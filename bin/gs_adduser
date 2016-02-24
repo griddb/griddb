@@ -1,0 +1,87 @@
+#!/usr/bin/python -B
+# coding=UTF-8
+
+import sys
+import locale
+reload(sys)
+sys.setdefaultencoding(locale.getpreferredencoding())
+
+import os
+import csv
+import hashlib
+import getpass
+import fcntl
+import stat
+import re
+from optparse import OptionParser
+
+import util
+util.install_sigint_handler()
+(homedir,logdir) = util.get_required_env()
+
+reserved_name = ["admin","system"]
+
+parser = OptionParser(usage="%prog USERNAME [-p PASSWORD]",
+                      description=u"Add an administrator. USERNAME must start with gs#.",
+			version="%prog [V2.8.00]")
+parser.add_option("-p", "--password", dest="password",
+                  help=u'specify password. not display prompt')
+(options, args) = parser.parse_args()
+
+if len(args) < 1:
+	parser.error(u"A10001: Specify USERNAME.")
+username = args[0]
+
+if not re.match(r"gs#[a-zA-Z0-9_]+$", username) and username not in reserved_name:
+	print u"A10002: USERNAME must starts with gs#. After it, you must use combination of alphabetic, numeric character and _(underbar)."
+	print u"USERNAME is case insensitive."
+	sys.exit(1)
+
+filename = os.path.join(homedir, "conf/password")
+with open(filename, 'r+b') as file:
+	try:
+		fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+	except(IOError):
+		print u"A10101: Failed to lock"
+		sys.exit(1)
+
+	csvReader = csv.reader(file)
+	allPassword = {}
+	for row in csvReader:
+		allPassword[row[0]] = row[1]
+
+	if username.upper() in (name.upper() for name in allPassword):
+		print u"A10102: USERNAME '" + username + "' already exists. USERNAME is case insensitive."
+		sys.exit(1)
+
+	if options.password is not None:
+		password = options.password
+	else:
+		try:
+			password = getpass.getpass()
+			password2 = getpass.getpass("Retype password: ")
+		except KeyboardInterrupt:
+			print ""
+			sys.exit(0)
+		if password != password2:
+			print u"A10103: Password mismatch."
+			sys.exit(1)
+
+	if password == "":
+		print u"A10104: Password cannnot include space"
+		sys.exit(1)
+	digest = hashlib.sha256(password).hexdigest()
+	allPassword[username] = digest
+
+	os.umask(0)
+	tmpfilename = filename + ".tmp"
+	with open(tmpfilename, 'w+b') as tmpfile:
+		csvWriter = csv.writer(tmpfile)
+		for row in allPassword.items():
+			csvWriter.writerow(row);
+
+	statinfo = os.stat(filename)
+	os.chown(tmpfilename, statinfo[stat.ST_UID], statinfo[stat.ST_GID])
+	os.chmod(tmpfilename, statinfo[stat.ST_MODE])
+
+	os.rename(tmpfilename, filename)

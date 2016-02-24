@@ -1,0 +1,2448 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+               "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en">
+<head>
+<title>GridDB クイックスタートガイド</title>
+<meta http-equiv="Content-Type" content="text/html;charset=utf-8"/>
+<meta name="title" content="GridDB クイックスタートガイド"/>
+<meta name="generator" content="Org-mode"/>
+<meta name="generated" content="2016-02-23T16:11+0900"/>
+<meta name="author" content="root"/>
+<meta name="description" content=""/>
+<meta name="keywords" content=""/>
+
+<meta http-equiv="X-UA-Compatible" content="IE=8">
+<STYLE type="text/css">
+html { font-family: Verdana, "メイリオ", Meiryo, sans-serif; font-size: 10pt; }
+h2 { border-left: 7px solid #00C; padding: 0 0 0 7px; }
+h3 { border-left: 5px solid #00A; padding: 0 0 0 5px; }
+h4 { border-left: 3px solid #008; padding: 0 0 0 3px; }
+pre {
+font-family: courier, monospace;
+border: 1pt solid #AEBDCC;
+background-color: #F3F5F7;
+padding: 5pt;
+width:auto;
+overflow-x:auto;
+overflow-y:hidden;
+}
+code {
+margin: 0 2px;
+padding: 0 5px;
+white-space: nowrap;
+border: 1px solid #cacaea;
+background-color: #f0f0ff;
+border-radius: 3px;
+}
+a { text-decoration: none; color: #2233AA; }
+a:visited { text-decoration: none; color: #2233AA; }
+a:hover { text-decoration: underline; color: #2288FF; }
+table {
+border-collapse: collapse;
+border-spacing: 0px;
+empty-cells: show;
+margin-bottom: 6px;
+}
+th, tr, td {
+vertical-align: top;
+padding: 5px;
+border-collapse: collapse;
+}
+tr > td:first-child {
+white-space: nowrap;
+}
+div.figure { padding: 0.5em; }
+div.figure p { text-align: center; }
+#table-of-contents {
+width: 23%;
+height: 100%;
+top: 0px;
+left: 0px;
+font-size: 70%;
+position: fixed;
+overflow: auto;
+}
+#table-of-contents ul {
+margin: 1pt 0 1pt 1.5em;
+padding: 0;
+list-style-type: none;
+}
+#table-of-contents li {
+margin: 1pt 0;
+}
+#content {
+width: 76%;
+float: right;
+}
+#postamble {
+display: none;
+}
+.revision {
+text-align: right;
+font-size: 8pt;
+}
+@media print {
+#table-of-contents {
+width:100%;
+font-size: 100%;
+position: static;
+overflow: visible;
+}
+#content {
+padding: 0px;
+width:100%;
+float: none;
+}
+}
+</STYLE>
+
+
+</head>
+<body>
+
+<div id="preamble">
+
+</div>
+
+<div id="content">
+<h1 class="title">GridDB クイックスタートガイド</h1>
+
+
+
+
+
+
+<p>
+<p class="revision">Revision: revision-number</p>
+</p>
+<div id="table-of-contents">
+<h2>Table of Contents</h2>
+<div id="text-table-of-contents">
+<ul>
+<li><a href="#sec-1">1 はじめに</a>
+<ul>
+<li><a href="#sec-1-1">1.1 本文書の目的と構成</a></li>
+<li><a href="#sec-1-2">1.2 GridDBとは</a>
+<ul>
+<li><a href="#sec-1-2-1">1.2.1 概要</a></li>
+<li><a href="#sec-1-2-2">1.2.2 特徴</a></li>
+</ul>
+</li>
+<li><a href="#sec-1-3">1.3 用語の説明</a></li>
+</ul>
+</li>
+<li><a href="#sec-2">2 システム設計・構築</a>
+<ul>
+<li><a href="#sec-2-1">2.1 必要なリソースを確認する</a>
+<ul>
+<li><a href="#sec-2-1-1">2.1.1 総メモリ使用量</a></li>
+<li><a href="#sec-2-1-2">2.1.2 クラスタ構成台数</a></li>
+<li><a href="#sec-2-1-3">2.1.3 ディスク使用量</a></li>
+</ul>
+</li>
+<li><a href="#sec-2-2">2.2 インストールおよびセットアップを行う(ノード)</a>
+<ul>
+<li><a href="#sec-2-2-1">2.2.1 環境の確認</a></li>
+<li><a href="#sec-2-2-2">2.2.2 ノードをインストールする</a></li>
+<li><a href="#sec-2-2-3">2.2.3 インストール後の確認を行う</a></li>
+<li><a href="#sec-2-2-4">2.2.4 管理ユーザを設定する(必須)</a></li>
+</ul>
+</li>
+<li><a href="#sec-2-3">2.3 環境依存パラメータを設定する</a>
+<ul>
+<li><a href="#sec-2-3-1">2.3.1 ネットワーク環境の設定(必須)</a></li>
+<li><a href="#sec-2-3-2">2.3.2 クラスタ名の設定(必須)</a></li>
+</ul>
+</li>
+<li><a href="#sec-2-4">2.4 チューニングパラメータを設定する</a>
+<ul>
+<li><a href="#sec-2-4-1">2.4.1 更新性能に関するパラメータ</a></li>
+<li><a href="#sec-2-4-2">2.4.2 性能と可用性に関するパラメータ</a></li>
+<li><a href="#sec-2-4-3">2.4.3 その他のパラメータ</a></li>
+</ul>
+</li>
+<li><a href="#sec-2-5">2.5 各ノードに定義ファイルを配布する</a></li>
+<li><a href="#sec-2-6">2.6 インストールおよびセットアップを行う(クライアント)</a>
+<ul>
+<li><a href="#sec-2-6-1">2.6.1 環境の確認</a></li>
+<li><a href="#sec-2-6-2">2.6.2 クライアントライブラリをインストールする</a></li>
+<li><a href="#sec-2-6-3">2.6.3 インストール後の確認を行う</a></li>
+<li><a href="#sec-2-6-4">2.6.4 ライブラリを設定する</a></li>
+<li><a href="#sec-2-6-5">2.6.5 クライアント側の設定を行う</a></li>
+</ul></li>
+</ul>
+</li>
+<li><a href="#sec-3">3 運用</a>
+<ul>
+<li><a href="#sec-3-1">3.1 起動から停止までの操作</a>
+<ul>
+<li><a href="#sec-3-1-1">3.1.1 基本の流れ</a></li>
+<li><a href="#sec-3-1-2">3.1.2 各ノードを起動する</a></li>
+<li><a href="#sec-3-1-3">3.1.3 クラスタを構成する</a></li>
+<li><a href="#sec-3-1-4">3.1.4 サービスを利用する</a></li>
+<li><a href="#sec-3-1-5">3.1.5 クラスタを停止する</a></li>
+<li><a href="#sec-3-1-6">3.1.6 一度停止したクラスタを再稼動する</a></li>
+</ul>
+</li>
+<li><a href="#sec-3-2">3.2 各種情報を取得する</a>
+<ul>
+<li><a href="#sec-3-2-1">3.2.1 クラスタ情報を取得する</a></li>
+</ul></li>
+</ul>
+</li>
+<li><a href="#sec-4">4 注意点</a></li>
+<li><a href="#sec-5">5 付録</a>
+<ul>
+<li><a href="#sec-5-1">5.1 パラメータ一覧</a>
+<ul>
+<li><a href="#sec-5-1-1">5.1.1 ノード定義ファイル(gs_node.json)</a></li>
+<li><a href="#sec-5-1-2">5.1.2 クラスタ定義ファイル(gs_cluster.json)</a></li>
+</ul>
+</li>
+<li><a href="#sec-5-2">5.2 ビルド・実行方法</a></li>
+</ul>
+</li>
+<li><a href="#sec-6">6 商標</a></li>
+</ul>
+</div>
+</div>
+
+
+
+
+
+<DIV class="break"></DIV><BR>
+
+
+<div id="outline-container-1" class="outline-2">
+<h2 id="sec-1"><span class="section-number-2">1</span> はじめに</h2>
+<div class="outline-text-2" id="text-1">
+
+
+
+</div>
+
+<div id="outline-container-1-1" class="outline-3">
+<h3 id="sec-1-1"><span class="section-number-3">1.1</span> 本文書の目的と構成</h3>
+<div class="outline-text-3" id="text-1-1">
+
+
+<p>
+<span style="text-decoration:underline;">本文書はGridDB(TM)の基本的な運用手順について説明したものです。</span>
+</p>
+<p>
+GridDBを用いたシステム構築を行う設計者、GridDBの運用管理を行う管理者の方を対象としています。
+</p>
+<p>
+本文書は、以下のような構成となっています。
+</p>
+<ul>
+<li><a href="#chap_system">システム設計・構築</a>
+<ul>
+<li>GridDBのインストールから、基本的なセットアップの方法について説明しています。
+
+</li>
+</ul>
+
+</li>
+<li><a href="#chap_operation">運用</a>
+<ul>
+<li>GridDBの起動および停止といった基本操作から、GridDB稼働中の管理操作と障害発生時の対応に関するポイントを説明しています。
+</li>
+</ul>
+
+</li>
+</ul>
+
+
+
+</div>
+
+</div>
+
+<div id="outline-container-1-2" class="outline-3">
+<h3 id="sec-1-2"><span class="section-number-3">1.2</span> GridDBとは</h3>
+<div class="outline-text-3" id="text-1-2">
+
+
+
+</div>
+
+<div id="outline-container-1-2-1" class="outline-4">
+<h4 id="sec-1-2-1"><span class="section-number-4">1.2.1</span> 概要</h4>
+<div class="outline-text-4" id="text-1-2-1">
+
+
+<p>
+GridDBは、キーと複数の値からなるデータ(ロウと呼ばれる)の集合を管理する、分散NoSQL型データベースです。
+</p>
+
+<ul>
+<li>GridDBは、データ管理をインメモリで行い、高速処理が可能です。
+<ul>
+<li>ロウの集合をインメモリ格納しており、高速な更新および検索処理ができます。
+
+</li>
+</ul>
+
+</li>
+<li>GridDBは、インメモリ処理ながら大容量化が可能です。
+<ul>
+<li>複数マシンにデータを分散配置することで大容量化を行えます。さらに、本文書では紹介していませんが、ディスクを併用したデータ管理も可能です。そのため、単体のノードで動作させた場合も、メモリサイズに制限されない大容量化を実現できています。
+
+</li>
+</ul>
+
+</li>
+<li>GridDBは、高い可用性を実現できます。
+<ul>
+<li>クラスタ内でデータの複製を作成しており、いずれかのノードに障害が発生した場合には複製を使用することで処理を継続できます。また、各ノードはディスクを使用してデータ更新情報の永続化を行っており、障害時にはそれまでのデータを復元することもできます。
+
+</li>
+</ul>
+
+</li>
+<li>GridDBは、1,000台規模までスケールアウトが可能です。
+<ul>
+<li>コンテナ単位のトランザクションにおいて、クラスタ処理の並列性を高めることで、高いスケーラビリティを実現できています。
+
+</li>
+</ul>
+
+</li>
+<li>GridDBは、人手によるクラスタ管理を必要としません。
+<ul>
+<li>ノード相互に分散プロトコルを用いて通信を行い、GridDB自身が自律的にクラスタを制御します。
+</li>
+</ul>
+
+</li>
+</ul>
+
+
+
+<ul>
+<li>GridDBは、社会インフラで利用される時系列データをサポートしています。
+</li>
+</ul>
+
+
+
+
+
+</div>
+
+</div>
+
+<div id="outline-container-1-2-2" class="outline-4">
+<h4 id="sec-1-2-2"><span class="section-number-4">1.2.2</span> 特徴</h4>
+<div class="outline-text-4" id="text-1-2-2">
+
+
+
+<p>
+GridDB(community edition)の特徴は以下のようにまとめられます。
+</p>
+
+<table  border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides" align="center">
+<colgroup><col class="left" /><col class="left" />
+</colgroup>
+<thead>
+<tr><th scope="col" class="left">要件</th><th scope="col" class="left">説明</th></tr>
+</thead>
+<tbody>
+<tr><td class="left"><b>【基本要件】</b></td><td class="left"></td></tr>
+</tbody>
+<tbody>
+<tr><td class="left">大容量性(ペタバイト級)</td><td class="left">高速性と大容量性を両立するため、インメモリとSSDの長所を活かしたデータ格納</td></tr>
+<tr><td class="left">高速性(インメモリ)</td><td class="left">インメモリ処理</td></tr>
+<tr><td class="left">高スケーラビリティ性</td><td class="left">１台から１０００台超までサーバ増設可能</td></tr>
+<tr><td class="left">高可用性</td><td class="left">複数サーバでのデータ複製、HDD併用により更なる可用性向上</td></tr>
+<tr><td class="left">高自律性</td><td class="left">データ複製やデータ配置バランシングを自動化。</td></tr>
+</tbody>
+<tbody>
+<tr><td class="left"><b>【社会インフラ要件】</b></td><td class="left"></td></tr>
+</tbody>
+<tbody>
+<tr><td class="left">時系列データ</td><td class="left">時系列に特化したコンテナを提供</td></tr>
+<tr><td class="left">一貫性の保証</td><td class="left">同一コンテナ内でＡＣＩＤトランザクションをサポート</td></tr>
+</tbody>
+</table>
+
+
+</div>
+</div>
+
+</div>
+
+<div id="outline-container-1-3" class="outline-3">
+<h3 id="sec-1-3"><span class="section-number-3">1.3</span> 用語の説明</h3>
+<div class="outline-text-3" id="text-1-3">
+
+
+<p>
+GridDBの説明で用いられる用語の説明です。
+</p>
+<table  border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides" align="center">
+<colgroup><col class="left" /><col class="left" />
+</colgroup>
+<thead>
+<tr><th scope="col" class="left">用語</th><th scope="col" class="left">意味</th></tr>
+</thead>
+<tbody>
+<tr><td class="left">ノード</td><td class="left">GridDBでデータ管理を行う個々のサーバプロセスを指します。</td></tr>
+<tr><td class="left">クラスタ</td><td class="left">一体となってデータ管理を行う、1つ、もしくは複数のノードの集合を指します。</td></tr>
+<tr><td class="left">パーティション</td><td class="left">データを格納する論理的な領域です。GridDB内部にのみ存在し、ユーザからは直接は見えません。</td></tr>
+<tr><td class="left">ロウ</td><td class="left">GridDBで管理する１件分のデータを指します。キーと複数の値からなるひとまとまりのデータです。</td></tr>
+<tr><td class="left">コンテナ</td><td class="left">ロウの集合を管理する入れ物です。コレクションと時系列コンテナの２種類が存在します。</td></tr>
+<tr><td class="left">コレクション</td><td class="left">一般の型のキーを持つロウを管理するコンテナの１種です。</td></tr>
+<tr><td class="left">時系列コンテナ</td><td class="left">時刻型のキーを持つロウを管理するコンテナの１種です。時系列データを扱う専用の機能を持ちます。</td></tr>
+<tr><td class="left">マスタノード</td><td class="left">クラスタ管理処理を行うノードです。</td></tr>
+<tr><td class="left">フォロワノード</td><td class="left">クラスタに参加している、マスタノード以外のノードです。</td></tr>
+<tr><td class="left">オーナノード</td><td class="left">複製されたコンテナのうち、マスタコンテナを記録しているノードです。</td></tr>
+<tr><td class="left">バックアップノード</td><td class="left">複製されたコンテナのうち、レプリカコンテナを記録しているノードです。</td></tr>
+</tbody>
+</table>
+
+
+</div>
+</div>
+
+</div>
+
+<div id="outline-container-2" class="outline-2">
+<h2 id="sec-2"><a name="chap_system" id="chap_system"></a><span class="section-number-2">2</span> システム設計・構築</h2>
+<div class="outline-text-2" id="text-2">
+
+
+<p>
+この章では、基本的なシステム設計・構築の流れを示します。
+</p>
+<p>
+GridDBノードおよびクラスタの設計・構築は以下の流れで行います。
+</p>
+<ol>
+<li><a href="#calc_resources">必要なリソースを確認する</a>
+</li>
+<li><a href="#setup_node">インストールおよびセットアップを行う(ノード)</a>
+</li>
+<li><a href="#setup_params">環境依存パラメータを設定する</a>
+</li>
+<li><a href="#tune-up_params">チューニングパラメータを設定する</a>
+</li>
+<li><a href="#dist_conf">各ノードに定義ファイルを配布する</a>
+</li>
+</ol>
+
+
+<p>
+クライアントの設定は、以下の項目を参照ください。
+</p>
+<ul>
+<li><a href="#setup_client">インストールおよびセットアップを行う(クライアント)</a>
+</li>
+</ul>
+
+
+
+
+</div>
+
+<div id="outline-container-2-1" class="outline-3">
+<h3 id="sec-2-1"><a name="calc_resources" id="calc_resources"></a><span class="section-number-3">2.1</span> 必要なリソースを確認する</h3>
+<div class="outline-text-3" id="text-2-1">
+
+
+
+<p>
+GridDBは、スケールアウト型データベースであり、
+従来ＤＢのように慎重なシステム設計作業やサイジング作業は不要です。
+しかし、初期のシステム設計の目安として以下のような点を考慮してください。
+</p>
+<ul>
+<li>メモリ使用量
+</li>
+<li>クラスタ構成台数
+</li>
+<li>ディスク使用量
+</li>
+</ul>
+
+
+<p>
+以下、順に見積もり方法を説明します。
+</p>
+<p>
+<span style="text-decoration:underline;">ただし、以下のメモリサイズの計算では、SSDなどの外部ストレージによる大容量化機能は考慮していません。</span>
+</p>
+
+
+</div>
+
+<div id="outline-container-2-1-1" class="outline-4">
+<h4 id="sec-2-1-1"><span class="section-number-4">2.1.1</span> 総メモリ使用量</h4>
+<div class="outline-text-4" id="text-2-1-1">
+
+
+<p>
+コンテナに格納するデータ量を予測し、メモリ使用量を見積もります。
+</p>
+<p>
+まず、アプリケーションで格納するデータ量を予測します。
+以下のサイズと件数を予測します。
+</p>
+<ul>
+<li>ロウのデータサイズ
+</li>
+<li>登録するロウ件数
+</li>
+</ul>
+
+
+<p>
+次に、予測したデータ量を格納するために必要なメモリ使用量を見積もります。
+</p>
+<ul>
+<li>メモリ使用量 = ロウデータサイズ × 登録ロウ件数 ÷ 0.75 ＋ 8 × 登録ロウ件数 × ( 付与索引数 ＋ 2 ) ÷ 0.66  (バイト)
+</li>
+</ul>
+
+
+<p>
+アプリケーションで作成、使用する全コレクションについて同様の見積もりを行います。
+総和がGridDBクラスタで使用するメモリ使用量となります。
+</p>
+<ul>
+<li>総メモリ使用量 = 全コレクションのメモリ使用量の総和
+</li>
+</ul>
+
+
+<p>
+ただし、正確なメモリ使用量は更新頻度にも依存するため、
+最低限の目安と考えてください。
+</p>
+
+</div>
+
+</div>
+
+<div id="outline-container-2-1-2" class="outline-4">
+<h4 id="sec-2-1-2"><span class="section-number-4">2.1.2</span> クラスタ構成台数</h4>
+<div class="outline-text-4" id="text-2-1-2">
+
+
+<p>
+GridDBで使用するノードの必要台数を見積もります。
+以下では、１マシン上では１ノードを実行することを前提としています。
+</p>
+<p>
+まず、マシン１台あたりのメモリサイズを想定します。
+</p>
+<ul>
+<li>マシンのメモリサイズ
+</li>
+</ul>
+
+
+<p>
+また、作成するレプリカ数を想定します。
+レプリカ数は、GridDBの設定値として与えられます。
+</p>
+<ul>
+<li>レプリカ数
+</li>
+</ul>
+
+
+<p>
+レプリカ数のデフォルト値は、2です。
+</p>
+<ul>
+<li>ノード台数 =  ( 総メモリ使用量 ÷ マシンのメモリサイズ ) × レプリカ数   (台)
+</li>
+</ul>
+
+
+<p>
+ただし、負荷分散や可用性向上を考慮すれば、より余裕のある台数が好ましいため、
+最低限の目安と考えてください。
+</p>
+
+</div>
+
+</div>
+
+<div id="outline-container-2-1-3" class="outline-4">
+<h4 id="sec-2-1-3"><span class="section-number-4">2.1.3</span> ディスク使用量</h4>
+<div class="outline-text-4" id="text-2-1-3">
+
+
+<p>
+GridDBで作成するファイルのサイズを見積もり、
+ノード実行するマシンに必要なディスク容量を見積もります。
+作成するファイルにはチェックポイントファイルとトランザクションログファイルの二種類があります。
+</p>
+<p>
+ノード単体でのメモリ使用量は以下のように求められます。
+</p>
+<ul>
+<li>単体メモリ使用量 = ( 総メモリ使用量 × レプリカ数 ) ÷ ノード台数    (バイト)
+</li>
+</ul>
+
+
+
+<p>
+この数値を元に、以下のようにチェックポイントファイルを見積もります。
+</p>
+<ul>
+<li>ファイルサイズ = 単体メモリ使用量 × 2   (バイト)
+</li>
+</ul>
+
+
+
+<p>
+また、トランザクションログファイルサイズは、アプリケーションの更新頻度に依存するため、
+以下の情報を予測します。
+</p>
+<ul>
+<li>ロウ更新頻度    (回/秒)
+</li>
+</ul>
+
+
+<p>
+さらに、チェックポイント間隔を想定します。
+チェックポイント間隔は、GridDBの設定値として与えられます。
+</p>
+<ul>
+<li>チェックポイント間隔
+</li>
+</ul>
+
+
+<p>
+チェックポイント間隔のデフォルト値は、1200秒(20分)です。
+</p>
+<p>
+これらの数値を元に、以下のようにトランザクションログファイルサイズを見積もります。
+</p>
+<ul>
+<li>ファイルサイズ = ロウデータサイズ × ロウ更新頻度 ×　チェックポイント間隔   (バイト)
+</li>
+</ul>
+
+
+
+<p>
+これらをあわせ、以下のように単体ディスク使用量を見積もります。
+</p>
+<ul>
+<li>単体ディスク使用量 = トランザクションログファイルサイズ ＋ チェックポイントファイルサイズ
+</li>
+</ul>
+
+
+
+
+</div>
+</div>
+
+</div>
+
+<div id="outline-container-2-2" class="outline-3">
+<h3 id="sec-2-2"><a name="setup_node" id="setup_node"></a><span class="section-number-3">2.2</span> インストールおよびセットアップを行う(ノード)</h3>
+<div class="outline-text-3" id="text-2-2">
+
+
+<p>
+１台のマシンへのインストールについて説明します。
+クラスタの構成については、<a href="#chap_operation">運用</a>の章を参照ください。
+</p>
+
+</div>
+
+<div id="outline-container-2-2-1" class="outline-4">
+<h4 id="sec-2-2-1"><span class="section-number-4">2.2.1</span> 環境の確認</h4>
+<div class="outline-text-4" id="text-2-2-1">
+
+
+<p>
+CentOS 6.7でのみ動作を確認しています。
+</p>
+
+
+
+<pre class="example">$ lsb_release -id
+Distributor ID: CentOS
+Description:    CentOS release 6.7 (Final)
+</pre>
+
+
+<p>
+<b>【注意点】</b>
+</p><ul>
+<li>OSインストール時のOSパッケージグループの選択では、最低以下を選択してください。
+<ul>
+<li>Basic Server
+</li>
+</ul>
+
+</li>
+</ul>
+
+
+</div>
+
+</div>
+
+<div id="outline-container-2-2-2" class="outline-4">
+<h4 id="sec-2-2-2"><span class="section-number-4">2.2.2</span> ノードをインストールする</h4>
+<div class="outline-text-4" id="text-2-2-2">
+
+
+
+<p>
+GridDBのソースコードパッケージをダウンロードしてビルドしてください。
+</p>
+
+
+
+<pre class="example">$ git clone git://github.com/griddb/griddb.git
+$ cd griddb
+$ sh bootstrap.sh
+$ ./configure
+$ make
+$ export GS_HOME=$PWD
+$ export GS_LOG=$PWD/log
+</pre>
+
+
+
+<p>
+以下の環境変数が定義されます。
+</p>
+<table  border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides" align="center">
+<colgroup><col class="left" /><col class="left" /><col class="left" />
+</colgroup>
+<thead>
+<tr><th scope="col" class="left">環境変数</th><th scope="col" class="left">値</th><th scope="col" class="left">意味</th></tr>
+</thead>
+<tbody>
+<tr><td class="left">GS_HOME</td><td class="left">ソースコードを展開したディレクトリ</td><td class="left">GridDBホームディレクトリ</td></tr>
+<tr><td class="left">GS_LOG</td><td class="left">$GS_HOME/log</td><td class="left">イベントログファイル出力ディレクトリ</td></tr>
+</tbody>
+</table>
+
+<b>【注意点】</b>
+<ul>
+<li>これら環境変数は、以降で説明する運用コマンドで参照されます。
+</li>
+</ul>
+
+
+</div>
+
+</div>
+
+<div id="outline-container-2-2-3" class="outline-4">
+<h4 id="sec-2-2-3"><span class="section-number-4">2.2.3</span> インストール後の確認を行う</h4>
+<div class="outline-text-4" id="text-2-2-3">
+
+
+<p>
+#インストールされたGridDBノードのディレクトリ構成を確認します。
+#まず、GridDBホームディレクトリと、関連ディレクトリ、ファイルが作成されていることを確認します。
+</p>
+
+<p>
+正常にインストールできている場合、以下のファイルが作成されます。
+</p>
+
+
+<pre class="example">$GS_HOME/bin/gsserver
+</pre>
+
+
+<p>
+<b>補足</b>
+</p>
+<p>
+以後の手順に従い、GridDBを動作させると、以下のファイルが作成されます。
+</p>
+<p>
+【データベースファイル】
+</p>
+
+
+<pre class="example">$GS_HOME                                # GridDBホームディレクトリ
+                   data/                # データベースファイルディレクトリ
+                        gs_log_n_m.log  # トランザクションログを記録するログファイル(n,mは数字)
+                        gs_cp_n_p.dat   # データを定期的に記録するチェックポイントファイル(n,pは数字)
+</pre>
+
+
+<p>
+【ログファイル】
+</p>
+
+
+<pre class="example">$GS_HOME                                       # GridDBホームディレクトリ
+                   log/                        # ログディレクトリ
+                       gridstore-%Y%m%d-n.log  # イベントログファイル
+                       gs_XXXX.log             # 運用ツールログファイル
+</pre>
+
+
+<p>
+これらファイルの作成ディレクトリはノード定義ファイル中のパラメータ設定で変更できます。
+</p>
+
+</div>
+
+</div>
+
+<div id="outline-container-2-2-4" class="outline-4">
+<h4 id="sec-2-2-4"><a name="setup_admin" id="setup_admin"></a><span class="section-number-4">2.2.4</span> 管理ユーザを設定する(必須)</h4>
+<div class="outline-text-4" id="text-2-2-4">
+
+
+<p>
+管理ユーザは、ノードやクラスタへの認証のために用いられます。管理ユーザの情報は、
+<b>ユーザ定義ファイル</b> に保存されています。デフォルトでは以下のファイルです。
+</p>
+<ul>
+<li>$GS_HOME/conf/password
+</li>
+</ul>
+
+
+<p>
+インストール直後では、下記のデフォルトユーザが存在します。
+</p>
+
+<table  border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides" align="center">
+<colgroup><col class="left" /><col class="left" />
+</colgroup>
+<thead>
+<tr><th scope="col" class="left">ユーザ</th><th scope="col" class="left">パスワード</th></tr>
+</thead>
+<tbody>
+<tr><td class="left">admin</td><td class="left">未設定</td></tr>
+</tbody>
+</table>
+
+
+<p>
+上記のデフォルトユーザを含む管理ユーザ情報は、運用コマンドのユーザ管理コマンドを用いて変更できます。
+</p>
+<table  border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides" align="center">
+<colgroup><col class="left" /><col class="left" />
+</colgroup>
+<thead>
+<tr><th scope="col" class="left">コマンド</th><th scope="col" class="left">機能</th></tr>
+</thead>
+<tbody>
+<tr><td class="left">gs_adduser</td><td class="left">管理ユーザを追加する</td></tr>
+<tr><td class="left">gs_deluser</td><td class="left">管理ユーザを削除する</td></tr>
+<tr><td class="left">gs_passwd</td><td class="left">管理ユーザのパスワードを変更する</td></tr>
+</tbody>
+</table>
+
+
+<p>
+デフォルトユーザを利用する場合は、以下のようにパスワードを変更してください。
+パスワードは登録の際に暗号化されます。
+</p>
+<p>
+<b>【注意点】</b>
+</p><ul>
+<li><span style="text-decoration:underline;">デフォルトユーザのパスワードは設定されていません。管理ユーザのパスワードが設定されていない場合、サーバは起動できないため必ずパスワードを変更してください。</span>
+</li>
+</ul>
+
+
+
+
+
+<pre class="example">$ gs_passwd admin
+Password:（パスワードを入力します）
+Retype password:（パスワードを再入力します）
+</pre>
+
+
+<p>
+<span style="text-decoration:underline;">デフォルト以外の新しい管理ユーザを追加する場合、ユーザ名はgs#で始まる必要があります。</span>
+</p>
+<p>
+gs#以降は1文字以上のASCII英数字ならびにアンダースコア「_」を使用可能です。
+</p>
+<p>
+管理ユーザを新たに追加する例を以下に示します。
+</p>
+
+
+
+<pre class="example">$ gs_adduser gs#newuser
+Password:（パスワードを入力します）
+Retype password:（パスワードを再入力します）
+</pre>
+
+
+<p>
+<b>【注意点】</b>
+</p>
+<ul>
+<li><span style="text-decoration:underline;">ユーザ管理コマンドによる管理ユーザ情報の変更は、ノードを再起動することで有効になります。</span>
+</li>
+<li>クライアントで認証に用いるため、全ノードで同一のユーザ情報が登録されている必要があります。 <b>ユーザ定義ファイル</b> をコピーするなどして、 <span style="text-decoration:underline;">全ノードで同一のユーザ情報が参照されるようにしてください。</span>
+</li>
+</ul>
+
+
+
+
+
+</div>
+</div>
+
+</div>
+
+<div id="outline-container-2-3" class="outline-3">
+<h3 id="sec-2-3"><a name="setup_params" id="setup_params"></a><span class="section-number-3">2.3</span> 環境依存パラメータを設定する</h3>
+<div class="outline-text-3" id="text-2-3">
+
+
+<p>
+インストール後、GridDBを動作させるためには以下の設定が必要です。
+</p>
+<ol>
+<li>ネットワーク環境の設定
+</li>
+<li>クラスタ名の設定
+</li>
+</ol>
+
+
+<p>
+GridDBの設定は、2種類の定義ファイルを編集して行います。
+</p>
+<ul>
+<li>クラスタ定義ファイル(gs_cluster.json)
+</li>
+<li>ノード定義ファイル(gs_node.json)
+</li>
+</ul>
+
+
+<p>
+クラスタ定義ファイルは、クラスタ全体で共通とするパラメータを定義するファイルです。
+</p>
+<p>
+ノード定義ファイルは、ノード毎に異なる設定値とするパラメータを定義するファイルです。
+</p>
+<p>
+以下のとおり、これら定義ファイルの雛形がインストールされています。
+</p>
+
+
+
+
+<pre class="example">$GS_HOME                            # GridDBホームディレクトリ
+
+               conf/                # 定義ファイルディレクトリ
+                    gs_cluster.json # クラスタ定義ファイルの雛形
+                    gs_node.json    # ノード定義ファイルの雛形
+</pre>
+
+
+
+
+<p>
+<b>【注意点】</b>
+</p>
+<ul>
+<li>クラスタ定義ファイルは、クラスタ全体で共通となるパラメータを定義するファイルです。そのため、 <span style="text-decoration:underline;">クラスタに参加する全ノードで、同一の設定内容でなければなりません。</span> 内容が異なるノードは、後に説明するクラスタ参加の段階でエラーとなり、クラスタに参加できません。
+</li>
+</ul>
+
+
+
+</div>
+
+<div id="outline-container-2-3-1" class="outline-4">
+<h4 id="sec-2-3-1"><a name="setup_networks" id="setup_networks"></a><span class="section-number-4">2.3.1</span> ネットワーク環境の設定(必須)</h4>
+<div class="outline-text-4" id="text-2-3-1">
+
+
+<p>
+まず、ネットワーク環境について設定します。設定項目は以下のように大別されます。
+</p>
+<ul>
+<li>(1)クライアントとのインタフェースとなるアドレス情報
+</li>
+<li>(2)クラスタ管理処理のためのアドレス情報
+</li>
+</ul>
+
+
+
+<p>
+これらの設定項目は環境に合わせて設定する必要がありますが、基本的にはデフォルト設定でも動作します。
+</p>
+<p>
+<span style="text-decoration:underline;">ただし、GridDBクラスタが複数ノード構成かシングルノード構成かによらず、マシンのホスト名から 逆引きしたIPアドレスが、外部から接続できるアドレスである必要があります。</span>
+</p>
+<p>
+これは通常、/etc/hostsファイルにホスト名とIPアドレスの対応を記載することで設定できます。
+</p>
+<p>
+<b>/etc/hostsの設定</b>
+</p>
+<p>
+まず、既に設定済みかどうかを以下のコマンドで確認します。IPアドレスが表示されれば、既に設定が行われています。
+</p>
+
+
+
+<pre class="example">$ hostname -i
+192.168.11.10
+</pre>
+
+
+<p>
+下記のような場合には、設定が行われていません。
+</p>
+
+
+
+<pre class="example">$ hostname -i
+hostname: 名前に対応するアドレスがありません
+</pre>
+
+
+<p>
+また、外部から接続できないループバックアドレスが表示される場合があります。
+</p>
+
+
+
+<pre class="example">$ hostname -i
+127.0.0.1
+</pre>
+
+
+<p>
+設定が行われていない場合またはループバックアドレスが表示される場合には、以下の例を参考に/etc/hostsの設定を
+行ってください。ホスト名とIPアドレス、適切なネットワークインタフェースカード(NIC)は環境によって異なります。
+</p>
+<ol>
+<li>ホスト名とIPアドレスを確認します。
+</li>
+</ol>
+
+
+
+
+
+<pre class="example">$ hostname
+GS_HOST
+$ ip route | grep eth0 | cut -f 12 -d " " | tr -d "\n"
+192.168.11.10
+</pre>
+
+
+<ol>
+<li>rootユーザで、確認したIPアドレスとホスト名の対応を/etc/hostsファイルに追加します。
+</li>
+</ol>
+
+
+
+
+
+<pre class="example">192.168.11.10   GS_HOST
+</pre>
+
+
+<ol>
+<li>設定が正しく行われたことを確認します。
+</li>
+</ol>
+
+
+
+
+
+<pre class="example">$ hostname -i
+192.168.11.10
+</pre>
+
+
+<p>
+※表示が設定前と変わらない場合、より優先度の高い設定が/etc/hostsファイルに記載されています。適宜優先順位を変更してください。
+</p>
+<p>
+/etc/hostsが正しく設定されていることが確認できたら、以降の設定に進んでください。
+</p>
+
+<p>
+<b>(1)クライアントとのインタフェースとなるアドレス情報</b>
+</p>
+<p>
+クライアントとのインタフェースとなるアドレス情報には <b>ノード定義ファイル</b> および <b>クラスタ定義ファイル</b> に設定項目があります。
+</p>
+<p>
+<b>ノード定義ファイル</b>
+</p><table  border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides" align="center">
+<colgroup><col class="left" /><col class="left" /><col class="left" />
+</colgroup>
+<thead>
+<tr><th scope="col" class="left">パラメータ</th><th scope="col" class="left">データ型</th><th scope="col" class="left">意味</th></tr>
+</thead>
+<tbody>
+<tr><td class="left">/transaction/serviceAddress</td><td class="left">string</td><td class="left">トランザクション処理の受付アドレス</td></tr>
+<tr><td class="left">/transaction/servicePort</td><td class="left">string</td><td class="left">トランザクション処理の受付ポート</td></tr>
+<tr><td class="left">/system/serviceAddress</td><td class="left">string</td><td class="left">運用コマンドの接続アドレス</td></tr>
+<tr><td class="left">/system/servicePort</td><td class="left">string</td><td class="left">運用コマンドの接続ポート</td></tr>
+</tbody>
+</table>
+
+
+<p>
+トランザクション処理の受付アドレスおよびポートは、
+クライアントがクラスタを構成するノードに個別に接続してGridDBクラスタに対してトランザクション処理要求するために使用します。
+クラスタをノード1台で構成する場合は利用しますが、複数台で構成する場合にはAPIを用いて明示的にこのアドレスを利用することはありません。
+</p>
+
+<p>
+運用コマンドの接続アドレスおよびポートは、運用コマンドの処理要求先の指定としても利用します。
+</p>
+<p>
+これら受付/接続アドレスは、複数インタフェースを使用/使い分ける必要がない限り設定不要です。
+</p>
+<p>
+<b>クラスタ定義ファイル</b>
+</p>
+<table  border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides" align="center">
+<colgroup><col class="left" /><col class="left" /><col class="left" />
+</colgroup>
+<thead>
+<tr><th scope="col" class="left">パラメータ</th><th scope="col" class="left">データ型</th><th scope="col" class="left">意味</th></tr>
+</thead>
+<tbody>
+<tr><td class="left">/transaction/notificationAddress</td><td class="left">string</td><td class="left">クライアントとクラスタとのインタフェースアドレス</td></tr>
+<tr><td class="left">/transaction/notificationPort</td><td class="left">string</td><td class="left">クライアントとクラスタとのインタフェースポート</td></tr>
+</tbody>
+</table>
+
+
+<p>
+クライアントとクラスタとのインタフェースアドレスにはマルチキャストアドレスおよびポートを指定します。
+GridDBクラスタがクライアントに対してクラスタ情報を通知し、クライアントでクラスタにAPIで処理要求を送信するために利用します。
+詳しくは、『GridDB APIリファレンス』(<a href="GridDB_API_Reference_ja.html">GridDB_API_Reference_ja.html</a>)のGridStoreFactoryクラス/メソッドの説明を参照ください。
+</p>
+
+
+<p>
+<b>(2)クラスタ管理処理のためのアドレス情報</b>
+</p>
+<p>
+クラスタが自律的に行うクラスタ管理処理のためのアドレス情報には <b>ノード定義ファイル</b> および <b>クラスタ定義ファイル</b> に設定項目があります。
+これらのアドレスは、クラスタ間のハートビート(クラスタ間の生存確認）やクラスタ間の情報交換用にGridDBが内部的に利用するアドレスです。
+複数のネットワークインタフェースカードを利用する場合や、同一ネットワーク上の他のシステムと利用するアドレスが重複しない限り設定は不要です。
+</p>
+<p>
+<b>ノード定義ファイル</b>
+</p><table  border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides" align="center">
+<colgroup><col class="left" /><col class="left" /><col class="left" />
+</colgroup>
+<thead>
+<tr><th scope="col" class="left">パラメータ</th><th scope="col" class="left">データ型</th><th scope="col" class="left">意味</th></tr>
+</thead>
+<tbody>
+<tr><td class="left">/cluster/serviceAddress</td><td class="left">string</td><td class="left">クラスタ管理のために使用する受信アドレス</td></tr>
+<tr><td class="left">/cluster/servicePort</td><td class="left">string</td><td class="left">クラスタ管理のために使用する受信ポート</td></tr>
+</tbody>
+</table>
+
+
+<p>
+<b>クラスタ定義ファイル</b>
+</p><table  border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides" align="center">
+<colgroup><col class="left" /><col class="left" /><col class="left" />
+</colgroup>
+<thead>
+<tr><th scope="col" class="left">パラメータ</th><th scope="col" class="left">データ型</th><th scope="col" class="left">意味</th></tr>
+</thead>
+<tbody>
+<tr><td class="left">/cluster/notificationAddress</td><td class="left">string</td><td class="left">クラスタ管理用のためのマルチキャスト用アドレス</td></tr>
+<tr><td class="left">/cluster/notificationPort</td><td class="left">string</td><td class="left">クラスタ管理用のためのマルチキャスト用ポート</td></tr>
+</tbody>
+</table>
+
+
+<ul>
+<li>クラスタ構成が変化した際にレプリカとの同期処理が行われますが、その処理でのタイムアウト時間を設定できます。
+<ul>
+<li>/sync/timeoutInterval
+</li>
+</ul>
+
+</li>
+</ul>
+
+
+<p>
+<b>【注意点】</b>
+</p><ul>
+<li>いずれもGridDB以外では使用されていないアドレス、ポートを設定する必要があります。
+</li>
+<li>ノード定義ファイルgs_node.jsonの/transaction/serviceAddress、/system/serviceAddress、および/cluster/serviceAddress
+  は同一のアドレスを設定して動作させることが可能です。
+  マシンが複数のネットワークインタフェースを持っている場合には、
+  それぞれ別のアドレスを割り当てることで帯域を増やすことができます。
+</li>
+</ul>
+
+
+
+
+</div>
+
+</div>
+
+<div id="outline-container-2-3-2" class="outline-4">
+<h4 id="sec-2-3-2"><a name="setup_clusterName" id="setup_clusterName"></a><span class="section-number-4">2.3.2</span> クラスタ名の設定(必須)</h4>
+<div class="outline-text-4" id="text-2-3-2">
+
+
+<p>
+対象のノードが構成するクラスタの名前をあらかじめ設定しておきます。設定した名前は
+クラスタを構成するコマンドで指定した値と一致するかがチェックされます。そのため、
+コマンドの指定誤りで、異なるノードとクラスタを構成してしまうという誤りを防げます。
+</p>
+<p>
+クラスタ名の指定は <b>クラスタ定義ファイル</b> の以下設定項目に指定します。
+</p>
+<p>
+<b>クラスタ定義ファイル</b>
+</p><table  border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides" align="center">
+<colgroup><col class="left" /><col class="left" /><col class="left" />
+</colgroup>
+<thead>
+<tr><th scope="col" class="left">パラメータ</th><th scope="col" class="left">データ型</th><th scope="col" class="left">意味</th></tr>
+</thead>
+<tbody>
+<tr><td class="left">/cluster/clusterName</td><td class="left">string</td><td class="left">作成するクラスタの名前</td></tr>
+</tbody>
+</table>
+
+
+<p>
+<b>【注意点】</b>
+</p><ul>
+<li><span style="text-decoration:underline;">デフォルト値("")では、ノードの起動に失敗します。</span>
+</li>
+<li><span style="text-decoration:underline;">サブネットワーク上で一意となる名前にすることを推奨します。</span>
+</li>
+<li>クラスタ名は、1文字以上のASCII英数字ならびにアンダースコア「_」の列で構成されます。ただし、
+  先頭の文字には数字を指定できません。また、大文字・小文字は区別されません。また、64文字以内で指定する必要があります。
+</li>
+</ul>
+
+
+</div>
+</div>
+
+</div>
+
+<div id="outline-container-2-4" class="outline-3">
+<h3 id="sec-2-4"><a name="tune-up_params" id="tune-up_params"></a><span class="section-number-3">2.4</span> チューニングパラメータを設定する</h3>
+<div class="outline-text-3" id="text-2-4">
+
+
+<p>
+ここでは、主なチューニングパラメータについて説明します。
+必須の設定項目ではありませんが、クラスタの処理性能に影響を与えるパラメータです。
+</p>
+
+
+</div>
+
+<div id="outline-container-2-4-1" class="outline-4">
+<h4 id="sec-2-4-1"><span class="section-number-4">2.4.1</span> 更新性能に関するパラメータ</h4>
+<div class="outline-text-4" id="text-2-4-1">
+
+
+<p>
+GridDBは、永続化のためにトランザクションログファイル、チェックポイントファイルを作成します。
+これらファイルへのデータ書き込みは更新性能に影響を与えるため、
+以下のパラメータにより作成の方法を切り替えることができます。
+ただし、デメリットとして、障害時にデータを失ってしまう可能性が高くなる場合があります。
+</p>
+<p>
+これに関するパラメータには以下があります。
+</p>
+<p>
+<b>ノード定義ファイル</b>
+</p><table  border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides" align="center">
+<colgroup><col class="left" /><col class="left" /><col class="left" />
+</colgroup>
+<thead>
+<tr><th scope="col" class="left">パラメータ</th><th scope="col" class="left">データ型</th><th scope="col" class="left">意味</th></tr>
+</thead>
+<tbody>
+<tr><td class="left">/dataStore/persistencyMode</td><td class="left">string</td><td class="left">永続化モード</td></tr>
+<tr><td class="left">/dataStore/logWriteMode</td><td class="left">int</td><td class="left">ログ書き込みモード</td></tr>
+</tbody>
+</table>
+
+
+<p>
+永続化モードは、データ更新時のファイルへの書き込み有無を指定するものです。
+ログ書き込みモードは、トランザクションログファイルの書き込みのタイミングを指定するものです。
+</p>
+<p>
+永続化モードには、以下のいずれかの値を設定できます。
+</p>
+<ul>
+<li>"NORMAL"
+</li>
+<li>"KEEP_ALL_LOGS"
+</li>
+</ul>
+
+
+<p>
+"NORMAL" は、トランザクションログファイル、チェックポイントファイルに更新都度書き込みを行います。
+チェックポイントにより、不要になったトランザクションログファイルは削除されます。
+"KEEP_ALL_LOGS"は、書込みタイミングが"NORMAL"と同じですが、全てのトランザクションログファイルを残します。
+デフォルト値は"NORMAL"です。
+</p>
+<p>
+<b>【注意点】</b>
+</p>
+
+<p>
+ログ書き込みモードには、以下のいずれかの値を設定できます。
+</p>
+<ul>
+<li>0: SYNC
+</li>
+<li>1以上の整数値: DELAYED_SYNC
+</li>
+</ul>
+
+
+<p>
+"SYNC"では、更新トランザクションのコミット・アボートごとに、ログ書き込みを同期的に行います。
+"DELAYED_SYNC"では、更新時のログ書き込みを、更新タイミングとは関係なく、指定秒数毎に遅延して行います。
+デフォルト値は"1(DELAYED_SYNC 1秒)"です。
+</p>
+</div>
+
+</div>
+
+<div id="outline-container-2-4-2" class="outline-4">
+<h4 id="sec-2-4-2"><span class="section-number-4">2.4.2</span> 性能と可用性に関するパラメータ</h4>
+<div class="outline-text-4" id="text-2-4-2">
+
+
+<p>
+GridDBは、クラスタを構成することで、データを複数ノードに複製して検索性能、可用性を向上させることができます。
+これらデータの複製は更新性能に影響を与えるため、
+以下のパラメータにより作成の方法を切り替えることができます。
+ただし、デメリットとして、障害時にデータを失ってしまう可能性が高くなる場合があります。
+</p>
+<p>
+これに関するパラメータには以下があります。
+</p>
+<p>
+<b>クラスタ定義ファイル</b>
+</p><table  border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides" align="center">
+<colgroup><col class="left" /><col class="left" /><col class="left" />
+</colgroup>
+<thead>
+<tr><th scope="col" class="left">パラメータ</th><th scope="col" class="left">データ型</th><th scope="col" class="left">意味</th></tr>
+</thead>
+<tbody>
+<tr><td class="left">/transaction/replicationMode</td><td class="left">int</td><td class="left">レプリケーションモード</td></tr>
+</tbody>
+</table>
+
+
+<p>
+レプリケーションモードは、レプリカの方法を指定するものです。クラスタ内の全ノードで一致させる必要があります。
+</p>
+<ul>
+<li>"0": 非同期レプリケーション
+</li>
+<li>"1": 準同期レプリケーション
+</li>
+</ul>
+
+
+<p>
+"非同期レプリケーション"は、更新処理のタイミングと同期せずにレプリケーションを行います。
+"準同期レプリケーション"は、更新処理のタイミングで同期的にレプリケーションを行いますが、
+レプリケーション完了の待ち合わせは行いません。デフォルトは"0"です。
+</p>
+
+
+</div>
+
+</div>
+
+<div id="outline-container-2-4-3" class="outline-4">
+<h4 id="sec-2-4-3"><a name="other_params" id="other_params"></a><span class="section-number-4">2.4.3</span> その他のパラメータ</h4>
+<div class="outline-text-4" id="text-2-4-3">
+
+
+<p>
+その他のパラメータについて説明します。
+デフォルト値は、付録の<a href="#param_list">パラメータ一覧</a>を参照ください。
+</p>
+<p>
+<b>ノード定義ファイル</b>
+</p>
+
+<table  border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides" align="center">
+<colgroup><col class="left" /><col class="left" /><col class="left" />
+</colgroup>
+<thead>
+<tr><th scope="col" class="left">パラメータ</th><th scope="col" class="left">データ型</th><th scope="col" class="left">意味</th></tr>
+</thead>
+<tbody>
+<tr><td class="left">/dataStore/dbPath</td><td class="left">string</td><td class="left">データベースファイルディレクトリ</td></tr>
+<tr><td class="left">/dataStore/storeMemoryLimit</td><td class="left">string</td><td class="left">メモリバッファサイズ</td></tr>
+<tr><td class="left">/dataStore/concurrency</td><td class="left">int</td><td class="left">処理並列度</td></tr>
+<tr><td class="left">/dataStore/affinityGroupSize</td><td class="left">int</td><td class="left">データアフィニティのグループ数</td></tr>
+</tbody>
+<tbody>
+<tr><td class="left">/checkpoint/checkpointInterval</td><td class="left">int</td><td class="left">チェックポイント実行間隔(単位:秒)</td></tr>
+</tbody>
+<tbody>
+<tr><td class="left">/system/eventLogPath</td><td class="left">string</td><td class="left">イベントログファイルの出力ディレクトリ</td></tr>
+</tbody>
+<tbody>
+<tr><td class="left">/transaction/connectionLimit</td><td class="left">int</td><td class="left">コネクション数上限値</td></tr>
+</tbody>
+<tbody>
+<tr><td class="left">/trace/カテゴリ</td><td class="left">string</td><td class="left">イベントログ出力レベル</td></tr>
+</tbody>
+</table>
+
+
+<ul>
+<li>データベースファイルディレクトリは、インメモリに登録されたデータを永続化する際に作成される、
+  トランザクションログファイル、チェックポイントファイルが作成されるディレクトリです。
+
+</li>
+<li>メモリバッファサイズは、データ管理のために用いるメモリサイズです。
+  単位付きの文字列で指定します(例: "2048MB")。
+</li>
+<li>処理並列度は、GridDBが二次記憶装置のI/O処理を並列に実行する上限数です。
+</li>
+<li>データアフィニティでは、関連するデータを集めて配置管理する際のグループ数を指定します。
+</li>
+<li>グループ数には、1から64までの数値が指定できます。グループ数を多くするとメモリ利用効率は
+  低下しますので注意して設定してください。
+</li>
+<li>チェックポイント実行間隔は、内部的に定期的に実行される(データの永続化に関する)
+  チェックポイント処理を実行する間隔です。
+</li>
+<li>イベントログの出力ディレクトリは、ノード内部で発生した例外などのイベント情報に
+  関するメッセージ(イベントメッセージファイル)が出力されるディレクトリです。
+</li>
+<li>コネクション数上限値は、想定されるクライアント数を2倍した値以上を目安に設定してください。
+</li>
+<li>イベントログ出力レベルは、イベントログの各カテゴリに対する出力レベルです。
+</li>
+</ul>
+
+
+</div>
+</div>
+
+</div>
+
+<div id="outline-container-2-5" class="outline-3">
+<h3 id="sec-2-5"><a name="dist_conf" id="dist_conf"></a><span class="section-number-3">2.5</span> 各ノードに定義ファイルを配布する</h3>
+<div class="outline-text-3" id="text-2-5">
+
+
+<p>
+<span style="text-decoration:underline;">定義ファイルのうち、ユーザ定義ファイルとクラスタ定義ファイルは、GridDBクラスタを構成する すべてのノードで同一の設定内容にする必要があります。</span>
+</p>
+<p>
+そのため、2台以上のノードでクラスタを構成する場合、下記の手順ですべてのノードの設定を行います。
+(1台のノードでクラスタを構成する場合、これまでの手順でノードおよびクラスタの設定は完了しています。)
+</p>
+<ol>
+<li>ノードをインストールしたいずれかのマシン上で、<a href="#setup_admin">管理ユーザの設定</a>、<a href="#setup_params">環境依存パラメータの設定</a>を行う。
+</li>
+<li>設定した <b>クラスタ定義ファイル</b> 、 <b>ユーザ定義ファイル</b> を他のノードの定義ファイルディレクトリに上書きコピーする。
+</li>
+<li>各ノードで共通としたい設定を行った場合は、 <b>ノード定義ファイル</b> も合わせてコピーします。
+</li>
+<li>各ノードで異なる設定を別途行う。(<a href="#setup_networks">ネットワーク環境の設定</a>など)
+</li>
+</ol>
+
+
+</div>
+
+</div>
+
+<div id="outline-container-2-6" class="outline-3">
+<h3 id="sec-2-6"><a name="setup_client" id="setup_client"></a><span class="section-number-3">2.6</span> インストールおよびセットアップを行う(クライアント)</h3>
+<div class="outline-text-3" id="text-2-6">
+
+
+<p>
+クライアントライブラリのインストール手順を説明します。
+</p>
+
+
+</div>
+
+<div id="outline-container-2-6-1" class="outline-4">
+<h4 id="sec-2-6-1"><span class="section-number-4">2.6.1</span> 環境の確認</h4>
+<div class="outline-text-4" id="text-2-6-1">
+
+
+<p>
+CentOS 6.7でのみ動作を確認しています。
+</p>
+
+
+
+<pre class="example">$ lsb_release -id
+Distributor ID: CentOS
+Description:    CentOS release 6.7 (Final)
+</pre>
+
+
+<p>
+<b>【注意点】</b>
+</p><ul>
+<li>OSインストール時のOSパッケージグループの選択では、最低以下を選択してください。
+<ul>
+<li>Software Development WorkStation
+</li>
+</ul>
+
+</li>
+</ul>
+
+
+<p>
+Java言語の開発環境としては、Oracle Java 7でのみ動作を確認しています。
+</p>
+
+
+
+
+
+<pre class="example">$ java -version
+java version "1.7.0_79"
+Java(TM) SE Runtime Environment (build 1.7.0_79-b15)
+Java HotSpot(TM) 64-Bit Server VM (build 24.79-b02, mixed mode)
+</pre>
+
+
+</div>
+
+</div>
+
+<div id="outline-container-2-6-2" class="outline-4">
+<h4 id="sec-2-6-2"><span class="section-number-4">2.6.2</span> クライアントライブラリをインストールする</h4>
+<div class="outline-text-4" id="text-2-6-2">
+
+
+
+<p>
+以下のコマンドを用いてインストールします。
+</p>
+
+
+<pre class="example">$ ant -f java_client/build.xml
+</pre>
+
+
+</div>
+
+</div>
+
+<div id="outline-container-2-6-3" class="outline-4">
+<h4 id="sec-2-6-3"><span class="section-number-4">2.6.3</span> インストール後の確認を行う</h4>
+<div class="outline-text-4" id="text-2-6-3">
+
+
+<p>
+正常にインストールできている場合、以下のファイルが作成されます。
+</p>
+
+
+<pre class="example">$GS_HOME/bin/gridstore.jar              # javaクライアントライブラリ
+</pre>
+
+
+</div>
+
+</div>
+
+<div id="outline-container-2-6-4" class="outline-4">
+<h4 id="sec-2-6-4"><span class="section-number-4">2.6.4</span> ライブラリを設定する</h4>
+<div class="outline-text-4" id="text-2-6-4">
+
+
+<p>
+Java版クライアントを使用する場合、クライアントライブラリをCLASSPATHに追加します。
+</p>
+
+
+
+
+<pre class="example">$ export CLASSPATH=${CLASSPATH}:$GS_HOME/bin/gridstore.jar
+</pre>
+
+
+</div>
+
+</div>
+
+<div id="outline-container-2-6-5" class="outline-4">
+<h4 id="sec-2-6-5"><span class="section-number-4">2.6.5</span> クライアント側の設定を行う</h4>
+<div class="outline-text-4" id="text-2-6-5">
+
+
+<p>
+クライアントの設定を行うための定義ファイルはありません。
+クライアントプログラム中で接続先やユーザ／パスワードの指定を行います。
+</p>
+
+<p>
+指定の詳細については、NoSQLの場合『GridDB APIリファレンス』(<a href="GridDB_API_Reference_ja.html">GridDB_API_Reference_ja.html</a>)を参照ください
+</p>
+
+
+
+</div>
+</div>
+</div>
+
+</div>
+
+<div id="outline-container-3" class="outline-2">
+<h2 id="sec-3"><a name="chap_operation" id="chap_operation"></a><span class="section-number-2">3</span> 運用</h2>
+<div class="outline-text-2" id="text-3">
+
+
+<p>
+この章では、GridDBの運用手順について説明します。
+</p>
+<p>
+以下のケース毎に順に説明します。
+</p>
+<ul>
+<li>起動から停止までの操作
+</li>
+</ul>
+
+
+
+
+<p>
+運用では以下のコマンドを使用します。
+</p>
+<p>
+【コマンド一覧】
+</p>
+<table  border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides" align="center">
+<colgroup><col class="left" /><col class="left" />
+</colgroup>
+<thead>
+<tr><th scope="col" class="left">コマンド</th><th scope="col" class="left">機能</th></tr>
+</thead>
+<tbody>
+<tr><td class="left">gs_startnode</td><td class="left">ノードを起動する</td></tr>
+<tr><td class="left">gs_joincluster</td><td class="left">クラスタを作成する/ノードを参加させる</td></tr>
+<tr><td class="left">gs_stopcluster</td><td class="left">クラスタを停止する(処理停止する)</td></tr>
+<tr><td class="left">gs_stopnode</td><td class="left">ノードを停止する(シャットダウン)</td></tr>
+<tr><td class="left">gs_leavecluster</td><td class="left">クラスタからノードを離脱させる</td></tr>
+</tbody>
+<tbody>
+<tr><td class="left">gs_stat</td><td class="left">ノードの内部情報を取得する</td></tr>
+</tbody>
+</table>
+
+
+<p>
+<b>【運用コマンドを利用する上での注意点】</b>
+</p>
+<ul>
+<li>プロキシ変数(http_proxy)が設定されている場合、ノードのアドレス(群)を、no_proxyで設定し、proxyから除外してください。
+  運用コマンドはREST/http通信を行うため、誤ってproxyサーバ側に接続されてしまい、運用コマンドが動作しません。
+</li>
+<li>「接続サーバ:ポート」のオプション指定があるコマンドの場合、ポート設定をデフォルトから変更していなければ、
+  このオプションを指定する必要はありません。
+  また、「接続サーバ:ポート」のオプションを指定すれば、
+  ノードを起動したマシンとは別のマシン上からこのコマンドを実行できます。
+</li>
+</ul>
+
+
+<p>
+以下、使用方法について、順次説明します。
+</p>
+
+
+</div>
+
+<div id="outline-container-3-1" class="outline-3">
+<h3 id="sec-3-1"><span class="section-number-3">3.1</span> 起動から停止までの操作</h3>
+<div class="outline-text-3" id="text-3-1">
+
+
+
+</div>
+
+<div id="outline-container-3-1-1" class="outline-4">
+<h4 id="sec-3-1-1"><span class="section-number-4">3.1.1</span> 基本の流れ</h4>
+<div class="outline-text-4" id="text-3-1-1">
+
+
+<p>
+GridDBノードのインストールおよびセットアップを行った後、
+GridDBクラスタの起動から停止までの、通常運用の流れは以下のようになります。
+</p>
+<ol>
+<li>各ノードを起動する。
+</li>
+<li>クラスタを構成する。
+</li>
+<li>GridDBのサービスを利用する。
+</li>
+<li>クラスタを停止する。
+</li>
+<li>各ノードを停止する。
+</li>
+</ol>
+
+
+<p>
+<b>【利用する上での注意点】</b>
+</p><ul>
+<li>以下の手順では、運用管理者が、ノードを実行する全マシンのホスト名(もしくはアドレス)の一覧を把握していることを想定しています。
+</li>
+<li>同様に、クラスタに参加させている、全ノードの台数も把握していることを想定しています。
+</li>
+<li>ユーザ認証オプション(-u)には、ユーザ「admin」、パスワード「admin」を例として使用しています。
+</li>
+</ul>
+
+
+
+</div>
+
+</div>
+
+<div id="outline-container-3-1-2" class="outline-4">
+<h4 id="sec-3-1-2"><span class="section-number-4">3.1.2</span> 各ノードを起動する</h4>
+<div class="outline-text-4" id="text-3-1-2">
+
+
+<p>
+ノードを実行するマシン上でノード起動コマンドを実行します。
+このコマンドはノード毎に実行する必要があります。
+</p>
+
+
+<p>
+ノードの起動には以下のコマンドを用います。
+</p>
+<ul>
+<li>gs_startnode
+</li>
+</ul>
+
+
+<p>
+GridDBホームディレクトリ下のconfディレクトリ下にあるノード定義ファイル、クラスタ定義ファイル、ユーザ定義ファイルの設定を用いてノードを起動します。
+以下に、コマンド実行例を示します。
+</p>
+<p>
+【コマンド実行例】
+</p>
+
+
+<pre class="example">$ gs_startnode
+</pre>
+
+
+<p>
+クラスタを構成する全てのマシンで、ノード起動を行う必要があります。
+</p>
+<p>
+<b>【注意点】</b>
+</p><ul>
+<li>クラスタを構成する場合、参加する各ノードの <b>クラスタ定義ファイル</b> は同一である必要があります。起動前に、各ノードのクラスタ定義ファイルを同一にしておいてください。
+</li>
+<li>同様に、各ノードの <b>ユーザ定義ファイル</b> も同一である必要があります。
+</li>
+</ul>
+
+
+
+</div>
+
+</div>
+
+<div id="outline-container-3-1-3" class="outline-4">
+<h4 id="sec-3-1-3"><span class="section-number-4">3.1.3</span> クラスタを構成する</h4>
+<div class="outline-text-4" id="text-3-1-3">
+
+
+<p>
+起動したノードをクラスタに参加させ、クラスタを構成します。
+シングルノードで使用する(複数ノードでクラスタを組まない)場合でも、この操作は必要です。
+</p>
+<p>
+ノードをクラスタに参加させるためには、以下のクラスタ参加コマンドを実行します。
+</p>
+<ul>
+<li>gs_joincluster [-s 接続サーバ:ポート] -n|&ndash;nodeNum 構成ノード数  -c|&ndash;clusterName クラスタ名 -u ユーザ名/パスワード
+</li>
+</ul>
+
+
+<p>
+オプションとして「クラスタ名」、「構成ノード数」を与えて実行します。
+</p>
+<p>
+オプションとして指定するクラスタの「構成ノード数」には、GridDBクラスタを構成するノード数を指定します。
+GridDBが初回に起動する際に、各種サービスを開始する閾値として用いられます。
+</p>
+<p>
+以下に、ノードが起動しているマシン上で実行する場合のコマンド実行例を示します。
+クラスタ名を「<a href="#setup_clusterName">設定したクラスタ名</a>」、構成ノード数を「1」として
+クラスタを作成しています。
+</p>
+<p>
+【コマンド実行例】
+</p>
+
+
+<pre class="example">$ gs_joincluster -c 設定したクラスタ名 -n 1 -u admin/admin
+</pre>
+
+
+<p>
+ノードが起動しているマシンとは別のマシン上で実行する場合のコマンド実行例を示します。
+ノードが起動しているマシンのアドレス「192.168.10.11」に対して、
+クラスタ名「example_three_nodes_cluster」、構成ノード数「3」のクラスタに参加しています。
+</p>
+<p>
+【コマンド実行例】
+</p>
+
+
+<pre class="example">$ gs_joincluster -s 192.168.10.11:10040 -c example_three_nodes_cluster -n 3 -u admin/admin
+</pre>
+
+
+<p>
+クラスタを構成する3台のマシンに対してそれぞれ正しくクラスタ名を指定して実行することで、クラスタが構成されます。
+クラスタの参加ノード数が構成ノード数と等しくなると、クラスタはサービスを開始します。
+サービスが開始されると、アプリケーションからアクセスできるようになります。
+</p>
+<p>
+ただし、このコマンドはリクエスト受付後すぐに制御が戻ります。
+クラスタが構成されるまではアプリケーションからの接続に失敗することがありますので、
+クラスタを構成する最後の1台で-wオプションを指定し、クラスタ構成完了を待合わせてください。
+</p>
+<p>
+以下に、他の2台のマシンに対して、同様にコマンドを実行して、3台のノードでクラスタを構成する例を示します。
+</p>
+<p>
+【コマンド実行例】
+</p>
+
+
+<pre class="example">$ gs_joincluster -s 192.168.10.12:10040 -c example_three_nodes_cluster -n 3 -u admin/admin
+$ gs_joincluster -s 192.168.10.13:10040 -c example_three_nodes_cluster -n 3 -u admin/admin -w
+...
+クラスタを構成しました。
+</pre>
+
+
+<p>
+<b>【注意点】</b>
+</p><ul>
+<li>構成ノード数は、シングルノード構成では1を指定してください。
+</li>
+<li>クラスタ参加コマンドがエラーとなる場合、そのノードのクラスタ定義ファイルに差異があります。
+  再度、クラスタ定義ファイルを確認し、同一の定義としてください。
+</li>
+<li>クラスタの参加ノード数が構成ノード数に満たない場合、クラスタは一切のサービスを開始しません。
+  サービスが開始されない場合は、ノード数が正しいか確認してください。
+</li>
+</ul>
+
+
+<p>
+構成ノード数を誤って指定してしまった場合は、ノードをクラスタから
+離脱させてください。以下のクラスタ離脱コマンドを実行します。
+</p>
+<ul>
+<li>gs_leavecluster [-s 接続サーバ:ポート] -u ユーザ名/パスワード
+</li>
+</ul>
+
+
+<p>
+以下に、クラスタから離脱させるノードが起動しているマシン上でコマンドを実行する例を示します。
+</p>
+<p>
+【コマンド実行例】
+</p>
+
+
+<pre class="example">$ gs_leavecluster -u admin/admin
+</pre>
+
+
+<p>
+<b>【注意点】</b>
+</p><ul>
+<li>このコマンドをクラスタの停止目的に使用すると、クラスタの再稼動後のデータを参照できなくなる可能性があります。
+</li>
+<li>クラスタが既に稼動している場合は、クラスタ停止コマンド(gs_stopcluster)を使用してください。
+</li>
+</ul>
+
+
+</div>
+
+</div>
+
+<div id="outline-container-3-1-4" class="outline-4">
+<h4 id="sec-3-1-4"><span class="section-number-4">3.1.4</span> サービスを利用する</h4>
+<div class="outline-text-4" id="text-3-1-4">
+
+
+<p>
+クラスタを構成したあとは、登録したユーザを用いて、
+クライアントプログラムからGridDBに対して、データ登録や検索ができます。
+</p>
+<p>
+クライアントプログラムの作成についての詳細は、
+</p>
+<p>
+『GridDB APIリファレンス』(<a href="GridDB_API_Reference_ja.html">GridDB_API_Reference_ja.html</a>)を参照ください。
+</p>
+
+
+
+</div>
+
+</div>
+
+<div id="outline-container-3-1-5" class="outline-4">
+<h4 id="sec-3-1-5"><span class="section-number-4">3.1.5</span> クラスタを停止する</h4>
+<div class="outline-text-4" id="text-3-1-5">
+
+
+<p>
+GridDBクラスタを停止させます。
+各ノードを停止するためには、GridDBクラスタ管理処理を停止させた後、
+順次ノード停止させる手順を踏む必要があります。
+</p>
+<p>
+まず、クラスタ管理処理を停止させます。そのためにはクラスタ全停止コマンドを実行します。
+クラスタに参加しているノードのいずれかに以下のコマンドを実行します。
+</p>
+<ul>
+<li>gs_stopcluster [-s 接続サーバ:ポート] -u ユーザ名/パスワード
+</li>
+</ul>
+
+
+<p>
+以下に、停止させるクラスタのノードが起動しているマシン上でコマンド実行する例を示します。
+</p>
+<p>
+【コマンド実行例】
+</p>
+
+
+<pre class="example">$ gs_stopcluster -u admin/admin
+</pre>
+
+
+<p>
+この時点で、クラスタに参加していた全てのノードがデータ登録および検索サービスを停止します。
+</p>
+<p>
+この後、ノードを停止(シャットダウン)させます。このためにはノード停止コマンドを実行します。
+</p>
+<ul>
+<li>gs_stopnode [-w [WAIT_TIME]][-s 接続サーバ:ポート] [-f|&ndash;force] -u ユーザ名/パスワード
+</li>
+</ul>
+
+
+<p>
+以下に、ノードが起動しているマシン上でのノード停止コマンド実行例を示します。
+</p>
+<p>
+【コマンド実行例】
+</p>
+
+
+<pre class="example">$ gs_stopnode -w -u admin/admin
+</pre>
+
+
+<p>
+ノード停止させると、チェックポイント(メモリデータのファイル書き出し)処理のため、
+ノードのプロセスが終了するまでに時間を要することがあります。-wオプションを指定することで、終了を待ち合わせることをお勧めします。
+</p>
+
+
+</div>
+
+</div>
+
+<div id="outline-container-3-1-6" class="outline-4">
+<h4 id="sec-3-1-6"><span class="section-number-4">3.1.6</span> 一度停止したクラスタを再稼動する</h4>
+<div class="outline-text-4" id="text-3-1-6">
+
+
+<p>
+GridDBクラスタをシャットダウンした後、通常の起動と同じ以下の手順で再稼動させることができます。
+</p>
+<ul>
+<li><span style="text-decoration:underline;">事前にシャットダウン時点の参加ノード数を確認しておきます。</span>
+</li>
+<li>ノードを起動する。
+</li>
+<li>シャットダウン時点の構成台数を指定してクラスタに参加させる。
+</li>
+</ul>
+
+
+<p>
+以下は、シングルノード構成のクラスタを再稼動させる具体例です。
+</p>
+<p>
+【コマンド実行例】
+</p>
+
+
+<pre class="example">$ gs_startnode
+...
+$ gs_joincluster -c 設定したクラスタ名 -n 1 -u admin/admin
+...
+</pre>
+
+
+<ul>
+<li>クラスタ名は、クラスタ定義ファイルに<a href="#setup_clusterName">設定したクラスタ名</a>を指定してください。
+</li>
+<li>構成ノード数は、シングルノード構成では1を指定してください。複数台構成の場合はシャットダウン時点でのノード台数を指定してください。
+</li>
+<li>シャットダウン時点でのクラスタ参加ノードは、イベントログファイルに情報が出力されています。
+</li>
+</ul>
+
+
+<p>
+再稼動させると、GridDBクラスタはデータベースファイル(トランザクションログファイル、チェックポイントファイル)を読み込み、
+シャットダウン時点の状態を復元します。
+<span style="text-decoration:underline;">「構成ノード数」台のノードがクラスタに参加すると、サービスを開始します。</span>
+</p>
+
+<p>
+<b>【注意点】</b>
+</p><ul>
+<li>「構成ノード数」には、シャットダウン時点でのノード台数を正しく指定する必要があります。クラスタの参加ノード数が構成ノード数に満たない場合、クラスタは一切のサービスを開始しません。サービスが開始されない場合は、ノード数が正しいか確認してください。
+</li>
+<li>「構成ノード数」を誤って指定した際、クラスタが稼動していない状態のときは、クラスタ離脱コマンドでクラスタから離脱させ、再度正しい「構成ノード数」を指定してクラスタに参加させてください。
+</li>
+<li>「構成ノード数」を誤って指定した際、クラスタが稼動してしまったときは、誤った状態でサービスを開始してしまう可能性があります。この場合は、クラスタを停止する手順を実施した後で、再稼動手順を実施してください。
+</li>
+<li>マシン故障などにより、シャットダウン時点とノード数が変わってしまった(シャットダウン時点より少ない)場合、再起動可能なノード数を指定して、再起動手順を実施してください。運用中の障害発生時と同様にデータの再配置を行います。ただし、大幅にノード数が減少してしまう場合には、データを参照できなくなる可能性があります。
+</li>
+<li>元々クラスタに参加していたマシンのIPアドレス、ポート(ノード定義ファイルの/xxx/serviceAddress、/xxx/servicePort)の変更は可能です。
+</li>
+</ul>
+
+
+
+
+
+
+</div>
+</div>
+
+</div>
+
+<div id="outline-container-3-2" class="outline-3">
+<h3 id="sec-3-2"><span class="section-number-3">3.2</span> 各種情報を取得する</h3>
+<div class="outline-text-3" id="text-3-2">
+
+
+
+
+
+</div>
+
+<div id="outline-container-3-2-1" class="outline-4">
+<h4 id="sec-3-2-1"><span class="section-number-4">3.2.1</span> クラスタ情報を取得する</h4>
+<div class="outline-text-4" id="text-3-2-1">
+
+
+<p>
+クラスタ情報（クラスタ構成情報および内部情報）を取得します。
+そのためには、以下のクラスタ構成情報取得コマンドを実行します。
+</p>
+<ul>
+<li>gs_stat [-s 接続サーバ:ポート] -u ユーザ名/パスワード
+</li>
+</ul>
+
+
+<p>
+以下に、ノードが起動しているマシン上で実行する場合のコマンド実行例を示します。
+</p>
+<p>
+【コマンド実行例】
+</p>
+
+
+<pre class="example">$ gs_stat -u admin/admin
+{
+　　　　　　　　：
+　　　　　　　　：
+    "cluster": {
+        "activeCount": 3,
+        "clusterName": "defaultCluster",
+        "clusterStatus": "MASTER",
+　　　　　　　　：
+　　　　　　　　：
+}
+</pre>
+
+
+<p>
+クラスタ状態(clusterStatus)の意味は以下のとおりとなります。
+</p>
+<ul>
+<li>MASTER : マスタ
+</li>
+<li>SUB_MASTER : マスタ障害時にマスタとなる候補
+</li>
+<li>FOLLOWER : フォロワ
+</li>
+<li>SUB_FOLLOWER : マスタ障害時にフォロワとなる候補
+</li>
+<li>SUB_CLUSTER : クラスタが稼動していない
+</li>
+</ul>
+
+
+<p>
+システム状態(nodeStatus)の意味は以下のとおりとなります。
+</p>
+<ul>
+<li>INACTIVE : 停止
+</li>
+<li>ACTIVATING : 稼働開始
+</li>
+<li>ACTIVE : 稼働
+</li>
+<li>DEACTIVATING : 停止開始
+</li>
+<li>ABNORMAL : 異常停止
+</li>
+<li>NORMAL_SHUTDOWN : 通常終了開始
+</li>
+</ul>
+
+
+<p>
+その他の項目の説明は<a href="#param_list">パラメータ一覧</a>を参照ください。
+</p>
+
+
+</div>
+</div>
+</div>
+
+</div>
+
+<div id="outline-container-4" class="outline-2">
+<h2 id="sec-4"><span class="section-number-2">4</span> 注意点</h2>
+<div class="outline-text-2" id="text-4">
+
+<p>以下はコミュニティ版のみの注意点です。
+</p><ul>
+<li>圧縮機能はサポートしていません。
+</li>
+<li>非常に単純なユーザ認証のみをサポートしています。
+</li>
+<li>登録済の全ユーザがアクセス可能な「public」という名前の1個のデータベースのみをサポートしています。
+</li>
+<li>デフォルトのビルド環境はトリガ機能を無効にしています。トリガ機能を有効にするにはビルドする際に以下オプションを追加してください。
+</li>
+</ul>
+
+
+
+
+<pre class="example">$ ./configure --enable-activemq
+</pre>
+
+
+</div>
+
+</div>
+
+<div id="outline-container-5" class="outline-2">
+<h2 id="sec-5"><span class="section-number-2">5</span> 付録</h2>
+<div class="outline-text-2" id="text-5">
+
+
+
+
+
+
+</div>
+
+<div id="outline-container-5-1" class="outline-3">
+<h3 id="sec-5-1"><a name="param_list" id="param_list"></a><span class="section-number-3">5.1</span> パラメータ一覧</h3>
+<div class="outline-text-3" id="text-5-1">
+
+
+<p>
+GridDBの定義ファイルであるノード定義ファイルとクラスタ定義ファイルのパラメータ一覧を以下に示します。
+</p>
+
+</div>
+
+<div id="outline-container-5-1-1" class="outline-4">
+<h4 id="sec-5-1-1"><span class="section-number-4">5.1.1</span> ノード定義ファイル(gs_node.json)</h4>
+<div class="outline-text-4" id="text-5-1-1">
+
+
+
+<table  border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+<colgroup><col class="left" /><col class="left" /><col class="left" /><col class="left" />
+</colgroup>
+<thead>
+<tr><th scope="col" class="left">パラメータ</th><th scope="col" class="left">データ型</th><th scope="col" class="left">意味</th><th scope="col" class="left">デフォルト</th></tr>
+</thead>
+<tbody>
+<tr><td class="left">/dataStore/dbPath</td><td class="left">string</td><td class="left">データベースファイルディレクトリ</td><td class="left">"data"</td></tr>
+<tr><td class="left">/dataStore/storeMemoryLimit</td><td class="left">string</td><td class="left">メモリバッファサイズ</td><td class="left">"1024MB"</td></tr>
+<tr><td class="left">/dataStore/concurrency</td><td class="left">int</td><td class="left">処理並列度</td><td class="left">1</td></tr>
+<tr><td class="left">/dataStore/logWriteMode</td><td class="left">int</td><td class="left">ログ書き込みモード</td><td class="left">1</td></tr>
+<tr><td class="left">/dataStore/persistencyMode</td><td class="left">string</td><td class="left">永続化モード</td><td class="left">"NORMAL"</td></tr>
+<tr><td class="left">/dataStore/affinityGroupSize</td><td class="left">int</td><td class="left">アフィニティグループ数</td><td class="left">4</td></tr>
+</tbody>
+<tbody>
+<tr><td class="left">/checkpoint/checkpointInterval</td><td class="left">string</td><td class="left">チェックポイント実行間隔</td><td class="left">"1200s"</td></tr>
+<tr><td class="left">/checkpoint/checkpointMemoryLimit</td><td class="left">string</td><td class="left">チェックポイント用メモリバッファサイズ</td><td class="left">"1024MB"</td></tr>
+<tr><td class="left">/checkpoint/useParallelMode</td><td class="left">boolean</td><td class="left">チェックポイントの並列動作(false:無効、true:有効)</td><td class="left">false</td></tr>
+</tbody>
+<tbody>
+<tr><td class="left">/cluster/serviceAddress</td><td class="left">string</td><td class="left">クラスタ管理のために使用する受信アドレス</td><td class="left">"127.0.0.1"</td></tr>
+<tr><td class="left">/cluster/servicePort</td><td class="left">int</td><td class="left">クラスタ管理のために使用する受信ポート</td><td class="left">10010</td></tr>
+</tbody>
+<tbody>
+<tr><td class="left">/sync/serviceAddress</td><td class="left">string</td><td class="left">データ同期に使用する受信アドレス</td><td class="left">"127.0.0.1"</td></tr>
+<tr><td class="left">/sync/servicePort</td><td class="left">int</td><td class="left">データ同期に使用する受信ポート</td><td class="left">10020</td></tr>
+</tbody>
+<tbody>
+<tr><td class="left">/system/serviceAddress</td><td class="left">string</td><td class="left">運用コマンドの接続アドレス</td><td class="left">"127.0.0.1"</td></tr>
+<tr><td class="left">/system/servicePort</td><td class="left">int</td><td class="left">運用コマンドの接続ポート</td><td class="left">10040</td></tr>
+<tr><td class="left">/system/eventLogPath</td><td class="left">string</td><td class="left">イベントログファイルの出力ディレクトリ</td><td class="left">"log"</td></tr>
+</tbody>
+<tbody>
+<tr><td class="left">/transaction/serviceAddress</td><td class="left">string</td><td class="left">トランザクション処理の受付アドレス</td><td class="left">"127.0.0.1"</td></tr>
+<tr><td class="left">/transaction/servicePort</td><td class="left">int</td><td class="left">トランザクション処理の受付ポート</td><td class="left">10001</td></tr>
+<tr><td class="left">/transaction/connectionLimit</td><td class="left">int</td><td class="left">コネクション数上限値</td><td class="left">5000</td></tr>
+</tbody>
+<tbody>
+<tr><td class="left">/trace/default</td><td class="left">string</td><td class="left">イベントログ出力レベル</td><td class="left">"LEVEL_ERROR"</td></tr>
+<tr><td class="left">/trace/dataStore</td><td class="left">string</td><td class="left"></td><td class="left">"LEVEL_ERROR"</td></tr>
+<tr><td class="left">/trace/collection</td><td class="left">string</td><td class="left"></td><td class="left">"LEVEL_ERROR"</td></tr>
+<tr><td class="left">/trace/timeSeries</td><td class="left">string</td><td class="left"></td><td class="left">"LEVEL_ERROR"</td></tr>
+<tr><td class="left">/trace/chunkManager</td><td class="left">string</td><td class="left"></td><td class="left">"LEVEL_ERROR"</td></tr>
+<tr><td class="left">/trace/objectManager</td><td class="left">string</td><td class="left"></td><td class="left">"LEVEL_INFO"</td></tr>
+<tr><td class="left">/trace/checkpointFile</td><td class="left">string</td><td class="left"></td><td class="left">"LEVEL_ERROR"</td></tr>
+<tr><td class="left">/trace/checkpointService</td><td class="left">string</td><td class="left"></td><td class="left">"LEVEL_INFO"</td></tr>
+<tr><td class="left">/trace/logManager</td><td class="left">string</td><td class="left"></td><td class="left">"LEVEL_WARNING"</td></tr>
+<tr><td class="left">/trace/clusterOperation</td><td class="left">string</td><td class="left"></td><td class="left">"LEVEL_INFO"</td></tr>
+<tr><td class="left">/trace/clusterService</td><td class="left">string</td><td class="left"></td><td class="left">"LEVEL_ERROR"</td></tr>
+<tr><td class="left">/trace/syncService</td><td class="left">string</td><td class="left"></td><td class="left">"LEVEL_ERROR"</td></tr>
+<tr><td class="left">/trace/systemService</td><td class="left">string</td><td class="left"></td><td class="left">"LEVEL_INFO"</td></tr>
+<tr><td class="left">/trace/transactionManager</td><td class="left">string</td><td class="left"></td><td class="left">"LEVEL_ERROR"</td></tr>
+<tr><td class="left">/trace/transactionService</td><td class="left">string</td><td class="left"></td><td class="left">"LEVEL_ERROR"</td></tr>
+<tr><td class="left">/trace/transactionTimeout</td><td class="left">string</td><td class="left"></td><td class="left">"LEVEL_WARNING"</td></tr>
+<tr><td class="left">/trace/sessionTimeout</td><td class="left">string</td><td class="left"></td><td class="left">"LEVEL_WARNING"</td></tr>
+<tr><td class="left">/trace/replicationTimeout</td><td class="left">string</td><td class="left"></td><td class="left">"LEVEL_WARNING"</td></tr>
+<tr><td class="left">/trace/recoveryManager</td><td class="left">string</td><td class="left"></td><td class="left">"LEVEL_INFO"</td></tr>
+<tr><td class="left">/trace/eventEngine</td><td class="left">string</td><td class="left"></td><td class="left">"LEVEL_WARNING"</td></tr>
+<tr><td class="left">/trace/triggerService</td><td class="left">string</td><td class="left"></td><td class="left">"LEVEL_ERROR"</td></tr>
+</tbody>
+</table>
+
+
+
+
+</div>
+
+</div>
+
+<div id="outline-container-5-1-2" class="outline-4">
+<h4 id="sec-5-1-2"><span class="section-number-4">5.1.2</span> クラスタ定義ファイル(gs_cluster.json)</h4>
+<div class="outline-text-4" id="text-5-1-2">
+
+
+<table  border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides">
+<colgroup><col class="left" /><col class="left" /><col class="left" /><col class="left" />
+</colgroup>
+<thead>
+<tr><th scope="col" class="left">パラメータ</th><th scope="col" class="left">データ型</th><th scope="col" class="left">意味</th><th scope="col" class="left">デフォルト</th></tr>
+</thead>
+<tbody>
+<tr><td class="left">/dataStore/partitionNum</td><td class="left">int</td><td class="left">パーティション数</td><td class="left">128</td></tr>
+<tr><td class="left">/dataStore/storeBlockSize</td><td class="left">string</td><td class="left">ブロックサイズ("64KB"、"1MB")</td><td class="left">"64KB"</td></tr>
+</tbody>
+<tbody>
+<tr><td class="left">/cluster/clusterName</td><td class="left">string</td><td class="left">クラスタ名</td><td class="left">""</td></tr>
+<tr><td class="left">/cluster/replicationNum</td><td class="left">int</td><td class="left">レプリカ数</td><td class="left">2</td></tr>
+<tr><td class="left">/cluster/notificationAddress</td><td class="left">string</td><td class="left">クラスタ管理用のためのマルチキャスト用アドレス</td><td class="left">"239.0.0.1"</td></tr>
+<tr><td class="left">/cluster/notificationPort</td><td class="left">int</td><td class="left">クラスタ管理用のためのマルチキャスト用ポート</td><td class="left">20000</td></tr>
+<tr><td class="left">/cluster/notificationInterval</td><td class="left">string</td><td class="left">クラスタ管理用のためのマルチキャスト間隔</td><td class="left">"5s"</td></tr>
+<tr><td class="left">/cluster/heartbeatInterval</td><td class="left">string</td><td class="left">ハートビート間隔</td><td class="left">"5s"</td></tr>
+<tr><td class="left">/cluster/loadbalanceCheckInterval</td><td class="left">string</td><td class="left">ロードバランスチェック間隔</td><td class="left">"180s"</td></tr>
+</tbody>
+<tbody>
+<tr><td class="left">/sync/timeoutInterval</td><td class="left">string</td><td class="left">短期同期タイムアウト時間</td><td class="left">"30s"</td></tr>
+</tbody>
+<tbody>
+<tr><td class="left">/transaction/notificationAddress</td><td class="left">string</td><td class="left">クライアントへのマルチキャスト用アドレス</td><td class="left">"239.0.0.1"</td></tr>
+<tr><td class="left">/transaction/notificationPort</td><td class="left">int</td><td class="left">クライアントへのマルチキャスト用ポート</td><td class="left">31999</td></tr>
+<tr><td class="left">/transaction/notificationInterval</td><td class="left">string</td><td class="left">クライアントへのマルチキャスト間隔</td><td class="left">"5s"</td></tr>
+<tr><td class="left">/transaction/replicationTimeoutInterval</td><td class="left">string</td><td class="left">レプリケーション・タイムアウト時間</td><td class="left">"10s"</td></tr>
+<tr><td class="left">/transaction/replicationMode</td><td class="left">int</td><td class="left">レプリケーション方法(0:非同期、1:準同期)</td><td class="left">0</td></tr>
+</tbody>
+</table>
+
+
+
+
+
+</div>
+</div>
+
+</div>
+
+<div id="outline-container-5-2" class="outline-3">
+<h3 id="sec-5-2"><span class="section-number-3">5.2</span> ビルド・実行方法</h3>
+<div class="outline-text-3" id="text-5-2">
+
+
+<p>
+プログラムのビルドおよび実行方法の例を示します。
+</p>
+
+
+<p>
+<b>【注意点】</b>
+</p><ul>
+<li>サンプルプログラム内のユーザ、パスワードは適宜変更する必要があります。
+</li>
+</ul>
+
+
+
+
+<p>
+<b>【NoSQL DBの場合】</b>
+</p>
+<p>
+Javaの場合
+</p>
+<ol>
+<li>環境変数の設定
+</li>
+<li>サンプルプログラムをgsSampleディレクトリにコピー
+</li>
+<li>ビルド
+</li>
+<li>実行
+</li>
+</ol>
+
+
+
+
+
+
+<pre class="example">$ export CLASSPATH=${CLASSPATH}:$GS_HOME/bin/gridstore.jar
+$ mkdir gsSample
+$ cp $GS_HOME/docs/sample/program/Sample1.java gsSample/.
+$ javac gsSample/Sample1.java
+$ java gsSample/Sample1 239.0.0.1 31999 設定したクラスタ名 admin 設定したパスワード
+</pre>
+
+
+
+
+
+</div>
+</div>
+
+</div>
+
+<div id="outline-container-6" class="outline-2">
+<h2 id="sec-6"><span class="section-number-2">6</span> 商標</h2>
+<div class="outline-text-2" id="text-6">
+
+
+<ul>
+<li>GridDBは、株式会社東芝の商標です。
+</li>
+<li>OracleとJavaは、Oracle Corporation 及びその子会社、関連会社の米国及びその他の国における登録商標です。文中の社名、商品名等は各社の商標または登録商標である場合があります。
+</li>
+<li>LinuxはLinus Torvaldsの商標です。
+</li>
+<li>その他製品名は、それぞれの所有者の商標または登録商標です。
+</li>
+</ul>
+
+
+
+
+<p>
+                            Copyright © 2013-2016 TOSHIBA CORPORATION
+</p>
+</div>
+</div>
+</div>
+
+<div id="postamble">
+<a href="http://validator.w3.org/check?uri=referer">Validate XHTML 1.0</a>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,24 @@
+<configuration>
+
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d [%thread] %-5level %logger{36} - %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <logger name="com.toshiba.mwcloud.gs.GridStoreLogger" level="INFO"/>
+  <!--
+  <logger name="com.toshiba.mwcloud.gs.GridStoreLogger.Config" level="INFO"/>
+  <logger name="com.toshiba.mwcloud.gs.GridStoreLogger.Heartbeat" level="INFO"/>
+  <logger name="com.toshiba.mwcloud.gs.GridStoreLogger.Discovery" level="INFO"/>
+  <logger name="com.toshiba.mwcloud.gs.GridStoreLogger.Connection" level="INFO"/>
+  <logger name="com.toshiba.mwcloud.gs.GridStoreLogger.Transaction" level="INFO"/>
+  <logger name="com.toshiba.mwcloud.gs.GridStoreLogger.StatementIO" level="INFO"/>
+  <logger name="com.toshiba.mwcloud.gs.GridStoreLogger.StatementExec" level="INFO"/>
+  -->
+
+  <root level="DEBUG">
+    <appender-ref ref="STDOUT" />
+  </root>
+
+</configuration>

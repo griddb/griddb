@@ -1,0 +1,55 @@
+#!/usr/bin/python -B
+# coding=UTF-8
+
+import sys
+import log
+import os
+import json
+import util
+from optparse import OptionParser
+from optparse import SUPPRESS_HELP
+
+import util
+
+
+util.install_sigint_handler()
+(homedir,logdir) = util.get_required_env()
+
+parser = OptionParser(usage="%prog [-a ADDR_TYPE]"+ util.CLIENT_OPTIONS_USAGE,
+                      	description=u"Obtains internal information of a node.",
+			version="%prog [V2.8.00]")
+util.add_client_options(parser)
+parser.add_option("-a", "--address-type", type="string",
+		action="callback", callback=util.check_addr_type, dest="addr_type",
+		help=u"obtain address information with a specified service type\
+							ADDR_TYPE\
+							system\
+							cluster\
+							transaction\
+							sync")
+(options, args) = parser.parse_args()
+
+if options.username is None:
+	print u"AE0001: Specify a user name and a password. (-u USER/PASS)"
+	sys.exit(2)
+
+log = log.logger(__file__, log.DEBUG)
+log.info("%s start." % (__file__))
+
+path = "/node/stat"
+data = {}
+
+if options.addr_type is not None:
+	data["addressType"] = options.addr_type
+
+method = "GET"
+(res, code) = util.request_rest(method, path, data, options, log)
+if res is not None:
+	print json.dumps(json.loads(res), sort_keys=True, indent=4)
+
+if code != 200:
+	log.error("AE0105: Failed to get stat.")
+	sys.exit(1)
+
+log.info("%s end." % (__file__))
+

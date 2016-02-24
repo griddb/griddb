@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<project default="all" basedir=".">
+
+	<property name="baseName" value="java_client" />
+	<property name="binDir" value="obj" />
+	<property name="srcDir" value="src" />
+	<property name="stubSrcDir" value="src_stub" />
+	<property name="confSrcDir" value="src_conf" />
+	<property name="jarDir" value="../bin" />
+	<property name="jarFile" value="gridstore.jar" />
+	<property name="confJarFile" value="gridstore-conf.jar" />
+	<property name="jarFileCompatible" value="gs.jar" />
+	<property name="srcEncoding" value="UTF-8" />
+	<property name="includeDebugInfo" value="yes" />
+
+	<path id="buildClasspath">
+		<fileset dir="../3rd_party/slf4j">
+			<include name="slf4j-api-*.jar" />
+		</fileset>
+	</path>
+
+	<target name="checkBaseDirs">
+		<pathconvert property="binNoEmpty" setonempty="false" pathsep=" ">
+			<path>
+				<fileset dir=".." includes="bin/*" />
+				<fileset dir=".." includes="bin/**" />
+			</path>
+		</pathconvert>
+	</target>
+
+	<target name="cleanBinBase" depends="checkBaseDirs" unless="binNoEmpty">
+		<delete dir="../bin" />
+	</target>
+
+
+	<target name="cleanBaseDirs"
+		depends="cleanBinBase">
+	</target>
+	<target name="cleanObjSub">
+		<delete dir="${binDir}" />
+	</target>
+
+	<target name="cleanObj" depends="cleanObjSub,cleanBaseDirs">
+	</target>
+
+	<target name="cleanSub" depends="cleanObjSub" >
+		<delete file="${jarDir}/${jarFile}" failonerror="no" />
+		<delete file="${jarDir}/${jarFileCompatible}" failonerror="no" />
+	</target>
+
+	<target name="clean" depends="cleanSub,cleanBaseDirs">
+	</target>
+
+	<target name="compile">
+		<mkdir dir="${binDir}"/>
+
+		<javac srcdir="${srcDir}" destdir="${binDir}"
+			encoding="${srcEncoding}" debug="${includeDebugInfo}"
+			includeantruntime="no" source="1.6" target="1.6"
+			classpathref="buildClasspath" />
+	</target>
+
+	<target name="stubCompile" depends="compile">
+		<mkdir dir="${binDir}"/>
+
+		<javac srcdir="${stubSrcDir}" destdir="${binDir}"
+			encoding="${srcEncoding}" debug="yes" includeantruntime="no"
+			source="1.6" target="1.6" classpath="${binDir}">
+		</javac>
+	</target>
+
+	<target name="confCompile" depends="compile">
+		<mkdir dir="${binDir}"/>
+
+		<javac srcdir="${confSrcDir}" destdir="${binDir}"
+			encoding="${srcEncoding}" debug="yes" includeantruntime="no"
+			source="1.6" target="1.6" classpath="${binDir}">
+		</javac>
+	</target>
+
+	<target name="jar" depends="compile">
+		<mkdir dir="${jarDir}"/>
+
+		<jar destfile="${jarDir}/${jarFile}">
+			<zipfileset dir="${binDir}" />
+			<zipfileset dir="${srcDir}" includes="**/*.properties" />
+		</jar>
+	</target>
+
+	<target name="stubJar" depends="stubCompile">
+		<jar destfile="${jarFile}">
+			<zipfileset dir="${binDir}" />
+			<zipfileset dir="${stubSrcDir}" includes="META-INF/**/*" />
+		</jar>
+	</target>
+
+	<target name="confJar" depends="confCompile">
+		<mkdir dir="${jarDir}"/>
+
+		<jar destfile="${jarDir}/${confJarFile}">
+			<zipfileset dir="${binDir}" includes="com/toshiba/mwcloud/gs/config/*.class" />
+			<zipfileset dir="${confSrcDir}" includes="META-INF/**/*" />
+		</jar>
+	</target>
+
+	<target name="jarPartial" depends="compile">
+		<jar destfile="${jarDir}/${jarFile}">
+			<zipfileset dir="${binDir}" includes="com/toshiba/mwcloud/gs/*.class" />
+		</jar>
+	</target>
+
+	<target name="all" depends="jar,confJar">
+	</target>
+
+</project>

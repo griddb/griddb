@@ -1,0 +1,25 @@
+{
+	"dataStore":{
+		"partitionNum":128,
+		"storeBlockSize":"64KB"
+	},
+	"cluster":{
+		"clusterName":"",
+		"replicationNum":2,
+		"notificationAddress":"239.0.0.1",
+		"notificationPort":20000,
+		"notificationInterval":"5s",
+		"heartbeatInterval":"5s",
+		"loadbalanceCheckInterval":"180s"
+	},
+	"sync":{
+		"timeoutInterval":"30s"
+	},
+	"transaction":{
+		"notificationAddress":"239.0.0.1",
+		"notificationPort":31999,
+		"notificationInterval":"5s",
+		"replicationMode":0,
+		"replicationTimeoutInterval":"10s"
+	}
+}

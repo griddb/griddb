@@ -1,0 +1,190 @@
+#!/usr/bin/python -B
+# coding=UTF-8
+
+import sys
+import os
+import log
+import stat
+import pwd
+import time
+import json
+from optparse import OptionParser
+from optparse import SUPPRESS_HELP
+import subprocess
+import datetime
+import util
+
+#-- function --------------
+def getPort(nodeconf):
+        port = nodeconf["system"].get("listenPort")
+        if port is None:
+                port = nodeconf["system"].get("servicePort")
+        if port is None:
+                port = "10040"
+        return port
+#---------------------------
+
+util.install_sigint_handler()
+(homedir,logdir) = util.get_required_env()
+
+parser = OptionParser(usage="%prog [-w [WAIT_TIME] -u USER/PASS]",
+                      description=u"Starts a node.",
+			version="%prog [V2.8.00]")
+
+util.add_client_options(parser)
+parser.remove_option("--server")
+parser.remove_option("--port")
+parser.add_option("-w", "--wait", action='callback', callback=\
+					util.optional_arg(0), dest="wait_time",default=None,
+                  help=u"wait for a while until it starts")
+parser.set_defaults(checkPort=None)
+parser.add_option("--checkPort", dest="checkPort", help=SUPPRESS_HELP)
+(options, args) = parser.parse_args()
+
+if options.wait_time is not None:
+	if options.username is None:
+		print u"AD0001: If you use a wait option,"
+		print u"Specify a user name and a password. (-u USER/PASS)"
+		sys.exit(2)	
+	try:
+		wait_time = int(options.wait_time)
+	except ValueError:
+		print u"AD0002: Specify the correct number of seconds to wait. (-w WAIT_TIME)"
+		sys.exit(2)
+
+log = log.logger(__file__, log.DEBUG)
+log.info("%s start." % (__file__))
+
+statinfo = os.stat(homedir)
+if statinfo[stat.ST_UID] != os.getuid():
+	print u"AD0101: You can't start the node because of you aren't the owner of home directory %s." % homedir
+	print u"the current user: %s" %(pwd.getpwuid(os.getuid())[0])
+	print u"the owner of home directory %s: %s" %(homedir, pwd.getpwuid(statinfo[stat.ST_UID])[0])
+	log.error("AD0101: The current user is not the owner of home directory. (dir="+homedir+")")
+	sys.exit(1)
+
+
+confdir = os.path.join(homedir, "conf")
+
+# read gs_node.json
+nodeconffile = os.path.join(confdir, "gs_node.json")
+with open(nodeconffile) as f:
+	nodeconf = json.load(f)
+
+# check Port
+if options.checkPort is not None:
+        port = getPort(nodeconf)
+        if str(port) != options.checkPort:
+		print u"AD0108: The specified port number isn't the port number of target node. (port="+str(options.checkPort)+", port(target node)="+str(port)+", file="+nodeconffile+")"
+		sys.exit(1)
+
+
+# check whether process is running
+pidfile = os.path.join(confdir, "gridstore.pid")
+if os.path.exists(pidfile):
+	pid = util.getpid(pidfile)
+	if util.psexists(pid, "gsserver"):
+		print u"AD0102: gsserver process may exist."
+		print "PID is " + pid
+		log.error("AD0102: PID file and gsserver process exists. (pid="+pid+")")
+		sys.exit(0)
+	else:
+		log.warning("AD0105: PID file exists, but gsserver process is not found. Then delete pid file and start gsserver. (pid="+pid+")")
+		os.remove(pidfile)
+
+logdir = nodeconf["system"]["eventLogPath"]
+
+if not os.path.isabs(logdir):
+	logdir = os.path.join(homedir, logdir)
+startuplog = os.path.join(logdir, "gsstartup.log")
+
+bindir = os.path.dirname(os.path.abspath(__file__))
+gsserver = os.path.join(bindir, "gsserver")
+
+
+command = [gsserver, "--conf", confdir]
+
+log.debug("command: %s" % command)
+
+os.chdir(homedir)
+
+f = file(startuplog, 'a')
+f.write("-------------------------\n")
+d = datetime.datetime.today()
+f.write(d.strftime("%Y-%m-%d %H:%M:%S")+"\n")
+f.flush()
+
+proc = subprocess.Popen(command, stdout=f, stderr=f)
+
+existProcess = False
+serverPid = 0
+while True:
+	time.sleep(1)
+	proc.poll()
+	if proc.returncode is not None:
+		log.error("AD0106: Process is stopped. (pid="+str(proc.pid)+", exitCode="+str(proc.returncode)+")")
+		break
+	if os.path.exists(pidfile):
+		serverPid = util.getpid(pidfile)
+		if util.psexists(serverPid, "gsserver"):
+			existProcess = True
+			break
+		else:
+			log.error("AD0107: Process is stopped. (pid="+str(proc.pid)+", gridstore.pid="+str(serverPid)+")")
+			break
+
+if not existProcess:
+	print u"AD0103: Unable to start node."
+	print u"Confirm event logs (gridstore-YYYYMMDD-n.log, gsstartup.log)."
+	log.error("AD0103: Unable to start node.")
+	sys.exit(1)
+
+if options.wait_time is not None:
+	server = nodeconf["system"].get("listenAddress")
+	if server is None:
+		server = nodeconf["system"].get("serviceAddress")
+	if server is None:
+		server = "127.0.0.1"
+	options.server = server
+	options.port = getPort(nodeconf)
+	
+	log.info("Waits for starting node. (node="+server+":"+str(options.port)+" waitTime="+str(wait_time)+")")
+
+	method = "GET"
+	path = "/node/stat"
+	data =  { }
+	recovery_status=0
+	options.silent = 1
+	e = 0
+	sleep_time = 0
+	while recovery_status <1 :
+		util.wait_one_sec()
+		sleep_time += 1
+		recovery_status=0
+		(res, code) = util.request_rest(method, path, data, options, log)		
+		if code == 401:
+			e = 1
+			break
+		if sleep_time == wait_time:
+			e = 2
+			break
+		if not os.path.exists(pidfile):
+			print u"AD0104: Failed to start node."
+			print u"Confirm event logs (gridstore-YYYYMMDD-n.log)."
+			log.error("AD0104: Failed to start node.")
+			sys.exit(1)
+		if not util.psexists(serverPid, "gsserver"):
+			print u"AD0105: Failed to start node."
+			print u"Confirm event logs (gridstore-YYYYMMDD-n.log)."
+			log.error("AD0105: Failed to start node.")
+			sys.exit(1)
+		if code == 200:
+			nodestat = json.loads(res)
+			recovery_status = nodestat.get("recovery").get("progressRate")
+			# print recovery_status
+
+	util.wait_error_case(e,log,u"\nStarted node.")
+	log.info("%s end." % (__file__))
+	sys.exit(e)
+
+log.info("%s end." % (__file__))
