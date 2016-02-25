@@ -12,6 +12,8 @@
 
 ## Quick start
 ### Build a server
+    We have confirmed the operation on CentOS 6.7 and gcc version 4.4.7.
+
     $ ./bootstrap.sh
     $ ./configure
     $ make 
