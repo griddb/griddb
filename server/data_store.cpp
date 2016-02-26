@@ -1254,7 +1254,7 @@ void DataStore::ContainerIdTable::set(PartitionId pId, ContainerId containerId,
 		ContainerInfoCache containerInfoCache(
 			oId, databaseVersionId, attribute);
 		itr = containerIdMap_[pId].insert(
-			std::make_pair<ContainerId, ContainerInfoCache>(
+			std::make_pair(
 				containerId, containerInfoCache));
 		if (!itr.second) {
 			GS_THROW_SYSTEM_ERROR(

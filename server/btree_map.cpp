@@ -935,7 +935,7 @@ int32_t BtreeMap::getAll(TransactionContext &txn, ResultSize limit,
 
 	int32_t loc = 0;
 	while (true) {
-		keyValueList.push_back(std::make_pair<const K, const V>(
+		keyValueList.push_back(std::make_pair(
 			node.getKeyValue(loc).key_, node.getKeyValue(loc).value_));
 		if (!nextPos(txn, node, loc) || keyValueList.size() >= limit) {
 			break;
@@ -972,7 +972,7 @@ int32_t BtreeMap::getAll(TransactionContext &txn, ResultSize limit,
 	}
 	bool hasNext = false;
 	while (true) {
-		idList.push_back(std::make_pair<const K, const V>(
+		idList.push_back(std::make_pair(
 			node.getKeyValue(loc).key_, node.getKeyValue(loc).value_));
 		hasNext = nextPos(txn, node, loc);
 		if (!hasNext || idList.size() >= limit) {
