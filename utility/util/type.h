@@ -917,17 +917,26 @@ namespace util {
 
 
 
-template<int>
+template<bool>
 struct StaticAssertChecker {
+public:
+	enum {
+		ASSERTION_FAILED
+	};
+};
+
+template<>
+struct StaticAssertChecker<false> {
+private:
+	enum {
+		ASSERTION_FAILED
+	};
 };
 }
 
-#define UTIL_STATIC_ASSERT_SYMBOL(name, num) name##num
-#define UTIL_STATIC_ASSERT_SYMBOL2(name, num) \
-	UTIL_STATIC_ASSERT_SYMBOL(name, num)
 #define UTIL_STATIC_ASSERT(expression) \
-	typedef util::StaticAssertChecker<1 / ((expression) ? 1 : 0)> \
-		UTIL_STATIC_ASSERT_SYMBOL2(UtilStaticAssertChecker, __LINE__)
+	static_cast<void>( \
+			util::StaticAssertChecker<(expression)>::ASSERTION_FAILED)
 
 
 
