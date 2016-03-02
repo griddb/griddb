@@ -1368,17 +1368,20 @@ addrinfo* SocketAddress::getAddressInfo(
 
 SocketAddress::Inet SocketAddress::toInet(uint32_t inAddr) {
 	Inet addr;
-	const u_long inAddrAsNet = htonl(inAddr);
-	
-	memcpy(&addr, &inAddrAsNet, sizeof(inAddrAsNet));
+	convertTypeDirect(addr, htonl(inAddr));
 	return addr;
 }
 
 SocketAddress::Inet6 SocketAddress::toInet6(const struct in6_addr &in6Addr) {
 	Inet6 addr;
-	
-	memcpy(&addr, &in6Addr, sizeof(in6Addr));
+	convertTypeDirect(addr, in6Addr);
 	return addr;
+}
+
+template<typename D, typename S>
+void SocketAddress::convertTypeDirect(D &dest, const S &src) {
+	UTIL_STATIC_ASSERT(sizeof(dest) == sizeof(src));
+	memcpy(&dest, &src, sizeof(src));
 }
 
 std::ostream& operator<<(std::ostream &s, const SocketAddress &addr) {

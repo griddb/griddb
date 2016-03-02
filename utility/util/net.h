@@ -654,6 +654,9 @@ private:
 	static Inet toInet(uint32_t inAddr);
 	static Inet6 toInet6(const struct in6_addr &in6Addr);
 
+	template<typename D, typename S>
+	static void convertTypeDirect(D &dest, const S &src);
+
 private:
 	int family_;
 	uint16_t port_;
