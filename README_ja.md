@@ -47,6 +47,8 @@
   * クラスタ設計書(GridDBTechnicalDesignDocument_ja.pdf)
   * スタートアップガイド(manual/GridDB_QuickStartGuide_ja.html)
   * APIリファレンス(manual/GridDB_API_Reference_ja.html)
+  * RPMインストールガイド(manual/GridDB_RPM_InstallGuide.html)
+  * テクニカルリファレンス(https://www.griddb.net/ja/documents/technical-reference/)
 
 ## コミュニティ
   * Issues  
