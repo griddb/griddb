@@ -48,7 +48,6 @@
   * Quick Start Guide(manual/GridDB_QuickStartGuide.html)
   * API Reference(manual/GridDB_API_Reference.html)
   * RPM Install Guide(manual/GridDB_RPM_InstallGuide.html)
-  * Technical reference(https://www.griddb.net/en/technical-reference/)
 
 ## Community
   * Issues  
