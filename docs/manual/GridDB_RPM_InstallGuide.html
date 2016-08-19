@@ -1,13 +1,13 @@
-<?xml version="1.0" encoding="shift_jis"?>
+<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
                "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
 <html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en">
 <head>
 <title>GridDB RPM Install Guide</title>
-<meta http-equiv="Content-Type" content="text/html;charset=shift_jis"/>
+<meta http-equiv="Content-Type" content="text/html;charset=utf-8"/>
 <meta name="title" content="GridDB RPM Install Guide"/>
 <meta name="generator" content="Org-mode"/>
-<meta name="generated" content="2016-05-06T19:05+0900"/>
+<meta name="generated" content="2016-06-24T12:34+0900"/>
 <meta name="author" content="root"/>
 <meta name="description" content=""/>
 <meta name="keywords" content=""/>
@@ -127,6 +127,7 @@ for the JavaScript code in this tag.
 <li><a href="#sec-1-9">1.9 Uninstalling GridDB</a></li>
 </ul>
 </li>
+<li><a href="#sec-2">2 Trademark</a></li>
 </ul>
 </div>
 </div>
@@ -274,7 +275,7 @@ Use the user and group for running a node module and operational commands.
 <tr><th scope="col" class="left">Group</th><th scope="col" class="left">User</th><th scope="col" class="left">Home directory</th></tr>
 </thead>
 <tbody>
-<tr><td class="left">gridstore</td><td class="left">gsadm</td><td class="left">/var/lib/griddb</td></tr>
+<tr><td class="left">gridstore</td><td class="left">gsadm</td><td class="left">/var/lib/gridstore</td></tr>
 </tbody>
 </table>
 
@@ -297,8 +298,8 @@ For the user "gsadm," two environment variables are defined as below.
 <tr><th scope="col" class="left">Environment variable</th><th scope="col" class="left">Value</th><th scope="col" class="left">Meaning</th></tr>
 </thead>
 <tbody>
-<tr><td class="left">GS_HOME</td><td class="left">/var/lib/griddb</td><td class="left">gsadm/GridDB home directory</td></tr>
-<tr><td class="left">GS_LOG</td><td class="left">/var/lib/griddb/log</td><td class="left">Event log file output directory</td></tr>
+<tr><td class="left">GS_HOME</td><td class="left">/var/lib/gridstore</td><td class="left">gsadm/GridDB home directory</td></tr>
+<tr><td class="left">GS_LOG</td><td class="left">/var/lib/gridstore/log</td><td class="left">Event log file output directory</td></tr>
 </tbody>
 </table>
 
@@ -328,7 +329,7 @@ If installation completed normally, the following directories and files are crea
 
 
 
-<pre class="example">/var/lib/griddb/        # GridDB home directory
+<pre class="example">/var/lib/gridstore/        # GridDB home directory
      backup/               # Backup directory(unused)
      conf/                 # Directory storing definition files
          gs_cluster.json   # Cluster definition file
@@ -376,15 +377,15 @@ Similarly, confirm whether the following files and directories exist.
 
 
 
-<pre class="example">$ ls /var/lib/griddb/*
-/var/lib/griddb/backup:
+<pre class="example">$ ls /var/lib/gridstore/*
+/var/lib/gridstore/backup:
 
-/var/lib/griddb/conf:
+/var/lib/gridstore/conf:
 gs_cluster.json  gs_node.json  password
 
-/var/lib/griddb/data:
+/var/lib/gridstore/data:
 
-/var/lib/griddb/log:
+/var/lib/gridstore/log:
 </pre>
 
 
@@ -409,7 +410,7 @@ If you start a GridDB node and then access and run the node from a client, the f
 </p>
 
 
-<pre class="example">/var/lib/griddb/        # GridDB home directory
+<pre class="example">/var/lib/gridstore/        # GridDB home directory
      data/                 # Directory storing database files
          gs_log_n_m.log    # File recording transaction logs (n, m: positive number)
          gs_cp_n_p.dat     # Checkpoint file recording data regularly (n, p: positive number)
@@ -421,7 +422,7 @@ If you start a GridDB node and then access and run the node from a client, the f
 </p>
 
 
-<pre class="example">/var/lib/griddb/              # GridDB home directory
+<pre class="example">/var/lib/gridstore/              # GridDB home directory
      log/                        # Directory storing event logs
          gridstore-%Y%m%d-n.log  # Event log file
 </pre>
@@ -496,8 +497,8 @@ The password is encrypted during registration.
 
 
 <pre class="example">$ gs_passwd admin
-Password:ÅiInput passwordÅj
-Retype password:ÅiInput password againÅj
+Password:ÔºàInput passwordÔºâ
+Retype password:ÔºàInput password againÔºâ
 </pre>
 
 
@@ -505,7 +506,7 @@ Retype password:ÅiInput password againÅj
 <span style="text-decoration:underline;">When adding a new administrator user except a default user, the user name has to start with gs#.</span>
 </p>
 <p>
-One or more ASCII alphanumeric characters and the underscore sign Åg_Åh can be used after gs#.
+One or more ASCII alphanumeric characters and the underscore sign ‚Äú_‚Äù can be used after gs#.
 </p>
 <p>
 An example on adding a new administrator user is shown below.
@@ -514,8 +515,8 @@ An example on adding a new administrator user is shown below.
 
 
 <pre class="example">$ gs_adduser gs#newuser
-Password:ÅiInput passwordÅj
-Retype password:ÅiInput password againÅj
+Password:ÔºàInput passwordÔºâ
+Retype password:ÔºàInput password againÔºâ
 </pre>
 
 
@@ -573,7 +574,7 @@ Save an edited file with the predetermined name in the predetermined directory s
 
 
 
-<pre class="example">/var/lib/griddb/       # GridDB home directory
+<pre class="example">/var/lib/gridstore/       # GridDB home directory
      conf/                # Directory storing definition files
          gs_cluster.json  # (Edited) Cluster definition file
          gs_node.json     # (Edited) Node definition file
@@ -638,8 +639,33 @@ Follow the uninstallation procedure shown below:
 # rpm -e griddb_nosql
 </pre>
 
+
 </div>
 </div>
+
+</div>
+
+<div id="outline-container-2" class="outline-2">
+<h2 id="sec-2"><span class="section-number-2">2</span> Trademark</h2>
+<div class="outline-text-2" id="text-2">
+
+
+<ul>
+<li>GridDB is a trademark of Toshiba Corporation.
+</li>
+<li>Oracle and Java are registered trademarks of Oracle and/or its affiliates.
+</li>
+<li>Linux is a trademark of Linus Torvalds.
+</li>
+<li>Other product names are trademarks or registered trademarks of the respective owners.
+</li>
+</ul>
+
+
+
+<p>
+                            Copyright ¬© 2016 TOSHIBA CORPORATION
+</p></div>
 </div>
 </div>
 
