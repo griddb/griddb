@@ -148,7 +148,8 @@ $(srcdir)/value_processor.cpp \
 $(srcdir)/main.cpp
 
 gsserver_CPPFLAGS = \
--DGEOMETRY_SEARCH_DISABLE
+-DGEOMETRY_SEARCH_DISABLE \
+$(NOSQL_INCLUDES)
 
 gsserver_LDADD = \
 $(utildir)/libutil.a \
@@ -159,7 +160,7 @@ $(aprldadd) \
 
 gsserver_LDFLAGS = -rdynamic
 
-INCLUDES = \
+NOSQL_INCLUDES = \
 -I$(srcdir) \
 -I$(utildir) \
 -I$(incdir) \

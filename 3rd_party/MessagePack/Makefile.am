@@ -12,5 +12,6 @@ $(srcdir)/src/version.c \
 $(srcdir)/src/vrefbuffer.c \
 $(srcdir)/src/zone.c
 
-INCLUDES = -Iinclude
+libmsgpack_a_CPPFLAGS = \
+-I$(srcdir)/include
 

@@ -30,4 +30,5 @@ $(srcdir)/util/trace.h \
 $(srcdir)/util/type.cpp \
 $(srcdir)/util/type.h
 
-INCLUDES = -I$(top_srcdir)/utility
+libutil_a_CPPFLAGS = \
+-I$(top_srcdir)/utility
