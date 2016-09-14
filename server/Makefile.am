@@ -31,10 +31,14 @@ $(buildenvfile): $(deploybinfile)
 	ldd $(bin_PROGRAMS) | grep ' => .\+\.so' | cut -d ' ' -f 3 | xargs ls -ln --time-style="+%Y-%m-%d %H:%M:%S" >> $(buildenvfile)
 	echo '[ldd-libs-actual]' >> $(buildenvfile)
 	@for i in `ldd $(bin_PROGRAMS) | grep ' => .\+\.so' | cut -d ' ' -f 3` ; do readlink -f $$i ; done | xargs ls -ln --time-style="+%Y-%m-%d %H:%M:%S" >> $(buildenvfile)
-	echo '[rpm]' >> $(buildenvfile)
-	rpm -qa | grep 'glibc\|gcc\|make\|libtool\|openssl' | sort  >> $(buildenvfile)
-	echo '[redhat-release]' >> $(buildenvfile)
-	cat /etc/redhat-release >> $(buildenvfile)
+	echo '[bin-depends]' >> $(buildenvfile)
+	( LANG=C readelf -d $(bin_PROGRAMS) ) | grep 'NEEDED\|SONAME' >> $(buildenvfile) || :
+	echo '[bin-version-needs]' >> $(buildenvfile)
+	( LANG=C readelf -V $(bin_PROGRAMS) ) | grep 'Version:' >> $(buildenvfile) || :
+	echo '[cc-version]' >> $(buildenvfile)
+	@CC@ --version >> $(buildenvfile)
+	echo '[cxx-version]' >> $(buildenvfile)
+	@CXX@ --version >> $(buildenvfile)
 
 clean-local:
 	rm -fv $(buildenvfile)
