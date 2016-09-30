@@ -107,7 +107,7 @@ std::string Value::dump(
 				OId headerOId = *reinterpret_cast<const OId *>(blobHeaderData);
 				if (headerOId != UNDEF_OID) {
 					VariableArrayCursor arrayCursor(
-						txn, objectManager, headerOId, false);
+						txn, objectManager, headerOId, OBJECT_READ_ONLY);
 					uint32_t num = arrayCursor.getArrayLength();
 					ss << num << ",";
 					ss << "totalSize=" << totalSize << "[";
@@ -280,7 +280,7 @@ void Value::getArrayElement(TransactionContext &txn,
 						data_.object_.value_);
 				if (data_.object_.onDataStore_) {
 					VariableArrayCursor arrayCursor(
-						txn, objectManager, arrayObject->getHeaderOId(), false);
+						txn, objectManager, arrayObject->getHeaderOId(), OBJECT_READ_ONLY);
 
 					uint32_t elemCount;
 					while (arrayCursor

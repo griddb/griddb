@@ -61,7 +61,7 @@ import javax.sql.rowset.serial.SerialBlob;
  * set on the corresponding field or methods. </p>
  *
  * <p>The correspondence between the type of a Column and the type of
- * each value in a Row object is as follows:
+ * each value in a Row object is as follows:</p>
 	<table><thead><td>
 	Column type
 	</td>
@@ -89,7 +89,6 @@ import javax.sql.rowset.serial.SerialBlob;
  * <tr><td>TIMESTAMP array</td><td>{@code java.util.Date[]}</td></tr>
  * </tbody>
  * </table>
- * </p>
  *
  * <p>There is an upper limit to the number of columns and length of the column name.
  * In addition, the display range and size are limited in the field value.
@@ -330,7 +329,7 @@ public interface Container<K, R> extends Closeable {
 	 *
 	 * <p>It is used for a query whose output format does not match the types of
 	 * Rows in this Container, such as an aggregation operation. The following
-	 * types and {@code null} are only available as {@code rowType}.
+	 * types and {@code null} are only available as {@code rowType}.</p>
 	 * <dl>
 	 * <dt>Row type of Container </dt>
 	 * <dd>Indicates receiving Row data of the type matching the Rows in this
@@ -343,7 +342,7 @@ public interface Container<K, R> extends Closeable {
 	 * <dt>{@code null}</dt>
 	 * <dd>Indicates receiving a proper type of result, depending on the operation. </dd>
 	 * </dl>
-	 * No other value can be specified. </p>
+	 * <p>No other value can be specified. </p>
 	 *
 	 * <p>When obtaining a set of Rows using {@link Query#fetch(boolean)}, the
 	 * option of locking for update can be enabled only for the queries that
@@ -364,7 +363,7 @@ public interface Container<K, R> extends Closeable {
 	 * in {@link Container} using {@link #put(Object)} etc. </p>
 	 *
 	 * <p>At least the following methods can be called on the {@link Blob}
-	 * obtained by this method.
+	 * obtained by this method.</p>
 	 * <ul>
 	 * <li>{@link Blob#length()}</li>
 	 * <li>{@link Blob#setBinaryStream(long)}</li>
@@ -372,7 +371,6 @@ public interface Container<K, R> extends Closeable {
 	 * <li>{@link Blob#setBytes(long, byte[], int, int)}</li>
 	 * <li>{@link Blob#free()}</li>
 	 * </ul>
-	 * </p>
 	 *
 	 * <p>You do not have to use the {@link Blob} created by this method as
 	 * BLOB to be set on a Row object. You can set an instance of
@@ -436,7 +434,7 @@ public interface Container<K, R> extends Closeable {
 	 *
 	 * <p>In a Container created using {@link GridStoreFactory#getInstance()},
 	 * the following types of indexes are selected by default, depending on the
-	 * type of Container, the type of a corresponding Column, etc.
+	 * type of Container, the type of a corresponding Column, etc.</p>
 	 * <table>
 	 * <thead>
 	 * <tr><th>Column type</th><th>Collection</th><th>TimeSeries </th></tr>
@@ -462,8 +460,7 @@ public interface Container<K, R> extends Closeable {
 	 * <td>(-)</td></tr>
 	 * </tbody>
 	 * </table>
-	 * No index cannot be set on a TimeSeries Row key (TIMESTAMP type).
-	 * </p>
+	 * <p>No index cannot be set on a TimeSeries Row key (TIMESTAMP type).</p>
 	 *
 	 * <p>If an index is already set on the specified Column, nothing is changed. </p>
 	 *
@@ -614,10 +611,10 @@ public interface Container<K, R> extends Closeable {
 	 *
 	 * <b>Notification destination URI</b>
 	 * <p>
-	 * A notification destination URI is described in the following format.
+	 * A notification destination URI is described in the following format.</p>
 	 * <pre>
 	 * (method name)://(host name):(port number)/(path)</pre>
-	 * However, if the trigger type is REST, only http can be specified in the method name.</p>
+	 * <p>However, if the trigger type is REST, only http can be specified in the method name.</p>
 	 *
 	 * <b>Notification contents</b>
 	 * <p>Provide notification of the updated Container name, update operation name,
@@ -634,7 +631,7 @@ public interface Container<K, R> extends Closeable {
 	 * will be set as the value.</p>
 	 *
 	 * <b>Notification method - For REST</b>
-	 * <p>JSON character strings such as those shown below are sent with the MIME type application/json.
+	 * <p>JSON character strings such as those shown below are sent with the MIME type application/json.</p>
 	 * <pre>
 	 * {
 	 *   "container" : "(container name)",
@@ -645,7 +642,6 @@ public interface Container<K, R> extends Closeable {
 	 *     ...
 	 *   }
 	 * }</pre>
-	 * </p>
 	 *
 	 * <b>Notification method - For JMS</b>
 	 * <p>A javax.jms.TextMessage is sent with the specified destination type

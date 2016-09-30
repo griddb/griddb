@@ -30,10 +30,10 @@
 #include "gs_error.h"
 #include "qp_def.h"
 #include "schema.h"
+#include "transaction_context.h"
 #include "value_processor.h"
 #include <cstdarg>
 #include <stdexcept>
-#include "transaction_context.h"
 
 class AggregationMap;
 class Expr;
@@ -311,7 +311,8 @@ public:
 	 *
 	 * @return generated expression
 	 */
-	static Expr *newExprArray(ExprList &v, TransactionContext &txn, ObjectManager &objectManager) {
+	static Expr *newExprArray(
+		ExprList &v, TransactionContext &txn, ObjectManager &objectManager) {
 		return QP_NEW_BY_TXN(txn) Expr(&v, txn, objectManager);
 	}
 
@@ -383,6 +384,8 @@ public:
 	static Expr *newArrayValue(Value *array, TransactionContext &txn) {
 		return QP_NEW_BY_TXN(txn) Expr(array, txn);
 	}
+
+	static char *dequote(util::StackAllocator &alloc, const char *str);
 
 	virtual ~Expr();
 
@@ -714,12 +717,11 @@ protected:
 
 	Type type_;
 
-	Value *
-		value_;					  
+	Value *value_;				  
 	ExprList *arglist_;			  
 	util::XArray<uint8_t> *buf_;  
-	char *label_;   
-	Operation op_;  
+	char *label_;  
+	Operation op_;			  
 	ColumnType columnType_;   
 	ColumnInfo *columnInfo_;  
 	uint32_t columnId_;  

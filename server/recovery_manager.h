@@ -65,9 +65,12 @@ public:
 	void initialize(ManagerSet &mgrSet);
 
 
-	static void checkExistingFiles(ConfigTable &configTable, bool &createFrag,
+	static void checkExistingFiles1(ConfigTable &configTable, bool &createFrag,
 		bool forceRecoveryFromExistingFiles);
 
+	static void checkExistingFiles2(ConfigTable &configTable,
+		LogManager &logMgr, bool &createFrag,
+		bool forceRecoveryFromExistingFiles);
 
 
 

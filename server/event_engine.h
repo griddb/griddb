@@ -28,6 +28,7 @@
 
 
 
+
 class PartitionGroupConfig;
 struct NodeDescriptor;
 /*!
@@ -127,6 +128,8 @@ public:
 
 	void getStats(Stats &stats);
 	bool getStats(PartitionGroupId pgId, Stats &stats);
+
+	EventMonotonicTime getMonotonicTime();
 
 
 private:
@@ -1250,6 +1253,11 @@ private:
 			const EventMonotonicTime *queuedTime);
 
 	template<bool Adding> void updateBufferSize(const Event &ev);
+
+	template<typename EventContainer>
+	static void addEvent(
+			VariableSizeAllocator &allocator, EventContainer &eventContainer,
+			const Event &ev);
 
 	template<typename EventContainer>
 	static void clearEvents(

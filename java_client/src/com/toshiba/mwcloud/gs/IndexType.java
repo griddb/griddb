@@ -25,7 +25,7 @@ public enum IndexType {
 	 *
 	 * <p>This index can be applied to following types of Columns of any type of
 	 * {@link Container}, except the Column corresponding to the Row key of
-	 * TimeSeries.
+	 * TimeSeries.</p>
 	 * <ul>
 	 * <li>STRING</li>
 	 * <li>BOOL</li>
@@ -37,14 +37,13 @@ public enum IndexType {
 	 * <li>DOUBLE</li>
 	 * <li>TIMESTAMP</li>
 	 * </ul>
-	 * </p>
 	 */
 	TREE,
 
 	/**
 	 * Indicates a hash index.
 	 *
-	 * <p>This type of index can be set on the following types of Columns in {@link Collection}
+	 * <p>This type of index can be set on the following types of Columns in {@link Collection}</p>
 	 * <ul>
 	 * <li>STRING</li>
 	 * <li>BOOL</li>
@@ -56,7 +55,7 @@ public enum IndexType {
 	 * <li>DOUBLE</li>
 	 * <li>TIMESTAMP</li>
 	 * </ul>
-	 * It cannot be set on Columns in {@link TimeSeries}.
+	 * <p>It cannot be set on Columns in {@link TimeSeries}.
 	 * </p>
 	 */
 	HASH,

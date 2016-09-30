@@ -199,6 +199,8 @@ void QueryForCollection::doQueryWithoutCondition(
 			sc.columnId_ = orderColumnId;
 			sc.keyType_ =
 				collection.getColumnInfo(orderColumnId).getColumnType();
+			setLimitByIndexSort();
+			sc.limit_ = nLimit_;
 		}
 	}
 
@@ -319,6 +321,7 @@ void QueryForCollection::doQueryWithCondition(
 					sc.keyType_ =
 						collection.getColumnInfo(orderColumnId).getColumnType();
 					pOrderByExpr_->clear();
+					setLimitByIndexSort();
 				}
 			}
 			if (doExecute()) {
@@ -341,10 +344,6 @@ void QueryForCollection::doQueryWithCondition(
 			switch (indexType) {
 			case MAP_TYPE_BTREE: {
 				assert(indexColumnInfo != NULL);
-				BtreeMap::SearchContext sc;
-				BoolExpr::toSearchContext(txn, andList, indexColumnInfo, *this,
-					sc, restConditions, nLimit_);
-
 				if (orList.size() == 1 && pOrderByExpr_ &&
 					pOrderByExpr_->size() == 1) {
 					SortExpr &orderExpr = (*pOrderByExpr_)[0];
@@ -363,8 +362,12 @@ void QueryForCollection::doQueryWithCondition(
 										  ? ORDER_ASCENDING
 										  : ORDER_DESCENDING;  
 						pOrderByExpr_->clear();
+						setLimitByIndexSort();
 					}
 				}
+				BtreeMap::SearchContext sc;
+				BoolExpr::toSearchContext(txn, andList, indexColumnInfo, *this,
+					sc, restConditions, nLimit_);
 
 				if (doExecute()) {
 					if (doExplain()) {

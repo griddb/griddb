@@ -27,9 +27,13 @@ import java.net.SocketTimeoutException;
 import java.nio.BufferUnderflowException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
 import java.util.Arrays;
 import java.util.EnumMap;
+import java.util.Formatter;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Random;
 
 import com.toshiba.mwcloud.gs.GSException;
 import com.toshiba.mwcloud.gs.common.BasicBuffer;
@@ -48,7 +52,7 @@ public class NodeConnection implements Closeable {
 
 	public static final int EE_MAGIC_NUMBER = 65021048;
 
-	private static final int DEFAULT_PROTOCOL_VERSION = 7;
+	private static final int DEFAULT_PROTOCOL_VERSION = 10;
 
 	private static final int STATEMENT_TYPE_NUMBER_V2_OFFSET = 100;
 
@@ -74,8 +78,6 @@ public class NodeConnection implements Closeable {
 
 	private static final Statement STATEMENT_LIST[] = Statement.values();
 
-	private static final byte typeNoSQL = 0;
-
 	private final long statementTimeoutMillis;
 
 	private final long heartbeatTimeoutMillis;
@@ -89,6 +91,8 @@ public class NodeConnection implements Closeable {
 	private final Integer alternativeVersion;
 
 	private final boolean ipv6Enabled;
+
+	private AuthMode authMode = Challenge.getDefaultMode();
 
 	private boolean responseUnacceptable;
 
@@ -144,6 +148,7 @@ public class NodeConnection implements Closeable {
 		case 4:
 		case 5:
 		case 6:
+		case 8:
 			return true;
 		default:
 			return false;
@@ -621,7 +626,7 @@ public class NodeConnection implements Closeable {
 				if (responseUnacceptable) {
 					throw new GSConnectionException(
 							GSErrorCode.BAD_CONNECTION,
-							"Connection probrem occurred after heartbeat (" +
+							"Connection problem occurred after heartbeat (" +
 							"elapsedMillis=" + elapsedMillis +
 							", address=" + getRemoteSocketAddress() +
 							", reason=" + e.getMessage() + ")", e);
@@ -761,6 +766,8 @@ public class NodeConnection implements Closeable {
 		putConnectRequest(req);
 		executeStatement(
 				Statement.CONNECT, SPECIAL_PARTITION_ID, 0, req, resp);
+
+		authMode = Challenge.getMode(resp);
 	}
 
 	public void disconnect(BasicBuffer req, BasicBuffer resp) throws GSException {
@@ -774,12 +781,19 @@ public class NodeConnection implements Closeable {
 		closeImmediately();
 	}
 
-	public void login(BasicBuffer req, BasicBuffer resp,
-			LoginInfo loginInfo) throws GSException {
+	public void login(
+			BasicBuffer req, BasicBuffer resp, LoginInfo loginInfo)
+			throws GSException {
+		final Challenge challenge = loginInternal(req, resp, loginInfo, null);
 
-		
-		boolean systemMode = false;
+		if (challenge != null) {
+			loginInternal(req, resp, loginInfo, challenge);
+		}
+	}
 
+	private Challenge loginInternal(
+			BasicBuffer req, BasicBuffer resp, LoginInfo loginInfo,
+			Challenge lastChallenge) throws GSException {
 		req = (req == null ? createRequestBuffer() : req);
 		resp = (resp == null ? createOutput() : resp);
 
@@ -787,29 +801,35 @@ public class NodeConnection implements Closeable {
 
 		if (isOptionalRequestEnabled()) {
 			final OptionalRequest request = new OptionalRequest();
-			if (loginInfo.transactionTimeoutSecs >= 0) {
 
+			if (loginInfo.transactionTimeoutSecs >= 0) {
 				request.put(OptionalRequestType.TRANSACTION_TIMEOUT,
 						loginInfo.transactionTimeoutSecs);
 			}
 
-			request.put(OptionalRequestType.SYSTEM_MODE, systemMode);
-			request.put(OptionalRequestType.DB_NAME, loginInfo.database);
-			request.put(OptionalRequestType.REQUEST_MODULE_TYPE, typeNoSQL);
+			if (loginInfo.database != null) {
+				request.put(OptionalRequestType.DB_NAME, loginInfo.database);
+			}
 			request.format(req);
 		}
 
 		req.putString(loginInfo.user);
-		req.putString(loginInfo.passwordDigest);
+		req.putString(Challenge.build(
+				authMode, lastChallenge, loginInfo.passwordDigest));
 		req.putInt(PropertyUtils.
 				timeoutPropertyToIntSeconds(statementTimeoutMillis));
 		req.putBoolean(loginInfo.ownerMode);
 
-		if (loginInfo.clusterName != null && !loginInfo.clusterName.isEmpty()) {
-			req.putString(loginInfo.clusterName);
-		}
+		req.putString(loginInfo.clusterName == null ? "" : loginInfo.clusterName);
+		Challenge.putRequest(req, authMode, lastChallenge);
 
 		executeStatement(Statement.LOGIN, SPECIAL_PARTITION_ID, 0, req, resp);
+
+		final AuthMode[] resultMode = new AuthMode[] { authMode };
+		final Challenge respChallenge =
+				Challenge.getResponse(resp, resultMode, lastChallenge);
+		authMode = resultMode[0];
+		return respChallenge;
 	}
 
 	public void reuse(BasicBuffer req, BasicBuffer resp,
@@ -976,9 +996,11 @@ public class NodeConnection implements Closeable {
 
 	public static class LoginInfo {
 
+		public static final String DEFAULT_DATABASE_NAME = null;
+
 		private String user;
 
-		private String passwordDigest;
+		private PasswordDigest passwordDigest;
 
 		private String database;
 
@@ -988,10 +1010,12 @@ public class NodeConnection implements Closeable {
 
 		private int transactionTimeoutSecs;
 
-		public LoginInfo(String user, String password, boolean ownerMode,
-				String database, String clusterName, long transactionTimeoutMillis) {
+		public LoginInfo(
+				String user, String password, boolean ownerMode,
+				String database, String clusterName,
+				long transactionTimeoutMillis) {
 			this.user = user;
-			this.passwordDigest = getDigest(password);
+			this.passwordDigest = Challenge.makeDigest(user, password);
 			this.database = database;
 			this.ownerMode = ownerMode;
 			this.clusterName = clusterName;
@@ -1018,7 +1042,7 @@ public class NodeConnection implements Closeable {
 		}
 
 		public void setPassword(String password) {
-			this.passwordDigest = getDigest(password);
+			this.passwordDigest = Challenge.makeDigest(user, password);
 		}
 
 		public void setDatabase(String database) {
@@ -1047,28 +1071,287 @@ public class NodeConnection implements Closeable {
 
 	}
 
+	public enum AuthMode {
+		NONE,
+		BASIC,
+		CHALLENGE
+	}
+
+	public static class Challenge {
+
+		private static final AuthMode DEFAULT_MODE = AuthMode.CHALLENGE;
+
+		private static final String DEFAULT_METHOD = "POST";
+
+		private static final String DEFAULT_REALM = "DB_Auth";
+
+		private static final String DEFAULT_URI = "/";
+
+		private static final String DEFAULT_QOP = "auth";
+
+		private static final Random RANDOM = new SecureRandom();
+
+		private static boolean challengeEnabled = false;
+
+		private final boolean challenging;
+
+		private final String nonce;
+
+		private final String nc;
+
+		private final String opaque;
+
+		private final String baseSalt;
+
+		private String cnonce;
+
+		public Challenge() {
+			challenging = false;
+			this.nonce = null;
+			this.nc = null;
+			this.opaque = null;
+			this.baseSalt = null;
+		}
+
+		public Challenge(
+				String nonce, String nc, String opaque, String baseSalt) {
+			challenging = true;
+			this.nonce = nonce;
+			this.nc = nc;
+			this.opaque = opaque;
+			this.baseSalt = baseSalt;
+		}
+
+		public static boolean isChallenging(Challenge challenge) {
+			return (challenge != null && challenge.challenging);
+		}
+
+		public static PasswordDigest makeDigest(String user, String password) {
+			return new PasswordDigest(
+					sha256Hash(password),
+					sha256Hash(user + ":" + password),
+					md5Hash(user + ":" + DEFAULT_REALM + ":" + password));
+		}
+
+		public static void putRequest(
+				BasicBuffer out, AuthMode mode, Challenge lastChallenge)
+				throws GSException {
+			if (mode == AuthMode.NONE) {
+				return;
+			}
+
+			out.putByteEnum(mode);
+
+			final boolean challenged = isChallenging(lastChallenge);
+			out.putBoolean(challenged);
+
+			if (challenged) {
+				out.putString(lastChallenge.opaque);
+				out.putString(lastChallenge.cnonce);
+			}
+		}
+
+		public static Challenge getResponse(
+				BasicBuffer in, AuthMode[] mode, Challenge lastChallenge)
+				throws GSException {
+			final AuthMode respMode = getMode(in);
+			if (respMode != mode[0]) {
+				if (respMode == AuthMode.BASIC) {
+					mode[0] = respMode;
+					return new Challenge();
+				}
+				throw new GSConnectionException(
+						GSErrorCode.MESSAGE_CORRUPTED, "");
+			}
+			else if (respMode == AuthMode.NONE) {
+				return null;
+			}
+
+			final boolean respChallenging = in.getBoolean();
+			final boolean challenging = isChallenging(lastChallenge);
+			if (respMode != AuthMode.BASIC &&
+					!(respChallenging ^ challenging)) {
+				throw new GSConnectionException(
+						GSErrorCode.MESSAGE_CORRUPTED, "");
+			}
+
+			if (respChallenging) {
+				final String nonce = in.getString();
+				final String nc = in.getString();
+				final String opaque = in.getString();
+				final String baseSalt = in.getString();
+
+				return new Challenge(nonce, nc, opaque, baseSalt);
+			}
+
+			return null;
+		}
+
+		public static String build(
+				AuthMode mode, Challenge challenge, PasswordDigest digest) {
+			if (!isChallenging(challenge)) {
+				if (mode == AuthMode.CHALLENGE) {
+					return "";
+				}
+				else {
+					return digest.basicSecret;
+				}
+			}
+
+			return challenge.build(digest);
+		}
+
+		public String getOpaque() {
+			return opaque;
+		}
+
+		public String getLastCNonce() {
+			return cnonce;
+		}
+
+		public static String generateCNonce() {
+			return randomHexString(4);
+		}
+
+		public String build(PasswordDigest digest) {
+			final String cnonce = generateCNonce();
+			final String result = build(digest, cnonce);
+
+			this.cnonce = cnonce;
+			return result;
+		}
+
+		public String build(PasswordDigest digest, String cnonce) {
+			return "#1#" + getChallengeDigest(digest, cnonce) + "#" +
+					getCryptSecret(digest);
+		}
+
+		public String getChallengeDigest(
+				PasswordDigest digest, String cnonce) {
+			final String ha1 = md5Hash(
+					digest.challengeBase + ":" + nonce + ":" + cnonce);
+			final String ha2 = md5Hash(DEFAULT_METHOD + ":" + DEFAULT_URI);
+
+			return md5Hash(
+					ha1 + ":" + nonce + ":" + nc + ":" + cnonce + ":" +
+					DEFAULT_QOP + ":" + ha2);
+		}
+
+		public String getCryptSecret(PasswordDigest digest) {
+			return sha256Hash(baseSalt + ":" + digest.cryptBase);
+		}
+
+		public static String sha256Hash(String value) {
+			return hash(value, "SHA-256");
+		}
+
+		public static String md5Hash(String value) {
+			return hash(value, "MD5");
+		}
+
+		public static String hash(String value, String algorithm) {
+			final MessageDigest md;
+			try {
+				md = MessageDigest.getInstance(algorithm);
+			}
+			catch (NoSuchAlgorithmException e) {
+				throw new Error("Internal error while calculating digest", e);
+			}
+
+			md.update(value.getBytes(BasicBuffer.DEFAULT_CHARSET));
+
+			return bytesToHex(md.digest());
+		}
+
+		public static String randomHexString(int bytesSize) {
+			final byte[] bytes = new byte[bytesSize];
+			getRandom().nextBytes(bytes);
+			return bytesToHex(bytes);
+		}
+
+		public static String bytesToHex(byte[] bytes) {
+			final Formatter formatter =
+					new Formatter(new StringBuilder(), Locale.US);
+
+			for (byte b : bytes) {
+				formatter.format("%02x", b);
+			}
+
+			return formatter.toString();
+		}
+
+		public static Random getRandom() {
+			return RANDOM;
+		}
+
+		public static AuthMode getDefaultMode() {
+			if (challengeEnabled) {
+				return DEFAULT_MODE;
+			}
+			else {
+				return AuthMode.NONE;
+			}
+		}
+
+		public static AuthMode getMode(BasicBuffer in) throws GSException {
+			if (challengeEnabled && in.base().remaining() > 0) {
+				return in.getByteEnum(AuthMode.class);
+			}
+			return AuthMode.NONE;
+		}
+
+	}
+
+	public static class PasswordDigest {
+
+		private final String basicSecret;
+
+		private final String cryptBase;
+
+		private final String challengeBase;
+
+		public PasswordDigest(
+				String basicSecret, String cryptSecret, String challengeBase) {
+			this.basicSecret = basicSecret;
+			this.cryptBase = cryptSecret;
+			this.challengeBase = challengeBase;
+		}
+
+		public String getBasicSecret() {
+			return basicSecret;
+		}
+
+	}
+
 	public enum OptionalRequestType {
 
-		TRANSACTION_TIMEOUT(1),
-		FOR_UPDATE(2),
-		CONTAINER_LOCK_REQUIRED(3),
-		SYSTEM_MODE(4),
-		DB_NAME(5),
-		CONTAINER_ATTRIBUTE(6),
-		ROW_INSERT_UPDATE(7),
-		REQUEST_MODULE_TYPE(8),
-		STATEMENT_TIMEOUT(10001),
-		FETCH_LIMIT(10002),
-		FETCH_SIZE(10003);
+		TRANSACTION_TIMEOUT(1, Integer.class),
+		FOR_UPDATE(2, Boolean.class),
+		CONTAINER_LOCK_REQUIRED(3, Boolean.class),
+		SYSTEM_MODE(4, Boolean.class),
+		DB_NAME(5, String.class),
+		CONTAINER_ATTRIBUTE(6, Integer.class),
+		ROW_INSERT_UPDATE(7, Integer.class),
+		REQUEST_MODULE_TYPE(8, Byte.class),
+		STATEMENT_TIMEOUT(10001, Integer.class),
+		FETCH_LIMIT(10002, Long.class),
+		FETCH_SIZE(10003, Long.class);
 
 		private final int id;
 
-		private OptionalRequestType(int id) {
+		private final Class<?> valueType;
+
+		private OptionalRequestType(int id, Class<?> valueType) {
 			this.id = id;
+			this.valueType = valueType;
 		}
 
 		public int id() {
 			return id;
+		}
+
+		public Class<?> valueType() {
+			return valueType;
 		}
 
 	}
@@ -1084,7 +1367,7 @@ public class NodeConnection implements Closeable {
 		}
 
 		public void put(OptionalRequestType type, Object value) {
-			requestMap.put(type, getValueType(type).cast(value));
+			requestMap.put(type, type.valueType().cast(value));
 		}
 
 		public void format(BasicBuffer req) {
@@ -1101,7 +1384,7 @@ public class NodeConnection implements Closeable {
 					requestMap.entrySet()) {
 				req.putShort((short) (entry.getKey().id()));
 
-				final Class<?> valueType = getValueType(entry.getKey());
+				final Class<?> valueType = entry.getKey().valueType();
 				if (valueType == Integer.class) {
 					req.putInt((Integer) entry.getValue());
 				}
@@ -1126,35 +1409,6 @@ public class NodeConnection implements Closeable {
 			req.base().position(headPos);
 			req.putInt(endPos - bodyPos);
 			req.base().position(endPos);
-		}
-
-		private static Class<?> getValueType(OptionalRequestType requestType) {
-			switch (requestType) {
-			case TRANSACTION_TIMEOUT:
-				return Integer.class;
-			case FOR_UPDATE:
-				return Boolean.class;
-			case CONTAINER_LOCK_REQUIRED:
-				return Boolean.class;
-			case SYSTEM_MODE:
-				return Boolean.class;
-			case DB_NAME:
-				return String.class;
-			case CONTAINER_ATTRIBUTE:
-				return Integer.class;
-			case ROW_INSERT_UPDATE:
-				return Integer.class;
-			case REQUEST_MODULE_TYPE:
-				return Byte.class;
-			case STATEMENT_TIMEOUT:
-				return Integer.class;
-			case FETCH_LIMIT:
-				return Long.class;
-			case FETCH_SIZE:
-				return Long.class;
-			default:
-				throw new Error("Internal error by illegal request type");
-			}
 		}
 
 	}

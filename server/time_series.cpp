@@ -217,11 +217,6 @@ void TimeSeries::createIndex(TransactionContext &txn, IndexInfo &indexInfo) {
 			return;
 		}
 
-		bool isUnique = false;
-		if (indexInfo.columnId == ColumnInfo::ROW_KEY_COLUMN_ID) {
-			isUnique = true;
-		}
-
 		if (indexSchema_->createIndexInfo(
 				txn, indexInfo.columnId, indexInfo.mapType)) {
 			replaceIndexSchema(txn);
@@ -1260,12 +1255,10 @@ void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 	}
 
 	Timestamp expiredTime = getCurrentExpiredTime(txn);
-	const void *backupStartKey = NULL;
 	const Timestamp *startKeyPtr =
 		reinterpret_cast<const Timestamp *>(sc.startKey_);
 	if (expiredTime != MINIMUM_EXPIRED_TIMESTAMP &&
 		(startKeyPtr == NULL || *startKeyPtr < expiredTime)) {
-		backupStartKey = sc.startKey_;
 		sc.startKey_ = &expiredTime;
 	}
 
@@ -1754,12 +1747,10 @@ void TimeSeries::sampleWithoutInterp(TransactionContext &txn,
 	}
 
 	Timestamp expiredTime = getCurrentExpiredTime(txn);
-	const void *backupStartKey = NULL;
 	const Timestamp *startKeyPtr =
 		reinterpret_cast<const Timestamp *>(sc.startKey_);
 	if (expiredTime != MINIMUM_EXPIRED_TIMESTAMP &&
 		(startKeyPtr == NULL || *startKeyPtr < expiredTime)) {
-		backupStartKey = sc.startKey_;
 		sc.startKey_ = &expiredTime;
 	}
 
@@ -2333,6 +2324,27 @@ void TimeSeries::lockIdList(TransactionContext &txn, util::XArray<OId> &oIdList,
 	}
 }
 
+void TimeSeries::setDummyMvccImage(TransactionContext &txn) {
+	try {
+		util::StackAllocator::Scope scope(txn.getDefaultAllocator());
+
+		util::XArray<SubTimeSeriesInfo> subTimeSeriesList(
+			txn.getDefaultAllocator());
+		getSubTimeSeriesList(txn, subTimeSeriesList, true);
+		if (!subTimeSeriesList.empty()) {
+			const size_t lastPos = subTimeSeriesList.size() - 1;
+			const SubTimeSeriesInfo &subTimeSeriesInfo =
+				subTimeSeriesList[lastPos];
+			SubTimeSeries *subContainer = ALLOC_NEW(txn.getDefaultAllocator())
+				SubTimeSeries(txn, subTimeSeriesInfo, this);
+			subContainer->setDummyMvccImage(txn);
+		}
+	}
+	catch (std::exception &e) {
+		GS_RETHROW_USER_OR_SYSTEM(e, "");
+	}
+}
+
 void TimeSeries::getContainerOptionInfo(
 	TransactionContext &txn, util::XArray<uint8_t> &containerSchema) {
 	bool isExistTimeSeriesOption = true;
@@ -2559,6 +2571,9 @@ void TimeSeries::searchRowArrayList(TransactionContext &txn,
 				RowArray mvccRowArray(txn, this);
 				for (mvccItr = mvccKeyValueList.begin();
 					 mvccItr != mvccKeyValueList.end(); mvccItr++) {
+					if (mvccItr->second.type_ == MVCC_SELECT) {
+						continue;
+					}
 					if (mvccItr->first != txn.getId() &&
 						mvccItr->second.type_ != MVCC_CREATE) {
 						mvccRowArray.load(txn, mvccItr->second.snapshotRowOId_,

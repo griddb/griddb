@@ -29,7 +29,6 @@
 
 class ObjectManager;
 
-
 static const uint32_t OBJECT_MAX_1BYTE_LENGTH_VALUE =
 	127;  
 static const uint32_t NEXT_OBJECT_LINK_INFO_SIZE = 8;  
@@ -154,6 +153,7 @@ const ColumnType COLUMN_TYPE_TIMESTAMP_ARRAY = 20;
 const ColumnType COLUMN_TYPE_ROWID = COLUMN_TYPE_LONG;
 const ColumnType COLUMN_TYPE_WITH_BEGIN = 0xff;
 const ColumnType COLUMN_TYPE_NULL = 0xff;  
+const ColumnType COLUMN_TYPE_ANY = 0xff;
 
 const uint16_t FixedSizeOfColumnType[] = {
 	0,					
@@ -206,7 +206,7 @@ static const char *const GS_SYSTEM_USER = "system";
 static const char *const GS_PREFIX = "gs#";			 
 
 static const DatabaseId UNDEF_DBID = UNDEF_ROWID;
-static const DatabaseId GS_SYSYTEM_DB_ID = -2;
+static const DatabaseId GS_SYSTEM_DB_ID = -2;
 static const DatabaseId GS_PUBLIC_DB_ID = -1;
 
 /*!
@@ -317,6 +317,7 @@ typedef int8_t MVCC_IMAGE_TYPE;
 const MVCC_IMAGE_TYPE MVCC_CREATE = 0;
 const MVCC_IMAGE_TYPE MVCC_UPDATE = 1;
 const MVCC_IMAGE_TYPE MVCC_DELETE = 2;
+const MVCC_IMAGE_TYPE MVCC_SELECT = 3;
 const MVCC_IMAGE_TYPE MVCC_UNDEF = INT8_MAX;
 
 /*!
@@ -344,7 +345,7 @@ struct MvccRowImage {
 		  padding3_(0) {}
 	MvccRowImage(MVCC_IMAGE_TYPE type, RowId rowId)
 		: type_(type), padding1_(0), padding2_(0), padding3_(0) {
-		if (type_ == MVCC_CREATE) {
+		if (type_ == MVCC_CREATE || type_ == MVCC_SELECT) {
 			firstCreateRowId_ = rowId;
 			lastCreateRowId_ = rowId;
 		}
@@ -405,6 +406,9 @@ struct MvccRowImage {
 			break;
 		case MVCC_DELETE:
 			str = "DELETE";
+			break;
+		case MVCC_SELECT:
+			str = "SELECT";
 			break;
 		default:
 			str = "UNKNOWN";
@@ -525,9 +529,6 @@ static inline void validateContainerName(const char *name, const uint32_t limit,
 		}
 	}
 }
-
-
-
 
 
 

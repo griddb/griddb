@@ -21,11 +21,12 @@
 
 #include "cluster_manager.h"
 #include "util/trace.h"
-#include "data_store_common.h"
 #include "gs_error.h"
 #include "picojson.h"
 #include "sha2.h"
 #include <iostream>
+
+#include "cluster_service.h"
 
 UTIL_TRACER_DECLARE(CLUSTER_SERVICE);
 UTIL_TRACER_DECLARE(CLUSTER_OPERATION);
@@ -39,10 +40,17 @@ ClusterManager::ClusterManager(const ConfigTable &configTable,
 	  versionId_(versionId),
 	  isSignalBeforeRecovery_(false),
 	  currentChunkSyncPId_(UNDEF_PARTITIONID),
-	  currentChunkSyncCPId_(UNDEF_CHECKPOINT_ID) {
+	  currentChunkSyncCPId_(UNDEF_CHECKPOINT_ID),
+	  ee_(NULL),
+	  clsSvc_(NULL)
+{
 	statUpdator_.manager_ = this;
 	try {
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+#else
 		setDigest(configTable);
+#endif
+
 		clusterInfo_.startupTime_ =
 			util::DateTime::now(TRIM_MILLISECONDS).getUnixTime();
 
@@ -60,12 +68,14 @@ ClusterManager::ClusterManager(const ConfigTable &configTable,
 				"(source=gs_cluster.json:gs_node.json, "
 				"name=cluster.clusterName)");
 		}
-
-		int64_t baseTime = util::DateTime::now(TRIM_MILLISECONDS).getUnixTime();
-		pt_->setHeartbeatTimeout(0, nextHeartbeatTime(baseTime));
 		delayCheckpointLimitTime_.assign(
 			configTable.getUInt32(CONFIG_TABLE_DS_CONCURRENCY), 0);
 		concurrency_ = configTable.get<int32_t>(CONFIG_TABLE_DS_CONCURRENCY);
+
+#ifdef CLUSTER_MOD_WEB_API
+		ConfigTable *tmpTable = (ConfigTable *)&configTable;
+		config_.setUpConfigHandler(this, *tmpTable);
+#endif
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_USER_OR_SYSTEM(e, "");
@@ -449,7 +459,7 @@ void ClusterManager::set(HeartbeatInfo &heartbeatInfo) {
 		bool isParentMaster = heartbeatInfo.isParentMaster();
 		NodeId senderNodeId = heartbeatInfo.getSenderNodeId();
 
-		int64_t baseTime = util::DateTime::now(TRIM_MILLISECONDS).getUnixTime();
+		int64_t baseTime = getMonotonicTime();
 		pt_->setHeartbeatTimeout(0, nextHeartbeatTime(baseTime));
 
 		if (pt_->isMaster()) {
@@ -564,7 +574,7 @@ void ClusterManager::set(HeartbeatResInfo &heartbeatResInfo) {
 
 		PartitionStatus status;
 		PartitionRoleStatus roleStatus;
-		int64_t baseTime = util::DateTime::now(TRIM_MILLISECONDS).getUnixTime();
+		int64_t baseTime = getMonotonicTime();
 		pt_->setHeartbeatTimeout(senderNodeId, nextHeartbeatTime(baseTime));
 		pt_->setAckHeartbeat(senderNodeId, true);
 
@@ -627,8 +637,7 @@ void ClusterManager::HeartbeatResInfo::add(
 */
 void ClusterManager::get(HeartbeatCheckInfo &heartbeatCheckInfo) {
 	try {
-		int64_t currentTime =
-			util::DateTime::now(TRIM_MILLISECONDS).getUnixTime();
+		int64_t currentTime = getMonotonicTime();
 		ClusterStatusTransition nextTransition = KEEP;
 		bool isAddNewNode = false;
 
@@ -743,10 +752,9 @@ void ClusterManager::set(UpdatePartitionInfo &updatePartitionInfo) {
 			isDownNode = true;
 		}
 		if (addNodeSet.size() > 0) {
-			TRACE_CLUSTER_NORMAL_OPERATION(
-				INFO, "[INFO] Detect new nodes, count:"
-						  << addNodeSet.size()
-						  << ", nodes:" << pt_->dumpNodeSet(addNodeSet));
+			TRACE_CLUSTER_NORMAL(INFO, "[INFO] Detect new nodes, count:"
+										   << addNodeSet.size() << ", nodes:"
+										   << pt_->dumpNodeSet(addNodeSet));
 		}
 
 		for (std::set<NodeId>::iterator it = downNodeSet.begin();
@@ -810,9 +818,7 @@ void ClusterManager::set(UpdatePartitionInfo &updatePartitionInfo) {
 				updatePartitionInfo.setMaxLsnList(pt_->getMaxLsnList());
 			}
 
-			int64_t baseTime =
-				util::DateTime::now(TRIM_MILLISECONDS).getUnixTime();
-
+			int64_t baseTime = getMonotonicTime();
 			int32_t slackTime = clusterConfig_.getHeartbeatInterval() * 2;
 			int64_t shortTermSyncLimitTime =
 				baseTime + clusterConfig_.getShortTermTimeoutInterval() +
@@ -915,19 +921,12 @@ void ClusterManager::get(NotifyClusterInfo &notifyClusterInfo) {
 		int32_t notifyPendingCount = updateNotifyPendingCount();
 		if (notifyPendingCount > 0) {
 			GS_THROW_USER_ERROR(GS_ERROR_CLM_CLUSTER_IS_PENDING,
-				"Cluster notifyication message will send after "
+				"Cluster notification message will send after "
 					<< notifyPendingCount *
 						   clusterConfig_.getNotifyClusterInterval()
 					<< " seconds");
 		}
 
-		int32_t limitNodeNum = pt_->getConfig().getLimitClusterNodeNum();
-		if (pt_->getNodeNum() >= limitNodeNum) {
-			GS_THROW_USER_ERROR(GS_ERROR_CLM_CLUSTER_ALREADY_MAX_NODE,
-				"Cluster notification error : cluster construction node num:"
-					<< pt_->getNodeNum()
-					<< ", over cluster node max:" << limitNodeNum);
-		}
 
 		notifyClusterInfo.set(clusterInfo_, pt_);
 	}
@@ -1010,8 +1009,7 @@ bool ClusterManager::set(NotifyClusterInfo &notifyClusterInfo) {
 				"[NOTE] Change to cluster status, current:SUB_MASTER, "
 				"Next:FOLLOWER");
 
-			int64_t baseTime =
-				util::DateTime::now(TRIM_MILLISECONDS).getUnixTime();
+			int64_t baseTime = getMonotonicTime();
 			pt_->setHeartbeatTimeout(0, nextHeartbeatTime(baseTime));
 			pt_->setHeartbeatTimeout(senderNodeId, nextHeartbeatTime(baseTime));
 			setHeartbeatRes();
@@ -1137,7 +1135,7 @@ void ClusterManager::set(NotifyClusterResInfo &notifyClusterResInfo) {
 			}
 		}
 
-		int64_t baseTime = util::DateTime::now(TRIM_MILLISECONDS).getUnixTime();
+		int64_t baseTime = getMonotonicTime();
 		pt_->setHeartbeatTimeout(0, nextHeartbeatTime(baseTime));
 		pt_->setHeartbeatTimeout(senderNodeId, nextHeartbeatTime(baseTime));
 
@@ -1199,8 +1197,8 @@ void ClusterManager::set(JoinClusterInfo &joinClusterInfo) {
 			settedClusterName != clusterName) {
 			joinClusterInfo.setErrorType(WEBAPI_CS_CLUSTERNAME_UNMATCH);
 			GS_THROW_USER_ERROR(GS_ERROR_CLM_JOIN_CLUSTER_UNMATCH_CLUSTER_NAME,
-				"Cluster name is not match to setted cluster name : current:"
-					<< clusterName << ", setted:" << settedClusterName);
+				"Cluster name is not match to set cluster name : current:"
+					<< clusterName << ", set:" << settedClusterName);
 		}
 
 		if (!joinClusterInfo.isPreCheck()) {
@@ -1290,8 +1288,6 @@ void ClusterManager::getSafetyLeaveNodeList(util::StackAllocator &alloc,
 
 		util::XArray<NodeId> activeNodeList(alloc);
 		pt_->getLiveNodeIdList(activeNodeList);
-		std::set<NodeId> downNodeSet;
-		pt_->getDownNodes(downNodeSet, false);
 
 		int32_t activeNum = static_cast<int32_t>(activeNodeList.size());
 		UTIL_TRACE_INFO(
@@ -1364,8 +1360,8 @@ void ClusterManager::set(GossipInfo &gossipInfo) {
 		}
 
 		if (pId >= pt_->getPartitionNum() || nodeId >= pt_->getNodeNum()) {
-			GS_THROW_USER_ERROR(GS_ERROR_CLM_INVALID_PARTIION_NUM,
-				"Receive gossip is invalied, pId:"
+			GS_THROW_USER_ERROR(GS_ERROR_CLM_INVALID_PARTITION_NUM,
+				"Receive gossip is invalid, pId:"
 					<< pId << ", check pId:" << pt_->getPartitionNum()
 					<< ", nodeId:" << nodeId
 					<< ", check nodeId:" << pt_->getNodeNum());
@@ -1484,7 +1480,7 @@ void ClusterManager::set(ChangePartitionTableInfo &changePartitionTableInfo) {
 			nextTableType = PartitionTable::PT_CURRENT_OB;
 			isMasterChange = true;
 			TRACE_CLUSTER_NORMAL(
-				WARNING, "Update master partiton, role:" << candRole);
+				WARNING, "Update master partition, role:" << candRole);
 		}
 		else {
 			GS_THROW_USER_ERROR(
@@ -1577,7 +1573,16 @@ void ClusterManager::setSecondMaster(NodeAddress &secondMasterNode) {
 	@brief Validates cluster name
 */
 bool ClusterManager::validateClusterName(std::string &clusterName) {
-	return validateCharacters(clusterName.c_str());
+	size_t len = clusterName.length();
+	if (!isalpha(clusterName[0]) && clusterName[0] != '_') {
+		return false;
+	}
+	for (size_t i = 1; i < len; i++) {
+		if (!isalnum(clusterName[i]) && clusterName[i] != '_') {
+			return false;
+		}
+	}
+	return true;
 }
 
 const char8_t *ClusterManager::NodeStatusInfo::dumpNodeStatus() const {
@@ -1633,7 +1638,14 @@ void ClusterManager::detectMutliMaster() {
 /*!
 	@brief Sets the digest of cluster information
 */
-void ClusterManager::setDigest(const ConfigTable &configTable) {
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+void ClusterManager::setDigest(const ConfigTable &configTable,
+	util::XArray<uint8_t> &digestBinary, NodeAddressSet &addressInfoList,
+	ClusterNotificationMode mode)
+#else
+void ClusterManager::setDigest(const ConfigTable &configTable)
+#endif
+{
 	try {
 		ClusterDigest digest;
 		memset(static_cast<void *>(&digest), 0, sizeof(ClusterDigest));
@@ -1645,24 +1657,30 @@ void ClusterManager::setDigest(const ConfigTable &configTable) {
 
 		util::SocketAddress socketAddress;
 
-		socketAddress.assign(configTable.get<const char8_t *>(
-								 CONFIG_TABLE_CS_NOTIFICATION_ADDRESS),
-			configTable.getUInt16(CONFIG_TABLE_CS_NOTIFICATION_PORT));
-		socketAddress.getIP(
-			(util::SocketAddress::Inet *)&digest.notificationClusterAddress_,
-			&digest.notificationClusterPort_);
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+		if (mode == NOTIFICATION_MULTICAST)
+#endif
+		{
+			socketAddress.assign(configTable.get<const char8_t *>(
+									 CONFIG_TABLE_CS_NOTIFICATION_ADDRESS),
+				configTable.getUInt16(CONFIG_TABLE_CS_NOTIFICATION_PORT));
+			socketAddress.getIP(reinterpret_cast<util::SocketAddress::Inet *>(
+									&digest.notificationClusterAddress_),
+				&digest.notificationClusterPort_);
+
+			socketAddress.assign(configTable.get<const char8_t *>(
+									 CONFIG_TABLE_TXN_NOTIFICATION_ADDRESS),
+				configTable.getUInt16(CONFIG_TABLE_TXN_NOTIFICATION_PORT));
+			socketAddress.getIP(reinterpret_cast<util::SocketAddress::Inet *>(
+									&digest.notificationClientAddress_),
+				&digest.notificationClientPort_);
+
+		}
 
 		digest.notificationClusterInterval_ =
 			configTable.get<int32_t>(CONFIG_TABLE_CS_NOTIFICATION_INTERVAL);
 		digest.heartbeatInterval_ =
 			configTable.get<int32_t>(CONFIG_TABLE_CS_HEARTBEAT_INTERVAL);
-
-		socketAddress.assign(configTable.get<const char8_t *>(
-								 CONFIG_TABLE_TXN_NOTIFICATION_ADDRESS),
-			configTable.getUInt16(CONFIG_TABLE_TXN_NOTIFICATION_PORT));
-		socketAddress.getIP(
-			(util::SocketAddress::Inet *)&digest.notificationClientAddress_,
-			&digest.notificationClientPort_);
 
 		digest.replicationMode_ =
 			configTable.get<int32_t>(CONFIG_TABLE_TXN_REPLICATION_MODE);
@@ -1670,9 +1688,41 @@ void ClusterManager::setDigest(const ConfigTable &configTable) {
 			configTable.get<int32_t>(CONFIG_TABLE_DS_STORE_BLOCK_SIZE);
 
 		char digestData[SHA256_DIGEST_STRING_LENGTH + 1];
+
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+
+		digest.notificationMode_ = mode;
+
+		if (addressInfoList.size() > 0) {
+			assert(mode == NOTIFICATION_FIXEDLIST);
+
+			digestBinary.push_back(reinterpret_cast<const uint8_t *>(&digest),
+				sizeof(ClusterDigest));
+
+			AddressInfo info;
+			int32_t p = 0;
+			for (NodeAddressSetItr it = addressInfoList.begin();
+				 it != addressInfoList.end(); it++, p++) {
+				memset((char *)&info, 0, sizeof(AddressInfo));
+				info = (*it);
+				digestBinary.push_back(
+					(const uint8_t *)&(info), sizeof(AddressInfo));
+			}
+
+			SHA256_Data(reinterpret_cast<const uint8_t *>(digestBinary.data()),
+				digestBinary.size(), digestData);
+			clusterInfo_.digest_ = digestData;
+		}
+		else {
+			SHA256_Data(reinterpret_cast<const uint8_t *>(&digest),
+				sizeof(ClusterDigest), digestData);
+			clusterInfo_.digest_ = digestData;
+		}
+#else
 		SHA256_Data(reinterpret_cast<const uint8_t *>(&digest),
 			sizeof(ClusterDigest), digestData);
 		clusterInfo_.digest_ = digestData;
+#endif  
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_USER_OR_SYSTEM(e, "");
@@ -1686,8 +1736,8 @@ void ClusterManager::setCheckpointDelayLimitTime(
 	PartitionId pId, PartitionGroupId pgId) {
 	if (clusterConfig_.getCheckpointDelayLimitInterval() == 0) return;
 
-	int64_t limitTime = util::DateTime::now(TRIM_MILLISECONDS).getUnixTime() +
-						clusterConfig_.getCheckpointDelayLimitInterval();
+	int64_t limitTime =
+		getMonotonicTime() + clusterConfig_.getCheckpointDelayLimitInterval();
 
 	for (PartitionGroupId pos = 0;
 		 pos < static_cast<uint32_t>(delayCheckpointLimitTime_.size()); pos++) {
@@ -1810,8 +1860,18 @@ void ClusterManager::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.setMin(1)
 		.setMax(PartitionTable::MAX_NODE_NUM - 1)
 		.setDefault(2);
+
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_CS_NOTIFICATION_ADDRESS, STRING)
+		.inherit(CONFIG_TABLE_ROOT_NOTIFICATION_ADDRESS)
+		.addExclusive(CONFIG_TABLE_CS_NOTIFICATION_ADDRESS)
+		.addExclusive(CONFIG_TABLE_CS_NOTIFICATION_PROVIDER)
+		.addExclusive(CONFIG_TABLE_CS_NOTIFICATION_MEMBER);
+#else
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_CS_NOTIFICATION_ADDRESS, STRING)
 		.inherit(CONFIG_TABLE_ROOT_NOTIFICATION_ADDRESS);
+#endif
+
 	CONFIG_TABLE_ADD_PORT_PARAM(
 		config, CONFIG_TABLE_CS_NOTIFICATION_PORT, 20000);
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_CS_NOTIFICATION_INTERVAL, INT32)
@@ -1850,6 +1910,40 @@ void ClusterManager::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.setMin(3)
 		.setMax(65536)
 		.setDefault(5000);
+
+#ifdef CLUSTER_MOD_WEB_API
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_CS_CHECKPOINT_DELAY_INTERVAL, INT32)
+		.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
+		.setMin(0)
+		.setDefault(1200);
+#endif
+
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+
+	picojson::value defaultValue;
+
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_CS_NOTIFICATION_MEMBER, JSON)
+		.setDefault(defaultValue);
+
+	config.resolveGroup(CONFIG_TABLE_CS, CONFIG_TABLE_CS_NOTIFICATION_PROVIDER,
+		"notificationProvider");
+
+	config
+		.addParam(CONFIG_TABLE_CS_NOTIFICATION_PROVIDER,
+			CONFIG_TABLE_CS_NOTIFICATION_PROVIDER_URL, "url")
+		.setType(ParamValue::PARAM_TYPE_STRING)
+		.setDefault("");
+	config
+		.addParam(CONFIG_TABLE_CS_NOTIFICATION_PROVIDER,
+			CONFIG_TABLE_CS_NOTIFICATION_PROVIDER_UPDATE_INTERVAL,
+			"updateInterval")
+		.setType(ParamValue::PARAM_TYPE_INT32)
+		.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
+		.setMin(1)
+		.setDefault(0);
+
+#endif  
 }
 
 ClusterManager::StatSetUpHandler ClusterManager::statSetUpHandler_;
@@ -1879,6 +1973,11 @@ void ClusterManager::StatSetUpHandler::operator()(StatTable &stat) {
 	STAT_ADD(STAT_TABLE_CS_NODE_LIST);
 	STAT_ADD(STAT_TABLE_CS_MASTER);
 
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+	STAT_ADD(STAT_TABLE_CS_NOTIFICATION_MODE);
+	STAT_ADD(STAT_TABLE_CS_NOTIFICATION_MEMBER);
+#endif
+
 	stat.resolveGroup(parentId, STAT_TABLE_CS_ERROR, "errorInfo");
 
 	parentId = STAT_TABLE_CS_ERROR;
@@ -1899,6 +1998,24 @@ bool ClusterManager::StatUpdator::operator()(StatTable &stat) {
 	ClusterManager &mgr = *manager_;
 	PartitionTable &pt = *mgr.pt_;
 	const NodeId masterNodeId = pt.getMaster();
+
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+	stat.set(STAT_TABLE_CS_NOTIFICATION_MODE, mgr.getNotificationMode());
+
+	ClusterService *clsSvc = mgr.getService();
+	ClusterService::NotificationManager &notifyMgr =
+		clsSvc->getNotificationManager();
+
+	if (notifyMgr.getMode() != NOTIFICATION_MULTICAST &&
+		stat.getDisplayOption(
+			STAT_TABLE_DISPLAY_OPTIONAL_NOTIFICATION_MEMBER)) {
+		picojson::value value;
+		notifyMgr.getNotificationMember(value);
+		if (!value.is<picojson::null>()) {
+			stat.set(STAT_TABLE_CS_NOTIFICATION_MEMBER, value);
+		}
+	}
+#endif
 
 	stat.set(STAT_TABLE_CS_NODE_STATUS, mgr.statusInfo_.getSystemStatus());
 	stat.set(STAT_TABLE_CS_DESIGNATED_COUNT, mgr.getReserveNum());
@@ -2037,3 +2154,38 @@ bool ClusterManager::StatUpdator::operator()(StatTable &stat) {
 
 	return true;
 }
+
+void ClusterManager::initialize(ClusterService *clsSvc) {
+	clsSvc_ = clsSvc;
+	ee_ = clsSvc->getEE();
+	pt_->initialize(this);
+	int64_t baseTime = ee_->getMonotonicTime();
+	pt_->setHeartbeatTimeout(0, nextHeartbeatTime(baseTime));
+}
+
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+
+ClusterService *ClusterManager::getService() {
+	return clsSvc_;
+}
+
+#endif  
+
+#ifdef CLUSTER_MOD_WEB_API
+void ClusterManager::Config::setUpConfigHandler(
+	ClusterManager *clsMgr, ConfigTable &configTable) {
+	clsMgr_ = clsMgr;
+	configTable.setParamHandler(
+		CONFIG_TABLE_CS_CHECKPOINT_DELAY_INTERVAL, *this);
+}
+
+void ClusterManager::Config::operator()(
+	ConfigTable::ParamId id, const ParamValue &value) {
+	switch (id) {
+	case CONFIG_TABLE_CS_CHECKPOINT_DELAY_INTERVAL:
+		clsMgr_->getConfig().setCheckpointDelayLimitInterval(
+			changeTimeSecToMill(value.get<int32_t>()));
+		break;
+	}
+}
+#endif

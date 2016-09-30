@@ -222,10 +222,10 @@ void QueryForTimeSeries::doQueryWithoutCondition(
 		pExpireTs = NULL;
 	}
 
-	BtreeMap::SearchContext sc(
-		0, pExpireTs, 0, true, NULL, 0, true, 0, NULL, nLimit_);
 
 	if (nPassSelectRequested_ != QP_PASSMODE_NO_PASS && pOrderByExpr_ == NULL) {
+		BtreeMap::SearchContext sc(
+			0, pExpireTs, 0, true, NULL, 0, true, 0, NULL, nLimit_);
 		if (doExplain()) {
 			addExplain(1, "API_PASSTHROUGH", "BOOLEAN", "TRUE", "NO ORDERBY");
 		}
@@ -233,6 +233,8 @@ void QueryForTimeSeries::doQueryWithoutCondition(
 	}
 	else {
 		nPassSelectRequested_ = QP_PASSMODE_NO_PASS;
+		ColumnId searchColumnId = ColumnInfo::ROW_KEY_COLUMN_ID;
+		ColumnType searchType = COLUMN_TYPE_WITH_BEGIN;
 
 		if (pOrderByExpr_ && pOrderByExpr_->size() == 1) {
 			SortExpr &orderExpr = (*pOrderByExpr_)[0];
@@ -250,10 +252,27 @@ void QueryForTimeSeries::doQueryWithoutCondition(
 				outputOrder = (orderExpr.order == ASC)
 								  ? ORDER_ASCENDING
 								  : ORDER_DESCENDING;  
-				sc.columnId_ = orderColumnId;
-				sc.keyType_ =
+				setLimitByIndexSort();
+				searchColumnId = orderColumnId;
+				searchType =
 					timeSeries.getColumnInfo(orderColumnId).getColumnType();
 			}
+		}
+
+		BtreeMap::SearchContext sc(searchColumnId, pExpireTs, 0, true, NULL, 0,
+			true, 0, NULL, nLimit_);
+		sc.keyType_ = searchType;
+		if (pExpireTs != NULL &&
+			searchColumnId != ColumnInfo::ROW_KEY_COLUMN_ID) {
+			sc.startKey_ = NULL;
+			TermCondition *condition =
+				ALLOC_NEW(txn.getDefaultAllocator()) TermCondition;
+			condition->columnId_ = ColumnInfo::ROW_KEY_COLUMN_ID;
+			condition->operator_ = &geTimestampTimestamp;
+			condition->value_ = reinterpret_cast<const uint8_t *>(pExpireTs);
+			condition->valueSize_ = sizeof(Timestamp);
+			sc.conditionList_ = condition;
+			sc.conditionNum_ = 1;
 		}
 		if (doExecute()) {
 			if (outputOrder != ORDER_UNDEFINED) {
@@ -432,6 +451,10 @@ void QueryForTimeSeries::doQueryWithCondition(
 											  ? ORDER_ASCENDING
 											  : ORDER_DESCENDING;  
 							pOrderByExpr_->clear();
+							setLimitByIndexSort();
+							BoolExpr::toSearchContext(txn, andList, expireTs_,
+								indexColumnInfo, *this, sc, restConditions,
+								nLimit_);
 						}
 					}
 					if (doExecute()) {
@@ -947,8 +970,7 @@ QueryForTimeSeries *QueryForTimeSeries::dup(
 	query->specialIdMap_ = specialIdMap_;
 
 	query->expireTs_ = expireTs_;
-	query->scPass_ =
-		scPass_;  
+	query->scPass_ = scPass_;  
 	{
 		if (scPass_.startKeySize_ > 0) {
 			query->scPass_.startKey_ =

@@ -69,10 +69,6 @@
     (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
     THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
-
-
-
-
 #include "util/file.h"
 #include "util/code.h"
 #include "util/system.h"
@@ -96,9 +92,6 @@
 #endif
 
 namespace util {
-
-
-
 
 
 #ifdef _WIN32
@@ -230,27 +223,6 @@ bool FileFlag::isReadAndWrite(void) const {
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 void FileFlag::swap(FileFlag &obj) {
 	std::swap(flags_, obj.flags_);
 }
@@ -284,9 +256,6 @@ bool FileFlag::operator!=(int flags) const {
 bool FileFlag::operator!=(const FileFlag &flags) const {
 	return flags_ != flags.flags_;
 }
-
-
-
 
 
 FilePermission::FilePermission() :
@@ -416,9 +385,6 @@ bool FilePermission::operator!=(const FilePermission &perm) const {
 }
 
 
-
-
-
 #ifdef _WIN32
 const File::FD File::INITIAL_FD = NULL;
 #else
@@ -431,9 +397,6 @@ File::File() : fd_(INITIAL_FD) {
 }
 
 File::~File() try {
-	
-	
-	
 	close();
 }
 catch (...) {
@@ -542,13 +505,11 @@ ssize_t File::write(const void *buf, size_t blen, off_t offset) {
 }
 
 void File::read(IOOperation &operation) {
-	
 	(void) operation;
 	UTIL_THROW_NOIMPL_UTIL();
 }
 
 void File::write(IOOperation &operation) {
-	
 	(void) operation;
 	UTIL_THROW_NOIMPL_UTIL();
 }
@@ -586,15 +547,12 @@ void File::sync() {
 
 void File::preAllocate(int mode, off_t offset, off_t len) {
 #ifdef _WIN32
-	
 #else
-	
 	if (fallocate(fd_, mode, offset, len) != 0) {
 		UTIL_THROW_PLATFORM_ERROR(NULL);
 	}
 #endif
 }
-
 
 void File::getStatus(FileStatus *status) {
 #ifdef _WIN32
@@ -729,9 +687,6 @@ void File::duplicate(FD srcfd, FD newfd) {
 }
 
 
-
-
-
 NamedFile::NamedFile() {
 }
 
@@ -773,8 +728,6 @@ void NamedFile::open(const char8_t *name, FileFlag flags, FilePermission perm) {
 		dwCreationDisposition = OPEN_EXISTING;
 	}
 
-	
-	
 
 	if (flags.isSync()) {
 		dwFlagsAndAttributes |= FILE_FLAG_WRITE_THROUGH;
@@ -799,10 +752,6 @@ void NamedFile::open(const char8_t *name, FileFlag flags, FilePermission perm) {
 				FILE_SHARE_DELETE | FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
 				dwCreationDisposition, dwFlagsAndAttributes, NULL);
 
-		
-		
-		
-		
 		if (fd == INVALID_HANDLE_VALUE) {
 			if (GetLastError() == ERROR_SHARING_VIOLATION &&
 					++retries <= MAX_RETRIES) {
@@ -930,9 +879,6 @@ void NamedFile::sync() {
 }
 #endif	
 
-
-
-
 #if UTIL_FAILURE_SIMULATION_ENABLED
 volatile bool NamedFileFailureSimulator::enabled_ = false;
 volatile NamedFileFailureSimulator::FilterHandler
@@ -988,15 +934,11 @@ void NamedFileFailureSimulator::checkOperation(
 #endif	
 
 
-
-
-
 NamedPipe::NamedPipe() {
 }
 
 NamedPipe::~NamedPipe() {
 }
-
 
 
 void NamedPipe::open(
@@ -1090,9 +1032,6 @@ void NamedPipe::open(
 #if UTIL_MINOR_MODULE_ENABLED
 
 
-
-
-
 #ifndef _WIN32
 UTIL_FLAG_TYPE UTIL_MEM_OMODE_EXEC = PROT_EXEC;
 UTIL_FLAG_TYPE UTIL_MEM_OMODE_READ = PROT_READ;
@@ -1169,7 +1108,6 @@ public:
 	Normal(size_t size) {
 		void* ptr(malloc(size));
 		if (NULL == ptr) {
-			
 			UTIL_THROW_UTIL_ERROR_CODED(CODE_NO_MEMORY);
 		}
 
@@ -1267,9 +1205,6 @@ void* Memory::getMemory(void) {
 const void* Memory::getMemory(void) const {
 	return data_->getBlock();
 }
-
-
-
 
 
 MessageQueue::MessageQueue() {
@@ -1479,9 +1414,6 @@ ssize_t MessageQueue::write(const void *buf, size_t blen) {
 }
 
 
-
-
-
 const FilePermission SharedMemory::DEFAULT_PERMISSION = 0777;
 
 SharedMemory::SharedMemory() {
@@ -1526,9 +1458,6 @@ bool SharedMemory::unlink(void) {
 }
 
 #endif 
-
-
-
 
 
 namespace {
@@ -1657,9 +1586,6 @@ bool Directory::isParentOrSelfChecked() {
 }
 
 
-
-
-
 bool FileStatus::isSocket(void) const {
 #if defined(S_ISSOCK)
 	return 0 != S_ISSOCK(mode_);
@@ -1674,7 +1600,6 @@ bool FileStatus::isRegularFile(void) const {
 #elif defined(S_IFREG)
 	return S_IFREG == ((S_IFMT & mode_) & S_IFREG);
 #else
-	
 	return ((attributes_ & FILE_ATTRIBUTE_DIRECTORY) == 0 &&
 			(attributes_ & FILE_ATTRIBUTE_DEVICE));
 #endif
@@ -1838,9 +1763,6 @@ DateTime FileStatus::getCreationTime(void) const {
 }
 
 
-
-
-
 size_t FileSystemStatus::getBlockSize(void) const {
 	return blockSize_;
 }
@@ -1946,9 +1868,6 @@ bool FileSystemStatus::isReadOnly(void) const {
 }
 
 
-
-
-
 namespace {
 
 #ifdef _WIN32
@@ -1992,8 +1911,6 @@ bool FileSystem::exists(const char8_t *path) {
 	std::wstring pathStr;
 	CodeConverter(Code::UTF8, Code::WCHAR_T)(path, pathStr);
 
-	
-	
 	WIN32_FIND_DATAW findData;
 	const HANDLE handle = FindFirstFileW(pathStr.c_str(), &findData);
 	if (handle == INVALID_HANDLE_VALUE) {
@@ -2014,7 +1931,6 @@ bool FileSystem::isDirectory(const char8_t *path) {
 	std::wstring pathStr;
 	CodeConverter(Code::UTF8, Code::WCHAR_T)(path, pathStr);
 
-	
 	WIN32_FIND_DATAW findData;
 	const HANDLE handle = FindFirstFileW(pathStr.c_str(), &findData);
 	if (handle == INVALID_HANDLE_VALUE) {
@@ -2037,7 +1953,6 @@ bool FileSystem::isRegularFile(const char8_t *path) {
 	std::wstring pathStr;
 	CodeConverter(Code::UTF8, Code::WCHAR_T)(path, pathStr);
 
-	
 	WIN32_FIND_DATAW findData;
 	const HANDLE handle = FindFirstFileW(pathStr.c_str(), &findData);
 	if (handle == INVALID_HANDLE_VALUE) {
@@ -2111,7 +2026,6 @@ void FileSystem::createLink(
 void FileSystem::createPath(
 		const char8_t *directoryName, const char8_t *baseName,
 		u8string &path) {
-	
 
 	const bool emptyDir =
 			(directoryName == NULL || strlen(directoryName) == 0);
@@ -2133,8 +2047,6 @@ void FileSystem::createPath(
 }
 
 void FileSystem::getBaseName(const char8_t *path, u8string &baseName) {
-	
-	
 
 	u8string buf;
 	buf.swap(baseName);
@@ -2155,14 +2067,11 @@ void FileSystem::getBaseName(const char8_t *path, u8string &baseName) {
 
 void FileSystem::getDirectoryName(
 		const char8_t *path, u8string &directoryName) {
-	
-	
 
 	u8string buf;
 	buf.swap(directoryName);
 	buf = path;
 
-	
 	const size_t tailNoSepPos = findLastNonSeparatorPos(buf);
 	if (tailNoSepPos != u8string::npos && tailNoSepPos < buf.size()) {
 		buf.erase(tailNoSepPos + 1);
@@ -2175,10 +2084,8 @@ void FileSystem::getDirectoryName(
 		}
 	}
 	else {
-		
 		buf.erase(sepPos + 1);
 
-		
 		const size_t noSepPos = findLastNonSeparatorPos(buf);
 		if (noSepPos == u8string::npos) {
 			buf = UTIL_FILE_SYSTEM_SEPARATOR;
@@ -2390,7 +2297,6 @@ void FileSystem::updateFileTime(const char8_t *path,
 	CodeConverter(Code::UTF8, Code::CHAR)(path, pathStr);
 	timeval times[2];
 	if (accessTime == NULL || modifiedTime == NULL) {
-		
 		struct stat stBuf;
 		if (::stat(pathStr.c_str(), &stBuf) != 0) {
 			UTIL_THROW_PLATFORM_ERROR(NULL);
@@ -2472,7 +2378,6 @@ void PIdFile::open(const char8_t *name) {
 			util::FileFlag::TYPE_READ_WRITE | util::FileFlag::TYPE_CREATE);
 
 	if (!base_.lock()) {
-		
 		UTIL_THROW_PLATFORM_ERROR(NULL);
 	}
 

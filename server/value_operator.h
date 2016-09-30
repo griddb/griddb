@@ -101,16 +101,6 @@ static inline int32_t compareByteDouble(TransactionContext&, uint8_t const* p,
 					 ? 0
 					 : 1;
 }
-static inline int32_t compareByteTimestamp(TransactionContext&,
-	uint8_t const* p, uint32_t, uint8_t const* q, uint32_t) {
-	return (*(reinterpret_cast<const int8_t*>(p))) <
-				   (*(reinterpret_cast<const Timestamp*>(q)))
-			   ? -1
-			   : (*(reinterpret_cast<const int8_t*>(p))) ==
-						 (*(reinterpret_cast<const Timestamp*>(q)))
-					 ? 0
-					 : 1;
-}
 
 static inline int32_t compareShortByte(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
@@ -171,16 +161,6 @@ static inline int32_t compareShortDouble(TransactionContext&, uint8_t const* p,
 			   ? -1
 			   : (*(reinterpret_cast<const int16_t*>(p))) ==
 						 (*(reinterpret_cast<const double*>(q)))
-					 ? 0
-					 : 1;
-}
-static inline int32_t compareShortTimestamp(TransactionContext&,
-	uint8_t const* p, uint32_t, uint8_t const* q, uint32_t) {
-	return (*(reinterpret_cast<const int16_t*>(p))) <
-				   (*(reinterpret_cast<const Timestamp*>(q)))
-			   ? -1
-			   : (*(reinterpret_cast<const int16_t*>(p))) ==
-						 (*(reinterpret_cast<const Timestamp*>(q)))
 					 ? 0
 					 : 1;
 }
@@ -247,16 +227,6 @@ static inline int32_t compareIntDouble(TransactionContext&, uint8_t const* p,
 					 ? 0
 					 : 1;
 }
-static inline int32_t compareIntTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (*(reinterpret_cast<const int32_t*>(p))) <
-				   (*(reinterpret_cast<const Timestamp*>(q)))
-			   ? -1
-			   : (*(reinterpret_cast<const int32_t*>(p))) ==
-						 (*(reinterpret_cast<const Timestamp*>(q)))
-					 ? 0
-					 : 1;
-}
 
 static inline int32_t compareLongByte(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
@@ -317,16 +287,6 @@ static inline int32_t compareLongDouble(TransactionContext&, uint8_t const* p,
 			   ? -1
 			   : (*(reinterpret_cast<const int64_t*>(p))) ==
 						 (*(reinterpret_cast<const double*>(q)))
-					 ? 0
-					 : 1;
-}
-static inline int32_t compareLongTimestamp(TransactionContext&,
-	uint8_t const* p, uint32_t, uint8_t const* q, uint32_t) {
-	return (*(reinterpret_cast<const int64_t*>(p))) <
-				   (*(reinterpret_cast<const Timestamp*>(q)))
-			   ? -1
-			   : (*(reinterpret_cast<const int64_t*>(p))) ==
-						 (*(reinterpret_cast<const Timestamp*>(q)))
 					 ? 0
 					 : 1;
 }
@@ -405,17 +365,6 @@ static inline int32_t compareFloatDouble(TransactionContext&, uint8_t const* p,
 	}
 	return ((x < y) ? -1 : ((x == y) ? 0 : 1));
 }
-static inline int32_t compareFloatTimestamp(TransactionContext&,
-	uint8_t const* p, uint32_t, uint8_t const* q, uint32_t) {
-	if (isnan(*(reinterpret_cast<const float*>(p)))) return 1;
-	return (*(reinterpret_cast<const float*>(p))) <
-				   (*(reinterpret_cast<const Timestamp*>(q)))
-			   ? -1
-			   : (*(reinterpret_cast<const float*>(p))) ==
-						 (*(reinterpret_cast<const Timestamp*>(q)))
-					 ? 0
-					 : 1;
-}
 
 static inline int32_t compareDoubleByte(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
@@ -491,80 +440,7 @@ static inline int32_t compareDoubleDouble(TransactionContext&, uint8_t const* p,
 	}
 	return ((x < y) ? -1 : ((x == y) ? 0 : 1));
 }
-static inline int32_t compareDoubleTimestamp(TransactionContext&,
-	uint8_t const* p, uint32_t, uint8_t const* q, uint32_t) {
-	if (isnan(*(reinterpret_cast<const double*>(p)))) return 1;
-	return (*(reinterpret_cast<const double*>(p))) <
-				   (*(reinterpret_cast<const Timestamp*>(q)))
-			   ? -1
-			   : (*(reinterpret_cast<const double*>(p))) ==
-						 (*(reinterpret_cast<const Timestamp*>(q)))
-					 ? 0
-					 : 1;
-}
 
-static inline int32_t compareTimestampByte(TransactionContext&,
-	uint8_t const* p, uint32_t, uint8_t const* q, uint32_t) {
-	return (*(reinterpret_cast<const Timestamp*>(p))) <
-				   (*(reinterpret_cast<const int8_t*>(q)))
-			   ? -1
-			   : (*(reinterpret_cast<const Timestamp*>(p))) ==
-						 (*(reinterpret_cast<const int8_t*>(q)))
-					 ? 0
-					 : 1;
-}
-static inline int32_t compareTimestampShort(TransactionContext&,
-	uint8_t const* p, uint32_t, uint8_t const* q, uint32_t) {
-	return (*(reinterpret_cast<const Timestamp*>(p))) <
-				   (*(reinterpret_cast<const int16_t*>(q)))
-			   ? -1
-			   : (*(reinterpret_cast<const Timestamp*>(p))) ==
-						 (*(reinterpret_cast<const int16_t*>(q)))
-					 ? 0
-					 : 1;
-}
-static inline int32_t compareTimestampInt(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (*(reinterpret_cast<const Timestamp*>(p))) <
-				   (*(reinterpret_cast<const int32_t*>(q)))
-			   ? -1
-			   : (*(reinterpret_cast<const Timestamp*>(p))) ==
-						 (*(reinterpret_cast<const int32_t*>(q)))
-					 ? 0
-					 : 1;
-}
-static inline int32_t compareTimestampLong(TransactionContext&,
-	uint8_t const* p, uint32_t, uint8_t const* q, uint32_t) {
-	return (*(reinterpret_cast<const Timestamp*>(p))) <
-				   (*(reinterpret_cast<const int64_t*>(q)))
-			   ? -1
-			   : (*(reinterpret_cast<const Timestamp*>(p))) ==
-						 (*(reinterpret_cast<const int64_t*>(q)))
-					 ? 0
-					 : 1;
-}
-static inline int32_t compareTimestampFloat(TransactionContext&,
-	uint8_t const* p, uint32_t, uint8_t const* q, uint32_t) {
-	if (isnan(*(reinterpret_cast<const double*>(q)))) return -1;
-	return (*(reinterpret_cast<const Timestamp*>(p))) <
-				   (*(reinterpret_cast<const float*>(q)))
-			   ? -1
-			   : (*(reinterpret_cast<const Timestamp*>(p))) ==
-						 (*(reinterpret_cast<const float*>(q)))
-					 ? 0
-					 : 1;
-}
-static inline int32_t compareTimestampDouble(TransactionContext&,
-	uint8_t const* p, uint32_t, uint8_t const* q, uint32_t) {
-	if (isnan(*(reinterpret_cast<const double*>(q)))) return -1;
-	return (*(reinterpret_cast<const Timestamp*>(p))) <
-				   (*(reinterpret_cast<const double*>(q)))
-			   ? -1
-			   : (*(reinterpret_cast<const Timestamp*>(p))) ==
-						 (*(reinterpret_cast<const double*>(q)))
-					 ? 0
-					 : 1;
-}
 static inline int32_t compareTimestampTimestamp(TransactionContext&,
 	uint8_t const* p, uint32_t, uint8_t const* q, uint32_t) {
 	return (*(reinterpret_cast<const Timestamp*>(p))) <
@@ -600,10 +476,6 @@ static inline bool eqByteDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareByteDouble(txn, p, 0, q, 0) == 0) ? true : false;
 }
-static inline bool eqByteTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareByteTimestamp(txn, p, 0, q, 0) == 0) ? true : false;
-}
 
 static inline bool neByteByte(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
@@ -628,10 +500,6 @@ static inline bool neByteFloat(TransactionContext& txn, uint8_t const* p,
 static inline bool neByteDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareByteDouble(txn, p, 0, q, 0) != 0) ? true : false;
-}
-static inline bool neByteTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareByteTimestamp(txn, p, 0, q, 0) != 0) ? true : false;
 }
 
 static inline bool ltByteByte(TransactionContext& txn, uint8_t const* p,
@@ -658,10 +526,6 @@ static inline bool ltByteDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareByteDouble(txn, p, 0, q, 0) < 0) ? true : false;
 }
-static inline bool ltByteTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareByteTimestamp(txn, p, 0, q, 0) < 0) ? true : false;
-}
 
 static inline bool gtByteByte(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
@@ -686,10 +550,6 @@ static inline bool gtByteFloat(TransactionContext& txn, uint8_t const* p,
 static inline bool gtByteDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareByteDouble(txn, p, 0, q, 0) > 0) ? true : false;
-}
-static inline bool gtByteTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareByteTimestamp(txn, p, 0, q, 0) > 0) ? true : false;
 }
 
 static inline bool leByteByte(TransactionContext& txn, uint8_t const* p,
@@ -716,10 +576,6 @@ static inline bool leByteDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareByteDouble(txn, p, 0, q, 0) <= 0) ? true : false;
 }
-static inline bool leByteTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareByteTimestamp(txn, p, 0, q, 0) <= 0) ? true : false;
-}
 
 static inline bool geByteByte(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
@@ -744,10 +600,6 @@ static inline bool geByteFloat(TransactionContext& txn, uint8_t const* p,
 static inline bool geByteDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareByteDouble(txn, p, 0, q, 0) >= 0) ? true : false;
-}
-static inline bool geByteTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareByteTimestamp(txn, p, 0, q, 0) >= 0) ? true : false;
 }
 
 static inline bool eqShortByte(TransactionContext& txn, uint8_t const* p,
@@ -774,10 +626,6 @@ static inline bool eqShortDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareShortDouble(txn, p, 0, q, 0) == 0) ? true : false;
 }
-static inline bool eqShortTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareShortTimestamp(txn, p, 0, q, 0) == 0) ? true : false;
-}
 
 static inline bool neShortByte(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
@@ -802,10 +650,6 @@ static inline bool neShortFloat(TransactionContext& txn, uint8_t const* p,
 static inline bool neShortDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareShortDouble(txn, p, 0, q, 0) != 0) ? true : false;
-}
-static inline bool neShortTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareShortTimestamp(txn, p, 0, q, 0) != 0) ? true : false;
 }
 
 static inline bool ltShortByte(TransactionContext& txn, uint8_t const* p,
@@ -832,10 +676,6 @@ static inline bool ltShortDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareShortDouble(txn, p, 0, q, 0) < 0) ? true : false;
 }
-static inline bool ltShortTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareShortTimestamp(txn, p, 0, q, 0) < 0) ? true : false;
-}
 
 static inline bool gtShortByte(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
@@ -860,10 +700,6 @@ static inline bool gtShortFloat(TransactionContext& txn, uint8_t const* p,
 static inline bool gtShortDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareShortDouble(txn, p, 0, q, 0) > 0) ? true : false;
-}
-static inline bool gtShortTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareShortTimestamp(txn, p, 0, q, 0) > 0) ? true : false;
 }
 
 static inline bool leShortByte(TransactionContext& txn, uint8_t const* p,
@@ -890,10 +726,6 @@ static inline bool leShortDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareShortDouble(txn, p, 0, q, 0) <= 0) ? true : false;
 }
-static inline bool leShortTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareShortTimestamp(txn, p, 0, q, 0) <= 0) ? true : false;
-}
 
 static inline bool geShortByte(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
@@ -918,10 +750,6 @@ static inline bool geShortFloat(TransactionContext& txn, uint8_t const* p,
 static inline bool geShortDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareShortDouble(txn, p, 0, q, 0) >= 0) ? true : false;
-}
-static inline bool geShortTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareShortTimestamp(txn, p, 0, q, 0) >= 0) ? true : false;
 }
 
 static inline bool eqIntByte(TransactionContext& txn, uint8_t const* p,
@@ -948,10 +776,6 @@ static inline bool eqIntDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareIntDouble(txn, p, 0, q, 0) == 0) ? true : false;
 }
-static inline bool eqIntTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareIntTimestamp(txn, p, 0, q, 0) == 0) ? true : false;
-}
 
 static inline bool neIntByte(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
@@ -976,10 +800,6 @@ static inline bool neIntFloat(TransactionContext& txn, uint8_t const* p,
 static inline bool neIntDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareIntDouble(txn, p, 0, q, 0) != 0) ? true : false;
-}
-static inline bool neIntTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareIntTimestamp(txn, p, 0, q, 0) != 0) ? true : false;
 }
 
 static inline bool ltIntByte(TransactionContext& txn, uint8_t const* p,
@@ -1006,10 +826,6 @@ static inline bool ltIntDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareIntDouble(txn, p, 0, q, 0) < 0) ? true : false;
 }
-static inline bool ltIntTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareIntTimestamp(txn, p, 0, q, 0) < 0) ? true : false;
-}
 
 static inline bool gtIntByte(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
@@ -1034,10 +850,6 @@ static inline bool gtIntFloat(TransactionContext& txn, uint8_t const* p,
 static inline bool gtIntDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareIntDouble(txn, p, 0, q, 0) > 0) ? true : false;
-}
-static inline bool gtIntTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareIntTimestamp(txn, p, 0, q, 0) > 0) ? true : false;
 }
 
 static inline bool leIntByte(TransactionContext& txn, uint8_t const* p,
@@ -1064,10 +876,6 @@ static inline bool leIntDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareIntDouble(txn, p, 0, q, 0) <= 0) ? true : false;
 }
-static inline bool leIntTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareIntTimestamp(txn, p, 0, q, 0) <= 0) ? true : false;
-}
 
 static inline bool geIntByte(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
@@ -1092,10 +900,6 @@ static inline bool geIntFloat(TransactionContext& txn, uint8_t const* p,
 static inline bool geIntDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareIntDouble(txn, p, 0, q, 0) >= 0) ? true : false;
-}
-static inline bool geIntTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareIntTimestamp(txn, p, 0, q, 0) >= 0) ? true : false;
 }
 
 static inline bool eqLongByte(TransactionContext& txn, uint8_t const* p,
@@ -1122,10 +926,6 @@ static inline bool eqLongDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareLongDouble(txn, p, 0, q, 0) == 0) ? true : false;
 }
-static inline bool eqLongTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareLongTimestamp(txn, p, 0, q, 0) == 0) ? true : false;
-}
 
 static inline bool neLongByte(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
@@ -1150,10 +950,6 @@ static inline bool neLongFloat(TransactionContext& txn, uint8_t const* p,
 static inline bool neLongDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareLongDouble(txn, p, 0, q, 0) != 0) ? true : false;
-}
-static inline bool neLongTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareLongTimestamp(txn, p, 0, q, 0) != 0) ? true : false;
 }
 
 static inline bool ltLongByte(TransactionContext& txn, uint8_t const* p,
@@ -1180,10 +976,6 @@ static inline bool ltLongDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareLongDouble(txn, p, 0, q, 0) < 0) ? true : false;
 }
-static inline bool ltLongTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareLongTimestamp(txn, p, 0, q, 0) < 0) ? true : false;
-}
 
 static inline bool gtLongByte(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
@@ -1208,10 +1000,6 @@ static inline bool gtLongFloat(TransactionContext& txn, uint8_t const* p,
 static inline bool gtLongDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareLongDouble(txn, p, 0, q, 0) > 0) ? true : false;
-}
-static inline bool gtLongTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareLongTimestamp(txn, p, 0, q, 0) > 0) ? true : false;
 }
 
 static inline bool leLongByte(TransactionContext& txn, uint8_t const* p,
@@ -1238,10 +1026,6 @@ static inline bool leLongDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareLongDouble(txn, p, 0, q, 0) <= 0) ? true : false;
 }
-static inline bool leLongTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareLongTimestamp(txn, p, 0, q, 0) <= 0) ? true : false;
-}
 
 static inline bool geLongByte(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
@@ -1266,10 +1050,6 @@ static inline bool geLongFloat(TransactionContext& txn, uint8_t const* p,
 static inline bool geLongDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareLongDouble(txn, p, 0, q, 0) >= 0) ? true : false;
-}
-static inline bool geLongTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareLongTimestamp(txn, p, 0, q, 0) >= 0) ? true : false;
 }
 
 static inline bool eqFloatByte(TransactionContext& txn, uint8_t const* p,
@@ -1296,10 +1076,6 @@ static inline bool eqFloatDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareFloatDouble(txn, p, 0, q, 0) == 0) ? true : false;
 }
-static inline bool eqFloatTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareFloatTimestamp(txn, p, 0, q, 0) == 0) ? true : false;
-}
 
 static inline bool neFloatByte(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
@@ -1324,10 +1100,6 @@ static inline bool neFloatFloat(TransactionContext& txn, uint8_t const* p,
 static inline bool neFloatDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareFloatDouble(txn, p, 0, q, 0) != 0) ? true : false;
-}
-static inline bool neFloatTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareFloatTimestamp(txn, p, 0, q, 0) != 0) ? true : false;
 }
 
 static inline bool ltFloatByte(TransactionContext& txn, uint8_t const* p,
@@ -1354,10 +1126,6 @@ static inline bool ltFloatDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareFloatDouble(txn, p, 0, q, 0) < 0) ? true : false;
 }
-static inline bool ltFloatTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareFloatTimestamp(txn, p, 0, q, 0) < 0) ? true : false;
-}
 
 static inline bool gtFloatByte(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
@@ -1382,10 +1150,6 @@ static inline bool gtFloatFloat(TransactionContext& txn, uint8_t const* p,
 static inline bool gtFloatDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareFloatDouble(txn, p, 0, q, 0) > 0) ? true : false;
-}
-static inline bool gtFloatTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareFloatTimestamp(txn, p, 0, q, 0) > 0) ? true : false;
 }
 
 static inline bool leFloatByte(TransactionContext& txn, uint8_t const* p,
@@ -1412,10 +1176,6 @@ static inline bool leFloatDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareFloatDouble(txn, p, 0, q, 0) <= 0) ? true : false;
 }
-static inline bool leFloatTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareFloatTimestamp(txn, p, 0, q, 0) <= 0) ? true : false;
-}
 
 static inline bool geFloatByte(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
@@ -1440,10 +1200,6 @@ static inline bool geFloatFloat(TransactionContext& txn, uint8_t const* p,
 static inline bool geFloatDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareFloatDouble(txn, p, 0, q, 0) >= 0) ? true : false;
-}
-static inline bool geFloatTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareFloatTimestamp(txn, p, 0, q, 0) >= 0) ? true : false;
 }
 
 static inline bool eqDoubleByte(TransactionContext& txn, uint8_t const* p,
@@ -1470,10 +1226,6 @@ static inline bool eqDoubleDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareDoubleDouble(txn, p, 0, q, 0) == 0) ? true : false;
 }
-static inline bool eqDoubleTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareDoubleTimestamp(txn, p, 0, q, 0) == 0) ? true : false;
-}
 
 static inline bool neDoubleByte(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
@@ -1498,10 +1250,6 @@ static inline bool neDoubleFloat(TransactionContext& txn, uint8_t const* p,
 static inline bool neDoubleDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareDoubleDouble(txn, p, 0, q, 0) != 0) ? true : false;
-}
-static inline bool neDoubleTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareDoubleTimestamp(txn, p, 0, q, 0) != 0) ? true : false;
 }
 
 static inline bool ltDoubleByte(TransactionContext& txn, uint8_t const* p,
@@ -1528,10 +1276,6 @@ static inline bool ltDoubleDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareDoubleDouble(txn, p, 0, q, 0) < 0) ? true : false;
 }
-static inline bool ltDoubleTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareDoubleTimestamp(txn, p, 0, q, 0) < 0) ? true : false;
-}
 
 static inline bool gtDoubleByte(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
@@ -1556,10 +1300,6 @@ static inline bool gtDoubleFloat(TransactionContext& txn, uint8_t const* p,
 static inline bool gtDoubleDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareDoubleDouble(txn, p, 0, q, 0) > 0) ? true : false;
-}
-static inline bool gtDoubleTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareDoubleTimestamp(txn, p, 0, q, 0) > 0) ? true : false;
 }
 
 static inline bool leDoubleByte(TransactionContext& txn, uint8_t const* p,
@@ -1586,10 +1326,6 @@ static inline bool leDoubleDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareDoubleDouble(txn, p, 0, q, 0) <= 0) ? true : false;
 }
-static inline bool leDoubleTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareDoubleTimestamp(txn, p, 0, q, 0) <= 0) ? true : false;
-}
 
 static inline bool geDoubleByte(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
@@ -1615,180 +1351,32 @@ static inline bool geDoubleDouble(TransactionContext& txn, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	return (compareDoubleDouble(txn, p, 0, q, 0) >= 0) ? true : false;
 }
-static inline bool geDoubleTimestamp(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareDoubleTimestamp(txn, p, 0, q, 0) >= 0) ? true : false;
-}
 
-static inline bool eqTimestampByte(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampByte(txn, p, 0, q, 0) == 0) ? true : false;
-}
-static inline bool eqTimestampShort(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampShort(txn, p, 0, q, 0) == 0) ? true : false;
-}
-static inline bool eqTimestampInt(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampInt(txn, p, 0, q, 0) == 0) ? true : false;
-}
-static inline bool eqTimestampLong(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampLong(txn, p, 0, q, 0) == 0) ? true : false;
-}
-static inline bool eqTimestampFloat(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampFloat(txn, p, 0, q, 0) == 0) ? true : false;
-}
-static inline bool eqTimestampDouble(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampDouble(txn, p, 0, q, 0) == 0) ? true : false;
-}
 static inline bool eqTimestampTimestamp(TransactionContext& txn,
 	uint8_t const* p, uint32_t, uint8_t const* q, uint32_t) {
 	return (compareTimestampTimestamp(txn, p, 0, q, 0) == 0) ? true : false;
 }
 
-static inline bool neTimestampByte(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampByte(txn, p, 0, q, 0) != 0) ? true : false;
-}
-static inline bool neTimestampShort(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampShort(txn, p, 0, q, 0) != 0) ? true : false;
-}
-static inline bool neTimestampInt(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampInt(txn, p, 0, q, 0) != 0) ? true : false;
-}
-static inline bool neTimestampLong(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampLong(txn, p, 0, q, 0) != 0) ? true : false;
-}
-static inline bool neTimestampFloat(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampFloat(txn, p, 0, q, 0) != 0) ? true : false;
-}
-static inline bool neTimestampDouble(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampDouble(txn, p, 0, q, 0) != 0) ? true : false;
-}
 static inline bool neTimestampTimestamp(TransactionContext& txn,
 	uint8_t const* p, uint32_t, uint8_t const* q, uint32_t) {
 	return (compareTimestampTimestamp(txn, p, 0, q, 0) != 0) ? true : false;
 }
 
-static inline bool ltTimestampByte(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampByte(txn, p, 0, q, 0) < 0) ? true : false;
-}
-static inline bool ltTimestampShort(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampShort(txn, p, 0, q, 0) < 0) ? true : false;
-}
-static inline bool ltTimestampInt(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampInt(txn, p, 0, q, 0) < 0) ? true : false;
-}
-static inline bool ltTimestampLong(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampLong(txn, p, 0, q, 0) < 0) ? true : false;
-}
-static inline bool ltTimestampFloat(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampFloat(txn, p, 0, q, 0) < 0) ? true : false;
-}
-static inline bool ltTimestampDouble(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampDouble(txn, p, 0, q, 0) < 0) ? true : false;
-}
 static inline bool ltTimestampTimestamp(TransactionContext& txn,
 	uint8_t const* p, uint32_t, uint8_t const* q, uint32_t) {
 	return (compareTimestampTimestamp(txn, p, 0, q, 0) < 0) ? true : false;
 }
 
-static inline bool gtTimestampByte(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampByte(txn, p, 0, q, 0) > 0) ? true : false;
-}
-static inline bool gtTimestampShort(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampShort(txn, p, 0, q, 0) > 0) ? true : false;
-}
-static inline bool gtTimestampInt(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampInt(txn, p, 0, q, 0) > 0) ? true : false;
-}
-static inline bool gtTimestampLong(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampLong(txn, p, 0, q, 0) > 0) ? true : false;
-}
-static inline bool gtTimestampFloat(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampFloat(txn, p, 0, q, 0) > 0) ? true : false;
-}
-static inline bool gtTimestampDouble(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampDouble(txn, p, 0, q, 0) > 0) ? true : false;
-}
 static inline bool gtTimestampTimestamp(TransactionContext& txn,
 	uint8_t const* p, uint32_t, uint8_t const* q, uint32_t) {
 	return (compareTimestampTimestamp(txn, p, 0, q, 0) > 0) ? true : false;
 }
 
-static inline bool leTimestampByte(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampByte(txn, p, 0, q, 0) <= 0) ? true : false;
-}
-static inline bool leTimestampShort(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampShort(txn, p, 0, q, 0) <= 0) ? true : false;
-}
-static inline bool leTimestampInt(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampInt(txn, p, 0, q, 0) <= 0) ? true : false;
-}
-static inline bool leTimestampLong(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampLong(txn, p, 0, q, 0) <= 0) ? true : false;
-}
-static inline bool leTimestampFloat(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampFloat(txn, p, 0, q, 0) <= 0) ? true : false;
-}
-static inline bool leTimestampDouble(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampDouble(txn, p, 0, q, 0) <= 0) ? true : false;
-}
 static inline bool leTimestampTimestamp(TransactionContext& txn,
 	uint8_t const* p, uint32_t, uint8_t const* q, uint32_t) {
 	return (compareTimestampTimestamp(txn, p, 0, q, 0) <= 0) ? true : false;
 }
 
-static inline bool geTimestampByte(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampByte(txn, p, 0, q, 0) >= 0) ? true : false;
-}
-static inline bool geTimestampShort(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampShort(txn, p, 0, q, 0) >= 0) ? true : false;
-}
-static inline bool geTimestampInt(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampInt(txn, p, 0, q, 0) >= 0) ? true : false;
-}
-static inline bool geTimestampLong(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampLong(txn, p, 0, q, 0) >= 0) ? true : false;
-}
-static inline bool geTimestampFloat(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampFloat(txn, p, 0, q, 0) >= 0) ? true : false;
-}
-static inline bool geTimestampDouble(TransactionContext& txn, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t) {
-	return (compareTimestampDouble(txn, p, 0, q, 0) >= 0) ? true : false;
-}
 static inline bool geTimestampTimestamp(TransactionContext& txn,
 	uint8_t const* p, uint32_t, uint8_t const* q, uint32_t) {
 	return (compareTimestampTimestamp(txn, p, 0, q, 0) >= 0) ? true : false;
@@ -1933,32 +1521,30 @@ static const Comparator comparatorTable[][11] = {
 		NULL}
 	,
 	{NULL, NULL, &compareByteByte, &compareByteShort, &compareByteInt,
-		&compareByteLong, &compareByteFloat, &compareByteDouble,
-		&compareByteTimestamp, NULL, NULL}
+		&compareByteLong, &compareByteFloat, &compareByteDouble, NULL, NULL,
+		NULL}
 	,
 	{NULL, NULL, &compareShortByte, &compareShortShort, &compareShortInt,
-		&compareShortLong, &compareShortFloat, &compareShortDouble,
-		&compareShortTimestamp, NULL, NULL}
+		&compareShortLong, &compareShortFloat, &compareShortDouble, NULL, NULL,
+		NULL}
 	,
 	{NULL, NULL, &compareIntByte, &compareIntShort, &compareIntInt,
-		&compareIntLong, &compareIntFloat, &compareIntDouble,
-		&compareIntTimestamp, NULL, NULL}
+		&compareIntLong, &compareIntFloat, &compareIntDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &compareLongByte, &compareLongShort, &compareLongInt,
-		&compareLongLong, &compareLongFloat, &compareLongDouble,
-		&compareLongTimestamp, NULL, NULL}
+		&compareLongLong, &compareLongFloat, &compareLongDouble, NULL, NULL,
+		NULL}
 	,
 	{NULL, NULL, &compareFloatByte, &compareFloatShort, &compareFloatInt,
-		&compareFloatLong, &compareFloatFloat, &compareFloatDouble,
-		&compareFloatTimestamp, NULL, NULL}
+		&compareFloatLong, &compareFloatFloat, &compareFloatDouble, NULL, NULL,
+		NULL}
 	,
 	{NULL, NULL, &compareDoubleByte, &compareDoubleShort, &compareDoubleInt,
 		&compareDoubleLong, &compareDoubleFloat, &compareDoubleDouble, NULL,
-		NULL, &compareDoubleTimestamp}
+		NULL, NULL}
 	,
-	{NULL, NULL, &compareTimestampByte, &compareTimestampShort,
-		&compareTimestampInt, &compareTimestampLong, &compareTimestampFloat,
-		&compareTimestampDouble, &compareTimestampTimestamp, NULL, NULL}
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, &compareTimestampTimestamp,
+		NULL, NULL}
 	,
 	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
 	,
@@ -1971,26 +1557,25 @@ static const Operator eqTable[][11] = {
 	{NULL, &eqBoolBool, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &eqByteByte, &eqByteShort, &eqByteInt, &eqByteLong,
-		&eqByteFloat, &eqByteDouble, &eqByteTimestamp, NULL, NULL}
+		&eqByteFloat, &eqByteDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &eqShortByte, &eqShortShort, &eqShortInt, &eqShortLong,
-		&eqShortFloat, &eqShortDouble, &eqShortTimestamp, NULL, NULL}
+		&eqShortFloat, &eqShortDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &eqIntByte, &eqIntShort, &eqIntInt, &eqIntLong, &eqIntFloat,
-		&eqIntDouble, &eqIntTimestamp, NULL, NULL}
+		&eqIntDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &eqLongByte, &eqLongShort, &eqLongInt, &eqLongLong,
-		&eqLongFloat, &eqLongDouble, &eqLongTimestamp, NULL, NULL}
+		&eqLongFloat, &eqLongDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &eqFloatByte, &eqFloatShort, &eqFloatInt, &eqFloatLong,
-		&eqFloatFloat, &eqFloatDouble, &eqFloatTimestamp, NULL, NULL}
+		&eqFloatFloat, &eqFloatDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &eqDoubleByte, &eqDoubleShort, &eqDoubleInt, &eqDoubleLong,
-		&eqDoubleFloat, &eqDoubleDouble, &eqDoubleTimestamp, NULL, NULL}
+		&eqDoubleFloat, &eqDoubleDouble, NULL, NULL, NULL}
 	,
-	{NULL, NULL, &eqTimestampByte, &eqTimestampShort, &eqTimestampInt,
-		&eqTimestampLong, &eqTimestampFloat, &eqTimestampDouble,
-		&eqTimestampTimestamp, NULL, NULL}
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, &eqTimestampTimestamp,
+		NULL, NULL}
 	,
 	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
 	,
@@ -2002,26 +1587,25 @@ static const Operator neTable[][11] = {
 	{NULL, &neBoolBool, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &neByteByte, &neByteShort, &neByteInt, &neByteLong,
-		&neByteFloat, &neByteDouble, &neByteTimestamp, NULL, NULL}
+		&neByteFloat, &neByteDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &neShortByte, &neShortShort, &neShortInt, &neShortLong,
-		&neShortFloat, &neShortDouble, &neShortTimestamp, NULL, NULL}
+		&neShortFloat, &neShortDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &neIntByte, &neIntShort, &neIntInt, &neIntLong, &neIntFloat,
-		&neIntDouble, &neIntTimestamp, NULL, NULL}
+		&neIntDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &neLongByte, &neLongShort, &neLongInt, &neLongLong,
-		&neLongFloat, &neLongDouble, &neLongTimestamp, NULL, NULL}
+		&neLongFloat, &neLongDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &neFloatByte, &neFloatShort, &neFloatInt, &neFloatLong,
-		&neFloatFloat, &neFloatDouble, &neFloatTimestamp, NULL, NULL}
+		&neFloatFloat, &neFloatDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &neDoubleByte, &neDoubleShort, &neDoubleInt, &neDoubleLong,
-		&neDoubleFloat, &neDoubleDouble, &neDoubleTimestamp, NULL, NULL}
+		&neDoubleFloat, &neDoubleDouble, NULL, NULL, NULL}
 	,
-	{NULL, NULL, &neTimestampByte, &neTimestampShort, &neTimestampInt,
-		&neTimestampLong, &neTimestampFloat, &neTimestampDouble,
-		&neTimestampTimestamp, NULL, NULL}
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, &neTimestampTimestamp,
+		NULL, NULL}
 	,
 	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
 	,
@@ -2032,26 +1616,25 @@ static const Operator ltTable[][11] = {
 	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &ltByteByte, &ltByteShort, &ltByteInt, &ltByteLong,
-		&ltByteFloat, &ltByteDouble, &ltByteTimestamp, NULL, NULL}
+		&ltByteFloat, &ltByteDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &ltShortByte, &ltShortShort, &ltShortInt, &ltShortLong,
-		&ltShortFloat, &ltShortDouble, &ltShortTimestamp, NULL, NULL}
+		&ltShortFloat, &ltShortDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &ltIntByte, &ltIntShort, &ltIntInt, &ltIntLong, &ltIntFloat,
-		&ltIntDouble, &ltIntTimestamp, NULL, NULL}
+		&ltIntDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &ltLongByte, &ltLongShort, &ltLongInt, &ltLongLong,
-		&ltLongFloat, &ltLongDouble, &ltLongTimestamp, NULL, NULL}
+		&ltLongFloat, &ltLongDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &ltFloatByte, &ltFloatShort, &ltFloatInt, &ltFloatLong,
-		&ltFloatFloat, &ltFloatDouble, &ltFloatTimestamp, NULL, NULL}
+		&ltFloatFloat, &ltFloatDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &ltDoubleByte, &ltDoubleShort, &ltDoubleInt, &ltDoubleLong,
-		&ltDoubleFloat, &ltDoubleDouble, &ltDoubleTimestamp, NULL, NULL}
+		&ltDoubleFloat, &ltDoubleDouble, NULL, NULL, NULL}
 	,
-	{NULL, NULL, &ltTimestampByte, &ltTimestampShort, &ltTimestampInt,
-		&ltTimestampLong, &ltTimestampFloat, &ltTimestampDouble,
-		&ltTimestampTimestamp, NULL, NULL}
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, &ltTimestampTimestamp,
+		NULL, NULL}
 	,
 	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
 	,
@@ -2062,26 +1645,25 @@ static const Operator gtTable[][11] = {
 	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &gtByteByte, &gtByteShort, &gtByteInt, &gtByteLong,
-		&gtByteFloat, &gtByteDouble, &gtByteTimestamp, NULL, NULL}
+		&gtByteFloat, &gtByteDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &gtShortByte, &gtShortShort, &gtShortInt, &gtShortLong,
-		&gtShortFloat, &gtShortDouble, &gtShortTimestamp, NULL, NULL}
+		&gtShortFloat, &gtShortDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &gtIntByte, &gtIntShort, &gtIntInt, &gtIntLong, &gtIntFloat,
-		&gtIntDouble, &gtIntTimestamp, NULL, NULL}
+		&gtIntDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &gtLongByte, &gtLongShort, &gtLongInt, &gtLongLong,
-		&gtLongFloat, &gtLongDouble, &gtLongTimestamp, NULL, NULL}
+		&gtLongFloat, &gtLongDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &gtFloatByte, &gtFloatShort, &gtFloatInt, &gtFloatLong,
-		&gtFloatFloat, &gtFloatDouble, &gtFloatTimestamp, NULL, NULL}
+		&gtFloatFloat, &gtFloatDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &gtDoubleByte, &gtDoubleShort, &gtDoubleInt, &gtDoubleLong,
-		&gtDoubleFloat, &gtDoubleDouble, &gtDoubleTimestamp, NULL, NULL}
+		&gtDoubleFloat, &gtDoubleDouble, NULL, NULL, NULL}
 	,
-	{NULL, NULL, &gtTimestampByte, &gtTimestampShort, &gtTimestampInt,
-		&gtTimestampLong, &gtTimestampFloat, &gtTimestampDouble,
-		&gtTimestampTimestamp, NULL, NULL}
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, &gtTimestampTimestamp,
+		NULL, NULL}
 	,
 	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
 	,
@@ -2092,26 +1674,25 @@ static const Operator leTable[][11] = {
 	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &leByteByte, &leByteShort, &leByteInt, &leByteLong,
-		&leByteFloat, &leByteDouble, &leByteTimestamp, NULL, NULL}
+		&leByteFloat, &leByteDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &leShortByte, &leShortShort, &leShortInt, &leShortLong,
-		&leShortFloat, &leShortDouble, &leShortTimestamp, NULL, NULL}
+		&leShortFloat, &leShortDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &leIntByte, &leIntShort, &leIntInt, &leIntLong, &leIntFloat,
-		&leIntDouble, &leIntTimestamp, NULL, NULL}
+		&leIntDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &leLongByte, &leLongShort, &leLongInt, &leLongLong,
-		&leLongFloat, &leLongDouble, &leLongTimestamp, NULL, NULL}
+		&leLongFloat, &leLongDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &leFloatByte, &leFloatShort, &leFloatInt, &leFloatLong,
-		&leFloatFloat, &leFloatDouble, &leFloatTimestamp, NULL, NULL}
+		&leFloatFloat, &leFloatDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &leDoubleByte, &leDoubleShort, &leDoubleInt, &leDoubleLong,
-		&leDoubleFloat, &leDoubleDouble, &leDoubleTimestamp, NULL, NULL}
+		&leDoubleFloat, &leDoubleDouble, NULL, NULL, NULL}
 	,
-	{NULL, NULL, &leTimestampByte, &leTimestampShort, &leTimestampInt,
-		&leTimestampLong, &leTimestampFloat, &leTimestampDouble,
-		&leTimestampTimestamp, NULL, NULL}
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, &leTimestampTimestamp,
+		NULL, NULL}
 	,
 	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
 	,
@@ -2122,26 +1703,25 @@ static const Operator geTable[][11] = {
 	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &geByteByte, &geByteShort, &geByteInt, &geByteLong,
-		&geByteFloat, &geByteDouble, &geByteTimestamp, NULL, NULL}
+		&geByteFloat, &geByteDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &geShortByte, &geShortShort, &geShortInt, &geShortLong,
-		&geShortFloat, &geShortDouble, &geShortTimestamp, NULL, NULL}
+		&geShortFloat, &geShortDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &geIntByte, &geIntShort, &geIntInt, &geIntLong, &geIntFloat,
-		&geIntDouble, &geIntTimestamp, NULL, NULL}
+		&geIntDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &geLongByte, &geLongShort, &geLongInt, &geLongLong,
-		&geLongFloat, &geLongDouble, &geLongTimestamp, NULL, NULL}
+		&geLongFloat, &geLongDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &geFloatByte, &geFloatShort, &geFloatInt, &geFloatLong,
-		&geFloatFloat, &geFloatDouble, &geFloatTimestamp, NULL, NULL}
+		&geFloatFloat, &geFloatDouble, NULL, NULL, NULL}
 	,
 	{NULL, NULL, &geDoubleByte, &geDoubleShort, &geDoubleInt, &geDoubleLong,
-		&geDoubleFloat, &geDoubleDouble, &geDoubleTimestamp, NULL, NULL}
+		&geDoubleFloat, &geDoubleDouble, NULL, NULL, NULL}
 	,
-	{NULL, NULL, &geTimestampByte, &geTimestampShort, &geTimestampInt,
-		&geTimestampLong, &geTimestampFloat, &geTimestampDouble,
-		&geTimestampTimestamp, NULL, NULL}
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, &geTimestampTimestamp,
+		NULL, NULL}
 	,
 	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
 	,
@@ -2177,11 +1757,6 @@ static inline void addByteDouble(TransactionContext&, uint8_t const* p,
 	value.set((*(reinterpret_cast<const int8_t*>(p))) +
 			  (*(reinterpret_cast<const double*>(q))));
 }
-static inline void addByteTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int8_t*>(p))) +
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
 static inline void addShortByte(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const int16_t*>(p))) +
@@ -2211,11 +1786,6 @@ static inline void addShortDouble(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const int16_t*>(p))) +
 			  (*(reinterpret_cast<const double*>(q))));
-}
-static inline void addShortTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int16_t*>(p))) +
-			  (*(reinterpret_cast<const int64_t*>(q))));
 }
 static inline void addIntByte(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
@@ -2247,11 +1817,6 @@ static inline void addIntDouble(TransactionContext&, uint8_t const* p, uint32_t,
 	value.set((*(reinterpret_cast<const int32_t*>(p))) +
 			  (*(reinterpret_cast<const double*>(q))));
 }
-static inline void addIntTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int32_t*>(p))) +
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
 static inline void addLongByte(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const int64_t*>(p))) +
@@ -2281,11 +1846,6 @@ static inline void addLongDouble(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const int64_t*>(p))) +
 			  (*(reinterpret_cast<const double*>(q))));
-}
-static inline void addLongTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) +
-			  (*(reinterpret_cast<const int64_t*>(q))));
 }
 static inline void addFloatByte(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
@@ -2317,11 +1877,6 @@ static inline void addFloatDouble(TransactionContext&, uint8_t const* p,
 	value.set((*(reinterpret_cast<const float*>(p))) +
 			  (*(reinterpret_cast<const double*>(q))));
 }
-static inline void addFloatTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const float*>(p))) +
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
 static inline void addDoubleByte(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const double*>(p))) +
@@ -2352,46 +1907,6 @@ static inline void addDoubleDouble(TransactionContext&, uint8_t const* p,
 	value.set((*(reinterpret_cast<const double*>(p))) +
 			  (*(reinterpret_cast<const double*>(q))));
 }
-static inline void addDoubleTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const double*>(p))) +
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
-static inline void addTimestampByte(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) +
-			  (*(reinterpret_cast<const int8_t*>(q))));
-}
-static inline void addTimestampShort(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) +
-			  (*(reinterpret_cast<const int16_t*>(q))));
-}
-static inline void addTimestampInt(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) +
-			  (*(reinterpret_cast<const int32_t*>(q))));
-}
-static inline void addTimestampLong(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) +
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
-static inline void addTimestampFloat(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) +
-			  (*(reinterpret_cast<const float*>(q))));
-}
-static inline void addTimestampDouble(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) +
-			  (*(reinterpret_cast<const double*>(q))));
-}
-static inline void addTimestampTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) +
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
 const Calculator2 addTable[][11] = {
 	{
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
@@ -2401,33 +1916,30 @@ const Calculator2 addTable[][11] = {
 	},
 	{
 		NULL, NULL, &addByteByte, &addByteShort, &addByteInt, &addByteLong,
-		&addByteFloat, &addByteDouble, &addByteTimestamp, NULL, NULL,
+		&addByteFloat, &addByteDouble, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, &addShortByte, &addShortShort, &addShortInt, &addShortLong,
-		&addShortFloat, &addShortDouble, &addShortTimestamp, NULL, NULL,
+		&addShortFloat, &addShortDouble, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, &addIntByte, &addIntShort, &addIntInt, &addIntLong,
-		&addIntFloat, &addIntDouble, &addIntTimestamp, NULL, NULL,
+		&addIntFloat, &addIntDouble, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, &addLongByte, &addLongShort, &addLongInt, &addLongLong,
-		&addLongFloat, &addLongDouble, &addLongTimestamp, NULL, NULL,
+		&addLongFloat, &addLongDouble, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, &addFloatByte, &addFloatShort, &addFloatInt, &addFloatLong,
-		&addFloatFloat, &addFloatDouble, &addFloatTimestamp, NULL, NULL,
+		&addFloatFloat, &addFloatDouble, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, &addDoubleByte, &addDoubleShort, &addDoubleInt,
-		&addDoubleLong, &addDoubleFloat, &addDoubleDouble, &addDoubleTimestamp,
-		NULL, NULL,
+		&addDoubleLong, &addDoubleFloat, &addDoubleDouble, NULL, NULL, NULL,
 	},
 	{
-		NULL, NULL, &addTimestampByte, &addTimestampShort, &addTimestampInt,
-		&addTimestampLong, &addTimestampFloat, &addTimestampDouble,
-		&addTimestampTimestamp, NULL, NULL,
+		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
@@ -2466,11 +1978,6 @@ static inline void subByteDouble(TransactionContext&, uint8_t const* p,
 	value.set((*(reinterpret_cast<const int8_t*>(p))) -
 			  (*(reinterpret_cast<const double*>(q))));
 }
-static inline void subByteTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int8_t*>(p))) -
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
 static inline void subShortByte(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const int16_t*>(p))) -
@@ -2500,11 +2007,6 @@ static inline void subShortDouble(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const int16_t*>(p))) -
 			  (*(reinterpret_cast<const double*>(q))));
-}
-static inline void subShortTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int16_t*>(p))) -
-			  (*(reinterpret_cast<const int64_t*>(q))));
 }
 static inline void subIntByte(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
@@ -2536,11 +2038,6 @@ static inline void subIntDouble(TransactionContext&, uint8_t const* p, uint32_t,
 	value.set((*(reinterpret_cast<const int32_t*>(p))) -
 			  (*(reinterpret_cast<const double*>(q))));
 }
-static inline void subIntTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int32_t*>(p))) -
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
 static inline void subLongByte(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const int64_t*>(p))) -
@@ -2570,11 +2067,6 @@ static inline void subLongDouble(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const int64_t*>(p))) -
 			  (*(reinterpret_cast<const double*>(q))));
-}
-static inline void subLongTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) -
-			  (*(reinterpret_cast<const int64_t*>(q))));
 }
 static inline void subFloatByte(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
@@ -2606,11 +2098,6 @@ static inline void subFloatDouble(TransactionContext&, uint8_t const* p,
 	value.set((*(reinterpret_cast<const float*>(p))) -
 			  (*(reinterpret_cast<const double*>(q))));
 }
-static inline void subFloatTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const float*>(p))) -
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
 static inline void subDoubleByte(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const double*>(p))) -
@@ -2641,46 +2128,7 @@ static inline void subDoubleDouble(TransactionContext&, uint8_t const* p,
 	value.set((*(reinterpret_cast<const double*>(p))) -
 			  (*(reinterpret_cast<const double*>(q))));
 }
-static inline void subDoubleTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const double*>(p))) -
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
-static inline void subTimestampByte(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) -
-			  (*(reinterpret_cast<const int8_t*>(q))));
-}
-static inline void subTimestampShort(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) -
-			  (*(reinterpret_cast<const int16_t*>(q))));
-}
-static inline void subTimestampInt(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) -
-			  (*(reinterpret_cast<const int32_t*>(q))));
-}
-static inline void subTimestampLong(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) -
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
-static inline void subTimestampFloat(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) -
-			  (*(reinterpret_cast<const float*>(q))));
-}
-static inline void subTimestampDouble(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) -
-			  (*(reinterpret_cast<const double*>(q))));
-}
-static inline void subTimestampTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) -
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
+
 const Calculator2 subTable[][11] = {
 	{
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
@@ -2690,33 +2138,30 @@ const Calculator2 subTable[][11] = {
 	},
 	{
 		NULL, NULL, &subByteByte, &subByteShort, &subByteInt, &subByteLong,
-		&subByteFloat, &subByteDouble, &subByteTimestamp, NULL, NULL,
+		&subByteFloat, &subByteDouble, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, &subShortByte, &subShortShort, &subShortInt, &subShortLong,
-		&subShortFloat, &subShortDouble, &subShortTimestamp, NULL, NULL,
+		&subShortFloat, &subShortDouble, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, &subIntByte, &subIntShort, &subIntInt, &subIntLong,
-		&subIntFloat, &subIntDouble, &subIntTimestamp, NULL, NULL,
+		&subIntFloat, &subIntDouble, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, &subLongByte, &subLongShort, &subLongInt, &subLongLong,
-		&subLongFloat, &subLongDouble, &subLongTimestamp, NULL, NULL,
+		&subLongFloat, &subLongDouble, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, &subFloatByte, &subFloatShort, &subFloatInt, &subFloatLong,
-		&subFloatFloat, &subFloatDouble, &subFloatTimestamp, NULL, NULL,
+		&subFloatFloat, &subFloatDouble, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, &subDoubleByte, &subDoubleShort, &subDoubleInt,
-		&subDoubleLong, &subDoubleFloat, &subDoubleDouble, &subDoubleTimestamp,
-		NULL, NULL,
+		&subDoubleLong, &subDoubleFloat, &subDoubleDouble, NULL, NULL, NULL,
 	},
 	{
-		NULL, NULL, &subTimestampByte, &subTimestampShort, &subTimestampInt,
-		&subTimestampLong, &subTimestampFloat, &subTimestampDouble,
-		&subTimestampTimestamp, NULL, NULL,
+		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
@@ -2725,6 +2170,7 @@ const Calculator2 subTable[][11] = {
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 	},
 };
+
 static inline void mulByteByte(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const int8_t*>(p))) *
@@ -2754,11 +2200,6 @@ static inline void mulByteDouble(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const int8_t*>(p))) *
 			  (*(reinterpret_cast<const double*>(q))));
-}
-static inline void mulByteTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int8_t*>(p))) *
-			  (*(reinterpret_cast<const int64_t*>(q))));
 }
 static inline void mulShortByte(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
@@ -2790,11 +2231,6 @@ static inline void mulShortDouble(TransactionContext&, uint8_t const* p,
 	value.set((*(reinterpret_cast<const int16_t*>(p))) *
 			  (*(reinterpret_cast<const double*>(q))));
 }
-static inline void mulShortTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int16_t*>(p))) *
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
 static inline void mulIntByte(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const int32_t*>(p))) *
@@ -2824,11 +2260,6 @@ static inline void mulIntDouble(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const int32_t*>(p))) *
 			  (*(reinterpret_cast<const double*>(q))));
-}
-static inline void mulIntTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int32_t*>(p))) *
-			  (*(reinterpret_cast<const int64_t*>(q))));
 }
 static inline void mulLongByte(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
@@ -2860,11 +2291,6 @@ static inline void mulLongDouble(TransactionContext&, uint8_t const* p,
 	value.set((*(reinterpret_cast<const int64_t*>(p))) *
 			  (*(reinterpret_cast<const double*>(q))));
 }
-static inline void mulLongTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) *
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
 static inline void mulFloatByte(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const float*>(p))) *
@@ -2894,11 +2320,6 @@ static inline void mulFloatDouble(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const float*>(p))) *
 			  (*(reinterpret_cast<const double*>(q))));
-}
-static inline void mulFloatTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const float*>(p))) *
-			  (*(reinterpret_cast<const int64_t*>(q))));
 }
 static inline void mulDoubleByte(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
@@ -2930,46 +2351,6 @@ static inline void mulDoubleDouble(TransactionContext&, uint8_t const* p,
 	value.set((*(reinterpret_cast<const double*>(p))) *
 			  (*(reinterpret_cast<const double*>(q))));
 }
-static inline void mulDoubleTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const double*>(p))) *
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
-static inline void mulTimestampByte(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) *
-			  (*(reinterpret_cast<const int8_t*>(q))));
-}
-static inline void mulTimestampShort(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) *
-			  (*(reinterpret_cast<const int16_t*>(q))));
-}
-static inline void mulTimestampInt(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) *
-			  (*(reinterpret_cast<const int32_t*>(q))));
-}
-static inline void mulTimestampLong(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) *
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
-static inline void mulTimestampFloat(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) *
-			  (*(reinterpret_cast<const float*>(q))));
-}
-static inline void mulTimestampDouble(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) *
-			  (*(reinterpret_cast<const double*>(q))));
-}
-static inline void mulTimestampTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) *
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
 const Calculator2 mulTable[][11] = {
 	{
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
@@ -2979,33 +2360,30 @@ const Calculator2 mulTable[][11] = {
 	},
 	{
 		NULL, NULL, &mulByteByte, &mulByteShort, &mulByteInt, &mulByteLong,
-		&mulByteFloat, &mulByteDouble, &mulByteTimestamp, NULL, NULL,
+		&mulByteFloat, &mulByteDouble, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, &mulShortByte, &mulShortShort, &mulShortInt, &mulShortLong,
-		&mulShortFloat, &mulShortDouble, &mulShortTimestamp, NULL, NULL,
+		&mulShortFloat, &mulShortDouble, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, &mulIntByte, &mulIntShort, &mulIntInt, &mulIntLong,
-		&mulIntFloat, &mulIntDouble, &mulIntTimestamp, NULL, NULL,
+		&mulIntFloat, &mulIntDouble, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, &mulLongByte, &mulLongShort, &mulLongInt, &mulLongLong,
-		&mulLongFloat, &mulLongDouble, &mulLongTimestamp, NULL, NULL,
+		&mulLongFloat, &mulLongDouble, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, &mulFloatByte, &mulFloatShort, &mulFloatInt, &mulFloatLong,
-		&mulFloatFloat, &mulFloatDouble, &mulFloatTimestamp, NULL, NULL,
+		&mulFloatFloat, &mulFloatDouble, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, &mulDoubleByte, &mulDoubleShort, &mulDoubleInt,
-		&mulDoubleLong, &mulDoubleFloat, &mulDoubleDouble, &mulDoubleTimestamp,
-		NULL, NULL,
+		&mulDoubleLong, &mulDoubleFloat, &mulDoubleDouble, NULL, NULL, NULL,
 	},
 	{
-		NULL, NULL, &mulTimestampByte, &mulTimestampShort, &mulTimestampInt,
-		&mulTimestampLong, &mulTimestampFloat, &mulTimestampDouble,
-		&mulTimestampTimestamp, NULL, NULL,
+		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
@@ -3052,10 +2430,6 @@ static inline void divByteLong(TransactionContext&, uint8_t const* p, uint32_t,
 }
 static inline void divByteFloat(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const float*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
 	value.set((*(reinterpret_cast<const int8_t*>(p))) /
 			  (*(reinterpret_cast<const float*>(q))));
 }
@@ -3063,15 +2437,6 @@ static inline void divByteDouble(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const int8_t*>(p))) /
 			  (*(reinterpret_cast<const double*>(q))));
-}
-static inline void divByteTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int64_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
-	value.set((*(reinterpret_cast<const int8_t*>(p))) /
-			  (*(reinterpret_cast<const int64_t*>(q))));
 }
 static inline void divShortByte(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
@@ -3111,10 +2476,6 @@ static inline void divShortLong(TransactionContext&, uint8_t const* p, uint32_t,
 }
 static inline void divShortFloat(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const float*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
 	value.set((*(reinterpret_cast<const int16_t*>(p))) /
 			  (*(reinterpret_cast<const float*>(q))));
 }
@@ -3122,15 +2483,6 @@ static inline void divShortDouble(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const int16_t*>(p))) /
 			  (*(reinterpret_cast<const double*>(q))));
-}
-static inline void divShortTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int64_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
-	value.set((*(reinterpret_cast<const int16_t*>(p))) /
-			  (*(reinterpret_cast<const int64_t*>(q))));
 }
 static inline void divIntByte(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
@@ -3170,10 +2522,6 @@ static inline void divIntLong(TransactionContext&, uint8_t const* p, uint32_t,
 }
 static inline void divIntFloat(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const float*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
 	value.set((*(reinterpret_cast<const int32_t*>(p))) /
 			  (*(reinterpret_cast<const float*>(q))));
 }
@@ -3181,15 +2529,6 @@ static inline void divIntDouble(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const int32_t*>(p))) /
 			  (*(reinterpret_cast<const double*>(q))));
-}
-static inline void divIntTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int64_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
-	value.set((*(reinterpret_cast<const int32_t*>(p))) /
-			  (*(reinterpret_cast<const int64_t*>(q))));
 }
 static inline void divLongByte(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
@@ -3229,10 +2568,6 @@ static inline void divLongLong(TransactionContext&, uint8_t const* p, uint32_t,
 }
 static inline void divLongFloat(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const float*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
 	value.set((*(reinterpret_cast<const int64_t*>(p))) /
 			  (*(reinterpret_cast<const float*>(q))));
 }
@@ -3241,57 +2576,28 @@ static inline void divLongDouble(TransactionContext&, uint8_t const* p,
 	value.set((*(reinterpret_cast<const int64_t*>(p))) /
 			  (*(reinterpret_cast<const double*>(q))));
 }
-static inline void divLongTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int64_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
-	value.set((*(reinterpret_cast<const int64_t*>(p))) /
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
 static inline void divFloatByte(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int8_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
 	value.set((*(reinterpret_cast<const float*>(p))) /
 			  (*(reinterpret_cast<const int8_t*>(q))));
 }
 static inline void divFloatShort(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int16_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
 	value.set((*(reinterpret_cast<const float*>(p))) /
 			  (*(reinterpret_cast<const int16_t*>(q))));
 }
 static inline void divFloatInt(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int32_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
 	value.set((*(reinterpret_cast<const float*>(p))) /
 			  (*(reinterpret_cast<const int32_t*>(q))));
 }
 static inline void divFloatLong(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int64_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
 	value.set((*(reinterpret_cast<const float*>(p))) /
 			  (*(reinterpret_cast<const int64_t*>(q))));
 }
 static inline void divFloatFloat(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const float*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
 	value.set((*(reinterpret_cast<const float*>(p))) /
 			  (*(reinterpret_cast<const float*>(q))));
 }
@@ -3300,57 +2606,28 @@ static inline void divFloatDouble(TransactionContext&, uint8_t const* p,
 	value.set((*(reinterpret_cast<const float*>(p))) /
 			  (*(reinterpret_cast<const double*>(q))));
 }
-static inline void divFloatTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int64_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
-	value.set((*(reinterpret_cast<const float*>(p))) /
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
 static inline void divDoubleByte(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int8_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
 	value.set((*(reinterpret_cast<const double*>(p))) /
 			  (*(reinterpret_cast<const int8_t*>(q))));
 }
 static inline void divDoubleShort(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int16_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
 	value.set((*(reinterpret_cast<const double*>(p))) /
 			  (*(reinterpret_cast<const int16_t*>(q))));
 }
 static inline void divDoubleInt(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int32_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
 	value.set((*(reinterpret_cast<const double*>(p))) /
 			  (*(reinterpret_cast<const int32_t*>(q))));
 }
 static inline void divDoubleLong(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int64_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
 	value.set((*(reinterpret_cast<const double*>(p))) /
 			  (*(reinterpret_cast<const int64_t*>(q))));
 }
 static inline void divDoubleFloat(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const float*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
 	value.set((*(reinterpret_cast<const double*>(p))) /
 			  (*(reinterpret_cast<const float*>(q))));
 }
@@ -3358,74 +2635,6 @@ static inline void divDoubleDouble(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const double*>(p))) /
 			  (*(reinterpret_cast<const double*>(q))));
-}
-static inline void divDoubleTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int64_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
-	value.set((*(reinterpret_cast<const double*>(p))) /
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
-static inline void divTimestampByte(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int8_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
-	value.set((*(reinterpret_cast<const int64_t*>(p))) /
-			  (*(reinterpret_cast<const int8_t*>(q))));
-}
-static inline void divTimestampShort(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int16_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
-	value.set((*(reinterpret_cast<const int64_t*>(p))) /
-			  (*(reinterpret_cast<const int16_t*>(q))));
-}
-static inline void divTimestampInt(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int32_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
-	value.set((*(reinterpret_cast<const int64_t*>(p))) /
-			  (*(reinterpret_cast<const int32_t*>(q))));
-}
-static inline void divTimestampLong(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int64_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
-	value.set((*(reinterpret_cast<const int64_t*>(p))) /
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
-static inline void divTimestampFloat(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const float*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
-	value.set((*(reinterpret_cast<const int64_t*>(p))) /
-			  (*(reinterpret_cast<const float*>(q))));
-}
-static inline void divTimestampDouble(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	value.set((*(reinterpret_cast<const int64_t*>(p))) /
-			  (*(reinterpret_cast<const double*>(q))));
-}
-static inline void divTimestampTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int64_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
-	value.set((*(reinterpret_cast<const int64_t*>(p))) /
-			  (*(reinterpret_cast<const int64_t*>(q))));
 }
 const Calculator2 divTable[][11] = {
 	{
@@ -3436,33 +2645,30 @@ const Calculator2 divTable[][11] = {
 	},
 	{
 		NULL, NULL, &divByteByte, &divByteShort, &divByteInt, &divByteLong,
-		&divByteFloat, &divByteDouble, &divByteTimestamp, NULL, NULL,
+		&divByteFloat, &divByteDouble, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, &divShortByte, &divShortShort, &divShortInt, &divShortLong,
-		&divShortFloat, &divShortDouble, &divShortTimestamp, NULL, NULL,
+		&divShortFloat, &divShortDouble, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, &divIntByte, &divIntShort, &divIntInt, &divIntLong,
-		&divIntFloat, &divIntDouble, &divIntTimestamp, NULL, NULL,
+		&divIntFloat, &divIntDouble, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, &divLongByte, &divLongShort, &divLongInt, &divLongLong,
-		&divLongFloat, &divLongDouble, &divLongTimestamp, NULL, NULL,
+		&divLongFloat, &divLongDouble, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, &divFloatByte, &divFloatShort, &divFloatInt, &divFloatLong,
-		&divFloatFloat, &divFloatDouble, &divFloatTimestamp, NULL, NULL,
+		&divFloatFloat, &divFloatDouble, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, &divDoubleByte, &divDoubleShort, &divDoubleInt,
-		&divDoubleLong, &divDoubleFloat, &divDoubleDouble, &divDoubleTimestamp,
-		NULL, NULL,
+		&divDoubleLong, &divDoubleFloat, &divDoubleDouble, NULL, NULL, NULL,
 	},
 	{
-		NULL, NULL, &divTimestampByte, &divTimestampShort, &divTimestampInt,
-		&divTimestampLong, &divTimestampFloat, &divTimestampDouble,
-		&divTimestampTimestamp, NULL, NULL,
+		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
@@ -3507,15 +2713,6 @@ static inline void modByteLong(TransactionContext&, uint8_t const* p, uint32_t,
 	value.set((*(reinterpret_cast<const int8_t*>(p))) %
 			  (*(reinterpret_cast<const int64_t*>(q))));
 }
-static inline void modByteTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int64_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
-	value.set((*(reinterpret_cast<const int8_t*>(p))) %
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
 static inline void modShortByte(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
 	if (*(reinterpret_cast<const int8_t*>(q)) == 0) {
@@ -3545,15 +2742,6 @@ static inline void modShortInt(TransactionContext&, uint8_t const* p, uint32_t,
 }
 static inline void modShortLong(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int64_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
-	value.set((*(reinterpret_cast<const int16_t*>(p))) %
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
-static inline void modShortTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
 	if (*(reinterpret_cast<const int64_t*>(q)) == 0) {
 		GS_THROW_USER_ERROR(
 			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
@@ -3597,15 +2785,6 @@ static inline void modIntLong(TransactionContext&, uint8_t const* p, uint32_t,
 	value.set((*(reinterpret_cast<const int32_t*>(p))) %
 			  (*(reinterpret_cast<const int64_t*>(q))));
 }
-static inline void modIntTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int64_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
-	value.set((*(reinterpret_cast<const int32_t*>(p))) %
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
 static inline void modLongByte(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
 	if (*(reinterpret_cast<const int8_t*>(q)) == 0) {
@@ -3642,60 +2821,6 @@ static inline void modLongLong(TransactionContext&, uint8_t const* p, uint32_t,
 	value.set((*(reinterpret_cast<const int64_t*>(p))) %
 			  (*(reinterpret_cast<const int64_t*>(q))));
 }
-static inline void modLongTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int64_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
-	value.set((*(reinterpret_cast<const int64_t*>(p))) %
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
-static inline void modTimestampByte(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int8_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
-	value.set((*(reinterpret_cast<const int64_t*>(p))) %
-			  (*(reinterpret_cast<const int8_t*>(q))));
-}
-static inline void modTimestampShort(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int16_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
-	value.set((*(reinterpret_cast<const int64_t*>(p))) %
-			  (*(reinterpret_cast<const int16_t*>(q))));
-}
-static inline void modTimestampInt(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int32_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
-	value.set((*(reinterpret_cast<const int64_t*>(p))) %
-			  (*(reinterpret_cast<const int32_t*>(q))));
-}
-static inline void modTimestampLong(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int64_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
-	value.set((*(reinterpret_cast<const int64_t*>(p))) %
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
-static inline void modTimestampTimestamp(TransactionContext&, uint8_t const* p,
-	uint32_t, uint8_t const* q, uint32_t, Value& value) {
-	if (*(reinterpret_cast<const int64_t*>(q)) == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_DIVIDE_BY_ZERO, "Divide by 0 detected.");
-	}
-	value.set((*(reinterpret_cast<const int64_t*>(p))) %
-			  (*(reinterpret_cast<const int64_t*>(q))));
-}
 const Calculator2 modTable[][11] = {
 	{
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
@@ -3705,19 +2830,19 @@ const Calculator2 modTable[][11] = {
 	},
 	{
 		NULL, NULL, &modByteByte, &modByteShort, &modByteInt, &modByteLong,
-		NULL, NULL, &modByteTimestamp, NULL, NULL,
+		NULL, NULL, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, &modShortByte, &modShortShort, &modShortInt, &modShortLong,
-		NULL, NULL, &modShortTimestamp, NULL, NULL,
+		NULL, NULL, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, &modIntByte, &modIntShort, &modIntInt, &modIntLong, NULL,
-		NULL, &modIntTimestamp, NULL, NULL,
+		NULL, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, &modLongByte, &modLongShort, &modLongInt, &modLongLong,
-		NULL, NULL, &modLongTimestamp, NULL, NULL,
+		NULL, NULL, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
@@ -3726,8 +2851,7 @@ const Calculator2 modTable[][11] = {
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 	},
 	{
-		NULL, NULL, &modTimestampByte, &modTimestampShort, &modTimestampInt,
-		&modTimestampLong, NULL, NULL, &modTimestampTimestamp, NULL, NULL,
+		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 	},
 	{
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
@@ -3736,5 +2860,4 @@ const Calculator2 modTable[][11] = {
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 	},
 };
-
 #endif

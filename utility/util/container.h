@@ -33,8 +33,6 @@
 #include <algorithm>
 #include <climits>
 
-
-
 #define UTIL_DISABLE_CONTAINER_DEFAULT_CONSTRUCTOR 1
 
 namespace util {
@@ -46,9 +44,6 @@ struct ObjectPoolUtils;
 /*!
 	@brief Manages same type object in the pool
 */
-
-
-
 template<typename T, typename Mutex = NoopMutex>
 class ObjectPool {
 	friend struct detail::ObjectPoolUtils;
@@ -64,24 +59,20 @@ public:
 
 	~ObjectPool();
 
-	
 
 	T* allocate();
 	void deallocate(T *element);
 
 	T* poll();
 
-	
 
 	void setTotalElementLimit(size_t limit);
 	void setFreeElementLimit(size_t limit);
 
-	
 
 	size_t getTotalElementCount();
 	size_t getFreeElementCount();
 
-	
 
 	void getStats(AllocatorStats &stats);
 	void setLimit(AllocatorStats::Type type, size_t value);
@@ -173,9 +164,6 @@ namespace util {
 /*!
 	@brief std::vector, using StackAllocator in default
 */
-
-
-
 template< typename T, typename Alloc = StdAllocator<T, StackAllocator> >
 class Vector : public std::vector<T, Alloc> {
 private:
@@ -218,9 +206,6 @@ private:
 /*!
 	@brief std::deque, using StackAllocator in default
 */
-
-
-
 template< typename T, typename Alloc = StdAllocator<T, StackAllocator> >
 class Deque : public std::deque<T, Alloc> {
 private:
@@ -257,9 +242,6 @@ private:
 /*!
 	@brief std::map, using StackAllocator in default
 */
-
-
-
 template< typename K, typename V, typename Comp = std::less<K>,
 	typename Alloc = StdAllocator<std::pair<K, V>, StackAllocator> >
 class Map : public std::map<K, V, Comp, Alloc> {
@@ -312,9 +294,6 @@ private:
 /*!
 	@brief std::multimup, using StackAllocator in default
 */
-
-
-
 template< typename K, typename V, typename Comp = std::less<K>,
 	typename Alloc = StdAllocator<std::pair<K, V>, StackAllocator> >
 class MultiMap : public std::multimap<K, V, Comp, Alloc> {
@@ -367,9 +346,6 @@ private:
 /*!
 	@brief std::set, using StackAllocator in default
 */
-
-
-
 template< typename T, typename Comp = std::less<T>,
 	typename Alloc = StdAllocator<T, StackAllocator> >
 class Set : public std::set<T, Comp, Alloc> {
@@ -422,9 +398,6 @@ private:
 /*!
 	@brief std::multiset, using StackAllocator in default
 */
-
-
-
 template< typename T, typename Comp = std::less<T>,
 	typename Alloc = StdAllocator<T, StackAllocator> >
 class MultiSet : public std::multiset<T, Comp, Alloc> {
@@ -479,9 +452,6 @@ template<typename T, typename Alloc> class XArray;
 /*!
 	@brief Iterates for XArray
 */
-
-
-
 template<typename V, typename T>
 class XArrayIterator {
 private:
@@ -502,7 +472,6 @@ private:
 	};
 
 public:
-	
 	typedef std::random_access_iterator_tag iterator_category;
 	typedef V value_type;
 	typedef ptrdiff_t difference_type;
@@ -539,17 +508,6 @@ private:
 			OK: int32_t, uint8_t, std::pair, std::string*, XArray*, File*
 			NG: std::string, util::XArray, util::File
 */
-
-
-
-
-
-
-
-
-
-
-
 template< typename T, typename Alloc = StdAllocator<T, StackAllocator> >
 class XArray {
 public:
@@ -567,9 +525,6 @@ public:
 	typedef std::reverse_iterator<iterator> reverse_iterator;
 	typedef std::reverse_iterator<const_iterator> const_reverse_iterator;
 
-	
-	
-	
 
 #if UTIL_DISABLE_CONTAINER_DEFAULT_CONSTRUCTOR
 	explicit XArray(const Alloc &alloc);
@@ -577,59 +532,28 @@ public:
 	explicit XArray(const Alloc &alloc = Alloc());
 #endif
 
-	
-	
-	
 
 	template<typename Iter>
 	XArray(Iter first, Iter last, const Alloc &alloc = Alloc());
 
-	
-	
-	
 
-	
 	~XArray();
 
-	
-	
-	
 
 	Alloc get_allocator() const { return allocator_; }
 
-	
-	
-	
 
 	template<typename Iter>
 	void assign(Iter first, Iter last);
 
 	void assign(size_t count, const T &value);
 
-
-
-
-
 	void clear();
 
 	void swap(XArray<T, Alloc> &another);
 
-	
-	
-	
-
-
-
-
-
-
-
-
 
 	void resize(size_t count);
-
-
-
 
 	void resize(size_t count, T value);
 
@@ -637,28 +561,11 @@ public:
 
 	bool empty() const;
 
-	
-	
-	
-
-
-
-
-
-
-
-
 
 	void reserve(size_t requestedCapacity);
 
-
-
-
 	size_t capacity() const;
 
-	
-	
-	
 
 	iterator begin() { return iterator(data_); }
 	iterator end() { return iterator(tail_); }
@@ -672,55 +579,32 @@ public:
 	const_reverse_iterator rbegin() const { return const_reverse_iterator( end() ); }
 	const_reverse_iterator rend() const { return const_reverse_iterator( begin() ); }
 
-	
-	
-	
 
 	T& front();
 	const T& front() const;
 	T& back();
 	const T& back() const;
 
-	
-	
-	
-	
 	void push_back(const T &value);
 
-	
-	
 	void push_back(const T *values, size_t count);
 
-	
 	void pop_back();
 
-	
-	
-	
 
-	
 	T& operator[](size_t index);
 	const T& operator[](size_t index) const;
 
-	
-	
 	T* data();
 
 	const T* data() const;
 
-	
-	
-	
 
-	
 	iterator insert(iterator pos, const T &value);
 
 	template<typename Iter>
 	void insert(iterator pos, Iter first, Iter last);
 
-	
-	
-	
 
 	iterator erase(iterator pos);
 	iterator erase(iterator first, iterator last);
@@ -743,9 +627,6 @@ private:
 /*!
 	@brief XArray using usual dynamic memory allocator.
 */
-
-
-
 template<typename T>
 class NormalXArray : public XArray< T, std::allocator<T> > {
 private:
@@ -794,9 +675,6 @@ template<typename T, typename Alloc> class BArray;
 /*!
 	@brief Iterates for BArray.
 */
-
-
-
 template<typename V, typename T>
 class BArrayIterator {
 private:
@@ -822,7 +700,6 @@ private:
 	typedef typename Traits<V, T>::BlockIterator BlockIterator;
 
 public:
-	
 	typedef std::random_access_iterator_tag iterator_category;
 	typedef V value_type;
 	typedef ptrdiff_t difference_type;
@@ -851,7 +728,6 @@ public:
 		return blockEnd_ - blockBegin_;
 	}
 
-	
 	pointer cur_;
 	pointer blockBegin_;
 	pointer blockEnd_;
@@ -888,12 +764,6 @@ private:
 /*!
 	@brief Manages array, using a block allocator.
 */
-
-
-
-
-
-
 template< typename T, typename Alloc = StdAllocator<T, StackAllocator> >
 class BArray {
 public:
@@ -911,9 +781,6 @@ public:
 	typedef std::reverse_iterator<iterator> reverse_iterator;
 	typedef std::reverse_iterator<const_iterator> const_reverse_iterator;
 
-	
-	
-	
 
 #if UTIL_DISABLE_CONTAINER_DEFAULT_CONSTRUCTOR
 	explicit BArray(const Alloc &alloc);
@@ -923,9 +790,6 @@ public:
 	explicit BArray(const BArrayOption &option, const Alloc &alloc = Alloc());
 #endif
 
-	
-	
-	
 
 	template<typename Iter>
 	BArray(Iter first, Iter last, const Alloc &alloc = Alloc());
@@ -934,53 +798,26 @@ public:
 	BArray(Iter first, Iter last,
 		const BArrayOption &option, const Alloc &alloc = Alloc());
 
-	
-	
-	
 
 	~BArray();
 
-	
-	
-	
 
 	Alloc get_allocator() const {
 		return allocator_type(blockTable_.get_allocator());
 	}
 
-	
-	
-	
 
 	template<typename Iter>
 	void assign(Iter first, Iter last);
 
 	void assign(size_t count, const T &value);
 
-
-
-
-
 	void clear();
 
 	void swap(BArray<T, Alloc> &another);
 
-	
-	
-	
-
-
-
-
-
-
-
-
 
 	void resize(size_t count);
-
-
-
 
 	void resize(size_t count, T value);
 
@@ -988,28 +825,11 @@ public:
 
 	bool empty() const;
 
-	
-	
-	
-
-
-
-
-
-
-
-
 
 	void reserve(size_t count);
 
-
-
-
 	size_t capacity() const;
 
-	
-	
-	
 
 	iterator begin();
 	iterator end();
@@ -1023,9 +843,6 @@ public:
 	const_reverse_iterator rbegin() const { return const_reverse_iterator( end() ); }
 	const_reverse_iterator rend() const { return const_reverse_iterator( begin() ); }
 
-	
-	
-	
 
 	T& front();
 	const T& front() const;
@@ -1037,30 +854,17 @@ public:
 
 	void pop_back();
 
-	
-	
-	
 
-	
-	
-	
 
-	
 	T& operator[](size_t index);
 	const T& operator[](size_t index) const;
 
-	
-	
-	
 
 	iterator insert(iterator pos, const T &value);
 
 	template<typename Iter>
 	void insert(iterator pos, Iter first, Iter last);
 
-	
-	
-	
 
 	iterator erase(iterator pos);
 	iterator erase(iterator first, iterator last);
@@ -1087,9 +891,6 @@ private:
 /*!
 	@brief NormalBArray using usual dynamic memory allocator.
 */
-
-
-
 template<typename T>
 class NormalBArray : public BArray< T, std::allocator<T> > {
 private:
@@ -1114,10 +915,6 @@ public:
 /*!
 	@brief Lists data in order.
 */
-
-
-
-
 template< typename T, typename Comp = std::less<T>,
 	typename Base = XArray<T> >
 class SortedList {
@@ -1217,9 +1014,6 @@ private:
 /*!
 	@brief Lists data in order using usual dynamic memory allocator.
 */
-
-
-
 template< typename T, typename Comp = std::less<T> >
 class NormalSortedList : public SortedList< T, Comp, NormalXArray<T> > {
 private:
@@ -1242,9 +1036,6 @@ public:
 	@brief Maps entries only referred.
 	@note Thread safe
 */
-
-
-
 template<typename K, typename V>
 class WeakMap {
 public:
@@ -1277,9 +1068,6 @@ private:
 /*!
 	@brief Refers WeakMap entries
 */
-
-
-
 template<typename K, typename V>
 class WeakMapReference {
 public:
@@ -1298,95 +1086,10 @@ private:
 };
 
 
-#if 0
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-template<typename T, typename Alloc>
-class BlockingQueue {
-public:
-
-
-
-
-
-
-	explicit BlockingQueue(
-		size_t initialCapacity = 0, size_t limit = 0, const Alloc &alloc = Alloc());
-	~BlockingQueue();
-
-
-
-	bool push(const T &src, bool tryPush = false, uint32_t timeoutMillisec = 0);
-
-
-
-	bool pop(T &dest, bool tryPop = false, uint32_t timeoutMillisec = 0);
-
-private:
-	BlockingQueue(const BlockingQueue&);
-	BlockingQueue& operator=(const BlockingQueue&);
-
-	Deque<T, Alloc> base_;
-	const size_t limit_;
-
-	Mutex mutex_;
-	Event popEvent_;
-	Event pushEvent_;
-};
-
-template<typename V>
-class LimitedFlatTrie {
-public:
-	LimitedFlatTrie(const std::set<V> &orgSet);
-	~LimitedFlatTrie();
-	bool find(const V value);
-
-private:
-	typedef int32_t Block;		
-	static const size_t TABLE_BITS = 12;	
-	static const size_t TABLE_SIZE = static_cast<size_t>(1) << TABLE_BITS;
-	static const V TABLE_MASK = static_cast<V>(
-			(static_cast<size_t>(1) << TABLE_BITS) - 1 );
-
-	Block blockList_[TABLE_SIZE];
-	bool conflict_;
-	std::set<V> valueSet_;
-};
-#endif
-
-
-
-
-
-
 
 /*!
 	@brief Manages byte stream for XArray.
 */
-
-
-
 template< typename Alloc = StdAllocator<uint8_t, StackAllocator> >
 class XArrayOutStream : public BasicByteStream< XArrayOutStream<Alloc> > {
 public:
@@ -1414,14 +1117,9 @@ typedef ByteStream<NormalOutStream> NormalByteOutStream;
 /*!
 	@brief Manages byte stream for writable object, e.g. files.
 */
-
-
-
-
 template<typename Base>
 class BufferedOutStream : public BasicByteStream< BufferedOutStream<Base> > {
 public:
-	
 	inline explicit BufferedOutStream(
 		Base &base, NormalXArray<uint8_t> &buffer, size_t limitSize);
 
@@ -1439,26 +1137,12 @@ private:
 
 
 
-
-
-
-
-
-
-
-
 #ifdef _MSC_VER
-
 typedef class XArray<int32_t> Int32XArray;
 typedef class XArray<uint32_t> UInt32XArray;
 typedef class BArray<int32_t> Int32BArray;
 typedef class BArray<uint32_t> UInt32BArray;
 #endif
-
-
-
-
-
 
 
 
@@ -1569,14 +1253,14 @@ void ObjectPool<T, Mutex>::getStats(AllocatorStats &stats) {
 	stats.merge(stats_);
 	stats.values_[AllocatorStats::STAT_CACHE_SIZE] +=
 			AllocatorStats::asStatValue(
-					freeElementCount_ * base_.getTotalElementCount());
+					freeElementCount_ * base_.getElementSize());
 }
 
 template<typename T, typename Mutex>
 void ObjectPool<T, Mutex>::setLimit(AllocatorStats::Type type, size_t value) {
 	switch (type) {
 	case AllocatorStats::STAT_CACHE_LIMIT:
-		setFreeElementLimit(value / base_.getTotalElementCount());
+		setFreeElementLimit(value / base_.getElementSize());
 		break;
 	default:
 		break;
@@ -1641,11 +1325,6 @@ void ObjectPool<T, Mutex>::clear(size_t preservedCount) {
 		freeElementCount_--;
 	}
 }
-
-
-
-
-
 
 
 template<typename V, typename T>
@@ -1813,11 +1492,6 @@ inline typename XArrayIterator<V1, T>::difference_type operator-(
 }
 
 
-
-
-
-
-
 template<typename T, typename Alloc>
 XArray<T, Alloc>::XArray(const Alloc &alloc) :
 	allocator_(alloc), restSize_(0), data_(NULL), tail_(NULL)
@@ -1889,7 +1563,6 @@ void XArray<T, Alloc>::swap(XArray<T, Alloc> &another) {
 
 template<typename T, typename Alloc>
 size_t XArray<T, Alloc>::size() const {
-	
 	return static_cast<size_t>(tail_ - data_);
 }
 
@@ -2075,7 +1748,6 @@ void XArray<T, Alloc>::reserveInternal(size_t requestedCapacity) {
 	assert (0 < requestedCapacity);
 	assert (size() < requestedCapacity);
 
-	
 	const uint32_t MIN_CAPACITY_BIT = 4;	
 	const size_t usedSize = this->size();
 	const size_t newCapacity = (1U << std::max<uint32_t>(
@@ -2106,11 +1778,6 @@ void XArray<T, Alloc>::reserveInternal(size_t requestedCapacity) {
 	tail_ = data_ + usedSize;
 	restSize_ = newCapacity - usedSize;
 }
-
-
-
-
-
 
 
 template<typename V, typename T>
@@ -2358,11 +2025,6 @@ inline typename BArrayIterator<V1, T>::difference_type operator-(
 }
 
 
-
-
-
-
-
 template<typename T, typename Alloc>
 BArray<T, Alloc>::BArray(const Alloc &alloc) :
 	tail_(NULL),
@@ -2443,7 +2105,6 @@ void BArray<T, Alloc>::destroy() {
 template<typename T, typename Alloc>
 template<typename Iter>
 void BArray<T, Alloc>::assign(Iter first, Iter last) {
-	
 	clear();
 	for (; first != last; ++first) {
 		push_back(*first);
@@ -2468,7 +2129,6 @@ void BArray<T, Alloc>::clear() {
 
 template<typename T, typename Alloc>
 void BArray<T, Alloc>::swap(BArray<T, Alloc> &another) {
-	
 	if (this == &another) {
 		return;
 	}
@@ -2555,7 +2215,6 @@ size_t BArray<T, Alloc>::capacity() const {
 
 template<typename T, typename Alloc>
 typename BArray<T, Alloc>::iterator BArray<T, Alloc>::begin() {
-	
 	if ( empty() ) {
 		return iterator(NULL, NULL, NULL, blockItr_);
 	}
@@ -2567,7 +2226,6 @@ typename BArray<T, Alloc>::iterator BArray<T, Alloc>::begin() {
 
 template<typename T, typename Alloc>
 typename BArray<T, Alloc>::iterator BArray<T, Alloc>::end() {
-	
 	if (tail_ == blockEnd_) {
 		if (tail_ == NULL) {
 			return iterator( NULL, NULL, NULL, blockTable_.end() );
@@ -2583,7 +2241,6 @@ typename BArray<T, Alloc>::iterator BArray<T, Alloc>::end() {
 
 template<typename T, typename Alloc>
 typename BArray<T, Alloc>::const_iterator BArray<T, Alloc>::begin() const {
-	
 	if ( empty() ) {
 		return const_iterator( NULL, NULL, NULL, blockTable_.begin() );
 	}
@@ -2595,7 +2252,6 @@ typename BArray<T, Alloc>::const_iterator BArray<T, Alloc>::begin() const {
 
 template<typename T, typename Alloc>
 typename BArray<T, Alloc>::const_iterator BArray<T, Alloc>::end() const {
-	
 	if (tail_ == blockEnd_) {
 		if (tail_ == NULL) {
 			return const_iterator( NULL, NULL, NULL, blockTable_.end() );
@@ -2624,7 +2280,6 @@ const T& BArray<T, Alloc>::front() const {
 template<typename T, typename Alloc>
 T& BArray<T, Alloc>::back() {
 	assert ( !empty() );
-	
 	if (tail_ - 1 == blockEnd_ - (static_cast<size_t>(1) << blockBits_)) {
 		return *(--end());
 	}
@@ -2634,7 +2289,6 @@ T& BArray<T, Alloc>::back() {
 template<typename T, typename Alloc>
 const T& BArray<T, Alloc>::back() const {
 	assert ( !empty() );
-	
 	if (tail_ - 1 == blockEnd_ - (static_cast<size_t>(1) << blockBits_)) {
 		return *(--end());
 	}
@@ -2658,7 +2312,6 @@ inline void BArray<T, Alloc>::push_back(const T &value) {
 
 template<typename T, typename Alloc>
 inline void BArray<T, Alloc>::push_back(const T *values, size_t count) {
-	
 	const T *endIt = values + count;
 	for (const T *it = values; it != endIt; ++it) {
 		push_back(*it);
@@ -2807,11 +2460,6 @@ typename BArray<T, Alloc>::iterator BArray<T, Alloc>::erase(
 	return (begin() + index);
 }
 
-
-
-
-
-
 template<typename K, typename V>
 WeakMap<K, V>::WeakMap() {
 }
@@ -2896,144 +2544,6 @@ void WeakMapReference<K, V>::unmanage() {
 	value_ = NULL;
 }
 
-#if 0
-
-
-
-
-
-
-template<typename V>
-LimitedFlatTrie<V>::LimitedFlatTrie(const std::set<V> &orgSet) :
-		conflict_(false), valueSet_(orgSet) {
-
-	std::fill( &blockList_[0], &blockList_[TABLE_SIZE],
-		static_cast<Block>(false) );
-	for ( typename std::set<V>::iterator it = valueSet_.begin();
-			it != valueSet_.end(); ++it ) {
-		const V value = *it;
-		if ( (value & (~TABLE_MASK)) != 0 ) {
-			conflict_ |= true;
-		}
-
-		Block &found = blockList_[value & TABLE_MASK];
-		if (found) {
-			conflict_ |= true;
-		}
-		else {
-			found |= true;
-		}
-	}
-}
-
-template<typename V>
-LimitedFlatTrie<V>::~LimitedFlatTrie() {
-}
-
-template<typename V>
-inline bool LimitedFlatTrie<V>::find(const V value) {
-	if (blockList_[value & TABLE_MASK]) {
-		if (conflict_) {
-			return ( valueSet_.find(value) != valueSet_.end() );
-		}
-		else {
-			return true;
-		}
-	}
-	return false;
-}
-#endif
-
-
-#if 0
-
-
-
-
-
-
-template<typename T, typename Alloc>
-BlockingQueue<T, Alloc>::BlockingQueue(
-	size_t initialCapacity, size_t limit, const Alloc &alloc) :
-	base_(initialCapacity, T(), alloc),
-	limit_(limit)
-{
-	base_.clear();
-}
-
-template<typename T, typename Alloc>
-BlockingQueue<T, Alloc>::~BlockingQueue() {
-}
-
-template<typename T, typename Alloc>
-bool BlockingQueue<T, Alloc>::push(
-	const T &src, bool tryPush, uint32_t timeoutMillisec)
-{
-	WaitableTimer timer(tryPush, timeoutMillisec);
-
-	for (;;) {
-		
-		{
-			Lock lock(mutex_);
-
-			if (limit_ == 0 || base_.size() < limit_) {		
-				base_.push_back(src);		
-				popEvent_.signal();		
-
-				return true;
-			}
-
-			if (limit_ > 0) {
-				pushEvent_.reset();
-			}
-		}
-
-		
-		if ( limit_ > 0 && !timer.wait(pushEvent_) ) {
-			return false;
-		}
-	}
-}
-
-template<typename T, typename Alloc>
-bool BlockingQueue<T, Alloc>::pop(
-	T &dest, bool tryPop, uint32_t timeoutMillisec)
-{
-	WaitableTimer timer(tryPop, timeoutMillisec);
-
-	for (;;) {
-		
-		{
-			Lock lock(mutex_);
-
-			if ( !base_.empty() ) {		
-				dest = base_.front();		
-				base_.pop_front();
-
-				if (limit_ > 0) {
-					pushEvent_.signal();		
-				}
-
-				return true;
-			}
-
-			popEvent_.reset();
-		}
-
-		
-		if ( !timer.wait(popEvent_) ) {
-			return false;
-		}
-	}
-}
-#endif
-
-
-
-
-
-
-
 
 
 
@@ -3055,9 +2565,6 @@ inline void XArrayOutStream<Alloc>::writeAll(const void *buf, size_t length) {
 	buffer_.resize(lastSize + length);
 	memcpy(&buffer_[0] + lastSize, buf, length);
 }
-
-
-
 
 
 template<typename Base>

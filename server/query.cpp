@@ -436,21 +436,12 @@ void Query::setFromCollection(Token &name1, Token &, TransactionContext &txn) {
 	memcpy(str, name1.z, name1.n + 1);
 	str[name1.n] = '\0';
 
-	if (str[0] == '"') {
-		if (str[name1.n - 1] != '"') {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_TQ_SYNTAX_ERROR_CANNOT_DEQUOTE, "Cannot dequote");
-		}
-		collectionName = str + 1;
-	}
-	else {
-		collectionName = str;
-	}
+	collectionName = Expr::dequote(txn.getDefaultAllocator(), str);
 
 	if (pCollectionName) {
 		if (!eqCaseStringStringI(txn_,
 				reinterpret_cast<const uint8_t *>(collectionName),
-				static_cast<uint32_t>(name1.n),
+				static_cast<uint32_t>(strlen(collectionName)),
 				reinterpret_cast<const uint8_t *>(pCollectionName),
 				collectionNameLen)) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_INVALID_COLLECTION_NAME,

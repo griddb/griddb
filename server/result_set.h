@@ -27,6 +27,7 @@
 
 
 class BaseContainer;
+class ContainerRowScanner;
 /*!
 	@brief ResultSet
 */
@@ -66,6 +67,7 @@ public:
 	inline void setSkipCount(uint64_t count) {
 		skipCount_ = count;
 	}
+
 
 	inline void setFetchNum(ResultSize fetchNum) {
 		fetchNum_ = fetchNum;
@@ -137,6 +139,7 @@ public:
 	inline uint64_t getSkipCount() const {
 		return skipCount_;
 	}
+
 
 	inline bool getRowExist() const {
 		return resultNum_ > 0;
@@ -274,6 +277,7 @@ private:
 	uint64_t varOffsetSize_;
 	uint64_t
 		skipCount_;  
+
 
 	ResultType resultType_;
 

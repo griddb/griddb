@@ -30,6 +30,17 @@
 #include "gs_error.h"
 #include "system_service.h"
 
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+#include "service_address.h"
+
+
+#define DEBUG_CLUSTER_DIGEST(d, n)
+
+#define DEBUG_CLUSTER_DIGEST_LIST(infosetType, infoset)
+
+
+#endif  
+
 
 class ClusterService;
 class ClusterManager;
@@ -52,14 +63,14 @@ class ObjectManager;
 struct ManagerSet {
 	ManagerSet(ClusterService *clsSvc, SyncService *syncSvc,
 		TransactionService *txnSvc, CheckpointService *cpSvc,
-		SystemService *sysSvc, TriggerService *trgSvc,
-		PartitionTable *pt, DataStore *ds, LogManager *logMgr,
-		ClusterManager *clsMgr, SyncManager *syncMgr,
-		TransactionManager *txnMgr, ChunkManager *chunkMgr,
-		RecoveryManager *recoveryMgr, ObjectManager *objectMgr,
-		GlobalFixedSizeAllocator *fixedSizeAlloc,
+		SystemService *sysSvc, TriggerService *trgSvc, PartitionTable *pt,
+		DataStore *ds, LogManager *logMgr, ClusterManager *clsMgr,
+		SyncManager *syncMgr, TransactionManager *txnMgr,
+		ChunkManager *chunkMgr, RecoveryManager *recoveryMgr,
+		ObjectManager *objectMgr, GlobalFixedSizeAllocator *fixedSizeAlloc,
 		GlobalVariableSizeAllocator *varSizeAlloc, ConfigTable *config,
-		StatTable *stats)
+		StatTable *stats
+		)
 		: clsSvc_(clsSvc),
 		  syncSvc_(syncSvc),
 		  txnSvc_(txnSvc),
@@ -119,7 +130,7 @@ struct ClusterStats {
 	/*!
 		@brief cluster statistics type for setting
 	*/
-	enum SetType { CLUSTER_RECIEVE, CLUSTER_SEND, SYNC_RECIEVE, SYNC_SEND };
+	enum SetType { CLUSTER_RECEIVE, CLUSTER_SEND, SYNC_RECEIVE, SYNC_SEND };
 
 	static const int32_t TYPE_UNIT = 4;
 
@@ -127,13 +138,13 @@ struct ClusterStats {
 		@brief cluster statistics type for getting
 	*/
 	enum GetType {
-		CLUSTER_RECIEVE_BYTE,
+		CLUSTER_RECEIVE_BYTE,
 		CLUSTER_SEND_BYTE,
-		SYNC_RECIEVE_BYTE,
+		SYNC_RECEIVE_BYTE,
 		SYNC_SEND_BYTE,
-		CLUSTER_RECIEVE_COUNT,
+		CLUSTER_RECEIVE_COUNT,
 		CLUSTER_SEND_COUNT,
-		SYNC_RECIEVE_COUNT,
+		SYNC_RECEIVE_COUNT,
 		SYNC_SEND_COUNT,
 		MAX_GET_TYPE
 	};
@@ -166,7 +177,7 @@ struct ClusterStats {
 			eventErrorCount_[eventType]++;
 			totalErrorCount_++;
 		}
-		if (pId != UNDEF_PARTITIONID && pId < partitionNum_) {
+		if (pId != UNDEF_PARTITIONID && pId >= 0 && pId < partitionNum_) {
 			partitionErrorCount_[pId]++;
 		}
 	}
@@ -194,11 +205,11 @@ struct ClusterStats {
 
 	int64_t getClusterByteAll() {
 		return (
-			valueList_[CLUSTER_RECIEVE_BYTE] + valueList_[CLUSTER_SEND_BYTE]);
+			valueList_[CLUSTER_RECEIVE_BYTE] + valueList_[CLUSTER_SEND_BYTE]);
 	}
 
 	int64_t getSyncByteAll() {
-		return (valueList_[SYNC_RECIEVE_BYTE] + valueList_[SYNC_SEND_BYTE]);
+		return (valueList_[SYNC_RECEIVE_BYTE] + valueList_[SYNC_SEND_BYTE]);
 	}
 
 	int64_t getByteAll() {
@@ -206,11 +217,11 @@ struct ClusterStats {
 	}
 
 	int64_t getClusterCountAll() {
-		return (valueList_[SYNC_RECIEVE_BYTE] + valueList_[SYNC_SEND_BYTE]);
+		return (valueList_[SYNC_RECEIVE_BYTE] + valueList_[SYNC_SEND_BYTE]);
 	}
 
 	int64_t getSyncCountAll() {
-		return (valueList_[SYNC_RECIEVE_COUNT] + valueList_[SYNC_SEND_COUNT]);
+		return (valueList_[SYNC_RECEIVE_COUNT] + valueList_[SYNC_SEND_COUNT]);
 	}
 
 	int64_t getCountAll() {
@@ -244,13 +255,25 @@ public:
 
 	void initialize(const ManagerSet &mgrSet);
 
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+	static NodeId checkAddress(PartitionTable *pt, EventType type,
+		NodeAddress &address, NodeId clusterNodeId, ServiceType serviceType,
+		EventEngine *ee);
+#endif
+
 protected:
 
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+	template <class T>
+	void updateNodeList(EventType type, T &AddressInfoList);
+#else
 	void updateNodeList(
 		EventType type, std::vector<AddressInfo> &AddressInfoList);
 
 	NodeId checkAddress(EventType type, NodeAddress &address,
 		NodeId clusterNodeId, ServiceType serviceType, EventEngine *ee);
+
+#endif
 
 	void checkAutoNdNumbering(const NodeDescriptor &nd);
 
@@ -402,22 +425,39 @@ public:
 };
 
 
+
 /*!
 	@brief ClusterService
 */
 class ClusterService {
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+	class NotificationManager;
+	friend class TimerNotifyClusterHandler;
+	friend class ClusterManager::StatUpdator;
+
+#endif  
+
 public:
 
 	ClusterService(const ConfigTable &config, EventEngine::Config &eeConfig,
 		EventEngine::Source source, const char8_t *name, ClusterManager &clsMgr,
 		ClusterVersionId versionId,
-		ServiceThreadErrorHandler &serviceThreadErrorHandler);
+		ServiceThreadErrorHandler &serviceThreadErrorHandler
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+		,
+		const util::StdAllocator<void, void> &alloc
+#endif
+		);
 
 	~ClusterService();
 
 	void initialize(ManagerSet &mgrSet);
 
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+	void start(const Event::Source &eventSource);
+#else
 	void start();
+#endif
 
 	void shutdown();
 
@@ -478,14 +518,26 @@ public:
 
 	static NodeId resolveSenderND(Event &ev);
 
-	static void getAddress(
-		NodeAddress &nodeAddress, NodeId nodeId, EventEngine *ee);
+	static void changeAddress(NodeAddress &nodeAddress, NodeId nodeId,
+		ServiceType serviceType, EventEngine *ee);
 
-	static NodeId getNodeId(NodeAddress &nodeAddress, EventEngine *ee);
+	static NodeId changeNodeId(NodeAddress &nodeAddress, EventEngine *ee);
 
 	ClusterStats &getStats() {
 		return clusterStats_;
 	}
+
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+	template <class T>
+	void updateNodeList(EventType type, T &AddressInfoList);
+
+	NotificationManager &getNotificationManager();
+#endif
+
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+	static bool isMulticastMode(const ConfigTable &config);
+#endif
+
 
 
 private:
@@ -526,6 +578,116 @@ private:
 	PartitionTable *pt_;
 	bool initailized_;
 	bool isSystemServiceError_;
+
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+
+	class NotificationManager {
+	public:
+		static const int32_t DEFAULT_CHECK_INTERVAL = 1 * 1000;
+		static const int32_t LONG_CHECK_INTERVAL = 3 * 1000;
+
+		static const char *CONFIG_ADDRESS;
+		static const char *CONFIG_PORT;
+		static const char *CONFIG_URL;
+		static const char *CONFIG_UPDATE_INTERVAL;
+
+		/*!
+			@brief Constructor of NotificationManager
+		*/
+		NotificationManager(ClusterManager *clsMgr,
+			const util::StdAllocator<void, void> &valloc);
+
+		/*!
+			@brief Destructor of NotificationManager
+		*/
+		~NotificationManager();
+
+		/*!
+			@brief Initializer
+		*/
+		void initialize(util::StackAllocator &alloc, const ConfigTable &config);
+
+		/*!
+			@brief Sets resolver updating interval
+		*/
+		int32_t updateResolverInterval() {
+			return resolverUpdateInterval_;
+		}
+
+		int32_t checkResolverInterval() {
+			return resolverCheckInterval_;
+		}
+
+		int32_t checkResolverLongInterval() {
+			return resolverCheckLongInterval_;
+		}
+
+		/*!
+			@brief Gets the cluster notification mode.
+		*/
+		ClusterNotificationMode getMode() {
+			return mode_;
+		}
+
+		/*!
+			@brief Sets digest value of a set of fixed address info.
+		*/
+		void setDigest(util::XArray<uint8_t> &digestBinary);
+
+		/*!
+			@brief Gets a set of fixed address info.
+		*/
+		NodeAddressSet &getFixedAddressInfo();
+
+		/*!
+			@brief Gets the number of fixed adderss info.
+		*/
+		int32_t getFixedNodeNum() {
+			return fixedNodeNum_;
+		}
+
+		/*!
+			@brief Requests the resolver the next update.
+		*/
+		bool next();
+
+		int32_t check();
+
+		/*!
+			@brief Requests the resolver to start to update.
+		*/
+		ServiceAddressResolver *getResolver(int32_t pos = 0) {
+			return resolverList_[pos];
+		}
+
+		void getNotificationMember(picojson::value &target);
+
+
+
+	private:
+		ClusterManager *clsMgr_;
+
+		PartitionTable *pt_;
+
+		const util::StdAllocator<void, void> &valloc_;
+
+		ClusterNotificationMode mode_;
+
+		std::vector<ServiceAddressResolver *> resolverList_;
+
+		NodeAddressSet fixedAddressInfoSet_;
+
+		int32_t fixedNodeNum_;
+
+		int32_t resolverUpdateInterval_;
+
+		int32_t resolverCheckInterval_;
+		int32_t resolverCheckLongInterval_;
+	};
+
+	NotificationManager notificationManager_;
+
+#endif  
 };
 
 #endif

@@ -121,7 +121,7 @@ void RecoveryManager::initialize(ManagerSet &mgrSet) {
 /*!
 	@brief Checks if files exist.
 */
-void RecoveryManager::checkExistingFiles(
+void RecoveryManager::checkExistingFiles1(
 	ConfigTable &param, bool &createFlag, bool forceRecoveryFromExistingFiles) {
 	createFlag = false;
 	const char8_t *const dbPath =
@@ -129,7 +129,7 @@ void RecoveryManager::checkExistingFiles(
 	if (util::FileSystem::exists(dbPath)) {
 		if (!util::FileSystem::isDirectory(dbPath)) {
 			GS_THROW_SYSTEM_ERROR(
-				GS_ERROR_CM_IO_ERROR, "Create data diretory failed. path=\""
+				GS_ERROR_CM_IO_ERROR, "Create data directory failed. path=\""
 										  << dbPath << "\" is not directory");
 		}
 	}
@@ -184,7 +184,85 @@ void RecoveryManager::checkExistingFiles(
 				continue;
 			}
 		}
+		bool existLogFile = false;
+		std::vector<PartitionGroupId> emptyPgIdList;
+		for (PartitionGroupId pgId = 0; pgId < partitionGroupNum; ++pgId) {
+			if (logFileInfoList[pgId].size() == 0) {
+				if (forceRecoveryFromExistingFiles) {
+					emptyPgIdList.push_back(pgId);
+				}
+				else if (existLogFile) {
+					GS_THROW_SYSTEM_ERROR(GS_ERROR_RM_LOG_FILE_NOT_FOUND,
+						"Log files are not found: pgId=" << pgId);
+				}
+			}
+			else {
+				existLogFile = true;
+			}
+		}
+		if (!existLogFile) {
+			for (PartitionGroupId pgId = 0; pgId < partitionGroupNum; ++pgId) {
+				if (cpFileInfoList[pgId] != 0) {
+					GS_THROW_SYSTEM_ERROR(GS_ERROR_RM_CP_FILE_WITH_NO_LOG_FILE,
+						"Checkpoint file is exist, but log files are not "
+						"exist: pgId="
+							<< pgId);
+				}
+			}
+			createFlag = true;
+		}
+	}
+	catch (std::exception &e) {
+		GS_RETHROW_USER_OR_SYSTEM(e, "File access failed. reason=("
+										 << GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+}
 
+void RecoveryManager::checkExistingFiles2(ConfigTable &param,
+	LogManager &logMgr, bool &createFlag, bool forceRecoveryFromExistingFiles) {
+	if (createFlag) {
+		return;
+	}
+	const char8_t *const dbPath =
+		param.get<const char8_t *>(CONFIG_TABLE_DS_DB_PATH);
+	try {
+		const uint32_t partitionGroupNum =
+			param.getUInt32(CONFIG_TABLE_DS_CONCURRENCY);
+
+		util::Directory dir(dbPath);
+
+		std::vector<std::vector<CheckpointId> > logFileInfoList(
+			partitionGroupNum);
+		std::vector<int32_t> cpFileInfoList(partitionGroupNum);
+
+		for (u8string fileName; dir.nextEntry(fileName);) {
+			PartitionGroupId pgId = UNDEF_PARTITIONGROUPID;
+			CheckpointId cpId = UNDEF_CHECKPOINT_ID;
+
+			if (LogManager::checkFileName(fileName, pgId, cpId)) {
+				if (pgId >= partitionGroupNum) {
+					GS_THROW_SYSTEM_ERROR(
+						GS_ERROR_RM_PARTITION_GROUP_NUM_NOT_MATCH,
+						"Invalid PartitionGroupId: "
+							<< pgId << ", config partitionGroupNum="
+							<< partitionGroupNum << ", fileName=" << fileName);
+				}
+				logFileInfoList[pgId].push_back(cpId);
+			}
+			else if (CheckpointFile::checkFileName(fileName, pgId)) {
+				if (pgId >= partitionGroupNum) {
+					GS_THROW_SYSTEM_ERROR(
+						GS_ERROR_RM_PARTITION_GROUP_NUM_NOT_MATCH,
+						"Invalid PartitionGroupId: "
+							<< pgId << ", config partitionGroupNum="
+							<< partitionGroupNum << ", fileName=" << fileName);
+				}
+				cpFileInfoList[pgId] = 1;
+			}
+			else {
+				continue;
+			}
+		}
 		bool existLogFile = false;
 		std::vector<PartitionGroupId> emptyPgIdList;
 		for (PartitionGroupId pgId = 0; pgId < partitionGroupNum; ++pgId) {
@@ -204,22 +282,28 @@ void RecoveryManager::checkExistingFiles(
 		if (existLogFile) {
 			for (PartitionGroupId pgId = 0; pgId < partitionGroupNum; ++pgId) {
 				if (cpFileInfoList[pgId] == 0) {
-					if (forceRecoveryFromExistingFiles) {
-						if (logFileInfoList[pgId].size() != 0) {
+					if (logMgr.getLastCompletedCheckpointId(pgId) !=
+						UNDEF_CHECKPOINT_ID) {
+						if (forceRecoveryFromExistingFiles) {
+							if (logFileInfoList[pgId].size() != 0) {
+								GS_THROW_SYSTEM_ERROR(
+									GS_ERROR_RM_LOG_FILE_CP_FILE_MISMATCH,
+									"Checkpoint file is not exist, and log "
+									"files are not complete: pgId="
+										<< pgId);
+							}
+							createFlag = true;
+						}
+						else {
 							GS_THROW_SYSTEM_ERROR(
 								GS_ERROR_RM_LOG_FILE_CP_FILE_MISMATCH,
 								"Checkpoint file is not exist, and log files "
 								"are not complete: pgId="
 									<< pgId);
 						}
-						createFlag = true;
 					}
 					else {
-						GS_THROW_SYSTEM_ERROR(
-							GS_ERROR_RM_LOG_FILE_CP_FILE_MISMATCH,
-							"Checkpoint file is not exist, and log files are "
-							"not complete: pgId="
-								<< pgId);
+						createFlag = true;
 					}
 				}
 			}
@@ -246,7 +330,7 @@ void RecoveryManager::checkExistingFiles(
 	@brief Parses a string of a partition of the recovery target.
 */
 void RecoveryManager::parseRecoveryTargetPartition(const std::string &str) {
-	const size_t MAX_PARTIITON_NUM_STRING_LEN =
+	const size_t MAX_PARTITION_NUM_STRING_LEN =
 		5;  
 	const uint32_t partitionNum = pgConfig_.getPartitionCount();
 	if (str.length() > 0) {
@@ -263,7 +347,7 @@ void RecoveryManager::parseRecoveryTargetPartition(const std::string &str) {
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_RM_INVALID_PARTITION,
 			"Invalid partition range (" << str << ")");
 	}
-	bool vallidPIdFound = false;
+	bool validPIdFound = false;
 	std::vector<std::string> pIdsList;
 	size_t current = 0;
 	size_t found = 0;
@@ -287,7 +371,7 @@ void RecoveryManager::parseRecoveryTargetPartition(const std::string &str) {
 				std::string(numStr, current, found - current);
 			std::string endStr =
 				std::string(numStr, found + 1, numStr.length() - (found + 1));
-			if (startStr.length() > MAX_PARTIITON_NUM_STRING_LEN) {
+			if (startStr.length() > MAX_PARTITION_NUM_STRING_LEN) {
 				GS_THROW_SYSTEM_ERROR(GS_ERROR_RM_INVALID_PARTITION,
 					"Invalid partition No. (" << startStr << ")");
 			}
@@ -295,7 +379,7 @@ void RecoveryManager::parseRecoveryTargetPartition(const std::string &str) {
 				GS_THROW_SYSTEM_ERROR(GS_ERROR_RM_INVALID_PARTITION,
 					"Invalid partition range (" << numStr << ")");
 			}
-			if (endStr.length() > MAX_PARTIITON_NUM_STRING_LEN) {
+			if (endStr.length() > MAX_PARTITION_NUM_STRING_LEN) {
 				GS_THROW_SYSTEM_ERROR(GS_ERROR_RM_INVALID_PARTITION,
 					"Invalid partition No. (" << endStr << ")");
 			}
@@ -324,10 +408,10 @@ void RecoveryManager::parseRecoveryTargetPartition(const std::string &str) {
 			for (uint32_t pId = startPId; pId <= endPId; ++pId) {
 				recoveryPartitionId_[pId] = 1;
 			}
-			vallidPIdFound = true;
+			validPIdFound = true;
 		}
 		else {
-			if (numStr.length() > MAX_PARTIITON_NUM_STRING_LEN) {
+			if (numStr.length() > MAX_PARTITION_NUM_STRING_LEN) {
 				GS_THROW_SYSTEM_ERROR(GS_ERROR_RM_INVALID_PARTITION,
 					"Invalid partition No. (" << numStr << ")");
 			}
@@ -337,10 +421,10 @@ void RecoveryManager::parseRecoveryTargetPartition(const std::string &str) {
 					"Invalid partition No. (" << numStr << ")");
 			}
 			recoveryPartitionId_[targetPId] = 1;
-			vallidPIdFound = true;
+			validPIdFound = true;
 		}
 	}
-	if (!vallidPIdFound) {
+	if (!validPIdFound) {
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_RM_INVALID_PARTITION,
 			"Invalid partition range (" << str << ")");
 	}
@@ -431,7 +515,7 @@ void RecoveryManager::recovery(
 }
 
 /*!
-	@brief Undos uncommitted transactions of restored partitions.
+	@brief Undoes uncommitted transactions of restored partitions.
 */
 size_t RecoveryManager::undo(util::StackAllocator &alloc, PartitionId pId) {
 
@@ -501,7 +585,7 @@ size_t RecoveryManager::undo(util::StackAllocator &alloc, PartitionId pId) {
 }
 
 /*!
-	@brief Redos logs,
+	@brief Redoes logs,
 */
 void RecoveryManager::redoLogList(util::StackAllocator &alloc, Mode mode,
 	PartitionId pId, const util::DateTime &redoStartTime,
@@ -730,7 +814,7 @@ void RecoveryManager::dumpCheckpointFile(
 			}
 		}
 		else {
-			std::cout << " WARINIG empty cp file (pgId=" << pgId
+			std::cout << " WARNING empty cp file (pgId=" << pgId
 					  << ", cpId=" << recoveryStartCpId << ")... ";
 		}
 
@@ -742,7 +826,7 @@ void RecoveryManager::dumpCheckpointFile(
 }
 
 /*!
-	@brief Redos from cursor position of Log to the end of Checkpoint file or
+	@brief Redoes from cursor position of Log to the end of Checkpoint file or
    Log.
 */
 void RecoveryManager::redoAll(
@@ -905,11 +989,11 @@ void RecoveryManager::redoAll(
 }
 
 /*!
-	@brief Redos LogRecord of Chunks; i.e. applies to DataStore.
+	@brief Redoes LogRecord of Chunks; i.e. applies to DataStore.
 */
 
 /*!
-	@brief Redos each parsed LogRecord, i.e. apply to TxnManager and DataStore.
+	@brief Redoes each parsed LogRecord, i.e. apply to TxnManager and DataStore.
 */
 LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 	Mode mode, PartitionId pId, const util::DateTime &stmtStartTime,
@@ -930,13 +1014,13 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 					GS_TRACE_RM_REDO_LOG_STATUS,
 					"LOG_TYPE_CHECKPOINT_START(pId="
 						<< pId << ", lsn=" << logRecord.lsn_
-						<< ", msxTxnId=" << logRecord.txnId_
+						<< ", maxTxnId=" << logRecord.txnId_
 						<< ", numTxn=" << logRecord.txnContextNum_ << ")");
 
 				const uint32_t partitionCount = pgConfig_.getPartitionCount();
 				if (logRecord.containerId_ != partitionCount) {
 					GS_THROW_SYSTEM_ERROR(GS_ERROR_RM_PARTITION_NUM_NOT_MATCH,
-						"Invalid PartitionNum: log partitonNum="
+						"Invalid PartitionNum: log partitionNum="
 							<< logRecord.containerId_
 							<< ", config partitionNum=" << partitionCount);
 				}
@@ -1585,7 +1669,8 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 	catch (std::exception &e) {
 		RM_RETHROW_LOG_REDO_ERROR(
 			e, "(pId=" << pId << ", lsn=" << logRecord.lsn_
-					   << ", type=" << logRecord.type_ << ")");
+					   << ", type=" << logRecord.type_
+					   << ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 

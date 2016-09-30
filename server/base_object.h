@@ -94,6 +94,14 @@ public:
 		baseOId_ = oId;
 	}
 
+
+	inline void loadNeighbor(OId oId, AccessMode mode) {
+		if (mode == OBJECT_READ_ONLY) {
+			baseAddr_ = cursor_ = objectManager_->load<uint8_t, OBJECT_READ_ONLY>(pId_, oId, &baseOId_, baseAddr_);
+		} else {
+			baseAddr_ = cursor_ = objectManager_->load<uint8_t, OBJECT_FOR_UPDATE>(pId_, oId, &baseOId_, baseAddr_);
+		}
+	}
 	/*!
 		@brief Allocate Object from Chunk
 	*/

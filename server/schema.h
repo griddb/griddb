@@ -25,8 +25,7 @@
 #include <float.h>
 #include "base_object.h"
 #include "object_manager.h"  
-#include "value_operator.h"
-#include "value_processor.h"
+#include "value.h"
 
 class TransactionContext;
 class BaseIndex;
@@ -340,7 +339,7 @@ public:
 	}
 
 	const char *getColumnName(
-		TransactionContext &txn, ObjectManager &objectManager) {
+		TransactionContext &txn, ObjectManager &objectManager) const {
 		BaseObject nameObject(
 			txn.getPartitionId(), objectManager, columnNameOId_);
 		size_t len = strlen(nameObject.getBaseAddr<const char *>()) + 1;

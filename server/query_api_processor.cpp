@@ -617,14 +617,62 @@ void QueryProcessor::fetch(TransactionContext &txn, BaseContainer &container,
 				}
 
 				resultSet->resetSerializedData();
-				resultSet->getRowDataFixedPartBuffer()->reserve(
-					resultSet->getOIdList()->size() *
-					container.getRowFixedDataSize());
-				if (container.getVariableColumnNum() > 0) {
-					resultSet->getRowDataVarPartBuffer()->reserve(
-						resultSet->getOIdList()->size() *
-						container.getVariableColumnNum() * 8);
+				{
+					size_t reserveSize =
+						(resultSet->getOIdList()->size() - startPos > fetchNum)
+							? fetchNum
+							: resultSet->getOIdList()->size() - startPos;
+					resultSet->getRowDataFixedPartBuffer()->reserve(
+						reserveSize * container.getRowFixedDataSize());
+					if (container.getVariableColumnNum() > 0) {
+						resultSet->getRowDataVarPartBuffer()->reserve(
+							reserveSize * container.getVariableColumnNum() * 8);
+					}
 				}
+#if defined(PARTIAL_EXE_SERVER_UNIT_TEST_MODE) && \
+	defined(GD_ENABLE_NEWSQL_SERVER)
+				ResultSize resultNum;
+				if (resultSet->isPartialExecuteMode()) {
+					if (!resultSet->isPartialExecuteSuspend()) {
+						OutputMessageRowStore outputMessageRowStore(
+							container.getDataStore()->getValueLimitConfig(),
+							container.getColumnInfoList(),
+							container.getColumnNum(),
+							*(resultSet->getRowDataFixedPartBuffer()),
+							*(resultSet->getRowDataVarPartBuffer()),
+							isRowIdIncluded);
+
+						util::XArray<OId> tmpList(txn.getDefaultAllocator());
+						uint64_t skipped = 0;
+						if (resultSet->getRowIdList()->size() == 0) {
+							tmpList.insert(tmpList.end(),
+								resultSet->getOIdList()->begin(),
+								resultSet->getOIdList()->end());
+						}
+						else {
+							container.getOIdList(txn, 0, MAX_RESULT_SIZE,
+								skipped, *resultSet->getRowIdList(), tmpList);
+						}
+						container.getRowList(txn, tmpList, MAX_RESULT_SIZE,
+							resultNum, &outputMessageRowStore, isRowIdIncluded,
+							0);
+						resultSet->setResultNum(tmpList.size());
+					}
+					else {
+					}
+				}
+				else {
+					OutputMessageRowStore outputMessageRowStore(
+						container.getDataStore()->getValueLimitConfig(),
+						container.getColumnInfoList(), container.getColumnNum(),
+						*(resultSet->getRowDataFixedPartBuffer()),
+						*(resultSet->getRowDataVarPartBuffer()),
+						isRowIdIncluded);
+					container.getRowList(txn, *(resultSet->getOIdList()),
+						fetchNum, resultNum, &outputMessageRowStore,
+						isRowIdIncluded, 0);
+				}
+#else
 				OutputMessageRowStore outputMessageRowStore(
 					container.getDataStore()->getValueLimitConfig(),
 					container.getColumnInfoList(), container.getColumnNum(),
@@ -633,6 +681,7 @@ void QueryProcessor::fetch(TransactionContext &txn, BaseContainer &container,
 				ResultSize resultNum;
 				container.getRowList(txn, *(resultSet->getOIdList()), fetchNum,
 					resultNum, &outputMessageRowStore, isRowIdIncluded, 0);
+#endif
 				resultSet->setDataPos(
 					0, static_cast<uint32_t>(
 						   resultSet->getRowDataFixedPartBuffer()->size()),

@@ -76,8 +76,9 @@ public class SubnetPartitionController implements PartitionController {
 		return getContainerCount(partitionIndex, cond, false);
 	}
 
-	public long getContainerCount(int partitionIndex,
-			ContainerCondition cond, boolean systemMode) throws GSException {
+	public long getContainerCount(
+			int partitionIndex, ContainerCondition cond,
+			boolean systemMode) throws GSException {
 
 		checkOpened();
 		checkPartitionIndex(partitionIndex);

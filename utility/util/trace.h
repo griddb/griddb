@@ -30,14 +30,8 @@ namespace util {
 /*!
     @brief Options for traces.
 */
-
-
-
 class TraceOption {
 public:
-
-
-
 
 	enum Level {
 		LEVEL_DEBUG = 10,
@@ -46,9 +40,6 @@ public:
 		LEVEL_ERROR = 40,
 		LEVEL_CRITICAL = 50
 	};
-
-
-
 
 	enum OutputType {
 		OUTPUT_NONE,
@@ -67,16 +58,9 @@ public:
 /*!
     @brief Handlers for traces.
 */
-
-
-
 class TraceHandler {
 public:
 	virtual ~TraceHandler();
-
-
-
-
 
 	virtual void startStream() = 0;
 };
@@ -84,9 +68,6 @@ public:
 /*!
     @brief Writes traces.
 */
-
-
-
 class TraceWriter {
 public:
 	virtual ~TraceWriter();
@@ -141,16 +122,9 @@ class TraceManager;
 /*!
     @brief Operates traces.
 */
-
-
-
 class Tracer {
 public:
 	typedef char8_t SourceSymbolChar;
-
-
-
-
 
 	void put(
 			int32_t level,
@@ -161,11 +135,6 @@ public:
 			const std::exception *causeInHandling = NULL,
 			const Exception::NamedErrorCode &namedErrorCode =
 					Exception::NamedErrorCode()) throw();
-
-
-
-
-
 
 	void setMinOutputLevel(int32_t minOutputLevel);
 
@@ -192,34 +161,14 @@ class ProxyTraceHandler;
 /*!
     @brief Manages all Traces.
 */
-
-
-
 class TraceManager {
 public:
 
-
-
-
-
-
 	Tracer& resolveTracer(const char8_t *name);
-
-
-
-
-
 
 	Tracer* getTracer(const char8_t *name);
 
-
-
-
 	void getAllTracers(std::vector<Tracer*> &tracerList);
-
-
-
-
 
 	void setOutputType(TraceOption::OutputType outputType);
 
@@ -227,40 +176,17 @@ public:
 
 	void setMinOutputLevel(int32_t minOutputLevel);
 
-
-
-
-
-
 	void setRotationFilesDirectory(const char8_t *directory);
 
 	const char8_t* getRotationFilesDirectory();
 
 	void setRotationFileName(const char8_t *name);
 
-
-
-
-
-
 	void setMaxRotationFileSize(int32_t maxRotationFileSize);
-
-
-
-
-
 
 	void setMaxRotationFileCount(int32_t maxRotationFileCount);
 
 	void setRotationMode(TraceOption::RotationMode rotationMode);
-
-
-
-
-
-
-
-
 
 	void setTraceHandler(TraceHandler *traceHandler);
 
@@ -343,7 +269,6 @@ private:
 	size_t reentrantCount_;
 };
 
-
 class StdTraceWriter : public TraceWriter {
 public:
 	StdTraceWriter(FILE *file);
@@ -363,7 +288,6 @@ private:
 	StdTraceWriter& operator=(const StdTraceWriter&);
 	FILE *file_;
 };
-
 
 class ChainTraceWriter : public TraceWriter {
 public:
@@ -410,9 +334,6 @@ private:
 /*!
     @brief Macro of declaration of a tracer.
 */
-
-
-
 #define UTIL_TRACER_DECLARE(name) \
 	inline util::Tracer& UTIL_TRACER_INSTANCE_GETTER(name) () { \
 		static util::Tracer *tracer( \
@@ -425,10 +346,6 @@ private:
 /*!
     @brief Returns tracer of specified name.
 */
-
-
-
-
 #define UTIL_TRACER_RESOLVE(name) \
 		UTIL_TRACER_INSTANCE_GETTER(name)()
 

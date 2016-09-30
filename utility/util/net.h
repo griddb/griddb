@@ -71,16 +71,12 @@ class SocketAddress;
 /*!
 	@brief Types of network I/O events.
 */
-
-
-
 class IOPollEvent {
 public:
 	static const int TYPE_READ;
 	static const int TYPE_WRITE;
 	static const int TYPE_ERROR;
 	static const int TYPE_READ_WRITE;
-	
 
 	IOPollEvent() : flags_(0) {}
 	IOPollEvent(int flags) : flags_(flags) {}
@@ -94,17 +90,10 @@ private:
 /*!
 	@brief Handlers of network I/O events.
 */
-
-
-
 class IOPollHandler {
 public:
 	virtual ~IOPollHandler();
 
-	
-	
-	
-	
 	virtual void handlePollEvent(IOPollBase *io, IOPollEvent event) = 0;
 
 	virtual File& getFile() = 0;
@@ -113,54 +102,23 @@ public:
 /*!
 	@brief Common interface to accept network I/O events: e.g. Socket.
 */
-
-
-
-
 class IOPollBase {
 public:
 	static const uint32_t WAIT_INFINITY;
 
 	virtual ~IOPollBase();
 
-	
-	
-	
-	
 	virtual void add(IOPollHandler *handler, IOPollEvent event) = 0;
 
-	
-	
-	
-	
 	virtual void modify(IOPollHandler *handler, IOPollEvent event) = 0;
 
-	
-	
-	
 	virtual void remove(IOPollHandler *handler) = 0;
 
-	
-	
-	
 	virtual bool dispatch(uint32_t msec = WAIT_INFINITY) = 0;
 
-	
-	
 	virtual const char* getType(void) const = 0;
 
-
-
-
-
 	virtual void setInterruptible();
-
-
-
-
-
-
-
 
 	virtual void interrupt();
 
@@ -173,9 +131,6 @@ private:
 /*!
 	@brief Initializes and finalizes Socket library.
 */
-
-
-
 struct SocketLibrary {
 public:
 	SocketLibrary();
@@ -192,21 +147,12 @@ private:
 /*!
 	@brief Organizes order of initialization and finalization of Socket library.
 */
-
-
-
-
-
-
 static SocketLibrary g_socketLibrary;
 
 
 /*!
 	@brief Wrapper of Socket for network I/O.
 */
-
-
-
 class Socket : public File, public IOPollHandler {
 public:
 	static const int TYPE_DATAGRAM;
@@ -221,82 +167,32 @@ public:
 public:
 	virtual void close(void);
 
-	
-	
-	
-	
 	virtual void open(int family, int type, int protocol = 0);
 
-	
-	
 	virtual void open(const char8_t*,
 			FileFlag, FilePermission = DEFAULT_PERMISSION);
 
-	
-	
-	
 	SocketAddress& getSocketName(SocketAddress &addr) const;
 
-	
-	
-	
 	SocketAddress& getPeerName(SocketAddress &addr) const;
-
-
-
-
 
 	void shutdown(bool forReceive, bool forSend);
 
-	
-	
 	void bind(const SocketAddress &addr);
 
-	
-	
 	void listen(uint32_t backlogSize = DEFAULT_MAX_BACKLOG_SIZE);
 
-	
-	
-	
-	
 	bool accept(Socket *socket, SocketAddress *addr = NULL) const;
 
-	
-	
-	
-	
 	bool connect(const SocketAddress &addr);
 
-	
-	
-	
-	
-	
 	ssize_t receive(void *buf, size_t len, int flags = 0);
 
-	
-	
-	
-	
-	
-	
 	ssize_t receiveFrom(
 			void *buf, size_t len, SocketAddress *addr, int flags = 0);
 
-	
-	
-	
-	
-	
 	ssize_t send(const void *buf, size_t len, int flags = 0);
 
-	
-	
-	
-	
-	
-	
 	ssize_t sendTo(const void *buf,
 			size_t len, const SocketAddress &addr, int flags = 0);
 
@@ -311,43 +207,23 @@ public:
 
 	virtual off_t tell();
 
-	
-	
 	bool getReuseAddress(void) const;
 
-	
-	
-	
 	void setReuseAddress(bool value);
 
-	
-	
 	bool getKeepAlive(void) const;
 
-	
-	
-	
 	void setKeepAlive(bool value);
 
 	void setKeepAlive(
 			int32_t idleSeconds, int32_t intervalSeconds, int32_t retryCount);
 
-	
-	
 	int32_t getReceiveBufferSize(void) const;
 
-	
-	
-	
 	void setReceiveBufferSize(int32_t value);
 
-	
-	
 	int32_t getSendBufferSize(void) const;
 
-	
-	
-	
 	void setSendBufferSize(int32_t value);
 
 	uint32_t getReceiveTimeout(void) const;
@@ -358,13 +234,8 @@ public:
 
 	void setSendTimeout(uint32_t value);
 
-	
-	
 	bool getNoDelay(void) const;
 
-	
-	
-	
 	void setNoDelay(bool value);
 
 	bool getLinger(int32_t *timeoutSecs = NULL);
@@ -379,9 +250,6 @@ public:
 
 	void setMulticastLoopback(bool value);
 
-	
-	
-	
 	virtual void setBlockingMode(bool value);
 
 	void joinMulticastGroup(
@@ -432,54 +300,20 @@ private:
 	Socket(const Socket&);
 	Socket& operator=(const Socket&);
 
-	
-	
-	
-	
-	
 	void getOption(int level, int name, void *value, size_t len) const;
 
-	
-	
-	
-	
-	
 	void setOption(int level, int name, const void *value, size_t len);
 
-	
-	
-	
-	
 	int32_t getInt32Option(int level, int name) const;
 
-	
-	
-	
-	
 	void setInt32Option(int level, int name, int32_t value);
 
-	
-	
-	
-	
 	int64_t getInt64Option(int level, int name) const;
 
-	
-	
-	
-	
 	void setInt64Option(int level, int name, int64_t value);
 
-	
-	
-	
-	
 	bool getBoolOption(int level, int name) const;
 
-	
-	
-	
-	
 	void setBoolOption(int level, int name, bool value);
 
 	void setMulticastInterfaceOption(
@@ -523,9 +357,6 @@ private:
 /*!
 	@brief Address Socket for sending and receiving
 */
-
-
-
 class SocketAddress {
 public:
 	static const int FAMILY_INET;
@@ -553,13 +384,10 @@ public:
 	};
 
 public:
-	
 	SocketAddress();
 
-	
 	explicit SocketAddress(const char8_t *host, const char8_t *service = NULL,
 			int family = 0, int sockType = 0);
-	
 	explicit SocketAddress(const char8_t *host, uint16_t port = 0,
 			int family = 0, int sockType = 0);
 
@@ -569,7 +397,6 @@ public:
 	SocketAddress(const SocketAddress &another);
 	SocketAddress& operator=(const SocketAddress &another);
 
-	
 	virtual ~SocketAddress();
 
 public:
@@ -578,16 +405,13 @@ public:
 
 	static void getHostName(u8string &hostName);
 
-	
 	static SocketAddress getLocalHost(
 			uint16_t port = 0, int family = 0, int sockType = 0);
 
-	
 	static void getAll(std::vector<SocketAddress> &addrList,
 			const char8_t *host, const char8_t *service = NULL,
 			int family = 0, int sockType = 0);
 
-	
 	static void getAll(std::vector<SocketAddress> &addrList,
 			const char8_t *host, uint16_t port = 0,
 			int family = 0, int sockType = 0);
@@ -595,11 +419,9 @@ public:
 	bool isAny() const;
 	bool isLoopback() const;
 
-	
 	void assign(const char8_t *host, const char8_t *service = NULL,
 			int family = 0, int sockType = 0);
 
-	
 	void assign(const char8_t *host, uint16_t port = 0,
 			int family = 0, int sockType = 0);
 
@@ -609,20 +431,12 @@ public:
 
 	void clear();
 
-	
 	bool isEmpty(void) const;
 
-	
-	
 	struct sockaddr* getAddress(struct sockaddr_storage *addr) const;
 
-	
-	
-	
 	size_t getSize(void) const;
 
-	
-	
 	int getFamily(void) const;
 
 	void getName(u8string *host, u8string *service = NULL,
@@ -630,15 +444,22 @@ public:
 
 	void getIP(u8string *host, uint16_t *port = NULL) const;
 
-	
 	void getIP(Inet *inAddr, uint16_t *port = NULL) const;
 
-	
 	void getIP(Inet6 *in6Addr, uint16_t *port = NULL) const;
 
 	uint16_t getPort() const { return port_; }
 
 	void setPort(uint16_t port) { port_ = port; }
+
+	int32_t compare(const SocketAddress &another) const;
+
+	bool operator==(const SocketAddress &a) const { return compare(a) == 0; }
+	bool operator!=(const SocketAddress &a) const { return compare(a) != 0; }
+	bool operator<(const SocketAddress &a) const { return compare(a) < 0; }
+	bool operator<=(const SocketAddress &a) const { return compare(a) <= 0; }
+	bool operator>(const SocketAddress &a) const { return compare(a) > 0; }
+	bool operator>=(const SocketAddress &a) const { return compare(a) >= 0; }
 
 private:
 	friend class Socket;
@@ -673,9 +494,6 @@ std::ostream& operator<<(std::ostream &s, const SocketAddress::Inet6 &addr);
 /*!
 	@brief Waits network I/O using select system calls.
 */
-
-
-
 class IOPollSelect : public IOPollBase {
 public:
 	IOPollSelect();
@@ -702,9 +520,6 @@ private:
 /*!
 	@brief Waits network I/O using epoll system calls.
 */
-
-
-
 class IOPollEPoll : public IOPollBase {
 public:
 	IOPollEPoll();
@@ -730,9 +545,6 @@ typedef IOPollSelect IOPollEPoll;
 /*!
 	@brief States IOPollPoll
 */
-
-
-
 class IOPollPollCont {
 public:
 	IOPollPollCont();
@@ -784,9 +596,6 @@ private:
 /*!
 	@brief Waits network I/O using poll system calls.
 */
-
-
-
 class IOPollPoll : public IOPollBase {
 public:
 	IOPollPoll();

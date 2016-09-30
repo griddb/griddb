@@ -15,10 +15,6 @@
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-
-
-
-
 #include "util/allocator.h"
 
 #include <algorithm>
@@ -28,7 +24,6 @@
 #endif
 
 #if UTIL_ALLOCATOR_REPORTER_ENABLED3
-
 	int64_t g_limitCount = 1000;
 	int64_t g_limitSize = 1024*1024;
 	 int64_t g_limitCountCount = 0;
@@ -38,18 +33,8 @@
 namespace util {
 
 
-
-
-
-
-
 AllocationErrorHandler::~AllocationErrorHandler() {
 }
-
-
-
-
-
 
 
 #if UTIL_ALLOCATOR_REPORTER_ENABLED
@@ -113,21 +98,16 @@ void AllocatorReporter::reportMissHit(
 #endif	
 
 
-
-
-
-
-
 AllocatorInfo::AllocatorInfo(
 		AllocatorGroupId groupId, const char8_t *nameLiteral,
 		AllocatorManager *manager) :
-		groupId_(groupId), nameLiteral_(nameLiteral), manager_(manager)
-{
+		groupId_(groupId), nameLiteral_(nameLiteral), manager_(manager),
+		unitSize_(0) {
 }
 
 AllocatorInfo::AllocatorInfo() :
 		groupId_(AllocatorManager::GROUP_ID_ROOT),  nameLiteral_(NULL),
-		manager_(NULL) {
+		manager_(NULL), unitSize_(0) {
 }
 
 AllocatorGroupId AllocatorInfo::getGroupId() const {
@@ -143,20 +123,42 @@ AllocatorManager& AllocatorInfo::resolveManager() const {
 			AllocatorManager::getDefaultInstance() : *manager_);
 }
 
-void AllocatorInfo::format(std::ostream &stream, bool partial) const {
+size_t AllocatorInfo::getUnitSize() const {
+	return unitSize_;
+}
+
+void AllocatorInfo::setUnitSize(size_t size) {
+	unitSize_ = size;
+}
+
+void AllocatorInfo::format(
+		std::ostream &stream, bool partial, bool nameOnly,
+		bool withUnit) const {
 	AllocatorManager &manager = resolveManager();
 
 	if (nameLiteral_ != NULL) {
-		AllocatorInfo(groupId_, NULL, &manager).format(stream, false);
-		stream << "." << nameLiteral_;
+		if (!nameOnly) {
+			AllocatorInfo(groupId_, NULL, &manager).format(stream, false);
+			stream << ".";
+		}
+		stream << nameLiteral_;
+
+		if (withUnit && unitSize_ > 0) {
+			stream << "[";
+			formatUnitSize(stream, unitSize_, true);
+			stream << "]";
+		}
+
 		return;
 	}
 
 	AllocatorGroupId parentId = groupId_;
 	if (manager.getParentId(parentId)) {
-		AllocatorInfo(parentId, nameLiteral_, &manager).format(stream, true);
-		if (manager.getParentId(parentId)) {
-			stream << ".";
+		if (!nameOnly) {
+			AllocatorInfo(parentId, nameLiteral_, &manager).format(stream, true);
+			if (manager.getParentId(parentId)) {
+				stream << ".";
+			}
 		}
 	}
 	else {
@@ -175,15 +177,33 @@ void AllocatorInfo::format(std::ostream &stream, bool partial) const {
 	}
 }
 
+void AllocatorInfo::formatUnitSize(
+		std::ostream &stream, int64_t size, bool exact) {
+	const char8_t *unit = "";
+	int64_t value = size;
+	if ((exact && value % 1024 == 0) || (!exact && value >= 10000)) {
+		value /= 1024;
+		if ((exact && value % 1024 == 0) || (!exact && value >= 10000)) {
+			value /= 1024;
+			if ((exact && value % 1024 == 0) || (!exact && value >= 10000)) {
+				value /= 1024;
+				unit = "G";
+			}
+			else {
+				unit = "M";
+			}
+		}
+		else {
+			unit = "K";
+		}
+	}
+	stream << value << unit;
+}
+
 std::ostream& operator<<(std::ostream &stream, const AllocatorInfo &info) {
 	info.format(stream);
 	return stream;
 }
-
-
-
-
-
 
 
 AllocatorStats::AllocatorStats(const AllocatorInfo &info) : info_(info) {
@@ -211,11 +231,6 @@ int64_t AllocatorStats::asStatValue(size_t value) {
 
 	return static_cast<uint64_t>(value);
 }
-
-
-
-
-
 
 
 AllocationErrorHandler *StackAllocator::defaultErrorHandler_ = NULL;
@@ -536,17 +551,9 @@ void StackAllocator::setLimit(AllocatorStats::Type type, AllocatorLimitter *limi
 }
 
 
-
-
-
 void StackAllocator::Tool::forceReset(StackAllocator &alloc) {
 	alloc.pop(NULL, 0);
 }
-
-
-
-
-
 
 
 AllocatorManager *AllocatorManager::defaultInstance_ = NULL;
@@ -776,7 +783,7 @@ AllocatorManager::TinyList<T>::operator=(const TinyList &another) {
 		end_ = NULL;
 		storageEnd_ = NULL;
 
-		for (T *it = begin_; it != end_; ++it) {
+		for (T *it = another.begin_; it != another.end_; ++it) {
 			add(*it);
 		}
 	}
@@ -794,7 +801,6 @@ void AllocatorManager::TinyList<T>::add(const T &value) {
 
 		T *newStorage = UTIL_NEW T[newCapacity];
 		for (T *it = begin_; it != end_; ++it) {
-			
 			newStorage[it - begin_] = *it;
 		}
 		delete[] begin_;

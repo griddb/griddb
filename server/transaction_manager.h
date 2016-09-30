@@ -136,7 +136,6 @@ public:
 	TransactionManager(const ConfigTable &config);
 	~TransactionManager();
 
-
 	void createPartition(PartitionId pId);
 
 	void removePartition(PartitionId pId);
@@ -160,12 +159,9 @@ public:
 
 	typedef uint8_t TransactionMode;
 	static const TransactionMode AUTO_COMMIT;  
-	static const TransactionMode
-		NO_AUTO_COMMIT_BEGIN;  
-	static const TransactionMode
-		NO_AUTO_COMMIT_CONTINUE;  
-	static const TransactionMode
-		NO_AUTO_COMMIT_BEGIN_OR_CONTINUE;  
+	static const TransactionMode NO_AUTO_COMMIT_BEGIN;  
+	static const TransactionMode NO_AUTO_COMMIT_CONTINUE;			
+	static const TransactionMode NO_AUTO_COMMIT_BEGIN_OR_CONTINUE;  
 
 	/*!
 		@brief ContextSource
@@ -243,6 +239,9 @@ public:
 		const ContextSource &src, NodeDescriptor ND, EventMonotonicTime emNow);
 	ReplicationContext &get(PartitionId pId, ReplicationId replId);
 	void remove(PartitionId pId, ReplicationId replId);
+
+	void removeAllReplicationContext();
+
 	void getReplicationTimeoutContextId(PartitionGroupId pgId,
 		EventMonotonicTime emNow, util::XArray<PartitionId> &pIds,
 		util::XArray<ReplicationId> &replIds);
@@ -257,6 +256,7 @@ public:
 	uint64_t getRequestTimeoutCount(PartitionId pId) const;
 	uint64_t getTransactionTimeoutCount(PartitionId pId) const;
 	uint64_t getReplicationTimeoutCount(PartitionId pId) const;
+
 
 	size_t getMemoryUsage(
 		PartitionGroupId pgId, bool includeFreeMemory = false);
@@ -275,9 +275,7 @@ private:
 
 	static const size_t DEFAULT_BLOCK_SIZE_BITS =
 		20;  
-	static const size_t DEFAULT_FREE_ELEMENT_LIMIT =
-		20 * 1024 *
-		1024;  
+	static const size_t DEFAULT_FREE_ELEMENT_LIMIT = 0;
 
 	static const size_t HASH_SIZE = 40037;
 	static const uint32_t TIMER_MERGIN_SEC = 60;
@@ -355,8 +353,7 @@ private:
 	public:
 		Partition(PartitionId pId, int32_t requestTimeoutInterval,
 			TransactionContextMap *txnContextMap,
-			ActiveTransactionMap *activeTxnMap,
-			ReplicationContextMap *replContextMap);
+			ActiveTransactionMap *activeTxnMap);
 		~Partition();
 
 		TransactionContext &put(util::StackAllocator &alloc,
@@ -398,16 +395,8 @@ private:
 			const ContainerId *refContainerIds, const StatementId *lastStmtIds,
 			const int32_t *txnTimeoutIntervalSec, EventMonotonicTime emNow);
 
-		ReplicationContext &put(const ClientId &clientId,
-			ContainerId containerId, int32_t stmtType, StatementId stmtId,
-			NodeDescriptor ND, int32_t replTimeoutInterval,
-			EventMonotonicTime emNow);
-		ReplicationContext &get(ReplicationId replId);
-		void remove(ReplicationId replId);
-
 		uint64_t getRequestTimeoutCount() const;
 		uint64_t getTransactionTimeoutCount() const;
-		uint64_t getReplicationTimeoutCount() const;
 
 	private:
 		const PartitionId pId_;
@@ -415,15 +404,12 @@ private:
 		const int32_t txnTimeoutLimit_;
 
 		TransactionId maxTxnId_;
-		ReplicationId maxReplId_;
 
 		TransactionContextMap *txnContextMap_;
 		ActiveTransactionMap *activeTxnMap_;
-		ReplicationContextMap *replContextMap_;
 
 		uint64_t reqTimeoutCount_;
 		uint64_t txnTimeoutCount_;
-		uint64_t replTimeoutCount_;
 
 		TransactionContext autoContext_;
 
@@ -431,26 +417,58 @@ private:
 		void endTransaction(TransactionContext &txn);
 	};
 
+	class ReplicationContextPartition {
+		friend class TransactionManager;
+
+	public:
+		ReplicationContextPartition(
+			PartitionId pId, ReplicationContextMap *replContextMap);
+		~ReplicationContextPartition();
+
+		ReplicationContext &put(const ClientId &clientId,
+			ContainerId containerId, int32_t stmtType, StatementId stmtId,
+			NodeDescriptor ND, int32_t replTimeoutInterval,
+			EventMonotonicTime emNow);
+		ReplicationContext &get(ReplicationId replId);
+		void remove(ReplicationId replId);
+
+		uint64_t getReplicationTimeoutCount() const;
+
+	private:
+		const PartitionId pId_;
+		ReplicationId maxReplId_;
+
+		ReplicationContextMap *replContextMap_;
+
+		uint64_t replTimeoutCount_;
+	};
+
+
 
 	const PartitionGroupConfig pgConfig_;
 	const int32_t replicationMode_;
 	const int32_t replicationTimeoutInterval_;
 	const int32_t txnTimeoutLimit_;
 
-	TransactionContextMap::Manager **txnContextMapManager_;
-	TransactionContextMap **txnContextMap_;
+	std::vector<TransactionContextMap::Manager *> txnContextMapManager_;
+	std::vector<TransactionContextMap *> txnContextMap_;
 
-	ActiveTransactionMap::Manager **activeTxnMapManager_;
-	ActiveTransactionMap **activeTxnMap_;
+	std::vector<ActiveTransactionMap::Manager *> activeTxnMapManager_;
+	std::vector<ActiveTransactionMap *> activeTxnMap_;
 
-	ReplicationContextMap::Manager **replContextMapManager_;
-	ReplicationContextMap **replContextMap_;
+	std::vector<ReplicationContextMap::Manager *> replContextMapManager_;
+	std::vector<ReplicationContextMap *> replContextMap_;
 
 
-	Partition **partition_;
+	std::vector<Partition *> partition_;
+	std::vector<ReplicationContextPartition *> replContextPartition_;
 
-	int32_t *ptLock_;
+	std::vector<int32_t> ptLock_;
 	util::Mutex *ptLockMutex_;
+
+	void finalize();
+
+	void createReplContextPartition(PartitionId pId);
 
 	void begin(TransactionContext &txn, EventMonotonicTime emNow);
 

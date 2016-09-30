@@ -296,7 +296,6 @@ public:
 			RowArray *rowArrayCursor_;
 			uint8_t *binary_;
 			size_t nullsOffset_;
-
 		private:
 			void checkVarDataSize(TransactionContext &txn, uint32_t columnNum,
 				uint32_t variableColumnNum, uint8_t *varTopAddr,
@@ -767,6 +766,7 @@ public:
 		TransactionContext &txn, Timestamp ts, TimeOperator timeOp, OId &oId);
 
 	void lockRowList(TransactionContext &txn, util::XArray<RowId> &rowIdList);
+	void setDummyMvccImage(TransactionContext &txn);
 	bool isLocked(
 		TransactionContext &txn, uint32_t rowKeySize, const uint8_t *rowKey);
 
@@ -1086,6 +1086,8 @@ public:
 
 
 
+
+	void setDummyMvccImage(TransactionContext &txn);
 
 	void getIndexList(
 		TransactionContext &txn, util::XArray<IndexData> &list) const {
@@ -1407,5 +1409,6 @@ void aggregationPostProcess(AggregationCursor &cursor, Value &value);
 static const AggregatorForLoop aggLoopTable[] = {&minForLoop, &maxForLoop,
 	&sumForLoop, &avgForLoop, &varianceForLoop, &stddevForLoop, &countForLoop,
 	NULL};
+
 
 #endif

@@ -1,5 +1,4 @@
-﻿
-/*
+﻿/*
 	Copyright (c) 2012 TOSHIBA CORPORATION.
 
 	This program is free software: you can redistribute it and/or modify
@@ -32,7 +31,7 @@
 #include <map>
 #include <utility>
 
-#if defined(__GXX_EXPERIMENTAL_CXX0X__) || __cplusplus >= 201103L
+#if UTIL_CXX11_SUPPORTED
 #include <unordered_map>
 #endif
 
@@ -84,18 +83,20 @@ public:
 		const char *databaseName, const char *containerName);
 
 	const char *c_str() {
-		return reinterpret_cast<const char *>(fullPathName_);
+		return fullPathName_.c_str();
 	}
 
 	DatabaseId getDatabaseId() {
 		if (databaseId_ == UNDEF_DBID) {
 			const char *undefName = "#Unknown";
-			if (strlen(fullPathName_) != strlen(undefName) ||
-				strncmp(fullPathName_, undefName, strlen(undefName)) != 0) {
+			if (strlen(fullPathName_.c_str()) != strlen(undefName) ||
+				strncmp(fullPathName_.c_str(), undefName, strlen(undefName)) !=
+					0) {
 				size_t startDbNamePos = 0;
 				size_t startContainerNamePos = 0;
-				getFullPathNamePosition(fullPathName_, strlen(fullPathName_),
-					startDbNamePos, startContainerNamePos);
+				getFullPathNamePosition(fullPathName_.c_str(),
+					strlen(fullPathName_.c_str()), startDbNamePos,
+					startContainerNamePos);
 				if (startContainerNamePos == 0) {
 					databaseId_ = GS_PUBLIC_DB_ID;
 				}
@@ -104,14 +105,14 @@ public:
 					size_t publicDbNameLen = strlen(GS_PUBLIC);
 					size_t systemDbNameLen = strlen(GS_SYSTEM);
 					if (len >= publicDbNameLen &&
-						memcmp(fullPathName_, GS_PUBLIC, publicDbNameLen) ==
-							0) {
+						memcmp(fullPathName_.c_str(), GS_PUBLIC,
+							publicDbNameLen) == 0) {
 						databaseId_ = GS_PUBLIC_DB_ID;
 					}
 					else if (len >= systemDbNameLen &&
-							 memcmp(fullPathName_, GS_SYSTEM,
+							 memcmp(fullPathName_.c_str(), GS_SYSTEM,
 								 systemDbNameLen) == 0) {
-						databaseId_ = GS_SYSYTEM_DB_ID;
+						databaseId_ = GS_SYSTEM_DB_ID;
 					}
 					else {
 						GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR,
@@ -121,24 +122,25 @@ public:
 				else {
 					size_t len = startDbNamePos - 1;
 					char *name = ALLOC_NEW(alloc_) char[len + 1];
-					memcpy(name, fullPathName_, len);
+					memcpy(name, fullPathName_.c_str(), len);
 					name[len] = '\0';
 					databaseId_ = atol(name);
 				}
 			}
 		}
-
 		return databaseId_;
 	}
 	const char *getDatabaseName() {
 		if (databaseName_ == NULL) {
 			const char *undefName = "#Unknown";
-			if (strlen(fullPathName_) != strlen(undefName) ||
-				strncmp(fullPathName_, undefName, strlen(undefName)) != 0) {
+			if (strlen(fullPathName_.c_str()) != strlen(undefName) ||
+				strncmp(fullPathName_.c_str(), undefName, strlen(undefName)) !=
+					0) {
 				size_t startDbNamePos = 0;
 				size_t startContainerNamePos = 0;
-				getFullPathNamePosition(fullPathName_, strlen(fullPathName_),
-					startDbNamePos, startContainerNamePos);
+				getFullPathNamePosition(fullPathName_.c_str(),
+					strlen(fullPathName_.c_str()), startDbNamePos,
+					startContainerNamePos);
 
 				if (startContainerNamePos == 0) {
 					size_t len = strlen(GS_PUBLIC) + 1;
@@ -149,7 +151,8 @@ public:
 					assert(startDbNamePos <= startContainerNamePos);
 					size_t len = startContainerNamePos - startDbNamePos - 1;
 					databaseName_ = ALLOC_NEW(alloc_) char[len + 1];
-					memcpy(databaseName_, fullPathName_ + startDbNamePos, len);
+					memcpy(databaseName_,
+						fullPathName_.c_str() + startDbNamePos, len);
 					databaseName_[len] = '\0';
 				}
 			}
@@ -159,23 +162,25 @@ public:
 				memcpy(databaseName_, undefName, len);
 			}
 		}
-
 		return reinterpret_cast<const char *>(databaseName_);
 	}
 	const char *getContainerName() {
 		if (containerName_ == NULL) {
 			const char *undefName = "#Unknown";
-			if (strlen(fullPathName_) != strlen(undefName) ||
-				strncmp(fullPathName_, undefName, strlen(undefName)) != 0) {
+			if (strlen(fullPathName_.c_str()) != strlen(undefName) ||
+				strncmp(fullPathName_.c_str(), undefName, strlen(undefName)) !=
+					0) {
 				size_t startDbNamePos = 0;
 				size_t startContainerNamePos = 0;
-				getFullPathNamePosition(fullPathName_, strlen(fullPathName_),
-					startDbNamePos, startContainerNamePos);
+				getFullPathNamePosition(fullPathName_.c_str(),
+					strlen(fullPathName_.c_str()), startDbNamePos,
+					startContainerNamePos);
 
-				size_t len = strlen(fullPathName_) - startContainerNamePos;
+				size_t len =
+					strlen(fullPathName_.c_str()) - startContainerNamePos;
 				containerName_ = ALLOC_NEW(alloc_) char[len + 1];
-				memcpy(
-					containerName_, fullPathName_ + startContainerNamePos, len);
+				memcpy(containerName_,
+					fullPathName_.c_str() + startContainerNamePos, len);
 				containerName_[len] = '\0';
 			}
 			else {
@@ -191,18 +196,15 @@ private:
 	void createFullPathName(
 		const DatabaseId dbId, const char *dbName, const char *containerName) {
 		assert(strcmp(dbName, "") != 0);
-		util::NormalOStringStream stream;
-		if (strcmp(dbName, GS_PUBLIC) != 0) {
-			if (strcmp(dbName, GS_SYSTEM) != 0) {
+		if (dbId != GS_PUBLIC_DB_ID) {
+			util::NormalOStringStream stream;
+			if (dbId != GS_SYSTEM_DB_ID) {
 				stream << dbId << ":";
 			}
 			stream << dbName << ".";
+			fullPathName_.append(stream.str().c_str());
 		}
-		stream << containerName;
-
-		size_t len = strlen(stream.str().c_str()) + 1;
-		fullPathName_ = ALLOC_NEW(alloc_) char[len];
-		memcpy(fullPathName_, stream.str().c_str(), len);
+		fullPathName_.append(containerName);
 	}
 
 	static void getFullPathNamePosition(const char *fullPathName,
@@ -225,7 +227,7 @@ private:
 	}
 
 	util::StackAllocator &alloc_;
-	char *fullPathName_;
+	util::String fullPathName_;
 	DatabaseId databaseId_;
 	char *databaseName_;
 	char *containerName_;
@@ -430,6 +432,7 @@ public:
 	void getContainerNameList(TransactionContext &txn, PartitionId pId,
 		int64_t start, ResultSize limit, const DatabaseId dbId,
 		ContainerCondition &condition, util::XArray<util::String *> &nameList);
+
 	BaseContainer *putContainer(TransactionContext &txn, PartitionId pId,
 		ExtendedContainerName &extContainerName, ContainerType containerType,
 		uint32_t schemaSize, const uint8_t *containerSchema, bool isEnable,
@@ -493,6 +496,7 @@ public:
 		SchemaVersionId versionId, int64_t emNow);
 
 	ResultSet *getResultSet(TransactionContext &txn, ResultSetId resultSetId);
+
 
 	void closeResultSet(PartitionId pId, ResultSetId resultSetId);
 
@@ -579,7 +583,7 @@ private:
 		@brief Map of (ContainerId, ContainerInfoCache)
 	*/
 	class ContainerIdTable {
-#if defined(__GXX_EXPERIMENTAL_CXX0X__) || __cplusplus >= 201103L
+#if UTIL_CXX11_SUPPORTED
 		typedef std::unordered_map<ContainerId, ContainerInfoCache>
 			ContainerIdMap;
 #else
@@ -722,7 +726,6 @@ private:
 
 	bool restoreContainerIdTable(
 		TransactionContext &txn, ClusterService *clusterService);
-
 
 	void setUnrestored(PartitionId pId);
 	void setRestored(PartitionId pId);

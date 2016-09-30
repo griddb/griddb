@@ -27,8 +27,8 @@
 #include "util/file.h"
 #include "util/time.h"  
 #include "util/trace.h"
-#include "data_type.h"
 #include "bit_array.h"
+#include "data_type.h"
 
 UTIL_TRACER_DECLARE(CHECKPOINT_FILE);
 
@@ -49,11 +49,12 @@ public:
 
 	void initialize(const char8_t *dir, PartitionGroupId pgId);
 
+	void punchHoleBlock(uint32_t size, uint64_t offset);
 	int64_t writeBlock(const uint8_t *buffer, uint32_t size, uint64_t blockNo);
 	int64_t readBlock(uint8_t *buffer, uint32_t size, uint64_t blockNo);
 
-	int64_t writeBytes(const uint8_t *buffer, uint32_t size, uint64_t offset);
-	int64_t readBytes(uint8_t *buffer, uint32_t size, uint64_t offset);
+	int64_t writePartialBlock(
+		const uint8_t *buffer, uint32_t size, uint64_t offset);
 
 	uint64_t getWriteBlockCount();
 	uint64_t getReadBlockCount();
@@ -113,6 +114,9 @@ public:
 	std::string dumpValidChunkInfo();
 
 	int64_t getFileSize();
+	int64_t getFileAllocateSize();
+	static size_t getFileSystemBlockSize(const std::string &dir);
+	size_t getFileSystemBlockSize();
 	std::string dump();
 
 private:
@@ -120,7 +124,8 @@ private:
 	static const char8_t *const gsCpFileExtension;
 	static const char8_t *const gsCpFileSeparator;
 
-	const Size_t CHUNK_SIZE_;
+	const Size_t BLOCK_EXP_SIZE_;
+	const Size_t BLOCK_SIZE_;
 
 	util::NamedFile *file_;
 	BitArray usedChunkInfo_;

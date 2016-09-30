@@ -29,16 +29,12 @@
 #include "transaction_manager.h"
 #include "checkpoint_service.h"
 #include "data_store.h"
-#include "schema.h"
 #include "sync_service.h"
-#include "value_processor.h"
+
 
 
 #define TXN_PRIVATE private
 #define TXN_PROTECTED protected
-
-#ifndef NDEBUG
-#endif
 
 #define TXN_THROW_DECODE_ERROR(errorCode, message) \
 	GS_THROW_CUSTOM_ERROR(EncodeDecodeException, errorCode, message)
@@ -70,7 +66,6 @@ UTIL_TRACER_DECLARE(REPLICATION);
 UTIL_TRACER_DECLARE(SESSION_TIMEOUT);
 UTIL_TRACER_DECLARE(TRANSACTION_TIMEOUT);
 UTIL_TRACER_DECLARE(REPLICATION_TIMEOUT);
-
 
 /*!
 	@brief Exception class for denying the statement execution
@@ -104,7 +99,7 @@ public:
 
 	virtual ~StatementHandler();
 	void initialize(const ManagerSet &mgrSet);
-	
+
 	static const size_t USER_NAME_SIZE_MAX = 64;  
 	static const size_t DIGEST_SIZE_MAX = 64;  
 	static const size_t DATABASE_NAME_SIZE_MAX = 64;  
@@ -141,11 +136,11 @@ public:
 	static const ProtocolVersion TXN_V2_7_X_CLIENT_VERSION;
 
 	static const ProtocolVersion TXN_V2_8_X_CLIENT_VERSION;
+	static const ProtocolVersion TXN_V2_9_X_CLIENT_VERSION;
+	static const ProtocolVersion TXN_V3_0_X_CLIENT_VERSION;
+	static const ProtocolVersion TXN_V3_0_X_CE_CLIENT_VERSION;
 
 	static const ProtocolVersion TXN_CLIENT_VERSION;
-
-	static const ProtocolVersion MIN_ACCEPTABLE_TXN_CLIENT_VERSION;
-	static const ProtocolVersion MAX_ACCEPTABLE_TXN_CLIENT_VERSION;
 
 	static const ProtocolVersion TXN_V2_5_X_REPLICATION_MSG_VERSION = 3;
 
@@ -409,7 +404,7 @@ public:
 
 	void setSuccessReply(Event &ev, StatementId stmtId,
 		StatementExecStatus status, const Response &response);
-	void setErrorReply(Event &ev, StatementId stmtId,
+	static void setErrorReply(Event &ev, StatementId stmtId,
 		StatementExecStatus status, const std::exception &exception,
 		const NodeDescriptor &nd);
 
@@ -466,7 +461,7 @@ public:
 	TriggerService *triggerService_;
 	SystemService *systemService_;
 	RecoveryManager *recoveryManager_;
-	
+
 	/*!
 		@brief Represents the information about a connection
 	*/
@@ -480,7 +475,8 @@ public:
 			  isAdminAndPublicDB_(true),
 			  userType_(USER),
 			  authenticationTime_(0),
-			  requestType_(NOSQL) {
+			  requestType_(NOSQL)
+		{
 		}
 
 		void clear() {
@@ -570,9 +566,9 @@ public:
 	template <typename StringType>
 	void decodeStringData(
 		util::ByteStream<util::ArrayInStream> &in, StringType &strData);
-	void decodeBooleanData(
+	static void decodeBooleanData(
 		util::ByteStream<util::ArrayInStream> &in, bool &boolData);
-	void decodeBinaryData(util::ByteStream<util::ArrayInStream> &in,
+	static void decodeBinaryData(util::ByteStream<util::ArrayInStream> &in,
 		util::XArray<uint8_t> &binaryData, bool readAll);
 	void decodeVarSizeBinaryData(util::ByteStream<util::ArrayInStream> &in,
 		util::XArray<uint8_t> &binaryData);
@@ -650,6 +646,9 @@ public:
 		bool isSystemMode, RequestType requestType, bool isWriteMode);
 	bool isAccessibleMode(
 		ContainerAccessMode containerAccessMode, ContainerAttribute attribute);
+
+	void checkDbAccessible(const std::string &loginDbName,
+		const util::String &specifiedDbName) const;
 
 	static const char8_t *clusterRoleToStr(ClusterRole role);
 	static const char8_t *partitionRoleTypeToStr(PartitionRoleType role);
@@ -754,8 +753,8 @@ void StatementHandler::encodeEnumData(
 */
 class ConnectHandler : public StatementHandler {
 public:
-	ConnectHandler(ProtocolVersion minAcceptableClientVer,
-		ProtocolVersion maxAcceptableClientVer);
+	ConnectHandler(ProtocolVersion currentVersion,
+		const ProtocolVersion *acceptableProtocolVersons);
 
 	void operator()(EventContext &ec, Event &ev);
 
@@ -763,8 +762,8 @@ private:
 	typedef uint32_t OldStatementId;  
 	static const OldStatementId UNDEF_OLD_STATEMENTID = UINT32_MAX;
 
-	const ProtocolVersion minAcceptableClientVer_;
-	const ProtocolVersion maxAcceptableClientVer_;
+	const ProtocolVersion currentVersion_;
+	const ProtocolVersion *acceptableProtocolVersons_;
 
 	struct ConnectRequest {
 		ConnectRequest(PartitionId pId, EventType stmtType)
@@ -1146,6 +1145,9 @@ class MultiStatementHandler : public StatementHandler {
 
 	void handleWholeError(EventContext &ec, util::StackAllocator &alloc,
 		const Event &ev, const FixedPart &request, std::exception &e);
+
+	void decodeContainerOptionPart(util::ByteStream<util::ArrayInStream> &in,
+		const FixedPart &fixedPart, OptionPart &optionPart);
 };
 
 /*!
@@ -1199,6 +1201,7 @@ private:
 	void decodeMultiSchema(util::ByteStream<util::ArrayInStream> &in,
 		util::XArray<const MessageSchema *> &schemaList);
 	void decodeMultiRowSet(util::ByteStream<util::ArrayInStream> &in,
+		const FixedPart &request,
 		const util::XArray<const MessageSchema *> &schemaList,
 		util::XArray<const RowSetRequest *> &rowSetList);
 };
@@ -1322,6 +1325,7 @@ private:
 		const FixedPart &request, const QueryRequest &queryRequest);
 
 	void decodeMultiQuery(util::ByteStream<util::ArrayInStream> &in,
+		const FixedPart &request,
 		util::XArray<const QueryRequest *> &queryList);
 
 	void encodeMultiSearchResultHead(
@@ -1352,9 +1356,6 @@ public:
 */
 class CheckTimeoutHandler : public StatementHandler {
 public:
-	CheckTimeoutHandler();
-	~CheckTimeoutHandler();
-
 	void operator()(EventContext &ec, Event &ev);
 
 private:
@@ -1363,7 +1364,7 @@ private:
 	static const uint64_t TIMEOUT_CHECK_STATE_TRACE_COUNT =
 		100;  
 
-	uint64_t *timeoutCheckCount_;
+	std::vector<uint64_t> timeoutCheckCount_;
 
 	void checkReplicationTimeout(EventContext &ec);
 	void checkTransactionTimeout(
@@ -1371,9 +1372,9 @@ private:
 	void checkRequestTimeout(
 		EventContext &ec, const util::XArray<bool> &checkPartitionFlagList);
 	void checkResultSetTimeout(EventContext &ec);
-	bool timeoutCheckEnabled(
+
+	bool isTransactionTimeoutCheckEnabled(
 		PartitionGroupId pgId, util::XArray<bool> &checkPartitionFlagList);
-	void checkTimeoutCorrectlyEnabled(PartitionId pId) const;
 };
 
 /*!
@@ -1416,7 +1417,6 @@ private:
 	PartitionId *pIdCursor_;
 };
 
-
 /*!
 	@brief Handles ADJUST_STORE_MEMORY_PERIODICALLY event
 */
@@ -1454,9 +1454,9 @@ public:
 		PartitionTable::PartitionStatus after, ChangePartitionType changeType,
 		bool isToSubMaster, ClusterStats &stats);
 
-	void setTimeoutCheckEnabled(PartitionId pId);
-	void setTimeoutCheckDisabled(PartitionId pId);
-	bool isTimeoutCheckEnabled(PartitionId pId) const;
+	void enableTransactionTimeoutCheck(PartitionId pId);
+	void disableTransactionTimeoutCheck(PartitionId pId);
+	bool isTransactionTimeoutCheckEnabled(PartitionId pId) const;
 
 	uint64_t getTotalReadOperationCount() const;
 	uint64_t getTotalWriteOperationCount() const;
@@ -1492,12 +1492,12 @@ private:
 
 	const PartitionGroupConfig pgConfig_;
 
-	util::Atomic<bool> *enableTimeoutCheck_;
+	std::vector<util::Atomic<bool> > enableTxnTimeoutCheck_;
 
-	uint64_t *readOperationCount_;
-	uint64_t *writeOperationCount_;
-	uint64_t *rowReadCount_;
-	uint64_t *rowWriteCount_;
+	std::vector<uint64_t> readOperationCount_;
+	std::vector<uint64_t> writeOperationCount_;
+	std::vector<uint64_t> rowReadCount_;
+	std::vector<uint64_t> rowWriteCount_;
 
 	static const int32_t TXN_TIMEOUT_CHECK_INTERVAL =
 		3;  
@@ -1567,6 +1567,7 @@ private:
 	ChangePartitionTableHandler changePartitionTableHandler_;
 
 	CheckpointOperationHandler checkpointOperationHandler_;
+
 };
 
 inline void TransactionService::incrementReadOperationCount(PartitionId pId) {

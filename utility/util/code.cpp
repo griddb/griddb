@@ -40,10 +40,6 @@
     (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
     THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
-
-
-
-
 #include "util/code.h"
 #include "util/os.h"
 #include <iomanip>
@@ -66,9 +62,6 @@
 namespace util {
 
 
-
-
-
 namespace detail {
 
 template<typename T>
@@ -81,9 +74,6 @@ template struct FloatingNumberFormatter<float>;
 template struct FloatingNumberFormatter<double>;
 
 }	
-
-
-
 
 
 #ifdef _WIN32
@@ -268,7 +258,6 @@ bool CodeConverter::convertToString(const char *inbuf, size_t inBytesLeft,
 
 	for (;;) {
 		typedef typename OutStringType::value_type OutChar;
-		
 		OutChar *outBufChars = new OutChar[outLen];
 		OutChar *outBufCharsPtr = outBufChars;
 		size_t outBytesLeft = outLen;
@@ -298,11 +287,6 @@ bool CodeConverter::reset() {
 	return convertToChars(NULL, 0, NULL, 0) != static_cast<size_t>(-1);
 }
 #endif 
-
-
-
-
-
 
 
 const uint32_t* CRC32::getTable() {
@@ -368,14 +352,6 @@ const uint16_t* CRC16::getTable() {
 
 
 
-
-
-
-
-
-
-
-
 static const char gBase64_enc[] = { 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H',
 		'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V',
 		'W', 'X', 'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j',
@@ -436,7 +412,6 @@ size_t Base64Converter::decodeUnit(char o[3], const char i[4]) {
 		}
 
 		if ((c = gBase64_dec[c]) == -1) {
-			
 			return 0;
 		}
 
@@ -464,12 +439,6 @@ size_t Base64Converter::decodeUnit(char o[3], const char i[4]) {
 		++index;
 	} 
 
-	
-	
-	
-	
-	
-	
 
 	if (index < 2)
 		return 0;
@@ -484,7 +453,6 @@ size_t Base64Converter::encode(char *obuf, const char *ibuf, size_t iblen) {
 	const char* ie(ibuf + iblen);
 	char* it(obuf);
 
-	
 
 	while (step < step_max) {
 		encodeUnit(it, ib, 3);
@@ -508,14 +476,12 @@ size_t Base64Converter::decode(char *obuf, const char *ibuf, size_t iblen) {
 	size_t step = 0;
 
 	const char* ib(ibuf);
-	
 	char* it(obuf);
 	size_t dec_len;
 
 	while (step < step_max) {
 		dec_len = decodeUnit(it, ib);
 		if (0 == dec_len) {
-			
 			return 0;
 		}
 
@@ -585,9 +551,6 @@ std::ostream& Base64Converter::decode(std::ostream &os, std::istream &is) {
 
 	return os;
 }
-
-
-
 
 
 inline static bool _addEscape(char &o, char c, char e) {
@@ -763,9 +726,6 @@ size_t EscapeConverter::decode(
 }
 
 
-
-
-
 inline static unsigned char _toHexHalf(unsigned char c, bool cap) {
 	if (c < 10) {
 		return static_cast<unsigned char>('0' + c);
@@ -882,9 +842,6 @@ size_t HexConverter::decode(char *obuf, const char *ibuf, size_t iblen) {
 
 	return ret;
 }
-
-
-
 
 const uint8_t URLConverter::URL_TABLE[] = {
 		1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
@@ -1038,11 +995,6 @@ std::ostream& URLConverter::decode(std::ostream &os, std::istream &is) {
 }
 
 
-
-
-
-
-
 namespace detail {
 void StreamErrors::throwUnexpectedEnd() {
 	UTIL_THROW_UTIL_ERROR(CODE_DECODE_FAILED,
@@ -1057,5 +1009,6 @@ void StreamErrors::throwUnexpectedRemaining() {
 			"Decode failed (detail=unexpected remaining of stream)");
 }
 } 
+
 
 } 

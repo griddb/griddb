@@ -43,10 +43,6 @@
     (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE 
     OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
-
-
-
-
 #include "util/time.h"
 #include "util/os.h"
 #include <iomanip>
@@ -68,9 +64,6 @@ namespace util {
 #define UTIL_FAILURE_SIMULATION_CLOCK_FILTER(clock) (clock)
 #define UTIL_FAILURE_SIMULATION_TRACE_COVERAGE(posName)
 #endif
-
-
-
 
 
 const int64_t DateTime::INITIAL_UNIX_TIME = static_cast<int64_t>(0);
@@ -171,11 +164,7 @@ void DateTime::setFields(
 
 void DateTime::addField(int64_t amount, FieldType fieldType) {
 
-	
-	
-	
 
-	
 	switch (fieldType) {
 	case FIELD_DAY_OF_MONTH:
 		unixTimeMillis_ += amount * 24 * 60 * 60 * 1000;
@@ -196,15 +185,11 @@ void DateTime::addField(int64_t amount, FieldType fieldType) {
 		break;
 	}
 
-	
-	
-	
 
 	int32_t year, month, monthDay, hour, minute, second, milliSecond;
 
 	getFields(year, month, monthDay, hour, minute, second, milliSecond, false);
 
-	
 	switch (fieldType) {
 	case FIELD_YEAR:
 		year += static_cast<int32_t>(amount);
@@ -229,7 +214,6 @@ void DateTime::addField(int64_t amount, FieldType fieldType) {
 	}
 
 	if (monthDay >= 29) {
-		
 		const DateTime straightTime(
 				DateTime(year, month,
 						1, hour, minute, second, milliSecond, false).getUnixTime() +
@@ -239,7 +223,6 @@ void DateTime::addField(int64_t amount, FieldType fieldType) {
 		straightTime.getFields(
 				yearS, monthS, monthDay, hour, minute, second, milliSecond, false);
 		if (monthS != month || yearS != year) {
-			
 			month++;
 			if (month >= 13) {
 				month = 1;
@@ -251,7 +234,6 @@ void DateTime::addField(int64_t amount, FieldType fieldType) {
 		}
 	}
 
-	
 	setFields(year, month, monthDay, hour, minute, second, milliSecond, false);
 }
 
@@ -363,7 +345,6 @@ void DateTime::format(
 bool DateTime::parse(
 		const char8_t *str, DateTime &dateTime, bool trimMilliseconds) {
 	try {
-		
 		util::NormalIStringStream iss(str);
 
 		iss.unsetf(std::ios::skipws);
@@ -457,8 +438,8 @@ DateTime DateTime::now(bool trimMilliseconds) {
 	GetSystemTimeAsFileTime(&time);
 	int64_t unixTime = FileLib::getUnixTime(time);
 #else
-	timeval time;
-	if (gettimeofday(&time, NULL) != 0) {
+	timespec time;
+	if (clock_gettime(CLOCK_REALTIME, &time) != 0) {
 		UTIL_THROW_PLATFORM_ERROR(NULL);
 	}
 	int64_t unixTime = FileLib::getUnixTime(time);
@@ -504,9 +485,6 @@ int64_t DateTime::getMaxUnixTime(bool trimMilliseconds) {
 
 	return (trimMilliseconds ? maxUnixTime / 1000 * 1000 : maxUnixTime);
 }
-
-
-
 
 
 Stopwatch::Stopwatch(Status initialStatus) :
@@ -604,13 +582,14 @@ uint64_t Stopwatch::currentClock() {
 	return UTIL_FAILURE_SIMULATION_CLOCK_FILTER(
 			static_cast<uint64_t>(current.QuadPart));
 #else
-	
-	struct timeval current;
-	gettimeofday(&current, NULL);
+	timespec current;
+	if (clock_gettime(CLOCK_MONOTONIC, &current) != 0) {
+		UTIL_THROW_PLATFORM_ERROR(NULL);
+	}
 
 	return UTIL_FAILURE_SIMULATION_CLOCK_FILTER(
 			static_cast<uint64_t>(current.tv_sec) * 1000 * 1000 +
-			static_cast<uint64_t>(current.tv_usec));
+			static_cast<uint64_t>(current.tv_nsec) / 1000);
 #endif	
 }
 
@@ -620,7 +599,6 @@ uint64_t Stopwatch::clocksPerSec() {
 	QueryPerformanceFrequency(&frequency);
 	const uint64_t result = static_cast<uint64_t>(frequency.QuadPart);
 	if (result == 0) {
-		
 		UTIL_THROW_PLATFORM_ERROR(NULL);
 	}
 	return result;
@@ -630,9 +608,6 @@ uint64_t Stopwatch::clocksPerSec() {
 }
 
 #if UTIL_FAILURE_SIMULATION_ENABLED
-
-
-
 
 
 volatile int32_t DateTimeFailureSimulator::mode_ = 0;
@@ -705,8 +680,8 @@ uint64_t DateTimeFailureSimulator::filterClock(uint64_t clock) {
 		GetSystemTimeAsFileTime(&time);
 		const int64_t unixTime = FileLib::getUnixTime(time);
 #else
-		timeval time;
-		if (gettimeofday(&time, NULL) != 0) {
+		timespec time;
+		if (clock_gettime(CLOCK_REALTIME, &time) != 0) {
 			UTIL_THROW_PLATFORM_ERROR(NULL);
 		}
 		const int64_t unixTime = FileLib::getUnixTime(time);

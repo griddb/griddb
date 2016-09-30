@@ -114,6 +114,7 @@ $(srcdir)/btree_map.cpp \
 $(srcdir)/checkpoint_file.cpp \
 $(srcdir)/checkpoint_service.cpp \
 $(srcdir)/chunk_manager.cpp \
+$(srcdir)/cluster_event_type.cpp \
 $(srcdir)/cluster_manager.cpp \
 $(srcdir)/cluster_service.cpp \
 $(srcdir)/collection.cpp \
@@ -122,6 +123,8 @@ $(srcdir)/data_store.cpp \
 $(srcdir)/event_engine.cpp \
 $(srcdir)/gs_error.cpp \
 $(srcdir)/hash_map.cpp \
+$(srcdir)/http.cpp \
+$(srcdir)/json.cpp \
 $(srcdir)/log_manager.cpp \
 $(srcdir)/message_row_store.cpp \
 $(srcdir)/message_schema.cpp \
@@ -136,6 +139,7 @@ $(srcdir)/recovery_manager.cpp \
 $(srcdir)/result_set.cpp \
 $(srcdir)/row.cpp \
 $(srcdir)/schema.cpp \
+$(srcdir)/service_address.cpp \
 $(srcdir)/string_array_processor.cpp \
 $(srcdir)/string_processor.cpp \
 $(srcdir)/sub_time_series.cpp \
@@ -152,7 +156,6 @@ $(srcdir)/value_processor.cpp \
 $(srcdir)/main.cpp
 
 gsserver_CPPFLAGS = \
--DGEOMETRY_SEARCH_DISABLE \
 $(NOSQL_INCLUDES)
 
 gsserver_LDADD = \
@@ -160,7 +163,7 @@ $(utildir)/libutil.a \
 $(libdir)/MessagePack/libmsgpack.a \
 $(activemqldadd) \
 $(aprldadd) \
--lpthread -lrt -ldl -lstdc++
+-lpthread -lrt -ldl -lstdc++ -lz
 
 gsserver_LDFLAGS = -rdynamic
 

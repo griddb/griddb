@@ -86,12 +86,15 @@ struct ClientId {
 	}
 
 	bool operator<(const ClientId &id) const {
+		if (sessionId_ > id.sessionId_) {
+			return true;
+		}
 		if (sessionId_ == id.sessionId_) {
-			return (memcmp(uuid_, id.uuid_, TXN_CLIENT_UUID_BYTE_SIZE) == 0);
+			if (memcmp(uuid_, id.uuid_, TXN_CLIENT_UUID_BYTE_SIZE) > 0) {
+				return true;
+			}
 		}
-		else {
-			return false;
-		}
+		return false;
 	}
 
 	bool operator!=(const ClientId &id) const {

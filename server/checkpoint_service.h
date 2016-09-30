@@ -298,7 +298,14 @@ public:
 		return currentCheckpointIdList_[pId];
 	}
 
+	/*!
+		@brief Gets transactionEE queue size
+	*/
+	int32_t getTransactionEEQueueSize(PartitionGroupId pgId);
+
 private:
+	static const int32_t CP_CHUNK_COPY_WITH_SLEEP_LIMIT_QUEUE_SIZE = 40;
+
 	/*!
 		@brief Manages LSNs for each Partition.
 	*/

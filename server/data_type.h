@@ -43,10 +43,8 @@ typedef int32_t ChunkId; /*!< Chunk ID (unique witihin a partition) */
 typedef uint64_t ContainerId; /*!< Container ID (unique witihin a partition) */
 
 typedef int64_t RowId; /*!< Row ID (unique witihin a container) */
-typedef uint64_t RId;  
 
 typedef uint32_t ColumnId; /*!< Column ID */
-typedef uint32_t FieldId;  
 
 typedef uint32_t SchemaVersionId; /*!< ContainerSchema version ID (unique
 									 witihin a container) */
@@ -55,8 +53,7 @@ typedef uint64_t LogSequentialNumber; /*!< Log sequential Number (unique witihin
 										 a partition) */
 
 typedef uint64_t
-	TransactionId;			/*!< Transaction ID (unique witihin a partition) */
-typedef TransactionId TId;  
+	TransactionId; /*!< Transaction ID (unique witihin a partition) */
 
 typedef uint64_t SessionId; /*!< Session ID (decide by client) */
 
@@ -70,8 +67,6 @@ typedef uint64_t
 	CheckpointId; /*!< Checkpoint ID (unique witihin a partition group) */
 
 typedef uint64_t ResultSize;  
-typedef uint64_t DataSize;	
-typedef uint8_t* DataPtr;	 
 
 typedef uint32_t Size_t;
 typedef int32_t Offset_t;
@@ -129,12 +124,6 @@ const CheckpointId MAX_CHECKPOINT_ID = UNDEF_CHECKPOINT_ID - 1;
 const ResultSize UNDEF_RESULT_SIZE = UINT64_MAX;
 const ResultSize MAX_RESULT_SIZE = UNDEF_RESULT_SIZE - 1;
 
-const RId UNDEF_RID = UINT32_MAX;
-const RId MAX_RID = UNDEF_RID - 1;
-
-const FieldId UNDEF_FIELDID = UINT32_MAX;
-const FieldId MAX_FIELDID = UNDEF_FIELDID - 1;
-
 const bool TRIM_MILLISECONDS = false;  
 
 const uint32_t IO_MONITOR_DEFAULT_WARNING_THRESHOLD_MILLIS = 5000;
@@ -164,9 +153,14 @@ const ChunkKey UNDEF_CHUNK_KEY = INT32_MAX;
 const ChunkKey MAX_CHUNK_KEY = UNDEF_CHUNK_KEY - 1;
 const ChunkKey MIN_CHUNK_KEY = INT32_MIN;
 
+typedef uint8_t ContainerHashMode;
+const ContainerHashMode CONTAINER_HASH_MODE_CRC32 = 0;
+
 typedef uint64_t AffinityGroupId;
 
 typedef RowId DatabaseId;  
+
+
 
 
 #endif

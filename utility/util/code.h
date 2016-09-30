@@ -53,17 +53,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+
 namespace util {
 
 /*!
 	@brief Creates a random number.
 */
-
-
-
 class Random {
 public:
-	
 
 	Random() {}
 
@@ -77,15 +74,11 @@ public:
 		return (rand() << 30 | rand() << 15 | rand());
 	}
 
-	
-	
-	
 	int32_t nextInt32(int32_t count) {
 		if (count <= 0) {
 			return 0;
 		}
 
-		
 		return (nextInt32() & 0x7fffffff) % count;
 	}
 
@@ -101,9 +94,6 @@ public:
 /*!
 	@brief Converts strings and values of numbers or booleans.
 */
-
-
-
 template<typename T>
 struct LexicalConverter {
 	bool operator()(const char8_t *src, T &dest);
@@ -142,66 +132,35 @@ class CodeConverter;
 /*!
 	@brief Types of encodings of strings.
 */
-
-
-
 class Code {
 	friend class CodeConverter;
 public:
-
-
-
 	const static Code CHAR;
 
-
-
-
 	const static Code ISO88591;
-
-
-
 
 	const static Code UTF8;
 
 #ifdef _WIN32
-
-
-
 	const static Code WCHAR_T;
 #endif
 
 private:
 #ifdef _WIN32
-
-
-
-
 	Code(unsigned int codePage) :
 			codePage_(codePage) {
 	}
 #else
-
-
-
-
 	Code(const char *iconvCode) : iconvCode_(iconvCode) {
 	}
 #endif
 
 private:
 #ifdef _WIN32
-
-
-
-
 	operator unsigned int() const {
 		return codePage_;
 	}
 #else
-
-
-
-
 	operator const char* () const {
 		return iconvCode_;
 	}
@@ -218,64 +177,19 @@ private:
 /*!
 	@brief Utilities to convert encodings of a string.
 */
-
-
-
 class CodeConverter {
 public:
-
-
-
-
-
 	CodeConverter(Code fromCode, Code toCode);
 
-
-
-
-
 	~CodeConverter();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 	size_t operator()(const char **inBuf, size_t *inBytesLeft, char **outBuf,
 			size_t *outBytesLeft);
 
-
-
-
-
-
-
 	bool operator()(const std::string &inBuf, std::string &outBuf);
 
 #ifdef _WIN32
-
-
-
-
-
-
 	bool operator()(const std::string &inBuf, std::wstring &outBuf);
-
-
-
-
-
-
 
 	bool operator()(const std::wstring &inBuf, std::string &outBuf);
 #endif
@@ -304,17 +218,9 @@ private:
 };
 
 
-
-
-
-
-
 /*!
 	@brief Creates CRC32.
 */
-
-
-
 class CRC32 {
 public:
 
@@ -332,13 +238,9 @@ private:
 /*!
 	@brief Creates CRC16.
 */
-
-
-
 class CRC16 {
 public:
 
-	
 
 	static uint16_t calculate(const void *buf, size_t length);
 
@@ -349,32 +251,22 @@ private:
 	~CRC16();
 };
 
-
 uint32_t fletcher32(const void *buf, size_t len);
-
 
 uint32_t countNumOfBits(uint32_t bits);
 
-
 uint32_t population(uint32_t bits);
 
-
 uint32_t nlz(uint32_t bits);
-
-
+uint32_t nlz(uint64_t bits);
 
 uint32_t bitsize(uint32_t bits);
-
-
 
 uint32_t ilog2(uint32_t bits);
 
 /*!
 	@brief Gets logarithm of base of e^2.
 */
-
-
-
 template<uint32_t n>
 struct ILog2 {
 	enum {
@@ -389,24 +281,15 @@ struct ILog2<0> {
 	};
 };
 
-
-
 uint32_t getFirst1Position(uint32_t bits);
 
-
 uint32_t nextPowerBitsOf2(uint32_t x);
-
 
 uint32_t nextPowerOf2(uint32_t x);
 
 /*!
 	@brief Finds a bit 1 in the array of bits.
 */
-
-
-
-
-
 template<typename V>
 class BitNumSet {
 public:
@@ -433,10 +316,6 @@ private:
 /*!
 	@brief Returns alignment size of each types.
 */
-
-
-
-
 template<typename T>
 struct AlignmentOf {
 	struct ComplexType {
@@ -452,81 +331,28 @@ struct AlignmentOf {
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 int32_t varIntDecode64(const uint8_t *p, uint64_t &v);
 int32_t varIntDecode32(const uint8_t *p, uint32_t &v);
 int32_t varIntEncode64(uint8_t *p, uint64_t v);
 int32_t varIntEncode32(uint8_t *p, uint32_t v);
 
 
-
-
-
-
-
 /*!
 	@brief Encodes and decodes  BASE64.
 */
-
-
-
 class Base64Converter {
 public:
-	
-	
-	
-	
 	static std::ostream& encode(std::ostream &os, std::istream &is);
 
-	
-	
-	
-	
-	
-	
 	static size_t encode(char *obuf, const char *ibuf, size_t iblen);
 
-	
-	
-	
-	
 	static std::ostream& decode(std::ostream &os, std::istream &is);
 
-	
-	
-	
-	
-	
 	static size_t decode(char *obuf, const char *ibuf, size_t iblen);
 
 public:
-	
-	
-	
-	
-	
 	static char* encodeUnit(char o[4], const char *i, size_t ilen);
 
-	
-	
-	
-	
 	static size_t decodeUnit(char o[3], const char i[4]);
 
 private:
@@ -538,43 +364,17 @@ private:
 /*!
 	@brief Encodes and decodes  strings using escape characters.
 */
-
-
-
 class EscapeConverter {
 public:
-	
-	
-	
-	
-	
 	static std::ostream& encode(std::ostream &os, std::istream &is,
 			char e = '\\');
 
-	
-	
-	
-	
-	
-	
-	
 	static size_t encode(char *obuf, const char *ibuf, size_t iblen,
 			char e = '\\');
 
-	
-	
-	
-	
-	
 	static std::ostream& decode(std::ostream &os, std::istream &is,
 			char e = '\\');
 
-	
-	
-	
-	
-	
-	
 	static size_t decode(char *obuf, const char *ibuf, size_t iblen,
 			char e = '\\');
 
@@ -587,52 +387,20 @@ private:
 /*!
 	@brief Encodes and decodes  a hex byte array.
 */
-
-
-
 class HexConverter {
 public:
-	
-	
-	
-	
-	
 	static std::ostream& encode(std::ostream &os, std::istream &is,
 			bool cap = true);
 
-	
-	
-	
-	
-	
-	
-	
 	static size_t encode(char *obuf, const char *ibuf, size_t iblen,
 			bool cap = true);
 
-	
-	
-	
-	
 	static std::ostream& decode(std::ostream &os, std::istream &is);
 
-	
-	
-	
-	
-	
 	static size_t decode(char *obuf, const char *ibuf, size_t iblen);
 
-	
-	
-	
-	
-	
 	static char* encode(char o[2], char c, bool cap);
 
-	
-	
-	
 	static char decode(const char o[2]);
 
 private:
@@ -644,36 +412,14 @@ private:
 /*!
 	@brief Encodes and decodes  a URL.
 */
-
-
-
 class URLConverter {
 public:
-	
-	
-	
-	
 	static std::ostream& encode(std::ostream &os, std::istream &is);
 
-	
-	
-	
-	
-	
-	
 	static size_t encode(char *obuf, const char *ibuf, size_t iblen);
 
-	
-	
-	
-	
 	static std::ostream& decode(std::ostream &os, std::istream &is);
 
-	
-	
-	
-	
-	
 	static size_t decode(char *obuf, const char *ibuf, size_t iblen);
 
 private:
@@ -686,62 +432,26 @@ private:
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 /*!
 	@brief Encodes and decodes  a byte stream.
 */
-
-
-
 template<typename S>
 class BasicByteStream {
 public:
+	typedef FalseType Locator;
+
 	BasicByteStream() : error_(false) {}
 
-	
-	
-	
 
-	
-	
 	size_t readAll(void *buf, size_t length, bool force);
 
-	
 	void readAll(void *buf, size_t length);
 
-	
-	
-	
+	template<typename A> void readAll(size_t length, A &action);
 
-	
-	
+
 	size_t writeAll(const void *buf, size_t length, bool force);
 
-	
 	void writeAll(const void *buf, size_t length);
 
 	inline void ensureEOF();
@@ -751,6 +461,8 @@ public:
 	inline bool isError() const { return error_; };
 
 	void setError() { error_ = true; };
+
+	Locator locator() { return Locator(); }
 
 protected:
 	template<bool Enabled=true>
@@ -769,10 +481,6 @@ private:
 /*!
 	@brief Returns size of an encoded or decoded byte stream.
 */
-
-
-
-
 class SizeCountStream : public BasicByteStream<SizeCountStream> {
 public:
 	explicit SizeCountStream(size_t &size) : size_(size) {}
@@ -789,16 +497,17 @@ private:
 /*!
 	@brief Arrays in the stream.
 */
-
-
-
 class ArrayInStream : public BasicByteStream<ArrayInStream> {
 public:
+	class Locator;
+
 	ArrayInStream(const void *buffer, size_t size);
 
 	size_t read(void *buf, size_t length);
 
 	void readAll(void *buf, size_t length);
+
+	template<typename A> void readAll(size_t length, A &action);
 
 	inline size_t getRemaining() const { return remaining(); }		
 
@@ -810,26 +519,29 @@ public:
 
 	inline void clear() { position(0); }
 
+	Locator locator();
+
 private:
 	const uint8_t *begin_;
 	const uint8_t *end_;
 	const uint8_t *next_;
 };
 
+class ArrayInStream::Locator {
+public:
+	Locator();
+	explicit Locator(ArrayInStream &stream);
+
+	void locate() const;
+
+private:
+	ArrayInStream *stream_;
+	size_t position_;
+};
+
 /*!
 	@brief Read and write formatter of a string as a pair of a size header and an array.
 */
-
-
-
-
-
-
-
-
-
-
-
 template<bool Check = true, typename StrSize = uint32_t>
 class BasicStingFormatter {
 public:
@@ -843,7 +555,6 @@ public:
 	void put(S &s, const E *str);
 
 private:
-	
 	struct StrSizeChecker {
 		static inline bool check(const uint8_t*) { return true; }
 		static inline bool check(const uint16_t*) { return true; }
@@ -855,11 +566,6 @@ private:
 		static inline bool check(const int64_t *s) { return *s >= 0; }
 	};
 
-	
-	
-	
-	
-	
 	struct InstanceForGet {};
 	struct InstanceForPut {};
 	template<typename Src, typename Dest, typename Instance>
@@ -869,38 +575,30 @@ private:
 /*!
 	@brief I/O stream of a byte array of basic types or string type in binary.
 */
-
-
-
-
 template< typename S, typename F = BasicStingFormatter<> >
 class ByteStream {
 public:
 	typedef ByteStream<S, F> ThisType;
+	typedef typename S::Locator Locator;
 
 	inline explicit ByteStream(const S &baseStream);
 
 	inline ByteStream(const S &baseStream, const F &formatterObj);
 
-	
 	template<typename V>
 	inline ThisType& operator>>(V &value);
 
-	
 	template<typename V>
 	inline ThisType& operator<<(const V &value);
 
-	
 	template<typename V, typename Size>
 	inline ThisType& operator>>(const std::pair<V*, Size> &valArray);
 
-	
 	template<typename V, typename Size>
 	inline ThisType& operator<<(const std::pair<const V*, Size> &valArray);
 	template<typename V, typename Size>
 	inline ThisType& operator<<(const std::pair<V*, Size> &valArray);
 
-	
 	template<typename E>
 	inline ThisType& operator<<(const E *str);
 
@@ -910,6 +608,9 @@ public:
 	inline void readAll(void *buf, size_t length) {
 		base_.readAll(buf, length);
 	}
+	template<typename A> inline void readAll(size_t length, A &action) {
+		base_.readAll(length, action);
+	}
 
 	inline size_t writeAll(const void *buf, size_t length, bool force) {
 		return base_.writeAll(buf, length, force);
@@ -918,13 +619,8 @@ public:
 		base_.writeAll(buf, length);
 	}
 
-	
-	
 	inline void ensureEOF() { base_.ensureEOF(); }
 
-	
-	
-	
 	inline void flush() { base_.flush(); }
 
 	inline S& base() { return base_; };
@@ -934,6 +630,8 @@ public:
 	inline F& formatter() { return formatter_; };
 
 	inline const F& formatter() const { return formatter_; };
+
+	Locator locator() { return base_.locator(); }
 
 private:
 	template<typename V>
@@ -980,13 +678,6 @@ typedef ByteStream<util::ArrayInStream> ArrayByteInStream;
 
 
 
-
-
-
-
-
-
-
 namespace detail {
 
 template<typename T>
@@ -1002,7 +693,6 @@ struct GeneralParser {
 			iss.unsetf(std::ios::skipws);
 			iss >> dest;
 
-			
 			if (iss.bad()) {
 				break;
 			}
@@ -1182,11 +872,6 @@ inline void FormattedValue<T>::operator()(std::ostream &stream) const {
 	Formatter()(value_, stream);
 }
 
-
-
-
-
-
 inline uint32_t CRC32::update(uint32_t lastCRC, const void *buf, size_t length) {
 	const uint32_t* const table = getTable();
 
@@ -1202,8 +887,6 @@ inline uint32_t CRC32::calculate(const void *buf, size_t length) {
 }
 
 
-
-
 inline uint16_t CRC16::calculate(const void *buf, size_t length) {
 	const uint16_t* const table = getTable();
 
@@ -1214,8 +897,6 @@ inline uint16_t CRC16::calculate(const void *buf, size_t length) {
 	}
 	return c;
 }
-
-
 
 inline uint32_t fletcher32(const void *buf, size_t len) {
 	len /= 2; 
@@ -1265,11 +946,19 @@ inline uint32_t nlz(uint32_t bits) {
 	return population(~bits);
 }
 
+inline uint32_t nlz(uint64_t bits) {
+	uint32_t high = static_cast<uint32_t>(bits >> 32);
+	if (high == 0) {
+		return 32 + nlz(static_cast<uint32_t>(bits));
+	}
+	else {
+		return nlz(high);
+	}
+}
+
 /*
 	@note cf.(Public Domain)http://www.hackersdelight.org/
 */
-
-
 inline uint32_t bitsize(uint32_t bits) {
 	bits = bits ^ (bits >> 31);
 	return (33 - nlz(bits));
@@ -1278,8 +967,6 @@ inline uint32_t bitsize(uint32_t bits) {
 /*
 	@note cf.(Public Domain)http://www.hackersdelight.org/
 */
-
-
 inline uint32_t ilog2(uint32_t bits) {
 	bits = bits | (bits >> 1);
 	bits = bits | (bits >> 2);
@@ -1289,11 +976,7 @@ inline uint32_t ilog2(uint32_t bits) {
 	return population(bits) - 1;
 }
 
-
 inline uint32_t getFirst1Position(uint32_t bits) {
-	
-	
-	
 	return countNumOfBits(
 		( bits & static_cast<uint32_t>(-static_cast<int32_t>(bits)) ) - 1);
 }
@@ -1301,8 +984,6 @@ inline uint32_t getFirst1Position(uint32_t bits) {
 /*
 	@note cf.(Public Domain)http://www.hackersdelight.org/
 */
-
-
 inline uint32_t nextPowerBitsOf2(uint32_t x) {
 	return ( 32 - nlz(x - 1) );
 }
@@ -1310,9 +991,6 @@ inline uint32_t nextPowerBitsOf2(uint32_t x) {
 inline uint32_t nextPowerOf2(uint32_t x) {
 	return ( 1 << nextPowerBitsOf2(x) );
 }
-
-
-
 
 
 template<typename V>
@@ -1356,11 +1034,6 @@ inline bool BitNumSet<V>::find(const V value) {
 	return false;
 }
 
-
-
-
-
-
 /*
 	@note cf.(Public Domain)http://www.sqlite.org
 */
@@ -1368,14 +1041,12 @@ UTIL_FORCEINLINE int32_t varIntDecode64(const uint8_t *p, uint64_t &v) {
 	uint32_t a, b, s;
 	a = *p;
 	++p;
-	
 	if ( !(a & 0x80) ) {
 		v = a;
 		return 1;
 	}
 	b = *p;
 	++p;
-	
 	if ( !(b & 0x80) ) {
 		a &= 0x7f;
 		a = a<<7;
@@ -1386,7 +1057,6 @@ UTIL_FORCEINLINE int32_t varIntDecode64(const uint8_t *p, uint64_t &v) {
 	a = a << 14;
 	a |= *p;
 	++p;
-	
 	if ( !(a&0x80) ) {
 		a &= (0x7f << 14) | (0x7f);
 		b &= 0x7f;
@@ -1395,54 +1065,35 @@ UTIL_FORCEINLINE int32_t varIntDecode64(const uint8_t *p, uint64_t &v) {
 		v = a;
 		return 3;
 	}
-	
 	a &= (0x7f << 14) | (0x7f);
 	b = b << 14;
 	b |= *p;
 	++p;
-	
 	if ( !(b & 0x80) ) {
 		b &= (0x7f << 14) | (0x7f);
-		
-		
 		a = a << 7;
 		a |= b;
 		v = a;
 		return 4;
 	}
-	
-	
-	
-	
-	
 	b &= (0x7f << 14) | (0x7f);
 	s = a;
-	
 	a = a<<14;
 	a |= *p;
 	++p;
-	
 	if ( !(a & 0x80) ) {
-		
-		
-		
 		b = b << 7;
 		a |= b;
 		s = s >> 18;
 		v = static_cast<uint64_t>(s) << 32 | a;
 		return 5;
 	}
-	
 	s = s << 7;
 	s |= b;
-	
 	b = b << 14;
 	b |= *p;
 	++p;
-	
 	if ( !(b&0x80) ) {
-		
-		
 		a &= (0x7f << 14) | (0x7f);
 		a = a << 7;
 		a |= b;
@@ -1453,7 +1104,6 @@ UTIL_FORCEINLINE int32_t varIntDecode64(const uint8_t *p, uint64_t &v) {
 	a = a << 14;
 	a |= *p;
 	++p;
-	
 	if ( !(a & 0x80) ) {
 		a &= (0x7f << 28) | (0x7f << 14) | (0x7f);
 		b &= (0x7f << 14) | (0x7f);
@@ -1463,16 +1113,12 @@ UTIL_FORCEINLINE int32_t varIntDecode64(const uint8_t *p, uint64_t &v) {
 		v = static_cast<uint64_t>(s) << 32 | a;
 		return 7;
 	}
-	
 	a &= (0x7f << 14) | (0x7f);
 	b = b << 14;
 	b |= *p;
 	++p;
-	
 	if ( !(b & 0x80) ) {
 		b &= (0x7f << 28) | (0x7f << 14) | (0x7f);
-		
-		
 		a = a << 7;
 		a |= b;
 		s = s >> 4;
@@ -1482,14 +1128,10 @@ UTIL_FORCEINLINE int32_t varIntDecode64(const uint8_t *p, uint64_t &v) {
 	a = a << 15;
 	a |= *p;
 	++p;
-	
-	
-	
 	b &= (0x7f << 14) | (0x7f);
 	b = b << 8;
 	a |= b;
 	s = s << 4;
-	
 	b = p[-5];	
 	b &= 0x7f;
 	b = b >> 3;
@@ -1505,14 +1147,12 @@ UTIL_FORCEINLINE int32_t varIntDecode32(const uint8_t *p, uint32_t &v) {
 	uint32_t a, b;
 	a = *p;
 	++p;
-	
 	if ( !(a & 0x80) ) {
 		v = a;
 		return 1;
 	}
 	b = *p;
 	++p;
-	
 	if ( !(b & 0x80) ) {
 		a &= 0x7f;
 		a = a<<7;
@@ -1523,7 +1163,6 @@ UTIL_FORCEINLINE int32_t varIntDecode32(const uint8_t *p, uint32_t &v) {
 	a = a << 14;
 	a |= *p;
 	++p;
-	
 	if ( !(a&0x80) ) {
 		a &= (0x7f << 14) | (0x7f);
 		b &= 0x7f;
@@ -1532,17 +1171,13 @@ UTIL_FORCEINLINE int32_t varIntDecode32(const uint8_t *p, uint32_t &v) {
 		v = a;
 		return 3;
 	}
-	
 	a &= (0x7f << 14) | (0x7f);
 	b = b << 14;
 	b |= *p;
 	++p;
 
-	
 	if ( !(b & 0x80) ) {
 		b &= (0x7f << 14) | (0x7f);
-		
-		
 		a = a << 7;
 		a |= b;
 		v = a;
@@ -1550,21 +1185,11 @@ UTIL_FORCEINLINE int32_t varIntDecode32(const uint8_t *p, uint32_t &v) {
 	}
 
 	uint32_t s;
-	
-	
-	
-	
-	
 	b &= (0x7f << 14) | (0x7f);
 	s = a;
-	
 	a = a<<14;
 	a |= *p;
 	++p;
-	
-	
-	
-	
 	b = b << 7;
 	a |= b;
 	s = s >> 18;
@@ -1583,7 +1208,6 @@ UTIL_FORCEINLINE int32_t varIntDecode32_partial(const uint8_t *p, uint32_t &v) {
 	a |= *(p + 2);
 	p += 2;
 
-	
 	if ( !(a&0x80) ) {
 		a &= (0x7f << 14) | (0x7f);
 		b &= 0x7f;
@@ -1592,38 +1216,24 @@ UTIL_FORCEINLINE int32_t varIntDecode32_partial(const uint8_t *p, uint32_t &v) {
 		v = a;
 		return 3;
 	}
-	
 	a &= (0x7f << 14) | (0x7f);
 	b = b << 14;
 	b |= *p;
 	++p;
 
-	
 	if ( !(b & 0x80) ) {
 		b &= (0x7f << 14) | (0x7f);
-		
-		
 		a = a << 7;
 		a |= b;
 		v = a;
 		return 4;
 	}
 	uint32_t s;
-	
-	
-	
-	
-	
 	b &= (0x7f << 14) | (0x7f);
 	s = a;
-	
 	a = a<<14;
 	a |= *p;
 	++p;
-	
-	
-	
-	
 	b = b << 7;
 	a |= b;
 	s = s >> 18;
@@ -1678,11 +1288,9 @@ UTIL_FORCEINLINE int32_t varIntEncode32(uint8_t *p, uint32_t v) {
 }
 
 
-
 /*
 	@note cf.(Public Domain)http://www.sqlite.org
 */
-
 UTIL_FORCEINLINE uint32_t varIntDecode32_limited_fast_short(const uint8_t *p, uint32_t &v) {
 	uint32_t a;
 	a = *p;
@@ -1699,7 +1307,6 @@ UTIL_FORCEINLINE uint32_t varIntDecode32_limited_fast_short(const uint8_t *p, ui
 /*
 	@note cf.(Public Domain)http://www.sqlite.org
 */
-
 UTIL_FORCEINLINE uint32_t varIntDecode32_fast_short(const uint8_t *p, uint32_t &v) {
 	if ( !(*p & 0x80) ) {
 		v = *p;
@@ -1713,25 +1320,21 @@ UTIL_FORCEINLINE uint32_t varIntDecode32_fast_short(const uint8_t *p, uint32_t &
 		v = (a |= *p);
 		return 2;
 	}
-	
 	return varIntDecode32_partial(p - 1, v);
 }
 
 /*
 	@note cf.(Public Domain)http://www.sqlite.org
 */
-
 UTIL_FORCEINLINE int32_t varIntEncode32_limited_fast_short(uint8_t *p, uint32_t v) {
 	if( (v & ~0x7f)==0 ){
 		p[0] = static_cast<uint8_t>(v);
 		return 1;
 	}
-	
 	p[0] = static_cast<uint8_t>((v >> 7) | 0x80);
 	p[1] = static_cast<uint8_t>(v & 0x7f);
 	return 2;
 }
-
 
 UTIL_FORCEINLINE int32_t varIntEncode32_fast_short(uint8_t *p, uint32_t v) {
 	if( (v & ~0x7f)==0 ){
@@ -1743,17 +1346,8 @@ UTIL_FORCEINLINE int32_t varIntEncode32_fast_short(uint8_t *p, uint32_t v) {
 		p[1] = static_cast<uint8_t>(v & 0x7f);
 		return 2;
 	}
-	
 	return varIntEncode64(p, v);
 }
-
-
-
-
-
-
-
-
 
 
 
@@ -1781,6 +1375,22 @@ size_t BasicByteStream<S>::readAll(void *buf, size_t length, bool force) {
 template<typename S>
 void BasicByteStream<S>::readAll(void *buf, size_t length) {
 	impl().readAll(buf, length);
+}
+
+template<typename S>
+template<typename A>
+inline void BasicByteStream<S>::readAll(size_t length, A &action) {
+	uint8_t buf[8192];
+	for (size_t remaining = length; remaining > 0;) {
+		const size_t last = impl().read(buf, std::min(remaining, sizeof(buf)));
+		if (last == 0) {
+			setError();
+			detail::StreamErrors::throwUnexpectedEnd();
+		}
+
+		action(static_cast<const void*>(buf), last);
+		remaining -= last;
+	}
 }
 
 template<typename S>
@@ -1819,9 +1429,6 @@ inline void BasicByteStream<S>::ensureEOF() {
 }
 
 
-
-
-
 inline ArrayInStream::ArrayInStream(const void *buffer, size_t size) :
 		begin_( static_cast<const uint8_t*>(buffer) ),
 		end_(begin_ + size),
@@ -1845,6 +1452,16 @@ inline void ArrayInStream::readAll(void *buf, size_t length) {
 	next_ = newNext;
 }
 
+template<typename A>
+inline void ArrayInStream::readAll(size_t length, A &action) {
+	const uint8_t *newNext = next_ + length;
+	if (newNext > end_) {
+		detail::StreamErrors::throwUnexpectedEnd();
+	}
+	action(static_cast<const void*>(next_), length);
+	next_ = newNext;
+}
+
 inline void ArrayInStream::position(size_t pos) {
 	const uint8_t *const newNext = begin_ + pos;
 	if (newNext > end_) {
@@ -1853,8 +1470,25 @@ inline void ArrayInStream::position(size_t pos) {
 	next_ = newNext;
 }
 
+inline ArrayInStream::Locator ArrayInStream::locator() {
+	return Locator(*this);
+}
 
 
+inline ArrayInStream::Locator::Locator() : stream_(NULL), position_(0) {
+}
+
+inline ArrayInStream::Locator::Locator(ArrayInStream &stream) :
+		stream_(&stream), position_(stream.position()) {
+}
+
+inline void ArrayInStream::Locator::locate() const {
+	if (stream_ == NULL) {
+		return;
+	}
+
+	stream_->position(position_);
+}
 
 
 template<bool Check, typename StrSize>
@@ -1882,8 +1516,6 @@ void BasicStingFormatter<Check, StrSize>::get(
 	}
 	str.reserve(size);
 
-	
-	
 	const size_t LOCAL_BUF_SIZE = 8192;
 	E buf[LOCAL_BUF_SIZE + 1];
 	for (size_t r = static_cast<size_t>(size); r > 0;) {
@@ -1944,9 +1576,6 @@ inline Dest BasicStingFormatter<Check, StrSize>::filterStringSize(
 
 	return destSize;
 }
-
-
-
 
 
 template<typename S, typename F>
@@ -2037,6 +1666,7 @@ inline ByteStream<S, F>& ByteStream<S, F>::put(
 	formatter_.put(*this, str);
 	return *this;
 }
+
 
 } 
 

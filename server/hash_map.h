@@ -1487,8 +1487,8 @@ public:
 		TransactionContext& txn, const void* key, OId oId, OId newOId);
 	int32_t search(
 		TransactionContext& txn, const void* key, uint32_t size, OId& oId);
-	int32_t search(TransactionContext& txn, const void* key, uint32_t size,
-		ResultSize limit, util::XArray<OId>& idList);
+	int32_t search(TransactionContext& txn, SearchContext& sc,
+		util::XArray<OId>& idList, OutputOrder outputOrder = ORDER_UNDEFINED);
 	int32_t getAll(
 		TransactionContext& txn, ResultSize limit, util::XArray<OId>& idList);
 	int32_t getAll(TransactionContext& txn, ResultSize limit,

@@ -513,8 +513,9 @@ bool SyncContext::decrementCounter(NodeId syncTargetNodeId) {
 			break;
 		}
 	}
-	TRACE_SYNC_NORMAL(INFO, "taget:" << syncTargetNodeId << ", before:"
-									 << before << ", after:" << numSendBackup_);
+	TRACE_SYNC_NORMAL(INFO, "target:" << syncTargetNodeId
+									  << ", before:" << before
+									  << ", after:" << numSendBackup_);
 
 	return (numSendBackup_ == 0);
 }
@@ -817,7 +818,7 @@ void SyncManager::ConfigSetUpHandler::operator()(ConfigTable &config) {
 	CONFIG_TABLE_ADD_PARAM(
 		config, CONFIG_TABLE_SYNC_LONG_SYNC_MAX_MESSAGE_SIZE, INT32)
 		.setUnit(ConfigTable::VALUE_UNIT_SIZE_B)
-		.setMin(1024)
+		.setMin(1)
 		.setDefault(1024 * 1024 * 85 / 100);  
 
 	CONFIG_TABLE_ADD_SERVICE_ADDRESS_PARAMS(config, SYNC, 10020);

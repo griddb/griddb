@@ -190,38 +190,19 @@ TransactionManager::TransactionManager(const ConfigTable &config)
 		  config.get<int32_t>(CONFIG_TABLE_TXN_REPLICATION_TIMEOUT_INTERVAL)),
 	  txnTimeoutLimit_(
 		  config.get<int32_t>(CONFIG_TABLE_TXN_TRANSACTION_TIMEOUT_LIMIT)),
-	  txnContextMapManager_(UTIL_NEW TransactionContextMap::Manager *
-							[pgConfig_.getPartitionGroupCount()]),
-	  txnContextMap_(UTIL_NEW TransactionContextMap *
-					 [pgConfig_.getPartitionGroupCount()]),
-	  activeTxnMapManager_(UTIL_NEW ActiveTransactionMap::Manager *
-						   [pgConfig_.getPartitionGroupCount()]),
-	  activeTxnMap_(
-		  UTIL_NEW ActiveTransactionMap * [pgConfig_.getPartitionGroupCount()]),
-	  replContextMapManager_(UTIL_NEW ReplicationContextMap::Manager *
-							 [pgConfig_.getPartitionGroupCount()]),
-	  replContextMap_(UTIL_NEW ReplicationContextMap *
-					  [pgConfig_.getPartitionGroupCount()]),
-	  partition_(UTIL_NEW Partition * [pgConfig_.getPartitionCount()]),
-	  ptLock_(UTIL_NEW int32_t[pgConfig_.getPartitionCount()]),
-	  ptLockMutex_(UTIL_NEW util::Mutex[NUM_LOCK_MUTEX])
-{
+	  txnContextMapManager_(pgConfig_.getPartitionGroupCount(), NULL),
+	  txnContextMap_(pgConfig_.getPartitionGroupCount(), NULL),
+	  activeTxnMapManager_(pgConfig_.getPartitionGroupCount(), NULL),
+	  activeTxnMap_(pgConfig_.getPartitionGroupCount(), NULL),
+	  replContextMapManager_(pgConfig_.getPartitionGroupCount(), NULL),
+	  replContextMap_(pgConfig_.getPartitionGroupCount(), NULL),
+	  partition_(pgConfig_.getPartitionCount(), NULL),
+	  replContextPartition_(pgConfig_.getPartitionCount(), NULL),
+	  ptLock_(pgConfig_.getPartitionCount(), 0),
+	  ptLockMutex_(NULL) {
 	try {
-		for (PartitionId pId = 0; pId < pgConfig_.getPartitionCount(); pId++) {
-			partition_[pId] = NULL;
-			ptLock_[pId] = 0;
-		}
-		for (PartitionGroupId pgId = 0;
-			 pgId < pgConfig_.getPartitionGroupCount(); pgId++) {
-			txnContextMapManager_[pgId] = NULL;
-			txnContextMap_[pgId] = NULL;
+		ptLockMutex_ = UTIL_NEW util::Mutex[NUM_LOCK_MUTEX];
 
-			activeTxnMapManager_[pgId] = NULL;
-			activeTxnMap_[pgId] = NULL;
-
-			replContextMapManager_[pgId] = NULL;
-			replContextMap_[pgId] = NULL;
-		}
 		for (PartitionGroupId pgId = 0;
 			 pgId < pgConfig_.getPartitionGroupCount(); pgId++) {
 			txnContextMapManager_[pgId] =
@@ -256,32 +237,7 @@ TransactionManager::TransactionManager(const ConfigTable &config)
 		}
 	}
 	catch (std::exception &e) {
-		for (PartitionGroupId pgId = 0;
-			 pgId < pgConfig_.getPartitionGroupCount(); pgId++) {
-			txnContextMapManager_[pgId]->remove(txnContextMap_[pgId]);
-			delete txnContextMapManager_[pgId];
-
-			activeTxnMapManager_[pgId]->remove(activeTxnMap_[pgId]);
-			delete activeTxnMapManager_[pgId];
-
-			replContextMapManager_[pgId]->remove(replContextMap_[pgId]);
-			delete replContextMapManager_[pgId];
-		}
-		delete[] txnContextMapManager_;
-		delete[] txnContextMap_;
-
-		delete[] activeTxnMapManager_;
-		delete[] activeTxnMap_;
-
-		delete[] replContextMapManager_;
-		delete[] replContextMap_;
-
-
-		delete[] partition_;
-
-		delete[] ptLock_;
-		delete[] ptLockMutex_;
-
+		finalize();
 		GS_RETHROW_USER_OR_SYSTEM(
 			e, GS_EXCEPTION_MERGE_MESSAGE(
 				   e, "Failed to initialize transaction manager"));
@@ -289,34 +245,7 @@ TransactionManager::TransactionManager(const ConfigTable &config)
 }
 
 TransactionManager::~TransactionManager() {
-	for (PartitionId pId = 0; pId < pgConfig_.getPartitionCount(); pId++) {
-		delete partition_[pId];
-	}
-	for (PartitionGroupId pgId = 0; pgId < pgConfig_.getPartitionGroupCount();
-		 pgId++) {
-		txnContextMapManager_[pgId]->remove(txnContextMap_[pgId]);
-		delete txnContextMapManager_[pgId];
-
-		activeTxnMapManager_[pgId]->remove(activeTxnMap_[pgId]);
-		delete activeTxnMapManager_[pgId];
-
-		replContextMapManager_[pgId]->remove(replContextMap_[pgId]);
-		delete replContextMapManager_[pgId];
-	}
-	delete[] txnContextMapManager_;
-	delete[] txnContextMap_;
-
-	delete[] activeTxnMapManager_;
-	delete[] activeTxnMap_;
-
-	delete[] replContextMapManager_;
-	delete[] replContextMap_;
-
-
-	delete[] partition_;
-
-	delete[] ptLock_;
-	delete[] ptLockMutex_;
+	finalize();
 }
 
 /*!
@@ -330,8 +259,8 @@ void TransactionManager::createPartition(PartitionId pId) {
 	try {
 		const PartitionGroupId pgId = pgConfig_.getPartitionGroupId(pId);
 
-		partition_[pId] = UTIL_NEW Partition(pId, txnTimeoutLimit_,
-			txnContextMap_[pgId], activeTxnMap_[pgId], replContextMap_[pgId]);
+		partition_[pId] = UTIL_NEW Partition(
+			pId, txnTimeoutLimit_, txnContextMap_[pgId], activeTxnMap_[pgId]);
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_USER_OR_SYSTEM(e,
@@ -694,9 +623,9 @@ void TransactionManager::restoreTransactionActiveContext(PartitionId pId,
 ReplicationContext &TransactionManager::put(PartitionId pId,
 	const ClientId &clientId, const ContextSource &src, NodeDescriptor ND,
 	EventMonotonicTime emNow) {
-	createPartition(pId);
-	return partition_[pId]->put(clientId, src.containerId_, src.stmtType_,
-		src.stmtId_, ND, replicationTimeoutInterval_, emNow);
+	createReplContextPartition(pId);
+	return replContextPartition_[pId]->put(clientId, src.containerId_,
+		src.stmtType_, src.stmtId_, ND, replicationTimeoutInterval_, emNow);
 }
 
 /*!
@@ -704,16 +633,16 @@ ReplicationContext &TransactionManager::put(PartitionId pId,
 */
 ReplicationContext &TransactionManager::get(
 	PartitionId pId, ReplicationId replId) {
-	createPartition(pId);
-	return partition_[pId]->get(replId);
+	createReplContextPartition(pId);
+	return replContextPartition_[pId]->get(replId);
 }
 
 /*!
 	@brief Removes replication context
 */
 void TransactionManager::remove(PartitionId pId, ReplicationId replId) {
-	createPartition(pId);
-	partition_[pId]->remove(replId);
+	createReplContextPartition(pId);
+	replContextPartition_[pId]->remove(replId);
 }
 
 /*!
@@ -730,7 +659,8 @@ void TransactionManager::getReplicationTimeoutContextId(PartitionGroupId pgId,
 			 replContext = replContextMap_[pgId]->refresh(emNow, key)) {
 			pIds.push_back(key->pId_);
 			replIds.push_back(key->replId_);
-			partition_[replContext->getPartitionId()]->replTimeoutCount_++;
+			replContextPartition_[replContext->getPartitionId()]
+				->replTimeoutCount_++;
 		}
 
 		assert(pIds.size() == replIds.size());
@@ -787,9 +717,9 @@ uint64_t TransactionManager::getTransactionTimeoutCount(PartitionId pId) const {
    specified partition
 */
 uint64_t TransactionManager::getReplicationTimeoutCount(PartitionId pId) const {
-	return (partition_[pId] == NULL)
+	return (replContextPartition_[pId] == NULL)
 			   ? 0
-			   : partition_[pId]->getReplicationTimeoutCount();
+			   : replContextPartition_[pId]->getReplicationTimeoutCount();
 }
 /*!
 	@brief Gets memory usage on a specified partition group
@@ -822,7 +752,7 @@ size_t TransactionManager::getMemoryUsage(
 				: 0);
 
 	return (txnContextUsage + activeTxnUsage + replContextUsage +
-			replContextFree + txnContextFree + activeTxnFree + replContextFree);
+			txnContextFree + activeTxnFree + replContextFree);
 }
 
 /*!
@@ -837,6 +767,7 @@ TransactionManager::GetMode TransactionManager::getContextGetModeForRecovery(
 		return PUT;
 	}
 }
+
 /*!
 	@brief Decide transaction mode (for recovery)
 */
@@ -852,33 +783,67 @@ TransactionManager::getTransactionModeForRecovery(
 	}
 }
 
+void TransactionManager::finalize() {
+	for (PartitionId pId = 0; pId < pgConfig_.getPartitionCount(); pId++) {
+		removePartition(pId);
+	}
+
+	removeAllReplicationContext();
+
+	for (PartitionGroupId pgId = 0; pgId < pgConfig_.getPartitionGroupCount();
+		 pgId++) {
+		if (txnContextMapManager_[pgId] != NULL) {
+			txnContextMapManager_[pgId]->remove(txnContextMap_[pgId]);
+			delete txnContextMapManager_[pgId];
+		}
+
+		if (activeTxnMapManager_[pgId] != NULL) {
+			activeTxnMapManager_[pgId]->remove(activeTxnMap_[pgId]);
+			delete activeTxnMapManager_[pgId];
+		}
+
+		if (replContextMapManager_[pgId] != NULL) {
+			replContextMapManager_[pgId]->remove(replContextMap_[pgId]);
+			delete replContextMapManager_[pgId];
+		}
+
+	}
+
+	delete[] ptLockMutex_;
+}
+
+void TransactionManager::createReplContextPartition(PartitionId pId) {
+	if (replContextPartition_[pId] != NULL) {
+		return;
+	}
+
+	try {
+		const PartitionGroupId pgId = pgConfig_.getPartitionGroupId(pId);
+		replContextPartition_[pId] =
+			UTIL_NEW ReplicationContextPartition(pId, replContextMap_[pgId]);
+	}
+	catch (std::exception &e) {
+		GS_RETHROW_USER_OR_SYSTEM(e,
+			"Failed to create partition "
+			"(pId="
+				<< pId << ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+}
+
+
 TransactionManager::Partition::Partition(PartitionId pId,
 	int32_t txnTimeoutLimit, TransactionContextMap *txnContextMap,
-	ActiveTransactionMap *activeTxnMap, ReplicationContextMap *replContextMap)
+	ActiveTransactionMap *activeTxnMap)
 	: pId_(pId),
 	  txnTimeoutLimit_(txnTimeoutLimit),
 	  maxTxnId_(INITIAL_TXNID),
-	  maxReplId_(INITIAL_REPLICATIONID),
 	  txnContextMap_(txnContextMap),
 	  activeTxnMap_(activeTxnMap),
-	  replContextMap_(replContextMap),
 	  reqTimeoutCount_(0),
-	  txnTimeoutCount_(0),
-	  replTimeoutCount_(0) {
+	  txnTimeoutCount_(0) {
 }
 
 TransactionManager::Partition::~Partition() {
-	{
-		ReplicationContextMap::Cursor cursor = replContextMap_->getCursor();
-		for (ReplicationContext *replContext = cursor.next();
-			 replContext != NULL; replContext = cursor.next()) {
-			if (replContext->getPartitionId() == pId_) {
-				const ReplicationContextKey key(
-					pId_, replContext->getReplicationId());
-				replContextMap_->remove(key);
-			}
-		}
-	}
 	{
 		TransactionContextMap::Cursor cursor = txnContextMap_->getCursor();
 		for (TransactionContext *txn = cursor.next(); txn != NULL;
@@ -1283,12 +1248,77 @@ void TransactionManager::Partition::restoreTransactionActiveContext(
 				<< ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
-/*!
-	@brief Creates replication context
-*/
-ReplicationContext &TransactionManager::Partition::put(const ClientId &clientId,
-	ContainerId containerId, int32_t stmtType, StatementId stmtId,
-	NodeDescriptor ND, int32_t replTimeoutInterval, EventMonotonicTime emNow) {
+void TransactionManager::Partition::checkStatementAlreadyExecuted(
+	const TransactionContext &txn, StatementId stmtId,
+	bool isUpdateStmt) const {
+	if (stmtId <= txn.getLastStatementId() && isUpdateStmt) {
+		TM_THROW_STATEMENT_ALREADY_EXECUTED(
+			"(lastStmtId=" << txn.getLastStatementId() << ", stmtId=" << stmtId
+						   << ")");
+	}
+}
+void TransactionManager::Partition::checkStatementContinuousInTransaction(
+	const TransactionContext &txn, StatementId stmtId, GetMode getMode,
+	TransactionMode txnMode) const {
+	if (getMode == GET && stmtId > txn.getLastStatementId() &&
+		stmtId - txn.getLastStatementId() > 1 &&
+		txnMode == NO_AUTO_COMMIT_CONTINUE) {
+		GS_THROW_USER_ERROR(GS_ERROR_TM_STATEMENT_INVALID,
+			"(lastStmtId=" << txn.getLastStatementId() << ", stmtId=" << stmtId
+						   << ")");
+	}
+}
+uint64_t TransactionManager::Partition::getRequestTimeoutCount() const {
+	return reqTimeoutCount_;
+}
+uint64_t TransactionManager::Partition::getTransactionTimeoutCount() const {
+	return txnTimeoutCount_;
+}
+TransactionContext *TransactionManager::Partition::getAutoContext() {
+	return &autoContext_;
+}
+void TransactionManager::Partition::endTransaction(TransactionContext &txn) {
+	try {
+		const ActiveTransactionKey key(pId_, txn.getId());
+		activeTxnMap_->remove(key);
+		txn.state_ = TransactionContext::INACTIVE;
+	}
+	catch (std::exception &e) {
+		GS_RETHROW_USER_OR_SYSTEM(e,
+			"Failed to end transaction "
+			"(pId="
+				<< pId_ << ", txnId=" << txn.getId()
+				<< ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+}
+
+TransactionManager::ReplicationContextPartition::ReplicationContextPartition(
+	PartitionId pId, ReplicationContextMap *replContextMap)
+	: pId_(pId),
+	  maxReplId_(INITIAL_REPLICATIONID),
+	  replContextMap_(replContextMap),
+	  replTimeoutCount_(0) {
+}
+
+TransactionManager::ReplicationContextPartition::
+	~ReplicationContextPartition() {
+	{
+		ReplicationContextMap::Cursor cursor = replContextMap_->getCursor();
+		for (ReplicationContext *replContext = cursor.next();
+			 replContext != NULL; replContext = cursor.next()) {
+			if (replContext->getPartitionId() == pId_) {
+				const ReplicationContextKey key(
+					pId_, replContext->getReplicationId());
+				replContextMap_->remove(key);
+			}
+		}
+	}
+}
+
+ReplicationContext &TransactionManager::ReplicationContextPartition::put(
+	const ClientId &clientId, ContainerId containerId, int32_t stmtType,
+	StatementId stmtId, NodeDescriptor ND, int32_t replTimeoutInterval,
+	EventMonotonicTime emNow) {
 	try {
 		const ReplicationId replId = ++maxReplId_;
 		const EventMonotonicTime replTimeout =
@@ -1315,10 +1345,9 @@ ReplicationContext &TransactionManager::Partition::put(const ClientId &clientId,
 				<< ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
-/*!
-	@brief Gets replication context
-*/
-ReplicationContext &TransactionManager::Partition::get(ReplicationId replId) {
+
+ReplicationContext &TransactionManager::ReplicationContextPartition::get(
+	ReplicationId replId) {
 	try {
 		const ReplicationContextKey key(pId_, replId);
 		ReplicationContext *replContext = replContextMap_->get(key);
@@ -1341,10 +1370,9 @@ ReplicationContext &TransactionManager::Partition::get(ReplicationId replId) {
 				<< ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
-/*!
-	@brief Removes replication context
-*/
-void TransactionManager::Partition::remove(ReplicationId replId) {
+
+void TransactionManager::ReplicationContextPartition::remove(
+	ReplicationId replId) {
 	try {
 		const ReplicationContextKey key(pId_, replId);
 		replContextMap_->remove(key);
@@ -1357,65 +1385,13 @@ void TransactionManager::Partition::remove(ReplicationId replId) {
 				<< ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
-/*!
-	@brief Checks if stetement already executed
-*/
-void TransactionManager::Partition::checkStatementAlreadyExecuted(
-	const TransactionContext &txn, StatementId stmtId,
-	bool isUpdateStmt) const {
-	if (stmtId <= txn.getLastStatementId() && isUpdateStmt) {
-		TM_THROW_STATEMENT_ALREADY_EXECUTED(
-			"(lastStmtId=" << txn.getLastStatementId() << ", stmtId=" << stmtId
-						   << ")");
-	}
-}
-/*!
-	@brief Checks if statement is continuous in a transaction
-*/
-void TransactionManager::Partition::checkStatementContinuousInTransaction(
-	const TransactionContext &txn, StatementId stmtId, GetMode getMode,
-	TransactionMode txnMode) const {
-	if (getMode == GET && stmtId > txn.getLastStatementId() &&
-		stmtId - txn.getLastStatementId() > 1 &&
-		txnMode == NO_AUTO_COMMIT_CONTINUE) {
-		GS_THROW_USER_ERROR(GS_ERROR_TM_STATEMENT_INVALID,
-			"(lastStmtId=" << txn.getLastStatementId() << ", stmtId=" << stmtId
-						   << ")");
-	}
-}
-uint64_t TransactionManager::Partition::getRequestTimeoutCount() const {
-	return reqTimeoutCount_;
-}
-uint64_t TransactionManager::Partition::getTransactionTimeoutCount() const {
-	return txnTimeoutCount_;
-}
-uint64_t TransactionManager::Partition::getReplicationTimeoutCount() const {
+
+uint64_t
+TransactionManager::ReplicationContextPartition::getReplicationTimeoutCount()
+	const {
 	return replTimeoutCount_;
 }
-TransactionContext *TransactionManager::Partition::getAutoContext() {
-	return &autoContext_;
-}
-/*!
-	@brief Ends transaction
-*/
-void TransactionManager::Partition::endTransaction(TransactionContext &txn) {
-	try {
-		const ActiveTransactionKey key(pId_, txn.getId());
-		activeTxnMap_->remove(key);
-		txn.state_ = TransactionContext::INACTIVE;
-	}
-	catch (std::exception &e) {
-		GS_RETHROW_USER_OR_SYSTEM(e,
-			"Failed to end transaction "
-			"(pId="
-				<< pId_ << ", txnId=" << txn.getId()
-				<< ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
-	}
-}
 
-/*!
-	@brief Locks partition object
-*/
 bool TransactionManager::lockPartition(PartitionId pId) {
 	util::LockGuard<util::Mutex> lock(ptLockMutex_[pId % NUM_LOCK_MUTEX]);
 	if (ptLock_[pId] == 0) {
@@ -1427,13 +1403,17 @@ bool TransactionManager::lockPartition(PartitionId pId) {
 	}
 }
 
-/*!
-	@brief Unlocks partition object
-*/
 void TransactionManager::unlockPartition(PartitionId pId) {
 	util::LockGuard<util::Mutex> lock(ptLockMutex_[pId % NUM_LOCK_MUTEX]);
 	if (ptLock_[pId] == 1) {
 		ptLock_[pId]--;
+	}
+}
+
+void TransactionManager::removeAllReplicationContext() {
+	for (PartitionId pId = 0; pId < pgConfig_.getPartitionCount(); pId++) {
+		delete replContextPartition_[pId];
+		replContextPartition_[pId] = NULL;
 	}
 }
 
@@ -1467,6 +1447,7 @@ void TransactionManager::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		config, CONFIG_TABLE_TXN_REPLICATION_TIMEOUT_INTERVAL, INT32)
 		.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
 		.setMin(1)
+		.setMax(300)
 		.setDefault(TXN_STABLE_TRANSACTION_TIMEOUT_INTERVAL);
 
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TXN_CONNECTION_LIMIT, INT32)
@@ -1487,6 +1468,7 @@ void TransactionManager::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.setMin(1)
 		.setDefault(1024);
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TXN_QUEUE_MEMORY_LIMIT, INT32)
+		.setMin(1)
 		.deprecate();
 	CONFIG_TABLE_ADD_PARAM(
 		config, CONFIG_TABLE_TXN_TOTAL_MESSAGE_MEMORY_LIMIT, INT32)

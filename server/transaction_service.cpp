@@ -38,7 +38,6 @@
 #include "message_schema.h"
 #include "query_processor.h"
 #include "result_set.h"
-#include "result_set.h"
 
 #include "cluster_service.h"
 #include "partition_table.h"
@@ -58,10 +57,12 @@
 #define TXN_THROW_DENY_ERROR(errorCode, message) \
 	GS_THROW_CUSTOM_ERROR(DenyException, errorCode, message)
 
-#define TXN_TRACE_HANDLER_CALLED(ev)               \
-	UTIL_TRACE_DEBUG(TRANSACTION_SERVICE,          \
-		"handler called. (nd=" << ev.getSenderND() \
-							   << ", pId=" << ev.getPartitionId() << ")")
+#define TXN_TRACE_HANDLER_CALLED(ev)                                      \
+	UTIL_TRACE_DEBUG(TRANSACTION_SERVICE,                                 \
+		"handler called. (type=" << getEventTypeName(ev.getType()) << "[" \
+								 << ev.getType() << "]"                   \
+								 << ", nd=" << ev.getSenderND()           \
+								 << ", pId=" << ev.getPartitionId() << ")")
 
 #define TXN_FAILOVER_STATE_SET(state, eventType, cxtSrc)
 #define TXN_FAILOVER_STATE_SET_IF( \
@@ -70,7 +71,7 @@
 
 UTIL_TRACER_DECLARE(IO_MONITOR);
 UTIL_TRACER_DECLARE(TRANSACTION_DETAIL);
-
+UTIL_TRACER_DECLARE(DISTRIBUTED_FRAMEWORK);
 
 Sampling StatementHandler::SamplingQuery::toSamplingOption() const {
 	Sampling sampling;
@@ -91,11 +92,9 @@ const StatementHandler::ClusterRole StatementHandler::CROLE_SUBMASTER = 1 << 2;
 const StatementHandler::ClusterRole StatementHandler::CROLE_MASTER = 1 << 0;
 const StatementHandler::ClusterRole StatementHandler::CROLE_FOLLOWER = 1 << 1;
 const StatementHandler::ClusterRole StatementHandler::CROLE_ANY = ~0;
-const char8_t* const StatementHandler::clusterRoleStr[8] = {"UNKNOWN",
-	"MASTER", "FOLLOWER", "MASTER, FOLLOWER", "SUB_CLUSTER",
-	"MASTER, SUB_CLUSTER", "FOLLOWER, SUB_CLUSTER",
-	"MASTER, FOLLOWER, SUB_CLUSTER"
-};
+const char8_t *const StatementHandler::clusterRoleStr[8] = {"UNKNOWN", "MASTER",
+	"FOLLOWER", "MASTER, FOLLOWER", "SUB_CLUSTER", "MASTER, SUB_CLUSTER",
+	"FOLLOWER, SUB_CLUSTER", "MASTER, FOLLOWER, SUB_CLUSTER"};
 
 const StatementHandler::PartitionRoleType StatementHandler::PROLE_UNKNOWN = 0;
 const StatementHandler::PartitionRoleType StatementHandler::PROLE_OWNER = 1
@@ -106,13 +105,12 @@ const StatementHandler::PartitionRoleType StatementHandler::PROLE_CATCHUP =
 	1 << 2;
 const StatementHandler::PartitionRoleType StatementHandler::PROLE_NONE = 1 << 3;
 const StatementHandler::PartitionRoleType StatementHandler::PROLE_ANY = ~0;
-const char8_t* const StatementHandler::partitionRoleTypeStr[16] = {"UNKNOWN",
+const char8_t *const StatementHandler::partitionRoleTypeStr[16] = {"UNKNOWN",
 	"OWNER", "BACKUP", "OWNER, BACKUP", "CATCHUP", "OWNER, CATCHUP",
 	"BACKUP, CATCHUP", "OWNER, BACKUP, CATCHUP", "NONE", "OWNER, NONE",
 	"BACKUP, NONE", "OWNER, BACKUP, NONE", "CATCHUP, NONE",
 	"OWNER, CATCHUP, NONE", "BACKUP, CATCHUP, NONE",
-	"OWNER, BACKUP, CATCHUP, NONE"
-};
+	"OWNER, BACKUP, CATCHUP, NONE"};
 
 const StatementHandler::PartitionStatus StatementHandler::PSTATE_UNKNOWN = 0;
 const StatementHandler::PartitionStatus StatementHandler::PSTATE_ON = 1 << 0;
@@ -120,11 +118,10 @@ const StatementHandler::PartitionStatus StatementHandler::PSTATE_SYNC = 1 << 1;
 const StatementHandler::PartitionStatus StatementHandler::PSTATE_OFF = 1 << 2;
 const StatementHandler::PartitionStatus StatementHandler::PSTATE_STOP = 1 << 3;
 const StatementHandler::PartitionStatus StatementHandler::PSTATE_ANY = ~0;
-const char8_t* const StatementHandler::partitionStatusStr[16] = {"UNKNOWN",
+const char8_t *const StatementHandler::partitionStatusStr[16] = {"UNKNOWN",
 	"ON", "SYNC", "ON, SYNC", "OFF", "ON, OFF", "SYNC, OFF", "ON, SYNC, OFF",
 	"STOP", "ON, STOP", "SYNC, STOP", "ON, SYNC, STOP", "OFF, STOP",
-	"ON, OFF, STOP", "SYNC, OFF, STOP", "ON, SYNC, OFF, STOP"
-};
+	"ON, OFF, STOP", "SYNC, OFF, STOP", "ON, SYNC, OFF, STOP"};
 
 const StatementHandler::StatementExecStatus
 	StatementHandler::TXN_STATEMENT_SUCCESS = 0;
@@ -156,14 +153,20 @@ const StatementHandler::ProtocolVersion
 	StatementHandler::TXN_V2_7_X_CLIENT_VERSION = 6;
 const StatementHandler::ProtocolVersion
 	StatementHandler::TXN_V2_8_X_CLIENT_VERSION = 7;
+const StatementHandler::ProtocolVersion
+	StatementHandler::TXN_V2_9_X_CLIENT_VERSION = 8;
+const StatementHandler::ProtocolVersion
+	StatementHandler::TXN_V3_0_X_CLIENT_VERSION = 9;
+const StatementHandler::ProtocolVersion
+	StatementHandler::TXN_V3_0_X_CE_CLIENT_VERSION = 10;
 const StatementHandler::ProtocolVersion StatementHandler::TXN_CLIENT_VERSION =
-	TXN_V2_8_X_CLIENT_VERSION;
-const StatementHandler::ProtocolVersion
-	StatementHandler::MIN_ACCEPTABLE_TXN_CLIENT_VERSION =
-		TXN_V2_8_X_CLIENT_VERSION;
-const StatementHandler::ProtocolVersion
-	StatementHandler::MAX_ACCEPTABLE_TXN_CLIENT_VERSION =
-		TXN_V2_8_X_CLIENT_VERSION;
+	TXN_V3_0_X_CE_CLIENT_VERSION;
+
+static const StatementHandler::ProtocolVersion
+	ACCEPTABLE_NOSQL_CLIENT_VERSIONS[] = {
+		StatementHandler::TXN_CLIENT_VERSION,
+		StatementHandler::PROTOCOL_VERSION_UNDEFINED /* sentinel */
+};
 
 StatementHandler::StatementHandler()
 	: clusterService_(NULL),
@@ -175,7 +178,10 @@ StatementHandler::StatementHandler()
 	  transactionService_(NULL),
 	  transactionManager_(NULL),
 	  triggerService_(NULL),
-	  systemService_(NULL) {}
+	  systemService_(NULL),
+	  recoveryManager_(NULL)
+{
+}
 
 StatementHandler::~StatementHandler() {}
 
@@ -201,7 +207,9 @@ void StatementHandler::setSuccessReply(Event &ev, StatementId stmtId,
 {
 	try {
 		EventByteOutStream out = encodeCommonPart(ev, stmtId, status);
-		switch (ev.getType()) {
+		EventType eventType = ev.getType();
+
+		switch (eventType) {
 		case CONNECT:
 		case DISCONNECT:
 		case LOGIN:
@@ -221,7 +229,6 @@ void StatementHandler::setSuccessReply(Event &ev, StatementId stmtId,
 		case CLOSE_MULTIPLE_TRANSACTION_CONTEXTS:
 		case PUT_MULTIPLE_CONTAINER_ROWS:
 		case CLOSE_RESULT_SET:
-			break;
 		case GET_PARTITION_ADDRESS:
 			encodeBinaryData(
 				out, response.binaryData_.data(), response.binaryData_.size());
@@ -418,12 +425,12 @@ void StatementHandler::checkConsistency(
 void StatementHandler::checkExecutable(PartitionId pId,
 	ClusterRole requiredClusterRole, PartitionRoleType requiredPartitionRole,
 	PartitionStatus requiredPartitionStatus) {
-#define TXN_THROW_PT_STATE_UNMATCH_ERROR(                           \
-	errorCode, requiredPartitionStatus, actualPartitionStatus)       \
-	TXN_THROW_DENY_ERROR(errorCode,                                 \
+#define TXN_THROW_PT_STATE_UNMATCH_ERROR(                                     \
+	errorCode, requiredPartitionStatus, actualPartitionStatus)                \
+	TXN_THROW_DENY_ERROR(errorCode,                                           \
 		"(required={" << partitionStatusToStr(requiredPartitionStatus) << "}" \
-					<< ", actual="                                  \
-					<< partitionStatusToStr(actualPartitionStatus) << ")")
+					  << ", actual="                                          \
+					  << partitionStatusToStr(actualPartitionStatus) << ")")
 
 	const PartitionTable::PartitionStatus actualPartitionStatus =
 		partitionTable_->getPartitionStatus(pId);
@@ -462,12 +469,12 @@ void StatementHandler::checkExecutable(PartitionId pId,
 	}
 
 	const NodeId myself = 0;
-	const bool isOwner = partitionTable_->isOwner(pId, myself,
-		PartitionTable::PT_CURRENT_OB);
-	const bool isBackup = partitionTable_->isBackup(pId, myself,
-		PartitionTable::PT_CURRENT_OB);
-	const bool isCatchup = partitionTable_->isBackup(pId, myself,
-		PartitionTable::PT_CURRENT_GOAL);
+	const bool isOwner =
+		partitionTable_->isOwner(pId, myself, PartitionTable::PT_CURRENT_OB);
+	const bool isBackup =
+		partitionTable_->isBackup(pId, myself, PartitionTable::PT_CURRENT_OB);
+	const bool isCatchup =
+		partitionTable_->isBackup(pId, myself, PartitionTable::PT_CURRENT_GOAL);
 	assert((isOwner && isBackup) == false);
 	assert((isOwner && isCatchup) == false);
 	assert((isBackup && isCatchup) == false);
@@ -480,9 +487,11 @@ void StatementHandler::checkExecutable(PartitionId pId,
 	assert(actualPartitionRole != PROLE_UNKNOWN);
 	if (!(actualPartitionRole & requiredPartitionRole)) {
 		TXN_THROW_DENY_ERROR(GS_ERROR_TXN_PARTITION_ROLE_UNMATCH,
-			"(required={" << partitionRoleTypeToStr(requiredPartitionRole) << "}"
-						<< ", actual="
-						<< partitionRoleTypeToStr(actualPartitionRole) << ")");
+			"(required={" << partitionRoleTypeToStr(requiredPartitionRole)
+						  << "}"
+						  << ", actual="
+						  << partitionRoleTypeToStr(actualPartitionRole)
+						  << ")");
 	}
 
 	const bool isMaster = partitionTable_->isMaster();
@@ -497,8 +506,8 @@ void StatementHandler::checkExecutable(PartitionId pId,
 	if (!(actualClusterRole & requiredClusterRole)) {
 		TXN_THROW_DENY_ERROR(GS_ERROR_TXN_CLUSTER_ROLE_UNMATCH,
 			"(required={" << clusterRoleToStr(requiredClusterRole) << "}"
-						<< ", actual="
-						<< clusterRoleToStr(actualClusterRole) << ")");
+						  << ", actual=" << clusterRoleToStr(actualClusterRole)
+						  << ")");
 	}
 
 #undef TXN_THROW_PT_STATE_UNMATCH_ERROR
@@ -680,75 +689,57 @@ void StatementHandler::decodeFixedPart(
 void StatementHandler::decodeOptionPart(
 	util::ByteStream<util::ArrayInStream> &in, OptionPart &optionPart) {
 	try {
-		uint32_t tmpTotalSize;
-		in >> tmpTotalSize;
+		uint32_t totalSize;
+		in >> totalSize;
 
-		size_t totalSize = tmpTotalSize;
-		size_t readSize = 0;
+		const size_t endPos = in.base().position() + totalSize;
 
-		while (readSize < totalSize) {
+		while (in.base().position() < endPos) {
 			OptionType optionType;
 
-			assert(totalSize - readSize > sizeof(optionType));
-
 			in >> optionType;
-			readSize += sizeof(optionType);
 
 			if (optionType > OPTION_TYPE_MAX) {
-				const size_t currentPos = in.base().position();
-				in.base().position(currentPos + (totalSize - readSize));
 				break;
 			}
 
 			switch (optionType) {
 			case OPTION_TXN_TIMEOUT_INTERVAL:
 				in >> optionPart.txnTimeoutInterval_;
-				readSize += sizeof(optionPart.txnTimeoutInterval_);
 				break;
 			case OPTION_FOR_UPDATE:
 				decodeBooleanData(in, optionPart.forUpdate_);
-				readSize += sizeof(uint8_t);
 				break;
 			case OPTION_SYSTEM_MODE:
 				decodeBooleanData(in, optionPart.systemMode_);
-				readSize += sizeof(uint8_t);
 				break;
-			case OPTION_DB_NAME: {
-				uint32_t size;
-				in >> size;
-				readSize += sizeof(int32_t);
-				char ch;
-				for (uint32_t i = 0; i < size; i++) {
-					in >> ch;
-					optionPart.dbName_ += ch;
-				}
-				readSize += sizeof(char) * size;
-			} break;
+			case OPTION_DB_NAME:
+				optionPart.dbName_.clear();
+				in >> optionPart.dbName_;
+				break;
 			case OPTION_CONTAINER_ATTRIBUTE: {
 				uint32_t containerAttribute;
 				in >> containerAttribute;
 				optionPart.containerAttribute_ =
 					static_cast<ContainerAttribute>(containerAttribute);
-				readSize += sizeof(uint32_t);
 			} break;
 			case OPTION_REQUEST_MODULE_TYPE: {
 				char8_t requestType;
 				in >> requestType;
 				optionPart.requestType_ = static_cast<RequestType>(requestType);
-				readSize += sizeof(char8_t);
 			} break;
 			case OPTION_PUT_ROW_OPTION: {
 				int8_t putRowOption;
 				in >> putRowOption;
 				optionPart.putRowOption_ =
 					static_cast<PutRowOption>(putRowOption);
-				readSize += sizeof(int8_t);
 			} break;
 			default:
 				GS_THROW_USER_ERROR(GS_ERROR_TXN_OPTION_TYPE_INVALID,
 					"(optionType=" << static_cast<uint32_t>(optionType) << ")");
 			}
 		}
+		in.base().position(endPos);
 
 		if (optionPart.dbName_.size() ==
 			0) {  
@@ -771,6 +762,9 @@ void StatementHandler::decodeOptionPart(
 		fixedPart.optPart_ = &optionPart;
 		optionPart.fixedPart_ = &fixedPart;
 
+		if (!connOption.dbName_.empty()) {
+			optionPart.dbName_ = connOption.dbName_.c_str();
+		}
 		decodeOptionPart(in, optionPart);
 
 
@@ -1812,37 +1806,43 @@ bool StatementHandler::isAccessibleMode(
 	return isAccessible;
 }
 
+void StatementHandler::checkDbAccessible(
+	const std::string &loginDbName, const util::String &specifiedDbName) const {
+	if (specifiedDbName.compare(loginDbName.c_str()) != 0) {
+		GS_THROW_USER_ERROR(GS_ERROR_DS_CON_ACCESS_INVALID,
+			"Only can access connect db :"
+				<< loginDbName << ", can not access db : " << specifiedDbName);
+	}
+}
+
 const char8_t *StatementHandler::clusterRoleToStr(
 	StatementHandler::ClusterRole role) {
-	return role > CROLE_MASTER + CROLE_FOLLOWER + CROLE_SUBMASTER
-			   ? "{ANY}"
-			   : clusterRoleStr[role];
+	const ClusterRole allStatesSet =
+		CROLE_MASTER + CROLE_FOLLOWER + CROLE_SUBMASTER;
+	return role > allStatesSet ? clusterRoleStr[allStatesSet]
+							   : clusterRoleStr[role];
 }
 
 const char8_t *StatementHandler::partitionRoleTypeToStr(
 	StatementHandler::PartitionRoleType role) {
-	return role > PROLE_OWNER + PROLE_BACKUP + PROLE_CATCHUP + PROLE_NONE
-			   ? "{ANY}"
-			   : partitionRoleTypeStr[role];
+	const PartitionRoleType allStatesSet =
+		PROLE_OWNER + PROLE_BACKUP + PROLE_CATCHUP + PROLE_NONE;
+	return role > allStatesSet ? partitionRoleTypeStr[allStatesSet]
+							   : partitionRoleTypeStr[role];
 }
 
 const char8_t *StatementHandler::partitionStatusToStr(
 	StatementHandler::PartitionStatus status) {
-	return status > PSTATE_STOP ? "{ANY}" : partitionStatusStr[status];
+	const PartitionStatus allStatesSet =
+		PSTATE_ON + PSTATE_SYNC + PSTATE_OFF + PSTATE_STOP;
+	return status > allStatesSet ? partitionStatusStr[allStatesSet]
+								 : partitionStatusStr[status];
 }
 
-ConnectHandler::ConnectHandler(ProtocolVersion minAcceptableClientVer,
-	ProtocolVersion maxAcceptableClientVer)
-	: StatementHandler(),
-	  minAcceptableClientVer_(minAcceptableClientVer),
-	  maxAcceptableClientVer_(maxAcceptableClientVer) {
-	if (minAcceptableClientVer_ > maxAcceptableClientVer_) {
-		GS_THROW_USER_ERROR(GS_ERROR_CM_INVALID_ARGS,
-			"minAcceptableClientVer=" << minAcceptableClientVer_
-									  << ", maxAcceptableClientVer="
-									  << maxAcceptableClientVer_);
-	}
-}
+ConnectHandler::ConnectHandler(ProtocolVersion currentVersion,
+	const ProtocolVersion *acceptableProtocolVersons)
+	: currentVersion_(currentVersion),
+	  acceptableProtocolVersons_(acceptableProtocolVersons) {}
 
 /*!
 	@brief Handler Operator
@@ -1883,13 +1883,16 @@ void ConnectHandler::operator()(EventContext &ec, Event &ev) {
 }
 
 void ConnectHandler::checkClientVersion(ProtocolVersion clientVersion) {
-	if (clientVersion < minAcceptableClientVer_ ||
-		clientVersion > maxAcceptableClientVer_) {
-		GS_THROW_USER_ERROR(GS_ERROR_TXN_CLIENT_VERSION_NOT_ACCEPTABLE,
-			"(connectClientVersion=" << clientVersion
-									 << ", acceptableClientVersion="
-									 << minAcceptableClientVer_ << "-"
-									 << maxAcceptableClientVer_ << ")");
+	for (const ProtocolVersion *acceptableVersions = acceptableProtocolVersons_;
+		 ; acceptableVersions++) {
+		if (clientVersion == *acceptableVersions) {
+			return;
+		}
+		else if (*acceptableVersions == PROTOCOL_VERSION_UNDEFINED) {
+			GS_THROW_USER_ERROR(GS_ERROR_TXN_CLIENT_VERSION_NOT_ACCEPTABLE,
+				"(connectClientVersion=" << clientVersion << ", serverVersion="
+										 << currentVersion_ << ")");
+		}
 	}
 }
 
@@ -1917,6 +1920,7 @@ void ConnectHandler::replySuccess(EventContext &ec, util::StackAllocator &alloc,
 
 	Event ev(ec, stmtType, request.pId_);
 	encodeCommonPart(ev, request.oldStmtId_, status);
+
 
 	if (ev.getExtraMessageCount() > 0) {
 		EventEngine::EventRequestOption option;
@@ -2037,10 +2041,13 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 	Response response(alloc);
 
 	try {
+		ConnectionOption &connOption =
+			ev.getSenderND().getUserData<ConnectionOption>();
+		connOption.clear();
+
 		EventByteInStream in(ev.getInStream());
 		decodeFixedPart(in, request);
-		decodeOptionPart(in, ev.getSenderND().getUserData<ConnectionOption>(),
-			request, optionPart);
+		decodeOptionPart(in, connOption, request, optionPart);
 
 		util::String userName(alloc);
 		util::String digest(alloc);
@@ -2056,10 +2063,6 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 		if (in.base().remaining() > 0) {
 			decodeStringData<std::string>(in, clusterName);
 		}
-
-		ConnectionOption &connOption =
-			ev.getSenderND().getUserData<ConnectionOption>();
-
 		TEST_PRINT("[RequestMesg]\n");
 		TEST_PRINT1("userName=%s\n", userName.c_str());
 		TEST_PRINT1("digest=%s\n", digest.c_str());
@@ -2197,7 +2200,13 @@ void GetPartitionAddressHandler::operator()(EventContext &ec, Event &ev) {
 		decodeOptionPart(in, ev.getSenderND().getUserData<ConnectionOption>(),
 			request, optionPart);
 
-		const ClusterRole clusterRole = CROLE_MASTER;
+		int8_t masterResolving = 0;
+		if (in.base().remaining() > 0) {
+			decodeIntData<int8_t>(in, masterResolving);
+		}
+
+		const ClusterRole clusterRole =
+			CROLE_MASTER | (masterResolving ? CROLE_FOLLOWER : 0);
 		const PartitionRoleType partitionRole = PROLE_ANY;
 		const PartitionStatus partitionStatus = PSTATE_ANY;
 		checkAuthentication(ev.getSenderND(), emNow);  
@@ -2212,7 +2221,9 @@ void GetPartitionAddressHandler::operator()(EventContext &ec, Event &ev) {
 
 		out << partitionTable_->getPartitionNum();
 
-		const NodeId ownerNodeId = partitionTable_->getOwner(request.pId_);
+		const NodeId ownerNodeId =
+			(masterResolving ? UNDEF_NODEID
+							 : partitionTable_->getOwner(request.pId_));
 		if (ownerNodeId != UNDEF_NODEID) {
 			out << static_cast<uint8_t>(1);
 			const NodeDescriptor &ownerND =
@@ -2229,7 +2240,9 @@ void GetPartitionAddressHandler::operator()(EventContext &ec, Event &ev) {
 		}
 
 		util::XArray<NodeId> backupNodeIds(alloc);
-		partitionTable_->getBackup(request.pId_, backupNodeIds);
+		if (!masterResolving) {
+			partitionTable_->getBackup(request.pId_, backupNodeIds);
+		}
 
 		const uint8_t numBackup = static_cast<uint8_t>(backupNodeIds.size());
 		out << numBackup;
@@ -2239,6 +2252,25 @@ void GetPartitionAddressHandler::operator()(EventContext &ec, Event &ev) {
 			util::SocketAddress::Inet addr;
 			uint16_t port;
 			backupND.getAddress().getIP(&addr, &port);
+			out << std::pair<const uint8_t *, size_t>(
+				reinterpret_cast<const uint8_t *>(&addr), sizeof(addr));
+			out << static_cast<uint32_t>(port);
+		}
+
+		if (masterResolving) {
+			const NodeId masterNodeId = partitionTable_->getMaster();
+			const NodeDescriptor &masterND =
+				transactionService_->getEE()->getServerND(masterNodeId);
+
+			const int8_t masterMatched = masterND.isSelf();
+			out << masterMatched;
+
+			const ContainerHashMode hashMode = CONTAINER_HASH_MODE_CRC32;
+			out << hashMode;
+
+			util::SocketAddress::Inet addr;
+			uint16_t port;
+			masterND.getAddress().getIP(&addr, &port);
 			out << std::pair<const uint8_t *, size_t>(
 				reinterpret_cast<const uint8_t *>(&addr), sizeof(addr));
 			out << static_cast<uint32_t>(port);
@@ -2300,14 +2332,7 @@ void GetPartitionContainerNamesHandler::operator()(
 			TXN_EMPTY_CLIENTID, request.cxtSrc_, now, emNow);
 		const DataStore::Latch latch(
 			txn, txn.getPartitionId(), dataStore_, clusterService_);
-		if ((connOption.dbName_.size() > 0) &&
-			(optionPart.dbName_.compare(connOption.dbName_.c_str()) !=
-				0)) {  
-			GS_THROW_USER_ERROR(GS_ERROR_DS_CON_ACCESS_INVALID,
-				"Only can access connect db :" << connOption.dbName_
-											   << ", can not access db : "
-											   << optionPart.dbName_);
-		}
+		checkDbAccessible(connOption.dbName_, optionPart.dbName_);
 		ContainerAccessMode containerAccessMode =
 			getContainerAccessMode(connOption.userType_, optionPart.systemMode_,
 				connOption.requestType_, false);
@@ -2416,14 +2441,7 @@ void GetContainerPropertiesHandler::operator()(EventContext &ec, Event &ev)
 			ContainerAutoPtr containerAutoPtr(txn, dataStore_,
 				txn.getPartitionId(), extContainerName, ANY_CONTAINER);
 			BaseContainer *container = containerAutoPtr.getBaseContainer();
-			if ((connOption.dbName_.size() > 0) &&
-				(optionPart.dbName_.compare(connOption.dbName_.c_str()) !=
-					0)) {  
-				GS_THROW_USER_ERROR(GS_ERROR_DS_CON_ACCESS_INVALID,
-					"Only can access connect db :" << connOption.dbName_
-												   << ", can not access db : "
-												   << optionPart.dbName_);
-			}
+			checkDbAccessible(connOption.dbName_, optionPart.dbName_);
 			ContainerAccessMode containerAccessMode =
 				getContainerAccessMode(connOption.userType_,
 					optionPart.systemMode_, connOption.requestType_, false);
@@ -2451,12 +2469,13 @@ void GetContainerPropertiesHandler::operator()(EventContext &ec, Event &ev)
 				const ContainerId containerId = container->getContainerId();
 				const SchemaVersionId schemaVersionId =
 					container->getVersionId();
-				const char8_t *respContainerName =
-					extContainerName.getContainerName();
-				uint32_t respContainerNameSize =
-					static_cast<uint32_t>(strlen(respContainerName));
+				ExtendedContainerName *respContainerName;
+				container->getExtendedContainerName(txn, respContainerName);
+				uint32_t respContainerNameSize = static_cast<uint32_t>(
+					strlen(respContainerName->getContainerName()));
 				encodeId(out, schemaVersionId, containerId,
-					reinterpret_cast<const uint8_t *>(respContainerName),
+					reinterpret_cast<const uint8_t *>(
+							 respContainerName->getContainerName()),
 					respContainerNameSize);
 			}
 
@@ -2740,14 +2759,7 @@ void PutContainerHandler::operator()(EventContext &ec, Event &ev) {
 			TXN_EMPTY_CLIENTID, request.cxtSrc_, now, emNow);
 		const DataStore::Latch latch(
 			txn, txn.getPartitionId(), dataStore_, clusterService_);
-		if ((connOption.dbName_.size() > 0) &&
-			(optionPart.dbName_.compare(connOption.dbName_.c_str()) !=
-				0)) {  
-			GS_THROW_USER_ERROR(GS_ERROR_DS_CON_ACCESS_INVALID,
-				"Only can access connect db :" << connOption.dbName_
-											   << ", can not access db : "
-											   << optionPart.dbName_);
-		}
+		checkDbAccessible(connOption.dbName_, optionPart.dbName_);
 		ContainerAccessMode containerAccessMode =
 			getContainerAccessMode(connOption.userType_, optionPart.systemMode_,
 				connOption.requestType_, true);
@@ -2903,14 +2915,7 @@ void DropContainerHandler::operator()(EventContext &ec, Event &ev) {
 			ContainerAutoPtr containerAutoPtr(txn, dataStore_,
 				txn.getPartitionId(), extContainerName, containerType);
 			BaseContainer *container = containerAutoPtr.getBaseContainer();
-			if ((connOption.dbName_.size() > 0) &&
-				(optionPart.dbName_.compare(connOption.dbName_.c_str()) !=
-					0)) {  
-				GS_THROW_USER_ERROR(GS_ERROR_DS_CON_ACCESS_INVALID,
-					"Only can access connect db :" << connOption.dbName_
-												   << ", can not access db : "
-												   << optionPart.dbName_);
-			}
+			checkDbAccessible(connOption.dbName_, optionPart.dbName_);
 			ContainerAccessMode containerAccessMode =
 				getContainerAccessMode(connOption.userType_,
 					optionPart.systemMode_, connOption.requestType_, true);
@@ -3028,14 +3033,7 @@ void GetContainerHandler::operator()(EventContext &ec, Event &ev) {
 		ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
 			extContainerName, containerType);
 		BaseContainer *container = containerAutoPtr.getBaseContainer();
-		if ((connOption.dbName_.size() > 0) &&
-			(optionPart.dbName_.compare(connOption.dbName_.c_str()) !=
-				0)) {  
-			GS_THROW_USER_ERROR(GS_ERROR_DS_CON_ACCESS_INVALID,
-				"Only can access connect db :" << connOption.dbName_
-											   << ", can not access db : "
-											   << optionPart.dbName_);
-		}
+		checkDbAccessible(connOption.dbName_, optionPart.dbName_);
 		ContainerAccessMode containerAccessMode =
 			getContainerAccessMode(connOption.userType_, optionPart.systemMode_,
 				connOption.requestType_, false);
@@ -4321,7 +4319,12 @@ void GetRowSetHandler::operator()(EventContext &ec, Event &ev) {
 /*!
 	@brief Handler Operator
 */
+#if defined(PARTIAL_EXE_SERVER_UNIT_TEST_MODE) && \
+	defined(GD_ENABLE_NEWSQL_SERVER)
+void PartialTQLHandler::operator()(EventContext &ec, Event &ev)
+#else
 void QueryTqlHandler::operator()(EventContext &ec, Event &ev)
+#endif
 {
 	TXN_TRACE_HANDLER_CALLED(ev);
 
@@ -5004,7 +5007,6 @@ void FetchResultSetHandler::operator()(EventContext &ec, Event &ev) {
 		const DataStore::Latch latch(
 			txn, txn.getPartitionId(), dataStore_, clusterService_);
 
-
 		ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
 			txn.getContainerId(), ANY_CONTAINER);
 		BaseContainer *container = containerAutoPtr.getBaseContainer();
@@ -5041,7 +5043,6 @@ void CloseResultSetHandler::operator()(EventContext &ec, Event &ev) {
 	TXN_TRACE_HANDLER_CALLED(ev);
 
 	util::StackAllocator &alloc = ec.getAllocator();
-	const util::DateTime now = ec.getHandlerStartTime();
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	FixedPart request(ev.getPartitionId(), ev.getType());
@@ -5142,14 +5143,7 @@ void MultiCreateTransactionContextHandler::operator()(
 				ContainerAutoPtr containerAutoPtr(txn, dataStore_,
 					txn.getPartitionId(), extContainerName, ANY_CONTAINER);
 				BaseContainer *container = containerAutoPtr.getBaseContainer();
-				if ((connOption.dbName_.size() > 0) &&
-					(optionPart.dbName_.compare(connOption.dbName_.c_str()) !=
-						0)) {  
-					GS_THROW_USER_ERROR(GS_ERROR_DS_CON_ACCESS_INVALID,
-						"Only can access connect db :"
-							<< connOption.dbName_
-							<< ", can not access db : " << optionPart.dbName_);
-				}
+				checkDbAccessible(connOption.dbName_, optionPart.dbName_);
 				ContainerAccessMode containerAccessMode =
 					getContainerAccessMode(connOption.userType_,
 						optionPart.systemMode_, connOption.requestType_, false);
@@ -5254,8 +5248,7 @@ void MultiCloseTransactionContextHandler::operator()(
 
 		Event reply(ec, ev.getType(), ev.getPartitionId());
 
-		EventByteOutStream out = encodeCommonPart(
-			reply, request.cxtSrc_.stmtId_, TXN_STATEMENT_SUCCESS);
+		encodeCommonPart(reply, request.cxtSrc_.stmtId_, TXN_STATEMENT_SUCCESS);
 
 		util::XArray<ClientId> closedResourceIds(alloc);
 		util::XArray<const util::XArray<uint8_t> *> logRecordList(alloc);
@@ -5517,6 +5510,23 @@ void MultiStatementHandler::handleWholeError(EventContext &ec,
 	}
 }
 
+void MultiStatementHandler::decodeContainerOptionPart(
+	util::ByteStream<util::ArrayInStream> &in, const FixedPart &fixedPart,
+	OptionPart &optionPart) {
+	try {
+		optionPart.txnTimeoutInterval_ = -1;
+		decodeOptionPart(in, optionPart);
+
+		if (optionPart.txnTimeoutInterval_ < 0) {
+			optionPart.txnTimeoutInterval_ =
+				fixedPart.cxtSrc_.txnTimeoutInterval_;
+		}
+	}
+	catch (std::exception &e) {
+		TXN_RETHROW_DECODE_ERROR(e, "");
+	}
+}
+
 /*!
 	@brief Handler Operator
 */
@@ -5542,7 +5552,7 @@ void MultiPutHandler::operator()(EventContext &ec, Event &ev) {
 		util::XArray<const RowSetRequest *> rowSetList(alloc);
 
 		decodeMultiSchema(in, schemaList);
-		decodeMultiRowSet(in, schemaList, rowSetList);
+		decodeMultiRowSet(in, request, schemaList, rowSetList);
 
 		const ClusterRole clusterRole = (CROLE_MASTER | CROLE_FOLLOWER);
 		const PartitionRoleType partitionRole = PROLE_OWNER;
@@ -5833,7 +5843,7 @@ TransactionManager::ContextSource MultiPutHandler::createContextSource(
 	const FixedPart &request, const RowSetRequest &rowSetRequest) {
 	return TransactionManager::ContextSource(request.stmtType_,
 		rowSetRequest.stmtId_, rowSetRequest.containerId_,
-		request.cxtSrc_.txnTimeoutInterval_, rowSetRequest.getMode_,
+		rowSetRequest.option_.txnTimeoutInterval_, rowSetRequest.getMode_,
 		rowSetRequest.txnMode_);
 }
 
@@ -5864,7 +5874,7 @@ void MultiPutHandler::decodeMultiSchema(
 }
 
 void MultiPutHandler::decodeMultiRowSet(
-	util::ByteStream<util::ArrayInStream> &in,
+	util::ByteStream<util::ArrayInStream> &in, const FixedPart &request,
 	const util::XArray<const MessageSchema *> &schemaList,
 	util::XArray<const RowSetRequest *> &rowSetList) {
 	try {
@@ -5875,34 +5885,35 @@ void MultiPutHandler::decodeMultiRowSet(
 		rowSetList.reserve(static_cast<size_t>(bodyCount));
 
 		for (int32_t i = 0; i < bodyCount; i++) {
-			RowSetRequest *request = ALLOC_NEW(alloc) RowSetRequest(alloc);
+			RowSetRequest *subRequest = ALLOC_NEW(alloc) RowSetRequest(alloc);
 
-			in >> request->stmtId_;
-			in >> request->containerId_;
-			in >> request->sessionId_;
+			in >> subRequest->stmtId_;
+			in >> subRequest->containerId_;
+			in >> subRequest->sessionId_;
 
-			in >> request->getMode_;
-			in >> request->txnMode_;
+			in >> subRequest->getMode_;
+			in >> subRequest->txnMode_;
 
-			decodeOptionPart(in, request->option_);
+			decodeContainerOptionPart(in, request, subRequest->option_);
 
-			in >> request->schemaIndex_;
+			in >> subRequest->schemaIndex_;
 
-			if (request->schemaIndex_ < 0 ||
-				static_cast<size_t>(request->schemaIndex_) >=
+			if (subRequest->schemaIndex_ < 0 ||
+				static_cast<size_t>(subRequest->schemaIndex_) >=
 					schemaList.size()) {
 				TXN_THROW_DECODE_ERROR(GS_ERROR_TXN_DECODE_FAILED, "");
 			}
 
 			uint32_t bytesSize;
 			in >> bytesSize;
-			request->rowSetData_.resize(bytesSize - sizeof(request->rowCount_));
+			subRequest->rowSetData_.resize(
+				bytesSize - sizeof(subRequest->rowCount_));
 
-			in >> request->rowCount_;
+			in >> subRequest->rowCount_;
 			in.readAll(
-				request->rowSetData_.data(), request->rowSetData_.size());
+				subRequest->rowSetData_.data(), subRequest->rowSetData_.size());
 
-			rowSetList.push_back(request);
+			rowSetList.push_back(subRequest);
 		}
 	}
 	catch (std::exception &e) {
@@ -5917,7 +5928,6 @@ void MultiGetHandler::operator()(EventContext &ec, Event &ev) {
 	TXN_TRACE_HANDLER_CALLED(ev);
 
 	util::StackAllocator &alloc = ec.getAllocator();
-	const util::DateTime now = ec.getHandlerStartTime();
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	FixedPart request(ev.getPartitionId(), ev.getType());
@@ -5939,14 +5949,7 @@ void MultiGetHandler::operator()(EventContext &ec, Event &ev) {
 		ContainerAccessMode containerAccessMode =
 			getContainerAccessMode(connOption.userType_, optionPart.systemMode_,
 				connOption.requestType_, false);
-		if ((connOption.dbName_.size() > 0) &&
-			(optionPart.dbName_.compare(connOption.dbName_.c_str()) !=
-				0)) {  
-			GS_THROW_USER_ERROR(GS_ERROR_DS_CON_ACCESS_INVALID,
-				"Only can access connect db :" << connOption.dbName_
-											   << ", can not access db : "
-											   << optionPart.dbName_);
-		}
+		checkDbAccessible(connOption.dbName_, optionPart.dbName_);
 
 		decodeMultiSearchEntry(in, request.pId_, connOption.dbId_,
 			optionPart.dbName_.c_str(), containerAccessMode, searchList);
@@ -6065,6 +6068,7 @@ uint32_t MultiGetHandler::execute(EventContext &ec, const FixedPart &request,
 
 			QueryProcessor::search(txn, *container, MAX_RESULT_SIZE,
 				predicate.startKey_, predicate.finishKey_, *rs);
+			rs->setResultType(RESULT_ROWSET);
 
 			if (rs->getResultNum() > 0) {
 
@@ -6094,6 +6098,7 @@ uint32_t MultiGetHandler::execute(EventContext &ec, const FixedPart &request,
 
 				QueryProcessor::get(txn, *container,
 					static_cast<uint32_t>(rowKey.size()), rowKey.data(), *rs);
+				rs->setResultType(RESULT_ROWSET);
 
 				if (rs->getResultNum() > 0) {
 
@@ -6291,9 +6296,9 @@ void MultiGetHandler::checkContainerRowKey(
 
 TransactionManager::ContextSource MultiGetHandler::createContextSource(
 	const FixedPart &request, const SearchEntry &entry) {
-	return TransactionManager::ContextSource(request.stmtType_,
-		request.cxtSrc_.stmtId_, entry.containerId_,
-		request.cxtSrc_.txnTimeoutInterval_, entry.getMode_, entry.txnMode_);
+	return TransactionManager::ContextSource(request.stmtType_, entry.stmtId_,
+		entry.containerId_, request.cxtSrc_.txnTimeoutInterval_, entry.getMode_,
+		entry.txnMode_);
 }
 
 void MultiGetHandler::decodeMultiSearchEntry(
@@ -6470,7 +6475,7 @@ void MultiQueryHandler::operator()(EventContext &ec, Event &ev) {
 
 		QueryRequestList queryList(alloc);
 
-		decodeMultiQuery(in, queryList);
+		decodeMultiQuery(in, request, queryList);
 
 		const ClusterRole clusterRole = (CROLE_MASTER | CROLE_FOLLOWER);
 		const PartitionStatus partitionStatus = PSTATE_ON;
@@ -6656,7 +6661,7 @@ TransactionManager::ContextSource MultiQueryHandler::createContextSource(
 }
 
 void MultiQueryHandler::decodeMultiQuery(
-	util::ByteStream<util::ArrayInStream> &in,
+	util::ByteStream<util::ArrayInStream> &in, const FixedPart &request,
 	util::XArray<const QueryRequest *> &queryList) {
 	util::StackAllocator &alloc = *queryList.get_allocator().base();
 
@@ -6666,49 +6671,49 @@ void MultiQueryHandler::decodeMultiQuery(
 		queryList.reserve(static_cast<size_t>(entryCount));
 
 		for (int32_t i = 0; i < entryCount; i++) {
-			QueryRequest *request = ALLOC_NEW(alloc) QueryRequest(alloc);
+			QueryRequest *subRequest = ALLOC_NEW(alloc) QueryRequest(alloc);
 
 			int32_t stmtType;
 			in >> stmtType;
-			request->stmtType_ = static_cast<EventType>(stmtType);
+			subRequest->stmtType_ = static_cast<EventType>(stmtType);
 
-			in >> request->stmtId_;
-			in >> request->containerId_;
-			in >> request->sessionId_;
-			in >> request->schemaVersionId_;
+			in >> subRequest->stmtId_;
+			in >> subRequest->containerId_;
+			in >> subRequest->sessionId_;
+			in >> subRequest->schemaVersionId_;
 
-			in >> request->getMode_;
-			in >> request->txnMode_;
+			in >> subRequest->getMode_;
+			in >> subRequest->txnMode_;
 
-			decodeOptionPart(in, request->optionPart_);
+			decodeContainerOptionPart(in, request, subRequest->optionPart_);
 
-			decodeFetchOption(in, request->fetchOption_);
+			decodeFetchOption(in, subRequest->fetchOption_);
 
-			switch (request->stmtType_) {
+			switch (subRequest->stmtType_) {
 			case QUERY_TQL:
-				request->query_.tqlQuery_ =
+				subRequest->query_.tqlQuery_ =
 					ALLOC_NEW(alloc) util::String(alloc);
-				in >> *request->query_.tqlQuery_;
+				in >> *subRequest->query_.tqlQuery_;
 				break;
 			case QUERY_TIME_SERIES_RANGE: {
 				RangeQuery *query = ALLOC_NEW(alloc) RangeQuery();
 
 				decodeRangeQuery(in, *query);
 
-				request->query_.rangeQuery_ = query;
+				subRequest->query_.rangeQuery_ = query;
 			} break;
 			case QUERY_TIME_SERIES_SAMPLING: {
 				SamplingQuery *query = ALLOC_NEW(alloc) SamplingQuery(alloc);
 
 				decodeSamplingQuery(in, *query);
 
-				request->query_.samplingQuery_ = query;
+				subRequest->query_.samplingQuery_ = query;
 			} break;
 			default:
 				TXN_THROW_DECODE_ERROR(GS_ERROR_TXN_DECODE_FAILED, "");
 			}
 
-			queryList.push_back(request);
+			queryList.push_back(subRequest);
 		}
 	}
 	catch (std::exception &e) {
@@ -6910,7 +6915,6 @@ void ReplicationAckHandler::operator()(EventContext &ec, Event &ev) {
 	TXN_TRACE_HANDLER_CALLED(ev);
 
 	util::StackAllocator &alloc = ec.getAllocator();
-	const util::DateTime now = ec.getHandlerStartTime();
 
 	ReplicationAck ack(ev.getPartitionId());
 
@@ -6960,39 +6964,30 @@ void ReplicationAckHandler::operator()(EventContext &ec, Event &ev) {
 	}
 }
 
-CheckTimeoutHandler::CheckTimeoutHandler()
-	: StatementHandler(), timeoutCheckCount_(NULL) {
-	timeoutCheckCount_ = UTIL_NEW uint64_t[DataStore::MAX_PARTITION_NUM];
-	for (PartitionId pId = 0; pId < DataStore::MAX_PARTITION_NUM; pId++) {
-		timeoutCheckCount_[pId] = 0;
-	}
-}
-
-CheckTimeoutHandler::~CheckTimeoutHandler() {
-	delete[] timeoutCheckCount_;
-}
-
-/*!
-	@brief Handler Operator
-*/
 void CheckTimeoutHandler::operator()(EventContext &ec, Event &ev) {
 	TXN_TRACE_HANDLER_CALLED(ev);
 
+	util::StackAllocator &alloc = ec.getAllocator();
+
 	try {
-		util::XArray<bool> checkPartitionFlagList(ec.getAllocator());
-		if (!timeoutCheckEnabled(ec.getWorkerId(), checkPartitionFlagList)) {
-			return;
+		{
+			const util::StackAllocator::Scope scope(alloc);
+
+			util::XArray<bool> checkPartitionFlagList(alloc);
+			if (isTransactionTimeoutCheckEnabled(
+					ec.getWorkerId(), checkPartitionFlagList)) {
+
+				checkRequestTimeout(ec, checkPartitionFlagList);
+				checkTransactionTimeout(ec, checkPartitionFlagList);
+			}
 		}
 
-
 		checkReplicationTimeout(ec);
-		checkRequestTimeout(ec, checkPartitionFlagList);
-		checkTransactionTimeout(ec, checkPartitionFlagList);
 		checkResultSetTimeout(ec);
 	}
 	catch (std::exception &e) {
 		UTIL_TRACE_EXCEPTION(TRANSACTION_SERVICE, e,
-			"Active transaction check failed (nd="
+			"resource timeout check failed (nd="
 				<< ev.getSenderND() << ", reason=" << GS_EXCEPTION_MESSAGE(e)
 				<< ")");
 
@@ -7271,12 +7266,8 @@ void CheckTimeoutHandler::checkResultSetTimeout(EventContext &ec) {
 	}
 }
 
-bool CheckTimeoutHandler::timeoutCheckEnabled(
+bool CheckTimeoutHandler::isTransactionTimeoutCheckEnabled(
 	PartitionGroupId pgId, util::XArray<bool> &checkPartitionFlagList) {
-	if (clusterService_->isError()) {
-		return false;
-	}
-
 	const PartitionId beginPId =
 		transactionManager_->getPartitionGroupConfig().getGroupBeginPartitionId(
 			pgId);
@@ -7286,45 +7277,12 @@ bool CheckTimeoutHandler::timeoutCheckEnabled(
 
 	bool existTarget = false;
 	for (PartitionId pId = beginPId; pId < endPId; pId++) {
-		const bool flag = transactionService_->isTimeoutCheckEnabled(pId);
+		const bool flag =
+			transactionService_->isTransactionTimeoutCheckEnabled(pId);
 		checkPartitionFlagList.push_back(flag);
 		existTarget |= flag;
 	}
 	return existTarget;
-}
-
-void CheckTimeoutHandler::checkTimeoutCorrectlyEnabled(PartitionId pId) const {
-
-	const bool enabled = transactionService_->isTimeoutCheckEnabled(pId);
-
-	if (timeoutCheckCount_[pId]++ % TIMEOUT_CHECK_STATE_TRACE_COUNT == 0) {
-		GS_TRACE_WARNING(TRANSACTION_SERVICE, GS_TRACE_TXN_CHECK_TIMEOUT,
-			"timeout check is "
-				<< (enabled ? "enabled. " : "disabled. ") << "(isSubMaster="
-				<< partitionTable_->isSubMaster() << ", pId=" << pId
-				<< ", isOwner=" << partitionTable_->isOwner(pId)
-				<< ", isBackup=" << partitionTable_->isBackup(pId) << ", state="
-				<< partitionTable_->getPartitionStatus(pId) << ")");
-	}
-
-	if (partitionTable_->isSubMaster() && enabled) {
-		assert(false);
-		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
-	}
-
-	const PartitionTable::PartitionStatus status =
-		partitionTable_->getPartitionStatus(pId);
-
-	if (status == PartitionTable::PT_SYNC && enabled) {
-		assert(false);
-		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
-	}
-
-	if (status == PartitionTable::PT_STOP && enabled) {
-		assert(false);
-		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
-	}
-
 }
 
 DataStorePeriodicallyHandler::DataStorePeriodicallyHandler()
@@ -7386,7 +7344,7 @@ void DataStorePeriodicallyHandler::operator()(EventContext &ec, Event &ev) {
 					pIdCursor_[pgId] = pgConfig.getGroupBeginPartitionId(pgId);
 				}
 			}
-			WATCHER_END_1(getEventTypeName(ADJUST_STORE_MEMORY_PERIODICALLY));
+			WATCHER_END_1(getEventTypeName(CHUNK_EXPIRE_PERIODICALLY));
 		}
 	}
 	catch (UserException &e) {
@@ -7399,7 +7357,6 @@ void DataStorePeriodicallyHandler::operator()(EventContext &ec, Event &ev) {
 		}
 	}
 }
-
 
 AdjustStoreMemoryPeriodicallyHandler::AdjustStoreMemoryPeriodicallyHandler()
 	: StatementHandler(), pIdCursor_(NULL) {
@@ -7530,15 +7487,14 @@ TransactionService::TransactionService(const ConfigTable &config,
 	  ee_(NULL),
 	  initalized_(false),
 	  pgConfig_(config),
-	  enableTimeoutCheck_(
-		  UTIL_NEW util::Atomic<bool>[pgConfig_.getPartitionCount()]),
-	  readOperationCount_(UTIL_NEW uint64_t[pgConfig_.getPartitionCount()]),
-	  writeOperationCount_(UTIL_NEW uint64_t[pgConfig_.getPartitionCount()]),
-	  rowReadCount_(UTIL_NEW uint64_t[pgConfig_.getPartitionCount()]),
-	  rowWriteCount_(UTIL_NEW uint64_t[pgConfig_.getPartitionCount()]),
-	  connectHandler_(StatementHandler::MIN_ACCEPTABLE_TXN_CLIENT_VERSION,
-		  StatementHandler::MAX_ACCEPTABLE_TXN_CLIENT_VERSION)
-{
+	  enableTxnTimeoutCheck_(pgConfig_.getPartitionCount(),
+		  static_cast<util::Atomic<bool> >(false)),
+	  readOperationCount_(pgConfig_.getPartitionCount(), 0),
+	  writeOperationCount_(pgConfig_.getPartitionCount(), 0),
+	  rowReadCount_(pgConfig_.getPartitionCount(), 0),
+	  rowWriteCount_(pgConfig_.getPartitionCount(), 0),
+	  connectHandler_(StatementHandler::TXN_CLIENT_VERSION,
+		  ACCEPTABLE_NOSQL_CLIENT_VERSIONS) {
 	try {
 		eeConfig_.setServerNDAutoNumbering(false);
 		eeConfig_.setClientNDEnabled(true);
@@ -7551,9 +7507,18 @@ TransactionService::TransactionService(const ConfigTable &config,
 			config.get<const char8_t *>(CONFIG_TABLE_TXN_SERVICE_ADDRESS),
 			config.getUInt16(CONFIG_TABLE_TXN_SERVICE_PORT));
 
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+		if (ClusterService::isMulticastMode(config)) {
+			eeConfig_.setMulticastAddress(
+				config.get<const char8_t *>(
+					CONFIG_TABLE_TXN_NOTIFICATION_ADDRESS),
+				config.getUInt16(CONFIG_TABLE_TXN_NOTIFICATION_PORT));
+		}
+#else
 		eeConfig_.setMulticastAddress(
 			config.get<const char8_t *>(CONFIG_TABLE_TXN_NOTIFICATION_ADDRESS),
 			config.getUInt16(CONFIG_TABLE_TXN_NOTIFICATION_PORT));
+#endif
 
 		eeConfig_.connectionCountLimit_ =
 			config.get<int32_t>(CONFIG_TABLE_TXN_CONNECTION_LIMIT);
@@ -7575,22 +7540,11 @@ TransactionService::TransactionService(const ConfigTable &config,
 
 		ee_ = UTIL_NEW EventEngine(eeConfig_, eeSource_, name);
 
-		for (PartitionId pId = 0; pId < pgConfig_.getPartitionCount(); pId++) {
-			enableTimeoutCheck_[pId] = false;
-			readOperationCount_[pId] = 0;
-			writeOperationCount_[pId] = 0;
-			rowReadCount_[pId] = 0;
-			rowWriteCount_[pId] = 0;
-		}
+
 
 	}
 	catch (std::exception &e) {
 		delete ee_;
-		delete[] enableTimeoutCheck_;
-		delete[] readOperationCount_;
-		delete[] writeOperationCount_;
-		delete[] rowReadCount_;
-		delete[] rowWriteCount_;
 
 		GS_RETHROW_SYSTEM_ERROR(e, "");
 	}
@@ -7606,14 +7560,17 @@ TransactionService::~TransactionService() {
 		for (PartitionId pId = 0; pId < pgConfig_.getPartitionCount(); pId++) {
 			transactionManager->removePartition(pId);
 		}
-	}
-	delete ee_;
 
-	delete[] enableTimeoutCheck_;
-	delete[] readOperationCount_;
-	delete[] writeOperationCount_;
-	delete[] rowReadCount_;
-	delete[] rowWriteCount_;
+		transactionManager->removeAllReplicationContext();
+
+		for (PartitionGroupId pgId = 0;
+			 pgId < pgConfig_.getPartitionGroupCount(); pgId++) {
+			assert(transactionManager->getTransactionContextCount(pgId) == 0);
+			assert(transactionManager->getReplicationContextCount(pgId) == 0);
+		}
+	}
+
+	delete ee_;
 }
 
 void TransactionService::initialize(const ManagerSet &mgrSet) {
@@ -7940,6 +7897,7 @@ void TransactionService::initialize(const ManagerSet &mgrSet) {
 		ee_->setHandler(PARTITION_GROUP_END, checkpointOperationHandler_);
 		ee_->setHandler(CLEANUP_CP_DATA, checkpointOperationHandler_);
 
+
 		const PartitionGroupConfig &pgConfig =
 			mgrSet.txnMgr_->getPartitionGroupConfig();
 
@@ -7968,10 +7926,6 @@ void TransactionService::initialize(const ManagerSet &mgrSet) {
 					changeTimeSecondToMilliSecond(writeLogInterval));
 			}
 		}
-
-		ee_->setHandler(TXN_COLLECT_TIMEOUT_RESOURCE, checkTimeoutHandler_);
-		ee_->setHandlingMode(TXN_COLLECT_TIMEOUT_RESOURCE,
-			EventEngine::HANDLING_PARTITION_SERIALIZED);
 
 
 		statUpdator_.service_ = this;
@@ -8020,73 +7974,78 @@ void TransactionService::changeTimeoutCheckMode(PartitionId pId,
 	assert(!(isToSubMaster && isShortTermSyncBegin));
 	assert(!(isToSubMaster && isShortTermSyncEnd));
 
-	if (isToSubMaster || isShortTermSyncBegin) {
-		setTimeoutCheckDisabled(pId);
-		stats.setTransactionTimeoutCheck(pId, 0);
-		return;
-	}
-	else if (isShortTermSyncEnd) {
-		setTimeoutCheckEnabled(pId);
-		stats.setTransactionTimeoutCheck(pId, 1);
-		return;
-	}
 
 	switch (after) {
 	case PartitionTable::PT_ON:
 		assert(!isShortTermSyncBegin);
 		assert(!isToSubMaster);
-		setTimeoutCheckEnabled(pId);
+		enableTransactionTimeoutCheck(pId);
 		stats.setTransactionTimeoutCheck(pId, 1);
 		break;
 
 	case PartitionTable::PT_OFF:
+		if (isToSubMaster) {
+			disableTransactionTimeoutCheck(pId);
+			stats.setTransactionTimeoutCheck(pId, 0);
+		}
+		else if (isShortTermSyncBegin) {
+			enableTransactionTimeoutCheck(pId);
+			stats.setTransactionTimeoutCheck(pId, 1);
+		}
+		else if (isShortTermSyncEnd) {
+			enableTransactionTimeoutCheck(pId);
+			stats.setTransactionTimeoutCheck(pId, 1);
+		}
+		else {
+		}
 		break;
 
 	case PartitionTable::PT_SYNC:
 		assert(isShortTermSyncBegin);
 		assert(!isShortTermSyncEnd);
 		assert(!isToSubMaster);
-		setTimeoutCheckDisabled(pId);
+		disableTransactionTimeoutCheck(pId);
 		stats.setTransactionTimeoutCheck(pId, 0);
 		break;
 
 	case PartitionTable::PT_STOP:
 		assert(!isShortTermSyncBegin);
 		assert(!isShortTermSyncEnd);
-		setTimeoutCheckDisabled(pId);
+		disableTransactionTimeoutCheck(pId);
 		stats.setTransactionTimeoutCheck(pId, 0);
 		break;
 
 	default:
-		GS_TRACE_ERROR(TRANSACTION_SERVICE,
-			GS_TRACE_TXN_INVALID_PARTITION_STATUS,
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INVALID_ARGS,
 			"(pId=" << pId << ", state=" << after
 					<< ", changeType=" << static_cast<int32_t>(changeType)
 					<< ", isToSubMaster=" << isToSubMaster << ")");
-		break;
 	}
 }
 
-void TransactionService::setTimeoutCheckEnabled(PartitionId pId) {
-	const bool before = enableTimeoutCheck_[pId];
-	enableTimeoutCheck_[pId] = true;
-	if (before != enableTimeoutCheck_[pId]) {
+void TransactionService::enableTransactionTimeoutCheck(PartitionId pId) {
+	const bool before = enableTxnTimeoutCheck_[pId];
+	enableTxnTimeoutCheck_[pId] = true;
+
+	if (!before) {
 		GS_TRACE_WARNING(TRANSACTION_SERVICE, GS_TRACE_TXN_CHECK_TIMEOUT,
 			"timeout check enabled. (pId=" << pId << ")");
 	}
 }
 
-void TransactionService::setTimeoutCheckDisabled(PartitionId pId) {
-	const bool before = enableTimeoutCheck_[pId];
-	enableTimeoutCheck_[pId] = false;
-	if (before != enableTimeoutCheck_[pId]) {
+void TransactionService::disableTransactionTimeoutCheck(PartitionId pId) {
+	const bool before = enableTxnTimeoutCheck_[pId];
+	enableTxnTimeoutCheck_[pId] = false;
+
+	if (before) {
 		GS_TRACE_WARNING(TRANSACTION_SERVICE, GS_TRACE_TXN_CHECK_TIMEOUT,
 			"timeout check disabled. (pId=" << pId << ")");
 	}
 }
 
-bool TransactionService::isTimeoutCheckEnabled(PartitionId pId) const {
-	return enableTimeoutCheck_[pId];
+bool TransactionService::isTransactionTimeoutCheckEnabled(
+	PartitionId pId) const {
+	return enableTxnTimeoutCheck_[pId];
 }
 
 uint64_t TransactionService::getTotalReadOperationCount() const {
@@ -8189,7 +8148,6 @@ bool TransactionService::StatUpdator::operator()(StatTable &stat) {
 
 	return true;
 }
-
 
 TransactionService::StatUpdator::StatUpdator()
 	: service_(NULL), manager_(NULL) {}

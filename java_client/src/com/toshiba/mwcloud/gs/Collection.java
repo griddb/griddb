@@ -19,15 +19,14 @@ package com.toshiba.mwcloud.gs;
 /**
  * A general-purpose Container for managing a set of Rows.
  *
- * <p>The following types are available as a Row key.
+ * <p>The following types are available as a Row key.</p>
  * <ul>
  * <li>String type ({@link String})</li>
  * <li>INTEGER type ({@link Integer})</li>
  * <li>LONG type ({@link Long})</li>
  * <li>TIMESTAMP type ({@link java.util.Date})</li>
  * </ul>
- * It is not mandatory to set a Row key.
- * </p>
+ * <p>It is not mandatory to set a Row key.</p>
  *
  * <p>There is no Container-specific constraint on Row operations. </p>
  *
