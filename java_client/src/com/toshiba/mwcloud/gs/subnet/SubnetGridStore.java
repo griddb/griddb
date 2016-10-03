@@ -105,12 +105,15 @@ public class SubnetGridStore implements GridStore {
 	private static boolean pathKeyOperationEnabled = false;
 
 	static final String SYSTEM_USER_CONTAINER_NAME = "gs#users@0";
-	static final String SUBCONTAINER_ID_SEPARATOR = "/";
-	static final String AFFINITY_SEPARATOR = "@";
+
 	private static final byte DEFAULT_DBUSER_PROPERTY = (byte)0;
+
 	private static final String DEFAULT_PRIVILEGE = "ALL";
+
 	private static final int USER_INFO_COUNT_LIMIT = 128;	
+
 	private static final int DATABASE_INFO_COUNT_LIMIT = 128;	
+
 	private static final int USER_PASSWORD_LENGTH_LIMIT = 64;
 
 	private final GridStoreChannel channel;
@@ -382,23 +385,21 @@ public class SubnetGridStore implements GridStore {
 		return components;
 	}
 
-	public static void tryPutDatabaseOptionalRequest(BasicBuffer req,
-			Context context) {
-		if (NodeConnection.isOptionalRequestEnabled()) {
-			final OptionalRequest request = context.getOptionalRequest();
-			request.put(OptionalRequestType.DB_NAME, context.getDatabaseName());
-			request.format(req);
-		}
+	private static void tryPutDatabaseOptionalRequest(
+			BasicBuffer req, Context context) {
+		NodeConnection.tryPutEmptyOptionalRequest(req);
 	}
 
-	public static void tryPutSystemOptionalRequest(BasicBuffer req,
-			Context context, boolean systemMode) {
-		if (NodeConnection.isOptionalRequestEnabled()) {
-			final OptionalRequest request = context.getOptionalRequest();
-			request.put(OptionalRequestType.SYSTEM_MODE, systemMode);
-			request.put(OptionalRequestType.DB_NAME, context.getDatabaseName());
-			request.format(req);
+	public static void tryPutSystemOptionalRequest(
+			BasicBuffer req, Context context, boolean systemMode) {
+		if (!systemMode) {
+			NodeConnection.tryPutEmptyOptionalRequest(req);
+			return;
 		}
+
+		final OptionalRequest optionalRequest = context.getOptionalRequest();
+		optionalRequest.put(OptionalRequestType.SYSTEM_MODE, systemMode);
+		optionalRequest.format(req);
 	}
 
 	
@@ -436,55 +437,43 @@ public class SubnetGridStore implements GridStore {
 		return null;
 	}
 
-	public static void tryPutAttributeOptionalRequest(BasicBuffer req,
-			Context context, boolean systemMode, ContainerInfo containerInfo) throws GSException {
-		if (NodeConnection.isOptionalRequestEnabled()) {
-			final int headPos = req.base().position();
-			req.putInt(0);
-
-			final int bodyPos = req.base().position();
-
-			req.putShort((short) (OptionalRequestType.SYSTEM_MODE).id());
-			req.putBoolean(systemMode);
-
-			req.putShort((short) (OptionalRequestType.CONTAINER_ATTRIBUTE).id());
-			if (systemMode && containerInfo instanceof ExtendedContainerInfo) {
-				req.putInt(getContainerAttributeFlag(((ExtendedContainerInfo)containerInfo).getAttribute()));
-			} else {
-				req.putInt(getContainerAttributeFlag(ContainerAttribute.BASE));
-			}
-
-			req.putShort((short) (OptionalRequestType.DB_NAME).id());
-			req.putString(context.getDatabaseName());
-
-			final int endPos = req.base().position();
-			req.base().position(headPos);
-			req.putInt(endPos - bodyPos);
-			req.base().position(endPos);
+	private static void tryPutAttributeOptionalRequest(
+			BasicBuffer req, Context context, boolean systemMode,
+			ContainerInfo containerInfo) throws GSException {
+		final ContainerAttribute attribute;
+		if (containerInfo instanceof ExtendedContainerInfo) {
+			attribute = ((ExtendedContainerInfo) containerInfo).getAttribute();
 		}
+		else {
+			attribute = null;
+		}
+
+		if (!systemMode && attribute == null) {
+			NodeConnection.tryPutEmptyOptionalRequest(req);
+			return;
+		}
+
+		final OptionalRequest optionalRequest = context.getOptionalRequest();
+		if (systemMode) {
+			optionalRequest.put(OptionalRequestType.SYSTEM_MODE, systemMode);
+		}
+		if (attribute != null) {
+			optionalRequest.put(
+					OptionalRequestType.CONTAINER_ATTRIBUTE, getContainerAttributeFlag(attribute));
+		}
+		optionalRequest.format(req);
 	}
 
 	@Override
 	public ContainerInfo getContainerInfo(String name) throws GSException {
-		final ContainerInfo containerInfo = getExtendedContainerInfo(
-				name, EnumSet.allOf(ContainerPropertyType.class), null, false);
-
-		if (containerInfo == null) {
-			return null;
-		}
-
-		return containerInfo;
+		return getExtendedContainerInfo(name, false);
 	}
 
-	public ExtendedContainerInfo getExtendedContainerInfo(String name, boolean systemMode) throws GSException {
-		final ExtendedContainerInfo containerInfo = getExtendedContainerInfo(
-				name, EnumSet.allOf(ContainerPropertyType.class), null, systemMode);
-
-		if (containerInfo == null) {
-			return null;
-		}
-
-		return containerInfo;
+	public ExtendedContainerInfo getExtendedContainerInfo(
+			String name, boolean systemMode) throws GSException {
+		return getExtendedContainerInfo(
+				name, EnumSet.allOf(ContainerPropertyType.class), null,
+				systemMode);
 	}
 
 	private ExtendedContainerInfo getExtendedContainerInfo(
@@ -513,7 +502,8 @@ public class SubnetGridStore implements GridStore {
 			req.putByteEnum(type);
 		}
 
-		executeStatement(Statement.GET_CONTAINER_PROPERTIES,
+		executeStatement(
+				Statement.GET_CONTAINER_PROPERTIES,
 				partitionId, req, resp, name);
 
 		final boolean found = resp.getBoolean();
@@ -1043,8 +1033,8 @@ public class SubnetGridStore implements GridStore {
 	}
 
 	private <K, R> SubnetContainer<K, R> getContainer(
-			String name, ContainerType containerType, Class<R> rowType, boolean systemMode)
-			throws GSException {
+			String name, ContainerType containerType, Class<R> rowType,
+			boolean systemMode) throws GSException {
 		final ContainerCache cache = context.getContainerCache();
 		if (cache != null && !systemMode) {
 			final Container<K, R> cachedContainer = findContainerByCache(
@@ -1107,8 +1097,7 @@ public class SubnetGridStore implements GridStore {
 
 	@Override
 	public <K, R> SubnetCollection<K, R> getCollection(
-			String name, Class<R> rowType)
-			throws GSException {
+			String name, Class<R> rowType) throws GSException {
 		final SubnetContainer<K, R> container =
 				getContainer(name, ContainerType.COLLECTION, rowType, false);
 		return (SubnetCollection<K, R>) container;
@@ -1429,7 +1418,8 @@ public class SubnetGridStore implements GridStore {
 	}
 
 	private <K> Container<K, Row> getContainer(
-			String name, ContainerType expectedType, boolean systemMode) throws GSException {
+			String name, ContainerType expectedType, boolean systemMode)
+			throws GSException {
 		if (CONTEXT_CONTROLLER_NAME.equals(name)) {
 			final Collection<K, Row> container =
 					getContextControllerCollection(expectedType);
@@ -1449,7 +1439,8 @@ public class SubnetGridStore implements GridStore {
 
 		final ContainerIdInfo[] idInfo = new ContainerIdInfo[1];
 		final ContainerInfo containerInfo = getExtendedContainerInfo(
-				name, EnumSet.allOf(ContainerPropertyType.class), idInfo, systemMode);
+				name, EnumSet.allOf(ContainerPropertyType.class), idInfo,
+				systemMode);
 
 		if (containerInfo == null) {
 			return null;
@@ -1490,7 +1481,9 @@ public class SubnetGridStore implements GridStore {
 	public <K> Container<K, Row> getContainer(String name) throws GSException {
 		return getContainer(name, null, false);
 	}
-	public <K> Container<K, Row> getContainer(String name, boolean systemMode) throws GSException {
+
+	public <K> Container<K, Row> getContainer(
+			String name, boolean systemMode) throws GSException {
 		return getContainer(name, null, systemMode);
 	}
 
@@ -1577,16 +1570,18 @@ public class SubnetGridStore implements GridStore {
 	}
 
 	public <K> Container<K, Row> putContainer(
-			String name, ContainerInfo info, boolean modifiable, boolean systemMode)
-			throws GSException {
-		return putContainer(name, (ContainerType) null, info, modifiable, systemMode);
+			String name, ContainerInfo info, boolean modifiable,
+			boolean systemMode) throws GSException {
+		return putContainer(
+				name, (ContainerType) null, info, modifiable, systemMode);
 	}
 
 	@Override
 	public <K> Container<K, Row> putContainer(
 			String name, ContainerInfo info, boolean modifiable)
 			throws GSException {
-		return putContainer(name, (ContainerType) null, info, modifiable, false);
+		return putContainer(
+				name, (ContainerType) null, info, modifiable, false);
 	}
 
 	@Override
@@ -1609,7 +1604,8 @@ public class SubnetGridStore implements GridStore {
 	}
 
 	private void dropContainer(
-			String name, ContainerType containerType, boolean systemMode) throws GSException {
+			String name, ContainerType containerType, boolean systemMode)
+			throws GSException {
 
 		final BasicBuffer req = context.getRequestBuffer();
 		final BasicBuffer resp = context.getResponseBuffer();
@@ -2602,18 +2598,19 @@ public class SubnetGridStore implements GridStore {
 		
 
 		
-		setUserInfoRequest(req, userName);
-		req.put(prop);
+		setUserInfoRequest(req, userName);	
+		req.put(prop);		
 
 		if (hashPassword != null) {
 			if (hashPassword.length() == 0) {
 				throw new GSException(
-						GSErrorCode.ILLEGAL_PARAMETER, "Invalid parameter string length");
+						GSErrorCode.ILLEGAL_PARAMETER, "invalid parameter string length.");
 			}
-			req.putBoolean(true);
+			req.putBoolean(true);		
 			req.putString(hashPassword);
 		} else {
-			req.putBoolean(false);
+			req.putBoolean(false);		
+			
 		}
 	}
 
@@ -2660,7 +2657,6 @@ public class SubnetGridStore implements GridStore {
 
 		
 		name = validateName(name, userInfo.getName());
-
 		
 		RowMapper.normalizeSymbol(name);
 
@@ -2696,7 +2692,9 @@ public class SubnetGridStore implements GridStore {
 
 		req.putBoolean(modifiable);
 
-		executeStatement(Statement.PUT_USER, partitionId, req, resp, null);
+		executeStatement(
+				Statement.PUT_USER,
+				partitionId, req, resp, null);
 	}
 
 	public void dropUser(String name) throws GSException {
@@ -2720,7 +2718,9 @@ public class SubnetGridStore implements GridStore {
 
 		setUserInfoRequest(req, name);
 
-		executeStatement(Statement.DROP_USER, partitionId, req, resp, null);
+		executeStatement(
+				Statement.DROP_USER,
+				partitionId, req, resp, null);
 	}
 
 	public Map<String, UserInfo> getUsers() throws GSException {
@@ -2734,10 +2734,12 @@ public class SubnetGridStore implements GridStore {
 
 		final int partitionId = channel.resolvePartitionId(context, SYSTEM_USER_CONTAINER_NAME);
 
-		req.putBoolean(false);
-		req.put(DEFAULT_DBUSER_PROPERTY);
+		req.putBoolean(false);	
+		req.put(DEFAULT_DBUSER_PROPERTY);		
 
-		executeStatement(Statement.GET_USERS, partitionId, req, resp, null);
+		executeStatement(
+				Statement.GET_USERS,
+				partitionId, req, resp, null);
 
 		final Map<String, UserInfo> map = getUserInfoMap(resp);
 
@@ -2758,11 +2760,13 @@ public class SubnetGridStore implements GridStore {
 		
 		RowMapper.normalizeExtendedSymbol(context.getUser(), true);
 
-		req.putBoolean(true);
-		req.putString(context.getUser());
-		req.put(DEFAULT_DBUSER_PROPERTY);
+		req.putBoolean(true);	
+		req.putString(context.getUser());	
+		req.put(DEFAULT_DBUSER_PROPERTY);		
 
-		executeStatement(Statement.GET_USERS, partitionId, req, resp, null);
+		executeStatement(
+				Statement.GET_USERS,
+				partitionId, req, resp, null);
 
 		final Map<String, UserInfo> map = getUserInfoMap(resp);
 
@@ -2774,6 +2778,7 @@ public class SubnetGridStore implements GridStore {
 				", actual=" + map.size() + ")");
 		}
 
+		
 		UserInfo userInfo = map.get(context.getUser());
 		if (userInfo == null) {
 			throw new GSConnectionException(GSErrorCode.MESSAGE_CORRUPTED,
@@ -2811,7 +2816,7 @@ public class SubnetGridStore implements GridStore {
 
 				RowMapper.normalizeSymbol(privilegeEntry.getKey());
 				req.putString(privilegeEntry.getKey());	
-				PrivilegeInfo privilegeInfo = privilegeEntry.getValue();
+				PrivilegeInfo privilegeInfo = privilegeEntry.getValue();	
 				if (privilegeInfo == null) {
 					throw new GSException(GSErrorCode.EMPTY_PARAMETER,
 							"PrivilegeInfo not specified");
@@ -2857,6 +2862,7 @@ public class SubnetGridStore implements GridStore {
 		for (int i = 0; i < databaseInfoCount; i++) {
 
 			String databaseName = resp.getString();	
+			@SuppressWarnings("unused")
 			Byte property = resp.base().get();		
 
 			final int privilegeInfoCount = resp.base().getInt();	
@@ -2908,7 +2914,9 @@ public class SubnetGridStore implements GridStore {
 		setDatabaseInfoRequest(req, name, DEFAULT_DBUSER_PROPERTY, null);
 		req.putBoolean(modifiable);
 
-		executeStatement(Statement.PUT_DATABASE, partitionId, req, resp, null);
+		executeStatement(
+				Statement.PUT_DATABASE,
+				partitionId, req, resp, null);
 	}
 
 	public void dropDatabase(String name) throws GSException {
@@ -2956,7 +2964,9 @@ public class SubnetGridStore implements GridStore {
 
 		setDatabaseInfoRequest(req, name);
 
-		executeStatement(Statement.DROP_DATABASE, partitionId, req, resp, null);
+		executeStatement(
+				Statement.DROP_DATABASE,
+				partitionId, req, resp, null);
 	}
 
 	public Map<String, DatabaseInfo> getDatabases() throws GSException {
@@ -2970,14 +2980,15 @@ public class SubnetGridStore implements GridStore {
 
 		final int partitionId = channel.resolvePartitionId(context, SYSTEM_USER_CONTAINER_NAME);
 
-		req.putBoolean(false);
-		req.put(DEFAULT_DBUSER_PROPERTY);
+		req.putBoolean(false);	
+		req.put(DEFAULT_DBUSER_PROPERTY);		
 
-		executeStatement(Statement.GET_DATABASES, partitionId, req, resp, null);
+		executeStatement(
+				Statement.GET_DATABASES,
+				partitionId, req, resp, null);
 
 		final Map<String, DatabaseInfo> map = getDatabaseInfoMap(resp);
 
-		assert(map != null);	
 		return map;
 	}
 
@@ -2992,22 +3003,29 @@ public class SubnetGridStore implements GridStore {
 
 		final int partitionId = channel.resolvePartitionId(context, SYSTEM_USER_CONTAINER_NAME);
 
-		
-		RowMapper.normalizeSymbol(context.getDatabaseName());
-		req.putBoolean(true);
-		req.putString(context.getDatabaseName());
-		req.put(DEFAULT_DBUSER_PROPERTY);
+		final String dbName = context.getDatabaseName();
 
-		executeStatement(Statement.GET_DATABASES, partitionId, req, resp, null);
+		req.putBoolean(true);	
+		req.putString(dbName == null ? "" : dbName);	
+		req.put(DEFAULT_DBUSER_PROPERTY);		
+
+		executeStatement(
+				Statement.GET_DATABASES, partitionId, req, resp, null);
 
 		final Map<String, DatabaseInfo> map = getDatabaseInfoMap(resp);
 
-		DatabaseInfo info = null;
+		final DatabaseInfo info;
 
 		if (map.size() == 1) {
 
+			if (dbName == null) {
+				info = map.values().iterator().next();
+			}
+			else {
+				info = map.get(dbName);
+			}
+
 			
-			info = map.get(context.getDatabaseName());
 			if (info == null) {
 				throw new GSConnectionException(GSErrorCode.MESSAGE_CORRUPTED,
 						"Protocol error by illegal database name (" +
@@ -3018,9 +3036,8 @@ public class SubnetGridStore implements GridStore {
 
 			
 			throw new GSConnectionException(GSErrorCode.MESSAGE_CORRUPTED,
-				"Protocol error by illegal database info count (" +
-				"expected=1" +
-				", actual=" + map.size() + ")");
+					"Protocol error by illegal database info count (" +
+					"expected=1" + ", actual=" + map.size() + ")");
 		}
 
 		return info;
@@ -3044,7 +3061,9 @@ public class SubnetGridStore implements GridStore {
 
 		setDatabaseInfoRequest(req, dbName, DEFAULT_DBUSER_PROPERTY, userName, info);
 
-		executeStatement(Statement.PUT_PRIVILEGE, partitionId, req, resp, null);
+		executeStatement(
+				Statement.PUT_PRIVILEGE,
+				partitionId, req, resp, null);
 	}
 
 	public void dropPrivilege(String dbName, String userName, PrivilegeInfo info) throws GSException {
@@ -3062,9 +3081,11 @@ public class SubnetGridStore implements GridStore {
 
 		final int partitionId = channel.resolvePartitionId(context, SYSTEM_USER_CONTAINER_NAME);
 
-		setDatabaseInfoRequest(req, dbName, DEFAULT_DBUSER_PROPERTY , userName, info);
+		setDatabaseInfoRequest(req, dbName, DEFAULT_DBUSER_PROPERTY, userName, info);
 
-		executeStatement(Statement.DROP_PRIVILEGE, partitionId, req, resp, null);
+		executeStatement(
+				Statement.DROP_PRIVILEGE,
+				partitionId, req, resp, null);
 	}
 
 }

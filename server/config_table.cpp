@@ -22,7 +22,9 @@
 
 #include "util/file.h"
 #include "util/container.h"
+#include "gs_error.h"
 #include "sha2.h"
+#include "json.h"
 #include "picojson.h"
 #include <limits>
 #include <algorithm>
@@ -73,46 +75,6 @@ static void replaceAll(std::string &str, const std::string &from, const std::str
         str.replace(pos, from.size(), to);
         pos += to.size();
     }
-}
-
-u8string JsonUtils::parseAll(
-		picojson::value &value, const char8_t *begin, const char8_t *end) {
-	u8string err;
-	const char8_t *last = picojson::parse(value, begin, end, &err);
-
-	if (!err.empty()) {
-		value = picojson::value();
-		return err;
-	}
-	else if (last != end) {
-		bool found = false;
-		for (const char8_t *i = last; i != end; i++) {
-			found |= (strchr("\r\n\t ", *i) == NULL);
-		}
-
-		if (found) {
-			value = picojson::value();
-			u8string content;
-			size_t line = 0;
-			{
-				util::NormalIStringStream iss(u8string(begin, last));
-				while (std::getline(iss, content)) {
-					line++;
-				}
-			}
-			{
-				util::NormalIStringStream iss(u8string(begin, end));
-				for (size_t i = 0; i < line && std::getline(iss, content); i++) {
-				}
-			}
-			util::NormalOStringStream oss;
-			oss << "Failed to parse json by extra part (line=" << line <<
-					", content=\"" << content << "\")";
-			err = oss.str();
-		}
-	}
-
-	return err;
 }
 
 ParamValue::ParamValue(const Null&) : type_(PARAM_TYPE_NULL) {
@@ -202,6 +164,16 @@ bool ParamValue::operator==(const ParamValue &another) const {
 
 bool ParamValue::operator!=(const ParamValue &another) const {
 	return !(*this == another);
+}
+
+template<> picojson::value ParamValue::get() const {
+	if (!is<picojson::value>()) {
+		picojson::value value;
+		toJSON(value);
+		return value;
+	}
+
+	return *storage_.asJSON_.get();
 }
 
 ParamValue::Type ParamValue::getType() const {
@@ -327,8 +299,8 @@ template<> size_t ParamValue::elementCount(const picojson::value*) {
 	return 1;
 }
 
-template<typename T>
-void ParamValue::VariableType<T>::construct(
+template<typename T, bool Pod>
+void ParamValue::VariableType<T, Pod>::construct(
 		const T *value, const Allocator *alloc) {
 
 	if (alloc == NULL) {
@@ -357,27 +329,44 @@ void ParamValue::VariableType<T>::construct(
 	}
 }
 
-template<typename T>
-void ParamValue::VariableType<T>::destruct() {
+template<typename T, bool Pod>
+void ParamValue::VariableType<T, Pod>::destruct() {
 	if (owner_) {
 		ValueAllocator *valueAllocator =
 				reinterpret_cast<ValueAllocator*>(&allocator_);
 
-		valueAllocator->deallocate(
-				value_.stored_, elementCount(value_.stored_));
+		const size_t count = elementCount(value_.stored_);
+		if (!Pod) {
+			for (size_t i = 0; i < count; i++) {
+				try {
+					valueAllocator->destroy(value_.stored_ + i);
+				}
+				catch (...) {
+					assert(false);
+				}
+			}
+		}
+
+		try {
+			valueAllocator->deallocate(value_.stored_, count);
+		}
+		catch (...) {
+			assert(false);
+		}
+
 		valueAllocator->~ValueAllocator();
 
 		value_.stored_ = NULL;
 	}
 }
 
-template<typename T>
-const T *const& ParamValue::VariableType<T>::get() const {
+template<typename T, bool Pod>
+const T *const& ParamValue::VariableType<T, Pod>::get() const {
 	return value_.ref_;
 }
 
-template struct ParamValue::VariableType<char8_t>;
-template struct ParamValue::VariableType<picojson::value>;
+template struct ParamValue::VariableType<char8_t, true>;
+template struct ParamValue::VariableType<picojson::value, false>;
 
 std::ostream& operator<<(std::ostream &stream, const ParamValue &value) {
 	value.format(stream);
@@ -409,14 +398,41 @@ void UserTable::load(const char8_t *fileName) {
 		if (nameEnd != entryEnd) {
 			const std::string name(entry, nameEnd);
 			const std::string digestStr(nameEnd + 1, entryEnd);
-			const char *emptyDigest = "";
-			if (digestStr.compare(emptyDigest) == 0) {
-				GS_THROW_USER_ERROR(GS_ERROR_TXN_AUTH_FAILED, "Password of \"" << name << "\" has not been set");
-			}
 			digestMap_.insert(std::make_pair(name, digestStr));
 		}
 		entry = entryEnd;
 	}
+}
+
+void UserTable::save(const char8_t *fileName) const {
+	util::NormalOStringStream oss;
+	for (std::map<std::string, std::string>::const_iterator it =
+			digestMap_.begin(); it != digestMap_.end(); ++it) {
+		oss << it->first << "," << it->second << "\n";
+	}
+	const std::string &contentStr = oss.str();
+	const char8_t *content = contentStr.c_str();
+
+	const std::string tmpFileName = std::string(fileName) + ".tmp";
+	util::NamedFile file;
+	file.open(tmpFileName.c_str(),
+			util::FileFlag::TYPE_READ_WRITE | util::FileFlag::TYPE_CREATE);
+	try {
+		file.setSize(0);
+
+		const char8_t *end = content + contentStr.size();
+		for (const char8_t *it = content; it < end;) {
+			it += file.write(it, end - it);
+		}
+
+		file.close();
+	}
+	catch (...) {
+		file.unlink();
+		throw;
+	}
+
+	util::FileSystem::move(tmpFileName.c_str(), fileName);
 }
 
 /*!
@@ -442,11 +458,35 @@ bool UserTable::isValidUser(
 	return false;
 }
 
+const char8_t* UserTable::getDigest(const char8_t *name) const {
+	std::map<std::string, std::string>::const_iterator it = digestMap_.find(name);
+	if (it == digestMap_.end()) {
+		return NULL;
+	}
+	return it->second.c_str();
+}
+
+void UserTable::setUser(const char8_t *name, const char8_t *digest) {
+	const std::string nameStr = name;
+	std::string digestStr = digest;
+
+	std::map<std::string, std::string>::iterator it = digestMap_.find(nameStr);
+	if (it == digestMap_.end()) {
+		digestMap_[nameStr].swap(digestStr);
+	}
+	else {
+		it->second.swap(digestStr);
+	}
+}
+
+void UserTable::removeUser(const char8_t *name) {
+	digestMap_.erase(name);
+}
+
 /*!
 	@brief Checks if a specified user name exists
 */
-bool UserTable::exists(
-		const char8_t *name) const {
+bool UserTable::exists(const char8_t *name) const {
 
 	std::map<std::string, std::string>::const_iterator it = digestMap_.find(name);
 	if (it != digestMap_.end()) {
@@ -685,6 +725,54 @@ bool ParamTable::getParentParam(ParamId id, ParamId &parentId) const {
 	return (parentId != PARAM_ID_ROOT);
 }
 
+ParamTable::IdSet ParamTable::listDescendantParams(const IdSet &src) const {
+	IdSet dest(IdSet::key_compare(), src.get_allocator());
+	if (src.empty()) {
+		return dest;
+	}
+
+	IdSet dupSrc(IdSet::key_compare(), src.get_allocator());
+
+	for (const IdSet *curSrc = &src;;) {
+		bool groupFound = false;
+
+		for (IdSet::const_iterator srcIt = curSrc->begin();
+				srcIt != curSrc->end(); ++srcIt) {
+
+			EntryMap::const_iterator entryIt = entryMap_.find(*srcIt);
+			if (entryIt == entryMap_.end()) {
+				GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+			}
+
+			if (!entryIt->second.group_) {
+				dest.insert(entryIt->first);
+				continue;
+			}
+
+			groupFound = true;
+			const NameMap &nameMap = entryIt->second.subNameMap_;
+			for (NameMap::const_iterator it = nameMap.begin();
+					it != nameMap.end(); ++it) {
+				dest.insert(it->second);
+			}
+		}
+
+		if (!groupFound) {
+			return dest;
+		}
+
+		if (dest.size() == curSrc->size() &&
+				std::equal(dest.begin(), dest.end(), curSrc->begin())) {
+			GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+		}
+
+		dupSrc.swap(dest);
+
+		curSrc = &dupSrc;
+		dest.clear();
+	}
+}
+
 /*!
 	@brief Gets annotated value
 */
@@ -801,7 +889,7 @@ void ParamTable::set(ParamId id, const ParamValue &value,
 			newValue->assign(value, alloc_);
 		}
 		else if (!entry.annotation_->asStorableValue(
-				*newValue, &value, NULL, sourceInfo, alloc_)) {
+				*newValue, &value, NULL, sourceInfo, alloc_, NULL)) {
 			UTIL_OBJECT_POOL_DELETE(valuePool_, newValue);
 			return;
 		}
@@ -835,6 +923,7 @@ void ParamTable::acceptFile(
 	for (size_t i = 0; i < count; i++) {
 		u8string filePath;
 		util::FileSystem::createPath(dirPath, fileList[i], filePath);
+		String sourceInfo(filePath.c_str(), alloc_);
 
 		util::NormalXArray<uint8_t> buf;
 		loadAllAsString(filePath.c_str(), buf);
@@ -847,7 +936,7 @@ void ParamTable::acceptFile(
 				JsonUtils::parseAll(jsonValue, str, str + buf.size() - 1);
 		if (!err.empty()) {
 			GS_THROW_USER_ERROR(GS_ERROR_CT_PARAMETER_INVALID,
-					"Failed to parse json (file=" << fileList[i] <<
+					"Failed to parse JSON (file=" << fileList[i] <<
 					", reason=" << err << ")");
 		}
 	}
@@ -1216,11 +1305,16 @@ void ParamTable::accept(
 	EntryMap tmpMap(EntryMap::key_compare(), alloc_);
 	EntryMapCleaner cleaner(tmpMap, valuePool_);
 
-	typedef std::set<ParamId> IdSet;
-	IdSet idSet;
-	for (EntryMap::iterator it = entryMap_.begin();
+	IdSet idSet(IdSet::key_compare(), valueMap.get_allocator());
+	for (EntryMap::const_iterator it = entryMap_.begin();
 			it != entryMap_.end(); ++it) {
 		idSet.insert(it->first);
+	}
+
+	IdSet specifiedIdSet(IdSet::key_compare(), valueMap.get_allocator());
+	for (EntryMap::const_iterator it = valueMap.begin();
+			it != valueMap.end(); ++it) {
+		specifiedIdSet.insert(it->first);
 	}
 
 	do {
@@ -1274,7 +1368,8 @@ void ParamTable::accept(
 				}
 			}
 			else if (!entry.annotation_->asStorableValue(
-						*destValue, srcValue, baseValue, sourceInfo, alloc_)) {
+						*destValue, srcValue, baseValue, sourceInfo, alloc_,
+						&specifiedIdSet)) {
 				UTIL_OBJECT_POOL_DELETE(valuePool_, destValue);
 				destValue = NULL;
 			}
@@ -1547,6 +1642,7 @@ ConfigTable::Constraint& ConfigTable::Constraint::setDefault(
 	ParamValue filtered;
 	ValueUnit srcUnit;
 	defaultValue_.assign(*filterValue(filtered, value, srcUnit), alloc_);
+	defaultSpecified_ = true;
 	return *this;
 }
 
@@ -1657,6 +1753,14 @@ ConfigTable::Constraint& ConfigTable::Constraint::inherit(ParamId baseId) {
 	return *this;
 }
 
+ConfigTable::Constraint& ConfigTable::Constraint::addExclusive(ParamId id) {
+	if (!exclusiveIdSet_.insert(id).second) {
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
+
+	return *this;
+}
+
 ConfigTable::Constraint& ConfigTable::Constraint::deprecate(bool enabled) {
 	deprecated_ = enabled;
 	return *this;
@@ -1759,7 +1863,8 @@ bool ConfigTable::Constraint::isHidden() const {
 
 bool ConfigTable::Constraint::asStorableValue(
 		ParamValue &dest, const ParamValue *src, const ParamValue *base,
-		const char8_t *sourceInfo, const Allocator &alloc) const {
+		const char8_t *sourceInfo, const Allocator &alloc,
+		const IdSet *specifiedIds) const {
 
 	Formatter formatter(*this);
 	formatter.add("source", sourceInfo);
@@ -1780,10 +1885,16 @@ bool ConfigTable::Constraint::asStorableValue(
 		}
 	}
 
+	{
+		const IdSet &exclusiveIds = listExclusiveParams(formatter);
+		checkExclusiveIdSet(formatter, exclusiveIds);
+		checkExclusiveValue(formatter, exclusiveIds, specifiedIds);
+	}
+
 	const ParamValue *selected;
 	if (src == NULL) {
 		if (filtered == NULL) {
-			if (defaultValue_.is<ParamValue::Null>()) {
+			if (!defaultSpecified_) {
 				if (deprecated_) {
 					return false;
 				}
@@ -1795,7 +1906,7 @@ bool ConfigTable::Constraint::asStorableValue(
 		}
 		else {
 			formatter.add("baseName", filteredId, Formatter::ENTRY_PATH);
-			formatter.add("baseValue", *filtered);
+			formatter.add("baseValue", *filtered, Formatter::ENTRY_SPECIFIED);
 
 			if (!alterable_ && !inheritable_) {
 				GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
@@ -1804,11 +1915,11 @@ bool ConfigTable::Constraint::asStorableValue(
 		}
 	}
 	else {
-		formatter.add("value", *src);
+		formatter.add("value", *src, Formatter::ENTRY_SPECIFIED);
 
 		if (filtered != NULL && alterable_) {
 			formatter.add("baseName", filteredId, Formatter::ENTRY_PATH);
-			formatter.add("baseValue", *filtered);
+			formatter.add("baseValue", *filtered, Formatter::ENTRY_SPECIFIED);
 			GS_THROW_USER_ERROR(GS_ERROR_CT_PARAMETER_INVALID,
 					"Parameter conflicted " << formatter);
 		}
@@ -1827,6 +1938,7 @@ bool ConfigTable::Constraint::asStorableValue(
 	}
 
 	ParamValue converted;
+	NumberRounding rounding;
 	if (extendedType_ != EXTENDED_TYPE_NONE) {
 		if (asStorableExtendedValue(converted, *selected, alloc, formatter)) {
 			selected = &converted;
@@ -1834,13 +1946,15 @@ bool ConfigTable::Constraint::asStorableValue(
 	}
 	else if (defaultUnit_ != VALUE_UNIT_NONE) {
 		ValueUnit srcUnit;
-		if (asStorableUnitValue(converted, *selected, alloc, formatter, &srcUnit)) {
+		if (asStorableUnitValue(
+				converted, *selected, alloc, formatter, &srcUnit, rounding)) {
 			selected = &converted;
 		}
 	}
 
 	ParamValue numeric;
-	if (asStorableNumericValue(numeric, *selected, alloc, formatter)) {
+	if (asStorableNumericValue(
+			numeric, *selected, alloc, formatter, rounding)) {
 		selected = &numeric;
 	}
 
@@ -1854,15 +1968,15 @@ bool ConfigTable::Constraint::asStorableValue(
 	}
 
 	if (!minValue_.is<ParamValue::Null>() &&
-			compareValue(*selected, minValue_) < 0) {
+			compareValue(*selected, minValue_, rounding) < 0) {
 		formatter.add("min", minValue_, Formatter::ENTRY_VALUE);
 		GS_THROW_USER_ERROR(GS_ERROR_CT_PARAMETER_LESS_THAN_LOWER_LIMIT,
 				"Too small value " << formatter);
 	}
 
 	if (!maxValue_.is<ParamValue::Null>() &&
-			compareValue(*selected, maxValue_) > 0) {
-		formatter.add("max", minValue_, Formatter::ENTRY_VALUE);
+			compareValue(*selected, maxValue_, rounding) > 0) {
+		formatter.add("max", maxValue_, Formatter::ENTRY_VALUE);
 		GS_THROW_USER_ERROR(GS_ERROR_CT_PARAMETER_GREATER_THAN_UPPER_LIMIT,
 				"Too large value " << formatter);
 	}
@@ -1915,14 +2029,16 @@ void ConfigTable::Constraint::asDisplayValue(
 
 		ValueUnit displayUnit = preferredUnit;
 		try {
+			NumberRounding rounding;
 			if (displayUnit == VALUE_UNIT_NONE || !asStorableNumericValue(
-						numeric, src, alloc_, formatter, &numericType)) {
+						numeric, src, alloc_, formatter, rounding, &numericType)) {
 				filtered.assign(src, alloc);
 				displayUnit = defaultUnit_;
 			}
 			else {
 				filtered.assign(convertUnit(numeric.get<int64_t>(),
-							preferredUnit, defaultUnit_, formatter), alloc);
+						preferredUnit, defaultUnit_, formatter, rounding),
+						alloc);
 			}
 		}
 		catch (UserException &e) {
@@ -1950,12 +2066,14 @@ ConfigTable::Constraint::Constraint(
 		extendedType_(EXTENDED_TYPE_NONE),
 		defaultUnit_(VALUE_UNIT_NONE),
 		candidateList_(alloc),
+		exclusiveIdSet_(IdSet::key_compare(), alloc),
 		filter_(NULL),
 		deprecated_(false),
 		hidden_(false),
 		unitRequired_(false),
 		alterable_(false),
-		inheritable_(false) {
+		inheritable_(false),
+		defaultSpecified_(false) {
 }
 
 bool ConfigTable::Constraint::asStorableExtendedValue(
@@ -1994,10 +2112,12 @@ bool ConfigTable::Constraint::asStorableExtendedValue(
 
 		ParamValue numeric;
 		const ParamValue *filtered;
+		NumberRounding rounding;
 		if (src.getType() == type) {
 			filtered = &src;
 		}
-		else if (asStorableNumericValue(numeric, src, alloc, formatter, &type)) {
+		else if (asStorableNumericValue(
+				numeric, src, alloc, formatter, rounding, &type)) {
 			filtered = &numeric;
 		}
 		else {
@@ -2023,7 +2143,7 @@ bool ConfigTable::Constraint::asStorableExtendedValue(
 bool ConfigTable::Constraint::asStorableUnitValue(
 		ParamValue &dest, const ParamValue &src,
 		const Allocator &alloc, Formatter &formatter,
-		ValueUnit *srcUnit) const {
+		ValueUnit *srcUnit, NumberRounding &rounding) const {
 	*srcUnit = VALUE_UNIT_NONE;
 
 	if (defaultUnit_ == VALUE_UNIT_NONE) {
@@ -2074,13 +2194,22 @@ bool ConfigTable::Constraint::asStorableUnitValue(
 
 	String unitStr(str, unitPos, String::npos, alloc);
 	if (unitStr.empty()) {
+		if (!unitRequired_) {
+			formatter.add("valueType",
+					static_cast<int32_t>(src.getType()), Formatter::ENTRY_TYPE);
+		}
+
 		formatter.add("availableUnits", ParamValue(),
 				Formatter::ENTRY_UNIT_CANDIDATES);
 		formatter.add("defaultUnit",
 				static_cast<int32_t>(defaultUnit_),
 				Formatter::ENTRY_UNIT);
+
+		const char8_t *const message = unitRequired_ ?
+				"Unit not specified " :
+				"Either string with unit or number without unit allowed ";
 		GS_THROW_USER_ERROR(GS_ERROR_CT_PARAMETER_INVALID,
-				"Unit not specified " << formatter);
+				message << formatter);
 	}
 
 	const UnitInfo *infoListEnd = UNIT_INFO_LIST +
@@ -2099,9 +2228,11 @@ bool ConfigTable::Constraint::asStorableUnitValue(
 	}
 
 	if (*srcUnit == VALUE_UNIT_NONE) {
-		formatter.add("specifiedUnit", unitStr);
-		formatter.add("availableUnits", ParamValue(),
-				Formatter::ENTRY_UNIT_CANDIDATES);
+		formatter.add(
+				"specifiedUnit", unitStr, Formatter::ENTRY_SPECIFIED);
+		formatter.add(
+				"availableUnits",
+				ParamValue(), Formatter::ENTRY_UNIT_CANDIDATES);
 		GS_THROW_USER_ERROR(GS_ERROR_CT_PARAMETER_INVALID,
 				"Unknown unit " << formatter);
 	}
@@ -2140,24 +2271,27 @@ bool ConfigTable::Constraint::asStorableUnitValue(
 		util::NormalOStringStream oss;
 		oss << number;
 		if (iss.fail() || !iss.eof() || numberStr != oss.str()) {
-			formatter.add("targetNumber", str.c_str());
-			formatter.add("specifiedUnit",
-					static_cast<int32_t>(*srcUnit),
-					Formatter::ENTRY_UNIT);
+			formatter.add(
+					"targetNumber",
+					numberStr.c_str(), Formatter::ENTRY_SPECIFIED);
+			formatter.add(
+					"specifiedUnit",
+					static_cast<int32_t>(*srcUnit), Formatter::ENTRY_UNIT);
 
 			GS_THROW_USER_ERROR(GS_ERROR_CT_PARAMETER_INVALID,
 					"Failed to parse number " << formatter);
 		}
 	}
 
-	dest.assign(convertUnit(number, defaultUnit_, *srcUnit, formatter), alloc);
+	dest.assign(convertUnit(
+			number, defaultUnit_, *srcUnit, formatter, rounding), alloc);
 	return true;
 }
 
 bool ConfigTable::Constraint::asStorableNumericValue(
 		ParamValue &dest, const ParamValue &src,
 		const Allocator &alloc, Formatter &formatter,
-		const ParamValue::Type *type) const {
+		NumberRounding &rounding, const ParamValue::Type *type) const {
 
 	const ParamValue::Type targetType = (type == NULL ? type_ : *type);
 	if (targetType == src.getType()) {
@@ -2167,10 +2301,10 @@ bool ConfigTable::Constraint::asStorableNumericValue(
 	if (targetType == ParamValue::PARAM_TYPE_INT64) {
 		int64_t destNumber;
 		if (src.getType() == ParamValue::PARAM_TYPE_INT32) {
-			convertNumber(destNumber, src.get<int32_t>(), formatter);
+			convertNumber(destNumber, src.get<int32_t>(), formatter, rounding);
 		}
 		else if (src.getType() == ParamValue::PARAM_TYPE_DOUBLE) {
-			convertNumber(destNumber, src.get<double>(), formatter);
+			convertNumber(destNumber, src.get<double>(), formatter, rounding);
 		}
 		else {
 			return false;
@@ -2180,10 +2314,10 @@ bool ConfigTable::Constraint::asStorableNumericValue(
 	else if (targetType == ParamValue::PARAM_TYPE_INT32) {
 		int32_t destNumber;
 		if (src.getType() == ParamValue::PARAM_TYPE_INT64) {
-			convertNumber(destNumber, src.get<int64_t>(), formatter);
+			convertNumber(destNumber, src.get<int64_t>(), formatter, rounding);
 		}
 		else if (src.getType() == ParamValue::PARAM_TYPE_DOUBLE) {
-			convertNumber(destNumber, src.get<double>(), formatter);
+			convertNumber(destNumber, src.get<double>(), formatter, rounding);
 		}
 		else {
 			return false;
@@ -2193,10 +2327,10 @@ bool ConfigTable::Constraint::asStorableNumericValue(
 	else if (targetType == ParamValue::PARAM_TYPE_DOUBLE) {
 		double destNumber;
 		if (src.getType() == ParamValue::PARAM_TYPE_INT32) {
-			convertNumber(destNumber, src.get<int32_t>(), formatter);
+			convertNumber(destNumber, src.get<int32_t>(), formatter, rounding);
 		}
 		else if (src.getType() == ParamValue::PARAM_TYPE_INT64) {
-			convertNumber(destNumber, src.get<int64_t>(), formatter);
+			convertNumber(destNumber, src.get<int64_t>(), formatter, rounding);
 		}
 		else {
 			return false;
@@ -2215,12 +2349,15 @@ const ParamValue* ConfigTable::Constraint::filterValue(
 	srcUnit = defaultUnit_;
 	Formatter formatter(*this);
 
+	NumberRounding rounding;
 	const ParamValue *filtered = &value;
-	if (filtered->getType() != type_ &&
+	if (type_ != ParamValue::PARAM_TYPE_JSON &&
+			filtered->getType() != type_ &&
 			value.getType() == ParamValue::PARAM_TYPE_STRING) {
 		try {
 			if (!asStorableUnitValue(
-					filteredStorage, *filtered, alloc_, formatter, &srcUnit)) {
+					filteredStorage, *filtered, alloc_, formatter, &srcUnit,
+					rounding)) {
 				GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 			}
 			filtered = &filteredStorage;
@@ -2233,12 +2370,13 @@ const ParamValue* ConfigTable::Constraint::filterValue(
 
 	if (value.getType() != ParamValue::PARAM_TYPE_DOUBLE &&
 			asStorableNumericValue(
-					filteredStorage, *filtered, alloc_, formatter)) {
+					filteredStorage, *filtered, alloc_, formatter, rounding)) {
 		filtered = &filteredStorage;
 	}
 
-	if (type_ == ParamValue::PARAM_TYPE_NULL ||
-			filtered->getType() != type_) {
+	if (type_ != ParamValue::PARAM_TYPE_JSON &&
+			(type_ == ParamValue::PARAM_TYPE_NULL ||
+			filtered->getType() != type_)) {
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}
 
@@ -2261,8 +2399,14 @@ void ConfigTable::Constraint::checkComparable(bool expected) const {
 
 template<typename D, typename S>
 void ConfigTable::Constraint::convertNumber(
-		D &dest, const S &src, Formatter &formatter) const {
-	if (src > std::numeric_limits<D>::max()) {
+		D &dest, const S &src, Formatter &formatter,
+		NumberRounding &rounding) const {
+	if (!(src <= std::numeric_limits<D>::max())) {
+		if (!(src >= std::numeric_limits<D>::max())) {
+			GS_THROW_USER_ERROR(GS_ERROR_CT_PARAMETER_INVALID,
+					"NaN can not be accepted " << formatter);
+		}
+
 		if (maxValue_.is<ParamValue::Null>()) {
 			formatter.add("upperRange",
 					std::numeric_limits<D>::max(), Formatter::ENTRY_VALUE);
@@ -2275,7 +2419,7 @@ void ConfigTable::Constraint::convertNumber(
 				"Too large number " << formatter);
 	}
 	else if (std::numeric_limits<D>::is_integer &&
-			src < std::numeric_limits<D>::min()) {
+			!(src >= std::numeric_limits<D>::min())) {
 		if (minValue_.is<ParamValue::Null>()) {
 			formatter.add("lowerRange",
 					std::numeric_limits<D>::min(), Formatter::ENTRY_VALUE);
@@ -2288,25 +2432,54 @@ void ConfigTable::Constraint::convertNumber(
 				"Too small number " << formatter);
 	}
 
-	dest = static_cast<D>(src);
+	const volatile D converted = static_cast<D>(src);
+	const volatile S reverted = static_cast<S>(converted);
+
+	applyNumberRounding(src, reverted, rounding);
+
+	dest = converted;
+}
+
+template<typename T>
+void ConfigTable::Constraint::applyNumberRounding(
+		const T org, const T reverted, NumberRounding &rounding) {
+	rounding.first |= (org < reverted);
+	rounding.second |= (org > reverted);
 }
 
 int32_t ConfigTable::Constraint::compareValue(
-		const ParamValue &value1, const ParamValue &value2) {
+		const ParamValue &value1, const ParamValue &value2,
+		const NumberRounding &rounding1) {
 	if (value1.getType() != value2.getType()) {
 		return 0;
 	}
 
+	int32_t comp;
 	switch (value1.getType()) {
 	case ParamValue::PARAM_TYPE_INT64:
-		return compareNumber(value1.get<int64_t>(), value2.get<int64_t>());
+		comp = compareNumber(value1.get<int64_t>(), value2.get<int64_t>());
+		break;
 	case ParamValue::PARAM_TYPE_INT32:
-		return compareNumber(value1.get<int32_t>(), value2.get<int32_t>());
+		comp = compareNumber(value1.get<int32_t>(), value2.get<int32_t>());
+		break;
 	case ParamValue::PARAM_TYPE_DOUBLE:
-		return compareNumber(value1.get<double>(), value2.get<double>());
+		comp = compareNumber(value1.get<double>(), value2.get<double>());
+		break;
 	default:
-		return 0;
+		comp = 0;
+		break;
 	}
+
+	if (comp == 0) {
+		if (rounding1.first) {
+			return -1;
+		}
+		if (rounding1.second) {
+			return 1;
+		}
+	}
+
+	return comp;
 }
 
 template<typename T>
@@ -2323,8 +2496,9 @@ int32_t ConfigTable::Constraint::compareNumber(
 	}
 }
 
-int64_t ConfigTable::Constraint::convertUnit(int64_t src, ValueUnit destUnit,
-		ValueUnit srcUnit, Formatter &formatter) {
+int64_t ConfigTable::Constraint::convertUnit(
+		int64_t src, ValueUnit destUnit, ValueUnit srcUnit,
+		Formatter &formatter, NumberRounding &rounding) {
 
 	const UnitInfo *destInfo = &UNIT_INFO_LIST[destUnit];
 	const UnitInfo *srcInfo = &UNIT_INFO_LIST[srcUnit];
@@ -2339,7 +2513,11 @@ int64_t ConfigTable::Constraint::convertUnit(int64_t src, ValueUnit destUnit,
 				GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 			}
 
+			const int64_t org = dest;
 			dest /= nextInfo->step_;
+
+			const int64_t reverted = dest * nextInfo->step_;
+			applyNumberRounding(org, reverted, rounding);
 		}
 		else {
 			nextInfo = unitInfo - 1;
@@ -2360,7 +2538,7 @@ int64_t ConfigTable::Constraint::convertUnit(int64_t src, ValueUnit destUnit,
 						Formatter::ENTRY_UNIT);
 
 				GS_THROW_USER_ERROR(GS_ERROR_CT_PARAMETER_INVALID,
-						"Too small to convert unit" << formatter);
+						"Too small to convert unit " << formatter);
 			}
 			dest *= step;
 		}
@@ -2370,53 +2548,225 @@ int64_t ConfigTable::Constraint::convertUnit(int64_t src, ValueUnit destUnit,
 	return dest;
 }
 
+void ConfigTable::Constraint::checkExclusiveIdSet(
+		const Formatter &formatter, const IdSet &exclusiveIds) const {
+	if (exclusiveIdSet_.empty()) {
+		return;
+	}
+
+	bool foundOther = false;
+	for (IdSet::const_iterator it = exclusiveIds.begin();
+			it != exclusiveIds.end(); ++it) {
+		const Constraint &constraint = *static_cast<const Constraint*>(
+				paramTable_.getAnnotatedValue(*it, false, true).second);
+
+		if (!constraint.alterable_ && !constraint.inheritable_ &&
+				!constraint.defaultSpecified_) {
+			Formatter subFormatter(*this);
+			subFormatter.addAll(formatter);
+
+			if (*it != id_) {
+				subFormatter.add("illegalConstraint", *it, Formatter::ENTRY_PATH);
+			}
+
+			GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR,
+					"Exclusive parameter must have default or "
+					"dependent value " << subFormatter);
+		}
+
+		foundOther |= (*it != id_);
+	}
+
+	if (!foundOther) {
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR,
+				"Internal error by no other exclusive parameter " <<
+				formatter);
+	}
+}
+
+void ConfigTable::Constraint::checkExclusiveValue(
+		const Formatter &formatter, const IdSet &exclusiveIds,
+		const IdSet *specifiedIds) const {
+	if (exclusiveIdSet_.empty() || specifiedIds == NULL) {
+		return;
+	}
+
+	Formatter subFormatter(*this);
+	subFormatter.addAll(formatter);
+
+	IdSet foundIds(IdSet::key_compare(), alloc_);
+	if (specifiedIds->find(id_) != specifiedIds->end()) {
+		subFormatter.add("specified", id_, Formatter::ENTRY_PATH);
+		foundIds.insert(id_);
+	}
+
+	size_t minCount = 0;
+	for (IdSet::const_iterator it = exclusiveIds.begin();
+			it != exclusiveIds.end(); ++it) {
+		if (*it == id_) {
+			minCount = 1;
+		}
+		else if (specifiedIds->find(*it) != specifiedIds->end()) {
+			const ParamId foundId = getExclusiveParam(*it);
+			subFormatter.add("specified", foundId, Formatter::ENTRY_PATH);
+			foundIds.insert(foundId);
+		}
+	}
+
+	if (foundIds.size() > 1) {
+		GS_THROW_USER_ERROR(GS_ERROR_CT_PARAMETER_INVALID,
+				"Either one of following parameters can be specified " <<
+				subFormatter);
+	}
+	else if (foundIds.size() < minCount) {
+		for (IdSet::const_iterator it = exclusiveIdSet_.begin();
+				it != exclusiveIdSet_.end(); ++it) {
+			subFormatter.add("candidate", *it, Formatter::ENTRY_PATH);
+		}
+
+		GS_THROW_USER_ERROR(GS_ERROR_CT_PARAMETER_INVALID,
+				"One of following parameters must be specified " <<
+				subFormatter);
+	}
+}
+
+ParamTable::IdSet ConfigTable::Constraint::listExclusiveParams(
+		const Formatter &formatter) const {
+	for (IdSet::const_iterator it = exclusiveIdSet_.begin();
+			it != exclusiveIdSet_.end(); ++it) {
+		try {
+			paramTable_.getAnnotatedValue(*it, false, false);
+		}
+		catch (std::exception &e) {
+			Formatter subFormatter(*this);
+			subFormatter.addAll(formatter);
+			subFormatter.add("unknownParameterId", *it);
+
+			GS_RETHROW_USER_ERROR(e,
+					"Internal error by unknown exclusive parameter " <<
+					subFormatter);
+		}
+	}
+
+	const IdSet &exclusiveIds =
+			paramTable_.listDescendantParams(exclusiveIdSet_);
+
+	for (IdSet::const_iterator it = exclusiveIds.begin();
+			it != exclusiveIds.end(); ++it) {
+		paramTable_.getAnnotatedValue(*it, false, true);
+	}
+
+	return exclusiveIds;
+}
+
+ParamTable::ParamId ConfigTable::Constraint::getExclusiveParam(
+		ParamId id) const {
+
+	for (ParamId targetId = id;;) {
+		if (exclusiveIdSet_.find(targetId) != exclusiveIdSet_.end()) {
+			return targetId;
+		}
+
+		if (targetId == PARAM_ID_ROOT) {
+			GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+		}
+
+		ParamId parentId;
+		paramTable_.getParentParam(targetId, parentId);
+
+		targetId = parentId;
+	}
+}
+
 ConfigTable::Constraint::Formatter::Formatter(const Constraint &constraint) :
-		constraint_(constraint), entryCount_(0) {
+		constraint_(constraint),
+		entryAlloc_(constraint.alloc_),
+		entryList_(constraint.alloc_) {
+}
+
+ConfigTable::Constraint::Formatter::~Formatter() {
+	for (EntryList::iterator it = entryList_.begin();	
+			it != entryList_.end(); ++it) {
+
+		try {
+			entryAlloc_.destroy(*it);
+		}
+		catch (...) {
+		}
+
+		try {
+			entryAlloc_.deallocate(*it, 1);
+		}
+		catch (...) {
+		}
+	}
 }
 
 void ConfigTable::Constraint::Formatter::add(
 		const char8_t *name, const ParamValue &value, EntryType entryType) {
 
-	if (entryCount_ >= sizeof(entryList_) / sizeof(*entryList_)) {
+	entryList_.reserve(entryList_.size() + 1);
+
+	Entry *entry = new (entryAlloc_.allocate(1)) Entry();
+	entryList_.push_back(entry);
+
+	entry->name_ = name;
+	entry->value_.assign(value, constraint_.alloc_);
+	entry->entryType_ = entryType;
+}
+
+void ConfigTable::Constraint::Formatter::addAll(const Formatter &formatter) {
+	if (this == &formatter) {
 		assert(false);
 		return;
 	}
 
-	Entry &entry = entryList_[entryCount_];
+	for (EntryList::const_iterator it = formatter.entryList_.begin();
+			it != formatter.entryList_.end(); ++it) {
 
-	entry.name_ = name;
-	entry.value_.assign(value, constraint_.alloc_);
-	entry.entryType_ = entryType;
-
-	entryCount_++;
-}
-
-void ConfigTable::Constraint::Formatter::addAll(const Formatter &formatter) {
-	assert(this != &formatter);
-	const size_t count = formatter.entryCount_;
-	for (size_t i = 0; i < count; i++) {
-		const Entry &entry = formatter.entryList_[i];
+		const Entry &entry = **it;
 		add(entry.name_, entry.value_, entry.entryType_);
 	}
 }
 
 void ConfigTable::Constraint::Formatter::format(std::ostream &stream) const {
 	stream << "(";
-	for (size_t i = 0; i < entryCount_; i++) {
-		if (i > 0) {
+	bool lastSame = false;
+	for (EntryList::const_iterator it = entryList_.begin();
+			it != entryList_.end(); ++it) {
+		const Entry &cur = **it;
+		const Entry *next = (it + 1 == entryList_.end() ? NULL : *(it + 1));
+
+		const bool nextSame =
+				next != NULL && cur.name_ != NULL && next->name_ != NULL &&
+				strcmp(cur.name_, next->name_) == 0;
+
+		if (it != entryList_.begin()) {
 			stream << ", ";
 		}
-		format(stream, entryList_[i]);
+
+		if (!lastSame) {
+			if (cur.name_ != NULL) {
+				stream << cur.name_ << "=";
+			}
+			if (nextSame) {
+				stream << "[";
+			}
+		}
+
+		format(stream, cur);
+
+		if (lastSame && !nextSame) {
+			stream << "]";
+		}
+
+		lastSame = nextSame;
 	}
 	stream << ")";
 }
 
 void ConfigTable::Constraint::Formatter::format(
 		std::ostream &stream, const Entry &entry) const try {
-	if (entry.name_ != NULL) {
-		stream << entry.name_ << "=";
-	}
-
 	switch (entry.entryType_) {
 	case ENTRY_NORMAL:
 		stream << entry.value_;
@@ -2431,8 +2781,11 @@ void ConfigTable::Constraint::Formatter::format(
 			constraint_.asDisplayValue(
 					value, entry.value_, constraint_.alloc_,
 					EXPORT_MODE_DEFAULT);
-			stream << value;
+			formatValue(stream, value);
 		}
+		break;
+	case ENTRY_SPECIFIED:
+		formatValue(stream, entry.value_);
 		break;
 	case ENTRY_TYPE:
 		switch (entry.value_.get<int32_t>()) {
@@ -2522,10 +2875,10 @@ void ConfigTable::Constraint::Formatter::format(
 					constraint_.asDisplayValue(
 							value, *it->value_, constraint_.alloc_,
 							EXPORT_MODE_DEFAULT);
-					stream << value;
+					formatValue(stream, value);
 				}
 				else {
-					stream << it->name_.c_str();
+					formatValue(stream, it->name_.c_str());
 				}
 			}
 		}
@@ -2566,6 +2919,19 @@ catch (...) {
 	stream.setstate(std::ios::badbit);
 	if ((stream.exceptions() & std::ios::badbit) != 0) {
 		throw;
+	}
+}
+
+void ConfigTable::Constraint::Formatter::formatValue(
+		std::ostream &stream, const ParamValue &value) {
+	if (value.is<const char8_t*>()) {
+		stream << "\"";
+	}
+
+	stream << value;
+
+	if (value.is<const char8_t*>()) {
+		stream << "\"";
 	}
 }
 

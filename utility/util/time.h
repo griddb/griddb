@@ -28,14 +28,8 @@ namespace util {
 /*!
 	@brief Manages date and time
 */
-
-
-
 class DateTime {
 public:
-
-
-
 
 	enum FieldType {
 		FIELD_YEAR,
@@ -55,22 +49,7 @@ public:
 
 	DateTime(const char8_t *str, bool trimMilliseconds);
 
-
-
-
-
 	DateTime(int64_t unixTimeMillis);
-
-
-
-
-
-
-
-
-
-
-
 
 	DateTime(
 			int32_t year,
@@ -108,49 +87,17 @@ public:
 			int32_t milliSecond,
 			bool asLocalTimeZone);
 
-
-
-
-
-
-
-
-
-
 	void addField(int64_t amount, FieldType fieldType);
-
-
-
-
-
-
 
 	int64_t getDifference(const DateTime &base, FieldType fieldType) const;
 
-
-
-
-
-
-
-
 	void format(std::ostream &s,
 		bool trimMilliseconds, bool asLocalTimeZone = true) const;
-
-
-
-
-
-
 
 	static bool parse(
 		const char8_t *str, DateTime &dateTime, bool trimMilliseconds);
 
 	static DateTime now(bool trimMilliseconds);
-
-
-
-
 
 	static DateTime max(bool trimMilliseconds);
 
@@ -170,9 +117,6 @@ private:
 /*!
 	@brief Measures time in high precision
 */
-
-
-
 class Stopwatch {
 public:
 	enum Status {
@@ -209,9 +153,6 @@ private:
 	uint64_t startClock_;
 	uint64_t elapsedClock_;
 };
-
-
-
 
 
 inline DateTime::DateTime() : unixTimeMillis_(INITIAL_UNIX_TIME) {
@@ -271,28 +212,6 @@ inline std::ostream& operator<<(
 #if UTIL_FAILURE_SIMULATION_ENABLED
 class DateTimeFailureSimulator {
 public:
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 	static void set(int32_t mode, uint64_t startCount, uint64_t endCount,
 			int32_t speedRate, int64_t startOffset, int64_t endDuration);

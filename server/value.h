@@ -703,8 +703,9 @@ public:
 			addr += sizeof(uint32_t);
 			const OId *oId = reinterpret_cast<const OId *>(addr);
 			if (*oId != UNDEF_OID) {
-				const ArrayObject arrayObject(txn, objectManager, *oId);
-				return arrayObject.getArrayLength();
+				VariableArrayCursor arrayCursor(
+					txn, objectManager, *oId, OBJECT_READ_ONLY);
+				return arrayCursor.getArrayLength();
 			}
 			else {
 				return 0;

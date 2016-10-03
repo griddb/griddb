@@ -502,6 +502,20 @@ void CheckpointService::changeParam(
 	}
 }
 
+/*!
+	@brief Gets transactionEE queue size
+*/
+int32_t CheckpointService::getTransactionEEQueueSize(PartitionGroupId pgId) {
+	EventEngine::Stats stats;
+	if (txnEE_->getStats(pgId, stats)) {
+		return static_cast<int32_t>(
+			stats.get(EventEngine::Stats::EVENT_ACTIVE_QUEUE_SIZE_CURRENT));
+	}
+	else {
+		return 0;
+	}
+}
+
 
 void CheckpointService::runCheckpoint(
 	EventContext &ec, int32_t mode, uint32_t flag) {
@@ -1283,14 +1297,14 @@ void CheckpointService::ConfigSetUpHandler::operator()(ConfigTable &config) {
 
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_CP_CHECKPOINT_INTERVAL, INT32)
 		.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
-		.setMin(0)
+		.setMin(1)
 		.setDefault(1200);
 	CONFIG_TABLE_ADD_PARAM(
 		config, CONFIG_TABLE_CP_CHECKPOINT_MEMORY_LIMIT, INT32)
 		.setUnit(ConfigTable::VALUE_UNIT_SIZE_MB)
 		.setMin(1)
-		.setDefault(1024)
-		.setMax("128TB");
+		.setMax("128TB")
+		.setDefault(1024);
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_CP_USE_PARALLEL_MODE, BOOL)
 		.setExtendedType(ConfigTable::EXTENDED_TYPE_LAX_BOOL)
 		.setDefault(false);
@@ -1329,6 +1343,8 @@ void CheckpointService::StatSetUpHandler::operator()(StatTable &stat) {
 	parentId = STAT_TABLE_PERF;
 	STAT_ADD(STAT_TABLE_PERF_CHECKPOINT_FILE_SIZE);
 	STAT_ADD(STAT_TABLE_PERF_CHECKPOINT_FILE_USAGE_RATE);
+	STAT_ADD(STAT_TABLE_PERF_STORE_COMPRESSION_MODE);
+	STAT_ADD(STAT_TABLE_PERF_CHECKPOINT_FILE_ALLOCATE_SIZE);
 	STAT_ADD(STAT_TABLE_PERF_CURRENT_CHECKPOINT_WRITE_BUFFER_SIZE);
 	STAT_ADD(STAT_TABLE_PERF_CHECKPOINT_WRITE_SIZE);
 	STAT_ADD(STAT_TABLE_PERF_CHECKPOINT_WRITE_TIME);
@@ -1372,6 +1388,10 @@ bool CheckpointService::StatUpdator::operator()(StatTable &stat) {
 	stat.set(STAT_TABLE_PERF_CHECKPOINT_FILE_USAGE_RATE,
 		cmStats.getCheckpointFileUsageRate());
 
+	stat.set(STAT_TABLE_PERF_STORE_COMPRESSION_MODE,
+		cmStats.getActualCompressionMode());
+	stat.set(STAT_TABLE_PERF_CHECKPOINT_FILE_ALLOCATE_SIZE,
+		cmStats.getCheckpointFileAllocateSize());
 
 	stat.set(STAT_TABLE_PERF_CURRENT_CHECKPOINT_WRITE_BUFFER_SIZE,
 		cmStats.getCheckpointWriteBufferSize());

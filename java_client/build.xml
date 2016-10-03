@@ -5,6 +5,7 @@
 	<property name="baseName" value="java_client" />
 	<property name="binDir" value="obj" />
 	<property name="srcDir" value="src" />
+	<property name="contribSrcDir" value="src_contrib" />
 	<property name="stubSrcDir" value="src_stub" />
 	<property name="confSrcDir" value="src_conf" />
 	<property name="jarDir" value="../bin" />
@@ -58,7 +59,11 @@
 		<javac srcdir="${srcDir}" destdir="${binDir}"
 			encoding="${srcEncoding}" debug="${includeDebugInfo}"
 			includeantruntime="no" source="1.6" target="1.6"
-			classpathref="buildClasspath" />
+      classpathref="buildClasspath">
+        <src path="${srcDir}"/>
+        <src path="${contribSrcDir}"/>
+    </javac>
+
 	</target>
 
 	<target name="stubCompile" depends="compile">

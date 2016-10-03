@@ -44,11 +44,6 @@
     OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-
-
-
-
-
 #ifndef FD_SETSIZE
 #define FD_SETSIZE 64
 #endif
@@ -71,7 +66,6 @@
 #include <sys/select.h>
 #endif
 
-
 #ifndef UTIL_IOPOLL_CHECKER
 #define UTIL_IOPOLL_CHECKER 0
 #endif
@@ -79,31 +73,20 @@
 namespace util {
 
 
-
-
-
 #ifdef _WIN32
 const int IOPollEvent::TYPE_READ = 1 << 0;
 const int IOPollEvent::TYPE_WRITE = 1 << 1;
 const int IOPollEvent::TYPE_ERROR = 1 << 2;
-
 #else
 const int IOPollEvent::TYPE_READ = POLLIN;
 const int IOPollEvent::TYPE_WRITE = POLLOUT;
 const int IOPollEvent::TYPE_ERROR = POLLERR;
-
 #endif
 const int IOPollEvent::TYPE_READ_WRITE = (TYPE_READ | TYPE_WRITE);
 
 
-
-
-
 IOPollHandler::~IOPollHandler() {
 }
-
-
-
 
 
 struct IOPollBase::InterruptionData : public IOPollHandler {
@@ -128,8 +111,6 @@ IOPollBase::InterruptionData::InterruptionData() {
 	listenerSocket.open(
 			util::SocketAddress::FAMILY_INET, util::Socket::TYPE_STREAM);
 	listenerSocket.setReuseAddress(false);
-	
-	
 	listenerSocket.bind(util::SocketAddress::INET_LOOPBACK);
 	listenerSocket.listen(1);
 
@@ -184,9 +165,6 @@ void IOPollBase::InterruptionData::interrupt() {
 }
 
 
-
-
-
 const uint32_t IOPollBase::WAIT_INFINITY = static_cast<uint32_t>(-1);
 
 IOPollBase::~IOPollBase() {
@@ -211,9 +189,6 @@ void IOPollBase::interrupt() {
 }
 
 
-
-
-
 #ifdef _WIN32
 int32_t SocketLibrary::counter_ = 0;
 #endif
@@ -224,22 +199,16 @@ SocketLibrary::SocketLibrary() {
 		return;
 	}
 
-	
 	WSADATA wsaData;
 	if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-		
 		return;
 	}
 
 	do {
-		
 		if (LOBYTE(wsaData.wVersion) != 2 || HIBYTE(wsaData.wVersion) != 2) {
 			return;
 		}
 
-		
-		
-		
 		const wchar_t *const envName = L"SystemRoot";
 		if (GetEnvironmentVariableW(envName, NULL, 0) == 0) {
 			UINT length = GetWindowsDirectoryW(NULL, 0);
@@ -285,9 +254,6 @@ void SocketLibrary::checkAvailability() {
 }
 
 
-
-
-
 const int Socket::TYPE_DATAGRAM = SOCK_DGRAM;
 const int Socket::TYPE_STREAM = SOCK_STREAM;
 
@@ -310,8 +276,6 @@ Socket::Socket(const char *user) : family_(0), user_(user) {
 }
 
 Socket::~Socket() try {
-	
-	
 	close();
 }
 catch (...) {
@@ -461,7 +425,6 @@ bool Socket::connect(const SocketAddress &addr) {
 		switch (WSAGetLastError()) {
 		case WSAEALREADY:
 		case WSAEINPROGRESS:
-		
 		case WSAEWOULDBLOCK:
 			return false;
 		}
@@ -933,9 +896,6 @@ bool Socket::isTimeoutError(int32_t errorCode) {
 #endif
 }
 
-
-
-
 #if UTIL_FAILURE_SIMULATION_ENABLED
 volatile bool SocketFailureSimulator::enabled_ = false;
 volatile SocketFailureSimulator::FilterHandler
@@ -989,9 +949,6 @@ void SocketFailureSimulator::checkOperation(
 }
 
 #endif	
-
-
-
 
 
 const int SocketAddress::FAMILY_INET = AF_INET;
@@ -1333,6 +1290,47 @@ void SocketAddress::getIP(Inet6 *in6Addr, uint16_t *port) const {
 	}
 }
 
+int32_t SocketAddress::compare(const SocketAddress &another) const {
+	const int family = getFamily();
+
+	if (family != another.getFamily()) {
+		return family - another.getFamily();
+	}
+
+	int32_t addrComp;
+
+	uint16_t port;
+	uint16_t anotherPort;
+
+	if (family == util::SocketAddress::FAMILY_INET) {
+		util::SocketAddress::Inet addr;
+		util::SocketAddress::Inet anotherAddr;
+		getIP(&addr, &port);
+		another.getIP(&anotherAddr, &anotherPort);
+
+		addrComp = memcmp(&addr, &anotherAddr, sizeof(addr));
+	}
+	else if (family == util::SocketAddress::FAMILY_INET6) {
+		util::SocketAddress::Inet6 addr;
+		util::SocketAddress::Inet6 anotherAddr;
+		getIP(&addr, &port);
+		another.getIP(&anotherAddr, &anotherPort);
+
+		addrComp = memcmp(&addr, &anotherAddr, sizeof(addr));
+	}
+	else {
+		port = 0;
+		anotherPort = 0;
+		addrComp = 0;
+	}
+
+	if (addrComp != 0) {
+		return addrComp;
+	}
+
+	return static_cast<int32_t>(port) - static_cast<int32_t>(anotherPort);
+}
+
 addrinfo* SocketAddress::getAddressInfo(
 		const char8_t *host, const char8_t *service,
 		int family, int sockType) {
@@ -1398,7 +1396,7 @@ std::ostream& operator<<(std::ostream &s, const SocketAddress &addr) {
 		SocketAddress::Inet6 in6Addr;
 		uint16_t port;
 		addr.getIP(&in6Addr, &port);
-		return s << in6Addr << ":" << port;
+		return s << "[" << in6Addr << "]:" << port;
 	default:
 		s << "(empty address)";
 		return s;
@@ -1425,7 +1423,6 @@ std::ostream& operator<<(std::ostream &s, const SocketAddress::Inet6 &addr) {
 		u8string host;
 		sockAddr.getName(&host);
 
-		
 		s << host;
 	}
 	catch (...) {
@@ -1437,9 +1434,6 @@ std::ostream& operator<<(std::ostream &s, const SocketAddress::Inet6 &addr) {
 
 	return s;
 }
-
-
-
 
 
 struct IOPollSelect::Data {
@@ -1581,7 +1575,6 @@ bool IOPollSelect::dispatch(uint32_t msec) {
 		UTIL_THROW_PLATFORM_ERROR(NULL);
 	}
 	else if (0 == res) {
-		
 		return false;
 	}
 
@@ -1624,9 +1617,6 @@ const char* IOPollSelect::getType(void) const {
 }
 
 #ifdef UTIL_HAVE_EPOLL_CTL
-
-
-
 
 
 const int UTIL_EPOLL_SIZE = 10240;
@@ -1716,9 +1706,6 @@ const char* IOPollEPoll::getType(void) const {
 #ifdef UTIL_HAVE_POLL
 
 
-
-
-
 namespace {
 const int UTIL_POLL_INIT_SIZE = 10240;
 }
@@ -1739,7 +1726,6 @@ void IOPollPollCont::increase(void) {
 		if (0 == nextsize) {
 			nextsize = cur_ + UTIL_POLL_INIT_SIZE;
 			if (nextsize < cur_) {
-				
 				UTIL_THROW_UTIL_ERROR_CODED(CODE_INVALID_STATUS);
 			}
 		}
@@ -1766,7 +1752,6 @@ void IOPollPollCont::clear(void) {
 const IOPollHandler* IOPollPollCont::getFile(int fd) const {
 	IndexCItr ib = index_.find(fd);
 	if (index_.end() == ib) {
-		
 		UTIL_THROW_UTIL_ERROR_CODED(CODE_ILLEGAL_ARGUMENT);
 	}
 
@@ -1776,7 +1761,6 @@ const IOPollHandler* IOPollPollCont::getFile(int fd) const {
 IOPollHandler* IOPollPollCont::getFile(int fd) {
 	IndexItr ib = index_.find(fd);
 	if (index_.end() == ib) {
-		
 		UTIL_THROW_UTIL_ERROR_CODED(CODE_ILLEGAL_ARGUMENT);
 	}
 
@@ -1785,7 +1769,6 @@ IOPollHandler* IOPollPollCont::getFile(int fd) {
 
 void IOPollPollCont::add(int fd, IOPollHandler *file, IOPollEvent events) {
 	if (index_.find(fd) != index_.end()) {
-		
 		UTIL_THROW_UTIL_ERROR_CODED(CODE_ILLEGAL_ARGUMENT);
 	}
 
@@ -1803,13 +1786,11 @@ void IOPollPollCont::add(int fd, IOPollHandler *file, IOPollEvent events) {
 
 void IOPollPollCont::remove(int fd) {
 	if (0 == cur_) {
-		
 		UTIL_THROW_UTIL_ERROR_CODED(CODE_ILLEGAL_ARGUMENT);
 	}
 
 	IndexItr ib = index_.find(fd);
 	if (index_.end() == ib) {
-		
 		UTIL_THROW_UTIL_ERROR_CODED(CODE_ILLEGAL_ARGUMENT);
 	}
 
@@ -1836,7 +1817,6 @@ void IOPollPollCont::remove(int fd) {
 void IOPollPollCont::modify(int fd, IOPollEvent events) {
 	IndexItr ib = index_.find(fd);
 	if (index_.end() == ib) {
-		
 		UTIL_THROW_UTIL_ERROR_CODED(CODE_ILLEGAL_ARGUMENT);
 	}
 
@@ -1924,7 +1904,6 @@ void Pipe::create(Pipe *&writeTerm, Pipe *&readTerm) {
 #ifdef _WIN32
 	UTIL_THROW_NOIMPL_UTIL();
 #else
-	
 	int fd[2];
 
 	pipe(fd);

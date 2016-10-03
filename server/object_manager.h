@@ -22,8 +22,8 @@
 #define OBJECT_MANAGER_H_
 
 #include "util/type.h"
-#include "util/trace.h"
 #include "util/container.h"
+#include "util/trace.h"
 #include "util/trace.h"
 #include "gs_error.h"
 #include "data_type.h"
@@ -33,6 +33,11 @@
 
 
 UTIL_TRACER_DECLARE(OBJECT_MANAGER);
+
+template<AccessMode> struct ObjectAccessType {};
+typedef ObjectAccessType<OBJECT_READ_ONLY> ObjectReadType;
+typedef ObjectAccessType<OBJECT_FOR_UPDATE> ObjectWriteType;
+
 
 
 #define ASSERT_ISVALID_CATEGORYID(categoryId)      \
@@ -213,13 +218,10 @@ public:
 		Offset_t offset = getOffset(oId);
 
 		try {
-			Size_t size;
-
 			MetaChunk* metaChunk = chunkManager_->getChunkForUpdate(
 				pId, categoryId, cId, UNDEF_CHUNK_KEY, true);
 			uint8_t* objectAddr = metaChunk->getPtr() + offset;
 			validateObject(objectAddr, pId, oId, categoryId, cId, offset);
-			size = objectAllocator_->getObjectSize(objectAddr);
 			return reinterpret_cast<T*>(objectAddr);
 		}
 		catch (std::exception& e) {
@@ -257,6 +259,37 @@ public:
 		}
 	}
 
+	template<typename T, AccessMode mode>
+	UTIL_FORCEINLINE T* load(
+		PartitionId pId, OId oId, OId* lastOId, uint8_t* lastAddr) {
+		assert(oId != UNDEF_OID);
+		const OId offsetMask =
+			(((static_cast<OId>(1) << CATEGORY_ID_SHIFT_BIT) - 1) ^
+				~((static_cast<OId>(1) << UNIT_OFFSET_SHIFT_BIT) - 1));
+
+		T* result;
+		if ((oId & offsetMask) != (*lastOId & offsetMask)) {
+			typedef ObjectAccessType<mode> AccessModeType;
+			result = static_cast<T*>(reload(pId, oId, lastOId, AccessModeType()));
+		}
+		else {
+			assert(*lastOId != UNDEF_OID);
+			assert(objectAllocator_->isValidObject(lastAddr));
+
+			result =
+				reinterpret_cast<T*>(lastAddr - getRelativeOffset(*lastOId) +
+									 getRelativeOffset(oId));
+
+			assert(objectAllocator_->isValidObject(result));
+		}
+
+		*lastOId = oId;
+		return result;
+	}
+
+	void* reload(PartitionId pId, OId oId, OId *lastOId, const ObjectReadType&); 
+	void* reload(PartitionId pId, OId oId, OId *lastOId, const ObjectWriteType&); 
+
 	/*!
 		@brief Raises dirty flag of the Object.
 	*/
@@ -268,8 +301,7 @@ public:
 		ChunkId cId = getChunkId(oId);
 
 		try {
-			MetaChunk* metaChunk = NULL;
-			metaChunk = chunkManager_->getChunkForUpdate(
+			chunkManager_->getChunkForUpdate(
 				pId, categoryId, cId, UNDEF_CHUNK_KEY, false);
 		}
 		catch (std::exception& e) {
@@ -443,6 +475,16 @@ public:
 				<< UNIT_OFFSET_ROUND_BIT) +
 			ObjectAllocator::BLOCK_HEADER_SIZE;
 		ASSERT_ISVALID_OFFSET(offset);
+		return offset;
+	}
+
+	inline static Offset_t getRelativeOffset(OId oId) {
+		const OId mask = static_cast<OId>(MASK_16BIT) << UNIT_OFFSET_SHIFT_BIT;
+		const uint32_t shiftBits =
+			UNIT_OFFSET_SHIFT_BIT - UNIT_OFFSET_ROUND_BIT;
+		const Offset_t offset =
+			static_cast<Offset_t>((mask & oId) >> shiftBits);
+		ASSERT_ISVALID_OFFSET(offset + ObjectAllocator::BLOCK_HEADER_SIZE);
 		return offset;
 	}
 

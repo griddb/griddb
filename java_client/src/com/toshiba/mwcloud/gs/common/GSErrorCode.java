@@ -97,7 +97,7 @@ public class GSErrorCode {
 
 	public static final int TRANSACTION_CLOSED = 145036;
 
-	public static final int NO_SHCH_ELEMENT = 145037;
+	public static final int NO_SUCH_ELEMENT = 145037;
 
 	public static final int CONTAINER_CLOSED = 145038;
 
@@ -115,6 +115,24 @@ public class GSErrorCode {
 	public static final int ILLEGAL_CONFIG = 145044;
 
 	public static final int DATABASE_NOT_EMPTY = 145045;
+
+	public static final int JSON_INVALID_SYNTAX = 121500;
+
+	public static final int JSON_KEY_NOT_FOUND = 121501;
+
+	public static final int JSON_VALUE_OUT_OF_RANGE = 121502;
+
+	public static final int JSON_UNEXPECTED_TYPE = 121503;
+
+	public static final int HTTP_UNEXPECTED_MESSAGE = 122503;
+
+	public static final int SA_INVALID_CONFIG = 123502;
+
+	public static final int SA_ADDRESS_CONFLICTED = 123503;
+
+	public static final int SA_ADDRESS_NOT_ASSIGNED = 123504;
+
+	public static final int SA_INVALID_ADDRESS = 123505;
 
 	private static final Map<Integer, String> NAME_MAP = makeNameMap();
 

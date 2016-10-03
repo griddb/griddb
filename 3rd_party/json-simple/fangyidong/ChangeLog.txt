@@ -1,0 +1,28 @@
+ChangeLog
+
+Version 1.1.1 (2012/01/29)
+* Supports OSGi
+* Accepts a java.util.Map parameter in constructor of JSONObject
+
+Version 1.1  (2009/01/23)
+* Supports stoppable SAX-like content handler for streaming of JSON text
+* Added JSONStreamAware to support streaming JSON text
+* Added ContainerFactory to support creating arbitrary Map and List as JSON object and JSON array container during decoding
+* Supports any Map and List as JSON object and JSON array container during encoding
+* Added interface JSONAware
+* Added ParseException to get detail error report while parsing 
+* Added escaping for Unicode characters that cause problems for browser JS eval
+ 
+Version 1.02 (2009/01/10)
+* Updated json.lex to improve performance of the lexer
+* Removed Rope.java and related junit test
+
+Version 1.01 (2008/08/26)
+* License changed to a more commerce friendly and clear one, Apache License 2.0
+* Use JFlex to generate a faster Yylex.java
+* Added Rope.java to get faster string operations
+* Separate test codes from source codes
+* Added ant build file build.xml
+
+Version 1.0 (2006/04/15)
+* Initial version

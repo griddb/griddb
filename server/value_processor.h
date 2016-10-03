@@ -636,8 +636,7 @@ public:
 public:  
 public:  
 	VariableArrayCursor(TransactionContext &txn, ObjectManager &objectManager,
-		OId oId, bool forUpdate);
-
+		OId oId, AccessMode accessMode);
 	VariableArrayCursor(uint8_t *addr);
 
 	void finalize();
@@ -681,6 +680,10 @@ public:
 
 	void getField(const ColumnInfo &columnInfo, BaseObject &baseObject);
 
+	static uint32_t divisionThreshold(uint32_t size) {
+		return size + (size >> 1);
+	}
+
 private:  
 	struct VariableColumnInfo {
 		OId oId_;  
@@ -696,7 +699,7 @@ private:
 	uint32_t currentSize_;
 	uint32_t
 		elemCursor_;  
-	bool forUpdate_;  
+	AccessMode accessMode_;
 private:			  
 	uint8_t *data() {
 		return curObject_.getBaseAddr();
@@ -751,7 +754,7 @@ public:
 	}
 
 private:  
-	static const uint8_t ZERO_LENGTH_STR_BINARY_ = '\0';
+	static const uint8_t ZERO_LENGTH_STR_BINARY_ = 0x01;
 
 private:  
 	uint32_t length_;

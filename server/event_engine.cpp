@@ -1713,6 +1713,9 @@ EventMonotonicTime EventEngine::ClockGenerator::getMonotonicTime() {
 	return monotonicTime_;
 }
 
+EventMonotonicTime EventEngine::getMonotonicTime() {
+	return clockGenerator_->getMonotonicTime();
+}
 void EventEngine::ClockGenerator::generateCorrectedTime() {
 	const int32_t maxTrial = ee_.config_->clockCorrectionMaxTrial_;
 	const uint32_t interval = ee_.config_->clockIntervalMillis_;
@@ -2696,28 +2699,27 @@ void EventEngine::EventWorker::addPending(
 		return;
 	}
 
-	Event *queueingEv = ALLOC_VAR_SIZE_NEW(*sharedVarAllocator_)
-			Event(*sharedVarAllocator_, ev);
-	try {
-		switch (resumeCondition) {
-		case RESUME_ALWAYS:
-			pendingQueue_->push_back(queueingEv);
-			break;
-		case RESUME_AT_PARTITION_CHANGE:
-			conditionalQueue_->push_back(queueingEv);
-			break;
-		}
+	EventQueue *queue;
+	switch (resumeCondition) {
+	case RESUME_ALWAYS:
+		queue = pendingQueue_.get();
+		break;
+	case RESUME_AT_PARTITION_CHANGE:
+		queue = conditionalQueue_.get();
+		break;
+	default:
+		GS_THROW_USER_ERROR(GS_ERROR_EE_PARAMETER_INVALID,
+				"Unknown resume condition");
 	}
-	catch (...) {
-		ALLOC_VAR_SIZE_DELETE(*sharedVarAllocator_, queueingEv);
-		throw;
-	}
+	addEvent(*sharedVarAllocator_, *queue, ev);
 
 	condition_.signal();
 
 	stats_.increment(Stats::EVENT_PENDING_QUEUE_SIZE_CURRENT);
 	stats_.set(Stats::EVENT_PENDING_QUEUE_SIZE_MAX,
 			stats_.get(Stats::EVENT_PENDING_QUEUE_SIZE_CURRENT));
+
+	stats_.increment(Stats::EVENT_PENDING_ADD_COUNT);
 }
 
 
@@ -2781,13 +2783,15 @@ bool EventEngine::EventWorker::popActiveEvents(
 
 		updateBufferSize<false>(*entry.ev_);
 		ALLOC_VAR_SIZE_DELETE(*sharedVarAllocator_, entry.ev_);
+
+		const int32_t periodicInterval = entry.periodicInterval_;
 		activeQueue_->pop_front();
 
-		if (entry.periodicInterval_ > 0) {
+		if (periodicInterval > 0) {
 			addDirect(
-					now + entry.periodicInterval_,
+					now + periodicInterval,
 					*eventList.back(),
-					entry.periodicInterval_,
+					periodicInterval,
 					NULL);
 		}
 	}
@@ -2876,8 +2880,15 @@ inline void EventEngine::EventWorker::addDirect(
 	}
 
 	it = activeQueue_->insert(it, entry);
-	it->ev_ = ALLOC_VAR_SIZE_NEW(*sharedVarAllocator_)
-			Event(*sharedVarAllocator_, ev);
+	try {
+		it->ev_ = ALLOC_VAR_SIZE_NEW(*sharedVarAllocator_)
+				Event(*sharedVarAllocator_, ev);
+	}
+	catch (...) {
+		activeQueue_->erase(it);
+		throw;
+	}
+
 	it->ev_->incrementQueueingCount();
 
 	if (queuedTime != NULL) {
@@ -2914,6 +2925,20 @@ inline void EventEngine::EventWorker::updateBufferSize(const Event &ev) {
 		if (size - diff > bufferSizeSoftLimit_) {
 			ee_->limitter_->reportEventBufferDiff(-(size - diff));
 		}
+	}
+}
+
+template<typename EventContainer>
+inline void EventEngine::EventWorker::addEvent(
+		VariableSizeAllocator &allocator, EventContainer &eventContainer,
+		const Event &ev) {
+	Event *addingEv = ALLOC_VAR_SIZE_NEW(allocator) Event(allocator, ev);
+	try {
+		eventContainer.push_back(addingEv);
+	}
+	catch (...) {
+		ALLOC_VAR_SIZE_DELETE(allocator, addingEv);
+		throw;
 	}
 }
 
@@ -4334,6 +4359,7 @@ const char8_t *const EventEngine::Stats::STATS_TYPE_NAMES[] = {
 	"WORKER_WAIT_TIME_MAX",
 	"WORKER_WAIT_TIME_TOTAL",
 	"WORKER_HANDLED_EVENT_COUNT",
+	"WORKER_LOCAL_EVENT_COUNT",
 	"WORKER_UNKNOWN_EVENT_COUNT",
 	"WORKER_STOPPED_THREAD_COUNT",
 	"WORKER_HANDLING_THREAD_COUNT",

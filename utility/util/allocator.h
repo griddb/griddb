@@ -67,13 +67,9 @@
 #define UTIL_ALLOCATOR_SUBSTITUTE_STACK_ALLOCATOR 0
 #endif
 
-
-
 #ifndef UTIL_ALLOCATOR_REPORTER_ENABLED
 #define UTIL_ALLOCATOR_REPORTER_ENABLED 0
 #endif
-
-
 
 #ifndef UTIL_ALLOCATOR_REPORTER_ENABLED2
 #define UTIL_ALLOCATOR_REPORTER_ENABLED2 0
@@ -109,10 +105,6 @@ namespace util {
 /*!
 	@brief Substitutes mutex object for Allocators.
 */
-
-
-
-
 class NoopMutex {
 public:
 	inline NoopMutex() {}
@@ -141,9 +133,6 @@ public:
 /*!
 	@brief ErrorHandler of allocation errors for customization.
 */
-
-
-
 class AllocationErrorHandler {
 public:
 	virtual ~AllocationErrorHandler();
@@ -185,9 +174,6 @@ class AllocatorLimitter;
 /*!
 	@brief Manages information of allocator.
 */
-
-
-
 class AllocatorInfo {
 public:
 	AllocatorInfo(AllocatorGroupId groupId, const char8_t *nameLiteral,
@@ -199,18 +185,23 @@ public:
 	const char8_t* getName() const;
 	AllocatorManager& resolveManager() const;
 
-	void format(std::ostream &stream, bool partial = false) const;
+	size_t getUnitSize() const;
+	void setUnitSize(size_t size);
+
+	void format(
+			std::ostream &stream, bool partial = false, bool nameOnly = false,
+			bool withUnit = true) const;
+
+	static void formatUnitSize(std::ostream &stream, int64_t size, bool exact);
 
 private:
 	AllocatorGroupId groupId_;
 	const char8_t *nameLiteral_;
 	AllocatorManager *manager_;
+	size_t unitSize_;
 };
 
 std::ostream& operator<<(std::ostream &stream, const AllocatorInfo &info);
-
-
-
 
 struct AllocatorStats {
 	enum Type {
@@ -240,9 +231,6 @@ struct AllocatorStats {
 /*!
 	@brief Allocates fixed size memory.
 */
-
-
-
 template<typename Mutex = NoopMutex>
 class FixedSizeAllocator {
 public:
@@ -256,19 +244,16 @@ public:
 
 	~FixedSizeAllocator();
 
-	
 
 	void* allocate();
 	void deallocate(void *element);
 
-	
 
 	void setTotalElementLimit(size_t limit);
 	void setFreeElementLimit(size_t limit);
 
 	void setErrorHandler(AllocationErrorHandler *errorHandler);
 
-	
 
 	size_t getTotalElementLimit();
 	size_t getFreeElementLimit();
@@ -277,7 +262,6 @@ public:
 	size_t getTotalElementCount();
 	size_t getFreeElementCount();
 
-	
 
 	void getStats(AllocatorStats &stats);
 	void setLimit(AllocatorStats::Type type, size_t value);
@@ -322,9 +306,6 @@ private:
 	AllocatorLimitter *limitter_;
 };
 
-
-
-
 template<
 		size_t SmallSize = 128,
 		size_t MiddleSize = 1024 * 4,
@@ -338,9 +319,6 @@ struct VariableSizeAllocatorTraits {
 /*!
 	@brief Allocates variable size memory.
 */
-
-
-
 template<
 		typename Mutex = NoopMutex,
 		typename Traits = VariableSizeAllocatorTraits<> >
@@ -362,18 +340,15 @@ public:
 
 	~VariableSizeAllocator();
 
-	
 
 	void* allocate(size_t size);
 	void deallocate(void *element);
 
 	template<typename T> void destroy(T *object);
 
-	
 
 	void setErrorHandler(AllocationErrorHandler *errorHandler);
 
-	
 
 	BaseAllocator* base(size_t index);
 
@@ -383,9 +358,8 @@ public:
 	size_t getHugeElementCount();
 	size_t getHugeElementSize();
 
-	size_t getElementCapacity(void *element);
+	size_t getElementCapacity(const void *element);
 
-	
 
 	void getStats(AllocatorStats &stats);
 	void setLimit(AllocatorStats::Type type, size_t value);
@@ -454,9 +428,6 @@ namespace util {
 /*!
 	@brief Allocates memory, which can be freed at once according to the scop.
 */
-
-
-
 class StackAllocator {
 #if UTIL_FAILURE_SIMULATION_ENABLED
 	friend class AllocationFailureSimulator;
@@ -474,25 +445,11 @@ public:
 
 	~StackAllocator();
 
-
-
-
-
 	void* allocate(size_t size);
-
-
-
-
-
 
 	void deallocate(void *ptr);
 
 	template<typename T> void destroy(T *object);
-
-
-
-
-
 
 	void setErrorHandler(AllocationErrorHandler *errorHandler);
 
@@ -500,12 +457,10 @@ public:
 
 	void trim();
 
-	
 
 	void setTotalSizeLimit(size_t limit);
 	void setFreeSizeLimit(size_t limit);
 
-	
 
 	size_t getTotalSizeLimit();
 	size_t getFreeSizeLimit();
@@ -516,7 +471,6 @@ public:
 	size_t getHugeCount();
 	size_t getHugeSize();
 
-	
 
 	void getStats(AllocatorStats &stats);
 	void setLimit(AllocatorStats::Type type, size_t value);
@@ -525,13 +479,6 @@ public:
 	BaseAllocator& base();
 
 	struct Tool {
-
-
-
-
-
-
-
 		static void forceReset(StackAllocator &alloc);
 	};
 
@@ -582,16 +529,7 @@ private:
 
 class StackAllocator::Scope {
 public:
-
-
-
 	Scope(StackAllocator &allocator);
-
-
-
-
-
-
 
 	~Scope();
 
@@ -641,9 +579,6 @@ namespace util {
 /*!
 	@brief Allocates for STL containers or strings. (std::allocator compatible)
 */
-
-
-
 template<typename T, typename BaseAllocator>
 class StdAllocator {
 public:
@@ -682,7 +617,8 @@ public:
 		return std::numeric_limits<size_t>::max() / sizeof(T);
 	}
 
-	inline pointer allocate(size_type size, const_pointer = NULL) {
+	inline pointer allocate(
+			size_type size, std::allocator<void>::const_pointer = NULL) {
 #if UTIL_ALLOCATOR_EMPTY_ALLOCATOR_CONSTRUCTOR_ALLOWED
 		assert(base_ != NULL);
 #endif
@@ -696,13 +632,27 @@ public:
 		base_->deallocate(ptr);
 	}
 
+#if UTIL_CXX11_SUPPORTED
+	template<typename U, typename ...Args>
+	inline void construct(U *ptr, Args &&...args) {
+		::new (static_cast<void*>(ptr)) U(std::forward<Args>(args)...);
+	}
+#else
 	inline void construct(pointer ptr, const T &value) {
 		new(static_cast<void*>(ptr)) T(value);
 	}
+#endif
 
+#if UTIL_CXX11_SUPPORTED
+	template<typename U>
+	inline void destroy(U *ptr) {
+		ptr->~U();
+	}
+#else
 	inline void destroy(pointer ptr) {
 		ptr->~T();
 	}
+#endif
 
 	inline pointer address(reference value) const {
 		return &value;
@@ -724,9 +674,6 @@ private:
 /*!
 	@brief StdAllocator specified in void type.
 */
-
-
-
 template<typename BaseAllocator>
 class StdAllocator<void, BaseAllocator> {
 public:
@@ -769,10 +716,6 @@ private:
 /*!
 	@brief StdAllocator specified in void type.
 */
-
-
-
-
 template<typename T>
 class StdAllocator<T, void> {
 public:
@@ -819,7 +762,8 @@ public:
 		return std::numeric_limits<size_t>::max() / sizeof(T);
 	}
 
-	inline pointer allocate(size_type size, const_pointer = NULL) {
+	inline pointer allocate(
+			size_type size, std::allocator<void>::const_pointer = NULL) {
 #if UTIL_ALLOCATOR_EMPTY_ALLOCATOR_CONSTRUCTOR_ALLOWED
 		assert(base_ != NULL);
 #endif
@@ -836,13 +780,27 @@ public:
 		}
 	}
 
+#if UTIL_CXX11_SUPPORTED
+	template<typename U, typename ...Args>
+	inline void construct(U *ptr, Args &&...args) {
+		::new (static_cast<void*>(ptr)) U(std::forward<Args>(args)...);
+	}
+#else
 	inline void construct(pointer ptr, const T &value) {
 		new(static_cast<void*>(ptr)) T(value);
 	}
+#endif
 
+#if UTIL_CXX11_SUPPORTED
+	template<typename U>
+	inline void destroy(U *ptr) {
+		ptr->~U();
+	}
+#else
 	inline void destroy(pointer ptr) {
 		ptr->~T();
 	}
+#endif
 
 	inline pointer address(reference value) const {
 		return &value;
@@ -861,21 +819,14 @@ public:
 
 	template<typename BaseAllocator>
 	inline static WrapperResult wrap(BaseAllocator *base) throw() {
-		return wrapSame(base, static_cast<size_t*>(NULL));
+		return wrapSame(base, base);
 	}
 
 private:
-	template<typename BaseAllocator, bool, typename>
-	struct Wrapper {
-		inline static void* execute(void *alloc, void *ptr, size_t size) {
-			UTIL_STATIC_ASSERT(sizeof(BaseAllocator) < 0);
-			return NULL;
-		}
-	};
 
 	template<typename BaseAllocator>
-	struct Wrapper<BaseAllocator, true, void> {
-		inline static void* execute(void *alloc, void *ptr, size_t size) {
+	struct CustomWrapper {
+		static void* execute(void *alloc, void *ptr, size_t size) {
 			if (ptr == NULL) {
 				return static_cast<BaseAllocator*>(alloc)->allocate(size);
 			}
@@ -887,8 +838,8 @@ private:
 	};
 
 	template<typename BaseAllocator, typename ValueType>
-	struct Wrapper<BaseAllocator, false, ValueType> {
-		inline static void* execute(void *alloc, void *ptr, size_t size) {
+	struct StdWrapper {
+		static void* execute(void *alloc, void *ptr, size_t size) {
 			UTIL_STATIC_ASSERT(sizeof(ValueType) == 1);
 			if (ptr == NULL) {
 				return static_cast<BaseAllocator*>(alloc)->allocate(size);
@@ -901,50 +852,45 @@ private:
 		}
 	};
 
-	template<typename BaseAllocator>
-	inline static WrapperResult wrapSame(BaseAllocator *base, void*) throw() {
-		return wrapOther<BaseAllocator>(base, static_cast<size_t*>(NULL));
-	}
+	struct Placeholder {};
 
-	template<typename BaseAllocator>
+	template<typename U, typename BaseAllocator>
 	inline static WrapperResult wrapSame(
-			BaseAllocator *base,
-			typename EnableIf<IsSame<
-					typename BaseAllocator::template rebind<char>::other,
-					typename rebind<char>::other>::VALUE, size_t>::Type*) throw() {
+			const StdAllocator<U, void> *base, BaseAllocator*) throw() {
 		assert(base != NULL);
 		return WrapperResult(base->base(), base->wrapper());
 	}
 
 	template<typename BaseAllocator>
 	inline static WrapperResult wrapSame(
-			const BaseAllocator *base, void*) throw() {
-		UTIL_STATIC_ASSERT(sizeof(BaseAllocator) < 0);
-		return WrapperResult();
-	}
-
-	template<typename BaseAllocator>
-	inline static WrapperResult wrapSame(
-			const BaseAllocator *base,
-			typename EnableIf<IsSame<
-					typename BaseAllocator::template rebind<char>::other,
-					typename rebind<char>::other>::VALUE, size_t>::Type*) throw() {
-		assert(base != NULL);
-		return WrapperResult(base->base(), base->wrapper());
+			const void*, BaseAllocator *base) throw() {
+		return wrapOther<BaseAllocator>(
+				ensureNonConstAllocator(base), static_cast<Placeholder*>(NULL));
 	}
 
 	template<typename BaseAllocator>
 	inline static WrapperResult wrapOther(BaseAllocator *base, void*) throw() {
-		return WrapperResult(base, &Wrapper<BaseAllocator, true, void>::execute);
+		return WrapperResult(base, &CustomWrapper<BaseAllocator>::execute);
 	}
 
 	template<typename BaseAllocator>
 	inline static WrapperResult wrapOther(
 			BaseAllocator *base,
-			typename BaseAllocator::template rebind<char>::other::size_type*)
-			throw() {
-		return WrapperResult(base, &Wrapper<BaseAllocator, false,
-				typename BaseAllocator::value_type>::execute);
+			typename BaseAllocator::
+					template rebind<Placeholder>::other::value_type*) throw() {
+		return WrapperResult(base, &StdWrapper<
+				BaseAllocator, typename BaseAllocator::value_type>::execute);
+	}
+
+	template<typename Alloc>
+	inline static Alloc* ensureNonConstAllocator(Alloc *alloc) {
+		return alloc;
+	}
+
+	template<typename Alloc>
+	inline static Alloc* ensureNonConstAllocator(const Alloc*) {
+		UTIL_STATIC_ASSERT(sizeof(Alloc) < 0);
+		return NULL;
 	}
 
 	void *base_;
@@ -954,9 +900,6 @@ private:
 /*!
 	@brief StdAllocator, enable to specify a base allocator to run.
 */
-
-
-
 template<>
 class StdAllocator<void, void> {
 private:
@@ -1027,9 +970,6 @@ inline bool operator!=(
 
 	return op1.base() != op2.base();
 }
-
-
-
 
 class AllocatorManager {
 public:
@@ -1186,9 +1126,6 @@ private:
 
 
 
-
-
-
 #define UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL1(func) \
 		template<typename A1> \
 		inline ThisType& func(A1 a1) { \
@@ -1284,17 +1221,6 @@ template<> struct IntDetector<uint64_t> { typedef IntTag Result; };
 /*!
 	@brief STL string template for using allocators with members.
 */
-
-
-
-
-
-
-
-
-
-
-
 template<
 		typename CharT,
 		typename Traits = std::char_traits<CharT>,
@@ -1488,14 +1414,6 @@ typedef BasicString<
 
 
 
-
-
-
-
-
-
-
-
 namespace detail {
 union AlignmentUnit {
 	void *member1;
@@ -1519,11 +1437,6 @@ struct AlignedSizeOf {
 }	
 
 
-
-
-
-
-
 #if !UTIL_ALLOCATOR_FORCE_ALLOCATOR_INFO
 template<typename Mutex>
 inline FixedSizeAllocator<Mutex>::FixedSizeAllocator(
@@ -1539,6 +1452,7 @@ inline FixedSizeAllocator<Mutex>::FixedSizeAllocator(
 		stats_(AllocatorInfo()),
 		limitter_(NULL) {
 	assert(elementSize > 0);
+	stats_.info_.setUnitSize(elementSize);
 	util::AllocatorManager::addAllocator(stats_.info_, *this);
 }
 #endif
@@ -1557,6 +1471,7 @@ inline FixedSizeAllocator<Mutex>::FixedSizeAllocator(
 		stats_(info),
 		limitter_(NULL) {
 	assert(elementSize > 0);
+	stats_.info_.setUnitSize(elementSize);
 	util::AllocatorManager::addAllocator(stats_.info_, *this);
 }
 
@@ -1600,9 +1515,6 @@ inline void* FixedSizeAllocator<Mutex>::allocate() {
 	LockGuard<Mutex> guard(mutex_);
 
 	if (freeLink_ == NULL) {
-		
-		
-		
 		reserve();
 	}
 
@@ -1825,7 +1737,7 @@ inline void FixedSizeAllocator<Mutex>::reserve() {
 
 		const int64_t lastTotalSize = AllocatorStats::asStatValue(
 				elementSize_ * totalElementCount_);
-		if (stats_.values_[AllocatorStats::STAT_TOTAL_SIZE] < lastTotalSize) {
+		if (stats_.values_[AllocatorStats::STAT_PEAK_TOTAL_SIZE] < lastTotalSize) {
 			stats_.values_[AllocatorStats::STAT_PEAK_TOTAL_SIZE] = lastTotalSize;
 		}
 		stats_.values_[AllocatorStats::STAT_TOTAL_SIZE] = lastTotalSize;
@@ -1867,11 +1779,6 @@ inline void FixedSizeAllocator<Mutex>::clear(size_t preservedCount) {
 }
 
 
-
-
-
-
-
 template<size_t SmallSize, size_t MiddleSize, size_t LargeSize>
 inline size_t VariableSizeAllocatorTraits<
 		SmallSize, MiddleSize, LargeSize>::getFixedSize(size_t index) {
@@ -1904,11 +1811,6 @@ inline size_t VariableSizeAllocatorTraits<
 		return 3;
 	}
 }
-
-
-
-
-
 
 
 #if !UTIL_ALLOCATOR_FORCE_ALLOCATOR_INFO
@@ -2144,15 +2046,15 @@ inline size_t VariableSizeAllocator<Mutex, Traits>::getHugeElementSize() {
 
 template<typename Mutex, typename Traits>
 inline size_t VariableSizeAllocator<Mutex, Traits>::getElementCapacity(
-		void *element) {
+		const void *element) {
 	if (element == NULL) {
 		return 0;
 	}
 
 	const size_t offset = detail::AlignedSizeOf<size_t>::VALUE;
-	void *ptr = static_cast<uint8_t*>(element) - offset;
+	const void *ptr = static_cast<const uint8_t*>(element) - offset;
 
-	const size_t totalSize = *static_cast<size_t*>(ptr);
+	const size_t totalSize = *static_cast<const size_t*>(ptr);
 	const size_t index = traits_.selectFixedAllocator(totalSize);
 
 	if (index < FIXED_ALLOCATOR_COUNT) {
@@ -2220,11 +2122,6 @@ inline void VariableSizeAllocator<Mutex, Traits>::clear() {
 
 	util::AllocatorManager::removeAllocator(stats_.info_, *this);
 }
-
-
-
-
-
 
 
 inline void* StackAllocator::allocate(size_t size) {
@@ -2321,11 +2218,6 @@ inline void StackAllocator::push(BlockHead *&lastBlock, size_t &lastRestSize) {
 }
 
 
-
-
-
-
-
 inline uint8_t* StackAllocator::BlockHead::body() {
 	return reinterpret_cast<uint8_t*>(this) +
 			detail::AlignedSizeOf<BlockHead>::VALUE;
@@ -2340,11 +2232,6 @@ inline size_t StackAllocator::BlockHead::bodySize() {
 }
 
 
-
-
-
-
-
 inline StackAllocator::Scope::Scope(StackAllocator &allocator) :
 		allocator_(allocator) {
 	allocator_.push(lastBlock_, lastRestSize_);
@@ -2353,11 +2240,6 @@ inline StackAllocator::Scope::Scope(StackAllocator &allocator) :
 inline StackAllocator::Scope::~Scope() {
 	allocator_.pop(lastBlock_, lastRestSize_);
 }
-
-
-
-
-
 
 
 template<typename Alloc>

@@ -339,8 +339,11 @@ int32_t HashMap::search(
 /*!
 	@brief Search Row Objects
 */
-int32_t HashMap::search(TransactionContext& txn, const void* constKey,
-	uint32_t size, ResultSize limit, util::XArray<OId>& idList) {
+int32_t HashMap::search(TransactionContext& txn, SearchContext& sc,
+	util::XArray<OId>& idList, OutputOrder outputOrder) {
+	ResultSize limit = sc.limit_;
+	const void* constKey = sc.key_;
+	uint32_t size = sc.keySize_;
 	if (limit == 0) {
 		return GS_SUCCESS;
 	}
@@ -790,8 +793,7 @@ std::string HashMap::dump(TransactionContext& txn, uint8_t mode) {
 							 ? 0
 							 : mapStat.useNum_ * 100 / mapStat.allocateNum_;
 		theoreticalStatus =
-			(mapStat.allocateNum_ + mapStat.activeBucket_) *
-			8;  
+			(mapStat.allocateNum_ + mapStat.activeBucket_) * 8;  
 		strstrm << ", " << totalRequest << ", " << currentStatus << ", "
 				<< mapStat.bucketNum_ << ", " << mapStat.activeBucket_ << ", "
 				<< mapStat.allocateNum_ << ", " << mapStat.useNum_ << ", "

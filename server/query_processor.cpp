@@ -97,7 +97,7 @@ void QueryProcessor::executeTQL(TransactionContext &txn,
 			queryObj.finishQuery(txn, resultSet, container);
 		} break;
 		default:
-			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_DS_CONTAINER_TYPE_INVALID, "");
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
 			break;
 		}
 	}

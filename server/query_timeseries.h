@@ -61,8 +61,7 @@ protected:
 
 	TimeSeries
 		*timeSeries_;  
-	Timestamp
-		expireTs_;  
+	Timestamp expireTs_;  
 
 	void doQueryWithoutCondition(
 		TransactionContext &txn, TimeSeries &timeSeries, ResultSet &resultSet);
@@ -74,14 +73,10 @@ protected:
 		ResultType &type, ResultSize &resultNum,
 		util::XArray<uint8_t> &serializedRowList,
 		util::XArray<uint8_t> &serializedVarDataList);
-	BtreeMap::SearchContext
-		scPass_;  
-	QpPassMode
-		nPassSelectRequested_;  
-	bool
-		isRowKeySearched_;  
-	OutputOrder
-		apiOutputOrder_;  
+	BtreeMap::SearchContext scPass_;   
+	QpPassMode nPassSelectRequested_;  
+	bool isRowKeySearched_;  
+	OutputOrder apiOutputOrder_;  
 
 	void tsResultMerge(TransactionContext &txn, TimeSeries &timeSeries,
 
@@ -117,9 +112,7 @@ public:
 		}
 		catch (...) {
 			for (uint32_t i = 0; i < varrayCounter_; i++) {
-				varray_[i]
-					.getBaseObject()
-					.reset();  
+				varray_[i].getBaseObject().reset();  
 			}
 			ALLOC_DELETE((alloc), varray_);
 			throw;
@@ -128,9 +121,7 @@ public:
 	~TimeSeriesRowWrapper() {
 		util::StackAllocator &alloc = txn_.getDefaultAllocator();
 		for (uint32_t i = 0; i < varrayCounter_; i++) {
-			varray_[i]
-				.getBaseObject()
-				.reset();  
+			varray_[i].getBaseObject().reset();  
 		}
 		ALLOC_DELETE((alloc), varray_);
 	}

@@ -22,6 +22,7 @@
 #include "partition_table.h"
 #include "util/net.h"
 #include "util/trace.h"
+#include "cluster_manager.h"
 #include "config_table.h"
 #include "picojson.h"
 
@@ -48,14 +49,18 @@ void NodeAddress::set(const util::SocketAddress &socketAddress) {
 }
 
 /*!
-	@brief Gets NodeAddress that corespond to a specified type
+	@brief Gets NodeAddress that correspond to a specified type
 */
 NodeAddress &AddressInfo::getNodeAddress(ServiceType type) {
 	switch (type) {
 	case CLUSTER_SERVICE:
 		return clusterAddress_;
 	case TRANSACTION_SERVICE:
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+		return transactionAddress_;
+#else
 		return txnAddress_;
+#endif
 	case SYNC_SERVICE:
 		return syncAddress_;
 	case SYSTEM_SERVICE:
@@ -74,7 +79,11 @@ void AddressInfo::setNodeAddress(ServiceType type, NodeAddress &address) {
 		clusterAddress_ = address;
 		break;
 	case TRANSACTION_SERVICE:
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+		transactionAddress_ = address;
+#else
 		txnAddress_ = address;
+#endif
 		break;
 	case SYNC_SERVICE:
 		syncAddress_ = address;
@@ -130,6 +139,8 @@ PartitionTable::PartitionTable(const ConfigTable &configTable)
 		maxLsnList_.assign(partitionNum, 0);
 		repairLsnList_.assign(partitionNum, UNDEF_LSN);
 		currentActiveOwnerList_.assign(partitionNum, UNDEF_NODEID);
+
+		gapCountList_.assign(partitionNum, 0);
 
 		nextBlockQueue_.init(alloc_);
 		goalBlockQueue_.init(alloc_);
@@ -235,7 +246,7 @@ bool PartitionTable::isBackup(
 
 bool PartitionTable::setNodeInfo(
 	NodeId nodeId, ServiceType type, NodeAddress &address) {
-	if (nodeId > config_.limitClusterNodeNum_) {
+	if (nodeId >= config_.limitClusterNodeNum_) {
 		GS_THROW_USER_ERROR(GS_ERROR_PT_SET_INVALID_NODE_ID, "");
 	}
 
@@ -290,7 +301,7 @@ void PartitionTable::updatePartitionRole(PartitionId pId, TableType type) {
 		break;
 	}
 	default: {
-		GS_THROW_USER_ERROR(GS_ERROR_PT_INVALID_PARTITON_ROLE_TYPE, "");
+		GS_THROW_USER_ERROR(GS_ERROR_PT_INVALID_PARTITION_ROLE_TYPE, "");
 	}
 	}
 
@@ -425,6 +436,7 @@ void PartitionTable::clearAll(bool) {
 	for (PartitionId pId = 0; pId < getPartitionNum(); pId++) {
 		repairLsnList_[pId] = UNDEF_LSN;
 		currentActiveOwnerList_[pId] = UNDEF_NODEID;
+		gapCountList_[pId] = 0;
 	}
 }
 
@@ -494,8 +506,7 @@ void PartitionTable::checkRelation(PartitionContext &context, PartitionId pId,
 		util::XArray<NodeId> backups(*context.alloc_);
 		getBackup(pId, backups, PT_CURRENT_OB);
 
-		int64_t checkTime =
-			util::DateTime::now(TRIM_MILLISECONDS).getUnixTime();
+		int64_t checkTime = clsMgr_->getMonotonicTime();
 		int64_t limitTime = partitionInfo->shortTermTimeout_;
 
 		bool timeoutCheck = (limitTime != UNDEF_TTL && checkTime > limitTime);
@@ -566,17 +577,28 @@ void PartitionTable::checkRelation(PartitionContext &context, PartitionId pId,
 
 				if (checkLimitOwnerBackupLsnDetectErrorGap(
 						ownerLsn, backupLsn) &&
-					isOwnerChanged && isBackupNotChanged) {
-					TRACE_CLUSTER_NORMAL_OPERATION(INFO,
-						"[NOTE] Detect cluster irregular, current owner-backup "
-						"lsn gap is invalid, pId:"
-							<< pId << ", owner:" << dumpNodeAddress(ownerNodeId)
-							<< "(" << ownerNodeId
-							<< "), backup:" << dumpNodeAddress(backupNodeId)
-							<< "(" << backupNodeId << "), ownerLsn:" << ownerLsn
-							<< ", backupLsn:" << backupLsn);
-					setGossip(pId);
-					syncFlag = true;
+					isBackupNotChanged) {
+					if (setGapCount(pId)) {
+						TRACE_CLUSTER_NORMAL_OPERATION(INFO,
+							"[NOTE] Detect cluster irregular, current "
+							"owner-backup lsn gap is invalid, pId:"
+								<< pId
+								<< ", owner:" << dumpNodeAddress(ownerNodeId)
+								<< "(" << ownerNodeId << "), backup:"
+								<< dumpNodeAddress(backupNodeId) << "("
+								<< backupNodeId << "), ownerLsn:" << ownerLsn
+								<< ", backupLsn:" << backupLsn);
+						setGossip(pId);
+						syncFlag = true;
+						resetGapCount(pId);
+					}
+					else {
+						GS_TRACE_INFO(CLUSTER_OPERATION, 0,
+							"pId=" << pId << ", count=" << getGapCount(pId));
+					}
+				}
+				else {
+					resetGapCount(pId);
 				}
 			}
 		}
@@ -636,7 +658,7 @@ void PartitionTable::checkRelation(PartitionContext &context, PartitionId pId,
 				goalBlockQueue_.push(pId, backupNodeId);
 				TRACE_CLUSTER_NORMAL_OPERATION(INFO,
 					"[NOTE] Detect cluster irregular, long term sync timeout "
-					"is occured, pId:"
+					"is occurred, pId:"
 						<< pId << ", owner:" << dumpNodeAddress(ownerNodeId)
 						<< "(" << ownerNodeId << "), catchup:"
 						<< dumpNodeAddress(backupNodeId) << "(" << backupNodeId
@@ -699,8 +721,7 @@ void PartitionTable::filter(PartitionContext &context,
 		changedNodeSet.insert(0);
 
 		if (isShortSync) {
-			int64_t checkTime =
-				util::DateTime::now(TRIM_MILLISECONDS).getUnixTime();
+			int64_t checkTime = clsMgr_->getMonotonicTime();
 			int32_t backupNum = getReplicationNum();
 			int32_t liveNum = getLiveNum();
 
@@ -754,9 +775,8 @@ void PartitionTable::filter(PartitionContext &context,
 					PartitionRole &nextRole =
 						partitions_[pId].roles_[PT_TMP_OB];
 
-					NodeId currentOwner, nextOwner;
+					NodeId currentOwner;
 					currentOwner = currentRole.getOwner();
-					nextOwner = nextRole.getOwner();
 
 					bool isDownNextOwner =
 						((currentOwner == UNDEF_NODEID) ||
@@ -1799,6 +1819,20 @@ void PartitionTable::Partition::check(NodeId nodeId) {
 		GS_THROW_USER_ERROR(GS_ERROR_TXN_PARTITION_STATE_INVALID, "max nodeId");
 		return;
 	}
+}
+
+EventMonotonicTime PartitionTable::getMonotonicTime() {
+	return clsMgr_->getMonotonicTime();
+}
+
+void PartitionTable::setFailoverTime() {
+	prevFailoverTime_ = clsMgr_->getMonotonicTime();
+}
+
+bool PartitionTable::checkFailoverTime() {
+	int64_t currentTime = clsMgr_->getMonotonicTime();
+	return ((currentTime - prevFailoverTime_) >
+			PartitionConfig::PT_FAILOVER_LIMIT_TIME);
 }
 
 std::ostream &operator<<(std::ostream &ss, SubPartition &subPartition) {

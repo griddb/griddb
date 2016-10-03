@@ -406,6 +406,8 @@ void BaseContainer::getTriggerList(
 */
 void BaseContainer::getLockRowIdList(TransactionContext &txn,
 	ResultSet &resultSet, util::XArray<RowId> &idList) {
+	setDummyMvccImage(txn);
+
 	if (resultSet.getResultNum() > 0) {
 		if (resultSet.hasRowId()) {
 			lockIdList(txn, *(resultSet.getOIdList()), idList);
@@ -447,33 +449,66 @@ BaseIndex *BaseContainer::getIndex(
 	}
 }
 
+template <typename R, typename T>
+void BaseContainer::searchColumnIdIndex(TransactionContext &txn,
+	MapType mapType, typename T::SearchContext &sc,
+	util::XArray<OId> &resultList, OutputOrder outputOrder) {
+	const Operator *op1, *op2;
+	bool isValid = getKeyCondition(txn, sc, op1, op2);
+	if (!isValid) {
+		return;
+	}
+
+	util::XArray<OId> mvccList(txn.getDefaultAllocator());
+	{
+		ResultSize limitBackup = sc.limit_;
+		if (outputOrder != ORDER_UNDEFINED) {
+			sc.limit_ = MAX_RESULT_SIZE;
+		}
+		searchMvccMap<R, typename T::SearchContext>(txn, sc, mvccList);
+		sc.limit_ = limitBackup;
+
+		if (outputOrder == ORDER_UNDEFINED && mvccList.size() >= sc.limit_) {
+			mvccList.resize(sc.limit_);
+			resultList.swap(mvccList);
+			return;
+		}
+	}
+
+	{
+		StackAllocAutoPtr<T> map(txn.getDefaultAllocator(),
+			reinterpret_cast<T *>(getIndex(txn, mapType, sc.columnId_)));
+		util::XArray<OId> oIdList(txn.getDefaultAllocator());
+
+		ResultSize limitBackup = sc.limit_;
+		if (sc.conditionNum_ > 0 || !isExclusive()) {
+			sc.limit_ = MAX_RESULT_SIZE;
+		}
+		map.get()->search(txn, sc, oIdList, outputOrder);
+		sc.limit_ = limitBackup;
+		searchColumnId<R, typename T::SearchContext>(
+			txn, sc, oIdList, mvccList, resultList, outputOrder);
+	}
+}
+
 /*!
-	@brief Search Btree Index of column
+	@brief Search Index of column
 */
 void BaseContainer::searchColumnIdIndex(TransactionContext &txn,
 	BtreeMap::SearchContext &sc, util::XArray<OId> &resultList,
 	OutputOrder outputOrder) {
-	StackAllocAutoPtr<BtreeMap> map(
-		txn.getDefaultAllocator(), reinterpret_cast<BtreeMap *>(getIndex(
-									   txn, MAP_TYPE_BTREE, sc.columnId_)));
-	util::XArray<OId> oIdList(txn.getDefaultAllocator());
-	ResultSize limitBackup = sc.limit_;
-	if (sc.conditionNum_ > 0 || !isExclusive()) {
-		sc.limit_ = MAX_RESULT_SIZE;
-	}
-	map.get()->search(txn, sc, oIdList, outputOrder);
-	sc.limit_ = limitBackup;
+	MapType mapType = MAP_TYPE_BTREE;
 	switch (getContainerType()) {
 	case COLLECTION_CONTAINER:
-		searchColumnId<Collection, BtreeMap::SearchContext>(
-			txn, sc, oIdList, resultList, outputOrder);
+		searchColumnIdIndex<Collection, BtreeMap>(
+			txn, mapType, sc, resultList, outputOrder);
 		break;
 	case TIME_SERIES_CONTAINER:
-		searchColumnId<TimeSeries, BtreeMap::SearchContext>(
-			txn, sc, oIdList, resultList, outputOrder);
+		searchColumnIdIndex<TimeSeries, BtreeMap>(
+			txn, mapType, sc, resultList, outputOrder);
 		break;
 	default:
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_DS_CONTAINER_TYPE_INVALID, "");
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
 		break;
 	}
 }
@@ -483,27 +518,18 @@ void BaseContainer::searchColumnIdIndex(TransactionContext &txn,
 */
 void BaseContainer::searchColumnIdIndex(TransactionContext &txn,
 	HashMap::SearchContext &sc, util::XArray<OId> &resultList) {
-	const Operator *op1, *op2;
-	bool isValid = getKeyCondition(txn, sc, op1, op2);
-	if (!isValid) {
-		return;
-	}
-	StackAllocAutoPtr<HashMap> map(
-		txn.getDefaultAllocator(), reinterpret_cast<HashMap *>(getIndex(
-									   txn, MAP_TYPE_HASH, sc.columnId_)));
-	util::XArray<OId> oIdList(txn.getDefaultAllocator());
-	map.get()->search(txn, sc.key_, sc.keySize_, MAX_RESULT_SIZE, oIdList);
+	MapType mapType = MAP_TYPE_HASH;
 	switch (getContainerType()) {
 	case COLLECTION_CONTAINER:
-		searchColumnId<Collection, HashMap::SearchContext>(
-			txn, sc, oIdList, resultList, ORDER_UNDEFINED);
+		searchColumnIdIndex<Collection, HashMap>(
+			txn, mapType, sc, resultList, ORDER_UNDEFINED);
 		break;
 	case TIME_SERIES_CONTAINER:
-		searchColumnId<TimeSeries, HashMap::SearchContext>(
-			txn, sc, oIdList, resultList, ORDER_UNDEFINED);
+		searchColumnIdIndex<TimeSeries, HashMap>(
+			txn, mapType, sc, resultList, ORDER_UNDEFINED);
 		break;
 	default:
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_DS_CONTAINER_TYPE_INVALID, "");
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
 		break;
 	}
 }
@@ -527,7 +553,7 @@ void BaseContainer::getRowList(TransactionContext &txn,
 				resultNum, messageRowStore, isWithRowId, startPos);
 			break;
 		default:
-			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_DS_CONTAINER_TYPE_INVALID, "");
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
 			break;
 		}
 	}
@@ -551,7 +577,7 @@ void BaseContainer::getRowIdList(TransactionContext &txn,
 			container->getRowIdListImpl<TimeSeries>(txn, oIdList, rowIdList);
 			break;
 		default:
-			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_DS_CONTAINER_TYPE_INVALID, "");
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
 			break;
 		}
 	}
@@ -884,7 +910,7 @@ bool BaseContainer::isSupportIndex(IndexInfo &indexInfo) {
 											[indexInfo.mapType];
 		break;
 	default:
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_DS_CONTAINER_TYPE_INVALID, "");
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
 		break;
 	}
 	if (isSuport) {
@@ -904,7 +930,7 @@ void BaseContainer::indexInsert(TransactionContext &txn, IndexInfo &indexInfo) {
 		indexInsertImpl<TimeSeries>(txn, indexInfo);
 		break;
 	default:
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_DS_CONTAINER_TYPE_INVALID, "");
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
 		break;
 	}
 }
@@ -1061,7 +1087,7 @@ void BaseContainer::changeSchemaRecord(TransactionContext &txn,
 		changeSchemaRecordImpl<TimeSeries>(txn, newContainer, copyColumnMap);
 		break;
 	default:
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_DS_CONTAINER_TYPE_INVALID, "");
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
 		break;
 	}
 }
@@ -1205,7 +1231,10 @@ void BaseContainer::searchMvccMap(
 	mvccMap.get()->getAll<TransactionId, MvccRowImage>(
 		txn, MAX_RESULT_SIZE, idList);
 	for (itr = idList.begin(); itr != idList.end(); itr++) {
-		if (itr->second.type_ == MVCC_CREATE) {
+		if (itr->second.type_ == MVCC_SELECT) {
+			continue;
+		}
+		else if (itr->second.type_ == MVCC_CREATE) {
 			if (getExclusiveStatus() == IS_EXCLUSIVE &&
 				txn.getId() != itr->first) {  
 				setExclusiveStatus(IS_NOT_EXCLUSIVE_CREATE_EXIST);
@@ -1252,22 +1281,11 @@ void BaseContainer::searchMvccMap(
 	}
 }
 
+
 template <class R, class S>
 void BaseContainer::searchColumnId(TransactionContext &txn, S &sc,
-	util::XArray<OId> &oIdList, util::XArray<OId> &resultList,
-	OutputOrder outputOrder) {
-	const Operator *op1, *op2;
-	bool isValid = getKeyCondition(txn, sc, op1, op2);
-	if (!isValid) {
-		return;
-	}
-
-	util::XArray<OId> mvccList(txn.getDefaultAllocator());
-	ResultSize limitBackup = sc.limit_;
-	sc.limit_ = MAX_RESULT_SIZE;
-	searchMvccMap<R, S>(txn, sc, mvccList);
-	sc.limit_ = limitBackup;
-
+	util::XArray<OId> &oIdList, util::XArray<OId> &mvccList,
+	util::XArray<OId> &resultList, OutputOrder outputOrder) {
 	ContainerValue containerValue(txn, *getObjectManager());
 	util::XArray<OId>::iterator itr;
 	if (sc.conditionNum_ > 0 || !isExclusive()) {
@@ -1742,7 +1760,7 @@ std::string BaseContainer::dump(TransactionContext &txn) {
 		strstrm << dumpImpl<TimeSeries>(txn);
 		break;
 	default:
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_DS_CONTAINER_TYPE_INVALID, "");
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
 		break;
 	}
 	return strstrm.str();
@@ -1788,6 +1806,10 @@ std::string BaseContainer::dumpImpl(TransactionContext &txn) {
 						<< ", lastRowId = " << itr->second.lastCreateRowId_
 						<< std::endl;
 			}
+			else if (itr->second.type_ == MVCC_SELECT) {
+				strstrm << "(" << MvccRowImage::getTypeStr(itr->second.type_)
+						<< ")" << std::endl;
+			}
 			else {
 				typename R::RowArray rowArray(txn, itr->second.snapshotRowOId_,
 					reinterpret_cast<R *>(this), OBJECT_READ_ONLY);
@@ -1825,7 +1847,7 @@ std::string BaseContainer::dump(
 		}
 		break;
 	default:
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_DS_CONTAINER_TYPE_INVALID, "");
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
 		break;
 	}
 	return strstrm.str();
@@ -1849,7 +1871,7 @@ bool BaseContainer::validate(
 			validateImpl<TimeSeries>(txn, errorMessage, preRowId, countRowNum);
 		break;
 	default:
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_DS_CONTAINER_TYPE_INVALID, "");
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
 		break;
 	}
 	return isValid;
@@ -1974,7 +1996,10 @@ bool BaseContainer::validateImpl(TransactionContext &txn,
 				mvccMap.get()->getAll<TransactionId, MvccRowImage>(
 					txn, MAX_RESULT_SIZE, idList, btreeCursor);
 			for (itr = idList.begin(); itr != idList.end(); itr++) {
-				if (itr->second.type_ != MVCC_CREATE) {
+				if (itr->second.type_ == MVCC_SELECT) {
+					continue;
+				}
+				else if (itr->second.type_ != MVCC_CREATE) {
 					typename R::RowArray rowArray(
 						txn, reinterpret_cast<R *>(this));
 					try {
@@ -2183,4 +2208,5 @@ bool BaseContainer::validateImpl(TransactionContext &txn,
 	}
 	return isValid;
 }
+
 

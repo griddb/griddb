@@ -235,7 +235,7 @@ void SyncService::encode(Event &ev, T &t) {
 
 		t.encode(out);
 
-		clsSvc_->getStats().set(ClusterStats::SYNC_RECIEVE,
+		clsSvc_->getStats().set(ClusterStats::SYNC_RECEIVE,
 			static_cast<int32_t>(out.base().position()));
 
 		TRACE_SYNC_TARGET_PID_IN_SERVICE(ev.getPartitionId(), DEBUG,
@@ -742,7 +742,7 @@ void ShortTermSyncHandler::operator()(EventContext &ec, Event &ev) {
 				OP_SHORTTERM_SYNC_LOG, pId, syncRequestInfo.getPartitionRole());
 
 			TRACE_SYNC_HANDLER_DETAIL(
-				ev, eventType, pId, INFO, "(Backup) Shorterm sync apply logs, "
+				ev, eventType, pId, INFO, "(Backup) Shortterm sync apply logs, "
 											  << syncRequestInfo.dump());
 
 			ds_->setUndoCompleted(pId);
@@ -942,7 +942,7 @@ void ShortTermSyncHandler::operator()(EventContext &ec, Event &ev) {
 				OP_SHORTTERM_SYNC_END, pId, syncRequestInfo.getPartitionRole());
 
 			TRACE_SYNC_HANDLER_DETAIL(ev, eventType, pId, INFO,
-				"(Backup) ShorTerm sync is completed, "
+				"(Backup) ShortTerm sync is completed, "
 					<< syncRequestInfo.dump());
 
 			SyncId syncId = syncRequestInfo.getBackupSyncId();
@@ -1101,11 +1101,11 @@ void ShortTermSyncHandler::operator()(EventContext &ec, Event &ev) {
 	}
 	catch (LockConflictException &e) {
 		TRACE_SYNC_EXCEPTION(
-			e, eventType, pId, WARNING, "LockConflict exception is occured.");
+			e, eventType, pId, WARNING, "LockConflict exception is occurred.");
 	}
 	catch (LogRedoException &e) {
 		TRACE_SYNC_EXCEPTION(
-			e, eventType, pId, WARNING, "Log redo exception is occured.");
+			e, eventType, pId, WARNING, "Log redo exception is occurred.");
 
 		if (context != NULL) {
 			TRACE_SYNC_CONTEXT(eventType, context, DEBUG, "remove, ");
@@ -1973,8 +1973,7 @@ void LongTermSyncHandler::operator()(EventContext &ec, Event &ev) {
 	catch (UserException &e) {
 		TRACE_SYNC_EXCEPTION(
 			e, eventType, pId, WARNING, "Long term sync operation is failed.");
-		clsMgr_->checkCheckpointDelayLimitTime(
-			util::DateTime::now(TRIM_MILLISECONDS).getUnixTime());
+		clsMgr_->checkCheckpointDelayLimitTime(clsMgr_->getMonotonicTime());
 
 		if (context != NULL) {
 			TRACE_SYNC_CONTEXT(eventType, context, DEBUG, "remove, ");
@@ -1985,7 +1984,7 @@ void LongTermSyncHandler::operator()(EventContext &ec, Event &ev) {
 	}
 	catch (LockConflictException &e) {
 		TRACE_SYNC_EXCEPTION(e, eventType, pId, WARNING,
-			"Lock confiict exception is occured, retry:"
+			"Lock confict exception is occurred, retry:"
 				<< syncMgr_->getExtraConfig().getLockConflictPendingInterval());
 
 		txnEE_->addTimer(
@@ -1994,7 +1993,7 @@ void LongTermSyncHandler::operator()(EventContext &ec, Event &ev) {
 	}
 	catch (LogRedoException &e) {
 		TRACE_SYNC_EXCEPTION(e, eventType, pId, WARNING,
-			"Log redo exception is occured."
+			"Log redo exception is occurred."
 				<< syncMgr_->getExtraConfig().getLockConflictPendingInterval());
 
 		clsMgr_->checkCheckpointDelayLimitTime();
@@ -2093,7 +2092,6 @@ bool SyncRequestInfo::getChunks(PartitionId pId, PartitionTable *pt,
 		request_.numChunk_ = 0;
 		request_.binaryLogSize_ = 0;
 
-		assert(condition_.chunkNum_ == 0);
 		const PartitionGroupId pgId = pt->getPartitionGroupId(pId);
 		uint8_t *chunk = syncMgr_->getChunkBuffer(pgId);
 		lastChunkGet = chunkMgr->getCheckpointChunk(pId, chunkSize, chunk);
@@ -2421,8 +2419,7 @@ void RecvSyncMessageHandler::operator()(EventContext &ec, Event &ev) {
 			e, syncEventType, pId, WARNING, "Recv sync operation is failed.");
 
 		if (syncEventType != SYC_SHORTTERM_SYNC_LOG) {
-			clsMgr_->checkCheckpointDelayLimitTime(
-				util::DateTime::now(TRIM_MILLISECONDS).getUnixTime());
+			clsMgr_->checkCheckpointDelayLimitTime(clsMgr_->getMonotonicTime());
 		}
 	}
 	catch (std::exception &e) {
@@ -2586,7 +2583,7 @@ SyncHandler::SyncPartitionLock::SyncPartitionLock(
 	if (!txnMgr_->lockPartition(pId_)) {
 		GS_THROW_CUSTOM_ERROR(LockConflictException,
 			GS_ERROR_TXN_PARTITION_LOCK_CONFLICT,
-			"Lock conflict is occured, pId:" << pId_);
+			"Lock conflict is occurred, pId:" << pId_);
 	}
 }
 
@@ -2733,10 +2730,11 @@ void SyncRequestInfo::decode(EventByteInStream &in, const char8_t *bodyBuffer) {
 
 		partitionRole_.get(ownerAddress, backupsAddress);
 
-		owner = ClusterService::getNodeId(ownerAddress, ee_);
+		owner = ClusterService::changeNodeId(ownerAddress, ee_);
 
 		for (size_t pos = 0; pos < backupsAddress.size(); pos++) {
-			NodeId nodeId = ClusterService::getNodeId(backupsAddress[pos], ee_);
+			NodeId nodeId =
+				ClusterService::changeNodeId(backupsAddress[pos], ee_);
 			if (nodeId != UNDEF_NODEID) {
 				backups.push_back(nodeId);
 			}

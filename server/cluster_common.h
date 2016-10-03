@@ -28,6 +28,9 @@ typedef uint8_t ClusterVersionId;
 typedef int32_t NodeId;
 typedef int32_t AddressType;
 static const ClusterVersionId GS_CLUSTER_MESSAGE_BEFORE_V_1_5 = 1;
+
+const ClusterVersionId GS_CLUSTER_MESSAGE_CURRENT_VERSION = 12;
+
 static const int32_t SERVICE_MAX = 4;
 
 /*!
@@ -62,6 +65,10 @@ enum ServiceType {
 	TRANSACTION_SERVICE = 1,
 	SYNC_SERVICE = 2,
 	SYSTEM_SERVICE = 3,
+};
+
+static const char8_t *const SERVICE_TYPE_NAMES[] = {
+	"cluster", "transaction", "sync", "system"
 };
 
 static void clearStringStream(util::NormalOStringStream &oss) {

@@ -311,13 +311,12 @@ std::string ObjectAllocator::dump(uint8_t *top, int32_t level) const {
 
 	stream << "[ObjectArea]" << std::endl;
 	uint32_t *freeList = getFreeList(top);
-	HeaderBlock *list = 0;
 	uint32_t totalFreeSize = 0;
 	std::map<int32_t, uint32_t> freeOffsetMap;
 	stream << "(FreeArea)" << std::endl;
 	for (uint8_t k = minPower_; k <= maxPower_; ++k) {
 		uint32_t powerFreeSize = 0;
-		list = getHeaderBlock(top, freeList[k]);
+		getHeaderBlock(top, freeList[k]);
 		int32_t counter = 0;
 		uint32_t offset = freeList[k];
 		if (offset != UINT32_MAX) {
@@ -414,12 +413,11 @@ void ObjectAllocator::dumpSummary(uint8_t *top,
 	std::map<int8_t, std::pair<uint32_t, uint32_t> > &typeStatMap,
 	uint64_t &summaryFreeSize, uint64_t &summaryUseSize) const {
 	uint32_t *freeList = getFreeList(top);
-	HeaderBlock *list = 0;
 	uint32_t totalFreeSize = 0;
 	std::map<int32_t, uint32_t> freeOffsetMap;
 	for (uint8_t k = minPower_; k <= maxPower_; ++k) {
 		uint32_t powerFreeSize = 0;
-		list = getHeaderBlock(top, freeList[k]);
+		getHeaderBlock(top, freeList[k]);
 		int32_t counter = 0;
 		int32_t offset = freeList[k];
 		if (offset != INT32_MAX) {

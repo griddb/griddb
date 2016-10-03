@@ -31,6 +31,7 @@
 #include "chunk_manager.h"  
 #include "data_store.h"
 #include "ebb_request_parser.h"
+#include "json.h"
 #include "log_manager.h"
 #include "object_manager.h"
 #include "picojson.h"
@@ -38,6 +39,10 @@
 
 using util::ValueFormatter;
 
+
+#ifndef _WIN32
+#include <signal.h>  
+#endif
 
 
 
@@ -447,6 +452,10 @@ void SystemService::getHosts(picojson::value &result, int32_t addressTypeNum) {
 		}
 		hosts["follower"] = picojson::value(followerarray);
 
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+		if (clsSvc_->getNotificationManager().getMode() ==
+			NOTIFICATION_MULTICAST)
+#endif
 		{
 			picojson::object multicast;
 			multicast["address"] = picojson::value(multicastAddress_);
@@ -686,7 +695,6 @@ void SystemService::getStats(picojson::value &result, StatTable &stats) {
 	@brief Gets the statistics about synchronization
 */
 void SystemService::getSyncStats(picojson::value &result) {
-	typedef EventEngine::Stats Stats;
 	picojson::object &syncStats = setJsonObject(result);
 
 	syncStats["unfixCount"] = picojson::value(
@@ -757,7 +765,6 @@ void SystemService::getSyncStats(picojson::value &result) {
 */
 
 void SystemService::getPGStoreMemoryLimitStats(picojson::value &result) {
-	typedef EventEngine::Stats Stats;
 	picojson::array &limitStats = setJsonArray(result);
 
 	PartitionGroupId partitionGroupNum =
@@ -1156,12 +1163,21 @@ bool SystemService::acceptStatsOption(
 		return false;
 	}
 
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+	const size_t maxNameListSize = 9;
+#else
 	const size_t maxNameListSize = 8;
+#endif
+
 	const char8_t *const allNameList[][maxNameListSize] = {
 		{"all", "clusterInfo", "recoveryInfo", "cpInfo", "performanceInfo",
 			NULL},
 		{"detail", "clusterDetail", "storeDetail", "transactionDetail",
-			"memoryDetail", "syncDetail", "pgLimitDetail", NULL}};
+			"memoryDetail", "syncDetail", "pgLimitDetail",
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+			"notificationMember",
+#endif
+			NULL}};
 
 	const int32_t allOptionList[][maxNameListSize] = {
 		{-1, STAT_TABLE_DISPLAY_SELECT_CS, STAT_TABLE_DISPLAY_SELECT_CP,
@@ -1169,7 +1185,11 @@ bool SystemService::acceptStatsOption(
 		{-1, STAT_TABLE_DISPLAY_OPTIONAL_CS, STAT_TABLE_DISPLAY_OPTIONAL_DS,
 			STAT_TABLE_DISPLAY_OPTIONAL_TXN, STAT_TABLE_DISPLAY_OPTIONAL_MEM,
 			STAT_TABLE_DISPLAY_OPTIONAL_SYNC,
-			STAT_TABLE_DISPLAY_OPTIONAL_PGLIMIT, -1}};
+			STAT_TABLE_DISPLAY_OPTIONAL_PGLIMIT,
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+			STAT_TABLE_DISPLAY_OPTIONAL_NOTIFICATION_MEMBER,
+#endif
+			-1}};
 
 	for (size_t i = 0; i < sizeof(allNameList) / sizeof(*allNameList); i++) {
 		const char8_t *const *nameList = allNameList[i];
@@ -1887,6 +1907,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 					alloc_, PartitionTable::PT_CURRENT_GOAL);
 			}
 			std::cout << pt_->dumpDatas(true);
+
 			if (request.parameterMap_.find("trace") !=
 				request.parameterMap_.end()) {
 				const std::string resetStr = request.parameterMap_["trace"];
@@ -1910,6 +1931,13 @@ void SystemService::ListenerSocketHandler::dispatch(
 					GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_CLUSTER_STATUS,
 						pt_->dumpDatas(true));
 				}
+			}
+		}
+		else if (request.pathElements_.size() == 2 &&
+				 request.pathElements_[1] == "profs") {
+			if (request.method_ != EBB_GET) {
+				response.setMethodError();
+				return;
 			}
 		}
 		else {
@@ -2033,7 +2061,7 @@ bool SystemService::WebAPIRequest::set(util::NormalXArray<char8_t> &input) {
 
 		const size_t inputSize = strlen(input.data());
 		ebb_request_parser_execute(&parser, input.data(), inputSize);
-		if (request.content_length != 0 && !request.body_read) {
+		if (parser.current_request != NULL) {
 			break;
 		}
 
@@ -2294,6 +2322,7 @@ void SystemService::StatSetUpHandler::operator()(StatTable &stat) {
 
 	parentId = STAT_TABLE_PERF_MEM_DS;
 	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_MEM_DS_STORE_TOTAL);
+	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_MEM_DS_STORE_CACHED);
 	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_MEM_DS_LOG_TOTAL);
 	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_MEM_DS_LOG_CACHED);
 
@@ -2347,9 +2376,11 @@ bool SystemService::StatUpdator::operator()(StatTable &stat) {
 
 		picojson::array eeArray;
 		EventEngine *eeList[] = {
-			svc.clsSvc_->getEE(), svc.syncSvc_->getEE(), svc.txnSvc_->getEE()};
+			svc.clsSvc_->getEE(), svc.syncSvc_->getEE(), svc.txnSvc_->getEE()
+		};
 		const StatTableParamId paramList[] = {STAT_TABLE_PERF_TXN_EE_CLUSTER,
-			STAT_TABLE_PERF_TXN_EE_SYNC, STAT_TABLE_PERF_TXN_EE_TRANSACTION};
+			STAT_TABLE_PERF_TXN_EE_SYNC, STAT_TABLE_PERF_TXN_EE_TRANSACTION
+		};
 		for (size_t i = 0; i < sizeof(eeList) / sizeof(*eeList); i++) {
 			const uint32_t concurrency =
 				static_cast<uint32_t>(svc.clsMgr_->getConcurrency());
@@ -2365,6 +2396,55 @@ bool SystemService::StatUpdator::operator()(StatTable &stat) {
 				picojson::object eeInfoObj;
 				eeInfoObj["activeQueueSize"] =
 					picojson::value(static_cast<double>(activeQueueSize));
+
+				const int64_t activeQueueSizeMax = eeStats.get(
+					EventEngine::Stats::EVENT_ACTIVE_QUEUE_SIZE_MAX);
+				eeInfoObj["activeQueueSizeMax"] =
+					picojson::value(static_cast<double>(activeQueueSizeMax));
+
+				int64_t tmp;
+				tmp = eeStats.get(
+					EventEngine::Stats::EVENT_ACTIVE_QUEUE_SIZE_MAX);
+				eeInfoObj["activeQueueSizeMax"] =
+					picojson::value(static_cast<double>(activeQueueSizeMax));
+
+				tmp = eeStats.get(EventEngine::Stats::EVENT_ACTIVE_ADD_COUNT);
+				eeInfoObj["acvieAddCount"] =
+					picojson::value(static_cast<double>(tmp));
+
+				tmp = eeStats.get(EventEngine::Stats::EVENT_PENDING_ADD_COUNT);
+				eeInfoObj["pendingAddCount"] =
+					picojson::value(static_cast<double>(tmp));
+
+				tmp = eeStats.get(EventEngine::Stats::EVENT_PENDING_ADD_COUNT);
+				eeInfoObj["pendingAddCount"] =
+					picojson::value(static_cast<double>(tmp));
+
+				tmp = eeStats.get(
+					EventEngine::Stats::EVENT_ACTIVE_QUEUE_SIZE_CURRENT);
+				eeInfoObj["activeQueueSizeCurrent"] =
+					picojson::value(static_cast<double>(tmp));
+
+				tmp = eeStats.get(
+					EventEngine::Stats::EVENT_ACTIVE_BUFFER_SIZE_CURRENT);
+				eeInfoObj["activeBufferSizeCurrent"] =
+					picojson::value(static_cast<double>(tmp));
+
+				tmp = eeStats.get(
+					EventEngine::Stats::EVENT_ACTIVE_BUFFER_SIZE_MAX);
+				eeInfoObj["activeBufferSizeMax"] =
+					picojson::value(static_cast<double>(tmp));
+
+				tmp = eeStats.get(
+					EventEngine::Stats::EVENT_PENDING_QUEUE_SIZE_CURRENT);
+				eeInfoObj["pendingQueueSizeCurrent"] =
+					picojson::value(static_cast<double>(tmp));
+
+				tmp = eeStats.get(
+					EventEngine::Stats::EVENT_PENDING_QUEUE_SIZE_MAX);
+				eeInfoObj["pendingQueueSizeMax"] =
+					picojson::value(static_cast<double>(tmp));
+
 				if (eeInfo.is<picojson::array>()) {
 					eeInfo.get<picojson::array>().push_back(
 						picojson::value(eeInfoObj));
@@ -2452,17 +2532,14 @@ bool SystemService::StatUpdator::operator()(StatTable &stat) {
 
 			stat.set(paramId,
 				allocStats.values_[util::AllocatorStats::STAT_TOTAL_SIZE]);
-
-			if (paramId != STAT_TABLE_PERF_MEM_DS_STORE_TOTAL) {
-				stat.set(paramId + 1,
-					allocStats.values_[util::AllocatorStats::STAT_CACHE_SIZE]);
-			}
+			stat.set(paramId + 1,
+				allocStats.values_[util::AllocatorStats::STAT_CACHE_SIZE]);
 
 			if (paramId == STAT_TABLE_PERF_MEM_ALL_TOTAL) {
 				stat.set(STAT_TABLE_PERF_MEM_PROCESS_MEMORY_GAP,
 					static_cast<int64_t>(processMemory) -
 						allocStats
-							.values_[util::AllocatorStats::STAT_CACHE_SIZE]);
+							.values_[util::AllocatorStats::STAT_TOTAL_SIZE]);
 			}
 		}
 	} while (false);
@@ -2478,6 +2555,7 @@ bool SystemService::StatUpdator::operator()(StatTable &stat) {
 		svc.getPGStoreMemoryLimitStats(result);
 		stat.set(STAT_TABLE_ROOT_PG_STORE_MEMORY_LIMIT, result);
 	}
+
 
 	return true;
 }

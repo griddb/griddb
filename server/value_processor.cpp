@@ -243,17 +243,12 @@ std::string ValueProcessor::dumpMemory(
 }
 
 VariableArrayCursor::VariableArrayCursor(TransactionContext &txn,
-	ObjectManager &objectManager, OId oId, bool forUpdate)
-	: BaseObject(txn.getPartitionId(), objectManager, oId),
+	ObjectManager &objectManager, OId oId, AccessMode accessMode)
+	: BaseObject(txn.getPartitionId(), objectManager),
 	  curObject_(*this),
 	  elemCursor_(UNDEF_CURSOR_POS),
-	  forUpdate_(forUpdate) {
-	if (forUpdate) {
-		BaseObject::load(oId, OBJECT_FOR_UPDATE);
-	}
-	else {
-		BaseObject::load(oId, OBJECT_READ_ONLY);
-	}
+	  accessMode_(accessMode) {
+	BaseObject::load(oId, accessMode_);
 	rootOId_ = getBaseOId();
 	elemNum_ = ValueProcessor::decodeVarSize(curObject_.getBaseAddr());
 	curObject_.moveCursor(
@@ -309,12 +304,7 @@ bool VariableArrayCursor::nextElement(bool forRemove) {
 		if (forRemove) {
 			curObject_.finalize();
 		}
-		if (forUpdate_) {
-			curObject_.load(oId, OBJECT_FOR_UPDATE);
-		}
-		else {
-			curObject_.load(oId, OBJECT_READ_ONLY);
-		}
+		curObject_.loadNeighbor(oId, accessMode_);
 	}
 	return true;
 }

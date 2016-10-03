@@ -21,7 +21,6 @@
 
 #include "checkpoint_service.h"
 #include "chunk_manager.h"
-#include "cluster_common.h"
 #include "cluster_manager.h"
 #include "cluster_service.h"
 #include "config_table.h"
@@ -44,23 +43,25 @@
 #endif
 
 #ifdef MAIN_CAPTURE_SIGNAL
+#include <errno.h>
+#include <execinfo.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/types.h>
 #include <unistd.h>
 #endif  
 
 
 
 const char8_t *const GS_PRODUCT_NAME = "GridDB";
-const char8_t *const GS_MAJOR_VERSION = "2";
-const char8_t *const GS_MINOR_VERSION = "8";
-const char8_t *const GS_REVISION = "0";
+const int32_t GS_MAJOR_VERSION = 3;
+const int32_t GS_MINOR_VERSION = 0;
+const int32_t GS_BASE_REVISION = 0;
+const int32_t GS_BUILD_NO = 27877;
 
-const char8_t *const GS_BUILD_NO = "24853";
-
-const ClusterVersionId GS_CLUSTER_MESSAGE_CURRENT_VERSION = 7;
+const int32_t GS_REVISION = GS_BASE_REVISION;
+const char8_t *const GS_EDITION_NAME = "Community Edition";
+const char8_t *const GS_EDITION_NAME_SHORT = "CE";
 
 const char8_t *const SYS_CLUSTER_FILE_NAME = "gs_cluster.json";
 const char8_t *const SYS_NODE_FILE_NAME = "gs_node.json";
@@ -86,12 +87,26 @@ static class MainConfigSetUpHandler : public ConfigTable::SetUpHandler {
 static void setUpTrace(const ConfigTable *param, bool checkOnly);
 static void setUpAllocator();
 
+/*!
+	@brief Handler for failure of memory allocation at the StackAllocator
+	@note Throws UserException with the error code of stack memory limit over
+*/
+static class StackMemoryLimitOverErrorHandler
+	: public util::AllocationErrorHandler {
+	void operator()(util::Exception &e);
+} g_stackMemoryLimitOverErrorHandler;
+
 std::string preparePidFile(const char8_t *const configDir);
 void createPidFile(const std::string &fileName, util::PIdFile &pidFile);
 void cleanupPidFile(const std::string &fileName, util::PIdFile &pidFile);
 
 static void cleanupOnNormalShutdown(const Event::Source &eventSource,
 	util::StackAllocator &alloc, SystemService &sysSvc, ClusterManager &clsMgr);
+
+
+#ifdef MAIN_CAPTURE_SIGNAL
+void signal_handler(int sig, siginfo_t *siginfo, void *param);
+#endif
 
 
 UTIL_TRACER_DECLARE(MAIN);
@@ -142,10 +157,11 @@ int main(int argc, char **argv) {
 		version << GS_MAJOR_VERSION << "." << GS_MINOR_VERSION << "."
 				<< GS_REVISION;
 		util::NormalOStringStream simpleVersion;
-		simpleVersion << version.str() << "-" << GS_BUILD_NO;
+		simpleVersion << version.str() << "-" << GS_BUILD_NO << " "
+					  << GS_EDITION_NAME_SHORT;
 		util::NormalOStringStream fullVersion;
 		fullVersion << GS_PRODUCT_NAME << " version " << version.str()
-					<< " build " << GS_BUILD_NO;
+					<< " build " << GS_BUILD_NO << " " << GS_EDITION_NAME;
 
 		util::VariableSizeAllocator<> tableAlloc(
 			(util::AllocatorInfo(ALLOCATOR_GROUP_MAIN, "tableAlloc")));
@@ -272,17 +288,42 @@ int main(int argc, char **argv) {
 		config.setTraceEnabled(true);
 
 #ifdef MAIN_CAPTURE_SIGNAL
-		sigset_t ss;
-		sigemptyset(&ss);
+		const int syncSignals[] = {SIGSEGV};
+		const int signalNum = sizeof(syncSignals) / sizeof(*syncSignals);
 
-		if (0 != sigaddset(&ss, SIGINT)) {
-			return EXIT_FAILURE;
+		struct sigaction sa;
+
+		memset(&sa, 0x00, sizeof(struct sigaction));
+		sigemptyset(&(sa.sa_mask));
+
+		sa.sa_flags = SA_RESTART | SA_SIGINFO | SA_RESETHAND | SA_ONSTACK;
+		sa.sa_sigaction = signal_handler;
+
+		for (int i = 0; i < signalNum; i++) {
+			if (0 != sigaction(syncSignals[i], &sa, NULL)) {
+				UTIL_THROW_PLATFORM_ERROR(UTIL_EXCEPTION_CREATE_MESSAGE_CHARS(
+					"signal=" << syncSignals[i]));
+			}
 		}
-		if (0 != sigaddset(&ss, SIGTERM)) {
-			return EXIT_FAILURE;
+
+		sigset_t ss1;
+		sigemptyset(&ss1);
+
+		if (0 != sigaddset(&ss1, SIGINT)) {
+			UTIL_THROW_PLATFORM_ERROR("");
 		}
-		if (0 != sigaddset(&ss, SIGUSR1)) {
-			return EXIT_FAILURE;
+		if (0 != sigaddset(&ss1, SIGTERM)) {
+			UTIL_THROW_PLATFORM_ERROR("");
+		}
+
+		sigset_t ss2;
+		sigemptyset(&ss2);
+
+		for (int i = 0; i < signalNum; i++) {
+			if (0 != sigaddset(&ss2, syncSignals[i])) {
+				UTIL_THROW_PLATFORM_ERROR(UTIL_EXCEPTION_CREATE_MESSAGE_CHARS(
+					"signal=" << syncSignals[i]));
+			}
 		}
 #endif  
 
@@ -293,15 +334,23 @@ int main(int argc, char **argv) {
 #ifdef MAIN_CAPTURE_SIGNAL
 		if (!checkOnly) {
 
-			if (0 != pthread_sigmask(SIG_BLOCK, &ss, NULL)) {
+
+			if (0 != pthread_sigmask(SIG_BLOCK, &ss1, NULL)) {
+				const int errsv = errno;
 				cleanupPidFile(pidFileName, pidFile);
-				return EXIT_FAILURE;
+				UTIL_THROW_PLATFORM_ERROR_WITH_CODE(TYPE_NORMAL, errsv, "");
+			}
+
+			if (0 != pthread_sigmask(SIG_UNBLOCK, &ss2, NULL)) {
+				const int errsv = errno;
+				cleanupPidFile(pidFileName, pidFile);
+				UTIL_THROW_PLATFORM_ERROR_WITH_CODE(TYPE_NORMAL, errsv, "");
 			}
 		}
 #endif  
 
 		bool createMode = false;
-		RecoveryManager::checkExistingFiles(
+		RecoveryManager::checkExistingFiles1(
 			config, createMode, forceRecoveryFromExistingFiles);
 
 		EventEngine::VariableSizeAllocator eeVarSizeAlloc(
@@ -318,6 +367,9 @@ int main(int argc, char **argv) {
 			1 << blockSizeBits);
 		fixedSizeAlloc.setFreeElementLimit(maxCount);
 
+		util::StackAllocator::setDefaultErrorHandler(
+			&g_stackMemoryLimitOverErrorHandler);
+
 		ServiceThreadErrorHandler errorHandler;
 
 
@@ -326,6 +378,9 @@ int main(int argc, char **argv) {
 		RecoveryManager recoveryMgr(config);
 		LogManager logMgr(config);
 		logMgr.open(checkOnly, forceRecoveryFromExistingFiles);
+
+		RecoveryManager::checkExistingFiles2(
+			config, logMgr, createMode, forceRecoveryFromExistingFiles);
 
 		ClusterVersionId clsVersionId = GS_CLUSTER_MESSAGE_CURRENT_VERSION;
 		ClusterManager clsMgr(config, &pt, clsVersionId);
@@ -355,9 +410,15 @@ int main(int argc, char **argv) {
 
 		EventEngine::Config eeConfig;
 
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+		util::VariableSizeAllocator<> notifyAlloc(
+			(util::AllocatorInfo(ALLOCATOR_GROUP_MAIN, "notifyAlloc")));
+		ClusterService clsSvc(config, eeConfig, source, "CLUSTER_SERVICE",
+			clsMgr, clsVersionId, errorHandler, notifyAlloc);
+#else
 		ClusterService clsSvc(config, eeConfig, source, "CLUSTER_SERVICE",
 			clsMgr, clsVersionId, errorHandler);
-
+#endif
 		SyncService syncSvc(config, eeConfig, source, "SYNC_SERVICE", syncMgr,
 			clsVersionId, errorHandler);
 
@@ -381,10 +442,12 @@ int main(int argc, char **argv) {
 		StatTable stats(tableAlloc);
 		stats.initialize();
 
+
 		ManagerSet mgrSet(&clsSvc, &syncSvc, &txnSvc, &cpSvc, &sysSvc, &trgSvc,
 			&pt, &dataStore, &logMgr, &clsMgr, &syncMgr, &txnMgr, &chunkMgr,
 			&recoveryMgr, objectMgr, &fixedSizeAlloc, &varSizeAlloc, &config,
-			&stats);
+			&stats
+			);
 
 		recoveryMgr.initialize(mgrSet);
 
@@ -430,7 +493,11 @@ int main(int argc, char **argv) {
 
 		try {
 			sysSvc.start();
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+			clsSvc.start(source);
+#else
 			clsSvc.start();
+#endif
 			syncSvc.start();
 			txnSvc.start();
 			cpSvc.start(source);
@@ -461,7 +528,7 @@ int main(int argc, char **argv) {
 #ifdef MAIN_CAPTURE_SIGNAL
 			int signo;
 			while (1) {
-				if (sigwait(&ss, &signo) == 0) {
+				if (sigwait(&ss1, &signo) == 0) {
 					if (SIGINT == signo) {  
 						if (!checkOnly) {
 							cleanupPidFile(pidFileName, pidFile);
@@ -506,7 +573,6 @@ int main(int argc, char **argv) {
 
 			try {
 				clsSvc.shutdownAllService();
-
 				clsSvc.waitForShutdown();
 				syncSvc.waitForShutdown();
 				txnSvc.waitForShutdown();
@@ -651,6 +717,21 @@ static void cleanupOnNormalShutdown(const Event::Source &eventSource,
 	sysSvc.shutdownNode(eventSource, alloc, normalShutdown);
 }
 
+
+#ifdef MAIN_CAPTURE_SIGNAL
+void signal_handler(int sig, siginfo_t *siginfo, void *param) {
+	int nptrs;
+	const int FRAME_DEPTH = 50;
+	void *buffer[FRAME_DEPTH];
+
+	nptrs = backtrace(buffer, FRAME_DEPTH);
+
+	backtrace_symbols_fd(buffer, nptrs, STDOUT_FILENO);
+
+	abort();
+}
+#endif
+
 #define MAIN_TRACE_DECLARE(configTable, name, defaultLevel)                    \
 	declareTraceConfigConstraints(                                             \
 		CONFIG_TABLE_ADD_PARAM(configTable, CONFIG_TABLE_TRACE_##name, INT32), \
@@ -699,6 +780,11 @@ void MainConfigSetUpHandler::operator()(ConfigTable &config) {
 	MAIN_TRACE_DECLARE(config, EVENT_ENGINE, WARNING);
 	MAIN_TRACE_DECLARE(config, TRIGGER_SERVICE, ERROR);
 	MAIN_TRACE_DECLARE(config, MESSAGE_LOG_TEST, ERROR);
+	MAIN_TRACE_DECLARE(config, CLUSTER_INFO_TRACE, ERROR);
+	MAIN_TRACE_DECLARE(config, SYSTEM, ERROR);
+	MAIN_TRACE_DECLARE(config, BTREE_MAP, ERROR);
+	MAIN_TRACE_DECLARE(config, AUTHENTICATION_TIMEOUT, ERROR);
+
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TRACE_OUTPUT_TYPE, INT32)
 		.setExtendedType(ConfigTable::EXTENDED_TYPE_ENUM)
 		.addEnum(util::TraceOption::OUTPUT_NONE, "OUTPUT_NONE")
@@ -762,6 +848,13 @@ ConfigTable::Constraint &MainConfigSetUpHandler::declareTraceConfigConstraints(
 }
 
 
+void setMinOutputLevel(const ConfigTable *config, util::TraceManager &manager,
+	ConfigTable::ParamId id) {
+	util::Tracer &tracer = manager.resolveTracer(
+		ParamTable::getParamSymbol(config->getName(id), false, 3).c_str());
+	tracer.setMinOutputLevel(config->get<int32_t>(id));
+}
+
 void setUpTrace(const ConfigTable *config, bool checkOnly) {
 	util::TraceManager &manager = util::TraceManager::getInstance();
 
@@ -785,11 +878,8 @@ void setUpTrace(const ConfigTable *config, bool checkOnly) {
 
 	for (ConfigTable::ParamId id = CONFIG_TABLE_TRACE_TRACER_ID_START;
 		 ++id < CONFIG_TABLE_TRACE_TRACER_ID_END;) {
-		util::Tracer &tracer = manager.resolveTracer(
-			ParamTable::getParamSymbol(config->getName(id), false, 3).c_str());
-		tracer.setMinOutputLevel(config->get<int32_t>(id));
+		setMinOutputLevel(config, manager, id);
 	}
-
 	manager.setMaxRotationFileCount(
 		config->get<int32_t>(CONFIG_TABLE_TRACE_FILE_COUNT));
 
@@ -819,4 +909,8 @@ void setUpAllocator() {
 	manager.addGroup(parentId, ALLOCATOR_GROUP_TXN_RESULT, "transactionResult");
 	manager.addGroup(parentId, ALLOCATOR_GROUP_TXN_WORK, "transactionWork");
 
+}
+
+void StackMemoryLimitOverErrorHandler::operator()(util::Exception &e) {
+	GS_RETHROW_USER_OR_SYSTEM(e, "");
 }

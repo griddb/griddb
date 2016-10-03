@@ -516,7 +516,7 @@ public:
 };
 
 /*!
-	@brief Handles recieving Sync message
+	@brief Handles receiving Sync message
 */
 class RecvSyncMessageHandler : public SyncHandler {
 public:

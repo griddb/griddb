@@ -28,6 +28,8 @@
 #include "cluster_common.h"
 #include "data_type.h"
 
+#include "event_engine.h"
+class ClusterManager;
 
 #include "msgpack.hpp"
 class ConfigTable;
@@ -79,7 +81,7 @@ struct NodeAddress {
 	}
 
 	bool isValid() {
-		return (address_ != 0);
+		return (address_ != 0 && port_ >= 0);
 	}
 
 	bool operator==(const NodeAddress &nodeAddress) const {
@@ -125,21 +127,42 @@ struct AddressInfo {
 	AddressInfo(NodeAddress &clusterAddress, NodeAddress &txnAddress,
 		NodeAddress &syncAddress, NodeAddress &systemAddress)
 		: clusterAddress_(clusterAddress),
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+		  transactionAddress_(txnAddress),
+#else
 		  txnAddress_(txnAddress),
+#endif
 		  syncAddress_(syncAddress),
 		  systemAddress_(systemAddress),
-		  isActive_(false) {}
+		  isActive_(false) {
+	}
 
 	NodeAddress &getNodeAddress(ServiceType type);
 
 	void setNodeAddress(ServiceType type, NodeAddress &address);
+
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+	bool operator<(const AddressInfo &right) const {
+		if (clusterAddress_.address_ < right.clusterAddress_.address_) {
+			return true;
+		}
+		if (clusterAddress_.address_ > right.clusterAddress_.address_) {
+			return false;
+		}
+		return (clusterAddress_.port_ < right.clusterAddress_.port_);
+	}
+#endif
 
 	std::string dump() {
 		util::NormalOStringStream ss;
 		ss << "NodeAddress:{"
 		   << "cluster:{" << clusterAddress_.dump() << "}, "
 		   << "sync:{" << syncAddress_.dump() << "}, "
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+		   << "transaction:{" << transactionAddress_.dump() << "}, "
+#else
 		   << "transaction:{" << txnAddress_.dump() << "}, "
+#endif
 		   << "system:{" << systemAddress_.dump() << "}, "
 		   << "isActive:{" << isActive_ << "}"
 		   << "}";
@@ -148,14 +171,26 @@ struct AddressInfo {
 
 
 	NodeAddress clusterAddress_;
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+	NodeAddress transactionAddress_;
+#else
 	NodeAddress txnAddress_;
+#endif
 	NodeAddress syncAddress_;
 	NodeAddress systemAddress_;
+	NodeAddress sqlServiceAddress_;
 	NodeAddress dummy1_;
 	NodeAddress dummy2_;
 	bool isActive_;
+
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+	MSGPACK_DEFINE(clusterAddress_, transactionAddress_, syncAddress_,
+		systemAddress_, sqlServiceAddress_, dummy1_, dummy2_, isActive_);
+#else
 	MSGPACK_DEFINE(clusterAddress_, txnAddress_, syncAddress_, systemAddress_,
-		dummy1_, dummy2_, isActive_);
+		sqlServiceAddress_, dummy1_, dummy2_, isActive_);
+
+#endif
 };
 
 /*!
@@ -656,6 +691,12 @@ public:
 
 	~PartitionTable();
 
+	void initialize(ClusterManager *clsMgr) {
+		clsMgr_ = clsMgr;
+	}
+
+	EventMonotonicTime getMonotonicTime();
+
 	NodeId getOwner(PartitionId pId, TableType type = PT_CURRENT_OB);
 
 	bool isOwner(PartitionId pId, NodeId targetNodeDescriptor = 0,
@@ -696,6 +737,24 @@ public:
 
 	void setRepairLsn(PartitionId pId, LogSequentialNumber lsn) {
 		repairLsnList_[pId] = lsn;
+	}
+
+	bool setGapCount(PartitionId pId) {
+		gapCountList_[pId]++;
+		if (gapCountList_[pId] > PartitionConfig::PT_LSN_NOTCHANGE_COUNT_MAX) {
+			return true;
+		}
+		else {
+			return false;
+		}
+	}
+
+	void resetGapCount(PartitionId pId) {
+		gapCountList_[pId] = 0;
+	}
+
+	int32_t getGapCount(PartitionId pId) {
+		return gapCountList_[pId];
 	}
 
 	bool checkMaxLsn(PartitionId pId, LogSequentialNumber lsn) {
@@ -1054,19 +1113,11 @@ public:
 		return nodes_[nodeId].nodeBaseInfo_[type].address_.toString();
 	}
 
-	void setFailoverTime() {
-		prevFailoverTime_ =
-			util::DateTime::now(TRIM_MILLISECONDS).getUnixTime();
-	}
+	void setFailoverTime();
 	void resetFailoverTime() {
 		prevFailoverTime_ = 0;
 	}
-	bool checkFailoverTime() {
-		int64_t currentTime =
-			util::DateTime::now(TRIM_MILLISECONDS).getUnixTime();
-		return ((currentTime - prevFailoverTime_) >
-				PartitionConfig::PT_FAILOVER_LIMIT_TIME);
-	}
+	bool checkFailoverTime();
 
 	std::string dumpNodeSet(std::set<NodeId> &nodeSet) {
 		util::NormalOStringStream ss;
@@ -1954,6 +2005,27 @@ private:
 		}
 	}
 
+	bool checkNextCandOwner(PartitionId pId, NodeId nodeId, bool isOwnerActive,
+		PartitionRole *currentRole) {
+		LogSequentialNumber targetLsn = getLSN(pId, nodeId);
+		LogSequentialNumber &maxLsn = maxLsnList_[pId];
+
+		if (isOwnerActive) {
+			if (((getPartitionStatus(pId, nodeId) == PT_ON) &&
+					currentRole->isOwner(nodeId)) ||
+				currentRole->isBackup(nodeId) ||
+				(prevCatchupPId_ == pId && prevCatchupNodeId_ == nodeId &&
+					checkPromoteOwnerCatchupLsnGap(maxLsn, targetLsn))) {
+				return true;
+			}
+		}
+		else {
+			if (maxLsn <= targetLsn) {
+				return true;
+			}
+		}
+	}
+
 
 
 	util::FixedSizeAllocator<util::Mutex> fixedSizeAlloc_;
@@ -1966,6 +2038,8 @@ private:
 	std::vector<LogSequentialNumber> maxLsnList_;
 	std::vector<LogSequentialNumber> repairLsnList_;
 	std::vector<NodeId> currentActiveOwnerList_;
+
+	std::vector<int32_t> gapCountList_;
 
 	util::Mutex revisionLock_;
 	util::Mutex nodeInfoLock_;
@@ -1997,6 +2071,8 @@ private:
 	bool failCatchup_;
 	bool isRepaired_;
 	int64_t prevFailoverTime_;
+
+	ClusterManager *clsMgr_;
 
 };
 

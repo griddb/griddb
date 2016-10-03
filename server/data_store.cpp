@@ -67,17 +67,19 @@ DataStoreValueLimitConfig::DataStoreValueLimitConfig(
 ExtendedContainerName::ExtendedContainerName(util::StackAllocator &alloc,
 	const char *extContainerName, size_t extContainerNameLen)
 	: alloc_(alloc),
+	  fullPathName_(alloc),
 	  databaseId_(UNDEF_DBID),
 	  databaseName_(NULL),
 	  containerName_(NULL) {
-	fullPathName_ = ALLOC_NEW(alloc) char[extContainerNameLen + 1];
-	memcpy(fullPathName_, extContainerName, extContainerNameLen);
-	fullPathName_[extContainerNameLen] = '\0';
+	char *tmpName = ALLOC_NEW(alloc) char[extContainerNameLen + 1];
+	memcpy(tmpName, extContainerName, extContainerNameLen);
+	tmpName[extContainerNameLen] = '\0';
+	fullPathName_.append(tmpName);
 }
 
 ExtendedContainerName::ExtendedContainerName(util::StackAllocator &alloc,
 	DatabaseId databaseId, const char *databaseName, const char *containerName)
-	: alloc_(alloc) {
+	: alloc_(alloc), fullPathName_(alloc) {
 	size_t len = strlen(databaseName) + 1;
 	databaseName_ = ALLOC_NEW(alloc) char[len];
 	memcpy(databaseName_, databaseName, len);
@@ -135,6 +137,7 @@ ResultSet *DataStore::getResultSet(TransactionContext &txn, ResultSetId rsId) {
 	}
 	return rs;
 }
+
 
 /*!
 	@brief Close ResultSet
@@ -294,6 +297,7 @@ DataStore::DataStore(const ConfigTable &configTable, ChunkManager *chunkManager)
 DataStore::~DataStore() {
 	for (uint32_t i = 0; i < pgConfig_.getPartitionCount(); ++i) {
 		objectManager_->validateRefCounter(i);
+		forceCloseAllResultSet(i);
 	}
 
 	for (uint32_t i = 0; i < pgConfig_.getPartitionGroupCount(); ++i) {
@@ -431,7 +435,6 @@ void DataStore::dropContainer(TransactionContext &txn, PartitionId pId,
 			partitionHeadearObject.setMetaMapOId(containerMap.getBaseOId());
 		}
 
-
 		if (!container->isInvalid()) {  
 			container->finalize(txn);
 		}
@@ -494,7 +497,7 @@ BaseContainer *DataStore::getContainer(TransactionContext &txn, PartitionId pId,
 				ALLOC_NEW(txn.getDefaultAllocator()) TimeSeries(txn, this, oId);
 		} break;
 		default:
-			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_DS_CONTAINER_TYPE_INVALID, "");
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
 			break;
 		}
 
@@ -517,7 +520,7 @@ BaseContainer *DataStore::getContainer(TransactionContext &txn, PartitionId pId,
 		}
 		OId oId = containerIdTable_->get(pId, containerId);
 		if (UNDEF_OID == oId) {
-			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_ID_INVALID, "");
+			GS_THROW_USER_ERROR(GS_ERROR_DS_CONTAINER_UNEXPECTEDLY_REMOVED, "");
 		}
 		ContainerType realContainerType = getContainerType(txn, containerId);
 		if (containerType != ANY_CONTAINER &&
@@ -535,7 +538,7 @@ BaseContainer *DataStore::getContainer(TransactionContext &txn, PartitionId pId,
 				ALLOC_NEW(txn.getDefaultAllocator()) TimeSeries(txn, this, oId);
 		} break;
 		default:
-			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_DS_CONTAINER_TYPE_INVALID, "");
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
 			break;
 		}
 
@@ -576,7 +579,7 @@ BaseContainer *DataStore::getContainerForRestore(
 	TransactionContext &txn, PartitionId, OId oId, uint8_t containerType) {
 	try {
 		if (UNDEF_OID == oId) {
-			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_ID_INVALID, "");
+			GS_THROW_USER_ERROR(GS_ERROR_DS_CONTAINER_UNEXPECTEDLY_REMOVED, "");
 		}
 		if (containerType != COLLECTION_CONTAINER &&
 			containerType != TIME_SERIES_CONTAINER) {
@@ -593,7 +596,7 @@ BaseContainer *DataStore::getContainerForRestore(
 				ALLOC_NEW(txn.getDefaultAllocator()) TimeSeries(txn, this, oId);
 		} break;
 		default:
-			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_DS_CONTAINER_TYPE_INVALID, "");
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
 			break;
 		}
 
@@ -767,7 +770,7 @@ BaseContainer *DataStore::createContainer(TransactionContext &txn,
 		container = ALLOC_NEW(txn.getDefaultAllocator()) TimeSeries(txn, this);
 	} break;
 	default:
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_DS_CONTAINER_TYPE_INVALID, "");
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
 		break;
 	}
 
@@ -828,7 +831,7 @@ void DataStore::changeContainerSchema(TransactionContext &txn, PartitionId pId,
 			ALLOC_NEW(txn.getDefaultAllocator()) TimeSeries(txn, this);
 	} break;
 	default:
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_DS_CONTAINER_TYPE_INVALID, "");
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
 		break;
 	}
 	newContainer->initialize(txn);
@@ -896,7 +899,6 @@ void DataStore::changeContainerSchema(TransactionContext &txn, PartitionId pId,
 	}
 	container->updateTrigger(txn, oldColumnNameList, newColumnNameList);
 }
-
 
 OId DataStore::getColumnSchemaId(TransactionContext &txn, PartitionId pId,
 	MessageSchema *messageSchema, int64_t schemaHashKey) {
@@ -1104,7 +1106,6 @@ void DataStore::restartPartition(
 }
 
 
-
 /*!
 	@brief Restore ContainerIdTable in the partition
 */
@@ -1254,8 +1255,7 @@ void DataStore::ContainerIdTable::set(PartitionId pId, ContainerId containerId,
 		ContainerInfoCache containerInfoCache(
 			oId, databaseVersionId, attribute);
 		itr = containerIdMap_[pId].insert(
-			std::make_pair(
-				containerId, containerInfoCache));
+			std::make_pair(containerId, containerInfoCache));
 		if (!itr.second) {
 			GS_THROW_SYSTEM_ERROR(
 				GS_ERROR_DS_DS_CONTAINER_ID_INVALID, "duplicate container id");
@@ -1326,6 +1326,7 @@ void DataStore::ContainerIdTable::getList(
 			e, GS_EXCEPTION_MERGE_MESSAGE(e, "Failed to list container"));
 	}
 }
+
 
 void DataStore::dumpPartition(TransactionContext &txn, PartitionId pId,
 	DumpType type, const char *fileName) {
@@ -1448,6 +1449,7 @@ bool DataStore::containerIdMapAsc::operator()(
 	return left.first < right.first;
 }
 
+
 /*!
 	@brief Returns names of Container to meet a given condition in the partition
 */
@@ -1518,6 +1520,7 @@ void DataStore::getContainerNameList(TransactionContext &txn, PartitionId pId,
 		handleSearchError(e, GS_ERROR_DS_DS_GET_CONTAINER_LIST_FAILED);
 	}
 }
+
 
 DataStore::Latch::Latch(TransactionContext &txn, PartitionId pId,
 	DataStore *dataStore, ClusterService *clusterService)
@@ -1629,7 +1632,9 @@ void DataStore::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.setDefault(128);
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_STORE_BLOCK_SIZE, INT32)
 		.setUnit(ConfigTable::VALUE_UNIT_SIZE_B, true)
+		.add("32KB")
 		.add("64KB")
+		.add("128KB")
 		.add("1MB")
 		.setDefault("64KB");
 
@@ -1657,6 +1662,12 @@ void DataStore::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.setMin(1)
 		.setMax(10000)
 		.setDefault(4);
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_DS_STORE_COMPRESSION_MODE, INT32)
+		.setExtendedType(ConfigTable::EXTENDED_TYPE_ENUM)
+		.addEnum(ChunkManager::NO_BLOCK_COMPRESSION, "NO_COMPRESSION")
+		.addEnum(ChunkManager::BLOCK_COMPRESSION, "COMPRESSION")
+		.setDefault(ChunkManager::NO_BLOCK_COMPRESSION);
 
 	CONFIG_TABLE_ADD_PARAM(
 		config, CONFIG_TABLE_DS_IO_WARNING_THRESHOLD_MILLIS, INT32)

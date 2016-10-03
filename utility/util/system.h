@@ -59,9 +59,6 @@ namespace util {
 /*!
     @brief Status of using memory.
 */
-
-
-
 class MemoryStatus {
 public:
 
@@ -86,21 +83,12 @@ private:
 
 #if UTIL_MINOR_MODULE_ENABLED
 
-
 class SharedObject {
 public:
-	
-	
-	
-	
 	void open(const char8_t *path, int type);
 
-	
 	void close(void);
 
-	
-	
-	
 	void* getSymbol(const char8_t *symbol);
 
 public:
@@ -115,42 +103,18 @@ private:
 	void *data_;
 };
 
-
 class System {
 public:
-	
-	
-	
 	static std::string& getCurrentDirectory(std::string &out);
 
-	
-	
-	
-	
 	static char* getCurrentDirectory(char *buf, size_t blen);
 
 
 
-
-
-
-
-
-
-
-	
-	
-	
-	
-	
 	static void getLibraryVersion(int *major, int *minor, int *patch, int *rel);
 
-	
-	
 	static size_t getCPUCount(void);
 
-	
-	
 	static size_t getOnlineCPUCount(void);
 
 private:
@@ -161,57 +125,36 @@ private:
 
 class Group;
 
-
 class User {
 public:
-	
-	
-	
 	void getUser(uid_t uid);
 
-	
-	
-	
 	void getUser(const char *id);
 
-	
-	
 	inline const char* getID(void) const {
 		return id_.c_str();
 	}
 
-	
-	
 	inline const char* getPassword(void) const {
 		return password_.c_str();
 	}
 
-	
-	
 	inline uid_t getUID(void) const {
 		return uid_;
 	}
 
-	
-	
 	inline gid_t getGID(void) const {
 		return gid_;
 	}
 
-	
-	
 	inline const char* getName(void) const {
 		return name_.c_str();
 	}
 
-	
-	
 	inline const char* getHomeDirectory(void) const {
 		return homedir_.c_str();
 	}
 
-	
-	
 	inline const char* getShell(void) const {
 		return shell_.c_str();
 	}
@@ -230,55 +173,35 @@ private:
 	std::string shell_;
 };
 
-
 class Group {
 public:
-	
 	typedef std::list<std::string> user_cont;
 
-	
 	typedef user_cont::iterator user_itr;
 
-	
 	typedef user_cont::const_iterator user_citr;
 
 public:
-	
-	
-	
 	void getGroup(gid_t gid);
 
-	
-	
-	
 	void getGroup(const char *id);
 
-	
-	
 	inline const char* getID(void) const {
 		return id_.c_str();
 	}
 
-	
-	
 	inline const char* getPassword(void) const {
 		return password_.c_str();
 	}
 
-	
-	
 	inline uid_t getGID(void) const {
 		return gid_;
 	}
 
-	
-	
 	inline user_cont& getUsers(void) {
 		return users_;
 	}
 
-	
-	
 	inline const user_cont& getUsers(void) const {
 		return users_;
 	}

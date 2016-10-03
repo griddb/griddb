@@ -124,6 +124,10 @@ public class GSException extends IOException {
 			return ((GSException) cause).description;
 		}
 
+		if (cause != null) {
+			return cause.getMessage(); 
+		}
+
 		return null;
 	}
 

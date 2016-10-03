@@ -428,7 +428,6 @@ int SelectionTimeInterpolated::operator()(TransactionContext &txn,
 
 	getInterpolatedValue(txn, baseTs, v1.getValue(), v2.getValue(), t1, t2, v);
 
-	uint64_t resultNum = 0;
 	rowArray.load(txn, resultRowIdList[pos - 1], &timeSeries,
 		OBJECT_READ_ONLY);  
 	TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
@@ -438,7 +437,6 @@ int SelectionTimeInterpolated::operator()(TransactionContext &txn,
 	messageRowStore->setField(0, timeVal);
 	messageRowStore->next();  
 	resultType = RESULT_ROWSET;
-	resultNum = 1;
 	return 1;
 }
 
@@ -673,8 +671,6 @@ int SelectionTimeSampling::operator()(TransactionContext &txn,
 		starIdList.push_back(arRowList[i].rowid);
 	}
 
-	uint64_t resultNum = 0;
-
 	for (uint32_t i = 0; i < starIdList.size(); ++i) {
 		rowArray.load(txn, starIdList[i], &timeSeries,
 			OBJECT_READ_ONLY);  
@@ -689,7 +685,6 @@ int SelectionTimeSampling::operator()(TransactionContext &txn,
 		}
 		messageRowStore->next();  
 	}
-	resultNum = starIdList.size();
 
 	resultType = RESULT_ROWSET;
 	return static_cast<int>(arRowList.size());

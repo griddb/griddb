@@ -24,6 +24,10 @@
 #include "config_table.h"
 #include "checkpoint_file.h"
 #include <algorithm>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <linux/falloc.h>
+#endif
 
 
 UTIL_TRACER_DECLARE(IO_MONITOR);
@@ -39,7 +43,8 @@ const char8_t *const CheckpointFile::gsCpFileSeparator = "_";
 */
 CheckpointFile::CheckpointFile(
 	uint8_t chunkExpSize, const std::string &dir, PartitionGroupId pgId)
-	: CHUNK_SIZE_(1UL << chunkExpSize),
+	: BLOCK_EXP_SIZE_(chunkExpSize),
+	  BLOCK_SIZE_(1UL << chunkExpSize),
 	  file_(NULL),
 	  usedChunkInfo_(10240),
 	  validChunkInfo_(10240),
@@ -106,7 +111,8 @@ bool CheckpointFile::open(bool checkOnly, bool createMode) {
 			}
 			util::FileStatus status;
 			file_->getStatus(&status);
-			int64_t chunkNum = status.getSize() / CHUNK_SIZE_;
+			int64_t chunkNum =
+				(status.getSize() + BLOCK_SIZE_ - 1) / BLOCK_SIZE_;
 			blockNum_ = chunkNum;
 			usedChunkInfo_.reserve(chunkNum + 1);
 			usedChunkInfo_.set(chunkNum + 1, false);
@@ -314,6 +320,38 @@ void CheckpointFile::initializeValidBlockInfo(
 /*!
 	@brief Write chunkSize-block.
 */
+void CheckpointFile::punchHoleBlock(uint32_t size, uint64_t offset) {
+#ifdef _WIN32
+#else
+	const uint64_t startClock = util::Stopwatch::currentClock();  
+	try {
+		if (0 < size) {
+			file_->preAllocate(
+				FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE, offset, size);
+		}
+	}
+	catch (std::exception &e) {
+		GS_RETHROW_SYSTEM_ERROR(e, "Checkpoint file fallocate failed. (reason="
+									   << GS_EXCEPTION_MESSAGE(e) << fileName_
+									   << ",pgId," << pgId_ << ",offset,"
+									   << offset << ",size," << size << ")");
+	}
+
+	const uint32_t lap = util::Stopwatch::clockToMillis(
+		util::Stopwatch::currentClock() - startClock);
+	if (lap > ioWarningThresholdMillis_) {  
+		UTIL_TRACE_WARNING(IO_MONITOR,
+			"[LONG I/O] punching hole time,"
+				<< lap << ",fileName," << fileName_ << ",pgId," << pgId_
+				<< ",chunkNth," << offset << ",size," << size
+				<< ",writeBlockCount_=" << writeBlockCount_);
+	}
+#endif
+}
+
+/*!
+	@brief Write chunkSize-block.
+*/
 int64_t CheckpointFile::writeBlock(
 	const uint8_t *buffer, uint32_t size, uint64_t blockNo) {
 	try {
@@ -323,31 +361,39 @@ int64_t CheckpointFile::writeBlock(
 				util::FileFlag::TYPE_CREATE | util::FileFlag::TYPE_READ_WRITE);
 			file_->lock();
 		}
-		uint64_t writeOffset = blockNo;
 
 		const uint64_t startClock =
 			util::Stopwatch::currentClock();  
-		file_->write(buffer, size * CHUNK_SIZE_, blockNo * CHUNK_SIZE_);
+		ssize_t writtenSize = file_->write(
+			buffer, (size << BLOCK_EXP_SIZE_), (blockNo << BLOCK_EXP_SIZE_));
+		if (static_cast<uint64_t>(writtenSize) != (size << BLOCK_EXP_SIZE_)) {
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_CF_WRITE_CHUNK_FAILED,
+				"invalid size, expected = " << (size << BLOCK_EXP_SIZE_)
+											<< ", actural = " << writtenSize);
+		}
+
 		const uint32_t lap = util::Stopwatch::clockToMillis(
 			util::Stopwatch::currentClock() - startClock);
-
-		++writeBlockCount_;
-
 		if (lap > ioWarningThresholdMillis_) {  
 			UTIL_TRACE_WARNING(
 				IO_MONITOR, "[LONG I/O] write time,"
 								<< lap << ",fileName," << fileName_ << ",pgId,"
-								<< pgId_ << ",chunkNth," << writeOffset
+								<< pgId_ << ",chunkNth," << blockNo
 								<< ",writeBlockCount_=" << writeBlockCount_);
 		}
 
-		if (blockNum_ < (size + writeOffset)) {
-			blockNum_ = (size + writeOffset);
-			UTIL_TRACE_INFO(
-				CHECKPOINT_FILE, fileName_ + " extended. File size = "
-									 << (writeOffset + size) << "(MByte)"
-									 << ",blockNum_=" << blockNum_);
+		if (blockNum_ < (size + blockNo)) {
+			blockNum_ = (size + blockNo);
+			UTIL_TRACE_INFO(CHECKPOINT_FILE,
+				fileName_ + " extended. File size = "
+					<< (blockNo + size) << ",blockNum_=" << blockNum_);
 		}
+
+		uint64_t writeBlockNum = (writtenSize >> BLOCK_EXP_SIZE_);
+		writeBlockCount_ += writeBlockNum;
+		UTIL_TRACE_INFO(CHECKPOINT_FILE,
+			fileName_ << ",blockNo," << blockNo
+					  << ",writeBlockCount=" << writeBlockCount_);
 		return size;
 	}
 	catch (std::exception &e) {
@@ -361,7 +407,7 @@ int64_t CheckpointFile::writeBlock(
 /*!
 	@brief Write byteSize-data.
 */
-int64_t CheckpointFile::writeBytes(
+int64_t CheckpointFile::writePartialBlock(
 	const uint8_t *buffer, uint32_t size, uint64_t offset) {
 	assert(offset >= 0);
 	try {
@@ -371,22 +417,38 @@ int64_t CheckpointFile::writeBytes(
 				util::FileFlag::TYPE_CREATE | util::FileFlag::TYPE_READ_WRITE);
 			file_->lock();
 		}
-		uint64_t writeOffset = offset;
 
 		const uint64_t startClock =
 			util::Stopwatch::currentClock();  
-		file_->write(buffer, size, offset);
+		ssize_t writtenSize = file_->write(buffer, size, offset);
+
+		if (static_cast<uint64_t>(writtenSize) != size) {
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_CF_WRITE_CHUNK_FAILED,
+				"invalid size, expected = " << size
+											<< ", actural = " << writtenSize);
+		}
+
 		const uint32_t lap = util::Stopwatch::clockToMillis(
 			util::Stopwatch::currentClock() - startClock);  
-
-		if (lap > ioWarningThresholdMillis_) {  
+		if (lap > ioWarningThresholdMillis_) {				
 			UTIL_TRACE_WARNING(IO_MONITOR, "[LONG I/O] write time,"
 											   << lap << ",fileName,"
 											   << fileName_ << ",pgId," << pgId_
-											   << ",chunkNth," << writeOffset);
+											   << ",chunkNth," << offset);
 		}
 
-		return writeOffset;
+		if ((blockNum_ << BLOCK_EXP_SIZE_) < size + offset) {
+			blockNum_ = ((size + offset + BLOCK_SIZE_ - 1) >> BLOCK_EXP_SIZE_);
+			UTIL_TRACE_INFO(
+				CHECKPOINT_FILE, fileName_ + " extended. File size = "
+									 << (size + offset) << "(Byte)"
+									 << ",blockNum_=" << blockNum_);
+		}
+
+		UTIL_TRACE_INFO(CHECKPOINT_FILE,
+			fileName_ << ",write, offset," << offset << ",size=" << size);
+
+		return writtenSize;
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_SYSTEM_ERROR(e, "Checkpoint file write failed. (reason="
@@ -399,6 +461,13 @@ int64_t CheckpointFile::writeBytes(
 */
 int64_t CheckpointFile::readBlock(
 	uint8_t *buffer, uint32_t size, uint64_t blockNo) {
+	if (blockNum_ < size + blockNo - 1) {
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_CF_READ_CHUNK_FAILED,
+			"Checkpoint file read failed. (reason= invalid parameter."
+				<< " size = " << size << ", blockNo = " << blockNo
+				<< ", blockNum = " << blockNum_ << ")");
+	}
+
 	try {
 		if (!file_) {
 			if (util::FileSystem::exists(fileName_.c_str())) {
@@ -410,76 +479,49 @@ int64_t CheckpointFile::readBlock(
 				return 0;
 			}
 		}
-		if (blockNum_ >= size + blockNo - 1) {
-			const uint64_t startClock =
-				util::Stopwatch::currentClock();  
-			ssize_t readSize =
-				file_->read(buffer, size * CHUNK_SIZE_, blockNo * CHUNK_SIZE_);
-			const uint32_t lap = util::Stopwatch::clockToMillis(
-				util::Stopwatch::currentClock() - startClock);  
+		const uint64_t startClock =
+			util::Stopwatch::currentClock();  
+		ssize_t readSize = file_->read(
+			buffer, (size << BLOCK_EXP_SIZE_), (blockNo << BLOCK_EXP_SIZE_));
 
-			readBlockCount_ += (readSize / CHUNK_SIZE_);
-			UTIL_TRACE_INFO(CHECKPOINT_FILE,
-				fileName_ << ",blockNo," << blockNo
-						  << ",readBlockCount_=" << readBlockCount_);
-			if (lap > ioWarningThresholdMillis_) {  
-				UTIL_TRACE_WARNING(IO_MONITOR,
-					"[LONG I/O] read time," << lap << ",fileName," << fileName_
-											<< ",blockNo," << blockNo
-											<< ",blockCount," << size);
-			}
-			return readSize / CHUNK_SIZE_;
-		}
-		else {
-			return 0;
-		}
-	}
-	catch (std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(e, "Checkpoint file read failed. (reason="
-									   << GS_EXCEPTION_MESSAGE(e) << ")");
-	}
-}
-
-/*!
-	@brief Read byteSize-data.
-*/
-int64_t CheckpointFile::readBytes(
-	uint8_t *buffer, uint32_t size, uint64_t offset) {
-	assert(offset != -1);
-	try {
-		if (!file_) {
-			if (util::FileSystem::exists(fileName_.c_str())) {
-				file_ = UTIL_NEW util::NamedFile();
-				file_->open(fileName_.c_str(), util::FileFlag::TYPE_READ_WRITE);
-				file_->lock();
+		if (static_cast<uint64_t>(readSize) != (size << BLOCK_EXP_SIZE_)) {
+			util::FileStatus status;
+			file_->getStatus(&status);
+			if ((readSize < (size << BLOCK_EXP_SIZE_)) &&
+				(static_cast<uint64_t>(status.getSize()) < ((blockNo + size) << BLOCK_EXP_SIZE_))) {
+				uint32_t tailBlankSize = (size << BLOCK_EXP_SIZE_) - readSize;
+				memset(buffer + readSize, 0, tailBlankSize);
+				readSize += tailBlankSize;
 			}
 			else {
-				return 0;
+				GS_THROW_SYSTEM_ERROR(GS_ERROR_CF_READ_CHUNK_FAILED,
+					"invalid size, expected = " << (size << BLOCK_EXP_SIZE_)
+												<< ", actural = " << readSize);
 			}
 		}
-		if (blockNum_ * CHUNK_SIZE_ >= (size + offset - 1)) {
-			const uint64_t startClock =
-				util::Stopwatch::currentClock();  
-			ssize_t readSize = file_->read(buffer, size, offset);
-			const uint32_t lap = util::Stopwatch::clockToMillis(
-				util::Stopwatch::currentClock() - startClock);  
-			if (lap > ioWarningThresholdMillis_) {				
-				UTIL_TRACE_WARNING(IO_MONITOR,
-					"[LONG I/O] read time," << lap << ",fileName," << fileName_
-											<< ",offset," << offset << ",size,"
-											<< size);
-			}
-			return readSize;
+
+		const uint32_t lap = util::Stopwatch::clockToMillis(
+			util::Stopwatch::currentClock() - startClock);  
+		if (lap > ioWarningThresholdMillis_) {				
+			UTIL_TRACE_WARNING(IO_MONITOR,
+				"[LONG I/O] read time," << lap << ",fileName," << fileName_
+										<< ",blockNo," << blockNo
+										<< ",blockCount," << size);
 		}
-		else {
-			return 0;
-		}
+
+		int64_t readBlockNum = (readSize >> BLOCK_EXP_SIZE_);
+		readBlockCount_ += readBlockNum;
+		UTIL_TRACE_INFO(CHECKPOINT_FILE,
+			fileName_ << ",blockNo," << blockNo
+					  << ",readBlockCount_=" << readBlockCount_);
+		return readBlockNum;
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_SYSTEM_ERROR(e, "Checkpoint file read failed. (reason="
 									   << GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
+
 
 /*!
 	@brief Return file size.
@@ -498,6 +540,47 @@ int64_t CheckpointFile::getFileSize() {
 	return writeOffset;
 }
 
+/*!
+	@brief Close the file.
+*/
+int64_t CheckpointFile::getFileAllocateSize() {
+	if (0 < blockNum_) {
+#ifdef _WIN32
+		return getFileSize();
+#else
+		int64_t blockSize;
+		try {
+			util::FileStatus fileStatus;
+			file_->getStatus(&fileStatus);
+			blockSize = fileStatus.getBlockCount() * 512;
+		}
+		catch (std::exception &e) {
+			GS_RETHROW_SYSTEM_ERROR(e, "Checkpoint file read failed. (reason="
+										   << GS_EXCEPTION_MESSAGE(e) << ")");
+		}
+		return blockSize;
+#endif
+	}
+	return 0;
+}
+
+size_t CheckpointFile::getFileSystemBlockSize(const std::string &dir) {
+	size_t fileSystemBlockSize;
+	try {
+		util::FileSystemStatus status;
+		util::FileSystem::getStatus(dir.c_str(), &status);
+		fileSystemBlockSize = status.getBlockSize();
+	}
+	catch (std::exception &e) {
+		GS_RETHROW_SYSTEM_ERROR(e, "Directory access failed. (reason="
+									   << GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+	return fileSystemBlockSize;
+}
+
+size_t CheckpointFile::getFileSystemBlockSize() {
+	return getFileSystemBlockSize(dir_);
+}
 
 void CheckpointFile::close() {
 	if (file_) {

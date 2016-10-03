@@ -222,7 +222,7 @@ public class SubnetRowSet<R> implements RowSet<R> {
 		if (!resultCursor.hasNext()) {
 			if (remainingRowCount <= 0) {
 				throw new GSException(
-						GSErrorCode.NO_SHCH_ELEMENT,
+						GSErrorCode.NO_SUCH_ELEMENT,
 						"No more rows were found");
 			}
 			fetchFollowing();
@@ -255,7 +255,7 @@ public class SubnetRowSet<R> implements RowSet<R> {
 
 		if (!resultCursor.isInRange()) {
 			throw new GSException(
-					GSErrorCode.NO_SHCH_ELEMENT, "Cursor out of range");
+					GSErrorCode.NO_SUCH_ELEMENT, "Cursor out of range");
 		}
 
 		container.remove(mapper, transactionId,
@@ -268,7 +268,7 @@ public class SubnetRowSet<R> implements RowSet<R> {
 
 		if (!resultCursor.isInRange()) {
 			throw new GSException(
-					GSErrorCode.NO_SHCH_ELEMENT, "Cursor out of range");
+					GSErrorCode.NO_SUCH_ELEMENT, "Cursor out of range");
 		}
 
 		container.update(mapper, transactionId,
@@ -349,7 +349,7 @@ public class SubnetRowSet<R> implements RowSet<R> {
 
 			if (!rowSet.resultCursor.isInRange()) {
 				throw new GSException(
-						GSErrorCode.NO_SHCH_ELEMENT, "Cursor out of range");
+						GSErrorCode.NO_SUCH_ELEMENT, "Cursor out of range");
 			}
 
 			if (!rowSet.resultCursor.isRowIdIncluded()) {
@@ -367,7 +367,7 @@ public class SubnetRowSet<R> implements RowSet<R> {
 
 			if (!rowSet.resultCursor.isInRange()) {
 				throw new GSException(
-						GSErrorCode.NO_SHCH_ELEMENT, "Cursor out of range");
+						GSErrorCode.NO_SUCH_ELEMENT, "Cursor out of range");
 			}
 
 			if (!rowSet.container.getRowMapper().hasKey()) {
@@ -386,7 +386,7 @@ public class SubnetRowSet<R> implements RowSet<R> {
 
 		if (!hasNext()) {
 			throw new GSException(
-					GSErrorCode.NO_SHCH_ELEMENT, "Cursor out of range");
+					GSErrorCode.NO_SUCH_ELEMENT, "Cursor out of range");
 		}
 
 		final Row rowObj = (Row) mapper.decode(resultCursor, true);

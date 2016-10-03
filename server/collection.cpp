@@ -471,7 +471,8 @@ void Collection::abortInternal(TransactionContext& txn, TransactionId tId) {
 							for (rowArray.begin(); !rowArray.end();
 								 rowArray.next()) {
 								RowArray::Row row(rowArray.getRow(), &rowArray);
-								if (row.getTxnId() == tId) {
+								if (row.getTxnId() == tId &&
+									!row.isFirstUpdate()) {
 									undoCreateRow(txn, rowArray);
 									if (rowArray.getActiveRowNum() == 0) {
 										RowId rowId = rowArray.getRowId();
@@ -491,7 +492,10 @@ void Collection::abortInternal(TransactionContext& txn, TransactionId tId) {
 				}
 			}
 			for (itr = mvccList.begin(); itr != mvccList.end(); itr++) {
-				if (itr->type_ != MVCC_CREATE) {
+				if (itr->type_ == MVCC_SELECT) {
+					removeMvccMap(txn, mvccMap.get(), tId, *itr);
+				}
+				else if (itr->type_ != MVCC_CREATE) {
 					RowArray rowArray(
 						txn, itr->snapshotRowOId_, this, OBJECT_FOR_UPDATE);
 					undoUpdateRow(txn, rowArray);
@@ -536,6 +540,7 @@ void Collection::commit(TransactionContext& txn) {
 			for (itr = mvccList.begin(); itr != mvccList.end(); itr++) {
 				switch (itr->type_) {
 				case MVCC_CREATE:
+				case MVCC_SELECT:
 					{ removeMvccMap(txn, mvccMap.get(), tId, *itr); }
 					break;
 				case MVCC_UPDATE:
@@ -951,6 +956,7 @@ void Collection::searchRowIdIndex(TransactionContext& txn, uint64_t start,
 		resultList.resize(resultList.size() - skipped);
 	}
 }
+
 
 
 /*!
@@ -1524,7 +1530,10 @@ bool Collection::searchRowKeyWithMvccMap(TransactionContext& txn,
 	mvccMap.get()->getAll<TransactionId, MvccRowImage>(
 		txn, MAX_RESULT_SIZE, idList);
 	for (itr = idList.begin(); itr != idList.end(); itr++) {
-		if (itr->second.type_ == MVCC_CREATE) {
+		if (itr->second.type_ == MVCC_SELECT) {
+			continue;
+		}
+		else if (itr->second.type_ == MVCC_CREATE) {
 			continue;
 		}
 		RowArray rowArray(
@@ -1712,6 +1721,41 @@ void Collection::lockIdList(TransactionContext& txn, util::XArray<OId>& oIdList,
 	}
 }
 
+void Collection::setDummyMvccImage(TransactionContext& txn) {
+	try {
+		util::StackAllocator::Scope scope(txn.getDefaultAllocator());
+		StackAllocAutoPtr<BtreeMap> mvccMap(
+			txn.getDefaultAllocator(), getMvccMap(txn));
+		TransactionId tId = txn.getId();
+
+		bool exists = false;
+		if (!mvccMap.get()->isEmpty()) {
+			util::XArray<MvccRowImage> mvccList(txn.getDefaultAllocator());
+			util::XArray<MvccRowImage>::iterator itr;
+			BtreeMap::SearchContext sc(
+				UNDEF_COLUMNID, &tId, sizeof(tId), 0, NULL, MAX_RESULT_SIZE);
+			mvccMap.get()->search<TransactionId, MvccRowImage, MvccRowImage>(
+				txn, sc, mvccList);
+			if (!mvccList.empty()) {
+				for (itr = mvccList.begin(); itr != mvccList.end(); itr++) {
+					if (itr->type_ == MVCC_SELECT) {
+						exists = true;
+						break;
+					}
+				}
+			}
+		}
+
+		if (!exists) {
+			MvccRowImage dummyMvccImage(MVCC_SELECT, INITIAL_ROWID);
+			insertMvccMap(txn, mvccMap.get(), tId, dummyMvccImage);
+		}
+	}
+	catch (std::exception& e) {
+		GS_RETHROW_USER_OR_SYSTEM(e, "");
+	}
+}
+
 void Collection::getContainerOptionInfo(
 	TransactionContext&, util::XArray<uint8_t>&) {
 	return;
@@ -1741,7 +1785,10 @@ void Collection::checkExclusive(TransactionContext& txn) {
 	mvccMap.get()->getAll<TransactionId, MvccRowImage>(
 		txn, MAX_RESULT_SIZE, idList);
 	for (itr = idList.begin(); itr != idList.end(); itr++) {
-		if (itr->second.type_ == MVCC_CREATE) {
+		if (itr->second.type_ == MVCC_SELECT) {
+			continue;
+		}
+		else if (itr->second.type_ == MVCC_CREATE) {
 			if (getExclusiveStatus() == IS_EXCLUSIVE &&
 				txn.getId() != itr->first) {  
 				setExclusiveStatus(IS_NOT_EXCLUSIVE_CREATE_EXIST);

@@ -43,10 +43,6 @@
     (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE 
     OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
-
-
-
-
 #ifdef NDEBUG
 #if (defined(_SECURE_SCL) && _SECURE_SCL) || \
 	(defined(_HAS_ITERATOR_DEBUGGING) && _HAS_ITERATOR_DEBUGGING)
@@ -96,12 +92,9 @@ int stricmp(const char *x, const char *y) {
 	return stricmp(x, y);
 #endif
 #else
-#error
+#error 0
 #endif 
 }
-
-
-
 
 
 bool Exception::whatEnabled_ = false;
@@ -808,16 +801,10 @@ void Exception::clearEntry(Entry &entry) throw() {
 }
 
 
-
-
-
 Exception::NamedErrorCode::NamedErrorCode(
 		int32_t code, const SourceSymbolChar *nameLiteral) throw() :
 		code_(code), name_(code == 0 ? NULL : nameLiteral) {
 }
-
-
-
 
 
 Exception::Entry::Entry() throw() :
@@ -846,9 +833,6 @@ bool Exception::Entry::isEmpty(bool typeNameIgnorable) const throw() {
 }
 
 
-
-
-
 template<typename Alloc>
 Exception::NoThrowString<Alloc>::NoThrowString(
 		Stream &stream) throw() : str_(NULL) {
@@ -874,9 +858,6 @@ const char8_t* Exception::NoThrowString<Alloc>::get() const throw() {
 template struct Exception::NoThrowString<util::NormalOStringStream::allocator_type>;
 
 
-
-
-
 Exception::Field::Field(
 		const Exception &exception, FieldType fieldType, size_t depth) throw() :
 		exception_(exception), fieldType_(fieldType), depth_(depth) {
@@ -898,9 +879,6 @@ Exception::Field::Field(const Field &field) :
 }
 
 
-
-
-
 PlatformException::PlatformException(
 		UTIL_EXCEPTION_CONSTRUCTOR_ARGS_LIST) throw() :
 		Exception(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_SET) {
@@ -908,9 +886,6 @@ PlatformException::PlatformException(
 
 PlatformException::~PlatformException() throw() {
 }
-
-
-
 
 
 UtilityException::UtilityException(
@@ -954,9 +929,6 @@ UtilityException UtilityException::inherit(
 } 
 
 
-
-
-
 namespace util {
 namespace detail {
 const char8_t* RawNumberFormatter::operator()(uint64_t value) {
@@ -990,9 +962,6 @@ const char8_t* RawNumberFormatter::operator()(int32_t value) {
 }
 }	
 }	
-
-
-
 
 
 namespace util {
@@ -1059,9 +1028,6 @@ const char8_t* LocalString::tryGet(const char8_t *alternative) throw() {
 #ifdef UTIL_STACK_TRACE_ENABLED
 
 
-
-
-
 namespace util {
 struct StackTraceUtils::Impl {
 	Impl();
@@ -1086,9 +1052,6 @@ struct StackTraceUtils::Impl {
 #endif
 };
 }	
-
-
-
 
 
 namespace util {
@@ -1153,9 +1116,6 @@ std::ostream& StackTraceUtils::getStackTrace(std::ostream &stream) {
 }	
 
 
-
-
-
 namespace util {
 const std::locale *LocaleUtils::cLocale_ = NULL;
 
@@ -1189,25 +1149,16 @@ LocaleUtils::Initializer::~Initializer() {
 }	
 
 
-
-
-
 namespace util {
 NormalOStringStream::~NormalOStringStream() {
 }
 }	
 
 
-
-
-
 namespace util {
 NormalIStringStream::~NormalIStringStream() {
 }
 }	
-
-
-
 
 
 namespace util {
@@ -1279,7 +1230,6 @@ void StackTraceUtils::Impl::getSymbolName(
 		handler(formatter(static_cast<uint64_t>(intAddress)), -1);
 	}
 	else if(!SymGetSymFromAddr(process, intAddress, &dispSym, imageSymbol)) {
-		
 		util::detail::RawNumberFormatter formatter;
 		handler(formatter(static_cast<uint64_t>(intAddress)), -1);
 	}
@@ -1295,7 +1245,6 @@ void StackTraceUtils::Impl::getSymbolName(
 		StackTraceHandler &handler, char8_t *rawSymbol) {
 
 	do {
-		
 		char8_t *left = strchr(rawSymbol, '(');
 		if (left == NULL) {
 			break;
@@ -1311,7 +1260,6 @@ void StackTraceUtils::Impl::getSymbolName(
 		detail::LocalString mangled(mangledBuf, sizeof(mangledBuf));
 		mangled.tryAppend(left, right);
 
-		
 		int status = 0;
 		char8_t *demangled =
 				abi::__cxa_demangle(mangled.tryGet(), 0, 0, &status);
@@ -1340,9 +1288,6 @@ void StackTraceUtils::Impl::getSymbolName(
 }	
 
 
-
-
-
 namespace util {
 size_t StackTraceUtils::Initializer::counter_ = 0;
 
@@ -1365,9 +1310,6 @@ StackTraceUtils::Initializer::~Initializer() {
 	}
 }
 }	
-
-
-
 
 
 namespace util {
@@ -1417,9 +1359,6 @@ void StackTraceStringHandler::operator()(const char8_t *name, int32_t line) {
 #endif	
 
 
-
-
-
 namespace util {
 
 bool DebugUtils::isDebuggerAttached() {
@@ -1437,9 +1376,6 @@ void DebugUtils::interrupt() {
 }
 
 } 
-
-
-
 
 
 namespace util {
@@ -1461,9 +1397,6 @@ void DirectAllocationUtils::deallocate(void *ptr) {
 
 } 
 } 
-
-
-
 
 
 #if UTIL_FAILURE_SIMULATION_ENABLED
@@ -1503,7 +1436,6 @@ void AllocationFailureSimulator::checkOperation(int32_t targetType, size_t size)
 		if (startCount_ <= count && count < endCount_) {
 			switch (targetType) {
 			case TARGET_NEW:
-				
 				UTIL_THROW_UTIL_ERROR(CODE_NO_MEMORY,
 						"Allocation failed");
 			case TARGET_STACK_ALLOCATION:

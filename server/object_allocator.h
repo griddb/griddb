@@ -21,7 +21,7 @@
 #ifndef OBJECT_ALLOCATOR_H_
 #define OBJECT_ALLOCATOR_H_
 
-#include "data_type.h"
+#include "data_type.h"  
 #include <cassert>
 #include <iostream>
 #include <map>
@@ -177,10 +177,8 @@ private:
 	uint8_t minPower_;  
 	uint8_t maxPower_;  
 	uint32_t tableSize_;
-	uint8_t
-		hSize_;  
-	int32_t
-		freeListOffset_;  
+	uint8_t hSize_;  
+	int32_t freeListOffset_;  
 	int32_t maxFreeExpSizeOffset_;
 
 	ObjectAllocator(const ObjectAllocator &);

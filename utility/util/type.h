@@ -51,9 +51,6 @@
 #define UTIL_TYPE_H_
 
 
-
-
-
 #ifndef UTIL_MINOR_MODULE_ENABLED
 #define UTIL_MINOR_MODULE_ENABLED 0
 #endif
@@ -61,9 +58,6 @@
 #ifndef UTIL_FAILURE_SIMULATION_ENABLED
 #define UTIL_FAILURE_SIMULATION_ENABLED 0
 #endif
-
-
-
 
 
 
@@ -82,8 +76,14 @@
 #define UTIL_POINTER_SIZE 4
 #endif
 
+#if defined(__GXX_EXPERIMENTAL_CXX0X__) || __cplusplus >= 201103L
+#define UTIL_CXX11_SUPPORTED 1
+#else
+#define UTIL_CXX11_SUPPORTED 0
+#endif
+
 #if defined(_MSC_VER) && defined(_M_X64) && !defined(_WIN64)
-#error
+#error 0
 #endif
 
 #ifdef _WIN32
@@ -271,7 +271,7 @@
 #endif
 
 #define __STDC_CONSTANT_MACROS
-#if defined(__GXX_EXPERIMENTAL_CXX0X__) || __cplusplus >= 201103L
+#if UTIL_CXX11_SUPPORTED
 #include <cstdint>
 #else
 #ifndef __STDC_LIMIT_MACROS
@@ -286,7 +286,6 @@
 #include <stdint.h>
 #endif 
 #endif 
-
 
 #ifdef UTIL_HAVE_STDDEF_H
 #include <stddef.h>
@@ -313,10 +312,6 @@ typedef int64_t ssize_t;
 #endif 
 
 
-
-
-
-
 #ifndef UTIL_UTF8_CHAR_DEFINED
 typedef char char8_t;
 #define UTIL_UTF8_CHAR_DEFINED
@@ -327,9 +322,7 @@ typedef std::string u8string;
 #define UTIL_UTF8_STRING_DEFINED
 #endif
 
-
-#if defined(__GNUC__) && !( \
-		defined(__GXX_EXPERIMENTAL_CXX0X__) || __cplusplus >= 201103L) || \
+#if defined(__GNUC__) && !UTIL_CXX11_SUPPORTED || \
 	defined(_MSC_VER) && !( \
 		defined(_HAS_CHAR16_T_LANGUAGE_SUPPORT) && \
 		_HAS_CHAR16_T_LANGUAGE_SUPPORT ) && \
@@ -347,16 +340,9 @@ namespace util {
 
 int stricmp(const char *x, const char *y);
 
-
 typedef std::basic_string< char8_t, std::char_traits<char8_t> > NormalString;
 
 } 
-
-
-
-
-
-
 
 
 #ifdef _MSC_VER
@@ -365,18 +351,15 @@ typedef std::basic_string< char8_t, std::char_traits<char8_t> > NormalString;
 #define UTIL_FORCEINLINE inline
 #endif
 
-
 #ifdef _MSC_VER
 #define UTIL_NORETURN(func) __declspec(noreturn) func
 #elif defined(__GNUC__)
 #define UTIL_NORETURN(func) func __attribute__((noreturn))
 #else
-#error
+#error 0
 #endif
 
-
 namespace util {
-
 typedef const int UTIL_FLAG_TYPE;
 
 #if !defined(UTIL_HAVE_OFF_T)
@@ -417,7 +400,6 @@ typedef size_t fsblkcnt_t;
 #endif 
 
 } 
-
 
 const int32_t ERROR_UNDEF = 0;
 
@@ -461,9 +443,6 @@ namespace util {
 /*!
     @brief Basic exception handling error messages and place caused the error.
 */
-
-
-
 class Exception : public std::exception {
 	friend class ExceptionInitializer;
 public:
@@ -507,8 +486,6 @@ public:
 	static const DuplicatedLiteralFlags LITERAL_NORMAL;
 	static const DuplicatedLiteralFlags LITERAL_ALL_DUPLICATED;
 
-	
-	
 
 	explicit Exception(
 			const NamedErrorCode &namedErrorCode = NamedErrorCode(),
@@ -672,9 +649,6 @@ private:
 /*!
     @brief String for exception without throwing.
 */
-
-
-
 template<typename Alloc>
 struct Exception::NoThrowString {
 public:
@@ -683,7 +657,6 @@ public:
 	typedef std::basic_string<
 			char8_t, std::char_traits<char8_t>, Alloc> String;
 
-	
 
 	explicit NoThrowString(Stream &stream) throw();
 
@@ -723,10 +696,6 @@ std::ostream& operator<<(std::ostream &s, const Exception::Field &field);
 /*!
     @brief Exception handling an error number of a system call.
 */
-
-
-
-
 class PlatformException : public Exception {
 public:
 	PlatformException(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw();
@@ -854,16 +823,12 @@ public:
 #define UTIL_EXCEPTION_POSITION_ARGS \
 	__FILE__, UTIL_EXCEPTION_THROWN_FUNCTION, __LINE__
 
-
-
-
 #define UTIL_EXCEPTION_CREATE_MESSAGE_STREAM \
 	util::NormalOStringStream().write("", 0)
 #define UTIL_EXCEPTION_CREATE_MESSAGE_CHARS(message) \
 	util::Exception::NoThrowString<util::NormalOStringStream::allocator_type>( \
 			static_cast<util::NormalOStringStream&>( \
 					UTIL_EXCEPTION_CREATE_MESSAGE_STREAM << message)).get()
-
 
 #define UTIL_EXCEPTION_CREATE_CUSTOM_DETAIL( \
 		type, errorCode, cause, message, stackTraceMode) \
@@ -876,7 +841,6 @@ public:
 #define UTIL_EXCEPTION_CREATE_DETAIL_TRACE(type, errorCode, cause, message) \
 	UTIL_EXCEPTION_CREATE_CUSTOM_DETAIL( \
 			type, errorCode, cause, message, util::Exception::STACK_TRACE_TOP)
-
 
 #define UTIL_EXCEPTION_UTIL_NAMED_CODE(codeSymbol) \
 	util::Exception::makeNamedErrorCode( \
@@ -896,7 +860,6 @@ public:
 #define UTIL_THROW_NOIMPL_UTIL() \
 	UTIL_THROW_UTIL_ERROR(CODE_ILLEGAL_OPERATION,  "Not implemented")
 
-
 #define UTIL_THROW_ERROR(errorCode, message) \
 	throw UTIL_EXCEPTION_CREATE_DETAIL_TRACE( \
 			util::Exception, errorCode, NULL, message)
@@ -905,8 +868,31 @@ public:
 			util::Exception, errorCode, &(cause), message)
 #define UTIL_THROW_NOIMPL() UTIL_THROW_ERROR(0, "Not implemented")
 
+namespace util {
+class PlatformExceptionBuilder {
+public:
+	enum Type {
+		TYPE_NORMAL,
+		TYPE_ADDRINFO_LINUX
+	};
 
+	PlatformException operator()(
+			const char8_t *message,
+			const Exception::SourceSymbolChar *fileNameLiteral,
+			const Exception::SourceSymbolChar *functionNameLiteral,
+			int32_t lineNumber,
+			Type type = TYPE_NORMAL,
+			int32_t specialErrorCode = 0);
+};
+}
 
+#define UTIL_THROW_PLATFORM_ERROR(message) \
+	throw util::PlatformExceptionBuilder()(message, UTIL_EXCEPTION_POSITION_ARGS);
+
+#define UTIL_THROW_PLATFORM_ERROR_WITH_CODE(type, errorCode, message) \
+	throw util::PlatformExceptionBuilder()( \
+			message, UTIL_EXCEPTION_POSITION_ARGS, \
+			util::PlatformExceptionBuilder::type, errorCode);
 
 
 namespace util {
@@ -914,9 +900,6 @@ namespace util {
 /*!
     @brief Structure template for only assert macros during compile.
 */
-
-
-
 template<bool>
 struct StaticAssertChecker {
 public:
@@ -937,9 +920,6 @@ private:
 #define UTIL_STATIC_ASSERT(expression) \
 	static_cast<void>( \
 			util::StaticAssertChecker<(expression)>::ASSERTION_FAILED)
-
-
-
 
 
 namespace util {
@@ -971,6 +951,16 @@ template<typename T> struct EnableIf<true, T> {
 	typedef T Type;
 };
 
+template<bool Cond, typename T, typename F>
+struct Conditional {
+	typedef T Type;
+};
+
+template<typename T, typename F>
+struct Conditional<false, T, F> {
+	typedef F Type;
+};
+
 template<typename T, typename U> struct IsSame {
 	typedef FalseType Type;
 	enum Value { VALUE = Type::VALUE };
@@ -982,9 +972,6 @@ template<typename T> struct IsSame<T, T> {
 };
 
 }
-
-
-
 
 
 namespace util {
@@ -1002,9 +989,6 @@ private:
 };
 }	
 }	
-
-
-
 
 
 namespace util {
@@ -1026,9 +1010,6 @@ private:
 };
 }	
 }	
-
-
-
 
 
 #ifdef UTIL_STACK_TRACE_ENABLED
@@ -1086,30 +1067,14 @@ private:
 #endif	
 
 
-
-
-
 namespace util {
 /*!
     @brief Utility for debugging.
 */
-
-
-
 class DebugUtils {
 public:
 
-
-
-
-
-
 	static bool isDebuggerAttached();
-
-
-
-
-
 
 	static void interrupt();
 
@@ -1119,9 +1084,6 @@ private:
 	DebugUtils& operator=(const DebugUtils&);
 };
 } 
-
-
-
 
 
 namespace util {
@@ -1138,17 +1100,11 @@ struct DirectAllocationUtils {
 
 
 
-
-
-
-#if defined(__GXX_EXPERIMENTAL_CXX0X__) || __cplusplus >= 201103L
+#if UTIL_CXX11_SUPPORTED
 #define UTIL_UNIQUE_PTR std::unique_ptr
 #else
 #define UTIL_UNIQUE_PTR std::auto_ptr
 #endif
-
-
-
 
 
 
@@ -1193,9 +1149,6 @@ void operator delete[](void *p);
 #endif
 
 #endif	
-
-
-
 
 #define UTIL_NEW new
 

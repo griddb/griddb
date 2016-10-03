@@ -14,10 +14,6 @@
     You should have received a copy of the GNU Affero General Public License
     along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
-
-
-
-
 #include "util/trace.h"
 
 #include "util/container.h"
@@ -251,7 +247,6 @@ FileTraceWriter::FileTraceWriter(
 			traceHandler_.startStream();
 		}
 		catch (...) {
-			
 		}
 	}
 }
@@ -266,12 +261,8 @@ void FileTraceWriter::write(
 			int32_t level, const util::DateTime &dateTime,
 			const char8_t *data, size_t size) {
 
-	
-	
 	LockGuard<Mutex> guard(mutex_);
 
-	
-	
 	if (reentrantCount_ == 0 && prepareFile(level, dateTime, size)) {
 		struct ScopedCounter {
 			explicit ScopedCounter(size_t &count) : count_(count) { count_++; }
@@ -283,14 +274,12 @@ void FileTraceWriter::write(
 			traceHandler_.startStream();
 		}
 		catch (...) {
-			
 			try {
 				lastFile_.write(data, size);
 			}
 			catch (...) {
 			}
 
-			
 			try {
 				throw;
 			}
@@ -462,7 +451,6 @@ bool FileTraceWriter::prepareFile(
 				FileSystem::removeFile(path.c_str());
 			}
 			catch (...) {
-				
 			}
 			list.erase(list.end() - 1);
 		}
@@ -484,9 +472,6 @@ bool FileTraceWriter::prepareFile(
 
 		bool rotate;
 		if (FileSystem::exists(lastPath.c_str())) {
-			
-			
-			
 			rotate = true;
 		}
 		else {
@@ -516,7 +501,6 @@ bool FileTraceWriter::prepareFile(
 
 	lastFile_.open(lastPath.c_str(),
 			FileFlag::TYPE_READ_WRITE | FileFlag::TYPE_CREATE);
-	
 
 	return true;
 }
@@ -622,9 +606,6 @@ void Tracer::put(
 		const std::exception *causeInHandling,
 		const Exception::NamedErrorCode &namedErrorCode) throw() try {
 
-	
-	
-	
 
 	if (level < minOutputLevel_) {
 		return;
@@ -699,7 +680,6 @@ Tracer::Tracer(
 }
 
 Tracer& TraceManager::resolveTracer(const char8_t *name) {
-	
 
 	LockGuard<Mutex> guard(mutex_);
 	TracerMap::iterator it = tracerMap_.find(name);

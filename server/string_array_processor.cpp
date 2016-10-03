@@ -51,7 +51,7 @@ int32_t StringArrayProcessor::compare(TransactionContext &txn,
 	int32_t result = 0;
 	if (headerOId != UNDEF_OID) {
 		VariableArrayCursor targetArrayCursor(
-			txn, objectManager, headerOId, false);
+			txn, objectManager, headerOId, OBJECT_READ_ONLY);
 		targetArrayLength = targetArrayCursor.getArrayLength();
 
 		if (inputArrayLength < targetArrayLength) {
@@ -61,7 +61,6 @@ int32_t StringArrayProcessor::compare(TransactionContext &txn,
 			result = 1;
 		}
 		else {
-			const uint8_t *inputElem;
 			uint32_t inputElemSize;
 			uint32_t inputCount;
 			uint8_t *targetElem;
@@ -70,8 +69,7 @@ int32_t StringArrayProcessor::compare(TransactionContext &txn,
 
 			result = 0;
 			while (inputArrayCursor.nextElement()) {
-				inputElem =
-					inputArrayCursor.getElement(inputElemSize, inputCount);
+				inputArrayCursor.getElement(inputElemSize, inputCount);
 				if (targetArrayCursor.nextElement()) {
 					targetElem = targetArrayCursor.getElement(
 						targetElemSize, targetCount);
@@ -116,12 +114,12 @@ int32_t StringArrayProcessor::compare(TransactionContext &txn,
 	int32_t result = 0;
 	if (srcHeaderOId != UNDEF_OID) {
 		VariableArrayCursor srcArrayCursor(
-			txn, objectManager, srcHeaderOId, false);
+			txn, objectManager, srcHeaderOId, OBJECT_READ_ONLY);
 		srcArrayLength = srcArrayCursor.getArrayLength();
 
 		if (targetHeaderOId != UNDEF_OID) {
 			VariableArrayCursor targetArrayCursor(
-				txn, objectManager, targetHeaderOId, false);
+				txn, objectManager, targetHeaderOId, OBJECT_READ_ONLY);
 			targetArrayLength = targetArrayCursor.getArrayLength();
 
 			if (srcArrayLength < targetArrayLength) {
@@ -164,7 +162,7 @@ int32_t StringArrayProcessor::compare(TransactionContext &txn,
 	else {
 		if (targetHeaderOId != UNDEF_OID) {
 			VariableArrayCursor targetArrayCursor(
-				txn, objectManager, targetHeaderOId, false);
+				txn, objectManager, targetHeaderOId, OBJECT_READ_ONLY);
 			targetArrayLength = targetArrayCursor.getArrayLength();
 			result = (targetArrayLength > 0) ? -1 : 0;
 		}
@@ -193,7 +191,7 @@ void StringArrayProcessor::getField(TransactionContext &txn,
 		const OId headerOId = arrayObject->getHeaderOId();
 		if (headerOId != UNDEF_OID) {
 			VariableArrayCursor arrayCursor(
-				txn, objectManager, headerOId, false);
+				txn, objectManager, headerOId, OBJECT_READ_ONLY);
 			uint32_t arrayLength = arrayCursor.getArrayLength();
 			messageRowStore->setVarSize(arrayLength);
 			copySize += ValueProcessor::getEncodedVarSize(arrayLength);
@@ -234,7 +232,7 @@ void StringArrayProcessor::clone(TransactionContext &txn,
 	OId linkOId = UNDEF_OID;
 	if (srcHeaderOId != UNDEF_OID) {
 		VariableArrayCursor srcArrayCursor(
-			txn, objectManager, srcHeaderOId, false);
+			txn, objectManager, srcHeaderOId, OBJECT_READ_ONLY);
 		linkOId = srcArrayCursor.clone(txn, allocateStrategy, neighborOId);
 	}
 	else {
@@ -256,7 +254,7 @@ void StringArrayProcessor::remove(TransactionContext &txn,
 	addr += sizeof(uint32_t);
 	OId *oId = reinterpret_cast<OId *>(addr);
 	if (*oId != UNDEF_OID) {
-		VariableArrayCursor variableArrayCursor(txn, objectManager, *oId, true);
+		VariableArrayCursor variableArrayCursor(txn, objectManager, *oId, OBJECT_FOR_UPDATE);
 		variableArrayCursor.finalize();
 		*oId = UNDEF_OID;
 	}
@@ -275,39 +273,61 @@ OId StringArrayProcessor::putToObject(TransactionContext &txn,
 	OId currentNeighborOId = neighborOId;
 	uint32_t remain = size;
 	srcAddr += ValueProcessor::getEncodedVarSize(size);
-	if (remain <= MAX_STRING_ARRAY_OBJECT_SIZE) {
-		BaseObject destObj(txn.getPartitionId(), objectManager);
-		if (currentNeighborOId == UNDEF_OID) {
-			destObj.allocate<uint8_t>(
-				size, allocateStrategy, headerOId, OBJECT_TYPE_ROW);
-		}
-		else {
-			destObj.allocateNeighbor<uint8_t>(size, allocateStrategy, headerOId,
-				currentNeighborOId, OBJECT_TYPE_ROW);
-		}
-		memcpy(destObj.getBaseAddr(), srcAddr, size);
-		remain = 0;
-	}
-	else {
-		remain = size;
-		uint32_t currentObjectSize = 0;
-		VariableArrayCursor variableArrayCursor(const_cast<uint8_t *>(srcAddr));
-		uint32_t headerSize = ValueProcessor::getEncodedVarSize(
+	util::XArray<uint32_t> accumulateSizeList(txn.getDefaultAllocator());
+	VariableArrayCursor variableArrayCursor(const_cast<uint8_t *>(srcAddr));
+	uint32_t currentObjectSize = ValueProcessor::getEncodedVarSize(
 			variableArrayCursor.getArrayLength());
-		currentObjectSize = headerSize;
-		const uint8_t *copyStartAddr = srcAddr;
-		BaseObject prevDestObj(txn.getPartitionId(), objectManager);
+	const uint8_t *copyStartAddr = srcAddr;
+	BaseObject prevDestObj(txn.getPartitionId(), objectManager);
+	if (remain <= MAX_STRING_ARRAY_OBJECT_SIZE) {
+
 		while (variableArrayCursor.nextElement()) {
 			uint32_t elemSize;
 			uint32_t elemNth;
 			variableArrayCursor.getElement(elemSize, elemNth);
-			if ((currentObjectSize +
-					ValueProcessor::getEncodedVarSize(elemSize) + elemSize +
+			currentObjectSize +=
+				elemSize + ValueProcessor::getEncodedVarSize(elemSize);
+			accumulateSizeList.push_back(currentObjectSize);
+		}
+	}
+	else {
+		while (variableArrayCursor.nextElement()) {
+			uint32_t elemSize;
+			uint32_t elemNth;
+			variableArrayCursor.getElement(elemSize, elemNth);
+			for (size_t checkCount = 0; 
+				(currentObjectSize + elemSize +
+					ValueProcessor::getEncodedVarSize(elemSize) +
 					NEXT_OBJECT_LINK_INFO_SIZE) >
-				MAX_STRING_ARRAY_OBJECT_SIZE) {
+				MAX_STRING_ARRAY_OBJECT_SIZE;
+				checkCount++) {
+				uint32_t dividedObjectSize = currentObjectSize;
+				uint32_t dividedElemNth = elemNth - 1;
+
+				Size_t estimateAllocateSize =
+					objectManager.estimateAllocateSize(currentObjectSize) + NEXT_OBJECT_LINK_INFO_SIZE;
+				if (checkCount == 0 && VariableArrayCursor::divisionThreshold(currentObjectSize) < estimateAllocateSize) {
+					for (size_t i = 0; i < accumulateSizeList.size(); i++) {
+						uint32_t accumulateSize = accumulateSizeList[accumulateSizeList.size() - 1 - i];
+						if (accumulateSize == currentObjectSize) {
+							continue;
+						}
+						Size_t estimateAllocateSizeFront =
+							objectManager.estimateAllocateSize(accumulateSize + NEXT_OBJECT_LINK_INFO_SIZE) + ObjectAllocator::BLOCK_HEADER_SIZE;
+						Size_t estimateAllocateSizeBack =
+							objectManager.estimateAllocateSize(currentObjectSize - accumulateSize);
+						if (estimateAllocateSizeFront + estimateAllocateSizeBack < estimateAllocateSize && 
+							(VariableArrayCursor::divisionThreshold(accumulateSize + ObjectAllocator::BLOCK_HEADER_SIZE) >= estimateAllocateSizeFront)) {
+							dividedObjectSize = accumulateSize;
+							dividedElemNth -= static_cast<uint32_t>(i);
+							break;
+						}
+					}
+				}
+
 				uint32_t allocateSize =
-					currentObjectSize + NEXT_OBJECT_LINK_INFO_SIZE;
-				OId targetOId;
+					dividedObjectSize + NEXT_OBJECT_LINK_INFO_SIZE;
+				OId targetOId = UNDEF_OID;
 				BaseObject destObj(txn.getPartitionId(), objectManager);
 				if (currentNeighborOId == UNDEF_OID) {
 					destObj.allocate<uint8_t>(allocateSize, allocateStrategy,
@@ -319,9 +339,9 @@ OId StringArrayProcessor::putToObject(TransactionContext &txn,
 						OBJECT_TYPE_ROW);
 				}
 				currentNeighborOId = targetOId;  
-				memcpy(destObj.getBaseAddr(), copyStartAddr, currentObjectSize);
-				remain -= currentObjectSize;
-				copyStartAddr += currentObjectSize;
+				memcpy(destObj.getBaseAddr(), copyStartAddr, dividedObjectSize);
+				remain -= dividedObjectSize;
+				copyStartAddr += dividedObjectSize;
 
 				if (headerOId == UNDEF_OID) {
 					headerOId = targetOId;
@@ -333,32 +353,88 @@ OId StringArrayProcessor::putToObject(TransactionContext &txn,
 						sizeof(uint64_t));
 				}
 				prevDestObj.copyReference(destObj);
-				prevDestObj.moveCursor(currentObjectSize);
-				currentObjectSize = 0;
-
-				if (remain <= MAX_STRING_ARRAY_OBJECT_SIZE) {
-					currentObjectSize = remain;
-					break;
-				}
+				prevDestObj.moveCursor(dividedObjectSize);
+				currentObjectSize = currentObjectSize - dividedObjectSize;
+				accumulateSizeList.erase(accumulateSizeList.begin(), accumulateSizeList.end() - (elemNth - 1 - dividedElemNth));
 			}
 			currentObjectSize +=
 				elemSize + ValueProcessor::getEncodedVarSize(elemSize);
+			accumulateSizeList.push_back(currentObjectSize);
 		}
-		assert(currentObjectSize <= MAX_STRING_ARRAY_OBJECT_SIZE);
-		OId targetOId;
-		BaseObject destObj(txn.getPartitionId(), objectManager);
+	}
+	Size_t estimateAllocateSize =
+		objectManager.estimateAllocateSize(currentObjectSize);
+	if (VariableArrayCursor::divisionThreshold(currentObjectSize) < estimateAllocateSize) {
+		uint32_t dividedObjectSize = currentObjectSize;
+		for (size_t i = 0; i < accumulateSizeList.size(); i++) {
+			uint32_t accumulateSize = accumulateSizeList[accumulateSizeList.size() - 1 - i];
+			if (accumulateSize == currentObjectSize) {
+				continue;
+			}
+			Size_t estimateAllocateSizeFront =
+				objectManager.estimateAllocateSize(accumulateSize + NEXT_OBJECT_LINK_INFO_SIZE) + ObjectAllocator::BLOCK_HEADER_SIZE;
+			Size_t estimateAllocateSizeBack =
+				objectManager.estimateAllocateSize(currentObjectSize - accumulateSize);
+			if (estimateAllocateSizeFront + estimateAllocateSizeBack < estimateAllocateSize && 
+				(VariableArrayCursor::divisionThreshold(accumulateSize + ObjectAllocator::BLOCK_HEADER_SIZE) >= estimateAllocateSizeFront)) {
+				dividedObjectSize = accumulateSize;
+				break;
+			}
+		}
+		if (dividedObjectSize != currentObjectSize) {
+			uint32_t allocateSize =
+				dividedObjectSize + NEXT_OBJECT_LINK_INFO_SIZE;
+			OId targetOId = UNDEF_OID;
+			BaseObject destObj(txn.getPartitionId(), objectManager);
+			if (currentNeighborOId == UNDEF_OID) {
+				destObj.allocate<uint8_t>(allocateSize, allocateStrategy,
+					targetOId, OBJECT_TYPE_ROW);
+			}
+			else {
+				destObj.allocateNeighbor<uint8_t>(allocateSize,
+					allocateStrategy, targetOId, currentNeighborOId,
+					OBJECT_TYPE_ROW);
+			}
+			currentNeighborOId = targetOId;  
+			memcpy(destObj.getBaseAddr(), copyStartAddr, dividedObjectSize);
+			remain -= dividedObjectSize;
+			copyStartAddr += dividedObjectSize;
+
+			if (headerOId == UNDEF_OID) {
+				headerOId = targetOId;
+			}
+			else {
+				uint64_t encodedOId =
+					ValueProcessor::encodeVarSizeOId(targetOId);
+				memcpy(prevDestObj.getCursor<uint8_t>(), &encodedOId,
+					sizeof(uint64_t));
+			}
+			prevDestObj.copyReference(destObj);
+			prevDestObj.moveCursor(dividedObjectSize);
+			currentObjectSize = currentObjectSize - dividedObjectSize;
+		}
+	}
+
+	assert(currentObjectSize <= MAX_STRING_ARRAY_OBJECT_SIZE);
+	OId targetOId = UNDEF_OID;
+	BaseObject destObj(txn.getPartitionId(), objectManager);
+	if (currentNeighborOId == UNDEF_OID) {
+		destObj.allocate<uint8_t>(
+			size, allocateStrategy, headerOId, OBJECT_TYPE_ROW);
+	}
+	else {
 		destObj.allocateNeighbor<uint8_t>(currentObjectSize, allocateStrategy,
 			targetOId, currentNeighborOId, OBJECT_TYPE_ROW);
-		memcpy(destObj.getBaseAddr(), copyStartAddr, currentObjectSize);
-		remain -= currentObjectSize;
-		if (headerOId == UNDEF_OID) {
-			headerOId = targetOId;
-		}
-		else {
-			uint64_t encodedOId = ValueProcessor::encodeVarSizeOId(targetOId);
-			memcpy(prevDestObj.getCursor<uint8_t>(), &encodedOId,
-				sizeof(uint64_t));
-		}
+	}
+	memcpy(destObj.getBaseAddr(), copyStartAddr, currentObjectSize);
+	remain -= currentObjectSize;
+	if (headerOId == UNDEF_OID) {
+		headerOId = targetOId;
+	}
+	else {
+		uint64_t encodedOId = ValueProcessor::encodeVarSizeOId(targetOId);
+		memcpy(prevDestObj.getCursor<uint8_t>(), &encodedOId,
+			sizeof(uint64_t));
 	}
 	assert(remain == 0);
 	return headerOId;

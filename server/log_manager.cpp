@@ -21,8 +21,8 @@
 
 #include "log_manager.h"
 #include "gs_error.h"
-#include "util/trace.h"
 #include "util/time.h"
+#include "util/trace.h"
 #include "chunk_manager.h"
 #include "partition_table.h"
 
@@ -2101,7 +2101,7 @@ void LogManager::LogFileInfo::lock() {
 
 
 
-const uint16_t LogManager::LogBlocksInfo::LOGBLOCK_VERSION = 0x8;
+const uint16_t LogManager::LogBlocksInfo::LOGBLOCK_VERSION = 0x11;
 
 const uint16_t
 LogManager::LogBlocksInfo::LOGBLOCK_ACCEPTABLE_VERSIONS[] = {
@@ -4455,9 +4455,10 @@ void LogManager::PartitionGroupManager::cleanupLogFiles() {
 				util::FileSystem::removeFile(filePath.c_str());
 			}
 			catch (std::exception &e) {
-				GS_RETHROW_USER_ERROR(
-					e, "Remove failed (path=" << filePath <<
-					"reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+				GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_CLEANUP_LOG_FILES,
+					"Remove failed (path=" << filePath <<
+					", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+				GS_RETHROW_USER_ERROR(e, "");
 			}
 
 			GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_CLEANUP_LOG_FILES,
@@ -4467,8 +4468,9 @@ void LogManager::PartitionGroupManager::cleanupLogFiles() {
 		}
 	}
 	catch (std::exception &e) {
-		UTIL_TRACE_EXCEPTION(LOG_MANAGER, e, "Ignore exception. (message="
-						   << GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_CLEANUP_LOG_FILES,
+			"Cleanup log files: (message="
+				<< GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 

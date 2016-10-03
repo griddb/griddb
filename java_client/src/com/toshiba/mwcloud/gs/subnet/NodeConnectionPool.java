@@ -100,6 +100,7 @@ public class NodeConnectionPool implements Closeable {
 			synchronized (this) {
 				if (connectionMap == null) {
 					exceededConnectionList.add(connection);
+					connection = null;
 				}
 				else if (connectionSet.add(connection)) {
 					final SocketAddress key = getKey(connection);
@@ -109,6 +110,7 @@ public class NodeConnectionPool implements Closeable {
 						connectionMap.put(key, list);
 					}
 					list.add(connection);
+					connection = null;
 
 					adjustSize(maxSize);
 				}
@@ -116,7 +118,15 @@ public class NodeConnectionPool implements Closeable {
 		}
 		finally {
 			try {
-				closeExceededConnections();
+				try {
+					closeExceededConnections();
+				}
+				finally {
+					if (connection != null) {
+						connection.close();
+						connectionSet.remove(connection);
+					}
+				}
 			}
 			catch (GSException e) {
 				

@@ -61,7 +61,7 @@ void Collection::RowArray::Row::finalize(TransactionContext &txn) {
 			ObjectManager &objectManager =
 				*(rowArrayCursor_->getContainer().getObjectManager());
 			VariableArrayCursor cursor(
-				txn, objectManager, getVariableArray(), true);
+				txn, objectManager, getVariableArray(), OBJECT_FOR_UPDATE);
 			for (uint32_t columnId = 0;
 				 columnId < rowArrayCursor_->getContainer().getColumnNum();
 				 columnId++) {
@@ -110,6 +110,7 @@ void Collection::RowArray::Row::checkVarDataSize(TransactionContext &txn,
 		variableColumnNum);  
 	varDataObjectSizeList.push_back(currentObjectSize);  
 	uint32_t varColumnObjectCount = 0;
+	util::XArray<uint32_t> accumulateSizeList(txn.getDefaultAllocator());
 	for (uint32_t columnId = 0; columnId < columnNum; columnId++) {
 		ColumnInfo &columnInfo =
 			rowArrayCursor_->getContainer().getColumnInfo(columnId);
@@ -124,25 +125,81 @@ void Collection::RowArray::Row::checkVarDataSize(TransactionContext &txn,
 			if (columnInfo.isSpecialVariable()) {
 				elemSize = LINK_VARIABLE_COLUMN_DATA_SIZE;
 			}
-			if ((currentObjectSize + elemSize +
+			for (size_t checkCount = 0; 
+				(currentObjectSize + elemSize +
 					ValueProcessor::getEncodedVarSize(elemSize) +
 					NEXT_OBJECT_LINK_INFO_SIZE) >
-				static_cast<uint32_t>(objectManager.getMaxObjectSize())) {
-				varDataObjectPosList.push_back(
-					static_cast<uint32_t>(elemNth - 1));
-				varDataObjectSizeList[varColumnObjectCount] = currentObjectSize;
+				static_cast<uint32_t>(objectManager.getMaxObjectSize());
+				checkCount++) {
+				uint32_t dividedObjectSize = currentObjectSize;
+				uint32_t dividedElemNth = elemNth - 1;
+
+				Size_t estimateAllocateSize =
+					rowArrayCursor_->getContainer().getObjectManager()->estimateAllocateSize(currentObjectSize) + NEXT_OBJECT_LINK_INFO_SIZE;
+				if (checkCount == 0 && VariableArrayCursor::divisionThreshold(currentObjectSize) < estimateAllocateSize) {
+					for (size_t i = 0; i < accumulateSizeList.size(); i++) {
+						uint32_t accumulateSize = accumulateSizeList[accumulateSizeList.size() - 1 - i];
+						if (accumulateSize == currentObjectSize) {
+							continue;
+						}
+						Size_t estimateAllocateSizeFront =
+							rowArrayCursor_->getContainer().getObjectManager()->estimateAllocateSize(accumulateSize + NEXT_OBJECT_LINK_INFO_SIZE) + ObjectAllocator::BLOCK_HEADER_SIZE;
+						Size_t estimateAllocateSizeBack =
+							rowArrayCursor_->getContainer().getObjectManager()->estimateAllocateSize(currentObjectSize - accumulateSize);
+						if (estimateAllocateSizeFront + estimateAllocateSizeBack < estimateAllocateSize && 
+							(VariableArrayCursor::divisionThreshold(accumulateSize + ObjectAllocator::BLOCK_HEADER_SIZE) >= estimateAllocateSizeFront)) {
+							dividedObjectSize = accumulateSize;
+							dividedElemNth -= static_cast<uint32_t>(i);
+							break;
+						}
+					}
+				}
+				varDataObjectPosList.push_back(dividedElemNth);
+				varDataObjectSizeList[varColumnObjectCount] = dividedObjectSize + NEXT_OBJECT_LINK_INFO_SIZE;
 				++varColumnObjectCount;
-				currentObjectSize = 0;								 
+				currentObjectSize = currentObjectSize - dividedObjectSize;	 
 				varDataObjectSizeList.push_back(currentObjectSize);  
+				accumulateSizeList.erase(accumulateSizeList.begin(), accumulateSizeList.end() - (elemNth - 1 - dividedElemNth));
 			}
 			currentObjectSize +=
 				elemSize + ValueProcessor::getEncodedVarSize(elemSize);
+			accumulateSizeList.push_back(currentObjectSize);
+		}
+	}
+	Size_t estimateAllocateSize =
+		rowArrayCursor_->getContainer().getObjectManager()->estimateAllocateSize(currentObjectSize);
+	if (VariableArrayCursor::divisionThreshold(currentObjectSize) < estimateAllocateSize) {
+		uint32_t dividedObjectSize = currentObjectSize;
+		uint32_t dividedElemNth = variableColumnNum - 1;
+		for (size_t i = 0; i < accumulateSizeList.size(); i++) {
+			uint32_t accumulateSize = accumulateSizeList[accumulateSizeList.size() - 1 - i];
+			if (accumulateSize == currentObjectSize) {
+				continue;
+			}
+			Size_t estimateAllocateSizeFront =
+				rowArrayCursor_->getContainer().getObjectManager()->estimateAllocateSize(accumulateSize + NEXT_OBJECT_LINK_INFO_SIZE) + ObjectAllocator::BLOCK_HEADER_SIZE;
+			Size_t estimateAllocateSizeBack =
+				rowArrayCursor_->getContainer().getObjectManager()->estimateAllocateSize(currentObjectSize - accumulateSize);
+			if (estimateAllocateSizeFront + estimateAllocateSizeBack < estimateAllocateSize && 
+				(VariableArrayCursor::divisionThreshold(accumulateSize + ObjectAllocator::BLOCK_HEADER_SIZE) >= estimateAllocateSizeFront)) {
+				dividedObjectSize = accumulateSize;
+				dividedElemNth -= static_cast<uint32_t>(i);
+				break;
+			}
+		}
+		if (dividedObjectSize != currentObjectSize) {
+			varDataObjectPosList.push_back(dividedElemNth);
+			varDataObjectSizeList[varColumnObjectCount] = dividedObjectSize + NEXT_OBJECT_LINK_INFO_SIZE;
+			++varColumnObjectCount;
+			currentObjectSize = currentObjectSize - dividedObjectSize;
+			varDataObjectSizeList.push_back(currentObjectSize);  
 		}
 	}
 	varDataObjectSizeList[varColumnObjectCount] = currentObjectSize;
 	varDataObjectPosList.push_back(
 		static_cast<uint32_t>(variableColumnNum - 1));
 }
+
 /*!
 	@brief Set field values to RowArray Object
 */
@@ -177,20 +234,21 @@ void Collection::RowArray::Row::setFields(
 		checkVarDataSize(txn, rowArrayCursor_->getContainer().getColumnNum(),
 			variableColumnNum, varTopAddr, varColumnIdList,
 			varDataObjectSizeList, varDataObjectPosList);
-
 		OId variableOId = UNDEF_OID;
 
 		VariableArrayCursor variableArrayCursor(varTopAddr);
 		uint8_t *copyStartAddr = varTopAddr;
 		BaseObject destObj(txn.getPartitionId(), objectManager);
+		OId neighborOId = rowArrayCursor_->getBaseOId();
 		for (size_t i = 0; i < varDataObjectSizeList.size(); ++i) {
 			BaseObject prevDestObj(txn.getPartitionId(), objectManager);
 			prevDestObj.copyReference(destObj);
 			prevDestObj.moveCursor(
 				destObj.getCursor<uint8_t>() - destObj.getBaseAddr());
 			destObj.allocateNeighbor<uint8_t>(varDataObjectSizeList[i],
-				allocateStrategy, variableOId, rowArrayCursor_->getBaseOId(),
+				allocateStrategy, variableOId, neighborOId,
 				OBJECT_TYPE_ROW);  
+			neighborOId = variableOId;
 			if (i == 0) {
 				setVariableArray(variableOId);
 				uint32_t encodedVariableColumnNum =
@@ -291,7 +349,6 @@ void Collection::RowArray::Row::updateFields(
 	if (variableColumnNum > 0) {
 		const AllocateStrategy allocateStrategy =
 			rowArrayCursor_->getContainer().getRowAllcateStrategy();
-		OId destVarTopOId = oldVarDataOId;
 
 		setVariableArray(UNDEF_OID);
 		util::XArray<uint32_t> varColumnIdList(txn.getDefaultAllocator());
@@ -311,7 +368,7 @@ void Collection::RowArray::Row::updateFields(
 		util::XArray<OId> oldVarDataOIdList(txn.getDefaultAllocator());
 		{
 			VariableArrayCursor srcArrayCursor(
-				txn, objectManager, oldVarDataOId, true);
+				txn, objectManager, oldVarDataOId, OBJECT_FOR_UPDATE);
 			OId prevOId = UNDEF_OID;
 			for (uint32_t columnId = 0;
 				 columnId < rowArrayCursor_->getContainer().getColumnNum();
@@ -360,6 +417,7 @@ void Collection::RowArray::Row::updateFields(
 			BaseObject oldVarObj(txn.getPartitionId(), objectManager);
 			Size_t oldVarObjSize = 0;
 			uint8_t *nextLinkAddr = NULL;
+			OId neighborOId = rowArrayCursor_->getBaseOId();
 			for (size_t i = 0; i < varDataObjectSizeList.size(); ++i) {
 				if (i < oldVarDataOIdList.size()) {
 					oldVarDataOId = oldVarDataOIdList[i];
@@ -381,13 +439,13 @@ void Collection::RowArray::Row::updateFields(
 					}
 					destAddr = oldVarObj.allocateNeighbor<uint8_t>(
 						varDataObjectSizeList[i], allocateStrategy, variableOId,
-						rowArrayCursor_->getBaseOId(),
+						neighborOId,
 						OBJECT_TYPE_ROW);  
+					neighborOId = variableOId;
 					assert(destAddr);
 				}
 				if (i == 0) {
 					setVariableArray(variableOId);
-					destVarTopOId = variableOId;
 					uint32_t encodedVariableColumnNum =
 						ValueProcessor::encodeVarSize(variableColumnNum);
 					uint32_t encodedVariableColumnNumLen =
@@ -492,7 +550,7 @@ void Collection::RowArray::Row::getField(TransactionContext &txn,
 		ObjectManager &objectManager =
 			*(rowArrayCursor_->getContainer().getObjectManager());
 		VariableArrayCursor variableArrayCursor(
-			txn, objectManager, variableOId, false);
+			txn, objectManager, variableOId, OBJECT_READ_ONLY);
 		variableArrayCursor.getField(columnInfo, baseObject);
 	}
 }
@@ -546,12 +604,12 @@ void Collection::RowArray::Row::copy(
 			rowArrayCursor_->getContainer().getRowAllcateStrategy();
 		OId srcTopOId = getVariableArray();
 
-		VariableArrayCursor srcCursor(txn, objectManager, srcTopOId, false);
+		VariableArrayCursor srcCursor(txn, objectManager, srcTopOId, OBJECT_READ_ONLY);
 		OId destTopOId = srcCursor.clone(txn, allocateStrategy,
 			dest.rowArrayCursor_->getBaseOId());  
 		dest.setVariableArray(destTopOId);
 
-		VariableArrayCursor destCursor(txn, objectManager, destTopOId, true);
+		VariableArrayCursor destCursor(txn, objectManager, destTopOId, OBJECT_FOR_UPDATE);
 		for (uint32_t columnId = 0;
 			 columnId < rowArrayCursor_->getContainer().getColumnNum();
 			 ++columnId) {
@@ -625,7 +683,7 @@ void Collection::RowArray::Row::getImage(TransactionContext &txn,
 			rowArrayCursor_->getContainer().getVariableColumnNum());  
 
 		OId variablePartOId = getVariableArray();
-		VariableArrayCursor cursor(txn, objectManager, variablePartOId, false);
+		VariableArrayCursor cursor(txn, objectManager, variablePartOId, OBJECT_READ_ONLY);
 		for (uint32_t columnId = 0;
 			 columnId < rowArrayCursor_->getContainer().getColumnNum();
 			 columnId++) {
@@ -655,7 +713,7 @@ void Collection::RowArray::Row::getImage(TransactionContext &txn,
 							messageRowStore->setVarDataHeaderField(
 								columnId, totalSize);
 							VariableArrayCursor arrayCursor(
-								txn, objectManager, linkOId, false);
+								txn, objectManager, linkOId, OBJECT_READ_ONLY);
 							messageRowStore->setVarSize(
 								arrayCursor.getArrayLength());  
 							while (arrayCursor.nextElement()) {
@@ -735,6 +793,7 @@ void Collection::RowArray::Row::getFieldImage(TransactionContext &txn,
 		txn, objectManager, newColumnId, &value, messageRowStore);
 }
 
+
 Collection::RowArray::RowArray(
 	TransactionContext &txn, OId oId, Collection *container, uint8_t getOption)
 	: BaseObject(txn.getPartitionId(), *(container->getObjectManager())),
@@ -752,6 +811,7 @@ Collection::RowArray::RowArray(TransactionContext &txn, Collection *container)
 	  elemCursor_(0) {
 	rowSize_ = container_->getRowSize();
 }
+
 
 /*!
 	@brief Get Object from Chunk
@@ -1145,7 +1205,7 @@ void TimeSeries::RowArray::Row::finalize(TransactionContext &txn) {
 			ObjectManager &objectManager =
 				*(rowArrayCursor_->getContainer().getObjectManager());
 			VariableArrayCursor cursor(
-				txn, objectManager, getVariableArray(), true);
+				txn, objectManager, getVariableArray(), OBJECT_FOR_UPDATE);
 			for (uint32_t columnId = 0;
 				 columnId < rowArrayCursor_->getContainer().getColumnNum();
 				 columnId++) {
@@ -1194,6 +1254,7 @@ void TimeSeries::RowArray::Row::checkVarDataSize(TransactionContext &txn,
 		variableColumnNum);  
 	varDataObjectSizeList.push_back(currentObjectSize);  
 	uint32_t varColumnObjectCount = 0;
+	util::XArray<uint32_t> accumulateSizeList(txn.getDefaultAllocator());
 	for (uint32_t columnId = 0; columnId < columnNum; columnId++) {
 		ColumnInfo &columnInfo =
 			rowArrayCursor_->getContainer().getColumnInfo(columnId);
@@ -1208,25 +1269,82 @@ void TimeSeries::RowArray::Row::checkVarDataSize(TransactionContext &txn,
 			if (columnInfo.isSpecialVariable()) {
 				elemSize = LINK_VARIABLE_COLUMN_DATA_SIZE;
 			}
-			if ((currentObjectSize + elemSize +
+			for (size_t checkCount = 0; 
+				(currentObjectSize + elemSize +
 					ValueProcessor::getEncodedVarSize(elemSize) +
 					NEXT_OBJECT_LINK_INFO_SIZE) >
-				static_cast<uint32_t>(objectManager.getMaxObjectSize())) {
-				varDataObjectPosList.push_back(
-					static_cast<uint32_t>(elemNth - 1));
-				varDataObjectSizeList[varColumnObjectCount] = currentObjectSize;
+				static_cast<uint32_t>(objectManager.getMaxObjectSize());
+				checkCount++) {
+				uint32_t dividedObjectSize = currentObjectSize;
+				uint32_t dividedElemNth = elemNth - 1;
+
+				Size_t estimateAllocateSize =
+					rowArrayCursor_->getContainer().getObjectManager()->estimateAllocateSize(currentObjectSize) + NEXT_OBJECT_LINK_INFO_SIZE;
+				if (checkCount == 0 && VariableArrayCursor::divisionThreshold(currentObjectSize) < estimateAllocateSize) {
+					for (size_t i = 0; i < accumulateSizeList.size(); i++) {
+						uint32_t accumulateSize = accumulateSizeList[accumulateSizeList.size() - 1 - i];
+						if (accumulateSize == currentObjectSize) {
+							continue;
+						}
+						Size_t estimateAllocateSizeFront =
+							rowArrayCursor_->getContainer().getObjectManager()->estimateAllocateSize(accumulateSize + NEXT_OBJECT_LINK_INFO_SIZE) + ObjectAllocator::BLOCK_HEADER_SIZE;
+						Size_t estimateAllocateSizeBack =
+							rowArrayCursor_->getContainer().getObjectManager()->estimateAllocateSize(currentObjectSize - accumulateSize);
+						if (estimateAllocateSizeFront + estimateAllocateSizeBack < estimateAllocateSize && 
+							(VariableArrayCursor::divisionThreshold(accumulateSize + ObjectAllocator::BLOCK_HEADER_SIZE) >= estimateAllocateSizeFront)) {
+							dividedObjectSize = accumulateSize;
+							dividedElemNth -= static_cast<uint32_t>(i);
+							break;
+						}
+					}
+				}
+				varDataObjectPosList.push_back(dividedElemNth);
+				varDataObjectSizeList[varColumnObjectCount] = dividedObjectSize + NEXT_OBJECT_LINK_INFO_SIZE;
 				++varColumnObjectCount;
-				currentObjectSize = 0;								 
+				currentObjectSize = currentObjectSize - dividedObjectSize;	 
 				varDataObjectSizeList.push_back(currentObjectSize);  
+				accumulateSizeList.erase(accumulateSizeList.begin(), accumulateSizeList.end() - (elemNth - 1 - dividedElemNth));
 			}
 			currentObjectSize +=
 				elemSize + ValueProcessor::getEncodedVarSize(elemSize);
+			accumulateSizeList.push_back(currentObjectSize);
+		}
+	}
+	Size_t estimateAllocateSize =
+		rowArrayCursor_->getContainer().getObjectManager()->estimateAllocateSize(currentObjectSize);
+	if (VariableArrayCursor::divisionThreshold(currentObjectSize) < estimateAllocateSize) {
+		uint32_t dividedObjectSize = currentObjectSize;
+		uint32_t dividedElemNth = variableColumnNum - 1;
+		for (size_t i = 0; i < accumulateSizeList.size(); i++) {
+			uint32_t accumulateSize = accumulateSizeList[accumulateSizeList.size() - 1 - i];
+			if (accumulateSize == currentObjectSize) {
+				continue;
+			}
+			Size_t estimateAllocateSizeFront =
+				rowArrayCursor_->getContainer().getObjectManager()->estimateAllocateSize(accumulateSize + NEXT_OBJECT_LINK_INFO_SIZE) + ObjectAllocator::BLOCK_HEADER_SIZE;
+			Size_t estimateAllocateSizeBack =
+				rowArrayCursor_->getContainer().getObjectManager()->estimateAllocateSize(currentObjectSize - accumulateSize);
+			if (estimateAllocateSizeFront + estimateAllocateSizeBack < estimateAllocateSize && 
+				(VariableArrayCursor::divisionThreshold(accumulateSize + ObjectAllocator::BLOCK_HEADER_SIZE) >= estimateAllocateSizeFront)) {
+				dividedObjectSize = accumulateSize;
+				dividedElemNth -= static_cast<uint32_t>(i);
+				break;
+			}
+		}
+		if (dividedObjectSize != currentObjectSize) {
+			varDataObjectPosList.push_back(dividedElemNth);
+			varDataObjectSizeList[varColumnObjectCount] = dividedObjectSize + NEXT_OBJECT_LINK_INFO_SIZE;
+			++varColumnObjectCount;
+			currentObjectSize = currentObjectSize - dividedObjectSize;
+			varDataObjectSizeList.push_back(currentObjectSize);  
 		}
 	}
 	varDataObjectSizeList[varColumnObjectCount] = currentObjectSize;
 	varDataObjectPosList.push_back(
 		static_cast<uint32_t>(variableColumnNum - 1));
 }
+
+
 /*!
 	@brief Set field values to RowArray Object
 */
@@ -1261,20 +1379,21 @@ void TimeSeries::RowArray::Row::setFields(
 		checkVarDataSize(txn, rowArrayCursor_->getContainer().getColumnNum(),
 			variableColumnNum, varTopAddr, varColumnIdList,
 			varDataObjectSizeList, varDataObjectPosList);
-
 		OId variableOId = UNDEF_OID;
 
 		VariableArrayCursor variableArrayCursor(varTopAddr);
 		uint8_t *copyStartAddr = varTopAddr;
 		BaseObject destObj(txn.getPartitionId(), objectManager);
+		OId neighborOId = rowArrayCursor_->getBaseOId();
 		for (size_t i = 0; i < varDataObjectSizeList.size(); ++i) {
 			BaseObject prevDestObj(txn.getPartitionId(), objectManager);
 			prevDestObj.copyReference(destObj);
 			prevDestObj.moveCursor(
 				destObj.getCursor<uint8_t>() - destObj.getBaseAddr());
 			destObj.allocateNeighbor<uint8_t>(varDataObjectSizeList[i],
-				allocateStrategy, variableOId, rowArrayCursor_->getBaseOId(),
+				allocateStrategy, variableOId, neighborOId,
 				OBJECT_TYPE_ROW);  
+			neighborOId = variableOId;
 			if (i == 0) {
 				setVariableArray(variableOId);
 				uint32_t encodedVariableColumnNum =
@@ -1375,7 +1494,6 @@ void TimeSeries::RowArray::Row::updateFields(
 	if (variableColumnNum > 0) {
 		const AllocateStrategy allocateStrategy =
 			rowArrayCursor_->getContainer().getRowAllcateStrategy();
-		OId destVarTopOId = oldVarDataOId;
 
 		setVariableArray(UNDEF_OID);
 		util::XArray<uint32_t> varColumnIdList(txn.getDefaultAllocator());
@@ -1395,7 +1513,7 @@ void TimeSeries::RowArray::Row::updateFields(
 		util::XArray<OId> oldVarDataOIdList(txn.getDefaultAllocator());
 		{
 			VariableArrayCursor srcArrayCursor(
-				txn, objectManager, oldVarDataOId, true);
+				txn, objectManager, oldVarDataOId, OBJECT_FOR_UPDATE);
 			OId prevOId = UNDEF_OID;
 			for (uint32_t columnId = 0;
 				 columnId < rowArrayCursor_->getContainer().getColumnNum();
@@ -1444,6 +1562,7 @@ void TimeSeries::RowArray::Row::updateFields(
 			BaseObject oldVarObj(txn.getPartitionId(), objectManager);
 			Size_t oldVarObjSize = 0;
 			uint8_t *nextLinkAddr = NULL;
+			OId neighborOId = rowArrayCursor_->getBaseOId();
 			for (size_t i = 0; i < varDataObjectSizeList.size(); ++i) {
 				if (i < oldVarDataOIdList.size()) {
 					oldVarDataOId = oldVarDataOIdList[i];
@@ -1465,13 +1584,13 @@ void TimeSeries::RowArray::Row::updateFields(
 					}
 					destAddr = oldVarObj.allocateNeighbor<uint8_t>(
 						varDataObjectSizeList[i], allocateStrategy, variableOId,
-						rowArrayCursor_->getBaseOId(),
+						neighborOId,
 						OBJECT_TYPE_ROW);  
+					neighborOId = variableOId;
 					assert(destAddr);
 				}
 				if (i == 0) {
 					setVariableArray(variableOId);
-					destVarTopOId = variableOId;
 					uint32_t encodedVariableColumnNum =
 						ValueProcessor::encodeVarSize(variableColumnNum);
 					uint32_t encodedVariableColumnNumLen =
@@ -1576,7 +1695,7 @@ void TimeSeries::RowArray::Row::getField(TransactionContext &txn,
 		ObjectManager &objectManager =
 			*(rowArrayCursor_->getContainer().getObjectManager());
 		VariableArrayCursor variableArrayCursor(
-			txn, objectManager, variableOId, false);
+			txn, objectManager, variableOId, OBJECT_READ_ONLY);
 		variableArrayCursor.getField(columnInfo, baseObject);
 	}
 }
@@ -1630,12 +1749,12 @@ void TimeSeries::RowArray::Row::copy(
 			rowArrayCursor_->getContainer().getRowAllcateStrategy();
 		OId srcTopOId = getVariableArray();
 
-		VariableArrayCursor srcCursor(txn, objectManager, srcTopOId, false);
+		VariableArrayCursor srcCursor(txn, objectManager, srcTopOId, OBJECT_READ_ONLY);
 		OId destTopOId = srcCursor.clone(txn, allocateStrategy,
 			dest.rowArrayCursor_->getBaseOId());  
 		dest.setVariableArray(destTopOId);
 
-		VariableArrayCursor destCursor(txn, objectManager, destTopOId, true);
+		VariableArrayCursor destCursor(txn, objectManager, destTopOId, OBJECT_FOR_UPDATE);
 		for (uint32_t columnId = 0;
 			 columnId < rowArrayCursor_->getContainer().getColumnNum();
 			 ++columnId) {
@@ -1692,7 +1811,7 @@ void TimeSeries::RowArray::Row::getImage(TransactionContext &txn,
 			rowArrayCursor_->getContainer().getVariableColumnNum());  
 
 		OId variablePartOId = getVariableArray();
-		VariableArrayCursor cursor(txn, objectManager, variablePartOId, false);
+		VariableArrayCursor cursor(txn, objectManager, variablePartOId, OBJECT_READ_ONLY);
 		for (uint32_t columnId = 0;
 			 columnId < rowArrayCursor_->getContainer().getColumnNum();
 			 columnId++) {
@@ -1722,7 +1841,7 @@ void TimeSeries::RowArray::Row::getImage(TransactionContext &txn,
 							messageRowStore->setVarDataHeaderField(
 								columnId, totalSize);
 							VariableArrayCursor arrayCursor(
-								txn, objectManager, linkOId, false);
+								txn, objectManager, linkOId, OBJECT_READ_ONLY);
 							messageRowStore->setVarSize(
 								arrayCursor.getArrayLength());  
 							while (arrayCursor.nextElement()) {
@@ -1802,6 +1921,7 @@ void TimeSeries::RowArray::Row::getFieldImage(TransactionContext &txn,
 		txn, objectManager, newColumnId, &value, messageRowStore);
 }
 
+
 TimeSeries::RowArray::RowArray(
 	TransactionContext &txn, OId oId, TimeSeries *container, uint8_t getOption)
 	: BaseObject(txn.getPartitionId(), *(container->getObjectManager())),
@@ -1819,6 +1939,7 @@ TimeSeries::RowArray::RowArray(TransactionContext &txn, TimeSeries *container)
 	  elemCursor_(0) {
 	rowSize_ = container_->getRowSize();
 }
+
 
 /*!
 	@brief Get Object from Chunk

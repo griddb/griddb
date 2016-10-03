@@ -550,8 +550,7 @@ void ColumnSchema::set(TransactionContext &txn, ObjectManager &objectManager,
 		uint16_t variableColumnIndex = 0;  
 		for (uint16_t i = 0; i < columnNum_; i++) {
 			if (columnInfoList[i].isVariable()) {
-				columnInfoList[i].setOffset(
-					variableColumnIndex);  
+				columnInfoList[i].setOffset(variableColumnIndex);  
 				++variableColumnIndex;
 			}
 			else {
@@ -570,8 +569,7 @@ void ColumnSchema::set(TransactionContext &txn, ObjectManager &objectManager,
 			columnInfoList[i].set(
 				txn, objectManager, i, i, messageSchema, allocateStrategy);
 			if (columnInfoList[i].isVariable()) {
-				columnInfoList[i].setOffset(
-					variableColumnIndex);  
+				columnInfoList[i].setOffset(variableColumnIndex);  
 				++variableColumnIndex;
 			}
 			else {

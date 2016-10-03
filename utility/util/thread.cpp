@@ -43,10 +43,6 @@
     (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE 
     OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
-
-
-
-
 #include "util/thread.h"
 #include "util/code.h"
 #include "util/time.h"
@@ -62,13 +58,9 @@
 
 #define UTIL_WIN_COND_CHANGE
 
-
 namespace util {
 
 #if UTIL_MINOR_MODULE_ENABLED
-
-
-
 
 
 struct Barrier::Data {
@@ -129,13 +121,11 @@ BarrierAttribute::~BarrierAttribute() {
 #endif 
 
 
-
-
-
 struct Condition::Data {
 #ifdef UTIL_HAVE_POSIX_CONDITION
 	pthread_cond_t cond_;
 	pthread_mutex_t mutex_;
+	clockid_t clockId_;
 #else
 #ifndef UTIL_WIN_COND_CHANGE
 	bool lastSingnalWasBroadcast_;
@@ -204,9 +194,16 @@ struct ConditionAttribute::Data {
 
 Condition::Condition(const ConditionAttribute *attr) : data_(new Data) {
 #ifdef UTIL_HAVE_POSIX_CONDITION
-	if (0 != pthread_cond_init(&data_->cond_,
-		(attr ? &attr->data_->attr_ : NULL)))
-	{
+	ConditionAttribute defaultAttr;
+
+	pthread_condattr_t &selectedAttr =
+			(attr == NULL ? &defaultAttr : attr)->data_->attr_;
+
+	if (0 != pthread_condattr_getclock(&selectedAttr, &data_->clockId_)) {
+		UTIL_THROW_PLATFORM_ERROR(NULL);
+	}
+
+	if (0 != pthread_cond_init(&data_->cond_, &selectedAttr)) {
 		UTIL_THROW_PLATFORM_ERROR(NULL);
 	}
 
@@ -254,7 +251,6 @@ void Condition::broadcast(void) {
 		ReleaseSemaphore(data_->waitBarrier_, data_->waitersCount_, 0);
 		LeaveCriticalSection(&data_->waitersCountLock_);
 		WaitForSingleObject(data_->waitBarrierClearSignal_, INFINITE);
-		
 		data_->lastSingnalWasBroadcast_ = false;
 	} else {
 		LeaveCriticalSection(&data_->waitersCountLock_);
@@ -326,7 +322,7 @@ bool Condition::wait(struct timespec &ts) {
 
 bool Condition::wait(uint32_t timeoutMillis) {
 #if defined(UTIL_HAVE_POSIX_CONDITION)
-	timespec ts = FileLib::calculateTimeoutSpec(timeoutMillis);
+	timespec ts = FileLib::calculateTimeoutSpec(data_->clockId_, timeoutMillis);
 	const int result = pthread_cond_timedwait(
 			&data_->cond_, &data_->mutex_, &ts);
 
@@ -390,6 +386,11 @@ ConditionAttribute::ConditionAttribute() : data_(new Data) {
 	if (0 != pthread_condattr_init(&data_->attr_)) {
 		UTIL_THROW_PLATFORM_ERROR(NULL);
 	}
+
+	if (0 != pthread_condattr_setclock(&data_->attr_, CLOCK_MONOTONIC)) {
+		pthread_condattr_destroy(&data_->attr_);
+		UTIL_THROW_PLATFORM_ERROR(NULL);
+	}
 #endif
 }
 
@@ -398,9 +399,6 @@ ConditionAttribute::~ConditionAttribute() {
 	pthread_condattr_destroy(&data_->attr_);
 #endif
 }
-
-
-
 
 
 #ifndef _WIN32
@@ -567,9 +565,6 @@ void MutexAttribute::getShared(bool &shared) const {
 	UTIL_THROW_NOIMPL_UTIL();
 #endif
 }
-
-
-
 
 
 struct RWLock::Data {
@@ -776,7 +771,7 @@ bool RWLock::ReadLock::tryLock(void) {
 
 bool RWLock::ReadLock::tryLock(uint32_t msec) {
 #ifdef UTIL_HAVE_POSIX_MUTEX
-	timespec ts = FileLib::calculateTimeoutSpec(msec);
+	timespec ts = FileLib::calculateTimeoutSpec(CLOCK_REALTIME, msec);
 	return (0 == pthread_rwlock_timedrdlock(&data_->rwlock_, &ts));
 #else
 	HANDLE handles[] = { data_->mutex_, data_->readEvent_ };
@@ -827,7 +822,7 @@ bool RWLock::WriteLock::tryLock(void) {
 
 bool RWLock::WriteLock::tryLock(uint32_t msec) {
 #ifdef UTIL_HAVE_POSIX_MUTEX
-	timespec ts = FileLib::calculateTimeoutSpec(msec);
+	timespec ts = FileLib::calculateTimeoutSpec(CLOCK_REALTIME, msec);
 	return (0 == pthread_rwlock_timedwrlock(&data_->rwlock_, &ts));
 #else
 	data_->addWriter();
@@ -899,9 +894,6 @@ void RWLockAttribute::getShared(bool &shared) const {
 	UTIL_THROW_NOIMPL_UTIL();
 #endif
 }
-
-
-
 
 
 struct Semaphore::Data {
@@ -1074,7 +1066,7 @@ bool Semaphore::tryLock(uint32_t msec) {
 			data_->handle_, static_cast<DWORD>(msec), TRUE);
 	return (result == WAIT_OBJECT_0 || result == WAIT_ABANDONED);
 #else
-	timespec ts = FileLib::calculateTimeoutSpec(msec);
+	timespec ts = FileLib::calculateTimeoutSpec(CLOCK_REALTIME, msec);
 	return (-1 != sem_timedwait(data_->getKey(), &ts));
 #endif
 }
@@ -1117,9 +1109,6 @@ void Semaphore::getValue(size_t &value) const {
 	value = static_cast<size_t>(intValue);
 #endif
 }
-
-
-
 
 
 struct SpinLock::Data {
@@ -1188,9 +1177,6 @@ bool SpinLock::tryLock(uint32_t msec) {
 	(void) msec;
 	UTIL_THROW_NOIMPL_UTIL();
 }
-
-
-
 
 
 struct Thread::Data {
@@ -1275,8 +1261,6 @@ void Thread::join() {
 		UTIL_THROW_PLATFORM_ERROR(NULL);
 	}
 #else
-	
-	
 	pthread_join(data_->threadId_, NULL);
 	data_->threadId_ = 0;
 #endif
@@ -1294,7 +1278,6 @@ void Thread::sleep(uint32_t millisecTime) {
 }
 
 void Thread::yield() {
-	
 	Thread::sleep(0);
 }
 
@@ -1302,7 +1285,6 @@ uint64_t Thread::getSelfId() {
 #ifdef _WIN32
 	return GetCurrentThreadId();
 #else
-	
 	return syscall(SYS_gettid);
 #endif
 }
@@ -1454,9 +1436,6 @@ void ThreadAttribute::getStackSize(size_t &size) const {
 #endif
 }
 
-
-
-
 ConflictionDetector::ConflictionDetector() {
 }
 
@@ -1478,9 +1457,6 @@ void ConflictionDetector::leave() {
 				"Internal error by wrong confliction detector usage");
 	}
 }
-
-
-
 
 
 ConflictionDetectorScope::ConflictionDetectorScope(

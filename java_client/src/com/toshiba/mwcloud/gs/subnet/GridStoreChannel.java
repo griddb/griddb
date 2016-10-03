@@ -23,7 +23,6 @@ import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
-import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Formatter;
@@ -52,6 +51,8 @@ import com.toshiba.mwcloud.gs.common.LoggingUtils;
 import com.toshiba.mwcloud.gs.common.LoggingUtils.BaseGridStoreLogger;
 import com.toshiba.mwcloud.gs.common.PropertyUtils.WrappedProperties;
 import com.toshiba.mwcloud.gs.common.RowMapper;
+import com.toshiba.mwcloud.gs.common.ServiceAddressResolver;
+import com.toshiba.mwcloud.gs.common.ServiceAddressResolver.SocketAddressComparator;
 import com.toshiba.mwcloud.gs.common.Statement;
 import com.toshiba.mwcloud.gs.subnet.NodeConnection.LoginInfo;
 import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequest;
@@ -59,8 +60,6 @@ import com.toshiba.mwcloud.gs.subnet.NodeResolver.ContainerHashMode;
 
 @SuppressWarnings("deprecation")
 public class GridStoreChannel implements Closeable {
-
-	private static boolean ipv6EnabledDefault = false;
 
 	public static Boolean v1ProtocolCompatible = null;
 
@@ -76,8 +75,6 @@ public class GridStoreChannel implements Closeable {
 
 	public static boolean v21StatementIdCompatible = false;
 
-	private static int NOTIFICATION_PORT_DEFAULT = 31999;
-
 	private static int FAILOVER_TIMEOUT_DEFAULT = 60 * 1000;
 
 	private static int FAILOVER_RETRY_INTERVAL = 1 * 1000;
@@ -87,10 +84,6 @@ public class GridStoreChannel implements Closeable {
 	public static int MAPPER_CACHE_SIZE = 32;
 
 	private static int MAX_REF_SCAN_COUNT = 15;
-
-	public static String DEFAULT_NOTIFICATION_ADDRESS = "239.0.0.1";
-
-	public static String DEFAULT_NOTIFICATION_ADDRESS_V6 = "ff12::1";
 
 	private static final int SYSTEM_CONTAINER_PARTITION_ID = 0;
 
@@ -234,52 +227,31 @@ public class GridStoreChannel implements Closeable {
 		private final DataAffinityPattern dataAffinityPattern;
 
 		public Source(WrappedProperties props) throws GSException {
-			final String host = props.getProperty("host", false);
-			final boolean passive = (host == null);
+			final boolean[] passive = new boolean[1];
+			ServiceAddressResolver.Config sarConfig =
+					new ServiceAddressResolver.Config();
+			List<InetSocketAddress> memberList =
+					new ArrayList<InetSocketAddress>();
 
-			final String ipProtocol = props.getProperty("ipProtocol", true);
-			boolean ipv6Enabled = ipv6EnabledDefault;
-			if (ipProtocol != null) {
-				if (ipProtocol.equals("IPV6")) {
-					ipv6Enabled = true;
-				}
-				if (ipProtocol.equals("IPV4")) {
-					ipv6Enabled = false;
-				}
-				else {
-					throw new GSException(
-							GSErrorCode.ILLEGAL_PARAMETER,
-							"Illegal IP type: " + ipProtocol);
-				}
-			}
-
-			final String notificationHost =
-					props.getProperty("notificationAddress", false);
-			final InetAddress address = getAddress(
-					(passive ? notificationHost : host), ipv6Enabled);
-
-			Integer port = (passive ?
-					getPortProperty(props, "notificationPort") :
-					getPortProperty(props, "port"));
-			if (port == null) {
-				if (passive) {
-					port = NOTIFICATION_PORT_DEFAULT;
-				}
-				else {
-					throw new GSException(
-							GSErrorCode.ILLEGAL_PARAMETER,
-							"Port must not be specified");
-				}
+			final InetSocketAddress address =
+					NodeResolver.getAddressProperties(
+							props, passive, sarConfig, memberList, null);
+			if (address != null) {
+				sarConfig = null;
+				memberList = null;
 			}
 
 			final String clusterName =
 					props.getProperty("clusterName", "", false);
 			final String user = props.getProperty("user", "", false);
 			final String password = props.getProperty("password", "", false);
-			final String database = props.getProperty("database", "public", false);
+			final String database = props.getProperty(
+					"database", NodeConnection.LoginInfo.DEFAULT_DATABASE_NAME,
+					false);
 
 			this.key = new Key(
-					passive, new InetSocketAddress(address, port), user, clusterName);
+					passive[0], address,
+					user, clusterName, sarConfig, memberList);
 			this.password = password;
 
 			Integer partitionCount =
@@ -332,46 +304,6 @@ public class GridStoreChannel implements Closeable {
 			return loginInfo;
 		}
 
-		private static InetAddress getAddress(
-				String host, Boolean ipv6Enabled) throws GSException {
-			if (host == null) {
-				if (ipv6Enabled) {
-					host = DEFAULT_NOTIFICATION_ADDRESS_V6;
-				}
-				else {
-					host = DEFAULT_NOTIFICATION_ADDRESS;
-				}
-			}
-
-			try {
-				for (InetAddress address : InetAddress.getAllByName(host)) {
-					if (!(address instanceof Inet6Address ^ ipv6Enabled)) {
-						return address;
-					}
-				}
-			}
-			catch (UnknownHostException e) {
-				throw new GSException(e);
-			}
-
-			throw new GSException("Address not resolved");
-		}
-
-		private static Integer getPortProperty(
-				WrappedProperties props, String name) throws GSException {
-			final Integer port = props.getIntProperty(name, false);
-			if (port == null) {
-				return null;
-			}
-
-			if (port < 0 || port >= 1 << 16) {
-				throw new GSException(
-						GSErrorCode.ILLEGAL_PARAMETER,
-						"Port out of range: " + port);
-			}
-			return port;
-		}
-
 		public Key getKey() {
 			return key;
 		}
@@ -409,15 +341,32 @@ public class GridStoreChannel implements Closeable {
 
 		private final String clusterName;
 
+		private final ServiceAddressResolver.Config sarConfig;
+
+		private final List<InetSocketAddress> memberList;
+
 		public Key(boolean passive, InetSocketAddress address,
-				String user, String clusterName) {
+				String user, String clusterName,
+				ServiceAddressResolver.Config sarConfig,
+				List<InetSocketAddress> memberList) {
 			this.passive = passive;
 			this.address = address;
 			this.user = user;
 			this.clusterName = clusterName;
+			this.sarConfig = (sarConfig == null ?
+					null : new ServiceAddressResolver.Config(sarConfig));
+			this.memberList = (sarConfig == null ?
+					Collections.<InetSocketAddress>emptyList() :
+					new ArrayList<InetSocketAddress>(memberList));
+			if (sarConfig != null) {
+				Collections.sort(this.memberList, new SocketAddressComparator());
+			}
 		}
 
 		public boolean isIPV6Enabled() {
+			if (address == null) {
+				return sarConfig.isIPv6Expected();
+			}
 			return (address.getAddress() instanceof Inet6Address);
 		}
 
@@ -433,11 +382,15 @@ public class GridStoreChannel implements Closeable {
 		public int hashCode() {
 			final int prime = 31;
 			int result = 1;
-			result = prime * result
-					+ ((address == null) ? 0 : address.hashCode());
-			result = prime * result
-					+ ((clusterName == null) ? 0 : clusterName.hashCode());
+			result = prime * result +
+					((address == null) ? 0 : address.hashCode());
+			result = prime * result +
+					((clusterName == null) ? 0 : clusterName.hashCode());
+			result = prime * result +
+					((memberList == null) ? 0 : memberList.hashCode());
 			result = prime * result + (passive ? 1231 : 1237);
+			result = prime * result +
+					((sarConfig == null) ? 0 : sarConfig.hashCode());
 			result = prime * result + ((user == null) ? 0 : user.hashCode());
 			return result;
 		}
@@ -454,19 +407,34 @@ public class GridStoreChannel implements Closeable {
 			if (address == null) {
 				if (other.address != null)
 					return false;
-			} else if (!address.equals(other.address))
+			}
+			else if (!address.equals(other.address))
 				return false;
 			if (clusterName == null) {
 				if (other.clusterName != null)
 					return false;
-			} else if (!clusterName.equals(other.clusterName))
+			}
+			else if (!clusterName.equals(other.clusterName))
+				return false;
+			if (memberList == null) {
+				if (other.memberList != null)
+					return false;
+			}
+			else if (!memberList.equals(other.memberList))
 				return false;
 			if (passive != other.passive)
+				return false;
+			if (sarConfig == null) {
+				if (other.sarConfig != null)
+					return false;
+			}
+			else if (!sarConfig.equals(other.sarConfig))
 				return false;
 			if (user == null) {
 				if (other.user != null)
 					return false;
-			} else if (!user.equals(other.user))
+			}
+			else if (!user.equals(other.user))
 				return false;
 			return true;
 		}
@@ -1039,7 +1007,8 @@ public class GridStoreChannel implements Closeable {
 		this.nodeResolver = new NodeResolver(
 				pool, key.passive, key.address,
 				config.getConnectionConfig(), source.getLoginInfo(),
-				source.partitionCount);
+				source.partitionCount, key.sarConfig, key.memberList,
+				null);
 		this.requestHeadLength =
 				NodeConnection.getRequestHeadLength(key.isIPV6Enabled());
 		apply(config);
@@ -1721,7 +1690,7 @@ public class GridStoreChannel implements Closeable {
 				});
 			}
 
-			if (containerName.equals(SubnetGridStore.SYSTEM_USER_CONTAINER_NAME )) {
+			if (containerName.equals(SubnetGridStore.SYSTEM_USER_CONTAINER_NAME)) {
 
 				
 				return SYSTEM_CONTAINER_PARTITION_ID;
@@ -1732,6 +1701,8 @@ public class GridStoreChannel implements Closeable {
 			String base = null;
 			String affinity = null;
 			int partitionId = -1;
+			int partitioningCount = 0;
+			boolean newPartitioningRule = false;
 
 			int affinityPos = containerName.indexOf('@');
 			int subPartitionIdPos = containerName.indexOf('/');
@@ -1747,7 +1718,16 @@ public class GridStoreChannel implements Closeable {
 						"Illegal container name (" + containerName + ")");
 			} else {
 
-				String subPartitionId = containerName.substring(subPartitionIdPos + 1);
+				int partitioningPos = containerName.indexOf('_', subPartitionIdPos + 1);
+				if (partitioningPos != -1) {
+					newPartitioningRule = true;
+				}
+				else {
+					partitioningPos = containerName.length();
+				}
+
+				String subPartitionId = containerName.substring(subPartitionIdPos + 1, partitioningPos);
+
 				if (subPartitionId.isEmpty()) {
 					throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
 							"Illegal container name (" + containerName + ")");
@@ -1759,6 +1739,20 @@ public class GridStoreChannel implements Closeable {
 				} else {
 					throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
 							"Illegal container name (, " + containerName + ")");
+				}
+
+
+				if (newPartitioningRule) {
+					String partitioningCountStr = containerName.substring(partitioningPos + 1,
+							containerName.length());
+
+					final Matcher m2 = NUMERICAL_REGEX_PATTERN.matcher(partitioningCountStr);
+					if (m2.find()) {
+						partitioningCount = Integer.parseInt(partitioningCountStr);
+					} else {
+						throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
+								"Illegal container name (, " + containerName + ")");
+					}
 				}
 			}
 
@@ -1786,28 +1780,41 @@ public class GridStoreChannel implements Closeable {
 				final Matcher m1 = NUMERICAL_REGEX_PATTERN.matcher(affinity);
 				if (m1.find()) {
 					partitionId = Integer.parseInt(affinity);
+					if (subContainerId != -1) {
+						partitionId += subContainerId;
+					}
 				} else {
 					affinity = RowMapper.normalizeSymbol("_" + affinity);
 					affinity = affinity.substring(1);
+					base = affinity;
 				}
 			}
-
 			if (partitionId != -1) {
 				partitionId %= context.partitionCount;
-			} else if (affinity != null) {
+			} else if (affinity != null && !newPartitioningRule) {
 
 				
 				partitionId = calculatePartitionId(affinity,
 					context.containerHashMode, context.partitionCount);
 			} else {
-
-				partitionId = calculatePartitionId(base,
-					context.containerHashMode, context.partitionCount);
-			}
-
-			if (subContainerId != -1) {
-				
-				partitionId = (int) ((partitionId + subContainerId)) % context.partitionCount;
+				if (!newPartitioningRule) {
+					partitionId = calculatePartitionId(base,
+						context.containerHashMode, context.partitionCount);
+					if (subContainerId != -1) {
+						partitionId = (int) ((partitionId + subContainerId)) % context.partitionCount;
+					}
+				}
+				else {
+					if (context.partitionCount <= partitioningCount) {
+						return subContainerId % context.partitionCount;
+					}
+					int pbase = (context.partitionCount / partitioningCount);
+					int pmod = (context.partitionCount % partitioningCount);
+					final CRC32 crc = new CRC32();
+					crc.update(base.getBytes(BasicBuffer.DEFAULT_CHARSET));
+					partitionId = (pbase * subContainerId
+							+ (int)Math.min(pmod, subContainerId) + ((int)((crc.getValue() & 0xffffffff) % pbase)));
+				}
 			}
 
 			return partitionId;

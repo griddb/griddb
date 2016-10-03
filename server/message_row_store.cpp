@@ -20,7 +20,6 @@
 */
 
 #include "message_row_store.h"
-#include "value_processor.h"
 #include "data_store.h"
 #include <algorithm>
 

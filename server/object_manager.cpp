@@ -192,3 +192,23 @@ void ObjectManager::free(PartitionId pId, OId oId) {
 					  << offset << GS_EXCEPTION_MESSAGE(e));
 	}
 }
+
+void* ObjectManager::reload(PartitionId pId, OId oId, OId *lastOId, const ObjectReadType&)
+{
+	if (*lastOId != UNDEF_OID) {
+		unfix(pId, *lastOId);
+		*lastOId = UNDEF_OID;
+	}
+
+	return getForRead<uint8_t>(pId, oId);
+}
+
+void* ObjectManager::reload(PartitionId pId, OId oId, OId *lastOId, const ObjectWriteType&)
+{
+	if (*lastOId != UNDEF_OID) {
+		unfix(pId, *lastOId);
+		*lastOId = UNDEF_OID;
+	}
+
+	return getForUpdate<uint8_t>(pId, oId);
+}

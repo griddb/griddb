@@ -57,10 +57,6 @@
 /*!
     @brief Declaration of thread local.
 */
-
-
-
-
 #ifdef WIN32
 #define UTIL_THREAD_LOCAL __declspec(thread)
 #else
@@ -74,10 +70,6 @@ namespace detail { template<typename T> struct AtomicImplResolver; }
 /*!
     @brief Value for atomic operation.
 */
-
-
-
-
 template<typename T>
 class Atomic : public detail::AtomicImplResolver<T>::Result {
 public:
@@ -121,9 +113,6 @@ inline LockGuard<L>::~LockGuard() {
 /*!
     @brief Locks in the scope if object exists.
 */
-
-
-
 template<typename L>
 class DynamicLockGuard {
 public:
@@ -156,21 +145,13 @@ DynamicLockGuard<L>::~DynamicLockGuard() {
 
 class BarrierAttribute;
 
-
 class Barrier {
 public:
-	
-	
-	
 	explicit Barrier(size_t count, const BarrierAttribute *attr = NULL);
 
-	
-	
 	virtual ~Barrier();
 
 public:
-	
-	
 	void wait(void);
 
 private:
@@ -181,10 +162,8 @@ private:
 	UTIL_UNIQUE_PTR<Data> data_;
 };
 
-
 class BarrierAttribute {
 public:
-	
 	BarrierAttribute();
 
 	virtual ~BarrierAttribute();
@@ -207,43 +186,25 @@ class Mutex;
 /*!
     @brief Condition of values, setting and getting atomically.
 */
-
-
-
 class Condition {
 public:
-	
-	
 	explicit Condition(const ConditionAttribute *attr = NULL);
 
 	virtual ~Condition();
 
 public:
-	
 	void signal(void);
 
-	
 	void broadcast(void);
 
 	void lock(void);
 
 	void unlock(void);
 
-	
-	
 	void wait(void);
 
-	
-	
-	
-	
 	bool wait(uint32_t timeoutMillis);
 
-	
-	
-	
-	
-	
 	bool wait(struct timespec &ts);
 
 private:
@@ -254,12 +215,8 @@ private:
 	UTIL_UNIQUE_PTR<Data> data_;
 };
 
-
-
-
 class ConditionAttribute {
 public:
-	
 	ConditionAttribute();
 
 	virtual ~ConditionAttribute();
@@ -283,36 +240,20 @@ extern UTIL_FLAG_TYPE UTIL_MUTEX_ERRORCHECK;
 /*!
     @brief Mutex for prevention of concurrent execution.
 */
-
-
-
 class Mutex {
 public:
-	
-	
-	
 	explicit Mutex(int type = UTIL_MUTEX_FAST);
 
-	
-	
 	explicit Mutex(const MutexAttribute *attr);
 
 	virtual ~Mutex();
 
-	
 	void lock(void);
 
-	
-	
-	
 	bool tryLock(void);
 
-	
-	
-	
 	bool tryLock(uint32_t msec);
 
-	
 	void unlock(void);
 
 private:
@@ -326,35 +267,19 @@ private:
 /*!
     @brief Attributes of Mutex.
 */
-
-
-
 class MutexAttribute {
 public:
-	
 	MutexAttribute();
 
 	virtual ~MutexAttribute();
 
 public:
-	
-	
-	
 	void setType(int type = UTIL_MUTEX_DEFAULT);
 
-	
-	
-	
 	void getType(int &type) const;
 
-	
-	
-	
 	void setShared(bool shared);
 
-	
-	
-	
 	void getShared(bool &shared) const;
 
 private:
@@ -372,10 +297,6 @@ class RWLock;
 /*!
     @brief Lock permits a single write operation, or multi read operations.
 */
-
-
-
-
 class RWLock {
 private:
 	struct Data;
@@ -383,12 +304,8 @@ public:
 	class ReadLock;
 	class WriteLock;
 
-	
-	
 	explicit RWLock(const RWLockAttribute *attr);
 
-	
-	
 	explicit RWLock();
 
 	virtual ~RWLock();
@@ -403,19 +320,12 @@ public:
 public:
 	class ReadLock {
 	public:
-		
 		void lock(void);
 
-		
-		
 		bool tryLock(void);
 
-		
-		
-		
 		bool tryLock(uint32_t msec);
 
-		
 		void unlock(void);
 
 	private:
@@ -431,19 +341,12 @@ public:
 public:
 	class WriteLock {
 	public:
-		
 		void lock(void);
 
-		
-		
 		bool tryLock(void);
 
-		
-		
-		
 		bool tryLock(uint32_t msec);
 
-		
 		void unlock(void);
 
 	private:
@@ -469,24 +372,14 @@ private:
 /*!
     @brief Attributes of RWLock.
 */
-
-
-
 class RWLockAttribute {
 public:
-	
 	RWLockAttribute(void);
 
 	virtual ~RWLockAttribute();
 
-	
-	
-	
 	void setShared(bool pshared);
 
-	
-	
-	
 	void getShared(bool &pshared) const;
 
 private:
@@ -512,43 +405,24 @@ typedef RWLock::WriteLock WriteLock;
 /*!
     @brief Semaphore.
 */
-
-
-
 class Semaphore {
 public:
-	
-	
-	
 	explicit Semaphore(uint32_t value = 0);
 
-	
-	
-	
-	
-	
 	Semaphore(const char8_t *name, FileFlag flags, FilePermission perm,
 			uint32_t value = 0);
 
 	virtual ~Semaphore();
 
-	
-	
-	
 	static bool unlink(const char8_t *name);
 
 public:
-	
-	
 	bool unlink(void) const;
 	void lock(void);
 	bool tryLock(void);
 	bool tryLock(uint32_t msec);
 	void unlock(void);
 
-	
-	
-	
 	void getValue(size_t &value) const;
 
 private:
@@ -562,32 +436,18 @@ private:
 /*!
     @brief Lock permits only a single thread operation.
 */
-
-
-
-
 class SpinLock {
 public:
-	
-	
 	explicit SpinLock();
 
 	virtual ~SpinLock();
 
-	
 	void lock(void);
 
-	
-	
-	
 	bool tryLock(void);
 
-	
-	
-	
 	bool tryLock(uint32_t msec);
 
-	
 	void unlock(void);
 
 private:
@@ -603,9 +463,6 @@ class ThreadAttribute;
 /*!
     @brief Interface to execute a thread.
 */
-
-
-
 class ThreadRunner {
 public:
 	virtual ~ThreadRunner();
@@ -615,35 +472,20 @@ public:
 /*!
     @brief Interface to run multiple threads.
 */
-
-
-
 class Thread : public ThreadRunner {
 public:
 	Thread();
 
 	virtual ~Thread();
 
-	
-	
 	virtual void start(
 			ThreadRunner *runner = NULL, const ThreadAttribute *attr = NULL);
 
-	
 	virtual void close();
 
 public:
 
-	
-	
-	
 	void join();
-
-
-
-
-
-
 
 
 
@@ -654,12 +496,7 @@ public:
 	static uint64_t getSelfId();
 
 protected:
-	
 	virtual void run();
-
-
-
-
 
 
 private:
@@ -681,69 +518,35 @@ private:
 /*!
     @brief Attribute of a thread.
 */
-
-
-
 class ThreadAttribute {
 public:
 	friend class Thread;
 
-	
 	ThreadAttribute();
-
-
-
-
-
 
 
 	virtual ~ThreadAttribute();
 
 
-
-
-
 public:
-	
-	
 	void setScope(int type);
 
-	
-	
 	void getScope(int &type) const;
 
-	
-	
 	void setDetach(bool detached);
 
-	
-	
 	void getDetach(bool &detached) const;
 
-	
-	
 	void setGuardSize(size_t size);
 
-	
-	
 	void getGuardSize(size_t &size) const;
 
-	
-	
-	
 	void setStack(void *stack, size_t size);
 
-	
-	
-	
 	void getStack(void *&stack, size_t &size) const;
 
-	
-	
 	void setStackSize(size_t size);
 
-	
-	
 	void getStackSize(size_t &size) const;
 
 private:
@@ -756,12 +559,6 @@ private:
 
 
 
-
-
-
-
-
-
 namespace detail {
 
 #if defined(__GNUC__)
@@ -770,22 +567,17 @@ namespace detail {
 #elif defined(__i386__) || defined(__x86_64__)
 #define UTIL_ATOMIC_DETAIL_TYPE_GCC_X86
 #else
-#error
+#error 0
 #endif
-
 #elif defined(_WIN32)
 #define UTIL_ATOMIC_DETAIL_TYPE_WIN32
-
 #else
-#error
+#error 0
 #endif
 
 /*!
     @brief Utility to control an atomic operation.
 */
-
-
-
 struct AtomicUtil {
 
 	struct BadType;
@@ -907,7 +699,6 @@ private:
 	ValueType loadImpl(TrueType) const volatile {
 		ValueType value = AccessorType::toValueType(
 				const_cast<const volatile StorageType&>(value_));
-		
 		do {
 		}
 		while (!const_cast<AtomicBase*>(this)->compareExchange(value, value));
@@ -952,15 +743,9 @@ protected:
 	UTIL_ATOMIC_DETAIL_OP_AND_FETCH_BY_CAS(opSymbol, operand); \
 	return next
 
-
 template<typename T>
 class AtomicIntegerBase : public AtomicBase< T, AtomicIntegerBase<T> > {
 
-	
-	
-	
-	
-	
 
 public:
 	typedef AtomicIntegerBase<T> ThisType;
@@ -1225,7 +1010,6 @@ private:
 	typedef typename BaseType::AccessorType AccessorType;
 
 	inline static ValueType toValueType(StorageType value) {
-		
 		return !!value;
 	}
 };
@@ -1294,7 +1078,6 @@ inline void AtomicUtil::fenceBeforeStore() {
 #elif defined(UTIL_ATOMIC_DETAIL_TYPE_GCC_X86)
 	__asm__ __volatile__ ("" ::: "memory");
 #elif defined(UTIL_ATOMIC_DETAIL_TYPE_WIN32)
-	
 #endif
 }
 
@@ -1344,7 +1127,7 @@ struct AtomicUtil::CompareExchanger<S, 4> {
 				(volatile long*)target, (long) desired, (long) expected);
 		return (previous == expected);
 #else
-#error
+#error 0
 #endif
 	}
 };
@@ -1399,7 +1182,7 @@ struct AtomicUtil::CompareExchanger<S, 8> {
 		return (previous == expected);
 #endif 
 #else
-#error
+#error 0
 #endif
 	}
 };
@@ -1450,21 +1233,14 @@ template<> struct AtomicImplResolver<bool> {
 	typedef AtomicBoolBase<> Result;
 };
 
-
 typedef Atomic<uint32_t> AtomicUInt32;
 
 } 
 
 
-
-
-
 /*!
     @brief Detects conflictions.
 */
-
-
-
 class ConflictionDetector {
 public:
 	ConflictionDetector();
@@ -1485,9 +1261,6 @@ private:
 /*!
     @brief Scope of ConflictionDetector for seting in the clitical section.
 */
-
-
-
 class ConflictionDetectorScope {
 public:
 	ConflictionDetectorScope(ConflictionDetector &detector, bool entering);

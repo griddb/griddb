@@ -66,6 +66,8 @@ struct KeyValue {
 	K key_;
 	V value_;
 
+	KeyValue() : key_(), value_() {}
+
 	friend std::ostream &operator<<(
 		std::ostream &output, const KeyValue<K, V> &kv) {
 		output << "[" << kv.key_ << ",";
@@ -1220,6 +1222,10 @@ private:
 	int32_t find(TransactionContext &txn, SearchContext &sc,
 		util::XArray<R> &idList, OutputOrder outputOrder) {
 		if (sc.isEqual_ && isUnique()) {
+			if (sc.startKey_ == NULL) {
+				GS_THROW_USER_ERROR(
+					GS_ERROR_DS_UNEXPECTED_ERROR, "internal error");
+			}
 			P key = *reinterpret_cast<const P *>(sc.startKey_);
 			KeyValue<K, V> keyValue;
 			int32_t ret = find<P, K, V>(txn, key, keyValue);
@@ -1545,10 +1551,8 @@ void BtreeMap::merge(TransactionContext &txn, BNode<K, V> &node,
 	int32_t (*cmpInternal)(TransactionContext &txn,
 						 ObjectManager &objectManager, const KeyValue<K, V> &e1,
 						 const KeyValue<K, V> &e2)) {
-	bool needFix;
 	if (node.numkeyValues() < nodeMinSize_ && !node.isRoot()) {
 		int32_t upIndex;
-		needFix = false;
 		findUpNode(txn, node, upIndex);
 		BNode<K, V> parentNode(txn, *getObjectManager(), node.getParentOId(),
 			allocateStrategy_);  
@@ -1733,8 +1737,8 @@ bool BtreeMap::insertInternal(
 	val.key_ = key;
 	val.value_ = value;
 	if (isEmpty()) {
-		BNode<K, V> dirtyNode(
-			txn, *getObjectManager(), getBaseOId(), allocateStrategy_);
+		BNode<K, V> dirtyNode(txn, *getObjectManager(), allocateStrategy_);
+		getRootBNodeObject<K, V>(dirtyNode);
 		dirtyNode.allocateVal(txn, 0, val);
 		setTailNodeOId(txn, getRootOId());
 	}
@@ -1894,7 +1898,7 @@ bool BtreeMap::updateInternal(
 	KeyValue<P, V> val;
 	val.key_ = key;
 	val.value_ = value;
-	int32_t srcLoc, orgLoc, destLoc;
+	int32_t orgLoc;
 
 	BNode<K, V> dirtyOrgNode(txn, *getObjectManager(),
 		allocateStrategy_);  
@@ -1905,8 +1909,6 @@ bool BtreeMap::updateInternal(
 		txn.getPartitionId(), dirtyOrgNode.getSelfOId());
 
 	dirtyOrgNode.setValue(orgLoc, newValue);
-
-	srcLoc = destLoc = orgLoc;
 
 	return true;
 }

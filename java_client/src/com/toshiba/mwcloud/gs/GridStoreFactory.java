@@ -130,7 +130,7 @@ public abstract class GridStoreFactory implements Closeable {
 	 *
 	 * <p>The following properties can be specified. Unsupported property
 	 * names are ignored. See "System limiting values" in the GridDB API Reference for upper limit values
-	 * of some properties.
+	 * of some properties.</p>
 	 * <table>
 	 * <thead><tr><th>Property</th><th>Description</th></tr></thead>
 	 * <tbody>
@@ -142,7 +142,10 @@ public abstract class GridStoreFactory implements Closeable {
 	 * For autodetection of a master, omit the setting.</td></tr>
 	 * <tr><td>notificationAddress</td><td>An IP address (IPV4 only) for receiving
 	 * a notification used for autodetection of a master. A default address is
-	 * used if omitted.</td></tr>
+	 * used if omitted.
+	 * This property cannot be specified with neither notificationMember nor
+	 * notificationProvider properties at the same time.
+	 * </td></tr>
 	 * <tr><td>notificationPort</td><td>A port number for receiving a notification
 	 * used for autodetection of a master. A string representing of a number
 	 * from {@code 0} to {@code 65535}. A default port number is used if omitted.</td></tr>
@@ -196,9 +199,25 @@ public abstract class GridStoreFactory implements Closeable {
 	 * names, except a wild card character "%" is also acceptable additionally. Data
 	 * affinity patterns maintain the general contract for
 	 * {@link ContainerInfo#setDataAffinity(String)}.</td></tr>
+	 * <tr><td>notificationMember</td><td>
+	 * A list of address and port pairs in cluster. It is used to connect to
+	 * cluster which is configured with FIXED_LIST mode, and specified as
+	 * follows.
+	 * <pre>(Address1):(Port1),(Address2):(Port2),...</pre>
+	 * This property cannot be specified with neither notificationAddress nor
+	 * notificationProvider properties at the same time.
+	 * This property is supported on version 2.9 or later.
+	 * </td></tr>
+	 * <tr><td>notificationProvider</td><td>
+	 * A URL of address provider. It is used to connect to cluster which is
+	 * configured with PROVIDER mode.
+	 * This property cannot be specified with neither notificationAddress nor
+	 * notificationMember properties at the same time.
+	 * This property is supported on version 2.9 or later.
+	 * 
+	 * </td></tr>
 	 * </tbody>
 	 * </table>
-	 * </p>
 	 *
 	 * <p>A new {@link GridStore} instance is created by each call of this method.
 	 * Operations on different {@link GridStore} instances and related objects are thread
@@ -229,7 +248,7 @@ public abstract class GridStoreFactory implements Closeable {
 	 * <p>The changed settings are reflected in {@link GridStore} already created
 	 * by this Factory and {@link GridStore} to be created by this Factory later. </p>
 	 *
-	 * <p>The following properties can be specified. Unsupported property names are ignored.
+	 * <p>The following properties can be specified. Unsupported property names are ignored.</p>
 	 * <table>
 	 * <thead><tr><th>Property</th><th>Description</th></tr></thead>
 	 * <tbody>
@@ -244,7 +263,6 @@ public abstract class GridStoreFactory implements Closeable {
 	 * </td></tr>
 	 * </tbody>
 	 * </table>
-	 * </p>
 	 *
 	 * @throws GSException if any specified property does not match the format shown above.
 	 * @throws GSException if the connection is closed.

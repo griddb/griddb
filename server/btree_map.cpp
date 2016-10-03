@@ -501,7 +501,7 @@ int32_t BtreeMap::search(TransactionContext &txn, SearchContext &sc,
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TM_SEARCH_FAILED, "");
 		break;
 	}
-	return GS_SUCCESS;
+	return ret;
 }
 
 /*!
@@ -551,7 +551,7 @@ int32_t BtreeMap::getAll(
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TM_SEARCH_FAILED, "");
 		break;
 	}
-	return GS_SUCCESS;
+	return ret;
 }
 
 /*!

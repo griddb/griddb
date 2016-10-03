@@ -53,6 +53,41 @@ public class PropertyUtils {
 		}
 	}
 
+	public static void checkExclusiveProperties(
+			Properties props, String ...nameList) throws GSException {
+		int count = 0;
+		for (final String name : nameList) {
+			if (props.containsKey(name)) {
+				count++;
+			}
+		}
+
+		if (count > 1) {
+			final StringBuilder builder = new StringBuilder();
+
+			builder.append("Either one of following properties ");
+			builder.append("can be specified (");
+
+			boolean found = false;
+			for (final String name : nameList) {
+				if (props.containsKey(name)) {
+					if (!found) {
+						builder.append(", ");
+						found = true;
+					}
+					builder.append(name);
+					builder.append("=");
+					builder.append(props.getProperty(name));
+				}
+			}
+
+			builder.append(")");
+
+			throw new GSException(
+					GSErrorCode.ILLEGAL_PROPERTY_ENTRY, builder.toString());
+		}
+	}
+
 	public static class WrappedProperties {
 
 		private final Properties base;
@@ -62,6 +97,10 @@ public class PropertyUtils {
 
 		public WrappedProperties(Properties base) {
 			this.base = base;
+		}
+
+		public Properties getBase() {
+			return base;
 		}
 
 		public Long getTimeoutProperty(String name, Long defaultValue,
@@ -111,7 +150,11 @@ public class PropertyUtils {
 				return Integer.valueOf(strValue);
 			}
 			catch (NumberFormatException e) {
-				throw new GSException(GSErrorCode.ILLEGAL_VALUE_FORMAT, e);
+				throw new GSException(
+						GSErrorCode.ILLEGAL_VALUE_FORMAT,
+						"Failed to parse as integer (value=" + strValue +
+						", propertyName=" + name +
+						", reason=" + e.getMessage() + ")", e);
 			}
 		}
 
@@ -123,12 +166,7 @@ public class PropertyUtils {
 				return defaultValue;
 			}
 
-			try {
-				return Boolean.valueOf(strValue);
-			}
-			catch (NumberFormatException e) {
-				throw new GSException(GSErrorCode.ILLEGAL_VALUE_FORMAT, e);
-			}
+			return Boolean.valueOf(strValue);
 		}
 
 		public String getProperty(String name, boolean deprecated) {

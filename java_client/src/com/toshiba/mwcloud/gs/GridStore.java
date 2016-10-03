@@ -152,7 +152,7 @@ public interface GridStore extends Closeable {
 	 * the column will be deleted from the list of triggers subject to notification.</p>
 	 *
 	 * <p>The values of Columns to be newly created are initialized according
-	 * to the type as follows:
+	 * to the type as follows:</p>
 	 * <table>
 	 * <thead><tr><th>Column type</th><th>Initial value</th></tr></thead>
 	 * <tbody>
@@ -164,7 +164,6 @@ public interface GridStore extends Closeable {
 	 * <tr><td>Array type</td><td>An array with no element</td></tr>
 	 * </tbody>
 	 * </table>
-	 * </p>
 	 *
 	 * <p>For the correspondence between a specified type and a Column layout,
 	 * see the description of {@link Container}</p>
@@ -407,18 +406,18 @@ public interface GridStore extends Closeable {
 	 *
 	 * <p>Excluding the next point, the behavior will be the same
 	 * as {@link #putCollection(String, Class, boolean)}
-	 * or {@link #putTimeSeries(String, Class, TimeSeriesProperties, boolean)}.
+	 * or {@link #putTimeSeries(String, Class, TimeSeriesProperties, boolean)}.</p>
 	 * <ul>
 	 * <li>Use {@link ContainerInfo} to specify the Container type, column layout,
 	 * as well as the TimeSeries composition option where necessary</li>
 	 * <li>The Row object type of the {@link Container} returned will always
 	 * be {@link Row}</li>
 	 * </ul>
-	 * Arguments {@code modifiable} with the same respective name are used
+	 * <p>Arguments {@code modifiable} with the same respective name are used
 	 * in the same way as well.</p>
 	 *
 	 * <p>A list of the methods to specify Container-related information is
-	 * given below.
+	 * given below.</p>
 	 * <table>
 	 * <thead><tr><th>item</th><th>argument</th><th>description</th></tr></thead>
 	 * <tbody>
@@ -458,7 +457,6 @@ public interface GridStore extends Closeable {
 	 * if {@code null} is specified. </td></tr>
 	 * </tbody>
 	 * </table>
-	 * </p>
 	 *
 	 * @param name Name of a Container subject to processing
 	 * @param info Information of a Container subject to processing
@@ -492,7 +490,7 @@ public interface GridStore extends Closeable {
 	 * a {@link Row}.
 	 *
 	 * <p>Excluding the next point, the behavior will be the same as
-	 * {@link #getCollection(String, Class)} or {@link #getTimeSeries(String, Class)}.
+	 * {@link #getCollection(String, Class)} or {@link #getTimeSeries(String, Class)}.</p>
 	 * <ul>
 	 * <li>Return a {@link Container} object based on the existing Container type
 	 * and column layout</li>
@@ -501,7 +499,7 @@ public interface GridStore extends Closeable {
 	 * <li>The Row object type of the {@link Container} returned will always be
 	 * {@link Row}</li>
 	 * </ul>
-	 * Arguments {@code name} with the same respective name are used in the same way
+	 * <p>Arguments {@code name} with the same respective name are used in the same way
 	 * as well.</p>
 	 *
 	 * @param name Name of a Container subject to processing

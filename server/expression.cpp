@@ -494,6 +494,9 @@ Expr *Expr::getArrayElement(
 		case COLUMN_TYPE_DOUBLE_ARRAY:
 			return Expr::newNumericValue(
 				*reinterpret_cast<const double *>(data), txn);
+		case COLUMN_TYPE_TIMESTAMP_ARRAY:
+			return Expr::newTimestampValue(
+				*reinterpret_cast<const Timestamp *>(data), txn);
 		default:
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CRITICAL_LOGIC_ERROR,
 				"Internal logic error: getArrayElement() is called with "
@@ -1332,7 +1335,9 @@ Expr *Expr::evalSubBinOp(TransactionContext &txn, ObjectManager &objectManager,
 		txn, objectManager, column_values, function_map, mode);
 
 	if (x1->isValueOrColumn() && x2->isValueOrColumn() &&
-		opTable[x1->getColumnType()][x2->getColumnType()] == NULL) {
+		(ValueProcessor::isArray(x1->getColumnType()) ||
+			ValueProcessor::isArray(x2->getColumnType()) ||
+			opTable[x1->getColumnType()][x2->getColumnType()] == NULL)) {
 		ColumnType colType1 = x1->getColumnType();
 		ColumnType colType2 = x2->getColumnType();
 
@@ -1356,6 +1361,8 @@ Expr *Expr::evalSubBinOp(TransactionContext &txn, ObjectManager &objectManager,
 	}
 #endif
 	if (!x1->isValue() || !x2->isValue() ||
+		ValueProcessor::isArray(x1->value_->getType()) ||
+		ValueProcessor::isArray(x2->value_->getType()) ||
 		opTable[x1->value_->getType()][x2->value_->getType()] == NULL) {
 		switch (mode) {
 		case EVAL_MODE_PRINT: {
@@ -1419,7 +1426,9 @@ Expr *Expr::evalSubBinOp(TransactionContext &txn, ObjectManager &objectManager,
 		txn, objectManager, column_values, function_map, mode);
 
 	if (x1->isValueOrColumn() && x2->isValueOrColumn() &&
-		opTable[x1->getColumnType()][x2->getColumnType()] == NULL) {
+		(ValueProcessor::isArray(x1->getColumnType()) ||
+			ValueProcessor::isArray(x2->getColumnType()) ||
+			opTable[x1->getColumnType()][x2->getColumnType()] == NULL)) {
 		ColumnType colType1 = x1->getColumnType();
 		ColumnType colType2 = x2->getColumnType();
 
@@ -2266,13 +2275,11 @@ Expr *Expr::newColumnOrIdNode(Token &idName, TransactionContext &txn,
 	char buf[MAX_COLUMN_NAME_LEN];
 	char *cName = buf;
 	int i = 0;
-	bool allocFlag = false;
 	Expr *ret;
 
 	if (idName.n > MAX_COLUMN_NAME_LEN) {
 		cName = static_cast<char *>(
 			txn.getDefaultAllocator().allocate(idName.n + 1));
-		allocFlag = true;
 	}
 
 	for (i = 0; i < idName.n; i++) {
@@ -2316,7 +2323,6 @@ Expr *Expr::newColumnNode(Token &colName, TransactionContext &txn,
 	char buf[MAX_COLUMN_NAME_LEN];
 	char *cName = buf;
 	int i = 0;
-	bool allocFlag = false;
 	Expr *ret;
 
 	if (colName.z[0] == '*') {
@@ -2328,7 +2334,6 @@ Expr *Expr::newColumnNode(Token &colName, TransactionContext &txn,
 	if (colName.n > MAX_COLUMN_NAME_LEN) {
 		cName = static_cast<char *>(
 			txn.getDefaultAllocator().allocate(colName.n + 1));
-		allocFlag = true;
 	}
 
 	for (i = 0; i < colName.n; i++) {
@@ -2361,19 +2366,7 @@ Expr *Expr::newColumnNode(const char *upperName, TransactionContext &txn,
 	char *tmpCName;
 	Expr *ret;
 
-	if (upperName[0] == '"') {
-		size_t len = strlen(upperName);
-		if (upperName[len - 1] != '"') {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_TQ_SYNTAX_ERROR_CANNOT_DEQUOTE, "Cannot dequote");
-		}
-		tmpCName = reinterpret_cast<char *>(QP_ALLOCATOR.allocate(len));
-		memcpy(tmpCName, upperName + 1, len);
-		tmpCName[len - 1] = '\0';
-	}
-	else {
-		tmpCName = const_cast<char *>(upperName);
-	}
+	tmpCName = dequote(QP_ALLOCATOR, upperName);
 
 	if (tmpCName[0] == '*' && tmpCName[1] == '\0') {
 		if (state == Query::PARSESTATE_CONDITION) {
@@ -2425,19 +2418,7 @@ Expr *Expr::newFunctionNode(
 	int i = 0;
 	char *tmpCName;
 
-	if (fnName.z[0] == '"') {
-		size_t len = strlen(fnName.z);
-		if (fnName.z[len - 1] != '"') {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_TQ_SYNTAX_ERROR_CANNOT_DEQUOTE, "Cannot dequote");
-		}
-		tmpCName = reinterpret_cast<char *>(QP_ALLOCATOR.allocate(len));
-		memcpy(tmpCName, fnName.z + 1, len);
-		tmpCName[len - 1] = '\0';
-	}
-	else {
-		tmpCName = const_cast<char *>(fnName.z);
-	}
+	tmpCName = const_cast<char *>(fnName.z);
 
 	if (fnName.n >= MAX_COLUMN_NAME_LEN) {
 		util::String fName =
@@ -2479,19 +2460,7 @@ Expr *Expr::newSelectionNode(Token &fnName, ExprList *args,
 	int i = 0;
 	char *tmpCName;
 
-	if (fnName.z[0] == '"') {
-		size_t len = strlen(fnName.z);
-		if (fnName.z[len - 1] != '"') {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_TQ_SYNTAX_ERROR_CANNOT_DEQUOTE, "Cannot dequote");
-		}
-		tmpCName = reinterpret_cast<char *>(QP_ALLOCATOR.allocate(len));
-		memcpy(tmpCName, fnName.z + 1, len);
-		tmpCName[len - 1] = '\0';
-	}
-	else {
-		tmpCName = const_cast<char *>(fnName.z);
-	}
+	tmpCName = const_cast<char *>(fnName.z);
 
 	if (fnName.n >= MAX_COLUMN_NAME_LEN) {
 		util::String fName =
@@ -2521,6 +2490,27 @@ Expr *Expr::newSelectionNode(Token &fnName, ExprList *args,
 	}
 	GS_THROW_USER_ERROR(GS_ERROR_TQ_FUNCTION_NOT_FOUND,
 		util::String("No such function : ", QP_ALLOCATOR) + buf);
+}
+
+char *Expr::dequote(util::StackAllocator &alloc, const char *str) {
+	if (str[0] == '"') {
+		size_t len = strlen(str);
+		if (str[len - 1] != '"') {
+			GS_THROW_USER_ERROR(
+				GS_ERROR_TQ_SYNTAX_ERROR_CANNOT_DEQUOTE, "Cannot dequote");
+		}
+
+		size_t newlen = len - 2;
+		char *dequotedStr =
+			reinterpret_cast<char *>(alloc.allocate(newlen + 1));
+		memcpy(dequotedStr, str + 1, newlen);
+		dequotedStr[newlen] = '\0';
+
+		return dequotedStr;
+	}
+	else {
+		return const_cast<char *>(str);
+	}
 }
 
 bool Expr::aggregate(TransactionContext &txn, Collection &collection,
@@ -2613,7 +2603,8 @@ bool Expr::aggregate(TransactionContext &txn, TimeSeries &timeSeries,
 
 		TimeSeries::RowArray rowArray(txn, &timeSeries);		  
 		ColumnInfo &keyColumnInfo = timeSeries.getColumnInfo(0);  
-		ColumnInfo &aggColumnInfo = timeSeries.getColumnInfo(aggColumnId);  
+		ColumnInfo &aggColumnInfo =
+			timeSeries.getColumnInfo(aggColumnId);  
 		for (uint32_t i = 0; i < resultRowIdList.size(); i++) {
 			ContainerValue k(txn, objectManager), v(txn, objectManager);
 			rowArray.load(txn, resultRowIdList[i], &timeSeries,

@@ -702,10 +702,12 @@ private:
 		const void *constKey, OId oId, ColumnId columnId, MapType mapType);
 	void updateIndexData(TransactionContext &txn, IndexData indexData);
 
+
 	void getIdList(TransactionContext &txn,
 		util::XArray<uint8_t> &serializedRowList, util::XArray<RowId> &idList);
 	void lockIdList(TransactionContext &txn, util::XArray<OId> &oIdList,
 		util::XArray<RowId> &idList);
+	void setDummyMvccImage(TransactionContext &txn);
 	void getContainerOptionInfo(
 		TransactionContext &txn, util::XArray<uint8_t> &containerSchema);
 	void checkContainerOption(MessageSchema *messageSchema,
@@ -755,5 +757,6 @@ private:
 	}
 
 };
+
 
 #endif

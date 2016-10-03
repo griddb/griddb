@@ -100,9 +100,7 @@ public:
 		}
 		catch (...) {
 			for (uint32_t i = 0; i < varrayCounter_; i++) {
-				varray_[i]
-					.getBaseObject()
-					.reset();  
+				varray_[i].getBaseObject().reset();  
 			}
 			ALLOC_DELETE((alloc), varray_);
 			throw;
@@ -111,9 +109,7 @@ public:
 	~CollectionRowWrapper() {
 		util::StackAllocator &alloc = txn_.getDefaultAllocator();
 		for (uint32_t i = 0; i < varrayCounter_; i++) {
-			varray_[i]
-				.getBaseObject()
-				.reset();  
+			varray_[i].getBaseObject().reset();  
 		}
 		ALLOC_DELETE((alloc), varray_);
 	}

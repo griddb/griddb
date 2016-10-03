@@ -2535,7 +2535,6 @@ public class RowMapper {
 					final int savePos = buffer.base().position();
 					buffer.base().position(varDataLast);
 					final int elemCount = getVarSize(buffer);
-					assert(elemCount == getVariableEntryCount());
 					varDataLast = buffer.base().position();
 					buffer.base().position(savePos);
 				}
@@ -3519,7 +3518,6 @@ public class RowMapper {
 	}
 
 	static final int encodeVarSize(int val) {
-		assert(val < 0x40000000L);
 		if (val < VAR_SIZE_1BYTE_THRESHOLD) {
 			return ((val << 1L) | 0x01);
 		} else {

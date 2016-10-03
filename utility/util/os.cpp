@@ -43,14 +43,11 @@
     (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE 
     OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
-
-
-
-
 #include "util/os.h"
 #include "util/file.h"
 #include "util/code.h"
 #include <vector>
+#include <cassert>
 
 namespace util {
 
@@ -118,9 +115,6 @@ PlatformException PlatformExceptionBuilder::operator()(
 			NULL, "util::PlatformException",
 			Exception::STACK_TRACE_TOP);
 }
-
-
-
 
 
 namespace {
@@ -226,8 +220,14 @@ int64_t FileLib::getUnixTime(
 }
 
 int64_t FileLib::getUnixTime(const timeval &time) {
-	return static_cast<uint64_t>(time.tv_sec) * 1000 +
+	return static_cast<int64_t>(time.tv_sec) * 1000 +
 			static_cast<int64_t>(time.tv_usec) / 1000;
+}
+
+int64_t FileLib::getUnixTime(const timespec &time) {
+	const int64_t nanosPerMilli = 1000 * 1000;
+	return static_cast<int64_t>(time.tv_sec) * 1000 +
+			static_cast<int64_t>(time.tv_nsec) / nanosPerMilli;
 }
 
 int64_t FileLib::getUnixTime(time_t time) {
@@ -261,13 +261,24 @@ timeval FileLib::getTimeval(int64_t unixTime) {
 	return tv;
 }
 
-timespec FileLib::calculateTimeoutSpec(uint32_t timeoutMillis) {
-	timeval tv;
-	gettimeofday(&tv, NULL);
-	const uint64_t endTimeMillis = FileLib::getUnixTime(tv) + timeoutMillis;
+timespec FileLib::calculateTimeoutSpec(clockid_t clockId, uint32_t timeoutMillis) {
 	timespec ts;
-	ts.tv_sec = static_cast<time_t>(endTimeMillis / 1000);
-	ts.tv_nsec = static_cast<long>((endTimeMillis % 1000) * 1000000L);
+	if (0 != clock_gettime(clockId, &ts)) {
+		UTIL_THROW_PLATFORM_ERROR(NULL);
+	}
+
+	const long nanosPerSec = 1000 * 1000 * 1000;
+	const long nanosPerMilli = 1000 * 1000;
+
+	ts.tv_sec += static_cast<time_t>(timeoutMillis / 1000);
+	ts.tv_nsec += static_cast<long>(timeoutMillis % 1000) * nanosPerMilli;
+
+	const long sec = ts.tv_nsec / nanosPerSec;
+	assert(0 <= sec && sec <= 1);
+
+	ts.tv_sec += static_cast<time_t>(sec);
+	ts.tv_nsec -= sec * nanosPerSec;
+
 	return ts;
 }
 #endif
@@ -332,8 +343,24 @@ void FileLib::getFileStatus(const struct stat &stBuf, FileStatus *status) {
 void FileLib::getFileSystemStatus(
 		const char8_t *path, FileSystemStatus *status) {
 #ifdef _WIN32
+	u8string realPathDir;
+	if (FileSystem::exists(path)) {
+		u8string realPath;
+		FileSystem::getRealPath(path, realPath);
+
+		if (FileSystem::isDirectory(realPath.c_str())) {
+			realPathDir = realPath;
+		}
+		else {
+			FileSystem::getDirectoryName(realPath.c_str(), realPathDir);
+		}
+	}
+	else {
+		realPathDir = path;
+	}
+
 	std::wstring pathStr;
-	CodeConverter(Code::UTF8, Code::WCHAR_T)(path, pathStr);
+	CodeConverter(Code::UTF8, Code::WCHAR_T)(realPathDir.c_str(), pathStr);
 
 	ULARGE_INTEGER availableBytes;
 	ULARGE_INTEGER totalBytes;
@@ -458,7 +485,6 @@ int FileLib::createUnnamedSharedMemoryTemp(void) {
 				break;
 			}
 		} else {
-			
 			shm_unlink(tmpfn);
 			break;
 		}

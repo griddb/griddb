@@ -127,9 +127,9 @@ private:
 
 	T currentTime_;
 
-	Link *hashTable_;
+	std::vector<Link> hashTable_;
 
-	Link *timerRing_;
+	std::vector<Link> timerRing_;
 	size_t timerTop_;  
 	size_t timerBottom_;
 
@@ -317,8 +317,8 @@ ExpirableMap<K, V, T, Hash>::ExpirableMap(util::ObjectPool<Entry> &pool,
 	  interval_(interval),
 	  timerSize_(max_ / interval_),
 	  currentTime_(0),
-	  hashTable_(UTIL_NEW Link[hashSize_]),
-	  timerRing_(UTIL_NEW Link[timerSize_]),
+	  hashTable_(hashSize_),
+	  timerRing_(timerSize_),
 	  timerTop_(0),
 	  timerBottom_(timerSize_ - 1)
 {
@@ -341,9 +341,6 @@ ExpirableMap<K, V, T, Hash>::~ExpirableMap() {
 
 		hashTable_[i].next_ = NULL;
 	}
-
-	delete[] hashTable_;
-	delete[] timerRing_;
 }
 
 /*!

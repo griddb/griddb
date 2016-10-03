@@ -36,6 +36,7 @@ UTIL_TRACER_DECLARE(BASE_CONTAINER);
 
 class MessageSchema;
 class ResultSet;
+class ContainerRowScanner;
 
 
 /*!
@@ -514,13 +515,17 @@ protected:
 		ResultSize limit, ResultSize &resultNum,
 		MessageRowStore *messageRowStore, bool isWithRowId,
 		ResultSize startPos);
+	template <typename R, typename T>
+	void searchColumnIdIndex(TransactionContext &txn, MapType mapType,
+		typename T::SearchContext &sc, util::XArray<OId> &resultList,
+		OutputOrder outputOrder);
 	template <class R, class S>
 	void searchMvccMap(
 		TransactionContext &txn, S &sc, util::XArray<OId> &resultList);
 	template <class R, class S>
 	void searchColumnId(TransactionContext &txn, S &sc,
-		util::XArray<OId> &oIdList, util::XArray<OId> &resultList,
-		OutputOrder outputOrder);
+		util::XArray<OId> &oIdList, util::XArray<OId> &mvccList,
+		util::XArray<OId> &resultList, OutputOrder outputOrder);
 	template <class R>
 	void mergeRowList(TransactionContext &txn,
 		const ColumnInfo &targetColumnInfo, util::XArray<OId> &inputList1,
@@ -544,6 +549,7 @@ protected:
 	void getOIdListImpl(TransactionContext &txn, uint64_t start, uint64_t limit,
 		uint64_t &skipped, util::XArray<RowId> &rowIdList,
 		util::XArray<OId> &oIdList);
+	virtual void setDummyMvccImage(TransactionContext &txn) = 0;
 
 	virtual void checkExclusive(TransactionContext &txn) = 0;
 
@@ -703,5 +709,6 @@ public:
 
 private:
 };
+
 
 #endif

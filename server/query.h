@@ -292,6 +292,17 @@ protected:
 	}
 
 	/*!
+	 * Called when LIMIT keyword is used and sorted by value index.
+	 */
+	virtual void setLimitByIndexSort() {
+		if (nLimit_ == MAX_RESULT_SIZE && nActualLimit_ != MAX_RESULT_SIZE &&
+			(!getSelectionExpr(0)->isSelection() &&
+				!getSelectionExpr(0)->isAggregation())) {
+			nLimit_ = nActualLimit_ + nOffset_;
+		}
+	}
+
+	/*!
 	 * Called when GROUPBY keyword is used.
 	 */
 	void setGroupByExpr(ExprList *e) {
@@ -429,42 +440,34 @@ protected:
 		util::XArray<BoolExpr *> &andList, MapType mapType,
 		ColumnInfo *&indexColumnInfo);
 
-	const char *
-		str_;  
-	util::String
-		*pErrorMsg_;  
+	const char *str_;		   
+	util::String *pErrorMsg_;  
 	bool isSetError_;  
 	ExprList *
 		pSelectionExprList_;  
 	BoolExpr
 		*pWhereExpr_;  
-	const char *
-		pFromCollectionName_;  
-	TransactionContext &txn_;  
+	const char *pFromCollectionName_;  
+	TransactionContext &txn_;		   
 	ObjectManager
 		&objectManager_;  
 	ParseState parseState_;  
 	static bool sIsTrace_;
 	int nResultSorted_;  
 
-	ExplainData *
-		explainData_;  
+	ExplainData *explainData_;  
 	uint32_t explainNum_;  
 	uint32_t explainAllocNum_;  
-	bool
-		isExplainExecute_;  
+	bool isExplainExecute_;  
 	static const uint32_t EXPLAIN_COLUMN_NUM = 6;
-	QueryHookClass
-		*hook_;  
+	QueryHookClass *hook_;  
 
 	bool isDistinct_;  
-	ResultSize nActualLimit_, nLimit_,
-		nOffset_;  
+	ResultSize nActualLimit_, nLimit_, nOffset_;  
 	Expr *pLimitExpr_;  
-	ExprList *pGroupByExpr_;  
-	Expr *pHavingExpr_;		  
-	SortExprList
-		*pOrderByExpr_;  
+	ExprList *pGroupByExpr_;	  
+	Expr *pHavingExpr_;			  
+	SortExprList *pOrderByExpr_;  
 
 	FunctionMap *functionMap_;  
 	AggregationMap *aggregationMap_;  

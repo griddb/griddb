@@ -22,7 +22,6 @@
 #define MESSAGE_ROW_STORE_H_
 
 #include "schema.h"
-#include "value_processor.h" 
 
 
 class ColumnInfo;

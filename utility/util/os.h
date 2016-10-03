@@ -52,7 +52,6 @@
 
 #include "util/type.h"
 
-
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -62,7 +61,6 @@
 #include <set>
 #include <map>
 #include <algorithm>
-
 
 #include <cstdlib>
 #include <cstdio>
@@ -164,32 +162,6 @@ typedef int socklen_t;
 #endif
 
 namespace util {
-class PlatformExceptionBuilder {
-public:
-	enum Type {
-		TYPE_NORMAL,
-		TYPE_ADDRINFO_LINUX
-	};
-
-	PlatformException operator()(
-			const char8_t *message,
-			const Exception::SourceSymbolChar *fileNameLiteral,
-			const Exception::SourceSymbolChar *functionNameLiteral,
-			int32_t lineNumber,
-			Type type = TYPE_NORMAL,
-			int32_t specialErrorCode = 0);
-};
-}
-
-#define UTIL_THROW_PLATFORM_ERROR(message) \
-	throw util::PlatformExceptionBuilder()(message, UTIL_EXCEPTION_POSITION_ARGS);
-
-#define UTIL_THROW_PLATFORM_ERROR_WITH_CODE(type, errorCode, message) \
-	throw util::PlatformExceptionBuilder()( \
-			message, UTIL_EXCEPTION_POSITION_ARGS, \
-			util::PlatformExceptionBuilder::type, errorCode);
-
-namespace util {
 
 class FileStatus;
 class FileSystemStatus;
@@ -197,9 +169,6 @@ class FileSystemStatus;
 /*!
     @brief Information of shared memory.
 */
-
-
-
 struct SharedInstanceInfo {
 	void *p;
 	int fd;
@@ -213,9 +182,6 @@ struct SharedInstanceInfo {
 /*!
     @brief Common portable utility for platform-specific functions.
 */
-
-
-
 struct FileLib {
 
 #ifdef _WIN32
@@ -228,10 +194,11 @@ struct FileLib {
 	static int64_t getUnixTime(
 			tm &time, int32_t milliSecond, bool asLocalTimeZone);
 	static int64_t getUnixTime(const timeval &time);
+	static int64_t getUnixTime(const timespec &time);
 	static int64_t getUnixTime(time_t time);
 	static tm getTM(int64_t unixTime, bool asLocalTimeZone);
 	static timeval getTimeval(int64_t unixTime);
-	static timespec calculateTimeoutSpec(uint32_t timeoutMillis);
+	static timespec calculateTimeoutSpec(clockid_t clockId, uint32_t timeoutMillis);
 #endif
 
 #ifdef _WIN32

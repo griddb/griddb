@@ -106,7 +106,7 @@ public class QueryAnalysisEntry {
 	 * Returns the value type of the information indicated by an entry.
 	 *
 	 * <p>It returns the value type of an analysis result (e.g., execution time) etc.
-	 * The following types (primitive types defined by TQL) are supported:
+	 * The following types (primitive types defined by TQL) are supported:</p>
 	 * <ul>
 	 * <li>STRING</li>
 	 * <li>BOOL</li>
@@ -117,7 +117,6 @@ public class QueryAnalysisEntry {
 	 * <li>FLOAT</li>
 	 * <li>DOUBLE</li>
 	 * </ul>
-	 * </p>
 	 *
 	 * <p>It returns an empty string if no value is assigned. </p>
 	 */

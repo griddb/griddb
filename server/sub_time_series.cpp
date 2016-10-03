@@ -312,7 +312,8 @@ void SubTimeSeries::abortInternal(TransactionContext& txn, TransactionId tId) {
 						RowArray rowArray(txn, *rowItr,
 							reinterpret_cast<SubTimeSeries*>(this),
 							OBJECT_FOR_UPDATE);
-						if (rowArray.getTxnId() == tId) {
+						if (rowArray.getTxnId() == tId &&
+							!rowArray.isFirstUpdate()) {
 							undoCreateRow(txn, rowArray);
 						}
 					}
@@ -321,7 +322,10 @@ void SubTimeSeries::abortInternal(TransactionContext& txn, TransactionId tId) {
 			}
 		}
 		for (itr = mvccList.begin(); itr != mvccList.end(); itr++) {
-			if (itr->type_ != MVCC_CREATE) {
+			if (itr->type_ == MVCC_SELECT) {
+				removeMvccMap(txn, mvccMap.get(), tId, *itr);
+			}
+			else if (itr->type_ != MVCC_CREATE) {
 				RowArray rowArray(txn, itr->snapshotRowOId_,
 					reinterpret_cast<SubTimeSeries*>(this), OBJECT_FOR_UPDATE);
 				undoUpdateRow(txn, rowArray);
@@ -362,6 +366,7 @@ void SubTimeSeries::commit(TransactionContext& txn) {
 		for (itr = mvccList.begin(); itr != mvccList.end(); itr++) {
 			switch (itr->type_) {
 			case MVCC_CREATE:
+			case MVCC_SELECT:
 				{ removeMvccMap(txn, mvccMap.get(), tId, *itr); }
 				break;
 			case MVCC_UPDATE:
@@ -597,6 +602,43 @@ void SubTimeSeries::searchRowIdIndex(TransactionContext& txn,
 void SubTimeSeries::searchRowIdIndex(TransactionContext&, uint64_t, uint64_t,
 	util::XArray<RowId>&, util::XArray<OId>&, uint64_t&) {
 	GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_UNEXPECTED_ERROR, "");
+}
+
+void SubTimeSeries::setDummyMvccImage(TransactionContext& txn) {
+	try {
+		util::StackAllocator::Scope scope(txn.getDefaultAllocator());
+		StackAllocAutoPtr<BtreeMap> mvccMap(
+			txn.getDefaultAllocator(), getMvccMap(txn));
+		TransactionId tId = txn.getId();
+
+		bool exists = false;
+		if (!mvccMap.get()->isEmpty()) {
+			util::XArray<MvccRowImage> mvccList(txn.getDefaultAllocator());
+			util::XArray<MvccRowImage>::iterator itr;
+			BtreeMap::SearchContext sc(
+				UNDEF_COLUMNID, &tId, sizeof(tId), 0, NULL, MAX_RESULT_SIZE);
+			mvccMap.get()->search<TransactionId, MvccRowImage, MvccRowImage>(
+				txn, sc, mvccList);
+			if (!mvccList.empty()) {
+				for (itr = mvccList.begin(); itr != mvccList.end(); itr++) {
+					if (itr->type_ == MVCC_SELECT) {
+						exists = true;
+						break;
+					}
+				}
+			}
+		}
+
+		if (!exists) {
+			MvccRowImage dummyMvccImage(MVCC_SELECT, INITIAL_ROWID);
+			insertMvccMap(txn, mvccMap.get(), tId, dummyMvccImage);
+			setRuntime();
+			updateSubTimeSeriesImage(txn);
+		}
+	}
+	catch (std::exception& e) {
+		GS_RETHROW_USER_OR_SYSTEM(e, "");
+	}
 }
 
 /*!

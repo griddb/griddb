@@ -30,10 +30,30 @@
 #include "gs_error.h"
 #include "partition_table.h"
 
+#include "event_engine.h"
+
 #define TEST_CLUSTER_MANAGER
 
 #define TEST_TRANSACTION_HANDLER
 
+
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+
+typedef std::set<AddressInfo> NodeAddressSet;
+typedef NodeAddressSet::iterator NodeAddressSetItr;
+
+/*!
+	@brief cluster notification mode
+*/
+enum ClusterNotificationMode {
+	NOTIFICATION_MULTICAST,
+	NOTIFICATION_FIXEDLIST,
+	NOTIFICATION_RESOLVER
+};
+
+#endif
+
+class ClusterService;
 
 /*!
 	@brief cluster status after transition
@@ -66,7 +86,7 @@ enum GossipType {
 };
 
 /*!
-	@brief Operation type related with cluster managemet
+	@brief Operation type related with cluster management
 */
 enum ClusterOperationType {
 	OP_HEARTBEAT,
@@ -103,7 +123,12 @@ class ClusterManager {
 	friend class ClusterManagerTest;
 	friend class TransactionHandlerTest;
 
+	friend class ClusterService;
+
+
 public:
+	static const int32_t EVENT_MONOTONIC_ADJUST_TIME = 1000;
+
 
 	/*!
 		@brief Node status
@@ -168,6 +193,13 @@ public:
 		return clusterInfo_.clusterName_;
 	}
 
+
+	void initialize(ClusterService *clsSvc);
+
+	EventMonotonicTime getMonotonicTime() {
+		return ee_->getMonotonicTime() + clusterInfo_.startupTime_ +
+			   EVENT_MONOTONIC_ADJUST_TIME;
+	}
 
 	void getSafetyLeaveNodeList(util::StackAllocator &alloc,
 		std::vector<NodeId> &candList, int32_t removeNodeNum = 1);
@@ -260,8 +292,30 @@ public:
 		return isSignalBeforeRecovery_;
 	}
 
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+	void setNotificationMode(ClusterNotificationMode mode) {
+		clusterInfo_.mode_ = mode;
+	}
+
+	const char *getNotificationMode() {
+		switch (clusterInfo_.mode_) {
+		case NOTIFICATION_MULTICAST:
+			return "MULTICAST";
+		case NOTIFICATION_FIXEDLIST:
+			return "FIXED_LIST";
+		case NOTIFICATION_RESOLVER:
+			return "PROVIDER";
+		default:
+			return "UNDEF_MODE";
+		}
+	}
+
+	ClusterService *getService();
+
+#endif
+
 	/*!
-		@brief Represents Syncronization Statistics
+		@brief Represents Synchronization Statistics
 	*/
 	struct SyncStat {
 		SyncStat() : syncChunkNum_(0), syncApplyNum_(0) {}
@@ -287,7 +341,11 @@ public:
 	*/
 	class ErrorManager {
 	public:
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+		static const int32_t MAX_ERROR_COUNT = 6;
+#else
 		static const int32_t MAX_ERROR_COUNT = 5;
+#endif
 		static const int32_t DEFAULT_DUMP_COUNT = 1000;
 
 		ErrorManager() {
@@ -297,7 +355,12 @@ public:
 			dumpCountList_[1] = 10000;
 			dumpCountList_[2] = 10000;
 			dumpCountList_[3] = 10000;
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+			dumpCountList_[4] = 10;
+			dumpCountList_[5] = DEFAULT_DUMP_COUNT;
+#else
 			dumpCountList_[4] = DEFAULT_DUMP_COUNT;
+#endif
 		}
 
 		void reset() {
@@ -343,8 +406,16 @@ public:
 			case GS_ERROR_TXN_PARTITION_ROLE_UNMATCH:
 			case GS_ERROR_TXN_PARTITION_STATE_UNMATCH:
 				return 3;
+
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+			case GS_ERROR_CS_PROVIDER_TIMEOUT:
+				return 4;
+			default:
+				return MAX_ERROR_COUNT - 1;
+#else
 			default:
 				return 4;
+#endif
 			}
 		}
 		std::vector<uint64_t> errorCountList_;
@@ -365,9 +436,9 @@ public:
 
 	bool isSyncRunning(PartitionGroupId pgId) {
 		return (delayCheckpointLimitTime_[pgId] > 0 &&
-				util::DateTime::now(TRIM_MILLISECONDS).getUnixTime() <
-					delayCheckpointLimitTime_[pgId]);
+				getMonotonicTime() < delayCheckpointLimitTime_[pgId]);
 	}
+
 
 	void setChunkSync(PartitionId pId, CheckpointId cpId) {
 		currentChunkSyncPId_ = pId;
@@ -494,7 +565,7 @@ public:
 
 		void validate(uint64_t partitionNum) {
 			if (maxLsnList_.size() < partitionNum) {
-				GS_THROW_USER_ERROR(GS_ERROR_CLM_INVALID_PARTIION_NUM,
+				GS_THROW_USER_ERROR(GS_ERROR_CLM_INVALID_PARTITION_NUM,
 					"Invalid partition num, maxLsn="
 						<< maxLsnList_.size() << ", self=" << partitionNum);
 			}
@@ -854,6 +925,16 @@ public:
 
 		bool check() {
 			return true;
+		}
+
+		void validate(uint64_t partitionNum) {
+			if (lsnList_.size() != partitionNum ||
+				maxLsnList_.size() != partitionNum) {
+				GS_THROW_USER_ERROR(GS_ERROR_CLM_INVALID_PARTITION_NUM,
+					"Invalid partition num, recvLsn="
+						<< lsnList_.size() << ", maxLsn=" << maxLsnList_.size()
+						<< ", self=" << partitionNum);
+			}
 		}
 
 		void set(ClusterInfo &clusterInfo, PartitionTable *pt);
@@ -1460,10 +1541,22 @@ public:
 
 	void set(ChangePartitionTableInfo &changePartitionStatusInfo);
 
+
 	int64_t nextHeartbeatTime(int64_t baseTime) {
 		return (baseTime + clusterConfig_.getHeartbeatInterval() * 2 +
 				extraConfig_.getNextHeartbeatMargin());
 	}
+
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+	void setDigest(const ConfigTable &configTable,
+		util::XArray<uint8_t> &digestBinary, NodeAddressSet &addressInfoList,
+		ClusterNotificationMode mode);
+
+	PartitionTable *getPartitionTable() {
+		return pt_;
+	}
+
+#endif
 
 
 private:
@@ -1503,12 +1596,9 @@ private:
 		return clusterInfo_.quorum_;
 	}
 
-public:
 	int32_t getReserveNum() {
 		return clusterInfo_.reserveNum_;
 	}
-
-private:
 	void setClusterName(const std::string &clusterName) {
 		util::LockGuard<util::Mutex> lock(clusterLock_);
 		clusterInfo_.clusterName_ = clusterName;
@@ -1548,7 +1638,10 @@ private:
 		return clusterInfo_.digest_;
 	}
 
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+#else
 	void setDigest(const ConfigTable &configTable);
+#endif
 
 	int64_t getStartupTime() {
 		return clusterInfo_.startupTime_;
@@ -1565,9 +1658,13 @@ private:
 	void setNotifyPendingCount();
 
 	int32_t updateNotifyPendingCount() {
-		if (clusterInfo_.notifyPendingCount_ > 0)
+		if (clusterInfo_.notifyPendingCount_ > 0) {
 			clusterInfo_.notifyPendingCount_--;
-		return clusterInfo_.notifyPendingCount_ - 1;
+			return clusterInfo_.notifyPendingCount_ + 1;
+		}
+		else {
+			return 0;
+		}
 	}
 
 	void detectMutliMaster();
@@ -1618,8 +1715,13 @@ private:
 			ownerCatchupPromoteCheckInterval_ =
 				changeTimeSecToMill(OWNER_CATCHUP_LSN_CHECK_SLACK_INTERVAL);
 
+#ifdef CLUSTER_MOD_WEB_API
+			checkpointDelayLimitInterval_ = changeTimeSecToMill(
+				config.get<int32_t>(CONFIG_TABLE_CS_CHECKPOINT_DELAY_INTERVAL));
+#else
 			checkpointDelayLimitInterval_ =
 				changeTimeSecToMill(CHECKPOINT_DELAY_INTERVAL);
+#endif
 		}
 
 		int32_t getHeartbeatInterval() const {
@@ -1768,7 +1870,21 @@ private:
 		uint16_t notificationClientPort_;
 		int32_t replicationMode_;
 		Size_t chunkSize_;
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+		ClusterNotificationMode notificationMode_;
+#endif
 	};
+
+#ifdef CLUSTER_MOD_WEB_API
+	struct Config : public ConfigTable::ParamHandler {
+		Config() : clsMgr_(NULL){};
+		void setUpConfigHandler(
+			ClusterManager *clsMgr, ConfigTable &configTable);
+		virtual void operator()(
+			ConfigTable::ParamId id, const ParamValue &value);
+		ClusterManager *clsMgr_;
+	};
+#endif
 
 	/*!
 		@brief Represents cluster information
@@ -1794,7 +1910,12 @@ private:
 			  isForceSync_(false),
 			  isRepairPartition_(false),
 			  pt_(pt),
-			  isHeartbeatRes_(false) {
+			  isHeartbeatRes_(false)
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+			  ,
+			  mode_(NOTIFICATION_MULTICAST)
+#endif
+		{
 		}
 
 		bool isStable() {
@@ -1849,6 +1970,10 @@ private:
 		std::vector<NodeId> prevActiveNodeList_;
 		std::set<NodeId> downNodeList_;
 		bool isHeartbeatRes_;
+
+#ifdef GD_ENABLE_UNICAST_NOTIFICATION
+		ClusterNotificationMode mode_;
+#endif
 
 		std::string dump() {
 			util::NormalOStringStream ss;
@@ -1950,6 +2075,7 @@ private:
 	} statSetUpHandler_;
 
 	class StatUpdator : public StatTable::StatUpdator {
+		friend class ClusterServiceTest;
 		virtual bool operator()(StatTable &stat);
 
 	public:
@@ -1974,6 +2100,13 @@ private:
 	SyncStat syncStat_;
 	ErrorManager errorMgr_;
 
+	EventEngine *ee_;
+
+	ClusterService *clsSvc_;
+
+#ifdef CLUSTER_MOD_WEB_API
+	Config config_;
+#endif
 };
 
 typedef ClusterManager::HeartbeatResInfo::HeartbeatResValue HeartbeatResValue;

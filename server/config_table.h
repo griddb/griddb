@@ -31,17 +31,6 @@ namespace picojson {
 class value;
 }
 
-/*!
-	@brief Parses JSON data
-*/
-struct JsonUtils {
-	static u8string parseAll(
-			picojson::value &value, const char8_t *begin, const char8_t *end);
-};
-
-/*!
-	@brief Represents parameter value
-*/
 class ParamValue {
 public:
 	typedef util::StdAllocator<void, void> Allocator;
@@ -81,7 +70,7 @@ public:
 	bool operator!=(const ParamValue &another) const;
 
 	template<typename T> bool is() const;
-	template<typename T> const T& get() const;
+	template<typename T> T get() const;
 	Type getType() const;
 	void toJSON(picojson::value &dest) const;
 
@@ -97,7 +86,7 @@ private:
 
 	template<typename T> static size_t elementCount(const T*);
 
-	template<typename T> struct VariableType {
+	template<typename T, bool Pod> struct VariableType {
 	public:
 		typedef typename Allocator::template rebind<T>::other ValueAllocator;
 
@@ -117,17 +106,18 @@ private:
 	};
 
 	union {
-		VariableType<char8_t> asString_;
+		VariableType<char8_t, true> asString_;
 		int64_t asInt64_;
 		int32_t asInt32_;
 		double asDouble_;
 		bool asBool_;
-		VariableType<picojson::value> asJSON_;
+		VariableType<picojson::value, false> asJSON_;
 	} storage_;
 
 	Type type_;
 };
 
+template<> picojson::value ParamValue::get() const;
 std::ostream& operator<<(std::ostream &stream, const ParamValue &value);
 
 /*!
@@ -139,6 +129,9 @@ public:
 
 	typedef int32_t ParamId;
 	static const ParamId PARAM_ID_ROOT;
+
+	typedef std::set< ParamId, std::less<ParamId>,
+			util::StdAllocator<ParamId, void> > IdSet;
 
 	template<typename T> class BasicSetUpHandler;
 	class ValueAnnotation;
@@ -169,12 +162,14 @@ public:
 	bool getNextParam(ParamId id, ParamId &nextId, bool skipEmpty) const;
 	bool getParentParam(ParamId id, ParamId &parentId) const;
 
+	IdSet listDescendantParams(const IdSet &src) const;
+
 	AnnotatedValue getAnnotatedValue(
 			ParamId id, bool valueExpected = true,
 			bool annotationExpected = true) const;
 
 	bool isSet(ParamId id) const;
-	template<typename T> const T& get(ParamId id) const;
+	template<typename T> T get(ParamId id) const;
 
 	const char8_t* getName(ParamId id) const;
 	const char8_t* getSourceInfo(ParamId id) const;
@@ -190,6 +185,7 @@ public:
 			const char8_t *const *sourceInfoList);
 	void toFile(const char8_t *filePath, ParamId id, ExportMode mode);
 	void toJSON(picojson::value &dest, ParamId id, ExportMode mode);
+
 
 	void addProblem(const util::Exception::NamedErrorCode &code,
 			const char8_t *message);
@@ -303,7 +299,8 @@ public:
 
 	virtual bool asStorableValue(
 			ParamValue &dest, const ParamValue *src, const ParamValue *base,
-			const char8_t *sourceInfo, const Allocator &alloc) const = 0;
+			const char8_t *sourceInfo, const Allocator &alloc,
+			const IdSet *specifiedIds) const = 0;
 
 	virtual void asDisplayValue(ParamValue &dest, const ParamValue &src,
 			const Allocator &alloc, ExportMode mode) const = 0;
@@ -342,12 +339,17 @@ public:
 	UserTable();
 
 	void load(const char8_t *fileName);
+	void save(const char8_t *fileName) const;
 
 	bool isValidUser(
 		const char8_t *name, const char8_t *password, bool convert = false) const;
 
-	bool exists(
-		const char8_t *name) const;
+	const char8_t* getDigest(const char8_t *name) const;
+
+	void setUser(const char8_t *name, const char8_t *digest);
+	void removeUser(const char8_t *name);
+
+	bool exists(const char8_t *name) const;
 
 private:
 	UserTable(const UserTable&);
@@ -440,6 +442,8 @@ public:
 	Constraint& alternate(ParamId alternativeId, Filter *filter = NULL);
 	Constraint& inherit(ParamId baseId);
 
+	Constraint& addExclusive(ParamId id);
+
 	Constraint& deprecate(bool enabled = true);
 	Constraint& hide(bool enabled = true);
 
@@ -451,7 +455,8 @@ protected:
 
 	virtual bool asStorableValue(
 			ParamValue &dest, const ParamValue *src, const ParamValue *base,
-			const char8_t *sourceInfo, const Allocator &alloc) const;
+			const char8_t *sourceInfo, const Allocator &alloc,
+			const IdSet *specifiedIds) const;
 
 	virtual void asDisplayValue(ParamValue &dest, const ParamValue &src,
 			const Allocator &alloc, ExportMode mode) const;
@@ -461,6 +466,7 @@ private:
 
 	typedef ParamTable::Allocator Allocator;
 	typedef ParamTable::String String;
+	typedef std::pair<bool, bool> NumberRounding;
 
 	struct CandidateInfo {
 		String name_;
@@ -493,10 +499,12 @@ private:
 
 	bool asStorableUnitValue(ParamValue &dest, const ParamValue &src,
 			const Allocator &alloc, Formatter &formatter,
-			ValueUnit *srcUnit) const;
+			ValueUnit *srcUnit, NumberRounding &rounding) const;
 
-	bool asStorableNumericValue(ParamValue &dest, const ParamValue &src,
+	bool asStorableNumericValue(
+			ParamValue &dest, const ParamValue &src,
 			const Allocator &alloc, Formatter &formatter,
+			NumberRounding &rounding,
 			const ParamValue::Type *type = NULL) const;
 
 	const ParamValue* filterValue(
@@ -506,15 +514,32 @@ private:
 	void checkComparable(bool expected) const;
 
 	template<typename D, typename S>
-	void convertNumber(D &dest, const S &src, Formatter &formatter) const;
+	void convertNumber(
+			D &dest, const S &src, Formatter &formatter,
+			NumberRounding &rounding) const;
+
+	template<typename T>
+	static void applyNumberRounding(
+			const T org, const T reverted, NumberRounding &rounding);
 
 	static int32_t compareValue(
-			const ParamValue &value1, const ParamValue &value2);
+			const ParamValue &value1, const ParamValue &value2,
+			const NumberRounding &rounding1);
 	template<typename T> static int32_t compareNumber(
 			const T &value1, const T &value2);
 
-	static int64_t convertUnit(int64_t src, ValueUnit destUnit,
-			ValueUnit srcUnit, Formatter &formatter);
+	static int64_t convertUnit(
+			int64_t src, ValueUnit destUnit, ValueUnit srcUnit,
+			Formatter &formatter, NumberRounding &rounding);
+
+	void checkExclusiveIdSet(
+			const Formatter &formatter, const IdSet &exclusiveIds) const;
+	void checkExclusiveValue(
+			const Formatter &formatter, const IdSet &exclusiveIds,
+			const IdSet *specifiedIds) const;
+
+	ParamId getExclusiveParam(ParamId id) const;
+	IdSet listExclusiveParams(const Formatter &formatter) const;
 
 	ParamTable::ParamId id_;
 	ParamTable &paramTable_;
@@ -530,6 +555,7 @@ private:
 	ParamValue maxValue_;
 
 	CandidateList candidateList_;
+	IdSet exclusiveIdSet_;
 
 	Filter *filter_;
 
@@ -538,6 +564,7 @@ private:
 	bool unitRequired_;
 	bool alterable_;
 	bool inheritable_;
+	bool defaultSpecified_;
 };
 
 class ConfigTable::Constraint::Formatter {
@@ -549,6 +576,7 @@ public:
 		ENTRY_NORMAL,
 		ENTRY_PATH,
 		ENTRY_VALUE,
+		ENTRY_SPECIFIED,
 		ENTRY_TYPE,
 		ENTRY_JSON_VALUE_TYPE,
 		ENTRY_RECOMMENDS,
@@ -558,6 +586,7 @@ public:
 	};
 
 	explicit Formatter(const Constraint &constraint);
+	~Formatter();
 
 	void add(const char8_t *name, const ParamValue &value,
 			EntryType entryType = ENTRY_NORMAL);
@@ -573,11 +602,15 @@ private:
 		EntryType entryType_;
 	};
 
+	typedef std::vector< Entry*, util::StdAllocator<Entry*, void> > EntryList;
+
 	void format(std::ostream &stream, const Entry &entry) const;
+	static void formatValue(std::ostream &stream, const ParamValue &value);
 
 	const Constraint &constraint_;
-	Entry entryList_[10];
-	size_t entryCount_;
+	util::StdAllocator<Entry, void> entryAlloc_;
+
+	EntryList entryList_;
 };
 
 std::ostream& operator<<(
@@ -683,39 +716,34 @@ template<typename T> inline bool ParamValue::is() const {
 	return (resolveType<T>() == type_);
 }
 
-template<typename T> inline const T& ParamValue::get() const {
+template<typename T> inline T ParamValue::get() const {
 	UTIL_STATIC_ASSERT(sizeof(T) < 0);
 	return *static_cast<const T*>(NULL);
 }
 
-template<> inline const char8_t *const& ParamValue::get() const {
+template<> inline const char8_t* ParamValue::get() const {
 	assert(is<const char8_t*>());
 	return storage_.asString_.get();
 }
 
-template<> inline const int64_t& ParamValue::get() const {
+template<> inline int64_t ParamValue::get() const {
 	assert(is<int64_t>());
 	return storage_.asInt64_;
 }
 
-template<> inline const int32_t& ParamValue::get() const {
+template<> inline int32_t ParamValue::get() const {
 	assert(is<int32_t>());
 	return storage_.asInt32_;
 }
 
-template<> inline const double& ParamValue::get() const {
+template<> inline double ParamValue::get() const {
 	assert(is<double>());
 	return storage_.asDouble_;
 }
 
-template<> inline const bool& ParamValue::get() const {
+template<> inline bool ParamValue::get() const {
 	assert(is<bool>());
 	return storage_.asBool_;
-}
-
-template<> inline const picojson::value& ParamValue::get() const {
-	assert(is<picojson::value>());
-	return *storage_.asJSON_.get();
 }
 
 template<typename T> inline ParamValue::Type ParamValue::resolveType() {
@@ -752,7 +780,7 @@ template<> inline ParamValue::Type ParamValue::resolveType<picojson::value>() {
 	return PARAM_TYPE_JSON;
 }
 
-template<typename T> inline const T& ParamTable::get(ParamId id) const {
+template<typename T> inline T ParamTable::get(ParamId id) const {
 	const ParamValue *value = getAnnotatedValue(id, true, false).first;
 	return value->get<T>();
 }
@@ -835,6 +863,11 @@ enum ConfigTableParamId {
 	CONFIG_TABLE_TXN_REPLICATION_TIMEOUT_INTERVAL,
 	CONFIG_TABLE_TXN_AUTHENTICATION_TIMEOUT_INTERVAL,
 
+	CONFIG_TABLE_CS_NOTIFICATION_MEMBER,
+	CONFIG_TABLE_CS_NOTIFICATION_PROVIDER,
+	CONFIG_TABLE_CS_NOTIFICATION_PROVIDER_URL,
+	CONFIG_TABLE_CS_NOTIFICATION_PROVIDER_UPDATE_INTERVAL,
+
 
 	CONFIG_TABLE_ROOT_SERVICE_ADDRESS,
 
@@ -845,6 +878,7 @@ enum ConfigTableParamId {
 	CONFIG_TABLE_DS_LOG_WRITE_MODE,
 	CONFIG_TABLE_DS_STORE_WARM_START,
 	CONFIG_TABLE_DS_AFFINITY_GROUP_SIZE,
+	CONFIG_TABLE_DS_STORE_COMPRESSION_MODE,
 
 	CONFIG_TABLE_DS_IO_WARNING_THRESHOLD_MILLIS,
 	CONFIG_TABLE_DS_IO_WARNING_THRESHOLD_TIME,
@@ -867,6 +901,7 @@ enum ConfigTableParamId {
 	CONFIG_TABLE_CS_SERVICE_PORT,
 
 	CONFIG_TABLE_CS_CONNECTION_LIMIT,
+	CONFIG_TABLE_CS_CHECKPOINT_DELAY_INTERVAL,
 
 	CONFIG_TABLE_SYNC_LISTEN_ADDRESS,
 	CONFIG_TABLE_SYNC_LISTEN_PORT,
@@ -939,6 +974,11 @@ enum ConfigTableParamId {
 	CONFIG_TABLE_TRACE_EVENT_ENGINE,
 	CONFIG_TABLE_TRACE_TRIGGER_SERVICE,
 	CONFIG_TABLE_TRACE_MESSAGE_LOG_TEST,
+	CONFIG_TABLE_TRACE_CLUSTER_INFO_TRACE,
+	CONFIG_TABLE_TRACE_SYSTEM,
+	CONFIG_TABLE_TRACE_BTREE_MAP,
+	CONFIG_TABLE_TRACE_AUTHENTICATION_TIMEOUT,
+
 	CONFIG_TABLE_TRACE_TRACER_ID_END,
 
 	CONFIG_TABLE_DEV_AUTO_JOIN_CLUSTER,
@@ -966,10 +1006,10 @@ public:
 			ConfigTable &configTable, ConfigTable::ParamId id,
 			const char8_t *symbol);
 
+	static const char8_t* getGroupSymbol(const char8_t *src, bool reverse);
+
 private:
 	typedef std::map<std::string, std::string> SymbolTable;
-
-	static const char8_t* getGroupSymbol(const char8_t *src, bool reverse);
 
 	static SymbolTable& getGroupSymbolTable();
 };
@@ -1044,6 +1084,9 @@ enum StatTableParamId {
 	STAT_TABLE_CS_ERROR_ALREADY_APPLIED_LOG,
 	STAT_TABLE_CS_ERROR_INVALID_LOG,
 
+	STAT_TABLE_CS_NOTIFICATION_MODE,
+	STAT_TABLE_CS_NOTIFICATION_MEMBER,
+
 	STAT_TABLE_CP_START_TIME,
 	STAT_TABLE_CP_END_TIME,
 	STAT_TABLE_CP_MODE,
@@ -1060,6 +1103,8 @@ enum StatTableParamId {
 
 	STAT_TABLE_PERF_CHECKPOINT_FILE_SIZE,	
 	STAT_TABLE_PERF_CHECKPOINT_FILE_USAGE_RATE,	
+	STAT_TABLE_PERF_STORE_COMPRESSION_MODE,
+	STAT_TABLE_PERF_CHECKPOINT_FILE_ALLOCATE_SIZE,	
 	STAT_TABLE_PERF_CURRENT_CHECKPOINT_WRITE_BUFFER_SIZE,
 	STAT_TABLE_PERF_CHECKPOINT_WRITE_SIZE,	
 	STAT_TABLE_PERF_CHECKPOINT_WRITE_TIME,
@@ -1081,6 +1126,7 @@ enum StatTableParamId {
 	STAT_TABLE_PERF_TXN_EE_CLUSTER,
 	STAT_TABLE_PERF_TXN_EE_SYNC,
 	STAT_TABLE_PERF_TXN_EE_TRANSACTION,
+	STAT_TABLE_PERF_TXN_EE_SQL,
 
 	STAT_TABLE_PERF_DS_STORE_MEMORY_LIMIT,
 	STAT_TABLE_PERF_DS_STORE_MEMORY,	
@@ -1129,6 +1175,7 @@ enum StatTableParamId {
 	STAT_TABLE_PERF_MEM_ALL_CACHED,	
 	STAT_TABLE_PERF_MEM_PROCESS_MEMORY_GAP,	
 	STAT_TABLE_PERF_MEM_DS_STORE_TOTAL,
+	STAT_TABLE_PERF_MEM_DS_STORE_CACHED,
 	STAT_TABLE_PERF_MEM_DS_LOG_TOTAL,
 	STAT_TABLE_PERF_MEM_DS_LOG_CACHED,
 	STAT_TABLE_PERF_MEM_WORK_CHECKPOINT_TOTAL,
@@ -1166,6 +1213,7 @@ enum StatTableDisplayOption {
 	STAT_TABLE_DISPLAY_OPTIONAL_MEM,
 	STAT_TABLE_DISPLAY_OPTIONAL_SYNC,
 	STAT_TABLE_DISPLAY_OPTIONAL_PGLIMIT,
+	STAT_TABLE_DISPLAY_OPTIONAL_NOTIFICATION_MEMBER,
 	STAT_TABLE_DISPLAY_ADDRESS_CLUSTER,
 	STAT_TABLE_DISPLAY_ADDRESS_TRANSACTION,
 	STAT_TABLE_DISPLAY_ADDRESS_SYNC
@@ -1198,7 +1246,6 @@ enum AllocatorGroupId {
 	ALLOCATOR_GROUP_TXN_MESSAGE,
 	ALLOCATOR_GROUP_TXN_RESULT,
 	ALLOCATOR_GROUP_TXN_WORK,
-
 	ALLOCATOR_GROUP_ID_END
 };
 

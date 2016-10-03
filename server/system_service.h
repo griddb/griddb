@@ -399,8 +399,6 @@ private:
 	ConfigTable &config_;
 	StatTable *baseStats_;
 
-	static const char8_t *const CONFIG_PARAMETOR_INFOS[];
-
 	std::set<std::string> moduleList_;
 
 };
