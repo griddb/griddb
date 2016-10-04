@@ -156,6 +156,7 @@ $(srcdir)/value_processor.cpp \
 $(srcdir)/main.cpp
 
 gsserver_CPPFLAGS = \
+-DGD_ENABLE_UNICAST_NOTIFICATION \
 $(NOSQL_INCLUDES)
 
 gsserver_LDADD = \
