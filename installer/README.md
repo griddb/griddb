@@ -1,4 +1,4 @@
-Put an archive file (griddb_nosql-2.8.0.zip) on SOURCES directory.
+Put an archive file (griddb_nosql-X.X.X.zip) on SOURCES directory.
 
 For example, input the following command:
 
