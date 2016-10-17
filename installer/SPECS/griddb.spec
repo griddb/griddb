@@ -1,5 +1,5 @@
 %define griddb_name griddb_nosql
-%define griddb_ver 2.8.0
+%define griddb_ver 3.0.0
 %define griddb_instdir /usr/griddb-%{griddb_ver}
 %define griddb_homedir /var/lib/gridstore
 # do not strip
@@ -10,7 +10,7 @@
 Name:           %{griddb_name}
 Summary:        GridDB Community Edition
 Version:        %{griddb_ver}
-Release:        1%{?dist}
+Release:        1.linux
 Group:          Applications/Databases
 Vendor:         TOSHIBA CORPORATION
 License:        AGPL-3.0 and (Apache-2.0)
@@ -39,6 +39,7 @@ mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/purewell
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/sha2
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/slf4j
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/yield
+mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/json-simple
 mkdir -p %{buildroot}%{griddb_instdir}/docs
 mkdir -p %{buildroot}%{griddb_instdir}/docs/manual
 mkdir -p %{buildroot}%{griddb_instdir}/docs/sample
@@ -68,6 +69,7 @@ install -c -m 640 conf/gs_cluster.json     %{buildroot}%{griddb_instdir}/conf
 install -c -m 640 conf/gs_node.json        %{buildroot}%{griddb_instdir}/conf
 install -c -m 640 conf/password            %{buildroot}%{griddb_instdir}/conf
 
+install -c -m 640 3rd_party/3rd_party.md                        %{buildroot}%{griddb_instdir}/3rd_party
 install -c -m 640 3rd_party/Apache_License-2.0.txt              %{buildroot}%{griddb_instdir}/3rd_party
 install -c -m 640 3rd_party/BSD_License.txt                     %{buildroot}%{griddb_instdir}/3rd_party
 install -c -m 640 3rd_party/MIT_License.txt                     %{buildroot}%{griddb_instdir}/3rd_party
@@ -82,8 +84,9 @@ install -c -m 640 3rd_party/slf4j/LICENSE.txt                   %{buildroot}%{gr
 install -c -m 640 3rd_party/slf4j/slf4j-api-1.7.7.jar           %{buildroot}%{griddb_instdir}/3rd_party/slf4j
 install -c -m 640 3rd_party/slf4j/slf4j-jdk14-1.7.7.jar         %{buildroot}%{griddb_instdir}/3rd_party/slf4j
 install -c -m 640 3rd_party/yield/yield.txt                     %{buildroot}%{griddb_instdir}/3rd_party/yield
+install -c -m 640 3rd_party/json-simple/fangyidong/LICENSE.txt  %{buildroot}%{griddb_instdir}/3rd_party/json-simple
 
-install -c -m 640 README.md                                     %{buildroot}%{griddb_instdir}
+install -c -m 640 RPM-README.md                                 %{buildroot}%{griddb_instdir}
 install -c -m 644 docs/manual/GridDB_RPM_InstallGuide.html      %{buildroot}%{griddb_instdir}/docs/manual
 install -c -m 644 docs/sample/program/Sample1.java              %{buildroot}%{griddb_instdir}/docs/sample/program
 
@@ -242,6 +245,7 @@ fi
 %dir %{griddb_instdir}/3rd_party/sha2
 %dir %{griddb_instdir}/3rd_party/slf4j
 %dir %{griddb_instdir}/3rd_party/yield
+%dir %{griddb_instdir}/3rd_party/json-simple
 %dir %{griddb_instdir}/docs
 %dir %{griddb_instdir}/docs/manual
 %dir %{griddb_instdir}/docs/sample
@@ -266,6 +270,7 @@ fi
 %{griddb_instdir}/conf/gs_cluster.json
 %{griddb_instdir}/conf/gs_node.json
 %{griddb_instdir}/conf/password
+%{griddb_instdir}/3rd_party/3rd_party.md
 %{griddb_instdir}/3rd_party/Apache_License-2.0.txt
 %{griddb_instdir}/3rd_party/BSD_License.txt
 %{griddb_instdir}/3rd_party/MIT_License.txt
@@ -280,7 +285,8 @@ fi
 %{griddb_instdir}/3rd_party/slf4j/slf4j-api-1.7.7.jar
 %{griddb_instdir}/3rd_party/slf4j/slf4j-jdk14-1.7.7.jar
 %{griddb_instdir}/3rd_party/yield/yield.txt
-%{griddb_instdir}/README.md
+%{griddb_instdir}/3rd_party/json-simple/LICENSE.txt
+%{griddb_instdir}/RPM-README.md
 %{griddb_instdir}/docs/manual/GridDB_RPM_InstallGuide.html
 %{griddb_instdir}/docs/sample/program/Sample1.java
 /usr/bin/gsserver
@@ -297,5 +303,5 @@ fi
 /usr/share/java/gridstore-conf.jar
 
 %changelog
-* Thu Jun 23 2016 TOSHIBA CORPORARION
-- 2.8.0
+* Mon Oct 3 2016 TOSHIBA CORPORARION
+- 3.0.0
