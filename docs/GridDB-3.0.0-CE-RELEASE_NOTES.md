@@ -180,3 +180,6 @@ Its operation was verified in the following environment.
   * OS: CentOS 7.2
   * File system: XFS
   * File system block size: 4 KB
+
+
+Copyright @ 2016 TOSHIBA CORPORATION

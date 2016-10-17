@@ -181,3 +181,6 @@ GridDBノードを再起動することで、圧縮機能の動作を有効/無�
   * OS: CentOS 7.2
   * ファイルシステム：XFS
   * ファイルシステムのブロックサイズ：4KB 
+  
+
+Copyright © 2016 TOSHIBA CORPORATION 
