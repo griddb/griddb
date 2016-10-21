@@ -1693,15 +1693,15 @@ template <>
 inline bool HashMap::isEquals<double>(
 	TransactionContext& txn, double key, uint32_t, OId oId) {
 	double value = *getField<double>(txn, oId);
-	if (isnan(key)) {
-		if (isnan(value)) {
+	if (util::isNaN(key)) {
+		if (util::isNaN(value)) {
 			return true;
 		}
 		else {
 			return false;
 		}
 	}
-	else if (isnan(value)) {
+	else if (util::isNaN(value)) {
 		return false;
 	}
 	else {
@@ -1712,15 +1712,15 @@ template <>
 inline bool HashMap::isEquals<float>(
 	TransactionContext& txn, float key, uint32_t, OId oId) {
 	float value = *getField<float>(txn, oId);
-	if (isnan(key)) {
-		if (isnan(value)) {
+	if (util::isNaN(key)) {
+		if (util::isNaN(value)) {
 			return true;
 		}
 		else {
 			return false;
 		}
 	}
-	else if (isnan(value)) {
+	else if (util::isNaN(value)) {
 		return false;
 	}
 	else {

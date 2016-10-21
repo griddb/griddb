@@ -1931,10 +1931,10 @@ TermCondition *Expr::toCondition(TransactionContext &txn, MapType mapType,
 				if (checkValueRange(columnType, valueType, c.value_, i64, d)) {
 					if (columnType == COLUMN_TYPE_FLOAT) {
 						float *f = QP_NEW float;
-						if (isnan(d)) {
+						if (util::isNaN(d)) {
 							*f = std::numeric_limits<float>::quiet_NaN();
 						}
-						else if (isinf(d)) {
+						else if (util::isInf(d)) {
 							*f = (d > 0)
 									 ? std::numeric_limits<float>::infinity()
 									 : -std::numeric_limits<float>::infinity();
