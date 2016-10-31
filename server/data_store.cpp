@@ -438,7 +438,6 @@ void DataStore::dropContainer(TransactionContext &txn, PartitionId pId,
 		if (!container->isInvalid()) {  
 			container->finalize(txn);
 		}
-		ALLOC_DELETE(txn.getDefaultAllocator(), container);
 
 		GS_TRACE_INFO(DATA_STORE, GS_TRACE_DS_DS_DROP_CONTAINER,
 			"name = " << extContainerName.getContainerName()

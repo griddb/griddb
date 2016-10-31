@@ -659,9 +659,6 @@ public:
 		stackAutoPtr_.set(container);
 	}
 	~ContainerAutoPtr() {
-		if (stackAutoPtr_.get() != NULL) {
-			stackAutoPtr_.~StackAllocAutoPtr();
-		}
 	}
 
 	BaseContainer *getBaseContainer() {
