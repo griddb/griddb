@@ -681,10 +681,10 @@ protected:
 			case COLUMN_TYPE_FLOAT:
 				{
 					float t = *(reinterpret_cast<const float *>(value));
-					if (isnan(t)) {
+					if (util::isNaN(t)) {
 						d = std::numeric_limits<double>::quiet_NaN();
 					}
-					else if (isinf(t)) {
+					else if (util::isInf(t)) {
 						d = (t > 0) ? std::numeric_limits<double>::infinity()
 									: -std::numeric_limits<double>::infinity();
 					}
@@ -700,7 +700,7 @@ protected:
 				break;
 			}
 
-			return (!isfinite(d)) || (d > -std::numeric_limits<float>::max() &&
+			return (!util::isFinite(d)) || (d > -std::numeric_limits<float>::max() &&
 										 d < std::numeric_limits<float>::max());
 		}
 	}

@@ -22,22 +22,8 @@
 #define QP_OPERATOR_H_
 
 #include "value.h"
+#include "util/numeric.h"
 
-
-
-#ifdef _WIN32
-#include <float.h>
-#ifndef isfinite
-#define isnan _isnan
-#define isinf(x) (!_finite(x) && !isnan(x))
-#define isfinite(x) (_finite(x))
-#endif
-#else
-#ifndef isfinite
-#define isfinite(x) (!isnan(x) && !isinf(x))
-#endif
-#endif
-#include <math.h>
 
 static inline int32_t compareByteByte(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
@@ -81,7 +67,7 @@ static inline int32_t compareByteLong(TransactionContext&, uint8_t const* p,
 }
 static inline int32_t compareByteFloat(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
-	if (isnan(*(reinterpret_cast<const float*>(q)))) return -1;
+	if (util::isNaN(*(reinterpret_cast<const float*>(q)))) return -1;
 	return (*(reinterpret_cast<const int8_t*>(p))) <
 				   (*(reinterpret_cast<const float*>(q)))
 			   ? -1
@@ -92,7 +78,7 @@ static inline int32_t compareByteFloat(TransactionContext&, uint8_t const* p,
 }
 static inline int32_t compareByteDouble(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
-	if (isnan(*(reinterpret_cast<const double*>(q)))) return -1;
+	if (util::isNaN(*(reinterpret_cast<const double*>(q)))) return -1;
 	return (*(reinterpret_cast<const int8_t*>(p))) <
 				   (*(reinterpret_cast<const double*>(q)))
 			   ? -1
@@ -144,7 +130,7 @@ static inline int32_t compareShortLong(TransactionContext&, uint8_t const* p,
 }
 static inline int32_t compareShortFloat(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
-	if (isnan(*(reinterpret_cast<const float*>(q)))) return -1;
+	if (util::isNaN(*(reinterpret_cast<const float*>(q)))) return -1;
 	return (*(reinterpret_cast<const int16_t*>(p))) <
 				   (*(reinterpret_cast<const float*>(q)))
 			   ? -1
@@ -155,7 +141,7 @@ static inline int32_t compareShortFloat(TransactionContext&, uint8_t const* p,
 }
 static inline int32_t compareShortDouble(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
-	if (isnan(*(reinterpret_cast<const double*>(q)))) return -1;
+	if (util::isNaN(*(reinterpret_cast<const double*>(q)))) return -1;
 	return (*(reinterpret_cast<const int16_t*>(p))) <
 				   (*(reinterpret_cast<const double*>(q)))
 			   ? -1
@@ -207,7 +193,7 @@ static inline int32_t compareIntLong(TransactionContext&, uint8_t const* p,
 }
 static inline int32_t compareIntFloat(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
-	if (isnan(*(reinterpret_cast<const float*>(q)))) return -1;
+	if (util::isNaN(*(reinterpret_cast<const float*>(q)))) return -1;
 	return (*(reinterpret_cast<const int32_t*>(p))) <
 				   (*(reinterpret_cast<const float*>(q)))
 			   ? -1
@@ -218,7 +204,7 @@ static inline int32_t compareIntFloat(TransactionContext&, uint8_t const* p,
 }
 static inline int32_t compareIntDouble(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
-	if (isnan(*(reinterpret_cast<const double*>(q)))) return -1;
+	if (util::isNaN(*(reinterpret_cast<const double*>(q)))) return -1;
 	return (*(reinterpret_cast<const int32_t*>(p))) <
 				   (*(reinterpret_cast<const double*>(q)))
 			   ? -1
@@ -270,7 +256,7 @@ static inline int32_t compareLongLong(TransactionContext&, uint8_t const* p,
 }
 static inline int32_t compareLongFloat(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
-	if (isnan(*(reinterpret_cast<const float*>(q)))) return -1;
+	if (util::isNaN(*(reinterpret_cast<const float*>(q)))) return -1;
 	return (*(reinterpret_cast<const int64_t*>(p))) <
 				   (*(reinterpret_cast<const float*>(q)))
 			   ? -1
@@ -281,7 +267,7 @@ static inline int32_t compareLongFloat(TransactionContext&, uint8_t const* p,
 }
 static inline int32_t compareLongDouble(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
-	if (isnan(*(reinterpret_cast<const double*>(q)))) return -1;
+	if (util::isNaN(*(reinterpret_cast<const double*>(q)))) return -1;
 	return (*(reinterpret_cast<const int64_t*>(p))) <
 				   (*(reinterpret_cast<const double*>(q)))
 			   ? -1
@@ -293,7 +279,7 @@ static inline int32_t compareLongDouble(TransactionContext&, uint8_t const* p,
 
 static inline int32_t compareFloatByte(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
-	if (isnan(*(reinterpret_cast<const float*>(p)))) return 1;
+	if (util::isNaN(*(reinterpret_cast<const float*>(p)))) return 1;
 	return (*(reinterpret_cast<const float*>(p))) <
 				   (*(reinterpret_cast<const int8_t*>(q)))
 			   ? -1
@@ -304,7 +290,7 @@ static inline int32_t compareFloatByte(TransactionContext&, uint8_t const* p,
 }
 static inline int32_t compareFloatShort(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
-	if (isnan(*(reinterpret_cast<const float*>(p)))) return 1;
+	if (util::isNaN(*(reinterpret_cast<const float*>(p)))) return 1;
 	return (*(reinterpret_cast<const float*>(p))) <
 				   (*(reinterpret_cast<const int16_t*>(q)))
 			   ? -1
@@ -315,7 +301,7 @@ static inline int32_t compareFloatShort(TransactionContext&, uint8_t const* p,
 }
 static inline int32_t compareFloatInt(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
-	if (isnan(*(reinterpret_cast<const float*>(p)))) return 1;
+	if (util::isNaN(*(reinterpret_cast<const float*>(p)))) return 1;
 	return (*(reinterpret_cast<const float*>(p))) <
 				   (*(reinterpret_cast<const int32_t*>(q)))
 			   ? -1
@@ -326,7 +312,7 @@ static inline int32_t compareFloatInt(TransactionContext&, uint8_t const* p,
 }
 static inline int32_t compareFloatLong(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
-	if (isnan(*(reinterpret_cast<const float*>(p)))) return 1;
+	if (util::isNaN(*(reinterpret_cast<const float*>(p)))) return 1;
 	return (*(reinterpret_cast<const float*>(p))) <
 				   (*(reinterpret_cast<const int64_t*>(q)))
 			   ? -1
@@ -339,13 +325,13 @@ static inline int32_t compareFloatFloat(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	float x = *(reinterpret_cast<const float*>(p));
 	float y = *(reinterpret_cast<const float*>(q));
-	if (isnan(x)) {
-		if (isnan(y))
+	if (util::isNaN(x)) {
+		if (util::isNaN(y))
 			return 0;
 		else
 			return 1;
 	}
-	else if (isnan(y)) {
+	else if (util::isNaN(y)) {
 		return -1;
 	}
 	return ((x < y) ? -1 : ((x == y) ? 0 : 1));
@@ -354,13 +340,13 @@ static inline int32_t compareFloatDouble(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	float x = *(reinterpret_cast<const float*>(p));
 	double y = *(reinterpret_cast<const double*>(q));
-	if (isnan(x)) {
-		if (isnan(y))
+	if (util::isNaN(x)) {
+		if (util::isNaN(y))
 			return 0;
 		else
 			return 1;
 	}
-	else if (isnan(y)) {
+	else if (util::isNaN(y)) {
 		return -1;
 	}
 	return ((x < y) ? -1 : ((x == y) ? 0 : 1));
@@ -368,7 +354,7 @@ static inline int32_t compareFloatDouble(TransactionContext&, uint8_t const* p,
 
 static inline int32_t compareDoubleByte(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
-	if (isnan(*(reinterpret_cast<const double*>(p)))) return 1;
+	if (util::isNaN(*(reinterpret_cast<const double*>(p)))) return 1;
 	return (*(reinterpret_cast<const double*>(p))) <
 				   (*(reinterpret_cast<const int8_t*>(q)))
 			   ? -1
@@ -379,7 +365,7 @@ static inline int32_t compareDoubleByte(TransactionContext&, uint8_t const* p,
 }
 static inline int32_t compareDoubleShort(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
-	if (isnan(*(reinterpret_cast<const double*>(p)))) return 1;
+	if (util::isNaN(*(reinterpret_cast<const double*>(p)))) return 1;
 	return (*(reinterpret_cast<const double*>(p))) <
 				   (*(reinterpret_cast<const int16_t*>(q)))
 			   ? -1
@@ -390,7 +376,7 @@ static inline int32_t compareDoubleShort(TransactionContext&, uint8_t const* p,
 }
 static inline int32_t compareDoubleInt(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
-	if (isnan(*(reinterpret_cast<const double*>(p)))) return 1;
+	if (util::isNaN(*(reinterpret_cast<const double*>(p)))) return 1;
 	return (*(reinterpret_cast<const double*>(p))) <
 				   (*(reinterpret_cast<const int32_t*>(q)))
 			   ? -1
@@ -401,7 +387,7 @@ static inline int32_t compareDoubleInt(TransactionContext&, uint8_t const* p,
 }
 static inline int32_t compareDoubleLong(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
-	if (isnan(*(reinterpret_cast<const double*>(p)))) return 1;
+	if (util::isNaN(*(reinterpret_cast<const double*>(p)))) return 1;
 	return (*(reinterpret_cast<const double*>(p))) <
 				   (*(reinterpret_cast<const int64_t*>(q)))
 			   ? -1
@@ -414,13 +400,13 @@ static inline int32_t compareDoubleFloat(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	double x = *(reinterpret_cast<const double*>(p));
 	float y = *(reinterpret_cast<const float*>(q));
-	if (isnan(x)) {
-		if (isnan(y))
+	if (util::isNaN(x)) {
+		if (util::isNaN(y))
 			return 0;
 		else
 			return 1;
 	}
-	else if (isnan(y)) {
+	else if (util::isNaN(y)) {
 		return -1;
 	}
 	return ((x < y) ? -1 : ((x == y) ? 0 : 1));
@@ -429,13 +415,13 @@ static inline int32_t compareDoubleDouble(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const* q, uint32_t) {
 	double x = *(reinterpret_cast<const double*>(p));
 	double y = *(reinterpret_cast<const double*>(q));
-	if (isnan(x)) {
-		if (isnan(y))
+	if (util::isNaN(x)) {
+		if (util::isNaN(y))
 			return 0;
 		else
 			return 1;
 	}
-	else if (isnan(y)) {
+	else if (util::isNaN(y)) {
 		return -1;
 	}
 	return ((x < y) ? -1 : ((x == y) ? 0 : 1));

@@ -107,15 +107,15 @@ static inline int32_t keyCmp(TransactionContext &txn,
 
 static inline int32_t keyCmp(TransactionContext &, ObjectManager &,
 	const KeyValue<double, OId> &e1, const KeyValue<double, OId> &e2) {
-	if (isnan(e1.key_)) {
-		if (isnan(e2.key_)) {
+	if (util::isNaN(e1.key_)) {
+		if (util::isNaN(e2.key_)) {
 			return 0;
 		}
 		else {
 			return 1;
 		}
 	}
-	else if (isnan(e2.key_)) {
+	else if (util::isNaN(e2.key_)) {
 		return -1;
 	}
 	else {
@@ -125,15 +125,15 @@ static inline int32_t keyCmp(TransactionContext &, ObjectManager &,
 
 static inline int32_t keyCmp(TransactionContext &, ObjectManager &,
 	const KeyValue<float, OId> &e1, const KeyValue<float, OId> &e2) {
-	if (isnan(e1.key_)) {
-		if (isnan(e2.key_)) {
+	if (util::isNaN(e1.key_)) {
+		if (util::isNaN(e2.key_)) {
 			return 0;
 		}
 		else {
 			return 1;
 		}
 	}
-	else if (isnan(e2.key_)) {
+	else if (util::isNaN(e2.key_)) {
 		return -1;
 	}
 	else {
@@ -181,8 +181,8 @@ static inline int32_t valueCmp(TransactionContext &txn,
 
 static inline int32_t valueCmp(TransactionContext &, ObjectManager &,
 	const KeyValue<double, OId> &e1, const KeyValue<double, OId> &e2) {
-	if (isnan(e1.key_)) {
-		if (isnan(e2.key_)) {
+	if (util::isNaN(e1.key_)) {
+		if (util::isNaN(e2.key_)) {
 			return e1.value_ < e2.value_ ? -1
 										 : (e1.value_ == e2.value_ ? 0 : 1);
 		}
@@ -190,7 +190,7 @@ static inline int32_t valueCmp(TransactionContext &, ObjectManager &,
 			return 1;
 		}
 	}
-	else if (isnan(e2.key_)) {
+	else if (util::isNaN(e2.key_)) {
 		return -1;
 	}
 	else {
@@ -204,8 +204,8 @@ static inline int32_t valueCmp(TransactionContext &, ObjectManager &,
 
 static inline int32_t valueCmp(TransactionContext &, ObjectManager &,
 	const KeyValue<float, OId> &e1, const KeyValue<float, OId> &e2) {
-	if (isnan(e1.key_)) {
-		if (isnan(e2.key_)) {
+	if (util::isNaN(e1.key_)) {
+		if (util::isNaN(e2.key_)) {
 			return e1.value_ < e2.value_ ? -1
 										 : (e1.value_ == e2.value_ ? 0 : 1);
 		}
@@ -213,7 +213,7 @@ static inline int32_t valueCmp(TransactionContext &, ObjectManager &,
 			return 1;
 		}
 	}
-	else if (isnan(e2.key_)) {
+	else if (util::isNaN(e2.key_)) {
 		return -1;
 	}
 	else {
