@@ -281,7 +281,7 @@
 #ifdef _MSC_STDINT_H_
 #error "Do not include stdint.h before this header is included"
 #endif
-/* #include "util/stdint.h" */
+#include "util/stdint.h"
 #else
 #include <stdint.h>
 #endif 
