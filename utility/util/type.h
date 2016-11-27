@@ -227,7 +227,7 @@
 /* #undef UTIL_HAVE_STAT_H */
 #define UTIL_HAVE_STAT_T	88
 #define UTIL_HAVE_STDDEF_H	1
-/* #define UTIL_HAVE_STDINT_H	1 */
+#define UTIL_HAVE_STDINT_H	1
 #define UTIL_HAVE_STRCASECMP	1
 /* #undef UTIL_HAVE_STRICMP */
 /* #undef UTIL_HAVE_SYS_DIRENT_H */
