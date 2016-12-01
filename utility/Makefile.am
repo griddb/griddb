@@ -18,7 +18,6 @@ $(srcdir)/util/net.cpp \
 $(srcdir)/util/net.h \
 $(srcdir)/util/os.cpp \
 $(srcdir)/util/os.h \
-$(srcdir)/util/stdint.h \
 $(srcdir)/util/system.cpp \
 $(srcdir)/util/system.h \
 $(srcdir)/util/thread.cpp \
