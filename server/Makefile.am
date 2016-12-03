@@ -96,7 +96,7 @@ QP_SOURCES= \
 	$(srcdir)/lexer.h \
 	$(srcdir)/lexer.cpp \
 	$(srcdir)/function_map.cpp \
-	$(srcdir)/function_map.hpp \
+	$(srcdir)/function_map.h \
 	$(srcdir)/tql.cpp \
 	$(srcdir)/query.cpp \
 	$(srcdir)/query.h \
