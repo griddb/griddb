@@ -46,7 +46,7 @@
   The documents below are stored in the docs folder.
   * GridDB Technical Design Document  (GridDBTechnicalDesignDocument.pdf)
   * Quick Start Guide(manual/GridDB_QuickStartGuide.html)
-  * API Reference(manual/GridDB_API_Reference.html)
+  * API Reference(manual/GridDB_API_Reference.html)
   * RPM Install Guide(manual/GridDB_RPM_InstallGuide.html)
 
 ## Community
