@@ -86,7 +86,7 @@ install -c -m 640 3rd_party/slf4j/slf4j-jdk14-1.7.7.jar         %{buildroot}%{gr
 install -c -m 640 3rd_party/yield/yield.txt                     %{buildroot}%{griddb_instdir}/3rd_party/yield
 install -c -m 640 3rd_party/json-simple/fangyidong/LICENSE.txt  %{buildroot}%{griddb_instdir}/3rd_party/json-simple
 
-install -c -m 640 RPM-README.md                                 %{buildroot}%{griddb_instdir}
+install -c -m 640 installer/SOURCES/RPM-README.md               %{buildroot}%{griddb_instdir}
 install -c -m 644 docs/manual/GridDB_RPM_InstallGuide.html      %{buildroot}%{griddb_instdir}/docs/manual
 install -c -m 644 docs/sample/program/Sample1.java              %{buildroot}%{griddb_instdir}/docs/sample/program
 
