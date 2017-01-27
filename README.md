@@ -49,6 +49,12 @@
   - [API Reference](https://griddb.github.io/griddb_nosql/manual/GridDB_API_Reference.html) (manual/GridDB_API_Reference.html)
   - [RPM Installation Guide](https://griddb.github.io/griddb_nosql/manual/GridDB_RPM_InstallGuide.html) (manual/GridDB_RPM_InstallGuide.html)
 
+## Connector
+
+  There are some connectors for other OSS.
+  * [GridDB connector for Hadoop MapReduce](https://github.com/griddb/griddb_hadoop_mapreduce)
+  * [GridDB connector for YCSB](https://github.com/griddb/griddb_ycsb)
+    
 ## Community
   * Issues  
     Use the GitHub issue function if you have any requests, questions, or bug reports. 

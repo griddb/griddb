@@ -49,6 +49,11 @@
   * APIリファレンス(manual/GridDB_API_Reference_ja.html)
   * RPMインストールガイド(manual/GridDB_RPM_InstallGuide.html)
 
+## コネクタ
+  他のOSSと接続するためのコネクタもあります。
+  * [GridDB connector for Hadoop MapReduce](https://github.com/griddb/griddb_hadoop_mapreduce)
+  * [GridDB connector for YCSB](https://github.com/griddb/griddb_ycsb)
+
 ## コミュニティ
   * Issues  
     質問、不具合報告はissue機能をご利用ください。
