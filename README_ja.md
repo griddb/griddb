@@ -53,6 +53,7 @@
   他のOSSと接続するためのコネクタもあります。
   * [GridDB connector for Hadoop MapReduce](https://github.com/griddb/griddb_hadoop_mapreduce)
   * [GridDB connector for YCSB](https://github.com/griddb/griddb_ycsb)
+  * [GridDB connector for KairosDB](https://github.com/griddb/griddb_kairosdb)
 
 ## コミュニティ
   * Issues  
