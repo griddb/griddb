@@ -11,7 +11,7 @@
     従来の分散KVSでは、Put/Get/Removeという操作によりデータを操作します。GridDB/NoSQLは、これを大幅に拡張し、構造化データの定義機能、SQLライクなクエリ機能、トランザクション機能、JavaのAPI(Application Programming Interface)をサポートしており、RDBユーザがスムーズに導入できるようになっています。キー・バリューをキー・コンテナと呼ぶレコードの集合体でデータを表現します。これはRDBのテーブル名とテーブルの関係に類似しています。また、センサーデータ管理向けの応用機能も備わっています。
 
 ##クイックスタート
-### サーバのビルド
+### サーバ、クライアント(java)のビルド
     CentOS6.7及びgccのバージョン4.4.7の環境での動作を確認しています。
 
     $ ./bootstrap.sh
@@ -29,9 +29,6 @@
     $ export no_proxy=127.0.0.1
     $ bin/gs_startnode
     $ bin/gs_joincluster -c your_clustername -u admin/your_password
-    
-### クライアント(Java)のビルド
-    $ ant -f java_client/build.xml
 
 ### サンプルプログラムの実行
     $ export CLASSPATH=${CLASSPATH}:$GS_HOME/bin/gridstore.jar

@@ -7,8 +7,8 @@
 <meta http-equiv="Content-Type" content="text/html;charset=utf-8"/>
 <meta name="title" content="GridDB Quick Start Guide"/>
 <meta name="generator" content="Org-mode"/>
-<meta name="generated" content="2016-02-23T16:11+0900"/>
-<meta name="author" content="root"/>
+<meta name="generated" content="2017-04-13T19:03+0900"/>
+<meta name="author" content=""/>
 <meta name="description" content=""/>
 <meta name="keywords" content=""/>
 
@@ -685,7 +685,7 @@ Description:    CentOS release 6.7 (Final)
 </div>
 
 <div id="outline-container-2-2-2" class="outline-4">
-<h4 id="sec-2-2-2"><span class="section-number-4">2.2.2</span> Installing a Node</h4>
+<h4 id="sec-2-2-2"><a name="install" id="install"></a><span class="section-number-4">2.2.2</span> Installing a Node</h4>
 <div class="outline-text-4" id="text-2-2-2">
 
 
@@ -717,7 +717,7 @@ Two environment variables are defined as below.
 <tr><th scope="col" class="left">Environment variable</th><th scope="col" class="left">Value</th><th scope="col" class="left">Meaning</th></tr>
 </thead>
 <tbody>
-<tr><td class="left">GS_HOME</td><td class="left">Directory where source code file is decompressed</td><td class="left">GridDB home directory</td></tr>
+<tr><td class="left">GS_HOME</td><td class="left">Directory where source code file is decompressed</td><td class="left">gsadm/GridDB home directory</td></tr>
 <tr><td class="left">GS_LOG</td><td class="left">$GS_HOME/log</td><td class="left">Event log file output directory</td></tr>
 </tbody>
 </table>
@@ -1537,14 +1537,8 @@ Java HotSpot(TM) 64-Bit Server VM (build 24.79-b02, mixed mode)
 
 
 <p>
-Install using the following command.
+Client library are installed by running 'make' in <a href="#install">Installing a Node</a>.
 </p>
-
-
-<pre class="example">$ ant -f java_client/build.xml
-</pre>
-
-
 </div>
 
 </div>
@@ -2394,7 +2388,7 @@ $ java gsSample/Sample1 239.0.0.1 31999 setup_cluster_name admin your_password
 </div>
 
 <div id="postamble">
-<a href="http://validator.w3.org/check?uri=referer">Validate XHTML 1.0</a>
+
 
 </div>
 </body>

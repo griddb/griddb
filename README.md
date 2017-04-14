@@ -11,7 +11,7 @@
     In a traditional distributed KVS, data is handled using operations such as Put/Get/Remove. GridDB expands these functions greatly to support the definition function for organizational data, SQL-like query function, transaction function and Java API (Application Programming Interface) so that RDB users are able to introduce the system smoothly. The key value represents the data in a set of records known as a key container. This is similar to the relationship between a RDB table name and table. It is also equipped with an application function for sensor data management.
 
 ## Quick start
-### Build a server
+### Build a server and client(Java)
     We have confirmed the operation on CentOS 6.7 and gcc version 4.4.7.
 
     $ ./bootstrap.sh
@@ -29,9 +29,6 @@
     $ export no_proxy=127.0.0.1
     $ bin/gs_startnode
     $ bin/gs_joincluster -c your_clustername -u admin/your_password
-    
-### Build a client (Java)
-    $ ant -f java_client/build.xml
 
 ### Execute a sample program
     $ export CLASSPATH=${CLASSPATH}:$GS_HOME/bin/gridstore.jar
