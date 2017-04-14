@@ -4,8 +4,8 @@ BINDIRS = bin
 CONFDIRS = conf
 OSSDIRS = 3rd_party
 
-BINFILES = $(BINDIRS)/gridstore-conf.jar \
-	$(BINDIRS)/gridstore.jar \
+BINFILES = $(BINDIRS)/gridstore.jar \
+	$(BINDIRS)/gridstore-conf.jar \
 	$(BINDIRS)/gs_adduser \
 	$(BINDIRS)/gs_deluser \
 	$(BINDIRS)/gs_joincluster \
@@ -37,6 +37,9 @@ OSSFILES = $(OSSDIRS)/3rd_party.md \
 	$(OSSDIRS)/slf4j/slf4j-jdk14-1.7.7.jar \
 	$(OSSDIRS)/yield/yield.txt \
 	$(OSSDIRS)/json-simple/fangyidong/LICENSE.txt
+
+$(BINDIRS)/gridstore.jar:
+	cd java_client;ant
 
 dist_noinst_DATA = $(BINFILES) $(CONFFILES) $(OSSFILES) \
 	installer/SOURCES/RPM-README.md \
