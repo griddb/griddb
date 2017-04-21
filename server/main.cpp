@@ -56,7 +56,7 @@
 const char8_t *const GS_PRODUCT_NAME = "GridDB";
 const int32_t GS_MAJOR_VERSION = 3;
 const int32_t GS_MINOR_VERSION = 0;
-const int32_t GS_BASE_REVISION = 0;
+const int32_t GS_BASE_REVISION = 1;
 const int32_t GS_BUILD_NO = 27877;
 
 const int32_t GS_REVISION = GS_BASE_REVISION;

@@ -1,5 +1,5 @@
 %define griddb_name griddb_nosql
-%define griddb_ver 3.0.0
+%define griddb_ver 3.0.1
 %define griddb_instdir /usr/griddb-%{griddb_ver}
 %define griddb_homedir /var/lib/gridstore
 # do not strip
@@ -303,5 +303,5 @@ fi
 /usr/share/java/gridstore-conf.jar
 
 %changelog
-* Mon Oct 3 2016 TOSHIBA CORPORARION
-- 3.0.0
+* Wed Apr 19 2017 TOSHIBA CORPORARION
+- 3.0.1
