@@ -41,10 +41,10 @@
 ## ドキュメント
   docsフォルダに以下のドキュメントがあります。
 
-  * クラスタ設計書(GridDBTechnicalDesignDocument_ja.pdf)
-  * スタートアップガイド(manual/GridDB_QuickStartGuide_ja.html)
-  * APIリファレンス(manual/GridDB_API_Reference_ja.html)
-  * RPMインストールガイド(manual/GridDB_RPM_InstallGuide.html)
+  * [クラスタ設計書](https://griddb.github.io/griddb_nosql/manual/GridDBTechnicalDesignDocument_ja.pdf) (GridDBTechnicalDesignDocument_ja.pdf)
+  * [スタートアップガイド](https://griddb.github.io/griddb_nosql/manual/GridDB_QuickStartGuide_ja.html) (manual/GridDB_QuickStartGuide_ja.html)
+  * [APIリファレンス](https://griddb.github.io/griddb_nosql/manual/GridDB_API_Reference_ja.html) (manual/GridDB_API_Reference_ja.html)
+  * [RPMインストールガイド](https://griddb.github.io/griddb_nosql/manual/GridDB_RPM_InstallGuide.html) (manual/GridDB_RPM_InstallGuide.html)
 
 ## コネクタ
   他のOSSと接続するためのコネクタもあります。
