@@ -14,6 +14,6 @@
    limitations under the License.
 */
 /**
- * Defines public interface of GridData.
+ * Defines public interface of GridDB.
  */
 package com.toshiba.mwcloud.gs;
