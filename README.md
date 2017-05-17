@@ -47,6 +47,8 @@
   - [RPM Installation Guide](https://griddb.github.io/griddb_nosql/manual/GridDB_RPM_InstallGuide.html) (manual/GridDB_RPM_InstallGuide.html)
 
 ## Connector
+  There is C Client for GridDB.
+  * [GridDB C Client](https://github.com/griddb/c_client)
 
   There are some connectors for other OSS.
   * [GridDB connector for Hadoop MapReduce](https://github.com/griddb/griddb_hadoop_mapreduce)
