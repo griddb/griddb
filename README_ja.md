@@ -51,10 +51,10 @@
 
 ## コネクタ
   Java以外のクライアントもあります。
-  * [GridDB C Client](https://github.com/griddb/c_client)
+  * [GridDB C Client](https://github.com/griddb/c_client/blob/master/README_ja.md)
 
   他のOSSと接続するためのコネクタもあります。
-  * [GridDB connector for Hadoop MapReduce](https://github.com/griddb/griddb_hadoop_mapreduce)
+  * [GridDB connector for Hadoop MapReduce](https://github.com/griddb/griddb_hadoop_mapreduce/blob/master/README_ja.md)
   * [GridDB connector for YCSB](https://github.com/griddb/griddb_ycsb)
   * [GridDB connector for KairosDB](https://github.com/griddb/griddb_kairosdb)
 
