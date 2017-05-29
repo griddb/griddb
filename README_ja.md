@@ -49,9 +49,11 @@
   * [RPMインストールガイド](https://griddb.github.io/griddb_nosql/manual/GridDB_RPM_InstallGuide.html) (manual/GridDB_RPM_InstallGuide.html)
   * [V3.0 Release Notes](docs/GridDB-3.0.0-CE-RELEASE_NOTES_ja.md) (GridDB-3.0.0-CE-RELEASE_NOTES_ja.md)
 
-## コネクタ
+## クライアントとコネクタ
   Java以外のクライアントもあります。
   * [GridDB C Client](https://github.com/griddb/c_client/blob/master/README_ja.md)
+  * [GridDB Python Client](https://github.com/griddb/griddb_client)
+  * [GridDB Ruby Client](https://github.com/griddb/griddb_client)
 
   他のOSSと接続するためのコネクタもあります。
   * [GridDB connector for Hadoop MapReduce](https://github.com/griddb/griddb_hadoop_mapreduce/blob/master/README_ja.md)

@@ -49,9 +49,11 @@
   - [RPM Installation Guide](https://griddb.github.io/griddb_nosql/manual/GridDB_RPM_InstallGuide.html) (manual/GridDB_RPM_InstallGuide.html)
   - [V3.0 Release Notes](docs/GridDB-3.0.0-CE-RELEASE_NOTES.md) (GridDB-3.0.0-CE-RELEASE_NOTES.md)
 
-## Connector
-  There is C Client for GridDB.
+## Client and Connector
+  There are other clients for GridDB.
   * [GridDB C Client](https://github.com/griddb/c_client)
+  * [GridDB Python Client](https://github.com/griddb/griddb_client)
+  * [GridDB Ruby Client](https://github.com/griddb/griddb_client)
 
   There are some connectors for other OSS.
   * [GridDB connector for Hadoop MapReduce](https://github.com/griddb/griddb_hadoop_mapreduce)
