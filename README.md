@@ -10,6 +10,8 @@
   * Advanced data model and operation model  
     In a traditional distributed KVS, data is handled using operations such as Put/Get/Remove. GridDB expands these functions greatly to support the definition function for organizational data, SQL-like query function, transaction function and Java API (Application Programming Interface) so that RDB users are able to introduce the system smoothly. The key value represents the data in a set of records known as a key container. This is similar to the relationship between a RDB table name and table. It is also equipped with an application function for sensor data management.
 
+  This repository includes server and Java client.
+
 ## Quick start
 ### Build a server and client(Java)
     We have confirmed the operation on CentOS 6.7 and gcc version 4.4.7.
@@ -65,6 +67,6 @@
 
 ## License
   The server source license is GNU Affero General Public License (AGPL), 
-  while the client library license and the operational commands is Apache License, version 2.0.
+  while the Java client library license and the operational commands is Apache License, version 2.0.
   See 3rd_party/3rd_party.md for the source and license of the third party.
 
