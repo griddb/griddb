@@ -56,10 +56,11 @@
   * [GridDB Ruby Client](https://github.com/griddb/griddb_client)
 
   There are some connectors for other OSS.
-  * [GridDB connector for Hadoop MapReduce](https://github.com/griddb/griddb_hadoop_mapreduce)
+  * [GridDB connector for Apache Hadoop MapReduce](https://github.com/griddb/griddb_hadoop_mapreduce)
   * [GridDB connector for YCSB](https://github.com/griddb/griddb_ycsb)
   * [GridDB connector for KairosDB](https://github.com/griddb/griddb_kairosdb)
-      
+  * [GridDB connector for Apache Spark](https://github.com/griddb/griddb_spark)
+
 ## Community
   * Issues  
     Use the GitHub issue function if you have any requests, questions, or bug reports. 
