@@ -1,5 +1,5 @@
 %define griddb_name griddb_nosql
-%define griddb_ver 3.0.0
+%define griddb_ver 3.0.1
 %define griddb_instdir /usr/griddb-%{griddb_ver}
 %define griddb_homedir /var/lib/gridstore
 # do not strip
@@ -86,7 +86,7 @@ install -c -m 640 3rd_party/slf4j/slf4j-jdk14-1.7.7.jar         %{buildroot}%{gr
 install -c -m 640 3rd_party/yield/yield.txt                     %{buildroot}%{griddb_instdir}/3rd_party/yield
 install -c -m 640 3rd_party/json-simple/fangyidong/LICENSE.txt  %{buildroot}%{griddb_instdir}/3rd_party/json-simple
 
-install -c -m 640 RPM-README.md                                 %{buildroot}%{griddb_instdir}
+install -c -m 640 installer/SOURCES/RPM-README.md               %{buildroot}%{griddb_instdir}
 install -c -m 644 docs/manual/GridDB_RPM_InstallGuide.html      %{buildroot}%{griddb_instdir}/docs/manual
 install -c -m 644 docs/sample/program/Sample1.java              %{buildroot}%{griddb_instdir}/docs/sample/program
 
@@ -303,5 +303,5 @@ fi
 /usr/share/java/gridstore-conf.jar
 
 %changelog
-* Mon Oct 3 2016 TOSHIBA CORPORARION
-- 3.0.0
+* Wed Apr 19 2017 TOSHIBA CORPORARION
+- 3.0.1
