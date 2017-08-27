@@ -1,6 +1,6 @@
-FROM centos:7.2.1511
+FROM centos:7.3.1611
 
-RUN yum install -y zip unzip zlib-devel \
+RUN yum install -y zip unzip zlib-devel ant \
     && yum groupinstall -y "Development Tools"
 
 RUN cd /root/ \
