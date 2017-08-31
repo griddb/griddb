@@ -16,7 +16,3 @@ RUN cd /root/ \
     && rm -rf *.o
 
 VOLUME /root/griddb_nosql
-
-ENV GS_HOME=/root/griddb_nosql
-ENV GS_LOG=/root/griddb_nosql/log
-
