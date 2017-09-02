@@ -1,7 +1,8 @@
 FROM centos:7
 
 RUN yum install -y zip unzip zlib-devel ant \
-    && yum groupinstall -y "Development Tools"
+    && yum groupinstall -y "Development Tools" \
+    && yum clean all
 
 RUN cd /root/ \
     && git clone https://github.com/griddb/griddb_nosql.git \
