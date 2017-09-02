@@ -1,4 +1,4 @@
-FROM centos:7.3.1611
+FROM centos:7
 
 RUN yum install -y zip unzip zlib-devel ant \
     && yum groupinstall -y "Development Tools"
