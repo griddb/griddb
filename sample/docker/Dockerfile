@@ -8,14 +8,11 @@ RUN yum install -y wget java-1.8.0-openjdk-devel \
     && rpm -ivh griddb_nosql-3.0.1-1.linux.x86_64.rpm \
     && rm griddb_nosql-3.0.1-1.linux.x86_64.rpm
 
-ENV GS_HOME /usr/griddb-3.0.1
+ENV GS_HOME /var/lib/gridstore
 ENV GS_LOG $GS_HOME/log
 ENV HOME $GS_HOME
-ENV PATH $PATH:$GS_HOME/bin
 
-RUN mkdir $GS_LOG \
-    && chown gsadm:gridstore $GS_LOG \
-    && gs_passwd admin -p admin \
+RUN gs_passwd admin -p admin \
     && sed -i -e s/\"clusterName\":\"\"/\"clusterName\":\"dockerGridDB\"/g \
        /var/lib/gridstore/conf/gs_cluster.json
 
