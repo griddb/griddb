@@ -52,7 +52,7 @@
 ## クライアントとコネクタ
   Java以外のクライアントもあります。
   * [GridDB C Client](https://github.com/griddb/c_client/blob/master/README_ja.md)
-  * [GridDB Python Client](https://github.com/griddb/griddb_client)
+  * [GridDB Python Client](https://github.com/griddb/python_client)
   * [GridDB Ruby Client](https://github.com/griddb/griddb_client)
 
   他のOSSと接続するためのコネクタもあります。

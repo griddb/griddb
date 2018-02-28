@@ -52,7 +52,7 @@
 ## Client and Connector
   There are other clients for GridDB.
   * [GridDB C Client](https://github.com/griddb/c_client)
-  * [GridDB Python Client](https://github.com/griddb/griddb_client)
+  * [GridDB Python Client](https://github.com/griddb/python_client)
   * [GridDB Ruby Client](https://github.com/griddb/griddb_client)
 
   There are some connectors for other OSS.
