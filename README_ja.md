@@ -54,6 +54,7 @@
   * [GridDB C Client](https://github.com/griddb/c_client/blob/master/README_ja.md)
   * [GridDB Python Client](https://github.com/griddb/python_client)
   * [GridDB Ruby Client](https://github.com/griddb/griddb_client)
+  * [GridDB Go Client](https://github.com/griddb/go_client)
 
   他のOSSと接続するためのコネクタもあります。
   * [GridDB connector for Apache Hadoop MapReduce](https://github.com/griddb/griddb_hadoop_mapreduce/blob/master/README_ja.md)
