@@ -183,4 +183,4 @@ GridDBノードを再起動することで、圧縮機能の動作を有効/無�
   * ファイルシステムのブロックサイズ：4KB 
   
 
-Copyright © 2016 TOSHIBA CORPORATION 
+Copyright (C) 2017 TOSHIBA Digital Solutions Corporation
