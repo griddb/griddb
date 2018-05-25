@@ -21,20 +21,39 @@ import java.nio.charset.Charset;
 import java.util.Date;
 import java.util.UUID;
 
+import com.toshiba.mwcloud.gs.GSException;
+
 public class BasicBuffer {
 
 	public static final Charset DEFAULT_CHARSET = Charset.forName("UTF-8");
+
+	private static final ByteOrder DEFAULT_BYTE_ORDER =
+			ByteOrder.LITTLE_ENDIAN;
 
 	private static final int HUGE_BUFFER_GROW_UNIT = 1024 * 1024;
 
 	private ByteBuffer base;
 
+	private BasicBuffer(ByteBuffer base) {
+		this.base = base;
+	}
+
 	public BasicBuffer(int initialSize) {
 		base = ByteBuffer.allocate(initialSize);
-		base.order(ByteOrder.LITTLE_ENDIAN);
+		base.order(DEFAULT_BYTE_ORDER);
 	}
 
 	public ByteBuffer base() {
+		return base;
+	}
+
+	public static BasicBuffer wrap(byte[] bytes) {
+		return new BasicBuffer(wrapBase(bytes));
+	}
+
+	public static ByteBuffer wrapBase(byte[] bytes) {
+		final ByteBuffer base = ByteBuffer.wrap(bytes);
+		base.order(DEFAULT_BYTE_ORDER);
 		return base;
 	}
 
@@ -221,6 +240,96 @@ public class BasicBuffer {
 
 	public void clear() {
 		base.clear();
+	}
+
+	public static class BufferUtils {
+
+		private BufferUtils() {
+		}
+
+		public static int getIntSize(ByteBuffer buf) throws GSException {
+			final int size = getNonNegativeInt(buf);
+			if (size > buf.remaining()) {
+				throw errorTooLargeSize(size, buf);
+			}
+			return size;
+		}
+
+		public static long getLongSize(ByteBuffer buf) throws GSException {
+			final long size = getNonNegativeLong(buf);
+			if (size > buf.remaining()) {
+				throw errorTooLargeSize(size, buf);
+			}
+			return size;
+		}
+
+		public static int getNonNegativeInt(ByteBuffer buf)
+				throws GSException {
+			final int value = buf.getInt();
+			if (value < 0) {
+				throw errorNegativeValue(value);
+			}
+			return value;
+		}
+
+		public static long getNonNegativeLong(ByteBuffer buf)
+				throws GSException {
+			final long value = buf.getLong();
+			if (value < 0) {
+				throw errorNegativeValue(value);
+			}
+			return value;
+		}
+
+		public static void skipForward(
+				ByteBuffer buf, int size) throws GSException {
+			buf.position(getForwardPosition(buf, size));
+		}
+
+		public static int limitForward(
+				ByteBuffer buf, int size) throws GSException {
+			final int orgLimit = buf.limit();
+			buf.limit(getForwardPosition(buf, size));
+			return orgLimit;
+		}
+
+		public static void skipToLimit(
+				ByteBuffer buf, int newLimit) throws GSException {
+			buf.position(buf.limit());
+			buf.limit(newLimit);
+		}
+
+		public static int getForwardPosition(
+				ByteBuffer buf, int size) throws GSException {
+			return buf.position() + checkSize(buf, size);
+		}
+
+		public static int checkSize(ByteBuffer buf, int size)
+				throws GSException {
+			if (size < 0) {
+				throw errorNegativeValue(size);
+			}
+			else if (size > buf.remaining()) {
+				throw errorTooLargeSize(size, buf);
+			}
+			return size;
+		}
+
+		public static GSException errorNegativeValue(long value) {
+			return new GSConnectionException(
+					GSErrorCode.MESSAGE_CORRUPTED,
+					"Protocol error by negative value (" +
+					"value=" + value + ")");
+		}
+
+		public static GSException errorTooLargeSize(
+				long size, ByteBuffer buf) {
+			return new GSConnectionException(
+					GSErrorCode.MESSAGE_CORRUPTED,
+					"Protocol error by too large size value (" +
+					"size=" + size + ", remaining=" + buf.remaining() + ")");
+		}
+
 	}
 
 }

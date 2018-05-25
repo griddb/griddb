@@ -33,7 +33,7 @@ import javax.sql.rowset.serial.SerialBlob;
  *
  * <p>Each Column composing a schema in GridDB has a correspondence
  * relation with a field and methods defined in a Row object. The
- * number of Columns is  from 1 to 1024 per Container. The
+ * number of Columns is from 1 to 1024 per Container. The
  * correspondence relation with each column is determined based on
  * the public, protected and default access fields of the specified
  * type or the getter and setter methods, excluding fields and methods
@@ -46,25 +46,33 @@ import javax.sql.rowset.serial.SerialBlob;
  * beginning with "is" or "get" if it return a Boolean value, or a
  * name with beginning with "get" if it returns any other type value.
  * The setter is a method with only one parameter specifying a setting
- * value which has a name beginning with "set." The Column names used
- * in GridDB correspond with the character strings obtained by
- * removing prefixes, such as "get," from the names of getter and
- * setter methods. A Column name must be composed of ASCII alphanumeric
- * characters and underscores ("_"). And the first character must not
- * be numeric. Since Column names are case-insensitive, you cannot
- * differentiate upper- and lowercase letters in a Column name. If
- * either (not both) of a getter or a setter is only defined, it is
- * ignored. If a field with the same name and both of a getter and a
- * setter are defined, the getter and the setter are used. If there
- * is a difference in case between a getter and a setter, the getter
- * is given priority. If a Column has a Row key, {@link RowKey} is
- * set on the corresponding field or methods. </p>
+ * value which has a name beginning with "set." Unless specified by
+ * {@link RowField}, the column names used in GridDB correspond with
+ * the character strings obtained by removing prefixes, such as "get,"
+ * from the names of field, getter or setter methods. If either (not both) of a
+ * getter or a setter is only defined, it is ignored. If a field with
+ * the same name and both of a getter and a setter are defined, the
+ * getter and the setter are used. If there is a difference in case
+ * between a getter and a setter, the getter is given priority. If a
+ * Column has a Row key, {@link RowKey} is set on the corresponding
+ * field or methods. </p>
+ *
+ * <p>Multiple column names that are different only in upper-
+ * and lowercase letters cannot be defined in a table.
+ * Further the allowed characters, the length of column names and
+ * the number of columns are limited. See the GridDB Technical
+ * Reference for the details. In the operations specifying column
+ * names, ASCII uppercase and lowercase characters are identified as
+ * same unless otherwise noted. Use {@link RowField} to specify
+ * column names that cannot be defined as fields or methods (such as
+ * the names in which the first character is a number and Java
+ * reserved words).</p>
  *
  * <p>The correspondence between the type of a Column and the type of
  * each value in a Row object is as follows:</p>
-	<table><thead><td>
-	Column type
-	</td>
+ * <table><thead><td>
+ * Column type
+ * </td>
  * <table>
  * <thead><tr><th>Column type</th><th>Type of each value in a Row object</th></tr></thead>
  * <tbody>
@@ -90,14 +98,54 @@ import javax.sql.rowset.serial.SerialBlob;
  * </tbody>
  * </table>
  *
- * <p>There is an upper limit to the number of columns and length of the column name.
- * In addition, the display range and size are limited in the field value.
- * Refer specifically to "System limiting values" in the GridDB API Reference.
+ * <p>There are the restrictions on the display range and size of the
+ * field value. See the GridDB Technical Reference and the appendix
+ * "Range of values" for the details.
  * Values contrary to the restriction cannot be stored in a Container.</p>
  *
  * <p>Restrictions such as the datatypes permitted as a Row key, existence of
  * columns corresponding to the Row key, and permissibility of Row operations
  * differ depending on the definition of the sub-interfaces of this Container.</p>
+ *
+ * <p>NULL in GridDB rows can be retained unless the NOT NULL constraint is set.
+ * When the field of the row object or the getter / setter method can input / output
+ * the value of the reference type, NULL in GridDB rows can be input and output as
+ * {@code null}. Otherwise, NULL is mapped to an empty value in the row object. </p>
+ *
+ * <p>The NOT NULL constraint on the row object type can be explicitly specified with
+ * {@link NotNull} and {@link Nullable}. If a NOT NULL constraint is not specified for
+ * any of the specifications, the column other than the row key is assumed to be without
+ * the NOT NULL constraint. The row key is implicitly set to the NOT NULL constraint
+ * and cannot be specified to exclude this constraint. Also, it is not possible to specify
+ * conflicting NOT NULL constraints between the same object and between getter and setter
+ * methods. For example, if {@link NotNull} and {@link Nullable} are specified
+ * simultaneously for the row object type, it is assumed that a conflicting NOT NULL
+ * constraint was specified. The priority order by designation target on the presence
+ * or absence of the NOT NULL constraint is as follows. </p>
+ * <ol>
+ * <li>Field of row object or getter/setter method</li>
+ * <li>Raw object </li>
+ * <li>Enclosing of row object (Example: An interface that surrounds the class of the
+ * row object as an inner class) or an enclosing that is recursively obtained. Among
+ * enclosing types that are determined in recurrence, there are constraint specifications,
+ * and the type found first is given priority。</li>
+ * <li>Package to which the type of row object belongs to</li>
+ * </ol>
+ *
+ * <p> An empty value is a type of field value that may be used as initial value of various
+ * operations such as creation of {@link Row}. Values are defined for each column as follows.</p>
+ * <table>
+ * <thead><tr><th>Column</th><th>empty value</th></tr></thead>
+ * <tbody>
+ * <tr><td>STRING</td><td>{@code ""}(String with length 0)</td></tr>
+ * <tr><td>BOOL</td><td>False ({@code false})</td></tr>
+ * <tr><td>NUMERAL</td><td>{@code 0}</td></tr>
+ * <tr><td>TIMESTAMP</td><td>{@code 1970-01-01T00:00:00Z}</td></tr>
+ * <tr><td>GEOMETRY</td><td>{@code POINT(EMPTY)}</td></tr>
+ * <tr><td>BLOB</td><td>BLOB data of length 0</td></tr>
+ * <tr><td>ARRAY</td><td>Array with 0 element</td></tr>
+ * </tbody>
+ * </table>
  *
  * <p>During transaction processing, the auto commit mode is enabled by default.
  * In the auto commit mode, change operations are confirmed sequentially
@@ -124,6 +172,17 @@ import javax.sql.rowset.serial.SerialBlob;
  * when the period defined in GridDB has passed. When you try to continue
  * with the Row operations and transaction commitment without aborting
  * after the validity period is reached, {@link GSException} will be sent out.</p>
+ *
+ * <p>In some cases, operations on the same container may have to wait until
+ * the processing on the cluster node is started in response to an operation
+ * request to a certain container. Operations here include changes of definitions
+ * such as container schema and index, container information reference, row operation,
+ * etc. When manipulating containers through {@link GridStore} instances with
+ * a consistency level of {@code IMMEDIATE}, in principle, they are made to wait
+ * in the middle of other manipulations with the {@code IMMEDIATE} setting for
+ * the same container. In principle, processing is not performed based on the state
+ * in the middle of other operation processing on the container. For exceptional
+ * items, see the explanation for each individual operation. </p>
  *
  * @param <K> the type of a Row key. If no Row key is used, specify Void.
  * @param <R> the type of a Row object used for mapping
@@ -170,7 +229,9 @@ public interface Container<K, R> extends Closeable {
 	 * @throws ClassCastException if the specified key or Row object does
 	 * not completely match the type(s) used in mapping operation.
 	 * @throws NullPointerException if {@code null} is specified as {@code row};
-	 * or if no object exists in the Row object which corresponds to the Row field.
+	 * For objects in row objects corresponding to row fields, if there is a NOT NULL
+	 * constrain but {@code null} is set, it will in include elements of {@code null}
+	 * when array type is selected.
 	 */
 	public boolean put(K key, R row) throws GSException;
 
@@ -221,9 +282,9 @@ public interface Container<K, R> extends Closeable {
 	 * @throws ClassCastException if the specified Row objects does not match
 	 * the value types of Row objects used
 	 * in mapping operation, respectively.
-	 * @throws NullPointerException  if NULL is specified as {@code rowCollection} or
-	 * its element; or if no object exists
-	 * in each Row object which corresponds to the Row field.
+	 * @throws NullPointerException if NULL is specified as {@code rowCollection} or
+	 * its element; As with {@link #put(Object, Object)}, if {@code null} is
+	 * included in a specific part of the row object.
 	 *
 	 * @see #put(Object)
 	 */
@@ -315,9 +376,15 @@ public interface Container<K, R> extends Closeable {
 	 * will not select Rows which do not exist in this Container. For example, it
 	 * cannot be enabled for a query containing an interpolation operation. </p>
 	 *
-	 * <p>{@link GSException} will not be thrown in the current version. </p>
+	 * <p> In the current version, due to an error in the TQL statement,
+	 * {@link GSException} and by specifying {@code null} with an argument
+	 * that cannot specify {@code null}, {@link NullPointerException} will
+	 * not be dispatched. If there is an error in the argument, an exception
+	 * will be thrown when the resulting query is fetched. </p>
 	 *
-	 * @throws NullPointerException  if {@code null} is specified as {@code tql}.
+	 * @param tql TQL statement. {@code null} cannot be specified
+	 *
+	 * @throws GSException not sent in the current version
 	 *
 	 * @see #query(String, Class)
 	 */
@@ -349,8 +416,16 @@ public interface Container<K, R> extends Closeable {
 	 * will not select Rows which do not exist in this Container. For example,
 	 * it cannot be enabled for a query containing an interpolation operation.</p>
 	 *
+	 * <p>In the current version, due to an error in the TQL statement,
+	 * {@link GSException} and by specifying {@code null} with an argument
+	 * that cannot specify {@code null}, {@link NullPointerException} will
+	 * not be dispatched. If there is an error in the argument, an exception
+	 * will be thrown when the resulting query is fetched. </p>
+	 *
+	 * @param tql TQL statement. {@code null} cannot be specified
+	 * @param rowType the expected row object type or {@code null}
+	 *
 	 * @throws GSException if an unsupported type is specified as {@code rowType}.
-	 * @throws NullPointerException if {@code null} is specified as {@code tql}.
 	 */
 	public <S> Query<S> query(
 			String tql, Class<S> rowType) throws GSException;
@@ -430,44 +505,13 @@ public interface Container<K, R> extends Closeable {
 	public void setAutoCommit(boolean enabled) throws GSException;
 
 	/**
-	 * Creates a default type of index on the specified Column.
+	 * Creates an unnamed index with default type for the column with the specified name.
 	 *
-	 * <p>In a Container created using {@link GridStoreFactory#getInstance()},
-	 * the following types of indexes are selected by default, depending on the
-	 * type of Container, the type of a corresponding Column, etc.</p>
-	 * <table>
-	 * <thead>
-	 * <tr><th>Column type</th><th>Collection</th><th>TimeSeries </th></tr>
-	 * </thead>
-	 * <tbody>
-	 * <tr><td>STRING</td>
-	 * <td>{@link IndexType#TREE}</td>
-	 * <td>{@link IndexType#TREE}</td></tr>
-	 * <tr><td>BOOL</td>
-	 * <td>{@link IndexType#TREE}</td>
-	 * <td>{@link IndexType#TREE}</td></tr>
-	 * <tr><td>Numeric type</td>
-	 * <td>{@link IndexType#TREE}</td>
-	 * <td>{@link IndexType#TREE}</td></tr>
-	 * <tr><td>TIMESTAMP</td>
-	 * <td>{@link IndexType#TREE}</td>
-	 * <td>{@link IndexType#TREE} * With some limitations </td></tr>
-	 * <tr><td>BLOB</td>
-	 * <td>(-)</td>
-	 * <td>(-)</td></tr>
-	 * <tr><td>Array type</td>
-	 * <td>(-)</td>
-	 * <td>(-)</td></tr>
-	 * </tbody>
-	 * </table>
-	 * <p>No index cannot be set on a TimeSeries Row key (TIMESTAMP type).</p>
+	 * <p>Behaves the same as calling {@link #createIndex(IndexInfo)} with {@link IndexInfo}
+	 * with only the column name set. </p>
 	 *
-	 * <p>If an index is already set on the specified Column, nothing is changed. </p>
-	 *
-	 * <p>When a transaction(s) is active in a target Container, it creates an index
-	 * after waiting for the transaction(s) to complete. </p>
-	 *
-	 * @throws GSException if no Column has the specified name.
+	 * @throws GSException If the specified column name does not conform to the rule of
+	 * {@link #createIndex(IndexInfo)}
 	 * @throws GSException if a timeout occurs during this operation, this Container
 	 * is deleted, its schema is changed or a connection failure occurs; or if called
 	 * after the connection is closed.
@@ -477,17 +521,13 @@ public interface Container<K, R> extends Closeable {
 	public void createIndex(String columnName) throws GSException;
 
 	/**
-	 * Creates a specified type of index on the specified Column.
+	 * Creates an unnamed index with the specified type for the column with the specified name.
 	 *
-	 * <p>The supported types of indexes are different depending on the types of
-	 * a Column and a Container. See the definition of {@link IndexType}.</p>
+	 * <p>Behaves the same as calling {@link #createIndex(IndexInfo)} with
+	 * {@link IndexInfo} with only the column name and type set. </p>
 	 *
-	 * <p>If an index is already set on the specified Column, nothing is changed. </p>
-	 *
-	 * <p>When a transaction(s) is active in a target Container, it creates an index
-	 * after waiting for the transaction(s) to complete. </p>
-	 *
-	 * @throws GSException if no Column has the specified name.
+	 * @throws GSException If the specified column name and type does not conform to the rule of
+	 * {@link #createIndex(IndexInfo)}
 	 * @throws GSException if a timeout occurs during this operation, this Container
 	 * is deleted, its schema is changed or a connection failure occurs; or if called
 	 * after the connection is closed.
@@ -499,18 +539,116 @@ public interface Container<K, R> extends Closeable {
 			String columnName, IndexType type) throws GSException;
 
 	/**
-	 * Removes a default type of index among indexes on the specified Column.
+	 * Create an index according to the contents set in {@link IndexInfo}.
 	 *
-	 * <p>The default type of index in a Container created using
-	 * {@link GridStoreFactory#getInstance()} is the same as defined by
-	 * {@link #createIndex(String)}. </p>
+	 * <p>For the column of the index to be created, at least one of the column
+	 * name and column number must be set, and the actual container must be set
+	 * in the corresponding container. If both column name and column number are
+	 * set, corresponding columns must match each other. </p>
 	 *
-	 * <p>If no index is set, nothing is changed. </p>
+	 * <p>If the index type is not set or {@link IndexType#DEFAULT} is set,
+	 * the default index type is selected according to the criteria described below. </p>
 	 *
-	 * <p>When a transaction(s) is active in a target Container, it removes
-	 * the index after waiting for the transaction(s) to complete. </p>
+	 * <p>If an index name is set, a new index is created only if
+	 * there is no index with the same name or the different name
+	 * only in upper- or lowercase letters in the target
+	 * container. See the GridDB Technical Reference for the
+	 * details. In defining an index name, there are limits on
+	 * the allowed characters and the length. In the operations of
+	 * index, the names are not case-sensitive unless otherwise
+	 * noted.</p>
 	 *
-	 * @throws GSException if no Column has the specified name.
+	 * <p>If a name index gets duplicated, you must specify the
+	 * same setting {@link IndexInfo} that satisfies the
+	 * conditions described below, in which case no new index will
+	 * be created. On the other hand, you can not specify an
+	 * existing {@link IndexInfo} that has the same name as an
+	 * index with a different name or an unnamed index. </p>
+	 *
+	 * <p>If an index name is not set, it is assumed that creation
+	 * of an unnamed index was requested. If an identical index
+	 * already exists (excluding name), it must be an unnamed
+	 * index, which in this case no new index will be
+	 * created. </p>
+	 *
+	 * <p>In the current version, an index created through {@link Container}
+	 * is considered to be the same set of indexes
+	 * except for index names if the following conditions are
+	 * satisfied.</p>
+	 * <ul>
+	 * <li>The columns to be indexed must match. Differences in column specification methods,
+	 * such as column names and column numbers are ignored.</li>
+	 * <li>The columns to be indexed must match. Differences in the specification method of
+	 * index type such as existence of default designation are ignored.</li>
+	 * </ul>
+	 *
+	 * <p> In the current version, for the {@link Container} instance generated based on
+	 * {@link GridStoreFactory#getInstance ()}, the following index type is selected as default
+	 * based on the type of container, the type of corresponding column, etc.</p>
+	 * <table>
+	 * <thead>
+	 * <tr><th>Column type</th><th>collection</th><th>time series</th></tr>
+	 * </thead>
+	 * <tbody>
+	 * <tr><td>STRING</td>
+	 * <td>{@link IndexType#TREE}</td>
+	 * <td>{@link IndexType#TREE}</td></tr>
+	 * <tr><td>BOOL</td>
+	 * <td>{@link IndexType#TREE}</td>
+	 * <td>{@link IndexType#TREE}</td></tr>
+	 * <tr><td>NUMERAL</td>
+	 * <td>{@link IndexType#TREE}</td>
+	 * <td>{@link IndexType#TREE}</td></tr>
+	 * <tr><td>TIMESTAMP</td>
+	 * <td>{@link IndexType#TREE}</td>
+	 * <td>{@link IndexType#TREE} Note:restriction applies</td></tr>
+	 * <tr><td>GEOMETRY</td>
+	 * <td>{@link IndexType#SPATIAL}</td>
+	* <td>(-)</td></tr>
+	 * <tr><td>BLOB</td>
+	* <td>(-)</td>
+	* <td>(-)</td></tr>
+	 * <tr><td>ARRAY</td>
+	 * <td>(-)</td>
+	 * <td>(-)</td></tr>
+	 * </tbody>
+	 * </table>
+	 * <p> An Index cannot be set for Time Series Row Keys (TIMESTAMP type).</p>
+	 * <p>If this {@link Container} instance holds an uncommitted transaction,
+	 * commit before create. Container to be processed. If there are other transactions
+	 * being executed at the same time, wait for them to finish before creating.
+	 * If an index already exists and no new index is created, it is undefined whether
+	 * to wait by another transaction. In this case, it is undefined whether uncommitted
+	 * transactions held by this {@link Container} instance are always committed or not. </p>
+	 *
+	 * <p>In the current version, in the case of satisfying the
+	 * conditions such as the size of the container, during
+	 * creating an index, the reference of the container
+	 * information, a part of the index operations, the trigger
+	 * operations, and the row operations (including the update of
+	 * rows) may be performed. Under the definition of {@link Container},
+	 * other operations may be waited. For the
+	 * operations during the index creation, the container
+	 * information doesn't include the index information to be
+	 * created.</p>
+	 *
+	 * @throws GSException When the column or index name to be created does not conform to the above rule
+	 * @throws GSException If this process's timeout, deletion of this container or schema change,
+	 * connection failure occurs, or when called after closing
+	 * @throws GSException When an unsupported index type is specified in the specified column
+	 * @throws NullPointerException when {@code null} is specified as argument
+	 *
+	 */
+	public void createIndex(IndexInfo info) throws GSException;
+
+	/**
+	 * Delete only the default type index from the column with the specified name.
+	 *
+	 * <p>Behaves the same as calling {@link #dropIndex(IndexInfo)} with
+	 * {@link IndexInfo} with column name and default type set. </p>
+	 *
+	 * @throws GSException When the specified column name does not conform
+	 * to the rule of {@link #dropIndex(IndexInfo)}
 	 * @throws GSException if a timeout occurs during this operation, this
 	 * Container is deleted, its schema is changed or a connection failure
 	 * occurs; or if called after the connection is closed.
@@ -519,14 +657,13 @@ public interface Container<K, R> extends Closeable {
 	public void dropIndex(String columnName) throws GSException;
 
 	/**
-	 * Removes the specified type of index among indexes on the specified Column.
+	 * Deletes only the index of the specified type from the column with the specified name.
 	 *
-	 * <p>If the specified index is not found, nothing is changed. </p>
+	 * <p>Behaves the same as calling {@link #dropIndex(IndexInfo)} with {@link IndexInfo}
+	 * with column name and type set. </p>
 	 *
-	 * <p>When a transaction(s) is active in a target Container, it removes the
-	 * index after waiting for the transaction(s) to complete. </p>
-	 *
-	 * @throws GSException if no Column has the specified name.
+	 * @throws GSException when the specified column name does not conform to the rule of
+	 * {@link #dropIndex(IndexInfo)}
 	 * @throws GSException if a timeout occurs during this operation, this Container
 	 * is deleted, its schema is changed or a connection failure occurs; or if called
 	 * after the connection is closed.
@@ -535,6 +672,49 @@ public interface Container<K, R> extends Closeable {
 	 */
 	public void dropIndex(
 			String columnName, IndexType type) throws GSException;
+
+	/**
+	 * Delete all indexes that match the content set in {@link IndexInfo}.
+	 *
+	 * <p>The setting information of {@link IndexInfo} are used as a condition
+	 * to narrow down the index to be deleted. Filtering conditions are classified
+	 * into three categories: column, index type, and index name. Setting each
+	 * of them is optional. If none of them are set, all created indexes are deleted. </p>
+	 *
+	 * <p>If a column name or column number is set, it must exist in the corresponding
+	 * container. If both column name and column number are set, corresponding columns
+	 * must match each other. If neither the column name nor the column number is set,
+	 * the index for any column that satisfies other refinement conditions
+	 * (index type, index name) will be deleted. </p>
+	 *
+	 * <p>When the index type is set, only the index of the specified type will be
+	 * deleted. If {@link IndexType#DEFAULT} is set, the default type index is
+	 * selected according to the standard of {@link #createIndex(IndexInfo)}.
+	 * Columns that do not support indexes and columns that do not support indexes
+	 * of the specified type are not eligible for deletion. If the index type is not set,
+	 * index that fulfil the conditions (column, index name) will be deleted. </p>
+	 *
+	 * <p>If an index name is set, only the index with the specified name will be deleted.
+	 * The identity of the index name follows the criteria of {@link #createIndex(IndexInfo)}.
+	 * If an index name is not set, an index with an arbitrary name and an unnamed index
+	 * that fulfils the conditions (column, index type) will be deleted. </p>
+	 *
+	 * <p>If there is no index to be deleted, the index will not get deleted.</p>
+	 *
+	 * <p>Transaction handling is similar to {@link #createIndex(IndexInfo)}. Also,
+	 * it is undefined whether or not other transactions may be executed while only
+	 * a few indexes are deleted when multiple indexes are subject to deletion. </p>
+	 *
+	 * <p>The immediate state after completion of the index deletion request is similar
+	 * to {@link GridStore#dropContainer(String)}. </p>
+	 *
+	 * @throws GSException if the column or index name to be deleted does not conform to the above rule
+	 * @throws GSException if the process is timeout, deletion of this container or schema change,
+	 * connection failure occurs, or called after closing
+	 * @throws NullPointerException when {@code null} is specified as argument
+	 *
+	 */
+	public void dropIndex(IndexInfo info) throws GSException;
 
 	/**
 	 * @deprecated
@@ -558,8 +738,18 @@ public interface Container<K, R> extends Closeable {
 	 * the setting will be overwritten.</p>
 	 *
 	 * <p>Refer to the definition of {@link TriggerInfo} for the detailed trigger
-	 * settings. The details of the trigger type, notification conditions,
+	 * settings. The details of the trigger name, the trigger type, notification conditions,
 	 * notification destination URI and notification contents are as shown below.</p>
+	 *
+	 * <b>Trigger name</b>
+	 * <p>Multiple trigger names which are identified as the same,
+	 * including the names only different in ASCII uppercase and
+	 * lowercase characters, even if they have different types or
+	 * notification conditions, in a container cannot be
+	 * defined. And there are the limitations, the allowed characters
+	 * and the length, on the trigger names. See the GridDB
+	 * Technical Reference for the details. Trigger names are
+	 * case-sensitive unless otherwise noted.</p>
 	 *
 	 * <b>Trigger type</b>
 	 * <p>The following trigger types are supported.
@@ -670,13 +860,13 @@ public interface Container<K, R> extends Closeable {
 	 * Therefore, a trigger having an invalid notification destination URI
 	 * is recommended to be deleted by using {@link #dropTrigger(String)}.</p>
 	 *
-	 * <p>Refer to "System limiting values" in the GridDB API Reference for the maximum number of
+	 * <p>See the GridDB Technical Reference for the maximum number of
 	 * triggers that can be set for a single Container and the upper limit of the
 	 * values for various trigger settings.</p>
 	 *
 	 * @param info Trigger information of the setting target
 	 *
-	 * @throws GSException If the trigger name is {@code null}, or blank
+	 * @throws GSException If the trigger name is {@code null}, blank, or does not follow to other rules
 	 * @throws GSException If the update operation subject to monitoring is not specified
 	 * @throws GSException If the notification destination URI does not conform to the stipulated syntax
 	 * @throws GSException If the JMS is specified by the trigger type, and the JMS destination type is {@code null},
@@ -686,6 +876,7 @@ public interface Container<K, R> extends Closeable {
 	 * @throws GSException If the JMS is specified by the trigger type, and the JMS destination name is {@code null},
 	 * or is blank
 	 * @throws NullPointerException If {@code null} is specified in the argument
+	 *
 	 */
 	public void createTrigger(TriggerInfo info) throws GSException;
 

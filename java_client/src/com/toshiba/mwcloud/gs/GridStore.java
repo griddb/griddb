@@ -27,22 +27,48 @@ import java.util.Map;
  * and TimeSeries Containers as well as to process the Rows constituting
  * a Container is provided.</p>
  *
- * <p>Rows cannot be stored with duplicated names, regardless of
- * whether it is a TimeSeries or Collection Container.
- * Where necessary, the Container name can be specified by appending
- * the node affinity name after the base Container name with the at mark "@".
- * Only ASCII alphanumeric characters and the underscore mark ( "_" ) can be used
- * in the base Container name and node affinity name.
- * ASCII characters are not case-sensitive. Numbers cannot be used in front of the
- * base Container name.
- * Refer to "System limiting values" in the GridDB API Reference for the upper limit of the length
- * of the Container name.</p>
+ * <p>Regardless of container types, etc., multiple container names
+ * different only in uppercase and lowercase ASCII characters cannot
+ * be defined in a database. A container name is represented by only
+ * a base container name or by connecting the base name and a node
+ * affinity name with '@'. See the GridDB Technical Reference for the
+ * details. In the operations specifying a container name, uppercase
+ * and lowercase ASCII characters are identified as the same unless
+ * otherwise noted.</p>
+ *
+ * <p>The {@link GSException} thrown by this interface or the
+ * interface of the instance which is acquired through this interface may contain the
+ * following parameters related the error.</p>
+ * <table>
+ * <thead><tr><th>Parameter name</th><th>Description</th></tr></thead>
+ * <tbody>
+ * <tr><td>address</td><td>Address and port of connecting cluster
+ * node.  It is a string connecting the host name or the IP address
+ * and the port number with a colon ":".  In this interface or the
+ * interface of the instance which is acquired through this interface,
+ * when an error is detected in invoking an operation including a
+ * cluster access, this parameter may be contained.  In that case, the
+ * details of the error may be logged in the cluster node shown by this
+ * parameter.</td></tr>
+ * <tr><td>container</td><td>The name of container which may relate
+ * the exception.  When operating any number of containers and
+ * detected that the operation cannot be performed for one of the
+ * containers, this parameter may be contained.  For instance of such
+ * operations, see the definition of each interface.  For such as
+ * resource shortage in preparing requests to cluster nodes, it may
+ * not be possible to determine which node is the cause, so this parameter
+ * may not be contained in some error cases.  And even if it is
+ * not possible to operate multiple nodes, this parameter contains
+ * only one node name at most.</td></tr>
+ * </tbody>
+ * </table>
  *
  * <p>Thread safety of each method is not guaranteed. </p>
  *
  * @see Collection
  * @see TimeSeries
  * @see Container
+ * @see GSException#getParameters()
  */
 public interface GridStore extends Closeable {
 
@@ -151,19 +177,8 @@ public interface GridStore extends Closeable {
 	 * is subject to notification is deleted due to a change in the column layout,
 	 * the column will be deleted from the list of triggers subject to notification.</p>
 	 *
-	 * <p>The values of Columns to be newly created are initialized according
-	 * to the type as follows:</p>
-	 * <table>
-	 * <thead><tr><th>Column type</th><th>Initial value</th></tr></thead>
-	 * <tbody>
-	 * <tr><td>STRING</td><td>{@code ""}(a string of length 0)</td></tr>
-	 * <tr><td>BOOL</td><td>({@code false})</td></tr>
-	 * <tr><td>Numeric type</td><td>{@code 0}</td></tr>
-	 * <tr><td>TIMESTAMP</td><td>{@code 1970-01-01T00:00:00Z}</td></tr>
-	 * <tr><td>BLOB</td><td>BLOB data of length 0</td></tr>
-	 * <tr><td>Array type</td><td>An array with no element</td></tr>
-	 * </tbody>
-	 * </table>
+	 * <p>The values of Columns to be newly created are initialized with an empty
+	 * value defined in {@link Container} as an initial value.</p>
 	 *
 	 * <p>For the correspondence between a specified type and a Column layout,
 	 * see the description of {@link Container}</p>
@@ -176,7 +191,15 @@ public interface GridStore extends Closeable {
 	 * the Row key which is defined by {@link Container#createIndex(String)}
 	 * is created. The index is removable.</p>
 	 *
-	 * @param name Name of a Collection subject to processing
+	 * <p> In the current version, when conditions such as the size of a container
+	 * are met, from the beginning to the end of changing the column layout, it is
+	 * sometimes possible to refer to the container information for the container
+	 * to be processed and reference the row without updating lock. There are cases
+	 * where other operations are made to wait as defined in {@link Container}.
+	 * If another operation is performed during column layout change, the prior layout
+	 * will be used. </p>
+	 *
+	* @param name Name of a Collection subject to processing
 	 * @param rowType Type of Row object corresponding to the column layout
 	 * of the Collection subject to processing
 	 * @param modifiable Indicates whether the column layout of the existing
@@ -356,12 +379,11 @@ public interface GridStore extends Closeable {
 	/**
 	 * Deletes a Collection with the specified name.
 	 *
-	 * <p>If the specified Collection is already deleted, nothing is changed. </p>
+	 * <p>Deletion handling, transaction handling, and the immediate state
+	 * after deletion request is completed are the same as those found in
+	 * {@link #dropContainer(String)} </p>
 	 *
-	 * <p>When a transaction(s) is active in a target Collection, it deletes
-	 * the Collection after waiting for the transaction(s) to complete. </p>
-	 *
- 	 * @param name Name of Collection subject to processing
+	 * @param name Name of Collection subject to processing
 	 *
 	 * @throws GSException if the Container type is unmatched.
 	 * @throws GSException if a timeout occurs during this operation or
@@ -374,10 +396,9 @@ public interface GridStore extends Closeable {
 	/**
 	 * Deletes a TimeSeries with the specified name.
 	 *
-	 * <p>If the specified TimeSeries is already deleted, nothing is changed. </p>
-	 *
-	 * <p>When a transaction(s) is active in a target TimeSeries, it deletes
-	 * the TimeSeries after waiting for the transaction(s) to complete. </p>
+	 * <p>Deletion handling, transaction handling, and the immediate state
+	 * after deletion request is completed are the same as those found in
+	 * {@link #dropContainer(String)} </p>
 	 *
 	 * @param name Name of TimeSeries subject to processing
 	 *
@@ -526,8 +547,7 @@ public interface GridStore extends Closeable {
 	 *
 	 * <p>Except for points where the Container type is limited to
 	 * {@link ContainerType#COLLECTION} and the returned type is {@link Collection},
-	 * the behavior will be the same as {@link #putContainer(String, ContainerInfo,
-	 * boolean)}.</p>
+	 * the behavior will be the same as {@link #putContainer(String, ContainerInfo, boolean)}.</p>
 	 *
 	 * @param name Name of Collection subject to processing
 	 * @param info Collection information subject to processing Specify either
@@ -632,6 +652,11 @@ public interface GridStore extends Closeable {
 	 * to processing, the system will wait for these to be completed
 	 * before deleting the data.</p>
 	 *
+	 * <p>Immediately after the container deletion request is completed,
+	 * the memory and storage area used for the index or row of the container
+	 * may not be reused immediately. In addition, when delete processing
+	 * is run on the cluster, increase in load may occur for sometime.</p>
+	 *
 	 * @param name Name of a Container subject to processing
 	 *
 	 * @throws GSException Name of a Container subject to processing
@@ -655,11 +680,8 @@ public interface GridStore extends Closeable {
 	 * However, the Container type will not be included even if a
 	 * {@link Row#getSchema()} is invoked against the created {@link Row}.</p>
 	 *
-	 * <p>The existing initial value is set in each field of the created {@link Row}.
-	 * This initial value is the same as the value of each field in the
-	 * column newly added in {@link #putContainer(String, ContainerInfo, boolean)}.
-	 * Refer to the definition of {@link #putCollection(String, Class, boolean)}
-	 * for a list of the specific values.</p>
+	 * <p>An empty value defined in {@link Container} is set as the initial value
+	 * for each field of the created {@link Row}.</p>
 	 *
 	 * <p>The operation on the created {@link Row} also does not affect whether this
 	 * {@link GridStore} object is closed or not.</p>
@@ -723,7 +745,11 @@ public interface GridStore extends Closeable {
 	 * <p>If the system tries to acquire a large number of Rows all at once,
 	 * the upper limit of the communication buffer size managed by the GridDB
 	 * node may be reached, possibly resulting in a failure.
-	 * Refer to "System limiting values" in the GridDB API Reference for the upper limit size.</p>
+	 * Refer to "System limiting values" in the GridDB Technical Reference for the upper limit size.</p>
+	 *
+	 * <p>The thrown {@link GSException} may contain {@code container}
+	 * parameter.  For the details of the parameters
+	 * related the error, see the definition of {@link GridStore}.</p>
 	 *
 	 * @param queryList List of {@link Query} targeted
 	 *
@@ -806,6 +832,10 @@ public interface GridStore extends Closeable {
 	 * and its Rows, only the results for some of the Rows of some of the
 	 * Containers may remain reflected.</p>
 	 *
+	 * <p>The thrown {@link GSException} may contain {@code container}
+	 * parameter.  For the details of the parameters
+	 * related the error, see the definition of {@link GridStore}.</p>
+	 *
 	 * @param containerRowsMap A map made up of a list of Row objects
 	 * and target Container names
 	 *
@@ -854,13 +884,13 @@ public interface GridStore extends Closeable {
 	 * The Container cannot include {@code null} as a key or value of the map.</p>
 	 *
 	 * <p>A returned map is composed of entries that adopt the Container name
-	 * as its key and list of Row objects as its value. All the Container names
-	 * included in a specified map as acquisition conditions are included
-	 * in a returned map.
-	 * If the same Container is specified and multiple entries in which
-	 * Container names with different notations in uppercase and lowercase
-	 * letters are set are included in a specified map, a single entry
-	 * consolidating these is stored in the returned map.
+	 * as its key and list of Row objects as its value. And only the
+	 * real Container names at the request included in a specified
+	 * map as acquisition conditions are included in a returned map.
+	 * If multiple entries in which Container names with different
+	 * notations in uppercase and lowercase letters that specify
+	 * the same Container are set are included in a specified map,
+	 * a single entry consolidating these is stored in the returned map.
 	 * If multiple Row objects are included in the same list, the stored sequence
 	 * follows the Container type and the definition of the sub-interface
 	 * of the corresponding {@link Container}.
@@ -884,7 +914,11 @@ public interface GridStore extends Closeable {
 	 * <p>If the system tries to acquire a large number of Rows all at once,
 	 * the upper limit of the communication buffer size managed by the GridDB
 	 * node may be reached, possibly resulting in a failure.
-	 * Refer to "System limiting values" in the GridDB API Reference for the upper limit size.</p>
+	 * Refer to "System limiting values" in the GridDB Technical Reference for the upper limit size.</p>
+	 *
+	 * <p>The thrown {@link GSException} may contain {@code container}
+	 * parameter.  For the details of the parameters
+	 * related the error, see the definition of {@link GridStore}.</p>
 	 *
 	 * @param containerPredicateMap Map made up of targeted Container names
 	 * and conditions
@@ -892,9 +926,8 @@ public interface GridStore extends Closeable {
 	 * @return Map that maintains Row groups conforming to the conditions
 	 * by Container
 	 *
-	 * @throws GSException If the subject Container does not exist.
-	 * If acquisition conditions concerning a specified Container that cannot be
-	 * evaluated are specified
+	 * @throws GSException If acquisition conditions concerning a specified
+	 * Container that cannot be evaluated are specified
 	 * @throws GSException If this process or transaction times out, a connection
 	 * failure were to occur, or if it is invoked after being closed
 	 * @throws NullPointerException If {@code null} is specified as an argument

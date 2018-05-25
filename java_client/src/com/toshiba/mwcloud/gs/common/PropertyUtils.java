@@ -181,7 +181,7 @@ public class PropertyUtils {
 			return (value == null ? defaultValue : value);
 		}
 
-		public Set<String> getUnknowNames() {
+		public Set<String> getUnknownNames() {
 			final Set<String> names = new HashSet<String>(
 					base.stringPropertyNames());
 			names.removeAll(visited.keySet());

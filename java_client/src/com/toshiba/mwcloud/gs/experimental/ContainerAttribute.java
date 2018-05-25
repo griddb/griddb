@@ -18,18 +18,39 @@ package com.toshiba.mwcloud.gs.experimental;
 
 public enum ContainerAttribute {
 
-	BASE,
+	BASE(0x00000000),
 
-	BASE_SYSTEM,
+	BASE_SYSTEM(0x00000001),
 
-	SINGLE,
+	SINGLE(0x00000010),
 
-	SINGLE_SYSTEM,
+	SINGLE_SYSTEM(0x00000011),
 
-	SINGLE_SEMI_PERMANENT_SYSTEM,
+	SINGLE_SEMI_PERMANENT_SYSTEM(0x00000015),
 
-	LARGE,
+	LARGE(0x00000020),
 
-	SUB
+	SUB(0x00000030)
 	;
+
+	private int flag;
+
+	private ContainerAttribute(int flag) {
+		this.flag = flag;
+	}
+
+	public int flag() {
+		return this.flag;
+	}
+
+	public static ContainerAttribute getAttribute(int flag) {
+
+		for (ContainerAttribute attribute : values()) {
+			if (attribute.flag() == flag) {
+				return attribute;
+			}
+		}
+		return null;
+	}
+
 }

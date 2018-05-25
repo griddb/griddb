@@ -24,7 +24,7 @@ public enum InterpolationMode {
 
 	/**
 	 * Indicates performing linear interpolation or interpolation with the value of
-	 * a privious Row on Columns.
+	 * a previous Row on Columns.
 	 *
 	 * <p>The Column specified the interpolation function is linearly interpolated
 	 * with the Row values before and after the target time of interpolation.
@@ -39,10 +39,8 @@ public enum InterpolationMode {
 	/**
 	 * Indicates using an empty value as an interpolated value.
 	 *
-	 * <p>It indicates that an empty value defined for each type is used as
-	 * an interpolated value for all Row fields except Row keys. The empty value is
-	 * the same as the initial value of a Column newly created when changing
-	 * a Column layout using {@link GridStore#putCollection(String, Class, boolean)}. </p>
+	 * <p>It indicates that an empty value defined in {@link Container} is used as
+	 * an interpolated value for all Row fields except Row keys.</p>
 	 */
 	EMPTY
 

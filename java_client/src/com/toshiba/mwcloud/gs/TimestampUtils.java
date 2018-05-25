@@ -35,6 +35,10 @@ public class TimestampUtils {
 
 	private static final boolean TRIM_MILLISECONDS = false;
 
+	@Deprecated
+	public TimestampUtils() {
+	}
+
 	/**
 	 * Returns the current time.
 	 */
@@ -62,16 +66,22 @@ public class TimestampUtils {
 	 * <p>An earlier time than the specified time can be obtained by specifying a negative value as {@code amount}.</p>
 	 *
 	 * <p>The current version uses the UTC timezone for calculation.</p>
+	 *
+	 * @param timestamp target time
+	 * @param amount value to be added
+	 * @param timeUnit unit of value to be added
+	 *
+	 * @throws NullPointerException when {@code null} is specified for {@code timestamp}, {@code timeUnit}
 	 */
-	public static Date add(Date timeStamp, int amount, TimeUnit timeUnit) {
+	public static Date add(Date timestamp, int amount, TimeUnit timeUnit) {
 		final Calendar calendar = currentCalendar();
 
 		try {
-			calendar.setTime(timeStamp);
+			calendar.setTime(timestamp);
 			calendar.add(toCalendarField(timeUnit), amount);
 		}
 		catch (NullPointerException e) {
-			GSErrorCode.checkNullParameter(timeStamp, "timeStamp", e);
+			GSErrorCode.checkNullParameter(timestamp, "timestamp", e);
 			GSErrorCode.checkNullParameter(timeUnit, "timeUnit", e);
 			throw e;
 		}
@@ -109,20 +119,27 @@ public class TimestampUtils {
 	 * Returns the string representing the specified time, according to the TIMESTAMP value notation of TQL.
 	 *
 	 * <p>The current version uses the UTC timezone for conversion.</p>
+	 *
+	 * @param timestamp target time
+	 *
+	 * @throws NullPointerException when {@code null} is specified as argument
 	 */
-	public static String format(Date timeStamp) {
+	public static String format(Date timestamp) {
 		try {
-			return getFormat().format(timeStamp);
+			return getFormat().format(timestamp);
 		}
 		catch (NullPointerException e) {
-			throw GSErrorCode.checkNullParameter(timeStamp, "timeStamp", e);
+			throw GSErrorCode.checkNullParameter(timestamp, "timestamp", e);
 		}
 	}
 
 	/**
 	 * Returns a {@link Date} object corresponding to the specified string, according to the TIMESTAMP value notation of TQL.
 	 *
+	 * @param source string representation of target time
+	 *
 	 * @throws ParseException if the specified string does not match any time representation.
+	 * @throws NullPointerException when {@code null} is specified as argument
 	 */
 	public static Date parse(String source) throws ParseException {
 		try {

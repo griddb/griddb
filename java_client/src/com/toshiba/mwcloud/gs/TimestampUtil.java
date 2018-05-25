@@ -26,6 +26,10 @@ import java.util.Date;
 @Deprecated
 public class TimestampUtil {
 
+	@Deprecated
+	public TimestampUtil() {
+	}
+
 	/**
 	 * @deprecated
 	 */

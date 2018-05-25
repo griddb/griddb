@@ -29,6 +29,7 @@ import com.toshiba.mwcloud.gs.TimeSeries;
 import com.toshiba.mwcloud.gs.TimeUnit;
 import com.toshiba.mwcloud.gs.TimestampUtils;
 import com.toshiba.mwcloud.gs.common.BasicBuffer;
+import com.toshiba.mwcloud.gs.common.ContainerKeyConverter.ContainerKey;
 import com.toshiba.mwcloud.gs.common.GSErrorCode;
 import com.toshiba.mwcloud.gs.common.RowMapper;
 import com.toshiba.mwcloud.gs.common.RowMapper.MappingMode;
@@ -45,12 +46,12 @@ extends SubnetContainer<Date, R> implements TimeSeries<R> {
 	public SubnetTimeSeries(
 			SubnetGridStore store, GridStoreChannel channel, Context context,
 			Class<R> rowType, RowMapper mapper, int schemaVerId,
-			int partitionId, long containerId, String normalizedContainerName,
-			String remoteContainerName)
+			int partitionId, long containerId, ContainerKey normalizedContainerKey,
+			ContainerKey remoteContainerKey)
 			throws GSException {
 		super(store, channel, context, rowType, mapper, schemaVerId,
-				partitionId, containerId, normalizedContainerName,
-				remoteContainerName);
+				partitionId, containerId, normalizedContainerKey,
+				remoteContainerKey);
 	}
 
 	@Override
@@ -147,8 +148,8 @@ extends SubnetContainer<Date, R> implements TimeSeries<R> {
 			throws GSException {
 		checkOpened();
 		return new SubnetQuery<R>(
-				this, rowType, mapper, Statement.QUERY_TIME_SERIES_RANGE,
-				new QueryFormatter() {
+				this, rowType, mapper,
+				new QueryFormatter(Statement.QUERY_TIME_SERIES_RANGE) {
 					@Override
 					public void format(BasicBuffer inBuf) throws GSException {
 						inBuf.putDate(wrapOptionalTimestamp(start));
@@ -214,8 +215,8 @@ extends SubnetContainer<Date, R> implements TimeSeries<R> {
 		}
 
 		return new SubnetQuery<R>(
-				this, rowType, mapper, Statement.QUERY_TIME_SERIES_SAMPLING,
-				new QueryFormatter() {
+				this, rowType, mapper,
+				new QueryFormatter(Statement.QUERY_TIME_SERIES_SAMPLING) {
 					@Override
 					public void format(BasicBuffer inBuf) {
 						try {
@@ -257,6 +258,7 @@ extends SubnetContainer<Date, R> implements TimeSeries<R> {
 	}
 
 	@Override
+	@Deprecated
 	public Query<R> query(
 			Date start, Date end, Set<String> columnSet,
 			int interval, TimeUnit intervalUnit)

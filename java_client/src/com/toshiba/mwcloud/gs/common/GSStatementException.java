@@ -15,11 +15,19 @@
 */
 package com.toshiba.mwcloud.gs.common;
 
+import java.util.Map;
+
 import com.toshiba.mwcloud.gs.GSException;
 
 public class GSStatementException extends GSException {
 
 	private static final long serialVersionUID = 8993426842284161001L;
+
+	public GSStatementException(
+			int errorCode, String errorName, String description,
+			Map<String, String> parameters, Throwable cause) {
+		super(errorCode, errorName, description, parameters, cause);
+	}
 
 	public GSStatementException(int errorCode,
 			String errorName, String description, Throwable cause) {

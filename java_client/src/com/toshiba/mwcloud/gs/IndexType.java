@@ -23,7 +23,7 @@ public enum IndexType {
 	/**
 	 * Indicates a tree index.
 	 *
-	 * <p>This index can be applied to following types of Columns of any type of
+	 * <p>This index type can be applied to following types of Columns of any type of
 	 * {@link Container}, except the Column corresponding to the Row key of
 	 * TimeSeries.</p>
 	 * <ul>
@@ -43,7 +43,7 @@ public enum IndexType {
 	/**
 	 * Indicates a hash index.
 	 *
-	 * <p>This type of index can be set on the following types of Columns in {@link Collection}</p>
+	 * <p>This index type can be set on the following types of Columns in {@link Collection}</p>
 	 * <ul>
 	 * <li>STRING</li>
 	 * <li>BOOL</li>
@@ -61,8 +61,23 @@ public enum IndexType {
 	HASH,
 
 	/**
-	 * Not supported
+	 * Indicates a spatial index.
+	 *
+	 * TODO
+	 * <p>This index type can be applied to only GEOMETRY type of Columns in
+	 * {@link Collection}. It cannot be set on Columns in {@link TimeSeries}.
+	 * </p>
+	 *
 	 */
-	SPATIAL
+	SPATIAL,
+
+	/**
+	 * Indicates the default index type.
+	 *
+	 * <p>This index type is used when it is necessary to manipulate the index
+	 * without specifying a type, and the existing index is classified as another type</p>
+	 *
+	 */
+	DEFAULT
 
 }

@@ -20,6 +20,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Inet6Address;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketAddress;
@@ -31,12 +32,17 @@ import java.security.SecureRandom;
 import java.util.Arrays;
 import java.util.EnumMap;
 import java.util.Formatter;
+import java.util.Iterator;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
+import java.util.SortedMap;
+import java.util.TreeMap;
+import java.util.UUID;
 
 import com.toshiba.mwcloud.gs.GSException;
 import com.toshiba.mwcloud.gs.common.BasicBuffer;
+import com.toshiba.mwcloud.gs.common.ContainerKeyConverter;
 import com.toshiba.mwcloud.gs.common.GSConnectionException;
 import com.toshiba.mwcloud.gs.common.GSErrorCode;
 import com.toshiba.mwcloud.gs.common.GSStatementException;
@@ -46,13 +52,14 @@ import com.toshiba.mwcloud.gs.common.LoggingUtils.BaseGridStoreLogger;
 import com.toshiba.mwcloud.gs.common.PropertyUtils;
 import com.toshiba.mwcloud.gs.common.PropertyUtils.WrappedProperties;
 import com.toshiba.mwcloud.gs.common.Statement;
+import com.toshiba.mwcloud.gs.common.Statement.GeneralStatement;
 import com.toshiba.mwcloud.gs.common.StatementResult;
 
 public class NodeConnection implements Closeable {
 
 	public static final int EE_MAGIC_NUMBER = 65021048;
 
-	private static final int DEFAULT_PROTOCOL_VERSION = 10;
+	private static final int DEFAULT_PROTOCOL_VERSION = 15;
 
 	private static final int STATEMENT_TYPE_NUMBER_V2_OFFSET = 100;
 
@@ -66,7 +73,7 @@ public class NodeConnection implements Closeable {
 	private static volatile int protocolVersion = DEFAULT_PROTOCOL_VERSION;
 
 	private static volatile int firstStatementTypeNumber =
-			statementToNumber(Statement.CONNECT);
+			statementToNumber(Statement.CONNECT.generalize());
 
 	private static boolean tcpNoDelayEnabled = true;
 
@@ -77,6 +84,10 @@ public class NodeConnection implements Closeable {
 			LoggingUtils.getLogger("StatementIO");
 
 	private static final Statement STATEMENT_LIST[] = Statement.values();
+
+	private static final String ERROR_PARAM_ADDRESS = "address";
+
+	private static final String ERROR_PARAM_PARTITION_ID = "partitionId";
 
 	private final long statementTimeoutMillis;
 
@@ -94,9 +105,13 @@ public class NodeConnection implements Closeable {
 
 	private AuthMode authMode = Challenge.getDefaultMode();
 
+	private int remoteProtocolVersion;
+
 	private boolean responseUnacceptable;
 
 	private long statementId = 0;
+
+	private long heartbeatReceiveCount;
 
 	private byte[] pendingResp;
 
@@ -140,6 +155,10 @@ public class NodeConnection implements Closeable {
 		return protocolVersion;
 	}
 
+	public int getRemoteProtocolVersion() {
+		return remoteProtocolVersion;
+	}
+
 	public static boolean isSupportedProtocolVersion(int protocolVersion) {
 		switch (protocolVersion) {
 		case 1:
@@ -149,6 +168,9 @@ public class NodeConnection implements Closeable {
 		case 5:
 		case 6:
 		case 8:
+		case 13:
+		case 14:
+		case 15:
 			return true;
 		default:
 			return false;
@@ -162,7 +184,8 @@ public class NodeConnection implements Closeable {
 					"Wrong protocol version (version=" + protocolVersion + ")");
 		}
 		NodeConnection.protocolVersion = protocolVersion;
-		firstStatementTypeNumber = statementToNumber(Statement.CONNECT);
+		firstStatementTypeNumber =
+				statementToNumber(Statement.CONNECT.generalize());
 	}
 
 	public SocketAddress getRemoteSocketAddress() {
@@ -270,6 +293,14 @@ public class NodeConnection implements Closeable {
 		return protocolVersion >= 3;
 	}
 
+	public static boolean isClientIdOnLoginEnabled() {
+		return protocolVersion >= 13;
+	}
+
+	public static boolean isDatabaseIdEnabled() {
+		return protocolVersion >= 14;
+	}
+
 	public static void tryPutEmptyOptionalRequest(BasicBuffer req) {
 		if (isOptionalRequestEnabled()) {
 			req.putInt(0);
@@ -280,7 +311,16 @@ public class NodeConnection implements Closeable {
 			Statement statement, int partitionId, long statementId,
 			BasicBuffer req, BasicBuffer resp)
 			throws GSException {
-		executeStatementDirect(statementToNumber(statement),
+		executeStatement(
+				statement.generalize(), partitionId, statementId, req, resp);
+	}
+
+	public void executeStatement(
+			GeneralStatement statement, int partitionId, long statementId,
+			BasicBuffer req, BasicBuffer resp)
+			throws GSException {
+		executeStatementDirect(
+				statementToNumber(statement),
 				partitionId, statementId, req, resp, null);
 	}
 
@@ -602,6 +642,8 @@ public class NodeConnection implements Closeable {
 				heartbeat.orgException = e;
 			}
 
+			heartbeatReceiveCount++;
+
 			if (heartbeat.orgStatementFound) {
 				resp = heartbeatBuf;
 				resp.clear();
@@ -724,6 +766,16 @@ public class NodeConnection implements Closeable {
 			}
 		}
 
+		final Map<String, String> paremeters = GSErrorCode.newParameters();
+		if (resp.base().remaining() > 0) {
+			final int paramCount = resp.base().getInt();
+			for (int i = 0; i < paramCount; i++) {
+				final String name = resp.getString();
+				final String value = resp.getString();
+				paremeters.put(name, value);
+			}
+		}
+
 		if (!detailErrorMessageEnabled && majorMessage != null) {
 			messageBuilder.append(majorMessage);
 		}
@@ -731,25 +783,28 @@ public class NodeConnection implements Closeable {
 		if (messageBuilder.length() > 0) {
 			messageBuilder.append(" ");
 		}
-		messageBuilder.append("(address=");
-		messageBuilder.append(getRemoteSocketAddress());
-		messageBuilder.append(", partitionId=").append(partitionId);
+		messageBuilder.append("(");
+		GSErrorCode.addParameter(
+				messageBuilder, paremeters, ERROR_PARAM_ADDRESS,
+				socketAddressToString(getRemoteSocketAddress()), true);
+		GSErrorCode.addParameter(
+				messageBuilder, paremeters, ERROR_PARAM_PARTITION_ID,
+				Integer.toString(partitionId), false);
 		messageBuilder.append(")");
 
 		switch (result) {
-		case STATEMENT_ERROR: {
+		case STATEMENT_ERROR:
 			return new GSStatementException(
 					(majorCode == 0 ? GSErrorCode.BAD_STATEMENT : majorCode),
-					errorName, messageBuilder.toString(), null);
-		}
+					errorName, messageBuilder.toString(), paremeters, null);
 		case DENY:
 			return new GSWrongNodeException(
 					(majorCode == 0 ? GSErrorCode.WRONG_NODE : majorCode),
-					errorName, messageBuilder.toString(), null);
+					errorName, messageBuilder.toString(), paremeters, null);
 		default:
 			return new GSConnectionException(
 					(majorCode == 0 ? GSErrorCode.BAD_CONNECTION : majorCode),
-					errorName, messageBuilder.toString(), null);
+					errorName, messageBuilder.toString(), paremeters, null);
 		}
 	}
 
@@ -759,15 +814,31 @@ public class NodeConnection implements Closeable {
 				protocolVersion : alternativeVersion);
 	}
 
+	private void acceptConnectResponse(BasicBuffer resp) throws GSException {
+		authMode = Challenge.getMode(resp);
+
+		if (resp.base().remaining() > 0) {
+			final int version = resp.base().getInt();
+			if (version == 0 || (remoteProtocolVersion != 0 &&
+					version != remoteProtocolVersion)) {
+				throw new GSConnectionException(
+						GSErrorCode.MESSAGE_CORRUPTED,
+						"Protocol error by illegal remote version (version=" +
+						version + ")");
+			}
+			remoteProtocolVersion = version;
+		}
+	}
+
 	public void connect(BasicBuffer req, BasicBuffer resp) throws GSException {
 		req = (req == null ? createRequestBuffer() : req);
 		resp = (resp == null ? createOutput() : resp);
 
 		putConnectRequest(req);
 		executeStatement(
-				Statement.CONNECT, SPECIAL_PARTITION_ID, 0, req, resp);
-
-		authMode = Challenge.getMode(resp);
+				Statement.CONNECT.generalize(), SPECIAL_PARTITION_ID,
+				0, req, resp);
+		acceptConnectResponse(resp);
 	}
 
 	public void disconnect(BasicBuffer req, BasicBuffer resp) throws GSException {
@@ -776,27 +847,45 @@ public class NodeConnection implements Closeable {
 		req.base().position(getRequestHeadLength(ipv6Enabled, false));
 		tryPutEmptyOptionalRequest(req);
 		executeStatement(
-				Statement.DISCONNECT, SPECIAL_PARTITION_ID, 0, req, null);
+				Statement.DISCONNECT.generalize(), SPECIAL_PARTITION_ID,
+				0, req, null);
 
 		closeImmediately();
 	}
 
 	public void login(
-			BasicBuffer req, BasicBuffer resp, LoginInfo loginInfo)
-			throws GSException {
+			BasicBuffer req, BasicBuffer resp, LoginInfo loginInfo,
+			long[] databaseId) throws GSException {
+		req = (req == null ? createRequestBuffer() : req);
+		resp = (resp == null ? createOutput() : resp);
+
 		final Challenge challenge = loginInternal(req, resp, loginInfo, null);
 
 		if (challenge != null) {
 			loginInternal(req, resp, loginInfo, challenge);
+		}
+
+		final long respDatabaseId;
+		if (resp.base().remaining() > 0) {
+			respDatabaseId = resp.base().getLong();
+		}
+		else {
+			if (isDatabaseIdEnabled()) {
+				throw new GSConnectionException(
+						GSErrorCode.MESSAGE_CORRUPTED,
+						"Protocol error by lack of database ID");
+			}
+			respDatabaseId = ContainerKeyConverter.getPublicDatabaseId();
+		}
+
+		if (databaseId != null) {
+			databaseId[0] = respDatabaseId;
 		}
 	}
 
 	private Challenge loginInternal(
 			BasicBuffer req, BasicBuffer resp, LoginInfo loginInfo,
 			Challenge lastChallenge) throws GSException {
-		req = (req == null ? createRequestBuffer() : req);
-		resp = (resp == null ? createOutput() : resp);
-
 		req.base().position(getRequestHeadLength(ipv6Enabled, false));
 
 		if (isOptionalRequestEnabled()) {
@@ -809,6 +898,9 @@ public class NodeConnection implements Closeable {
 
 			if (loginInfo.database != null) {
 				request.put(OptionalRequestType.DB_NAME, loginInfo.database);
+			}
+			if (loginInfo.clientId != null && isClientIdOnLoginEnabled()) {
+				request.put(OptionalRequestType.CLIENT_ID, loginInfo.clientId);
 			}
 			request.format(req);
 		}
@@ -823,7 +915,9 @@ public class NodeConnection implements Closeable {
 		req.putString(loginInfo.clusterName == null ? "" : loginInfo.clusterName);
 		Challenge.putRequest(req, authMode, lastChallenge);
 
-		executeStatement(Statement.LOGIN, SPECIAL_PARTITION_ID, 0, req, resp);
+		executeStatement(
+				Statement.LOGIN.generalize(), SPECIAL_PARTITION_ID,
+				0, req, resp);
 
 		final AuthMode[] resultMode = new AuthMode[] { authMode };
 		final Challenge respChallenge =
@@ -832,11 +926,12 @@ public class NodeConnection implements Closeable {
 		return respChallenge;
 	}
 
-	public void reuse(BasicBuffer req, BasicBuffer resp,
-			LoginInfo loginInfo) throws GSException {
+	public void reuse(
+			BasicBuffer req, BasicBuffer resp, LoginInfo loginInfo,
+			long[] databaseId) throws GSException {
 		
 		
-		login(req, resp, loginInfo);
+		login(req, resp, loginInfo, databaseId);
 	}
 
 	public void logout(BasicBuffer req, BasicBuffer resp) throws GSException {
@@ -845,13 +940,19 @@ public class NodeConnection implements Closeable {
 
 		req.base().position(getRequestHeadLength(ipv6Enabled, false));
 		tryPutEmptyOptionalRequest(req);
-		executeStatement(Statement.LOGOUT, SPECIAL_PARTITION_ID, 0, req, resp);
+		executeStatement(
+				Statement.LOGOUT.generalize(), SPECIAL_PARTITION_ID,
+				0, req, resp);
 	}
 
-	public static String getDigest(String pasword) {
+	public long getHeartbeatReceiveCount() {
+		return heartbeatReceiveCount;
+	}
+
+	public static String getDigest(String password) {
 		try {
 			final MessageDigest md = MessageDigest.getInstance("SHA-256");
-			md.update(pasword.getBytes(BasicBuffer.DEFAULT_CHARSET));
+			md.update(password.getBytes(BasicBuffer.DEFAULT_CHARSET));
 
 			StringBuilder builder = new StringBuilder();
 			for (byte b : md.digest()) {
@@ -866,6 +967,10 @@ public class NodeConnection implements Closeable {
 	}
 
 	public static int statementToNumber(Statement statement) {
+		return statementToNumber(statement.generalize());
+	}
+
+	public static int statementToNumber(GeneralStatement statement) {
 		return statement.ordinal() + getStatementNumberOffset();
 	}
 
@@ -875,6 +980,34 @@ public class NodeConnection implements Closeable {
 		}
 
 		return STATEMENT_TYPE_NUMBER_V2_OFFSET;
+	}
+
+	public static String socketAddressToString(
+			SocketAddress socketAddress) {
+		final InetSocketAddress inetSocketAddress;
+		if (socketAddress instanceof InetSocketAddress) {
+			inetSocketAddress = (InetSocketAddress) socketAddress;
+		}
+		else {
+			return socketAddress.toString();
+		}
+
+		final InetAddress address = inetSocketAddress.getAddress();
+		final int port = inetSocketAddress.getPort();
+
+		final StringBuilder builder = new StringBuilder();
+		if (address instanceof Inet6Address) {
+			builder.append("[");
+			builder.append(address.getHostAddress());
+			builder.append("]");
+		}
+		else if (address != null) {
+			builder.append(address.getHostAddress());
+		}
+		builder.append(":");
+		builder.append(port);
+
+		return builder.toString();
 	}
 
 	private BasicBuffer createRequestBuffer() {
@@ -914,6 +1047,31 @@ public class NodeConnection implements Closeable {
 		long orgStatementId;
 		boolean orgStatementFound;
 		GSStatementException orgException;
+	}
+
+	public static class ClientId {
+
+		private final UUID uuid;
+
+		private final long sessionId;
+
+		public ClientId(UUID uuid, long sessionId) {
+			this.uuid = uuid;
+			this.sessionId = sessionId;
+		}
+
+		public static ClientId generate(long sessionId) {
+			return new ClientId(UUID.randomUUID(), sessionId);
+		}
+
+		public long getSessionId() {
+			return sessionId;
+		}
+
+		public UUID getUUID() {
+			return uuid;
+		}
+
 	}
 
 	public static class Config {
@@ -996,8 +1154,6 @@ public class NodeConnection implements Closeable {
 
 	public static class LoginInfo {
 
-		public static final String DEFAULT_DATABASE_NAME = null;
-
 		private String user;
 
 		private PasswordDigest passwordDigest;
@@ -1009,6 +1165,8 @@ public class NodeConnection implements Closeable {
 		private String clusterName;
 
 		private int transactionTimeoutSecs;
+
+		private ClientId clientId;
 
 		public LoginInfo(
 				String user, String password, boolean ownerMode,
@@ -1053,6 +1211,10 @@ public class NodeConnection implements Closeable {
 			this.ownerMode = ownerMode;
 		}
 
+		public void setClientId(ClientId clientId) {
+			this.clientId = clientId;
+		}
+
 		public boolean isOwnerMode() {
 			return ownerMode;
 		}
@@ -1067,6 +1229,10 @@ public class NodeConnection implements Closeable {
 
 		public String getDatabase() {
 			return database;
+		}
+
+		public ClientId getClientId() {
+			return clientId;
 		}
 
 	}
@@ -1137,6 +1303,7 @@ public class NodeConnection implements Closeable {
 				BasicBuffer out, AuthMode mode, Challenge lastChallenge)
 				throws GSException {
 			if (mode == AuthMode.NONE) {
+				out.putByteEnum(mode);
 				return;
 			}
 
@@ -1155,6 +1322,11 @@ public class NodeConnection implements Closeable {
 				BasicBuffer in, AuthMode[] mode, Challenge lastChallenge)
 				throws GSException {
 			final AuthMode respMode = getMode(in);
+			if (respMode != AuthMode.NONE && !challengeEnabled) {
+				throw new GSConnectionException(
+						GSErrorCode.MESSAGE_CORRUPTED, "");
+			}
+
 			if (respMode != mode[0]) {
 				if (respMode == AuthMode.BASIC) {
 					mode[0] = respMode;
@@ -1242,21 +1414,15 @@ public class NodeConnection implements Closeable {
 		}
 
 		public static String sha256Hash(String value) {
-			return hash(value, "SHA-256");
+			return hash(value, MessageDigestFactory.SHA256);
 		}
 
 		public static String md5Hash(String value) {
-			return hash(value, "MD5");
+			return hash(value, MessageDigestFactory.MD5);
 		}
 
-		public static String hash(String value, String algorithm) {
-			final MessageDigest md;
-			try {
-				md = MessageDigest.getInstance(algorithm);
-			}
-			catch (NoSuchAlgorithmException e) {
-				throw new Error("Internal error while calculating digest", e);
-			}
+		public static String hash(String value, MessageDigestFactory factory) {
+			final MessageDigest md = factory.create();
 
 			md.update(value.getBytes(BasicBuffer.DEFAULT_CHARSET));
 
@@ -1294,7 +1460,7 @@ public class NodeConnection implements Closeable {
 		}
 
 		public static AuthMode getMode(BasicBuffer in) throws GSException {
-			if (challengeEnabled && in.base().remaining() > 0) {
+			if (in.base().remaining() > 0) {
 				return in.getByteEnum(AuthMode.class);
 			}
 			return AuthMode.NONE;
@@ -1323,6 +1489,58 @@ public class NodeConnection implements Closeable {
 
 	}
 
+	public static class MessageDigestFactory {
+
+		public static final MessageDigestFactory SHA256 =
+				new MessageDigestFactory("SHA-256");
+
+		public static final MessageDigestFactory MD5 =
+				new MessageDigestFactory("MD5");
+
+		private final String algorithm;
+
+		private final MessageDigest md;
+
+		private final boolean cloneable;
+
+		private MessageDigestFactory(String algorithm) {
+			this.algorithm = algorithm;
+
+			md = create(algorithm);
+
+			boolean cloneable = false;
+			try {
+				cloneable = (md.clone() instanceof MessageDigest);
+			}
+			catch (CloneNotSupportedException e) {
+			}
+			this.cloneable = cloneable;
+		}
+
+		private static MessageDigest create(String algorithm) {
+			try {
+				return MessageDigest.getInstance(algorithm);
+			}
+			catch (NoSuchAlgorithmException e) {
+				throw new Error("Internal error while calculating digest", e);
+			}
+		}
+
+		public MessageDigest create() {
+			if (cloneable) {
+				try {
+					return (MessageDigest) md.clone();
+				}
+				catch (CloneNotSupportedException e) {
+				}
+				catch (ClassCastException e) {
+				}
+			}
+			return create(algorithm);
+		}
+
+	}
+
 	public enum OptionalRequestType {
 
 		TRANSACTION_TIMEOUT(1, Integer.class),
@@ -1335,7 +1553,9 @@ public class NodeConnection implements Closeable {
 		REQUEST_MODULE_TYPE(8, Byte.class),
 		STATEMENT_TIMEOUT(10001, Integer.class),
 		FETCH_LIMIT(10002, Long.class),
-		FETCH_SIZE(10003, Long.class);
+		FETCH_SIZE(10003, Long.class),
+		CLIENT_ID(11001, ClientId.class),
+		FETCH_BYTES_SIZE(11002, Integer.class);
 
 		private final int id;
 
@@ -1356,55 +1576,207 @@ public class NodeConnection implements Closeable {
 
 	}
 
-	public static class OptionalRequest {
+	private static class OptionalRequestIterator {
+
+		private Iterator<Map.Entry<OptionalRequestType, Object>> base;
+
+		private Iterator<Map.Entry<Integer, byte[]>> ext;
+
+		private Integer id;
+
+		private Class<?> valueType;
+
+		OptionalRequestIterator(
+				Map<OptionalRequestType, Object> requestMap,
+				SortedMap<Integer, byte[]> extRequestMap) {
+			if (!requestMap.isEmpty()) {
+				base = requestMap.entrySet().iterator();
+			}
+			if (extRequestMap != null && !extRequestMap.isEmpty()) {
+				ext = extRequestMap.entrySet().iterator();
+			}
+		}
+
+		Object next() {
+			Object nextValue;
+			if (base != null) {
+				final Map.Entry<OptionalRequestType, Object> entry =
+						base.next();
+
+				nextValue = entry.getValue();
+				id = entry.getKey().id();
+				valueType = entry.getKey().valueType();
+
+				if (!base.hasNext()) {
+					base = null;
+				}
+			}
+			else if (ext != null) {
+				final Map.Entry<Integer, byte[]> entry = ext.next();
+
+				nextValue = entry.getValue();
+				id = entry.getKey();
+				valueType = byte[].class;
+
+				if (!ext.hasNext()) {
+					ext = null;
+				}
+			}
+			else {
+				nextValue = null;
+				id = null;
+				valueType = null;
+			}
+			return nextValue;
+		}
+
+		public int getId() {
+			if (id == null) {
+				throw new IllegalStateException();
+			}
+			return id;
+		}
+
+		public Class<?> getValueType() {
+			if (valueType == null) {
+				throw new IllegalStateException();
+			}
+			return valueType;
+		}
+
+	}
+
+	public interface OptionalRequestSource {
+
+		public boolean hasOptions();
+
+		public void putOptions(OptionalRequest optionalRequest);
+
+	}
+
+	public static class OptionalRequest implements OptionalRequestSource {
+
+		private static final int RANGE_SIZE = 1000;
+
+		private static final int RANGE_START_ID = RANGE_SIZE * 11;
 
 		private final Map<OptionalRequestType, Object> requestMap =
 				new EnumMap<OptionalRequestType, Object>(
 						OptionalRequestType.class);
 
+		private SortedMap<Integer, byte[]> extRequestMap;
+
+		@Override
+		public boolean hasOptions() {
+			return !requestMap.isEmpty() ||
+					(extRequestMap == null || !extRequestMap.isEmpty());
+		}
+
+		@Override
+		public void putOptions(OptionalRequest optionalRequest) {
+			optionalRequest.requestMap.putAll(requestMap);
+
+			if (optionalRequest.extRequestMap == null) {
+				optionalRequest.extRequestMap = new TreeMap<Integer, byte[]>();
+			}
+			optionalRequest.extRequestMap.putAll(extRequestMap);
+		}
+
 		public void clear() {
 			requestMap.clear();
+			extRequestMap = null;
 		}
 
 		public void put(OptionalRequestType type, Object value) {
 			requestMap.put(type, type.valueType().cast(value));
 		}
 
+		public void putExt(int type, byte[] value) {
+			if (extRequestMap == null) {
+				extRequestMap = new TreeMap<Integer, byte[]>();
+			}
+			if (type <= RANGE_START_ID || type >= Short.MAX_VALUE) {
+				throw new IllegalArgumentException();
+			}
+			extRequestMap.put(type, value);
+		}
+
 		public void format(BasicBuffer req) {
-			if (requestMap.isEmpty()) {
+			if (!hasOptions()) {
 				req.putInt(0);
 				return;
 			}
+
+			int lastRangeId = 0;
+			int rangeHeadPos = -1;
+			int rangeBodyPos = -1;
 
 			final int headPos = req.base().position();
 			req.putInt(0);
 
 			final int bodyPos = req.base().position();
-			for (Map.Entry<OptionalRequestType, Object> entry :
-					requestMap.entrySet()) {
-				req.putShort((short) (entry.getKey().id()));
+			final OptionalRequestIterator iterator =
+					new OptionalRequestIterator(requestMap, extRequestMap);
+			for (Object value; (value = iterator.next()) != null;) {
+				final int id = iterator.getId();
+				if (id >= RANGE_START_ID) {
+					final int rangeId = id / RANGE_SIZE;
+					if (rangeId != lastRangeId) {
+						if (lastRangeId != 0) {
+							putBodySize(req, rangeHeadPos, rangeBodyPos);
+						}
 
-				final Class<?> valueType = entry.getKey().valueType();
+						req.putShort((short) (rangeId * RANGE_SIZE));
+
+						rangeHeadPos = req.base().position();
+						req.putInt(0);
+						rangeBodyPos = req.base().position();
+
+						lastRangeId = rangeId;
+					}
+				}
+				req.putShort((short) id);
+
+				final Class<?> valueType = iterator.getValueType();
 				if (valueType == Integer.class) {
-					req.putInt((Integer) entry.getValue());
+					req.putInt((Integer) value);
 				}
 				else if (valueType == Long.class) {
-					req.putLong((Long) entry.getValue());
+					req.putLong((Long) value);
 				}
 				else if (valueType == Boolean.class) {
-					req.putBoolean((Boolean) entry.getValue());
+					req.putBoolean((Boolean) value);
 				}
 				else if (valueType == String.class) {
-					req.putString((String) entry.getValue());
+					req.putString((String) value);
 				}
 				else if (valueType == Byte.class) {
-					req.put((Byte) entry.getValue());
+					req.put((Byte) value);
+				}
+				else if (valueType == ClientId.class) {
+					final ClientId clientId = (ClientId) value;
+					req.putUUID(clientId.getUUID());
+					req.putLong(clientId.getSessionId());
+				}
+				else if (valueType == byte[].class) {
+					final byte[] bytes = (byte[]) value;
+					req.prepare(bytes.length);
+					req.base().put(bytes);
 				}
 				else {
 					throw new Error("Internal error by illegal value type");
 				}
 			}
 
+			if (lastRangeId != 0) {
+				putBodySize(req, rangeHeadPos, rangeBodyPos);
+			}
+
+			putBodySize(req, headPos, bodyPos);
+		}
+
+		private static void putBodySize(
+				BasicBuffer req, int headPos, int bodyPos) {
 			final int endPos = req.base().position();
 			req.base().position(headPos);
 			req.putInt(endPos - bodyPos);

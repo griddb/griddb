@@ -16,8 +16,12 @@
 package com.toshiba.mwcloud.gs.common;
 
 import java.lang.reflect.Field;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
+
+import com.toshiba.mwcloud.gs.GSException;
 
 public class GSErrorCode {
 
@@ -136,6 +140,8 @@ public class GSErrorCode {
 
 	private static final Map<Integer, String> NAME_MAP = makeNameMap();
 
+	private static ExceptionAccessor exceptionAccessor;
+
 	public static NullPointerException checkNullParameter(
 			Object parameter, String name, NullPointerException cause) {
 		if (parameter == null) {
@@ -148,6 +154,13 @@ public class GSErrorCode {
 		}
 
 		return cause;
+	}
+
+	@SuppressWarnings("deprecation")
+	public static GSException newGSRecoverableException(
+			int errorCode, String description, Throwable cause) {
+		return new com.toshiba.mwcloud.gs.GSRecoverableException(
+				errorCode, description, cause);
 	}
 
 	private static Map<Integer, String> makeNameMap() {
@@ -168,6 +181,56 @@ public class GSErrorCode {
 
 	public static String getName(int code) {
 		return NAME_MAP.get(code);
+	}
+
+	public static Map<String, String> newParameters() {
+		return newParameters(Collections.<String, String>emptyMap());
+	}
+
+	public static Map<String, String> newParameters(Map<String, String> src) {
+		return new LinkedHashMap<String, String>(src);
+	}
+
+	public static void addParameter(
+			StringBuilder builder, Map<String, String> paremeters,
+			String name, String value, boolean first) {
+		if (!first) {
+			builder.append(", ");
+		}
+		builder.append(name);
+		builder.append("=");
+		builder.append(value);
+		paremeters.put(name, value);
+	}
+
+	public static void setExceptionAccessor(ExceptionAccessor accessor) {
+		if (!accessor.getClass().getEnclosingClass().isAssignableFrom(
+				GSException.class)) {
+			throw new IllegalArgumentException();
+		}
+
+		synchronized (GSErrorCode.class) {
+			exceptionAccessor = accessor;
+		}
+	}
+
+	public static String getDescription(GSException e) {
+		final ExceptionAccessor accessor;
+		synchronized (GSErrorCode.class) {
+			accessor = exceptionAccessor;
+		}
+
+		if (accessor != null) {
+			return accessor.getDescription(e);
+		}
+
+		return null;
+	}
+
+	public static interface ExceptionAccessor {
+
+		public String getDescription(GSException e);
+
 	}
 
 }

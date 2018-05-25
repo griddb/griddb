@@ -15,49 +15,22 @@
 */
 package com.toshiba.mwcloud.gs;
 
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+
 /**
- * Represents the type(s) of field values in GridDB.
+ * NOT NULL indicates the column has no constraint.
+ *
+ * @see Container
  */
-public enum GSType {
-
-	STRING,
-
-	BOOL,
-
-	BYTE,
-
-	SHORT,
-
-	INTEGER,
-
-	LONG,
-
-	FLOAT,
-
-	DOUBLE,
-
-	TIMESTAMP,
-
-	GEOMETRY,
-
-	BLOB,
-
-	STRING_ARRAY,
-
-	BOOL_ARRAY,
-
-	BYTE_ARRAY,
-
-	SHORT_ARRAY,
-
-	INTEGER_ARRAY,
-
-	LONG_ARRAY,
-
-	FLOAT_ARRAY,
-
-	DOUBLE_ARRAY,
-
-	TIMESTAMP_ARRAY
+@Retention(RetentionPolicy.RUNTIME)
+@Target({
+	ElementType.TYPE,
+	ElementType.FIELD,
+	ElementType.METHOD,
+	ElementType.PACKAGE})
+public @interface Nullable {
 
 }

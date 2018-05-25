@@ -37,8 +37,13 @@ public interface RowSet<R> extends Closeable {
 	/**
 	 * Moves the cursor to the next Row in a Row set and returns the Row object at the moved position.
 	 *
+	 * <p>When {@link FetchOption#PARTIAL_EXECUTION} has been set
+	 * to be effective, the continuation of the query execution may
+	 * be executed in this method.</p>
+	 *
 	 * @throws GSException if there is no Row at the cursor position.
 	 * @throws GSException if a connection failure caused an error in creation of a Row object
+	 * @throws GSException when there is a timeout of transaction for this processing or of related processing, the target container has been deleted, its schema has been changed or there is a connection failure.
 	 * @throws GSException if called after this object or the relevant {@link Container} is closed.
 	 */
 	public R next() throws GSException;
@@ -82,6 +87,12 @@ public interface RowSet<R> extends Closeable {
 
 	/**
 	 * Returns the size, namely the number of Rows at the time of creating a Row set.
+	 *
+	 * <p>If {@link FetchOption#PARTIAL_EXECUTION} has been set to
+	 * be effective, the result cannot be obtained despite
+	 * the status of the query processing progress.</p>
+	 *
+	 * @throws IllegalStateException if the number of rows cannot be obtained by the option setting.
 	 */
 	public int size();
 

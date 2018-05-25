@@ -18,8 +18,8 @@ package com.toshiba.mwcloud.gs;
 /**
  * Represents how to specify a Row based on a key timestamp of {@link TimeSeries}</a>.
  *
- * <p>It can be used in combination with the timestamp (specified separately) to specify 
- * a Row with the nearest timestamp etc. When no relevant Row exists, 
+ * <p>It can be used in combination with the timestamp (specified separately) to specify
+ * a Row with the nearest timestamp etc. When no relevant Row exists,
  * it behaves differently depending on the function using this enumeration type.</p>
  */
 public enum TimeOperator {

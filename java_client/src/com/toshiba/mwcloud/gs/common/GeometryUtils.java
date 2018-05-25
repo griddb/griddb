@@ -42,6 +42,8 @@ public class GeometryUtils {
 	
 	private static boolean strictMode = false;
 
+	private static boolean quadraticSurfaceStrict = false;
+
 	private static final int SR_ID_DEFAULT = -1;
 
 	private static final Pattern SR_ID_BASE_PATTERN =
@@ -62,12 +64,12 @@ public class GeometryUtils {
 
 	private static final String NEGATIVE_INFINITY_STRING = "-INF";
 
-	private static final Pattern GEOMETRY_MAIN_PETTERN = Pattern.compile(
+	private static final Pattern GEOMETRY_MAIN_PATTERN = Pattern.compile(
 			"^(\\w+)\\s*" +
 			"(\\(\\s*" + EMPTY_CONTENT + "\\s*\\)\\s*|(.*))" +
 			"$");
 
-	private static final Pattern POINT_PETTERN =
+	private static final Pattern POINT_PATTERN =
 			Pattern.compile("^([^\\s,();]+)\\s+([^\\s,();]+)(\\s+([^\\s,();]+))?$");
 
 	private static final int[] LOWER_PATTERN_LEVELS = { -1, 0, 0, 2, 3 };
@@ -83,18 +85,18 @@ public class GeometryUtils {
 
 		array[0] = base;
 		
-		array[1] = parenthesisePattern(base);
+		array[1] = parenthesizePattern(base);
 		
-		array[2] = parenthesisePattern(repeatPattern(base));
+		array[2] = parenthesizePattern(repeatPattern(base));
 		
-		array[3] = parenthesisePattern(repeatPattern(array[2]));
+		array[3] = parenthesizePattern(repeatPattern(array[2]));
 		
-		array[4] = parenthesisePattern(repeatPattern(array[3]));
+		array[4] = parenthesizePattern(repeatPattern(array[3]));
 
 		POINTS_PATTERN_ARRAY = array;
 	}
 
-	private static Pattern parenthesisePattern(Pattern base) {
+	private static Pattern parenthesizePattern(Pattern base) {
 		return Pattern.compile(
 				"\\(\\s*" + base.pattern() + "\\s*" + SR_ID_PATTERN_STR + "\\)");
 	}
@@ -115,16 +117,18 @@ public class GeometryUtils {
 			
 			"([^\\s,();]+)\\s+([^\\s,();]+)\\s+([^\\s,();]+)\\s+" +
 			
-			"([^\\s,();]+)\\s+" +
+			"([^\\s,();]+)(?:\\s+" +
 			
-			"([^\\s,();]+)\\s+([^\\s,();]+)\\s+([^\\s,();]+)\\s*" +
+			"([^\\s,();]+)\\s+([^\\s,();]+)\\s+([^\\s,();]+))?\\s*" +
 			SR_ID_PATTERN_STR + "\\))");
 
-	private static final int QUADRATICSURFACE_ELEMENT_COUNT = 16;
+	private static final int QUADRATIC_SURFACE_ELEMENT_COUNT = 13;
+
+	private static final int QUADRATIC_SURFACE_EXTRA_ELEMENT_COUNT = 3;
 
 	public static byte[] encodeGeometry(String geometryStr) throws GSException {
 		final Matcher typeMatcher =
-				GEOMETRY_MAIN_PETTERN.matcher(geometryStr);
+				GEOMETRY_MAIN_PATTERN.matcher(geometryStr);
 		if (!typeMatcher.matches()) {
 			throw new GSException(
 					GSErrorCode.ILLEGAL_VALUE_FORMAT,
@@ -275,7 +279,7 @@ public class GeometryUtils {
 			return dimension;
 		}
 		else {
-			final Matcher matcher = POINT_PETTERN.matcher(str);
+			final Matcher matcher = POINT_PATTERN.matcher(str);
 			if (!matcher.find()) {
 				throw new GSException(
 						GSErrorCode.ILLEGAL_VALUE_FORMAT,
@@ -309,6 +313,7 @@ public class GeometryUtils {
 			buffer.put(dimension);
 
 			buffer.putShort(PV3KEY_NONE);
+
 			final Matcher matcher = QUADRATIC_SURFACE.matcher(str);
 			if (!matcher.find()) {
 				throw new GSException(
@@ -316,10 +321,24 @@ public class GeometryUtils {
 						"Illegal format: " + str);
 			}
 
-			final int srId = parseSrId(matcher.group(matcher.groupCount()));
+			final int groupCount = matcher.groupCount();
+			final int srId = parseSrId(matcher.group(groupCount));
 
-			for (int i = 2; i < matcher.groupCount(); i++) {
-				encodeDoubleValue(buffer, matcher.group(i));
+			for (int i = 2; i < groupCount; i++) {
+				final String valueStr = matcher.group(i);
+
+				if (i >= groupCount -
+						QUADRATIC_SURFACE_EXTRA_ELEMENT_COUNT) {
+					if (valueStr != null && quadraticSurfaceStrict) {
+						throw new GSException(
+								GSErrorCode.ILLEGAL_VALUE_FORMAT,
+								"Illegal format: " + str);
+					}
+					buffer.putDouble(0);
+				}
+				else {
+					encodeDoubleValue(buffer, valueStr);
+				}
 			}
 
 			return srId;
@@ -522,11 +541,14 @@ public class GeometryUtils {
 						GSErrorCode.ILLEGAL_PARAMETER,
 						"Illegal pv3key: " + pv3key);
 			}
-			for (int i = 0; i < QUADRATICSURFACE_ELEMENT_COUNT; i++) {
+			for (int i = 0; i < QUADRATIC_SURFACE_ELEMENT_COUNT; i++) {
 				if (i > 0) {
 					out.append(" ");
 				}
 				decodeDoubleValue(out, in.base().getDouble());
+			}
+			for (int i = 0; i < QUADRATIC_SURFACE_EXTRA_ELEMENT_COUNT; i++) {
+				in.base().getDouble();
 			}
 			decodeSrId(out, srId);
 		}
@@ -557,11 +579,11 @@ public class GeometryUtils {
 				valueStr = valueStr.replace("E", "e").replace(".0e", "e");
 			}
 			else if (valueStr.endsWith("0") && valueStr.contains(".")) {
-				int trimingLength = 1;
+				int trimmingLength = 1;
 				if (valueStr.endsWith(".0")) {
-					trimingLength += 1;
+					trimmingLength += 1;
 				}
-				valueStr = valueStr.substring(0, valueStr.length() - trimingLength);
+				valueStr = valueStr.substring(0, valueStr.length() - trimmingLength);
 			}
 		}
 

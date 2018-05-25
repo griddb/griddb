@@ -27,7 +27,7 @@ public interface Row {
 	 * Returns the schema corresponding to the specified Row.
 	 *
 	 * <p>It returns {@link ContainerInfo} in which only the Column layout
-	 * information including the existance of any {@link RowKey} is set, and
+	 * information including the existence of any {@link RowKey} is set, and
 	 * the Container name, the Container type, index settings, and the
 	 * TimeSeries configuration options are not included.</p>
 	 *
@@ -45,7 +45,8 @@ public interface Row {
 	 * @param fieldValue value of the target field
 	 *
 	 * @throws GSException if the specified Column number is out of range.
-	 * @throws GSException if {@code null} is specified as the field value or its element.
+	 * @throws GSException when {@code null} is specified as a field value for a column with a NOT NULL constraint
+	 * @throws GSException if the array element of a field value of array type contains {@code null}
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
 	 */
 	public void setValue(int column, Object fieldValue) throws GSException;
@@ -55,7 +56,7 @@ public interface Row {
 	 *
 	 * @param column the Column number of the target field, from {@code 0} to number of Columns minus one.
 	 *
-	 * @return the value of the target field
+	 * @return the value of the target field. If NULL is set as {@code null}.
 	 *
 	 * @throws GSException if the specified Column number is out of range.
 	 */
@@ -68,7 +69,7 @@ public interface Row {
 	 * @param fieldValue value of the target field
 	 *
 	 * @throws GSException if the specified Column number is out of range.
-	 * @throws GSException if {@code null} is specified as the field value.
+	 * @throws GSException if {@code null} is specified as field value for a column with NOT NULL constraint.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
 	 */
 	public void setString(int column, String fieldValue) throws GSException;
@@ -78,7 +79,7 @@ public interface Row {
 	 *
 	 * @param column the Column number of the target field, from {@code 0} to number of Columns minus one.
 	 *
-	 * @return the value of the target field
+	 * @return the value of the target field. If NULL is set as {@code null}.
 	 *
 	 * @throws GSException if the specified Column number is out of range.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
@@ -101,7 +102,7 @@ public interface Row {
 	 *
 	 * @param column the Column number of the target field, from {@code 0} to number of Columns minus one.
 	 *
-	 * @return the value of the target field
+	 * @return the value of the target field. If NULL is set as empty value.
 	 *
 	 * @throws GSException if the specified Column number is out of range.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
@@ -124,7 +125,7 @@ public interface Row {
 	 *
 	 * @param column the Column number of the target field, from {@code 0} to number of Columns minus one.
 	 *
-	 * @return the value of the target field
+	 * @return the value of the target field. If NULL is set as empty value.
 	 *
 	 * @throws GSException if the specified Column number is out of range.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
@@ -147,7 +148,7 @@ public interface Row {
 	 *
 	 * @param column the Column number of the target field, from {@code 0} to number of Columns minus one.
 	 *
-	 * @return the value of the target field
+	 * @return the value of the target field. If NULL is set as empty value.
 	 *
 	 * @throws GSException if the specified Column number is out of range.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
@@ -170,7 +171,7 @@ public interface Row {
 	 *
 	 * @param column the Column number of the target field, from {@code 0} to number of Columns minus one.
 	 *
-	 * @return the value of the target field
+	 * @return the value of the target field. If NULL is set as empty value.
 	 *
 	 * @throws GSException if the specified Column number is out of range.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
@@ -193,7 +194,7 @@ public interface Row {
 	 *
 	 * @param column the Column number of the target field, from {@code 0} to number of Columns minus one.
 	 *
-	 * @return the value of the target field
+	 * @return the value of the target field. If NULL is set as empty value.
 	 *
 	 * @throws GSException if the specified Column number is out of range.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
@@ -216,7 +217,7 @@ public interface Row {
 	 *
 	 * @param column the Column number of the target field, from {@code 0} to number of Columns minus one.
 	 *
-	 * @return the value of the target field
+	 * @return the value of the target field. If NULL is set as empty value.
 	 *
 	 * @throws GSException if the specified Column number is out of range.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
@@ -239,7 +240,7 @@ public interface Row {
 	 *
 	 * @param column the Column number of the target field, from {@code 0} to number of Columns minus one.
 	 *
-	 * @return the value of the target field
+	 * @return the value of the target field. If NULL is set as empty value.
 	 *
 	 * @throws GSException if the specified Column number is out of range.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
@@ -256,7 +257,7 @@ public interface Row {
 	 * @param fieldValue value of the target field
 	 *
 	 * @throws GSException if the specified Column number is out of range.
-	 * @throws GSException if {@code null} is specified as the field value.
+	 * @throws GSException if {@code null} is specified as the field value for a column with a NOT NULL constraint.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
 	 */
 	public void setTimestamp(int column, Date fieldValue) throws GSException;
@@ -271,7 +272,7 @@ public interface Row {
 	 *
 	 * @param column the Column number of the target field, from {@code 0} to number of Columns minus one.
 	 *
-	 * @return the value of the target field
+	 * @return the value of the target field. If NULL is set as {@code null}.
 	 *
 	 * @throws GSException if the specified Column number is out of range.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
@@ -285,7 +286,7 @@ public interface Row {
 	 * @param fieldValue value of the target field
 	 *
 	 * @throws GSException if the specified Column number is out of range.
-	 * @throws GSException if {@code null} is specified as the field value.
+	 * @throws GSException if {@code null} is specified as the field value for a column with a NOT NULL constraint.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
 	 */
 	public void setGeometry(
@@ -296,7 +297,7 @@ public interface Row {
 	 *
 	 * @param column the Column number of the target field, from {@code 0} to number of Columns minus one.
 	 *
-	 * @return the value of the target field
+	 * @return the value of the target field. If NULL is set as {@code null}.
 	 *
 	 * @throws GSException if the specified Column number is out of range.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
@@ -313,7 +314,7 @@ public interface Row {
 	 * @param fieldValue value of the target field
 	 *
 	 * @throws GSException if the specified Column number is out of range.
-	 * @throws GSException if {@code null} is specified as the field value.
+	 * @throws GSException if {@code null} is specified as the field value for a column with a NOT NULL constraint.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
 	 */
 	public void setBlob(int column, Blob fieldValue) throws GSException;
@@ -328,7 +329,7 @@ public interface Row {
 	 *
 	 * @param column the Column number of the target field, from {@code 0} to number of Columns minus one.
 	 *
-	 * @return the value of the target field
+	 * @return the value of the target field. If NULL is set as {@code null}.
 	 *
 	 * @throws GSException if the specified Column number is out of range.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
@@ -345,7 +346,8 @@ public interface Row {
 	 * @param fieldValue value of the target field
 	 *
 	 * @throws GSException if the specified Column number is out of range.
-	 * @throws GSException if {@code null} is specified as the field value or its element.
+	 * @throws GSException if {@code null} is specified as the field value for a column with a NOT NULL constraint.
+	 * @throws GSException if the array element of a field value of array type contains {@code null}
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
 	 */
 	public void setStringArray(
@@ -361,7 +363,7 @@ public interface Row {
 	 *
 	 * @param column the Column number of the target field, from {@code 0} to number of Columns minus one.
 	 *
-	 * @return the value of the target field
+	 * @return the value of the target field. If NULL is set as {@code null}.
 	 *
 	 * @throws GSException if the specified Column number is out of range.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
@@ -379,7 +381,7 @@ public interface Row {
 	 * @param fieldValue value of the target field
 	 *
 	 * @throws GSException if the specified Column number is out of range.
-	 * @throws GSException if {@code null} is specified as the field value.
+	 * @throws GSException if {@code null} is specified as the field value for a column with a NOT NULL constraint.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
 	 */
 	public void setBoolArray(
@@ -395,7 +397,7 @@ public interface Row {
 	 *
 	 * @param column the Column number of the target field, from {@code 0} to number of Columns minus one.
 	 *
-	 * @return the value of the target field
+	 * @return the value of the target field. If NULL is set as {@code null}.
 	 *
 	 * @throws GSException if the specified Column number is out of range.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
@@ -412,7 +414,7 @@ public interface Row {
 	 * @param fieldValue value of the target field
 	 *
 	 * @throws GSException if the specified Column number is out of range.
-	 * @throws GSException if {@code null} is specified as the field value.
+	 * @throws GSException if {@code null} is specified as the field value for a column with a NOT NULL constraint.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
 	 */
 	public void setByteArray(
@@ -428,7 +430,7 @@ public interface Row {
 	 *
 	 * @param column the Column number of the target field, from {@code 0} to number of Columns minus one.
 	 *
-	 * @return the value of the target field
+	 * @return the value of the target field. If NULL is set as {@code null}.
 	 *
 	 * @throws GSException if the specified Column number is out of range.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
@@ -445,7 +447,7 @@ public interface Row {
 	 * @param fieldValue value of the target field
 	 *
 	 * @throws GSException if the specified Column number is out of range.
-	 * @throws GSException if {@code null} is specified as the field value.
+	 * @throws GSException if {@code null} is specified as the field value for a column with a NOT NULL constraint.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
 	 */
 	public void setShortArray(
@@ -461,7 +463,7 @@ public interface Row {
 	 *
 	 * @param column the Column number of the target field, from {@code 0} to number of Columns minus one.
 	 *
-	 * @return the value of the target field
+	 * @return the value of the target field. If NULL is set as {@code null}.
 	 *
 	 * @throws GSException if the specified Column number is out of range.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
@@ -478,7 +480,7 @@ public interface Row {
 	 * @param fieldValue value of the target field
 	 *
 	 * @throws GSException if the specified Column number is out of range.
-	 * @throws GSException if {@code null} is specified as the field value.
+	 * @throws GSException if {@code null} is specified as the field value for a column with a NOT NULL constraint.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
 	 */
 	public void setIntegerArray(
@@ -494,7 +496,7 @@ public interface Row {
 	 *
 	 * @param column the Column number of the target field, from {@code 0} to number of Columns minus one.
 	 *
-	 * @return the value of the target field
+	 * @return the value of the target field. If NULL is set as {@code null}.
 	 *
 	 * @throws GSException if the specified Column number is out of range.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
@@ -511,7 +513,7 @@ public interface Row {
 	 * @param fieldValue value of the target field
 	 *
 	 * @throws GSException if the specified Column number is out of range.
-	 * @throws GSException if {@code null} is specified as the field value.
+	 * @throws GSException if {@code null} is specified as the field value for a column with a NOT NULL constraint.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
 	 */
 	public void setLongArray(
@@ -527,7 +529,7 @@ public interface Row {
 	 *
 	 * @param column the Column number of the target field, from {@code 0} to number of Columns minus one.
 	 *
-	 * @return the value of the target field
+	 * @return the value of the target field. If NULL is set as {@code null}.
 	 *
 	 * @throws GSException if the specified Column number is out of range.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
@@ -544,7 +546,7 @@ public interface Row {
 	 * @param fieldValue value of the target field
 	 *
 	 * @throws GSException if the specified Column number is out of range.
-	 * @throws GSException if {@code null} is specified as the field value.
+	 * @throws GSException if {@code null} is specified as the field value for a column with a NOT NULL constraint.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
 	 */
 	public void setFloatArray(
@@ -560,7 +562,7 @@ public interface Row {
 	 *
 	 * @param column the Column number of the target field, from {@code 0} to number of Columns minus one.
 	 *
-	 * @return the value of the target field
+	 * @return the value of the target field. If NULL is set as {@code null}.
 	 *
 	 * @throws GSException if the specified Column number is out of range.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
@@ -577,7 +579,7 @@ public interface Row {
 	 * @param fieldValue value of the target field
 	 *
 	 * @throws GSException if the specified Column number is out of range.
-	 * @throws GSException if {@code null} is specified as the field value.
+	 * @throws GSException if {@code null} is specified as the field value for a column with a NOT NULL constraint.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
 	 */
 	public void setDoubleArray(
@@ -593,7 +595,7 @@ public interface Row {
 	 *
 	 * @param column the Column number of the target field, from {@code 0} to number of Columns minus one.
 	 *
-	 * @return the value of the target field
+	 * @return the value of the target field. If NULL is set as {@code null}.
 	 *
 	 * @throws GSException if the specified Column number is out of range.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
@@ -610,7 +612,8 @@ public interface Row {
 	 * @param fieldValue value of the target field
 	 *
 	 * @throws GSException if the specified Column number is out of range.
-	 * @throws GSException if {@code null} is specified as the field value or its element.
+	 * @throws GSException if {@code null} is specified as the field value for a column with a NOT NULL constraint.
+	 * @throws GSException if the array element of a field value of array type contains {@code null}
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
 	 */
 	public void setTimestampArray(
@@ -630,11 +633,36 @@ public interface Row {
 	 *
 	 * @param column the Column number of the target field, from {@code 0} to number of Columns minus one.
 	 *
-	 * @return the value of the target field
+	 * @return the value of the target field. If NULL is set as {@code null}.
 	 *
 	 * @throws GSException if the specified Column number is out of range.
 	 * @throws GSException if the type of the specified field does not match the type of the Column.
 	 */
 	public Date[] getTimestampArray(int column) throws GSException;
+
+	/**
+	 * Set the field to NULL.
+	 *
+	 * @param column Column number of the targeted field. Values greater than {@code 0} and less than the number of columns
+	 *
+	 * @throws GSException when a column number outside the range is specified
+	 * @throws GSException when a column with NOT NULL constraint is specified
+	 *
+	 */
+	public void setNull(int column) throws GSException;
+
+	/**
+	 * Returns to the specified field regardless it is set to NULL or not.
+	 *
+	 * <p>Whenever a column with the NOT NULL constraint is specified, returns {@code false}.</p>
+	 *
+	 * @param column Column number of target field. Values greater than {@code 0} and less than the number of columns
+	 *
+	 * @return regardless the specified field is set to NULL or not
+	 *
+	 * @throws GSException when a column number outside the range is specified
+	 *
+	 */
+	public boolean isNull(int column) throws GSException;
 
 }

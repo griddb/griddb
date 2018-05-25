@@ -205,6 +205,7 @@ public class RowKeyPredicate<K> {
 	 *
 	 * @throws GSException if a range condition had already been set
 	 * @throws ClassCastException the value of the specified key is not NULL or the type is not supported as {@link RowKey}
+	 * @throws NullPointerException when {@code null} is specified as an argument
 	 */
 	public void add(K key) throws GSException {
 		if (start != null || finish != null) {

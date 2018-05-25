@@ -36,6 +36,52 @@ public enum FetchOption {
 	 * @deprecated
 	 */
 	@Deprecated
-	SIZE
+	SIZE,
+
+	/**
+	 * Used to set the partial execution mode.
+	 *
+	 * <p>In the partial execution mode, it is trying for the
+	 * buffer size of the intermediate query processing and the
+	 * data transfer, etc. to fit inside a fixed size by dividing
+	 * the target data and getting the query results in each
+	 * divided range. Therefore the results for some data ranges may
+	 * not be determined when the {@link RowSet} is obtained,
+	 * and in the middle of getting the results,
+	 * there are the cases that the query is executed partially
+	 * for the rest of the ranges.</p>
+	 *
+	 * <p>In this version, the partial execution mode can be used
+	 * for queries satisfying all the following conditions.
+	 * And it can be used in combination with {@link #LIMIT}
+	 * option. Even if not satisfying the conditions, the error may
+	 * not be detected when setting the fetch option.</p>
+	 * <ul>
+	 * <li>The query must be specified by TQL</li>
+	 * <li>The SELECT clause must be consisted of only '*' and an
+	 * ORDER BY clause must not be specified.</li>
+	 * <li>The target {@link Container} must have been set to the
+	 * auto commit mode at the each partial execution of the
+	 * query.</li>
+	 * </ul>
+	 *
+	 * <p>In the partial execution mode, rows that can be fetched
+	 * at the each partial execution of the query based on the
+	 * separation level and the status of the corresponding
+	 * {@link Container} transaction are used. However rows that
+	 * don't exist at the first time of the whole query execution
+	 * may not be reflected to the results.</p>
+	 *
+	 * <p>For inhibited operations and behaviors on {@link RowSet}
+	 * in this mode, see the individual definitions.</p>
+	 *
+	 * <p>The only supported type for this setting is {@link Boolean}.
+	 * The value matching to {@link Boolean#TRUE} must
+	 * be specified to activate this mode. In this version, the
+	 * partial execution mode is not effective unless setting the
+	 * mode explicitly.</p>
+	 *
+	 */
+	PARTIAL_EXECUTION
 
 }

@@ -25,11 +25,16 @@ public class ExtendedContainerInfo extends ContainerInfo {
 
 	private ContainerAttribute attribute;
 
-	public ExtendedContainerInfo(String name, ContainerType type,
+	public ExtendedContainerInfo(
+			String name, ContainerType type,
 			List<ColumnInfo> columnInfoList, boolean rowKeyAssigned,
 			ContainerAttribute attribute) {
 		super(name, type, columnInfoList, rowKeyAssigned);
 		this.attribute = attribute;
+	}
+
+	public ExtendedContainerInfo(ContainerInfo info) {
+		super(info);
 	}
 
 	public ExtendedContainerInfo() {

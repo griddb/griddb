@@ -47,7 +47,7 @@ public interface PartitionController extends Closeable {
 	 * <p>The calculated quantity when determining the number of containers is generally not dependent
 	 * on the number of containers.</p>
 	 *
-	 * @param partitionIndex Partition index.  A value of {@code 0} or above and less than the number of partitions.
+	 * @param partitionIndex Partition index. A value of {@code 0} or above and less than the number of partitions.
 	 *
 	 * @return Number of containers
 	 *
@@ -75,7 +75,7 @@ public interface PartitionController extends Closeable {
 	 * <p>When a returned list is updated, whether an exception will occur or not
 	 * when {@link UnsupportedOperationException}, etc. is executed is still not defined.</p>
 	 *
-	 * @param partitionIndex Partition index.  A value of {@code 0} or above and less than the number of partitions.
+	 * @param partitionIndex Partition index. A value of {@code 0} or above and less than the number of partitions.
 	 * @param start Start position of the acquisition range. A value of {@code 0} and above
 	 * @param limit Upper limit of the number of cases acquired. If {@code null}, no upper limit is assumed
 	 *
@@ -96,7 +96,7 @@ public interface PartitionController extends Closeable {
 	 * <p>When a returned list is updated, whether an exception will occur or not
 	 * when {@link UnsupportedOperationException}, etc. is executed is still not defined.</p>
 	 *
-	 * @param partitionIndex Partition index.  A value of {@code 0} or above and less than the number of partitions.
+	 * @param partitionIndex Partition index. A value of {@code 0} or above and less than the number of partitions.
 	 *
 	 * @return Assuming {@link InetAddress}, which represents the address of the node, as a component, {@link List}
 	 *
@@ -112,7 +112,7 @@ public interface PartitionController extends Closeable {
 	 * <p>An owner node is a node that is always selected when {@code "IMMEDIATE"} is specified as a consistency level
 	 * in {@link GridStoreFactory#getGridStore(java.util.Properties)}.</p>
 	 *
-	 * @param partitionIndex Partition index.  A value of {@code 0} or above and less than the number of partitions.
+	 * @param partitionIndex Partition index. A value of {@code 0} or above and less than the number of partitions.
 	 *
 	 * @return Represents the address of the owner node {@link InetAddress}
 	 *
@@ -133,7 +133,7 @@ public interface PartitionController extends Closeable {
 	 * <p>When a returned list is updated, whether an exception will occur or not
 	 * when {@link UnsupportedOperationException}, etc. is executed is still not defined.</p>
 	 *
-	 * @param partitionIndex Partition index.  A value of {@code 0} or above and less than the number of partitions.
+	 * @param partitionIndex Partition index. A value of {@code 0} or above and less than the number of partitions.
 	 *
 	 * @return Assuming {@link InetAddress}, which represents the address of the backup node,
 	 * as a component, {@link List}
@@ -152,9 +152,9 @@ public interface PartitionController extends Closeable {
 	 * the address set will always be selected if it is included in the candidate destination.
 	 * The setting is ignored otherwise.</p>
 	 *
-	 * @param partitionIndex Partition index.  A value of {@code 0} or above and less than the number of partitions.
+	 * @param partitionIndex Partition index. A value of {@code 0} or above and less than the number of partitions.
 	 *
-	 * @param host Address of the host to be prioritized in the selection. 
+	 * @param host Address of the host to be prioritized in the selection.
 	 * For {@code null}, the setting is cancelled
 	 *
 	 * @throws GSException If a partition index outside the range is specified

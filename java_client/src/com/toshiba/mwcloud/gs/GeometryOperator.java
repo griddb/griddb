@@ -16,12 +16,21 @@
 package com.toshiba.mwcloud.gs;
 
 /**
- * Not supported
+ * Represents the constraints regarding relationship between each two spatial
+ * ranges.
+ *
+ * <p>It is used to specify the conditions to spatial range query.</p>
  */
 public enum GeometryOperator {
 
 	/**
-	 * Not supported
+	 * Represents that each spatial ranges or their bounding volume are
+	 * intersected.
+	 *
+	 * <p>Represents that each MBBs (Minimum Bounding Box) or MBB and quadric
+	 * surface are intersected.
+	 * The conditions for determination of the intersections are the same as
+	 * {@code ST_MBRIntersects} or {@code ST_QSFMBRIntersects} in TQL.</p>
 	 */
 	INTERSECT
 

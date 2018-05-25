@@ -15,17 +15,29 @@
 */
 package com.toshiba.mwcloud.gs.subnet;
 
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+
 import com.toshiba.mwcloud.gs.FetchOption;
 import com.toshiba.mwcloud.gs.GSException;
 import com.toshiba.mwcloud.gs.Query;
 import com.toshiba.mwcloud.gs.RowSet;
 import com.toshiba.mwcloud.gs.common.BasicBuffer;
+import com.toshiba.mwcloud.gs.common.Extensibles;
 import com.toshiba.mwcloud.gs.common.GSErrorCode;
 import com.toshiba.mwcloud.gs.common.RowMapper;
 import com.toshiba.mwcloud.gs.common.Statement;
+import com.toshiba.mwcloud.gs.experimental.Experimentals;
+import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequest;
+import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequestSource;
+import com.toshiba.mwcloud.gs.subnet.SubnetContainer.PartialExecutionStatus;
 import com.toshiba.mwcloud.gs.subnet.SubnetContainer.QueryFormatter;
 
-public class SubnetQuery<R> implements Query<R>, QueryFormatter {
+public class SubnetQuery<R>
+implements Query<R>, Extensibles.AsQuery<R>, Experimentals.AsQuery<R> {
 
 	private final SubnetContainer<?, ?> container;
 
@@ -33,28 +45,22 @@ public class SubnetQuery<R> implements Query<R>, QueryFormatter {
 
 	private final RowMapper mapper;
 
-	private final Statement statement;
-
 	private final QueryFormatter formatter;
 
-	private long fetchLimit = Long.MAX_VALUE;
-
-	private long fetchSize = Long.MAX_VALUE;
+	private QueryParameters parameters;
 
 	private SubnetRowSet<R> lastRowSet;
-
-	private boolean forUpdate;
 
 	private boolean lastRowSetVisible;
 
 	private boolean closed;
 
-	public SubnetQuery(SubnetContainer<?, ?> container, Class<R> resultType,
-			RowMapper mapper, Statement statement, QueryFormatter formatter) {
+	public SubnetQuery(
+			SubnetContainer<?, ?> container, Class<R> resultType,
+			RowMapper mapper, QueryFormatter formatter) {
 		this.container = container;
 		this.resultType = resultType;
 		this.mapper = mapper;
-		this.statement = statement;
 		this.formatter = formatter;
 	}
 
@@ -63,7 +69,7 @@ public class SubnetQuery<R> implements Query<R>, QueryFormatter {
 	}
 
 	Statement getStatement() {
-		return statement;
+		return formatter.getStatement();
 	}
 
 	private void checkOpened() throws GSException {
@@ -90,51 +96,63 @@ public class SubnetQuery<R> implements Query<R>, QueryFormatter {
 			throw GSErrorCode.checkNullParameter(value, "value", null);
 		}
 
-		final long longValue;
+		parameters = QueryParameters.resolve(parameters);
 		switch (option) {
 		case LIMIT:
-			if (value instanceof Integer) {
-				longValue = (long) (Integer) value;
-			}
-			else if (value instanceof Long) {
-				longValue = (Long) value;
-			}
-			else {
-				throw new GSException(
-						GSErrorCode.UNSUPPORTED_FIELD_TYPE,
-						"Unsupported limit value type " +
-						"(class=" + value.getClass() + ")");
-			}
-			if (longValue < 0) {
-				throw new GSException(
-						GSErrorCode.ILLEGAL_PARAMETER,
-						"Unsupported limit value (value=" + value + ")");
-			}
-			fetchLimit = longValue;
+			parameters.setFetchLimit(filterSizedFetchOption(option, value));
 			break;
 		case SIZE:
-			if (value instanceof Integer) {
-				longValue = (long) (Integer) value;
-			}
-			else if (value instanceof Long) {
-				longValue = (Long) value;
-			}
-			else {
-				throw new GSException(
-						GSErrorCode.UNSUPPORTED_FIELD_TYPE,
-						"Unsupported size value type " +
-						"(class=" + value.getClass() + ")");
-			}
-			if (longValue < 0) {
-				throw new GSException(
-						GSErrorCode.ILLEGAL_PARAMETER,
-						"Unsupported size value (value=" + value + ")");
-			}
-			fetchSize = longValue;
+			parameters.setFetchSize(filterSizedFetchOption(option, value));
+			break;
+		case PARTIAL_EXECUTION:
+			parameters.setPartialExecutionEnabled(
+					filterFetchOption(option, value, Boolean.class, true));
 			break;
 		default:
-			throw new InternalError();
+			throw new Error();
 		}
+	}
+
+	private static long filterSizedFetchOption(
+			FetchOption option, Object value) throws GSException {
+		final Integer intValue =
+				filterFetchOption(option, value, Integer.class, false);
+
+		final long longValue;
+		if (intValue == null) {
+			longValue = filterFetchOption(option, value, Long.class, true);
+		}
+		else {
+			longValue = (int) intValue;
+		}
+
+		if (longValue < 0) {
+			throw new GSException(
+					GSErrorCode.ILLEGAL_PARAMETER,
+					"Negative fetch option value specified " +
+					"(option=" + option +
+					", value=" + longValue + ")");
+		}
+
+		return longValue;
+	}
+
+	private static <T> T filterFetchOption(
+			FetchOption option, Object value, Class<T> type,
+			boolean force) throws GSException {
+		if (!type.isInstance(value)) {
+			if (!force) {
+				return null;
+			}
+			throw new GSException(
+					GSErrorCode.UNSUPPORTED_FIELD_TYPE,
+					"Unsupported fetch option value type " +
+					"(option=" + option +
+					", value=" + value +
+					", valueClass=" + value.getClass() + ")");
+		}
+
+		return type.cast(value);
 	}
 
 	@Override
@@ -158,36 +176,28 @@ public class SubnetQuery<R> implements Query<R>, QueryFormatter {
 		checkOpened();
 		clearLastRowSet();
 
-		lastRowSet = container.queryAndFetch(
-				statement, resultType, mapper, this,
-				this.forUpdate || forUpdate, fetchSize);
-		lastRowSetVisible = true;
+		final SubnetRowSet<R> rowSet = container.queryAndFetch(
+				resultType, mapper, formatter, parameters,
+				QueryParameters.isForUpdate(parameters, forUpdate));
+
+		if (rowSet != null) {
+			rowSet.prepareFollowing();
+			lastRowSet = rowSet;
+			lastRowSetVisible = true;
+		}
 
 		return lastRowSet;
 	}
 
 	@Override
-	public void format(BasicBuffer inBuf) throws GSException {
-		inBuf.putLong(fetchLimit);
-		if (isFetchSizeEnabled(NodeConnection.getProtocolVersion())) {
-			inBuf.putLong(fetchSize);
-		}
-		formatter.format(inBuf);
-	}
-
-	@Override
-	public String getQueryString() {
-		return formatter.getQueryString();
-	}
-
-	@Override
-	public RowSet<R> getRowSet() throws GSException {
+	public SubnetRowSet<R> getRowSet() throws GSException {
 		checkOpened();
 
 		if (!lastRowSetVisible) {
 			return null;
 		}
 
+		lastRowSet.prepareFollowing();
 		lastRowSetVisible = false;
 
 		return lastRowSet;
@@ -202,7 +212,7 @@ public class SubnetQuery<R> implements Query<R>, QueryFormatter {
 			return;
 		}
 
-		if (!GridStoreChannel.v10ResourceCompatible || rowSet.isPartial()) {
+		if (!GridStoreChannel.v10ResourceCompatible) {
 			rowSet.close();
 		}
 	}
@@ -213,24 +223,30 @@ public class SubnetQuery<R> implements Query<R>, QueryFormatter {
 				!GridStoreChannel.v1ProtocolCompatible));
 	}
 
-	public long getFetchLimit() {
-		return fetchLimit;
+	public long getFetchLimit() throws GSException {
+		checkOpened();
+		return QueryParameters.get(parameters).fetchLimit;
 	}
 
-	public void setForUpdate(boolean forUpdate) {
-		this.forUpdate = forUpdate;
+	void setForUpdate(boolean forUpdate) {
+		if (forUpdate != QueryParameters.get(parameters).forUpdate) {
+			parameters = QueryParameters.resolve(parameters);
+			parameters.forUpdate = forUpdate;
+		}
 	}
 
-	public boolean isForUpdate() {
-		return forUpdate;
+	boolean isForUpdate() {
+		return QueryParameters.isForUpdate(parameters, false);
 	}
 
 	void makeRequest(BasicBuffer req, boolean noUUID) throws GSException {
 		checkOpened();
 		clearLastRowSet();
 
+		final boolean forUpdate =
+				QueryParameters.isForUpdate(parameters, false);
 		container.makeQueryRequest(
-				statement, this, forUpdate, fetchSize, req, noUUID);
+				formatter, parameters, forUpdate, req, noUUID);
 	}
 
 	void acceptResponse(
@@ -238,10 +254,273 @@ public class SubnetQuery<R> implements Query<R>, QueryFormatter {
 			boolean bufSwapAllowed) throws GSException {
 		clearLastRowSet();
 
-		lastRowSet = container.acceptQueryResponse(
-				statement, resultType, mapper, forUpdate, fetchSize, resp,
+		final boolean forUpdate =
+				QueryParameters.isForUpdate(parameters, false);
+		final SubnetRowSet<R> rowSet = container.acceptQueryResponse(
+				resultType, mapper, formatter, parameters, forUpdate, resp,
 				targetConnection, bufSwapAllowed);
-		lastRowSetVisible = true;
+
+		if (rowSet != null) {
+			lastRowSet = rowSet;
+			lastRowSetVisible = true;
+		}
+	}
+
+	@Override
+	public void applyOptionsTo(
+			Extensibles.AsQuery<?> dest) throws GSException {
+		checkOpened();
+		if (parameters == null) {
+			return;
+		}
+		parameters.applyOptionsTo(dest);
+	}
+
+	@Override
+	public void setExtOption(
+			int key, byte[] value, boolean followingInheritable)
+			throws GSException {
+		checkOpened();
+		parameters = QueryParameters.resolve(parameters);
+		parameters.setExtOption(key, value, followingInheritable);
+	}
+
+	@Override
+	public void setAcceptableResultKeys(Set<Integer> keys)
+			throws GSException {
+		checkOpened();
+		parameters = QueryParameters.resolve(parameters);
+		parameters.acceptableResultKeys = keys;
+	}
+
+	@Override
+	public void setContainerLostAcceptable(boolean acceptable)
+			throws GSException {
+		checkOpened();
+		parameters = QueryParameters.resolve(parameters);
+		parameters.containerLostAcceptable = acceptable;
+	}
+
+	static class QueryParameters implements OptionalRequestSource {
+
+		private static final QueryParameters DEFAULT_INSTANCE =
+				new QueryParameters();
+
+		private static final long DEFAULT_SIZE_OPTION_VALUE = Long.MAX_VALUE;
+
+		long fetchLimit = DEFAULT_SIZE_OPTION_VALUE;
+
+		long fetchSize = DEFAULT_SIZE_OPTION_VALUE;
+
+		PartialExecutionStatus executionStatus =
+				PartialExecutionStatus.DISABLED;
+
+		boolean executionPartial;
+
+		boolean containerLostAcceptable;
+
+		boolean forUpdate;
+
+		Long initialTransactionId;
+
+		Map<Integer, byte[]> extOptions;
+
+		Set<Integer> inheritableOptionKeys;
+
+		Set<Integer> acceptableResultKeys = Collections.emptySet();
+
+		QueryParameters() {
+		}
+
+		QueryParameters(QueryParameters src) {
+			this.fetchLimit = src.fetchLimit;
+			this.fetchSize = src.fetchSize;
+			this.executionStatus = src.executionStatus;
+			this.executionPartial = src.executionPartial;
+			this.containerLostAcceptable = src.containerLostAcceptable;
+
+			this.forUpdate = src.forUpdate;
+			this.initialTransactionId = src.initialTransactionId;
+
+			if (src.extOptions != null) {
+				this.extOptions = new HashMap<Integer, byte[]>(src.extOptions);
+			}
+			if (src.inheritableOptionKeys != null) {
+				this.inheritableOptionKeys =
+						new HashSet<Integer>(src.inheritableOptionKeys);
+			}
+			this.acceptableResultKeys = src.acceptableResultKeys;
+		}
+
+		@Override
+		public boolean hasOptions() {
+			return extOptions != null;
+		}
+
+		@Override
+		public void putOptions(OptionalRequest optionalRequest) {
+			if (extOptions == null) {
+				return;
+			}
+			for (Map.Entry<Integer, byte[]> entry : extOptions.entrySet()) {
+				optionalRequest.putExt(entry.getKey(), entry.getValue());
+			}
+		}
+
+		public void applyOptionsTo(
+				Extensibles.AsQuery<?> dest) throws GSException {
+			if (fetchLimit != DEFAULT_SIZE_OPTION_VALUE) {
+				dest.setFetchOption(FetchOption.LIMIT, fetchLimit);
+			}
+			if (fetchSize != DEFAULT_SIZE_OPTION_VALUE) {
+				@SuppressWarnings("deprecation")
+				final FetchOption option = FetchOption.SIZE;
+				dest.setFetchOption(option, fetchSize);
+			}
+			if (isPartialExecutionConfigured()) {
+				dest.setFetchOption(FetchOption.PARTIAL_EXECUTION, true);
+			}
+			if (containerLostAcceptable) {
+				dest.setContainerLostAcceptable(true);
+			}
+			if (extOptions != null) {
+				for (Map.Entry<Integer, byte[]> entry :
+						extOptions.entrySet()) {
+					final Integer key = entry.getKey();
+					final boolean inheritable =
+							(inheritableOptionKeys != null &&
+							inheritableOptionKeys.contains(key));
+					dest.setExtOption(key, entry.getValue(), inheritable);
+				}
+			}
+			if (acceptableResultKeys != null) {
+				dest.setAcceptableResultKeys(acceptableResultKeys);
+			}
+		}
+
+		void putFixed(BasicBuffer out) {
+			out.putLong(fetchLimit);
+			if (isFetchSizeEnabled(NodeConnection.getProtocolVersion())) {
+				out.putLong(fetchSize);
+			}
+			if (SubnetGridStore.isQueryOptionsExtensible()) {
+				executionStatus.put(out);
+			}
+		}
+
+		void setFetchLimit(long fetchLimit) throws GSException {
+			this.fetchLimit = fetchLimit;
+		}
+
+		void setFetchSize(long fetchSize) throws GSException {
+			checkPartialOptions(fetchSize, executionStatus);
+			this.fetchSize = fetchSize;
+		}
+
+		void setPartialExecutionEnabled(boolean enabled) throws GSException {
+			final PartialExecutionStatus executionStatus = (enabled ?
+					PartialExecutionStatus.ENABLED_INITIAL :
+					PartialExecutionStatus.DISABLED);
+
+			checkPartialOptions(fetchSize, executionStatus);
+			this.executionStatus = executionStatus;
+			this.executionPartial = enabled;
+		}
+
+		boolean isPartialExecutionConfigured() {
+			return executionPartial;
+		}
+
+		void setExtOption(
+				int key, byte[] value, boolean followingInheritable)
+				throws GSException {
+			if (extOptions == null) {
+				extOptions = new HashMap<Integer, byte[]>();
+			}
+			extOptions.put(key, value);
+
+			if (followingInheritable) {
+				if (inheritableOptionKeys == null) {
+					inheritableOptionKeys = new HashSet<Integer>();
+				}
+				inheritableOptionKeys.add(key);
+			}
+		}
+
+		void checkResultType(int type) throws GSException {
+			if (!acceptableResultKeys.contains(type)) {
+				throw new GSException(
+						GSErrorCode.MESSAGE_CORRUPTED,
+						"Protocol error by unexpected query result type (" +
+						"type=" + type + ")");
+			}
+		}
+
+		static void checkPartialOptions(
+				long fetchSize, PartialExecutionStatus executionStatus)
+				throws GSException {
+			if (isPartialFetch(fetchSize) && executionStatus.isEnabled()) {
+				throw new GSException(
+						GSErrorCode.ILLEGAL_PARAMETER,
+						"Partial fetch and partial execution " +
+						"cannot be enabled at the same time");
+			}
+		}
+
+		static boolean isPartialFetch(long fetchSize) {
+			return fetchSize != DEFAULT_SIZE_OPTION_VALUE;
+		}
+
+		static boolean isForUpdate(QueryParameters src, boolean forUpdate) {
+			return get(src).forUpdate || forUpdate;
+		}
+
+		static long resolveInitialTransactionId(QueryParameters src) {
+			final Long transactionId = findInitialTransactionId(src);
+			return (transactionId == null ? 0 : transactionId);
+		}
+
+		static Long findInitialTransactionId(QueryParameters src) {
+			return get(src).initialTransactionId;
+		}
+
+		static QueryParameters get(QueryParameters src) {
+			return (src == null ? DEFAULT_INSTANCE : src);
+		}
+
+		static QueryParameters resolve(QueryParameters src) {
+			return (src == null ? new QueryParameters() : src);
+		}
+
+		static QueryParameters inherit(
+				QueryParameters src, boolean forUpdate, long transactionId,
+				PartialExecutionStatus executionStatus) throws GSException {
+			if (src == null && !forUpdate && transactionId == 0 &&
+					!PartialExecutionStatus.isEnabled(executionStatus)) {
+				return null;
+			}
+
+			final QueryParameters dest = (src == null ?
+					new QueryParameters() : new QueryParameters(src));
+
+			dest.forUpdate = isForUpdate(src, forUpdate);
+			if (dest.initialTransactionId != null &&
+					dest.initialTransactionId != transactionId) {
+				throw new Error();
+			}
+			dest.initialTransactionId = transactionId;
+
+			dest.executionStatus = PartialExecutionStatus.inherit(
+					dest.executionStatus, executionStatus);
+
+			if (src != null && src.extOptions != null &&
+					dest.inheritableOptionKeys != null) {
+				dest.extOptions.keySet().retainAll(dest.inheritableOptionKeys);
+			}
+
+			return dest;
+		}
+
 	}
 
 }
