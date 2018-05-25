@@ -27,7 +27,7 @@ def getPort(nodeconf):
 util.install_sigint_handler()
 (homedir,logdir) = util.get_required_env()
 
-parser = OptionParser(usage="%prog [-w [WAIT_TIME] -u USER/PASS]",
+parser = OptionParser(usage="%prog [-w [WAIT_TIME] -u USER/PASS] [--releaseUnusedFileBlocks]",
                       description=u"Starts a node.",
 			version="%prog [V2.8.00]")
 
@@ -37,6 +37,8 @@ parser.remove_option("--port")
 parser.add_option("-w", "--wait", action='callback', callback=\
 					util.optional_arg(0), dest="wait_time",default=None,
                   help=u"wait for a while until it starts")
+parser.add_option("--releaseUnusedFileBlocks", dest="release_unused_file_blocks",
+                  action="store_true", default=False, help=u"Deallocate unused file blocks.")
 parser.set_defaults(checkPort=None)
 parser.add_option("--checkPort", dest="checkPort", help=SUPPRESS_HELP)
 (options, args) = parser.parse_args()
@@ -103,6 +105,9 @@ gsserver = os.path.join(bindir, "gsserver")
 
 
 command = [gsserver, "--conf", confdir]
+
+if options.release_unused_file_blocks:
+	command.append("--release-unused-file-blocks")
 
 log.debug("command: %s" % command)
 
