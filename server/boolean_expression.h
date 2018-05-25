@@ -31,6 +31,7 @@
 class Expr;
 class QueryForCollection;
 class QueryForTimeSeries;
+
 /*!
  * @brief  Boolean expression (treated as special case.
  *         since we need to expand one expression into DNF
@@ -50,12 +51,13 @@ public:
 	BoolExpr(Operation t, BoolTerms &terms, TransactionContext &txn);
 	BoolExpr(Operation t, TransactionContext &txn, int size, ...);
 	BoolExpr(bool b, TransactionContext &txn);
+	BoolExpr(TrivalentLogicType b, TransactionContext &txn);
 
 	virtual ~BoolExpr();
 
-	bool eval(TransactionContext &txn, ObjectManager &objectManager,
+	TrivalentLogicType eval(TransactionContext &txn, ObjectManager &objectManager,
 		ContainerRowWrapper *column_values, FunctionMap *function_map,
-		bool default_return);
+		TrivalentLogicType default_return);
 
 	/*!
 	 * @brief Evaluate the expression as a boolean value
@@ -68,8 +70,8 @@ public:
 	}
 
 	bool operator==(BoolExpr &e) const {
-		if (type_ != e.type_) return false;
-		if (type_ == UNARY) {
+		if (opeType_ != e.opeType_) return false;
+		if (opeType_ == UNARY) {
 			return *unary_ == *e.unary_;
 		}
 		if (e.operands_.size() != operands_.size()) {
@@ -132,7 +134,7 @@ public:
 		uint32_t indexColumnId, Query &queryObj, TermCondition *&cond,
 		const void *&startKey, uint32_t &startKeySize,
 		int32_t &isStartKeyIncluded, const void *&endKey, uint32_t &endKeySize,
-		int32_t &isEndKeyIncluded);
+		int32_t &isEndKeyIncluded, NullCondition &nullCond);
 
 	void getIndexBitmapAndInfo(TransactionContext &txn,
 		BaseContainer &baseContainer, Query &queryObj, uint32_t &mapBitmap,
@@ -150,7 +152,7 @@ public:
 	 * @return test result
 	 */
 	bool checkOperationType(Operation t) {
-		return type_ == t;
+		return opeType_ == t;
 	}
 	/*!
 	 * @brief Checks operand num
@@ -162,7 +164,7 @@ public:
 	}
 	void getMappingColumnInfo(
 		TransactionContext &txn, std::vector<util::String> &x) {
-		if (type_ == UNARY) {
+		if (opeType_ == UNARY) {
 			unary_->getMappingColumnInfo(txn, x);
 		}
 		else {
@@ -179,7 +181,9 @@ public:
 
 protected:
 	BoolExpr(TransactionContext &txn)
-		: Expr(txn), operands_(txn.getDefaultAllocator()) {}
+		: Expr(txn), operands_(txn.getDefaultAllocator()) {
+		type_ = BOOL_EXPR;
+	}
 
 	/*!
 	 * @brief Check for that all expression in the term list are unary or NOT
@@ -225,7 +229,7 @@ protected:
 	 */
 	bool isOneHasTheType(Operation t, BoolTerms &v) {
 		for (BoolTerms::const_iterator it = v.begin(); it != v.end(); it++) {
-			if ((*it)->type_ == t) {
+			if ((*it)->opeType_ == t) {
 				return true;
 			}
 		}
@@ -243,7 +247,7 @@ protected:
 	 */
 	bool isOneNotHasTheType(Operation t, BoolTerms &v) {
 		for (BoolTerms::const_iterator it = v.begin(); it != v.end(); it++) {
-			if ((*it)->type_ != t) {
+			if ((*it)->opeType_ != t) {
 				return true;
 			}
 		}
@@ -263,7 +267,7 @@ protected:
 	 */
 	void addOperands(
 		TransactionContext &txn, ObjectManager &objectManager, BoolTerms &t) {
-		if (type_ == UNARY) {
+		if (opeType_ == UNARY) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CRITICAL_LOGIC_ERROR,
 				"Internal logic error: cannot add operands in unary "
 				"expression");
@@ -282,7 +286,7 @@ protected:
 	 */
 	void addOperandsDNF(
 		TransactionContext &txn, ObjectManager &objectManager, BoolTerms &t) {
-		if (type_ == UNARY) {
+		if (opeType_ == UNARY) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CRITICAL_LOGIC_ERROR,
 				"Internal logic error: cannot add operands in unary "
 				"expression");
@@ -310,7 +314,7 @@ protected:
 	 * @return test result
 	 */
 	virtual bool isValueOrColumn() {
-		return type_ == UNARY && (unary_->isColumn() || unary_->isValue());
+		return opeType_ == UNARY && (unary_->isColumn() || unary_->isValue());
 	}
 	/*!
 	 * @brief get the column type
@@ -326,14 +330,14 @@ protected:
 	inline void checkDNF() {
 #ifndef NDEBUG
 		BoolTerms::const_iterator it;
-		switch (type_) {
+		switch (opeType_) {
 		case UNARY:
 			return;
 		case AND:
 			for (it = operands_.begin(); it != operands_.end(); it++) {
-				if ((*it)->type_ != UNARY &&
-					!((*it)->type_ == NOT &&
-						(*it)->operands_[0]->type_ == UNARY)) {
+				if ((*it)->opeType_ != UNARY &&
+					!((*it)->opeType_ == NOT &&
+						(*it)->operands_[0]->opeType_ == UNARY)) {
 					GS_THROW_USER_ERROR(GS_ERROR_TQ_CRITICAL_LOGIC_ERROR,
 						"Internal logic error: checkDNF failed");
 				}
@@ -341,7 +345,7 @@ protected:
 			return;
 		case OR:
 			for (it = operands_.begin(); it != operands_.end(); it++) {
-				switch ((*it)->type_) {
+				switch ((*it)->opeType_) {
 				case UNARY:
 					break;
 				case NOT:
@@ -356,7 +360,7 @@ protected:
 			}
 			break;
 		case NOT:
-			if (operands_[0]->type_ != UNARY) {
+			if (operands_[0]->opeType_ != UNARY) {
 				GS_THROW_USER_ERROR(GS_ERROR_TQ_CRITICAL_LOGIC_ERROR,
 					"Internal logic error: checkDNF failed");
 			}
@@ -367,7 +371,7 @@ protected:
 
 	BoolTerms operands_;
 	Expr *unary_;
-	Operation type_;
+	Operation opeType_;
 	bool noEval_;  
 };
 

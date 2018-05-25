@@ -35,7 +35,7 @@ void QueryProcessor::get(TransactionContext &txn, BaseContainer &container,
 	uint32_t rowKeySize, const uint8_t *rowKey, ResultSet &resultSet) {
 	try {
 		if (!container.definedRowKey()) {  
-			GS_THROW_USER_ERROR(GS_ERROR_QP_ROW_KEY_UNDEFINED, "");
+			GS_THROW_USER_ERROR(GS_ERROR_QP_ROW_KEY_UNDEFINED, "");	
 		}
 		ColumnInfo &keyColumnInfo =
 			container.getColumnInfo(ColumnInfo::ROW_KEY_COLUMN_ID);
@@ -78,7 +78,7 @@ void QueryProcessor::get(TransactionContext &txn, BaseContainer &container,
 			else {
 				ColumnType type = keyColumnInfo.getColumnType();
 
-				TermCondition cond(eqTable[type][type],
+				TermCondition cond(ComparatorTable::eqTable_[type][type],
 					ColumnInfo::ROW_KEY_COLUMN_ID,
 					keyColumnInfo.getColumnOffset(), rowKey, rowKeySize);
 				BtreeMap::SearchContext sc(
@@ -113,21 +113,21 @@ void QueryProcessor::get(TransactionContext &txn, BaseContainer &container,
 	RowId preLast, ResultSize limit, RowId &, ResultSet &resultSet) {
 	try {
 		if (limit == UNDEF_RESULT_SIZE) {
-			GS_THROW_SYSTEM_ERROR(GS_ERROR_QP_UNDEFINED, "undefined limit");
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_QP_UNDEFINED, "undefined limit");	
 		}
 
 		util::XArray<OId> &idList = *resultSet.getOIdList();
 		idList.clear();
-
+		ColumnId columnId = UNDEF_COLUMNID;
 		if (preLast != UNDEF_ROWID) {
 			RowId start = preLast;
 			BtreeMap::SearchContext sc(
-				0, &start, 0, false, NULL, 0, true, 0, NULL, limit);
+				columnId, &start, 0, false, NULL, 0, true, 0, NULL, limit);
 			container.searchRowIdIndex(txn, sc, idList, ORDER_ASCENDING);
 		}
 		else {
 			BtreeMap::SearchContext sc(
-				0, NULL, 0, true, NULL, 0, true, 0, NULL, limit);
+				columnId, NULL, 0, true, NULL, 0, true, 0, NULL, limit);
 			container.searchRowIdIndex(txn, sc, idList, ORDER_ASCENDING);
 		}
 		resultSet.setResultType(RESULT_ROW_ID_SET, idList.size());
@@ -205,7 +205,7 @@ void QueryProcessor::search(TransactionContext &txn, BaseContainer &container,
 
 				const ColumnType type = keyColumnInfo.getColumnType();
 				const Operator operatorList[] = {
-					geTable[type][type], leTable[type][type]};
+					ComparatorTable::geTable_[type][type], ComparatorTable::leTable_[type][type]};
 
 				for (size_t i = 0; i < keyCount; i++) {
 					if (keyIncluded[i]) {
@@ -407,8 +407,12 @@ void QueryProcessor::aggregate(TransactionContext &txn, TimeSeries &timeSeries,
 		sc.endKey_ = &end;
 		sc.isEndKeyIncluded_ = true;
 
+		Value value;
 		timeSeries.aggregate(
-			txn, sc, columnId, aggregationType, resultNum, serializedRowList);
+			txn, sc, columnId, aggregationType, resultNum, value);
+		if (resultNum > 0) {
+			value.serialize(serializedRowList);
+		}
 		resultSet.setResultType(RESULT_AGGREGATE, resultNum);
 	}
 	catch (std::exception &e) {
@@ -629,50 +633,6 @@ void QueryProcessor::fetch(TransactionContext &txn, BaseContainer &container,
 							reserveSize * container.getVariableColumnNum() * 8);
 					}
 				}
-#if defined(PARTIAL_EXE_SERVER_UNIT_TEST_MODE) && \
-	defined(GD_ENABLE_NEWSQL_SERVER)
-				ResultSize resultNum;
-				if (resultSet->isPartialExecuteMode()) {
-					if (!resultSet->isPartialExecuteSuspend()) {
-						OutputMessageRowStore outputMessageRowStore(
-							container.getDataStore()->getValueLimitConfig(),
-							container.getColumnInfoList(),
-							container.getColumnNum(),
-							*(resultSet->getRowDataFixedPartBuffer()),
-							*(resultSet->getRowDataVarPartBuffer()),
-							isRowIdIncluded);
-
-						util::XArray<OId> tmpList(txn.getDefaultAllocator());
-						uint64_t skipped = 0;
-						if (resultSet->getRowIdList()->size() == 0) {
-							tmpList.insert(tmpList.end(),
-								resultSet->getOIdList()->begin(),
-								resultSet->getOIdList()->end());
-						}
-						else {
-							container.getOIdList(txn, 0, MAX_RESULT_SIZE,
-								skipped, *resultSet->getRowIdList(), tmpList);
-						}
-						container.getRowList(txn, tmpList, MAX_RESULT_SIZE,
-							resultNum, &outputMessageRowStore, isRowIdIncluded,
-							0);
-						resultSet->setResultNum(tmpList.size());
-					}
-					else {
-					}
-				}
-				else {
-					OutputMessageRowStore outputMessageRowStore(
-						container.getDataStore()->getValueLimitConfig(),
-						container.getColumnInfoList(), container.getColumnNum(),
-						*(resultSet->getRowDataFixedPartBuffer()),
-						*(resultSet->getRowDataVarPartBuffer()),
-						isRowIdIncluded);
-					container.getRowList(txn, *(resultSet->getOIdList()),
-						fetchNum, resultNum, &outputMessageRowStore,
-						isRowIdIncluded, 0);
-				}
-#else
 				OutputMessageRowStore outputMessageRowStore(
 					container.getDataStore()->getValueLimitConfig(),
 					container.getColumnInfoList(), container.getColumnNum(),
@@ -681,7 +641,6 @@ void QueryProcessor::fetch(TransactionContext &txn, BaseContainer &container,
 				ResultSize resultNum;
 				container.getRowList(txn, *(resultSet->getOIdList()), fetchNum,
 					resultNum, &outputMessageRowStore, isRowIdIncluded, 0);
-#endif
 				resultSet->setDataPos(
 					0, static_cast<uint32_t>(
 						   resultSet->getRowDataFixedPartBuffer()->size()),
@@ -718,6 +677,7 @@ void QueryProcessor::fetch(TransactionContext &txn, BaseContainer &container,
 					serializedVarDataList =
 						resultSet->getRSRowDataVarPartBuffer();
 				}
+				bool isValidate = false;
 				InputMessageRowStore inputMessageRowStore(
 					container.getDataStore()->getValueLimitConfig(),
 					container.getColumnInfoList(), container.getColumnNum(),
@@ -725,7 +685,7 @@ void QueryProcessor::fetch(TransactionContext &txn, BaseContainer &container,
 					static_cast<uint32_t>(serializedFixedDataList->size()),
 					serializedVarDataList->data(),
 					static_cast<uint32_t>(serializedVarDataList->size()),
-					resultSet->getResultNum(), isRowIdIncluded);
+					resultSet->getResultNum(), isRowIdIncluded, isValidate);
 
 				uint64_t startFixedOffset, fixedOffsetSize, startVarOffset,
 					varOffsetSize;
@@ -735,7 +695,7 @@ void QueryProcessor::fetch(TransactionContext &txn, BaseContainer &container,
 				resultSet->setDataPos(startFixedOffset, fixedOffsetSize,
 					startVarOffset, varOffsetSize);
 
-					if (startPos + fetchNum >= resultSet->getResultNum()) {
+				if (startPos + fetchNum >= resultSet->getResultNum()) {
 					resultSet->setFetchNum(
 						resultSet->getResultNum() - startPos);
 					resultSet->setResultType(RESULT_ROWSET);
@@ -770,3 +730,4 @@ void QueryProcessor::fetch(TransactionContext &txn, BaseContainer &container,
 		container.handleSearchError(txn, e, GS_ERROR_QP_FETCH_FAILED);
 	}
 }
+

@@ -24,7 +24,6 @@
 
 #include <stddef.h>
 
-
 #define QP_NEW QP_NEW_BY_TXN(txn)
 #define QP_ALLOC_NEW(alloc) ALLOC_NEW(alloc)
 #define QP_NEW_BY_TXN(txn) ALLOC_NEW(txn.getDefaultAllocator())
@@ -65,12 +64,6 @@ enum EvalMode { EVAL_MODE_NORMAL, EVAL_MODE_PRINT, EVAL_MODE_CONTRACT };
 
 #define USE_LOCAL_TIMEZONE (false)
 
-#define QP_ENABLE_3DINDEX
-#define QP_ENABLE_EXPLAIN
-#define QP_ENABLE_SELECTION_PASSTHROUGH
-#define QP_DISABLE_VARIANCE_PASSTHROUGH  
-#define QP_ENABLE_SELECTION_DOUBLE_INTERPOLATION
-#define QP_ORDERBY_COLUMN_ONLY  
 
 #define QP_TR_EPSI 1.0E-8
 

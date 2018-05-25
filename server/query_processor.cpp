@@ -36,21 +36,23 @@ const char8_t *const QueryProcessor::ANALYZE_QUERY = "#analyze";
 
 
 
-
 /*!
 	@brief Execute TQL Query
 */
 void QueryProcessor::executeTQL(TransactionContext &txn,
-	BaseContainer &container, ResultSize limit, const char *query,
+	BaseContainer &container, ResultSize limit, const TQLInfo &tqlInfo,
 	ResultSet &resultSet) {
+	const char *query = tqlInfo.query_;
 	try {
-		if (limit == 0) {
+		bool noop = (limit == 0);
+
+		if (noop) {
 			resultSet.setResultType(RESULT_ROWSET, 0);
 			return;
 		}
 
 		if (strcmp(query, ANALYZE_QUERY) == 0) {
-			Query analyzeQuery(txn, *(container.getObjectManager()));
+			Query analyzeQuery(txn, *(container.getObjectManager()), tqlInfo);
 			analyzeQuery.enableExplain(true);
 			if (container.isInvalid()) {
 				analyzeQuery.addExplain(
@@ -66,9 +68,19 @@ void QueryProcessor::executeTQL(TransactionContext &txn,
 		switch (container.getContainerType()) {
 		case COLLECTION_CONTAINER: {
 			Collection *collection = reinterpret_cast<Collection *>(&container);
-			QueryForCollection queryObj(txn, *collection, query, limit, NULL);
+			QueryStopwatchHook *hook = NULL;
+			QueryForCollection queryObj(txn, *collection, tqlInfo, limit, hook);
 			if (queryObj.getLimit() == 0) {
-				resultSet.setResultType(RESULT_ROWSET, 0);
+				ResultType resultType = RESULT_ROWSET;
+				if (queryObj.hasAggregationClause()) {
+					resultType = RESULT_AGGREGATE;
+				}
+				resultSet.setResultType(resultType, 0);
+
+				if (queryObj.doExplain()) {
+					queryObj.addExplain(0, "QUERY_RESULT_ROWS", "INTEGER", "0", "");
+				}
+				queryObj.finishQuery(txn, resultSet, container);
 				return;
 			}
 
@@ -82,10 +94,20 @@ void QueryProcessor::executeTQL(TransactionContext &txn,
 		} break;
 		case TIME_SERIES_CONTAINER: {
 			TimeSeries *timeSeries = reinterpret_cast<TimeSeries *>(&container);
-			QueryForTimeSeries queryObj(txn, *timeSeries, query, limit, NULL);
+			QueryStopwatchHook *hook = NULL;
+			QueryForTimeSeries queryObj(txn, *timeSeries, tqlInfo, limit, hook);
 
 			if (queryObj.getLimit() == 0) {
-				resultSet.setResultType(RESULT_ROWSET, 0);
+				ResultType resultType = RESULT_ROWSET;
+				if (queryObj.hasAggregationClause()) {
+					resultType = RESULT_AGGREGATE;
+				}
+				resultSet.setResultType(resultType, 0);
+
+				if (queryObj.doExplain()) {
+					queryObj.addExplain(0, "QUERY_RESULT_ROWS", "INTEGER", "0", "");
+				}
+				queryObj.finishQuery(txn, resultSet, container);
 				return;
 			}
 
@@ -97,7 +119,7 @@ void QueryProcessor::executeTQL(TransactionContext &txn,
 			queryObj.finishQuery(txn, resultSet, container);
 		} break;
 		default:
-			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");	
 			break;
 		}
 	}

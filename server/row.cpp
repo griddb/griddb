@@ -31,10 +31,6 @@
 #include "string_array_processor.h"
 #include "value_processor.h"
 
-#ifdef NDEBUG
-#else
-#endif
-
 Collection::RowArray::Row::Row(uint8_t *rowImage, RowArray *rowArrayCursor)
 	: rowArrayCursor_(rowArrayCursor), binary_(rowImage) {
 	nullsOffset_ = (rowArrayCursor_->container_->getVariableColumnNum() > 0)
@@ -122,8 +118,10 @@ void Collection::RowArray::Row::checkVarDataSize(TransactionContext &txn,
 			uint32_t elemSize;
 			uint32_t elemNth;
 			variableArrayCursor.getElement(elemSize, elemNth);
-			if (columnInfo.isSpecialVariable()) {
+			if (columnInfo.getColumnType() == COLUMN_TYPE_STRING_ARRAY) {
 				elemSize = LINK_VARIABLE_COLUMN_DATA_SIZE;
+			} else if (columnInfo.getColumnType() == COLUMN_TYPE_BLOB) {
+				elemSize = BlobCursor::getPrefixDataSize(objectManager, elemSize);
 			}
 			for (size_t checkCount = 0; 
 				(currentObjectSize + elemSize +
@@ -251,7 +249,7 @@ void Collection::RowArray::Row::setFields(
 			neighborOId = variableOId;
 			if (i == 0) {
 				setVariableArray(variableOId);
-				uint32_t encodedVariableColumnNum =
+				uint64_t encodedVariableColumnNum =
 					ValueProcessor::encodeVarSize(variableColumnNum);
 				uint32_t encodedVariableColumnNumLen =
 					ValueProcessor::getEncodedVarSize(variableColumnNum);
@@ -276,7 +274,8 @@ void Collection::RowArray::Row::setFields(
 				ColumnInfo &columnInfo =
 					rowArrayCursor_->getContainer().getColumnInfo(
 						varColumnIdList[elemNth]);
-				if (columnInfo.isSpecialVariable()) {
+				switch (columnInfo.getColumnType()) {
+				case COLUMN_TYPE_STRING_ARRAY: {
 					uint32_t linkHeaderValue = ValueProcessor::encodeVarSize(
 						LINK_VARIABLE_COLUMN_DATA_SIZE);
 					uint32_t linkHeaderSize = ValueProcessor::getEncodedVarSize(
@@ -289,29 +288,25 @@ void Collection::RowArray::Row::setFields(
 					destObj.moveCursor(sizeof(uint32_t));
 					OId linkOId = UNDEF_OID;
 					if (elemSize > 0) {
-						switch (columnInfo.getColumnType()) {
-						case COLUMN_TYPE_STRING_ARRAY:
-							linkOId = StringArrayProcessor::putToObject(txn,
-								objectManager, data, elemSize, allocateStrategy,
-								variableOId);  
-							break;
-						case COLUMN_TYPE_BLOB:
-							linkOId = BlobProcessor::putToObject(txn,
-								objectManager, data, elemSize, allocateStrategy,
-								variableOId);  
-							break;
-						default:
-							GS_THROW_USER_ERROR(GS_ERROR_CM_NOT_SUPPORTED,
-								"unknown columnType:"
-									<< (int32_t)columnInfo.getColumnType());
-						}
+						linkOId = StringArrayProcessor::putToObject(txn,
+							objectManager, data, elemSize, allocateStrategy,
+							variableOId);  
 					}
 					memcpy(destObj.getCursor<uint8_t>(), &linkOId, sizeof(OId));
 					destObj.moveCursor(sizeof(OId));
 					data += headerSize + elemSize;
 					copyStartAddr = data;
-				}
-				else {
+				} break;
+				case COLUMN_TYPE_BLOB: {
+					uint32_t destSize;
+					BlobProcessor::setField(txn, objectManager,
+						copyStartAddr, elemSize,
+						destObj.getCursor<uint8_t>(), destSize,
+						allocateStrategy, variableOId);
+					destObj.moveCursor(destSize);
+					copyStartAddr = data + headerSize + elemSize;
+				} break;
+				default:
 					memcpy(destObj.getCursor<uint8_t>(), copyStartAddr,
 						(data + headerSize + elemSize - copyStartAddr));
 					destObj.moveCursor(
@@ -446,7 +441,7 @@ void Collection::RowArray::Row::updateFields(
 				}
 				if (i == 0) {
 					setVariableArray(variableOId);
-					uint32_t encodedVariableColumnNum =
+					uint64_t encodedVariableColumnNum =
 						ValueProcessor::encodeVarSize(variableColumnNum);
 					uint32_t encodedVariableColumnNumLen =
 						ValueProcessor::getEncodedVarSize(variableColumnNum);
@@ -472,7 +467,8 @@ void Collection::RowArray::Row::updateFields(
 					ColumnInfo &columnInfo =
 						rowArrayCursor_->getContainer().getColumnInfo(
 							varColumnIdList[elemNth]);
-					if (columnInfo.isSpecialVariable()) {
+					switch (columnInfo.getColumnType()) {
+					case COLUMN_TYPE_STRING_ARRAY: {
 						uint32_t linkHeaderValue =
 							ValueProcessor::encodeVarSize(
 								LINK_VARIABLE_COLUMN_DATA_SIZE);
@@ -485,33 +481,26 @@ void Collection::RowArray::Row::updateFields(
 							sizeof(uint32_t));  
 						destAddr += sizeof(uint32_t);
 						OId linkOId = UNDEF_OID;
-						switch (columnInfo.getColumnType()) {
-						case COLUMN_TYPE_STRING_ARRAY:
-							if (elemSize > 0) {
-								linkOId = StringArrayProcessor::putToObject(txn,
-									objectManager, data, elemSize,
-									allocateStrategy,
-									variableOId);  
-							}
-							break;
-						case COLUMN_TYPE_BLOB:
-							if (elemSize > 0) {
-								linkOId = BlobProcessor::putToObject(txn,
-									objectManager, data, elemSize,
-									allocateStrategy,
-									variableOId);  
-							}
-							break;
-						default:
-							GS_THROW_USER_ERROR(GS_ERROR_CM_NOT_SUPPORTED,
-								"unknown columnType:"
-									<< (int32_t)columnInfo.getColumnType());
+						if (elemSize > 0) {
+							linkOId = StringArrayProcessor::putToObject(txn,
+								objectManager, data, elemSize,
+								allocateStrategy,
+								variableOId);  
 						}
 						memcpy(destAddr, &linkOId, sizeof(OId));
 						destAddr += sizeof(OId);
 						copyStartAddr = data + headerSize + elemSize;
-					}
-					else {
+					} break;
+					case COLUMN_TYPE_BLOB: {
+						uint32_t destSize;
+						BlobProcessor::setField(txn, objectManager,
+							copyStartAddr, elemSize,
+							destAddr, destSize,
+							allocateStrategy, variableOId);
+						destAddr += destSize;
+						copyStartAddr = data + headerSize + elemSize;
+					} break;
+					default:
 						memcpy(destAddr, copyStartAddr,
 							(data + headerSize + elemSize - copyStartAddr));
 						destAddr +=
@@ -560,9 +549,13 @@ void Collection::RowArray::Row::getField(TransactionContext &txn,
 */
 void Collection::RowArray::Row::getField(TransactionContext &txn,
 	const ColumnInfo &columnInfo, ContainerValue &containerValue) {
-	getField(txn, columnInfo, containerValue.getBaseObject());
-	containerValue.set(containerValue.getBaseObject().getCursor<uint8_t>(),
-		columnInfo.getColumnType());
+	if (isNullValue(columnInfo)) {
+		containerValue.setNull();
+	} else {
+		getField(txn, columnInfo, containerValue.getBaseObject());
+		containerValue.set(containerValue.getBaseObject().getCursor<uint8_t>(),
+			columnInfo.getColumnType());
+	}
 }
 
 /*!
@@ -610,6 +603,7 @@ void Collection::RowArray::Row::copy(
 		dest.setVariableArray(destTopOId);
 
 		VariableArrayCursor destCursor(txn, objectManager, destTopOId, OBJECT_FOR_UPDATE);
+		srcCursor.reset();
 		for (uint32_t columnId = 0;
 			 columnId < rowArrayCursor_->getContainer().getColumnNum();
 			 ++columnId) {
@@ -619,20 +613,22 @@ void Collection::RowArray::Row::copy(
 				bool exist = destCursor.nextElement();
 				UNUSED_VARIABLE(exist);
 				assert(exist);
+				srcCursor.nextElement();
 				if (columnInfo.isSpecialVariable()) {
-					uint32_t elemSize;
-					uint32_t elemCount;
-					uint8_t *elem = destCursor.getElement(elemSize, elemCount);
+					uint32_t destElemSize, srcElemSize;
+					uint32_t destElemCount, srcElemCount;
+					uint8_t *srcElem = srcCursor.getElement(srcElemSize, srcElemCount);
+					uint8_t *destElem = destCursor.getElement(destElemSize, destElemCount);
 					switch (columnInfo.getColumnType()) {
 					case COLUMN_TYPE_STRING_ARRAY:
 						StringArrayProcessor::clone(txn, objectManager,
-							columnInfo.getColumnType(), elem, elem,
+							columnInfo.getColumnType(), srcElem, destElem,
 							allocateStrategy,
 							destTopOId);  
 						break;
 					case COLUMN_TYPE_BLOB:
 						BlobProcessor::clone(txn, objectManager,
-							columnInfo.getColumnType(), elem, elem,
+							columnInfo.getColumnType(), srcElem, destElem,
 							allocateStrategy,
 							destTopOId);  
 						break;
@@ -697,7 +693,8 @@ void Collection::RowArray::Row::getImage(TransactionContext &txn,
 				uint32_t elemSize;
 				uint32_t elemCount;
 				uint8_t *elemData = cursor.getElement(elemSize, elemCount);
-				if (columnInfo.isSpecialVariable()) {
+				switch (columnInfo.getColumnType()) {
+				case COLUMN_TYPE_STRING_ARRAY: {
 					uint32_t totalSize = 0;
 					if (elemSize > 0) {
 						assert(elemSize == LINK_VARIABLE_COLUMN_DATA_SIZE);
@@ -708,69 +705,35 @@ void Collection::RowArray::Row::getImage(TransactionContext &txn,
 					if (totalSize > 0) {
 						OId linkOId;
 						memcpy(&linkOId, elemData, sizeof(OId));
-						switch (columnInfo.getColumnType()) {
-						case COLUMN_TYPE_STRING_ARRAY: {
-							messageRowStore->setVarDataHeaderField(
-								columnId, totalSize);
-							VariableArrayCursor arrayCursor(
-								txn, objectManager, linkOId, OBJECT_READ_ONLY);
-							messageRowStore->setVarSize(
-								arrayCursor.getArrayLength());  
-							while (arrayCursor.nextElement()) {
-								uint32_t elemSize, elemCount;
-								uint8_t *addr =
-									arrayCursor.getElement(elemSize, elemCount);
-								messageRowStore->addArrayElement(
-									addr, elemSize +
-											  ValueProcessor::getEncodedVarSize(
-												  elemSize));
-							}
-						} break;
-						case COLUMN_TYPE_BLOB: {
-							messageRowStore->setVarDataHeaderField(
-								columnId, totalSize);
-							ArrayObject oIdArrayObject(
-								txn, objectManager, linkOId);
-							uint32_t num = oIdArrayObject.getArrayLength();
-							for (uint32_t blockCount = 0; blockCount < num;
-								 blockCount++) {
-								const uint8_t *elemData =
-									oIdArrayObject.getArrayElement(
-										blockCount, COLUMN_TYPE_OID);
-								const OId elemOId =
-									*reinterpret_cast<const OId *>(elemData);
-								if (elemOId != UNDEF_OID) {
-									BinaryObject elemObject(
-										txn, objectManager, elemOId);
-									messageRowStore->addVariableFieldPart(
-										elemObject.data(), elemObject.size());
-								}
-							}
-						} break;
-						default:
-							GS_THROW_SYSTEM_ERROR(
-								GS_ERROR_DS_DS_PARAMETER_INVALID, "");  
-							;
+						messageRowStore->setVarDataHeaderField(
+							columnId, totalSize);
+						VariableArrayCursor arrayCursor(
+							txn, objectManager, linkOId, OBJECT_READ_ONLY);
+						messageRowStore->setVarSize(
+							arrayCursor.getArrayLength());  
+						while (arrayCursor.nextElement()) {
+							uint32_t elemSize, elemCount;
+							uint8_t *addr =
+								arrayCursor.getElement(elemSize, elemCount);
+							messageRowStore->addArrayElement(
+								addr, elemSize +
+										  ValueProcessor::getEncodedVarSize(
+											  elemSize));
 						}
 					}
 					else {
-						switch (columnInfo.getColumnType()) {
-						case COLUMN_TYPE_STRING_ARRAY: {
-							messageRowStore->setVarDataHeaderField(columnId, 1);
-							messageRowStore->setVarSize(0);  
-						} break;
-						case COLUMN_TYPE_BLOB: {
-							messageRowStore->setVarDataHeaderField(columnId, 0);
-						} break;
-						default:
-							GS_THROW_SYSTEM_ERROR(
-								GS_ERROR_DS_DS_PARAMETER_INVALID, "");  
-							;
-						}
+						messageRowStore->setVarDataHeaderField(columnId, 1);
+						messageRowStore->setVarSize(0);  
 					}
-				}
-				else {
-					messageRowStore->setField(columnId, elemData, elemSize);
+				} break;
+				case COLUMN_TYPE_BLOB: {
+					Value value;
+					value.set(elemData, COLUMN_TYPE_BLOB);
+					BlobProcessor::getField(txn, objectManager, columnId, 
+					&value, messageRowStore);
+				} break;
+				default:
+					messageRowStore->setField(columnId, elemData, elemSize); 
 				}
 			}
 		}
@@ -785,12 +748,10 @@ void Collection::RowArray::Row::getFieldImage(TransactionContext &txn,
 	MessageRowStore *messageRowStore) {
 	ObjectManager &objectManager =
 		*(rowArrayCursor_->getContainer().getObjectManager());
-	BaseObject baseFieldObject(txn.getPartitionId(), objectManager);
-	getField(txn, columnInfo, baseFieldObject);
-	Value value;
-	value.set(baseFieldObject.getCursor<uint8_t>(), columnInfo.getColumnType());
+	ContainerValue containerValue(txn, objectManager);
+	getField(txn, columnInfo, containerValue);
 	ValueProcessor::getField(
-		txn, objectManager, newColumnId, &value, messageRowStore);
+		txn, objectManager, newColumnId, &containerValue.getValue(), messageRowStore);
 }
 
 
@@ -803,6 +764,7 @@ Collection::RowArray::RowArray(
 		BaseObject::load(oId, getOption);
 	}
 	rowSize_ = container_->getRowSize();
+	nullbitsSize_ = container_->getNullbitsSize();
 }
 
 Collection::RowArray::RowArray(TransactionContext &txn, Collection *container)
@@ -810,6 +772,7 @@ Collection::RowArray::RowArray(TransactionContext &txn, Collection *container)
 	  container_(container),
 	  elemCursor_(0) {
 	rowSize_ = container_->getRowSize();
+	nullbitsSize_ = container_->getNullbitsSize();
 }
 
 
@@ -831,7 +794,7 @@ void Collection::RowArray::initialize(
 	OId oId;
 	BaseObject::allocate<uint8_t>(getBinarySize(maxRowNum),
 		container_->getRowAllcateStrategy(), oId, OBJECT_TYPE_ROW_ARRAY);
-	memset(getBaseAddr(), 0, HEADER_SIZE);
+	memset(getBaseAddr(), 0, getHeaderSize());
 	setMaxRowNum(maxRowNum);
 	setRowNum(0);
 	setRowId(baseRowId);
@@ -865,6 +828,8 @@ void Collection::RowArray::append(
 	row.setRowId(rowId);
 	row.setFields(txn, messageRowStore);
 	setRowNum(getRowNum() + 1);
+	updateNullsStats(row.getNullsAddr());
+	container_->updateNullsStats(row.getNullsAddr());
 }
 
 /*!
@@ -879,6 +844,8 @@ void Collection::RowArray::insert(
 	if (elemCursor_ >= getRowNum()) {
 		setRowNum(elemCursor_ + 1);
 	}
+	updateNullsStats(row.getNullsAddr());
+	container_->updateNullsStats(row.getNullsAddr());
 }
 
 /*!
@@ -888,6 +855,8 @@ void Collection::RowArray::update(
 	TransactionContext &txn, MessageRowStore *messageRowStore) {
 	Row row(getRow(), this);
 	row.updateFields(txn, messageRowStore);
+	updateNullsStats(messageRowStore->getNullsAddr());
+	container_->updateNullsStats(messageRowStore->getNullsAddr());
 }
 
 /*!
@@ -910,6 +879,7 @@ void Collection::RowArray::move(TransactionContext &txn, RowArray &dest) {
 	row.move(txn, destRow);
 	updateCursor();
 	dest.updateCursor();
+	dest.updateNullsStats(destRow.getNullsAddr());
 }
 
 /*!
@@ -921,6 +891,14 @@ void Collection::RowArray::copy(TransactionContext &txn, RowArray &dest) {
 	row.copy(txn, destRow);
 	updateCursor();
 	dest.updateCursor();
+	dest.updateNullsStats(destRow.getNullsAddr());
+}
+
+/*!
+	@brief Update stats of nullbits
+*/
+void Collection::RowArray::updateNullsStats(const uint8_t *nullbits) {
+	RowNullBits::unionNullsStats(nullbits, getNullsStats(), getNullbitsSize());
 }
 
 /*!
@@ -1148,7 +1126,11 @@ std::string Collection::RowArray::dump(TransactionContext &txn) {
 	uint16_t pos = elemCursor_;
 	util::NormalOStringStream strstrm;
 	strstrm << "RowId," << getRowId() << ",MaxRowNum," << getMaxRowNum()
-			<< ",RowNum," << getActiveRowNum() << std::endl;
+			<< ",RowNum," << getActiveRowNum()
+			<< ",ContainerId," << getContainerId() 
+			<< ",ColumnNum," << getColumnNum()
+			<< ",NULLBITS_OFFSET," << NULLBITS_OFFSET
+			<< std::endl;
 	strstrm << "ChunkId,Offset,ElemNum" << std::endl;
 	for (begin(); !end(); next()) {
 		Row row(getRow(), this);
@@ -1161,6 +1143,10 @@ std::string Collection::RowArray::dump(TransactionContext &txn) {
 	}
 	elemCursor_ = pos;
 	return strstrm.str();
+}
+
+bool Collection::RowArray::validate() {
+	return true;
 }
 
 std::string Collection::RowArray::Row::dump(TransactionContext &txn) {
@@ -1266,8 +1252,10 @@ void TimeSeries::RowArray::Row::checkVarDataSize(TransactionContext &txn,
 			uint32_t elemSize;
 			uint32_t elemNth;
 			variableArrayCursor.getElement(elemSize, elemNth);
-			if (columnInfo.isSpecialVariable()) {
+			if (columnInfo.getColumnType() == COLUMN_TYPE_STRING_ARRAY) {
 				elemSize = LINK_VARIABLE_COLUMN_DATA_SIZE;
+			} else if (columnInfo.getColumnType() == COLUMN_TYPE_BLOB) {
+				elemSize = BlobCursor::getPrefixDataSize(objectManager, elemSize);
 			}
 			for (size_t checkCount = 0; 
 				(currentObjectSize + elemSize +
@@ -1396,7 +1384,7 @@ void TimeSeries::RowArray::Row::setFields(
 			neighborOId = variableOId;
 			if (i == 0) {
 				setVariableArray(variableOId);
-				uint32_t encodedVariableColumnNum =
+				uint64_t encodedVariableColumnNum =
 					ValueProcessor::encodeVarSize(variableColumnNum);
 				uint32_t encodedVariableColumnNumLen =
 					ValueProcessor::getEncodedVarSize(variableColumnNum);
@@ -1421,7 +1409,8 @@ void TimeSeries::RowArray::Row::setFields(
 				ColumnInfo &columnInfo =
 					rowArrayCursor_->getContainer().getColumnInfo(
 						varColumnIdList[elemNth]);
-				if (columnInfo.isSpecialVariable()) {
+				switch (columnInfo.getColumnType()) {
+				case COLUMN_TYPE_STRING_ARRAY: {
 					uint32_t linkHeaderValue = ValueProcessor::encodeVarSize(
 						LINK_VARIABLE_COLUMN_DATA_SIZE);
 					uint32_t linkHeaderSize = ValueProcessor::getEncodedVarSize(
@@ -1434,29 +1423,25 @@ void TimeSeries::RowArray::Row::setFields(
 					destObj.moveCursor(sizeof(uint32_t));
 					OId linkOId = UNDEF_OID;
 					if (elemSize > 0) {
-						switch (columnInfo.getColumnType()) {
-						case COLUMN_TYPE_STRING_ARRAY:
-							linkOId = StringArrayProcessor::putToObject(txn,
-								objectManager, data, elemSize, allocateStrategy,
-								variableOId);  
-							break;
-						case COLUMN_TYPE_BLOB:
-							linkOId = BlobProcessor::putToObject(txn,
-								objectManager, data, elemSize, allocateStrategy,
-								variableOId);  
-							break;
-						default:
-							GS_THROW_USER_ERROR(GS_ERROR_CM_NOT_SUPPORTED,
-								"unknown columnType:"
-									<< (int32_t)columnInfo.getColumnType());
-						}
+						linkOId = StringArrayProcessor::putToObject(txn,
+							objectManager, data, elemSize, allocateStrategy,
+							variableOId);  
 					}
 					memcpy(destObj.getCursor<uint8_t>(), &linkOId, sizeof(OId));
 					destObj.moveCursor(sizeof(OId));
 					data += headerSize + elemSize;
 					copyStartAddr = data;
-				}
-				else {
+				} break;
+				case COLUMN_TYPE_BLOB: {
+					uint32_t destSize;
+					BlobProcessor::setField(txn, objectManager,
+						copyStartAddr, elemSize,
+						destObj.getCursor<uint8_t>(), destSize,
+						allocateStrategy, variableOId);
+					destObj.moveCursor(destSize);
+					copyStartAddr = data + headerSize + elemSize;
+				} break;
+				default:
 					memcpy(destObj.getCursor<uint8_t>(), copyStartAddr,
 						(data + headerSize + elemSize - copyStartAddr));
 					destObj.moveCursor(
@@ -1591,7 +1576,7 @@ void TimeSeries::RowArray::Row::updateFields(
 				}
 				if (i == 0) {
 					setVariableArray(variableOId);
-					uint32_t encodedVariableColumnNum =
+					uint64_t encodedVariableColumnNum =
 						ValueProcessor::encodeVarSize(variableColumnNum);
 					uint32_t encodedVariableColumnNumLen =
 						ValueProcessor::getEncodedVarSize(variableColumnNum);
@@ -1617,7 +1602,8 @@ void TimeSeries::RowArray::Row::updateFields(
 					ColumnInfo &columnInfo =
 						rowArrayCursor_->getContainer().getColumnInfo(
 							varColumnIdList[elemNth]);
-					if (columnInfo.isSpecialVariable()) {
+					switch (columnInfo.getColumnType()) {
+					case COLUMN_TYPE_STRING_ARRAY: {
 						uint32_t linkHeaderValue =
 							ValueProcessor::encodeVarSize(
 								LINK_VARIABLE_COLUMN_DATA_SIZE);
@@ -1630,33 +1616,26 @@ void TimeSeries::RowArray::Row::updateFields(
 							sizeof(uint32_t));  
 						destAddr += sizeof(uint32_t);
 						OId linkOId = UNDEF_OID;
-						switch (columnInfo.getColumnType()) {
-						case COLUMN_TYPE_STRING_ARRAY:
-							if (elemSize > 0) {
-								linkOId = StringArrayProcessor::putToObject(txn,
-									objectManager, data, elemSize,
-									allocateStrategy,
-									variableOId);  
-							}
-							break;
-						case COLUMN_TYPE_BLOB:
-							if (elemSize > 0) {
-								linkOId = BlobProcessor::putToObject(txn,
-									objectManager, data, elemSize,
-									allocateStrategy,
-									variableOId);  
-							}
-							break;
-						default:
-							GS_THROW_USER_ERROR(GS_ERROR_CM_NOT_SUPPORTED,
-								"unknown columnType:"
-									<< (int32_t)columnInfo.getColumnType());
+						if (elemSize > 0) {
+							linkOId = StringArrayProcessor::putToObject(txn,
+								objectManager, data, elemSize,
+								allocateStrategy,
+								variableOId);  
 						}
 						memcpy(destAddr, &linkOId, sizeof(OId));
 						destAddr += sizeof(OId);
 						copyStartAddr = data + headerSize + elemSize;
-					}
-					else {
+					} break;
+					case COLUMN_TYPE_BLOB: {
+						uint32_t destSize;
+						BlobProcessor::setField(txn, objectManager,
+							copyStartAddr, elemSize,
+							destAddr, destSize,
+							allocateStrategy, variableOId);
+						destAddr += destSize;
+						copyStartAddr = data + headerSize + elemSize;
+					} break;
+					default:
 						memcpy(destAddr, copyStartAddr,
 							(data + headerSize + elemSize - copyStartAddr));
 						destAddr +=
@@ -1686,6 +1665,9 @@ void TimeSeries::RowArray::Row::updateFields(
 void TimeSeries::RowArray::Row::getField(TransactionContext &txn,
 	const ColumnInfo &columnInfo, BaseObject &baseObject) {
 
+	if (isNullValue(columnInfo)) {
+		baseObject.reset();
+	} else
 	if (ValueProcessor::isSimple(columnInfo.getColumnType())) {
 		baseObject.copyReference(this->rowArrayCursor_->getBaseOId(),
 			this->getFixedAddr() + columnInfo.getColumnOffset());
@@ -1705,9 +1687,13 @@ void TimeSeries::RowArray::Row::getField(TransactionContext &txn,
 */
 void TimeSeries::RowArray::Row::getField(TransactionContext &txn,
 	const ColumnInfo &columnInfo, ContainerValue &containerValue) {
-	getField(txn, columnInfo, containerValue.getBaseObject());
-	containerValue.set(containerValue.getBaseObject().getCursor<uint8_t>(),
-		columnInfo.getColumnType());
+	if (isNullValue(columnInfo)) {
+		containerValue.setNull();
+	} else {
+		getField(txn, columnInfo, containerValue.getBaseObject());
+		containerValue.set(containerValue.getBaseObject().getCursor<uint8_t>(),
+			columnInfo.getColumnType());
+	}
 }
 
 /*!
@@ -1755,6 +1741,7 @@ void TimeSeries::RowArray::Row::copy(
 		dest.setVariableArray(destTopOId);
 
 		VariableArrayCursor destCursor(txn, objectManager, destTopOId, OBJECT_FOR_UPDATE);
+		srcCursor.reset();
 		for (uint32_t columnId = 0;
 			 columnId < rowArrayCursor_->getContainer().getColumnNum();
 			 ++columnId) {
@@ -1764,20 +1751,22 @@ void TimeSeries::RowArray::Row::copy(
 				bool exist = destCursor.nextElement();
 				UNUSED_VARIABLE(exist);
 				assert(exist);
+				srcCursor.nextElement();
 				if (columnInfo.isSpecialVariable()) {
-					uint32_t elemSize;
-					uint32_t elemCount;
-					uint8_t *elem = destCursor.getElement(elemSize, elemCount);
+					uint32_t destElemSize, srcElemSize;
+					uint32_t destElemCount, srcElemCount;
+					uint8_t *srcElem = srcCursor.getElement(srcElemSize, srcElemCount);
+					uint8_t *destElem = destCursor.getElement(destElemSize, destElemCount);
 					switch (columnInfo.getColumnType()) {
 					case COLUMN_TYPE_STRING_ARRAY:
 						StringArrayProcessor::clone(txn, objectManager,
-							columnInfo.getColumnType(), elem, elem,
+							columnInfo.getColumnType(), srcElem, destElem,
 							allocateStrategy,
 							destTopOId);  
 						break;
 					case COLUMN_TYPE_BLOB:
 						BlobProcessor::clone(txn, objectManager,
-							columnInfo.getColumnType(), elem, elem,
+							columnInfo.getColumnType(), srcElem, destElem,
 							allocateStrategy,
 							destTopOId);  
 						break;
@@ -1825,7 +1814,8 @@ void TimeSeries::RowArray::Row::getImage(TransactionContext &txn,
 				uint32_t elemSize;
 				uint32_t elemCount;
 				uint8_t *elemData = cursor.getElement(elemSize, elemCount);
-				if (columnInfo.isSpecialVariable()) {
+				switch (columnInfo.getColumnType()) {
+				case COLUMN_TYPE_STRING_ARRAY: {
 					uint32_t totalSize = 0;
 					if (elemSize > 0) {
 						assert(elemSize == LINK_VARIABLE_COLUMN_DATA_SIZE);
@@ -1836,68 +1826,34 @@ void TimeSeries::RowArray::Row::getImage(TransactionContext &txn,
 					if (totalSize > 0) {
 						OId linkOId;
 						memcpy(&linkOId, elemData, sizeof(OId));
-						switch (columnInfo.getColumnType()) {
-						case COLUMN_TYPE_STRING_ARRAY: {
-							messageRowStore->setVarDataHeaderField(
-								columnId, totalSize);
-							VariableArrayCursor arrayCursor(
-								txn, objectManager, linkOId, OBJECT_READ_ONLY);
-							messageRowStore->setVarSize(
-								arrayCursor.getArrayLength());  
-							while (arrayCursor.nextElement()) {
-								uint32_t elemSize, elemCount;
-								uint8_t *addr =
-									arrayCursor.getElement(elemSize, elemCount);
-								messageRowStore->addArrayElement(
-									addr, elemSize +
-											  ValueProcessor::getEncodedVarSize(
-												  elemSize));
-							}
-						} break;
-						case COLUMN_TYPE_BLOB: {
-							messageRowStore->setVarDataHeaderField(
-								columnId, totalSize);
-							ArrayObject oIdArrayObject(
-								txn, objectManager, linkOId);
-							uint32_t num = oIdArrayObject.getArrayLength();
-							for (uint32_t blockCount = 0; blockCount < num;
-								 blockCount++) {
-								const uint8_t *elemData =
-									oIdArrayObject.getArrayElement(
-										blockCount, COLUMN_TYPE_OID);
-								const OId elemOId =
-									*reinterpret_cast<const OId *>(elemData);
-								if (elemOId != UNDEF_OID) {
-									BinaryObject elemObject(
-										txn, objectManager, elemOId);
-									messageRowStore->addVariableFieldPart(
-										elemObject.data(), elemObject.size());
-								}
-							}
-						} break;
-						default:
-							GS_THROW_SYSTEM_ERROR(
-								GS_ERROR_DS_DS_PARAMETER_INVALID, "");  
-							;
+						messageRowStore->setVarDataHeaderField(
+							columnId, totalSize);
+						VariableArrayCursor arrayCursor(
+							txn, objectManager, linkOId, OBJECT_READ_ONLY);
+						messageRowStore->setVarSize(
+							arrayCursor.getArrayLength());  
+						while (arrayCursor.nextElement()) {
+							uint32_t elemSize, elemCount;
+							uint8_t *addr =
+								arrayCursor.getElement(elemSize, elemCount);
+							messageRowStore->addArrayElement(
+								addr, elemSize +
+										  ValueProcessor::getEncodedVarSize(
+											  elemSize));
 						}
 					}
 					else {
-						switch (columnInfo.getColumnType()) {
-						case COLUMN_TYPE_STRING_ARRAY: {
-							messageRowStore->setVarDataHeaderField(columnId, 1);
-							messageRowStore->setVarSize(0);  
-						} break;
-						case COLUMN_TYPE_BLOB: {
-							messageRowStore->setVarDataHeaderField(columnId, 0);
-						} break;
-						default:
-							GS_THROW_SYSTEM_ERROR(
-								GS_ERROR_DS_DS_PARAMETER_INVALID, "");  
-							;
-						}
+						messageRowStore->setVarDataHeaderField(columnId, 1);
+						messageRowStore->setVarSize(0);  
 					}
-				}
-				else {
+				} break;
+				case COLUMN_TYPE_BLOB: {
+					Value value;
+					value.set(elemData, COLUMN_TYPE_BLOB);
+					BlobProcessor::getField(txn, objectManager, columnId, 
+					&value, messageRowStore);
+				} break;
+				default:
 					messageRowStore->setField(columnId, elemData, elemSize);
 				}
 			}
@@ -1913,12 +1869,10 @@ void TimeSeries::RowArray::Row::getFieldImage(TransactionContext &txn,
 	MessageRowStore *messageRowStore) {
 	ObjectManager &objectManager =
 		*(rowArrayCursor_->getContainer().getObjectManager());
-	BaseObject baseFieldObject(txn.getPartitionId(), objectManager);
-	getField(txn, columnInfo, baseFieldObject);
-	Value value;
-	value.set(baseFieldObject.getCursor<uint8_t>(), columnInfo.getColumnType());
+	ContainerValue containerValue(txn, objectManager);
+	getField(txn, columnInfo, containerValue);
 	ValueProcessor::getField(
-		txn, objectManager, newColumnId, &value, messageRowStore);
+		txn, objectManager, newColumnId, &containerValue.getValue(), messageRowStore);
 }
 
 
@@ -1931,6 +1885,7 @@ TimeSeries::RowArray::RowArray(
 		BaseObject::load(oId, getOption);
 	}
 	rowSize_ = container_->getRowSize();
+	nullbitsSize_ = container_->getNullbitsSize();
 }
 
 TimeSeries::RowArray::RowArray(TransactionContext &txn, TimeSeries *container)
@@ -1938,6 +1893,7 @@ TimeSeries::RowArray::RowArray(TransactionContext &txn, TimeSeries *container)
 	  container_(container),
 	  elemCursor_(0) {
 	rowSize_ = container_->getRowSize();
+	nullbitsSize_ = container_->getNullbitsSize();
 }
 
 
@@ -1959,7 +1915,7 @@ void TimeSeries::RowArray::initialize(
 	OId oId;
 	BaseObject::allocate<uint8_t>(getBinarySize(maxRowNum),
 		container_->getRowAllcateStrategy(), oId, OBJECT_TYPE_ROW_ARRAY);
-	memset(getBaseAddr(), 0, HEADER_SIZE);
+	memset(getBaseAddr(), 0, getHeaderSize());
 	setMaxRowNum(maxRowNum);
 	setRowNum(0);
 	setRowId(baseRowId);
@@ -1993,6 +1949,8 @@ void TimeSeries::RowArray::append(
 	row.setRowId(rowId);
 	row.setFields(txn, messageRowStore);
 	setRowNum(getRowNum() + 1);
+	updateNullsStats(row.getNullsAddr());
+	container_->updateNullsStats(row.getNullsAddr());
 }
 
 /*!
@@ -2007,6 +1965,8 @@ void TimeSeries::RowArray::insert(
 	if (elemCursor_ >= getRowNum()) {
 		setRowNum(elemCursor_ + 1);
 	}
+	updateNullsStats(row.getNullsAddr());
+	container_->updateNullsStats(row.getNullsAddr());
 }
 
 /*!
@@ -2016,6 +1976,8 @@ void TimeSeries::RowArray::update(
 	TransactionContext &txn, MessageRowStore *messageRowStore) {
 	Row row(getRow(), this);
 	row.updateFields(txn, messageRowStore);
+	updateNullsStats(messageRowStore->getNullsAddr());
+	container_->updateNullsStats(messageRowStore->getNullsAddr());
 }
 
 /*!
@@ -2038,6 +2000,7 @@ void TimeSeries::RowArray::move(TransactionContext &txn, RowArray &dest) {
 	row.move(txn, destRow);
 	updateCursor();
 	dest.updateCursor();
+	dest.updateNullsStats(destRow.getNullsAddr());
 }
 
 /*!
@@ -2049,15 +2012,22 @@ void TimeSeries::RowArray::copy(TransactionContext &txn, RowArray &dest) {
 	row.copy(txn, destRow);
 	updateCursor();
 	dest.updateCursor();
+	dest.updateNullsStats(destRow.getNullsAddr());
+}
+
+/*!
+	@brief Update stats of nullbits
+*/
+void TimeSeries::RowArray::updateNullsStats(const uint8_t *nullbits) {
+	RowNullBits::unionNullsStats(nullbits, getNullsStats(), getNullbitsSize());
 }
 
 void TimeSeries::RowArray::copyRowArray(
 	TransactionContext &txn, RowArray &dest) {
 	uint16_t currentCursor = elemCursor_;
 	if (getContainer().getVariableColumnNum() > 0) {
-		memcpy(dest.getAddr(), getAddr(), RowArray::HEADER_SIZE);
+		memcpy(dest.getAddr(), getAddr(), RowArray::getHeaderSize());
 		for (begin(); !end(); next()) {
-			Row row(getRow(), this);
 			copy(txn, dest);
 			dest.next();
 		}
@@ -2310,8 +2280,12 @@ std::string TimeSeries::RowArray::dump(TransactionContext &txn) {
 	uint16_t pos = elemCursor_;
 	util::NormalOStringStream strstrm;
 	strstrm << "RowId," << getRowId() << ",MaxRowNum," << getMaxRowNum()
-			<< ",RowNum," << getActiveRowNum() << ",TxnId," << this->getTxnId()
-			<< std::endl;
+			<< ",RowNum," << getActiveRowNum()
+			<< ",ContainerId," << getContainerId() 
+			<< ",ColumnNum," << getColumnNum()
+			<< ",TID_OFFSET," << TID_OFFSET
+			<< ",NULLBITS_OFFSET," << NULLBITS_OFFSET
+			<< ",TxnId," << this->getTxnId() << std::endl;
 	strstrm << "ChunkId,Offset,ElemNum" << std::endl;
 	for (begin(); !end(); next()) {
 		Row row(getRow(), this);
@@ -2326,16 +2300,25 @@ std::string TimeSeries::RowArray::dump(TransactionContext &txn) {
 	return strstrm.str();
 }
 
+bool TimeSeries::RowArray::validate() {
+	return true;
+}
+
 std::string TimeSeries::RowArray::Row::dump(TransactionContext &txn) {
 	ObjectManager &objectManager =
 		*(rowArrayCursor_->getContainer().getObjectManager());
 	util::NormalOStringStream strstrm;
+	strstrm << "(";
 	ContainerValue containerValue(txn, objectManager);
 	for (uint32_t i = 0; i < rowArrayCursor_->getContainer().getColumnNum();
 		 i++) {
+		if (i != 0) {
+			strstrm << ",";
+		}
 		getField(txn, rowArrayCursor_->getContainer().getColumnInfo(i),
 			containerValue);
-		strstrm << containerValue.getValue().dump(txn, objectManager) << ", ";
+		strstrm << containerValue.getValue().dump(txn, objectManager);
 	}
+	strstrm << ")";
 	return strstrm.str();
 }

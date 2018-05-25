@@ -22,9 +22,9 @@
 #include "partition_table.h"
 #include "util/net.h"
 #include "util/trace.h"
-#include "cluster_manager.h"
 #include "config_table.h"
 #include "picojson.h"
+#include "cluster_manager.h"
 
 
 UTIL_TRACER_DECLARE(CLUSTER_SERVICE);
@@ -98,27 +98,27 @@ void AddressInfo::setNodeAddress(ServiceType type, NodeAddress &address) {
 
 PartitionTable::PartitionTable(const ConfigTable &configTable)
 	: fixedSizeAlloc_(
-		  util::AllocatorInfo(ALLOCATOR_GROUP_CS, "partitionTableFixed"),
-		  1 << 18),
-	  alloc_(util::AllocatorInfo(ALLOCATOR_GROUP_CS, "partitionTableStack"),
-		  &fixedSizeAlloc_),
-	  nodeNum_(0),
-	  masterNodeId_(UNDEF_NODEID),
-	  partitionLockList_(NULL),
-	  config_(configTable, MAX_NODE_NUM),
-	  prevMaxNodeId_(0),
-	  nextBlockQueue_(configTable.get<int32_t>(CONFIG_TABLE_DS_PARTITION_NUM)),
-	  goalBlockQueue_(configTable.get<int32_t>(CONFIG_TABLE_DS_PARTITION_NUM)),
-	  promoteCandPId_(UNDEF_PARTITIONID),
-	  prevCatchupPId_(UNDEF_PARTITIONID),
-	  currentCatchupPId_(UNDEF_PARTITIONID),
-	  prevCatchupNodeId_(UNDEF_NODEID),
-	  partitions_(NULL),
-	  nodes_(NULL),
-	  loadInfo_(MAX_NODE_NUM),
-	  failCatchup_(false),
-	  isRepaired_(false),
-	  prevFailoverTime_(0) {
+			util::AllocatorInfo(ALLOCATOR_GROUP_CS, "partitionTableFixed"), 1 << 18),
+	alloc_(util::AllocatorInfo(ALLOCATOR_GROUP_CS, "partitionTableStack"),
+		&fixedSizeAlloc_),
+	nodeNum_(0),
+	masterNodeId_(UNDEF_NODEID),
+	partitionLockList_(NULL),
+	config_(configTable, MAX_NODE_NUM),
+	prevMaxNodeId_(0),
+	nextBlockQueue_(configTable.get<int32_t>(CONFIG_TABLE_DS_PARTITION_NUM)),
+	goalBlockQueue_(configTable.get<int32_t>(CONFIG_TABLE_DS_PARTITION_NUM)),
+	promoteCandPId_(UNDEF_PARTITIONID),
+	prevCatchupPId_(UNDEF_PARTITIONID),
+	currentCatchupPId_(UNDEF_PARTITIONID),
+	prevCatchupNodeId_(UNDEF_NODEID),
+	partitions_(NULL),
+	nodes_(NULL),
+	loadInfo_(MAX_NODE_NUM),
+	failCatchup_(false), failCatchupPId_(-1),
+	isRepaired_(false),
+	prevFailoverTime_(0)
+{
 	try {
 		Partition dummyPartition;
 		uint32_t partitionNum = config_.partitionNum_;
@@ -152,6 +152,8 @@ PartitionTable::PartitionTable(const ConfigTable &configTable)
 		partitionDigit_ = digit;
 		lsnDigit_ = 10;
 
+
+
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_SYSTEM_ERROR(e, "");
@@ -161,18 +163,20 @@ PartitionTable::PartitionTable(const ConfigTable &configTable)
 PartitionTable::PartitionConfig::PartitionConfig(
 	const ConfigTable &configTable, int32_t maxNodeNum)
 	: partitionNum_(configTable.getUInt32(CONFIG_TABLE_DS_PARTITION_NUM)),
-	  replicationNum_(
-		  configTable.get<int32_t>(CONFIG_TABLE_CS_REPLICATION_NUM) - 1),
-	  limitOwnerBackupLsnGap_(
-		  configTable.get<int32_t>(CONFIG_TABLE_CS_OWNER_BACKUP_LSN_GAP)),
-	  limitOwnerCatchupLsnGap_(
-		  configTable.get<int32_t>(CONFIG_TABLE_CS_OWNER_CATCHUP_LSN_GAP)),
-	  limitClusterNodeNum_(maxNodeNum),
-	  limitMaxLsnGap_(0),
-	  ownerLoadLimit_(PT_OWNER_LOAD_LIMIT),
-	  dataLoadLimit_(PT_DATA_LOAD_LIMIT),
-	  maxNodeNum_(maxNodeNum),
-	  isSucceedCurrentOwner_(false) {
+	replicationNum_(
+		configTable.get<int32_t>(CONFIG_TABLE_CS_REPLICATION_NUM) - 1),
+	limitOwnerBackupLsnGap_(
+		configTable.get<int32_t>(CONFIG_TABLE_CS_OWNER_BACKUP_LSN_GAP)),
+	limitOwnerCatchupLsnGap_(
+		configTable.get<int32_t>(CONFIG_TABLE_CS_OWNER_CATCHUP_LSN_GAP)),
+	limitClusterNodeNum_(maxNodeNum),
+	limitMaxLsnGap_(0),
+	ownerLoadLimit_(PT_OWNER_LOAD_LIMIT),
+	dataLoadLimit_(PT_DATA_LOAD_LIMIT),
+	maxNodeNum_(maxNodeNum),
+	isSucceedCurrentOwner_(false)
+	, assignMode_(configTable.get<int32_t>(CONFIG_TABLE_CS_PARTITION_ASSIGN_MODE))
+{
 	limitOwnerBackupLsnDetectErrorGap_ =
 		limitOwnerBackupLsnGap_ * PT_BACKUP_GAP_FACTOR;
 
@@ -191,7 +195,7 @@ PartitionTable::~PartitionTable() {
 		}
 	}
 	for (NodeId nodeId = 0; nodeId < config_.getLimitClusterNodeNum();
-		 nodeId++) {
+		nodeId++) {
 		if (nodes_) {
 			ALLOC_DELETE(alloc_, &nodes_[nodeId]);
 		}
@@ -364,7 +368,7 @@ CheckedPartitionStat PartitionTable::checkPartitionStat(bool firstCheckSkip) {
 			std::vector<NodeId> backups = nextRole.getBackups();
 			liveNum = 0;
 			for (std::vector<NodeId>::iterator it = backups.begin();
-				 it != backups.end(); it++) {
+				it != backups.end(); it++) {
 				if (checkLiveNode(*it) || ((*it == 0) && firstCheckSkip)) {
 					loadInfo_.add(*it, false);
 					liveNum++;
@@ -384,8 +388,8 @@ CheckedPartitionStat PartitionTable::checkPartitionStat(bool firstCheckSkip) {
 			retStatus = PT_REPLICA_LOSS;
 		}
 		else if (loadInfo_.isBalance(true, getPartitionNum()) &&
-				 loadInfo_.isBalance(
-					 false, (backupNum + 1) * getPartitionNum())) {
+				loadInfo_.isBalance(
+					false, (backupNum + 1) * getPartitionNum())) {
 			retStatus = PT_NORMAL;
 		}
 		else {
@@ -409,12 +413,15 @@ CheckedPartitionStat PartitionTable::checkPartitionStat(bool firstCheckSkip) {
 	@brief Checks the condition for DropPartition
 */
 bool PartitionTable::checkDrop(PartitionId pId) {
-	int32_t backupMargin = PartitionConfig::PT_BACKUP_GAP_FACTOR;
+//	int32_t backupMargin = PartitionConfig::PT_BACKUP_GAP_FACTOR;
+	bool hasOtherRole = 
+		(getOwner(pId, PT_CURRENT_OB) != -1 ||  getOwner(pId, PT_NEXT_OB) != -1);
 	return (
+		config_.replicationNum_ > 0 && hasOtherRole &&
 		getLSN(pId) != 0 && !isOwner(pId, 0, PT_CURRENT_OB) &&
 		!isOwner(pId, 0, PT_NEXT_OB) && !isBackup(pId, 0, PT_CURRENT_OB) &&
-		!isBackup(pId, 0, PT_NEXT_OB) && !isBackup(pId, 0, PT_CURRENT_GOAL) &&
-		checkLimitOwnerBackupLsnGap(getMaxLsn(pId), getLSN(pId), backupMargin));
+		!isBackup(pId, 0, PT_NEXT_OB) && !isBackup(pId, 0, PT_CURRENT_GOAL) 
+		);
 }
 
 void PartitionTable::set(SubPartition &subPartition) {
@@ -481,11 +488,9 @@ void PartitionTable::checkRelation(PartitionContext &context, PartitionId pId,
 				context.isSync_ = true;
 				if (!revision_.isInitialRevision()) {
 					TRACE_CLUSTER_NORMAL_OPERATION(INFO,
-						"[NOTE] Detect active nodes, pId:"
-							<< pId
-							<< ", node:" << dumpNodeAddress(searchedNodeId)
-							<< ",  maxLsn:" << maxLsn
-							<< ", lsn:" << getLSN(pId, searchedNodeId));
+						"Detect active partition (pId=" << pId
+							<< ", node=" << dumpNodeAddress(searchedNodeId)
+							<< ", LSN=" << getLSN(pId, searchedNodeId) << ")");
 				}
 			}
 			return;
@@ -515,18 +520,17 @@ void PartitionTable::checkRelation(PartitionContext &context, PartitionId pId,
 		if (timeoutCheck) {
 			TRACE_CLUSTER_NORMAL(
 				INFO, "Short term sync timeout check, limitTime:"
-						  << getTimeStr(limitTime)
-						  << ", checkTime:" << getTimeStr(checkTime));
+						<< getTimeStr(limitTime)
+						<< ", checkTime:" << getTimeStr(checkTime));
 		}
 
 		if (timeoutCheck && checkFailover) {
 			if (getPartitionStatus(pId, ownerNodeId) != PT_ON) {
 				TRACE_CLUSTER_NORMAL_OPERATION(INFO,
-					"[NOTE] Detect cluster irregular, current owner is not "
-					"active, pId:"
-						<< pId << ", owner:" << dumpNodeAddress(ownerNodeId)
-						<< "(" << ownerNodeId << "), status:"
-						<< getPartitionStatus(pId, ownerNodeId));
+						"Detect irregular partition status (Current owner is not active, pId="
+						<< pId << ", owner=" << dumpNodeAddress(ownerNodeId)
+						<< ", status=" << dumpPartitionStatusForRest(
+						getPartitionStatus(pId, ownerNodeId)) << ")");
 				syncFlag = true;
 			}
 		}
@@ -540,13 +544,10 @@ void PartitionTable::checkRelation(PartitionContext &context, PartitionId pId,
 				if (timeoutCheck || limitTime == UNDEF_TTL) {
 					if (getPartitionStatus(pId, backupNodeId) != PT_ON) {
 						TRACE_CLUSTER_NORMAL_OPERATION(INFO,
-							"[NOTE] Detect cluster irregular, current backup "
-							"is not active, pId:"
-								<< pId
-								<< ", backup:" << dumpNodeAddress(backupNodeId)
-								<< "(" << backupNodeId << "), status:"
-								<< getPartitionStatus(pId, backupNodeId));
-
+							"Detect irregular partition status (Current backup is not active, pId="
+								<< pId << ", backup=" << dumpNodeAddress(backupNodeId)
+								<< ", status=" << dumpPartitionStatusForRest(
+								getPartitionStatus(pId, backupNodeId)) << ")");
 						setGossip(pId);
 						nextBlockQueue_.push(pId, backupNodeId);
 						syncFlag = true;
@@ -567,7 +568,7 @@ void PartitionTable::checkRelation(PartitionContext &context, PartitionId pId,
 						<< config_.limitOwnerBackupLsnDetectErrorGap_
 						<< ", gapCheck:"
 						<< checkLimitOwnerBackupLsnDetectErrorGap(
-							   ownerLsn, backupLsn)
+							ownerLsn, backupLsn)
 						<< ", isOwnerChanged:" << isOwnerChanged
 						<< ", ownerChangeCount:"
 						<< getLsnChangeCount(pId, ownerNodeId)
@@ -580,21 +581,13 @@ void PartitionTable::checkRelation(PartitionContext &context, PartitionId pId,
 					isBackupNotChanged) {
 					if (setGapCount(pId)) {
 						TRACE_CLUSTER_NORMAL_OPERATION(INFO,
-							"[NOTE] Detect cluster irregular, current "
-							"owner-backup lsn gap is invalid, pId:"
-								<< pId
-								<< ", owner:" << dumpNodeAddress(ownerNodeId)
-								<< "(" << ownerNodeId << "), backup:"
-								<< dumpNodeAddress(backupNodeId) << "("
-								<< backupNodeId << "), ownerLsn:" << ownerLsn
-								<< ", backupLsn:" << backupLsn);
+								"Detect irregular partition status (Invalid owner-backup lsn gap, pId="
+								<< pId << ", owner=" << dumpNodeAddress(ownerNodeId)
+								<< ", backup=" << dumpNodeAddress(backupNodeId) 
+								<< ", ownerLSN=" << ownerLsn << ", backupLSN=" << backupLsn << ")");
 						setGossip(pId);
 						syncFlag = true;
 						resetGapCount(pId);
-					}
-					else {
-						GS_TRACE_INFO(CLUSTER_OPERATION, 0,
-							"pId=" << pId << ", count=" << getGapCount(pId));
 					}
 				}
 				else {
@@ -610,12 +603,10 @@ void PartitionTable::checkRelation(PartitionContext &context, PartitionId pId,
 				if (currentOwner != UNDEF_NODEID && currentOwner != nextOwner) {
 					if (getPartitionStatus(pId, nextOwner) != PT_ON) {
 						TRACE_CLUSTER_NORMAL_OPERATION(INFO,
-							"[NOTE] Detect cluster irregular, next backup is "
-							"not active, pId:"
-								<< pId
-								<< ", backup:" << dumpNodeAddress(nextOwner)
-								<< "(" << nextOwner << "), status:"
-								<< getPartitionStatus(pId, nextOwner));
+							"Detect irregular partition status (Next backup is not active, pId="
+								<< pId << ", backup=" << dumpNodeAddress(nextOwner)
+								<< ", status=" << dumpPartitionStatusForRest(
+								getPartitionStatus(pId, nextOwner)) << ")");
 						nextBlockQueue_.push(pId, nextOwner);
 						setGossip(pId);
 					}
@@ -624,16 +615,14 @@ void PartitionTable::checkRelation(PartitionContext &context, PartitionId pId,
 				backups.clear();
 				getBackup(pId, backups, PT_NEXT_OB);
 				for (pos = 0; pos < static_cast<int32_t>(backups.size());
-					 pos++) {
+					pos++) {
 					backupNodeId = backups[pos];
 					if (getPartitionStatus(pId, backupNodeId) != PT_ON) {
 						TRACE_CLUSTER_NORMAL_OPERATION(INFO,
-							"[NOTE] Detect cluster irregular, next backup is "
-							"not active, pId:"
-								<< pId
-								<< ", backup:" << dumpNodeAddress(backupNodeId)
-								<< "(" << backupNodeId << "), status:"
-								<< getPartitionStatus(pId, backupNodeId));
+							"Detect irregular partition status (Next backup is not active, pId="
+								<< pId << " , backup=" << dumpNodeAddress(backupNodeId)
+								<< ", status=" << dumpPartitionStatusForRest(
+										getPartitionStatus(pId, backupNodeId)) << ")");
 						nextBlockQueue_.push(pId, backupNodeId);
 						setGossip(pId);
 					}
@@ -657,40 +646,23 @@ void PartitionTable::checkRelation(PartitionContext &context, PartitionId pId,
 			if (timeoutCheck) {
 				goalBlockQueue_.push(pId, backupNodeId);
 				TRACE_CLUSTER_NORMAL_OPERATION(INFO,
-					"[NOTE] Detect cluster irregular, long term sync timeout "
-					"is occurred, pId:"
-						<< pId << ", owner:" << dumpNodeAddress(ownerNodeId)
-						<< "(" << ownerNodeId << "), catchup:"
-						<< dumpNodeAddress(backupNodeId) << "(" << backupNodeId
-						<< "), limitTime:" << getTimeStr(limitTime)
-						<< ", checkTime:" << getTimeStr(checkTime));
+						"Detect irregular partition status (Long term sync timeout, pId="
+						<< pId << ", owner=" << dumpNodeAddress(ownerNodeId)
+						<< ", catchup=" << dumpNodeAddress(backupNodeId)
+						<< ", limitTime=" << getTimeStr(limitTime)
+						<< ", checkTime=" << getTimeStr(checkTime) << ")");
 				setGossip(pId);
 			}
 			else {
 				if (checkPromoteOwnerCatchupLsnGap(ownerLsn, backupLsn) &&
 					((ownerLsn > 0 && backupLsn != 0) ||
 						(ownerLsn == 0 && backupLsn == 0))) {
-					if (checkTime -
-							(limitTime - longtermTimeout - heartbeatSlack) <
-						slackTime) {
-						TRACE_CLUSTER_NORMAL(INFO,
-							"Not reached promotion limit time, pId:"
-								<< pId << ", owner:" << ownerNodeId
-								<< ", ownerLsn:" << ownerLsn << ", catchup:"
-								<< backupNodeId << ", catchupLsn:" << backupLsn
-								<< ", currentInterval:"
-								<< (checkTime - (limitTime - longtermTimeout -
-													heartbeatSlack)));
-						continue;
-					}
 					TRACE_CLUSTER_NORMAL_OPERATION(INFO,
-						"[INFO] Detect catchup node promotion, pId:"
-							<< pId << ", owner:" << dumpNodeAddress(ownerNodeId)
-							<< "(" << ownerNodeId << "), ownerLsn:" << ownerLsn
-							<< ", catchup:" << dumpNodeAddress(backupNodeId)
-							<< "(" << backupNodeId
-							<< "), catchupLsn:" << backupLsn);
-
+						"Detect catchup partition promotion (pId="
+							<< pId << ", owner=" << dumpNodeAddress(ownerNodeId)
+							<< ", ownerLSN=" << ownerLsn
+							<< ", catchup=" << dumpNodeAddress(backupNodeId)
+							<< ", catchupLSN=" << backupLsn << ")");
 					nextBlockQueue_.erase(pId, backupNodeId);
 					setGossip(pId);
 					promoteFlag = true;
@@ -713,7 +685,8 @@ void PartitionTable::checkRelation(PartitionContext &context, PartitionId pId,
 
 void PartitionTable::filter(PartitionContext &context,
 	util::Set<NodeId> &changedNodeSet, SubPartitionTable &subPartitionTable,
-	bool isShortSync) {
+	bool isShortSync
+	) {
 	try {
 		PartitionId pId;
 		util::XArray<PartitionId>::iterator it;
@@ -742,7 +715,8 @@ void PartitionTable::filter(PartitionContext &context,
 					(limitTime == UNDEF_TTL || checkTime > limitTime);
 
 				if (currentRole == nextRole && currentRole == targetRole &&
-					timeoutCheck) {
+					timeoutCheck
+					) {
 					NodeId owner;
 					std::vector<NodeId> backups;
 					owner = nextRole.getOwner();
@@ -760,8 +734,8 @@ void PartitionTable::filter(PartitionContext &context,
 							}
 						}
 						if (activeCount ==
-								static_cast<int32_t>(backups.size()) &&
-							activeCount >= backupNum) {
+								static_cast<int32_t>(backups.size()) 
+							) {
 							checkFlag = false;
 						}
 					}
@@ -811,7 +785,6 @@ void PartitionTable::filter(PartitionContext &context,
 						getPartitionInfo(pId)->isActive_, true, nextRole);
 					nextRole.getTargetNodeSet(changedNodeSet);
 					currentRole.getTargetNodeSet(changedNodeSet);
-
 					getPartitionInfo(pId)->longTermTimeout_ =
 						context.longTermTimeout_;
 				}
@@ -833,18 +806,18 @@ void PartitionTable::checkAndSetPartitionStatus(PartitionId pId,
 			if (targetNode != currentActiveOwner) {
 				UTIL_TRACE_WARNING(CLUSTER_SERVICE,
 					"Change, pId:" << pId << ", targetNode:" << targetNode
-								   << ", currentOwner:" << currentOwner
-								   << ", currentActiveOwner:"
-								   << currentActiveOwner);
+								<< ", currentOwner:" << currentOwner
+								<< ", currentActiveOwner:"
+								<< currentActiveOwner);
 				currentActiveOwnerList_[pId] = targetNode;
 			}
 		}
 		else {
 			UTIL_TRACE_WARNING(CLUSTER_SERVICE,
 				"Detect unmatch, pId:" << pId << ", targetNode:" << targetNode
-									   << ", currentOwner:" << currentOwner
-									   << ", currentActiveOwner:"
-									   << currentActiveOwner);
+									<< ", currentOwner:" << currentOwner
+									<< ", currentActiveOwner:"
+									<< currentActiveOwner);
 			partitions_[pId].roles_[PT_CURRENT_OB].setOwner(targetNode);
 			setGossip(pId);
 		}
@@ -919,8 +892,16 @@ void PartitionTable::BlockQueue::erase(PartitionId pId, NodeId nodeId) {
 	}
 }
 
+template<class T> void arrayShuffle(util::XArray<T> &ary, uint32_t size, util::Random &random) {
+	for(uint32_t i = 0;i < size; i++) {
+		uint32_t j = (uint32_t)(random.nextInt32()) % size;
+		T t = ary[i];
+		ary[i] = ary[j];
+		ary[j] = t;
+	}
+}
 
-void PartitionTable::createNextPartition(PartitionContext &context) {
+void PartitionTable::createNextPartition(PartitionContext &context, uint32_t partitionNum) {
 	try {
 		PartitionId targetPId;
 		size_t pos = 0;
@@ -930,7 +911,6 @@ void PartitionTable::createNextPartition(PartitionContext &context) {
 		bool isSucceedCurrentOwner = config_.isSucceedCurrentOwner();
 
 		int32_t nodeNum = getNodeNum();
-		uint32_t partitionNum = getPartitionNum();
 		int32_t replicationNum = getReplicationNum();
 		util::StackAllocator &alloc = *context.alloc_;
 
@@ -946,6 +926,7 @@ void PartitionTable::createNextPartition(PartitionContext &context) {
 
 		util::XArray<PartitionId> &targetPIdList = context.shortTermPIdList_;
 		bool isRepairPartition = context.isRepairPartition_;
+		bool isShufflePartition = context.isShufflePartition_;
 
 		util::XArray<NodeId>::iterator nodeItr;
 
@@ -962,7 +943,7 @@ void PartitionTable::createNextPartition(PartitionContext &context) {
 		PartitionRole *nextRole, *targetRole, *currentRole;
 		uint32_t maxOwnerLoad, minOwnerLoad, maxDataLoad, minDataLoad;
 
-		TRACE_CLUSTER_NORMAL(INFO, "IsRepaired:" << isRepairPartition);
+		TRACE_CLUSTER_NORMAL(INFO, "IsRepaired:" << isRepairPartition << ", IsShuffle" << isShufflePartition);
 
 		bool isResync = (targetPIdSize == partitionNum);
 
@@ -975,7 +956,7 @@ void PartitionTable::createNextPartition(PartitionContext &context) {
 					if (nodes_[currentOwner].heartbeatTimeout_ == UNDEF_TTL) {
 						TRACE_CLUSTER_NORMAL(
 							WARNING, "Modify down owner, before:{"
-										 << currentRole << "}");
+										<< currentRole << "}");
 						currentRole.clear();
 						currentOwner = UNDEF_NODEID;
 						setPartitionRole(pId, currentRole);
@@ -1000,12 +981,12 @@ void PartitionTable::createNextPartition(PartitionContext &context) {
 					if (isDown) {
 						TRACE_CLUSTER_NORMAL(
 							WARNING, "Modify down backups, before:{"
-										 << currentRole << "}");
+										<< currentRole << "}");
 						currentRole.set(currentOwner, tmpBackups);
 						setPartitionRole(pId, currentRole);
 						TRACE_CLUSTER_NORMAL(
 							WARNING, "Modify down backups, after:{"
-										 << currentRole << "}");
+										<< currentRole << "}");
 					}
 				}
 			}
@@ -1020,7 +1001,7 @@ void PartitionTable::createNextPartition(PartitionContext &context) {
 				continue;
 			}
 			for (nodeItr = liveNodeList.begin(); nodeItr != liveNodeList.end();
-				 nodeItr++) {
+				nodeItr++) {
 				nextRole = &partitions_[pId].roles_[PT_NEXT_OB];
 				nodeId = (*nodeItr);
 				if (nextRole->isOwner(nodeId)) {
@@ -1040,6 +1021,19 @@ void PartitionTable::createNextPartition(PartitionContext &context) {
 					<< ", dataLoad:" << dataLoadList[nodeId] << "}");
 		}
 
+		if (isShufflePartition) {
+			context.shortTermPIdList_.clear();
+			for (PartitionId pId = 0; pId < partitionNum; pId++) {
+				context.shortTermPIdList_.push_back(pId);
+			}
+		}
+
+		if ((config_.assignMode_ == PARTITION_ASSIGN_SHUFFLE && nodeNum > 1) || isShufflePartition) {
+			util::Random random(static_cast<int64_t>(util::DateTime::now(false).getUnixTime()));
+			arrayShuffle(context.shortTermPIdList_,
+					static_cast<uint32_t>(context.shortTermPIdList_.size()), random);
+		}
+
 		LogSequentialNumber maxLsn, targetLsn, ownerLsn, startLsn;
 		int32_t candOwnerCount, backupCount;
 		NodeId candOwner = UNDEF_NODEID, candBackup;
@@ -1054,7 +1048,6 @@ void PartitionTable::createNextPartition(PartitionContext &context) {
 			nextRole = &partitions_[targetPId].roles_[PT_NEXT_OB];
 			currentRole = &partitions_[targetPId].roles_[PT_CURRENT_OB];
 
-			if (isResync) {
 				TRACE_CLUSTER_NORMAL(WARNING, "resync");
 				NodeId owner = nextRole->getOwner();
 				if (owner != UNDEF_NODEID) {
@@ -1074,7 +1067,6 @@ void PartitionTable::createNextPartition(PartitionContext &context) {
 						}
 					}
 				}
-			}
 
 			currentOwner = currentRole->getOwner();
 			bool isOwnerActive = false;
@@ -1104,7 +1096,7 @@ void PartitionTable::createNextPartition(PartitionContext &context) {
 				LogSequentialNumber prevMaxLsn = getMaxLsn(targetPId);
 				LogSequentialNumber nextMaxLsn = 0;
 				for (nodeItr = liveNodeList.begin();
-					 nodeItr != liveNodeList.end(); nodeItr++) {
+					nodeItr != liveNodeList.end(); nodeItr++) {
 					nodeId = (*nodeItr);
 					targetLsn = getLSN(targetPId, nodeId);
 					if (targetLsn > nextMaxLsn) {
@@ -1118,15 +1110,15 @@ void PartitionTable::createNextPartition(PartitionContext &context) {
 					minDataLoad, cmpCatchupOwnerNode);
 
 				for (ownerNodeItr = ownerOrderList.begin();
-					 ownerNodeItr != ownerOrderList.end(); ownerNodeItr++) {
+					ownerNodeItr != ownerOrderList.end(); ownerNodeItr++) {
 					nodeId = (*ownerNodeItr).nodeId_;
 					targetLsn = getLSN(targetPId, nodeId);
 
 					TRACE_CLUSTER_NORMAL(
 						WARNING, "Reparing check, pId:"
-									 << targetPId << ", nodeId:" << nodeId
-									 << ", targetLsn:" << targetLsn
-									 << ", nextMaxLsn:" << nextMaxLsn);
+									<< targetPId << ", nodeId:" << nodeId
+									<< ", targetLsn:" << targetLsn
+									<< ", nextMaxLsn:" << nextMaxLsn);
 
 					if (targetLsn == nextMaxLsn) {
 						candOwner = nodeId;
@@ -1135,12 +1127,10 @@ void PartitionTable::createNextPartition(PartitionContext &context) {
 						repairLsnList_[targetPId] = nextMaxLsn;
 
 						TRACE_CLUSTER_NORMAL_OPERATION(INFO,
-							"[INFO] Repair partition, pId:"
-								<< targetPId << ", owner:"
-								<< dumpNodeAddress(candOwner) << "("
-								<< candOwner << "), prevMaxLsn:" << prevMaxLsn
-								<< ", repairedMaxLsn:" << nextMaxLsn);
-
+							"Repair partition (pId="
+								<< targetPId << ", owner="
+								<< dumpNodeAddress(candOwner) << ", prevMaxLSN=" << prevMaxLsn
+								<< ", repairedMaxLSN=" << nextMaxLsn);
 						isRepaired_ = true;
 						nextBlockQueue_.clear(targetPId);
 
@@ -1160,13 +1150,13 @@ void PartitionTable::createNextPartition(PartitionContext &context) {
 				else {
 					bool isFind;
 					for (nodeItr = liveNodeList.begin();
-						 nodeItr != liveNodeList.end(); nodeItr++) {
+						nodeItr != liveNodeList.end(); nodeItr++) {
 						nodeId = (*nodeItr);
 						targetLsn = getLSN(targetPId, nodeId);
 						TRACE_CLUSTER_NORMAL(
 							WARNING, "(Phase1) Check owner, pId:"
-										 << targetPId << ", nodeId:" << nodeId
-										 << ", lsn:" << targetLsn);
+										<< targetPId << ", nodeId:" << nodeId
+										<< ", lsn:" << targetLsn);
 						isFind = false;
 						if (!isOwnerActive) {
 							if (maxLsn <= targetLsn) {
@@ -1175,7 +1165,7 @@ void PartitionTable::createNextPartition(PartitionContext &context) {
 						}
 						else {
 							if (((getPartitionStatus(targetPId, nodeId) ==
-									 PT_ON) &&
+									PT_ON) &&
 									(currentRole->isOwner(nodeId) ||
 										currentRole->isBackup(nodeId))) ||
 								(!checkLimitOwnerBackupLsnGap(
@@ -1209,7 +1199,7 @@ void PartitionTable::createNextPartition(PartitionContext &context) {
 				else if (nextBlockQueue_.find(targetPId, candOwner)) {
 					TRACE_CLUSTER_NORMAL(
 						WARNING, "Target node is blocked, pId:"
-									 << targetPId << ", nodeId:" << candOwner);
+									<< targetPId << ", nodeId:" << candOwner);
 					continue;
 				}
 				tmpOwnerList[targetPId] = candOwner;
@@ -1251,7 +1241,7 @@ void PartitionTable::createNextPartition(PartitionContext &context) {
 			}
 
 			for (ownerNodeItr = ownerOrderList.begin();
-				 ownerNodeItr != ownerOrderList.end(); ownerNodeItr++) {
+				ownerNodeItr != ownerOrderList.end(); ownerNodeItr++) {
 				isFind = false;
 				candOwner = (*ownerNodeItr).nodeId_;
 				targetLsn = getLSN(targetPId, candOwner);
@@ -1338,16 +1328,14 @@ void PartitionTable::createNextPartition(PartitionContext &context) {
 				}
 
 				TRACE_CLUSTER_NORMAL_OPERATION(
-					INFO, "[NOTE] Target node is not service, pId:"
-							  << targetPId << " cluster maxLsn:" << maxLsn
-							  << ", current maxLsn:" << tmpMaxLsn << ")");
-
+					INFO, "Target partition is not service (pId="
+							<< targetPId << ", expected maxLSN=" << maxLsn
+							<< ", actual maxLSN=" << tmpMaxLsn << ")");
 				if (notLiveMaxNodeIdList.size() > 0) {
 					TRACE_CLUSTER_NORMAL_OPERATION(
-						INFO, "[INFO] Down nodes information, pId:"
-								  << targetPId << ", cluster maxLsn:" << maxLsn
-								  << ", nodes:"
-								  << dumpNodeAddressList(notLiveMaxNodeIdList));
+							INFO, "Down node information (pId="
+							<< targetPId << ", down nodeList="
+							<< dumpNodeAddressList(notLiveMaxNodeIdList) << ")");
 				}
 			}
 			else {
@@ -1383,7 +1371,7 @@ void PartitionTable::createNextPartition(PartitionContext &context) {
 				}
 
 				for (nodeItr = liveNodeList.begin();
-					 nodeItr != liveNodeList.end(); nodeItr++) {
+					nodeItr != liveNodeList.end(); nodeItr++) {
 					candBackup = (*nodeItr);
 					if (candOwner == candBackup) continue;
 
@@ -1405,15 +1393,15 @@ void PartitionTable::createNextPartition(PartitionContext &context) {
 						(!checkLimitOwnerBackupLsnGap(ownerLsn, targetLsn))
 						&&
 						((isActivePartitionList[targetPId] &&
-							 targetLsn >= startLsn)
+							targetLsn >= startLsn)
 							|| (!isActivePartitionList[targetPId] &&
-								   targetLsn >= startLsn)));
+								targetLsn >= startLsn)));
 
 					bool check2 = (
 						((prevCatchupPId_ == targetPId) &&
 							(prevCatchupNodeId_ == candBackup))
 						&& ((ownerLsn == 0 && targetLsn == 0) ||
-							   (ownerLsn > 0 && targetLsn > 0))
+							(ownerLsn > 0 && targetLsn > 0))
 						&&
 						!checkLimitOwnerBackupLsnGap(ownerLsn, targetLsn,
 							PartitionConfig::PT_BACKUP_GAP_FACTOR));
@@ -1427,8 +1415,8 @@ void PartitionTable::createNextPartition(PartitionContext &context) {
 						}
 						TRACE_CLUSTER_NORMAL(
 							INFO, "Cand backup, pId:"
-									  << targetPId << ", backup:" << candBackup
-									  << ", load:" << dataLoadList[candBackup]);
+									<< targetPId << ", backup:" << candBackup
+									<< ", load:" << dataLoadList[candBackup]);
 
 						CatchupNodeInfo catchupInfo(candBackup,
 							dataLoadList[candBackup], dataLoadList[candBackup]);
@@ -1441,15 +1429,15 @@ void PartitionTable::createNextPartition(PartitionContext &context) {
 						cmpCatchupNode);
 					backupCount = 0;
 					for (backupNodeItr = backupOrderList.begin();
-						 backupNodeItr != backupOrderList.end();
-						 backupNodeItr++) {
+						backupNodeItr != backupOrderList.end();
+						backupNodeItr++) {
 						candBackup = (*backupNodeItr).nodeId_;
 
 						TRACE_CLUSTER_NORMAL(
 							INFO, "Next backup informations, no:"
-									  << backupCount << ", pId:" << targetPId
-									  << ", backup:" << candBackup
-									  << ", load:" << dataLoadList[candBackup]);
+									<< backupCount << ", pId:" << targetPId
+									<< ", backup:" << candBackup
+									<< ", load:" << dataLoadList[candBackup]);
 
 						backups.push_back(candBackup);
 						dataLoadList[candBackup]++;
@@ -1462,6 +1450,49 @@ void PartitionTable::createNextPartition(PartitionContext &context) {
 				targetRole = &partitions_[targetPId].roles_[targetType];
 				targetRole->set(revision_, candOwner);
 				context.setChangePId(MODE_SHORTTERM_SYNC, targetPId);
+			}
+		}
+
+		for (PartitionId pId = 0; pId < partitionNum; pId++) {
+			util::XArray<CatchupNodeInfo> catchupOrderList(alloc);
+			sortOrderList(catchupOrderList, liveNodeList, ownerLoadList,
+				dataLoadList, maxOwnerLoad, minOwnerLoad, maxDataLoad, minDataLoad,
+				cmpCatchupNode, true);
+			if (maxOwnerLoad - minOwnerLoad < 2) break;
+//			bool hasMin = false;
+			bool hasMax = false;
+//			NodeId target = UNDEF_NODEID;
+			nextRole = &partitions_[pId].roles_[PT_TMP_OB];
+			NodeId owner = nextRole->getOwner();
+			if (owner == UNDEF_NODEID) continue;
+			bool isOwner = true;
+			bool isBackup = false;
+			if (ownerLoadList[owner] == maxOwnerLoad &&
+				(isOwner || isBackup)) {
+				hasMax = true;
+			}
+			if (hasMax) {
+				for (nodeItr = liveNodeList.begin();
+					nodeItr != liveNodeList.end(); nodeItr++) {
+					nodeId = *nodeItr;
+					isOwner = nextRole->isOwner(nodeId);
+					 isBackup = nextRole->isBackup(nodeId);
+					if (ownerLoadList[nodeId] == minOwnerLoad &&
+						(isOwner || isBackup)) {
+						targetRole = &partitions_[pId].roles_[PT_TMP_OB];
+						std::vector<NodeId> tmpBackList;
+						std::vector<NodeId> &backupList = targetRole->getBackups();
+						tmpBackList.push_back(owner);
+						for (size_t pos = 0; pos < backupList.size(); pos++) {
+							if (nodeId != backupList[pos] ) {
+								tmpBackList.push_back(backupList[pos]);
+							}
+						}
+						targetRole->set(revision_, nodeId,  tmpBackList);
+						 ownerLoadList[nodeId]++;
+						 ownerLoadList[owner]--;
+					}
+				}
 			}
 		}
 	}
@@ -1482,8 +1513,8 @@ void PartitionTable::createCatchupPartition(
 
 			TRACE_CLUSTER_NORMAL(
 				WARNING, "Update catchup information, pId:"
-							 << prevCatchupPId_
-							 << ", goalNodeId:" << prevCatchupNodeId_);
+							<< prevCatchupPId_
+							<< ", goalNodeId:" << prevCatchupNodeId_);
 			return;
 		}
 		PartitionId pId, targetPId;
@@ -1515,7 +1546,7 @@ void PartitionTable::createCatchupPartition(
 
 		TRACE_CLUSTER_NORMAL(
 			INFO, "Create catchup partition is started, prev catchup pId:"
-					  << prevCatchupPId_);
+					<< prevCatchupPId_);
 
 		TRACE_CLUSTER_NORMAL(
 			WARNING, dumpPartitions(alloc, PartitionTable::PT_NEXT_OB));
@@ -1524,7 +1555,16 @@ void PartitionTable::createCatchupPartition(
 			WARNING, dumpPartitions(alloc, PartitionTable::PT_TMP_OB));
 
 		util::XArray<ReplicaInfo> replicaLossList(alloc);
+		util::XArray<PartitionId> tmpSearchPIdList(alloc);
 		for (pId = 0; pId < partitionNum; pId++) {
+			tmpSearchPIdList.push_back(pId);
+		}
+		util::Random random(static_cast<int64_t>(util::DateTime::now(false).getUnixTime()));
+		arrayShuffle(tmpSearchPIdList,
+				static_cast<uint32_t>(tmpSearchPIdList.size()), random);
+
+		for (size_t tmpPos = 0; tmpPos < tmpSearchPIdList.size(); tmpPos++) {
+			pId = tmpSearchPIdList[tmpPos]; 
 			nextRole = &partitions_[pId].roles_[targetNextType];
 			nextCatchupRole = &partitions_[pId].roles_[PT_TMP_GOAL];
 			nextCatchupRole->clear();
@@ -1542,7 +1582,7 @@ void PartitionTable::createCatchupPartition(
 
 		for (pId = 0; pId < partitionNum; pId++) {
 			for (nodeItr = liveNodeList.begin(); nodeItr != liveNodeList.end();
-				 nodeItr++) {
+				nodeItr++) {
 				nextRole = &partitions_[pId].roles_[targetNextType];
 				nodeId = (*nodeItr);
 				if (nextRole->isOwner(nodeId)) {
@@ -1582,7 +1622,7 @@ void PartitionTable::createCatchupPartition(
 					if (owner == UNDEF_NODEID) continue;
 
 					for (nodeItr = liveNodeList.begin();
-						 nodeItr != liveNodeList.end(); nodeItr++) {
+						nodeItr != liveNodeList.end(); nodeItr++) {
 						nodeId = *nodeItr;
 
 						if (!goalBlockQueue_.find(pId, nodeId)) {
@@ -1642,8 +1682,8 @@ void PartitionTable::createCatchupPartition(
 					goalBlockQueue_.push(prevCatchupPId_, prevCatchupNodeId_);
 					TRACE_CLUSTER_NORMAL(
 						WARNING, "Update catchup information, pId:"
-									 << prevCatchupPId_
-									 << ", goalNodeId:" << prevCatchupNodeId_);
+									<< prevCatchupPId_
+									<< ", goalNodeId:" << prevCatchupNodeId_);
 				}
 				prevCatchupPId_ = UNDEF_PARTITIONID;
 				prevCatchupNodeId_ = UNDEF_NODEID;
@@ -1659,8 +1699,8 @@ void PartitionTable::createCatchupPartition(
 			std::sort(
 				replicaLossList.begin(), replicaLossList.end(), cmpReplica);
 			for (partitionPos = 0;
-				 partitionPos < static_cast<int32_t>(replicaLossList.size());
-				 partitionPos++) {
+				partitionPos < static_cast<int32_t>(replicaLossList.size());
+				partitionPos++) {
 				if (!isActive(replicaLossList[partitionPos].pId_)) continue;
 				searchPIdList.push_back(replicaLossList[partitionPos].pId_);
 			}
@@ -1688,23 +1728,26 @@ void PartitionTable::createCatchupPartition(
 				if (!isActive(pId)) continue;
 				searchPIdList.push_back(pId);
 			}
+			util::Random random(static_cast<int64_t>(util::DateTime::now(false).getUnixTime()));
+			arrayShuffle(searchPIdList,
+					static_cast<uint32_t>(searchPIdList.size()), random);
 		}
 
 		for (partitionPos = 0;
-			 partitionPos < static_cast<int32_t>(searchPIdList.size());
-			 partitionPos++) {
+			partitionPos < static_cast<int32_t>(searchPIdList.size());
+			partitionPos++) {
 			targetPId = searchPIdList[partitionPos];
 			nextRole = &partitions_[targetPId].roles_[targetNextType];
 
 			for (nodePos = 0;
-				 nodePos < static_cast<int32_t>(catchupOrderList.size());
-				 nodePos++) {
+				nodePos < static_cast<int32_t>(catchupOrderList.size());
+				nodePos++) {
 				target = catchupOrderList[nodePos].nodeId_;
 				if (target == UNDEF_NODEID) continue;  
 
 				TRACE_CLUSTER_NORMAL(WARNING, "Check catchup informations, pId:"
-												  << targetPId
-												  << ", target:" << target);
+												<< targetPId
+												<< ", target:" << target);
 
 				owner = nextRole->getOwner();
 				if (owner >= 0 && owner != target &&
@@ -1726,7 +1769,7 @@ void PartitionTable::createCatchupPartition(
 								prevCatchupPId_ != targetPId) {
 								PartitionRole *tmpRole =
 									&partitions_[prevCatchupPId_]
-										 .roles_[targetType];
+										.roles_[targetType];
 								tmpRole->set(revision_, UNDEF_NODEID);
 								context.setChangePId(
 									MODE_LONGTERM_SYNC, prevCatchupPId_);
@@ -1756,13 +1799,13 @@ void PartitionTable::createCatchupPartition(
 					else {
 						TRACE_CLUSTER_NORMAL(
 							WARNING, "Target node is blocked, pId:"
-										 << targetPId << ", nodeId:" << target);
+										<< targetPId << ", nodeId:" << target);
 					}
 				}
 				else {
 					TRACE_CLUSTER_NORMAL(
 						DEBUG, "Target node is not candidated, pId:"
-								   << targetPId << ", nodeId:" << target);
+								<< targetPId << ", nodeId:" << target);
 				}
 			}
 		}
@@ -1772,8 +1815,8 @@ void PartitionTable::createCatchupPartition(
 				goalBlockQueue_.push(prevCatchupPId_, prevCatchupNodeId_);
 				TRACE_CLUSTER_NORMAL(
 					WARNING, "Update catchup information, pId:"
-								 << prevCatchupPId_
-								 << ", goalNodeId:" << prevCatchupNodeId_);
+								<< prevCatchupPId_
+								<< ", goalNodeId:" << prevCatchupNodeId_);
 			}
 			prevCatchupPId_ = UNDEF_PARTITIONID;
 			prevCatchupNodeId_ = UNDEF_NODEID;
@@ -1908,7 +1951,7 @@ std::string PartitionTable::dumpPartitions(
 
 	ss << terminateCode << "[PARTITION ROLE]" << terminateCode;
 	ss << "# partitionNum:" << partitionNum
-	   << ", replicaNum:" << (replicationNum + 1) << terminateCode;
+	<< ", replicaNum:" << (replicationNum + 1) << terminateCode;
 	std::string partitionType;
 	std::string backupStr;
 	std::string ownerStr("O");
@@ -1958,7 +2001,7 @@ std::string PartitionTable::dumpPartitions(
 		int32_t psum = 0;
 		int32_t currentPos = 0;
 		ss << "[P" << std::setfill('0') << std::setw(partitionDigit_) << pId
-		   << "]";
+		<< "]";
 		ss << "[" << dumpPartitionStatusEx(getPartitionStatus(pId)) << "]";
 
 		std::vector<NodeId> currentBackupList;
@@ -2004,6 +2047,52 @@ std::string PartitionTable::dumpPartitions(
 	return ss.str();
 }
 
+std::string PartitionTable::dumpPartitionsList(
+	util::StackAllocator &alloc, TableType type) {
+	util::NormalOStringStream ss;
+	util::XArray<uint32_t> countList(alloc);
+	util::XArray<uint32_t> ownerCountList(alloc);
+	countList.assign(static_cast<size_t>(nodeNum_), 0);
+	ownerCountList.assign(static_cast<size_t>(nodeNum_), 0);
+	uint32_t partitionNum = config_.partitionNum_;
+//	int32_t replicationNum = config_.replicationNum_;
+//	size_t pos = 0;
+
+	PartitionId pId;
+	LogSequentialNumber maxLSN = 0;
+	for (pId = 0; pId < partitionNum; pId++) {
+		if (maxLsnList_[pId] > maxLSN) {
+			maxLSN = maxLsnList_[pId];
+		}
+	}
+	int32_t digit = 0;
+	for (; maxLSN != 0; digit++) {
+		maxLSN /= 10;
+	}
+
+	ss << "[";
+	for (pId = 0; pId < partitionNum; pId++) {
+		PartitionRole *role = &partitions_[pId].roles_[type];
+//		int32_t psum = 0;
+//		int32_t currentPos = 0;
+		std::vector<NodeId> currentBackupList;
+		NodeId curretOwnerNodeId = role->getOwner();
+//		PartitionRevision &revision = role->getRevision();
+		std::vector<NodeId> &backups = role->getBackups();
+//		int32_t backupNum = static_cast<int32_t>(backups.size());
+		ss << "{pId=" << pId << ", owner="<< dumpNodeAddress(curretOwnerNodeId) 
+				<< ", backup=" << dumpNodeAddressList(backups) << "}";
+		if (pId != partitionNum - 1) {
+			ss << ",";
+		}
+		else {
+			ss << "]";
+		}
+	}
+	return ss.str();
+}
+
+
 std::string PartitionTable::dumpDatas(bool isDetail) {
 	PartitionId pId;
 	LogSequentialNumber maxLSN = 0;
@@ -2026,7 +2115,7 @@ std::string PartitionTable::dumpDatas(bool isDetail) {
 	ss << terminateCode << "[LSN LIST]" << terminateCode;
 	for (pId = 0; pId < partitionNum; pId++) {
 		ss << "[P" << std::setfill('0') << std::setw(partitionDigit_) << pId
-		   << "]";
+		<< "]";
 		for (NodeId nodeId = 0; nodeId < nodeNum_; nodeId++) {
 			if (isMaster()) {
 				ss << std::setw(lsnDigit_) << getLSN(pId, nodeId);
@@ -2047,7 +2136,7 @@ std::string PartitionTable::dumpDatas(bool isDetail) {
 		ss << terminateCode << "[START LSN LIST]" << terminateCode;
 		for (pId = 0; pId < partitionNum; pId++) {
 			ss << "[P" << std::setfill('0') << std::setw(partitionDigit_) << pId
-			   << "]";
+			<< "]";
 			for (NodeId nodeId = 0; nodeId < nodeNum_; nodeId++) {
 				if (isMaster()) {
 					ss << std::setw(lsnDigit_) << getStartLSN(pId, nodeId);
@@ -2165,3 +2254,4 @@ std::string PartitionRole::dump(PartitionTable *pt, ServiceType serviceType) {
 	}
 	return ss1.str();
 }
+

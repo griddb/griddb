@@ -55,9 +55,17 @@ public:
 
 	uint64_t append(bool value);
 
+	inline uint8_t* data() const {
+		return reinterpret_cast<uint8_t*>(data_);
+	}
+
 	inline uint64_t length() const {
 		return bitNum_;
 	};
+
+	inline uint64_t byteLength() const {
+		return (bitNum_+ CHAR_BIT - 1) / CHAR_BIT;
+	}
 
 	inline uint64_t countNumOfBits() {
 		uint64_t numOfBits = 0;

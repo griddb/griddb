@@ -53,6 +53,9 @@ typedef ObjectAccessType<OBJECT_FOR_UPDATE> ObjectWriteType;
 			   (1L << UNIT_OFFSET_ROUND_BIT) ==                 \
 		   0);
 
+#define ASSERT_ISVALID_USER(user)                           \
+	assert(0 <= user && user < (1L << MAX_USER_BIT));
+
 struct AllocateStrategy;
 
 /*!
@@ -334,6 +337,9 @@ public:
 	uint32_t getHalfOfMaxObjectSize() const {
 		return halfOfMaxObjectSize_;
 	}
+	uint32_t getRecommendtLimitObjectSize() const {
+		return recommendLimitObjectSize_;
+	}
 
 	/*!
 		@brief Validates RefCounter of fixing and unfixing.
@@ -343,7 +349,8 @@ public:
 			ChunkCategoryId categoryId = 0;
 			ChunkId cId = 0;
 			uint64_t chunkNum = chunkManager_->getScanSize(pId);
-			MetaChunk* metaChunk = chunkManager_->begin(pId, categoryId, cId);
+			ChunkKey* chunkKey;
+			MetaChunk* metaChunk = chunkManager_->begin(pId, categoryId, cId, chunkKey);
 			for (uint64_t i = 0; i < chunkNum; i++) {
 				if (metaChunk && !metaChunk->isFree()) {
 					int32_t refCount =
@@ -357,7 +364,7 @@ public:
 								<< ", cId = " << i << ", ref = " << refCount);
 					}
 				}
-				metaChunk = chunkManager_->next(pId, categoryId, cId);
+				metaChunk = chunkManager_->next(pId, categoryId, cId, chunkKey);
 			}
 		}
 	}
@@ -372,6 +379,8 @@ private:
 	ObjectAllocator* objectAllocator_;  
 	uint32_t maxObjectSize_;
 	uint32_t halfOfMaxObjectSize_;
+	uint32_t recommendLimitObjectSize_;
+	bool isZeroFill_; 
 
 	uint8_t* allocateObject(MetaChunk& metaChunk, uint8_t powerSize,
 		ObjectType objectType, uint32_t& offset, Size_t& size) {
@@ -433,21 +442,27 @@ private:
 	}
 
 
+
 	static const uint64_t MASK_32BIT = 0xFFFFFFFFULL;
 	static const uint64_t MASK_16BIT = 0x0000FFFFULL;
 	static const uint64_t MASK_3BIT = 0x00000007ULL;
 
 	static const int32_t MAGIC_NUMBER_EXP_SIZE = 3;
-	static const uint64_t MASK_MAGIC = 0x0038000000000000ULL;
-	static const uint64_t MAGIC_NUMBER = 0x0028000000000000ULL;
+	static const uint64_t MASK_MAGIC = 0x000000000000e000ULL;
+	static const uint64_t MAGIC_NUMBER = 0x000000000000a000ULL;
+
+	static const uint64_t MASK_USER = 0x000003FFULL;
 
 	static const uint32_t UNIT_OFFSET_ROUND_BIT = 4;
 
 	static const uint32_t MAX_CHUNK_EXP_SIZE = 20;
 
-	static const uint32_t UNIT_OFFSET_SHIFT_BIT = 32;
-	static const uint32_t CATEGORY_ID_SHIFT_BIT = 32 + 16;
-	static const uint32_t MAGIC_SHIFT_BIT = 3 + 32 + 16;
+	static const uint32_t UNIT_CHUNK_SHIFT_BIT = 32;
+	static const uint32_t UNIT_OFFSET_SHIFT_BIT = 16;
+	static const uint32_t CATEGORY_ID_SHIFT_BIT = 10;
+	static const uint32_t MAGIC_SHIFT_BIT = 1 + 12;
+
+	static const uint32_t MAX_USER_BIT = 10;
 
 public:
 	inline static OId getOId(
@@ -455,7 +470,7 @@ public:
 		ASSERT_ISVALID_CATEGORYID(categoryId);
 		ASSERT_ISVALID_CHUNKID(cId);
 		ASSERT_ISVALID_OFFSET(offset);
-		OId chunkIdOId = ((OId)cId);
+		OId chunkIdOId = ((OId)cId << UNIT_CHUNK_SHIFT_BIT);
 		OId unitOffsetOId = (((OId)offset >> UNIT_OFFSET_ROUND_BIT)
 							 << UNIT_OFFSET_SHIFT_BIT);  
 		OId categoryIdOId = ((OId)categoryId << CATEGORY_ID_SHIFT_BIT);
@@ -464,16 +479,13 @@ public:
 	}
 
 	inline static ChunkId getChunkId(OId oId) {
-		ChunkId cId = static_cast<ChunkId>(MASK_32BIT & (oId));
+		ChunkId cId = static_cast<ChunkId>(MASK_32BIT & (oId >> UNIT_CHUNK_SHIFT_BIT));
 		ASSERT_ISVALID_CHUNKID(cId);
 		return cId;
 	}
 
 	inline static Offset_t getOffset(OId oId) {
-		Offset_t offset =
-			(static_cast<int32_t>(MASK_16BIT & (oId >> UNIT_OFFSET_SHIFT_BIT))
-				<< UNIT_OFFSET_ROUND_BIT) +
-			ObjectAllocator::BLOCK_HEADER_SIZE;
+		Offset_t offset = getRelativeOffset(oId) + ObjectAllocator::BLOCK_HEADER_SIZE;
 		ASSERT_ISVALID_OFFSET(offset);
 		return offset;
 	}
@@ -495,6 +507,21 @@ public:
 		return categoryId;
 	}
 
+	inline static OId getUserArea(OId oId) {
+		OId userArea = oId & MASK_USER;
+		return userArea;
+	}
+
+	inline static OId setUserArea(OId oId, OId userArea) {
+		ASSERT_ISVALID_USER(userArea);
+		OId addedOId = getBaseArea(oId) | userArea;
+		return addedOId;
+	}
+
+	inline static OId getBaseArea(OId oId) {
+		OId baseArea = oId & (~MASK_USER);
+		return baseArea;
+	}
 private:
 	inline static bool isValidOId(OId oId) {
 		uint64_t magic = static_cast<uint64_t>(MASK_MAGIC & oId);

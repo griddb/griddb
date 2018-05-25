@@ -281,7 +281,6 @@ inline int Lexer::_gsGetToken(const char *z, int *tokenType) {
 		case '\'':
 		case '"': {
 			int delim = z[0];
-			int idCharCheck = 0xFF;
 			for (i = 1; (c = z[i]) != 0; i++) {
 				if (c == delim) {
 					if (z[i + 1] == delim) {
@@ -291,15 +290,12 @@ inline int Lexer::_gsGetToken(const char *z, int *tokenType) {
 						break;
 					}
 				}
-				else {
-					idCharCheck &= IdChar(z[i]);
-				}
 			}
 			if (c == '\'') {
 				*tokenType = TK_STRING;
 				return i + 1;
 			}
-			else if (c != 0 && idCharCheck) {
+			else if (c != 0) {
 				*tokenType = TK_ID;
 				return i + 1;
 			}

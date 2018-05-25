@@ -32,9 +32,9 @@ struct CompareStringI {
 public:
 	bool operator()(const util::String &right, const util::String &left) const {
 		return (compareStringStringI(
-					reinterpret_cast<const uint8_t *>(right.c_str()),
+					right.c_str(),
 					static_cast<uint32_t>(right.length()),
-					reinterpret_cast<const uint8_t *>(left.c_str()),
+					left.c_str(),
 					static_cast<uint32_t>(left.length())) < 0);
 	}
 };
@@ -54,12 +54,16 @@ public:
 		return containerType_;
 	}
 
+
 	uint32_t getColumnCount() const {
 		return columnNum_;
 	}
 
-	ColumnId getRowKeyColumnId() const {
-		return keyColumnId_;
+	const util::XArray<ColumnId>& getRowKeyColumnIdList() const {
+		return keyColumnIds_;
+	}
+	uint32_t getRowKeyNum() const {
+		return static_cast<uint32_t>(keyColumnIds_.size());
 	}
 
 	ColumnType getColumnType(ColumnId columnId) const {
@@ -69,7 +73,14 @@ public:
 	ColumnType getColumnFullType(ColumnId columnId) const;
 
 	bool getIsArray(ColumnId columnId) const {
-		return isArrayList_[columnId];
+		return (flagsList_[columnId] & COLUMN_FLAG_ARRAY) != 0;
+	}
+	bool getIsNotNull(ColumnId columnId) const {
+		return (flagsList_[columnId] & COLUMN_FLAG_NOT_NULL) != 0;
+	}
+
+	bool getIsVirtual(ColumnId columnId) const {
+		return (flagsList_[columnId] & COLUMN_FLAG_VIRTUAL) != 0;
 	}
 
 	const util::String &getColumnName(ColumnId columnId) const {
@@ -102,8 +113,6 @@ protected:
 
 	void setColumnType(ColumnId columnId, ColumnType type);
 
-	void setIsArray(ColumnId columnId, bool isArray);
-
 	void setColumnName(ColumnId columnId, const void *data, uint32_t size);
 
 	void setContainerAttribute(ContainerAttribute attribute) {
@@ -115,10 +124,14 @@ protected:
 	ContainerType containerType_;
 	util::String affinityStr_;  
 private:
+	static const uint8_t COLUMN_FLAG_ARRAY = 0x01;
+	static const uint8_t COLUMN_FLAG_VIRTUAL = 0x02;
+	static const uint8_t COLUMN_FLAG_NOT_NULL = 0x04;
+
 	uint32_t columnNum_;
-	ColumnId keyColumnId_;
+	util::XArray<ColumnId> keyColumnIds_;
 	util::XArray<ColumnType> columnTypeList_;
-	util::XArray<bool> isArrayList_;
+	util::XArray<uint8_t> flagsList_;
 	util::Vector<util::String> columnNameList_;
 	util::Map<util::String, ColumnId, CompareStringI> columnNameMap_;
 	util::StackAllocator &alloc_;
@@ -135,8 +148,7 @@ public:
 		const char *containerName, util::ArrayByteInStream &in);
 
 	~MessageCollectionSchema() {}
-
-private:
+protected:
 };
 
 /*!
@@ -159,10 +171,11 @@ public:
 	}
 
 
-	void setExpirationInfo(TimeSeries::ExpirationInfo &expirationInfo) {
+	void setExpirationInfo(const TimeSeries::ExpirationInfo &expirationInfo) {
 		expirationInfo_ = expirationInfo;
 	}
 
+protected:
 private:
 	void validateRowKeySchema();
 	void validateOption(util::ArrayByteInStream &in);

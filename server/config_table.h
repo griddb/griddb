@@ -132,6 +132,8 @@ public:
 
 	typedef std::set< ParamId, std::less<ParamId>,
 			util::StdAllocator<ParamId, void> > IdSet;
+	typedef std::vector<
+			const char8_t*, util::StdAllocator<ParamId, void> > SubPath;
 
 	template<typename T> class BasicSetUpHandler;
 	class ValueAnnotation;
@@ -158,7 +160,9 @@ public:
 	void setParamHandler(ParamId id, ParamHandler &handler);
 	void setDefaultParamHandler(ParamHandler &handler);
 
-	bool findParam(ParamId groupId, ParamId &id, const char8_t *name) const;
+	bool findParam(
+			ParamId groupId, ParamId &id, const char8_t *name,
+			SubPath *subPath = NULL) const;
 	bool getNextParam(ParamId id, ParamId &nextId, bool skipEmpty) const;
 	bool getParentParam(ParamId id, ParamId &parentId) const;
 
@@ -177,7 +181,8 @@ public:
 	bool getReferredParam(ParamId id, ParamId &refId, size_t ordinal) const;
 
 	void set(ParamId id, const ParamValue &value,
-			const char8_t *sourceInfo, ParamHandler *customHandler = NULL);
+			const char8_t *sourceInfo, ParamHandler *customHandler = NULL,
+			const SubPath *subPath = NULL);
 
 	void acceptFile(const char8_t *dirPath,
 			const char8_t *const *fileList, size_t count, ParamId id);
@@ -186,17 +191,32 @@ public:
 	void toFile(const char8_t *filePath, ParamId id, ExportMode mode);
 	void toJSON(picojson::value &dest, ParamId id, ExportMode mode);
 
-
 	void addProblem(const util::Exception::NamedErrorCode &code,
 			const char8_t *message);
 	void setTraceEnabled(bool enabled);
 
-	PathFormatter pathFormatter(ParamId id) const;
+	PathFormatter pathFormatter(
+			ParamId id, const SubPath *subPath = NULL) const;
 
 	static ParamHandler& silentHandler();
 
+	static picojson::value* findSubValue(
+			picojson::value &value, const SubPath *subPath = NULL);
+	static const picojson::value& getSubValue(
+			const picojson::value &value, const SubPath *subPath = NULL);
+
 	static std::string getParamSymbol(
 			const char8_t *src, bool reverse, size_t startDepth);
+
+	static void fileToJson(
+			const util::StdAllocator<void, void> &alloc,
+			const char8_t *fileName,
+			picojson::value &jsonValue, const size_t *maxFileSize = NULL);
+
+	static void fileToBuffer(
+			const char8_t *fileName,
+			util::XArray< uint8_t, util::StdAllocator<uint8_t, void> > &buf,
+			const size_t *maxFileSize = NULL);
 
 protected:
 	typedef util::BasicString< char8_t, std::char_traits<char8_t>,
@@ -317,10 +337,12 @@ public:
 
 private:
 	friend class ParamTable;
-	PathFormatter(ParamId id, const EntryMap &enrtyMap);
+	PathFormatter(
+			ParamId id, const EntryMap &enrtyMap, const SubPath *subPath);
 
 	ParamId id_;
 	const EntryMap &entryMap_;
+	const SubPath *subPath_;
 };
 
 class ParamTable::SilentParamHandler : public ParamHandler {
@@ -342,7 +364,8 @@ public:
 	void save(const char8_t *fileName) const;
 
 	bool isValidUser(
-		const char8_t *name, const char8_t *password, bool convert = false) const;
+			const char8_t *name, const char8_t *password,
+			bool convert = false) const;
 
 	const char8_t* getDigest(const char8_t *name) const;
 
@@ -354,6 +377,9 @@ public:
 private:
 	UserTable(const UserTable&);
 	UserTable& operator=(const UserTable&);
+
+	void replaceAll(
+			std::string &str, const std::string &from, const std::string &to);
 
 	std::map<std::string, std::string> digestMap_;
 };
@@ -855,6 +881,21 @@ enum ConfigTableParamId {
 
 	CONFIG_TABLE_SYNC_LONG_SYNC_TIMEOUT_INTERVAL,
 	CONFIG_TABLE_SYNC_LONG_SYNC_MAX_MESSAGE_SIZE,
+	CONFIG_TABLE_SYNC_LOG_MAX_MESSAGE_SIZE,
+	CONFIG_TABLE_SYNC_CHUNK_MAX_MESSAGE_SIZE,
+
+	CONFIG_TABLE_SYNC_APPROXIMATE_GAP_LSN,
+	CONFIG_TABLE_SYNC_LOCKCONFLICT_INTERVAL,
+	CONFIG_TABLE_SYNC_APPROXIMATE_WAIT_INTERVAL,
+	CONFIG_TABLE_SYNC_SHORTTERM_LIMIT_QUEUE_SIZE,
+	CONFIG_TABLE_SYNC_SHORTTERM_LOWLOAD_LOG_INTERVAL,
+	CONFIG_TABLE_SYNC_SHORTTERM_HIGHLOAD_LOG_INTERVAL,
+	CONFIG_TABLE_SYNC_LONGTERM_LIMIT_QUEUE_SIZE,
+	CONFIG_TABLE_SYNC_LONGTERM_LOWLOAD_LOG_INTERVAL,
+	CONFIG_TABLE_SYNC_LONGTERM_HIGHLOAD_LOG_INTERVAL,
+	CONFIG_TABLE_SYNC_LONGTERM_LOWLOAD_CHUNK_INTERVAL,
+	CONFIG_TABLE_SYNC_LONGTERM_HIGHLOAD_CHUNK_INTERVAL,
+	CONFIG_TABLE_SYNC_LONGTERM_DUMP_CHUNK_INTERVAL,
 
 	CONFIG_TABLE_TXN_NOTIFICATION_ADDRESS,
 	CONFIG_TABLE_TXN_NOTIFICATION_PORT,
@@ -872,6 +913,7 @@ enum ConfigTableParamId {
 	CONFIG_TABLE_ROOT_SERVICE_ADDRESS,
 
 	CONFIG_TABLE_DS_DB_PATH,
+	CONFIG_TABLE_DS_SYNC_TEMP_PATH,  
 	CONFIG_TABLE_DS_CHUNK_MEMORY_LIMIT,
 	CONFIG_TABLE_DS_STORE_MEMORY_LIMIT,
 	CONFIG_TABLE_DS_CONCURRENCY,
@@ -888,6 +930,8 @@ enum ConfigTableParamId {
 	CONFIG_TABLE_DS_PERSISTENCY_MODE,
 	CONFIG_TABLE_DS_RETAINED_FILE_COUNT,
 
+	CONFIG_TABLE_DS_BACKGROUND_MIN_RATE,
+
 	CONFIG_TABLE_CP_CHECKPOINT_INTERVAL,
 	CONFIG_TABLE_CP_CHECKPOINT_MEMORY_LIMIT,
 	CONFIG_TABLE_CP_USE_PARALLEL_MODE,
@@ -902,6 +946,9 @@ enum ConfigTableParamId {
 
 	CONFIG_TABLE_CS_CONNECTION_LIMIT,
 	CONFIG_TABLE_CS_CHECKPOINT_DELAY_INTERVAL,
+	CONFIG_TABLE_CS_CATCHUP_PROMOTION_CHECK_INTERVAL,
+
+	CONFIG_TABLE_CS_PARTITION_ASSIGN_MODE,
 
 	CONFIG_TABLE_SYNC_LISTEN_ADDRESS,
 	CONFIG_TABLE_SYNC_LISTEN_PORT,
@@ -927,6 +974,7 @@ enum ConfigTableParamId {
 	CONFIG_TABLE_TXN_STACK_MEMORY_LIMIT,
 	CONFIG_TABLE_TXN_TOTAL_MEMORY_LIMIT,
 	CONFIG_TABLE_TXN_QUEUE_MEMORY_LIMIT,
+	CONFIG_TABLE_TXN_WORK_MEMORY_LIMIT,
 	CONFIG_TABLE_TXN_TOTAL_MESSAGE_MEMORY_LIMIT,
 	CONFIG_TABLE_TXN_USE_KEEPALIVE,
 	CONFIG_TABLE_TXN_KEEPALIVE_IDLE,
@@ -953,6 +1001,7 @@ enum ConfigTableParamId {
 	CONFIG_TABLE_TRACE_CHECKPOINT_FILE,
 	CONFIG_TABLE_TRACE_CHECKPOINT_SERVICE,
 	CONFIG_TABLE_TRACE_CHECKPOINT_SERVICE_DETAIL,
+	CONFIG_TABLE_TRACE_CHECKPOINT_SERVICE_STATUS_DETAIL,
 	CONFIG_TABLE_TRACE_LOG_MANAGER,
 	CONFIG_TABLE_TRACE_IO_MONITOR,
 	CONFIG_TABLE_TRACE_CLUSTER_OPERATION,
@@ -978,7 +1027,12 @@ enum ConfigTableParamId {
 	CONFIG_TABLE_TRACE_SYSTEM,
 	CONFIG_TABLE_TRACE_BTREE_MAP,
 	CONFIG_TABLE_TRACE_AUTHENTICATION_TIMEOUT,
+	CONFIG_TABLE_TRACE_DATASTORE_BACKGROUND,
+	CONFIG_TABLE_TRACE_SYNC_DETAIL,
+	CONFIG_TABLE_TRACE_CLUSTER_DETAIL,
 
+	CONFIG_TABLE_TRACE_ZLIB_UTILS,
+	CONFIG_TABLE_TRACE_SIZE_MONITOR,
 	CONFIG_TABLE_TRACE_TRACER_ID_END,
 
 	CONFIG_TABLE_DEV_AUTO_JOIN_CLUSTER,
@@ -990,6 +1044,7 @@ enum ConfigTableParamId {
 	CONFIG_TABLE_DEV_TRACE_SECRET,
 	CONFIG_TABLE_DEV_SIMPLE_VERSION,
 	CONFIG_TABLE_DEV_FULL_VERSION,
+
 
 	CONFIG_TABLE_PARAM_END
 };
@@ -1087,6 +1142,13 @@ enum StatTableParamId {
 	STAT_TABLE_CS_NOTIFICATION_MODE,
 	STAT_TABLE_CS_NOTIFICATION_MEMBER,
 
+	STAT_TABLE_PERF_OWNER_COUNT,
+	STAT_TABLE_PERF_BACKUP_COUNT,
+	STAT_TABLE_PERF_TOTAL_OWNER_LSN,
+	STAT_TABLE_PERF_TOTAL_BACKUP_LSN,
+	STAT_TABLE_PERF_TOTAL_OTHER_LSN,
+
+
 	STAT_TABLE_CP_START_TIME,
 	STAT_TABLE_CP_END_TIME,
 	STAT_TABLE_CP_MODE,
@@ -1116,11 +1178,19 @@ enum StatTableParamId {
 	STAT_TABLE_PERF_TXN_NUM_CONNECTION,	
 	STAT_TABLE_PERF_TXN_NUM_SESSION,	
 	STAT_TABLE_PERF_TXN_NUM_TXN,	
+	STAT_TABLE_PERF_TXN_NUM_BACKGROUND,	
+	STAT_TABLE_PERF_TXN_NUM_NO_EXPIRE_TXN,	
 	STAT_TABLE_PERF_TXN_TOTAL_LOCK_CONFLICT_COUNT,	
 	STAT_TABLE_PERF_TXN_TOTAL_READ_OPERATION,	
 	STAT_TABLE_PERF_TXN_TOTAL_WRITE_OPERATION,	
 	STAT_TABLE_PERF_TXN_TOTAL_ROW_READ,	
 	STAT_TABLE_PERF_TXN_TOTAL_ROW_WRITE,	
+	STAT_TABLE_PERF_TXN_DETAIL,
+	STAT_TABLE_PERF_TXN_TOTAL_BACKGROUND_OPERATION,	
+	STAT_TABLE_PERF_TXN_TOTAL_NO_EXPIRE_OPERATION, 
+	STAT_TABLE_PERF_TXN_TOTAL_ABORT_DDL,	
+	STAT_TABLE_PERF_TXN_TOTAL_REP_TIMEOUT,	
+	STAT_TABLE_PERF_TXN_BACKGROUND_MIN_RATE,
 
 	STAT_TABLE_PERF_TXN_DETAIL_DISABLE_TIMEOUT_CHECK_PARTITION_COUNT,
 	STAT_TABLE_PERF_TXN_EE_CLUSTER,
@@ -1146,6 +1216,7 @@ enum StatTableParamId {
 
 	STAT_TABLE_PERF_DS_DETAIL_POOL_BUFFER_MEMORY,
 	STAT_TABLE_PERF_DS_DETAIL_POOL_CHECKPOINT_MEMORY,
+
 
 
 	STAT_TABLE_PERF_DS_DETAIL_CATEGORY_START,
@@ -1246,6 +1317,7 @@ enum AllocatorGroupId {
 	ALLOCATOR_GROUP_TXN_MESSAGE,
 	ALLOCATOR_GROUP_TXN_RESULT,
 	ALLOCATOR_GROUP_TXN_WORK,
+	ALLOCATOR_GROUP_REPLICATION,
 	ALLOCATOR_GROUP_ID_END
 };
 

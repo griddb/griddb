@@ -188,7 +188,7 @@ public:
 	virtual ~SelectionTimeSampling() {}
 
 private:
-	void parseArgument(TransactionContext &txn, ObjectManager &objectManager,
+	bool parseArgument(TransactionContext &txn, ObjectManager &objectManager,
 		ExprList &args, uint32_t &columnId, ColumnType &columnType,
 		util::DateTime::FieldType &fType, Timestamp &targetTs, Timestamp &endTs,
 		int32_t &duration);

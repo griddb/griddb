@@ -38,45 +38,6 @@ UTIL_TRACER_DECLARE(SYSTEM);
 		GS_EXCEPTION_NAMED_CODE(code), \
 		UTIL_EXCEPTION_CREATE_MESSAGE_CHARS(message))
 
-static void loadAllAsString(
-		const char8_t *fileName, util::NormalXArray<uint8_t> &buf) {
-	const int32_t maxFileSize = 1024 * 1024;
-
-	try {
-		if (!util::FileSystem::exists(fileName)) {
-			GS_THROW_USER_ERROR(GS_ERROR_CM_FILE_NOT_FOUND, "");
-		}
-
-		util::NamedFile file;
-		file.open(fileName, util::FileFlag::TYPE_READ_ONLY);
-
-		util::FileStatus status;
-		file.getStatus(&status);
-		const int64_t size = status.getSize();
-		if (size > maxFileSize) {
-			GS_THROW_USER_ERROR(GS_ERROR_CT_PARAMETER_FILE_TOO_LARGE,
-				"Too large file size (limitBytes=" << maxFileSize << ")");
-		}
-
-		buf.resize(static_cast<size_t>(size + 1));
-		file.read(buf.data(), static_cast<size_t>(size));
-		file.close();
-		buf[buf.size() - 1] = '\0';
-	}
-	catch (std::exception &e) {
-		GS_RETHROW_USER_ERROR(e, "Failed to load file (fileName=" <<
-				fileName << ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
-	}
-}
-
-static void replaceAll(std::string &str, const std::string &from, const std::string &to) {
-    std::string::size_type pos = 0;
-    while (pos = str.find(from, pos), pos != std::string::npos) {
-        str.replace(pos, from.size(), to);
-        pos += to.size();
-    }
-}
-
 ParamValue::ParamValue(const Null&) : type_(PARAM_TYPE_NULL) {
 }
 
@@ -380,8 +341,9 @@ UserTable::UserTable() {
 	@brief Loads user definition file
 */
 void UserTable::load(const char8_t *fileName) {
-	util::NormalXArray<uint8_t> buf;
-	loadAllAsString(fileName, buf);
+	std::allocator<char> alloc;
+	util::XArray< uint8_t, util::StdAllocator<uint8_t, void> > buf(alloc);
+	ParamTable::fileToBuffer(fileName, buf);
 
 	std::string allStr(buf.begin(), buf.end());
 	replaceAll(allStr, "\r\n", "\n");
@@ -481,6 +443,15 @@ void UserTable::setUser(const char8_t *name, const char8_t *digest) {
 
 void UserTable::removeUser(const char8_t *name) {
 	digestMap_.erase(name);
+}
+
+void UserTable::replaceAll(
+			std::string &str, const std::string &from, const std::string &to) {
+    std::string::size_type pos = 0;
+    while (pos = str.find(from, pos), pos != std::string::npos) {
+        str.replace(pos, from.size(), to);
+        pos += to.size();
+    }
 }
 
 /*!
@@ -666,7 +637,8 @@ void ParamTable::setDefaultParamHandler(ParamHandler &handler) {
 	@brief Checks if a specified parameter exists
 */
 bool ParamTable::findParam(
-		ParamId groupId, ParamId &id, const char8_t *name) const {
+		ParamId groupId, ParamId &id, const char8_t *name,
+		SubPath *subPath) const {
 	id = PARAM_ID_ROOT;
 
 	EntryMap::const_iterator groupIt = entryMap_.find(groupId);
@@ -680,7 +652,25 @@ bool ParamTable::findParam(
 	const NameMap::const_iterator nameIt =
 			groupEntry.subNameMap_.find(nameStr);
 	if (nameIt == groupEntry.subNameMap_.end()) {
-		return false;
+
+		if (groupEntry.group_ || subPath == NULL ||
+				groupEntry.value_ == NULL ||
+				!groupEntry.value_->is<picojson::value>()) {
+			return false;
+		}
+
+		picojson::value jsonValue =
+				groupEntry.value_->get<picojson::value>();
+		picojson::value *subValue = findSubValue(jsonValue, subPath);
+
+		if (subValue == NULL && JsonUtils::find<picojson::value>(
+				*subValue, name) == NULL) {
+			return false;
+		}
+
+		subPath->push_back(name);
+		id = groupId;
+		return true;
 	}
 
 	id = nameIt->second;
@@ -862,7 +852,8 @@ bool ParamTable::getReferredParam(
 	@brief Sets ParamValue, input file name and ParamHandler with parameter id
 */
 void ParamTable::set(ParamId id, const ParamValue &value,
-		const char8_t *sourceInfo, ParamHandler *customHandler) {
+		const char8_t *sourceInfo, ParamHandler *customHandler,
+		const SubPath *subPath) {
 
 	EntryMap::iterator it = entryMap_.find(id);
 	if (it == entryMap_.end()) {
@@ -870,6 +861,22 @@ void ParamTable::set(ParamId id, const ParamValue &value,
 	}
 
 	Entry &entry = it->second;
+
+	if (subPath != NULL && !subPath->empty()) {
+		if (entry.value_ == NULL || !entry.value_->is<picojson::value>()) {
+			GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+		}
+
+		picojson::value jsonValue = entry.value_->get<picojson::value>();
+		picojson::value *subValue = findSubValue(jsonValue, subPath);
+		if (subValue == NULL) {
+			GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+		}
+
+		value.toJSON(*subValue);
+		set(id, jsonValue, sourceInfo, customHandler, NULL);
+		return;
+	}
 
 	ParamHandler *handler = (customHandler == NULL ?
 			(entry.handler_ == NULL ? defaultHandler_ : entry.handler_) :
@@ -923,22 +930,9 @@ void ParamTable::acceptFile(
 	for (size_t i = 0; i < count; i++) {
 		u8string filePath;
 		util::FileSystem::createPath(dirPath, fileList[i], filePath);
-		String sourceInfo(filePath.c_str(), alloc_);
-
-		util::NormalXArray<uint8_t> buf;
-		loadAllAsString(filePath.c_str(), buf);
-		const char8_t *str = reinterpret_cast<char8_t*>(buf.data());
 
 		jsonValueList.push_back(picojson::value());
-		picojson::value &jsonValue = jsonValueList.back();
-
-		const std::string err =
-				JsonUtils::parseAll(jsonValue, str, str + buf.size() - 1);
-		if (!err.empty()) {
-			GS_THROW_USER_ERROR(GS_ERROR_CT_PARAMETER_INVALID,
-					"Failed to parse JSON (file=" << fileList[i] <<
-					", reason=" << err << ")");
-		}
+		fileToJson(alloc_, filePath.c_str(), jsonValueList.back());
 	}
 
 	acceptJSON(&jsonValueList[0], count, id, fileList);
@@ -1104,8 +1098,9 @@ void ParamTable::setTraceEnabled(bool enabled) {
 /*!
 	@brief Returns path format
 */
-ParamTable::PathFormatter ParamTable::pathFormatter(ParamId id) const {
-	return PathFormatter(id, entryMap_);
+ParamTable::PathFormatter ParamTable::pathFormatter(
+		ParamId id, const SubPath *subPath) const {
+	return PathFormatter(id, entryMap_, subPath);
 }
 
 /*!
@@ -1114,6 +1109,37 @@ ParamTable::PathFormatter ParamTable::pathFormatter(ParamId id) const {
 ParamTable::ParamHandler& ParamTable::silentHandler() {
 	static SilentParamHandler handler;
 	return handler;
+}
+
+picojson::value* ParamTable::findSubValue(
+		picojson::value &value, const SubPath *subPath) {
+	picojson::value *subValue = &value;
+
+	if (subValue != NULL) {
+		for (SubPath::const_iterator it = subPath->begin();
+				it != subPath->end(); ++it) {
+			subValue = JsonUtils::find<picojson::value>(*subValue, *it);
+			if (subValue == NULL) {
+				return NULL;
+			}
+		}
+	}
+
+	return subValue;
+}
+
+const picojson::value& ParamTable::getSubValue(
+		const picojson::value &value, const SubPath *subPath) {
+	const picojson::value *subValue = &value;
+
+	if (subValue != NULL) {
+		for (SubPath::const_iterator it = subPath->begin();
+				it != subPath->end(); ++it) {
+			subValue = &JsonUtils::as<picojson::value>(*subValue, *it);
+		}
+	}
+
+	return *subValue;
 }
 
 /*!
@@ -1190,6 +1216,57 @@ std::string ParamTable::getParamSymbol(
 		}
 	}
 	return dest;
+}
+
+void ParamTable::fileToJson(
+		const util::StdAllocator<void, void> &alloc, const char8_t *fileName,
+		picojson::value &jsonValue, const size_t *maxFileSize) {
+
+	util::XArray< uint8_t, util::StdAllocator<uint8_t, void> > buf(alloc);
+	fileToBuffer(fileName, buf, maxFileSize);
+
+	const char8_t *str = reinterpret_cast<char8_t*>(buf.data());
+
+	const std::string err =
+			JsonUtils::parseAll(jsonValue, str, str + buf.size());
+	if (!err.empty()) {
+		GS_THROW_USER_ERROR(GS_ERROR_CT_PARAMETER_INVALID,
+				"Failed to parse JSON (file=" << fileName <<
+				", reason=" << err << ")");
+	}
+}
+
+void ParamTable::fileToBuffer(
+		const char8_t *fileName,
+		util::XArray< uint8_t, util::StdAllocator<uint8_t, void> > &buf,
+		const size_t *maxFileSize) {
+	const size_t maxFileSizeLocal =
+			(maxFileSize == NULL ? 1024 * 1024 : *maxFileSize);
+
+	try {
+		if (!util::FileSystem::exists(fileName)) {
+			GS_THROW_USER_ERROR(GS_ERROR_CM_FILE_NOT_FOUND, "");
+		}
+
+		util::NamedFile file;
+		file.open(fileName, util::FileFlag::TYPE_READ_ONLY);
+
+		util::FileStatus status;
+		file.getStatus(&status);
+		const uint64_t size = static_cast<uint64_t>(status.getSize());
+		if (size > maxFileSizeLocal) {
+			GS_THROW_USER_ERROR(GS_ERROR_CT_PARAMETER_FILE_TOO_LARGE,
+				"Too large file size (limitBytes=" << maxFileSizeLocal << ")");
+		}
+
+		buf.resize(static_cast<size_t>(size));
+		file.read(buf.data(), static_cast<size_t>(size));
+		file.close();
+	}
+	catch (std::exception &e) {
+		GS_RETHROW_USER_ERROR(e, "Failed to load file (fileName=" <<
+				fileName << ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+	}
 }
 
 void ParamTable::initializeSchema(const ParamTable &table) {
@@ -1440,7 +1517,6 @@ void ParamTable::SilentParamHandler::operator()(ParamId, const ParamValue&) {
 void ParamTable::PathFormatter::format(std::ostream &stream) const {
 	if (id_ == PARAM_ID_ROOT) {
 		stream << "(root)";
-		return;
 	}
 
 	typedef std::vector<const Entry*> EntryList;
@@ -1456,11 +1532,21 @@ void ParamTable::PathFormatter::format(std::ostream &stream) const {
 		stream << (it == entryList.rbegin() ? "" : ".") <<
 				(**it).name_.c_str();
 	}
+
+	if (subPath_ != NULL) {
+		for (SubPath::const_iterator it = subPath_->begin();
+				it != subPath_->end(); ++it) {
+			if (it != subPath_->begin() || !entryList.empty()) {
+				stream << ".";
+			}
+			stream << *it;
+		}
+	}
 }
 
 ParamTable::PathFormatter::PathFormatter(
-		ParamId id, const EntryMap &entryMap) :
-		id_(id), entryMap_(entryMap) {
+		ParamId id, const EntryMap &entryMap, const SubPath *subPath) :
+		id_(id), entryMap_(entryMap), subPath_(subPath) {
 }
 
 std::ostream& operator<<(
@@ -1501,15 +1587,17 @@ void ConfigTable::resolveGroup(ParamId groupId, ParamId id, const char8_t *name)
 ConfigTable::Constraint& ConfigTable::addParam(
 		ParamId groupId, ParamId id, const char8_t *name) {
 
-	constraintList_.reserve(constraintList_.size() + 1);
+	util::InsertionResetter resetter(constraintList_);
+	util::AllocUniquePtr<Constraint> constraint(
+			UTIL_OBJECT_POOL_NEW(constraintPool_) Constraint(
+					id, *this, getAllocator(), getValuePool()),
+			constraintPool_);
 
-	Constraint *constraint = UTIL_OBJECT_POOL_NEW(constraintPool_) Constraint(
-			id, *this, getAllocator(), getValuePool());
-	constraintList_.push_back(constraint);
+	constraintList_.push_back(constraint.get());
+	ParamTable::addParam(groupId, id, name, constraint.get(), false, true);
 
-	ParamTable::addParam(groupId, id, name, constraint, false, true);
-
-	return *constraint;
+	resetter.release();
+	return *constraint.release();
 }
 
 /*!
@@ -1683,12 +1771,13 @@ ConfigTable::Constraint& ConfigTable::Constraint::add(
 		}
 	}
 
-	candidateList_.reserve(candidateList_.size() + 1);
-	CandidateInfo info = {
-		String(),
-		UTIL_OBJECT_POOL_NEW(valuePool_) ParamValue(*filtered, alloc_),
-		srcUnit };
+	util::AllocUniquePtr<ParamValue> paramValue(
+			UTIL_OBJECT_POOL_NEW(valuePool_) ParamValue(*filtered, alloc_),
+			valuePool_);
+	CandidateInfo info = { String(), paramValue.get(), srcUnit };
+
 	candidateList_.push_back(info);
+	paramValue.release();
 
 	return *this;
 }
@@ -1717,12 +1806,13 @@ ConfigTable::Constraint& ConfigTable::Constraint::addEnum(
 		}
 	}
 
-	candidateList_.reserve(candidateList_.size() + 1);
-	CandidateInfo info = {
-		nameStr,
-		UTIL_OBJECT_POOL_NEW(valuePool_) ParamValue(*filtered, alloc_),
-		VALUE_UNIT_NONE };
+	util::AllocUniquePtr<ParamValue> paramValue(
+			UTIL_OBJECT_POOL_NEW(valuePool_) ParamValue(*filtered, alloc_),
+			valuePool_);
+	CandidateInfo info = { nameStr, paramValue.get(), VALUE_UNIT_NONE };
+
 	candidateList_.push_back(info);
+	paramValue.release();
 
 	return *this;
 }
@@ -2705,14 +2795,14 @@ ConfigTable::Constraint::Formatter::~Formatter() {
 void ConfigTable::Constraint::Formatter::add(
 		const char8_t *name, const ParamValue &value, EntryType entryType) {
 
-	entryList_.reserve(entryList_.size() + 1);
-
-	Entry *entry = new (entryAlloc_.allocate(1)) Entry();
-	entryList_.push_back(entry);
-
+	util::AllocUniquePtr<Entry> entry(
+			new (entryAlloc_.allocate(1)) Entry(), entryAlloc_);
 	entry->name_ = name;
 	entry->value_.assign(value, constraint_.alloc_);
 	entry->entryType_ = entryType;
+
+	entryList_.push_back(entry.get());
+	entry.release();
 }
 
 void ConfigTable::Constraint::Formatter::addAll(const Formatter &formatter) {

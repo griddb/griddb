@@ -27,8 +27,8 @@
 #include "util/file.h"
 #include "util/time.h"  
 #include "util/trace.h"
-#include "bit_array.h"
 #include "data_type.h"
+#include "bit_array.h"
 
 UTIL_TRACER_DECLARE(CHECKPOINT_FILE);
 
@@ -50,11 +50,13 @@ public:
 	void initialize(const char8_t *dir, PartitionGroupId pgId);
 
 	void punchHoleBlock(uint32_t size, uint64_t offset);
+
+	void zerofillUnusedBlock(const uint64_t blockNum);
+
 	int64_t writeBlock(const uint8_t *buffer, uint32_t size, uint64_t blockNo);
 	int64_t readBlock(uint8_t *buffer, uint32_t size, uint64_t blockNo);
 
-	int64_t writePartialBlock(
-		const uint8_t *buffer, uint32_t size, uint64_t offset);
+	int64_t writePartialBlock(const uint8_t *buffer, uint32_t size, uint64_t offset);
 
 	uint64_t getWriteBlockCount();
 	uint64_t getReadBlockCount();

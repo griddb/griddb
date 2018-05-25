@@ -39,19 +39,19 @@ public:
 		uint8_t *srcObjectRowField, uint8_t *targetObjectRowField);
 
 	static void getField(TransactionContext &txn, ObjectManager &objectManager,
-		ColumnId columnId, Value *objectValue,
+		ColumnId columnId, const Value *objectValue,
 		MessageRowStore *outputMessageRowStore);
 
 	static void clone(TransactionContext &txn, ObjectManager &objectManager,
-		ColumnType type, const void *srcObjectField, void *destObjectField,
+		ColumnType type, const uint8_t *srcObjectField, uint8_t *destObjectField,
 		const AllocateStrategy &allocateStrategy, OId neighborOId);
 
 	static void remove(TransactionContext &txn, ObjectManager &objectManager,
 		ColumnType type, uint8_t *objectField);
 
-	static OId putToObject(TransactionContext &txn,
-		ObjectManager &objectManager, const uint8_t *srcAddr, uint32_t size,
+	static void setField(TransactionContext &txn,
+		ObjectManager &objectManager, const uint8_t *srcAddr, uint32_t srcSize,
+		uint8_t *destAddr, uint32_t &destSize,
 		const AllocateStrategy &allocateStrategy, OId neighborOId);
 };
-
 #endif

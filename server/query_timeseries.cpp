@@ -33,7 +33,6 @@
 #include "boolean_expression.h"
 #include "result_set.h"
 
-
 /*!
 * @brief Query constructor
 *
@@ -45,14 +44,13 @@
 *
 */
 QueryForTimeSeries::QueryForTimeSeries(TransactionContext &txn,
-	TimeSeries &timeSeries, const char *statement, uint64_t limit,
+	TimeSeries &timeSeries, const TQLInfo &tqlInfo, uint64_t limit,
 	QueryHookClass *hook)
-	: Query(txn, *(timeSeries.getObjectManager()), "", limit, hook),
+	: Query(txn, *(timeSeries.getObjectManager()), tqlInfo, limit, hook),
 	  timeSeries_(&timeSeries) {
 	if (hook_) {
-		hook_->qpBuildBeginHook(*this);
+		hook_->qpBuildBeginHook(*this);	
 	}
-	this->str_ = statement;
 	isExplainExecute_ = true;
 	explainAllocNum_ = 0;
 	explainNum_ = 0;
@@ -62,7 +60,7 @@ QueryForTimeSeries::QueryForTimeSeries(TransactionContext &txn,
 	setDefaultFunctionMap();
 
 	if (hook_) {
-		hook_->qpBuildTmpHook(*this, 3);
+		hook_->qpBuildTmpHook(*this, 3);	
 	}
 
 	lemon_tqlParser::tqlParser *x = QP_NEW lemon_tqlParser::tqlParser();
@@ -72,7 +70,7 @@ QueryForTimeSeries::QueryForTimeSeries(TransactionContext &txn,
 	}
 	Token t;
 	int ret;
-	const char *c_str = statement;
+	const char *c_str = tqlInfo.query_;
 #ifndef NDEBUG
 	if (sIsTrace_) {
 		x->tqlParserSetTrace(&std::cerr, "trace: ");
@@ -128,7 +126,7 @@ QueryForTimeSeries::QueryForTimeSeries(TransactionContext &txn,
 	}
 
 	if (hook_) {
-		hook_->qpBuildTmpHook(*this, 4);
+		hook_->qpBuildTmpHook(*this, 4);	
 	}
 
 
@@ -139,14 +137,14 @@ QueryForTimeSeries::QueryForTimeSeries(TransactionContext &txn,
 	}
 
 	if (hook_) {
-		hook_->qpBuildTmpHook(*this, 5);
+		hook_->qpBuildTmpHook(*this, 5);	
 	}
 	contractCondition();
 
 	expireTs_ = timeSeries.getCurrentExpiredTime(txn);
 
 	if (hook_) {
-		hook_->qpBuildFinishHook(*this);
+		hook_->qpBuildFinishHook(*this);	
 	}
 }
 
@@ -157,21 +155,24 @@ QueryForTimeSeries::QueryForTimeSeries(TransactionContext &txn,
 void QueryForTimeSeries::doQuery(
 	TransactionContext &txn, TimeSeries &timeSeries, ResultSet &resultSet) {
 	if (hook_) {
-		hook_->qpSearchBeginHook(*this);
+		hook_->qpSearchBeginHook(*this);	
 	}
 	BoolExpr *conditionExpr = getConditionExpr();  
 	Expr *selectionExpr = getSelectionExpr(0);
 
 
-#ifdef QP_ENABLE_SELECTION_PASSTHROUGH
 	if (selectionExpr != NULL) {
 		nPassSelectRequested_ = selectionExpr->getPassMode(txn);
 	}
 	else {
 		nPassSelectRequested_ = QP_PASSMODE_NO_PASS;
 	}
-#endif
 
+	if (resultSet.getQueryOption().isRowIdScan()) {
+		nPassSelectRequested_ = QP_PASSMODE_NO_PASS;
+		doQueryPartial(txn, timeSeries, resultSet);
+	}
+	else 
 	if (conditionExpr == NULL) {
 		doQueryWithoutCondition(txn, timeSeries, resultSet);
 	}
@@ -190,7 +191,7 @@ void QueryForTimeSeries::doQuery(
 			0, "QUERY_EXECUTE_RESULT_ROWS", "INTEGER", os.str().c_str(), "");
 	}
 	if (hook_) {
-		hook_->qpSearchFinishHook(*this);
+		hook_->qpSearchFinishHook(*this);	
 	}
 }
 
@@ -222,7 +223,6 @@ void QueryForTimeSeries::doQueryWithoutCondition(
 		pExpireTs = NULL;
 	}
 
-
 	if (nPassSelectRequested_ != QP_PASSMODE_NO_PASS && pOrderByExpr_ == NULL) {
 		BtreeMap::SearchContext sc(
 			0, pExpireTs, 0, true, NULL, 0, true, 0, NULL, nLimit_);
@@ -236,18 +236,23 @@ void QueryForTimeSeries::doQueryWithoutCondition(
 		ColumnId searchColumnId = ColumnInfo::ROW_KEY_COLUMN_ID;
 		ColumnType searchType = COLUMN_TYPE_WITH_BEGIN;
 
-		if (pOrderByExpr_ && pOrderByExpr_->size() == 1) {
+		if (isIndexSortAvailable(timeSeries, 0)) {
 			SortExpr &orderExpr = (*pOrderByExpr_)[0];
 			uint32_t orderColumnId = (orderExpr.expr)
 										 ? orderExpr.expr->getColumnId()
 										 : UNDEF_COLUMNID;
 			if (orderExpr.expr &&
-				timeSeries.hasIndex(
-					txn, orderColumnId, MAP_TYPE_BTREE)) {  
+				(orderColumnId == ColumnInfo::ROW_KEY_COLUMN_ID ||
+				timeSeries.hasIndex(txn, orderColumnId, MAP_TYPE_BTREE))) {
 				if (doExplain()) {
 					addExplain(0, "QUERY_RESULT_SORT", "BOOLEAN", "TRUE", "");
-					addExplain(1, "QUERY_RESULT_SORT_API_INDEX_ORDER", "STRING",
-						(orderExpr.order == ASC) ? "ASC" : "DESC", "");
+					if (orderColumnId == ColumnInfo::ROW_KEY_COLUMN_ID) {
+						addExplain(1, "QUERY_RESULT_SORT_API_ROWKEY_ORDER", "STRING",
+							(orderExpr.order == ASC) ? "ASC" : "DESC", "");
+					} else {
+						addExplain(1, "QUERY_RESULT_SORT_API_INDEX_ORDER", "STRING",
+							(orderExpr.order == ASC) ? "ASC" : "DESC", "");
+					}
 				}
 				outputOrder = (orderExpr.order == ASC)
 								  ? ORDER_ASCENDING
@@ -259,50 +264,43 @@ void QueryForTimeSeries::doQueryWithoutCondition(
 			}
 		}
 
-		BtreeMap::SearchContext sc(searchColumnId, pExpireTs, 0, true, NULL, 0,
-			true, 0, NULL, nLimit_);
+		BtreeMap::SearchContext sc(
+			searchColumnId, pExpireTs, 0, true, NULL, 0, true, 0, NULL, nLimit_);
 		sc.keyType_ = searchType;
-		if (pExpireTs != NULL &&
-			searchColumnId != ColumnInfo::ROW_KEY_COLUMN_ID) {
+		if (searchColumnId != ColumnInfo::ROW_KEY_COLUMN_ID) {
+			sc.nullCond_ = BaseIndex::SearchContext::ALL;
+		}
+		if (pExpireTs != NULL && searchColumnId != ColumnInfo::ROW_KEY_COLUMN_ID) {
 			sc.startKey_ = NULL;
-			TermCondition *condition =
-				ALLOC_NEW(txn.getDefaultAllocator()) TermCondition;
+			TermCondition *condition = ALLOC_NEW(txn.getDefaultAllocator()) TermCondition;
 			condition->columnId_ = ColumnInfo::ROW_KEY_COLUMN_ID;
 			condition->operator_ = &geTimestampTimestamp;
-			condition->value_ = reinterpret_cast<const uint8_t *>(pExpireTs);
+			condition->value_ = reinterpret_cast<const uint8_t*>(pExpireTs);
 			condition->valueSize_ = sizeof(Timestamp);
 			sc.conditionList_ = condition;
 			sc.conditionNum_ = 1;
 		}
+		if (searchColumnId != ColumnInfo::ROW_KEY_COLUMN_ID || outputOrder == ORDER_DESCENDING) {
+			isRowKeySearched_ = false;
+		}
 		if (doExecute()) {
-			if (outputOrder != ORDER_UNDEFINED) {
+			if (searchColumnId != ColumnInfo::ROW_KEY_COLUMN_ID) {
 				timeSeries.searchColumnIdIndex(
 					txn, sc, resultOIdList, outputOrder);  
 			}
 			else {
 				timeSeries.searchRowIdIndex(
-					txn, sc, resultOIdList, ORDER_UNDEFINED);  
+					txn, sc, resultOIdList, outputOrder);  
 			}
 
-			Expr *pSel = getSelectionExpr(0);
-			if (pOrderByExpr_ && pSel && !pSel->isSelection() &&
-				(outputOrder == ORDER_UNDEFINED)) {
-				assert(
-					!pSel->isAggregation());  
+			if (isSortBeforeSelectClause() && outputOrder == ORDER_UNDEFINED) {
 				assert(pOrderByExpr_->size() > 0);
 				SortExpr &firstExpr = (*pOrderByExpr_)[0];
 				if (firstExpr.expr->isColumn() &&
 					firstExpr.expr->getColumnId() == 0) {
-					apiOutputOrder_ = (firstExpr.order == ASC)
-										  ? ORDER_ASCENDING
-										  : ORDER_DESCENDING;
-					if (doExplain()) {
-						addExplain(0, "QUERY_RESULT_SORT", "BOOLEAN", "FALSE",
-							"BECAUSE_OF_ROWKEY");
-						addExplain(1, "QUERY_RESULT_SORT_API_ROWKEY_ORDER",
-							"STRING", (firstExpr.order == ASC) ? "ASC" : "DESC",
-							"");
-					}
+					assert(false);
+					GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_RANGE,
+						"Internal logic error: rowkey is already sorted ");
 				}
 				else {
 					assert(pOrderByExpr_->size() > 0);
@@ -349,6 +347,7 @@ void QueryForTimeSeries::doQueryWithCondition(
 		andList(alloc);							
 	uint32_t restConditions = 0;				
 	OutputOrder outputOrder = ORDER_UNDEFINED;  
+	isRowKeySearched_ = true;
 
 	util::XArray<PointRowId> andPointRowIdArray(
 		txn.getDefaultAllocator());  
@@ -396,20 +395,39 @@ void QueryForTimeSeries::doQueryWithCondition(
 			}
 			else {
 				nPassSelectRequested_ = QP_PASSMODE_NO_PASS;
-				isRowKeySearched_ = true;
+				if (isIndexSortAvailable(timeSeries, orList.size())) {
+					SortExpr &orderExpr = (*pOrderByExpr_)[0];
+					if (orderExpr.expr &&
+						orderExpr.expr->getColumnId() ==
+							ColumnInfo::ROW_KEY_COLUMN_ID) {
+						if (doExplain()) {
+							addExplain(0, "QUERY_RESULT_SORT", "BOOLEAN",
+								"TRUE", "");
+							addExplain(1,
+								"QUERY_RESULT_SORT_API_ROWKEY_ORDER",
+								"STRING",
+								(orderExpr.order == ASC) ? "ASC" : "DESC",
+								"");
+						}
+						outputOrder = (orderExpr.order == ASC)
+										  ? ORDER_ASCENDING
+										  : ORDER_DESCENDING;  
+						setLimitByIndexSort();
+						BoolExpr::toSearchContext(txn, andList, expireTs_, NULL, *this, sc,
+							restConditions, nLimit_);
+					}
+				}
 				if (doExecute()) {
 					addExplain(1, "SEARCH_EXECUTE", "MAP_TYPE", "BTREE", "");
 					addExplain(
 						2, "SEARCH_MAP", "STRING", "TIME_SERIES_ROW_MAP", "");
 					operatorOutPointRowIdArray.clear();
 					timeSeries.searchRowIdIndex(txn, sc,
-						operatorOutPointRowIdArray, ORDER_UNDEFINED);  
+						operatorOutPointRowIdArray, outputOrder);  
 				}
 			}
 		}
 		else {
-			isRowKeySearched_ = (indexColumnInfo->getColumnId() ==
-								 ColumnInfo::ROW_KEY_COLUMN_ID);
 			switch (indexType) {
 			case MAP_TYPE_BTREE: {
 				assert(indexColumnInfo != NULL);
@@ -417,62 +435,48 @@ void QueryForTimeSeries::doQueryWithCondition(
 				BoolExpr::toSearchContext(txn, andList, expireTs_,
 					indexColumnInfo, *this, sc, restConditions, nLimit_);
 
-				if (orList.size() == 1 &&
-					(nPassSelectRequested_ == QP_PASSMODE_PASS ||
-						(nPassSelectRequested_ ==
-								QP_PASSMODE_PASS_IF_NO_WHERE &&
-							pWhereExpr_ == NULL)) &&
-					restConditions == 0 && isRowKeySearched_ &&
-					sc.conditionNum_ == 0) {
-					if (doExplain()) {
-						addExplain(1, "API_PASSTHROUGH", "BOOLEAN", "TRUE",
-							"TIME_CONDITIONS_ONLY");
+				nPassSelectRequested_ = QP_PASSMODE_NO_PASS;
+				if (isIndexSortAvailable(timeSeries, orList.size())) {
+					SortExpr &orderExpr = (*pOrderByExpr_)[0];
+					if (orderExpr.expr &&
+						orderExpr.expr->getColumnId() ==
+							indexColumnInfo
+								->getColumnId()) {  
+						if (doExplain()) {
+							addExplain(0, "QUERY_RESULT_SORT", "BOOLEAN",
+								"TRUE", "");
+							addExplain(1,
+								"QUERY_RESULT_SORT_API_INDEX_ORDER",
+								"STRING",
+								(orderExpr.order == ASC) ? "ASC" : "DESC",
+								"");
+						}
+						outputOrder = (orderExpr.order == ASC)
+										  ? ORDER_ASCENDING
+										  : ORDER_DESCENDING;  
+						setLimitByIndexSort();
+						BoolExpr::toSearchContext(txn, andList, expireTs_,
+							indexColumnInfo, *this, sc, restConditions, nLimit_);
 					}
 				}
-				else {
-					nPassSelectRequested_ = QP_PASSMODE_NO_PASS;
-					if (orList.size() == 1 && pOrderByExpr_ &&
-						pOrderByExpr_->size() == 1) {
-						SortExpr &orderExpr = (*pOrderByExpr_)[0];
-						if (orderExpr.expr &&
-							orderExpr.expr->getColumnId() ==
-								indexColumnInfo
-									->getColumnId()) {  
-							if (doExplain()) {
-								addExplain(0, "QUERY_RESULT_SORT", "BOOLEAN",
-									"TRUE", "");
-								addExplain(1,
-									"QUERY_RESULT_SORT_API_INDEX_ORDER",
-									"STRING",
-									(orderExpr.order == ASC) ? "ASC" : "DESC",
-									"");
-							}
-							outputOrder = (orderExpr.order == ASC)
-											  ? ORDER_ASCENDING
-											  : ORDER_DESCENDING;  
-							pOrderByExpr_->clear();
-							setLimitByIndexSort();
-							BoolExpr::toSearchContext(txn, andList, expireTs_,
-								indexColumnInfo, *this, sc, restConditions,
-								nLimit_);
-						}
-					}
-					if (doExecute()) {
-						addExplain(
-							1, "SEARCH_EXECUTE", "MAP_TYPE", "BTREE", "");
-						const char *columnName =
-							indexColumnInfo->getColumnName(txn, objectManager_);
-						addExplain(2, "SEARCH_MAP", "STRING", columnName, "");
-						operatorOutPointRowIdArray.clear();
-						timeSeries.searchColumnIdIndex(txn, sc,
-							operatorOutPointRowIdArray, outputOrder);  
-					}
+				if (doExecute()) {
+					addExplain(
+						1, "SEARCH_EXECUTE", "MAP_TYPE", "BTREE", "");
+					const char *columnName =
+						indexColumnInfo->getColumnName(txn, objectManager_);
+					addExplain(2, "SEARCH_MAP", "STRING", columnName, "");
+					operatorOutPointRowIdArray.clear();
+					timeSeries.searchColumnIdIndex(txn, sc,
+						operatorOutPointRowIdArray, outputOrder);  
 				}
 			} break;
 			default:  
 				GS_THROW_USER_ERROR(GS_ERROR_TQ_CRITICAL_LOGIC_ERROR,
 					"Internal logic error: Invalid map type specified.");
 				break;
+			}
+			if (indexColumnInfo->getColumnId() != ColumnInfo::ROW_KEY_COLUMN_ID && outputOrder != ORDER_UNDEFINED) {
+				isRowKeySearched_ = false;
 			}
 		}
 
@@ -483,18 +487,18 @@ void QueryForTimeSeries::doQueryWithCondition(
 		else {
 			uint64_t *pBitmap = reinterpret_cast<uint64_t *>(alloc.allocate(
 				sizeof(uint64_t) * ((timeSeries.getColumnNum() / 64) + 1)));
+			TimeSeriesRowWrapper row(txn, timeSeries, pBitmap);
 
 			for (uint32_t i = 0; i < operatorOutPointRowIdArray.size(); i++) {
 				PointRowId pointRowId = operatorOutPointRowIdArray[i];
 				bool conditionFlag = true;  
 				{
 					util::StackAllocator::Scope scope(alloc);
-					TimeSeriesRowWrapper row(
-						txn, timeSeries, pointRowId, pBitmap);
+					row.load(pointRowId);
 					for (uint32_t q = 0; q < andList.size(); q++) {
-						bool evalResult = andList[q]->eval(
-							txn, objectManager_, &row, getFunctionMap(), true);
-						if (!evalResult) {
+						TrivalentLogicType evalResult = andList[q]->eval(
+							txn, objectManager_, &row, getFunctionMap(), TRI_TRUE);
+						if (evalResult != TRI_TRUE) {
 							conditionFlag = false;
 							break;
 						}
@@ -535,21 +539,13 @@ void QueryForTimeSeries::doQueryWithCondition(
 	}  
 
 	if (resultOIdList.size() > nLimit_) {
-		ResultSize eraseSize = resultOIdList.size() - nLimit_;
+//		ResultSize eraseSize = resultOIdList.size() - nLimit_;
 		resultOIdList.erase(
 			resultOIdList.begin() + static_cast<size_t>(nLimit_),
 			resultOIdList.end());
-		if (resultSet.getRowIdList()->size() > 0) {
-			ResultSize erasePos = resultSet.getRowIdList()->size() - eraseSize;
-			resultSet.getRowIdList()->erase(resultSet.getRowIdList()->begin() +
-												static_cast<size_t>(erasePos),
-				resultSet.getRowIdList()->end());
-		}
 	}
 
-	Expr *pSel = getSelectionExpr(0);
-	if (pOrderByExpr_ && pSel && !pSel->isSelection() &&
-		(outputOrder == ORDER_UNDEFINED)) {
+	if (isSortBeforeSelectClause() && outputOrder == ORDER_UNDEFINED) {
 		assert(pOrderByExpr_->size() > 0);
 
 		SortExpr &firstExpr = (*pOrderByExpr_)[0];
@@ -582,17 +578,31 @@ void QueryForTimeSeries::doQueryWithCondition(
 }
 
 void QueryForTimeSeries::doSelectionByAPI(TransactionContext &txn,
-	TimeSeries &timeSeries, ResultType &type, ResultSize &resultNum,
-	util::XArray<uint8_t> &serializedRowList,
-	util::XArray<uint8_t> &serializedVarDataList) {
+	TimeSeries &timeSeries, ResultSet &resultSet) {
 	Expr *selectionExpr = getSelectionExpr(0);
+
+	ResultType type;
+	ResultSize resultNum;
+	util::XArray<uint8_t> &serializedRowList =
+		*resultSet.getRowDataFixedPartBuffer();
+	util::XArray<uint8_t> &serializedVarDataList =
+		*resultSet.getRowDataVarPartBuffer();
+
 	OutputMessageRowStore outputMessageRowStore(
 		timeSeries.getDataStore()->getValueLimitConfig(),
 		timeSeries.getColumnInfoList(), timeSeries.getColumnNum(),
 		serializedRowList, serializedVarDataList, false);
 	if (selectionExpr->isAggregation()) {
-		selectionExpr->aggregate(
-			txn, timeSeries, scPass_, resultNum, serializedRowList, type);
+		Value value;
+		if (nOffset_ < 1) {
+			selectionExpr->aggregate(
+				txn, timeSeries, scPass_, resultNum, value);
+		} else {
+			resultNum = 0;
+		}
+		if (resultNum > 0) {
+			value.serialize(serializedRowList);
+		}
 		type = RESULT_AGGREGATE;
 	}
 	else {
@@ -600,6 +610,7 @@ void QueryForTimeSeries::doSelectionByAPI(TransactionContext &txn,
 			nActualLimit_, nOffset_, resultNum, &outputMessageRowStore, type);
 		type = RESULT_ROWSET;
 	}
+	resultSet.setResultType(type, resultNum);
 }
 
 void QueryForTimeSeries::doSelection(
@@ -612,18 +623,26 @@ void QueryForTimeSeries::doSelection(
 		*resultSet.getRowDataVarPartBuffer();
 	util::XArray<OId> &resultOIdList = *resultSet.getOIdList();
 	if (nPassSelectRequested_) {
-		doSelectionByAPI(txn, timeSeries, type, resultNum, serializedRowList,
-			serializedVarDataList);
+		doSelectionByAPI(txn, timeSeries, resultSet);
+		resultNum = resultSet.getResultNum();
+		type = resultSet.getResultType();
 	}
 	else {
 		size_t numSelection = getSelectionExprLength();
+		if (resultSet.getQueryOption().isRowIdScan()) {
+			resultNum = resultSet.getResultNum();
+			type = RESULT_ROWSET;
+		} else
 		if (numSelection > 0) {
 			Expr *selectionExpr = getSelectionExpr(0);
 			if (selectionExpr->isAggregation()) {
 				type = RESULT_AGGREGATE;
 				Value result;
-				bool resultOK = selectionExpr->aggregate(
-					txn, timeSeries, resultOIdList, result);
+				bool resultOK = false;
+				if (nOffset_ < 1) {
+					resultOK = selectionExpr->aggregate(
+						txn, timeSeries, resultOIdList, result);
+				}
 				if (resultOK) {
 					result.serialize(serializedRowList);
 					resultNum = 1;
@@ -643,29 +662,14 @@ void QueryForTimeSeries::doSelection(
 						resultOIdList.erase(resultOIdList.begin(),
 							resultOIdList.begin() +
 								static_cast<size_t>(nOffset_));
-						if (resultSet.getRowIdList()->size() > 0) {
-							resultSet.getRowIdList()->erase(
-								resultSet.getRowIdList()->begin(),
-								resultSet.getRowIdList()->begin() +
-									static_cast<size_t>(nOffset_));
-						}
 
 						if (nActualLimit_ < resultOIdList.size()) {
-							ResultSize eraseSize =
-								resultOIdList.size() - nActualLimit_;
+//							ResultSize eraseSize =
+//								resultOIdList.size() - nActualLimit_;
 							resultOIdList.erase(
 								resultOIdList.begin() +
 									static_cast<size_t>(nActualLimit_),
 								resultOIdList.end());
-							if (resultSet.getRowIdList()->size() > 0) {
-								ResultSize erasePos =
-									resultSet.getRowIdList()->size() -
-									eraseSize;
-								resultSet.getRowIdList()->erase(
-									resultSet.getRowIdList()->begin() +
-										static_cast<size_t>(erasePos),
-									resultSet.getRowIdList()->end());
-							}
 						}
 						resultNum = resultOIdList.size();
 					}
@@ -758,7 +762,7 @@ void QueryForTimeSeries::doSelection(
 	}
 
 	if (hook_) {
-		hook_->qpSelectFinishHook(*this);
+		hook_->qpSelectFinishHook(*this);	
 	}
 	resultSet.setResultType(type, resultNum);
 }
@@ -863,17 +867,29 @@ void QueryForTimeSeries::tsResultMerge(TransactionContext &txn,
 QueryForTimeSeries *QueryForTimeSeries::dup(
 	TransactionContext &txn, ObjectManager &objectManager_) {
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
+	char *dbName = NULL;
+	char *queryStr = NULL;
+	FullContainerKey *containerKey = NULL;
+	if (tqlInfo_.dbName_ != NULL) {
+		size_t len = strlen(tqlInfo_.dbName_) + 1;
+		char *dbName = QP_ALLOC_NEW(alloc) char[len];
+		memcpy(dbName, tqlInfo_.dbName_, len);
+	}
+	if (tqlInfo_.query_ != NULL) {
+		size_t len = strlen(tqlInfo_.query_) + 1;
+		char *queryStr = QP_ALLOC_NEW(alloc) char[len];
+		memcpy(queryStr, tqlInfo_.query_, len);
+	}
+	if (tqlInfo_.containerKey_ != NULL) {
+		const void *body;
+		size_t size;
+		tqlInfo_.containerKey_->toBinary(body, size);
+		containerKey = QP_ALLOC_NEW(alloc) FullContainerKey(alloc, KeyConstraint(), body, size);
+	}
+
+	TQLInfo tqlInfo(dbName, containerKey, queryStr);
 	QueryForTimeSeries *query =
-		QP_ALLOC_NEW(alloc) QueryForTimeSeries(txn_, *timeSeries_);
-	if (str_ != NULL) {
-		size_t len = strlen(str_) + 1;
-		char *str = QP_ALLOC_NEW(alloc) char[len];
-		memcpy(str, str_, len);
-		query->str_ = str;
-	}
-	else {
-		query->str_ = NULL;
-	}
+		QP_ALLOC_NEW(alloc) QueryForTimeSeries(txn_, *timeSeries_, tqlInfo);
 	if (pErrorMsg_ != NULL) {
 		query->pErrorMsg_ = QP_ALLOC_NEW(alloc) util::String(alloc);
 		query->pErrorMsg_ = pErrorMsg_;
@@ -970,7 +986,8 @@ QueryForTimeSeries *QueryForTimeSeries::dup(
 	query->specialIdMap_ = specialIdMap_;
 
 	query->expireTs_ = expireTs_;
-	query->scPass_ = scPass_;  
+	query->scPass_ =
+		scPass_;  
 	{
 		if (scPass_.startKeySize_ > 0) {
 			query->scPass_.startKey_ =

@@ -39,7 +39,7 @@ public:
 		uint8_t *srcObjectRowField, uint8_t *targetObjectRowField);
 
 	static void getField(TransactionContext &txn, ObjectManager &objectManager,
-		ColumnId columnId, Value *objectValue,
+		ColumnId columnId, const Value *objectValue,
 		MessageRowStore *outputMessageRowStore);
 };
 

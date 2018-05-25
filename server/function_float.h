@@ -44,6 +44,9 @@ public:
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT,
 				"Invalid argument count");
 		}
+		if (args[0]->isNullValue()) {
+			return Expr::newNullValue(txn);
+		}
 		if (!args[0]->isNumeric()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT,
 				"Argument 1 is invalid");
@@ -67,6 +70,9 @@ public:
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT,
 				"Invalid argument count");
 		}
+		if (args[0]->isNullValue()) {
+			return Expr::newNullValue(txn);
+		}
 		if (!args[0]->isNumeric()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT,
 				"Argument 1 is invalid");
@@ -89,6 +95,9 @@ public:
 		if (args.empty() || args.size() != 1) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT,
 				"Invalid argument count");
+		}
+		if (args[0]->isNullValue()) {
+			return Expr::newNullValue(txn);
 		}
 		if (!args[0]->isNumeric()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT,

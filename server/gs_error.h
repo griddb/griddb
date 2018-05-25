@@ -136,6 +136,44 @@ public:
 	virtual ~UserException() throw() {}
 };
 
+class InterruptionChecker {
+public:
+	class CheckHandler;
+
+	enum InterruptionType {
+		INTERRUPTION_CANCEL,
+		INTERRUPTION_SUSPEND,
+		INTERRUPTION_HANDLER
+	};
+
+	InterruptionChecker();
+
+	bool check();
+
+	void setCheckHandler(CheckHandler *handler);
+	void setInterruption(InterruptionType type);
+	void clearInterruption();
+
+	static bool checkFlags(int32_t flags);
+	static void errorCanceled();
+
+private:
+	bool checkInternal();
+
+	util::Atomic<int32_t> flags_;
+	CheckHandler *handler_;
+};
+
+class InterruptionChecker::CheckHandler {
+public:
+	virtual ~CheckHandler();
+	virtual bool operator()(InterruptionChecker &checker, int32_t flags) = 0;
+};
+
+inline bool InterruptionChecker::check() {
+	return (flags_ != 0 && checkInternal());
+}
+
 #define UTIL_THROW_USER_ERROR(errorCode, message) \
 	throw UTIL_EXCEPTION_CREATE_DETAIL(UserException, errorCode, NULL, message)
 #define UTIL_THROW_SYSTEM_ERROR(errorCode, message) \
@@ -222,6 +260,103 @@ public:
 #define GS_TRACE_DEBUG(tracer, code, message) \
 	GS_TRACER_PUT(tracer, LEVEL_DEBUG, code, message, NULL)
 
+#define GS_FILE_WRITE_ALL(tracer, namedFile, data, size, offset, timeThreshold) \
+	{ \
+		uint64_t retryCount = 0; \
+		off_t filePos = static_cast<off_t>(offset); \
+		ssize_t writeRemain = size; \
+		const uint8_t *writeAddr = static_cast<const uint8_t*>(data); \
+		const uint64_t startClock = util::Stopwatch::currentClock(); \
+		while (writeRemain > 0) { \
+			ssize_t writtenSize = namedFile.write(writeAddr, writeRemain, filePos); \
+			if (writtenSize == writeRemain) { \
+				if (retryCount > 0) { \
+					GS_TRACE_WARNING(tracer, GS_TRACE_CM_PARTIAL_IO, \
+							"[Partial Write](LAST) fileName," << namedFile.getName() << \
+							",offset," << filePos << \
+							",requested," << writeRemain << \
+							",result," << writtenSize); \
+				} \
+				break; \
+			} \
+			assert(writtenSize < writeRemain); \
+			GS_TRACE_WARNING(tracer, GS_TRACE_CM_PARTIAL_IO, \
+					"[Partial Write] fileName," << namedFile.getName() << \
+					",offset," << filePos << \
+					",requested," << writeRemain << \
+					",result," << writtenSize); \
+			writeRemain -= writtenSize; \
+			writeAddr += writtenSize; \
+			filePos += static_cast<off_t>(writtenSize); \
+			++retryCount; \
+		} \
+		const uint32_t lap = util::Stopwatch::clockToMillis( \
+				util::Stopwatch::currentClock() - startClock); \
+		if (lap > timeThreshold) { \
+			GS_TRACE_WARNING(tracer, GS_TRACE_CM_LONG_IO, \
+					"[LONG I/O] write time," << lap << \
+					",fileName," << namedFile.getName() << \
+					",offset," << offset << \
+					",time," << lap); \
+		} \
+	}
+
+#define GS_FILE_READ_ALL(tracer, namedFile, data, size, offset, timeThreshold) \
+	{ \
+		uint64_t retryCount = 0; \
+		off_t filePos = static_cast<off_t>(offset); \
+		ssize_t readRemain = size; \
+		uint8_t *readAddr = static_cast<uint8_t*>(data); \
+		const uint64_t startClock = util::Stopwatch::currentClock(); \
+		while (readRemain > 0) { \
+			ssize_t readSize = namedFile.read(readAddr, readRemain, filePos); \
+			if (readSize == readRemain) { \
+				if (retryCount > 0) { \
+					GS_TRACE_WARNING(tracer, GS_TRACE_CM_PARTIAL_IO, \
+							"[Partial Read](LAST) fileName," << namedFile.getName() << \
+							",offset," << filePos << \
+							",requested," << readRemain << \
+							",result," << readSize); \
+				} \
+				break; \
+			} \
+			if (readSize == 0 && retryCount > 0) { \
+				util::FileStatus status; \
+				namedFile.getStatus(&status); \
+				if (status.getSize() <= filePos) { \
+					memset(readAddr, 0, readRemain); \
+					GS_TRACE_INFO(tracer, GS_TRACE_CM_PARTIAL_IO, \
+							"[Partial Read (end of file)] fileName," << namedFile.getName() << \
+							",offset," << offset << \
+							",requested," << size << \
+							",result," << (size - readRemain) << \
+							",fileSize," << status.getSize()); \
+					readRemain = 0; \
+					break; \
+				} \
+			} \
+			assert(readSize < readRemain); \
+			GS_TRACE_WARNING(tracer, GS_TRACE_CM_PARTIAL_IO, \
+					"[Partial Read] fileName," << namedFile.getName() << \
+					",offset," << filePos << \
+					",requested," << readRemain << \
+					",result," << readSize); \
+			readRemain -= readSize; \
+			readAddr += readSize; \
+			filePos += static_cast<off_t>(readSize); \
+			++retryCount; \
+		} \
+		const uint32_t lap = util::Stopwatch::clockToMillis( \
+				util::Stopwatch::currentClock() - startClock); \
+		if (lap > timeThreshold) { \
+			GS_TRACE_WARNING(tracer, GS_TRACE_CM_LONG_IO, \
+					"[LONG I/O] read time," << lap << \
+					",fileName," << namedFile.getName() << \
+					",offset," << offset << \
+					",time," << lap); \
+		} \
+	}
+
 /*!
 	@brief Error code
 */
@@ -271,6 +406,10 @@ enum ErrorCode {
 	GS_ERROR_CM_PLATFORM_ERROR,
 	GS_ERROR_CM_MEMORY_LIMIT_EXCEEDED,
 	GS_ERROR_CM_SIZE_LIMIT_EXCEEDED,
+	GS_ERROR_CM_CANCELED,
+	GS_ERROR_CM_COMPRESSION_FAILED,
+	GS_ERROR_CM_UNCOMPRESSION_FAILED,
+	GS_ERROR_CM_INCOMPATIBLE_ZLIB_VERSION,
 
 	GS_ERROR_TXN_SERVICE_START_FAILED = 10000,
 	GS_ERROR_TXN_PARTITION_ALREADY_EXISTS,  
@@ -342,13 +481,13 @@ enum ErrorCode {
 	GS_ERROR_TXN_OPTION_TYPE_INVALID,
 	GS_ERROR_TXN_RESULT_TYPE_INVALID,
 	GS_ERROR_TXN_COLLECT_TIMEOUT_REPLICATION_FAILED,
-	GS_ERROR_TXN_REPLICATION_MSG_VERSION_NOT_ACCEPTABLE,
+	GS_ERROR_TXN_REPLICATION_MSG_VERSION_NOT_ACCEPTABLE,	
 	GS_ERROR_TXN_REQUEST_GET_CONTAINER_NAME_LIST_FAILED,
 	GS_ERROR_TXN_REPLICATION_ACK_FAILED,
 	GS_ERROR_TXN_REPLICATION_REPLY_CLIENT_FAILED,
 	GS_ERROR_TXN_CANCELLED,
 	GS_ERROR_TXN_AUTHENTICATION_SERVICE_NOT_READY,
-	GS_ERROR_TXN_AUTHENTICATION_MSG_VERSION_NOT_ACCEPTABLE,
+	GS_ERROR_TXN_AUTHENTICATION_MSG_VERSION_NOT_ACCEPTABLE,	
 	GS_ERROR_TXN_USER_NAME_ALREADY_EXISTS,
 	GS_ERROR_TXN_DATABASE_NAME_ALREADY_EXISTS,
 	GS_ERROR_TXN_OPERATION_NOT_ALLOWED,
@@ -365,6 +504,12 @@ enum ErrorCode {
 	GS_ERROR_TXN_OTHER_PRIVILEGE_EXISTS,
 	GS_ERROR_TXN_REAUTHENTICATION_FIRED,
 	GS_ERROR_TXN_AUTHENTICATION_TIMEOUT,
+	GS_ERROR_TXN_CONTAINER_ATTRIBUTE_UNMATCH,
+	GS_ERROR_TXN_CONTAINER_PROPERTY_INVALID,
+	GS_ERROR_TXN_INDEX_ALREADY_EXISTS,
+	GS_ERROR_TXN_INDEX_NOT_FOUND,
+	GS_ERROR_TXN_REPLICATION_LOG_VERSION_NOT_ACCEPTABLE,
+	GS_ERROR_TXN_DATABASE_UNMATCH,
 
 	GS_ERROR_SYNC_SERVICE_START_FAILED = 20000,  
 	GS_ERROR_SYNC_SERVICE_ENCODE_FAILED,		 
@@ -442,6 +587,7 @@ enum ErrorCode {
 	GS_ERROR_CP_WRITE_CHUNK_META_DATA_LOG_FAILED,
 	GS_ERROR_CP_WRITE_LSN_INFO_FILE_FAILED,
 	GS_ERROR_CP_DUMMY3,
+	GS_ERROR_CP_LONGTERM_SYNC_FAILED,
 
 	GS_ERROR_CS_SYNC_NO_OWNER = 40000,
 	GS_ERROR_CS_INVALID_OWNER_ADDRESS,
@@ -683,6 +829,25 @@ enum ErrorCode {
 	GS_ERROR_DS_UNUSED1,  
 	GS_ERROR_DS_CONTAINER_UNEXPECTEDLY_REMOVED,
 	GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN,
+	GS_ERROR_DS_INPUT_MESSAGE_INVALID,
+	GS_ERROR_DS_BACKGROUND_TASK_INVALID,
+
+	GS_ERROR_VC_CONSTRUCT_FAILED = 65000,
+	GS_ERROR_VC_INVALID_CONATAINER,
+	GS_ERROR_VC_CREATE_CONTAINER_FAILED,
+	GS_ERROR_VC_DROP_CONTAINER_FAILED,
+	GS_ERROR_VC_SEARCH_FAILED,
+	GS_ERROR_VC_PUTROW_FAILED,
+	GS_ERROR_VC_INVALID_CREATE_CONTAINER_SCHEMA,
+	GS_ERROR_VC_INVALID_CREATE_INDEX_PARAMS,
+	GS_ERROR_VC_INVALID_SEARCH_PARAMS,
+	GS_ERROR_VC_CREATE_INDEX_FAILED,
+	GS_ERROR_VC_NOT_SUPPORT_OPERATION,
+	GS_ERROR_VC_CONTAINER_NOT_FOUND,
+	GS_ERROR_VC_INVALID_ROW_FIELD,
+	GS_ERROR_VC_SERIALIZATION_FAILED,
+	GS_ERROR_VC_INVALID_DATA,
+	GS_ERROR_VC_CHANGE_PARAMETER_FAILED,
 
 	GS_ERROR_OM_UNDEFINED = 68000,
 	GS_ERROR_OM_INVALID_CHUNK_EXP_SIZE,  
@@ -1107,6 +1272,7 @@ enum ErrorCode {
 	GS_ERROR_SYM_CONTEXT_FREE_LOG_CHUNK_FAILED,
 	GS_ERROR_SYM_INVALID_SYNC_TYPE,
 	GS_ERROR_SYM_CONTEXT_CLEAR_FAILED
+
 };
 
 /*!
@@ -1117,6 +1283,9 @@ enum TraceCode {
 	GS_TRACE_CM_SIMULATE_FAILURE,  
 	GS_TRACE_CM_BUILTIN_TEST,	  
 	GS_TRACE_CM_LONG_EVENT,
+	GS_TRACE_CM_COMPRESSION_FAILED,
+	GS_TRACE_CM_INVALID_COMPRESSION,
+	GS_TRACE_CM_PARTIAL_IO,
 
 	GS_TRACE_TXN_REPLY_CLIENT = 10900,  
 	GS_TRACE_TXN_SEND_LOG,				
@@ -1132,12 +1301,14 @@ enum TraceCode {
 	GS_TRACE_TXN_CHECK_TIMEOUT,
 	GS_TRACE_TXN_CLUSTER_VERSION_UNMATCHED,
 	GS_TRACE_TXN_AUTHENTICATION_TIMEOUT,  
+	GS_TRACE_TXN_KEEPALIVE_TIMEOUT, 
 
 	GS_TRACE_SYNC_HANDLER = 20900,
 	GS_TRACE_SYNC_HANDLER_DETAIL,
 	GS_TRACE_SYNC_OPERATION,
 	GS_TRACE_SYNC_NORMAL,
 	GS_TRACE_SYNC_EVENT_SEND,
+	GS_TRACE_SYNC_TRACE_STATS, 
 
 	GS_TRACE_CP_CONTROLLER_ILLEAGAL_STATE = 30900,
 	GS_TRACE_CP_DUMMY1,
@@ -1146,6 +1317,9 @@ enum TraceCode {
 	GS_TRACE_CP_PARAMETER_INFO,
 	GS_TRACE_CP_FAILURE_SIMULATOR,
 	GS_TRACE_CP_FLUSH_LOG,
+	GS_TRACE_CP_LONGTERM_SYNC_INFO,  
+	GS_TRACE_CP_LONGTERM_SYNC_FAILED,  
+	GS_TRACE_CP_LONGTERM_SYNC_LOG_WRITE_FAILED,  
 
 	GS_TRACE_CS_CLUSTER_STATUS = 40900,
 	GS_TRACE_CS_UPDATE_START_LSN,
@@ -1158,6 +1332,7 @@ enum TraceCode {
 #ifdef GD_ENABLE_UNICAST_NOTIFICATION
 	GS_TRACE_CS_TRACE_INTERNAL,
 #endif
+	GS_TRACE_CS_TRACE_STATS, 
 
 	GS_TRACE_SC_EVENT_LOG_STARTED = 50900,
 	GS_TRACE_SC_UNEXPECTED_SHUTDOWN_DETECTED,
@@ -1172,6 +1347,7 @@ enum TraceCode {
 	GS_TRACE_SC_DUMMY11,
 	GS_TRACE_SC_DUMMY12,
 	GS_TRACE_SC_TRACE_STATS,
+	GS_TRACE_SC_FORCE_SHUTDOWN,
 
 	GS_TRACE_DS_DS_CREATE_CONTAINER = 60900,
 	GS_TRACE_DS_DS_UPDATE_CONTAINER,
@@ -1193,6 +1369,10 @@ enum TraceCode {
 	GS_TRACE_CHM_COMPRESSION_FAILED,
 	GS_TRACE_CHM_INVALID_COMPRESSION,
 
+	GS_TRACE_VC_PLUGIN_INFO = 65900,
+	GS_TRACE_VC_PLUGIN_CREATE_INDEX,
+	GS_TRACE_VC_PLUGIN_OPEN,
+
 	GS_TRACE_LM_OPEN_SKIP_PARTITIONGROUP = 80900,
 	GS_TRACE_LM_UNSUPPORTED_LOGTYPE,
 	GS_TRACE_LM_UNKNOWN_LOGTYPE,
@@ -1205,6 +1385,11 @@ enum TraceCode {
 	GS_TRACE_LM_CLEANUP_LOG_FILES,
 	GS_TRACE_LM_INCOMPLETE_TAIL_BLOCK,
 	GS_TRACE_LM_FIND_LOG_INFO,
+	GS_TRACE_LM_PREPARE_CHECKPOINT_FAILED,
+	GS_TRACE_LM_POST_CHECKPOINT_FAILED,
+	GS_TRACE_LM_FLUSH_SYNC_TEMP_LOG_FAILED,
+	GS_TRACE_LM_PUT_SYNC_TEMP_LOG_FAILED,
+	GS_TRACE_LM_CHUNK_META_LOG_SIZE,
 
 	GS_TRACE_EE_TIME_DIFF_ERROR = 130900,
 	GS_TRACE_EE_WAIT_COMPLETION,

@@ -52,6 +52,8 @@ UTIL_TRACER_DECLARE(SYSTEM_SERVICE);
 UTIL_TRACER_DECLARE(SYSTEM_SERVICE_DETAIL);
 UTIL_TRACER_DECLARE(CLUSTER_OPERATION);
 
+UTIL_TRACER_DECLARE(CLUSTER_DETAIL);
+
 
 
 
@@ -258,7 +260,7 @@ bool SystemService::joinCluster(const Event::Source &eventSource,
 				errorNo = WEBAPI_CS_CLUSTERNAME_UNMATCH;
 				reason = "cluster name unmatch, name=" + clusterName +
 						 ", target=" +
-						 clsMgr_->getConfig().getSettedClusterName() + ".";
+						 clsMgr_->getConfig().getSetClusterName() + ".";
 				break;
 			}
 			case WEBAPI_CS_CLUSTERNAME_INVALID: {
@@ -475,9 +477,10 @@ void SystemService::getHosts(picojson::value &result, int32_t addressTypeNum) {
 /*!
 	@brief Handles getPartitions command
 */
-void SystemService::getPartitions(picojson::value &result, int32_t partitionNo,
-	int32_t addressTypeNum, bool lossOnly, bool force, bool isSelf,
-	bool lsnDump, bool notDumpRole, uint32_t partitionGroupNo) {
+void SystemService::getPartitions(
+		picojson::value &result, int32_t partitionNo,
+		int32_t addressTypeNum, bool lossOnly, bool force, bool isSelf,
+		bool lsnDump, bool notDumpRole, uint32_t partitionGroupNo) {
 	try {
 		GS_TRACE_DEBUG(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
 			"Get partitions called");
@@ -697,10 +700,8 @@ void SystemService::getStats(picojson::value &result, StatTable &stats) {
 void SystemService::getSyncStats(picojson::value &result) {
 	picojson::object &syncStats = setJsonObject(result);
 
-	syncStats["unfixCount"] = picojson::value(
-		static_cast<double>(syncMgr_->getSyncOptStat()->getUnfixCount()));
 	syncStats["contextCount"] = picojson::value(
-		static_cast<double>(syncMgr_->getSyncOptStat()->getContextCount()));
+		static_cast<double>(syncMgr_->getContextCount()));
 
 	PartitionId currentCatchupPId = pt_->getCatchupPId();
 	if (currentCatchupPId != UNDEF_PARTITIONID) {
@@ -742,21 +743,6 @@ void SystemService::getSyncStats(picojson::value &result) {
 				syncStats["catchup"] = picojson::value(catchupInfo);
 			}
 		}
-		if (cpSvc_->getCurrentCpPId() != UNDEF_PARTITIONID) {
-			picojson::object cpInfo;
-			cpInfo["pId"] =
-				picojson::value(static_cast<double>(cpSvc_->getCurrentCpPId()));
-			cpInfo["pgId"] = picojson::value(
-				static_cast<double>(cpSvc_->getCurrentCpGroupId()));
-			uint32_t pgId;
-			std::string retStr;
-			if (clsMgr_->getCurrentPendingCheckpointInfo(pgId, retStr)) {
-				cpInfo["pendingPgId"] =
-					picojson::value(static_cast<double>(pgId));
-				cpInfo["pendingLimitTime"] = picojson::value(retStr);
-			}
-			syncStats["cpInfo"] = picojson::value(cpInfo);
-		}
 	}
 }
 
@@ -788,8 +774,9 @@ void SystemService::getPGStoreMemoryLimitStats(picojson::value &result) {
 /*!
 	@brief Gets the statistics about memory usage
 */
-void SystemService::getMemoryStats(picojson::value &result,
-	const char8_t *namePrefix, const char8_t *selectedType, int64_t minSize) {
+void SystemService::getMemoryStats(
+		picojson::value &result, const char8_t *namePrefix,
+		const char8_t *selectedType, int64_t minSize) {
 	util::AllocatorManager &allocMgr =
 		util::AllocatorManager::getDefaultInstance();
 
@@ -853,25 +840,28 @@ void SystemService::getMemoryStats(picojson::value &result,
 	}
 }
 
+
 /*!
 	@brief Gets/Sets config of SystemService
 */
-bool SystemService::getOrSetConfig(const std::vector<std::string> namePath,
-	picojson::value &result, const picojson::value *paramValue, bool noUnit) {
+bool SystemService::getOrSetConfig(
+		util::StackAllocator &alloc, const std::vector<std::string> namePath,
+		picojson::value &result, const picojson::value *paramValue, bool noUnit) {
 	const bool updating = (paramValue != NULL);
 	GS_TRACE_INFO(SYSTEM_SERVICE_DETAIL, GS_TRACE_SC_WEB_API_CALLED,
-		(updating ? "Set" : "Get") << " config called");
+			(updating ? "Set" : "Get") << " config called");
 
 	try {
 		ConfigTable::ParamId id = CONFIG_TABLE_ROOT;
+		ConfigTable::SubPath subPath(alloc);
 		for (std::vector<std::string>::const_iterator it = namePath.begin();
 			 it != namePath.end(); ++it) {
 			const ConfigTable::ParamId groupId = id;
-			if (!config_.findParam(groupId, id, it->c_str())) {
+			if (!config_.findParam(groupId, id, it->c_str(), &subPath)) {
 				GS_TRACE_WARNING(SYSTEM_SERVICE, GS_TRACE_SC_BAD_REQUEST,
-					"Unknown config name (basePath="
-						<< config_.pathFormatter(groupId) << ", name=" << *it
-						<< ")");
+						"Unknown config name (basePath=" <<
+						config_.pathFormatter(groupId, &subPath) <<
+						", name=" << *it << ")");
 				return false;
 			}
 		}
@@ -882,7 +872,8 @@ bool SystemService::getOrSetConfig(const std::vector<std::string> namePath,
 			util::NormalOStringStream oss;
 			oss << "Web API (updated=" << util::DateTime::now(false) << ")";
 			try {
-				config_.set(id, *paramValue, oss.str().c_str());
+				config_.set(
+						id, *paramValue, oss.str().c_str(), NULL, &subPath);
 			}
 			catch (UserException &e) {
 				UTIL_TRACE_EXCEPTION_WARNING(SYSTEM_SERVICE, e, "");
@@ -893,13 +884,14 @@ bool SystemService::getOrSetConfig(const std::vector<std::string> namePath,
 			config_.toJSON(accepted, id, ConfigTable::EXPORT_MODE_SHOW_HIDDEN);
 
 			GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_CONFIG_UPDATED,
-				"Configuration updated (name=" << config_.pathFormatter(id)
-											   << ", acceptedValue=" << accepted
-											   << ", inputValue=" << *paramValue
-											   << ")");
+					"Configuration updated ("
+					"name=" << config_.pathFormatter(id, &subPath) <<
+					", acceptedValue=" <<
+					ConfigTable::getSubValue(accepted, &subPath) <<
+					", inputValue=" << *paramValue << ")");
 
 			config_.toFile(outputDiffFileName_.c_str(), CONFIG_TABLE_ROOT,
-				ConfigTable::EXPORT_MODE_DIFF_ONLY);
+					ConfigTable::EXPORT_MODE_DIFF_ONLY);
 		}
 		else {
 			config_.toJSON(result, id,
@@ -917,14 +909,17 @@ bool SystemService::getOrSetConfig(const std::vector<std::string> namePath,
 }
 
 bool SystemService::getEventStats(picojson::value &result, bool reset) {
+	static_cast<void>(result);
+	static_cast<void>(reset);
 	return false;
 }
 
 /*!
 	@brief Handles getLogs command
 */
-void SystemService::getLogs(picojson::value &result, std::string &searchStr,
-	std::string &searchStr2, std::string &ignoreStr, uint32_t length) {
+void SystemService::getLogs(
+		picojson::value &result, std::string &searchStr,
+		std::string &searchStr2, std::string &ignoreStr, uint32_t length) {
 	try {
 		picojson::array logs;
 		std::vector<std::string> history;
@@ -981,7 +976,7 @@ void SystemService::getLogs(picojson::value &result, std::string &searchStr,
 	@brief Handles setEventLogLevel command
 */
 bool SystemService::setEventLogLevel(
-	const std::string &category, const std::string &level, bool force) {
+		const std::string &category, const std::string &level, bool force) {
 	try {
 		if (!force &&
 			unchangableTraceCategories_.find(category) !=
@@ -1047,6 +1042,17 @@ void SystemService::getEventLogLevel(picojson::value &result) {
 
 void SystemService::testEventLogLevel() {
 }
+
+
+
+
+
+
+
+
+
+
+
 
 /*!
 	@brief Writes statistics periodically to Event Log file
@@ -1244,6 +1250,26 @@ bool SystemService::acceptStatsOption(
 */
 void OutputStatsHandler::operator()(EventContext &ec, Event &) {
 	sysSvc_->traceStats(ec.getVariableSizeAllocator());
+	if (pt_->isMaster()) {
+		GS_TRACE_INFO(CLUSTER_DETAIL,
+				GS_TRACE_CS_TRACE_STATS,
+				pt_->dumpPartitionsList(ec.getAllocator(), PartitionTable::PT_CURRENT_OB));
+					GS_TRACE_INFO(CLUSTER_DETAIL, GS_TRACE_CS_CLUSTER_STATUS,
+						pt_->getClusterManager()->dump());
+					{
+						util::StackAllocator &alloc = ec.getAllocator();
+						GS_TRACE_INFO(CLUSTER_DETAIL,
+							GS_TRACE_CS_CLUSTER_STATUS,
+							pt_->dumpPartitions(
+								alloc, PartitionTable::PT_CURRENT_OB));
+						GS_TRACE_INFO(CLUSTER_DETAIL,
+							GS_TRACE_CS_CLUSTER_STATUS,
+							pt_->dumpPartitions(
+								alloc, PartitionTable::PT_CURRENT_GOAL));
+					}
+					GS_TRACE_INFO(CLUSTER_DETAIL, GS_TRACE_CS_CLUSTER_STATUS,
+						pt_->dumpDatas(true));
+	}
 }
 
 
@@ -1789,7 +1815,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 
 			picojson::value result;
 			if (!sysSvc_->getOrSetConfig(
-					namePath, result, paramValue, noUnit)) {
+					alloc_, namePath, result, paramValue, noUnit)) {
 				response.setBadRequestError();
 			}
 
@@ -1808,6 +1834,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 		}
 		else if (request.pathElements_.size() >= 2 &&
 				 request.pathElements_[1] == "memory") {
+
 			if (request.method_ != EBB_GET) {
 				response.setMethodError();
 				return;
@@ -1908,6 +1935,8 @@ void SystemService::ListenerSocketHandler::dispatch(
 			}
 			std::cout << pt_->dumpDatas(true);
 
+
+
 			if (request.parameterMap_.find("trace") !=
 				request.parameterMap_.end()) {
 				const std::string resetStr = request.parameterMap_["trace"];
@@ -1933,13 +1962,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 				}
 			}
 		}
-		else if (request.pathElements_.size() == 2 &&
-				 request.pathElements_[1] == "profs") {
-			if (request.method_ != EBB_GET) {
-				response.setMethodError();
-				return;
-			}
-		}
+
 		else {
 			response.setBadRequestError();
 			return;
@@ -2305,6 +2328,7 @@ void SystemService::StatSetUpHandler::operator()(StatTable &stat) {
 	STAT_ADD(STAT_TABLE_PERF_PEAK_PROCESS_MEMORY);
 	STAT_ADD_SUB_SUB(
 		STAT_TABLE_PERF_TXN_DETAIL_DISABLE_TIMEOUT_CHECK_PARTITION_COUNT);
+
 	stat.resolveGroup(parentId, STAT_TABLE_PERF_TXN_EE, "eventEngine");
 	stat.resolveGroup(parentId, STAT_TABLE_PERF_MEM, "memoryDetail");
 
@@ -2376,10 +2400,14 @@ bool SystemService::StatUpdator::operator()(StatTable &stat) {
 
 		picojson::array eeArray;
 		EventEngine *eeList[] = {
-			svc.clsSvc_->getEE(), svc.syncSvc_->getEE(), svc.txnSvc_->getEE()
+			svc.clsSvc_->getEE(),
+			svc.syncSvc_->getEE(),
+			svc.txnSvc_->getEE()
 		};
-		const StatTableParamId paramList[] = {STAT_TABLE_PERF_TXN_EE_CLUSTER,
-			STAT_TABLE_PERF_TXN_EE_SYNC, STAT_TABLE_PERF_TXN_EE_TRANSACTION
+		const StatTableParamId paramList[] = {
+			STAT_TABLE_PERF_TXN_EE_CLUSTER,
+			STAT_TABLE_PERF_TXN_EE_SYNC,
+			STAT_TABLE_PERF_TXN_EE_TRANSACTION
 		};
 		for (size_t i = 0; i < sizeof(eeList) / sizeof(*eeList); i++) {
 			const uint32_t concurrency =
@@ -2390,68 +2418,79 @@ bool SystemService::StatUpdator::operator()(StatTable &stat) {
 			}
 			EventEngine::Stats eeStats;
 			eeList[i]->getStats(eeStats);
+
+			const int64_t activeQueueSize = eeStats.get(
+				EventEngine::Stats::EVENT_ACTIVE_QUEUE_SIZE_CURRENT);
+			picojson::object eeInfoObj;
+			eeInfoObj["activeQueueSize"] =
+				picojson::value(static_cast<double>(activeQueueSize));
+
+			int64_t tmp;
+				tmp = eeStats.get(
+				EventEngine::Stats::EVENT_ACTIVE_QUEUE_SIZE_MAX);
+			eeInfoObj["activeQueueSizeMax"] =
+				picojson::value(static_cast<double>(tmp));
+
+				tmp = eeStats.get(
+				EventEngine::Stats::EVENT_ACTIVE_ADD_COUNT);
+			eeInfoObj["activeAddCount"] =
+				picojson::value(static_cast<double>(tmp));
+
+				tmp = eeStats.get(
+				EventEngine::Stats::EVENT_PENDING_ADD_COUNT);
+			eeInfoObj["pendingAddCount"] =
+				picojson::value(static_cast<double>(tmp));
+
+				tmp = eeStats.get(
+				EventEngine::Stats::EVENT_PENDING_ADD_COUNT);
+			eeInfoObj["pendingAddCount"] =
+				picojson::value(static_cast<double>(tmp));
+
+				tmp = eeStats.get(
+				EventEngine::Stats::EVENT_ACTIVE_QUEUE_SIZE_CURRENT);
+			eeInfoObj["activeQueueSizeCurrent"] =
+				picojson::value(static_cast<double>(tmp));
+
+				tmp = eeStats.get(
+				EventEngine::Stats::EVENT_ACTIVE_BUFFER_SIZE_CURRENT);
+			eeInfoObj["activeBufferSizeCurrent"] =
+				picojson::value(static_cast<double>(tmp));
+
+				tmp = eeStats.get(
+				EventEngine::Stats::EVENT_ACTIVE_BUFFER_SIZE_MAX);
+			eeInfoObj["activeBufferSizeMax"] =
+				picojson::value(static_cast<double>(tmp));
+
+				tmp = eeStats.get(
+				EventEngine::Stats::EVENT_PENDING_QUEUE_SIZE_CURRENT);
+			eeInfoObj["pendingQueueSizeCurrent"] =
+				picojson::value(static_cast<double>(tmp));
+
+				tmp = eeStats.get(
+				EventEngine::Stats::EVENT_PENDING_QUEUE_SIZE_MAX);
+			eeInfoObj["pendingQueueSizeMax"] =
+				picojson::value(static_cast<double>(tmp));
+
+				tmp = eeStats.get(
+				EventEngine::Stats::IO_SEND_BUFFER_SIZE_MAX);
+
+			eeInfoObj["ioSendBufferSizeMax"] =
+				picojson::value(static_cast<double>(tmp));
+
+			int64_t sendBufferSizeCurrent = 0;
 			for (PartitionGroupId pgId = 0; pgId < concurrency; pgId++) {
-				const int64_t activeQueueSize = eeStats.get(
-					EventEngine::Stats::EVENT_ACTIVE_QUEUE_SIZE_CURRENT);
-				picojson::object eeInfoObj;
-				eeInfoObj["activeQueueSize"] =
-					picojson::value(static_cast<double>(activeQueueSize));
-
-				const int64_t activeQueueSizeMax = eeStats.get(
-					EventEngine::Stats::EVENT_ACTIVE_QUEUE_SIZE_MAX);
-				eeInfoObj["activeQueueSizeMax"] =
-					picojson::value(static_cast<double>(activeQueueSizeMax));
-
-				int64_t tmp;
-				tmp = eeStats.get(
-					EventEngine::Stats::EVENT_ACTIVE_QUEUE_SIZE_MAX);
-				eeInfoObj["activeQueueSizeMax"] =
-					picojson::value(static_cast<double>(activeQueueSizeMax));
-
-				tmp = eeStats.get(EventEngine::Stats::EVENT_ACTIVE_ADD_COUNT);
-				eeInfoObj["acvieAddCount"] =
-					picojson::value(static_cast<double>(tmp));
-
-				tmp = eeStats.get(EventEngine::Stats::EVENT_PENDING_ADD_COUNT);
-				eeInfoObj["pendingAddCount"] =
-					picojson::value(static_cast<double>(tmp));
-
-				tmp = eeStats.get(EventEngine::Stats::EVENT_PENDING_ADD_COUNT);
-				eeInfoObj["pendingAddCount"] =
-					picojson::value(static_cast<double>(tmp));
-
-				tmp = eeStats.get(
-					EventEngine::Stats::EVENT_ACTIVE_QUEUE_SIZE_CURRENT);
-				eeInfoObj["activeQueueSizeCurrent"] =
-					picojson::value(static_cast<double>(tmp));
-
-				tmp = eeStats.get(
-					EventEngine::Stats::EVENT_ACTIVE_BUFFER_SIZE_CURRENT);
-				eeInfoObj["activeBufferSizeCurrent"] =
-					picojson::value(static_cast<double>(tmp));
-
-				tmp = eeStats.get(
-					EventEngine::Stats::EVENT_ACTIVE_BUFFER_SIZE_MAX);
-				eeInfoObj["activeBufferSizeMax"] =
-					picojson::value(static_cast<double>(tmp));
-
-				tmp = eeStats.get(
-					EventEngine::Stats::EVENT_PENDING_QUEUE_SIZE_CURRENT);
-				eeInfoObj["pendingQueueSizeCurrent"] =
-					picojson::value(static_cast<double>(tmp));
-
-				tmp = eeStats.get(
-					EventEngine::Stats::EVENT_PENDING_QUEUE_SIZE_MAX);
-				eeInfoObj["pendingQueueSizeMax"] =
-					picojson::value(static_cast<double>(tmp));
-
-				if (eeInfo.is<picojson::array>()) {
-					eeInfo.get<picojson::array>().push_back(
-						picojson::value(eeInfoObj));
-				}
-				else {
-					eeInfo = picojson::value(eeInfoObj);
-				}
+				EventEngine::Stats eeGroupStats;
+				eeList[i]->getStats(pgId, eeGroupStats);
+				sendBufferSizeCurrent += eeGroupStats.get(
+						EventEngine::Stats::IO_SEND_BUFFER_SIZE_CURRENT);
+			}
+			eeInfoObj["ioSendBufferSizeCurrent"] =
+				picojson::value(static_cast<double>(sendBufferSizeCurrent));
+			if (eeInfo.is<picojson::array>()) {
+				eeInfo.get<picojson::array>().push_back(picojson::value(eeInfoObj));
+			}
+			else {
+				eeInfo = picojson::value(eeInfoObj);
 			}
 			stat.set(paramList[i], eeInfo);
 		}
@@ -2485,7 +2524,8 @@ bool SystemService::StatUpdator::operator()(StatTable &stat) {
 		}
 
 		static const int32_t statIdList[] = {
-			STAT_TABLE_PERF_MEM_ALL_TOTAL, STAT_TABLE_PERF_MEM_DS_STORE_TOTAL,
+			STAT_TABLE_PERF_MEM_ALL_TOTAL,
+			STAT_TABLE_PERF_MEM_DS_STORE_TOTAL,
 			STAT_TABLE_PERF_MEM_DS_LOG_TOTAL,
 			STAT_TABLE_PERF_MEM_WORK_CHECKPOINT_TOTAL,
 			STAT_TABLE_PERF_MEM_WORK_CLUSTER_TOTAL,
@@ -2498,15 +2538,21 @@ bool SystemService::StatUpdator::operator()(StatTable &stat) {
 		};
 		static const size_t listSize = sizeof(statIdList) / sizeof(*statIdList);
 		static const util::AllocatorGroupId allocIdList[listSize] = {
-			ALLOCATOR_GROUP_ROOT, ALLOCATOR_GROUP_STORE, ALLOCATOR_GROUP_LOG,
-			ALLOCATOR_GROUP_CP, ALLOCATOR_GROUP_CS, ALLOCATOR_GROUP_MAIN,
-			ALLOCATOR_GROUP_SYNC, ALLOCATOR_GROUP_SYS,
-			ALLOCATOR_GROUP_TXN_MESSAGE, ALLOCATOR_GROUP_TXN_RESULT,
+			ALLOCATOR_GROUP_ROOT,
+			ALLOCATOR_GROUP_STORE,
+			ALLOCATOR_GROUP_LOG,
+			ALLOCATOR_GROUP_CP,
+			ALLOCATOR_GROUP_CS,
+			ALLOCATOR_GROUP_MAIN,
+			ALLOCATOR_GROUP_SYNC,
+			ALLOCATOR_GROUP_SYS,
+			ALLOCATOR_GROUP_TXN_MESSAGE,
+			ALLOCATOR_GROUP_TXN_RESULT,
 			ALLOCATOR_GROUP_TXN_WORK,
 		};
 
 		util::AllocatorManager &allocMgr =
-			util::AllocatorManager::getDefaultInstance();
+				util::AllocatorManager::getDefaultInstance();
 
 		typedef std::vector<util::AllocatorGroupId> IdList;
 		IdList idList;
@@ -2520,26 +2566,25 @@ bool SystemService::StatUpdator::operator()(StatTable &stat) {
 		allocMgr.getGroupStats(&idList[0], idList.size(), &statsList[0]);
 		for (IdList::iterator it = idList.begin(); it != idList.end(); ++it) {
 			const size_t index = static_cast<size_t>(
-				std::find(allocIdList, allocIdList + listSize, *it) -
-				allocIdList);
+					std::find(allocIdList, allocIdList + listSize, *it) -
+					allocIdList);
 			if (index == listSize) {
 				continue;
 			}
 
 			const int32_t paramId = statIdList[index];
 			const util::AllocatorStats &allocStats =
-				statsList[it - idList.begin()];
+					statsList[it - idList.begin()];
 
 			stat.set(paramId,
-				allocStats.values_[util::AllocatorStats::STAT_TOTAL_SIZE]);
+					allocStats.values_[util::AllocatorStats::STAT_TOTAL_SIZE]);
 			stat.set(paramId + 1,
-				allocStats.values_[util::AllocatorStats::STAT_CACHE_SIZE]);
+					allocStats.values_[util::AllocatorStats::STAT_CACHE_SIZE]);
 
 			if (paramId == STAT_TABLE_PERF_MEM_ALL_TOTAL) {
 				stat.set(STAT_TABLE_PERF_MEM_PROCESS_MEMORY_GAP,
-					static_cast<int64_t>(processMemory) -
-						allocStats
-							.values_[util::AllocatorStats::STAT_TOTAL_SIZE]);
+						static_cast<int64_t>(processMemory) - allocStats
+								.values_[util::AllocatorStats::STAT_TOTAL_SIZE]);
 			}
 		}
 	} while (false);
@@ -2571,5 +2616,6 @@ void ServiceThreadErrorHandler::initialize(const ManagerSet &mgrSet) {
 
 void OutputStatsHandler::initialize(ManagerSet &mgrSet) {
 	sysSvc_ = mgrSet.sysSvc_;
+	pt_ = mgrSet.pt_;
 }
 

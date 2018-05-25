@@ -33,248 +33,6 @@ class ColumnInfo;
 class MessageRowStore;
 class Value;
 
-
-/*!
-	@brief Object for blob
-*/
-class BinaryObject : public BaseObject {
-public:
-	BinaryObject(TransactionContext &txn, ObjectManager &objectManager)
-		: BaseObject(txn.getPartitionId(), objectManager) {}
-	BinaryObject(TransactionContext &txn, ObjectManager &objectManager, OId oId)
-		: BaseObject(txn.getPartitionId(), objectManager, oId) {}
-	BinaryObject(uint8_t *addr) : BaseObject(addr) {}
-
-	/*!
-		@brief Get size of data
-		@note contain variable size area
-	*/
-	static uint32_t getObjectSize(uint32_t size) {
-		return ValueProcessor::getEncodedVarSize(size) + size;  
-	}
-
-	void setData(uint32_t size, const uint8_t *data) {
-		uint32_t sizeLen = ValueProcessor::getEncodedVarSize(size);
-		uint32_t encodedSize = ValueProcessor::encodeVarSize(size);
-		memcpy(getBaseAddr(), &encodedSize, sizeLen);
-		memcpy(getBaseAddr() + sizeLen, data, size);  
-	}
-	/*!
-		@brief Get size of blob
-	*/
-	uint32_t size() const {
-		return ValueProcessor::decodeVarSize(getBaseAddr());
-	}
-	/*!
-		@brief Get value pointer
-		@note return head of blob-bainary
-	*/
-	const uint8_t *data() const {
-		uint32_t sizeLen = ValueProcessor::getEncodedVarSize(getBaseAddr());
-		return reinterpret_cast<const uint8_t *>(getBaseAddr() + sizeLen);
-	}
-
-	/*!
-		@brief Get value pointer
-		@note all return head of data
-	*/
-	uint8_t *getImage() {
-		return getBaseAddr();
-	}
-};
-
-/*!
-	@brief Object for Fixed-type array
-*/
-class ArrayObject : public BaseObject {
-public:
-	ArrayObject(TransactionContext &txn, ObjectManager &objectManager)
-		: BaseObject(txn.getPartitionId(), objectManager) {}
-	ArrayObject(TransactionContext &txn, ObjectManager &objectManager, OId oId)
-		: BaseObject(txn.getPartitionId(), objectManager, oId) {}
-	ArrayObject(uint8_t *addr) : BaseObject(addr) {}
-	/*!
-		@brief Get size of data
-		@note contain variable size area
-	*/
-	static uint32_t getObjectSize(uint32_t arrayLength, ColumnType type) {
-		assert(FixedSizeOfColumnType[type] > 0);
-		uint32_t arrayLengthLen = ValueProcessor::getEncodedVarSize(
-			arrayLength);  
-		uint32_t totalSize =
-			arrayLengthLen +
-			arrayLength * FixedSizeOfColumnType
-							  [type];  
-		uint32_t totalSizeLen = ValueProcessor::getEncodedVarSize(totalSize);
-		uint32_t objectSize = totalSizeLen + totalSize;
-		return objectSize;
-	}
-
-	/*!
-		@brief Get array length
-	*/
-	uint32_t getArrayLength() const {
-		uint32_t totalSizeLen = ValueProcessor::getEncodedVarSize(
-			getBaseAddr());  
-		return ValueProcessor::decodeVarSize(getBaseAddr() + totalSizeLen);
-	}
-
-	/*!
-		@brief Get element of array
-	*/
-	const uint8_t *getArrayElement(uint32_t arrayIndex, ColumnType type) const {
-		assert(FixedSizeOfColumnType[type] > 0);
-		assert(arrayIndex < getArrayLength());
-		uint32_t totalSizeLen =
-			ValueProcessor::getEncodedVarSize(getBaseAddr());  
-		uint32_t elemCountLen = ValueProcessor::getEncodedVarSize(
-			getBaseAddr() + totalSizeLen);  
-		return reinterpret_cast<const uint8_t *>(
-			getBaseAddr() + totalSizeLen + elemCountLen +
-			(arrayIndex * FixedSizeOfColumnType[type]));
-	}
-
-	/*!
-		@brief Set array length
-	*/
-	void setArrayLength(uint32_t arrayLength, ColumnType type) {
-		assert(FixedSizeOfColumnType[type] > 0);
-		uint32_t arrayLengthLen =
-			ValueProcessor::getEncodedVarSize(arrayLength);
-		uint32_t totalSize =
-			arrayLengthLen + arrayLength * FixedSizeOfColumnType[type];
-
-		uint32_t encodedTotalSize =
-			ValueProcessor::encodeVarSize(totalSize);  
-		uint32_t totalSizeLen = ValueProcessor::getEncodedVarSize(totalSize);
-		uint32_t encodedArrayLength =
-			ValueProcessor::encodeVarSize(arrayLength);  
-		memcpy(getBaseAddr(), &encodedTotalSize, totalSizeLen);
-		memcpy(
-			getBaseAddr() + totalSizeLen, &encodedArrayLength, arrayLengthLen);
-	}
-
-	/*!
-		@brief Set element of array
-	*/
-	void setArrayElement(
-		uint32_t arrayIndex, ColumnType type, const uint8_t *data) {
-		assert(FixedSizeOfColumnType[type] > 0);
-		assert(arrayIndex < getArrayLength());
-		memcpy(getArrayElementForUpdate(arrayIndex, type), data,
-			FixedSizeOfColumnType[type]);
-	}
-
-	/*!
-		@brief Get value pointer
-		@note all return head of data
-	*/
-	uint8_t *getImage() {
-		return getBaseAddr();
-	}
-
-private:
-	uint8_t *getArrayElementForUpdate(uint32_t arrayIndex, ColumnType type) {
-		assert(FixedSizeOfColumnType[type] > 0);
-		assert(arrayIndex < getArrayLength());
-		uint32_t totalSizeLen =
-			ValueProcessor::getEncodedVarSize(getBaseAddr());  
-		uint32_t elemCountLen = ValueProcessor::getEncodedVarSize(
-			getBaseAddr() + totalSizeLen);  
-		return reinterpret_cast<uint8_t *>(
-			getBaseAddr() + totalSizeLen + elemCountLen +
-			(arrayIndex * FixedSizeOfColumnType[type]));
-	}
-};
-
-/*!
-	@brief Cursor for blob/string array
-*/
-class MatrixCursor {
-public:
-	/*!
-		@brief Get variable size
-	*/
-	uint32_t getTotalSize() const {
-		const uint8_t *cursor = &variant_;
-		uint32_t elemSizeLen = ValueProcessor::getEncodedVarSize(
-			&variant_);  
-		cursor += elemSizeLen;
-		uint32_t totalSize = *reinterpret_cast<const uint32_t *>(cursor);
-		return totalSize;
-	}
-
-	/*!
-		@brief Get linked OId
-	*/
-	OId getHeaderOId() const {
-		const uint8_t *cursor = &variant_;
-		uint32_t elemSizeLen = ValueProcessor::getEncodedVarSize(&variant_);
-		cursor += elemSizeLen;		 
-		cursor += sizeof(uint32_t);  
-		return *reinterpret_cast<const OId *>(cursor);
-	}
-
-	void initialize() {
-		variant_ = 0;
-	}
-
-	/*!
-		@brief Set variable size
-	*/
-	void setTotalSize(uint32_t totalSize) {
-		uint32_t encodedArrayLength = ValueProcessor::encodeVarSize(
-			LINK_VARIABLE_COLUMN_DATA_SIZE);  
-		uint32_t arrayLengthLen =
-			ValueProcessor::getEncodedVarSize(LINK_VARIABLE_COLUMN_DATA_SIZE);
-		memcpy(&variant_, &encodedArrayLength, arrayLengthLen);
-		memcpy(&variant_ + arrayLengthLen, &totalSize, sizeof(uint32_t));
-	}
-
-	/*!
-		@brief Set linked OId
-	*/
-	void setHeaderOId(OId headerOId) {
-		uint8_t *cursor = &variant_;
-		uint32_t elemSizeLen = ValueProcessor::getEncodedVarSize(&variant_);
-		cursor += elemSizeLen;		 
-		cursor += sizeof(uint32_t);  
-
-		uint32_t arrayLengthLen =
-			ValueProcessor::getEncodedVarSize(LINK_VARIABLE_COLUMN_DATA_SIZE);
-		uint32_t totalSizeLen = sizeof(uint32_t);
-		memcpy(
-			&variant_ + arrayLengthLen + totalSizeLen, &headerOId, sizeof(OId));
-	}
-
-	/*!
-		@brief Set variable size and linked OId
-	*/
-	static void setVariableDataInfo(
-		void *objectRowField, OId linkOId, uint32_t blobDataSize) {
-		uint8_t *addr = reinterpret_cast<uint8_t *>(objectRowField);
-		uint32_t encodedElemNum =
-			ValueProcessor::encodeVarSize(LINK_VARIABLE_COLUMN_DATA_SIZE);
-		uint32_t elemNumLen =
-			ValueProcessor::getEncodedVarSize(LINK_VARIABLE_COLUMN_DATA_SIZE);
-		memcpy(addr, &encodedElemNum, elemNumLen);
-		addr += elemNumLen;
-		memcpy(addr, &blobDataSize, sizeof(uint32_t));
-		addr += sizeof(uint32_t);
-		memcpy(addr, &linkOId, sizeof(OId));
-	}
-
-	/*!
-		@brief Get value pointer
-	*/
-	uint8_t *getImage() {
-		return reinterpret_cast<uint8_t *>(&variant_);
-	}
-
-private:
-	uint8_t variant_;
-};
-
 /*!
 	@brief Field Value Wrapper
 */
@@ -341,7 +99,7 @@ public:
 	explicit Value(util::StackAllocator &alloc, const char *s)
 		: type_(COLUMN_TYPE_STRING) {
 		uint32_t strSize = static_cast<uint32_t>(strlen(s));
-		uint32_t encodedSize = ValueProcessor::encodeVarSize(strSize);
+		uint64_t encodedSize = ValueProcessor::encodeVarSize(strSize);
 		uint32_t sizeLen = ValueProcessor::getEncodedVarSize(strSize);
 		char *target =
 			reinterpret_cast<char *>(alloc.allocate(sizeLen + strSize));
@@ -355,7 +113,7 @@ public:
 	*/
 	explicit Value(util::StackAllocator &alloc, const char *s, uint32_t strSize)
 		: type_(COLUMN_TYPE_STRING) {  
-		uint32_t encodedSize = ValueProcessor::encodeVarSize(strSize);
+		uint64_t encodedSize = ValueProcessor::encodeVarSize(strSize);
 		uint32_t sizeLen = ValueProcessor::getEncodedVarSize(strSize);
 		char *target =
 			reinterpret_cast<char *>(alloc.allocate(sizeLen + strSize));
@@ -392,6 +150,10 @@ public:
 		type_ = COLUMN_TYPE_DOUBLE;
 		data_.double_ = d;
 	}
+	inline void setNull() {
+		type_ = COLUMN_TYPE_NULL;
+		data_.object_.value_ = NULL;
+	}
 
 	/*!
 		@brief Set string value
@@ -400,7 +162,7 @@ public:
 	inline void set(util::StackAllocator &alloc, char *s) {
 		type_ = COLUMN_TYPE_STRING;
 		uint32_t strSize = static_cast<uint32_t>(strlen(s));
-		uint32_t encodedSize = ValueProcessor::encodeVarSize(strSize);
+		uint64_t encodedSize = ValueProcessor::encodeVarSize(strSize);
 		uint32_t sizeLen = ValueProcessor::getEncodedVarSize(strSize);
 		char *target =
 			reinterpret_cast<char *>(alloc.allocate(sizeLen + strSize));
@@ -415,7 +177,7 @@ public:
 	inline void set(util::StackAllocator &alloc, char *s,
 		uint32_t strSize) {  
 		type_ = COLUMN_TYPE_STRING;
-		uint32_t encodedSize = ValueProcessor::encodeVarSize(strSize);
+		uint64_t encodedSize = ValueProcessor::encodeVarSize(strSize);
 		uint32_t sizeLen = ValueProcessor::getEncodedVarSize(strSize);
 		char *target =
 			reinterpret_cast<char *>(alloc.allocate(sizeLen + strSize));
@@ -473,6 +235,9 @@ public:
 		case COLUMN_TYPE_TIMESTAMP_ARRAY:
 			return reinterpret_cast<const uint8_t *>(data_.object_.value_);
 			break;
+		case COLUMN_TYPE_NULL:
+			return NULL;
+			break;
 		default:
 			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
 			break;
@@ -524,9 +289,12 @@ public:
 				const ArrayObject arrayObject(reinterpret_cast<uint8_t *>(
 					const_cast<void *>(data_.object_.value_)));
 				size = arrayObject.getObjectSize(arrayObject.getArrayLength(),
-					ValueProcessor::getSimpleColumnType(type_));
+					FixedSizeOfColumnType[ValueProcessor::getSimpleColumnType(type_)]);
 			}
 		} break;
+		case COLUMN_TYPE_NULL:
+			size = 0;
+			break;
 		default:
 			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
 			break;
@@ -567,6 +335,9 @@ public:
 		case COLUMN_TYPE_TIMESTAMP_ARRAY:
 			return reinterpret_cast<const uint8_t *>(data_.object_.value_);
 			break;
+		case COLUMN_TYPE_NULL:
+			return NULL;
+			break;
 		default:
 			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
 			break;
@@ -601,6 +372,7 @@ public:
 		case COLUMN_TYPE_FLOAT_ARRAY:
 		case COLUMN_TYPE_DOUBLE_ARRAY:
 		case COLUMN_TYPE_TIMESTAMP_ARRAY:
+		case COLUMN_TYPE_NULL:
 			data_.object_.onDataStore_ = false;
 			data_.object_.value_ = NULL;
 			break;
@@ -636,6 +408,9 @@ public:
 
 	inline bool isSimple() const {
 		return ValueProcessor::isSimple(type_);
+	}
+	inline bool isNullValue() const {
+		return type_ == COLUMN_TYPE_NULL;
 	}
 
 	/*!
@@ -759,7 +534,17 @@ public:
 				 || type == COLUMN_TYPE_STRING) {
 			data_.object_.set(data, true);
 		}
-		else {
+		else if (type == COLUMN_TYPE_BLOB) {
+			if (data != NULL) {
+				const uint8_t *objectData =
+					reinterpret_cast<const uint8_t *>(data);  
+				uint32_t totalSize = static_cast<uint32_t>(BlobCursor::getTotalSize(objectData));
+				data_.object_.set(objectData, totalSize, true);
+			}
+			else {
+				data_.object_.set(NULL, 0, true);
+			}
+		} else {
 			if (data != NULL) {
 				uint32_t varDataSize = ValueProcessor::decodeVarSize(data);
 				const uint8_t *objectData =

@@ -55,7 +55,6 @@ UTIL_TRACER_DECLARE(CLUSTER_OPERATION);
 
 #ifdef GD_ENABLE_UNICAST_NOTIFICATION
 
-
 const char *ClusterService::NotificationManager::CONFIG_ADDRESS = "address";
 const char *ClusterService::NotificationManager::CONFIG_PORT = "port";
 const char *ClusterService::NotificationManager::CONFIG_URL = "url";
@@ -119,25 +118,25 @@ ClusterService::ClusterService(const ConfigTable &config,
 	ServiceThreadErrorHandler &serviceThreadErrorHandler
 #ifdef GD_ENABLE_UNICAST_NOTIFICATION
 	,
-	const util::StdAllocator<void, void> &alloc
+	util::VariableSizeAllocator<> &alloc
 #endif
 	)
 	: serviceThreadErrorHandler_(serviceThreadErrorHandler),
-	  ee_(createEEConfig(config, eeconfig), source, name),
-	  versionId_(versionId),
-	  fixedSizeAlloc_(source.fixedAllocator_),
-	  clsMgr_(&clsMgr),
-	  txnSvc_(NULL),
-	  syncSvc_(NULL),
-	  sysSvc_(NULL),
-	  cpSvc_(NULL),
-	  clusterStats_(config.get<int32_t>(CONFIG_TABLE_DS_PARTITION_NUM)),
-	  pt_(NULL),
-	  initailized_(false),
-	  isSystemServiceError_(false)
+	ee_(createEEConfig(config, eeconfig), source, name),
+	versionId_(versionId),
+	fixedSizeAlloc_(source.fixedAllocator_),
+	clsMgr_(&clsMgr),
+	txnSvc_(NULL),
+	syncSvc_(NULL),
+	sysSvc_(NULL),
+	cpSvc_(NULL),
+	clusterStats_(config.get<int32_t>(CONFIG_TABLE_DS_PARTITION_NUM)),
+	pt_(NULL),
+	initailized_(false),
+	isSystemServiceError_(false)
 #ifdef GD_ENABLE_UNICAST_NOTIFICATION
-	  ,
-	  notificationManager_(clsMgr_, alloc)
+	,
+	notificationManager_(clsMgr_, alloc)
 #endif
 {
 	try {
@@ -171,7 +170,6 @@ ClusterService::ClusterService(const ConfigTable &config,
 
 		ee_.setHandler(CS_ORDER_DROP_PARTITION, orderDropPartitionHandler_);
 
-
 		ee_.setHandler(CS_TIMER_CHECK_CLUSTER, timerCheckClusterHandler_);
 		Event checkClusterEvent(
 			source, CS_TIMER_CHECK_CLUSTER, CS_HANDLER_PARTITION_ID);
@@ -197,9 +195,10 @@ ClusterService::ClusterService(const ConfigTable &config,
 		ee_.addPeriodicTimer(checkLoadbalanceEvent,
 			clsMgr_->getConfig().getCheckLoadBalanceInterval());
 
+
+
 		ee_.setUnknownEventHandler(unknownEventHandler_);
 		ee_.setThreadErrorHandler(serviceThreadErrorHandler_);
-
 
 #ifdef GD_ENABLE_UNICAST_NOTIFICATION
 
@@ -208,7 +207,7 @@ ClusterService::ClusterService(const ConfigTable &config,
 			fixedSizeAlloc_);
 		util::StackAllocator::Scope scope(alloc);
 
-		notificationManager_.initialize(alloc, config);
+		notificationManager_.initialize(config);
 		if (notificationManager_.getMode() == NOTIFICATION_RESOLVER) {
 			ee_.setHandler(CS_UPDATE_PROVIDER, timerNotifyClusterHandler_);
 			ee_.setHandler(CS_CHECK_PROVIDER, timerNotifyClusterHandler_);
@@ -295,19 +294,20 @@ void ClusterService::initialize(ManagerSet &mgrSet) {
 		timerNotifyClientHandler_.initialize(mgrSet);
 		timerCheckLoadBalanceHandler_.initialize(mgrSet);
 		orderDropPartitionHandler_.initialize(mgrSet);
+
+
 		unknownEventHandler_.initialize(mgrSet);
 		serviceThreadErrorHandler_.initialize(mgrSet);
 
 
 
-
 		NodeAddress clusterAddress, txnAddress, syncAddress;
 		ClusterService::changeAddress(
-			clusterAddress, 0, CLUSTER_SERVICE, getEE(CLUSTER_SERVICE));
+			clusterAddress, 0, getEE(CLUSTER_SERVICE));
 		ClusterService::changeAddress(
-			txnAddress, 0, TRANSACTION_SERVICE, getEE(TRANSACTION_SERVICE));
+			txnAddress, 0, getEE(TRANSACTION_SERVICE));
 		ClusterService::changeAddress(
-			syncAddress, 0, SYNC_SERVICE, getEE(SYNC_SERVICE));
+			syncAddress, 0, getEE(SYNC_SERVICE));
 
 		EventEngine::Config tmp;
 		tmp.setServerAddress(
@@ -335,7 +335,7 @@ void ClusterService::initialize(ManagerSet &mgrSet) {
 				notificationManager_.getFixedAddressInfo();
 			bool selfIncluded = false;
 			for (NodeAddressSet::iterator it = addressInfo.begin();
-				 it != addressInfo.end(); it++) {
+				it != addressInfo.end(); it++) {
 				const NodeAddress &address = (*it).clusterAddress_;
 				if (address == clusterAddress) {
 					selfIncluded = true;
@@ -453,6 +453,7 @@ void ClusterService::encode(Event &ev, T &t) {
 	catch (std::exception &e) {
 		GS_RETHROW_USER_ERROR(e, "");
 	}
+
 }
 template void ClusterService::encode(Event &ev, DropPartitionInfo &t);
 
@@ -473,11 +474,11 @@ void ClusterService::checkVersion(uint8_t versionId) {
 	@brief Decodes message for cluster service
 */
 template <class T>
-void ClusterService::decode(Event &ev, T &t) {
+void ClusterService::decode(util::StackAllocator &alloc, Event &ev, T &t) {
 	try {
 		EventByteInStream in = ev.getInStream();
 		const uint8_t *eventBuffer = ev.getMessageBuffer().getXArray().data() +
-									 ev.getMessageBuffer().getOffset();
+									ev.getMessageBuffer().getOffset();
 
 		if (eventBuffer == NULL) {
 			GS_THROW_USER_ERROR(GS_ERROR_CS_SERVICE_DECODE_MESSAGE_FAILED,
@@ -523,7 +524,8 @@ void ClusterService::decode(Event &ev, T &t) {
 	}
 }
 
-template void ClusterService::decode(Event &ev, DropPartitionInfo &t);
+template void ClusterService::decode(util::StackAllocator &alloc, Event &ev, DropPartitionInfo &t);
+template void ClusterService::decode(util::StackAllocator &alloc, Event &ev, LongtermSyncInfo &t);
 
 /*!
 	@brief Handles system error
@@ -532,7 +534,7 @@ void ClusterService::setError(
 	const Event::Source &eventSource, std::exception *e) {
 	try {
 		if (e != NULL) {
-			UTIL_TRACE_EXCEPTION_INFO(CLUSTER_OPERATION, *e,
+			UTIL_TRACE_EXCEPTION_ERROR(CLUSTER_OPERATION, *e,
 				GS_EXCEPTION_MERGE_MESSAGE(*e, "[ERROR] SetError requested"));
 		}
 
@@ -561,7 +563,7 @@ void ClusterService::setError(
 	}
 	catch (std::exception &e) {
 		UTIL_TRACE_EXCEPTION(CLUSTER_OPERATION, e,
-			"[CRITICAL] Unrecoveble error is occurred, abort process.");
+			"[CRITICAL] Unrecoverable error is occurred, abort process, reason=" << GS_EXCEPTION_MESSAGE(e));
 		abort();
 	}
 }
@@ -570,22 +572,17 @@ void ClusterService::setError(
 	@brief Requests Gossip
 */
 void ClusterService::requestGossip(const Event::Source &eventSource,
-	util::StackAllocator &alloc, PartitionId pId, NodeId nodeId,
-	GossipType gossipType) {
+		util::StackAllocator &alloc, PartitionId pId, NodeId nodeId, GossipType gossipType) {
 	try {
-		if (gossipType != GOSSIP_NORMAL && gossipType != GOSSIP_GOAL_SELF) {
+		if (gossipType != GOSSIP_INVALID_NODE && gossipType != GOSSIP_INVALID_CATHCUP_PARTITION) {
 			return;
 		}
-
 		ClusterManager::GossipInfo gossipInfo(alloc);
 		gossipInfo.setTarget(pId, nodeId, gossipType);
-
 		clsMgr_->get(gossipInfo);
-
 		if (gossipInfo.isValid()) {
 			Event gossipEvent(eventSource, CS_GOSSIP, CS_HANDLER_PARTITION_ID);
 			encode(gossipEvent, gossipInfo);
-
 			NodeId master = pt_->getMaster();
 			if (master != UNDEF_NODEID) {
 				const NodeDescriptor &nd = ee_.getServerND(master);
@@ -632,7 +629,7 @@ void ClusterService::requestChangePartitionStatus(EventContext &ec,
 /*!
 	@brief Executes ChangePartitionStatus directly in the same thread
 */
-void ClusterService::requestChangePartitionStatus(util::StackAllocator &alloc,
+void ClusterService::requestChangePartitionStatus(EventContext &ec, util::StackAllocator &alloc,
 	PartitionId pId, PartitionStatus status,
 	ChangePartitionType changePartitionType) {
 	try {
@@ -642,6 +639,11 @@ void ClusterService::requestChangePartitionStatus(util::StackAllocator &alloc,
 			TXN_CHANGE_PARTITION_STATE, INFO, changePartitionStatusInfo.dump());
 		txnSvc_->changeTimeoutCheckMode(pId, status, changePartitionType,
 			changePartitionStatusInfo.isToSubMaster(), getStats());
+		if (!pt_->isOwner(pId) && pt_->isOwner(pId, 0, PartitionTable::PT_NEXT_OB)
+				&& changePartitionType != PT_CHANGE_SYNC_END) {
+			txnSvc_->checkNoExpireTransaction(alloc, pId);
+		}
+
 		clsMgr_->set(changePartitionStatusInfo);
 	}
 	catch (std::exception &e) {
@@ -649,7 +651,9 @@ void ClusterService::requestChangePartitionStatus(util::StackAllocator &alloc,
 	}
 }
 
-
+template void ClusterService::request(const Event::Source &eventSource,
+	EventType eventType, PartitionId pId, EventEngine *targetEE,
+	LongtermSyncInfo &t);
 
 /*!
 	@brief Requests UpdateStartLSN
@@ -709,8 +713,8 @@ void ClusterService::requestCompleteCheckpoint(const Event::Source &eventSource,
 	catch (std::exception &e) {
 		GS_RETHROW_USER_OR_SYSTEM(
 			e, GS_EXCEPTION_MERGE_MESSAGE(
-				   e, "Failed to request checkpoint completion: isRecovery="
-						  << isRecovery));
+				e, "Failed to request checkpoint completion: isRecovery="
+						<< isRecovery));
 	}
 }
 
@@ -748,9 +752,6 @@ void ClusterService::request(const Event::Source &eventSource,
 	try {
 		Event requestEvent(eventSource, eventType, pId);
 		encode(requestEvent, t);
-
-		TRACE_CLUSTER_HANDLER(eventType, INFO, t.dump());
-
 		targetEE->add(requestEvent);
 	}
 	catch (std::exception &e) {
@@ -804,7 +805,7 @@ void HeartbeatHandler::operator()(EventContext &ec, Event &ev) {
 
 			ClusterManager::HeartbeatInfo heartbeatInfo(
 				alloc, senderNodeId, pt_);
-			clsSvc_->decode(ev, heartbeatInfo);
+			clsSvc_->decode(alloc, ev, heartbeatInfo);
 
 			TRACE_CLUSTER_HANDLER(eventType, INFO, heartbeatInfo.dump());
 
@@ -814,7 +815,9 @@ void HeartbeatHandler::operator()(EventContext &ec, Event &ev) {
 #else
 			updateNodeList(eventType, heartbeatInfo.getNodeAddressList());
 #endif
-			clsMgr_->set(heartbeatInfo);
+			if (!clsMgr_->set(heartbeatInfo)) {
+				return;
+			}
 			bool isInitialCluster = heartbeatInfo.isIntialCluster();
 
 			if (heartbeatInfo.isStatusChange()) {
@@ -854,7 +857,7 @@ void HeartbeatHandler::operator()(EventContext &ec, Event &ev) {
 
 			ClusterManager::HeartbeatResInfo heartbeatResInfo(
 				alloc, senderNodeId);
-			clsSvc_->decode(ev, heartbeatResInfo);
+			clsSvc_->decode(alloc, ev, heartbeatResInfo);
 
 			TRACE_CLUSTER_HANDLER_DETAIL(
 				ev, eventType, INFO, heartbeatResInfo.dump());
@@ -907,7 +910,7 @@ void NotifyClusterHandler::operator()(EventContext &ec, Event &ev) {
 
 			ClusterManager::NotifyClusterInfo recvNotifyClusterInfo(
 				alloc, senderNodeId, pt_);
-			clsSvc_->decode(ev, recvNotifyClusterInfo);
+			clsSvc_->decode(alloc, ev, recvNotifyClusterInfo);
 
 			TRACE_CLUSTER_HANDLER(
 				eventType, INFO, recvNotifyClusterInfo.dump());
@@ -957,7 +960,7 @@ void NotifyClusterHandler::operator()(EventContext &ec, Event &ev) {
 
 			ClusterManager::NotifyClusterResInfo notifyClusterResInfo(
 				alloc, senderNodeId, pt_);
-			clsSvc_->decode(ev, notifyClusterResInfo);
+			clsSvc_->decode(alloc, ev, notifyClusterResInfo);
 
 			TRACE_CLUSTER_HANDLER(eventType, INFO, notifyClusterResInfo.dump());
 
@@ -1030,8 +1033,8 @@ void SystemCommandHandler::operator()(EventContext &ec, Event &ev) {
 			clsMgr_->checkCommandStatus(OP_JOIN_CLUSTER);
 
 			ClusterManager::JoinClusterInfo joinClusterInfo(
-				alloc, senderNodeId);
-			clsSvc_->decode(ev, joinClusterInfo);
+				alloc, senderNodeId, false);
+			clsSvc_->decode(alloc, ev, joinClusterInfo);
 
 			TRACE_CLUSTER_HANDLER(eventType, WARNING, joinClusterInfo.dump());
 
@@ -1056,7 +1059,7 @@ void SystemCommandHandler::operator()(EventContext &ec, Event &ev) {
 
 			ClusterManager::LeaveClusterInfo leaveClusterInfo(
 				alloc, senderNodeId);
-			clsSvc_->decode(ev, leaveClusterInfo);
+			clsSvc_->decode(alloc, ev, leaveClusterInfo);
 
 			TRACE_CLUSTER_HANDLER(eventType, WARNING, leaveClusterInfo.dump());
 
@@ -1074,9 +1077,8 @@ void SystemCommandHandler::operator()(EventContext &ec, Event &ev) {
 			clsMgr_->updateNodeStatus(OP_LEAVE_CLUSTER);
 
 			if (clsMgr_->isShutdownPending()) {
-				TRACE_CLUSTER_OPERATION(eventType, INFO,
-					"[NOTE] Normal shutdown is started by pending "
-					"command(shutdown)");
+				TRACE_CLUSTER_NORMAL_OPERATION(INFO,
+						"Normal shutdown operation is started by pending operation");
 
 				clsMgr_->checkClusterStatus(OP_SHUTDOWN_NODE_NORMAL);
 
@@ -1098,7 +1100,7 @@ void SystemCommandHandler::operator()(EventContext &ec, Event &ev) {
 
 			ClusterManager::ShutdownNodeInfo shutdownNodeInfo(
 				alloc, senderNodeId, true);
-			clsSvc_->decode(ev, shutdownNodeInfo);
+			clsSvc_->decode(alloc, ev, shutdownNodeInfo);
 
 			TRACE_CLUSTER_HANDLER(eventType, WARNING, shutdownNodeInfo.dump());
 
@@ -1110,12 +1112,11 @@ void SystemCommandHandler::operator()(EventContext &ec, Event &ev) {
 
 #if defined(SYSTEM_CAPTURE_SIGNAL)
 			pid_t pid = getpid();
-			kill(pid, SIGTERM);
+			kill(pid, SIGINT);
 #endif  
 
-			TRACE_CLUSTER_OPERATION(eventType, INFO,
-				"[INFO] Force shutdown node operation is completed.");
-
+			TRACE_CLUSTER_NORMAL_OPERATION(INFO,
+					"Force shutdown node operation is completed");
 			break;
 		}
 
@@ -1126,7 +1127,7 @@ void SystemCommandHandler::operator()(EventContext &ec, Event &ev) {
 
 			ClusterManager::ShutdownNodeInfo shutdownNodeInfo(
 				alloc, senderNodeId, false);
-			clsSvc_->decode(ev, shutdownNodeInfo);
+			clsSvc_->decode(alloc, ev, shutdownNodeInfo);
 
 			TRACE_CLUSTER_HANDLER(eventType, WARNING, shutdownNodeInfo.dump());
 
@@ -1134,9 +1135,8 @@ void SystemCommandHandler::operator()(EventContext &ec, Event &ev) {
 
 			clsMgr_->updateNodeStatus(OP_SHUTDOWN_NODE_NORMAL);
 
-			TRACE_CLUSTER_OPERATION(eventType, INFO,
-				"[INFO] Normal shutdown node operation is completed.");
-
+			TRACE_CLUSTER_NORMAL_OPERATION(INFO,
+					"Normal shutdown node operation is completed");
 			break;
 		}
 
@@ -1158,10 +1158,10 @@ void SystemCommandHandler::operator()(EventContext &ec, Event &ev) {
 			util::XArray<NodeId> liveNodeIdList(alloc);
 			pt_->getLiveNodeIdList(liveNodeIdList);
 
-			TRACE_CLUSTER_OPERATION(eventType, INFO,
-				"[INFO] Shutdown cluster info, nodeNum:"
-					<< liveNodeIdList.size() << ", address list: "
-					<< pt_->dumpNodeAddressList(liveNodeIdList));
+			TRACE_CLUSTER_NORMAL_OPERATION(INFO,
+					"Shutdown cluster (nodeNum="
+					<< liveNodeIdList.size() << ", addressList="
+					<< pt_->dumpNodeAddressList(liveNodeIdList) << ")");
 
 			for (size_t pos = 0; pos < liveNodeIdList.size(); pos++) {
 				const NodeDescriptor &nd =
@@ -1179,20 +1179,17 @@ void SystemCommandHandler::operator()(EventContext &ec, Event &ev) {
 				else {
 					TRACE_CLUSTER_HANDLER(eventType, INFO,
 						"Target nd(nodId:" << liveNodeIdList[pos]
-										   << ") is invalid.");
+										<< ") is invalid.");
 				}
 			}
-
-			TRACE_CLUSTER_OPERATION(eventType, INFO,
-				"[INFO] Shutdown cluster operation is completed.");
-
+			TRACE_CLUSTER_NORMAL_OPERATION(INFO,
+					"Shutdown cluster operation is completed");
 			break;
 		}
 
 		case CS_COMPLETE_CHECKPOINT_FOR_SHUTDOWN: {
-			TRACE_CLUSTER_OPERATION(eventType, INFO,
-				"[INFO] Shutdown checkpoint is completed, shutdown all "
-				"services.");
+			TRACE_CLUSTER_NORMAL_OPERATION(INFO,
+					"Shutdown checkpoint is completed, shutdown all services");
 
 			clsMgr_->checkClusterStatus(OP_COMPLETE_CHECKPOINT_FOR_SHUTDOWN);
 
@@ -1214,14 +1211,13 @@ void SystemCommandHandler::operator()(EventContext &ec, Event &ev) {
 			clsMgr_->updateNodeStatus(OP_COMPLETE_CHECKPOINT_FOR_SHUTDOWN);
 
 			TRACE_CLUSTER_OPERATION(eventType, INFO,
-				"[INFO] Normal shutdown node operation is completed.");
-
+					"Normal shutdown node operation is completed.");
 			break;
 		}
 
 		case CS_COMPLETE_CHECKPOINT_FOR_RECOVERY: {
-			TRACE_CLUSTER_OPERATION(eventType, INFO,
-				"[INFO] Recovery checkpoint is completed, start all services.");
+			TRACE_CLUSTER_NORMAL_OPERATION(INFO,
+					"Recovery checkpoint is completed, start all services");
 			{
 				util::LockGuard<util::Mutex> lock(clsMgr_->getClusterLock());
 
@@ -1252,8 +1248,8 @@ void SystemCommandHandler::operator()(EventContext &ec, Event &ev) {
 					pid_t pid = getpid();
 					kill(pid, SIGTERM);
 #endif  
-					TRACE_CLUSTER_OPERATION(eventType, INFO,
-						"[INFO] Normal shutdown node operation is completed.");
+					TRACE_CLUSTER_NORMAL_OPERATION(INFO,
+							"Normal shutdown node operation is completed");
 				}
 			}
 
@@ -1355,13 +1351,13 @@ void TimerCheckClusterHandler::operator()(EventContext &ec, Event &ev) {
 
 				int64_t currentTime = clsMgr_->getMonotonicTime();
 				for (nodeId = 1; nodeId < activeNodeListSize;
-					 nodeId++, validCount++) {
+					nodeId++, validCount++) {
 					TRACE_CLUSTER_NORMAL(INFO,
 						"node:"
 							<< pt_->dumpNodeAddress(activeNodeList[nodeId])
 							<< ", time:"
 							<< getTimeStr(
-								   clsMgr_->nextHeartbeatTime(currentTime))
+								clsMgr_->nextHeartbeatTime(currentTime))
 							<< ", ack"
 							<< pt_->getAckHeartbeat(activeNodeList[nodeId]));
 
@@ -1374,10 +1370,10 @@ void TimerCheckClusterHandler::operator()(EventContext &ec, Event &ev) {
 								<< pt_->dumpNodeAddress(activeNodeList[nodeId])
 								<< ", time:"
 								<< getTimeStr(
-									   clsMgr_->nextHeartbeatTime(currentTime))
+									clsMgr_->nextHeartbeatTime(currentTime))
 								<< ", ack"
 								<< pt_->getAckHeartbeat(
-									   activeNodeList[nodeId]));
+									activeNodeList[nodeId]));
 					}
 					pt_->setAckHeartbeat(activeNodeList[nodeId], false);
 
@@ -1435,7 +1431,7 @@ void TimerCheckClusterHandler::operator()(EventContext &ec, Event &ev) {
 					util::Set<NodeId> &filterNodeSet =
 						updatePartitionInfo.getFilterNodeSet();
 					for (util::Set<NodeId>::iterator it = filterNodeSet.begin();
-						 it != filterNodeSet.end(); it++) {
+						it != filterNodeSet.end(); it++) {
 						NodeId nodeId = (*it);
 						if (nodeId == 0) {
 							clsEE_->add(updatePartitionEvent);
@@ -1551,7 +1547,7 @@ void TimerNotifyClusterHandler::operator()(EventContext &ec, Event &ev) {
 
 
 				for (int32_t nodeId = 1; nodeId < manager.getFixedNodeNum();
-					 nodeId++) {
+					nodeId++) {
 					{
 						const NodeDescriptor &nd = clsEE_->getServerND(nodeId);
 						if (isFirst) {
@@ -1724,7 +1720,7 @@ void TimerNotifyClusterHandler::operator()(EventContext &ec, Event &ev) {
 			}
 			default: {
 				GS_THROW_USER_ERROR(GS_ERROR_CS_ERROR_INTERNAL,
-					"Invalid notification mode (mode= " << mode << ")");
+					"Invalid notification mode (mode= " << static_cast<uint32_t>(mode) << ")");
 			}
 			}
 		}
@@ -1829,7 +1825,6 @@ void TimerCheckLoadBalanceHandler::operator()(EventContext &ec, Event &ev) {
 	TRACE_CLUSTER_HANDLER_DETAIL(ev, eventType, DEBUG, "");
 
 	try {
-		clsMgr_->checkCheckpointDelayLimitTime(clsMgr_->getMonotonicTime());
 		clsMgr_->checkNodeStatus();
 
 		try {
@@ -1854,9 +1849,8 @@ void TimerCheckLoadBalanceHandler::operator()(EventContext &ec, Event &ev) {
 			PartitionId targetCatchupPId = pt_->getCatchupPId();
 
 			TRACE_CLUSTER_HANDLER(eventType, WARNING,
-				"info={[INFO] Partition status:"
-					<< pt_->dumpPartitionStat(balanceStatus)
-					<< ", catchup:" << targetCatchupPId << "}");
+					"Partition status=" << pt_->dumpPartitionStat(balanceStatus)
+					<< ", catchup=" << targetCatchupPId);
 
 			if (targetCatchupPId != UNDEF_PARTITIONID) {
 				int64_t limitTime =
@@ -1867,7 +1861,7 @@ void TimerCheckLoadBalanceHandler::operator()(EventContext &ec, Event &ev) {
 
 				TRACE_CLUSTER_HANDLER(eventType, WARNING,
 					"checkTime:" << checkTime
-								 << ", timeoutCheck:" << timeoutCheck);
+								<< ", timeoutCheck:" << timeoutCheck);
 
 				if (timeoutCheck || limitTime == UNDEF_TTL) {
 					pt_->setCatchupPId(UNDEF_PARTITIONID, UNDEF_NODEID);
@@ -1878,21 +1872,18 @@ void TimerCheckLoadBalanceHandler::operator()(EventContext &ec, Event &ev) {
 
 			if (balanceStatus != PartitionTable::PT_NORMAL) {
 				TRACE_CLUSTER_HANDLER(eventType, WARNING,
-					"[NOTE] Cluster partition status:"
-						<< pt_->dumpPartitionStat(balanceStatus));
+					"Cluster partition status=" << pt_->dumpPartitionStat(balanceStatus));
 			}
 			if ((balanceStatus != PartitionTable::PT_NORMAL &&
 					pt_->getCatchupPId() == UNDEF_PARTITIONID) ||
 				isCatchupError) {
 				if (clsMgr_->checkLoadBalance()) {
-					TRACE_CLUSTER_OPERATION(eventType, INFO,
-						"[NOTE] Resync by cluster partition status:"
-							<< pt_->dumpPartitionStat(balanceStatus));
-
+					TRACE_CLUSTER_NORMAL_OPERATION(INFO,
+							"Resync by cluster partition status (status="
+							<< pt_->dumpPartitionStat(balanceStatus) << ")");
 					TRACE_CLUSTER_HANDLER(eventType, WARNING,
-						"cachupPId:" << pt_->getCatchupPId()
-									 << ", isCatchup:" << isCatchupError);
-
+							"Current cachupPId=" << pt_->getCatchupPId()
+									<< ", isCatchup=" << isCatchupError);
 					clsMgr_->setForceSync();
 				}
 				else {
@@ -1922,7 +1913,7 @@ void TimerCheckLoadBalanceHandler::operator()(EventContext &ec, Event &ev) {
 				if (!pt_->isActive(pId)) {
 					TRACE_CLUSTER_HANDLER(eventType, INFO,
 						"pId:" << pId
-							   << " is not service, set replica loss info");
+							<< " is not service, set replica loss info");
 
 					orderDropPartitionInfo.setReplicaLoss(pId);
 					continue;
@@ -1943,18 +1934,18 @@ void TimerCheckLoadBalanceHandler::operator()(EventContext &ec, Event &ev) {
 
 				TRACE_CLUSTER_HANDLER(eventType, INFO,
 					"Check owner :{pId:" << pId << ", owner:" << ownerNodeId
-										 << ", status:"
-										 << dumpPartitionStatus(pstatus)
-										 << ", needSync:" << needSync);
+										<< ", status:"
+										<< dumpPartitionStatus(pstatus)
+										<< ", needSync:" << needSync);
 
 				if (pstatus != PartitionTable::PT_ON) {
 					isReplicaLoss = true;
 					if (needSync) {
-						TRACE_CLUSTER_OPERATION(eventType, INFO,
-							"[NOTE] Resync by cluster partition check, pId:"
-								<< pId << ", owner:"
+						TRACE_CLUSTER_NORMAL_OPERATION(INFO,
+							"Resync by cluster partition check (pId="
+								<< pId << ", owner="
 								<< pt_->dumpNodeAddress(ownerNodeId)
-								<< ", status:" << dumpPartitionStatus(pstatus));
+								<< ", status=" << dumpPartitionStatus(pstatus) << ")");
 						clsMgr_->setForceSync();
 					}
 				}
@@ -1962,7 +1953,7 @@ void TimerCheckLoadBalanceHandler::operator()(EventContext &ec, Event &ev) {
 				pt_->getBackup(pId, backups, PartitionTable::PT_CURRENT_OB);
 				int32_t backupCount = 0;
 				for (int32_t pos = 0;
-					 pos < static_cast<int32_t>(backups.size()); pos++) {
+					pos < static_cast<int32_t>(backups.size()); pos++) {
 					pstatus = pt_->getPartitionStatus(pId, backups[pos]);
 
 					TRACE_CLUSTER_HANDLER(eventType, INFO,
@@ -1974,12 +1965,12 @@ void TimerCheckLoadBalanceHandler::operator()(EventContext &ec, Event &ev) {
 					if (pstatus != PartitionTable::PT_ON) {
 						isReplicaLoss = true;
 						if (needSync) {
-							TRACE_CLUSTER_OPERATION(eventType, INFO,
-								"[NOTE] Resync by cluster partition check, pId="
-									<< pId << ", backup:"
+							TRACE_CLUSTER_NORMAL_OPERATION(INFO,
+								"Resync by cluster partition check (pId="
+									<< pId << ", backup="
 									<< pt_->dumpNodeAddress(backups[pos])
-									<< ", status:"
-									<< dumpPartitionStatus(pstatus));
+									<< ", status="
+									<< dumpPartitionStatus(pstatus) << ")");
 							clsMgr_->setForceSync();
 							break;
 						}
@@ -1993,8 +1984,8 @@ void TimerCheckLoadBalanceHandler::operator()(EventContext &ec, Event &ev) {
 
 					TRACE_CLUSTER_HANDLER(eventType, WARNING,
 						"Replica loss, pId:" << pId
-											 << ", backupCount:" << backupCount
-											 << ", backupNum:" << backupNum);
+											<< ", backupCount:" << backupCount
+											<< ", backupNum:" << backupNum);
 				}
 				else {
 				}
@@ -2030,6 +2021,11 @@ void TimerCheckLoadBalanceHandler::operator()(EventContext &ec, Event &ev) {
 				}
 			}
 		}
+
+		PartitionId irregularPId = syncMgr_->checkCurrentSyncStatus();
+		if (irregularPId != UNDEF_PARTITIONID) {
+			clsSvc_->requestGossip(ec, alloc, irregularPId, 0, GOSSIP_INVALID_CATHCUP_PARTITION);
+		}
 		TRACE_CLUSTER_HANDLER(eventType, DEBUG, "");
 	}
 	catch (UserException &e) {
@@ -2057,7 +2053,7 @@ void OrderDropPartitionHandler::operator()(EventContext &ec, Event &ev) {
 		util::StackAllocator::Scope scope(alloc);
 
 		ClusterManager::OrderDropPartitionInfo orderDropPartitionInfo(alloc);
-		clsSvc_->decode(ev, orderDropPartitionInfo);
+		clsSvc_->decode(alloc, ev, orderDropPartitionInfo);
 
 		TRACE_CLUSTER_HANDLER(
 			eventType, WARNING, orderDropPartitionInfo.dump());
@@ -2068,6 +2064,7 @@ void OrderDropPartitionHandler::operator()(EventContext &ec, Event &ev) {
 		for (size_t pos = 0; pos < replicaLossPartitionList.size(); pos++) {
 			replicaLossPartitionSet.insert(replicaLossPartitionList[pos]);
 		}
+
 		for (PartitionId pId = 0; pId < pt_->getPartitionNum(); pId++) {
 			bool isReplicaLoss = false, isInvalidChunk = false;
 			util::Set<PartitionId>::iterator setItr =
@@ -2103,8 +2100,7 @@ std::string dumpPartitionList(
 	PartitionTable *pt, T &partitionList, PartitionRevision &revision) {
 	util::NormalOStringStream ss;
 	int32_t listSize = static_cast<int32_t>(partitionList.size());
-	ss << "{revision:" << revision.toString();
-	ss << ", count:" << listSize << ", partitions:[";
+	ss << "[";
 	for (int32_t pos = 0; pos < listSize; pos++) {
 		ss << partitionList[pos];
 		ss << "(" << pt->getLSN(partitionList[pos]) << ")";
@@ -2112,7 +2108,7 @@ std::string dumpPartitionList(
 			ss << ",";
 		}
 	}
-	ss << "]}";
+	ss << "]";
 	return ss.str().c_str();
 }
 
@@ -2136,7 +2132,7 @@ void UpdatePartitionHandler::operator()(EventContext &ec, Event &ev) {
 
 		ClusterManager::UpdatePartitionInfo updatePartitionInfo(
 			alloc, senderNodeId, pt_);
-		clsSvc_->decode(ev, updatePartitionInfo);
+		clsSvc_->decode(alloc, ev, updatePartitionInfo);
 
 		if (!updatePartitionInfo.isPending()) {
 			TRACE_CLUSTER_HANDLER(
@@ -2168,8 +2164,8 @@ void UpdatePartitionHandler::operator()(EventContext &ec, Event &ev) {
 
 			TRACE_CLUSTER_HANDLER(
 				eventType, INFO, "Update follower down node list:{size:"
-									 << addressInfoList.size()
-									 << ", master:" << masterNodeId << "}");
+									<< addressInfoList.size()
+									<< ", master:" << masterNodeId << "}");
 
 			for (size_t pos = 0; pos < addressInfoList.size(); pos++) {
 				NodeId nodeId = ClusterService::changeNodeId(
@@ -2192,14 +2188,11 @@ void UpdatePartitionHandler::operator()(EventContext &ec, Event &ev) {
 						pt_->setHeartbeatTimeout(nodeId, UNDEF_TTL);
 						TRACE_CLUSTER_HANDLER(eventType, WARNING,
 							"downNode:{" << pt_->dumpNodeAddress(nodeId)
-										 << "}");
+										<< "}");
 					}
 				}
 			}
 		}
-
-		clsMgr_->checkCheckpointDelayLimitTime();
-
 		if (updatePartitionInfo.isPending()) {
 			updatePartitionInfo.setPending(false);
 			Event requestEvent(
@@ -2216,7 +2209,7 @@ void UpdatePartitionHandler::operator()(EventContext &ec, Event &ev) {
 				"Pending sync operation, revision:"
 					<< pt_->getPartitionRevision().toString() << ", waitTime:"
 					<< clsMgr_->getExtraConfig()
-						   .getClusterReconstructWaitTime());
+						.getClusterReconstructWaitTime());
 
 			TRACE_CLUSTER_HANDLER(eventType, DEBUG, "");
 
@@ -2243,8 +2236,8 @@ void UpdatePartitionHandler::operator()(EventContext &ec, Event &ev) {
 			NodeId owner = ClusterService::changeNodeId(ownerAddress, clsEE_);
 			std::vector<NodeId> backups;
 			for (int32_t backupPos = 0;
-				 backupPos < static_cast<int32_t>(backupAddressList.size());
-				 backupPos++) {
+				backupPos < static_cast<int32_t>(backupAddressList.size());
+				backupPos++) {
 				NodeId backup = ClusterService::changeNodeId(
 					backupAddressList[backupPos], clsEE_);
 				backups.push_back(backup);
@@ -2281,7 +2274,7 @@ void UpdatePartitionHandler::operator()(EventContext &ec, Event &ev) {
 
 			PartitionRole nextRole, currentRole;
 			pt_->getPartitionRole(pId, currentRole);
-			bool isCurrentOwner = (currentOwner == 0);
+			bool isCurrentOwner = (currentOwner == 0 && pt_->isOwner(pId));
 			bool isCurrentBackup = currentRole.isBackup();
 			bool isNextOwner = role.isOwner();
 			bool isNextBackup = role.isBackup();
@@ -2298,8 +2291,8 @@ void UpdatePartitionHandler::operator()(EventContext &ec, Event &ev) {
 
 				TRACE_CLUSTER_HANDLER(eventType, WARNING,
 					"current:" << currentRole << ", next:" << role
-							   << ", isNextDownOwner:" << isNextDownOwner
-							   << ", isCurrentOwner:" << isCurrentOwner);
+							<< ", isNextDownOwner:" << isNextDownOwner
+							<< ", isCurrentOwner:" << isCurrentOwner);
 
 				if (isCurrentOwner || isNextDownOwner) {
 					SyncRequestInfo syncRequestInfo(alloc,
@@ -2321,10 +2314,6 @@ void UpdatePartitionHandler::operator()(EventContext &ec, Event &ev) {
 							<< ", mode:shortTerm, role:current or next owner}");
 
 					txnEE_->addTimer(requestEvent, EE_PRIORITY_HIGH);
-
-					TRACE_SYNC_EE_ADD(
-						TXN_SHORTTERM_SYNC_REQUEST, pId, DEBUG, "");
-
 					nextOwnerList.push_back(pId);
 				}
 				else if (isNextBackup) {
@@ -2335,7 +2324,7 @@ void UpdatePartitionHandler::operator()(EventContext &ec, Event &ev) {
 					nextBackupList.push_back(pId);
 				}
 				else if (!pt_->isMaster() && !isCurrentOwner &&
-						 !isCurrentBackup && !isNextOwner && !isNextBackup) {
+						!isCurrentBackup && !isNextOwner && !isNextBackup) {
 					ClusterManager::ChangePartitionTableInfo
 						changePartitionTableInfo(alloc, 0, role);
 					Event requestEvent(ec, TXN_CHANGE_PARTITION_TABLE, pId);
@@ -2347,10 +2336,7 @@ void UpdatePartitionHandler::operator()(EventContext &ec, Event &ev) {
 					TRACE_CLUSTER_HANDLER(TXN_SHORTTERM_SYNC_REQUEST, WARNING,
 						"requestSyncInfo:{pId:"
 							<< pId << ", mode:shortTerm, role:none}");
-
 					txnEE_->addTimer(requestEvent, EE_PRIORITY_HIGH);
-					TRACE_SYNC_EE_ADD(
-						TXN_CHANGE_PARTITION_TABLE, pId, DEBUG, "");
 				}
 			}
 			else if (type == PartitionTable::PT_NEXT_GOAL) {
@@ -2367,12 +2353,7 @@ void UpdatePartitionHandler::operator()(EventContext &ec, Event &ev) {
 					TRACE_CLUSTER_HANDLER(TXN_LONGTERM_SYNC_REQUEST, WARNING,
 						"requestSyncInfo:{pId:"
 							<< pId << ", mode:longTerm, role:next goal owner}");
-
 					txnEE_->add(requestEvent);
-
-					TRACE_SYNC_EE_ADD(
-						TXN_SHORTTERM_SYNC_REQUEST, pId, WARNING, "");
-
 					nextGoalOwnerList.push_back(pId);
 				}
 				else if (isNextBackup) {
@@ -2394,45 +2375,37 @@ void UpdatePartitionHandler::operator()(EventContext &ec, Event &ev) {
 					TRACE_CLUSTER_HANDLER(TXN_SHORTTERM_SYNC_REQUEST, WARNING,
 						"requestSyncInfo:{pId:"
 							<< pId << ", mode:longTerm, role:none}");
-
 					txnEE_->addTimer(requestEvent, EE_PRIORITY_HIGH);
-					TRACE_SYNC_EE_ADD(
-						TXN_CHANGE_PARTITION_TABLE, pId, WARNING, "");
 				}
 			}
 		}
 
+
 		PartitionRevision &currentRevision = pt_->getPartitionRevision();
 		bool isDump = false;
 		if (nextOwnerList.size() > 0) {
-			TRACE_CLUSTER_OPERATION(eventType, INFO,
-				"[INFO] New next owners:{revision:"
-					<< currentRevision << ", "
-					<< dumpPartitionList(pt_, nextOwnerList, currentRevision));
+			TRACE_CLUSTER_NORMAL_OPERATION(INFO,
+				"Short term sync owners (revision=" << currentRevision << ", partitions="
+					<< dumpPartitionList(pt_, nextOwnerList, currentRevision) << ")");
 			isDump = true;
 		}
 		if (nextBackupList.size() > 0) {
-			TRACE_CLUSTER_OPERATION(eventType, INFO,
-				"[INFO] Next backups:{revision:"
-					<< currentRevision << ","
-					<< dumpPartitionList(pt_, nextBackupList, currentRevision));
+			TRACE_CLUSTER_NORMAL_OPERATION(INFO,
+				"Short term sync backups (revision=" << currentRevision << ", partitions="
+					<< dumpPartitionList(pt_, nextBackupList, currentRevision) << ")");
 			isDump = true;
 		}
 		if (nextGoalOwnerList.size() > 0) {
-			TRACE_CLUSTER_OPERATION(eventType, INFO,
-				"[INFO] Next goal owners:{revision:" << currentRevision << ","
-													 << dumpPartitionList(pt_,
-															nextGoalOwnerList,
-															currentRevision));
+			TRACE_CLUSTER_NORMAL_OPERATION(INFO,
+				"Long term sync owners (revision=" << currentRevision << ", partitions="
+				<< dumpPartitionList(pt_, nextGoalOwnerList, currentRevision) << ")");
 		}
 		if (nextGoalCatchupList.size() > 0) {
-			TRACE_CLUSTER_OPERATION(eventType, INFO,
-				"[INFO] Next goal catchups:{revision:"
-					<< currentRevision << ","
-					<< dumpPartitionList(
-						   pt_, nextGoalCatchupList, currentRevision));
+			TRACE_CLUSTER_NORMAL_OPERATION(INFO,
+					"Long term sync catchups  (revision=" << currentRevision << ", partitions="
+					<< currentRevision << "," << dumpPartitionList(
+					pt_, nextGoalCatchupList, currentRevision));
 		}
-
 		if (isDump) {
 			nextOwnerList.clear();
 			nextBackupList.clear();
@@ -2445,19 +2418,17 @@ void UpdatePartitionHandler::operator()(EventContext &ec, Event &ev) {
 					nextBackupList.push_back(pId);
 				}
 			}
-
 			if (nextOwnerList.size() > 0) {
 				TRACE_CLUSTER_HANDLER(eventType, WARNING,
-					"[INFO] Current owners:" << dumpPartitionList(
-						pt_, nextOwnerList, currentRevision));
+						"Short term sync all owners (revision=" << currentRevision << ", partitions="
+						<< dumpPartitionList(pt_, nextOwnerList, currentRevision) << ")");
 			}
 			if (nextBackupList.size() > 0) {
 				TRACE_CLUSTER_HANDLER(eventType, WARNING,
-					"[INFO] Current backups:" << dumpPartitionList(
-						pt_, nextBackupList, currentRevision));
+						"Short term sync all backups (revision=" << currentRevision << ", partitions="
+						<< dumpPartitionList(pt_, nextBackupList, currentRevision) << ")");
 			}
 		}
-		TRACE_CLUSTER_HANDLER(eventType, DEBUG, "");
 	}
 	catch (UserException &e) {
 		TRACE_CLUSTER_EXCEPTION(e, eventType, WARNING, "");
@@ -2484,7 +2455,7 @@ void GossipHandler::operator()(EventContext &ec, Event &ev) {
 		util::StackAllocator::Scope scope(alloc);
 
 		ClusterManager::GossipInfo gossipInfo(alloc);
-		clsSvc_->decode(ev, gossipInfo);
+		clsSvc_->decode(alloc, ev, gossipInfo);
 
 		TRACE_CLUSTER_HANDLER(eventType, WARNING, gossipInfo.dump());
 
@@ -2536,7 +2507,7 @@ void ClusterHandler::initialize(const ManagerSet &mgrSet) {
 	@brief Gets node address
 */
 void ClusterService::changeAddress(NodeAddress &nodeAddress, NodeId nodeId,
-	ServiceType serviceType, EventEngine *ee) {
+		EventEngine *ee) {
 	util::SocketAddress::Inet address;
 	uint16_t port;
 	const NodeDescriptor &nd = ee->getServerND(nodeId);
@@ -2573,19 +2544,18 @@ NodeId ClusterHandler::checkAddress(PartitionTable *pt, EventType eventType,
 	try {
 		if (clusterNodeId != UNDEF_NODEID &&
 			pt->getNodeInfo(clusterNodeId).check(serviceType)) {
-			TRACE_CLUSTER_HANDLER(
-				eventType, DEBUG, "Service is already set, service={type:"
-									  << serviceType << ", address:{"
-									  << address.toString() << "}}");
+			TRACE_CLUSTER_HANDLER(eventType, DEBUG,
+				"Service is already set, service={type:" << static_cast<int32_t>(serviceType) << ", address:{"
+					<< address.toString() << "}}");
 			return clusterNodeId;
 		}
 
 		if (serviceType == SYSTEM_SERVICE) {
 			if (!pt->setNodeInfo(clusterNodeId, serviceType, address)) {
-				TRACE_CLUSTER_HANDLER(eventType, DEBUG,
-					"System service is already set, service={type:"
-						<< serviceType << ", address:{" << address.toString()
-						<< "}}");
+				TRACE_CLUSTER_HANDLER(
+					eventType, DEBUG, "System service is already set, service={type:"
+										<< static_cast<int32_t>(serviceType) << ", address:{"
+										<< address.toString() << "}}");
 			}
 			return clusterNodeId;
 		}
@@ -2604,8 +2574,8 @@ NodeId ClusterHandler::checkAddress(PartitionTable *pt, EventType eventType,
 			if (pt->setNodeInfo(nodeId, serviceType, address)) {
 				TRACE_CLUSTER_HANDLER(
 					eventType, INFO, "Set new address, service:{type:"
-										 << serviceType << ", address:{"
-										 << address.toString() << "}}");
+										<< static_cast<int32_t>(serviceType) << ", address:{"
+										<< address.toString() << "}}");
 			}
 			return nodeId;
 		}
@@ -2623,19 +2593,18 @@ NodeId ClusterHandler::checkAddress(EventType eventType, NodeAddress &address,
 	try {
 		if (clusterNodeId != UNDEF_NODEID &&
 			pt_->getNodeInfo(clusterNodeId).check(serviceType)) {
-			TRACE_CLUSTER_HANDLER(
-				eventType, DEBUG, "Service is already set, service={type:"
-									  << serviceType << ", address:{"
-									  << address.toString() << "}}");
+			TRACE_CLUSTER_HANDLER(eventType, DEBUG,
+				"Service is already set, service={type:" << serviceType << ", address:{"
+												<< address.toString() << "}}");
 			return clusterNodeId;
 		}
 
 		if (serviceType == SYSTEM_SERVICE) {
 			if (!pt_->setNodeInfo(clusterNodeId, serviceType, address)) {
-				TRACE_CLUSTER_HANDLER(eventType, DEBUG,
-					"System service is already set, service={type:"
-						<< serviceType << ", address:{" << address.toString()
-						<< "}}");
+				TRACE_CLUSTER_HANDLER(
+					eventType, DEBUG, "System service is already set, service={type:"
+										<< serviceType << ", address:{"
+										<< address.toString() << "}}");
 			}
 			return clusterNodeId;
 		}
@@ -2654,8 +2623,8 @@ NodeId ClusterHandler::checkAddress(EventType eventType, NodeAddress &address,
 			if (pt_->setNodeInfo(nodeId, serviceType, address)) {
 				TRACE_CLUSTER_HANDLER(
 					eventType, INFO, "Set new address, service:{type:"
-										 << serviceType << ", address:{"
-										 << address.toString() << "}}");
+										<< serviceType << ", address:{"
+										<< address.toString() << "}}");
 			}
 			return nodeId;
 		}
@@ -2677,12 +2646,12 @@ template <class T>
 void ClusterService::updateNodeList(EventType eventType, T &addressInfoList) {
 	try {
 		for (typename T::iterator it = addressInfoList.begin();
-			 it != addressInfoList.end(); it++) {
+			it != addressInfoList.end(); it++) {
 			NodeId clusterNodeId = UNDEF_NODEID, tmpNodeId;
 			EventEngine *targetEE;
 
 			for (int32_t serviceType = 0; serviceType < SERVICE_MAX;
-				 serviceType++) {
+				serviceType++) {
 				ServiceType currentServiceType =
 					static_cast<ServiceType>(serviceType);
 				if (clusterNodeId == 0) {
@@ -2731,7 +2700,7 @@ void ClusterHandler::updateNodeList(
 			EventEngine *targetEE;
 
 			for (int32_t serviceType = 0; serviceType < SERVICE_MAX;
-				 serviceType++) {
+				serviceType++) {
 				ServiceType currentServiceType =
 					static_cast<ServiceType>(serviceType);
 				if (clusterNodeId == 0) {
@@ -2755,8 +2724,8 @@ void ClusterHandler::updateNodeList(
 					GS_THROW_USER_ERROR(
 						GS_ERROR_CS_INVALID_SERVICE_ADDRESS_RELATION,
 						"cluster nodeId:" << clusterNodeId
-										  << ", current nodeId:" << tmpNodeId
-										  << ", serviceType:" << serviceType);
+										<< ", current nodeId:" << tmpNodeId
+										<< ", serviceType:" << serviceType);
 				}
 				else {
 					clusterNodeId = tmpNodeId;
@@ -2810,7 +2779,7 @@ void ChangePartitionStateHandler::operator()(EventContext &ec, Event &ev) {
 
 		ClusterManager::ChangePartitionStatusInfo changePartitionStatusInfo(
 			alloc);
-		clsSvc_->decode(ev, changePartitionStatusInfo);
+		clsSvc_->decode(alloc, ev, changePartitionStatusInfo);
 
 		TRACE_SYNC_HANDLER(
 			eventType, pId, INFO, changePartitionStatusInfo.dump());
@@ -2821,6 +2790,10 @@ void ChangePartitionStateHandler::operator()(EventContext &ec, Event &ev) {
 		txnSvc_->changeTimeoutCheckMode(pId, changeStatus,
 			changePartitionStatusInfo.getPartitionChangeType(),
 			changePartitionStatusInfo.isToSubMaster(), clsSvc_->getStats());
+		if (!pt_->isOwner(pId) && pt_->isOwner(pId, 0, PartitionTable::PT_NEXT_OB)
+				&& changePartitionStatusInfo.getPartitionChangeType() != PT_CHANGE_SYNC_END) {
+			txnSvc_->checkNoExpireTransaction(alloc, pId);
+		}
 
 		clsMgr_->set(changePartitionStatusInfo);
 
@@ -2854,7 +2827,7 @@ void ChangePartitionTableHandler::operator()(EventContext &ec, Event &ev) {
 
 		ClusterManager::ChangePartitionTableInfo changePartitionTableInfo(
 			alloc, 0);
-		clsSvc_->decode(ev, changePartitionTableInfo);
+		clsSvc_->decode(alloc, ev, changePartitionTableInfo);
 
 		TRACE_SYNC_HANDLER(
 			eventType, pId, WARNING, changePartitionTableInfo.dump());
@@ -2882,43 +2855,54 @@ void ChangePartitionTableHandler::operator()(EventContext &ec, Event &ev) {
 		bool isPrevCatchup = false;
 		bool isPrevCatchupOwner = false;
 		if (nextRole.getTableType() == PartitionTable::PT_NEXT_GOAL) {
-			syncMgr_->getCurrentSyncId(
-				currentPId, currentSyncId, currentRevision);
-			syncMgr_->getSyncContext(currentPId, currentSyncId);
-
-			if (currentPId != UNDEF_PARTITIONID) {
 				isPrevCatchup = pt_->isBackup(
-					currentPId, 0, PartitionTable::PT_CURRENT_GOAL);
+					pId, 0, PartitionTable::PT_CURRENT_GOAL);
 				isPrevCatchupOwner = pt_->isOwner(
-					currentPId, 0, PartitionTable::PT_CURRENT_GOAL);
-			}
+					pId, 0, PartitionTable::PT_CURRENT_GOAL);
 		}
 		UTIL_TRACE_WARNING(CLUSTER_SERVICE,
 			"currentPId:" << currentPId
-						  << ", currentSyncId:" << currentSyncId.dump()
-						  << ", isPrevCatchup:" << isPrevCatchup
-						  << ", isPrevCatchupOwner:" << isPrevCatchupOwner);
+						<< ", currentSyncId:" << currentSyncId.dump()
+						<< ", isPrevCatchup:" << isPrevCatchup
+						<< ", isPrevCatchupOwner:" << isPrevCatchupOwner);
 
 		clsMgr_->set(changePartitionTableInfo);
 		PartitionTable::TableType tableType =
 			changePartitionTableInfo.getPartitionRole().getTableType();
 
 		if (tableType == PartitionTable::PT_NEXT_OB) {
-			clsSvc_->requestChangePartitionStatus(
+			clsSvc_->requestChangePartitionStatus(ec, 
 				alloc, pId, PartitionTable::PT_OFF, PT_CHANGE_SYNC_END);
 		}
 
 		if (nextRole.getTableType() == PartitionTable::PT_NEXT_GOAL) {
 			if (nextRole.getOwner() == UNDEF_NODEID) {
-				if (nextRole.getRevision() == currentRevision) {
-					SyncContext *context =
-						syncMgr_->getSyncContext(pId, currentSyncId);
+				if (isPrevCatchupOwner) {
+					PartitionId currentPId;
+					SyncId syncId;
+					PartitionRevision ptRev;
+					syncMgr_->getCurrentSyncId(currentPId, syncId, ptRev, isPrevCatchupOwner);
+					SyncContext *context = syncMgr_->getSyncContext(currentPId, syncId);
 					if (context != NULL) {
-						UTIL_TRACE_WARNING(CLUSTER_SERVICE,
-							"Clear catchup info(catchup), pId:"
-								<< currentPId << ", ptRev:"
-								<< context->getPartitionRevision());
-						syncMgr_->removeSyncContext(currentPId, context);
+						Event syncTimeoutEvent(ec, TXN_SYNC_TIMEOUT, pId);
+						SyncTimeoutInfo syncTimeoutInfo(
+								alloc, TXN_SYNC_TIMEOUT, syncMgr_, currentPId, MODE_LONGTERM_SYNC, context);
+						syncSvc_->encode(syncTimeoutEvent, syncTimeoutInfo);
+						txnEE_->addTimer(syncTimeoutEvent, 0);
+					}
+				}
+				else if (isPrevCatchup) {
+					PartitionId currentPId;
+					SyncId syncId;
+					PartitionRevision ptRev;
+					syncMgr_->getCurrentSyncId(currentPId, syncId, ptRev, isPrevCatchupOwner);
+					SyncContext *context = syncMgr_->getSyncContext(currentPId, syncId);
+					if (context != NULL) {
+						Event syncTimeoutEvent(ec, TXN_SYNC_TIMEOUT, pId);
+						SyncTimeoutInfo syncTimeoutInfo(
+								alloc, TXN_SYNC_TIMEOUT, syncMgr_, currentPId, MODE_LONGTERM_SYNC, context);
+						syncSvc_->encode(syncTimeoutEvent, syncTimeoutInfo);
+						txnEE_->addTimer(syncTimeoutEvent, 0);
 					}
 				}
 			}
@@ -2946,7 +2930,7 @@ void UnknownClusterEventHandler::operator()(EventContext &, Event &ev) {
 					<< getEventTypeName(eventType) << " is before v1.5");
 		}
 		else if (eventType >= V_1_5_CLUSTER_START &&
-				 eventType <= V_1_5_CLUSTER_END) {
+				eventType <= V_1_5_CLUSTER_END) {
 			GS_THROW_USER_ERROR(GS_ERROR_CS_CLUSTER_VERSION_UNMATCHED,
 				"Cluster version is unmatched, event type:"
 					<< getEventTypeName(eventType) << " is v1.5");
@@ -3000,12 +2984,12 @@ void ClusterService::shutdownAllService(bool isInSytemService) {
 		kill(pid, SIGTERM);
 #endif  
 
-		TRACE_CLUSTER_NORMAL_OPERATION(
-			INFO, "[INFO] Shutdown node operation is completed.");
+		TRACE_CLUSTER_NORMAL_OPERATION(INFO, "Complete shutdown node operation");
 	}
 	catch (std::exception &e) {
 		UTIL_TRACE_EXCEPTION(CLUSTER_OPERATION, e,
-			"[CRITICAL] Unrecoveble error is occurred, abort process.");
+				"Unrecoverable error is occurred, abort process, reason="
+			<< GS_EXCEPTION_MESSAGE(e));
 		abort();
 	}
 }
@@ -3016,15 +3000,16 @@ void ClusterService::shutdownAllService(bool isInSytemService) {
 	@brief Constructor of NotificationManager
 */
 ClusterService::NotificationManager::NotificationManager(
-	ClusterManager *clsMgr, const util::StdAllocator<void, void> &valloc)
+	ClusterManager *clsMgr,  util::VariableSizeAllocator<> &valloc)
 	: clsMgr_(clsMgr),
-	  pt_(clsMgr->getPartitionTable()),
-	  valloc_(valloc),
-	  mode_(NOTIFICATION_MULTICAST),
-	  fixedNodeNum_(0),
-	  resolverUpdateInterval_(0),
-	  resolverCheckInterval_(DEFAULT_CHECK_INTERVAL),
-	  resolverCheckLongInterval_(LONG_CHECK_INTERVAL)
+	pt_(clsMgr->getPartitionTable()),
+	valloc_(valloc),
+	mode_(NOTIFICATION_MULTICAST),
+	fixedNodeNum_(0),
+	resolverUpdateInterval_(0),
+	resolverCheckInterval_(DEFAULT_CHECK_INTERVAL),
+	resolverCheckLongInterval_(LONG_CHECK_INTERVAL)
+		, value_(UTIL_NEW picojson::value)
 {
 }
 
@@ -3035,13 +3020,15 @@ ClusterService::NotificationManager::~NotificationManager() {
 	for (size_t pos = 0; pos < resolverList_.size(); pos++) {
 		delete resolverList_[pos];
 	}
+	if (value_) {
+		delete value_;
+	}
 }
 
 /*!
 	@brief Initializer
 */
-void ClusterService::NotificationManager::initialize(
-	util::StackAllocator &alloc, const ConfigTable &config) {
+void ClusterService::NotificationManager::initialize(const ConfigTable &config) {
 	try {
 
 		const int32_t notificationInterval =
@@ -3129,7 +3116,7 @@ void ClusterService::NotificationManager::initialize(
 void ClusterService::NotificationManager::setDigest(
 	util::XArray<uint8_t> &digestBinary) {
 	for (NodeAddressSetItr it = fixedAddressInfoSet_.begin();
-		 it != fixedAddressInfoSet_.end(); it++) {
+		it != fixedAddressInfoSet_.end(); it++) {
 		digestBinary.push_back(
 			reinterpret_cast<const uint8_t *>(&(*it)), sizeof(AddressInfo));
 	}
@@ -3189,8 +3176,17 @@ bool ClusterService::NotificationManager::next() {
 				return false;
 			}
 
+			if (completed && resolverList_[pos]->isChanged()) {
+				util::LockGuard<util::Mutex> guard(lock_);
+				resolverList_[pos]->exportTo(*value_);
+			}
+
 			const bool immediate = resolverList_[pos]->update();
 			if (immediate) {
+				if (resolverList_[pos]->isChanged()) {
+					util::LockGuard<util::Mutex> guard(lock_);
+					resolverList_[pos]->exportTo(*value_);
+				}
 				return true;
 			}
 			else {
@@ -3214,16 +3210,17 @@ bool ClusterService::NotificationManager::next() {
 	}
 }
 
-
 int32_t ClusterService::NotificationManager::check() {
 	try {
-
 		for (size_t pos = 0; pos < resolverList_.size(); pos++) {
 			size_t readSize = 0;
 			if (resolverList_[pos]->checkUpdated(&readSize)) {
+				if (resolverList_[pos]->isChanged()) {
+					util::LockGuard<util::Mutex> guard(lock_);
+					resolverList_[pos]->exportTo(*value_);
+				}
 				return 0;
 			}
-
 			if (readSize > 0) {
 				return resolverCheckLongInterval_;
 			}
@@ -3246,9 +3243,8 @@ int32_t ClusterService::NotificationManager::check() {
 void ClusterService::NotificationManager::getNotificationMember(
 	picojson::value &target) {
 	try {
-		if (!resolverList_.empty()) {
-			resolverList_.front()->exportTo(target);
-		}
+		util::LockGuard<util::Mutex> guard(lock_);
+		target = *value_;
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_USER_OR_SYSTEM(e,
@@ -3258,6 +3254,5 @@ void ClusterService::NotificationManager::getNotificationMember(
 	}
 }
 
-
-
 #endif  
+

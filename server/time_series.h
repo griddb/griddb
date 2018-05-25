@@ -39,13 +39,14 @@ class MessageTimeSeriesSchema;
 
 UTIL_TRACER_DECLARE(TIME_SERIES);
 
-static const uint8_t EXPIRE_DIVIDE_DEFAULT_NUM = 8;
+static const uint16_t EXPIRE_DIVIDE_DEFAULT_NUM = 8;
+static const int32_t EXPIRE_DIVIDE_UNDEFINED_NUM = -1;
 static const Timestamp EXPIRE_MARGIN =
 	1000;  
-static const OId RUNTIME_BASE_FILTER =
-	0x7FFFFFFFFFFFFFFFLL;  
+static const OId RUNTIME_RESET_FILTER =
+	0x0ULL;  
 static const OId RUNTIME_SET_FILTER =
-	0x8000000000000000ULL;  
+	0x1ULL;  
 
 
 
@@ -100,8 +101,6 @@ public:
 		uint64_t reserved_;  
 		uint64_t padding1_;  
 		uint64_t padding2_;  
-		uint64_t padding3_;  
-		uint64_t padding4_;  
 	};
 	/*!
 		@brief SubTimeSeries format
@@ -116,7 +115,7 @@ public:
 			startTime_ = 0;  
 		}
 		bool isRuntime() const {
-			return (mvccMapOId_ & RUNTIME_SET_FILTER) != 0;
+			return ObjectManager::getUserArea(mvccMapOId_) != 0;
 		}
 		bool operator!=(const SubTimeSeriesImage &target) const {
 			if (rowIdMapOId_ != target.rowIdMapOId_ ||
@@ -200,7 +199,7 @@ public:
 			/*!
 				@brief Check if this Row is already updated in the transaction
 			*/
-			bool isFirstUpdate() {
+			bool isFirstUpdate() const {
 				return rowArrayCursor_->isFirstUpdate();
 			}
 
@@ -213,13 +212,13 @@ public:
 			/*!
 				@brief Get TransactionId when finally updated
 			*/
-			TransactionId getTxnId() {
+			TransactionId getTxnId() const {
 				return rowArrayCursor_->getTxnId();
 			}
 			/*!
 				@brief Get RowId
 			*/
-			RowId getRowId() {
+			RowId getRowId() const {
 				return *reinterpret_cast<RowId *>(getRowIdAddr());
 			}
 			/*!
@@ -232,7 +231,7 @@ public:
 			/*!
 				@brief Check if this Row is already removed
 			*/
-			bool isRemoved() {
+			bool isRemoved() const {
 				return isRemoved(binary_);
 			}
 			/*!
@@ -250,14 +249,18 @@ public:
 			/*!
 				@brief Get address of variable OId
 			*/
-			uint8_t *getVariableArrayAddr() {
+			uint8_t *getVariableArrayAddr() const {
 				return getFixedAddr();
+			}
+
+			const uint8_t *getNullsAddr() const {
+				return binary_ + FIXED_ADDR_OFFSET + nullsOffset_;
 			}
 
 			/*!
 				@brief Get Row key(Timestamp)
 			*/
-			Timestamp getTime() {
+			Timestamp getTime() const {
 				return *reinterpret_cast<Timestamp *>(getRowIdAddr());
 			}
 			/*!
@@ -273,14 +276,20 @@ public:
 							sizeof(RowId), cond.value_, cond.valueSize_);
 				}
 				else {
-					getField(txn, rowArrayCursor_->getContainer().getColumnInfo(
-									  cond.columnId_),
-						tmpValue);
-					isMatch = cond.operator_(txn, tmpValue.getValue().data(),
-						tmpValue.getValue().size(), cond.value_,
-						cond.valueSize_);
+					ColumnInfo &columnInfo = rowArrayCursor_->getContainer().getColumnInfo(cond.columnId_);
+					if (isNullValue(columnInfo)) {
+						isMatch = cond.operator_ == ComparatorTable::isNull_;
+					} else {
+						getField(txn, columnInfo, tmpValue);
+						isMatch = cond.operator_(txn, tmpValue.getValue().data(),
+							tmpValue.getValue().size(), cond.value_,
+							cond.valueSize_);
+					}
 				}
 				return isMatch;
+			}
+			bool isNullValue(const ColumnInfo &columnInfo) const {
+				return RowNullBits::isNullValue(getNullsAddr(), columnInfo.getColumnId());
 			}
 			std::string dump(TransactionContext &txn);
 
@@ -296,38 +305,36 @@ public:
 			RowArray *rowArrayCursor_;
 			uint8_t *binary_;
 			size_t nullsOffset_;
+
 		private:
 			void checkVarDataSize(TransactionContext &txn, uint32_t columnNum,
 				uint32_t variableColumnNum, uint8_t *varTopAddr,
 				util::XArray<uint32_t> &varColumnIdList,
 				util::XArray<uint32_t> &varDataObjectSizeList,
 				util::XArray<uint32_t> &varDataObjectPosList);
-			uint8_t *getRowIdAddr() {
+			uint8_t *getRowIdAddr() const {
 				return getFixedAddr() +
 					   rowArrayCursor_->getContainer()
 						   .getColumnInfo(ColumnInfo::ROW_KEY_COLUMN_ID)
 						   .getColumnOffset();
 			}
-			uint8_t *getTIdAddr() {
+			uint8_t *getTIdAddr() const {
 				return binary_ + TID_OFFSET;
 			}
-			uint8_t *getFixedAddr() {
+			uint8_t *getFixedAddr() const {
 				return binary_ + FIXED_ADDR_OFFSET;
 			}
 			void setVariableArray(OId oId) {
 				memcpy(getVariableArrayAddr(), &oId, sizeof(OId));
 			}
-			OId getVariableArray() {
+			OId getVariableArray() const {
 				return *reinterpret_cast<OId *>(getVariableArrayAddr());
-			}
-			uint8_t *getNullsAddr() {
-				return binary_ + FIXED_ADDR_OFFSET + nullsOffset_;
 			}
 			void setRemoved() {
 				RowHeader *val = reinterpret_cast<RowHeader *>(binary_);
 				*val |= REMOVE_BIT;
 			}
-			uint8_t *getAddr() {
+			uint8_t *getAddr() const {
 				return binary_;
 			}
 		};
@@ -350,6 +357,7 @@ public:
 		void remove(TransactionContext &txn);
 		void move(TransactionContext &txn, RowArray &dest);
 		void copy(TransactionContext &txn, RowArray &dest);
+		void updateNullsStats(const uint8_t *nullbits);
 		void copyRowArray(TransactionContext &txn, RowArray &dest);
 
 		bool nextRowArray(
@@ -433,7 +441,7 @@ public:
 		/*!
 			@brief Check if next Row exists
 		*/
-		bool hasNext() {
+		bool hasNext() const {
 			if (elemCursor_ + 1 < getRowNum()) {
 				return true;
 			}
@@ -461,26 +469,25 @@ public:
 		/*!
 			@brief Check if RowArray is initialized
 		*/
-		bool isNotInitialized() {
+		bool isNotInitialized() const {
 			return BaseObject::getBaseOId() == UNDEF_OID ? true : false;
 		}
 		/*!
 			@brief Check if cursor is last Row
 		*/
-		bool isTailPos() {
+		bool isTailPos() const {
 			return elemCursor_ >= getMaxRowNum() - 1 ? true : false;
 		}
 		/*!
 			@brief Get OId of Row(RowArray OId + row offset)
 		*/
-		OId getOId() {
-			return ((static_cast<OId>(elemCursor_) << (64 - ELEM_BIT)) |
-					getBaseOId());
+		OId getOId() const {
+			return ObjectManager::setUserArea(getBaseOId(), static_cast<OId>(elemCursor_));
 		}
 		/*!
 			@brief Get OId of RowArray
 		*/
-		OId getBaseOId() {
+		OId getBaseOId() const {
 			return getBaseOId(BaseObject::getBaseOId());
 		}
 		/*!
@@ -493,13 +500,13 @@ public:
 		/*!
 			@brief Get address of current Row
 		*/
-		uint8_t *getRow() {
+		uint8_t *getRow() const {
 			return getRow(elemCursor_);
 		}
 		/*!
 			@brief Get number of Rows(include removed Rows)
 		*/
-		uint16_t getRowNum() {
+		uint16_t getRowNum() const {
 			return *reinterpret_cast<uint16_t *>(getAddr() + ROW_NUM_OFFSET);
 		}
 		/*!
@@ -518,24 +525,27 @@ public:
 		/*!
 			@brief Get maximum that it can store
 		*/
-		uint16_t getMaxRowNum() {
+		uint16_t getMaxRowNum() const {
 			return *reinterpret_cast<uint16_t *>(
 				getAddr() + MAX_ROW_NUM_OFFSET);
 		}
 		/*!
 			@brief Get header size of RowArray Object
 		*/
-		static uint32_t getHeaderSize() {
-			return HEADER_SIZE;
+		uint32_t getHeaderSize() const {
+			return NULLBITS_OFFSET + getNullbitsSize();
+		}
+		static uint32_t calcHeaderSize(uint32_t nullbitsSize) {
+			return NULLBITS_OFFSET + nullbitsSize;
 		}
 
 		/*!
 			@brief Get RowId address of current Row
 		*/
-		uint8_t *getRowIdAddr() {
+		uint8_t *getRowIdAddr() const {
 			return getAddr() + ROWID_OFFSET;
 		}
-		uint8_t *getTIdAddr() {
+		uint8_t *getTIdAddr() const {
 			return getAddr() + TID_OFFSET;
 		}
 		void lock(TransactionContext &txn);
@@ -558,7 +568,7 @@ public:
 		/*!
 			@brief Check if this RowArray is already updated in the transaction
 		*/
-		bool isFirstUpdate() {
+		bool isFirstUpdate() const {
 			return (*reinterpret_cast<uint8_t *>(getBitsAddr()) &
 					   FIRST_UPDATE_BIT) != 0;
 		}
@@ -571,7 +581,7 @@ public:
 		/*!
 			@brief Get TransactionId when finally updated
 		*/
-		TransactionId getTxnId() {
+		TransactionId getTxnId() const {
 			TransactionId tId =
 				*reinterpret_cast<TransactionId *>(getTIdAddr());
 			return (tId & TID_FIELD);
@@ -579,28 +589,60 @@ public:
 		/*!
 			@brief Get RowId of current Row
 		*/
-		RowId getRowId() {
+		RowId getRowId() const {
 			return *reinterpret_cast<RowId *>(getRowIdAddr());
+		}
+		uint8_t *getNullsStats() {
+			return getAddr() + NULLBITS_OFFSET;
+		}
+		uint32_t getNullbitsSize() const {
+			return nullbitsSize_;
+		}
+		bool validate();
+		void setContainerId(ContainerId containerId) {
+			ContainerId *containerIdAddr = 
+				reinterpret_cast<ContainerId *>(getBaseAddr() + CONTAINER_ID_OFFSET);
+			*containerIdAddr = containerId;
+		}
+		ContainerId getContainerId() const {
+			ContainerId *containerIdAddr = 
+				reinterpret_cast<ContainerId *>(getBaseAddr() + CONTAINER_ID_OFFSET);
+			return *containerIdAddr;
+		}
+		void setColumnNumd(uint16_t columnNum) {
+			uint16_t *columnNumAddr = 
+				reinterpret_cast<uint16_t *>(getBaseAddr() + COLUMN_NUM_OFFSET);
+			*columnNumAddr = columnNum;
+		}
+		uint16_t getColumnNum() const {
+			uint16_t *columnNumAddr = 
+				reinterpret_cast<uint16_t *>(getBaseAddr() + COLUMN_NUM_OFFSET);
+			return *columnNumAddr;
 		}
 		std::string dump(TransactionContext &txn);
 
 	private:  
 		static const size_t HEADER_FREE_AREA_SIZE =
-			20;  
-		static const size_t HEADER_SIZE =
-			sizeof(uint16_t) * 2 + sizeof(RowId) + sizeof(TransactionId) +
-			HEADER_FREE_AREA_SIZE;  
+			8;  
 		static const size_t MAX_ROW_NUM_OFFSET = 0;  
 		static const size_t ROW_NUM_OFFSET =
 			sizeof(uint16_t);  
 		static const size_t ROWID_OFFSET =
 			sizeof(uint16_t) * 2;  
-		static const size_t TID_OFFSET =
+		static const size_t CONTAINER_ID_OFFSET =
 			ROWID_OFFSET + sizeof(RowId);  
+		static const size_t COLUMN_NUM_OFFSET =
+			CONTAINER_ID_OFFSET + sizeof(ContainerId);  
+		static const size_t ROWARRAY_TYPE_OFFSET =
+			COLUMN_NUM_OFFSET + sizeof(uint16_t);  
+		static const size_t SPARSE_DATA_OFFSET =
+			ROWARRAY_TYPE_OFFSET + sizeof(uint16_t);  
+		static const size_t TID_OFFSET =
+			SPARSE_DATA_OFFSET + sizeof(RowId);  
 		static const size_t BITS_OFFSET =
 			TID_OFFSET + 7;  
-		static const size_t ROW_AREA_OFFSET =
-			TID_OFFSET + sizeof(TransactionId);  
+		static const size_t NULLBITS_OFFSET = TID_OFFSET + sizeof(TransactionId)
+			+ HEADER_FREE_AREA_SIZE;
 		static const uint8_t FIRST_UPDATE_BIT =
 			0x40;  
 		static const TransactionId TID_FIELD =
@@ -611,20 +653,20 @@ public:
 		struct Header {
 			uint16_t elemCursor_;
 		};
-		static const size_t ELEM_BIT = 10;
-		static const OId BASE_FILTER = 0x003FFFFFFFFFFFFFLL;
 
 	private:  
 		TimeSeries *container_;
 		size_t rowSize_;
 		uint16_t elemCursor_;
+		uint32_t nullbitsSize_;
 
 	private:  
-		uint8_t *getBitsAddr() {
+		uint8_t *getBitsAddr() const {
 			return getAddr() + BITS_OFFSET;
 		}
-		uint8_t *getRow(uint16_t elem) {
-			return getAddr() + HEADER_SIZE + elem * rowSize_;
+
+		uint8_t *getRow(uint16_t elem) const {
+			return getAddr() + getHeaderSize() + elem * rowSize_;
 		}
 		void setMaxRowNum(uint16_t num) {
 			uint16_t *addr =
@@ -636,14 +678,14 @@ public:
 				reinterpret_cast<uint16_t *>(getAddr() + ROW_NUM_OFFSET);
 			*addr = num;
 		}
-		uint8_t *getAddr() {
+		uint8_t *getAddr() const {
 			return getBaseAddr();
 		}
-		TimeSeries &getContainer() {
+		TimeSeries &getContainer() const {
 			return *container_;
 		}
-		uint16_t getElemCursor(OId oId) {
-			return static_cast<uint16_t>((oId >> (64 - ELEM_BIT)));
+		uint16_t getElemCursor(OId oId) const {
+			return static_cast<uint16_t>(ObjectManager::getUserArea(oId));
 		}
 		void setLockTId(TransactionId tId) {
 			TransactionId *targetAddr =
@@ -662,13 +704,14 @@ public:
 			}
 			setRowNum(currentCursor + 1);
 		}
-		OId getBaseOId(OId oId) {
-			return (oId & BASE_FILTER);
+		OId getBaseOId(OId oId) const {
+			return ObjectManager::getBaseArea(oId);
 		}
-		uint32_t getBinarySize(uint16_t maxRowNum) {
+		uint32_t getBinarySize(uint16_t maxRowNum) const {
 			return static_cast<uint32_t>(
 				getHeaderSize() + rowSize_ * maxRowNum);
 		}
+
 		RowArray(const RowArray &);  
 		RowArray &operator=(const RowArray &);  
 	};
@@ -692,15 +735,24 @@ public:
 		ALLOC_DELETE((alloc_), subTimeSeriesListHead_);
 	}
 	void initialize(TransactionContext &txn);
-	void finalize(TransactionContext &txn);
-	void set(TransactionContext &txn, const char8_t *containerName,
+	bool finalize(TransactionContext &txn);
+	void set(TransactionContext &txn, const FullContainerKey &containerKey,
 		ContainerId containerId, OId columnSchemaOId,
 		MessageSchema *orgContainerSchema);
 
-	void createIndex(TransactionContext &txn, IndexInfo &indexInfo);
-	void dropIndex(TransactionContext &txn, IndexInfo &indexInfo);
+	void createIndex(TransactionContext &txn, const IndexInfo& indexInfo, 
+		IndexCursor& indexCursor,
+		bool isIndexNameCaseSensitive = false);
+	void continueCreateIndex(TransactionContext& txn, 
+		IndexCursor& indexCursor);
+
+	void dropIndex(TransactionContext &txn, IndexInfo &indexInfo,
+		bool isIndexNameCaseSensitive = false);
 
 
+	void putRow(TransactionContext &txn, uint32_t rowSize,
+		const uint8_t *rowData, RowId &rowId, DataStore::PutStatus &status,
+		PutRowOption putRowOption);
 	void appendRow(TransactionContext &txn, uint32_t rowSize,
 		const uint8_t *rowDataWOTimestamp, Timestamp &rowKey,
 		DataStore::PutStatus &status);
@@ -729,19 +781,12 @@ public:
 		bool isForceLock = true;
 		deleteRow(txn, rowId, existing, isForceLock);
 	}
-	/*!
-		@brief Updates a Row corresponding to the specified RowId at recovery
-	   phase
-	*/
-	void redoUpdateRow(TransactionContext &txn, uint32_t rowSize,
-		const uint8_t *rowData, RowId rowId, DataStore::PutStatus &status) {
-		bool isForceLock = true;
-		updateRow(txn, rowSize, rowData, rowId, status, isForceLock);
-	}
 	void abort(TransactionContext &txn);
 	void commit(TransactionContext &txn);
-	void changeSchema(TransactionContext &txn, BaseContainer &newContainer,
-		util::XArray<uint32_t> &copyColumnMap);
+
+	void continueChangeSchema(TransactionContext &txn,
+		ContainerCursor &containerCursor);
+
 	bool hasUncommitedTransaction(TransactionContext &txn);
 
 	void searchRowIdIndex(TransactionContext &txn, BtreeMap::SearchContext &sc,
@@ -749,12 +794,13 @@ public:
 	void searchRowIdIndex(TransactionContext &txn, uint64_t start,
 		uint64_t limit, util::XArray<RowId> &rowIdList,
 		util::XArray<OId> &resultList, uint64_t &skipped);
+	RowId getMaxRowId(TransactionContext &txn);
 	void searchColumnIdIndex(TransactionContext &txn,
 		BtreeMap::SearchContext &sc, util::XArray<OId> &resultList,
-		OutputOrder order);
+		OutputOrder order, bool neverOrdering = false);
 	void aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 		uint32_t columnId, AggregationType type, ResultSize &resultNum,
-		util::XArray<uint8_t> &serializedRowList);  
+		Value &value);  
 	void sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 		const Sampling &sampling, ResultSize &resultNum,
 		MessageRowStore *messageRowStore);  
@@ -767,8 +813,6 @@ public:
 
 	void lockRowList(TransactionContext &txn, util::XArray<RowId> &rowIdList);
 	void setDummyMvccImage(TransactionContext &txn);
-	bool isLocked(
-		TransactionContext &txn, uint32_t rowKeySize, const uint8_t *rowKey);
 
 	Timestamp getCurrentExpiredTime(TransactionContext &txn);
 
@@ -776,7 +820,21 @@ public:
 		@brief Calculate AllocateStrategy of Map Object
 	*/
 	AllocateStrategy calcMapAllocateStrategy() const {
-		AllocateStrategy allocateStrategy;
+		AffinityGroupId groupId = calcAffnityGroupId(getAffinity());
+		return AllocateStrategy(ALLOCATE_NO_EXPIRE_MAP, groupId);
+	}
+	/*!
+		@brief Calculate AllocateStrategy of Row Object
+	*/
+	AllocateStrategy calcRowAllocateStrategy() const {
+		AffinityGroupId groupId = calcAffnityGroupId(getAffinity());
+		return AllocateStrategy(ALLOCATE_NO_EXPIRE_ROW, groupId);
+	}
+
+	/*!
+		@brief Calculate AllocateStrategy of Map Object
+	*/
+	AllocateStrategy calcSubMapAllocateStrategy() const {
 		ChunkCategoryId chunkCategoryId;
 		if (getExpirationInfo().duration_ == INT64_MAX) {
 			chunkCategoryId = ALLOCATE_NO_EXPIRE_MAP;
@@ -790,8 +848,7 @@ public:
 	/*!
 		@brief Calculate AllocateStrategy of Row Object
 	*/
-	AllocateStrategy calcRowAllocateStrategy() const {
-		AllocateStrategy allocateStrategy;
+	AllocateStrategy calcSubRowAllocateStrategy() const {
 		ChunkCategoryId chunkCategoryId;
 		if (getExpirationInfo().duration_ == INT64_MAX) {
 			chunkCategoryId = ALLOCATE_NO_EXPIRE_ROW;
@@ -809,6 +866,26 @@ public:
 		return getExpirationInfo().duration_ != INT64_MAX;
 	}
 
+	uint32_t getRealColumnNum(TransactionContext &txn) {
+		return getColumnNum();
+	}
+	ColumnInfo* getRealColumnInfoList(TransactionContext &txn) {
+		return getColumnInfoList();
+	}
+	uint32_t getRealRowSize(TransactionContext &txn) {
+		return getRowSize();
+	}
+	uint32_t getRealRowFixedDataSize(TransactionContext &txn) {
+		return getRowFixedDataSize();
+	}
+
+	const ExpirationInfo& getExpirationInfo() const {
+		ExpirationInfo *expirationInfo =
+			commonContainerSchema_->get<ExpirationInfo>(META_TYPE_DURATION);
+		return *expirationInfo;
+	}
+
+
 	bool validate(TransactionContext &txn, std::string &errorMessage);
 	std::string dump(TransactionContext &txn);
 
@@ -822,6 +899,8 @@ private:
 	};
 
 private:										
+	AllocateStrategy subRowAllocateStrategy_;
+	AllocateStrategy subMapAllocateStrategy_;
 	SubTimeSeriesList *subTimeSeriesListHead_;  
 private:										
 	SubTimeSeries *putSubContainer(TransactionContext &txn, Timestamp rowKey);
@@ -863,16 +942,13 @@ private:
 	void setAllocateStrategy() {
 		metaAllocateStrategy_ = calcMetaAllocateStrategy();
 		rowAllocateStrategy_ = calcRowAllocateStrategy();
+		subRowAllocateStrategy_ = calcSubRowAllocateStrategy();
 		mapAllocateStrategy_ = calcMapAllocateStrategy();
+		subMapAllocateStrategy_ = calcSubMapAllocateStrategy();
 	}
 
 	void checkExclusive(TransactionContext &) {}
 
-	ExpirationInfo &getExpirationInfo() const {
-		ExpirationInfo *expirationInfo =
-			commonContainerSchema_->get<ExpirationInfo>(META_TYPE_DURATION);
-		return *expirationInfo;
-	}
 	void getSubTimeSeriesList(TransactionContext &txn,
 		util::XArray<SubTimeSeriesInfo> &subTimeSeriesList, bool forUpdate);
 	void getSubTimeSeriesList(TransactionContext &txn,
@@ -935,14 +1011,19 @@ private:
 		TransactionContext &txn, const SubTimeSeriesInfo &subTimeSeriesInfo);
 
 	bool getIndexData(TransactionContext &txn, ColumnId columnId,
-		MapType mapType, IndexData &indexData) const {
+		MapType mapType, bool withUncommitted, IndexData &indexData) const {
 		return indexSchema_->getIndexData(
-			txn, columnId, mapType, UNDEF_CONTAINER_POS, indexData);
+			txn, columnId, mapType, UNDEF_CONTAINER_POS, withUncommitted, indexData);
 	}
-	void getIndexList(
-		TransactionContext &txn, util::XArray<IndexData> &list) const {
-		indexSchema_->getIndexList(txn, UNDEF_CONTAINER_POS, list);
+	void createNullIndexData(TransactionContext &txn, IndexData &indexData) {
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_UNEXPECTED_ERROR, "");
 	}
+	void getIndexList(TransactionContext &txn,  
+		bool withUncommitted, util::XArray<IndexData> &list) const {
+		indexSchema_->getIndexList(txn, UNDEF_CONTAINER_POS, withUncommitted, list);
+	}
+
+
 	void finalizeIndex(TransactionContext &txn) {
 		indexSchema_->finalize(txn);
 	}
@@ -957,27 +1038,28 @@ private:
 		baseContainerImage_->rowNum_--;
 	}
 
-	void insertRowIdMap(
-		TransactionContext &txn, BtreeMap *map, const void *constKey, OId oId);
+	void insertRowIdMap(TransactionContext &txn, BtreeMap *map,
+		const void *constKey, OId oId);
 	void insertMvccMap(TransactionContext &txn, BtreeMap *map,
 		TransactionId tId, MvccRowImage &mvccImage);
-	void insertValueMap(TransactionContext &txn, BaseIndex *map,
-		const void *constKey, OId oId, ColumnId columnId, MapType mapType);
+	void insertValueMap(TransactionContext &txn, ValueMap &valueMap,
+		const void *constKey, OId oId, bool isNull);
 	void updateRowIdMap(TransactionContext &txn, BtreeMap *map,
 		const void *constKey, OId oldOId, OId newOId);
 	void updateMvccMap(TransactionContext &txn, BtreeMap *map,
 		TransactionId tId, MvccRowImage &oldMvccImage,
 		MvccRowImage &newMvccImage);
-	void updateValueMap(TransactionContext &txn, BaseIndex *map,
-		const void *constKey, OId oldOId, OId newOId, ColumnId columnId,
-		MapType mapType);
-	void removeRowIdMap(
-		TransactionContext &txn, BtreeMap *map, const void *constKey, OId oId);
+	void updateValueMap(TransactionContext &txn, ValueMap &valueMap,
+		const void *constKey, OId oldOId, OId newOId, bool isNull);
+	void removeRowIdMap(TransactionContext &txn, BtreeMap *map,
+		const void *constKey, OId oId);
 	void removeMvccMap(TransactionContext &txn, BtreeMap *map,
 		TransactionId tId, MvccRowImage &mvccImage);
-	void removeValueMap(TransactionContext &txn, BaseIndex *map,
-		const void *constKey, OId oId, ColumnId columnId, MapType mapType);
-	void updateIndexData(TransactionContext &txn, IndexData indexData);
+	void removeValueMap(TransactionContext &txn, ValueMap &valueMap,
+		const void *constKey, OId oId, bool isNull);
+	void updateIndexData(
+		TransactionContext &txn, const IndexData &indexData);
+
 
 };
 
@@ -1022,17 +1104,28 @@ public:
 		  parent_(parent),
 		  position_(0),
 		  startTime_(0) {}
-	~SubTimeSeries() {}
+	~SubTimeSeries() {
+		commonContainerSchema_ = NULL;
+		columnSchema_ = NULL;
+		indexSchema_ = NULL;
+	}
 	void initialize(uint64_t position, Timestamp startTime);
 	void initialize(TransactionContext &txn);
-	void finalize(TransactionContext &txn);
-	void set(TransactionContext &txn, const char8_t *containerName,
+	bool finalize(TransactionContext &txn);
+	void set(TransactionContext &txn, const FullContainerKey &containerKey,
 		ContainerId containerId, OId columnSchemaOId,
 		MessageSchema *orgContainerSchema);
 	void set(TransactionContext &txn, TimeSeries *parent);
 
-	void createIndex(TransactionContext &txn, IndexInfo &indexInfo);
-	void dropIndex(TransactionContext &txn, IndexInfo &indexInfo);
+	void createIndex(TransactionContext &txn, const IndexInfo& indexInfo, 
+		IndexCursor& indexCursor,
+		bool isIndexNameCaseSensitive = false);
+	void continueCreateIndex(TransactionContext& txn, 
+		IndexCursor& indexCursor);
+	void indexInsert(TransactionContext& txn, IndexCursor& indexCursor);
+
+	void dropIndex(TransactionContext &txn, IndexInfo &indexInfo,
+		bool isIndexNameCaseSensitive = false);
 
 
 	void putRow(TransactionContext &txn,
@@ -1060,14 +1153,6 @@ public:
 	void redoDeleteRow(TransactionContext &, RowId, bool &) {
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "unsupport operation");
 	}
-	/*!
-		@brief Updates a Row corresponding to the specified RowId at recovery
-	   phase
-	*/
-	void redoUpdateRow(TransactionContext &, uint32_t, const uint8_t *, RowId,
-		DataStore::PutStatus &) {
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "unsupport operation");
-	}
 	void deleteRow(
 		TransactionContext &txn, RowId rowId, bool &existing, bool isForceLock);
 	void updateRow(TransactionContext &txn, uint32_t rowSize,
@@ -1075,8 +1160,6 @@ public:
 		bool isForceLock);
 	void abort(TransactionContext &txn);
 	void commit(TransactionContext &txn);
-	void changeSchema(TransactionContext &txn, BaseContainer &newContainer,
-		util::XArray<uint32_t> &copyColumnMap);
 
 	void searchRowIdIndex(TransactionContext &txn, BtreeMap::SearchContext &sc,
 		util::XArray<OId> &resultList, OutputOrder order);
@@ -1087,12 +1170,11 @@ public:
 
 
 
+
 	void setDummyMvccImage(TransactionContext &txn);
 
 	void getIndexList(
-		TransactionContext &txn, util::XArray<IndexData> &list) const {
-		indexSchema_->getIndexList(txn, position_, list);
-	}
+		TransactionContext &txn, bool withUncommitted, util::XArray<IndexData> &list) const;
 
 	bool validate(TransactionContext &txn, std::string &errorMessage);
 	std::string dump(TransactionContext &txn);
@@ -1134,14 +1216,14 @@ private:
 
 	void setRuntime() {
 		baseContainerImage_->mvccMapOId_ =
-			(baseContainerImage_->mvccMapOId_ | RUNTIME_SET_FILTER);
+			ObjectManager::setUserArea(baseContainerImage_->mvccMapOId_, RUNTIME_SET_FILTER);
 	}
 	void resetRuntime() {
 		baseContainerImage_->mvccMapOId_ =
-			(baseContainerImage_->mvccMapOId_ & RUNTIME_BASE_FILTER);
+			ObjectManager::setUserArea(baseContainerImage_->mvccMapOId_, RUNTIME_RESET_FILTER);
 	}
 	bool isRuntime() {
-		return (baseContainerImage_->mvccMapOId_ & RUNTIME_SET_FILTER) != 0;
+		return ObjectManager::getUserArea(baseContainerImage_->mvccMapOId_) != 0;
 	}
 
 
@@ -1167,8 +1249,8 @@ private:
 	}
 	void setAllocateStrategy(TimeSeries *parent) {
 		metaAllocateStrategy_ = parent->metaAllocateStrategy_;
-		rowAllocateStrategy_ = parent->rowAllocateStrategy_;
-		mapAllocateStrategy_ = parent->mapAllocateStrategy_;
+		rowAllocateStrategy_ = parent->subRowAllocateStrategy_;
+		mapAllocateStrategy_ = parent->subMapAllocateStrategy_;
 		if (getExpirationInfo().duration_ != INT64_MAX) {
 			ChunkKey chunkKey = getSetChunkKey();
 			rowAllocateStrategy_.chunkKey_ = chunkKey;
@@ -1179,10 +1261,14 @@ private:
 	void checkExclusive(TransactionContext &) {}
 
 	bool getIndexData(TransactionContext &txn, ColumnId columnId,
-		MapType mapType, IndexData &indexData) const {
+		MapType mapType, bool withUncommitted, IndexData &indexData) const {
 		return indexSchema_->getIndexData(
-			txn, columnId, mapType, position_, indexData);
+			txn, columnId, mapType, position_, withUncommitted, indexData);
 	}
+	void createNullIndexData(TransactionContext &txn, IndexData &indexData) {
+		indexSchema_->createNullIndexData(txn, position_, indexData, this);
+	}
+
 	void finalizeIndex(TransactionContext &txn) {
 		indexSchema_->dropAll(txn, this, position_, true);
 	}
@@ -1198,27 +1284,37 @@ private:
 		parent_->decrementRowNum();
 	}
 
-	void insertRowIdMap(
-		TransactionContext &txn, BtreeMap *map, const void *constKey, OId oId);
+	bool isAlterContainer() const {
+		return parent_->isAlterContainer();
+	}
+	void setAlterContainer() {
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_UNEXPECTED_ERROR, "");
+	}
+	void resetAlterContainer() {
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_UNEXPECTED_ERROR, "");
+	}
+
+	void insertRowIdMap(TransactionContext &txn, BtreeMap *map,
+		const void *constKey, OId oId);
 	void insertMvccMap(TransactionContext &txn, BtreeMap *map,
 		TransactionId tId, MvccRowImage &mvccImage);
-	void insertValueMap(TransactionContext &txn, BaseIndex *map,
-		const void *constKey, OId oId, ColumnId columnId, MapType mapType);
+	void insertValueMap(TransactionContext &txn, ValueMap &valueMap,
+		const void *constKey, OId oId, bool isNull);
 	void updateRowIdMap(TransactionContext &txn, BtreeMap *map,
 		const void *constKey, OId oldOId, OId newOId);
 	void updateMvccMap(TransactionContext &txn, BtreeMap *map,
 		TransactionId tId, MvccRowImage &oldMvccImage,
 		MvccRowImage &newMvccImage);
-	void updateValueMap(TransactionContext &txn, BaseIndex *map,
-		const void *constKey, OId oldOId, OId newOId, ColumnId columnId,
-		MapType mapType);
-	void removeRowIdMap(
-		TransactionContext &txn, BtreeMap *map, const void *constKey, OId oId);
+	void updateValueMap(TransactionContext &txn, ValueMap &valueMap,
+		const void *constKey, OId oldOId, OId newOId, bool isNull);
+	void removeRowIdMap(TransactionContext &txn, BtreeMap *map,
+		const void *constKey, OId oId);
 	void removeMvccMap(TransactionContext &txn, BtreeMap *map,
 		TransactionId tId, MvccRowImage &mvccImage);
-	void removeValueMap(TransactionContext &txn, BaseIndex *map,
-		const void *constKey, OId oId, ColumnId columnId, MapType mapType);
-	void updateIndexData(TransactionContext &txn, IndexData indexData);
+	void removeValueMap(TransactionContext &txn, ValueMap &valueMap,
+		const void *constKey, OId oId, bool isNull);
+	void updateIndexData(
+		TransactionContext &txn, const IndexData &indexData);
 };
 
 /*!
@@ -1245,26 +1341,26 @@ struct AggregationCursor {
 		type_ = type;
 		switch (aggType) {
 		case AGG_MIN:
-			operator_ = ltTable[type][type];
+			operator_ = ComparatorTable::ltTable_[type][type];
 			break;
 		case AGG_MAX:
-			operator_ = gtTable[type][type];
+			operator_ = ComparatorTable::gtTable_[type][type];
 			break;
 		case AGG_SUM:
-			calculator1_ = addTable[type][type];
+			calculator1_ = CalculatorTable::addTable_[type][type];
 			break;
 		case AGG_AVG:
-			calculator1_ = addTable[type][type];
+			calculator1_ = CalculatorTable::addTable_[type][type];
 			break;
 		case AGG_COUNT:
 			break;
 		case AGG_VARIANCE:
-			calculator1_ = addTable[type][type];
-			calculator2_ = mulTable[type][type];
+			calculator1_ = CalculatorTable::addTable_[type][type];
+			calculator2_ = CalculatorTable::mulTable_[type][type];
 			break;
 		case AGG_STDDEV:
-			calculator1_ = addTable[type][type];
-			calculator2_ = mulTable[type][type];
+			calculator1_ = CalculatorTable::addTable_[type][type];
+			calculator2_ = CalculatorTable::mulTable_[type][type];
 			break;
 		case AGG_TIME_AVG:
 		default:
@@ -1409,6 +1505,5 @@ void aggregationPostProcess(AggregationCursor &cursor, Value &value);
 static const AggregatorForLoop aggLoopTable[] = {&minForLoop, &maxForLoop,
 	&sumForLoop, &avgForLoop, &varianceForLoop, &stddevForLoop, &countForLoop,
 	NULL};
-
 
 #endif

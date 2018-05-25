@@ -28,23 +28,38 @@
 
 #include "picojson.h"
 #include <fstream>
+#include "zlib_utils.h"
 
 #ifndef _WIN32
 #include <signal.h>  
 #endif
 
+
 UTIL_TRACER_DECLARE(CHECKPOINT_SERVICE);
 UTIL_TRACER_DECLARE(CHECKPOINT_SERVICE_DETAIL);
+UTIL_TRACER_DECLARE(CHECKPOINT_SERVICE_STATUS_DETAIL);
 UTIL_TRACER_DECLARE(IO_MONITOR);
 
 const std::string CheckpointService::PID_LSN_INFO_FILE_NAME("gs_lsn_info.json");
 
+const uint32_t CheckpointService::MAX_BACKUP_NAME_LEN = 12;
+
+const char *const CheckpointService::SYNC_TEMP_FILE_SUFFIX =
+		"_sync_temp";
+
+const CheckpointService::SyncSequentialNumber
+	CheckpointService::UNDEF_SYNC_SEQ_NUMBER = INT64_MAX;
+
+const CheckpointService::SyncSequentialNumber
+	CheckpointService::MAX_SYNC_SEQ_NUMBER = UNDEF_SYNC_SEQ_NUMBER - 1;
+
 /*!
 	@brief Constructor of CheckpointService
 */
-CheckpointService::CheckpointService(const ConfigTable &config,
-	EventEngine::Config eeConfig, EventEngine::Source source,
-	const char8_t *name, ServiceThreadErrorHandler &serviceThreadErrorHandler)
+CheckpointService::CheckpointService(
+		const ConfigTable &config, EventEngine::Config eeConfig,
+		EventEngine::Source source, const char8_t *name,
+		ServiceThreadErrorHandler &serviceThreadErrorHandler)
 	: serviceThreadErrorHandler_(serviceThreadErrorHandler),
 	  ee_(createEEConfig(config, eeConfig), source, name),
 	  clusterService_(NULL),
@@ -58,6 +73,7 @@ CheckpointService::CheckpointService(const ConfigTable &config,
 	  chunkManager_(NULL),
 	  partitionTable_(NULL),
 	  initailized_(false),
+	  syncService_(NULL),
 	  fixedSizeAlloc_(NULL),
 	  requestedShutdownCheckpoint_(false),
 	  pgConfig_(config),
@@ -65,9 +81,11 @@ CheckpointService::CheckpointService(const ConfigTable &config,
 		  CONFIG_TABLE_CP_CHECKPOINT_INTERVAL)),  
 	  logWriteMode_(config.get<int32_t>(
 		  CONFIG_TABLE_DS_LOG_WRITE_MODE)),  
+	  syncTempTopPath_(config.get<const char8_t *>(CONFIG_TABLE_DS_SYNC_TEMP_PATH)),
 	  chunkCopyIntervalMillis_(config.get<int32_t>(
 		  CONFIG_TABLE_CP_CHECKPOINT_COPY_INTERVAL)),  
-	  delaySleepTime_(CP_SYNC_DELAY_INTERVAL),
+
+	  currentDuplicateLogMode_(false),
 	  currentCpGrpId_(UINT32_MAX),
 	  currentCpPId_(UNDEF_PARTITIONID),
 	  parallelCheckpoint_(config.get<bool>(
@@ -79,8 +97,6 @@ CheckpointService::CheckpointService(const ConfigTable &config,
 	statUpdator_.service_ = this;
 	try {
 
-		Event::Source eventSource(source);
-
 		ee_.setHandler(CP_REQUEST_CHECKPOINT, checkpointServiceMainHandler_);
 
 		ee_.setHandler(
@@ -91,21 +107,24 @@ CheckpointService::CheckpointService(const ConfigTable &config,
 		ee_.setThreadErrorHandler(serviceThreadErrorHandler_);
 
 		groupCheckpointStatus_.resize(
-			config.getUInt32(CONFIG_TABLE_DS_CONCURRENCY));
+				config.getUInt32(CONFIG_TABLE_DS_CONCURRENCY));
 
-		lsnInfo_.setConfigValue(this,
-			config.getUInt32(CONFIG_TABLE_DS_PARTITION_NUM),
-			config.getUInt32(CONFIG_TABLE_DS_CONCURRENCY),
-			config.get<const char8_t *>(CONFIG_TABLE_DS_DB_PATH));
+		lsnInfo_.setConfigValue(
+				this, config.getUInt32(CONFIG_TABLE_DS_PARTITION_NUM),
+				config.getUInt32(CONFIG_TABLE_DS_CONCURRENCY),
+				config.get<const char8_t *>(CONFIG_TABLE_DS_DB_PATH));
 
 		lastArchivedCpIdList_.assign(pgConfig_.getPartitionGroupCount(), 0);
 
 		currentCheckpointIdList_.assign(pgConfig_.getPartitionCount(), 0);
 
+		checkpointReadyList_.assign(pgConfig_.getPartitionCount(), 0);
+
+		ssnList_.assign(pgConfig_.getPartitionCount(), UNDEF_SYNC_SEQ_NUMBER);
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_SYSTEM_ERROR(
-			e, "Initialize failed. (reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+				e, "Initialize failed. (reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 
@@ -152,13 +171,13 @@ void CheckpointService::initialize(ManagerSet &mgrSet) {
 		checkpointServiceMainHandler_.initialize(mgrSet);
 		checkpointServiceGroupHandler_.initialize(mgrSet);
 		flushLogPeriodicallyHandler_.initialize(mgrSet);
-
+		syncService_ = mgrSet.syncSvc_;
 		serviceThreadErrorHandler_.initialize(mgrSet);
 		initailized_ = true;
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_SYSTEM_ERROR(
-			e, "Initialize failed. (reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+				e, "Initialize failed. (reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 
@@ -173,7 +192,7 @@ void CheckpointService::start(const Event::Source &eventSource) {
 		ee_.start();
 
 		Event requestEvent(
-			eventSource, CP_REQUEST_CHECKPOINT, CP_HANDLER_PARTITION_ID);
+				eventSource, CP_REQUEST_CHECKPOINT, CP_HANDLER_PARTITION_ID);
 
 		EventByteOutStream out = requestEvent.getOutStream();
 
@@ -183,20 +202,71 @@ void CheckpointService::start(const Event::Source &eventSource) {
 		out << mode;
 		out << flag;
 		out << backupPath;
+		out << UNDEF_SYNC_SEQ_NUMBER; 
 
 		ee_.addTimer(requestEvent, changeTimeSecondToMilliSecond(cpInterval_));
 
 		if (logWriteMode_ > 0 && logWriteMode_ < INT32_MAX) {
 			Event flushLogEvent(
-				eventSource, CP_TIMER_LOG_FLUSH, CP_SERIALIZED_PARTITION_ID);
+					eventSource, CP_TIMER_LOG_FLUSH, CP_SERIALIZED_PARTITION_ID);
 			ee_.addPeriodicTimer(
-				flushLogEvent, changeTimeSecondToMilliSecond(logWriteMode_));
+					flushLogEvent, changeTimeSecondToMilliSecond(logWriteMode_));
+		}
+		if (!syncTempTopPath_.empty()) {
+			if (util::FileSystem::exists(syncTempTopPath_.c_str()) &&
+				util::FileSystem::isDirectory(syncTempTopPath_.c_str())) {
+				util::Directory dir(syncTempTopPath_.c_str());
+				u8string name;
+				while(dir.nextEntry(name)) {
+					u8string path;
+					util::FileSystem::createPath(syncTempTopPath_.c_str(), name.c_str(), path);
+					if (util::FileSystem::isDirectory(path.c_str())) {
+						bool isNumber = true;
+						for (u8string::const_iterator itr = name.begin();
+								itr != name.end(); ++itr) {
+							if (!isdigit(static_cast<uint8_t>(*itr))) {
+								isNumber = false;
+								break;
+							}
+						}
+						if (isNumber) {
+							try {
+								util::FileSystem::remove(path.c_str(), true);
+							}
+							catch (std::exception &e) {
+								UTIL_TRACE_EXCEPTION(
+										CHECKPOINT_SERVICE, e,
+										"Failed to remove syncTemp child dir (path=" <<
+										path <<
+										", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+							}
+						}
+					}
+				}
+			}
+			else {
+				try {
+					util::FileSystem::createDirectoryTree(syncTempTopPath_.c_str());
+				}
+				catch (std::exception &e) {
+					GS_RETHROW_SYSTEM_ERROR(
+							e, "Create synctemp top directory failed. (path=\"" <<
+							syncTempTopPath_ << "\"" <<
+							", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+				}
+				if (!util::FileSystem::isDirectory(syncTempTopPath_.c_str())) {
+					GS_THROW_SYSTEM_ERROR(
+							GS_ERROR_CP_SERVICE_START_FAILED,
+							"The specified path is not directory. (path=" <<
+							syncTempTopPath_ << ")");
+				}
+			}
 		}
 	}
 	catch (std::exception &e) {
 		clusterService_->setError(eventSource, &e);
 		GS_RETHROW_SYSTEM_ERROR(
-			e, "Start failed. (reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+				e, "Start failed. (reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 
@@ -232,16 +302,17 @@ void CheckpointService::requestNormalCheckpoint(
 	}
 	try {
 		if (requestedShutdownCheckpoint_) {
-			GS_THROW_USER_ERROR(GS_ERROR_CP_CONTROLLER_ILLEAGAL_STATE,
-				"Checkpoint cancelled: already requested shutdown ("
-				"lastMode="
-					<< checkpointModeToString(lastMode_) << ")");
+			GS_THROW_USER_ERROR(
+					GS_ERROR_CP_CONTROLLER_ILLEAGAL_STATE,
+					"Checkpoint cancelled: already requested shutdown ("
+					"lastMode=" <<
+					checkpointModeToString(lastMode_) << ")");
 		}
 		GS_TRACE_INFO(
-			CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS, "[NormalCP]requested.");
+				CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS, "[NormalCP]requested.");
 
 		Event requestEvent(
-			eventSource, CP_REQUEST_CHECKPOINT, CP_HANDLER_PARTITION_ID);
+				eventSource, CP_REQUEST_CHECKPOINT, CP_HANDLER_PARTITION_ID);
 
 		EventByteOutStream out = requestEvent.getOutStream();
 		int32_t mode = CP_REQUESTED;
@@ -250,13 +321,15 @@ void CheckpointService::requestNormalCheckpoint(
 		out << mode;
 		out << flag;
 		out << backupPath;
+		out << UNDEF_SYNC_SEQ_NUMBER; 
 
 		ee_.add(requestEvent);
 	}
 	catch (std::exception &e) {
 		clusterService_->setError(eventSource, &e);
-		GS_RETHROW_SYSTEM_ERROR(e, "Request normal checkpoint failed. (reason="
-									   << GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Request normal checkpoint failed. (reason=" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 
@@ -270,10 +343,10 @@ void CheckpointService::requestShutdownCheckpoint(
 	}
 	try {
 		GS_TRACE_INFO(
-			CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS, "[ShutdownCP]requested.");
+				CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS, "[ShutdownCP]requested.");
 
 		Event requestEvent(
-			eventSource, CP_REQUEST_CHECKPOINT, CP_HANDLER_PARTITION_ID);
+				eventSource, CP_REQUEST_CHECKPOINT, CP_HANDLER_PARTITION_ID);
 
 		EventByteOutStream out = requestEvent.getOutStream();
 		int32_t mode = CP_SHUTDOWN;
@@ -282,6 +355,7 @@ void CheckpointService::requestShutdownCheckpoint(
 		out << mode;
 		out << flag;
 		out << backupPath;
+		out << UNDEF_SYNC_SEQ_NUMBER; 
 
 		if (!requestedShutdownCheckpoint_) {
 			requestedShutdownCheckpoint_ = true;
@@ -291,8 +365,9 @@ void CheckpointService::requestShutdownCheckpoint(
 	}
 	catch (std::exception &e) {
 		clusterService_->setError(eventSource, &e);
-		GS_RETHROW_SYSTEM_ERROR(e, "Request shutdowncheckpoint failed. (reason="
-									   << GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Request shutdowncheckpoint failed. (reason=" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 
@@ -306,10 +381,10 @@ void CheckpointService::executeRecoveryCheckpoint(
 	}
 	try {
 		GS_TRACE_INFO(
-			CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS, "[RecoveryCheckpoint]");
+				CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS, "[RecoveryCheckpoint]");
 
 		Event requestEvent(
-			eventSource, CP_REQUEST_CHECKPOINT, CP_HANDLER_PARTITION_ID);
+				eventSource, CP_REQUEST_CHECKPOINT, CP_HANDLER_PARTITION_ID);
 
 		EventByteOutStream out = requestEvent.getOutStream();
 		int32_t mode = CP_AFTER_RECOVERY;
@@ -318,13 +393,15 @@ void CheckpointService::executeRecoveryCheckpoint(
 		out << mode;
 		out << flag;
 		out << backupPath;
+		out << UNDEF_SYNC_SEQ_NUMBER; 
 
 		ee_.add(requestEvent);
 	}
 	catch (std::exception &e) {
 		clusterService_->setError(eventSource, &e);
-		GS_RETHROW_SYSTEM_ERROR(e, "Recovery checkpoint failed. (reason="
-									   << GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Recovery checkpoint failed. (reason=" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 
@@ -345,7 +422,7 @@ void CheckpointHandler::initialize(const ManagerSet &mgrSet) {
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_SYSTEM_ERROR(
-			e, "Initialize failed. (reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+				e, "Initialize failed. (reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 
@@ -362,8 +439,13 @@ void CheckpointServiceMainHandler::operator()(EventContext &ec, Event &ev) {
 
 		int32_t mode;
 		uint32_t flag;
+		std::string backupPath;
+		CheckpointService::SyncSequentialNumber ssn;
+
 		in >> mode;
 		in >> flag;
+		in >> backupPath;
+		in >> ssn; 
 
 		if (mode == CP_AFTER_RECOVERY || mode == CP_SHUTDOWN) {
 			critical = true;
@@ -371,11 +453,11 @@ void CheckpointServiceMainHandler::operator()(EventContext &ec, Event &ev) {
 
 		if (mode == CP_NORMAL) {
 			ec.getEngine().addTimer(
-				ev, changeTimeSecondToMilliSecond(
-						checkpointService_->getCheckpointInterval()));
+					ev, changeTimeSecondToMilliSecond(
+					checkpointService_->getCheckpointInterval()));
 		}
 
-		checkpointService_->runCheckpoint(ec, mode, flag);
+		checkpointService_->runCheckpoint(ec, mode, flag, backupPath, ssn);
 	}
 	catch (UserException &e) {
 		checkpointService_->errorOccured_ = true;
@@ -411,15 +493,20 @@ void CheckpointServiceGroupHandler::operator()(EventContext &ec, Event &ev) {
 
 		int32_t mode;
 		uint32_t flag;
+		std::string backupPath;
+		CheckpointService::SyncSequentialNumber ssn;
+
 		in >> mode;
 		in >> flag;
+		in >> backupPath;
+		in >> ssn; 
 
 		if (mode == CP_AFTER_RECOVERY || mode == CP_SHUTDOWN) {
 			critical = true;
 		}
 
 		checkpointService_->runGroupCheckpoint(
-			ec.getWorkerId(), ec, mode, flag);
+				ec.getWorkerId(), ec, mode, flag, backupPath, ssn);
 	}
 	catch (UserException &e) {
 		checkpointService_->errorOccured_ = true;
@@ -429,7 +516,7 @@ void CheckpointServiceGroupHandler::operator()(EventContext &ec, Event &ev) {
 		}
 		else {
 			UTIL_TRACE_EXCEPTION_WARNING(
-				CHECKPOINT_SERVICE, e, "workerId=" << ec.getWorkerId());
+					CHECKPOINT_SERVICE, e, "workerId=" << ec.getWorkerId());
 		}
 	}
 	catch (SystemException &) {
@@ -440,8 +527,8 @@ void CheckpointServiceGroupHandler::operator()(EventContext &ec, Event &ev) {
 		checkpointService_->errorOccured_ = true;
 		clusterService_->setError(ec, &e);
 		GS_RETHROW_SYSTEM_ERROR(
-			e, "(workerId=" << ec.getWorkerId()
-							<< ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+				e, "(workerId=" << ec.getWorkerId() <<
+				", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 
@@ -455,6 +542,10 @@ const char8_t *CheckpointService::checkpointModeToString(int32_t mode) {
 		return "RECOVERY_CHECKPOINT";
 	case CP_SHUTDOWN:
 		return "SHUTDOWN_CHECKPOINT";
+	case CP_PREPARE_LONGTERM_SYNC:
+		return "PREPARE_LONGTERM_SYNC";
+	case CP_STOP_LONGTERM_SYNC:
+		return "STOP_LONGTERM_SYNC";
 	default:
 		return "UNKNOWN";
 	}
@@ -467,38 +558,43 @@ void CheckpointService::changeParam(
 		if (paramName == "checkpointChunkCopyIntervalMillis") {
 			if (int32Value >= 0) {
 				chunkCopyIntervalMillis_ = int32Value;
-				GS_TRACE_INFO(CHECKPOINT_SERVICE, GS_TRACE_CP_PARAMETER_INFO,
-					"parameter changed: checkpointChunkCopyIntervalMillis="
-						<< chunkCopyIntervalMillis_ << ", value=" << value);
+				GS_TRACE_INFO(
+						CHECKPOINT_SERVICE, GS_TRACE_CP_PARAMETER_INFO,
+						"parameter changed: checkpointChunkCopyIntervalMillis=" <<
+						chunkCopyIntervalMillis_ << ", value=" << value);
 			}
 			else {
-				GS_TRACE_INFO(CHECKPOINT_SERVICE, GS_TRACE_CP_PARAMETER_INFO,
-					"illeagal parameter value: "
-					"checkpointChunkCopyIntervalMillis="
-						<< chunkCopyIntervalMillis_ << ", value=" << value);
+				GS_TRACE_INFO(
+						CHECKPOINT_SERVICE, GS_TRACE_CP_PARAMETER_INFO,
+						"illeagal parameter value: "
+						"checkpointChunkCopyIntervalMillis=" <<
+						chunkCopyIntervalMillis_ << ", value=" << value);
 			}
 		}
 		else if (paramName == "dumpInternalParam") {
-			GS_TRACE_INFO(CHECKPOINT_SERVICE, GS_TRACE_CP_PARAMETER_INFO,
-				"dump parameters: checkpointInterval="
-					<< cpInterval_ << ", checkpointChunkCopyIntervalMillis="
-					<< chunkCopyIntervalMillis_);
+			GS_TRACE_INFO(
+					CHECKPOINT_SERVICE, GS_TRACE_CP_PARAMETER_INFO,
+					"dump parameters: checkpointInterval=" <<
+					cpInterval_ << ", checkpointChunkCopyIntervalMillis=" <<
+					chunkCopyIntervalMillis_);
 		}
 		else {
-			GS_TRACE_INFO(CHECKPOINT_SERVICE, GS_TRACE_CP_PARAMETER_INFO,
-				"[NOTE] Parameter(" << paramName << "," << value
-									<< ") cannot update");
+			GS_TRACE_INFO(
+					CHECKPOINT_SERVICE, GS_TRACE_CP_PARAMETER_INFO,
+					"[NOTE] Parameter(" << paramName << "," << value <<
+					") cannot update");
 		}
 	}
 	catch (UserException &e) {
-		UTIL_TRACE_EXCEPTION_WARNING(CHECKPOINT_SERVICE, e,
-			"User error occured, but continue running: (reason="
-				<< GS_EXCEPTION_MESSAGE(e) << ")");
+		UTIL_TRACE_EXCEPTION_WARNING(
+				CHECKPOINT_SERVICE, e,
+				"User error occured, but continue running: (reason=" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 	catch (std::exception &e) {
 		UTIL_TRACE_EXCEPTION_ERROR(CHECKPOINT_SERVICE, e,
-			"Unexpected error occured, but continue running (reason="
-				<< GS_EXCEPTION_MESSAGE(e) << ")");
+				"Unexpected error occured, but continue running (reason=" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 
@@ -509,26 +605,241 @@ int32_t CheckpointService::getTransactionEEQueueSize(PartitionGroupId pgId) {
 	EventEngine::Stats stats;
 	if (txnEE_->getStats(pgId, stats)) {
 		return static_cast<int32_t>(
-			stats.get(EventEngine::Stats::EVENT_ACTIVE_QUEUE_SIZE_CURRENT));
+				stats.get(EventEngine::Stats::EVENT_ACTIVE_QUEUE_SIZE_CURRENT));
 	}
 	else {
 		return 0;
 	}
 }
 
+CheckpointService::CpLongtermSyncInfo* CheckpointService::getCpLongtermSyncInfo(
+		SyncSequentialNumber id) {
+	util::LockGuard<util::Mutex> guard(cpLongtermSyncMutex_);
+	if (cpLongtermSyncInfoMap_.find(id) != cpLongtermSyncInfoMap_.end()) {
+		return &cpLongtermSyncInfoMap_[id];
+	}
+	else {
+		return NULL;
+	}
+}
+
+bool CheckpointService::setCpLongtermSyncInfo(
+		SyncSequentialNumber id, const CpLongtermSyncInfo &cpLongtermSyncInfo) {
+	util::LockGuard<util::Mutex> guard(cpLongtermSyncMutex_);
+	if (cpLongtermSyncInfoMap_.find(id) == cpLongtermSyncInfoMap_.end()) {
+		cpLongtermSyncInfoMap_[id] = cpLongtermSyncInfo;
+		return true;
+	}
+	else {
+		return false;
+	}
+}
+
+bool CheckpointService::updateCpLongtermSyncInfo(
+		SyncSequentialNumber id, const CpLongtermSyncInfo &cpLongtermSyncInfo) {
+	util::LockGuard<util::Mutex> guard(cpLongtermSyncMutex_);
+	if (cpLongtermSyncInfoMap_.find(id) != cpLongtermSyncInfoMap_.end()) {
+		cpLongtermSyncInfoMap_[id] = cpLongtermSyncInfo;
+		return true;
+	}
+	else {
+		return false;
+	}
+}
+
+CheckpointService::SyncSequentialNumber CheckpointService::getCurrentSyncSequentialNumber(PartitionId pId) {
+	util::LockGuard<util::Mutex> guard(cpLongtermSyncMutex_);
+	assert(pId < pgConfig_.getPartitionCount());
+	return ssnList_[pId];
+}
+
+bool CheckpointService::removeCpLongtermSyncInfo(SyncSequentialNumber id) {
+	util::LockGuard<util::Mutex> guard(cpLongtermSyncMutex_);
+	if (cpLongtermSyncInfoMap_.find(id) != cpLongtermSyncInfoMap_.end()) {
+		cpLongtermSyncInfoMap_.erase(id);
+		return true;
+	}
+	else {
+		return false;
+	}
+}
+
+std::string CheckpointService::getChunkHeaderDumpString(const uint8_t* chunkData) {
+	util::NormalOStringStream oss;
+
+	oss << "(PG,P,Cat,Chunk),(" <<
+	ChunkManager::ChunkHeader::getPartitionGroupId(chunkData) <<
+	"," <<
+	ChunkManager::ChunkHeader::getPartitionId(chunkData) <<
+	"," <<
+	(int32_t)ChunkManager::ChunkHeader::getChunkCategoryId(chunkData) <<
+	"," <<
+	ChunkManager::ChunkHeader::getChunkId(chunkData) <<
+	"),CheckSum,0x" << std::setw(8) << std::setfill('0') << std::hex <<
+	ChunkManager::ChunkHeader::getCheckSum(chunkData) << std::dec;
+	return oss.str();
+}
+
+bool CheckpointService::checkLongtermSyncIsReady(SyncSequentialNumber ssn) {
+	if (ssn != UNDEF_SYNC_SEQ_NUMBER) {
+		CpLongtermSyncInfo *info = getCpLongtermSyncInfo(ssn);
+		if (info && info->logManager_ &&
+			!info->logManager_->isLongtermSyncLogAvailable()) {
+			return true;
+		}
+		else {
+			return false;
+		}
+	}
+	return false;
+}
+
+bool CheckpointService::getLongSyncChunk(
+		SyncSequentialNumber ssn, uint32_t size, uint8_t* buffer) {
+	if (ssn != UNDEF_SYNC_SEQ_NUMBER) {
+		CpLongtermSyncInfo *info = getCpLongtermSyncInfo(ssn);
+		if (info && info->newOffsetMap_) {
+			if (info->readCount_ == 0) {
+				info->readItr_ = info->newOffsetMap_->begin();
+			}
+			if (info->readItr_ == info->newOffsetMap_->end()) {
+				GS_THROW_USER_ERROR(
+						GS_ERROR_CP_LONGTERM_SYNC_FAILED,
+						"No chunk: ssn=" << ssn << ", pId=" << info->targetPId_);
+			}
+			if (info && info->logManager_ &&
+						!info->logManager_->isLongtermSyncLogAvailable()) {
+				info->errorOccured_ = true;
+				GS_THROW_USER_ERROR(
+						GS_TRACE_CP_LONGTERM_SYNC_LOG_WRITE_FAILED,
+						"SyncTemp log write failed (reason=" <<
+						info->logManager_->getLongtermSyncLogErrorMessage() << ")");
+			}
+			const size_t chunkSize =
+					1 << chunkManager_->getConfig().getChunkExpSize();
+			if (size < chunkSize) {
+				GS_THROW_USER_ERROR(
+						GS_ERROR_CHM_GET_CHECKPOINT_CHUNK_FAILED,
+						"Invalid size (specified size=" << size <<
+						", chunkSize=" << chunkSize << ")");
+			}
+
+			ChunkManager::FileManager fileManager(chunkManager_->getConfig(), *(info->syncCpFile_));
+			uint32_t remain = static_cast<uint32_t>(size / chunkSize);
+			uint8_t *addr = buffer;
+			while(info->readItr_ != info->newOffsetMap_->end() && remain > 0) {
+				info->syncCpFile_->readBlock(addr, 1, info->readItr_->second);
+				fileManager.uncompressChunk(addr);
+				++info->readItr_;
+				++info->readCount_;
+				addr += chunkSize;
+				--remain;
+			}
+			return (info->readItr_ == info->newOffsetMap_->end());
+		}
+		else {
+			GS_THROW_USER_ERROR(
+					GS_ERROR_CP_LONGTERM_SYNC_FAILED,
+					"Invalid syncSequentialNumber: ssn=" << ssn);
+		}
+	}
+	else {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_CP_LONGTERM_SYNC_FAILED,
+				"Invalid syncSequentialNumber: ssn=" << ssn);
+	}
+}
+
+bool CheckpointService::getLongSyncLog(
+		SyncSequentialNumber ssn,
+		LogSequentialNumber startLsn, LogCursor &cursor) {
+
+	assert(ssn != UNDEF_SYNC_SEQ_NUMBER);
+	CpLongtermSyncInfo *info = getCpLongtermSyncInfo(ssn);
+	if (info && info->logManager_) {
+		if (info->logManager_->isLongtermSyncLogAvailable()) {
+			return info->logManager_->findLog(
+					cursor, info->targetPId_, startLsn);
+		}
+		else {
+			info->errorOccured_ = true;
+			GS_THROW_USER_ERROR(
+					GS_ERROR_CP_LOG_FILE_WRITE_FAILED,
+					"SyncTemp log write failed (reason=" <<
+					info->logManager_->getLongtermSyncLogErrorMessage() << ")");
+			return false;
+		}
+	}
+	else {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_CP_LONGTERM_SYNC_FAILED,
+				"Invalid syncSequentialNumber: ssn=" << ssn);
+		return false;
+	}
+}
+
+bool CheckpointService::getLongSyncCheckpointStartLog(
+		SyncSequentialNumber ssn, LogCursor &cursor) {
+	assert(ssn != UNDEF_SYNC_SEQ_NUMBER);
+	CpLongtermSyncInfo *info = getCpLongtermSyncInfo(ssn);
+	if (info && info->logManager_) {
+		if (info->logManager_->isLongtermSyncLogAvailable()) {
+			const PartitionGroupId pgId =
+					getPGConfig().getPartitionGroupId(info->targetPId_);
+			return info->logManager_->findCheckpointStartLog(
+					cursor, pgId, info->cpId_);
+		}
+		else {
+			info->errorOccured_ = true;
+			GS_THROW_USER_ERROR(
+					GS_TRACE_CP_LONGTERM_SYNC_LOG_WRITE_FAILED,
+					"SyncTemp log write failed (reason=" <<
+					info->logManager_->getLongtermSyncLogErrorMessage() << ")");
+			return false;
+		}
+	}
+	else {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_CP_LONGTERM_SYNC_FAILED,
+				"Invalid syncSequentialNumber: ssn=" << ssn);
+		return false;
+	}
+}
+
+bool CheckpointService::isEntry(SyncSequentialNumber ssn) {
+	assert(ssn != UNDEF_SYNC_SEQ_NUMBER);
+	CpLongtermSyncInfo *info = getCpLongtermSyncInfo(ssn);
+	if (info) {
+		if (info->syncCpFile_ && info->logManager_) {
+			return true;
+		}
+		else {
+			return false;
+		}
+	}
+	else {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_CP_LONGTERM_SYNC_FAILED,
+				"Invalid syncSequentialNumber: ssn=" << ssn);
+		return false;
+	}
+}
+
 
 void CheckpointService::runCheckpoint(
-	EventContext &ec, int32_t mode, uint32_t flag) {
+		EventContext &ec, int32_t mode, uint32_t flag,
+		const std::string &backupPath, SyncSequentialNumber ssn) {
 	if ((lastMode_ == CP_UNDEF && mode != CP_AFTER_RECOVERY) ||
-		lastMode_ == CP_SHUTDOWN ||
-		(mode != CP_SHUTDOWN && requestedShutdownCheckpoint_)  
+			lastMode_ == CP_SHUTDOWN ||
+			(mode != CP_SHUTDOWN && requestedShutdownCheckpoint_)  
 		) {
-		GS_TRACE_WARNING(CHECKPOINT_SERVICE, GS_TRACE_CP_CHECKPOINT_CANCELLED,
-			"Checkpoint cancelled by status (mode="
-				<< checkpointModeToString(mode)
-				<< ", lastMode=" << checkpointModeToString(lastMode_)
-				<< ", shutdownRequested=" << requestedShutdownCheckpoint_
-				<< ")");
+		GS_TRACE_WARNING(
+				CHECKPOINT_SERVICE, GS_TRACE_CP_CHECKPOINT_CANCELLED,
+				"Checkpoint cancelled by status (mode=" <<
+				checkpointModeToString(mode) <<
+				", lastMode=" << checkpointModeToString(lastMode_) <<
+				", shutdownRequested=" << requestedShutdownCheckpoint_ <<
+				")");
 		return;
 	}
 
@@ -536,32 +847,33 @@ void CheckpointService::runCheckpoint(
 	errorOccured_ = false;
 
 	struct CheckpointDataCleaner {
-		CheckpointDataCleaner(CheckpointService &service,
-			ChunkManager &chunkManager, EventContext &ec)
+		CheckpointDataCleaner(
+				CheckpointService &service,
+				ChunkManager &chunkManager, EventContext &ec)
 			: service_(service),
 			  chunkManager_(chunkManager),
 			  ec_(ec),
 			  workerId_(ec.getWorkerId()) {}
-
 		~CheckpointDataCleaner() {
 			if (workerId_ == 0) {
 				for (PartitionGroupId pgId = 0;
 					 pgId < service_.pgConfig_.getPartitionGroupCount();
 					 ++pgId) {
 					const PartitionId startPId =
-						service_.pgConfig_.getGroupBeginPartitionId(pgId);
+							service_.pgConfig_.getGroupBeginPartitionId(pgId);
 					const CheckpointId cpId = 0;  
 					try {
+						std::string dummy;
 						service_.executeOnTransactionService(ec_,
-							CLEANUP_CP_DATA, CP_UNDEF, startPId, cpId,
-							false);  
+								CLEANUP_CP_DATA, CP_UNDEF, startPId, cpId,
+								dummy, false, UNDEF_SYNC_SEQ_NUMBER);  
 					}
 					catch (...) {
 					}
 				}
 				try {
 					service_.endTime_ =
-						util::DateTime::now(false).getUnixTime();
+							util::DateTime::now(false).getUnixTime();
 					service_.pendingPartitionCount_ = 0;
 				}
 				catch (...) {
@@ -573,7 +885,8 @@ void CheckpointService::runCheckpoint(
 		ChunkManager &chunkManager_;
 		EventContext &ec_;
 		uint32_t workerId_;
-	} cpDataCleaner(*this, *chunkManager_, ec);
+	} cpDataCleaner(
+			*this, *chunkManager_, ec);
 
 	startTime_ = 0;
 	endTime_ = 0;
@@ -582,38 +895,74 @@ void CheckpointService::runCheckpoint(
 	startTime_ = util::DateTime::now(false).getUnixTime();
 	pendingPartitionCount_ = pgConfig_.getPartitionCount();
 
-	GS_TRACE_INFO(CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
-		"[CP_START] mode=" << checkpointModeToString(mode));
-
-	if (parallelCheckpoint_) {
-		groupCheckpointStatus_.assign(
-			pgConfig_.getPartitionGroupCount(), GROUP_CP_COMPLETED);
-		PartitionGroupId pgId = 1;
-		try {
-			for (; pgId < pgConfig_.getPartitionGroupCount(); ++pgId) {
-				PartitionId topPId = pgConfig_.getGroupBeginPartitionId(pgId);
-				Event requestEvent(ec, CP_REQUEST_GROUP_CHECKPOINT, topPId);
-				EventByteOutStream out = requestEvent.getOutStream();
-				out << mode;
-				out << flag;
-				groupCheckpointStatus_[pgId] = GROUP_CP_RUNNING;
-				ee_.add(requestEvent);
-			}
-			pgId = 0;
-			groupCheckpointStatus_[pgId] = GROUP_CP_RUNNING;
-			runGroupCheckpoint(pgId, ec, mode, flag);
-		}
-		catch (...) {
-			groupCheckpointStatus_[pgId] = GROUP_CP_COMPLETED;
-			waitAllGroupCheckpointEnd();
-			throw;
-		}
-		waitAllGroupCheckpointEnd();
+	if (mode != CP_PREPARE_LONGTERM_SYNC && mode != CP_STOP_LONGTERM_SYNC) { 
+		GS_TRACE_INFO(
+				CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
+				"[CP_START] mode=" << checkpointModeToString(mode));
 	}
 	else {
-		for (PartitionGroupId pgId = 0;
-			 pgId < pgConfig_.getPartitionGroupCount(); ++pgId) {
-			runGroupCheckpoint(pgId, ec, mode, flag);
+		GS_TRACE_INFO(
+				CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
+				"[CP_LONGTERM_SYNC_START] mode=" << checkpointModeToString(mode) <<
+				", SSN=" << ssn);
+	}
+	if (mode != CP_PREPARE_LONGTERM_SYNC && mode != CP_STOP_LONGTERM_SYNC) { 
+		if (parallelCheckpoint_) {
+			groupCheckpointStatus_.assign(
+					pgConfig_.getPartitionGroupCount(), GROUP_CP_COMPLETED);
+			PartitionGroupId pgId = 1;
+			try {
+				for (; pgId < pgConfig_.getPartitionGroupCount(); ++pgId) {
+					PartitionId topPId = pgConfig_.getGroupBeginPartitionId(pgId);
+					Event requestEvent(ec, CP_REQUEST_GROUP_CHECKPOINT, topPId);
+					EventByteOutStream out = requestEvent.getOutStream();
+					out << mode;
+					out << flag;
+					out << backupPath;
+					out << UNDEF_SYNC_SEQ_NUMBER; 
+
+					groupCheckpointStatus_[pgId] = GROUP_CP_RUNNING;
+					ee_.add(requestEvent);
+				}
+				pgId = 0;
+				groupCheckpointStatus_[pgId] = GROUP_CP_RUNNING;
+				runGroupCheckpoint(pgId, ec, mode, flag, backupPath, ssn);
+			}
+			catch (...) {
+				groupCheckpointStatus_[pgId] = GROUP_CP_COMPLETED;
+				waitAllGroupCheckpointEnd();
+				throw;
+			}
+			waitAllGroupCheckpointEnd();
+		}
+		else {
+			for (PartitionGroupId pgId = 0;
+				 pgId < pgConfig_.getPartitionGroupCount(); ++pgId) {
+				runGroupCheckpoint(pgId, ec, mode, flag, backupPath, ssn);
+			}
+		}
+	}
+	else if (mode == CP_PREPARE_LONGTERM_SYNC) {
+		assert(ssn != UNDEF_SYNC_SEQ_NUMBER);
+		CpLongtermSyncInfo *info = getCpLongtermSyncInfo(ssn);
+		if (info != NULL) {
+			info->startTime_ = startTime_;
+			info->oldOffsetMap_ = UTIL_NEW CpLongtermSyncOffsetMap;
+			assert(info->targetPId_ != UNDEF_PARTITIONID);
+			const PartitionGroupId pgId =
+					getPGConfig().getPartitionGroupId(info->targetPId_);
+			runGroupCheckpoint(pgId, ec, mode, flag, backupPath, ssn);
+		}
+	}
+	else {
+		assert(mode == CP_STOP_LONGTERM_SYNC);
+		assert(ssn != UNDEF_SYNC_SEQ_NUMBER);
+		CpLongtermSyncInfo *info = getCpLongtermSyncInfo(ssn);
+		if (info != NULL) {
+			assert(info->targetPId_ != UNDEF_PARTITIONID);
+			const PartitionGroupId pgId =
+					getPGConfig().getPartitionGroupId(info->targetPId_);
+			runGroupCheckpoint(pgId, ec, mode, flag, backupPath, ssn);
 		}
 	}
 
@@ -623,21 +972,51 @@ void CheckpointService::runCheckpoint(
 	}
 	if (mode == CP_SHUTDOWN) {
 		clusterService_->requestCompleteCheckpoint(
-			ec, ec.getAllocator(), false);
+				ec, ec.getAllocator(), false);
 	}
 
-	GS_TRACE_INFO(CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
-		"[CP_END] mode=" << checkpointModeToString(mode)
-						 << ", commandElapsedMillis="
-						 << getLastDuration(util::DateTime::now(false)));
+	if (mode != CP_PREPARE_LONGTERM_SYNC && mode != CP_STOP_LONGTERM_SYNC) { 
+		GS_TRACE_INFO(
+				CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
+				"[CP_END] mode=" << checkpointModeToString(mode) <<
+				", commandElapsedMillis=" <<
+				getLastDuration(util::DateTime::now(false)));
+	}
+	else {
+		GS_TRACE_INFO(
+				CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
+				"[CP_LONGTERM_SYNC_END] mode=" << checkpointModeToString(mode) <<
+				", SSN=" << ssn << ", commandElapsedMillis=" <<
+				getLastDuration(util::DateTime::now(false)));
+	}
 
 	pendingPartitionCount_ = 0;
 
+	if (errorOccured_) {
+		if (mode == CP_PREPARE_LONGTERM_SYNC) { 
+			assert(ssn != UNDEF_SYNC_SEQ_NUMBER);
+			CpLongtermSyncInfo *info = getCpLongtermSyncInfo(ssn);
+			if (info != NULL) { 
+				info->errorOccured_ = true;
+				syncService_->notifyCheckpointLongSyncReady(
+						ec, info->targetPId_, &info->longtermSyncInfo_, true);
+			}
+		}
+		return;
+	}
 	if (mode == CP_NORMAL) {
 		totalNormalCpOperation_++;
 	}
 	else if (mode == CP_REQUESTED) {
 		totalRequestedCpOperation_++;
+	}
+	else if (mode == CP_PREPARE_LONGTERM_SYNC) { 
+		assert(ssn != UNDEF_SYNC_SEQ_NUMBER);
+		CpLongtermSyncInfo *info = getCpLongtermSyncInfo(ssn);
+		if (info != NULL) { 
+			syncService_->notifyCheckpointLongSyncReady(
+					ec, info->targetPId_, &info->longtermSyncInfo_, false);
+		}
 	}
 }
 
@@ -645,7 +1024,7 @@ void CheckpointService::waitAllGroupCheckpointEnd() {
 	for (;;) {
 		bool completed = true;
 		for (PartitionGroupId pgId = 0;
-			 pgId < pgConfig_.getPartitionGroupCount(); ++pgId) {
+				pgId < pgConfig_.getPartitionGroupCount(); ++pgId) {
 			if (groupCheckpointStatus_[pgId] == GROUP_CP_RUNNING) {
 				completed = false;
 				break;
@@ -659,11 +1038,12 @@ void CheckpointService::waitAllGroupCheckpointEnd() {
 }
 
 void CheckpointService::runGroupCheckpoint(
-	PartitionGroupId pgId, EventContext &ec, int32_t mode, uint32_t flag) {
+		PartitionGroupId pgId, EventContext &ec, int32_t mode, uint32_t flag,
+		const std::string &backupPath, SyncSequentialNumber ssn) {
 	struct GroupCheckpointDataCleaner {
 		explicit GroupCheckpointDataCleaner(
-			CheckpointService &service, PartitionGroupId pgId)
-			: service_(service), pgId_(pgId) {}
+				CheckpointService &service, PartitionGroupId pgId)
+				: service_(service), pgId_(pgId) {}
 
 		~GroupCheckpointDataCleaner() {
 			service_.groupCheckpointStatus_[pgId_] = GROUP_CP_COMPLETED;
@@ -674,81 +1054,94 @@ void CheckpointService::runGroupCheckpoint(
 
 	util::StackAllocator &alloc = ec.getAllocator();
 
-	GS_TRACE_INFO(CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
-		"[CP_GROUP_START_REQUEST] mode=" << checkpointModeToString(mode)
-										 << ", pgId=" << pgId);
-	if (clusterService_->getManager()->isSyncRunning(pgId)) {
-		GS_TRACE_INFO(CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
-			"[NOTE] Checkpoint pending by longTerm sync running, pgId="
-				<< pgId << ", currentCpId ="
-				<< logManager_->getLastCheckpointId(pgId) << ", limitTime="
-				<< clusterService_->getManager()->getPendingLimitTime(pgId));
-		return;
-	}
+	GS_TRACE_INFO(
+			CHECKPOINT_SERVICE_STATUS_DETAIL, GS_TRACE_CP_STATUS,
+			"[CP_GROUP_START_REQUEST] mode=" << checkpointModeToString(mode) <<
+			", pgId=" << pgId);
+
 
 	PartitionGroupLock pgLock(*transactionManager_, pgId);
 
 	util::StackAllocator::Scope scope(alloc);  
 
+	if (mode == CP_STOP_LONGTERM_SYNC) {
+		assert(ssn != UNDEF_SYNC_SEQ_NUMBER);
+		CpLongtermSyncInfo *info = getCpLongtermSyncInfo(ssn);
+		if (info != NULL) {
+			CpLongtermSyncInfo tmpInfo = *info;
+
+			const CheckpointId cpId = logManager_->getLastCheckpointId(pgId);
+			if (tmpInfo.logManager_ != NULL) {
+				tmpInfo.logManager_->flushFile(pgId);
+			}
+			assert(info->targetPId_ != UNDEF_PARTITIONID);
+			executeOnTransactionService(
+					ec, CP_TXN_STOP_LONGTERM_SYNC, mode, tmpInfo.targetPId_,
+					cpId, tmpInfo.dir_, true, ssn);
+
+			removeCpLongtermSyncInfo(ssn);
+
+			delete tmpInfo.newOffsetMap_;
+			delete tmpInfo.oldOffsetMap_;
+			delete tmpInfo.syncCpFile_;
+
+			if (!tmpInfo.dir_.empty()) {
+				try {
+					util::FileSystem::remove(tmpInfo.dir_.c_str(), true);
+				} catch(std::exception &e) {
+					GS_TRACE_WARNING(CHECKPOINT_SERVICE,
+							GS_TRACE_CP_LONGTERM_SYNC_INFO,
+							"Remove long sync temporary files failed.  (reason=" <<
+							 GS_EXCEPTION_MESSAGE(e) << ")");
+				}
+			}
+		}
+		return;
+	}
+
 	const PartitionId startPId = pgConfig_.getGroupBeginPartitionId(pgId);
 	const PartitionId endPId = pgConfig_.getGroupEndPartitionId(pgId);
 	const CheckpointId cpId = logManager_->getLastCheckpointId(pgId) + 1;
 
-	GS_TRACE_INFO(CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
-		"[CP_GROUP_START] mode=" << checkpointModeToString(mode)
-								 << ", pgId=" << pgId << ", cpId=" << cpId);
+	GS_TRACE_INFO(
+			CHECKPOINT_SERVICE_STATUS_DETAIL, GS_TRACE_CP_STATUS,
+			"[CP_GROUP_START] mode=" << checkpointModeToString(mode) <<
+			", pgId=" << pgId << ", cpId=" << cpId);
 
 	uint64_t beforeAllocatedCheckpointBufferCount =
-		chunkManager_->getChunkManagerStats()
-			.getAllocatedCheckpointBufferCount();
+			chunkManager_->getChunkManagerStats()
+				.getAllocatedCheckpointBufferCount();
 
 	logManager_->flushFile(pgId);
 	executeOnTransactionService(
-		ec, PARTITION_GROUP_START, mode, startPId, cpId, true);
+			ec, PARTITION_GROUP_START, mode, startPId, cpId, backupPath, true,
+			ssn);
+
 
 	if (clusterService_->isError()) {
-		GS_THROW_USER_ERROR(GS_ERROR_CP_CONTROLLER_ILLEAGAL_STATE,
-			"Checkpoint cancelled ("
-			"systemErrorOccurred="
-				<< clusterService_->isError() << ")");
+		GS_THROW_USER_ERROR(
+				GS_ERROR_CP_CONTROLLER_ILLEAGAL_STATE,
+				"Checkpoint cancelled ("
+				"systemErrorOccurred=" <<
+				clusterService_->isError() << ")");
 	}
-	ClusterManager *clsMgr = clusterService_->getManager();
-	int32_t delayLimitInterval =
-		clsMgr->getConfig().getCheckpointDelayLimitInterval();
+
 
 	int64_t totalWriteCount = 0;
-	int32_t delayTotalSleepInterval = 0;
 
 	for (PartitionId pId = startPId; pId < endPId; pId++) {
-		GS_TRACE_DEBUG(CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
-			"[CP_PARTITION_START] mode=" << checkpointModeToString(mode)
-										 << ", pgId=" << pgId << ", pId=" << pId
-										 << ", cpId=" << cpId);
-
+		GS_TRACE_DEBUG(
+				CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
+				"[CP_PARTITION_START] mode=" << checkpointModeToString(mode) <<
+				", pgId=" << pgId << ", pId=" << pId <<
+				", cpId=" << cpId);
 		PartitionLock pLock(*transactionManager_, pId);
 
-		delayTotalSleepInterval = 0;
-		PartitionId currentChunkSyncPId = UNDEF_PARTITIONID;
-		CheckpointId currentChunkSyncCPId = UNDEF_CHECKPOINT_ID;
-		clsMgr->getCurrentChunkSync(currentChunkSyncPId, currentChunkSyncCPId);
-
-		while (clsMgr->isSyncRunning(pgId) &&
-			   delayTotalSleepInterval < delayLimitInterval &&
-			   pId == currentChunkSyncPId) {  
-			util::Thread::sleep(delaySleepTime_);
-			delayTotalSleepInterval += delaySleepTime_;
-		}
-		if (delayTotalSleepInterval > 0) {
-			GS_TRACE_INFO(CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
-				"Checkpoint operation(pgId="
-					<< pgId << ") is delayed by sync operation, delayed time: "
-					<< delayTotalSleepInterval);
-		}
 
 		struct ChunkStatusCleaner {
 			explicit ChunkStatusCleaner(
-				ChunkManager &chunkManager, PartitionId targetPId)
-				: chunkManager_(chunkManager), targetPId_(targetPId) {}
+					ChunkManager &chunkManager, PartitionId targetPId)
+					: chunkManager_(chunkManager), targetPId_(targetPId) {}
 			~ChunkStatusCleaner() {
 				try {
 				}
@@ -759,53 +1152,61 @@ void CheckpointService::runGroupCheckpoint(
 			PartitionId targetPId_;
 		} chunkStatusCleaner(*chunkManager_, pId);
 
-		const bool checkpointReady =
-			dataStore_->isRestored(pId) && chunkManager_->existPartition(pId);
+		executeOnTransactionService(
+				ec, PARTITION_START, mode, pId, cpId, backupPath, true,
+				ssn);
 
-		executeOnTransactionService(ec, PARTITION_START, mode, pId, cpId, true);
+		const bool checkpointReady = isCheckpointReady(pId);
 
 		if (clusterService_->isError()) {
-			GS_THROW_USER_ERROR(GS_ERROR_CP_CONTROLLER_ILLEAGAL_STATE,
-				"Checkpoint cancelled ("
-				"systemErrorOccurred="
-					<< clusterService_->isError() << ")");
+			GS_THROW_USER_ERROR(
+					GS_ERROR_CP_CONTROLLER_ILLEAGAL_STATE,
+					"Checkpoint cancelled ("
+					"systemErrorOccurred=" <<
+					clusterService_->isError() << ")");
 		}
 
 		if (checkpointReady) {
 			while (chunkManager_->isCopyLeft(pId)) {
 				executeOnTransactionService(
-					ec, COPY_CHUNK, mode, pId, cpId, true);
+						ec, COPY_CHUNK, mode, pId, cpId, backupPath, true,
+						ssn);
 				if (clusterService_->isError()) {
-					GS_THROW_USER_ERROR(GS_ERROR_CP_CONTROLLER_ILLEAGAL_STATE,
-						"Checkpoint cancelled ("
-						"systemErrorOccurred="
-							<< clusterService_->isError() << ")");
+					GS_THROW_USER_ERROR(
+							GS_ERROR_CP_CONTROLLER_ILLEAGAL_STATE,
+							"Checkpoint cancelled ("
+							"systemErrorOccurred=" <<
+							clusterService_->isError() << ")");
 				}
 
 				totalWriteCount += chunkManager_->writeChunk(pId);
 
-				if (mode != CP_AFTER_RECOVERY && mode != CP_SHUTDOWN) {
+				int32_t queueSize = getTransactionEEQueueSize(pgId);
+				if (mode != CP_AFTER_RECOVERY && mode != CP_SHUTDOWN &&
+						(queueSize > CP_CHUNK_COPY_WITH_SLEEP_LIMIT_QUEUE_SIZE)) {
 					util::Thread::sleep(chunkCopyIntervalMillis_);
 				}
 			}
 
 			executeOnTransactionService(
-				ec, PARTITION_END, mode, pId, cpId, true);
+					ec, PARTITION_END, mode, pId, cpId, backupPath, true,
+					ssn);
 
 			if (clusterService_->isError()) {
-				GS_THROW_USER_ERROR(GS_ERROR_CP_CONTROLLER_ILLEAGAL_STATE,
-					"Checkpoint cancelled ("
-					"systemErrorOccurred="
-						<< clusterService_->isError() << ")");
+				GS_THROW_USER_ERROR(
+						GS_ERROR_CP_CONTROLLER_ILLEAGAL_STATE,
+						"Checkpoint cancelled ("
+						"systemErrorOccurred=" <<
+						clusterService_->isError() << ")");
 			}
 		}
-
-		GS_TRACE_DEBUG(CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
-			"[CP_PARTITION_END] mode="
-				<< checkpointModeToString(mode) << ", pgId=" << pgId
-				<< ", pId=" << pId << ", cpId=" << cpId
-				<< ", writeCount=" << totalWriteCount
-				<< ", isReady=" << (checkpointReady ? "true" : "false"));
+		GS_TRACE_DEBUG(
+				CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
+				"[CP_PARTITION_END] mode=" <<
+				checkpointModeToString(mode) << ", pgId=" << pgId << ", pId=" <<
+				pId << ", cpId=" << cpId <<
+				", writeCount=" << totalWriteCount <<
+				", isReady=" << (checkpointReady ? "true" : "false"));
 
 		if (pId + 1 < endPId) {
 			pendingPartitionCount_--;
@@ -814,11 +1215,12 @@ void CheckpointService::runGroupCheckpoint(
 		chunkManager_->flush(pgId);
 		if (!parallelCheckpoint_) {
 			for (uint32_t flushPgId = 0;
-				 flushPgId < pgConfig_.getPartitionGroupCount(); ++flushPgId) {
-				GS_TRACE_INFO(CHECKPOINT_SERVICE_DETAIL, GS_TRACE_CP_STATUS,
-					"Flush Log while CP: flushPgId = " << flushPgId);
+					flushPgId < pgConfig_.getPartitionGroupCount(); ++flushPgId) {
+				GS_TRACE_INFO(
+						CHECKPOINT_SERVICE_DETAIL, GS_TRACE_CP_STATUS,
+						"Flush Log while CP: flushPgId = " << flushPgId);
 				logManager_->flushFile(
-					flushPgId);  
+						flushPgId, pgId == flushPgId);  
 			}
 		}
 	}
@@ -826,29 +1228,74 @@ void CheckpointService::runGroupCheckpoint(
 	chunkManager_->flush(pgId);
 	logManager_->flushFile(pgId);
 	executeOnTransactionService(
-		ec, PARTITION_GROUP_END, mode, startPId, cpId, true);
+			ec, PARTITION_GROUP_END, mode, startPId, cpId, backupPath, true,
+			ssn);
 
 	uint64_t cpMallocCount = chunkManager_->getChunkManagerStats()
-								 .getAllocatedCheckpointBufferCount() -
-							 beforeAllocatedCheckpointBufferCount;
+			.getAllocatedCheckpointBufferCount() -
+				beforeAllocatedCheckpointBufferCount;
 
-	GS_TRACE_INFO(CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
-		"[CP_GROUP_END] mode=" << checkpointModeToString(mode)
-							   << ", pgId=" << pgId << ", cpId=" << cpId
-							   << ", bufferAllocateCount=" << cpMallocCount
-							   << ", writeCount=" << totalWriteCount);
+	GS_TRACE_INFO(
+			CHECKPOINT_SERVICE_STATUS_DETAIL, GS_TRACE_CP_STATUS,
+			"[CP_GROUP_END] mode=" << checkpointModeToString(mode) <<
+			", pgId=" << pgId << ", cpId=" << cpId <<
+			", bufferAllocateCount=" << cpMallocCount <<
+			", writeCount=" << totalWriteCount);
 
 	if (clusterService_->isError()) {
-		GS_THROW_USER_ERROR(GS_ERROR_CP_CONTROLLER_ILLEAGAL_STATE,
-			"Checkpoint cancelled ("
-			"systemErrorOccurred="
-				<< clusterService_->isError() << ")");
+		GS_THROW_USER_ERROR(
+				GS_ERROR_CP_CONTROLLER_ILLEAGAL_STATE,
+				"Checkpoint cancelled ("
+				"systemErrorOccurred=" <<
+				clusterService_->isError() << ")");
+	}
+
+	if (CP_PREPARE_LONGTERM_SYNC == mode) {
+
+		assert(ssn != UNDEF_SYNC_SEQ_NUMBER);
+		CpLongtermSyncInfo *info = getCpLongtermSyncInfo(ssn);
+		if (info != NULL) {
+			info->startTime_ = startTime_;
+			assert(info->targetPId_ != UNDEF_PARTITIONID);
+			assert(pgId == getPGConfig().getPartitionGroupId(info->targetPId_));
+		}
+		GS_TRACE_INFO(
+				CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
+				"[CP_PREPARE_LONGTERM_SYNC_CHUNK_COPY_START] mode=" <<
+				checkpointModeToString(mode) << ", pgId=" << pgId <<
+				", cpId=" << cpId << ", synctempPath=" << info->dir_.c_str());
+
+		assert(info->newOffsetMap_ == NULL);
+		uint64_t fileSize = 0;
+		try {
+			info->newOffsetMap_ = UTIL_NEW CpLongtermSyncOffsetMap;
+			info->readItr_ = info->newOffsetMap_->begin();
+			info->syncCpFile_ = UTIL_NEW CheckpointFile(
+					chunkManager_->getConfig().getChunkExpSize(),
+					info->dir_, pgId);
+			info->syncCpFile_->open();
+
+			fileSize = chunkManager_->makeSyncTempCpFile(
+					pgId, info->targetPId_, cpId,
+					info->dir_.c_str(), *info->oldOffsetMap_, *info->newOffsetMap_, *info->syncCpFile_);
+		}
+		catch (std::exception &e) {
+			GS_RETHROW_USER_ERROR(
+					e, "Create temporary file for sync failed. (reason=" <<
+					GS_EXCEPTION_MESSAGE(e) << ")");
+		}
+		assert(info->syncCpFile_);
+
+		GS_TRACE_INFO(
+				CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
+				"[CP_PREPARE_LONGTERM_SYNC_CHUNK_COPY_END] mode=" <<
+				checkpointModeToString(mode) << ", pgId=" << pgId <<
+				", cpId=" << cpId << ", fileSize=" << fileSize);
 	}
 
 	pendingPartitionCount_--;
 
 	lsnInfo_.endCheckpoint();
-
 }
 
 
@@ -856,9 +1303,12 @@ void CheckpointService::runGroupCheckpoint(
 /*!
 	@brief Starts a Checkpoint on a transaction thread.
 */
-void CheckpointService::executeOnTransactionService(EventContext &ec,
-	GSEventType eventType, int32_t mode, PartitionId pId, CheckpointId cpId,
-	bool executeAndWait)
+
+void CheckpointService::executeOnTransactionService(
+		EventContext &ec,
+		GSEventType eventType, int32_t mode, PartitionId pId, CheckpointId cpId,
+		const std::string &backupPath, bool executeAndWait,
+		SyncSequentialNumber ssn)
 {
 	try {
 		Event requestEvent(ec, eventType, pId);
@@ -866,6 +1316,9 @@ void CheckpointService::executeOnTransactionService(EventContext &ec,
 		EventByteOutStream out = requestEvent.getOutStream();
 		out << mode;
 		out << cpId;
+		out << backupPath;
+		out << ssn; 
+
 		if (executeAndWait) {
 			txnEE_->executeAndWait(ec, requestEvent);
 		}
@@ -875,8 +1328,8 @@ void CheckpointService::executeOnTransactionService(EventContext &ec,
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_SYSTEM_ERROR(
-			e, "Execute handler on TransactionService failed. (reason="
-				   << GS_EXCEPTION_MESSAGE(e) << ")");
+				e, "Execute handler on TransactionService failed. (reason=" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 
@@ -892,15 +1345,17 @@ void CheckpointOperationHandler::operator()(EventContext &ec, Event &ev) {
 
 		const PartitionId pId = ev.getPartitionId();
 		const PartitionGroupId pgId =
-			checkpointService_->getPGConfig().getPartitionGroupId(pId);
+				checkpointService_->getPGConfig().getPartitionGroupId(pId);
 
 		int32_t mode;
 		CheckpointId cpId;
+		std::string backupPath;
+		CheckpointService::SyncSequentialNumber ssn;
+
 		in >> mode;
 		in >> cpId;
-
-		const bool checkpointReady =
-			dataStore_->isRestored(pId) && chunkManager_->existPartition(pId);
+		in >> backupPath;
+		in >> ssn; 
 
 		WATCHER_START;
 		switch (ev.getType()) {
@@ -908,38 +1363,74 @@ void CheckpointOperationHandler::operator()(EventContext &ec, Event &ev) {
 			chunkManager_->cleanCheckpointData(pgId);
 			break;
 
-
+		case CP_TXN_STOP_LONGTERM_SYNC:
+			{
+				assert(ssn != CheckpointService::UNDEF_SYNC_SEQ_NUMBER);
+				CheckpointService::CpLongtermSyncInfo *info =
+						checkpointService_->getCpLongtermSyncInfo(ssn);
+				if (info && info->logManager_) {
+					logManager_->removeSyncLogManager(info->logManager_, info->targetPId_);
+					delete info->logManager_;
+					info->logManager_ = NULL;
+				}
+			}
+			break;
 		case PARTITION_GROUP_START:
 
 			checkpointService_->setCurrentCpGrpId(pgId);
 
 			chunkManager_->startCheckpoint(pgId, cpId);
 			logManager_->prepareCheckpoint(pgId, cpId);
+
+			if (ssn != CheckpointService::UNDEF_SYNC_SEQ_NUMBER) {
+				CheckpointService::CpLongtermSyncInfo *info =
+						checkpointService_->getCpLongtermSyncInfo(ssn);
+				if (info != NULL) {
+					LogManager::Config syncLogManagerConfig =
+							logManager_->getConfig();
+					syncLogManagerConfig.persistencyMode_ =
+							LogManager::PERSISTENCY_KEEP_ALL_LOG;
+					syncLogManagerConfig.alwaysFlushOnTxnEnd_ = false;
+					syncLogManagerConfig.logDirectory_ = info->dir_;
+					syncLogManagerConfig.emptyFileAppendable_ = true;
+					LogManager *syncLogManager =
+							UTIL_NEW LogManager(syncLogManagerConfig);
+					info->logManager_ = syncLogManager;
+				}
+			}
 			break;
 
 		case PARTITION_START:
-
-			checkpointService_->setCurrentCpPId(pId);
-
-			if (checkpointReady) {
-				chunkManager_->startCheckpoint(pId);
+			{
+				checkpointService_->setCurrentCpPId(pId);
+				bool checkpointReady =
+						dataStore_->isRestored(pId) && chunkManager_->existPartition(pId);
+				checkpointService_->setCheckpointReady(pId, checkpointReady);
+				if (checkpointReady) {
+					chunkManager_->startCheckpoint(pId);
+				}
+//				LogSequentialNumber lsn = 
+				writeCheckpointStartLog(
+						alloc, mode, pgId, pId, cpId);
+				writeChunkMetaDataLog(
+						alloc, mode, pgId, pId, cpId, checkpointReady);
 			}
-			writeCheckpointStartLog(alloc, mode, pgId, pId, cpId);
-			writeChunkMetaDataLog(
-				alloc, mode, pgId, pId, cpId, checkpointReady);
 			break;
 
 		case COPY_CHUNK:
-			chunkManager_->copyChunk(pId);
+			if (checkpointService_->isCheckpointReady(pId)) {
+				chunkManager_->copyChunk(pId);
+			}
 			break;
 
 		case PARTITION_END:
-			chunkManager_->endCheckpoint(pId);
-
+			if (checkpointService_->isCheckpointReady(pId)) {
+				chunkManager_->endCheckpoint(pId);
+				checkpointService_->setCurrentCheckpointId(
+						pId, logManager_->getLastCheckpointId(pgId));
+			}
 			checkpointService_->setCurrentCpPId(UNDEF_PARTITIONID);
 
-			checkpointService_->setCurrentCheckpointId(
-				pId, logManager_->getLastCheckpointId(pgId));
 			if (cpId == 0) {
 				logManager_->setAvailableStartLSN(pId, cpId);
 			}
@@ -958,50 +1449,64 @@ void CheckpointOperationHandler::operator()(EventContext &ec, Event &ev) {
 
 			BitArray &validBitArray = chunkManager_->getCheckpointBit(pgId);
 
+			const PartitionGroupConfig &pgConfig =
+					checkpointService_->getPGConfig();
 			{
 				const PartitionId startPId =
-					checkpointService_->getPGConfig().getGroupBeginPartitionId(
-						pgId);
+						pgConfig.getGroupBeginPartitionId(pgId);
 				const PartitionId endPId =
-					checkpointService_->getPGConfig().getGroupEndPartitionId(
-						pgId);
+						pgConfig.getGroupEndPartitionId(pgId);
 				for (PartitionId pId = startPId; pId < endPId; pId++) {
 					checkpointService_->lsnInfo_.setLsn(
-						pId, logManager_->getLSN(pId));  
+							pId, logManager_->getLSN(pId));  
 				}
 			}
-			logManager_->putCheckpointEndLog(binaryLogBuf,
-				checkpointService_->getPGConfig().getGroupBeginPartitionId(
-					pgId),
-				validBitArray);
+			logManager_->putCheckpointEndLog(
+					binaryLogBuf,
+					pgConfig.getGroupBeginPartitionId(pgId),
+					validBitArray);
 
 			logManager_->writeBuffer(pgId);
 			logManager_->flushFile(pgId);
 			logManager_->postCheckpoint(
-				pgId);  
+					pgId);  
 
 			{
 				PartitionTable *pt = checkpointService_->getPartitionTable();
 				util::XArray<uint8_t> binaryLogRecords(alloc);
 				CheckpointId cpId = logManager_->getFirstCheckpointId(pgId);
 				logManager_->updateAvailableStartLsn(
-					pt, pgId, binaryLogRecords, cpId);
+						pt, pgId, binaryLogRecords, cpId);
 
 				const PartitionId startPId =
-					checkpointService_->getPGConfig().getGroupBeginPartitionId(
-						pgId);
+						pgConfig.getGroupBeginPartitionId(pgId);
 				const PartitionId endPId =
-					checkpointService_->getPGConfig().getGroupEndPartitionId(
-						pgId);
+						pgConfig.getGroupEndPartitionId(pgId);
 				clusterService_->requestUpdateStartLsn(
-					ec, ec.getAllocator(), startPId, endPId);
+						ec, ec.getAllocator(), startPId, endPId);
+			}
+			if (ssn != CheckpointService::UNDEF_SYNC_SEQ_NUMBER) {
+				CheckpointService::CpLongtermSyncInfo *info =
+						checkpointService_->getCpLongtermSyncInfo(ssn);
+				if (info != NULL) {
+					assert(info->oldOffsetMap_);
+					chunkManager_->getCheckpointChunkPos(
+							info->targetPId_, *info->oldOffsetMap_);
+
+					info->cpId_ = logManager_->getLastCheckpointId(pgId);
+
+					logManager_->copyLogFile(pgId, info->dir_.c_str());
+
+					info->logManager_->open(false, true, false, pgId);
+					logManager_->addSyncLogManager(info->logManager_, info->targetPId_);
+				}
 			}
 
 			if (mode == CP_SHUTDOWN) {
 				logManager_->writeBuffer(
-					pgId);  
+						pgId);  
 				logManager_->flushFile(
-					pgId);  
+						pgId);  
 			}
 		} break;
 		}
@@ -1009,8 +1514,9 @@ void CheckpointOperationHandler::operator()(EventContext &ec, Event &ev) {
 	}
 	catch (std::exception &e) {
 		clusterService_->setError(ec, &e);
-		GS_RETHROW_SYSTEM_ERROR(e, "Group checkpoint failed. (reason="
-									   << GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Group checkpoint failed. (reason=" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 
@@ -1018,9 +1524,9 @@ void CheckpointOperationHandler::operator()(EventContext &ec, Event &ev) {
 /*!
 	@brief Outputs a log of starting a Checkpoint.
 */
-void CheckpointOperationHandler::writeCheckpointStartLog(
-	util::StackAllocator &alloc, int32_t mode, PartitionGroupId pgId,
-	PartitionId pId, CheckpointId cpId) {
+LogSequentialNumber CheckpointOperationHandler::writeCheckpointStartLog(
+		util::StackAllocator &alloc, int32_t mode, PartitionGroupId pgId,
+		PartitionId pId, CheckpointId cpId) {
 	try {
 		util::XArray<uint64_t> dirtyChunkList(alloc);
 
@@ -1034,131 +1540,218 @@ void CheckpointOperationHandler::writeCheckpointStartLog(
 
 
 		transactionManager_->backupTransactionActiveContext(pId,
-			maxAssignedTxnId, activeClientIds, activeTxnIds,
-			activeRefContainerIds, activeLastExecStmtIds,
-			activeTimeoutIntervalSec);
+				maxAssignedTxnId, activeClientIds, activeTxnIds,
+				activeRefContainerIds, activeLastExecStmtIds,
+				activeTimeoutIntervalSec);
 
 		util::XArray<uint8_t> logBuffer(alloc);
-		logManager_->putCheckpointStartLog(logBuffer, pId, maxAssignedTxnId,
-			logManager_->getLSN(pId), activeClientIds, activeTxnIds,
-			activeRefContainerIds, activeLastExecStmtIds,
-			activeTimeoutIntervalSec);
+		return logManager_->putCheckpointStartLog(
+				logBuffer, pId, maxAssignedTxnId,
+				logManager_->getLSN(pId), activeClientIds, activeTxnIds,
+				activeRefContainerIds, activeLastExecStmtIds,
+				activeTimeoutIntervalSec);
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_USER_ERROR(
-			e, "Write checkpoint start log failed. (pgId="
-				   << pgId << ", pId=" << pId << ", mode=" << mode << ", cpId="
-				   << cpId << ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+				e, "Write checkpoint start log failed. (pgId=" <<
+				pgId << ", pId=" << pId << ", mode=" << mode << ", cpId=" <<
+				cpId << ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
 	}
+}
+void CheckpointOperationHandler::compressChunkMetaDataLog(
+		util::StackAllocator &alloc,
+		PartitionGroupId pgId, PartitionId pId,
+		ChunkCategoryId categoryId,
+		ChunkId startChunkId, int32_t count,
+		util::XArray<uint8_t> &logBuffer,
+		util::XArray<uint8_t> &metaDataEmptySize,
+		util::XArray<uint8_t> &metaDataFileOffset,
+		util::XArray<uint8_t> &metaDataChunkKey
+) {
+	util::XArray<uint8_t> compressBuffer(alloc);
+	util::XArray<uint8_t> compressSource(alloc);
+	compressSource.reserve(metaDataEmptySize.size()
+			+ metaDataFileOffset.size()
+			+ metaDataChunkKey.size()
+			+ sizeof(uint32_t) * 2);
+	compressSource.push_back(
+			metaDataEmptySize.data(), metaDataEmptySize.size());
+	compressSource.push_back(metaDataFileOffset.data(),
+			metaDataFileOffset.size());
+	const bool isBatchFreeMode = chunkManager_->isBatchFreeMode(categoryId);
+	if (isBatchFreeMode) {
+		compressSource.push_back(
+				metaDataChunkKey.data(), metaDataChunkKey.size());
+	}
+	uint32_t origSize = static_cast<uint32_t>(compressSource.size());
+	uint32_t compSize = static_cast<uint32_t>(origSize * 1.1 + 14);
+	uint8_t temp = 0;
+	compressBuffer.assign(compSize, temp);
+
+	try {
+		ZlibUtils zlib;
+		zlib.compressData(
+			compressSource.data(), origSize,
+			compressBuffer.data(), compSize);
+
+		if (compSize < origSize) {
+			compressBuffer.resize(compSize);
+			logManager_->putChunkMetaDataLog(
+					logBuffer, pId, categoryId, startChunkId, count,
+					origSize, &compressBuffer, false);
+		}
+		else {
+			logManager_->putChunkMetaDataLog(
+					logBuffer, pId, categoryId, startChunkId, count,
+					0, &compressSource, false);
+		}
+	} catch(std::exception &e) {
+		logManager_->putChunkMetaDataLog(
+				logBuffer, pId, categoryId, startChunkId, count,
+				0, &compressSource, false);
+		GS_TRACE_WARNING(CHECKPOINT_SERVICE,
+				GS_TRACE_CM_COMPRESSION_FAILED,
+				"Compress chunk meta data log failed. (reason="
+				<< GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+	GS_TRACE_INFO(
+			CHECKPOINT_SERVICE_DETAIL, GS_TRACE_CP_STATUS,
+					"writeChunkMetaDaLog,pgId," <<
+					pgId << ",pId," << pId << ",chunkCategoryId," <<
+					(int32_t)categoryId << ",startChunkId," <<
+					startChunkId << ",chunkNum," << count);
 }
 
 /*!
 	@brief Outputs a log of metadata of Chunk.
 */
 void CheckpointOperationHandler::writeChunkMetaDataLog(
-	util::StackAllocator &alloc, int32_t mode, PartitionGroupId pgId,
-	PartitionId pId, CheckpointId cpId, bool isRestored) {
+		util::StackAllocator &alloc, int32_t mode, PartitionGroupId pgId,
+		PartitionId pId, CheckpointId cpId, bool isRestored) {
 	try {
+
 		if (isRestored) {
 			int32_t count = 0;
 			util::XArray<uint8_t> logBuffer(alloc);
-			util::XArray<uint8_t> metaDataBinary(alloc);
-
+			util::XArray<uint8_t> metaDataEmptySize(alloc);
+			util::XArray<uint8_t> metaDataFileOffset(alloc);
+			util::XArray<uint8_t> metaDataChunkKey(alloc);
 			ChunkCategoryId categoryId;
 			ChunkId chunkId;
 			ChunkId startChunkId = 0;
 			int64_t scanSize = chunkManager_->getScanSize(pId);
+			ChunkKey *metaChunkKey;
 			ChunkManager::MetaChunk *metaChunk =
-				chunkManager_->begin(pId, categoryId, chunkId);
-			GS_TRACE_INFO(CHECKPOINT_SERVICE_DETAIL, GS_TRACE_CP_STATUS,
-				"writeChunkMetaDataLog: pId=" << pId <<
+					chunkManager_->begin(pId, categoryId, chunkId, metaChunkKey);
+			GS_TRACE_INFO(
+					CHECKPOINT_SERVICE_DETAIL, GS_TRACE_CP_STATUS,
+					"writeChunkMetaDataLog: pId=" << pId <<
 					",chunkId" << chunkId);
 
+			uint64_t prevPos = 0;
+			ChunkKey prevChunkKey = 0;
+			uint8_t varIntBuf[LogManager::LOGMGR_VARINT_MAX_LEN];
 
 			for (int64_t index = 0; index < scanSize; index++) {
-				uint8_t tmp[LogManager::LOGMGR_VARINT_MAX_LEN * 2 + 1];
-				uint8_t *addr = tmp;
 				if (!metaChunk) {
-					tmp[0] = 0xff;
-					++addr;
-					uint32_t dummyData = 0;
-					addr += util::varIntEncode64(addr, dummyData);  
+					metaDataEmptySize.push_back(0xff);
+					int64_t filePosDiff = 0;
+					uint64_t zigzagDiff = util::zigzagEncode64(filePosDiff);
+
+					int32_t encodedSize = util::varIntEncode64(varIntBuf, zigzagDiff);
+					metaDataFileOffset.push_back(varIntBuf, encodedSize);
 					if (chunkManager_->isBatchFreeMode(categoryId)) {
-						addr += util::varIntEncode32(addr, dummyData);
+						int32_t chunkKeyDiff = 0;
+						uint32_t zigzagDiff = util::zigzagEncode32(chunkKeyDiff);
+						encodedSize = util::varIntEncode32(varIntBuf, zigzagDiff);
+						metaDataChunkKey.push_back(varIntBuf, encodedSize);
 					}
 				}
 				else {
-					tmp[0] = metaChunk->getUnoccupiedSize();
-					++addr;
+					uint8_t unoccupiedSize = metaChunk->getUnoccupiedSize();
+					metaDataEmptySize.push_back(unoccupiedSize);
+
 					int64_t filePos = metaChunk->getCheckpointPos();
 					assert(filePos != -1);
-					addr += util::varIntEncode64(addr, filePos);
+
+					int64_t diff = static_cast<int64_t>(filePos)
+							- static_cast<int64_t>(prevPos);
+					uint64_t zigzagDiff = util::zigzagEncode64(diff);
+
+					int32_t encodedSize = util::varIntEncode64(varIntBuf, zigzagDiff);
+					metaDataFileOffset.push_back(varIntBuf, encodedSize);
+					prevPos = filePos;
 					if (chunkManager_->isBatchFreeMode(categoryId)) {
-						addr += util::varIntEncode32(
-							addr, metaChunk->getChunkKey());
+						assert(metaChunkKey != NULL);
+						assert(*metaChunkKey >= 0);
+						int32_t diff = static_cast<int32_t>(*metaChunkKey)
+								- static_cast<int32_t>(prevChunkKey);
+						uint32_t zigzagDiff = util::zigzagEncode32(diff);
+						prevChunkKey = *metaChunkKey;
+						encodedSize = util::varIntEncode32(varIntBuf, zigzagDiff);
+						metaDataChunkKey.push_back(varIntBuf, encodedSize);
 					}
-					GS_TRACE_DEBUG(CHECKPOINT_SERVICE_DETAIL,
-						GS_TRACE_CP_STATUS,
-						"chunkMetaData: (chunkId,"
-							<< chunkId << ",freeInfo,"
-							<< (int32_t)metaChunk->getUnoccupiedSize()
-							<< ",pos," << metaChunk->getCheckpointPos()
-							<< ",chunkKey," << metaChunk->getChunkKey());
+					GS_TRACE_DEBUG(
+							CHECKPOINT_SERVICE_DETAIL, GS_TRACE_CP_STATUS,
+							"chunkMetaData: (chunkId," <<
+							chunkId << ",freeInfo," <<
+							(int32_t)metaChunk->getUnoccupiedSize() <<
+							",pos," << metaChunk->getCheckpointPos() <<
+							",chunkKey," << (metaChunkKey ? *metaChunkKey : -1));
 				}
-				metaDataBinary.push_back(tmp, (addr - tmp));
 				++count;
 				if (count == CHUNK_META_DATA_LOG_MAX_NUM) {
-					logManager_->putChunkMetaDataLog(logBuffer, pId, categoryId,
-						startChunkId, count, &metaDataBinary, false);
-					GS_TRACE_INFO(CHECKPOINT_SERVICE_DETAIL, GS_TRACE_CP_STATUS,
-						"writeChunkMetaDaLog,pgId,"
-							<< pgId << ",pId," << pId << ",chunkCategoryId,"
-							<< (int32_t)categoryId << ",startChunkId,"
-							<< startChunkId << ",chunkNum," << count);
+					compressChunkMetaDataLog(
+							alloc, pgId, pId, categoryId, startChunkId, count,
+							logBuffer, metaDataEmptySize,
+							metaDataFileOffset, metaDataChunkKey);
 
 					startChunkId += count;
 					count = 0;
-					metaDataBinary.clear();
+					prevPos = 0;
+					prevChunkKey = 0;
+					metaDataEmptySize.clear();
+					metaDataFileOffset.clear();
+					metaDataChunkKey.clear();
 					logBuffer.clear();
 				}
 
 				ChunkCategoryId prevCategoryId = categoryId;
-				metaChunk = chunkManager_->next(pId, categoryId, chunkId);
+				metaChunk = chunkManager_->next(pId, categoryId, chunkId, metaChunkKey);
 				if (categoryId != prevCategoryId) {
 					if (count > 0) {
 
-						logManager_->putChunkMetaDataLog(logBuffer, pId,
-							prevCategoryId, startChunkId, count,
-							&metaDataBinary, false);
-						GS_TRACE_INFO(CHECKPOINT_SERVICE_DETAIL,
-							GS_TRACE_CP_STATUS,
-							"writeChunkMetaDaLog,pgId,"
-								<< pgId << ",pId," << pId << ",chunkCategoryId,"
-								<< (int32_t)prevCategoryId << ",startChunkId,"
-								<< startChunkId << ",chunkNum," << count);
+						compressChunkMetaDataLog(
+								alloc, pgId, pId, prevCategoryId, startChunkId, count,
+								logBuffer, metaDataEmptySize,
+								metaDataFileOffset, metaDataChunkKey);
+
 						startChunkId = 0;
 						count = 0;
-						metaDataBinary.clear();
+						prevPos = 0;
+						prevChunkKey = 0;
+						metaDataEmptySize.clear();
+						metaDataFileOffset.clear();
+						metaDataChunkKey.clear();
 						logBuffer.clear();
 					}
 				}
 			}  
-
 			logBuffer.clear();
 			logManager_->putChunkMetaDataLog(
-				logBuffer, pId, UNDEF_CHUNK_CATEGORY_ID, 0, 1, NULL, true);
+					logBuffer, pId, UNDEF_CHUNK_CATEGORY_ID, 0, 1, 0, NULL, true);
 		}
 		else {
 			util::XArray<uint8_t> logBuffer(alloc);
 			logManager_->putChunkMetaDataLog(
-				logBuffer, pId, UNDEF_CHUNK_CATEGORY_ID, 0, 0, NULL, true);
+					logBuffer, pId, UNDEF_CHUNK_CATEGORY_ID, 0, 0, 0, NULL, true);
 		}  
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_USER_ERROR(
-			e, "Write chunk meta data log failed. (pgId="
-				   << pgId << ", pId=" << pId << ", mode=" << mode << ", cpId="
-				   << cpId << ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+				e, "Write chunk meta data log failed. (pgId=" <<
+				pgId << ", pId=" << pId << ", mode=" << mode << ", cpId=" <<
+				cpId << ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 
@@ -1168,18 +1761,20 @@ void CheckpointOperationHandler::writeChunkMetaDataLog(
 void FlushLogPeriodicallyHandler::operator()(EventContext &ec) {
 	try {
 		for (uint32_t pgId = 0;
-			 pgId < checkpointService_->getPGConfig().getPartitionGroupCount();
-			 ++pgId) {
-			GS_TRACE_INFO(CHECKPOINT_SERVICE_DETAIL, GS_TRACE_CP_FLUSH_LOG,
-				"Flush Log: pgId = " << pgId);
+				 pgId < checkpointService_->getPGConfig().getPartitionGroupCount();
+				++pgId) {
+			GS_TRACE_INFO(
+					CHECKPOINT_SERVICE_DETAIL, GS_TRACE_CP_FLUSH_LOG,
+					"Flush Log: pgId = " << pgId);
 			logManager_->flushFile(
-				pgId);  
+					pgId, false);   
 		}
 	}
 	catch (std::exception &e) {
 		clusterService_->setError(ec, &e);
-		GS_RETHROW_SYSTEM_ERROR(e, "Flush log file failed. (reason="
-									   << GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Flush log file failed. (reason=" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 
@@ -1188,8 +1783,8 @@ void FlushLogPeriodicallyHandler::operator()(EventContext &ec) {
 	@brief Locks a Partition group.
 */
 PartitionGroupLock::PartitionGroupLock(
-	TransactionManager &txnManager, PartitionGroupId pgId)
-	: transactionManager_(txnManager), pgId_(pgId) {
+		TransactionManager &txnManager, PartitionGroupId pgId)
+		: transactionManager_(txnManager), pgId_(pgId) {
 }
 
 /*!
@@ -1201,8 +1796,9 @@ PartitionGroupLock::~PartitionGroupLock() {
 /*!
 	@brief Locks a Partition.
 */
-PartitionLock::PartitionLock(TransactionManager &txnManager, PartitionId pId)
-	: transactionManager_(txnManager), pId_(pId) {
+PartitionLock::PartitionLock(
+		TransactionManager &txnManager, PartitionId pId)
+		: transactionManager_(txnManager), pId_(pId) {
 	while (!transactionManager_.lockPartition(pId_)) {
 		util::Thread::sleep(100);
 	}
@@ -1217,13 +1813,13 @@ PartitionLock::~PartitionLock() {
 
 
 CheckpointService::PIdLsnInfo::PIdLsnInfo()
-	: checkpointService_(NULL), partitionNum_(0), partitionGroupNum_(0) {}
+		: checkpointService_(NULL), partitionNum_(0), partitionGroupNum_(0) {}
 
 CheckpointService::PIdLsnInfo::~PIdLsnInfo() {}
 
 void CheckpointService::PIdLsnInfo::setConfigValue(
-	CheckpointService *checkpointService, uint32_t partitionNum,
-	uint32_t partitionGroupNum, const std::string &path) {
+		CheckpointService *checkpointService, uint32_t partitionNum,
+		uint32_t partitionGroupNum, const std::string &path) {
 	checkpointService_ = checkpointService;
 	partitionNum_ = partitionNum;
 	partitionGroupNum_ = partitionGroupNum;
@@ -1239,7 +1835,7 @@ void CheckpointService::PIdLsnInfo::endCheckpoint() {
 }
 
 void CheckpointService::PIdLsnInfo::setLsn(
-	PartitionId pId, LogSequentialNumber lsn) {
+		PartitionId pId, LogSequentialNumber lsn) {
 	lsnList_[pId] = lsn;
 }
 
@@ -1250,43 +1846,46 @@ void CheckpointService::PIdLsnInfo::writeFile() {
 	try {
 		picojson::object jsonNodeInfo;
 		NodeAddress &address =
-			checkpointService_->partitionTable_->getNodeInfo(0)
-				.getNodeAddress();
+				checkpointService_->partitionTable_->
+				getNodeInfo(0).getNodeAddress();
 		jsonNodeInfo["address"] = picojson::value(address.toString(false));
 		jsonNodeInfo["port"] =
-			picojson::value(static_cast<double>(address.port_));
+				picojson::value(static_cast<double>(address.port_));
 
 		picojson::object jsonLsnInfo;
 
 		picojson::array lsnList;
 		for (PartitionId pId = 0; pId < partitionNum_; ++pId) {
 			lsnList.push_back(
-				picojson::value(static_cast<double>(lsnList_[pId])));
+					picojson::value(static_cast<double>(lsnList_[pId])));
 		}
 
 		picojson::object jsonObject;
 		jsonObject["nodeInfo"] = picojson::value(jsonNodeInfo);
 		jsonObject["partitionNum"] =
-			picojson::value(static_cast<double>(partitionNum_));
+				picojson::value(static_cast<double>(partitionNum_));
 		jsonObject["groupNum"] =
-			picojson::value(static_cast<double>(partitionGroupNum_));
+				picojson::value(static_cast<double>(partitionGroupNum_));
 		jsonObject["lsnInfo"] = picojson::value(lsnList);
 
 		std::string jsonString(picojson::value(jsonObject).serialize());
 
 		util::FileSystem::createPath(
-			path_.c_str(), PID_LSN_INFO_FILE_NAME.c_str(), lsnInfoFileName);
-		file.open(lsnInfoFileName.c_str(), util::FileFlag::TYPE_READ_WRITE |
-											   util::FileFlag::TYPE_CREATE |
-											   util::FileFlag::TYPE_TRUNCATE);
+				path_.c_str(), PID_LSN_INFO_FILE_NAME.c_str(), lsnInfoFileName);
+		file.open(
+				lsnInfoFileName.c_str(),
+						util::FileFlag::TYPE_READ_WRITE |
+						util::FileFlag::TYPE_CREATE |
+						util::FileFlag::TYPE_TRUNCATE);
 		file.lock();
 		file.write(jsonString.c_str(), jsonString.length());
 		file.close();
 	}
 	catch (std::exception &e) {
-		GS_RETHROW_USER_ERROR(e, "Write lsn info file failed. (fileName="
-									 << lsnInfoFileName.c_str() << ", reason="
-									 << GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_USER_ERROR(
+				e, "Write lsn info file failed. (fileName=" <<
+				lsnInfoFileName.c_str() << ", reason=" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 
@@ -1295,28 +1894,30 @@ CheckpointService::ConfigSetUpHandler CheckpointService::configSetUpHandler_;
 void CheckpointService::ConfigSetUpHandler::operator()(ConfigTable &config) {
 	CONFIG_TABLE_RESOLVE_GROUP(config, CONFIG_TABLE_CP, "checkpoint");
 
-	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_CP_CHECKPOINT_INTERVAL, INT32)
-		.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
-		.setMin(1)
-		.setDefault(1200);
 	CONFIG_TABLE_ADD_PARAM(
-		config, CONFIG_TABLE_CP_CHECKPOINT_MEMORY_LIMIT, INT32)
-		.setUnit(ConfigTable::VALUE_UNIT_SIZE_MB)
-		.setMin(1)
-		.setMax("128TB")
-		.setDefault(1024);
-	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_CP_USE_PARALLEL_MODE, BOOL)
-		.setExtendedType(ConfigTable::EXTENDED_TYPE_LAX_BOOL)
-		.setDefault(false);
+			config, CONFIG_TABLE_CP_CHECKPOINT_INTERVAL, INT32)
+			.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
+			.setMin(1)
+			.setDefault(60);
+	CONFIG_TABLE_ADD_PARAM(
+			config, CONFIG_TABLE_CP_CHECKPOINT_MEMORY_LIMIT, INT32)
+			.setUnit(ConfigTable::VALUE_UNIT_SIZE_MB)
+			.setMin(1)
+			.setMax("128TB")
+			.setDefault(1024);
+	CONFIG_TABLE_ADD_PARAM(
+			config, CONFIG_TABLE_CP_USE_PARALLEL_MODE, BOOL)
+			.setExtendedType(ConfigTable::EXTENDED_TYPE_LAX_BOOL)
+			.setDefault(false);
 
 	CONFIG_TABLE_ADD_PARAM(
-		config, CONFIG_TABLE_CP_CHECKPOINT_COPY_INTERVAL_MILLIS, INT32)
-		.deprecate();
+			config, CONFIG_TABLE_CP_CHECKPOINT_COPY_INTERVAL_MILLIS, INT32)
+			.deprecate();
 	CONFIG_TABLE_ADD_PARAM(
-		config, CONFIG_TABLE_CP_CHECKPOINT_COPY_INTERVAL, INT32)
-		.setUnit(ConfigTable::VALUE_UNIT_DURATION_MS)
-		.setMin(0)
-		.setDefault(100);
+			config, CONFIG_TABLE_CP_CHECKPOINT_COPY_INTERVAL, INT32)
+			.setUnit(ConfigTable::VALUE_UNIT_DURATION_MS)
+			.setMin(0)
+			.setDefault(100);
 }
 
 CheckpointService::StatSetUpHandler CheckpointService::statSetUpHandler_;
@@ -1360,7 +1961,7 @@ bool CheckpointService::StatUpdator::operator()(StatTable &stat) {
 	CheckpointService &svc = *service_;
 
 	ChunkManager::ChunkManagerStats &cmStats =
-		svc.chunkManager_->getChunkManagerStats();
+			svc.chunkManager_->getChunkManagerStats();
 	ChunkManager::Config &cmConfig = svc.chunkManager_->getConfig();
 
 	if (stat.getDisplayOption(STAT_TABLE_DISPLAY_WEB_ONLY)) {
@@ -1383,33 +1984,173 @@ bool CheckpointService::StatUpdator::operator()(StatTable &stat) {
 
 
 	stat.set(
-		STAT_TABLE_PERF_CHECKPOINT_FILE_SIZE, cmStats.getCheckpointFileSize());
+			STAT_TABLE_PERF_CHECKPOINT_FILE_SIZE, cmStats.getCheckpointFileSize());
 
 	stat.set(STAT_TABLE_PERF_CHECKPOINT_FILE_USAGE_RATE,
-		cmStats.getCheckpointFileUsageRate());
+			cmStats.getCheckpointFileUsageRate());
 
 	stat.set(STAT_TABLE_PERF_STORE_COMPRESSION_MODE,
-		cmStats.getActualCompressionMode());
+			cmStats.getActualCompressionMode());
 	stat.set(STAT_TABLE_PERF_CHECKPOINT_FILE_ALLOCATE_SIZE,
-		cmStats.getCheckpointFileAllocateSize());
+			cmStats.getCheckpointFileAllocateSize());
 
 	stat.set(STAT_TABLE_PERF_CURRENT_CHECKPOINT_WRITE_BUFFER_SIZE,
-		cmStats.getCheckpointWriteBufferSize());
+			cmStats.getCheckpointWriteBufferSize());
 
 	stat.set(STAT_TABLE_PERF_CHECKPOINT_WRITE_SIZE,
-		cmStats.getCheckpointWriteSize());
+			cmStats.getCheckpointWriteSize());
 
 	if (stat.getDisplayOption(STAT_TABLE_DISPLAY_WEB_ONLY)) {
 		stat.set(STAT_TABLE_PERF_CHECKPOINT_WRITE_TIME,
-			cmStats.getCheckpointWriteTime());
+				cmStats.getCheckpointWriteTime());
 
 		stat.set(STAT_TABLE_PERF_CHECKPOINT_MEMORY_LIMIT,
-			cmConfig.getAtomicCheckpointMemoryLimit());
+				cmConfig.getAtomicCheckpointMemoryLimit());
 
 		stat.set(
-			STAT_TABLE_PERF_CHECKPOINT_MEMORY, cmStats.getCheckpointMemory());
+				STAT_TABLE_PERF_CHECKPOINT_MEMORY, cmStats.getCheckpointMemory());
 	}
 
 	return true;
 }
+
+void CheckpointService::requestStartCheckpointForLongtermSync(
+		const Event::Source &eventSource,
+		PartitionId pId, LongtermSyncInfo *longtermSyncInfo) {
+	assert(longtermSyncInfo);
+	SyncSequentialNumber ssn = longtermSyncInfo->getSequentialNumber();
+	if (lastMode_ == CP_SHUTDOWN) {
+		GS_THROW_USER_ERROR(GS_ERROR_CP_CONTROLLER_ILLEAGAL_STATE,
+				"RequestStartLongtermSync cancelled by already requested shutdown ("
+				"lastMode=" <<
+				checkpointModeToString(lastMode_) << ")");
+	}
+
+	if (requestedShutdownCheckpoint_) {
+		GS_THROW_USER_ERROR(GS_ERROR_CP_CONTROLLER_ILLEAGAL_STATE,
+				"RequestStartLongtermSync cancelled by already requested shutdown ("
+				"lastMode=" <<
+				checkpointModeToString(lastMode_) << ")");
+	}
+
+	if (pId >= pgConfig_.getPartitionCount()) {
+		GS_THROW_USER_ERROR(GS_ERROR_CP_LONGTERM_SYNC_FAILED,
+				"RequestStartLongtermSync: invalid pId (pId=" <<
+				pId << ", syncSeqNumber=" << ssnList_.at(pId) << ")");
+	}
+
+	std::string syncTempPath;
+	util::NormalOStringStream oss;
+	oss << ssn;
+	util::FileSystem::createPath(
+			syncTempTopPath_.c_str(), oss.str().c_str(), syncTempPath);
+	std::string origSyncTempPath(syncTempPath);
+
+	{
+		CpLongtermSyncInfo info;
+		info.ssn_ = ssn;
+		info.targetPId_ = pId;
+		info.dir_ = syncTempPath;
+		info.longtermSyncInfo_.copy(*longtermSyncInfo);
+		bool success = setCpLongtermSyncInfo(ssn, info);
+		if (!success) {
+			GS_THROW_USER_ERROR(GS_ERROR_CP_LONGTERM_SYNC_FAILED,
+					"Same syncSequentialNumber already used (pId=" <<
+					pId << ", syncSequentialNumber=" << ssn << ")");
+		}
+	}
+	CpLongtermSyncInfo *info = getCpLongtermSyncInfo(ssn);
+	assert(info != NULL);
+
+	if (ssnList_.at(pId) != UNDEF_SYNC_SEQ_NUMBER) {
+		info->errorOccured_ = true;
+		GS_THROW_USER_ERROR(GS_ERROR_CP_CONTROLLER_ILLEAGAL_STATE,
+				"RequestStartLongtermSync: another long sync is already running. (pId=" <<
+				pId << ", anotherSSN=" << ssnList_.at(pId) <<
+				", thisSSN=" << ssn << ")");
+	}
+
+	if (util::FileSystem::exists(syncTempPath.c_str())) {
+		try {
+			util::FileSystem::remove(syncTempPath.c_str(), true);
+		}
+		catch (std::exception &e) {
+			info->errorOccured_ = true;
+			GS_RETHROW_USER_ERROR(e,
+					"Failed to remove syncTemp top dir (path=" <<
+					syncTempPath <<
+					", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+		}
+	}
+
+	try {
+		util::FileSystem::createDirectoryTree(syncTempPath.c_str());
+	}
+	catch (std::exception &) {
+		info->errorOccured_ = true;
+		GS_THROW_USER_ERROR(GS_ERROR_CP_LONGTERM_SYNC_FAILED,
+				"SyncTemp directory can't create (pId=" <<
+				pId << ", path=" << syncTempPath << ")");
+	}
+	try {
+		GS_TRACE_INFO(CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
+				"[PrepareLongtermSync] requested (pId=" <<
+				pId << ", path=" << syncTempPath << ")");
+
+		Event requestEvent(
+				eventSource, CP_REQUEST_CHECKPOINT, CP_HANDLER_PARTITION_ID);
+
+		EventByteOutStream out = requestEvent.getOutStream();
+
+		int32_t mode = CP_PREPARE_LONGTERM_SYNC;
+		uint32_t flag = 0;
+		out << mode;
+		out << flag;
+		out << syncTempPath;
+		out << ssn; 
+
+		ee_.add(requestEvent);
+	}
+	catch (std::exception &e) {
+		info->errorOccured_ = true;
+		clusterService_->setError(eventSource, &e);
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Request prepare long sync failed.  (reason=" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+}
+
+void CheckpointService::requestStopCheckpointForLongtermSync(
+		const Event::Source &eventSource,
+		PartitionId pId, int64_t ssn) {
+	CpLongtermSyncInfo* longSyncInfo = getCpLongtermSyncInfo(ssn);
+	if (longSyncInfo != NULL) {
+		try {
+			GS_TRACE_INFO(
+					CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
+					"[StopCpLongtermSync] requested (SSN=" << ssn << ")");
+
+			Event requestEvent(
+					eventSource, CP_REQUEST_CHECKPOINT, CP_HANDLER_PARTITION_ID);
+
+			EventByteOutStream out = requestEvent.getOutStream();
+
+			std::string dummy;
+			int32_t mode = CP_STOP_LONGTERM_SYNC;
+			uint32_t flag = 0;
+			out << mode;
+			out << flag;
+			out << dummy;
+			out << ssn; 
+
+			ee_.add(requestEvent);
+		}
+		catch (std::exception &e) {
+			clusterService_->setError(eventSource, &e);
+			GS_RETHROW_SYSTEM_ERROR(
+					e, "Request stop long sync failed.  (reason=" <<
+					GS_EXCEPTION_MESSAGE(e) << ")");
+		}
+	}
+	}
 

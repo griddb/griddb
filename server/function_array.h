@@ -41,6 +41,9 @@ public:
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
 		}
+		else if (args[0]->isNullValue()) {
+			return Expr::newNullValue(txn);
+		}
 		else if (!args[0]->isArrayValue()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 				"Argument 1 is not an array");
@@ -66,6 +69,9 @@ public:
 		if (args.empty() || args.size() != 2) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
+		}
+		else if (args[0]->isNullValue() || args[1]->isNullValue()) {
+			return Expr::newNullValue(txn);
 		}
 		else if (!args[0]->isNumericInteger()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,

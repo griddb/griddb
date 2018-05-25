@@ -177,7 +177,7 @@ int32_t StringArrayProcessor::compare(TransactionContext &txn,
 	@brief Set field value to message
 */
 void StringArrayProcessor::getField(TransactionContext &txn,
-	ObjectManager &objectManager, ColumnId columnId, Value *objectValue,
+	ObjectManager &objectManager, ColumnId columnId, const Value *objectValue,
 	MessageRowStore *messageRowStore) {
 
 	const MatrixCursor *arrayObject =

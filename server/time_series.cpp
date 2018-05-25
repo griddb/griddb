@@ -29,7 +29,6 @@
 #include "message_schema.h"
 #include "value_processor.h"
 
-
 const bool TimeSeries::indexMapTable[][MAP_TYPE_NUM] = {
 	{true, false, false},   
 	{true, false, false},   
@@ -52,6 +51,7 @@ void TimeSeries::initialize(TransactionContext &txn) {
 	baseContainerImage_ =
 		BaseObject::allocate<TimeSeriesImage>(sizeof(TimeSeriesImage),
 			getMetaAllcateStrategy(), getBaseOId(), OBJECT_TYPE_TIME_SERIES);
+	memset(baseContainerImage_, 0, sizeof(TimeSeriesImage));
 	baseContainerImage_->containerType_ =
 		static_cast<int8_t>(TIME_SERIES_CONTAINER);
 	baseContainerImage_->status_ = 0;  
@@ -66,11 +66,11 @@ void TimeSeries::initialize(TransactionContext &txn) {
 	baseContainerImage_->lastLsn_ = UNDEF_LSN;
 	baseContainerImage_->rowNum_ = 0;
 	baseContainerImage_->versionId_ = 0;
+	baseContainerImage_->tablePartitioningVersionId_ = UNDEF_TABLE_PARTITIONING_VERSIONID;
+	baseContainerImage_->expiredTime_ = 0;
 	reinterpret_cast<TimeSeriesImage *>(baseContainerImage_)->reserved_ = 0;
 	reinterpret_cast<TimeSeriesImage *>(baseContainerImage_)->padding1_ = 0;
 	reinterpret_cast<TimeSeriesImage *>(baseContainerImage_)->padding2_ = 0;
-	reinterpret_cast<TimeSeriesImage *>(baseContainerImage_)->padding3_ = 0;
-	reinterpret_cast<TimeSeriesImage *>(baseContainerImage_)->padding4_ = 0;
 
 	rowImageSize_ = 0;
 	metaAllocateStrategy_ = AllocateStrategy();
@@ -81,20 +81,16 @@ void TimeSeries::initialize(TransactionContext &txn) {
 /*!
 	@brief Set TimeSeries Schema
 */
-void TimeSeries::set(TransactionContext &txn, const char8_t *containerName,
+void TimeSeries::set(TransactionContext &txn, const FullContainerKey &containerKey,
 	ContainerId containerId, OId columnSchemaOId,
 	MessageSchema *orgContainerSchema) {
-	MessageTimeSeriesSchema *containerSchema =
-		reinterpret_cast<MessageTimeSeriesSchema *>(orgContainerSchema);
+//	MessageTimeSeriesSchema *containerSchema =
+//		reinterpret_cast<MessageTimeSeriesSchema *>(orgContainerSchema);
 	baseContainerImage_->containerId_ = containerId;
 
-	uint32_t containerNameSize = static_cast<uint32_t>(strlen(containerName));
-
-	BaseObject stringObject(txn.getPartitionId(), *getObjectManager());
-	char *stringPtr = stringObject.allocate<char>(containerNameSize + 1,
-		getMetaAllcateStrategy(), baseContainerImage_->containerNameOId_,
-		OBJECT_TYPE_VARIANT);
-	memcpy(stringPtr, containerName, containerNameSize + 1);
+	FullContainerKeyCursor keyCursor(txn.getPartitionId(), *getObjectManager());
+	keyCursor.initialize(txn, containerKey, getMetaAllcateStrategy());
+	baseContainerImage_->containerNameOId_ = keyCursor.getBaseOId();
 
 	baseContainerImage_->columnSchemaOId_ = columnSchemaOId;
 	commonContainerSchema_ =
@@ -106,7 +102,7 @@ void TimeSeries::set(TransactionContext &txn, const char8_t *containerName,
 
 	indexSchema_ = ALLOC_NEW(txn.getDefaultAllocator())
 		IndexSchema(txn, *getObjectManager(), getMetaAllcateStrategy());
-	indexSchema_->initialize(txn, IndexSchema::INITIALIZE_RESERVE_NUM);
+	indexSchema_->initialize(txn, IndexSchema::INITIALIZE_RESERVE_NUM, 0, getColumnNum());
 	baseContainerImage_->indexSchemaOId_ = indexSchema_->getBaseOId();
 
 	rowFixedDataSize_ = calcRowFixedDataSize();
@@ -133,17 +129,17 @@ void TimeSeries::set(TransactionContext &txn, const char8_t *containerName,
 
 	setAllocateStrategy();
 
-	GS_TRACE_INFO(BASE_CONTAINER, GS_TRACE_DS_CON_DATA_AFFINITY_DEFINED,
-		"ContainerName = " << containerName << ", Affinity = "
-						   << containerSchema->getAffinityStr()
-						   << ", AffinityHashVal = "
-						   << calcAffnityGroupId(getAffinity()));
+	BtreeMap mvccMap(txn, *getObjectManager(), getMapAllcateStrategy(), this);
+	mvccMap.initialize<TransactionId, MvccRowImage>(
+		txn, COLUMN_TYPE_OID, false, BtreeMap::TYPE_SINGLE_KEY);
+	baseContainerImage_->mvccMapOId_ = mvccMap.getBaseOId();
+
 }
 
 /*!
 	@brief Free Objects related to TimeSeries
 */
-void TimeSeries::finalize(TransactionContext &txn) {
+bool TimeSeries::finalize(TransactionContext& txn) {
 	try {
 		setDirty();
 		Timestamp expiredTime = getCurrentExpiredTime(txn);
@@ -153,16 +149,25 @@ void TimeSeries::finalize(TransactionContext &txn) {
 			const SubTimeSeriesImage &subTimeSeriesImage =
 				*(subTimeSeriesListHead_->get(txn, i));
 			util::StackAllocator::Scope scope(txn.getDefaultAllocator());
-			SubTimeSeries *subContainer =
-				ALLOC_NEW(txn.getDefaultAllocator()) SubTimeSeries(
+			SubTimeSeries subContainer(
 					txn, SubTimeSeriesInfo(subTimeSeriesImage, i), this);
-			subContainer->finalize(txn);
+			bool isFinished = subContainer.finalize(txn);
+			if (!isFinished) {
+				return isFinished;
+			}
+			subTimeSeriesListHead_->remove(txn, i);
 		}
 
 		if (baseContainerImage_->subContainerListOId_ != UNDEF_OID) {
 			subTimeSeriesListHead_->finalize(txn);
 		}
 
+
+		if (baseContainerImage_->mvccMapOId_ != UNDEF_OID) {
+			StackAllocAutoPtr<BtreeMap> mvccMap(
+				txn.getDefaultAllocator(), getMvccMap(txn));
+			getDataStore()->finalizeMap(txn, getMapAllcateStrategy(), mvccMap.get());
+		}
 
 		commonContainerSchema_->reset();  
 		getDataStore()->removeColumnSchema(
@@ -185,53 +190,205 @@ void TimeSeries::finalize(TransactionContext &txn) {
 	catch (std::exception &e) {
 		handleUpdateError(txn, e, GS_ERROR_DS_DS_DROP_TIME_SERIES_FAILED);
 	}
+
+	return true;
 }
 
 /*!
 	@brief Creates a specifed type of index on the specified Column
 */
-void TimeSeries::createIndex(TransactionContext &txn, IndexInfo &indexInfo) {
+void TimeSeries::createIndex(TransactionContext &txn,
+	const IndexInfo& indexInfo, IndexCursor& indexCursor,
+	bool isIndexNameCaseSensitive) {
 	try {
-		GS_TRACE_INFO(TIME_SERIES, GS_TRACE_DS_CON_CREATE_INDEX,
-			"TimeSeries Id = " << getContainerId()
-							   << " columnId = " << indexInfo.columnId
-							   << " type = " << indexInfo.mapType);
-
 		if (isInvalid()) {  
 			GS_THROW_USER_ERROR(GS_ERROR_DS_CON_STATUS_INVALID,
 				"can not create index. container's status is invalid.");
 		}
+		IndexInfo realIndexInfo = indexInfo;
+		if (realIndexInfo.columnIds_.size() != 1 || realIndexInfo.anyTypeMatches_ != 0 || realIndexInfo.anyNameMatches_ != 0) {
+			GS_THROW_USER_ERROR(
+				GS_ERROR_CM_NOT_SUPPORTED, 
+				"Invalid parameter, number of columnName is invalid or anyType is specified or any index name is specified, "
+					<< " number of columnName = " << realIndexInfo.columnIds_.size()
+					<< ", anyTypeMatches = " << (uint32_t)realIndexInfo.anyTypeMatches_
+					<< ", anyNameMatches = " << (uint32_t)realIndexInfo.anyNameMatches_);
+		}
+		EmptyAllowedKey::validate(
+			KeyConstraint::getUserKeyConstraint(
+				getDataStore()->getValueLimitConfig().getLimitContainerNameSize()),
+			realIndexInfo.indexName_.c_str(),
+			static_cast<uint32_t>(realIndexInfo.indexName_.size()),
+			"indexName");
 
-		if (indexInfo.columnId >= getColumnNum()) {
+		ColumnId inputColumnId = realIndexInfo.columnIds_[0];
+		if (inputColumnId >= getColumnNum()) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_COLUMN_ID_INVALID, "");
 		}
-		if (!isSupportIndex(indexInfo)) {
+
+		ColumnInfo& columnInfo = getColumnInfo(inputColumnId);
+		if (realIndexInfo.mapType == MAP_TYPE_DEFAULT) {
+			realIndexInfo.mapType = defaultIndexType[columnInfo.getColumnType()];
+		}
+		MapType inputMapType = realIndexInfo.mapType;
+
+		GS_TRACE_INFO(TIME_SERIES, GS_TRACE_DS_CON_CREATE_INDEX,
+			"TimeSeries Id = " << getContainerId()
+							   << ", columnNumber = " << inputColumnId
+							   << ", type = " << getMapTypeStr(inputMapType));
+
+		if (!isSupportIndex(realIndexInfo)) {
 			GS_THROW_USER_ERROR(
 				GS_ERROR_CM_NOT_SUPPORTED, "not support this index type");
 		}
-		if (indexInfo.columnId == ColumnInfo::ROW_KEY_COLUMN_ID) {
+		if (inputColumnId == ColumnInfo::ROW_KEY_COLUMN_ID) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_CREATEINDEX_ON_ROWKEY, "");
 		}
 
-		if (hasIndex(txn, indexInfo.columnId, indexInfo.mapType)) {
+		util::Vector<IndexInfo> matchList(txn.getDefaultAllocator());
+		util::Vector<IndexInfo> mismatchList(txn.getDefaultAllocator());
+		bool withUncommitted = true;
+
+		indexSchema_->getIndexInfoList(txn, this, realIndexInfo, 
+			withUncommitted, matchList, mismatchList, isIndexNameCaseSensitive);
+		if (!mismatchList.empty()) {
+			for (size_t i = 0; i < mismatchList.size(); i++) {
+				IndexData indexData;
+				bool isExist = getIndexData(txn, 
+					mismatchList[0].columnIds_[0], mismatchList[0].mapType, 
+					withUncommitted, indexData);
+				if (isExist && indexData.status_ != DDL_READY) {
+					DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_COL_LOCK_CONFLICT,
+						"createIndex(pId=" << txn.getPartitionId()
+							<< ", index name = \"" << realIndexInfo.indexName_.c_str()
+							<< ", type=" << getMapTypeStr(inputMapType)
+							<< ", columnNumber=" << (int32_t)inputColumnId
+							<< ", txnId=" << txn.getId() << ")");
+				} else {
+					util::NormalOStringStream strstrm;
+					strstrm << "The specified parameter caused inconsistency to the existing index"
+							<< ", existing index name = \"" << mismatchList[0].indexName_.c_str()
+							<< ", \" existing columnNumber = " << mismatchList[0].columnIds_[0]
+							<< ", existing type = " << getMapTypeStr(mismatchList[0].mapType)
+							<< ", input index name = \"" << realIndexInfo.indexName_.c_str()
+							<< ", \" input columnNumbers = [";
+					for (size_t j = 0; j < realIndexInfo.columnIds_.size(); j++) {
+						if (j != 0) {
+							strstrm << ",";
+						}
+						strstrm << realIndexInfo.columnIds_[j] << ",";
+					}
+					strstrm << "]";
+					strstrm << ", input mapType = " << getMapTypeStr(realIndexInfo.mapType)
+							<< ", input anyTypeMatches = " << (int32_t)realIndexInfo.anyTypeMatches_
+							<< ", input anyNameMatches = " << (int32_t)realIndexInfo.anyNameMatches_;
+
+					GS_THROW_USER_ERROR(GS_ERROR_CM_NOT_SUPPORTED, strstrm.str().c_str());
+				}
+			}
+		}
+
+		if (isAlterContainer()) {
+			DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_TIM_LOCK_CONFLICT,
+				"(pId=" << txn.getPartitionId() << ", containerId=" << getContainerId()
+						<< ", txnId=" << txn.getId() << ")");
+		}
+		indexCursor.setColumnId(inputColumnId);
+		indexCursor.setMapType(inputMapType);
+		IndexData indexData;
+		bool isExist = getIndexData(txn, inputColumnId, inputMapType, 
+			withUncommitted, indexData);
+		if (isExist && indexData.status_ == DDL_READY) {
+			indexCursor.setRowId(MAX_ROWID);
+			return;
+		}
+		if (isExist && indexCursor.isImmediateMode()) {
+			GS_THROW_USER_ERROR(
+				GS_ERROR_CM_NOT_SUPPORTED, 
+				"Immediate mode of createIndex is forbidden under constructing, "
+					<< " columnNumber = " << inputColumnId
+					<< " type = " << getMapTypeStr(inputMapType));
 			return;
 		}
 
-		if (indexSchema_->createIndexInfo(
-				txn, indexInfo.columnId, indexInfo.mapType)) {
-			replaceIndexSchema(txn);
-		}
+		setDirty();
+		TransactionId tId = txn.getId();
+		StackAllocAutoPtr<BtreeMap> mvccMap(
+			txn.getDefaultAllocator(), getMvccMap(txn));
+		MvccRowImage beforeImage;
+		if (isExist) {
+			util::XArray<MvccRowImage> mvccList(txn.getDefaultAllocator());
+			util::XArray<MvccRowImage>::iterator itr;
+			BtreeMap::SearchContext sc(
+				UNDEF_COLUMNID, &tId, sizeof(tId), 0, NULL, MAX_RESULT_SIZE);
+			mvccMap.get()->search<TransactionId, MvccRowImage, MvccRowImage>(
+				txn, sc, mvccList);
+			if (!mvccList.empty()) {
+				for (itr = mvccList.begin(); itr != mvccList.end(); itr++) {
+					if (itr->type_ == MVCC_INDEX) {
+						beforeImage = *itr;
+					} else {
+						GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
+					}
+				}
+			} else {
+				DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_COL_LOCK_CONFLICT,
+					"createIndex(pId=" << txn.getPartitionId()
+						<< ", index name = \"" << realIndexInfo.indexName_.c_str()
+						<< ", type=" << getMapTypeStr(inputMapType)
+						<< ", columnNumber=" << (int32_t)inputColumnId
+						<< ", txnId=" << txn.getId() << ")");
+			}
+		} else {
+			if (indexSchema_->createIndexInfo(txn, realIndexInfo)) {
+				replaceIndexSchema(txn);
+			}
 
-		util::XArray<SubTimeSeriesInfo> subTimeSeriesList(
-			txn.getDefaultAllocator());
-		util::XArray<SubTimeSeriesInfo>::iterator itr;
-		getSubTimeSeriesList(txn, subTimeSeriesList, true);
-		for (itr = subTimeSeriesList.begin(); itr != subTimeSeriesList.end();
-			 itr++) {
-			util::StackAllocator::Scope scope(txn.getDefaultAllocator());
-			SubTimeSeries *subContainer = ALLOC_NEW(txn.getDefaultAllocator())
-				SubTimeSeries(txn, *itr, this);
-			subContainer->createIndex(txn, indexInfo);
+			util::XArray<SubTimeSeriesInfo> subTimeSeriesList(
+				txn.getDefaultAllocator());
+			util::XArray<SubTimeSeriesInfo>::iterator itr;
+			getSubTimeSeriesList(txn, subTimeSeriesList, true);
+			for (itr = subTimeSeriesList.begin(); itr != subTimeSeriesList.end();
+				 itr++) {
+				util::StackAllocator::Scope scope(txn.getDefaultAllocator());
+				SubTimeSeries *subContainer = ALLOC_NEW(txn.getDefaultAllocator())
+					SubTimeSeries(txn, *itr, this);
+				subContainer->createIndex(txn, realIndexInfo, indexCursor);
+			}
+			getIndexData(txn, indexCursor.getColumnId(), indexCursor.getMapType(), 
+				withUncommitted, indexData);
+			if (!indexCursor.isImmediateMode()) {
+				beforeImage = indexCursor.getMvccImage();
+				insertMvccMap(txn, mvccMap.get(), tId, beforeImage);
+			} else {
+				indexSchema_->commit(txn, inputColumnId, inputMapType);
+			}
+		}
+		{
+			BtreeMap::SearchContext sc(ColumnInfo::ROW_KEY_COLUMN_ID, &indexData.cursor_, 0, false, NULL, 0,
+				false, 0, NULL, MAX_RESULT_SIZE);
+			util::XArray<SubTimeSeriesInfo> subTimeSeriesList(
+				txn.getDefaultAllocator());
+			util::XArray<SubTimeSeriesInfo>::iterator itr;
+			getSubTimeSeriesList(txn, sc, subTimeSeriesList, true);
+			if (subTimeSeriesList.empty()) {
+				indexCursor.setRowId(MAX_ROWID);
+			}
+			else {
+				indexCursor.setRowId(indexData.cursor_);
+				for (itr = subTimeSeriesList.begin(); itr != subTimeSeriesList.end();
+					 itr++) {
+					if (!indexCursor.isImmediateMode() && indexCursor.isFinished()) {
+						indexCursor.setRowId(itr->image_.startTime_ - 1);
+					}
+					util::StackAllocator::Scope scope(txn.getDefaultAllocator());
+					SubTimeSeries subContainer(txn, *itr, this);
+					subContainer.indexInsert(txn, indexCursor);
+					if (!indexCursor.isFinished()) {
+						break;
+					}
+				}
+			}
 		}
 	}
 	catch (std::exception &e) {
@@ -240,25 +397,149 @@ void TimeSeries::createIndex(TransactionContext &txn, IndexInfo &indexInfo) {
 }
 
 /*!
+	@brief Continues to create a specifed type of index on the specified Column
+*/
+void TimeSeries::continueCreateIndex(TransactionContext& txn, 
+	IndexCursor& indexCursor) {
+	try {
+		setDirty();
+
+		MvccRowImage beforeImage = indexCursor.getMvccImage();
+		IndexData indexData;
+		bool withUncommitted = true;
+		bool isExist = getIndexData(txn, indexCursor.getColumnId(), indexCursor.getMapType(), 
+			withUncommitted, indexData);
+		if (!isExist) {
+			GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR,
+				"can not continue to create index. index data does not existed.");
+		}
+		if (indexData.status_ == DDL_READY) {
+			indexCursor.setRowId(MAX_ROWID);
+			return;
+		}
+
+		{
+			BtreeMap::SearchContext sc(ColumnInfo::ROW_KEY_COLUMN_ID, &indexData.cursor_, 0, false, NULL, 0,
+				false, 0, NULL, MAX_RESULT_SIZE);
+			util::XArray<SubTimeSeriesInfo> subTimeSeriesList(
+				txn.getDefaultAllocator());
+			util::XArray<SubTimeSeriesInfo>::iterator itr;
+			getSubTimeSeriesList(txn, sc, subTimeSeriesList, true);
+			if (subTimeSeriesList.empty()) {
+				indexCursor.setRowId(MAX_ROWID);
+			}
+			else {
+				indexCursor.setRowId(indexData.cursor_);
+				for (itr = subTimeSeriesList.begin(); itr != subTimeSeriesList.end();
+					 itr++) {
+					if (!indexCursor.isImmediateMode() && indexCursor.isFinished()) {
+						indexCursor.setRowId(itr->image_.startTime_ - 1);
+					}
+					util::StackAllocator::Scope scope(txn.getDefaultAllocator());
+					SubTimeSeries *subContainer = ALLOC_NEW(txn.getDefaultAllocator())
+						SubTimeSeries(txn, *itr, this);
+					subContainer->indexInsert(txn, indexCursor);
+					if (!indexCursor.isFinished()) {
+						break;
+					}
+				}
+			}
+		}
+
+	}
+	catch (std::exception& e) {
+		handleUpdateError(txn, e, GS_ERROR_DS_COL_CREATE_INDEX_FAILED);
+	}
+}
+
+void TimeSeries::continueChangeSchema(TransactionContext &txn,
+	ContainerCursor &containerCursor) {
+
+	try {
+		setDirty();
+
+		MvccRowImage beforeImage = containerCursor.getMvccImage();
+		ContainerAutoPtr containerAutoPtr(txn, dataStore_, 
+			txn.getPartitionId(), containerCursor);
+		BaseContainer *newContainer = containerAutoPtr.getBaseContainer();
+
+		util::XArray<uint32_t> copyColumnMap(txn.getDefaultAllocator());
+		makeCopyColumnMap(txn, *newContainer, copyColumnMap);
+
+		RowId rowIdCursor = containerCursor.getRowId();
+		{
+			BtreeMap::SearchContext sc(ColumnInfo::ROW_KEY_COLUMN_ID, &rowIdCursor, 0, false, NULL, 0,
+				false, 0, NULL, MAX_RESULT_SIZE);
+			util::XArray<SubTimeSeriesInfo> subTimeSeriesList(
+				txn.getDefaultAllocator());
+			util::XArray<SubTimeSeriesInfo>::iterator itr;
+			getSubTimeSeriesList(txn, sc, subTimeSeriesList, true);
+			if (subTimeSeriesList.empty()) {
+				containerCursor.setRowId(MAX_ROWID);
+			}
+			else {
+				for (itr = subTimeSeriesList.begin(); itr != subTimeSeriesList.end();
+					 itr++) {
+					if (!containerCursor.isImmediateMode() && containerCursor.isFinished()) {
+						rowIdCursor = itr->image_.startTime_ - 1;
+					}
+					util::StackAllocator::Scope scope(txn.getDefaultAllocator());
+					SubTimeSeries *subContainer = ALLOC_NEW(txn.getDefaultAllocator())
+						SubTimeSeries(txn, *itr, this);
+					subContainer->changeSchemaRecord<TimeSeries>(txn, *newContainer, copyColumnMap,
+						rowIdCursor, containerCursor.isImmediateMode());
+					containerCursor.setRowId(rowIdCursor);
+					if (!containerCursor.isFinished()) {
+						break;
+					}
+				}
+			}
+		}
+
+		newContainer->commit(txn);
+		if (!containerCursor.isImmediateMode()) {
+			MvccRowImage mvccImage = containerCursor.getMvccImage();
+			StackAllocAutoPtr<BtreeMap> mvccMap(
+				txn.getDefaultAllocator(), getMvccMap(txn));
+			updateMvccMap(txn, mvccMap.get(), txn.getId(), beforeImage, mvccImage);
+		}
+	}
+	catch (std::exception& e) {
+		handleUpdateError(txn, e, GS_ERROR_DS_COL_CREATE_INDEX_FAILED);
+	}
+}
+
+/*!
 	@brief Creates a specifed type of index on the specified Column
 */
-void TimeSeries::dropIndex(TransactionContext &txn, IndexInfo &indexInfo) {
+
+void TimeSeries::dropIndex(TransactionContext &txn, IndexInfo &indexInfo,
+						   bool isIndexNameCaseSensitive) {
 	try {
 		GS_TRACE_DEBUG(TIME_SERIES, GS_TRACE_DS_CON_DROP_INDEX,
-			"TimeSeries Id = "
-				<< getContainerId() << " columnId = " << indexInfo.columnId
-				<< " type = " << static_cast<uint32_t>(indexInfo.mapType));
+			"TimeSeries Id = " << getContainerId());
 
 		if (isInvalid()) {  
 			GS_THROW_USER_ERROR(GS_ERROR_DS_CON_STATUS_INVALID,
 				"can not drop index. container's status is invalid.");
 		}
+		util::Vector<IndexInfo> matchList(txn.getDefaultAllocator());
+		util::Vector<IndexInfo> mismatchList(txn.getDefaultAllocator());
+		bool withUncommitted = false;
 
-		if (indexInfo.columnId >= getColumnNum()) {
-			GS_THROW_USER_ERROR(GS_ERROR_DS_COLUMN_ID_INVALID, "");
+		indexSchema_->getIndexInfoList(txn, this, indexInfo, withUncommitted, 
+			matchList, mismatchList, isIndexNameCaseSensitive);
+
+		if (isAlterContainer() && !matchList.empty()) {
+			DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_TIM_LOCK_CONFLICT,
+				"(pId=" << txn.getPartitionId() << ", containerId=" << getContainerId()
+						<< ", txnId=" << txn.getId() << ")");
 		}
 
-		if (hasIndex(txn, indexInfo.columnId, indexInfo.mapType)) {
+		for (size_t i = 0; i < matchList.size(); i++) {
+			ColumnId inputColumnId = matchList[i].columnIds_[0];
+			MapType inputMapType = matchList[i].mapType;
+
 			util::XArray<SubTimeSeriesInfo> subTimeSeriesList(
 				txn.getDefaultAllocator());
 			util::XArray<SubTimeSeriesInfo>::reverse_iterator rItr;
@@ -266,16 +547,44 @@ void TimeSeries::dropIndex(TransactionContext &txn, IndexInfo &indexInfo) {
 			for (rItr = subTimeSeriesList.rbegin();
 				 rItr != subTimeSeriesList.rend(); rItr++) {
 				util::StackAllocator::Scope scope(txn.getDefaultAllocator());
-				SubTimeSeries *subContainer = ALLOC_NEW(
-					txn.getDefaultAllocator()) SubTimeSeries(txn, *rItr, this);
-				subContainer->dropIndex(txn, indexInfo);
+				SubTimeSeries subContainer(txn, *rItr, this);
+				subContainer.dropIndex(txn, matchList[i], isIndexNameCaseSensitive);
 			}
 			indexSchema_->dropIndexInfo(
-				txn, indexInfo.columnId, indexInfo.mapType);
+				txn, inputColumnId, inputMapType);
 		}
 	}
 	catch (std::exception &e) {
 		handleUpdateError(txn, e, GS_ERROR_DS_TIM_DROP_INDEX_FAILED);
+	}
+}
+
+/*!
+	@brief Newly creates or updates a Row, based on the specified Row object and
+   also the Row key specified as needed
+*/
+void TimeSeries::putRow(TransactionContext &txn, uint32_t rowSize,
+	const uint8_t *rowData, RowId &rowId, DataStore::PutStatus &status,
+	PutRowOption putRowOption)
+{
+	try {
+		util::StackAllocator::Scope scope(txn.getDefaultAllocator());
+		setDirty();
+
+		if (isInvalid()) {  
+			GS_THROW_USER_ERROR(GS_ERROR_DS_CON_STATUS_INVALID,
+				"can not put. container's status is invalid.");
+		}
+
+		InputMessageRowStore inputMessageRowStore(
+			getDataStore()->getValueLimitConfig(), getRealColumnInfoList(txn),
+			getRealColumnNum(txn), const_cast<uint8_t *>(rowData), rowSize, 1,
+			getRealRowFixedDataSize(txn), false);
+		inputMessageRowStore.next();
+		putRow(txn, &inputMessageRowStore, rowId, status, putRowOption);
+	}
+	catch (std::exception &e) {
+		handleUpdateError(txn, e, GS_ERROR_DS_COL_PUT_ROW_FAILED);
 	}
 }
 
@@ -339,6 +648,12 @@ void TimeSeries::deleteRow(TransactionContext &txn, uint32_t rowKeySize,
 		}
 
 
+		if (isAlterContainer()) {
+			DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_TIM_LOCK_CONFLICT,
+				"(pId=" << txn.getPartitionId() << ", containerId=" << getContainerId()
+						<< ", txnId=" << txn.getId() << ")");
+		}
+
 		SubTimeSeries *subContainer =
 			getSubContainer(txn, rowKeyTimestamp, true);
 		if (subContainer == NULL) {
@@ -347,6 +662,7 @@ void TimeSeries::deleteRow(TransactionContext &txn, uint32_t rowKeySize,
 			return;
 		}
 		subContainer->deleteRow(txn, rowKeySize, rowKey, rowId, existing);
+		ALLOC_DELETE(txn.getDefaultAllocator(), subContainer);
 	}
 	catch (std::exception &e) {
 		handleUpdateError(txn, e, GS_ERROR_DS_TIM_DELETE_ROW_FAILED);
@@ -372,6 +688,12 @@ void TimeSeries::deleteRow(
 		}
 
 
+		if (isAlterContainer()) {
+			DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_TIM_LOCK_CONFLICT,
+				"(pId=" << txn.getPartitionId() << ", containerId=" << getContainerId()
+						<< ", txnId=" << txn.getId() << ")");
+		}
+
 		SubTimeSeries *subContainer =
 			getSubContainer(txn, rowKeyTimestamp, true);
 		if (subContainer == NULL) {
@@ -380,6 +702,7 @@ void TimeSeries::deleteRow(
 			return;
 		}
 		subContainer->deleteRow(txn, rowId, existing, isForceLock);
+		ALLOC_DELETE(txn.getDefaultAllocator(), subContainer);
 	}
 	catch (std::exception &e) {
 		handleUpdateError(txn, e, GS_ERROR_DS_TIM_DELETE_ROW_FAILED);
@@ -406,6 +729,12 @@ void TimeSeries::updateRow(TransactionContext &txn, uint32_t rowSize,
 		}
 
 
+		if (isAlterContainer()) {
+			DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_TIM_LOCK_CONFLICT,
+				"(pId=" << txn.getPartitionId() << ", containerId=" << getContainerId()
+						<< ", txnId=" << txn.getId() << ")");
+		}
+
 		SubTimeSeries *subContainer =
 			getSubContainer(txn, rowKeyTimestamp, true);
 		if (subContainer == NULL) {
@@ -415,6 +744,7 @@ void TimeSeries::updateRow(TransactionContext &txn, uint32_t rowSize,
 		}
 		subContainer->updateRow(
 			txn, rowSize, rowData, rowId, status, isForceLock);
+		ALLOC_DELETE(txn.getDefaultAllocator(), subContainer);
 	}
 	catch (std::exception &e) {
 		handleUpdateError(txn, e, GS_ERROR_DS_TIM_UPDATE_ROW_INVALID);
@@ -441,9 +771,90 @@ void TimeSeries::abort(TransactionContext &txn) {
 		for (itr = subTimeSeriesList.begin(); itr != subTimeSeriesList.end();
 			 itr++) {
 			util::StackAllocator::Scope scope(txn.getDefaultAllocator());
-			SubTimeSeries *subContainer = ALLOC_NEW(txn.getDefaultAllocator())
-				SubTimeSeries(txn, *itr, this);
-			subContainer->abort(txn);
+			SubTimeSeries subContainer(txn, *itr, this);
+			subContainer.abort(txn);
+		}
+		{
+			TransactionId tId = txn.getId();
+			StackAllocAutoPtr<BtreeMap> mvccMap(
+				txn.getDefaultAllocator(), getMvccMap(txn));
+			if (mvccMap.get()->isEmpty()) {
+				return;
+			}
+			util::XArray<MvccRowImage> mvccList(txn.getDefaultAllocator());
+			util::XArray<MvccRowImage>::iterator itr;
+			BtreeMap::SearchContext sc(
+				UNDEF_COLUMNID, &tId, sizeof(tId), 0, NULL, MAX_RESULT_SIZE);
+			mvccMap.get()->search<TransactionId, MvccRowImage, MvccRowImage>(
+				txn, sc, mvccList);
+
+			if (!mvccList.empty()) {
+				for (itr = mvccList.begin(); itr != mvccList.end(); itr++) {
+					if (isAlterContainer() && itr->type_ != MVCC_CONTAINER) {
+						GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_COL_LOCK_CONFLICT, 
+							"abort : container already locked "
+							<< ", partitionId = " << txn.getPartitionId()
+							<< ", txnId = " << txn.getId()
+							<< ", containerId = " << getContainerId()
+							);
+					}
+					switch (itr->type_) {
+					case MVCC_SELECT:
+						{ removeMvccMap(txn, mvccMap.get(), tId, *itr); }
+						break;
+					case MVCC_INDEX:
+						{
+							IndexCursor indexCursor = IndexCursor(*itr);
+							IndexInfo indexInfo(txn.getDefaultAllocator(),
+								indexCursor.getColumnId(), indexCursor.getMapType());
+
+							util::XArray<SubTimeSeriesInfo> subTimeSeriesList(
+								txn.getDefaultAllocator());
+							util::XArray<SubTimeSeriesInfo>::reverse_iterator rItr;
+							getSubTimeSeriesList(txn, subTimeSeriesList, true);
+							for (rItr = subTimeSeriesList.rbegin();
+								 rItr != subTimeSeriesList.rend(); rItr++) {
+								util::StackAllocator::Scope scope(txn.getDefaultAllocator());
+								SubTimeSeries *subContainer = ALLOC_NEW(
+									txn.getDefaultAllocator()) SubTimeSeries(txn, *rItr, this);
+								subContainer->dropIndex(txn, indexInfo);
+							}
+							indexSchema_->dropIndexInfo(
+								txn, indexCursor.getColumnId(), indexCursor.getMapType());
+							removeMvccMap(txn, mvccMap.get(), tId, *itr);
+
+							GS_TRACE_INFO(
+								DATA_STORE, GS_ERROR_DS_BACKGROUND_TASK_INVALID, 
+								"abort createIndex, " 
+								<< "containerId = " << getContainerId()
+								<< ", columnNumber =" << indexCursor.getColumnId()
+								<< ", mapType=" << (int)indexCursor.getMapType());
+						}
+						break;
+					case MVCC_CONTAINER:
+						{
+							ContainerCursor containerCursor(*itr);
+							resetAlterContainer();
+							ContainerAutoPtr containerAutoPtr(txn, dataStore_, 
+								txn.getPartitionId(), containerCursor);
+							BaseContainer *container = containerAutoPtr.getBaseContainer();
+							dataStore_->finalizeContainer(txn, container);
+							removeMvccMap(txn, mvccMap.get(), tId, *itr);
+
+							GS_TRACE_INFO(
+								DATA_STORE, GS_ERROR_DS_BACKGROUND_TASK_INVALID, 
+								"abort alter, "
+								<< "containerId = " << getContainerId()
+								<< ", txnId = " << txn.getId());
+						}
+						break;
+					default:
+						GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "Type = " << (int)itr->type_
+							<< "This type must not exist in Timeseries ");
+						break;
+					}
+				}
+			}
 		}
 	}
 	catch (std::exception &e) {
@@ -471,9 +882,72 @@ void TimeSeries::commit(TransactionContext &txn) {
 		for (itr = subTimeSeriesList.begin(); itr != subTimeSeriesList.end();
 			 itr++) {
 			util::StackAllocator::Scope scope(txn.getDefaultAllocator());
-			SubTimeSeries *subContainer = ALLOC_NEW(txn.getDefaultAllocator())
-				SubTimeSeries(txn, *itr, this);
-			subContainer->commit(txn);
+			SubTimeSeries subContainer(txn, *itr, this);
+			subContainer.commit(txn);
+		}
+
+		bool isFinalize = false;
+		{
+			StackAllocAutoPtr<BtreeMap> mvccMap(
+				txn.getDefaultAllocator(), getMvccMap(txn));
+			if (mvccMap.get()->isEmpty()) {
+				return;
+			}
+
+			TransactionId tId = txn.getId();
+			util::XArray<MvccRowImage> mvccList(txn.getDefaultAllocator());
+			util::XArray<MvccRowImage>::iterator itr;
+			BtreeMap::SearchContext sc(
+				UNDEF_COLUMNID, &tId, sizeof(tId), 0, NULL, MAX_RESULT_SIZE);
+			mvccMap.get()->search<TransactionId, MvccRowImage, MvccRowImage>(
+				txn, sc, mvccList);
+
+			if (!mvccList.empty()) {
+				setDirty();
+				for (itr = mvccList.begin(); itr != mvccList.end(); itr++) {
+					if (isAlterContainer() && itr->type_ != MVCC_CONTAINER) {
+						GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TIM_LOCK_CONFLICT, 
+							"commit : container already locked "
+							<< ", partitionId = " << txn.getPartitionId()
+							<< ", txnId = " << txn.getId()
+							<< ", containerId = " << getContainerId()
+							);
+					}
+					switch (itr->type_) {
+					case MVCC_SELECT:
+						{ removeMvccMap(txn, mvccMap.get(), tId, *itr); }
+						break;
+					case MVCC_INDEX:
+						{
+							IndexCursor indexCursor = createCursor(txn, *itr);
+							while (!indexCursor.isFinished()) {
+								continueCreateIndex(txn, indexCursor);
+							}
+							indexSchema_->commit(txn, indexCursor.getColumnId(), indexCursor.getMapType());
+							removeMvccMap(txn, mvccMap.get(), tId, *itr);
+						}
+						break;
+					case MVCC_CONTAINER:
+						{
+							ContainerCursor containerCursor(*itr);
+							while (!containerCursor.isFinished()) {
+								continueChangeSchema(txn, containerCursor);
+							}
+							resetAlterContainer();
+							removeMvccMap(txn, mvccMap.get(), tId, *itr);
+							dataStore_->updateContainer(txn, this, containerCursor.getContainerOId());
+							isFinalize = true; 
+						}
+						break;
+					default:
+						GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
+						break;
+					}
+				}
+			}
+		}
+		if (isFinalize) {
+			dataStore_->finalizeContainer(txn, this);
 		}
 	}
 	catch (std::exception &e) {
@@ -483,51 +957,15 @@ void TimeSeries::commit(TransactionContext &txn) {
 
 
 /*!
-	@brief Change new Column layout
-*/
-void TimeSeries::changeSchema(TransactionContext &txn,
-	BaseContainer &newContainer, util::XArray<uint32_t> &copyColumnMap) {
-	try {
-		setDirty();
-		newContainer.setTriggerOId(getTriggerOId());
-		setTriggerOId(UNDEF_OID);
-
-		for (uint32_t columnId = 0; columnId < copyColumnMap.size();
-			 columnId++) {
-			uint32_t oldColumnId = copyColumnMap[columnId];
-			if (oldColumnId != UNDEF_COLUMNID) {
-				if (hasIndex(txn, oldColumnId, MAP_TYPE_BTREE)) {
-					IndexInfo indexInfo(columnId, MAP_TYPE_BTREE);
-					newContainer.createIndex(txn, indexInfo);
-				}
-				if (hasIndex(txn, oldColumnId, MAP_TYPE_HASH)) {
-					IndexInfo indexInfo(columnId, MAP_TYPE_HASH);
-					newContainer.createIndex(txn, indexInfo);
-				}
-			}
-		}
-		util::XArray<SubTimeSeriesInfo> subTimeSeriesList(
-			txn.getDefaultAllocator());
-		util::XArray<SubTimeSeriesInfo>::iterator itr;
-		getSubTimeSeriesList(txn, subTimeSeriesList, true);
-		for (itr = subTimeSeriesList.begin(); itr != subTimeSeriesList.end();
-			 itr++) {
-			util::StackAllocator::Scope scope(txn.getDefaultAllocator());
-			SubTimeSeries *subContainer = ALLOC_NEW(txn.getDefaultAllocator())
-				SubTimeSeries(txn, *itr, this);
-			subContainer->changeSchema(txn, newContainer, copyColumnMap);
-		}
-	}
-	catch (std::exception &e) {
-		handleUpdateError(
-			txn, e, GS_ERROR_DS_DS_CHANGE_TIME_SERIES_SCHEMA_FAILED);
-	}
-}
-
-/*!
 	@brief Check if Container has data of uncommited transaction
 */
 bool TimeSeries::hasUncommitedTransaction(TransactionContext &txn) {
+	StackAllocAutoPtr<BtreeMap> mvccMap(
+		txn.getDefaultAllocator(), getMvccMap(txn));
+	if (!mvccMap.get()->isEmpty()) {
+		return true;
+	}
+
 	util::XArray<SubTimeSeriesInfo> subTimeSeriesList(
 		txn.getDefaultAllocator());
 	getRuntimeSubTimeSeriesList(txn, subTimeSeriesList, false);
@@ -561,9 +999,8 @@ void TimeSeries::searchRowIdIndex(TransactionContext &txn,
 		util::XArray<SubTimeSeriesInfo>::iterator itr;
 		for (itr = subTimeSeriesImageList.begin();
 			 itr != subTimeSeriesImageList.end(); itr++) {
-			SubTimeSeries *subContainer = ALLOC_NEW(txn.getDefaultAllocator())
-				SubTimeSeries(txn, *itr, this);
-			subContainer->searchRowIdIndex(txn, sc, resultList,
+			SubTimeSeries subContainer(txn, *itr, this);
+			subContainer.searchRowIdIndex(txn, sc, resultList,
 				ORDER_ASCENDING);  
 			if (resultList.size() >= sc.limit_) {
 				break;
@@ -574,9 +1011,8 @@ void TimeSeries::searchRowIdIndex(TransactionContext &txn,
 		util::XArray<SubTimeSeriesInfo>::reverse_iterator itr;
 		for (itr = subTimeSeriesImageList.rbegin();
 			 itr != subTimeSeriesImageList.rend(); itr++) {
-			SubTimeSeries *subContainer = ALLOC_NEW(txn.getDefaultAllocator())
-				SubTimeSeries(txn, *itr, this);
-			subContainer->searchRowIdIndex(txn, sc, resultList, order);
+			SubTimeSeries subContainer(txn, *itr, this);
+			subContainer.searchRowIdIndex(txn, sc, resultList, order);
 			if (resultList.size() >= sc.limit_) {
 				break;
 			}
@@ -627,16 +1063,16 @@ void TimeSeries::searchRowIdIndex(TransactionContext &txn, uint64_t start,
 	util::XArray<SubTimeSeriesInfo>::iterator itr;
 	for (itr = subTimeSeriesImageList.begin();
 		 itr != subTimeSeriesImageList.end(); itr++) {
-		SubTimeSeries *subContainer =
-			ALLOC_NEW(txn.getDefaultAllocator()) SubTimeSeries(txn, *itr, this);
+		SubTimeSeries subContainer(txn, *itr, this);
 
 		StackAllocAutoPtr<BtreeMap> rowIdMap(
-			txn.getDefaultAllocator(), subContainer->getRowIdMap(txn));
+			txn.getDefaultAllocator(), subContainer.getRowIdMap(txn));
 		rowIdMap.get()->search<RowId, OId, KeyValue<RowId, OId> >(
 			txn, sc, keyValueList, ORDER_ASCENDING);
 
-		subContainer->searchMvccMap<TimeSeries, BtreeMap::SearchContext>(
-			txn, sc, mvccList);
+		bool isCheckOnly = false;
+		subContainer.searchMvccMap<TimeSeries, BtreeMap::SearchContext>(
+			txn, sc, mvccList, isCheckOnly);
 	}
 	util::Map<RowId, OId> mvccRowIdMap(txn.getDefaultAllocator());
 	for (util::XArray<OId>::iterator mvccItr = mvccList.begin();
@@ -732,7 +1168,6 @@ void TimeSeries::searchRowIdIndex(TransactionContext &txn, uint64_t start,
 		else {
 			resultList[currentItr->second] = mvccRowIdMapItr->second;
 		}
-		currentItr++;
 	}
 	if (skipped > 0) {
 		for (size_t outPos = 0, curPos = 0; curPos < resultList.size();
@@ -745,10 +1180,28 @@ void TimeSeries::searchRowIdIndex(TransactionContext &txn, uint64_t start,
 	}
 }
 
+
+/*!
+	@brief Get max RowId
+*/
+RowId TimeSeries::getMaxRowId(TransactionContext &txn) {
+	OId oId = UNDEF_OID;
+	searchTimeOperator(txn, MAX_TIMESTAMP, TIME_PREV, oId);
+	if (UNDEF_OID == oId) {
+		return UNDEF_ROWID;
+	}
+	else {
+		RowArray rowArray(txn, oId, this, OBJECT_READ_ONLY);
+		RowArray::Row row(rowArray.getRow(), &rowArray);
+		return row.getRowId();
+	}
+}
+
 void TimeSeries::searchColumnIdIndex(TransactionContext &txn,
 	BtreeMap::SearchContext &sc, util::XArray<OId> &resultList,
-	OutputOrder order)
+	OutputOrder order, bool neverOrdering)
 {
+	assert(!(order != ORDER_UNDEFINED && neverOrdering));
 	BtreeMap::SearchContext
 		targetContainerSc;  
 	util::XArray<SubTimeSeriesInfo> subTimeSeriesImageList(
@@ -767,10 +1220,9 @@ void TimeSeries::searchColumnIdIndex(TransactionContext &txn,
 	for (itr = subTimeSeriesImageList.begin();
 		 itr != subTimeSeriesImageList.end(); itr++) {
 		util::XArray<OId> subList(txn.getDefaultAllocator());
-		SubTimeSeries *subContainer =
-			ALLOC_NEW(txn.getDefaultAllocator()) SubTimeSeries(txn, *itr, this);
+		SubTimeSeries subContainer(txn, *itr, this);
 		if (order != ORDER_UNDEFINED) {
-			reinterpret_cast<BaseContainer *>(subContainer)
+			reinterpret_cast<BaseContainer *>(&subContainer)
 				->searchColumnIdIndex(txn, sc, subList, order);
 			mergeRowList<TimeSeries>(txn, sortColumnInfo, resultList, true,
 				subList, true, mergeList, order);
@@ -779,12 +1231,17 @@ void TimeSeries::searchColumnIdIndex(TransactionContext &txn,
 		else {
 			ResultSize limitBackup = sc.limit_;
 			sc.limit_ = MAX_RESULT_SIZE;
-			reinterpret_cast<BaseContainer *>(subContainer)
-				->searchColumnIdIndex(txn, sc, subList, order);
+			reinterpret_cast<BaseContainer *>(&subContainer)
+				->searchColumnIdIndex(
+					txn, sc, subList, order);
 			sc.limit_ = limitBackup;
-			mergeRowList<TimeSeries>(txn, sortColumnInfo, resultList, true,
-				subList, false, mergeList, ORDER_ASCENDING);
-			resultList.swap(mergeList);
+			if (!neverOrdering) {
+				mergeRowList<TimeSeries>(txn, sortColumnInfo, resultList, true,
+					subList, false, mergeList, ORDER_ASCENDING);
+				resultList.swap(mergeList);
+			} else {
+				resultList.insert(resultList.end(), subList.begin(), subList.end());
+			}
 			if (resultList.size() >= sc.limit_) {
 				break;
 			}
@@ -802,7 +1259,7 @@ void TimeSeries::searchColumnIdIndex(TransactionContext &txn,
 */
 void TimeSeries::aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 	uint32_t columnId, AggregationType type, ResultSize &resultNum,
-	util::XArray<uint8_t> &serializedRowList) {
+	Value &value) {
 	if (type == AGG_UNSUPPORTED_TYPE) {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_AGGREGATED_COLUMN_TYPE_INVALID, "");
 	}
@@ -834,7 +1291,6 @@ void TimeSeries::aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 	}
 
 	ContainerValue containerValue(txn, *getObjectManager());
-	Value value;
 	switch (type) {
 	case AGG_TIME_AVG: {
 		ContainerValue containerValueTs(txn, *getObjectManager());
@@ -924,6 +1380,8 @@ void TimeSeries::aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 					if (isMatch) {
 						row.getField(txn, keyColumnInfo, containerValueTs);
 						row.getField(txn, aggColumnInfo, containerValue);
+						if (containerValue.getValue().isNullValue()) {
+						} else
 						if (isFirst) {
 							beforeTs =
 								containerValueTs.getValue().getTimestamp();
@@ -1108,7 +1566,9 @@ void TimeSeries::aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 				}
 				if (isMatch) {
 					row.getField(txn, aggColumnInfo, containerValue);
-					(*aggLoop)(txn, containerValue.getValue(), aggCursor);
+					if (!containerValue.getValue().isNullValue()) {
+						(*aggLoop)(txn, containerValue.getValue(), aggCursor);
+					}
 				}
 			}
 		}
@@ -1142,7 +1602,9 @@ void TimeSeries::aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 				}
 				if (isMatch) {
 					row.getField(txn, aggColumnInfo, containerValue);
-					(*aggLoop)(txn, containerValue.getValue(), aggCursor);
+					if (!containerValue.getValue().isNullValue()) {
+						(*aggLoop)(txn, containerValue.getValue(), aggCursor);
+					}
 				}
 			}
 		}
@@ -1157,9 +1619,6 @@ void TimeSeries::aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 	} break;
 	}
 
-	if (resultNum > 0) {
-		value.serialize(serializedRowList);
-	}
 }
 
 /*!
@@ -1417,9 +1876,9 @@ void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 		uint32_t columnId = sampling.interpolatedColumnIdList_[i];
 		ColumnType type = getColumnInfo(columnId).getColumnType();
 		opList[columnId].isInterpolated_ = true;
-		opList[columnId].sub_ = subTable[type][type];
-		opList[columnId].mul_ = mulTable[type][COLUMN_TYPE_DOUBLE];
-		opList[columnId].add_ = addTable[type][COLUMN_TYPE_DOUBLE];
+		opList[columnId].sub_ = CalculatorTable::subTable_[type][type];
+		opList[columnId].mul_ = CalculatorTable::mulTable_[type][COLUMN_TYPE_DOUBLE];
+		opList[columnId].add_ = CalculatorTable::addTable_[type][COLUMN_TYPE_DOUBLE];
 	}
 
 	bool isWithRowId = false;  
@@ -1501,6 +1960,10 @@ void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 										.isInterpolated_) {  
 									row.getField(
 										txn, columnInfo, nextContainerValue);
+									if (prevContainerValue.getValue().isNullValue() ||
+										nextContainerValue.getValue().isNullValue()) {
+										messageRowStore->setNull(columnId);
+									} else {
 
 									double rate =
 										static_cast<double>(targetT - prevT) /
@@ -1564,6 +2027,7 @@ void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 										GS_THROW_USER_ERROR(
 											GS_ERROR_DS_TIM_INTERPORATED_COLUMN_TYPE_INVALID,
 											"");
+									}
 									}
 								}
 								else {  
@@ -1875,8 +2339,8 @@ void TimeSeries::sampleWithoutInterp(TransactionContext &txn,
 							 columnId++) {
 							ColumnInfo &columnInfo = getColumnInfo(columnId);
 							value.init(columnInfo.getColumnType());
-							ValueProcessor::getField(txn, *getObjectManager(),
-								columnId, &value, messageRowStore);
+							value.get(txn, *getObjectManager(), 
+								messageRowStore, columnId);
 						}
 						messageRowStore->next();
 
@@ -1954,8 +2418,8 @@ LABEL_FINISH:
 			for (uint32_t columnId = 1; columnId < getColumnNum(); columnId++) {
 				ColumnInfo &columnInfo = getColumnInfo(columnId);
 				value.init(columnInfo.getColumnType());
-				ValueProcessor::getField(txn, *getObjectManager(), columnId,
-					&value, messageRowStore);
+				value.get(txn, *getObjectManager(), 
+					messageRowStore, columnId);
 			}
 			messageRowStore->next();
 			if (messageRowStore->getRowCount() >= sc.limit_) {
@@ -2013,6 +2477,12 @@ void TimeSeries::lockRowList(
 				"can not lock. container's status is invalid.");
 		}
 
+		if (isAlterContainer()) {
+			DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_TIM_LOCK_CONFLICT,
+				"(pId=" << txn.getPartitionId() << ", containerId=" << getContainerId()
+						<< ", txnId=" << txn.getId() << ")");
+		}
+
 		for (size_t i = 0; i < rowIdList.size(); i++) {
 			util::StackAllocator::Scope scope(txn.getDefaultAllocator());
 			BtreeMap::SearchContext sc(UNDEF_COLUMNID, &rowIdList[i], 0, true,
@@ -2036,54 +2506,10 @@ void TimeSeries::lockRowList(
 }
 
 /*!
-	@brief Check if Row is locked
-*/
-bool TimeSeries::isLocked(
-	TransactionContext &txn, uint32_t, const uint8_t *rowKey) {
-	try {
-		Timestamp rowKeyTimestamp =
-			*(reinterpret_cast<const Timestamp *>(rowKey));
-		if (!ValueProcessor::validateTimestamp(rowKeyTimestamp)) {
-			GS_THROW_USER_ERROR(GS_ERROR_DS_COL_ROWKEY_INVALID,
-				"Timestamp of rowKey out of range (rowKey=" << rowKeyTimestamp
-															<< ")");
-		}
-
-		util::StackAllocator::Scope scope(txn.getDefaultAllocator());
-		util::XArray<OId> oIdList(txn.getDefaultAllocator());
-		util::XArray<OId>::iterator itr;
-		BtreeMap::SearchContext sc(
-			ColumnInfo::ROW_KEY_COLUMN_ID, &rowKey, 0, 0, NULL, 1);
-		searchRowIdIndex(txn, sc, oIdList, ORDER_ASCENDING);
-
-		if (!oIdList.empty()) {
-			RowArray rowArray(txn, oIdList[0], this, OBJECT_READ_ONLY);
-			RowArray::Row row(rowArray.getRow(), &rowArray);
-			if (txn.getManager().isActiveTransaction(
-					txn.getPartitionId(), row.getTxnId())) {
-				return true;
-			}
-			else {
-				return false;
-			}
-		}
-		else {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_DS_COL_ROWKEY_INVALID, "rowKey not exist");
-		}
-	}
-	catch (std::exception &e) {
-		handleSearchError(txn, e, GS_ERROR_DS_TIM_GET_LOCK_ID_INVALID);
-	}
-
-	return false;
-}
-
-/*!
 	@brief Get max expired time
 */
 Timestamp TimeSeries::getCurrentExpiredTime(TransactionContext &txn) {
-	ExpirationInfo &expirationInfo = getExpirationInfo();
+	const ExpirationInfo &expirationInfo = getExpirationInfo();
 	Timestamp currentTime = txn.getStatementStartTime().getUnixTime();
 	if (expirationInfo.duration_ == INT64_MAX) {
 		return MINIMUM_EXPIRED_TIMESTAMP;  
@@ -2091,6 +2517,7 @@ Timestamp TimeSeries::getCurrentExpiredTime(TransactionContext &txn) {
 	else {
 		Timestamp lastExpiredTime = DataStore::convertChunkKey2Timestamp(
 			getDataStore()->getLastChunkKey(txn));
+
 		Timestamp calcExpiredTime = currentTime;
 		if (calcExpiredTime >= lastExpiredTime) {
 			return calcExpiredTime - expirationInfo.duration_;
@@ -2106,14 +2533,17 @@ void TimeSeries::putRow(TransactionContext &txn,
 	InputMessageRowStore *inputMessageRowStore, RowId &rowId,
 	DataStore::PutStatus &status, PutRowOption putRowOption) {
 	util::StackAllocator::Scope scope(txn.getDefaultAllocator());
-	const uint8_t *rowKey;
-	uint32_t rowKeySize;
-	inputMessageRowStore->getField(
-		ColumnInfo::ROW_KEY_COLUMN_ID, rowKey, rowKeySize);
+	if (isAlterContainer()) {
+		DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_TIM_LOCK_CONFLICT,
+			"(pId=" << txn.getPartitionId() << ", containerId=" << getContainerId()
+					<< ", txnId=" << txn.getId() << ")");
+	}
+
+	Timestamp rowKey = inputMessageRowStore->getField<COLUMN_TYPE_TIMESTAMP>(
+		ColumnInfo::ROW_KEY_COLUMN_ID);
 
 
-	Timestamp rowKeyTimestamp = *(reinterpret_cast<const Timestamp *>(rowKey));
-	SubTimeSeries *subContainer = putSubContainer(txn, rowKeyTimestamp);
+	SubTimeSeries *subContainer = putSubContainer(txn, rowKey);
 	if (subContainer == NULL) {
 		rowId = UNDEF_ROWID;
 		status = DataStore::NOT_EXECUTED;
@@ -2121,6 +2551,7 @@ void TimeSeries::putRow(TransactionContext &txn,
 	}
 	subContainer->putRow(
 		txn, inputMessageRowStore, rowId, status, putRowOption);
+	ALLOC_DELETE(txn.getDefaultAllocator(), subContainer);
 }
 
 
@@ -2335,9 +2766,8 @@ void TimeSeries::setDummyMvccImage(TransactionContext &txn) {
 			const size_t lastPos = subTimeSeriesList.size() - 1;
 			const SubTimeSeriesInfo &subTimeSeriesInfo =
 				subTimeSeriesList[lastPos];
-			SubTimeSeries *subContainer = ALLOC_NEW(txn.getDefaultAllocator())
-				SubTimeSeries(txn, subTimeSeriesInfo, this);
-			subContainer->setDummyMvccImage(txn);
+			SubTimeSeries subContainer(txn, subTimeSeriesInfo, this);
+			subContainer.setDummyMvccImage(txn);
 		}
 	}
 	catch (std::exception &e) {
@@ -2351,16 +2781,17 @@ void TimeSeries::getContainerOptionInfo(
 	containerSchema.push_back(
 		reinterpret_cast<uint8_t *>(&isExistTimeSeriesOption), sizeof(bool));
 
-	ExpirationInfo &expirationInfo = getExpirationInfo();
+	const ExpirationInfo &expirationInfo = getExpirationInfo();
 	containerSchema.push_back(
-		reinterpret_cast<uint8_t *>(&(expirationInfo.elapsedTime_)),
+		reinterpret_cast<const uint8_t *>(&(expirationInfo.elapsedTime_)),
 		sizeof(int32_t));
 	int8_t tmp = static_cast<int8_t>(expirationInfo.timeUnit_);
 	containerSchema.push_back(
-		reinterpret_cast<uint8_t *>(&tmp), sizeof(int8_t));
-	int32_t tmpDivisionCount = expirationInfo.dividedNum_;
+		reinterpret_cast<const uint8_t *>(&tmp), sizeof(int8_t));
+	int32_t tmpDivisionCount = (expirationInfo.elapsedTime_ > 0 ?
+		expirationInfo.dividedNum_ : EXPIRE_DIVIDE_UNDEFINED_NUM);
 	containerSchema.push_back(
-		reinterpret_cast<uint8_t *>(&tmpDivisionCount), sizeof(int32_t));
+		reinterpret_cast<const uint8_t *>(&tmpDivisionCount), sizeof(int32_t));
 
 	DurationInfo defaultDurationInfo;
 	int32_t tmpDuration =
@@ -2388,7 +2819,7 @@ void TimeSeries::checkContainerOption(MessageSchema *orgMessageSchema,
 		messageSchema->setExpirationInfo(getExpirationInfo());
 	}
 	else {
-		ExpirationInfo &expirationInfo = getExpirationInfo();
+		const ExpirationInfo &expirationInfo = getExpirationInfo();
 		if (expirationInfo.elapsedTime_ !=
 			messageSchema->getExpirationInfo().elapsedTime_) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_INVALID_SCHEMA_OPTION,
@@ -2546,10 +2977,9 @@ void TimeSeries::searchRowArrayList(TransactionContext &txn,
 	getSubTimeSeriesList(txn, sc, subTimeSeriesList, false);
 	for (itr = subTimeSeriesList.begin(); itr != subTimeSeriesList.end();
 		 itr++) {
-		SubTimeSeries *subContainer =
-			ALLOC_NEW(txn.getDefaultAllocator()) SubTimeSeries(txn, *itr, this);
+		SubTimeSeries subContainer(txn, *itr, this);
 		StackAllocAutoPtr<BtreeMap> rowIdMap(
-			txn.getDefaultAllocator(), subContainer->getRowIdMap(txn));
+			txn.getDefaultAllocator(), subContainer.getRowIdMap(txn));
 		rowIdMap.get()->search(txn, sc, normalOIdList);
 		{
 			util::XArray<std::pair<TransactionId, MvccRowImage> >
@@ -2557,7 +2987,7 @@ void TimeSeries::searchRowArrayList(TransactionContext &txn,
 			util::XArray<std::pair<TransactionId, MvccRowImage> >::iterator
 				mvccItr;
 			StackAllocAutoPtr<BtreeMap> mvccMap(
-				txn.getDefaultAllocator(), subContainer->getMvccMap(txn));
+				txn.getDefaultAllocator(), subContainer.getMvccMap(txn));
 			mvccMap.get()->getAll<TransactionId, MvccRowImage>(
 				txn, MAX_RESULT_SIZE, mvccKeyValueList);
 			mvccOIdList.reserve(mvccKeyValueList.size());  
@@ -2571,31 +3001,43 @@ void TimeSeries::searchRowArrayList(TransactionContext &txn,
 				RowArray mvccRowArray(txn, this);
 				for (mvccItr = mvccKeyValueList.begin();
 					 mvccItr != mvccKeyValueList.end(); mvccItr++) {
-					if (mvccItr->second.type_ == MVCC_SELECT) {
-						continue;
-					}
-					if (mvccItr->first != txn.getId() &&
-						mvccItr->second.type_ != MVCC_CREATE) {
-						mvccRowArray.load(txn, mvccItr->second.snapshotRowOId_,
-							this, OBJECT_READ_ONLY);
-						if (mvccRowArray.begin()) {
-							RowArray::Row row(
-								mvccRowArray.getRow(), &mvccRowArray);
+					switch (mvccItr->second.type_) {
+					case MVCC_SELECT:
+					case MVCC_INDEX:
+					case MVCC_CONTAINER:
+					case MVCC_CREATE:
+						break;
+					case MVCC_UPDATE:
+					case MVCC_DELETE:
+						{
+							if (mvccItr->first != txn.getId()) {
+								mvccRowArray.load(txn, mvccItr->second.snapshotRowOId_,
+									this, OBJECT_READ_ONLY);
+								if (mvccRowArray.begin()) {
+									RowArray::Row row(
+										mvccRowArray.getRow(), &mvccRowArray);
 
-							uint8_t *objectRowField;
-							row.getRowIdField(objectRowField);
+									uint8_t *objectRowField;
+									row.getRowIdField(objectRowField);
 
-							SortKey sortKey;
-							sortKey.set(txn, targetType, objectRowField,
-								mvccItr->second.snapshotRowOId_);
-							mvccSortKeyList.push_back(sortKey);
+									SortKey sortKey;
+									sortKey.set(txn, targetType, objectRowField,
+										mvccItr->second.snapshotRowOId_);
+									mvccSortKeyList.push_back(sortKey);
+								}
+							}
 						}
+						break;
+					default:
+						GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
+						break;
 					}
 				}
 				const Operator *sortOp =
-					&ltTable[COLUMN_TYPE_TIMESTAMP][COLUMN_TYPE_TIMESTAMP];
+					&ComparatorTable::ltTable_[COLUMN_TYPE_TIMESTAMP][COLUMN_TYPE_TIMESTAMP];
+				bool isNullLast = true;
 				std::sort(mvccSortKeyList.begin(), mvccSortKeyList.end(),
-					SortPred(txn, sortOp, COLUMN_TYPE_TIMESTAMP));
+					SortPred(txn, sortOp, COLUMN_TYPE_TIMESTAMP, isNullLast));
 				util::XArray<SortKey>::iterator mvccKeyItr;
 				for (mvccKeyItr = mvccSortKeyList.begin();
 					 mvccKeyItr != mvccSortKeyList.end(); mvccKeyItr++) {
@@ -2611,13 +3053,19 @@ void TimeSeries::insertRowIdMap(
 	GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_UNEXPECTED_ERROR, "");
 }
 
-void TimeSeries::insertMvccMap(
-	TransactionContext &, BtreeMap *, TransactionId, MvccRowImage &) {
-	GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_UNEXPECTED_ERROR, "");
+void TimeSeries::insertMvccMap(TransactionContext& txn, BtreeMap* map,
+	TransactionId tId, MvccRowImage& mvccImage) {
+	bool isCaseSensitive = true;
+	int32_t status =
+		map->insert<TransactionId, MvccRowImage>(txn, tId, mvccImage, isCaseSensitive);
+	if ((status & BtreeMap::ROOT_UPDATE) != 0) {
+		setDirty();
+		baseContainerImage_->mvccMapOId_ = map->getBaseOId();
+	}
 }
 
-void TimeSeries::insertValueMap(
-	TransactionContext &, BaseIndex *, const void *, OId, ColumnId, MapType) {
+void TimeSeries::insertValueMap(TransactionContext& txn, ValueMap &valueMap,
+	const void* constKey, OId oId, bool isNullVal) {
 	GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_UNEXPECTED_ERROR, "");
 }
 
@@ -2626,13 +3074,19 @@ void TimeSeries::updateRowIdMap(
 	GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_UNEXPECTED_ERROR, "");
 }
 
-void TimeSeries::updateMvccMap(TransactionContext &, BtreeMap *, TransactionId,
-	MvccRowImage &, MvccRowImage &) {
-	GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_UNEXPECTED_ERROR, "");
+void TimeSeries::updateMvccMap(TransactionContext& txn, BtreeMap* map,
+	TransactionId tId, MvccRowImage& oldMvccImage, MvccRowImage& newMvccImage) {
+	bool isCaseSensitive = true;
+	int32_t status = map->update<TransactionId, MvccRowImage>(
+		txn, tId, oldMvccImage, newMvccImage, isCaseSensitive);
+	if ((status & BtreeMap::ROOT_UPDATE) != 0) {
+		setDirty();
+		baseContainerImage_->mvccMapOId_ = map->getBaseOId();
+	}
 }
 
-void TimeSeries::updateValueMap(TransactionContext &, BaseIndex *, const void *,
-	OId, OId, ColumnId, MapType) {
+void TimeSeries::updateValueMap(TransactionContext& txn, ValueMap &valueMap,
+	const void* constKey, OId oldOId, OId newOId, bool isNullVal) {
 	GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_UNEXPECTED_ERROR, "");
 }
 
@@ -2641,28 +3095,35 @@ void TimeSeries::removeRowIdMap(
 	GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_UNEXPECTED_ERROR, "");
 }
 
-void TimeSeries::removeMvccMap(
-	TransactionContext &, BtreeMap *, TransactionId, MvccRowImage &) {
+void TimeSeries::removeMvccMap(TransactionContext& txn, BtreeMap* map,
+	TransactionId tId, MvccRowImage& mvccImage) {
+	bool isCaseSensitive = true;
+	int32_t status =
+		map->remove<TransactionId, MvccRowImage>(txn, tId, mvccImage, isCaseSensitive);
+	if ((status & BtreeMap::ROOT_UPDATE) != 0) {
+		setDirty();
+		baseContainerImage_->mvccMapOId_ = map->getBaseOId();
+	}
+}
+
+void TimeSeries::removeValueMap(TransactionContext& txn, ValueMap &valueMap,
+	const void* constKey, OId oId, bool isNullVal) {
 	GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_UNEXPECTED_ERROR, "");
 }
 
-void TimeSeries::removeValueMap(
-	TransactionContext &, BaseIndex *, const void *, OId, ColumnId, MapType) {
+void TimeSeries::updateIndexData(TransactionContext &, const IndexData &) {
 	GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_UNEXPECTED_ERROR, "");
 }
 
-void TimeSeries::updateIndexData(TransactionContext &, IndexData) {
-	GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_UNEXPECTED_ERROR, "");
-}
 
 uint16_t TimeSeries::calcRowArrayNum(uint16_t baseRowNum) {
 	uint32_t pointArrayObjectSize = static_cast<uint32_t>(
-		RowArray::getHeaderSize() + rowImageSize_ * baseRowNum);
+		RowArray::calcHeaderSize(getNullbitsSize()) + rowImageSize_ * baseRowNum);
 	Size_t estimateAllocateSize =
 		getObjectManager()->estimateAllocateSize(pointArrayObjectSize);
 	if (estimateAllocateSize > getObjectManager()->getHalfOfMaxObjectSize()) {
 		uint32_t oneRowObjectSize = static_cast<uint32_t>(
-			RowArray::getHeaderSize() + rowImageSize_ * 1);
+			RowArray::calcHeaderSize(getNullbitsSize()) + rowImageSize_ * 1);
 		Size_t estimateOneRowAllocateSize =
 			getObjectManager()->estimateAllocateSize(oneRowObjectSize);
 		if (estimateOneRowAllocateSize >
@@ -2674,7 +3135,7 @@ uint16_t TimeSeries::calcRowArrayNum(uint16_t baseRowNum) {
 		}
 	}
 	return static_cast<uint16_t>(
-		(estimateAllocateSize - RowArray::getHeaderSize()) / rowImageSize_);
+		(estimateAllocateSize - RowArray::calcHeaderSize(getNullbitsSize())) / rowImageSize_);
 }
 
 /*!
@@ -2724,7 +3185,8 @@ bool TimeSeries::validate(TransactionContext &txn, std::string &errorMessage) {
 	uint64_t totalCountRowNum = 0;
 
 	util::XArray<IndexData> parentIndexList(txn.getDefaultAllocator());
-	getIndexList(txn, parentIndexList);
+	bool withUncommitted = true;
+	getIndexList(txn, withUncommitted, parentIndexList);
 
 	util::XArray<SubTimeSeriesInfo> subTimeSeriesList(
 		txn.getDefaultAllocator());
@@ -2733,11 +3195,10 @@ bool TimeSeries::validate(TransactionContext &txn, std::string &errorMessage) {
 	for (itr = subTimeSeriesList.begin(); itr != subTimeSeriesList.end();
 		 itr++) {
 		util::StackAllocator::Scope scope(txn.getDefaultAllocator());
-		SubTimeSeries *subContainer =
-			ALLOC_NEW(txn.getDefaultAllocator()) SubTimeSeries(txn, *itr, this);
+		SubTimeSeries subContainer(txn, *itr, this);
 		std::string subErrorMessage;
 		uint64_t countRowNum = 0;
-		isValid = subContainer->validateImpl<TimeSeries>(
+		isValid = subContainer.validateImpl<TimeSeries>(
 			txn, subErrorMessage, preRowId, countRowNum, isRowRateCheck);
 		if (!isValid) {
 			isValid = false;
@@ -2747,7 +3208,7 @@ bool TimeSeries::validate(TransactionContext &txn, std::string &errorMessage) {
 		totalCountRowNum += countRowNum;
 
 		util::XArray<IndexData> childIndexList(txn.getDefaultAllocator());
-		subContainer->getIndexList(txn, childIndexList);
+		subContainer.getIndexList(txn, withUncommitted, childIndexList);
 		if (parentIndexList.size() != childIndexList.size()) {
 			isValid = false;
 			strstrm << "inValid IndexSize: parentIndexListSize("
@@ -2801,10 +3262,9 @@ std::string TimeSeries::dump(TransactionContext &txn) {
 	for (itr = subTimeSeriesList.begin(); itr != subTimeSeriesList.end();
 		 itr++) {
 		util::StackAllocator::Scope scope(txn.getDefaultAllocator());
-		SubTimeSeries *subContainer =
-			ALLOC_NEW(txn.getDefaultAllocator()) SubTimeSeries(txn, *itr, this);
+		SubTimeSeries subContainer(txn, *itr, this);
 		strstrm << "===SubTimeSeries Dump===" << std::endl;
-		strstrm << subContainer->dump(txn);
+		strstrm << subContainer.dump(txn);
 	}
 	return strstrm.str();
 }

@@ -27,8 +27,6 @@
 #include "util/container.h"
 
 
-
-
 class PartitionGroupConfig;
 struct NodeDescriptor;
 /*!
@@ -41,6 +39,8 @@ public:
 	struct Config;
 	struct Source;
 	struct EventRequestOption;
+	class BufferManager;
+	class ExternalBuffer;
 	class Buffer;
 	class Event;
 	class EventContext;
@@ -48,6 +48,7 @@ public:
 	class EventCoder;
 	class ThreadErrorHandler;
 	class Stats;
+	struct Tool;
 
 	typedef int32_t EventType;
 	typedef int64_t EventMonotonicTime;
@@ -58,6 +59,8 @@ public:
 			uint8_t, VariableSizeAllocator> > EventOutStream;
 	typedef util::ArrayByteInStream EventByteInStream;
 	typedef util::ByteStream<EventOutStream> EventByteOutStream;
+	typedef std::pair<uint64_t, uint64_t> BufferId;
+
 	/*!
 		@brief Event handling mode
 	*/
@@ -66,6 +69,7 @@ public:
 		HANDLING_IMMEDIATE,
 		HANDLING_QUEUEING
 	};
+
 	/*!
 		@brief Local event type
 	*/
@@ -75,6 +79,7 @@ public:
 		LOCAL_IO_WORKER_STARTED,
 		LOCAL_IO_WORKER_TERMINATING
 	};
+
 	/*!
 		@brief Resume condition at pending
 	*/
@@ -157,6 +162,9 @@ private:
 
 	typedef util::LockGuard<util::Mutex> LockGuard;
 
+	typedef std::vector< Event*, util::StdAllocator<
+			Event*, VariableSizeAllocator> > EventList;
+
 	EventEngine(const EventEngine&);
 	EventEngine& operator=(const EventEngine&);
 
@@ -183,6 +191,7 @@ private:
 	UTIL_UNIQUE_PTR<Listener> listener_;
 	IOWorker *ioWorkerList_;
 	EventWorker *eventWorkerList_;
+	BufferManager *bufferManager_;
 };
 
 typedef EventEngine::EventRequestOption EventRequestOption;
@@ -309,6 +318,7 @@ struct EventEngine::Source {
 
 	VariableSizeAllocator *varAllocator_;
 	FixedSizeAllocator *fixedAllocator_;
+	BufferManager *bufferManager_;
 };
 
 /*!
@@ -319,6 +329,76 @@ struct EventEngine::EventRequestOption {
 	bool operator==(const EventRequestOption &option) const;
 
 	int32_t timeoutMillis_;
+};
+
+class EventEngine::BufferManager {
+public:
+	virtual ~BufferManager();
+
+	virtual size_t getUnitSize() = 0;
+
+	virtual std::pair<BufferId, void*> allocate() = 0;
+	virtual void deallocate(const BufferId &id) = 0;
+
+	virtual void* latch(const BufferId &id) = 0;
+	virtual void unlatch(const BufferId &id) = 0;
+};
+
+class EventEngine::ExternalBuffer {
+public:
+	class Reader;
+	class Writer;
+
+	explicit ExternalBuffer(BufferManager *manager = NULL);
+	~ExternalBuffer();
+
+	void clear();
+	void swap(ExternalBuffer &another);
+
+	bool isEmpty() const;
+	size_t getSize() const;
+	size_t getCapacity() const;
+
+private:
+	ExternalBuffer(const ExternalBuffer&);
+	ExternalBuffer& operator=(const ExternalBuffer&);
+
+	BufferManager *manager_;
+	BufferId id_;
+	size_t size_;
+	size_t capacity_;
+};
+
+class EventEngine::ExternalBuffer::Reader {
+public:
+	explicit Reader(const ExternalBuffer &buffer);
+	~Reader();
+
+	const void* data();
+
+private:
+	Reader(const Reader&);
+	Reader& operator=(const Reader&);
+
+	BufferManager *manager_;
+	BufferId id_;
+	const void *data_;
+};
+
+class EventEngine::ExternalBuffer::Writer {
+public:
+	explicit Writer(ExternalBuffer &buffer);
+	~Writer();
+
+	size_t tryAppend(const void *data, size_t size);
+
+private:
+	Writer(const Writer&);
+	Writer& operator=(const Writer&);
+
+	ExternalBuffer &bufferRef_;
+	ExternalBuffer buffer_;
+	void *data_;
 };
 
 /*!
@@ -353,11 +433,17 @@ public:
 
 	void transferTo(Buffer &another) const;
 
+	ExternalBuffer& prepareExternal(BufferManager *manager);
+	const ExternalBuffer* getExternal() const;
+	size_t getExternalOffset() const;
+	void setExternalOffset(size_t offset);
+
 private:
 	struct Body;
 
 	mutable Body *body_;
 	size_t offset_;
+	size_t extOffset_;
 };
 
 /*!
@@ -514,7 +600,8 @@ private:
 	uint32_t workerId_;
 	bool onIOWorker_;
 
-	Event *scannerEvent_;
+	const EventList *eventList_;
+
 };
 
 /*!
@@ -534,6 +621,7 @@ struct EventEngine::EventContext::Source {
 	Stats *workerStats_;
 	uint32_t workerId_;
 	bool onIOWorker_;
+	const EventList *eventList_;
 };
 
 /*!
@@ -659,6 +747,13 @@ public:
 		EVENT_PENDING_QUEUE_SIZE_CURRENT,
 		EVENT_PENDING_QUEUE_SIZE_MAX,
 
+		STATS_LIVE_TYPE_START,
+
+		EVENT_ACTIVE_EXECUTABLE_COUNT =
+				STATS_LIVE_TYPE_START, 
+		EVENT_CYCLE_HANDLING_COUNT, 
+		EVENT_CYCLE_HANDLING_AFTER_COUNT, 
+
 		STATS_TYPE_MAX
 	};
 
@@ -674,14 +769,14 @@ public:
 	void increment(Type type);
 	void decrement(Type type);
 
-	void merge(Type type, int64_t value);
-	void mergeAll(const Stats &stats);
+	void merge(Type type, int64_t value, bool sumOnly = false);
+	void mergeAll(const Stats &stats, bool sumOnly = false);
 
 	static const char8_t* typeToString(Type type);
 	void dump(std::ostream &out) const;
 
 private:
-	static const char8_t *const STATS_TYPE_NAMES[];
+	static const char8_t *const STATS_TYPE_NAMES[STATS_TYPE_MAX];
 
 	static const Type STATS_MAX_INITIAL_VALUE_TYPES[];
 	static const Type STATS_MIN_INITIAL_VALUE_TYPES[];
@@ -693,6 +788,13 @@ private:
 	static bool findType(const Type (&typeArray)[N], Type type);
 
 	int64_t valueList_[STATS_TYPE_MAX];
+};
+
+struct EventEngine::Tool {
+	static bool getLiveStats(
+			EventEngine &ee, PartitionGroupId pgId, Stats::Type type,
+			int64_t &value, const EventContext *ec, const Event *ev,
+			const EventMonotonicTime *now = NULL);
 };
 
 
@@ -767,12 +869,13 @@ struct EventEngine::Buffer::Body {
 	explicit Body(VariableSizeAllocator &allocator);
 
 	VariableSizeAllocator& getAllocator();
-	uint64_t getReferenceCount();
+	ExternalBuffer& prepareExternal(BufferManager *manager);
 
 	Body(const Body&);
 	Body& operator=(const Body&);
 	uint64_t refCount_;
 	XArray storage_;
+	ExternalBuffer ext_;
 };
 
 class EventEngine::NDPool {
@@ -1019,6 +1122,9 @@ struct EventEngine::Manipulator {
 
 	static void prepareMulticastSocket(
 			const Config &config, NDPool &ndPool, SocketPool &socketPool);
+
+	static size_t getHandlingEventCount(
+			const EventContext &ec, const Event *ev, bool includesStarted);
 };
 
 class EventEngine::ClockGenerator : public util::ThreadRunner {
@@ -1204,6 +1310,9 @@ public:
 	const Stats& getStats() const;
 	void mergeExtraStats(Stats &stats);
 
+	bool getLiveStats(
+			Stats::Type type, EventMonotonicTime now, int64_t &value);
+
 private:
 	struct ActiveEntry {
 		ActiveEntry(int64_t time, int32_t periodicInterval);
@@ -1228,9 +1337,6 @@ private:
 	typedef std::deque< Event*, util::StdAllocator<
 			Event*, VariableSizeAllocator> > EventQueue;
 
-	typedef std::vector< Event*, util::StdAllocator<
-			Event*, VariableSizeAllocator> > EventList;
-
 	typedef std::vector<
 			EventProgressWatcher*,
 			util::StdAllocator<
@@ -1241,7 +1347,8 @@ private:
 	EventWorker(const EventWorker&);
 	EventWorker& operator=(const EventWorker&);
 
-	EventContext::Source createContextSource(util::StackAllocator &allocator);
+	EventContext::Source createContextSource(
+			util::StackAllocator &allocator, const EventList *eventList);
 
 
 	bool popActiveEvents(EventList &eventList, int64_t &nextTimeDiff);
@@ -1264,6 +1371,9 @@ private:
 			VariableSizeAllocator &allocator, EventContainer &eventContainer);
 	static void clearEvents(
 			VariableSizeAllocator &allocator, ActiveQueue &activeQueue);
+
+	size_t getExecutableActiveEventCount(
+			EventMonotonicTime now, const util::LockGuard<util::Condition>&);
 
 	EventEngine *ee_;
 	uint32_t id_;
@@ -1339,6 +1449,9 @@ private:
 	void requestShutdown();
 
 	bool handleIOError(std::exception &e) throw();
+
+	void appendToSendBuffer(
+			const void *data, size_t size, size_t offset);
 
 
 	EventEngine &ee_;
@@ -1628,13 +1741,13 @@ inline void EventEngine::getStats(Stats &stats) {
 	stats = *stats_;
 
 	for (uint32_t i = 0; i < config_->concurrency_; i++) {
-		stats.mergeAll(eventWorkerList_[i].getStats());
+		stats.mergeAll(eventWorkerList_[i].getStats(), true);
 		eventWorkerList_[i].mergeExtraStats(stats);
 	}
 
 	const uint32_t ioConcurrency = Manipulator::getIOConcurrency(*config_);
 	for (uint32_t i = 0; i < ioConcurrency; i++) {
-		stats.mergeAll(ioWorkerList_[i].getStats());
+		stats.mergeAll(ioWorkerList_[i].getStats(), true);
 		ioWorkerList_[i].mergeExtraStats(stats);
 	}
 }
@@ -1737,7 +1850,8 @@ inline EventEngine::Source::Source(
 		VariableSizeAllocator &varAllocator,
 		FixedSizeAllocator &fixedAllocator) :
 		varAllocator_(&varAllocator),
-		fixedAllocator_(&fixedAllocator) {
+		fixedAllocator_(&fixedAllocator),
+		bufferManager_(NULL) {
 }
 
 inline EventEngine::VariableSizeAllocator&
@@ -1773,12 +1887,14 @@ inline bool EventEngine::EventRequestOption::operator==(
 
 inline EventEngine::Buffer::Buffer(VariableSizeAllocator &allocator) :
 		body_(Body::newInstance(allocator)),
-		offset_(0) {
+		offset_(0),
+		extOffset_(0) {
 }
 
 inline EventEngine::Buffer::Buffer() :
 		body_(NULL),
-		offset_(0) {
+		offset_(0),
+		extOffset_(0) {
 }
 
 inline EventEngine::Buffer::~Buffer() try {
@@ -1789,7 +1905,8 @@ catch (...) {
 
 inline EventEngine::Buffer::Buffer(const Buffer &another) :
 		body_(Body::duplicateReference(another.body_)),
-		offset_(another.offset_) {
+		offset_(another.offset_),
+		extOffset_(another.extOffset_) {
 }
 
 inline EventEngine::Buffer& EventEngine::Buffer::operator=(
@@ -1802,6 +1919,7 @@ inline EventEngine::Buffer& EventEngine::Buffer::operator=(
 
 	body_ = Body::duplicateReference(another.body_);
 	offset_ = another.offset_;
+	extOffset_ = another.extOffset_;
 
 	return *this;
 }
@@ -1860,6 +1978,7 @@ inline bool EventEngine::Buffer::isEmpty() const {
 
 inline void EventEngine::Buffer::clear() {
 	offset_ = 0;
+	extOffset_ = 0;
 
 	if (body_ == NULL) {
 		return;
@@ -1933,6 +2052,26 @@ inline void EventEngine::Buffer::setOffset(size_t offset) {
 	}
 
 	offset_ = offset;
+}
+
+inline EventEngine::ExternalBuffer& EventEngine::Buffer::prepareExternal(
+		BufferManager *manager) {
+	assert(body_ != NULL);
+	return body_->prepareExternal(manager);
+}
+
+inline const EventEngine::ExternalBuffer*
+EventEngine::Buffer::getExternal() const {
+	assert(body_ != NULL);
+	return (body_->ext_.isEmpty() ? NULL : &body_->ext_);
+}
+
+inline size_t EventEngine::Buffer::getExternalOffset() const {
+	return extOffset_;
+}
+
+inline void EventEngine::Buffer::setExternalOffset(size_t offset) {
+	extOffset_ = offset;
 }
 
 
@@ -2244,7 +2383,8 @@ inline EventEngine::EventContext::EventContext(const Source &source) :
 		eventSource_(*source.varAllocator_),
 		workerStats_(*source.workerStats_),
 		workerId_(source.workerId_),
-		onIOWorker_(source.onIOWorker_)
+		onIOWorker_(source.onIOWorker_),
+		eventList_(source.eventList_)
 {
 
 	if (source.varAllocator_ == NULL || source.allocator_ == NULL ||
@@ -2378,7 +2518,8 @@ inline EventEngine::EventContext::Source::Source(
 		progressWatcher_(NULL),
 		workerStats_(&workerStats),
 		workerId_(0),
-		onIOWorker_(false) {
+		onIOWorker_(false),
+		eventList_(NULL) {
 }
 
 
@@ -2547,12 +2688,98 @@ inline void EventEngine::Buffer::Body::removeReference(Body *&body) {
 
 inline EventEngine::Buffer::Body::Body(VariableSizeAllocator &allocator) :
 		refCount_(0),
-		storage_(allocator) {
+		storage_(allocator),
+		ext_(NULL) {
 }
 
 inline EventEngine::VariableSizeAllocator&
 EventEngine::Buffer::Body::getAllocator() {
 	return *storage_.get_allocator().base();
+}
+
+inline EventEngine::ExternalBuffer&
+EventEngine::Buffer::Body::prepareExternal(BufferManager *manager) {
+	if (ext_.isEmpty()) {
+		ExternalBuffer ext(manager);
+		ext_.swap(ext);
+	}
+	return ext_;
+}
+
+/*!
+	@brief Deallocates body objects
+*/
+inline void EventEngine::NDPool::deallocateBody(NodeDescriptor::Body *body) {
+	if (body == NULL) {
+		return;
+	}
+
+	LockGuard guard(poolMutex_);
+
+	switch (body->type_) {
+	case NodeDescriptor::ND_TYPE_CLIENT:
+		ee_.stats_->increment(Stats::ND_CLIENT_REMOVE_COUNT);
+		break;
+	case NodeDescriptor::ND_TYPE_SERVER:
+		ee_.stats_->increment(Stats::ND_SERVER_REMOVE_COUNT);
+		break;
+	case NodeDescriptor::ND_TYPE_MULTICAST:
+		ee_.stats_->increment(Stats::ND_MCAST_REMOVE_COUNT);
+		break;
+	default:
+		assert(false);
+	}
+
+	if (body->type_ == NodeDescriptor::ND_TYPE_CLIENT) {
+		body->freeLink_ = bodyFreeLink_;
+		bodyFreeLink_ = body;
+	}
+	else {
+		UTIL_OBJECT_POOL_DELETE(bodyPool_, body);
+	}
+}
+
+/*!
+	@brief Deallocates user data
+*/
+inline void EventEngine::NDPool::deallocateUserData(void *userData) {
+	if (userData == NULL) {
+		return;
+	}
+
+	LockGuard guard(userDataMutex_);
+
+	if (userDataPool_.get() == NULL) {
+		return;
+	}
+
+	try {
+		(*userDataDestructor_)(userData);
+	}
+	catch (...) {
+	}
+
+	userDataPool_->deallocate(userData);
+
+	ee_.stats_->increment(Stats::ND_USER_DATA_REMOVE_COUNT);
+}
+
+inline void EventEngine::Stats::increment(Type type) {
+	assert(0 <= type && type < STATS_TYPE_MAX);
+	valueList_[type]++;
+}
+
+inline void EventEngine::Stats::decrement(Type type) {
+	assert(0 <= type && type < STATS_TYPE_MAX);
+	valueList_[type]--;
+}
+
+inline void EventEngine::NDPool::releaseTimeMap(TimeMap *&map) {
+	if (map != NULL) {
+		LockGuard guard(poolMutex_);
+		UTIL_OBJECT_POOL_DELETE(timeMapPool_, map);
+		map = NULL;
+	}
 }
 
 #endif

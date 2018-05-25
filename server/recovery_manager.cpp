@@ -23,6 +23,7 @@
 #include "gs_error.h"
 #include "log_manager.h"
 #include "transaction_manager.h"
+#include "zlib_utils.h"
 
 #include "base_container.h"
 #include "checkpoint_service.h"
@@ -46,8 +47,7 @@ UTIL_TRACER_DECLARE(RECOVERY_MANAGER_DETAIL);
 #define RM_RETHROW_LOG_REDO_ERROR(cause, message) \
 	GS_RETHROW_CUSTOM_ERROR(LogRedoException, GS_ERROR_DEFAULT, cause, message)
 
-#ifndef NDEBUG
-#endif
+
 
 
 util::Atomic<uint32_t> RecoveryManager::progressPercent_(0);
@@ -79,7 +79,8 @@ std::ostream &operator<<(
 /*!
 	@brief Constructor of RecoveryManager
 */
-RecoveryManager::RecoveryManager(ConfigTable &configTable)
+RecoveryManager::RecoveryManager(
+		ConfigTable &configTable, bool releaseUnusedFileBlocks)
 	: pgConfig_(configTable),
 	  CHUNK_EXP_SIZE_(util::nextPowerBitsOf2(
 		  configTable.getUInt32(CONFIG_TABLE_DS_STORE_BLOCK_SIZE))),
@@ -90,7 +91,10 @@ RecoveryManager::RecoveryManager(ConfigTable &configTable)
 		  CONFIG_TABLE_DEV_RECOVERY_DOWN_POINT)),
 	  recoveryDownCount_(
 		  configTable.get<int32_t>(CONFIG_TABLE_DEV_RECOVERY_DOWN_COUNT)),
-	  recoveryTargetPartitionMode_(false) {
+	  recoveryTargetPartitionMode_(false),
+	  releaseUnusedFileBlocks_(releaseUnusedFileBlocks),
+	  chunkMgr_(NULL), logMgr_(NULL), pt_(NULL),
+	  clsSvc_(NULL), sysSvc_(NULL), txnMgr_(NULL), ds_(NULL) {
 	statUpdator_.manager_ = this;
 
 }
@@ -219,7 +223,8 @@ void RecoveryManager::checkExistingFiles1(
 }
 
 void RecoveryManager::checkExistingFiles2(ConfigTable &param,
-	LogManager &logMgr, bool &createFlag, bool forceRecoveryFromExistingFiles) {
+	LogManager &logMgr, bool &createFlag, 
+	bool forceRecoveryFromExistingFiles) {
 	if (createFlag) {
 		return;
 	}
@@ -483,7 +488,8 @@ void RecoveryManager::recovery(
 								 << ")");
 				}
 				chunkMgr_->setCheckpointBit(
-					pgId, record.rowData_, record.numRow_);
+					pgId, record.rowData_, record.numRow_,
+					releaseUnusedFileBlocks_);
 			}  
 
 			chunkMgr_->isValidFileHeader(pgId);
@@ -795,14 +801,18 @@ void RecoveryManager::dumpCheckpointFile(
 			CHUNK_SIZE_;
 		if (blockCount > 0) {
 			util::NormalOStringStream oss;
-			oss << chunkMgr_->dumpChunkCSVField();
+			oss << "#, isValid, " << chunkMgr_->dumpChunkCSVField();
 			oss << std::endl;
 
 			BitArray validBitArray(record.numRow_);
 			validBitArray.putAll(record.rowData_, record.numRow_);
 
 			for (uint64_t blockNo = 0; blockNo < blockCount; ++blockNo) {
-				oss << chunkMgr_->dumpChunkCSV(pgId, blockNo);
+				if (validBitArray.get(blockNo)) {
+					oss << blockNo << ", valid, " << chunkMgr_->dumpChunkCSV(pgId, blockNo);
+				} else {
+					oss << blockNo << ", invalid, ";
+				}
 				oss << std::endl;
 
 				if (blockNo + 1 >= record.numRow_ || blockNo % 100 == 0) {
@@ -851,6 +861,7 @@ void RecoveryManager::redoAll(
 	const PartitionId beginPId = pgConfig_.getGroupBeginPartitionId(pgId);
 	const PartitionId endPId = pgConfig_.getGroupEndPartitionId(pgId);
 
+	uint64_t startTime = util::Stopwatch::currentClock();
 	for (uint64_t logCount = 0;; logCount++) {
 		binaryLogRecord.clear();
 		if (!cursor.nextLog(logRecord, binaryLogRecord)) {
@@ -951,14 +962,9 @@ void RecoveryManager::redoAll(
 			numAfterDropLogs[pId]++;
 		}
 		numRedoLogRecord[logRecord.partitionId_]++;
-
-		ChunkManager::Config &chunkManagerConfig = chunkMgr_->getConfig();
-		ChunkManager::ChunkManagerStats &chunkManagerStats =
-			chunkMgr_->getChunkManagerStats();
-		uint64_t storeMem = chunkManagerStats.getStoreMemory();
-		if (storeMem > chunkManagerConfig.getAtomicStoreMemoryLimit() &&
-			(storeMem - chunkManagerConfig.getAtomicStoreMemoryLimit()) >
-				10 * 1024 * 1024) {
+		const uint64_t currentTime = util::Stopwatch::currentClock();
+		if (currentTime - startTime > ADJUST_MEMORY_TIME_INTERVAL_) {
+			startTime = currentTime;
 			chunkMgr_->redistributeMemoryLimit(0);
 			for (PartitionGroupId tmpPgId = 0; tmpPgId < pgId; ++tmpPgId) {
 				chunkMgr_->adjustPGStoreMemory(tmpPgId);
@@ -992,6 +998,106 @@ void RecoveryManager::redoAll(
 	@brief Redoes LogRecord of Chunks; i.e. applies to DataStore.
 */
 
+void RecoveryManager::recoveryChunkMetaData(
+		util::StackAllocator &alloc, const LogRecord &logRecord) {
+	const uint8_t *addr = logRecord.rowData_;
+	const PartitionGroupId currentPgId =
+			pgConfig_.getPartitionGroupId(logRecord.partitionId_);
+	uint64_t startTime = util::Stopwatch::currentClock();
+
+	util::XArray<uint8_t> dataBuffer(alloc);
+	uint32_t expandedSize = static_cast<uint32_t>(logRecord.expandedLen_);
+	if (expandedSize > 0) {
+		uint8_t temp = 0;
+		dataBuffer.assign(expandedSize, temp);
+		try {
+			ZlibUtils zlib;
+			zlib.uncompressData(
+					addr, logRecord.dataLen_,
+					dataBuffer.data(), expandedSize);
+			assert(expandedSize == logRecord.expandedLen_);
+			addr = dataBuffer.data();
+		}
+		catch(std::exception &e) {
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_RM_INVALID_CHUNK_DATA, 
+					"Expand chunk meta data failed. (reason="
+					<< GS_EXCEPTION_MESSAGE(e) << ")");
+		}
+	}
+	util::XArray<uint8_t> emptySizeList(alloc);
+	util::XArray<uint64_t> fileOffsetList(alloc);
+	util::XArray<ChunkKey> chunkKeyList(alloc);
+
+	emptySizeList.reserve(logRecord.chunkNum_);
+	for (int32_t chunkId = logRecord.startChunkId_;
+			chunkId < logRecord.startChunkId_ + logRecord.chunkNum_;
+			chunkId++) {
+		emptySizeList.push_back(*addr);
+		++addr;
+	}
+	fileOffsetList.reserve(logRecord.chunkNum_);
+	int64_t prevOffset = 0;
+	int32_t prevChunkKey = 0;
+	for (int32_t chunkId = logRecord.startChunkId_;
+			chunkId < logRecord.startChunkId_ + logRecord.chunkNum_;
+			chunkId++) {
+		uint64_t zigzagDiff;
+		addr += util::varIntDecode64(addr, zigzagDiff);
+		int64_t diff = util::zigzagDecode64(zigzagDiff);
+		int64_t fileBlockOffset = prevOffset + diff;
+		fileOffsetList.push_back(fileBlockOffset);
+		prevOffset = fileBlockOffset;
+	}
+	const bool isBatchFreeMode =
+			chunkMgr_->isBatchFreeMode(logRecord.chunkCategoryId_);
+	if (isBatchFreeMode) {
+		chunkKeyList.reserve(logRecord.chunkNum_);
+		for (int32_t chunkId = logRecord.startChunkId_;
+				chunkId < logRecord.startChunkId_ + logRecord.chunkNum_;
+				chunkId++) {
+			uint32_t zigzagDiff;
+			addr += util::varIntDecode32(addr, zigzagDiff);
+			int32_t diff = util::zigzagDecode32(zigzagDiff);
+			int32_t chunkKey = prevChunkKey + diff;
+			chunkKeyList.push_back(chunkKey);
+			prevChunkKey = chunkKey;
+		}
+	}
+	for (int32_t pos = 0; pos < logRecord.chunkNum_; pos++) {
+		const int32_t chunkId = pos + logRecord.startChunkId_;
+		ChunkKey chunkKey = 0;
+		const uint8_t unoccupiedSize = emptySizeList[pos];
+		const uint64_t filePos = fileOffsetList[pos];
+		if (unoccupiedSize != 0xff) {
+			if (isBatchFreeMode) {
+				chunkKey = chunkKeyList[pos];
+			}
+			chunkMgr_->recoveryChunk(
+					logRecord.partitionId_,
+					logRecord.chunkCategoryId_, chunkId, chunkKey,
+					unoccupiedSize, filePos);
+			const uint64_t currentTime = util::Stopwatch::currentClock();
+			if (currentTime - startTime > ADJUST_MEMORY_TIME_INTERVAL_) {
+				startTime = currentTime;
+
+				chunkMgr_->redistributeMemoryLimit(0);
+				for (PartitionGroupId tmpPgId = 0;
+						tmpPgId < currentPgId; ++tmpPgId) {
+						chunkMgr_->adjustPGStoreMemory(tmpPgId);
+				}
+			}
+		}
+		GS_TRACE_DEBUG(RECOVERY_MANAGER_DETAIL,
+				GS_TRACE_RM_REDO_LOG_STATUS,
+				"initMetaChunk (pId,"
+				<< logRecord.partitionId_ << ",categoryId,"
+				<< (uint32_t)logRecord.chunkCategoryId_
+				<< ",chunkId," << chunkId << ",unoccupiedSize,"
+				<< (uint32_t)unoccupiedSize << ",filePos,"
+				<< filePos << ",chunkKey," << chunkKey << ")");
+	}
+}
+
 /*!
 	@brief Redoes each parsed LogRecord, i.e. apply to TxnManager and DataStore.
 */
@@ -1002,6 +1108,10 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 	try {
 		util::StackAllocator::Scope scope(alloc);
 		LogSequentialNumber nextLsn = logRecord.lsn_;
+
+		const KeyConstraint containerKeyConstraint =
+			KeyConstraint::getSystemKeyConstraint(
+				ds_->getValueLimitConfig().getLimitContainerNameSize());
 
 		const bool REDO = true;
 
@@ -1083,54 +1193,7 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 						UNDEF_LSN;  
 					break;
 				}
-				const uint8_t *addr = logRecord.rowData_;
-				const PartitionGroupId currentPgId =
-					pgConfig_.getPartitionGroupId(logRecord.partitionId_);
-				for (int32_t chunkId = logRecord.startChunkId_;
-					 chunkId < logRecord.startChunkId_ + logRecord.chunkNum_;
-					 chunkId++) {
-					uint8_t unoccupiedSize = *addr;
-					++addr;
-					uint64_t filePos;
-					addr += util::varIntDecode64(addr, filePos);
-					uint32_t chunkKey = UNDEF_CHUNK_KEY;
-					if (chunkMgr_->isBatchFreeMode(
-							logRecord.chunkCategoryId_)) {
-						addr += util::varIntDecode32(addr, chunkKey);
-					}
-					if (unoccupiedSize != 0xff) {
-						chunkMgr_->recoveryChunk(logRecord.partitionId_,
-							logRecord.chunkCategoryId_, chunkId, chunkKey,
-							unoccupiedSize, filePos);
-
-						ChunkManager::ChunkManagerStats &chunkManagerStats =
-							chunkMgr_->getChunkManagerStats();
-						ChunkManager::Config &chunkManagerConfig =
-							chunkMgr_->getConfig();
-						uint64_t storeMem = chunkManagerStats.getStoreMemory();
-						if (storeMem > chunkManagerConfig
-										   .getAtomicStoreMemoryLimit() &&
-							(storeMem -
-								chunkManagerConfig
-									.getAtomicStoreMemoryLimit()) >
-								10 * 1024 * 1024) {
-							chunkMgr_->redistributeMemoryLimit(0);
-							for (PartitionGroupId tmpPgId = 0;
-								 tmpPgId < currentPgId; ++tmpPgId) {
-								chunkMgr_->adjustPGStoreMemory(tmpPgId);
-							}
-						}
-
-					}
-					GS_TRACE_DEBUG(RECOVERY_MANAGER_DETAIL,
-						GS_TRACE_RM_REDO_LOG_STATUS,
-						"initMetaChunk (pId,"
-							<< logRecord.partitionId_ << ",categoryId,"
-							<< (uint32_t)logRecord.chunkCategoryId_
-							<< ",chunkId," << chunkId << ",unoccupiedSize,"
-							<< (uint32_t)unoccupiedSize << ",filePos,"
-							<< filePos << ",chunkKey," << chunkKey << ")");
-				}
+				recoveryChunkMetaData(alloc, logRecord);
 			}
 			else {
 				GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL,
@@ -1291,40 +1354,60 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 			break;
 
 		case LogManager::LOG_TYPE_PUT_CONTAINER: {
+			const TransactionManager::ContextSource src(PUT_CONTAINER,
+				logRecord.stmtId_, logRecord.containerId_,
+				logRecord.txnTimeout_,
+				txnMgr_->getContextGetModeForRecovery(
+					static_cast<TransactionManager::GetMode>(
+						logRecord.txnContextCreationMode_)),
+				txnMgr_->getTransactionModeForRecovery(
+					logRecord.withBegin_, logRecord.isAutoCommit_));
 			GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL, GS_TRACE_RM_REDO_LOG_STATUS,
 				"LOG_TYPE_CREATE_CONTAINER(pId="
 					<< pId << ", lsn=" << logRecord.lsn_
 					<< ", containerId=" << logRecord.containerId_
 					<< ", stmtId=" << logRecord.stmtId_
 					<< ", containerName=" << logRecord.containerName_
-					<< ", containerType=" << logRecord.containerType_ << ")");
-			const TransactionManager::ContextSource src(PUT_CONTAINER,
-				logRecord.stmtId_, logRecord.containerId_,
-				TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL,
-				TransactionManager::AUTO, TransactionManager::AUTO_COMMIT);
-			TransactionContext &txn = txnMgr_->put(alloc, pId,
-				TXN_EMPTY_CLIENTID, src, stmtStartTime, stmtStartEmTime, REDO);
+					<< ", containerType=" << logRecord.containerType_
+					<< ", getMode=" << TM_OUTPUT_GETMODE(src.getMode_)
+					<< ", txnMode=" << TM_OUTPUT_TXNMODE(src.txnMode_)
+					<< ", cursorRowId=" << logRecord.numRow_
+					<< ", withBegin=" << (int32_t)logRecord.withBegin_
+					<< ", isAutoCommit=" << (int32_t)logRecord.isAutoCommit_
+					<< ")");
+			TransactionContext &txn =
+				txnMgr_->putNoExpire(alloc, pId, logRecord.clientId_, src,
+					stmtStartTime, stmtStartEmTime, REDO, logRecord.txnId_);
+			assert(txn.getId() == logRecord.txnId_ || logRecord.txnId_ == UNDEF_TXNID);
+			assert(txn.getContainerId() == logRecord.containerId_);
 
 			const DataStore::Latch latch(
 				txn, txn.getPartitionId(), ds_, clsSvc_);
 
-			ExtendedContainerName extContainerName(txn.getDefaultAllocator(),
+			const FullContainerKey containerKey(
+				alloc, containerKeyConstraint,
 				logRecord.containerName_, logRecord.containerNameLen_);
 			DataStore::PutStatus dummy;
 			const bool isModifiable = true;
 			ContainerAutoPtr containerAutoPtr(txn, ds_, txn.getPartitionId(),
-				extContainerName,
+				containerKey,
 				static_cast<uint8_t>(logRecord.containerType_),
 				logRecord.containerInfoLen_, logRecord.containerInfo_,
 				isModifiable, dummy);
 
 			BaseContainer *container = containerAutoPtr.getBaseContainer();
 			assert(container != NULL);
-			if (container->getContainerId() != logRecord.containerId_) {
+			if (container->getContainerId() != logRecord.containerId_ || 
+				txn.getContainerId() != logRecord.containerId_) {
 				GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_DS_CONTAINER_ID_INVALID,
 					"log containerId : " << logRecord.containerId_
 										 << ", redo containerId : "
 										 << container->getContainerId());
+			}
+			if (!txn.isAutoCommit()) {
+				txnMgr_->update(txn, logRecord.stmtId_);
+
+				removeTransaction(mode, txn);
 			}
 		} break;
 
@@ -1345,25 +1428,40 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 			const DataStore::Latch latch(
 				txn, txn.getPartitionId(), ds_, clsSvc_);
 
-			ExtendedContainerName extContainerName(txn.getDefaultAllocator(),
+			const FullContainerKey containerKey(
+				alloc, containerKeyConstraint,
 				logRecord.containerName_, logRecord.containerNameLen_);
 			ds_->dropContainer(
-				txn, txn.getPartitionId(), extContainerName, ANY_CONTAINER);
+				txn, txn.getPartitionId(), containerKey, ANY_CONTAINER);
 		} break;
 
-		case LogManager::LOG_TYPE_CREATE_INDEX: {
+		case LogManager::LOG_TYPE_CONTINUE_CREATE_INDEX:
+		case LogManager::LOG_TYPE_CONTINUE_ALTER_CONTAINER: {
+			const TransactionManager::ContextSource src(CONTINUE_CREATE_INDEX,
+				logRecord.stmtId_, logRecord.containerId_,
+				logRecord.txnTimeout_,
+				txnMgr_->getContextGetModeForRecovery(
+					static_cast<TransactionManager::GetMode>(
+						logRecord.txnContextCreationMode_)),
+				txnMgr_->getTransactionModeForRecovery(
+					logRecord.withBegin_, logRecord.isAutoCommit_));
 			GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL, GS_TRACE_RM_REDO_LOG_STATUS,
 				"LOG_TYPE_CREATE_INDEX(pId="
 					<< pId << ", lsn=" << logRecord.lsn_
-					<< ", containerId=" << logRecord.containerId_ << ", stmtId="
-					<< logRecord.stmtId_ << ", columnId=" << logRecord.columnId_
-					<< ", mapType=" << logRecord.mapType_ << ")");
-			const TransactionManager::ContextSource src(CREATE_INDEX,
-				logRecord.stmtId_, logRecord.containerId_,
-				TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL,
-				TransactionManager::AUTO, TransactionManager::AUTO_COMMIT);
-			TransactionContext &txn = txnMgr_->put(alloc, pId,
-				TXN_EMPTY_CLIENTID, src, stmtStartTime, stmtStartEmTime, REDO);
+					<< ", clientId=" << logRecord.clientId_ << ", containerId="
+					<< logRecord.containerId_ << ", txnId=" << logRecord.txnId_
+					<< ", stmtId=" << logRecord.stmtId_
+					<< ", getMode=" << TM_OUTPUT_GETMODE(src.getMode_)
+					<< ", txnMode=" << TM_OUTPUT_TXNMODE(src.txnMode_)
+					<< ", cursorRowId=" << logRecord.numRow_
+					<< ", withBegin=" << (int32_t)logRecord.withBegin_
+					<< ", isAutoCommit=" << (int32_t)logRecord.isAutoCommit_
+					<< ")");
+			TransactionContext &txn =
+				txnMgr_->put(alloc, pId, logRecord.clientId_, src,
+					stmtStartTime, stmtStartEmTime, REDO, logRecord.txnId_);
+			assert(txn.getId() == logRecord.txnId_);
+			assert(txn.getContainerId() == logRecord.containerId_);
 
 			const DataStore::Latch latch(
 				txn, txn.getPartitionId(), ds_, clsSvc_);
@@ -1373,18 +1471,122 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 			BaseContainer *container = containerAutoPtr.getBaseContainer();
 			assert(container != NULL);
 
-			IndexInfo indexInfo(
-				logRecord.columnId_, static_cast<MapType>(logRecord.mapType_));
-			container->createIndex(txn, indexInfo);
+			if (container->getContainerId() != logRecord.containerId_ || 
+				txn.getContainerId() != logRecord.containerId_) {
+				GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_DS_CONTAINER_ID_INVALID,
+					"log containerId : " << logRecord.containerId_
+										 << ", redo containerId : "
+										 << container->getContainerId());
+			}
+			if (logRecord.type_ == LogManager::LOG_TYPE_CONTINUE_CREATE_INDEX) {
+				IndexCursor indexCursor = container->getIndexCursor(txn);
+				container->continueCreateIndex(txn, indexCursor);
+			} else {
+				ContainerCursor containerCursor(txn.isAutoCommit());
+				containerCursor = container->getContainerCursor(txn);
+				container->continueChangeSchema(txn, containerCursor);
+			}
+			txnMgr_->update(txn, logRecord.stmtId_);
+
+			removeTransaction(mode, txn);
+		} break;
+
+		case LogManager::LOG_TYPE_CREATE_INDEX: {
+			const TransactionManager::ContextSource src(CREATE_INDEX,
+				logRecord.stmtId_, logRecord.containerId_,
+				logRecord.txnTimeout_,
+				txnMgr_->getContextGetModeForRecovery(
+					static_cast<TransactionManager::GetMode>(
+						logRecord.txnContextCreationMode_)),
+				txnMgr_->getTransactionModeForRecovery(
+					logRecord.withBegin_, logRecord.isAutoCommit_));
+			GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL, GS_TRACE_RM_REDO_LOG_STATUS,
+				"LOG_TYPE_CREATE_INDEX(pId=" << pId
+					<< ", lsn=" << logRecord.lsn_
+					<< ", containerId=" << logRecord.containerId_
+					<< ", txnId=" << logRecord.txnId_
+					<< ", stmtId=" << logRecord.stmtId_
+					<< ", columnCount=" << logRecord.columnIdCount_
+					<< ", firstColumnId="
+					<< (logRecord.columnIdCount_ > 0 ? logRecord.columnIds_[0] : UNDEF_COLUMNID)
+					<< ", mapType=" << logRecord.mapType_
+					<< ", getMode=" << TM_OUTPUT_GETMODE(src.getMode_)
+					<< ", txnMode=" << TM_OUTPUT_TXNMODE(src.txnMode_)
+					<< ", cursorRowId=" << logRecord.numRow_
+					<< ", withBegin=" << (int32_t)logRecord.withBegin_
+					<< ", isAutoCommit=" << (int32_t)logRecord.isAutoCommit_
+					<< ", indexName=" << logRecord.indexName_ << ")");
+			TransactionContext &txn =
+				txnMgr_->putNoExpire(alloc, pId, logRecord.clientId_, src,
+					stmtStartTime, stmtStartEmTime, REDO, logRecord.txnId_);
+			assert(txn.getId() == logRecord.txnId_ || logRecord.txnId_ == UNDEF_TXNID);
+			assert(txn.getContainerId() == logRecord.containerId_);
+
+			const DataStore::Latch latch(
+				txn, txn.getPartitionId(), ds_, clsSvc_);
+
+			ContainerAutoPtr containerAutoPtr(txn, ds_, txn.getPartitionId(),
+				txn.getContainerId(), ANY_CONTAINER);
+			BaseContainer *container = containerAutoPtr.getBaseContainer();
+			assert(container != NULL);
+
+			IndexInfo indexInfo(alloc);
+			indexInfo.mapType = static_cast<MapType>(logRecord.mapType_);
+			indexInfo.columnIds_.resize(logRecord.columnIdCount_, 0);
+			if (!indexInfo.columnIds_.empty()) {
+				memcpy(&(indexInfo.columnIds_[0]), logRecord.columnIds_,
+					sizeof(ColumnId)*logRecord.columnIdCount_);
+			}
+			indexInfo.indexName_.append(logRecord.indexName_, logRecord.indexNameLen_-1);
+			indexInfo.extensionName_.append(logRecord.extensionName_, logRecord.extensionNameLen_-1);
+			util::XArray<uint8_t> paramSchema(alloc);
+			size_t paramOffset = 0;
+			if (logRecord.paramCount_ > 0) {
+				indexInfo.extensionOptionSchema_.push_back(
+					logRecord.paramData_ + paramOffset, logRecord.paramDataLen_[0]);
+				paramOffset += logRecord.paramDataLen_[0];
+			}
+			util::XArray<uint8_t> paramFixed(alloc);
+			if (logRecord.paramCount_ > 1) {
+				indexInfo.extensionOptionFixedPart_.push_back(
+					logRecord.paramData_ + paramOffset, logRecord.paramDataLen_[1]);
+				paramOffset += logRecord.paramDataLen_[1];
+			}
+			util::XArray<uint8_t> paramVar(alloc);
+			if (logRecord.paramCount_ > 2) {
+				indexInfo.extensionOptionVarPart_.push_back(
+					logRecord.paramData_ + paramOffset, logRecord.paramDataLen_[2]);
+				paramOffset += logRecord.paramDataLen_[2];
+			}
+
+			if (container->getContainerId() != logRecord.containerId_ || 
+				txn.getContainerId() != logRecord.containerId_) {
+				GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_DS_CONTAINER_ID_INVALID,
+					"log containerId : " << logRecord.containerId_
+										 << ", redo containerId : "
+										 << container->getContainerId());
+			}
+			IndexCursor indexCursor;
+			container->createIndex(txn, indexInfo, indexCursor);
+
+			if (!txn.isAutoCommit()) {
+				txnMgr_->update(txn, logRecord.stmtId_);
+
+				removeTransaction(mode, txn);
+			}
 		} break;
 
 		case LogManager::LOG_TYPE_DROP_INDEX: {
 			GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL, GS_TRACE_RM_REDO_LOG_STATUS,
-				"LOG_TYPE_DROP_INDEX(pId="
-					<< pId << ", lsn=" << logRecord.lsn_
-					<< ", containerId=" << logRecord.containerId_ << ", stmtId="
-					<< logRecord.stmtId_ << ", columnId=" << logRecord.columnId_
-					<< ", mapType=" << logRecord.mapType_ << ")");
+				"LOG_TYPE_DROP_INDEX(pId=" << pId
+					<< ", lsn=" << logRecord.lsn_
+					<< ", containerId=" << logRecord.containerId_
+					<< ", stmtId=" << logRecord.stmtId_
+					<< ", columnCount=" << logRecord.columnIdCount_
+					<< ", firstColumnId="
+					<< (logRecord.columnIdCount_ > 0 ? logRecord.columnIds_[0] : UNDEF_COLUMNID)
+					<< ", mapType=" << logRecord.mapType_
+					<< ", indexName=" << logRecord.indexName_ << ")");
 			const TransactionManager::ContextSource src(DELETE_INDEX,
 				logRecord.stmtId_, logRecord.containerId_,
 				TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL,
@@ -1400,8 +1602,25 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 			BaseContainer *container = containerAutoPtr.getBaseContainer();
 			assert(container != NULL);
 
-			IndexInfo indexInfo(
-				logRecord.columnId_, static_cast<MapType>(logRecord.mapType_));
+			IndexInfo indexInfo(alloc);
+			indexInfo.mapType = static_cast<MapType>(logRecord.mapType_);
+			indexInfo.columnIds_.resize(logRecord.columnIdCount_, 0);
+			if (!indexInfo.columnIds_.empty()) {
+				memcpy(&(indexInfo.columnIds_[0]), logRecord.columnIds_,
+					sizeof(ColumnId)*logRecord.columnIdCount_);
+			}
+			indexInfo.indexName_.append(logRecord.indexName_, logRecord.indexNameLen_-1);
+			indexInfo.extensionName_.append(logRecord.extensionName_, logRecord.extensionNameLen_-1);
+			size_t paramOffset = 0;
+			if (logRecord.paramCount_ > 0) {
+				indexInfo.anyNameMatches_ = *static_cast<const uint8_t*>(logRecord.paramData_ + paramOffset);
+				paramOffset += logRecord.paramDataLen_[0];
+			}
+			if (logRecord.paramCount_ > 1) {
+				indexInfo.anyTypeMatches_ = *static_cast<const uint8_t*>(logRecord.paramData_ + paramOffset);
+				paramOffset += logRecord.paramDataLen_[1];
+			}
+
 			container->dropIndex(txn, indexInfo);
 		} break;
 
@@ -1455,7 +1674,8 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 			assert(container != NULL);
 
 			const std::string triggerName(
-				logRecord.containerName_, logRecord.containerNameLen_);
+				reinterpret_cast<const char*>(logRecord.containerName_),
+				logRecord.containerNameLen_);
 			container->deleteTrigger(txn, triggerName.c_str());
 		} break;
 
@@ -1510,8 +1730,22 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 				container->putRow(txn, logRecord.dataLen_, logRecord.rowData_,
 					rowId, status, PUT_INSERT_OR_UPDATE);
 				if (logRecord.numRowId_ == 1) {
-					assert(rowId == reinterpret_cast<const RowId *>(
-										logRecord.rowIds_)[0]);
+					if(rowId != reinterpret_cast<const RowId *>(logRecord.rowIds_)[0]){
+							GS_TRACE_INFO(
+								RECOVERY_MANAGER, GS_ERROR_DS_BACKGROUND_TASK_INVALID, 
+								"(pId=" << logRecord.partitionId_ 
+										<< ", lsn=" << logRecord.lsn_
+										<< ", logType = " << logRecord.type_ 
+										<< ", containerId = " << logRecord.containerId_
+										<< ", containerType =" << (int32_t)container->getContainerType()
+										<< ", log rowId = " << reinterpret_cast<const RowId *>(logRecord.rowIds_)[0]
+										<< ", unmatch rowId = " << rowId
+										);
+						if (container->getContainerType() != TIME_SERIES_CONTAINER ||
+							!(reinterpret_cast<TimeSeries *>(container))->isExpireContainer()) {
+							assert(false);
+						}
+					}
 				}
 			}
 			else {
@@ -1563,6 +1797,22 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 				container->updateRow(
 					txn, logRecord.dataLen_, logRecord.rowData_, rowId, status);
 				assert(status == DataStore::UPDATE);
+				if (status != DataStore::UPDATE) {
+						GS_TRACE_INFO(
+							RECOVERY_MANAGER, GS_ERROR_DS_BACKGROUND_TASK_INVALID, 
+							"(pId=" << logRecord.partitionId_ 
+									<< ", lsn=" << logRecord.lsn_
+									<< ", logType = " << logRecord.type_ 
+									<< ", containerId = " << logRecord.containerId_
+									<< ", containerType =" << (int32_t)container->getContainerType()
+									<< ", log rowId = " << reinterpret_cast<const RowId *>(logRecord.rowIds_)[i]
+									<< ", unmatch rowId = " << UNDEF_ROWID
+									);
+					if (container->getContainerType() != TIME_SERIES_CONTAINER ||
+						!(reinterpret_cast<TimeSeries *>(container))->isExpireContainer()) {
+						assert(false);
+					}
+				}
 			}
 
 			txnMgr_->update(txn, logRecord.stmtId_);
@@ -1608,6 +1858,22 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 					reinterpret_cast<const RowId *>(logRecord.rowIds_)[i];
 				bool dummy;
 				container->redoDeleteRow(txn, rowId, dummy);
+				if (!dummy) {
+						GS_TRACE_INFO(
+							RECOVERY_MANAGER, GS_ERROR_DS_BACKGROUND_TASK_INVALID, 
+							"(pId=" << logRecord.partitionId_ 
+									<< ", lsn=" << logRecord.lsn_
+									<< ", logType = " << logRecord.type_ 
+									<< ", containerId = " << logRecord.containerId_
+									<< ", containerType =" << (int32_t)container->getContainerType()
+									<< ", log rowId = " << reinterpret_cast<const RowId *>(logRecord.rowIds_)[i]
+									<< ", unmatch rowId = " << UNDEF_ROWID
+									);
+					if (container->getContainerType() != TIME_SERIES_CONTAINER ||
+						!(reinterpret_cast<TimeSeries *>(container))->isExpireContainer()) {
+						assert(false);
+					}
+				}
 			}
 
 			txnMgr_->update(txn, logRecord.stmtId_);
@@ -1669,8 +1935,8 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 	catch (std::exception &e) {
 		RM_RETHROW_LOG_REDO_ERROR(
 			e, "(pId=" << pId << ", lsn=" << logRecord.lsn_
-					   << ", type=" << logRecord.type_
-					   << ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+				<< ", type=" << logRecord.type_
+				<< ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 
@@ -1926,8 +2192,12 @@ void RecoveryManager::logRecordToString(PartitionId pId,
 		   << ", containerId=" << logRecord.containerId_
 		   << ", clientId=" << logRecord.clientId_
 		   << ", txnId=" << logRecord.txnId_ << ", stmtId=" << logRecord.stmtId_
-		   << ", columnId=" << logRecord.columnId_
-		   << ", mapType=" << logRecord.mapType_;
+		   << ", columnCount=" << logRecord.columnIdCount_
+		   << ", firstColumnId="
+		   << (logRecord.columnIdCount_ > 0 ? logRecord.columnIds_[0] : UNDEF_COLUMNID)
+		   << ", mapType=" << logRecord.mapType_
+		   << ", indexName=" << logRecord.indexName_
+		   << ", paramCount=" << logRecord.paramCount_;
 		break;
 
 	case LogManager::LOG_TYPE_DROP_INDEX:
@@ -1935,8 +2205,12 @@ void RecoveryManager::logRecordToString(PartitionId pId,
 		   << ", containerId=" << logRecord.containerId_
 		   << ", clientId=" << logRecord.clientId_
 		   << ", txnId=" << logRecord.txnId_ << ", stmtId=" << logRecord.stmtId_
-		   << ", columnId=" << logRecord.columnId_
-		   << ", mapType=" << logRecord.mapType_;
+		   << ", columnCount=" << logRecord.columnIdCount_
+		   << ", firstColumnId="
+		   << (logRecord.columnIdCount_ > 0 ? logRecord.columnIds_[0] : UNDEF_COLUMNID)
+		   << ", mapType=" << logRecord.mapType_
+		   << ", indexName=" << logRecord.indexName_
+		   << ", paramCount=" << logRecord.paramCount_;
 		break;
 
 	case LogManager::LOG_TYPE_PUT_ROW:

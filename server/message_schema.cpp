@@ -29,8 +29,9 @@ MessageSchema::MessageSchema(util::StackAllocator &alloc,
 	: dsValueLimitConfig_(dsValueLimitConfig),
 	  containerType_(UNDEF_CONTAINER),
 	  affinityStr_(alloc),
+	  keyColumnIds_(alloc),
 	  columnTypeList_(alloc),
-	  isArrayList_(alloc),
+	  flagsList_(alloc),
 	  columnNameList_(alloc),
 	  columnNameMap_(alloc),
 	  alloc_(alloc) {
@@ -56,31 +57,20 @@ void MessageSchema::validateColumnSchema(util::ArrayByteInStream &in) {
 			"Number of columns = " << columnNum_ << " is invalid");
 	}
 
-	int32_t tmpKeyColumnId;
-	in >> tmpKeyColumnId;
-	if (tmpKeyColumnId == -1) {
-		keyColumnId_ = UNDEF_COLUMNID;
-	}
-	else {
-		keyColumnId_ = static_cast<ColumnId>(tmpKeyColumnId);
-	}
-	if (keyColumnId_ != UNDEF_COLUMNID &&
-		keyColumnId_ >=
-			columnNum_) {  
-		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
-			"ColumnId of rowkey = " << keyColumnId_ << " is invalid");
-	}
 
 	columnNameList_.reserve(columnNum_);
 	columnTypeList_.reserve(columnNum_);
-	isArrayList_.reserve(columnNum_);
+	flagsList_.reserve(columnNum_);
 
 	util::Map<util::String, ColumnId, CompareStringI>::iterator itr;
 	for (uint32_t i = 0; i < columnNum_; i++) {
 		util::String columnName(alloc_);
 		in >> columnName;
 
-		validateName(columnName.c_str(), LIMIT_COLUMN_NAME_SIZE);
+		NoEmptyKey::validate(
+			KeyConstraint::getUserKeyConstraint(LIMIT_COLUMN_NAME_SIZE),
+			columnName.c_str(), static_cast<uint32_t>(columnName.size()),
+			"columnName");
 
 		columnNameList_.push_back(columnName);
 
@@ -101,27 +91,51 @@ void MessageSchema::validateColumnSchema(util::ArrayByteInStream &in) {
 		in >> columTypeTmp;
 		columnTypeList_.push_back(static_cast<ColumnType>(columTypeTmp));
 
-		int8_t isArrayTmp;
-		in >> isArrayTmp;
-		isArrayList_.push_back(isArrayTmp != 0);
+		uint8_t flagsTmp;
+		in >> flagsTmp;
+		flagsList_.push_back(flagsTmp);
+		const bool isArray = getIsArray(i);
+//		const bool isNotNull = getIsNotNull(i);
 
 		if (!ValueProcessor::isValidArrayAndType(
-				isArrayList_[i], columnTypeList_[i])) {
+				isArray, columnTypeList_[i])) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
 				"unsupported Column type = " << (int32_t)columnTypeList_[i]
 											 << ", array = "
-											 << (int32_t)isArrayList_[i]);
-		}
-		if (keyColumnId_ == i) {
-			if (!ValueProcessor::validateRowKeyType(
-					isArrayList_[i], columnTypeList_[i])) {
-				GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
-					"unsupported RowKey Column type = "
-						<< (int32_t)columnTypeList_[i]
-						<< ", array = " << (int32_t)isArrayList_[i]);
-			}
+											 << (int32_t)isArray);
 		}
 	}
+	int16_t rowKeyNum;
+	in >> rowKeyNum;
+	for (int16_t i = 0; i < rowKeyNum; i++) {
+		int16_t rowKeyColumnId;
+		in >> rowKeyColumnId;
+		if (rowKeyColumnId != 0) {
+			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
+				"ColumnNumber of rowkey = " << rowKeyColumnId << " is invalid");
+		}
+
+		const bool isArray = getIsArray(rowKeyColumnId);
+		const bool isNotNull = getIsNotNull(rowKeyColumnId);
+		if (!ValueProcessor::validateRowKeyType(
+				isArray, columnTypeList_[rowKeyColumnId])) {
+			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
+				"unsupported RowKey Column type = "
+					<< (int32_t)columnTypeList_[rowKeyColumnId]
+					<< ", array = " << (int32_t)isArray);
+		}
+		if (!isNotNull) {
+			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
+				"unsupported RowKey Column is not nullable");
+		}
+		keyColumnIds_.push_back(rowKeyColumnId);
+	}
+	if (rowKeyNum < 0 || rowKeyNum > 1) {
+		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
+			"Number of rowkey must be one or zero");
+	}
+
+
 }
 
 void MessageSchema::validateContainerOption(util::ArrayByteInStream &in) {
@@ -138,14 +152,11 @@ MessageCollectionSchema::MessageCollectionSchema(util::StackAllocator &alloc,
 	: MessageSchema(alloc, dsValueLimitConfig, containerName, in) {
 	containerType_ = COLLECTION_CONTAINER;
 	validateContainerOption(in);
-	int32_t attribute = CONTAINER_ATTR_BASE;
+	int32_t attribute = CONTAINER_ATTR_SINGLE;
 	if (in.base().remaining() != 0) {
 		in >> attribute;
 	}
 	setContainerAttribute(static_cast<ContainerAttribute>(attribute));
-	validateContainerName(containerName,
-		dsValueLimitConfig_.getLimitContainerNameSize(),
-		static_cast<ContainerAttribute>(attribute));
 }
 
 MessageTimeSeriesSchema::MessageTimeSeriesSchema(util::StackAllocator &alloc,
@@ -158,22 +169,20 @@ MessageTimeSeriesSchema::MessageTimeSeriesSchema(util::StackAllocator &alloc,
 	validateContainerOption(in);
 	validateRowKeySchema();
 	validateOption(in);
-	int32_t attribute = CONTAINER_ATTR_BASE;
+	int32_t attribute = CONTAINER_ATTR_SINGLE;
 	if (in.base().remaining() != 0) {
 		in >> attribute;
 	}
-	if (attribute != CONTAINER_ATTR_BASE) {
-		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
-			"TimeSeries Forbidden Attribute : " << attribute);
-	}
 	setContainerAttribute(static_cast<ContainerAttribute>(attribute));
-	validateContainerName(containerName,
-		dsValueLimitConfig_.getLimitContainerNameSize(),
-		static_cast<ContainerAttribute>(attribute));
 }
 
 void MessageTimeSeriesSchema::validateRowKeySchema() {
-	ColumnId columnId = getRowKeyColumnId();
+	const util::XArray<ColumnId> &keyColumnIds = getRowKeyColumnIdList();
+	if (keyColumnIds.size() != 1) {
+		GS_THROW_USER_ERROR(
+			GS_ERROR_DS_DS_SCHEMA_INVALID, "must define one rowkey");
+	}
+	ColumnId columnId = keyColumnIds.front();
 	if (columnId >= getColumnCount()) {  
 		GS_THROW_USER_ERROR(
 			GS_ERROR_DS_DS_SCHEMA_INVALID, "must define rowkey");
@@ -203,7 +212,7 @@ void MessageTimeSeriesSchema::validateOption(util::ArrayByteInStream &in) {
 			static_cast<TimeUnit>(timeUnitTmp);  
 		int32_t expirationDivisionCount;
 		in >> expirationDivisionCount;
-		if (expirationDivisionCount != -1) {
+		if (expirationDivisionCount != EXPIRE_DIVIDE_UNDEFINED_NUM) {
 			expirationInfo_.dividedNum_ = static_cast<uint16_t>(
 				expirationDivisionCount);  
 		}
@@ -280,3 +289,4 @@ void MessageTimeSeriesSchema::validateOption(util::ArrayByteInStream &in) {
 		in >> reserve4;
 	}
 }
+

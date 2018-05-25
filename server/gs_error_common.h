@@ -65,7 +65,8 @@ enum GSCommonErrorCode {
 	GS_THROW_USER_ERROR(errorCode, message)
 #define GS_COMMON_RETHROW_USER_ERROR(cause, message) \
 	GS_RETHROW_USER_ERROR(cause, message)
-#define GS_COMMON_EXCEPTION_MESSAGE(cause) GS_EXCEPTION_MESSAGE(cause)
+#define GS_COMMON_EXCEPTION_MESSAGE(cause) \
+	GS_EXCEPTION_MESSAGE(cause)
 #endif
 
 #endif

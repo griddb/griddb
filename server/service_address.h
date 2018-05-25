@@ -26,7 +26,7 @@
 
 namespace picojson {
 class value;
-}  
+} 
 
 class ServiceAddressResolver {
 public:
@@ -43,7 +43,7 @@ public:
 
 	~ServiceAddressResolver();
 
-	const Config &getConfig() const;
+	const Config& getConfig() const;
 
 	static void checkConfig(const Allocator &alloc, const Config &config);
 
@@ -70,17 +70,17 @@ public:
 	util::SocketAddress getAddress(size_t index, uint32_t type) const;
 
 	void setAddress(
-		size_t index, uint32_t type, const util::SocketAddress &addr);
+			size_t index, uint32_t type, const util::SocketAddress &addr);
 
 	void importFrom(const picojson::value &value, bool strict = true);
 
 	bool exportTo(picojson::value &value) const;
-
+ 
 	void validate();
 
 	void normalize();
 
-	util::IOPollHandler *getIOPollHandler();
+	util::IOPollHandler* getIOPollHandler();
 	util::IOPollEvent getIOPollEvent();
 
 	util::SocketAddress makeSocketAddress(const char8_t *host, int64_t port);
@@ -91,37 +91,37 @@ private:
 	struct EntryLess;
 	struct ProviderContext;
 
-	typedef util::BasicString<char8_t, std::char_traits<char8_t>,
-		util::StdAllocator<char8_t, void> >
-		String;
+	typedef util::BasicString< char8_t, std::char_traits<char8_t>,
+			util::StdAllocator<char8_t, void> > String;
 
 	typedef std::vector<String, util::StdAllocator<String, void> > TypeList;
-	typedef std::map<String, uint32_t, std::less<String>,
-		util::StdAllocator<std::pair<const String, uint32_t>, void> >
-		TypeMap;
+	typedef std::map< String, uint32_t, std::less<String>, util::StdAllocator<
+			std::pair<const String, uint32_t>, void> > TypeMap;
 
-	typedef std::set<util::SocketAddress, std::less<util::SocketAddress>,
-		util::StdAllocator<util::SocketAddress, void> >
-		AddressSet;
+	typedef std::set< util::SocketAddress, std::less<util::SocketAddress>,
+			util::StdAllocator<util::SocketAddress, void> > AddressSet;
 	typedef std::vector<Entry, util::StdAllocator<Entry, void> > EntryList;
 
-	friend std::ostream &operator<<(
-		std::ostream &s, const ProviderContext &cxt);
+	friend std::ostream& operator<<(
+			std::ostream &s, const ProviderContext &cxt);
 
 	static const char8_t JSON_KEY_ADDRESS[];
 	static const char8_t JSON_KEY_PORT[];
 
-	ServiceAddressResolver(const ServiceAddressResolver &);
-	ServiceAddressResolver &operator=(const ServiceAddressResolver &);
+	ServiceAddressResolver(const ServiceAddressResolver&);
+	ServiceAddressResolver& operator=(const ServiceAddressResolver&);
+
+	void initializeRaw();
 
 	void completeInit();
 	void checkEntry(size_t index) const;
 	void checkType(uint32_t type) const;
 
-	const char8_t *getTypeName(uint32_t type) const;
+	const char8_t* getTypeName(uint32_t type) const;
 
-	static bool isSameEntries(const EntryList &list1, bool normalized1,
-		const EntryList &list2, bool normalized2);
+	static bool isSameEntries(
+			const EntryList &list1, bool normalized1,
+			const EntryList &list2, bool normalized2);
 
 	static void normalizeEntries(EntryList *entryList);
 
@@ -145,9 +145,9 @@ private:
 };
 
 struct ServiceAddressResolver::Entry {
-	typedef std::vector<util::SocketAddress,
-		util::StdAllocator<util::SocketAddress, void> >
-		AddressList;
+	typedef std::vector<
+			util::SocketAddress,
+			util::StdAllocator<util::SocketAddress, void> > AddressList;
 
 	Entry(const Allocator &alloc, size_t typeCount);
 

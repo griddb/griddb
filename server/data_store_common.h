@@ -24,13 +24,14 @@
 
 #include "data_type.h"
 #include "gs_error.h"
-#include <string.h>
 
 
 class ObjectManager;
 
-static const uint32_t OBJECT_MAX_1BYTE_LENGTH_VALUE =
-	127;  
+static const uint32_t VAR_SIZE_1BYTE_THRESHOLD = 128;
+static const uint32_t VAR_SIZE_4BYTE_THRESHOLD = UINT32_C(1) << 30;
+static const uint64_t VAR_SIZE_8BYTE_THRESHOLD = UINT64_C(1) << 62;
+
 static const uint32_t NEXT_OBJECT_LINK_INFO_SIZE = 8;  
 static const uint32_t LINK_VARIABLE_COLUMN_DATA_SIZE =
 	sizeof(uint32_t) + sizeof(uint64_t);  
@@ -125,6 +126,8 @@ enum CheckpointMode {
 	CP_REQUESTED,
 	CP_AFTER_RECOVERY,
 	CP_SHUTDOWN,
+	CP_PREPARE_LONGTERM_SYNC,	
+	CP_STOP_LONGTERM_SYNC		
 };
 
 typedef uint8_t ColumnType;
@@ -195,9 +198,8 @@ static const char *const GS_CAPITAL_SYSTEM_USER =
 	"SYSTEM";  
 
 static const char *const GS_SYSTEM = "gs#system";  
-static const char *const GS_USERS = "gs#users@0";  
-static const char *const GS_DATABASES =
-	"gs#databases@0";  
+static const char *const GS_USERS = "#_users@0";
+static const char *const GS_DATABASES = "#_databases@0";
 static const char *const GS_PUBLIC = "public";  
 static const char *const GS_INFO_SCHEMA =
 	"information_schema";							 
@@ -206,36 +208,24 @@ static const char *const GS_SYSTEM_USER = "system";
 static const char *const GS_PREFIX = "gs#";			 
 
 static const DatabaseId UNDEF_DBID = UNDEF_ROWID;
-static const DatabaseId GS_SYSTEM_DB_ID = -2;
-static const DatabaseId GS_PUBLIC_DB_ID = -1;
+static const DatabaseId MAX_DBID = MAX_ROWID;
+static const DatabaseId DBID_RESERVED_RANGE = 100;
+static const DatabaseId GS_PUBLIC_DB_ID = 0;
+static const DatabaseId GS_SYSTEM_DB_ID = 1;
 
 /*!
 	@brief Represents the attribute of container
 */
 enum ContainerAttribute {
-
-	CONTAINER_ATTR_BASE = 0x00000000,  
-	CONTAINER_ATTR_BASE_SYSTEM =
-		0x00000001,  
 	CONTAINER_ATTR_SINGLE =
 		0x00000010,  
 	CONTAINER_ATTR_SINGLE_SYSTEM =
 		0x00000011,  
-	CONTAINER_ATTR_SINGLE_SEMI_PERMANENT_SYSTEM =
-		0x00000015,  
 	CONTAINER_ATTR_LARGE =
 		0x00000020,  
 	CONTAINER_ATTR_SUB =
 		0x00000030,  
-};
-
-/*!
-	@brief Represents the mode of access for container
-*/
-enum ContainerAccessMode {
-	UNDEF_ACCESS_MODE,  
-	NOSQL_SYSTEM_ACCESS_MODE,  
-	NOSQL_NORMAL_ACCESS_MODE,  
+	CONTAINER_ATTR_ANY = 0x0000007f
 };
 
 /*!
@@ -247,12 +237,53 @@ enum PutRowOption {
 	PUT_UPDATE_ONLY,	   
 };
 
-typedef uint8_t MapType;
+typedef int8_t MapType;
 static const MapType MAP_TYPE_BTREE = 0;
 static const MapType MAP_TYPE_HASH = 1;
-static const MapType MAP_TYPE_RESERVED = 2;
-static const MapType MAP_TYPE_WITH_BEGIN = 0xff;
-static const MapType MAP_TYPE_NUM = 3;  
+static const MapType MAP_TYPE_SPATIAL = 2;
+static const MapType MAP_TYPE_NUM = 3;
+
+static const MapType MAP_TYPE_DEFAULT = -1;
+static const MapType MAP_TYPE_VECTOR = -2;
+
+const MapType defaultIndexType[] = {
+	MAP_TYPE_BTREE,		
+	MAP_TYPE_BTREE,		
+	MAP_TYPE_BTREE,		
+	MAP_TYPE_BTREE,		
+	MAP_TYPE_BTREE,		
+	MAP_TYPE_BTREE,		
+	MAP_TYPE_BTREE,		
+	MAP_TYPE_BTREE,		
+	MAP_TYPE_BTREE,		
+	MAP_TYPE_SPATIAL,	
+	MAP_TYPE_DEFAULT,	
+	MAP_TYPE_DEFAULT,	
+	MAP_TYPE_DEFAULT,	
+	MAP_TYPE_DEFAULT,	
+	MAP_TYPE_DEFAULT,	
+	MAP_TYPE_DEFAULT,	
+	MAP_TYPE_DEFAULT,	
+	MAP_TYPE_DEFAULT,	
+	MAP_TYPE_DEFAULT,	
+	MAP_TYPE_DEFAULT,	
+	MAP_TYPE_DEFAULT,	
+};
+
+inline const char8_t* getMapTypeStr(MapType type) {
+	switch (type) {
+	case MAP_TYPE_BTREE:
+		return "TREE";
+	case MAP_TYPE_HASH:
+		return "HASH";
+	case MAP_TYPE_SPATIAL:
+		return "SPATIAL";
+	case MAP_TYPE_DEFAULT:
+		return "DEFAULT";
+	default:
+		return "UNKNOWN";
+	}
+}
 
 typedef uint8_t TimeUnit;
 static const TimeUnit TIME_UNIT_YEAR = 0;
@@ -283,13 +314,12 @@ enum AggregationType {
 	@brief Represents the type(s) of ResultSet
 */
 enum ResultType {
-	RESULT_ROWSET,			
-	RESULT_AGGREGATE,		
-	RESULT_EXPLAIN,			
-	PARTIAL_RESULT_ROWSET,  
-	RESULT_ROW_ID_SET,		
-	RESULT_NONE,
-	RESULT_SELECTION = RESULT_ROWSET,  
+	RESULT_NONE = -1,
+	RESULT_ROW_ID_SET = -2,		
+	RESULT_ROWSET = 0,			
+	RESULT_AGGREGATE = 1,		
+	RESULT_EXPLAIN = 2,			
+	PARTIAL_RESULT_ROWSET = 3,  
 };
 
 
@@ -318,6 +348,8 @@ const MVCC_IMAGE_TYPE MVCC_CREATE = 0;
 const MVCC_IMAGE_TYPE MVCC_UPDATE = 1;
 const MVCC_IMAGE_TYPE MVCC_DELETE = 2;
 const MVCC_IMAGE_TYPE MVCC_SELECT = 3;
+const MVCC_IMAGE_TYPE MVCC_INDEX = 4;
+const MVCC_IMAGE_TYPE MVCC_CONTAINER = 5;
 const MVCC_IMAGE_TYPE MVCC_UNDEF = INT8_MAX;
 
 /*!
@@ -327,14 +359,22 @@ struct MvccRowImage {
 	union {
 		RowId firstCreateRowId_;  
 		OId snapshotRowOId_;  
+		RowId cursor_;			
 	};
 	union {
 		RowId lastCreateRowId_;  
+		OId containerOId_;		
 	};
 	MVCC_IMAGE_TYPE type_;
-	uint8_t padding1_;
+	union {
+		uint8_t padding1_;
+		MapType mapType_;
+	};
 	uint16_t padding2_;
-	uint32_t padding3_;
+	union {
+		uint32_t padding3_;
+		ColumnId columnId_;
+	};
 
 	MvccRowImage()
 		: firstCreateRowId_(INITIAL_ROWID),
@@ -410,6 +450,12 @@ struct MvccRowImage {
 		case MVCC_SELECT:
 			str = "SELECT";
 			break;
+		case MVCC_INDEX:
+			str = "INDEX";
+			break;
+		case MVCC_CONTAINER:
+			str = "CONTAINER";
+			break;
 		default:
 			str = "UNKNOWN";
 			break;
@@ -434,101 +480,18 @@ private:
 	}
 };
 
-/*!
-	@brief Validate character
-	@note name A word consisting only of alphanumeric characters and
-   underscores, and beginning with an alphabetic character or an underscore
-*/
-static inline bool validateCharacters(const char *name) {
-	size_t len = strlen(name);
-	{
-		const unsigned char ch = static_cast<unsigned char>(name[0]);
-		if (!isascii(ch) || (!isalpha(ch) && ch != '_')) {
-			return false;
-		}
-	}
-	for (size_t i = 1; i < len; i++) {
-		const unsigned char ch = static_cast<unsigned char>(name[i]);
-		if (!isascii(ch) || (!isalnum(ch) && ch != '_')) {
-			return false;
-		}
-	}
-	return true;
+class FullContainerKey;
+struct TQLInfo {
+	TQLInfo() : dbName_(GS_PUBLIC),	containerKey_(NULL), query_("") {}
+	TQLInfo(const char *dbName, const FullContainerKey *containerKey, 
+		const char *query) : 
+		dbName_((dbName == NULL) ? GS_PUBLIC : dbName), 
+		containerKey_(containerKey),
+		query_((query == NULL) ? "" : query) {} 
+	const char *dbName_;
+	const FullContainerKey *containerKey_;
+	const char *query_;
 };
-
-/*!
-	@brief Validate name
-*/
-static inline void validateName(const char *name, const uint32_t limit) {
-	size_t len = strlen(name);
-	if (len <= 0 || len > limit) {  
-		GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-			"Size of name exceeds maximum size or is zero: " << name);
-	}
-	if (!validateCharacters(name)) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_CM_LIMITS_EXCEEDED, "forbidden characters : " << name);
-	}
-}
-
-/*!
-	@brief Validate Container name
-	@note name A word consisting only of alphanumeric characters , underscores,
-   sharp, slash and atmark, and beginning with an alphabetic character or an
-   underscore
-	@note atmark can be used only once
-	@note sharp can be used in System Container
-	@note slash can be used in Sub Container
-*/
-static inline void validateContainerName(const char *name, const uint32_t limit,
-	const ContainerAttribute attribute) {
-	size_t len = strlen(name);
-	if (len <= 0 || len > limit) {  
-		GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-			"Size of name exceeds maximum size or is zero: " << name);
-	}
-	{
-		const unsigned char ch = static_cast<unsigned char>(name[0]);
-		if (!isascii(ch) || (!isalpha(ch) && ch != '_')) {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_CM_LIMITS_EXCEEDED, "forbidden characters : " << name);
-		}
-	}
-	int32_t atmarkCounter = 0;
-	bool isSlashMode = false;
-	for (size_t i = 1; i < len; i++) {
-		const unsigned char ch = static_cast<unsigned char>(name[i]);
-		if (!isascii(ch)) {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_CM_LIMITS_EXCEEDED, "forbidden characters : " << name);
-		}
-		if (isSlashMode) {
-			if (!isdigit(ch)) {
-				GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-					"forbidden characters : " << name);
-			}
-		}
-		else {
-			if (!(isalnum(ch) || ch == '_' || ch == '@' ||
-					(ch == '/' && attribute == CONTAINER_ATTR_SUB) ||
-					(ch == '#' &&
-						(attribute == CONTAINER_ATTR_BASE_SYSTEM ||
-							attribute ==
-								CONTAINER_ATTR_SINGLE_SEMI_PERMANENT_SYSTEM ||
-							attribute == CONTAINER_ATTR_SINGLE_SYSTEM)))) {
-				GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-					"forbidden characters : " << name);
-			}
-			if (ch == '/') {
-				isSlashMode = true;
-			}
-			else if (ch == '@' && ++atmarkCounter > 1) {
-				GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-					"forbidden characters : " << name);
-			}
-		}
-	}
-}
 
 
 

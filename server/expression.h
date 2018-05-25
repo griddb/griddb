@@ -30,10 +30,10 @@
 #include "gs_error.h"
 #include "qp_def.h"
 #include "schema.h"
-#include "transaction_context.h"
 #include "value_processor.h"
 #include <cstdarg>
 #include <stdexcept>
+#include "transaction_context.h"
 
 class AggregationMap;
 class Expr;
@@ -44,6 +44,17 @@ class TqlAggregation;
 class TqlFunc;
 class TqlSelection;
 class TqlSpecialId;
+
+enum TrivalentLogicType {
+	TRI_TRUE = 1,
+	TRI_NULL = 0,
+	TRI_FALSE = -1
+};
+
+static inline TrivalentLogicType notTrivalentLogic(const TrivalentLogicType input) {
+	return static_cast<TrivalentLogicType>(input * -1);
+}
+
 /*!
 * @brief Token structure
 */
@@ -63,6 +74,8 @@ enum SortOrder { ASC, DESC };
 typedef struct SortExpr {
 	SortOrder order;
 	Expr *expr;
+	bool nullsLast;
+	SortExpr() : order(ASC), expr(NULL), nullsLast(true) {}
 	SortExpr *dup(TransactionContext &txn, ObjectManager &objectManager);
 } SortItem;
 
@@ -91,10 +104,15 @@ class OutputMessageRowStore;
 */
 class ContainerRowWrapper {
 public:
+	virtual ~ContainerRowWrapper() {}
 	virtual const Value *getColumn(uint32_t columnId) = 0;
 	const Value *operator[](uint32_t id) {
 		return getColumn(id);
 	}
+	virtual void load(OId oId) = 0;
+	virtual RowId getRowId() = 0;
+	virtual void getImage(TransactionContext &txn,
+		MessageRowStore *messageRowStore, bool isWithRowId) = 0;
 };
 
 class BaseContainer;
@@ -118,9 +136,8 @@ public:
 		COLUMN,
 		VARIABLE,
 		EXPRLABEL,
-#ifdef QP_USE_NULL_VALUE
 		NULLVALUE,
-#endif
+		BOOL_EXPR,
 	};
 	/*!
 	*	@brief Represents the type of Operation
@@ -154,21 +171,20 @@ public:
 
 	bool isNumeric() const;
 	bool isNumericOfType(ColumnType t) const;
-	bool isNumericInteger();
-	bool isNumericFloat();
-	bool isBoolean();
-	bool isString();
-	bool isTimestamp();
-	bool isArrayValue();
-	bool isValue();
-	bool isExprLabel();
-	bool isExprArray();
-	bool isAggregation();
-	bool isSelection();
-	bool isColumn();
-#ifdef QP_USE_NULL_VALUE
-	bool isNullValue();
-#endif
+	bool isNumericInteger() const;
+	bool isNumericFloat() const;
+	bool isBoolean() const;
+	bool isString() const;
+	bool isTimestamp() const;
+	bool isArrayValue() const;
+	bool isValue() const;
+	bool isExprLabel() const;
+	bool isExprArray() const;
+	bool isAggregation() const;
+	bool isSelection() const;
+	bool isColumn() const;
+	bool isNullValue() const;
+	bool isNullable() const;
 	QpPassMode getPassMode(TransactionContext &txn);
 
 	Type getType();
@@ -186,7 +202,6 @@ public:
 
 	virtual Expr *dup(TransactionContext &txn, ObjectManager &objectManager);
 
-#ifdef QP_USE_NULL_VALUE
 	/*!
 	 * @param Generate expression with null value
 	 *
@@ -195,9 +210,8 @@ public:
 	 * @return generated expression
 	 */
 	static Expr *newNullValue(TransactionContext &txn) {
-		return QP_NEW_BY_TXN(txn) Expr(txn);
+		return QP_NEW_BY_TXN(txn) Expr(TRI_NULL, txn);
 	}
-#endif
 
 	/*!
 	 * @brief Generate expression with boolean value
@@ -209,6 +223,18 @@ public:
 	 */
 	static Expr *newBooleanValue(bool v, TransactionContext &txn) {
 		return QP_NEW_BY_TXN(txn) Expr(v, txn);
+	}
+	/*!
+	 * @brief Generate expression with boolean value
+	 *
+	 * @param v value
+	 * @param txn The transaction context
+	 *
+	 * @return generated expression
+	 */
+	static Expr *newBooleanValue(TrivalentLogicType v, TransactionContext &txn) {
+		bool b = (v == TRI_TRUE);
+		return QP_NEW_BY_TXN(txn) Expr(b, txn);
 	}
 
 	/*!
@@ -311,8 +337,7 @@ public:
 	 *
 	 * @return generated expression
 	 */
-	static Expr *newExprArray(
-		ExprList &v, TransactionContext &txn, ObjectManager &objectManager) {
+	static Expr *newExprArray(ExprList &v, TransactionContext &txn, ObjectManager &objectManager) {
 		return QP_NEW_BY_TXN(txn) Expr(&v, txn, objectManager);
 	}
 
@@ -385,7 +410,7 @@ public:
 		return QP_NEW_BY_TXN(txn) Expr(array, txn);
 	}
 
-	static char *dequote(util::StackAllocator &alloc, const char *str);
+	static char *dequote(util::StackAllocator &alloc, const char *str, bool &isQuote);
 
 	virtual ~Expr();
 
@@ -413,6 +438,19 @@ public:
 	 */
 	operator bool() {
 		return getValueAsBool();
+	}
+
+	/*!
+	 * @brief Cast to trivalent logic value
+	 */
+	TrivalentLogicType castTrivalentLogicValue() {
+		if (isNullValue()) {
+			return TRI_NULL;
+		} else if (getValueAsBool()) {
+			return TRI_TRUE;
+		} else {
+			return TRI_FALSE;
+		}
 	}
 
 	/*!
@@ -446,7 +484,7 @@ public:
 		uint32_t indexColumnId, Query &queryObj, const void *&startKey,
 		uint32_t &startKeySize, int32_t &isStartKeyIncluded,
 		const void *&endKey, uint32_t &endKeySize, int32_t &isEndKeyIncluded,
-		bool notFlag);
+		NullCondition &nullCond, bool notFlag);
 
 	bool aggregate(TransactionContext &txn, Collection &collection,
 		util::XArray<OId> &resultRowIdList, Value &result);
@@ -481,7 +519,7 @@ public:
 
 	void aggregate(TransactionContext &txn, TimeSeries &timeSeries,
 		BtreeMap::SearchContext &sc, ResultSize &resultNum,
-		util::XArray<uint8_t> &serializedRowList, ResultType &resultType);
+		Value &value);
 
 	static void dequote(util::String &str, char quote);
 	static void unescape(util::String &str, char escape);
@@ -494,12 +532,12 @@ public:
 	 *
 	 * @return compare result(-1, 0, 1)
 	 */
-	int compareAsValue(TransactionContext &txn, Expr *e2) {
+	int compareAsValue(TransactionContext &txn, Expr *e2, bool nullsLast) {
 		if (isValue() && e2->isValue() && !value_->isArray() &&
 			!e2->value_->isArray()) {
 #ifdef QP_USE_STRING_COMPARATOR
-			if (comparatorTable[value_->getType()][e2->value_->getType()]) {
-				return comparatorTable[value_->getType()]
+			if (ComparatorTable::comparatorTable_[value_->getType()][e2->value_->getType()]) {
+				return ComparatorTable::comparatorTable_[value_->getType()]
 									  [e2->value_->getType()](txn,
 										  value_->data(), value_->size(),
 										  e2->value_->data(),
@@ -507,8 +545,8 @@ public:
 			}
 #else
 			if (value_->getType() != COLUMN_TYPE_STRING &&
-				comparatorTable[value_->getType()][e2->value_->getType()]) {
-				return comparatorTable[value_->getType()]
+				ComparatorTable::comparatorTable_[value_->getType()][e2->value_->getType()]) {
+				return ComparatorTable::comparatorTable_[value_->getType()]
 									  [e2->value_->getType()](txn,
 										  value_->data(), value_->size(),
 										  e2->value_->data(),
@@ -534,23 +572,19 @@ public:
 			}
 		}
 		else {
-#ifdef QP_USE_NULL_VALUE
 			if (isNullValue() && e2->isValue()) {
-				return -1;
+				return nullsLast ? 1 : -1;
 			}
 			else if (isValue() && e2->isNullValue()) {
-				return 1;
+				return nullsLast ? -1 : 1;
 			}
 			else if (isNullValue() && e2->isNullValue()) {
 				return 0;
 			}
 			else {
-#endif
 				GS_THROW_USER_ERROR(GS_ERROR_TQ_INTERNAL_DATA_CANNOT_COMPARE,
 					"Internal logic error: Cannot compare non-value data");
-#ifdef QP_USE_NULL_VALUE
 			}
-#endif
 		}
 	}
 
@@ -567,6 +601,9 @@ protected:
 		uint32_t size1, uint8_t const *q, uint32_t size2, Value &value);
 	Expr *evalSubBinOp(TransactionContext &txn, ObjectManager &objectManager,
 		const Calculator op[][11], ContainerRowWrapper *column_values,
+		FunctionMap *function_map, const char *mark, EvalMode mode);
+	Expr *evalSubBinOp(TransactionContext &txn, ObjectManager &objectManager,
+		const Operation opType, ContainerRowWrapper *column_values,
 		FunctionMap *function_map, const char *mark, EvalMode mode);
 
 	Expr *evalSubUnaryOpBaseZero(TransactionContext &txn,
@@ -612,6 +649,7 @@ protected:
 	Expr(const char *name, TqlSelection *func, ExprList *arg,
 		TransactionContext &txn);
 	Expr(const char *name, TqlSpecialId *func, TransactionContext &txn);
+	Expr(TrivalentLogicType logicType, TransactionContext &txn);
 
 	template <typename T, typename R>
 	const char *stringifyValue(TransactionContext &txn);
@@ -717,11 +755,12 @@ protected:
 
 	Type type_;
 
-	Value *value_;				  
+	Value *
+		value_;					  
 	ExprList *arglist_;			  
 	util::XArray<uint8_t> *buf_;  
-	char *label_;  
-	Operation op_;			  
+	char *label_;   
+	Operation op_;  
 	ColumnType columnType_;   
 	ColumnInfo *columnInfo_;  
 	uint32_t columnId_;  

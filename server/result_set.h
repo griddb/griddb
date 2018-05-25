@@ -25,7 +25,6 @@
 #include "data_type.h"
 
 
-
 class BaseContainer;
 class ContainerRowScanner;
 /*!
@@ -33,6 +32,8 @@ class ContainerRowScanner;
 */
 class ResultSet {
 public:			  
+	class UpdateRowIdHandler;
+
 	ResultSet();  
 	~ResultSet();
 
@@ -244,6 +245,177 @@ public:
 
 	bool isRelease() const;
 
+	class QueryOption;
+	QueryOption &getQueryOption() {
+		return queryOption_;
+	}
+
+	const QueryOption &getQueryOption() const {
+		return queryOption_;
+	}
+
+	typedef util::Map<int8_t, util::XArray<uint8_t> *> PartialQueryOption;	 
+	void setQueryOption(int32_t fetchByteSize, bool isDistribute,
+		bool isPartial, const PartialQueryOption &partialQueryOption) {
+		queryOption_.setFetchByteSize(fetchByteSize);
+		queryOption_.setDistribute(isDistribute);
+		queryOption_.setPartial(isPartial);
+		queryOption_.decodePartialQueryOption(partialQueryOption);
+	}
+
+	void encodePartialQueryOption(util::StackAllocator &alloc, PartialQueryOption &partialQueryOption) const {
+		RowId minRowId = queryOption_.getMinRowId();
+		RowId maxRowId = queryOption_.getMaxRowId();
+
+		if (!queryOption_.isPartial() || 
+			(minRowId == MAX_ROWID && maxRowId == MAX_ROWID)) {
+			return;
+		}
+		{
+			int32_t entryType = ROW_ID;
+			util::XArray<uint8_t> *entryBody = ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
+			entryBody->push_back(
+				reinterpret_cast<uint8_t *>(&minRowId),
+				sizeof(RowId));
+			entryBody->push_back(
+				reinterpret_cast<uint8_t *>(&maxRowId),
+				sizeof(RowId));
+			partialQueryOption.insert(std::make_pair(entryType, entryBody));
+		}
+		{
+			int32_t entryType = FILTERED_COUNT;
+			util::XArray<uint8_t> *entryBody = ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
+			int64_t filteredNum = queryOption_.getFilteredNum();
+			entryBody->push_back(
+				reinterpret_cast<uint8_t *>(&filteredNum),
+				sizeof(int64_t));
+			partialQueryOption.insert(std::make_pair(entryType, entryBody));
+		}
+	}
+
+
+	int32_t getSerializedSize() {
+		if (getResultNum() > 0 && serializedRowList_ != NULL && serializedVarDataList_ != NULL) {
+			size_t usedSize = serializedRowList_->size() + 
+				serializedVarDataList_->size();
+			return static_cast<int32_t>(usedSize);
+		} else {
+			return 0;
+		}
+	}
+
+	enum PartialPositionType {
+		ROW_ID = 0,
+		FILTERED_COUNT = 1,
+	};
+	class QueryOption {
+	private:
+		bool isPartial_;
+		bool isDistribute_;
+		RowId minRowId_;		
+		RowId maxRowId_;		
+		int64_t filteredNum_;
+		int64_t distLimit_;
+		int64_t distOffset_;
+		int32_t fetchByteSize_;
+	public:
+		QueryOption() : isPartial_(false), isDistribute_(false),
+			minRowId_(INITIAL_ROWID), maxRowId_(MAX_ROWID), 
+			filteredNum_(0), distLimit_(MAX_RESULT_SIZE),
+			distOffset_(0) {}
+		static const ResultSize PARTIAL_SCAN_LIMIT = 100000;
+		enum PartialPositionType {
+			ROW_ID = 0,
+			FILTERED_COUNT = 1,
+		};
+
+		RowId getMinRowId() const {
+			return minRowId_;
+		}
+		RowId getMaxRowId() const {
+			return maxRowId_;
+		}
+		void setMinRowId(RowId id) {
+			minRowId_ = id;
+		}
+		void setMaxRowId(RowId id) {
+			maxRowId_ = id;
+		}
+		bool isRowIdScan() const {
+			return (isPartial_ || isDistribute_);
+		}
+
+		void decodePartialQueryOption(
+			const PartialQueryOption &partialQueryOption) {
+			PartialQueryOption::const_iterator itr;
+			for (itr = partialQueryOption.begin(); itr != partialQueryOption.end(); itr++) {
+				switch (itr->first) {
+				case ROW_ID: {
+					RowId *rowIdPair = reinterpret_cast<RowId *>(itr->second->data());
+					minRowId_ = *rowIdPair;
+					rowIdPair++;
+					maxRowId_ = *rowIdPair;
+				} break;
+				case FILTERED_COUNT: {
+					int64_t *filteredNum = reinterpret_cast<int64_t *>(itr->second->data());
+					filteredNum_ = *filteredNum;
+				} break;
+				default:
+					break;
+				}
+			}
+		}
+
+		bool isDistribute() const {
+			if (isDistribute_) {
+				return true;
+			} else {
+				return false;
+			}
+		}
+		void setDistribute(bool isDistribute) {
+			isDistribute_ = isDistribute;
+		}
+
+		bool existLimitOffset() const {
+			if (static_cast<ResultSize>(getDistLimit()) != MAX_RESULT_SIZE || getDistOffset() != 0) {
+				return true;
+			} else {
+				return false;
+			}
+		}
+		int64_t getFilteredNum() const {
+			return filteredNum_;
+		}
+		void setFilteredNum(int64_t num) {
+			filteredNum_ = num;
+		}
+		int32_t getFetchByteSize() const {
+			return fetchByteSize_;
+		}
+		void setFetchByteSize(int32_t fetchByteSize) {
+			fetchByteSize_ = fetchByteSize;
+		}
+		int64_t getDistLimit() const {
+			return distLimit_;
+		}
+		int64_t getDistOffset() const {
+			return distOffset_;
+		}
+		void setDistLimit(int64_t limit) {
+			distLimit_ = limit;
+		}
+		void setDistOffset(int64_t offset) {
+			distOffset_ = offset;
+		}
+		void setPartial(bool isPartial) {
+			isPartial_  = isPartial;
+		}
+		bool isPartial() const {
+			return isPartial_ ;
+		}
+	} queryOption_;
+
 private:							 
 	util::StackAllocator *rsAlloc_;  
 	util::StackAllocator
@@ -288,6 +460,7 @@ private:
 
 };
 
+
 /*!
 	@brief Pre/postprocess before/after ResultSet Operation
 */
@@ -304,6 +477,7 @@ private:
 	util::StackAllocator &txnAlloc_;
 	const size_t txnMemoryLimit_;
 };
+
 
 inline ResultSetGuard::ResultSetGuard(DataStore &dataStore, ResultSet &rs)
 	: dataStore_(dataStore),
