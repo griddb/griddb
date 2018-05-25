@@ -15,15 +15,33 @@
 */
 package com.toshiba.mwcloud.gs.config;
 
+import java.util.Collections;
+import java.util.Set;
+
 import com.toshiba.mwcloud.gs.GridStoreFactory;
 import com.toshiba.mwcloud.gs.common.GridStoreFactoryProvider;
+import com.toshiba.mwcloud.gs.common.ServiceProviderUtils;
 import com.toshiba.mwcloud.gs.subnet.SubnetGridStoreFactory;
 
-public class ConfigurableFactoryProvider extends GridStoreFactoryProvider {
+public class ConfigurableFactoryProvider extends GridStoreFactoryProvider
+implements GridStoreFactoryProvider.ChainProvidable,
+SubnetGridStoreFactory.ConfigProvidable {
 
 	@Override
 	public GridStoreFactory getFactory() {
-		return new SubnetGridStoreFactory.ConfigurableFactory();
+		return getFactory(
+				Collections.<Class<?>>emptySet(),
+				Collections.<Class<?>>emptySet());
+	}
+
+	@Override
+	public GridStoreFactory getFactory(
+			Set<Class<?>> chainProviderClasses,
+			Set<Class<?>> visitedProviderClasses) {
+		return new SubnetGridStoreFactory.ConfigurableFactory(
+				ServiceProviderUtils.mergeChainClasses(
+						chainProviderClasses, ConfigurableFactoryProvider.class),
+				visitedProviderClasses);
 	}
 
 }
