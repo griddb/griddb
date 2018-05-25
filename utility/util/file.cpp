@@ -434,7 +434,12 @@ ssize_t File::read(void *buf, size_t blen) {
 #else
 	const ssize_t result = ::read(fd_, static_cast<char*>(buf), blen);
 	if (result < 0) {
-		UTIL_THROW_PLATFORM_ERROR(NULL);
+		if (errno == EINTR) {
+			return 0;
+		}
+		else {
+			UTIL_THROW_PLATFORM_ERROR(NULL);
+		}
 	}
 	return result;
 #endif
@@ -446,7 +451,12 @@ ssize_t File::write(const void *buf, size_t blen) {
 #else
 	const ssize_t result = ::write(fd_, static_cast<const char*>(buf), blen);
 	if (result < 0) {
-		UTIL_THROW_PLATFORM_ERROR(NULL);
+		if (errno == EINTR) {
+			return 0;
+		}
+		else {
+			UTIL_THROW_PLATFORM_ERROR(NULL);
+		}
 	}
 	return result;
 #endif
@@ -472,7 +482,12 @@ ssize_t File::read(void *buf, size_t blen, off_t offset) {
 #else
 	const ssize_t result = ::pread(fd_, buf, blen, offset);
 	if (result < 0) {
-		UTIL_THROW_PLATFORM_ERROR(NULL);
+		if (errno == EINTR) {
+			return 0;
+		}
+		else {
+			UTIL_THROW_PLATFORM_ERROR(NULL);
+		}
 	}
 	return result;
 #endif
@@ -498,7 +513,12 @@ ssize_t File::write(const void *buf, size_t blen, off_t offset) {
 #else
 	const ssize_t result = ::pwrite(fd_, buf, blen, offset);
 	if (result < 0) {
-		UTIL_THROW_PLATFORM_ERROR(NULL);
+		if (errno == EINTR) {
+			return 0;
+		}
+		else {
+			UTIL_THROW_PLATFORM_ERROR(NULL);
+		}
 	}
 	return result;
 #endif
@@ -1029,435 +1049,6 @@ void NamedPipe::open(
 #endif
 }
 
-#if UTIL_MINOR_MODULE_ENABLED
-
-
-#ifndef _WIN32
-UTIL_FLAG_TYPE UTIL_MEM_OMODE_EXEC = PROT_EXEC;
-UTIL_FLAG_TYPE UTIL_MEM_OMODE_READ = PROT_READ;
-UTIL_FLAG_TYPE UTIL_MEM_OMODE_WRITE = PROT_WRITE;
-UTIL_FLAG_TYPE UTIL_MEM_OMODE_NONE = PROT_NONE;
-UTIL_FLAG_TYPE UTIL_MEM_OMODE_DEFAULT = PROT_READ|PROT_WRITE;
-#else
-UTIL_FLAG_TYPE UTIL_MEM_OMODE_EXEC = 0;
-UTIL_FLAG_TYPE UTIL_MEM_OMODE_READ = 0;
-UTIL_FLAG_TYPE UTIL_MEM_OMODE_WRITE = 0;
-UTIL_FLAG_TYPE UTIL_MEM_OMODE_NONE = 0;
-UTIL_FLAG_TYPE UTIL_MEM_OMODE_DEFAULT = 0;
-#endif
-
-#ifndef _WIN32
-UTIL_FLAG_TYPE UTIL_MEM_FILE_FORCE = MAP_FIXED;
-UTIL_FLAG_TYPE UTIL_MEM_FILE_SHARED = MAP_SHARED;
-UTIL_FLAG_TYPE UTIL_MEM_FILE_PRIVATE = MAP_PRIVATE;
-UTIL_FLAG_TYPE UTIL_MEM_FILE_DEFAULT = MAP_PRIVATE;
-#else
-UTIL_FLAG_TYPE UTIL_MEM_FILE_FORCE = 0;
-UTIL_FLAG_TYPE UTIL_MEM_FILE_SHARED = 0;
-UTIL_FLAG_TYPE UTIL_MEM_FILE_PRIVATE = 0;
-UTIL_FLAG_TYPE UTIL_MEM_FILE_DEFAULT = 0;
-#endif
-
-struct Memory::Data {
-public:
-	struct Normal;
-	struct FileMap;
-
-	virtual Memory::MEM_TYPE getType(void) const = 0;
-
-	virtual void close(void) = 0;
-
-	inline size_t getSize(void) const {
-		return size_;
-	}
-
-	inline void* getBlock(void) {
-		return mem_;
-	}
-
-	inline const void* getBlock(void) const {
-		return mem_;
-	}
-
-public:
-	inline Data() :
-			size_(0), mem_(NULL) {
-	}
-	virtual ~Data() {
-	}
-
-protected:
-	size_t size_;
-	void *mem_;
-};
-
-struct Memory::Data::Normal : public Memory::Data {
-public:
-	inline Memory::MEM_TYPE getType(void) const {
-		return Memory::MEM_NORMAL;
-	}
-
-	inline void close(void) {
-		if (NULL != mem_) {
-			free(mem_);
-			mem_ = NULL;
-			size_ = 0;
-		}
-	}
-
-	Normal(size_t size) {
-		void* ptr(malloc(size));
-		if (NULL == ptr) {
-			UTIL_THROW_UTIL_ERROR_CODED(CODE_NO_MEMORY);
-		}
-
-		mem_ = ptr;
-		size_ = size;
-	}
-};
-
-struct Memory::Data::FileMap : public Memory::Data {
-public:
-	inline Memory::MEM_TYPE getType(void) const {
-		return Memory::MEM_FILE;
-	}
-
-	inline void close(void) {
-#ifdef _WIN32
-		UTIL_THROW_NOIMPL_UTIL();
-#else
-		if (NULL != mem_) {
-			munmap(mem_, size_);
-			mem_ = NULL;
-			size_ = 0;
-		}
-#endif
-	}
-
-#ifndef _WIN32
-	FileMap(void *start, int fd, off_t offset, size_t size, int prot,
-			int flag) :
-			fd_(fd), offset_(offset), prot_(prot), flag_(flag) {
-		void* ptr = mmap(start, size, prot, flag, fd, offset);
-		if (MAP_FAILED == ptr) {
-			UTIL_THROW_PLATFORM_ERROR(NULL);
-		}
-
-		mem_ = ptr;
-		size_ = size;
-	}
-#endif
-
-protected:
-#ifndef _WIN32
-	int fd_;
-	off_t offset_;
-	int prot_;
-	int flag_;
-#endif
-};
-
-Memory::Memory(size_t size) : data_(new Data::Normal(size)) {
-}
-
-Memory::Memory(size_t size, File &file,
-		off_t offset, int omode, int flags, void *startPtr) {
-#ifdef _WIN32
-	UTIL_THROW_NOIMPL_UTIL();
-#else
-	data_.reset(new Data::FileMap(
-			startPtr, file.getHandle(), offset, size, omode, flags));
-#endif
-}
-
-Memory::Memory(size_t size, File::FD fd,
-		off_t offset, int omode, int flags, void *startPtr) {
-#ifdef _WIN32
-	UTIL_THROW_NOIMPL_UTIL();
-#else
-	data_.reset(new Data::FileMap(startPtr, fd, offset, size, omode, flags));
-#endif
-}
-
-Memory::~Memory() {
-}
-
-Memory::MEM_TYPE Memory::getType(void) const {
-	return data_->getType();
-}
-
-size_t Memory::getSize(void) const {
-	return data_->getSize();
-}
-
-const void* Memory::operator()(void) const {
-	return data_->getBlock();
-}
-
-void* Memory::operator()(void) {
-	return data_->getBlock();
-}
-
-void* Memory::getMemory(void) {
-	return data_->getBlock();
-}
-
-const void* Memory::getMemory(void) const {
-	return data_->getBlock();
-}
-
-
-MessageQueue::MessageQueue() {
-}
-
-MessageQueue::~MessageQueue() {
-	close();
-}
-
-void MessageQueue::close(void) {
-#ifndef _WIN32
-	if (-1 != fd_) {
-		mq_close((mqd_t) fd_);
-		fd_ = -1;
-	}
-#endif
-}
-
-void MessageQueue::open(
-		const char8_t *name, FileFlag flags, FilePermission perm) {
-#ifdef _WIN32
-	UTIL_THROW_NOIMPL_UTIL();
-#else
-	u8string nameStr = name;
-	std::string encodedName;
-	CodeConverter(Code::UTF8, Code::CHAR)(nameStr, encodedName);
-
-	mqd_t fd = (mqd_t) -1;
-	if (flags & O_CREAT) {
-		fd = mq_open(
-				encodedName.c_str(), flags, static_cast<int>(perm), NULL);
-	} else {
-		fd = mq_open(encodedName.c_str(), flags);
-	}
-
-	if ((mqd_t) -1 == fd) {
-		UTIL_THROW_PLATFORM_ERROR(NULL);
-	}
-
-	name_.swap(nameStr);
-	fd_ = (int) fd;
-#endif
-}
-
-void MessageQueue::open(const char8_t *name, FileFlag flags,
-		FilePermission perm, size_t maxmsg, size_t msgsize) {
-#ifdef _WIN32
-	UTIL_THROW_NOIMPL_UTIL();
-#else
-	u8string nameStr = name;
-	std::string encodedName;
-	CodeConverter(Code::UTF8, Code::CHAR)(nameStr, encodedName);
-
-	mqd_t fd = (mqd_t) -1;
-	if (flags & O_CREAT) {
-		struct mq_attr attr;
-		memset(&attr, 0x00, sizeof(attr));
-		attr.mq_maxmsg = maxmsg;
-		attr.mq_msgsize = msgsize;
-		attr.mq_curmsgs = 0;
-		fd = mq_open(
-				encodedName.c_str(), flags, static_cast<int>(perm), &attr);
-	} else {
-		fd = mq_open(encodedName.c_str(), flags);
-	}
-
-	if ((mqd_t) -1 == fd) {
-		UTIL_THROW_PLATFORM_ERROR(NULL);
-	}
-
-	name_.swap(nameStr);
-	fd_ = (int) fd;
-#endif
-}
-
-bool MessageQueue::unlink(void) {
-#ifdef _WIN32
-	UTIL_THROW_NOIMPL_UTIL();
-#else
-	const bool res = (0 == (int) mq_unlink(name_.c_str()));
-	name_.clear();
-	return res;
-#endif
-}
-
-ssize_t MessageQueue::send(const void *buf, size_t blen, size_t priority) {
-#ifdef _WIN32
-	UTIL_THROW_NOIMPL_UTIL();
-#else
-	if (0 != mq_send((mqd_t) fd_, (const char*) buf, blen, priority)) {
-		UTIL_THROW_PLATFORM_ERROR(NULL);
-	}
-	return static_cast<ssize_t>(blen);
-#endif
-}
-
-ssize_t MessageQueue::sendTimeLimit(const void *buf, size_t blen,
-		size_t priority, size_t msec) {
-#ifdef _WIN32
-	UTIL_THROW_NOIMPL_UTIL();
-#else
-	struct timespec ts;
-	ts.tv_sec = msec / 1000;
-	ts.tv_nsec = (msec % 1000) * 1000;
-	if (0 != mq_timedsend(
-			(mqd_t) fd_, (const char*) buf, blen, priority, &ts)) {
-		UTIL_THROW_PLATFORM_ERROR(NULL);
-	}
-	return static_cast<ssize_t>(blen);
-#endif
-}
-
-ssize_t MessageQueue::receive(void *buf, size_t blen, size_t *priority) {
-#ifdef _WIN32
-	UTIL_THROW_NOIMPL_UTIL();
-#else
-	unsigned int prior = 0;
-	const ssize_t result = mq_receive((mqd_t) fd_, (char*) buf, blen, &prior);
-	if (priority) {
-		*priority = (size_t) prior;
-	}
-	if (result < 0) {
-		UTIL_THROW_PLATFORM_ERROR(NULL);
-	}
-	return result;
-#endif
-}
-
-ssize_t MessageQueue::receiveTimeLimit(void *buf, size_t blen,
-		size_t *priority, size_t msec) {
-#ifdef _WIN32
-	UTIL_THROW_NOIMPL_UTIL();
-#else
-	struct timespec ts;
-	ts.tv_sec = msec / 1000;
-	ts.tv_nsec = (msec % 1000) * 1000;
-	unsigned int prior = 0;
-	const ssize_t result =
-			mq_timedreceive((mqd_t) fd_, (char*) buf, blen, &prior, &ts);
-	if (priority) {
-		*priority = (size_t) prior;
-	}
-	if (result < 0) {
-		UTIL_THROW_PLATFORM_ERROR(NULL);
-	}
-	return result;
-#endif
-}
-
-size_t MessageQueue::getCurrentCount(void) const {
-#ifdef _WIN32
-	UTIL_THROW_NOIMPL_UTIL();
-#else
-	size_t ret = (size_t) -1;
-	getStatus(NULL, NULL, &ret);
-	return ret;
-#endif
-}
-
-size_t MessageQueue::getMaxCount(void) const {
-#ifdef _WIN32
-	UTIL_THROW_NOIMPL_UTIL();
-#else
-	size_t ret = (size_t) -1;
-	getStatus(&ret, NULL, NULL);
-	return ret;
-#endif
-}
-
-size_t MessageQueue::getMessageSize(void) const {
-#ifdef _WIN32
-	UTIL_THROW_NOIMPL_UTIL();
-#else
-	size_t ret = (size_t) -1;
-	getStatus(NULL, &ret, NULL);
-	return ret;
-#endif
-}
-
-#ifndef _WIN32
-void MessageQueue::getStatus(size_t* __restrict__ maxcount,
-		size_t* __restrict__ msgsize, size_t* __restrict__ curcount) const {
-	struct mq_attr attr;
-	if (-1 == mq_getattr(fd_, &attr))
-		UTIL_THROW_PLATFORM_ERROR(NULL);
-
-	if (maxcount)
-		*maxcount = attr.mq_maxmsg;
-	if (msgsize)
-		*msgsize = attr.mq_msgsize;
-	if (curcount)
-		*curcount = attr.mq_curmsgs;
-}
-#else
-void MessageQueue::getStatus(size_t *maxcount, size_t *msgsize,
-		size_t *curcount) const {
-	UTIL_THROW_NOIMPL_UTIL();
-}
-#endif
-
-ssize_t MessageQueue::read(void *buf, size_t blen) {
-	return receive(buf, blen, NULL);
-}
-
-ssize_t MessageQueue::write(const void *buf, size_t blen) {
-	return send(buf, blen, 0);
-}
-
-
-const FilePermission SharedMemory::DEFAULT_PERMISSION = 0777;
-
-SharedMemory::SharedMemory() {
-}
-
-SharedMemory::~SharedMemory() {
-}
-
-void SharedMemory::open(const char8_t *name,
-		FileFlag flags, FilePermission perm) {
-#ifdef _WIN32
-	UTIL_THROW_NOIMPL_UTIL();
-#else
-	u8string nameStr = name;
-	std::string encodedName;
-	CodeConverter(Code::UTF8, Code::CHAR)(nameStr, encodedName);
-
-	const int fd = shm_open(encodedName.c_str(), flags, perm);
-	if (-1 == fd) {
-		UTIL_THROW_PLATFORM_ERROR(NULL);
-	}
-
-	name_ = name;
-	fd_ = fd;
-#endif
-}
-
-bool SharedMemory::unlink(void) {
-#ifdef _WIN32
-	UTIL_THROW_NOIMPL_UTIL();
-#else
-	std::string encodedName;
-	CodeConverter(Code::UTF8, Code::CHAR)(name_, encodedName);
-
-	const bool res = (0 == shm_unlink(encodedName.c_str()));
-	if (res) {
-		name_.clear();
-	}
-
-	return res;
-#endif
-}
-
-#endif 
 
 
 namespace {

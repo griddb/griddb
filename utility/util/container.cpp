@@ -18,4 +18,29 @@
 
 namespace util {
 
+
+InsertionResetter::~InsertionResetter() {
+	reset();
+}
+
+void InsertionResetter::release() throw() {
+	entry_ = Entry();
+}
+
+void InsertionResetter::reset() throw() {
+	if (entry_.func_ != NULL) {
+		entry_.func_(entry_.container_, entry_.pos_);
+		release();
+	}
+}
+
+InsertionResetter::Entry::Entry() :
+		func_(NULL), container_(NULL), pos_(0) {
+}
+
+InsertionResetter::Entry::Entry(
+		ResetterFunc func, void *container, size_t pos) :
+		func_(func), container_(container), pos_(pos) {
+}
+
 } 

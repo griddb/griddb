@@ -39,6 +39,7 @@ namespace util {
 
 namespace detail {
 struct ObjectPoolUtils;
+template<typename T, typename Mutex> class ObjectPoolAllocator;
 }
 
 /*!
@@ -49,6 +50,8 @@ class ObjectPool {
 	friend struct detail::ObjectPoolUtils;
 
 public:
+	struct StdAllocatorResolver;
+
 	typedef FixedSizeAllocator<Mutex> BaseAllocator;
 
 #if UTIL_ALLOCATOR_FORCE_ALLOCATOR_INFO
@@ -79,6 +82,21 @@ public:
 	void setLimit(AllocatorStats::Type type, AllocatorLimitter *limitter);
 
 	BaseAllocator& base();
+	StdAllocator<T, void> getStdAllocator();
+
+#if UTIL_ALLOCATOR_DIFF_REPORTER_TRACE_ENABLED
+	class ManagerTool {
+		friend class AllocatorManager;
+		typedef Mutex MutexType;
+		static AllocatorDiffReporter::ActivationSaver& getActivationSaver(
+				ObjectPool &pool) {
+			return pool.activationSaver_;
+		}
+		static MutexType& getLock(ObjectPool &pool) {
+			return pool.getLock();
+		}
+	};
+#endif
 
 private:
 	struct FreeLink {
@@ -96,6 +114,11 @@ private:
 
 	void clear(size_t preservedCount);
 
+	size_t mergeFreeElementCount(
+			size_t baseCount, const util::LockGuard<Mutex>&);
+
+	Mutex& getLock();
+
 	inline static void* elementOf(FreeLink *entry) {
 		return reinterpret_cast<uint8_t*>(entry) + ELEMENT_OFFSET;
 	}
@@ -111,8 +134,25 @@ private:
 
 	size_t freeElementCount_;
 
+#if UTIL_ALLOCATOR_DIFF_REPORTER_TRACE_ENABLED
+	AllocatorDiffReporter::ActivationSaver activationSaver_;
+#endif
+
 	BaseAllocator base_;
 	AllocatorStats stats_;
+};
+
+template<typename T, typename Mutex>
+struct ObjectPool<T, Mutex>::StdAllocatorResolver {
+	typedef T ValueType;
+
+	template<typename U> struct Rebind {
+		typedef typename ObjectPool<U, Mutex>::StdAllocatorResolver Other;
+	};
+
+	StdAllocator<T, void> operator()(ObjectPool<T, Mutex> *pool) const {
+		return pool->getStdAllocator();
+	}
 };
 
 namespace detail {
@@ -135,6 +175,60 @@ struct ObjectPoolUtils {
 		}
 		catch (...) {
 		}
+	}
+
+	template<typename T, typename Mutex>
+	static size_t getBaseElementSize() {
+		return ObjectPool<T, Mutex>::ELEMENT_OFFSET + sizeof(T);
+	}
+};
+}	
+
+namespace detail {
+template<typename T, typename Mutex>
+class ObjectPoolAllocator {
+public:
+	typedef ObjectPool<T, Mutex> BaseType;
+
+	void* allocate(size_t size) {
+		BaseType &pool = base();
+		if (size != sizeof(T) ||
+				pool.base().getElementSize() !=
+						ObjectPoolUtils::getBaseElementSize<T, Mutex>()) {
+			UTIL_THROW_UTIL_ERROR(CODE_ILLEGAL_ARGUMENT, "");
+		}
+
+		uint8_t *baseAddr = static_cast<uint8_t*>(pool.base().allocate());
+		return baseAddr + ObjectPoolUtils::getBaseElementSize<T, Mutex>() -
+				sizeof(T);
+	}
+
+	void deallocate(void *ptr) {
+		if (ptr == NULL) {
+			return;
+		}
+
+		BaseType &pool = base();
+		uint8_t *baseAddr = static_cast<uint8_t*>(ptr) + sizeof(T) -
+				ObjectPoolUtils::getBaseElementSize<T, Mutex>();
+
+		pool.base().deallocate(baseAddr);
+	}
+
+	static ObjectPoolAllocator& get(BaseType &pool) {
+		void *addr = &pool;
+		return *static_cast<ObjectPoolAllocator*>(addr);
+	}
+
+private:
+	ObjectPoolAllocator();
+
+	ObjectPoolAllocator(const ObjectPoolAllocator&);
+	ObjectPoolAllocator& operator=(const ObjectPoolAllocator&);
+
+	BaseType& base() {
+		void *addr = this;
+		return *static_cast<BaseType*>(addr);
 	}
 };
 }	
@@ -203,6 +297,48 @@ private:
 	BaseType& base() { return *this; };
 };
 
+template<typename T, typename Alloc>
+inline bool operator==(
+		const Vector<T, Alloc> &lhs, const Vector<T, Alloc> &rhs) {
+	typedef typename std::vector<T, Alloc> Base;
+	return static_cast<const Base&>(lhs) == static_cast<const Base&>(rhs);
+}
+
+template<typename T, typename Alloc>
+inline bool operator!=(
+		const Vector<T, Alloc> &lhs, const Vector<T, Alloc> &rhs) {
+	typedef typename std::vector<T, Alloc> Base;
+	return static_cast<const Base&>(lhs) != static_cast<const Base&>(rhs);
+}
+
+template<typename T, typename Alloc>
+inline bool operator<(
+		const Vector<T, Alloc> &lhs, const Vector<T, Alloc> &rhs) {
+	typedef typename std::vector<T, Alloc> Base;
+	return static_cast<const Base&>(lhs) < static_cast<const Base&>(rhs);
+}
+
+template<typename T, typename Alloc>
+inline bool operator<=(
+		const Vector<T, Alloc> &lhs, const Vector<T, Alloc> &rhs) {
+	typedef typename std::vector<T, Alloc> Base;
+	return static_cast<const Base&>(lhs) <= static_cast<const Base&>(rhs);
+}
+
+template<typename T, typename Alloc>
+inline bool operator>(
+		const Vector<T, Alloc> &lhs, const Vector<T, Alloc> &rhs) {
+	typedef typename std::vector<T, Alloc> Base;
+	return static_cast<const Base&>(lhs) > static_cast<const Base&>(rhs);
+}
+
+template<typename T, typename Alloc>
+inline bool operator>=(
+		const Vector<T, Alloc> &lhs, const Vector<T, Alloc> &rhs) {
+	typedef typename std::vector<T, Alloc> Base;
+	return static_cast<const Base&>(lhs) >= static_cast<const Base&>(rhs);
+}
+
 /*!
 	@brief std::deque, using StackAllocator in default
 */
@@ -238,6 +374,48 @@ private:
 	const BaseType& base() const { return *this; };
 	BaseType& base() { return *this; };
 };
+
+template<typename T, typename Alloc>
+inline bool operator==(
+		const Deque<T, Alloc> &lhs, const Deque<T, Alloc> &rhs) {
+	typedef typename std::deque<T, Alloc> Base;
+	return static_cast<const Base&>(lhs) == static_cast<const Base&>(rhs);
+}
+
+template<typename T, typename Alloc>
+inline bool operator!=(
+		const Deque<T, Alloc> &lhs, const Deque<T, Alloc> &rhs) {
+	typedef typename std::deque<T, Alloc> Base;
+	return static_cast<const Base&>(lhs) != static_cast<const Base&>(rhs);
+}
+
+template<typename T, typename Alloc>
+inline bool operator<(
+		const Deque<T, Alloc> &lhs, const Deque<T, Alloc> &rhs) {
+	typedef typename std::deque<T, Alloc> Base;
+	return static_cast<const Base&>(lhs) < static_cast<const Base&>(rhs);
+}
+
+template<typename T, typename Alloc>
+inline bool operator<=(
+		const Deque<T, Alloc> &lhs, const Deque<T, Alloc> &rhs) {
+	typedef typename std::deque<T, Alloc> Base;
+	return static_cast<const Base&>(lhs) <= static_cast<const Base&>(rhs);
+}
+
+template<typename T, typename Alloc>
+inline bool operator>(
+		const Deque<T, Alloc> &lhs, const Deque<T, Alloc> &rhs) {
+	typedef typename std::deque<T, Alloc> Base;
+	return static_cast<const Base&>(lhs) > static_cast<const Base&>(rhs);
+}
+
+template<typename T, typename Alloc>
+inline bool operator>=(
+		const Deque<T, Alloc> &lhs, const Deque<T, Alloc> &rhs) {
+	typedef typename std::deque<T, Alloc> Base;
+	return static_cast<const Base&>(lhs) >= static_cast<const Base&>(rhs);
+}
 
 /*!
 	@brief std::map, using StackAllocator in default
@@ -291,6 +469,48 @@ private:
 	BaseType& base() { return *this; };
 };
 
+template<typename K, typename V, typename Comp, typename Alloc>
+inline bool operator==(
+		const Map<K, V, Comp, Alloc> &lhs, const Map<K, V, Comp, Alloc> &rhs) {
+	typedef typename std::map<K, V, Comp, Alloc> Base;
+	return static_cast<const Base&>(lhs) == static_cast<const Base&>(rhs);
+}
+
+template<typename K, typename V, typename Comp, typename Alloc>
+inline bool operator!=(
+		const Map<K, V, Comp, Alloc> &lhs, const Map<K, V, Comp, Alloc> &rhs) {
+	typedef typename std::map<K, V, Comp, Alloc> Base;
+	return static_cast<const Base&>(lhs) != static_cast<const Base&>(rhs);
+}
+
+template<typename K, typename V, typename Comp, typename Alloc>
+inline bool operator<(
+		const Map<K, V, Comp, Alloc> &lhs, const Map<K, V, Comp, Alloc> &rhs) {
+	typedef typename std::map<K, V, Comp, Alloc> Base;
+	return static_cast<const Base&>(lhs) < static_cast<const Base&>(rhs);
+}
+
+template<typename K, typename V, typename Comp, typename Alloc>
+inline bool operator<=(
+		const Map<K, V, Comp, Alloc> &lhs, const Map<K, V, Comp, Alloc> &rhs) {
+	typedef typename std::map<K, V, Comp, Alloc> Base;
+	return static_cast<const Base&>(lhs) <= static_cast<const Base&>(rhs);
+}
+
+template<typename K, typename V, typename Comp, typename Alloc>
+inline bool operator>(
+		const Map<K, V, Comp, Alloc> &lhs, const Map<K, V, Comp, Alloc> &rhs) {
+	typedef typename std::map<K, V, Comp, Alloc> Base;
+	return static_cast<const Base&>(lhs) > static_cast<const Base&>(rhs);
+}
+
+template<typename K, typename V, typename Comp, typename Alloc>
+inline bool operator>=(
+		const Map<K, V, Comp, Alloc> &lhs, const Map<K, V, Comp, Alloc> &rhs) {
+	typedef typename std::map<K, V, Comp, Alloc> Base;
+	return static_cast<const Base&>(lhs) >= static_cast<const Base&>(rhs);
+}
+
 /*!
 	@brief std::multimup, using StackAllocator in default
 */
@@ -342,6 +562,54 @@ private:
 	const BaseType& base() const { return *this; };
 	BaseType& base() { return *this; };
 };
+
+template<typename K, typename V, typename Comp, typename Alloc>
+inline bool operator==(
+		const MultiMap<K, V, Comp, Alloc> &lhs,
+		const MultiMap<K, V, Comp, Alloc> &rhs) {
+	typedef typename std::multimap<K, V, Comp, Alloc> Base;
+	return static_cast<const Base&>(lhs) == static_cast<const Base&>(rhs);
+}
+
+template<typename K, typename V, typename Comp, typename Alloc>
+inline bool operator!=(
+		const MultiMap<K, V, Comp, Alloc> &lhs,
+		const MultiMap<K, V, Comp, Alloc> &rhs) {
+	typedef typename std::multimap<K, V, Comp, Alloc> Base;
+	return static_cast<const Base&>(lhs) != static_cast<const Base&>(rhs);
+}
+
+template<typename K, typename V, typename Comp, typename Alloc>
+inline bool operator<(
+		const MultiMap<K, V, Comp, Alloc> &lhs,
+		const MultiMap<K, V, Comp, Alloc> &rhs) {
+	typedef typename std::multimap<K, V, Comp, Alloc> Base;
+	return static_cast<const Base&>(lhs) < static_cast<const Base&>(rhs);
+}
+
+template<typename K, typename V, typename Comp, typename Alloc>
+inline bool operator<=(
+		const MultiMap<K, V, Comp, Alloc> &lhs,
+		const MultiMap<K, V, Comp, Alloc> &rhs) {
+	typedef typename std::multimap<K, V, Comp, Alloc> Base;
+	return static_cast<const Base&>(lhs) <= static_cast<const Base&>(rhs);
+}
+
+template<typename K, typename V, typename Comp, typename Alloc>
+inline bool operator>(
+		const MultiMap<K, V, Comp, Alloc> &lhs,
+		const MultiMap<K, V, Comp, Alloc> &rhs) {
+	typedef typename std::multimap<K, V, Comp, Alloc> Base;
+	return static_cast<const Base&>(lhs) > static_cast<const Base&>(rhs);
+}
+
+template<typename K, typename V, typename Comp, typename Alloc>
+inline bool operator>=(
+		const MultiMap<K, V, Comp, Alloc> &lhs,
+		const MultiMap<K, V, Comp, Alloc> &rhs) {
+	typedef typename std::multimap<K, V, Comp, Alloc> Base;
+	return static_cast<const Base&>(lhs) >= static_cast<const Base&>(rhs);
+}
 
 /*!
 	@brief std::set, using StackAllocator in default
@@ -395,6 +663,48 @@ private:
 	BaseType& base() { return *this; };
 };
 
+template<typename T, typename Comp, typename Alloc>
+inline bool operator==(
+		const Set<T, Comp, Alloc> &lhs, const Set<T, Comp, Alloc> &rhs) {
+	typedef typename std::set<T, Comp, Alloc> Base;
+	return static_cast<const Base&>(lhs) == static_cast<const Base&>(rhs);
+}
+
+template<typename T, typename Comp, typename Alloc>
+inline bool operator!=(
+		const Set<T, Comp, Alloc> &lhs, const Set<T, Comp, Alloc> &rhs) {
+	typedef typename std::set<T, Comp, Alloc> Base;
+	return static_cast<const Base&>(lhs) != static_cast<const Base&>(rhs);
+}
+
+template<typename T, typename Comp, typename Alloc>
+inline bool operator<(
+		const Set<T, Comp, Alloc> &lhs, const Set<T, Comp, Alloc> &rhs) {
+	typedef typename std::set<T, Comp, Alloc> Base;
+	return static_cast<const Base&>(lhs) < static_cast<const Base&>(rhs);
+}
+
+template<typename T, typename Comp, typename Alloc>
+inline bool operator<=(
+		const Set<T, Comp, Alloc> &lhs, const Set<T, Comp, Alloc> &rhs) {
+	typedef typename std::set<T, Comp, Alloc> Base;
+	return static_cast<const Base&>(lhs) <= static_cast<const Base&>(rhs);
+}
+
+template<typename T, typename Comp, typename Alloc>
+inline bool operator>(
+		const Set<T, Comp, Alloc> &lhs, const Set<T, Comp, Alloc> &rhs) {
+	typedef typename std::set<T, Comp, Alloc> Base;
+	return static_cast<const Base&>(lhs) > static_cast<const Base&>(rhs);
+}
+
+template<typename T, typename Comp, typename Alloc>
+inline bool operator>=(
+		const Set<T, Comp, Alloc> &lhs, const Set<T, Comp, Alloc> &rhs) {
+	typedef typename std::set<T, Comp, Alloc> Base;
+	return static_cast<const Base&>(lhs) >= static_cast<const Base&>(rhs);
+}
+
 /*!
 	@brief std::multiset, using StackAllocator in default
 */
@@ -446,6 +756,54 @@ private:
 	const BaseType& base() const { return *this; };
 	BaseType& base() { return *this; };
 };
+
+template<typename T, typename Comp, typename Alloc>
+inline bool operator==(
+		const MultiSet<T, Comp, Alloc> &lhs,
+		const MultiSet<T, Comp, Alloc> &rhs) {
+	typedef typename std::multiset<T, Comp, Alloc> Base;
+	return static_cast<const Base&>(lhs) == static_cast<const Base&>(rhs);
+}
+
+template<typename T, typename Comp, typename Alloc>
+inline bool operator!=(
+		const MultiSet<T, Comp, Alloc> &lhs,
+		const MultiSet<T, Comp, Alloc> &rhs) {
+	typedef typename std::multiset<T, Comp, Alloc> Base;
+	return static_cast<const Base&>(lhs) != static_cast<const Base&>(rhs);
+}
+
+template<typename T, typename Comp, typename Alloc>
+inline bool operator<(
+		const MultiSet<T, Comp, Alloc> &lhs,
+		const MultiSet<T, Comp, Alloc> &rhs) {
+	typedef typename std::multiset<T, Comp, Alloc> Base;
+	return static_cast<const Base&>(lhs) < static_cast<const Base&>(rhs);
+}
+
+template<typename T, typename Comp, typename Alloc>
+inline bool operator<=(
+		const MultiSet<T, Comp, Alloc> &lhs,
+		const MultiSet<T, Comp, Alloc> &rhs) {
+	typedef typename std::multiset<T, Comp, Alloc> Base;
+	return static_cast<const Base&>(lhs) <= static_cast<const Base&>(rhs);
+}
+
+template<typename T, typename Comp, typename Alloc>
+inline bool operator>(
+		const MultiSet<T, Comp, Alloc> &lhs,
+		const MultiSet<T, Comp, Alloc> &rhs) {
+	typedef typename std::multiset<T, Comp, Alloc> Base;
+	return static_cast<const Base&>(lhs) > static_cast<const Base&>(rhs);
+}
+
+template<typename T, typename Comp, typename Alloc>
+inline bool operator>=(
+		const MultiSet<T, Comp, Alloc> &lhs,
+		const MultiSet<T, Comp, Alloc> &rhs) {
+	typedef typename std::multiset<T, Comp, Alloc> Base;
+	return static_cast<const Base&>(lhs) >= static_cast<const Base&>(rhs);
+}
 
 template<typename T, typename Alloc> class XArray;
 
@@ -1086,6 +1444,44 @@ private:
 };
 
 
+class InsertionResetter {
+public:
+	template<typename C>
+	explicit InsertionResetter(C &container);
+
+	template<typename C>
+	InsertionResetter(C &container, typename C::const_iterator insertionPoint);
+
+	~InsertionResetter();
+
+	void release() throw();
+	void reset() throw();
+
+private:
+	typedef void (*ResetterFunc)(void*, size_t);
+
+	struct Entry {
+		Entry();
+		Entry(ResetterFunc func, void *container, size_t pos);
+
+		ResetterFunc func_;
+		void *container_;
+		size_t pos_;
+	};
+
+	template<typename C>
+	static Entry createEntry(
+			C &container, typename C::const_iterator insertionPoint);
+
+	template<typename C>
+	static void resetSpecific(void *container, size_t pos);
+
+	InsertionResetter(const InsertionResetter&);
+	InsertionResetter& operator=(const InsertionResetter&);
+
+	Entry entry_;
+};
+
 
 /*!
 	@brief Manages byte stream for XArray.
@@ -1193,19 +1589,31 @@ void ObjectPool<T, Mutex>::deallocate(T *element) {
 
 	FreeLink *entry = linkOf(element);
 
-	if (getFreeElementCount() < freeElementLimit_) {
+	do {
+		const size_t baseCount = base_.getFreeElementCount();
+
+		LockGuard<Mutex> guard(getLock());
+
+		if (mergeFreeElementCount(baseCount, guard) >= freeElementLimit_) {
+			break;
+		}
+
 		entry->next_ = freeLink_;
 		freeLink_ = entry;
 		++freeElementCount_;
+
+		return;
 	}
-	else {
-		element->~T();
-		base_.deallocate(entry);
-	}
+	while (false);
+
+	element->~T();
+	base_.deallocate(entry);
 }
 
 template<typename T, typename Mutex>
 T* ObjectPool<T, Mutex>::poll() {
+	LockGuard<Mutex> guard(getLock());
+
 	FreeLink *cur = freeLink_;
 
 	if (cur == NULL) {
@@ -1228,7 +1636,11 @@ void ObjectPool<T, Mutex>::setTotalElementLimit(size_t limit) {
 
 template<typename T, typename Mutex>
 void ObjectPool<T, Mutex>::setFreeElementLimit(size_t limit) {
-	freeElementLimit_ = limit;
+	{
+		UTIL_ALLOCATOR_DETAIL_STAT_GUARD(guard, getLock());
+		freeElementLimit_ = limit;
+	}
+
 	clear(limit);
 }
 
@@ -1239,7 +1651,10 @@ size_t ObjectPool<T, Mutex>::getTotalElementCount() {
 
 template<typename T, typename Mutex>
 size_t ObjectPool<T, Mutex>::getFreeElementCount() {
-	return freeElementCount_ + base_.getFreeElementCount();
+	const size_t baseCount = base_.getFreeElementCount();
+	UTIL_ALLOCATOR_DETAIL_STAT_GUARD(guard, getLock());
+
+	return mergeFreeElementCount(baseCount, guard);
 }
 
 template<typename T, typename Mutex>
@@ -1249,11 +1664,23 @@ ObjectPool<T, Mutex>::base() {
 }
 
 template<typename T, typename Mutex>
+StdAllocator<T, void> ObjectPool<T, Mutex>::getStdAllocator() {
+	typedef detail::ObjectPoolAllocator<T, Mutex> Base;
+	Base &base = Base::get(*this);
+	return StdAllocator<T, void>(base);
+}
+
+template<typename T, typename Mutex>
 void ObjectPool<T, Mutex>::getStats(AllocatorStats &stats) {
+	size_t localCount;
+	{
+		UTIL_ALLOCATOR_DETAIL_STAT_GUARD(guard, getLock());
+		localCount = freeElementCount_;
+	}
+
 	stats.merge(stats_);
 	stats.values_[AllocatorStats::STAT_CACHE_SIZE] +=
-			AllocatorStats::asStatValue(
-					freeElementCount_ * base_.getElementSize());
+			AllocatorStats::asStatValue(localCount * base_.getElementSize());
 }
 
 template<typename T, typename Mutex>
@@ -1276,7 +1703,21 @@ void ObjectPool<T, Mutex>::setLimit(
 
 template<typename T, typename Mutex>
 void* ObjectPool<T, Mutex>::allocateDirect() {
-	FreeLink *cur = freeLink_;
+	FreeLink *cur;
+	do {
+		LockGuard<Mutex> guard(getLock());
+
+		cur = freeLink_;
+		if (cur == NULL) {
+			break;
+		}
+
+		freeLink_ = cur->next_;
+
+		assert(freeElementCount_ > 0);
+		--freeElementCount_;
+	}
+	while (false);
 
 	if (cur == NULL) {
 		FreeLink *entry = static_cast<FreeLink*>(base_.allocate());
@@ -1285,14 +1726,10 @@ void* ObjectPool<T, Mutex>::allocateDirect() {
 		return elementOf(entry);
 	}
 
-	void *rawElement = elementOf(cur);
-	static_cast<T*>(rawElement)->~T();
-
-	freeLink_ = cur->next_;
 	cur->next_ = NULL;
 
-	assert(freeElementCount_ > 0);
-	--freeElementCount_;
+	void *rawElement = elementOf(cur);
+	static_cast<T*>(rawElement)->~T();
 
 	return rawElement;
 }
@@ -1310,20 +1747,48 @@ void ObjectPool<T, Mutex>::deallocateDirect(void *rawElement) {
 
 template<typename T, typename Mutex>
 void ObjectPool<T, Mutex>::clear(size_t preservedCount) {
-	for (FreeLink *cur = freeLink_; cur != NULL;) {
-		if (preservedCount >= freeElementCount_) {
-			break;
+	const size_t baseCount = base_.getFreeElementCount();
+	size_t rest = 0;
+	do {
+		FreeLink *cur;
+		{
+			LockGuard<Mutex> guard(getLock());
+
+			if (rest == 0) {
+				const size_t count = mergeFreeElementCount(baseCount, guard);
+				if (preservedCount >= count) {
+					break;
+				}
+				rest = count - preservedCount;
+			}
+
+			cur = freeLink_;
+			if (cur == NULL) {
+				break;
+			}
+
+			FreeLink *next = cur->next_;
+			freeLink_ = next;
+
+			assert(freeElementCount_ > 0);
+			freeElementCount_--;
 		}
 
 		static_cast<T*>(elementOf(cur))->~T();
-
-		FreeLink *next = cur->next_;
 		base_.deallocate(cur);
-		cur = next;
-
-		freeLink_ = cur;
-		freeElementCount_--;
 	}
+	while (--rest > 0);
+}
+
+template<typename T, typename Mutex>
+size_t ObjectPool<T, Mutex>::mergeFreeElementCount(
+		size_t baseCount, const util::LockGuard<Mutex>&) {
+	return freeElementCount_ + baseCount;
+}
+
+template<typename T, typename Mutex>
+Mutex& ObjectPool<T, Mutex>::getLock() {
+	return base_.getLock();
 }
 
 
@@ -2545,6 +3010,37 @@ void WeakMapReference<K, V>::unmanage() {
 }
 
 
+
+
+template<typename C>
+InsertionResetter::InsertionResetter(C &container) :
+		entry_(createEntry(container, container.end())) {
+}
+
+template<typename C>
+InsertionResetter::InsertionResetter(
+		C &container, typename C::const_iterator insertionPoint) :
+		entry_(createEntry(container, insertionPoint)) {
+}
+
+template<typename C>
+InsertionResetter::Entry InsertionResetter::createEntry(
+		C &container, typename C::const_iterator insertionPoint) {
+	const ptrdiff_t distance = insertionPoint - container.begin();
+	return Entry(&resetSpecific<C>, &container, static_cast<size_t>(distance));
+}
+
+template<typename C>
+void InsertionResetter::resetSpecific(void *container, size_t pos) {
+	C *containerObj = static_cast<C*>(container);
+
+	if (pos >= containerObj->size()) {
+		assert(false);
+		return;
+	}
+
+	containerObj->erase(containerObj->begin() + pos);
+}
 
 
 
