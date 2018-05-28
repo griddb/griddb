@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -23,6 +23,15 @@ import java.util.Set;
  *
  * <p>Generally, in extraction of a specific range and aggregation operations on TimeSeries,
  * more efficient implementation is selected than on {@link Collection}.</p>
+ *
+ * <p>There are some limitations on row operations unlike {@link Collection}.
+ * If a compression option based on {@link TimeSeriesProperties}
+ * has been set, the following operations cannot be performed.</p>
+ * <ul>
+ * <li>Update of the specified row</li>
+ * <li>Deletion of the specified row</li>
+ * <li>Creation of a new row that has an older timestamp key than the latest one.</li>
+ * </ul>
  *
  * <p>If the order of Rows requested by {@link #query(String)} or {@link GridStore#multiGet(java.util.Map)}
  * is not specified, the Rows in a result set are sorted in ascending order of Row key.</p>
@@ -67,6 +76,11 @@ public interface TimeSeries<R> extends Container<Date, R> {
 	 * <p>It newly creates a Row, based on the value of the Row key specified as {@code key} or the Row key in
 	 * the specified Row object if {@code key} is not specified.</p>
 	 *
+	 * <p>Only rows that have a newer timestamp key than any
+	 * existing row can be created. If the timestamp is equal to
+	 * the newest one, no update occurs and the existing row
+	 * is held.</p>
+	 *
 	 * <p>In the manual commit mode, the target Row is locked. Other Rows in the same internal storage unit
 	 * are also locked.</p>
 	 *
@@ -108,6 +122,9 @@ public interface TimeSeries<R> extends Container<Date, R> {
 	 *
 	 * <p>It can be used only if a Column exists which corresponds to a specified Row key.
 	 * If no corresponding Row exists, nothing is changed.</p>
+	 *
+	 * <p>It can not be used for time series that has a setting of
+	 * compression option.</p>
 	 *
 	 * <p>In the manual commit mode, the target Row is locked.</p>
 	 *
@@ -191,10 +208,14 @@ public interface TimeSeries<R> extends Container<Date, R> {
 	 * <p>The option of locking for update can be enabled when obtaining a set of Rows using
 	 * {@link Query#fetch(boolean)}.</p>
 	 *
+	 * <p>For arguments that cannot specify {@code NULL}, depending on the {@code NULL} status,
+	 * {@link NullPointerException} may not be dispatched. If there is an error in the argument,
+	 * an exception will be thrown when the query result is fetched. </p>
+	 *
 	 * @param start start time or {@code null}. A {@code null} value indicates the timestamp of the oldest Row in
 	 * this TimeSeries.
 	 * @param end end time or {@code null}. A value indicates the timestamp of the newest Row in this TimeSeries.
-	 * @param order the time order of Rows in a result set.
+	 * @param order the time order of Rows in a result set. {@code null} cannot be specified
 	 * {@link QueryOrder#ASCENDING} indicates the order from older to newer, and {@link QueryOrder#DESCENDING} indicates
 	 * the order from newer to older.
 	 *
@@ -222,14 +243,18 @@ public interface TimeSeries<R> extends Container<Date, R> {
 	 *
 	 * <p>The option of locking for update cannot be enabled when obtaining a set of Rows using {@link Query#fetch(boolean)}.
 	 *
-	 * @param start start time
-	 * @param end end time
+	 * <p>In the current version, for arguments that cannot specify {@link GSException} or {@code NULL},
+	 * depending on the {@code NULL} status, {@link NullPointerException} may not be dispatched.
+	 * If there is an error in the argument, an exception will be thrown when the query result is fetched. </p>
+	 *
+	 * @param start start time. {@code null} cannot be specified
+	 * @param end end time. {@code null} cannot be specified
 	 * @param columnSet a set of names of the Columns to be interpolated according to {@code mode}. An empty set
 	 * indicates no specification of target Columns. A {@code null} value indicates the same as an empty set.
-	 * @param mode an interpolation method
+	 * @param mode an interpolation method. {@code null} cannot be specified
 	 * @param interval a sampling interval.{@code 0} or a negative value cannot be specified.
 	 * @param intervalUnit the time unit of the sampling interval.
-	 * {@link TimeUnit#YEAR} and {@link TimeUnit#MONTH} cannot be specified.
+	 * {@link TimeUnit#YEAR} and {@link TimeUnit#MONTH} cannot be specified. {@code null} cannot be specified
 	 *
 	 * @throws GSException It will not be thrown in the current version.
 	 */
@@ -268,7 +293,7 @@ public interface TimeSeries<R> extends Container<Date, R> {
 	 * @throws GSException if the type of the specified Column is not supported by the specified aggregation method.
 	 * @throws GSException if a timeout occurs during this operation or the transaction, this Container is deleted,
 	 * its schema is changed, or a connection failure occurs; or if called after the connection is closed.
-	 * @throws NullPointerException if {@code null} is specified as {@code start},{@code end}, or {@code aggregation}.
+	 * @throws NullPointerException if {@code null} is specified as {@code start}, {@code end}, or {@code aggregation}.
 	 *
 	 * @see Aggregation
 	 */

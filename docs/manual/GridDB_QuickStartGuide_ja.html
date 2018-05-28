@@ -114,7 +114,7 @@ float: none;
 
 
 <p>
-<p class="revision">Revision: revision-number</p>
+<p class="revision">Revision: CE-20180525</p>
 </p>
 <div id="table-of-contents">
 <h2>Table of Contents</h2>
@@ -2246,13 +2246,13 @@ GridDBの定義ファイルであるノード定義ファイルとクラスタ�
 <tbody>
 <tr><td class="left">/dataStore/dbPath</td><td class="left">string</td><td class="left">データベースファイルディレクトリ</td><td class="left">"data"</td></tr>
 <tr><td class="left">/dataStore/storeMemoryLimit</td><td class="left">string</td><td class="left">メモリバッファサイズ</td><td class="left">"1024MB"</td></tr>
-<tr><td class="left">/dataStore/concurrency</td><td class="left">int</td><td class="left">処理並列度</td><td class="left">1</td></tr>
+<tr><td class="left">/dataStore/concurrency</td><td class="left">int</td><td class="left">処理並列度</td><td class="left">4</td></tr>
 <tr><td class="left">/dataStore/logWriteMode</td><td class="left">int</td><td class="left">ログ書き込みモード</td><td class="left">1</td></tr>
 <tr><td class="left">/dataStore/persistencyMode</td><td class="left">string</td><td class="left">永続化モード</td><td class="left">"NORMAL"</td></tr>
 <tr><td class="left">/dataStore/affinityGroupSize</td><td class="left">int</td><td class="left">アフィニティグループ数</td><td class="left">4</td></tr>
 </tbody>
 <tbody>
-<tr><td class="left">/checkpoint/checkpointInterval</td><td class="left">string</td><td class="left">チェックポイント実行間隔</td><td class="left">"1200s"</td></tr>
+<tr><td class="left">/checkpoint/checkpointInterval</td><td class="left">string</td><td class="left">チェックポイント実行間隔</td><td class="left">"60s"</td></tr>
 <tr><td class="left">/checkpoint/checkpointMemoryLimit</td><td class="left">string</td><td class="left">チェックポイント用メモリバッファサイズ</td><td class="left">"1024MB"</td></tr>
 <tr><td class="left">/checkpoint/useParallelMode</td><td class="left">boolean</td><td class="left">チェックポイントの並列動作(false:無効、true:有効)</td><td class="left">false</td></tr>
 </tbody>
@@ -2415,7 +2415,7 @@ $ java gsSample/Sample1 239.0.0.1 31999 設定したクラスタ名 admin 設定
 
 
 <ul>
-<li>GridDBは、株式会社東芝の商標です。
+<li>GridDBは、東芝デジタルソリューションズ株式会社の商標です。
 </li>
 <li>OracleとJavaは、Oracle Corporation 及びその子会社、関連会社の米国及びその他の国における登録商標です。文中の社名、商品名等は各社の商標または登録商標である場合があります。
 </li>
@@ -2429,7 +2429,7 @@ $ java gsSample/Sample1 239.0.0.1 31999 設定したクラスタ名 admin 設定
 
 
 <p>
-                            Copyright © 2013-2016 TOSHIBA CORPORATION
+                            Copyright (C) 2017 TOSHIBA Digital Solutions Corporation
 </p>
 </div>
 </div>

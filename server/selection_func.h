@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -188,7 +188,7 @@ public:
 	virtual ~SelectionTimeSampling() {}
 
 private:
-	void parseArgument(TransactionContext &txn, ObjectManager &objectManager,
+	bool parseArgument(TransactionContext &txn, ObjectManager &objectManager,
 		ExprList &args, uint32_t &columnId, ColumnType &columnType,
 		util::DateTime::FieldType &fType, Timestamp &targetTs, Timestamp &endTs,
 		int32_t &duration);

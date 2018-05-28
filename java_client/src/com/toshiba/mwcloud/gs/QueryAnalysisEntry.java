@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -95,6 +95,8 @@ public class QueryAnalysisEntry {
 	/**
 	 * Sets the type of the information indicated by an entry.
 	 *
+	 * @param type type or {@code null}
+	 *
 	 * @see #getType()
 	 */
 	@RowField(name="TYPE", columnNumber=2)
@@ -128,6 +130,8 @@ public class QueryAnalysisEntry {
 	/**
 	 * Sets the value type of the information indicated by an entry.
 	 *
+	 * @param valueType value type or {@code null}
+	 *
 	 * @see #getValueType()
 	 */
 	@RowField(name="VALUE_TYPE", columnNumber=3)
@@ -152,6 +156,8 @@ public class QueryAnalysisEntry {
 	 * Sets a character string representing the value of the information
 	 * indicated by an entry.
 	 *
+	 * @param value A string representation of the value or {@code null}
+	 *
 	 * @see #getValue()
 	 */
 	@RowField(name="VALUE", columnNumber=4)
@@ -173,6 +179,8 @@ public class QueryAnalysisEntry {
 	/**
 	 * Sets a part of a TQL statement corresponding to the information
 	 * indicated by an entry.
+	 *
+	 * @param statement Part of the TQL statement or {@code null}
 	 *
 	 * @see #getStatement()
 	 */
@@ -209,14 +217,14 @@ public class QueryAnalysisEntry {
 	/**
 	 * Indicates whether some other object is "equal to" this one.
 	 *
-	 * <p>Returns true if each values (e.g. valuse returned by {@link #getId()}
+	 * <p>Returns true if each values (e.g. value returned by {@link #getId()}
 	 * or {@link #getDepth()}) of this object and the specified object are
 	 * equivalent.</p>
 	 *
 	 * <p>This method maintain the general contract for the {@link Object#hashCode()} method,
 	 * which states that equal objects must have equal hash codes.</p>
 	 *
-	 * @param obj the reference object with which to compare.
+	 * @param obj the reference object with which to compare or {@code null}
 	 *
 	 * @return {@code true} if this object is the same as the {@code obj} argument;
 	 * {@code false} otherwise.

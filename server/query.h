@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -114,7 +114,7 @@ class Query {
 
 public:
 	Query(TransactionContext &txn, ObjectManager &objectManager,
-		const char *statement, uint64_t limit = MAX_RESULT_SIZE,
+		const TQLInfo &tqlInfo, uint64_t limit = MAX_RESULT_SIZE,
 		QueryHookClass *hook = NULL);
 	virtual ~Query();
 
@@ -170,8 +170,7 @@ protected:
 	}
 
 	Query(TransactionContext &txn, ObjectManager &objectManager)
-		: txn_(txn), objectManager_(objectManager) {
-		str_ = "";
+		: tqlInfo_(TQLInfo()), txn_(txn), objectManager_(objectManager) {
 		isSetError_ = false;
 		isExplainExecute_ = true;
 		explainAllocNum_ = 0;
@@ -210,11 +209,7 @@ protected:
 		return isExplainExecute_;
 	}
 	bool doExplain() {
-#ifdef QP_ENABLE_EXPLAIN
 		return (explainAllocNum_ > 0);
-#else
-		return false;
-#endif
 	}
 	const char *getFromName() {
 		if (pFromCollectionName_) {
@@ -229,17 +224,14 @@ protected:
 	}
 	virtual void finishQuery(TransactionContext &txn, ResultSet &resultSet,
 		BaseContainer &container);
+
+	void doQueryPartial(
+		TransactionContext &txn, BaseContainer &container, ResultSet &resultSet);
 protected:
 	void contractCondition();
-#ifdef QP_ENABLE_EXPLAIN
 	void addExplain(uint32_t depth, const char *exp_type,
 		const char *value_type, const char *value_string,
 		const char *statement);
-#else
-	void addExplain(uint32_t depth, const char *exp_type,
-		const char *value_type, const char *value_string,
-		const char *statement) {}
-#endif
 	void serializeExplainData(TransactionContext &txn, uint64_t &resultNum,
 		MessageRowStore *messageRowStore);
 
@@ -258,12 +250,18 @@ protected:
 
 		pLimitExpr_ = e1;
 
-		uint64_t limit = (pLimitExpr_ == NULL)
-							 ? MAX_RESULT_SIZE
-							 : pLimitExpr_
-								   ->eval(txn_, objectManager_, NULL,
-									   functionMap_, EVAL_MODE_NORMAL)
-								   ->getValueAsInt64();
+		uint64_t limit = MAX_RESULT_SIZE;
+		if (pLimitExpr_ != NULL) {
+			int64_t tmp = pLimitExpr_->eval(txn_, objectManager_, NULL,
+							functionMap_, EVAL_MODE_NORMAL)
+							->getValueAsInt64();
+			if (tmp < 0) {
+				GS_THROW_USER_ERROR(
+					GS_ERROR_TQ_SYNTAX_ERROR_EXECUTION, "limit(" << tmp << ") is negative");
+			}
+			limit = static_cast<uint64_t>(tmp);
+		}
+		
 		if (limit < nLimit_) {
 			nLimit_ = limit;
 		}
@@ -276,15 +274,17 @@ protected:
 			nActualLimit_ = nLimit_;
 			nLimit_ = MAX_RESULT_SIZE;
 		}
+		nOffset_ = 0;
 		if (e2 != NULL) {
-			Expr *e3 = e2->eval(
-				txn_, objectManager_, NULL, functionMap_, EVAL_MODE_NORMAL);
-			nOffset_ = e3->getValueAsInt64();
+			int64_t tmp = e2->eval(txn_, objectManager_, NULL,
+							functionMap_, EVAL_MODE_NORMAL)
+							->getValueAsInt64();
+			if (tmp < 0) {
+				GS_THROW_USER_ERROR(
+					GS_ERROR_TQ_SYNTAX_ERROR_EXECUTION, "offset(" << tmp << ") is negative");
+			}
+			nOffset_ = static_cast<uint64_t>(tmp);
 			QP_SAFE_DELETE(e2);
-			QP_SAFE_DELETE(e3);
-		}
-		else {
-			nOffset_ = 0;
 		}
 		if (nLimit_ != MAX_RESULT_SIZE) {
 			nLimit_ += nOffset_;
@@ -323,7 +323,6 @@ protected:
 	 */
 	void setSortList(SortExprList *e) {
 		pOrderByExpr_ = e;
-#ifdef QP_ORDERBY_COLUMN_ONLY
 		if (e != NULL) {
 			for (size_t i = 0; i < e->size(); i++) {
 				if (!(*e)[i].expr->isColumn()) {
@@ -333,14 +332,73 @@ protected:
 				}
 			}
 		}
-#endif
-		Expr *eSel = getSelectionExpr(0);
-		if (e != NULL && eSel != NULL && eSel->isAggregation()) {
+		if (e != NULL && hasAggregationClause()) {
 			GS_THROW_USER_ERROR(
 				GS_ERROR_TQ_SYNTAX_ERROR_ORDERBY_WITH_AGGREGATION,
 				"Cannot use order-by clause with aggregation");
 		}
 	}
+
+	/*!
+	 * @brief Return the type of the expression
+	 * @return The expression is an aggregation function
+	 */
+	bool hasAggregationClause() {
+		Expr *eSel = getSelectionExpr(0);
+		if (eSel != NULL && eSel->isAggregation()) {
+			return true;
+		} else {
+			return false;
+		}
+	}
+
+	bool isSortBeforeSelectClause() {
+		Expr *pSel = getSelectionExpr(0);
+		if (pOrderByExpr_ && pSel && !pSel->isSelection()) {
+			return true;
+		} else {
+			return false;
+		}
+	}
+
+	bool isIndexSortAvailable(BaseContainer &container, size_t orListNum) {
+//		bool isAvailable = false;
+		if (isSortBeforeSelectClause() && orListNum <= 1 && 
+			pOrderByExpr_) {
+			uint32_t orderColumnId = (*pOrderByExpr_)[0].expr->getColumnId();
+			ColumnInfo columnInfo = container.getColumnInfo(orderColumnId);
+			if (pOrderByExpr_->size() == 1 || columnInfo.isKey()) {
+				return true;
+			} else {
+				return false;
+			}
+		} else {
+			return false;
+		}
+	}
+/*
+	bool isIndexSortAvailable(size_t orListNum, ColumnId &indexColumnId, OutputOrder &order) {
+		bool isAvailable = false;
+		indexColumnId = UNDEF_COLUMNID;
+		if (orListNum <= 1 && pOrderByExpr_ && pOrderByExpr_->size() == 1) {
+			SortExpr &orderExpr = (*pOrderByExpr_)[0];
+			uint32_t orderColumnId = (orderExpr.expr)
+										 ? orderExpr.expr->getColumnId()
+										 : UNDEF_COLUMNID;
+			if ((orderColumnId == ColumnInfo::ROW_KEY_COLUMN_ID && 
+				container.getContainerType() == TIME_SERIES_CONTAINER) ||
+				(orderColumnId != UNDEF_COLUMNID && 
+					container.hasIndex(txn, orderColumnId, MAP_TYPE_BTREE)) {
+				outputOrder = (orderExpr.order == ASC)
+								  ? ORDER_ASCENDING
+								  : ORDER_DESCENDING;
+				indexColumnId = orderColumnId;
+				isAvailable = true;
+			}
+		}
+		return isAvailable;
+	}
+	*/
 
 	ColumnInfo *makeExplainColumnInfo(TransactionContext &txn) {
 		ColumnInfo *explainColumnInfoList =
@@ -427,47 +485,41 @@ protected:
 		}
 	}
 
-	void distinctRowByUpdate(TransactionContext &txn, ResultSet &resultSet,
-		util::XArray<OId> &oIdList, util::XArray<RowId> &rowIdList);
-	template <class R, class S>
-	void getRowListByUpdate(TransactionContext &txn, BaseContainer *container,
-		ResultSet &resultSet, util::XArray<BoolExpr *> &orList,
-		util::XArray<OId> &oIdList, util::XArray<RowId> &rowIdList);
-	void partialDiffMerge(TransactionContext &txn, BaseContainer &container,
-		ResultSet &resultSet, util::XArray<OId> &oIdList,
-		util::XArray<OId> &diffOIdArray);
-	bool isFullScanIndexSearch(TransactionContext &txn,
-		util::XArray<BoolExpr *> &andList, MapType mapType,
-		ColumnInfo *&indexColumnInfo);
-
-	const char *str_;		   
-	util::String *pErrorMsg_;  
+	const TQLInfo tqlInfo_;
+	util::String
+		*pErrorMsg_;  
 	bool isSetError_;  
 	ExprList *
 		pSelectionExprList_;  
 	BoolExpr
 		*pWhereExpr_;  
-	const char *pFromCollectionName_;  
-	TransactionContext &txn_;		   
+	const char *
+		pFromCollectionName_;  
+	TransactionContext &txn_;  
 	ObjectManager
 		&objectManager_;  
 	ParseState parseState_;  
 	static bool sIsTrace_;
 	int nResultSorted_;  
 
-	ExplainData *explainData_;  
+	ExplainData *
+		explainData_;  
 	uint32_t explainNum_;  
 	uint32_t explainAllocNum_;  
-	bool isExplainExecute_;  
+	bool
+		isExplainExecute_;  
 	static const uint32_t EXPLAIN_COLUMN_NUM = 6;
-	QueryHookClass *hook_;  
+	QueryHookClass
+		*hook_;  
 
 	bool isDistinct_;  
-	ResultSize nActualLimit_, nLimit_, nOffset_;  
+	ResultSize nActualLimit_, nLimit_,
+		nOffset_;  
 	Expr *pLimitExpr_;  
-	ExprList *pGroupByExpr_;	  
-	Expr *pHavingExpr_;			  
-	SortExprList *pOrderByExpr_;  
+	ExprList *pGroupByExpr_;  
+	Expr *pHavingExpr_;		  
+	SortExprList
+		*pOrderByExpr_;  
 
 	FunctionMap *functionMap_;  
 	AggregationMap *aggregationMap_;  
@@ -533,8 +585,8 @@ public:
 		for (int i = 0; i < 10; i++) {
 			oss << std::fixed << std::setprecision(3) << takeTime[i] << ",";
 		}
-		if (strlen(queryObj.str_) < 200) {
-			oss << "\"" << queryObj.str_ << "\"";
+		if (strlen(queryObj.tqlInfo_.query_) < 200) {
+			oss << "\"" << queryObj.tqlInfo_.query_ << "\"";
 		}
 		oss << std::endl;
 		const std::string data = oss.str();

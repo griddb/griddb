@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -29,7 +29,8 @@ typedef int32_t NodeId;
 typedef int32_t AddressType;
 static const ClusterVersionId GS_CLUSTER_MESSAGE_BEFORE_V_1_5 = 1;
 
-const ClusterVersionId GS_CLUSTER_MESSAGE_CURRENT_VERSION = 12;
+
+const ClusterVersionId GS_CLUSTER_MESSAGE_CURRENT_VERSION = 26;
 
 static const int32_t SERVICE_MAX = 4;
 
@@ -106,6 +107,14 @@ static inline int32_t changeTimeSecToMill(int32_t sec) {
 		UTIL_TRACE_EXCEPTION_WARNING(CLUSTER_OPERATION, e, ""); \
 	}
 
+#define TRACE_CLUSTER_EXCEPTION_FORCE_ERROR(errorCode, message)       \
+	try {                                                       \
+		GS_THROW_USER_ERROR(errorCode, message);                \
+	}                                                           \
+	catch (std::exception & e) {                                \
+		UTIL_TRACE_EXCEPTION_ERROR(CLUSTER_OPERATION, e, ""); \
+	}
+
 
 #define TRACE_CLUSTER_HANDLER_DETAIL(ev, eventType, level, str)   \
 	GS_TRACE_##level(CLUSTER_SERVICE, GS_TRACE_CS_HANDLER_DETAIL, \
@@ -116,15 +125,6 @@ static inline int32_t changeTimeSecToMill(int32_t sec) {
 	GS_TRACE_##level(SYNC_SERVICE, GS_TRACE_SYNC_HANDLER_DETAIL,  \
 		str << ", eventType:" << getEventTypeName(eventType)      \
 			<< ", pId:" << pId << ", sender:" << ev.getSenderND());
-
-#define TRACE_SYNC_OPERATION(                                              \
-	level, eventType, pId, role, targetNodeId, lsn, rev, info)             \
-	GS_TRACE_##level(SYNC_SERVICE, GS_TRACE_SYNC_OPERATION,                \
-		"Event:{pId:" << pId << ", type:" << getEventTypeName(eventType)   \
-					  << ", ptRev:" << rev                                 \
-					  << ", target:" << pt_->dumpNodeAddress(targetNodeId) \
-					  << ", role:" << dumpPartitionRoleStatus(role)        \
-					  << ", lsn:" << lsn << ", info:{" << info << "}}");
 
 #define TRACE_CLUSTER_HANDLER(eventType, level, str)       \
 	GS_TRACE_##level(CLUSTER_SERVICE, GS_TRACE_CS_HANDLER, \
@@ -172,7 +172,7 @@ static inline int32_t changeTimeSecToMill(int32_t sec) {
 #define TRACE_SYNC_EXCEPTION(e, eventType, pId, level, str)                 \
 	UTIL_TRACE_EXCEPTION_##level(SYNC_SERVICE, e,                           \
 		"[INFO] {" << str << "}, eventType:" << getEventTypeName(eventType) \
-				   << ", pId:" << pId);
+				<< ", pId:" << pId);
 
 #define TRACE_CLUSTER_EE_SEND(eventType, nd, level, str)             \
 	GS_TRACE_##level(CLUSTER_SERVICE, GS_TRACE_CS_EVENT_SEND,        \
@@ -187,9 +187,6 @@ static inline int32_t changeTimeSecToMill(int32_t sec) {
 #define TRACE_CLUSTER_EE_ADD(eventType, level, str) \
 	TRACE_CLUSTER_HANDLER(eventType, level, str);
 
-#define TRACE_SYNC_EE_ADD(eventType, pId, level, str) \
-	TRACE_SYNC_HANDLER(eventType, pId, level, str);
-
 #define WATCHER_START util::Stopwatch watch(util::Stopwatch::STATUS_STARTED);
 
 #define WATCHER_END_1(eventType)                                 \
@@ -201,13 +198,13 @@ static inline int32_t changeTimeSecToMill(int32_t sec) {
 		}                                                        \
 	}
 
-#define WATCHER_END_2(eventType, pId)                            \
+#define WATCHER_END_SYNC(eventType, pId)                            \
 	{                                                            \
 		const uint32_t lap = watch.elapsedMillis();              \
 		if (lap > IO_MONITOR_DEFAULT_WARNING_THRESHOLD_MILLIS) { \
 			GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_EVENT, \
 				"eventType=" << eventType << ", pId=" << pId     \
-							 << ", time=" << lap);               \
+							<< ", time=" << lap);               \
 		}                                                        \
 	}
 
@@ -217,7 +214,7 @@ static inline int32_t changeTimeSecToMill(int32_t sec) {
 		if (lap > IO_MONITOR_DEFAULT_WARNING_THRESHOLD_MILLIS) {        \
 			GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_EVENT,        \
 				"eventType=" << eventType << ", pId=" << pId            \
-							 << ", pgId=" << pgId << ", time=" << lap); \
+							<< ", pgId=" << pgId << ", time=" << lap); \
 		}                                                               \
 	}
 
@@ -236,7 +233,7 @@ static inline int32_t changeTimeSecToMill(int32_t sec) {
 		if (lap - lastLap > IO_MONITOR_DEFAULT_WARNING_THRESHOLD_MILLIS) {   \
 			GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_EVENT,             \
 				"eventType=" << eventType << ",no=" << no << ", pId=" << pId \
-							 << ", pgId=" << pgId << ", time=" << lap);      \
+							<< ", pgId=" << pgId << ", time=" << lap);      \
 		}                                                                    \
 		lastLap = lap;                                                       \
 	}

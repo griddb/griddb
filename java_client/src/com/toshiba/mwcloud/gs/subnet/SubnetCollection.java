@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -21,13 +21,13 @@ import com.toshiba.mwcloud.gs.Geometry;
 import com.toshiba.mwcloud.gs.GeometryOperator;
 import com.toshiba.mwcloud.gs.Query;
 import com.toshiba.mwcloud.gs.common.BasicBuffer;
+import com.toshiba.mwcloud.gs.common.ContainerKeyConverter.ContainerKey;
 import com.toshiba.mwcloud.gs.common.GSErrorCode;
 import com.toshiba.mwcloud.gs.common.GeometryUtils;
 import com.toshiba.mwcloud.gs.common.RowMapper;
 import com.toshiba.mwcloud.gs.common.RowMapper.MappingMode;
 import com.toshiba.mwcloud.gs.common.Statement;
 import com.toshiba.mwcloud.gs.subnet.GridStoreChannel.Context;
-import com.toshiba.mwcloud.gs.subnet.SubnetContainer;
 
 public class SubnetCollection<K, R>
 extends SubnetContainer<K, R> implements Collection<K, R> {
@@ -35,12 +35,12 @@ extends SubnetContainer<K, R> implements Collection<K, R> {
 	public SubnetCollection(
 			SubnetGridStore store, GridStoreChannel channel, Context context,
 			Class<R> rowType, RowMapper mapper, int schemaVerId,
-			int partitionId, long containerId, String normalizedContainerName,
-			String remoteContainerName)
+			int partitionId, long containerId, ContainerKey normalizedContainerKey,
+			ContainerKey remoteContainerKey)
 			throws GSException {
 		super(store, channel, context, rowType, mapper, schemaVerId,
-				partitionId, containerId, normalizedContainerName,
-				remoteContainerName);
+				partitionId, containerId, normalizedContainerKey,
+				remoteContainerKey);
 	}
 
 	@Override
@@ -50,8 +50,8 @@ extends SubnetContainer<K, R> implements Collection<K, R> {
 		checkOpened();
 		return new SubnetQuery<R>(
 				this, rowType, mapper,
-				Statement.QUERY_COLLECTION_GEOMETRY_RELATED,
-				new QueryFormatter() {
+				new QueryFormatter(
+						Statement.QUERY_COLLECTION_GEOMETRY_RELATED) {
 					@Override
 					public void format(BasicBuffer inBuf) throws GSException {
 						formatQuery(inBuf, column, geometry, geometryOp);
@@ -93,8 +93,8 @@ extends SubnetContainer<K, R> implements Collection<K, R> {
 		checkOpened();
 		return new SubnetQuery<R>(
 				this, rowType, mapper,
-				Statement.QUERY_COLLECTION_GEOMETRY_WITH_EXCLUSION,
-				new QueryFormatter() {
+				new QueryFormatter(
+						Statement.QUERY_COLLECTION_GEOMETRY_WITH_EXCLUSION) {
 					@Override
 					public void format(BasicBuffer inBuf) throws GSException {
 						formatQuery(inBuf, column,

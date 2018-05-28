@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -187,6 +187,12 @@ public:
 		}
 	}
 
+	void reset(PartitionId pId, ObjectManager &objectManager) {
+		reset();
+		objectManager_ = &objectManager;
+		pId_ = pId;
+	}
+
 	/*!
 		@brief Free Object
 	*/
@@ -222,21 +228,8 @@ public:
 	/*!
 		@brief Get address of Object
 	*/
-	uint8_t *getBaseAddr() {
-		return baseAddr_;
-	}
-	/*!
-		@brief Get address of Object
-	*/
 	template <class T>
 	T getBaseAddr() const {
-		return reinterpret_cast<T>(baseAddr_);
-	}
-	/*!
-		@brief Get address of Object
-	*/
-	template <class T>
-	T getBaseAddr() {
 		return reinterpret_cast<T>(baseAddr_);
 	}
 	/*!
@@ -244,13 +237,6 @@ public:
 	*/
 	template <typename V>
 	V *getCursor() const {
-		return reinterpret_cast<V *>(cursor_);
-	}
-	/*!
-		@brief Get address of cursor
-	*/
-	template <typename V>
-	V *getCursor() {
 		return reinterpret_cast<V *>(cursor_);
 	}
 	/*!

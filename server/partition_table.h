@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2014 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -31,12 +31,9 @@
 #include "event_engine.h"
 class ClusterManager;
 
-#include "msgpack.hpp"
+#include "msgpack_utils.h"
 class ConfigTable;
 
-#define TEST_CLUSTER_MANAGER
-
-#define TEST_PARTITION_TABLE
 
 typedef int32_t NodeId;
 const int32_t UNDEF_NODEID = -1;
@@ -81,7 +78,7 @@ struct NodeAddress {
 	}
 
 	bool isValid() {
-		return (address_ != 0 && port_ >= 0);
+		return (address_ != 0);
 	}
 
 	bool operator==(const NodeAddress &nodeAddress) const {
@@ -103,7 +100,7 @@ struct NodeAddress {
 		util::NormalOStringStream ss;
 		util::SocketAddress::Inet *tmp = (util::SocketAddress::Inet *)&address_;
 		ss << (int32_t)tmp->value_[0] << "." << (int32_t)tmp->value_[1] << "."
-		   << (int32_t)tmp->value_[2] << "." << (int32_t)tmp->value_[3];
+		<< (int32_t)tmp->value_[2] << "." << (int32_t)tmp->value_[3];
 		if (isPort) {
 			ss << ":" << port_;
 		}
@@ -128,14 +125,13 @@ struct AddressInfo {
 		NodeAddress &syncAddress, NodeAddress &systemAddress)
 		: clusterAddress_(clusterAddress),
 #ifdef GD_ENABLE_UNICAST_NOTIFICATION
-		  transactionAddress_(txnAddress),
+		transactionAddress_(txnAddress),
 #else
-		  txnAddress_(txnAddress),
+		txnAddress_(txnAddress),
 #endif
-		  syncAddress_(syncAddress),
-		  systemAddress_(systemAddress),
-		  isActive_(false) {
-	}
+		syncAddress_(syncAddress),
+		systemAddress_(systemAddress),
+		isActive_(false) {}
 
 	NodeAddress &getNodeAddress(ServiceType type);
 
@@ -156,16 +152,16 @@ struct AddressInfo {
 	std::string dump() {
 		util::NormalOStringStream ss;
 		ss << "NodeAddress:{"
-		   << "cluster:{" << clusterAddress_.dump() << "}, "
-		   << "sync:{" << syncAddress_.dump() << "}, "
+		<< "cluster:{" << clusterAddress_.dump() << "}, "
+		<< "sync:{" << syncAddress_.dump() << "}, "
 #ifdef GD_ENABLE_UNICAST_NOTIFICATION
-		   << "transaction:{" << transactionAddress_.dump() << "}, "
+		<< "transaction:{" << transactionAddress_.dump() << "}, "
 #else
-		   << "transaction:{" << txnAddress_.dump() << "}, "
+		<< "transaction:{" << txnAddress_.dump() << "}, "
 #endif
-		   << "system:{" << systemAddress_.dump() << "}, "
-		   << "isActive:{" << isActive_ << "}"
-		   << "}";
+		<< "system:{" << systemAddress_.dump() << "}, "
+		<< "isActive:{" << isActive_ << "}"
+		<< "}";
 		return ss.str();
 	}
 
@@ -189,7 +185,6 @@ struct AddressInfo {
 #else
 	MSGPACK_DEFINE(clusterAddress_, txnAddress_, syncAddress_, systemAddress_,
 		sqlServiceAddress_, dummy1_, dummy2_, isActive_);
-
 #endif
 };
 
@@ -197,8 +192,6 @@ struct AddressInfo {
 	@brief Represents the table of partitions
 */
 class PartitionTable {
-	TEST_PARTITION_TABLE
-	TEST_CLUSTER_MANAGER
 
 	struct NodeInfo;
 	struct PartitionInfo;
@@ -206,6 +199,8 @@ class PartitionTable {
 
 public:
 	static const int32_t MAX_NODE_NUM = 1000;
+	static const int32_t PARTITION_ASSIGN_NORMAL = 0;
+	static const int32_t PARTITION_ASSIGN_SHUFFLE = 1;
 
 
 	/*!
@@ -364,20 +359,20 @@ public:
 
 		PartitionRole(PartitionId pId, TableType type)
 			: pId_(pId),
-			  type_(type),
-			  messageType_(type),
-			  ownerNodeId_(UNDEF_NODEID),
-			  isSelfBackup_(false) {}
+			type_(type),
+			messageType_(type),
+			ownerNodeId_(UNDEF_NODEID),
+			isSelfBackup_(false) {}
 
 		PartitionRole(PartitionId pId, PartitionRevision revision, NodeId owner,
 			std::vector<NodeId> &backups, TableType type)
 			: pId_(pId),
-			  revision_(revision),
-			  type_(type),
-			  messageType_(static_cast<int8_t>(type)),
-			  ownerNodeId_(owner),
-			  backups_(backups),
-			  isSelfBackup_(false) {}
+			revision_(revision),
+			type_(type),
+			messageType_(static_cast<int8_t>(type)),
+			ownerNodeId_(owner),
+			backups_(backups),
+			isSelfBackup_(false) {}
 
 		void init(PartitionId pId, TableType type = PT_NEXT_OB) {
 			pId_ = pId;
@@ -548,7 +543,7 @@ public:
 				targetNodeSet.insert(ownerNodeId_);
 			}
 			for (std::vector<NodeId>::iterator it = backups_.begin();
-				 it != backups_.end(); it++) {
+				it != backups_.end(); it++) {
 				targetNodeSet.insert(*it);
 			}
 		}
@@ -593,6 +588,7 @@ public:
 			return ownerAddress_;
 		}
 
+
 		std::string dump();
 		std::string dumpIds();
 
@@ -622,16 +618,18 @@ public:
 		PartitionContext(util::StackAllocator &alloc, PartitionTable *pt,
 			bool isSync = false)
 			: alloc_(&alloc),
-			  changedShortTermPIdList_(alloc),
-			  changedLongTermPIdList_(alloc),
-			  shortTermPIdList_(alloc),
-			  changedNodeSet_(alloc),
-			  isSync_(isSync),
-			  isDownNode_(false),
-			  shortTermTimeout_(UNDEF_TTL),
-			  longTermTimeout_(UNDEF_TTL),
-			  pt_(pt),
-			  isRepairPartition_(false) {}
+			changedShortTermPIdList_(alloc),
+			changedLongTermPIdList_(alloc),
+			shortTermPIdList_(alloc),
+			changedNodeSet_(alloc),
+			isSync_(isSync),
+			isDownNode_(false),
+			shortTermTimeout_(UNDEF_TTL),
+			longTermTimeout_(UNDEF_TTL),
+			pt_(pt),
+			isRepairPartition_(false),
+			isShufflePartition_(false)
+		{}
 
 		void setChangePId(SyncMode mode, PartitionId pId) {
 			if (mode == MODE_SHORTTERM_SYNC) {
@@ -656,17 +654,21 @@ public:
 			isRepairPartition_ = isRepair;
 		}
 
+		void setShufflePartition(bool isShuffle) {
+			isShufflePartition_ = isShuffle;
+		}
+
 		std::string dump() {
 			util::NormalOStringStream ss;
 			ss << "PartitionContext:{"
-			   << "changedShortTermPIdList:" << changedShortTermPIdList_
-			   << ", changedLongTermPIdList:" << changedLongTermPIdList_
-			   << ", shortTermPIdList:" << shortTermPIdList_
-			   << ", changedNodeSet:"
-			   << pt_->dumpNodeAddressSet(changedNodeSet_)
-			   << ", isSync:" << isSync_ << ", isDownNode:" << isDownNode_
-			   << ", shortTermTimeout:" << getTimeStr(shortTermTimeout_)
-			   << ", longTermTimeout:" << getTimeStr(longTermTimeout_) << "}";
+			<< "changedShortTermPIdList:" << changedShortTermPIdList_
+			<< ", changedLongTermPIdList:" << changedLongTermPIdList_
+			<< ", shortTermPIdList:" << shortTermPIdList_
+			<< ", changedNodeSet:"
+			<< pt_->dumpNodeAddressSet(changedNodeSet_)
+			<< ", isSync:" << isSync_ << ", isDownNode:" << isDownNode_
+			<< ", shortTermTimeout:" << getTimeStr(shortTermTimeout_)
+			<< ", longTermTimeout:" << getTimeStr(longTermTimeout_) << "}";
 			return ss.str();
 		}
 
@@ -683,6 +685,7 @@ public:
 
 		PartitionTable *pt_;
 		bool isRepairPartition_;
+		bool isShufflePartition_;
 	};
 
 
@@ -693,6 +696,10 @@ public:
 
 	void initialize(ClusterManager *clsMgr) {
 		clsMgr_ = clsMgr;
+	}
+
+	ClusterManager *getClusterManager() {
+		return clsMgr_;
 	}
 
 	EventMonotonicTime getMonotonicTime();
@@ -756,6 +763,7 @@ public:
 	int32_t getGapCount(PartitionId pId) {
 		return gapCountList_[pId];
 	}
+
 
 	bool checkMaxLsn(PartitionId pId, LogSequentialNumber lsn) {
 		if (repairLsnList_[pId] > maxLsnList_[pId]) {
@@ -835,6 +843,12 @@ public:
 		role = partitions_[pId].roles_[type];
 	}
 
+	int32_t getPartitionRevision(
+		PartitionId pId, TableType type = PT_CURRENT_OB) {
+		util::LockGuard<util::ReadLock> currentLock(partitionLockList_[pId]);
+		return partitions_[pId].roles_[type].getRevisionNo();
+	}
+	
 	void setPartitionRole(
 		PartitionId pId, PartitionRole &role, TableType type = PT_CURRENT_OB) {
 		util::LockGuard<util::WriteLock> currentLock(partitionLockList_[pId]);
@@ -872,7 +886,8 @@ public:
 		NodeId targetNode = UNDEF_NODEID);
 
 	void filter(PartitionContext &context, util::Set<NodeId> &changedNodeSet,
-		SubPartitionTable &subTable, bool isShortSync = true);
+		SubPartitionTable &subTable, bool isShortSync
+		);
 
 	CheckedPartitionStat checkPartitionStat(bool firstCheckSkip = true);
 
@@ -980,7 +995,7 @@ public:
 		return partitions_[pId].partitionInfo_.pgId_;
 	}
 
-	void createNextPartition(PartitionContext &context);
+	void createNextPartition(PartitionContext &context, uint32_t partitionNum);
 
 	void createCatchupPartition(PartitionContext &context, bool isSkip = false);
 
@@ -995,7 +1010,7 @@ public:
 	void getSyncTargetPIdList(util::XArray<PartitionId> &pIdList) {
 		util::LockGuard<util::WriteLock> lock(lock_);
 		for (std::set<PartitionId>::iterator it = gossips_.begin();
-			 it != gossips_.end(); it++) {
+			it != gossips_.end(); it++) {
 			pIdList.push_back(*it);
 		}
 
@@ -1003,11 +1018,13 @@ public:
 	}
 
 	void clearGossip() {
+		util::LockGuard<util::WriteLock> lock(lock_);
 		gossips_.clear();
 	}
-
-	void setCatchupError() {
+	void setCatchupError(PartitionId pId) {
+		if (currentCatchupPId_ == pId) {
 		failCatchup_ = true;
+	}
 	}
 
 	bool isCatchupError() {
@@ -1017,6 +1034,9 @@ public:
 	}
 
 	NodeInfo &getNodeInfo(NodeId nodeId) {
+		if (nodeId >= config_.maxNodeNum_ || nodeId == UNDEF_NODEID) {
+			GS_THROW_USER_ERROR(GS_ERROR_CS_SERVICE_CLUSTER_INTERNAL_FAILED, "");
+		}
 		return nodes_[nodeId];
 	}
 
@@ -1098,7 +1118,7 @@ public:
 		}
 	}
 
-	bool isSetted(NodeId nodeId) {
+	bool isSet(NodeId nodeId) {
 		if (nodeId >= nodeNum_) {
 			return false;
 		}
@@ -1107,7 +1127,7 @@ public:
 
 	std::string dumpNodeAddress(
 		NodeId nodeId, ServiceType type = CLUSTER_SERVICE) {
-		if (nodeId >= nodeNum_) {
+		if (nodeId >= nodeNum_ || nodeId < 0) {
 			return std::string("");
 		}
 		return nodes_[nodeId].nodeBaseInfo_[type].address_.toString();
@@ -1125,7 +1145,7 @@ public:
 		int32_t pos = 0;
 		ss << "[";
 		for (std::set<NodeId>::iterator it = nodeSet.begin();
-			 it != nodeSet.end(); it++, pos++) {
+			it != nodeSet.end(); it++, pos++) {
 			ss << dumpNodeAddress(*it);
 			if (pos != listSize - 1) {
 				ss << ",";
@@ -1150,7 +1170,6 @@ public:
 		ss << "]";
 		return ss.str().c_str();
 	}
-
 	std::string dumpNodeAddressInfoList(std::vector<AddressInfo> &nodeList) {
 		util::NormalOStringStream ss;
 		int32_t listSize = static_cast<int32_t>(nodeList.size());
@@ -1172,7 +1191,7 @@ public:
 		int32_t setSize = static_cast<int32_t>(nodeSet.size());
 		int32_t pos = 0;
 		for (util::Set<NodeId>::iterator it = nodeSet.begin();
-			 it != nodeSet.end(); it++, pos++) {
+			it != nodeSet.end(); it++, pos++) {
 			ss << dumpNodeAddress(*it, type);
 			if (pos != setSize - 1) {
 				ss << ",";
@@ -1185,6 +1204,8 @@ public:
 	std::string dumpNodes();
 
 	std::string dumpPartitions(util::StackAllocator &alloc, TableType type);
+
+	std::string dumpPartitionsList(util::StackAllocator &alloc, TableType type);
 
 	std::string dumpPartitionStatusForRest(PartitionStatus status) {
 		switch (status) {
@@ -1199,7 +1220,7 @@ public:
 		default:
 			break;
 		}
-		return NULL;
+		return std::string();
 	}
 
 	std::string dumpPartitionStatusEx(PartitionStatus status) {
@@ -1215,7 +1236,7 @@ public:
 		default:
 			break;
 		}
-		return NULL;
+		return std::string();
 	}
 
 	std::string dumpCurrentClusterStatus() {
@@ -1236,20 +1257,21 @@ public:
 		NodeId nodeId, picojson::value &result, ServiceType addressType);
 
 
+
 private:
 
 	struct PartitionInfo {
 
 		PartitionInfo()
 			: lsn_(0),
-			  startLsn_(0),
-			  status_(PT_STOP),
-			  isActive_(false),
-			  shortTermTimeout_(UNDEF_TTL),
-			  longTermTimeout_(UNDEF_TTL),
-			  pgId_(0),
-			  isDrop_(false),
-			  notChangeCount_(0) {}
+			startLsn_(0),
+			status_(PT_STOP),
+			isActive_(false),
+			shortTermTimeout_(UNDEF_TTL),
+			longTermTimeout_(UNDEF_TTL),
+			pgId_(0),
+			isDrop_(false),
+			notChangeCount_(0) {}
 
 		void clear() {
 			shortTermTimeout_ = UNDEF_TTL;
@@ -1277,32 +1299,32 @@ private:
 
 		struct NodeBaseInfo {
 
-			NodeBaseInfo() : isSetted_(false) {}
+			NodeBaseInfo() : isSet_(false) {}
 
 			bool set(NodeAddress &address) {
-				if (!isSetted_ && address.isValid()) {
+				if (!isSet_ && address.isValid()) {
 					address_ = address;
-					isSetted_ = true;
+					isSet_ = true;
 					return true;
 				}
 				return false;
 			}
 
 			bool check() {
-				return isSetted_;
+				return isSet_;
 			}
 
 
 			NodeAddress address_;
-			bool isSetted_;
+			bool isSet_;
 		};
 
 
 		NodeInfo()
 			: nodeBaseInfo_(NULL),
-			  heartbeatTimeout_(UNDEF_TTL),
-			  isAcked_(false),
-			  alloc_(NULL) {}
+			heartbeatTimeout_(UNDEF_TTL),
+			isAcked_(false),
+			alloc_(NULL) {}
 
 		~NodeInfo() {
 			if (nodeBaseInfo_) {
@@ -1367,8 +1389,8 @@ private:
 
 		BlockQueue(int32_t partitionNum, int32_t queueSizeLimit = INT32_MAX)
 			: queueList_(NULL),
-			  partitionNum_(partitionNum),
-			  queueSize_(queueSizeLimit) {}
+			partitionNum_(partitionNum),
+			queueSize_(queueSizeLimit) {}
 
 		~BlockQueue() {
 			if (queueList_) {
@@ -1580,10 +1602,10 @@ private:
 		struct MasterPartitionInfo {
 			MasterPartitionInfo()
 				: lsn_(0),
-				  startLsn_(0),
-				  status_(PT_OFF),
-				  notChangeCount_(0),
-				  roleStatus_(static_cast<uint8_t>(PT_NONE)) {}
+				startLsn_(0),
+				status_(PT_OFF),
+				notChangeCount_(0),
+				roleStatus_(static_cast<uint8_t>(PT_NONE)) {}
 			LogSequentialNumber lsn_;
 			LogSequentialNumber startLsn_;
 			PartitionStatus status_;
@@ -1635,10 +1657,10 @@ private:
 
 		LoadSummary(int32_t nodeLimit)
 			: ownerLimit_(PartitionConfig::PT_OWNER_LOAD_LIMIT),
-			  dataLimit_(PartitionConfig::PT_DATA_LOAD_LIMIT),
-			  status_(PT_NORMAL),
-			  ownerLoadCount_(0),
-			  dataLoadCount_(0) {
+			dataLimit_(PartitionConfig::PT_DATA_LOAD_LIMIT),
+			status_(PT_NORMAL),
+			ownerLoadCount_(0),
+			dataLoadCount_(0) {
 			ownerLoadList_.assign(static_cast<size_t>(nodeLimit), 0);
 			dataLoadList_.assign(static_cast<size_t>(nodeLimit), 0);
 			liveNodeList_.assign(static_cast<size_t>(nodeLimit), 0);
@@ -1719,7 +1741,7 @@ private:
 				}
 			}
 			ss << "], ownerLoadCount:" << ownerLoadCount_
-			   << ", dataLoadCount:" << dataLoadCount_ << "}";
+			<< ", dataLoadCount:" << dataLoadCount_ << "}";
 			return ss.str();
 		}
 
@@ -1760,6 +1782,8 @@ private:
 				return false;
 			}
 			limitOwnerBackupLsnGap_ = gap;
+			limitOwnerBackupLsnDetectErrorGap_ = limitOwnerBackupLsnGap_ * PT_BACKUP_GAP_FACTOR;
+			limitOwnerBackupLsnDropGap_ = limitOwnerBackupLsnGap_ * PT_BACKUP_GAP_FACTOR;
 			return true;
 		}
 
@@ -1848,6 +1872,7 @@ private:
 		uint32_t dataLoadLimit_;
 		int32_t maxNodeNum_;
 		bool isSucceedCurrentOwner_;
+		int32_t assignMode_;
 	};
 
 
@@ -1913,7 +1938,7 @@ private:
 		maxDataLoad = 0;
 		uint32_t currentOwnerLoad, currentDataLoad, targetLoad;
 		for (util::XArray<NodeId>::iterator nodeItr = nodeList.begin();
-			 nodeItr != nodeList.end(); nodeItr++) {
+			nodeItr != nodeList.end(); nodeItr++) {
 			nodeId = (*nodeItr);
 
 			currentOwnerLoad = ownerLoadList[nodeId];
@@ -2038,8 +2063,8 @@ private:
 	std::vector<LogSequentialNumber> maxLsnList_;
 	std::vector<LogSequentialNumber> repairLsnList_;
 	std::vector<NodeId> currentActiveOwnerList_;
-
 	std::vector<int32_t> gapCountList_;
+
 
 	util::Mutex revisionLock_;
 	util::Mutex nodeInfoLock_;
@@ -2069,6 +2094,7 @@ private:
 	int32_t lsnDigit_;
 
 	bool failCatchup_;
+	PartitionId failCatchupPId_;
 	bool isRepaired_;
 	int64_t prevFailoverTime_;
 
@@ -2096,27 +2122,27 @@ public:
 	SubPartition(PartitionId pId, bool isActive, bool isDownNextOwner,
 		PartitionRole &role, NodeAddress &currentOwner)
 		: pId_(pId),
-		  isActive_(isActive),
-		  isDownNextOwner_(isDownNextOwner),
-		  role_(role),
-		  currentOwner_(currentOwner){};
+		isActive_(isActive),
+		isDownNextOwner_(isDownNextOwner),
+		role_(role),
+		currentOwner_(currentOwner){};
 
 	SubPartition(PartitionId pId, bool isActive, bool isDownNextOwner,
 		PartitionRole &role)
 		: pId_(pId),
-		  isActive_(isActive),
-		  isDownNextOwner_(isDownNextOwner),
-		  role_(role){};
+		isActive_(isActive),
+		isDownNextOwner_(isDownNextOwner),
+		role_(role){};
 
 	MSGPACK_DEFINE(pId_, isActive_, isDownNextOwner_, role_, currentOwner_);
 
 	std::string dump() {
 		util::NormalOStringStream ss;
 		ss << "SubPartition:{"
-		   << "pId:" << pId_ << ", isActive:" << isActive_
-		   << ", isDownNextOwner:" << isDownNextOwner_
-		   << ", role:" << role_.dump()
-		   << ", current owner:" << currentOwner_.toString() << "}";
+		<< "pId:" << pId_ << ", isActive:" << isActive_
+		<< ", isDownNextOwner:" << isDownNextOwner_
+		<< ", role:" << role_.dump()
+		<< ", current owner:" << currentOwner_.toString() << "}";
 		return ss.str();
 	}
 
@@ -2142,6 +2168,9 @@ public:
 	SubPartitionTable() {}
 
 	SubPartitionTable(PartitionRevision &revision) : revision_(revision) {}
+	bool check() {
+		return true;
+	}
 
 	int32_t size() {
 		return static_cast<int32_t>(subPartitionList_.size());
@@ -2172,6 +2201,7 @@ public:
 		nodeAddressList_.push_back(addressInfo);
 	}
 
+
 	std::vector<AddressInfo> &getNodeAddressList() {
 		return nodeAddressList_;
 	}
@@ -2185,7 +2215,7 @@ public:
 	std::string dump() {
 		util::NormalOStringStream ss;
 		ss << "subPartitionTable:{"
-		   << "ptRev:" << revision_.toString();
+		<< "ptRev:" << revision_.toString();
 		ss << ", [";
 		for (size_t pos = 0; pos < subPartitionList_.size(); pos++) {
 			ss << subPartitionList_[pos].dump();

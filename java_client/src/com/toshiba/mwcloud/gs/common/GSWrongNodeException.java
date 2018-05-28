@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -15,9 +15,17 @@
 */
 package com.toshiba.mwcloud.gs.common;
 
+import java.util.Map;
+
 public class GSWrongNodeException extends GSConnectionException {
 
 	private static final long serialVersionUID = -5153394848618060421L;
+
+	public GSWrongNodeException(
+			int errorCode, String errorName, String description,
+			Map<String, String> parameters, Throwable cause) {
+		super(errorCode, errorName, description, parameters, cause);
+	}
 
 	public GSWrongNodeException(int errorCode,
 			String errorName, String description, Throwable cause) {

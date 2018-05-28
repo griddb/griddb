@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2015 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -65,7 +65,8 @@ enum GSCommonErrorCode {
 	GS_THROW_USER_ERROR(errorCode, message)
 #define GS_COMMON_RETHROW_USER_ERROR(cause, message) \
 	GS_RETHROW_USER_ERROR(cause, message)
-#define GS_COMMON_EXCEPTION_MESSAGE(cause) GS_EXCEPTION_MESSAGE(cause)
+#define GS_COMMON_EXCEPTION_MESSAGE(cause) \
+	GS_EXCEPTION_MESSAGE(cause)
 #endif
 
 #endif

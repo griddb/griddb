@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -16,8 +16,8 @@
 package com.toshiba.mwcloud.gs;
 
 import java.io.Closeable;
+import java.util.Collections;
 import java.util.Properties;
-import java.util.ServiceLoader;
 
 import com.toshiba.mwcloud.gs.common.GridStoreFactoryProvider;
 import com.toshiba.mwcloud.gs.common.LoggingUtils;
@@ -74,47 +74,23 @@ public abstract class GridStoreFactory implements Closeable {
 		registerLoggers();
 	}
 
-	private static final String DEFAULT_CLASS_NAME =
-			"com.toshiba.mwcloud.gs.subnet.SubnetGridStoreFactory";
-
 	private static final GridStoreFactory INSTANCE = newInstance();
 
 	protected GridStoreFactory() {
 	}
 
 	private static GridStoreFactory newInstance() {
-	
-		for (ClassLoader cl : new ClassLoader[] {
-				GridStoreFactory.class.getClassLoader(),
-				Thread.currentThread().getContextClassLoader(),
-				ClassLoader.getSystemClassLoader()
-		}) {
-			for (GridStoreFactoryProvider provider : ServiceLoader.load(
-					GridStoreFactoryProvider.class, cl)) {
-				return provider.getFactory();
-			}
-		}
-
-		try {
-			return (GridStoreFactory)
-					Class.forName(DEFAULT_CLASS_NAME).newInstance();
-		}
-		catch (IllegalAccessException e) {
-			throw new RuntimeException(e);
-		}
-		catch (ClassNotFoundException e) {
-			throw new RuntimeException(e);
-		}
-		catch (InstantiationException e) {
-			throw new RuntimeException(e);
-		}
+		return GridStoreFactoryProvider.getProvider(
+				GridStoreFactoryProvider.class,
+				GridStoreFactory.class,
+				Collections.<Class<?>>emptySet()).getFactory();
 	}
 
 	/**
 	 * Returns a default instance.
 	 *
 	 * <p>When loading this class, a default subclass of the {@link GridStoreFactory}
-	 *  class is loaded and an instance is created.</p>
+	 * class is loaded and an instance is created.</p>
 	 */
 	public static GridStoreFactory getInstance() {
 		return INSTANCE;
@@ -129,8 +105,7 @@ public abstract class GridStoreFactory implements Closeable {
 	 * a node corresponding to each Container, authentication is performed.</p>
 	 *
 	 * <p>The following properties can be specified. Unsupported property
-	 * names are ignored. See "System limiting values" in the GridDB API Reference for upper limit values
-	 * of some properties.</p>
+	 * names are ignored.</p>
 	 * <table>
 	 * <thead><tr><th>Property</th><th>Description</th></tr></thead>
 	 * <tbody>
@@ -151,9 +126,11 @@ public abstract class GridStoreFactory implements Closeable {
 	 * from {@code 0} to {@code 65535}. A default port number is used if omitted.</td></tr>
 	 * <tr><td>clusterName</td><td>A cluster name. It is used to verify whether it
 	 * matches the cluster name assigned to the destination cluster. If it is omitted
-	 * or an empty string is specified, cluster name verification is not performed.
-	 * If a cluster name of over the upper length limit is specified, connection to the
-	 * cluster node will fail. </td></tr>
+	 * or an empty string is specified, cluster name verification is not performed.</td></tr>
+	 * <tr><td>database</td><td>Name of the database to be connected.
+	 * If it is omitted, "public" database that all users can
+	 * access is automatically connected. Users can handle the
+	 * containers belonging to the connected database.</td></tr>
 	 * <tr><td>user</td><td>A user name</td></tr>
 	 * <tr><td>password</td><td>A password for user authentication</td></tr>
 	 * <tr><td>consistency</td><td>Either one of the following consistency levels:
@@ -186,19 +163,24 @@ public abstract class GridStoreFactory implements Closeable {
 	 * the value is {@code 0}. To obtain a {@link Container}, its ContainerInfo
 	 * might be obtained from the Container cache instead of request to GridDB.
 	 * A default number is used if omitted. </td></tr>
-	 * <tr><td>dataAffinityPattern</td><td>Patterns of Container names and data
-	 * affinity strings in order to set data affinity strings to their {@link Container}s
-	 * automatically. Format is as following.
+	 * <tr><td>dataAffinityPattern</td><td>Specifies the arbitrary
+	 * number of patterns as show below, using pairs of an
+	 * affinity string for the function of data affinity and a
+	 * container pattern.
 	 * <pre>(ContainerNamePattern1)=(DataAffinityString1),(ContainerNamePattern2)=(DataAffinityString2),...</pre>
-	 * The dataAffinityPattern is applied to the new Container when it is created
-	 * with the ContainerInfo which does not include a data affinity string.
-	 * If a Container name matches one of the ContainerNamePattern of the dataAffinityPattern,
-	 * the corresponding data affinity string is applied to the new Container.
-	 * The priority order of matching and applying patterns is the order of specified
-	 * patterns. ContainerNamePatterns maintain the general contract for Container
-	 * names, except a wild card character "%" is also acceptable additionally. Data
-	 * affinity patterns maintain the general contract for
-	 * {@link ContainerInfo#setDataAffinity(String)}.</td></tr>
+	 * When {@link Container} is added by {@link ContainerInfo#setDataAffinity(String)}, the affinity string
+	 * pairing with a container name pattern that matches the
+	 * container name is applied. If there are multiple patterns
+	 * that match the name, the first pattern in the specified
+	 * order is selected. Each container name pattern follows the
+	 * naming rules of container, except a wild card character '%'
+	 * can also be specified in the pattern. The affinity string
+	 * follows the rules of {@link ContainerInfo#setDataAffinity(String)}.
+	 * To specify special characters used in the patterns or as
+	 * delimiters for the patterns in a container name, etc., they
+	 * must be escaped by '\'. But the characters against the
+	 * naming rules of container or affinity cannot be specified.
+	 * Supported since the version 2.7.</td></tr>
 	 * <tr><td>notificationMember</td><td>
 	 * A list of address and port pairs in cluster. It is used to connect to
 	 * cluster which is configured with FIXED_LIST mode, and specified as
@@ -214,10 +196,19 @@ public abstract class GridStoreFactory implements Closeable {
 	 * This property cannot be specified with neither notificationAddress nor
 	 * notificationMember properties at the same time.
 	 * This property is supported on version 2.9 or later.
-	 * 
+	 *
 	 * </td></tr>
 	 * </tbody>
 	 * </table>
+	 *
+	 * <p>Cluster names, database names, user names and passwords
+	 * are case-sensitive. See the GridDB Technical Reference for
+	 * the details of the limitations, such as allowed characters
+	 * and maximum length. When a name violating the limitations has
+	 * been specified as a property value, the error detection may
+	 * be delayed until the authentication processing. And there
+	 * are the cases that the error is identified as an authentication
+	 * error, etc., not a violation error for the limitations.</p>
 	 *
 	 * <p>A new {@link GridStore} instance is created by each call of this method.
 	 * Operations on different {@link GridStore} instances and related objects are thread
@@ -234,7 +225,7 @@ public abstract class GridStoreFactory implements Closeable {
 	 *
 	 * @throws GSException if host name resolution fails.
 	 * @throws GSException if any specified property does not match the format
-	 * shown above. If the properties match the format, no GSException is thrown
+	 * explained above.
 	 * even if connection or authentication will not succeed with their values.
 	 * @throws GSException if the connection is closed.
 	 * @throws NullPointerException {@code null} is specified as {@code properties}.

@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -102,24 +102,6 @@ public:
 	}
 
 	virtual AggregationType apiAggregationType() = 0;
-	/*!
-	 * @brief API passthrough
-	 * @param txn
-	 * @param timeSeries
-	 * @param sc
-	 * @param columnId
-	 * @param serializedRowList
-	 *
-	 * @return
-	 */
-	virtual bool getResultFromAPI(TransactionContext &txn,
-		TimeSeries &timeSeries, BtreeMap::SearchContext &sc, uint32_t columnId,
-		util::XArray<uint8_t> &serializedRowList) {
-		uint64_t resultNum;
-		timeSeries.aggregate(txn, sc, columnId, apiAggregationType(), resultNum,
-			serializedRowList);
-		return resultNum != 0;
-	}
 
 	/*!
 	 * @brief If function has internal valuables,
@@ -266,8 +248,8 @@ public:
 				"Internal logic error: Invalid value for aggregation");
 		}
 		ColumnType type = input.getType();
-		assert(addTable[type][value.getType()] != NULL);
-		addTable[type][value.getType()](
+		assert(CalculatorTable::addTable_[type][value.getType()] != NULL);
+		CalculatorTable::addTable_[type][value.getType()](
 			txn, input.data(), 0, value.data(), 0, value);
 		b = true;
 	}
@@ -282,7 +264,7 @@ public:
 	 */
 	virtual bool getResult(TransactionContext &txn, Value &result) {
 		result.set(0);
-		addTable[result.getType()][value.getType()](
+		CalculatorTable::addTable_[result.getType()][value.getType()](
 			txn, result.data(), 0, value.data(), 0, result);
 		return b;  
 	}
@@ -441,15 +423,9 @@ public:
 		return true;
 	}
 
-#ifdef QP_DISABLE_VARIANCE_PASSTHROUGH
 	virtual AggregationType apiAggregationType() {
 		return AGG_UNSUPPORTED_TYPE;
 	}
-#else
-	virtual AggregationType apiAggregationType() {
-		return AGG_VARIANCE;
-	}
-#endif
 
 	/*!
 	 * @brief If function has internal valuables,
@@ -554,15 +530,9 @@ public:
 		return true;
 	}
 
-#ifdef QP_DISABLE_VARIANCE_PASSTHROUGH
 	virtual AggregationType apiAggregationType() {
 		return AGG_UNSUPPORTED_TYPE;
 	}
-#else
-	virtual AggregationType apiAggregationType() {
-		return AGG_STDDEV;
-	}
-#endif
 
 	/*!
 	 * @brief If function has internal valuables,
@@ -681,14 +651,14 @@ public:
 				if ((*opTable)[type][value.getType()](
 						txn, input.data(), 0, value.data(), 0) == true) {
 					value.set(0);
-					addTable[type][value.getType()](
+					CalculatorTable::addTable_[type][value.getType()](
 						txn, input.data(), 0, value.data(), 0, value);
 				}
 			}
 			else {
 				value.set(0);
 				assert(opTable[type][value.getType()] != NULL);
-				addTable[input.getType()][value.getType()](
+				CalculatorTable::addTable_[input.getType()][value.getType()](
 					txn, input.data(), 0, value.data(), 0, value);
 				resultFlag = true;
 			}
@@ -714,7 +684,7 @@ public:
 			break;
 		default: {
 			Value zero(0);
-			addTable[value.getType()][COLUMN_TYPE_INT](
+			CalculatorTable::addTable_[value.getType()][COLUMN_TYPE_INT](
 				txn, value.data(), 0, zero.data(), 0, result);
 		} break;
 		}
@@ -754,7 +724,7 @@ public:
 	 * @brief constructor setups opTable
 	 */
 	AggregationMax() {
-		opTable = reinterpret_cast<const OperatorTable *>(&gtTable);
+		opTable = reinterpret_cast<const OperatorTable *>(&ComparatorTable::gtTable_);
 	}
 	virtual AggregationType apiAggregationType() {
 		return AGG_MAX;
@@ -789,7 +759,7 @@ public:
 	 * @brief constructor setups opTable
 	 */
 	AggregationMin() {
-		opTable = reinterpret_cast<const OperatorTable *>(&ltTable);
+		opTable = reinterpret_cast<const OperatorTable *>(&ComparatorTable::ltTable_);
 	}
 	virtual AggregationType apiAggregationType() {
 		return AGG_MIN;

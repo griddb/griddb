@@ -1,6 +1,6 @@
 ﻿/*
-    Copyright (c) 2012 TOSHIBA CORPORATION.
-    
+    Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
+
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License as
     published by the Free Software Foundation, either version 3 of the
@@ -28,6 +28,7 @@
 
 UTIL_TRACER_DECLARE(LOG_MANAGER);
 UTIL_TRACER_DECLARE(IO_MONITOR);
+UTIL_TRACER_DECLARE(SIZE_MONITOR);
 UTIL_TRACER_DECLARE(CLUSTER_SERVICE);
 
 
@@ -46,7 +47,8 @@ const char *const LogManager::LOG_DUMP_FILE_EXTENSION = ".txt";
     @brief Constructor of LogManager
 */
 LogManager::LogManager(const Config &config) :
-	config_(config) 
+	config_(config)
+	,filterPId_(UNDEF_PARTITIONID)  
 {
 	if (config_.getBlockSize() <=
 			LogBlocksInfo::LOGBLOCK_HEADER_SIZE +
@@ -74,6 +76,7 @@ LogManager::LogManager(const Config &config) :
 			delete pgManagerList_[i];
 		}
 	}
+	childLogManagerList_.assign(config.pgConfig_.getPartitionCount(), NULL);  
 
 	config_.setUpConfigHandler();
 }
@@ -96,7 +99,11 @@ struct NoDigitChecker {
 /*!
     @brief Opens Log file of all Partition groups.
 */
-void LogManager::open(bool checkOnly, bool forceRecoveryFromExistingFiles) {
+void LogManager::open(
+		bool checkOnly, bool forceRecoveryFromExistingFiles,
+		bool isIncrementalBackup,
+		PartitionGroupId cpLongSyncPgId
+		) {
 	typedef std::vector<CheckpointId> CheckpointIdList;
 	typedef std::map<PartitionGroupId, CheckpointIdList> CheckpointIdsMap;
 
@@ -158,63 +165,73 @@ void LogManager::open(bool checkOnly, bool forceRecoveryFromExistingFiles) {
 
 		if (!cpIdsMap.empty()) {
 			if (forceRecoveryFromExistingFiles) {
-				for (PartitionGroupId pgId = 0; pgId < config_.pgConfig_.getPartitionGroupCount(); ++pgId) {
+
+				for (PartitionGroupId pgId = 0;
+						pgId < config_.pgConfig_.getPartitionGroupCount(); ++pgId) {
 					if (cpIdsMap.find(pgId) == cpIdsMap.end()) {
-						GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_OPEN_SKIP_PARTITIONGROUP,
-									  "forceRecoveryFromExistingFiles=true: skip pgId=" << pgId);
+						assert(cpLongSyncPgId == UNDEF_PARTITIONGROUPID ||
+								pgId != cpLongSyncPgId);
+						GS_TRACE_INFO(
+								LOG_MANAGER, GS_TRACE_LM_OPEN_SKIP_PARTITIONGROUP,
+								"forceRecoveryFromExistingFiles=true: skip pgId=" << pgId);
 						const CheckpointId cpId = 0;
 
 						LOG_MANAGER_CONFLICTION_DETECTOR_SCOPE(pgId, true);
 						pgManagerList_[pgId]->open(
-							pgId, config_, cpId, cpId,
-							partitionInfoList_, config_.emptyFileAppendable_, checkOnly);
+								pgId, config_, cpId, cpId,
+								partitionInfoList_, config_.emptyFileAppendable_,
+								checkOnly);
 					} else {
 						LOG_MANAGER_CONFLICTION_DETECTOR_SCOPE(pgId, true);
-						
+						assert(cpLongSyncPgId == UNDEF_PARTITIONGROUPID ||
+								pgId == cpLongSyncPgId);
 						CheckpointIdList &list = cpIdsMap[pgId];
 						std::sort(list.begin(), list.end());
-						
-						if (list.size() > 1 && list.begin()[0] == 0 && list.begin()[1] > 1) {
+
+						if (list.size() > 1 &&
+								list.begin()[0] == 0 && list.begin()[1] > 1) {
 							list.erase(list.begin());
 						}
-						
+
 						CheckpointId first = list.front();
 						pgManagerList_[pgId]->open(
-							pgId, config_, first, list.back() + 1,
-							partitionInfoList_, config_.emptyFileAppendable_, checkOnly);
+								pgId, config_, first, list.back() + 1,
+								partitionInfoList_, config_.emptyFileAppendable_,
+								checkOnly, NULL, (pgId == cpLongSyncPgId)); 
 					}
 				}
 			} else {
 				const PartitionGroupId minPgId = cpIdsMap.begin()->first;
 				const PartitionGroupId maxPgId = (--cpIdsMap.end())->first;
-				if (minPgId != 0 || maxPgId + 1 !=
-					config_.pgConfig_.getPartitionGroupCount() ||
-					cpIdsMap.size() != config_.pgConfig_.getPartitionGroupCount()) {
+				if (minPgId != 0 ||
+						maxPgId + 1 != config_.pgConfig_.getPartitionGroupCount() ||
+						cpIdsMap.size() != config_.pgConfig_.getPartitionGroupCount()) {
 					GS_THROW_USER_ERROR(
-						GS_ERROR_LM_LOG_FILES_CONFIGURATION_UNMATCHED,
-						"Existing log files do not match the server configuration"
-						" (expectedPartitionGroupNum=" <<
-						config_.pgConfig_.getPartitionGroupCount() <<
-						", actualPartitionGroupNum=" << cpIdsMap.size() <<
-						", actualMinPartitionGroupId=" << minPgId <<
-						", actualMaxPartitionGroupId=" << maxPgId << ")");
+							GS_ERROR_LM_LOG_FILES_CONFIGURATION_UNMATCHED,
+							"Existing log files do not match the server configuration"
+							" (expectedPartitionGroupNum=" <<
+							config_.pgConfig_.getPartitionGroupCount() <<
+							", actualPartitionGroupNum=" << cpIdsMap.size() <<
+							", actualMinPartitionGroupId=" << minPgId <<
+							", actualMaxPartitionGroupId=" << maxPgId << ")");
 				}
 				for (CheckpointIdsMap::iterator it = cpIdsMap.begin();
-					 it != cpIdsMap.end(); ++it) {
+						it != cpIdsMap.end(); ++it) {
 					const PartitionGroupId pgId = it->first;
 					LOG_MANAGER_CONFLICTION_DETECTOR_SCOPE(pgId, true);
-					
+
 					CheckpointIdList &list = it->second;
 					std::sort(list.begin(), list.end());
-					
+
 					if (list.size() > 1 && list.begin()[0] == 0 && list.begin()[1] > 1) {
 						list.erase(list.begin());
 					}
 
 					CheckpointId first = list.front();
 					pgManagerList_[pgId]->open(
-						pgId, config_, first, list.back() + 1,
-						partitionInfoList_, config_.emptyFileAppendable_, checkOnly);
+							pgId, config_, first, list.back() + 1,
+							partitionInfoList_, config_.emptyFileAppendable_,
+							checkOnly);
 				}
 			}
 		}
@@ -237,15 +254,17 @@ void LogManager::open(bool checkOnly, bool forceRecoveryFromExistingFiles) {
 		}
 	}
 	catch (std::exception &e) {
-		GS_RETHROW_USER_ERROR(e, "Open logfile failed. (reason="
-							  << GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_USER_ERROR(
+				e, "Open logfile failed. (reason=" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 
 /*!
     @brief Open Log file of specified Partition group.
 */
-void LogManager::openPartial(PartitionGroupId pgId, CheckpointId cpId, const char8_t *suffix) {
+void LogManager::openPartial(
+		PartitionGroupId pgId, CheckpointId cpId, const char8_t *suffix) {
 	try {
 		LOG_MANAGER_CONFLICTION_DETECTOR_SCOPE(pgId, true);
 
@@ -256,16 +275,17 @@ void LogManager::openPartial(PartitionGroupId pgId, CheckpointId cpId, const cha
 				appendable, checkOnly, suffix);
 	}
 	catch (std::exception &e) {
-		GS_RETHROW_USER_ERROR(e, "Open logfile failed. (reason="
-							  << GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_USER_ERROR(
+				e, "Open logfile failed. (reason=" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 
 /*!
     @brief Create Log files of all Partition groups.
 */
-void LogManager::create(PartitionGroupId pgId, CheckpointId cpId,
-		const char8_t *suffix) {
+void LogManager::create(
+		PartitionGroupId pgId, CheckpointId cpId, const char8_t *suffix) {
 	try {
 		LOG_MANAGER_CONFLICTION_DETECTOR_SCOPE(pgId, true);
 
@@ -276,8 +296,9 @@ void LogManager::create(PartitionGroupId pgId, CheckpointId cpId,
 				appendable, checkOnly, suffix);
 	}
 	catch (std::exception &e) {
-		GS_RETHROW_USER_ERROR(e, "Create logfile failed. (reason="
-							  << GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_USER_ERROR(
+				e, "Create logfile failed. (reason=" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 
@@ -384,8 +405,9 @@ bool LogManager::findCheckpointEndLog(
 /*!
     @brief Output a Log of a Replication.
 */
-void LogManager::putReplicationLog(PartitionId pId, LogSequentialNumber lsn,
-								   uint32_t len, uint8_t *logRecord)
+void LogManager::putReplicationLog(
+		PartitionId pId, LogSequentialNumber lsn,
+		uint32_t len, uint8_t *logRecord)
 {
 	putLog(pId, lsn, logRecord, len, false);
 }
@@ -393,23 +415,24 @@ void LogManager::putReplicationLog(PartitionId pId, LogSequentialNumber lsn,
 /*!
     @brief Output a Log of the start of a Checkpoint.
 */
-LogSequentialNumber LogManager::putCheckpointStartLog(util::XArray<uint8_t> &binaryLogBuf,
-													  PartitionId pId,
-													  TransactionId maxTxnId,
-													  LogSequentialNumber cpLsn,
-													  const util::XArray<ClientId> &clientIds,
-													  const util::XArray<TransactionId> &activeTxnIds,
-													  const util::XArray<ContainerId> &refContainerIds,
-													  const util::XArray<StatementId> &lastExecStmtIds,
-													  const util::XArray<int32_t> &txnTimeoutIntervalSec)
+LogSequentialNumber LogManager::putCheckpointStartLog(
+		util::XArray<uint8_t> &binaryLogBuf,
+		PartitionId pId,
+		TransactionId maxTxnId,
+		LogSequentialNumber cpLsn,
+		const util::XArray<ClientId> &clientIds,
+		const util::XArray<TransactionId> &activeTxnIds,
+		const util::XArray<ContainerId> &refContainerIds,
+		const util::XArray<StatementId> &lastExecStmtIds,
+		const util::XArray<int32_t> &txnTimeoutIntervalSec)
 {
 	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
 	LogSequentialNumber lsn = 0;
 	try {
 		const uint32_t partitionCount = config_.pgConfig_.getPartitionCount();
 		lsn = serializeLogCommonPart(
-			binaryLogBuf, LOG_TYPE_CHECKPOINT_START,
-			pId, cpLsn, maxTxnId, partitionCount);
+				binaryLogBuf, LOG_TYPE_CHECKPOINT_START,
+				pId, cpLsn, maxTxnId, partitionCount);
 
 		uint8_t tmp[LOGMGR_VARINT_MAX_LEN * 2];
 		uint8_t *addr = tmp;
@@ -418,29 +441,35 @@ LogSequentialNumber LogManager::putCheckpointStartLog(util::XArray<uint8_t> &bin
 		uint32_t numContainerRefCount = 0;
 		addr += util::varIntEncode32(addr, numContainerRefCount);
 		binaryLogBuf.push_back(tmp, (addr - tmp));
-		binaryLogBuf.push_back(reinterpret_cast<const uint8_t*>(clientIds.data()),
-			clientIds.size() * sizeof(ClientId));
-		binaryLogBuf.push_back(reinterpret_cast<const uint8_t*>(activeTxnIds.data()),
-			activeTxnIds.size() * sizeof(TransactionId));
-		binaryLogBuf.push_back(reinterpret_cast<const uint8_t*>(refContainerIds.data()),
-			refContainerIds.size() * sizeof(ContainerId));
-		binaryLogBuf.push_back(reinterpret_cast<const uint8_t*>(lastExecStmtIds.data()),
-			lastExecStmtIds.size() * sizeof(StatementId));
-		binaryLogBuf.push_back(reinterpret_cast<const uint8_t*>(txnTimeoutIntervalSec.data()),
-			txnTimeoutIntervalSec.size() * sizeof(uint32_t));
+		binaryLogBuf.push_back(
+				reinterpret_cast<const uint8_t*>(clientIds.data()),
+				clientIds.size() * sizeof(ClientId));
+		binaryLogBuf.push_back(
+				reinterpret_cast<const uint8_t*>(activeTxnIds.data()),
+				activeTxnIds.size() * sizeof(TransactionId));
+		binaryLogBuf.push_back(
+				reinterpret_cast<const uint8_t*>(refContainerIds.data()),
+				refContainerIds.size() * sizeof(ContainerId));
+		binaryLogBuf.push_back(
+				reinterpret_cast<const uint8_t*>(lastExecStmtIds.data()),
+				lastExecStmtIds.size() * sizeof(StatementId));
+		binaryLogBuf.push_back(
+				reinterpret_cast<const uint8_t*>(txnTimeoutIntervalSec.data()),
+				txnTimeoutIntervalSec.size() * sizeof(uint32_t));
 		assert(clientIds.size() == activeTxnIds.size()
-			   && activeTxnIds.size() == refContainerIds.size()
-			   && refContainerIds.size() == lastExecStmtIds.size()
-			   && lastExecStmtIds.size() == txnTimeoutIntervalSec.size()
-			   && txnTimeoutIntervalSec.size() == static_cast<size_t>(txnNum));
+				&& activeTxnIds.size() == refContainerIds.size()
+				&& refContainerIds.size() == lastExecStmtIds.size()
+				&& lastExecStmtIds.size() == txnTimeoutIntervalSec.size()
+				&& txnTimeoutIntervalSec.size() == static_cast<size_t>(txnNum));
 
 		putLog(pId, lsn, binaryLogBuf.data(), binaryLogBuf.size());
 		flushByCommit(pId);
 
 
 	} catch(std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(e, "Write log failed. reason=("
-								<< GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Write log failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 	return lsn;
 }
@@ -448,19 +477,20 @@ LogSequentialNumber LogManager::putCheckpointStartLog(util::XArray<uint8_t> &bin
 /*!
     @brief Output a Log of committing a transaction.
 */
-LogSequentialNumber LogManager::putCommitTransactionLog(util::XArray<uint8_t> &binaryLogBuf,
-														PartitionId pId,
-														const ClientId &clientId,
-														TransactionId txnId,
-														ContainerId containerId,
-														StatementId stmtId)
+LogSequentialNumber LogManager::putCommitTransactionLog(
+		util::XArray<uint8_t> &binaryLogBuf,
+		PartitionId pId,
+		const ClientId &clientId,
+		TransactionId txnId,
+		ContainerId containerId,
+		StatementId stmtId)
 {
 	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
 	LogSequentialNumber lsn = 0;
 	try {
 		lsn = serializeLogCommonPart(
-			binaryLogBuf, LOG_TYPE_COMMIT,
-            pId, clientId.sessionId_, txnId, containerId);
+				binaryLogBuf, LOG_TYPE_COMMIT,
+				pId, clientId.sessionId_, txnId, containerId);
 
 		uint8_t tmp[LOGMGR_VARINT_MAX_LEN * 1];
 		uint8_t *addr = tmp;
@@ -472,8 +502,9 @@ LogSequentialNumber LogManager::putCommitTransactionLog(util::XArray<uint8_t> &b
 		flushByCommit(pId);
 
 	} catch(std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(e, "Write log failed. reason=("
-								<< GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Write log failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 	return lsn;
 }
@@ -481,19 +512,20 @@ LogSequentialNumber LogManager::putCommitTransactionLog(util::XArray<uint8_t> &b
 /*!
     @brief Output a Log of aborting a transaction.
 */
-LogSequentialNumber LogManager::putAbortTransactionLog(util::XArray<uint8_t> &binaryLogBuf,
-													   PartitionId pId,
-													   const ClientId &clientId,
-													   TransactionId txnId,
-													   ContainerId containerId,
-													   StatementId stmtId)
+LogSequentialNumber LogManager::putAbortTransactionLog(
+		util::XArray<uint8_t> &binaryLogBuf,
+		PartitionId pId,
+		const ClientId &clientId,
+		TransactionId txnId,
+		ContainerId containerId,
+		StatementId stmtId)
 {
 	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
 	LogSequentialNumber lsn = 0;
 	try {
 		lsn = serializeLogCommonPart(
-			binaryLogBuf, LOG_TYPE_ABORT,
-            pId, clientId.sessionId_, txnId, containerId);
+				binaryLogBuf, LOG_TYPE_ABORT,
+				pId, clientId.sessionId_, txnId, containerId);
 
 		uint8_t tmp[LOGMGR_VARINT_MAX_LEN * 1];
 		uint8_t *addr = tmp;
@@ -505,8 +537,9 @@ LogSequentialNumber LogManager::putAbortTransactionLog(util::XArray<uint8_t> &bi
 		flushByCommit(pId);
 
 	} catch(std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(e, "Write log failed. reason=("
-								<< GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Write log failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 	return lsn;
 }
@@ -514,22 +547,24 @@ LogSequentialNumber LogManager::putAbortTransactionLog(util::XArray<uint8_t> &bi
 /*!
     @brief Output a Log of removing a partition.
 */
-LogSequentialNumber LogManager::putDropPartitionLog(util::XArray<uint8_t> &binaryLogBuf,
-													PartitionId pId)
+LogSequentialNumber LogManager::putDropPartitionLog(
+		util::XArray<uint8_t> &binaryLogBuf,
+		PartitionId pId)
 {
 	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
 	LogSequentialNumber lsn = 0;
 	try {
 		lsn = serializeLogCommonPart(
-			binaryLogBuf, LOG_TYPE_DROP_PARTITION,
-			pId, 0, 0, 0);
+				binaryLogBuf, LOG_TYPE_DROP_PARTITION,
+				pId, 0, 0, 0);
 
 
 		putLog(pId, lsn, binaryLogBuf.data(), binaryLogBuf.size());
 		flushByCommit(pId);
 	} catch(util::Exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(e, "Write log failed. reason=("
-								<< GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Write log failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 	return lsn;
 }
@@ -537,36 +572,60 @@ LogSequentialNumber LogManager::putDropPartitionLog(util::XArray<uint8_t> &binar
 /*!
     @brief Output a Log of putting a Container.
 */
-LogSequentialNumber LogManager::putPutContainerLog(util::XArray<uint8_t> &binaryLogBuf,
-												   PartitionId pId,
-												   ContainerId containerId,
-												   uint32_t containerNameLen, const char *containerName,
-												   const util::XArray<uint8_t> &containerInfo,
-												   int32_t containerType)
+LogSequentialNumber LogManager::putPutContainerLog(
+		util::XArray<uint8_t> &binaryLogBuf,
+		PartitionId pId,
+		const ClientId &clientId,
+		TransactionId txnId,
+		ContainerId containerId, StatementId stmtId,
+		uint32_t containerNameLen, const uint8_t *containerName,
+		const util::XArray<uint8_t> &containerInfo,
+		int32_t containerType,
+		uint32_t extensionNameLen, const char *extensionName,
+		int32_t txnTimeoutInterval,
+		int32_t txnContextCreateMode, bool withBegin,
+		bool isAutoCommit, RowId cursorRowId)
+
 {
 	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
 	LogSequentialNumber lsn = 0;
 	try {
 		lsn = serializeLogCommonPart(
-			binaryLogBuf, LOG_TYPE_PUT_CONTAINER,
-			pId, 0, 0, containerId);
+				binaryLogBuf, LOG_TYPE_PUT_CONTAINER,
+				pId, clientId.sessionId_, txnId, containerId);
 
-		uint8_t tmp[LOGMGR_VARINT_MAX_LEN * 3];
+		uint8_t tmp[LOGMGR_VARINT_MAX_LEN * 4];
 		uint8_t *addr = tmp;
 		addr += util::varIntEncode32(addr, containerType);
-		addr += util::varIntEncode32(addr, containerNameLen + 1);
+		addr += util::varIntEncode32(addr, containerNameLen);
 		uint32_t dataLen = static_cast<uint32_t>(containerInfo.size());
 		addr += util::varIntEncode32(addr, dataLen);
+		addr += util::varIntEncode32(addr, extensionNameLen + 1);
 		binaryLogBuf.push_back(tmp, (addr - tmp));
-		binaryLogBuf.push_back(reinterpret_cast<const uint8_t*>(containerName), containerNameLen + 1);
+		binaryLogBuf.push_back(containerName, containerNameLen);
 		binaryLogBuf.push_back(containerInfo.data(), dataLen);
+		binaryLogBuf.push_back(
+				reinterpret_cast<const uint8_t*>(extensionName),
+				extensionNameLen + 1);
+
+		if (!isAutoCommit) {
+			uint8_t tmp[LOGMGR_VARINT_MAX_LEN * 6];
+			uint8_t *addr = tmp;
+			addr += util::varIntEncode64(addr, stmtId);
+			addr += util::varIntEncode32(addr, txnContextCreateMode);
+			addr += util::varIntEncode32(addr, txnTimeoutInterval);
+			addr += util::varIntEncode64(addr, cursorRowId);
+			binaryLogBuf.push_back(tmp, (addr - tmp));
+			binaryLogBuf.push_back(clientId.uuid_, TXN_CLIENT_UUID_BYTE_SIZE);
+		}
 
 		putLog(pId, lsn, binaryLogBuf.data(), binaryLogBuf.size());
 		flushByCommit(pId);
 
 	} catch(std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(e, "Write log failed. reason=("
-								<< GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Write log failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 	return lsn;
 }
@@ -574,31 +633,33 @@ LogSequentialNumber LogManager::putPutContainerLog(util::XArray<uint8_t> &binary
 /*!
     @brief Output a Log of removing a Container.
 */
-LogSequentialNumber LogManager::putDropContainerLog(util::XArray<uint8_t> &binaryLogBuf,
-													PartitionId pId,
-													ContainerId containerId,
-													uint32_t containerNameLen, const char *containerName)
+LogSequentialNumber LogManager::putDropContainerLog(
+		util::XArray<uint8_t> &binaryLogBuf,
+		PartitionId pId,
+		ContainerId containerId,
+		uint32_t containerNameLen, const uint8_t *containerName)
 {
 	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
 
 	LogSequentialNumber lsn = 0;
 	try {
 		lsn = serializeLogCommonPart(
-			binaryLogBuf, LOG_TYPE_DROP_CONTAINER,
-			pId, 0, 0, containerId);
+				binaryLogBuf, LOG_TYPE_DROP_CONTAINER,
+				pId, 0, 0, containerId);
 
 		uint8_t tmp[LOGMGR_VARINT_MAX_LEN * 1];
 		uint8_t *addr = tmp;
-		addr += util::varIntEncode32(addr, containerNameLen + 1);
+		addr += util::varIntEncode32(addr, containerNameLen);
 		binaryLogBuf.push_back(tmp, (addr - tmp));
-		binaryLogBuf.push_back(reinterpret_cast<const uint8_t*>(containerName), containerNameLen + 1);
+		binaryLogBuf.push_back(containerName, containerNameLen);
 
 		putLog(pId, lsn, binaryLogBuf.data(), binaryLogBuf.size());
 		flushByCommit(pId);
 
 	} catch(std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(e, "Write log failed. reason=("
-								<< GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Write log failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 	return lsn;
 }
@@ -606,31 +667,160 @@ LogSequentialNumber LogManager::putDropContainerLog(util::XArray<uint8_t> &binar
 /*!
     @brief Output a Log of creating an Index.
 */
-LogSequentialNumber LogManager::putCreateIndexLog(util::XArray<uint8_t> &binaryLogBuf,
-												  PartitionId pId,
-												  ContainerId containerId,
-												  ColumnId columnId, int32_t mapType)
+LogSequentialNumber LogManager::putContinueCreateIndexLog(
+		util::XArray<uint8_t> &binaryLogBuf,
+		PartitionId pId,
+		const ClientId &clientId,
+		TransactionId txnId,
+		ContainerId containerId,
+		StatementId stmtId,
+		int32_t txnTimeoutInterval,
+		int32_t txnContextCreateMode,
+		bool withBegin,
+		bool isAutoCommit,
+		RowId cursorRowId)
 {
 	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
 
 	LogSequentialNumber lsn = 0;
 	try {
 		lsn = serializeLogCommonPart(
-			binaryLogBuf, LOG_TYPE_CREATE_INDEX,
-			pId, 0, 0, containerId);
+				binaryLogBuf, LOG_TYPE_CONTINUE_CREATE_INDEX,
+				pId, clientId.sessionId_, txnId, containerId);
 
-		uint8_t tmp[LOGMGR_VARINT_MAX_LEN * 2];
+		uint8_t tmp[LOGMGR_VARINT_MAX_LEN * 6];
 		uint8_t *addr = tmp;
-		addr += util::varIntEncode32(addr, columnId);
-		addr += util::varIntEncode32(addr, mapType);
+		addr += util::varIntEncode64(addr, stmtId);
+		addr += util::varIntEncode32(addr, txnContextCreateMode);
+		addr += util::varIntEncode32(addr, txnTimeoutInterval);
+		addr += util::varIntEncode64(addr, cursorRowId);
 		binaryLogBuf.push_back(tmp, (addr - tmp));
+		binaryLogBuf.push_back(clientId.uuid_, TXN_CLIENT_UUID_BYTE_SIZE);
 
 		putLog(pId, lsn, binaryLogBuf.data(), binaryLogBuf.size());
-		flushByCommit(pId);
 
 	} catch(std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(e, "Write log failed. reason=("
-								<< GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Write log failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+	return lsn;
+}
+
+LogSequentialNumber LogManager::putContinueAlterContainerLog(
+		util::XArray<uint8_t> &binaryLogBuf,
+		PartitionId pId,
+		const ClientId &clientId,
+		TransactionId txnId,
+		ContainerId containerId,
+		StatementId stmtId,
+		int32_t txnTimeoutInterval,
+		int32_t txnContextCreateMode,
+		bool withBegin,
+		bool isAutoCommit,
+		RowId cursorRowId)
+{
+	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
+
+	LogSequentialNumber lsn = 0;
+	try {
+		lsn = serializeLogCommonPart(
+				binaryLogBuf, LOG_TYPE_CONTINUE_ALTER_CONTAINER,
+				pId, clientId.sessionId_, txnId, containerId);
+
+		uint8_t tmp[LOGMGR_VARINT_MAX_LEN * 6];
+		uint8_t *addr = tmp;
+		addr += util::varIntEncode64(addr, stmtId);
+		addr += util::varIntEncode32(addr, txnContextCreateMode);
+		addr += util::varIntEncode32(addr, txnTimeoutInterval);
+		addr += util::varIntEncode64(addr, cursorRowId);
+		binaryLogBuf.push_back(tmp, (addr - tmp));
+		binaryLogBuf.push_back(clientId.uuid_, TXN_CLIENT_UUID_BYTE_SIZE);
+
+		putLog(pId, lsn, binaryLogBuf.data(), binaryLogBuf.size());
+
+	} catch(std::exception &e) {
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Write log failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+	return lsn;
+}
+
+LogSequentialNumber LogManager::putCreateIndexLog(
+		util::XArray<uint8_t> &binaryLogBuf,
+		PartitionId pId,
+		const ClientId &clientId,
+		TransactionId txnId,
+		ContainerId containerId, StatementId stmtId,
+		const util::Vector<ColumnId> &columnIds,
+		int32_t mapType,
+		uint32_t indexNameLen, const char *indexName,
+		uint32_t extensionNameLen, const char *extensionName,
+		const util::XArray<uint32_t> &paramDataLen,
+		const util::XArray<const uint8_t*> &paramData,
+		int32_t txnTimeoutInterval,
+		int32_t txnContextCreateMode, bool withBegin,
+		bool isAutoCommit, RowId cursorRowId)
+
+{
+	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
+
+	LogSequentialNumber lsn = 0;
+	try {
+		lsn = serializeLogCommonPart(
+				binaryLogBuf, LOG_TYPE_CREATE_INDEX,
+				pId, clientId.sessionId_, txnId, containerId);
+
+		uint8_t tmp[LOGMGR_VARINT_MAX_LEN * 5];
+		uint8_t *addr = tmp;
+		addr += util::varIntEncode32(addr, static_cast<uint32_t>(columnIds.size()));
+		addr += util::varIntEncode32(addr, mapType);
+		addr += util::varIntEncode32(addr, indexNameLen + 1);
+		addr += util::varIntEncode32(addr, extensionNameLen + 1);
+		addr += util::varIntEncode32(addr, static_cast<uint32_t>(paramDataLen.size()));
+		binaryLogBuf.push_back(tmp, (addr - tmp));
+		for (size_t i = 0; i < columnIds.size(); i++) {
+			if (!columnIds.empty()) {
+				binaryLogBuf.push_back(
+						reinterpret_cast<const uint8_t*>(&(columnIds[0])),
+						sizeof(ColumnId)*columnIds.size());
+			}
+		}
+		binaryLogBuf.push_back(
+				reinterpret_cast<const uint8_t*>(indexName),
+				indexNameLen + 1);
+		binaryLogBuf.push_back(
+				reinterpret_cast<const uint8_t*>(extensionName),
+				extensionNameLen + 1);
+		for (size_t i = 0; i < paramDataLen.size(); i++) {
+			binaryLogBuf.push_back(
+					reinterpret_cast<const uint8_t*>(&(paramDataLen[i])),
+					sizeof(uint32_t));
+		}
+		for (size_t i = 0; i < paramData.size(); i++) {
+			binaryLogBuf.push_back(paramData[i], paramDataLen[i]);
+		}
+		if (!isAutoCommit) {
+			uint8_t tmp[LOGMGR_VARINT_MAX_LEN * 6];
+			uint8_t *addr = tmp;
+			addr += util::varIntEncode64(addr, stmtId);
+			addr += util::varIntEncode32(addr, txnContextCreateMode);
+			addr += util::varIntEncode32(addr, txnTimeoutInterval);
+			addr += util::varIntEncode64(addr, cursorRowId);
+			binaryLogBuf.push_back(tmp, (addr - tmp));
+			binaryLogBuf.push_back(clientId.uuid_, TXN_CLIENT_UUID_BYTE_SIZE);
+		}
+
+		putLog(pId, lsn, binaryLogBuf.data(), binaryLogBuf.size());
+		if (isAutoCommit) {
+			flushByCommit(pId);
+		}
+
+	} catch(std::exception &e) {
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Write log failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 	return lsn;
 }
@@ -638,31 +828,62 @@ LogSequentialNumber LogManager::putCreateIndexLog(util::XArray<uint8_t> &binaryL
 /*!
     @brief Output a Log of removing an Index.
 */
-LogSequentialNumber LogManager::putDropIndexLog(util::XArray<uint8_t> &binaryLogBuf,
-												PartitionId pId,
-												ContainerId containerId,
-												ColumnId columnId, int32_t mapType)
+LogSequentialNumber LogManager::putDropIndexLog(
+		util::XArray<uint8_t> &binaryLogBuf,
+		PartitionId pId,
+		ContainerId containerId,
+		const util::Vector<ColumnId> &columnIds,
+		int32_t mapType,
+		uint32_t indexNameLen, const char *indexName,
+		uint32_t extensionNameLen, const char *extensionName,
+		const util::XArray<uint32_t> &paramDataLen,
+		const util::XArray<const uint8_t*> &paramData)
 {
 	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
 
 	LogSequentialNumber lsn = 0;
 	try {
 		lsn = serializeLogCommonPart(
-			binaryLogBuf, LOG_TYPE_DROP_INDEX,
-			pId, 0, 0, containerId);
+				binaryLogBuf, LOG_TYPE_DROP_INDEX,
+				pId, 0, 0, containerId);
 
-		uint8_t tmp[LOGMGR_VARINT_MAX_LEN * 2];
+		uint8_t tmp[LOGMGR_VARINT_MAX_LEN * 5];
 		uint8_t *addr = tmp;
-		addr += util::varIntEncode32(addr, columnId);
+		addr += util::varIntEncode32(addr, static_cast<uint32_t>(columnIds.size()));
 		addr += util::varIntEncode32(addr, mapType);
+		addr += util::varIntEncode32(addr, indexNameLen + 1);
+		addr += util::varIntEncode32(addr, extensionNameLen + 1);
+		addr += util::varIntEncode32(addr, static_cast<uint32_t>(paramDataLen.size()));
 		binaryLogBuf.push_back(tmp, (addr - tmp));
+		for (size_t i = 0; i < columnIds.size(); i++) {
+			if (!columnIds.empty()) {
+				binaryLogBuf.push_back(
+						reinterpret_cast<const uint8_t*>(&(columnIds[0])),
+						sizeof(ColumnId)*columnIds.size());
+			}
+		}
+		binaryLogBuf.push_back(
+				reinterpret_cast<const uint8_t*>(indexName),
+				indexNameLen + 1);
+		binaryLogBuf.push_back(
+				reinterpret_cast<const uint8_t*>(extensionName),
+				extensionNameLen + 1);
+		for (size_t i = 0; i < paramDataLen.size(); i++) {
+			binaryLogBuf.push_back(
+					reinterpret_cast<const uint8_t*>(&(paramDataLen[i])),
+					sizeof(uint32_t));
+		}
+		for (size_t i = 0; i < paramData.size(); i++) {
+			binaryLogBuf.push_back(paramData[i], paramDataLen[i]);
+		}
 
 		putLog(pId, lsn, binaryLogBuf.data(), binaryLogBuf.size());
 		flushByCommit(pId);
 
 	} catch(std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(e, "Write log failed. reason=("
-								<< GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Write log failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 	return lsn;
 }
@@ -670,19 +891,20 @@ LogSequentialNumber LogManager::putDropIndexLog(util::XArray<uint8_t> &binaryLog
 /*!
     @brief Output a Log of creating a Trigger.
 */
-LogSequentialNumber LogManager::putCreateTriggerLog(util::XArray<uint8_t> &binaryLogBuf,
-													PartitionId pId,
-													ContainerId containerId,
-													uint32_t nameLen, const char *name,
-													const util::XArray<uint8_t> &triggerInfo)
+LogSequentialNumber LogManager::putCreateTriggerLog(
+		util::XArray<uint8_t> &binaryLogBuf,
+		PartitionId pId,
+		ContainerId containerId,
+		uint32_t nameLen, const char *name,
+		const util::XArray<uint8_t> &triggerInfo)
 {
 	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
 
 	LogSequentialNumber lsn = 0;
 	try {
 		lsn = serializeLogCommonPart(
-			binaryLogBuf, LOG_TYPE_CREATE_TRIGGER,
-			pId, 0, 0, containerId);
+				binaryLogBuf, LOG_TYPE_CREATE_TRIGGER,
+				pId, 0, 0, containerId);
 
 		uint8_t tmp[LOGMGR_VARINT_MAX_LEN * 2];
 		uint8_t *addr = tmp;
@@ -697,8 +919,9 @@ LogSequentialNumber LogManager::putCreateTriggerLog(util::XArray<uint8_t> &binar
 		flushByCommit(pId);
 
 	} catch(std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(e, "Write log failed. reason=("
-								<< GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Write log failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 	return lsn;
 }
@@ -706,32 +929,36 @@ LogSequentialNumber LogManager::putCreateTriggerLog(util::XArray<uint8_t> &binar
 /*!
     @brief Output a Log of removing a Trigger.
 */
-LogSequentialNumber LogManager::putDropTriggerLog(util::XArray<uint8_t> &binaryLogBuf,
-												  PartitionId pId,
-												  ContainerId containerId,
-												  uint32_t nameLen,
-												  const char *name)
+LogSequentialNumber LogManager::putDropTriggerLog(
+		util::XArray<uint8_t> &binaryLogBuf,
+		PartitionId pId,
+		ContainerId containerId,
+		uint32_t nameLen,
+		const char *name)
 {
 	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
 
 	LogSequentialNumber lsn = 0;
 	try {
 		lsn = serializeLogCommonPart(
-			binaryLogBuf, LOG_TYPE_DROP_TRIGGER,
-			pId, 0, 0, containerId);
+				binaryLogBuf, LOG_TYPE_DROP_TRIGGER,
+				pId, 0, 0, containerId);
 
 		uint8_t tmp[LOGMGR_VARINT_MAX_LEN * 1];
 		uint8_t *addr = tmp;
 		addr += util::varIntEncode32(addr, nameLen + 1);
 		binaryLogBuf.push_back(tmp, (addr - tmp));
-		binaryLogBuf.push_back(reinterpret_cast<const uint8_t*>(name), nameLen + 1);
+		binaryLogBuf.push_back(
+				reinterpret_cast<const uint8_t*>(name),
+				nameLen + 1);
 
 		putLog(pId, lsn, binaryLogBuf.data(), binaryLogBuf.size());
 		flushByCommit(pId);
 
 	} catch(std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(e, "Write log failed. reason=("
-								<< GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Write log failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 	return lsn;
 }
@@ -739,61 +966,65 @@ LogSequentialNumber LogManager::putDropTriggerLog(util::XArray<uint8_t> &binaryL
 /*!
     @brief Output a Log of putting a Row.
 */
-LogSequentialNumber LogManager::putPutRowLog(util::XArray<uint8_t> &binaryLogBuf,
-											 PartitionId pId,
-											 const ClientId &clientId,
-											 TransactionId txnId,
-											 ContainerId containerId,
-											 StatementId stmtId,
-											 uint64_t numRowId, const util::XArray<RowId> &rowIds,
-											 uint64_t numRow, const util::XArray<uint8_t> &rowData,
-											 int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
-											 bool withBegin, bool isAutoCommit)
+LogSequentialNumber LogManager::putPutRowLog(
+		util::XArray<uint8_t> &binaryLogBuf,
+		PartitionId pId,
+		const ClientId &clientId,
+		TransactionId txnId,
+		ContainerId containerId,
+		StatementId stmtId,
+		uint64_t numRowId, const util::XArray<RowId> &rowIds,
+		uint64_t numRow, const util::XArray<uint8_t> &rowData,
+		int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
+		bool withBegin, bool isAutoCommit)
 {
 	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
 
-	return putPutOrUpdateRowLog(LOG_TYPE_PUT_ROW, binaryLogBuf, pId,
-		clientId, txnId, containerId, stmtId,
-		numRowId, rowIds, numRow, rowData,
-		txnTimeoutInterval, txnContextCreateMode,
-		withBegin, isAutoCommit);
+	return putPutOrUpdateRowLog(
+			LOG_TYPE_PUT_ROW, binaryLogBuf, pId,
+			clientId, txnId, containerId, stmtId,
+			numRowId, rowIds, numRow, rowData,
+			txnTimeoutInterval, txnContextCreateMode,
+			withBegin, isAutoCommit);
 }
 
 /*!
     @brief Output a Log of updating a Row.
 */
-LogSequentialNumber LogManager::putUpdateRowLog(util::XArray<uint8_t> &binaryLogBuf,
-												PartitionId pId,
-												const ClientId &clientId,
-												TransactionId txnId,
-												ContainerId containerId,
-												StatementId stmtId,
-												uint64_t numRowId, const util::XArray<RowId> &rowIds,
-												uint64_t numRow, const util::XArray<uint8_t> &rowData,
-												int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
-												bool withBegin, bool isAutoCommit)
+LogSequentialNumber LogManager::putUpdateRowLog(
+		util::XArray<uint8_t> &binaryLogBuf,
+		PartitionId pId,
+		const ClientId &clientId,
+		TransactionId txnId,
+		ContainerId containerId,
+		StatementId stmtId,
+		uint64_t numRowId, const util::XArray<RowId> &rowIds,
+		uint64_t numRow, const util::XArray<uint8_t> &rowData,
+		int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
+		bool withBegin, bool isAutoCommit)
 {
 	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
 
 	return putPutOrUpdateRowLog(LOG_TYPE_UPDATE_ROW, binaryLogBuf, pId,
-		clientId, txnId, containerId, stmtId,
-		numRowId, rowIds, numRow, rowData,
-		txnTimeoutInterval, txnContextCreateMode,
-		withBegin, isAutoCommit);
+			clientId, txnId, containerId, stmtId,
+			numRowId, rowIds, numRow, rowData,
+			txnTimeoutInterval, txnContextCreateMode,
+			withBegin, isAutoCommit);
 }
 
 /*!
     @brief Output a Log of removing a Row.
 */
-LogSequentialNumber LogManager::putRemoveRowLog(util::XArray<uint8_t> &binaryLogBuf,
-												PartitionId pId,
-												const ClientId &clientId,
-												TransactionId txnId,
-												ContainerId containerId,
-												StatementId stmtId,
-												uint64_t numRowId, const util::XArray<RowId> &rowIds,
-												int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
-												bool withBegin, bool isAutoCommit)
+LogSequentialNumber LogManager::putRemoveRowLog(
+		util::XArray<uint8_t> &binaryLogBuf,
+		PartitionId pId,
+		const ClientId &clientId,
+		TransactionId txnId,
+		ContainerId containerId,
+		StatementId stmtId,
+		uint64_t numRowId, const util::XArray<RowId> &rowIds,
+		int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
+		bool withBegin, bool isAutoCommit)
 {
 	assert(!(withBegin && isAutoCommit));
 
@@ -803,8 +1034,8 @@ LogSequentialNumber LogManager::putRemoveRowLog(util::XArray<uint8_t> &binaryLog
 		uint8_t beginFlag = withBegin ? LOG_TYPE_WITH_BEGIN : 0;
 		uint8_t autoCommitFlag = isAutoCommit ? LOG_TYPE_IS_AUTO_COMMIT : 0;
 		lsn = serializeLogCommonPart(
-			binaryLogBuf, LOG_TYPE_REMOVE_ROW | beginFlag | autoCommitFlag,
-			pId, clientId.sessionId_, txnId, containerId);
+				binaryLogBuf, LOG_TYPE_REMOVE_ROW | beginFlag | autoCommitFlag,
+				pId, clientId.sessionId_, txnId, containerId);
 
 		uint8_t tmp[LOGMGR_VARINT_MAX_LEN * 4];
 		uint8_t *addr = tmp;
@@ -815,15 +1046,17 @@ LogSequentialNumber LogManager::putRemoveRowLog(util::XArray<uint8_t> &binaryLog
 		binaryLogBuf.push_back(tmp, (addr - tmp));
 		binaryLogBuf.push_back(clientId.uuid_, TXN_CLIENT_UUID_BYTE_SIZE);
 		binaryLogBuf.push_back(
-				reinterpret_cast<const uint8_t*>(rowIds.data()), numRowId * sizeof(RowId));
+				reinterpret_cast<const uint8_t*>(rowIds.data()),
+				numRowId * sizeof(RowId));
 
 		putLog(pId, lsn, binaryLogBuf.data(), binaryLogBuf.size());
 		if (isAutoCommit) {
 			flushByCommit(pId);
 		}
 	} catch(std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(e, "Write log failed. reason=("
-								<< GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Write log failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 	return lsn;
 }
@@ -831,15 +1064,16 @@ LogSequentialNumber LogManager::putRemoveRowLog(util::XArray<uint8_t> &binaryLog
 /*!
     @brief Output a Log of locking a Row.
 */
-LogSequentialNumber LogManager::putLockRowLog(util::XArray<uint8_t> &binaryLogBuf,
-											  PartitionId pId,
-											  const ClientId &clientId,
-											  TransactionId txnId,
-											  ContainerId containerId,
-											  StatementId stmtId,
-											  uint64_t numRowId, const util::XArray<RowId> &rowIds,
-											  int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
-											  bool withBegin, bool isAutoCommit)
+LogSequentialNumber LogManager::putLockRowLog(
+		util::XArray<uint8_t> &binaryLogBuf,
+		PartitionId pId,
+		const ClientId &clientId,
+		TransactionId txnId,
+		ContainerId containerId,
+		StatementId stmtId,
+		uint64_t numRowId, const util::XArray<RowId> &rowIds,
+		int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
+		bool withBegin, bool isAutoCommit)
 {
 	assert(!(withBegin && isAutoCommit));
 
@@ -849,8 +1083,8 @@ LogSequentialNumber LogManager::putLockRowLog(util::XArray<uint8_t> &binaryLogBu
 		uint8_t beginFlag = withBegin ? LOG_TYPE_WITH_BEGIN : 0;
 		uint8_t autoCommitFlag = isAutoCommit ? LOG_TYPE_IS_AUTO_COMMIT : 0;
 		lsn = serializeLogCommonPart(
-			binaryLogBuf, LOG_TYPE_LOCK_ROW | beginFlag | autoCommitFlag,
-			pId, clientId.sessionId_, txnId, containerId);
+				binaryLogBuf, LOG_TYPE_LOCK_ROW | beginFlag | autoCommitFlag,
+				pId, clientId.sessionId_, txnId, containerId);
 
 		uint8_t tmp[LOGMGR_VARINT_MAX_LEN * 4];
 		uint8_t *addr = tmp;
@@ -861,13 +1095,15 @@ LogSequentialNumber LogManager::putLockRowLog(util::XArray<uint8_t> &binaryLogBu
 		binaryLogBuf.push_back(tmp, (addr - tmp));
 		binaryLogBuf.push_back(clientId.uuid_, TXN_CLIENT_UUID_BYTE_SIZE);
 		binaryLogBuf.push_back(
-				reinterpret_cast<const uint8_t*>(rowIds.data()), numRowId * sizeof(RowId));
+				reinterpret_cast<const uint8_t*>(rowIds.data()),
+				numRowId * sizeof(RowId));
 
 		putLog(pId, lsn, binaryLogBuf.data(), binaryLogBuf.size());
 
 	} catch(std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(e, "Write log failed. reason=("
-								<< GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Write log failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 	return lsn;
 }
@@ -875,9 +1111,10 @@ LogSequentialNumber LogManager::putLockRowLog(util::XArray<uint8_t> &binaryLogBu
 /*!
     @brief Output a Log of the end of Checkpoint.
 */
-LogSequentialNumber LogManager::putCheckpointEndLog(util::XArray<uint8_t> &binaryLogBuf,
-													PartitionId pId,
-													BitArray &validBlockInfo)
+LogSequentialNumber LogManager::putCheckpointEndLog(
+		util::XArray<uint8_t> &binaryLogBuf,
+		PartitionId pId,
+		BitArray &validBlockInfo)
 {
 	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
 	LogSequentialNumber lsn = 0;
@@ -885,8 +1122,8 @@ LogSequentialNumber LogManager::putCheckpointEndLog(util::XArray<uint8_t> &binar
 		const uint32_t partitionCount = config_.pgConfig_.getPartitionCount();
 		const uint32_t partitionGroupCount = config_.pgConfig_.getPartitionGroupCount();
 		lsn = serializeLogCommonPart(
-			binaryLogBuf, LOG_TYPE_CHECKPOINT_END,
-			pId, partitionCount, partitionGroupCount, 1);
+				binaryLogBuf, LOG_TYPE_CHECKPOINT_END,
+				pId, partitionCount, partitionGroupCount, 1);
 
 		GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_INFO,
 				"writeCPFileInfoLog: lsn=" << lsn << ", pId=" << pId);
@@ -902,11 +1139,13 @@ LogSequentialNumber LogManager::putCheckpointEndLog(util::XArray<uint8_t> &binar
 
 		putBlockTailNoopLog(binaryLogBuf, pId);
 
-		GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_INFO,
+		GS_TRACE_INFO(
+				LOG_MANAGER, GS_TRACE_LM_PUT_LOG_INFO,
 				"cpFileInfo: num=" << validBlockInfoBitsSize << ", data=");
 	} catch(std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(e, "Write log failed. reason=("
-								<< GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Write log failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 	return lsn;
 }
@@ -914,17 +1153,19 @@ LogSequentialNumber LogManager::putCheckpointEndLog(util::XArray<uint8_t> &binar
 /*!
     @brief Output a Log of metadata of Chunk data.
 */
-LogSequentialNumber LogManager::putChunkMetaDataLog(util::XArray<uint8_t> &binaryLogBuf,
-													PartitionId pId, ChunkCategoryId categoryId,
-													ChunkId startChunkId, int32_t chunkNum,
-													const util::XArray<uint8_t> *chunkMetaDataList,
-													bool sentinel) {
+LogSequentialNumber LogManager::putChunkMetaDataLog(
+		util::XArray<uint8_t> &binaryLogBuf,
+		PartitionId pId, ChunkCategoryId categoryId,
+		ChunkId startChunkId, int32_t chunkNum,
+		uint32_t expandedSize,
+		const util::XArray<uint8_t> *chunkMetaDataList,
+		bool sentinel) {
 	LogSequentialNumber lsn = 0;
 	try {
 		const ContainerId cId = sentinel ? UNDEF_CONTAINERID : 0;
 		lsn = serializeLogCommonPart(
-			binaryLogBuf, LOG_TYPE_CHUNK_META_DATA,
-			pId, 0, 0, cId);
+				binaryLogBuf, LOG_TYPE_CHUNK_META_DATA,
+				pId, 0, 0, cId);
 
 		uint8_t tmp[LOGMGR_VARINT_MAX_LEN * 4];
 		uint8_t *addr = tmp;
@@ -933,32 +1174,43 @@ LogSequentialNumber LogManager::putChunkMetaDataLog(util::XArray<uint8_t> &binar
 		++addr;
 		addr += util::varIntEncode32(addr, startChunkId);
 		addr += util::varIntEncode32(addr, chunkNum);
+		addr += util::varIntEncode32(addr, expandedSize);
 		uint32_t dataLen = 0;
 		if (chunkMetaDataList) {
 			dataLen = static_cast<uint32_t>(chunkMetaDataList->size());
 			addr += util::varIntEncode32(addr, dataLen);
 			binaryLogBuf.push_back(tmp, (addr - tmp));
 			binaryLogBuf.push_back(
-				reinterpret_cast<const uint8_t*>(chunkMetaDataList->data()), dataLen);
+					reinterpret_cast<const uint8_t*>(chunkMetaDataList->data()),
+					dataLen);
 
 			putLog(pId, lsn, binaryLogBuf.data(), binaryLogBuf.size(), true);
-			GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_INFO,
-							"writeChunkMetaDataLog: lsn," << lsn << ",pId," << pId
-							<< ",logSize," << binaryLogBuf.size());
+			GS_TRACE_INFO(
+					LOG_MANAGER, GS_TRACE_LM_PUT_LOG_INFO,
+					"writeChunkMetaDataLog: lsn," << lsn << ",pId," << pId <<
+					",logSize," << binaryLogBuf.size());
 		} else {
 			assert(sentinel);
 			addr += util::varIntEncode32(addr, dataLen);
 			binaryLogBuf.push_back(tmp, (addr - tmp));
-			
-			putLog(pId, lsn, binaryLogBuf.data(), binaryLogBuf.size(), true);
-			GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_INFO,
-							"writeChunkMetaDataLog(sentinel): lsn," << lsn << ",pId," << pId
-							<< ",logSize,0");
-		}
 
+			putLog(pId, lsn, binaryLogBuf.data(), binaryLogBuf.size(), true);
+			GS_TRACE_INFO(
+					LOG_MANAGER, GS_TRACE_LM_PUT_LOG_INFO,
+					"writeChunkMetaDataLog(sentinel): lsn," << lsn <<
+					",pId," << pId << ",logSize,0");
+		}
+		GS_TRACE_INFO(
+				SIZE_MONITOR, GS_TRACE_LM_CHUNK_META_LOG_SIZE,
+				"writeChunkMetaDataLog: lsn," << lsn << ",pId," << pId <<
+				",categoryId," << static_cast<int32_t>(categoryId) <<
+				",startChunkId," << startChunkId <<
+				",chunkNum," << chunkNum <<
+				",logSize," << binaryLogBuf.size());
 	} catch(std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(e, "Write log failed. reason=("
-								<< GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Write log failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 	return lsn;
 }
@@ -966,15 +1218,16 @@ LogSequentialNumber LogManager::putChunkMetaDataLog(util::XArray<uint8_t> &binar
 /*!
     @brief Output a Log of the start of Chunk data.
 */
-LogSequentialNumber LogManager::putChunkStartLog(util::XArray<uint8_t> &binaryLogBuf,
-												 PartitionId pId, uint64_t putChunkId,
-												 uint64_t chunkNum) {
+LogSequentialNumber LogManager::putChunkStartLog(
+		util::XArray<uint8_t> &binaryLogBuf,
+		PartitionId pId, uint64_t putChunkId,
+		uint64_t chunkNum) {
 
 	LogSequentialNumber lsn = 0;
 	try {
 		lsn = serializeLogCommonPart(
-			binaryLogBuf, LOG_TYPE_PUT_CHUNK_START,
-			pId, 0, 0, putChunkId);
+				binaryLogBuf, LOG_TYPE_PUT_CHUNK_START,
+				pId, 0, 0, putChunkId);
 
 		uint8_t tmp[LOGMGR_VARINT_MAX_LEN * 1];
 		uint8_t *addr = tmp;
@@ -983,13 +1236,15 @@ LogSequentialNumber LogManager::putChunkStartLog(util::XArray<uint8_t> &binaryLo
 		binaryLogBuf.push_back(tmp, (addr - tmp));
 
 		putLog(pId, lsn, binaryLogBuf.data(), binaryLogBuf.size(), true);
-		GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_INFO,
-						"writePutChunkStartLog: lsn," << lsn << ",pId," << pId
-						<< ",putChunkId," << putChunkId
-						<< ",logSize," << binaryLogBuf.size());
+		GS_TRACE_INFO(
+				LOG_MANAGER, GS_TRACE_LM_PUT_LOG_INFO,
+				"writePutChunkStartLog: lsn," << lsn << ",pId," << pId <<
+				",putChunkId," << putChunkId <<
+				",logSize," << binaryLogBuf.size());
 	} catch(std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(e, "Write log failed. reason=("
-								<< GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Write log failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 	return lsn;
 }
@@ -997,15 +1252,16 @@ LogSequentialNumber LogManager::putChunkStartLog(util::XArray<uint8_t> &binaryLo
 /*!
     @brief Output a Log of a Chunk data.
 */
-LogSequentialNumber LogManager::putChunkDataLog(util::XArray<uint8_t> &binaryLogBuf,
-												PartitionId pId, uint64_t putChunkId,
-												uint32_t chunkSize,
-												const uint8_t* chunkImage) {
+LogSequentialNumber LogManager::putChunkDataLog(
+		util::XArray<uint8_t> &binaryLogBuf,
+		PartitionId pId, uint64_t putChunkId,
+		uint32_t chunkSize,
+		const uint8_t* chunkImage) {
 	LogSequentialNumber lsn = 0;
 	try {
 		lsn = serializeLogCommonPart(
-			binaryLogBuf, LOG_TYPE_PUT_CHUNK_DATA,
-			pId, 0, 0, putChunkId);
+				binaryLogBuf, LOG_TYPE_PUT_CHUNK_DATA,
+				pId, 0, 0, putChunkId);
 
 		uint8_t tmp[LOGMGR_VARINT_MAX_LEN * 1];
 		uint8_t *addr = tmp;
@@ -1017,13 +1273,15 @@ LogSequentialNumber LogManager::putChunkDataLog(util::XArray<uint8_t> &binaryLog
 		binaryLogBuf.push_back(chunkImage, chunkSize);
 
 		putLog(pId, lsn, binaryLogBuf.data(), binaryLogBuf.size(), true);
-		GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_INFO,
-					  "writePutChunkDataLog: lsn," << lsn << ",pId," << pId
-					  << ",putChunkId," << putChunkId
-					  << ",logSize," << binaryLogBuf.size());
+		GS_TRACE_INFO(
+				LOG_MANAGER, GS_TRACE_LM_PUT_LOG_INFO,
+				"writePutChunkDataLog: lsn," << lsn << ",pId," << pId <<
+				",putChunkId," << putChunkId <<
+				",logSize," << binaryLogBuf.size());
 	} catch(std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(e, "Write log failed. reason=("
-								<< GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Write log failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 	return lsn;
 }
@@ -1031,24 +1289,27 @@ LogSequentialNumber LogManager::putChunkDataLog(util::XArray<uint8_t> &binaryLog
 /*!
     @brief Output a Log of the end of Chunk data.
 */
-LogSequentialNumber LogManager::putChunkEndLog(util::XArray<uint8_t> &binaryLogBuf,
-											   PartitionId pId, uint64_t putChunkId) {
+LogSequentialNumber LogManager::putChunkEndLog(
+		util::XArray<uint8_t> &binaryLogBuf,
+		PartitionId pId, uint64_t putChunkId) {
 
 	LogSequentialNumber lsn = 0;
 	try {
 		lsn = serializeLogCommonPart(
-			binaryLogBuf, LOG_TYPE_PUT_CHUNK_END,
-			pId, 0, 0, putChunkId);
+				binaryLogBuf, LOG_TYPE_PUT_CHUNK_END,
+				pId, 0, 0, putChunkId);
 
 
 		putLog(pId, lsn, binaryLogBuf.data(), binaryLogBuf.size(), true);
-		GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_INFO,
-					  "writePutChunkEndLog: lsn," << lsn << ",pId," << pId
-					  << ",putChunkId," << putChunkId
-					  << ",logSize," << binaryLogBuf.size());
+		GS_TRACE_INFO(
+				LOG_MANAGER, GS_TRACE_LM_PUT_LOG_INFO,
+				"writePutChunkEndLog: lsn," << lsn << ",pId," << pId <<
+				",putChunkId," << putChunkId <<
+				",logSize," << binaryLogBuf.size());
 	} catch(std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(e, "Write log failed. reason=("
-								<< GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Write log failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 	return lsn;
 }
@@ -1069,8 +1330,27 @@ void LogManager::prepareCheckpoint(PartitionGroupId pgId, CheckpointId cpId) {
 		pgManagerList_[pgId]->prepareCheckpoint();
 	}
 	catch(std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(e, "Prepare checkpoint failed. reason=("
-								<< GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Prepare checkpoint failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+	const PartitionId beginPId = config_.pgConfig_.getGroupBeginPartitionId(pgId);
+	const PartitionId endPId = config_.pgConfig_.getGroupEndPartitionId(pgId);
+	for (PartitionId pId = beginPId; pId < endPId; ++pId) {
+		if (childLogManagerList_[pId] != NULL) {
+			try {
+				childLogManagerList_[pId]->prepareCheckpoint(pgId, cpId);
+			}
+			catch(std::exception &e) {
+				util::NormalOStringStream oss;
+				oss << "Prepare checkpoint failed (syncTemp). reason=(" <<
+						GS_EXCEPTION_MESSAGE(e) << ")";
+				childLogManagerList_[pId]->setLongtermSyncLogError(oss.str());
+				childLogManagerList_[pId] = NULL; 
+				GS_TRACE_WARNING(LOG_MANAGER,
+						GS_TRACE_LM_PREPARE_CHECKPOINT_FAILED, oss);
+			}
+		}
 	}
 }
 
@@ -1084,8 +1364,27 @@ void LogManager::postCheckpoint(PartitionGroupId pgId) {
 		pgManagerList_[pgId]->cleanupLogFiles();
 	}
 	catch(std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(e, "Post checkpoint failed. reason=("
-								  << GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Post checkpoint failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+	const PartitionId beginPId = config_.pgConfig_.getGroupBeginPartitionId(pgId);
+	const PartitionId endPId = config_.pgConfig_.getGroupEndPartitionId(pgId);
+	for (PartitionId pId = beginPId; pId < endPId; ++pId) {
+		if (childLogManagerList_[pId] != NULL) {
+			try {
+				childLogManagerList_[pId]->postCheckpoint(pgId);
+			}
+			catch(std::exception &e) {
+				util::NormalOStringStream oss;
+				oss << "Post checkpoint failed (syncTemp). reason=(" <<
+						GS_EXCEPTION_MESSAGE(e) << ")";
+				childLogManagerList_[pId]->setLongtermSyncLogError(oss.str());
+				childLogManagerList_[pId] = NULL; 
+				GS_TRACE_WARNING(LOG_MANAGER,
+						GS_TRACE_LM_POST_CHECKPOINT_FAILED, oss);
+			}
+		}
 	}
 }
 
@@ -1099,21 +1398,73 @@ void LogManager::writeBuffer(PartitionGroupId pgId) {
 		pgManagerList_[pgId]->writeBuffer();
 	}
 	catch(std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(e, "Flush log failed. reason=("
-								<< GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Flush log failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+	const PartitionId beginPId = config_.pgConfig_.getGroupBeginPartitionId(pgId);
+	const PartitionId endPId = config_.pgConfig_.getGroupEndPartitionId(pgId);
+	for (PartitionId pId = beginPId; pId < endPId; ++pId) {
+		if (childLogManagerList_[pId] != NULL) {
+			try {
+				childLogManagerList_[pId]->pgManagerList_[pgId]->writeBuffer();
+			}
+			catch(std::exception &e) {
+				util::NormalOStringStream oss;
+				oss << "Flush syncTemp log failed. reason=(" <<
+						GS_EXCEPTION_MESSAGE(e) << ")";
+				childLogManagerList_[pId]->setLongtermSyncLogError(oss.str());
+				childLogManagerList_[pId] = NULL; 
+				GS_TRACE_WARNING(LOG_MANAGER,
+						GS_TRACE_LM_FLUSH_SYNC_TEMP_LOG_FAILED, oss);
+			}
+		}
 	}
 }
 
 /*!
     @brief Flushes the Log file.
 */
-void LogManager::flushFile(PartitionGroupId pgId) {
+void LogManager::flushFile(PartitionGroupId pgId, bool executeChildren) {
 	try {
 		pgManagerList_[pgId]->flushFile();
 	}
 	catch(std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(e, "Flush log failed. reason=("
-								<< GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Flush log failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+	if (executeChildren) {
+		const PartitionId beginPId = config_.pgConfig_.getGroupBeginPartitionId(pgId);
+		const PartitionId endPId = config_.pgConfig_.getGroupEndPartitionId(pgId);
+		for (PartitionId pId = beginPId; pId < endPId; ++pId) {
+			if (childLogManagerList_[pId] != NULL) {
+				try {
+					childLogManagerList_[pId]->flushFile(pgId, executeChildren);
+				}
+				catch(std::exception &e) {
+					util::NormalOStringStream oss;
+					oss << "Flush syncTemp log failed. reason=(" <<
+							GS_EXCEPTION_MESSAGE(e) << ")";
+					childLogManagerList_[pId]->setLongtermSyncLogError(oss.str());
+					childLogManagerList_[pId] = NULL; 
+					GS_TRACE_WARNING(LOG_MANAGER,
+							GS_TRACE_LM_FLUSH_SYNC_TEMP_LOG_FAILED, oss);
+				}
+			}
+		}
+	}
+}
+
+void LogManager::addSyncLogManager(LogManager *child, PartitionId filterPId) {
+	assert(child);
+	child->filterPId_ = filterPId;
+	childLogManagerList_[filterPId] = child;
+}
+
+void LogManager::removeSyncLogManager(LogManager *target, PartitionId filterPId) {
+	if (childLogManagerList_[filterPId] == target) {
+		childLogManagerList_[filterPId] = NULL;
 	}
 }
 
@@ -1125,6 +1476,13 @@ uint16_t LogManager::getVersion() {
 };
 
 /*!
+    @brief Checks the version of the Log
+*/
+bool LogManager::isAcceptableVersion(uint16_t version) {
+	return LogBlocksInfo::isAcceptableVersion(version);
+}
+
+/*!
     @brief Copies Log files.
 */
 uint64_t LogManager::copyLogFile(PartitionGroupId pgId, const char8_t *dirPath) {
@@ -1134,8 +1492,9 @@ uint64_t LogManager::copyLogFile(PartitionGroupId pgId, const char8_t *dirPath) 
 		return pgManagerList_[pgId]->copyLogFile(pgId, dirPath);
 	}
 	catch (std::exception &e) {
-		GS_RETHROW_USER_ERROR(e, "Copy logfile failed. reason=("
-							  << GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_USER_ERROR(
+				e, "Copy logfile failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 
@@ -1144,7 +1503,7 @@ uint64_t LogManager::copyLogFile(PartitionGroupId pgId, const char8_t *dirPath) 
 */
 uint32_t LogManager::parseLogHeader(const uint8_t *&addr, LogRecord &record) {
 	const uint8_t *topAddr = addr;
-    LogRecord::LogType logType;
+	LogRecord::LogType logType;
 	memcpy(&logType, addr, sizeof(uint8_t));
 	record.withBegin_ = (logType & LOG_TYPE_WITH_BEGIN) > 0;
 	record.isAutoCommit_ = (logType & LOG_TYPE_IS_AUTO_COMMIT) > 0;
@@ -1215,33 +1574,111 @@ uint32_t LogManager::parseLogBody(const uint8_t *&addr, LogRecord &record) {
 		addr += util::varIntDecode32(addr, flagValue);
 		addr += util::varIntDecode32(addr, record.containerNameLen_);
 		addr += util::varIntDecode32(addr, record.containerInfoLen_);
+		addr += util::varIntDecode32(addr, record.extensionNameLen_);
 		record.containerType_ = flagValue;
-		record.containerName_ = reinterpret_cast<const char*>(addr);
+		record.containerName_ = addr;
 		addr += record.containerNameLen_;
 		record.containerInfo_ = addr;
 		addr += record.containerInfoLen_;
-		record.isAutoCommit_ = true;
+		record.extensionName_ = reinterpret_cast<const char*>(addr);
+		addr += record.extensionNameLen_;
+		if (record.txnId_ == UNDEF_TXNID) {
+			record.isAutoCommit_ = true;
+			record.stmtId_ = 0;
+			record.txnContextCreationMode_ = 0;
+			record.txnTimeout_ = TXN_NO_TRANSACTION_TIMEOUT_INTERVAL;
+			record.numRowId_ = MAX_ROWID;
+			record.clientId_ = TXN_EMPTY_CLIENTID;
+		} else {
+			record.isAutoCommit_ = false;
+			addr += util::varIntDecode64(addr, record.stmtId_);
+			addr += util::varIntDecode32(addr, record.txnContextCreationMode_);
+			addr += util::varIntDecode32(addr, record.txnTimeout_);
+			addr += util::varIntDecode64(addr, record.numRowId_);
+			memcpy(record.clientId_.uuid_, addr, TXN_CLIENT_UUID_BYTE_SIZE);
+			addr += TXN_CLIENT_UUID_BYTE_SIZE;
+		}
 		break;
 
 	case LOG_TYPE_DROP_CONTAINER:
 		addr += util::varIntDecode32(addr, record.containerNameLen_);
-		record.containerName_ = reinterpret_cast<const char*>(addr);
+		record.containerName_ = addr;
 		addr += record.containerNameLen_;
 		record.isAutoCommit_ = true;
 		break;
 
-	case LOG_TYPE_CREATE_INDEX:
+	case LOG_TYPE_CONTINUE_CREATE_INDEX:
 		/* FALLTHROUGH */
-	case LOG_TYPE_DROP_INDEX:
-		addr += util::varIntDecode32(addr, record.columnId_);
+	case LOG_TYPE_CONTINUE_ALTER_CONTAINER:
+		addr += util::varIntDecode64(addr, record.stmtId_);
+		addr += util::varIntDecode32(addr, record.txnContextCreationMode_);
+		addr += util::varIntDecode32(addr, record.txnTimeout_);
+		addr += util::varIntDecode64(addr, record.numRowId_);
+		memcpy(record.clientId_.uuid_, addr, TXN_CLIENT_UUID_BYTE_SIZE);
+		addr += TXN_CLIENT_UUID_BYTE_SIZE;
+		break;
+
+	case LOG_TYPE_CREATE_INDEX:
+		addr += util::varIntDecode32(addr, record.columnIdCount_);
 		addr += util::varIntDecode32(addr, record.mapType_);
+		addr += util::varIntDecode32(addr, record.indexNameLen_);
+		addr += util::varIntDecode32(addr, record.extensionNameLen_);
+		addr += util::varIntDecode32(addr, record.paramCount_);
+		record.columnIds_ = reinterpret_cast<const ColumnId*>(addr);
+		addr += sizeof(ColumnId) * record.columnIdCount_;
+		record.indexName_ = reinterpret_cast<const char*>(addr);
+		addr += record.indexNameLen_;
+		record.extensionName_ = reinterpret_cast<const char*>(addr);
+		addr += record.extensionNameLen_;
+		record.paramDataLen_ = reinterpret_cast<const uint32_t*>(addr);
+		addr += sizeof(uint32_t) * record.paramCount_;
+		record.paramData_ = addr;
+		for (uint32_t i = 0; i < record.paramCount_; i++) {
+			addr += record.paramDataLen_[i];
+		}
+		if (record.txnId_ == UNDEF_TXNID) {
+			record.isAutoCommit_ = true;
+			record.stmtId_ = 0;
+			record.txnContextCreationMode_ = 0;
+			record.txnTimeout_ = TXN_NO_TRANSACTION_TIMEOUT_INTERVAL;
+			record.numRowId_ = MAX_ROWID;
+			record.clientId_ = TXN_EMPTY_CLIENTID;
+		} else {
+			record.isAutoCommit_ = false;
+			addr += util::varIntDecode64(addr, record.stmtId_);
+			addr += util::varIntDecode32(addr, record.txnContextCreationMode_);
+			addr += util::varIntDecode32(addr, record.txnTimeout_);
+			addr += util::varIntDecode64(addr, record.numRowId_);
+			memcpy(record.clientId_.uuid_, addr, TXN_CLIENT_UUID_BYTE_SIZE);
+			addr += TXN_CLIENT_UUID_BYTE_SIZE;
+		}
+		break;
+
+	case LOG_TYPE_DROP_INDEX:
+		addr += util::varIntDecode32(addr, record.columnIdCount_);
+		addr += util::varIntDecode32(addr, record.mapType_);
+		addr += util::varIntDecode32(addr, record.indexNameLen_);
+		addr += util::varIntDecode32(addr, record.extensionNameLen_);
+		addr += util::varIntDecode32(addr, record.paramCount_);
+		record.columnIds_ = reinterpret_cast<const ColumnId*>(addr);
+		addr += sizeof(ColumnId) * record.columnIdCount_;
+		record.indexName_ = reinterpret_cast<const char*>(addr);
+		addr += record.indexNameLen_;
+		record.extensionName_ = reinterpret_cast<const char*>(addr);
+		addr += record.extensionNameLen_;
+		record.paramDataLen_ = reinterpret_cast<const uint32_t*>(addr);
+		addr += sizeof(uint32_t) * record.paramCount_;
+		record.paramData_ = addr;
+		for (uint32_t i = 0; i < record.paramCount_; i++) {
+			addr += record.paramDataLen_[i];
+		}
 		record.isAutoCommit_ = true;
 		break;
 
 	case LOG_TYPE_CREATE_TRIGGER:
 		addr += util::varIntDecode32(addr, record.containerNameLen_);
 		addr += util::varIntDecode32(addr, record.containerInfoLen_);
-		record.containerName_ = reinterpret_cast<const char*>(addr);
+		record.containerName_ = addr;
 		addr += record.containerNameLen_;
 		record.containerInfo_ = addr;
 		addr += record.containerInfoLen_;
@@ -1250,7 +1687,7 @@ uint32_t LogManager::parseLogBody(const uint8_t *&addr, LogRecord &record) {
 
 	case LOG_TYPE_DROP_TRIGGER:
 		addr += util::varIntDecode32(addr, record.containerNameLen_);
-		record.containerName_ = reinterpret_cast<const char*>(addr);
+		record.containerName_ = addr;
 		addr += record.containerNameLen_;
 		record.isAutoCommit_ = true;
 		break;
@@ -1295,6 +1732,8 @@ uint32_t LogManager::parseLogBody(const uint8_t *&addr, LogRecord &record) {
 			record.startChunkId_ = static_cast<ChunkId>(tmpData);
 			addr += util::varIntDecode32(addr, tmpData);
 			record.chunkNum_ = static_cast<int32_t>(tmpData);
+			addr += util::varIntDecode32(addr, tmpData);
+			record.expandedLen_ = static_cast<int32_t>(tmpData);
 			addr += util::varIntDecode32(addr, record.dataLen_);
 			record.rowData_ = addr;
 			addr += record.dataLen_;
@@ -1334,14 +1773,16 @@ uint32_t LogManager::parseLogBody(const uint8_t *&addr, LogRecord &record) {
 		break;
 
 	case LOG_TYPE_NOOP:
-		GS_TRACE_WARNING(LOG_MANAGER, GS_TRACE_LM_UNSUPPORTED_LOGTYPE,
-						 "Unsupported logType=" << record.type_);
+		GS_TRACE_WARNING(
+				LOG_MANAGER, GS_TRACE_LM_UNSUPPORTED_LOGTYPE,
+				"Unsupported logType=" << record.type_);
 		addr = topAddr + record.bodyLen_;
 		break;
 
 	default:
-		GS_TRACE_WARNING(LOG_MANAGER, GS_TRACE_LM_UNKNOWN_LOGTYPE,
-						 "Unknown logType=" << record.type_);
+		GS_TRACE_WARNING(
+				LOG_MANAGER, GS_TRACE_LM_UNKNOWN_LOGTYPE,
+				"Unknown logType=" << record.type_);
 		addr = topAddr + record.bodyLen_;
 		break;
 	}
@@ -1484,6 +1925,14 @@ const char* LogManager::logTypeToString(LogType type) {
 		return "PUT_CHUNK_END";
 		break;
 
+	case LOG_TYPE_CONTINUE_CREATE_INDEX:
+		return "CONTINUE_CREATE_INDEX";
+		break;
+
+	case LOG_TYPE_CONTINUE_ALTER_CONTAINER:
+		return "CONTINUE_ALTER_CONTAINER";
+		break;
+
 	case LOG_TYPE_UNDEF:
 	case LOG_TYPE_WITH_BEGIN:
 	case LOG_TYPE_IS_AUTO_COMMIT:
@@ -1594,6 +2043,22 @@ void LogManager::putLog(PartitionId pId, LogSequentialNumber lsn,
 
 	LOG_MANAGER_CONFLICTION_DETECTOR_SCOPE(pgId, false);
 	setLSN(pId, lsn);
+
+	if (childLogManagerList_[pId] != NULL) {
+		try {
+			childLogManagerList_[pId]->putLog(
+					pId, lsn, serializedLogRecord, logRecordLen, needUpdateLength);
+		}
+		catch(std::exception &e) {
+			util::NormalOStringStream oss;
+			oss << "Put syncTemp log failed. pId=" << pId <<
+					", reason=(" << GS_EXCEPTION_MESSAGE(e) << ")";
+			childLogManagerList_[pId]->setLongtermSyncLogError(oss.str());
+			childLogManagerList_[pId] = NULL; 
+			GS_TRACE_WARNING(
+					LOG_MANAGER, GS_TRACE_LM_PUT_SYNC_TEMP_LOG_FAILED, oss);
+		}
+	}
 }
 
 void LogManager::flushByCommit(PartitionId pId) {
@@ -1604,17 +2069,18 @@ void LogManager::flushByCommit(PartitionId pId) {
 	}
 }
 
-LogSequentialNumber LogManager::putPutOrUpdateRowLog(LogType logType,
-													 util::XArray<uint8_t> &binaryLogBuf,
-													 PartitionId pId,
-													 const ClientId &clientId,
-													 TransactionId txnId,
-													 ContainerId containerId,
-													 StatementId stmtId,
-													 uint64_t numRowId, const util::XArray<RowId> &rowIds,
-													 uint64_t numRow, const util::XArray<uint8_t> &rowData,
-													 int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
-													 bool withBegin, bool isAutoCommit)
+LogSequentialNumber LogManager::putPutOrUpdateRowLog(
+		LogType logType,
+		util::XArray<uint8_t> &binaryLogBuf,
+		PartitionId pId,
+		const ClientId &clientId,
+		TransactionId txnId,
+		ContainerId containerId,
+		StatementId stmtId,
+		uint64_t numRowId, const util::XArray<RowId> &rowIds,
+		uint64_t numRow, const util::XArray<uint8_t> &rowData,
+		int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
+		bool withBegin, bool isAutoCommit)
 {
 	assert(!(withBegin && isAutoCommit));
 
@@ -1623,8 +2089,8 @@ LogSequentialNumber LogManager::putPutOrUpdateRowLog(LogType logType,
 		uint8_t beginFlag = withBegin ? LOG_TYPE_WITH_BEGIN : 0;
 		uint8_t autoCommitFlag = isAutoCommit ? LOG_TYPE_IS_AUTO_COMMIT : 0;
 		lsn = serializeLogCommonPart(
-			binaryLogBuf, static_cast<uint8_t>(logType) | beginFlag | autoCommitFlag,
-			pId, clientId.sessionId_, txnId, containerId);
+				binaryLogBuf, static_cast<uint8_t>(logType) | beginFlag | autoCommitFlag,
+				pId, clientId.sessionId_, txnId, containerId);
 
 		uint8_t tmp[LOGMGR_VARINT_MAX_LEN * 6];
 		uint8_t *addr = tmp;
@@ -1638,17 +2104,19 @@ LogSequentialNumber LogManager::putPutOrUpdateRowLog(LogType logType,
 		binaryLogBuf.push_back(tmp, (addr - tmp));
 		binaryLogBuf.push_back(clientId.uuid_, TXN_CLIENT_UUID_BYTE_SIZE);
 		binaryLogBuf.push_back(
-			reinterpret_cast<const uint8_t*>(rowIds.data()), numRowId * sizeof(RowId));
+				reinterpret_cast<const uint8_t*>(rowIds.data()),
+				numRowId * sizeof(RowId));
 		binaryLogBuf.push_back(
-			reinterpret_cast<const uint8_t*>(rowData.data()), dataLen);
+				reinterpret_cast<const uint8_t*>(rowData.data()), dataLen);
 
 		putLog(pId, lsn, binaryLogBuf.data(), binaryLogBuf.size());
 		if (isAutoCommit) {
 			flushByCommit(pId);
 		}
 	} catch(std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(e, "Write log failed. reason=("
-								<< GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Write log failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 	return lsn;
 }
@@ -1701,17 +2169,45 @@ void LogManager::ConfigSetUpHandler::operator()(ConfigTable &config) {
 }
 
 
+bool LogManager::isLongtermSyncLogAvailable() const {
+	if (filterPId_ != UNDEF_PARTITIONID) {
+		const PartitionGroupId pgId = calcPartitionGroupId(filterPId_);
+		return !pgManagerList_[pgId]->getLongtermSyncLogErrorFlag();
+	}
+	else {
+		return false;
+	}
+}
+
+std::string LogManager::getLongtermSyncLogErrorMessage() const {
+	if (filterPId_ != UNDEF_PARTITIONID) {
+		const PartitionGroupId pgId = calcPartitionGroupId(filterPId_);
+		return pgManagerList_[pgId]->getLongtermSyncLogErrorMessage();
+	}
+	else {
+		return std::string();
+	}
+}
+
+void LogManager::setLongtermSyncLogError(const std::string &message) {
+	assert(filterPId_ != UNDEF_PARTITIONID);
+	if (filterPId_ != UNDEF_PARTITIONID) {
+		const PartitionGroupId pgId = calcPartitionGroupId(filterPId_);
+		pgManagerList_[pgId]->setLongtermSyncLogError(message);
+	}
+}
+
 /*!
     @brief Returns the version of Log file.
 */
 uint16_t LogManager::getFileVersion(PartitionGroupId pgId, CheckpointId cpId) { 
 	if (pgId >= pgManagerList_.size()) {
 		GS_THROW_USER_ERROR(
-			GS_ERROR_LM_LOG_FILES_CONFIGURATION_UNMATCHED,
-			"Existing log files do not match the server configuration"
-			" (expectedPartitionGroupNum=" <<
-			config_.pgConfig_.getPartitionGroupCount() <<
-			", requestedLogFilePartitionGroupNum=" << pgId << ")");
+				GS_ERROR_LM_LOG_FILES_CONFIGURATION_UNMATCHED,
+				"Existing log files do not match the server configuration"
+				" (expectedPartitionGroupNum=" <<
+				config_.pgConfig_.getPartitionGroupCount() <<
+				", requestedLogFilePartitionGroupNum=" << pgId << ")");
 		return 0;
 	}
 	LogFileLatch fileLatch;
@@ -1849,7 +2345,8 @@ void LogManager::LogFileInfo::open(const Config &config,
 		}
 
 		if (!expectExisting && fileSize_ != 0) {
-			GS_THROW_USER_ERROR(GS_ERROR_LM_CREATE_LOG_FILE_FAILED,
+			GS_THROW_USER_ERROR(
+					GS_ERROR_LM_CREATE_LOG_FILE_FAILED,
 					"Created file is not empty");
 		}
 	}
@@ -1861,8 +2358,8 @@ void LogManager::LogFileInfo::open(const Config &config,
 		}
 
 		GS_RETHROW_USER_ERROR(
-			e, "Failed to open (path=" << filePath <<
-			", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+				e, "Failed to open (path=" << filePath <<
+				", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 
@@ -1884,8 +2381,8 @@ void LogManager::LogFileInfo::close() {
 	}
 	catch(std::exception &e) {
 		GS_RETHROW_USER_ERROR(
-			e, "Close log file failed. reason=("
-			<< GS_EXCEPTION_MESSAGE(e) << ")");
+				e, "Close log file failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 
@@ -1968,16 +2465,15 @@ uint32_t LogManager::LogFileInfo::readBlock(
 		util::Stopwatch watch(util::Stopwatch::STATUS_STARTED);
 		const int64_t resultSize = file_->read(buffer, requestSize, startOffset);
 		const uint32_t lap = watch.elapsedMillis();
-
-		if (resultSize != static_cast<int64_t>(requestSize)) {
-			GS_THROW_USER_ERROR(GS_ERROR_LM_READ_LOG_BLOCK_FAILED,
-					"Result size unmatched (path=" << file_->getName() << ")");
-		}
 		if (lap > config_->ioWarningThresholdMillis_) { 
 			GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_IO,
 					"[LONG I/O] read time," << lap <<
-				   ",fileName," << file_->getName() <<
-				   ",startIndex," << startIndex << ",count," << count); 
+					",fileName," << file_->getName() <<
+					",startIndex," << startIndex << ",count," << count);
+		}
+		if (resultSize != static_cast<int64_t>(requestSize)) {
+			GS_THROW_USER_ERROR(GS_ERROR_LM_READ_LOG_BLOCK_FAILED,
+					"Result size unmatched (path=" << file_->getName() << ")");
 		}
 	}
 	catch (std::exception &e) {
@@ -1987,8 +2483,9 @@ uint32_t LogManager::LogFileInfo::readBlock(
 		catch (...) {
 		}
 
-		GS_RETHROW_USER_ERROR(e, "Read log block failed. reason=("
-							  << GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_USER_ERROR(
+				e, "Read log block failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 
 	return requestSize;
@@ -2011,16 +2508,15 @@ void LogManager::LogFileInfo::writeBlock(
 		util::Stopwatch watch(util::Stopwatch::STATUS_STARTED);
 		const int64_t resultSize = file_->write(buffer, requestSize, startOffset);
 		const uint32_t lap = watch.elapsedMillis();
-
-		if (resultSize != static_cast<int64_t>(requestSize)) {
-			GS_THROW_USER_ERROR(GS_ERROR_LM_WRITE_LOG_BLOCK_FAILED,
-					"Result size unmatched (path=" << file_->getName() << ")");
-		}
 		if (lap > config_->ioWarningThresholdMillis_) { 
 			GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_IO,
 					"[LONG I/O] write time," << lap <<
-				   ",fileName," << file_->getName() <<
-				   ",startIndex," << startIndex << ",count," << count); 
+					",fileName," << file_->getName() <<
+					",startIndex," << startIndex << ",count," << count);
+		}
+		if (resultSize != static_cast<int64_t>(requestSize)) {
+			GS_THROW_USER_ERROR(GS_ERROR_LM_WRITE_LOG_BLOCK_FAILED,
+					"Result size unmatched (path=" << file_->getName() << ")");
 		}
 
 		fileSize_ = std::max(fileSize_, endOffset);
@@ -2033,8 +2529,9 @@ void LogManager::LogFileInfo::writeBlock(
 		catch (...) {
 		}
 
-		GS_RETHROW_USER_ERROR(e, "Write log block failed. reason=("
-							  << GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_USER_ERROR(
+				e, "Write log block failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 
@@ -2064,8 +2561,9 @@ void LogManager::LogFileInfo::flush(
 			}
 		}
 
-		GS_RETHROW_USER_ERROR(e, "Sync log file failed. reason=("
-							  << GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_USER_ERROR(
+				e, "Sync log file failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 
@@ -2094,18 +2592,20 @@ void LogManager::LogFileInfo::lock() {
 		catch (...) {
 		}
 
-		GS_RETHROW_USER_ERROR(e, "Lock log file failed. reason=("
-							  << GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_USER_ERROR(
+				e, "Lock log file failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 
 
 
-const uint16_t LogManager::LogBlocksInfo::LOGBLOCK_VERSION = 0x11;
+const uint16_t LogManager::LogBlocksInfo::LOGBLOCK_VERSION = 0x19;
 
 const uint16_t
 LogManager::LogBlocksInfo::LOGBLOCK_ACCEPTABLE_VERSIONS[] = {
 		LOGBLOCK_VERSION,
+		0x21,
 		0 /* sentinel */
 };
 
@@ -2128,8 +2628,9 @@ void LogManager::LogBlocksInfo::initialize(
 		assert(blocks_ != NULL);
 	}
 	catch (std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(e, "Initialize failed. reason=("
-								<< GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Initialize failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 
 	startIndex_ = startIndex;
@@ -2261,7 +2762,8 @@ uint32_t LogManager::LogBlocksInfo::copyAllFromFile(LogFileInfo &fileInfo) {
 			const uint64_t totalSize = fileInfo.getFileSize();
 
 			if (availableSize != totalSize) {
-				GS_TRACE_WARNING(LOG_MANAGER, GS_TRACE_LM_INCOMPLETE_TAIL_BLOCK,
+				GS_TRACE_WARNING(LOG_MANAGER,
+						GS_TRACE_LM_INCOMPLETE_TAIL_BLOCK,
 						"Tail block is incomplete (checkpointId=" <<
 						fileInfo.getCheckpointId() <<
 						", blockIndex=" << totalBlockCount <<
@@ -2420,6 +2922,19 @@ uint16_t LogManager::LogBlocksInfo::getVersion() const {
 	return getHeaderFileld<uint16_t>(startIndex_, LOGBLOCK_VERSION_OFFSET);
 }
 
+bool LogManager::LogBlocksInfo::isAcceptableVersion(uint16_t version) {
+	bool acceptable = false;
+
+	for (const uint16_t *acceptableVersions = LOGBLOCK_ACCEPTABLE_VERSIONS;
+		*acceptableVersions != 0 && !acceptable; acceptableVersions++) {
+		if (version == *acceptableVersions) {
+			acceptable = true;
+		}
+	}
+
+	return acceptable;
+}
+
 bool LogManager::LogBlocksInfo::isValidRecordOffset(
 		const Config &config, uint64_t offset) {
 	const uint32_t blockOffset = getBlockOffset(config, offset);
@@ -2443,18 +2958,10 @@ void LogManager::LogBlocksInfo::validate(uint64_t index) const {
 	const uint16_t version =
 			getHeaderFileld<uint16_t>(index, LOGBLOCK_VERSION_OFFSET);
 
-	for (const uint16_t *acceptableVersions = LOGBLOCK_ACCEPTABLE_VERSIONS;;
-			acceptableVersions++) {
-
-		if (version == *acceptableVersions) {
-			break;
-		}
-		else if (*acceptableVersions == 0) {
-			GS_THROW_USER_ERROR(
-					GS_ERROR_LM_LOG_FILE_VERSION_UNMATCHED,
-					"Version unmatched (version=" << version << ")");
-		}
-
+	if (!isAcceptableVersion(version)) {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_LM_LOG_FILE_VERSION_UNMATCHED,
+				"Version unmatched (version=" << version << ")");
 	}
 
 	if (getHeaderFileld<uint16_t>(index, LOGBLOCK_MAGIC_OFFSET) !=
@@ -3137,6 +3644,7 @@ LogManager::PartitionGroupManager::PartitionGroupManager() :
 		flushRequired_(false),
 		normalShutdownCompleted_(false),
 		tailReadOnly_(false),
+		longtermSyncLogErrorFlag_(false), 
 		config_(NULL),
 		partitionInfoList_(NULL) {
 }
@@ -3154,7 +3662,7 @@ void LogManager::PartitionGroupManager::open(
 		CheckpointId firstCpId, CheckpointId endCpId,
 		std::vector<PartitionInfo> &partitionInfoList,
 		bool emptyFileAppendable, bool checkOnly,
-		const char8_t *suffix) {
+		const char8_t *suffix, bool isSyncTempLogFile) {
 	assert(isClosed());
 
 	pgId_ = pgId;
@@ -3191,7 +3699,8 @@ void LogManager::PartitionGroupManager::open(
 			fileLatch.set(*this, lastCheckpointId_, expectExisting, suffix);
 		}
 
-		if (emptyFileAppendable && fileLatch.get()->getFileSize() == 0) {
+		if ((emptyFileAppendable && fileLatch.get()->getFileSize() == 0)
+			|| isSyncTempLogFile) {
 			tailReadOnly_ = false;
 		}
 		else {
@@ -3883,7 +4392,7 @@ uint64_t LogManager::PartitionGroupManager::copyLogFile(
 			util::FileFlag::TYPE_READ_WRITE | util::FileFlag::TYPE_CREATE);
 
 	try {
-		util::File *srcFile = lastLogFile_;
+		util::NamedFile *srcFile = lastLogFile_;
 
 		util::FileStatus status;
 		srcFile->getStatus(&status);
@@ -3904,7 +4413,6 @@ uint64_t LogManager::PartitionGroupManager::copyLogFile(
 			const uint64_t copyOffset = config_->getBlockSize() * i;
 			srcFile->read(buffer.data(), copySize, copyOffset);
 			destFile->write(buffer.data(), copySize, copyOffset);
-
 			i += blockCount;
 		}
 
@@ -4438,9 +4946,10 @@ void LogManager::PartitionGroupManager::cleanupLogFiles() {
 			requiredCpId = completedCheckpointId_;
 		}
 
-		requiredCpId = std::min(requiredCpId,
-								lastCheckpointId_ -
-								std::min(config_->retainedFileCount_, lastCheckpointId_));
+		requiredCpId = std::min(
+				requiredCpId,
+				lastCheckpointId_ -
+					std::min(config_->retainedFileCount_, lastCheckpointId_));
 
 
 		while (firstCheckpointId_ < requiredCpId) {
@@ -4456,8 +4965,8 @@ void LogManager::PartitionGroupManager::cleanupLogFiles() {
 			}
 			catch (std::exception &e) {
 				GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_CLEANUP_LOG_FILES,
-					"Remove failed (path=" << filePath <<
-					", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+						"Remove failed (path=" << filePath <<
+						", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
 				GS_RETHROW_USER_ERROR(e, "");
 			}
 
@@ -4469,24 +4978,27 @@ void LogManager::PartitionGroupManager::cleanupLogFiles() {
 	}
 	catch (std::exception &e) {
 		GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_CLEANUP_LOG_FILES,
-			"Cleanup log files: (message="
-				<< GS_EXCEPTION_MESSAGE(e) << ")");
+				"Cleanup log files: (message=" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 
 /*!
     @brief Updates an available start LSN.
 */
-void LogManager::updateAvailableStartLsn(PartitionTable *pt, PartitionGroupId pgId, 
-										 util::XArray<uint8_t> &binaryLogRecords, CheckpointId cpId) 
+void LogManager::updateAvailableStartLsn(
+		PartitionTable *pt, PartitionGroupId pgId,
+		util::XArray<uint8_t> &binaryLogRecords, CheckpointId cpId)
 {
 	const PartitionId startPId =  config_.pgConfig_.getGroupBeginPartitionId(pgId);
 	const PartitionId endPId =  config_.pgConfig_.getGroupEndPartitionId(pgId);
 	CheckpointId lastCpId = getLastCheckpointId(pgId);
 
 	for (PartitionId pId = startPId; pId < endPId; pId++) {
-		std::map<CheckpointId, LogSequentialNumber> &startLsnMap =  partitionInfoList_[pId].startLsnMap_;
-		std::map<CheckpointId, LogSequentialNumber>::iterator itr = startLsnMap.begin();
+		std::map<CheckpointId, LogSequentialNumber> &startLsnMap =
+				partitionInfoList_[pId].startLsnMap_;
+		std::map<CheckpointId, LogSequentialNumber>::iterator itr =
+				startLsnMap.begin();
 		LogSequentialNumber startLsn = UINT64_MAX;
 
 		if(startLsnMap.size() == 0) {
@@ -4495,65 +5007,65 @@ void LogManager::updateAvailableStartLsn(PartitionTable *pt, PartitionGroupId pg
 				if (findCheckpointStartLog(cursor, pgId, cpId)) {
 					LogRecord logRecord;
 					if (cursor.nextLog(logRecord, binaryLogRecords,
-									   pId, LogManager::LOG_TYPE_CHECKPOINT_START)) {
-						GS_TRACE_INFO(CLUSTER_SERVICE, GS_TRACE_CS_UPDATE_START_LSN,
-							"pgId:" << pgId << ", pId:" << pId
-							<< ", cpId:" << cpId << ", lsn:" << logRecord.lsn_);
+							pId, LogManager::LOG_TYPE_CHECKPOINT_START)) {
 						pt->setStartLSN(pId, logRecord.lsn_);
 					}
-					else {
-						GS_TRACE_INFO(CLUSTER_SERVICE, GS_TRACE_CS_UPDATE_START_LSN,
-							"pgId:" << pgId << ", pId:"
-							<< pId << ", cpId:" << cpId << ", not found1");
-					}
-				}
-				else {
-					GS_TRACE_INFO(CLUSTER_SERVICE, GS_TRACE_CS_UPDATE_START_LSN,
-						"pgId:" << pgId << ", pId:" << pId
-						<< ", cpId:" << cpId << ", not found2");
 				}
 			} catch(std::exception &) {
 				GS_TRACE_INFO(CLUSTER_SERVICE, GS_TRACE_CS_UPDATE_START_LSN,
-					"pgId:" << pgId << ", pId:" << pId
-					<< ", cpId:" << cpId << ", not found2");
+						"pgId:" << pgId << ", pId:" << pId <<
+						", cpId:" << cpId << ", not found2");
 			}
 		}
 		else {
 			while (itr != startLsnMap.end()) {
 				CheckpointId currentCPId = (*itr).first;
-				LogSequentialNumber currentLsn = (*itr).second;
+//				LogSequentialNumber currentLsn = (*itr).second;
 				if(currentCPId < cpId) {
-					GS_TRACE_WARNING(CLUSTER_SERVICE, GS_TRACE_CS_UPDATE_START_LSN,
-						"erase start lsn, pId:" << pId << ", currentCpId:" << currentCPId 
-						<< ", cpId:" << cpId << ", lsn:" << currentLsn);
 					startLsnMap.erase(itr++);
 				}
 				else {
 					LogSequentialNumber currentLsn = (*itr).second;
 					if(startLsn > currentLsn && currentLsn <= getLSN(pId)) {
 						pt->setStartLSN(pId, currentLsn);
-						GS_TRACE_WARNING(CLUSTER_SERVICE, GS_TRACE_CS_UPDATE_START_LSN,
-							"update start lsn, pId:" << pId << ", currentCpId:" << currentCPId 
-							<< ", cpId:" << cpId << ", lsn:" << currentLsn);
+						GS_TRACE_WARNING(CLUSTER_SERVICE,
+								GS_TRACE_CS_UPDATE_START_LSN,
+								"Start lsn updated, pId=" << pId <<
+								", currentCpId=" << currentCPId <<
+								", targetCpId:" << cpId <<
+								", lsn:" << currentLsn);
 						startLsn = currentLsn;
 					}
-					itr++;
+					++itr;
 				}
 			}
 		}
 		setAvailableStartLSN(pId, lastCpId);
 		GS_TRACE_WARNING(CLUSTER_SERVICE, GS_TRACE_CS_UPDATE_START_LSN,
-						 "update new cpId, pId:" << pId << ", cpId:" << lastCpId 
-						 << ", lsn:" << pt->getLSN(pId));
+				"CheckpointId updated, pId:" << pId << ", cpId:"
+				<< lastCpId << ", lsn:" << pt->getLSN(pId));
 	}
 }
 
+void LogManager::PartitionGroupManager::setLongtermSyncLogError(const std::string &message) {
+	longtermSyncLogErrorFlag_ = true;
+	longtermSyncLogErrorMessage_ = message;
+}
+
+bool LogManager::PartitionGroupManager::getLongtermSyncLogErrorFlag() const {
+	return longtermSyncLogErrorFlag_;
+}
+
+const std::string& LogManager::PartitionGroupManager::getLongtermSyncLogErrorMessage() const {
+	return longtermSyncLogErrorMessage_;
+}
 
 /*!
     @brief Checks if fileName is of Log.
 */
-bool LogManager::checkFileName(const std::string &fileName,
-							  PartitionGroupId &pgId, CheckpointId &cpId) {
+bool LogManager::checkFileName(
+		const std::string &fileName,
+		PartitionGroupId &pgId, CheckpointId &cpId) {
 	pgId = UNDEF_PARTITIONGROUPID;
 	cpId = UNDEF_CHECKPOINT_ID;
 
@@ -4652,8 +5164,11 @@ void LogRecord::reset() {
 	containerName_ = NULL;
 	containerInfo_ = NULL;
 
-	columnId_ = 0;
+	columnIdCount_ = 0;
 	mapType_ = 0;
+	indexNameLen_ = 0;
+	indexName_ = NULL;
+	columnIds_ = NULL;
 
 	cpLsn_ = 0;
 	txnContextNum_ = 0;
@@ -4663,11 +5178,33 @@ void LogRecord::reset() {
 	refContainerIds_ = NULL;
 	lastExecStmtIds_ = NULL;
 	txnTimeouts_ = NULL;
+	startChunkId_ = 0;
+	chunkNum_ = 0;
+	chunkCategoryId_ = 0;
+	emptyInfo_ = 0;
+	expandedLen_ = 0;
+	extensionNameLen_ = 0;
+	extensionName_ = NULL;
+	paramCount_ = 0;
+	paramDataLen_ = NULL;
+	paramData_ = NULL;
 
 	withBegin_ = false;
 	isAutoCommit_ = false;
 
 	fileVersion_ = 0;
+}
+
+void LogRecord::dump(std::ostream &os) {
+	os << getDumpString() << std::endl;
+}
+
+std::string LogRecord::getDumpString() {
+	util::NormalOStringStream oss;
+	oss << "LogRecord,pId," << partitionId_ << ",LSN," << lsn_ <<
+			",bodyLen," << bodyLen_ << ",type," << type_ <<
+			",txnId," << txnId_ << ",containerId," << containerId_;
+	return oss.str();
 }
 
 
@@ -4704,6 +5241,12 @@ bool LogCursor::nextLog(
 	LogManager::PartitionGroupManager *pgManager =
 			blocksLatch_.getManager();
 
+	if (pgManager->getLongtermSyncLogErrorFlag()) {
+		GS_THROW_USER_ERROR(
+				GS_TRACE_CP_LONGTERM_SYNC_LOG_WRITE_FAILED,
+				"SyncTemp log error occured (reason=" <<
+				pgManager->getLongtermSyncLogErrorMessage() << ")");
+	}
 	const size_t orgSize = binaryLogRecord.size();
 	while (pgManager->getLogHeader(
 			blocksLatch_, offset_, logRecord, &binaryLogRecord, false)) {

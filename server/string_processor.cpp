@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -83,7 +83,7 @@ int32_t StringProcessor::compare(TransactionContext &txn, ObjectManager &,
 	@brief Set field value to message
 */
 void StringProcessor::getField(TransactionContext &, ObjectManager &,
-	ColumnId columnId, Value *objectValue, MessageRowStore *messageRowStore) {
+	ColumnId columnId, const Value *objectValue, MessageRowStore *messageRowStore) {
 	const uint8_t *data = objectValue->getImage();
 	if (data != NULL) {
 		uint32_t size = objectValue->size();

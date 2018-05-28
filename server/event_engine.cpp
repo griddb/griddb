@@ -1,5 +1,5 @@
 ﻿/*
-    Copyright (c) 2012 TOSHIBA CORPORATION.
+    Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
     
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License as
@@ -33,7 +33,8 @@ EventEngine::EventEngine(
 		fixedAllocator_(&source.resolveFixedSizeAllocator()),
 		name_(name),
 		ioWorkerList_(NULL),
-		eventWorkerList_(NULL) {
+		eventWorkerList_(NULL),
+		bufferManager_(source.bufferManager_) {
 
 	try {
 		source.resolveVariableSizeAllocator();
@@ -257,6 +258,10 @@ bool EventEngine::send(
 	}
 }
 
+EventMonotonicTime EventEngine::getMonotonicTime() {
+	return clockGenerator_->getMonotonicTime();
+}
+
 
 const NodeDescriptor NodeDescriptor::EMPTY_ND;
 
@@ -451,6 +456,138 @@ EventEngine::Config& EventEngine::Config::setAllAllocatorGroup(
 }
 
 
+EventEngine::BufferManager::~BufferManager() {
+}
+
+
+EventEngine::ExternalBuffer::ExternalBuffer(BufferManager *manager) :
+		manager_(manager),
+		size_(0),
+		capacity_(0) {
+}
+
+EventEngine::ExternalBuffer::~ExternalBuffer() {
+	try {
+		clear();
+	}
+	catch (...) {
+	}
+}
+
+void EventEngine::ExternalBuffer::clear() {
+	if (capacity_ != 0) {
+		assert(manager_ != NULL);
+
+		BufferManager *manager = manager_;
+		BufferId id = id_;
+
+		manager_ = NULL;
+		id_ = BufferId();
+		size_ = 0;
+		capacity_ = 0;
+
+		manager->deallocate(id);
+	}
+}
+
+void EventEngine::ExternalBuffer::swap(ExternalBuffer &another) {
+	std::swap(manager_, another.manager_);
+	std::swap(id_, another.id_);
+	std::swap(size_, another.size_);
+	std::swap(capacity_, another.capacity_);
+}
+
+bool EventEngine::ExternalBuffer::isEmpty() const {
+	return capacity_ == 0;
+}
+
+size_t EventEngine::ExternalBuffer::getSize() const {
+	return size_;
+}
+
+size_t EventEngine::ExternalBuffer::getCapacity() const {
+	return capacity_;
+}
+
+
+EventEngine::ExternalBuffer::Reader::Reader(const ExternalBuffer &buffer) :
+		manager_(buffer.manager_),
+		id_(buffer.id_),
+		data_(manager_->latch(id_)) {
+}
+
+EventEngine::ExternalBuffer::Reader::~Reader() {
+	try {
+		manager_->unlatch(id_);
+	}
+	catch (...) {
+	}
+}
+
+const void* EventEngine::ExternalBuffer::Reader::data() {
+	return data_;
+}
+
+
+EventEngine::ExternalBuffer::Writer::Writer(ExternalBuffer &buffer) :
+		bufferRef_(buffer),
+		buffer_(buffer.manager_),
+		data_(NULL) {
+
+	BufferManager *manager = buffer_.manager_;
+	if (manager == NULL) {
+		return;
+	}
+
+	const std::pair<BufferId, void*> &ret = manager->allocate();
+	buffer_.id_ = ret.first;
+	buffer_.size_ = 0;
+	buffer_.capacity_ = manager->getUnitSize();
+	data_ = ret.second;
+
+	if (bufferRef_.size_ != 0) {
+		assert(bufferRef_.size_ <= buffer_.capacity_);
+
+		Reader reader(bufferRef_);
+		memcpy(data_, reader.data(), bufferRef_.size_);
+		buffer_.size_ = bufferRef_.size_;
+	}
+
+	bufferRef_.clear();
+}
+
+EventEngine::ExternalBuffer::Writer::~Writer() {
+	BufferManager *manager = buffer_.manager_;
+	if (manager == NULL) {
+		return;
+	}
+
+	try {
+		const BufferId id = buffer_.id_;
+		buffer_.swap(bufferRef_);
+		manager->unlatch(id);
+	}
+	catch (...) {
+	}
+}
+
+size_t EventEngine::ExternalBuffer::Writer::tryAppend(
+		const void *data, size_t size) {
+	const size_t offset = buffer_.size_;
+	const size_t capacity = buffer_.capacity_;
+	assert(offset <= capacity);
+
+	const size_t consuming = std::min(size, capacity - offset);
+
+	if (offset < capacity && consuming > 0) {
+		memcpy(static_cast<uint8_t*>(data_) + offset, data, consuming);
+		buffer_.size_ = offset + consuming;
+	}
+
+	return consuming;
+}
+
+
 EventEngine::NDPool::NDPool(EventEngine &ee) :
 		ee_(ee),
 		config_(*ee_.config_),
@@ -630,14 +767,6 @@ int64_t& EventEngine::NDPool::prepareLastEventTime(
 	return it->second;
 }
 
-void EventEngine::NDPool::releaseTimeMap(TimeMap *&map) {
-	if (map != NULL) {
-		LockGuard guard(poolMutex_);
-		UTIL_OBJECT_POOL_DELETE(timeMapPool_, map);
-		map = NULL;
-	}
-}
-
 NodeDescriptor EventEngine::NDPool::putServerND(
 		const util::SocketAddress &address, NodeDescriptorId ndId,
 		bool modifiable, bool &found) {
@@ -756,39 +885,6 @@ NodeDescriptor::Body& EventEngine::NDPool::allocateBody(
 }
 
 /*!
-	@brief Deallocates body objects
-*/
-void EventEngine::NDPool::deallocateBody(NodeDescriptor::Body *body) {
-	if (body == NULL) {
-		return;
-	}
-
-	LockGuard guard(poolMutex_);
-
-	switch (body->type_) {
-	case NodeDescriptor::ND_TYPE_CLIENT:
-		ee_.stats_->increment(Stats::ND_CLIENT_REMOVE_COUNT);
-		break;
-	case NodeDescriptor::ND_TYPE_SERVER:
-		ee_.stats_->increment(Stats::ND_SERVER_REMOVE_COUNT);
-		break;
-	case NodeDescriptor::ND_TYPE_MULTICAST:
-		ee_.stats_->increment(Stats::ND_MCAST_REMOVE_COUNT);
-		break;
-	default:
-		assert(false);
-	}
-
-	if (body->type_ == NodeDescriptor::ND_TYPE_CLIENT) {
-		body->freeLink_ = bodyFreeLink_;
-		bodyFreeLink_ = body;
-	}
-	else {
-		UTIL_OBJECT_POOL_DELETE(bodyPool_, body);
-	}
-}
-
-/*!
 	@brief Allocates user data
 */
 void* EventEngine::NDPool::allocateUserData(UserDataConstructor *constructor) {
@@ -818,30 +914,6 @@ void* EventEngine::NDPool::allocateUserData(UserDataConstructor *constructor) {
 	return userData;
 }
 
-/*!
-	@brief Deallocates user data
-*/
-void EventEngine::NDPool::deallocateUserData(void *userData) {
-	if (userData == NULL) {
-		return;
-	}
-
-	LockGuard guard(userDataMutex_);
-
-	if (userDataPool_.get() == NULL) {
-		return;
-	}
-
-	try {
-		(*userDataDestructor_)(userData);
-	}
-	catch (...) {
-	}
-
-	userDataPool_->deallocate(userData);
-
-	ee_.stats_->increment(Stats::ND_USER_DATA_REMOVE_COUNT);
-}
 
 
 bool EventEngine::NDPool::SocketAddressLess::operator()(
@@ -1582,6 +1654,31 @@ void EventEngine::Manipulator::prepareMulticastSocket(
 	body.setSocket(guard, socket, NodeDescriptor::Body::ND_SOCKET_RECEIVER);
 }
 
+size_t EventEngine::Manipulator::getHandlingEventCount(
+		const EventContext &ec, const Event *ev, bool includesStarted) {
+	const EventList *list = ec.eventList_;
+	if (list == NULL) {
+		GS_THROW_USER_ERROR(GS_ERROR_EE_OPERATION_NOT_ALLOWED, "");
+	}
+
+	size_t count = list->size();
+
+	if (!includesStarted) {
+		assert(ev != NULL);
+
+		for (EventList::const_iterator it = list->begin();
+				it != list->end(); ++it) {
+			count--;
+
+			if (*it == ev) {
+				break;
+			}
+		}
+	}
+
+	return count;
+}
+
 
 EventEngine::ClockGenerator::ClockGenerator(EventEngine &ee) :
 		ee_(ee),
@@ -1713,9 +1810,6 @@ EventMonotonicTime EventEngine::ClockGenerator::getMonotonicTime() {
 	return monotonicTime_;
 }
 
-EventMonotonicTime EventEngine::getMonotonicTime() {
-	return clockGenerator_->getMonotonicTime();
-}
 void EventEngine::ClockGenerator::generateCorrectedTime() {
 	const int32_t maxTrial = ee_.config_->clockCorrectionMaxTrial_;
 	const uint32_t interval = ee_.config_->clockIntervalMillis_;
@@ -2509,7 +2603,7 @@ void EventEngine::EventWorker::run() {
 	EventList eventList(*localVarAllocator_);
 	util::StackAllocator &allocator(*allocator_);
 	allocator.setFreeSizeLimit(ee_->fixedAllocator_->getElementSize());
-	EventContext ec(createContextSource(allocator));
+	EventContext ec(createContextSource(allocator, &eventList));
 
 	try {
 		ee_->dispatcher_->handleLocalEvent(ec, LOCAL_EVENT_WORKER_STARTED);
@@ -2716,7 +2810,7 @@ void EventEngine::EventWorker::addPending(
 	condition_.signal();
 
 	stats_.increment(Stats::EVENT_PENDING_QUEUE_SIZE_CURRENT);
-	stats_.set(Stats::EVENT_PENDING_QUEUE_SIZE_MAX,
+	stats_.updateMax(Stats::EVENT_PENDING_QUEUE_SIZE_MAX,
 			stats_.get(Stats::EVENT_PENDING_QUEUE_SIZE_CURRENT));
 
 	stats_.increment(Stats::EVENT_PENDING_ADD_COUNT);
@@ -2747,8 +2841,21 @@ void EventEngine::EventWorker::mergeExtraStats(Stats &stats) {
 	Manipulator::mergeAllocatorStats(stats, *allocator_);
 }
 
+bool EventEngine::EventWorker::getLiveStats(
+		Stats::Type type, EventMonotonicTime now, int64_t &value) {
+	switch (type) {
+	case Stats::EVENT_ACTIVE_EXECUTABLE_COUNT:
+		value = static_cast<int64_t>(getExecutableActiveEventCount(
+				now, util::LockGuard<util::Condition>(condition_)));
+		break;
+	default:
+		return false;
+	}
+	return true;
+}
+
 EventContext::Source EventEngine::EventWorker::createContextSource(
-		util::StackAllocator &allocator) {
+		util::StackAllocator &allocator, const EventList *eventList) {
 	EventContext::Source source(*localVarAllocator_, allocator, stats_);
 
 	source.ee_ = ee_;
@@ -2756,6 +2863,7 @@ EventContext::Source EventEngine::EventWorker::createContextSource(
 	source.pendingPartitionCheckList_ = &pendingPartitionCheckList_;
 	source.progressWatcher_ = progressWatcher_.get();
 	source.workerId_ = id_;
+	source.eventList_ = eventList;
 
 	return source;
 }
@@ -2896,7 +3004,7 @@ inline void EventEngine::EventWorker::addDirect(
 	}
 
 	stats_.increment(Stats::EVENT_ACTIVE_QUEUE_SIZE_CURRENT);
-	stats_.set(Stats::EVENT_ACTIVE_QUEUE_SIZE_MAX,
+	stats_.updateMax(Stats::EVENT_ACTIVE_QUEUE_SIZE_MAX,
 			stats_.get(Stats::EVENT_ACTIVE_QUEUE_SIZE_CURRENT));
 
 	stats_.increment(Stats::EVENT_ACTIVE_ADD_COUNT);
@@ -2959,6 +3067,20 @@ void EventEngine::EventWorker::clearEvents(
 		ALLOC_VAR_SIZE_DELETE(allocator, it->ev_);
 	}
 	activeQueue.clear();
+}
+
+size_t EventEngine::EventWorker::getExecutableActiveEventCount(
+		EventMonotonicTime now, const util::LockGuard<util::Condition>&) {
+	size_t count = 0;
+	for (ActiveQueue::const_iterator it = activeQueue_->begin();
+			it != activeQueue_->end(); ++it) {
+		const int64_t nextTimeDiff = it->time_ - now;
+		if (nextTimeDiff > 0) {
+			break;
+		}
+		count++;
+	}
+	return count;
 }
 
 
@@ -3181,15 +3303,10 @@ void EventEngine::EventSocket::send(
 				remaining = eventCoder_.encode(
 						ee_, ev, ptr, size, index, option, firstEventSent_);
 
-				Buffer &subBuffer =
-						parentWorker_.pushBufferQueue(sendBufferQueue_, size);
-				subBuffer.getOutStream().writeAll(ptr, size);
-				subBuffer.setOffset(nextPos);
+				appendToSendBuffer(ptr, size, nextPos);
 
 				index++;
 				nextPos = 0;
-
-				parentWorker_.updateSendBufferSize(subBuffer, true);
 			}
 			while (remaining > 0);
 
@@ -3602,18 +3719,78 @@ void EventEngine::EventSocket::sendLocal() {
 
 			Buffer &buffer = sendBufferQueue_->front();
 
-			const size_t offset = buffer.getOffset();
-			const size_t size = buffer.getSize();
-			const void *data = buffer.getXArray().data() + offset;
+			bool pending = false;
+			for (size_t i = 0; i < 2; i++) {
+				size_t offset;
+				size_t size;
+				int64_t sentSize;
+				if (i == 0) {
+					offset = buffer.getOffset();
+					size = buffer.getSize();
+					if (size == 0) {
+						continue;
+					}
 
-			const int64_t sentSize = multicast_ ?
-					base_.sendTo(data, size, address_) :
-					base_.send(data, size);
-			if (sentSize < 0) {
-				break;
+					const void *data = buffer.getXArray().data() + offset;
+					sentSize = multicast_ ?
+							base_.sendTo(data, size, address_) :
+							base_.send(data, size);
+				}
+				else {
+					const ExternalBuffer *ext = buffer.getExternal();
+					if (ext == NULL) {
+						continue;
+					}
+
+					offset = buffer.getExternalOffset();
+					size = ext->getSize();
+					if (offset >= size) {
+						continue;
+					}
+					size -= offset;
+
+					ExternalBuffer::Reader reader(*ext);
+
+					const void *data =
+							static_cast<const uint8_t*>(reader.data()) + offset;
+					sentSize = multicast_ ?
+							base_.sendTo(data, size, address_) :
+							base_.send(data, size);
+				}
+
+				if (sentSize < 0 || multicast_) {
+					pending = true;
+					break;
+				}
+
+				size_t nextOffset = offset;
+				if (sentSize < static_cast<int64_t>(size)) {
+					pending = true;
+					nextOffset += static_cast<size_t>(sentSize);
+				}
+				else {
+					nextOffset += size;
+				}
+
+				if (i == 0) {
+					buffer.setOffset(nextOffset);
+
+					if (pending) {
+						break;
+					}
+				}
+				else {
+					if (pending) {
+						buffer.setExternalOffset(nextOffset);
+						break;
+					}
+					else {
+						buffer.prepareExternal(NULL).clear();
+					}
+				}
 			}
-			else if (sentSize < static_cast<int64_t>(size) && !multicast_) {
-				buffer.setOffset(offset + static_cast<size_t>(sentSize));
+
+			if (pending) {
 				break;
 			}
 
@@ -3691,6 +3868,85 @@ bool EventEngine::EventSocket::handleIOError(std::exception&) throw() {
 	}
 
 	return false;
+}
+
+void EventEngine::EventSocket::appendToSendBuffer(
+		const void *data, size_t size, size_t offset) {
+	const bool extEnabled = false;
+
+	typedef VariableSizeAllocator::TraitsType Traits;
+	const size_t threshold =
+			Traits::getFixedSize(Traits::FIXED_ALLOCATOR_COUNT - 1) / 2;
+
+	size_t nextOffset = offset;
+
+	bool forExternal = false;
+	while (nextOffset < size) {
+		Buffer *buffer = NULL;
+		ExternalBuffer *ext = NULL;
+		do {
+			if (forExternal) {
+				break;
+			}
+
+			if (sendBufferQueue_ == NULL || sendBufferQueue_->empty()) {
+				break;
+			}
+
+			buffer = &sendBufferQueue_->back();
+
+			if (buffer->getExternal() == NULL &&
+					(buffer->getXArray().size() < threshold ||
+					buffer->getCapacity() > buffer->getXArray().size())) {
+				if (!(extEnabled && sendBufferQueue_->size() > 1)) {
+					break;
+				}
+			}
+
+			if (!extEnabled) {
+				buffer = NULL;
+				break;
+			}
+
+			ext = &buffer->prepareExternal(ee_.bufferManager_);
+			if (ext->getSize() >= ext->getCapacity()) {
+				ext = NULL;
+			}
+			forExternal = true;
+		}
+		while (false);
+
+		if (buffer == NULL) {
+			buffer = &parentWorker_.pushBufferQueue(
+					sendBufferQueue_, (forExternal ? 0 : threshold));
+
+			if (buffer->getCapacity() > 0) {
+				parentWorker_.updateSendBufferSize(*buffer, true);
+			}
+		}
+
+		if (forExternal) {
+			if (ext == NULL) {
+				ext = &buffer->prepareExternal(ee_.bufferManager_);
+			}
+
+			ExternalBuffer::Writer writer(*ext);
+
+			const size_t wroteSize = writer.tryAppend(
+					static_cast<const uint8_t*>(data) + nextOffset,
+					size - nextOffset);
+			nextOffset += wroteSize;
+		}
+		else {
+			const size_t writeSize = std::min(
+					buffer->getCapacity() - buffer->getXArray().size(),
+					size - nextOffset);
+			buffer->getOutStream().writeAll(
+					static_cast<const uint8_t*>(data) + nextOffset,
+					writeSize);
+			nextOffset += writeSize;
+		}
+	}
 }
 
 
@@ -4396,7 +4652,11 @@ const char8_t *const EventEngine::Stats::STATS_TYPE_NAMES[] = {
 	"EVENT_ACTIVE_BUFFER_SIZE_CURRENT",
 	"EVENT_ACTIVE_BUFFER_SIZE_MAX",
 	"EVENT_PENDING_QUEUE_SIZE_CURRENT",
-	"EVENT_PENDING_QUEUE_SIZE_MAX"
+	"EVENT_PENDING_QUEUE_SIZE_MAX",
+
+	"EVENT_ACTIVE_EXECUTABLE_COUNT",
+	"EVENT_CYCLE_HANDLING_COUNT",
+	"EVENT_CYCLE_HANDLING_AFTER_COUNT"
 };
 
 const EventEngine::Stats::Type
@@ -4458,33 +4718,25 @@ void EventEngine::Stats::updateMin(Type type, int64_t value) {
 	valueList_[type] = std::min(valueList_[type], value);
 }
 
-void EventEngine::Stats::increment(Type type) {
-	assert(0 <= type && type < STATS_TYPE_MAX);
-	valueList_[type]++;
-}
-
-void EventEngine::Stats::decrement(Type type) {
-	assert(0 <= type && type < STATS_TYPE_MAX);
-	valueList_[type]--;
-}
-
-void EventEngine::Stats::merge(Type type, int64_t value) {
+void EventEngine::Stats::merge(Type type, int64_t value, bool sumOnly) {
 	assert(0 <= type && type < STATS_TYPE_MAX);
 
-	if (findType(STATS_MAX_TYPES, type)) {
-		updateMax(type, value);
+	if (!sumOnly) {
+		if (findType(STATS_MAX_TYPES, type)) {
+			updateMax(type, value);
+		}
+		else if (findType(STATS_MIN_TYPES, type)) {
+			updateMin(type, value);
+		}
+		return;
 	}
-	else if (findType(STATS_MIN_TYPES, type)) {
-		updateMin(type, value);
-	}
-	else {
-		valueList_[type] += value;
-	}
+
+	valueList_[type] += value;
 }
 
-void EventEngine::Stats::mergeAll(const Stats &stats) {
+void EventEngine::Stats::mergeAll(const Stats &stats, bool sumOnly) {
 	for (size_t i = 0; i < STATS_TYPE_MAX; i++) {
-		merge(static_cast<Type>(i), stats.valueList_[i]);
+		merge(static_cast<Type>(i), stats.valueList_[i], sumOnly);
 	}
 }
 
@@ -4504,4 +4756,39 @@ void EventEngine::Stats::dump(std::ostream &out) const {
 template<size_t N>
 bool EventEngine::Stats::findType(const Type (&typeArray)[N], Type type) {
 	return (std::find(typeArray, typeArray + N, type) != typeArray + N);
+}
+
+
+bool EventEngine::Tool::getLiveStats(
+		EventEngine &ee, PartitionGroupId pgId, Stats::Type type,
+		int64_t &value, const EventContext *ec, const Event *ev,
+		const EventMonotonicTime *now) {
+	value = std::numeric_limits<int64_t>::min();
+
+	if(pgId >= ee.config_->concurrency_) {
+		return false;
+	}
+
+	switch (type) {
+	case Stats::EVENT_CYCLE_HANDLING_COUNT:
+		if (ec == NULL) {
+			GS_THROW_USER_ERROR(GS_ERROR_EE_PARAMETER_INVALID, "");
+		}
+		value = static_cast<int64_t>(
+				Manipulator::getHandlingEventCount(*ec, NULL, true));
+		return true;
+	case Stats::EVENT_CYCLE_HANDLING_AFTER_COUNT:
+		if (ec == NULL || ev == NULL) {
+			GS_THROW_USER_ERROR(GS_ERROR_EE_PARAMETER_INVALID, "");
+		}
+		value = static_cast<int64_t>(
+				Manipulator::getHandlingEventCount(*ec, ev, false));
+		return true;
+	default:
+		break;
+	}
+
+	const EventMonotonicTime resolvedNow =
+			(now == NULL ? ee.clockGenerator_->getMonotonicTime() : *now);
+	return ee.eventWorkerList_[pgId].getLiveStats(type, resolvedNow, value);
 }

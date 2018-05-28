@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2014 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -40,35 +40,55 @@ class BaseContainer;
 class BaseIndex : public BaseObject {
 public:
 	BaseIndex(TransactionContext &txn, ObjectManager &objectManager,
-		const AllocateStrategy &strategy, BaseContainer *container)
+		const AllocateStrategy &strategy, BaseContainer *container,
+		MapType mapType)
 		: BaseObject(txn.getPartitionId(), objectManager),
 		  allocateStrategy_(strategy),
-		  container_(container) {}
+		  container_(container),
+		  mapType_(mapType) {}
 	BaseIndex(TransactionContext &txn, ObjectManager &objectManager, OId oId,
-		const AllocateStrategy &strategy, BaseContainer *container)
+		const AllocateStrategy &strategy, BaseContainer *container,
+		MapType mapType)
 		: BaseObject(txn.getPartitionId(), objectManager, oId),
 		  allocateStrategy_(strategy),
-		  container_(container) {}
-
-	virtual int32_t finalize(TransactionContext &txn) = 0;
+		  container_(container),
+		  mapType_(mapType) {}
+	virtual bool finalize(TransactionContext &txn) = 0;
 	virtual int32_t insert(
 		TransactionContext &txn, const void *key, OId oId) = 0;
 	virtual int32_t remove(
 		TransactionContext &txn, const void *key, OId oId) = 0;
 	virtual int32_t update(
 		TransactionContext &txn, const void *key, OId oId, OId newOId) = 0;
+	MapType getMapType() {return mapType_;}
+	static const uint64_t NUM_PER_EXEC = 50;
 
-protected:
+public:
 	struct SearchContext {
+		enum NullCondition {
+			IS_NULL,		
+			ALL,			
+			NOT_IS_NULL		
+		};
+
+		enum ResumeStatus {
+			NOT_RESUME,		
+			NULL_RESUME,	
+			NOT_NULL_RESUME	
+		};
 		ColumnId columnId_;  
 		uint32_t conditionNum_;			
 		TermCondition *conditionList_;  
 		ResultSize limit_;				
+		NullCondition nullCond_;		 
+
 		SearchContext()
 			: columnId_(0),
 			  conditionNum_(0),
 			  conditionList_(NULL),
 			  limit_(MAX_RESULT_SIZE)
+			  ,
+			  nullCond_(NOT_IS_NULL)
 		{
 		}
 		SearchContext(ColumnId columnId, uint32_t conditionNum,
@@ -77,6 +97,8 @@ protected:
 			  conditionNum_(conditionNum),
 			  conditionList_(conditionList),
 			  limit_(limit)
+			  ,
+			  nullCond_(NOT_IS_NULL)
 		{
 		}
 	};
@@ -84,6 +106,10 @@ protected:
 protected:
 	AllocateStrategy allocateStrategy_;
 	BaseContainer *container_;
+	MapType mapType_;
 };
 
+typedef BaseIndex::SearchContext::ResumeStatus ResumeStatus;
+typedef BaseIndex::SearchContext::NullCondition NullCondition;
+typedef BaseIndex::SearchContext BaseSearchContext;
 #endif  

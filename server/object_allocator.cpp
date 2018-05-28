@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -44,14 +44,17 @@ const uint8_t ObjectAllocator::ZeroTable[256] = {
 /*!
 	@brief Constructor of ObjectAllocator
 */
-ObjectAllocator::ObjectAllocator(uint8_t chunkExpSize, uint32_t chunkHeaderSize)
+ObjectAllocator::ObjectAllocator(uint8_t chunkExpSize, uint32_t chunkHeaderSize, bool isZeroFill)
 	: CHUNK_EXP_SIZE_(chunkExpSize),
 	  CHUNK_SIZE_(1L << CHUNK_EXP_SIZE_),
 	  chunkHeaderSize_(chunkHeaderSize),
 	  minPower_(0),
 	  maxPower_(0),
 	  tableSize_(0),
-	  hSize_(0) {
+	  hSize_(0)
+	  ,
+	  isZeroFill_(isZeroFill)
+	  {
 	hSize_ = sizeof(uint32_t);  
 
 	minPower_ = ObjectAllocator::log2(
@@ -197,6 +200,12 @@ uint8_t ObjectAllocator::free(
 
 	uint8_t k = header->getPower();
 	uint8_t freedBlockSize = k;
+
+	if (isZeroFill_) {
+		Size_t objectSize = (1U << k) - hSize_;
+		memset(objectAddr, 0, objectSize);
+	}
+
 	int32_t mask = 1L << k;
 	HeaderBlock *buddy = getHeaderBlock(chunkTop, (headerOffset ^ mask));
 	for (;;) {

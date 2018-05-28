@@ -1,5 +1,5 @@
 ﻿/*
-    Copyright (c) 2012 TOSHIBA CORPORATION.
+    Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
     
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License as
@@ -43,51 +43,6 @@ public:
 		typedef void InvalidType;
 		typedef InvalidType PrimitiveType;
 	};
-
-	/*!
-		@brief Get variable size
-	*/
-	static inline uint32_t getVarSize(util::ByteStream<util::ArrayInStream> &in) {
-		uint64_t currentPos = in.base().position();
-		uint8_t byteData;
-		in >> byteData;
-		if (ValueProcessor::varSizeIs1Byte(byteData)) {
-			return ValueProcessor::decode1ByteVarSize(byteData);
-		} else {
-			in.base().position(static_cast<size_t>(currentPos));
-			uint32_t rawData;
-			in >> rawData;
-			return ValueProcessor::decode4ByteVarSize(rawData);
-		}
-	}
-
-	/*!
-		@brief Get variable size or OId
-	*/
-	static inline void getVarSizeOrOId(util::ByteStream<util::ArrayInStream> &in,
-									   uint64_t &varSizeOrOId, bool &isOId) {
-		size_t currentPos = in.base().position();
-		uint8_t byteData;
-		isOId = false;
-		in >> byteData;
-		if (ValueProcessor::varSizeIs1Byte(byteData)) {
-			varSizeOrOId = ValueProcessor::decode1ByteVarSize(byteData);
-		} else {
-			if (ValueProcessor::varSizeIs4Byte(byteData)) {
-				in.base().position(currentPos);
-				uint32_t rawData;
-				in >> rawData;
-				varSizeOrOId = ValueProcessor::decode4ByteVarSize(rawData);
-			} else {
-				isOId = true;
-				in.base().position(currentPos);
-				uint64_t rawData;
-				in >> rawData;
-				varSizeOrOId = ValueProcessor::decode8ByteVarSize(rawData);
-			}
-		}
-	}
-
 
 
 	virtual bool next() = 0;
@@ -145,6 +100,10 @@ public:
 	void getArrayElement(ColumnId columnId,
 			uint32_t arrayIndex, const uint8_t *&data, uint32_t &size) const;
 
+	virtual bool isNullValue(ColumnId columnId) const;
+	virtual const uint8_t *getNullsAddr() const;
+	virtual void setNull(ColumnId columnId);
+
 
 	virtual void setRowId(RowId rowId);
 
@@ -171,18 +130,14 @@ public:
 
 	virtual void setVarSize(uint32_t varSize);
 
-	virtual void setUInt64(uint64_t data);
-
 protected:
 
-	virtual void validate() const;
+	virtual void validate();
 
 
 	const ColumnInfo& getColumnInfo(ColumnId columnId) const;
 
 	bool isVariableColumn(ColumnId columnId) const;
-
-	bool isLinkedVariableColumn(ColumnId columnId) const;  
 
 	static uint32_t getColumnElementFixedSize(const ColumnInfo &info);
 
@@ -240,7 +195,6 @@ public:
 	uint64_t getRowCount();
 
 
-
 	void getRowFixedPart(const void *&data, uint32_t &size) const;
 
 	uint8_t* getRowVariablePart() const;
@@ -254,14 +208,11 @@ public:
 		const ColumnInfo &info = getColumnInfo(columnId);
 		if (info.isVariable()) {
 			util::ByteStream<util::ArrayInStream> varDataIn = varDataIn_;
-			MessageRowStore::getVarSize(varDataIn); 
+			ValueProcessor::getVarSize(varDataIn); 
 
 			for (uint32_t i = 0; i <= info.getColumnOffset(); ++i) {
 				data = varData_ + varDataIn.base().position(); 
-				size = MessageRowStore::getVarSize(varDataIn);
-				if (size == 0) {
-					data = NULL;
-				}
+				size = ValueProcessor::getVarSize(varDataIn);
 				varDataIn.base().position(varDataIn.base().position() + size); 
 			}
 		}
@@ -294,9 +245,19 @@ public:
 	void getArrayElement(ColumnId columnId,
 			uint32_t arrayIndex, const void *&data, uint32_t &size) const;
 
-	bool getStartOffset(uint64_t startPos, uint64_t &fixedOffset, uint64_t &varOffset);
 	void getPartialRowSet(uint64_t startPos, uint64_t rowNum, uint64_t &fixedOffset,
 		uint64_t &fixedSize, uint64_t &varOffset, uint64_t &varSize);
+
+	/*!
+		@brief Check if value is null
+	*/
+	bool isNullValue(ColumnId columnId) const {
+		const uint8_t *nullbits = getNullsAddr();
+		return RowNullBits::isNullValue(nullbits, columnId);
+	}
+	const uint8_t *getNullsAddr() const {
+		return fixedData_ + fixedDataIn_.base().position() + rowIdSize_ + getNullsOffset();
+	}
 
 	/*!
 		@brief Reset field cursor position
@@ -331,7 +292,7 @@ public:
 	void setField(ColumnId columnId, const Value &value);
 
 private:
-	void validate() const;
+	void validate();
 
 	static util::ByteStream<util::ArrayInStream> getVarDataInput(
 			void *data, uint32_t size, uint64_t rowCount, size_t fixedRowPartSize);
@@ -353,9 +314,9 @@ private:
 		fixedDataIn >> varDataOffset;
 		varDataIn.base().position(static_cast<size_t>(varDataOffset));
 
-		MessageRowStore::getVarSize(varDataIn); 
+		ValueProcessor::getVarSize(varDataIn); 
 		for (uint32_t i = 0; i < info.getColumnOffset(); ++i) {
-			uint32_t varElemSize = MessageRowStore::getVarSize(varDataIn); 
+			uint32_t varElemSize = ValueProcessor::getVarSize(varDataIn); 
 			varDataIn.base().position(varDataIn.base().position() + varElemSize);
 		}
 		if (varDataIn.base().position() >= std::numeric_limits<size_t>::max()) {
@@ -403,10 +364,6 @@ public:
 
 	void setVarSize(uint32_t varSize);
 
-	void setUInt64(uint64_t data);
-
-	void setNextOId(OId oId);
-
 	void setRowId(RowId rowId);
 
 	void setRowFixedPart(const void *data, uint32_t size);
@@ -437,10 +394,15 @@ public:
 	void getAllFixedPart(const uint8_t *&data, uint32_t &size) const;
 	void getAllVariablePart(const uint8_t *&data, uint32_t &size) const;
 
+	/*!
+		@brief set null
+	*/
+	void setNull(ColumnId columnId);
 private:
 	uint32_t getFullRowFixedPartSize() const;
 
 	size_t getFixedDataOffset(ColumnId columnId) const;
+	void setInitField(ColumnId columnId);
 
 	const util::XArray<uint8_t> &varData_;
 	const util::XArray<uint8_t> &fixedData_;

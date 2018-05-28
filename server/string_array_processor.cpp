@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -177,7 +177,7 @@ int32_t StringArrayProcessor::compare(TransactionContext &txn,
 	@brief Set field value to message
 */
 void StringArrayProcessor::getField(TransactionContext &txn,
-	ObjectManager &objectManager, ColumnId columnId, Value *objectValue,
+	ObjectManager &objectManager, ColumnId columnId, const Value *objectValue,
 	MessageRowStore *messageRowStore) {
 
 	const MatrixCursor *arrayObject =

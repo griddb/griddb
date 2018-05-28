@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2015 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -188,7 +188,7 @@ public class ServiceAddressResolver {
 		}
 		catch (GSException e) {
 			throw new GSException(
-					"Failed to acces the address provider (" +
+					"Failed to access the address provider (" +
 					"url=" + config.providerURL +
 					", reason=" + e.getMessage() + ")", e);
 		}
@@ -601,8 +601,8 @@ public class ServiceAddressResolver {
 		@Override
 		public int compare(InetSocketAddress o1, InetSocketAddress o2) {
 			{
-				final int comp = ((Integer) getFalimy(
-						o1.getAddress())).compareTo(getFalimy(o2.getAddress()));
+				final int comp = ((Integer) getFamily(
+						o1.getAddress())).compareTo(getFamily(o2.getAddress()));
 				if (comp != 0) {
 					return comp;
 				}
@@ -627,7 +627,7 @@ public class ServiceAddressResolver {
 			return 0;
 		}
 
-		private static int getFalimy(InetAddress addr) {
+		private static int getFamily(InetAddress addr) {
 			if (addr instanceof Inet4Address) {
 				return 1;
 			}

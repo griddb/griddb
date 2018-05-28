@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -43,23 +43,23 @@
 #endif
 
 #ifdef MAIN_CAPTURE_SIGNAL
-#include <errno.h>
 #include <execinfo.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <errno.h>
 #endif  
 
 
 
-const char8_t *const GS_PRODUCT_NAME = "GridDB";
-const int32_t GS_MAJOR_VERSION = 3;
-const int32_t GS_MINOR_VERSION = 0;
-const int32_t GS_BASE_REVISION = 1;
-const int32_t GS_BUILD_NO = 27877;
 
-const int32_t GS_REVISION = GS_BASE_REVISION;
+const char8_t *const GS_PRODUCT_NAME = "GridDB";
+const int32_t GS_MAJOR_VERSION = 4;
+const int32_t GS_MINOR_VERSION = 0;
+const int32_t GS_REVISION = 0;
+const int32_t GS_BUILD_NO = 33128;
+
 const char8_t *const GS_EDITION_NAME = "Community Edition";
 const char8_t *const GS_EDITION_NAME_SHORT = "CE";
 
@@ -69,7 +69,6 @@ const char8_t *const SYS_DEVELOPER_FILE_NAME = "gs_developer.json";
 const char8_t *const GS_CLUSTER_PARAMATER_DIFF_FILE_NAME = "gs_diff.json";
 
 const char8_t *const GS_TRACE_SECRET_HEX_KEY = "7B790AB2C82F01B3";
-
 
 static void autoJoinCluster(const Event::Source &eventSource,
 	util::StackAllocator &alloc, SystemService &sysSvc, PartitionTable &pt,
@@ -102,6 +101,9 @@ void cleanupPidFile(const std::string &fileName, util::PIdFile &pidFile);
 
 static void cleanupOnNormalShutdown(const Event::Source &eventSource,
 	util::StackAllocator &alloc, SystemService &sysSvc, ClusterManager &clsMgr);
+
+static void forceShutdown(ClusterService &clsSvc,
+	const std::string &pidFileName, util::PIdFile &pidFile, bool checkOnly);
 
 
 #ifdef MAIN_CAPTURE_SIGNAL
@@ -157,11 +159,14 @@ int main(int argc, char **argv) {
 		version << GS_MAJOR_VERSION << "." << GS_MINOR_VERSION << "."
 				<< GS_REVISION;
 		util::NormalOStringStream simpleVersion;
-		simpleVersion << version.str() << "-" << GS_BUILD_NO << " "
-					  << GS_EDITION_NAME_SHORT;
+		simpleVersion << version.str()
+					<< "-" << GS_BUILD_NO
+					<< " " << GS_EDITION_NAME_SHORT;
 		util::NormalOStringStream fullVersion;
-		fullVersion << GS_PRODUCT_NAME << " version " << version.str()
-					<< " build " << GS_BUILD_NO << " " << GS_EDITION_NAME;
+		fullVersion << GS_PRODUCT_NAME
+					<< " version " << version.str()
+					<< " build " << GS_BUILD_NO
+					<< " " << GS_EDITION_NAME;
 
 		util::VariableSizeAllocator<> tableAlloc(
 			(util::AllocatorInfo(ALLOCATOR_GROUP_MAIN, "tableAlloc")));
@@ -182,6 +187,7 @@ int main(int argc, char **argv) {
 		bool forceRecoveryFromExistingFiles = false;  
 		std::string recoveryTargetPartition;		  
 		bool fileVersionDump = false;				  
+		bool releaseUnusedFileBlocks = false;		  
 
 		if (argc >= 3) {
 			if (strcmp(argv[1], "--conf") == 0) {
@@ -207,6 +213,9 @@ int main(int argc, char **argv) {
 					else if (strcmp(argv[3], "--fileversiondump") == 0) {
 						checkOnly = true;
 						fileVersionDump = true;
+					}
+					else if (strcmp(argv[3], "--release-unused-file-blocks") == 0) {
+						releaseUnusedFileBlocks = true;
 					}
 					else {
 						needHelp = true;
@@ -272,6 +281,8 @@ int main(int argc, char **argv) {
 						 "[--force-recovery-from-existing-files] "
 						 "[--recovery-target-partition a,b-c,d]"
 					  << std::endl;
+			std::cerr << "Usage: --conf (Config dir) --release-unused-file-blocks"
+					  << std::endl;
 			std::cerr << "Usage: --conf (Config dir) --dbdump (Dump dir)"
 					  << std::endl;
 			std::cerr << "Usage: --conf (Config dir) --logdump (GroupId) (Dump "
@@ -288,7 +299,9 @@ int main(int argc, char **argv) {
 		config.setTraceEnabled(true);
 
 #ifdef MAIN_CAPTURE_SIGNAL
-		const int syncSignals[] = {SIGSEGV};
+		const int syncSignals[] = {
+			SIGSEGV
+		};
 		const int signalNum = sizeof(syncSignals) / sizeof(*syncSignals);
 
 		struct sigaction sa;
@@ -302,7 +315,7 @@ int main(int argc, char **argv) {
 		for (int i = 0; i < signalNum; i++) {
 			if (0 != sigaction(syncSignals[i], &sa, NULL)) {
 				UTIL_THROW_PLATFORM_ERROR(UTIL_EXCEPTION_CREATE_MESSAGE_CHARS(
-					"signal=" << syncSignals[i]));
+						"signal=" << syncSignals[i]));
 			}
 		}
 
@@ -319,10 +332,10 @@ int main(int argc, char **argv) {
 		sigset_t ss2;
 		sigemptyset(&ss2);
 
-		for (int i = 0; i < signalNum; i++) {
+		for (int i= 0; i < signalNum; i++) {
 			if (0 != sigaddset(&ss2, syncSignals[i])) {
 				UTIL_THROW_PLATFORM_ERROR(UTIL_EXCEPTION_CREATE_MESSAGE_CHARS(
-					"signal=" << syncSignals[i]));
+						"signal=" << syncSignals[i]));
 			}
 		}
 #endif  
@@ -375,12 +388,12 @@ int main(int argc, char **argv) {
 
 		PartitionTable pt(config);
 
-		RecoveryManager recoveryMgr(config);
+		RecoveryManager recoveryMgr(config, releaseUnusedFileBlocks);
 		LogManager logMgr(config);
 		logMgr.open(checkOnly, forceRecoveryFromExistingFiles);
 
-		RecoveryManager::checkExistingFiles2(
-			config, logMgr, createMode, forceRecoveryFromExistingFiles);
+		RecoveryManager::checkExistingFiles2(config, logMgr, createMode,
+			forceRecoveryFromExistingFiles);
 
 		ClusterVersionId clsVersionId = GS_CLUSTER_MESSAGE_CURRENT_VERSION;
 		ClusterManager clsMgr(config, &pt, clsVersionId);
@@ -447,7 +460,8 @@ int main(int argc, char **argv) {
 			&pt, &dataStore, &logMgr, &clsMgr, &syncMgr, &txnMgr, &chunkMgr,
 			&recoveryMgr, objectMgr, &fixedSizeAlloc, &varSizeAlloc, &config,
 			&stats
-			);
+		);
+
 
 		recoveryMgr.initialize(mgrSet);
 
@@ -456,6 +470,7 @@ int main(int argc, char **argv) {
 		txnSvc.initialize(mgrSet);
 		sysSvc.initialize(mgrSet);
 		cpSvc.initialize(mgrSet);
+		dataStore.initialize(mgrSet);
 
 		if (logDump) {
 			util::StackAllocator alloc(
@@ -530,19 +545,25 @@ int main(int argc, char **argv) {
 			while (1) {
 				if (sigwait(&ss1, &signo) == 0) {
 					if (SIGINT == signo) {  
-						if (!checkOnly) {
-							cleanupPidFile(pidFileName, pidFile);
-						}
-						clsSvc.shutdownAllService();
+						forceShutdown(clsSvc, pidFileName, pidFile, checkOnly);
 						signalOccured = true;
 						break;
 					}
 					if (SIGTERM == signo) {  
-						util::StackAllocator alloc(
-							util::AllocatorInfo(
-								ALLOCATOR_GROUP_MAIN, "shutdownStack"),
-							&fixedSizeAlloc);
-						cleanupOnNormalShutdown(source, alloc, sysSvc, clsMgr);
+						if (clsMgr.isSystemError()) {
+							forceShutdown(clsSvc, pidFileName, pidFile, checkOnly);
+							signalOccured = true;
+							const char8_t *msg = "Requested normal shutdown node, but node status is ABNORMAL, so that executes force shutdown node.";
+							std::cerr << msg << std::endl;
+							GS_TRACE_WARNING(MAIN, GS_TRACE_SC_FORCE_SHUTDOWN, msg);
+						}
+						else {
+							util::StackAllocator alloc(
+								util::AllocatorInfo(
+									ALLOCATOR_GROUP_MAIN, "shutdownStack"),
+								&fixedSizeAlloc);
+							cleanupOnNormalShutdown(source, alloc, sysSvc, clsMgr);
+						}
 						break;
 					}
 				}
@@ -554,6 +575,7 @@ int main(int argc, char **argv) {
 			txnSvc.waitForShutdown();
 			cpSvc.waitForShutdown();
 			sysSvc.waitForShutdown();
+
 
 
 			systemErrorOccurred = clsSvc.isSystemServiceError();
@@ -717,6 +739,14 @@ static void cleanupOnNormalShutdown(const Event::Source &eventSource,
 	sysSvc.shutdownNode(eventSource, alloc, normalShutdown);
 }
 
+static void forceShutdown(ClusterService &clsSvc,
+		const std::string &pidFileName, util::PIdFile &pidFile, bool checkOnly) {
+	if (!checkOnly) {
+		cleanupPidFile(pidFileName, pidFile);
+	}
+	clsSvc.shutdownAllService();
+}
+
 
 #ifdef MAIN_CAPTURE_SIGNAL
 void signal_handler(int sig, siginfo_t *siginfo, void *param) {
@@ -759,6 +789,7 @@ void MainConfigSetUpHandler::operator()(ConfigTable &config) {
 	MAIN_TRACE_DECLARE(config, CHECKPOINT_FILE, ERROR);
 	MAIN_TRACE_DECLARE(config, CHECKPOINT_SERVICE, INFO);
 	MAIN_TRACE_DECLARE(config, CHECKPOINT_SERVICE_DETAIL, ERROR);
+	MAIN_TRACE_DECLARE(config, CHECKPOINT_SERVICE_STATUS_DETAIL, ERROR);
 	MAIN_TRACE_DECLARE(config, LOG_MANAGER, WARNING);
 	MAIN_TRACE_DECLARE(config, IO_MONITOR, WARNING);
 	MAIN_TRACE_DECLARE(config, CLUSTER_OPERATION, INFO);
@@ -784,7 +815,11 @@ void MainConfigSetUpHandler::operator()(ConfigTable &config) {
 	MAIN_TRACE_DECLARE(config, SYSTEM, ERROR);
 	MAIN_TRACE_DECLARE(config, BTREE_MAP, ERROR);
 	MAIN_TRACE_DECLARE(config, AUTHENTICATION_TIMEOUT, ERROR);
-
+	MAIN_TRACE_DECLARE(config, DATASTORE_BACKGROUND, ERROR);
+	MAIN_TRACE_DECLARE(config, SYNC_DETAIL, WARNING);
+	MAIN_TRACE_DECLARE(config, CLUSTER_DETAIL, WARNING);
+	MAIN_TRACE_DECLARE(config, ZLIB_UTILS, ERROR);
+	MAIN_TRACE_DECLARE(config, SIZE_MONITOR, WARNING);
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TRACE_OUTPUT_TYPE, INT32)
 		.setExtendedType(ConfigTable::EXTENDED_TYPE_ENUM)
 		.addEnum(util::TraceOption::OUTPUT_NONE, "OUTPUT_NONE")
@@ -848,8 +883,9 @@ ConfigTable::Constraint &MainConfigSetUpHandler::declareTraceConfigConstraints(
 }
 
 
-void setMinOutputLevel(const ConfigTable *config, util::TraceManager &manager,
-	ConfigTable::ParamId id) {
+void setMinOutputLevel(
+		const ConfigTable *config, util::TraceManager &manager,
+		ConfigTable::ParamId id) {
 	util::Tracer &tracer = manager.resolveTracer(
 		ParamTable::getParamSymbol(config->getName(id), false, 3).c_str());
 	tracer.setMinOutputLevel(config->get<int32_t>(id));
@@ -914,3 +950,4 @@ void setUpAllocator() {
 void StackMemoryLimitOverErrorHandler::operator()(util::Exception &e) {
 	GS_RETHROW_USER_OR_SYSTEM(e, "");
 }
+

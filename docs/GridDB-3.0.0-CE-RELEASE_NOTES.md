@@ -182,4 +182,4 @@ Its operation was verified in the following environment.
   * File system block size: 4 KB
 
 
-Copyright @ 2016 TOSHIBA CORPORATION
+Copyright (C) 2017 TOSHIBA Digital Solutions Corporation

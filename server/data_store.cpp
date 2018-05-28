@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -34,16 +34,16 @@
 #define TEST_PRINT1(s, d)
 
 
+
 const OId DataStore::PARTITION_HEADER_OID = ObjectManager::getOId(
 	ALLOCATE_META_CHUNK, INITIAL_CHUNK_ID, FIRST_OBJECT_OFFSET);
-
 
 
 const uint32_t DataStoreValueLimitConfig::LIMIT_SMALL_SIZE_LIST[6] = {
 	15 * 1024, 31 * 1024, 63 * 1024, 127 * 1024, 128 * 1024, 128 * 1024};
 const uint32_t DataStoreValueLimitConfig::LIMIT_BIG_SIZE_LIST[6] = {
-	31 * 1024 * 1024, 127 * 1024 * 1024, 511 * 1024 * 1024, 1024 * 1024 * 1024,
-	1024 * 1024 * 1024, 1024 * 1024 * 1024};
+	1024 * 1024 * 1024 - 1, 1024 * 1024 * 1024 - 1, 1024 * 1024 * 1024 - 1, 1024 * 1024 * 1024 - 1,
+	1024 * 1024 * 1024 - 1, 1024 * 1024 * 1024 - 1};
 const uint32_t DataStoreValueLimitConfig::LIMIT_ARRAY_NUM_LIST[6] = {
 	2000, 4000, 8000, 16000, 32000, 65000};
 const uint32_t DataStoreValueLimitConfig::LIMIT_COLUMN_NUM_LIST[6] = {
@@ -64,33 +64,6 @@ DataStoreValueLimitConfig::DataStoreValueLimitConfig(
 	limitContainerNameSize_ = LIMIT_CONTAINER_NAME_SIZE_LIST[nth];
 }
 
-ExtendedContainerName::ExtendedContainerName(util::StackAllocator &alloc,
-	const char *extContainerName, size_t extContainerNameLen)
-	: alloc_(alloc),
-	  fullPathName_(alloc),
-	  databaseId_(UNDEF_DBID),
-	  databaseName_(NULL),
-	  containerName_(NULL) {
-	char *tmpName = ALLOC_NEW(alloc) char[extContainerNameLen + 1];
-	memcpy(tmpName, extContainerName, extContainerNameLen);
-	tmpName[extContainerNameLen] = '\0';
-	fullPathName_.append(tmpName);
-}
-
-ExtendedContainerName::ExtendedContainerName(util::StackAllocator &alloc,
-	DatabaseId databaseId, const char *databaseName, const char *containerName)
-	: alloc_(alloc), fullPathName_(alloc) {
-	size_t len = strlen(databaseName) + 1;
-	databaseName_ = ALLOC_NEW(alloc) char[len];
-	memcpy(databaseName_, databaseName, len);
-	len = strlen(containerName) + 1;
-	containerName_ = ALLOC_NEW(alloc) char[len];
-	memcpy(containerName_, containerName, len);
-	databaseId_ = databaseId;
-
-	createFullPathName(databaseId, databaseName, containerName);
-}
-
 
 
 /*!
@@ -98,12 +71,15 @@ ExtendedContainerName::ExtendedContainerName(util::StackAllocator &alloc,
 */
 
 ResultSet *DataStore::createResultSet(TransactionContext &txn,
-	ContainerId containerId, SchemaVersionId schemaVersionId, int64_t emNow) {
+	ContainerId containerId, SchemaVersionId schemaVersionId, int64_t emNow,
+	bool noExpire) {
 	PartitionGroupId pgId = calcPartitionGroupId(txn.getPartitionId());
 	ResultSetId rsId = ++resultSetIdList_[pgId];
 	int32_t rsTimeout = txn.getTransationTimeoutInterval();
 	const int64_t timeout = emNow + static_cast<int64_t>(rsTimeout) * 1000;
-	ResultSet &rs = resultSetMap_[pgId]->create(rsId, timeout);
+	ResultSet &rs = (noExpire ?
+			resultSetMap_[pgId]->createNoExpire(rsId) :
+			resultSetMap_[pgId]->create(rsId, timeout));
 	rs.setTxnAllocator(&txn.getDefaultAllocator());
 	if (resultSetAllocator_[pgId]) {
 		rs.setRSAllocator(resultSetAllocator_[pgId]);
@@ -115,8 +91,8 @@ ResultSet *DataStore::createResultSet(TransactionContext &txn,
 			&resultSetPool_);
 		rs.setRSAllocator(allocator);
 	}
-	rs.getRSAllocator()->setTotalSizeLimit(resultSetMemoryLimit_);
-	rs.setMemoryLimit(resultSetMemoryLimit_);
+	rs.getRSAllocator()->setTotalSizeLimit(rs.getTxnAllocator()->getTotalSizeLimit());
+	rs.setMemoryLimit(rs.getTxnAllocator()->getTotalSizeLimit());
 	rs.setContainerId(containerId);
 	rs.setSchemaVersionId(schemaVersionId);
 	rs.setId(rsId);
@@ -201,6 +177,7 @@ void DataStore::checkTimeoutResultSet(
 }
 
 
+
 void DataStore::forceCloseAllResultSet(PartitionId pId) {
 	PartitionGroupId pgId = calcPartitionGroupId(pId);
 	util::ExpirableMap<ResultSetId, ResultSet, int64_t, ResultSetIdHash>::Cursor
@@ -214,12 +191,10 @@ void DataStore::forceCloseAllResultSet(PartitionId pId) {
 	}
 }
 
-DataStore::DataStore(const ConfigTable &configTable, ChunkManager *chunkManager)
-	: pgConfig_(configTable),
+DataStore::DataStore(ConfigTable &configTable, ChunkManager *chunkManager)
+	: config_(configTable), pgConfig_(configTable),
 	  dsValueLimitConfig_(configTable),
 	  allocateStrategy_(AllocateStrategy(ALLOCATE_META_CHUNK)),
-	  resultSetMemoryLimit_(ConfigTable::megaBytesToBytes(
-		  configTable.getUInt32(CONFIG_TABLE_TXN_TOTAL_MEMORY_LIMIT))),
 	  resultSetPool_(
 		  util::AllocatorInfo(ALLOCATOR_GROUP_TXN_RESULT, "resultSetPool"),
 		  1 << RESULTSET_POOL_BLOCK_SIZE_BITS),
@@ -227,7 +202,8 @@ DataStore::DataStore(const ConfigTable &configTable, ChunkManager *chunkManager)
 		  UTIL_NEW util::StackAllocator * [pgConfig_.getPartitionGroupCount()]),
 	  resultSetMapManager_(NULL),
 	  resultSetMap_(NULL),
-	  containerIdTable_(NULL) {
+	  containerIdTable_(NULL)
+{
 	resultSetPool_.setTotalElementLimit(
 		ConfigTable::megaBytesToBytes(
 			configTable.getUInt32(CONFIG_TABLE_DS_RESULT_SET_MEMORY_LIMIT)) /
@@ -249,6 +225,8 @@ DataStore::DataStore(const ConfigTable &configTable, ChunkManager *chunkManager)
 		objectManager_ = UTIL_NEW ObjectManager(configTable, chunkManager);
 
 		containerIdTable_ = UTIL_NEW ContainerIdTable(partitionNum);
+
+
 		cpFilePath_ = cpFilePath;
 		eventLogPath_ =
 			configTable.get<const char8_t *>(CONFIG_TABLE_SYS_EVENT_LOG_PATH);
@@ -278,6 +256,9 @@ DataStore::DataStore(const ConfigTable &configTable, ChunkManager *chunkManager)
 				resultSetMapManager_[i]->create(RESULTSET_MAP_HASH_SIZE,
 					DS_MAX_RESULTSET_TIMEOUT_INTERVAL * 1000, 1000);
 		}
+		currentBackgroundList_.assign(partitionGroupNum, BGTask());
+		activeBackgroundCount_.assign(partitionNum, 0);
+		statUpdator_.dataStore_ = this;
 	}
 	catch (std::exception &e) {
 		for (uint32_t i = 0; i < pgConfig_.getPartitionGroupCount(); i++) {
@@ -313,28 +294,45 @@ DataStore::~DataStore() {
 }
 
 /*!
+	@brief Initializer of DataStore
+*/
+void DataStore::initialize(ManagerSet &mgrSet) {
+	try {
+		mgrSet.stats_->addUpdator(&statUpdator_);
+	}
+	catch (std::exception &e) {
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Initialize failed. (reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+}
+
+/*!
 	@brief Creates or Updates Container
 */
 BaseContainer *DataStore::putContainer(TransactionContext &txn, PartitionId pId,
-	ExtendedContainerName &extContainerName, uint8_t containerType,
+	const FullContainerKey &containerKey, uint8_t containerType,
 	uint32_t schemaSize, const uint8_t *containerSchema, bool isEnable,
-	PutStatus &status) {
+	PutStatus &status, bool isCaseSensitive) {
 	BaseContainer *container = NULL;
+	util::StackAllocator &alloc = txn.getDefaultAllocator();
 	try {
 		util::ArrayByteInStream in = util::ArrayByteInStream(
 			util::ArrayInStream(containerSchema, schemaSize));
 		MessageSchema *messageSchema = NULL;
+
+		util::String containerName(alloc);
+		containerKey.toString(alloc, containerName);
 		switch (containerType) {
 		case COLLECTION_CONTAINER:
-			messageSchema = ALLOC_NEW(txn.getDefaultAllocator())
-				MessageCollectionSchema(txn.getDefaultAllocator(),
-					getValueLimitConfig(), extContainerName.getContainerName(),
+			messageSchema = ALLOC_NEW(alloc)
+				MessageCollectionSchema(alloc,
+					getValueLimitConfig(), containerName.c_str(),
 					in);
 			break;
 		case TIME_SERIES_CONTAINER:
-			messageSchema = ALLOC_NEW(txn.getDefaultAllocator())
-				MessageTimeSeriesSchema(txn.getDefaultAllocator(),
-					getValueLimitConfig(), extContainerName.getContainerName(),
+			messageSchema = ALLOC_NEW(alloc)
+				MessageTimeSeriesSchema(alloc,
+					getValueLimitConfig(), containerName.c_str(),
 					in);
 			break;
 		default:
@@ -342,38 +340,79 @@ BaseContainer *DataStore::putContainer(TransactionContext &txn, PartitionId pId,
 			break;
 		}
 
-		container = getContainer(txn, pId, extContainerName, containerType);
+		container = getContainer(txn, pId, containerKey, containerType, false);
 		if (container == NULL) {
 			container = createContainer(
-				txn, pId, extContainerName, containerType, messageSchema);
+				txn, pId, containerKey, containerType, messageSchema);
 			status = CREATE;
 			GS_TRACE_INFO(DATA_STORE, GS_TRACE_DS_DS_CREATE_CONTAINER,
-				"name = " << extContainerName.getContainerName()
+				"name = " << containerName
 						  << " Id = " << container->getContainerId());
 		}
 		else {
-			util::XArray<uint32_t> copyColumnMap(txn.getDefaultAllocator());
-			bool isCompletelySameSchema;
-			container->makeCopyColumnMap(
-				txn, messageSchema, copyColumnMap, isCompletelySameSchema);
-			if (!isCompletelySameSchema) {
-				if (!isEnable) {  
+
+			if (isCaseSensitive) {
+				FullContainerKey existContainerKey = container->getContainerKey(txn);
+				if (containerKey.compareTo(alloc, existContainerKey, isCaseSensitive) != 0) {
+					util::String inputStr(alloc);
+					util::String existStr(alloc);
+					containerKey.toString(alloc, inputStr);
+					existContainerKey.toString(alloc, existStr);
 					GS_THROW_USER_ERROR(
-						GS_ERROR_DS_DS_CHANGE_SCHEMA_DISABLE, "");
+						GS_ERROR_TXN_INDEX_ALREADY_EXISTS, 
+						"Case sensitivity mismatch, existed container name = "
+							<< existStr
+							<< ", input container name = " << inputStr);
+				}
+			}
+
+			util::XArray<uint32_t> copyColumnMap(alloc);
+			SchemaState schemaState;
+			container->makeCopyColumnMap(txn, messageSchema, copyColumnMap, 
+				schemaState);
+			if (schemaState != DataStore::SAME_SCHEMA) {
+				if (!isEnable) {  
+					{
+						GS_THROW_USER_ERROR(
+							GS_ERROR_DS_DS_CHANGE_SCHEMA_DISABLE, "");
+					}
 				}
 				if (container->isInvalid()) {  
 					GS_THROW_USER_ERROR(GS_ERROR_DS_CON_STATUS_INVALID,
 						"can not change schema. container's status is "
 						"invalid.");
 				}
-				GS_TRACE_INFO(DATA_STORE, GS_TRACE_DS_DS_UPDATE_CONTAINER,
-					"Start name = " << extContainerName.getContainerName()
-									<< " Id = " << container->getContainerId());
-				changeContainerSchema(
-					txn, pId, container, messageSchema, copyColumnMap);
-				GS_TRACE_INFO(
-					DATA_STORE, GS_TRACE_DS_DS_UPDATE_CONTAINER, "End");
-				status = UPDATE;
+				if (container->hasUncommitedTransaction(txn)) {
+					try {
+						container->getContainerCursor(txn);
+						GS_TRACE_INFO(
+							DATASTORE_BACKGROUND, GS_TRACE_DS_DS_UPDATE_CONTAINER, "Continue to change shema");
+						status = UPDATE;
+					} 
+					catch (UserException &e) {
+						DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_COL_LOCK_CONFLICT,
+							"change schema(pId=" << txn.getPartitionId()
+								<< ", containerId=" << container->getContainerId()
+								<< ", txnId=" << txn.getId() << ")");
+					}
+				} else {
+					GS_TRACE_INFO(DATA_STORE, GS_TRACE_DS_DS_UPDATE_CONTAINER,
+						"Start name = " << containerName
+										<< " Id = " << container->getContainerId());
+					if (schemaState == DataStore::COLUMNS_DIFFERENCE) {
+						changeContainerSchema(
+							txn, pId, containerKey, container, messageSchema, copyColumnMap);
+						GS_TRACE_INFO(
+							DATA_STORE, GS_TRACE_DS_DS_UPDATE_CONTAINER, "Change shema");
+						status = UPDATE;
+					} else if (schemaState == DataStore::PROPERY_DIFFERENCE) {
+						changeContainerProperty(
+							txn, pId, container, messageSchema);
+						GS_TRACE_INFO(
+							DATA_STORE, GS_TRACE_DS_DS_UPDATE_CONTAINER, "Change property");
+						status = CHANGE_PROPERY;
+					}
+				}
 			}
 			else {
 				status = NOT_EXECUTED;
@@ -383,7 +422,7 @@ BaseContainer *DataStore::putContainer(TransactionContext &txn, PartitionId pId,
 	}
 	catch (std::exception &e) {
 		if (container != NULL) {
-			ALLOC_DELETE(txn.getDefaultAllocator(), container);
+			ALLOC_DELETE(alloc, container);
 		}
 		handleUpdateError(e, GS_ERROR_DS_DS_CREATE_COLLECTION_FAILED);
 		return NULL;
@@ -394,16 +433,23 @@ BaseContainer *DataStore::putContainer(TransactionContext &txn, PartitionId pId,
 	@brief Drop Container
 */
 void DataStore::dropContainer(TransactionContext &txn, PartitionId pId,
-	ExtendedContainerName &extContainerName, uint8_t containerType) {
+	const FullContainerKey &containerKey, uint8_t containerType,
+	bool isCaseSensitive) {
 	try {
 		if (!objectManager_->existPartition(pId)) {
 			return;
 		}
 		ContainerAutoPtr containerAutoPtr(
-			txn, this, pId, extContainerName, containerType);
+			txn, this, pId, containerKey, containerType, isCaseSensitive);
 		BaseContainer *container = containerAutoPtr.getBaseContainer();
 		if (container == NULL) {
 			return;
+		}
+		if (!container->isInvalid() && container->hasUncommitedTransaction(txn)) {
+			DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_COL_LOCK_CONFLICT,
+				"drop container(pId=" << txn.getPartitionId()
+					<< ", containerId=" << container->getContainerId()
+					<< ", txnId=" << txn.getId() << ")");
 		}
 
 		ContainerId containerId = container->getContainerId();
@@ -414,34 +460,23 @@ void DataStore::dropContainer(TransactionContext &txn, PartitionId pId,
 		BtreeMap containerMap(txn, *getObjectManager(),
 			partitionHeadearObject.getMetaMapOId(), allocateStrategy_, NULL);
 
-		uint32_t containerNameSize =
-			static_cast<uint32_t>(strlen(extContainerName.c_str()));
-		util::XArray<char8_t> containerUpperName(txn.getDefaultAllocator());
-		containerUpperName.resize(containerNameSize + 1);
-		ValueProcessor::convertUpperCase(extContainerName.c_str(),
-			containerNameSize + 1, containerUpperName.data());
-		StringCursor keyStringCursor(
-			txn, reinterpret_cast<const char *>(containerUpperName.data()));
-
 		OId oId = UNDEF_OID;
-		containerMap.search(
-			txn, keyStringCursor.str(), keyStringCursor.stringLength(), oId);
+		FullContainerKeyCursor keyCursor(const_cast<FullContainerKey *>(&containerKey));
+		containerMap.search<FullContainerKeyCursor, OId, OId>(
+			txn, keyCursor, oId, isCaseSensitive);
 		if (oId == UNDEF_OID) {
 			return;
 		}
 
-		int32_t status = containerMap.remove(txn, keyStringCursor.data(), oId);
+		int32_t status = containerMap.remove<FullContainerKeyCursor, OId>(txn, keyCursor, oId, isCaseSensitive);
 		if ((status & BtreeMap::ROOT_UPDATE) != 0) {
 			partitionHeadearObject.setMetaMapOId(containerMap.getBaseOId());
 		}
 
 		if (!container->isInvalid()) {  
-			container->finalize(txn);
+			finalizeContainer(txn, container);
 		}
 
-		GS_TRACE_INFO(DATA_STORE, GS_TRACE_DS_DS_DROP_CONTAINER,
-			"name = " << extContainerName.getContainerName()
-					  << " Id = " << containerId);
 	}
 	catch (std::exception &e) {
 		handleUpdateError(e, GS_ERROR_DS_DS_DROP_COLLECTION_FAILED);
@@ -452,7 +487,8 @@ void DataStore::dropContainer(TransactionContext &txn, PartitionId pId,
 	@brief Get Container by name
 */
 BaseContainer *DataStore::getContainer(TransactionContext &txn, PartitionId pId,
-	ExtendedContainerName &extContainerName, uint8_t containerType) {
+	const FullContainerKey &containerKey, uint8_t containerType,
+	bool isCaseSensitive) {
 	try {
 		if (!objectManager_->existPartition(pId)) {
 			return NULL;
@@ -462,44 +498,14 @@ BaseContainer *DataStore::getContainer(TransactionContext &txn, PartitionId pId,
 		BtreeMap containerMap(txn, *getObjectManager(),
 			partitionHeadearObject.getMetaMapOId(), allocateStrategy_, NULL);
 
-		uint32_t containerNameSize =
-			static_cast<uint32_t>(strlen(extContainerName.c_str()));
-		util::XArray<char8_t> containerUpperName(txn.getDefaultAllocator());
-		containerUpperName.resize(containerNameSize + 1);
-		ValueProcessor::convertUpperCase(extContainerName.c_str(),
-			containerNameSize + 1, containerUpperName.data());
-
 		OId oId = UNDEF_OID;
-		containerMap.search(
-			txn, containerUpperName.data(), containerNameSize, oId);
+		FullContainerKeyCursor keyCursor(const_cast<FullContainerKey *>(&containerKey));
+		containerMap.search<FullContainerKeyCursor, OId, OId>(
+			txn, keyCursor, oId, isCaseSensitive);
 		if (oId == UNDEF_OID) {
 			return NULL;
 		}
-		BaseObject baseContainerImageObject(
-			txn.getPartitionId(), *getObjectManager(), oId);
-		BaseContainer::BaseContainerImage *baseContainerImage =
-			baseContainerImageObject
-				.getBaseAddr<BaseContainer::BaseContainerImage *>();
-		ContainerType realContainerType = baseContainerImage->containerType_;
-		if (containerType != ANY_CONTAINER &&
-			realContainerType != containerType) {
-			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_TYPE_INVALID, "");
-		}
-		BaseContainer *container = NULL;
-		switch (realContainerType) {
-		case COLLECTION_CONTAINER: {
-			container =
-				ALLOC_NEW(txn.getDefaultAllocator()) Collection(txn, this, oId);
-		} break;
-		case TIME_SERIES_CONTAINER: {
-			container =
-				ALLOC_NEW(txn.getDefaultAllocator()) TimeSeries(txn, this, oId);
-		} break;
-		default:
-			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
-			break;
-		}
-
+		BaseContainer *container = getBaseContainer(txn, pId, oId, containerType);
 		return container;
 	}
 	catch (std::exception &e) {
@@ -518,29 +524,7 @@ BaseContainer *DataStore::getContainer(TransactionContext &txn, PartitionId pId,
 			return NULL;
 		}
 		OId oId = containerIdTable_->get(pId, containerId);
-		if (UNDEF_OID == oId) {
-			GS_THROW_USER_ERROR(GS_ERROR_DS_CONTAINER_UNEXPECTEDLY_REMOVED, "");
-		}
-		ContainerType realContainerType = getContainerType(txn, containerId);
-		if (containerType != ANY_CONTAINER &&
-			realContainerType != containerType) {
-			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_TYPE_INVALID, "");
-		}
-		BaseContainer *container = NULL;
-		switch (realContainerType) {
-		case COLLECTION_CONTAINER: {
-			container =
-				ALLOC_NEW(txn.getDefaultAllocator()) Collection(txn, this, oId);
-		} break;
-		case TIME_SERIES_CONTAINER: {
-			container =
-				ALLOC_NEW(txn.getDefaultAllocator()) TimeSeries(txn, this, oId);
-		} break;
-		default:
-			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
-			break;
-		}
-
+		BaseContainer *container = getBaseContainer(txn, pId, oId, containerType);
 		return container;
 	}
 	catch (std::exception &e) {
@@ -575,13 +559,15 @@ TimeSeries *DataStore::getTimeSeries(
 	@brief Get Collection by ObjectId at recovery phase
 */
 BaseContainer *DataStore::getContainerForRestore(
-	TransactionContext &txn, PartitionId, OId oId, uint8_t containerType) {
+	TransactionContext &txn, PartitionId, OId oId,
+	ContainerId containerId, uint8_t containerType) {
 	try {
 		if (UNDEF_OID == oId) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_CONTAINER_UNEXPECTEDLY_REMOVED, "");
 		}
 		if (containerType != COLLECTION_CONTAINER &&
-			containerType != TIME_SERIES_CONTAINER) {
+			containerType != TIME_SERIES_CONTAINER
+		) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_TYPE_INVALID, "");
 		}
 		BaseContainer *container = NULL;
@@ -619,8 +605,9 @@ void DataStore::removeColumnSchema(
 		StackAllocAutoPtr<BtreeMap> schemaMap(
 			txn.getDefaultAllocator(), getSchemaMap(txn, pId));
 
+		bool isCaseSensitive = true;
 		int32_t status =
-			schemaMap.get()->remove(txn, &schemaHashKey, schemaOId);
+			schemaMap.get()->remove(txn, schemaHashKey, schemaOId, isCaseSensitive);
 		if ((status & BtreeMap::ROOT_UPDATE) != 0) {
 			DataStorePartitionHeaderObject partitionHeadearObject(
 				txn.getPartitionId(), *getObjectManager(),
@@ -646,8 +633,9 @@ void DataStore::removeTrigger(
 		StackAllocAutoPtr<BtreeMap> triggerMap(
 			txn.getDefaultAllocator(), getTriggerMap(txn, pId));
 
+		bool isCaseSensitive = true;
 		int32_t status =
-			triggerMap.get()->remove(txn, &schemaHashKey, triggerOId);
+			triggerMap.get()->remove(txn, schemaHashKey, triggerOId, isCaseSensitive);
 		if ((status & BtreeMap::ROOT_UPDATE) != 0) {
 			DataStorePartitionHeaderObject partitionHeadearObject(
 				txn.getPartitionId(), *getObjectManager(),
@@ -679,6 +667,316 @@ void DataStore::setLastChunkKey(PartitionId pId, ChunkKey chunkKey) {
 	partitionHeadearObject.setChunkKey(chunkKey);
 }
 
+void DataStore::finalizeContainer(TransactionContext &txn, BaseContainer *container) {
+	bool isFinished = container->finalize(txn);
+	if (isFinished) {
+		GS_TRACE_INFO(
+			DATASTORE_BACKGROUND, GS_ERROR_DS_BACKGROUND_TASK_INVALID, 
+			"[DropContainer immediately finished, PartitionId = " << txn.getPartitionId()
+				<< ", containerId = " << container->getContainerId());
+	} else {
+		BackgroundData bgData;
+		bgData.setDropContainerData(container->getBaseOId());
+//		BackgroundId bgId = 
+		insertBGTask(txn, txn.getPartitionId(), bgData);
+
+		GS_TRACE_INFO(
+			DATASTORE_BACKGROUND, GS_ERROR_DS_BACKGROUND_TASK_INVALID, 
+			"[DropContainer start, PartitionId = " << txn.getPartitionId()
+				<< ", containerId = " << container->getContainerId());
+	}
+}
+
+void DataStore::finalizeMap(TransactionContext &txn, const AllocateStrategy &allcateStrategy, BaseIndex *index) {
+	bool isFinished = index->finalize(txn);
+	if (isFinished) {
+		GS_TRACE_INFO(
+			DATASTORE_BACKGROUND, GS_ERROR_DS_BACKGROUND_TASK_INVALID,
+			"[DropIndex immediately finished, PartitionId = " << txn.getPartitionId()
+				<< ", mapType = " << (int)index->getMapType()
+				<< ", oId = " << index->getBaseOId());
+	} else {
+		BackgroundData bgData;
+		bgData.setDropIndexData(index->getMapType(), allcateStrategy.chunkKey_, index->getBaseOId());
+//		BackgroundId bgId = 
+		insertBGTask(txn, txn.getPartitionId(), bgData);
+
+		GS_TRACE_INFO(
+			DATASTORE_BACKGROUND, GS_ERROR_DS_BACKGROUND_TASK_INVALID,
+			"[DropIndex start, PartitionId = " << txn.getPartitionId()
+				<< ", mapType = " << (int)index->getMapType()
+				<< ", oId = " << index->getBaseOId());
+	}
+}
+
+template<>
+DataStore::BackgroundData BtreeMap::getMaxValue() {
+	return DataStore::BackgroundData();
+}
+template<>
+DataStore::BackgroundData BtreeMap::getMinValue() {
+	return DataStore::BackgroundData();
+}
+
+template int32_t BtreeMap::getAll(TransactionContext &txn, ResultSize limit,
+	util::XArray< std::pair<BackgroundId, DataStore::BackgroundData> > &keyValueList);
+template int32_t BtreeMap::getAll(TransactionContext &txn, ResultSize limit,
+	util::XArray<std::pair<BackgroundId, DataStore::BackgroundData> > &keyValueList,
+	BtreeMap::BtreeCursor &cursor);
+bool DataStore::searchBGTask(TransactionContext &txn, PartitionId pId, BGTask &bgTask) {
+	bool isFound = false;
+//	PartitionGroupId pgId = pgConfig_.getPartitionGroupId(pId);
+
+	if (getObjectManager()->existPartition(pId) && getBGTaskCount(pId) > 0) {
+		StackAllocAutoPtr<BtreeMap> map(txn.getDefaultAllocator(),
+			getBackgroundMap(txn, pId));
+		BtreeMap::BtreeCursor btreeCursor;
+		ResultSize limit = 10;
+		while (1) {
+			util::StackAllocator::Scope scope(txn.getDefaultAllocator());
+			util::XArray< std::pair<BackgroundId, BackgroundData> > idList(
+				txn.getDefaultAllocator());
+			util::XArray< std::pair<BackgroundId, BackgroundData> >::iterator itr;
+			int32_t getAllStatus = map.get()->getAll<BackgroundId, BackgroundData>(
+				txn, limit, idList, btreeCursor);
+			for (itr = idList.begin(); itr != idList.end(); itr++) {
+				BackgroundData bgData = itr->second;
+				if (!bgData.isInvalid()) {
+					bgTask.pId_ = pId;
+					bgTask.bgId_ = itr->first;
+					isFound = true;
+					break;
+				}
+			}
+			if (isFound || getAllStatus == GS_SUCCESS) {
+				break;
+			}
+		}
+	}
+
+	return isFound;
+}
+
+bool DataStore::executeBGTask(TransactionContext &txn, const BackgroundId bgId) {
+	bool isFinished = false;
+	try {
+		util::StackAllocator::Scope scope(txn.getDefaultAllocator());
+		util::XArray<BackgroundData> list(txn.getDefaultAllocator());
+		{
+			StackAllocAutoPtr<BtreeMap> bgMap(txn.getDefaultAllocator(),
+				getBackgroundMap(txn, txn.getPartitionId()));
+			BtreeMap::SearchContext sc(
+				UNDEF_COLUMNID, &bgId, sizeof(BackgroundId), 0, NULL, MAX_RESULT_SIZE);
+//			int32_t ret = 
+			bgMap.get()->search
+				<BackgroundId, BackgroundData, BackgroundData>(txn, sc, list);
+		}
+
+		if (list.size() != 1) {
+			isFinished = true;
+			return isFinished;
+		}
+		BackgroundData bgData = list[0];
+		if (bgData.isInvalid()) {
+			isFinished = true;
+			return isFinished;
+		}
+		try {
+			isFinished = executeBGTaskInternal(txn, bgData);
+		}
+		catch (UserException &) {
+			isFinished = false;
+			BackgroundData afterBgData = bgData;
+			bgData.incrementError();
+			updateBGTask(txn, txn.getPartitionId(), bgId, bgData, afterBgData);
+		}
+		if (isFinished) {
+			removeBGTask(txn, txn.getPartitionId(), bgId, bgData);
+		}
+	}
+	catch (std::exception &e) {
+		handleUpdateError(e, GS_ERROR_DS_BACKGROUND_TASK_INVALID);
+	}
+	return isFinished;
+}
+
+void DataStore::clearAllBGTask(TransactionContext &txn) {
+	if (!objectManager_->existPartition(txn.getPartitionId())) {
+		return;
+	}
+	try {
+		bool isAllFinish = false;
+		while (!isAllFinish) {
+			util::StackAllocator::Scope scope(txn.getDefaultAllocator());
+			util::XArray< std::pair<BackgroundId, BackgroundData> > list(txn.getDefaultAllocator());
+			util::XArray< std::pair<BackgroundId, BackgroundData> >::iterator itr;
+			{
+				StackAllocAutoPtr<BtreeMap> bgMap(txn.getDefaultAllocator(),
+					getBackgroundMap(txn, txn.getPartitionId()));
+				bgMap.get()->getAll<BackgroundId, BackgroundData>(txn, MAX_RESULT_SIZE, list);
+			}
+			if (list.empty()) {
+				break;
+			}
+			for (itr = list.begin(); itr != list.end(); itr++) {
+				BackgroundId bgId = itr->first;
+				BackgroundData bgData = itr->second;
+				if (bgData.isInvalid()) {
+					continue;
+				}
+				while (!executeBGTaskInternal(txn, bgData)) {}
+				removeBGTask(txn, txn.getPartitionId(), bgId, bgData);
+			}
+		}
+	}
+	catch (std::exception &e) {
+		handleUpdateError(e, GS_ERROR_DS_BACKGROUND_TASK_INVALID);
+	}
+}
+
+bool DataStore::executeBGTaskInternal(TransactionContext &txn, BackgroundData &bgData) {
+	bool isFinished = false;
+	switch (bgData.getEventType()) {
+	case BackgroundData::DROP_CONTAINER:
+		{
+			OId containerOId;
+			bgData.getDropContainerData(containerOId);
+			StackAllocAutoPtr<BaseContainer> container(txn.getDefaultAllocator(),
+				getBaseContainer(txn, txn.getPartitionId(), containerOId, 
+				ANY_CONTAINER));
+			if (container.get() == NULL || container.get()->isInvalid()) {
+				isFinished = true;
+			} else {
+				isFinished = container.get()->finalize(txn);
+				if (isFinished) {
+					GS_TRACE_INFO(
+						DATASTORE_BACKGROUND, GS_ERROR_DS_BACKGROUND_TASK_INVALID, 
+						"[DropContainer End PartitionId = " << txn.getPartitionId()
+							<< ", containerId = " << container.get()->getContainerId());
+				}
+			}
+		}
+		break;
+	case BackgroundData::DROP_INDEX:
+		{
+			MapType mapType;
+			ChunkKey chunkKey;
+			OId mapOId;
+
+			bgData.getDropIndexData(mapType, chunkKey, mapOId);
+			AllocateStrategy strategy;	
+
+			Timestamp timestamp = txn.getStatementStartTime().getUnixTime();
+			ChunkKey expireChunkKey = DataStore::convertTimestamp2ChunkKey(timestamp, false);
+			if (chunkKey != UNDEF_CHUNK_KEY && (chunkKey <= getLastChunkKey(txn) || chunkKey <= expireChunkKey)) {
+				isFinished = true;
+			}
+			else {
+				strategy.chunkKey_ = chunkKey;
+				StackAllocAutoPtr<BaseIndex> map(txn.getDefaultAllocator(),
+					getIndex(txn, *getObjectManager(), mapType, mapOId, 
+					strategy, NULL));
+				isFinished = map.get()->finalize(txn);
+			}
+			if (isFinished) {
+				GS_TRACE_INFO(
+					DATASTORE_BACKGROUND, GS_ERROR_DS_BACKGROUND_TASK_INVALID,
+					"[DropIndex End PartitionId = " << txn.getPartitionId()
+						<< ", mapType = " << (int)mapType
+						<< ", oId = " << mapOId);
+			}
+		}
+		break;
+	default:
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
+		break;
+	}
+	return isFinished;
+}
+
+BaseIndex *DataStore::getIndex(TransactionContext &txn, 
+	ObjectManager &objectManager, MapType mapType, OId mapOId, 
+	const AllocateStrategy &strategy, BaseContainer *container) {
+	BaseIndex *map = NULL;
+	switch (mapType) {
+	case MAP_TYPE_BTREE:
+		map = ALLOC_NEW(txn.getDefaultAllocator()) BtreeMap(
+			txn, objectManager, mapOId, strategy, container);
+		break;
+	case MAP_TYPE_HASH:
+		map = ALLOC_NEW(txn.getDefaultAllocator()) HashMap(
+			txn, objectManager, mapOId, strategy, container);
+		break;
+	default:
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
+	}
+	return map;
+}
+
+std::ostream &operator<<(
+	std::ostream &output, const DataStore::BackgroundData &bgData) {
+	switch (bgData.getEventType()) {
+	case DataStore::BackgroundData::DROP_CONTAINER:
+		{
+			output << "[ eventType=DROP_CONTAINER,";
+			OId containerOId;
+			bgData.getDropContainerData(containerOId);
+			output << " oId=" << containerOId << ",";
+		}
+		break;
+	case DataStore::BackgroundData::DROP_INDEX:
+		{
+			output << "[ eventType=DROP_INDEX,";
+			MapType mapType;
+			ChunkKey chunkKey;
+			OId mapOId;
+			bgData.getDropIndexData(mapType, chunkKey, mapOId);
+			output << " mapType=" << (uint32_t)mapType << ",";
+			output << " chunkKey=" << chunkKey << ",";
+			output << " oId=" << mapOId << ",";
+		}
+		break;
+	default:
+		output << "[ eventType=UNKNOWN,";
+		break;
+	}
+	output << " status=" << (uint32_t)bgData.isInvalid() << ",";
+	output << " errorCounter=" << (uint32_t)bgData.getErrorCount() << ",";
+	output << "]";
+	return output;
+}
+
+void DataStore::dumpTraceBGTask(TransactionContext &txn, PartitionId pId) {
+	util::NormalOStringStream stream;
+	stream << "dumpTraceBGTask PartitionId = " << pId << std::endl;
+	if (getObjectManager()->existPartition(pId)) {
+		stream << "BGTaskCount= " << getBGTaskCount(pId) << std::endl;
+
+		StackAllocAutoPtr<BtreeMap> map(txn.getDefaultAllocator(),
+			getBackgroundMap(txn, pId));
+		util::StackAllocator::Scope scope(txn.getDefaultAllocator());
+		util::XArray< std::pair<BackgroundId, BackgroundData> > idList(
+			txn.getDefaultAllocator());
+		util::XArray< std::pair<BackgroundId, BackgroundData> >::iterator itr;
+//		int32_t getAllStatus = 
+		map.get()->getAll<BackgroundId, BackgroundData>(
+			txn, MAX_RESULT_SIZE, idList);
+		stream << "BGTaskRealCount= " << idList.size() << std::endl;
+		for (itr = idList.begin(); itr != idList.end(); itr++) {
+			BackgroundData bgData = itr->second;
+			stream << "BGTask= " << bgData << std::endl;
+		}
+	}
+
+	GS_TRACE_ERROR(
+		DATA_STORE, GS_ERROR_DS_BACKGROUND_TASK_INVALID, stream.str().c_str());
+}
+
+
+template <>
+int32_t BtreeMap::getInitialItemSizeThreshold<BackgroundId, DataStore::BackgroundData>() {
+	return INITIAL_MVCC_ITEM_SIZE_THRESHOLD;
+}
 
 /*!
 	@brief Allocate DataStorePartitionHeader Object and BtreeMap Objects for
@@ -708,7 +1006,13 @@ void DataStore::DataStorePartitionHeaderObject::initialize(
 		txn, COLUMN_TYPE_LONG, false, BtreeMap::TYPE_SINGLE_KEY);
 	setTriggerMapOId(triggerMap.getBaseOId());
 
+	BtreeMap backgroundMap(txn, *getObjectManager(), allocateStrategy, NULL);
+	backgroundMap.initialize<BackgroundId, DataStore::BackgroundData>(
+		txn, COLUMN_TYPE_LONG, false, BtreeMap::TYPE_SINGLE_KEY);
+	setBackgroundMapOId(backgroundMap.getBaseOId());
+
 	get()->maxContainerId_ = 0;
+	get()->maxBackgroundId_ = 0;
 }
 
 /*!
@@ -726,10 +1030,13 @@ void DataStore::DataStorePartitionHeaderObject::finalize(
 	BtreeMap triggerMap(
 		txn, *getObjectManager(), getTriggerMapOId(), allocateStrategy, NULL);
 	triggerMap.finalize(txn);
+	BtreeMap backgroundMap(
+		txn, *getObjectManager(), getBackgroundMapOId(), allocateStrategy, NULL);
+	backgroundMap.finalize(txn);
 }
 
 BaseContainer *DataStore::createContainer(TransactionContext &txn,
-	PartitionId pId, ExtendedContainerName &extContainerName,
+	PartitionId pId, const FullContainerKey &containerKey,
 	ContainerType containerType, MessageSchema *messageSchema) {
 	DataStorePartitionHeaderObject partitionHeadearObject(
 		pId, *getObjectManager());
@@ -753,12 +1060,12 @@ BaseContainer *DataStore::createContainer(TransactionContext &txn,
 		GS_THROW_USER_ERROR(
 			GS_ERROR_CM_LIMITS_EXCEEDED, "container num over limit");
 	}
-	BtreeMap containerMap(txn, *getObjectManager(),
-		partitionHeadearObject.getMetaMapOId(), allocateStrategy_, NULL);
 
 	int64_t schemaHashKey = BaseContainer::calcSchemaHashKey(messageSchema);
 	OId schemaOId = getColumnSchemaId(txn, pId, messageSchema, schemaHashKey);
 	insertColumnSchema(txn, pId, messageSchema, schemaHashKey, schemaOId);
+
+	const ContainerId containerId = partitionHeadearObject.getMaxContainerId();
 
 	BaseContainer *container;
 	switch (containerType) {
@@ -774,27 +1081,24 @@ BaseContainer *DataStore::createContainer(TransactionContext &txn,
 	}
 
 	container->initialize(txn);
-	container->set(txn, extContainerName.c_str(),
-		partitionHeadearObject.getMaxContainerId(), schemaOId, messageSchema);
+	container->set(txn, containerKey,
+		containerId, schemaOId, messageSchema);
 	ContainerAttribute attribute = container->getAttribute();
-	containerIdTable_->set(pId, partitionHeadearObject.getMaxContainerId(),
-		container->getBaseOId(), extContainerName.getDatabaseId(), attribute);
+	containerIdTable_->set(pId, container->getContainerId(),
+		container->getBaseOId(), containerKey.getComponents(txn.getDefaultAllocator()).dbId_, attribute);
 	TEST_PRINT("create container \n");
 	TEST_PRINT1("pId %d\n", pId);
-	TEST_PRINT1("databaseName %s\n", extContainerName.getDatabaseName());
-	TEST_PRINT1("databaseVersionId %d\n", extContainerName.getDatabaseId());
+	TEST_PRINT1("databaseVersionId %d\n", containerKey.getComponemts().dbId_);
 	TEST_PRINT1("attribute %d\n", (int32_t)attribute);
 
-	uint32_t size = static_cast<uint32_t>(strlen(extContainerName.c_str()));
-	util::XArray<char8_t> containerUpperName(txn.getDefaultAllocator());
-	containerUpperName.resize(size + 1);
-	ValueProcessor::convertUpperCase(
-		extContainerName.c_str(), size + 1, containerUpperName.data());
-	StringCursor keyStringCursor(
-		txn, reinterpret_cast<const char *>(containerUpperName.data()));
+	FullContainerKeyCursor keyCursor(
+		txn, *getObjectManager(), container->getContainerKeyOId());
 
-	int32_t status = containerMap.insert(
-		txn, keyStringCursor.data(), container->getBaseOId());
+	bool isCaseSensitive = false;
+	BtreeMap containerMap(txn, *getObjectManager(),
+		partitionHeadearObject.getMetaMapOId(), allocateStrategy_, NULL);
+	int32_t status = containerMap.insert<FullContainerKeyCursor, OId>(
+		txn, keyCursor, container->getBaseOId(), isCaseSensitive);
 	if ((status & BtreeMap::ROOT_UPDATE) != 0) {
 		partitionHeadearObject.setMetaMapOId(containerMap.getBaseOId());
 	}
@@ -803,18 +1107,9 @@ BaseContainer *DataStore::createContainer(TransactionContext &txn,
 }
 
 void DataStore::changeContainerSchema(TransactionContext &txn, PartitionId pId,
+	const FullContainerKey &containerKey,
 	BaseContainer *&container, MessageSchema *messageSchema,
 	util::XArray<uint32_t> &copyColumnMap) {
-	ExtendedContainerName *extContainerName;
-	container->getExtendedContainerName(txn, extContainerName);
-
-	util::XArray<const util::String *> oldColumnNameList(
-		txn.getDefaultAllocator());
-	{
-		ColumnInfo *oldSchema = container->getColumnInfoList();
-		const uint32_t columnCount = container->getColumnNum();
-		getColumnNameList(txn, oldSchema, columnCount, oldColumnNameList);
-	}
 
 	int64_t schemaHashKey = BaseContainer::calcSchemaHashKey(messageSchema);
 	OId schemaOId = getColumnSchemaId(txn, pId, messageSchema, schemaHashKey);
@@ -833,8 +1128,9 @@ void DataStore::changeContainerSchema(TransactionContext &txn, PartitionId pId,
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
 		break;
 	}
+
 	newContainer->initialize(txn);
-	newContainer->set(txn, extContainerName->c_str(),
+	newContainer->set(txn, containerKey,
 		container->getContainerId(), schemaOId, messageSchema);
 	newContainer->setVersionId(
 		container->getVersionId() + 1);  
@@ -843,60 +1139,38 @@ void DataStore::changeContainerSchema(TransactionContext &txn, PartitionId pId,
 		container->changeSchema(txn, *newContainer, copyColumnMap);
 	}
 	catch (UserException &e) {  
-		newContainer->finalize(txn);
+		finalizeContainer(txn, newContainer);
+		ALLOC_DELETE(txn.getDefaultAllocator(), newContainer);
 		GS_RETHROW_USER_ERROR(
 			e, GS_EXCEPTION_MERGE_MESSAGE(e, "Failed to change schema"));
 	}
 
-	DataStorePartitionHeaderObject partitionHeadearObject(
-		txn.getPartitionId(), *getObjectManager(), PARTITION_HEADER_OID);
-	BtreeMap containerMap(txn, *getObjectManager(),
-		partitionHeadearObject.getMetaMapOId(), allocateStrategy_, NULL);
-
-	uint32_t size = static_cast<uint32_t>(strlen(extContainerName->c_str()));
-	util::XArray<char8_t> containerUpperName(txn.getDefaultAllocator());
-	containerUpperName.resize(size + 1);
-	ValueProcessor::convertUpperCase(
-		extContainerName->c_str(), size + 1, containerUpperName.data());
-	StringCursor keyStringCursor(
-		txn, reinterpret_cast<const char *>(containerUpperName.data()));
-
-	OId oId = UNDEF_OID;
-	containerMap.search(
-		txn, keyStringCursor.str(), keyStringCursor.stringLength(), oId);
-	if (oId == UNDEF_OID) {
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_NOT_FOUND, "");
-	}
-
-	int32_t status = containerMap.update(
-		txn, keyStringCursor.data(), oId, newContainer->getBaseOId());
-	if ((status & BtreeMap::ROOT_UPDATE) != 0) {
-		partitionHeadearObject.setMetaMapOId(containerMap.getBaseOId());
-	}
-
-	ContainerId containerId = container->getContainerId();
-
-	containerIdTable_->remove(pId, containerId);
-	ContainerAttribute attribute = container->getAttribute();
-	containerIdTable_->set(pId, containerId, newContainer->getBaseOId(),
-		extContainerName->getDatabaseId(), attribute);
 	TEST_PRINT("changeSchema \n");
 	TEST_PRINT1("pId %d\n", pId);
-	TEST_PRINT1("databaseName %s\n", extContainerName.getDatabaseName());
-	TEST_PRINT1("databaseVersionId %d\n", extContainerName.getDatabaseId());
+	TEST_PRINT1("databaseVersionId %d\n", containerKey.getComponents().dbId_);
 	TEST_PRINT1("attribute %d\n", (int32_t)attribute);
 
-	container->finalize(txn);
-	container = newContainer;
-
-	util::XArray<const util::String *> newColumnNameList(
-		txn.getDefaultAllocator());
-	{
-		ColumnInfo *newSchema = container->getColumnInfoList();
-		const uint32_t columnCount = container->getColumnNum();
-		getColumnNameList(txn, newSchema, columnCount, newColumnNameList);
+	if (txn.isAutoCommit()) {
+		updateContainer(txn, container, newContainer->getBaseOId());
+		finalizeContainer(txn, container);
+		ALLOC_DELETE(txn.getDefaultAllocator(), container);
+		container = newContainer;
+	} else {
+		ALLOC_DELETE(txn.getDefaultAllocator(), newContainer);
 	}
-	container->updateTrigger(txn, oldColumnNameList, newColumnNameList);
+}
+
+void DataStore::changeContainerProperty(TransactionContext &txn, PartitionId pId,
+	BaseContainer *&container, MessageSchema *messageSchema) {
+
+	ContainerId containerId = container->getContainerId();
+	ContainerType containerType = container->getContainerType();
+	int64_t schemaHashKey = BaseContainer::calcSchemaHashKey(messageSchema);
+	OId schemaOId = getColumnSchemaId(txn, pId, messageSchema, schemaHashKey);
+	insertColumnSchema(txn, pId, messageSchema, schemaHashKey, schemaOId);
+	container->changeProperty(txn, schemaOId);
+	ALLOC_DELETE(txn.getDefaultAllocator(), container);
+	container = getContainer(txn, pId, containerId, containerType);
 }
 
 OId DataStore::getColumnSchemaId(TransactionContext &txn, PartitionId pId,
@@ -960,8 +1234,9 @@ void DataStore::insertColumnSchema(TransactionContext &txn, PartitionId pId,
 		commonContainerSchema.set(schemaHashKey, inputList);
 		schemaOId = commonContainerSchema.getBaseOId();
 
+		bool isCaseSensitive = true;
 		int32_t status =
-			schemaMap.get()->insert(txn, &schemaHashKey, schemaOId);
+			schemaMap.get()->insert(txn, schemaHashKey, schemaOId, isCaseSensitive);
 		if ((status & BtreeMap::ROOT_UPDATE) != 0) {
 			DataStorePartitionHeaderObject partitionHeadearObject(
 				txn.getPartitionId(), *getObjectManager(),
@@ -998,8 +1273,9 @@ void DataStore::insertTrigger(TransactionContext &txn, PartitionId pId,
 		triggerSchema.set(triggerHashKey, inputList);
 		triggerOId = triggerSchema.getBaseOId();
 
+		bool isCaseSensitive = true;
 		int32_t status =
-			triggerMap.get()->insert(txn, &triggerHashKey, triggerOId);
+			triggerMap.get()->insert(txn, triggerHashKey, triggerOId, isCaseSensitive);
 		if ((status & BtreeMap::ROOT_UPDATE) != 0) {
 			DataStorePartitionHeaderObject partitionHeadearObject(
 				txn.getPartitionId(), *getObjectManager(),
@@ -1040,6 +1316,173 @@ BtreeMap *DataStore::getTriggerMap(TransactionContext &txn, PartitionId pId) {
 		ALLOC_NEW(txn.getDefaultAllocator()) BtreeMap(txn, *getObjectManager(),
 			partitionHeadearObject.getTriggerMapOId(), allocateStrategy_);
 	return schemaMap;
+}
+
+template int32_t BtreeMap::insert(
+	TransactionContext &txn, BackgroundId &key, DataStore::BackgroundData &value, bool isCaseSensitive);
+template int32_t BtreeMap::remove(
+	TransactionContext &txn, BackgroundId &key, DataStore::BackgroundData &value, bool isCaseSensitive);
+template int32_t BtreeMap::update(TransactionContext &txn, BackgroundId &key,
+	DataStore::BackgroundData &oldValue, DataStore::BackgroundData &newValue, bool isCaseSensitive);
+
+/*!
+	@brief Get Container by ContainerId
+*/
+BaseContainer *DataStore::getBaseContainer(TransactionContext &txn, PartitionId pId,
+	OId oId, ContainerType containerType) {
+	if (!objectManager_->existPartition(pId)) {
+		return NULL;
+	}
+	if (UNDEF_OID == oId) {
+		GS_THROW_USER_ERROR(GS_ERROR_DS_CONTAINER_UNEXPECTEDLY_REMOVED, "");
+	}
+	BaseObject baseContainerImageObject(
+		txn.getPartitionId(), *getObjectManager(), oId);
+	BaseContainer::BaseContainerImage *baseContainerImage =
+		baseContainerImageObject
+			.getBaseAddr<BaseContainer::BaseContainerImage *>();
+	ContainerType realContainerType = baseContainerImage->containerType_;
+	if (containerType != ANY_CONTAINER &&
+		realContainerType != containerType) {
+		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_TYPE_INVALID, 
+			"Container type is invalid, or partitioned container already exists");
+	}
+
+	BaseContainer *container = NULL;
+	switch (realContainerType) {
+	case COLLECTION_CONTAINER: {
+		container =
+			ALLOC_NEW(txn.getDefaultAllocator()) Collection(txn, this, oId);
+	} break;
+	case TIME_SERIES_CONTAINER: {
+		container =
+			ALLOC_NEW(txn.getDefaultAllocator()) TimeSeries(txn, this, oId);
+	} break;
+	default:
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
+		break;
+	}
+
+	return container;
+}
+
+/*!
+	@brief Update objcet of Container
+*/
+void DataStore::updateContainer(TransactionContext &txn, BaseContainer *container, OId newContainerOId) {
+	DataStorePartitionHeaderObject partitionHeadearObject(
+		txn.getPartitionId(), *getObjectManager(), PARTITION_HEADER_OID);
+	BtreeMap containerMap(txn, *getObjectManager(),
+		partitionHeadearObject.getMetaMapOId(), allocateStrategy_, NULL);
+
+	FullContainerKeyCursor keyCursor(
+		txn, *getObjectManager(), container->getContainerKeyOId());
+
+	OId oId = UNDEF_OID;
+	bool isCaseSensitive = false;
+	containerMap.search<FullContainerKeyCursor, OId, OId>(
+		txn, keyCursor, oId, isCaseSensitive);
+	if (oId == UNDEF_OID) {
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_NOT_FOUND, "");
+	}
+
+	int32_t status = containerMap.remove<FullContainerKeyCursor, OId>(
+		txn, keyCursor, oId, isCaseSensitive);
+	if ((status & BtreeMap::ROOT_UPDATE) != 0) {
+		partitionHeadearObject.setMetaMapOId(containerMap.getBaseOId());
+	}
+
+	StackAllocAutoPtr<BaseContainer> newContainer(txn.getDefaultAllocator(),
+		getBaseContainer(txn, txn.getPartitionId(), newContainerOId, 
+		container->getContainerType()));
+	if (newContainer.get() == NULL || newContainer.get()->isInvalid()) {
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_NOT_FOUND, "");
+	}
+
+	FullContainerKeyCursor newKeyCursor(
+		txn, *getObjectManager(), newContainer.get()->getContainerKeyOId());
+	status = containerMap.insert<FullContainerKeyCursor, OId>(
+		txn, newKeyCursor, newContainerOId, isCaseSensitive);
+	if ((status & BtreeMap::ROOT_UPDATE) != 0) {
+		partitionHeadearObject.setMetaMapOId(containerMap.getBaseOId());
+	}
+
+	ContainerId containerId = container->getContainerId();
+
+	containerIdTable_->remove(txn.getPartitionId(), containerId);
+	ContainerAttribute attribute = container->getAttribute();
+
+	containerIdTable_->set(txn.getPartitionId(), containerId, newContainerOId,
+		newKeyCursor.getKey().getComponents(txn.getDefaultAllocator()).dbId_, attribute);
+}
+
+BtreeMap *DataStore::getBackgroundMap(TransactionContext &txn, PartitionId pId) {
+	BtreeMap *schemaMap = NULL;
+
+	DataStorePartitionHeaderObject partitionHeadearObject(
+		txn.getPartitionId(), *getObjectManager(), PARTITION_HEADER_OID);
+	schemaMap =
+		ALLOC_NEW(txn.getDefaultAllocator()) BtreeMap(txn, *getObjectManager(),
+			partitionHeadearObject.getBackgroundMapOId(), allocateStrategy_);
+	return schemaMap;
+}
+BackgroundId DataStore::insertBGTask(TransactionContext &txn, PartitionId pId, 
+	BackgroundData &bgData) {
+
+	DataStorePartitionHeaderObject partitionHeadearObject(
+		txn.getPartitionId(), *getObjectManager(), PARTITION_HEADER_OID);
+
+	partitionHeadearObject.incrementBackgroundId();
+	BackgroundId bgId = partitionHeadearObject.getMaxBackgroundId();
+
+	{
+		StackAllocAutoPtr<BtreeMap> bgMap(
+			txn.getDefaultAllocator(), getBackgroundMap(txn, pId));
+
+		bool isCaseSensitive = true;
+		int32_t status =
+			bgMap.get()->insert<BackgroundId, BackgroundData>(txn, bgId, bgData, isCaseSensitive);
+		if ((status & BtreeMap::ROOT_UPDATE) != 0) {
+			partitionHeadearObject.setBackgroundMapOId(
+				bgMap.get()->getBaseOId());
+		}
+	}
+
+	activeBackgroundCount_[pId]++;
+
+	return bgId;
+}
+void DataStore::removeBGTask(TransactionContext &txn, PartitionId pId, BackgroundId bgId,
+	BackgroundData &bgData) {
+	StackAllocAutoPtr<BtreeMap> bgMap(
+		txn.getDefaultAllocator(), getBackgroundMap(txn, pId));
+
+	bool isCaseSensitive = true;
+	int32_t status =
+		bgMap.get()->remove<BackgroundId, BackgroundData>(txn, bgId, bgData, isCaseSensitive);
+	if ((status & BtreeMap::ROOT_UPDATE) != 0) {
+		DataStorePartitionHeaderObject partitionHeadearObject(
+			txn.getPartitionId(), *getObjectManager(), PARTITION_HEADER_OID);
+		partitionHeadearObject.setBackgroundMapOId(
+			bgMap.get()->getBaseOId());
+	}
+	activeBackgroundCount_[pId]--;
+}
+
+void DataStore::updateBGTask(TransactionContext &txn, PartitionId pId, BackgroundId bgId, 
+	BackgroundData &beforBgData, BackgroundData &afterBgData) {
+	StackAllocAutoPtr<BtreeMap> bgMap(
+		txn.getDefaultAllocator(), getBackgroundMap(txn, pId));
+
+	bool isCaseSensitive = true;
+	int32_t status =
+		bgMap.get()->update<BackgroundId, BackgroundData>(txn, bgId, beforBgData, afterBgData, isCaseSensitive);
+	if ((status & BtreeMap::ROOT_UPDATE) != 0) {
+		DataStorePartitionHeaderObject partitionHeadearObject(
+			txn.getPartitionId(), *getObjectManager(), PARTITION_HEADER_OID);
+		partitionHeadearObject.setBackgroundMapOId(
+			bgMap.get()->getBaseOId());
+	}
 }
 
 /*!
@@ -1083,23 +1526,13 @@ void DataStore::setRestored(PartitionId pId) {
 	}
 }
 
-void DataStore::getColumnNameList(TransactionContext &txn, ColumnInfo *schema,
-	uint32_t columnCount, util::XArray<const util::String *> &columnNameList) {
-	for (uint32_t i = 0; i < columnCount; i++) {
-		util::String *columnName = ALLOC_NEW(txn.getDefaultAllocator())
-			util::String(txn.getDefaultAllocator());
-		columnName->append(reinterpret_cast<const char *>(
-			schema[i].getColumnName(txn, *getObjectManager())));
-		columnNameList.push_back(columnName);
-	}
-}
-
 /*!
 	@brief Prepare for redo log
 */
 void DataStore::restartPartition(
 	TransactionContext &txn, ClusterService *clusterService) {
 	restoreContainerIdTable(txn, clusterService);
+	restoreBackground(txn, clusterService);
 	setRestored(txn.getPartitionId());
 
 }
@@ -1141,20 +1574,21 @@ bool DataStore::restoreContainerIdTable(
 			ContainerId containerId = baseContainerImage->containerId_;
 			PartitionId pId = txn.getPartitionId();
 			ContainerForRestoreAutoPtr containerAutoPtr(
-				txn, this, pId, oId, baseContainerImage->containerType_);
+				txn, this, pId, oId,
+				containerId,
+				baseContainerImage->containerType_);
 			BaseContainer *container = containerAutoPtr.getBaseContainer();
 
-			ExtendedContainerName *extContainerName;
-			container->getExtendedContainerName(txn, extContainerName);
+			const FullContainerKey containerKey = container->getContainerKey(txn);
+			util::String containerName(txn.getDefaultAllocator());
+			containerKey.toString(txn.getDefaultAllocator(), containerName);
 			const DatabaseId databaseVersionId =
-				extContainerName->getDatabaseId();
-
+				containerKey.getComponents(txn.getDefaultAllocator()).dbId_;
 			ContainerAttribute attribute = container->getAttribute();
 			containerIdTable_->set(
 				pId, containerId, oId, databaseVersionId, attribute);
 			TEST_PRINT("changeSchema \n");
 			TEST_PRINT1("pId %d\n", pId);
-			TEST_PRINT1("databaseName %s\n", container->getDatabaseName(txn));
 			TEST_PRINT1("databaseVersionId %d\n", databaseVersionId);
 			TEST_PRINT1("attribute %d\n", (int32_t)attribute);
 
@@ -1170,6 +1604,47 @@ bool DataStore::restoreContainerIdTable(
 					   << containerListSize);
 
 	return isGsContainersExist;
+}
+
+/*!
+	@brief Restore BackgroundCounter in the partition
+*/
+void DataStore::restoreBackground(
+	TransactionContext &txn, ClusterService *clusterService) {
+	PartitionId pId = txn.getPartitionId();
+	if (!objectManager_->existPartition(pId)) {
+		return;
+	}
+
+	const DataStore::Latch latch(
+		txn, pId, this, clusterService);
+
+	StackAllocAutoPtr<BtreeMap> bgMap(
+		txn.getDefaultAllocator(), getBackgroundMap(txn, pId));
+
+	BtreeMap::BtreeCursor btreeCursor;
+	while (1) {
+		util::StackAllocator::Scope scope(txn.getDefaultAllocator());
+		util::XArray< std::pair<BackgroundId, BackgroundData> > idList(
+			txn.getDefaultAllocator());
+		util::XArray< std::pair<BackgroundId, BackgroundData> >::iterator itr;
+		int32_t getAllStatus = bgMap.get()->getAll<BackgroundId, BackgroundData>
+			(txn, PARTIAL_RESULT_SIZE, idList, btreeCursor);
+
+		for (itr = idList.begin(); itr != idList.end(); itr++) {
+			BackgroundData bgData = itr->second;
+			if (!bgData.isInvalid()) {
+				activeBackgroundCount_[pId]++;
+			} else {
+				GS_TRACE_WARNING(
+					DATA_STORE, GS_ERROR_DS_BACKGROUND_TASK_INVALID, 
+					"Invalid BGTask= " << bgData);
+			}
+		}
+		if (getAllStatus == GS_SUCCESS) {
+			break;
+		}
+	}
 }
 
 /*!
@@ -1194,25 +1669,6 @@ void DataStore::dropPartition(PartitionId pId) {
 	}
 	catch (std::exception &e) {
 		handleUpdateError(e, GS_ERROR_DS_DS_DROP_PARTITION_FAILED);
-	}
-}
-
-/*!
-	@brief Get Container type by ContainerId
-*/
-ContainerType DataStore::getContainerType(
-	TransactionContext &txn, ContainerId containerId) const {
-	OId oId = containerIdTable_->get(txn.getPartitionId(), containerId);
-	if (oId == UNDEF_OID) {
-		return UNDEF_CONTAINER;  
-	}
-	else {
-		BaseObject baseContainerImageObject(
-			txn.getPartitionId(), *getObjectManager(), oId);
-		BaseContainer::BaseContainerImage *baseContainerImage =
-			baseContainerImageObject
-				.getBaseAddr<BaseContainer::BaseContainerImage *>();
-		return baseContainerImage->containerType_;
 	}
 }
 
@@ -1254,7 +1710,8 @@ void DataStore::ContainerIdTable::set(PartitionId pId, ContainerId containerId,
 		ContainerInfoCache containerInfoCache(
 			oId, databaseVersionId, attribute);
 		itr = containerIdMap_[pId].insert(
-			std::make_pair(containerId, containerInfoCache));
+			std::make_pair(
+				containerId, containerInfoCache));
 		if (!itr.second) {
 			GS_THROW_SYSTEM_ERROR(
 				GS_ERROR_DS_DS_CONTAINER_ID_INVALID, "duplicate container id");
@@ -1359,9 +1816,9 @@ void DataStore::dumpPartition(TransactionContext &txn, PartitionId pId,
 				txn, this, pId, list[i].first, ANY_CONTAINER);
 			BaseContainer *container = containerAutoPtr.getBaseContainer();
 
-			ExtendedContainerName *extContainerName;
-			container->getExtendedContainerName(txn, extContainerName);
-			const char *containerName = extContainerName->getContainerName();
+			const FullContainerKey &containerKey = container->getContainerKey(txn);
+			util::String containerName(txn.getDefaultAllocator());
+			containerKey.toString(txn.getDefaultAllocator(), containerName);
 
 			stream << "" << container->getContainerId() << ","
 				   << (int32_t)container->getContainerType() << ","
@@ -1398,6 +1855,7 @@ void DataStore::dumpPartition(TransactionContext &txn, PartitionId pId,
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_OM_OPEN_DUMP_FILE_FAILED, "");
 	}
 }
+
 
 
 /*!
@@ -1449,12 +1907,13 @@ bool DataStore::containerIdMapAsc::operator()(
 }
 
 
+
 /*!
 	@brief Returns names of Container to meet a given condition in the partition
 */
 void DataStore::getContainerNameList(TransactionContext &txn, PartitionId pId,
 	int64_t start, ResultSize limit, const DatabaseId dbId,
-	ContainerCondition &condition, util::XArray<util::String *> &nameList) {
+	ContainerCondition &condition, util::XArray<FullContainerKey> &nameList) {
 	nameList.clear();
 	if (pId >= pgConfig_.getPartitionCount()) {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_GET_CONTAINER_LIST_FAILED,
@@ -1497,19 +1956,8 @@ void DataStore::getContainerNameList(TransactionContext &txn, PartitionId pId,
 				if (count >= start) {
 					ContainerAutoPtr containerAutoPtr(
 						txn, this, pId, list[i].first, ANY_CONTAINER);
-
-					ExtendedContainerName *extContainerName;
-					containerAutoPtr.getBaseContainer()
-						->getExtendedContainerName(txn, extContainerName);
-					const char *containerName =
-						extContainerName->getContainerName();
-
-					TEST_PRINT1("getContainerNameList:containerName %s\n",
-						containerName);
-					util::String *containerNameString =
-						ALLOC_NEW(txn.getDefaultAllocator()) util::String(
-							containerName, txn.getDefaultAllocator());
-					nameList.push_back(containerNameString);
+					nameList.push_back(
+						containerAutoPtr.getBaseContainer()->getContainerKey(txn));
 				}
 				count++;
 			}
@@ -1633,12 +2081,13 @@ void DataStore::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.setUnit(ConfigTable::VALUE_UNIT_SIZE_B, true)
 		.add("32KB")
 		.add("64KB")
-		.add("128KB")
 		.add("1MB")
 		.setDefault("64KB");
 
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_DB_PATH, STRING)
 		.setDefault("data");
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_SYNC_TEMP_PATH, STRING)
+		.setDefault("sync");  
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_CHUNK_MEMORY_LIMIT, INT32)
 		.deprecate();
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_STORE_MEMORY_LIMIT, INT32)
@@ -1656,7 +2105,7 @@ void DataStore::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.setDefault(1);
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_STORE_WARM_START, BOOL)
 		.setExtendedType(ConfigTable::EXTENDED_TYPE_LAX_BOOL)
-		.setDefault(true);
+		.setDefault(false);
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_AFFINITY_GROUP_SIZE, INT32)
 		.setMin(1)
 		.setMax(10000)
@@ -1687,4 +2136,70 @@ void DataStore::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.add(0)
 		.add(1)
 		.setDefault(0);
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_BACKGROUND_MIN_RATE, DOUBLE)
+		.setMin(0.1)
+		.setDefault(0.1)
+		.setMax(1.0);
+}
+
+DataStore::StatSetUpHandler DataStore::statSetUpHandler_;
+
+#define STAT_ADD_SUB(id) STAT_TABLE_ADD_PARAM_SUB(stat, parentId, id)
+
+void DataStore::StatSetUpHandler::operator()(StatTable &stat) {
+	StatTable::ParamId parentId;
+
+	parentId = STAT_TABLE_ROOT;
+	stat.resolveGroup(parentId, STAT_TABLE_PERF, "performance");
+
+	parentId = STAT_TABLE_PERF;
+	STAT_ADD_SUB(STAT_TABLE_PERF_TXN_NUM_BACKGROUND);
+	STAT_ADD_SUB(STAT_TABLE_PERF_TXN_BACKGROUND_MIN_RATE);
+}
+
+bool DataStore::StatUpdator::operator()(StatTable &stat) {
+	if (!stat.getDisplayOption(STAT_TABLE_DISPLAY_SELECT_PERF)) {
+		return true;
+	}
+
+	uint64_t numBGTask = 0;
+	for (PartitionId pId = 0; pId < dataStore_->pgConfig_.getPartitionCount(); pId++) {
+		numBGTask += dataStore_->getBGTaskCount(pId);
+	}
+
+	stat.set(STAT_TABLE_PERF_TXN_NUM_BACKGROUND, numBGTask);
+	if (stat.getDisplayOption(STAT_TABLE_DISPLAY_WEB_ONLY) &&
+		stat.getDisplayOption(STAT_TABLE_DISPLAY_OPTIONAL_TXN)) {
+		stat.set(STAT_TABLE_PERF_TXN_BACKGROUND_MIN_RATE, 
+			dataStore_->getConfig().getBackgroundMinRate());
+	}
+	return true;
+}
+
+DataStore::Config::Config(ConfigTable &configTable) :
+		backgroundMinRate_(10), backgroundWaitWeight_(9) {
+	setUpConfigHandler(configTable);
+	setBackgroundMinRate(configTable.get<double>(CONFIG_TABLE_DS_BACKGROUND_MIN_RATE));
+}
+
+void DataStore::Config::setUpConfigHandler(ConfigTable &configTable) {
+	configTable.setParamHandler(CONFIG_TABLE_DS_BACKGROUND_MIN_RATE, *this);
+}
+
+void DataStore::Config::setBackgroundMinRate(double rate) {
+	backgroundMinRate_ = static_cast<int64_t>(rate * 100);
+	backgroundWaitWeight_ = 100.0 / backgroundMinRate_ - 1;
+}
+
+double DataStore::Config::getBackgroundMinRate() const {
+	return static_cast<double>(backgroundMinRate_) / 100;
+}
+
+void DataStore::Config::operator()(
+		ConfigTable::ParamId id, const ParamValue &value) {
+	switch (id) {
+	case CONFIG_TABLE_DS_BACKGROUND_MIN_RATE:
+		setBackgroundMinRate(value.get<double>());
+		break;
+	}
 }

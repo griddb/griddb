@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -31,6 +31,8 @@ public class ColumnInfo {
 
 	private final GSType type;
 
+	private final Boolean nullable;
+
 	private final Set<IndexType> indexTypes;
 
 	/**
@@ -55,8 +57,29 @@ public class ColumnInfo {
 	 * No index type is set if it is an empty set.
 	 */
 	public ColumnInfo(String name, GSType type, Set<IndexType> indexTypes) {
+		this(name, type, null, indexTypes);
+	}
+
+	/**
+	 * Create column information by specifying the column name, type,
+	 * NOT NULL constraint state, and index type set.
+	 *
+	 * <p>If a set of not empty index types is specified, the contents are duplicated. </p>
+	 *
+	 * @param name column name. Not set when {@code null} is specified.
+	 * @param type column type. Not set when {@code null} is specified.
+	 * @param nullable {@code true} if NOT NULL constraint is not set, {@code false} is set.
+	 * Not set when {@code null} is specified.
+	 * @param indexTypes A set of index types. Not set when {@code null} is specified.
+	 * When empty, the index is considered as not set.
+	 *
+	 */
+	public ColumnInfo(
+			String name, GSType type, Boolean nullable,
+			Set<IndexType> indexTypes) {
 		this.name = name;
 		this.type = type;
+		this.nullable = nullable;
 
 		if (indexTypes == null) {
 			this.indexTypes = null;
@@ -87,6 +110,17 @@ public class ColumnInfo {
 	 */
 	public GSType getType() {
 		return type;
+	}
+
+	/**
+	 * Retrieve the value irrespective to NOT NULL constraint is set in the column or not.
+	 *
+	 * @return {@code true} if the NOT NULL constraint is not set,
+	 * {@code false} if set. If not set {@code null}.
+	 *
+	 */
+	public Boolean getNullable() {
+		return nullable;
 	}
 
 	/**

@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -156,7 +156,7 @@ public class NodeConnectionPool implements Closeable {
 	public NodeConnection resolve(InetSocketAddress address,
 			BasicBuffer req, BasicBuffer resp,
 			NodeConnection.Config config,
-			NodeConnection.LoginInfo loginInfo,
+			NodeConnection.LoginInfo loginInfo, long[] databaseId,
 			boolean preferCache) throws GSException {
 		NodeConnection connection = (preferCache ? pull(address) : null);
 		if (connection == null) {
@@ -164,7 +164,6 @@ public class NodeConnectionPool implements Closeable {
 					new NodeConnection(address, config);
 			try {
 				newConnection.connect(req, resp);
-				newConnection.login(req, resp, loginInfo);
 				connection = newConnection;
 			}
 			finally {
@@ -173,10 +172,11 @@ public class NodeConnectionPool implements Closeable {
 				}
 			}
 		}
-		else {
+
+		{
 			boolean released = false;
 			try {
-				connection.reuse(req, resp, loginInfo);
+				connection.login(req, resp, loginInfo, databaseId);
 				released = true;
 			}
 			catch (GSStatementException e) {

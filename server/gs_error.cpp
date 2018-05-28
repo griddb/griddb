@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2014 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -319,9 +319,65 @@ u8string GSTraceFormatter::obfuscate(const u8string &src) {
 
 	u8string dest = src;
 	for (u8string::iterator it = dest.begin(); it != dest.end(); ++it) {
-		*it ^= static_cast<char8_t>(
-			secretKey_[(it - dest.begin()) % secretKey_.size()]);
+		*it = static_cast<char8_t>(*it ^ static_cast<char8_t>(
+				secretKey_[(it - dest.begin()) % secretKey_.size()]));
 	}
 
 	return dest;
+}
+
+InterruptionChecker::InterruptionChecker() :
+		flags_(0),
+		handler_(NULL) {
+}
+
+void InterruptionChecker::setCheckHandler(CheckHandler *handler) {
+	handler_ = handler;
+
+	const int32_t flag = (1 << INTERRUPTION_HANDLER);
+	if (handler == NULL) {
+		flags_ &= ~flag;
+	}
+	else {
+		flags_ |= flag;
+	}
+}
+
+void InterruptionChecker::setInterruption(InterruptionType type) {
+	flags_ |= (1 << type);
+}
+
+void InterruptionChecker::clearInterruption() {
+	flags_ &= (1 << INTERRUPTION_HANDLER);
+}
+
+bool InterruptionChecker::checkFlags(int32_t flags) {
+	if ((flags & (1 << INTERRUPTION_CANCEL)) != 0) {
+		errorCanceled();
+	}
+	else if ((flags & (1 << INTERRUPTION_SUSPEND)) != 0) {
+		return true;
+	}
+
+	return false;
+}
+
+void InterruptionChecker::errorCanceled() {
+	GS_THROW_USER_ERROR(GS_ERROR_CM_CANCELED, "");
+}
+
+bool InterruptionChecker::checkInternal() {
+	const int32_t flags = flags_;
+	if (flags != 0) {
+		if (handler_ != NULL) {
+			return (*handler_)(*this, flags);
+		}
+
+		return checkFlags(flags);
+	}
+
+	return false;
+}
+
+InterruptionChecker::CheckHandler::~CheckHandler() {
 }

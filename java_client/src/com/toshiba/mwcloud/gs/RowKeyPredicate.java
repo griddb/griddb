@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -205,6 +205,7 @@ public class RowKeyPredicate<K> {
 	 *
 	 * @throws GSException if a range condition had already been set
 	 * @throws ClassCastException the value of the specified key is not NULL or the type is not supported as {@link RowKey}
+	 * @throws NullPointerException when {@code null} is specified as an argument
 	 */
 	public void add(K key) throws GSException {
 		if (start != null || finish != null) {

@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -18,8 +18,8 @@ package com.toshiba.mwcloud.gs;
 /**
  * Represents how to specify a Row based on a key timestamp of {@link TimeSeries}</a>.
  *
- * <p>It can be used in combination with the timestamp (specified separately) to specify 
- * a Row with the nearest timestamp etc. When no relevant Row exists, 
+ * <p>It can be used in combination with the timestamp (specified separately) to specify
+ * a Row with the nearest timestamp etc. When no relevant Row exists,
  * it behaves differently depending on the function using this enumeration type.</p>
  */
 public enum TimeOperator {

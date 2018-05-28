@@ -1,6 +1,6 @@
 ﻿/*
-    Copyright (c) 2012 TOSHIBA CORPORATION.
-    
+    Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
+
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License as
     published by the Free Software Foundation, either version 3 of the
@@ -29,8 +29,6 @@
 #include "util/container.h"
 
 class PartitionTable;
-
-
 
 class LogCursor;
 struct LogRecord;
@@ -84,6 +82,9 @@ public:
 		LOG_TYPE_PUT_CHUNK_DATA,		/*!< chunk data */
 		LOG_TYPE_PUT_CHUNK_END,			/*!< end of chunk data */
 
+		LOG_TYPE_CONTINUE_CREATE_INDEX, /*!< continue to alter Container */
+		LOG_TYPE_CONTINUE_ALTER_CONTAINER, /*!< continue to alter Container */
+
 		LOG_TYPE_WITH_BEGIN = 0x80,		/*!< flags for transaction start */
 		LOG_TYPE_IS_AUTO_COMMIT = 0x40,	/*!< flags for autocommit transaction */
 		LOG_TYPE_CLEAR_FLAGS = 0x3f,	/*!< empty flag */
@@ -104,7 +105,10 @@ public:
 
 	~LogManager();
 
-	void open(bool checkOnly, bool forceRecoveryFromExistingFiles = false);
+	void open(
+			bool checkOnly, bool forceRecoveryFromExistingFiles = false,
+			bool isIncremental = false,
+			PartitionGroupId cpLongSyncPgId = UNDEF_PARTITIONGROUPID);  
 
 	void openPartial(PartitionGroupId pgId, CheckpointId cpId, const char8_t *suffix);
 
@@ -120,8 +124,9 @@ public:
 
 	bool findLog(LogCursor &cursor, PartitionId pId, LogSequentialNumber lsn);
 
-	void updateAvailableStartLsn(PartitionTable *pt, PartitionGroupId pgId,
-		util::XArray<uint8_t> &binaryLogRecords, CheckpointId cpId);
+	void updateAvailableStartLsn(
+			PartitionTable *pt, PartitionGroupId pgId,
+			util::XArray<uint8_t> &binaryLogRecords, CheckpointId cpId);
 
 	bool findCheckpointStartLog(
 			LogCursor &cursor, PartitionGroupId pgId, CheckpointId cpId);
@@ -140,113 +145,182 @@ public:
 
 
 
-	void putReplicationLog(PartitionId pId, LogSequentialNumber lsn,
+	void putReplicationLog(
+			PartitionId pId, LogSequentialNumber lsn,
 			uint32_t len, uint8_t *logRecord);
 
-	LogSequentialNumber putCheckpointStartLog(util::XArray<uint8_t> &binaryLogBuf,
-		PartitionId pId,
-		TransactionId maxTxnId,	LogSequentialNumber cpLsn,
-		const util::XArray<ClientId> &clientIds,
-		const util::XArray<TransactionId> &activeTxnIds,
-		const util::XArray<ContainerId> &refContainerIds,
-		const util::XArray<StatementId> &lastExecStmtIds,
-		const util::XArray<int32_t> &txnTimeoutIntervalSec);
+	LogSequentialNumber putCheckpointStartLog(
+			util::XArray<uint8_t> &binaryLogBuf,
+			PartitionId pId,
+			TransactionId maxTxnId,	LogSequentialNumber cpLsn,
+			const util::XArray<ClientId> &clientIds,
+			const util::XArray<TransactionId> &activeTxnIds,
+			const util::XArray<ContainerId> &refContainerIds,
+			const util::XArray<StatementId> &lastExecStmtIds,
+			const util::XArray<int32_t> &txnTimeoutIntervalSec);
 
-	LogSequentialNumber putCommitTransactionLog(util::XArray<uint8_t> &binaryLogBuf, 
-			PartitionId pId, const ClientId &clientId, TransactionId txnId, ContainerId containerId,
+	LogSequentialNumber putCommitTransactionLog(
+			util::XArray<uint8_t> &binaryLogBuf, 
+			PartitionId pId, const ClientId &clientId,
+			TransactionId txnId, ContainerId containerId,
 			StatementId stmtId);
-	LogSequentialNumber putAbortTransactionLog(util::XArray<uint8_t> &binaryLogBuf, 
-			PartitionId pId, const ClientId &clientId, TransactionId txnId, ContainerId containerId,
+
+	LogSequentialNumber putAbortTransactionLog(
+			util::XArray<uint8_t> &binaryLogBuf, 
+			PartitionId pId, const ClientId &clientId,
+			TransactionId txnId, ContainerId containerId,
 			StatementId stmtId);
 
-	LogSequentialNumber putDropPartitionLog(util::XArray<uint8_t> &binaryLogBuf,
-		PartitionId pId) ;
+	LogSequentialNumber putDropPartitionLog(
+			util::XArray<uint8_t> &binaryLogBuf,
+			PartitionId pId) ;
 
 
-	LogSequentialNumber putPutContainerLog(util::XArray<uint8_t> &binaryLogBuf,
-		PartitionId pId, ContainerId containerId,
-		uint32_t containerNameLen, const char *containerName,
-		const util::XArray<uint8_t> &containerInfo,
-		int32_t containerType);
-	LogSequentialNumber putDropContainerLog(util::XArray<uint8_t> &binaryLogBuf,
-		PartitionId pId, ContainerId containerId,
-		uint32_t containerNameLen, const char *containerName);
+	LogSequentialNumber putPutContainerLog(
+			util::XArray<uint8_t> &binaryLogBuf,
+			PartitionId pId, const ClientId &clientId, TransactionId txnId,
+			ContainerId containerId, StatementId stmtId,
+			uint32_t containerNameLen, const uint8_t *containerName,
+			const util::XArray<uint8_t> &containerInfo,
+			int32_t containerType,
+			uint32_t extensionNameLen, const char *extensionName,
+			int32_t txnTimeoutInterval,
+			int32_t txnContextCreateMode, bool withBegin,
+			bool isAutoCommit, RowId cursorRowId);
 
-	LogSequentialNumber putCreateIndexLog(util::XArray<uint8_t> &binaryLogBuf,
-		PartitionId pId, ContainerId containerId,
-		ColumnId columnId, int32_t mapType);
-	LogSequentialNumber putDropIndexLog(util::XArray<uint8_t> &binaryLogBuf,
-		PartitionId pId, ContainerId containerId,
-		ColumnId columnId, int32_t mapType);
+	LogSequentialNumber putDropContainerLog(
+			util::XArray<uint8_t> &binaryLogBuf,
+			PartitionId pId, ContainerId containerId,
+			uint32_t containerNameLen, const uint8_t *containerName);
 
-	LogSequentialNumber putCreateTriggerLog(util::XArray<uint8_t> &binaryLogBuf,
-		PartitionId pId, ContainerId containerId,
-		uint32_t nameLen, const char *name,
-		const util::XArray<uint8_t> &triggerInfo);
-	LogSequentialNumber putDropTriggerLog(util::XArray<uint8_t> &binaryLogBuf,
-		PartitionId pId, ContainerId containerId,
-		uint32_t nameLen, const char *name);
+	LogSequentialNumber putCreateIndexLog(
+			util::XArray<uint8_t> &binaryLogBuf,
+			PartitionId pId, const ClientId &clientId, TransactionId txnId,
+			ContainerId containerId, StatementId stmtId,
+			const util::Vector<ColumnId> &columnIds,
+			int32_t mapType, uint32_t indexNameLen, const char *indexName,
+			uint32_t extensionNameLen, const char *extensionName,
+			const util::XArray<uint32_t> &paramDataLen,
+			const util::XArray<const uint8_t*> &paramData,
+			int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
+			bool withBegin, bool isAutoCommit, RowId cursorRowId);
 
-	LogSequentialNumber putPutRowLog(util::XArray<uint8_t> &binaryLogBuf,
-		PartitionId pId, const ClientId &clientId, TransactionId txnId, ContainerId containerId,
-		StatementId stmtId,
-		uint64_t numRowId, const util::XArray<RowId> &rowIds,
-		uint64_t numRow, const util::XArray<uint8_t> &rowData,
-		int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
-		bool withBegin, bool isAutoCommit);
-	LogSequentialNumber putUpdateRowLog(util::XArray<uint8_t> &binaryLogBuf,
-		PartitionId pId, const ClientId &clientId, TransactionId txnId, ContainerId containerId,
-		StatementId stmtId,
-		uint64_t numRowId, const util::XArray<RowId> &rowIds,
-		uint64_t numRow, const util::XArray<uint8_t> &rowData,
-		int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
-		bool withBegin, bool isAutoCommit);
-	LogSequentialNumber putRemoveRowLog(util::XArray<uint8_t> &binaryLogBuf,
-		PartitionId pId, const ClientId &clientId, TransactionId txnId, ContainerId containerId,
-		StatementId stmtId,
-		uint64_t numRowId, const util::XArray<RowId> &rowIds,
-		int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
-		bool withBegin, bool isAutoCommit);
-	LogSequentialNumber putLockRowLog(util::XArray<uint8_t> &binaryLogBuf,
-		PartitionId pId, const ClientId &clientId, TransactionId txnId, ContainerId containerId,
-		StatementId stmtId,
-		uint64_t numRowId, const util::XArray<RowId> &rowIds,
-		int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
-		bool withBegin, bool isAutoCommit);
+	LogSequentialNumber putContinueCreateIndexLog(
+			util::XArray<uint8_t> &binaryLogBuf,
+			PartitionId pId, const ClientId &clientId, TransactionId txnId,
+			ContainerId containerId, StatementId stmtId,
+			int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
+			bool withBegin, bool isAutoCommit, RowId cursor);
 
-	LogSequentialNumber putCheckpointEndLog(util::XArray<uint8_t> &binaryLogBuf,
-		PartitionId pId,
-		BitArray &validBlockInfo);
+	LogSequentialNumber putContinueAlterContainerLog(
+			util::XArray<uint8_t> &binaryLogBuf,
+			PartitionId pId, const ClientId &clientId, TransactionId txnId,
+			ContainerId containerId, StatementId stmtId,
+			int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
+			bool withBegin, bool isAutoCommit, RowId cursorRowId);
 
-	LogSequentialNumber putChunkMetaDataLog(util::XArray<uint8_t> &binaryLogBuf,
-											PartitionId pId, ChunkCategoryId categoryId,
-											ChunkId startChunkId, int32_t chunkNum,
-											const util::XArray<uint8_t> *chunkMetaDataList,
-											bool sentinel);
+	LogSequentialNumber putDropIndexLog(
+			util::XArray<uint8_t> &binaryLogBuf,
+			PartitionId pId, ContainerId containerId,
+			const util::Vector<ColumnId> &columnIds, int32_t mapType,
+			uint32_t indexNameLen, const char *indexName,
+			uint32_t extensionNameLen, const char *extensionName,
+			const util::XArray<uint32_t> &paramDataLen,
+			const util::XArray<const uint8_t*> &paramData);
+
+	LogSequentialNumber putCreateTriggerLog(
+			util::XArray<uint8_t> &binaryLogBuf,
+			PartitionId pId, ContainerId containerId,
+			uint32_t nameLen, const char *name,
+			const util::XArray<uint8_t> &triggerInfo);
+
+	LogSequentialNumber putDropTriggerLog(
+			util::XArray<uint8_t> &binaryLogBuf,
+			PartitionId pId, ContainerId containerId,
+			uint32_t nameLen, const char *name);
+
+	LogSequentialNumber putPutRowLog(
+			util::XArray<uint8_t> &binaryLogBuf,
+			PartitionId pId, const ClientId &clientId,
+			TransactionId txnId, ContainerId containerId,
+			StatementId stmtId,
+			uint64_t numRowId, const util::XArray<RowId> &rowIds,
+			uint64_t numRow, const util::XArray<uint8_t> &rowData,
+			int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
+			bool withBegin, bool isAutoCommit);
+
+	LogSequentialNumber putUpdateRowLog(
+			util::XArray<uint8_t> &binaryLogBuf,
+			PartitionId pId, const ClientId &clientId,
+			TransactionId txnId, ContainerId containerId,
+			StatementId stmtId,
+			uint64_t numRowId, const util::XArray<RowId> &rowIds,
+			uint64_t numRow, const util::XArray<uint8_t> &rowData,
+			int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
+			bool withBegin, bool isAutoCommit);
+
+	LogSequentialNumber putRemoveRowLog(
+			util::XArray<uint8_t> &binaryLogBuf,
+			PartitionId pId, const ClientId &clientId,
+			TransactionId txnId, ContainerId containerId,
+			StatementId stmtId,
+			uint64_t numRowId, const util::XArray<RowId> &rowIds,
+			int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
+			bool withBegin, bool isAutoCommit);
+
+	LogSequentialNumber putLockRowLog(
+			util::XArray<uint8_t> &binaryLogBuf,
+			PartitionId pId, const ClientId &clientId,
+			TransactionId txnId, ContainerId containerId,
+			StatementId stmtId,
+			uint64_t numRowId, const util::XArray<RowId> &rowIds,
+			int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
+			bool withBegin, bool isAutoCommit);
+
+	LogSequentialNumber putCheckpointEndLog(
+			util::XArray<uint8_t> &binaryLogBuf,
+			PartitionId pId,
+			BitArray &validBlockInfo);
+
+	LogSequentialNumber putChunkMetaDataLog(
+			util::XArray<uint8_t> &binaryLogBuf,
+			PartitionId pId, ChunkCategoryId categoryId,
+			ChunkId startChunkId, int32_t chunkNum,
+			uint32_t expandedSize,
+			const util::XArray<uint8_t> *chunkMetaDataList,
+			bool sentinel);
 
 
 	void prepareCheckpoint(PartitionGroupId pgId, CheckpointId cpId);
 
 	void postCheckpoint(PartitionGroupId pgId);
 
-	LogSequentialNumber putChunkStartLog(util::XArray<uint8_t> &binaryLogBuf,
-										 PartitionId pId, uint64_t putChunkId,
-										 uint64_t chunkNum);
+	LogSequentialNumber putChunkStartLog(
+			util::XArray<uint8_t> &binaryLogBuf,
+			PartitionId pId, uint64_t putChunkId,
+			uint64_t chunkNum);
 
-	LogSequentialNumber putChunkDataLog(util::XArray<uint8_t> &binaryLogBuf,
-										PartitionId pId, uint64_t putChunkId,
-										uint32_t chunkSize, 
-										const uint8_t* chunkImage);
+	LogSequentialNumber putChunkDataLog(
+			util::XArray<uint8_t> &binaryLogBuf,
+			PartitionId pId, uint64_t putChunkId,
+			uint32_t chunkSize,
+			const uint8_t* chunkImage);
 
 
-	LogSequentialNumber putChunkEndLog(util::XArray<uint8_t> &binaryLogBuf,
-										 PartitionId pId, uint64_t putChunkId);
+	LogSequentialNumber putChunkEndLog(
+			util::XArray<uint8_t> &binaryLogBuf,
+			PartitionId pId, uint64_t putChunkId);
 
 	void writeBuffer(PartitionGroupId pgId);
 
-	void flushFile(PartitionGroupId pgId);
+	void flushFile(PartitionGroupId pgId, bool executeChildren = true);
+
+	void addSyncLogManager(LogManager *logMgr, PartitionId filterPId);
+	void removeSyncLogManager(LogManager *logMgr, PartitionId filterPId);
 
 	static uint16_t getVersion();
+
+	static bool isAcceptableVersion(uint16_t version);
 
 	uint64_t copyLogFile(PartitionGroupId pgId, const char8_t *dirPath);
 
@@ -262,8 +336,15 @@ public:
 	static bool isLsnAssignable(uint8_t logType);
 
 
-	static bool checkFileName(const std::string &name,
-							  PartitionGroupId &pgId, CheckpointId &cpId);
+	bool isLongtermSyncLogAvailable() const;
+
+	void setLongtermSyncLogError(const std::string &message);
+
+	std::string getLongtermSyncLogErrorMessage() const;
+
+	static bool checkFileName(
+			const std::string &name,
+			PartitionGroupId &pgId, CheckpointId &cpId);
 
 
 	uint16_t getFileVersion(PartitionGroupId pgId, CheckpointId cpId);
@@ -272,7 +353,7 @@ public:
 
 	Config& getConfig() { return config_; }
 
-	/*! 
+	/*!
 		@brief Configuration of LogManaegr
 	*/
 	struct Config : public ConfigTable::ParamHandler {
@@ -352,7 +433,8 @@ private:
 	template<typename Alloc>
 	void putBlockTailNoopLog(
 			util::XArray<uint8_t, Alloc> &logBuf, PartitionId pId);
-	void putLog(PartitionId pId, LogSequentialNumber lsn,
+	void putLog(
+			PartitionId pId, LogSequentialNumber lsn,
 			uint8_t *serializedLogRecord, size_t logRecordLen,
 			bool needUpdateLength = true);
 	void flushByCommit(PartitionId pId);
@@ -360,8 +442,8 @@ private:
 	LogSequentialNumber putPutOrUpdateRowLog(
 			LogType logType,
 			util::XArray<uint8_t> &binaryLogBuf,
-			PartitionId pId, const ClientId &clientId, TransactionId txnId, ContainerId containerId,
-			StatementId stmtId,
+			PartitionId pId, const ClientId &clientId, TransactionId txnId,
+			ContainerId containerId, StatementId stmtId,
 			uint64_t numRowId, const util::XArray<RowId> &rowIds,
 			uint64_t numRow, const util::XArray<uint8_t> &rowData,
 			int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
@@ -385,6 +467,8 @@ private:
 	std::vector<PartitionInfo> partitionInfoList_;
 	std::vector<PartitionGroupManager*> pgManagerList_;
 
+	std::vector<LogManager*> childLogManagerList_; 
+	PartitionId filterPId_; 
 };
 
 
@@ -406,14 +490,15 @@ private:
 	size_t count_;
 };
 
-/*! 
+/*!
 	@brief Information of a Log file
 */
 struct LogManager::LogFileInfo {
 public:
 	LogFileInfo();
 
-	void open(const Config &config,
+	void open(
+			const Config &config,
 			PartitionGroupId pgId, CheckpointId cpId, bool expectExisting,
 			bool checkOnly, const char8_t *suffix);
 	void close();
@@ -451,7 +536,7 @@ private:
 	const Config *config_;
 };
 
-/*! 
+/*!
 	@brief Information of a LogBlock for logging
 */
 struct LogManager::LogBlocksInfo {
@@ -500,6 +585,8 @@ public:
 	void setNormalShutdownCompleted(uint64_t index, bool completed);
 
 	uint16_t getVersion() const;
+
+	static bool isAcceptableVersion(uint16_t version);
 
 	static bool isValidRecordOffset(const Config &config, uint64_t offset);
 
@@ -674,7 +761,7 @@ private:
 	bool invalid_;
 };
 
-/*! 
+/*!
 	@brief Recovery information of a Partition
 */
 struct LogManager::PartitionInfo {
@@ -699,11 +786,12 @@ public:
 	PartitionGroupManager();
 	~PartitionGroupManager();
 
-	void open(PartitionGroupId pgId, const Config &config,
+	void open(
+			PartitionGroupId pgId, const Config &config,
 			CheckpointId initialCpId, CheckpointId lastCpId,
 			std::vector<PartitionInfo> &partitionInfoList,
 			bool emptyFileAppendable, bool checkOnly,
-			const char8_t *suffix = NULL);
+			const char8_t *suffix = NULL, bool isSyncTempLogFile = false);
 	void close();
 	bool isClosed() const;
 
@@ -748,6 +836,11 @@ public:
 	void prepareCheckpoint();
 
 	void cleanupLogFiles();
+	bool getLongtermSyncLogErrorFlag() const;
+
+	void setLongtermSyncLogError(const std::string &message);
+
+	const std::string& getLongtermSyncLogErrorMessage() const;
 
 	uint64_t getAvailableEndOffset(
 			LogFileLatch &fileLatch, LogBlocksLatch &blocksLatch);
@@ -758,7 +851,8 @@ public:
 			LogFileLatch &fileLatch, uint64_t startIndex, bool multiple);
 	void unlatchBlocks(LogFileLatch &fileLatch, LogBlocksInfo *&blocksInfo);
 
-	LogFileInfo* latchFile(CheckpointId cpId, bool expectExisting, const char8_t *suffix);
+	LogFileInfo* latchFile(
+			CheckpointId cpId, bool expectExisting, const char8_t *suffix);
 	void unlatchFile(LogFileInfo *&fileInfo);
 
 
@@ -812,6 +906,9 @@ private:
 	bool tailReadOnly_;
 	bool checkOnly_;
 
+	std::string longtermSyncLogErrorMessage_; 
+
+	bool longtermSyncLogErrorFlag_; 
 
 	const Config *config_;
 	UTIL_UNIQUE_PTR<BlockPool> blocksPool_;
@@ -820,7 +917,7 @@ private:
 	util::Atomic<util::NamedFile*> lastLogFile_;
 };
 
-/*! 
+/*!
 	@brief Information of LogRecord for recovery
 */
 struct LogRecord {
@@ -853,11 +950,14 @@ public:
 	uint32_t containerType_;			
 	uint32_t containerNameLen_;			
 	uint32_t containerInfoLen_;			
-	const char *containerName_;			
+	const uint8_t *containerName_;		
 	const uint8_t *containerInfo_;		
 
-	ColumnId columnId_;
+	uint32_t columnIdCount_;
 	uint32_t mapType_;
+	uint32_t indexNameLen_;
+	const char *indexName_;
+	const ColumnId *columnIds_;
 
 	LogSequentialNumber cpLsn_;
 	uint32_t txnContextNum_;
@@ -872,12 +972,21 @@ public:
 	int32_t chunkNum_;
 	uint8_t chunkCategoryId_;
 	uint8_t emptyInfo_;
+	uint32_t expandedLen_;   
+	uint32_t extensionNameLen_;
+	const char *extensionName_;
+	uint32_t paramCount_;
+	const uint32_t *paramDataLen_;
+	const uint8_t *paramData_;
 
 	bool withBegin_;					
 	bool isAutoCommit_;					
 
 	uint16_t fileVersion_;
 
+	LogRecord() {
+		reset();
+	}
 	void reset();
 
 	void dump(std::ostream &os);
@@ -946,7 +1055,7 @@ public:
 	template<typename Stream>
 	void importPosition(Stream &stream, LogManager &logManager);
 
-	/*! 
+	/*!
 		@brief Recovery progress information
 	*/
 	struct Progress {
@@ -972,8 +1081,8 @@ private:
 	void exportPosition(
 			CheckpointId &cpId, uint64_t &offset,
 			PartitionId &pId, LogSequentialNumber &lsn);
-	void importPosition(LogManager &logManager,
-			CheckpointId cpId, uint64_t offset,
+	void importPosition(
+			LogManager &logManager, CheckpointId cpId, uint64_t offset,
 			PartitionId pId, LogSequentialNumber lsn);
 
 	PartitionGroupId pgId_;
@@ -1034,8 +1143,7 @@ void LogCursor::exportPosition(Stream &stream) {
 }
 
 template<typename Stream>
-void LogCursor::importPosition(
-		Stream &stream, LogManager &logManager) {
+void LogCursor::importPosition(Stream &stream, LogManager &logManager) {
 	CheckpointId cpId;
 	uint64_t offset;
 	PartitionId pId;

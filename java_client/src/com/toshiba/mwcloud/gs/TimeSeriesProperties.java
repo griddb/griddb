@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -26,8 +26,9 @@ import com.toshiba.mwcloud.gs.common.RowMapper;
 /**
  * Represents the information about optional configuration settings used for newly creating or updating a TimeSeries.
  *
- * <p>It does not guarantee the validity of values e.g. the upper limit of
- * the column number that can be individually compressed.</p>
+ * <p>It does not guarantee the validity of values e.g. the column
+ * names and the upper limit of the column number that can be
+ * individually compressed.</p>
  */
 public class TimeSeriesProperties implements Cloneable {
 
@@ -76,7 +77,13 @@ public class TimeSeriesProperties implements Cloneable {
 	}
 
 	/**
-	 * Not supported
+	 * Sets a type of TimeSeries compression method.
+	 *
+	 * <p>When changing the compression method, all settings of individual column are released.</p>
+	 *
+	 * @param compressionMethod A type of compression method
+	 *
+	 * @throws NullPointerException If {@code null} is specified in the argument
 	 */
 	public void setCompressionMethod(CompressionMethod compressionMethod) {
 		if (compressionMethod == null) {
@@ -92,14 +99,53 @@ public class TimeSeriesProperties implements Cloneable {
 	}
 
 	/**
-	 * Not supported
+	 * Gets the type of compression method
+	 *
+	 * @return Type of compression method. {@code null} is not returned.
 	 */
 	public CompressionMethod getCompressionMethod() {
 		return compressionMethod;
 	}
 
 	/**
-	 * Not supported
+	 * Sets parameters for the thinning compression method with
+	 * relative error on the specified column.
+	 *
+	 * <p>If a different compression method had been set, it is
+	 * changed to the thinning method.</p>
+	 *
+	 * <p>Multiplying {@code rate} and {@code span} together is
+	 * equal to the value that is obtained by {@link #getCompressionWidth(String)}
+	 * in the thinning compression with absolute error.</p>
+	 *
+	 * <p>The column types are limited to the followings. </p>
+	 * <ul>
+	 * <li>{@link GSType#BYTE}</li>
+	 * <li>{@link GSType#SHORT}</li>
+	 * <li>{@link GSType#INTEGER}</li>
+	 * <li>{@link GSType#LONG}</li>
+	 * <li>{@link GSType#FLOAT}</li>
+	 * <li>{@link GSType#DOUBLE}</li>
+	 * </ul>
+	 *
+	 * <p>See the GridDB Technical Reference for the upper limit
+	 * of the number of columns on which the parameters can be
+	 * specified. The number of options that is over the limit
+	 * can be created, but the TimeSeries cannot be created for
+	 * that case.</p>
+	 *
+	 * @param column Column name
+	 * @param rate Boundary value of relative error based on
+	 * {@code span}. It must be greater than or equal to 0.0 and
+	 * less than or equal to 1.0.
+	 * @param span The difference between maximum and minimum
+	 * value of the column.
+	 *
+	 * @throws IllegalArgumentException When detecting an illegal
+	 * column name against the limitations, or specifying value
+	 * out of the range for {@code rate}.
+	 * @throws NullPointerException If {@code null} is specified
+	 * in the argument.
 	 */
 	public void setRelativeHiCompression(
 			String column, double rate, double span) {
@@ -123,7 +169,23 @@ public class TimeSeriesProperties implements Cloneable {
 	}
 
 	/**
-	 * Not supported
+	 * Sets parameters for the thinning compression method with
+	 * absolute error on the specified column.
+	 *
+	 * <p>If a different compression method had been set, it is
+	 * changed to the thinning method.</p>
+	 *
+	 * <p>The limitation of column type and the upper limit of the
+	 * number of columns are the same as {@link #setRelativeHiCompression(String, double, double)}. </p>
+	 *
+	 * @param column Column name
+	 * @param width Width of error boundary corresponding to
+	 * {@link #getCompressionWidth(String)}
+	 *
+	 * @throws IllegalArgumentException When detecting an illegal
+	 * column name against the limitations.
+	 * @throws NullPointerException If {@code null} is specified
+	 * in the argument.
 	 */
 	public void setAbsoluteHiCompression(String column, double width) {
 		this.compressionMethod = CompressionMethod.HI;
@@ -139,7 +201,19 @@ public class TimeSeriesProperties implements Cloneable {
 	}
 
 	/**
-	 * Not supported
+	 * Returns value which indicates whether the error
+	 * threshold of the thinning compression with error is
+	 * relative or not on the specified column.
+	 *
+	 * @param column Column name
+	 *
+	 * @return If the specified column has the corresponding
+	 * setting, the value is returned, otherwise {@code null}
+	 *
+	 * @throws IllegalArgumentException When detecting an illegal
+	 * column name against the limitations.
+	 * @throws NullPointerException If {@code null} is specified
+	 * in the argument.
 	 */
 	public Boolean isCompressionRelative(String column) {
 		final Entry entry;
@@ -158,7 +232,21 @@ public class TimeSeriesProperties implements Cloneable {
 	}
 
 	/**
-	 * Not supported
+	 * Returns the ratio of error range based on the possible
+	 * value range of the specified column for the thinning
+	 * compression with relative error.
+	 *
+	 * <p>The possible value range can be obtained by {@link #getCompressionWidth(String)}.</p>
+	 *
+	 * @param column Column name
+	 *
+	 * @return If the specified column has the corresponding
+	 * setting, the value is returned, otherwise {@code null}
+	 *
+	 * @throws IllegalArgumentException When detecting an illegal
+	 * column name against the limitations.
+	 * @throws NullPointerException If {@code null} is specified
+	 * in the argument.
 	 */
 	public Double getCompressionRate(String column) {
 		final Entry entry;
@@ -178,7 +266,19 @@ public class TimeSeriesProperties implements Cloneable {
 	}
 
 	/**
-	 * Not supported
+	 * Returns the difference between maximum and minimum
+	 * possible value of the specified column by the thinning
+	 * compression with relative error.
+	 *
+	 * @param column Column name
+	 *
+	 * @return If the specified column has the corresponding
+	 * setting, the value is returned, otherwise {@code null}
+	 *
+	 * @throws IllegalArgumentException When detecting an illegal
+	 * column name against the limitations.
+	 * @throws NullPointerException If {@code null} is specified
+	 * in the argument.
 	 */
 	public Double getCompressionSpan(String column) {
 		final Entry entry;
@@ -198,7 +298,18 @@ public class TimeSeriesProperties implements Cloneable {
 	}
 
 	/**
-	 * Not supported
+	 * Returns the width of error boundary on the specified column
+	 * for the thinning compression with absolute error.
+	 *
+	 * @param column Column name
+	 *
+	 * @return If the specified column has the corresponding
+	 * setting, the value is returned, otherwise {@code null}
+	 *
+	 * @throws IllegalArgumentException When detecting an illegal
+	 * column name against the limitations.
+	 * @throws NullPointerException if {@code null} is specified
+	 * in the argument.
 	 */
 	public Double getCompressionWidth(String column) {
 		final Entry entry;
@@ -218,7 +329,13 @@ public class TimeSeriesProperties implements Cloneable {
 	}
 
 	/**
-	 * Not supported
+	 * Returns all names of the columns which have additional setting.
+	 *
+	 * <p>This object is not changed by updating the returned
+	 * object, and the returned object is not changed by updating
+	 * this object.</p>
+	 *
+	 * @return Name set of columns which have additional setting.
 	 */
 	public Set<String> getSpecifiedColumns() {
 		final Set<String> columnNames = new HashSet<String>();
@@ -310,7 +427,7 @@ public class TimeSeriesProperties implements Cloneable {
 	 * cannot be specified.
 	 *
 	 * @throws IllegalArgumentException if {@code elapsedTime} or {@code timeUnit} of out of range is specified
-	 * @throws IllegalArgumentException if a column value with an incorrect format
+	 * @throws IllegalArgumentException when detecting an illegal column name against the limitations
 	 * @throws NullPointerException if {@code null} is specified in the argument.
 	 */
 	public void setRowExpiration(int elapsedTime, TimeUnit timeUnit) {
@@ -357,7 +474,34 @@ public class TimeSeriesProperties implements Cloneable {
 	}
 
 	/**
-	 * Not supported
+	 * Sets a window size which means maximum time span of
+	 * contiguous data thinned by the compression.
+	 *
+	 * <p>When the window size has been set to a time series and a
+	 * row in the time series is apart over the window size from
+	 * previous stored data, even if the row satisfies the other
+	 * compression conditions, the row is not thinned.</p>
+	 *
+	 * <p>This setting is ignored if {@link CompressionMethod#NO}
+	 * has been set.</p>
+	 *
+	 * <p>If {@link CompressionMethod#HI} or {@link CompressionMethod#SS}
+	 * has been set and this setting is not specified, the maximum
+	 * value of TIMESTAMP is set as the window size.</p>
+	 *
+	 * <p>Even if the row is in the window size from the previous
+	 * data and it satisfies the conditions of the compression, it
+	 * may not be thinned depending on its stored location, etc.</p>
+	 *
+	 * @param compressionWindowSize Window size. It is not
+	 * allowed to set value less than or equal to {@code 0}.
+	 * @param compressionWindowSizeUnit Unit of the window size.
+	 * {@link TimeUnit#YEAR} and {@link TimeUnit#MONTH} cannot be
+	 * specified.
+	 *
+	 * @throws IllegalArgumentException When {@code compressionWindowSize} is out of the range.
+	 * @throws IllegalArgumentException when detecting an illegal column name against the limitations
+	 * @throws NullPointerException if {@code null} is specified in the argument.
 	 */
 	public void setCompressionWindowSize(
 			int compressionWindowSize, TimeUnit compressionWindowSizeUnit) {
@@ -409,8 +553,15 @@ public class TimeSeriesProperties implements Cloneable {
 	 * Expired row data shall be released at the point they are collected only
 	 * when the period equivalent to the division number is reached.</p>
 	 *
-	 * <p>It will be failed if the division number exceeds the size limit.
-	 * See "System limiting values" in the GridDB API Reference for the division number upper limit.</p>
+	 * <p>See the GridDB Technical Reference for the upper limit
+	 * of the division number. It will be failed if the division
+	 * number exceeds the size limit.</p>
+	 *
+	 * <p>If the elapsed time period is not set, the setting of
+	 * division number is ignored. If the elapsed time period has been
+	 * set and the setting of division number is not set, the
+	 * division number is set to the default value of the
+	 * connected GridDB server.</p>
 	 *
 	 * @param count the division number for the validity period. Must not be {@code 0} or less.
 	 *
@@ -428,14 +579,22 @@ public class TimeSeriesProperties implements Cloneable {
 	}
 
 	/**
-	 * Not supported
+	 * Returns the window size for the thinning compression.
+	 * The contiguous data can be thinned in the window size which
+	 * represents a time span.
+	 *
+	 * @return Window size. {@code -1} if it has not been set.
 	 */
 	public int getCompressionWindowSize() {
 		return compressionWindowSize;
 	}
 
 	/**
-	 * Not supported
+	 * Returns the unit of the window size for the thinning compression.
+	 * The contiguous data can be thinned in the window size which
+	 * represents a time span.
+	 *
+	 * @return Unit of window size. {@code -1} if it has not been set.
 	 */
 	public TimeUnit getCompressionWindowSizeUnit() {
 		return compressionWindowSizeUnit;
@@ -453,12 +612,10 @@ public class TimeSeriesProperties implements Cloneable {
 
 	private static String normalizeColumn(String column) {
 		try {
-			return RowMapper.normalizeSymbol(column);
+			return RowMapper.normalizeSymbol(column, "column name");
 		}
 		catch (GSException e) {
-			throw new IllegalArgumentException(
-					"Illegal column format (reason=" + e.getMessage() + ")",
-					e);
+			throw new IllegalArgumentException(e);
 		}
 	}
 

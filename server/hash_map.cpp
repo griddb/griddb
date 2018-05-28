@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -73,19 +73,32 @@ int32_t HashMap::initialize(TransactionContext& txn, ColumnType columnType,
 /*!
 	@brief Free Objects related to HashMap
 */
-int32_t HashMap::finalize(TransactionContext& txn) {
+bool HashMap::finalize(TransactionContext& txn) {
 	setDirty();
+
+	uint64_t removeNum = NUM_PER_EXEC;
 	if (size() > 0) {
+		uint32_t counter = 0;
 		for (uint64_t i = 0; i < hashMapImage_->rear_; i++) {
 			Bucket bucket(txn, *getObjectManager(), maxArraySize_,
 				maxCollisionArraySize_);
-			hashArray_.get(txn, i, bucket);
+			hashArray_.get(txn, hashMapImage_->rear_ - i - 1, bucket);
 			bucket.clear(txn);
+			counter++;
+			removeNum--;
+			if (removeNum == 0) {
+				break;
+			}
 		}
+		hashMapImage_->rear_ -= counter;
 	}
-	hashArray_.finalize(txn);
-	BaseObject::finalize();
-	return GS_SUCCESS;
+	if (removeNum > 0) {
+		hashArray_.finalize(txn, removeNum);
+	}
+	if (removeNum > 0) {
+		BaseObject::finalize();
+	}
+	return removeNum > 0;
 }
 
 /*!
@@ -339,8 +352,8 @@ int32_t HashMap::search(
 /*!
 	@brief Search Row Objects
 */
-int32_t HashMap::search(TransactionContext& txn, SearchContext& sc,
-	util::XArray<OId>& idList, OutputOrder outputOrder) {
+int32_t HashMap::search(TransactionContext &txn, SearchContext &sc,
+	util::XArray<OId> &idList, OutputOrder outputOrder) {
 	ResultSize limit = sc.limit_;
 	const void* constKey = sc.key_;
 	uint32_t size = sc.keySize_;
@@ -793,7 +806,8 @@ std::string HashMap::dump(TransactionContext& txn, uint8_t mode) {
 							 ? 0
 							 : mapStat.useNum_ * 100 / mapStat.allocateNum_;
 		theoreticalStatus =
-			(mapStat.allocateNum_ + mapStat.activeBucket_) * 8;  
+			(mapStat.allocateNum_ + mapStat.activeBucket_) *
+			8;  
 		strstrm << ", " << totalRequest << ", " << currentStatus << ", "
 				<< mapStat.bucketNum_ << ", " << mapStat.activeBucket_ << ", "
 				<< mapStat.allocateNum_ << ", " << mapStat.useNum_ << ", "

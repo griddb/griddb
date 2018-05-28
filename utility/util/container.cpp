@@ -1,5 +1,5 @@
 ﻿/*
-    Copyright (c) 2012 TOSHIBA CORPORATION.
+    Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
     
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License as
@@ -17,5 +17,30 @@
 #include "util/container.h"
 
 namespace util {
+
+
+InsertionResetter::~InsertionResetter() {
+	reset();
+}
+
+void InsertionResetter::release() throw() {
+	entry_ = Entry();
+}
+
+void InsertionResetter::reset() throw() {
+	if (entry_.func_ != NULL) {
+		entry_.func_(entry_.container_, entry_.pos_);
+		release();
+	}
+}
+
+InsertionResetter::Entry::Entry() :
+		func_(NULL), container_(NULL), pos_(0) {
+}
+
+InsertionResetter::Entry::Entry(
+		ResetterFunc func, void *container, size_t pos) :
+		func_(func), container_(container), pos_(pos) {
+}
 
 } 

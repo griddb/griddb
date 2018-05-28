@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -60,7 +60,7 @@ int32_t ValueProcessor::compare(TransactionContext &txn,
 	case COLUMN_TYPE_DOUBLE:
 	case COLUMN_TYPE_TIMESTAMP: {
 		uint32_t objectRowFieldSize = 0;
-		result = comparatorTable[type][type](txn, inputField, inputFieldSize,
+		result = ComparatorTable::comparatorTable_[type][type](txn, inputField, inputFieldSize,
 			objectRowField, objectRowFieldSize);
 	} break;
 	case COLUMN_TYPE_STRING:
@@ -110,7 +110,7 @@ int32_t ValueProcessor::compare(TransactionContext &txn,
 	case COLUMN_TYPE_TIMESTAMP: {
 		uint32_t srcObjectRowFieldSize = 0;
 		uint32_t targetObjectRowFieldSize = 0;
-		result = comparatorTable[type][type](txn, srcObjectRowField,
+		result = ComparatorTable::comparatorTable_[type][type](txn, srcObjectRowField,
 			srcObjectRowFieldSize, targetObjectRowField,
 			targetObjectRowFieldSize);
 	} break;
@@ -147,8 +147,14 @@ int32_t ValueProcessor::compare(TransactionContext &txn,
 	@brief Set field value to message
 */
 void ValueProcessor::getField(TransactionContext &txn,
-	ObjectManager &objectManager, ColumnId columnId, Value *objectValue,
+	ObjectManager &objectManager, ColumnId columnId, const Value *objectValue,
 	MessageRowStore *messageRowStore) {
+
+	if (objectValue->isNullValue()) {
+		messageRowStore->setNull(columnId);
+		return;
+	}
+
 	ColumnType type =
 		messageRowStore->getColumnInfoList()[columnId].getColumnType();
 
@@ -187,39 +193,6 @@ void ValueProcessor::getField(TransactionContext &txn,
 		ArrayProcessor::getField(
 			txn, objectManager, columnId, objectValue, messageRowStore);
 		break;
-	default:
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
-	}
-}
-
-/*!
-	@brief Set default field value
-*/
-void ValueProcessor::initField(ColumnType type, void *objectField) {
-	switch (type) {
-	case COLUMN_TYPE_BOOL:
-	case COLUMN_TYPE_BYTE:
-	case COLUMN_TYPE_SHORT:
-	case COLUMN_TYPE_INT:
-	case COLUMN_TYPE_LONG:
-	case COLUMN_TYPE_FLOAT:
-	case COLUMN_TYPE_DOUBLE:
-	case COLUMN_TYPE_TIMESTAMP:
-	case COLUMN_TYPE_OID:
-		memset(objectField, 0, FixedSizeOfColumnType[type]);
-		break;
-	case COLUMN_TYPE_STRING:
-	case COLUMN_TYPE_BLOB:
-	case COLUMN_TYPE_STRING_ARRAY:
-	case COLUMN_TYPE_BOOL_ARRAY:
-	case COLUMN_TYPE_BYTE_ARRAY:
-	case COLUMN_TYPE_SHORT_ARRAY:
-	case COLUMN_TYPE_INT_ARRAY:
-	case COLUMN_TYPE_LONG_ARRAY:
-	case COLUMN_TYPE_FLOAT_ARRAY:
-	case COLUMN_TYPE_DOUBLE_ARRAY:
-	case COLUMN_TYPE_TIMESTAMP_ARRAY: {
-	} break;
 	default:
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
 	}
@@ -482,7 +455,7 @@ StringCursor::StringCursor(
 		setBaseAddr(
 			ALLOC_NEW(txn.getDefaultAllocator()) uint8_t[offset + length_]);
 
-		uint32_t encodedLength = ValueProcessor::encodeVarSize(length_);
+		uint64_t encodedLength = ValueProcessor::encodeVarSize(length_);
 		memcpy(getBaseAddr(), &encodedLength, offset);
 		memcpy(getBaseAddr() + offset, str, length_);
 		moveCursor(offset);
@@ -502,7 +475,7 @@ StringCursor::StringCursor(TransactionContext &txn, const char *str)
 		setBaseAddr(
 			ALLOC_NEW(txn.getDefaultAllocator()) uint8_t[offset + length_]);
 
-		uint32_t encodedLength = ValueProcessor::encodeVarSize(length_);
+		uint64_t encodedLength = ValueProcessor::encodeVarSize(length_);
 		memcpy(getBaseAddr(), &encodedLength, offset);
 		memcpy(getBaseAddr() + offset, str, length_);
 		moveCursor(offset);
@@ -529,7 +502,7 @@ std::string ValueProcessor::getTypeName(ColumnType type) {
 		str = "SHORT";
 		break;
 	case COLUMN_TYPE_INT:
-		str = "INT";
+		str = "INTEGER";
 		break;
 	case COLUMN_TYPE_LONG:
 		str = "LONG";
@@ -582,3 +555,4 @@ std::string ValueProcessor::getTypeName(ColumnType type) {
 	}
 	return str;
 }
+

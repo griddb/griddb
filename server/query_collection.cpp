@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -33,6 +33,7 @@
 #include "boolean_expression.h"
 #include "result_set.h"
 
+
 /*!
 * @brief Query constructor
 *
@@ -44,14 +45,13 @@
 *
 */
 QueryForCollection::QueryForCollection(TransactionContext &txn,
-	Collection &collection, const char *statement, uint64_t limit,
-	QueryHookClass *hook)
-	: Query(txn, *(collection.getObjectManager()), "", limit, hook),
+	Collection &collection, const TQLInfo &tqlInfo, 
+	uint64_t limit, QueryHookClass *hook)
+	: Query(txn, *(collection.getObjectManager()), tqlInfo, limit, hook),
 	  collection_(&collection) {
 	if (hook_) {
-		hook_->qpBuildBeginHook(*this);
+		hook_->qpBuildBeginHook(*this);	
 	}
-	this->str_ = statement;
 	isExplainExecute_ = true;
 	explainAllocNum_ = 0;
 	explainNum_ = 0;
@@ -60,7 +60,7 @@ QueryForCollection::QueryForCollection(TransactionContext &txn,
 	setDefaultFunctionMap();
 
 	if (hook_) {
-		hook_->qpBuildTmpHook(*this, 3);
+		hook_->qpBuildTmpHook(*this, 3);	
 	}
 
 	lemon_tqlParser::tqlParser *x = QP_NEW lemon_tqlParser::tqlParser();
@@ -71,7 +71,7 @@ QueryForCollection::QueryForCollection(TransactionContext &txn,
 
 	Token t;
 	int ret;
-	const char *c_str = statement;
+	const char *c_str = tqlInfo.query_;
 #ifndef NDEBUG
 	if (sIsTrace_) {
 		x->tqlParserSetTrace(&std::cerr, "trace: ");
@@ -127,7 +127,7 @@ QueryForCollection::QueryForCollection(TransactionContext &txn,
 	}
 
 	if (hook_) {
-		hook_->qpBuildTmpHook(*this, 4);
+		hook_->qpBuildTmpHook(*this, 4);	
 	}
 
 
@@ -140,7 +140,7 @@ QueryForCollection::QueryForCollection(TransactionContext &txn,
 	contractCondition();
 
 	if (hook_) {
-		hook_->qpBuildFinishHook(*this);
+		hook_->qpBuildFinishHook(*this);	
 	}
 }
 
@@ -151,9 +151,13 @@ QueryForCollection::QueryForCollection(TransactionContext &txn,
 void QueryForCollection::doQuery(
 	TransactionContext &txn, Collection &collection, ResultSet &resultSet) {
 	if (hook_) {
-		hook_->qpSearchBeginHook(*this);
+		hook_->qpSearchBeginHook(*this);	
 	}
 	BoolExpr *conditionExpr = getConditionExpr();  
+	if (resultSet.getQueryOption().isRowIdScan()) {
+		doQueryPartial(txn, collection, resultSet);
+	}
+	else 
 	if (conditionExpr == NULL) {
 		doQueryWithoutCondition(txn, collection, resultSet);
 	}
@@ -168,7 +172,7 @@ void QueryForCollection::doQuery(
 			0, "QUERY_EXECUTE_RESULT_ROWS", "INTEGER", os.str().c_str(), "");
 	}
 	if (hook_) {
-		hook_->qpSearchFinishHook(*this);
+		hook_->qpSearchFinishHook(*this);	
 	}
 }
 
@@ -181,9 +185,10 @@ void QueryForCollection::doQueryWithoutCondition(
 	}
 	OutputOrder outputOrder = ORDER_UNDEFINED;  
 
-	BtreeMap::SearchContext sc;
+	BtreeMap::SearchContext sc(
+		UNDEF_COLUMNID, NULL, 0, true, NULL, 0, true, 0, NULL, nLimit_);
 
-	if (pOrderByExpr_ && pOrderByExpr_->size() == 1) {
+	if (isIndexSortAvailable(collection, 0)) {
 		SortExpr &orderExpr = (*pOrderByExpr_)[0];
 		uint32_t orderColumnId =
 			(orderExpr.expr) ? orderExpr.expr->getColumnId() : UNDEF_COLUMNID;
@@ -200,6 +205,7 @@ void QueryForCollection::doQueryWithoutCondition(
 			sc.keyType_ =
 				collection.getColumnInfo(orderColumnId).getColumnType();
 			setLimitByIndexSort();
+			sc.nullCond_ = BaseIndex::SearchContext::ALL;
 			sc.limit_ = nLimit_;
 		}
 	}
@@ -209,25 +215,18 @@ void QueryForCollection::doQueryWithoutCondition(
 			collection.searchColumnIdIndex(txn, sc, resultOIdList, outputOrder);
 		}
 		else {
+			sc.columnId_ = UNDEF_COLUMNID;
 			collection.searchRowIdIndex(txn, sc, resultOIdList, outputOrder);
 		}
 
 		if (resultOIdList.size() > nLimit_) {
-			ResultSize eraseSize = resultOIdList.size() - nLimit_;
+//			ResultSize eraseSize = resultOIdList.size() - nLimit_;
 			resultOIdList.erase(
 				resultOIdList.begin() + static_cast<size_t>(nLimit_),
 				resultOIdList.end());
-			if (resultSet.getRowIdList()->size() > 0) {
-				ResultSize erasePos =
-					resultSet.getRowIdList()->size() - eraseSize;
-				resultSet.getRowIdList()->erase(
-					resultSet.getRowIdList()->begin() +
-						static_cast<size_t>(erasePos),
-					resultSet.getRowIdList()->end());
-			}
 		}
 	}
-	if (pOrderByExpr_ && (outputOrder == ORDER_UNDEFINED)) {  
+	if (isSortBeforeSelectClause() && outputOrder == ORDER_UNDEFINED) {
 		assert(pOrderByExpr_->size() > 0);
 		if (doExplain()) {
 			util::NormalOStringStream os;
@@ -263,7 +262,7 @@ void QueryForCollection::doQueryWithCondition(
 	OutputOrder outputOrder = ORDER_UNDEFINED;  
 
 	if (hook_) {
-		hook_->qpBuildTmpHook(*this, 5);
+		hook_->qpBuildTmpHook(*this, 5);	
 	}
 
 	orList.clear();
@@ -285,13 +284,13 @@ void QueryForCollection::doQueryWithCondition(
 		ColumnInfo *indexColumnInfo;
 
 		if (hook_) {
-			hook_->qpBuildTmpHook(*this, 6);
+			hook_->qpBuildTmpHook(*this, 6);	
 		}
 		getIndexInfoInAndList(
 			txn, collection, andList, indexType, indexColumnInfo);
 
 		if (hook_) {
-			hook_->qpBuildTmpHook(*this, 7);
+			hook_->qpBuildTmpHook(*this, 7);	
 		}
 
 		if (indexColumnInfo == NULL) {
@@ -320,7 +319,6 @@ void QueryForCollection::doQueryWithCondition(
 					sc.columnId_ = orderColumnId;
 					sc.keyType_ =
 						collection.getColumnInfo(orderColumnId).getColumnType();
-					pOrderByExpr_->clear();
 					setLimitByIndexSort();
 				}
 			}
@@ -344,8 +342,7 @@ void QueryForCollection::doQueryWithCondition(
 			switch (indexType) {
 			case MAP_TYPE_BTREE: {
 				assert(indexColumnInfo != NULL);
-				if (orList.size() == 1 && pOrderByExpr_ &&
-					pOrderByExpr_->size() == 1) {
+				if (isIndexSortAvailable(collection, orList.size())) {
 					SortExpr &orderExpr = (*pOrderByExpr_)[0];
 					if (orderExpr.expr &&
 						orderExpr.expr->getColumnId() ==
@@ -361,7 +358,6 @@ void QueryForCollection::doQueryWithCondition(
 						outputOrder = (orderExpr.order == ASC)
 										  ? ORDER_ASCENDING
 										  : ORDER_DESCENDING;  
-						pOrderByExpr_->clear();
 						setLimitByIndexSort();
 					}
 				}
@@ -406,7 +402,7 @@ void QueryForCollection::doQueryWithCondition(
 		}
 
 		if (hook_) {
-			hook_->qpBuildTmpHook(*this, 8);
+			hook_->qpBuildTmpHook(*this, 8);	
 		}
 
 		if (restConditions == 0) {  
@@ -416,19 +412,19 @@ void QueryForCollection::doQueryWithCondition(
 		else {
 			uint64_t *pBitmap = reinterpret_cast<uint64_t *>(alloc.allocate(
 				sizeof(uint64_t) * ((collection.getColumnNum() / 64) + 1)));
-
+			CollectionRowWrapper row(txn, collection, pBitmap);
 			for (uint32_t i = 0; i < operatorOutOIdArray.size(); i++) {
 				bool conditionFlag = true;  
 				OId rowId = operatorOutOIdArray[i];
 				{  
 					util::StackAllocator::Scope scope(alloc);
-					CollectionRowWrapper row(txn, collection, rowId, pBitmap);
+					row.load(rowId);
 
 					for (uint32_t q = 0; q < andList.size(); q++) {
 						util::StackAllocator::Scope scope(alloc);
-						bool evalResult = andList[q]->eval(
-							txn, objectManager_, &row, getFunctionMap(), true);
-						if (!evalResult) {
+						TrivalentLogicType evalResult = andList[q]->eval(
+							txn, objectManager_, &row, getFunctionMap(), TRI_TRUE);
+						if (evalResult != TRI_TRUE) {
 							conditionFlag = false;
 							break;
 						}
@@ -461,7 +457,7 @@ void QueryForCollection::doQueryWithCondition(
 			resultOIdList.end());
 	}
 
-	if (pOrderByExpr_ && (outputOrder == ORDER_UNDEFINED)) {  
+	if (isSortBeforeSelectClause() && outputOrder == ORDER_UNDEFINED) {
 		assert(pOrderByExpr_->size() > 0);
 		if (doExplain()) {
 			util::NormalOStringStream os;
@@ -493,16 +489,23 @@ void QueryForCollection::doSelection(
 	size_t numSelection = getSelectionExprLength();
 
 	if (hook_) {
-		hook_->qpBuildTmpHook(*this, 9);
+		hook_->qpBuildTmpHook(*this, 9);	
 	}
 
+	if (resultSet.getQueryOption().isRowIdScan()) {
+		resultNum = resultSet.getResultNum();
+		type = RESULT_ROWSET;
+	} else
 	if (numSelection > 0) {
 		Expr *selectionExpr = getSelectionExpr(0);
 		if (selectionExpr->isAggregation()) {
 			type = RESULT_AGGREGATE;
 			Value result;
-			bool resultOK = selectionExpr->aggregate(
-				txn, collection, resultOIdList, result);
+			bool resultOK = false;
+			if (nOffset_ < 1) {
+				resultOK = selectionExpr->aggregate(
+					txn, collection, resultOIdList, result);
+			}
 			if (resultOK) {
 				result.serialize(serializedRowList);
 				resultNum = 1;
@@ -519,28 +522,13 @@ void QueryForCollection::doSelection(
 					resultOIdList.erase(resultOIdList.begin(),
 						resultOIdList.begin() + static_cast<size_t>(nOffset_));
 
-					if (resultSet.getRowIdList()->size() > 0) {
-						resultSet.getRowIdList()->erase(
-							resultSet.getRowIdList()->begin(),
-							resultSet.getRowIdList()->begin() +
-								static_cast<size_t>(nOffset_));
-					}
-
 					if (nActualLimit_ < resultOIdList.size()) {
-						ResultSize eraseSize =
-							resultOIdList.size() - nActualLimit_;
+//						ResultSize eraseSize =
+//							resultOIdList.size() - nActualLimit_;
 						resultOIdList.erase(
 							resultOIdList.begin() +
 								static_cast<size_t>(nActualLimit_),
 							resultOIdList.end());
-						if (resultSet.getRowIdList()->size() > 0) {
-							ResultSize erasePos =
-								resultSet.getRowIdList()->size() - eraseSize;
-							resultSet.getRowIdList()->erase(
-								resultSet.getRowIdList()->begin() +
-									static_cast<size_t>(erasePos),
-								resultSet.getRowIdList()->end());
-						}
 					}
 					resultNum = resultOIdList.size();
 				}
@@ -598,7 +586,7 @@ void QueryForCollection::doSelection(
 	}
 
 	if (hook_) {
-		hook_->qpSelectFinishHook(*this);
+		hook_->qpSelectFinishHook(*this);	
 	}
 	resultSet.setResultType(type, resultNum);
 }
@@ -606,17 +594,29 @@ void QueryForCollection::doSelection(
 QueryForCollection *QueryForCollection::dup(
 	TransactionContext &txn, ObjectManager &objectManager) {
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
+	char *dbName = NULL;
+	char *queryStr = NULL;
+	FullContainerKey *containerKey = NULL;
+	if (tqlInfo_.dbName_ != NULL) {
+		size_t len = strlen(tqlInfo_.dbName_) + 1;
+		char *dbName = QP_ALLOC_NEW(alloc) char[len];
+		memcpy(dbName, tqlInfo_.dbName_, len);
+	}
+	if (tqlInfo_.query_ != NULL) {
+		size_t len = strlen(tqlInfo_.query_) + 1;
+		char *queryStr = QP_ALLOC_NEW(alloc) char[len];
+		memcpy(queryStr, tqlInfo_.query_, len);
+	}
+	if (tqlInfo_.containerKey_ != NULL) {
+		const void *body;
+		size_t size;
+		tqlInfo_.containerKey_->toBinary(body, size);
+		containerKey = QP_ALLOC_NEW(alloc) FullContainerKey(alloc, KeyConstraint(), body, size);
+	}
+
+	TQLInfo tqlInfo(dbName, containerKey, queryStr);
 	QueryForCollection *query =
-		QP_ALLOC_NEW(alloc) QueryForCollection(txn_, *collection_);
-	if (str_ != NULL) {
-		size_t len = strlen(str_) + 1;
-		char *str = QP_ALLOC_NEW(alloc) char[len];
-		memcpy(str, str_, len);
-		query->str_ = str;
-	}
-	else {
-		query->str_ = NULL;
-	}
+		QP_ALLOC_NEW(alloc) QueryForCollection(txn_, *collection_, tqlInfo);
 	if (pErrorMsg_ != NULL) {
 		query->pErrorMsg_ = QP_ALLOC_NEW(alloc) util::String(alloc);
 		query->pErrorMsg_ = pErrorMsg_;

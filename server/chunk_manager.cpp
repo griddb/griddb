@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -28,7 +28,6 @@
 #include <iostream>
 #include <sstream>
 
-
 /*!
 	@brief Constructor of ChunkManager.
 */
@@ -48,9 +47,8 @@ ChunkManager::ChunkManager(ConfigTable& configTable,
 		  MAX_ONCE_SWAP_SIZE_BYTE_ /
 			  configTable.getUInt32(CONFIG_TABLE_DS_STORE_BLOCK_SIZE)
 			  ,
-		  (configTable.get<int32_t>(CONFIG_TABLE_DS_STORE_COMPRESSION_MODE) == 0
-					  ? NO_BLOCK_COMPRESSION
-					  : BLOCK_COMPRESSION)
+		  (configTable.get<int32_t>(CONFIG_TABLE_DS_STORE_COMPRESSION_MODE) == 
+				  0 ? NO_BLOCK_COMPRESSION : BLOCK_COMPRESSION)
 			  ),
 	  storeMemoryPool_(
 		  util::AllocatorInfo(ALLOCATOR_GROUP_STORE, "txnBlockPool"),
@@ -63,7 +61,7 @@ ChunkManager::ChunkManager(ConfigTable& configTable,
 	  chunkManagerStats_()
 {
 
-	config_.setUpConfigHandler(configTable);  
+	config_.setUpConfigHandler(configTable);	
 	chunkManagerStats_.setManager(*this);
 
 	try {
@@ -117,8 +115,8 @@ ChunkManager::ChunkManager(ConfigTable& configTable,
 
 				int64_t writePos = 0;
 				FileManager fileManager(getConfig(), checkpointFile);
-				uint32_t holeOffset = fileManager.compressChunk(
-					chunk.data(), getConfig().getPartitionCompressionMode(pId));
+				uint32_t holeOffset = fileManager.compressChunk(chunk.data(),
+					getConfig().getPartitionCompressionMode(pId));
 				fileManager.updateCheckSum(chunk.data());
 				fileManager.writeHolePunchingChunk(
 					chunk.data(), writePos, holeOffset);
@@ -128,7 +126,8 @@ ChunkManager::ChunkManager(ConfigTable& configTable,
 
 		for (PartitionId pId = 0; pId < getConfig().getPartitionNum(); pId++) {
 			partitionList_.push_back(UTIL_NEW PartitionData(
-				getConfig(), pId, getPartitionGroupData(pId).allocator_));
+				getConfig(), pId, getPartitionGroupData(pId).allocator_,
+				this));
 		}
 
 		memoryLimitManager_.redistributeMemoryLimit(
@@ -197,7 +196,9 @@ void ChunkManager::dropPartition(PartitionId pId) {
 		MetaChunkManager& metaChunkManager = getMetaChunkManager(pId);
 		BufferManager& bufferManager = getBufferManager(pId);
 		ChunkCursor cursor;
-		BaseMetaChunk* baseMetaChunk = metaChunkManager.begin(pId, cursor);
+		ChunkKey* chunkKey;
+		BaseMetaChunk* baseMetaChunk = metaChunkManager.begin(
+				pId, cursor, chunkKey);
 		bool isHead = false;
 		while (!isHead) {
 			if (!baseMetaChunk->isFree()) {
@@ -208,7 +209,7 @@ void ChunkManager::dropPartition(PartitionId pId) {
 				}
 				freeChunk(pId, cursor.categoryId_, cursor.cId_);
 			}
-			baseMetaChunk = metaChunkManager.next(pId, cursor, isHead);
+			baseMetaChunk = metaChunkManager.next(pId, cursor, isHead, chunkKey);
 		}
 
 		assert(
@@ -261,8 +262,9 @@ void ChunkManager::freeChunk(
 	PartitionId pId, ChunkCategoryId categoryId, ChunkId cId) {
 	assert(isValidId(pId, categoryId, cId));
 	MetaChunkManager& metaChunkManager = getMetaChunkManager(pId);
+	ChunkKey *metaChunkKey = NULL;
 	BaseMetaChunk* baseMetaChunk =
-		metaChunkManager.getMetaChunk(pId, categoryId, cId);
+		metaChunkManager.getMetaChunk(pId, categoryId, cId, metaChunkKey);
 	assert(!baseMetaChunk->isFree());
 	int64_t checkpointPos = baseMetaChunk->getCheckpointPos();
 
@@ -277,7 +279,9 @@ void ChunkManager::freeChunk(
 		bufferManager.freeCheckpointBuffer(checkpointBuffer);
 	}
 
-	baseMetaChunk->setChunkKey(UNDEF_CHUNK_KEY);
+	if (metaChunkKey != NULL) {
+		*metaChunkKey = UNDEF_CHUNK_KEY;
+	}
 	baseMetaChunk->resetUnoccupiedSize();
 	baseMetaChunk->setAffinityUnused();
 
@@ -296,8 +300,9 @@ ChunkManager::MetaChunk* ChunkManager::getChunkForUpdate(PartitionId pId,
 	assert(isValidId(pId, categoryId, cId));
 
 	MetaChunkManager& metaChunkManager = getMetaChunkManager(pId);
+	ChunkKey *metaChunkKey;
 	BaseMetaChunk* baseMetaChunk =
-		metaChunkManager.getMetaChunk(pId, categoryId, cId);
+			metaChunkManager.getMetaChunk(pId, categoryId, cId, metaChunkKey);
 	assert(!baseMetaChunk->isFree());
 	int64_t checkpointPos = baseMetaChunk->getCheckpointPos();
 
@@ -319,10 +324,10 @@ ChunkManager::MetaChunk* ChunkManager::getChunkForUpdate(PartitionId pId,
 	}
 
 	if (chunkKey != UNDEF_CHUNK_KEY &&
-		baseMetaChunk->getChunkKey() < chunkKey) {
-		assert(isBatchFreeMode(categoryId));
-		baseMetaChunk->setChunkKey(chunkKey);
-		ChunkHeader::setChunkKey(buffer, chunkKey);
+			metaChunkKey != NULL && *metaChunkKey < chunkKey) {
+			assert(isBatchFreeMode(categoryId));
+			*metaChunkKey = chunkKey;
+			ChunkHeader::setChunkKey(buffer, chunkKey);
 	}
 
 	metaChunk.base_ = baseMetaChunk;
@@ -346,8 +351,9 @@ ChunkManager::MetaChunk* ChunkManager::getChunk(
 	assert(isValidId(pId, categoryId, cId));
 
 	MetaChunkManager& metaChunkManager = getMetaChunkManager(pId);
+	ChunkKey* chunkKey;
 	BaseMetaChunk* baseMetaChunk =
-		metaChunkManager.getMetaChunk(pId, categoryId, cId);
+		metaChunkManager.getMetaChunk(pId, categoryId, cId, chunkKey);
 	int64_t checkpointPos = baseMetaChunk->getCheckpointPos();
 
 	MetaChunk& metaChunk = getMetaChunk(pId);
@@ -375,7 +381,7 @@ ChunkManager::MetaChunk* ChunkManager::searchChunk(PartitionId pId,
 	ChunkKey chunkKey, uint8_t powerSize, ChunkId& cId) {
 	assert(isValidId(pId, categoryId));
 	BaseMetaChunk* baseMetaChunk = NULL;
-
+	
 	try {
 		AffinityManager& affinityManager = getAffinityManager(pId);
 		cId =
@@ -383,8 +389,9 @@ ChunkManager::MetaChunk* ChunkManager::searchChunk(PartitionId pId,
 
 		MetaChunkManager& metaChunkManager = getMetaChunkManager(pId);
 		if (cId != UNDEF_CHUNKID) {
-			baseMetaChunk = metaChunkManager.getMetaChunk(pId, categoryId, cId);
-
+			ChunkKey *metaChunkKey;
+			baseMetaChunk = metaChunkManager.getMetaChunk(
+					pId, categoryId, cId, metaChunkKey);
 			if (baseMetaChunk->isFree()) {
 				ChunkId oldAffinityCId;
 				affinityManager.setAffinityChunkId(pId, categoryId,
@@ -409,8 +416,7 @@ ChunkManager::MetaChunk* ChunkManager::searchChunk(PartitionId pId,
 
 		if (cId == UNDEF_CHUNKID) {
 			const uint8_t BATCH_FREE_MODE_EMPTY_CHUNK_THRESHOLD =
-				getConfig().getChunkExpSize() -
-				0x03;  
+				getConfig().getChunkExpSize();
 			if (isBatchFreeMode(categoryId)) {
 				if (powerSize < BATCH_FREE_MODE_EMPTY_CHUNK_THRESHOLD) {
 					powerSize = BATCH_FREE_MODE_EMPTY_CHUNK_THRESHOLD;
@@ -418,7 +424,9 @@ ChunkManager::MetaChunk* ChunkManager::searchChunk(PartitionId pId,
 			}
 
 			cId = searchEmptyChunk(pId, categoryId, powerSize);
-			baseMetaChunk = metaChunkManager.getMetaChunk(pId, categoryId, cId);
+			ChunkKey *metaChunkKey;
+			baseMetaChunk = metaChunkManager.getMetaChunk(
+					pId, categoryId, cId, metaChunkKey);
 			assert(cId != UNDEF_CHUNKID);
 			assert(cId < metaChunkManager.getNextTail(pId, categoryId).cId_);
 		}
@@ -448,8 +456,9 @@ ChunkManager::MetaChunk* ChunkManager::searchChunk(PartitionId pId,
 	assert(isValidId(pId, categoryId, cId));
 	try {
 		MetaChunkManager& metaChunkManager = getMetaChunkManager(pId);
+		ChunkKey *metaChunkKey;
 		BaseMetaChunk* baseMetaChunk =
-			metaChunkManager.getMetaChunk(pId, categoryId, cId);
+			metaChunkManager.getMetaChunk(pId, categoryId, cId, metaChunkKey);
 		if (powerSize <= baseMetaChunk->getUnoccupiedSize()) {
 			return getChunkForUpdate(pId, categoryId, cId, chunkKey, true);
 		}
@@ -520,11 +529,12 @@ bool ChunkManager::batchFreeChunk(PartitionId pId, ChunkKey chunkKey,
 	uint64_t beforeBatchFreeCount = metaChunkManager.getPGBatchFreeCount();
 
 	ChunkCursor& cursor = metaChunkManager.getBatchFreeCursor(pId);
-	BaseMetaChunk* baseMetaChunk = metaChunkManager.begin(pId, cursor);
+	ChunkKey* metaChunkKey;
+	BaseMetaChunk* baseMetaChunk = metaChunkManager.begin(pId, cursor, metaChunkKey);
 	bool isHead = false;
 	for (scanCount = 0; scanCount < scanChunkNum && !isHead; scanCount++) {
 		if (isBatchFreeMode(cursor.categoryId_) && !baseMetaChunk->isFree()) {
-			if (baseMetaChunk->getChunkKey() <= chunkKey) {
+			if (metaChunkKey && *metaChunkKey <= chunkKey) {
 				assert(!getBufferManager(pId).isFixed(
 					pId, cursor.categoryId_, cursor.cId_));
 				freeChunk(pId, cursor.categoryId_, cursor.cId_);
@@ -532,7 +542,7 @@ bool ChunkManager::batchFreeChunk(PartitionId pId, ChunkKey chunkKey,
 			}
 		}
 
-		baseMetaChunk = metaChunkManager.next(pId, cursor, isHead);
+		baseMetaChunk = metaChunkManager.next(pId, cursor, isHead, metaChunkKey);
 		if (!isHead &&
 			metaChunkManager.getNextTail(pId, cursor.categoryId_).cId_ <=
 				cursor.cId_) {
@@ -544,7 +554,7 @@ bool ChunkManager::batchFreeChunk(PartitionId pId, ChunkKey chunkKey,
 				isHead = true;  
 				break;
 			}
-			baseMetaChunk = metaChunkManager.begin(pId, cursor);
+			baseMetaChunk = metaChunkManager.begin(pId, cursor, metaChunkKey);
 		}
 	}
 
@@ -555,11 +565,12 @@ bool ChunkManager::batchFreeChunk(PartitionId pId, ChunkKey chunkKey,
 }
 
 
+
 /*!
 	@brief Validate if the header of the checkpoint block is valid.
 */
 void ChunkManager::isValidFileHeader(PartitionGroupId pgId) {
-	assert(0 <= pgId && pgId < getConfig().getPartitionGroupNum());
+	assert(pgId < getConfig().getPartitionGroupNum());
 	CheckpointManager& pgCheckpointManager = getPGCheckpointManager(pgId);
 
 	if (pgCheckpointManager.getPGFileSize() == 0) {
@@ -585,11 +596,13 @@ void ChunkManager::isValidFileHeader(PartitionGroupId pgId) {
 	@brief Set checkpoint block bits to the CheckpointFile for recovery.
 */
 void ChunkManager::setCheckpointBit(
-	PartitionGroupId pgId, const uint8_t* bitList, uint64_t bitNum) {
+		PartitionGroupId pgId, const uint8_t* bitList, uint64_t bitNum,
+		bool releaseUnusedFileBlocks) {
 	try {
-		assert(0 <= pgId && pgId < getConfig().getPartitionGroupNum());
+		assert(pgId < getConfig().getPartitionGroupNum());
 		CheckpointManager& pgCheckpointManager = getPGCheckpointManager(pgId);
-		pgCheckpointManager.setPGCheckpointBit(bitList, bitNum);
+		pgCheckpointManager.setPGCheckpointBit(
+				bitList, bitNum, releaseUnusedFileBlocks);
 	}
 	catch (std::exception& e) {
 		GS_RETHROW_SYSTEM_ERROR(e, "");
@@ -623,14 +636,17 @@ void ChunkManager::recoveryChunk(PartitionId pId, ChunkCategoryId categoryId,
 				<< unoccupiedSize << ", filePos, " << filePos);
 
 		MetaChunkManager& metaChunkManager = getMetaChunkManager(pId);
+		ChunkKey *metaChunkKey;
 		BaseMetaChunk* baseMetaChunk =
-			metaChunkManager.reallocate(pId, categoryId, cId);
+				metaChunkManager.reallocate(pId, categoryId, cId, metaChunkKey);
 
 		if (!exist(pId)) {
 			initialize(pId);
 		}
 
-		baseMetaChunk->setChunkKey(chunkKey);
+		if (metaChunkKey != NULL) {
+			*metaChunkKey = chunkKey;
+		}
 		baseMetaChunk->setUnoccupiedSize(unoccupiedSize);
 
 		baseMetaChunk->setCheckpointPos(filePos);
@@ -708,7 +724,9 @@ void ChunkManager::recoveryChunk(
 		}
 
 		BaseMetaChunk* baseMetaChunk = NULL;
-		baseMetaChunk = metaChunkManager.reallocate(pId, categoryId, cId);
+		ChunkKey *metaChunkKey;
+		baseMetaChunk = metaChunkManager.reallocate(
+				pId, categoryId, cId, metaChunkKey);
 		BufferManager& bufferManager = getBufferManager(pId);
 		BufferInfo* bufferInfo = NULL;
 		uint8_t* buffer =
@@ -716,7 +734,9 @@ void ChunkManager::recoveryChunk(
 		memcpy(buffer, chunk, size);
 		bufferManager.unfix(pId, categoryId, cId);  
 
-		baseMetaChunk->setChunkKey(chunkKey);
+		if (metaChunkKey != NULL) {
+			*metaChunkKey = chunkKey;
+		}
 		baseMetaChunk->setUnoccupiedSize(unoccupiedSize);
 
 		GS_TRACE_INFO(CHUNK_MANAGER_DETAIL, GS_TRACE_CHM_INTERNAL_INFO,
@@ -733,7 +753,7 @@ void ChunkManager::recoveryChunk(
 	@brief Adjust using store memory to the memoryLimit of the partitionGroup.
 */
 void ChunkManager::adjustPGStoreMemory(PartitionGroupId pgId) {
-	assert(0 <= pgId && pgId < getConfig().getPartitionGroupNum());
+	assert(pgId < getConfig().getPartitionGroupNum());
 	try {
 		BufferManager& bufferManager = getPGBufferManager(pgId);
 		bufferManager.adjustStoreMemory();
@@ -748,7 +768,7 @@ void ChunkManager::adjustPGStoreMemory(PartitionGroupId pgId) {
 	@brief Start checkpoint of partitionGroup by initializing checkpoint data.
 */
 void ChunkManager::startCheckpoint(PartitionGroupId pgId, CheckpointId cpId) {
-	assert(0 <= pgId && pgId < getConfig().getPartitionGroupNum());
+	assert(pgId < getConfig().getPartitionGroupNum());
 	try {
 		CheckpointManager& pgCheckpointManager = getPGCheckpointManager(pgId);
 		pgCheckpointManager.clearPG();
@@ -764,7 +784,7 @@ void ChunkManager::startCheckpoint(PartitionGroupId pgId, CheckpointId cpId) {
    blocks.
 */
 void ChunkManager::endCheckpoint(PartitionGroupId pgId, CheckpointId cpId) {
-	assert(0 <= pgId && pgId < getConfig().getPartitionGroupNum());
+	assert(pgId < getConfig().getPartitionGroupNum());
 	try {
 		CheckpointManager& pgCheckpointManager = getPGCheckpointManager(pgId);
 		pgCheckpointManager.switchPGCheckpointBit(cpId);
@@ -780,7 +800,7 @@ void ChunkManager::endCheckpoint(PartitionGroupId pgId, CheckpointId cpId) {
 	@brief Flush the checkpointFile of partitionGroup.
 */
 void ChunkManager::flush(PartitionGroupId pgId) {
-	assert(0 <= pgId && pgId < getConfig().getPartitionGroupNum());
+	assert(pgId < getConfig().getPartitionGroupNum());
 	try {
 		EXEC_FAILURE(GS_ERROR_CHM_IO_FAILED);
 		CheckpointManager& pgCheckpointManager = getPGCheckpointManager(pgId);
@@ -798,7 +818,7 @@ void ChunkManager::flush(PartitionGroupId pgId) {
 	@brief Return checkpoint bits of the CheckpointFile of partitionGroup.
 */
 BitArray& ChunkManager::getCheckpointBit(PartitionGroupId pgId) {
-	assert(0 <= pgId && pgId < getConfig().getPartitionGroupNum());
+	assert(pgId < getConfig().getPartitionGroupNum());
 	CheckpointManager& checkpointManager = getPGCheckpointManager(pgId);
 	return checkpointManager.getPGCheckpointBit();
 }
@@ -807,7 +827,7 @@ BitArray& ChunkManager::getCheckpointBit(PartitionGroupId pgId) {
 	@brief Clean the information for the checkpoint of partitionGroup.
 */
 void ChunkManager::cleanCheckpointData(PartitionGroupId pgId) {
-	assert(0 <= pgId && pgId < getConfig().getPartitionGroupNum());
+	assert(pgId < getConfig().getPartitionGroupNum());
 	CheckpointManager& checkpointManager = getPGCheckpointManager(pgId);
 	checkpointManager.clearPG();
 }
@@ -828,8 +848,9 @@ void ChunkManager::startCheckpoint(PartitionId pId) {
 
 		MetaChunkManager& metaChunkManager = getMetaChunkManager(pId);
 		ChunkCursor cursor;
-		BaseMetaChunk* baseMetaChunk = metaChunkManager.begin(pId, cursor);
-
+		ChunkKey *metaChunkKey;
+		BaseMetaChunk* baseMetaChunk = metaChunkManager.begin(
+				pId, cursor, metaChunkKey);
 		bool isHead = false;
 		while (!isHead) {
 			if (baseMetaChunk->isFree()) {
@@ -842,7 +863,8 @@ void ChunkManager::startCheckpoint(PartitionId pId) {
 					baseMetaChunk->setCheckpointPos(-1);
 				}
 
-				baseMetaChunk = metaChunkManager.next(pId, cursor, isHead);
+				baseMetaChunk = metaChunkManager.next(
+						pId, cursor, isHead, metaChunkKey);
 				continue;
 			}
 
@@ -866,7 +888,7 @@ void ChunkManager::startCheckpoint(PartitionId pId) {
 						newCheckpointPos);
 				}
 				baseMetaChunk = metaChunkManager.getMetaChunk(
-					pId, cursor.categoryId_, cursor.cId_);
+						pId, cursor.categoryId_, cursor.cId_, metaChunkKey);
 				baseMetaChunk->setCheckpointPos(newCheckpointPos);
 				baseMetaChunk->setCumulativeDirtyFlag(true);
 				baseMetaChunk->setDifferentialDirtyFlag(true);
@@ -884,7 +906,8 @@ void ChunkManager::startCheckpoint(PartitionId pId) {
 			GS_TRACE_INFO(CHUNK_MANAGER_DETAIL, GS_TRACE_CHM_INTERNAL_INFO,
 				getTraceInfo(pId, cursor.categoryId_, cursor.cId_));
 
-			baseMetaChunk = metaChunkManager.next(pId, cursor, isHead);
+			baseMetaChunk = metaChunkManager.next(
+					pId, cursor, isHead, metaChunkKey);
 		}
 	}
 	catch (std::exception& e) {
@@ -916,15 +939,15 @@ uint64_t ChunkManager::getScanSize(PartitionId pId) {
 }
 
 ChunkManager::MetaChunk* ChunkManager::begin(
-	PartitionId pId, ChunkCategoryId& categoryId, ChunkId& cId) {
+		PartitionId pId, ChunkCategoryId& categoryId,
+		ChunkId& cId, ChunkKey* &chunkKey) {
 	assert(isValidId(pId));
 
 	ChunkCursor& cursor = getSyncCursor(pId);
 	cursor.categoryId_ = 0;
 	cursor.cId_ = 0;
 	MetaChunkManager& metaChunkManager = getMetaChunkManager(pId);
-	BaseMetaChunk* baseMetaChunk = metaChunkManager.begin(pId, cursor);
-
+	BaseMetaChunk* baseMetaChunk = metaChunkManager.begin(pId, cursor, chunkKey);
 	categoryId = cursor.categoryId_;
 	cId = cursor.cId_;
 	if (baseMetaChunk->isFree()) {
@@ -936,13 +959,14 @@ ChunkManager::MetaChunk* ChunkManager::begin(
 	}
 }
 ChunkManager::MetaChunk* ChunkManager::next(
-	PartitionId pId, ChunkCategoryId& categoryId, ChunkId& cId) {
+		PartitionId pId, ChunkCategoryId& categoryId,
+		ChunkId& cId, ChunkKey* &chunkKey) {
 	assert(isValidId(pId));
 	ChunkCursor& cursor = getSyncCursor(pId);
 	bool isHead = false;
 	MetaChunkManager& metaChunkManager = getMetaChunkManager(pId);
-	BaseMetaChunk* baseMetaChunk = metaChunkManager.next(pId, cursor, isHead);
-
+	BaseMetaChunk* baseMetaChunk = metaChunkManager.next(
+			pId, cursor, isHead, chunkKey);
 	categoryId = cursor.categoryId_;
 	cId = cursor.cId_;
 	if (baseMetaChunk->isFree()) {
@@ -1062,7 +1086,9 @@ uint64_t ChunkManager::startSync(CheckpointId cpId, PartitionId pId) {
 		checkpointManager.clearCheckpointPosList();
 		MetaChunkManager& metaChunkManager = getMetaChunkManager(pId);
 		ChunkCursor cursor;
-		BaseMetaChunk* baseMetaChunk = metaChunkManager.begin(pId, cursor);
+		ChunkKey *metaChunkKey;
+		BaseMetaChunk* baseMetaChunk = metaChunkManager.begin(
+				pId, cursor, metaChunkKey);
 		bool isHead = false;
 		while (!isHead) {
 			if (baseMetaChunk->getCheckpointPos() != -1) {
@@ -1070,7 +1096,8 @@ uint64_t ChunkManager::startSync(CheckpointId cpId, PartitionId pId) {
 				checkpointManager.appendCheckpointPosList(pId, checkpointPos);
 			}
 
-			baseMetaChunk = metaChunkManager.next(pId, cursor, isHead);
+			baseMetaChunk = metaChunkManager.next(
+					pId, cursor, isHead, metaChunkKey);
 		}
 
 		assert(pId != checkpointManager.getSyncPId() ||
@@ -1123,6 +1150,219 @@ bool ChunkManager::getCheckpointChunk(
 	}
 }
 
+int64_t ChunkManager::getCheckpointChunkPos(
+		PartitionId pId,
+		std::map<int64_t, int64_t> &oldOffsetMap 
+		) {
+	assert(isValidId(pId));
+
+	CheckpointManager& checkpointManager = getCheckpointManager(pId);
+	try {
+		oldOffsetMap.clear();
+
+		MetaChunkManager& metaChunkManager = getMetaChunkManager(pId);
+		ChunkCursor cursor;
+		int64_t chunkSeqNumber = 0;
+		ChunkKey *metaChunkKey;
+		BaseMetaChunk* baseMetaChunk = metaChunkManager.begin(
+				pId, cursor, metaChunkKey);
+		bool isHead = false;
+		while (!isHead) {
+			int64_t checkpointPos = baseMetaChunk->getCheckpointPos();
+			if (checkpointPos != -1) {
+				assert(oldOffsetMap.find(checkpointPos) == oldOffsetMap.end());
+				oldOffsetMap[checkpointPos] = chunkSeqNumber;
+				++chunkSeqNumber;
+			}
+			baseMetaChunk = metaChunkManager.next(
+					pId, cursor, isHead, metaChunkKey);
+		}
+		return chunkSeqNumber;
+	}
+	catch (std::exception& e) {
+		GS_RETHROW_SYSTEM_ERROR(
+			e, "pId," << pId << ",innerCpId,"
+					  << checkpointManager.getPGCompletedCheckpointId()
+					  << GS_EXCEPTION_MESSAGE(e));
+	}
+}
+
+uint64_t ChunkManager::makeSyncTempCpFile(
+		PartitionGroupId pgId, PartitionId pId, CheckpointId cpId,
+		const std::string& syncTempPath,
+		std::map<int64_t, int64_t> &oldOffsetMap, 
+		std::map<int64_t, int64_t> &newOffsetMap, 
+		CheckpointFile &syncTempFile) {
+	assert(pgId < getConfig().getPartitionGroupNum());
+	try {
+		const uint32_t copySize = 1 * 1024 * 1024;
+
+		util::NormalXArray<uint8_t> readBuffer;
+		uint8_t temp = 0;
+		readBuffer.assign(copySize, temp);
+
+		util::NormalXArray<uint8_t> writeBuffer;
+		writeBuffer.assign(copySize, temp);
+
+		Config& config = getConfig();
+		CheckpointFile* cpFile = &getPGCheckpointFile(pgId);
+		assert(cpFile);
+
+		GS_TRACE_INFO(CHUNK_MANAGER_DETAIL, GS_TRACE_CHM_INTERNAL_INFO,
+			"makeSyncTempCpFile started (syncTempName=" << syncTempPath << ")");
+
+		cpFile->flush();
+		const uint32_t chunkSize = config.getChunkSize();
+		const uint64_t chunkNum = cpFile->getBlockNum();
+		const uint32_t copyNum = static_cast<int32_t>(copySize / chunkSize);
+
+		GS_TRACE_INFO(CHUNK_MANAGER_DETAIL, GS_TRACE_CHM_INTERNAL_INFO,
+			"copySize=" << copySize << ", chunkNum=" << chunkNum
+						<< ", copyNum=" << copyNum);
+		int64_t srcBlockNo = 0;
+		int64_t destBlockNo = 0;
+		FileManager originalFileManager(config_, *cpFile);
+		FileManager syncTempFileManager(config_, syncTempFile);
+		{
+			uint64_t writePos = 0;
+			uint8_t *writeBufferTop = writeBuffer.data();
+			for (; static_cast<uint64_t>(srcBlockNo + copyNum) < chunkNum; srcBlockNo += copyNum) {
+				GS_TRACE_INFO(CHUNK_MANAGER_DETAIL, GS_TRACE_CHM_INTERNAL_INFO,
+					"srcBlockNo=" << srcBlockNo << ", chunkNum=" << chunkNum);
+
+				originalFileManager.readChunk(
+					readBuffer.data(), copyNum, srcBlockNo);
+
+				for (uint32_t i = 0; i < copyNum; ++i) {
+					const uint8_t* chunkTop = readBuffer.data() + chunkSize * i;
+					if (cpFile->getValidBlockInfo(srcBlockNo + i)) {
+						PartitionId chunkPId =
+								ChunkHeader::getPartitionId(chunkTop);
+						if (chunkPId != pId) {
+							continue;
+						}
+						uint32_t chunkCheckSum =
+								ChunkHeader::getCheckSum(chunkTop);
+						uint32_t calcCheckSum =
+								ChunkHeader::calcCheckSum(chunkTop);
+						if (ChunkHeader::getPartitionId(chunkTop) == pId) {
+							EXEC_FAILURE(GS_ERROR_CHM_INVALID_CHUNK_CHECKSUM);
+							if (chunkCheckSum != calcCheckSum) {
+								GS_THROW_SYSTEM_ERROR(
+									GS_ERROR_CHM_INVALID_CHUNK_CHECKSUM,
+									"checkSum, " << chunkCheckSum << ", " <<
+									calcCheckSum << ", pgId, " << pgId <<
+									", pId," << chunkPId <<
+									",blockNo," << srcBlockNo + i);
+							}
+							int64_t newOffsetMapKey = -1;
+							std::map<int64_t, int64_t>::iterator mapItr;
+							if ((mapItr = oldOffsetMap.find(srcBlockNo + i))
+									== oldOffsetMap.end()) {
+								continue;
+							}
+							else {
+								newOffsetMapKey = mapItr->second;
+								oldOffsetMap.erase(mapItr);
+							}
+							uint8_t* writeTop = writeBufferTop + chunkSize * writePos;
+							memcpy(writeTop, chunkTop, chunkSize);
+							
+							assert(newOffsetMap.find(newOffsetMapKey) == newOffsetMap.end());
+							newOffsetMap[newOffsetMapKey] = static_cast<ChunkId>(destBlockNo + writePos);
+							++writePos;
+							if (writePos == copyNum) {
+								syncTempFile.writeBlock(writeBufferTop, copyNum, destBlockNo);
+								destBlockNo += copyNum;
+								writePos = 0;
+								writeTop = writeBufferTop;
+							}
+						}
+					}
+				}
+			}
+			if (static_cast<uint64_t>(srcBlockNo) < chunkNum) {
+				const uint32_t lastCopyNum =
+					static_cast<uint32_t>(chunkNum - srcBlockNo);
+				GS_TRACE_INFO(
+						CHUNK_MANAGER_DETAIL, GS_TRACE_CHM_INTERNAL_INFO,
+						"srcBlockNo=" << srcBlockNo <<
+						", chunkNum=" << chunkNum <<
+						", lastCopyNum=" << lastCopyNum);
+				originalFileManager.readChunk(
+						readBuffer.data(), lastCopyNum, srcBlockNo);
+
+				for (uint32_t i = 0; i < lastCopyNum; ++i) {
+					const uint8_t* chunkTop = readBuffer.data() + chunkSize * i;
+					if (cpFile->getValidBlockInfo(srcBlockNo + i)) {
+						PartitionId chunkPId =
+								ChunkHeader::getPartitionId(chunkTop);
+						if (chunkPId != pId) {
+							continue;
+						}
+						uint32_t chunkCheckSum =
+								ChunkHeader::getCheckSum(chunkTop);
+						uint32_t calcCheckSum =
+								ChunkHeader::calcCheckSum(chunkTop);
+//						int64_t chunkCategoryId = static_cast<int64_t>(
+//								ChunkHeader::getChunkCategoryId(chunkTop));
+//						ChunkId chunkId = ChunkHeader::getChunkId(chunkTop);
+						EXEC_FAILURE(GS_ERROR_CHM_INVALID_CHUNK_CHECKSUM);
+						if (chunkCheckSum != calcCheckSum) {
+							GS_THROW_SYSTEM_ERROR(
+								GS_ERROR_CHM_INVALID_CHUNK_CHECKSUM,
+								"checkSum, " << chunkCheckSum << ", " <<
+								calcCheckSum << ", pgId, " << pgId <<
+								", pId," << chunkPId <<
+								", blockNo," << srcBlockNo + i);
+						}
+						int64_t newOffsetMapKey = -1;
+						std::map<int64_t, int64_t>::iterator mapItr;
+						if ((mapItr = oldOffsetMap.find(srcBlockNo + i))
+								== oldOffsetMap.end()) {
+							continue;
+							}
+						else {
+							newOffsetMapKey = mapItr->second;
+							oldOffsetMap.erase(mapItr);
+						}
+						uint8_t* writeTop = writeBufferTop + chunkSize * writePos;
+						memcpy(writeTop, chunkTop, chunkSize);
+
+						assert(newOffsetMap.find(newOffsetMapKey) == newOffsetMap.end());
+						newOffsetMap[newOffsetMapKey] = static_cast<ChunkId>(destBlockNo + writePos);
+						++writePos;
+						if (writePos == copyNum) {
+							syncTempFile.writeBlock(writeBufferTop, copyNum, destBlockNo);
+							destBlockNo += copyNum;
+							writePos = 0;
+							writeTop = writeBufferTop;
+						}
+					}
+				}
+				if (writePos > 0) {
+					syncTempFile.writeBlock(writeBufferTop, writePos, destBlockNo);
+					destBlockNo += writePos;
+				}
+			}
+		}
+		syncTempFile.flush();
+		syncTempFile.close();
+
+		GS_TRACE_INFO(
+				CHUNK_MANAGER_DETAIL, GS_TRACE_CHM_INTERNAL_INFO,
+				"makeSyncTempCpFile: end: copy chunkNum=" << newOffsetMap.size());
+
+		if (!oldOffsetMap.empty()) {
+		}
+
+		return newOffsetMap.size() * chunkSize;
+	}
+	catch (std::exception& e) {
+		GS_RETHROW_USER_OR_SYSTEM(
+				e, "pgId," << pgId << ",cpId," << cpId << GS_EXCEPTION_MESSAGE(e));
+	}
+}
 
 std::string ChunkManager::dump(PartitionId pId, ChunkCategoryId categoryId) {
 	assert(isValidId(pId, categoryId));
@@ -1134,29 +1374,38 @@ std::string ChunkManager::dump(PartitionId pId, ChunkCategoryId categoryId) {
 	ChunkCursor cursor;
 	bool isHead = false;
 	if (categoryId == UNDEF_CHUNK_CATEGORY_ID) {
-		BaseMetaChunk* baseMetaChunk = metaChunkManager.begin(pId, cursor);
+		ChunkKey *metaChunkKey;
+		BaseMetaChunk* baseMetaChunk = metaChunkManager.begin(
+				pId, cursor, metaChunkKey);
 		while (!isHead) {
 			stream << "categoryId," << (int32_t)cursor.categoryId_ << ",cId,"
-				   << cursor.cId_ << "," << baseMetaChunk->dump() << std::endl;
-			baseMetaChunk = metaChunkManager.next(pId, cursor, isHead);
+				   << cursor.cId_ << "," << baseMetaChunk->dump()
+				   << ",chunkKey," << (metaChunkKey ? *metaChunkKey : -1)
+				   << std::endl;
+			baseMetaChunk = metaChunkManager.next(
+					pId, cursor, isHead, metaChunkKey);
 		}
 	}
 	else {
 		cursor.categoryId_ = categoryId;
-		BaseMetaChunk* baseMetaChunk = metaChunkManager.begin(pId, cursor);
+		ChunkKey *metaChunkKey;
+		BaseMetaChunk* baseMetaChunk = metaChunkManager.begin(
+				pId, cursor, metaChunkKey);
 		while (!isHead) {
 			stream << "categoryId," << (int32_t)cursor.categoryId_ << ",cId,"
-				   << cursor.cId_ << "," << baseMetaChunk->dump() << std::endl;
-			baseMetaChunk =
-				metaChunkManager.nextForCategory(pId, cursor, isHead);
+				   << cursor.cId_ << "," << baseMetaChunk->dump()
+				   << ",chunkKey," << (metaChunkKey ? *metaChunkKey : -1)
+				   << std::endl;
+			baseMetaChunk = metaChunkManager.nextForCategory(
+					pId, cursor, isHead, metaChunkKey);
 		}
 	}
 	return stream.str();
 }
 std::string ChunkManager::dumpChunkCSVField() {
 	util::NormalOStringStream stream;
-	stream << "#," << ChunkHeader::dumpFieldName() << "validChecksum"
-		   << std::endl;
+
+	stream << ChunkHeader::dumpFieldName() << "validChecksum";
 	return stream.str();
 }
 std::string ChunkManager::dumpChunkCSV(PartitionGroupId pgId, int64_t pos) {
@@ -1171,9 +1420,8 @@ std::string ChunkManager::dumpChunkCSV(PartitionGroupId pgId, int64_t pos) {
 		fileManager.isValidCheckSum(buffer);
 		fileManager.uncompressChunk(buffer);
 
-		if (getPGCheckpointFile(pgId).getValidBitArray().get(pos)) {
-			stream << pos << "," << ChunkHeader::dump(buffer) << std::endl;
-		}
+
+		stream << ChunkHeader::dump(buffer);
 
 		checkpointMemoryPool_.deallocate(buffer);
 		return stream.str();
@@ -1255,8 +1503,8 @@ ChunkId ChunkManager::searchEmptyChunk(
 	if (nextTail.cId_ <= cursor.cId_) {
 		cursor.cId_ = 0;  
 	}
-	baseMetaChunk = metaChunkManager.begin(pId, cursor);
-
+	ChunkKey *metaChunkKey;
+	baseMetaChunk = metaChunkManager.begin(pId, cursor, metaChunkKey);
 	uint64_t count = 0;
 	for (; count < searchNum; count++) {
 		assert(cursor.cId_ <
@@ -1280,34 +1528,40 @@ ChunkId ChunkManager::searchEmptyChunk(
 			unusedCandidate = cursor;  
 		}
 
-		baseMetaChunk = metaChunkManager.nextForCategory(pId, cursor, isHead);
+		baseMetaChunk = metaChunkManager.nextForCategory(
+				pId, cursor, isHead, metaChunkKey);
 		if (!isHead && nextTail.cId_ <= cursor.cId_) {
 			cursor.cId_ = 0;
-			baseMetaChunk = metaChunkManager.begin(pId, cursor);
+			baseMetaChunk = metaChunkManager.begin(pId, cursor, metaChunkKey);
 		}
 	}
 
 	if (inMemoryCandidate) {
-		assert(powerSize <=
-			   metaChunkManager.getMetaChunk(pId, categoryId, cursor.cId_)
-				   ->getUnoccupiedSize());
+#ifndef NDEBUG
+		baseMetaChunk = metaChunkManager.getMetaChunk(
+				pId, categoryId, cursor.cId_, metaChunkKey);
+		assert(powerSize <= baseMetaChunk->getUnoccupiedSize());
+#endif
 		assert(inMemoryCandidate->cId_ == cursor.cId_);
 		return cursor.cId_;
 	}
 	else if (swappedCandidate.cId_ != UNDEF_CHUNKID) {
 		cursor = swappedCandidate;
-		assert(powerSize <=
-			   metaChunkManager
-				   .getMetaChunk(pId, categoryId, swappedCandidate.cId_)
-				   ->getUnoccupiedSize());
+#ifndef NDEBUG
+		baseMetaChunk = metaChunkManager.getMetaChunk(
+				pId, categoryId, swappedCandidate.cId_, metaChunkKey);
+		assert(powerSize <= baseMetaChunk->getUnoccupiedSize());
+#endif
 		assert(swappedCandidate.cId_ == cursor.cId_);
 		return swappedCandidate.cId_;
 	}
 	else if (unusedCandidate.cId_ != UNDEF_CHUNKID) {
 		cursor = unusedCandidate;
-		assert(metaChunkManager
-				   .getMetaChunk(pId, categoryId, unusedCandidate.cId_)
-				   ->isFree());
+#ifndef NDEBUG
+		baseMetaChunk = metaChunkManager.getMetaChunk(
+				pId, categoryId, unusedCandidate.cId_, metaChunkKey);
+		assert(baseMetaChunk->isFree());
+#endif
 		assert(unusedCandidate.cId_ == cursor.cId_);
 		return unusedCandidate.cId_;
 	}
@@ -1330,8 +1584,9 @@ std::string ChunkManager::getTraceInfo(PartitionId pId,
 	MetaChunkManager& metaChunkManager = getMetaChunkManager(pId);
 	if (enableMetaChunk &&
 		cId < (ChunkId)metaChunkManager.getChunkList(pId, categoryId).size()) {
+		ChunkKey *metaChunkKey;
 		BaseMetaChunk* baseMetaChunk =
-			metaChunkManager.getMetaChunk(pId, categoryId, cId);
+			metaChunkManager.getMetaChunk(pId, categoryId, cId, metaChunkKey);
 		if (baseMetaChunk) {
 			stream << baseMetaChunk->dump();
 		}
@@ -1436,15 +1691,14 @@ ChunkManager::Config::Config(
 	: partitionGroupNum_(partitionGroupNum),
 	  partitionNum_(partitionNum),
 	  categoryNum_(chunkCategoryNum),
-	  chunkExpSize_(util::nextPowerBitsOf2(chunkSize)),
+	  chunkExpSize_(static_cast<uint8_t>(util::nextPowerBitsOf2(chunkSize))),
 	  chunkSize_(chunkSize),
 	  atomicAffinitySize_(affinitySize),
 	  isWarmStart_(isWarmStart),
 	  maxOnceSwapNum_(maxOnceSwapNum)
 	  ,
 	  partitionCompressionMode_(partitionNum),
-	  compressionMode_(
-		  initializetCompressionMode(compressionMode))  
+	  compressionMode_(initializetCompressionMode(compressionMode))  
 {
 	setAtomicStoreMemoryLimit(storeMemoryLimit * 1024 * 1024);
 	setAtomicCheckpointMemoryLimit(checkpointMemoryLimit * 1024 * 1024);
@@ -1602,14 +1856,14 @@ double ChunkManager::ChunkManagerStats::getCheckpointFileUsageRate() const {
 
 const char8_t* ChunkManager::ChunkManagerStats::getActualCompressionMode()
 	const {
-	switch (FileManager::isEnableCompression()) {
-	case NO_BLOCK_COMPRESSION:
-		return "NO_BLOCK_COMPRESSION";
-	case BLOCK_COMPRESSION:
-		return "BLOCK_COMPRESSION";
-	default:
-		return "UNDEF_MODE";
-	}
+		switch (FileManager::isEnableCompression()) {
+			case NO_BLOCK_COMPRESSION:
+				return "NO_BLOCK_COMPRESSION";
+			case BLOCK_COMPRESSION:
+				return "BLOCK_COMPRESSION";
+			default:
+				return "UNDEF_MODE";
+		}
 }
 
 uint64_t ChunkManager::ChunkManagerStats::getCheckpointFileAllocateSize()
@@ -2180,15 +2434,25 @@ const char* const ChunkManager::ChunkOperationTypeString[] = {"ALLOCATE_CHUNK",
 	"FREE_CHUNK", "GET_CHUNK_FOR_UPDATE", "GET_CHUNK", "SEARCH_CHUNK",
 	"CHECKPOINT_CHUNK", "COPY_CHUNK"};
 ChunkManager::PartitionMetaChunk::PartitionMetaChunk(
-	ChunkCategoryId chunkCategoryNum, PartitionGroupAllocator& allocator)
-	: chunkCategoryNum_(chunkCategoryNum), chunkList_() {
+	ChunkCategoryId chunkCategoryNum, PartitionGroupAllocator& allocator,
+	ChunkManager *chunkManager)
+	: chunkCategoryNum_(chunkCategoryNum),
+	chunkList_(), chunkKeyList_() {
 	try {
 		for (ChunkCategoryId categoryId = 0; categoryId < chunkCategoryNum_;
 			 categoryId++) {
 			categoryStats_.push_back(MetaChunkStats());
 			chunkList_.push_back(UTIL_NEW ChunkList(allocator));
+			chunkKeyList_.push_back(UTIL_NEW ChunkKeyList(allocator));
+			assert(chunkManager);
+			const bool isBatchFreeMode =
+					(chunkManager ?
+					 chunkManager->isBatchFreeMode(categoryId) : true);
 			for (uint32_t i = 0; i < INIT_CHUNK_RESERVE_NUM; i++) {
 				chunkList_[categoryId]->push_back(BaseMetaChunk());
+				if (isBatchFreeMode) {
+					chunkKeyList_[categoryId]->push_back(MIN_CHUNK_KEY);
+				}
 			}
 			ChunkCursor chunkCursor(categoryId, 0);
 			emptyScanCursor_.push_back(chunkCursor);
@@ -2197,19 +2461,30 @@ ChunkManager::PartitionMetaChunk::PartitionMetaChunk(
 		}
 	}
 	catch (std::exception& e) {
-		for (ChunkCategoryId categoryId = 0; categoryId < chunkCategoryNum_;
-			 categoryId++) {
-			delete chunkList_[categoryId];
+		std::vector<ChunkList*>::iterator chunkItr = chunkList_.begin();
+		for (; chunkItr != chunkList_.end(); ++chunkItr) {
+			delete (*chunkItr);
 		}
+		chunkList_.clear();
+		std::vector<ChunkKeyList*>::iterator chunkKeyItr = chunkKeyList_.begin();
+		for (; chunkKeyItr != chunkKeyList_.end(); ++chunkKeyItr) {
+			delete (*chunkKeyItr);
+		}
+		chunkKeyList_.clear();
 		GS_RETHROW_SYSTEM_ERROR(e, "");
 	}
 }
 ChunkManager::PartitionMetaChunk::~PartitionMetaChunk() {
-	for (ChunkCategoryId categoryId = 0; categoryId < chunkCategoryNum_;
-		 categoryId++) {
-		chunkList_[categoryId]->clear();
-		delete chunkList_[categoryId];
+	std::vector<ChunkList*>::iterator chunkItr = chunkList_.begin();
+	for (; chunkItr != chunkList_.end(); ++chunkItr) {
+		delete (*chunkItr);
 	}
+	chunkList_.clear();
+	std::vector<ChunkKeyList*>::iterator chunkKeyItr = chunkKeyList_.begin();
+	for (; chunkKeyItr != chunkKeyList_.end(); ++chunkKeyItr) {
+		delete (*chunkKeyItr);
+	}
+	chunkKeyList_.clear();
 }
 
 void ChunkManager::AffinityChunkIdTable::initialize(
@@ -2298,12 +2573,14 @@ ChunkManager::MetaChunkManager::MetaChunkManager(PartitionGroupId pgId,
 	  pgStats_(),
 	  pIdList_(pIdList),
 	  partitionList_(partitionList) {}
+
 ChunkManager::MetaChunkManager::~MetaChunkManager() {
 	return;
 }
 void ChunkManager::MetaChunkManager::expand(
 	PartitionId pId, ChunkCursor& nextTail, ChunkId cId) {
 	ChunkList& chunkList = getChunkList(pId, nextTail.categoryId_);
+	ChunkKeyList& chunkKeyList = getChunkKeyList(pId, nextTail.categoryId_);
 	ChunkId targetCId = cId;
 
 	if (targetCId == UNDEF_CHUNKID) {
@@ -2321,14 +2598,25 @@ void ChunkManager::MetaChunkManager::expand(
 				   << ",cId," << targetCId);
 	}
 
-	if (static_cast<uint64_t>(targetCId) < chunkList.size()) {
-		assert(chunkList[targetCId].unoccupiedSize_ == UNDEF_UNOCCUPIED_SIZE_);
+	if (static_cast<size_t>(targetCId) < chunkList.size()) {
+		assert(chunkList[targetCId].getUnoccupiedSize() == UNDEF_UNOCCUPIED_SIZE_);
+		assert((chunkKeyList.size() > 0) ?
+				static_cast<size_t>(targetCId) < chunkKeyList.size() : true);
 		assert(isValid(pId, nextTail.categoryId_));
-		assert(nextTail.cId_ <= chunkList.size());
+		assert(static_cast<size_t>(nextTail.cId_) <= chunkList.size());
 		return;
 	}
 
-	uint32_t newSize = util::nextPowerOf2(static_cast<uint32_t>(targetCId) + 1);
+	uint32_t newSize = static_cast<uint32_t>(chunkList.size());
+	if (newSize < ChunkManager::MAX_CHUNK_EXPAND_COUNT) {
+		newSize = util::nextPowerOf2(static_cast<uint32_t>(targetCId) + 1);
+	}
+	else {
+		while (newSize <= (static_cast<uint32_t>(targetCId) + 1)) {
+			newSize += ChunkManager::MAX_CHUNK_EXPAND_COUNT;
+		}
+		assert(newSize > (static_cast<uint32_t>(targetCId) + 1));
+	}
 	if (static_cast<uint32_t>(MAX_CHUNK_ID + 1) < newSize) {
 		newSize = MAX_CHUNK_ID + 1;
 	}
@@ -2336,8 +2624,11 @@ void ChunkManager::MetaChunkManager::expand(
 
 	try {
 		chunkList.resize(newSize);  
+		if (chunkKeyList.size() > 0) {
+			chunkKeyList.resize(newSize, MIN_CHUNK_KEY);  
+		}
 		assert(chunkList.size() == newSize);
-		assert(chunkList[chunkList.size() - 1].unoccupiedSize_ ==
+		assert(chunkList[chunkList.size() - 1].getUnoccupiedSize() ==
 			   UNDEF_UNOCCUPIED_SIZE_);
 		assert(isValid(pId, nextTail.categoryId_));
 	}
@@ -2359,16 +2650,16 @@ void ChunkManager::MetaChunkManager::contract(
 
 		ChunkList& chunkList = getChunkList(pId, nextTail.categoryId_);
 		assert(
-			nextTail.cId_ == chunkList.size() ||
-			chunkList[nextTail.cId_].unoccupiedSize_ == UNDEF_UNOCCUPIED_SIZE_);
+			static_cast<size_t>(nextTail.cId_) == chunkList.size() ||
+			chunkList[nextTail.cId_].getUnoccupiedSize() == UNDEF_UNOCCUPIED_SIZE_);
 		assert(0 < nextTail.cId_);
-		assert(chunkList[nextTail.cId_ - 1].unoccupiedSize_ ==
+		assert(chunkList[nextTail.cId_ - 1].getUnoccupiedSize() ==
 			   UNDEF_UNOCCUPIED_SIZE_);
 		nextTail.cId_--;
 
 		for (uint64_t count = 0; count < searchNum && 0 < nextTail.cId_;
 			 count++) {
-			if (chunkList[nextTail.cId_ - 1].unoccupiedSize_ ==
+			if (chunkList[nextTail.cId_ - 1].getUnoccupiedSize() ==
 				UNDEF_UNOCCUPIED_SIZE_) {
 				nextTail
 					.cId_--;  
@@ -2390,29 +2681,35 @@ void ChunkManager::MetaChunkManager::contract(
 		nextTail.cId_ <= batchFreeCursor.cId_) {
 		batchFreeCursor.categoryId_++;
 		batchFreeCursor.categoryId_ =
-			batchFreeCursor.categoryId_ % config_.getChunkCategoryNum();
+			static_cast<ChunkCategoryId>(
+				batchFreeCursor.categoryId_ % config_.getChunkCategoryNum());
 		batchFreeCursor.cId_ = 0;
 	}
 }
 ChunkManager::BaseMetaChunk* ChunkManager::MetaChunkManager::allocate(
-	PartitionId pId, ChunkCategoryId categoryId, ChunkId cId) {
+		PartitionId pId, ChunkCategoryId categoryId, ChunkId cId,
+		ChunkKey*& metaChunkKey) {
 	ChunkList& chunkList = getChunkList(pId, categoryId);
 
-	assert(cId < chunkList.size());
+	assert(static_cast<size_t>(cId) < chunkList.size());
 
 	pgStats_.useChunkNum_++;
 	getPartition(pId).categoryStats_[categoryId].useChunkNum_++;
 	chunkList[cId].reuse(config_.getChunkExpSize() - 0x01);
-
+	metaChunkKey = NULL;
+	ChunkKeyList& chunkKeyList = getChunkKeyList(pId, categoryId);
+	if (cId < static_cast<ChunkId>(chunkKeyList.size())) {
+		chunkKeyList[cId] = MIN_CHUNK_KEY;
+		metaChunkKey = &chunkKeyList[cId];
+	}
 	assert(0 < getNextTail(pId, categoryId).cId_);
 	return &chunkList[cId];
 }
 void ChunkManager::MetaChunkManager::free(
 	PartitionId pId, ChunkCategoryId categoryId, ChunkId cId) {
 	ChunkList& chunkList = getChunkList(pId, categoryId);
-	assert(cId < chunkList.size());
-	chunkList[cId].unoccupiedSize_ = UNDEF_UNOCCUPIED_SIZE_;  
-
+	assert(static_cast<size_t>(cId) < chunkList.size());
+	chunkList[cId].setUnoccupiedSize(UNDEF_UNOCCUPIED_SIZE_);  
 	pgStats_.useChunkNum_--;
 	assert(0 < getPartition(pId).categoryStats_[categoryId].useChunkNum_);
 	getPartition(pId).categoryStats_[categoryId].useChunkNum_--;
@@ -2423,13 +2720,14 @@ void ChunkManager::MetaChunkManager::free(
 		contract(pId, nextTail);
 	}
 
-	assert(getNextTail(pId, categoryId).cId_ <= chunkList.size());
-	assert(getEmptyScanCursor(pId, categoryId).cId_ <= chunkList.size());
+	assert(static_cast<size_t>(getNextTail(pId, categoryId).cId_) <= chunkList.size());
+	assert(static_cast<size_t>(getEmptyScanCursor(pId, categoryId).cId_) <= chunkList.size());
 	assert(getPartition(pId).batchFreeCursor_.categoryId_ != categoryId ||
-		   getPartition(pId).batchFreeCursor_.cId_ <= chunkList.size());
+		   static_cast<size_t>(getPartition(pId).batchFreeCursor_.cId_) <= chunkList.size());
 }
 ChunkManager::BaseMetaChunk* ChunkManager::MetaChunkManager::reallocate(
-	PartitionId pId, ChunkCategoryId categoryId, ChunkId cId) {
+		PartitionId pId, ChunkCategoryId categoryId, ChunkId cId,
+		ChunkKey*& metaChunkKey) {
 	assert(cId <= MAX_CHUNK_ID);
 
 	ChunkCursor& nextTail = getNextTail(pId, categoryId);
@@ -2437,7 +2735,7 @@ ChunkManager::BaseMetaChunk* ChunkManager::MetaChunkManager::reallocate(
 		expand(pId, nextTail, cId);
 	}
 
-	return allocate(pId, categoryId, cId);
+	return allocate(pId, categoryId, cId, metaChunkKey);
 }
 
 uint64_t ChunkManager::MetaChunkManager::getMaxChunkId() {
@@ -2477,8 +2775,8 @@ uint64_t ChunkManager::MetaChunkManager::getPGAllocatedObjectSize() const {
 uint64_t ChunkManager::MetaChunkManager::getTotalListElementNum(
 	PartitionId pId) {
 	uint64_t num = 0;
-	for (ChunkCategoryId categoryId = 0;
-		 categoryId < config_.getChunkCategoryNum(); categoryId++) {
+	for (ChunkCategoryId categoryId = 0; categoryId < config_.getChunkCategoryNum();
+		 categoryId++) {
 		num += getPartition(pId).chunkList_[categoryId]->size();
 	}
 	return num;
@@ -2488,12 +2786,22 @@ ChunkManager::ChunkCursor& ChunkManager::MetaChunkManager::getBatchFreeCursor(
 	return getPartition(pId).batchFreeCursor_;
 }
 ChunkManager::BaseMetaChunk* ChunkManager::MetaChunkManager::begin(
-	PartitionId pId, ChunkCursor& cursor) {
+		PartitionId pId, ChunkCursor& cursor,
+		ChunkKey*& metaChunkKey) {
 	ChunkList& chunkList = getChunkList(pId, cursor.categoryId_);
+	ChunkKeyList& chunkKeyList =
+			getChunkKeyList(pId, cursor.categoryId_);
+	if (cursor.cId_ < static_cast<ChunkId>(chunkKeyList.size())) {
+		metaChunkKey = &chunkKeyList[cursor.cId_];
+	}
+	else {
+		metaChunkKey = NULL;
+	}
 	return &chunkList[cursor.cId_];
 }
 ChunkManager::BaseMetaChunk* ChunkManager::MetaChunkManager::next(
-	PartitionId pId, ChunkCursor& cursor, bool& isHead) {
+		PartitionId pId, ChunkCursor& cursor,
+		bool& isHead, ChunkKey*& metaChunkKey) {
 	isHead = false;
 	cursor.cId_++;
 	ChunkList& chunkList = getChunkList(pId, cursor.categoryId_);
@@ -2504,27 +2812,57 @@ ChunkManager::BaseMetaChunk* ChunkManager::MetaChunkManager::next(
 			cursor.categoryId_ = 0;
 			isHead = true;
 		}
+		ChunkKeyList& chunkKeyList =
+				getChunkKeyList(pId, cursor.categoryId_);
+		if (cursor.cId_ < static_cast<ChunkId>(chunkKeyList.size())) {
+			metaChunkKey = &chunkKeyList[cursor.cId_];
+		}
+		else {
+			metaChunkKey = NULL;
+		}
 		ChunkList& nextForCategoryChunkList =
-			getChunkList(pId, cursor.categoryId_);
+				getChunkList(pId, cursor.categoryId_);
 		return &nextForCategoryChunkList[cursor.cId_];
 	}
 	else {
+		ChunkKeyList& chunkKeyList =
+				getChunkKeyList(pId, cursor.categoryId_);
+		if (cursor.cId_ < static_cast<ChunkId>(chunkKeyList.size())) {
+			metaChunkKey = &chunkKeyList[cursor.cId_];
+		}
+		else {
+			metaChunkKey = NULL;
+		}
 		return &chunkList[cursor.cId_];
 	}
 }
 ChunkManager::BaseMetaChunk* ChunkManager::MetaChunkManager::nextForCategory(
-	PartitionId pId, ChunkCursor& cursor, bool& isHead) {
+		PartitionId pId, ChunkCursor& cursor, bool& isHead, ChunkKey* &chunkKey) {
 	isHead = false;
 	cursor.cId_++;
 	ChunkList& chunkList = getChunkList(pId, cursor.categoryId_);
+	ChunkKeyList& chunkKeyList =
+			getChunkKeyList(pId, cursor.categoryId_);
 	if (static_cast<ChunkId>(chunkList.size()) <= cursor.cId_) {
 		cursor.cId_ = 0;
 		isHead = true;
+		if (cursor.cId_ < static_cast<ChunkId>(chunkKeyList.size())) {
+			chunkKey = &chunkKeyList[cursor.cId_];
+		}
+		else {
+			chunkKey = NULL;
+		}
 		ChunkList& nextForCategoryChunkList =
 			getChunkList(pId, cursor.categoryId_);
 		return &nextForCategoryChunkList[cursor.cId_];
 	}
 	else {
+		if (cursor.cId_ < static_cast<ChunkId>(chunkKeyList.size())) {
+			chunkKey = &chunkKeyList[cursor.cId_];
+		}
+		else {
+			chunkKey = NULL;
+		}
 		return &chunkList[cursor.cId_];
 	}
 }
@@ -2715,10 +3053,14 @@ void ChunkManager::CheckpointManager::switchPGCheckpointBit(CheckpointId cpId) {
 	}
 }
 void ChunkManager::CheckpointManager::setPGCheckpointBit(
-	const uint8_t* bitList, const uint64_t bitNum) {
+		const uint8_t* bitList, const uint64_t bitNum,
+		bool releaseUnusedFileBlocks) {
 	CheckpointFile& checkpointFile = getCheckpointFile();
 	checkpointFile.initializeValidBlockInfo(bitList, bitNum);
 	checkpointFile.initializeUsedBlockInfo(bitList, bitNum);
+	if (releaseUnusedFileBlocks) {
+		checkpointFile.zerofillUnusedBlock(bitNum);
+	}
 }
 void ChunkManager::CheckpointManager::flushPGFile() {
 	return getCheckpointFile().flush();
@@ -2816,7 +3158,7 @@ bool ChunkManager::CheckpointManager::getCopyChunkId(
 	}
 	assert(0 < copyList->size());
 	categoryId = categoryCursor_;
-	cId = copyList->back();
+	cId = copyList->front();
 	return true;
 }
 void ChunkManager::CheckpointManager::copyChunk(PartitionId pId,
@@ -2842,8 +3184,8 @@ void ChunkManager::CheckpointManager::copyChunk(PartitionId pId,
 
 	if (categoryId == categoryCursor_) {
 		CopyList& copyList = getCopyList(categoryCursor_);
-		if (!copyList.empty() && cId == copyList.back()) {
-			copyList.pop_back();
+		if (!copyList.empty() && cId == copyList.front()) {
+			copyList.pop_front();
 			cpWriter_.atomicDecrementCopySize();  
 			assert(0 < getPartitionInfo(pId).copyNum_);
 			getPartitionInfo(pId).copyNum_--;
@@ -2864,8 +3206,9 @@ bool ChunkManager::CheckpointManager::writeChunk(PartitionId pId) {
 	assert(checkpointBuffer.buffer_);
 	assert(0 <= checkpointBuffer.checkpointPos_);
 
-	uint32_t holeOffset = fileManagerCPThread_.compressChunk(
-		checkpointBuffer.buffer_, config_.getPartitionCompressionMode(pId));
+	uint32_t holeOffset =
+		fileManagerCPThread_.compressChunk(checkpointBuffer.buffer_,
+			config_.getPartitionCompressionMode(pId));
 	fileManagerCPThread_.updateCheckSum(checkpointBuffer.buffer_);
 	uint64_t ioTime = fileManagerCPThread_.writeHolePunchingChunk(
 		checkpointBuffer.buffer_, checkpointBuffer.checkpointPos_, holeOffset);
@@ -2935,8 +3278,7 @@ void ChunkManager::CheckpointManager::readSyncChunk(
 	assert(buffer);
 
 	try {
-		int64_t ioTime =
-			fileManagerTxnThread_.readChunk(buffer, 1, checkpointPos);
+		int64_t ioTime = fileManagerTxnThread_.readChunk(buffer, 1, checkpointPos);
 		fileManagerTxnThread_.isValidCheckSum(buffer);
 		fileManagerTxnThread_.uncompressChunk(buffer);
 		pgStats_.chunkSyncReadCount_++;
@@ -2966,8 +3308,7 @@ bool ChunkManager::CheckpointManager::readRecoveryChunk(uint8_t* buffer) {
 		checkBlockPos = 0;  
 	}
 	try {
-		int64_t ioTime =
-			fileManagerTxnThread_.readChunk(buffer, 1, checkBlockPos);
+		int64_t ioTime = fileManagerTxnThread_.readChunk(buffer, 1, checkBlockPos);
 		fileManagerTxnThread_.isValidCheckSum(buffer);
 
 		fileManagerTxnThread_.uncompressChunk(buffer);
@@ -3106,8 +3447,8 @@ void ChunkManager::BufferManager::swapOut(PartitionId pId,
 		uint8_t* buffer = bufferInfo->buffer_;
 		ChunkHeader::setCPCpId(buffer, getPartitionInfo(pId).lastCpId_);
 		ChunkHeader::setSwapCpId(buffer, getPartitionInfo(pId).startCpId_);
-		uint32_t holeOffset = fileManager_.compressChunk(
-			buffer, config_.getPartitionCompressionMode(pId));
+		uint32_t holeOffset = fileManager_.compressChunk(buffer,
+			config_.getPartitionCompressionMode(pId));
 		fileManager_.updateCheckSum(buffer);
 		TEST_DIRTY_CHECK_SET(pId, categoryId, cId, buffer);
 		uint64_t ioTime =
@@ -3404,8 +3745,7 @@ uint8_t* ChunkManager::BufferManager::getForUpdate(PartitionId pId,
 		}
 
 		EXEC_FAILURE(GS_ERROR_CHM_IO_FAILED);
-		int64_t ioTime =
-			fileManager_.readChunk(bufferInfo->buffer_, 1, readPos);
+		int64_t ioTime = fileManager_.readChunk(bufferInfo->buffer_, 1, readPos);
 		fileManager_.isValidCheckSum(bufferInfo->buffer_);
 		TEST_DIRTY_CHECK_SET(pId, categoryId, cId, bufferInfo->buffer_);
 		fileManager_.uncompressChunk(bufferInfo->buffer_);
@@ -3474,8 +3814,7 @@ uint8_t* ChunkManager::BufferManager::get(PartitionId pId,
 		bufferInfo->fixFirstTime(refId_);  
 
 		EXEC_FAILURE(GS_ERROR_CHM_IO_FAILED);
-		int64_t ioTime =
-			fileManager_.readChunk(bufferInfo->buffer_, 1, readPos);
+		int64_t ioTime = fileManager_.readChunk(bufferInfo->buffer_, 1, readPos);
 		fileManager_.isValidCheckSum(bufferInfo->buffer_);
 		TEST_DIRTY_CHECK_SET(pId, categoryId, cId, bufferInfo->buffer_);
 		fileManager_.uncompressChunk(bufferInfo->buffer_);
@@ -3606,8 +3945,7 @@ bool ChunkManager::BufferManager::enwarm(PartitionId pId,
 	if (getPGUseBufferNum() + 1 < getAtomicPGMemoryLimitNum()) {
 		uint8_t* buffer = NULL;
 		try {
-			buffer =
-				pgPool_.allocate();  
+			buffer = pgPool_.allocate();  
 			pgStats_.categoryStats_[categoryId].useBufferNum_++;
 			pgStats_.useBufferNum_++;
 
@@ -3706,12 +4044,44 @@ ChunkManager::MemoryLimitManager::~MemoryLimitManager() {
 	delete[] limitNum_;
 	limitNum_ = NULL;
 }
+
+void ChunkManager::MemoryLimitManager::calcParameter(
+		uint64_t &avgNum, uint64_t &minNum, uint64_t &shiftNum) {
+	uint64_t totalLimitNum = config_.getAtomicStoreMemoryLimitNum();  
+	avgNum = totalLimitNum / partitionGroupNum_;
+	if (avgNum == 0) {
+		avgNum = 1;
+	}
+
+	minNum = avgNum -
+	  (totalLimitNum * SHIFTABLE_MEMORY_RATIO) /
+		(100 * partitionGroupNum_);
+	if (minNum < 1) {
+		minNum = 1;  
+	}
+
+	shiftNum = (totalLimitNum * ONCE_SHIFTABLE_MEMORY_RATIO) / 100;
+	if (shiftNum < 1) {
+		shiftNum = 1;  
+	}
+	else if (avgNum < minNum + shiftNum &&
+			 avgNum - minNum <= maxShiftNum_) {
+		shiftNum =
+		  avgNum -
+			minNum;  
+	}
+	else if (maxShiftNum_ < shiftNum) {
+		shiftNum =
+		  maxShiftNum_;  
+	}
+	assert(1 <= shiftNum && minNum + shiftNum <= avgNum);
+}
+
 void ChunkManager::MemoryLimitManager::redistributeMemoryLimit(
 	PartitionGroupId executePgId) {
 	if (executePgId != DISTRIBUTOR_PARTITION_GROUP_ID_) {
 		return;
 	}
-
 	assert(0 < partitionGroupNum_);
 	uint64_t totalLimitNum = config_.getAtomicStoreMemoryLimitNum();  
 	uint64_t avgNum = totalLimitNum / partitionGroupNum_;
@@ -3751,25 +4121,24 @@ void ChunkManager::MemoryLimitManager::redistributeMemoryLimit(
 
 		getCurrentLoad(load_);
 
-		PartitionGroupId lastDelPgId = UNDEF_PARTITIONGROUPID,
-						 lastAddPgId = UNDEF_PARTITIONGROUPID;
-		bool isWorse = isLoadWorse(load_, avgNum, lastDelPgId, lastAddPgId);
-		if (isLastShifted_ && isWorse) {
-			limitNum_[lastDelPgId] += shiftNum;
-			limitNum_[lastAddPgId] -= shiftNum;
-			getPGBufferManager(lastDelPgId)
-				.setAtomicPGMemoryLimitNum(limitNum_[lastDelPgId]);  
-			getPGBufferManager(lastAddPgId)
-				.setAtomicPGMemoryLimitNum(limitNum_[lastAddPgId]);  
-		}
+		addPgIdCursor_++;
+		addPgIdCursor_ =
+				addPgIdCursor_ % partitionGroupNum_;  
 
-		PartitionGroupId delPgId = UNDEF_PARTITIONGROUPID,
-						 addPgId = UNDEF_PARTITIONGROUPID;
+		delPgIdCursor_++;
+		delPgIdCursor_ =
+				delPgIdCursor_ % partitionGroupNum_;  
+
+		assert(delPgIdCursor_ < partitionGroupNum_ &&
+				addPgIdCursor_ < partitionGroupNum_);
+
+		PartitionGroupId delPgId = UNDEF_PARTITIONGROUPID;
+		PartitionGroupId addPgId = UNDEF_PARTITIONGROUPID;
 		bool isShiftable = getShiftablePartitionGroup(
 			load_, avgNum, minNum, shiftNum, delPgId, addPgId);
 		if (isShiftable) {
-			assert(0 <= delPgId && delPgId < partitionGroupNum_ &&
-				   0 <= addPgId && addPgId < partitionGroupNum_);
+			assert(delPgId < partitionGroupNum_ &&
+				   addPgId < partitionGroupNum_);
 			limitNum_[delPgId] -= shiftNum;
 			limitNum_[addPgId] += shiftNum;
 			assert(
@@ -3839,42 +4208,30 @@ bool ChunkManager::MemoryLimitManager::getShiftablePartitionGroup(
 	delPgId = UNDEF_PARTITIONGROUPID;
 	addPgId = UNDEF_PARTITIONGROUPID;
 
-	for (PartitionGroupId count = 0; count < partitionGroupNum_ - 1; count++) {
+	for (PartitionGroupId count = 0; count < partitionGroupNum_; count++) {
 		if (minNum + shiftNum <= limitNum_[delPgIdCursor_]) {
-			if (limitNum_[delPgIdCursor_] < avgNum) {
-				if (load.lastLoad_[delPgIdCursor_] ==
-					load.load_[delPgIdCursor_]) {
-					delPgId = delPgIdCursor_;
-					break;
-				}
-			}
-			else {
+			if ((load.load_[delPgIdCursor_] <= load.lastLoad_[delPgIdCursor_]) &&
+					(load.load_[delPgIdCursor_] < load.avgLoad_)) {
 				delPgId = delPgIdCursor_;
 				break;
 			}
 		}
-
 		delPgIdCursor_++;
 		delPgIdCursor_ = delPgIdCursor_ % partitionGroupNum_;
 	}
 
 	for (PartitionGroupId count = 0; count < partitionGroupNum_; count++) {
-		if (delPgId != addPgIdCursor_) {  
-			if (load.lastLoad_[addPgIdCursor_] < load.load_[addPgIdCursor_] ||
-				load.avgLoad_ < load.load_[addPgIdCursor_]) {
-				addPgId = addPgIdCursor_;
-				break;
-			}
+		if ((load.lastLoad_[addPgIdCursor_] < load.load_[addPgIdCursor_]) ||
+				(load.avgLoad_ <= load.load_[addPgIdCursor_])) {
+			addPgId = addPgIdCursor_;
+			break;
 		}
-
 		addPgIdCursor_++;
 		addPgIdCursor_ = addPgIdCursor_ % partitionGroupNum_;
 	}
 
 	if (delPgId == UNDEF_PARTITIONGROUPID ||
 		addPgId == UNDEF_PARTITIONGROUPID) {
-		delPgIdCursor_++;
-		delPgIdCursor_ = delPgIdCursor_ % partitionGroupNum_;
 		return false;
 	}
 

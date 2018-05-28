@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -82,4 +82,57 @@ public enum Statement {
 	DROP_DATABASE,
 	PUT_PRIVILEGE,
 	DROP_PRIVILEGE,
+
+	
+	CREATE_INDEX_DETAIL,
+	DROP_INDEX_DETAIL
+
+	;
+
+	private final GeneralStatement general;
+
+	private Statement() {
+		this.general = new GeneralStatement(name(), ordinal());
+	}
+
+	public GeneralStatement generalize() {
+		return general;
+	}
+
+	public static class GeneralStatement {
+
+		private final String name;
+
+		private final int ordinal;
+
+		private GeneralStatement(String name, int ordinal) {
+			this.name = name;
+			this.ordinal = ordinal;
+		}
+
+		public static GeneralStatement getInstance(String name, int ordinal) {
+			if (name == null) {
+				throw new NullPointerException();
+			}
+			if (ordinal < Constants.PRESET_STATEMENTS.length) {
+				throw new IllegalArgumentException();
+			}
+			return new GeneralStatement(name, ordinal);
+		}
+
+		public int ordinal() {
+			return ordinal;
+		}
+
+		@Override
+		public String toString() {
+			return name;
+		}
+
+	}
+
+	private static class Constants {
+		private static final Statement[] PRESET_STATEMENTS = values();
+	}
+
 }

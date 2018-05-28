@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -292,6 +292,7 @@ bool TriggerList::updateImage(TransactionContext &txn,
 	bool isExist = false;
 
 	if (num_ > 0) {
+		isExist = true;
 		OId *list = getOIdList();
 
 		for (uint32_t i = 0; i < num_; i++) {
@@ -308,7 +309,8 @@ bool TriggerList::updateImage(TransactionContext &txn,
 
 			util::XArray<ColumnId> afterColumnIds(alloc);
 			for (size_t j = 0; j < before.columnIds_.size(); j++) {
-				const util::String *oldColumName = oldColumnNameList[j];
+				const ColumnId oldColumnId = before.columnIds_[j];
+				const util::String *oldColumName = oldColumnNameList[oldColumnId];
 
 				for (uint32_t newColumnId = 0;
 					 newColumnId <
@@ -323,9 +325,7 @@ bool TriggerList::updateImage(TransactionContext &txn,
 				}
 			}
 
-			if (afterColumnIds.size() > 0) {
-				isExist = true;
-
+			{
 				TriggerInfo after = before;
 				after.columnIds_.clear();
 				after.columnIds_.assign(
@@ -340,9 +340,6 @@ bool TriggerList::updateImage(TransactionContext &txn,
 				GS_TRACE_DEBUG(DATA_STORE, GS_TRACE_DS_CON_UPDATE_TRIGGER,
 					"numTrigger=" << num_ << ", triggerName=" << after.name_
 								  << ", triggerType=" << after.type_);
-			}
-			else {
-				triggerList.push_back(encodedTrigger);
 			}
 		}
 	}
@@ -426,7 +423,7 @@ void ColumnInfo::initialize() {
 	columnNameOId_ = UNDEF_OID;
 	columnType_ = COLUMN_TYPE_WITH_BEGIN;
 	offset_ = 0;
-	isKey_ = false;
+	flags_ = 0;
 }
 
 void ColumnInfo::set(TransactionContext &txn, ObjectManager &objectManager,
@@ -445,8 +442,22 @@ void ColumnInfo::set(TransactionContext &txn, ObjectManager &objectManager,
 	setType(messageSchema->getColumnType(fromColumnId),
 		messageSchema->getIsArray(fromColumnId));
 
-	if (fromColumnId == messageSchema->getRowKeyColumnId()) {
-		isKey_ = true;
+	flags_ = 0;
+
+//	int64_t hashVal = messageSchema->getColumnCount();
+	const util::XArray<ColumnId> &keyColumnIds =
+		messageSchema->getRowKeyColumnIdList();
+	util::XArray<ColumnId>::const_iterator itr = 
+		std::find(keyColumnIds.begin(), keyColumnIds.end(), fromColumnId);
+	if (itr != keyColumnIds.end()) {
+		flags_ |= COLUMN_FLAG_KEY;
+	}
+
+	if (messageSchema->getIsVirtual(fromColumnId)) {
+		flags_ |= COLUMN_FLAG_VIRTUAL;
+	}
+	if (messageSchema->getIsNotNull(fromColumnId)) {
+		flags_ |= COLUMN_FLAG_NOT_NULL;
 	}
 }
 
@@ -475,8 +486,10 @@ void ColumnInfo::getSchema(TransactionContext &txn,
 	int8_t tmp = static_cast<int8_t>(getSimpleColumnType());
 	schema.push_back(reinterpret_cast<uint8_t *>(&tmp), sizeof(int8_t));
 
-	bool isArrayVal = isArray();
-	schema.push_back(reinterpret_cast<uint8_t *>(&isArrayVal), sizeof(bool));
+	uint8_t flag = (isArray() ? 1 : 0);
+	flag |= (isVirtual() ? COLUMN_FLAG_VIRTUAL : 0);
+	flag |= (isNotNull() ? COLUMN_FLAG_NOT_NULL : 0);
+	schema.push_back(reinterpret_cast<uint8_t *>(&flag), sizeof(uint8_t));
 }
 
 
@@ -520,11 +533,12 @@ void ColumnSchema::finalize(
 void ColumnSchema::set(TransactionContext &txn, ObjectManager &objectManager,
 	MessageSchema *messageSchema, const AllocateStrategy &allocateStrategy) {
 	ColumnInfo *columnInfoList = getColumnInfoList();
-	if (messageSchema->getRowKeyColumnId() != UNDEF_COLUMNID) {
+	if (!messageSchema->getRowKeyColumnIdList().empty()) {
+		ColumnId messageRowKeyColumnId = messageSchema->getRowKeyColumnIdList().front();
 		bool hasVariableColumn = false;
 		uint32_t columnId = 1;
 		for (uint32_t i = 0; i < columnNum_; i++) {
-			if (i == messageSchema->getRowKeyColumnId()) {
+			if (i == messageRowKeyColumnId) {
 				columnInfoList[0].initialize();
 				columnInfoList[0].set(
 					txn, objectManager, 0, i, messageSchema, allocateStrategy);
@@ -550,7 +564,8 @@ void ColumnSchema::set(TransactionContext &txn, ObjectManager &objectManager,
 		uint16_t variableColumnIndex = 0;  
 		for (uint16_t i = 0; i < columnNum_; i++) {
 			if (columnInfoList[i].isVariable()) {
-				columnInfoList[i].setOffset(variableColumnIndex);  
+				columnInfoList[i].setOffset(
+					variableColumnIndex);  
 				++variableColumnIndex;
 			}
 			else {
@@ -569,7 +584,8 @@ void ColumnSchema::set(TransactionContext &txn, ObjectManager &objectManager,
 			columnInfoList[i].set(
 				txn, objectManager, i, i, messageSchema, allocateStrategy);
 			if (columnInfoList[i].isVariable()) {
-				columnInfoList[i].setOffset(variableColumnIndex);  
+				columnInfoList[i].setOffset(
+					variableColumnIndex);  
 				++variableColumnIndex;
 			}
 			else {
@@ -592,21 +608,32 @@ void ColumnSchema::set(TransactionContext &txn, ObjectManager &objectManager,
 			}
 		}
 	}
+	{
+		uint16_t *rowKeyNumPtr = reinterpret_cast<uint16_t *>(getRowKeyPtr());
+		const util::XArray<ColumnId> &schemaKeyColumnIdList = messageSchema->getRowKeyColumnIdList();
+		uint16_t rowKeyNum = static_cast<uint16_t>(schemaKeyColumnIdList.size());
+		*rowKeyNumPtr = rowKeyNum;
+		rowKeyNumPtr++;
+		for (size_t i = 0; i < schemaKeyColumnIdList.size(); i++) {
+			uint16_t columnId = static_cast<uint16_t>(schemaKeyColumnIdList[i]);
+			*rowKeyNumPtr = columnId;
+			rowKeyNumPtr++;
+		}
+	}
 }
 
 void ColumnSchema::getColumnInfo(TransactionContext &txn,
 	ObjectManager &objectManager, const char *name, uint32_t &columnId,
-	ColumnInfo *&columnInfo) const {
+	ColumnInfo *&columnInfo, bool isCaseSensitive) const {
 	for (uint32_t i = 0; i < columnNum_; i++) {
 		ColumnInfo &checkColumnInfo = getColumnInfo(i);
-		const char *stringObject =
+		const char *columnName =
 			checkColumnInfo.getColumnName(txn, objectManager);
-		const uint8_t *columnName =
-			reinterpret_cast<const uint8_t *>(stringObject);
-		uint32_t columnNameSize = static_cast<uint32_t>(strlen(stringObject));
-		if (eqCaseStringStringI(txn, reinterpret_cast<const uint8_t *>(name),
-				static_cast<uint32_t>(strlen(name)), columnName,
-				columnNameSize)) {
+		uint32_t columnNameSize = static_cast<uint32_t>(strlen(columnName));
+		bool isExist = 
+			eqCaseStringString(txn, name, static_cast<uint32_t>(strlen(name)),
+				columnName, columnNameSize, isCaseSensitive);
+		if (isExist) {
 			columnId = i;
 			columnInfo = &checkColumnInfo;
 			return;
@@ -619,8 +646,12 @@ void ColumnSchema::getColumnInfo(TransactionContext &txn,
 	@brief Calculate hash value
 */
 int64_t ColumnSchema::calcSchemaHashKey(MessageSchema *messageSchema) {
-	int64_t hashVal =
-		messageSchema->getColumnCount() + messageSchema->getRowKeyColumnId();
+	int64_t hashVal = messageSchema->getColumnCount();
+	const util::XArray<ColumnId> &keyColumnIds = messageSchema->getRowKeyColumnIdList();
+	util::XArray<ColumnId>::const_iterator itr;
+	for (itr = keyColumnIds.begin(); itr != keyColumnIds.end(); itr++) {
+		hashVal += *itr;
+	}
 	hashVal = hashVal << 32;
 	for (uint32_t i = 0; i < messageSchema->getColumnCount(); i++) {
 		int32_t columnHashVal = 0;
@@ -645,34 +676,25 @@ bool ColumnSchema::schemaCheck(TransactionContext &txn,
 	util::XArray<ColumnId> columnMap(txn.getDefaultAllocator());
 
 	uint32_t columnNum = messageSchema->getColumnCount();
-	ColumnId keyColumnId = messageSchema->getRowKeyColumnId();
 
 	if (columnNum != getColumnNum()) {
 		isSameSchema = false;
 	}
 	if (isSameSchema) {
-		ColumnInfo &keyColumnInfo = getColumnInfo(0);
-		if (keyColumnInfo.isKey()) {  
-			if (keyColumnId == UNDEF_COLUMNID) {
-				isSameSchema = false;
-			}
-			else {
-				for (uint16_t i = 0; i < keyColumnId; i++) {
-					columnMap.push_back(i + 1);
-				}
-				columnMap.push_back(0);
-				for (uint16_t i = keyColumnId + 1; i < columnNum; i++) {
-					columnMap.push_back(i);
-				}
-			}
+		util::XArray<ColumnId> keyColumnIdList(txn.getDefaultAllocator());
+		getKeyColumnIdList(keyColumnIdList);
+		const util::XArray<ColumnId> &schemaKeyColumnIdList = messageSchema->getRowKeyColumnIdList();
+		if (keyColumnIdList.size() != schemaKeyColumnIdList.size()) {
+			isSameSchema = false;
 		}
-		else {  
-			if (keyColumnId != UNDEF_COLUMNID) {
-				isSameSchema = false;
+		if (isSameSchema) {
+			for (uint16_t i = 0; i < columnNum; i++) {
+				columnMap.push_back(i);
 			}
-			else {
-				for (uint16_t i = 0; i < columnNum; i++) {
-					columnMap.push_back(i);
+			for (size_t i = 0; i < keyColumnIdList.size(); i++) {
+				if (keyColumnIdList[i] != schemaKeyColumnIdList[i]) {
+					isSameSchema = false;
+					break;
 				}
 			}
 		}
@@ -683,6 +705,7 @@ bool ColumnSchema::schemaCheck(TransactionContext &txn,
 			const util::String &newColumnName = messageSchema->getColumnName(i);
 			ColumnType columnType = messageSchema->getColumnType(i);
 			bool isArray = messageSchema->getIsArray(i);
+			bool isNotNull = messageSchema->getIsNotNull(i);
 
 			ColumnInfo &columnInfo = getColumnInfo(columnMap[i]);
 			const char *stringObject =
@@ -691,14 +714,15 @@ bool ColumnSchema::schemaCheck(TransactionContext &txn,
 				reinterpret_cast<const uint8_t *>(stringObject);
 			uint32_t columnNameSize =
 				static_cast<uint32_t>(strlen(stringObject));
-			if (eqTable[COLUMN_TYPE_STRING][COLUMN_TYPE_STRING](
+			if (eqStringString(
 					txn, columnName, columnNameSize,
 					reinterpret_cast<const uint8_t *>(newColumnName.c_str()),
 					static_cast<uint32_t>(
 						newColumnName.length()))) {  
 
 				if (columnInfo.getSimpleColumnType() != columnType ||
-					columnInfo.isArray() != isArray) {
+					columnInfo.isArray() != isArray ||
+					columnInfo.isNotNull() != isNotNull) {
 					isSameSchema = false;
 				}
 			}
@@ -717,9 +741,12 @@ bool ColumnSchema::schemaCheck(TransactionContext &txn,
 	@brief Allocate IndexSchema Object
 */
 void IndexSchema::initialize(
-	TransactionContext &txn, uint16_t reserveNum, uint16_t indexNum) {
-	BaseObject::allocate<uint8_t>(IndexSchema::getAllocateSize(reserveNum),
+	TransactionContext &txn, uint16_t reserveNum, uint16_t indexNum, uint32_t columnNum) {
+	uint8_t bitsSize = RowNullBits::calcBitsSize(columnNum);
+	BaseObject::allocate<uint8_t>(IndexSchema::getAllocateSize(reserveNum, bitsSize),
 		allocateStrategy_, getBaseOId(), OBJECT_TYPE_COLUMNINFO);
+	memset(getBaseAddr(), 0, IndexSchema::getAllocateSize(reserveNum, bitsSize));
+	setNullbitsSize(bitsSize);
 
 	setNum(indexNum);
 	setReserveNum(reserveNum);
@@ -729,7 +756,7 @@ void IndexSchema::initialize(
 	@brief Appends Index Info to Index Schema
 */
 bool IndexSchema::createIndexInfo(
-	TransactionContext &txn, ColumnId columnId, MapType mapType) {
+	TransactionContext &txn, const IndexInfo &indexInfo) {
 	setDirty();
 
 	bool isDuplicate = false;
@@ -737,7 +764,7 @@ bool IndexSchema::createIndexInfo(
 		expand(txn);
 		isDuplicate = true;
 	}
-	setIndexInfo(txn, getIndexNum(), columnId, mapType);
+	setIndexInfo(txn, getIndexNum(), indexInfo);
 	increment();
 
 	return isDuplicate;
@@ -757,12 +784,13 @@ void IndexSchema::dropIndexInfo(
 		getIndexData(txn, i, UNDEF_CONTAINER_POS, indexData);
 		if (indexData.columnId_ == columnId && indexData.mapType_ == mapType) {
 			isFound = true;
+			OId optionOId = getOptionOId(getElemHead() + (getIndexDataSize() * i));
+			getObjectManager()->free(txn.getPartitionId(), optionOId);
 			for (uint16_t j = i; j < getIndexNum(); j++) {
 				if (j + 1 < getIndexNum()) {
-					IndexData nextIndexData;
-					getIndexData(
-						txn, j + 1, UNDEF_CONTAINER_POS, nextIndexData);
-					setIndexData(txn, j, UNDEF_CONTAINER_POS, nextIndexData);
+					uint8_t *src = getElemHead() + (getIndexDataSize() * (j + 1));
+					uint8_t *dest = getElemHead() + (getIndexDataSize() * (j));
+					memcpy(dest, src, getIndexDataSize());
 				}
 			}
 			break;
@@ -776,33 +804,36 @@ void IndexSchema::dropIndexInfo(
 /*!
 	@brief Creates Index Object
 */
-void IndexSchema::createIndexData(TransactionContext &txn, ColumnId columnId,
+IndexData IndexSchema::createIndexData(TransactionContext &txn, ColumnId columnId,
 	MapType mapType, ColumnType columnType, BaseContainer *container,
 	uint64_t containerPos, bool isUnique) {
 	setDirty();
 
-	IndexData indexData;
-	indexData.columnId_ = columnId;
-	indexData.mapType_ = mapType;
+	OId oId;
 	switch (mapType) {
 	case MAP_TYPE_BTREE: {
 		BtreeMap map(txn, *getObjectManager(),
 			container->getMapAllcateStrategy(), container);
 		map.initialize(txn, columnType, isUnique, BtreeMap::TYPE_SINGLE_KEY);
-		indexData.oId_ = map.getBaseOId();
+		oId = map.getBaseOId();
 	} break;
 	case MAP_TYPE_HASH: {
 		HashMap map(txn, *getObjectManager(),
 			container->getMapAllcateStrategy(), container);
 		map.initialize(txn, columnType, columnId,
 			container->getMetaAllcateStrategy(), isUnique);
-		indexData.oId_ = map.getBaseOId();
+		oId = map.getBaseOId();
 	} break;
 	default:
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
 	}
+	IndexData indexData;
 	uint16_t nth = getNth(columnId, mapType);
+	getIndexData(txn, nth, UNDEF_CONTAINER_POS, indexData);
+	indexData.oIds_.mainOId_ = oId;
 	setIndexData(txn, nth, containerPos, indexData);
+
+	return indexData;
 }
 
 /*!
@@ -813,24 +844,53 @@ void IndexSchema::dropIndexData(TransactionContext &txn, ColumnId columnId,
 	bool isMapFinalize) {
 	setDirty();
 	if (isMapFinalize) {
-		StackAllocAutoPtr<BaseIndex> map(txn.getDefaultAllocator(),
-			getIndex(txn, mapType, columnId, container, containerPos));
-		map.get()->finalize(txn);
+		bool withUncommitted = true; 
+		IndexData indexData;
+		if (getIndexData(txn, columnId, mapType, containerPos, withUncommitted,
+			indexData)) {
+			StackAllocAutoPtr<BaseIndex> mainMap(txn.getDefaultAllocator(),
+				getIndex(txn, indexData, false, container));
+			container->getDataStore()->finalizeMap
+				(txn, container->getMapAllcateStrategy(), mainMap.get());
+			StackAllocAutoPtr<BaseIndex> nullMap(txn.getDefaultAllocator(),
+				getIndex(txn, indexData, true, container));
+			if (nullMap.get() != NULL) {
+				container->getDataStore()->finalizeMap
+					(txn, container->getMapAllcateStrategy(), nullMap.get());
+			}
+		}
 	}
 	uint16_t nth = getNth(columnId, mapType);
 	uint8_t *indexDataPos = getElemHead() + (getIndexDataSize() * nth);
-	removeOId(txn, indexDataPos, containerPos);
+	removeMapOIds(txn, indexDataPos, containerPos);
 }
 
 /*!
 	@brief Updates OId of Index Object
 */
 void IndexSchema::updateIndexData(
-	TransactionContext &txn, IndexData updateIndexData, uint64_t containerPos) {
+	TransactionContext &txn, const IndexData &updateIndexData, uint64_t containerPos) {
 	setDirty();
 	uint16_t nth = getNth(updateIndexData.columnId_, updateIndexData.mapType_);
 	uint8_t *indexDataPos = getElemHead() + (getIndexDataSize() * nth);
-	updateOId(txn, indexDataPos, containerPos, updateIndexData.oId_);
+	updateMapOIds(txn, indexDataPos, containerPos, updateIndexData.oIds_);
+	if (updateIndexData.status_!= DDL_READY) {
+		BaseObject option(txn.getPartitionId(), *getObjectManager(),
+			getOptionOId(indexDataPos));
+		option.setDirty();
+		setRowId(option.getBaseAddr(), updateIndexData.cursor_);
+	}
+}
+
+void IndexSchema::commit(TransactionContext &txn, ColumnId columnId, MapType mapType) {
+	setDirty();
+	uint16_t nth = getNth(columnId, mapType);
+	uint8_t *indexDataPos = getElemHead() + (getIndexDataSize() * nth);
+	if (nth == UNDEF_INDEX_POS || getStatus(indexDataPos) == DDL_READY) {
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "nth=" << nth
+			<< "columnId=" << columnId << ", mapType=" << (int32_t)mapType);
+	}
+	setStatus(indexDataPos, DDL_READY);
 }
 
 /*!
@@ -839,7 +899,9 @@ void IndexSchema::updateIndexData(
 bool IndexSchema::hasIndex(
 	TransactionContext &txn, ColumnId columnId, MapType mapType) const {
 	IndexData indexData;
-	return getIndexData(txn, columnId, mapType, UNDEF_CONTAINER_POS, indexData);
+	bool withUncommitted = false;
+	return getIndexData(txn, columnId, mapType, UNDEF_CONTAINER_POS, 
+		withUncommitted, indexData);
 }
 
 /*!
@@ -856,15 +918,15 @@ IndexTypes IndexSchema::getIndexTypes(
 	TransactionContext &txn, ColumnId columnId) const {
 	IndexTypes indexType = 0;
 	IndexData indexData;
-	if (getIndexData(
-			txn, columnId, MAP_TYPE_BTREE, UNDEF_CONTAINER_POS, indexData)) {
+	bool withUncommitted = false;
+	if (getIndexData(txn, columnId, MAP_TYPE_BTREE, UNDEF_CONTAINER_POS,
+		withUncommitted, indexData)) {
 		indexType |= (1 << MAP_TYPE_BTREE);
 	}
-	if (getIndexData(
-			txn, columnId, MAP_TYPE_HASH, UNDEF_CONTAINER_POS, indexData)) {
+	if (getIndexData(txn, columnId, MAP_TYPE_HASH, UNDEF_CONTAINER_POS,
+		withUncommitted, indexData)) {
 		indexType |= (1 << MAP_TYPE_HASH);
 	}
-
 	return indexType;
 }
 
@@ -872,11 +934,13 @@ IndexTypes IndexSchema::getIndexTypes(
 	@brief Get list of Index Data defined on Columns
 */
 void IndexSchema::getIndexList(TransactionContext &txn, uint64_t containerPos,
-	util::XArray<IndexData> &list) const {
+	bool withUncommitted, util::XArray<IndexData> &list) const {
 	for (uint16_t i = 0; i < getIndexNum(); i++) {
 		IndexData indexData;
 		getIndexData(txn, i, containerPos, indexData);
-		list.push_back(indexData);
+		if (withUncommitted || indexData.status_ == DDL_READY) {
+			list.push_back(indexData);
+		}
 	}
 }
 
@@ -884,21 +948,115 @@ void IndexSchema::getIndexList(TransactionContext &txn, uint64_t containerPos,
 	@brief Get Index Data defined on Column
 */
 bool IndexSchema::getIndexData(TransactionContext &txn, ColumnId columnId,
-	MapType mapType, uint64_t containerPos, IndexData &indexData) const {
+	MapType mapType, uint64_t containerPos, bool withUncommitted, 
+	IndexData &indexData) const {
 	bool isFound = false;
 	for (uint16_t i = 0; i < getIndexNum(); i++) {
 		uint8_t *indexDataPos = getElemHead() + (getIndexDataSize() * i);
+		DDLStatus status = getStatus(indexDataPos);
 		if (getColumnId(indexDataPos) == columnId &&
-			getMapType(indexDataPos) == mapType) {
-			indexData.oId_ = getOId(txn, indexDataPos, containerPos);
+			getMapType(indexDataPos) == mapType &&
+			(withUncommitted || status == DDL_READY)) {
+			indexData.oIds_ = getMapOIds(txn, indexDataPos, containerPos);
 			indexData.columnId_ = getColumnId(indexDataPos);
 			indexData.mapType_ = getMapType(indexDataPos);
-
+			indexData.status_ = getStatus(indexDataPos);
+			if (status != DDL_READY) {
+				BaseObject option(txn.getPartitionId(), *getObjectManager(),
+					getOptionOId(indexDataPos));
+				indexData.cursor_ = getRowId(option.getBaseAddr());
+			} else {
+				indexData.cursor_ = MAX_ROWID;
+			}
 			isFound = true;
 			break;
 		}
 	}
 	return isFound;
+}
+
+void IndexSchema::createNullIndexData(TransactionContext &txn, 
+	uint64_t containerPos, IndexData &indexData, BaseContainer *container) {
+	setDirty();
+
+	bool isUnique = false;
+	ColumnType nullType = COLUMN_TYPE_NULL;
+	BtreeMap map(txn, *getObjectManager(),
+		container->getMapAllcateStrategy(), container);
+	map.initialize(txn, nullType, isUnique, BtreeMap::TYPE_SINGLE_KEY);
+	indexData.oIds_.nullOId_ = map.getBaseOId();
+
+	uint16_t nth = getNth(indexData.columnId_, indexData.mapType_);
+	uint8_t *indexDataPos = getElemHead() + (getIndexDataSize() * nth);
+	updateMapOIds(txn, indexDataPos, containerPos, indexData.oIds_);
+}
+
+void IndexSchema::getIndexInfoList(TransactionContext &txn, 
+	BaseContainer *container, const IndexInfo &indexInfo, 
+	bool withUncommitted, util::Vector<IndexInfo> &matchList, 
+	util::Vector<IndexInfo> &mismatchList,
+	bool isIndexNameCaseSensitive) {
+	for (uint16_t i = 0; i < getIndexNum(); i++) {
+		IndexData indexData;
+		getIndexData(txn, i, UNDEF_CONTAINER_POS, indexData);
+		if (!withUncommitted && indexData.status_ != DDL_READY) {
+			continue;
+		}
+
+		IndexInfo currentIndexInfo(txn.getDefaultAllocator());
+		getIndexInfo(txn, i, currentIndexInfo);
+		bool isColumnIdsMatch = 
+			std::find(indexInfo.columnIds_.begin(), indexInfo.columnIds_.end(), currentIndexInfo.columnIds_[0])
+			!= indexInfo.columnIds_.end();
+
+		bool isMapTypeMatch;
+		if (indexInfo.mapType == MAP_TYPE_DEFAULT) {
+			ColumnInfo& columnInfo = container->getColumnInfo(currentIndexInfo.columnIds_[0]);
+			isMapTypeMatch = defaultIndexType[columnInfo.getColumnType()] == currentIndexInfo.mapType;
+		} else {
+			isMapTypeMatch = indexInfo.mapType == currentIndexInfo.mapType;
+		}
+
+		if (indexInfo.anyNameMatches_ == 0 && indexInfo.indexName_.length() != 0) {
+			bool isCaseSensitive = false;	
+			bool isNameEqWithCaseInsensitive = 
+				eqCaseStringString(txn, 
+					indexInfo.indexName_.c_str(),
+					static_cast<uint32_t>(indexInfo.indexName_.length()),
+					currentIndexInfo.indexName_.c_str(),
+					static_cast<uint32_t>(currentIndexInfo.indexName_.length()),
+					isCaseSensitive);
+			if (isNameEqWithCaseInsensitive) {
+				bool isCaseSensitiveMismatch = false;
+				if (isIndexNameCaseSensitive) {
+					isCaseSensitiveMismatch = 
+						!eqCaseStringString(txn, 
+							indexInfo.indexName_.c_str(),
+							static_cast<uint32_t>(indexInfo.indexName_.length()),
+							currentIndexInfo.indexName_.c_str(),
+							static_cast<uint32_t>(currentIndexInfo.indexName_.length()),
+							isIndexNameCaseSensitive);
+				}
+				if (isCaseSensitiveMismatch ||
+					(!indexInfo.columnIds_.empty() && !isColumnIdsMatch) ||
+					(indexInfo.anyTypeMatches_ == 0 && !isMapTypeMatch)) {
+					mismatchList.push_back(currentIndexInfo);
+				} else {
+					matchList.push_back(currentIndexInfo);
+				}
+			} else {
+				if (!indexInfo.columnIds_.empty() && isColumnIdsMatch &&
+					indexInfo.anyTypeMatches_ == 0 && isMapTypeMatch) {
+					mismatchList.push_back(currentIndexInfo);
+				}
+			}
+		} else {
+			if ((indexInfo.columnIds_.empty() || isColumnIdsMatch) &&
+				(indexInfo.anyTypeMatches_ != 0 || isMapTypeMatch)) {
+				matchList.push_back(currentIndexInfo);
+			}
+		}
+	}
 }
 
 /*!
@@ -909,7 +1067,8 @@ void IndexSchema::dropAll(TransactionContext &txn, BaseContainer *container,
 	setDirty();
 	{
 		util::XArray<IndexData> list(txn.getDefaultAllocator());
-		getIndexList(txn, containerPos, list);
+		bool withUncommitted = true;
+		getIndexList(txn, containerPos, withUncommitted, list);
 		for (size_t i = 0; i < list.size(); i++) {
 			dropIndexData(txn, list[i].columnId_, list[i].mapType_, container,
 				containerPos, isMapFinalize);
@@ -924,7 +1083,8 @@ void IndexSchema::finalize(TransactionContext &txn) {
 	setDirty();
 	{
 		util::XArray<IndexData> list(txn.getDefaultAllocator());
-		getIndexList(txn, UNDEF_CONTAINER_POS, list);
+		bool withUncommitted = true;
+		getIndexList(txn, UNDEF_CONTAINER_POS, withUncommitted, list);
 		for (size_t i = 0; i < list.size(); i++) {
 			dropIndexInfo(txn, list[i].columnId_, list[i].mapType_);
 		}
@@ -935,29 +1095,25 @@ void IndexSchema::finalize(TransactionContext &txn) {
 /*!
 	@brief Get Index Object
 */
-BaseIndex *IndexSchema::getIndex(TransactionContext &txn, MapType mapType,
-	ColumnId columnId, BaseContainer *container, uint64_t containerPos) const {
-	IndexData indexData;
-	AllocateStrategy strategy = container->getMapAllcateStrategy();
-	if (getIndexData(txn, columnId, mapType, containerPos, indexData)) {
-		BaseIndex *map = NULL;
-		switch (mapType) {
-		case MAP_TYPE_BTREE:
-			map = ALLOC_NEW(txn.getDefaultAllocator()) BtreeMap(
-				txn, *getObjectManager(), indexData.oId_, strategy, container);
-			break;
-		case MAP_TYPE_HASH:
-			map = ALLOC_NEW(txn.getDefaultAllocator()) HashMap(
-				txn, *getObjectManager(), indexData.oId_, strategy, container);
-			break;
-		default:
-			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
-		}
-		return map;
+BaseIndex *IndexSchema::getIndex(TransactionContext &txn, const IndexData &indexData,
+	bool forNull, BaseContainer *container) const {
+	const AllocateStrategy strategy = container->getMapAllcateStrategy();
+
+	OId mapOId;
+	MapType mapType;
+	if (forNull) {
+		mapOId = indexData.oIds_.nullOId_;
+		mapType = MAP_TYPE_BTREE;
+	} else {
+		mapOId = indexData.oIds_.mainOId_;
+		mapType = indexData.mapType_;
 	}
-	else {
+	if (mapOId == UNDEF_OID) {
 		return NULL;
 	}
+	BaseIndex *map = DataStore::getIndex(txn, *getObjectManager(), mapType, 
+		mapOId, strategy, container);
+	return map;
 }
 
 void IndexSchema::expand(TransactionContext &txn) {
@@ -966,10 +1122,11 @@ void IndexSchema::expand(TransactionContext &txn) {
 	uint16_t newReserveIndexNum = getReserveNum() * 2;
 	OId duplicateOId;
 	uint8_t *toIndexSchema = getObjectManager()->allocate<uint8_t>(
-		txn.getPartitionId(), getAllocateSize(newReserveIndexNum),
+		txn.getPartitionId(), getAllocateSize(newReserveIndexNum, getNullbitsSize()),
 		allocateStrategy_, duplicateOId, OBJECT_TYPE_COLUMNINFO);
-	memcpy(toIndexSchema, getBaseAddr(), getAllocateSize(orgIndexNum));
-	finalize(txn);
+	memset(toIndexSchema, 0, getAllocateSize(newReserveIndexNum, getNullbitsSize()));
+	memcpy(toIndexSchema, getBaseAddr(), getAllocateSize(orgIndexNum, getNullbitsSize()));
+	BaseObject::finalize();
 
 	setBaseOId(duplicateOId);
 	setBaseAddr(toIndexSchema);
@@ -1070,7 +1227,7 @@ const uint64_t LinkArray<H, V>::MAX_LOCAL_ELEMENT_NUM =
 		   ((int32_t)(log(double(sizeof(V))) / log(double(2))) + 1)));
 
 template <>
-uint64_t LinkArray<void, OId>::getHeaderSize() {
+uint64_t LinkArray<void, MapOIds>::getHeaderSize() {
 	return 0;
 }
 
@@ -1081,7 +1238,7 @@ uint64_t LinkArray<H, V>::getHeaderSize() {
 	return sizeof(H);
 }
 
-template const OId *LinkArray<void, OId>::get(
+template const MapOIds *LinkArray<void, MapOIds>::get(
 	TransactionContext &txn, uint64_t pos);
 template const TimeSeries::SubTimeSeriesImage *
 LinkArray<TimeSeries::BaseSubTimeSeriesData,
@@ -1108,8 +1265,8 @@ const V *LinkArray<H, V>::get(TransactionContext &txn, uint64_t pos) {
 	}
 }
 
-template void LinkArray<void, OId>::insert(TransactionContext &txn,
-	uint64_t pos, const OId *value, const AllocateStrategy &allocateStrategy);
+template void LinkArray<void, MapOIds>::insert(TransactionContext &txn,
+	uint64_t pos, const MapOIds *value, const AllocateStrategy &allocateStrategy);
 template void LinkArray<TimeSeries::BaseSubTimeSeriesData,
 	TimeSeries::SubTimeSeriesImage>::insert(TransactionContext &txn,
 	uint64_t pos, const TimeSeries::SubTimeSeriesImage *value,
@@ -1129,30 +1286,34 @@ void LinkArray<H, V>::insert(TransactionContext &txn, uint64_t pos,
 	getChainList(txn, chainNo, chain);
 	V insertImage = *value;
 	while (1) {
-		V tailImage = *(chain.getCursor<V>() + elemNum - 1);
-
 		uint64_t maxPos;
 		if (elemNum < MAX_LOCAL_ELEMENT_NUM) {
 			maxPos = elemNum;
-		}
-		else {
-			maxPos = elemNum - 1;
-		}
-
-		if (elemNum > 0) {
-			for (uint64_t i = maxPos; i > startPos; i--) {
-				V *fromValue = chain.getCursor<V>() + i - 1;
-				V *toValue = chain.getCursor<V>() + i;
-				*toValue = *fromValue;
+			if (elemNum > 0) {
+				for (uint64_t i = maxPos; i > startPos; i--) {
+					V *fromValue = chain.getCursor<V>() + i - 1;
+					V *toValue = chain.getCursor<V>() + i;
+					*toValue = *fromValue;
+				}
 			}
-		}
-		V *insertValue = chain.getCursor<V>() + startPos;
-		*insertValue = insertImage;
-
-		if (elemNum < MAX_LOCAL_ELEMENT_NUM) {
+			V *insertValue = chain.getCursor<V>() + startPos;
+			*insertValue = insertImage;
 			break;
 		}
 		else {
+			V tailImage = *(chain.getCursor<V>() + elemNum - 1);
+
+			maxPos = elemNum - 1;
+			if (elemNum > 0) {
+				for (uint64_t i = maxPos; i > startPos; i--) {
+					V *fromValue = chain.getCursor<V>() + i - 1;
+					V *toValue = chain.getCursor<V>() + i;
+					*toValue = *fromValue;
+				}
+			}
+			V *insertValue = chain.getCursor<V>() + startPos;
+			*insertValue = insertImage;
+
 			insertImage = tailImage;
 
 			chainNo++;
@@ -1164,8 +1325,8 @@ void LinkArray<H, V>::insert(TransactionContext &txn, uint64_t pos,
 	increment();
 }
 
-template void LinkArray<void, OId>::update(
-	TransactionContext &txn, uint64_t pos, const OId *value);
+template void LinkArray<void, MapOIds>::update(
+	TransactionContext &txn, uint64_t pos, const MapOIds *value);
 template void LinkArray<TimeSeries::BaseSubTimeSeriesData,
 	TimeSeries::SubTimeSeriesImage>::update(TransactionContext &txn,
 	uint64_t pos, const TimeSeries::SubTimeSeriesImage *value);
@@ -1193,7 +1354,7 @@ void LinkArray<H, V>::update(
 	}
 }
 
-template void LinkArray<void, OId>::remove(
+template void LinkArray<void, MapOIds>::remove(
 	TransactionContext &txn, uint64_t pos);
 template void LinkArray<TimeSeries::BaseSubTimeSeriesData,
 	TimeSeries::SubTimeSeriesImage>::remove(TransactionContext &txn,
@@ -1212,7 +1373,7 @@ void LinkArray<H, V>::remove(TransactionContext &txn, uint64_t pos) {
 	UpdateBaseObject chain(txn.getPartitionId(), *getObjectManager());
 	getChainList(txn, chainNo, chain);
 	while (1) {
-		for (uint64_t i = startPos; i < elemNum; i++) {
+		for (uint64_t i = startPos; i < elemNum - 1; i++) {
 			V *fromValue = chain.getCursor<V>() + i + 1;
 			V *toValue = chain.getCursor<V>() + i;
 			*toValue = *fromValue;
@@ -1239,7 +1400,7 @@ void LinkArray<H, V>::remove(TransactionContext &txn, uint64_t pos) {
 	decrement();
 }
 
-template OId LinkArray<void, OId>::expand(
+template OId LinkArray<void, MapOIds>::expand(
 	TransactionContext &txn, const AllocateStrategy &allocateStrategy);
 template OId LinkArray<TimeSeries::BaseSubTimeSeriesData,
 	TimeSeries::SubTimeSeriesImage>::expand(TransactionContext &txn,
@@ -1340,7 +1501,7 @@ void LinkArray<H, V>::getChainList(
 	return;
 }
 
-template void LinkArray<void, OId>::dump(TransactionContext &txn);
+template void LinkArray<void, MapOIds>::dump(TransactionContext &txn);
 template void LinkArray<TimeSeries::BaseSubTimeSeriesData,
 	TimeSeries::SubTimeSeriesImage>::dump(TransactionContext &txn);
 template <typename H, typename V>

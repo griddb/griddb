@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -32,6 +32,7 @@ static const int32_t V_1_5_SYNC_END = 2020;
 
 typedef int32_t EventType;
 
+
 /*!
 	@brief Error type of WebAPI operation
 */
@@ -60,6 +61,7 @@ enum WebAPIErrorType {
 	WEBAPI_RESERVED_ETYPE211,
 	WEBAPI_CP_PARTITION_STATUS_IS_CHANGED,
 	WEBAPI_RESERVED_ETYPE212,
+	WEBAPI_RESERVED_ETYPE213,
 
 	WEBAPI_NOT_RECOVERY_CHECKPOINT = 400,
 	WEBAPI_CONFIG_SET_ERROR,
@@ -94,8 +96,10 @@ enum GSEventType {
 						   later */
 	CREATE_SESSION,		/*!< same as CREATE_TRANSACTION_CONTEXT */
 	CLOSE_SESSION,		/*!< same as CLOSE_TRANSACTION_CONTEXT */
-	CREATE_INDEX,		/*!< create index */
-	DELETE_INDEX,		/*!< delete index */
+	V_3_2_CREATE_INDEX,	/*!< obsolete event, not supported for version 3.5 or
+						  later */
+	V_3_2_DELETE_INDEX,	/*!< obsolete event, not supported for version 3.5 or
+						  later */
 	CREATE_EVENT_NOTIFICATION, /*!< obsolete event, not supported for version
 								  2.0 or later */
 	DELETE_EVENT_NOTIFICATION, /*!< obsolete event, not supported for version
@@ -183,8 +187,15 @@ enum GSEventType {
 	DROP_DATABASE,   /*!< remove database */
 	PUT_PRIVILEGE,   /*!< put privilege */
 	DROP_PRIVILEGE,  /*!< remove privilege */
-	RESERVED_EVENT162 = 162,
-	RESERVED_EVENT163,
+	CREATE_INDEX,		/*!< create index */
+	DELETE_INDEX,		/*!< delete index */
+
+	PUT_LARGE_CONTAINER = 300,
+	UPDATE_CONTAINER_STATUS,
+	CREATE_LARGE_INDEX,
+	DROP_LARGE_INDEX,
+
+
 
 	CLIENT_STATEMENT_TYPE_MAX =
 		499,  
@@ -200,6 +211,9 @@ enum GSEventType {
 	CHUNK_EXPIRE_PERIODICALLY,  /*!< periodic removal of expired chunk blocks */
 	ADJUST_STORE_MEMORY_PERIODICALLY, /*!< periodic adjustment of store block
 										 memory */
+	BACK_GROUND,				
+	CONTINUE_CREATE_INDEX,
+	CONTINUE_ALTER_CONTAINER,
 
 	AUTHENTICATION = 700, /*!< authentication */
 	AUTHENTICATION_ACK,   /*!< authentication ack */
@@ -242,6 +256,7 @@ enum GSEventType {
 #endif
 
 
+
 	TXN_SHORTTERM_SYNC_REQUEST =
 		2100,					  /*!< request of short-term synchronization */
 	TXN_SHORTTERM_SYNC_START,	 /*!< start of short-term synchronization */
@@ -258,7 +273,7 @@ enum GSEventType {
 	TXN_LONGTERM_SYNC_LOG,		  /*!< long-term log synchronization */
 	TXN_LONGTERM_SYNC_LOG_ACK,	/*!< LONGTERM_SYNC_LOG ack */
 	TXN_SYNC_TIMEOUT,			  /*!< synchronization timeout */
-
+	TXN_LONGTERM_SYNC_PREPARE_ACK,
 	SYC_SHORTTERM_SYNC_LOG =
 		2500,			   /*!< shor-term synchronization via SyncService */
 	SYC_LONGTERM_SYNC_LOG, /*!< long-term log synchronization via SyncService */
@@ -274,9 +289,12 @@ enum GSEventType {
 	WRITE_LOG_PERIODICALLY, /*!< periodic write to log */
 	CLEANUP_CP_DATA,		/*!< cleanup checkpoint information */
 	RESERVED_EVENT3001,
+	CP_TXN_PREPARE_LONGTERM_SYNC,	
+	CP_TXN_STOP_LONGTERM_SYNC,		
 
 	SYS_EVENT_SIMULATE_FAILURE = 3500,
 	SYS_EVENT_OUTPUT_STATS, /*!< get statistics (Web API) */
+
 
 
 

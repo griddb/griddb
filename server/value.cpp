@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -22,6 +22,7 @@
 #include "util/time.h"
 #include "gs_error.h"
 #include "schema.h"
+#include "message_row_store.h"
 
 std::string Value::dump(
 	TransactionContext &txn, ObjectManager &objectManager) const {
@@ -87,12 +88,13 @@ std::string Value::dump(
 					case COLUMN_TYPE_FLOAT_ARRAY:
 					case COLUMN_TYPE_DOUBLE_ARRAY:
 					case COLUMN_TYPE_TIMESTAMP_ARRAY:
-					case COLUMN_TYPE_WITH_BEGIN:
+					case COLUMN_TYPE_NULL:
 					default:
 						ss << "(unknown type)";
 						break;
 					}
 				}
+				ss << "]";
 			}
 			else {
 				const uint8_t *blobHeaderData =
@@ -130,6 +132,7 @@ std::string Value::dump(
 						   << reinterpret_cast<char *>(binary.data());
 						++count;
 					}
+					ss << "]";
 					assert(num == count);
 				}
 			}
@@ -137,7 +140,6 @@ std::string Value::dump(
 		else {
 			ss << "0[";
 		}
-		ss << "]";
 	}
 	else {
 		switch (getType()) {
@@ -188,43 +190,12 @@ std::string Value::dump(
 			ss << getTimestamp();
 			break;
 		case COLUMN_TYPE_BLOB: {
-			ss << "(BLOB)length=" << data_.object_.totalSize_;
-			uint64_t length = 0;
-			if (data() != NULL) {
-				const uint8_t *blobHeaderData =
-					reinterpret_cast<const uint8_t *>(data());
-				uint32_t elemSize =
-					ValueProcessor::decodeVarSize(blobHeaderData);
-				blobHeaderData += ValueProcessor::getEncodedVarSize(elemSize);
-				uint32_t totalSize =
-					*reinterpret_cast<const uint32_t *>(blobHeaderData);
-				blobHeaderData += sizeof(uint32_t);
-				ss << ", totalSize=" << totalSize;
-
-				OId headerOId = *reinterpret_cast<const OId *>(blobHeaderData);
-				if (headerOId != UNDEF_OID) {
-					ArrayObject arrayObject(txn, objectManager, headerOId);
-					uint32_t num = arrayObject.getArrayLength();
-					for (uint32_t i = 0; i < num; i++) {
-						const uint8_t *elementObject =
-							arrayObject.getArrayElement(i, COLUMN_TYPE_OID);
-						OId srcElemOId =
-							*reinterpret_cast<const OId *>(elementObject);
-						if (srcElemOId != UNDEF_OID) {
-							BinaryObject srcElemVariant(
-								txn, objectManager, srcElemOId);
-							length += srcElemVariant.size();
-							ss << ",(" << i << ",OID=" << srcElemOId
-							   << ",size=" << srcElemVariant.size() << ")";
-						}
-						else {
-							ss << ",(" << i << ",OID=UNDEF_OID)";
-						}
-					}
-				}
-			}
-			assert(length == data_.object_.totalSize_);
+			BlobCursor blobCursor(txn.getPartitionId(), objectManager, data());
+			blobCursor.dump(ss);
 		} break;
+		case COLUMN_TYPE_NULL:
+			ss << "(NULL)";
+			break;
 		case COLUMN_TYPE_OID:
 		case COLUMN_TYPE_STRING_ARRAY:
 		case COLUMN_TYPE_BOOL_ARRAY:
@@ -235,7 +206,6 @@ std::string Value::dump(
 		case COLUMN_TYPE_FLOAT_ARRAY:
 		case COLUMN_TYPE_DOUBLE_ARRAY:
 		case COLUMN_TYPE_TIMESTAMP_ARRAY:
-		case COLUMN_TYPE_WITH_BEGIN:
 		default:
 			ss << "(unknown type)";
 			break;
@@ -270,7 +240,7 @@ void Value::getArrayElement(TransactionContext &txn,
 				const ArrayObject arrayObject(reinterpret_cast<uint8_t *>(
 					const_cast<void *>(data_.object_.value_)));
 				const uint8_t *elementObject =
-					arrayObject.getArrayElement(i, simpleType);
+					arrayObject.getArrayElement(i, FixedSizeOfColumnType[simpleType]);
 				data = elementObject;
 				size = FixedSizeOfColumnType[simpleType];
 			} break;
@@ -383,80 +353,46 @@ void Value::copy(TransactionContext &txn, ObjectManager &objectManager,
 	case COLUMN_TYPE_OID:
 		break;
 	case COLUMN_TYPE_BLOB: {
-		ArrayObject destObject(txn, objectManager);
-		if (srcValue.data_.object_.value_ != NULL) {
-			const ArrayObject srcObject(reinterpret_cast<uint8_t *>(
-				const_cast<void *>(srcValue.data_.object_.value_)));
-			ColumnType simpleType =
-				ValueProcessor::getSimpleColumnType(srcValue.getType());
-			uint32_t objectSize = ArrayObject::getObjectSize(
-				srcObject.getArrayLength(), COLUMN_TYPE_OID);
-
-			uint32_t num = srcObject.getArrayLength();
-
-			destObject.setBaseAddr(
-				reinterpret_cast<uint8_t *>(alloc.allocate(objectSize)));
-
-			destObject.setArrayLength(num, simpleType);
-
-			for (uint32_t i = 0; i < num; i++) {
-				BinaryObject srcElemVariant(txn, objectManager);
-				BinaryObject destElemVariant(txn, objectManager);
-				if (srcValue.onDataStore()) {
-					const OId *srcElemOId = reinterpret_cast<const OId *>(
-						srcObject.getArrayElement(i, simpleType));
-
-					if (*srcElemOId != UNDEF_OID) {
-						if (pId == UNDEF_PARTITIONID) {
-							GS_THROW_USER_ERROR(GS_ERROR_CM_NOT_SUPPORTED,
-								"not support copy type");
-						}
-						srcElemVariant.load(*srcElemOId);
-					}
-				}
-				else {
-					srcElemVariant.setBaseAddr(const_cast<uint8_t *>(
-						srcObject.getArrayElement(i, simpleType)));
-				}
-				if (srcElemVariant.getBaseAddr() != NULL) {
-					destElemVariant.setBaseAddr(reinterpret_cast<uint8_t *>(
-						alloc.allocate(BinaryObject::getObjectSize(
-							srcElemVariant.size()))));
-					destElemVariant.setData(
-						srcElemVariant.size(), srcElemVariant.data());
-				}
-
-				destObject.setArrayElement(
-					i, simpleType, destElemVariant.getBaseAddr());
-			}
-		}
-
 		type_ = srcValue.getType();
-		data_.object_.set(destObject.getImage(), false);
+		if (srcValue.data_.object_.value_ != NULL) {
+			BlobCursor blobCursor(txn.getPartitionId(), objectManager, reinterpret_cast<const uint8_t *>(srcValue.data_.object_.value_));
+			size_t blobSize = blobCursor.getTotalSize();
+			uint8_t *destAddr = reinterpret_cast<uint8_t *>(alloc.allocate(blobSize));
+			while (blobCursor.next()) {
+				uint32_t srcDataSize = 0;
+				const uint8_t *srcData = NULL;
+				blobCursor.getCurrentBinary(srcData, srcDataSize);
+				memcpy(destAddr, srcData, srcDataSize);
+				destAddr += srcDataSize;
+			}
+			data_.object_.set(destAddr, false);
+		} else {
+			data_.object_.set(NULL, false);
+		}
 	} break;
 	case COLUMN_TYPE_STRING_ARRAY: {
-		ArrayObject destObject(txn, objectManager);
+		ArrayObject destObject(txn.getPartitionId(), objectManager);
 		if (srcValue.data_.object_.value_ != NULL) {
 			const ArrayObject srcObject(reinterpret_cast<uint8_t *>(
 				const_cast<void *>(srcValue.data_.object_.value_)));
 			ColumnType simpleType =
 				ValueProcessor::getSimpleColumnType(srcValue.getType());
 			uint32_t objectSize = ArrayObject::getObjectSize(
-				srcObject.getArrayLength(), COLUMN_TYPE_OID);
+				srcObject.getArrayLength(), FixedSizeOfColumnType[COLUMN_TYPE_OID]);
 
 			uint32_t num = srcObject.getArrayLength();
 
 			destObject.setBaseAddr(
 				reinterpret_cast<uint8_t *>(alloc.allocate(objectSize)));
 
-			destObject.setArrayLength(num, simpleType);
+			destObject.setArrayLength(num, FixedSizeOfColumnType[simpleType]);
 			for (uint32_t i = 0; i < num; i++) {
 				const char *srcElemVariant;
 				char *destElemVariant;
 				BaseObject baseObject(pId, objectManager);
 				if (srcValue.onDataStore()) {
 					const OId *srcElemOId = reinterpret_cast<const OId *>(
-						srcObject.getArrayElement(i, simpleType));
+						srcObject.getArrayElement(i, FixedSizeOfColumnType[simpleType]));
 
 					if (*srcElemOId != UNDEF_OID) {
 						if (pId == UNDEF_PARTITIONID) {
@@ -472,7 +408,7 @@ void Value::copy(TransactionContext &txn, ObjectManager &objectManager,
 				}
 				else {
 					srcElemVariant = reinterpret_cast<const char *>(
-						srcObject.getArrayElement(i, simpleType));
+						srcObject.getArrayElement(i, FixedSizeOfColumnType[simpleType]));
 				}
 				if (srcElemVariant != NULL) {
 					uint32_t srcElemVariantLen =
@@ -486,7 +422,7 @@ void Value::copy(TransactionContext &txn, ObjectManager &objectManager,
 					destElemVariant = NULL;
 				}
 
-				destObject.setArrayElement(i, simpleType,
+				destObject.setArrayElement(i, FixedSizeOfColumnType[simpleType],
 					reinterpret_cast<const uint8_t *>(destElemVariant));
 			}
 		}
@@ -507,7 +443,7 @@ void Value::copy(TransactionContext &txn, ObjectManager &objectManager,
 			ArrayObject srcObject(reinterpret_cast<uint8_t *>(
 				const_cast<void *>(srcValue.data_.object_.value_)));
 			uint32_t objectSize = ArrayObject::getObjectSize(
-				srcObject.getArrayLength(), COLUMN_TYPE_OID);
+				srcObject.getArrayLength(), FixedSizeOfColumnType[COLUMN_TYPE_OID]);
 
 			destObject = alloc.allocate(objectSize);
 			memcpy(destObject, srcObject.getImage(), objectSize);
@@ -519,7 +455,9 @@ void Value::copy(TransactionContext &txn, ObjectManager &objectManager,
 		type_ = srcValue.getType();
 		data_.object_.set(destObject, false);
 	} break;
-	case COLUMN_TYPE_WITH_BEGIN:
+	case COLUMN_TYPE_NULL:
+		*this = srcValue;
+		break;
 	default:
 		break;
 	}
@@ -528,6 +466,10 @@ void Value::copy(TransactionContext &txn, ObjectManager &objectManager,
 
 void Value::get(TransactionContext &txn, ObjectManager &objectManager,
 	MessageRowStore *messageRowStore, ColumnId columnId) {
-	ValueProcessor::getField(
-		txn, objectManager, columnId, this, messageRowStore);
+	if (isNullValue()) {
+		messageRowStore->setNull(columnId);
+	} else {
+		ValueProcessor::getField(
+			txn, objectManager, columnId, this, messageRowStore);
+	}
 }

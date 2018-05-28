@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -28,6 +28,7 @@
 #include "expirable_map.h"  
 #include "message_row_store.h"
 #include "object_manager.h"
+#include "container_key.h"
 #include <map>
 #include <utility>
 
@@ -36,6 +37,7 @@
 #endif
 
 UTIL_TRACER_DECLARE(DATA_STORE);
+UTIL_TRACER_DECLARE(DATASTORE_BACKGROUND);
 
 class BaseContainer;
 class Collection;
@@ -46,6 +48,7 @@ class CheckpointBuffer;
 class CheckpointFile;
 class TransactionContext;
 class BtreeMap;
+struct ManagerSet;
 class MessageSchema;
 class ObjectManager;
 class ChunkManager;
@@ -72,166 +75,142 @@ class ChunktManager;
 class ColumnInfo;
 class ResultSet;  
 
-/*!
-	@brief Extended Container name
-*/
-class ExtendedContainerName {
+class Cursor {
+	virtual bool isFinished() const = 0;
 public:
-	ExtendedContainerName(util::StackAllocator &alloc,
-		const char *extContainerName, size_t extContainerNameLen);
-	ExtendedContainerName(util::StackAllocator &alloc, DatabaseId databaseId,
-		const char *databaseName, const char *containerName);
-
-	const char *c_str() {
-		return fullPathName_.c_str();
-	}
-
-	DatabaseId getDatabaseId() {
-		if (databaseId_ == UNDEF_DBID) {
-			const char *undefName = "#Unknown";
-			if (strlen(fullPathName_.c_str()) != strlen(undefName) ||
-				strncmp(fullPathName_.c_str(), undefName, strlen(undefName)) !=
-					0) {
-				size_t startDbNamePos = 0;
-				size_t startContainerNamePos = 0;
-				getFullPathNamePosition(fullPathName_.c_str(),
-					strlen(fullPathName_.c_str()), startDbNamePos,
-					startContainerNamePos);
-				if (startContainerNamePos == 0) {
-					databaseId_ = GS_PUBLIC_DB_ID;
-				}
-				else if (startDbNamePos == 0) {
-					size_t len = startContainerNamePos - startDbNamePos - 1;
-					size_t publicDbNameLen = strlen(GS_PUBLIC);
-					size_t systemDbNameLen = strlen(GS_SYSTEM);
-					if (len >= publicDbNameLen &&
-						memcmp(fullPathName_.c_str(), GS_PUBLIC,
-							publicDbNameLen) == 0) {
-						databaseId_ = GS_PUBLIC_DB_ID;
-					}
-					else if (len >= systemDbNameLen &&
-							 memcmp(fullPathName_.c_str(), GS_SYSTEM,
-								 systemDbNameLen) == 0) {
-						databaseId_ = GS_SYSTEM_DB_ID;
-					}
-					else {
-						GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR,
-							"Unknown dbname" << getDatabaseName());
-					}
-				}
-				else {
-					size_t len = startDbNamePos - 1;
-					char *name = ALLOC_NEW(alloc_) char[len + 1];
-					memcpy(name, fullPathName_.c_str(), len);
-					name[len] = '\0';
-					databaseId_ = atol(name);
-				}
-			}
-		}
-		return databaseId_;
-	}
-	const char *getDatabaseName() {
-		if (databaseName_ == NULL) {
-			const char *undefName = "#Unknown";
-			if (strlen(fullPathName_.c_str()) != strlen(undefName) ||
-				strncmp(fullPathName_.c_str(), undefName, strlen(undefName)) !=
-					0) {
-				size_t startDbNamePos = 0;
-				size_t startContainerNamePos = 0;
-				getFullPathNamePosition(fullPathName_.c_str(),
-					strlen(fullPathName_.c_str()), startDbNamePos,
-					startContainerNamePos);
-
-				if (startContainerNamePos == 0) {
-					size_t len = strlen(GS_PUBLIC) + 1;
-					databaseName_ = ALLOC_NEW(alloc_) char[len];
-					memcpy(databaseName_, GS_PUBLIC, len);
-				}
-				else {
-					assert(startDbNamePos <= startContainerNamePos);
-					size_t len = startContainerNamePos - startDbNamePos - 1;
-					databaseName_ = ALLOC_NEW(alloc_) char[len + 1];
-					memcpy(databaseName_,
-						fullPathName_.c_str() + startDbNamePos, len);
-					databaseName_[len] = '\0';
-				}
-			}
-			else {
-				size_t len = strlen(undefName) + 1;
-				databaseName_ = ALLOC_NEW(alloc_) char[len];
-				memcpy(databaseName_, undefName, len);
-			}
-		}
-		return reinterpret_cast<const char *>(databaseName_);
-	}
-	const char *getContainerName() {
-		if (containerName_ == NULL) {
-			const char *undefName = "#Unknown";
-			if (strlen(fullPathName_.c_str()) != strlen(undefName) ||
-				strncmp(fullPathName_.c_str(), undefName, strlen(undefName)) !=
-					0) {
-				size_t startDbNamePos = 0;
-				size_t startContainerNamePos = 0;
-				getFullPathNamePosition(fullPathName_.c_str(),
-					strlen(fullPathName_.c_str()), startDbNamePos,
-					startContainerNamePos);
-
-				size_t len =
-					strlen(fullPathName_.c_str()) - startContainerNamePos;
-				containerName_ = ALLOC_NEW(alloc_) char[len + 1];
-				memcpy(containerName_,
-					fullPathName_.c_str() + startContainerNamePos, len);
-				containerName_[len] = '\0';
-			}
-			else {
-				size_t len = strlen(undefName) + 1;
-				containerName_ = ALLOC_NEW(alloc_) char[len];
-				memcpy(containerName_, undefName, len);
-			}
-		}
-		return reinterpret_cast<const char *>(containerName_);
-	}
-
-private:
-	void createFullPathName(
-		const DatabaseId dbId, const char *dbName, const char *containerName) {
-		assert(strcmp(dbName, "") != 0);
-		if (dbId != GS_PUBLIC_DB_ID) {
-			util::NormalOStringStream stream;
-			if (dbId != GS_SYSTEM_DB_ID) {
-				stream << dbId << ":";
-			}
-			stream << dbName << ".";
-			fullPathName_.append(stream.str().c_str());
-		}
-		fullPathName_.append(containerName);
-	}
-
-	static void getFullPathNamePosition(const char *fullPathName,
-		const size_t fullPathLen, size_t &startDbNamePos,
-		size_t &startContainerNamePos) {
-		startDbNamePos = 0;
-		for (size_t i = 0; i < fullPathLen; i++) {
-			if (fullPathName[i] == ':' && i != fullPathLen - 1) {
-				startDbNamePos = i + 1;
-				break;
-			}
-		}
-		startContainerNamePos = 0;
-		for (size_t i = 0; i < fullPathLen; i++) {
-			if (fullPathName[i] == '.' && i != fullPathLen - 1) {
-				startContainerNamePos = i + 1;
-				break;
-			}
-		}
-	}
-
-	util::StackAllocator &alloc_;
-	util::String fullPathName_;
-	DatabaseId databaseId_;
-	char *databaseName_;
-	char *containerName_;
+	static const uint64_t NUM_PER_EXEC = 500;
 };
+
+class IndexCursor : Cursor {
+public:
+	IndexCursor() {};
+	IndexCursor(const MvccRowImage &image) {
+		setMvccImage(image);
+	};
+	IndexCursor(bool isImmediate) {
+		if (isImmediate) {
+			setImmediateMode();
+		}
+	};
+
+	bool isFinished() const {
+		return data_.rowId_ == MAX_ROWID;
+	}
+	bool isImmediateMode() const {
+		return data_.type_ == MVCC_UNDEF;
+	}
+
+	void setImmediateMode() {
+		data_.type_ = MVCC_UNDEF;
+	}
+	void setMvccImage(const MvccRowImage &image) {
+		memcpy(&data_, &image, sizeof(Data));
+	}
+	MvccRowImage getMvccImage() const {
+		MvccRowImage image;
+		memcpy(&image, &data_, sizeof(Data));
+		return image;
+	}
+	MapType getMapType() const {return data_.mapType_;}
+	ColumnId getColumnId() const {return data_.columnId_;}
+	RowId getRowId() const {return data_.rowId_;}
+	static uint64_t getNum() {return NUM_PER_EXEC;}
+	void setMapType(MapType mapType) {data_.mapType_ = mapType;}
+	void setColumnId(ColumnId columnId) {data_.columnId_ = columnId;}
+	void setRowId(RowId rowId) {data_.rowId_ = rowId;}
+private:
+	struct Data {
+		Data() {
+			rowId_ = INITIAL_ROWID;
+			padding1_ = 0;
+			type_ = MVCC_INDEX;
+			mapType_ = MAP_TYPE_DEFAULT;
+			padding2_ = 0;
+			columnId_ = UNDEF_COLUMNID;
+		}
+
+		RowId rowId_; 
+		uint64_t padding1_; 
+		MVCC_IMAGE_TYPE type_;
+		MapType mapType_;
+		uint16_t padding2_;
+		ColumnId columnId_;
+	};
+	Data data_;
+};
+
+class ContainerCursor : Cursor {
+public:
+	ContainerCursor() {};
+	ContainerCursor(const MvccRowImage &image) {
+		setMvccImage(image);
+	};
+	ContainerCursor(bool isImmediate) {
+		if (isImmediate) {
+			setImmediateMode();
+		}
+	};
+
+	ContainerCursor(bool isImmediate, OId oId) {
+		if (isImmediate) {
+			setImmediateMode();
+		}
+		setContainerOId(oId);
+	};
+
+	bool isFinished() const {
+		return data_.rowId_ == MAX_ROWID;
+	}
+	bool isImmediateMode() const {
+		return data_.type_ == MVCC_UNDEF;
+	}
+
+	void setImmediateMode() {
+		data_.type_ = MVCC_UNDEF;
+	}
+	void setMvccImage(const MvccRowImage &image) {
+		memcpy(&data_, &image, sizeof(Data));
+	}
+	MvccRowImage getMvccImage() const {
+		MvccRowImage image;
+		memcpy(&image, &data_, sizeof(Data));
+		return image;
+	}
+	static uint64_t getNum() {return NUM_PER_EXEC;}
+	RowId getRowId() const {return data_.rowId_;}
+	void setRowId(RowId rowId) {data_.rowId_ = rowId;}
+	OId getContainerOId() const {return data_.containerOId_;}
+	void setContainerOId(OId oId) {data_.containerOId_ = oId;}
+private:
+	struct Data {
+		Data() {
+			rowId_ = INITIAL_ROWID;
+			containerOId_ = UNDEF_OID;
+			type_ = MVCC_CONTAINER;
+			padding1_ = 0;
+			padding2_ = 0;
+			padding3_ = 0;
+		}
+
+		RowId rowId_; 
+		OId containerOId_; 
+		MVCC_IMAGE_TYPE type_;
+		uint8_t padding1_;
+		uint16_t padding2_;
+		uint32_t padding3_;
+	};
+	Data data_;
+};
+
+struct BGTask {
+	BGTask() {
+		pId_ = UNDEF_PARTITIONID;
+		bgId_ = UNDEF_BACKGROUND_ID;
+	}
+	PartitionId pId_;
+	BackgroundId bgId_;
+};
+
 
 /*!
 	@brief Estimate of Conainer resource size
@@ -344,6 +323,15 @@ public:
 		NOT_EXECUTED,
 		CREATE,
 		UPDATE,
+		CHANGE_PROPERY,
+	};
+	/*!
+		@brief Result of comparing two schema
+	*/
+	enum SchemaState {
+		SAME_SCHEMA,
+		PROPERY_DIFFERENCE,
+		COLUMNS_DIFFERENCE,
 	};
 
 	/*!
@@ -403,6 +391,92 @@ public:
 		util::Set<ContainerAttribute> attributes_;
 	};
 
+	typedef uint8_t BGEventType;
+	/*!
+		@brief BackgroundData base format
+	*/
+	class BackgroundData {
+	public:
+		static const BGEventType UNDEF_TYPE = 0;
+		static const BGEventType DROP_INDEX = 1;
+		static const BGEventType DROP_CONTAINER = 2;
+	public:
+		BackgroundData() {
+			eventType_ = UNDEF_TYPE;
+			status_ = 0;
+			errorCounter_ = 0;
+			mapType_ = MAP_TYPE_DEFAULT;
+			padding_ = 0;
+			oId_ = UNDEF_OID;
+		}
+		void setDropIndexData(MapType mapType, ChunkKey chunkKey, OId oId) {
+			eventType_ = DROP_INDEX;
+			mapType_ = mapType;
+			chunkKey_ = chunkKey;
+			oId_ = oId;
+		}
+		void setDropContainerData(OId &oId) {
+			eventType_ = DROP_CONTAINER;
+			oId_ = oId;
+		}
+		void getDropIndexData(MapType &mapType, ChunkKey &chunkKey, OId &oId) const {
+			if (eventType_ != DROP_INDEX) {
+				assert(true);
+			}
+			mapType = mapType_;
+			chunkKey = chunkKey_;
+			oId = oId_;
+		}
+		void getDropContainerData(OId &oId) const {
+			if (eventType_ != DROP_CONTAINER) {
+				assert(true);
+			}
+			oId = oId_;
+		}
+		bool isInvalid() const {
+			return (errorCounter_ > 1);
+		}
+		void incrementError() {
+			errorCounter_++;
+		}
+		uint8_t getErrorCount() const {
+			return errorCounter_;
+		}
+		BGEventType getEventType() const {
+			return eventType_;
+		}
+		void updateOId(OId oId) {
+			oId_ = oId;
+		}
+		bool operator==(const BackgroundData &b) const {
+			if (memcmp(this, &b, sizeof(BackgroundData)) == 0) {
+				return true;
+			}
+			else {
+				return false;
+			}
+		}
+		bool operator<(const BackgroundData &b) const {
+			if (memcmp(this, &b, sizeof(BackgroundData)) < 0) {
+				return true;
+			}
+			else {
+				return false;
+			}
+		}
+
+	private:
+		BGEventType eventType_;
+		uint8_t status_;  
+		uint8_t errorCounter_;  
+		MapType mapType_;
+		union {
+			ChunkKey chunkKey_;
+			uint32_t padding_;
+		};
+		OId oId_;
+	};
+
 	static const ResultSize CONTAINER_NAME_LIST_NUM_UPPER_LIMIT = INT32_MAX;
 
 	static const size_t RESULTSET_POOL_BLOCK_SIZE_BITS = 20;
@@ -417,8 +491,10 @@ public:
 
 public:  
 public:  
-	DataStore(const ConfigTable &configTable, ChunkManager *chunkManager);
+	DataStore(ConfigTable &configTable, ChunkManager *chunkManager);
 	~DataStore();
+
+	void initialize(ManagerSet &mgrSet);
 
 	bool isRestored(PartitionId pId) const;
 
@@ -431,36 +507,42 @@ public:
 		const DatabaseId dbId, ContainerCondition &condition);
 	void getContainerNameList(TransactionContext &txn, PartitionId pId,
 		int64_t start, ResultSize limit, const DatabaseId dbId,
-		ContainerCondition &condition, util::XArray<util::String *> &nameList);
+		ContainerCondition &condition, util::XArray<FullContainerKey> &nameList);
 
 	BaseContainer *putContainer(TransactionContext &txn, PartitionId pId,
-		ExtendedContainerName &extContainerName, ContainerType containerType,
+		const FullContainerKey &containerKey, ContainerType containerType,
 		uint32_t schemaSize, const uint8_t *containerSchema, bool isEnable,
-		PutStatus &status);
+		PutStatus &status, bool isCaseSensitive = false);
 
 	void dropContainer(TransactionContext &txn, PartitionId pId,
-		ExtendedContainerName &extContainerName, ContainerType containerType);
+		const FullContainerKey &containerKey, ContainerType containerType,
+		bool isCaseSensitive = false);
 	BaseContainer *getContainer(TransactionContext &txn, PartitionId pId,
-		ExtendedContainerName &extContainerName, ContainerType containerType);
+		const FullContainerKey &containerKey, ContainerType containerType,
+		bool isCaseSensitive = false);
 	BaseContainer *getContainer(TransactionContext &txn, PartitionId pId,
 		ContainerId containerId,
 		ContainerType containerType);  
+	BaseContainer *getContainer(TransactionContext &txn, PartitionId pId,
+		const ContainerCursor &containerCursor) {
+		return getBaseContainer(txn, pId, containerCursor.getContainerOId(), 
+			ANY_CONTAINER);
+	}
+
 	Collection *getCollection(
 		TransactionContext &txn, PartitionId pId, ContainerId containerId);
 	TimeSeries *getTimeSeries(
 		TransactionContext &txn, PartitionId pId, ContainerId containerId);
 
 	BaseContainer *getContainerForRestore(TransactionContext &txn,
-		PartitionId pId, OId oId, uint8_t containerType);  
+		PartitionId pId, OId oId,
+		ContainerId containerId, uint8_t containerType);  
 
-	ContainerType getContainerType(
-		TransactionContext &txn, ContainerId containerId) const;
+	void updateContainer(TransactionContext &txn, BaseContainer *container, OId newContainerOId);
 
-	BtreeMap *getSchemaMap(TransactionContext &txn, PartitionId pId);
 	void removeColumnSchema(
 		TransactionContext &txn, PartitionId pId, OId schemaOId);
 
-	BtreeMap *getTriggerMap(TransactionContext &txn, PartitionId pId);
 	void removeTrigger(
 		TransactionContext &txn, PartitionId pId, OId triggerOId);
 	void insertTrigger(TransactionContext &txn, PartitionId pId,
@@ -484,6 +566,30 @@ public:
 	void dropPartition(PartitionId pId);
 	UTIL_FORCEINLINE PartitionGroupId calcPartitionGroupId(PartitionId pId);
 
+	void setCurrentBGTask(PartitionGroupId pgId, const BGTask &bgTask) {
+		currentBackgroundList_[pgId] = bgTask;
+	}
+	void resetCurrentBGTask(PartitionGroupId pgId) {
+		currentBackgroundList_[pgId] = BGTask();
+	}
+	bool getCurrentBGTask(PartitionGroupId pgId, BGTask &bgTask) const {
+		bgTask = currentBackgroundList_[pgId];
+		return bgTask.bgId_ != UNDEF_BACKGROUND_ID;
+	}
+	bool searchBGTask(TransactionContext &txn, PartitionId pId, BGTask &bgTask);
+	void finalizeContainer(TransactionContext &txn, BaseContainer *container);
+	void finalizeMap(TransactionContext &txn, 
+		const AllocateStrategy &allcateStrategy, BaseIndex *index);
+	bool executeBGTask(TransactionContext &txn, BackgroundId bgId);
+	void clearAllBGTask(TransactionContext &txn);
+	static BaseIndex *getIndex(TransactionContext &txn, 
+		ObjectManager &objectManager, MapType mapType, OId mapOId, 
+		const AllocateStrategy &strategy, BaseContainer *container);
+
+	friend std::ostream &operator<<(
+		std::ostream &output, const DataStore::BackgroundData &bgData);
+	void dumpTraceBGTask(TransactionContext &txn, PartitionId pId);
+
 	void restartPartition(
 		TransactionContext &txn, ClusterService *clusterService);
 
@@ -493,9 +599,10 @@ public:
 	void dumpContainerIdTable(PartitionId pId);
 
 	ResultSet *createResultSet(TransactionContext &txn, ContainerId containerId,
-		SchemaVersionId versionId, int64_t emNow);
+		SchemaVersionId versionId, int64_t emNow, bool noExpire = false);
 
 	ResultSet *getResultSet(TransactionContext &txn, ResultSetId resultSetId);
+
 
 
 	void closeResultSet(PartitionId pId, ResultSetId resultSetId);
@@ -531,6 +638,10 @@ public:
 
 	bool executeBatchFree(PartitionId pId, Timestamp timestamp,
 		uint64_t maxScanNum, uint64_t &scanNum);
+
+	struct Config;
+	Config& getConfig() { return config_; }
+
 
 
 
@@ -619,13 +730,15 @@ private:
 		@brief DataStore meta data format
 	*/
 	struct DataStorePartitionHeader {
-		static const int32_t PADDING_SIZE = 464;
+		static const int32_t PADDING_SIZE = 448;
 		OId metaMapOId_;
 		OId schemaMapOId_;
 		OId triggerMapOId_;
 		uint64_t maxContainerId_;
 		ChunkKey chunkKey_;
 		uint32_t padding0_;
+		OId backgroundMapOId_;
+		uint64_t maxBackgroundId_;
 		uint8_t padding_[PADDING_SIZE];
 	};
 
@@ -653,6 +766,14 @@ private:
 			getObjectManager()->setDirty(getPartitionId(), getBaseOId());
 			get()->triggerMapOId_ = oId;
 		}
+		void setBackgroundMapOId(OId oId) {
+			getObjectManager()->setDirty(getPartitionId(), getBaseOId());
+			get()->backgroundMapOId_ = oId;
+		}
+		void incrementBackgroundId() {
+			getObjectManager()->setDirty(getPartitionId(), getBaseOId());
+			get()->maxBackgroundId_++;
+		}
 		void incrementMaxContainerId() {
 			getObjectManager()->setDirty(getPartitionId(), getBaseOId());
 			get()->maxContainerId_++;
@@ -669,6 +790,12 @@ private:
 		}
 		OId getTriggerMapOId() const {
 			return get()->triggerMapOId_;
+		}
+		OId getBackgroundMapOId() const {
+			return get()->backgroundMapOId_;
+		}
+		uint64_t getMaxBackgroundId() const {
+			return get()->maxBackgroundId_;
 		}
 		uint64_t getMaxContainerId() const {
 			return get()->maxContainerId_;
@@ -688,6 +815,40 @@ private:
 		}
 	};
 
+	static class StatSetUpHandler : public StatTable::SetUpHandler {
+		virtual void operator()(StatTable &stat);
+	} statSetUpHandler_;
+
+	/*!
+		@brief Updates Stat.
+	*/
+	class StatUpdator : public StatTable::StatUpdator {
+		virtual bool operator()(StatTable &stat);
+
+	public:
+		DataStore *dataStore_;
+	} statUpdator_;
+
+	/*!
+		@brief Configuration of DataStore
+	*/
+	struct Config : public ConfigTable::ParamHandler {
+		Config(ConfigTable &configTable);
+
+		void setUpConfigHandler(ConfigTable& configTable);
+		virtual void operator()(
+				ConfigTable::ParamId id, const ParamValue &value);
+
+		double getBackgroundMinRate() const;
+		double getBackgroundWaitWeight() const {
+			return backgroundWaitWeight_;
+		}
+		void setBackgroundMinRate(double rate);
+
+		util::Atomic<int64_t> backgroundMinRate_;
+		double backgroundWaitWeight_;
+	} config_;
+
 	static const ChunkId INITIAL_CHUNK_ID = 0;
 	static const uint32_t FIRST_OBJECT_OFFSET =
 		ObjectManager::CHUNK_HEADER_BLOCK_SIZE * 2 + 4;
@@ -702,7 +863,6 @@ private:
 	AllocateStrategy allocateStrategy_;
 	int32_t affinityGroupSize_;  
 
-	size_t resultSetMemoryLimit_;
 	std::vector<ResultSetId> resultSetIdList_;
 	util::FixedSizeAllocator<util::Mutex> resultSetPool_;
 	util::StackAllocator **resultSetAllocator_;  
@@ -710,6 +870,8 @@ private:
 		ResultSetIdHash>::Manager **resultSetMapManager_;
 	util::ExpirableMap<ResultSetId, ResultSet, int64_t, ResultSetIdHash> *
 		*resultSetMap_;
+	std::vector<BGTask> currentBackgroundList_;
+	std::vector<uint64_t> activeBackgroundCount_;
 	static const int32_t RESULTSET_MAP_HASH_SIZE = 100;
 	static const size_t RESULTSET_FREE_ELEMENT_LIMIT =
 		10 * RESULTSET_MAP_HASH_SIZE;
@@ -719,6 +881,7 @@ private:
 	ObjectManager *objectManager_;
 	ClusterService *clusterService_;
 
+
 private:  
 	void forceCloseAllResultSet(PartitionId pId);
 
@@ -726,24 +889,42 @@ private:
 
 	bool restoreContainerIdTable(
 		TransactionContext &txn, ClusterService *clusterService);
+	void restoreBackground(TransactionContext &txn, 
+		ClusterService *clusterService);
 
 	void setUnrestored(PartitionId pId);
 	void setRestored(PartitionId pId);
 
-	void getColumnNameList(TransactionContext &txn, ColumnInfo *schema,
-		uint32_t columnCount,
-		util::XArray<const util::String *> &columnNameList);
+	BtreeMap *getSchemaMap(TransactionContext &txn, PartitionId pId);
 	void insertColumnSchema(TransactionContext &txn, PartitionId pId,
 		MessageSchema *messageSchema, int64_t schemaHashKey, OId &schemaOId);
 	OId getColumnSchemaId(TransactionContext &txn, PartitionId pId,
 		MessageSchema *messageSchema, int64_t schemaHashKey);
+	BtreeMap *getTriggerMap(TransactionContext &txn, PartitionId pId);
 
 	BaseContainer *createContainer(TransactionContext &txn, PartitionId pId,
-		ExtendedContainerName &extContainerName, ContainerType containerType,
+		const FullContainerKey &containerKey, ContainerType containerType,
 		MessageSchema *messageSchema);
 	void changeContainerSchema(TransactionContext &txn, PartitionId pId,
+		const FullContainerKey &containerKey,
 		BaseContainer *&container, MessageSchema *messageSchema,
 		util::XArray<uint32_t> &copyColumnMap);
+	void changeContainerProperty(TransactionContext &txn, PartitionId pId,
+		BaseContainer *&container, MessageSchema *messageSchema);
+	BaseContainer *getBaseContainer(TransactionContext &txn, PartitionId pId,
+		OId oId, ContainerType containerType);
+
+	BtreeMap *getBackgroundMap(TransactionContext &txn, PartitionId pId);
+	uint64_t getBGTaskCount(PartitionId pId) {
+		return activeBackgroundCount_[pId];
+	}
+	BackgroundId insertBGTask(TransactionContext &txn, PartitionId pId, 
+		BackgroundData &bgData);
+	void removeBGTask(TransactionContext &txn, PartitionId pId, BackgroundId bgId,
+		BackgroundData &bgData);
+	void updateBGTask(TransactionContext &txn, PartitionId pId, BackgroundId bgId, 
+		BackgroundData &beforBgData, BackgroundData &afterBgData);
+	bool executeBGTaskInternal(TransactionContext &txn, BackgroundData &bgData);
 
 
 	static class ConfigSetUpHandler : public ConfigTable::SetUpHandler {

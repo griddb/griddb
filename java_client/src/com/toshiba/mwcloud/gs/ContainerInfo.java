@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -31,28 +31,44 @@ import com.toshiba.mwcloud.gs.common.RowMapper;
  */
 public class ContainerInfo {
 
-	protected String name;
+	private String name;
 
-	protected ContainerType type;
+	private ContainerType type;
 
-	protected List<ColumnInfo> columnInfoList;
+	private List<ColumnInfo> columnInfoList;
 
-	protected boolean rowKeyAssigned;
+	private List<IndexInfo> indexInfoList;
 
-	protected TimeSeriesProperties timeSeriesProperties;
+	private boolean rowKeyAssigned;
 
-	protected boolean columnOrderIgnorable;
+	private TimeSeriesProperties timeSeriesProperties;
 
-	protected List<TriggerInfo> triggerInfoList;
+	private boolean columnOrderIgnorable;
 
-	protected String dataAffinity;
+	private List<TriggerInfo> triggerInfoList;
 
+	private String dataAffinity;
+
+	/**
+	 * Container information is created by specifying information on the column layout.
+	 *
+	 * @param name Container name. Not set when {@code null} is specified.
+	 * @param type Container type. Not set when {@code null} is specified.
+	 * @param columnInfoList List of column information. {@code null} cannot be specified.
+	 * @param rowKeyAssigned Presence or absence of a column corresponding to a row key.
+	 * {@code true} if you have a row key, and {@code false} if you don’t have one.
+	 *
+	 * @throws NullPointerException when {@code null} is specified as argument
+	 *
+
+	 */
 	public ContainerInfo(String name, ContainerType type,
 			List<ColumnInfo> columnInfoList, boolean rowKeyAssigned) {
 		try {
 			this.name = name;
 			this.type = type;
 			this.columnInfoList = new ArrayList<ColumnInfo>(columnInfoList);
+			this.indexInfoList = Collections.emptyList();
 			this.rowKeyAssigned = rowKeyAssigned;
 			this.triggerInfoList = Collections.emptyList();
 		}
@@ -67,11 +83,17 @@ public class ContainerInfo {
 	 */
 	public ContainerInfo() {
 		this.columnInfoList = Collections.emptyList();
+		this.indexInfoList = Collections.emptyList();
 		this.triggerInfoList = Collections.emptyList();
 	}
 
 	/**
 	 * Duplicates the information about the specified Container.
+	 *
+	 * @param containerInfo Copied Container information. {@code null} cannot be specified.
+	 *
+	 * @throws NullPointerException when {@code null} is specified as argument
+	 *
 	 */
 	public ContainerInfo(ContainerInfo containerInfo) {
 		this();
@@ -90,6 +112,7 @@ public class ContainerInfo {
 		}
 
 		setRowKeyAssigned(containerInfo.isRowKeyAssigned());
+		setIndexInfoList(containerInfo.getIndexInfoList());
 		setTimeSeriesProperties(containerInfo.getTimeSeriesProperties());
 		setTriggerInfoList(containerInfo.getTriggerInfoList());
 
@@ -210,7 +233,7 @@ public class ContainerInfo {
 	 * <p>Updates of the specified object after this function is specified will not change
 	 * the object.</p>
 	 *
-	 * @param columnInfoList List of the information of Columns. 
+	 * @param columnInfoList List of the information of Columns.
 	 * For {@code null} or an empty list, the setting is cancelled.
 	 *
 	 * @see #setColumnOrderIgnorable(boolean)
@@ -238,11 +261,48 @@ public class ContainerInfo {
 	}
 
 	/**
+	 * Get a list of index information.
+	 *
+	 * <p>{@link UnsupportedOperationException} may occur if the returned value is changed.
+	 * Also, the operation on this object does not change the contents of the returned object. </p>
+	 *
+	 * @return List of index information.
+	 *
+	 */
+	public List<IndexInfo> getIndexInfoList() {
+		return indexInfoList;
+	}
+
+	/**
+	 * Set a list of index information.
+	 *
+	 * <p> Even if you change the contents of the specified object after calling,
+	 * the contents of this object will not change. </p>
+	 *
+	 * @param indexInfoList List of index information. Not set in the case of {@code null} or empty list.
+	 *
+	 */
+	public void setIndexInfoList(List<IndexInfo> indexInfoList) {
+		if (indexInfoList == null || indexInfoList.isEmpty()) {
+			this.indexInfoList = Collections.emptyList();
+			return;
+		}
+
+		final List<IndexInfo> dest =
+				new ArrayList<IndexInfo>(indexInfoList.size());
+		for (IndexInfo info : indexInfoList) {
+			dest.add(info.toUnmodifiable());
+		}
+
+		this.indexInfoList = Collections.unmodifiableList(dest);
+	}
+
+	/**
 	 * Returns the optional properties of TimeSeries.
 	 *
-	 * <p>If the contents of the returned object is changed after it has been invoked, 
+	 * <p>If the contents of the returned object is changed after it has been invoked,
 	 * it is not defined whether the contents of this content will be changed or not.
-	 * Moreover, it is not defined whether the contents of the returned object 
+	 * Moreover, it is not defined whether the contents of the returned object
 	 * will be changed or not by operating this object.</p>
 	 *
 	 * @return The optional properties of TimeSeries, or {@code null} if undefined.
@@ -259,7 +319,7 @@ public class ContainerInfo {
 	 * <p>Updates of the specified object after this function is invoked will not change
 	 * the object.</p>
 	 *
-	 * @param props The optional properties of TimeSeries. 
+	 * @param props The optional properties of TimeSeries.
 	 * For {@code null}, the setting is cancelled.
 	 */
 	public void setTimeSeriesProperties(TimeSeriesProperties props) {
@@ -302,7 +362,7 @@ public class ContainerInfo {
 	/**
 	 * Sets all information of triggers.
 	 *
-	 * @param triggerInfoList A list of trigger information. 
+	 * @param triggerInfoList A list of trigger information.
 	 * For {@code null}, the setting is cancelled.
 	 */
 	public void setTriggerInfoList(List<TriggerInfo> triggerInfoList) {
@@ -328,36 +388,39 @@ public class ContainerInfo {
 
 	/**
 	 *
-	 * Sets a data affinity string of the Container.
+	 * Sets a string to represent similarity between containers
+	 * (data affinity). The string is used for optimizing the data
+	 * allocation.
 	 *
 	 * <p>A data affinity string is for optimizing the arrangement of Containers
 	 * among the nodes of the cluster.</p>
 	 *
-	 * <p>Containers which have the same data affinity string may be stored
+	 * <p>Containers which have the same data affinity may be stored
 	 * near each other. Therefore the efficiency for the expiration of Rows
 	 * may be improved by using the same data affinity string for TimeSeries Containers
 	 * which includes Rows with similar elapsed time periods.</p>
 	 *
-	 * <p>An empty string is not acceptable. A data affinity string must be
-	 * composed of characters same as a Container name. See "System limiting values" in the GridDB API Reference
-	 * for the maximum length of the string. A Container with a Container name longer than
-	 * the maximum length cannot be created.</p>
+	 * <p>There are the limitations, allowed characters and maximum
+	 * length, for the data affinity string. See GridDB Technical
+	 * Reference for the details. All the limitations may not be
+	 * checked when setting the string. The data affinity string
+	 * is case-sensitive unless otherwise noted.</p>
 	 *
-	 * @param dataAffinity A data affinity string. If {@code null} is specified,
-	 * the Container will be stored as usual.
+	 * @param dataAffinity A string to represent similarity
+	 * between containers. If {@code null} is specified, the
+	 * Container will be stored as usual. There are the cases that
+	 * string against the limitations cannot be specified.
 	 *
 	 * @throws IllegalArgumentException If the specified string is not proper.
-	 * However, an exception may not occur even if the lenght of the string is exceeded.
+	 *
 	 */
 	public void setDataAffinity(String dataAffinity) {
 		if (dataAffinity != null) {
 			try {
-				RowMapper.normalizeSymbol(dataAffinity);
+				RowMapper.checkSymbol(dataAffinity, "data affinity");
 			}
 			catch (GSException e) {
-				throw new IllegalArgumentException(
-						"Illegal affinity format (" +
-						"reason=" + e.getMessage() +")", e);
+				throw new IllegalArgumentException(e);
 			}
 		}
 

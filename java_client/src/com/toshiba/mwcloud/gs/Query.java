@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -81,7 +81,7 @@ public interface Query<R> extends Closeable {
 	 * of this query will be closed.</p>
 	 *
 	 * <p>It will be failed if too much Rows are obtained, because of the data buffer
-	 * size upper limit of GridDB node. See "System limiting values" in the GridDB API Reference about
+	 * size upper limit of GridDB node. See "System limiting values" in the GridDB Technical Reference about
 	 * the buffer size upper limit.</p>
 	 *
 	 * @throws GSException if {@code true} is specified as {@code forUpdate} although the autocommit
@@ -90,7 +90,7 @@ public interface Query<R> extends Closeable {
 	 * cannot acquire a lock. For the availability of a lock, see the descriptions
 	 * of the functions to create a query.
 	 * @throws GSException if the target query contains any wrong parameter, syntax,
-	 * or directive. For example, in the case of TQL, if the type of a specified
+	 * directive or option setting. For example, in the case of TQL, if the type of a specified
 	 * Column does not match the parameter of a function. For detailed restrictions,
 	 * see the descriptions of the functions to create a query.
 	 * @throws GSException if the requested type of {@link RowSet} elements
@@ -117,12 +117,17 @@ public interface Query<R> extends Closeable {
 	/**
 	 * Returns {@link RowSet} of the latest result.
 	 *
+	 * <p>When {@link FetchOption#PARTIAL_EXECUTION} has been set
+	 * to be effective, the continuation of the query processing
+	 * may be executed.</p>
+	 *
 	 * <p>After {@link RowSet} returned once, it returns {@code null} until the
 	 * new query is executed.</p>
 	 *
 	 * @return {@link RowSet} of the latest result at the first time,
 	 * or {@code null} from the second time or no query executed before.
 	 *
+	 * @throws GSException when there is a timeout of this processing or of related transaction, the target container has been deleted or its schema has been changed.
 	 * @throws GSException if called after this object or the relevant {@link Container}
 	 * is closed.
 	 */

@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -23,6 +23,7 @@ import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Formatter;
@@ -40,9 +41,10 @@ import java.util.zip.CRC32;
 
 import com.toshiba.mwcloud.gs.ContainerType;
 import com.toshiba.mwcloud.gs.GSException;
-import com.toshiba.mwcloud.gs.GSRecoverableException;
 import com.toshiba.mwcloud.gs.GSTimeoutException;
 import com.toshiba.mwcloud.gs.common.BasicBuffer;
+import com.toshiba.mwcloud.gs.common.ContainerKeyConverter;
+import com.toshiba.mwcloud.gs.common.ContainerKeyConverter.ContainerKey;
 import com.toshiba.mwcloud.gs.common.GSConnectionException;
 import com.toshiba.mwcloud.gs.common.GSErrorCode;
 import com.toshiba.mwcloud.gs.common.GSStatementException;
@@ -53,12 +55,16 @@ import com.toshiba.mwcloud.gs.common.PropertyUtils.WrappedProperties;
 import com.toshiba.mwcloud.gs.common.RowMapper;
 import com.toshiba.mwcloud.gs.common.ServiceAddressResolver;
 import com.toshiba.mwcloud.gs.common.ServiceAddressResolver.SocketAddressComparator;
+import com.toshiba.mwcloud.gs.common.Statement.GeneralStatement;
 import com.toshiba.mwcloud.gs.common.Statement;
 import com.toshiba.mwcloud.gs.subnet.NodeConnection.LoginInfo;
+import com.toshiba.mwcloud.gs.subnet.NodeConnection.MessageDigestFactory;
 import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequest;
+import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequestSource;
+import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequestType;
+import com.toshiba.mwcloud.gs.subnet.NodeResolver.ClusterInfo;
 import com.toshiba.mwcloud.gs.subnet.NodeResolver.ContainerHashMode;
 
-@SuppressWarnings("deprecation")
 public class GridStoreChannel implements Closeable {
 
 	public static Boolean v1ProtocolCompatible = null;
@@ -75,6 +81,12 @@ public class GridStoreChannel implements Closeable {
 
 	public static boolean v21StatementIdCompatible = false;
 
+	public static boolean v40QueryCompatible = false;
+
+	public static boolean v40ContainerHashCompatible = true;
+
+	public static boolean v40SchemaCompatible = false;
+
 	private static int FAILOVER_TIMEOUT_DEFAULT = 60 * 1000;
 
 	private static int FAILOVER_RETRY_INTERVAL = 1 * 1000;
@@ -84,8 +96,6 @@ public class GridStoreChannel implements Closeable {
 	public static int MAPPER_CACHE_SIZE = 32;
 
 	private static int MAX_REF_SCAN_COUNT = 15;
-
-	private static final int SYSTEM_CONTAINER_PARTITION_ID = 0;
 
 	private static final BaseGridStoreLogger LOGGER =
 			LoggingUtils.getLogger("Connection");
@@ -107,9 +117,6 @@ public class GridStoreChannel implements Closeable {
 
 	private final Set<ContextReference> contextRefSet =
 			new LinkedHashSet<ContextReference>();
-
-	private static String NUMERICAL_REGEX = "\\A(0|[1-9][0-9]{0,8})\\z";
-	private static Pattern NUMERICAL_REGEX_PATTERN = Pattern.compile(NUMERICAL_REGEX);
 
 	public static class Config {
 
@@ -208,21 +215,52 @@ public class GridStoreChannel implements Closeable {
 
 	}
 
+	static class LocalConfig {
+
+		final long failoverTimeoutMillis;
+
+		final long transactionTimeoutMillis;
+
+		final int fetchBytesSize;
+
+		final int containerCacheSize;
+
+		public LocalConfig(WrappedProperties props) throws GSException {
+			this.failoverTimeoutMillis = props.getTimeoutProperty(
+					"failoverTimeout", (long) -1, false);
+			this.transactionTimeoutMillis = props.getTimeoutProperty(
+					"transactionTimeout", (long) -1, false);
+
+			final Integer containerCacheSize =
+					props.getIntProperty("containerCacheSize", false);
+			if (containerCacheSize != null && containerCacheSize < 0) {
+				throw new GSException(
+						GSErrorCode.ILLEGAL_PARAMETER,
+						"Negative container cache size (size=" +
+						containerCacheSize + ")");
+			}
+			this.containerCacheSize =
+					(containerCacheSize == null ? 0 : containerCacheSize);
+
+			final Integer fetchBytesSize =
+					props.getIntProperty("internal.fetchBytesSize", true);
+			this.fetchBytesSize =
+					(fetchBytesSize == null ? 0 : fetchBytesSize);
+		}
+
+	}
+
 	public static class Source {
 
 		private final Key key;
 
-		private final int partitionCount;
+		private final Integer partitionCount;
 
-		private final long failoverTimeoutMillis;
-
-		private final long transactionTimeoutMillis;
+		private final LocalConfig localConfig;
 
 		private final NodeConnection.LoginInfo loginInfo;
 
-		private transient final String password;
-
-		private final int containerCacheSize;
+		private final ContainerKeyConverter keyConverter;
 
 		private final DataAffinityPattern dataAffinityPattern;
 
@@ -245,18 +283,20 @@ public class GridStoreChannel implements Closeable {
 					props.getProperty("clusterName", "", false);
 			final String user = props.getProperty("user", "", false);
 			final String password = props.getProperty("password", "", false);
-			final String database = props.getProperty(
-					"database", NodeConnection.LoginInfo.DEFAULT_DATABASE_NAME,
-					false);
+			final String database = props.getProperty("database", null, false);
+
+			if (!clusterName.isEmpty()) {
+				RowMapper.checkSymbol(clusterName, "cluster name");
+			}
+			RowMapper.checkString(user, "user name");
+			RowMapper.checkString(password, "password");
+			if (database != null) {
+				RowMapper.checkSymbol(database, "database name");
+			}
 
 			this.key = new Key(
-					passive[0], address,
-					user, clusterName, sarConfig, memberList);
-			this.password = password;
-
-			Integer partitionCount =
-					props.getIntProperty("partitionCount", true);
-			this.partitionCount = (partitionCount == null ? 0 : partitionCount);
+					passive[0], address, clusterName, sarConfig, memberList);
+			this.partitionCount = props.getIntProperty("partitionCount", true);
 
 			final String consistency = props.getProperty("consistency", false);
 			final boolean backupPreferred;
@@ -273,31 +313,16 @@ public class GridStoreChannel implements Closeable {
 						consistency + ")");
 			}
 
-			final Integer containerCacheSize =
-					props.getIntProperty("containerCacheSize", false);
-			if (containerCacheSize != null && containerCacheSize < 0) {
-				throw new GSException(
-						GSErrorCode.ILLEGAL_PARAMETER,
-						"Negative container cache size (size=" +
-						containerCacheSize + ")");
-			}
-
-			this.failoverTimeoutMillis = props.getTimeoutProperty(
-					"failoverTimeout", (long) -1, false);
-			this.transactionTimeoutMillis = props.getTimeoutProperty(
-					"transactionTimeout", (long) -1, false);
+			this.localConfig = new LocalConfig(props);
 
 			this.loginInfo = new LoginInfo(
 					user, password, !backupPreferred, database, clusterName,
-					transactionTimeoutMillis);
-			this.containerCacheSize =
-					(containerCacheSize == null ? 0 : containerCacheSize);
+					localConfig.transactionTimeoutMillis);
+			this.keyConverter = ContainerKeyConverter.getInstance(
+					NodeConnection.getProtocolVersion(), false);
 			this.dataAffinityPattern = new DataAffinityPattern(
-					props.getProperty("dataAffinityPattern", false));
-		}
-
-		public int getPartitionCount() {
-			return partitionCount;
+					props.getProperty("dataAffinityPattern", false),
+					keyConverter);
 		}
 
 		public NodeConnection.LoginInfo getLoginInfo() {
@@ -308,6 +333,12 @@ public class GridStoreChannel implements Closeable {
 			return key;
 		}
 
+		public ClusterInfo createClusterInfo() {
+			final ClusterInfo clusterInfo = new ClusterInfo(loginInfo);
+			clusterInfo.setPartitionCount(partitionCount);
+			return clusterInfo;
+		}
+
 		public Context createContext() {
 			final BasicBuffer req = createRequestBuffer();
 			final BasicBuffer resp = new BasicBuffer(INITIAL_BUFFER_SIZE);
@@ -315,9 +346,8 @@ public class GridStoreChannel implements Closeable {
 			final BasicBuffer syncResp = new BasicBuffer(INITIAL_BUFFER_SIZE);
 
 			return new Context(
-					failoverTimeoutMillis, transactionTimeoutMillis, loginInfo,
-					req, resp, syncReq, syncResp, containerCacheSize,
-					dataAffinityPattern);
+					localConfig, loginInfo, createClusterInfo(), req, resp,
+					syncReq, syncResp, keyConverter, dataAffinityPattern);
 		}
 
 		private BasicBuffer createRequestBuffer() {
@@ -337,21 +367,18 @@ public class GridStoreChannel implements Closeable {
 
 		private final InetSocketAddress address;
 
-		private final String user;
-
 		private final String clusterName;
 
 		private final ServiceAddressResolver.Config sarConfig;
 
 		private final List<InetSocketAddress> memberList;
 
-		public Key(boolean passive, InetSocketAddress address,
-				String user, String clusterName,
+		public Key(
+				boolean passive, InetSocketAddress address, String clusterName,
 				ServiceAddressResolver.Config sarConfig,
 				List<InetSocketAddress> memberList) {
 			this.passive = passive;
 			this.address = address;
-			this.user = user;
 			this.clusterName = clusterName;
 			this.sarConfig = (sarConfig == null ?
 					null : new ServiceAddressResolver.Config(sarConfig));
@@ -391,7 +418,6 @@ public class GridStoreChannel implements Closeable {
 			result = prime * result + (passive ? 1231 : 1237);
 			result = prime * result +
 					((sarConfig == null) ? 0 : sarConfig.hashCode());
-			result = prime * result + ((user == null) ? 0 : user.hashCode());
 			return result;
 		}
 
@@ -429,12 +455,6 @@ public class GridStoreChannel implements Closeable {
 					return false;
 			}
 			else if (!sarConfig.equals(other.sarConfig))
-				return false;
-			if (user == null) {
-				if (other.user != null)
-					return false;
-			}
-			else if (!user.equals(other.user))
 				return false;
 			return true;
 		}
@@ -475,22 +495,20 @@ public class GridStoreChannel implements Closeable {
 		private final ContextMonitor contextMonitor =
 				createContextMonitorIfAvailable();
 
-		private final long failoverTimeoutMillis;
-
-		private final long transactionTimeoutMillis;
+		private final LocalConfig localConfig;
 
 		private int partitionId = -1;
 
-		private int partitionCount = -1;
-
-		private ContainerHashMode containerHashMode;
-
 		private NodeConnection lastConnection;
+
+		private long lastHeartbeatCount;
 
 		private final Map<SocketAddress, NodeConnection> activeConnections =
 				new HashMap<SocketAddress, NodeConnection>();
 
 		private final NodeConnection.LoginInfo loginInfo;
+
+		private final ClusterInfo clusterInfo;
 
 		private boolean closed;
 
@@ -509,7 +527,7 @@ public class GridStoreChannel implements Closeable {
 		private final List<InetSocketAddress> addressCache =
 				new ArrayList<InetSocketAddress>();
 
-		private final UUID sessionUUID = UUID.randomUUID();
+		private final UUID sessionUUID;
 
 		private long lastSessionId;
 
@@ -528,22 +546,28 @@ public class GridStoreChannel implements Closeable {
 
 		private ResolverExecutor<?> activeResolverExecutor;
 
+		private ContainerKeyConverter keyConverter;
+
+		private ContainerKeyConverter internalKeyConverter;
+
 		private Context(
-				long failoverTimeoutMillis, long transactionTimeoutMillis,
-				NodeConnection.LoginInfo loginInfo,
-				BasicBuffer req, BasicBuffer resp,
+				LocalConfig localConfig, NodeConnection.LoginInfo loginInfo,
+				ClusterInfo clusterInfo, BasicBuffer req, BasicBuffer resp,
 				BasicBuffer syncReq, BasicBuffer syncResp,
-				int containerCacheSize,
+				ContainerKeyConverter keyConverter,
 				DataAffinityPattern dataAffinityPattern) {
-			this.failoverTimeoutMillis = failoverTimeoutMillis;
-			this.transactionTimeoutMillis = transactionTimeoutMillis;
-			this.loginInfo = loginInfo;
+			this.localConfig = localConfig;
+			this.loginInfo = new NodeConnection.LoginInfo(loginInfo);
+			this.loginInfo.setClientId(NodeConnection.ClientId.generate(0));
+			this.clusterInfo = clusterInfo;
 			this.req = req;
 			this.resp = resp;
 			this.syncReq = syncReq;
 			this.syncResp = syncResp;
-			this.containerCache = (containerCacheSize > 0 ?
-					new ContainerCache(containerCacheSize) : null);
+			this.containerCache = (localConfig.containerCacheSize > 0 ?
+					new ContainerCache(localConfig.containerCacheSize) : null);
+			this.sessionUUID = this.loginInfo.getClientId().getUUID();
+			this.keyConverter = keyConverter;
 			this.dataAffinityPattern = dataAffinityPattern;
 		}
 
@@ -552,7 +576,33 @@ public class GridStoreChannel implements Closeable {
 		}
 
 		public long getTransactionTimeoutMillis() {
-			return transactionTimeoutMillis;
+			return localConfig.transactionTimeoutMillis;
+		}
+
+		public OptionalRequestSource bindQueryOptions(
+				final OptionalRequestSource source) {
+			final int fetchBytesSize = localConfig.fetchBytesSize;
+			if (fetchBytesSize <= 0) {
+				return source;
+			}
+
+			return new OptionalRequestSource() {
+				@Override
+				public boolean hasOptions() {
+					return true;
+				}
+
+				@Override
+				public void putOptions(OptionalRequest optionalRequest) {
+					optionalRequest.put(
+							OptionalRequestType.FETCH_BYTES_SIZE,
+							fetchBytesSize);
+
+					if (source != null) {
+						source.putOptions(optionalRequest);
+					}
+				}
+			};
 		}
 
 		public int getFailoverCount() {
@@ -605,6 +655,11 @@ public class GridStoreChannel implements Closeable {
 			lastSessionId = newId;
 
 			return newId;
+		}
+
+		public NodeConnection.ClientId generateClientId() {
+			return new NodeConnection.ClientId(
+					loginInfo.getClientId().getUUID(), generateSessionId());
 		}
 
 		public Set<Class<?>> getReferenceTargetClasses() {
@@ -683,6 +738,23 @@ public class GridStoreChannel implements Closeable {
 		public String getDatabaseName() {
 			return loginInfo.getDatabase();
 		}
+
+		public ContainerKeyConverter getKeyConverter(boolean internalMode) {
+			ContainerKeyConverter converter =
+					(internalMode ? internalKeyConverter : keyConverter);
+			if (converter == null) {
+				converter = ContainerKeyConverter.getInstance(
+						NodeConnection.getProtocolVersion(), internalMode);
+				if (internalMode) {
+					internalKeyConverter = converter;
+				}
+				else {
+					keyConverter = converter;
+				}
+			}
+			return converter;
+		}
+
 	}
 
 	public static class ContextReference extends WeakReference<Object> {
@@ -700,8 +772,8 @@ public class GridStoreChannel implements Closeable {
 
 		private final int cacheSize;
 
-		private final Map<String, LocatedSchema> schemaCache =
-				new LinkedHashMap<String, LocatedSchema>();
+		private final Map<ContainerKey, LocatedSchema> schemaCache =
+				new LinkedHashMap<ContainerKey, LocatedSchema>();
 
 		private final Map<SessionInfo.Key, SessionInfo> sessionCache =
 				new LinkedHashMap<SessionInfo.Key, SessionInfo>();
@@ -711,10 +783,10 @@ public class GridStoreChannel implements Closeable {
 		}
 
 		public LocatedSchema findSchema(
-				String normalizedContainerName,
+				ContainerKey normalizedContainerKey,
 				Class<?> rowType, ContainerType containerType) {
 			final LocatedSchema schema =
-					schemaCache.get(normalizedContainerName);
+					schemaCache.get(normalizedContainerKey);
 			if (schema == null ||
 					rowType != null &&
 					rowType != schema.mapper.getRowType() ||
@@ -727,8 +799,8 @@ public class GridStoreChannel implements Closeable {
 		}
 
 		public void cacheSchema(
-				String normalizedContainerName, LocatedSchema schema) {
-			schemaCache.put(normalizedContainerName, schema);
+				ContainerKey normalizedContainerKey, LocatedSchema schema) {
+			schemaCache.put(normalizedContainerKey, schema);
 			if (schemaCache.size() > cacheSize) {
 				final Iterator<LocatedSchema> it =
 						schemaCache.values().iterator();
@@ -737,8 +809,8 @@ public class GridStoreChannel implements Closeable {
 			}
 		}
 
-		public void removeSchema(String normalizedContainerName) {
-			schemaCache.remove(normalizedContainerName);
+		public void removeSchema(ContainerKey normalizedContainerKey) {
+			schemaCache.remove(normalizedContainerKey);
 		}
 
 		public SessionInfo takeSession(
@@ -761,9 +833,9 @@ public class GridStoreChannel implements Closeable {
 				if (sessionCache.size() > cacheSize) {
 					final Iterator<SessionInfo> it =
 							sessionCache.values().iterator();
-					final SessionInfo eariest = it.next();
+					final SessionInfo earliest = it.next();
 					it.remove();
-					return eariest;
+					return earliest;
 				}
 
 				return null;
@@ -789,15 +861,15 @@ public class GridStoreChannel implements Closeable {
 
 		private final int versionId;
 
-		private final String containerName;
+		private final ContainerKey containerKey;
 
 		public LocatedSchema(
 				RowMapper mapper, long containerId, int versionId,
-				String containerName) {
+				ContainerKey containerKey) {
 			this.mapper = mapper;
 			this.containerId = containerId;
 			this.versionId = versionId;
-			this.containerName = containerName;
+			this.containerKey = containerKey;
 		}
 
 		public RowMapper getMapper() {
@@ -812,8 +884,8 @@ public class GridStoreChannel implements Closeable {
 			return versionId;
 		}
 
-		public String getContainerName() {
-			return containerName;
+		public ContainerKey getContainerKey() {
+			return containerKey;
 		}
 
 	}
@@ -892,107 +964,204 @@ public class GridStoreChannel implements Closeable {
 
 	public static class DataAffinityPattern {
 
+		private static final Pattern MATCH_PATTERN =
+				Pattern.compile("([^%]+)|((?<!\\\\)%)");
+
+		private static final Pattern WILDCARD_PATTERN =
+				Pattern.compile("(?<!\\\\)%");
+
+		private static final Pattern ENTRY_SEPARATOR_PATTERN =
+				Pattern.compile("(?<!\\\\),");
+
+		private static final Pattern PAIR_SEPARATOR_PATTERN =
+				Pattern.compile("(?<!\\\\)=");
+
 		private static class Entry {
-			final Pattern pattern;
+			final Pattern basePattern;
+			final Pattern nodeAffinityPattern;
+			final long nodeAffinityNum;
+			final boolean nodeAffinityIgnorable;
 			final String affinity;
 
-			Entry(Pattern pattern, String affinity) {
-				this.pattern = pattern;
+			private Entry(
+					Pattern basePattern, Pattern nodeAffinityPattern,
+					long nodeAffinityNum, boolean nodeAffinityIgnorable,
+					String affinity) {
+				this.basePattern = basePattern;
+				this.nodeAffinityPattern = nodeAffinityPattern;
+				this.nodeAffinityNum = nodeAffinityNum;
+				this.nodeAffinityIgnorable = nodeAffinityIgnorable;
 				this.affinity = affinity;
 			}
 		}
 
 		private List<Entry> entryList = new ArrayList<Entry>();
 
-		public DataAffinityPattern(String patternString) throws GSException {
-			if (patternString == null || patternString.isEmpty()) {
+		public DataAffinityPattern(
+				String patternStr, ContainerKeyConverter keyConverter)
+				throws GSException {
+			if (patternStr == null || patternStr.isEmpty()) {
 				return;
 			}
 
-			final Pattern basePattern = Pattern.compile("([^%]+)|(%)");
-
-			for (String entryString : patternString.split(",", -1)) {
-				final String[] pair = entryString.split("=");
+			for (String entryStr :
+					ENTRY_SEPARATOR_PATTERN.split(patternStr, -1)) {
+				final String[] pair = PAIR_SEPARATOR_PATTERN.split(entryStr);
 				if (pair.length != 2) {
 					throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
 							"Illegal data affinity pattern entry (" +
-							"entry=\"" + entryString +
-							"\", pattern=\"" + patternString + "\")");
+							"entry=\"" + entryStr +
+							"\", pattern=\"" + patternStr + "\")");
 				}
 
-				final String subPattern = pair[0];
+				final ContainerKeyConverter.Components components =
+						new ContainerKeyConverter.Components();
+				final String keyPattern = pair[0];
 				try {
-					final String nonNodeAffinityPattern = subPattern.replaceFirst("@", "_");
-					RowMapper.normalizeSymbol(nonNodeAffinityPattern.replaceAll("%", "_"));
+					keyConverter.parse(
+							WILDCARD_PATTERN.matcher(
+									keyPattern).replaceAll("_"),
+							new ContainerKeyConverter.Components(), true);
+					keyConverter.parse(keyPattern, components, false);
 				}
 				catch (GSException e) {
 					throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
-							"Illegal character found or empty sub pattern " +
+							"Illegal character found or empty key pattern " +
 							"found in data affinity pattern (" +
-							"subPattern=\"" + subPattern +
-							"\", entry=\"" + entryString +
-							"\", pattern=\"" + patternString + "\")");
+							"keyPattern=\"" + keyPattern +
+							"\", entry=\"" + entryStr +
+							"\", pattern=\"" + patternStr + "\")");
 				}
 
-				if (subPattern.contains("%%")) {
+				if (keyPattern.contains("%%")) {
 					throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
 							"Duplicated wildcard found in data affinity pattern (" +
-							"subPattern=\"" + subPattern +
-							"\", entry=\"" + entryString +
-							"\", pattern=\"" + patternString + "\")");
+							"keyPattern=\"" + keyPattern +
+							"\", entry=\"" + entryStr +
+							"\", pattern=\"" + patternStr + "\")");
 				}
 
-				final String affinity = pair[1];
+				final String dataAffinity = pair[1];
 				try {
-					RowMapper.normalizeSymbol(affinity);
+					RowMapper.checkSymbol(dataAffinity, "data affinity");
 				}
 				catch (GSException e) {
 					throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
-							"Illegal character found or empty affinity string " +
-							"found in data affinity pattern (" +
-							"affinity=\"" + affinity +
-							"\", entry=\"" + entryString +
-							"\", pattern=\"" + patternString + "\")");
+							"Illegal data affinity specified " +
+							"in data affinity pattern (" +
+							"affinity=\"" + dataAffinity +
+							"\", entry=\"" + entryStr +
+							"\", pattern=\"" + patternStr + "\"" +
+							", reason=" + e + ")", e);
 				}
 
-				final Matcher matcher = basePattern.matcher(subPattern);
-				final StringBuilder patternBuilder = new StringBuilder();
-				patternBuilder.append("^");
-				while (matcher.find()) {
-					if (matcher.group(2) == null) {
-						final String elem;
-						try {
-							elem = RowMapper.normalizeExtendedSymbol(
-									"_" + matcher.group(1), true).substring(1);
-						}
-						catch (GSException e) {
-							throw new Error(e);
-						}
-						patternBuilder.append(Pattern.quote(elem));
-					}
-					else {
-						patternBuilder.append(".*");
-					}
+				final boolean[] wildCardEnd = new boolean[1];
+				final Pattern basePattern = createPattern(
+						components.base, keyConverter, wildCardEnd);
+
+				String nodeAffinitySrc;
+				if (components.affinityStr == null &&
+						components.affinityNum < 0) {
+					nodeAffinitySrc = null;
 				}
-				patternBuilder.append("$");
+				else {
+					nodeAffinitySrc = components.affinityStr;
+				}
 
-				final Pattern compiledSubPattern =
-						Pattern.compile(patternBuilder.toString());
+				final Pattern nodeAffinityPattern;
+				if (nodeAffinitySrc == null) {
+					nodeAffinityPattern = null;
+				}
+				else {
+					nodeAffinityPattern =
+							createPattern(nodeAffinitySrc, keyConverter, null);
+				}
 
-				entryList.add(new Entry(compiledSubPattern, affinity));
+				final boolean nodeAffinityIgnorable =
+						wildCardEnd[0] && nodeAffinityPattern != null;
+
+				entryList.add(new Entry(
+						basePattern, nodeAffinityPattern,
+						components.affinityNum, nodeAffinityIgnorable,
+						dataAffinity));
 			}
 		}
 
-		public String match(String containerName, String defaultAffinity)
+		private static Pattern createPattern(
+				String src, ContainerKeyConverter keyConverter,
+				boolean[] wildCardEndRef) {
+			final Matcher matcher = MATCH_PATTERN.matcher(src);
+			final StringBuilder patternBuilder = new StringBuilder();
+			patternBuilder.append("^");
+			boolean wildCardEnd = false;
+			while (matcher.find()) {
+				if (matcher.group(2) == null) {
+					final String elem = matcher.group(1);
+					try {
+						keyConverter.parse("_" + elem, false);
+					}
+					catch (GSException e) {
+						throw new Error(e);
+					}
+					patternBuilder.append(Pattern.quote(
+							RowMapper.normalizeSymbolUnchecked(elem)));
+					wildCardEnd = false;
+				}
+				else {
+					patternBuilder.append(".*");
+					wildCardEnd = true;
+				}
+			}
+			patternBuilder.append("$");
+
+			if (wildCardEndRef != null) {
+				wildCardEndRef[0] = wildCardEnd;
+			}
+
+			return Pattern.compile(patternBuilder.toString());
+		}
+
+		public String match(
+				ContainerKey containerKey, String defaultAffinity,
+				ContainerKeyConverter keyConverter)
 				throws GSException {
 			if (!entryList.isEmpty()) {
-				final String normalized =
-						RowMapper.normalizeExtendedSymbol(containerName, true);
+				final ContainerKeyConverter.Components components =
+						new ContainerKeyConverter.Components();
+				keyConverter.decompose(containerKey, components);
 
 				for (Entry entry : entryList) {
-					if (entry.pattern.matcher(normalized).find()) {
+					if (!entry.basePattern.matcher(components.base).find()) {
+						continue;
+					}
+
+					if (entry.nodeAffinityIgnorable) {
 						return entry.affinity;
 					}
+
+					final long nodeAffinityNum = components.affinityNum;
+					if (entry.nodeAffinityNum >= 0 &&
+							nodeAffinityNum != entry.nodeAffinityNum) {
+						continue;
+					}
+
+					final String nodeAffinityStr = (nodeAffinityNum >= 0 ?
+							Long.toString(nodeAffinityNum) :
+							components.affinityStr);
+					if (entry.nodeAffinityPattern != null) {
+						if (nodeAffinityStr == null) {
+							continue;
+						}
+						if (!entry.nodeAffinityPattern.matcher(
+								nodeAffinityStr).find()) {
+							continue;
+						}
+					}
+					else if (nodeAffinityStr != null) {
+						continue;
+					}
+
+					return entry.affinity;
 				}
 			}
 
@@ -1006,9 +1175,8 @@ public class GridStoreChannel implements Closeable {
 		this.key = source.key;
 		this.nodeResolver = new NodeResolver(
 				pool, key.passive, key.address,
-				config.getConnectionConfig(), source.getLoginInfo(),
-				source.partitionCount, key.sarConfig, key.memberList,
-				null);
+				config.getConnectionConfig(),
+				key.sarConfig, key.memberList, null);
 		this.requestHeadLength =
 				NodeConnection.getRequestHeadLength(key.isIPV6Enabled());
 		apply(config);
@@ -1020,11 +1188,6 @@ public class GridStoreChannel implements Closeable {
 
 	public NodeConnectionPool getConnectionPool() {
 		return pool;
-	}
-
-	public void apply(Source source) {
-		nodeResolver.setUser(source.getLoginInfo().getUser());
-		nodeResolver.setPassword(source.password);
 	}
 
 	public void apply(Config config) {
@@ -1116,8 +1279,8 @@ public class GridStoreChannel implements Closeable {
 	}
 
 	public long getFailoverTimeoutMillis(Context context) {
-		if (context.failoverTimeoutMillis >= 0) {
-			return context.failoverTimeoutMillis;
+		if (context.localConfig.failoverTimeoutMillis >= 0) {
+			return context.localConfig.failoverTimeoutMillis;
 		}
 
 		return config.failoverTimeoutMillis;
@@ -1306,27 +1469,30 @@ public class GridStoreChannel implements Closeable {
 			final NodeConnection activeConnection =
 					context.activeConnections.get(address);
 			if (activeConnection == null || activeConnection != connection) {
-				throw new GSRecoverableException(
-						GSErrorCode.RECOVERABLE_CONNECTION_PROBLEM, "");
+				throw GSErrorCode.newGSRecoverableException(
+						GSErrorCode.RECOVERABLE_CONNECTION_PROBLEM, "", null);
 			}
 		}
 	}
 
 	private static boolean isConnectionDependentStatement(
-			Statement statement) {
-		return (statement == Statement.CLOSE_ROW_SET ||
-				statement == Statement.FETCH_ROW_SET);
+			GeneralStatement statement) {
+		return (statement == Statement.CLOSE_ROW_SET.generalize() ||
+				statement == Statement.FETCH_ROW_SET.generalize());
 	}
 
-	public void executeStatement(Context context, Statement statement,
+	public void executeStatement(
+			Context context, Statement statement,
 			int partitionId, long statementId,
 			BasicBuffer req, BasicBuffer resp)
 			throws GSException {
 		executeStatement(
-				context, statement, partitionId, statementId, req, resp, null);
+				context, statement.generalize(),
+				partitionId, statementId, req, resp, null);
 	}
 
-	public void executeStatement(Context context, Statement statement,
+	public void executeStatement(
+			Context context, GeneralStatement statement,
 			int partitionId, long statementId,
 			BasicBuffer req, BasicBuffer resp,
 			ContextMonitor contextMonitor)
@@ -1351,7 +1517,8 @@ public class GridStoreChannel implements Closeable {
 
 			SocketAddress orgAddress = null;
 			long failoverStartTime = 0;
-			int failoverTrialCount = 0;
+			long failoverTrialCount = 0;
+			long failoverReconnectedTrial = -1;
 			for (boolean firstTrial = true;; firstTrial = false) {
 				try {
 					if (statement == null) {
@@ -1405,8 +1572,15 @@ public class GridStoreChannel implements Closeable {
 					try {
 						
 						if (context.lastConnection != null) {
+							if (!firstTrial && context.lastHeartbeatCount !=
+									context.lastConnection.
+									getHeartbeatReceiveCount()) {
+								failoverStartTime = 0;
+								failoverReconnectedTrial = failoverTrialCount;
+							}
 							final SocketAddress address =
-									context.lastConnection.getRemoteSocketAddress();
+									context.lastConnection.
+									getRemoteSocketAddress();
 							context.activeConnections.remove(address);
 							try {
 								context.lastConnection.close();
@@ -1435,8 +1609,9 @@ public class GridStoreChannel implements Closeable {
 
 					if (statement != null &&
 							isConnectionDependentStatement(statement)) {
-						throw new GSRecoverableException(
-								GSErrorCode.RECOVERABLE_CONNECTION_PROBLEM, e);
+						throw GSErrorCode.newGSRecoverableException(
+								GSErrorCode.RECOVERABLE_CONNECTION_PROBLEM,
+								null, e);
 					}
 
 					
@@ -1462,16 +1637,18 @@ public class GridStoreChannel implements Closeable {
 						failoverStartTime = curTime;
 					}
 
-					final long trialDuration = curTime - failoverStartTime;
+					final long failureMillis = curTime - failoverStartTime;
 					final long failoverTimeout = getFailoverTimeoutMillis(context);
-					if (trialDuration >= failoverTimeout) {
+					if (failureMillis >= failoverTimeout) {
 						
 						final String errorReason =
 								(e.getMessage() == null ? "" : e.getMessage());
 						final String errorMessage = (failoverTimeout > 0 ?
 								("Failover timed out (trialCount=" +
 								failoverTrialCount +
-								", trialMillis=" + trialDuration +
+								", reconnectedTrial=" +
+								failoverReconnectedTrial +
+								", failureMillis=" + failureMillis +
 								", timeoutMillis=" + failoverTimeout +
 								", reason=" + errorReason + ")") :
 								(firstTrial ? null : "Retry failed (reason=" +
@@ -1492,7 +1669,7 @@ public class GridStoreChannel implements Closeable {
 								partitionId,
 								statementId,
 								failoverTrialCount,
-								trialDuration,
+								failureMillis,
 								failoverTimeout,
 								e);
 					}
@@ -1560,10 +1737,6 @@ public class GridStoreChannel implements Closeable {
 			return;
 		}
 
-		if (context.partitionCount < 0) {
-			context.partitionCount = nodeResolver.getPartitionCount();
-		}
-
 		final InetSocketAddress address;
 		do {
 			if (partitionId >= 0 && partitionId < context.addressCache.size()) {
@@ -1576,10 +1749,14 @@ public class GridStoreChannel implements Closeable {
 			}
 
 			address = nodeResolver.getNodeAddress(
-					partitionId, !context.loginInfo.isOwnerMode(),
-					context.partitionCount,
+					context.clusterInfo, partitionId,
+					!context.loginInfo.isOwnerMode(),
 					context.preferableHosts.get(partitionId));
-			if (partitionId >= 0 && partitionId < context.partitionCount) {
+
+			final int partitionCount =
+					nodeResolver.getPartitionCount(context.clusterInfo);
+
+			if (partitionId >= 0 && partitionId < partitionCount) {
 				while (partitionId >= context.addressCache.size()) {
 					context.addressCache.add(null);
 				}
@@ -1603,14 +1780,21 @@ public class GridStoreChannel implements Closeable {
 		final BasicBuffer req = createRequestBuffer(64);
 		final BasicBuffer resp = createResponseBuffer(64);
 
+		final long[] databaseId = new long[1];
 		final NodeConnection newConnection = pool.resolve(
 				address, req, resp,
-				config.getConnectionConfig(), context.loginInfo,
+				config.getConnectionConfig(), context.loginInfo, databaseId,
 				preferConnectionPool);
+		nodeResolver.acceptDatabaseId(
+				context.clusterInfo, databaseId[0],
+				(InetSocketAddress) newConnection.getRemoteSocketAddress());
+
 		boolean updated = false;
 		try {
 			context.activeConnections.put(address, newConnection);
 			context.lastConnection = newConnection;
+			context.lastHeartbeatCount =
+					newConnection.getHeartbeatReceiveCount();
 			context.partitionId = partitionId;
 			updated = true;
 		}
@@ -1630,10 +1814,8 @@ public class GridStoreChannel implements Closeable {
 
 	public void invalidateMaster(Context context) {
 		synchronized (context) {
-			context.containerHashMode = null;
-			context.partitionCount = -1;
 			context.addressCache.clear();
-			nodeResolver.invalidateMaster();
+			nodeResolver.invalidateMaster(context.clusterInfo);
 		}
 	}
 
@@ -1645,14 +1827,33 @@ public class GridStoreChannel implements Closeable {
 		}
 	}
 
+	public long getDatabaseId(Context context) throws GSException {
+		synchronized (context) {
+			final ClusterInfo clusterInfo = context.clusterInfo;
+
+			if (clusterInfo.getDatabaseId() == null) {
+				executeResolver(context, new ResolverExecutor<Void>() {
+					@Override
+					public void execute() throws GSException {
+						nodeResolver.getDatabaseId(clusterInfo);
+					}
+				});
+			}
+
+			return clusterInfo.getDatabaseId();
+		}
+	}
+
 	public InetSocketAddress[] getNodeAddressList(
 			Context context, final int partitionId) throws GSException {
 		synchronized (context) {
+			final ClusterInfo clusterInfo = context.clusterInfo;
 			return executeResolver(
 					context, new ResolverExecutor<InetSocketAddress[]>() {
 				@Override
 				public void execute() throws GSException {
-					result = nodeResolver.getNodeAddressList(partitionId);
+					result = nodeResolver.getNodeAddressList(
+							clusterInfo, partitionId);
 				}
 			});
 		}
@@ -1660,176 +1861,114 @@ public class GridStoreChannel implements Closeable {
 
 	public int getPartitionCount(Context context) throws GSException {
 		synchronized (context) {
-			if (context.partitionCount < 0) {
-				context.partitionCount = executeResolver(
-						context, new ResolverExecutor<Integer>() {
+			final ClusterInfo clusterInfo = context.clusterInfo;
+
+			if (clusterInfo.getPartitionCount() == null) {
+				executeResolver(
+						context, new ResolverExecutor<Void>() {
 					@Override
 					public void execute() throws GSException {
-						result = nodeResolver.getPartitionCount();
+						nodeResolver.getPartitionCount(clusterInfo);
 					}
 				});
 			}
 
-			return context.partitionCount;
+			return clusterInfo.getPartitionCount();
 		}
 	}
 
 	public int resolvePartitionId(
-			final Context context, String containerName) throws GSException {
+			final Context context, ContainerKey containerKey,
+			boolean systemMode) throws GSException {
 		synchronized (context) {
-			if (context.partitionCount < 0 ||
-					context.containerHashMode == null) {
+			final ClusterInfo clusterInfo = context.clusterInfo;
+
+			Integer partitionCount;
+			ContainerHashMode hashMode;
+			for (;;) {
+				partitionCount = clusterInfo.getPartitionCount();
+				hashMode = clusterInfo.getHashMode();
+				if (partitionCount != null && hashMode != null) {
+					break;
+				}
+
 				executeResolver(context, new ResolverExecutor<Void>() {
 					@Override
 					public void execute() throws GSException {
-						context.partitionCount =
-								nodeResolver.getPartitionCount();
-						context.containerHashMode =
-								nodeResolver.getContainerHashMode();
+						nodeResolver.getPartitionCount(clusterInfo);
+						nodeResolver.getContainerHashMode(clusterInfo);
 					}
 				});
 			}
 
-			if (containerName.equals(SubnetGridStore.SYSTEM_USER_CONTAINER_NAME)) {
+			final ContainerKeyConverter converter =
+					context.getKeyConverter(true);
 
-				
-				return SYSTEM_CONTAINER_PARTITION_ID;
+			final ContainerKeyConverter.Components components =
+					new ContainerKeyConverter.Components();
+			converter.decompose(containerKey, components);
 
+			final String affinity = (components.affinityStr == null ?
+					null : RowMapper.normalizeSymbolUnchecked(
+							components.affinityStr));
+			final boolean withSubCount = (components.subCount >= 0);
+
+			if (components.affinityNum >= 0) {
+				return (int) (components.affinityNum % partitionCount);
+			}
+			else if (components.affinityStr != null && !withSubCount) {
+				return calculatePartitionId(
+						affinity, hashMode, partitionCount);
 			}
 
-			int subContainerId = -1;
-			String base = null;
-			String affinity = null;
-			int partitionId = -1;
-			int partitioningCount = 0;
-			boolean newPartitioningRule = false;
-
-			int affinityPos = containerName.indexOf('@');
-			int subPartitionIdPos = containerName.indexOf('/');
-			if (subPartitionIdPos == -1) {
-				if (affinityPos == -1) {
-					base = RowMapper.normalizeExtendedSymbol(containerName, true);
-					return calculatePartitionId(base,
-						context.containerHashMode, context.partitionCount);
+			final String base = (affinity == null ?
+					RowMapper.normalizeSymbolUnchecked(
+							components.base) : affinity);
+			if (withSubCount) {
+				final int subCount = components.subCount;
+				final int subId = (int) components.largeId;
+				if (partitionCount <= subCount) {
+					return subId % partitionCount;
 				}
-				subPartitionIdPos = containerName.length();
-			} else if (subPartitionIdPos == 0) {
-				throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
-						"Illegal container name (" + containerName + ")");
-			} else {
-
-				int partitioningPos = containerName.indexOf('_', subPartitionIdPos + 1);
-				if (partitioningPos != -1) {
-					newPartitioningRule = true;
-				}
-				else {
-					partitioningPos = containerName.length();
-				}
-
-				String subPartitionId = containerName.substring(subPartitionIdPos + 1, partitioningPos);
-
-				if (subPartitionId.isEmpty()) {
-					throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
-							"Illegal container name (" + containerName + ")");
-				}
-
-				final Matcher m1 = NUMERICAL_REGEX_PATTERN.matcher(subPartitionId);
-				if (m1.find()) {
-					subContainerId = Integer.parseInt(subPartitionId);
-				} else {
-					throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
-							"Illegal container name (, " + containerName + ")");
-				}
-
-
-				if (newPartitioningRule) {
-					String partitioningCountStr = containerName.substring(partitioningPos + 1,
-							containerName.length());
-
-					final Matcher m2 = NUMERICAL_REGEX_PATTERN.matcher(partitioningCountStr);
-					if (m2.find()) {
-						partitioningCount = Integer.parseInt(partitioningCountStr);
-					} else {
-						throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
-								"Illegal container name (, " + containerName + ")");
-					}
-				}
+				final int pbase = (partitionCount / subCount);
+				final int pmod = (partitionCount % subCount);
+				final int baseHash =
+						calculatePartitionId(base, hashMode, pbase);
+				return (pbase * subId + Math.min(pmod, subId) + baseHash);
 			}
-
-			
-			if (affinityPos == 0) {
-				throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
-						"Illegal container name (" + containerName + ")");
-			} else if (affinityPos == -1) {
-				
-				base = containerName.substring(0, subPartitionIdPos);
-				base = RowMapper.normalizeExtendedSymbol(base, true);
-			} else {
-
-				if (affinityPos > subPartitionIdPos || affinityPos + 1 == subPartitionIdPos) {
-					throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
-							"Illegal container name (" + containerName + ")");
+			else {
+				int partitionId =
+						calculatePartitionId(base, hashMode, partitionCount);
+				if (components.largeId >= 0) {
+					partitionId = (int) (partitionId + components.largeId) %
+							partitionCount;
 				}
-
-				affinity = containerName.substring(affinityPos + 1, subPartitionIdPos);
-				if (affinity.isEmpty()) {
-					throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
-							"Illegal container name (" + containerName + ")");
-				}
-
-				final Matcher m1 = NUMERICAL_REGEX_PATTERN.matcher(affinity);
-				if (m1.find()) {
-					partitionId = Integer.parseInt(affinity);
-					if (subContainerId != -1) {
-						partitionId += subContainerId;
-					}
-				} else {
-					affinity = RowMapper.normalizeSymbol("_" + affinity);
-					affinity = affinity.substring(1);
-					base = affinity;
-				}
+				return partitionId;
 			}
-			if (partitionId != -1) {
-				partitionId %= context.partitionCount;
-			} else if (affinity != null && !newPartitioningRule) {
-
-				
-				partitionId = calculatePartitionId(affinity,
-					context.containerHashMode, context.partitionCount);
-			} else {
-				if (!newPartitioningRule) {
-					partitionId = calculatePartitionId(base,
-						context.containerHashMode, context.partitionCount);
-					if (subContainerId != -1) {
-						partitionId = (int) ((partitionId + subContainerId)) % context.partitionCount;
-					}
-				}
-				else {
-					if (context.partitionCount <= partitioningCount) {
-						return subContainerId % context.partitionCount;
-					}
-					int pbase = (context.partitionCount / partitioningCount);
-					int pmod = (context.partitionCount % partitioningCount);
-					final CRC32 crc = new CRC32();
-					crc.update(base.getBytes(BasicBuffer.DEFAULT_CHARSET));
-					partitionId = (pbase * subContainerId
-							+ (int)Math.min(pmod, subContainerId) + ((int)((crc.getValue() & 0xffffffff) % pbase)));
-				}
-			}
-
-			return partitionId;
 		}
 	}
 
 	public static int calculatePartitionId(
-			String normalizedString, ContainerHashMode hashMode, int partitionCount)
-			throws GSException {
+			String normalizedString, ContainerHashMode hashMode,
+			int partitionCount) throws GSException {
+		final byte[] bytes =
+				normalizedString.getBytes(BasicBuffer.DEFAULT_CHARSET);
 		switch (hashMode) {
-		case CRC32: {
+		case COMPATIBLE1: {
 			final CRC32 crc = new CRC32();
-			crc.update(normalizedString.getBytes(BasicBuffer.DEFAULT_CHARSET));
+			crc.update(bytes);
 
 			return (int) ((crc.getValue() & 0xffffffff) % partitionCount);
+		}
+		case MD5: {
+			final MessageDigest md = MessageDigestFactory.MD5.create();
+			md.update(bytes);
+			final byte[] digest = md.digest();
+			long hash = 0;
+			for (int i = 0; i < 4; i++) {
+				hash = (hash << 8) | (digest[i] & 0xff);
+			}
+			return (int) (hash % partitionCount);
 		}
 		default:
 			throw new GSException(
@@ -1837,8 +1976,21 @@ public class GridStoreChannel implements Closeable {
 		}
 	}
 
+	public static boolean isMasterResolvableByConnection() {
+		return NodeConnection.getProtocolVersion() >= 8;
+	}
+
+	public static ContainerHashMode getDefaultContainerHashMode() {
+		if (NodeConnection.getProtocolVersion() < 14 ||
+				v40ContainerHashCompatible) {
+			return ContainerHashMode.COMPATIBLE1;
+		}
+
+		return ContainerHashMode.MD5;
+	}
+
 	public static int statementToNumber(Statement statement) {
-		return NodeConnection.statementToNumber(statement);
+		return NodeConnection.statementToNumber(statement.generalize());
 	}
 
 	public void close() throws GSException {
@@ -1866,7 +2018,7 @@ public class GridStoreChannel implements Closeable {
 
 	static class ContextMonitor {
 
-		String containerName;
+		ContainerKey containerKey;
 
 		String query;
 
@@ -1886,7 +2038,7 @@ public class GridStoreChannel implements Closeable {
 
 		boolean transactionStarted;
 
-		Statement lastStatement;
+		GeneralStatement lastStatement;
 
 		long lastStatementId;
 
@@ -1896,15 +2048,16 @@ public class GridStoreChannel implements Closeable {
 
 		long lastSessionId;
 
-		void setContainerName(String containerName) {
-			this.containerName = containerName;
+		void setContainerKey(ContainerKey containerKey) {
+			this.containerKey = containerKey;
 		}
 
 		void setQuery(String query) {
 			this.query = query;
 		}
 
-		void startStatement(Statement statement, long statementId,
+		void startStatement(
+				GeneralStatement statement, long statementId,
 				int partitionId, Long containerId) {
 			statementStartTime = System.nanoTime();
 			statementIOTotalTime = 0;
@@ -1944,8 +2097,8 @@ public class GridStoreChannel implements Closeable {
 			args.add(lastSessionId);
 
 			do {
-				if (containerName != null) {
-					args.add(containerName);
+				if (containerKey != null) {
+					args.add(containerKey);
 				}
 				else if (containerIdSpecified) {
 					args.add(lastContainerId);

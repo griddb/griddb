@@ -96,7 +96,7 @@ QP_SOURCES= \
 	$(srcdir)/lexer.h \
 	$(srcdir)/lexer.cpp \
 	$(srcdir)/function_map.cpp \
-	$(srcdir)/function_map.h \
+	$(srcdir)/function_map.hpp \
 	$(srcdir)/tql.cpp \
 	$(srcdir)/query.cpp \
 	$(srcdir)/query.h \
@@ -106,6 +106,17 @@ gsserver_SOURCES = \
 $(QP_SOURCES)\
 $(libdir)/ebb/ebb_request_parser.c \
 $(libdir)/sha2/sha2.c \
+$(libdir)/uuid/uuid/clear.c \
+$(libdir)/uuid/uuid/compare.c \
+$(libdir)/uuid/uuid/copy.c \
+$(libdir)/uuid/uuid/gen_uuid.c \
+$(libdir)/uuid/uuid/isnull.c \
+$(libdir)/uuid/uuid/pack.c \
+$(libdir)/uuid/uuid/parse.c \
+$(libdir)/uuid/uuid/unpack.c \
+$(libdir)/uuid/uuid/unparse.c \
+$(libdir)/uuid/uuid/uuid_time.c \
+$(srcdir)/zlib_utils.cpp \
 $(srcdir)/array_processor.cpp \
 $(srcdir)/base_container.cpp \
 $(srcdir)/bit_array.cpp \
@@ -119,6 +130,7 @@ $(srcdir)/cluster_manager.cpp \
 $(srcdir)/cluster_service.cpp \
 $(srcdir)/collection.cpp \
 $(srcdir)/config_table.cpp \
+$(srcdir)/container_key.cpp \
 $(srcdir)/data_store.cpp \
 $(srcdir)/event_engine.cpp \
 $(srcdir)/gs_error.cpp \
@@ -151,7 +163,9 @@ $(srcdir)/transaction_context.cpp \
 $(srcdir)/transaction_manager.cpp \
 $(srcdir)/transaction_service.cpp \
 $(srcdir)/trigger_service.cpp \
+$(srcdir)/uuid_utils.cpp \
 $(srcdir)/value.cpp \
+$(srcdir)/value_operator.cpp \
 $(srcdir)/value_processor.cpp \
 $(srcdir)/main.cpp
 
@@ -176,6 +190,8 @@ NOSQL_INCLUDES = \
 -I$(libdir)/picojson/include \
 -I$(libdir)/ebb \
 -I$(libdir)/sha2 \
+-I$(libdir)/omaha/omaha/base/security \
+-I$(libdir)/uuid \
 -I$(aprinclude) \
 -I$(activemqinclude)
 

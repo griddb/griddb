@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -35,7 +35,7 @@ class QueryProcessor {
 public:
 
 	static void executeTQL(TransactionContext &txn, BaseContainer &container,
-		ResultSize limit, const char *query, ResultSet &resultSet);
+		ResultSize limit, const TQLInfo &tqlInfo, ResultSet &resultSet);
 
 	static void get(TransactionContext &txn, BaseContainer &container,
 		uint32_t rowkeySize, const uint8_t *rowkey, ResultSet &resultSet);
@@ -80,6 +80,8 @@ public:
 
 	static void get(TransactionContext &txn, TimeSeries &timeSeries,
 		RowId preLast, ResultSize limit, RowId &last, ResultSet &resultSet);
+
+
 
 private:
 	static const uint32_t EXPLAIN_COLUMN_NUM = 6;

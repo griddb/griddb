@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -59,7 +59,8 @@ public:
 	static const ChunkCategoryId CHUNK_CATEGORY_NON_READY_PARTITION =
 		UNDEF_CHUNK_CATEGORY_ID;  
 
-	explicit RecoveryManager(ConfigTable &configTable);
+	RecoveryManager(
+			ConfigTable &configTable, bool releaseUnusedFileBlocks);
 	~RecoveryManager();
 
 	void initialize(ManagerSet &mgrSet);
@@ -69,7 +70,7 @@ public:
 		bool forceRecoveryFromExistingFiles);
 
 	static void checkExistingFiles2(ConfigTable &configTable,
-		LogManager &logMgr, bool &createFrag,
+		LogManager &logMgr, bool &createFrag, 
 		bool forceRecoveryFromExistingFiles);
 
 
@@ -126,6 +127,8 @@ public:
 private:
 	void redoAll(util::StackAllocator &alloc, Mode mode, LogCursor &cursor);
 
+	void recoveryChunkMetaData(
+			util::StackAllocator &alloc, const LogRecord &logRecord);
 
 	LogSequentialNumber redoLogRecord(util::StackAllocator &alloc, Mode mode,
 		PartitionId pId, const util::DateTime &stmtStartTime,
@@ -160,6 +163,8 @@ private:
 		RecoveryManager *manager_;
 	} statUpdator_;
 
+	static const uint64_t ADJUST_MEMORY_TIME_INTERVAL_ = 30 * 1000 * 1000;
+
 	PartitionGroupConfig pgConfig_;
 	const uint8_t CHUNK_EXP_SIZE_;
 	const int32_t CHUNK_SIZE_;
@@ -173,6 +178,8 @@ private:
 
 	std::vector<PartitionId> recoveryPartitionId_;
 	bool recoveryTargetPartitionMode_;
+
+	bool releaseUnusedFileBlocks_;
 
 	std::vector<PartitionId> syncChunkPId_;
 	std::vector<int64_t> syncChunkNum_;

@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -48,10 +48,8 @@ protected:
 	*/
 	struct CollectionImage : BaseContainerImage {
 		RowId maxRowId_;	 
+		uint64_t padding1_;  
 		uint64_t padding2_;  
-		uint64_t padding3_;  
-		uint64_t padding4_;  
-		uint64_t padding5_;  
 	};
 
 public:  
@@ -103,7 +101,7 @@ public:
 			/*!
 				@brief Check if this Row is already updated in the transaction
 			*/
-			bool isFirstUpdate() {
+			bool isFirstUpdate() const {
 				return (*reinterpret_cast<RowHeader *>(getBitsAddr()) &
 						   FIRST_UPDATE_BIT) != 0;
 			}
@@ -117,7 +115,7 @@ public:
 			/*!
 				@brief Get TransactionId when finally updated
 			*/
-			TransactionId getTxnId() {
+			TransactionId getTxnId() const {
 				TransactionId tId =
 					*reinterpret_cast<TransactionId *>(getTIdAddr());
 				return (tId & TID_FIELD);
@@ -125,7 +123,7 @@ public:
 			/*!
 				@brief Get RowId
 			*/
-			RowId getRowId() {
+			RowId getRowId() const {
 				return *reinterpret_cast<RowId *>(getRowIdAddr());
 			}
 			/*!
@@ -138,7 +136,7 @@ public:
 			/*!
 				@brief Check if this Row is already removed
 			*/
-			bool isRemoved() {
+			bool isRemoved() const {
 				return isRemoved(binary_);
 			}
 			/*!
@@ -156,8 +154,11 @@ public:
 			/*!
 				@brief Get address of variable OId
 			*/
-			uint8_t *getVariableArrayAddr() {
+			uint8_t *getVariableArrayAddr() const {
 				return getFixedAddr();
+			}
+			const uint8_t *getNullsAddr() const {
+				return binary_ + FIXED_ADDR_OFFSET + nullsOffset_;
 			}
 			/*!
 				@brief Check if this Row meet a condition
@@ -172,14 +173,20 @@ public:
 							sizeof(RowId), cond.value_, cond.valueSize_);
 				}
 				else {
-					getField(txn, rowArrayCursor_->getContainer().getColumnInfo(
-									  cond.columnId_),
-						tmpValue);
-					isMatch = cond.operator_(txn, tmpValue.getValue().data(),
-						tmpValue.getValue().size(), cond.value_,
-						cond.valueSize_);
+					ColumnInfo &columnInfo = rowArrayCursor_->getContainer().getColumnInfo(cond.columnId_);
+					if (isNullValue(columnInfo)) {
+						isMatch = cond.operator_ == ComparatorTable::isNull_;
+					} else {
+						getField(txn, columnInfo, tmpValue);
+						isMatch = cond.operator_(txn, tmpValue.getValue().data(),
+							tmpValue.getValue().size(), cond.value_,
+							cond.valueSize_);
+					}
 				}
 				return isMatch;
+			}
+			bool isNullValue(const ColumnInfo &columnInfo) const {
+				return RowNullBits::isNullValue(getNullsAddr(), columnInfo.getColumnId());
 			}
 			std::string dump(TransactionContext &txn);
 
@@ -213,26 +220,23 @@ public:
 				util::XArray<uint32_t> &varColumnIdList,
 				util::XArray<uint32_t> &varDataObjectSizeList,
 				util::XArray<uint32_t> &varDataObjectPosList);
-			uint8_t *getBitsAddr() {
+			uint8_t *getBitsAddr() const {
 				return binary_ + BITS_OFFSET;
 			}
-			uint8_t *getRowIdAddr() {
+			uint8_t *getRowIdAddr() const {
 				return binary_ + ROWID_OFFSET;
 			}
-			uint8_t *getTIdAddr() {
+			uint8_t *getTIdAddr() const {
 				return binary_ + TID_OFFSET;
 			}
-			uint8_t *getFixedAddr() {
+			uint8_t *getFixedAddr() const {
 				return binary_ + FIXED_ADDR_OFFSET;
 			}
 			void setVariableArray(OId oId) {
 				memcpy(getVariableArrayAddr(), &oId, sizeof(OId));
 			}
-			OId getVariableArray() {
+			OId getVariableArray() const {
 				return *reinterpret_cast<OId *>(getVariableArrayAddr());
-			}
-			uint8_t *getNullsAddr() {
-				return binary_ + FIXED_ADDR_OFFSET + nullsOffset_;
 			}
 			void setRemoved() {
 				RowHeader *val = reinterpret_cast<RowHeader *>(getBitsAddr());
@@ -246,7 +250,7 @@ public:
 				*targetAddr = (header | filterTId);
 				setFirstUpdate();
 			}
-			uint8_t *getAddr() {
+			uint8_t *getAddr() const {
 				return binary_;
 			}
 		};
@@ -269,6 +273,7 @@ public:
 		void remove(TransactionContext &txn);
 		void move(TransactionContext &txn, RowArray &dest);
 		void copy(TransactionContext &txn, RowArray &dest);
+		void updateNullsStats(const uint8_t *nullbits);
 
 		bool nextRowArray(
 			TransactionContext &, RowArray &neighbor, uint8_t getOption);
@@ -351,7 +356,7 @@ public:
 		/*!
 			@brief Check if next Row exists
 		*/
-		bool hasNext() {
+		bool hasNext() const {
 			if (elemCursor_ + 1 < getRowNum()) {
 				return true;
 			}
@@ -378,26 +383,25 @@ public:
 		/*!
 			@brief Check if RowArray is initialized
 		*/
-		bool isNotInitialized() {
+		bool isNotInitialized() const {
 			return BaseObject::getBaseOId() == UNDEF_OID ? true : false;
 		}
 		/*!
 			@brief Check if cursor is last Row
 		*/
-		bool isTailPos() {
+		bool isTailPos() const {
 			return elemCursor_ >= getMaxRowNum() - 1 ? true : false;
 		}
 		/*!
 			@brief Get OId of Row(RowArray OId + row offset)
 		*/
-		OId getOId() {
-			return ((static_cast<OId>(elemCursor_) << (64 - ELEM_BIT)) |
-					getBaseOId());
+		OId getOId() const {
+			return ObjectManager::setUserArea(getBaseOId(), static_cast<OId>(elemCursor_));
 		}
 		/*!
 			@brief Get OId of RowArray
 		*/
-		OId getBaseOId() {
+		OId getBaseOId() const {
 			return getBaseOId(BaseObject::getBaseOId());
 		}
 		/*!
@@ -410,13 +414,13 @@ public:
 		/*!
 			@brief Get address of current Row
 		*/
-		uint8_t *getRow() {
+		uint8_t *getRow() const {
 			return getRow(elemCursor_);
 		}
 		/*!
 			@brief Get number of Rows(include removed Rows)
 		*/
-		uint16_t getRowNum() {
+		uint16_t getRowNum() const {
 			return *reinterpret_cast<uint16_t *>(getAddr() + ROW_NUM_OFFSET);
 		}
 		/*!
@@ -435,20 +439,24 @@ public:
 		/*!
 			@brief Get maximum that it can store
 		*/
-		uint16_t getMaxRowNum() {
+		uint16_t getMaxRowNum() const {
 			return *reinterpret_cast<uint16_t *>(
 				getAddr() + MAX_ROW_NUM_OFFSET);
 		}
 		/*!
 			@brief Get header size of RowArray Object
 		*/
-		static uint32_t getHeaderSize() {
-			return HEADER_SIZE;
+		uint32_t getHeaderSize() const {
+			return NULLBITS_OFFSET + getNullbitsSize();
 		}
+		static uint32_t calcHeaderSize(uint32_t nullbitsSize) {
+			return NULLBITS_OFFSET + nullbitsSize;
+		}
+
 		/*!
 			@brief Get RowId address of current Row
 		*/
-		uint8_t *getRowIdAddr() {
+		uint8_t *getRowIdAddr() const {
 			return getAddr() + ROWID_OFFSET;
 		}
 		/*!
@@ -460,39 +468,70 @@ public:
 		/*!
 			@brief Get RowId of current Row
 		*/
-		RowId getRowId() {
+		RowId getRowId() const {
 			return *reinterpret_cast<RowId *>(getRowIdAddr());
 		}
-
+		uint8_t *getNullsStats() {
+			return getAddr() + NULLBITS_OFFSET;
+		}
+		uint32_t getNullbitsSize() const {
+			return nullbitsSize_;
+		}
+		bool validate();
+		void setContainerId(ContainerId containerId) {
+			ContainerId *containerIdAddr = 
+				reinterpret_cast<ContainerId *>(getBaseAddr() + CONTAINER_ID_OFFSET);
+			*containerIdAddr = containerId;
+		}
+		ContainerId getContainerId() const {
+			ContainerId *containerIdAddr = 
+				reinterpret_cast<ContainerId *>(getBaseAddr() + CONTAINER_ID_OFFSET);
+			return *containerIdAddr;
+		}
+		void setColumnNumd(uint16_t columnNum) {
+			uint16_t *columnNumAddr = 
+				reinterpret_cast<uint16_t *>(getBaseAddr() + COLUMN_NUM_OFFSET);
+			*columnNumAddr = columnNum;
+		}
+		uint16_t getColumnNum() const {
+			uint16_t *columnNumAddr = 
+				reinterpret_cast<uint16_t *>(getBaseAddr() + COLUMN_NUM_OFFSET);
+			return *columnNumAddr;
+		}
 		std::string dump(TransactionContext &txn);
 
 	private:  
 		static const size_t HEADER_FREE_AREA_SIZE =
-			28;  
-		static const size_t HEADER_SIZE =
-			sizeof(uint16_t) * 2 + sizeof(RowId) +
-			HEADER_FREE_AREA_SIZE;  
+			16;  
 		static const size_t MAX_ROW_NUM_OFFSET = 0;  
 		static const size_t ROW_NUM_OFFSET =
 			sizeof(uint16_t);  
-		static const size_t ROW_AREA_OFFSET =
-			HEADER_SIZE;  
 		static const size_t ROWID_OFFSET =
 			sizeof(uint16_t) * 2;  
+		static const size_t CONTAINER_ID_OFFSET =
+			ROWID_OFFSET + sizeof(RowId);  
+		static const size_t COLUMN_NUM_OFFSET =
+			CONTAINER_ID_OFFSET + sizeof(ContainerId);  
+		static const size_t ROWARRAY_TYPE_OFFSET =
+			COLUMN_NUM_OFFSET + sizeof(uint16_t);  
+		static const size_t SPARSE_DATA_OFFSET =
+			ROWARRAY_TYPE_OFFSET + sizeof(uint16_t);  
+
+		static const size_t NULLBITS_OFFSET = SPARSE_DATA_OFFSET + sizeof(OId)
+			+ HEADER_FREE_AREA_SIZE;
 		struct Header {
 			uint16_t elemCursor_;
 		};
-		static const size_t ELEM_BIT = 10;
-		static const OId BASE_FILTER = 0x003FFFFFFFFFFFFFLL;
 
 	private:  
 		Collection *container_;
 		size_t rowSize_;
 		uint16_t elemCursor_;
+		uint32_t nullbitsSize_;
 
 	private:  
-		uint8_t *getRow(uint16_t elem) {
-			return getAddr() + HEADER_SIZE + elem * rowSize_;
+		uint8_t *getRow(uint16_t elem) const {
+			return getAddr() + getHeaderSize() + elem * rowSize_;
 		}
 		void setMaxRowNum(uint16_t num) {
 			uint16_t *addr =
@@ -504,14 +543,14 @@ public:
 				reinterpret_cast<uint16_t *>(getAddr() + ROW_NUM_OFFSET);
 			*addr = num;
 		}
-		uint8_t *getAddr() {
+		uint8_t *getAddr() const {
 			return getBaseAddr();
 		}
-		Collection &getContainer() {
+		Collection &getContainer() const {
 			return *container_;
 		}
-		uint16_t getElemCursor(OId oId) {
-			return static_cast<uint16_t>((oId >> (64 - ELEM_BIT)));
+		uint16_t getElemCursor(OId oId) const {
+			return static_cast<uint16_t>(ObjectManager::getUserArea(oId));
 		}
 		void updateCursor() {
 			uint16_t currentCursor = -1;
@@ -522,13 +561,14 @@ public:
 			}
 			setRowNum(currentCursor + 1);
 		}
-		OId getBaseOId(OId oId) {
-			return (oId & BASE_FILTER);
+		OId getBaseOId(OId oId) const {
+			return ObjectManager::getBaseArea(oId);
 		}
-		uint32_t getBinarySize(uint16_t maxRowNum) {
+		uint32_t getBinarySize(uint16_t maxRowNum) const {
 			return static_cast<uint32_t>(
 				getHeaderSize() + rowSize_ * maxRowNum);
 		}
+
 		RowArray(const RowArray &);  
 		RowArray &operator=(const RowArray &);  
 	};
@@ -546,15 +586,24 @@ public:
 	}
 	~Collection() {}
 	void initialize(TransactionContext &txn);
-	void finalize(TransactionContext &txn);
-	void set(TransactionContext &txn, const char8_t *containerName,
+	bool finalize(TransactionContext &txn);
+	void set(TransactionContext &txn, const FullContainerKey &containerKey,
 		ContainerId containerId, OId columnSchemaOId,
 		MessageSchema *containerSchema);
 
-	void createIndex(TransactionContext &txn, IndexInfo &indexInfo);
-	void dropIndex(TransactionContext &txn, IndexInfo &indexInfo);
+	void createIndex(TransactionContext &txn, const IndexInfo &indexInfo, 
+		IndexCursor& indexCursor,
+		bool isIndexNameCaseSensitive = false);
+	void continueCreateIndex(TransactionContext& txn, 
+		IndexCursor& indexCursor);
+
+	void dropIndex(TransactionContext &txn, IndexInfo &indexInfo,
+		bool isIndexNameCaseSensitive = false);
 
 
+	void putRow(TransactionContext &txn, uint32_t rowSize,
+		const uint8_t *rowData, RowId &rowId, DataStore::PutStatus &status,
+		PutRowOption putRowOption);
 
 	void deleteRow(TransactionContext &txn, uint32_t rowKeySize,
 		const uint8_t *rowKey, RowId &rowId, bool &existing);
@@ -566,7 +615,7 @@ public:
 		deleteRow(txn, rowId, existing, isForceLock);
 	}
 	/*!
-		@brief Update a Row corresponding to the specified RowId
+		@brief Updates a Row corresponding to the specified RowId
 	*/
 	void updateRow(TransactionContext &txn, uint32_t rowSize,
 		const uint8_t *rowData, RowId rowId, DataStore::PutStatus &status) {
@@ -581,19 +630,12 @@ public:
 		bool isForceLock = true;
 		deleteRow(txn, rowId, existing, isForceLock);
 	}
-	/*!
-		@brief Update a Row corresponding to the specified RowId at recovery
-	   phase
-	*/
-	void redoUpdateRow(TransactionContext &txn, uint32_t rowSize,
-		const uint8_t *rowData, RowId rowId, DataStore::PutStatus &status) {
-		bool isForceLock = true;
-		updateRow(txn, rowSize, rowData, rowId, status, isForceLock);
-	}
 	void abort(TransactionContext &txn);
 	void commit(TransactionContext &txn);
-	void changeSchema(TransactionContext &txn, BaseContainer &newContainer,
-		util::XArray<uint32_t> &copyColumnMap);
+
+	void continueChangeSchema(TransactionContext &txn,
+		ContainerCursor &containerCursor);
+
 	bool hasUncommitedTransaction(TransactionContext &txn);
 
 	void searchRowIdIndex(TransactionContext &txn, BtreeMap::SearchContext &sc,
@@ -601,10 +643,9 @@ public:
 	void searchRowIdIndex(TransactionContext &txn, uint64_t start,
 		uint64_t limit, util::XArray<RowId> &rowIdList,
 		util::XArray<OId> &resultList, uint64_t &skipped);
+	RowId getMaxRowId(TransactionContext &txn);
 
 	void lockRowList(TransactionContext &txn, util::XArray<RowId> &rowIdList);
-	bool isLocked(
-		TransactionContext &txn, uint32_t rowKeySize, const uint8_t *rowKey);
 
 	/*!
 		@brief Calculate AllocateStrategy of Map Object
@@ -619,6 +660,19 @@ public:
 	AllocateStrategy calcRowAllocateStrategy() const {
 		AffinityGroupId groupId = calcAffnityGroupId(getAffinity());
 		return AllocateStrategy(ALLOCATE_NO_EXPIRE_ROW, groupId);
+	}
+
+	uint32_t getRealColumnNum(TransactionContext &txn) {
+		return getColumnNum();
+	}
+	ColumnInfo* getRealColumnInfoList(TransactionContext &txn) {
+		return getColumnInfoList();
+	}
+	uint32_t getRealRowSize(TransactionContext &txn) {
+		return getRowSize();
+	}
+	uint32_t getRealRowFixedDataSize(TransactionContext &txn) {
+		return getRowFixedDataSize();
 	}
 
 	bool validate(TransactionContext &txn, std::string &errorMessage);
@@ -680,27 +734,27 @@ private:
 					 ->maxRowId_;
 	}
 
-	void insertRowIdMap(
-		TransactionContext &txn, BtreeMap *map, const void *constKey, OId oId);
+	void insertRowIdMap(TransactionContext &txn, BtreeMap *map,
+		const void *constKey, OId oId);
 	void insertMvccMap(TransactionContext &txn, BtreeMap *map,
 		TransactionId tId, MvccRowImage &mvccImage);
-	void insertValueMap(TransactionContext &txn, BaseIndex *map,
-		const void *constKey, OId oId, ColumnId columnId, MapType mapType);
+	void insertValueMap(TransactionContext &txn, ValueMap &valueMap,
+		const void *constKey, OId oId, bool isNull);
 	void updateRowIdMap(TransactionContext &txn, BtreeMap *map,
 		const void *constKey, OId oldOId, OId newOId);
 	void updateMvccMap(TransactionContext &txn, BtreeMap *map,
 		TransactionId tId, MvccRowImage &oldMvccImage,
 		MvccRowImage &newMvccImage);
-	void updateValueMap(TransactionContext &txn, BaseIndex *map,
-		const void *constKey, OId oldOId, OId newOId, ColumnId columnId,
-		MapType mapType);
-	void removeRowIdMap(
-		TransactionContext &txn, BtreeMap *map, const void *constKey, OId oId);
+	void updateValueMap(TransactionContext &txn, ValueMap &valueMap,
+		const void *constKey, OId oldOId, OId newOId, bool isNull);
+	void removeRowIdMap(TransactionContext &txn, BtreeMap *map,
+		const void *constKey, OId oId);
 	void removeMvccMap(TransactionContext &txn, BtreeMap *map,
 		TransactionId tId, MvccRowImage &mvccImage);
-	void removeValueMap(TransactionContext &txn, BaseIndex *map,
-		const void *constKey, OId oId, ColumnId columnId, MapType mapType);
-	void updateIndexData(TransactionContext &txn, IndexData indexData);
+	void removeValueMap(TransactionContext &txn, ValueMap &valueMap,
+		const void *constKey, OId oId, bool isNull);
+	void updateIndexData(
+		TransactionContext &txn, const IndexData &indexData);
 
 
 	void getIdList(TransactionContext &txn,
@@ -736,14 +790,16 @@ private:
 	void checkExclusive(TransactionContext &txn);
 
 	bool getIndexData(TransactionContext &txn, ColumnId columnId,
-		MapType mapType, IndexData &indexData) const {
-		return indexSchema_->getIndexData(
-			txn, columnId, mapType, UNDEF_CONTAINER_POS, indexData);
+		MapType mapType, bool withUncommitted, IndexData &indexData) const;
+	void createNullIndexData(TransactionContext &txn, IndexData &indexData) {
+		indexSchema_->createNullIndexData(txn, UNDEF_CONTAINER_POS, indexData, 
+			this);
 	}
-	void getIndexList(
-		TransactionContext &txn, util::XArray<IndexData> &list) const {
-		indexSchema_->getIndexList(txn, UNDEF_CONTAINER_POS, list);
-	}
+	void getIndexList(TransactionContext &txn,  
+		bool withUncommitted, util::XArray<IndexData> &list) const;
+
+
+
 	void finalizeIndex(TransactionContext &txn) {
 		indexSchema_->dropAll(txn, this, UNDEF_CONTAINER_POS, true);
 		indexSchema_->finalize(txn);
@@ -757,6 +813,5 @@ private:
 	}
 
 };
-
 
 #endif

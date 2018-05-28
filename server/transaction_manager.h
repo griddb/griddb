@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -28,8 +28,6 @@
 #include "expirable_map.h"
 #include "transaction_context.h"
 
-#ifndef NDEBUG
-#endif
 
 class BaseContainer;
 
@@ -70,6 +68,8 @@ class ReplicationContext {
 	friend class TransactionManager;
 
 public:
+	typedef util::XArray<uint8_t, util::StdAllocator<uint8_t, void>> BinaryData;
+
 	ReplicationContext();
 	~ReplicationContext();
 
@@ -85,6 +85,9 @@ public:
 
 	ContainerId getContainerId() const;
 
+	SchemaVersionId getContainerSchemaVersionId() const;
+	void setContainerSchemaVersionId(SchemaVersionId schemaVersionId);
+
 	StatementId getStatementId() const;
 
 	const NodeDescriptor &getConnectionND() const;
@@ -97,6 +100,31 @@ public:
 	bool getExistFlag() const;
 	void setExistFlag(bool flag);
 
+	/*!
+		@brief Task status
+	*/
+	enum TaskStatus {
+		TASK_FINISHED = 0,
+		TASK_CONTINUE = 1,
+	};
+
+	void setTaskStatus(TaskStatus status) {
+		taskStatus_ =  status;
+	}
+	TaskStatus getTaskStatus() const {
+		return taskStatus_;
+	}
+	void setOriginalStmtId(StatementId stmtId) {
+		originalStmtId_ = stmtId;
+	}
+	StatementId getOriginalStatementId() const {
+		return originalStmtId_;
+	}
+
+
+
+	void setBinaryData(const void *data, size_t size);
+	const std::vector<BinaryData*>& getBinaryDatas() const;
 
 private:
 	ReplicationId id_;
@@ -104,9 +132,11 @@ private:
 	int32_t stmtType_;
 
 	ClientId clientId_;
+	ClientId ackClientId_;
 
 	PartitionId pId_;
 	ContainerId containerId_;
+	SchemaVersionId schemaVersionId_;
 	StatementId stmtId_;
 
 	NodeDescriptor clientNd_;
@@ -114,11 +144,22 @@ private:
 	int32_t ackCounter_;
 	EventMonotonicTime timeout_;
 
+	TaskStatus taskStatus_;
+	StatementId originalStmtId_;
+
 	bool existFlag_;
 
+
+	bool isSync_;
+	int32_t subContainerId_;
+	StatementId execId_;
+
+	util::VariableSizeAllocator<> *alloc_;
+	std::vector<BinaryData*> binaryDatas_;
+	
 	ReplicationContext(const ReplicationContext &replContext);
 	void clear();
-
+	void clearBinaryData();
 };
 
 /*!
@@ -159,9 +200,12 @@ public:
 
 	typedef uint8_t TransactionMode;
 	static const TransactionMode AUTO_COMMIT;  
-	static const TransactionMode NO_AUTO_COMMIT_BEGIN;  
-	static const TransactionMode NO_AUTO_COMMIT_CONTINUE;			
-	static const TransactionMode NO_AUTO_COMMIT_BEGIN_OR_CONTINUE;  
+	static const TransactionMode
+		NO_AUTO_COMMIT_BEGIN;  
+	static const TransactionMode
+		NO_AUTO_COMMIT_CONTINUE;  
+	static const TransactionMode
+		NO_AUTO_COMMIT_BEGIN_OR_CONTINUE;  
 
 	/*!
 		@brief ContextSource
@@ -184,6 +228,11 @@ public:
 	};
 
 	TransactionContext &put(util::StackAllocator &alloc, PartitionId pId,
+		const ClientId &clientId, const ContextSource &src,
+		const util::DateTime &now, EventMonotonicTime emNow,
+		bool isRedo = false, TransactionId txnId = UNDEF_TXNID);
+
+	TransactionContext &putNoExpire(util::StackAllocator &alloc, PartitionId pId,
 		const ClientId &clientId, const ContextSource &src,
 		const util::DateTime &now, EventMonotonicTime emNow,
 		bool isRedo = false, TransactionId txnId = UNDEF_TXNID);
@@ -222,6 +271,13 @@ public:
 		const util::XArray<bool> &checkPartitionFlagList,
 		util::XArray<PartitionId> &pIds, util::XArray<ClientId> &clientIds);
 
+	void getKeepaliveTimeoutContextId(util::StackAllocator &alloc,
+		PartitionGroupId pgId, EventMonotonicTime emNow,
+		const util::XArray<bool> &checkPartitionFlagList,
+		util::XArray<PartitionId> &pIds, util::XArray<ClientId> &clientIds);
+	void getNoExpireTransactionContextId(util::StackAllocator &alloc,
+		PartitionId pId, util::XArray<ClientId> &clientIds);
+
 	void backupTransactionActiveContext(PartitionId pId,
 		TransactionId &maxTxnId, util::XArray<ClientId> &clientIds,
 		util::XArray<TransactionId> &activeTxnIds,
@@ -257,6 +313,8 @@ public:
 	uint64_t getTransactionTimeoutCount(PartitionId pId) const;
 	uint64_t getReplicationTimeoutCount(PartitionId pId) const;
 
+
+	uint64_t getNoExpireTransactionCount(PartitionGroupId pgId) const;
 
 	size_t getMemoryUsage(
 		PartitionGroupId pgId, bool includeFreeMemory = false);
@@ -361,7 +419,7 @@ private:
 			StatementId stmtId, int32_t txnTimeoutInterval,
 			const util::DateTime &now, EventMonotonicTime emNow,
 			GetMode getMode, TransactionMode txnMode, bool isUpdateStmt,
-			bool isRedo, TransactionId txnId);
+			bool isRedo, TransactionId txnId, bool isExistTimeoutLimit);
 		TransactionContext &get(
 			util::StackAllocator &alloc, const ClientId &clientId);
 		void remove(const ClientId &clientId);
@@ -422,7 +480,8 @@ private:
 
 	public:
 		ReplicationContextPartition(
-			PartitionId pId, ReplicationContextMap *replContextMap);
+			PartitionId pId, ReplicationContextMap *replContextMap,
+			util::VariableSizeAllocator<> *replAllocator);
 		~ReplicationContextPartition();
 
 		ReplicationContext &put(const ClientId &clientId,
@@ -439,6 +498,8 @@ private:
 		ReplicationId maxReplId_;
 
 		ReplicationContextMap *replContextMap_;
+
+		util::VariableSizeAllocator<> *replAllocator_;
 
 		uint64_t replTimeoutCount_;
 	};
@@ -460,6 +521,8 @@ private:
 	std::vector<ReplicationContextMap *> replContextMap_;
 
 
+	std::vector<util::VariableSizeAllocator<> *> replAllocator_;
+
 	std::vector<Partition *> partition_;
 	std::vector<ReplicationContextPartition *> replContextPartition_;
 
@@ -471,6 +534,11 @@ private:
 	void createReplContextPartition(PartitionId pId);
 
 	void begin(TransactionContext &txn, EventMonotonicTime emNow);
+
+	void updateRequestTimeout(
+		PartitionGroupId pgId, const TransactionContext &txn);
+	void updateTransactionOrRequestTimeout(
+		PartitionGroupId pgId, const TransactionContext &txn);
 
 
 	/*!

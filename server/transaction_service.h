@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -31,10 +31,13 @@
 #include "data_store.h"
 #include "sync_service.h"
 
+#include "result_set.h"
 
 
 #define TXN_PRIVATE private
 #define TXN_PROTECTED protected
+
+typedef StatementId ExecId;
 
 #define TXN_THROW_DECODE_ERROR(errorCode, message) \
 	GS_THROW_CUSTOM_ERROR(EncodeDecodeException, errorCode, message)
@@ -101,7 +104,7 @@ public:
 	void initialize(const ManagerSet &mgrSet);
 
 	static const size_t USER_NAME_SIZE_MAX = 64;  
-	static const size_t DIGEST_SIZE_MAX = 64;  
+	static const size_t PASSWORD_SIZE_MAX = 64;  
 	static const size_t DATABASE_NAME_SIZE_MAX = 64;  
 
 	static const size_t USER_NUM_MAX = 128;		 
@@ -122,6 +125,22 @@ public:
 		USER,
 	};
 
+	enum QueryResponseType {
+		ROW_SET					= 0,
+		AGGREGATION				= 1,
+		QUERY_ANALYSIS			= 2,
+		PARTIAL_FETCH_STATE		= 3,	
+		PARTIAL_EXECUTION_STATE = 4,	
+	};
+
+	typedef int8_t CreateDropIndexMode;
+	static const CreateDropIndexMode CREATE_DROP_INDEX_NOSQL_MODE;
+	static const CreateDropIndexMode CREATE_DROP_INDEX_SQL_DEFAULT_MODE;
+	static const CreateDropIndexMode CREATE_DROP_INDEX_SQL_EXISTS_MODE;
+
+	static const int32_t DEFAULT_TQL_PARTIAL_EXEC_FETCH_BYTE_SIZE;
+
+
 	typedef int32_t ProtocolVersion;
 
 	static const ProtocolVersion PROTOCOL_VERSION_UNDEFINED;
@@ -139,19 +158,12 @@ public:
 	static const ProtocolVersion TXN_V2_9_X_CLIENT_VERSION;
 	static const ProtocolVersion TXN_V3_0_X_CLIENT_VERSION;
 	static const ProtocolVersion TXN_V3_0_X_CE_CLIENT_VERSION;
-
+	static const ProtocolVersion TXN_V3_1_X_CLIENT_VERSION;
+	static const ProtocolVersion TXN_V3_2_X_CLIENT_VERSION;
+	static const ProtocolVersion TXN_V3_5_X_CLIENT_VERSION;
+	static const ProtocolVersion TXN_V4_0_0_CLIENT_VERSION;
+	static const ProtocolVersion TXN_V4_0_1_CLIENT_VERSION;
 	static const ProtocolVersion TXN_CLIENT_VERSION;
-
-	static const ProtocolVersion TXN_V2_5_X_REPLICATION_MSG_VERSION = 3;
-
-	static const ProtocolVersion REPLICATION_MSG_VERSION =
-		TXN_V2_5_X_REPLICATION_MSG_VERSION;
-
-	static const ProtocolVersion MIN_ACCEPTABLE_REPLICATION_MSG_VERSION =
-		TXN_V2_5_X_REPLICATION_MSG_VERSION;
-	static const ProtocolVersion MAX_ACCEPTABLE_REPLICATION_MSG_VERSION =
-		REPLICATION_MSG_VERSION;
-
 
 
 	typedef uint8_t StatementExecStatus;  
@@ -189,6 +201,7 @@ public:
 	};
 
 	typedef int16_t OptionType;
+
 	static const OptionType OPTION_TXN_TIMEOUT_INTERVAL =
 		1;  
 	static const OptionType OPTION_FOR_UPDATE =
@@ -210,33 +223,61 @@ public:
 	static const OptionType OPTION_QUERY_VERSIONID = 15;
 	static const OptionType OPTION_USER_TYPE = 16;
 	static const OptionType OPTION_DB_VERSIONID = 17;
+	static const OptionType OPTION_EXTENSION_NAME = 18;
+	static const OptionType OPTION_EXTENSION_PARAMS = 19;
+	static const OptionType OPTION_INDEX_NAME = 20;
+	static const OptionType OPTION_EXTENSION_TYPE_LIST = 21;
+	static const OptionType OPTION_IS_SYNC_STATEMENT = 22;
+	static const OptionType OPTION_ACK_EVENT_TYPE = 23;
+	static const OptionType OPTION_SUB_CONTAINER_ID = 24;
+	static const OptionType OPTION_JOB_EXEC_ID = 25;
 
-	static const OptionType OPTION_TYPE_NOSQL_MAX =
-		10000;  
 
 	static const OptionType OPTION_SQL_STATEMENT_TIMEOUT_INTERVAL =
 		10001;  
 	static const OptionType OPTION_SQL_MAX_ROWS = 10002;  
 	static const OptionType OPTION_SQL_FETCH_SIZE = 10003;  
-	static const OptionType OPTION_TYPE_NEWSQL_MAX =
-		INT16_MAX;  
+	static const OptionType OPTION_SQL_RETRY_MODE = 10004;  
 
-	static const OptionType OPTION_TYPE_MAX =
-		OPTION_SQL_FETCH_SIZE;  
+
+	static const OptionType OPTION_TYPE_HUGE = 11000;
+	static const OptionType OPTION_TYPE_RANGE_BASE = 1000;
+
+	static const OptionType OPTION_TYPE_HUGE_NOSQL = 11000;
+	static const OptionType OPTION_CLIENTID = 11001;  
+	static const OptionType FETCH_BYTES_SIZE = 11002;
+
+	static const OptionType OPTION_TYPE_HUGE_NEWSQL = 12000;
+	static const OptionType OPTION_CREATE_DROP_INDEX_MODE = 12001;
+	static const OptionType OPTION_RETRY_MODE = 12002;
+	static const OptionType OPTION_DDL_TRANSACTION_MODE = 12003;
+	static const OptionType OPTION_SQL_CASE_SENSITIVITY = 12004;
+
+
 
 	/*!
 		@brief Represents option part of message
 	*/
 	struct OptionPart {
-		explicit OptionPart(util::StackAllocator &alloc)
-			: txnTimeoutInterval_(TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL),
-			  forUpdate_(false),
-			  systemMode_(false),
-			  alloc_(alloc),
-			  dbName_(alloc),
-			  containerAttribute_(CONTAINER_ATTR_BASE),
-			  requestType_(NOSQL),
-			  putRowOption_(PUT_INSERT_OR_UPDATE){};
+		explicit OptionPart(util::StackAllocator &alloc) :
+				txnTimeoutInterval_(TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL),
+				forUpdate_(false),
+				systemMode_(false),
+				alloc_(alloc),
+				dbName_(alloc),
+				containerAttribute_(CONTAINER_ATTR_ANY),
+				requestType_(NOSQL),
+				putRowOption_(PUT_INSERT_OR_UPDATE),
+				createDropIndexMode_(CREATE_DROP_INDEX_NOSQL_MODE),
+				ddlTransactionMode_(false),
+				fetchByteSize_(DEFAULT_TQL_PARTIAL_EXEC_FETCH_BYTE_SIZE),
+				isDistributeQuery_(false),
+				extensionName_(alloc),
+				extensionOptionFixedPart_(alloc),
+				extensionOptionVarPart_(alloc),
+				indexName_(alloc),
+				optionColumnTypeList_(alloc) {
+		}
 
 		int32_t txnTimeoutInterval_;
 		bool forUpdate_;
@@ -246,12 +287,75 @@ public:
 		ContainerAttribute containerAttribute_;
 		RequestType requestType_;  
 		PutRowOption putRowOption_;
+		CreateDropIndexMode createDropIndexMode_;
+		bool ddlTransactionMode_;
+		int32_t fetchByteSize_;
+		bool isDistributeQuery_;
+		struct CaseSensitivity {
+			uint8_t flags_;
+
+			CaseSensitivity() : flags_(0) {}
+			CaseSensitivity(const CaseSensitivity &another) : flags_(another.flags_) {}
+			CaseSensitivity& operator=(const CaseSensitivity &another) {
+				if (this == &another) {
+					return *this;
+				}
+				flags_ = another.flags_;
+				return *this;
+			}
+			bool isDatabaseNameCaseSensitive() const {
+				return ((flags_ & 0x80) != 0);
+			}
+			bool isUserNameCaseSensitive() const {
+				return ((flags_ & 0x40) != 0);
+			}
+			bool isContainerNameCaseSensitive() const {
+				return ((flags_ & 0x20) != 0);
+			}
+			bool isIndexNameCaseSensitive() const {
+				return ((flags_ & 0x10) != 0);
+			}
+			bool isColumnNameCaseSensitive() const {
+				return ((flags_ & 0x08) != 0);
+			}
+			void setDatabaseNameCaseSensitive() {
+				flags_ |= 0x80;
+			}
+			void setUserNameCaseSensitive() {
+				flags_ |= 0x40;
+			}
+			void setContainerNameCaseSensitive() {
+				flags_ |= 0x20;
+			}
+			void setIndexNameCaseSensitive() {
+				flags_ |= 0x10;
+			}
+			void setColumnNameCaseSensitive() {
+				flags_ |= 0x08;
+			}
+			bool isAllNameCaseInsensitive() const {
+				return (flags_ == 0);
+			}
+			void clear() {
+				flags_ = 0;
+			}
+		};
+
+		CaseSensitivity caseSensitivity_;
+
+
+		util::String extensionName_;
+		util::XArray<uint8_t> extensionOptionFixedPart_;
+		util::XArray<uint8_t> extensionOptionVarPart_;
+		util::String indexName_;
+		util::XArray<ColumnType> optionColumnTypeList_;
 
 		FixedPart *fixedPart_;
 	};
 
 	typedef util::XArray<uint8_t> RowKeyData;  
 	typedef util::XArray<uint8_t> RowData;	 
+	typedef util::Map<int8_t, util::XArray<uint8_t> *> PartialQueryOption;	 
 
 	/*!
 		@brief Represents fetch setting
@@ -339,6 +443,7 @@ public:
 
 
 
+	struct ConnectionOption;
 
 	/*!
 		@brief Represents response to a client
@@ -351,11 +456,13 @@ public:
 			  existFlag_(false),
 			  schemaVersionId_(UNDEF_SCHEMAVERSIONID),
 			  containerId_(UNDEF_CONTAINERID),
-			  stringData_(alloc),
+			  binaryData2_(alloc),
 			  rs_(NULL),
 			  last_(0),
-			  containerAttribute_(CONTAINER_ATTR_BASE),
+			  containerAttribute_(CONTAINER_ATTR_SINGLE),
 			  putRowOption_(0)
+			  ,
+			  connectionOption_(NULL)
 		{
 		}
 
@@ -363,13 +470,15 @@ public:
 		util::XArray<uint8_t> binaryData_;
 
 		uint64_t containerNum_;
-		util::XArray<util::String *> containerNameList_;
+		util::XArray<FullContainerKey> containerNameList_;
 
 
 		bool existFlag_;
 		SchemaVersionId schemaVersionId_;
 		ContainerId containerId_;
-		util::String stringData_;
+
+
+		util::XArray<uint8_t> binaryData2_;
 
 
 		ResultSet *rs_;
@@ -384,6 +493,7 @@ public:
 		ContainerAttribute containerAttribute_;
 
 		uint8_t putRowOption_;
+		ConnectionOption *connectionOption_;
 	};
 
 	/*!
@@ -393,16 +503,19 @@ public:
 		explicit ReplicationAck(PartitionId pId) : pId_(pId) {}
 
 		const PartitionId pId_;
-		ProtocolVersion clusterMsgVer_;
+		ClusterVersionId clusterVer_;
 		ReplicationId replId_;
+
 		int32_t replMode_;
 		int32_t replStmtType_;
 		StatementId replStmtId_;
 		ClientId clientId_;
+		int32_t taskStatus_;
 	};
 
 
-	void setSuccessReply(Event &ev, StatementId stmtId,
+	void setSuccessReply(util::StackAllocator &alloc,
+		Event &ev, StatementId stmtId,
 		StatementExecStatus status, const Response &response);
 	static void setErrorReply(Event &ev, StatementId stmtId,
 		StatementExecStatus status, const std::exception &exception,
@@ -450,6 +563,9 @@ public:
 	static const bool NO_REPLICATION =
 		false;  
 
+	typedef std::pair<const char8_t*, const char8_t*> ExceptionParameterEntry;
+	typedef util::Vector<ExceptionParameterEntry> ExceptionParameterList;
+
 	ClusterService *clusterService_;
 	ClusterManager *clusterManager_;
 	ChunkManager *chunkManager_;
@@ -476,10 +592,16 @@ public:
 			  userType_(USER),
 			  authenticationTime_(0),
 			  requestType_(NOSQL)
+			  ,
+			  authMode_(0)
+			  ,
+				clientId_()
+			  ,
+			  keepaliveTime_(0)
 		{
 		}
 
-		void clear() {
+			void clear() {
 			clientVersion_ = PROTOCOL_VERSION_UNDEFINED;
 			txnTimeoutInterval_ = TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL;
 			isAuthenticated_ = false;
@@ -492,6 +614,9 @@ public:
 
 			userName_.clear();
 			dbName_.clear();
+			clientId_ = ClientId();
+			keepaliveTime_ = 0;
+			currentSessionId_ = 0;
 		}
 
 		ProtocolVersion clientVersion_;
@@ -507,6 +632,10 @@ public:
 
 		std::string userName_;
 		std::string dbName_;
+		const int8_t authMode_;
+		ClientId clientId_;
+		EventMonotonicTime keepaliveTime_;
+		SessionId currentSessionId_;
 	};
 
 
@@ -516,73 +645,101 @@ public:
 	void checkExecutable(PartitionId pId, ClusterRole requiredClusterRole,
 		PartitionRoleType requiredPartitionRole,
 		PartitionStatus requiredPartitionStatus);
+
+
+	void checkExecutable(ClusterRole requiredClusterRole);
+
 	void checkTransactionTimeout(EventMonotonicTime now,
 		EventMonotonicTime queuedTime, int32_t txnTimeoutIntervalSec,
 		uint32_t queueingCount);
 	void checkContainerExistence(BaseContainer *container);
 	void checkContainerSchemaVersion(
 		BaseContainer *container, SchemaVersionId schemaVersionId);
-	void checkReplicationMessageVersion(ProtocolVersion replMsgVersion);
 	void checkFetchOption(FetchOption fetchOption);
 	void checkSizeLimit(ResultSize limit);
+	void checkLoggedInDatabase(
+		DatabaseId loginDbId, const std::string &loginDbName,
+		DatabaseId specifiedDbId, const util::String &specifiedDbName) const;
+	void checkQueryOption(const OptionPart &optionPart,
+		const FetchOption &fetchOption, bool isPartial, bool isTQL);
+	void applyQueryOption(
+		ResultSet &rs, const OptionPart &optionPart,
+		const int32_t *fetchBytesSize, bool partial,
+		const PartialQueryOption &partialOption);
+	static void checkLogVersion(uint16_t logVersion);
 
 
-	void decodeFixedPart(
+	static void decodeFixedPart(
 		util::ByteStream<util::ArrayInStream> &in, FixedPart &fixedPart);
+	
 	void decodeOptionPart(
 		util::ByteStream<util::ArrayInStream> &in, OptionPart &optionPart);
+
 	void decodeOptionPart(util::ByteStream<util::ArrayInStream> &in,
 		ConnectionOption &connOption, FixedPart &fixedPart,
 		OptionPart &optionPart);
 
-	void decodeIndexInfo(
-		util::ByteStream<util::ArrayInStream> &in, IndexInfo &indexInfo);
-	void decodeTriggerInfo(
-		util::ByteStream<util::ArrayInStream> &in, TriggerInfo &triggerInfo);
-	void decodeMultipleRowData(util::ByteStream<util::ArrayInStream> &in,
-		uint64_t &numRow, RowData &rowData);
-	void decodeFetchOption(
-		util::ByteStream<util::ArrayInStream> &in, FetchOption &fetchOption);
+	static size_t getOptionOffset(
+		util::StackAllocator &alloc,
+		util::ByteStream<util::ArrayInStream> &in, OptionType targetOption);
 
-	void decodeTimeRelatedConditon(util::ByteStream<util::ArrayInStream> &in,
+	static void decodeIndexInfo(
+		util::ByteStream<util::ArrayInStream> &in, IndexInfo &indexInfo);
+
+	static void decodeTriggerInfo(
+		util::ByteStream<util::ArrayInStream> &in, TriggerInfo &triggerInfo);
+	static void decodeMultipleRowData(util::ByteStream<util::ArrayInStream> &in,
+		uint64_t &numRow, RowData &rowData);
+	static void decodeFetchOption(
+		util::ByteStream<util::ArrayInStream> &in, FetchOption &fetchOption);
+	static void decodePartialQueryOption(
+		util::ByteStream<util::ArrayInStream> &in, util::StackAllocator &alloc,
+		bool &isPartial, PartialQueryOption &partitalQueryOption);
+
+	static void decodeTimeRelatedConditon(util::ByteStream<util::ArrayInStream> &in,
 		TimeRelatedCondition &condition);
-	void decodeInterpolateConditon(util::ByteStream<util::ArrayInStream> &in,
+	static void decodeInterpolateConditon(util::ByteStream<util::ArrayInStream> &in,
 		InterpolateCondition &condition);
-	void decodeAggregateQuery(
+	static void decodeAggregateQuery(
 		util::ByteStream<util::ArrayInStream> &in, AggregateQuery &query);
-	void decodeRangeQuery(
+	static void decodeRangeQuery(
 		util::ByteStream<util::ArrayInStream> &in, RangeQuery &query);
-	void decodeSamplingQuery(
+	static void decodeSamplingQuery(
 		util::ByteStream<util::ArrayInStream> &in, SamplingQuery &query);
-	void decodeContainerConditionData(util::ByteStream<util::ArrayInStream> &in,
+	static void decodeContainerConditionData(util::ByteStream<util::ArrayInStream> &in,
 		DataStore::ContainerCondition &containerCondition);
 
 	template <typename IntType>
-	void decodeIntData(
+	static void decodeIntData(
 		util::ByteStream<util::ArrayInStream> &in, IntType &intData);
 	template <typename LongType>
-	void decodeLongData(
+	static void decodeLongData(
 		util::ByteStream<util::ArrayInStream> &in, LongType &longData);
 	template <typename StringType>
-	void decodeStringData(
+	static void decodeStringData(
 		util::ByteStream<util::ArrayInStream> &in, StringType &strData);
 	static void decodeBooleanData(
 		util::ByteStream<util::ArrayInStream> &in, bool &boolData);
 	static void decodeBinaryData(util::ByteStream<util::ArrayInStream> &in,
 		util::XArray<uint8_t> &binaryData, bool readAll);
-	void decodeVarSizeBinaryData(util::ByteStream<util::ArrayInStream> &in,
+	static void decodeVarSizeBinaryData(util::ByteStream<util::ArrayInStream> &in,
 		util::XArray<uint8_t> &binaryData);
 	template <typename EnumType>
-	void decodeEnumData(
+	static void decodeEnumData(
 		util::ByteStream<util::ArrayInStream> &in, EnumType &enumData);
-	void decodeUUID(util::ByteStream<util::ArrayInStream> &in, uint8_t *uuid,
+	static void decodeUUID(util::ByteStream<util::ArrayInStream> &in, uint8_t *uuid,
 		size_t uuidSize);
 
-	void decodeReplicationAck(
+	static void decodeReplicationAck(
 		util::ByteStream<util::ArrayInStream> &in, ReplicationAck &ack);
 
 	static EventByteOutStream encodeCommonPart(
 		Event &ev, StatementId stmtId, StatementExecStatus status);
+
+	static void encodeIndexInfo(
+		EventByteOutStream &out, const IndexInfo &indexInfo);
+	static void encodeIndexInfo(
+		util::XArrayByteOutStream &out, const IndexInfo &indexInfo);
 
 	template <typename IntType>
 	static void encodeIntData(EventByteOutStream &out, IntType intData);
@@ -601,17 +758,23 @@ public:
 	static void encodeEnumData(EventByteOutStream &out, EnumType enumData);
 	static void encodeUUID(
 		EventByteOutStream &out, const uint8_t *uuid, size_t uuidSize);
+	static void encodeVarSizeBinaryData(
+		EventByteOutStream &out, const uint8_t *data, size_t size);
+	static void encodeContainerKey(EventByteOutStream &out,
+		const FullContainerKey &containerKey);
 
 	template <typename ByteOutStream>
 	static void encodeException(ByteOutStream &out,
-		const std::exception &exception, bool detailsHidden);
+		const std::exception &exception, bool detailsHidden,
+		const ExceptionParameterList *paramList = NULL);
 	template <typename ByteOutStream>
 	static void encodeException(ByteOutStream &out,
 		const std::exception &exception, const NodeDescriptor &nd);
 
 	static void encodeReplicationAckPart(EventByteOutStream &out,
-		uint32_t replMsgVer, int32_t replMode, const ClientId &clientId,
-		ReplicationId replId, EventType replStmtType, StatementId replStmtId);
+		ClusterVersionId clusterVer, int32_t replMode, const ClientId &clientId,
+		ReplicationId replId, EventType replStmtType, StatementId replStmtId,
+		int32_t taskStatus);
 
 
 	static bool isUpdateStatement(EventType stmtType);
@@ -620,6 +783,11 @@ public:
 		const NodeDescriptor &ND, EventType stmtType,
 		StatementExecStatus status, const FixedPart &request,
 		const Response &response, bool ackWait);
+	void continueEvent(EventContext &ec, util::StackAllocator &alloc,
+		const NodeDescriptor &ND, EventType stmtType, StatementId originalStmtId,
+		const FixedPart &request, const Response &response, bool ackWait);
+	void continueEvent(EventContext &ec, util::StackAllocator &alloc,
+		StatementExecStatus status, const ReplicationContext &replContext);
 	void replySuccess(EventContext &ec, util::StackAllocator &alloc,
 		StatementExecStatus status, const ReplicationContext &replContext);
 	void replyError(EventContext &ec, util::StackAllocator &alloc,
@@ -630,10 +798,23 @@ public:
 	bool executeReplication(const FixedPart &request, EventContext &ec,
 		util::StackAllocator &alloc, const NodeDescriptor &clientND,
 		TransactionContext &txn, EventType replStmtType, StatementId replStmtId,
-		int32_t replMode, const ClientId *closedResourceIds,
-		size_t closedResourceIdCount,
+		int32_t replMode,
+		const ClientId *closedResourceIds, size_t closedResourceIdCount,
 		const util::XArray<uint8_t> **logRecordList, size_t logRecordCount,
-		bool rowExistFlag = false);
+		const Response &response) {
+		return executeReplication(request, ec, alloc, clientND, txn, replStmtType,
+			replStmtId, replMode, ReplicationContext::TASK_FINISHED,
+			closedResourceIds, closedResourceIdCount,
+			logRecordList, logRecordCount, replStmtId, 0, response);
+	}
+	bool executeReplication(const FixedPart &request, EventContext &ec,
+		util::StackAllocator &alloc, const NodeDescriptor &clientND,
+		TransactionContext &txn, EventType replStmtType, StatementId replStmtId,
+		int32_t replMode, ReplicationContext::TaskStatus taskStatus,
+		const ClientId *closedResourceIds, size_t closedResourceIdCount,
+		const util::XArray<uint8_t> **logRecordList, size_t logRecordCount,
+		StatementId originalStmtId, int32_t delayTime,
+		const Response &response);
 	void replyReplicationAck(EventContext &ec, util::StackAllocator &alloc,
 		const NodeDescriptor &ND, const ReplicationAck &request);
 
@@ -642,10 +823,13 @@ public:
 
 	bool abortOnError(TransactionContext &txn, util::XArray<uint8_t> &log);
 
-	ContainerAccessMode getContainerAccessMode(UserType userType,
-		bool isSystemMode, RequestType requestType, bool isWriteMode);
-	bool isAccessibleMode(
-		ContainerAccessMode containerAccessMode, ContainerAttribute attribute);
+	bool checkPrivilege(EventType command,
+		UserType userType, RequestType requestType, bool isSystemMode,
+		ContainerType resourceType, ContainerAttribute resourceSubType,
+		ContainerAttribute expectedResourceSubType = CONTAINER_ATTR_ANY);
+
+	static bool isSupportedContainerAttribute(ContainerAttribute attribute);
+
 
 	void checkDbAccessible(const std::string &loginDbName,
 		const util::String &specifiedDbName) const;
@@ -653,6 +837,18 @@ public:
 	static const char8_t *clusterRoleToStr(ClusterRole role);
 	static const char8_t *partitionRoleTypeToStr(PartitionRoleType role);
 	static const char8_t *partitionStatusToStr(PartitionStatus status);
+
+protected:
+	static void decodeOptionBeforeV31(OptionType optionType,
+		util::ByteStream<util::ArrayInStream> &in, OptionPart &optionPart);
+	static void decodeOptionAfterV32(OptionType optionType,
+		util::ByteStream<util::ArrayInStream> &in, OptionPart &optionPart,
+		size_t skipPos);
+
+	const KeyConstraint& getKeyConstraint(
+		ContainerAttribute containerAttribute, bool checkLength = true) const;
+
+	KeyConstraint keyConstraint_[2][2][2];
 };
 
 template <typename IntType>
@@ -827,6 +1023,10 @@ public:
 class GetPartitionAddressHandler : public StatementHandler {
 public:
 	void operator()(EventContext &ec, Event &ev);
+
+	static void encodeClusterInfo(
+			util::XArrayByteOutStream &out, EventEngine &ee,
+			PartitionTable &partitionTable, ContainerHashMode hashMode);
 };
 
 /*!
@@ -844,8 +1044,9 @@ class GetContainerPropertiesHandler : public StatementHandler {
 public:
 	void operator()(EventContext &ec, Event &ev);
 
+
 private:
-	typedef util::XArray<util::String *> ContainerNameList;
+	typedef util::XArray<util::XArray<uint8_t> *> ContainerNameList;
 
 	enum ContainerProperty {
 		CONTAINER_PROPERTY_ID,
@@ -853,18 +1054,20 @@ private:
 		CONTAINER_PROPERTY_INDEX,
 		CONTAINER_PROPERTY_EVENT_NOTIFICATION,
 		CONTAINER_PROPERTY_TRIGGER,
-		CONTAINER_PROPERTY_ATTRIBUTES
+		CONTAINER_PROPERTY_ATTRIBUTES,
+		CONTAINER_PROPERTY_INDEX_DETAIL,
+		CONTAINER_PROPERTY_NULLS_STATISTICS,
+		CONTAINER_PROPERTY_PARTITIONING_METADATA = 16
 	};
 
 	void encodeResultListHead(EventByteOutStream &out, uint32_t totalCount);
 	void encodePropsHead(EventByteOutStream &out, uint32_t propTypeCount);
 	void encodeId(EventByteOutStream &out, SchemaVersionId schemaVersionId,
-		ContainerId containerId, const uint8_t *containerName,
-		uint32_t containerNameSize);
+		ContainerId containerId, const FullContainerKey &containerKey);
 	void encodeSchema(EventByteOutStream &out, ContainerType containerType,
 		const util::XArray<uint8_t> &serializedCollectionInfo);
 	void encodeIndex(
-		EventByteOutStream &out, const util::XArray<IndexInfo> &indexInfoList);
+		EventByteOutStream &out, const util::Vector<IndexInfo> &indexInfoList);
 	void encodeEventNotification(EventByteOutStream &out,
 		const util::XArray<char *> &urlList,
 		const util::XArray<uint32_t> &urlLenList);
@@ -872,6 +1075,14 @@ private:
 		const util::XArray<const uint8_t *> &triggerList);
 	void encodeAttributes(
 		EventByteOutStream &out, const ContainerAttribute containerAttribute);
+	void encodeIndexDetail(
+		EventByteOutStream &out, const util::Vector<IndexInfo> &indexInfoList);
+	void encodePartitioningMetaData(
+		EventByteOutStream &out,
+		TransactionContext &txn, EventMonotonicTime emNow,
+		BaseContainer &largeContainer, const char *dbName, const char8_t *containerName);
+	void encodeNulls(EventByteOutStream &out,
+		const util::XArray<uint8_t> &nullsList);
 };
 
 /*!
@@ -880,7 +1091,43 @@ private:
 class PutContainerHandler : public StatementHandler {
 public:
 	void operator()(EventContext &ec, Event &ev);
+
+private:
+	void setContainerAttributeForCreate(OptionPart &optionPart);
 };
+
+class PutLargeContainerHandler : public StatementHandler {
+public:
+	void operator()(EventContext &ec, Event &ev);
+
+private:
+	void setContainerAttributeForCreate(OptionPart &optionPart);
+};
+
+class updateContainerStatusHandler : public StatementHandler {
+public:
+	void operator()(EventContext &ec, Event &ev);
+
+private:
+};
+
+class CreateLargeIndexHandler : public StatementHandler {
+public:
+	void operator()(EventContext &ec, Event &ev);
+	bool checkCreateIndex(IndexInfo &indexInfo,
+			ColumnType targetColumnType, ContainerType targetContainerType);
+
+private:
+};
+
+class RemoveJobTaskHandler : public StatementHandler {
+public:
+	void operator()(EventContext &ec, Event &ev);
+
+private:
+};
+
+
 /*!
 	@brief Handles DROP_CONTAINER statement
 */
@@ -895,13 +1142,39 @@ class GetContainerHandler : public StatementHandler {
 public:
 	void operator()(EventContext &ec, Event &ev);
 };
+
 /*!
 	@brief Handles CREATE_DROP_INDEX statement
 */
 class CreateDropIndexHandler : public StatementHandler {
 public:
+
+protected:
+	bool getExecuteFlag(
+		EventType eventType, CreateDropIndexMode mode,
+		TransactionContext &txn, BaseContainer &container,
+		const IndexInfo &info, bool isCaseSensitive);
+
+	bool compareIndexName(util::StackAllocator &alloc,
+		const util::String &specifiedName, const util::String &existingName,
+		bool isCaseSensitive);
+};
+
+/*!
+	@brief Handles CREATE_DROP_INDEX statement
+*/
+class CreateIndexHandler : public CreateDropIndexHandler {
+public:
 	void operator()(EventContext &ec, Event &ev);
 };
+/*!
+	@brief Handles CREATE_DROP_INDEX statement
+*/
+class DropIndexHandler : public CreateDropIndexHandler {
+public:
+	void operator()(EventContext &ec, Event &ev);
+};
+
 /*!
 	@brief Handles DROP_TRIGGER statement
 */
@@ -1073,12 +1346,14 @@ public:
 
 private:
 	struct SessionCreationEntry {
-		SessionCreationEntry()
-			: containerName_(NULL),
-			  containerId_(UNDEF_CONTAINERID),
-			  sessionId_(UNDEF_SESSIONID) {}
+		SessionCreationEntry() :
+			containerAttribute_(CONTAINER_ATTR_ANY),
+			containerName_(NULL),
+			containerId_(UNDEF_CONTAINERID),
+			sessionId_(UNDEF_SESSIONID) {}
 
-		util::String *containerName_;
+		ContainerAttribute containerAttribute_;
+		util::XArray<uint8_t> *containerName_;
 		ContainerId containerId_;
 		SessionId sessionId_;
 	};
@@ -1227,14 +1502,14 @@ private:
 	};
 
 	struct SearchEntry {
-		SearchEntry(ContainerId containerId, const util::String *containerName,
+		SearchEntry(ContainerId containerId, const FullContainerKey *containerKey,
 			const RowKeyPredicate *predicate)
 			: stmtId_(0),
 			  containerId_(containerId),
 			  sessionId_(TXN_EMPTY_CLIENTID.sessionId_),
 			  getMode_(TransactionManager::AUTO),
 			  txnMode_(TransactionManager::AUTO_COMMIT),
-			  containerName_(containerName),
+			  containerKey_(containerKey),
 			  predicate_(predicate) {}
 
 		StatementId stmtId_;
@@ -1243,7 +1518,7 @@ private:
 		TransactionManager::GetMode getMode_;
 		TransactionManager::TransactionMode txnMode_;
 
-		const util::String *containerName_;
+		const FullContainerKey *containerKey_;
 		const RowKeyPredicate *predicate_;
 	};
 
@@ -1262,13 +1537,14 @@ private:
 		const FixedPart &request, const SearchEntry &entry);
 
 	void decodeMultiSearchEntry(util::ByteStream<util::ArrayInStream> &in,
-		PartitionId pId, DatabaseId dbId, const char *dbName,
-		ContainerAccessMode containerAccessMode,
+		PartitionId pId, DatabaseId loginDbId, const std::string &loginDbName,
+		const util::String &specifiedDbName,
+		UserType userType, RequestType requestType, bool isSystemMode,
 		util::XArray<SearchEntry> &searchList);
 	RowKeyPredicate decodePredicate(
 		util::ByteStream<util::ArrayInStream> &in, util::StackAllocator &alloc);
 
-	void encodeEntry(const util::String &containerName, ContainerId containerId,
+	void encodeEntry(const FullContainerKey &containerKey, ContainerId containerId,
 		const SchemaMap &schemaMap, ResultSet &rs, EventByteOutStream &out);
 };
 /*!
@@ -1288,7 +1564,9 @@ private:
 			  schemaVersionId_(UNDEF_SCHEMAVERSIONID),
 			  getMode_(TransactionManager::AUTO),
 			  txnMode_(TransactionManager::AUTO_COMMIT),
-			  optionPart_(alloc) {
+			  optionPart_(alloc),
+			  isPartial_(false),
+			  partialQueryOption_(alloc) {
 			query_.ptr_ = NULL;
 		}
 
@@ -1304,6 +1582,8 @@ private:
 		OptionPart optionPart_;
 
 		FetchOption fetchOption_;
+		bool isPartial_;
+		PartialQueryOption partialQueryOption_;
 
 		union {
 			void *ptr_;
@@ -1317,7 +1597,10 @@ private:
 
 	typedef util::XArray<const QueryRequest *> QueryRequestList;
 
-	void execute(EventContext &ec, const FixedPart &request,
+	void execute(EventContext &ec,
+		const FixedPart &request,
+		const OptionPart &optionPart,
+		int32_t &fetchByteSize,
 		const QueryRequest &queryRequest, EventByteOutStream &replyOut,
 		Progress &progress);
 
@@ -1330,7 +1613,10 @@ private:
 
 	void encodeMultiSearchResultHead(
 		EventByteOutStream &out, uint32_t queryCount);
-	void encodeSearchResult(EventByteOutStream &out, const ResultSet &rs);
+	void encodeEmptySearchResult(
+		util::StackAllocator &alloc, EventByteOutStream &out);
+	void encodeSearchResult(util::StackAllocator &alloc,
+		EventByteOutStream &out, const ResultSet &rs);
 
 	const char8_t *getQueryTypeName(EventType queryStmtType);
 };
@@ -1357,6 +1643,7 @@ public:
 class CheckTimeoutHandler : public StatementHandler {
 public:
 	void operator()(EventContext &ec, Event &ev);
+	void checkNoExpireTransaction(util::StackAllocator &alloc, PartitionId pId);
 
 private:
 	static const size_t MAX_OUTPUT_COUNT =
@@ -1372,6 +1659,8 @@ private:
 	void checkRequestTimeout(
 		EventContext &ec, const util::XArray<bool> &checkPartitionFlagList);
 	void checkResultSetTimeout(EventContext &ec);
+	void checkKeepaliveTimeout(
+		EventContext &ec, const util::XArray<bool> &checkPartitionFlagList);
 
 	bool isTransactionTimeoutCheckEnabled(
 		PartitionGroupId pgId, util::XArray<bool> &checkPartitionFlagList);
@@ -1431,13 +1720,41 @@ private:
 	PartitionId *pIdCursor_;
 };
 
+/*!
+	@brief Handles BACK_GROUND event
+*/
+class BackgroundHandler : public StatementHandler {
+public:
+	BackgroundHandler();
+	~BackgroundHandler();
+
+	void operator()(EventContext &ec, Event &ev);
+	int32_t getWaitTime(EventContext &ec, Event &ev, int32_t opeTime);
+	uint64_t diffLsn(PartitionId pId);
+private:
+	LogSequentialNumber *lsnCounter_;
+};
+
+/*!
+	@brief Handles CONTINUE_CREATE_INDEX/CONTINUE_ALTER_CONTAINER event
+*/
+class ContinueCreateDDLHandler : public StatementHandler {
+public:
+	ContinueCreateDDLHandler();
+	~ContinueCreateDDLHandler();
+
+	void operator()(EventContext &ec, Event &ev);
+};
+
+
+
 
 /*!
 	@brief TransactionService
 */
 class TransactionService {
 public:
-	TransactionService(const ConfigTable &config,
+	TransactionService(ConfigTable &config,
 		const EventEngine::Config &eeConfig,
 		const EventEngine::Source &eeSource, const char *name);
 	~TransactionService();
@@ -1450,6 +1767,7 @@ public:
 
 	EventEngine *getEE();
 
+	void checkNoExpireTransaction(util::StackAllocator &alloc, PartitionId pId);
 	void changeTimeoutCheckMode(PartitionId pId,
 		PartitionTable::PartitionStatus after, ChangePartitionType changeType,
 		bool isToSubMaster, ClusterStats &stats);
@@ -1458,14 +1776,24 @@ public:
 	void disableTransactionTimeoutCheck(PartitionId pId);
 	bool isTransactionTimeoutCheckEnabled(PartitionId pId) const;
 
+	size_t getWorkMemoryByteSizeLimit() const;
+
 	uint64_t getTotalReadOperationCount() const;
 	uint64_t getTotalWriteOperationCount() const;
 
 	uint64_t getTotalRowReadCount() const;
 	uint64_t getTotalRowWriteCount() const;
 
+	uint64_t getTotalBackgroundOperationCount() const;
+	uint64_t getTotalNoExpireOperationCount() const;
+	uint64_t getTotalAbortDDLCount() const;
+
 	void incrementReadOperationCount(PartitionId pId);
 	void incrementWriteOperationCount(PartitionId pId);
+
+	void incrementBackgroundOperationCount(PartitionId pId);
+	void incrementNoExpireOperationCount(PartitionId pId);
+	void incrementAbortDDLCount(PartitionId pId);
 
 	void addRowReadCount(PartitionId pId, uint64_t count);
 	void addRowWriteCount(PartitionId pId, uint64_t count);
@@ -1492,19 +1820,36 @@ private:
 
 	const PartitionGroupConfig pgConfig_;
 
-	std::vector<util::Atomic<bool> > enableTxnTimeoutCheck_;
+	class Config : public ConfigTable::ParamHandler {
+	public:
+		Config(ConfigTable &configTable);
+
+		size_t getWorkMemoryByteSizeLimit() const;
+
+	private:
+		void setUpConfigHandler(ConfigTable &configTable);
+		virtual void operator()(
+			ConfigTable::ParamId id, const ParamValue &value);
+
+		util::Atomic<size_t> workMemoryByteSizeLimit_;
+	} serviceConfig_;
+
+	std::vector< util::Atomic<bool> > enableTxnTimeoutCheck_;
 
 	std::vector<uint64_t> readOperationCount_;
 	std::vector<uint64_t> writeOperationCount_;
 	std::vector<uint64_t> rowReadCount_;
 	std::vector<uint64_t> rowWriteCount_;
+	std::vector<uint64_t> backgroundOperationCount_;
+	std::vector<uint64_t> noExpireOperationCount_;
+	std::vector<uint64_t> abortDDLCount_;
 
 	static const int32_t TXN_TIMEOUT_CHECK_INTERVAL =
 		3;  
 	static const int32_t CHUNK_EXPIRE_CHECK_INTERVAL =
 		1;  
 	static const int32_t ADJUST_STORE_MEMORY_CHECK_INTERVAL =
-		60;  
+		1; 
 
 	ServiceThreadErrorHandler serviceThreadErrorHandler_;
 
@@ -1518,7 +1863,8 @@ private:
 	PutContainerHandler putContainerHandler_;
 	DropContainerHandler dropContainerHandler_;
 	GetContainerHandler getContainerHandler_;
-	CreateDropIndexHandler createDropIndexHandler_;
+	CreateIndexHandler createIndexHandler_;
+	DropIndexHandler dropIndexHandler_;
 	CreateDropTriggerHandler createDropTriggerHandler_;
 	FlushLogHandler flushLogHandler_;
 	WriteLogPeriodicallyHandler writeLogPeriodicallyHandler_;
@@ -1533,7 +1879,6 @@ private:
 	GetRowHandler getRowHandler_;
 	GetRowSetHandler getRowSetHandler_;
 	QueryTqlHandler queryTqlHandler_;
-
 
 	AppendRowHandler appendRowHandler_;
 	GetRowTimeRelatedHandler getRowTimeRelatedHandler_;
@@ -1558,6 +1903,8 @@ private:
 
 	DataStorePeriodicallyHandler dataStorePeriodicallyHandler_;
 	AdjustStoreMemoryPeriodicallyHandler adjustStoreMemoryPeriodicallyHandler_;
+	BackgroundHandler backgroundHandler_;
+	ContinueCreateDDLHandler createDDLContinueHandler_;
 
 	ShortTermSyncHandler shortTermSyncHandler_;
 	LongTermSyncHandler longTermSyncHandler_;
@@ -1567,6 +1914,8 @@ private:
 	ChangePartitionTableHandler changePartitionTableHandler_;
 
 	CheckpointOperationHandler checkpointOperationHandler_;
+
+
 
 };
 
@@ -1587,6 +1936,17 @@ inline void TransactionService::addRowWriteCount(
 	PartitionId pId, uint64_t count) {
 	rowWriteCount_[pId] += count;
 }
+
+inline void TransactionService::incrementBackgroundOperationCount(PartitionId pId) {
+	++backgroundOperationCount_[pId];
+}
+inline void TransactionService::incrementNoExpireOperationCount(PartitionId pId) {
+	++noExpireOperationCount_[pId];
+}
+inline void TransactionService::incrementAbortDDLCount(PartitionId pId) {
+	++abortDDLCount_[pId];
+}
+
 
 
 #endif

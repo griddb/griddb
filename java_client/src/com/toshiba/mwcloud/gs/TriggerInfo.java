@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -191,8 +191,11 @@ public class TriggerInfo {
 	/**
 	 * Set the column name subject to notification when a trigger is discharged.
 	 *
-	 * <p>The column name is not case-sensitive. Even if the same column name is set several times,
-	 * the value of the column will only be set once in the notification.</p>
+	 * <p>When identifying a column as the target of the
+	 * notification, the difference in uppercase and lowercase
+	 * letters is not distinguished. Even if the same column name is
+	 * set several times, the value of the column will only be set
+	 * once in the notification.</p>
 	 *
 	 * <p>If the column name is not specified, none of the column values will be set
 	 * in the notification.</p>
@@ -216,7 +219,7 @@ public class TriggerInfo {
 	/**
 	 * Set the destination type used in a JMS notification.
 	 *
-	 * <p>"queue" or "topic" can be specified. Case sensitive.</p>
+	 * <p>{@code "queue"} or {@code "topic"} can be specified. Case sensitive.</p>
 	 *
 	 * <p>If a character string other than "queue" or "topic" is specified,
 	 * an error occurs when {@link Container#createTrigger(TriggerInfo)} is executed.</p>

@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -39,7 +39,7 @@ public:
 		uint8_t *srcObjectRowField, uint8_t *targetObjectRowField);
 
 	static void getField(TransactionContext &txn, ObjectManager &objectManager,
-		ColumnId columnId, Value *objectValue,
+		ColumnId columnId, const Value *objectValue,
 		MessageRowStore *outputMessageRowStore);
 };
 

@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -254,20 +254,20 @@ private:
 		/*!
 			@brief Free Objects related to HashArray
 		*/
-		void finalize(TransactionContext& txn) {
+		void finalize(TransactionContext& txn, uint64_t &removeNum) {
 			if (arrayImage_->oId_ == UNDEF_OID) {
 				return;
 			}
 
 			switch (arrayImage_->dimension_) {
 			case 1:
-				finalizeArray(txn, arrayImage_->oId_);
+				finalizeArray(txn, arrayImage_->oId_, removeNum);
 				break;
 			case 2:
-				finalizeMatrix(txn, arrayImage_->oId_);
+				finalizeMatrix(txn, arrayImage_->oId_, removeNum);
 				break;
 			case 3:
-				finalizeCube(txn, arrayImage_->oId_);
+				finalizeCube(txn, arrayImage_->oId_, removeNum);
 				break;
 			default:
 				GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_HM_UNEXPECTED_ERROR, "");
@@ -413,34 +413,58 @@ private:
 		}
 
 	private:
-		void finalizeArray(TransactionContext& txn, OId& arrayOId) {
+		void finalizeArray(TransactionContext& txn, OId& arrayOId, 
+			uint64_t &removeNum) {
 			freeArrayObject(txn, *objectManager_, arrayOId);
+			removeNum--;
 		}
 
-		void finalizeMatrix(TransactionContext& txn, OId& matrixOId) {
+		void finalizeMatrix(TransactionContext& txn, OId& matrixOId, 
+			uint64_t &removeNum) {
 			HashArrayObject hashArrayObject(txn, *objectManager_);
 			getArrayObject(txn, matrixOId, hashArrayObject, OBJECT_FOR_UPDATE);
 			uint32_t size = hashArrayObject.getArraySize();
 
+			uint32_t counter = 0;
 			for (uint32_t i = 0; i < size; i++) {
-				finalizeArray(txn, hashArrayObject.getElemOId(i));
+				finalizeArray(txn, hashArrayObject.getElemOId(size - i - 1), 
+					removeNum);
+				counter++;
+				if (removeNum == 0) {
+					break;
+				}
 			}
+			hashArrayObject.setArraySize(size - counter);
 
-			hashArrayObject.finalize();
-			matrixOId = UNDEF_OID;
+			if (removeNum > 0) {
+				hashArrayObject.finalize();
+				matrixOId = UNDEF_OID;
+			}
 		}
 
-		void finalizeCube(TransactionContext& txn, OId& cubeOId) {
+		void finalizeCube(TransactionContext& txn, OId& cubeOId,
+			uint64_t &removeNum) {
 			HashArrayObject hashArrayObject(txn, *objectManager_);
 			getArrayObject(txn, cubeOId, hashArrayObject, OBJECT_FOR_UPDATE);
 			uint32_t size = hashArrayObject.getArraySize();
 
+			uint32_t counter = 0;
 			for (uint32_t i = 0; i < size; i++) {
-				finalizeMatrix(txn, hashArrayObject.getElemOId(i));
+				finalizeMatrix(txn, hashArrayObject.getElemOId(size - i - 1),
+					removeNum);
+				if (removeNum == 0) {
+					break;
+				} else {
+					counter++;
+				}
 			}
 
-			hashArrayObject.finalize();
-			cubeOId = UNDEF_OID;
+			hashArrayObject.setArrayMaxSize(size - counter);
+
+			if (removeNum > 0) {
+				hashArrayObject.finalize();
+				cubeOId = UNDEF_OID;
+			}
 		}
 
 		void twiceArrayElements(TransactionContext& txn) {
@@ -1395,13 +1419,14 @@ private:
 	HashMapImage* hashMapImage_;
 	HashArray hashArray_;
 
-	static const uint64_t MAGIC_NUMBER = 0x0028000000000000ULL;
 
-	static const uint64_t MODULE_NUMBER = 0x0010000000000000ULL;
+	static const uint64_t MAGIC_NUMBER = 0x000000000000a000ULL;
 
-	static const uint64_t MASK_MAGIC = 0x0038000000000000ULL;
+	static const uint64_t MODULE_NUMBER = 0x0000000000004000ULL;
 
-	static const uint64_t RESET_MAGIC_MASK = 0xFFC7FFFFFFFFFFFFULL;
+	static const uint64_t MASK_MAGIC = 0x000000000000e000ULL;
+
+	static const uint64_t RESET_MAGIC_MASK = 0xFFFFFFFFFFFF1FFFULL;
 
 	inline static bool isModuleFlagOId(OId oId) {
 		return ((MASK_MAGIC & oId) == MODULE_NUMBER);
@@ -1467,7 +1492,7 @@ public:
 		ColumnId columnId, const AllocateStrategy& metaAllocateStrategy,
 		bool isUnique = false);
 
-	int32_t finalize(TransactionContext& txn);
+	bool finalize(TransactionContext& txn);
 
 	bool isEmpty() {
 		return hashMapImage_->size_ == 0;
@@ -1487,8 +1512,8 @@ public:
 		TransactionContext& txn, const void* key, OId oId, OId newOId);
 	int32_t search(
 		TransactionContext& txn, const void* key, uint32_t size, OId& oId);
-	int32_t search(TransactionContext& txn, SearchContext& sc,
-		util::XArray<OId>& idList, OutputOrder outputOrder = ORDER_UNDEFINED);
+	int32_t search(TransactionContext &txn, SearchContext &sc,
+		util::XArray<OId> &idList, OutputOrder outputOrder = ORDER_UNDEFINED);
 	int32_t getAll(
 		TransactionContext& txn, ResultSize limit, util::XArray<OId>& idList);
 	int32_t getAll(TransactionContext& txn, ResultSize limit,
@@ -1499,7 +1524,7 @@ public:
 
 	HashMap(TransactionContext& txn, ObjectManager& objectManager,
 		const AllocateStrategy& strategy, BaseContainer* container)
-		: BaseIndex(txn, objectManager, strategy, container),
+		: BaseIndex(txn, objectManager, strategy, container, MAP_TYPE_HASH),
 		  maxObjectSize_(objectManager.getMaxObjectSize()),
 		  maxArrayObjectSize_(maxObjectSize_ - ARRAY_OBJECT_HEADER_SIZE),
 		  maxArraySize_(maxArrayObjectSize_ >> OID_BIT_SIZE),
@@ -1513,7 +1538,7 @@ public:
 		  hashArray_(&objectManager, NULL, maxArraySize_) {}
 	HashMap(TransactionContext& txn, ObjectManager& objectManager, OId oId,
 		const AllocateStrategy& strategy, BaseContainer* container)
-		: BaseIndex(txn, objectManager, oId, strategy, container),
+		: BaseIndex(txn, objectManager, oId, strategy, container, MAP_TYPE_HASH),
 		  maxObjectSize_(objectManager.getMaxObjectSize()),
 		  maxArrayObjectSize_(maxObjectSize_ - ARRAY_OBJECT_HEADER_SIZE),
 		  maxArraySize_(maxArrayObjectSize_ >> OID_BIT_SIZE),
