@@ -28,5 +28,6 @@ See below for the copyrights and terms of use/disclaimers of the respective soft
                 3rd_party/picojson  
                 3rd_party/pure_well (the source code is in utility/util)  
                 3rd_party/yield (the source code is in utility/util)  
+                3rd_party/uuid  
                 3rd_party/zigzag_encoding (the source code is in utility/util)  
 
