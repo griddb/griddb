@@ -36,7 +36,10 @@ OSSFILES = $(OSSDIRS)/3rd_party.md \
 	$(OSSDIRS)/slf4j/slf4j-api-1.7.7.jar \
 	$(OSSDIRS)/slf4j/slf4j-jdk14-1.7.7.jar \
 	$(OSSDIRS)/yield/yield.txt \
-	$(OSSDIRS)/json-simple/fangyidong/LICENSE.txt
+	$(OSSDIRS)/json-simple/fangyidong/LICENSE.txt \
+	$(OSSDIRS)/uuid/uuid/COPYING \
+	$(OSSDIRS)/omaha/COPYING \
+	$(OSSDIRS)/zigzag_encoding/LICENSE 
 
 $(BINDIRS)/gridstore.jar:
 	cd java_client;ant

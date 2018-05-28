@@ -1,5 +1,5 @@
 %define griddb_name griddb_nosql
-%define griddb_ver 3.0.1
+%define griddb_ver 4.0.0
 %define griddb_instdir /usr/griddb-%{griddb_ver}
 %define griddb_homedir /var/lib/gridstore
 # do not strip
@@ -12,7 +12,7 @@ Summary:        GridDB Community Edition
 Version:        %{griddb_ver}
 Release:        1.linux
 Group:          Applications/Databases
-Vendor:         TOSHIBA CORPORATION
+Vendor:         Toshiba Digital Solutions Corporation
 License:        AGPL-3.0 and (Apache-2.0)
 Source:         %{name}-%{version}.zip
 
@@ -40,6 +40,9 @@ mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/sha2
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/slf4j
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/yield
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/json-simple
+mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/uuid
+mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/omaha
+mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/zigzag_encoding
 mkdir -p %{buildroot}%{griddb_instdir}/docs
 mkdir -p %{buildroot}%{griddb_instdir}/docs/manual
 mkdir -p %{buildroot}%{griddb_instdir}/docs/sample
@@ -85,6 +88,9 @@ install -c -m 640 3rd_party/slf4j/slf4j-api-1.7.7.jar           %{buildroot}%{gr
 install -c -m 640 3rd_party/slf4j/slf4j-jdk14-1.7.7.jar         %{buildroot}%{griddb_instdir}/3rd_party/slf4j
 install -c -m 640 3rd_party/yield/yield.txt                     %{buildroot}%{griddb_instdir}/3rd_party/yield
 install -c -m 640 3rd_party/json-simple/fangyidong/LICENSE.txt  %{buildroot}%{griddb_instdir}/3rd_party/json-simple
+install -c -m 640 3rd_party/uuid/uuid/COPYING                   %{buildroot}%{griddb_instdir}/3rd_party/uuid
+install -c -m 640 3rd_party/omaha/COPYING                       %{buildroot}%{griddb_instdir}/3rd_party/omaha
+install -c -m 640 3rd_party/zigzag_encoding/LICENSE             %{buildroot}%{griddb_instdir}/3rd_party/zigzag_encoding
 
 install -c -m 640 installer/SOURCES/RPM-README.md               %{buildroot}%{griddb_instdir}
 install -c -m 644 docs/manual/GridDB_RPM_InstallGuide.html      %{buildroot}%{griddb_instdir}/docs/manual
@@ -246,6 +252,9 @@ fi
 %dir %{griddb_instdir}/3rd_party/slf4j
 %dir %{griddb_instdir}/3rd_party/yield
 %dir %{griddb_instdir}/3rd_party/json-simple
+%dir %{griddb_instdir}/3rd_party/uuid
+%dir %{griddb_instdir}/3rd_party/omaha
+%dir %{griddb_instdir}/3rd_party/zigzag_encoding
 %dir %{griddb_instdir}/docs
 %dir %{griddb_instdir}/docs/manual
 %dir %{griddb_instdir}/docs/sample
@@ -286,6 +295,9 @@ fi
 %{griddb_instdir}/3rd_party/slf4j/slf4j-jdk14-1.7.7.jar
 %{griddb_instdir}/3rd_party/yield/yield.txt
 %{griddb_instdir}/3rd_party/json-simple/LICENSE.txt
+%{griddb_instdir}/3rd_party/uuid/COPYING
+%{griddb_instdir}/3rd_party/omaha/COPYING
+%{griddb_instdir}/3rd_party/zigzag_encoding/LICENSE
 %{griddb_instdir}/RPM-README.md
 %{griddb_instdir}/docs/manual/GridDB_RPM_InstallGuide.html
 %{griddb_instdir}/docs/sample/program/Sample1.java
@@ -303,5 +315,5 @@ fi
 /usr/share/java/gridstore-conf.jar
 
 %changelog
-* Wed Apr 19 2017 TOSHIBA CORPORARION
-- 3.0.1
+* Mon May 28 2018 Toshiba Digital Solutions Corporation
+- 4.0.0
