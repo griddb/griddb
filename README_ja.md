@@ -57,6 +57,7 @@
   * [GridDB Ruby Client](https://github.com/griddb/griddb_client)
   * [GridDB Go Client](https://github.com/griddb/go_client)
   * [GridDB Node.JS Client](https://github.com/griddb/nodejs_client)
+  * [GridDB PHP Client](https://github.com/griddb/php_client)
 
   他のOSSと接続するためのコネクタもあります。
   * [GridDB connector for Apache Hadoop MapReduce](https://github.com/griddb/griddb_hadoop_mapreduce/blob/master/README_ja.md)
