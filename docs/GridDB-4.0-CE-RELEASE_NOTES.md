@@ -12,6 +12,8 @@ Major updates in GridDB CE V4.0 are as follows:
     - It is now easier to integrate GridDB with other NoSQL database systems.
 4. Database file size reduction functionality
     - Added Linux file block deallocation function to reduce database file size.
+5. Change of license type for C Client
+    - Changed from AGPL V3 to Apache V2.
 
 ---
 
@@ -55,6 +57,12 @@ Specify the deallocation option, --releaseUnusedFileBlocks, of the gs_startnode 
 The unused blocks of database files (checkpoint files) are deallocated when starting the node. This will remain deallocated until there is a data update. 
 
 The support environment is the same as block data compression. 
+
+### 5. Change of license type for C Client
+
+GridDB's client have been published under AGPL V3 or Apache V2 licenses. 
+
+With this change, all GridDB's client will be licensed under the Apache License, Version 2.0. 
 
 ---
 
