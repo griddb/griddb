@@ -65,6 +65,7 @@
   * [GridDB connector for KairosDB](https://github.com/griddb/griddb_kairosdb)
   * [GridDB connector for Apache Spark](https://github.com/griddb/griddb_spark)
   * [GridDB Foreign Data Wrapper for PostgreSQL (https://github.com/pgspider/griddb_fdw)](https://github.com/pgspider/griddb_fdw)
+  * [GridDB Sample Application for Apache Kafka](https://github.com/griddb/griddb_kafka_sample_app)
 
 ## Community
   * Issues  
