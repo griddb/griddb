@@ -16,7 +16,11 @@
 package com.toshiba.mwcloud.gs;
 
 /**
+ * <div lang="ja">
+ * 時系列処理で用いる時間の単位を示します。
+ * </div><div lang="en">
  * Represents the time unit(s) used in TimeSeries data operation.
+ * </div>
  */
 public enum TimeUnit {
 

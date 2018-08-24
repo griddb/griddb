@@ -16,7 +16,11 @@
 package com.toshiba.mwcloud.gs;
 
 /**
+ * <div lang="ja">
+ * GridDB上のフィールド値の型を表します。
+ * </div><div lang="en">
  * Represents the type(s) of field values in GridDB.
+ * </div>
  */
 public enum GSType {
 

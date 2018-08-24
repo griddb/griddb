@@ -17,6 +17,26 @@ package com.toshiba.mwcloud.gs;
 
 
 /**
+ * <div lang="ja">
+ * ロウ集合を汎用的に管理するためのコンテナです。
+ *
+ * <p>ロウキーには次の型が使用できます。</p>
+ * <ul>
+ * <li>文字列型({@link String})</li>
+ * <li>INTEGER型({@link Integer})</li>
+ * <li>LONG型({@link Long})</li>
+ * <li>TIMESTAMP型({@link java.util.Date})</li>
+ * </ul>
+ * <p>ロウキーの設定は必須ではありません。</p>
+ *
+ * <p>ロウ操作について、コンテナ固有の制限は設けられていません。</p>
+ *
+ * <p>{@link #query(String)}もしくは{@link GridStore#multiGet(java.util.Map)}
+ * などより複数のロウの内容を一度に取得する場合、特に指定がなければ、
+ * 返却されるロウの順序は不定となります。</p>
+ *
+ * <p>ロック粒度はロウ単位です。</p>
+ * </div><div lang="en">
  * A general-purpose Container for managing a set of Rows.
  *
  * <p>The following types are available as a Row key.</p>
@@ -35,10 +55,28 @@ package com.toshiba.mwcloud.gs;
  * when order is not specified.</p>
  *
  * <p>The granularity of locking is a Row. </p>
+ * </div>
  */
 public interface Collection<K, R> extends Container<K, R> {
 
 	/**
+	 * <div lang="ja">
+	 * 指定した空間範囲条件に合致するロウ集合を求めるための、クエリを作成します。
+	 *
+	 * <p>{@link Query#fetch(boolean)}を通じてロウ集合を求める際、
+	 * 更新用ロックのオプションを有効にすることもできます。</p>
+	 *
+	 * <p>現バージョンでは、{@link GSException}や、{@code null}を指定できない
+	 * 引数で{@code null}を指定したことによる{@link NullPointerException}は
+	 * 送出されません。カラム名の誤りなどがあった場合、得られたクエリをフェッチする
+	 * 際に例外が送出されます。</p>
+	 *
+	 * @param column 比較対象の空間型カラムの名前。{@code null}は指定できない
+	 * @param geometry 比較対象として与える空間構造。{@code null}は指定できない
+	 * @param geometryOp 比較方法。{@code null}は指定できない
+	 *
+	 * @throws GSException 現バージョンでは送出されない
+	 * </div><div lang="en">
 	 * Creates a query to obtain a set of Rows which are matched to specified
 	 * geometry range conditions.
 	 *
@@ -59,12 +97,37 @@ public interface Collection<K, R> extends Container<K, R> {
 	 * @param geometryOp Comparison method. {@code null} cannot be specified
 	 *
 	 * @throws GSException It will not be thrown in the current version.
+	 * </div>
 	 */
 	public Query<R> query(
 			String column, Geometry geometry, GeometryOperator geometryOp)
 			throws GSException;
 
 	/**
+	 * <div lang="ja">
+	 * 除外範囲付きの空間範囲条件に合致するロウ集合を求めるための、
+	 * クエリを作成します。
+	 *
+	 * <p>{@code geometryIntersection}と交差し、かつ、{@code geometryDisjoint}と
+	 * 交差しないカラム値を持つロウ集合を取得します。交差判定の条件は、
+	 * {@link GeometryOperator#INTERSECT}と同一です。</p>
+	 *
+	 * <p>{@link Query#fetch(boolean)}を通じてロウ集合を求める際、
+	 * 更新用ロックのオプションを有効にすることもできます。</p>
+	 *
+	 * <p>現バージョンでは、{@link GSException}や、{@code null}を指定できない
+	 * 引数で{@code null}を指定したことによる{@link NullPointerException}は
+	 * 送出されません。カラム名の誤りなどがあった場合、得られたクエリをフェッチする
+	 * 際に例外が送出されます。</p>
+	 *
+	 * @param column 比較対象の空間型カラムの名前。{@code null}は指定できない
+	 * @param geometryIntersection カラム上の値と交差する範囲を示す空間構造。
+	 * {@code null}は指定できない
+	 * @param geometryDisjoint カラム上の値と交差しない範囲を示す空間構造。
+	 * {@code null}は指定できない
+	 *
+	 * @throws GSException 現バージョンでは送出されない
+	 * </div><div lang="en">
 	 * Creates a query to obtain a set of Rows which are matched to specified
 	 * geometry range conditions with exclusion range.
 	 *
@@ -88,6 +151,7 @@ public interface Collection<K, R> extends Container<K, R> {
 	 * not intersect with the values on the column. {@code null} cannot be specified
 	 *
 	 * @throws GSException It will not be thrown in the current version.
+	 * </div>
 	 */
 	public Query<R> query(
 			String column, Geometry geometryIntersection, Geometry geometryDisjoint)

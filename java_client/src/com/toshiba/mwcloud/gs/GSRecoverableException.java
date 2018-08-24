@@ -18,7 +18,19 @@ package com.toshiba.mwcloud.gs;
 import java.util.Map;
 
 /**
+ * <div lang="ja">
+ * 一時的な障害を原因とし、一定の手続きにより回復できる可能性のある例外です。
+ *
+ * <p>現バージョンでは、非公開オプションである{@link FetchOption#SIZE}を指定して
+ * 取得した{@link RowSet}に対し、{@link RowSet#next()}を実行した場合のみ
+ * 発生しうる例外です。</p>
+ *
  * @deprecated
+ *
+ * @since 1.5
+ * </div><div lang="en">
+ * @deprecated
+ * </div>
  */
 @Deprecated
 public class GSRecoverableException extends GSException {
@@ -26,9 +38,15 @@ public class GSRecoverableException extends GSException {
 	private static final long serialVersionUID = 1241771194878438360L;
 
 	/**
+	 * <div lang="ja">
+	 * 詳細メッセージを持たない例外を構築します。
+	 *
+	 * @see GSException#GSException()
+	 * </div><div lang="en">
 	 * Build a non-descriptive exception.
 	 *
 	 * @see GSException#GSException()
+	 * </div>
 	 */
 	public GSRecoverableException() {
 		super();
@@ -41,6 +59,17 @@ public class GSRecoverableException extends GSException {
 	}
 
 	/**
+	 * <div lang="ja">
+	 * エラー番号、エラー名、詳細メッセージ、および原因を指定して、例外を
+	 * 構築します。
+	 *
+	 * @param errorCode エラー番号
+	 * @param errorName エラー名または{@code null}
+	 * @param description 詳細メッセージまたは{@code null}
+	 * @param cause 原因または{@code null}
+	 *
+	 * @see GSException#GSException(int, String, String, Throwable)
+	 * </div><div lang="en">
 	 * Specify the error number, error name, description, and cause,
 	 * then build an exception.
 	 *
@@ -50,6 +79,7 @@ public class GSRecoverableException extends GSException {
 	 * @param cause Cause or {@code null}
 	 *
 	 * @see GSException#GSException(int, String, String, Throwable)
+	 * </div>
 	 */
 	public GSRecoverableException(int errorCode,
 			String errorName, String description, Throwable cause) {
@@ -57,6 +87,15 @@ public class GSRecoverableException extends GSException {
 	}
 
 	/**
+	 * <div lang="ja">
+	 * エラー番号、詳細メッセージ、および原因を指定して、例外を構築します。
+	 *
+	 * @param errorCode エラー番号
+	 * @param description 詳細メッセージまたは{@code null}
+	 * @param cause 原因または{@code null}
+	 *
+	 * @see GSException#GSException(int, String, Throwable)
+	 * </div><div lang="en">
 	 * Specify the error number, description and cause, then build an exception.
 	 *
 	 * @param errorCode Error number
@@ -64,6 +103,7 @@ public class GSRecoverableException extends GSException {
 	 * @param cause Cause or {@code null}
 	 *
 	 * @see GSException#GSException(int, String, Throwable)
+	 * </div>
 	 */
 	public GSRecoverableException(int errorCode, String description,
 			Throwable cause) {
@@ -71,58 +111,101 @@ public class GSRecoverableException extends GSException {
 	}
 
 	/**
+	 * <div lang="ja">
+	 * エラー番号および詳細メッセージを指定して、例外を構築します。
+	 *
+	 * @param errorCode エラー番号
+	 * @param description 詳細メッセージまたは{@code null}
+	 *
+	 * @see GSException#GSException(int, String)
+	 * </div><div lang="en">
 	 * Specify the error number and description, then build an exception.
 	 *
 	 * @param errorCode Error number
 	 * @param description Description or {@code null}
 	 *
 	 * @see GSException#GSException(int, String)
+	 * </div>
 	 */
 	public GSRecoverableException(int errorCode, String description) {
 		super(errorCode, description);
 	}
 
 	/**
+	 * <div lang="ja">
+	 * エラー番号および原因を指定して、例外を構築します。
+	 *
+	 * @param errorCode エラー番号
+	 * @param cause 原因または{@code null}
+	 *
+	 * @see GSException#GSException(int, Throwable)
+	 * </div><div lang="en">
 	 * Specify the error number and description, then build an exception.
 	 *
 	 * @param errorCode Error number
 	 * @param cause Cause or {@code null}
 	 *
 	 * @see GSException#GSException(int, Throwable)
+	 * </div>
 	 */
 	public GSRecoverableException(int errorCode, Throwable cause) {
 		super(errorCode, cause);
 	}
 
 	/**
+	 * <div lang="ja">
+	 * 詳細メッセージおよび原因を指定して、例外を構築します。
+	 *
+	 * @param message 詳細メッセージまたは{@code null}
+	 * @param cause 原因または{@code null}
+	 *
+	 * @see GSException#GSException(String, Throwable)
+	 * </div><div lang="en">
 	 * Specify the description and cause, then build an exception.
 	 *
 	 * @param message Description or {@code null}
 	 * @param cause Cause or {@code null}
 	 *
 	 * @see GSException#GSException(String, Throwable)
+	 * </div>
 	 */
 	public GSRecoverableException(String message, Throwable cause) {
 		super(message, cause);
 	}
 
 	/**
+	 * <div lang="ja">
+	 * 詳細メッセージを指定して、例外を構築します。
+	 *
+	 * @param message 詳細メッセージまたは{@code null}
+	 *
+	 * @see GSException#GSException(String)
+	 * </div><div lang="en">
 	 * Specify the description, then build an exception.
 	 *
 	 * @param message Description or {@code null}
 	 *
 	 * @see GSException#GSException(String)
+	 * </div>
 	 */
 	public GSRecoverableException(String message) {
 		super(message);
 	}
 
 	/**
+	 * <div lang="ja">
+	 * 原因を指定して、例外を構築します。
+	 *
+	 * @param cause 原因または{@code null}
+	 *
+	 * @see GSException#GSException(Throwable)
+	 * </div><div lang="en">
 	 * Specify the error, then build an exception.
 	 *
 	 * @param cause Cause or {@code null}
 	 *
 	 * @see GSException#GSException(Throwable)
+	 * </div>
 	 */
 	public GSRecoverableException(Throwable cause) {
 		super(cause);

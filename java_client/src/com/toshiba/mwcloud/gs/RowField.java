@@ -21,27 +21,49 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
+ * <div lang="ja">
+ * {@link Container}の処理におけるマッピング対象のロウフィールドについて、
+ * オプションを設定します。
+ * </div><div lang="en">
  * Sets options for mapping Row fields of a {@link Container}.
+ * </div>
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target({ElementType.FIELD, ElementType.METHOD})
 public @interface RowField {
 
 	/**
+	 * <div lang="ja">
+	 * 指定のカラム名を使用します。
+	 *
+	 * <p>空の文字を指定した場合、対応するフィールド名またはメソッド名に
+	 * 基づきカラム名を決定します。</p>
+	 * </div><div lang="en">
 	 * Sets the name to be used as a Column name.
 	 *
 	 * <p>If an empty string is specified, the Column name is determined based on the corresponding field name or
 	 * method name.</p>
+	 * </div>
 	 */
 	String name() default "";
 
 	/**
+	 * <div lang="ja">
+	 * カラム番号を設定します。
+	 *
+	 * <p>カラム順序を明示的に指定する場合、{@code 0}以上かつカラム数未満の値を
+	 * 指定します。同一コンテナ上で重複するカラム番号を指定することはできません。
+	 * また、ロウキーは常に先頭カラムになるように設定しなければなりません。
+	 * デフォルト値の{@code -1}を指定した場合、
+	 * 対応するカラムの番号は自動的に決定されます。</p>
+	 * </div><div lang="en">
 	 * Sets a Column number.
 	 *
 	 * <p>To specify the location of a Column explicitly, specify {@code 0} or more and less than the number of Columns.
 	 * Duplicate Column numbers cannot be specified in a single Container. A Row key must be always assigned to
 	 * the first Column. If the default value {@code -1} is specified, the corresponding Column number is automatically
 	 * determined.</p>
+	 * </div>
 	 */
 	int columnNumber() default -1;
 

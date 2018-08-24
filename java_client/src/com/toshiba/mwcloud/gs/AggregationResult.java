@@ -18,6 +18,23 @@ package com.toshiba.mwcloud.gs;
 import java.util.Date;
 
 /**
+ * <div lang="ja">
+ * 集計演算の結果を保持します。
+ *
+ * <p>集計演算に関するクエリの実行もしくは
+ * {@link TimeSeries#aggregate(Date, Date, String, Aggregation)}
+ * により取得できる、集計演算の結果を保持します。
+ * 整数型カラムに対する演算結果を浮動小数点型として、また、有効桁数の
+ * 少ない数値型のカラムに対する演算結果をより桁数の多い数値型として
+ * 受け取ることができます。</p>
+ *
+ * <p>保持する型は、集計演算の種別や集計対象のカラムの型によって決定されます。
+ * 具体的な規則は{@link Aggregation}またはTQLの仕様を参照してください。</p>
+ *
+ * <p>取り出しできる型は、保持されている型によって決まります。
+ * 保持されている型が数値型の場合はDOUBLE型またはLONG型、TIMESTAMP型の
+ * 場合はTIMESTAMP型の値としてのみ取り出しできます。</p>
+ * </div><div lang="en">
  * Stores the result of an aggregation operation.
  *
  * <p>Stores the result returned by an aggregation Query or
@@ -34,10 +51,20 @@ import java.util.Date;
  * <p>The type of obtaining value depends on the stored type.
  * DOUBLE type and LONG type are only available when a result is of numeric type,
  * and TIMESTAMP type when a result is of TIMESTAMP type.</p>
+ * </div>
  */
 public interface AggregationResult {
 
 	/**
+	 * <div lang="ja">
+	 * 数値型の集計値をDOUBLE型({@link Double})として取得します。
+	 *
+	 * <p>数値型以外の値を保持している場合、{@code null}を返します。
+	 * DOUBLE型以外の数値を保持している場合、DOUBLE型に変換したものを返します。</p>
+	 *
+	 * @return DOUBLE型({@link Double})の集計値。結果が数値型以外の場合は
+	 * {@code null}
+	 * </div><div lang="en">
 	 * Obtains the result of aggregating numeric-type values in DOUBLE type ({@link Double}).
 	 *
 	 * <p>It returns {@code null} if a result is not of numeric type. If a result is not of DOUBLE type,
@@ -45,10 +72,20 @@ public interface AggregationResult {
 	 *
 	 * @return Result of aggregating DOUBLE type ({@link Double}).
 	 * If the type of result is different, returns {@code null}.
+	 * </div>
 	 */
 	public Double getDouble();
 
 	/**
+	 * <div lang="ja">
+	 * 数値型の集計値をLONG型({@link Long})として取得します。
+	 *
+	 * <p>数値型以外の値を保持している場合、{@code null}を返します。
+	 * LONG型以外の数値を保持している場合、LONG型に変換したものを返します。</p>
+	 *
+	 * @return LONG型({@link Double})の集計値。結果が数値型以外の場合は
+	 * {@code null}
+	 * </div><div lang="en">
 	 * Obtains the result of aggregating numeric-type values in LONG type ({@link Long}).
 	 *
 	 * <p>It returns {@code null} if a result is not of numeric type.
@@ -56,16 +93,27 @@ public interface AggregationResult {
 	 *
 	 * @return Result of aggregating LONG type ({@link Long}).
 	 * If the type of result is different, returns {@code null}.
+	 * </div>
 	 */
 	public Long getLong();
 
 	/**
+	 * <div lang="ja">
+	 * 時刻型の集計値をTIMESTAMP型({@link Date})で取得します。
+	 *
+	 * <p>TIMESTAMP型以外の値を保持している場合、{@code null}を
+	 * 返します。</p>
+	 *
+	 * @return TIMESTAMP型({@link Date})の集計値。結果がTIMESTAMP型
+	 * 以外の場合は{@code null}
+	 * </div><div lang="en">
 	 * Obtains the result of aggregating time-type values in TIMESTAMP type ({@link Date}).
 	 *
 	 * <p>It returns {@code null} if a result is not of TIMESTAMP type. </p>
 	 *
 	 * @return Result of aggregating TIMESTAMP type ({@link Date}).
 	 * If the type of result is different, returns {@code null}.
+	 * </div>
 	 */
 	public Date getTimestamp();
 

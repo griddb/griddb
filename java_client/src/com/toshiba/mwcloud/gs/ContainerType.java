@@ -16,17 +16,29 @@
 package com.toshiba.mwcloud.gs;
 
 /**
+ * <div lang="ja">
+ * コンテナの種別を表します。
+ * </div><div lang="en">
  * Represents the type(s) of a Container.
+ * </div>
  */
 public enum ContainerType {
 
 	/**
+	 * <div lang="ja">
+	 * 対象のコンテナがコレクションであることを示します。
+	 * </div><div lang="en">
 	 * Indicates the target Container is a Collection.
+	 * </div>
 	 */
 	COLLECTION,
 
 	/**
+	 * <div lang="ja">
+	 * 対象のコンテナが時系列であることを示します。
+	 * </div><div lang="en">
 	 * Indicates the target Container is a TimeSeries.
+	 * </div>
 	 */
 	TIME_SERIES
 }

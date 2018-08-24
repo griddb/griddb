@@ -21,9 +21,17 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
+ * <div lang="ja">
+ * NOT NULL制約を持たないカラムであることを示します。
+ *
+ * @see Container
+ * @since 3.5
+ * </div><div lang="en">
  * NOT NULL indicates the column has no constraint.
  *
  * @see Container
+ * @since 3.5
+ * </div>
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target({

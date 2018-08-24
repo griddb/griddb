@@ -14,6 +14,10 @@
    limitations under the License.
 */
 /**
+ * <div lang="ja">
+ * GridDBの公開インタフェースを定義します。
+ * </div><div lang="en">
  * Defines public interface of GridDB.
+ * </div>
  */
 package com.toshiba.mwcloud.gs;

@@ -21,7 +21,12 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
+ * <div lang="ja">
+ * {@link Container}の処理において、マッピング対象外のロウフィールドで
+ * あることを宣言します。
+ * </div><div lang="en">
  * Specifies a Row field not to be mapped in operations on a {@link Container}.
+ * </div>
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target({ElementType.FIELD, ElementType.METHOD})

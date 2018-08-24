@@ -16,28 +16,58 @@
 package com.toshiba.mwcloud.gs;
 
 /**
+ * <div lang="ja">
+ * 圧縮方式の種別を表します。
+ *
+ * <p>時系列圧縮設定を行う際に使用します。</p>
+ * </div><div lang="en">
  * Represents types of compression methods.
  *
  * <p>These types are used when setting a time series compression.</p>
+ * </div>
  */
 public enum CompressionMethod {
 
 	/**
+	 * <div lang="ja">
+	 * 無圧縮であることを示します。
+	 * </div><div lang="en">
 	 * Represents no compression.
+	 * </div>
 	 */
 	NO,
 
 	/**
+	 * <div lang="ja">
+	 * 誤差なし間引き圧縮方式であることを示します。
+	 *
+	 * <p>誤差なし間引き圧縮では、直前及び直後に登録したロウと同じデータを
+	 * 持つロウは省かれます。
+	 * 省かれたデータはinterpolateやsample処理の際に、誤差を発生することなく
+	 * 復元されます。</p>
+	 * </div><div lang="en">
 	 * Represents a thinning compression without error
 	 *
 	 * <p>In this type of compression, rows that have the same
 	 * value registered immediately before and after are thinned.
 	 * The thinned values are recovered in the interpolation or sampling
 	 * processing without information loss.</p>
+	 * </div>
 	 */
 	SS,
 
 	/**
+	 * <div lang="ja">
+	 * 誤差あり間引き圧縮方式であることを示します。
+	 *
+	 * <p>誤差あり間引き圧縮では、前回まで及び直後に登録したデータと同じ傾斜を
+	 * 表すロウは省かれます。
+	 * 同じ傾斜かを判定する条件はユーザが指定できます。
+	 * 指定されたカラムが条件を満たし、それ以外のカラムの値が前回のデータと
+	 * 同じ場合のみ省かれます。
+	 * 省かれたデータはinterpolateやsample処理の際に、指定された誤差の範囲内で
+	 * 復元されます。</p>
+	 * </div><div lang="en">
 	 * Represents a thinning compression with error
 	 *
 	 * <p>In this type of compression, values that represent
@@ -49,6 +79,7 @@ public enum CompressionMethod {
 	 * row is thinned.
 	 * The thinned value is recovered in an interpolation or
 	 * sampling processing within the specified error range.</p>
+	 * </div>
 	 */
 	HI
 

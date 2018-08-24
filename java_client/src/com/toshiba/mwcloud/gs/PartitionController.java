@@ -20,14 +20,37 @@ import java.net.InetAddress;
 import java.util.List;
 
 /**
+ * <div lang="ja">
+ * パーティション状態の取得や操作のためのコントローラです。
+ *
+ * <p>パーティションとは、データを格納する論理的な領域です。
+ * GridDBクラスタ内のデータ配置に基づいた操作を行う
+ * ために使用します。</p>
+ *
+ * @since 1.5
+ * </div><div lang="en">
  * Controller for acquiring and processing the partition status.
  *
  * <p>A partition is a theoretical region where data is stored.
  * It is used to perform operations based on the data arrangement in a GridDB cluster.</p>
+ * </div>
  */
 public interface PartitionController extends Closeable {
 
 	/**
+	 * <div lang="ja">
+	 * 対象とするGridDBクラスタのパーティション数を取得します。
+	 *
+	 * <p>対象とするGridDBクラスタにおけるパーティション数設定の値を
+	 * 取得します。一度取得した結果はキャッシュされ、次にクラスタ障害・
+	 * クラスタノード障害を検知するまで再びGridDBクラスタに問い合わせる
+	 * ことはありません。</p>
+	 *
+	 * @return パーティション数
+	 *
+	 * @throws GSException この処理のタイムアウト、接続障害が発生した場合、
+	 * このオブジェクトまたは対応する{@link GridStore}のクローズ後に呼び出された場合
+	 * </div><div lang="en">
 	 * Get the number of partitions in the target GridDB cluster.
 	 *
 	 * <p>Get the value of the number of partitions set in the target GridDB cluster.
@@ -38,10 +61,27 @@ public interface PartitionController extends Closeable {
 	 *
 	 * @throws GSException If this process times out or when a connection error occurs,
 	 * or if the process is invoked after this object or corresponding {@link GridStore} is closed
+	 * </div>
 	 */
 	public int getPartitionCount() throws GSException;
 
 	/**
+	 * <div lang="ja">
+	 * 指定のパーティションに属するコンテナの総数を取得します。
+	 *
+	 * <p>コンテナ数を求める際の計算量は、コンテナ数にはおおむね依存しません。</p>
+	 *
+	 * @param partitionIndex パーティションインデックス。{@code 0}以上
+	 * パーティション数未満の値
+	 *
+	 * @return コンテナ数
+	 *
+	 * @throws GSException 範囲外のパーティションインデックスが指定された場合
+	 * @throws GSException この処理のタイムアウト、接続障害が発生した場合、
+	 * このオブジェクトまたは対応する{@link GridStore}のクローズ後に呼び出された場合
+	 *
+	 * @see #getPartitionIndexOfContainer(String)
+	 * </div><div lang="en">
 	 * Get the total number of containers belonging to a specified partition.
 	 *
 	 * <p>The calculated quantity when determining the number of containers is generally not dependent
@@ -56,10 +96,38 @@ public interface PartitionController extends Closeable {
 	 * or if the process is invoked after this object or corresponding {@link GridStore} is closed
 	 *
 	 * @see #getPartitionIndexOfContainer(String)
+	 * </div>
 	 */
 	public long getContainerCount(int partitionIndex) throws GSException;
 
 	/**
+	 * <div lang="ja">
+	 * 指定のパーティションに所属するコンテナの名前の一覧を取得します。
+	 *
+	 * <p>指定のパーティションについてコンテナの新規作成・構成変更・削除が
+	 * 行われたとしても、該当コンテナを除くとその前後で一覧の取得結果の順序が
+	 * 変わることはありません。それ以外の一覧の順序に関しては不定です。
+	 * 重複する名前が含まれることはありません。</p>
+	 *
+	 * <p>取得件数の上限が指定された場合、上限を超える場合、後方のものから
+	 * 切り捨てられます。指定条件に該当するものが存在しない場合、空のリストが
+	 * 返却されます。</p>
+	 *
+	 * <p>返却されたリストに対して変更操作を行った場合に、
+	 * {@link UnsupportedOperationException}などの実行時例外が発生するか
+	 * どうかは未定義です。</p>
+	 *
+	 * @param partitionIndex パーティションインデックス。{@code 0}以上
+	 * パーティション数未満の値
+	 * @param start 取得範囲の開始位置。{@code 0}以上の値
+	 * @param limit 取得件数の上限。{@code null}の場合、上限なしとみなされる
+	 *
+	 * @return コンテナの名前を要素とする{@link List}
+	 *
+	 * @throws GSException 範囲外のパーティションインデックスが指定された場合
+	 * @throws GSException この処理のタイムアウト、接続障害が発生した場合、
+	 * このオブジェクトまたは対応する{@link GridStore}のクローズ後に呼び出された場合
+	 * </div><div lang="en">
 	 * Get a list of the Container names belonging to a specified partition.
 	 *
 	 * <p>For the specified partition, the sequence of the list of acquisition results
@@ -84,11 +152,30 @@ public interface PartitionController extends Closeable {
 	 * @throws GSException If a partition index outside the range is specified
 	 * @throws GSException If this process times out, when a connection error occurs,
 	 * or if the process is invoked after this object or corresponding {@link GridStore} is closed
+	 * </div>
 	 */
 	public List<String> getContainerNames(
 			int partitionIndex, long start, Long limit) throws GSException;
 
 	/**
+	 * <div lang="ja">
+	 * 指定のパーティションに対応するノードのアドレス一覧を取得します。
+	 *
+	 * <p>一覧の順序に関しては不定です。重複するアドレスが含まれることはありません。</p>
+	 *
+	 * <p>返却されたリストに対して変更操作を行った場合に、
+	 * {@link UnsupportedOperationException}などの実行時例外が発生するか
+	 * どうかは未定義です。</p>
+	 *
+	 * @param partitionIndex パーティションインデックス。{@code 0}以上
+	 * パーティション数未満の値
+	 *
+	 * @return ノードのアドレスを表す{@link InetAddress}を要素とする、{@link List}
+	 *
+	 * @throws GSException 範囲外のパーティションインデックスが指定された場合
+	 * @throws GSException この処理のタイムアウト、接続障害が発生した場合、
+	 * このオブジェクトまたは対応する{@link GridStore}のクローズ後に呼び出された場合
+	 * </div><div lang="en">
 	 * Get a list of the addresses of the nodes corresponding to a specified partition.
 	 *
 	 * <p>The list will be compiled in no particular order. No duplicate address will be included.</p>
@@ -103,10 +190,28 @@ public interface PartitionController extends Closeable {
 	 * @throws GSException If a partition index outside the range is specified
 	 * @throws GSException If this process times out, when a connection error occurs,
 	 * or if the process is invoked after this object or corresponding {@link GridStore} is closed
+	 * </div>
 	 */
 	public List<InetAddress> getHosts(int partitionIndex) throws GSException;
 
 	/**
+	 * <div lang="ja">
+	 * 指定のパーティションに対応するオーナノードのアドレスを取得します。
+	 *
+	 * <p>オーナノードとは、
+	 * {@link GridStoreFactory#getGridStore(java.util.Properties)}における
+	 * 一貫性レベルとして{@code "IMMEDIATE"}を指定した場合に、
+	 * 常に選択されるノードのことです。</p>
+	 *
+	 * @param partitionIndex パーティションインデックス。{@code 0}以上
+	 * パーティション数未満の値
+	 *
+	 * @return オーナノードのアドレスを表す{@link InetAddress}
+	 *
+	 * @throws GSException 範囲外のパーティションインデックスが指定された場合
+	 * @throws GSException この処理のタイムアウト、接続障害が発生した場合、
+	 * このオブジェクトまたは対応する{@link GridStore}のクローズ後に呼び出された場合
+	 * </div><div lang="en">
 	 * Get the address of the owner node corresponding to a specified partition.
 	 *
 	 * <p>An owner node is a node that is always selected when {@code "IMMEDIATE"} is specified as a consistency level
@@ -119,10 +224,34 @@ public interface PartitionController extends Closeable {
 	 * @throws GSException If a partition index outside the range is specified
 	 * @throws GSException If this process times out, when a connection error occurs,
 	 * or if the process is invoked after this object or corresponding {@link GridStore} is closed
+	 * </div>
 	 */
 	public InetAddress getOwnerHost(int partitionIndex) throws GSException;
 
 	/**
+	 * <div lang="ja">
+	 * 指定のパーティションに対応するバックアップノードのアドレス一覧を取得します。
+	 *
+	 * <p>バックアップノードとは、
+	 * {@link GridStoreFactory#getGridStore(java.util.Properties)}における
+	 * 一貫性レベルとして{@code "EVENTUAL"}を指定した場合に、
+	 * 優先的に選択されるノードのことです。</p>
+	 *
+	 * <p>一覧の順序に関しては不定です。重複するアドレスが含まれることはありません。</p>
+	 *
+	 * <p>返却されたリストに対して変更操作を行った場合に、
+	 * {@link UnsupportedOperationException}などの実行時例外が発生するか
+	 * どうかは未定義です。</p>
+	 *
+	 * @param partitionIndex パーティションインデックス。{@code 0}以上
+	 * パーティション数未満の値
+	 *
+	 * @return バックアップノードのアドレスを表す{@link InetAddress}を要素とする、{@link List}
+	 *
+	 * @throws GSException 範囲外のパーティションインデックスが指定された場合
+	 * @throws GSException この処理のタイムアウト、接続障害が発生した場合、
+	 * このオブジェクトまたは対応する{@link GridStore}のクローズ後に呼び出された場合
+	 * </div><div lang="en">
 	 * Get a list of the addresses of the backup nodes corresponding to a specified partition.
 	 *
 	 * <p>A backup node is a node that is selected with a higher priority when {@code "EVENTUAL"} is
@@ -141,11 +270,31 @@ public interface PartitionController extends Closeable {
 	 * @throws GSException If a partition index outside the range is specified
 	 * @throws GSException If this process times out, when a connection error occurs,
 	 * or if the process is invoked after this object or corresponding {@link GridStore} is closed
+	 * </div>
 	 */
 	public List<InetAddress> getBackupHosts(
 			int partitionIndex) throws GSException;
 
 	/**
+	 * <div lang="ja">
+	 * 優先的に選択されるホストのアドレスを設定します。
+	 *
+	 * <p>バックアップノードへの接続など、可能な接続先が複数存在する場合に、
+	 * 設定されたアドレスが候補に含まれていれば常に選択されるようになります。
+	 * それ以外の場合は設定が無視されます。</p>
+	 *
+	 * @param partitionIndex パーティションインデックス。{@code 0}以上
+	 * パーティション数未満の値
+	 *
+	 * @param host 優先的に選択されるホストのアドレス。{@code null}の場合、
+	 * 設定が解除される
+	 *
+	 * @throws GSException 範囲外のパーティションインデックスが指定された場合
+	 * @throws GSException このオブジェクトまたは対応する{@link GridStore}の
+	 * クローズ後に呼び出された場合
+	 *
+	 * @see #getBackupHosts(int)
+	 * </div><div lang="en">
 	 * Set the address of the host to be prioritized in the selection.
 	 *
 	 * <p>If multiple possible destinations exist e.g. connections to backup nodes, etc.,
@@ -161,11 +310,32 @@ public interface PartitionController extends Closeable {
 	 * @throws GSException If invoked after this object or corresponding {@link GridStore} is closed.
 	 *
 	 * @see #getBackupHosts(int)
+	 * </div>
 	 */
 	public void assignPreferableHost(
 			int partitionIndex, InetAddress host) throws GSException;
 
 	/**
+	 * <div lang="ja">
+	 * 指定のコンテナ名に対応するパーティションインデックスを取得します。
+	 *
+	 * <p>一度GridDBクラスタが構築されると、コンテナの所属先のパーティションが
+	 * 変化することはなく、パーティションインデックスも一定となります。
+	 * 指定の名前に対応するコンテナが存在するかどうかは、結果に依存しません。</p>
+	 *
+	 * <p>パーティションインデックスの算出に必要とする情報はキャッシュされ、
+	 * 次にクラスタ障害・クラスタノード障害を検知するまで再びGridDBクラスタに
+	 * 問い合わせることはありません。</p>
+	 *
+	 * @param containerName コンテナ名。{@code null}は指定できない
+	 *
+	 * @return 指定のコンテナ名に対応するパーティションインデックス
+	 *
+	 * @throws GSException コンテナ名として許可されない文字列が指定された場合
+	 * @throws GSException この処理のタイムアウト、接続障害が発生した場合、
+	 * このオブジェクトまたは対応する{@link GridStore}のクローズ後に呼び出された場合
+	 * @throws NullPointerException 引数に{@code null}が指定された場合
+	 * </div><div lang="en">
 	 * Get the partition index corresponding to the specified Container name.
 	 *
 	 * <p>Once a GridDB cluster is constructed, there will not be any changes in the partitions of the destination
@@ -184,14 +354,21 @@ public interface PartitionController extends Closeable {
 	 * @throws GSException If this process times out, when a connection error occurs,
 	 * or if the process is invoked after this object or corresponding {@link GridStore} is closed
 	 * @throws NullPointerException If {@code null} is specified in the argument
+	 * </div>
 	 */
 	public int getPartitionIndexOfContainer(
 			String containerName) throws GSException;
 
 	/**
+	 * <div lang="ja">
+	 * GridDBとの接続状態を解除し、必要に応じて関連するリソースを解放します。
+	 *
+	 * @throws GSException 現バージョンでは送出されない
+	 * </div><div lang="en">
 	 * The connection status with GridDB is released and related resources are released where necessary.
 	 *
 	 * @throws GSException Not sent out in the current version
+	 * </div>
 	 */
 	@Override
 	public void close() throws GSException;

@@ -23,6 +23,21 @@ import java.util.Set;
 import com.toshiba.mwcloud.gs.common.GSErrorCode;
 
 /**
+ * <div lang="ja">
+ * ロウキーの合致条件を表します。
+ *
+ * <p>{@link GridStore#multiGet(java.util.Map)}における取得条件を
+ * 構成するために使用できます。</p>
+ *
+ * <p>条件の種別として、範囲条件と個別条件の2つの種別があります。
+ * 両方の種別の条件を共に指定することはできません。
+ * 条件の内容を何も指定しない場合、対象とするすべてのロウキーに
+ * 合致することを表します。</p>
+ *
+ * @param <K> 合致条件の評価対象とするロウキーの型
+ *
+ * @since 1.5
+ * </div><div lang="en">
  * Represents the condition that a {@link RowKey} satisfies.
  *
  * <p>This is used as the search condition in {@link GridStore#multiGet(java.util.Map)}</p>
@@ -33,6 +48,8 @@ import com.toshiba.mwcloud.gs.common.GSErrorCode;
  *
  * @param <K> type of {@link RowKey}
  *
+ * @since 1.5
+ * </div>
  */
 public class RowKeyPredicate<K> {
 
@@ -51,6 +68,28 @@ public class RowKeyPredicate<K> {
 	}
 
 	/**
+	 * <div lang="ja">
+	 * 指定の{@link GSType}をロウキーの型とする合致条件を作成します。
+	 *
+	 * <p>合致条件の評価対象とするコンテナは、ロウキーを持ち、かつ、
+	 * ロウキーの型が指定の{@link GSType}と同一の型でなければなりません。</p>
+	 *
+	 * <p>{@link #create(Class)}とは異なり、アプリケーションのコンパイル時点で
+	 * ロウキーの型が確定しない場合の使用に適します。ただし、
+	 * 条件内容を設定する際のロウキーの型チェックの基準は同一です。</p>
+	 *
+	 * <p>設定可能なロウキーの型は、{@link Container}のいずれかの
+	 * サブインタフェースにて許容されている型のみです。</p>
+	 *
+	 * @param keyType 合致条件の評価対象とするロウキーの型
+	 *
+	 * @return 新規に作成された{@link RowKeyPredicate}
+	 *
+	 * @throws GSException 指定された型がロウキーとして常にサポート外となる場合
+	 * @throws NullPointerException 引数に{@code null}が指定された場合
+	 *
+	 * @see Container
+	 * </div><div lang="en">
 	 * Creates an instance of {@link RowKeyPredicate} with the specified {@link GSType} as the {@link RowKey} type.
 	 *
 	 * <p>The target Container must have a {@link RowKey}, and the type of the {@link RowKey} must be
@@ -71,6 +110,7 @@ public class RowKeyPredicate<K> {
 	 * @throws NullPointerException if {@code null} is specified in the argument.
 	 *
 	 * @see Container
+	 * </div>
 	 */
 	public static RowKeyPredicate<Object> create(
 			GSType keyType) throws GSException {
@@ -95,6 +135,27 @@ public class RowKeyPredicate<K> {
 	}
 
 	/**
+	 * <div lang="ja">
+	 * 指定の{@link Class}に対応する{@link GSType}をロウキーの型とする
+	 * 合致条件を作成します。
+	 *
+	 * <p>判定対象とするコンテナは、ロウキーを持ち、かつ、ロウキーの型が対応する
+	 * {@link GSType}と同一の型でなければなりません。</p>
+	 *
+	 * <p>設定可能なロウキーの型は、{@link Container}のいずれかの
+	 * サブインタフェースにて許容されている型のみです。
+	 * {@link Class}と{@link GSType}との対応関係については、
+	 * {@link Container}の定義を参照してください。</p>
+	 *
+	 * @param keyType 合致条件の判定対象とするロウキーの型に対応する、{@link Class}
+	 *
+	 * @return 新規に作成された{@link RowKeyPredicate}
+	 *
+	 * @throws GSException 指定された型がロウキーとして常にサポート外となる場合
+	 * @throws NullPointerException 引数に{@code null}が指定された場合
+	 *
+	 * @see Container
+	 * </div><div lang="en">
 	 * Creates an instance of {@link RowKeyPredicate} with the {@link GSType} corresponding to
 	 * the specified {@link Class} as the {@link RowKey} type.
 	 *
@@ -114,6 +175,7 @@ public class RowKeyPredicate<K> {
 	 * @throws NullPointerException if {@code null} is specified in the argument.
 	 *
 	 * @see Container
+	 * </div>
 	 */
 	public static <K> RowKeyPredicate<K> create(
 			Class<K> keyType) throws GSException {
@@ -135,6 +197,22 @@ public class RowKeyPredicate<K> {
 	}
 
 	/**
+	 * <div lang="ja">
+	 * 範囲条件の開始位置とするロウキーの値を設定します。
+	 *
+	 * <p>設定された値より小さな値のロウキーは合致しないものとみなされる
+	 * ようになります。</p>
+	 *
+	 * <p>STRING型のように大小関係の定義されていない型の場合、
+	 * 条件として設定はできるものの、実際の判定に用いることはできません。</p>
+	 *
+	 * @param startKey 開始位置とするロウキーの値。{@code null}の場合、
+	 * 設定が解除される
+	 *
+	 * @throws GSException 個別条件がすでに設定されていた場合
+	 * @throws ClassCastException 指定のロウキーの値の型が{@code null}
+	 * ではなく、ロウキーに対応するクラスのインスタンスではない場合
+	 * </div><div lang="en">
 	 * Sets the value of the {@link RowKey} at the starting positionof the range condition.
 	 *
 	 * <p>A {@link RowKey} with a value smaller than the specified value is deemed as non-conforming.</p>
@@ -147,6 +225,7 @@ public class RowKeyPredicate<K> {
 	 *
 	 * @throws GSException if an individual condition had been set already
 	 * @throws ClassCastException the specified RowKey is not NULL or the type is not supported as {@link RowKey}
+	 * </div>
 	 */
 	public void setStart(K startKey) throws GSException {
 		if (distinctKeys != null) {
@@ -165,6 +244,22 @@ public class RowKeyPredicate<K> {
 	}
 
 	/**
+	 * <div lang="ja">
+	 * 範囲条件の終了位置とするロウキーの値を設定します。
+	 *
+	 * <p>設定された値より大きな値のロウキーは合致しないものとみなされる
+	 * ようになります。</p>
+	 *
+	 * <p>STRING型のように大小関係の定義されていない型の場合、
+	 * 条件として設定はできるものの、実際の判定に用いることはできません。</p>
+	 *
+	 * @param finishKey 終了位置とするロウキーの値。{@code null}の場合、
+	 * 設定が解除される
+	 *
+	 * @throws GSException 個別条件がすでに設定されていた場合
+	 * @throws ClassCastException 指定のロウキーの値の型が{@code null}
+	 * ではなく、ロウキーに対応するクラスのインスタンスではない場合
+	 * </div><div lang="en">
 	 * Sets the value of the {@link RowKey} at the last position of the range condition.
 	 *
 	 * <p>A {@link RowKey} with a value larger than the specified value is deemed as non-conforming.</p>
@@ -178,6 +273,7 @@ public class RowKeyPredicate<K> {
 	 * @throws GSException if an individual condition had been set already
 	 * @throws ClassCastException the value of specified key is not NULL
 	 * or the type is not supported as {@link RowKey}
+	 * </div>
 	 */
 	public void setFinish(K finishKey) throws GSException {
 		if (distinctKeys != null) {
@@ -196,6 +292,20 @@ public class RowKeyPredicate<K> {
 	}
 
 	/**
+	 * <div lang="ja">
+	 * 個別条件の要素の一つとするロウキーの値を追加します。
+	 *
+	 * <p>追加された値と同一の値のロウキーは合致するものとみなされる
+	 * ようになります。</p>
+	 *
+	 * @param key 個別条件の要素の一つとするロウキーの値。{@code null}は
+	 * 指定できない
+	 *
+	 * @throws GSException 範囲条件がすでに設定されていた場合
+	 * @throws ClassCastException 指定のロウキーの値の型が{@code null}
+	 * ではなく、ロウキーに対応するクラスのインスタンスではない場合
+	 * @throws NullPointerException 引数に{@code null}が指定された場合
+	 * </div><div lang="en">
 	 * Appends the value of the {@link RowKey} as one of the elements of the individual condition.
 	 *
 	 * <p>A {@link RowKey} with the same value as the added value is deemed as conforming.</p>
@@ -206,6 +316,7 @@ public class RowKeyPredicate<K> {
 	 * @throws GSException if a range condition had already been set
 	 * @throws ClassCastException the value of the specified key is not NULL or the type is not supported as {@link RowKey}
 	 * @throws NullPointerException when {@code null} is specified as an argument
+	 * </div>
 	 */
 	public void add(K key) throws GSException {
 		if (start != null || finish != null) {
@@ -227,9 +338,15 @@ public class RowKeyPredicate<K> {
 	}
 
 	/**
+	 * <div lang="ja">
+	 * 合致条件の評価対象とするロウキーの型を取得します。
+	 *
+	 * @return 合致条件の評価対象とするロウキーの型
+	 * </div><div lang="en">
 	 * Returns the type of {@link RowKey} used as a search condition.
 	 *
 	 * @return the type of {@link RowKey} used as a search condition.
+	 * </div>
 	 */
 	public GSType getKeyType() {
 		if (keyClass == String.class) {
@@ -251,27 +368,51 @@ public class RowKeyPredicate<K> {
 	}
 
 	/**
+	 * <div lang="ja">
+	 * 範囲条件の開始位置とするロウキーの値を取得します。
+	 *
+	 * @return 開始位置とするロウキーの値。設定されていない場合は{@code null}
+	 * </div><div lang="en">
 	 * Returns the value of the {@link RowKey} at the starting position of the range condition.
 	 *
 	 * @return the value of {@link RowKey} at the starting position
 	 * of the range condition, or {@code null} if it is not set.
+	 * </div>
 	 */
 	public K getStart() {
 		return start;
 	}
 
 	/**
+	 * <div lang="ja">
+	 * 範囲条件の終了位置とするロウキーの値を取得します。
+	 *
+	 * @return 終了位置とするロウキーの値。設定されていない場合は{@code null}
+	 * </div><div lang="en">
 	 * Returns the value of {@link RowKey} at the last position
 	 * of the range condition.
 	 *
 	 * @return the value of {@link RowKey} at the last position
 	 * of the range condition, or {@code null} if it is not set.
+	 * </div>
 	 */
 	public K getFinish() {
 		return finish;
 	}
 
 	/**
+	 * <div lang="ja">
+	 * 個別条件を構成するロウキーの値の集合を取得します。
+	 *
+	 * <p>返却された値に対して変更操作を行った場合に、
+	 * {@link UnsupportedOperationException}などの実行時例外が発生するか
+	 * どうかは未定義です。
+	 * また、このオブジェクトに対する操作により、返却されたオブジェクトの内容が
+	 * 変化するかどうかは未定義です。</p>
+	 *
+	 * @return 個別条件を構成するロウキーの値を要素とする
+	 * {@link java.util.Collection}
+	 * </div><div lang="en">
 	 * Returns a Collection containing all of the values of the row keys
 	 * that make up the individual condition.
 	 *
@@ -282,6 +423,7 @@ public class RowKeyPredicate<K> {
 	 *
 	 * @return {@link java.util.Collection} containing all of the values of the row keys
 	 * that make up the individual condition.
+	 * </div>
 	 */
 	public java.util.Collection<K> getDistinctKeys() {
 		if (distinctKeys == null) {

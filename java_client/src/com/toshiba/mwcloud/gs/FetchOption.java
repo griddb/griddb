@@ -16,11 +16,24 @@
 package com.toshiba.mwcloud.gs;
 
 /**
+ * <div lang="ja">
+ * クエリ実行結果を取得する際のオプション項目です。
+ * </div><div lang="en">
  * The options for fetching the result of a query.
+ * </div>
  */
 public enum FetchOption {
 
 	/**
+	 * <div lang="ja">
+	 * 取得するロウの数の最大値を設定するために使用します。
+	 *
+	 * <p>実行結果のロウ数が最大値を超えた場合、{@link RowSet}で得られる順番で
+	 * 先頭から最大値の分だけが取得できます。それ以降のロウは取得できません。</p>
+	 *
+	 * <p>サポートされる設定値の型は、{@link Integer}または{@link Long}です。
+	 * 負の値は指定できません。設定が省略された場合、上限は設定されません。</p>
+	 * </div><div lang="en">
 	 * Used to set the maximum number of Rows to be fetched.
 	 *
 	 * <p>If the number of Rows in a result exceeds the maximum, the maximum number of
@@ -29,16 +42,64 @@ public enum FetchOption {
 	 *
 	 * <p>The supported types of values are {@link Integer} and {@link Long}. Negative values are not available.
 	 * If the setting is omitted, the limit is not defined. </p>
+	 * </div>
 	 */
 	LIMIT,
 
 	/**
+	 * <div lang="ja">
+	 * 非公開のオプションです。
+	 *
 	 * @deprecated
+	 *
+	 * <p>十分検証されていないため、意図しない挙動を示す可能性があります。</p>
+	 *
+	 * @since 1.5
+	 * </div><div lang="en">
+	 * @deprecated
+	 * </div>
 	 */
 	@Deprecated
 	SIZE,
 
 	/**
+	 * <div lang="ja">
+	 * 部分実行モードを設定するために使用します。
+	 *
+	 * <p>部分実行モードでは、クエリの中間処理や結果送受信に用いる
+	 * バッファのサイズなどがなるべく一定の範囲に収まるよう、必要に応じて
+	 * 実行対象のデータ範囲を分割し、この部分範囲ごとに実行とフェッチを
+	 * リクエストすることがあります。そのため、{@link RowSet}を取得した時点で
+	 * 一部の範囲の結果が求まっていないことや、結果ロウを順に参照していく
+	 * 段階で、残りの範囲を部分的に実行していくことがあります。</p>
+	 *
+	 * <p>部分実行モードは、現バージョンでは次の条件すべてを満たすクエリに
+	 * 使用できます。また、{@link #LIMIT}オプションと併用することができます。
+	 * 条件を満たさない場合でも、各種フェッチオプションの設定時点ではエラーを
+	 * 検知しない場合があります。</p>
+	 * <ul>
+	 * <li>TQL文からなるクエリであること</li>
+	 * <li>TQL文において、選択式が「*」のみからなり、ORDER BY節を含まない
+	 * こと</li>
+	 * <li>対応する{@link Container}が個々の部分的なクエリ実行時点において
+	 * 常に自動コミットモードに設定されていること</li>
+	 * </ul>
+	 *
+	 * <p>部分実行モードでは、対応する {@link Container}のトランザクション
+	 * 分離レベルや状態に基づき、個々の部分的なクエリ実行時点において
+	 * 参照可能なロウが使用されます。ただし、クエリ全体の実行開始時点で
+	 * 存在しないロウは、実行対象から外れる場合があります。</p>
+	 *
+	 * <p>部分実行モードを有効にした場合に{@link RowSet}に対して使用
+	 * できない操作や特有の挙動については、個別の定義を参照してください。</p>
+	 *
+	 * <p>サポートされる設定値の型は、{@link Boolean}のみです。
+	 * 部分実行モードを有効にするには、{@link Boolean#TRUE}と一致する値を
+	 * 指定します。現バージョンでは、未設定の場合には部分実行モードを有効に
+	 * しません。</p>
+	 *
+	 * @since 4.0
+	 * </div><div lang="en">
 	 * Used to set the partial execution mode.
 	 *
 	 * <p>In the partial execution mode, it is trying for the
@@ -81,6 +142,8 @@ public enum FetchOption {
 	 * partial execution mode is not effective unless setting the
 	 * mode explicitly.</p>
 	 *
+	 * @since 4.0
+	 * </div>
 	 */
 	PARTIAL_EXECUTION
 

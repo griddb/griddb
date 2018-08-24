@@ -21,7 +21,11 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
+ * <div lang="ja">
+ * {@link Container}のキーと対応することを示します。
+ * </div><div lang="en">
  * Indicates the correspondence with a key of {@link Container}.
+ * </div>
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Target({ElementType.FIELD, ElementType.METHOD})
