@@ -1,0 +1,132 @@
+using System;
+
+namespace ConsoleApp3
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            char sex = 'М';
+            string name = "Olga";
+            bool hasFree2Pages = false;
+            decimal visaPrice = 60;
+            int birthYear = 2000;
+
+            //1. CHAR CONVERSION 
+
+            //1.1 CHAR to STRING
+
+            //string charToStringImplicit = sex;                        //IMPLICIT: NOT COMPILING
+            //string chartToStringExplicit = (string)sex;               //EXPLICIT: NOT COMPILING
+            string charToStringUsingConverter = Convert.ToString(sex);  //CONVERT: "M"
+
+            //1.2 CHAR to BOOL
+            //bool charToStringIm = sex;                                //IM: NOT COMPILING
+            //bool chartToStringEx = (string)sex;                       //EX: NOT COMPILING
+            //bool charboolConvert = Convert.ToBoolean(sex);            //CONVERT: Invalid cast from 'Char' to 'Boolean' 
+                                                                        //в документации написано This method is reserved for future use ))))) .
+
+            //1.2 CHAR to DECIMAL
+            decimal charToDecimalIm = sex;                             //IM: value: 1052
+            decimal chartTodecEx = (decimal)sex;                       //EX: value: 1052 show solve to remove unnecessary cast
+            //decimal chardecConvert = Convert.ToDecimal(sex);         //CONVERT: This method is reserved for future use.
+
+
+            //1.2 CHAR to INT
+
+            int charTointIm = sex;                                     //IM: value: 1052
+            int charTointEx = (int)sex;                                //EX: value: 1052 show solve to remove unnecessary cast
+            int charintConvert = Convert.ToInt32(sex);                 //CONVERT: value: 1052.
+
+            //2. STRING CONVERSION
+
+            //2.1 STRING to CHAR
+            //char strngTocharIm = name;                                //IM: NOT COMPILING
+            //char strngTocharEx = (char)name;                          //EX: NOT COMPILING
+            //char strngcharConvert = Convert.ToChar(name);             //CONVERT: String must be exactly one character long.
+
+            //2.2 STRING to BOOL
+            //bool strngToboolIm = name;                                //IM: NOT COMPILING
+            //bool strngToboolEx = (bool)name;                          //EX: NOT COMPILING
+            //bool strngboolConvert = Convert.ToBoolean(name);          //CONVERT: String was not recognized as a valid Boolean
+
+            //2.3 STRING to DECIMAL
+            //decimal strngTodecIm = name;                                //IM: NOT COMPILING
+            //decimal strngTodecEx = (decimal)name;                       //EX: NOT COMPILING
+            //decimal strngTodecconvert = Convert.ToDecimal(name);        //CONVERT: Input string was not in a correct format
+
+            //2.4 STRING to INT
+            //int strngTointIm = name;                                     //IM: NOT COMPILING
+            //int strngTointEx = (int)name;                                //EX: NOT COMPILING
+            //int strngintConvert = Convert.ToInt32(name);                 //CONVERT: Input string was not in a correct format
+
+
+            //3.1 BOOL TO CHAR CONVERSION
+            //char boolTocharIm = hasFree2Pages;                                //IM: NOT COMPILING
+            //char boolTocharEx = (char)hasFree2Pages;                          //EX: NOT COMPILING
+            //char boolcharConvert = Convert.ToChar(hasFree2Pages);             //CONVERT: Invalid cast from 'Boolean' to 'Char'.
+            char boolcharConvert = (char)Convert.ToByte(hasFree2Pages);         // returns 0 or 1
+
+            //3.2 BOOL TO STRING CONVERSION
+            //string boolToStringIm = hasFree2Pages;                            //IM: NOT COMPILING
+            //string boolToStringEx = (string)hasFree2Pages;                      //EX: NOT COMPILING
+            string boolToStringUsingConverter = Convert.ToString(hasFree2Pages);   //CONVERT: "False"
+
+            //3.3 BOOL TO Decml CONVERSION
+            //decimal boolTodecIm = hasFree2Pages;                                //IM: NOT COMPILING
+            //decimal boolTodecEx = (decimal)hasFree2Pages;                       //EX: NOT COMPILING
+            decimal boolTodecconvert = Convert.ToDecimal(hasFree2Pages);        //CONVERT: "0"
+
+            //3.4 BOOL TO INT CONVERSION
+            //int boolTointIm = hasFree2Pages;                                     //IM: NOT COMPILING
+            //int boolTointEx = (int)hasFree2Pages;                                //EX: NOT COMPILING
+            int boolintConvert = Convert.ToInt32(hasFree2Pages);                 //CONVERT: "0"
+
+
+            //4.1 DECIMAL TO CHAR CONVERSION           
+            //char decimalTocharIm = visaPrice;                                //IM: NOT COMPILING
+             char decimalTocharEx = (char)visaPrice;                          //EX: "<"
+            //char decimalcharConvert = Convert.ToChar(visaPrice);             //CONVERT: Invalid cast from 'Decimal' to 'Char'.
+
+
+            //4.2 DECIMAL TO STRING CONVERSION
+            //string decimalToStringIm = visaPrice;                            //IM: NOT COMPILING
+            //string decimalToStringEx = (string)visaPrice;                      //EX: NOT COMPILING
+            string decimalToStringUsingConverter = Convert.ToString(visaPrice);   //CONVERT: "60"
+
+            //4.3 DECIMAL TO BOOL
+            //bool decimalToboolIm = visaPrice;                                //IM: NOT COMPILING
+            //bool decimalToboolEx = (bool)visaPrice;                          //EX: NOT COMPILING
+            bool decimalConvert = Convert.ToBoolean(visaPrice);          //CONVERT: "true"
+
+            //4.4 DECIMAL TO INT CONVERSION
+            //int decimalTointIm = visaPrice;                                     //IM: NOT COMPILING
+            int decimalTointEx = (int)visaPrice;                                //EX: "60"
+            int decimalintConvert = Convert.ToInt32(visaPrice);                 //CONVERT: "60"
+
+
+            //5. INT TO CHAR CONVERSION           
+            //char intTocharIm = birthYear;                                //IM: NOT COMPILING
+            char intTocharEx = (char)birthYear;                          //EX: "ߐ"
+            char intcharConvert = Convert.ToChar(birthYear);             //CONVERT: "ߐ".
+
+
+            //5.2 INT TO STRING CONVERSION
+            //string intToStringIm = birthYear;                            //IM: NOT COMPILING
+            //string intToStringEx = (string)birthYear;                      //EX: NOT COMPILING
+            string intToStringUsingConverter = Convert.ToString(birthYear);   //CONVERT: "2000"
+
+            //5.3 INT TO BOOL
+            //bool intToboolIm = birthYear;                                //IM: NOT COMPILING
+            //bool intToboolEx = (bool)birthYear;                          //EX: NOT COMPILING
+            bool inttoboolConvert = Convert.ToBoolean(birthYear);                 //CONVERT: "true"
+
+            //5.4 INT TO Decml CONVERSION
+            decimal intTodecIm = birthYear;                                //IM: "2000"
+            decimal intTodecEx = (decimal)birthYear;                       //EX: "2000"
+            decimal intTodecconvert = Convert.ToDecimal(birthYear);        //CONVERT: "2000"    
+
+        }
+    }
+
+}
