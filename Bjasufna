@@ -1,0 +1,367 @@
+#version 430 core
+#extension GL_ARB_compute_shader : enable
+#extension GL_ARB_shader_image_load_store : enable
+
+// output of compute shader is a TEXTURE
+layout(rgba32f, binding = 0) uniform image2D outTexture;
+
+
+// receive as inputs, rays from the centre of the camera to the frustum corners
+layout( location = 0 ) uniform vec4 ray00; // top left in world space
+layout( location = 1 ) uniform vec4 ray01; // top right in world space
+layout( location = 2 ) uniform vec4 ray10; // bottom left in world space
+layout( location = 3 ) uniform vec4 ray11; // bottom right in world space
+
+// receive the camera position
+layout( location = 4 ) uniform vec3 camPos; // camera position
+
+// receive how many primitives of each type
+// geomCount.x = number of spheres
+// geomCount.y = number of triangles
+// geomCount.z = number of planes
+// geomCount.w = number of obbs
+layout( location = 5 ) uniform ivec4 geomCount; // sphere, triangle, planes, obbs
+
+// how many lights to process (how many elements in the array "light")
+layout( location = 6 ) uniform int lightCount;
+
+// receive an ARRAY of light_type, 
+struct light_type {
+	 vec4 position;
+	 vec4 colour;
+};
+layout(std430, binding = 2) buffer light
+{
+	light_type lights_data[];
+};
+
+struct sphere_type {
+	vec4 centre_radius;
+	vec4 colour;
+};
+// 8 floats per sphere: cx cy cz rad r g b a
+layout(std430, binding = 3) buffer sphere
+{
+	sphere_type spheres_data[];
+};
+
+struct plane_type {
+	vec4 normal_d;
+	vec4 colour;
+};
+// 8 floats per plane: nx ny nz d r g b a
+layout(std430, binding = 4) buffer plane
+{
+	plane_type planes_data[];
+};
+
+struct triangle_type {
+	vec4 vtx0, vtx1, vtx2;
+	vec4 colour;
+};
+layout(std430, binding = 5) buffer triangle
+{
+	triangle_type triangles_data[];
+};
+
+// 20 floats per obb: centre4, u3, hu, v3, hv, w3, hw, rgba4
+struct obb_type {
+	vec4 centre, u_hu, v_hv, w_hw, colour;
+};
+layout(std430, binding = 6) buffer obb
+{
+	obb_type obb_data[];
+};
+
+layout (local_size_x = 20, local_size_y = 20) in;
+
+#define SPHERE_TYPE 0
+#define LIGHT_TYPE 1
+#define PLANE_TYPE 2
+#define TRIANGLE_TYPE 3
+#define OBB_TYPE 4
+
+// primitives tests forward declarations
+float sphereTest(vec3 rayDir, vec3 rayOrigin, vec4 centre_radius);
+float planeTest(vec3 rayDir, vec3 rayOrigin, vec4 plane_info);
+float triangleTest(vec3 rayDir, vec3 rayOrigin, triangle_type tri);
+float obbTest(vec3 rayDir, vec3 rayOrigin, obb_type obb);
+
+// entire scene test forward declaration
+void sceneTest(in vec4 ray_dir, inout float lastT, inout int objIndex, inout int objType);
+
+// shade a point of a surface (for any primitive) forward declaration
+vec4 shade(in vec3 pointOnSurface, in vec3 normal, in vec3 colour);
+
+vec4 castRay(ivec2 pos)
+{
+	// normalise values from [ 0,width; 0,height ] to [ 0,1; 0,1]
+	vec2 interp = vec2(pos) / imageSize(outTexture); 
+
+	// compute ray as interpolation of input rays (corners)
+	vec4 ray_dir = normalize(
+		mix(
+			mix(ray00,ray01,interp.y), // left corners together
+			mix(ray10,ray11,interp.y), // right corners together
+			interp.x // join new interpolated rays into a final ray
+		)
+	);
+
+	// lastT is the last intersection found (will keep the closest value)
+	float lastT=-1;
+	// will remember which object index was hit if any.
+	int objIndex = -1;
+	// will remember which object type was hit if any.
+	int objType = -1;
+
+	// do ray versus scene test
+	sceneTest(ray_dir, lastT, objIndex, objType); 
+
+	// set pixel to BACKGROUND colour
+	vec4 finalPixelOut = vec4(0.2,0.2,0.2, 1.0);
+
+	if (objIndex >= 0) {
+		// did we hit something?
+
+		// IMPLEMENT HERE.
+		// FIND POINT IN SPACE WHERE THE INTERSECTION HAPPENED.
+		
+		vec3 pointOnSurface = camPos + ray_dir.xyz * lastT;
+
+		if (objType==SPHERE_TYPE)
+			{
+				
+				// IMPLEMENT HERE
+				// COMPUTE FINAL PIXEL COLOUR USING SHADE() FUNCTION
+				vec3 normal = normalize(pointOnSurface - spheres_data[objIndex].centre_radius.xyz);
+				finalPixelOut = shade(pointOnSurface, normal, spheres_data[objIndex].colour.xyz);
+			}
+		else if (objType==LIGHT_TYPE)
+		{
+			// IMPLEMENT HERE.
+			// LIGHTS ARE DRAWN AS SPHERES, JUST GIVE A CONSTANT COLOUR TO IT.
+			// DO NOT SHADE WITH SHADE() FUNCTION.
+			finalPixelOut = lights_data[objIndex].colour;
+		}
+		else if (objType == PLANE_TYPE)
+		{
+			finalPixelOut = shade(pointOnSurface, planes_data[objIndex].normal_d.xyz, planes_data[objIndex].colour.xyz);
+			// IMPLEMENT HERE
+			// COMPUTE FINAL PIXEL COLOUR USING SHADE() FUNCTION
+		}
+		else if (objType == TRIANGLE_TYPE) 
+		{
+			vec3 normal = normalize(cross(triangles_data[objIndex].vtx1.xyz - triangles_data[objIndex].vtx0.xyz, triangles_data[objIndex].vtx2.xyz - triangles_data[objIndex].vtx0.xyz));
+			finalPixelOut = shade(pointOnSurface, normal, triangles_data[objIndex].colour.xyz);
+			// IMPLEMENT HERE
+			// COMPUTE FINAL PIXEL COLOUR USING SHADE() FUNCTION
+		}
+		else if (objType == OBB_TYPE)
+		{
+			// IMPLEMENT HERE
+			// COMPUTE FINAL PIXEL COLOUR USING SHADE() FUNCTION
+		}
+	}
+	return finalPixelOut;
+}
+
+layout (local_size_x = 20, local_size_y = 20) in;
+void main()
+{
+	// pixel coordinate, x in [0,width-1], y in [0,height-1]
+	ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+	vec4 finalPixel = castRay(pos);
+	imageStore(outTexture, pos, finalPixel);
+	return;
+};
+
+void sceneTest(in vec4 ray_dir,inout float lastT, inout int objIndex, inout int objType)
+{
+
+	// use camPos to know where is the ray origin.
+	// example:
+	vec3 rayOrigin = camPos;
+
+	// test all spheres (in geomCount.x)
+	for (int i=0;i< geomCount.x;i++)
+	{
+		sphere_type sphere = spheres_data[i];
+		
+		float T = sphereTest(ray_dir.xyz, rayOrigin, sphere.centre_radius);
+		if (T != -1)
+		{
+			if( lastT == -1 || lastT > T)
+			{
+				lastT = T;
+				objType = SPHERE_TYPE;
+				objIndex = i;
+			}
+		}
+	}
+	// lights (we render lights as spheres)
+	for (int i=0;i<lightCount;i++)
+	{
+		light_type light = lights_data[i];
+		
+		float T = sphereTest(ray_dir.xyz, rayOrigin, light.position);
+		if (T != -1)
+		{
+			if( lastT == -1 || lastT > T)
+			{
+				lastT = T;
+				objType = LIGHT_TYPE;
+				objIndex = i;
+			}
+		}
+		// IMPLEMENT HERE.
+		// TEST SPHERE (LIGHT), UPDATE lastT, objIndex and objType if necessary.
+	}
+	// planes
+	for (int i = 0; i<geomCount.y; i++)
+	{
+		plane_type plane = planes_data[i];
+		
+		float T = planeTest(ray_dir.xyz, rayOrigin, plane.normal_d);
+		if (T != -1)
+		{
+			if( lastT == -1 || lastT > T)
+			{
+				lastT = T;
+				objType = PLANE_TYPE;
+				objIndex = i;
+			}
+		}
+		
+		// IMPLEMENT HERE.
+		// TEST PLANE, UPDATE lastT, objIndex and objType if necessary.
+	}
+	// triangles
+	for (int i = 0; i<geomCount.z; i++)
+	{
+		triangle_type triangle = triangles_data[i];
+		
+		float T = triangleTest(ray_dir.xyz, rayOrigin, triangle);
+		if (T != -1)
+		{
+			if( lastT == -1 || lastT > T)
+			{
+				lastT = T;
+				objType = TRIANGLE_TYPE;
+				objIndex = i;
+			}
+		}
+		// IMPLEMENT HERE.
+		// TEST TRIANGLE, UPDATE lastT, objIndex and objType if necessary.
+	}
+	// OBBs
+	for (int i = 0; i < geomCount.w; i++)
+	{
+		obb_type obb = obb_data[i];
+		// IMPLEMENT HERE.
+		// TEST OBB, UPDATE lastT, objIndex and objType if necessary.
+	}
+}
+
+float sphereTest(in vec3 rayDir, in vec3 rayOrigin, in vec4 centre_radius)
+{
+	vec3 oCent = rayOrigin - centre_radius.xyz;
+	float b = dot(rayDir, oCent);
+	float c = dot(oCent, oCent) - pow(centre_radius.w, 2);
+	float T = -1;
+	if(pow(b,2) - c >= 0)
+	{
+		T = min(-b + sqrt(pow(b,2) - c), -b - sqrt(pow(b,2) - c));
+		if( T < 0)
+		{
+			return -1;
+		}
+	}
+	return T;
+}
+
+float planeTest(vec3 rayDir, vec3 rayOrigin, vec4 plane_info)
+{
+	float normDir = dot(plane_info.xyz, rayDir); 
+	if(normDir == 0)
+	{
+		return -1;
+	}
+	else
+	{
+		float T = (-plane_info.w - dot(plane_info.xyz, rayOrigin))/normDir;
+		if(T >= 0)
+		{
+			return T;
+		}
+		else
+		{
+			return -1;
+		}
+	}
+}
+
+float triangleTest(vec3 rayDir, vec3 rayOrigin, triangle_type tri)
+{
+	float epsilon = 0.00001, a, t;
+	vec3 e1, e2, s, q, tuv, bigDet;
+	
+	t = -1;
+	e1 = tri.vtx1.xyz - tri.vtx0.xyz;
+	e2 = tri.vtx2.xyz - tri.vtx0.xyz;
+	s = rayDir - tri.vtx0.xyz;
+	
+	if(determinant(mat3(-rayDir, e1, e2)) > 0.0f)
+	{
+		bigDet.x = determinant(mat3(s, e1, e2));
+		bigDet.y = determinant(mat3(-rayDir, s, e2));
+		bigDet.z = determinant(mat3(-rayDir, e1, s));
+
+		tuv = (1 / determinant(mat3(-rayDir, e1, e2))) * bigDet;
+		q = cross(rayDir, e2);
+		a = dot(e1, q);
+		
+		if(tuv.x >= 0)
+		{
+			t = tuv.x;
+		}
+		
+		if((a > -epsilon && a < epsilon) || (tuv.y < 0) || (tuv.z < 0 || (tuv.y + tuv.z > 1.0)))
+		{
+			t = -1;
+		}
+	}
+	
+	return t;
+	// IMPLEMENT HERE
+}
+
+float obbTest(vec3 rayDir, vec3 rayOrigin, obb_type o)
+{
+	// IMPLEMENT HERE
+	return -1;
+};
+
+// everythin in World Space
+vec4 shade(in vec3 pointOnSurface, in vec3 normal, in vec3 colour)
+{
+
+	// ambient (combine with material color!)
+	// 0.2 is arbitrary, that is the value used in the model solution.
+	vec4 final_colour = vec4(0.2,0.2,0.2,1) * vec4(colour, 1);
+
+	// diffuse, no attenuation.
+	for (int i = 0; i < lightCount; i++)
+	{
+		vec4 light_pos = lights_data[i].position;
+		vec4 light_colour = lights_data[i].colour;
+		vec3 lightVector = normalize(light_pos.xyz - normal);
+		float diffuseFactor = dot(normal, lightVector);
+		vec3 color = colour * light_colour.xyz * diffuseFactor * light_pos.w / distance(pointOnSurface, light_pos.xyz);
+		final_colour += vec4(color, 1.0);
+		// IMPLEMENT HERE DIFFUSE SHADING
+	}
+	final_colour = min(final_colour, vec4(1.0, 1.0, 1.0, 1.0));
+	// UPDATE THIS LINE TO ACCOUNT FOR SATURATION (PIXEL COLOUR CANNOT GO OVER 1.0)
+	return final_colour;
+}
+
