@@ -1,13 +1,16 @@
 {
 	"dataStore":{
 		"dbPath":"data",
+		"backupPath":"backup",
 		"syncTempPath":"sync",
 		"storeMemoryLimit":"1024MB",
 		"storeWarmStart":false,
+		"storeCompressionMode":"NO_COMPRESSION",
 		"concurrency":4,
 		"logWriteMode":1,
 		"persistencyMode":"NORMAL",
-		"affinityGroupSize":4
+		"affinityGroupSize":4,
+		"autoExpire":false
 	},
 	"checkpoint":{
 		"checkpointInterval":"60s",
