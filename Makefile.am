@@ -1,4 +1,4 @@
-SUBDIRS = 3rd_party/MessagePack utility server
+SUBDIRS = 3rd_party/MessagePack utility server/tr-cpp server
 
 BINDIRS = bin
 CONFDIRS = conf
