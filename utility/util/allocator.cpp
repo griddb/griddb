@@ -341,6 +341,8 @@ void AllocatorDiffReporter::start(const AllocatorInfo &startInfo) {
 	allocMgr.saveReporterSnapshots(
 			&idList[0], idList.size(), body.namePrefix_.c_str(), this);
 #endif
+#else
+	static_cast<void>(startInfo);
 #endif 
 }
 
@@ -370,6 +372,8 @@ void AllocatorDiffReporter::finish(std::ostream *out) {
 	allocMgr.removeReporterSnapshots(
 			&idList[0], idList.size(), body.namePrefix_.c_str(), this);
 #endif
+#else
+	static_cast<void>(out);
 #endif 
 }
 
