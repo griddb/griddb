@@ -25,7 +25,6 @@
 #include "event_engine.h"
 #include "sync_manager.h"
 
-
 class ClusterService;
 class TransactionService;
 class ClusterHandler;
@@ -41,6 +40,7 @@ class LogManager;
 class TransactionManager;
 class StatementHandler;
 class SyncResponseInfo;
+
 
 /*!
 	@brief Represents the information for SyncManager
@@ -59,6 +59,10 @@ public:
 
 	SyncId &getBackupSyncId() {
 		return backupSyncId_;
+	}
+
+	void setBackupSyncId(SyncId &syncId) {
+		backupSyncId_ = syncId;
 	}
 
 	PartitionId getPartitionId() {
@@ -115,7 +119,7 @@ public:
 			SyncMode mode = MODE_SHORTTERM_SYNC)
 			: SyncManagerInfo(alloc, eventType, syncMgr, pId),
 			request_(mode), binaryLogRecords_(alloc), chunks_(alloc),
-			ee_(ee), isDownNextOwner_(false) {
+			ee_(ee) {
 		request_.requestInfo_ = this;
 	};
 
@@ -147,11 +151,10 @@ public:
 	}
 
 	void setSearchChunkCondition(
-		int32_t chunkNum, int32_t chunkSize, int32_t totalChunkNum) {
+		int32_t chunkNum, int32_t chunkSize) {
 		condition_.chunkNum_ = chunkNum;
 		condition_.chunkSize_ = chunkSize;
 		request_.chunkSize_ = chunkSize;
-		request_.totalChunkNum_ = totalChunkNum;
 	}
 
 	void clearSearchCondition() {
@@ -172,10 +175,14 @@ public:
 	uint32_t getBinaryLogSize() {
 		return request_.binaryLogSize_;
 	}
+	int64_t getChunkNum() {
+		return request_.numChunk_;
+	}
 
 	bool getLogs(PartitionId pId, int64_t sId, LogManager *logMgr, CheckpointService *cpSvc);
 	bool getChunks(util::StackAllocator &alloc, PartitionId pId, PartitionTable *pt,
-			LogManager *logMgr, ChunkManager *chunkMgr, CheckpointService *cpSvc, int64_t syncId);
+			LogManager *logMgr, ChunkManager *chunkMgr,
+			CheckpointService *cpSvc, int64_t syncId, uint64_t &totalCount);
 
 	void encode(EventByteOutStream &out);
 
@@ -183,14 +190,6 @@ public:
 
 	LogSequentialNumber getLsn() {
 		return request_.ownerLsn_;
-	}
-
-	void setIsDownNextOwner() {
-		isDownNextOwner_ = true;
-	}
-
-	bool getIsDownNextOwner() {
-		return isDownNextOwner_;
 	}
 
 	std::string dump(int32_t mode = 0);
@@ -201,8 +200,8 @@ public:
 	struct Request {
 		Request(int32_t mode) : syncMode_(mode), stmtId_(UNDEF_STATEMENTID),
 				ownerLsn_(UNDEF_LSN), startLsn_(UNDEF_LSN), endLsn_(UNDEF_LSN),
-				chunkSize_(0), numChunk_(0), binaryLogSize_(0), totalChunkNum_(0)
-				, globalSequentialNumber_(0)
+				chunkSize_(0), numChunk_(0), binaryLogSize_(0),
+				globalSequentialNumber_(0)
 		{}
 
 		~Request(){};
@@ -223,7 +222,6 @@ public:
 		uint32_t chunkSize_;
 		uint32_t numChunk_;
 		uint32_t binaryLogSize_;
-		uint32_t totalChunkNum_;
 		int64_t globalSequentialNumber_;
 		SyncRequestInfo *requestInfo_;
 	};
@@ -252,7 +250,6 @@ private:
 	util::XArray<uint8_t> binaryLogRecords_;
 	util::XArray<uint8_t *> chunks_;
 	EventEngine *ee_;
-	bool isDownNextOwner_;
 };
 
 /*!
@@ -342,6 +339,10 @@ public:
 		return ptRev_;
 	}
 
+	PartitionRevisionNo &getRevisionNo() {
+		return ptRev_.sequentialNumber_;
+	}
+
 	SyncMode getMode() {
 		return syncMode_;
 	}
@@ -359,8 +360,8 @@ private:
 class DropPartitionInfo : public SyncManagerInfo {
 public:
 	DropPartitionInfo(util::StackAllocator &alloc, EventType eventType,
-			SyncManager *syncMgr, PartitionId pId, bool forceFlag = false)
-			: SyncManagerInfo(alloc, eventType, syncMgr, pId), forceFlag_(forceFlag) {
+			SyncManager *syncMgr, PartitionId pId, bool forceFlag, PartitionRevisionNo revision = 0)
+		: SyncManagerInfo(alloc, eventType, syncMgr, pId), forceFlag_(forceFlag), revision_(revision) {
 	};
 
 	bool isForce() {
@@ -370,13 +371,17 @@ public:
 	bool check() {
 		return true;
 	}
+	PartitionRevisionNo getPartitionRevision() {
+		return revision_;
+	}
 
 	std::string dump();
 
-	MSGPACK_DEFINE(forceFlag_);
+	MSGPACK_DEFINE(forceFlag_,revision_);
 
 private:
 	bool forceFlag_;
+	PartitionRevisionNo revision_;
 };
 
 /*!
@@ -438,6 +443,10 @@ public:
 	CheckpointService *cpSvc_;
 
 protected:
+
+	void sendEvent(EventContext &Ec, EventEngine &ee, NodeId targetNodeId,
+			Event &ev, int32_t delayTime = -1);
+
 	class SyncPartitionLock {
 	public:
 		SyncPartitionLock(TransactionManager *txnMgr, PartitionId pId);
@@ -465,6 +474,8 @@ public:
 	ShortTermSyncHandler(){};
 
 	void operator()(EventContext &ec, EventEngine::Event &ev);
+
+	void undoPartition(util::StackAllocator &alloc, SyncContext *context, PartitionId pId);
 };
 
 /*!
@@ -544,7 +555,7 @@ public:
 			void encode(EventEngine::Event &ev, T &t);
 
 	void requestDrop(const Event::Source &eventSource,
-		util::StackAllocator &alloc, PartitionId pId, bool isForce = false);
+		util::StackAllocator &alloc, PartitionId pId, bool isForce, PartitionRevisionNo revision = 0);
 
 	void notifyCheckpointLongSyncReady(EventContext &ec, PartitionId pId,
 			LongtermSyncInfo *syncInfo, bool errorOccured);
@@ -555,11 +566,13 @@ public:
 
 private:
 	void checkVersion(ClusterVersionId decodedVersion);
+	uint16_t getLogVersion(PartitionId pId);
 
 	EventEngine ee_;
 	SyncManager *syncMgr_;
 	TransactionService *txnSvc_;
 	ClusterService *clsSvc_;
+	LogManager *logMgr_;
 
 	const uint8_t versionId_;
 	RecvSyncMessageHandler recvSyncMessageHandler_;
@@ -569,5 +582,9 @@ private:
 
 	bool initailized_;
 };
+
+
+
+
 
 #endif

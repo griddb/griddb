@@ -242,6 +242,12 @@ public:
 		return timeoutTimestamp_;
 	}
 
+	const util::Vector<int64_t>* getDistributedTarget() const;
+	util::Vector<int64_t>* getDistributedTarget();
+
+	void getDistributedTargetStatus(bool &uncovered, bool &reduced) const;
+	void setDistributedTargetStatus(bool uncovered, bool reduced);
+
 
 	bool isRelease() const;
 
@@ -340,9 +346,6 @@ public:
 		}
 		void setMaxRowId(RowId id) {
 			maxRowId_ = id;
-		}
-		bool isRowIdScan() const {
-			return (isPartial_ || isDistribute_);
 		}
 
 		void decodePartialQueryOption(
@@ -458,6 +461,10 @@ private:
 	bool
 		useRSRowImage_;  
 
+	util::Vector<int64_t> *distributedTarget_;
+	bool distributedTargetUncovered_;
+	bool distributedTargetReduced_;
+
 };
 
 
@@ -478,6 +485,92 @@ private:
 	const size_t txnMemoryLimit_;
 };
 
+class ResultSetHolderManager {
+public:
+	ResultSetHolderManager();
+	~ResultSetHolderManager();
+
+	void initialize(const PartitionGroupConfig &config);
+
+	void closeAll(TransactionContext &txn, DataStore &dataStore);
+	void closeAll(
+			util::StackAllocator &alloc, PartitionGroupId pgId,
+			DataStore &dataStore);
+
+	void add(PartitionId pId, ResultSetId rsId);
+	void setCloseable(PartitionId pId, ResultSetId rsId);
+	void release(PartitionId pId, ResultSetId rsId);
+
+private:
+	struct Entry;
+	struct Group;
+
+	typedef util::VariableSizeAllocator<> Allocator;
+	typedef std::pair<PartitionId, ResultSetId> EntryKey;
+	typedef std::pair<const EntryKey, Entry*> MapValue;
+	typedef util::Map<
+			EntryKey, Entry*, std::less<EntryKey>,
+			util::StdAllocator<MapValue, void> > Map;
+	typedef util::Vector< Group*, util::StdAllocator<Group*, void> > GroupList;
+
+	struct Entry {
+		explicit Entry(const EntryKey &key);
+
+		EntryKey key_;
+		Entry *next_;
+	};
+
+	struct Group {
+		explicit Group(Allocator &alloc);
+
+		Map map_;
+		util::Atomic<int64_t> version_;
+		int64_t checkedVersion_;
+		Entry *closeableEntry_;
+	};
+
+	ResultSetHolderManager(const ResultSetHolderManager &another);
+	ResultSetHolderManager& operator=(const ResultSetHolderManager &another);
+
+	void clear();
+	void clearEntries(Group &group, bool withMap);
+
+	void pullCloseable(
+			PartitionGroupId pgId, util::Vector<EntryKey> &keyList);
+
+	Group& getGroup(PartitionGroupId pgId);
+	PartitionGroupId getPartitionGroupId(PartitionId pId) const;
+
+	util::Mutex mutex_;
+	util::VariableSizeAllocator<> alloc_;
+	util::AllocUniquePtr<PartitionGroupConfig> config_;
+	GroupList groupList_;
+};
+
+class ResultSetHolder {
+public:
+	ResultSetHolder();
+	~ResultSetHolder();
+
+	bool isEmpty() const throw();
+	void assign(
+			ResultSetHolderManager &manager, PartitionId pId,
+			ResultSetId rsId);
+
+	void reset() throw();
+	void release() throw();
+
+private:
+	ResultSetHolder(const ResultSetHolder &another);
+	ResultSetHolder& operator=(const ResultSetHolder &another);
+
+	void clear() throw();
+
+	ResultSetHolderManager *manager_;
+	PartitionId pId_;
+	ResultSetId rsId_;
+};
+
 
 inline ResultSetGuard::ResultSetGuard(DataStore &dataStore, ResultSet &rs)
 	: dataStore_(dataStore),
@@ -494,4 +587,58 @@ inline ResultSetGuard::~ResultSetGuard() {
 	}
 	txnAlloc_.setTotalSizeLimit(txnMemoryLimit_);
 }
+
+inline ResultSetHolder::ResultSetHolder() :
+		manager_(NULL),
+		pId_(UNDEF_PARTITIONID),
+		rsId_(UNDEF_RESULTSETID) {
+}
+
+inline ResultSetHolder::~ResultSetHolder() {
+	reset();
+}
+
+inline bool ResultSetHolder::isEmpty() const throw() {
+	return (manager_ == NULL);
+}
+
+inline void ResultSetHolder::assign(
+		ResultSetHolderManager &manager, PartitionId pId,
+		ResultSetId rsId) {
+	reset();
+	manager.add(pId, rsId);
+
+	manager_ = &manager;
+	pId_ = pId;
+	rsId_ = rsId;
+}
+
+inline void ResultSetHolder::reset() throw() {
+	if (!isEmpty()) {
+		try {
+			manager_->setCloseable(pId_, rsId_);
+		}
+		catch (...) {
+		}
+		clear();
+	}
+}
+
+inline void ResultSetHolder::release() throw() {
+	if (!isEmpty()) {
+		try {
+			manager_->release(pId_, rsId_);
+		}
+		catch (...) {
+		}
+		clear();
+	}
+}
+
+inline void ResultSetHolder::clear() throw() {
+	manager_ = NULL;
+	pId_ = UNDEF_PARTITIONID;
+	rsId_ = UNDEF_RESULTSETID;
+}
+
 #endif

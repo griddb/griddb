@@ -32,6 +32,8 @@ class TimeSeries;
 class ColumnInfo;
 class MessageRowStore;
 class Value;
+class Geometry;
+class ArchiveHandler;
 
 /*!
 	@brief Field Value Wrapper
@@ -66,6 +68,12 @@ private:
 		Object object_;  
 	};
 	Member data_;
+	static const uint8_t defalutFixedValue_[8];
+	static const uint8_t defalutStringValue_[1];
+	static const uint8_t defalutFixedArrayValue_[2];
+	static const uint8_t defalutStringArrayValue_[13];
+	static const uint8_t defalutBlobValue_[2];
+	static const uint8_t defalutGeometryValue_[7];
 
 public:
 	Value() : type_(COLUMN_TYPE_STRING) {
@@ -120,6 +128,9 @@ public:
 		memcpy(target, &encodedSize, sizeLen);
 		memcpy(target + sizeLen, s, strSize);
 		data_.object_.set(target, false);
+	}
+	explicit Value(Geometry *geom) : type_(COLUMN_TYPE_GEOMETRY) {
+		data_.object_.set(geom, false);
 	}
 
 	inline void set(bool b) {
@@ -223,6 +234,17 @@ public:
 				return NULL;
 			}
 		} break;
+		case COLUMN_TYPE_GEOMETRY: {
+			if (data_.object_.value_ != NULL) {
+				const uint8_t *object =
+					reinterpret_cast<const uint8_t *>(data_.object_.value_);
+				uint32_t size = ValueProcessor::getEncodedVarSize(object);
+				return (object + size);  
+			}
+			else {
+				return NULL;
+			}
+		} break;
 		case COLUMN_TYPE_BLOB:
 		case COLUMN_TYPE_STRING_ARRAY:
 		case COLUMN_TYPE_BOOL_ARRAY:
@@ -263,6 +285,11 @@ public:
 			size = FixedSizeOfColumnType[type_];
 			break;
 		case COLUMN_TYPE_STRING: {
+			if (data_.object_.value_ != NULL) {
+				size = ValueProcessor::decodeVarSize(data_.object_.value_);
+			}
+		} break;
+		case COLUMN_TYPE_GEOMETRY: {
 			if (data_.object_.value_ != NULL) {
 				size = ValueProcessor::decodeVarSize(data_.object_.value_);
 			}
@@ -323,6 +350,10 @@ public:
 			return reinterpret_cast<const uint8_t *>(
 				data_.object_.value_);  
 			break;
+		case COLUMN_TYPE_GEOMETRY:
+			return reinterpret_cast<const uint8_t *>(
+				data_.object_.value_);  
+			break;
 		case COLUMN_TYPE_BLOB:
 		case COLUMN_TYPE_STRING_ARRAY:
 		case COLUMN_TYPE_BOOL_ARRAY:
@@ -362,6 +393,7 @@ public:
 			memset(&data_, 0, FixedSizeOfColumnType[type_]);
 			break;
 		case COLUMN_TYPE_STRING:
+		case COLUMN_TYPE_GEOMETRY:
 		case COLUMN_TYPE_BLOB:
 		case COLUMN_TYPE_STRING_ARRAY:
 		case COLUMN_TYPE_BOOL_ARRAY:
@@ -520,8 +552,10 @@ public:
 		MessageRowStore *messageRowStore,
 		ColumnId columnId);  
 
-	std::string dump(
-		TransactionContext &txn, ObjectManager &objectManager) const;
+	void archive(TransactionContext &txn, ObjectManager &objectManager, ArchiveHandler *handler) const;
+	void dump(
+		TransactionContext &txn, ObjectManager &objectManager, 
+		util::NormalOStringStream &stream, bool forExport = false) const;
 
 public:
 	inline void set(const void *data, ColumnType type) {
@@ -531,6 +565,7 @@ public:
 			memcpy(&data_, data, FixedSizeOfColumnType[type_]);
 		}
 		else if ((isArray() && type != COLUMN_TYPE_STRING_ARRAY)
+				 || type == COLUMN_TYPE_GEOMETRY
 				 || type == COLUMN_TYPE_STRING) {
 			data_.object_.set(data, true);
 		}
@@ -571,6 +606,75 @@ public:
 		data_.object_.set(const_cast<uint8_t *>(value), true);
 	}
 
+
+	static const void *getDefaultFixedValue(ColumnType type) {
+		return defalutFixedValue_;
+	}
+	static const void *getDefaultVariableValue(ColumnType type) {
+		switch (type) {
+		case COLUMN_TYPE_STRING:
+			return defalutStringValue_;
+			break;
+		case COLUMN_TYPE_GEOMETRY:
+			return defalutGeometryValue_;
+			break;
+		case COLUMN_TYPE_BLOB:
+			return defalutBlobValue_;
+			break;
+		case COLUMN_TYPE_STRING_ARRAY:
+			return defalutStringArrayValue_;
+			break;
+		case COLUMN_TYPE_BOOL_ARRAY:
+		case COLUMN_TYPE_BYTE_ARRAY:
+		case COLUMN_TYPE_SHORT_ARRAY:
+		case COLUMN_TYPE_INT_ARRAY:
+		case COLUMN_TYPE_LONG_ARRAY:
+		case COLUMN_TYPE_FLOAT_ARRAY:
+		case COLUMN_TYPE_DOUBLE_ARRAY:
+		case COLUMN_TYPE_TIMESTAMP_ARRAY:
+			return defalutFixedArrayValue_;
+			break;
+		default:
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
+			break;
+		}
+		return NULL;
+	}
+};
+
+/*!
+	@brief Object for Container field value
+*/
+class ContainerValue {
+public:
+	ContainerValue(PartitionId pId, ObjectManager &objectManager)
+		: baseObj_(pId, objectManager) {}
+	BaseObject &getBaseObject() {
+		return baseObj_;
+	}
+	const Value &getValue() {
+		return value_;
+	}
+	void set(const void *data, ColumnType type) {
+		value_.set(data, type);
+	}
+	void set(RowId rowId) {
+		value_.set(rowId);
+	}
+	void setNull() {
+		value_.setNull();
+	}
+	void init(ColumnType type) {
+		value_.init(type);
+	}
+private:
+	BaseObject baseObj_;
+	Value value_;
+
+private:
+	ContainerValue(const ContainerValue &);  
+	ContainerValue &operator=(
+		const ContainerValue &);  
 };
 
 typedef bool (*Operator)(TransactionContext &txn, uint8_t const *p,

@@ -803,6 +803,60 @@ void BoolExpr::toSearchContext(TransactionContext &txn,
 	sc.limit_ = (0 == restEval) ? limit : MAX_RESULT_SIZE;
 }
 
+/*!
+ * @brief transform and expressions into RtreeMap's SearchContext
+ *
+ */
+void BoolExpr::toSearchContext(TransactionContext &txn,
+	util::XArray<BoolExpr *> &andList, ColumnInfo *indexColumnInfo,
+	QueryForCollection &queryObj, RtreeMap::SearchContext &sc,
+	uint32_t &restEval, ResultSize limit) {
+	uint32_t cid = (indexColumnInfo == NULL) ? UNDEF_COLUMNID
+											 : indexColumnInfo->getColumnId();
+	sc = RtreeMap::SearchContext();
+	sc.conditionList_ =
+		reinterpret_cast<TermCondition *>(txn.getDefaultAllocator().allocate(
+			sizeof(TermCondition) * andList.size()));
+	sc.columnId_ = cid;
+	restEval = 0;
+
+	uint32_t dummySize;
+	int32_t dummyBool = 0, conditionDealed;
+//	uint32_t dummyColumnId = 0;
+	uint32_t dummyRelation = 0;
+	const void *r1 = NULL, *r2 = NULL;
+
+	for (size_t i = 0; i < andList.size(); i++) {
+		TermCondition *c = NULL;
+		conditionDealed = andList[i]->getCondition(txn, MAP_TYPE_SPATIAL,
+			sc.columnId_, queryObj, c, r1, dummyRelation, dummyBool, r2,
+			dummySize, dummyBool, sc.nullCond_);
+		if (c) {
+			sc.conditionList_[sc.conditionNum_++] = *c;
+		}
+		if (r1) {
+			sc.relation_ = dummyRelation;
+			if (sc.relation_ == GEOMETRY_QSF_INTERSECT) {
+				sc.pkey_ = *reinterpret_cast<const TrPv3Key *>(r1);
+			}
+			else {
+				sc.rect_[0] = *reinterpret_cast<const TrRectTag *>(r1);
+				if (r2) {
+					sc.rect_[1] = *reinterpret_cast<const TrRectTag *>(r2);
+				}
+			}
+			sc.columnId_ = indexColumnInfo->getColumnId();
+			sc.valid_ = true;
+		}
+		if (conditionDealed) {
+			andList[i]->enableEvaluationFilter();
+		}
+		else {
+			restEval++;
+		}
+	}
+	sc.limit_ = (0 == restEval) ? limit : MAX_RESULT_SIZE;
+}
 
 /*!
  * @brief transform and expressions into BtreeMap's SearchContext

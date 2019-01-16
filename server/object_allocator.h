@@ -191,6 +191,7 @@ public:
 	void dumpFreeChain(uint8_t *top, int32_t offset, int32_t k) const;
 	void dumpFreeChain(uint8_t *top, int32_t k) const;
 	std::string dump(uint8_t *chunk, int32_t level = 0) const;
+	std::string dumpDigest(uint8_t *chunk) const;
 	void dumpSummary(uint8_t *top,
 		std::map<int8_t, std::pair<uint32_t, uint32_t> > &typeStatMap,
 		uint64_t &summaryFreeSize, uint64_t &summaryUseSize) const;

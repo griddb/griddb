@@ -65,28 +65,42 @@ static const ChunkCategoryId ALLOCATE_EXPIRE_ROW = 4;
 
 static const AffinityGroupId DEFAULT_AFFINITY_GROUP_ID = 0;
 
+static const ExpireIntervalCategoryId DEFAULT_EXPIRE_CATEGORY_ID = 0;
+
 /*!
 	@brief Strategy for allocating object
 */
 struct AllocateStrategy {
 	ChunkKey chunkKey_;
 	ChunkCategoryId categoryId_;
+	ExpireIntervalCategoryId expireCategoryId_; 
 	AffinityGroupId affinityGroupId_;
 	AllocateStrategy()
 		: chunkKey_(UNDEF_CHUNK_KEY),
 		  categoryId_(ALLOCATE_META_CHUNK),
+		  expireCategoryId_(DEFAULT_EXPIRE_CATEGORY_ID),
 		  affinityGroupId_(DEFAULT_AFFINITY_GROUP_ID) {}
 	AllocateStrategy(ChunkCategoryId categoryId)
 		: chunkKey_(UNDEF_CHUNK_KEY),
 		  categoryId_(categoryId),
+		  expireCategoryId_(DEFAULT_EXPIRE_CATEGORY_ID),
 		  affinityGroupId_(DEFAULT_AFFINITY_GROUP_ID) {}
 	AllocateStrategy(ChunkCategoryId categoryId, AffinityGroupId groupId)
 		: chunkKey_(UNDEF_CHUNK_KEY),
 		  categoryId_(categoryId),
+		  expireCategoryId_(DEFAULT_EXPIRE_CATEGORY_ID),
+		  affinityGroupId_(groupId) {}
+	AllocateStrategy(ChunkCategoryId categoryId, AffinityGroupId groupId, 
+		ChunkKey chunkKey, ExpireIntervalCategoryId expireCategoryId)
+		: chunkKey_(chunkKey),
+		  categoryId_(categoryId),
+		  expireCategoryId_(expireCategoryId),
 		  affinityGroupId_(groupId) {}
 };
 
 static const uint32_t LIMIT_EXPIRATION_DIVIDE_NUM = 160;  
+static const uint32_t LIMIT_HICOMPRESSION_COLUMN_NUM =
+	100;  
 static const uint32_t LIMIT_COLUMN_NAME_SIZE = 256;  
 
 const ResultSize PARTIAL_RESULT_SIZE =
@@ -103,11 +117,11 @@ const ObjectType OBJECT_TYPE_TIME_SERIES_ROW = 6;
 const ObjectType OBJECT_TYPE_ROW_ARRAY = 7;
 const ObjectType OBJECT_TYPE_BTREE_MAP = 8;
 const ObjectType OBJECT_TYPE_HASH_MAP = 9;
-const ObjectType OBJECT_TYPE_RESERVED = 10;
+const ObjectType OBJECT_TYPE_COMPRESSIONINFO = 10;
 const ObjectType OBJECT_TYPE_EVENTLIST = 11;
 const ObjectType OBJECT_TYPE_VARIANT = 12;
 const ObjectType OBJECT_TYPE_CONTAINER_ID = 13;
-const ObjectType OBJECT_TYPE_RESERVED2 = 14;
+const ObjectType OBJECT_TYPE_RTREE_MAP = 14;
 const ObjectType OBJECT_TYPE_DSDC_VAL = 15;
 const ObjectType OBJECT_TYPE_VALUE_LIST = 16;
 const ObjectType OBJECT_TYPE_UNDEF = INT8_MAX;
@@ -124,8 +138,19 @@ enum CheckpointMode {
 	CP_UNDEF,
 	CP_NORMAL,
 	CP_REQUESTED,
+	CP_BACKUP,
+	CP_BACKUP_START,
+	CP_BACKUP_END,
 	CP_AFTER_RECOVERY,
 	CP_SHUTDOWN,
+	CP_BACKUP_WITH_LOG_ARCHIVE,
+	CP_BACKUP_WITH_LOG_DUPLICATE,
+	CP_ARCHIVE_LOG_START,
+	CP_ARCHIVE_LOG_END,
+	CP_INCREMENTAL_BACKUP_LEVEL_0,
+	CP_INCREMENTAL_BACKUP_LEVEL_1_CUMULATIVE,
+	CP_INCREMENTAL_BACKUP_LEVEL_1_DIFFERENTIAL,
+	CP_PREPARE_LONG_ARCHIVE,	
 	CP_PREPARE_LONGTERM_SYNC,	
 	CP_STOP_LONGTERM_SYNC		
 };
@@ -140,7 +165,7 @@ const ColumnType COLUMN_TYPE_LONG = 5;
 const ColumnType COLUMN_TYPE_FLOAT = 6;
 const ColumnType COLUMN_TYPE_DOUBLE = 7;
 const ColumnType COLUMN_TYPE_TIMESTAMP = 8;
-const ColumnType COLUMN_TYPE_RESERVED = 9;
+const ColumnType COLUMN_TYPE_GEOMETRY = 9;
 const ColumnType COLUMN_TYPE_BLOB = 10;
 const ColumnType COLUMN_TYPE_OID = 11;  
 const ColumnType COLUMN_TYPE_STRING_ARRAY = 12;
@@ -294,6 +319,13 @@ static const TimeUnit TIME_UNIT_MINUTE = 4;
 static const TimeUnit TIME_UNIT_SECOND = 5;
 static const TimeUnit TIME_UNIT_MILLISECOND = 6;
 
+enum ExpireType {
+	NO_EXPIRE,
+	ROW_EXPIRE,
+	TABLE_EXPIRE,
+	UNDEF_EXPIRE
+};
+
 /*!
 	@brief Represents the method(s) of aggregation operation on a set of Rows or
    their specific Columns
@@ -322,6 +354,15 @@ enum ResultType {
 	PARTIAL_RESULT_ROWSET = 3,  
 };
 
+/*!
+	@brief Defines the constraints on the relation between spatial ranges
+*/
+enum GeometryOperator {
+	GEOMETRY_INTERSECT = 0,			
+	GEOMETRY_INCLUDE = 1,			
+	GEOMETRY_DIFFERENTIAL = 2,		
+	GEOMETRY_QSF_INTERSECT = 0xF0,  
+};
 
 /*!
 	@brief Represents how to specify a Row based on a time-type key in a

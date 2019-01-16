@@ -43,14 +43,14 @@ static size_t time_binary_search(TransactionContext &txn,
 	midPos = highPos / 2;
 
 	found = false;
-	TimeSeries::RowArray rowArray(txn, &timeSeries);  
+	BaseContainer::RowArray rowArray(txn, &timeSeries);  
 	while (lowPos <= highPos) {
 		midPos = (lowPos + highPos) / 2;
 		rowArray.load(txn, resultRowIdList[midPos], &timeSeries,
 			OBJECT_READ_ONLY);  
-		TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
+		BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
 
-		ts = row.getTime();
+		ts = row.getRowId();
 		if (ts < targetTs) {
 			lowPos = midPos + 1;
 		}
@@ -65,9 +65,9 @@ static size_t time_binary_search(TransactionContext &txn,
 	}
 	rowArray.load(txn, resultRowIdList[midPos], &timeSeries,
 		OBJECT_READ_ONLY);  
-	TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
+	BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
 
-	ts = row.getTime();
+	ts = row.getRowId();
 	return midPos;
 }
 
@@ -116,11 +116,11 @@ int SelectionTimeFind<isJustInclude, isAscending>::operator()(
 	pos =
 		time_binary_search(txn, timeSeries, resultRowIdList, baseTs, found, ts);
 
+	BaseContainer::RowArray rowArray(txn, &timeSeries);  
 	if (isJustInclude && found) {
-		TimeSeries::RowArray rowArray(txn, &timeSeries);  
 		rowArray.load(txn, resultRowIdList[pos], &timeSeries,
 			OBJECT_READ_ONLY);  
-		TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
+		BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
 		row.getImage(txn, messageRowStore, false);					  
 		messageRowStore->next();									  
 		resultType = RESULT_ROWSET;
@@ -135,10 +135,9 @@ int SelectionTimeFind<isJustInclude, isAscending>::operator()(
 				if (resultRowIdList.size() == 1) return 0;  
 				pos++;
 			}
-			TimeSeries::RowArray rowArray(txn, &timeSeries);  
 			rowArray.load(txn, resultRowIdList[pos], &timeSeries,
 				OBJECT_READ_ONLY);  
-			TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
+			BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
 			row.getImage(txn, messageRowStore, false);					  
 			messageRowStore->next();									  
 			resultType = RESULT_ROWSET;
@@ -153,10 +152,9 @@ int SelectionTimeFind<isJustInclude, isAscending>::operator()(
 			if (!isJustInclude && ts == baseTs) {
 				pos--;
 			}
-			TimeSeries::RowArray rowArray(txn, &timeSeries);  
 			rowArray.load(txn, resultRowIdList[pos], &timeSeries,
 				OBJECT_READ_ONLY);  
-			TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
+			BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
 			row.getImage(txn, messageRowStore, false);					  
 			messageRowStore->next();									  
 			resultType = RESULT_ROWSET;
@@ -183,10 +181,9 @@ int SelectionTimeFind<isJustInclude, isAscending>::operator()(
 		}
 	}
 
-	TimeSeries::RowArray rowArray(txn, &timeSeries);  
 	rowArray.load(txn, resultRowIdList[pos], &timeSeries,
 		OBJECT_READ_ONLY);  
-	TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
+	BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
 	row.getImage(txn, messageRowStore, false);					  
 	messageRowStore->next();									  
 	resultType = RESULT_ROWSET;
@@ -201,7 +198,7 @@ int SelectionTimeFind<isJustInclude, isAscending>::operator()(
  */
 template <bool isJustInclude, bool isAscending>
 uint64_t SelectionTimeFind<isJustInclude, isAscending>::apiPassThrough(
-	TransactionContext &txn, TimeSeries &timeSeries, BtreeMap::SearchContext &,
+	TransactionContext &txn, TimeSeries &timeSeries, BtreeMap::SearchContext &sc,
 	OutputOrder, uint64_t, uint64_t offset, ExprList &args,
 	OutputMessageRowStore *messageRowStore, ResultType &resultType) {
 	TimeOperator timeOp;
@@ -255,16 +252,16 @@ uint64_t SelectionTimeFind<isJustInclude, isAscending>::apiPassThrough(
 	QP_SAFE_DELETE(tsExpr);
 
 	OId targetOId;
-	timeSeries.searchTimeOperator(txn, ts, timeOp, targetOId);
+	timeSeries.searchTimeOperator(txn, sc, ts, timeOp, targetOId);
 	if (UNDEF_OID == targetOId) {
 		resultNum = 0;
 		return 0;
 	}
 	resultNum = 1;
-	TimeSeries::RowArray rowArray(txn, &timeSeries);  
+	BaseContainer::RowArray rowArray(txn, &timeSeries);  
 	rowArray.load(
 		txn, targetOId, &timeSeries, OBJECT_READ_ONLY);  
-	TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
+	BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
 	row.getImage(txn, messageRowStore, false);					  
 	messageRowStore->next();									  
 	resultType = RESULT_ROWSET;
@@ -392,10 +389,10 @@ int SelectionTimeInterpolated::operator()(TransactionContext &txn,
 		time_binary_search(txn, timeSeries, resultRowIdList, baseTs, found, ts);
 
 	if (found) {
-		TimeSeries::RowArray rowArray(txn, &timeSeries);  
+		BaseContainer::RowArray rowArray(txn, &timeSeries);  
 		rowArray.load(txn, resultRowIdList[pos], &timeSeries,
 			OBJECT_READ_ONLY);  
-		TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
+		BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
 		row.getImage(txn, messageRowStore, false);					  
 		messageRowStore->next();									  
 		resultType = RESULT_ROWSET;
@@ -414,38 +411,39 @@ int SelectionTimeInterpolated::operator()(TransactionContext &txn,
 
 	Timestamp t1, t2;
 
-	TimeSeries::RowArray rowArray(txn, &timeSeries);  
+	BaseContainer::RowArray rowArray(txn, &timeSeries);  
 	rowArray.load(txn, resultRowIdList[pos - 1], &timeSeries,
 		OBJECT_READ_ONLY);  
-	TimeSeries::RowArray::Row row1(rowArray.getRow(), &rowArray);  
+	BaseContainer::RowArray::Row row1(rowArray.getRow(), &rowArray);  
 	rowArray.load(txn, resultRowIdList[pos], &timeSeries,
 		OBJECT_READ_ONLY);  
-	TimeSeries::RowArray::Row row2(rowArray.getRow(), &rowArray);  
+	BaseContainer::RowArray::Row row2(rowArray.getRow(), &rowArray);  
 
-	t1 = row1.getTime();
-	t2 = row2.getTime();  
+	t1 = row1.getRowId();
+	t2 = row2.getRowId();  
 	if (ts > t2) {
 		GS_THROW_USER_ERROR(GS_ERROR_TQ_TIM_SAMPLE_FAILED,
 			"Specified time is later than all timestamp in resultset.");
 	}
 
-	ContainerValue v1(txn, objectManager), v2(txn, objectManager);
+	ContainerValue v1(txn.getPartitionId(), objectManager);
+	ContainerValue v2(txn.getPartitionId(), objectManager);
 	ColumnInfo &interpolateColumnInfo =
 		timeSeries.getColumnInfo(columnId);  
 	rowArray.load(txn, resultRowIdList[pos - 1], &timeSeries,
 		OBJECT_READ_ONLY);  
-	TimeSeries::RowArray::Row row3(rowArray.getRow(), &rowArray);  
+	BaseContainer::RowArray::Row row3(rowArray.getRow(), &rowArray);  
 	row3.getField(txn, interpolateColumnInfo, v1);				   
 	rowArray.load(txn, resultRowIdList[pos], &timeSeries,
 		OBJECT_READ_ONLY);  
-	TimeSeries::RowArray::Row row4(rowArray.getRow(), &rowArray);  
+	BaseContainer::RowArray::Row row4(rowArray.getRow(), &rowArray);  
 	row4.getField(txn, interpolateColumnInfo, v2);				   
 
 	getInterpolatedValue(txn, baseTs, v1.getValue(), v2.getValue(), t1, t2, v);
 
 	rowArray.load(txn, resultRowIdList[pos - 1], &timeSeries,
 		OBJECT_READ_ONLY);  
-	TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
+	BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
 	row.getImage(txn, messageRowStore, false);					  
 	messageRowStore->setField(columnId, v);
 	Value timeVal(baseTs);
@@ -569,13 +567,13 @@ int SelectionTimeSampling::operator()(TransactionContext &txn,
 	if (currentTs > targetTs && i >= 1) {
 		i--;  
 	}
-	TimeSeries::RowArray rowArray(txn, &timeSeries);  
+	BaseContainer::RowArray rowArray(txn, &timeSeries);  
 	if (i >= 1) {
 		Value v;
 		rowArray.load(txn, resultRowIdList[i - 1], &timeSeries,
 			OBJECT_READ_ONLY);  
-		TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
-		prevTs = row.getTime();
+		BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
+		prevTs = row.getRowId();
 	}
 	else {
 		prevTs = -1;
@@ -595,8 +593,8 @@ int SelectionTimeSampling::operator()(TransactionContext &txn,
 		targetTs = dt.getUnixTime();
 		rowArray.load(txn, resultRowIdList[i], &timeSeries,
 			OBJECT_READ_ONLY);  
-		TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
-		currentTs = row.getTime();
+		BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
+		currentTs = row.getRowId();
 
 		if (i == 0) {
 			while (targetTs < currentTs) {
@@ -614,10 +612,10 @@ int SelectionTimeSampling::operator()(TransactionContext &txn,
 			tmpRow.key = targetTs;
 			if (columnId != UNDEF_COLUMNID) {
 				Value *v = QP_NEW Value();
-				ContainerValue currentContainerValue(txn, objectManager);
+				ContainerValue currentContainerValue(txn.getPartitionId(), objectManager);
 				rowArray.load(txn, resultRowIdList[i], &timeSeries,
 					OBJECT_READ_ONLY);  
-				TimeSeries::RowArray::Row row(
+				BaseContainer::RowArray::Row row(
 					rowArray.getRow(), &rowArray);  
 				row.getField(txn, timeSeries.getColumnInfo(columnId),
 					currentContainerValue);  
@@ -639,16 +637,17 @@ int SelectionTimeSampling::operator()(TransactionContext &txn,
 			tmpRow.key = targetTs;
 			if (columnId != UNDEF_COLUMNID) {
 				Value *v = QP_NEW Value();
-				ContainerValue v1(txn, objectManager), v2(txn, objectManager);
+				ContainerValue v1(txn.getPartitionId(), objectManager);
+				ContainerValue v2(txn.getPartitionId(), objectManager);
 				rowArray.load(txn, resultRowIdList[i - 1], &timeSeries,
 					OBJECT_READ_ONLY);  
-				TimeSeries::RowArray::Row row1(
+				BaseContainer::RowArray::Row row1(
 					rowArray.getRow(), &rowArray);  
 				row1.getField(
 					txn, timeSeries.getColumnInfo(columnId), v1);  
 				rowArray.load(txn, resultRowIdList[i], &timeSeries,
 					OBJECT_READ_ONLY);  
-				TimeSeries::RowArray::Row row2(
+				BaseContainer::RowArray::Row row2(
 					rowArray.getRow(), &rowArray);  
 				row2.getField(
 					txn, timeSeries.getColumnInfo(columnId), v2);  
@@ -693,7 +692,7 @@ int SelectionTimeSampling::operator()(TransactionContext &txn,
 	for (uint32_t i = 0; i < starIdList.size(); ++i) {
 		rowArray.load(txn, starIdList[i], &timeSeries,
 			OBJECT_READ_ONLY);  
-		TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
+		BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
 		row.getImage(txn, messageRowStore, false);					  
 		Value v1, v2;
 		v1.setTimestamp(arRowList[i].key);
@@ -1021,12 +1020,11 @@ int SelectionMaxMinRows<aggregateType>::execute(TransactionContext &txn,
 	util::XArray<PointRowId> maxMinPosList(
 		txn.getDefaultAllocator());  
 	ObjectManager &objectManager = *(container->getObjectManager());
+	BaseContainer::RowArray rowArray(txn, container);
 	for (size_t i = 0; i < resultRowIdList.size(); i++) {
-		typename R::RowArray rowArray(txn, resultRowIdList[i],
-			reinterpret_cast<R *>(container),
-			OBJECT_READ_ONLY);  
-		typename R::RowArray::Row row(rowArray.getRow(), &rowArray);  
-		ContainerValue currentContainerValue(txn, objectManager);
+		rowArray.load(txn, resultRowIdList[i], container, OBJECT_READ_ONLY);  
+		BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
+		ContainerValue currentContainerValue(txn.getPartitionId(), objectManager);
 		row.getField(txn, columnInfo, currentContainerValue);  
 		if (currentContainerValue.getValue().isNullValue()) {
 		}
@@ -1074,10 +1072,8 @@ int SelectionMaxMinRows<aggregateType>::execute(TransactionContext &txn,
 	uint64_t resultNum = maxMinPosList.size();
 
 	for (size_t i = 0; i < maxMinPosList.size(); ++i) {
-		typename R::RowArray rowArray(txn, maxMinPosList[i],
-			reinterpret_cast<R *>(container),
-			OBJECT_READ_ONLY);  
-		typename R::RowArray::Row row(rowArray.getRow(), &rowArray);  
+		rowArray.load(txn, maxMinPosList[i], container, OBJECT_READ_ONLY);  
+		BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
 		if (container->getContainerType() == TIME_SERIES_CONTAINER) {  
 			row.getImage(txn, messageRowStore, false);				   
 		}

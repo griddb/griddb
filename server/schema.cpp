@@ -22,6 +22,7 @@
 #include "btree_map.h"
 #include "data_store.h"
 #include "hash_map.h"
+#include "rtree_map.h"
 #include "message_schema.h"
 #include "value_processor.h"
 
@@ -428,16 +429,22 @@ void ColumnInfo::initialize() {
 
 void ColumnInfo::set(TransactionContext &txn, ObjectManager &objectManager,
 	uint32_t toColumnId, uint32_t fromColumnId, MessageSchema *messageSchema,
-	const AllocateStrategy &allocateStrategy) {
+	const AllocateStrategy &allocateStrategy, bool onMemory) {
 	columnId_ = static_cast<uint16_t>(toColumnId);
 
 	const util::String &columnName = messageSchema->getColumnName(fromColumnId);
 	uint32_t size = static_cast<uint32_t>(columnName.size());
 
-	BaseObject stringObject(txn.getPartitionId(), objectManager);
-	char *stringPtr = stringObject.allocate<char>(
-		size + 1, allocateStrategy, columnNameOId_, OBJECT_TYPE_VARIANT);
-	memcpy(stringPtr, columnName.c_str(), size + 1);
+	char *stringPtr = NULL;
+	if (onMemory) {
+		columnNameOnMemory_ = static_cast<char *>(txn.getDefaultAllocator().allocate(size + 1));
+		strcpy(columnNameOnMemory_, columnName.c_str());
+	} else {
+		BaseObject stringObject(txn.getPartitionId(), objectManager);
+		stringPtr = stringObject.allocate<char>(
+			size + 1, allocateStrategy, columnNameOId_, OBJECT_TYPE_VARIANT);
+		memcpy(stringPtr, columnName.c_str(), size + 1);
+	}
 
 	setType(messageSchema->getColumnType(fromColumnId),
 		messageSchema->getIsArray(fromColumnId));
@@ -492,6 +499,25 @@ void ColumnInfo::getSchema(TransactionContext &txn,
 	schema.push_back(reinterpret_cast<uint8_t *>(&flag), sizeof(uint8_t));
 }
 
+void MessageCompressionInfo::initialize() {
+	type_ = NONE;
+	threshhold_ = 0;
+	threshholdRelative_ = 0;
+	rate_ = 0;
+	span_ = 0;
+}
+
+void MessageCompressionInfo::set(CompressionType type, bool threshholdRelative,
+	double threshhold, double rate, double span) {
+	type_ = type;
+	threshholdRelative_ = threshholdRelative;
+	threshhold_ = threshhold;
+	rate_ = rate;
+	span_ = span;
+}
+
+void MessageCompressionInfo::finalize() {
+}
 
 std::string ColumnInfo::dump(
 	TransactionContext &txn, ObjectManager &objectManager) {
@@ -513,7 +539,10 @@ std::string ColumnInfo::dump(
 */
 void ColumnSchema::initialize(uint32_t columnNum) {
 	columnNum_ = columnNum;
-	rowFixedSize_ = 0;
+	rowFixedColumnSize_ = 0;
+	firstColumnNum_ = 0;
+	firstVarColumnNum_ = 0;
+	firstRowFixedColumnSize_ = 0;
 }
 
 /*!
@@ -531,7 +560,8 @@ void ColumnSchema::finalize(
 	@brief Set Column layout
 */
 void ColumnSchema::set(TransactionContext &txn, ObjectManager &objectManager,
-	MessageSchema *messageSchema, const AllocateStrategy &allocateStrategy) {
+	MessageSchema *messageSchema, const AllocateStrategy &allocateStrategy,
+	bool onMemory) {
 	ColumnInfo *columnInfoList = getColumnInfoList();
 	if (!messageSchema->getRowKeyColumnIdList().empty()) {
 		ColumnId messageRowKeyColumnId = messageSchema->getRowKeyColumnIdList().front();
@@ -541,7 +571,7 @@ void ColumnSchema::set(TransactionContext &txn, ObjectManager &objectManager,
 			if (i == messageRowKeyColumnId) {
 				columnInfoList[0].initialize();
 				columnInfoList[0].set(
-					txn, objectManager, 0, i, messageSchema, allocateStrategy);
+					txn, objectManager, 0, i, messageSchema, allocateStrategy, onMemory);
 				if (!hasVariableColumn && columnInfoList[0].isVariable()) {
 					hasVariableColumn = true;
 				}
@@ -549,7 +579,7 @@ void ColumnSchema::set(TransactionContext &txn, ObjectManager &objectManager,
 			else {
 				columnInfoList[columnId].initialize();
 				columnInfoList[columnId].set(txn, objectManager, columnId, i,
-					messageSchema, allocateStrategy);
+					messageSchema, allocateStrategy, onMemory);
 				if (!hasVariableColumn &&
 					columnInfoList[columnId].isVariable()) {
 					hasVariableColumn = true;
@@ -560,7 +590,7 @@ void ColumnSchema::set(TransactionContext &txn, ObjectManager &objectManager,
 		uint32_t nullsAndVarOffset =
 			ValueProcessor::calcNullsByteSize(columnNum_) +
 			(hasVariableColumn ? sizeof(OId) : 0);
-		rowFixedSize_ = 0;
+		rowFixedColumnSize_ = 0;
 		uint16_t variableColumnIndex = 0;  
 		for (uint16_t i = 0; i < columnNum_; i++) {
 			if (columnInfoList[i].isVariable()) {
@@ -569,8 +599,8 @@ void ColumnSchema::set(TransactionContext &txn, ObjectManager &objectManager,
 				++variableColumnIndex;
 			}
 			else {
-				columnInfoList[i].setOffset(nullsAndVarOffset + rowFixedSize_);
-				rowFixedSize_ += columnInfoList[i].getColumnSize();
+				columnInfoList[i].setOffset(nullsAndVarOffset + rowFixedColumnSize_);
+				rowFixedColumnSize_ += columnInfoList[i].getColumnSize();
 			}
 		}
 		variableColumnNum_ = variableColumnIndex;
@@ -582,15 +612,16 @@ void ColumnSchema::set(TransactionContext &txn, ObjectManager &objectManager,
 		for (uint16_t i = 0; i < columnNum_; i++) {
 			columnInfoList[i].initialize();
 			columnInfoList[i].set(
-				txn, objectManager, i, i, messageSchema, allocateStrategy);
+				txn, objectManager, i, i, messageSchema, allocateStrategy,
+				onMemory);
 			if (columnInfoList[i].isVariable()) {
 				columnInfoList[i].setOffset(
 					variableColumnIndex);  
 				++variableColumnIndex;
 			}
 			else {
-				columnInfoList[i].setOffset(nullsAndVarOffset + rowFixedSize_);
-				rowFixedSize_ += columnInfoList[i].getColumnSize();
+				columnInfoList[i].setOffset(nullsAndVarOffset + rowFixedColumnSize_);
+				rowFixedColumnSize_ += columnInfoList[i].getColumnSize();
 			}
 		}
 		variableColumnNum_ = variableColumnIndex;
@@ -598,12 +629,12 @@ void ColumnSchema::set(TransactionContext &txn, ObjectManager &objectManager,
 		if (variableColumnIndex > 0) {
 			nullsAndVarOffset =
 				ValueProcessor::calcNullsByteSize(columnNum_) + sizeof(OId);
-			rowFixedSize_ = 0;
+			rowFixedColumnSize_ = 0;
 			for (uint16_t i = 0; i < columnNum_; i++) {
 				if (!columnInfoList[i].isVariable()) {
 					columnInfoList[i].setOffset(
-						nullsAndVarOffset + rowFixedSize_);
-					rowFixedSize_ += columnInfoList[i].getColumnSize();
+						nullsAndVarOffset + rowFixedColumnSize_);
+					rowFixedColumnSize_ += columnInfoList[i].getColumnSize();
 				}
 			}
 		}
@@ -619,6 +650,11 @@ void ColumnSchema::set(TransactionContext &txn, ObjectManager &objectManager,
 			*rowKeyNumPtr = columnId;
 			rowKeyNumPtr++;
 		}
+	}
+	uint32_t columnNum, varColumnNum, rowFixedColumnSize;
+	messageSchema->getFirstSchema(columnNum, varColumnNum, rowFixedColumnSize);
+	if (columnNum != 0) {
+		setFirstSchema(columnNum, varColumnNum, rowFixedColumnSize);
 	}
 }
 
@@ -681,6 +717,18 @@ bool ColumnSchema::schemaCheck(TransactionContext &txn,
 		isSameSchema = false;
 	}
 	if (isSameSchema) {
+		uint32_t firstColumnNum, newFirstColumnNum;
+		uint32_t firstVarColumnNum, newFirstVarColumnNum;
+		uint32_t firstRowFixedColumnSize, newFirstRowFixedColumnSize;
+		messageSchema->getFirstSchema(newFirstColumnNum, newFirstVarColumnNum, newFirstRowFixedColumnSize);
+		getFirstSchema(firstColumnNum, firstVarColumnNum, firstRowFixedColumnSize);
+		if (newFirstColumnNum != firstColumnNum || 
+			firstVarColumnNum != newFirstVarColumnNum || 
+			firstRowFixedColumnSize != newFirstRowFixedColumnSize) {
+			isSameSchema = false;
+		}
+	}
+	if (isSameSchema) {
 		util::XArray<ColumnId> keyColumnIdList(txn.getDefaultAllocator());
 		getKeyColumnIdList(keyColumnIdList);
 		const util::XArray<ColumnId> &schemaKeyColumnIdList = messageSchema->getRowKeyColumnIdList();
@@ -741,10 +789,16 @@ bool ColumnSchema::schemaCheck(TransactionContext &txn,
 	@brief Allocate IndexSchema Object
 */
 void IndexSchema::initialize(
-	TransactionContext &txn, uint16_t reserveNum, uint16_t indexNum, uint32_t columnNum) {
-	uint8_t bitsSize = RowNullBits::calcBitsSize(columnNum);
-	BaseObject::allocate<uint8_t>(IndexSchema::getAllocateSize(reserveNum, bitsSize),
-		allocateStrategy_, getBaseOId(), OBJECT_TYPE_COLUMNINFO);
+	TransactionContext &txn, uint16_t reserveNum, uint16_t indexNum, uint32_t columnNum, 
+	bool onMemory) {
+	uint16_t bitsSize = RowNullBits::calcBitsSize(columnNum);
+	if (onMemory) {
+		void *binary = txn.getDefaultAllocator().allocate(IndexSchema::getAllocateSize(reserveNum, bitsSize));
+		setBaseAddr(static_cast<uint8_t *>(binary));
+	} else {
+		BaseObject::allocate<uint8_t>(IndexSchema::getAllocateSize(reserveNum, bitsSize),
+			allocateStrategy_, getBaseOId(), OBJECT_TYPE_COLUMNINFO);
+	}
 	memset(getBaseAddr(), 0, IndexSchema::getAllocateSize(reserveNum, bitsSize));
 	setNullbitsSize(bitsSize);
 
@@ -824,6 +878,13 @@ IndexData IndexSchema::createIndexData(TransactionContext &txn, ColumnId columnI
 			container->getMetaAllcateStrategy(), isUnique);
 		oId = map.getBaseOId();
 	} break;
+	case MAP_TYPE_SPATIAL: {
+		RtreeMap map(txn, *getObjectManager(),
+			container->getMapAllcateStrategy(), container);
+		map.initialize(txn, columnType, columnId,
+			container->getMetaAllcateStrategy(), isUnique);
+		oId = map.getBaseOId();
+	} break;
 	default:
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
 	}
@@ -834,6 +895,19 @@ IndexData IndexSchema::createIndexData(TransactionContext &txn, ColumnId columnI
 	setIndexData(txn, nth, containerPos, indexData);
 
 	return indexData;
+}
+
+void IndexSchema::createDummyIndexData(TransactionContext &txn,
+	ColumnId columnId, MapType mapType, uint64_t containerPos) {
+	setDirty();
+
+	OId oId = UNDEF_OID;
+	IndexData indexData;
+	uint16_t nth = getNth(columnId, mapType);
+	getIndexData(txn, nth, UNDEF_CONTAINER_POS, indexData);
+	indexData.oIds_.mainOId_ = oId;
+	uint8_t *indexDataPos =	getElemHead() + (getIndexDataSize() * nth);
+	setMapOIds(txn, indexDataPos, containerPos, indexData.oIds_);
 }
 
 /*!
@@ -926,6 +1000,10 @@ IndexTypes IndexSchema::getIndexTypes(
 	if (getIndexData(txn, columnId, MAP_TYPE_HASH, UNDEF_CONTAINER_POS,
 		withUncommitted, indexData)) {
 		indexType |= (1 << MAP_TYPE_HASH);
+	}
+	if (getIndexData(txn, columnId, MAP_TYPE_SPATIAL, UNDEF_CONTAINER_POS, 
+		withUncommitted, indexData)) {
+		indexType |= (1 << MAP_TYPE_SPATIAL);
 	}
 	return indexType;
 }
@@ -1133,15 +1211,187 @@ void IndexSchema::expand(TransactionContext &txn) {
 	setNum(orgIndexNum);
 	setReserveNum(newReserveIndexNum);
 }
+bool IndexSchema::expandNullStats(TransactionContext &txn, uint32_t oldColumnNum, uint32_t newColumnNum) {
+	uint16_t oldNullBitsSize = RowNullBits::calcBitsSize(oldColumnNum);
+	uint16_t newNullBitsSize = RowNullBits::calcBitsSize(newColumnNum);
+	if (oldNullBitsSize == newNullBitsSize) {
+		return false;
+	}
 
+	setDirty();
+	uint16_t reserveIndexNum = getReserveNum();
+	OId duplicateOId;
+
+	uint8_t *toIndexSchema = getObjectManager()->allocate<uint8_t>(
+		txn.getPartitionId(), getAllocateSize(reserveIndexNum, newNullBitsSize),
+		allocateStrategy_, duplicateOId, OBJECT_TYPE_COLUMNINFO);
+	memset(toIndexSchema, 0, getAllocateSize(reserveIndexNum, newNullBitsSize));
+	memcpy(toIndexSchema + NULL_STAT_OFFSET, getBaseAddr() + NULL_STAT_OFFSET, oldNullBitsSize);
+	memcpy(toIndexSchema + NULL_STAT_OFFSET + newNullBitsSize, 
+		getBaseAddr() + NULL_STAT_OFFSET + oldNullBitsSize, 
+		INDEX_HEADER_SIZE + getIndexDataSize() * reserveIndexNum);
+
+	BaseObject::finalize();
+
+	setBaseOId(duplicateOId);
+	setBaseAddr(toIndexSchema);
+	setNullbitsSize(newNullBitsSize);
+
+	return true;
+}
+
+void CompressionSchema::addHiCompression(uint16_t pos, ColumnId columnId,
+	double threshhold, double rate, double span, bool threshholdRelative) {
+	HiCompressionData *hiCompressionDataList = getHiCompressionDataList();
+	hiCompressionDataList[pos].initialize(
+		columnId, threshhold, rate, span, threshholdRelative);
+	hiCompressionColumnNum_++;
+}
+
+bool CompressionSchema::isHiCompression(ColumnId columnId) const {
+	bool isFound = false;
+	HiCompressionData *hiCompressionDataList = getHiCompressionDataList();
+	for (uint16_t i = 0; i < hiCompressionColumnNum_; i++) {
+		if (hiCompressionDataList[i].getColumnId() == columnId) {
+			isFound = true;
+			break;
+		}
+	}
+	return isFound;
+}
+
+void CompressionSchema::getHiCompressionColumnList(
+	util::XArray<ColumnId> &list) const {
+	HiCompressionData *hiCompressionDataList = getHiCompressionDataList();
+	for (uint16_t i = 0; i < hiCompressionColumnNum_; i++) {
+		list.push_back(hiCompressionDataList[i].getColumnId());
+	}
+}
+
+void CompressionSchema::getHiCompressionProperty(ColumnId columnId,
+	double &threshhold, double &rate, double &span, bool &threshholdRelative,
+	uint16_t &compressionPos) const {
+	bool isFound = false;
+	uint16_t i = 0;
+	HiCompressionData *hiCompressionDataList = getHiCompressionDataList();
+	for (; i < hiCompressionColumnNum_; i++) {
+		if (hiCompressionDataList[i].getColumnId() == columnId) {
+			isFound = true;
+			break;
+		}
+	}
+	if (!isFound) {
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_HICOMPRESSION_INVALID, "");
+	}
+	compressionPos = i;
+	hiCompressionDataList[compressionPos].getProperty(
+		threshhold, rate, span, threshholdRelative);
+}
+
+bool CompressionSchema::schemaCheck(
+	TransactionContext &, MessageTimeSeriesSchema *messageSchema) {
+	uint32_t columnNum = messageSchema->getColumnCount();
+
+	if (messageSchema->getCompressionType() != getCompressionType()) {
+		return false;
+	}
+
+	if (getCompressionType() != NO_COMPRESSION) {
+		if (getDurationInfo().timeDuration_ !=
+			messageSchema->getDurationInfo().timeDuration_) {
+			return false;
+		}
+		if (getDurationInfo().timeUnit_ !=
+			messageSchema->getDurationInfo().timeUnit_) {
+			return false;
+		}
+
+		if (messageSchema->getCompressionInfoNum() != 0) {
+			for (uint32_t i = 0; i < columnNum; i++) {
+				MessageCompressionInfo::CompressionType type =
+					messageSchema->getCompressionInfo(i).getType();
+				bool threshholdRelative = messageSchema->getCompressionInfo(i)
+											  .getThreshholdRelative();
+				double threshhold =
+					messageSchema->getCompressionInfo(i).getThreshhold();
+				double rate = messageSchema->getCompressionInfo(i).getRate();
+				double span = messageSchema->getCompressionInfo(i).getSpan();
+
+				if (type != MessageCompressionInfo::NONE) {
+					if (isHiCompression(i)) {
+						double oldThreshhold, oldRate, oldSpan;
+						bool oldThreshholdRelative;
+						uint16_t compressionPos;
+						getHiCompressionProperty(i, oldThreshhold, oldRate,
+							oldSpan, oldThreshholdRelative, compressionPos);
+
+						if (oldThreshholdRelative != threshholdRelative) {
+							return false;
+						}
+						if (oldThreshhold != threshhold) {
+							return false;
+						}
+						if (oldRate != rate) {
+							return false;
+						}
+						if (oldSpan != span) {
+							return false;
+						}
+					}
+					else {
+						return false;
+					}
+				}
+			}
+		}
+	}
+	return true;
+}
+
+int64_t CompressionSchema::calcHash(MessageTimeSeriesSchema *messageSchema) {
+	int64_t hashVal = 0;
+	uint32_t columnNum = messageSchema->getColumnCount();
+
+	hashVal += messageSchema->getCompressionType();
+	if (messageSchema->getCompressionType() != NO_COMPRESSION) {
+		hashVal += messageSchema->getDurationInfo().getHashVal();
+
+		if (messageSchema->getCompressionInfoNum() != 0) {
+			for (uint32_t i = 0; i < columnNum; i++) {
+				MessageCompressionInfo::CompressionType type =
+					messageSchema->getCompressionInfo(i).getType();
+				bool threshholdRelative = messageSchema->getCompressionInfo(i)
+											  .getThreshholdRelative();
+				double threshhold =
+					messageSchema->getCompressionInfo(i).getThreshhold();
+				double rate = messageSchema->getCompressionInfo(i).getRate();
+				double span = messageSchema->getCompressionInfo(i).getSpan();
+
+				if (type != MessageCompressionInfo::NONE) {
+					hashVal += static_cast<int64_t>(i);
+					hashVal += static_cast<int64_t>(threshholdRelative);
+					hashVal += static_cast<int64_t>(threshhold * 100);
+					hashVal += static_cast<int64_t>(rate * 100);
+					hashVal += static_cast<int64_t>(span * 100);
+				}
+			}
+		}
+	}
+	return hashVal;
+}
 
 /*!
 	@brief Allocate ShareValueList Object
 */
 void ShareValueList::initialize(TransactionContext &txn, uint32_t allocateSize,
-	const AllocateStrategy &allocateStrategy) {
-	BaseObject::allocate<uint8_t>(
-		allocateSize, allocateStrategy, getBaseOId(), OBJECT_TYPE_CONTAINER_ID);
+	const AllocateStrategy &allocateStrategy, bool onMemory) {
+	if (onMemory) {
+		void *binary = txn.getDefaultAllocator().allocate(allocateSize);
+		setBaseAddr(static_cast<uint8_t *>(binary));
+	} else {
+		BaseObject::allocate<uint8_t>(
+			allocateSize, allocateStrategy, getBaseOId(), OBJECT_TYPE_CONTAINER_ID);
+	}
 	memset(getBaseAddr(), 0, allocateSize);
 
 	*getHashValPtr() = 0;
@@ -1188,12 +1438,16 @@ uint8_t *ShareValueList::put(
 }
 
 template ColumnSchema *ShareValueList::get(CONTAINER_META_TYPE type) const;
-template TimeSeries::ExpirationInfo *ShareValueList::get(
+template CompressionSchema *ShareValueList::get(CONTAINER_META_TYPE type) const;
+template BaseContainer::ExpirationInfo *ShareValueList::get(
 	CONTAINER_META_TYPE type) const;
 template char *ShareValueList::get(CONTAINER_META_TYPE type) const;
 template TriggerList *ShareValueList::get(CONTAINER_META_TYPE type) const;
 template ContainerAttribute *ShareValueList::get(
 	CONTAINER_META_TYPE type) const;
+template BaseContainer::ContainerExpirationInfo *ShareValueList::get(
+	CONTAINER_META_TYPE type) const;
+
 template <typename K>
 K *ShareValueList::get(CONTAINER_META_TYPE type) const {
 	for (int32_t i = 0; i < getNum(); ++i) {
@@ -1519,5 +1773,577 @@ void LinkArray<H, V>::dump(TransactionContext &txn) {
 			std::cout << "[" << counter << "]" << *value << std::endl;
 			counter++;
 		}
+	}
+}
+
+
+const char *BibInfoUtil::CONTAINER_TYPE_COLLECTION_STR = "COLLECTION";
+const char *BibInfoUtil::CONTAINER_TYPE_TIMESERIES_STR = "TIME_SERIES";
+
+const char *BibInfoUtil::COLUMN_TYPE_BOOL_STR = "BOOL";
+const char *BibInfoUtil::COLUMN_TYPE_BYTE_STR = "BYTE";
+const char *BibInfoUtil::COLUMN_TYPE_SHORT_STR = "SHORT";
+const char *BibInfoUtil::COLUMN_TYPE_INT_STR = "INTEGER";
+const char *BibInfoUtil::COLUMN_TYPE_LONG_STR = "LONG";
+const char *BibInfoUtil::COLUMN_TYPE_FLOAT_STR = "FLOAT";
+const char *BibInfoUtil::COLUMN_TYPE_DOUBLE_STR = "DOUBLE";
+const char *BibInfoUtil::COLUMN_TYPE_TIMESTAMP_STR = "TIMESTAMP";
+const char *BibInfoUtil::COLUMN_TYPE_STRING_STR = "STRING";
+const char *BibInfoUtil::COLUMN_TYPE_GEOMETRY_STR = "GEOMETRY";
+const char *BibInfoUtil::COLUMN_TYPE_BLOB_STR = "BLOB";
+const char *BibInfoUtil::COLUMN_TYPE_STRING_ARRAY_STR = "STRING[]";
+const char *BibInfoUtil::COLUMN_TYPE_BOOL_ARRAY_STR = "BOOL[]";
+const char *BibInfoUtil::COLUMN_TYPE_BYTE_ARRAY_STR = "BYTE[]";
+const char *BibInfoUtil::COLUMN_TYPE_SHORT_ARRAY_STR = "SHORT[]";
+const char *BibInfoUtil::COLUMN_TYPE_INT_ARRAY_STR = "INTEGER[]";
+const char *BibInfoUtil::COLUMN_TYPE_LONG_ARRAY_STR = "LONG[]";
+const char *BibInfoUtil::COLUMN_TYPE_FLOAT_ARRAY_STR = "FLOAT[]";
+const char *BibInfoUtil::COLUMN_TYPE_DOUBLE_ARRAY_STR = "DOUBLE[]";
+const char *BibInfoUtil::COLUMN_TYPE_TIMESTAMP_ARRAY_STR = "TIMESTAMP[]";
+
+const char *BibInfoUtil::TIME_UNIT_DAY_STR = "DAY";
+const char *BibInfoUtil::TIME_UNIT_HOUR_STR = "HOUR";
+const char *BibInfoUtil::TIME_UNIT_MINUTE_STR = "MINUTE";
+const char *BibInfoUtil::TIME_UNIT_SECOND_STR = "SECOND";
+const char *BibInfoUtil::TIME_UNIT_MILLISECOND_STR = "MILLISECOND";
+
+const char *BibInfoUtil::NO_COMPRESSION_STR = "NO";
+const char *BibInfoUtil::SS_COMPRESSION_STR = "SS";
+const char *BibInfoUtil::HI_COMPRESSION_STR = "HI";
+
+TimeUnit BibInfoUtil::getTimeUnit(const char *str) {
+	TimeUnit unit = TIME_UNIT_DAY;
+	if (strcmp(str, TIME_UNIT_DAY_STR) == 0) {
+		unit = TIME_UNIT_DAY;
+	}
+	else if (strcmp(str, TIME_UNIT_HOUR_STR) == 0) {
+		unit = TIME_UNIT_HOUR;
+	}
+	else if (strcmp(str, TIME_UNIT_MINUTE_STR) == 0) {
+		unit = TIME_UNIT_MINUTE;
+	}
+	else if (strcmp(str, TIME_UNIT_SECOND_STR) == 0) {
+		unit = TIME_UNIT_SECOND;
+	}
+	else if (strcmp(str, TIME_UNIT_MILLISECOND_STR) == 0) {
+		unit = TIME_UNIT_MILLISECOND;
+	}
+	else {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
+			"Unknown Timeunit : " << str);
+	}
+	return unit;
+}
+
+const char *BibInfoUtil::getTimeUnitStr(TimeUnit unit) {
+	const char *unitStr = NULL;
+	switch (unit) {
+	case TIME_UNIT_DAY:
+		unitStr = TIME_UNIT_DAY_STR;
+		break;
+	case TIME_UNIT_HOUR:
+		unitStr = TIME_UNIT_HOUR_STR;
+		break;
+	case TIME_UNIT_MINUTE:
+		unitStr = TIME_UNIT_MINUTE_STR;
+		break;
+	case TIME_UNIT_SECOND:
+		unitStr = TIME_UNIT_SECOND_STR;
+		break;
+	case TIME_UNIT_MILLISECOND:
+		unitStr = TIME_UNIT_MILLISECOND_STR;
+		break;
+	default:
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
+			"Unknown Timeunit : " << unit);
+		break;
+	}
+	return unitStr;
+}
+
+COMPRESSION_TYPE BibInfoUtil::getCompressionType(const char *str) {
+	COMPRESSION_TYPE type = TIME_UNIT_DAY;
+	if (strcmp(str, NO_COMPRESSION_STR) == 0) {
+		type = NO_COMPRESSION;
+	}
+	else if (strcmp(str, SS_COMPRESSION_STR) == 0) {
+		type = SS_COMPRESSION;
+	}
+	else if (strcmp(str, HI_COMPRESSION_STR) == 0) {
+		type = HI_COMPRESSION;
+	}
+	else {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
+			"Unknown CompressionType : " << str);
+	}
+	return type;
+}
+
+const char *BibInfoUtil::getCompressionTypeStr(COMPRESSION_TYPE type) {
+	const char *typeStr = NULL;
+	switch (type) {
+	case NO_COMPRESSION:
+		typeStr = NO_COMPRESSION_STR;
+		break;
+	case SS_COMPRESSION:
+		typeStr = SS_COMPRESSION_STR;
+		break;
+	case HI_COMPRESSION:
+		typeStr = HI_COMPRESSION_STR;
+		break;
+	default:
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
+			"Unknown CompressionType : " << type);
+		break;
+	}
+	return typeStr;
+}
+
+ColumnType BibInfoUtil::getColumnType(const char *str) {
+	ColumnType type = COLUMN_TYPE_ANY;
+	if (strcmp(str, COLUMN_TYPE_BOOL_STR) == 0) {
+		type = COLUMN_TYPE_BOOL;
+	}
+	else if (strcmp(str, COLUMN_TYPE_BYTE_STR) == 0) {
+		type = COLUMN_TYPE_BYTE;
+	}
+	else if (strcmp(str, COLUMN_TYPE_SHORT_STR) == 0) {
+		type = COLUMN_TYPE_SHORT;
+	}
+	else if (strcmp(str, COLUMN_TYPE_INT_STR) == 0) {
+		type = COLUMN_TYPE_INT;
+	}
+	else if (strcmp(str, COLUMN_TYPE_LONG_STR) == 0) {
+		type = COLUMN_TYPE_LONG;
+	}
+	else if (strcmp(str, COLUMN_TYPE_FLOAT_STR) == 0) {
+		type = COLUMN_TYPE_FLOAT;
+	}
+	else if (strcmp(str, COLUMN_TYPE_DOUBLE_STR) == 0) {
+		type = COLUMN_TYPE_DOUBLE;
+	}
+	else if (strcmp(str, COLUMN_TYPE_TIMESTAMP_STR) == 0) {
+		type = COLUMN_TYPE_TIMESTAMP;
+	}
+	else if (strcmp(str, COLUMN_TYPE_STRING_STR) == 0) {
+		type = COLUMN_TYPE_STRING;
+	}
+	else if (strcmp(str, COLUMN_TYPE_GEOMETRY_STR) == 0) {
+		type = COLUMN_TYPE_GEOMETRY;
+	}
+	else if (strcmp(str, COLUMN_TYPE_BLOB_STR) == 0) {
+		type = COLUMN_TYPE_BLOB;
+	}
+	else if (strcmp(str, COLUMN_TYPE_STRING_ARRAY_STR) == 0) {
+		type = COLUMN_TYPE_STRING_ARRAY;
+	}
+	else if (strcmp(str, COLUMN_TYPE_BOOL_ARRAY_STR) == 0) {
+		type = COLUMN_TYPE_BOOL_ARRAY;
+	}
+	else if (strcmp(str, COLUMN_TYPE_BYTE_ARRAY_STR) == 0) {
+		type = COLUMN_TYPE_BYTE_ARRAY;
+	}
+	else if (strcmp(str, COLUMN_TYPE_SHORT_ARRAY_STR) == 0) {
+		type = COLUMN_TYPE_SHORT_ARRAY;
+	}
+	else if (strcmp(str, COLUMN_TYPE_INT_ARRAY_STR) == 0) {
+		type = COLUMN_TYPE_INT_ARRAY;
+	}
+	else if (strcmp(str, COLUMN_TYPE_LONG_ARRAY_STR) == 0) {
+		type = COLUMN_TYPE_LONG_ARRAY;
+	}
+	else if (strcmp(str, COLUMN_TYPE_FLOAT_ARRAY_STR) == 0) {
+		type = COLUMN_TYPE_FLOAT_ARRAY;
+	}
+	else if (strcmp(str, COLUMN_TYPE_DOUBLE_ARRAY_STR) == 0) {
+		type = COLUMN_TYPE_DOUBLE_ARRAY;
+	}
+	else if (strcmp(str, COLUMN_TYPE_TIMESTAMP_ARRAY_STR) == 0) {
+		type = COLUMN_TYPE_TIMESTAMP_ARRAY;
+	}
+	else {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
+			"Unknown ColumnType : " << str);
+	}
+	return type;
+}
+
+const char *BibInfoUtil::getColumnTypeStr(const ColumnType type) {
+	const char *str = NULL;
+	switch (type) {
+	case COLUMN_TYPE_BOOL:
+		str = COLUMN_TYPE_BOOL_STR;
+		break;
+	case COLUMN_TYPE_BYTE:
+		str = COLUMN_TYPE_BYTE_STR;
+		break;
+	case COLUMN_TYPE_SHORT:
+		str = COLUMN_TYPE_SHORT_STR;
+		break;
+	case COLUMN_TYPE_INT:
+		str = COLUMN_TYPE_INT_STR;
+		break;
+	case COLUMN_TYPE_LONG:
+		str = COLUMN_TYPE_LONG_STR;
+		break;
+	case COLUMN_TYPE_FLOAT:
+		str = COLUMN_TYPE_FLOAT_STR;
+		break;
+	case COLUMN_TYPE_DOUBLE:
+		str = COLUMN_TYPE_DOUBLE_STR;
+		break;
+	case COLUMN_TYPE_TIMESTAMP:
+		str = COLUMN_TYPE_TIMESTAMP_STR;
+		break;
+	case COLUMN_TYPE_STRING:
+		str = COLUMN_TYPE_STRING_STR;
+		break;
+	case COLUMN_TYPE_GEOMETRY:
+		str = COLUMN_TYPE_GEOMETRY_STR;
+		break;
+	case COLUMN_TYPE_BLOB:
+		str = COLUMN_TYPE_BLOB_STR;
+		break;
+	case COLUMN_TYPE_STRING_ARRAY:
+		str = COLUMN_TYPE_STRING_ARRAY_STR;
+		break;
+	case COLUMN_TYPE_BOOL_ARRAY:
+		str = COLUMN_TYPE_BOOL_ARRAY_STR;
+		break;
+	case COLUMN_TYPE_BYTE_ARRAY:
+		str = COLUMN_TYPE_BYTE_ARRAY_STR;
+		break;
+	case COLUMN_TYPE_SHORT_ARRAY:
+		str = COLUMN_TYPE_SHORT_ARRAY_STR;
+		break;
+	case COLUMN_TYPE_INT_ARRAY:
+		str = COLUMN_TYPE_INT_ARRAY_STR;
+		break;
+	case COLUMN_TYPE_LONG_ARRAY:
+		str = COLUMN_TYPE_LONG_ARRAY_STR;
+		break;
+	case COLUMN_TYPE_FLOAT_ARRAY:
+		str = COLUMN_TYPE_FLOAT_ARRAY_STR;
+		break;
+	case COLUMN_TYPE_DOUBLE_ARRAY:
+		str = COLUMN_TYPE_DOUBLE_ARRAY_STR;
+		break;
+	case COLUMN_TYPE_TIMESTAMP_ARRAY:
+		str = COLUMN_TYPE_TIMESTAMP_ARRAY_STR;
+		break;
+	default:
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
+			"Unknown ColumnType : " << type);
+		break;
+	}
+	return str;
+}
+
+ContainerType BibInfoUtil::getContainerType(const char *str) {
+	ContainerType type = UNDEF_CONTAINER;
+	if (strcmp(str, CONTAINER_TYPE_COLLECTION_STR) == 0) {
+		type = COLLECTION_CONTAINER;
+	}
+	else if (strcmp(str, CONTAINER_TYPE_TIMESERIES_STR) == 0) {
+		type = TIME_SERIES_CONTAINER;
+	}
+	else {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
+			"Unknown ContainerType : " << str);
+	}
+	return type;
+}
+
+const char *BibInfoUtil::getContainerTypeStr(ContainerType type) {
+	const char *typeStr = NULL;
+	switch (type) {
+	case COLLECTION_CONTAINER:
+		typeStr = CONTAINER_TYPE_COLLECTION_STR;
+		break;
+	case TIME_SERIES_CONTAINER:
+		typeStr = CONTAINER_TYPE_TIMESERIES_STR;
+		break;
+	default:
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
+			"Unknown ContainerType : " << type);
+		break;
+	}
+	return typeStr;
+}
+
+
+#include "gs_error_common.h"
+#include "json.h"
+#include "picojson.h"
+
+const int64_t BibInfo::Option::DEFAULT_FLUSH_THRESHOLD = 1024 * 1024; 
+const int64_t BibInfo::Option::DEFAULT_BLOCK_SIZE = 2 * 1024 * 1024 * 1024LL + 1024 * 1024LL; 
+const int64_t BibInfo::Option::LIMIT_BLOCK_SIZE = 4 * 1024 * 1024 * 1024LL; 
+const int64_t BibInfo::Option::LIMIT_FLUSH_THRESHOLD = LIMIT_BLOCK_SIZE;
+BibInfo::Option::Option() : flushThreshold_(DEFAULT_FLUSH_THRESHOLD),
+	blockSize_(DEFAULT_BLOCK_SIZE), preReadNum_(PARTIAL_RESULT_SIZE)
+{}
+
+BibInfo::Container::Container() : databaseId_(UNDEF_DBID),containerId_(UNDEF_CONTAINERID),
+	rowIndexOId_(UNDEF_OID),mvccIndexOId_(UNDEF_OID),initSchemaStatus_(0),
+	schemaVersion_(UNDEF_SCHEMAVERSIONID),database_(GS_PUBLIC),
+	partitionNo_(UNDEF_PARTITIONID),rowKeyAssigned_(false) {}
+BibInfo::Container::Column::Column() : notNull_(false) {}
+BibInfo::Container::TimeSeriesProperties::TimeSeriesProperties() : isExist_(false),
+	rowExpirationElapsedTime_(-1),
+	expirationDivisionCount_(BaseContainer::EXPIRE_DIVIDE_DEFAULT_NUM),
+	compressionMethod_("NO"), compressionWindowSize_(-1) {}
+BibInfo::Container::CompressionInfo::CompressionInfo() : rate_(0),span_(0),width_(0) {}
+
+bool BibInfo::setBoolKey(const picojson::value &json, const char *key, bool &output, bool isOption) {
+//	const picojson::value &existKey = json.get(key);
+	const bool *jsonValue = JsonUtils::find< bool >(json, key);
+	if (jsonValue == NULL && !json.get(key).is<picojson::null>()) {
+		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+			"Json key type unmatched , key = " << key);
+	}
+	if (jsonValue == NULL && !isOption) {
+		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+			"Json key not found, key = " << key);
+	}
+	bool exist = false;
+	if (jsonValue != NULL) {
+		output = *jsonValue;
+		exist = true;
+	}
+	return exist;
+}
+bool BibInfo::setDoubleKey(const picojson::value &json, const char *key, double &output, bool isOption) {
+//	const picojson::value &existKey = json.get(key);
+	const double *jsonValue = 
+		JsonUtils::find< double >(json, key);
+	if (jsonValue == NULL && !json.get(key).is<picojson::null>()) {
+		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+			"Json key type unmatched , key = " << key);
+	}
+	if (jsonValue == NULL && !isOption) {
+		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+			"Json key not found, key = " << key);
+	}
+	bool exist = false;
+	if (jsonValue != NULL) {
+		output = *jsonValue;
+		exist = true;
+	}
+	return exist;
+}
+bool BibInfo::setLongKey(const picojson::value &json, const char *key, int64_t &output, bool isOption) {
+//	const picojson::value &existKey = json.get(key);
+	const double *jsonValue = 
+		JsonUtils::find< double >(json, key);
+	if (jsonValue == NULL && !json.get(key).is<picojson::null>()) {
+		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+			"Json key type unmatched , key = " << key);
+	}
+	if (jsonValue == NULL && !isOption) {
+		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+			"Json key not found, key = " << key);
+	}
+	bool exist = false;
+	if (jsonValue != NULL) {
+		output = JsonUtils::asInt<int64_t>(*jsonValue);
+		exist = true;
+	}
+	return exist;
+}
+
+bool BibInfo::setStringKey(const picojson::value &json, const char *key, std::string &output, bool isOption) {
+//	const picojson::value &existKey = json.get(key);
+	const std::string *jsonValue = 
+		JsonUtils::find< std::string >(json, key);
+	if (jsonValue == NULL && !json.get(key).is<picojson::null>()) {
+		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+			"Json key type unmatched , key = " << key);
+	}
+	if (jsonValue == NULL && !isOption) {
+		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+			"Json key not found, key = " << key);
+	}
+	bool exist = false;
+	if (jsonValue != NULL) {
+		output = *jsonValue;
+		exist = true;
+	}
+	return exist;
+}
+
+void BibInfo::Option::load(const picojson::value &json) {
+	BibInfo::setStringKey(json, "containerFileType", containerFileType_, false);
+	BibInfo::setStringKey(json, "storeMemoryLimit", storeMemoryLimit_, false);
+	BibInfo::setStringKey(json, "logDirectory", logDirectory_, false);
+	BibInfo::setLongKey(json, "flushThreshold", flushThreshold_, true);
+	if (flushThreshold_ < 0) {
+		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+			"Value of flushThreshold is invalid, flushThreshold = " << flushThreshold_);
+	}
+	if (flushThreshold_ > LIMIT_FLUSH_THRESHOLD) {
+		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+			"Value of flushThreshold is over, limit =  " << LIMIT_FLUSH_THRESHOLD);
+	}
+	BibInfo::setLongKey(json, "blockSize", blockSize_, true);
+	if (blockSize_ < 0) {
+		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+			"Value of blockSize is invalid, blockSize = " << blockSize_);
+	}
+	if (blockSize_ > LIMIT_BLOCK_SIZE) {
+		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+			"Value of blockSize is over, limit =  " << LIMIT_BLOCK_SIZE);
+	}
+	BibInfo::setLongKey(json, "preReadNum", preReadNum_, true);
+	if (preReadNum_ < 0) {
+		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+			"Value of preReadNum is invalid, preReadNum = " << preReadNum_);
+	}
+}
+
+void BibInfo::Container::load(const picojson::value &json) {
+	BibInfo::setStringKey(json, "containerFileBase", containerFileBase_, false);
+	const picojson::value *attrJson = JsonUtils::find<picojson::value>(json, "containerAttribute");
+	if (attrJson == NULL) {
+		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+			"Json key not found or type unmatched , key = " << "containerAttribute");
+	}
+
+	BibInfo::setStringKey(*attrJson, "database", database_, true);
+	BibInfo::setStringKey(*attrJson, "container", container_, false);
+	BibInfo::setStringKey(*attrJson, "dataAffinity", dataAffinity_, true);
+	BibInfo::setStringKey(*attrJson, "containerType", containerType_, false);
+
+	BibInfo::setLongKey(*attrJson, "databaseId", databaseId_, false);
+	BibInfo::setLongKey(*attrJson, "containerId", containerId_, false);
+	BibInfo::setLongKey(*attrJson, "rowIndexOId", rowIndexOId_, false);
+	BibInfo::setLongKey(*attrJson, "mvccIndexOId", mvccIndexOId_, false);
+	BibInfo::setLongKey(*attrJson, "initSchemaStatus", initSchemaStatus_, true);
+	BibInfo::setLongKey(*attrJson, "schemaVersion", schemaVersion_, false);
+	BibInfo::setLongKey(*attrJson, "partitionNo", partitionNo_, false);
+
+	BibInfo::setBoolKey(*attrJson, "rowKeyAssigned", rowKeyAssigned_, true);
+
+	const picojson::value *timeSeriesProperties = JsonUtils::find<picojson::value>(*attrJson, "timeSeriesProperties");
+	if (timeSeriesProperties != NULL) {
+		if (!timeSeriesProperties->is<picojson::object>()) {
+			GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+				"Json key type unmatched , key = " << "timeSeriesProperties");
+		}
+		timeSeriesProperties_.load(*timeSeriesProperties);
+	}
+
+	const std::vector<picojson::value> *columnSetValue = 
+		JsonUtils::find< std::vector<picojson::value> >(*attrJson, "columnSet");
+	{
+		if (columnSetValue == NULL) {
+			GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+				"Json key not found or type unmatched , key = " << "columnSet");
+		}
+		if (columnSetValue->empty()) {
+			GS_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+				"empty array, key = " << "columnSet");
+		}
+		for (uint32_t i = 0; i < columnSetValue->size(); i++) {
+			Column columnValue;
+			columnValue.load((*columnSetValue)[i]);
+			columnSet_.push_back(columnValue);
+		}
+	}
+
+	const picojson::value *compressionInfoSetValue = 
+		JsonUtils::find< picojson::value >(*attrJson, "compressionInfoSet");
+	{
+		if (compressionInfoSetValue != NULL) {
+			if (!compressionInfoSetValue->is<picojson::array>()) {
+				GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+					"Json key type unmatched , key = " << "compressionInfoSet");
+			}
+			const picojson::array &arrayValue = compressionInfoSetValue->get<picojson::array>();
+			for (uint32_t i = 0; i < arrayValue.size(); i++) {
+				CompressionInfo compressionInfoValue;
+				compressionInfoValue.load(arrayValue[i]);
+				compressionInfoSet_.push_back(compressionInfoValue);
+			}
+		}
+	}
+}
+
+void BibInfo::Container::Column::load(const picojson::value &json) {
+	BibInfo::setStringKey(json, "columnName", columnName_, false);
+	BibInfo::setStringKey(json, "type", type_, false);
+	BibInfo::setBoolKey(json, "notNull", notNull_, true);
+}
+
+void BibInfo::Container::TimeSeriesProperties::load(const picojson::value &json) {
+	isExist_ = true;
+	BibInfo::setStringKey(json, "rowExpirationTimeUnit", rowExpirationTimeUnit_, true);
+	BibInfo::setStringKey(json, "compressionMethod", compressionMethod_, true);
+	BibInfo::setStringKey(json, "compressionWindowSizeUnit", compressionWindowSizeUnit_, true);
+	BibInfo::setLongKey(json, "rowExpirationElapsedTime", rowExpirationElapsedTime_, true);
+	BibInfo::setLongKey(json, "expirationDivisionCount", expirationDivisionCount_, true);
+	BibInfo::setLongKey(json, "compressionWindowSize", compressionWindowSize_, true);
+}
+
+void BibInfo::Container::CompressionInfo::load(const picojson::value &json) {
+	BibInfo::setStringKey(json, "columnName", columnName_, false);
+	BibInfo::setStringKey(json, "compressionType", compressionType_, false);
+	bool existRate = BibInfo::setDoubleKey(json, "rate", rate_, true);
+	bool existSpan = BibInfo::setDoubleKey(json, "span", span_, true);
+	bool existWidth = BibInfo::setDoubleKey(json, "width", width_, true);
+	if (compressionType_.compare("ABSOLUTE") == 0 && !existWidth) {
+		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+			"Json key 'width' must be defined, if Json key 'compressionType_' is 'ABSOLUTE'");
+	} else if (compressionType_.compare("RELATIVE") == 0  && (!existWidth || !existSpan)) {
+		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+			"Json key 'width' and 'span' must be defined, if Json key 'compressionType_' is 'RELATIVE'");
+	}
+	if (existWidth && (existRate || existSpan)) {
+		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+			"Json key 'width' must not be present at the same time as 'span' or 'width'");
+	}
+}
+
+void BibInfo::load(std::string &jsonString) {
+	picojson::value bibValue;
+	std::string error;
+	picojson::parse(bibValue, jsonString.begin(), jsonString.end(), &error);
+	if (!error.empty()) {
+		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_INVALID_SYNTAX,
+			"Json parse error : " << error);
+	}
+	try {
+		const picojson::value *optionValue = JsonUtils::find<picojson::value>(bibValue, "option");
+		if (optionValue == NULL || !optionValue->is<picojson::object>()) {
+			GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+				"Json key not found or type unmatched , key = " << "option");
+		}
+		option_.load(*optionValue);
+		const std::vector<picojson::value> *containersValue = 
+			JsonUtils::find< std::vector<picojson::value> >(bibValue, "containers");
+		if (containersValue == NULL) {
+			GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+				"Json key not found or type unmatched , key = " << "containers");
+		}
+		if (containersValue->empty()) {
+			GS_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+				"empty array, key = " << "containers");
+		}
+		for (uint32_t i = 0; i < containersValue->size(); i++) {
+			Container containerValue;
+			containerValue.load((*containersValue)[i]);
+			containers_.push_back(containerValue);
+		}
+	} catch (UserException &e) {
+		std::cerr << GS_EXCEPTION_MESSAGE(e) << std::endl;
+		throw;
 	}
 }

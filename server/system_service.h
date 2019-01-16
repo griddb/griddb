@@ -76,7 +76,7 @@ private:
 */
 class OutputStatsHandler : public EventHandler {
 public:
-	OutputStatsHandler() : sysSvc_(NULL){};
+	OutputStatsHandler() : sysSvc_(NULL), pt_(NULL), clsMgr_(NULL) {};
 
 	void operator()(EventContext &ec, Event &ev);
 
@@ -85,6 +85,7 @@ public:
 private:
 	SystemService *sysSvc_;
 	PartitionTable *pt_;
+	ClusterManager *clsMgr_;
 };
 
 /*!
@@ -139,8 +140,40 @@ public:
 
 	void shutdownCluster(
 		const Event::Source &eventSource, util::StackAllocator &alloc);
+	void increaseCluster(
+		const Event::Source &eventSource, util::StackAllocator &alloc);
+
+	bool decreaseCluster(const Event::Source &eventSource,
+		util::StackAllocator &alloc, picojson::value &result,
+		bool isAutoLeave = false, int32_t leaveNum = 1);
+	struct BackupOption {
+		bool logArchive_;
+		bool logDuplicate_;
+		bool stopOnDuplicateError_;
+		bool isIncrementalBackup_;
+		int32_t incrementalBackupLevel_;
+		bool isCumulativeBackup_;
+		bool skipBaseline_;
+	};
+
+
+	bool backupNode(
+			const Event::Source &eventSource, const char8_t *backupName,
+			int32_t mode, 
+			BackupOption &option,
+			picojson::value &result);
+
+	bool archiveLog(
+			const Event::Source &eventSource, const char8_t *backupName,
+			int32_t mode, picojson::value &result);
+
+	bool prepareLongArchive(
+			const Event::Source &eventSource, const char8_t *longArchiveName,
+			picojson::value &result);
 
 	void checkpointNode(const Event::Source &eventSource);
+
+	void setPeriodicCheckpointFlag(bool flag);  
 
 	void getHosts(picojson::value &result, int32_t addressTypeNum);
 
@@ -164,7 +197,7 @@ public:
 			picojson::value &result, int32_t partitionNo,
 			int32_t addressTypeNum, bool lossOnly = false,
 			bool force = false, bool isSelf = false, bool lsnDump = false,
-			bool notDumpRole = false, uint32_t partitionGroupNo = UINT32_MAX);
+			bool notDumpRole = false, uint32_t partitionGroupNo = UINT32_MAX, bool sqlOwnerDump=false);
 
 	void getLogs(
 			picojson::value &result, std::string &searchStr,
@@ -279,11 +312,13 @@ private:
 		ClusterService *clsSvc_;
 		SyncService *syncSvc_;
 		SystemService *sysSvc_;
+		TransactionService *txnSvc_;
 		PartitionTable *pt_;
 		SyncManager *syncMgr_;
 		ClusterManager *clsMgr_;
 		ChunkManager *chunkMgr_;
 		CheckpointService *cpSvc_;
+		DataStore *dataStore_;
 		GlobalFixedSizeAllocator *fixedSizeAlloc_;
 		EventEngine::VariableSizeAllocator varSizeAlloc_;
 		util::StackAllocator alloc_;

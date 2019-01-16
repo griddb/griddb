@@ -52,13 +52,15 @@
 #endif  
 
 
+#include <fstream>
+
 
 
 const char8_t *const GS_PRODUCT_NAME = "GridDB";
 const int32_t GS_MAJOR_VERSION = 4;
-const int32_t GS_MINOR_VERSION = 0;
+const int32_t GS_MINOR_VERSION = 1;
 const int32_t GS_REVISION = 0;
-const int32_t GS_BUILD_NO = 33128;
+const int32_t GS_BUILD_NO = 34408;
 
 const char8_t *const GS_EDITION_NAME = "Community Edition";
 const char8_t *const GS_EDITION_NAME_SHORT = "CE";
@@ -83,7 +85,7 @@ static class MainConfigSetUpHandler : public ConfigTable::SetUpHandler {
 
 } g_mainConfigSetUpHandler;
 
-static void setUpTrace(const ConfigTable *param, bool checkOnly);
+static void setUpTrace(const ConfigTable *param, bool checkOnly, bool longArchive = false);
 static void setUpAllocator();
 
 /*!
@@ -139,6 +141,38 @@ public:
 	const ConfigTable &config_;
 };
 
+
+void setUpArchive(const char *bibFile, ConfigTable &config, BibInfo &bibInfo) {
+	std::string jsonString;
+	if (bibFile != NULL) {
+		std::string inputFilePathPath;
+		const char *bibDir = ".";
+
+		util::FileSystem::createPath(
+			bibDir, bibFile, inputFilePathPath);
+		std::ifstream ifs(inputFilePathPath.c_str());
+		if (!ifs) {
+			GS_THROW_USER_ERROR(GS_ERROR_CM_FILE_NOT_FOUND,
+				std::string(bibFile) + " not found");
+		}
+		std::string tmpStr;
+		while (std::getline(ifs, tmpStr)) {
+			jsonString += tmpStr;
+			jsonString += "\n";
+		}
+	} else {
+		std::istreambuf_iterator<char> first(std::cin), last;
+		jsonString.append(first, last);
+	}
+	bibInfo.load(jsonString);
+	config.set(CONFIG_TABLE_DS_STORE_MEMORY_LIMIT, bibInfo.option_.storeMemoryLimit_,
+		"dataStore", &ConfigTable::silentHandler());
+	config.set(CONFIG_TABLE_SYS_EVENT_LOG_PATH, bibInfo.option_.logDirectory_,
+		"system", &ConfigTable::silentHandler());
+	config.set(CONFIG_TABLE_TRACE_RECOVERY_MANAGER, "LEVEL_WARNING",
+		"trace", &ConfigTable::silentHandler());
+}
+
 /*!
 	@brief main function
 */
@@ -188,6 +222,9 @@ int main(int argc, char **argv) {
 		std::string recoveryTargetPartition;		  
 		bool fileVersionDump = false;				  
 		bool releaseUnusedFileBlocks = false;		  
+		bool longArchive = false;					  
+		const char8_t *bibFile = NULL;				  
+		u8string longArchiveLogDir;					  
 
 		if (argc >= 3) {
 			if (strcmp(argv[1], "--conf") == 0) {
@@ -294,8 +331,19 @@ int main(int argc, char **argv) {
 			return EXIT_FAILURE;
 		}
 
+
+		BibInfo bibInfo;
+		if (longArchive) {
+			try {
+				setUpArchive(bibFile, config, bibInfo);
+			} catch (std::exception &e) {
+				std::cerr << "bib information is invalid :" << e.what() << std::endl;
+				return EXIT_FAILURE;
+			}
+		}
+
 		MainTraceHandler traceHandler(config);
-		setUpTrace(&config, checkOnly);
+		setUpTrace(&config, checkOnly, longArchive);
 		config.setTraceEnabled(true);
 
 #ifdef MAIN_CAPTURE_SIGNAL
@@ -363,8 +411,10 @@ int main(int argc, char **argv) {
 #endif  
 
 		bool createMode = false;
-		RecoveryManager::checkExistingFiles1(
-			config, createMode, forceRecoveryFromExistingFiles);
+		bool existBackupInfoFile = false;
+
+		RecoveryManager::checkExistingFiles1(config, createMode,
+			existBackupInfoFile, forceRecoveryFromExistingFiles);
 
 		EventEngine::VariableSizeAllocator eeVarSizeAlloc(
 			(util::AllocatorInfo(ALLOCATOR_GROUP_MAIN, "eeVar")));
@@ -389,11 +439,21 @@ int main(int argc, char **argv) {
 		PartitionTable pt(config);
 
 		RecoveryManager recoveryMgr(config, releaseUnusedFileBlocks);
-		LogManager logMgr(config);
-		logMgr.open(checkOnly, forceRecoveryFromExistingFiles);
+		bool isIncrementalBackup = false;
+		if (existBackupInfoFile) {
+			isIncrementalBackup = recoveryMgr.readBackupInfoFile();
+		}
+
+		LogManager::Config logManagerConfig(config);
+		if (longArchive && !longArchiveLogDir.empty()) {
+			logManagerConfig.logDirectory_ = longArchiveLogDir;
+		}
+		LogManager logMgr(logManagerConfig);
+		logMgr.open(
+			checkOnly, forceRecoveryFromExistingFiles, isIncrementalBackup);
 
 		RecoveryManager::checkExistingFiles2(config, logMgr, createMode,
-			forceRecoveryFromExistingFiles);
+			existBackupInfoFile, forceRecoveryFromExistingFiles);
 
 		ClusterVersionId clsVersionId = GS_CLUSTER_MESSAGE_CURRENT_VERSION;
 		ClusterManager clsMgr(config, &pt, clsVersionId);
@@ -412,7 +472,8 @@ int main(int argc, char **argv) {
 			}
 		}
 		ChunkManager chunkMgr(config, DS_CHUNK_CATEGORY_SIZE,
-			chunkCategoryAttributeList, checkOnly, createMode);
+			chunkCategoryAttributeList, checkOnly,
+			createMode);
 		delete[] chunkCategoryAttributeList;
 
 		DataStore dataStore(config, &chunkMgr);
@@ -507,17 +568,18 @@ int main(int argc, char **argv) {
 
 
 		try {
-			sysSvc.start();
+			if (!longArchive) { 
+				sysSvc.start();
 #ifdef GD_ENABLE_UNICAST_NOTIFICATION
-			clsSvc.start(source);
+				clsSvc.start(source);
 #else
-			clsSvc.start();
+				clsSvc.start();
 #endif
-			syncSvc.start();
-			txnSvc.start();
-			cpSvc.start(source);
+				syncSvc.start();
+				txnSvc.start();
+				cpSvc.start(source);
 
-
+			}
 			std::cout << "Running..." << std::endl;
 
 			if (config.get<bool>(CONFIG_TABLE_DEV_RECOVERY)) {
@@ -525,13 +587,30 @@ int main(int argc, char **argv) {
 				util::StackAllocator alloc(
 					util::AllocatorInfo(ALLOCATOR_GROUP_MAIN, "recoveryStack"),
 					&fixedSizeAlloc);
-				recoveryMgr.recovery(alloc, recoveryTargetPartition);
+				recoveryMgr.recovery(alloc, existBackupInfoFile,
+					forceRecoveryFromExistingFiles, recoveryTargetPartition,
+					longArchive);
 			}
 			else {
 				std::cout << "Skip Open DB" << std::endl;
 			}
+			if (longArchive) {
+				try {
+					util::StackAllocator alloc(
+						util::AllocatorInfo(ALLOCATOR_GROUP_MAIN, "dbStack"),
+						&fixedSizeAlloc);
+					dataStore.archive(alloc, txnMgr, bibInfo);
+				} catch (std::exception &e) {
+					UTIL_TRACE_EXCEPTION(MAIN, e, "");
+					return EXIT_FAILURE;
+				}
 
+				return EXIT_SUCCESS;
+			}
 			cpSvc.executeRecoveryCheckpoint(source);
+			if (existBackupInfoFile) {
+				recoveryMgr.removeBackupInfoFile();
+			}
 
 			if (config.get<bool>(CONFIG_TABLE_DEV_AUTO_JOIN_CLUSTER)) {
 				util::StackAllocator alloc(
@@ -588,18 +667,21 @@ int main(int argc, char **argv) {
 							 " See message logs"
 						  << std::endl;
 			}
+
 		}
 		catch (std::exception &e) {
 			systemErrorOccurred = true;
 			UTIL_TRACE_EXCEPTION(MAIN, e, "");
 
 			try {
-				clsSvc.shutdownAllService();
-				clsSvc.waitForShutdown();
-				syncSvc.waitForShutdown();
-				txnSvc.waitForShutdown();
-				cpSvc.waitForShutdown();
-				sysSvc.waitForShutdown();
+				if (!longArchive) {
+					clsSvc.shutdownAllService();
+					clsSvc.waitForShutdown();
+					syncSvc.waitForShutdown();
+					txnSvc.waitForShutdown();
+					cpSvc.waitForShutdown();
+					sysSvc.waitForShutdown();
+				}
 			}
 			catch (...) {
 				UTIL_TRACE_EXCEPTION(
@@ -657,7 +739,7 @@ void autoJoinCluster(const Event::Source &eventSource,
 			for (pId = 0; pId < pt.getPartitionNum(); pId++) {
 				pt.setPartitionStatus(pId, PartitionTable::PT_ON);
 				PartitionRole role(
-					pId, rev, 0, backups, PartitionTable::PT_CURRENT_OB);
+					pId, rev, PartitionTable::PT_CURRENT_OB);
 				pt.setPartitionRole(pId, role);
 			}
 			break;
@@ -818,8 +900,12 @@ void MainConfigSetUpHandler::operator()(ConfigTable &config) {
 	MAIN_TRACE_DECLARE(config, DATASTORE_BACKGROUND, ERROR);
 	MAIN_TRACE_DECLARE(config, SYNC_DETAIL, WARNING);
 	MAIN_TRACE_DECLARE(config, CLUSTER_DETAIL, WARNING);
+	MAIN_TRACE_DECLARE(config, CLUSTER_DUMP, WARNING);
+
 	MAIN_TRACE_DECLARE(config, ZLIB_UTILS, ERROR);
 	MAIN_TRACE_DECLARE(config, SIZE_MONITOR, WARNING);
+	MAIN_TRACE_DECLARE(config, LONG_ARCHIVE, WARNING);
+
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TRACE_OUTPUT_TYPE, INT32)
 		.setExtendedType(ConfigTable::EXTENDED_TYPE_ENUM)
 		.addEnum(util::TraceOption::OUTPUT_NONE, "OUTPUT_NONE")
@@ -891,7 +977,7 @@ void setMinOutputLevel(
 	tracer.setMinOutputLevel(config->get<int32_t>(id));
 }
 
-void setUpTrace(const ConfigTable *config, bool checkOnly) {
+void setUpTrace(const ConfigTable *config, bool checkOnly, bool longArchive) {
 	util::TraceManager &manager = util::TraceManager::getInstance();
 
 	static GSTraceFormatter formatter(GS_TRACE_SECRET_HEX_KEY);
@@ -910,7 +996,11 @@ void setUpTrace(const ConfigTable *config, bool checkOnly) {
 		manager.setRotationFilesDirectory(eventLogPath);
 	}
 
-	manager.setRotationFileName("gridstore");
+	if (longArchive) {
+		manager.setRotationFileName("gs_archive_svr");
+	} else {
+		manager.setRotationFileName("gridstore");
+	}
 
 	for (ConfigTable::ParamId id = CONFIG_TABLE_TRACE_TRACER_ID_START;
 		 ++id < CONFIG_TABLE_TRACE_TRACER_ID_END;) {
@@ -921,7 +1011,7 @@ void setUpTrace(const ConfigTable *config, bool checkOnly) {
 
 	manager.setRotationMode(util::TraceOption::ROTATION_DALILY);
 
-	if (!checkOnly) {
+	if (!checkOnly || longArchive) {
 		manager.setOutputType(static_cast<util::TraceOption::OutputType>(
 			config->get<int32_t>(CONFIG_TABLE_TRACE_OUTPUT_TYPE)));
 	}

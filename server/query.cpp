@@ -20,6 +20,8 @@
 */
 
 #include "transaction_context.h"
+#include "gis_generator.h"
+#include "gis_geomfromtext.h"
 #include "collection.h"
 #include "qp_def.h"
 #include "query.h"
@@ -32,6 +34,8 @@
 
 #include "boolean_expression.h"
 #include "result_set.h"
+
+#include "meta_store.h"
 
 bool Query::sIsTrace_ = false;
 
@@ -135,6 +139,16 @@ size_t Query::getSelectionExprLength() const {
  */
 void Query::getConditionAsOrList(util::XArray<BoolExpr *> &orList) {
 	this->pWhereExpr_->toOrList(orList);
+}
+
+MetaContainer* Query::getMetaContainer(
+		Collection &collection, TimeSeries &timeSeries) {
+	BaseContainer *base1 = &collection;
+	BaseContainer *base2 = &timeSeries;
+	if (base1 != base2) {
+		return NULL;
+	}
+	return static_cast<MetaContainer*>(base1);
 }
 
 /*!
@@ -378,6 +392,12 @@ void Query::setFromCollection(Token &name1, Token &name2, TransactionContext &tx
 		pCollectionName = containerName.c_str();
 		collectionNameLen = static_cast<uint32_t>(strlen(pCollectionName));
 	}
+	else if (getMetaContainer() != NULL) {
+		const FullContainerKey containerKey = getMetaContainer()->getContainerKey(txn);
+		containerKey.toString(txn.getDefaultAllocator(), containerName);
+		pCollectionName = containerName.c_str();
+		collectionNameLen = static_cast<uint32_t>(strlen(pCollectionName));
+	}
 	else if (getCollection() != NULL) {
 		const FullContainerKey containerKey = getCollection()->getContainerKey(txn);
 		containerKey.toString(txn.getDefaultAllocator(), containerName);
@@ -475,6 +495,10 @@ void Query::getIndexInfoInAndList(TransactionContext &txn,
 				if (((1 << k) & mapBitmap) != 0) {
 					const char *str = "";
 					switch (k) {
+					case 2:
+						mapType = MAP_TYPE_SPATIAL;
+						str = "SPATIAL";
+						break;
 					case 1:
 						mapType = MAP_TYPE_HASH;
 						str = "HASH";
@@ -635,43 +659,49 @@ void Query::finishQuery(
 	}
 }
 
+void Query::setQueryOption(TransactionContext &txn, ResultSet &resultSet) {
+	ResultSet::QueryOption &queryOption = resultSet.getQueryOption();
+
+	if (queryOption.isPartial() || queryOption.isDistribute()) {
+		size_t numSelection = getSelectionExprLength();
+		if (pOrderByExpr_  != NULL || numSelection == 0 || 
+			strcmp("*", getSelectionExpr(0)->getValueAsString(txn)) != 0) {
+			GS_THROW_USER_ERROR(
+				GS_ERROR_TQ_SYNTAX_ERROR_EXECUTION, "Partial/Distribute TQL does not support "
+				<< "order by and selection expression except for '*'");
+		}
+
+		queryOption.setDistLimit(nActualLimit_);
+		queryOption.setDistOffset(nOffset_);
+
+		{
+			int64_t filteredNum = queryOption.getFilteredNum();
+			if (filteredNum != 0) {
+				if (nOffset_ <= static_cast<ResultSize>(filteredNum)) {
+					nOffset_ = 0;
+					filteredNum -= nOffset_;
+				}
+				if (static_cast<ResultSize>(filteredNum) > nLimit_) {
+					GS_THROW_USER_ERROR(
+						GS_ERROR_DS_FETCH_PARAMETER_INVALID, "Invalid Parameter, filtered num exceeds limit");
+				}
+				if (filteredNum > 0) {
+					nLimit_ -= filteredNum;
+					nActualLimit_ -= filteredNum;
+				}
+			}
+			if (queryOption.isDistribute()) {
+				nActualLimit_ = nLimit_;
+				nOffset_ = 0;
+			}
+		}
+	}
+}
+
 void Query::doQueryPartial(
 	TransactionContext &txn, BaseContainer &container, ResultSet &resultSet) {
 	ResultSet::QueryOption &queryOption = resultSet.getQueryOption();
 		
-	size_t numSelection = getSelectionExprLength();
-	if (pOrderByExpr_  != NULL || numSelection == 0 || 
-		strcmp("*", getSelectionExpr(0)->getValueAsString(txn)) != 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TQ_SYNTAX_ERROR_EXECUTION, "Partial/Distribute TQL does not support "
-			<< "order by and selection expression except for '*'");
-	}
-
-	queryOption.setDistLimit(nActualLimit_);
-	queryOption.setDistOffset(nOffset_);
-
-	{
-		int64_t filteredNum = queryOption.getFilteredNum();
-		if (filteredNum != 0) {
-			if (nOffset_ <= static_cast<ResultSize>(filteredNum)) {
-				nOffset_ = 0;
-				filteredNum -= nOffset_;
-			}
-			if (static_cast<ResultSize>(filteredNum) > nLimit_) {
-				GS_THROW_USER_ERROR(
-					GS_ERROR_DS_FETCH_PARAMETER_INVALID, "Invalid Parameter, filtered num exceeds limit");
-			}
-			if (filteredNum > 0) {
-				nLimit_ -= filteredNum;
-				nActualLimit_ -= filteredNum;
-			}
-		}
-		if (queryOption.isDistribute()) {
-			nActualLimit_ = nLimit_;
-			nOffset_ = 0;
-		}
-	}
-
 	if (doExplain()) {
 		addExplain(0, "SELECTION", "CONDITION", "NULL", "");
 		addExplain(1, "INDEX", "BTREE", "ROWMAP", "");
@@ -736,8 +766,9 @@ void Query::doQueryPartial(
 	bool isAllFinished = false;
 //	bool enablePartialSuspend = !doExplain();
 
+	util::XArray<OId> scanOIdList(alloc);
 	for (size_t nth = 0; ; nth++) {
-		util::XArray<OId> scanOIdList(alloc);
+		scanOIdList.clear();
 		RowId minRowId = queryOption.getMinRowId();
 		RowId maxRowId = queryOption.getMaxRowId();
 		BtreeMap::SearchContext sc(
@@ -822,4 +853,45 @@ void Query::doQueryPartial(
 		queryOption.setFilteredNum(queryOption.getFilteredNum() + resultNum);
 	}
 	resultSet.setResultNum(resultNum);
+}
+
+const BoolExpr* Query::QueryAccessor::findWhereExpr(const Query &query) {
+	return query.pWhereExpr_;
+}
+
+Expr::Type Query::ExprAccessor::getType(const Expr &expr) {
+	return static_cast<const ExprAccessor&>(expr).type_;
+}
+
+Expr::Operation Query::ExprAccessor::getOp(const Expr &expr) {
+	return static_cast<const ExprAccessor&>(expr).op_;
+}
+
+const Value* Query::ExprAccessor::getValue(const Expr &expr) {
+	return static_cast<const ExprAccessor&>(expr).value_;
+}
+
+const ExprList* Query::ExprAccessor::getArgList(const Expr &expr) {
+	return static_cast<const ExprAccessor&>(expr).arglist_;
+}
+
+uint32_t Query::ExprAccessor::getColumnId(const Expr &expr) {
+	return static_cast<const ExprAccessor&>(expr).columnId_;
+}
+
+ColumnType Query::ExprAccessor::getExprColumnType(const Expr &expr) {
+	return static_cast<const ExprAccessor&>(expr).columnType_;
+}
+
+const BoolExpr::BoolTerms& Query::BoolExprAccessor::getOperands(
+		const BoolExpr &expr) {
+	return static_cast<const BoolExprAccessor&>(expr).operands_;
+}
+
+const Expr* Query::BoolExprAccessor::getUnary(const BoolExpr &expr) {
+	return static_cast<const BoolExprAccessor&>(expr).unary_;
+}
+
+BoolExpr::Operation Query::BoolExprAccessor::getOpType(const BoolExpr &expr) {
+	return static_cast<const BoolExprAccessor&>(expr).opeType_;
 }

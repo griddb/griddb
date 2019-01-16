@@ -25,6 +25,9 @@
 #include "query.h"
 #include "schema.h"
 
+struct MetaContainerInfo;
+struct MetaProcessorSource;
+
 /*!
  * @brief Query object for Collection
  *
@@ -78,17 +81,18 @@ public:
 		: txn_(txn),
 		  collection_(collection),
 		  rowId_(rowId),
-		  rowArray_(txn_, rowId_, &collection_, OBJECT_READ_ONLY),
+		  rowArray_(txn_, &collection_),
 		  pBitmap_(pBitmap),
 		  varrayCounter_(0) {
 		util::StackAllocator &alloc = txn_.getDefaultAllocator();
 
+		rowArray_.load(txn_, rowId_, &collection_, OBJECT_READ_ONLY);
 		varray_ = reinterpret_cast<ContainerValue *>(
 			alloc.allocate(sizeof(ContainerValue) * collection.getColumnNum()));
 		try {
 			for (uint32_t i = 0; i < collection_.getColumnNum(); i++) {
 				new (&(varray_[i])) ContainerValue(
-					txn,
+					txn.getPartitionId(),
 					*(collection
 							.getObjectManager()));  
 				varrayCounter_++;
@@ -120,7 +124,7 @@ public:
 		try {
 			for (uint32_t i = 0; i < collection_.getColumnNum(); i++) {
 				new (&(varray_[i])) ContainerValue(
-					txn,
+					txn.getPartitionId(),
 					*(collection_
 							.getObjectManager()));  
 				varrayCounter_++;
@@ -161,19 +165,19 @@ public:
 	const Value *getColumn(uint32_t k) {
 		ContainerValue &v = varray_[k];
 		if (bit_off(pBitmap_[k / 64], k % 64)) {
-			Collection::RowArray::Row row(rowArray_.getRow(), &rowArray_);
+			BaseContainer::RowArray::Row row(rowArray_.getRow(), &rowArray_);
 			row.getField(txn_, collection_.getColumnInfo(k), v);
 			set_bit(pBitmap_[k / 64], k % 64);
 		}
 		return &(v.getValue());
 	}
 	RowId getRowId() {
-		Collection::RowArray::Row row(rowArray_.getRow(), &rowArray_);
+		BaseContainer::RowArray::Row row(rowArray_.getRow(), &rowArray_);
 		return row.getRowId();
 	}
 	void getImage(TransactionContext &txn,
 		MessageRowStore *messageRowStore, bool isWithRowId) {
-		Collection::RowArray::Row row(rowArray_.getRow(), &rowArray_);
+		BaseContainer::RowArray::Row row(rowArray_.getRow(), &rowArray_);
 		row.getImage(txn, messageRowStore, isWithRowId);
 	}
 private:
@@ -187,7 +191,7 @@ private:
 	Collection &collection_;
 	OId rowId_;
 	ContainerValue *varray_;
-	Collection::RowArray rowArray_;
+	BaseContainer::RowArray rowArray_;
 	uint64_t *pBitmap_;
 	size_t varrayCounter_;
 };
@@ -246,6 +250,75 @@ public:
 	SortExprList &orderByExprList_;
 	uint64_t *pBitmap1_;
 	uint64_t *pBitmap2_;
+};
+
+/*!
+ * @brief Query object for MetaContainer
+ *
+ */
+class QueryForMetaContainer : public Query {
+public:
+	class MessageRowHandler;
+
+	QueryForMetaContainer(
+			TransactionContext &txn, MetaContainer &container,
+			const TQLInfo &tqlInfo, uint64_t limit = MAX_RESULT_SIZE,
+			QueryHookClass *hook = NULL);
+
+	void doQuery(
+			TransactionContext &txn, MetaProcessorSource &processorSource,
+			ResultSet &rs);
+
+	virtual Collection* getCollection();
+	virtual TimeSeries* getTimeSeries();
+
+private:
+	void check(TransactionContext &txn);
+
+	static FullContainerKey* predicateToContainerKey(
+			TransactionContext &txn, DataStore &dataStore, DatabaseId dbId,
+			const BoolExpr *expr, const MetaContainerInfo &metaInfo,
+			const MetaContainerInfo *coreMetaInfo, PartitionId partitionCount,
+			bool &reduced, PartitionId &reducedPartitionId);
+
+	static bool predicateToContainerName(
+			const Expr *expr, const MetaContainerInfo &metaInfo,
+			const MetaContainerInfo &coreMetaInfo,
+			util::String &containerName);
+	static bool predicateToContainerId(
+			const Expr *expr, const MetaContainerInfo &metaInfo,
+			const MetaContainerInfo &coreMetaInfo,
+			int64_t &partitionId, int64_t &containerId);
+
+	static uint32_t getCoreColumnId(
+			uint32_t columnId, const MetaContainerInfo &metaInfo,
+			const MetaContainerInfo &coreMetaInfo);
+
+	static const BoolExpr* findBoolExpr(const Expr &expr);
+	static const BoolExpr::BoolTerms* findAndOperands(const BoolExpr &expr);
+	static const Expr* findUnary(const BoolExpr &expr);
+	static bool findEqCond(
+			const Expr &expr, uint32_t &columnId, const Value *&value);
+
+	MetaContainer &container_;
+};
+
+class MetaContainerRowWrapper : public ContainerRowWrapper {
+public:
+	typedef util::Vector<Value> ValueList;
+
+	explicit MetaContainerRowWrapper(const ValueList &valueList);
+
+	virtual const Value* getColumn(uint32_t columnId);
+
+private:
+	virtual void load(OId oId);
+	virtual RowId getRowId();
+	virtual void getImage(
+			TransactionContext &txn, MessageRowStore *messageRowStore,
+			bool isWithRowId);
+
+	const ValueList &valueList_;
 };
 
 #endif  

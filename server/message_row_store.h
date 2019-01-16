@@ -56,9 +56,9 @@ public:
 	virtual uint64_t getRowCount() = 0;
 
 
-	void setRow(const MessageRowStore &source);
+	void setRow(MessageRowStore &source);
 
-	void setField(const MessageRowStore &source, ColumnId columnId);
+	void setField(MessageRowStore &source, ColumnId columnId);
 
 
 
@@ -70,7 +70,7 @@ public:
 
 	uint32_t getRowImageSize() const {return rowImageSize_;}        
 
-	uint32_t getRowFixedSize() const {return rowFixedSize_;}        
+	uint32_t getRowFixedSize() const {return rowFixedColumnSize_;}  
 
 	uint32_t getNullsOffset() const {return nullsOffset_;}          
 
@@ -84,12 +84,12 @@ public:
 
 	virtual uint8_t* getRowVariablePart() const;
 
-	virtual void getField(ColumnId columnId, const void *&data, uint32_t &size) const;
-	void getField(ColumnId columnId, const uint8_t *&data, uint32_t &size) const;
+	virtual void getField(ColumnId columnId, const void *&data, uint32_t &size);
+	void getField(ColumnId columnId, const uint8_t *&data, uint32_t &size);
 
 	template<ColumnType C>
 	typename ColumnTypeTraits<C>::PrimitiveType getField(
-			ColumnId columnId) const;
+			ColumnId columnId);
 
 	virtual uint32_t getArrayLength(ColumnId columnId) const;
 
@@ -155,7 +155,7 @@ protected:
 protected:
 	const DataStoreValueLimitConfig &dsValueLimitConfig_;
 	uint32_t rowImageSize_;        
-	uint32_t rowFixedSize_;        
+	uint32_t rowFixedColumnSize_;  
 	uint32_t nullsOffset_;         
 	uint32_t nullsBytes_;          
 	uint32_t variableColumnNum_;   
@@ -202,19 +202,15 @@ public:
 	/*!
 		@brief Get field value
 	*/
-	void getField(ColumnId columnId, const void *&data, uint32_t &size) const {
+	void getField(ColumnId columnId, const void *&data, uint32_t &size) {
 		assert(hasActiveRow());
 
 		const ColumnInfo &info = getColumnInfo(columnId);
 		if (info.isVariable()) {
 			util::ByteStream<util::ArrayInStream> varDataIn = varDataIn_;
-			ValueProcessor::getVarSize(varDataIn); 
-
-			for (uint32_t i = 0; i <= info.getColumnOffset(); ++i) {
-				data = varData_ + varDataIn.base().position(); 
-				size = ValueProcessor::getVarSize(varDataIn);
-				varDataIn.base().position(varDataIn.base().position() + size); 
-			}
+			moveVarData(info, varDataIn);
+			data = varData_ + varDataIn.base().position(); 
+			size = ValueProcessor::getVarSize(varDataIn);
 		}
 		else {
 			size = info.getColumnSize();
@@ -225,7 +221,7 @@ public:
 	/*!
 		@brief Get field value
 	*/
-	void getField(ColumnId columnId, const uint8_t *&data, uint32_t &size) const {
+	void getField(ColumnId columnId, const uint8_t *&data, uint32_t &size) {
 		MessageRowStore::getField(columnId, data, size);
 	}
 
@@ -234,16 +230,16 @@ public:
 	*/
 	template<ColumnType C>
 	typename ColumnTypeTraits<C>::PrimitiveType getField(
-			ColumnId columnId) const {
+			ColumnId columnId) {
 		return MessageRowStore::getField<C>(columnId);
 	}
 
-	uint32_t getArrayLength(ColumnId columnId) const;
+	uint32_t getArrayLength(ColumnId columnId);
 
-	uint32_t getTotalArraySize(ColumnId columnId) const;
+	uint32_t getTotalArraySize(ColumnId columnId);
 
 	void getArrayElement(ColumnId columnId,
-			uint32_t arrayIndex, const void *&data, uint32_t &size) const;
+			uint32_t arrayIndex, const void *&data, uint32_t &size);
 
 	void getPartialRowSet(uint64_t startPos, uint64_t rowNum, uint64_t &fixedOffset,
 		uint64_t &fixedSize, uint64_t &varOffset, uint64_t &varSize);
@@ -273,7 +269,7 @@ public:
 	/*!
 		@brief Set field value
 	*/
-	void setField(const MessageRowStore &source, ColumnId columnId) {
+	void setField(MessageRowStore &source, ColumnId columnId) {
 		MessageRowStore::setField(source, columnId);
 	}
 
@@ -299,7 +295,12 @@ private:
 
 	bool hasActiveRow() const;
 
-	size_t getVarDataOffset(ColumnId columnId) const {
+	void resetVarOffset() {
+		lastVarColumnNth_ = 0;
+		lastVarColumnOffset_ = 0;
+	}
+	void moveVarData(const ColumnInfo &info, util::ByteStream<util::ArrayInStream> &varDataIn);
+	size_t getVarDataOffset(ColumnId columnId) {
 		assert(isVariableColumn(columnId));
 
 		const ColumnInfo &info = getColumnInfo(columnId);
@@ -314,11 +315,7 @@ private:
 		fixedDataIn >> varDataOffset;
 		varDataIn.base().position(static_cast<size_t>(varDataOffset));
 
-		ValueProcessor::getVarSize(varDataIn); 
-		for (uint32_t i = 0; i < info.getColumnOffset(); ++i) {
-			uint32_t varElemSize = ValueProcessor::getVarSize(varDataIn); 
-			varDataIn.base().position(varDataIn.base().position() + varElemSize);
-		}
+		moveVarData(info, varDataIn);
 		if (varDataIn.base().position() >= std::numeric_limits<size_t>::max()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TXN_DECODE_FAILED, "Too large offset");
 		}
@@ -370,7 +367,7 @@ public:
 
 	void beginRow();
 
-	void setField(const MessageRowStore &source, ColumnId columnId) {
+	void setField(MessageRowStore &source, ColumnId columnId) {
 		MessageRowStore::setField(source, columnId);
 	}
 
@@ -474,7 +471,7 @@ struct MessageRowStore::ColumnTypeTraits<COLUMN_TYPE_TIMESTAMP> {
 
 template<ColumnType C>
 typename MessageRowStore::ColumnTypeTraits<C>::PrimitiveType MessageRowStore::getField(
-		ColumnId columnId) const {
+		ColumnId columnId) {
 	assert (C == getColumnInfo(columnId).getColumnType());
 
 	const void *data;

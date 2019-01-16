@@ -27,6 +27,13 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <cfloat>
+
+const uint32_t ChunkManager::LIMIT_CHUNK_NUM_LIST[6] = {
+	64 * 1024 * 1024, 128 * 1024 * 1024, 128 * 1024 * 1024, 128 * 1024 * 1024,
+	128 * 1024 * 1024, 128 * 1024 * 1024};
+
+const double ChunkManager::MemoryLimitManager::CALC_EMA_HALF_LIFE_CONSTANT = 2.8854;
 
 /*!
 	@brief Constructor of ChunkManager.
@@ -49,6 +56,8 @@ ChunkManager::ChunkManager(ConfigTable& configTable,
 			  ,
 		  (configTable.get<int32_t>(CONFIG_TABLE_DS_STORE_COMPRESSION_MODE) == 
 				  0 ? NO_BLOCK_COMPRESSION : BLOCK_COMPRESSION)
+			  , configTable.get<int32_t>(CONFIG_TABLE_DS_STORE_MEMORY_REDISTRIBUTE_SHIFTABLE_MEMORY_RATIO)
+			  , configTable.get<int32_t>(CONFIG_TABLE_DS_STORE_MEMORY_REDISTRIBUTE_EMA_HALF_LIFE_PERIOD)
 			  ),
 	  storeMemoryPool_(
 		  util::AllocatorInfo(ALLOCATOR_GROUP_STORE, "txnBlockPool"),
@@ -59,7 +68,11 @@ ChunkManager::ChunkManager(ConfigTable& configTable,
 	  atomicExistPartitionNum_(0),
 	  memoryLimitManager_(config_, partitionGroupData_, storeMemoryPool_),
 	  chunkManagerStats_()
+	  ,
+	  readOnly_(isReadOnlyModeFile)
 {
+	GS_TRACE_INFO(
+		CHUNK_MANAGER, GS_TRACE_CHM_CONFIG, "Backup function is acceptable. ");
 
 	config_.setUpConfigHandler(configTable);	
 	chunkManagerStats_.setManager(*this);
@@ -190,6 +203,7 @@ bool ChunkManager::existPartition(PartitionId pId) {
 	@brief Drop the partition.
 */
 void ChunkManager::dropPartition(PartitionId pId) {
+	assert(!readOnly_);
 	assert(isValidId(pId));
 
 	try {
@@ -214,7 +228,8 @@ void ChunkManager::dropPartition(PartitionId pId) {
 
 		assert(
 			metaChunkManager
-				.getEmptyScanCursor(pId, getConfig().getChunkCategoryNum() - 1)
+				.getEmptyScanCursor(pId, static_cast<ChunkCategoryId>(
+					getConfig().getChunkCategoryNum() - 1))
 				.cId_ == 0);
 		assert(metaChunkManager.getBatchFreeCursor(pId).cId_ == 0);
 
@@ -260,6 +275,7 @@ void ChunkManager::unfix(
 */
 void ChunkManager::freeChunk(
 	PartitionId pId, ChunkCategoryId categoryId, ChunkId cId) {
+	assert(!readOnly_);
 	assert(isValidId(pId, categoryId, cId));
 	MetaChunkManager& metaChunkManager = getMetaChunkManager(pId);
 	ChunkKey *metaChunkKey = NULL;
@@ -297,7 +313,9 @@ void ChunkManager::freeChunk(
 */
 ChunkManager::MetaChunk* ChunkManager::getChunkForUpdate(PartitionId pId,
 	ChunkCategoryId categoryId, ChunkId cId, ChunkKey chunkKey, bool doFix) {
+	assert(!readOnly_);
 	assert(isValidId(pId, categoryId, cId));
+
 
 	MetaChunkManager& metaChunkManager = getMetaChunkManager(pId);
 	ChunkKey *metaChunkKey;
@@ -351,7 +369,7 @@ ChunkManager::MetaChunk* ChunkManager::getChunk(
 	assert(isValidId(pId, categoryId, cId));
 
 	MetaChunkManager& metaChunkManager = getMetaChunkManager(pId);
-	ChunkKey* chunkKey;
+	ChunkKey* chunkKey = NULL;
 	BaseMetaChunk* baseMetaChunk =
 		metaChunkManager.getMetaChunk(pId, categoryId, cId, chunkKey);
 	int64_t checkpointPos = baseMetaChunk->getCheckpointPos();
@@ -376,29 +394,28 @@ ChunkManager::MetaChunk* ChunkManager::getChunk(
 /*!
 	@brief Return the chunk prohibited updating.
 */
-ChunkManager::MetaChunk* ChunkManager::searchChunk(PartitionId pId,
-	ChunkCategoryId categoryId, AffinityGroupId affinityValue,
-	ChunkKey chunkKey, uint8_t powerSize, ChunkId& cId) {
-	assert(isValidId(pId, categoryId));
+ChunkManager::MetaChunk* ChunkManager::searchChunk(
+		PartitionId pId, ChunkCategoryId chunkCategoryId,
+		const DataAffinityInfo &affinityInfo, ChunkKey chunkKey,
+		uint8_t powerSize, ChunkId& cId) {
+	assert(isValidId(pId, chunkCategoryId));
 	BaseMetaChunk* baseMetaChunk = NULL;
 	
 	try {
 		AffinityManager& affinityManager = getAffinityManager(pId);
-		cId =
-			affinityManager.getAffinityChunkId(pId, categoryId, affinityValue);
+		cId = affinityManager.getAffinityChunkId(
+				pId, chunkCategoryId, affinityInfo, chunkKey);
 
 		MetaChunkManager& metaChunkManager = getMetaChunkManager(pId);
 		if (cId != UNDEF_CHUNKID) {
 			ChunkKey *metaChunkKey;
 			baseMetaChunk = metaChunkManager.getMetaChunk(
-					pId, categoryId, cId, metaChunkKey);
+					pId, chunkCategoryId, cId, metaChunkKey);
 			if (baseMetaChunk->isFree()) {
 				ChunkId oldAffinityCId;
-				affinityManager.setAffinityChunkId(pId, categoryId,
-					affinityValue, UNDEF_CHUNKID, oldAffinityCId);
-				assert(
-					!baseMetaChunk
-						 ->isAffinityUse());  
+				affinityManager.setAffinityChunkId(pId, chunkCategoryId,
+						affinityInfo, chunkKey, UNDEF_CHUNKID, oldAffinityCId);
+				assert(!baseMetaChunk->isAffinityUse());
 				assert(oldAffinityCId == cId);  
 				cId = UNDEF_CHUNKID;  
 			}
@@ -410,40 +427,42 @@ ChunkManager::MetaChunk* ChunkManager::searchChunk(PartitionId pId,
 
 				assert(powerSize <= baseMetaChunk->getUnoccupiedSize());
 				assert(
-					cId < metaChunkManager.getNextTail(pId, categoryId).cId_);
+					cId < metaChunkManager.getNextTail(pId, chunkCategoryId).cId_);
 			}
 		}
 
 		if (cId == UNDEF_CHUNKID) {
 			const uint8_t BATCH_FREE_MODE_EMPTY_CHUNK_THRESHOLD =
-				getConfig().getChunkExpSize();
-			if (isBatchFreeMode(categoryId)) {
+					static_cast<uint8_t>(getConfig().getChunkExpSize() - 2);
+			if (isBatchFreeMode(chunkCategoryId)) {
 				if (powerSize < BATCH_FREE_MODE_EMPTY_CHUNK_THRESHOLD) {
 					powerSize = BATCH_FREE_MODE_EMPTY_CHUNK_THRESHOLD;
 				}
 			}
 
-			cId = searchEmptyChunk(pId, categoryId, powerSize);
+			cId = searchEmptyChunk(pId, chunkCategoryId, powerSize, chunkKey);
 			ChunkKey *metaChunkKey;
 			baseMetaChunk = metaChunkManager.getMetaChunk(
-					pId, categoryId, cId, metaChunkKey);
+					pId, chunkCategoryId, cId, metaChunkKey);
 			assert(cId != UNDEF_CHUNKID);
-			assert(cId < metaChunkManager.getNextTail(pId, categoryId).cId_);
+			assert(cId < metaChunkManager.getNextTail(pId, chunkCategoryId).cId_);
 		}
 
 		if (!baseMetaChunk->isFree()) {
 			assert(powerSize <= baseMetaChunk->getUnoccupiedSize());
-			return getChunkForUpdate(pId, categoryId, cId, chunkKey, true);
+			return getChunkForUpdate(pId, chunkCategoryId, cId, chunkKey, true);
 		}
 		else {
 			return NULL;
 		}
 	}
 	catch (std::exception& e) {
-		GS_RETHROW_SYSTEM_ERROR(e, getTraceInfo(pId, categoryId, cId)
-									   << ", affinity=" << affinityValue
-									   << ", powerSize=" << (int32_t)powerSize
-									   << ")" << GS_EXCEPTION_MESSAGE(e));
+		GS_RETHROW_SYSTEM_ERROR(
+				e, getTraceInfo(pId, chunkCategoryId, cId) <<
+				", affinity(expire)=" << affinityInfo.expireCategory_ <<
+				", affinity(update)=" << affinityInfo.updateCategory_ <<
+				", powerSize=" << (int32_t)powerSize <<
+				")" << GS_EXCEPTION_MESSAGE(e));
 	}
 }
 
@@ -508,10 +527,6 @@ void ChunkManager::reconstructAffinityTable(PartitionId pId) {
 	assert(isValidId(pId));
 
 	try {
-		AffinityManager& affinityManager = getAffinityManager(pId);
-		affinityManager.reconstruct(pId,
-			getConfig().getAtomicStoreMemoryLimitNum(),
-			getAtomicExistPartitionNum(), getConfig().getAffinitySize());
 	}
 	catch (std::exception& e) {
 		GS_RETHROW_SYSTEM_ERROR(e, "");
@@ -522,7 +537,9 @@ void ChunkManager::reconstructAffinityTable(PartitionId pId) {
 	@brief Free some chunks of the ChunkKey of smaller than chunkKey argument.
 */
 bool ChunkManager::batchFreeChunk(PartitionId pId, ChunkKey chunkKey,
-	uint64_t scanChunkNum, uint64_t& scanCount, uint64_t& freeChunkNum) {
+	uint64_t scanChunkNum, uint64_t& scanCount, uint64_t& freeChunkNum,
+	ChunkKey simulateChunkKey, uint64_t& simulateFreeNum) {
+	assert(!readOnly_);
 	assert(isValidId(pId));
 
 	MetaChunkManager& metaChunkManager = getMetaChunkManager(pId);
@@ -534,6 +551,9 @@ bool ChunkManager::batchFreeChunk(PartitionId pId, ChunkKey chunkKey,
 	bool isHead = false;
 	for (scanCount = 0; scanCount < scanChunkNum && !isHead; scanCount++) {
 		if (isBatchFreeMode(cursor.categoryId_) && !baseMetaChunk->isFree()) {
+			if (metaChunkKey && *metaChunkKey <= simulateChunkKey) {
+				simulateFreeNum++;
+			}
 			if (metaChunkKey && *metaChunkKey <= chunkKey) {
 				assert(!getBufferManager(pId).isFixed(
 					pId, cursor.categoryId_, cursor.cId_));
@@ -546,9 +566,15 @@ bool ChunkManager::batchFreeChunk(PartitionId pId, ChunkKey chunkKey,
 		if (!isHead &&
 			metaChunkManager.getNextTail(pId, cursor.categoryId_).cId_ <=
 				cursor.cId_) {
+			while (true) {
 			cursor.categoryId_++;
 			cursor.categoryId_ =
-				cursor.categoryId_ % getConfig().getChunkCategoryNum();
+				static_cast<ChunkCategoryId>(
+					cursor.categoryId_ % getConfig().getChunkCategoryNum());
+				if (cursor.categoryId_ == 0 || isBatchFreeMode(cursor.categoryId_)) {
+					break;
+				}
+			}
 			cursor.cId_ = 0;
 			if (cursor.categoryId_ == 0) {
 				isHead = true;  
@@ -562,6 +588,11 @@ bool ChunkManager::batchFreeChunk(PartitionId pId, ChunkKey chunkKey,
 		metaChunkManager.getPGBatchFreeCount() - beforeBatchFreeCount);
 
 	return isHead;  
+}
+
+void ChunkManager::purgeDataAffinityInfo(PartitionId pId, Timestamp ts) {
+	AffinityManager& affinityManager = getAffinityManager(pId);
+	affinityManager.purge(pId, ts);
 }
 
 
@@ -671,8 +702,8 @@ void ChunkManager::recoveryChunk(PartitionId pId, ChunkCategoryId categoryId,
 /*!
 	@brief Recovery a chunk from the chunk image.
 */
-void ChunkManager::recoveryChunk(
-	PartitionId pId, const uint8_t* chunk, uint32_t size)
+void ChunkManager::recoveryChunk(PartitionId pId, const uint8_t* chunk,
+	uint32_t size, bool forIncrementalBackup)
 {
 	if (!chunk) {
 		GS_THROW_USER_ERROR(GS_ERROR_CHM_NO_CHUNK_IMAGE, "pId," << pId);
@@ -682,8 +713,14 @@ void ChunkManager::recoveryChunk(
 	}
 	ChunkHeader::validateHeader(chunk, getConfig().getPartitionNum(),
 		getConfig().getChunkExpSize(), true);
-	if (pId != ChunkHeader::getPartitionId(chunk)) {
-		GS_THROW_USER_ERROR(GS_ERROR_CHM_INVALID_PARTITION_ID, "pId, " << pId);
+	if (forIncrementalBackup) {
+		pId = ChunkHeader::getPartitionId(chunk);
+	}
+	else {
+		if (pId != ChunkHeader::getPartitionId(chunk)) {
+			GS_THROW_USER_ERROR(
+				GS_ERROR_CHM_INVALID_PARTITION_ID, "pId, " << pId);
+		}
 	}
 	ChunkCategoryId categoryId = ChunkHeader::getChunkCategoryId(chunk);
 	ChunkId cId = ChunkHeader::getChunkId(chunk);
@@ -724,6 +761,17 @@ void ChunkManager::recoveryChunk(
 		}
 
 		BaseMetaChunk* baseMetaChunk = NULL;
+		if (forIncrementalBackup) {
+			ChunkCursor& cursor = metaChunkManager.getNextTail(pId, categoryId);
+			if (cId < cursor.cId_) {
+				ChunkKey *metaChunkKey;
+				baseMetaChunk = metaChunkManager.getMetaChunk(
+						pId, categoryId, cId, metaChunkKey);
+				if (!baseMetaChunk->isFree()) {
+					freeChunk(pId, categoryId, cId);
+				}
+			}
+		}
 		ChunkKey *metaChunkKey;
 		baseMetaChunk = metaChunkManager.reallocate(
 				pId, categoryId, cId, metaChunkKey);
@@ -773,6 +821,7 @@ void ChunkManager::startCheckpoint(PartitionGroupId pgId, CheckpointId cpId) {
 		CheckpointManager& pgCheckpointManager = getPGCheckpointManager(pgId);
 		pgCheckpointManager.clearPG();
 		pgCheckpointManager.setPGCheckpointId(cpId);
+		pgCheckpointManager.clearPGBackupBit();
 	}
 	catch (std::exception& e) {
 		GS_RETHROW_SYSTEM_ERROR(e, "");
@@ -1150,6 +1199,130 @@ bool ChunkManager::getCheckpointChunk(
 	}
 }
 
+void ChunkManager::getBackupChunk(
+	PartitionGroupId pgId, uint64_t checkpointPos, uint8_t* buffer) {
+	CheckpointManager& checkpointManager = getPGCheckpointManager(pgId);
+	try {
+		checkpointManager.readCheckpointChunk(checkpointPos, buffer);
+	}
+	catch (std::exception& e) {
+		UTIL_RETHROW_SYSTEM_ERROR(GS_ERROR_CHM_GET_CHECKPOINT_CHUNK_FAILED, e,
+			"pgId," << pgId << ",checkpointPos," << checkpointPos);
+	}
+}
+BitArray& ChunkManager::getBackupBitArray(PartitionGroupId pgId) {
+	CheckpointManager& checkpointManager = getPGCheckpointManager(pgId);
+	return checkpointManager.getPGBackupBit();
+}
+
+uint64_t ChunkManager::backupCheckpointFile(
+	PartitionGroupId pgId, CheckpointId cpId, const std::string& backupPath) {
+	assert(pgId < getConfig().getPartitionGroupNum());
+	try {
+		const uint32_t copySize = 1 * 1024 * 1024;
+
+		util::NormalXArray<uint8_t> chunk;
+		uint8_t temp = 0;
+		chunk.assign(copySize, temp);
+
+		Config& config = getConfig();
+		CheckpointFile* cpFile = &getPGCheckpointFile(pgId);
+		GS_TRACE_INFO(CHUNK_MANAGER_DETAIL, GS_TRACE_CHM_INTERNAL_INFO,
+			"Backup started (backupName=" << backupPath << ")");
+
+		CheckpointFile backupFile_org(
+			config.getChunkExpSize(), backupPath, pgId);
+		CheckpointFile* backupFile = &backupFile_org;
+		backupFile->open();
+
+		assert(cpFile);
+		assert(backupFile);
+
+
+		cpFile->flush();
+		const uint32_t chunkSize = config.getChunkSize();
+		const uint64_t chunkNum = cpFile->getBlockNum();
+		const uint32_t copyNum = copySize / chunkSize;
+
+		GS_TRACE_INFO(CHUNK_MANAGER_DETAIL, GS_TRACE_CHM_INTERNAL_INFO,
+			"copySize=" << copySize << ", chunkNum=" << chunkNum
+						<< ", copyNum=" << copyNum);
+		uint64_t srcBlockNo = 0;
+		uint64_t destBlockNo = 0;
+		FileManager originalFileManager(config_, *cpFile);
+		FileManager backupFileManager(config_, *backupFile);
+
+		{
+			for (; static_cast<uint64_t>(srcBlockNo + copyNum) < chunkNum;
+				 srcBlockNo += copyNum, destBlockNo += copyNum) {
+				GS_TRACE_INFO(CHUNK_MANAGER_DETAIL, GS_TRACE_CHM_INTERNAL_INFO,
+					"srcBlockNo=" << srcBlockNo << ", chunkNum=" << chunkNum);
+
+				originalFileManager.readChunk(
+					chunk.data(), copyNum, srcBlockNo);
+
+				for (uint32_t i = 0; i < copyNum; ++i) {
+					if (cpFile->getValidBlockInfo(srcBlockNo + i)) {
+						uint32_t chunkCheckSum = ChunkHeader::getCheckSum(
+							chunk.data() + chunkSize * i);
+						uint32_t calcCheckSum = ChunkHeader::calcCheckSum(
+							chunk.data() + chunkSize * i);
+
+						EXEC_FAILURE(GS_ERROR_CHM_INVALID_CHUNK_CHECKSUM);
+						if (chunkCheckSum != calcCheckSum) {
+							GS_THROW_SYSTEM_ERROR(
+								GS_ERROR_CHM_INVALID_CHUNK_CHECKSUM,
+								"checkSum, " << chunkCheckSum << ", "
+											 << calcCheckSum << ", pgId, "
+											 << pgId << ",blockNo,"
+											 << srcBlockNo + i);
+						}
+					}
+				}
+				backupFile->writeBlock(chunk.data(), copyNum, destBlockNo);
+			}
+			if (srcBlockNo < chunkNum) {
+				const uint32_t lastCopyNum =
+					static_cast<uint32_t>(chunkNum - srcBlockNo);
+				GS_TRACE_INFO(CHUNK_MANAGER_DETAIL, GS_TRACE_CHM_INTERNAL_INFO,
+					"srcBlockNo=" << srcBlockNo << ", chunkNum=" << chunkNum
+								  << ", lastCopyNum=" << lastCopyNum);
+				originalFileManager.readChunk(
+					chunk.data(), lastCopyNum, srcBlockNo);
+
+				for (uint32_t i = 0; i < lastCopyNum; ++i) {
+					if (cpFile->getValidBlockInfo(srcBlockNo + i)) {
+						uint32_t chunkCheckSum = ChunkHeader::getCheckSum(
+							chunk.data() + chunkSize * i);
+						uint32_t calcCheckSum = ChunkHeader::calcCheckSum(
+							chunk.data() + chunkSize * i);
+
+						EXEC_FAILURE(GS_ERROR_CHM_INVALID_CHUNK_CHECKSUM);
+						if (chunkCheckSum != calcCheckSum) {
+							GS_THROW_SYSTEM_ERROR(
+								GS_ERROR_CHM_INVALID_CHUNK_CHECKSUM,
+								"checkSum, " << chunkCheckSum << ", "
+											 << calcCheckSum << ", pgId, "
+											 << pgId << ",blockNo,"
+											 << srcBlockNo + i);
+						}
+					}
+				}
+				backupFile->writeBlock(chunk.data(), lastCopyNum, destBlockNo);
+			}
+		}
+
+		backupFile->flush();
+		backupFile->close();
+		backupFile = NULL;
+
+		return chunkNum * config.getChunkSize();
+	}
+	catch (std::exception& e) {
+		GS_RETHROW_SYSTEM_ERROR(
+			e, "pgId," << pgId << ",cpId," << cpId << GS_EXCEPTION_MESSAGE(e));
+	}
+}
 int64_t ChunkManager::getCheckpointChunkPos(
 		PartitionId pId,
 		std::map<int64_t, int64_t> &oldOffsetMap 
@@ -1187,167 +1360,97 @@ int64_t ChunkManager::getCheckpointChunkPos(
 	}
 }
 
-uint64_t ChunkManager::makeSyncTempCpFile(
+void ChunkManager::prepareMakeSyncTempCpFile(
 		PartitionGroupId pgId, PartitionId pId, CheckpointId cpId,
-		const std::string& syncTempPath,
-		std::map<int64_t, int64_t> &oldOffsetMap, 
-		std::map<int64_t, int64_t> &newOffsetMap, 
-		CheckpointFile &syncTempFile) {
-	assert(pgId < getConfig().getPartitionGroupNum());
+		const std::string& syncTempPath, CheckpointFile &syncTempFile,
+		MakeSyncTempCpContext &context) {
+
+	Config& config = getConfig();
+
+	assert(pgId < config.getPartitionGroupNum());
+
+	context.pgId_ = pgId;
+	context.pId_ = pId;
+	context.cpId_ = cpId;
+
+	context.syncTempPath_ = syncTempPath;
+	context.syncTempFile_ = &syncTempFile;
+	context.srcCpFile_ = &getPGCheckpointFile(pgId);
+
+	uint8_t temp = 0;
+	context.readBuffer_.assign(context.IO_SIZE, temp);
+	context.writeBuffer_.assign(context.IO_SIZE, temp);
+
+	context.chunkSize_ = config.getChunkSize();
+	context.chunkNum_ = context.srcCpFile_->getBlockNum();
+	context.copyNum_ = static_cast<int32_t>(context.IO_SIZE / context.chunkSize_);
+
+	GS_TRACE_INFO(CHUNK_MANAGER_DETAIL, GS_TRACE_CHM_INTERNAL_INFO,
+			"makeSyncTempCpFile started (syncTempName=" << context.syncTempPath_ << ")");
+
+	GS_TRACE_INFO(CHUNK_MANAGER_DETAIL, GS_TRACE_CHM_INTERNAL_INFO,
+			"copySize=" << context.IO_SIZE <<
+			", chunkNum=" << context.chunkNum_ <<
+			", copyNum=" << context.copyNum_);
+}
+
+
+bool ChunkManager::makeSyncTempCpFile(
+		MakeSyncTempCpContext &context,
+		std::map<int64_t, int64_t> &oldOffsetMap,
+		std::map<int64_t, int64_t> &newOffsetMap,
+		uint64_t &srcFilePos, uint64_t &destFilePos,
+		uint64_t &writeCount) {
+
 	try {
-		const uint32_t copySize = 1 * 1024 * 1024;
+		uint8_t *writeBufferTop = context.writeBuffer_.data();
+		uint64_t writeBufferPos = 0;
+		for (; (srcFilePos + context.copyNum_) <= context.chunkNum_; ) {
 
-		util::NormalXArray<uint8_t> readBuffer;
-		uint8_t temp = 0;
-		readBuffer.assign(copySize, temp);
+			context.srcCpFile_->readBlock(
+					context.readBuffer_.data(), context.copyNum_, srcFilePos);
 
-		util::NormalXArray<uint8_t> writeBuffer;
-		writeBuffer.assign(copySize, temp);
+			uint64_t oldDestWritePos = destFilePos;
+			makeSyncTempCpFileInternal(
+					context, oldOffsetMap, newOffsetMap,
+					srcFilePos, context.copyNum_,
+					destFilePos, writeBufferPos, writeCount, false);
 
-		Config& config = getConfig();
-		CheckpointFile* cpFile = &getPGCheckpointFile(pgId);
-		assert(cpFile);
-
-		GS_TRACE_INFO(CHUNK_MANAGER_DETAIL, GS_TRACE_CHM_INTERNAL_INFO,
-			"makeSyncTempCpFile started (syncTempName=" << syncTempPath << ")");
-
-		cpFile->flush();
-		const uint32_t chunkSize = config.getChunkSize();
-		const uint64_t chunkNum = cpFile->getBlockNum();
-		const uint32_t copyNum = static_cast<int32_t>(copySize / chunkSize);
-
-		GS_TRACE_INFO(CHUNK_MANAGER_DETAIL, GS_TRACE_CHM_INTERNAL_INFO,
-			"copySize=" << copySize << ", chunkNum=" << chunkNum
-						<< ", copyNum=" << copyNum);
-		int64_t srcBlockNo = 0;
-		int64_t destBlockNo = 0;
-		FileManager originalFileManager(config_, *cpFile);
-		FileManager syncTempFileManager(config_, syncTempFile);
-		{
-			uint64_t writePos = 0;
-			uint8_t *writeBufferTop = writeBuffer.data();
-			for (; static_cast<uint64_t>(srcBlockNo + copyNum) < chunkNum; srcBlockNo += copyNum) {
-				GS_TRACE_INFO(CHUNK_MANAGER_DETAIL, GS_TRACE_CHM_INTERNAL_INFO,
-					"srcBlockNo=" << srcBlockNo << ", chunkNum=" << chunkNum);
-
-				originalFileManager.readChunk(
-					readBuffer.data(), copyNum, srcBlockNo);
-
-				for (uint32_t i = 0; i < copyNum; ++i) {
-					const uint8_t* chunkTop = readBuffer.data() + chunkSize * i;
-					if (cpFile->getValidBlockInfo(srcBlockNo + i)) {
-						PartitionId chunkPId =
-								ChunkHeader::getPartitionId(chunkTop);
-						if (chunkPId != pId) {
-							continue;
-						}
-						uint32_t chunkCheckSum =
-								ChunkHeader::getCheckSum(chunkTop);
-						uint32_t calcCheckSum =
-								ChunkHeader::calcCheckSum(chunkTop);
-						if (ChunkHeader::getPartitionId(chunkTop) == pId) {
-							EXEC_FAILURE(GS_ERROR_CHM_INVALID_CHUNK_CHECKSUM);
-							if (chunkCheckSum != calcCheckSum) {
-								GS_THROW_SYSTEM_ERROR(
-									GS_ERROR_CHM_INVALID_CHUNK_CHECKSUM,
-									"checkSum, " << chunkCheckSum << ", " <<
-									calcCheckSum << ", pgId, " << pgId <<
-									", pId," << chunkPId <<
-									",blockNo," << srcBlockNo + i);
-							}
-							int64_t newOffsetMapKey = -1;
-							std::map<int64_t, int64_t>::iterator mapItr;
-							if ((mapItr = oldOffsetMap.find(srcBlockNo + i))
-									== oldOffsetMap.end()) {
-								continue;
-							}
-							else {
-								newOffsetMapKey = mapItr->second;
-								oldOffsetMap.erase(mapItr);
-							}
-							uint8_t* writeTop = writeBufferTop + chunkSize * writePos;
-							memcpy(writeTop, chunkTop, chunkSize);
-							
-							assert(newOffsetMap.find(newOffsetMapKey) == newOffsetMap.end());
-							newOffsetMap[newOffsetMapKey] = static_cast<ChunkId>(destBlockNo + writePos);
-							++writePos;
-							if (writePos == copyNum) {
-								syncTempFile.writeBlock(writeBufferTop, copyNum, destBlockNo);
-								destBlockNo += copyNum;
-								writePos = 0;
-								writeTop = writeBufferTop;
-							}
-						}
-					}
-				}
-			}
-			if (static_cast<uint64_t>(srcBlockNo) < chunkNum) {
-				const uint32_t lastCopyNum =
-					static_cast<uint32_t>(chunkNum - srcBlockNo);
-				GS_TRACE_INFO(
-						CHUNK_MANAGER_DETAIL, GS_TRACE_CHM_INTERNAL_INFO,
-						"srcBlockNo=" << srcBlockNo <<
-						", chunkNum=" << chunkNum <<
-						", lastCopyNum=" << lastCopyNum);
-				originalFileManager.readChunk(
-						readBuffer.data(), lastCopyNum, srcBlockNo);
-
-				for (uint32_t i = 0; i < lastCopyNum; ++i) {
-					const uint8_t* chunkTop = readBuffer.data() + chunkSize * i;
-					if (cpFile->getValidBlockInfo(srcBlockNo + i)) {
-						PartitionId chunkPId =
-								ChunkHeader::getPartitionId(chunkTop);
-						if (chunkPId != pId) {
-							continue;
-						}
-						uint32_t chunkCheckSum =
-								ChunkHeader::getCheckSum(chunkTop);
-						uint32_t calcCheckSum =
-								ChunkHeader::calcCheckSum(chunkTop);
-//						int64_t chunkCategoryId = static_cast<int64_t>(
-//								ChunkHeader::getChunkCategoryId(chunkTop));
-//						ChunkId chunkId = ChunkHeader::getChunkId(chunkTop);
-						EXEC_FAILURE(GS_ERROR_CHM_INVALID_CHUNK_CHECKSUM);
-						if (chunkCheckSum != calcCheckSum) {
-							GS_THROW_SYSTEM_ERROR(
-								GS_ERROR_CHM_INVALID_CHUNK_CHECKSUM,
-								"checkSum, " << chunkCheckSum << ", " <<
-								calcCheckSum << ", pgId, " << pgId <<
-								", pId," << chunkPId <<
-								", blockNo," << srcBlockNo + i);
-						}
-						int64_t newOffsetMapKey = -1;
-						std::map<int64_t, int64_t>::iterator mapItr;
-						if ((mapItr = oldOffsetMap.find(srcBlockNo + i))
-								== oldOffsetMap.end()) {
-							continue;
-							}
-						else {
-							newOffsetMapKey = mapItr->second;
-							oldOffsetMap.erase(mapItr);
-						}
-						uint8_t* writeTop = writeBufferTop + chunkSize * writePos;
-						memcpy(writeTop, chunkTop, chunkSize);
-
-						assert(newOffsetMap.find(newOffsetMapKey) == newOffsetMap.end());
-						newOffsetMap[newOffsetMapKey] = static_cast<ChunkId>(destBlockNo + writePos);
-						++writePos;
-						if (writePos == copyNum) {
-							syncTempFile.writeBlock(writeBufferTop, copyNum, destBlockNo);
-							destBlockNo += copyNum;
-							writePos = 0;
-							writeTop = writeBufferTop;
-						}
-					}
-				}
-				if (writePos > 0) {
-					syncTempFile.writeBlock(writeBufferTop, writePos, destBlockNo);
-					destBlockNo += writePos;
-				}
+			if (oldDestWritePos != destFilePos) {
+				context.syncTempFile_->flush();
+				return false; 
 			}
 		}
-		syncTempFile.flush();
-		syncTempFile.close();
+		if (static_cast<uint64_t>(srcFilePos) < context.chunkNum_) {
+			const uint32_t lastCopyNum =
+					static_cast<uint32_t>(context.chunkNum_ - srcFilePos);
+			assert(lastCopyNum < context.copyNum_);
+			GS_TRACE_INFO(
+					CHUNK_MANAGER_DETAIL, GS_TRACE_CHM_INTERNAL_INFO,
+					"srcFilePos=" << srcFilePos <<
+					", chunkNum=" << context.chunkNum_ <<
+					", lastCopyNum=" << lastCopyNum);
+
+			context.srcCpFile_->readBlock(
+					context.readBuffer_.data(), lastCopyNum, srcFilePos);
+
+//			uint64_t oldDestWritePos = destFilePos;
+			makeSyncTempCpFileInternal(
+					context, oldOffsetMap, newOffsetMap,
+					srcFilePos, lastCopyNum,
+					destFilePos, writeBufferPos, writeCount, true);
+		}
+		if (writeBufferPos > 0) {
+			context.syncTempFile_->writeBlock(
+					writeBufferTop, writeBufferPos, destFilePos);
+			destFilePos += writeBufferPos;
+			GS_TRACE_INFO(
+					CHUNK_MANAGER_DETAIL, GS_TRACE_CHM_INTERNAL_INFO,
+					"makeSyncTempCpFile: last write: writeBuferPos=" << writeBufferPos <<
+					", destFilePos=" << destFilePos);
+			writeBufferPos = 0;
+		}
+		context.syncTempFile_->flush();
 
 		GS_TRACE_INFO(
 				CHUNK_MANAGER_DETAIL, GS_TRACE_CHM_INTERNAL_INFO,
@@ -1355,15 +1458,74 @@ uint64_t ChunkManager::makeSyncTempCpFile(
 
 		if (!oldOffsetMap.empty()) {
 		}
-
-		return newOffsetMap.size() * chunkSize;
+		return true; 
 	}
 	catch (std::exception& e) {
 		GS_RETHROW_USER_OR_SYSTEM(
-				e, "pgId," << pgId << ",cpId," << cpId << GS_EXCEPTION_MESSAGE(e));
+				e, "pgId," << context.pgId_ << ",cpId," << context.cpId_ <<
+				GS_EXCEPTION_MESSAGE(e));
 	}
 }
 
+void ChunkManager::makeSyncTempCpFileInternal(
+	MakeSyncTempCpContext &context,
+	std::map<int64_t, int64_t> &oldOffsetMap,
+	std::map<int64_t, int64_t> &newOffsetMap,
+	uint64_t &srcFilePos, uint64_t readCount,
+	uint64_t &destFilePos, uint64_t &writeBufferPos,
+	uint64_t &writeCount, bool isLast) {
+
+	uint8_t *writeBufferTop = &context.writeBuffer_.front();
+	for (uint32_t i = 0; i < readCount; ++i) {
+		const uint8_t* chunkTop = context.readBuffer_.data() + context.chunkSize_ * i;
+		if (!context.srcCpFile_->getValidBlockInfo(srcFilePos + i)) {
+			continue;
+		}
+		PartitionId chunkPId = ChunkHeader::getPartitionId(chunkTop);
+		if (chunkPId != context.pId_) {
+			continue;
+		}
+		uint32_t chunkCheckSum = ChunkHeader::getCheckSum(chunkTop);
+		uint32_t calcCheckSum = ChunkHeader::calcCheckSum(chunkTop);
+
+		EXEC_FAILURE(GS_ERROR_CHM_INVALID_CHUNK_CHECKSUM);
+		if (chunkCheckSum != calcCheckSum) {
+			GS_THROW_SYSTEM_ERROR(
+				GS_ERROR_CHM_INVALID_CHUNK_CHECKSUM,
+				"checkSum, " << chunkCheckSum << ", " <<
+				calcCheckSum << ", pgId, " << context.pgId_ <<
+				", pId," << chunkPId <<
+				",blockNo," << srcFilePos + i);
+		}
+		int64_t newOffsetMapKey = -1;
+		std::map<int64_t, int64_t>::iterator mapItr;
+		if ((mapItr = oldOffsetMap.find(srcFilePos + i))
+				== oldOffsetMap.end()) {
+			continue;
+		}
+		else {
+			newOffsetMapKey = mapItr->second;
+			oldOffsetMap.erase(mapItr);
+		}
+		uint8_t* writeTop = writeBufferTop + context.chunkSize_ * writeBufferPos;
+		memcpy(writeTop, chunkTop, context.chunkSize_);
+
+		assert(newOffsetMap.find(newOffsetMapKey) == newOffsetMap.end());
+		newOffsetMap[newOffsetMapKey] = static_cast<ChunkId>(destFilePos + writeBufferPos);
+		++writeBufferPos;
+		++writeCount;
+		if (writeBufferPos == context.copyNum_) {
+			context.syncTempFile_->writeBlock(writeBufferTop, writeBufferPos, destFilePos);
+			destFilePos += writeBufferPos;
+			writeBufferPos = 0;
+			if (!isLast) {
+				srcFilePos += i;
+				return;
+			}
+		}
+	} 
+	srcFilePos += readCount;
+}
 std::string ChunkManager::dump(PartitionId pId, ChunkCategoryId categoryId) {
 	assert(isValidId(pId, categoryId));
 
@@ -1482,7 +1644,7 @@ uint32_t ChunkManager::getAtomicExistPartitionNum() {
 	return atomicExistPartitionNum_;
 }
 ChunkId ChunkManager::searchEmptyChunk(
-	PartitionId pId, ChunkCategoryId categoryId, uint8_t powerSize) {
+		PartitionId pId, ChunkCategoryId categoryId, uint8_t powerSize, ChunkKey chunkKey) {
 	MetaChunkManager& metaChunkManager = getMetaChunkManager(pId);
 	BufferManager& bufferManager = getBufferManager(pId);
 
@@ -1503,7 +1665,7 @@ ChunkId ChunkManager::searchEmptyChunk(
 	if (nextTail.cId_ <= cursor.cId_) {
 		cursor.cId_ = 0;  
 	}
-	ChunkKey *metaChunkKey;
+	ChunkKey *metaChunkKey = NULL;
 	baseMetaChunk = metaChunkManager.begin(pId, cursor, metaChunkKey);
 	uint64_t count = 0;
 	for (; count < searchNum; count++) {
@@ -1512,7 +1674,8 @@ ChunkId ChunkManager::searchEmptyChunk(
 
 		if (!baseMetaChunk->isFree()) {								
 			if (baseMetaChunk->getUnoccupiedSize() >= powerSize &&  
-				!baseMetaChunk->isAffinityUse())  
+				!baseMetaChunk->isAffinityUse() &&  
+				((chunkKey == UNDEF_CHUNK_KEY) || (metaChunkKey && chunkKey == *metaChunkKey)))
 			{
 				if (bufferManager.isOnBuffer(pId, categoryId, cursor.cId_)) {
 					inMemoryCandidate = &cursor;
@@ -1661,6 +1824,8 @@ void ChunkManager::Config::setUpConfigHandler(ConfigTable& configTable) {
 	configTable.setParamHandler(CONFIG_TABLE_CP_CHECKPOINT_MEMORY_LIMIT, *this);
 	configTable.setParamHandler(CONFIG_TABLE_DS_STORE_MEMORY_LIMIT, *this);
 	configTable.setParamHandler(CONFIG_TABLE_DS_AFFINITY_GROUP_SIZE, *this);
+	configTable.setParamHandler(CONFIG_TABLE_DS_STORE_MEMORY_REDISTRIBUTE_SHIFTABLE_MEMORY_RATIO, *this);
+	configTable.setParamHandler(CONFIG_TABLE_DS_STORE_MEMORY_REDISTRIBUTE_EMA_HALF_LIFE_PERIOD, *this);
 }
 
 void ChunkManager::Config::operator()(
@@ -1677,6 +1842,12 @@ void ChunkManager::Config::operator()(
 	case CONFIG_TABLE_DS_AFFINITY_GROUP_SIZE:
 		setAffinitySize(value.get<int32_t>());
 		break;
+	case CONFIG_TABLE_DS_STORE_MEMORY_REDISTRIBUTE_SHIFTABLE_MEMORY_RATIO:
+		setAtomicShiftableMemRatio(value.get<int32_t>());
+		break;
+	case CONFIG_TABLE_DS_STORE_MEMORY_REDISTRIBUTE_EMA_HALF_LIFE_PERIOD:
+		setAtomicEMAHalfLifePeriod(value.get<int32_t>());
+		break;
 	}
 }
 
@@ -1687,6 +1858,8 @@ ChunkManager::Config::Config(
 	uint32_t maxOnceSwapNum
 	,
 	CompressionMode compressionMode
+	, int32_t shiftableMemRatio
+	, int32_t emaHalfLifePeriod
 	)
 	: partitionGroupNum_(partitionGroupNum),
 	  partitionNum_(partitionNum),
@@ -1699,6 +1872,8 @@ ChunkManager::Config::Config(
 	  ,
 	  partitionCompressionMode_(partitionNum),
 	  compressionMode_(initializetCompressionMode(compressionMode))  
+	  , atomicShiftableMemRatio_(shiftableMemRatio)
+	  , atomicEMAHalfLifePeriod_(emaHalfLifePeriod)
 {
 	setAtomicStoreMemoryLimit(storeMemoryLimit * 1024 * 1024);
 	setAtomicCheckpointMemoryLimit(checkpointMemoryLimit * 1024 * 1024);
@@ -1711,17 +1886,20 @@ std::string ChunkManager::Config::dump() {
 		   << getPartitionNum() << ",isWarmStart," << isWarmStart()
 		   << ",storePoolLimitNum," << getAtomicStoreMemoryLimitNum()
 		   << ",checkpointPoolLimitNum," << getAtomicCheckpointMemoryLimitNum()
-		   << ",chunkCategoryNum," << getChunkCategoryNum() << ",chunkExpSize,"
-		   << getChunkExpSize() << ",storeMemoryLimit,"
+		   << ",chunkCategoryNum," << (uint32_t)getChunkCategoryNum() << ",chunkExpSize,"
+		   << (uint32_t)getChunkExpSize() << ",storeMemoryLimit,"
 		   << getAtomicStoreMemoryLimit() << ",checkpointMemoryLimit,"
 		   << getAtomicCheckpointMemoryLimit() << ",affinitySize,"
 		   << getAffinitySize();
+	stream << ",shiftableMemRatio," << getAtomicShiftableMemRatio();
+	stream << ",emaHalfLifePeriod," << getAtomicEMAHalfLifePeriod();
 	return stream.str();
 }
 ChunkManager::ChunkManagerStats::ChunkManagerStats() : manager_(NULL) {
 }
 
 ChunkManager::ChunkManagerStats::~ChunkManagerStats() {}
+
 uint64_t ChunkManager::ChunkManagerStats::getUseStore(
 	ChunkCategoryId categoryId) const {
 	uint64_t chunkNumSum = 0;
@@ -2072,12 +2250,11 @@ uint64_t ChunkManager::ChunkManagerStats::getPGStoreMemory(
 	return bufferByteSize;
 }
 uint64_t ChunkManager::ChunkManagerStats::getPGSwapRead(
-	PartitionGroupId pgId) const {
+		PartitionGroupId pgId) const {
 	BufferManager& bufferManager = getBufferManager(pgId);
-	uint64_t bufferNum = bufferManager.getAtomicPGSwapReadCount();
-	uint64_t bufferByteSize = bufferNum * getConfig().getChunkSize();
-	return bufferByteSize;
+	return bufferManager.getAtomicPGSwapReadCount();
 }
+
 ChunkManager::ChunkManagerStats::StatSetUpHandler
 	ChunkManager::ChunkManagerStats::statSetUpHandler_;
 
@@ -2175,7 +2352,8 @@ bool ChunkManager::ChunkManagerStats::operator()(StatTable& stat) {
 		for (int32_t baseId = STAT_TABLE_PERF_DS_DETAIL_CATEGORY_START + 1;
 			 baseId < STAT_TABLE_PERF_DS_DETAIL_CATEGORY_END; baseId++) {
 			const ChunkCategoryId categoryId =
-				baseId - (STAT_TABLE_PERF_DS_DETAIL_CATEGORY_START + 1);
+				static_cast<ChunkCategoryId>(
+					baseId - (STAT_TABLE_PERF_DS_DETAIL_CATEGORY_START + 1));
 			int32_t id =
 				getStoreParamId(baseId, STAT_TABLE_PERF_DS_DETAIL_PARAM_START);
 			stat.set(++id, getStoreMemory(categoryId));
@@ -2487,84 +2665,6 @@ ChunkManager::PartitionMetaChunk::~PartitionMetaChunk() {
 	chunkKeyList_.clear();
 }
 
-void ChunkManager::AffinityChunkIdTable::initialize(
-	uint64_t affinitySize, ChunkId**& affinityChunkId) {
-	EXEC_FAILURE(GS_ERROR_CM_NO_MEMORY);
-	affinityChunkId = UTIL_NEW ChunkId * [chunkCategoryNum_];
-	memset(affinityChunkId, 0, sizeof(ChunkId*) * chunkCategoryNum_);
-
-	for (uint32_t category = 0; category < chunkCategoryNum_; category++) {
-		affinityChunkId[category] = UTIL_NEW ChunkId[affinitySize];
-		for (uint32_t affinityValue = 0; affinityValue < affinitySize;
-			 affinityValue++) {
-			affinityChunkId[category][affinityValue] = UNDEF_CHUNKID;
-		}
-	}
-}
-void ChunkManager::AffinityChunkIdTable::clear(ChunkId**& affinityChunkId) {
-	if (affinityChunkId) {
-		for (uint32_t category = 0; category < chunkCategoryNum_; category++) {
-			delete[] affinityChunkId[category];
-			affinityChunkId[category] = NULL;
-		}
-	}
-	delete[] affinityChunkId;
-	affinityChunkId = NULL;
-}
-ChunkManager::AffinityChunkIdTable::AffinityChunkIdTable(
-	PartitionId pId, uint32_t chunkCategoryNum, uint64_t affinitySize)
-	: pId_(pId),
-	  chunkCategoryNum_(chunkCategoryNum),
-	  affinitySize_(affinitySize),
-	  affinityChunkId_(NULL) {
-	try {
-		initialize(affinitySize_, affinityChunkId_);
-	}
-	catch (std::exception& e) {
-		clear(affinityChunkId_);
-		GS_RETHROW_SYSTEM_ERROR(e, "pId," << pId_ << "chunkCategoryNum,"
-										  << chunkCategoryNum
-										  << ",affinitySize," << affinitySize
-										  << GS_EXCEPTION_MESSAGE(e));
-	}
-}
-ChunkManager::AffinityChunkIdTable::~AffinityChunkIdTable() {
-	clear(affinityChunkId_);
-}
-void ChunkManager::AffinityChunkIdTable::reconstruct(uint64_t newAffinitySize) {
-	if (affinitySize_ == newAffinitySize) {
-		return;
-	}
-
-	GS_TRACE_INFO(CHUNK_MANAGER_DETAIL, GS_TRACE_CHM_INTERNAL_INFO,
-		"pId," << pId_ << ",affinitySize," << affinitySize_ << ",newSize,"
-			   << newAffinitySize);
-	try {
-		ChunkId** newAffinityChunkId = NULL;
-		initialize(newAffinitySize, newAffinityChunkId);
-		assert(newAffinityChunkId);
-		uint64_t copySize = 1;  
-		for (uint32_t categoryId = 0; categoryId < chunkCategoryNum_;
-			 categoryId++) {
-			memcpy(newAffinityChunkId[categoryId], affinityChunkId_[categoryId],
-				sizeof(ChunkId) * copySize);
-			copySize = std::min<uint64_t>(affinitySize_,
-				newAffinitySize);  
-		}
-		clear(affinityChunkId_);
-		assert(!affinityChunkId_);
-		affinityChunkId_ = newAffinityChunkId;
-		affinitySize_ = newAffinitySize;
-	}
-	catch (std::exception& e) {
-		clear(affinityChunkId_);
-		GS_RETHROW_SYSTEM_ERROR(e,
-			"pId," << pId_ << ",chunkCategoryNum," << chunkCategoryNum_
-				   << ",affinitySize," << affinitySize_ << ",newAffinitySize,"
-				   << newAffinitySize << GS_EXCEPTION_MESSAGE(e));
-	}
-}
-
 ChunkManager::MetaChunkManager::MetaChunkManager(PartitionGroupId pgId,
 	ActivePartitionList& pIdList, PartitionDataList& partitionList,
 	Config& config)
@@ -2608,15 +2708,15 @@ void ChunkManager::MetaChunkManager::expand(
 	}
 
 	uint32_t newSize = static_cast<uint32_t>(chunkList.size());
-	if (newSize < ChunkManager::MAX_CHUNK_EXPAND_COUNT) {
-		newSize = util::nextPowerOf2(static_cast<uint32_t>(targetCId) + 1);
+	uint32_t targetSize = static_cast<uint32_t>(targetCId) + 1;
+	if (targetSize < ChunkManager::MAX_CHUNK_EXPAND_COUNT) {
+		newSize = util::nextPowerOf2(targetSize);
 	}
 	else {
-		while (newSize <= (static_cast<uint32_t>(targetCId) + 1)) {
-			newSize += ChunkManager::MAX_CHUNK_EXPAND_COUNT;
-		}
-		assert(newSize > (static_cast<uint32_t>(targetCId) + 1));
+		uint32_t quotient = targetSize / ChunkManager::MAX_CHUNK_EXPAND_COUNT;
+		newSize = (quotient + 1) * ChunkManager::MAX_CHUNK_EXPAND_COUNT;
 	}
+	assert(newSize >= (static_cast<uint32_t>(targetCId) + 1));
 	if (static_cast<uint32_t>(MAX_CHUNK_ID + 1) < newSize) {
 		newSize = MAX_CHUNK_ID + 1;
 	}
@@ -2695,7 +2795,7 @@ ChunkManager::BaseMetaChunk* ChunkManager::MetaChunkManager::allocate(
 
 	pgStats_.useChunkNum_++;
 	getPartition(pId).categoryStats_[categoryId].useChunkNum_++;
-	chunkList[cId].reuse(config_.getChunkExpSize() - 0x01);
+	chunkList[cId].reuse(static_cast<uint8_t>(config_.getChunkExpSize() - 0x01));
 	metaChunkKey = NULL;
 	ChunkKeyList& chunkKeyList = getChunkKeyList(pId, categoryId);
 	if (cId < static_cast<ChunkId>(chunkKeyList.size())) {
@@ -2836,6 +2936,7 @@ ChunkManager::BaseMetaChunk* ChunkManager::MetaChunkManager::next(
 		return &chunkList[cursor.cId_];
 	}
 }
+
 ChunkManager::BaseMetaChunk* ChunkManager::MetaChunkManager::nextForCategory(
 		PartitionId pId, ChunkCursor& cursor, bool& isHead, ChunkKey* &chunkKey) {
 	isHead = false;
@@ -2975,6 +3076,8 @@ ChunkManager::CheckpointManager::CheckpointManager(PartitionGroupId pgId,
 	  pgCheckpointBitArray_(100),
 	  pgFreeBitArray_(100)
 	  ,
+	  pgBackupBitArray_(100)
+	  ,
 	  pId_(UNDEF_PARTITIONID),
 	  partitionInfo_(partitionInfo),
 	  categoryCursor_(UNDEF_CHUNK_CATEGORY_ID),
@@ -3067,6 +3170,12 @@ void ChunkManager::CheckpointManager::flushPGFile() {
 }
 BitArray& ChunkManager::CheckpointManager::getPGCheckpointBit() {
 	return getCheckpointFile().getValidBitArray();
+}
+BitArray& ChunkManager::CheckpointManager::getPGBackupBit() {
+	return pgBackupBitArray_;
+}
+void ChunkManager::CheckpointManager::clearPGBackupBit() {
+	pgBackupBitArray_.clear();
 }
 void ChunkManager::CheckpointManager::clearPG() {
 	pgCheckpointBitArray_.clear();
@@ -3220,8 +3329,7 @@ bool ChunkManager::CheckpointManager::writeChunk(PartitionId pId) {
 	{
 		util::LockGuard<util::Mutex> guard(pgPoolMutext_);
 		pgPool_.free(checkpointBuffer.buffer_,
-			config_
-				.getAtomicCheckpointMemoryLimitNum());  
+			config_.getAtomicCheckpointMemoryLimitNum());
 		checkpointBuffer.buffer_ = NULL;
 	}
 
@@ -3263,8 +3371,7 @@ void ChunkManager::CheckpointManager::clearPartition() {
 		{
 			util::LockGuard<util::Mutex> guard(pgPoolMutext_);
 			pgPool_.free(checkpointBuffer.buffer_,
-				config_
-					.getAtomicCheckpointMemoryLimitNum());  
+				config_.getAtomicCheckpointMemoryLimitNum());
 		}
 		if (!cpWriter_.atomicPopQueue(checkpointBuffer)) {  
 			return;
@@ -3325,6 +3432,20 @@ bool ChunkManager::CheckpointManager::readRecoveryChunk(uint8_t* buffer) {
 	}
 	catch (std::exception& e) {
 		GS_RETHROW_SYSTEM_ERROR(e, GS_EXCEPTION_MESSAGE(e));
+	}
+}
+void ChunkManager::CheckpointManager::readCheckpointChunk(
+	uint64_t checkpointPos, uint8_t* buffer) {
+	try {
+		int64_t ioTime = fileManagerCPThread_.readChunk(buffer, 1, checkpointPos);
+		fileManagerCPThread_.isValidCheckSum(buffer);
+		fileManagerCPThread_.uncompressChunk(buffer);
+		pgStats_.backupReadCount_++;
+		pgStats_.backupReadTime_ += ioTime;
+	}
+	catch (std::exception& e) {
+		UTIL_RETHROW_USER_ERROR(GS_ERROR_CHM_GET_CHECKPOINT_CHUNK_FAILED, e,
+			"checkpointPos," << checkpointPos);
 	}
 }
 
@@ -3522,13 +3643,16 @@ ChunkManager::BufferManager::~BufferManager() {
 		bufferInfoPool_.deallocate(bufferInfo);
 	}
 }
-void ChunkManager::BufferManager::adjustStoreMemory() {
+void ChunkManager::BufferManager::adjustStoreMemory(bool doReserve) {
 	uint64_t swapNum =
 		getSwapNum(getAtomicPGMemoryLimitNum(), getPGUseBufferNum());
 	if (config_.getMaxOnceSwapNum() < swapNum) {
 		swapNum = config_.getMaxOnceSwapNum();
 	}
-
+	if (swapNum == 0 && doReserve && pgPool_.getFreeElementCount() == 0
+		&& pgPool_.getTotalElementCount() >= config_.getAtomicStoreMemoryLimitNum()) {
+		swapNum = 1;
+	}
 	for (uint64_t count = 0; count < swapNum; count++) {
 		PartitionId pId;
 		ChunkCategoryId categoryId;
@@ -3613,7 +3737,7 @@ uint8_t* ChunkManager::BufferManager::allocate(PartitionId pId,
 	bufferInfo->categoryId_ = categoryId;
 	bufferInfo->cId_ = cId;
 	bufferInfoList_.append(getBufferId(pId, categoryId, cId), bufferInfo);
-	adjustStoreMemory();
+	adjustStoreMemory(true);
 	bufferInfo->buffer_ =
 		pgPool_.allocate();  
 	pgStats_.categoryStats_[categoryId].useBufferNum_++;
@@ -3731,7 +3855,7 @@ uint8_t* ChunkManager::BufferManager::getForUpdate(PartitionId pId,
 	}
 	else {
 		assert(readPos != -1);
-		adjustStoreMemory();
+		adjustStoreMemory(true);
 		bufferInfo->buffer_ =
 			pgPool_.allocate();  
 		pgStats_.categoryStats_[categoryId].useBufferNum_++;
@@ -3805,7 +3929,7 @@ uint8_t* ChunkManager::BufferManager::get(PartitionId pId,
 	}
 	else {
 		assert(readPos != -1);
-		adjustStoreMemory();
+		adjustStoreMemory(true);
 		bufferInfo->buffer_ =
 			pgPool_.allocate();  
 		pgStats_.categoryStats_[categoryId].useBufferNum_++;
@@ -4025,6 +4149,9 @@ ChunkManager::MemoryLimitManager::MemoryLimitManager(Config& config,
 	  addPgIdCursor_(0),
 	  load_(partitionGroupNum_),
 	  limitNum_(NULL),
+		shiftableMemRatio_(config.getAtomicShiftableMemRatio()),
+		lastEMAHalfLifePeriod_(config.getAtomicEMAHalfLifePeriod()),
+		smoothingConstant_(0.003),
 	  config_(config),
 	  partitionGroupData_(partitionGroupData),
 	  memoryPool_(memoryPool) {
@@ -4033,6 +4160,14 @@ ChunkManager::MemoryLimitManager::MemoryLimitManager(Config& config,
 	try {
 		limitNum_ = UTIL_NEW uint64_t[partitionGroupNum_];
 		memset(limitNum_, 0, sizeof(uint64_t) * partitionGroupNum_);
+		lastBaseLimit_.assign(partitionGroupNum_, 0);
+		smoothingConstant_ =
+				2.0 / (static_cast<double>(lastEMAHalfLifePeriod_)
+					   * CALC_EMA_HALF_LIFE_CONSTANT + 1.0);
+	GS_TRACE_INFO(
+			CHUNK_MANAGER, GS_TRACE_CHM_CONFIG,
+			"MemoryLimitManger: EMAHalfLifePeriod initialize: emaHalfLifePeriod," <<
+			lastEMAHalfLifePeriod_ << ",smoothingConstant," << smoothingConstant_ );
 	}
 	catch (std::exception& e) {
 		delete[] limitNum_;
@@ -4054,7 +4189,7 @@ void ChunkManager::MemoryLimitManager::calcParameter(
 	}
 
 	minNum = avgNum -
-	  (totalLimitNum * SHIFTABLE_MEMORY_RATIO) /
+	  (totalLimitNum * shiftableMemRatio_) /
 		(100 * partitionGroupNum_);
 	if (minNum < 1) {
 		minNum = 1;  
@@ -4077,6 +4212,65 @@ void ChunkManager::MemoryLimitManager::calcParameter(
 	assert(1 <= shiftNum && minNum + shiftNum <= avgNum);
 }
 
+
+
+void ChunkManager::MemoryLimitManager::redistributeByEMA(
+		uint64_t avgNum, uint64_t minNum, uint64_t shiftNum,
+		uint64_t totalLimitNum) {
+	uint64_t limitTotal = 0;
+	double estimatedTotal = 0.0;
+	uint64_t lastBaseLimitTotal = 0;
+	for (PartitionGroupId pgId = 0; pgId < partitionGroupNum_; pgId++) {
+		limitTotal += limitNum_[pgId];
+		estimatedTotal += load_.newEstimatedLoad_[pgId];
+		lastBaseLimitTotal += lastBaseLimit_[pgId];
+	}
+	assert(totalLimitNum >= limitTotal);
+	uint64_t targetLimit = totalLimitNum;
+	if (estimatedTotal <= DBL_EPSILON) {
+		return;
+	}
+	PartitionGroupId maxPgId = 0;
+	uint64_t maxLimit = 0;
+	uint64_t subTotal = 0;
+	assert(targetLimit >= minNum * partitionGroupNum_);
+	targetLimit -= minNum * partitionGroupNum_;
+	for (PartitionGroupId pgId = 0; pgId < partitionGroupNum_; pgId++) {
+		lastBaseLimit_[pgId] = (targetLimit * load_.newEstimatedLoad_[pgId] / estimatedTotal) + minNum;
+		assert(lastBaseLimit_[pgId] >= minNum);
+		subTotal += lastBaseLimit_[pgId];
+		if (maxLimit < lastBaseLimit_[pgId]) {
+			maxLimit = lastBaseLimit_[pgId];
+			maxPgId = pgId;
+		}
+		limitNum_[pgId] = lastBaseLimit_[pgId];
+	}
+
+	if (subTotal != totalLimitNum) {
+		assert(subTotal < totalLimitNum);
+		int64_t diff = static_cast<int64_t>(totalLimitNum) -  static_cast<int64_t>(subTotal);
+		if (diff > 0) {
+			lastBaseLimit_[maxPgId] += diff;
+			limitNum_[maxPgId] = lastBaseLimit_[maxPgId];
+		}
+		else {
+			assert(false);
+			diff = -diff;
+			if (lastBaseLimit_[maxPgId] > diff + minNum) {
+				lastBaseLimit_[maxPgId] -= diff;
+			}
+			else {
+				lastBaseLimit_[maxPgId] = minNum;
+			}
+			limitNum_[maxPgId] = lastBaseLimit_[maxPgId];
+		}
+	}
+	for (PartitionGroupId pgId = 0; pgId < partitionGroupNum_; pgId++) {
+		getPGBufferManager(pgId).setAtomicPGMemoryLimitNum(limitNum_[pgId]);  
+	}
+}
+
+
 void ChunkManager::MemoryLimitManager::redistributeMemoryLimit(
 	PartitionGroupId executePgId) {
 	if (executePgId != DISTRIBUTOR_PARTITION_GROUP_ID_) {
@@ -4086,6 +4280,18 @@ void ChunkManager::MemoryLimitManager::redistributeMemoryLimit(
 	uint64_t totalLimitNum = config_.getAtomicStoreMemoryLimitNum();  
 	uint64_t avgNum = totalLimitNum / partitionGroupNum_;
 
+	int32_t emaHalfLifePeriod = config_.getAtomicEMAHalfLifePeriod();  
+	if (lastEMAHalfLifePeriod_ != emaHalfLifePeriod) {
+		smoothingConstant_ =
+				2.0 / (static_cast<double>(emaHalfLifePeriod)
+					   * CALC_EMA_HALF_LIFE_CONSTANT + 1.0);
+		GS_TRACE_INFO(
+				CHUNK_MANAGER, GS_TRACE_CHM_CONFIG,
+				"MemoryLimitManger: EMAHalfLifePeriod change: emaHalfLifePeriod," <<
+				emaHalfLifePeriod << ",smoothingConstant," << smoothingConstant_ );
+
+		lastEMAHalfLifePeriod_ = emaHalfLifePeriod;
+	}
 
 	if (lastTotalLimitNum_ != totalLimitNum) {
 		for (PartitionGroupId pgId = 0; pgId < partitionGroupNum_; pgId++) {
@@ -4097,8 +4303,8 @@ void ChunkManager::MemoryLimitManager::redistributeMemoryLimit(
 	else if (1 < partitionGroupNum_ && minTotalLimitNum_ <= totalLimitNum) {
 
 		uint64_t minNum = avgNum -
-						  (totalLimitNum * SHIFTABLE_MEMORY_RATIO) /
-							  (100 * partitionGroupNum_);
+						  (totalLimitNum * shiftableMemRatio_) /
+						  (100 * partitionGroupNum_);
 		if (minNum < 1) {
 			minNum = 1;  
 		}
@@ -4132,23 +4338,9 @@ void ChunkManager::MemoryLimitManager::redistributeMemoryLimit(
 		assert(delPgIdCursor_ < partitionGroupNum_ &&
 				addPgIdCursor_ < partitionGroupNum_);
 
-		PartitionGroupId delPgId = UNDEF_PARTITIONGROUPID;
-		PartitionGroupId addPgId = UNDEF_PARTITIONGROUPID;
-		bool isShiftable = getShiftablePartitionGroup(
-			load_, avgNum, minNum, shiftNum, delPgId, addPgId);
-		if (isShiftable) {
-			assert(delPgId < partitionGroupNum_ &&
-				   addPgId < partitionGroupNum_);
-			limitNum_[delPgId] -= shiftNum;
-			limitNum_[addPgId] += shiftNum;
-			assert(
-				minNum <= limitNum_[delPgId] && minNum <= limitNum_[addPgId]);
-			getPGBufferManager(delPgId).setAtomicPGMemoryLimitNum(
-				limitNum_[delPgId]);  
-			getPGBufferManager(addPgId).setAtomicPGMemoryLimitNum(
-				limitNum_[addPgId]);  
-		}
-		isLastShifted_ = isShiftable;
+		redistributeByEMA(
+				avgNum, minNum, shiftNum, totalLimitNum);
+		isLastShifted_ = true;
 	}
 
 	memoryPool_.setLimit(util::AllocatorStats::STAT_STABLE_LIMIT,
@@ -4169,40 +4361,17 @@ void ChunkManager::MemoryLimitManager::getCurrentLoad(Load& load) {
 		load.lastLoad_[pgId] = load.load_[pgId];
 		load.load_[pgId] = load.readCount_[pgId] - lastReadCount;
 		load.totalLoad_ += load.load_[pgId];
+		load.lastEstimatedLoad_[pgId] = load.newEstimatedLoad_[pgId];
+		load.newEstimatedLoad_[pgId] =
+				smoothingConstant_ * load.load_[pgId] +
+				(1.0 - smoothingConstant_) * load.lastEstimatedLoad_[pgId];
 	}
 	load.avgLoad_ = load.totalLoad_ / partitionGroupNum_;
 }
 
-bool ChunkManager::MemoryLimitManager::isLoadWorse(const Load& load,
-	uint64_t avgNum, PartitionGroupId& delPgId, PartitionGroupId& addPgId) {
-	assert(1 < partitionGroupNum_);
-	delPgId = delPgIdCursor_;
-	addPgId = addPgIdCursor_;
-	bool isWorse =
-		false;  
-
-	if (limitNum_[delPgId] < avgNum &&
-		load.lastLoad_[delPgId] < load.load_[delPgId]) {
-		isWorse = true;
-	}
-	else {
-		addPgIdCursor_++;
-		addPgIdCursor_ =
-			addPgIdCursor_ % partitionGroupNum_;  
-	}
-	delPgIdCursor_++;
-	delPgIdCursor_ =
-		delPgIdCursor_ % partitionGroupNum_;  
-
-	assert(
-		delPgId != UNDEF_PARTITIONGROUPID && addPgId != UNDEF_PARTITIONGROUPID);
-	assert(delPgIdCursor_ < partitionGroupNum_ &&
-		   addPgIdCursor_ < partitionGroupNum_);
-	return isWorse;
-}
 bool ChunkManager::MemoryLimitManager::getShiftablePartitionGroup(
-	const Load& load, uint64_t avgNum, uint64_t minNum, uint64_t shiftNum,
-	PartitionGroupId& delPgId, PartitionGroupId& addPgId) {
+		const Load& load, uint64_t avgNum, uint64_t minNum, uint64_t shiftNum,
+		PartitionGroupId& delPgId, PartitionGroupId& addPgId) {
 	assert(1 < partitionGroupNum_ && 0 < minNum && 0 < shiftNum &&
 		   minNum + shiftNum <= avgNum);
 	delPgId = UNDEF_PARTITIONGROUPID;
@@ -4211,7 +4380,7 @@ bool ChunkManager::MemoryLimitManager::getShiftablePartitionGroup(
 	for (PartitionGroupId count = 0; count < partitionGroupNum_; count++) {
 		if (minNum + shiftNum <= limitNum_[delPgIdCursor_]) {
 			if ((load.load_[delPgIdCursor_] <= load.lastLoad_[delPgIdCursor_]) &&
-					(load.load_[delPgIdCursor_] < load.avgLoad_)) {
+				(load.load_[delPgIdCursor_] < load.avgLoad_)) {
 				delPgId = delPgIdCursor_;
 				break;
 			}
@@ -4222,14 +4391,13 @@ bool ChunkManager::MemoryLimitManager::getShiftablePartitionGroup(
 
 	for (PartitionGroupId count = 0; count < partitionGroupNum_; count++) {
 		if ((load.lastLoad_[addPgIdCursor_] < load.load_[addPgIdCursor_]) ||
-				(load.avgLoad_ <= load.load_[addPgIdCursor_])) {
+			(load.avgLoad_ <= load.load_[addPgIdCursor_])) {
 			addPgId = addPgIdCursor_;
 			break;
 		}
 		addPgIdCursor_++;
 		addPgIdCursor_ = addPgIdCursor_ % partitionGroupNum_;
-	}
-
+		}
 	if (delPgId == UNDEF_PARTITIONGROUPID ||
 		addPgId == UNDEF_PARTITIONGROUPID) {
 		return false;
@@ -4258,7 +4426,7 @@ bool ChunkManager::MemoryLimitManager::isValid() const {
 		uint64_t pgMinLimitNum =
 			lastTotalLimitNum_ / partitionGroupNum_ -
 			static_cast<uint64_t>(static_cast<double>(lastTotalLimitNum_) *
-								  SHIFTABLE_MEMORY_RATIO) /
+								  shiftableMemRatio_) /
 				100 / partitionGroupNum_;
 		if (pgMinLimitNum < 1) {
 			pgMinLimitNum = 1;  
@@ -4281,13 +4449,14 @@ bool ChunkManager::MemoryLimitManager::isValid() const {
 	}
 	return isValid;
 }
+
 std::string ChunkManager::MemoryLimitManager::dump() const {
 	util::NormalOStringStream stream;
 
 	uint64_t minNum =
 		lastTotalLimitNum_ / config_.getPartitionGroupNum() -
 		static_cast<uint64_t>(
-			static_cast<double>(lastTotalLimitNum_) * SHIFTABLE_MEMORY_RATIO) /
+			static_cast<double>(lastTotalLimitNum_) * shiftableMemRatio_) /
 			100 / partitionGroupNum_;
 	bool adjustable = (maxShiftNum_ <= minNum);
 
@@ -4343,81 +4512,494 @@ std::string ChunkManager::MemoryLimitManager::dump() const {
 	return stream.str();
 }
 
+ChunkManager::PartitionAffinityChunkInfoTable::PartitionAffinityChunkInfoTable(
+		PartitionGroupAllocator& alloc, PartitionId pId,
+		ChunkCategoryId chunkCategoryNum, uint32_t expireCategoryNum,
+		uint32_t updateCategoryNum, uint64_t affinitySize,
+		ChunkManager* chunkManager) :
+		alloc_(alloc), chunkManager_(chunkManager),
+		pId_(pId), chunkCategoryNum_(chunkCategoryNum),
+		expireCategoryNum_(expireCategoryNum),
+		updateCategoryNum_(updateCategoryNum),
+		affinitySize_(affinitySize),
+		infoTableList_(alloc) {
+	infoTableList_.assign(chunkCategoryNum, NULL);
+}
+
+ChunkManager::PartitionAffinityChunkInfoTable::~PartitionAffinityChunkInfoTable() {
+	for (ChunkCategoryId categoryId = 0;
+			categoryId < chunkCategoryNum_;
+		 	++categoryId) {
+		if (infoTableList_[categoryId]) {
+			if (chunkManager_->isBatchFreeMode(categoryId)) {
+				BatchFreeChunkInfoTable* infoTable =
+					static_cast<BatchFreeChunkInfoTable*>(infoTableList_[categoryId]);
+				delete infoTable;
+				infoTableList_[categoryId] = NULL;
+			}
+			else {
+				NormalChunkInfoTable* infoTable =
+						static_cast<NormalChunkInfoTable*>(infoTableList_[categoryId]);
+				delete infoTable;
+				infoTableList_[categoryId] = NULL;
+			}
+		}
+	}
+}
+
+ChunkId ChunkManager::PartitionAffinityChunkInfoTable::getAffinityChunkId(
+		ChunkCategoryId categoryId, const DataAffinityInfo &affinityInfo,
+				ChunkKey chunkKey) const {
+	assert(categoryId < chunkCategoryNum_);
+	if (infoTableList_[categoryId]) {
+		if (chunkManager_->isBatchFreeMode(categoryId)) {
+			BatchFreeChunkInfoTable* infoTable =
+					static_cast<BatchFreeChunkInfoTable*>(infoTableList_[categoryId]);
+			return infoTable->getAffinityChunkId(
+					affinityInfo, chunkKey);
+		}
+		else {
+			NormalChunkInfoTable* infoTable =
+					static_cast<NormalChunkInfoTable*>(infoTableList_[categoryId]);
+			return infoTable->getAffinityChunkId(
+					affinityInfo, chunkKey);
+		}
+	}
+	else {
+		return UNDEF_CHUNKID;
+	}
+}
+
+bool ChunkManager::PartitionAffinityChunkInfoTable::setAffinityChunkId(
+		ChunkCategoryId categoryId, const DataAffinityInfo &affinityInfo,
+		ChunkKey chunkKey, ChunkId chunkId) {
+	assert(categoryId < chunkCategoryNum_);
+	if (infoTableList_[categoryId]) {
+		if (chunkManager_->isBatchFreeMode(categoryId)) {
+			BatchFreeChunkInfoTable* infoTable =
+					static_cast<BatchFreeChunkInfoTable*>(infoTableList_[categoryId]);
+			return infoTable->setAffinityChunkId(
+					affinityInfo, chunkKey, chunkId);
+		}
+		else {
+			NormalChunkInfoTable* infoTable =
+					static_cast<NormalChunkInfoTable*>(infoTableList_[categoryId]);
+			return infoTable->setAffinityChunkId(
+					affinityInfo, chunkKey, chunkId);
+		}
+	}
+	else {
+		if (chunkManager_->isBatchFreeMode(categoryId)) {
+			BatchFreeChunkInfoTable* infoTable = UTIL_NEW BatchFreeChunkInfoTable(
+					alloc_, pId_, chunkCategoryNum_, expireCategoryNum_,
+					updateCategoryNum_, affinitySize_);
+			infoTableList_[categoryId] = infoTable;
+			return infoTable->setAffinityChunkId(
+					affinityInfo, chunkKey, chunkId);
+		}
+		else {
+			NormalChunkInfoTable* infoTable = UTIL_NEW NormalChunkInfoTable(
+					alloc_, pId_, chunkCategoryNum_, expireCategoryNum_,
+					updateCategoryNum_, affinitySize_);
+			infoTableList_[categoryId] = infoTable;
+			return infoTable->setAffinityChunkId(
+					affinityInfo, chunkKey, chunkId);
+		}
+	}
+}
+
+void ChunkManager::PartitionAffinityChunkInfoTable::purge(
+		ChunkCategoryId categoryId, Timestamp baseTime){
+	assert(categoryId < chunkCategoryNum_);
+	if (infoTableList_[categoryId]) {
+		if (chunkManager_->isBatchFreeMode(categoryId)) {
+			BatchFreeChunkInfoTable* infoTable =
+					static_cast<BatchFreeChunkInfoTable*>(infoTableList_[categoryId]);
+			infoTable->purge(baseTime);
+		}
+		else {
+		}
+	}
+	else {
+	}
+}
+
+size_t ChunkManager::PartitionAffinityChunkInfoTable::size() const {
+	size_t totalSize = 0;
+	for (ChunkCategoryId categoryId = 0; categoryId < chunkCategoryNum_;
+			++categoryId) {
+		if (infoTableList_[categoryId]) {
+			if (chunkManager_->isBatchFreeMode(categoryId)) {
+				BatchFreeChunkInfoTable* infoTable =
+				  static_cast<BatchFreeChunkInfoTable*>(infoTableList_[categoryId]);
+				totalSize += infoTable->size();
+			}
+			else {
+				NormalChunkInfoTable* infoTable =
+				  static_cast<NormalChunkInfoTable*>(infoTableList_[categoryId]);
+				totalSize += infoTable->size();
+			}
+		}
+		else {
+		}
+	}
+	return totalSize;
+}
+
+void ChunkManager::PartitionAffinityChunkInfoTable::clear() {
+	for (ChunkCategoryId categoryId = 0; categoryId < chunkCategoryNum_;
+			++categoryId) {
+		if (infoTableList_[categoryId]) {
+			if (chunkManager_->isBatchFreeMode(categoryId)) {
+				BatchFreeChunkInfoTable* infoTable =
+						static_cast<BatchFreeChunkInfoTable*>(infoTableList_[categoryId]);
+				delete infoTable;
+				infoTableList_[categoryId] = NULL;
+			}
+			else {
+				NormalChunkInfoTable* infoTable =
+						static_cast<NormalChunkInfoTable*>(infoTableList_[categoryId]);
+				delete infoTable;
+				infoTableList_[categoryId] = NULL;
+			}
+		}
+	}
+}
+
+void ChunkManager::PartitionAffinityChunkInfoTable::initialize(Timestamp baseTime) {
+	static_cast<void>(baseTime);
+	clear();
+}
+
+ChunkManager::NormalChunkInfoTable::NormalChunkInfoTable(
+		PartitionGroupAllocator& allocator, PartitionId pId,
+		ChunkCategoryId chunkCategoryId, uint32_t expireCategoryNum,
+		uint32_t updateCategoryNum, uint64_t affinitySize) :
+		alloc_(allocator), chunkInfoTableList_(allocator), pId_(pId),
+		chunkCategoryId_(chunkCategoryId),
+		expireCategoryNum_(expireCategoryNum),
+		updateCategoryNum_(updateCategoryNum),
+		affinitySize_(affinitySize) {
+	initialize();
+}
+
+ChunkManager::NormalChunkInfoTable::~NormalChunkInfoTable() {
+}
+
+ChunkId ChunkManager::NormalChunkInfoTable::getAffinityChunkId(
+		const DataAffinityInfo &affinityInfo,
+		ChunkKey chunkKey) const {
+	static_cast<void>(chunkKey);
+	assert(affinityInfo.updateCategory_ < chunkInfoTableList_.size());
+	return chunkInfoTableList_[affinityInfo.updateCategory_];
+}
+
+bool ChunkManager::NormalChunkInfoTable::setAffinityChunkId(
+		const DataAffinityInfo &affinityInfo,
+		ChunkKey chunkKey, ChunkId chunkId) {
+	static_cast<void>(chunkKey);
+	assert(affinityInfo.updateCategory_ < chunkInfoTableList_.size());
+	chunkInfoTableList_[affinityInfo.updateCategory_] = chunkId;
+	return true;
+}
+
+void ChunkManager::NormalChunkInfoTable::purge(Timestamp baseTime){
+	static_cast<void>(baseTime);
+}
+
+void ChunkManager::NormalChunkInfoTable::clear() {
+	chunkInfoTableList_.clear();
+	chunkInfoTableList_.assign(updateCategoryNum_, UNDEF_CHUNKID);
+}
+
+void ChunkManager::NormalChunkInfoTable::initialize() {
+	chunkInfoTableList_.clear();
+	chunkInfoTableList_.assign(updateCategoryNum_, UNDEF_CHUNKID);
+}
+
+ChunkManager::BatchFreeChunkInfoList::BatchFreeChunkInfoList(
+		PartitionGroupAllocator &alloc,
+		ExpireIntervalCategoryId expireCategory,
+		uint64_t startBaseTime) :
+		chunkInfoDeque_(alloc), expireCategory_(expireCategory),
+		roundingBitNum_(
+				DataAffinityUtils::getExpireTimeRoundingBitNum(expireCategory)) {
+	roundingMask_ = static_cast<ChunkKey>(
+			UINT64_C(1) << (roundingBitNum_ - CHUNKKEY_BIT_NUM)) - 1;
+	initialize(startBaseTime);
+}
+
+ChunkManager::BatchFreeChunkInfoList::~BatchFreeChunkInfoList() {
+}
+
+void ChunkManager::BatchFreeChunkInfoList::clear() {
+	chunkInfoDeque_.clear();
+}
+
+void ChunkManager::BatchFreeChunkInfoList::initialize(Timestamp startBaseTime) {
+	chunkInfoDeque_.clear();
+	ChunkKey baseChunkKey = static_cast<ChunkKey>(
+			startBaseTime >> CHUNKKEY_BIT_NUM);
+	if ((startBaseTime & CHUNKKEY_BIT_NUM) != 0) {
+		baseChunkKey++;
+	}
+	ChunkKey maxChunkKey =
+			((baseChunkKey >> (roundingBitNum_ - CHUNKKEY_BIT_NUM)) + 1)
+			<< (roundingBitNum_ - CHUNKKEY_BIT_NUM);
+	minChunkKey_ = maxChunkKey - (KEEP_NUM << (roundingBitNum_ - CHUNKKEY_BIT_NUM));
+	assert(((maxChunkKey - minChunkKey_) >> (roundingBitNum_ - CHUNKKEY_BIT_NUM)) == KEEP_NUM);
+	ChunkKey pos = KEEP_NUM;
+	for (ChunkKey i = 0; i <= pos; ++i) {
+		AffinityChunkInfo chunkInfo;
+		chunkInfo.first = minChunkKey_ + (i << (roundingBitNum_ - CHUNKKEY_BIT_NUM));
+		chunkInfo.second = UNDEF_CHUNKID;
+		chunkInfoDeque_.push_back(chunkInfo);
+	}
+	assert(chunkInfoDeque_[pos].first == maxChunkKey);
+	assert(chunkInfoDeque_[pos].second == UNDEF_CHUNKID);
+}
+
+ChunkId ChunkManager::BatchFreeChunkInfoList::find(ChunkKey chunkKey) {
+	assert((chunkKey & ~roundingMask_) == chunkKey);
+	size_t pos = (chunkKey - minChunkKey_) >> (roundingBitNum_ - CHUNKKEY_BIT_NUM);
+	if (pos < chunkInfoDeque_.size()) {
+		assert(chunkInfoDeque_[pos].first == chunkKey);
+		return chunkInfoDeque_[pos].second;
+	}
+	else {
+		return UNDEF_CHUNKID;
+	}
+}
+
+bool ChunkManager::BatchFreeChunkInfoList::set(ChunkKey chunkKey, ChunkId chunkId) {
+	assert((chunkKey & ~roundingMask_) == chunkKey);
+	if (chunkKey >= minChunkKey_) {
+		size_t pos = (chunkKey - minChunkKey_) >> (roundingBitNum_ - CHUNKKEY_BIT_NUM);
+		if (pos >= chunkInfoDeque_.size()) {
+			expand(chunkKey);
+		}
+		assert(chunkInfoDeque_[pos].first == chunkKey);
+		chunkInfoDeque_[pos].second = chunkId;
+		return true;
+	}
+	else {
+		return false;
+	}
+}
+
+void ChunkManager::BatchFreeChunkInfoList::purge(Timestamp baseTime) {
+	ChunkKey baseChunkKey = static_cast<ChunkKey>(
+			baseTime >> CHUNKKEY_BIT_NUM);
+	if ((baseTime & CHUNKKEY_BIT_NUM) != 0) {
+		baseChunkKey++;
+	}
+	ChunkKey maxChunkKey =
+			((baseChunkKey >> (roundingBitNum_ - CHUNKKEY_BIT_NUM)) + 1)
+			<< (roundingBitNum_ - CHUNKKEY_BIT_NUM);
+	ChunkKey newMinChunkKey = maxChunkKey - (KEEP_NUM << (roundingBitNum_ - CHUNKKEY_BIT_NUM));
+	if (newMinChunkKey <= minChunkKey_) {
+		return;
+	}
+	assert(((maxChunkKey - newMinChunkKey) >> (roundingBitNum_ - CHUNKKEY_BIT_NUM)) == KEEP_NUM);
+	assert((newMinChunkKey & ~roundingMask_) == newMinChunkKey);
+	if (newMinChunkKey > minChunkKey_) {
+		size_t pos = (newMinChunkKey - minChunkKey_) >> (roundingBitNum_ - CHUNKKEY_BIT_NUM);
+		GS_TRACE_INFO(CHUNK_MANAGER_DETAIL, GS_TRACE_CHM_INTERNAL_INFO,
+				"BatchFreeChunkInfoList::purge: baseTime," << baseTime <<
+				",oldMinChunkKey," << minChunkKey_ <<
+				",newMinChunkKey," << newMinChunkKey <<
+				",newHeadPos," << pos);
+		if (pos < chunkInfoDeque_.size()) {
+			for (size_t i = 0; i < pos; ++i) {
+				chunkInfoDeque_.pop_front();
+			}
+		}
+		else {
+			chunkInfoDeque_.clear();
+			AffinityChunkInfo chunkInfo;
+			chunkInfo.first = newMinChunkKey;
+			chunkInfo.second = UNDEF_CHUNKID;
+			chunkInfoDeque_.push_back(chunkInfo);
+		}
+		assert(chunkInfoDeque_[0].first == newMinChunkKey);
+		minChunkKey_ = newMinChunkKey;
+	}
+	else {
+	}
+}
+
+void ChunkManager::BatchFreeChunkInfoList::expand(ChunkKey chunkKey) {
+	assert((chunkKey & ~roundingMask_) == chunkKey);
+	size_t pos = (chunkKey - minChunkKey_) >> (roundingBitNum_ - CHUNKKEY_BIT_NUM);
+	size_t startSize = chunkInfoDeque_.size();
+	assert(pos >= startSize);
+	for (size_t i = startSize; i <= pos; ++i) {
+		AffinityChunkInfo chunkInfo;
+		chunkInfo.first = static_cast<ChunkKey>(
+				minChunkKey_ + (i << (roundingBitNum_ - CHUNKKEY_BIT_NUM)));
+		chunkInfo.second = UNDEF_CHUNKID;
+		chunkInfoDeque_.push_back(chunkInfo);
+	}
+	assert(chunkInfoDeque_[pos].first == chunkKey);
+	assert(chunkInfoDeque_[pos].second == UNDEF_CHUNKID);
+}
+
+ChunkManager::BatchFreeChunkInfoTable::BatchFreeChunkInfoTable(
+		PartitionGroupAllocator& allocator, PartitionId pId,
+		ChunkCategoryId chunkCategoryId, uint32_t expireCategoryNum,
+		uint32_t updateCategoryNum, uint64_t affinitySize) :
+		alloc_(allocator), chunkInfoTableList_(allocator), pId_(pId),
+		chunkCategoryId_(chunkCategoryId),
+		expireCategoryNum_(expireCategoryNum),
+		updateCategoryNum_(updateCategoryNum),
+		affinitySize_(affinitySize) {
+	chunkInfoTableList_.clear();
+	chunkInfoTableList_.assign(expireCategoryNum_ * updateCategoryNum_, NULL);
+}
+
+ChunkManager::BatchFreeChunkInfoTable::~BatchFreeChunkInfoTable() {
+	const size_t total = expireCategoryNum_ * updateCategoryNum_;
+	for (size_t pos = 0; pos < total; ++pos) {
+		if (chunkInfoTableList_[pos]) {
+			delete chunkInfoTableList_[pos];
+			chunkInfoTableList_[pos] = NULL;
+		}
+	}
+}
+
+ChunkId ChunkManager::BatchFreeChunkInfoTable::getAffinityChunkId(
+		const DataAffinityInfo &affinityInfo,
+		ChunkKey chunkKey) const {
+	assert(affinityInfo.expireCategory_ < expireCategoryNum_);
+	assert(affinityInfo.updateCategory_ < updateCategoryNum_);
+	const size_t pos = affinityInfo.expireCategory_ * updateCategoryNum_ + affinityInfo.updateCategory_;
+	BatchFreeChunkInfoList* chunkInfoList = chunkInfoTableList_[pos];
+	if (chunkInfoList) {
+		return chunkInfoList->find(chunkKey);
+	}
+	else {
+		return UNDEF_CHUNKID;
+	}
+}
+
+bool ChunkManager::BatchFreeChunkInfoTable::setAffinityChunkId(
+		const DataAffinityInfo &affinityInfo,
+		ChunkKey chunkKey, ChunkId chunkId) {
+	assert(affinityInfo.expireCategory_ < expireCategoryNum_);
+	assert(affinityInfo.updateCategory_ < updateCategoryNum_);
+	const size_t pos = affinityInfo.expireCategory_ * updateCategoryNum_ + affinityInfo.updateCategory_;
+	BatchFreeChunkInfoList* chunkInfoList = chunkInfoTableList_[pos];
+	if (!chunkInfoList) {
+		uint64_t ts = util::DateTime::now(false).getUnixTime();
+		chunkInfoList = UTIL_NEW BatchFreeChunkInfoList(
+				alloc_, affinityInfo.expireCategory_, ts);
+		chunkInfoTableList_[pos] = chunkInfoList;
+	}
+	return chunkInfoList->set(chunkKey, chunkId);
+}
+
+void ChunkManager::BatchFreeChunkInfoTable::purge(
+		Timestamp baseTime){
+	for (size_t pos = 0; pos < expireCategoryNum_ * updateCategoryNum_; ++pos) {
+		BatchFreeChunkInfoList* chunkInfoList = chunkInfoTableList_[pos];
+		if (chunkInfoList) {
+			chunkInfoList->purge(baseTime);
+		}
+		else {
+		}
+	}
+}
+
+size_t ChunkManager::BatchFreeChunkInfoTable::size() const {
+	size_t total = 0;
+	for (size_t pos = 0; pos < expireCategoryNum_ * updateCategoryNum_; ++pos) {
+		BatchFreeChunkInfoList* chunkInfoList = chunkInfoTableList_[pos];
+		if (chunkInfoList) {
+			total += chunkInfoList->size();
+		}
+		else {
+		}
+	}
+	return total;
+}
+
+void ChunkManager::BatchFreeChunkInfoTable::clear() {
+	for (size_t pos = 0; pos < expireCategoryNum_ * updateCategoryNum_; ++pos) {
+		BatchFreeChunkInfoList* chunkInfoList = chunkInfoTableList_[pos];
+		if (chunkInfoList) {
+			delete chunkInfoList;
+			chunkInfoTableList_[pos] = NULL;
+		}
+		else {
+		}
+	}
+	chunkInfoTableList_.clear();
+	chunkInfoTableList_.assign(expireCategoryNum_ * updateCategoryNum_, NULL);
+}
+
+void ChunkManager::BatchFreeChunkInfoTable::initialize() {
+}
+
+
 const uint64_t ChunkManager::AffinityManager::MAX_AFFINITY_SIZE =
 	10000;  
 ChunkManager::AffinityManager::AffinityManager(int32_t chunkCategoryNum,
 	uint64_t maxAffinitySize, PartitionDataList& partitionData)
 	: chunkCategoryNum_(chunkCategoryNum),
+	  expireCategoryNum_(EXPIRE_INTERVAL_CATEGORY_COUNT),
+	  updateCategoryNum_(UPDATE_INTERVAL_CATEGORY_COUNT),
 	  maxAffinitySize_(maxAffinitySize),
 	  partitionData_(partitionData) {}
 ChunkManager::AffinityManager::~AffinityManager() {}
-void ChunkManager::AffinityManager::reconstruct(PartitionId pId,
-	uint64_t storeLimitNum, uint32_t existsPartitonNum,
-	uint64_t userSpecifiedAffinitySize, bool forceApplyConfig) {
-	assert(userSpecifiedAffinitySize != 0);
 
-	uint64_t newAffinitySize = userSpecifiedAffinitySize;
-	if (!forceApplyConfig) {
-		uint64_t calcAffinitySize = 1;
-		if (0 < existsPartitonNum &&
-			storeLimitNum > (existsPartitonNum * chunkCategoryNum_)) {
-			calcAffinitySize =
-				storeLimitNum / (existsPartitonNum * chunkCategoryNum_);
-		}
-		assert(0 < calcAffinitySize);
-		newAffinitySize = std::min<uint64_t>(
-			std::min<uint64_t>(userSpecifiedAffinitySize, calcAffinitySize),
-			maxAffinitySize_);
-	}
-	assert(0 < newAffinitySize);
-
-	try {
-		getAffinityChunkIdTable(pId).reconstruct(newAffinitySize);
-	}
-	catch (std::exception& e) {
-		GS_RETHROW_SYSTEM_ERROR(
-			e, "pId," << pId << ",storeLimitNum," << storeLimitNum
-					  << ",existsPartitonNum," << existsPartitonNum
-					  << ",userSpecifiedAffinitySize,"
-					  << userSpecifiedAffinitySize << ",forceApplyConfig,"
-					  << forceApplyConfig << GS_EXCEPTION_MESSAGE(e));
-	}
-}
 
 void ChunkManager::AffinityManager::drop(PartitionId pId) {
 	try {
-		uint64_t newAffinitySize = 1;  
-		getAffinityChunkIdTable(pId).reconstruct(newAffinitySize);
-		assert(getAffinityChunkIdTable(pId).getAffinitySize(
-				   chunkCategoryNum_ - 1) == 1);
+		PartitionAffinityChunkInfoTable& affinityChunkInfoTable =
+				getAffinityChunkInfoTable(pId);
+		affinityChunkInfoTable.clear();
 	}
 	catch (std::exception& e) {
 		GS_RETHROW_SYSTEM_ERROR(
-			e, "pId," << pId << ",affinitySize,"
-					  << getAffinityChunkIdTable(pId).getAffinitySize(
-							 chunkCategoryNum_ - 1)
-					  << GS_EXCEPTION_MESSAGE(e));
+				e, "pId," << pId << GS_EXCEPTION_MESSAGE(e));
 	}
 }
 
-ChunkId ChunkManager::AffinityManager::getAffinityChunkId(PartitionId pId,
-	ChunkCategoryId categoryId, AffinityGroupId affinityValue) const {
-	assert(0 <= affinityValue);
-	return getAffinityChunkIdTable(pId).getAffinityChunkId(
-		categoryId, affinityValue);
+ChunkId ChunkManager::AffinityManager::getAffinityChunkId(
+		PartitionId pId, ChunkCategoryId chunkCategoryId,
+		const DataAffinityInfo &affinityInfo, ChunkKey chunkKey) const {
+	return getAffinityChunkInfoTable(pId).getAffinityChunkId(
+		chunkCategoryId, affinityInfo, chunkKey);
 }
-void ChunkManager::AffinityManager::setAffinityChunkId(PartitionId pId,
-	ChunkCategoryId categoryId, AffinityGroupId affinityValue, ChunkId cId,
-	ChunkId& oldAffinityCId) {
-	assert(0 <= affinityValue);
-	AffinityChunkIdTable& affinityChunkIdTable = getAffinityChunkIdTable(pId);
-	oldAffinityCId =
-		affinityChunkIdTable.getAffinityChunkId(categoryId, affinityValue);
+bool ChunkManager::AffinityManager::setAffinityChunkId(
+		PartitionId pId, ChunkCategoryId chunkCategoryId,
+		const DataAffinityInfo &affinityInfo, ChunkKey chunkKey,
+	ChunkId cId, ChunkId& oldAffinityCId) {
+
+	PartitionAffinityChunkInfoTable& affinityChunkInfoTable = getAffinityChunkInfoTable(pId);
+	oldAffinityCId = affinityChunkInfoTable.getAffinityChunkId(
+			chunkCategoryId, affinityInfo, chunkKey);
 	if (cId != UNDEF_CHUNKID) {
-		affinityChunkIdTable.setAffinityChunkId(categoryId, affinityValue, cId);
+		bool result = affinityChunkInfoTable.setAffinityChunkId(
+				chunkCategoryId, affinityInfo,
+				chunkKey, cId);
 		GS_TRACE_INFO(CHUNK_MANAGER_DETAIL, GS_TRACE_CHM_INTERNAL_INFO,
-			"pId," << pId << ",categoryId," << static_cast<uint32_t>(categoryId)
-				   << ",cId," << cId << ",affinityValue," << affinityValue);
+			"pId," << pId <<
+			",chunkCategoryId," << static_cast<uint32_t>(chunkCategoryId) <<
+			",expireCategoryId," << affinityInfo.expireCategory_ <<
+			",updateCategoeyId," << affinityInfo.updateCategory_ << ",cId," << cId);
+		return result;
+	}
+	else {
+		return false;
+	}
+}
+void ChunkManager::AffinityManager::purge(
+		PartitionId pId, Timestamp baseTime) {
+	PartitionAffinityChunkInfoTable& affinityChunkInfoTable =
+			getAffinityChunkInfoTable(pId);
+	for (ChunkCategoryId id = 0; static_cast<uint32_t>(id) < chunkCategoryNum_; ++id) {
+		affinityChunkInfoTable.purge(id, baseTime);
 	}
 }
 

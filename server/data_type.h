@@ -165,7 +165,12 @@ typedef uint8_t ContainerHashMode;
 const ContainerHashMode CONTAINER_HASH_MODE_CRC32 = 0;
 
 typedef uint64_t AffinityGroupId;
+typedef uint16_t ExpireIntervalCategoryId;  
+typedef uint16_t UpdateIntervalCategoryId;  
 
 typedef RowId DatabaseId;  
+
+//#define GD_ENABLE_UNICAST_NOTIFICATION
+
 
 #endif

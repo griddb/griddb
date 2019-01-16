@@ -97,16 +97,17 @@ public:
 		: txn_(txn),
 		  timeSeries_(timeSeries),
 		  rowId_(rowId),
-		  rowArray_(txn_, rowId_, &timeSeries_, OBJECT_READ_ONLY),
+		  rowArray_(txn_, &timeSeries_),
 		  pBitmap_(pBitmap),
 		  varrayCounter_(0) {
+		rowArray_.load(txn_, rowId_, &timeSeries_, OBJECT_READ_ONLY);
 		util::StackAllocator &alloc = txn_.getDefaultAllocator();
 		varray_ = reinterpret_cast<ContainerValue *>(
 			alloc.allocate(sizeof(ContainerValue) * timeSeries.getColumnNum()));
 		try {
 			for (uint32_t i = 0; i < timeSeries_.getColumnNum(); i++) {
 				new (&(varray_[i])) ContainerValue(
-					txn,
+					txn.getPartitionId(),
 					*(timeSeries
 							.getObjectManager()));  
 				varrayCounter_++;
@@ -138,7 +139,7 @@ public:
 		try {
 			for (uint32_t i = 0; i < timeSeries_.getColumnNum(); i++) {
 				new (&(varray_[i])) ContainerValue(
-					txn,
+					txn.getPartitionId(),
 					*(timeSeries_
 							.getObjectManager()));  
 				varrayCounter_++;
@@ -179,7 +180,7 @@ public:
 	const Value *getColumn(uint32_t k) {
 		ContainerValue &v = varray_[k];
 		if (bit_off(pBitmap_[k / 64], k % 64)) {
-			TimeSeries::RowArray::Row row(rowArray_.getRow(), &rowArray_);
+			BaseContainer::RowArray::Row row(rowArray_.getRow(), &rowArray_);
 			row.getField(txn_, timeSeries_.getColumnInfo(k), v);
 			set_bit(pBitmap_[k / 64], k % 64);
 		}
@@ -187,12 +188,12 @@ public:
 	}
 
 	RowId getRowId() {
-		TimeSeries::RowArray::Row row(rowArray_.getRow(), &rowArray_);
+		BaseContainer::RowArray::Row row(rowArray_.getRow(), &rowArray_);
 		return row.getRowId();
 	}
 	void getImage(TransactionContext &txn,
 		MessageRowStore *messageRowStore, bool isWithRowId) {
-		TimeSeries::RowArray::Row row(rowArray_.getRow(), &rowArray_);
+		BaseContainer::RowArray::Row row(rowArray_.getRow(), &rowArray_);
 		row.getImage(txn, messageRowStore, isWithRowId);
 	}
 
@@ -212,7 +213,7 @@ private:
 	TimeSeries &timeSeries_;
 	PointRowId rowId_;
 	ContainerValue *varray_;
-	TimeSeries::RowArray rowArray_;
+	BaseContainer::RowArray rowArray_;
 	uint64_t *pBitmap_;
 	size_t varrayCounter_;
 };

@@ -22,9 +22,6 @@
 #ifndef SYNC_MANAGER_H_
 #define SYNC_MANAGER_H_
 
-#include "util/container.h"
-#include "config_table.h"
-#include "data_type.h"
 #include "partition_table.h"
 
 class CheckpointService;
@@ -61,6 +58,8 @@ enum SyncOperationType {
 	OP_LONGTERM_SYNC_LOG_ACK,
 	OP_SYNC_TIMEOUT,
 	OP_DROP_PARTITION,
+	OP_LONGTERM_SYNC_PREPARE_ACK,
+	SYNC_OPERATION_TYPE_MAX
 };
 
 /*!
@@ -185,7 +184,7 @@ struct SyncOptStat {
 		util::NormalOStringStream ss;
 		ss << "allocate info:{";
 		for (PartitionId pId = 0; pId < partitionNum_; pId++) {
-			ss << "{pId:" << pId << ", allocate:" << allocateList_[pId]
+			ss << " {pId=" << pId << ", allocate:" << allocateList_[pId]
 			<< ", ref:" << referenceCounter_[pId] << "}";
 		}
 		ss << "}";
@@ -213,6 +212,24 @@ public:
 	SyncContext();
 	~SyncContext();
 	void incrementCounter(NodeId syncTargetNodeId);
+	void setDump() {
+		isDump_ = true;
+	}
+	bool isDump() {
+		return isDump_;
+	}
+
+	void setSendReady() {
+		isSendReady_ = true;
+	}
+
+	void setPartitionTable(PartitionTable *pt) {
+		pt_ = pt;
+	}
+
+	bool isSendReady() {
+		return isSendReady_;
+	}
 
 	void resetCounter() {
 		for (size_t i = 0; i < sendBackups_.size(); i++) {
@@ -233,8 +250,6 @@ public:
 		}
 	}
 
-	void getSyncCompleteNodeIds(std::vector<NodeId> &syncCompleteNodeIds, bool isComplete);
-
 	void setSyncTargetLsn(NodeId syncTargetNodeId, LogSequentialNumber lsn);
 
 	void setSyncTargetLsnWithSyncId(
@@ -244,6 +259,13 @@ public:
 
 	bool getSyncTargetLsnWithSyncId(NodeId syncTargetNodeId,
 		LogSequentialNumber &backupLsn, SyncId &backupSyncId);
+
+	void getCatchupSyncId(SyncId &syncId) {
+		if (sendBackups_.size() == 0) {
+			return;
+	}
+		syncId = sendBackups_[0].backupSyncId_;
+	}
 
 	int32_t getId() const {
 		return id_;
@@ -297,14 +319,6 @@ public:
 		return numSendBackup_;
 	}
 
-	void setSyncCheckpointInfo(CheckpointId cpId) {
-		cpId_ = cpId;
-	}
-
-	CheckpointId getSyncCheckpointId() const {
-		return cpId_;
-	}
-
 	void setSyncCheckpointCompleted() {
 		isSyncCpCompleted_ = true;
 	}
@@ -312,6 +326,23 @@ public:
 	bool isSyncCheckpointCompleted() {
 		return isSyncCpCompleted_;
 	}
+
+	void setSyncCheckpointPending(bool flag) {
+		isSyncCpPending_ = flag;
+	}
+
+	bool isSyncCheckpointPending() {
+		return isSyncCpPending_;
+	}
+
+	void setSyncStartCompleted(bool flag) {
+		isSyncStartCompleted_ = flag;
+	}
+
+	bool isSyncStartCompleted() {
+		return isSyncStartCompleted_;
+	}
+
 
 	void setPartitionStatus(PartitionStatus status) {
 		status_ = status;
@@ -321,11 +352,6 @@ public:
 		return status_;
 	}
 
-	void setChunkInfo(CheckpointId cpId, int32_t totalChunkSize) {
-		cpId_ = cpId;
-		totalChunkNum_ = totalChunkSize;
-	}
-
 	void getChunkInfo(int32_t &chunkNum, int32_t &chunkSize) {
 		chunkNum = chunkNum_;
 		chunkSize = chunkBaseSize_;
@@ -333,22 +359,6 @@ public:
 
 	int32_t getChunkNum() {
 		return chunkNum_;
-	}
-
-	void setTotalChunkNum(int32_t totalChunkNum) {
-		totalChunkNum_ = totalChunkNum;
-	}
-
-	int32_t getTotalChunkNum() {
-		return totalChunkNum_;
-	}
-
-	bool isRecvCompleted() {
-		return (totalChunkNum_ == processedChunkNum_);
-	}
-
-	bool isRecvImcompleted() {
-		return (totalChunkNum_ > 0 && totalChunkNum_ < processedChunkNum_);
 	}
 
 	void incProcessedChunkNum(int32_t chunkNum = 1) {
@@ -427,29 +437,23 @@ public:
 
 	void getChunkBuffer(uint8_t *&chunkBuffer, int32_t chunkNo);
 
-	void setDownNextOwner(bool flag) {
-		isDownNextOwner_ = flag;
-	}
-
-	bool getDownNextOwner() {
-		return isDownNextOwner_;
-	}
-
 	std::string dump(uint8_t detailMode = 0);
 
 	bool checkTotalTime(int64_t checkTime = 15000) {
-		if ((mode_ == MODE_LONGTERM_SYNC) || (totalTime_ > checkTime)) {
+		if (mode_ == MODE_LONGTERM_SYNC) {
 			return true;
 		}
 		else {
-			return false;
+			if (totalTime_ >= checkTime) {
+				return true;
+			}
+			else {
+				return false;
+			}
 		}
 	}
 
-	void startAll() {
-		watch_.reset();
-		watch_.start();
-	}
+	void startAll();
 	void endAll() {
 		totalTime_	 += (watch_.elapsedNanos() / 1000 / 1000);
 	}
@@ -491,17 +495,6 @@ public:
 		}
 	}
 
-	void setNotifyLongSync() {
-		notifyLongSync_ = true;
-	}
-	void resetNotifyLongSync() {
-		notifyLongSync_ = false;
-	}
-
-	bool getNotifyLongSync() {
-		return notifyLongSync_;
-	}
-
 
 private:
 
@@ -528,19 +521,17 @@ private:
 	bool used_;
 	uint32_t numSendBackup_;
 	StatementId nextStmtId_;
-	CheckpointId cpId_;
 	NodeId recvNodeId_;
 
 	bool isSyncCpCompleted_;
+	bool isSyncCpPending_;
+	bool isSyncStartCompleted_;
 	SyncContext *nextEmptyChain_;
 	PartitionRevision ptRev_;
-	bool isDownNextOwner_;
 
 	util::NormalXArray<SendBackup> sendBackups_;
 
 	int32_t processedChunkNum_;
-
-	int32_t totalChunkNum_;
 
 	uint8_t *logBuffer_;
 
@@ -573,9 +564,10 @@ private:
 	int64_t syncSequentialNumber_;
 	int64_t globalSequentialNumber_;
 	util::Stopwatch watch_;
+	PartitionTable *pt_;
 
-	bool notifyLongSync_;
-
+	bool isDump_;
+	bool isSendReady_;
 };
 
 struct SyncStatus {
@@ -590,31 +582,9 @@ struct SyncStatus {
 		endLsn_ = 0;
 		errorCount_ = 0;
 	}
+	PartitionId checkAndUpdate(SyncContext *targetContext);
 
-	PartitionId checkAndUpdate(SyncContext *targetContext) {
-		if (pId_ == targetContext->getPartitionId()
-				&& ssn_ == targetContext->getSequentialNumber()
-				&& chunkNum_ == targetContext->getProcessedChunkNum()
-				&& startLsn_ == targetContext->getStartLsn()
-				&& endLsn_ == targetContext->getEndLsn()) {
-			if (errorCount_ > DEFAULT_DETECT_SYNC_ERROR_COUNT) {
-				clear();
-				return targetContext->getPartitionId();
-			}
-			else {
-				errorCount_++;
-			}
-		}
-		else {
-			pId_ = targetContext->getPartitionId();
-			ssn_ = targetContext->getSequentialNumber();
-			chunkNum_ = targetContext->getProcessedChunkNum();
-			startLsn_ = targetContext->getStartLsn();
-			endLsn_ = targetContext->getEndLsn();
-			errorCount_ = 0;
-		}
-		return UNDEF_PARTITIONID;
-	}
+
 
 	PartitionId pId_;
 	int64_t ssn_;
@@ -638,6 +608,7 @@ public:
 	static const uint32_t SYNC_MODE_NORMAL = 0;
 	static const uint32_t SYNC_MODE_RETRY_CHUNK = 1;
 	static const int32_t DEFAULT_LOG_SYNC_MESSAGE_MAX_SIZE;
+	static const int32_t DEFAULT_CHUNK_SYNC_MESSAGE_MAX_SIZE;
 
 	struct LongSyncEntry {
 		LongSyncEntry() : syncSequentialNumber_(-1), isOwner_(true) {}
@@ -666,6 +637,10 @@ public:
 	SyncContext *createSyncContext(EventContext &ec, PartitionId pId, PartitionRevision &ptRev,
 			SyncMode syncMode, PartitionRoleStatus roleStatus);
 
+	ClusterManager *getClusterManager() {
+		return clsMgr_;
+	}
+
 	uint64_t getContextCount() {
 		uint64_t retVal = 0;
 		for (size_t pos = 0; pos < pt_->getPartitionNum(); pos++) {
@@ -674,6 +649,9 @@ public:
 		}
 		return retVal;
 	}
+
+	void checkCurrentContext(EventContext &ec, PartitionId pId, bool isOwner, SyncMode mode = MODE_SHORTTERM_SYNC);
+	void checkCurrentContextWithLock(EventContext &ec, PartitionId pId, bool isOwner, SyncMode mode = MODE_SHORTTERM_SYNC);
 
 	struct LongSyncEntryManager {
 		LongSyncEntryManager(util::StackAllocator &alloc, int32_t partitionNum) :
@@ -735,7 +713,7 @@ public:
 
 	SyncContext *getSyncContext(PartitionId pId, SyncId &syncId);
 
-	void removeSyncContext(EventContext &ec, PartitionId pId, SyncContext *&context);
+	void removeSyncContext(EventContext &ec, PartitionId pId, SyncContext *&context, bool isFailed);
 
 	void removePartition(PartitionId pId);
 
@@ -767,10 +745,6 @@ public:
 		return chunkSize_;
 	}
 
-	int32_t getRecoveryLevel() {
-		return recoveryLevel_;
-	}
-
 	void setSyncMode(int32_t mode) {
 		syncMode_ = mode;
 	}
@@ -778,15 +752,6 @@ public:
 	int32_t getSyncMode() {
 		return syncMode_;
 	}
-
-	void setRestored(PartitionId pId) {
-		undoPartitionList_[pId] = 1;
-	}
-
-	uint8_t isRestored(PartitionId pId) {
-		return undoPartitionList_[pId];
-	}
-
 	uint8_t *getChunkBuffer(PartitionGroupId pgId) {
 		return &chunkBufferList_[chunkSize_ * pgId];
 	}
@@ -1104,7 +1069,6 @@ private:
 
 	void createPartition(PartitionId pId);
 
-	void checkCurrentContext(EventContext &ec, PartitionId pId, bool isOwner);
 
 
 
@@ -1125,21 +1089,13 @@ private:
 
 	SyncContextTable **syncContextTables_;
 	PartitionTable *pt_;
-	uint64_t contextCount_;
 
 	SyncConfig syncConfig_;
 	ExtraConfig extraConfig_;
 
 	uint8_t *chunkBufferList_;
-	PartitionId currentSyncPId_;
-	SyncId currentSyncId_;
-	PartitionRevision currentRev_;
-
 	Size_t chunkSize_;
-	int32_t recoveryLevel_;
 	int32_t syncMode_;
-
-	std::vector<bool> undoPartitionList_;
 	Config config_;
 
 	int64_t syncSequentialNumber_;
@@ -1147,6 +1103,7 @@ private:
 	CheckpointService *cpSvc_;
 	SyncService *syncSvc_;
 	TransactionService *txnSvc_;
+	ClusterManager *clsMgr_;
 	SyncStatus currentSyncStatus_;
 };
 
@@ -1160,7 +1117,6 @@ public:
 			return true;
 		}
 		MSGPACK_DEFINE(contextId_, contextVersion_, syncSequentialNumber_);
-
 		int32_t getId() {
 			return contextId_;
 		}

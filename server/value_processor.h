@@ -27,7 +27,6 @@
 #include "data_type.h"
 #include "gs_error.h"
 #include "object_manager.h"
-#include "transaction_context.h"
 #include <math.h>
 #include <vector>
 
@@ -276,8 +275,7 @@ public:
 		if (isArray && (type <= COLUMN_TYPE_TIMESTAMP)) {
 			return true;
 		}
-		else if (!isArray && (type < COLUMN_TYPE_OID) &&
-				 type != COLUMN_TYPE_RESERVED) {
+		else if (!isArray && (type < COLUMN_TYPE_OID)) {
 			return true;
 		}
 		else {
@@ -309,8 +307,7 @@ public:
 		@brief Validate Column type except for array typte
 	*/
 	static bool isValidColumnType(int8_t type) {
-		return (type >= COLUMN_TYPE_STRING && type < COLUMN_TYPE_RESERVED) ||
-			   (type > COLUMN_TYPE_RESERVED && type <= COLUMN_TYPE_BLOB);
+		return (type >= COLUMN_TYPE_STRING && type <= COLUMN_TYPE_BLOB);
 	}
 	/*!
 		@brief Check if Column type is simple (except variable type)
@@ -598,7 +595,10 @@ public:
 		@brief Get Typed-name
 	*/
 	static std::string getTypeName(ColumnType type);
+	static const char8_t* getTypeNameChars(ColumnType type);
 
+	static void dumpSimpleValue(util::NormalOStringStream &stream, 
+		ColumnType columnType, const void *data, uint32_t size, bool withType = false);
 
 	static const Timestamp
 		SUPPORT_MAX_TIMESTAMP;  
@@ -1037,7 +1037,6 @@ private:
 		uint32_t buddySize = objectManager_.estimateAllocateSize(size);
 		return buddySize + ObjectAllocator::BLOCK_HEADER_SIZE;
 	}
-
 };
 
 class BlobCursor {
@@ -1062,7 +1061,8 @@ public:
 	void getCurrentBinary(const uint8_t *&ptr, uint32_t &size);
 	void setBinary(const uint8_t *addr, uint64_t size);
 	void addBinary(const uint8_t *addr, uint32_t size);
-	void dump(util::NormalOStringStream &ss);
+	void dump(util::NormalOStringStream &ss, bool forExport = false);
+	uint8_t *getBinary(util::StackAllocator &alloc);
 private:
 	struct BlobArrayElement {
 		BlobArrayElement(uint64_t size, OId oId) : size_(size), oId_(oId) {

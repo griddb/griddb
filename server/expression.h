@@ -97,6 +97,7 @@ class Query;
 class BoolExpr;
 class OutputMessageRowStore;
 
+#include "gis_geometry.h"
 #include "collection.h"
 
 /*!
@@ -175,6 +176,7 @@ public:
 	bool isNumericFloat() const;
 	bool isBoolean() const;
 	bool isString() const;
+	bool isGeometry() const;
 	bool isTimestamp() const;
 	bool isArrayValue() const;
 	bool isValue() const;
@@ -193,6 +195,7 @@ public:
 	double getValueAsDouble();
 	bool getValueAsBool();
 	const char *getValueAsString(TransactionContext &txn);
+	Geometry *getGeometry();
 	const ExprList &getArgList();
 	Expr *getArrayElement(
 		TransactionContext &txn, ObjectManager &objectManager, size_t idx);
@@ -328,6 +331,17 @@ public:
 		return QP_NEW_BY_TXN(txn) Expr(t, txn, true);
 	}
 
+	/*!
+	 * @brief Generate expression of geometry value
+	 *
+	 * @param geom Geometry
+	 * @param txn The transaction context
+	 *
+	 * @return generated expression
+	 */
+	static Expr *newGeometryValue(Geometry *geom, TransactionContext &txn) {
+		return QP_NEW_BY_TXN(txn) Expr(geom, txn);
+	}
 
 	/*!
 	 * @brief Generate expression of expression array
@@ -631,6 +645,7 @@ protected:
 	Expr(const char *s, size_t len, TransactionContext &txn,
 		bool isLabel = false, bool needDequote = false);
 
+	Expr(Geometry *geom, TransactionContext &txn);
 
 	Expr(Value *array, TransactionContext &txn);
 
@@ -765,6 +780,7 @@ protected:
 	ColumnInfo *columnInfo_;  
 	uint32_t columnId_;  
 	void *functor_;  
+	Geometry *geomCache_;  
 };
 
 #endif

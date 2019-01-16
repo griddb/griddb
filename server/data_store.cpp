@@ -26,8 +26,12 @@
 #include "query_processor.h"
 #include "result_set.h"
 #include "time_series.h"
+#include "transaction_manager.h"
 
 #include "cluster_service.h"
+
+#include "picojson.h"
+#include <fstream>
 
 
 #define TEST_PRINT(s)
@@ -46,8 +50,10 @@ const uint32_t DataStoreValueLimitConfig::LIMIT_BIG_SIZE_LIST[6] = {
 	1024 * 1024 * 1024 - 1, 1024 * 1024 * 1024 - 1};
 const uint32_t DataStoreValueLimitConfig::LIMIT_ARRAY_NUM_LIST[6] = {
 	2000, 4000, 8000, 16000, 32000, 65000};
-const uint32_t DataStoreValueLimitConfig::LIMIT_COLUMN_NUM_LIST[6] = {
-	512, 1024, 1024, 1024, 1024, 1024};
+	const uint32_t DataStoreValueLimitConfig::LIMIT_COLUMN_NUM_LIST[6] = {
+	512, 1024, 1024, 1000*8, 1000*16, 1000*32};
+	const uint32_t DataStoreValueLimitConfig::LIMIT_INDEX_NUM_LIST[6] = {
+	512, 1024, 1024, 1000*4, 1000*8, 1000*16};
 const uint32_t DataStoreValueLimitConfig::LIMIT_CONTAINER_NAME_SIZE_LIST[6] = {
 	8 * 1024, 16 * 1024, 32 * 1024, 64 * 1024, 128 * 1024, 128 * 1024};
 
@@ -55,13 +61,14 @@ DataStoreValueLimitConfig::DataStoreValueLimitConfig(
 	const ConfigTable &configTable) {
 	int32_t chunkExpSize = util::nextPowerBitsOf2(
 		configTable.getUInt32(CONFIG_TABLE_DS_STORE_BLOCK_SIZE));
-	int32_t nth = chunkExpSize - DS_CHUNK_EXP_SIZE_MIN;
+	int32_t nth = chunkExpSize - ChunkManager::MIN_CHUNK_EXP_SIZE_;
 
 	limitSmallSize_ = LIMIT_SMALL_SIZE_LIST[nth];
 	limitBigSize_ = LIMIT_BIG_SIZE_LIST[nth];
 	limitArrayNumSize_ = LIMIT_ARRAY_NUM_LIST[nth];
 	limitColumnNumSize_ = LIMIT_COLUMN_NUM_LIST[nth];
 	limitContainerNameSize_ = LIMIT_CONTAINER_NAME_SIZE_LIST[nth];
+	limitIndexNumSize_ = LIMIT_INDEX_NUM_LIST[nth];
 }
 
 
@@ -258,6 +265,8 @@ DataStore::DataStore(ConfigTable &configTable, ChunkManager *chunkManager)
 		}
 		currentBackgroundList_.assign(partitionGroupNum, BGTask());
 		activeBackgroundCount_.assign(partitionNum, 0);
+		expirationStat_.assign(partitionNum, ExpirationStat());
+
 		statUpdator_.dataStore_ = this;
 	}
 	catch (std::exception &e) {
@@ -312,6 +321,7 @@ void DataStore::initialize(ManagerSet &mgrSet) {
 BaseContainer *DataStore::putContainer(TransactionContext &txn, PartitionId pId,
 	const FullContainerKey &containerKey, uint8_t containerType,
 	uint32_t schemaSize, const uint8_t *containerSchema, bool isEnable,
+	int32_t featureVersion,
 	PutStatus &status, bool isCaseSensitive) {
 	BaseContainer *container = NULL;
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
@@ -327,20 +337,21 @@ BaseContainer *DataStore::putContainer(TransactionContext &txn, PartitionId pId,
 			messageSchema = ALLOC_NEW(alloc)
 				MessageCollectionSchema(alloc,
 					getValueLimitConfig(), containerName.c_str(),
-					in);
+					in, featureVersion);
 			break;
 		case TIME_SERIES_CONTAINER:
 			messageSchema = ALLOC_NEW(alloc)
 				MessageTimeSeriesSchema(alloc,
 					getValueLimitConfig(), containerName.c_str(),
-					in);
+					in, featureVersion);
 			break;
 		default:
 			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_TYPE_INVALID, "");
 			break;
 		}
 
-		container = getContainer(txn, pId, containerKey, containerType, false);
+		bool isAllowExpiration = true;
+		container = getContainer(txn, pId, containerKey, containerType, false, isAllowExpiration);
 		if (container == NULL) {
 			container = createContainer(
 				txn, pId, containerKey, containerType, messageSchema);
@@ -350,7 +361,6 @@ BaseContainer *DataStore::putContainer(TransactionContext &txn, PartitionId pId,
 						  << " Id = " << container->getContainerId());
 		}
 		else {
-
 			if (isCaseSensitive) {
 				FullContainerKey existContainerKey = container->getContainerKey(txn);
 				if (containerKey.compareTo(alloc, existContainerKey, isCaseSensitive) != 0) {
@@ -382,6 +392,11 @@ BaseContainer *DataStore::putContainer(TransactionContext &txn, PartitionId pId,
 						"can not change schema. container's status is "
 						"invalid.");
 				}
+				if (container->isExpired(txn)) {
+					setLastExpiredTime(txn.getPartitionId(), txn.getStatementStartTime().getUnixTime());
+					status = NOT_EXECUTED;
+					return container;
+				}
 				if (container->hasUncommitedTransaction(txn)) {
 					try {
 						container->getContainerCursor(txn);
@@ -411,6 +426,12 @@ BaseContainer *DataStore::putContainer(TransactionContext &txn, PartitionId pId,
 						GS_TRACE_INFO(
 							DATA_STORE, GS_TRACE_DS_DS_UPDATE_CONTAINER, "Change property");
 						status = CHANGE_PROPERY;
+					} else if (schemaState == DataStore::COLUMNS_ADD) {
+						addContainerSchema(
+							txn, pId, container, messageSchema);
+						GS_TRACE_INFO(
+							DATA_STORE, GS_TRACE_DS_DS_UPDATE_CONTAINER, "Column add");
+						status = CHANGE_PROPERY; 
 					}
 				}
 			}
@@ -439,13 +460,14 @@ void DataStore::dropContainer(TransactionContext &txn, PartitionId pId,
 		if (!objectManager_->existPartition(pId)) {
 			return;
 		}
+		bool isAllowExpiration = true;
 		ContainerAutoPtr containerAutoPtr(
-			txn, this, pId, containerKey, containerType, isCaseSensitive);
+			txn, this, pId, containerKey, containerType, isCaseSensitive, isAllowExpiration);
 		BaseContainer *container = containerAutoPtr.getBaseContainer();
 		if (container == NULL) {
 			return;
 		}
-		if (!container->isInvalid() && container->hasUncommitedTransaction(txn)) {
+		if (!container->isExpired(txn) && !container->isInvalid() && container->hasUncommitedTransaction(txn)) {
 			DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_COL_LOCK_CONFLICT,
 				"drop container(pId=" << txn.getPartitionId()
 					<< ", containerId=" << container->getContainerId()
@@ -488,7 +510,7 @@ void DataStore::dropContainer(TransactionContext &txn, PartitionId pId,
 */
 BaseContainer *DataStore::getContainer(TransactionContext &txn, PartitionId pId,
 	const FullContainerKey &containerKey, uint8_t containerType,
-	bool isCaseSensitive) {
+	bool isCaseSensitive, bool allowExpiration) {
 	try {
 		if (!objectManager_->existPartition(pId)) {
 			return NULL;
@@ -505,7 +527,7 @@ BaseContainer *DataStore::getContainer(TransactionContext &txn, PartitionId pId,
 		if (oId == UNDEF_OID) {
 			return NULL;
 		}
-		BaseContainer *container = getBaseContainer(txn, pId, oId, containerType);
+		BaseContainer *container = getBaseContainer(txn, pId, oId, containerType, allowExpiration);
 		return container;
 	}
 	catch (std::exception &e) {
@@ -518,41 +540,17 @@ BaseContainer *DataStore::getContainer(TransactionContext &txn, PartitionId pId,
 	@brief Get Container by ContainerId
 */
 BaseContainer *DataStore::getContainer(TransactionContext &txn, PartitionId pId,
-	ContainerId containerId, uint8_t containerType) {
+	ContainerId containerId, uint8_t containerType, bool allowExpiration) {
 	try {
-		if (!objectManager_->existPartition(pId)) {
-			return NULL;
-		}
 		OId oId = containerIdTable_->get(pId, containerId);
-		BaseContainer *container = getBaseContainer(txn, pId, oId, containerType);
+		BaseContainer *container = 
+			getBaseContainer(txn, pId, oId, containerType, allowExpiration);
 		return container;
 	}
 	catch (std::exception &e) {
 		handleSearchError(e, GS_ERROR_DS_DS_GET_COLLECTION_FAILED);
 		return NULL;
 	}
-}
-
-/*!
-	@brief Get Collection by ContainerId
-*/
-Collection *DataStore::getCollection(
-	TransactionContext &txn, PartitionId pId, ContainerId containerId) {
-	BaseContainer *container =
-		getContainer(txn, pId, containerId, COLLECTION_CONTAINER);
-	Collection *collection = reinterpret_cast<Collection *>(container);
-	return collection;
-}
-
-/*!
-	@brief Get TimeSeries by ContainerId
-*/
-TimeSeries *DataStore::getTimeSeries(
-	TransactionContext &txn, PartitionId pId, ContainerId containerId) {
-	BaseContainer *container =
-		getContainer(txn, pId, containerId, TIME_SERIES_CONTAINER);
-	TimeSeries *timeSeries = reinterpret_cast<TimeSeries *>(container);
-	return timeSeries;
 }
 
 /*!
@@ -661,10 +659,10 @@ ChunkKey DataStore::getLastChunkKey(TransactionContext &txn) {
 /*!
 	@brief Set Finally ChunkKey when Chunk was expired
 */
-void DataStore::setLastChunkKey(PartitionId pId, ChunkKey chunkKey) {
+Timestamp DataStore::getLatestBatchFreeTime(TransactionContext &txn) {
 	DataStorePartitionHeaderObject partitionHeadearObject(
-		pId, *objectManager_, PARTITION_HEADER_OID);
-	partitionHeadearObject.setChunkKey(chunkKey);
+		txn.getPartitionId(), *getObjectManager(), PARTITION_HEADER_OID);
+	return partitionHeadearObject.getLatestBatchFreeTime();
 }
 
 void DataStore::finalizeContainer(TransactionContext &txn, BaseContainer *container) {
@@ -727,7 +725,7 @@ bool DataStore::searchBGTask(TransactionContext &txn, PartitionId pId, BGTask &b
 	bool isFound = false;
 //	PartitionGroupId pgId = pgConfig_.getPartitionGroupId(pId);
 
-	if (getObjectManager()->existPartition(pId) && getBGTaskCount(pId) > 0) {
+	if (isRestored(pId) && getObjectManager()->existPartition(pId) && getBGTaskCount(pId) > 0) {
 		StackAllocAutoPtr<BtreeMap> map(txn.getDefaultAllocator(),
 			getBackgroundMap(txn, pId));
 		BtreeMap::BtreeCursor btreeCursor;
@@ -760,6 +758,12 @@ bool DataStore::searchBGTask(TransactionContext &txn, PartitionId pId, BGTask &b
 bool DataStore::executeBGTask(TransactionContext &txn, const BackgroundId bgId) {
 	bool isFinished = false;
 	try {
+		if (!isRestored(txn.getPartitionId()) || 
+			!getObjectManager()->existPartition(txn.getPartitionId())) {
+			isFinished = true;
+			return isFinished;
+		}
+
 		util::StackAllocator::Scope scope(txn.getDefaultAllocator());
 		util::XArray<BackgroundData> list(txn.getDefaultAllocator());
 		{
@@ -801,7 +805,8 @@ bool DataStore::executeBGTask(TransactionContext &txn, const BackgroundId bgId) 
 }
 
 void DataStore::clearAllBGTask(TransactionContext &txn) {
-	if (!objectManager_->existPartition(txn.getPartitionId())) {
+	if (!isRestored(txn.getPartitionId()) || 
+		!getObjectManager()->existPartition(txn.getPartitionId())) {
 		return;
 	}
 	try {
@@ -836,6 +841,11 @@ void DataStore::clearAllBGTask(TransactionContext &txn) {
 
 bool DataStore::executeBGTaskInternal(TransactionContext &txn, BackgroundData &bgData) {
 	bool isFinished = false;
+	if (!isRestored(txn.getPartitionId()) || 
+		!getObjectManager()->existPartition(txn.getPartitionId())) {
+		isFinished = true;
+		return isFinished;
+	}
 	switch (bgData.getEventType()) {
 	case BackgroundData::DROP_CONTAINER:
 		{
@@ -843,7 +853,7 @@ bool DataStore::executeBGTaskInternal(TransactionContext &txn, BackgroundData &b
 			bgData.getDropContainerData(containerOId);
 			StackAllocAutoPtr<BaseContainer> container(txn.getDefaultAllocator(),
 				getBaseContainer(txn, txn.getPartitionId(), containerOId, 
-				ANY_CONTAINER));
+				ANY_CONTAINER, true));
 			if (container.get() == NULL || container.get()->isInvalid()) {
 				isFinished = true;
 			} else {
@@ -867,8 +877,9 @@ bool DataStore::executeBGTaskInternal(TransactionContext &txn, BackgroundData &b
 			AllocateStrategy strategy;	
 
 			Timestamp timestamp = txn.getStatementStartTime().getUnixTime();
-			ChunkKey expireChunkKey = DataStore::convertTimestamp2ChunkKey(timestamp, false);
-			if (chunkKey != UNDEF_CHUNK_KEY && (chunkKey <= getLastChunkKey(txn) || chunkKey <= expireChunkKey)) {
+			Timestamp chunkKeyTime = DataStore::convertChunkKey2Timestamp(chunkKey);
+
+			if (chunkKey != UNDEF_CHUNK_KEY && (chunkKeyTime <= getLatestBatchFreeTime(txn) || chunkKeyTime <= timestamp)) {
 				isFinished = true;
 			}
 			else {
@@ -905,6 +916,10 @@ BaseIndex *DataStore::getIndex(TransactionContext &txn,
 		break;
 	case MAP_TYPE_HASH:
 		map = ALLOC_NEW(txn.getDefaultAllocator()) HashMap(
+			txn, objectManager, mapOId, strategy, container);
+		break;
+	case MAP_TYPE_SPATIAL:
+		map = ALLOC_NEW(txn.getDefaultAllocator()) RtreeMap(
 			txn, objectManager, mapOId, strategy, container);
 		break;
 	default:
@@ -1013,6 +1028,8 @@ void DataStore::DataStorePartitionHeaderObject::initialize(
 
 	get()->maxContainerId_ = 0;
 	get()->maxBackgroundId_ = 0;
+
+	get()->latestCheckTime_ = 0;
 }
 
 /*!
@@ -1172,6 +1189,23 @@ void DataStore::changeContainerProperty(TransactionContext &txn, PartitionId pId
 	ALLOC_DELETE(txn.getDefaultAllocator(), container);
 	container = getContainer(txn, pId, containerId, containerType);
 }
+void DataStore::addContainerSchema(TransactionContext &txn, PartitionId pId,
+	BaseContainer *&container, MessageSchema *messageSchema) {
+
+//	bool isFirstUpdate = container->isFirstColumnAdd();
+//	bool oldWithVar = container->getVariableColumnNum() > 0;
+	uint32_t oldColumnNum = container->getColumnNum();
+
+	ContainerId containerId = container->getContainerId();
+	ContainerType containerType = container->getContainerType();
+	int64_t schemaHashKey = BaseContainer::calcSchemaHashKey(messageSchema);
+	OId schemaOId = getColumnSchemaId(txn, pId, messageSchema, schemaHashKey);
+	insertColumnSchema(txn, pId, messageSchema, schemaHashKey, schemaOId);
+	container->changeProperty(txn, schemaOId);
+	ALLOC_DELETE(txn.getDefaultAllocator(), container);
+	container = getContainer(txn, pId, containerId, containerType);
+	container->changeNullStats(txn, oldColumnNum);
+}
 
 OId DataStore::getColumnSchemaId(TransactionContext &txn, PartitionId pId,
 	MessageSchema *messageSchema, int64_t schemaHashKey) {
@@ -1223,14 +1257,15 @@ void DataStore::insertColumnSchema(TransactionContext &txn, PartitionId pId,
 		uint32_t bodyAllocateSize;
 		util::XArray<ShareValueList::ElemData> inputList(
 			txn.getDefaultAllocator());
+		bool onMemory = false;
 		BaseContainer::initializeSchema(txn, *getObjectManager(), messageSchema,
-			allocateStrategy_, inputList, bodyAllocateSize);
+			allocateStrategy_, inputList, bodyAllocateSize, onMemory);
 		uint32_t allocateSize = ShareValueList::getHeaderSize(
 									static_cast<int32_t>(inputList.size())) +
 								bodyAllocateSize;
 
 		ShareValueList commonContainerSchema(txn, *getObjectManager());
-		commonContainerSchema.initialize(txn, allocateSize, allocateStrategy_);
+		commonContainerSchema.initialize(txn, allocateSize, allocateStrategy_, onMemory);
 		commonContainerSchema.set(schemaHashKey, inputList);
 		schemaOId = commonContainerSchema.getBaseOId();
 
@@ -1269,7 +1304,9 @@ void DataStore::insertTrigger(TransactionContext &txn, PartitionId pId,
 									static_cast<int32_t>(inputList.size())) +
 								bodyAllocateSize;
 		ShareValueList triggerSchema(txn, *getObjectManager());
-		triggerSchema.initialize(txn, allocateSize, allocateStrategy_);
+		bool onMemory = false;
+		triggerSchema.initialize(txn, allocateSize, allocateStrategy_,
+			onMemory);
 		triggerSchema.set(triggerHashKey, inputList);
 		triggerOId = triggerSchema.getBaseOId();
 
@@ -1329,9 +1366,9 @@ template int32_t BtreeMap::update(TransactionContext &txn, BackgroundId &key,
 	@brief Get Container by ContainerId
 */
 BaseContainer *DataStore::getBaseContainer(TransactionContext &txn, PartitionId pId,
-	OId oId, ContainerType containerType) {
+	OId oId, ContainerType containerType, bool allowExpiration) {
 	if (!objectManager_->existPartition(pId)) {
-		return NULL;
+		GS_THROW_USER_ERROR(GS_ERROR_DS_CONTAINER_UNEXPECTEDLY_REMOVED, "Partition " << pId << " not exist");
 	}
 	if (UNDEF_OID == oId) {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_CONTAINER_UNEXPECTEDLY_REMOVED, "");
@@ -1361,6 +1398,14 @@ BaseContainer *DataStore::getBaseContainer(TransactionContext &txn, PartitionId 
 	default:
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
 		break;
+	}
+	if (container->isExpired(txn) && !allowExpiration) {
+		util::String containerName(txn.getDefaultAllocator());
+		container->getContainerKey(txn).toString(txn.getDefaultAllocator(), containerName);
+		ALLOC_DELETE(txn.getDefaultAllocator(), container);
+		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_EXPIRED, "\"" 
+			<< containerName
+			<< "\" is already expired");
 	}
 
 	return container;
@@ -1394,7 +1439,7 @@ void DataStore::updateContainer(TransactionContext &txn, BaseContainer *containe
 
 	StackAllocAutoPtr<BaseContainer> newContainer(txn.getDefaultAllocator(),
 		getBaseContainer(txn, txn.getPartitionId(), newContainerOId, 
-		container->getContainerType()));
+		container->getContainerType(), true));
 	if (newContainer.get() == NULL || newContainer.get()->isInvalid()) {
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_NOT_FOUND, "");
 	}
@@ -1535,6 +1580,29 @@ void DataStore::restartPartition(
 	restoreBackground(txn, clusterService);
 	setRestored(txn.getPartitionId());
 
+	restoreLastExpiredTime(txn, clusterService);
+
+}
+
+void DataStore::restoreLastExpiredTime(TransactionContext &txn, ClusterService *clusterService) {
+	PartitionId pId = txn.getPartitionId();
+	if (!objectManager_->existPartition(pId)) {
+		return;
+	}
+
+	const DataStore::Latch latch(
+		txn, pId, this, clusterService);
+
+	DataStorePartitionHeaderObject partitionHeadearObject(
+		txn.getPartitionId(), *getObjectManager(), PARTITION_HEADER_OID);
+
+	Timestamp lastCheckTime = partitionHeadearObject.getLatestCheckTime();
+	Timestamp lastChunkKeyTime = DataStore::convertChunkKey2Timestamp(
+		partitionHeadearObject.getChunkKey());
+	if (lastChunkKeyTime > lastCheckTime) {
+		partitionHeadearObject.setLatestCheckTime(lastChunkKeyTime);
+	}
+	expirationStat_[pId].expiredTime_ = partitionHeadearObject.getLatestCheckTime();
 }
 
 
@@ -1555,6 +1623,7 @@ bool DataStore::restoreContainerIdTable(
 		txn.getPartitionId(), *getObjectManager(), PARTITION_HEADER_OID);
 	BtreeMap containerMap(txn, *getObjectManager(),
 		partitionHeadearObject.getMetaMapOId(), allocateStrategy_, NULL);
+
 
 	size_t containerListSize = 0;
 	BtreeMap::BtreeCursor btreeCursor;
@@ -1663,6 +1732,8 @@ void DataStore::dropPartition(PartitionId pId) {
 		if (objectManager_->existPartition(pId)) {
 			objectManager_->dropPartition(pId);
 			containerIdTable_->dropPartition(pId);
+			activeBackgroundCount_[pId] = 0;
+			expirationStat_[pId] = ExpirationStat();
 		}
 
 		setUnrestored(pId);
@@ -1783,6 +1854,57 @@ void DataStore::ContainerIdTable::getList(
 	}
 }
 
+bool DataStore::ContainerIdTable::getListOrdered(
+		PartitionId pId, ContainerId startId, uint64_t limit,
+		const DatabaseId *dbId, ContainerCondition &condition,
+		ContainerIdRefList &list) const {
+	list.clear();
+	list.reserve(std::min<uint64_t>(containerIdMap_[pId].size(), limit));
+
+	const util::Set<ContainerAttribute> &attributes = condition.getAttributes();
+	containerIdMapAsc pred;
+
+	bool followingFound = false;
+	for (ContainerIdMap::const_iterator itr = containerIdMap_[pId].begin();
+			itr != containerIdMap_[pId].end(); ++itr) {
+
+		const ContainerId id = itr->first;
+		if (id < startId) {
+			continue;
+		}
+
+		if (dbId != NULL && itr->second.databaseVersionId_ != *dbId) {
+			continue;
+		}
+
+		if (attributes.find(itr->second.attribute_) == attributes.end()) {
+			continue;
+		}
+
+		const ContainerIdRefList::value_type entry(itr->first, &itr->second);
+
+		if (list.size() >= limit) {
+			followingFound = true;
+
+			if (list.empty()) {
+				break;
+			}
+
+			std::pop_heap(list.begin(), list.end(), pred);
+			if (pred(entry, list.back())) {
+				list.back() = entry;
+			}
+		}
+		else {
+			list.push_back(entry);
+		}
+
+		std::push_heap(list.begin(), list.end(), pred);
+	}
+
+	std::sort_heap(list.begin(), list.end(), pred);
+	return followingFound;
+}
 
 void DataStore::dumpPartition(TransactionContext &txn, PartitionId pId,
 	DumpType type, const char *fileName) {
@@ -1858,6 +1980,224 @@ void DataStore::dumpPartition(TransactionContext &txn, PartitionId pId,
 
 
 
+#include <cstdlib>
+
+#ifdef _WIN32
+#define CATDLL_API extern "C" __declspec(dllimport)
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
+#ifdef _WIN32
+LPCWSTR createLStr(char *str) {
+	std::string path = str;
+  std::wstring wpath = std::wstring(path.begin(), path.end());
+  LPCWSTR lpath = wpath.c_str();
+  return lpath;
+}
+
+void *LoadFuncOrDie(HINSTANCE *lib, const std::string& func_name) {
+
+  void *func = GetProcAddress(*lib, func_name.c_str());
+  printf("%d\n",GetLastError()); 
+  if (!func) {
+	std::cerr << "Cannot load symbol create: " << func_name.c_str() << std::endl;
+    exit(EXIT_FAILURE);
+  }
+  return func;
+}
+
+HINSTANCE *LoadLibOrDie(const std::string& path) {
+  HINSTANCE *lib = new HINSTANCE;
+
+  std::wstring wpath = std::wstring(path.begin(), path.end());
+  LPCWSTR lpath = wpath.c_str();
+  printf("%d\n",GetLastError()); 
+  *lib = LoadLibrary(lpath);
+  printf("%d\n",GetLastError()); 
+  if (!lib) {
+    std::cerr << "Cannot load library: " << path.c_str() << std::endl;
+    exit(EXIT_FAILURE);
+  }
+  return lib;
+}
+#else
+void *LoadFuncOrDie(void *lib, const std::string& func_name) {
+	void *func = dlsym(lib, func_name.c_str());
+	const char *dlsym_error = dlerror();
+	if (dlsym_error) {
+		std::cerr << "Cannot load symbol create: " << dlsym_error << std::endl;
+		dlclose(lib);
+		exit(EXIT_FAILURE);
+	}
+	return func;
+}
+
+void *LoadLibOrDie(const std::string& path) {
+	void *lib = dlopen(path.c_str(), RTLD_LAZY);
+	if (!lib) {
+		std::cerr << "Cannot load library: " << dlerror() << std::endl;
+		exit(EXIT_FAILURE);
+	}
+	return lib;
+}
+#endif
+
+void DataStore::archive(util::StackAllocator &alloc, TransactionManager &txnMgr, BibInfo &bibInfo) {
+	try {
+		std::string fileType = bibInfo.option_.containerFileType_;
+		int64_t flushThreshold = bibInfo.option_.flushThreshold_;
+		int64_t blockSize = bibInfo.option_.blockSize_;
+		ResultSize preReadNum = bibInfo.option_.preReadNum_;
+#ifdef _WIN32
+		std::string archiveHandler = "..\\lib\\longArchive\\" + fileType + "\\debug\\" + fileType + ".dll";
+		HINSTANCE *archiveLib = LoadLibOrDie(archiveHandler);
+#else
+		std::string archiveHandler = "lib" + fileType + ".so";
+		void *archiveLib = LoadLibOrDie(archiveHandler);
+#endif
+		std::vector< BibInfo::Container >::iterator itr;
+		for (itr = bibInfo.containers_.begin(); itr != bibInfo.containers_.end(); itr++) {
+			std::string fileBase = itr->containerFileBase_;
+			std::string dbName = itr->database_;
+			std::string containerName = itr->container_;
+			PartitionId pId = static_cast<PartitionId>(itr->partitionNo_);
+
+			if (!objectManager_->existPartition(pId)) {
+				GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_OM_OPEN_DUMP_FILE_FAILED, "not exist pId = " << pId);
+			}
+
+			ClientId clientId;
+			TransactionManager::ContextSource cxtSrc;
+			util::DateTime now(0);
+			EventMonotonicTime emNow = 0;
+			TransactionContext &txn = txnMgr.put(alloc, pId, clientId, cxtSrc, now, emNow);
+			StackAllocAutoPtr<BaseContainer> stackAutoPtr(txn.getDefaultAllocator(),
+				getBaseContainer(txn, pId, *itr));
+			BaseContainer *container = stackAutoPtr.get();
+
+			{
+				util::Set<TransactionId> activTxnSet(alloc);
+				util::Set<TransactionId>::iterator txnItr;
+				container->getActiveTxnList(txn, activTxnSet);
+
+				ClientId mvccClientId;
+				const bool isRedo = true;
+				for (txnItr = activTxnSet.begin(); txnItr != activTxnSet.end(); txnItr++) {
+					mvccClientId.sessionId_++;
+					const TransactionManager::ContextSource src(ABORT_TRANSACTION,
+						INITIAL_STATEMENTID, container->getContainerId(),
+						TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL, 
+						TransactionManager::PUT,
+						TransactionManager::NO_AUTO_COMMIT_BEGIN_OR_CONTINUE);
+//					TransactionContext &txn =
+						txnMgr.put(alloc, pId, mvccClientId, src,
+							now, emNow, isRedo, *txnItr);
+				}
+			}
+
+			ArchiveHandler *(*CreateArchiveHandler)(const void *output, const void *threshold, const void *blockSize) = reinterpret_cast<ArchiveHandler *(*)(const void *output, const void *threshold, const void *blockSize)>(LoadFuncOrDie(archiveLib, "Create"));
+			void (*DropArchiveHandler)(ArchiveHandler *) = reinterpret_cast<void (*)(ArchiveHandler *)>(LoadFuncOrDie(archiveLib, "Drop"));
+			ArchiveHandler* handler = CreateArchiveHandler(fileBase.c_str(), &flushThreshold, &blockSize);
+			try {
+				int32_t version = handler->getVersion();
+				std::cout << "version = " << version << std::endl;
+				handler->setServerVersion("");
+				handler->setDbName(dbName.c_str());
+				handler->setContainerName(containerName.c_str());
+				container->archive(txn, handler, preReadNum);
+				DropArchiveHandler(handler);
+			} catch (std::exception &) {
+				DropArchiveHandler(handler);
+				throw;
+			}
+		}
+	}
+	catch (std::exception &e) {
+		handleSearchError(e, GS_ERROR_DS_DS_ARCHIVE_FAILED);
+		return;
+	}
+}
+
+
+MessageSchema *DataStore::makeMessageSchema(TransactionContext &txn, ContainerType containerType, const BibInfo::Container &bibInfo) {
+	util::StackAllocator &alloc = txn.getDefaultAllocator();
+
+	MessageSchema *messageSchema = NULL;
+
+	switch (containerType) {
+	case COLLECTION_CONTAINER:
+		messageSchema = ALLOC_NEW(alloc)
+			MessageCollectionSchema(alloc,
+				getValueLimitConfig(), bibInfo);
+		break;
+	case TIME_SERIES_CONTAINER:
+		messageSchema = ALLOC_NEW(alloc)
+			MessageTimeSeriesSchema(alloc,
+				getValueLimitConfig(), bibInfo);
+		break;
+	default:
+		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_TYPE_INVALID, "");
+		break;
+	}
+	return messageSchema;
+}
+
+ShareValueList *DataStore::makeCommonContainerSchema(TransactionContext &txn, int64_t schemaHashKey, MessageSchema *messageSchema)
+{
+	uint32_t bodyAllocateSize;
+	util::XArray<ShareValueList::ElemData> inputList(
+		txn.getDefaultAllocator());
+
+	bool onMemory = true;
+
+	BaseContainer::initializeSchema(txn, *getObjectManager(), messageSchema,
+		allocateStrategy_, inputList, bodyAllocateSize, onMemory);
+	uint32_t allocateSize = ShareValueList::getHeaderSize(
+								static_cast<int32_t>(inputList.size())) +
+							bodyAllocateSize;
+	ShareValueList *commonContainerSchema =
+		ALLOC_NEW(txn.getDefaultAllocator()) ShareValueList(txn,
+			*getObjectManager());
+	commonContainerSchema->initialize(txn, allocateSize, allocateStrategy_, onMemory);
+	commonContainerSchema->set(schemaHashKey, inputList);
+
+	return commonContainerSchema;
+}
+
+
+BaseContainer *DataStore::getBaseContainer(TransactionContext &txn, PartitionId pId,
+	const BibInfo::Container &bibInfo) {
+//	util::StackAllocator &alloc = txn.getDefaultAllocator();
+	if (!objectManager_->existPartition(pId)) {
+		return NULL;
+	}
+
+	BaseContainer::BaseContainerImage *containerImage = BaseContainer::makeBaseContainerImage(txn, bibInfo);
+	MessageSchema *messageSchema = makeMessageSchema(txn, containerImage->containerType_, bibInfo);
+	int64_t schemaHashKey = BaseContainer::calcSchemaHashKey(messageSchema);
+	ShareValueList *commonContainerSchema = makeCommonContainerSchema(txn, schemaHashKey, messageSchema);
+
+	ContainerType containerType = containerImage->containerType_;
+	BaseContainer *container = NULL;
+	switch (containerType) {
+	case COLLECTION_CONTAINER: {
+		container =
+			ALLOC_NEW(txn.getDefaultAllocator()) Collection(txn, this, containerImage, commonContainerSchema);
+	} break;
+	case TIME_SERIES_CONTAINER: {
+		container =
+			ALLOC_NEW(txn.getDefaultAllocator()) TimeSeries(txn, this, containerImage, commonContainerSchema);
+	} break;
+	default:
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
+		break;
+	}
+
+	return container;
+}
+
 /*!
 	@brief Returns number of Container in the partition
 */
@@ -1906,6 +2246,11 @@ bool DataStore::containerIdMapAsc::operator()(
 	return left.first < right.first;
 }
 
+bool DataStore::containerIdMapAsc::operator()(
+	const std::pair<ContainerId, const ContainerInfoCache*> &left,
+	const std::pair<ContainerId, const ContainerInfoCache*> &right) const {
+	return left.first < right.first;
+}
 
 
 /*!
@@ -1930,7 +2275,8 @@ void DataStore::getContainerNameList(TransactionContext &txn, PartitionId pId,
 		ContainerIdTable::ContainerIdList list(txn.getDefaultAllocator());
 		containerIdTable_->getList(pId, 0, INT64_MAX, list);
 		std::sort(list.begin(), list.end(), containerIdMapAsc());
-		const int64_t currentDatabaseVersionId = dbId;
+		int64_t currentDatabaseVersionId = dbId;
+
 		TEST_PRINT("getContainerName ---------\n");
 		TEST_PRINT1("partitionId %d\n", pId);
 		TEST_PRINT1("listSize %d\n", list.size());
@@ -1942,8 +2288,10 @@ void DataStore::getContainerNameList(TransactionContext &txn, PartitionId pId,
 		for (size_t i = 0; i < list.size() && nameList.size() < limit; i++) {
 			const ContainerAttribute attribute = list[i].second.attribute_;
 			const int64_t databaseVersionId = list[i].second.databaseVersionId_;
+			if (currentDatabaseVersionId == UNDEF_DBID) {
+				currentDatabaseVersionId = databaseVersionId;
+			}
 			bool isDbMatch = databaseVersionId == currentDatabaseVersionId;
-
 			const util::Set<ContainerAttribute> &conditionAttributes =
 				condition.getAttributes();
 			bool isAttributeMatch = conditionAttributes.find(attribute) !=
@@ -1956,8 +2304,15 @@ void DataStore::getContainerNameList(TransactionContext &txn, PartitionId pId,
 				if (count >= start) {
 					ContainerAutoPtr containerAutoPtr(
 						txn, this, pId, list[i].first, ANY_CONTAINER);
+					util::StackAllocator &alloc = txn.getDefaultAllocator();
+					const void *srcBody;
+					size_t bodySize = 0;
+					containerAutoPtr.getBaseContainer()->getContainerKey(txn).toBinary(srcBody, bodySize);
+					void *destBody = alloc.allocate(bodySize);
+					memcpy(destBody, srcBody, bodySize);
 					nameList.push_back(
-						containerAutoPtr.getBaseContainer()->getContainerKey(txn));
+						FullContainerKey(alloc, 
+							KeyConstraint::getNoLimitKeyConstraint(), destBody, bodySize));
 				}
 				count++;
 			}
@@ -1968,6 +2323,44 @@ void DataStore::getContainerNameList(TransactionContext &txn, PartitionId pId,
 	}
 }
 
+DataStore::ContainerListHandler::~ContainerListHandler() {
+}
+
+bool DataStore::scanContainerList(
+		TransactionContext &txn, PartitionId pId, ContainerId startContainerId,
+		uint64_t limit, const DatabaseId *dbId, ContainerCondition &condition,
+		const ContainerListHandler &handler) {
+
+	util::StackAllocator &alloc = txn.getDefaultAllocator();
+	util::StackAllocator::Scope scope(alloc);
+
+	typedef ContainerIdTable::ContainerIdRefList ContainerIdRefList;
+	ContainerIdRefList list(alloc);
+
+	const bool followingFound = containerIdTable_->getListOrdered(
+			pId, startContainerId, limit, dbId, condition, list);
+
+	for (ContainerIdRefList::iterator itr = list.begin();
+			itr != list.end(); ++itr) {
+		util::StackAllocator::Scope subScope(alloc);
+
+		bool isAllowExpiration = true;
+		ContainerAutoPtr containerAutoPtr(txn, this, pId, itr->first, ANY_CONTAINER,
+			isAllowExpiration);
+		BaseContainer *baseContainer = containerAutoPtr.getBaseContainer();
+		if (baseContainer == NULL) {
+			GS_THROW_USER_ERROR(GS_ERROR_DS_CONTAINER_UNEXPECTEDLY_REMOVED, "");
+		}
+		handler(
+				txn,
+				itr->first,
+				itr->second->databaseVersionId_,
+				itr->second->attribute_,
+				*baseContainer);
+	}
+
+	return followingFound;
+}
 
 DataStore::Latch::Latch(TransactionContext &txn, PartitionId pId,
 	DataStore *dataStore, ClusterService *clusterService)
@@ -2051,21 +2444,92 @@ void DataStore::handleSearchError(std::exception &, ErrorCode) {
 	}
 }
 
+PartitionId DataStore::resolvePartitionId(
+		util::StackAllocator &alloc, const FullContainerKey &containerKey,
+		PartitionId partitionCount, ContainerHashMode hashMode) {
+	assert(partitionCount > 0);
+
+	const FullContainerKeyComponents normalizedComponents =
+			containerKey.getComponents(alloc, false);
+
+	if (normalizedComponents.affinityNumber_ != UNDEF_NODE_AFFINITY_NUMBER) {
+		return static_cast<PartitionId>(
+				normalizedComponents.affinityNumber_ % partitionCount);
+	}
+	else if (normalizedComponents.affinityStringSize_ > 0) {
+		const uint32_t crcValue = util::CRC32::calculate(
+				normalizedComponents.affinityString_,
+				normalizedComponents.affinityStringSize_);
+		return (crcValue % partitionCount);
+	}
+	else {
+		const char8_t *baseContainerName =
+				(normalizedComponents.baseNameSize_ == 0 ?
+						"" : normalizedComponents.baseName_);
+		const uint32_t crcValue = util::CRC32::calculate(
+				baseContainerName,
+				normalizedComponents.baseNameSize_);
+		return (crcValue % partitionCount);
+	}
+}
+
 
 /*!
 	@brief Frees all Objects on the Chunks, older than timestamp of ChunkKey.
 */
 bool DataStore::executeBatchFree(PartitionId pId, Timestamp timestamp,
 	uint64_t maxScanNum, uint64_t &scanNum) {
-	ChunkKey chunkKey = DataStore::convertTimestamp2ChunkKey(timestamp, false);
+	if (!isRestored(pId) || !getObjectManager()->existPartition(pId)) {
+		bool isTail = true;
+		return isTail;
+	}
+	util::Stopwatch timer;
+	timer.start();
+	Timestamp expireTime = timestamp;
+	if (!getConfig().isAutoExpire() && timestamp > getConfig().getErasableExpiredTime()) {
+		expireTime = getConfig().getErasableExpiredTime();
+	}
+	ChunkKey chunkKey = DataStore::convertTimestamp2ChunkKey(expireTime, false);
 
 	uint64_t freeChunkNum;
+	uint64_t simulateFreeNum = 0;
+	ChunkKey simulateChunkKey = DataStore::convertTimestamp2ChunkKey(
+		getConfig().getSimulateErasableExpiredTime(), false);
 	bool isTail = objectManager_->batchFree(
-		pId, chunkKey, maxScanNum, scanNum, freeChunkNum);
+		pId, chunkKey, maxScanNum, scanNum, freeChunkNum,
+		simulateChunkKey, simulateFreeNum);
+
 	if (freeChunkNum > 0) {
-		setLastChunkKey(pId, chunkKey);
-	}
+			setLastExpiredTime(pId, DataStore::convertChunkKey2Timestamp(chunkKey));
+			setLatestBatchFreeTime(pId, DataStore::convertChunkKey2Timestamp(chunkKey));
+		}
+
+	int64_t scanTime = timer.elapsedNanos() / 1000;
+	updateExpirationStat(pId, freeChunkNum, 
+		simulateFreeNum, scanNum, isTail, scanTime);
+
 	return isTail;
+}
+
+void DataStore::setLastExpiredTime(PartitionId pId, Timestamp time, bool force) {
+	DataStorePartitionHeaderObject partitionHeadearObject(
+		pId, *objectManager_, PARTITION_HEADER_OID);
+	partitionHeadearObject.setLatestCheckTime(time, force);
+	partitionHeadearObject.setChunkKey(DataStore::convertTimestamp2ChunkKey(time, false), force);
+	if (force || expirationStat_[pId].expiredTime_ < time) {
+		expirationStat_[pId].expiredTime_ = time;
+		GS_TRACE_INFO(
+			DATA_STORE, GS_ERROR_DS_BACKGROUND_TASK_INVALID, "setLastExpiredTime = " << time);
+	}
+}
+
+void DataStore::setLatestBatchFreeTime(PartitionId pId, Timestamp time, bool force) {
+	DataStorePartitionHeaderObject partitionHeadearObject(
+		pId, *objectManager_, PARTITION_HEADER_OID);
+	partitionHeadearObject.setLatestBatchFreeTime(time, force);
+
+	GS_TRACE_INFO(
+		DATA_STORE, GS_ERROR_DS_BACKGROUND_TASK_INVALID, "setLatestBatchFreeTime = " << partitionHeadearObject.getLatestBatchFreeTime());
 }
 
 DataStore::ConfigSetUpHandler DataStore::configSetUpHandler_;
@@ -2086,8 +2550,12 @@ void DataStore::ConfigSetUpHandler::operator()(ConfigTable &config) {
 
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_DB_PATH, STRING)
 		.setDefault("data");
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_BACKUP_PATH, STRING)
+		.setDefault("backup");
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_SYNC_TEMP_PATH, STRING)
 		.setDefault("sync");  
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_ARCHIVE_TEMP_PATH, STRING)
+		.setDefault("archive");  
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_CHUNK_MEMORY_LIMIT, INT32)
 		.deprecate();
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_STORE_MEMORY_LIMIT, INT32)
@@ -2099,7 +2567,7 @@ void DataStore::ConfigSetUpHandler::operator()(ConfigTable &config) {
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_CONCURRENCY, INT32)
 		.setMin(1)
 		.setMax(128)
-		.setDefault(1);
+		.setDefault(4);
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_LOG_WRITE_MODE, INT32)
 		.setMin(-1)
 		.setDefault(1);
@@ -2116,7 +2584,6 @@ void DataStore::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.addEnum(ChunkManager::NO_BLOCK_COMPRESSION, "NO_COMPRESSION")
 		.addEnum(ChunkManager::BLOCK_COMPRESSION, "COMPRESSION")
 		.setDefault(ChunkManager::NO_BLOCK_COMPRESSION);
-
 	CONFIG_TABLE_ADD_PARAM(
 		config, CONFIG_TABLE_DS_IO_WARNING_THRESHOLD_MILLIS, INT32)
 		.deprecate();
@@ -2140,11 +2607,43 @@ void DataStore::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.setMin(0.1)
 		.setDefault(0.1)
 		.setMax(1.0);
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_ERASABLE_EXPIRED_TIME, STRING)
+		.setDefault("1970-01-01T00:00:00.000Z");
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_AUTO_EXPIRE, BOOL)
+		.setDefault(true);
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_ESTIMATED_ERASABLE_EXPIRED_TIME, STRING)
+		.setDefault("1970-01-01T00:00:00.000Z");
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_BATCH_SCAN_NUM, INT32)
+		.setMin(500)
+		.setDefault(2000)
+		.setMax(100000);
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_ROW_ARRAY_RATE_EXPONENT, INT32)
+		.setMin(1)
+		.setDefault(4)
+		.setMax(10);
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_ROW_ARRAY_SIZE_CONTROL_MODE, BOOL)
+		.setDefault(true);
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_PARTITION_BATCH_FREE_CHECK_INTERVAL, INT32)
+		.setMin(60)
+		.setDefault(60*60*6)
+		.setMax(INT32_MAX);
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_STORE_MEMORY_REDISTRIBUTE_SHIFTABLE_MEMORY_RATIO, INT32)
+		.setMin(0)
+		.setMax(100)
+		.setDefault(80);
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_STORE_MEMORY_REDISTRIBUTE_EMA_HALF_LIFE_PERIOD, INT32)
+		.setMin(2)
+		.setMax(10000)
+		.setDefault(240); 
 }
 
 DataStore::StatSetUpHandler DataStore::statSetUpHandler_;
 
 #define STAT_ADD_SUB(id) STAT_TABLE_ADD_PARAM_SUB(stat, parentId, id)
+#define STAT_ADD_SUB_SUB(id) STAT_TABLE_ADD_PARAM_SUB_SUB(stat, parentId, id)
+#define CHUNK_STAT_ADD_PARAM(id)                           \
+	stat.addParam(parentId, id, \
+		STAT_TABLE_EXTRACT_SYMBOL(id, 5));
 
 void DataStore::StatSetUpHandler::operator()(StatTable &stat) {
 	StatTable::ParamId parentId;
@@ -2155,6 +2654,18 @@ void DataStore::StatSetUpHandler::operator()(StatTable &stat) {
 	parentId = STAT_TABLE_PERF;
 	STAT_ADD_SUB(STAT_TABLE_PERF_TXN_NUM_BACKGROUND);
 	STAT_ADD_SUB(STAT_TABLE_PERF_TXN_BACKGROUND_MIN_RATE);
+	stat.resolveGroup(parentId, STAT_TABLE_PERF_DS_EXP, "expirationDetail");
+
+	parentId = STAT_TABLE_PERF_DS_EXP;
+	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_DS_EXP_ERASABLE_EXPIRED_TIME);
+	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_DS_EXP_LATEST_EXPIRATION_CHECK_TIME);
+	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_DS_EXP_AUTO_EXPIRE);
+	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_DS_EXP_ESTIMATED_ERASABLE_EXPIRED_TIME);
+	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_DS_EXP_ESTIMATED_BATCH_FREE);
+	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_DS_EXP_LAST_BATCH_FREE);
+	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_DS_EXP_BATCH_SCAN_TOTAL_NUM);
+	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_DS_EXP_BATCH_SCAN_TOTAL_TIME);
+	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_DS_EXP_BATCH_SCAN_NUM);
 }
 
 bool DataStore::StatUpdator::operator()(StatTable &stat) {
@@ -2173,17 +2684,105 @@ bool DataStore::StatUpdator::operator()(StatTable &stat) {
 		stat.set(STAT_TABLE_PERF_TXN_BACKGROUND_MIN_RATE, 
 			dataStore_->getConfig().getBackgroundMinRate());
 	}
+	stat.set(STAT_TABLE_PERF_DS_EXP_AUTO_EXPIRE, dataStore_->getConfig().isAutoExpire());
+	{
+		util::DateTime dateTime(dataStore_->getConfig().getErasableExpiredTime());
+		util::NormalOStringStream strstrm;
+		dateTime.format(strstrm, false);
+
+		stat.set(STAT_TABLE_PERF_DS_EXP_ERASABLE_EXPIRED_TIME, strstrm.str());
+	}
+	{
+//		uint64_t totalScanTime_ = 0, totalScanNum_ = 0, 
+		uint64_t lastExpiredNum = 0, 
+			simulateExpiredNum = 0, scanBatchTotalTime = 0, scanBatchTotalNum = 0;
+		int64_t diffExpiredNum = 0;
+		Timestamp maxExpiredTime = 0;
+		Timestamp simulateExpiredTime = 0;
+		bool isMatch = true;
+		for (PartitionId pId = 0; pId < dataStore_->pgConfig_.getPartitionCount(); pId++) {
+			ExpirationStat curStat = dataStore_->getExpirationStat(pId);
+			if (pId == 0) {
+				simulateExpiredTime = curStat.preSimulateTime_;
+			} else if (curStat.preSimulateTime_ != simulateExpiredTime)  {
+				isMatch = false;
+			}
+			Timestamp expiredTime = curStat.expiredTime_;
+			if (expiredTime > maxExpiredTime) {
+				maxExpiredTime = expiredTime;
+			}
+			simulateExpiredNum += curStat.preSimulateCount_;
+			lastExpiredNum += curStat.preExpiredNum_;
+			diffExpiredNum += curStat.diffExpiredNum_;
+			scanBatchTotalTime += curStat.totalScanTime_;
+			scanBatchTotalNum += curStat.totalScanNum_;
+		}
+		util::NormalOStringStream strstrm;
+		{
+			util::DateTime dateTime(maxExpiredTime);
+			dateTime.format(strstrm, false);
+			stat.set(STAT_TABLE_PERF_DS_EXP_LATEST_EXPIRATION_CHECK_TIME, strstrm.str());
+		}
+		if (stat.getDisplayOption(STAT_TABLE_DISPLAY_WEB_ONLY) &&
+			stat.getDisplayOption(STAT_TABLE_DISPLAY_OPTIONAL_TXN)) {
+			strstrm.str("");
+			if (!isMatch) {
+				strstrm << "Under measurement";
+				stat.set(STAT_TABLE_PERF_DS_EXP_ESTIMATED_ERASABLE_EXPIRED_TIME, strstrm.str());
+				stat.set(STAT_TABLE_PERF_DS_EXP_ESTIMATED_BATCH_FREE, 0);
+			} else {
+				util::DateTime dateTime(simulateExpiredTime);
+				dateTime.format(strstrm, false);
+				stat.set(STAT_TABLE_PERF_DS_EXP_ESTIMATED_ERASABLE_EXPIRED_TIME, strstrm.str());
+				uint64_t simulateChunkByteSize = simulateExpiredNum * dataStore_->getObjectManager()->getChunkSize();
+				stat.set(STAT_TABLE_PERF_DS_EXP_ESTIMATED_BATCH_FREE, simulateChunkByteSize);
+			}
+			uint64_t lastChunkByteSize = lastExpiredNum * dataStore_->getObjectManager()->getChunkSize();
+			stat.set(STAT_TABLE_PERF_DS_EXP_LAST_BATCH_FREE, lastChunkByteSize);
+			stat.set(STAT_TABLE_PERF_DS_EXP_BATCH_SCAN_TOTAL_NUM, scanBatchTotalNum);
+			stat.set(STAT_TABLE_PERF_DS_EXP_BATCH_SCAN_TOTAL_TIME, scanBatchTotalTime);
+			stat.set(STAT_TABLE_PERF_DS_EXP_BATCH_SCAN_NUM, dataStore_->getConfig().getBatchScanNum());
+		}
+	}
+	if (stat.getDisplayOption(STAT_TABLE_DISPLAY_WEB_ONLY)) {
+	}
+
 	return true;
 }
 
 DataStore::Config::Config(ConfigTable &configTable) :
-		backgroundMinRate_(10), backgroundWaitWeight_(9) {
+		isAutoExpire_(true),
+		erasableExpiredTime_(0),
+		simulateErasableExpiredTime_(0),
+		batchScanNum_(2000),
+		rowArrayRateExponent_(4),
+		isRowArraySizeControlMode_(true),
+		backgroundMinRate_(10), backgroundWaitWeight_(9)
+		, checkErasableExpiredInterval_(60*60*24),
+		concurrencyNum_(1)
+		{
 	setUpConfigHandler(configTable);
 	setBackgroundMinRate(configTable.get<double>(CONFIG_TABLE_DS_BACKGROUND_MIN_RATE));
+	setErasableExpiredTime(configTable.get<const char8_t *>(CONFIG_TABLE_DS_ERASABLE_EXPIRED_TIME));
+	setAutoExpire(configTable.get<bool>(CONFIG_TABLE_DS_AUTO_EXPIRE));
+	setSimulateErasableExpiredTime(configTable.get<const char8_t *>(CONFIG_TABLE_DS_ESTIMATED_ERASABLE_EXPIRED_TIME));
+	setBatchScanNum(configTable.get<int32_t>(CONFIG_TABLE_DS_BATCH_SCAN_NUM));
+	setRowArrayRateExponent(configTable.get<int32_t>(CONFIG_TABLE_DS_ROW_ARRAY_RATE_EXPONENT));
+	setRowArraySizeControlMode(configTable.get<bool>(CONFIG_TABLE_DS_ROW_ARRAY_SIZE_CONTROL_MODE));
+	setCheckErasableExpiredInterval(
+		configTable.get<int32_t>(CONFIG_TABLE_DS_PARTITION_BATCH_FREE_CHECK_INTERVAL),
+		configTable.get<int32_t>(CONFIG_TABLE_DS_CONCURRENCY));
 }
 
 void DataStore::Config::setUpConfigHandler(ConfigTable &configTable) {
 	configTable.setParamHandler(CONFIG_TABLE_DS_BACKGROUND_MIN_RATE, *this);
+	configTable.setParamHandler(CONFIG_TABLE_DS_ERASABLE_EXPIRED_TIME, *this);
+	configTable.setParamHandler(CONFIG_TABLE_DS_AUTO_EXPIRE, *this);
+	configTable.setParamHandler(CONFIG_TABLE_DS_ESTIMATED_ERASABLE_EXPIRED_TIME, *this);
+	configTable.setParamHandler(CONFIG_TABLE_DS_BATCH_SCAN_NUM, *this);
+	configTable.setParamHandler(CONFIG_TABLE_DS_ROW_ARRAY_RATE_EXPONENT, *this);
+	configTable.setParamHandler(CONFIG_TABLE_DS_ROW_ARRAY_SIZE_CONTROL_MODE, *this);
+	configTable.setParamHandler(CONFIG_TABLE_DS_PARTITION_BATCH_FREE_CHECK_INTERVAL, *this);
 }
 
 void DataStore::Config::setBackgroundMinRate(double rate) {
@@ -2200,6 +2799,27 @@ void DataStore::Config::operator()(
 	switch (id) {
 	case CONFIG_TABLE_DS_BACKGROUND_MIN_RATE:
 		setBackgroundMinRate(value.get<double>());
+		break;
+	case CONFIG_TABLE_DS_AUTO_EXPIRE:
+		setAutoExpire(value.get<bool>());
+		break;
+	case CONFIG_TABLE_DS_ERASABLE_EXPIRED_TIME:
+		setErasableExpiredTime(value.get<const char8_t *>());
+		break;
+	case CONFIG_TABLE_DS_ESTIMATED_ERASABLE_EXPIRED_TIME:
+		setSimulateErasableExpiredTime(value.get<const char8_t *>());
+		break;
+	case CONFIG_TABLE_DS_BATCH_SCAN_NUM:
+		setBatchScanNum(value.get<int32_t>());
+		break;
+	case CONFIG_TABLE_DS_ROW_ARRAY_SIZE_CONTROL_MODE:
+		setRowArraySizeControlMode(value.get<bool>());
+		break;
+	case CONFIG_TABLE_DS_ROW_ARRAY_RATE_EXPONENT:
+		setRowArrayRateExponent(value.get<int32_t>());
+		break;
+	case CONFIG_TABLE_DS_PARTITION_BATCH_FREE_CHECK_INTERVAL:
+		setCheckErasableExpiredInterval(value.get<int32_t>());
 		break;
 	}
 }

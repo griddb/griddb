@@ -25,8 +25,7 @@
 #include "data_type.h"
 #include "gs_error.h"
 #include "object_manager.h"
-#include "schema.h"
-#include "string_processor.h"  
+#include "transaction_context.h"
 #include "value.h"			   
 #include <iomanip>
 #include <iostream>
@@ -53,6 +52,7 @@ public:
 		  allocateStrategy_(strategy),
 		  container_(container),
 		  mapType_(mapType) {}
+
 	virtual bool finalize(TransactionContext &txn) = 0;
 	virtual int32_t insert(
 		TransactionContext &txn, const void *key, OId oId) = 0;
@@ -65,6 +65,7 @@ public:
 
 public:
 	struct SearchContext {
+
 		enum NullCondition {
 			IS_NULL,		
 			ALL,			

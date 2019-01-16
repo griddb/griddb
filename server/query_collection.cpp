@@ -33,6 +33,25 @@
 #include "boolean_expression.h"
 #include "result_set.h"
 
+#include "meta_store.h"
+
+class QueryForMetaContainer::MessageRowHandler :
+		public MetaProcessor::RowHandler {
+public:
+	MessageRowHandler(
+			OutputMessageRowStore &out, BoolExpr *expr,
+			ObjectManager &objectManager, FunctionMap *functionMap);
+
+	virtual void operator()(
+			TransactionContext &txn,
+			const MetaProcessor::ValueList &valueList);
+
+private:
+	OutputMessageRowStore &out_;
+	BoolExpr *expr_;
+	ObjectManager &objectManager_;
+	FunctionMap *functionMap_;
+};
 
 /*!
 * @brief Query constructor
@@ -154,7 +173,7 @@ void QueryForCollection::doQuery(
 		hook_->qpSearchBeginHook(*this);	
 	}
 	BoolExpr *conditionExpr = getConditionExpr();  
-	if (resultSet.getQueryOption().isRowIdScan()) {
+	if (resultSet.getQueryOption().isPartial()) {
 		doQueryPartial(txn, collection, resultSet);
 	}
 	else 
@@ -394,6 +413,23 @@ void QueryForCollection::doQueryWithCondition(
 						txn, sc, operatorOutOIdArray);
 				}
 			} break;
+			case MAP_TYPE_SPATIAL: {
+				RtreeMap::SearchContext sc;
+				BoolExpr::toSearchContext(txn, andList, indexColumnInfo, *this,
+					sc, restConditions, nLimit_);
+				if (doExecute()) {
+					if (doExplain()) {
+						addExplain(
+							1, "SEARCH_EXECUTE", "MAP_TYPE", "SPATIAL", "");
+						const char *columnName =
+							indexColumnInfo->getColumnName(txn, objectManager_);
+						addExplain(2, "SEARCH_MAP", "STRING", columnName, "");
+					}
+					operatorOutOIdArray.clear();
+					collection.searchColumnIdIndex(
+						txn, sc, operatorOutOIdArray);
+				}
+			} break;
 			default:  
 				GS_THROW_SYSTEM_ERROR(GS_ERROR_TQ_CRITICAL_LOGIC_ERROR,
 					"Internal logic error: Invalid map type specified.");
@@ -492,7 +528,7 @@ void QueryForCollection::doSelection(
 		hook_->qpBuildTmpHook(*this, 9);	
 	}
 
-	if (resultSet.getQueryOption().isRowIdScan()) {
+	if (resultSet.getQueryOption().isPartial()) {
 		resultNum = resultSet.getResultNum();
 		type = RESULT_ROWSET;
 	} else
@@ -712,4 +748,576 @@ QueryForCollection *QueryForCollection::dup(
 	query->selectionMap_ = selectionMap_;
 	query->specialIdMap_ = specialIdMap_;
 	return query;
+}
+
+QueryForMetaContainer::QueryForMetaContainer(
+		TransactionContext &txn, MetaContainer &container,
+		const TQLInfo &tqlInfo, uint64_t limit, QueryHookClass *hook) :
+		Query(txn, *(container.getObjectManager()), tqlInfo, limit, hook),
+		container_(container) {
+
+	if (hook_) {
+		hook_->qpBuildBeginHook(*this);	
+	}
+	isExplainExecute_ = true;
+	explainAllocNum_ = 0;
+	explainNum_ = 0;
+	isSetError_ = false;
+	parseState_ = PARSESTATE_SELECTION;
+	setDefaultFunctionMap();
+
+	if (hook_) {
+		hook_->qpBuildTmpHook(*this, 3);	
+	}
+
+	lemon_tqlParser::tqlParser *x = QP_NEW lemon_tqlParser::tqlParser();
+	if (x == NULL) {
+		GS_THROW_USER_ERROR(
+			GS_ERROR_CM_NO_MEMORY, "Cannot allocate TQL parser");
+	}
+
+	Token t;
+	int ret;
+	const char *c_str = tqlInfo.query_;
+#ifndef NDEBUG
+	if (sIsTrace_) {
+		x->tqlParserSetTrace(&std::cerr, "trace: ");
+	}
+	else {
+		x->tqlParserSetTrace(NULL, "");
+	}
+#endif
+
+	do {
+		ret = Lexer::gsGetToken(c_str, t);
+		if (ret <= 0) break;
+		if (t.id == TK_ILLEGAL) {
+			isSetError_ = true;
+			break;
+		}
+		if (t.id != TK_SPACE) {
+			x->Execute(t.id, t, this);
+			if (isSetError_) {
+				QP_SAFE_DELETE(x);
+				GS_THROW_USER_ERROR(
+					GS_ERROR_TQ_SYNTAX_ERROR_EXECUTION, pErrorMsg_->c_str());
+			}
+		}
+		c_str += t.n;
+	} while (1);
+
+	if (!isSetError_) {
+		x->Execute(0, t, this);
+	}
+	QP_SAFE_DELETE(x);
+
+	if (isSetError_) {
+		if (pSelectionExprList_) {
+			for (ExprList::iterator it = pSelectionExprList_->begin();
+				 it != pSelectionExprList_->end(); it++) {
+				QP_SAFE_DELETE(*it);
+			}
+		}
+		QP_SAFE_DELETE(pSelectionExprList_);
+		QP_SAFE_DELETE(pWhereExpr_);
+
+		if (t.id == TK_ILLEGAL) {
+			GS_THROW_USER_ERROR(GS_ERROR_TQ_SYNTAX_ERROR_INVALID_TOKEN,
+				(util::String("Invalid token \'", QP_ALLOCATOR) +
+					util::String(t.z, t.n, QP_ALLOCATOR) + '\'')
+					.c_str());
+		}
+		else {
+			GS_THROW_USER_ERROR(
+				GS_ERROR_TQ_SYNTAX_ERROR_EXECUTION, pErrorMsg_->c_str());
+		}
+	}
+
+	if (hook_) {
+		hook_->qpBuildTmpHook(*this, 4);	
+	}
+
+
+	BoolExpr *tmp = pWhereExpr_;
+	if (tmp != NULL) {
+		pWhereExpr_ = tmp->makeDNF(txn, objectManager_);
+		QP_DELETE(tmp);  
+	}
+
+	contractCondition();
+
+	if (hook_) {
+		hook_->qpBuildFinishHook(*this);	
+	}
+}
+
+void QueryForMetaContainer::doQuery(
+		TransactionContext &txn, MetaProcessorSource &processorSource,
+		ResultSet &rs) {
+	check(txn);
+
+	util::StackAllocator &alloc = txn.getDefaultAllocator();
+	DataStore *dataStore = container_.getDataStore();
+
+	util::XArray<ColumnInfo> columnInfoList(alloc);
+	container_.getColumnInfoList(columnInfoList);
+
+	const uint32_t columnCount = container_.getColumnNum();
+	OutputMessageRowStore out(
+			dataStore->getValueLimitConfig(),
+			columnInfoList.data(), columnCount,
+			*rs.getRSRowDataFixedPartBuffer(),
+			*rs.getRSRowDataVarPartBuffer(), true);
+
+	const MetaContainerInfo &info = container_.getMetaContainerInfo();
+	MessageRowHandler handler(
+			out, pWhereExpr_, *container_.getObjectManager(),
+			getFunctionMap());
+	MetaProcessor proc(txn, info.id_, info.forCore_);
+
+	const TransactionManager *txnMgr =
+			processorSource.transactionManager_;
+	const PartitionId partitionCount  =
+			txnMgr->getPartitionGroupConfig().getPartitionCount();
+
+	bool reduced;
+	PartitionId reducedPartitionId;
+	const FullContainerKey *containerKey = predicateToContainerKey(
+			txn, *dataStore, processorSource.dbId_, pWhereExpr_, info,
+			NULL, partitionCount, reduced, reducedPartitionId);
+	proc.setContainerKey(containerKey);
+
+	if (!reduced || containerKey != NULL) {
+		proc.scan(txn, processorSource, handler);
+	}
+
+	rs.getRowDataFixedPartBuffer()->assign(
+			rs.getRSRowDataFixedPartBuffer()->begin(),
+			rs.getRSRowDataFixedPartBuffer()->end());
+	rs.getRowDataVarPartBuffer()->assign(
+			rs.getRSRowDataVarPartBuffer()->begin(),
+			rs.getRSRowDataVarPartBuffer()->end());
+
+	const ResultSize resultNum = out.getRowCount();
+
+	rs.setDataPos(
+			0, static_cast<uint32_t>(rs.getRowDataFixedPartBuffer()->size()),
+			0, static_cast<uint32_t>(rs.getRowDataVarPartBuffer()->size()));
+
+	rs.setResultType(RESULT_ROWSET, resultNum, true);
+	rs.setFetchNum(resultNum);
+
+	if (reduced) {
+		const bool uncovered = false;
+		rs.setDistributedTargetStatus(uncovered, reduced);
+
+		util::Vector<int64_t> *distTarget = rs.getDistributedTarget();
+		if (reducedPartitionId != UNDEF_PARTITIONID) {
+			distTarget->push_back(reducedPartitionId);
+		}
+	}
+}
+
+Collection* QueryForMetaContainer::getCollection() {
+	BaseContainer &base = container_;
+	return static_cast<Collection*>(&base);
+}
+
+TimeSeries* QueryForMetaContainer::getTimeSeries() {
+	BaseContainer &base = container_;
+	return static_cast<TimeSeries*>(&base);
+}
+
+void QueryForMetaContainer::check(TransactionContext &txn) {
+	if (nLimit_  < static_cast<ResultSize>(std::numeric_limits<int64_t>::max())) {
+		GS_THROW_USER_ERROR(GS_ERROR_TQ_INTERNAL_NOT_IMPLEMENTED,
+				"Fetch limit option is not implemented for meta container ("
+				"limit=" << nLimit_ << ")");
+	}
+
+	if (pLimitExpr_) {
+		GS_THROW_USER_ERROR(GS_ERROR_TQ_INTERNAL_NOT_IMPLEMENTED,
+				"LIMIT is not implemented for meta container");
+	}
+
+	if (pOrderByExpr_) {
+		GS_THROW_USER_ERROR(GS_ERROR_TQ_INTERNAL_NOT_IMPLEMENTED,
+				"ORDER BY is not implemented for meta container");
+	}
+
+	if (doExplain()) {
+		GS_THROW_USER_ERROR(GS_ERROR_TQ_INTERNAL_NOT_IMPLEMENTED,
+				"EXPLAIN is not implemented for meta container");
+	}
+
+	size_t numSelection = getSelectionExprLength();
+	if (numSelection <= 0) {
+		GS_THROW_USER_ERROR(GS_ERROR_TQ_CRITICAL_LOGIC_ERROR,
+				"Internal logic error: no selection expression specified.");
+	}
+
+	Expr *selectionExpr = getSelectionExpr(0);
+	if (selectionExpr->isAggregation()) {
+		GS_THROW_USER_ERROR(GS_ERROR_TQ_INTERNAL_NOT_IMPLEMENTED,
+				"Aggregation is not implemented for meta container");
+	}
+
+	if (strcmp("*", selectionExpr->getValueAsString(txn)) != 0) {
+		GS_THROW_USER_ERROR(GS_ERROR_TQ_INTERNAL_NOT_IMPLEMENTED,
+				"Complex selection is not implemented for meta container");
+	}
+}
+
+FullContainerKey* QueryForMetaContainer::predicateToContainerKey(
+		TransactionContext &txn, DataStore &dataStore, DatabaseId dbId,
+		const BoolExpr *expr, const MetaContainerInfo &metaInfo,
+		const MetaContainerInfo *coreMetaInfo, PartitionId partitionCount,
+		bool &reduced, PartitionId &reducedPartitionId) {
+	reduced = false;
+	reducedPartitionId = UNDEF_PARTITIONID;
+
+	if (coreMetaInfo == NULL) {
+		const MetaContainerInfo *resolvedInfo;
+		if (metaInfo.forCore_) {
+			resolvedInfo = &metaInfo;
+		}
+		else {
+			const bool forCore = true;
+			const MetaType::InfoTable &infoTable =
+					MetaType::InfoTable::getInstance();
+			resolvedInfo = &infoTable.resolveInfo(metaInfo.id_, forCore);
+		}
+		return predicateToContainerKey(
+				txn, dataStore, dbId, expr, metaInfo, resolvedInfo,
+				partitionCount, reduced, reducedPartitionId);
+	}
+
+	util::StackAllocator &alloc = txn.getDefaultAllocator();
+	const MetaContainerInfo::CommonColumnInfo &commonInfo =
+			coreMetaInfo->commonInfo_;
+
+	FullContainerKey *containerKey = NULL;
+	if (commonInfo.containerNameColumn_ != UNDEF_COLUMNID) {
+		util::String containerName(alloc);
+		if (!predicateToContainerName(
+				expr, metaInfo, *coreMetaInfo, containerName)) {
+			return NULL;
+		}
+		try {
+			containerKey = ALLOC_NEW(alloc) FullContainerKey(
+					alloc, KeyConstraint::getNoLimitKeyConstraint(), dbId,
+					containerName.c_str(), containerName.size());
+		}
+		catch (...) {
+		}
+	}
+	else if (commonInfo.containerIdColumn_ != UNDEF_COLUMNID) {
+		int64_t partitionId = -1;
+		int64_t containerId = -1;
+		if (!predicateToContainerId(
+				expr, metaInfo, *coreMetaInfo, partitionId, containerId)) {
+			return NULL;
+		}
+
+		if (partitionId != static_cast<int64_t>(txn.getPartitionId())) {
+			reduced = true;
+			if (partitionId >= 0 &&
+					partitionId < static_cast<int64_t>(partitionCount)) {
+				reducedPartitionId = static_cast<PartitionId>(partitionId);
+			}
+			return NULL;
+		}
+
+		try {
+			StackAllocAutoPtr<BaseContainer> containerAutoPtr(
+					alloc, dataStore.getContainer(
+							txn, txn.getPartitionId(),
+							static_cast<ContainerId>(containerId),
+							ANY_CONTAINER));
+			BaseContainer *container = containerAutoPtr.get();
+
+			if (container == NULL) {
+				return NULL;
+			}
+			containerKey = ALLOC_NEW(alloc) FullContainerKey(
+					container->getContainerKey(txn));
+		}
+		catch (...) {
+		}
+	}
+
+	reduced = (containerKey != NULL);
+	if (reduced) {
+		const ContainerHashMode hashMode = CONTAINER_HASH_MODE_CRC32;
+
+		reducedPartitionId = DataStore::resolvePartitionId(
+				alloc, *containerKey, partitionCount, hashMode);
+	}
+
+	return containerKey;
+}
+
+bool QueryForMetaContainer::predicateToContainerName(
+		const Expr *expr, const MetaContainerInfo &metaInfo,
+		const MetaContainerInfo &coreMetaInfo, util::String &containerName) {
+	if (expr == NULL) {
+		return false;
+	}
+
+	const BoolExpr *boolExpr = findBoolExpr(*expr);
+	if (boolExpr != NULL) {
+		const BoolExpr::BoolTerms *andOperands = findAndOperands(*boolExpr);
+		if (andOperands != NULL) {
+			for (BoolExpr::BoolTerms::const_iterator it = andOperands->begin();
+					it != andOperands->end(); ++it) {
+				if (predicateToContainerName(
+						*it, metaInfo, coreMetaInfo, containerName)) {
+					return true;
+				}
+			}
+			return false;
+		}
+
+		return predicateToContainerName(
+				findUnary(*boolExpr), metaInfo, coreMetaInfo, containerName);
+	}
+
+	uint32_t baseColumnId;
+	const Value *value;
+	if (findEqCond(*expr, baseColumnId, value)) {
+		const uint32_t columnId =
+				getCoreColumnId(baseColumnId, metaInfo, coreMetaInfo);
+		const MetaContainerInfo::CommonColumnInfo &commonInfo =
+				coreMetaInfo.commonInfo_;
+
+		if (columnId != commonInfo.containerNameColumn_) {
+			return false;
+		}
+
+		if (value->getType() != COLUMN_TYPE_STRING) {
+			return false;
+		}
+
+		containerName.assign(
+				reinterpret_cast<const char8_t*>(value->data()), value->size());
+		return true;
+	}
+
+	return false;
+}
+
+bool QueryForMetaContainer::predicateToContainerId(
+		const Expr *expr, const MetaContainerInfo &metaInfo,
+		const MetaContainerInfo &coreMetaInfo, int64_t &partitionId,
+		int64_t &containerId) {
+	if (expr == NULL) {
+		return false;
+	}
+
+	const BoolExpr *boolExpr = findBoolExpr(*expr);
+	if (boolExpr != NULL) {
+		const BoolExpr::BoolTerms *andOperands = findAndOperands(*boolExpr);
+		if (andOperands != NULL) {
+			for (BoolExpr::BoolTerms::const_iterator it = andOperands->begin();
+					it != andOperands->end(); ++it) {
+				if (predicateToContainerId(
+						*it, metaInfo, coreMetaInfo, partitionId,
+						containerId)) {
+					return true;
+				}
+			}
+			return false;
+		}
+
+		return predicateToContainerId(
+				findUnary(*boolExpr), metaInfo, coreMetaInfo, partitionId,
+				containerId);
+	}
+
+	uint32_t baseColumnId;
+	const Value *value;
+	if (findEqCond(*expr, baseColumnId, value)) {
+		const uint32_t columnId =
+				getCoreColumnId(baseColumnId, metaInfo, coreMetaInfo);
+		const MetaContainerInfo::CommonColumnInfo &commonInfo =
+				coreMetaInfo.commonInfo_;
+
+		int64_t *condValueRef;
+		if (columnId == commonInfo.partitionIndexColumn_) {
+			condValueRef = &partitionId;
+		}
+		else if (columnId == commonInfo.containerIdColumn_) {
+			condValueRef = &containerId;
+		}
+		else {
+			return false;
+		}
+
+		if (!value->isNumerical()) {
+			return false;
+		}
+
+		*condValueRef = value->getLong();
+		return (partitionId != -1 && containerId != -1);
+	}
+
+	return false;
+}
+
+uint32_t QueryForMetaContainer::getCoreColumnId(
+		uint32_t columnId, const MetaContainerInfo &metaInfo,
+		const MetaContainerInfo &coreMetaInfo) {
+	if (columnId >= metaInfo.columnCount_) {
+		assert(false);
+		return UNDEF_COLUMNID;
+	}
+
+	const ColumnId refId = metaInfo.columnList_[columnId].refId_;
+	if (refId == UNDEF_COLUMNID) {
+		assert(metaInfo.forCore_);
+		return columnId;
+	}
+
+	if (refId >= coreMetaInfo.columnCount_) {
+		assert(false);
+		return UNDEF_COLUMNID;
+	}
+
+	return refId;
+}
+
+const BoolExpr* QueryForMetaContainer::findBoolExpr(const Expr &expr) {
+	if (ExprAccessor::getType(expr) != Expr::BOOL_EXPR) {
+		return NULL;
+	}
+
+	return static_cast<const BoolExpr*>(&expr);
+}
+
+const BoolExpr::BoolTerms* QueryForMetaContainer::findAndOperands(
+		const BoolExpr &expr) {
+	if (BoolExprAccessor::getOpType(expr) != BoolExpr::AND) {
+		return NULL;
+	}
+
+	return &BoolExprAccessor::getOperands(expr);
+}
+
+const Expr* QueryForMetaContainer::findUnary(const BoolExpr &expr) {
+	if (BoolExprAccessor::getOpType(expr) != BoolExpr::UNARY) {
+		return NULL;
+	}
+
+	return BoolExprAccessor::getUnary(expr);
+}
+
+bool QueryForMetaContainer::findEqCond(
+		const Expr &expr, uint32_t &columnId, const Value *&value) {
+	if (ExprAccessor::getType(expr) != Expr::EXPR) {
+		return false;
+	}
+
+	if (ExprAccessor::getOp(expr) != Expr::EQ) {
+		return false;
+	}
+	const ExprList *argList = ExprAccessor::getArgList(expr);
+	if (argList == NULL || argList->size() != 2) {
+		return false;
+	}
+
+	const Expr *columnExpr = (*argList)[0];
+	const Expr *valueExpr = (*argList)[1];
+	if (ExprAccessor::getType(*columnExpr) != Expr::COLUMN) {
+		std::swap(columnExpr, valueExpr);
+	}
+	if (ExprAccessor::getType(*columnExpr) != Expr::COLUMN ||
+			ExprAccessor::getType(*valueExpr) != Expr::VALUE) {
+		return false;
+	}
+
+	value = ExprAccessor::getValue(*valueExpr);
+	if (value == NULL) {
+		return false;
+	}
+
+	columnId = ExprAccessor::getColumnId(*columnExpr);
+	return true;
+}
+
+QueryForMetaContainer::MessageRowHandler::MessageRowHandler(
+		OutputMessageRowStore &out, BoolExpr *expr,
+		ObjectManager &objectManager, FunctionMap *functionMap) :
+		out_(out),
+		expr_(expr),
+		objectManager_(objectManager),
+		functionMap_(functionMap) {
+}
+
+void QueryForMetaContainer::MessageRowHandler::operator()(
+		TransactionContext &txn,
+		const MetaProcessor::ValueList &valueList) {
+
+	if (expr_ != NULL) {
+		MetaContainerRowWrapper row(valueList);
+		const TrivalentLogicType evalResult = expr_->eval(
+				txn, objectManager_, &row, functionMap_, TRI_TRUE);
+		if (evalResult != TRI_TRUE) {
+			return;
+		}
+	}
+
+	const uint32_t count = out_.getColumnCount();
+	assert(count == valueList.size());
+
+	out_.beginRow();
+	out_.setRowId(out_.getRowCount());
+	for (uint32_t i = 0; i < count; i++) {
+		const Value &value = valueList[i];
+		assert(value.isNullValue() || value.getType() ==
+				out_.getColumnInfoList()[i].getColumnType());
+
+		if (value.isNullValue()) {
+			out_.setNull(i);
+		}
+		else if (value.getType() == COLUMN_TYPE_STRING) {
+			const uint32_t size = value.size();
+			const void *addr =
+					value.data() - ValueProcessor::getEncodedVarSize(size);
+			out_.setField(i, addr, size);
+		}
+		else if (value.getType() == COLUMN_TYPE_BOOL) {
+			out_.setField<COLUMN_TYPE_BOOL>(i, value.getBool());
+		}
+		else {
+			out_.setField(i, value);
+		}
+	}
+	out_.next();
+}
+
+MetaContainerRowWrapper::MetaContainerRowWrapper(
+		const ValueList &valueList) :
+		valueList_(valueList) {
+}
+
+const Value* MetaContainerRowWrapper::getColumn(uint32_t columnId) {
+	return &valueList_[columnId];
+}
+
+void MetaContainerRowWrapper::load(OId oId) {
+	static_cast<void>(oId);
+	GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+}
+
+RowId MetaContainerRowWrapper::getRowId() {
+	GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+}
+
+void MetaContainerRowWrapper::getImage(
+		TransactionContext &txn, MessageRowStore *messageRowStore,
+		bool isWithRowId) {
+	static_cast<void>(txn);
+	static_cast<void>(messageRowStore);
+	static_cast<void>(isWithRowId);
+	GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 }

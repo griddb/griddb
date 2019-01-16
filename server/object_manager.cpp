@@ -93,19 +93,19 @@ ObjectManager::~ObjectManager() {
 uint8_t *ObjectManager::allocateObject(PartitionId pId, Size_t requestSize,
 	const AllocateStrategy &allocateStrategy, OId &oId, ObjectType objectType) {
 	const ChunkCategoryId categoryId = allocateStrategy.categoryId_;
-	const AffinityGroupId affinityValue = allocateStrategy.affinityGroupId_;
+	const DataAffinityInfo affinityInfo = makeDataAffinityInfo(allocateStrategy);
 	try {
 		const uint8_t powerSize =
 			objectAllocator_->getObjectExpSize(requestSize);
 
 		ChunkId cId;
 		MetaChunk *metaChunk = chunkManager_->searchChunk(pId, categoryId,
-			affinityValue, allocateStrategy.chunkKey_, powerSize, cId);
+				affinityInfo, allocateStrategy.chunkKey_, powerSize, cId);
 		assert(cId != UNDEF_CHUNKID);
 
 		if (metaChunk == NULL) {
 			metaChunk = chunkManager_->allocateChunk(pId, categoryId,
-				affinityValue, allocateStrategy.chunkKey_, cId);
+					affinityInfo, allocateStrategy.chunkKey_, cId);
 			assert(cId <= OBJECT_MAX_CHUNK_ID_);  
 			uint8_t maxFreeExpSize;
 			objectAllocator_->initializeChunk(
@@ -221,3 +221,4 @@ void* ObjectManager::reload(PartitionId pId, OId oId, OId *lastOId, const Object
 
 	return getForUpdate<uint8_t>(pId, oId);
 }
+

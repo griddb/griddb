@@ -72,6 +72,7 @@ void SubTimeSeries::set(TransactionContext& txn, TimeSeries* parent) {
 	commonContainerSchema_ = parent->commonContainerSchema_;
 	columnSchema_ = parent->columnSchema_;
 	indexSchema_ = parent->indexSchema_;
+	rowArrayCache_ = parent_->rowArrayCache_;
 
 	if (getExpirationInfo().duration_ == INT64_MAX) {
 		endTime_ = MAX_TIMESTAMP;
@@ -109,12 +110,13 @@ void SubTimeSeries::set(TransactionContext& txn, TimeSeries* parent) {
 	@brief Free Objects related to SubTimeSeries
 */
 bool SubTimeSeries::finalize(TransactionContext& txn) {
+	RowArray rowArray(txn, this);
 	if (baseContainerImage_->rowIdMapOId_ != UNDEF_OID) {
 		BtreeMap::BtreeCursor btreeCursor;
 		StackAllocAutoPtr<BtreeMap> rowIdMap(
 			txn.getDefaultAllocator(), getRowIdMap(txn));
-		ResultSize limit = (ContainerCursor::getNum() < getNormalRowArrayNum()) ? 
-			1 : (ContainerCursor::getNum() / getNormalRowArrayNum());
+		ResultSize limit = (ContainerCursor::getNum() / getNormalRowArrayNum() <= 2) ?
+			2 : (ContainerCursor::getNum() / getNormalRowArrayNum());
 		util::StackAllocator::Scope scope(txn.getDefaultAllocator());
 		util::XArray<OId> idList(txn.getDefaultAllocator());
 		util::XArray<OId>::iterator itr;
@@ -122,8 +124,9 @@ bool SubTimeSeries::finalize(TransactionContext& txn) {
 			txn, limit, idList, btreeCursor);
 
 		for (itr = idList.begin(); itr != idList.end(); itr++) {
-			RowArray rowArray(txn, *itr,
-				reinterpret_cast<SubTimeSeries*>(this), OBJECT_FOR_UPDATE);
+//			bool isOldSchema = 
+			rowArray.load(txn, *itr, this, OBJECT_FOR_UPDATE);
+//			assert(isOldSchema || !isOldSchema);
 			RowId rowArrayId = rowArray.getRowId();
 			removeRowIdMap(txn, rowIdMap.get(),
 				&rowArrayId, *itr); 
@@ -159,8 +162,10 @@ bool SubTimeSeries::finalize(TransactionContext& txn) {
 					case MVCC_UPDATE:
 					case MVCC_DELETE:
 						{
-							RowArray rowArray(txn, itr->second.snapshotRowOId_, this,
+//							bool isOldSchema = 
+							rowArray.load(txn, itr->second.snapshotRowOId_, this,
 								OBJECT_FOR_UPDATE);
+//							assert(isOldSchema || !isOldSchema);
 							rowArray.finalize(txn);
 						}
 						break;
@@ -302,7 +307,12 @@ void SubTimeSeries::updateRow(TransactionContext& txn, uint32_t rowSize,
 	util::XArray<OId> oIdList(txn.getDefaultAllocator());
 	searchRowIdIndex(txn, sc, oIdList, ORDER_UNDEFINED);
 	if (!oIdList.empty()) {
-		RowArray rowArray(txn, oIdList[0], this, OBJECT_FOR_UPDATE);
+		RowArray rowArray(txn, this);
+		bool isOldSchema = rowArray.load(txn, oIdList[0], this, OBJECT_FOR_UPDATE);
+		if (isOldSchema) {
+			RowScope rowScope(*this, TO_NORMAL);
+			convertRowArraySchema(txn, rowArray, false);
+		}
 		RowArray::Row row(rowArray.getRow(), &rowArray);
 		if (!isForceLock &&
 			row.getTxnId() != txn.getId()) {  
@@ -347,6 +357,7 @@ void SubTimeSeries::abortInternal(TransactionContext& txn, TransactionId tId) {
 	if (!mvccList.empty()) {
 		getObjectManager()->setDirty(
 			txn.getPartitionId(), baseContainerImage_->mvccMapOId_);
+		RowArray rowArray(txn, this);
 		for (itr = mvccList.begin(); itr != mvccList.end(); itr++) {
 			if (parent_->isAlterContainer() && itr->type_ != MVCC_CONTAINER) {
 				GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_COL_LOCK_CONFLICT, 
@@ -372,15 +383,19 @@ void SubTimeSeries::abortInternal(TransactionContext& txn, TransactionId tId) {
 					}
 					for (rowItr = oIdList.begin(); rowItr != oIdList.end();
 						 rowItr++) {
-						RowArray rowArray(txn, *rowItr,
+//						bool isOldSchema = 
+						rowArray.load(txn, *rowItr,
 							reinterpret_cast<SubTimeSeries*>(this),
-							OBJECT_FOR_UPDATE);
+							OBJECT_READ_ONLY);
+//						assert(isOldSchema || !isOldSchema);
 						if (rowArray.getTxnId() == tId && !rowArray.isFirstUpdate()) {
+//							bool isOldSchema = 
+							rowArray.setDirty(txn);
+//							assert(isOldSchema || !isOldSchema);
 							undoCreateRow(txn, rowArray);
 						}
 					}
 				}
-				removeMvccMap(txn, mvccMap.get(), tId, *itr);
 			}
 		}
 		for (itr = mvccList.begin(); itr != mvccList.end(); itr++) {
@@ -398,8 +413,9 @@ void SubTimeSeries::abortInternal(TransactionContext& txn, TransactionId tId) {
 				case MVCC_UPDATE:
 				case MVCC_DELETE:
 					{
-						RowArray rowArray(txn, itr->snapshotRowOId_,
-							reinterpret_cast<SubTimeSeries*>(this), OBJECT_FOR_UPDATE);
+//						bool isOldSchema = 
+						rowArray.load(txn, itr->snapshotRowOId_, this, OBJECT_FOR_UPDATE);
+//						assert(isOldSchema || !isOldSchema);
 						undoUpdateRow(txn, rowArray);
 						removeMvccMap(txn, mvccMap.get(), tId, *itr);
 					}
@@ -410,6 +426,24 @@ void SubTimeSeries::abortInternal(TransactionContext& txn, TransactionId tId) {
 				}
 		}
 
+		const CompressionSchema& compressionSchema = getCompressionSchema();
+		switch (compressionSchema.getCompressionType()) {
+		case HI_COMPRESSION: {
+			uint16_t hiCompressionColumnNum =
+				compressionSchema.getHiCompressionNum();
+			if (hiCompressionColumnNum > 0) {
+				DSDCValList dsdcValList(txn, *getObjectManager(),
+					reinterpret_cast<TimeSeriesImage*>(baseContainerImage_)
+						->hiCompressionStatus_);
+				dsdcValList.reset(compressionSchema, hiCompressionColumnNum);
+			}
+		} break;
+		case SS_COMPRESSION: {
+			setSsCompressionReady(SS_IS_NOT_READRY);
+		} break;
+		default:
+			break;
+		}
 	}
 
 	if (mvccMap.get()->isEmpty()) {
@@ -440,6 +474,7 @@ void SubTimeSeries::commit(TransactionContext& txn) {
 	if (!mvccList.empty()) {
 		getObjectManager()->setDirty(
 			txn.getPartitionId(), baseContainerImage_->mvccMapOId_);
+		RowArray rowArray(txn, this);
 		for (itr = mvccList.begin(); itr != mvccList.end(); itr++) {
 			if (parent_->isAlterContainer() && itr->type_ != MVCC_CONTAINER) {
 				GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TIM_LOCK_CONFLICT, 
@@ -459,9 +494,9 @@ void SubTimeSeries::commit(TransactionContext& txn) {
 			case MVCC_UPDATE:
 			case MVCC_DELETE:
 				{
-					RowArray rowArray(txn, itr->snapshotRowOId_,
-						reinterpret_cast<SubTimeSeries*>(this),
-						OBJECT_FOR_UPDATE);
+//					bool isOldSchema = 
+					rowArray.load(txn, itr->snapshotRowOId_, this, OBJECT_FOR_UPDATE);
+//					assert(isOldSchema || !isOldSchema);
 					rowArray.finalize(txn);
 					removeMvccMap(txn, mvccMap.get(), tId, *itr);
 				}
@@ -506,10 +541,11 @@ void SubTimeSeries::searchRowIdIndex(TransactionContext& txn,
 	ResultSize limitBackup = sc.limit_;
 	sc.limit_ = MAX_RESULT_SIZE;
 	bool isCheckOnly = false;
-	searchMvccMap<TimeSeries, BtreeMap::SearchContext>(txn, sc, mvccList, isCheckOnly);
+	const bool ignoreTxnCheck = false;
+	searchMvccMap<TimeSeries, BtreeMap::SearchContext>(txn, sc, mvccList, isCheckOnly, ignoreTxnCheck);
 	sc.limit_ = limitBackup;
 
-	ContainerValue containerValue(txn, *getObjectManager());
+	ContainerValue containerValue(txn.getPartitionId(), *getObjectManager());
 	util::XArray<OId> oIdList(txn.getDefaultAllocator());
 	util::XArray<OId>::iterator itr;
 
@@ -525,9 +561,9 @@ void SubTimeSeries::searchRowIdIndex(TransactionContext& txn,
 	rowIdMap.get()->search(txn, sc, oIdList, outputOrder);
 	sc.limit_ = limitBackup;
 
+	RowArray rowArray(txn, this);
 	for (itr = oIdList.begin(); itr != oIdList.end(); itr++) {
-		RowArray rowArray(txn, *itr, reinterpret_cast<SubTimeSeries*>(this),
-			OBJECT_READ_ONLY);
+		rowArray.load(txn, *itr, this, OBJECT_READ_ONLY);
 		if (!isExclusive() && txn.getId() != rowArray.getTxnId() &&
 			!rowArray.isFirstUpdate() &&
 			txn.getManager().isActiveTransaction(
@@ -535,7 +571,12 @@ void SubTimeSeries::searchRowIdIndex(TransactionContext& txn,
 			continue;
 		}
 		if (outputOrder != ORDER_DESCENDING) {
-			for (rowArray.begin(); !rowArray.end(); rowArray.next()) {
+			if (op1 != 0 && *static_cast<const Timestamp*>(sc.startKey_) > rowArray.getRowId()) {
+				rowArray.searchNextRowId(*static_cast<const Timestamp*>(sc.startKey_));
+			} else {
+				rowArray.begin();
+			}
+			for (; !rowArray.end(); rowArray.next()) {
 				RowArray::Row row(rowArray.getRow(), &rowArray);
 				Timestamp rowId = row.getRowId();
 				if (((op1 != 0) &&
@@ -568,8 +609,13 @@ void SubTimeSeries::searchRowIdIndex(TransactionContext& txn,
 			}
 		}
 		else {
-			for (bool isRend = rowArray.tail(); isRend;
-				 isRend = rowArray.prev()) {
+			bool isRend;
+			if (op2 != 0 && *static_cast<const Timestamp*>(sc.endKey_) > rowArray.getRowId()) {
+				isRend = rowArray.searchPrevRowId(*static_cast<const Timestamp*>(sc.endKey_));
+			} else {
+				isRend = rowArray.tail();
+			}
+			for (; isRend; isRend = rowArray.prev()) {
 				RowArray::Row row(rowArray.getRow(), &rowArray);
 				Timestamp rowId = row.getRowId();
 				if (((op1 != 0) &&
@@ -621,10 +667,9 @@ void SubTimeSeries::searchRowIdIndex(TransactionContext& txn,
 				rowArray.load(txn, *itr, reinterpret_cast<SubTimeSeries*>(this),
 					OBJECT_READ_ONLY);
 				RowArray::Row row(rowArray.getRow(), &rowArray);
-				uint8_t* objectRowField;
-				row.getRowIdField(objectRowField);
+				RowId rowId = row.getRowId();
 				SortKey sortKey;
-				sortKey.set(txn, targetType, objectRowField, *itr);
+				sortKey.set(txn, targetType, reinterpret_cast<uint8_t *>(&rowId), *itr);
 
 				mvccSortKeyList.push_back(sortKey);
 			}
@@ -644,11 +689,10 @@ void SubTimeSeries::searchRowIdIndex(TransactionContext& txn,
 				rowArray.load(txn, *itr, reinterpret_cast<SubTimeSeries*>(this),
 					OBJECT_READ_ONLY);
 				RowArray::Row row(rowArray.getRow(), &rowArray);
-				uint8_t* objectRowField;
-				row.getRowIdField(objectRowField);
+				RowId rowId = row.getRowId();
 
 				SortKey sortKey;
-				sortKey.set(txn, targetType, objectRowField, *itr);
+				sortKey.set(txn, targetType, reinterpret_cast<uint8_t *>(&rowId), *itr);
 				indexSortKeyList.push_back(sortKey);
 			}
 
@@ -746,7 +790,7 @@ void SubTimeSeries::getIndexList(TransactionContext &txn, bool withUncommitted,
    also the Row key specified as needed
 */
 void SubTimeSeries::putRow(TransactionContext& txn,
-	InputMessageRowStore* inputMessageRowStore, RowId& rowId,
+	InputMessageRowStore* inputMessageRowStore, RowId& rowId, bool,
 	DataStore::PutStatus& status, PutRowOption putRowOption) {
 	util::StackAllocator::Scope scope(txn.getDefaultAllocator());
 
@@ -757,6 +801,11 @@ void SubTimeSeries::putRow(TransactionContext& txn,
 
 	OId tailOId = UNDEF_OID;
 	Timestamp tailRowKey = UNDEF_TIMESTAMP;
+	bool isOmittable = false;
+
+	const CompressionSchema& compressionSchema = getCompressionSchema();
+
+	if (compressionSchema.getCompressionType() == NO_COMPRESSION) {
 		if (position_ == parent_->getBasePos()) {
 			tailOId = BtreeMap::getTailDirect(
 				txn, *getObjectManager(), parent_->getTailNodeOId());
@@ -797,10 +846,10 @@ void SubTimeSeries::putRow(TransactionContext& txn,
 			}
 		}
 		if (mode == UNDEFINED_STATUS) {
-			rowArray.load(txn, tailOId, this, OBJECT_FOR_UPDATE);
+			bool isOldSchema = rowArray.load(txn, tailOId, this, OBJECT_FOR_UPDATE);
 			bool isExist = rowArray.tail();
 			RowArray::Row row(rowArray.getRow(), &rowArray);
-			tailRowKey = row.getTime();
+			tailRowKey = row.getRowId();
 			if (!isExist) {
 				rowArray.lock(txn);
 				RowId rowArrayRowId = rowArray.getRowId();
@@ -816,15 +865,19 @@ void SubTimeSeries::putRow(TransactionContext& txn,
 			}
 			else {
 				rowArray.begin();
-				Timestamp headRowKey = row.getTime();
+				Timestamp headRowKey = row.getRowId();
 				if (headRowKey <= rowKey) {
-					if (rowArray.searchRowId(rowKey)) {
+					if (rowArray.searchNextRowId(rowKey)) {
 						mode = UPDATE;
 					}
 					else {
 						mode = INSERT;
 					}
 				}
+			}
+			if (isOldSchema) {
+				RowScope rowScope(*this, TO_NORMAL);
+				convertRowArraySchema(txn, rowArray, false); 
 			}
 		}
 		if (mode == UNDEFINED_STATUS) {
@@ -835,12 +888,16 @@ void SubTimeSeries::putRow(TransactionContext& txn,
 				txn.getDefaultAllocator(), getRowIdMap(txn));
 			rowIdMap.get()->search(txn, sc, oIdList, ORDER_DESCENDING);
 			if (!oIdList.empty()) {
-				rowArray.load(txn, oIdList[0], this, OBJECT_FOR_UPDATE);
-				if (rowArray.searchRowId(rowKey)) {
+				bool isOldSchema = rowArray.load(txn, oIdList[0], this, OBJECT_FOR_UPDATE);
+				if (rowArray.searchNextRowId(rowKey)) {
 					mode = UPDATE;
 				}
 				else {
 					mode = INSERT;
+				}
+				if (isOldSchema) {
+					RowScope rowScope(*this, TO_NORMAL);
+					convertRowArraySchema(txn, rowArray, false); 
 				}
 			}
 			else {
@@ -848,6 +905,91 @@ void SubTimeSeries::putRow(TransactionContext& txn,
 				mode = APPEND;
 			}
 		}
+	}
+	else {
+		bool isPastTimeInsert = false;
+		if (position_ == parent_->getBasePos()) {
+			tailOId = BtreeMap::getTailDirect(
+				txn, *getObjectManager(), parent_->getTailNodeOId());
+		}
+		else {
+			isPastTimeInsert = true;
+		}
+		if (!isPastTimeInsert && tailOId == UNDEF_OID) {
+			mode = APPEND;
+		}
+		else if (!isPastTimeInsert) {
+			bool isOldSchema = rowArray.load(txn, tailOId, this, OBJECT_FOR_UPDATE);
+
+			bool isExist = rowArray.tail();
+			if (isOldSchema) {
+				RowScope rowScope(*this, TO_NORMAL);
+				convertRowArraySchema(txn, rowArray, false);
+			}
+			RowArray::Row row(rowArray.getRow(), &rowArray);
+			tailRowKey = row.getRowId();
+			RowId rowArrayRowId = rowArray.getRowId();
+			if (!isExist && rowArrayRowId <= rowKey) {
+				rowArray.lock(txn);
+				mode = APPEND;
+			}
+			else if (tailRowKey < rowKey) {
+				rowArray.lock(txn);
+
+
+				const CompressionSchema& compressionSchema =
+					getCompressionSchema();
+				switch (compressionSchema.getCompressionType()) {
+				case HI_COMPRESSION: {
+					isOmittable =
+						isRowOmittableByHiCompression(txn, compressionSchema,
+							inputMessageRowStore, rowArray, rowKey);
+				} break;
+				case SS_COMPRESSION: {
+					isOmittable =
+						isRowOmittableBySsCompression(txn, compressionSchema,
+							inputMessageRowStore, rowArray, rowKey);
+				} break;
+				default:
+					GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_UNEXPECTED_ERROR, "");
+					break;
+				}
+				if (isOmittable) {
+					mode = UPDATE;
+				}
+				else {
+					mode = APPEND;
+				}
+			}
+			else if (tailRowKey == rowKey) {
+				mode = NOT_EXECUTED;
+			}
+			else {
+				isPastTimeInsert = true;
+			}
+		}
+		if (isPastTimeInsert) {
+			if (isCompressionErrorMode()) {  
+				GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_UPDATE_INVALID,
+					"insert(old time)/update not support on Compression Mode : "
+					"rowKey("
+						<< rowKey << ") < latest rowKey(" << tailRowKey << ")");
+			}
+			else {
+				mode = NOT_EXECUTED;
+
+				const FullContainerKey containerKey = getContainerKey(txn);
+				util::String containerName(txn.getDefaultAllocator());
+				containerKey.toString(txn.getDefaultAllocator(), containerName);
+				GS_TRACE_ERROR(TIME_SERIES,
+					GS_TRACE_DS_TIM_COMPRESSION_INVALID_WARNING,
+					"insert(old time)/update not support on Compression Mode : "
+					"Container("
+						<< containerName << ") rowKey("
+						<< rowKey << ") < latest rowKey(" << tailRowKey << ")");
+			}
+		}
+	}
 
 	rowId = rowKey;
 	switch (mode) {
@@ -873,7 +1015,12 @@ void SubTimeSeries::putRow(TransactionContext& txn,
 				"insert row, but row exists");
 		}
 		updateRowInternal(txn, inputMessageRowStore, rowArray, rowId);
-		status = DataStore::UPDATE;
+		if (isOmittable) {
+			status = DataStore::CREATE;
+		}
+		else {
+			status = DataStore::UPDATE;
+		}
 		break;
 	case NOT_EXECUTED:
 		status = DataStore::NOT_EXECUTED;
@@ -895,8 +1042,9 @@ void SubTimeSeries::appendRowInternal(TransactionContext& txn,
 			txn.getDefaultAllocator(), getRowIdMap(txn));
 		rowArray.reset();
 		if (rowIdMap.get()->isEmpty()) {
-			uint16_t smallRowArrayNum =
-				calcRowArrayNum(SMALL_ROW_ARRAY_MAX_SIZE);
+			bool isRowArraySizeControlMode = false;
+			uint32_t smallRowArrayNum =
+				calcRowArrayNum(txn, isRowArraySizeControlMode, getSmallRowArrayNum());
 			rowArray.initialize(txn, rowId, smallRowArrayNum);
 		}
 		else {
@@ -909,6 +1057,7 @@ void SubTimeSeries::appendRowInternal(TransactionContext& txn,
 	else {
 		rowArray.lock(txn);
 		if (!txn.isAutoCommit() && rowArray.isFirstUpdate()) {
+			RowScope rowScope(*this, TO_MVCC);
 			rowArray.resetFirstUpdate();
 			RowArray snapShotRowArray(txn, this);
 			snapShotRowArray.initialize(
@@ -923,37 +1072,41 @@ void SubTimeSeries::appendRowInternal(TransactionContext& txn,
 			setRuntime();
 		}
 		if (rowArray.isTailPos()) {
+			RowScope rowScope(*this, TO_NORMAL);
 			shift(txn, rowArray, true);
 			rowArray.tail();
 		}
 	}
+	{
+		RowScope rowScope(*this, TO_NORMAL);
 
-	rowArray.append(txn, messageRowStore, rowId);
-	RowArray::Row row(rowArray.getRow(), &rowArray);
+		rowArray.append(txn, messageRowStore, rowId);
+		RowArray::Row row(rowArray.getRow(), &rowArray);
 
-	util::XArray<IndexData> indexList(txn.getDefaultAllocator());
-	bool withUncommitted = true;
-	getIndexList(txn, withUncommitted, indexList);
-	for (size_t i = 0; i < indexList.size(); i++) {
-		if (indexList[i].cursor_ < row.getRowId()) {
-			continue;
+		util::XArray<IndexData> indexList(txn.getDefaultAllocator());
+		bool withUncommitted = true;
+		getIndexList(txn, withUncommitted, indexList);
+		for (size_t i = 0; i < indexList.size(); i++) {
+			if (indexList[i].cursor_ < row.getRowId()) {
+				continue;
+			}
+			ValueMap valueMap(txn, this, indexList[i]);
+			ColumnInfo& columnInfo = getColumnInfo(indexList[i].columnId_);
+			bool isNullValue = row.isNullValue(columnInfo);
+			BaseObject baseFieldObject(txn.getPartitionId(), *getObjectManager());
+			const void *fieldValue = &NULL_VALUE;
+			if (!isNullValue) {
+				row.getField(txn, columnInfo, baseFieldObject);
+				fieldValue = baseFieldObject.getCursor<void>();
+			}
+			insertValueMap(txn, valueMap, fieldValue, rowArray.getOId(),
+				isNullValue);
 		}
-		ValueMap valueMap(txn, this, indexList[i]);
-		ColumnInfo& columnInfo = getColumnInfo(indexList[i].columnId_);
-		bool isNullValue = row.isNullValue(columnInfo);
-		BaseObject baseFieldObject(txn.getPartitionId(), *getObjectManager());
-		const void *fieldValue = &NULL_VALUE;
-		if (!isNullValue) {
-			row.getField(txn, columnInfo, baseFieldObject);
-			fieldValue = baseFieldObject.getCursor<void>();
-		}
-		insertValueMap(txn, valueMap, fieldValue, rowArray.getOId(),
-			isNullValue);
-	}
 
-	if (!txn.isAutoCommit()) {  
-		setCreateRowId(txn, rowId);
-		setRuntime();
+		if (!txn.isAutoCommit()) {  
+			setCreateRowId(txn, rowId);
+			setRuntime();
+		}
 	}
 }
 
@@ -961,10 +1114,10 @@ void SubTimeSeries::appendRowInternal(TransactionContext& txn,
 void SubTimeSeries::updateRowInternal(TransactionContext& txn,
 	MessageRowStore* messageRowStore, RowArray& rowArray, RowId& rowId) {
 	RowArray::Row row(rowArray.getRow(), &rowArray);
-	rowId = row.getRowId();
 	rowArray.lock(txn);
 
 	if (!txn.isAutoCommit() && rowArray.isFirstUpdate()) {
+		RowScope rowScope(*this, TO_MVCC);
 		rowArray.resetFirstUpdate();
 		RowArray snapShotRowArray(txn, this);
 		snapShotRowArray.initialize(
@@ -978,50 +1131,54 @@ void SubTimeSeries::updateRowInternal(TransactionContext& txn,
 		insertMvccMap(txn, mvccMap.get(), tId, mvccRowImage);
 		setRuntime();
 	}
+	{
+		RowScope rowScope(*this, TO_NORMAL);
 
-	util::XArray<IndexData> indexList(txn.getDefaultAllocator());
-	bool withUncommitted = true;
-	getIndexList(txn, withUncommitted, indexList);
-	if (!indexList.empty()) {
-		for (size_t i = 0; i < indexList.size(); i++) {
-			if (indexList[i].cursor_ < row.getRowId()) {
-				continue;
-			}
-			ColumnId columnId = indexList[i].columnId_;
-
-			ColumnInfo& columnInfo = getColumnInfo(columnId);
-			bool isInputNullValue = messageRowStore->isNullValue(columnInfo.getColumnId());
-			bool isCurrentNullValue = row.isNullValue(columnInfo);
-
-			BaseObject baseFieldObject(
-				txn.getPartitionId(), *getObjectManager());
-			const void *currentValue = &NULL_VALUE;
-			if (!isCurrentNullValue) {
-				row.getField(txn, columnInfo, baseFieldObject);
-				currentValue = baseFieldObject.getCursor<void>();
-			}
-
-			if (isInputNullValue != isCurrentNullValue || 
-				(!isInputNullValue && !isCurrentNullValue &&
-				ValueProcessor::compare(txn, *getObjectManager(), columnId,
-					messageRowStore, reinterpret_cast<uint8_t *>(const_cast<void *>(currentValue))) != 0)) {
-				ValueMap valueMap(txn, this, indexList[i]);
-				removeValueMap(txn, valueMap, currentValue, rowArray.getOId(),
-					isCurrentNullValue);
-
-				const void *inputValue = &NULL_VALUE;
-				if (!isInputNullValue) {
-					uint32_t inputValueSize;
-					messageRowStore->getField(columnInfo.getColumnId(),
-						inputValue, inputValueSize);
+		util::XArray<IndexData> indexList(txn.getDefaultAllocator());
+		bool withUncommitted = true;
+		getIndexList(txn, withUncommitted, indexList);
+		if (!indexList.empty()) {
+			for (size_t i = 0; i < indexList.size(); i++) {
+				if (indexList[i].cursor_ < row.getRowId()) {
+					continue;
 				}
-				insertValueMap(txn, valueMap, inputValue,
-					rowArray.getOId(), isInputNullValue);
+				ColumnId columnId = indexList[i].columnId_;
+
+				ColumnInfo& columnInfo = getColumnInfo(columnId);
+				bool isInputNullValue = messageRowStore->isNullValue(columnInfo.getColumnId());
+				bool isCurrentNullValue = row.isNullValue(columnInfo);
+
+				BaseObject baseFieldObject(
+					txn.getPartitionId(), *getObjectManager());
+				const void *currentValue = &NULL_VALUE;
+				if (!isCurrentNullValue) {
+					row.getField(txn, columnInfo, baseFieldObject);
+					currentValue = baseFieldObject.getCursor<void>();
+				}
+
+				if (isInputNullValue != isCurrentNullValue || 
+					(!isInputNullValue && !isCurrentNullValue &&
+					ValueProcessor::compare(txn, *getObjectManager(), columnId,
+						messageRowStore, reinterpret_cast<uint8_t *>(const_cast<void *>(currentValue))) != 0)) {
+					ValueMap valueMap(txn, this, indexList[i]);
+					removeValueMap(txn, valueMap, currentValue, rowArray.getOId(),
+						isCurrentNullValue);
+
+					const void *inputValue = &NULL_VALUE;
+					if (!isInputNullValue) {
+						uint32_t inputValueSize;
+						messageRowStore->getField(columnInfo.getColumnId(),
+							inputValue, inputValueSize);
+					}
+					insertValueMap(txn, valueMap, inputValue,
+						rowArray.getOId(), isInputNullValue);
+				}
 			}
 		}
-	}
 
-	rowArray.update(txn, messageRowStore);
+		rowArray.update(txn, messageRowStore);
+	}
+	rowId = row.getRowId();
 }
 
 void SubTimeSeries::deleteRowInternal(TransactionContext& txn, Timestamp rowKey,
@@ -1040,9 +1197,9 @@ void SubTimeSeries::deleteRowInternal(TransactionContext& txn, Timestamp rowKey,
 		existing = false;
 		return;
 	}
-	RowArray rowArray(txn, idList[0], reinterpret_cast<SubTimeSeries*>(this),
-		OBJECT_FOR_UPDATE);
-	if (!rowArray.searchRowId(rowKey)) {
+	RowArray rowArray(txn, this);
+	bool isOldSchema = rowArray.load(txn, idList[0], this, OBJECT_FOR_UPDATE);
+	if (!rowArray.searchNextRowId(rowKey)) {
 		existing = false;
 		return;
 	}
@@ -1054,7 +1211,17 @@ void SubTimeSeries::deleteRowInternal(TransactionContext& txn, Timestamp rowKey,
 					"(txnId=" << txn.getId() << ", rowTxnId=" << rowArray.getTxnId() << ")");
 		}
 	}
-	uint32_t activeNum = rowArray.getActiveRowNum();
+	if (isOldSchema) {
+		RowScope rowScope(*this, TO_NORMAL);
+		convertRowArraySchema(txn, rowArray, false);
+		StackAllocAutoPtr<BtreeMap> rowIdMap(
+			txn.getDefaultAllocator(), getRowIdMap(txn));
+		idList.clear();
+		rowIdMap.get()->search(txn, sc, idList);
+	}
+
+	uint16_t halfRowNum = rowArray.getMaxRowNum() / 2;
+	uint16_t activeNum = rowArray.getActiveRowNum(halfRowNum + 1);
 
 	DeleteStatus deleteStatus = DELETE_SIMPLE;
 	RowArray nextRowArray(txn, this);
@@ -1063,12 +1230,21 @@ void SubTimeSeries::deleteRowInternal(TransactionContext& txn, Timestamp rowKey,
 			deleteStatus = DELETE_ROW_ARRAY;
 		}
 	}
-	else if (activeNum < rowArray.getMaxRowNum() / 2) {
+	else if (activeNum < halfRowNum && !isOldSchema) {
 		if (idList.size() > 1) {
-			nextRowArray.load(txn, idList[1], this, OBJECT_FOR_UPDATE);
-			uint32_t nextActiveNum = nextRowArray.getActiveRowNum();
-			if (activeNum + nextActiveNum + 1 <= rowArray.getMaxRowNum()) {
-				deleteStatus = DELETE_MERGE;
+			bool isOldSchema = nextRowArray.load(txn, idList[1], this, OBJECT_FOR_UPDATE);
+			if (isForceLock || nextRowArray.getTxnId() == txn.getId() || 
+				!txn.getManager().isActiveTransaction(
+					txn.getPartitionId(), nextRowArray.getTxnId())) {  
+				if (isOldSchema) {
+					nextRowArray.begin();
+					RowScope rowScope(*this, TO_NORMAL);
+					convertRowArraySchema(txn, nextRowArray, false);
+				}
+				uint32_t nextActiveNum = nextRowArray.getActiveRowNum(rowArray.getMaxRowNum() - activeNum);
+				if (activeNum + nextActiveNum + 1 <= rowArray.getMaxRowNum()) {
+					deleteStatus = DELETE_MERGE;
+				}
 			}
 		}
 	}
@@ -1077,6 +1253,7 @@ void SubTimeSeries::deleteRowInternal(TransactionContext& txn, Timestamp rowKey,
 	if (deleteStatus == DELETE_MERGE) {
 		nextRowArray.lock(txn);
 		if (!txn.isAutoCommit() && nextRowArray.isFirstUpdate()) {
+			RowScope rowScope(*this, TO_MVCC);
 			nextRowArray.resetFirstUpdate();
 			RowArray snapShotRowArray(txn, this);
 			snapShotRowArray.initialize(
@@ -1093,6 +1270,7 @@ void SubTimeSeries::deleteRowInternal(TransactionContext& txn, Timestamp rowKey,
 	}
 
 	if (!txn.isAutoCommit() && rowArray.isFirstUpdate()) {
+		RowScope rowScope(*this, TO_MVCC);
 		rowArray.resetFirstUpdate();
 		RowArray snapShotRowArray(txn, this);
 		snapShotRowArray.initialize(
@@ -1113,50 +1291,53 @@ void SubTimeSeries::deleteRowInternal(TransactionContext& txn, Timestamp rowKey,
 		insertMvccMap(txn, mvccMap.get(), tId, mvccRowImage);
 		setRuntime();
 	}
+	{
+		RowScope rowScope(*this, TO_NORMAL);
 
-	util::XArray<IndexData> indexList(txn.getDefaultAllocator());
-	bool withUncommitted = true;
-	getIndexList(txn, withUncommitted, indexList);
-	if (!indexList.empty()) {
-		RowArray::Row row(rowArray.getRow(), &rowArray);
-		for (size_t i = 0; i < indexList.size(); i++) {
-			if (indexList[i].cursor_ < row.getRowId()) {
-				continue;
+		util::XArray<IndexData> indexList(txn.getDefaultAllocator());
+		bool withUncommitted = true;
+		getIndexList(txn, withUncommitted, indexList);
+		if (!indexList.empty()) {
+			RowArray::Row row(rowArray.getRow(), &rowArray);
+			for (size_t i = 0; i < indexList.size(); i++) {
+				if (indexList[i].cursor_ < row.getRowId()) {
+					continue;
+				}
+				ValueMap valueMap(txn, this, indexList[i]);
+				ColumnInfo& columnInfo = getColumnInfo(indexList[i].columnId_);
+				bool isNullValue = row.isNullValue(columnInfo);
+				BaseObject baseFieldObject(
+					txn.getPartitionId(), *getObjectManager());
+				const void *fieldValue = &NULL_VALUE;
+				if (!isNullValue) {
+					row.getField(txn, columnInfo, baseFieldObject);
+					fieldValue = baseFieldObject.getCursor<void>();
+				}
+				removeValueMap(txn, valueMap, fieldValue, rowArray.getOId(),
+					isNullValue);
 			}
-			ValueMap valueMap(txn, this, indexList[i]);
-			ColumnInfo& columnInfo = getColumnInfo(indexList[i].columnId_);
-			bool isNullValue = row.isNullValue(columnInfo);
-			BaseObject baseFieldObject(
-				txn.getPartitionId(), *getObjectManager());
-			const void *fieldValue = &NULL_VALUE;
-			if (!isNullValue) {
-				row.getField(txn, columnInfo, baseFieldObject);
-				fieldValue = baseFieldObject.getCursor<void>();
-			}
-			removeValueMap(txn, valueMap, fieldValue, rowArray.getOId(),
-				isNullValue);
 		}
-	}
 
-	rowArray.remove(txn);
+		rowArray.remove(txn);
 
-	switch (deleteStatus) {
-	case DELETE_SIMPLE:
-		break;
-	case DELETE_ROW_ARRAY: {
-		RowId removeRowId = rowArray.getRowId();
-		StackAllocAutoPtr<BtreeMap> rowIdMap(
-			txn.getDefaultAllocator(), getRowIdMap(txn));
-		removeRowIdMap(
-			txn, rowIdMap.get(), &removeRowId, rowArray.getBaseOId());
-		rowArray.finalize(txn);
-	} break;
-	case DELETE_MERGE: {
-		merge(txn, rowArray, nextRowArray);
-	} break;
-	default:
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TIM_PUT_ROW_ERROR, "");
-		break;
+		switch (deleteStatus) {
+		case DELETE_SIMPLE:
+			break;
+		case DELETE_ROW_ARRAY: {
+			RowId removeRowId = rowArray.getRowId();
+			StackAllocAutoPtr<BtreeMap> rowIdMap(
+				txn.getDefaultAllocator(), getRowIdMap(txn));
+			removeRowIdMap(
+				txn, rowIdMap.get(), &removeRowId, rowArray.getBaseOId());
+			rowArray.finalize(txn);
+		} break;
+		case DELETE_MERGE: {
+			merge(txn, rowArray, nextRowArray);
+		} break;
+		default:
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TIM_PUT_ROW_ERROR, "");
+			break;
+		}
 	}
 }
 
@@ -1165,9 +1346,16 @@ void SubTimeSeries::insertRowInternal(TransactionContext& txn,
 	rowArray.lock(txn);
 	if (rowArray.end()) {
 		RowArray nextRowArray(txn, this);
-		if (rowArray.nextRowArray(txn, nextRowArray, OBJECT_FOR_UPDATE)) {
+		bool isOldSchema = false;
+		if (rowArray.nextRowArray(txn, nextRowArray, isOldSchema, OBJECT_FOR_UPDATE)) {
 			nextRowArray.lock(txn);
+			if (isOldSchema) {
+				nextRowArray.begin();
+				RowScope rowScope(*this, TO_NORMAL);
+				convertRowArraySchema(txn, nextRowArray, false);
+			}
 			if (!txn.isAutoCommit() && nextRowArray.isFirstUpdate()) {
+				RowScope rowScope(*this, TO_MVCC);
 				nextRowArray.resetFirstUpdate();
 				RowArray snapShotRowArray(txn, this);
 				snapShotRowArray.initialize(
@@ -1186,6 +1374,7 @@ void SubTimeSeries::insertRowInternal(TransactionContext& txn,
 	}
 
 	if (!txn.isAutoCommit() && rowArray.isFirstUpdate()) {
+		RowScope rowScope(*this, TO_MVCC);
 		rowArray.resetFirstUpdate();
 		RowArray snapShotRowArray(txn, this);
 		snapShotRowArray.initialize(
@@ -1199,56 +1388,61 @@ void SubTimeSeries::insertRowInternal(TransactionContext& txn,
 		insertMvccMap(txn, mvccMap.get(), tId, mvccRowImage);
 		setRuntime();
 	}
+	{
+		RowScope rowScope(*this, TO_NORMAL);
 
-	RowId insertRowId = rowId;
-	if (rowArray.getMaxRowNum() == 1) {
-		if (rowArray.isFull()) {
-			StackAllocAutoPtr<BtreeMap> rowIdMap(
-				txn.getDefaultAllocator(), getRowIdMap(txn));
-			rowArray.reset();
-			rowArray.initialize(txn, insertRowId, getNormalRowArrayNum());
-			insertRowIdMap(
-				txn, rowIdMap.get(), &insertRowId, rowArray.getBaseOId());
-			rowArray.lock(txn);
-			rowArray.resetFirstUpdate();
-		}
-	}
-	else {
-		if (rowArray.isFull()) {
-			RowId splitRowId;
-			RowArray splitRowArray(txn, this);
-			split(txn, rowArray, insertRowId, splitRowArray, splitRowId);
-			if (splitRowId < insertRowId) {
-				rowArray.load(
-					txn, splitRowArray.getOId(), this, OBJECT_FOR_UPDATE);
+		RowId insertRowId = rowId;
+		if (rowArray.getMaxRowNum() == 1) {
+			if (rowArray.isFull()) {
+				StackAllocAutoPtr<BtreeMap> rowIdMap(
+					txn.getDefaultAllocator(), getRowIdMap(txn));
+				rowArray.reset();
+				rowArray.initialize(txn, insertRowId, getNormalRowArrayNum());
+				insertRowIdMap(
+					txn, rowIdMap.get(), &insertRowId, rowArray.getBaseOId());
+				rowArray.lock(txn);
+				rowArray.resetFirstUpdate();
 			}
 		}
 		else {
-			shift(txn, rowArray, false);
+			if (rowArray.isFull()) {
+				RowId splitRowId;
+				RowArray splitRowArray(txn, this);
+				split(txn, rowArray, insertRowId, splitRowArray, splitRowId);
+				if (splitRowId < insertRowId) {
+//					bool isOldSchema = 
+					rowArray.load(
+						txn, splitRowArray.getOId(), this, OBJECT_FOR_UPDATE);
+//					assert(!isOldSchema);
+				}
+			}
+			else {
+				shift(txn, rowArray, false);
+			}
 		}
-	}
 
-	rowArray.insert(txn, messageRowStore, insertRowId);
-	RowArray::Row row(rowArray.getRow(), &rowArray);
+		rowArray.insert(txn, messageRowStore, insertRowId);
+		RowArray::Row row(rowArray.getRow(), &rowArray);
 
-	util::XArray<IndexData> indexList(txn.getDefaultAllocator());
-	bool withUncommitted = true;
-	getIndexList(txn, withUncommitted, indexList);
-	for (size_t i = 0; i < indexList.size(); i++) {
-		if (indexList[i].cursor_ < row.getRowId()) {
-			continue;
+		util::XArray<IndexData> indexList(txn.getDefaultAllocator());
+		bool withUncommitted = true;
+		getIndexList(txn, withUncommitted, indexList);
+		for (size_t i = 0; i < indexList.size(); i++) {
+			if (indexList[i].cursor_ < row.getRowId()) {
+				continue;
+			}
+			ValueMap valueMap(txn, this, indexList[i]);
+			ColumnInfo& columnInfo = getColumnInfo(indexList[i].columnId_);
+			bool isNullValue = row.isNullValue(columnInfo);
+			BaseObject baseFieldObject(txn.getPartitionId(), *getObjectManager());
+			const void *fieldValue = &NULL_VALUE;
+			if (!isNullValue) {
+				row.getField(txn, columnInfo, baseFieldObject);
+				fieldValue = baseFieldObject.getCursor<void>();
+			}
+			insertValueMap(txn, valueMap, fieldValue, rowArray.getOId(),
+				isNullValue);
 		}
-		ValueMap valueMap(txn, this, indexList[i]);
-		ColumnInfo& columnInfo = getColumnInfo(indexList[i].columnId_);
-		bool isNullValue = row.isNullValue(columnInfo);
-		BaseObject baseFieldObject(txn.getPartitionId(), *getObjectManager());
-		const void *fieldValue = &NULL_VALUE;
-		if (!isNullValue) {
-			row.getField(txn, columnInfo, baseFieldObject);
-			fieldValue = baseFieldObject.getCursor<void>();
-		}
-		insertValueMap(txn, valueMap, fieldValue, rowArray.getOId(),
-			isNullValue);
 	}
 }
 
@@ -1257,34 +1451,8 @@ void SubTimeSeries::shift(
 	util::XArray<std::pair<OId, OId> > moveList(txn.getDefaultAllocator());
 	util::XArray<std::pair<OId, OId> >::iterator itr;
 	rowArray.shift(txn, isForce, moveList);
-	util::XArray<IndexData> indexList(txn.getDefaultAllocator());
-	bool withUncommitted = true;
-	getIndexList(txn, withUncommitted, indexList);
-	if (!indexList.empty() && !moveList.empty()) {
-		RowArray moveRowArray(txn, this);
-		for (size_t i = 0; i < indexList.size(); i++) {
-			ValueMap valueMap(txn, this, indexList[i]);
-			ColumnInfo& columnInfo = getColumnInfo(indexList[i].columnId_);
 
-			for (itr = moveList.begin(); itr != moveList.end(); itr++) {
-				moveRowArray.load(txn, itr->second, this, OBJECT_READ_ONLY);
-				RowArray::Row row(moveRowArray.getRow(), &moveRowArray);
-				if (indexList[i].cursor_ < row.getRowId()) {
-					continue;
-				}
-				bool isNullValue = row.isNullValue(columnInfo);
-				BaseObject baseFieldObject(
-					txn.getPartitionId(), *getObjectManager());
-				const void *fieldValue = &NULL_VALUE;
-				if (!isNullValue) {
-					row.getField(txn, columnInfo, baseFieldObject);
-					fieldValue = baseFieldObject.getCursor<void>();
-				}
-				updateValueMap(txn, valueMap, fieldValue, itr->first,
-					itr->second, isNullValue);
-			}
-		}
-	}
+	updateValueMaps(txn, moveList);
 }
 
 void SubTimeSeries::split(TransactionContext& txn, RowArray& rowArray,
@@ -1303,34 +1471,7 @@ void SubTimeSeries::split(TransactionContext& txn, RowArray& rowArray,
 	insertRowIdMap(
 		txn, rowIdMap.get(), &splitRowId, splitRowArray.getBaseOId());
 
-	util::XArray<IndexData> indexList(txn.getDefaultAllocator());
-	bool withUncommitted = true;
-	getIndexList(txn, withUncommitted, indexList);
-	if (!indexList.empty() && !moveList.empty()) {
-		RowArray moveRowArray(txn, this);
-		for (size_t i = 0; i < indexList.size(); i++) {
-			ValueMap valueMap(txn, this, indexList[i]);
-			ColumnInfo& columnInfo = getColumnInfo(indexList[i].columnId_);
-
-			for (itr = moveList.begin(); itr != moveList.end(); itr++) {
-				moveRowArray.load(txn, itr->second, this, OBJECT_READ_ONLY);
-				RowArray::Row row(moveRowArray.getRow(), &moveRowArray);
-				if (indexList[i].cursor_ < row.getRowId()) {
-					continue;
-				}
-				bool isNullValue = row.isNullValue(columnInfo);
-				BaseObject baseFieldObject(
-					txn.getPartitionId(), *getObjectManager());
-				const void *fieldValue = &NULL_VALUE;
-				if (!isNullValue) {
-					row.getField(txn, columnInfo, baseFieldObject);
-					fieldValue = baseFieldObject.getCursor<void>();
-				}
-				updateValueMap(txn, valueMap, fieldValue, itr->first,
-					itr->second, isNullValue);
-			}
-		}
-	}
+	updateValueMaps(txn, moveList);
 	if (!txn.isAutoCommit()) {  
 		setCreateRowId(txn, splitRowId);
 		setRuntime();
@@ -1343,34 +1484,7 @@ void SubTimeSeries::merge(
 	util::XArray<std::pair<OId, OId> >::iterator itr;
 	rowArray.merge(txn, nextRowArray, moveList);
 
-	util::XArray<IndexData> indexList(txn.getDefaultAllocator());
-	bool withUncommitted = true;
-	getIndexList(txn, withUncommitted, indexList);
-	if (!indexList.empty() && !moveList.empty()) {
-		RowArray moveRowArray(txn, this);
-		for (size_t i = 0; i < indexList.size(); i++) {
-			ValueMap valueMap(txn, this, indexList[i]);
-			ColumnInfo& columnInfo = getColumnInfo(indexList[i].columnId_);
-
-			for (itr = moveList.begin(); itr != moveList.end(); itr++) {
-				moveRowArray.load(txn, itr->second, this, OBJECT_READ_ONLY);
-				RowArray::Row row(moveRowArray.getRow(), &moveRowArray);
-				if (indexList[i].cursor_ < row.getRowId()) {
-					continue;
-				}
-				bool isNullValue = row.isNullValue(columnInfo);
-				BaseObject baseFieldObject(
-					txn.getPartitionId(), *getObjectManager());
-				const void *fieldValue = &NULL_VALUE;
-				if (!isNullValue) {
-					row.getField(txn, columnInfo, baseFieldObject);
-					fieldValue = baseFieldObject.getCursor<void>();
-				}
-				updateValueMap(txn, valueMap, fieldValue, itr->first, 
-					itr->second, isNullValue);
-			}
-		}
-	}
+	updateValueMaps(txn, moveList);
 
 	RowId rowId = nextRowArray.getRowId();
 	StackAllocAutoPtr<BtreeMap> rowIdMap(
@@ -1428,7 +1542,9 @@ void SubTimeSeries::undoUpdateRow(
 	rowIdMap.get()->search(txn, sc, oIdList);
 	bool isExistRowArray = false;
 	if (!oIdList.empty()) {
+//		bool isOldSchema = 
 		afterRowArray.load(txn, oIdList[0], this, OBJECT_FOR_UPDATE);
+//		assert(isOldSchema || !isOldSchema);
 		RowId targetRowId = afterRowArray.getRowId();
 		if (rowId == targetRowId) {
 			isExistRowArray = true;
@@ -1480,9 +1596,20 @@ void SubTimeSeries::undoUpdateRow(
 			}
 		}
 	}
+	for (size_t i = 0; i < beforeRowArray.getActiveRowNum(); i++) {
+		incrementRowNum();
+	}
+
+	RowScope rowScope(*this, TO_NORMAL);
+	beforeRowArray.moveRowArray(txn);
+
 	if (isExistRowArray) {
 		updateRowIdMap(txn, rowIdMap.get(), &rowId, afterRowArray.getBaseOId(),
 			beforeRowArray.getBaseOId());
+		if (!beforeRowArray.isLatestSchema()) {
+			convertRowArraySchema(txn, beforeRowArray, false);
+		}
+
 		for (size_t i = 0; i < afterRowArray.getActiveRowNum(); i++) {
 			decrementRowNum();
 		}
@@ -1491,9 +1618,6 @@ void SubTimeSeries::undoUpdateRow(
 	else {
 		insertRowIdMap(
 			txn, rowIdMap.get(), &rowId, beforeRowArray.getBaseOId());
-	}
-	for (size_t i = 0; i < beforeRowArray.getActiveRowNum(); i++) {
-		incrementRowNum();
 	}
 }
 
@@ -1505,6 +1629,7 @@ void SubTimeSeries::createMinimumRowArray(
 		assert(rowArray.getActiveRowNum() == 0);
 		RowId rowArrayRowId = rowArray.getRowId();
 		if (!txn.isAutoCommit() && rowArray.isFirstUpdate()) {
+			RowScope rowScope(*this, TO_MVCC);
 			rowArray.resetFirstUpdate();
 			RowArray snapShotRowArray(txn, this);
 			snapShotRowArray.initialize(
@@ -1536,6 +1661,284 @@ void SubTimeSeries::createMinimumRowArray(
 	}
 }
 
+bool SubTimeSeries::isRowOmittableBySsCompression(TransactionContext& txn,
+	const CompressionSchema& compressionSchema,
+	MessageRowStore* messageRowStore, RowArray& rowArray, Timestamp rowKey) {
+	bool isOmittable = true;
+	bool isSameValue = false;
+	uint32_t columnNum = getColumnNum();
+
+	RowArray checkRowArray(txn, this);
+	checkRowArray.load(txn, rowArray.getOId(), this, OBJECT_READ_ONLY);
+
+	if (checkRowArray.getRowNum() == 0) {
+		isOmittable = false;
+		isSameValue = false;
+	}
+	else {
+		checkRowArray.tail();
+		RowArray::Row prevRow(checkRowArray.getRow(), &checkRowArray);
+		if (checkRowArray.getRowNum() == 1) {
+			isOmittable = false;
+		}
+		else if (isSsCompressionReady()) {
+			RowArray startRowArray(txn, this);
+			startRowArray.load(txn, checkRowArray.getOId(), this, OBJECT_READ_ONLY);
+			startRowArray.prev();
+			RowArray::Row startRow(startRowArray.getRow(), &startRowArray);
+
+			Timestamp startTime = startRow.getRowId();
+			Timestamp nowTime = rowKey;
+			if (nowTime - startTime >
+				compressionSchema.getDurationInfo().timestampDuration_) {
+				isOmittable = false;
+			}
+		}
+
+		isSameValue = true;
+		for (uint32_t i = 1; i < columnNum; i++) {
+			ColumnInfo& columnInfo = getColumnInfo(i);
+			BaseObject baseFieldObject(
+				txn.getPartitionId(), *getObjectManager());
+			bool inputIsNull = messageRowStore->isNullValue(columnInfo.getColumnId());
+			bool prevIsNull = prevRow.isNullValue(columnInfo);
+			if (!prevIsNull) {
+				prevRow.getField(txn, columnInfo, baseFieldObject);
+			}
+			if (inputIsNull != prevIsNull || (!inputIsNull && !prevIsNull &&
+				ValueProcessor::compare(txn, *getObjectManager(), i,
+					messageRowStore,
+					baseFieldObject.getCursor<uint8_t>()) != 0)) {
+				isSameValue = false;
+				break;
+			}
+		}
+	}
+
+	if (isSameValue) {
+		if (!isSsCompressionReady()) {
+			isOmittable = false;
+		}
+		setSsCompressionReady(SS_IS_READRY);
+	}
+	else {
+		isOmittable = false;
+		setSsCompressionReady(SS_IS_NOT_READRY);
+	}
+
+	return isOmittable;
+}
+
+bool SubTimeSeries::isRowOmittableByHiCompression(TransactionContext& txn,
+	const CompressionSchema& compressionSchema,
+	MessageRowStore* messageRowStore, RowArray& rowArray, Timestamp rowKey)
+
+{
+	bool isOmittable = true;
+	uint32_t columnNum = getColumnNum();
+	RowArray checkRowArray(txn, this);
+	checkRowArray.load(txn, rowArray.getOId(), this, OBJECT_READ_ONLY);
+
+	DSDCValList dsdcValList(txn, *getObjectManager());
+	if (compressionSchema.getHiCompressionNum() > 0) {
+		dsdcValList.load(reinterpret_cast<TimeSeriesImage*>(baseContainerImage_)
+							 ->hiCompressionStatus_);
+	}
+	if (checkRowArray.getRowNum() > 1) {
+		checkRowArray.tail();
+		RowArray::Row prevRow(checkRowArray.getRow(), &checkRowArray);
+		RowArray startRowArray(txn, this);
+		startRowArray.load(txn, checkRowArray.getOId(), this, OBJECT_READ_ONLY);
+		startRowArray.prev();
+		RowArray::Row startRow(startRowArray.getRow(), &startRowArray);
+
+		Timestamp startTime = startRow.getRowId();
+		Timestamp nowTime = rowKey;
+		if (nowTime - startTime >
+			compressionSchema.getDurationInfo().timestampDuration_) {
+			isOmittable = false;
+		}
+		else {
+			for (uint32_t i = 1; i < columnNum; i++) {
+				ColumnInfo& columnInfo = getColumnInfo(i);
+
+				bool inputIsNull = messageRowStore->isNullValue(columnInfo.getColumnId());
+				bool startIsNull = startRow.isNullValue(columnInfo);
+				bool prevIsNull = prevRow.isNullValue(columnInfo);
+
+				const void* rowStoreField;
+				uint32_t size;
+				if (!inputIsNull) {
+					messageRowStore->getField(i, rowStoreField, size);
+				}
+				BaseObject baseStartFieldObject(
+					txn.getPartitionId(), *getObjectManager());
+				if (!startIsNull) {
+					startRow.getField(txn, columnInfo, baseStartFieldObject);
+				}
+				BaseObject basePrevFieldObject(
+					txn.getPartitionId(), *getObjectManager());
+				if (!prevIsNull) {
+					prevRow.getField(txn, columnInfo, basePrevFieldObject);
+				}
+
+				if (inputIsNull && startIsNull && prevIsNull) {
+				} 
+				else if (compressionSchema.isHiCompression(i)) {
+					if (inputIsNull || startIsNull || prevIsNull) {
+						isOmittable = false;
+					} else {
+
+						double startDoubleVal =
+							ValueProcessor::getDouble(columnInfo.getColumnType(),
+								baseStartFieldObject.getCursor<uint8_t>());
+						double nowDoubleVal = ValueProcessor::getDouble(
+							columnInfo.getColumnType(), rowStoreField);
+
+						double threshhold, rate, span;
+						bool threshholdRelative;
+						uint16_t compressionPos;
+						compressionSchema.getHiCompressionProperty(i, threshhold,
+							rate, span, threshholdRelative, compressionPos);
+
+						DSDCVal dsdcVal = *dsdcValList.get(compressionPos);
+						isOmittable = isOmittableByDSDCCheck(threshhold, startTime,
+							startDoubleVal, nowTime, nowDoubleVal, dsdcVal);
+						dsdcValList.update(compressionPos, &dsdcVal);
+					}
+				}
+				else {
+					if (inputIsNull != prevIsNull || (!inputIsNull && !prevIsNull &&
+						ValueProcessor::compare(txn, *getObjectManager(),
+							columnInfo.getColumnType(),
+							baseStartFieldObject.getCursor<uint8_t>(),
+							basePrevFieldObject.getCursor<uint8_t>()) != 0)) {
+						isOmittable = false;
+					}
+				}
+				if (isOmittable == false) {
+					break;
+				}
+			}
+		}
+	}
+	else {
+		isOmittable = false;
+	}
+
+	if (isOmittable == false && checkRowArray.getRowNum() > 0) {
+		checkRowArray.tail();
+		RowArray::Row prevRow(checkRowArray.getRow(), &checkRowArray);
+
+		util::XArray<ColumnId> columnIdList(txn.getDefaultAllocator());
+		compressionSchema.getHiCompressionColumnList(columnIdList);
+		for (size_t i = 0; i < columnIdList.size(); i++) {
+			ColumnId columnId = columnIdList[i];
+			ColumnInfo& columnInfo = getColumnInfo(columnId);
+			bool inputIsNull = messageRowStore->isNullValue(columnInfo.getColumnId());
+			bool prevIsNull = prevRow.isNullValue(columnInfo);
+			const void* rowStoreField;
+			uint32_t size;
+			if (!inputIsNull) {
+				messageRowStore->getField(columnId, rowStoreField, size);
+			}
+
+			BaseObject basePrevFieldObject(
+				txn.getPartitionId(), *getObjectManager());
+			if (!prevIsNull) {
+				prevRow.getField(txn, columnInfo, basePrevFieldObject);
+			}
+
+			if (!inputIsNull && !prevIsNull) {
+				double rowStoreDoubleVal = ValueProcessor::getDouble(
+					columnInfo.getColumnType(), rowStoreField);
+
+				Timestamp prevTimestamp = prevRow.getRowId();
+
+				double preDoubleVal =
+					ValueProcessor::getDouble(columnInfo.getColumnType(),
+						basePrevFieldObject.getCursor<uint8_t>());
+
+				double threshhold, rate, span;
+				bool threshholdRelative;
+				uint16_t compressionPos;
+				compressionSchema.getHiCompressionProperty(columnId, threshhold,
+					rate, span, threshholdRelative, compressionPos);
+				DSDCVal dsdcVal = *dsdcValList.get(compressionPos);
+				resetDSDCVal(threshhold, prevTimestamp, preDoubleVal, rowKey,
+					rowStoreDoubleVal, dsdcVal);
+				dsdcValList.update(compressionPos, &dsdcVal);
+			}
+		}
+	}
+
+	return isOmittable;
+}
+
+bool SubTimeSeries::isOmittableByDSDCCheck(double threshold,
+	Timestamp startTime, double startVal, Timestamp nowTime, double nowVal,
+	DSDCVal& dsdcVal) {
+	double timeNowDiff = static_cast<double>(nowTime - startTime);
+	assert(timeNowDiff > 0);
+
+
+	double nowMaxAngle =
+		(nowVal + dsdcVal.upperError_ - startVal) / timeNowDiff;
+
+
+	if (nowMaxAngle < dsdcVal.upperAngle_) {
+		dsdcVal.upperAngle_ = nowMaxAngle;  
+	}
+	else {
+		double nowUpperError =
+			startVal + (dsdcVal.upperAngle_ * timeNowDiff) - nowVal;
+		if (nowUpperError > 0 && nowUpperError < dsdcVal.upperError_) {
+			dsdcVal.upperError_ = nowUpperError;  
+		}
+		else {
+			dsdcVal.initialize(threshold);  
+			return false;					
+		}
+	}
+
+	double nowMinAngle =
+		(nowVal - dsdcVal.lowerError_ - startVal) / timeNowDiff;
+
+
+	if (nowMinAngle > dsdcVal.lowerAngle_) {
+		dsdcVal.lowerAngle_ = nowMinAngle;  
+	}
+	else {
+		double nowLowerError =
+			nowVal - (dsdcVal.lowerAngle_ * timeNowDiff) - startVal;
+		if (nowLowerError > 0 && nowLowerError < dsdcVal.lowerError_) {
+			dsdcVal.lowerError_ = nowLowerError;  
+		}
+		else {
+			dsdcVal.initialize(threshold);  
+			return false;					
+		}
+	}
+
+	return true;  
+}
+
+void SubTimeSeries::resetDSDCVal(double threshold, Timestamp prevTime,
+	double prevVal, Timestamp nowTime, double nowVal, DSDCVal& dsdcVal) {
+	double timeNowDiff = static_cast<double>(nowTime - prevTime);
+	assert(timeNowDiff > 0);
+
+
+	dsdcVal.upperError_ = threshold;
+	dsdcVal.lowerError_ = dsdcVal.upperError_;
+
+	double nowMaxAngle = (nowVal + dsdcVal.upperError_ - prevVal) / timeNowDiff;
+	dsdcVal.upperAngle_ = nowMaxAngle;
+
+	double nowMinAngle = (nowVal - dsdcVal.lowerError_ - prevVal) / timeNowDiff;
+	dsdcVal.lowerAngle_ = nowMinAngle;
+
+}
 
 void SubTimeSeries::updateSubTimeSeriesImage(TransactionContext& txn) {
 	SubTimeSeriesImage subTimeSeriesImage;
@@ -1665,6 +2068,23 @@ void SubTimeSeries::updateIndexData(
 	indexSchema_->updateIndexData(txn, indexData, position_);
 }
 
+
+util::String SubTimeSeries::getBibInfo(TransactionContext &txn, const char* dbName) {
+	return getBibInfoImpl(txn, dbName, position_, false);
+}
+
+void SubTimeSeries::getActiveTxnList(
+	TransactionContext &txn, util::Set<TransactionId> &txnList) {
+	getActiveTxnListImpl(txn, txnList);
+}
+
+void SubTimeSeries::getErasableList(TransactionContext &txn, Timestamp erasableTimeLimit, util::XArray<ArchiveInfo> &list) {
+	GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_UNEXPECTED_ERROR, "");
+}
+
+ExpireType SubTimeSeries::getExpireType() const {
+	return parent_->getExpireType();
+}
 
 /*!
 	@brief Validates Rows and Indexes
