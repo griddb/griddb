@@ -283,6 +283,11 @@ public interface GridStore extends Closeable {
 	 * この設定は、{@link ContainerInfo#isColumnOrderIgnorable()}を通じて
 	 * 確認できます。</p>
 	 *
+	 * <p>現バージョンでは、初期値でのNULL使用有無は未設定状態で求まります。
+	 * ただし今後のバージョンでは設定される可能性があります。
+	 * この設定は、各カラムの{@link ColumnInfo#getDefaultValueNull()}を
+	 * 通じて確認できます。</p>
+	 *
 	 * @param name 処理対象のコンテナの名前
 	 *
 	 * @return 指定の名前のコンテナに関する情報
@@ -303,6 +308,11 @@ public interface GridStore extends Closeable {
 	 * <p>The column sequence is set to Do Not Ignore.
 	 * This setting can be verified through
 	 * {@link ContainerInfo#isColumnOrderIgnorable()}.</p>
+	 *
+	 * <p>In the current version, whether to use of NULL for the initial value
+	 * is not set. Note that it may be set in the future version. This
+	 * information can be acquired through
+	 * {@link ColumnInfo#getDefaultValueNull()} on each column.</p>
 	 *
 	 * @param name the target Container name
 	 *
@@ -906,7 +916,10 @@ public interface GridStore extends Closeable {
 	 * 同様の振る舞いとなる。</td></tr>
 	 * <tr><td>カラムレイアウト</td><td>{@code info}</td>
 	 * <td>{@link Container}にて規定された制約に合致するよう
-	 * {@link ColumnInfo}のリストならびにロウキーの有無を設定する。</td></tr>
+	 * {@link ColumnInfo}のリストならびにロウキーの有無を設定する。
+	 * ただし現バージョンでは、{@link ColumnInfo#getDefaultValueNull()}が
+	 * {@code null}以外を返すような{@link ColumnInfo}を含めることは
+	 * できない。</td></tr>
 	 * <tr><td>カラム順序の無視</td><td>{@code info}</td>
 	 * <td>無視する場合、同名の既存のコンテナのカラム順序と一致するかどうかを
 	 * 検証しない。</td></tr>
@@ -982,9 +995,12 @@ public interface GridStore extends Closeable {
 	 * will be the same as {@link #putCollection(String, Class, boolean)}.
 	 * If {@link ContainerType#TIME_SERIES} is specified, the behavior will be the same as
 	 * {@link #putTimeSeries(String, Class, TimeSeriesProperties, boolean)}. </td></tr>
-	 * <tr><ts>column layout</td><td>{@code info}</td>
+	 * <tr><td>column layout</td><td>{@code info}</td>
 	 * <td>Set the {@link ColumnInfo} list and whether there is any Row key
-	 * so as to conform to the restrictions stipulated in {@link Container}. </td></tr>
+	 * so as to conform to the restrictions stipulated in {@link Container}.
+	 * However, in the current version, it is not allowed that the list
+	 * includes one or more {@link ColumnInfo} which returns a value except for
+	 * {@code null} through {@link ColumnInfo#getDefaultValueNull()}.</td></tr>
 	 * <tr><td>ignore column sequence</td><td>{@code info}</td>
 	 * <td>If ignored, no verification of the conformance with the column sequence
 	 * of existing Containers with the same name will be carried out. </td></tr>
@@ -1368,8 +1384,32 @@ public interface GridStore extends Closeable {
 	 * ただし、作成された{@link Row}に対して{@link Row#getSchema()}
 	 * を呼び出したとしても、コンテナ種別は含まれません。</p>
 	 *
-	 * <p>作成された{@link Row}の各フィールドには、{@link Container}にて定義
-	 * されている空の値が初期値として設定されます。</p>
+	 * <p>作成された{@link Row}の各フィールドには、指定の{@link ContainerInfo}に
+	 * 含まれる各カラムの{@link ColumnInfo}に基づいた初期値が設定されます。
+	 * 初期値として、{@link ColumnInfo#getDefaultValueNull()}の戻り値に応じた
+	 * 次の値が使用されます。</p>
+	 * <table>
+	 * <thead>
+	 * <tr>
+	 * <th>{@link ColumnInfo#getDefaultValueNull()}の戻り値</th>
+	 * <th>初期値</th>
+	 * </tr>
+	 * </thead>
+	 * <tbody>
+	 * <tr>
+	 * <td>{@code true}</td>
+	 * <td>NULL。ただし制約に反するロウは作成できない。</td>
+	 * </tr>
+	 * <tr>
+	 * <td>{@code false}</td>
+	 * <td>空の値。{@link Container}の定義を参照。</td>
+	 * </tr>
+	 * <tr>
+	 * <td>{@code null}</td>
+	 * <td>現バージョンでは、戻り値が{@code false}の場合と同様。</td>
+	 * </tr>
+	 * </tbody>
+	 * </table>
 	 *
 	 * <p>作成された{@link Row}に対する操作は、この{@link GridStore}オブジェクトの
 	 * クローズ有無に影響しません。</p>
@@ -1397,6 +1437,35 @@ public interface GridStore extends Closeable {
 	 * type are conformed to or not.
 	 * However, the Container type will not be included even if a
 	 * {@link Row#getSchema()} is invoked against the created {@link Row}.</p>
+	 *
+	 * <p>Each field will be set to the initial value which is based on
+	 * {@link ColumnInfo} of each column in the specified
+	 * {@link ContainerInfo}. The initial value corresponding to
+	 * the return value of {@link ColumnInfo#getDefaultValueNull()}
+	 * is selected by the following way.</p>
+	 * <table>
+	 * <thead>
+	 * <tr>
+	 * <th>Return value of {@link ColumnInfo#getDefaultValueNull()}</th>
+	 * <th>Initial value</th>
+	 * </tr>
+	 * </thead>
+	 * <tbody>
+	 * <tr>
+	 * <td>{@code true}</td>
+	 * <td>NULL. However a row which violates constraints can not be
+	 * created.</td>
+	 * </tr>
+	 * <tr>
+	 * <td>{@code false}</td>
+	 * <td>The empty value. See the definition of {@link Container}.</td>
+	 * </tr>
+	 * <tr>
+	 * <td>{@code null}</td>
+	 * <td>In the current version, same as {@code false}.</td>
+	 * </tr>
+	 * </tbody>
+	 * </table>
 	 *
 	 * <p>An empty value defined in {@link Container} is set as the initial value
 	 * for each field of the created {@link Row}.</p>

@@ -82,31 +82,36 @@ public class Extensibles {
 		public long getDatabaseId() throws GSException;
 
 		public ContainerKeyConverter getContainerKeyConverter(
-				boolean systemMode) throws GSException;
+				boolean internalMode, boolean forModification) throws GSException;
 
 		public ContainerProperties getContainerProperties(
 				ContainerKey key, ContainerProperties.KeySet propKeySet,
-				Integer attribute, boolean systemMode) throws GSException;
+				Integer attribute, boolean internalMode) throws GSException;
+
+		public List<ContainerProperties> getAllContainerProperties(
+				List<ContainerKey> keyList,
+				ContainerProperties.KeySet propKeySet,
+				Integer attribute, boolean internalMode) throws GSException;
 
 		public <K> AsContainer<K, Row> getContainer(
 				ContainerKey key, ContainerType expectedType,
-				Integer attribute, boolean systemMode) throws GSException;
+				Integer attribute, boolean internalMode) throws GSException;
 
 		public <K, R> AsContainer<K, R> getContainer(
 				ContainerKey key,
 				ContainerType containerType, Class<R> rowType,
-				Integer attribute, boolean systemMode) throws GSException;
+				Integer attribute, boolean internalMode) throws GSException;
 
 		public <K> Container<K, Row> putContainer(
 				ContainerKey key, ContainerProperties props,
-				boolean modifiable, boolean systemMode) throws GSException;
+				boolean modifiable, boolean internalMode) throws GSException;
 
 		public void dropContainer(
 				ContainerKey key, ContainerType containerType,
-				boolean systemMode) throws GSException;
+				boolean internalMode) throws GSException;
 
 		public void removeContainerCache(
-				ContainerKey key, boolean systemMode) throws GSException;
+				ContainerKey key, boolean internalMode) throws GSException;
 
 		public void fetchAll(
 				MultiOperationContext<
@@ -115,12 +120,12 @@ public class Extensibles {
 		public void multiPut(
 				MultiOperationContext<
 				ContainerKey, List<Row>, Void> multiContext,
-				boolean systemMode) throws GSException;
+				boolean internalMode) throws GSException;
 
 		public void multiGet(
 				MultiOperationContext<ContainerKey,
 				? extends RowKeyPredicate<?>, List<Row>> multiContext,
-				boolean systemMode) throws GSException;
+				boolean internalMode) throws GSException;
 
 		@Override
 		public AsPartitionController getPartitionController()
@@ -179,17 +184,17 @@ public class Extensibles {
 
 		public long getContainerCount(
 				int partitionIndex, ContainerKeyPredicate pred,
-				boolean systemMode) throws GSException;
+				boolean internalMode) throws GSException;
 
 		public List<String> getContainerNames(
 				int partitionIndex, long start, Long limit,
-				ContainerKeyPredicate pred, boolean systemMode) throws GSException;
+				ContainerKeyPredicate pred, boolean internalMode) throws GSException;
 
 		public int getPartitionIndexOfContainer(
-				String containerName, boolean systemMode) throws GSException;
+				String containerName, boolean internalMode) throws GSException;
 
 		public int getPartitionIndexOfContainer(
-				ContainerKey containerKey, boolean systemMode)
+				ContainerKey containerKey, boolean internalMode)
 				throws GSException;
 
 	}

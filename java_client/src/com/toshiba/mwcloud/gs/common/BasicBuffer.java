@@ -293,10 +293,18 @@ public class BasicBuffer {
 			return orgLimit;
 		}
 
-		public static void skipToLimit(
-				ByteBuffer buf, int newLimit) throws GSException {
+		public static void restoreLimit(
+				ByteBuffer buf, int orgLimit) throws GSException {
 			buf.position(buf.limit());
-			buf.limit(newLimit);
+			buf.limit(orgLimit);
+		}
+
+		public static void restoreLimitExact(
+				ByteBuffer buf, int orgLimit) throws GSException {
+			if (buf.position() != buf.limit()) {
+				throw errorUnknownRemaining(buf);
+			}
+			buf.limit(orgLimit);
 		}
 
 		public static int getForwardPosition(
@@ -328,6 +336,13 @@ public class BasicBuffer {
 					GSErrorCode.MESSAGE_CORRUPTED,
 					"Protocol error by too large size value (" +
 					"size=" + size + ", remaining=" + buf.remaining() + ")");
+		}
+
+		public static GSException errorUnknownRemaining(ByteBuffer buf) {
+			return new GSConnectionException(
+					GSErrorCode.MESSAGE_CORRUPTED,
+					"Protocol error by unknown remaining bytes (" +
+					"remaining=" + buf.remaining() + ")");
 		}
 
 	}

@@ -156,6 +156,20 @@ public class GSErrorCode {
 		return cause;
 	}
 
+	public static GSException acceptGSException(Throwable cause) {
+		if (cause instanceof GSException) {
+			return (GSException) cause;
+		}
+		else if (cause instanceof RuntimeException) {
+			throw (RuntimeException) cause;
+		}
+		else if (cause instanceof Error) {
+			throw (Error) cause;
+		}
+
+		return new GSException(cause);
+	}
+
 	@SuppressWarnings("deprecation")
 	public static GSException newGSRecoverableException(
 			int errorCode, String description, Throwable cause) {

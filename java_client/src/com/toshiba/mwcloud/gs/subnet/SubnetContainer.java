@@ -1469,7 +1469,7 @@ Extensibles.AsContainer<K, R>, Experimentals.AsContainer<K, R> {
 							"lastType=" + lastType + ", type=" + type + ")");
 				}
 
-				BufferUtils.skipToLimit(resp.base(), orgLimit);
+				BufferUtils.restoreLimit(resp.base(), orgLimit);
 			}
 
 			if (rowSetType == null) {
@@ -1532,7 +1532,7 @@ Extensibles.AsContainer<K, R>, Experimentals.AsContainer<K, R> {
 
 		final QueryParameters rowSetParameters = QueryParameters.inherit(
 				parameters, forUpdate, (isAutoCommit() ? 0 : transactionId),
-				executionStatus);
+				isTransactionStarted(), executionStatus);
 
 		final int rowCount = getResultRowSetCount(resp);
 		final BasicBuffer resultBuffer =
@@ -1685,7 +1685,9 @@ Extensibles.AsContainer<K, R>, Experimentals.AsContainer<K, R> {
 				QueryParameters.findInitialTransactionId(parameters);
 		if (initialTransactionId != null) {
 			checkTransactionPreserved(
-					forUpdateActual, initialTransactionId, true);
+					forUpdateActual, initialTransactionId,
+					QueryParameters.isInitialTransactionStarted(parameters),
+					true);
 		}
 
 		final StatementFamily baseFamily;
@@ -1842,7 +1844,7 @@ Extensibles.AsContainer<K, R>, Experimentals.AsContainer<K, R> {
 			channel.checkActiveConnection(
 					context, partitionId, targetConnection[0]);
 			try {
-				executeStatement(Statement.FETCH_ROW_SET, req, resp, null);
+				executeStatement(Statement.FETCH_ROW_SET, req, resp, family);
 			}
 			catch (@SuppressWarnings("deprecation")
 			com.toshiba.mwcloud.gs.GSRecoverableException e) {
@@ -1915,9 +1917,11 @@ Extensibles.AsContainer<K, R>, Experimentals.AsContainer<K, R> {
 	}
 
 	void remove(
-			RowMapper resolvedMapper, long transactionId, boolean updatable,
+			RowMapper resolvedMapper, long transactionId,
+			boolean transactionStarted, boolean updatable,
 			long rowId, Object key) throws GSException {
-		checkTransactionPreserved(true, transactionId, updatable);
+		checkTransactionPreserved(
+				true, transactionId, transactionStarted, updatable);
 
 		final BasicBuffer req = context.getRequestBuffer();
 		final BasicBuffer resp = context.getResponseBuffer();
@@ -1942,14 +1946,16 @@ Extensibles.AsContainer<K, R>, Experimentals.AsContainer<K, R> {
 	}
 
 	void update(
-			RowMapper resolvedMapper, long transactionId, boolean updatable,
+			RowMapper resolvedMapper, long transactionId,
+			boolean transactionStarted, boolean updatable,
 			long rowId, Object key, Object newRowObj) throws GSException {
 		if (this.mapper.isForTimeSeries() && !timeSeriesUpdateEnabled) {
 			throw new GSException(GSErrorCode.UNSUPPORTED_OPERATION,
 					"TimeSeries row can not be updated");
 		}
 
-		checkTransactionPreserved(true, transactionId, updatable);
+		checkTransactionPreserved(
+				true, transactionId, transactionStarted, updatable);
 
 		final BasicBuffer req = context.getRequestBuffer();
 		final BasicBuffer resp = context.getResponseBuffer();
@@ -1982,7 +1988,9 @@ Extensibles.AsContainer<K, R>, Experimentals.AsContainer<K, R> {
 			long transactionId, long baseId) throws GSException {
 		final long rowId = resolveRowIdForUpdate(baseId);
 		final Object key = resolveRowKeyForUpdate(baseId);
-		remove(mapper, transactionId, true, rowId, key);
+		remove(
+				mapper, transactionId, isTransactionStarted(), true,
+				rowId, key);
 	}
 
 	@Override
@@ -1990,12 +1998,14 @@ Extensibles.AsContainer<K, R>, Experimentals.AsContainer<K, R> {
 			long transactionId, long baseId, R rowObj) throws GSException {
 		final long rowId = resolveRowIdForUpdate(baseId);
 		final Object key = resolveRowKeyForUpdate(baseId);
-		update(mapper, transactionId, true, rowId, key, rowObj);
+		update(
+				mapper, transactionId, isTransactionStarted(), true,
+				rowId, key, rowObj);
 	}
 
 	private void checkTransactionPreserved(
-			boolean forUpdate, long transactionId, boolean updatable)
-			throws GSException {
+			boolean forUpdate, long transactionId, boolean transactionStarted,
+			boolean updatable) throws GSException {
 		if (forUpdate && (transactionId == 0 || !updatable)) {
 			throw new GSException(GSErrorCode.NOT_LOCKED,
 					"Update option must be turned on");
@@ -2012,7 +2022,8 @@ Extensibles.AsContainer<K, R>, Experimentals.AsContainer<K, R> {
 		}
 		else {
 			if (transactionId != this.transactionId ||
-					!transactionStarted || autoCommit) {
+					transactionStarted != this.transactionStarted ||
+					autoCommit) {
 				throw new GSException(GSErrorCode.TRANSACTION_CLOSED,
 						"Transaction expired");
 			}

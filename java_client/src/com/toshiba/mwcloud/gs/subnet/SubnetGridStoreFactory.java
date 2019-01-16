@@ -208,7 +208,8 @@ public class SubnetGridStoreFactory extends GridStoreFactory {
 		
 		
 		
-		private static final String ACCEPTABLE_VERSION = "3";
+		
+		private static final String ACCEPTABLE_VERSION = "4";
 
 		private final SubnetGridStoreFactory base;
 

@@ -26,13 +26,18 @@ import com.toshiba.mwcloud.gs.GSException;
 import com.toshiba.mwcloud.gs.Query;
 import com.toshiba.mwcloud.gs.RowSet;
 import com.toshiba.mwcloud.gs.common.BasicBuffer;
+import com.toshiba.mwcloud.gs.common.ContainerKeyConverter.ContainerKey;
+import com.toshiba.mwcloud.gs.common.ContainerProperties.MetaNamingType;
+import com.toshiba.mwcloud.gs.common.ContainerKeyConverter;
 import com.toshiba.mwcloud.gs.common.Extensibles;
 import com.toshiba.mwcloud.gs.common.GSErrorCode;
 import com.toshiba.mwcloud.gs.common.RowMapper;
 import com.toshiba.mwcloud.gs.common.Statement;
 import com.toshiba.mwcloud.gs.experimental.Experimentals;
+import com.toshiba.mwcloud.gs.subnet.NodeConnection.BytesRequestFormatter;
 import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequest;
 import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequestSource;
+import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequestType;
 import com.toshiba.mwcloud.gs.subnet.SubnetContainer.PartialExecutionStatus;
 import com.toshiba.mwcloud.gs.subnet.SubnetContainer.QueryFormatter;
 
@@ -266,6 +271,39 @@ implements Query<R>, Extensibles.AsQuery<R>, Experimentals.AsQuery<R> {
 		}
 	}
 
+	void setMetaContainerId(
+			long metaContainerId, MetaNamingType metaNamingType)
+			throws GSException {
+		checkOpened();
+		parameters = QueryParameters.resolve(parameters);
+		parameters.metaContainerId = metaContainerId;
+		parameters.metaNamingType = metaNamingType;
+	}
+
+	void setQeuryContainerKey(
+			final boolean enabled,
+			final ContainerKey queryContainerKey) throws GSException {
+		checkOpened();
+		parameters = QueryParameters.resolve(parameters);
+		parameters.queryContainerKey = getContainerKeyFormatter(
+				enabled, container.getStore(), queryContainerKey);
+	}
+
+	public static BytesRequestFormatter getContainerKeyFormatter(
+			final boolean enabled, Extensibles.AsStore store,
+			final ContainerKey containerKey) throws GSException {
+		final long databaseId = store.getDatabaseId();
+		final ContainerKeyConverter converter =
+				store.getContainerKeyConverter(true, false);
+		return new BytesRequestFormatter() {
+			@Override
+			public void format(BasicBuffer buf) throws GSException {
+				buf.putBoolean(enabled);
+				converter.put(containerKey, databaseId, buf);
+			}
+		};
+	}
+
 	@Override
 	public void applyOptionsTo(
 			Extensibles.AsQuery<?> dest) throws GSException {
@@ -321,7 +359,15 @@ implements Query<R>, Extensibles.AsQuery<R>, Experimentals.AsQuery<R> {
 
 		boolean forUpdate;
 
+		boolean initialTransactionStarted;
+
 		Long initialTransactionId;
+
+		Long metaContainerId;
+
+		MetaNamingType metaNamingType;
+
+		BytesRequestFormatter queryContainerKey;
 
 		Map<Integer, byte[]> extOptions;
 
@@ -340,7 +386,11 @@ implements Query<R>, Extensibles.AsQuery<R>, Experimentals.AsQuery<R> {
 			this.containerLostAcceptable = src.containerLostAcceptable;
 
 			this.forUpdate = src.forUpdate;
+			this.initialTransactionStarted = src.initialTransactionStarted;
 			this.initialTransactionId = src.initialTransactionId;
+			this.metaContainerId = src.metaContainerId;
+			this.metaNamingType = src.metaNamingType;
+			this.queryContainerKey = src.queryContainerKey;
 
 			if (src.extOptions != null) {
 				this.extOptions = new HashMap<Integer, byte[]>(src.extOptions);
@@ -354,11 +404,32 @@ implements Query<R>, Extensibles.AsQuery<R>, Experimentals.AsQuery<R> {
 
 		@Override
 		public boolean hasOptions() {
-			return extOptions != null;
+			return metaContainerId != null || queryContainerKey != null ||
+					extOptions != null;
 		}
 
 		@Override
 		public void putOptions(OptionalRequest optionalRequest) {
+			if (metaContainerId != null) {
+				optionalRequest.put(
+						OptionalRequestType.META_CONTAINER_ID,
+						metaContainerId);
+				optionalRequest.put(
+						OptionalRequestType.META_NAMING_TYPE,
+						(byte) metaNamingType.ordinal());
+			}
+
+			if (queryContainerKey != null) {
+				try {
+					optionalRequest.put(
+							OptionalRequestType.QUERY_CONTAINER_KEY,
+							queryContainerKey.format());
+				}
+				catch (GSException e) {
+					throw new IllegalStateException(e);
+				}
+			}
+
 			if (extOptions == null) {
 				return;
 			}
@@ -475,6 +546,10 @@ implements Query<R>, Extensibles.AsQuery<R>, Experimentals.AsQuery<R> {
 			return get(src).forUpdate || forUpdate;
 		}
 
+		static boolean isInitialTransactionStarted(QueryParameters src) {
+			return get(src).initialTransactionStarted;
+		}
+
 		static long resolveInitialTransactionId(QueryParameters src) {
 			final Long transactionId = findInitialTransactionId(src);
 			return (transactionId == null ? 0 : transactionId);
@@ -493,7 +568,8 @@ implements Query<R>, Extensibles.AsQuery<R>, Experimentals.AsQuery<R> {
 		}
 
 		static QueryParameters inherit(
-				QueryParameters src, boolean forUpdate, long transactionId,
+				QueryParameters src, boolean forUpdate,
+				long transactionId, boolean transactionStarted,
 				PartialExecutionStatus executionStatus) throws GSException {
 			if (src == null && !forUpdate && transactionId == 0 &&
 					!PartialExecutionStatus.isEnabled(executionStatus)) {
@@ -505,10 +581,12 @@ implements Query<R>, Extensibles.AsQuery<R>, Experimentals.AsQuery<R> {
 
 			dest.forUpdate = isForUpdate(src, forUpdate);
 			if (dest.initialTransactionId != null &&
-					dest.initialTransactionId != transactionId) {
+					(dest.initialTransactionId != transactionId ||
+					dest.initialTransactionStarted != transactionStarted)) {
 				throw new Error();
 			}
 			dest.initialTransactionId = transactionId;
+			dest.initialTransactionStarted = transactionStarted;
 
 			dest.executionStatus = PartialExecutionStatus.inherit(
 					dest.executionStatus, executionStatus);

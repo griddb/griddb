@@ -1543,6 +1543,7 @@ public class NodeConnection implements Closeable {
 
 	public enum OptionalRequestType {
 
+		LEGACY_VERSION_BLOCK(0, Byte.class),
 		TRANSACTION_TIMEOUT(1, Integer.class),
 		FOR_UPDATE(2, Boolean.class),
 		CONTAINER_LOCK_REQUIRED(3, Boolean.class),
@@ -1555,7 +1556,13 @@ public class NodeConnection implements Closeable {
 		FETCH_LIMIT(10002, Long.class),
 		FETCH_SIZE(10003, Long.class),
 		CLIENT_ID(11001, ClientId.class),
-		FETCH_BYTES_SIZE(11002, Integer.class);
+		FETCH_BYTES_SIZE(11002, Integer.class),
+		META_CONTAINER_ID(11003, Long.class),
+		FEATURE_VERSION(11004, Integer.class),
+		ACCEPTABLE_FEATURE_VERSION(11005, Integer.class),
+		CONTAINER_VISIBILITY(11006, Integer.class),
+		META_NAMING_TYPE(11007, Byte.class),
+		QUERY_CONTAINER_KEY(11008, byte[].class);
 
 		private final int id;
 
@@ -1676,15 +1683,19 @@ public class NodeConnection implements Closeable {
 		public void putOptions(OptionalRequest optionalRequest) {
 			optionalRequest.requestMap.putAll(requestMap);
 
-			if (optionalRequest.extRequestMap == null) {
-				optionalRequest.extRequestMap = new TreeMap<Integer, byte[]>();
+			if (extRequestMap != null) {
+				optionalRequest.putExtAll(extRequestMap);
 			}
-			optionalRequest.extRequestMap.putAll(extRequestMap);
 		}
 
 		public void clear() {
 			requestMap.clear();
 			extRequestMap = null;
+		}
+
+		public void putFeatureVersion(int version) {
+			put(OptionalRequestType.LEGACY_VERSION_BLOCK, (byte) 1);
+			put(OptionalRequestType.FEATURE_VERSION, version);
 		}
 
 		public void put(OptionalRequestType type, Object value) {
@@ -1699,6 +1710,13 @@ public class NodeConnection implements Closeable {
 				throw new IllegalArgumentException();
 			}
 			extRequestMap.put(type, value);
+		}
+
+		public void putExtAll(SortedMap<Integer, byte[]> src) {
+			if (extRequestMap == null) {
+				extRequestMap = new TreeMap<Integer, byte[]>();
+			}
+			extRequestMap.putAll(src);
 		}
 
 		public void format(BasicBuffer req) {
@@ -1755,8 +1773,8 @@ public class NodeConnection implements Closeable {
 				}
 				else if (valueType == ClientId.class) {
 					final ClientId clientId = (ClientId) value;
-					req.putUUID(clientId.getUUID());
 					req.putLong(clientId.getSessionId());
+					req.putUUID(clientId.getUUID());
 				}
 				else if (valueType == byte[].class) {
 					final byte[] bytes = (byte[]) value;
@@ -1781,6 +1799,34 @@ public class NodeConnection implements Closeable {
 			req.base().position(headPos);
 			req.putInt(endPos - bodyPos);
 			req.base().position(endPos);
+		}
+
+	}
+
+	public interface RequestFormatter {
+
+		void format(BasicBuffer buf) throws GSException;
+
+	}
+
+	public static abstract class BytesRequestFormatter
+	implements RequestFormatter {
+
+		public abstract void format(BasicBuffer buf) throws GSException;
+
+		public byte[] format() throws GSException {
+			return toBytes(this);
+		}
+
+		public static byte[] toBytes(
+				RequestFormatter formatter) throws GSException {
+			final BasicBuffer buf = new BasicBuffer(0);
+			formatter.format(buf);
+			buf.base().flip();
+
+			final byte[] bytes = new byte[buf.base().remaining()];
+			buf.base().get(bytes);
+			return bytes;
 		}
 
 	}
