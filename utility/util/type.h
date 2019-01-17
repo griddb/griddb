@@ -971,6 +971,18 @@ template<typename T> struct IsSame<T, T> {
 	enum Value { VALUE = Type::VALUE };
 };
 
+template<typename>
+struct IsPointer {
+	typedef FalseType Type;
+	enum Value { VALUE = Type::VALUE };
+};
+
+template<typename E>
+struct IsPointer<E*> {
+	typedef TrueType Type;
+	enum Value { VALUE = Type::VALUE };
+};
+
 }
 
 

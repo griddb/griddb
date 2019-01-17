@@ -23,6 +23,9 @@
 #include "expression.h"
 #include "qp_def.h"
 #include "transaction_context.h"
+#include "function_gis.h"
+#include "gis_generator.h"
+#include "gis_geomfromtext.h"
 #include "aggregation_func.h"
 #include "function_array.h"
 #include "function_float.h"
@@ -46,6 +49,11 @@ AggregationMap AggregationMap::map_;
  */
 FunctionMap::FunctionMap(bool forgis) : OpenHash<TqlFunc>() {
 	if (forgis) {
+		RegisterFunction<PointGenerator>("POINT");
+		RegisterFunction<LineStringGenerator>("LINESTRING");
+		RegisterFunction<PolygonGenerator>("POLYGON");
+		RegisterFunction<PolyhedronGenerator>("POLYHEDRALSURFACE");
+		RegisterFunction<QuadraticSurfaceGenerator>("QUADRATICSURFACE");
 		return;
 	}
 	else {
@@ -71,6 +79,19 @@ FunctionMap::FunctionMap(bool forgis) : OpenHash<TqlFunc>() {
 		RegisterFunction<FunctorCeil>("CEILING");
 		RegisterFunction<FunctorFloor>("FLOOR");
 
+		RegisterFunction<FunctorGeomFromText>("ST_GEOMFROMTEXT");
+		RegisterFunction<FunctorMakerect>("ST_MAKERECT");
+		RegisterFunction<FunctorMakebox>("ST_MAKEBOX");
+
+		RegisterFunction<FunctorMakeplane>("ST_MAKEPLANE");
+		RegisterFunction<FunctorMakesphere>("ST_MAKESPHERE");
+		RegisterFunction<FunctorMakecylinder>("ST_MAKECYLINDER");
+		RegisterFunction<FunctorMakecone>("ST_MAKECONE");
+		RegisterFunction<FunctorMakeqsf>("ST_MAKEQSF");
+		RegisterFunction<FunctorGetsrid>("ST_GETSRID");
+
+		RegisterFunction<FunctorMbrIntersects>("ST_MBRINTERSECTS");
+		RegisterFunction<FunctorQsfmbrIntersects>("ST_QSFMBRINTERSECTS");
 	}
 }
 

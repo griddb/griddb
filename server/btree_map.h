@@ -26,7 +26,7 @@
 #include "data_type.h"
 #include "gs_error.h"
 #include "object_manager.h"
-#include "string_processor.h"  
+#include "value_processor.h"  
 #include "value.h"			   
 #include "value_operator.h"
 #include "container_key.h"
@@ -495,7 +495,7 @@ public:
 		bool isNullSuspended_;
 		bool isCaseSensitive_;
 		RowId suspendRowId_;
-		
+
 		SearchContext()
 			: BaseIndex::SearchContext(),
 			  startKey_(NULL),
@@ -2922,6 +2922,7 @@ int32_t BtreeMap::insert(TransactionContext &txn, K &key, V &value, bool isCaseS
 		insertInternal<K, K, V>(txn, key, value, &valueCmp, &valueCmp, isCaseSensitive);
 
 	int32_t ret = (isSuccess) ? GS_SUCCESS : GS_FAIL;
+	assert(ret == GS_SUCCESS);
 	if (beforeRootOId != getRootOId()) {
 		ret = (ret | ROOT_UPDATE);
 	}
@@ -2943,6 +2944,7 @@ int32_t BtreeMap::remove(TransactionContext &txn, K &key, V &value, bool isCaseS
 		removeInternal<K, K, V>(txn, key, value, &valueCmp, &valueCmp, isCaseSensitive);
 
 	int32_t ret = (isSuccess) ? GS_SUCCESS : GS_FAIL;
+	assert(ret == GS_SUCCESS);
 	if (beforeRootOId != getRootOId()) {
 		ret = (ret | ROOT_UPDATE);
 	}
@@ -2976,6 +2978,7 @@ int32_t BtreeMap::update(
 		ret = (isSuccess) ? GS_SUCCESS : GS_FAIL;
 	}
 
+	assert(ret == GS_SUCCESS);
 	if (beforeRootOId != getRootOId()) {
 		ret = (ret | ROOT_UPDATE);
 	}

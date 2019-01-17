@@ -154,7 +154,7 @@ public:
 		uint64_t offset, FunctionMap &function_map, ExprList &args,
 		OutputMessageRowStore *messageRowStore, ResultType &resultType);
 	QpPassMode getPassMode() {
-		return QP_PASSMODE_PASS;
+		return QP_PASSMODE_PASS_IF_NO_WHERE;
 	}
 	uint64_t apiPassThrough(TransactionContext &txn, TimeSeries &timeSeries,
 		BtreeMap::SearchContext &sc, OutputOrder apiOutputOrder, uint64_t limit,

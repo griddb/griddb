@@ -26,6 +26,7 @@ import java.net.SocketAddress;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.Formatter;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -45,6 +46,8 @@ import com.toshiba.mwcloud.gs.GSTimeoutException;
 import com.toshiba.mwcloud.gs.common.BasicBuffer;
 import com.toshiba.mwcloud.gs.common.ContainerKeyConverter;
 import com.toshiba.mwcloud.gs.common.ContainerKeyConverter.ContainerKey;
+import com.toshiba.mwcloud.gs.common.ContainerProperties.ContainerVisibility;
+import com.toshiba.mwcloud.gs.common.ContainerProperties.MetaNamingType;
 import com.toshiba.mwcloud.gs.common.GSConnectionException;
 import com.toshiba.mwcloud.gs.common.GSErrorCode;
 import com.toshiba.mwcloud.gs.common.GSStatementException;
@@ -87,7 +90,7 @@ public class GridStoreChannel implements Closeable {
 
 	public static boolean v40SchemaCompatible = false;
 
-	private static int FAILOVER_TIMEOUT_DEFAULT = 60 * 1000;
+	private static int FAILOVER_TIMEOUT_DEFAULT = 2 * 60 * 1000;
 
 	private static int FAILOVER_RETRY_INTERVAL = 1 * 1000;
 
@@ -225,6 +228,10 @@ public class GridStoreChannel implements Closeable {
 
 		final int containerCacheSize;
 
+		final EnumSet<ContainerVisibility> containerVisibility;
+
+		final MetaNamingType metaNamingType;
+
 		public LocalConfig(WrappedProperties props) throws GSException {
 			this.failoverTimeoutMillis = props.getTimeoutProperty(
 					"failoverTimeout", (long) -1, false);
@@ -246,6 +253,39 @@ public class GridStoreChannel implements Closeable {
 					props.getIntProperty("internal.fetchBytesSize", true);
 			this.fetchBytesSize =
 					(fetchBytesSize == null ? 0 : fetchBytesSize);
+
+			containerVisibility = EnumSet.noneOf(ContainerVisibility.class);
+			setVisibility(
+					props, "experimental.metaContainerVisible",
+					ContainerVisibility.META);
+			setVisibility(
+					props, "internal.internalMetaContainerVisible",
+					ContainerVisibility.INTERNAL_META);
+			setVisibility(
+					props, "internal.systemToolContainerEnabled",
+					ContainerVisibility.SYSTEM_TOOL);
+
+			final String metaNaming = props.getProperty("experimental.metaNaming", false);
+			if (metaNaming == null ||
+					metaNaming.equals(MetaNamingType.CONTAINER.name())) {
+				this.metaNamingType = null;
+			}
+			else if (metaNaming.equals(MetaNamingType.TABLE.name())) {
+				this.metaNamingType = MetaNamingType.TABLE;
+			}
+			else {
+				throw new GSException(
+						GSErrorCode.ILLEGAL_PARAMETER,
+						"Unknown meta naming (type=" + metaNaming + ")");
+			}
+		}
+
+		void setVisibility(
+				WrappedProperties props, String name,
+				ContainerVisibility visibility) throws GSException {
+			if (props.getBooleanProperty(name, false, false)) {
+				containerVisibility.add(visibility);
+			}
 		}
 
 	}
@@ -319,7 +359,7 @@ public class GridStoreChannel implements Closeable {
 					user, password, !backupPreferred, database, clusterName,
 					localConfig.transactionTimeoutMillis);
 			this.keyConverter = ContainerKeyConverter.getInstance(
-					NodeConnection.getProtocolVersion(), false);
+					NodeConnection.getProtocolVersion(), false, false);
 			this.dataAffinityPattern = new DataAffinityPattern(
 					props.getProperty("dataAffinityPattern", false),
 					keyConverter);
@@ -548,6 +588,8 @@ public class GridStoreChannel implements Closeable {
 
 		private ContainerKeyConverter keyConverter;
 
+		private ContainerKeyConverter systemKeyConverter;
+
 		private ContainerKeyConverter internalKeyConverter;
 
 		private Context(
@@ -739,20 +781,49 @@ public class GridStoreChannel implements Closeable {
 			return loginInfo.getDatabase();
 		}
 
-		public ContainerKeyConverter getKeyConverter(boolean internalMode) {
-			ContainerKeyConverter converter =
-					(internalMode ? internalKeyConverter : keyConverter);
+		public boolean isVisible(ContainerVisibility visibility) {
+			return localConfig.containerVisibility.contains(visibility);
+		}
+
+		public ContainerKeyConverter getKeyConverter(
+				boolean internalMode, boolean forModification) {
+			final boolean systemAllowed =
+					(!forModification &&
+							(isVisible(ContainerVisibility.META) ||
+							(isVisible(ContainerVisibility.INTERNAL_META)) ||
+					isVisible(ContainerVisibility.SYSTEM_TOOL)));
+
+			ContainerKeyConverter converter;
+			if (internalMode) {
+				converter = internalKeyConverter;
+			}
+			else if (systemAllowed) {
+				converter = systemKeyConverter;
+			}
+			else {
+				converter = keyConverter;
+			}
+
 			if (converter == null) {
 				converter = ContainerKeyConverter.getInstance(
-						NodeConnection.getProtocolVersion(), internalMode);
+						NodeConnection.getProtocolVersion(),
+						internalMode, systemAllowed);
 				if (internalMode) {
 					internalKeyConverter = converter;
+				}
+				else if (systemAllowed) {
+					systemKeyConverter = converter;
 				}
 				else {
 					keyConverter = converter;
 				}
 			}
+
 			return converter;
+		}
+
+		public LocalConfig getConfig() {
+			return localConfig;
 		}
 
 	}
@@ -976,19 +1047,28 @@ public class GridStoreChannel implements Closeable {
 		private static final Pattern PAIR_SEPARATOR_PATTERN =
 				Pattern.compile("(?<!\\\\)=");
 
+		private static final Pattern DUPLICATE_WILDCARD_PATTERN =
+				Pattern.compile("(?<!\\\\)%%");
+
+		private static final Pattern ESCAPED_CHAR_PATTERN =
+				Pattern.compile("\\\\(.)");
+
+		private static final Pattern ESCAPED_NODE_AFFINITY_SEPARATOR_PATTERN =
+				Pattern.compile("\\\\@");
+
 		private static class Entry {
 			final Pattern basePattern;
-			final Pattern nodeAffinityPattern;
+			final Pattern nodeAffinityStrPattern;
 			final long nodeAffinityNum;
 			final boolean nodeAffinityIgnorable;
 			final String affinity;
 
 			private Entry(
-					Pattern basePattern, Pattern nodeAffinityPattern,
+					Pattern basePattern, Pattern nodeAffinityStrPattern,
 					long nodeAffinityNum, boolean nodeAffinityIgnorable,
 					String affinity) {
 				this.basePattern = basePattern;
-				this.nodeAffinityPattern = nodeAffinityPattern;
+				this.nodeAffinityStrPattern = nodeAffinityStrPattern;
 				this.nodeAffinityNum = nodeAffinityNum;
 				this.nodeAffinityIgnorable = nodeAffinityIgnorable;
 				this.affinity = affinity;
@@ -1018,11 +1098,13 @@ public class GridStoreChannel implements Closeable {
 						new ContainerKeyConverter.Components();
 				final String keyPattern = pair[0];
 				try {
+					final String modKeyPattern =
+							unescapeNodeAffinity(keyPattern);
 					keyConverter.parse(
-							WILDCARD_PATTERN.matcher(
-									keyPattern).replaceAll("_"),
+							unescape(WILDCARD_PATTERN.matcher(
+									modKeyPattern).replaceAll("_")),
 							new ContainerKeyConverter.Components(), true);
-					keyConverter.parse(keyPattern, components, false);
+					keyConverter.parse(modKeyPattern, components, false);
 				}
 				catch (GSException e) {
 					throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
@@ -1033,15 +1115,15 @@ public class GridStoreChannel implements Closeable {
 							"\", pattern=\"" + patternStr + "\")");
 				}
 
-				if (keyPattern.contains("%%")) {
+				if (DUPLICATE_WILDCARD_PATTERN.matcher(keyPattern).find()) {
 					throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
-							"Duplicated wildcard found in data affinity pattern (" +
+							"Duplicate wildcard found in data affinity pattern (" +
 							"keyPattern=\"" + keyPattern +
 							"\", entry=\"" + entryStr +
 							"\", pattern=\"" + patternStr + "\")");
 				}
 
-				final String dataAffinity = pair[1];
+				final String dataAffinity = unescape(pair[1]);
 				try {
 					RowMapper.checkSymbol(dataAffinity, "data affinity");
 				}
@@ -1059,29 +1141,24 @@ public class GridStoreChannel implements Closeable {
 				final Pattern basePattern = createPattern(
 						components.base, keyConverter, wildCardEnd);
 
-				String nodeAffinitySrc;
-				if (components.affinityStr == null &&
-						components.affinityNum < 0) {
-					nodeAffinitySrc = null;
-				}
-				else {
-					nodeAffinitySrc = components.affinityStr;
-				}
+				final boolean nodeAffinityFound =
+						(components.affinityStr != null ||
+						components.affinityNum >= 0);
 
-				final Pattern nodeAffinityPattern;
-				if (nodeAffinitySrc == null) {
-					nodeAffinityPattern = null;
+				final Pattern nodeAffinityStrPattern;
+				if (components.affinityStr == null) {
+					nodeAffinityStrPattern = null;
 				}
 				else {
-					nodeAffinityPattern =
-							createPattern(nodeAffinitySrc, keyConverter, null);
+					nodeAffinityStrPattern = createPattern(
+							components.affinityStr, keyConverter, null);
 				}
 
 				final boolean nodeAffinityIgnorable =
-						wildCardEnd[0] && nodeAffinityPattern != null;
+						!nodeAffinityFound && wildCardEnd[0];
 
 				entryList.add(new Entry(
-						basePattern, nodeAffinityPattern,
+						basePattern, nodeAffinityStrPattern,
 						components.affinityNum, nodeAffinityIgnorable,
 						dataAffinity));
 			}
@@ -1096,15 +1173,14 @@ public class GridStoreChannel implements Closeable {
 			boolean wildCardEnd = false;
 			while (matcher.find()) {
 				if (matcher.group(2) == null) {
-					final String elem = matcher.group(1);
+					final String elem = unescape(matcher.group(1));
 					try {
 						keyConverter.parse("_" + elem, false);
 					}
 					catch (GSException e) {
 						throw new Error(e);
 					}
-					patternBuilder.append(Pattern.quote(
-							RowMapper.normalizeSymbolUnchecked(elem)));
+					patternBuilder.append(Pattern.quote(normalize(elem)));
 					wildCardEnd = false;
 				}
 				else {
@@ -1131,7 +1207,8 @@ public class GridStoreChannel implements Closeable {
 				keyConverter.decompose(containerKey, components);
 
 				for (Entry entry : entryList) {
-					if (!entry.basePattern.matcher(components.base).find()) {
+					if (!entry.basePattern.matcher(
+							normalize(components.base)).find()) {
 						continue;
 					}
 
@@ -1141,19 +1218,19 @@ public class GridStoreChannel implements Closeable {
 
 					final long nodeAffinityNum = components.affinityNum;
 					if (entry.nodeAffinityNum >= 0 &&
-							nodeAffinityNum != entry.nodeAffinityNum) {
-						continue;
+							nodeAffinityNum == entry.nodeAffinityNum) {
+						return entry.affinity;
 					}
 
 					final String nodeAffinityStr = (nodeAffinityNum >= 0 ?
 							Long.toString(nodeAffinityNum) :
 							components.affinityStr);
-					if (entry.nodeAffinityPattern != null) {
+					if (entry.nodeAffinityStrPattern != null) {
 						if (nodeAffinityStr == null) {
 							continue;
 						}
-						if (!entry.nodeAffinityPattern.matcher(
-								nodeAffinityStr).find()) {
+						if (!entry.nodeAffinityStrPattern.matcher(
+								normalize(nodeAffinityStr)).find()) {
 							continue;
 						}
 					}
@@ -1166,6 +1243,19 @@ public class GridStoreChannel implements Closeable {
 			}
 
 			return defaultAffinity;
+		}
+
+		private static String unescape(String src) {
+			return ESCAPED_CHAR_PATTERN.matcher(src).replaceAll("$1");
+		}
+
+		private static String unescapeNodeAffinity(String src) {
+			return ESCAPED_NODE_AFFINITY_SEPARATOR_PATTERN.matcher(
+					src).replaceAll("@");
+		}
+
+		private static String normalize(String src) {
+			return RowMapper.normalizeSymbolUnchecked(src);
 		}
 	}
 
@@ -1519,6 +1609,7 @@ public class GridStoreChannel implements Closeable {
 			long failoverStartTime = 0;
 			long failoverTrialCount = 0;
 			long failoverReconnectedTrial = -1;
+			FailureHistory history = null;
 			for (boolean firstTrial = true;; firstTrial = false) {
 				try {
 					if (statement == null) {
@@ -1614,6 +1705,8 @@ public class GridStoreChannel implements Closeable {
 								null, e);
 					}
 
+					final long curTime = System.currentTimeMillis();
+
 					
 					if (statementRetryMode == 0 || statementRetryMode == 2) {
 						if (firstTrial && !(e instanceof GSWrongNodeException)) {
@@ -1628,11 +1721,12 @@ public class GridStoreChannel implements Closeable {
 										failoverTrialCount,
 										e);
 							}
+							history = FailureHistory.prepare(history);
+							history.add(e, curTime);
 							continue;
 						}
 					}
 
-					final long curTime = System.currentTimeMillis();
 					if (failoverStartTime == 0) {
 						failoverStartTime = curTime;
 					}
@@ -1641,18 +1735,10 @@ public class GridStoreChannel implements Closeable {
 					final long failoverTimeout = getFailoverTimeoutMillis(context);
 					if (failureMillis >= failoverTimeout) {
 						
-						final String errorReason =
-								(e.getMessage() == null ? "" : e.getMessage());
-						final String errorMessage = (failoverTimeout > 0 ?
-								("Failover timed out (trialCount=" +
-								failoverTrialCount +
-								", reconnectedTrial=" +
-								failoverReconnectedTrial +
-								", failureMillis=" + failureMillis +
-								", timeoutMillis=" + failoverTimeout +
-								", reason=" + errorReason + ")") :
-								(firstTrial ? null : "Retry failed (reason=" +
-										errorReason + ")"));
+						final String errorMessage = formatTimeoutError(
+								failoverStartTime, failoverTrialCount,
+								failoverReconnectedTrial, history, firstTrial,
+								curTime, failoverTimeout, e);
 
 						throw new GSTimeoutException(
 								e.getErrorCode(), errorMessage, e);
@@ -1688,6 +1774,8 @@ public class GridStoreChannel implements Closeable {
 					catch (InterruptedException e2) {
 					}
 					failoverTrialCount++;
+					history = FailureHistory.prepare(history);
+					history.add(e, curTime);
 				}
 				catch (GSStatementException e) {
 					if (!firstTrial && failoverTrialCount > 0) {
@@ -1711,6 +1799,47 @@ public class GridStoreChannel implements Closeable {
 					throw e;
 				}
 			}
+		}
+	}
+
+	private static String formatTimeoutError(
+			long failoverStartTime, long failoverTrialCount,
+			long failoverReconnectedTrial, FailureHistory history,
+			boolean firstTrial, long curTime, long failoverTimeout,
+			GSException reason) {
+		final long failureMillis = curTime - failoverStartTime;
+		final String reasonStr =
+				(reason.getMessage() == null ? "" : reason.getMessage());
+		if (failoverTimeout > 0) {
+			final StringBuilder builder = new StringBuilder();
+			builder.append("Failover timed out (trialCount=");
+			builder.append(failoverTrialCount);
+			if (failoverReconnectedTrial >= 0) {
+				builder.append(", reconnectedTrial=");
+				builder.append(failoverReconnectedTrial);
+			}
+			builder.append(", failureMillis=");
+			builder.append(failureMillis);
+			builder.append(", timeoutMillis=");
+			builder.append(failoverTimeout);
+			builder.append(", reason=");
+			builder.append(reasonStr);
+			if (history != null) {
+				history.format(
+						builder, failoverTrialCount, curTime);
+			}
+			builder.append(")");
+			return builder.toString();
+		}
+		else if (!firstTrial) {
+			final StringBuilder builder = new StringBuilder();
+			builder.append("Retry failed (reason=");
+			builder.append(reasonStr);
+			builder.append(")");
+			return builder.toString();
+		}
+		else {
+			return null;
 		}
 	}
 
@@ -1879,7 +2008,7 @@ public class GridStoreChannel implements Closeable {
 
 	public int resolvePartitionId(
 			final Context context, ContainerKey containerKey,
-			boolean systemMode) throws GSException {
+			boolean internalMode) throws GSException {
 		synchronized (context) {
 			final ClusterInfo clusterInfo = context.clusterInfo;
 
@@ -1902,7 +2031,7 @@ public class GridStoreChannel implements Closeable {
 			}
 
 			final ContainerKeyConverter converter =
-					context.getKeyConverter(true);
+					context.getKeyConverter(true, false);
 
 			final ContainerKeyConverter.Components components =
 					new ContainerKeyConverter.Components();
@@ -2014,6 +2143,133 @@ public class GridStoreChannel implements Closeable {
 		else {
 			return null;
 		}
+	}
+
+	static class FailureHistory {
+
+		private static final int MAX_HISTORY_SIZE = 10;
+
+		private final List<FailureEntry> entryList =
+				new ArrayList<FailureEntry>(MAX_HISTORY_SIZE);
+
+		private long totalTrial;
+
+		private long initialTimeMillis;
+
+		private long lastTimeMillis;
+
+		private boolean reduced;
+
+		static FailureHistory prepare(FailureHistory instance) {
+			if (instance == null) {
+				return new FailureHistory();
+			}
+			return instance;
+		}
+
+		void add(GSException reason, long curTimeMillis) {
+			if (totalTrial == 0) {
+				initialTimeMillis = curTimeMillis;
+				lastTimeMillis = curTimeMillis;
+			}
+			totalTrial++;
+
+			while (entryList.size() >= MAX_HISTORY_SIZE) {
+				long minMillis = Long.MAX_VALUE;
+				int minIndex = -1;
+				for (int i = 0; i < entryList.size(); i++) {
+					long millis = entryList.get(i).millisFromPrev;
+					if (millis < minMillis) {
+						minMillis = millis;
+						minIndex = i;
+					}
+				}
+				if (minIndex >= 0) {
+					entryList.remove(minIndex);
+					reduced = true;
+				}
+				else {
+					break;
+				}
+			}
+
+			final long millisFromInitial = curTimeMillis - initialTimeMillis;
+			final long millisFromPrev = curTimeMillis - lastTimeMillis;
+			entryList.add(new FailureEntry(
+					totalTrial, millisFromInitial, millisFromPrev, reason));
+
+			lastTimeMillis = curTimeMillis;
+		}
+
+		void format(
+				StringBuilder builder, long failureTrial, long curTimeMillis) {
+			if (totalTrial != entryList.size()) {
+				if (builder.length() > 0) {
+					builder.append(", ");
+				}
+				builder.append("historySize=");
+				builder.append(totalTrial);
+			}
+			if (!entryList.isEmpty()) {
+				if (builder.length() > 0) {
+					builder.append(", ");
+				}
+				builder.append("history");
+				if (reduced) {
+					builder.append("OfTop");
+					builder.append(entryList.size());
+				}
+				builder.append(
+						"(trial, millisFromInitial, millisFromPrev, reason)=");
+				if (entryList.size() > 1) {
+					builder.append("[");
+				}
+				boolean first = true;
+				for (final FailureEntry entry : entryList) {
+					if (first) {
+						first = false;
+					}
+					else {
+						builder.append(", ");
+					}
+					builder.append("(");
+					builder.append(entry.trialNumber);
+					builder.append(", ");
+					builder.append(entry.millisFromInitial);
+					builder.append(", ");
+					builder.append(entry.millisFromPrev);
+					builder.append(", ");
+					builder.append(entry.reason.getMessage());
+					builder.append(")");
+				}
+				if (entryList.size() > 1) {
+					builder.append("]");
+				}
+			}
+		}
+
+		static class FailureEntry {
+
+			final long trialNumber;
+
+			final long millisFromInitial;
+
+			final long millisFromPrev;
+
+			final GSException reason;
+
+			private FailureEntry(
+					long trialNumber, long millisFromInitial,
+					long millisFromPrev, GSException reason) {
+				this.trialNumber = trialNumber;
+				this.millisFromInitial = millisFromInitial;
+				this.millisFromPrev = millisFromPrev;
+				this.reason = reason;
+			}
+
+
+		}
+
 	}
 
 	static class ContextMonitor {

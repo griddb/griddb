@@ -15,10 +15,12 @@
 */
 package com.toshiba.mwcloud.gs.subnet;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -28,9 +30,11 @@ import com.toshiba.mwcloud.gs.GSException;
 import com.toshiba.mwcloud.gs.Row;
 import com.toshiba.mwcloud.gs.RowSet;
 import com.toshiba.mwcloud.gs.TimeSeries;
+import com.toshiba.mwcloud.gs.common.BasicBuffer;
 import com.toshiba.mwcloud.gs.common.Extensibles;
 import com.toshiba.mwcloud.gs.common.GSErrorCode;
 import com.toshiba.mwcloud.gs.common.RowMapper;
+import com.toshiba.mwcloud.gs.common.BasicBuffer.BufferUtils;
 import com.toshiba.mwcloud.gs.experimental.Experimentals;
 import com.toshiba.mwcloud.gs.subnet.GridStoreChannel.Context;
 import com.toshiba.mwcloud.gs.subnet.GridStoreChannel.RemoteReference;
@@ -345,8 +349,8 @@ implements RowSet<R>, Extensibles.AsRowSet<R>, Experimentals.AsRowSet<R> {
 		checkInRange();
 
 		container.remove(
-				mapper, getTransactionId(), isUpdatable(),
-				resultCursor.getLastRowId(), lastKey);
+				mapper, getTransactionId(), isTransactionStarted(),
+				isUpdatable(), resultCursor.getLastRowId(), lastKey);
 	}
 
 	@Override
@@ -355,8 +359,8 @@ implements RowSet<R>, Extensibles.AsRowSet<R>, Experimentals.AsRowSet<R> {
 		checkInRange();
 
 		container.update(
-				mapper, getTransactionId(), isUpdatable(),
-				resultCursor.getLastRowId(), lastKey, rowObj);
+				mapper, getTransactionId(), isTransactionStarted(),
+				isUpdatable(), resultCursor.getLastRowId(), lastKey, rowObj);
 	}
 
 	private void checkInRange() throws GSException {
@@ -368,6 +372,10 @@ implements RowSet<R>, Extensibles.AsRowSet<R>, Experimentals.AsRowSet<R> {
 
 	private long getTransactionId() {
 		return QueryParameters.resolveInitialTransactionId(queryParameters);
+	}
+
+	private boolean isTransactionStarted() {
+		return QueryParameters.isInitialTransactionStarted(queryParameters);
 	}
 
 	private boolean isUpdatable() {
@@ -415,6 +423,18 @@ implements RowSet<R>, Extensibles.AsRowSet<R>, Experimentals.AsRowSet<R> {
 		return extResultMap.get(key);
 	}
 
+	public static DistributedQueryTarget getDistTarget(
+			Extensibles.AsRowSet<?> rowSet) throws GSException {
+		final byte[] bytes =
+				rowSet.getExtOption(ExtResultOptionType.DIST_TARGET);
+		if (bytes == null) {
+			return null;
+		}
+		final BasicBuffer buf = BasicBuffer.wrap(bytes);
+
+		return new DistributedQueryTarget(buf);
+	}
+
 	private static interface NormalTarget extends ContainerSubResource {
 	}
 
@@ -441,11 +461,11 @@ implements RowSet<R>, Extensibles.AsRowSet<R>, Experimentals.AsRowSet<R> {
 		}
 
 		private static Class<?> selectTargetClass(SubnetRowSet<?> rowSet) {
-			if (rowSet.getTransactionId() == 0) {
-				return NormalTarget.class;
+			if (rowSet.isTransactionStarted()) {
+				return TransactionalTarget.class;
 			}
 			else {
-				return TransactionalTarget.class;
+				return NormalTarget.class;
 			}
 		}
 
@@ -556,6 +576,37 @@ implements RowSet<R>, Extensibles.AsRowSet<R>, Experimentals.AsRowSet<R> {
 		}
 
 		return new Experimentals.RowId(container, transactionId, baseId);
+	}
+
+	public static class ExtResultOptionType {
+
+		public static final int DIST_TARGET = 32;
+
+	}
+
+	public static class DistributedQueryTarget {
+
+		public final boolean uncovered;
+
+		public final boolean targeted;
+
+		public final List<Long> targetList;
+
+		DistributedQueryTarget(BasicBuffer buf) throws GSException {
+			uncovered = buf.getBoolean();
+			targeted = buf.getBoolean();
+			if (!targeted) {
+				targetList = null;
+				return;
+			}
+
+			final int count = BufferUtils.getNonNegativeInt(buf.base());
+			targetList = new ArrayList<Long>();
+			for (int i = 0; i < count; i++) {
+				targetList.add(buf.base().getLong());
+			}
+		}
+
 	}
 
 }

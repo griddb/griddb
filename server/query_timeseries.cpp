@@ -168,7 +168,7 @@ void QueryForTimeSeries::doQuery(
 		nPassSelectRequested_ = QP_PASSMODE_NO_PASS;
 	}
 
-	if (resultSet.getQueryOption().isRowIdScan()) {
+	if (resultSet.getQueryOption().isPartial()) {
 		nPassSelectRequested_ = QP_PASSMODE_NO_PASS;
 		doQueryPartial(txn, timeSeries, resultSet);
 	}
@@ -629,7 +629,7 @@ void QueryForTimeSeries::doSelection(
 	}
 	else {
 		size_t numSelection = getSelectionExprLength();
-		if (resultSet.getQueryOption().isRowIdScan()) {
+		if (resultSet.getQueryOption().isPartial()) {
 			resultNum = resultSet.getResultNum();
 			type = RESULT_ROWSET;
 		} else
@@ -775,20 +775,20 @@ void QueryForTimeSeries::tsResultMerge(TransactionContext &txn,
 
 	OId p;  
 	Timestamp xt = UNDEF_TIMESTAMP, yt = UNDEF_TIMESTAMP;
-	TimeSeries::RowArray rowArray(txn, &timeSeries);  
+	BaseContainer::RowArray rowArray(txn, &timeSeries);  
 
 	assert(listOut.size() == 0);
 	if (it1 != list1.end()) {
 		rowArray.load(
 			txn, *it1, &timeSeries, OBJECT_READ_ONLY);  
-		TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
-		xt = row.getTime();											  
+		BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
+		xt = row.getRowId();											  
 	}
 	if (it2 != list2.end()) {
 		rowArray.load(
 			txn, *it2, &timeSeries, OBJECT_READ_ONLY);  
-		TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
-		yt = row.getTime();											  
+		BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
+		yt = row.getRowId();											  
 	}
 
 	while (it1 != list1.end() && it2 != list2.end()) {
@@ -801,16 +801,16 @@ void QueryForTimeSeries::tsResultMerge(TransactionContext &txn,
 			if (it1 != list1.end()) {
 				rowArray.load(txn, *it1, &timeSeries,
 					OBJECT_READ_ONLY);  
-				TimeSeries::RowArray::Row row(
+				BaseContainer::RowArray::Row row(
 					rowArray.getRow(), &rowArray);  
-				xt = row.getTime();					
+				xt = row.getRowId();					
 			}
 			if (it2 != list2.end()) {
 				rowArray.load(txn, *it2, &timeSeries,
 					OBJECT_READ_ONLY);  
-				TimeSeries::RowArray::Row row(
+				BaseContainer::RowArray::Row row(
 					rowArray.getRow(), &rowArray);  
-				yt = row.getTime();					
+				yt = row.getRowId();					
 			}
 		}
 		else if (xt < yt) {  
@@ -820,9 +820,9 @@ void QueryForTimeSeries::tsResultMerge(TransactionContext &txn,
 			if (it1 != list1.end()) {
 				rowArray.load(txn, *it1, &timeSeries,
 					OBJECT_READ_ONLY);  
-				TimeSeries::RowArray::Row row(
+				BaseContainer::RowArray::Row row(
 					rowArray.getRow(), &rowArray);  
-				xt = row.getTime();					
+				xt = row.getRowId();					
 			}
 		}
 		else if (xt > yt) {
@@ -832,9 +832,9 @@ void QueryForTimeSeries::tsResultMerge(TransactionContext &txn,
 			if (it2 != list2.end()) {
 				rowArray.load(txn, *it2, &timeSeries,
 					OBJECT_READ_ONLY);  
-				TimeSeries::RowArray::Row row(
+				BaseContainer::RowArray::Row row(
 					rowArray.getRow(), &rowArray);  
-				yt = row.getTime();					
+				yt = row.getRowId();					
 			}
 		}
 		else {

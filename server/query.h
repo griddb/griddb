@@ -28,6 +28,12 @@
 #include "boolean_expression.h"
 #include "data_type.h"
 #include "expression.h"
+#include "gis_geometry.h"
+#include "gis_linestring.h"
+#include "gis_pointgeom.h"
+#include "gis_polygon.h"
+#include "gis_polyhedralsurface.h"
+#include "gis_surface.h"
 #include "schema.h"
 #include <cassert>
 #include <iostream>
@@ -38,6 +44,9 @@
 #include <string>
 
 #define INITIAL_EXPLAIN_DATA_NUM 0x100
+
+class ResultSet;
+class MetaContainer;
 
 namespace lemon_tqlParser {
 class tqlParser;
@@ -113,6 +122,10 @@ class Query {
 	friend class BoolExpr;
 
 public:
+	struct QueryAccessor;
+	struct ExprAccessor;
+	struct BoolExprAccessor;
+
 	Query(TransactionContext &txn, ObjectManager &objectManager,
 		const TQLInfo &tqlInfo, uint64_t limit = MAX_RESULT_SIZE,
 		QueryHookClass *hook = NULL);
@@ -144,6 +157,22 @@ protected:
 	virtual TimeSeries *getTimeSeries() {
 		return NULL;
 	}
+
+	MetaContainer* getMetaContainer() {
+		return getMetaContainer(getCollection(), getTimeSeries());
+	}
+
+	static MetaContainer* getMetaContainer(
+			Collection *collection, TimeSeries *timeSeries) {
+		if (collection != NULL && timeSeries != NULL) {
+			return getMetaContainer(*collection, *timeSeries);
+		}
+		return NULL;
+	}
+
+	static MetaContainer* getMetaContainer(
+			Collection &collection, TimeSeries &timeSeries);
+
 	virtual uint64_t getLimit() {
 		return nActualLimit_;
 	}
@@ -225,6 +254,7 @@ protected:
 	virtual void finishQuery(TransactionContext &txn, ResultSet &resultSet,
 		BaseContainer &container);
 
+	void setQueryOption(TransactionContext &txn, ResultSet &resultSet);
 	void doQueryPartial(
 		TransactionContext &txn, BaseContainer &container, ResultSet &resultSet);
 protected:
@@ -525,6 +555,25 @@ protected:
 	AggregationMap *aggregationMap_;  
 	SelectionMap *selectionMap_;	  
 	SpecialIdMap *specialIdMap_;	  
+};
+
+struct Query::QueryAccessor {
+	static const BoolExpr* findWhereExpr(const Query &query);
+};
+
+struct Query::ExprAccessor : public Expr {
+	static Type getType(const Expr &expr);
+	static Operation getOp(const Expr &expr);
+	static const ExprList* getArgList(const Expr &expr);
+	static const Value* getValue(const Expr &expr);
+	static uint32_t getColumnId(const Expr &expr);
+	static ColumnType getExprColumnType(const Expr &expr);
+};
+
+struct Query::BoolExprAccessor : public BoolExpr {
+	static const BoolExpr::BoolTerms& getOperands(const BoolExpr &expr);
+	static const Expr* getUnary(const BoolExpr &expr);
+	static Operation getOpType(const BoolExpr &expr);
 };
 
 /*!

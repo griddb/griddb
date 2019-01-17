@@ -33,10 +33,13 @@
 
 #include "expression.h"
 #include "qp_def.h"
+#include "gis_generator.h"
 
 #include "function_map.h"
 #include "lexer.h"
 #include "query.h"
+
+#include "meta_store.h"
 
 /*!
  * @brief Return the type of the expression
@@ -119,6 +122,19 @@ bool Expr::isString() const {
 	return (t == COLUMN_TYPE_STRING);
 }
 
+/*!
+ * @brief Return the type of the expression
+ * @return The expression is a geometry value
+ */
+bool Expr::isGeometry() const {
+	if (type_ != VALUE) return false;
+	if (value_ == NULL) {
+		GS_THROW_USER_ERROR(GS_ERROR_TQ_CRITICAL_LOGIC_ERROR,
+			"Internal logic error: value == NULL");
+	}
+	ColumnType t = value_->getType();
+	return (t == COLUMN_TYPE_GEOMETRY);
+}
 
 /*!
  * @brief Return the type of the expression
@@ -406,6 +422,10 @@ const char *Expr::getValueAsString(TransactionContext &txn) {
 			d->format(os, TRIM_MILLISECONDS, USE_LOCAL_TIMEZONE);
 			return os2char(txn, os);
 		}
+		case COLUMN_TYPE_GEOMETRY: {
+			Geometry *geom = geomCache_;
+			return geom->getString(txn);
+		}
 		default:
 			break;  
 		}
@@ -449,6 +469,24 @@ const char *Expr::getValueAsString(TransactionContext &txn) {
 		"Internal logic error: cannot create string");
 }
 
+/*!
+ * @brief  Return the value of the expression
+ * @return The expression as a Geometry
+ */
+Geometry *Expr::getGeometry() {
+	if (geomCache_ != NULL) {
+		return geomCache_;
+	}
+	else if (isNullValue()) {
+		GS_THROW_USER_ERROR(GS_ERROR_TQ_CRITICAL_LOGIC_ERROR,
+			"Internal logic error: expression is null");
+	}
+	else {
+		GS_THROW_USER_ERROR(GS_ERROR_TQ_CRITICAL_LOGIC_ERROR,
+			"Internal logic error: getGeometry() is called in invalid "
+			"context.");
+	}
+}
 
 /*!
  * @brief Return the value of the expression
@@ -617,6 +655,10 @@ Expr *Expr::dup(TransactionContext &txn, ObjectManager &objectManager) {
 				e = Expr::newTimestampValue(
 					*reinterpret_cast<const Timestamp *>(value_->data()), txn);
 				break;
+			case COLUMN_TYPE_GEOMETRY: {
+				Geometry *geom = getGeometry();
+				e = Expr::newGeometryValue(geom, txn);
+			} break;
 			default:
 				GS_THROW_USER_ERROR(GS_ERROR_TQ_CRITICAL_LOGIC_ERROR,
 					"Internal logic error: cannot determine column type.");
@@ -648,6 +690,7 @@ Expr *Expr::dup(TransactionContext &txn, ObjectManager &objectManager) {
 		e->columnId_ = columnId_;
 		e->columnType_ = columnType_;
 		e->functor_ = functor_;
+		e->geomCache_ = geomCache_;
 		if (arglist_ != NULL) {
 			e->arglist_ = QP_NEW ExprList(txn.getDefaultAllocator());
 			for (ExprList::const_iterator it = arglist_->begin();
@@ -673,6 +716,7 @@ void Expr::Init() {
 	columnId_ = 0;
 	functor_ = NULL;
 	columnType_ = COLUMN_TYPE_WITH_BEGIN;
+	geomCache_ = NULL;
 }
 
 /*!
@@ -967,6 +1011,18 @@ Expr::Expr(Value *array, TransactionContext &) {
 	value_ = array;
 }
 
+/*!
+ * @brief Ctor of geometry
+ * @param geom Geometry object (deserialized)
+ * @param txn The transaction context
+ */
+Expr::Expr(Geometry *geom, TransactionContext &txn) {
+	Init();
+	type_ = VALUE;
+	buf_ = QP_NEW util::XArray<uint8_t>(txn.getDefaultAllocator());
+	geomCache_ = geom;
+	value_ = QP_NEW Value(geom);
+}
 
 /*!
  * @brief Ctor of ExprList
@@ -1074,6 +1130,14 @@ Expr *Expr::eval(TransactionContext &txn, ObjectManager &objectManager,
 	EvalMode mode) {
 	switch (type_) {
 	case VALUE:
+		if (value_->getType() == COLUMN_TYPE_GEOMETRY) {
+			Geometry *g = getGeometry();
+			Expr *p =
+				Expr::newGeometryValue(g->assign(txn, objectManager,
+										   column_values, function_map, mode),
+					txn);
+			return p;
+		}
 		return this->dup(txn, objectManager);
 	case NULLVALUE:
 		return Expr::newNullValue(txn);
@@ -1239,6 +1303,12 @@ Expr *Expr::eval(TransactionContext &txn, ObjectManager &objectManager,
 			case COLUMN_TYPE_STRING:
 				return Expr::newStringValue(
 					reinterpret_cast<const char *>(v->data()), v->size(), txn);
+			case COLUMN_TYPE_GEOMETRY:
+				{
+					Geometry *geom =
+						Geometry::deserialize(txn, v->data(), v->size());
+					return Expr::newGeometryValue(geom, txn);
+				}
 			case COLUMN_TYPE_BOOL:
 				return Expr::newBooleanValue(
 					*reinterpret_cast<const bool *>(v->data()), txn);
@@ -2060,7 +2130,8 @@ TermCondition *Expr::toCondition(TransactionContext &txn, MapType mapType,
 		} else {
 		switch (columnType) {
 		case COLUMN_TYPE_STRING:
-			isValueCastableToKey = (valueType == COLUMN_TYPE_STRING);
+			isValueCastableToKey = (valueType == COLUMN_TYPE_STRING &&
+									mapType != MAP_TYPE_SPATIAL);
 			break;
 		case COLUMN_TYPE_BYTE:
 		case COLUMN_TYPE_SHORT:
@@ -2069,6 +2140,7 @@ TermCondition *Expr::toCondition(TransactionContext &txn, MapType mapType,
 			int64_t i64;
 			double d;
 			isValueCastableToKey = (
+				mapType != MAP_TYPE_SPATIAL &&
 				valueType <= COLUMN_TYPE_LONG && valueType >= COLUMN_TYPE_BYTE);
 			if (isValueCastableToKey && columnType < valueType) {
 				isValueCastableToKey =
@@ -2079,6 +2151,7 @@ TermCondition *Expr::toCondition(TransactionContext &txn, MapType mapType,
 		case COLUMN_TYPE_FLOAT:
 		case COLUMN_TYPE_DOUBLE: {
 			isValueCastableToKey = (
+				mapType != MAP_TYPE_SPATIAL &&
 				valueType <= COLUMN_TYPE_DOUBLE &&
 				valueType >= COLUMN_TYPE_BYTE);
 			if (isValueCastableToKey && (valueType <= COLUMN_TYPE_LONG ||
@@ -2116,6 +2189,7 @@ TermCondition *Expr::toCondition(TransactionContext &txn, MapType mapType,
 		}
 		case COLUMN_TYPE_TIMESTAMP:
 			isValueCastableToKey = (
+				mapType != MAP_TYPE_SPATIAL &&
 				valueType == COLUMN_TYPE_TIMESTAMP);
 			break;
 		default:
@@ -2267,7 +2341,28 @@ TermCondition *Expr::toCondition(TransactionContext &txn, MapType mapType,
 		c.valueSize_ = 0;
 	}
 	else if (type_ == FUNCTION) {
-		return NULL;
+		if (notFlag) {
+			return NULL;
+		}
+		if (arglist_ == NULL) {
+			return NULL;
+		}
+		ExprList &argList = *arglist_;
+		switch (mapType) {
+		case MAP_TYPE_SPATIAL:
+			{
+				TqlGisFunc *f = reinterpret_cast<TqlGisFunc *>(functor_);
+				GeometryOperator op_g;
+				f->getIndexParam(txn, argList, op_g, startKey, endKey);
+				startKeySize = static_cast<uint32_t>(op_g);
+				if (startKey == NULL) {
+					return NULL;
+				}
+			}
+			break;
+		default:
+			return NULL;
+		}
 	}
 	else {
 	}
@@ -2357,7 +2452,7 @@ void Expr::getIndexBitmapAndInfo(TransactionContext &txn,
 		case IS:
 		case ISNOT:
 			if ((*arglist_)[0]->isColumn()) {
-				mapBitmap &= (TOBITMAP(MAP_TYPE_HASH) | TOBITMAP(MAP_TYPE_BTREE));
+				mapBitmap &= (TOBITMAP(MAP_TYPE_HASH) | TOBITMAP(MAP_TYPE_BTREE) | TOBITMAP(MAP_TYPE_SPATIAL));
 				if (mapBitmap != 0) {
 					detectedOp = op;
 					if (queryObj.doExplain()) {
@@ -2406,6 +2501,14 @@ void Expr::getIndexBitmapAndInfo(TransactionContext &txn,
 			}
 		}
 
+		if (mapBitmap != 0) {
+			if (mapBitmap & TOBITMAP(MAP_TYPE_SPATIAL)) {
+				if (queryObj.doExplain()) {
+					queryObj.addExplain(
+						1, "INDEX_ENABLE", "INDEX_TYPE", "SPATIAL", label_);
+				}
+			}
+		}
 	}
 	else if (type_ == COLUMN) {
 		columnInfo = this->columnInfo_;
@@ -2423,6 +2526,14 @@ void Expr::getIndexBitmapAndInfo(TransactionContext &txn,
 			if (queryObj.doExplain()) {
 				queryObj.addExplain(
 					1, "INDEX_FOUND", "INDEX_TYPE", "HASH", label_);
+			}
+		}
+		if (container.hasIndex(
+				txn, columnInfo->getColumnId(), MAP_TYPE_SPATIAL)) {
+			mapBitmap |= TOBITMAP(MAP_TYPE_SPATIAL);
+			if (queryObj.doExplain()) {
+				queryObj.addExplain(
+					1, "INDEX_FOUND", "INDEX_TYPE", "SPATIAL", label_);
 			}
 		}
 	}
@@ -2567,7 +2678,14 @@ Expr *Expr::newColumnNode(const char *upperName, TransactionContext &txn,
 		}
 	}
 	else {
-		if (collection != NULL) {
+		MetaContainer *metaContainer =
+				Query::getMetaContainer(collection, timeSeries);
+		if (metaContainer != NULL) {
+			ObjectManager &objectManager = *(metaContainer->getObjectManager());
+			metaContainer->getColumnInfo(
+				txn, objectManager, tmpCName, columnId, cInfo, isQuoted);
+		}
+		else if (collection != NULL) {
 			ObjectManager &objectManager = *(collection->getObjectManager());
 			collection->getColumnInfo(
 				txn, objectManager, tmpCName, columnId, cInfo, isQuoted);
@@ -2746,13 +2864,13 @@ bool Expr::aggregate(TransactionContext &txn, Collection &collection,
 		ObjectManager &objectManager = *(collection.getObjectManager());
 		agg->reset(aggColumnType);
 
-		Collection::RowArray rowArray(txn, &collection);  
+		BaseContainer::RowArray rowArray(txn, &collection);  
 
 		for (uint32_t i = 0; i < resultRowIdList.size(); i++) {
 			rowArray.load(txn, resultRowIdList[i], &collection,
 				OBJECT_READ_ONLY);  
-			Collection::RowArray::Row row(rowArray.getRow(), &rowArray);  
-			ContainerValue v(txn, objectManager);
+			BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
+			ContainerValue v(txn.getPartitionId(), objectManager);
 			row.getField(txn, *aggColumnInfo, v);
 			if (!v.getValue().isNullValue()) {
 				agg->putValue(txn, v.getValue());
@@ -2801,14 +2919,15 @@ bool Expr::aggregate(TransactionContext &txn, TimeSeries &timeSeries,
 	else {
 		ObjectManager &objectManager = *(timeSeries.getObjectManager());
 
-		TimeSeries::RowArray rowArray(txn, &timeSeries);		  
+		BaseContainer::RowArray rowArray(txn, &timeSeries);		  
 		ColumnInfo &keyColumnInfo = timeSeries.getColumnInfo(0);  
 		ColumnInfo &aggColumnInfo = timeSeries.getColumnInfo(aggColumnId);  
 		for (uint32_t i = 0; i < resultRowIdList.size(); i++) {
-			ContainerValue k(txn, objectManager), v(txn, objectManager);
+			ContainerValue k(txn.getPartitionId(), objectManager);
+			ContainerValue v(txn.getPartitionId(), objectManager);
 			rowArray.load(txn, resultRowIdList[i], &timeSeries,
 				OBJECT_READ_ONLY);  
-			TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
+			BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
 			row.getField(txn, keyColumnInfo, k);
 			row.getField(txn, aggColumnInfo, v);
 			if (!v.getValue().isNullValue()) {

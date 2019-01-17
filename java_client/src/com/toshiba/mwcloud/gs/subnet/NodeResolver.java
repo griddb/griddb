@@ -93,6 +93,8 @@ public class NodeResolver implements Closeable {
 
 	private boolean connectionFailedPreviously;
 
+	private Throwable lastProblem;
+
 	private final InternPool<InetSocketAddress> addressCache =
 			new InternPool<InetSocketAddress>();
 
@@ -313,7 +315,6 @@ public class NodeResolver implements Closeable {
 		}
 
 		NodeConnection.fillRequestHead(ipv6Enabled, req);
-		boolean succeeded = false;
 		try {
 			NodeConnection.tryPutEmptyOptionalRequest(req);
 			masterConnection.executeStatementDirect(
@@ -385,13 +386,14 @@ public class NodeResolver implements Closeable {
 
 			updateConnectionPoolSize();
 
-			succeeded = true;
-			connectionFailedPreviously = false;
+			clearLastProblem();
 			return addressList;
 		}
-		finally {
-			if (!succeeded) {
-				connectionFailedPreviously = true;
+		catch (Throwable t) {
+			try {
+				throw acceptProblem(t, true);
+			}
+			finally {
 				try {
 					masterConnection.close();
 				}
@@ -435,17 +437,44 @@ public class NodeResolver implements Closeable {
 		return addressCache.intern(address);
 	}
 
+	private void checkLastProblem(long startTrialCount) throws GSException {
+		if (connectionFailedPreviously &&
+				startTrialCount != connectionTrialCounter) {
+			int errorCode = GSErrorCode.BAD_CONNECTION;
+			String reason = "(unknown)";
+
+			if (lastProblem != null) {
+				errorCode = 0;
+				reason = lastProblem.getMessage();
+			}
+
+			throw new GSConnectionException(
+					errorCode,
+					"Previously failed in the other thread (reason=" +
+					reason + ")");
+		}
+	}
+
+	private GSException acceptProblem(
+			Throwable cause, boolean lastProblemChecked) {
+		connectionFailedPreviously = true;
+		if (lastProblemChecked) {
+			lastProblem = cause;
+		}
+		return GSErrorCode.acceptGSException(cause);
+	}
+
+	private void clearLastProblem() {
+		connectionFailedPreviously = false;
+		lastProblem = null;
+	}
+
 	private void prepareConnectionAndClusterInfo(
 			ClusterInfo clusterInfo, long startTrialCount) throws GSException {
-		boolean succeeded = false;
-		boolean statementError = false;
+		boolean lastProblemChecked = false;
 		try {
-			if (connectionFailedPreviously &&
-					startTrialCount != connectionTrialCounter) {
-				throw new GSConnectionException(
-						GSErrorCode.CONNECTION_TIMEOUT,
-						"Previously failed in the other thread");
-			}
+			checkLastProblem(startTrialCount);
+			lastProblemChecked = true;
 
 			if (masterAddress == null) {
 				connectionTrialCounter++;
@@ -461,20 +490,20 @@ public class NodeResolver implements Closeable {
 				connectionTrialCounter++;
 			}
 
-			succeeded = true;
-			connectionFailedPreviously = false;
+			clearLastProblem();
 		}
-		catch (GSStatementException e) {
-			statementError = true;
-			throw e;
-		}
-		finally {
-			if (!succeeded) {
-				final boolean invalidated = clusterInfo.invalidate();
-				if (invalidated || !statementError) {
-					connectionFailedPreviously = true;
+		catch (Throwable t) {
+			final boolean invalidated = clusterInfo.invalidate();
+			if (invalidated || !(t instanceof GSStatementException)) {
+				try {
 					invalidateMaster(clusterInfo);
 				}
+				catch (Throwable t2) {
+				}
+				throw acceptProblem(t, lastProblemChecked);
+			}
+			else {
+				throw GSErrorCode.acceptGSException(t);
 			}
 		}
 	}

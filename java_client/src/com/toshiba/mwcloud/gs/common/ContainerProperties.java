@@ -35,11 +35,22 @@ public class ContainerProperties {
 
 		public final ContainerKey remoteKey;
 
+		public final MetaContainerType metaContainerType;
+
+		public final long metaContainerId;
+
+		public final MetaNamingType metaNamingType;
+
 		public ContainerIdInfo(
-				int versionId, long containerId, ContainerKey remoteKey) {
+				int versionId, long containerId, ContainerKey remoteKey,
+				MetaContainerType metaContainerType, long metaContainerId,
+				MetaNamingType metaNamingType) {
 			this.versionId = versionId;
 			this.containerId = containerId;
 			this.remoteKey = remoteKey;
+			this.metaContainerType = metaContainerType;
+			this.metaContainerId = metaContainerId;
+			this.metaNamingType = metaNamingType;
 		}
 
 	}
@@ -52,7 +63,18 @@ public class ContainerProperties {
 
 	private Integer attribute;
 
+	private Long reservedValue;
+
 	private Map<Integer, byte[]> rawEntries;
+
+	private Map<Integer, byte[]> schemaOptions;
+
+	public ContainerProperties() {
+	}
+
+	public ContainerProperties(ContainerInfo info) {
+		this.info = info;
+	}
 
 	public ContainerInfo getInfo() {
 		return info;
@@ -78,12 +100,28 @@ public class ContainerProperties {
 		this.attribute = attribute;
 	}
 
+	public Long getReservedValue() {
+		return reservedValue;
+	}
+
+	public void setReservedValue(Long reservedValue) {
+		this.reservedValue = reservedValue;
+	}
+
 	public Map<Integer, byte[]> getRawEntries() {
 		return rawEntries;
 	}
 
 	public void setRawEntries(Map<Integer, byte[]> rawEntries) {
 		this.rawEntries = rawEntries;
+	}
+
+	public Map<Integer, byte[]> getSchemaOptions() {
+		return schemaOptions;
+	}
+
+	public void setSchemaOptions(Map<Integer, byte[]> schemaOptions) {
+		this.schemaOptions = schemaOptions;
 	}
 
 	public static Key tryResolveKey(int rawkey) {
@@ -144,6 +182,23 @@ public class ContainerProperties {
 			return rawKeys;
 		}
 
+	}
+
+	public enum MetaContainerType {
+		NONE,
+		FULL
+	}
+
+	public enum MetaNamingType {
+		NEUTRAL,
+		CONTAINER,
+		TABLE
+	}
+
+	public enum ContainerVisibility {
+		META,
+		INTERNAL_META,
+		SYSTEM_TOOL
 	}
 
 }

@@ -65,6 +65,8 @@ public class RowMapper {
 
 	protected static boolean restrictKeyOrderFirst = true;
 
+	private static final boolean STRING_FIELD_ENCODING_STRICT = true; 
+
 	private static final RowMapper AGGREGATION_RESULT_MAPPER;
 
 	static {
@@ -553,6 +555,16 @@ public class RowMapper {
 		return false;
 	}
 
+	public boolean isDefaultValueSpecified() {
+		for (Entry entry : entryList) {
+			if (entry.initialValueSpecified) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
 	private int getVariableEntryCount() {
 		return variableEntryCount;
 	}
@@ -670,7 +682,7 @@ public class RowMapper {
 	}
 
 	public Row createGeneralRow() throws GSException {
-		return ArrayRow.create(this, false);
+		return ArrayRow.create(this, true);
 	}
 
 	public Object createRow(boolean general) throws GSException {
@@ -1098,6 +1110,7 @@ public class RowMapper {
 		entry.order = entryList.size();
 		entry.keyType = keyType;
 		entry.setNullableGeneral(columnInfo.getNullable(), nullableAllowed);
+		entry.setInitialValueNull(columnInfo.getDefaultValueNull());
 
 		if (normalizedName != null) {
 			entryMap.put(normalizedName, entry);
@@ -2319,6 +2332,9 @@ public class RowMapper {
 		boolean columnNullable;
 		boolean objectNullable;
 
+		boolean initialValueSpecified;
+		boolean initialValueNull;
+
 		Entry(String columnName) {
 			this.columnName = columnName;
 		}
@@ -2430,6 +2446,20 @@ public class RowMapper {
 			objectNullable = true;
 		}
 
+		void setInitialValueNull(Boolean valueNull) throws GSException {
+			if (valueNull != null) {
+				if (valueNull && !columnNullable) {
+					throw new GSException(
+							GSErrorCode.ILLEGAL_SCHEMA,
+							"Default value cannot set be null for " +
+							"non-nullable column (" +
+							"column=" + columnName + ")");
+				}
+				initialValueSpecified = true;
+				initialValueNull = valueNull;
+			}
+		}
+
 		boolean filterNullable(
 				Boolean nullable, Boolean nullableDefault,
 				boolean nullableAllowed) throws GSException {
@@ -2484,9 +2514,17 @@ public class RowMapper {
 			return toFullType(elementType, arrayUsed);
 		}
 
+		Boolean getInitialValueNull() {
+			if (initialValueSpecified) {
+				return initialValueNull;
+			}
+			return null;
+		}
+
 		ColumnInfo getColumnInfo() {
 			return new ColumnInfo(
-					columnName, getFullType(), columnNullable, null);
+					columnName, getFullType(), columnNullable,
+					getInitialValueNull(), null);
 		}
 
 		void exportColumnSchema(BasicBuffer out) {
@@ -2633,7 +2671,8 @@ public class RowMapper {
 		}
 
 		Object getInitialObj(boolean nullable, boolean general) {
-			if (nullable && (general || objectNullable) && columnNullable) {
+			if (nullable && (general || objectNullable) && columnNullable &&
+					initialValueNull) {
 				return null;
 			}
 
@@ -2664,6 +2703,8 @@ public class RowMapper {
 			result = prime * result +
 					((columnName == null) ? 0 : columnName.hashCode());
 			result = prime * result + (columnNullable ? 1231 : 1237);
+			result = prime * result + (initialValueNull ? 1231 : 1237);
+			result = prime * result + (initialValueSpecified ? 1231 : 1237);
 			result = prime * result +
 					((elementType == null) ? 0 : elementType.hashCode());
 			result = prime * result + (keyType ? 1231 : 1237);
@@ -2689,6 +2730,10 @@ public class RowMapper {
 			else if (!columnName.equals(other.columnName))
 				return false;
 			if (columnNullable != other.columnNullable)
+				return false;
+			if (initialValueNull != other.initialValueNull)
+				return false;
+			if (initialValueSpecified != other.initialValueSpecified)
 				return false;
 			if (elementType != other.elementType)
 				return false;
@@ -4109,12 +4154,27 @@ public class RowMapper {
 		}
 	}
 
-	static void putString(BasicBuffer out, String value, boolean varSizeMode) {
+	static void putString(BasicBuffer out, String value, boolean varSizeMode)
+			throws GSException {
 		if (varSizeMode) {
 			final byte[] buf = value.getBytes(BasicBuffer.DEFAULT_CHARSET);
 			out.prepare(MAX_VAR_SIZE_LENGTH + buf.length);
 			putVarSizePrepared(out, buf.length);
-			out.base().put(buf);
+
+			if (STRING_FIELD_ENCODING_STRICT) {
+				final int pos = out.base().position();
+				final byte[] dest = out.base().array();
+				for (int i = 0; i < buf.length; i++) {
+					if (buf[i] == 0) {
+						throw errorNullCharacter();
+					}
+					dest[pos + i] = buf[i];
+				}
+				out.base().position(pos + buf.length);
+			}
+			else {
+				out.base().put(buf);
+			}
 		}
 		else {
 			out.putString(value);
@@ -4128,6 +4188,12 @@ public class RowMapper {
 		final byte[] buf = new byte[bytesLength];
 		in.base().get(buf);
 		return new String(buf, 0, buf.length, BasicBuffer.DEFAULT_CHARSET);
+	}
+
+	private static GSException errorNullCharacter() {
+		return new GSException(
+				GSErrorCode.ILLEGAL_VALUE_FORMAT,
+				"Illegal '\\0' character found");
 	}
 
 }

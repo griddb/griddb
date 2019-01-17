@@ -27,6 +27,8 @@
 #include "value_processor.h"
 
 class ResultSet;
+class MetaContainer;
+struct MetaProcessorSource;
 
 /*!
 	@brief QueryProcessor
@@ -36,6 +38,11 @@ public:
 
 	static void executeTQL(TransactionContext &txn, BaseContainer &container,
 		ResultSize limit, const TQLInfo &tqlInfo, ResultSet &resultSet);
+
+	static void executeMetaTQL(
+		TransactionContext &txn, MetaContainer &container,
+		MetaProcessorSource &processorSource, ResultSize limit,
+		const TQLInfo &tqlInfo, ResultSet &resultSet);
 
 	static void get(TransactionContext &txn, BaseContainer &container,
 		uint32_t rowkeySize, const uint8_t *rowkey, ResultSet &resultSet);
@@ -48,6 +55,15 @@ public:
 		LogSequentialNumber lsn = 0);
 
 
+	static void searchGeometryRelated(TransactionContext &txn,
+		Collection &collection, ResultSize limit, uint32_t columnId,
+		uint32_t geometrySize, uint8_t *geometry, GeometryOperator geometryOp,
+		ResultSet &rs);
+
+	static void searchGeometry(TransactionContext &txn, Collection &collection,
+		ResultSize limit, uint32_t columnId, uint32_t geometrySize1,
+		uint8_t *geometry1, uint32_t geometrySize2, uint8_t *geometry2,
+		ResultSet &rs);
 
 	static void search(TransactionContext &txn,
 		BaseContainer &container, ResultSize limit,

@@ -67,8 +67,9 @@ void TimeSeries::initialize(TransactionContext &txn) {
 	baseContainerImage_->rowNum_ = 0;
 	baseContainerImage_->versionId_ = 0;
 	baseContainerImage_->tablePartitioningVersionId_ = UNDEF_TABLE_PARTITIONING_VERSIONID;
-	baseContainerImage_->expiredTime_ = 0;
-	reinterpret_cast<TimeSeriesImage *>(baseContainerImage_)->reserved_ = 0;
+	baseContainerImage_->startTime_ = 0;
+	reinterpret_cast<TimeSeriesImage *>(baseContainerImage_)
+		->hiCompressionStatus_ = UNDEF_OID;
 	reinterpret_cast<TimeSeriesImage *>(baseContainerImage_)->padding1_ = 0;
 	reinterpret_cast<TimeSeriesImage *>(baseContainerImage_)->padding2_ = 0;
 
@@ -87,6 +88,7 @@ void TimeSeries::set(TransactionContext &txn, const FullContainerKey &containerK
 //	MessageTimeSeriesSchema *containerSchema =
 //		reinterpret_cast<MessageTimeSeriesSchema *>(orgContainerSchema);
 	baseContainerImage_->containerId_ = containerId;
+	setContainerExpirationStartTime(orgContainerSchema->getContainerExpirationStartTime());
 
 	FullContainerKeyCursor keyCursor(txn.getPartitionId(), *getObjectManager());
 	keyCursor.initialize(txn, containerKey, getMetaAllcateStrategy());
@@ -99,10 +101,30 @@ void TimeSeries::set(TransactionContext &txn, const FullContainerKey &containerK
 	columnSchema_ =
 		commonContainerSchema_->get<ColumnSchema>(META_TYPE_COLUMN_SCHEMA);
 
+	const CompressionSchema &compressionSchema = getCompressionSchema();
+	switch (compressionSchema.getCompressionType()) {
+	case HI_COMPRESSION: {
+		uint16_t hiCompressionColumnNum =
+			compressionSchema.getHiCompressionNum();
+		if (hiCompressionColumnNum > 0) {
+			DSDCValList dsdcValList(txn, *getObjectManager());
+			dsdcValList.initialize(txn, compressionSchema,
+				hiCompressionColumnNum, getMetaAllcateStrategy());
+			reinterpret_cast<TimeSeriesImage *>(baseContainerImage_)
+				->hiCompressionStatus_ = dsdcValList.getBaseOId();
+		}
+	} break;
+	case SS_COMPRESSION: {
+		setSsCompressionReady(SS_IS_NOT_READRY);
+	} break;
+	default:
+		break;
+	}
 
 	indexSchema_ = ALLOC_NEW(txn.getDefaultAllocator())
 		IndexSchema(txn, *getObjectManager(), getMetaAllcateStrategy());
-	indexSchema_->initialize(txn, IndexSchema::INITIALIZE_RESERVE_NUM, 0, getColumnNum());
+	bool onMemory = false;
+	indexSchema_->initialize(txn, IndexSchema::INITIALIZE_RESERVE_NUM, 0, getColumnNum(), onMemory);
 	baseContainerImage_->indexSchemaOId_ = indexSchema_->getBaseOId();
 
 	rowFixedDataSize_ = calcRowFixedDataSize();
@@ -124,16 +146,25 @@ void TimeSeries::set(TransactionContext &txn, const FullContainerKey &containerK
 	baseContainerImage_->subContainerListOId_ =
 		subTimeSeriesListHead_->getBaseOId();
 
-	baseContainerImage_->normalRowArrayNum_ =
-		calcRowArrayNum(ROW_ARRAY_MAX_SIZE);
+	baseContainerImage_->normalRowArrayNum_ = calcRowArrayNum(
+		txn, getDataStore()->getConfig().isRowArraySizeControlMode(),
+		ROW_ARRAY_MAX_SIZE);
 
 	setAllocateStrategy();
+
+	if (isExpired(txn)) {
+		dataStore_->setLastExpiredTime(txn.getPartitionId(), txn.getStatementStartTime().getUnixTime());
+	}
 
 	BtreeMap mvccMap(txn, *getObjectManager(), getMapAllcateStrategy(), this);
 	mvccMap.initialize<TransactionId, MvccRowImage>(
 		txn, COLUMN_TYPE_OID, false, BtreeMap::TYPE_SINGLE_KEY);
 	baseContainerImage_->mvccMapOId_ = mvccMap.getBaseOId();
 
+	setNullsStatsStatus();
+
+	rowArrayCache_ = ALLOC_NEW(txn.getDefaultAllocator())
+		RowArray(txn, this);
 }
 
 /*!
@@ -142,26 +173,35 @@ void TimeSeries::set(TransactionContext &txn, const FullContainerKey &containerK
 bool TimeSeries::finalize(TransactionContext& txn) {
 	try {
 		setDirty();
-		Timestamp expiredTime = getCurrentExpiredTime(txn);
-		expireSubTimeSeries(txn, expiredTime);
-
-		for (int64_t i = subTimeSeriesListHead_->getNum() - 1; i >= 0; i--) {
-			const SubTimeSeriesImage &subTimeSeriesImage =
-				*(subTimeSeriesListHead_->get(txn, i));
+		util::XArray<SubTimeSeriesInfo> subTimeSeriesList(
+			txn.getDefaultAllocator());
+		util::XArray<SubTimeSeriesInfo>::reverse_iterator rItr;
+		getSubTimeSeriesList(txn, subTimeSeriesList, true);
+		for (rItr = subTimeSeriesList.rbegin();
+			 rItr != subTimeSeriesList.rend(); rItr++) {
 			util::StackAllocator::Scope scope(txn.getDefaultAllocator());
-			SubTimeSeries subContainer(
-					txn, SubTimeSeriesInfo(subTimeSeriesImage, i), this);
+			SubTimeSeries subContainer(txn, *rItr, this);
 			bool isFinished = subContainer.finalize(txn);
 			if (!isFinished) {
 				return isFinished;
 			}
-			subTimeSeriesListHead_->remove(txn, i);
+			subTimeSeriesListHead_->remove(txn, rItr->pos_);
 		}
 
 		if (baseContainerImage_->subContainerListOId_ != UNDEF_OID) {
 			subTimeSeriesListHead_->finalize(txn);
 		}
 
+		const CompressionSchema &compressionSchema = getCompressionSchema();
+		if (compressionSchema.getCompressionType() == HI_COMPRESSION) {
+			uint16_t hiCompressionColumnNum =
+				compressionSchema.getHiCompressionNum();
+			if (hiCompressionColumnNum > 0) {
+				getObjectManager()->free(txn.getPartitionId(),
+					reinterpret_cast<TimeSeriesImage *>(baseContainerImage_)
+						->hiCompressionStatus_);
+			}
+		}
 
 		if (baseContainerImage_->mvccMapOId_ != UNDEF_OID) {
 			StackAllocAutoPtr<BtreeMap> mvccMap(
@@ -169,11 +209,11 @@ bool TimeSeries::finalize(TransactionContext& txn) {
 			getDataStore()->finalizeMap(txn, getMapAllcateStrategy(), mvccMap.get());
 		}
 
+		finalizeIndex(txn);
+
 		commonContainerSchema_->reset();  
 		getDataStore()->removeColumnSchema(
 			txn, txn.getPartitionId(), baseContainerImage_->columnSchemaOId_);
-
-		finalizeIndex(txn);
 
 		OId triggerOId = getTriggerOId();
 		if (triggerOId != UNDEF_OID) {
@@ -204,6 +244,11 @@ void TimeSeries::createIndex(TransactionContext &txn,
 		if (isInvalid()) {  
 			GS_THROW_USER_ERROR(GS_ERROR_DS_CON_STATUS_INVALID,
 				"can not create index. container's status is invalid.");
+		}
+		if (isExpired(txn)) {
+			indexCursor.setRowId(MAX_ROWID);
+			dataStore_->setLastExpiredTime(txn.getPartitionId(), txn.getStatementStartTime().getUnixTime());
+			return;
 		}
 		IndexInfo realIndexInfo = indexInfo;
 		if (realIndexInfo.columnIds_.size() != 1 || realIndexInfo.anyTypeMatches_ != 0 || realIndexInfo.anyNameMatches_ != 0) {
@@ -311,6 +356,12 @@ void TimeSeries::createIndex(TransactionContext &txn,
 			return;
 		}
 
+		uint32_t limitNum = getDataStore()->getValueLimitConfig().getLimitIndexNum();
+		if (!isExist && indexSchema_->getIndexNum() == limitNum) {
+			GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED, "Num of index"
+				<< " exceeds maximum num : " << limitNum);
+		}
+
 		setDirty();
 		TransactionId tId = txn.getId();
 		StackAllocAutoPtr<BtreeMap> mvccMap(
@@ -347,7 +398,15 @@ void TimeSeries::createIndex(TransactionContext &txn,
 			util::XArray<SubTimeSeriesInfo> subTimeSeriesList(
 				txn.getDefaultAllocator());
 			util::XArray<SubTimeSeriesInfo>::iterator itr;
-			getSubTimeSeriesList(txn, subTimeSeriesList, true);
+			getSubTimeSeriesList(txn, subTimeSeriesList, true, true);
+
+			{
+				uint64_t expiredNum = subTimeSeriesListHead_->getNum() - subTimeSeriesList.size();
+				for (uint64_t i = 0; i < expiredNum; i++) {
+					indexSchema_->createDummyIndexData(txn, indexCursor.getColumnId(), indexCursor.getMapType(), i);
+				}
+			}
+
 			for (itr = subTimeSeriesList.begin(); itr != subTimeSeriesList.end();
 				 itr++) {
 				util::StackAllocator::Scope scope(txn.getDefaultAllocator());
@@ -403,6 +462,11 @@ void TimeSeries::continueCreateIndex(TransactionContext& txn,
 	IndexCursor& indexCursor) {
 	try {
 		setDirty();
+		if (isExpired(txn)) {
+			indexCursor.setRowId(MAX_ROWID);
+			dataStore_->setLastExpiredTime(txn.getPartitionId(), txn.getStatementStartTime().getUnixTime());
+			return;
+		}
 
 		MvccRowImage beforeImage = indexCursor.getMvccImage();
 		IndexData indexData;
@@ -424,7 +488,7 @@ void TimeSeries::continueCreateIndex(TransactionContext& txn,
 			util::XArray<SubTimeSeriesInfo> subTimeSeriesList(
 				txn.getDefaultAllocator());
 			util::XArray<SubTimeSeriesInfo>::iterator itr;
-			getSubTimeSeriesList(txn, sc, subTimeSeriesList, true);
+			getSubTimeSeriesList(txn, sc, subTimeSeriesList, true, true);
 			if (subTimeSeriesList.empty()) {
 				indexCursor.setRowId(MAX_ROWID);
 			}
@@ -457,6 +521,11 @@ void TimeSeries::continueChangeSchema(TransactionContext &txn,
 
 	try {
 		setDirty();
+		if (isExpired(txn)) {
+			containerCursor.setRowId(MAX_ROWID);
+			dataStore_->setLastExpiredTime(txn.getPartitionId(), txn.getStatementStartTime().getUnixTime());
+			return;
+		}
 
 		MvccRowImage beforeImage = containerCursor.getMvccImage();
 		ContainerAutoPtr containerAutoPtr(txn, dataStore_, 
@@ -523,6 +592,11 @@ void TimeSeries::dropIndex(TransactionContext &txn, IndexInfo &indexInfo,
 			GS_THROW_USER_ERROR(GS_ERROR_DS_CON_STATUS_INVALID,
 				"can not drop index. container's status is invalid.");
 		}
+		if (isExpired(txn)) {
+			dataStore_->setLastExpiredTime(txn.getPartitionId(), txn.getStatementStartTime().getUnixTime());
+			return;
+		}
+
 		util::Vector<IndexInfo> matchList(txn.getDefaultAllocator());
 		util::Vector<IndexInfo> mismatchList(txn.getDefaultAllocator());
 		bool withUncommitted = false;
@@ -543,12 +617,19 @@ void TimeSeries::dropIndex(TransactionContext &txn, IndexInfo &indexInfo,
 			util::XArray<SubTimeSeriesInfo> subTimeSeriesList(
 				txn.getDefaultAllocator());
 			util::XArray<SubTimeSeriesInfo>::reverse_iterator rItr;
-			getSubTimeSeriesList(txn, subTimeSeriesList, true);
+			getSubTimeSeriesList(txn, subTimeSeriesList, true, true);
 			for (rItr = subTimeSeriesList.rbegin();
 				 rItr != subTimeSeriesList.rend(); rItr++) {
 				util::StackAllocator::Scope scope(txn.getDefaultAllocator());
 				SubTimeSeries subContainer(txn, *rItr, this);
 				subContainer.dropIndex(txn, matchList[i], isIndexNameCaseSensitive);
+			}
+			{
+				uint64_t expiredNum = subTimeSeriesListHead_->getNum() - subTimeSeriesList.size();
+				for (uint64_t i = 0; i < expiredNum; i++) {
+					indexSchema_->dropIndexData(
+						txn, inputColumnId, inputMapType, this, expiredNum - i - 1, false);
+				}
 			}
 			indexSchema_->dropIndexInfo(
 				txn, inputColumnId, inputMapType);
@@ -564,8 +645,8 @@ void TimeSeries::dropIndex(TransactionContext &txn, IndexInfo &indexInfo,
    also the Row key specified as needed
 */
 void TimeSeries::putRow(TransactionContext &txn, uint32_t rowSize,
-	const uint8_t *rowData, RowId &rowId, DataStore::PutStatus &status,
-	PutRowOption putRowOption)
+	const uint8_t *rowData, RowId &rowId, bool rowIdSpecified,
+	DataStore::PutStatus &status, PutRowOption putRowOption)
 {
 	try {
 		util::StackAllocator::Scope scope(txn.getDefaultAllocator());
@@ -581,7 +662,8 @@ void TimeSeries::putRow(TransactionContext &txn, uint32_t rowSize,
 			getRealColumnNum(txn), const_cast<uint8_t *>(rowData), rowSize, 1,
 			getRealRowFixedDataSize(txn), false);
 		inputMessageRowStore.next();
-		putRow(txn, &inputMessageRowStore, rowId, status, putRowOption);
+		putRow(txn, &inputMessageRowStore, rowId, rowIdSpecified, status,
+			putRowOption);
 	}
 	catch (std::exception &e) {
 		handleUpdateError(txn, e, GS_ERROR_DS_COL_PUT_ROW_FAILED);
@@ -617,8 +699,9 @@ void TimeSeries::appendRow(TransactionContext &txn, uint32_t rowSize,
 		inputMessageRowStore.next();
 		inputMessageRowStore.setField(
 			ColumnInfo::ROW_KEY_COLUMN_ID, &rowKey, sizeof(Timestamp));
-		putRow(
-			txn, &inputMessageRowStore, rowKey, status, PUT_INSERT_OR_UPDATE);
+		bool dummy = false;
+		putRow(txn, &inputMessageRowStore, rowKey, dummy, status, 
+			PUT_INSERT_OR_UPDATE);
 	}
 	catch (std::exception &e) {
 		handleUpdateError(txn, e, GS_ERROR_DS_TIM_APPEND_ROW_FAILED);
@@ -647,6 +730,10 @@ void TimeSeries::deleteRow(TransactionContext &txn, uint32_t rowKeySize,
 															<< ")");
 		}
 
+		if (getCompressionSchema().getCompressionType() != NO_COMPRESSION) {
+			GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_UPDATE_INVALID,
+				"Delete not support on Compression Mode");
+		}
 
 		if (isAlterContainer()) {
 			DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_TIM_LOCK_CONFLICT,
@@ -687,6 +774,10 @@ void TimeSeries::deleteRow(
 															<< ")");
 		}
 
+		if (getCompressionSchema().getCompressionType() != NO_COMPRESSION) {
+			GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_UPDATE_INVALID,
+				"Delete not support on Compression Mode");
+		}
 
 		if (isAlterContainer()) {
 			DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_TIM_LOCK_CONFLICT,
@@ -728,6 +819,10 @@ void TimeSeries::updateRow(TransactionContext &txn, uint32_t rowSize,
 															<< ")");
 		}
 
+		if (getCompressionSchema().getCompressionType() != NO_COMPRESSION) {
+			GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_UPDATE_INVALID,
+				"Update not support on Compression Mode");
+		}
 
 		if (isAlterContainer()) {
 			DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_TIM_LOCK_CONFLICT,
@@ -762,6 +857,10 @@ void TimeSeries::abort(TransactionContext &txn) {
 		if (isInvalid()) {  
 			GS_THROW_USER_ERROR(GS_ERROR_DS_CON_STATUS_INVALID,
 				"can not abort. container's status is invalid.");
+		}
+		if (isExpired(txn)) {
+			dataStore_->setLastExpiredTime(txn.getPartitionId(), txn.getStatementStartTime().getUnixTime());
+			return;
 		}
 
 		util::XArray<SubTimeSeriesInfo> subTimeSeriesList(
@@ -875,6 +974,11 @@ void TimeSeries::commit(TransactionContext &txn) {
 				"can not commit. container's status is invalid.");
 		}
 
+		if (isExpired(txn)) {
+			dataStore_->setLastExpiredTime(txn.getPartitionId(), txn.getStatementStartTime().getUnixTime());
+			return;
+		}
+
 		util::XArray<SubTimeSeriesInfo> subTimeSeriesList(
 			txn.getDefaultAllocator());
 		util::XArray<SubTimeSeriesInfo>::iterator itr;
@@ -960,6 +1064,9 @@ void TimeSeries::commit(TransactionContext &txn) {
 	@brief Check if Container has data of uncommited transaction
 */
 bool TimeSeries::hasUncommitedTransaction(TransactionContext &txn) {
+	if (isExpired(txn)) {
+		return false;
+	}
 	StackAllocAutoPtr<BtreeMap> mvccMap(
 		txn.getDefaultAllocator(), getMvccMap(txn));
 	if (!mvccMap.get()->isEmpty()) {
@@ -1071,16 +1178,19 @@ void TimeSeries::searchRowIdIndex(TransactionContext &txn, uint64_t start,
 			txn, sc, keyValueList, ORDER_ASCENDING);
 
 		bool isCheckOnly = false;
+		const bool ignoreTxnCheck = false;
 		subContainer.searchMvccMap<TimeSeries, BtreeMap::SearchContext>(
-			txn, sc, mvccList, isCheckOnly);
+			txn, sc, mvccList, isCheckOnly, ignoreTxnCheck);
 	}
+
+	RowArray rowArray(txn, this);
 	util::Map<RowId, OId> mvccRowIdMap(txn.getDefaultAllocator());
 	for (util::XArray<OId>::iterator mvccItr = mvccList.begin();
 		 mvccItr != mvccList.end(); mvccItr++) {
-		RowArray mvccRowArray(txn, *mvccItr, this, OBJECT_READ_ONLY);
-		RowArray::Row mvccRow(mvccRowArray.getRow(), &mvccRowArray);
+		rowArray.load(txn, *mvccItr, this, OBJECT_READ_ONLY);
+		RowArray::Row mvccRow(rowArray.getRow(), &rowArray);
 		mvccRowIdMap.insert(
-			std::make_pair(mvccRow.getRowId(), mvccRowArray.getOId()));
+			std::make_pair(mvccRow.getRowId(), rowArray.getOId()));
 	}
 
 	util::XArray<std::pair<RowId, int64_t> >::iterator currentItr =
@@ -1096,7 +1206,7 @@ void TimeSeries::searchRowIdIndex(TransactionContext &txn, uint64_t start,
 							 : MAX_ROWID;  
 		RowId currentRowId = currentItr->first;
 		if (currentRowId >= startRowId && currentRowId < endRowId) {
-			RowArray rowArray(txn, keyValueItr->value_, this, OBJECT_READ_ONLY);
+			rowArray.load(txn, keyValueItr->value_, this, OBJECT_READ_ONLY);
 			for (rowArray.begin();
 				 !rowArray.end() && currentRowId < endRowId;) {
 				RowArray::Row row(rowArray.getRow(), &rowArray);
@@ -1191,7 +1301,8 @@ RowId TimeSeries::getMaxRowId(TransactionContext &txn) {
 		return UNDEF_ROWID;
 	}
 	else {
-		RowArray rowArray(txn, oId, this, OBJECT_READ_ONLY);
+		RowArray rowArray(txn, this);
+		rowArray.load(txn, oId, this, OBJECT_READ_ONLY);
 		RowArray::Row row(rowArray.getRow(), &rowArray);
 		return row.getRowId();
 	}
@@ -1253,6 +1364,46 @@ void TimeSeries::searchColumnIdIndex(TransactionContext &txn,
 	}
 }
 
+void TimeSeries::searchColumnIdIndex(TransactionContext &txn,
+	BtreeMap::SearchContext &sc, BtreeMap::SearchContext &orgSc,
+	util::XArray<OId> &normalRowList, util::XArray<OId> &mvccRowList)
+{
+	BtreeMap::SearchContext
+		targetContainerSc;  
+	util::XArray<SubTimeSeriesInfo> subTimeSeriesImageList(
+		txn.getDefaultAllocator());
+	getSubTimeSeriesList(txn, sc, subTimeSeriesImageList, false);
+	util::XArray<SubTimeSeriesInfo>::iterator itr;
+	util::XArray<OId> mergeList(txn.getDefaultAllocator());
+	for (itr = subTimeSeriesImageList.begin();
+		 itr != subTimeSeriesImageList.end(); itr++) {
+		util::XArray<OId> subNormalList(txn.getDefaultAllocator());
+		util::XArray<OId> subMvccList(txn.getDefaultAllocator());
+		SubTimeSeries subContainer(txn, *itr, this);
+
+		ResultSize limitBackup = sc.limit_;
+		sc.limit_ = MAX_RESULT_SIZE;
+		reinterpret_cast<BaseContainer *>(&subContainer)
+			->searchColumnIdIndex(
+				txn, sc, subNormalList, subMvccList);
+		sc.limit_ = limitBackup;
+		normalRowList.insert(normalRowList.end(), subNormalList.begin(), subNormalList.end());
+		mvccRowList.insert(mvccRowList.end(), subMvccList.begin(), subMvccList.end());
+		if (normalRowList.size() + mvccRowList.size() >= sc.limit_) {
+			break;
+		}
+		mergeList.clear();
+	}
+	if (normalRowList.size() + mvccRowList.size() > sc.limit_) {
+		if (mvccRowList.size() > sc.limit_) {
+			mvccRowList.resize(sc.limit_);
+			normalRowList.clear();
+		} else {
+			normalRowList.resize(sc.limit_ - mvccRowList.size());
+		}
+	}
+}
+
 /*!
 	@brief Performs an aggregation operation on a Row set or its specific
    Columns, based on the specified start and end times
@@ -1260,6 +1411,7 @@ void TimeSeries::searchColumnIdIndex(TransactionContext &txn,
 void TimeSeries::aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 	uint32_t columnId, AggregationType type, ResultSize &resultNum,
 	Value &value) {
+	PartitionId pId = txn.getPartitionId();
 	if (type == AGG_UNSUPPORTED_TYPE) {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_AGGREGATED_COLUMN_TYPE_INVALID, "");
 	}
@@ -1290,10 +1442,10 @@ void TimeSeries::aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 		searchRowArrayList(txn, sc, normalOIdList, mvccOIdList);
 	}
 
-	ContainerValue containerValue(txn, *getObjectManager());
+	ContainerValue containerValue(pId, *getObjectManager());
 	switch (type) {
 	case AGG_TIME_AVG: {
-		ContainerValue containerValueTs(txn, *getObjectManager());
+		ContainerValue containerValueTs(pId, *getObjectManager());
 		Timestamp beforeTs = UNDEF_TIMESTAMP;
 		Timestamp beforeIntTs = UNDEF_TIMESTAMP;
 		double beforeVal = 0;
@@ -1349,7 +1501,7 @@ void TimeSeries::aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 					(isExclusive() || txn.getId() == rowArrayPtr->getTxnId() ||
 						rowArrayPtr->isFirstUpdate() ||
 						!txn.getManager().isActiveTransaction(
-							txn.getPartitionId(), rowArrayPtr->getTxnId()))) ||
+							pId, rowArrayPtr->getTxnId()))) ||
 				(!isNoramlExecute && txn.getId() != rowArrayPtr->getTxnId())) {
 				for (rowArrayPtr->begin(); !rowArrayPtr->end();
 					 rowArrayPtr->next()) {
@@ -1458,7 +1610,7 @@ void TimeSeries::aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 			if (!isExclusive() && txn.getId() != rowArray.getTxnId() &&
 				!rowArray.isFirstUpdate() &&
 				txn.getManager().isActiveTransaction(
-					txn.getPartitionId(), rowArray.getTxnId())) {
+					pId, rowArray.getTxnId())) {
 				continue;
 			}
 			for (rowArray.begin(); !rowArray.end(); rowArray.next()) {
@@ -1538,7 +1690,7 @@ void TimeSeries::aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 			if (!isExclusive() && txn.getId() != rowArray.getTxnId() &&
 				!rowArray.isFirstUpdate() &&
 				txn.getManager().isActiveTransaction(
-					txn.getPartitionId(), rowArray.getTxnId())) {
+					pId, rowArray.getTxnId())) {
 				continue;
 			}
 			for (rowArray.begin(); !rowArray.end(); rowArray.next()) {
@@ -1627,6 +1779,7 @@ void TimeSeries::aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 	const Sampling &sampling, ResultSize &resultNum,
 	MessageRowStore *messageRowStore) {
+	PartitionId pId = txn.getPartitionId();
 	if (sc.startKey_ == NULL) {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_KEY_RANGE_INVALID, "");
 	}
@@ -1661,27 +1814,9 @@ void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 
 	Timestamp interval = 0;
 	if (sampling.interval_ != 0) {
-		switch (sampling.timeUnit_) {
-		case TIME_UNIT_DAY:
-			interval = static_cast<Timestamp>(sampling.interval_) * 24 * 60 *
-					   60 * 1000LL;
-			break;
-		case TIME_UNIT_HOUR:
-			interval =
-				static_cast<Timestamp>(sampling.interval_) * 60 * 60 * 1000LL;
-			break;
-		case TIME_UNIT_MINUTE:
-			interval = static_cast<Timestamp>(sampling.interval_) * 60 * 1000LL;
-			break;
-		case TIME_UNIT_SECOND:
-			interval = static_cast<Timestamp>(sampling.interval_) * 1000LL;
-			break;
-		case TIME_UNIT_MILLISECOND:
-			interval = static_cast<Timestamp>(sampling.interval_);
-			break;
-		default:
-			GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_SAMPLING_TIME_UNIT_INVALID, "");
-		}
+		interval = 
+			MessageSchema::getTimestampDuration(sampling.interval_,
+			sampling.timeUnit_);
 	}
 
 	const Operator *op1, *op2;
@@ -1753,7 +1888,7 @@ void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 				if (!isExclusive() && txn.getId() != rowArray.getTxnId() &&
 					!rowArray.isFirstUpdate() &&
 					txn.getManager().isActiveTransaction(
-						txn.getPartitionId(), rowArray.getTxnId())) {
+						pId, rowArray.getTxnId())) {
 					continue;
 				}
 				if (rowArray.tail()) {
@@ -1812,7 +1947,7 @@ void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 				txn.getId() != normalRowArrayPtr->getTxnId() &&
 				!normalRowArrayPtr->isFirstUpdate() &&
 				txn.getManager().isActiveTransaction(
-					txn.getPartitionId(), normalRowArrayPtr->getTxnId())) {
+					pId, normalRowArrayPtr->getTxnId())) {
 				continue;
 			}
 			if (normalRowArrayPtr->begin()) {
@@ -1860,9 +1995,9 @@ void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 			}
 		}
 	}
-	ContainerValue containerValue(txn, *getObjectManager());
-	ContainerValue prevContainerValue(txn, *getObjectManager());
-	ContainerValue nextContainerValue(txn, *getObjectManager());
+	ContainerValue containerValue(pId, *getObjectManager());
+	ContainerValue prevContainerValue(pId, *getObjectManager());
+	ContainerValue nextContainerValue(pId, *getObjectManager());
 	Value subValue;
 	Value mulValue;
 	Value addValue;
@@ -1900,7 +2035,7 @@ void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 				(isExclusive() || txn.getId() == rowArrayPtr->getTxnId() ||
 					rowArrayPtr->isFirstUpdate() ||
 					!txn.getManager().isActiveTransaction(
-						txn.getPartitionId(), rowArrayPtr->getTxnId()))) ||
+						pId, rowArrayPtr->getTxnId()))) ||
 			(!isNoramlExecute && txn.getId() != rowArrayPtr->getTxnId())) {
 			for (rowArrayPtr->begin(); !rowArrayPtr->end();
 				 rowArrayPtr->next()) {
@@ -2131,6 +2266,7 @@ LABEL_FINISH:
 void TimeSeries::sampleWithoutInterp(TransactionContext &txn,
 	BtreeMap::SearchContext &sc, const Sampling &sampling,
 	ResultSize &resultNum, MessageRowStore *messageRowStore) {
+	PartitionId pId = txn.getPartitionId();
 	if (sc.startKey_ == NULL) {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_KEY_RANGE_INVALID, "");
 	}
@@ -2158,27 +2294,9 @@ void TimeSeries::sampleWithoutInterp(TransactionContext &txn,
 
 	Timestamp interval = 0;
 	if (sampling.interval_ != 0) {
-		switch (sampling.timeUnit_) {
-		case TIME_UNIT_DAY:
-			interval = static_cast<Timestamp>(sampling.interval_) * 24 * 60 *
-					   60 * 1000LL;
-			break;
-		case TIME_UNIT_HOUR:
-			interval =
-				static_cast<Timestamp>(sampling.interval_) * 60 * 60 * 1000LL;
-			break;
-		case TIME_UNIT_MINUTE:
-			interval = static_cast<Timestamp>(sampling.interval_) * 60 * 1000LL;
-			break;
-		case TIME_UNIT_SECOND:
-			interval = static_cast<Timestamp>(sampling.interval_) * 1000LL;
-			break;
-		case TIME_UNIT_MILLISECOND:
-			interval = static_cast<Timestamp>(sampling.interval_);
-			break;
-		default:
-			GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_SAMPLING_TIME_UNIT_INVALID, "");
-		}
+		interval = 
+			MessageSchema::getTimestampDuration(sampling.interval_,
+			sampling.timeUnit_);
 	}
 
 	const Operator *op1, *op2;
@@ -2243,7 +2361,7 @@ void TimeSeries::sampleWithoutInterp(TransactionContext &txn,
 				txn.getId() != normalRowArrayPtr->getTxnId() &&
 				!normalRowArrayPtr->isFirstUpdate() &&
 				txn.getManager().isActiveTransaction(
-					txn.getPartitionId(), normalRowArrayPtr->getTxnId())) {
+					pId, normalRowArrayPtr->getTxnId())) {
 				continue;
 			}
 			if (normalRowArrayPtr->begin()) {
@@ -2267,7 +2385,7 @@ void TimeSeries::sampleWithoutInterp(TransactionContext &txn,
 		}
 	}
 
-	ContainerValue containerValue(txn, *getObjectManager());
+	ContainerValue containerValue(pId, *getObjectManager());
 	Value value;
 	bool isWithRowId = false;  
 	while (normalItr != normalOIdList.end() || mvccItr != mvccOIdList.end()) {
@@ -2287,7 +2405,7 @@ void TimeSeries::sampleWithoutInterp(TransactionContext &txn,
 				(isExclusive() || txn.getId() == rowArrayPtr->getTxnId() ||
 					rowArrayPtr->isFirstUpdate() ||
 					!txn.getManager().isActiveTransaction(
-						txn.getPartitionId(), rowArrayPtr->getTxnId()))) ||
+						pId, rowArrayPtr->getTxnId()))) ||
 			(!isNoramlExecute && txn.getId() != rowArrayPtr->getTxnId())) {
 			for (rowArrayPtr->begin(); !rowArrayPtr->end();
 				 rowArrayPtr->next()) {
@@ -2435,26 +2553,49 @@ LABEL_FINISH:
 */
 void TimeSeries::searchTimeOperator(
 	TransactionContext &txn, Timestamp ts, TimeOperator timeOp, OId &oId) {
+	BtreeMap::SearchContext sc(ColumnInfo::ROW_KEY_COLUMN_ID, NULL, 0, false,
+		false, 0, false, 0, NULL, 1);
+	searchTimeOperator(txn, sc, ts, timeOp, oId);
+}
+
+/*!
+	@brief Returns one Row related with the specified time within range condition
+*/
+void TimeSeries::searchTimeOperator(
+	TransactionContext &txn, BtreeMap::SearchContext &sc, Timestamp ts, TimeOperator timeOp, OId &oId) {
 	util::XArray<OId> oIdList(txn.getDefaultAllocator());
+	assert(sc.columnId_ == ColumnInfo::ROW_KEY_COLUMN_ID);
+	assert(sc.conditionNum_ == 0);
+	sc.conditionNum_ = 0;
+	sc.conditionList_ = NULL;
+	sc.limit_ = 1;
 	switch (timeOp) {
 	case TIME_PREV_ONLY: {
-		BtreeMap::SearchContext sc(ColumnInfo::ROW_KEY_COLUMN_ID, NULL, 0, true,
-			&ts, 0, false, 0, NULL, 1);
+		if (sc.endKey_ == NULL || *(static_cast<const Timestamp *>(sc.endKey_)) >= ts) {
+			sc.endKey_ = &ts;
+			sc.isEndKeyIncluded_ = false;
+		}
 		searchRowIdIndex(txn, sc, oIdList, ORDER_DESCENDING);
 	} break;
 	case TIME_PREV: {
-		BtreeMap::SearchContext sc(ColumnInfo::ROW_KEY_COLUMN_ID, NULL, 0, true,
-			&ts, 0, true, 0, NULL, 1);
+		if (sc.endKey_ == NULL || *(static_cast<const Timestamp *>(sc.endKey_)) > ts) {
+			sc.endKey_ = &ts;
+			sc.isEndKeyIncluded_ = true;
+		}
 		searchRowIdIndex(txn, sc, oIdList, ORDER_DESCENDING);
 	} break;
 	case TIME_NEXT: {
-		BtreeMap::SearchContext sc(ColumnInfo::ROW_KEY_COLUMN_ID, &ts, 0, true,
-			NULL, 0, true, 0, NULL, 1);
+		if (sc.startKey_ == NULL || *(static_cast<const Timestamp *>(sc.startKey_)) < ts) {
+			sc.startKey_ = &ts;
+			sc.isStartKeyIncluded_ = true;
+		}
 		searchRowIdIndex(txn, sc, oIdList, ORDER_ASCENDING);
 	} break;
 	case TIME_NEXT_ONLY: {
-		BtreeMap::SearchContext sc(ColumnInfo::ROW_KEY_COLUMN_ID, &ts, 0, false,
-			NULL, 0, true, 0, NULL, 1);
+		if (sc.startKey_ == NULL || *(static_cast<const Timestamp *>(sc.startKey_)) <= ts) {
+			sc.startKey_ = &ts;
+			sc.isStartKeyIncluded_ = false;
+		}
 		searchRowIdIndex(txn, sc, oIdList, ORDER_ASCENDING);
 	} break;
 	}
@@ -2477,12 +2618,18 @@ void TimeSeries::lockRowList(
 				"can not lock. container's status is invalid.");
 		}
 
+		if (isExpired(txn)) {
+			dataStore_->setLastExpiredTime(txn.getPartitionId(), txn.getStatementStartTime().getUnixTime());
+			return;
+		}
+
 		if (isAlterContainer()) {
 			DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_TIM_LOCK_CONFLICT,
 				"(pId=" << txn.getPartitionId() << ", containerId=" << getContainerId()
 						<< ", txnId=" << txn.getId() << ")");
 		}
 
+		RowArray rowArray(txn, this);
 		for (size_t i = 0; i < rowIdList.size(); i++) {
 			util::StackAllocator::Scope scope(txn.getDefaultAllocator());
 			BtreeMap::SearchContext sc(UNDEF_COLUMNID, &rowIdList[i], 0, true,
@@ -2490,7 +2637,9 @@ void TimeSeries::lockRowList(
 			util::XArray<OId> oIdList(txn.getDefaultAllocator());
 			searchRowIdIndex(txn, sc, oIdList, ORDER_UNDEFINED);
 			if (!oIdList.empty()) {
-				RowArray rowArray(txn, oIdList[0], this, OBJECT_FOR_UPDATE);
+//				bool isOldSchema = 
+				rowArray.load(txn, oIdList[0], this, OBJECT_FOR_UPDATE);
+//				assert(isOldSchema || !isOldSchema);
 				RowArray::Row row(rowArray.getRow(), &rowArray);
 				row.lock(txn);
 			}
@@ -2510,17 +2659,15 @@ void TimeSeries::lockRowList(
 */
 Timestamp TimeSeries::getCurrentExpiredTime(TransactionContext &txn) {
 	const ExpirationInfo &expirationInfo = getExpirationInfo();
-	Timestamp currentTime = txn.getStatementStartTime().getUnixTime();
 	if (expirationInfo.duration_ == INT64_MAX) {
 		return MINIMUM_EXPIRED_TIMESTAMP;  
 	}
 	else {
-		Timestamp lastExpiredTime = DataStore::convertChunkKey2Timestamp(
-			getDataStore()->getLastChunkKey(txn));
+		Timestamp lastExpiredTime = getDataStore()->getLatestExpirationCheckTime(txn.getPartitionId());
 
-		Timestamp calcExpiredTime = currentTime;
-		if (calcExpiredTime >= lastExpiredTime) {
-			return calcExpiredTime - expirationInfo.duration_;
+		Timestamp currentTime = txn.getStatementStartTime().getUnixTime();
+		if (currentTime >= lastExpiredTime) {
+			return currentTime - expirationInfo.duration_;
 		}
 		else {
 			return lastExpiredTime - expirationInfo.duration_;
@@ -2531,6 +2678,7 @@ Timestamp TimeSeries::getCurrentExpiredTime(TransactionContext &txn) {
 
 void TimeSeries::putRow(TransactionContext &txn,
 	InputMessageRowStore *inputMessageRowStore, RowId &rowId,
+	bool rowIdSpecified,
 	DataStore::PutStatus &status, PutRowOption putRowOption) {
 	util::StackAllocator::Scope scope(txn.getDefaultAllocator());
 	if (isAlterContainer()) {
@@ -2542,6 +2690,31 @@ void TimeSeries::putRow(TransactionContext &txn,
 	Timestamp rowKey = inputMessageRowStore->getField<COLUMN_TYPE_TIMESTAMP>(
 		ColumnInfo::ROW_KEY_COLUMN_ID);
 
+	const CompressionSchema &compressionSchema = getCompressionSchema();
+
+	if (compressionSchema.getCompressionType() != NO_COMPRESSION &&
+		putRowOption == PUT_UPDATE_ONLY) {
+		if (isCompressionErrorMode()) {  
+			GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_UPDATE_INVALID,
+				"insert(old time)/update not support on Compression Mode : "
+				"rowKey("
+					<< rowKey << ")");
+		}
+		else {
+			rowId = UNDEF_ROWID;
+			status = DataStore::NOT_EXECUTED;
+			const FullContainerKey containerKey = getContainerKey(txn);
+			util::String containerName(txn.getDefaultAllocator());
+			containerKey.toString(txn.getDefaultAllocator(), containerName);
+			GS_TRACE_ERROR(TIME_SERIES,
+				GS_TRACE_DS_TIM_COMPRESSION_INVALID_WARNING,
+				"insert(old time)/update not support on Compression Mode : "
+				"Container("
+					<< containerName << ") rowKey("
+					<< rowKey << ")");
+			return;
+		}
+	}
 
 	SubTimeSeries *subContainer = putSubContainer(txn, rowKey);
 	if (subContainer == NULL) {
@@ -2549,8 +2722,8 @@ void TimeSeries::putRow(TransactionContext &txn,
 		status = DataStore::NOT_EXECUTED;
 		return;
 	}
-	subContainer->putRow(
-		txn, inputMessageRowStore, rowId, status, putRowOption);
+	subContainer->putRow(txn, inputMessageRowStore, rowId, rowIdSpecified,
+		status, putRowOption);
 	ALLOC_DELETE(txn.getDefaultAllocator(), subContainer);
 }
 
@@ -2559,10 +2732,11 @@ SubTimeSeries *TimeSeries::putSubContainer(
 	TransactionContext &txn, Timestamp rowKey) {
 	SubTimeSeries *container = NULL;
 	Timestamp expiredTime = getCurrentExpiredTime(txn);
-	if (rowKey <= expiredTime) {
+	if (rowKey <= expiredTime || isExpired(txn)) {
 		return NULL;
 	}
-	expireSubTimeSeries(txn, expiredTime);
+	bool isIndexUpdate = false;
+	expireSubTimeSeries(txn, expiredTime, isIndexUpdate);
 
 	{
 		if (subTimeSeriesListHead_->getNum() == 0) {
@@ -2682,13 +2856,26 @@ bool TimeSeries::findStartSubTimeSeriesPos(TransactionContext &txn,
 }
 
 int32_t TimeSeries::expireSubTimeSeries(
-	TransactionContext &txn, Timestamp expiredTime) {
+	TransactionContext &txn, Timestamp erasableTime, bool indexUpdate) {
 	int32_t expireNum = 0;
+	if (!dataStore_->getConfig().isAutoExpire()) {
+		Timestamp configErasableTime = dataStore_->getConfig().getErasableExpiredTime();
+		if (erasableTime > configErasableTime) {
+			erasableTime = configErasableTime;
+		}
+	}
 	for (uint64_t i = 0; i < subTimeSeriesListHead_->getNum(); i++) {
 		const SubTimeSeriesImage &subTimeSeriesImage =
 			*(subTimeSeriesListHead_->get(txn, i));
-		if (subTimeSeriesImage.startTime_ + getDivideDuration() <=
-			expiredTime) {
+		SubTimeSeriesInfo subInfo(subTimeSeriesImage, i);
+		SubTimeSeries subContainer(txn, subInfo, this);
+		ChunkKey subChunkKey = subContainer.getRowAllcateStrategy().chunkKey_;
+		Timestamp subTimeErasableTime = DataStore::convertChunkKey2Timestamp(subChunkKey);
+
+		if (subTimeErasableTime <= erasableTime) {
+			if (indexUpdate) {
+				dataStore_->setLastExpiredTime(txn.getPartitionId(), subTimeErasableTime);
+			}
 			expireNum++;
 		}
 		else {
@@ -2744,7 +2931,9 @@ void TimeSeries::lockIdList(TransactionContext &txn, util::XArray<OId> &oIdList,
 	try {
 		RowArray rowArray(txn, this);
 		for (size_t i = 0; i < oIdList.size(); i++) {
+//			bool isOldSchema = 
 			rowArray.load(txn, oIdList[i], this, OBJECT_FOR_UPDATE);
+//			assert(isOldSchema || !isOldSchema);
 			RowArray::Row row(rowArray.getRow(), &rowArray);
 			row.lock(txn);
 			idList.push_back(row.getRowId());
@@ -2793,30 +2982,167 @@ void TimeSeries::getContainerOptionInfo(
 	containerSchema.push_back(
 		reinterpret_cast<const uint8_t *>(&tmpDivisionCount), sizeof(int32_t));
 
-	DurationInfo defaultDurationInfo;
-	int32_t tmpDuration =
-		static_cast<int32_t>(defaultDurationInfo.timeDuration_);
-	containerSchema.push_back(
-		reinterpret_cast<uint8_t *>(&tmpDuration), sizeof(int32_t));
-	int8_t tmpTimeUnit = static_cast<int8_t>(defaultDurationInfo.timeUnit_);
-	containerSchema.push_back(
-		reinterpret_cast<uint8_t *>(&tmpTimeUnit), sizeof(int8_t));
-	int8_t tmpCompressionType = 0;
-	containerSchema.push_back(
-		reinterpret_cast<uint8_t *>(&tmpCompressionType), sizeof(int8_t));
-	uint32_t compressionInfoNum = 0;
-	containerSchema.push_back(
-		reinterpret_cast<uint8_t *>(&compressionInfoNum), sizeof(uint32_t));
+	const CompressionSchema &compressionSchema = getCompressionSchema();
+	if (compressionSchema.getCompressionType() != NO_COMPRESSION) {
+		int32_t compressionDuration = static_cast<int32_t>(
+			compressionSchema.getDurationInfo().timeDuration_);
+		containerSchema.push_back(
+			reinterpret_cast<uint8_t *>(&compressionDuration), sizeof(int32_t));
+		int8_t tmpTimeUnit =
+			static_cast<int8_t>(compressionSchema.getDurationInfo().timeUnit_);
+		containerSchema.push_back(
+			reinterpret_cast<uint8_t *>(&tmpTimeUnit), sizeof(int8_t));
+
+		int8_t tmpCompressionType =
+			static_cast<int8_t>(compressionSchema.getCompressionType());
+		containerSchema.push_back(
+			reinterpret_cast<uint8_t *>(&tmpCompressionType), sizeof(int8_t));
+
+		util::XArray<ColumnId> hiCompressionColumnList(
+			txn.getDefaultAllocator());
+		compressionSchema.getHiCompressionColumnList(hiCompressionColumnList);
+
+		uint32_t compressionInfoNum =
+			static_cast<uint32_t>(hiCompressionColumnList.size());
+		containerSchema.push_back(
+			reinterpret_cast<uint8_t *>(&compressionInfoNum), sizeof(uint32_t));
+
+		for (uint32_t i = 0; i < hiCompressionColumnList.size(); i++) {
+			int32_t columnId = hiCompressionColumnList[i];
+			double threshhold, rate, span;
+			bool threshholdRelative;
+			uint16_t compressionPos;
+			compressionSchema.getHiCompressionProperty(columnId, threshhold,
+				rate, span, threshholdRelative, compressionPos);
+
+			containerSchema.push_back(
+				reinterpret_cast<uint8_t *>(&columnId), sizeof(int32_t));
+			containerSchema.push_back(
+				reinterpret_cast<uint8_t *>(&threshholdRelative), sizeof(bool));
+			if (threshholdRelative) {
+				containerSchema.push_back(
+					reinterpret_cast<uint8_t *>(&rate), sizeof(double));
+				containerSchema.push_back(
+					reinterpret_cast<uint8_t *>(&span), sizeof(double));
+			}
+			else {
+				containerSchema.push_back(
+					reinterpret_cast<uint8_t *>(&threshhold), sizeof(double));
+			}
+		}
+	}
+	else {
+		DurationInfo defaultDurationInfo;
+		int32_t compressionDuration =
+			static_cast<int32_t>(defaultDurationInfo.timeDuration_);
+		containerSchema.push_back(
+			reinterpret_cast<uint8_t *>(&compressionDuration), sizeof(int32_t));
+		int8_t tmpTimeUnit = static_cast<int8_t>(defaultDurationInfo.timeUnit_);
+		containerSchema.push_back(
+			reinterpret_cast<uint8_t *>(&tmpTimeUnit), sizeof(int8_t));
+
+		int8_t tmpCompressionType =
+			static_cast<int8_t>(compressionSchema.getCompressionType());
+		containerSchema.push_back(
+			reinterpret_cast<uint8_t *>(&tmpCompressionType), sizeof(int8_t));
+
+		uint32_t compressionInfoNum = 0;
+		containerSchema.push_back(
+			reinterpret_cast<uint8_t *>(&compressionInfoNum), sizeof(uint32_t));
+	}
+}
+
+util::String TimeSeries::getBibContainerOptionInfo(TransactionContext &txn) {
+	util::StackAllocator &alloc = txn.getDefaultAllocator();
+	util::NormalOStringStream strstrm;
+
+	strstrm << "," << std::endl;
+	strstrm << "\"timeSeriesProperties\" : {" << std::endl;
+	{
+		const ExpirationInfo &expirationInfo = getExpirationInfo();
+		strstrm << "\"rowExpirationElapsedTime\": " << expirationInfo.elapsedTime_ << "," << std::endl; 
+		strstrm << "\"rowExpirationTimeUnit\": \"" << BibInfoUtil::getTimeUnitStr(expirationInfo.timeUnit_) << "\"," << std::endl; 
+		int32_t tmpDivisionCount = (expirationInfo.elapsedTime_ > 0 ?
+			expirationInfo.dividedNum_ : EXPIRE_DIVIDE_UNDEFINED_NUM);
+		strstrm << "\"expirationDivisionCount\": " << tmpDivisionCount << std::endl; 
+		const CompressionSchema &compressionSchema = getCompressionSchema();
+		strstrm << "," << std::endl;
+		strstrm << "\"compressionMethod\": \"" << BibInfoUtil::getCompressionTypeStr(compressionSchema.getCompressionType()) << "\"," << std::endl; 
+		strstrm << "\"compressionWindowSize\": " << compressionSchema.getDurationInfo().timeDuration_ << "," << std::endl; 
+		strstrm << "\"compressionWindowSizeUnit\": \"" << BibInfoUtil::getTimeUnitStr(compressionSchema.getDurationInfo().timeUnit_) << "\"" << std::endl; 
+	}
+	strstrm << "}," << std::endl;
+	strstrm << "\"compressionInfoSet\" : [" << std::endl;
+	const CompressionSchema &compressionSchema = getCompressionSchema();
+	if (compressionSchema.getCompressionType() == HI_COMPRESSION) {
+		util::XArray<ColumnId> hiCompressionColumnList(alloc);
+		compressionSchema.getHiCompressionColumnList(hiCompressionColumnList);
+		for (uint32_t i = 0; i < hiCompressionColumnList.size(); i++) {
+			if (i != 0) {
+				strstrm << "," << std::endl;
+			}
+			strstrm << "{" << std::endl;
+			int32_t columnId = hiCompressionColumnList[i];
+			strstrm << "\"columnName\": \"" << getColumnInfo(columnId).getColumnName(txn, *getObjectManager()) << "\"," << std::endl; 
+			double threshhold, rate, span;
+			bool threshholdRelative;
+			uint16_t compressionPos;
+			compressionSchema.getHiCompressionProperty(columnId, threshhold,
+				rate, span, threshholdRelative, compressionPos);
+			if (threshholdRelative) {
+				strstrm << "\"compressionType\": \"RELATIVE\"," << std::endl; 
+				strstrm << "\"rate\": " << rate << "," << std::endl; 
+				strstrm << "\"span\": " << span << std::endl; 
+			} else {
+				strstrm << "\"compressionType\": \"ABSOLUTE\"," << std::endl; 
+				strstrm << "\"width\": " << threshhold << std::endl; 
+			}
+			strstrm << "}" << std::endl;
+		}
+	}
+	strstrm << "]" << std::endl;
+	util::String result(alloc);
+	result = strstrm.str().c_str();
+	return result;
 }
 
 void TimeSeries::checkContainerOption(MessageSchema *orgMessageSchema,
 	util::XArray<uint32_t> &copyColumnMap, bool &) {
 	MessageTimeSeriesSchema *messageSchema =
 		reinterpret_cast<MessageTimeSeriesSchema *>(orgMessageSchema);
+	uint32_t columnNum = messageSchema->getColumnCount();
+	const CompressionSchema &compressionSchema = getCompressionSchema();
 
 	if (!messageSchema->isExistTimeSeriesOption()) {
 
 		messageSchema->setExpirationInfo(getExpirationInfo());
+		messageSchema->setCompressionType(
+			compressionSchema.getCompressionType());
+
+		if (compressionSchema.getCompressionType() != NO_COMPRESSION) {
+			DurationInfo durationInfo = compressionSchema.getDurationInfo();
+			messageSchema->setDurationInfo(durationInfo);
+
+			for (uint32_t i = 0; i < columnNum; i++) {
+				if (copyColumnMap[i] != UNDEF_COLUMNID) {
+					ColumnId oldColumnId = copyColumnMap[i];
+
+					if (compressionSchema.isHiCompression(oldColumnId)) {
+						double threshhold, rate, span;
+						bool threshholdRelative;
+						uint16_t compressionPos;
+						compressionSchema.getHiCompressionProperty(oldColumnId,
+							threshhold, rate, span, threshholdRelative,
+							compressionPos);
+						messageSchema->setCompressionInfoNum(
+							messageSchema->getCompressionInfoNum() + 1);
+						messageSchema->getCompressionInfo(i).set(
+							MessageCompressionInfo::DSDC, threshholdRelative,
+							threshhold, rate, span);
+					}
+				}
+			}
+		}
 	}
 	else {
 		const ExpirationInfo &expirationInfo = getExpirationInfo();
@@ -2843,29 +3169,179 @@ void TimeSeries::checkContainerOption(MessageSchema *orgMessageSchema,
 					<< messageSchema->getExpirationInfo().dividedNum_);
 		}
 
+		if (messageSchema->getCompressionType() !=
+			compressionSchema.getCompressionType()) {
+			GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_INVALID_SCHEMA_OPTION,
+				"Compression type is different. old = "
+					<< (int32_t)compressionSchema.getCompressionType()
+					<< ", new = "
+					<< (int32_t)messageSchema->getCompressionType());
+		}
+
+		if (compressionSchema.getCompressionType() != NO_COMPRESSION) {
+			if (compressionSchema.getDurationInfo().timeDuration_ !=
+				messageSchema->getDurationInfo().timeDuration_) {
+				GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_INVALID_SCHEMA_OPTION,
+					"compression window size is different. old = "
+						<< compressionSchema.getDurationInfo().timeDuration_
+						<< ", new = "
+						<< messageSchema->getDurationInfo().timeDuration_);
+			}
+			if (compressionSchema.getDurationInfo().timeUnit_ !=
+				messageSchema->getDurationInfo().timeUnit_) {
+				GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_INVALID_SCHEMA_OPTION,
+					"time unit of compression window size is different. old = "
+						<< (int32_t)compressionSchema.getDurationInfo()
+							   .timeUnit_
+						<< ", new = "
+						<< (int32_t)messageSchema->getDurationInfo().timeUnit_);
+			}
+
+			if (messageSchema->getCompressionInfoNum() != 0) {
+				for (uint32_t i = 0; i < columnNum; i++) {
+					if (copyColumnMap[i] != UNDEF_COLUMNID) {
+						ColumnId oldColumnId = copyColumnMap[i];
+
+						MessageCompressionInfo::CompressionType type =
+							messageSchema->getCompressionInfo(i).getType();
+						bool threshholdRelative =
+							messageSchema->getCompressionInfo(i)
+								.getThreshholdRelative();
+						double threshhold = messageSchema->getCompressionInfo(i)
+												.getThreshhold();
+						double rate =
+							messageSchema->getCompressionInfo(i).getRate();
+						double span =
+							messageSchema->getCompressionInfo(i).getSpan();
+
+						if (type == MessageCompressionInfo::NONE) {
+							if (compressionSchema.isHiCompression(
+									oldColumnId)) {
+								messageSchema->setCompressionInfoNum(
+									messageSchema->getCompressionInfoNum() + 1);
+								double oldThreshhold, oldRate, oldSpan;
+								bool oldThreshholdRelative;
+								uint16_t compressionPos;
+								compressionSchema.getHiCompressionProperty(
+									oldColumnId, oldThreshhold, oldRate,
+									oldSpan, oldThreshholdRelative,
+									compressionPos);
+
+								messageSchema->getCompressionInfo(i).set(
+									MessageCompressionInfo::DSDC,
+									oldThreshholdRelative, oldThreshhold,
+									oldRate, oldSpan);
+							}
+						}
+						else {
+							if (compressionSchema.isHiCompression(
+									oldColumnId)) {
+								double oldThreshhold, oldRate, oldSpan;
+								bool oldThreshholdRelative;
+								uint16_t compressionPos;
+								compressionSchema.getHiCompressionProperty(
+									oldColumnId, oldThreshhold, oldRate,
+									oldSpan, oldThreshholdRelative,
+									compressionPos);
+
+								if (oldThreshholdRelative !=
+									threshholdRelative) {
+									GS_THROW_USER_ERROR(
+										GS_ERROR_DS_TIM_INVALID_SCHEMA_OPTION,
+										"column = "
+											<< messageSchema->getColumnName(i)
+												   .c_str()
+											<< " : "
+											<< "threshholdRelative of "
+											   "compression is different. old "
+											   "= "
+											<< (int32_t)oldThreshholdRelative
+											<< ", new = "
+											<< (int32_t)threshholdRelative);
+								}
+								if (oldThreshhold != threshhold) {
+									GS_THROW_USER_ERROR(
+										GS_ERROR_DS_TIM_INVALID_SCHEMA_OPTION,
+										"column = "
+											<< messageSchema->getColumnName(i)
+												   .c_str()
+											<< " : "
+											<< "threshhold of compression is "
+											   "different. old = "
+											<< oldThreshhold
+											<< ", new = " << threshhold);
+								}
+								if (oldRate != rate) {
+									GS_THROW_USER_ERROR(
+										GS_ERROR_DS_TIM_INVALID_SCHEMA_OPTION,
+										"column = "
+											<< messageSchema->getColumnName(i)
+												   .c_str()
+											<< " : "
+											<< "rate of compression is "
+											   "different. old = "
+											<< oldRate << ", new = " << rate);
+								}
+								if (oldSpan != span) {
+									GS_THROW_USER_ERROR(
+										GS_ERROR_DS_TIM_INVALID_SCHEMA_OPTION,
+										"column = "
+											<< messageSchema->getColumnName(i)
+												   .c_str()
+											<< " : "
+											<< "span of compression is "
+											   "different. old = "
+											<< oldSpan << ", new = " << span);
+								}
+							}
+							else {
+								GS_THROW_USER_ERROR(
+									GS_ERROR_DS_TIM_INVALID_SCHEMA_OPTION,
+									"column = "
+										<< messageSchema->getColumnName(i)
+											   .c_str()
+										<< " : "
+										<< "type of compression is different. "
+										   "old = NONE , new = HiCompression");
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if (messageSchema->getContainerExpirationInfo().info_.duration_ != INT64_MAX && 
+		messageSchema->getExpirationInfo().duration_ != INT64_MAX) {
+		GS_THROW_USER_ERROR(
+			GS_ERROR_DS_DS_SCHEMA_INVALID, 
+			"row and partiion expiration can not be defined at the same time");
 	}
 	return;
 }
 
 void TimeSeries::getSubTimeSeriesList(TransactionContext &txn,
-	util::XArray<SubTimeSeriesInfo> &subTimeSeriesList, bool forUpdate) {
+	util::XArray<SubTimeSeriesInfo> &subTimeSeriesList, bool forUpdate, bool indexUpdate) {
 	BtreeMap::SearchContext sc(
 		UNDEF_COLUMNID, NULL, 0, true, NULL, 0, true, 0, NULL, MAX_RESULT_SIZE);
-	getSubTimeSeriesList(txn, sc, subTimeSeriesList, forUpdate);
+	getSubTimeSeriesList(txn, sc, subTimeSeriesList, forUpdate, indexUpdate);
 }
 
 void TimeSeries::getSubTimeSeriesList(TransactionContext &txn,
 	BtreeMap::SearchContext &sc,
-	util::XArray<SubTimeSeriesInfo> &subTimeSeriesList, bool forUpdate) {
+	util::XArray<SubTimeSeriesInfo> &subTimeSeriesList, bool forUpdate, bool indexUpdate) {
 	const Operator *op1, *op2;
 	bool isValid = getKeyCondition(txn, sc, op1, op2);
 	if (!isValid) {
 		return;
 	}
 
+	if (isExpired(txn)) {
+		return;
+	}
+
 	Timestamp currentExpiredTime = getCurrentExpiredTime(txn);
 	if (forUpdate) {
-		expireSubTimeSeries(txn, currentExpiredTime);
+		expireSubTimeSeries(txn, currentExpiredTime, indexUpdate);
 	}
 
 	Timestamp scBeginTime = -1;
@@ -2943,11 +3419,35 @@ void TimeSeries::getSubTimeSeriesList(TransactionContext &txn,
 	}
 }
 
+void TimeSeries::getExpirableSubTimeSeriesList(TransactionContext &txn, 
+	Timestamp expirableTime, util::XArray<SubTimeSeriesInfo> &subTimeSeriesList) {
+
+	for (int64_t i = 0;
+		 i < static_cast<int64_t>(subTimeSeriesListHead_->getNum()); i++) {
+		const SubTimeSeriesImage &subTimeSeriesImage =
+			*(subTimeSeriesListHead_->get(txn, i));
+		SubTimeSeriesInfo subInfo(subTimeSeriesImage, i);
+		SubTimeSeries subContainer(txn, subInfo, this);
+		ChunkKey chunkKey = subContainer.getRowAllcateStrategy().chunkKey_;
+		Timestamp subExpireTime = DataStore::convertChunkKey2Timestamp(chunkKey);
+		if (subExpireTime <= expirableTime) {
+			subTimeSeriesList.push_back(subInfo);
+		} else {
+			break;
+		}
+	}
+}
+
 void TimeSeries::getRuntimeSubTimeSeriesList(TransactionContext &txn,
 	util::XArray<SubTimeSeriesInfo> &subTimeSeriesList, bool forUpdate) {
+	if (isExpired(txn)) {
+		return;
+	}
+
 	Timestamp expiredTime = getCurrentExpiredTime(txn);
 	if (forUpdate) {
-		expireSubTimeSeries(txn, expiredTime);
+		bool isIndexUpdate = false;
+		expireSubTimeSeries(txn, expiredTime, isIndexUpdate);
 	}
 
 	int64_t divideDuration = getDivideDuration();
@@ -2975,6 +3475,7 @@ void TimeSeries::searchRowArrayList(TransactionContext &txn,
 		txn.getDefaultAllocator());
 	util::XArray<SubTimeSeriesInfo>::iterator itr;
 	getSubTimeSeriesList(txn, sc, subTimeSeriesList, false);
+	RowArray mvccRowArray(txn, this);
 	for (itr = subTimeSeriesList.begin(); itr != subTimeSeriesList.end();
 		 itr++) {
 		SubTimeSeries subContainer(txn, *itr, this);
@@ -2998,7 +3499,6 @@ void TimeSeries::searchRowArrayList(TransactionContext &txn,
 				ColumnType targetType = COLUMN_TYPE_ROWID;
 				util::XArray<SortKey> mvccSortKeyList(
 					txn.getDefaultAllocator());
-				RowArray mvccRowArray(txn, this);
 				for (mvccItr = mvccKeyValueList.begin();
 					 mvccItr != mvccKeyValueList.end(); mvccItr++) {
 					switch (mvccItr->second.type_) {
@@ -3017,11 +3517,10 @@ void TimeSeries::searchRowArrayList(TransactionContext &txn,
 									RowArray::Row row(
 										mvccRowArray.getRow(), &mvccRowArray);
 
-									uint8_t *objectRowField;
-									row.getRowIdField(objectRowField);
+									RowId rowId = row.getRowId();
 
 									SortKey sortKey;
-									sortKey.set(txn, targetType, objectRowField,
+									sortKey.set(txn, targetType, reinterpret_cast<uint8_t *>(&rowId),
 										mvccItr->second.snapshotRowOId_);
 									mvccSortKeyList.push_back(sortKey);
 								}
@@ -3116,27 +3615,6 @@ void TimeSeries::updateIndexData(TransactionContext &, const IndexData &) {
 }
 
 
-uint16_t TimeSeries::calcRowArrayNum(uint16_t baseRowNum) {
-	uint32_t pointArrayObjectSize = static_cast<uint32_t>(
-		RowArray::calcHeaderSize(getNullbitsSize()) + rowImageSize_ * baseRowNum);
-	Size_t estimateAllocateSize =
-		getObjectManager()->estimateAllocateSize(pointArrayObjectSize);
-	if (estimateAllocateSize > getObjectManager()->getHalfOfMaxObjectSize()) {
-		uint32_t oneRowObjectSize = static_cast<uint32_t>(
-			RowArray::calcHeaderSize(getNullbitsSize()) + rowImageSize_ * 1);
-		Size_t estimateOneRowAllocateSize =
-			getObjectManager()->estimateAllocateSize(oneRowObjectSize);
-		if (estimateOneRowAllocateSize >
-			getObjectManager()->getHalfOfMaxObjectSize()) {
-			estimateAllocateSize = getObjectManager()->getMaxObjectSize();
-		}
-		else {
-			estimateAllocateSize = getObjectManager()->getHalfOfMaxObjectSize();
-		}
-	}
-	return static_cast<uint16_t>(
-		(estimateAllocateSize - RowArray::calcHeaderSize(getNullbitsSize())) / rowImageSize_);
-}
 
 /*!
 	@brief Postprocess of aggregation operation
@@ -3172,6 +3650,122 @@ void aggregationPostProcess(AggregationCursor &cursor, Value &value) {
 	}
 }
 
+
+util::String TimeSeries::getBibInfo(TransactionContext &txn, const char* dbName) {
+	util::NormalOStringStream strstrm;
+	util::XArray<SubTimeSeriesInfo> subTimeSeriesList(
+		txn.getDefaultAllocator());
+	util::XArray<SubTimeSeriesInfo>::iterator itr;
+
+	if (subTimeSeriesListHead_->getNum() == 0) {
+		strstrm << getBibInfoImpl(txn, dbName, 0, true);
+	}
+	for (int64_t i = 0;
+		 i < static_cast<int64_t>(subTimeSeriesListHead_->getNum()); i++) {
+		if (i != 0) {
+			strstrm << "," << std::endl;
+		}
+		util::StackAllocator::Scope scope(txn.getDefaultAllocator());
+		const SubTimeSeriesImage &subTimeSeriesImage =
+			*(subTimeSeriesListHead_->get(txn, i));
+		SubTimeSeriesInfo subInfo(subTimeSeriesImage, i);
+		SubTimeSeries subContainer(txn, subInfo, this);
+		strstrm << subContainer.getBibInfo(txn, dbName);
+	}
+	util::String result(txn.getDefaultAllocator());
+	result = strstrm.str().c_str();
+	return result;
+}
+
+void TimeSeries::getActiveTxnList(
+	TransactionContext &txn, util::Set<TransactionId> &txnList) {
+
+	getActiveTxnListImpl(txn, txnList);
+
+	util::XArray<SubTimeSeriesInfo> subTimeSeriesList(
+		txn.getDefaultAllocator());
+	util::XArray<SubTimeSeriesInfo>::iterator itr;
+	getSubTimeSeriesList(txn, subTimeSeriesList, false);
+	for (itr = subTimeSeriesList.begin(); itr != subTimeSeriesList.end();
+		 itr++) {
+		util::StackAllocator::Scope scope(txn.getDefaultAllocator());
+		SubTimeSeries subContainer(txn, *itr, this);
+		subContainer.getActiveTxnListImpl(txn, txnList);
+	}
+}
+void TimeSeries::getErasableList(TransactionContext &txn, Timestamp erasableTimeUpperLimit, util::XArray<ArchiveInfo> &list) {
+	Timestamp erasableTimeLowerLimit = getDataStore()->getLatestBatchFreeTime(txn);
+	if (erasableTimeLowerLimit < dataStore_->getConfig().getErasableExpiredTime()) {
+		erasableTimeLowerLimit = dataStore_->getConfig().getErasableExpiredTime();
+	}
+	ExpireType type = getExpireType();
+	if (type == TABLE_EXPIRE) {
+		ArchiveInfo info;
+		{
+			ExpireIntervalCategoryId expireCategoryId = DEFAULT_EXPIRE_CATEGORY_ID;
+			ChunkKey chunkKey = UNDEF_CHUNK_KEY;
+			calcChunkKey(getContainerExpirationEndTime(), 
+				getContainerExpirationDutation(),
+				expireCategoryId, chunkKey);
+
+			info.start_ = getContainerExpirationStartTime();
+			info.end_ = getContainerExpirationEndTime();
+			info.expired_ = getContainerExpirationTime();
+			info.erasable_ = DataStore::convertChunkKey2Timestamp(chunkKey);
+			if (erasableTimeLowerLimit >= info.erasable_ || info.erasable_ > erasableTimeUpperLimit) {
+				return;
+			}
+			if (subTimeSeriesListHead_->getNum() == 0) {
+				info.rowIdMapOId_ = UNDEF_OID;
+				info.mvccMapOId_ = UNDEF_OID;
+			} else {
+				assert(subTimeSeriesListHead_->getNum() == 1);
+				util::StackAllocator::Scope scope(txn.getDefaultAllocator());
+				const SubTimeSeriesImage &subTimeSeriesImage =
+					*(subTimeSeriesListHead_->get(txn, 0));
+				info.rowIdMapOId_ = subTimeSeriesImage.rowIdMapOId_;
+				info.mvccMapOId_ = subTimeSeriesImage.mvccMapOId_;
+			}
+		}
+		list.push_back(info);
+	} else if (type == ROW_EXPIRE) {
+		const ExpirationInfo &expirationInfo = getExpirationInfo();
+		for (int64_t i = 0;
+			 i < static_cast<int64_t>(subTimeSeriesListHead_->getNum()); i++) {
+			ArchiveInfo info;
+			{
+				util::StackAllocator::Scope scope(txn.getDefaultAllocator());
+				const SubTimeSeriesImage &subTimeSeriesImage =
+					*(subTimeSeriesListHead_->get(txn, i));
+				SubTimeSeriesInfo subInfo(subTimeSeriesImage, i);
+				SubTimeSeries subContainer(txn, subInfo, this);
+
+				info.start_ = subContainer.getStartTime();
+				info.end_ = subContainer.getEndTime();
+				info.expired_ = info.end_ + expirationInfo.duration_;
+				info.erasable_ = DataStore::convertChunkKey2Timestamp(subContainer.getRowAllcateStrategy().chunkKey_);
+				info.rowIdMapOId_ = subTimeSeriesImage.rowIdMapOId_;
+				info.mvccMapOId_ = subTimeSeriesImage.mvccMapOId_;
+				if (erasableTimeLowerLimit >= info.erasable_) {
+					continue;
+				} else if (info.erasable_ > erasableTimeUpperLimit) {
+					break;
+				}
+			}
+			list.push_back(info);
+		}
+	}
+}
+ExpireType TimeSeries::getExpireType() const {
+//	ContainerExpirationInfo *containerExpirationInfo = getContainerExpirationInfo();
+	if (getContainerExpirationDutation() != INT64_MAX) {
+		assert(getExpirationInfo().duration_ == INT64_MAX);
+		return TABLE_EXPIRE;
+	} else if (getExpirationInfo().duration_ != INT64_MAX) {
+		return ROW_EXPIRE;
+	}
+	return NO_EXPIRE;
+}
 
 /*!
 	@brief Validates Rows and Indexes

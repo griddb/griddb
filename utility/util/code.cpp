@@ -42,6 +42,7 @@
 */
 #include "util/code.h"
 #include "util/os.h"
+#include <cassert>
 #include <iomanip>
 
 #ifndef _WIN32
@@ -1007,6 +1008,74 @@ void StreamErrors::throwPositionOutOfRange() {
 void StreamErrors::throwUnexpectedRemaining() {
 	UTIL_THROW_UTIL_ERROR(CODE_DECODE_FAILED,
 			"Decode failed (detail=unexpected remaining of stream)");
+}
+} 
+
+
+namespace detail {
+void NameCoderImpl::initialize(
+		const char8_t **nameList, Entry *entryList, size_t count) {
+
+	Entry *entryEnd = entryList + count;
+	const char8_t **nameIt = nameList;
+	for (const Entry *it = entryList; it != entryEnd; ++it, ++nameIt) {
+		*nameIt = it->first;
+		assert(it->second == it - entryList);
+	}
+
+	std::sort(entryList, entryEnd, EntryPred());
+}
+
+const char8_t* NameCoderImpl::findName(
+		const char8_t *const *nameList, size_t count, int32_t id,
+		const char8_t *defaultName) {
+	if (id < 0 || static_cast<size_t>(id) >= count) {
+		return defaultName;
+	}
+
+	return nameList[id];
+}
+
+const NameCoderImpl::Entry* NameCoderImpl::findEntry(
+		const Entry *entryList, size_t count, const char8_t *name) {
+	assert(name != NULL);
+
+	const Entry *entryEnd = entryList + count;
+	const Entry key(name, Entry::second_type());
+	const std::pair<const Entry*, const Entry*> &range =
+			std::equal_range<const Entry*>(
+					entryList, entryEnd, key, EntryPred());
+
+	if (range.first == range.second) {
+		return NULL;
+	}
+
+	return range.first;
+}
+
+const char8_t* NameCoderImpl::removePrefix(
+		const char8_t *name, size_t prefixWordCount) {
+
+	const char8_t *ret = name;
+	for (size_t i = prefixWordCount; i > 0; i--) {
+		const char8_t *found = strchr(ret, '_');
+		if (found == NULL) {
+			assert(false);
+			break;
+		}
+		ret = found + 1;
+	}
+
+	return ret;
+}
+
+bool NameCoderImpl::EntryPred::operator()(
+		const Entry &entry1, const Entry &entry2) const {
+	if (entry1.first == NULL || entry2.first == NULL) {
+		return (entry1.first == NULL ? 0 : 1)  < (entry2.first == NULL ? 0 : 1);
+	}
+
+	return strcmp(entry1.first, entry2.first) < 0;
 }
 } 
 

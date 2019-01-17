@@ -7,7 +7,7 @@
 <meta http-equiv="Content-Type" content="text/html;charset=utf-8"/>
 <meta name="title" content="GridDB Quick Start Guide"/>
 <meta name="generator" content="Org-mode"/>
-<meta name="generated" content="2017-04-14T18:17+0900"/>
+<meta name="generated" content="2019-01-16T13:32+0900"/>
 <meta name="author" content=""/>
 <meta name="description" content=""/>
 <meta name="keywords" content=""/>
@@ -113,9 +113,10 @@ float: none;
 
 
 
-<p>
-<p class="revision">Revision: CE-20180525</p>
-</p>
+
+
+<p class="revision">Revision: CE-20190116</p>
+
 <div id="table-of-contents">
 <h2>Table of Contents</h2>
 <div id="text-table-of-contents">
@@ -188,6 +189,12 @@ float: none;
 <li><a href="#sec-3-2">3.2 Obtaining Various Information</a>
 <ul>
 <li><a href="#sec-3-2-1">3.2.1 Obtaining Cluster Information</a></li>
+</ul>
+</li>
+<li><a href="#sec-3-3">3.3 Adding/detaching nodes in a cluster</a>
+<ul>
+<li><a href="#sec-3-3-1">3.3.1 Adding a node to a cluster in operation</a></li>
+<li><a href="#sec-3-3-2">3.3.2 Detaching a node from a cluster in operation (shrinking a cluster)</a></li>
 </ul></li>
 </ul>
 </li>
@@ -1635,11 +1642,13 @@ The following commands are available for operations.
 <tr><th scope="col" class="left">Command</th><th scope="col" class="left">Function</th></tr>
 </thead>
 <tbody>
-<tr><td class="left">gs_startnode</td><td class="left">Stars a node.</td></tr>
+<tr><td class="left">gs_startnode</td><td class="left">Starts a node.</td></tr>
 <tr><td class="left">gs_joincluster</td><td class="left">Creates a cluster / joins a node to a cluster.</td></tr>
 <tr><td class="left">gs_stopcluster</td><td class="left">Stops a cluster (makes a cluster stop working).</td></tr>
 <tr><td class="left">gs_stopnode</td><td class="left">Stops (shuts down) a node.</td></tr>
-<tr><td class="left">gs_leavecluster</td><td class="left">Isolates a node from a cluster.</td></tr>
+<tr><td class="left">gs_leavecluster</td><td class="left">Detaches a node from a cluster.</td></tr>
+<tr><td class="left">gs_appendcluster</td><td class="left">Expands a cluster.</td></tr>
+<tr><td class="left">gs_increasecluster</td><td class="left">Increases the number of nodes in a cluster.</td></tr>
 </tbody>
 <tbody>
 <tr><td class="left">gs_stat</td><td class="left">Obtains internal information of a node.</td></tr>
@@ -2127,6 +2136,183 @@ The system status (nodeStatus) indicates as follows:
 See <a href="#param_list">Parameter List</a> for the descriptions of the other items.
 </p>
 
+</div>
+</div>
+
+</div>
+
+<div id="outline-container-3-3" class="outline-3">
+<h3 id="sec-3-3"><span class="section-number-3">3.3</span> Adding/detaching nodes in a cluster</h3>
+<div class="outline-text-3" id="text-3-3">
+
+
+
+</div>
+
+<div id="outline-container-3-3-1" class="outline-4">
+<h4 id="sec-3-3-1"><span class="section-number-4">3.3.1</span> Adding a node to a cluster in operation</h4>
+<div class="outline-text-4" id="text-3-3-1">
+
+
+<p>
+Additional nodes can be added to a running cluster having a specified number of nodes (the number is specified in the cluster configuration gs_joincluster). 
+</p>
+<p>
+Follow the procedure below to add additional nodes to a running cluster. 
+</p>
+<ul>
+<li>Ensure that the cluster is running. 
+</li>
+<li>Check the status of the cluster. 
+</li>
+<li>Start the nodes that you want to add. 
+<ul>
+<li>Check the cluster definition file of the node you want to add is the same as that of the other nodes of the cluster which you want to add the node to. 
+</li>
+<li>Execute the node addition command on the "node to be added". 
+</li>
+</ul>
+
+</li>
+<li>Get the cluster information of the nodes to be added with a gs_stat command, and if the cluster status turns to FOLLOWER, the node will be able to join the cluster. 
+</li>
+</ul>
+
+
+<p>
+To increase the number of nodes, execute the following command. 
+</p>
+<ul>
+<li>gs_appendcluster &ndash;cluster connection server: port [-s connection server: port] -u user name/password 
+</li>
+</ul>
+
+
+<p>
+Specify the server address and port (for the operating command) of "any one of the nodes constituting the cluster where the node is to be added" in the cluster option. A specific example on appending a new node to a cluster is shown below. 
+</p>
+<p>
+Check the status of the cluster to append the node. 
+</p>
+<p>
+[Command execution example] 
+</p>
+
+
+<pre class="example">$ gs_stat -s 192.168.33.29:10040  -u admin/admin
+{
+        :
+    "cluster":{                          // cluster-related
+        "activeCount":5,                   // number of nodes already participating in a cluster
+        "clusterName":"function_1",        // cluster name
+        "clusterStatus":"MASTER",          // cluster status
+        "designatedCount":5,               // number of nodes constituting a cluster (predetermined number of nodes)
+        :
+        
+</pre>
+
+<p>
+A cluster can be added if the number of nodes already participating in a cluster (number of nodes currently joined to a cluster) is equal to the number of nodes constituting a cluster. If the number of nodes constituting a cluster &gt; number of nodes already participating in a cluster, use gs_joincluster (join a cluster configuration) to add a node to the cluster. 
+</p>
+<p>
+Execute the following command on the machine to which the node will be added. Specify the server address and port (for operating command) of any of the nodes in the cluster (the node does not have to be a master node). 
+</p>
+<p>
+[Command execution example] 
+</p>
+
+
+<pre class="example">$ gs_startnode -w
+$ gs_appendcluster --cluster 192.168.33.29:10040 -u admin/admin
+</pre>
+
+
+<p>
+After appending the nodes, the number of nodes constituting a cluster and the number of nodes already participating in a cluster will be changed. 
+</p>
+<p>
+[Command execution example] 
+</p>
+
+
+<pre class="example">$ gs_stat  -u admin/admin
+{
+           :
+    "cluster":{                          // cluster-related
+        "activeCount":6,                   // number of nodes already participating in a cluster
+        "clusterName":"function_1",        // cluster name
+        "clusterStatus":"MASTER",          // cluster status
+        "designatedCount":6,               // number of nodes constituting a cluster (predetermined number of nodes)
+           :
+}
+</pre>
+
+
+
+<p>
+<b>[Points to note]</b>
+</p><ul>
+<li>Since the number of nodes constituting a cluster is required during cluster restart, make a note of this number using the gs_stat command when cluster expansion is carried out. 
+</li>
+<li>Non-stop expansion of a GridDB cluster (node increase) will be carried out 1 unit at a time. 
+</li>
+<li>In the case of large scale expansion, stop and re-configure the cluster instead. 
+</li>
+</ul>
+
+
+</div>
+
+</div>
+
+<div id="outline-container-3-3-2" class="outline-4">
+<h4 id="sec-3-3-2"><span class="section-number-4">3.3.2</span> Detaching a node from a cluster in operation (shrinking a cluster)</h4>
+<div class="outline-text-4" id="text-3-3-2">
+
+
+<p>
+In the case where a single node needs to be removed from a running GridDB cluster, follow the procedure below. 
+</p>
+<ul>
+<li>Check that the cluster is running. 
+</li>
+<li>Execute the cluster detachment command on the node which needs to be detached. 
+</li>
+</ul>
+
+
+<p>
+Execute the following cluster detachment command. 
+</p>
+<ul>
+<li>gs_leavecluster [-s connection server: port] [-f] -u user name/password 
+</li>
+</ul>
+
+
+<p>
+[Command execution example] 
+</p>
+
+
+<pre class="example">$ gs_leavecluster -u admin/admin
+</pre>
+
+
+<p>
+<b>[Points to note]</b>
+</p><ul>
+<li>If there is a possibility of data lost resulted from node detachment, cluster reduction will not be able to be carried out. To force node detachment, use the -f option. 
+</li>
+<li>Continuous node reduction will be carried out 1 node at a time. 
+</li>
+<li>A cluster will be terminated if the number of nodes existing in the cluster is less than half of the number of nodes constituting the cluster. When a large scale node reduction is required, stop and re-configure the cluster with the new number of nodes. However, please note that when a large scale reduction is carried out, the possibility of data lost increases. 
+</li>
+</ul>
+
+
+
+
 
 </div>
 </div>
@@ -2140,8 +2326,6 @@ See <a href="#param_list">Parameter List</a> for the descriptions of the other i
 
 <p>The following notice are only for community edition.
 </p><ul>
-<li>The compression function is not supported.
-</li>
 <li>Only the very simple user authentication is supported. 
 </li>
 <li>Only one database called "public" which all the registered users can access is supported. 

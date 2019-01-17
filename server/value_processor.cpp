@@ -22,6 +22,7 @@
 #include "message_row_store.h"
 #include "schema.h"
 #include "value_operator.h"
+#include "geometry_processor.h"
 #include "util/time.h"
 #include "array_processor.h"
 #include "blob_processor.h"
@@ -65,6 +66,10 @@ int32_t ValueProcessor::compare(TransactionContext &txn,
 	} break;
 	case COLUMN_TYPE_STRING:
 		result = StringProcessor::compare(
+			txn, objectManager, columnId, messageRowStore, objectRowField);
+		break;
+	case COLUMN_TYPE_GEOMETRY:
+		result = GeometryProcessor::compare(
 			txn, objectManager, columnId, messageRowStore, objectRowField);
 		break;
 	case COLUMN_TYPE_BLOB:
@@ -116,6 +121,10 @@ int32_t ValueProcessor::compare(TransactionContext &txn,
 	} break;
 	case COLUMN_TYPE_STRING:
 		result = StringProcessor::compare(
+			txn, objectManager, type, srcObjectRowField, targetObjectRowField);
+		break;
+	case COLUMN_TYPE_GEOMETRY:
+		result = GeometryProcessor::compare(
 			txn, objectManager, type, srcObjectRowField, targetObjectRowField);
 		break;
 	case COLUMN_TYPE_BLOB:
@@ -172,6 +181,10 @@ void ValueProcessor::getField(TransactionContext &txn,
 		break;
 	case COLUMN_TYPE_STRING:
 		StringProcessor::getField(
+			txn, objectManager, columnId, objectValue, messageRowStore);
+		break;
+	case COLUMN_TYPE_GEOMETRY:
+		GeometryProcessor::getField(
 			txn, objectManager, columnId, objectValue, messageRowStore);
 		break;
 	case COLUMN_TYPE_BLOB:
@@ -490,69 +503,124 @@ uint32_t StringCursor::getObjectSize() {
 }
 
 std::string ValueProcessor::getTypeName(ColumnType type) {
-	std::string str;
-	switch (type) {
-	case COLUMN_TYPE_BOOL:
-		str = "BOOL";
-		break;
-	case COLUMN_TYPE_BYTE:
-		str = "BYTE";
-		break;
-	case COLUMN_TYPE_SHORT:
-		str = "SHORT";
-		break;
-	case COLUMN_TYPE_INT:
-		str = "INTEGER";
-		break;
-	case COLUMN_TYPE_LONG:
-		str = "LONG";
-		break;
-	case COLUMN_TYPE_FLOAT:
-		str = "FLOAT";
-		break;
-	case COLUMN_TYPE_DOUBLE:
-		str = "DOUBLE";
-		break;
-	case COLUMN_TYPE_TIMESTAMP:
-		str = "TIMESTAMP";
-		break;
-	case COLUMN_TYPE_STRING:
-		str = "STRING";
-		break;
-	case COLUMN_TYPE_BLOB:
-		str = "BLOB";
-		break;
-	case COLUMN_TYPE_STRING_ARRAY:
-		str = "STRING_ARRAY";
-		break;
-	case COLUMN_TYPE_BOOL_ARRAY:
-		str = "BOOL_ARRAY";
-		break;
-	case COLUMN_TYPE_BYTE_ARRAY:
-		str = "BYTE_ARRAY";
-		break;
-	case COLUMN_TYPE_SHORT_ARRAY:
-		str = "SHORT_ARRAY";
-		break;
-	case COLUMN_TYPE_INT_ARRAY:
-		str = "INT_ARRAY";
-		break;
-	case COLUMN_TYPE_LONG_ARRAY:
-		str = "LONG_ARRAY";
-		break;
-	case COLUMN_TYPE_FLOAT_ARRAY:
-		str = "FLOAT_ARRAY";
-		break;
-	case COLUMN_TYPE_DOUBLE_ARRAY:
-		str = "DOUBLE_ARRAY";
-		break;
-	case COLUMN_TYPE_TIMESTAMP_ARRAY:
-		str = "TIMESTAMP_ARRAY";
-		break;
-	default:
-		str = "UNKNON_TYPE";
-		break;
-	}
-	return str;
+	return getTypeNameChars(type);
 }
 
+const char8_t* ValueProcessor::getTypeNameChars(ColumnType type) {
+	switch (type) {
+	case COLUMN_TYPE_BOOL:
+		return "BOOL";
+	case COLUMN_TYPE_BYTE:
+		return "BYTE";
+	case COLUMN_TYPE_SHORT:
+		return "SHORT";
+	case COLUMN_TYPE_INT:
+		return "INTEGER";
+	case COLUMN_TYPE_LONG:
+		return "LONG";
+	case COLUMN_TYPE_FLOAT:
+		return "FLOAT";
+	case COLUMN_TYPE_DOUBLE:
+		return "DOUBLE";
+	case COLUMN_TYPE_TIMESTAMP:
+		return "TIMESTAMP";
+	case COLUMN_TYPE_STRING:
+		return "STRING";
+	case COLUMN_TYPE_GEOMETRY:
+		return "GEOMETRY";
+	case COLUMN_TYPE_BLOB:
+		return "BLOB";
+	case COLUMN_TYPE_STRING_ARRAY:
+		return "STRING_ARRAY";
+	case COLUMN_TYPE_BOOL_ARRAY:
+		return "BOOL_ARRAY";
+	case COLUMN_TYPE_BYTE_ARRAY:
+		return "BYTE_ARRAY";
+	case COLUMN_TYPE_SHORT_ARRAY:
+		return "SHORT_ARRAY";
+	case COLUMN_TYPE_INT_ARRAY:
+		return "INT_ARRAY";
+	case COLUMN_TYPE_LONG_ARRAY:
+		return "LONG_ARRAY";
+	case COLUMN_TYPE_FLOAT_ARRAY:
+		return "FLOAT_ARRAY";
+	case COLUMN_TYPE_DOUBLE_ARRAY:
+		return "DOUBLE_ARRAY";
+	case COLUMN_TYPE_TIMESTAMP_ARRAY:
+		return "TIMESTAMP_ARRAY";
+	default:
+		return "UNKNON_TYPE";
+	}
+}
+
+void ValueProcessor::dumpSimpleValue(util::NormalOStringStream &stream, ColumnType columnType, const void *data, uint32_t size, bool withType) {
+	if (isArray(columnType)) {
+		stream << "(support only simple type";
+	} else {
+		if (withType) {
+			stream << "(" << getTypeName(columnType) << ")";
+		}
+		switch (columnType) {
+		case COLUMN_TYPE_STRING :
+			{
+				util::NormalXArray<char> binary;
+				binary.push_back(static_cast<const char *>(data) + ValueProcessor::getEncodedVarSize(size), size);
+				binary.push_back('\0');
+				stream << "'" << binary.data() << "'";
+			}
+			break;
+		case COLUMN_TYPE_TIMESTAMP :
+			{
+				Timestamp val = *static_cast<const Timestamp *>(data);
+				util::DateTime dateTime(val);
+				dateTime.format(stream, false, false);
+			}
+			break;
+		case COLUMN_TYPE_GEOMETRY :
+		case COLUMN_TYPE_BLOB:
+			{
+				stream << "x'";
+				util::NormalIStringStream iss(
+						u8string(static_cast<const char8_t*>(data) + ValueProcessor::getEncodedVarSize(size), size));
+				util::HexConverter::encode(stream, iss);
+				stream << "'";
+			}
+			break;
+		case COLUMN_TYPE_BOOL:
+			if (*static_cast<const bool *>(data)) {
+				stream << "TRUE";
+			} else {
+				stream << "FALSE";
+			}
+			break;
+		case COLUMN_TYPE_BYTE: 
+			{
+				int16_t byteVal = 
+					*static_cast<const int8_t *>(data);
+				stream << byteVal;
+			}
+			break;
+		case COLUMN_TYPE_SHORT:
+			stream << *static_cast<const int16_t *>(data);
+			break;
+		case COLUMN_TYPE_INT:
+			stream << *static_cast<const int32_t *>(data);
+			break;
+		case COLUMN_TYPE_LONG:
+			stream << *static_cast<const int64_t *>(data);
+			break;
+		case COLUMN_TYPE_FLOAT:
+			stream << *static_cast<const float *>(data);
+			break;
+		case COLUMN_TYPE_DOUBLE:
+			stream << *static_cast<const double *>(data);
+			break;
+		case COLUMN_TYPE_NULL:
+			stream << "NULL";
+			break;
+		default:
+			stream << "(not implement)";
+			break;
+		}
+	}
+}

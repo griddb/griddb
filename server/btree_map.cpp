@@ -188,6 +188,7 @@ int32_t BtreeMap::insert(
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TM_INSERT_FAILED, "");
 		break;
 	}
+	assert(ret == GS_SUCCESS);
 
 	if (beforeRootOId != getRootOId()) {
 		ret = (ret | ROOT_UPDATE);
@@ -264,6 +265,7 @@ int32_t BtreeMap::remove(
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TM_INSERT_FAILED, "");
 		break;
 	}
+	assert(ret == GS_SUCCESS);
 
 	if (beforeRootOId != getRootOId()) {
 		ret = (ret | ROOT_UPDATE);
@@ -341,6 +343,7 @@ int32_t BtreeMap::update(
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TM_INSERT_FAILED, "");
 		break;
 	}
+	assert(ret == GS_SUCCESS);
 
 	if (beforeRootOId != getRootOId()) {
 		ret = (ret | ROOT_UPDATE);
@@ -899,6 +902,7 @@ int32_t BtreeMap::insert(TransactionContext &txn, FullContainerKeyCursor &key, O
 		insertInternal<FullContainerKeyObject, FullContainerKeyAddr, OId>(txn, convertKey, value, &valueCmp, &valueCmp, isCaseSensitive);
 
 	int32_t ret = (isSuccess) ? GS_SUCCESS : GS_FAIL;
+	assert(ret == GS_SUCCESS);
 	if (beforeRootOId != getRootOId()) {
 		ret = (ret | ROOT_UPDATE);
 	}
@@ -919,6 +923,7 @@ int32_t BtreeMap::remove(TransactionContext &txn, FullContainerKeyCursor &key, O
 		removeInternal<FullContainerKeyObject, FullContainerKeyAddr, OId>(txn, convertKey, value, &valueCmp, &valueCmp, isCaseSensitive);
 
 	int32_t ret = (isSuccess) ? GS_SUCCESS : GS_FAIL;
+	assert(ret == GS_SUCCESS);
 	if (beforeRootOId != getRootOId()) {
 		ret = (ret | ROOT_UPDATE);
 	}
@@ -950,6 +955,7 @@ int32_t BtreeMap::update(TransactionContext &txn, FullContainerKeyCursor &key, O
 		ret = (isSuccess) ? GS_SUCCESS : GS_FAIL;
 	}
 
+	assert(ret == GS_SUCCESS);
 	if (beforeRootOId != getRootOId()) {
 		ret = (ret | ROOT_UPDATE);
 	}

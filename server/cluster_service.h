@@ -92,6 +92,12 @@ struct ManagerSet {
 		config_(config),
 		stats_(stats) {
 	}
+	ManagerSet() :
+	clsSvc_(NULL), syncSvc_(NULL), txnSvc_(NULL), cpSvc_(NULL), sysSvc_(NULL), trgSvc_(NULL),
+	pt_(NULL), ds_(NULL), logMgr_(NULL), clsMgr_(NULL), syncMgr_(NULL),
+	txnMgr_(NULL), chunkMgr_(NULL), recoveryMgr_(NULL), objectMgr_(NULL),
+	fixedSizeAlloc_(NULL), varSizeAlloc_(NULL), config_(NULL), stats_(NULL) {
+	}
 
 
 	ClusterService *clsSvc_;
@@ -115,6 +121,7 @@ struct ManagerSet {
 	ConfigTable *config_;
 	StatTable *stats_;
 };
+
 
 /*!
 	@brief Represents cluster statistics
@@ -305,6 +312,14 @@ public:
 	void operator()(EventContext &ec, Event &ev);
 };
 
+class SQLTimerNotifyClientHandler : public ClusterHandler {
+public:
+	void operator()(EventContext &ec, Event &ev);
+
+private:
+	void encode(EventByteOutStream &out, EventContext &ec);
+};
+
 /*!
 	@brief Handles NotifyCluster event
 */
@@ -376,29 +391,9 @@ public:
 	void operator()(EventContext &ec, Event &ev);
 };
 
-/*!
-	@brief Handles periodic CheckLoadBalance event
-*/
-class TimerCheckLoadBalanceHandler : public ClusterHandler {
+class TimerSQLNotifyClientHandler : public ClusterHandler {
 public:
-	TimerCheckLoadBalanceHandler() {}
-
-	void operator()(EventContext &ec, Event &ev);
-};
-
-/*!
-	@brief Handles DropPartition event from master node to follower nodes
-*/
-class OrderDropPartitionHandler : public ClusterHandler {
-public:
-	OrderDropPartitionHandler() {}
-
-	void operator()(EventContext &ec, Event &ev);
-};
-
-class TimerRequestSQLNotifyClientHandler : public ClusterHandler {
-public:
-	TimerRequestSQLNotifyClientHandler() {}
+	TimerSQLNotifyClientHandler() {}
 
 	void operator()(EventContext &ec, Event &ev);
 };
@@ -484,6 +479,38 @@ public:
 		return isSystemServiceError_;
 	}
 
+	void doJoinCluster(ClusterManager *clsMgr,
+		ClusterManager::JoinClusterInfo &joinClusterInfo, EventContext &ec);
+
+	void doLeaveCluster(ClusterManager *clsMgr, CheckpointService *cpSvc,
+			ClusterManager::LeaveClusterInfo &leaveClusterInfo, EventContext &ec);
+
+	void doIncreaseCluster(ClusterManager *clsMgr,
+			ClusterManager::IncreaseClusterInfo &increaseClusterInfo);
+
+		void doDecreaseCluster(ClusterManager *clsMgr,
+			ClusterManager::DecreaseClusterInfo &increaseClusterInfo, EventContext &ec);
+
+		void doShutdownNodeForce(ClusterManager *clsMgr,
+			CheckpointService *cpSvc, TransactionService *txnSvc, SyncService *syncSvc,
+				SystemService *systemSvc
+				);
+
+	void doShutdownNormal(ClusterManager *clsMgr, CheckpointService *cpSvc,
+			ClusterManager::ShutdownNodeInfo &shutdownNodeInfo, EventContext &ec);
+
+	void doShutdownCluster(ClusterManager *clsMgr, EventContext &ec, NodeId senderNodeId);
+
+		void doCompleteCheckpointForShutdown(ClusterManager *clsMgr,
+			CheckpointService *cpSvc, TransactionService *txnSvc, SyncService *syncSvc,
+				SystemService *systemSvc
+				);
+
+		void doCompleteCheckpointForRecovery(ClusterManager *clsMgr,
+			CheckpointService *cpSvc, TransactionService *txnSvc, SyncService *syncSvc,
+				SystemService *systemSvc
+				);
+
 	bool isError() {
 		return clsMgr_->isError();
 	}
@@ -494,7 +521,14 @@ public:
 	void encode(Event &ev, T &t);
 
 	template <class T>
+	void encode(Event &ev, T &t, EventByteOutStream &out);
+
+	template <class T>
 	void decode(util::StackAllocator &alloc, Event &ev, T &t);
+
+	template <class T>
+	void decode(util::StackAllocator &alloc, Event &ev, T &t, EventByteInStream &in);
+
 
 	template <class T>
 	void request(const Event::Source &eventSource, EventType eventType,
@@ -517,11 +551,12 @@ public:
 	void requestCompleteCheckpoint(const Event::Source &eventSource,
 		util::StackAllocator &alloc, bool isRecovery);
 
-	void requestUpdateStartLsn(const Event::Source &eventSource,
-		util::StackAllocator &alloc, PartitionId startPId, PartitionId endPId);
-
 	ClusterManager *getManager() {
 		return clsMgr_;
+	}
+
+	SystemService *getSystemService() {
+		return sysSvc_;
 	}
 
 	std::string getClusterName() {
@@ -553,6 +588,8 @@ public:
 	void checkVersion(ClusterVersionId decodedVersion);
 
 
+	ClusterExecStatus status_;
+
 private:
 
 	EventEngine::Config &createEEConfig(
@@ -568,8 +605,6 @@ private:
 	TimerCheckClusterHandler timerCheckClusterHandler_;
 	TimerNotifyClusterHandler timerNotifyClusterHandler_;
 	TimerNotifyClientHandler timerNotifyClientHandler_;
-	TimerCheckLoadBalanceHandler timerCheckLoadBalanceHandler_;
-	OrderDropPartitionHandler orderDropPartitionHandler_;
 
 
 	UnknownClusterEventHandler unknownEventHandler_;
@@ -673,7 +708,6 @@ private:
 		}
 
 		void getNotificationMember(picojson::value &target);
-
 
 	private:
 		ClusterManager *clsMgr_;

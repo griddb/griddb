@@ -40,6 +40,8 @@ public class ColumnInfo {
 
 	private final Boolean nullable;
 
+	private final Boolean defaultValueNull;
+
 	private final Set<IndexType> indexTypes;
 
 	/**
@@ -51,10 +53,10 @@ public class ColumnInfo {
 	 *
 	 * @since 1.5
 	 * </div><div lang="en">
-	 * Creates the information with the specified Column name and type of Column.
+	 * Constructs column information with the specified column name and type.
 	 *
-	 * @param name Column name. {@code null} indicates no specification of Column name.
-	 * @param type Column type. {@code null} indicates no specification of Column type.
+	 * @param name Column name. Not set when {@code null} is specified.
+	 * @param type Column type. Not set when {@code null} is specified.
 	 * </div>
 	 */
 	public ColumnInfo(String name, GSType type) {
@@ -74,15 +76,16 @@ public class ColumnInfo {
 	 *
 	 * @since 1.5
 	 * </div><div lang="en">
-	 * Creates the information with the specified Column name and type of Column
-	 * and set of Index type.
+	 * Constructs column information with the specified column name, type,
+	 * and set of index types.
 	 *
-	 * <p>Creates a copy of a specified non-empty set of Index type copied.</p>
+	 * <p>If a set of not empty index types is specified, the contents are
+	 * duplicated.</p>
 	 *
-	 * @param name Column name. {@code null} indicates no specification of Column name.
-	 * @param type Column type. {@code null} indicates no specification of Column type.
-	 * @param indexTypes Set of index type. {@code null} indicates no specification.
-	 * No index type is set if it is an empty set.
+	 * @param name Column name. Not set when {@code null} is specified.
+	 * @param type Column type. Not set when {@code null} is specified.
+	 * @param indexTypes A set of index types. Not set when {@code null}
+	 * is specified. No index type is set if empty set is specified.
 	 * </div>
 	 */
 	public ColumnInfo(String name, GSType type, Set<IndexType> indexTypes) {
@@ -106,17 +109,18 @@ public class ColumnInfo {
 	 *
 	 * @since 3.5
 	 * </div><div lang="en">
-	 * Create column information by specifying the column name, type,
-	 * NOT NULL constraint state, and index type set.
+	 * Constructs column information with the column name, type,
+	 * NOT NULL constraint state, and set of index types.
 	 *
-	 * <p>If a set of not empty index types is specified, the contents are duplicated. </p>
+	 * <p>If a set of not empty index types is specified, the contents are
+	 * duplicated.</p>
 	 *
-	 * @param name column name. Not set when {@code null} is specified.
-	 * @param type column type. Not set when {@code null} is specified.
-	 * @param nullable {@code true} if NOT NULL constraint is not set, {@code false} is set.
-	 * Not set when {@code null} is specified.
-	 * @param indexTypes A set of index types. Not set when {@code null} is specified.
-	 * When empty, the index is considered as not set.
+	 * @param name Column name. Not set when {@code null} is specified.
+	 * @param type Column type. Not set when {@code null} is specified.
+	 * @param nullable {@code true} if NOT NULL constraint is not set.
+	 * {@code false} if it is set. Not set when {@code null} is specified.
+	 * @param indexTypes A set of index types. Not set when {@code null}
+	 * is specified. No index type is set if empty set is specified.
 	 *
 	 * @since 3.5
 	 * </div>
@@ -124,9 +128,56 @@ public class ColumnInfo {
 	public ColumnInfo(
 			String name, GSType type, Boolean nullable,
 			Set<IndexType> indexTypes) {
+		this(name, type, nullable, null, indexTypes);
+	}
+
+	/**
+	 * <div lang="ja">
+	 * カラム名、型、NOT NULL制約の状態、初期値でのNULL使用有無、索引種別の
+	 * 集合を指定してカラム情報を作成します。
+	 *
+	 * <p>空ではない索引種別の集合が指定された場合、内容が複製されます。</p>
+	 *
+	 * @param name カラム名。{@code null}を指定すると未設定状態となる
+	 * @param type カラムの型。{@code null}を指定すると未設定状態となる
+	 * @param nullable NOT NULL制約が設定されていない場合は{@code true}、
+	 * 設定されている場合は{@code false}。{@code null}を指定すると
+	 * 未設定状態となる
+	 * @param defaultValueNull 初期値としてNULLを使用する場合は{@code true}、
+	 * 使用しない場合は{@code false}。{@code null}を指定すると
+	 * 未設定状態となる
+	 * @param indexTypes 索引種別の集合。{@code null}を指定すると
+	 * 未設定状態となる。空の場合は索引の設定が一つもないとみなされる
+	 *
+	 * @since 4.1
+	 * </div><div lang="en">
+	 * Constructs column information with specifying the column name, type,
+	 * whether to use of NULL for the initial value, NOT NULL constraint state,
+	 * and set of index types.
+	 *
+	 * <p>If a set of not empty index types is specified, the contents are
+	 * duplicated.</p>
+	 *
+	 * @param name Column name. Not set when {@code null} is specified.
+	 * @param type Column type. Not set when {@code null} is specified.
+	 * @param defaultValueNull {@code true} if the initial value is set to
+	 * NULL. {@code false} if the initial value is set to non-NULL. Not set
+	 * when {@code null} is specified.
+	 * @param nullable {@code true} if NOT NULL constraint is not set.
+	 * {@code false} if it is set. Not set when {@code null} is specified.
+	 * @param indexTypes A set of index types. Not set when {@code null}
+	 * is specified. No index type is set if empty set is specified.
+	 *
+	 * @since 4.1
+	 * </div>
+	 */
+	public ColumnInfo(
+			String name, GSType type, Boolean nullable,
+			Boolean defaultValueNull, Set<IndexType> indexTypes) {
 		this.name = name;
 		this.type = type;
 		this.nullable = nullable;
+		this.defaultValueNull = defaultValueNull;
 
 		if (indexTypes == null) {
 			this.indexTypes = null;
@@ -146,9 +197,9 @@ public class ColumnInfo {
 	 *
 	 * @return カラム名。未設定の場合は{@code null}
 	 * </div><div lang="en">
-	 * Returns a name of Column.
+	 * Returns a name of column.
 	 *
-	 * @return Name of Column, or {@code null} if unspecified.
+	 * @return Name of column, or {@code null} if unspecified.
 	 * </div>
 	 */
 	public String getName() {
@@ -161,10 +212,10 @@ public class ColumnInfo {
 	 *
 	 * @return カラムの型。未設定の場合は{@code null}
 	 * </div><div lang="en">
-	 * Returns the type of a Column, i.e., the type of each field value
-	 * corresponding to a Column.
+	 * Returns the type of a column, i.e., the type of each field value
+	 * corresponding to a column.
 	 *
-	 * @return Type of Column, or {@code null} if unspecified.
+	 * @return Type of column, or {@code null} if unspecified.
 	 * </div>
 	 */
 	public GSType getType() {
@@ -180,7 +231,8 @@ public class ColumnInfo {
 	 *
 	 * @since 3.5
 	 * </div><div lang="en">
-	 * Retrieve the value irrespective to NOT NULL constraint is set in the column or not.
+	 * Returns the value irrespective to NOT NULL constraint is set in the
+	 * column or not.
 	 *
 	 * @return {@code true} if the NOT NULL constraint is not set,
 	 * {@code false} if set. If not set {@code null}.
@@ -190,6 +242,27 @@ public class ColumnInfo {
 	 */
 	public Boolean getNullable() {
 		return nullable;
+	}
+
+	/**
+	 * <div lang="ja">
+	 * カラムの初期値としてNULLを使用するかどうかを取得します。
+	 *
+	 * @return NULLを使用する場合は{@code true}、NULL以外の値を使用する場合は
+	 * {@code false}、未設定の場合は{@code null}
+	 *
+	 * @since 4.1
+	 * </div><div lang="en">
+	 * Returns whether to use of NULL for the initial value.
+	 *
+	 * @return {@code true} if the initial value is set to NULL. {@code false}
+	 * if the initial value is set to non-NULL. {@code null} if not specified.
+	 *
+	 * @since 4.1
+	 * </div>
+	 */
+	public Boolean getDefaultValueNull() {
+		return defaultValueNull;
 	}
 
 	/**

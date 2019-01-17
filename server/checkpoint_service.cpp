@@ -41,8 +41,11 @@ UTIL_TRACER_DECLARE(CHECKPOINT_SERVICE_STATUS_DETAIL);
 UTIL_TRACER_DECLARE(IO_MONITOR);
 
 const std::string CheckpointService::PID_LSN_INFO_FILE_NAME("gs_lsn_info.json");
+const char *const CheckpointService::INCREMENTAL_BACKUP_FILE_SUFFIX =
+		"_incremental";
 
 const uint32_t CheckpointService::MAX_BACKUP_NAME_LEN = 12;
+const uint32_t CheckpointService::MAX_LONG_ARCHIVE_NAME_LEN = 12;
 
 const char *const CheckpointService::SYNC_TEMP_FILE_SUFFIX =
 		"_sync_temp";
@@ -81,10 +84,13 @@ CheckpointService::CheckpointService(
 		  CONFIG_TABLE_CP_CHECKPOINT_INTERVAL)),  
 	  logWriteMode_(config.get<int32_t>(
 		  CONFIG_TABLE_DS_LOG_WRITE_MODE)),  
+	  backupTopPath_(config.get<const char8_t *>(CONFIG_TABLE_DS_BACKUP_PATH)),
 	  syncTempTopPath_(config.get<const char8_t *>(CONFIG_TABLE_DS_SYNC_TEMP_PATH)),
+	  longArchiveTopPath_(config.get<const char8_t *>(CONFIG_TABLE_DS_ARCHIVE_TEMP_PATH)),
 	  chunkCopyIntervalMillis_(config.get<int32_t>(
 		  CONFIG_TABLE_CP_CHECKPOINT_COPY_INTERVAL)),  
 
+	  backupEndPending_(false),
 	  currentDuplicateLogMode_(false),
 	  currentCpGrpId_(UINT32_MAX),
 	  currentCpPId_(UNDEF_PARTITIONID),
@@ -93,9 +99,18 @@ CheckpointService::CheckpointService(
 	  errorOccured_(false),
 	  enableLsnInfoFile_(true),  
 	  lastMode_(CP_UNDEF)
+	  , archiveLogMode_(0)
+	  , duplicateLogMode_(0)
+	  , enablePeriodicCheckpoint_(true)  
+	  , newestLogVersion_(0)
 {
 	statUpdator_.service_ = this;
 	try {
+		backupInfo_.setConfigValue(
+				config.getUInt32(CONFIG_TABLE_DS_PARTITION_NUM),
+				config.getUInt32(CONFIG_TABLE_DS_CONCURRENCY));
+		backupInfo_.setGSVersion(
+				config.get<const char8_t *>(CONFIG_TABLE_DEV_SIMPLE_VERSION));
 
 		ee_.setHandler(CP_REQUEST_CHECKPOINT, checkpointServiceMainHandler_);
 
@@ -121,6 +136,8 @@ CheckpointService::CheckpointService(
 		checkpointReadyList_.assign(pgConfig_.getPartitionCount(), 0);
 
 		ssnList_.assign(pgConfig_.getPartitionCount(), UNDEF_SYNC_SEQ_NUMBER);
+		lastCpStartLsnList_.assign(pgConfig_.getPartitionCount(), UNDEF_LSN);
+		needGroupCheckpoint_.assign(pgConfig_.getPartitionGroupCount(), 1); 
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_SYSTEM_ERROR(
@@ -174,6 +191,7 @@ void CheckpointService::initialize(ManagerSet &mgrSet) {
 		syncService_ = mgrSet.syncSvc_;
 		serviceThreadErrorHandler_.initialize(mgrSet);
 		initailized_ = true;
+		newestLogVersion_ = logManager_->getLogVersion(0);
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_SYSTEM_ERROR(
@@ -289,6 +307,579 @@ void CheckpointService::waitForShutdown() {
 */
 EventEngine *CheckpointService::getEE() {
 	return &ee_;
+}
+
+
+
+bool CheckpointService::requestOnlineBackup(
+		const Event::Source &eventSource,
+		const std::string &backupName, int32_t mode,
+		const SystemService::BackupOption &option,
+		picojson::value &result) {
+	picojson::object errorInfo;
+	int32_t errorNo = 0;
+	std::string reason;
+	if (lastMode_ == CP_SHUTDOWN) {
+		reason = "Shutdown is already in progress";
+		errorNo = WEBAPI_CP_SHUTDOWN_IS_ALREADY_IN_PROGRESS;
+		errorInfo["errorStatus"] =
+				picojson::value(static_cast<double>(errorNo));
+		errorInfo["reason"] = picojson::value(reason);
+		result = picojson::value(errorInfo);
+		GS_TRACE_ERROR(CHECKPOINT_SERVICE,
+				GS_TRACE_CP_CONTROLLER_ILLEAGAL_STATE,
+				"Checkpoint cancelled by already requested shutdown ("
+				"lastMode=" << checkpointModeToString(lastMode_) <<
+				", backupName=" << backupName << ")");
+		return false;
+	}
+
+	if (requestedShutdownCheckpoint_) {
+		reason = "Shutdown is already in progress";
+		errorNo = WEBAPI_CP_SHUTDOWN_IS_ALREADY_IN_PROGRESS;
+		errorInfo["errorStatus"] =
+				picojson::value(static_cast<double>(errorNo));
+		errorInfo["reason"] = picojson::value(reason);
+		result = picojson::value(errorInfo);
+		GS_TRACE_ERROR(
+				CHECKPOINT_SERVICE, GS_TRACE_CP_CONTROLLER_ILLEAGAL_STATE,
+				"Checkpoint cancelled by already requested shutdown ("
+				"lastMode=" << checkpointModeToString(lastMode_) <<
+				", backupName=" << backupName << ")");
+		return false;
+	}
+
+	std::string backupPath;
+	util::FileSystem::createPath(
+		backupTopPath_.c_str(), backupName.c_str(), backupPath);
+	std::string origBackupPath(backupPath);
+
+	if (mode == CP_BACKUP || mode == CP_BACKUP_START) {
+		if (backupName.empty()) {
+			reason = "BackupName is empty";
+			errorNo = WEBAPI_CP_BACKUPNAME_IS_EMPTY;
+			errorInfo["errorStatus"] =
+					picojson::value(static_cast<double>(errorNo));
+			errorInfo["reason"] = picojson::value(reason);
+			result = picojson::value(errorInfo);
+			GS_TRACE_ERROR(
+					CHECKPOINT_SERVICE, GS_TRACE_CP_BACKUP_FAILED,
+					"BackupName is empty ("
+					"mode=" << checkpointModeToString(mode) << ")");
+			return false;
+		}
+
+		try {
+			AlphaOrDigitKey::validate(
+				backupName.c_str(), static_cast<uint32_t>(backupName.size()),
+				MAX_BACKUP_NAME_LEN, "backupName");
+		} catch (UserException &e) {
+			UTIL_TRACE_EXCEPTION(CHECKPOINT_SERVICE, e,
+					"BackupName is invalid (name=" << backupName <<
+					", mode=" << checkpointModeToString(mode) <<
+					", reason=" << GS_EXCEPTION_MESSAGE(e) <<")");
+			return false;
+		}
+
+		try {
+			util::FileSystem::createDirectoryTree(backupTopPath_.c_str());
+			if (!util::FileSystem::isDirectory(backupTopPath_.c_str())) {
+				util::NormalOStringStream oss;
+				oss << "Failed to create backup top dir (path="
+					<< backupTopPath_ << ")";
+				reason = oss.str();
+				errorNo = WEBAPI_CP_CREATE_BACKUP_PATH_FAILED;
+				errorInfo["errorStatus"] =
+						picojson::value(static_cast<double>(errorNo));
+				errorInfo["reason"] = picojson::value(reason);
+				result = picojson::value(errorInfo);
+				GS_TRACE_ERROR(CHECKPOINT_SERVICE, GS_TRACE_CP_BACKUP_FAILED,
+						"Failed to create backup top dir (path=" <<
+						backupTopPath_ <<
+						", mode=" << checkpointModeToString(mode) << ")");
+				return false;
+			}
+		}
+		catch (std::exception &e) {
+			util::NormalOStringStream oss;
+			oss << "Failed to create backup top dir (path=" << backupTopPath_
+				<< ")";
+			reason = oss.str();
+			errorNo = WEBAPI_CP_CREATE_BACKUP_PATH_FAILED;
+			errorInfo["errorStatus"] =
+					picojson::value(static_cast<double>(errorNo));
+			errorInfo["reason"] = picojson::value(reason);
+			result = picojson::value(errorInfo);
+			UTIL_TRACE_EXCEPTION(CHECKPOINT_SERVICE, e,
+					"Failed to create backup top dir (path=" <<
+					backupTopPath_ <<
+					", mode=" << checkpointModeToString(mode) <<
+					", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+			return false;
+		}
+
+		if (option.isIncrementalBackup_) {
+			if (option.incrementalBackupLevel_ == 0) {
+				backupPath.append("_lv0");
+			}
+			else {
+				assert(option.incrementalBackupLevel_ == 1);
+				uint64_t nextCumlativeCount =
+						lastQueuedBackupStatus_.cumlativeCount_;
+				uint64_t nextDifferentialCount =
+						lastQueuedBackupStatus_.differentialCount_;
+				if (option.isCumulativeBackup_) {
+					++nextCumlativeCount;
+					nextDifferentialCount = 0;
+				}
+				else {
+					++nextDifferentialCount;
+				}
+				if (nextCumlativeCount > INCREMENTAL_BACKUP_COUNT_LIMIT ||
+						nextDifferentialCount > INCREMENTAL_BACKUP_COUNT_LIMIT) {
+					errorNo = WEBAPI_CP_INCREMENTAL_BACKUP_COUNT_EXCEEDS_LIMIT;
+					errorInfo["errorStatus"] =
+							picojson::value(static_cast<double>(errorNo));
+					errorInfo["reason"] = picojson::value(reason);
+					result = picojson::value(errorInfo);
+					GS_TRACE_ERROR(
+							CHECKPOINT_SERVICE, GS_TRACE_CP_BACKUP_FAILED,
+							"Incremental backup count exceeds limit. (name=" <<
+							backupName << ", path=" << backupPath <<
+							", mode=" << checkpointModeToString(mode) <<
+							", nextCumulativeCount=" << nextCumlativeCount <<
+							", nextDifferentialCount=" <<
+							nextDifferentialCount << ")");
+				}
+				util::NormalOStringStream oss;
+				oss << "_lv1_" << std::setfill('0') << std::setw(3)
+					<< nextCumlativeCount << "_" << std::setw(3)
+					<< nextDifferentialCount;
+				backupPath.append(oss.str());
+			}
+		}
+		if (util::FileSystem::exists(backupPath.c_str())) {
+			util::NormalOStringStream oss;
+			oss << "Backup name is already used (name=" << backupName
+				<< ", path=" << backupPath << ")";
+			reason = oss.str();
+			errorNo = WEBAPI_CP_BACKUPNAME_ALREADY_EXIST;
+			errorInfo["errorStatus"] =
+					picojson::value(static_cast<double>(errorNo));
+			errorInfo["reason"] = picojson::value(reason);
+			result = picojson::value(errorInfo);
+			GS_TRACE_ERROR(CHECKPOINT_SERVICE, GS_TRACE_CP_BACKUP_FAILED,
+					"Backup name is already used (name=" <<
+					backupName << ", path=" << backupPath <<
+					", mode=" << checkpointModeToString(mode) << ")");
+			return false;
+		}
+		if (option.isIncrementalBackup_ && option.incrementalBackupLevel_ == 1) {
+			u8string checkPath(origBackupPath);
+			if (lastQueuedBackupStatus_.incrementalLevel_ == 0) {
+				checkPath.append("_lv0");
+			}
+			else {
+				util::NormalOStringStream oss;
+				oss << "_lv1_" << std::setfill('0') << std::setw(3)
+					<< lastQueuedBackupStatus_.cumlativeCount_ << "_"
+					<< std::setw(3)
+					<< lastQueuedBackupStatus_.differentialCount_;
+				checkPath.append(oss.str());
+			}
+			if (!util::FileSystem::exists(checkPath.c_str())) {
+				util::NormalOStringStream oss;
+				oss << "Last incremental backup is not found (name="
+					<< backupName << ", path=" << checkPath << ")";
+				reason = oss.str();
+				errorNo = WEBAPI_CP_BACKUPNAME_UNMATCH;
+				errorInfo["errorStatus"] =
+						picojson::value(static_cast<double>(errorNo));
+				errorInfo["reason"] = picojson::value(reason);
+				result = picojson::value(errorInfo);
+				GS_TRACE_ERROR(CHECKPOINT_SERVICE, GS_TRACE_CP_BACKUP_FAILED,
+						"Last incremental backup directory is not found (name=" <<
+						backupName << ", path=" << checkPath <<
+						", mode=" << checkpointModeToString(mode) << ")");
+				return false;
+			}
+		}
+	}
+	else {
+		assert(mode == CP_BACKUP_END);
+		if (!util::FileSystem::exists(backupPath.c_str())) {
+			util::NormalOStringStream oss;
+			oss << "Backup name is not found (name=" << backupName << ")";
+			reason = oss.str();
+			errorNo = WEBAPI_CP_BACKUPNAME_UNMATCH;
+			errorInfo["errorStatus"] =
+					picojson::value(static_cast<double>(errorNo));
+			errorInfo["reason"] = picojson::value(reason);
+			result = picojson::value(errorInfo);
+			GS_TRACE_ERROR(CHECKPOINT_SERVICE, GS_TRACE_CP_BACKUP_FAILED,
+					"Backup name is not found (name=" <<
+					backupName << ", path=" << backupPath <<
+					", mode=" << checkpointModeToString(mode) << ")");
+			return false;
+		}
+	}
+
+	if (option.isIncrementalBackup_) {
+		switch (option.incrementalBackupLevel_) {
+		case 0:
+			break;
+		case 1:
+			if (lastQueuedBackupStatus_.incrementalLevel_ == -1) {
+				util::NormalOStringStream oss;
+				oss << "Last backup is not incremental backup (name="
+					<< backupName << ")";
+				reason = oss.str();
+				errorNo =
+						WEBAPI_CP_PREVIOUS_BACKUP_MODE_IS_NOT_INCREMENTAL_MODE;
+				errorInfo["errorStatus"] =
+						picojson::value(static_cast<double>(errorNo));
+				errorInfo["reason"] = picojson::value(reason);
+				result = picojson::value(errorInfo);
+				GS_TRACE_ERROR(
+						CHECKPOINT_SERVICE, GS_TRACE_CP_BACKUP_FAILED,
+						"Previous backup is not incremental backup (name=" <<
+						backupName << ", path=" << backupPath <<
+						", mode=" << checkpointModeToString(mode) << ")");
+				return false;
+			}
+			break;
+		default:
+			{
+				util::NormalOStringStream oss;
+				oss << "Unknown incremental backup level: "
+					<< option.incrementalBackupLevel_ << " (name=" << backupName << ")";
+				reason = oss.str();
+				errorNo = WEBAPI_CP_INCREMENTAL_BACKUP_LEVEL_IS_INVALID;
+				errorInfo["errorStatus"] =
+						picojson::value(static_cast<double>(errorNo));
+				errorInfo["reason"] = picojson::value(reason);
+				result = picojson::value(errorInfo);
+				GS_TRACE_ERROR(
+						CHECKPOINT_SERVICE, GS_TRACE_CP_BACKUP_FAILED,
+						"Unknown incremental backup level: " <<
+						option.incrementalBackupLevel_ << " (name=" << backupName <<
+						")" <<
+						", path=" << backupPath <<
+						", mode=" << checkpointModeToString(mode) << ")");
+				return false;
+			}
+		}
+	}
+	if (!makeBackupDirectory(mode, backupPath)) {
+		util::NormalOStringStream oss;
+		oss << "Backup directory can't create (name=" << backupName
+			<< ", path=" << backupPath << ")";
+		reason = oss.str();
+		errorNo = WEBAPI_CP_CREATE_BACKUP_PATH_FAILED;
+		errorInfo["errorStatus"] =
+				picojson::value(static_cast<double>(errorNo));
+		errorInfo["reason"] = picojson::value(reason);
+		result = picojson::value(errorInfo);
+		GS_TRACE_ERROR(CHECKPOINT_SERVICE, GS_TRACE_CP_BACKUP_FAILED,
+				"Backup directory can't create (name=" <<
+				backupName << ", path=" << backupPath <<
+				", mode=" << checkpointModeToString(mode) << ")");
+		return false;
+	}
+	try {
+		GS_TRACE_INFO(
+				CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
+				"[OnlineBackup] requested (name=" <<
+				backupName << ", path=" << backupPath <<
+				", mode=" << checkpointModeToString(mode) <<
+				", logArchive=" << (option.logArchive_ ? "true" : "false") <<
+				", logDuplicate=" << (option.logDuplicate_ ? "true" : "false") <<
+				", isIncrementalBackup:" << (option.isIncrementalBackup_ ? 1 : 0) <<
+				", incrementalBackupLevel:" << option.incrementalBackupLevel_ <<
+				", isCumulativeBackup:" << (option.isCumulativeBackup_ ? 1 : 0) <<
+				")");
+
+		switch (mode) {
+		case CP_BACKUP:
+		case CP_BACKUP_START:
+		case CP_BACKUP_END:
+			lastQueuedBackupStatus_.name_ = backupName;
+			if (option.isIncrementalBackup_) {
+				lastQueuedBackupStatus_.archiveLogMode_ = false;
+				lastQueuedBackupStatus_.duplicateLogMode_ = false;
+				if (option.incrementalBackupLevel_ == 0) {
+					mode = CP_INCREMENTAL_BACKUP_LEVEL_0;
+					lastQueuedBackupStatus_.incrementalLevel_ = 0;
+					lastQueuedBackupStatus_.cumlativeCount_ = 0;
+					lastQueuedBackupStatus_.differentialCount_ = 0;
+				}
+				else {
+					assert(option.incrementalBackupLevel_ == 1);
+					lastQueuedBackupStatus_.incrementalLevel_ = 1;
+					if (option.isCumulativeBackup_) {
+						mode = CP_INCREMENTAL_BACKUP_LEVEL_1_CUMULATIVE;
+						++lastQueuedBackupStatus_.cumlativeCount_;
+						lastQueuedBackupStatus_.differentialCount_ = 0;
+					}
+					else {
+						mode = CP_INCREMENTAL_BACKUP_LEVEL_1_DIFFERENTIAL;
+						++lastQueuedBackupStatus_.differentialCount_;
+					}
+				}
+			}
+			else {
+				lastQueuedBackupStatus_.archiveLogMode_ = option.logArchive_;
+				lastQueuedBackupStatus_.duplicateLogMode_ = option.logDuplicate_;
+				lastQueuedBackupStatus_.incrementalLevel_ = -1;
+				lastQueuedBackupStatus_.cumlativeCount_ = 0;
+				lastQueuedBackupStatus_.differentialCount_ = 0;
+			}
+			break;
+		default: {
+			assert(false);
+			reason = "Unknown mode";
+			errorNo = WEBAPI_CP_OTHER_REASON;
+			errorInfo["errorStatus"] =
+					picojson::value(static_cast<double>(errorNo));
+			errorInfo["reason"] = picojson::value(reason);
+			result = picojson::value(errorInfo);
+			GS_TRACE_ERROR(
+					CHECKPOINT_SERVICE, GS_TRACE_CP_BACKUP_FAILED,
+					"Unacceptable mode");
+			return false;
+		}
+		}
+
+		Event requestEvent(
+				eventSource, CP_REQUEST_CHECKPOINT, CP_HANDLER_PARTITION_ID);
+
+		EventByteOutStream out = requestEvent.getOutStream();
+		uint32_t flag = 0;
+		flag |= (option.logArchive_ ? BACKUP_ARCHIVE_LOG_MODE_FLAG : 0);
+		flag |= (option.logDuplicate_ ? BACKUP_DUPLICATE_LOG_MODE_FLAG : 0);
+
+		if (option.logDuplicate_) {
+			flag |= (option.skipBaseline_ ? BACKUP_SKIP_BASELINE_MODE_FLAG : 0);
+		}
+		out << mode;
+		out << flag;
+		out << backupPath;
+		out << UNDEF_SYNC_SEQ_NUMBER; 
+
+		ee_.add(requestEvent);
+		return true;
+	}
+	catch (std::exception &e) {
+		clusterService_->setError(eventSource, &e);
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Request online backup failed.  (reason=" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+}
+
+CheckpointId CheckpointService::getLastArchivedCpId(PartitionGroupId pgId) {
+	return lastArchivedCpIdList_[pgId];
+}
+
+void CheckpointService::updateLastArchivedCpIdList() {
+	for (PartitionGroupId pgId = 0; pgId < pgConfig_.getPartitionGroupCount();
+			++pgId) {
+		lastArchivedCpIdList_[pgId] = logManager_->getLastCheckpointId(pgId);
+	}
+}
+
+void CheckpointService::requestCleanupLogFiles(
+	const Event::Source &eventSource) {
+	try {
+		std::string dummy;
+		for (PartitionGroupId pgId = 0;
+				pgId < pgConfig_.getPartitionGroupCount(); ++pgId) {
+			const PartitionId startPId =
+					pgConfig_.getGroupBeginPartitionId(pgId);
+			Event requestEvent(eventSource, CLEANUP_LOG_FILES, startPId);
+			EventByteOutStream out = requestEvent.getOutStream();
+			out << 0;
+			out << UNDEF_CHECKPOINT_ID;
+			out << dummy;
+			out << UNDEF_SYNC_SEQ_NUMBER; 
+
+			txnEE_->add(requestEvent);
+		}
+	}
+	catch (const std::exception &e) {
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Cleanup log files failed. (reason=" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+}
+
+
+
+bool CheckpointService::requestPrepareLongArchive(
+		const Event::Source &eventSource,
+		const std::string &longArchiveName, picojson::value &result) {
+	picojson::object errorInfo;
+	int32_t errorNo = 0;
+	std::string reason;
+	if (lastMode_ == CP_SHUTDOWN) {
+		reason = "Shutdown is already in progress";
+		errorNo = WEBAPI_CP_SHUTDOWN_IS_ALREADY_IN_PROGRESS;
+		errorInfo["errorStatus"] =
+				picojson::value(static_cast<double>(errorNo));
+		errorInfo["reason"] = picojson::value(reason);
+		result = picojson::value(errorInfo);
+		GS_TRACE_ERROR(CHECKPOINT_SERVICE,
+				GS_TRACE_CP_CONTROLLER_ILLEAGAL_STATE,
+				"Checkpoint cancelled by already requested shutdown ("
+				"lastMode=" << checkpointModeToString(lastMode_) <<
+				", longArchiveName=" << longArchiveName << ")");
+		return false;
+	}
+
+	if (requestedShutdownCheckpoint_) {
+		reason = "Shutdown is already in progress";
+		errorNo = WEBAPI_CP_SHUTDOWN_IS_ALREADY_IN_PROGRESS;
+		errorInfo["errorStatus"] =
+				picojson::value(static_cast<double>(errorNo));
+		errorInfo["reason"] = picojson::value(reason);
+		result = picojson::value(errorInfo);
+		GS_TRACE_ERROR(
+				CHECKPOINT_SERVICE, GS_TRACE_CP_CONTROLLER_ILLEAGAL_STATE,
+				"Checkpoint cancelled by already requested shutdown ("
+				"lastMode=" << checkpointModeToString(lastMode_) <<
+				", longArchiveName=" << longArchiveName << ")");
+		return false;
+	}
+
+	std::string longArchivePath;
+	util::FileSystem::createPath(
+		longArchiveTopPath_.c_str(), longArchiveName.c_str(), longArchivePath);
+	std::string origLongArchivePath(longArchivePath);
+
+	const int32_t mode = CP_PREPARE_LONG_ARCHIVE;
+	if (longArchiveName.empty()) {
+		reason = "LongArchiveName is empty";
+		errorNo = WEBAPI_CP_LONG_ARCHIVE_NAME_IS_EMPTY;
+		errorInfo["errorStatus"] =
+				picojson::value(static_cast<double>(errorNo));
+		errorInfo["reason"] = picojson::value(reason);
+		result = picojson::value(errorInfo);
+		GS_TRACE_ERROR(
+				CHECKPOINT_SERVICE, GS_TRACE_CP_PREPARE_LONG_ARCHIVE_FAILED,
+				"LongArchiveName is empty ("
+				"mode=" << checkpointModeToString(mode) << ")");
+		return false;
+	}
+
+	try {
+		AlphaOrDigitKey::validate(
+			longArchiveName.c_str(), static_cast<uint32_t>(longArchiveName.size()),
+			MAX_LONG_ARCHIVE_NAME_LEN, "longArchiveName");
+	} catch (UserException &e) {
+		UTIL_TRACE_EXCEPTION(CHECKPOINT_SERVICE, e,
+				"LongArchiveName is invalid (name=" << longArchiveName <<
+				", mode=" << checkpointModeToString(mode) <<
+				", reason=" << GS_EXCEPTION_MESSAGE(e) <<")");
+		return false;
+	}
+
+	try {
+		util::FileSystem::createDirectoryTree(longArchiveTopPath_.c_str());
+		if (!util::FileSystem::isDirectory(longArchiveTopPath_.c_str())) {
+			util::NormalOStringStream oss;
+			oss << "Failed to create long archive top dir (path="
+				<< longArchiveTopPath_ << ")";
+			reason = oss.str();
+			errorNo = WEBAPI_CP_CREATE_LONG_ARCHIVE_PATH_FAILED;
+			errorInfo["errorStatus"] =
+					picojson::value(static_cast<double>(errorNo));
+			errorInfo["reason"] = picojson::value(reason);
+			result = picojson::value(errorInfo);
+			GS_TRACE_ERROR(CHECKPOINT_SERVICE, GS_TRACE_CP_PREPARE_LONG_ARCHIVE_FAILED,
+					"Failed to create long archive top dir (path=" <<
+					longArchiveTopPath_ <<
+					", mode=" << checkpointModeToString(mode) << ")");
+			return false;
+		}
+	}
+	catch (std::exception &e) {
+		util::NormalOStringStream oss;
+		oss << "Failed to create long archive top dir (path=" << longArchiveTopPath_
+			<< ")";
+		reason = oss.str();
+		errorNo = WEBAPI_CP_CREATE_LONG_ARCHIVE_PATH_FAILED;
+		errorInfo["errorStatus"] =
+				picojson::value(static_cast<double>(errorNo));
+		errorInfo["reason"] = picojson::value(reason);
+		result = picojson::value(errorInfo);
+		UTIL_TRACE_EXCEPTION(CHECKPOINT_SERVICE, e,
+				"Failed to create long archive top dir (path=" <<
+				longArchiveTopPath_ <<
+				", mode=" << checkpointModeToString(mode) <<
+				", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+		return false;
+	}
+
+	if (util::FileSystem::exists(longArchivePath.c_str())) {
+		util::NormalOStringStream oss;
+		oss << "long archive name is already used (name=" << longArchiveName
+		<< ", path=" << longArchivePath << ")";
+		reason = oss.str();
+		errorNo = WEBAPI_CP_LONG_ARCHIVE_NAME_ALREADY_EXIST;
+		errorInfo["errorStatus"] =
+				picojson::value(static_cast<double>(errorNo));
+		errorInfo["reason"] = picojson::value(reason);
+		result = picojson::value(errorInfo);
+		GS_TRACE_ERROR(CHECKPOINT_SERVICE, GS_TRACE_CP_PREPARE_LONG_ARCHIVE_FAILED,
+				"long archive name is already used (name=" <<
+				longArchiveName << ", path=" << longArchivePath <<
+			", mode=" << checkpointModeToString(mode) << ")");
+		return false;
+	}
+
+	if (!makeLongArchiveDirectory(mode, longArchivePath)) {
+		util::NormalOStringStream oss;
+		oss << "long archive directory can't create (name=" << longArchiveName
+			<< ", path=" << longArchivePath << ")";
+		reason = oss.str();
+		errorNo = WEBAPI_CP_CREATE_LONG_ARCHIVE_PATH_FAILED;
+		errorInfo["errorStatus"] =
+				picojson::value(static_cast<double>(errorNo));
+		errorInfo["reason"] = picojson::value(reason);
+		result = picojson::value(errorInfo);
+		GS_TRACE_ERROR(CHECKPOINT_SERVICE, GS_TRACE_CP_PREPARE_LONG_ARCHIVE_FAILED,
+				"long archive directory can't create (name=" <<
+				longArchiveName << ", path=" << longArchivePath <<
+				", mode=" << checkpointModeToString(mode) << ")");
+		return false;
+	}
+	try {
+		GS_TRACE_INFO(
+				CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
+				"[PrepareLongArchive] requested (name=" <<
+				longArchiveName << ", path=" << longArchivePath <<
+				", mode=" << checkpointModeToString(mode) <<
+				")");
+
+		Event requestEvent(
+				eventSource, CP_REQUEST_CHECKPOINT, CP_HANDLER_PARTITION_ID);
+
+		EventByteOutStream out = requestEvent.getOutStream();
+		uint32_t flag = 0;
+		out << mode;
+		out << flag;
+		out << longArchivePath;
+		out << UNDEF_SYNC_SEQ_NUMBER; 
+
+		ee_.add(requestEvent);
+		return true;
+	}
+	catch (std::exception &e) {
+		clusterService_->setError(eventSource, &e);
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Request prepare long archive failed.  (reason=" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
+	}
 }
 
 
@@ -455,9 +1046,19 @@ void CheckpointServiceMainHandler::operator()(EventContext &ec, Event &ev) {
 			ec.getEngine().addTimer(
 					ev, changeTimeSecondToMilliSecond(
 					checkpointService_->getCheckpointInterval()));
-		}
 
-		checkpointService_->runCheckpoint(ec, mode, flag, backupPath, ssn);
+			if (checkpointService_->getPeriodicCheckpointFlag()) {
+				checkpointService_->runCheckpoint(ec, mode, flag, backupPath, ssn);
+			}
+			else {
+				GS_TRACE_INFO(
+						CHECKPOINT_SERVICE_STATUS_DETAIL, GS_TRACE_CP_STATUS,
+						"Periodic checkpoint skipped.");
+			}
+		}
+		else {
+			checkpointService_->runCheckpoint(ec, mode, flag, backupPath, ssn);
+		}
 	}
 	catch (UserException &e) {
 		checkpointService_->errorOccured_ = true;
@@ -538,10 +1139,32 @@ const char8_t *CheckpointService::checkpointModeToString(int32_t mode) {
 		return "NORMAL_CHECKPOINT";
 	case CP_REQUESTED:
 		return "REQUESTED_CHECKPOINT";
+	case CP_BACKUP:
+		return "BACKUP";
+	case CP_BACKUP_START:
+		return "BACKUP_PHASE1";
+	case CP_BACKUP_END:
+		return "BACKUP_PHASE2";
 	case CP_AFTER_RECOVERY:
 		return "RECOVERY_CHECKPOINT";
 	case CP_SHUTDOWN:
 		return "SHUTDOWN_CHECKPOINT";
+	case CP_BACKUP_WITH_LOG_ARCHIVE:
+		return "BACKUP_WITH_LOG_ARCHIVE";
+	case CP_BACKUP_WITH_LOG_DUPLICATE:
+		return "BACKUP_WITH_LOG_DUPLICATE";
+	case CP_ARCHIVE_LOG_START:
+		return "ARCHIVE_LOG_START";
+	case CP_ARCHIVE_LOG_END:
+		return "ARCHIVE_LOG_END";
+	case CP_INCREMENTAL_BACKUP_LEVEL_0:
+		return "INCREMENTAL_BACKUP_LEVEL_0";
+	case CP_INCREMENTAL_BACKUP_LEVEL_1_CUMULATIVE:
+		return "INCREMENTAL_BACKUP_LEVEL_1_CUMULATIVE";
+	case CP_INCREMENTAL_BACKUP_LEVEL_1_DIFFERENTIAL:
+		return "INCREMENTAL_BACKUP_LEVEL_1_DIFFERENTIAL";
+	case CP_PREPARE_LONG_ARCHIVE:  
+		return "PREPARE_LONG_ARCHIVE";
 	case CP_PREPARE_LONGTERM_SYNC:
 		return "PREPARE_LONGTERM_SYNC";
 	case CP_STOP_LONGTERM_SYNC:
@@ -695,17 +1318,36 @@ bool CheckpointService::checkLongtermSyncIsReady(SyncSequentialNumber ssn) {
 }
 
 bool CheckpointService::getLongSyncChunk(
-		SyncSequentialNumber ssn, uint32_t size, uint8_t* buffer) {
+		SyncSequentialNumber ssn, uint64_t size, uint8_t* buffer,
+		uint64_t &readSize, uint64_t &totalCount,
+		uint64_t &completedCount, uint64_t &readyCount) {
+
+	readSize = 0;
+	totalCount = 0;
+	completedCount = 0;
+	readyCount = 0;
 	if (ssn != UNDEF_SYNC_SEQ_NUMBER) {
+		util::LockGuard<util::Mutex> guard(cpLongtermSyncSessionMutex_);
 		CpLongtermSyncInfo *info = getCpLongtermSyncInfo(ssn);
 		if (info && info->newOffsetMap_) {
-			if (info->readCount_ == 0) {
-				info->readItr_ = info->newOffsetMap_->begin();
+			totalCount = info->totalChunkCount_;
+			completedCount = info->readCount_;
+			readyCount = info->readyCount_;
+			if (info->readCount_ >= info->totalChunkCount_) {
+				GS_TRACE_INFO(
+						CHECKPOINT_SERVICE_STATUS_DETAIL, GS_TRACE_CP_STATUS,
+						"[CP_GET_LONGTERM_SYNC_CHUNK_END]: totalCount," << totalCount <<
+						",completedCount," << completedCount <<
+						",readyCount," << readyCount);
+				return true;
 			}
-			if (info->readItr_ == info->newOffsetMap_->end()) {
-				GS_THROW_USER_ERROR(
-						GS_ERROR_CP_LONGTERM_SYNC_FAILED,
-						"No chunk: ssn=" << ssn << ", pId=" << info->targetPId_);
+			if (info->readCount_ >= info->readyCount_) {
+				GS_TRACE_INFO(
+						CHECKPOINT_SERVICE_STATUS_DETAIL, GS_TRACE_CP_STATUS,
+						"[CP_GET_LONGTERM_SYNC_CHUNK_AT_TAIL]: totalCount," << totalCount <<
+						",completedCount," << completedCount <<
+						",readyCount," << readyCount);
+				return false;
 			}
 			if (info && info->logManager_ &&
 						!info->logManager_->isLongtermSyncLogAvailable()) {
@@ -715,8 +1357,8 @@ bool CheckpointService::getLongSyncChunk(
 						"SyncTemp log write failed (reason=" <<
 						info->logManager_->getLongtermSyncLogErrorMessage() << ")");
 			}
-			const size_t chunkSize =
-					1 << chunkManager_->getConfig().getChunkExpSize();
+			assert(info->chunkSize_ > 0);
+			const uint32_t chunkSize = info->chunkSize_;
 			if (size < chunkSize) {
 				GS_THROW_USER_ERROR(
 						GS_ERROR_CHM_GET_CHECKPOINT_CHUNK_FAILED,
@@ -725,17 +1367,29 @@ bool CheckpointService::getLongSyncChunk(
 			}
 
 			ChunkManager::FileManager fileManager(chunkManager_->getConfig(), *(info->syncCpFile_));
-			uint32_t remain = static_cast<uint32_t>(size / chunkSize);
+			uint32_t remain = size / chunkSize;
+			size_t fileRemain = info->readyCount_ - info->readCount_;
 			uint8_t *addr = buffer;
-			while(info->readItr_ != info->newOffsetMap_->end() && remain > 0) {
-				info->syncCpFile_->readBlock(addr, 1, info->readItr_->second);
+			for(uint32_t chunkCount = 0; remain > 0 && fileRemain > 0; ++chunkCount) {
+				info->syncCpFile_->readBlock(addr, 1, info->readCount_);
 				fileManager.uncompressChunk(addr);
-				++info->readItr_;
-				++info->readCount_;
+				info->syncCpFile_->punchHoleBlock(chunkSize, info->readCount_ * chunkSize);
+
 				addr += chunkSize;
+				readSize += chunkSize;
+				++info->readCount_;
 				--remain;
+				--fileRemain;
 			}
-			return (info->readItr_ == info->newOffsetMap_->end());
+			completedCount = info->readCount_;
+			readyCount = info->readyCount_;
+
+			GS_TRACE_INFO(
+					CHECKPOINT_SERVICE_STATUS_DETAIL, GS_TRACE_CP_STATUS,
+					"[CP_GET_LONGTERM_SYNC_CHUNK]: totalCount," << totalCount <<
+					",completedCount," << completedCount <<
+					",readyCount," << readyCount);
+			return (info->readCount_ == info->totalChunkCount_);
 		}
 		else {
 			GS_THROW_USER_ERROR(
@@ -831,6 +1485,8 @@ void CheckpointService::runCheckpoint(
 		const std::string &backupPath, SyncSequentialNumber ssn) {
 	if ((lastMode_ == CP_UNDEF && mode != CP_AFTER_RECOVERY) ||
 			lastMode_ == CP_SHUTDOWN ||
+			(mode != CP_BACKUP_END && mode != CP_SHUTDOWN && backupEndPending_) ||
+			(mode == CP_BACKUP_END && !backupEndPending_) ||
 			(mode != CP_SHUTDOWN && requestedShutdownCheckpoint_)  
 		) {
 		GS_TRACE_WARNING(
@@ -839,6 +1495,8 @@ void CheckpointService::runCheckpoint(
 				checkpointModeToString(mode) <<
 				", lastMode=" << checkpointModeToString(lastMode_) <<
 				", shutdownRequested=" << requestedShutdownCheckpoint_ <<
+				", backupEndPending=" << backupEndPending_ <<
+				", backupPath=" << backupPath <<
 				")");
 		return;
 	}
@@ -846,13 +1504,29 @@ void CheckpointService::runCheckpoint(
 	currentCpGrpId_ = 0;
 	errorOccured_ = false;
 
+	backupEndPending_ = false;
+	bool backupCommandWorking = false;
+	bool prepareLongArchiveCommandWorking = false;
+	if (mode == CP_BACKUP || mode == CP_BACKUP_START || mode == CP_BACKUP_END ||
+			mode == CP_INCREMENTAL_BACKUP_LEVEL_0) {
+
+		backupCommandWorking = true;
+	}
+	if (mode == CP_PREPARE_LONG_ARCHIVE) {
+		prepareLongArchiveCommandWorking = true;
+	}
 	struct CheckpointDataCleaner {
 		CheckpointDataCleaner(
 				CheckpointService &service,
-				ChunkManager &chunkManager, EventContext &ec)
+				ChunkManager &chunkManager, EventContext &ec,
+				const bool &backupCommandWorking, const std::string &backupPath,
+				const bool &prepareLongArchiveCommandWorking)
 			: service_(service),
 			  chunkManager_(chunkManager),
 			  ec_(ec),
+			  backupCommandWorking_(backupCommandWorking),
+			  prepareLongArchiveCommandWorking_(prepareLongArchiveCommandWorking),
+			  backupPath_(backupPath),
 			  workerId_(ec.getWorkerId()) {}
 		~CheckpointDataCleaner() {
 			if (workerId_ == 0) {
@@ -863,10 +1537,23 @@ void CheckpointService::runCheckpoint(
 							service_.pgConfig_.getGroupBeginPartitionId(pgId);
 					const CheckpointId cpId = 0;  
 					try {
-						std::string dummy;
 						service_.executeOnTransactionService(ec_,
 								CLEANUP_CP_DATA, CP_UNDEF, startPId, cpId,
-								dummy, false, UNDEF_SYNC_SEQ_NUMBER);  
+								backupPath_, false, UNDEF_SYNC_SEQ_NUMBER);  
+					}
+					catch (...) {
+					}
+				}
+				if (backupCommandWorking_) {
+					try {
+						util::FileSystem::remove(backupPath_.c_str());
+					}
+					catch (...) {
+					}
+				}
+				if (prepareLongArchiveCommandWorking_ && !backupPath_.empty()) {
+					try {
+						util::FileSystem::remove(backupPath_.c_str());
 					}
 					catch (...) {
 					}
@@ -884,9 +1571,13 @@ void CheckpointService::runCheckpoint(
 		CheckpointService &service_;
 		ChunkManager &chunkManager_;
 		EventContext &ec_;
+		const bool &backupCommandWorking_;
+		const bool &prepareLongArchiveCommandWorking_;
+		const std::string &backupPath_;
 		uint32_t workerId_;
 	} cpDataCleaner(
-			*this, *chunkManager_, ec);
+			*this, *chunkManager_, ec, backupCommandWorking, backupPath,
+			prepareLongArchiveCommandWorking);
 
 	startTime_ = 0;
 	endTime_ = 0;
@@ -896,15 +1587,33 @@ void CheckpointService::runCheckpoint(
 	pendingPartitionCount_ = pgConfig_.getPartitionCount();
 
 	if (mode != CP_PREPARE_LONGTERM_SYNC && mode != CP_STOP_LONGTERM_SYNC) { 
+		if (mode != CP_NORMAL) {
 		GS_TRACE_INFO(
 				CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
-				"[CP_START] mode=" << checkpointModeToString(mode));
+				"[CP_START] mode=" << checkpointModeToString(mode) <<
+				", backupPath=" << backupPath.c_str());
+		}
+		else {
+			GS_TRACE_INFO(
+					CHECKPOINT_SERVICE_STATUS_DETAIL, GS_TRACE_CP_STATUS,
+					"[CP_START] mode=" << checkpointModeToString(mode) <<
+					", backupPath=" << backupPath.c_str());
+		}
 	}
 	else {
 		GS_TRACE_INFO(
 				CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
 				"[CP_LONGTERM_SYNC_START] mode=" << checkpointModeToString(mode) <<
 				", SSN=" << ssn);
+	}
+
+	if (mode == CP_BACKUP || mode == CP_BACKUP_START) {
+		backupInfo_.startBackup(backupPath);
+	}
+	else if (mode == CP_INCREMENTAL_BACKUP_LEVEL_0 ||
+			mode == CP_INCREMENTAL_BACKUP_LEVEL_1_CUMULATIVE ||
+			mode == CP_INCREMENTAL_BACKUP_LEVEL_1_DIFFERENTIAL) {
+		backupInfo_.startIncrementalBackup(backupPath, lastBackupPath_, mode);
 	}
 	if (mode != CP_PREPARE_LONGTERM_SYNC && mode != CP_STOP_LONGTERM_SYNC) { 
 		if (parallelCheckpoint_) {
@@ -979,6 +1688,7 @@ void CheckpointService::runCheckpoint(
 		GS_TRACE_INFO(
 				CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
 				"[CP_END] mode=" << checkpointModeToString(mode) <<
+				", backupPath=" << backupPath <<
 				", commandElapsedMillis=" <<
 				getLastDuration(util::DateTime::now(false)));
 	}
@@ -993,7 +1703,13 @@ void CheckpointService::runCheckpoint(
 	pendingPartitionCount_ = 0;
 
 	if (errorOccured_) {
-		if (mode == CP_PREPARE_LONGTERM_SYNC) { 
+		if (mode == CP_BACKUP || mode == CP_BACKUP_START ||
+				mode == CP_BACKUP_END || mode == CP_INCREMENTAL_BACKUP_LEVEL_0 ||
+				mode == CP_INCREMENTAL_BACKUP_LEVEL_1_CUMULATIVE ||
+				mode == CP_INCREMENTAL_BACKUP_LEVEL_1_DIFFERENTIAL) {
+			backupInfo_.errorBackup();
+		}
+		else if (mode == CP_PREPARE_LONGTERM_SYNC) { 
 			assert(ssn != UNDEF_SYNC_SEQ_NUMBER);
 			CpLongtermSyncInfo *info = getCpLongtermSyncInfo(ssn);
 			if (info != NULL) { 
@@ -1004,7 +1720,27 @@ void CheckpointService::runCheckpoint(
 		}
 		return;
 	}
-	if (mode == CP_NORMAL) {
+	if (mode == CP_BACKUP_START) {
+		backupEndPending_ = true;
+	}
+
+	if (mode == CP_BACKUP || mode == CP_BACKUP_START ||
+			mode == CP_INCREMENTAL_BACKUP_LEVEL_0 ||
+			mode == CP_INCREMENTAL_BACKUP_LEVEL_1_CUMULATIVE ||
+			mode == CP_INCREMENTAL_BACKUP_LEVEL_1_DIFFERENTIAL) {
+		lastBackupPath_ = backupPath;
+	}
+
+	backupCommandWorking = false;
+	prepareLongArchiveCommandWorking = false;
+	if (mode == CP_BACKUP || mode == CP_BACKUP_END ||
+			mode == CP_INCREMENTAL_BACKUP_LEVEL_0 ||
+			mode == CP_INCREMENTAL_BACKUP_LEVEL_1_CUMULATIVE ||
+			mode == CP_INCREMENTAL_BACKUP_LEVEL_1_DIFFERENTIAL) {
+		backupInfo_.endBackup();
+		totalBackupOperation_++;
+	}
+	else if (mode == CP_NORMAL) {
 		totalNormalCpOperation_++;
 	}
 	else if (mode == CP_REQUESTED) {
@@ -1057,15 +1793,45 @@ void CheckpointService::runGroupCheckpoint(
 	GS_TRACE_INFO(
 			CHECKPOINT_SERVICE_STATUS_DETAIL, GS_TRACE_CP_STATUS,
 			"[CP_GROUP_START_REQUEST] mode=" << checkpointModeToString(mode) <<
-			", pgId=" << pgId);
-
+			", pgId=" << pgId << ", backupPath=" << backupPath);
 
 	PartitionGroupLock pgLock(*transactionManager_, pgId);
 
 	util::StackAllocator::Scope scope(alloc);  
 
+	if (mode == CP_BACKUP_END) {
+		const CheckpointId cpId = logManager_->getLastCheckpointId(pgId);
+
+		GS_TRACE_INFO(
+				CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
+				"[CP_BACKUP_LOG_COPY] mode=" <<
+				checkpointModeToString(mode) << ", pgId=" << pgId <<
+				", cpId=" << cpId << ", lastBackupPath=" << lastBackupPath_);
+
+		backupInfo_.startLogFileCopy();
+
+		uint64_t fileSize = backupLog(flag, pgId, lastBackupPath_);
+
+		backupInfo_.endLogFileCopy(pgId, fileSize);
+
+		lastCompletedBackupStatus_.name_ = backupPath;
+		lastCompletedBackupStatus_.archiveLogMode_ =
+				(flag & BACKUP_ARCHIVE_LOG_MODE_FLAG) != 0;
+		lastCompletedBackupStatus_.duplicateLogMode_ =
+				(flag & BACKUP_DUPLICATE_LOG_MODE_FLAG) != 0;
+		lastCompletedBackupStatus_.skipBaselineMode_ =
+				(flag & BACKUP_SKIP_BASELINE_MODE_FLAG) != 0;  
+		lastCompletedBackupStatus_.incrementalLevel_ = -1;
+		lastCompletedBackupStatus_.cumlativeCount_ = 0;
+		lastCompletedBackupStatus_.differentialCount_ = 0;
+
+		groupCheckpointStatus_[pgId] = GROUP_CP_COMPLETED;
+
+		return;
+	}
 	if (mode == CP_STOP_LONGTERM_SYNC) {
 		assert(ssn != UNDEF_SYNC_SEQ_NUMBER);
+		util::LockGuard<util::Mutex> guard(cpLongtermSyncSessionMutex_);
 		CpLongtermSyncInfo *info = getCpLongtermSyncInfo(ssn);
 		if (info != NULL) {
 			CpLongtermSyncInfo tmpInfo = *info;
@@ -1083,8 +1849,15 @@ void CheckpointService::runGroupCheckpoint(
 
 			delete tmpInfo.newOffsetMap_;
 			delete tmpInfo.oldOffsetMap_;
-			delete tmpInfo.syncCpFile_;
-
+			try {
+				delete tmpInfo.syncCpFile_;
+			}
+			catch (std::exception &e) {
+				GS_TRACE_WARNING(CHECKPOINT_SERVICE,
+						GS_TRACE_CP_LONGTERM_SYNC_INFO,
+						"Remove long sync temporary file failed.  (reason=" <<
+						 GS_EXCEPTION_MESSAGE(e) << ")");
+			}
 			if (!tmpInfo.dir_.empty()) {
 				try {
 					util::FileSystem::remove(tmpInfo.dir_.c_str(), true);
@@ -1106,17 +1879,28 @@ void CheckpointService::runGroupCheckpoint(
 	GS_TRACE_INFO(
 			CHECKPOINT_SERVICE_STATUS_DETAIL, GS_TRACE_CP_STATUS,
 			"[CP_GROUP_START] mode=" << checkpointModeToString(mode) <<
-			", pgId=" << pgId << ", cpId=" << cpId);
+			", pgId=" << pgId << ", cpId=" << cpId <<
+			", backupPath=" << backupPath);
 
 	uint64_t beforeAllocatedCheckpointBufferCount =
 			chunkManager_->getChunkManagerStats()
 				.getAllocatedCheckpointBufferCount();
 
 	logManager_->flushFile(pgId);
+	needGroupCheckpoint_[pgId] = true;  
 	executeOnTransactionService(
 			ec, PARTITION_GROUP_START, mode, startPId, cpId, backupPath, true,
 			ssn);
 
+	if ((mode == CP_NORMAL) && (needGroupCheckpoint_[pgId] == 0)) {
+		GS_TRACE_INFO(
+				CHECKPOINT_SERVICE_STATUS_DETAIL, GS_TRACE_CP_STATUS,
+				"[CP_GROUP_END] No updates found, skipped :mode=" <<
+				checkpointModeToString(mode) <<
+				", pgId=" << pgId << ", cpId=" << cpId <<
+				", backupPath=" << backupPath);
+		return;
+	}
 
 	if (clusterService_->isError()) {
 		GS_THROW_USER_ERROR(
@@ -1126,7 +1910,6 @@ void CheckpointService::runGroupCheckpoint(
 				clusterService_->isError() << ")");
 	}
 
-
 	int64_t totalWriteCount = 0;
 
 	for (PartitionId pId = startPId; pId < endPId; pId++) {
@@ -1134,9 +1917,9 @@ void CheckpointService::runGroupCheckpoint(
 				CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
 				"[CP_PARTITION_START] mode=" << checkpointModeToString(mode) <<
 				", pgId=" << pgId << ", pId=" << pId <<
-				", cpId=" << cpId);
+				", cpId=" << cpId <<
+				", backupPath=" << backupPath);
 		PartitionLock pLock(*transactionManager_, pId);
-
 
 		struct ChunkStatusCleaner {
 			explicit ChunkStatusCleaner(
@@ -1205,6 +1988,7 @@ void CheckpointService::runGroupCheckpoint(
 				"[CP_PARTITION_END] mode=" <<
 				checkpointModeToString(mode) << ", pgId=" << pgId << ", pId=" <<
 				pId << ", cpId=" << cpId <<
+				", backupPath=" << backupPath <<
 				", writeCount=" << totalWriteCount <<
 				", isReady=" << (checkpointReady ? "true" : "false"));
 
@@ -1239,6 +2023,7 @@ void CheckpointService::runGroupCheckpoint(
 			CHECKPOINT_SERVICE_STATUS_DETAIL, GS_TRACE_CP_STATUS,
 			"[CP_GROUP_END] mode=" << checkpointModeToString(mode) <<
 			", pgId=" << pgId << ", cpId=" << cpId <<
+			", backupPath=" << backupPath <<
 			", bufferAllocateCount=" << cpMallocCount <<
 			", writeCount=" << totalWriteCount);
 
@@ -1250,7 +2035,38 @@ void CheckpointService::runGroupCheckpoint(
 				clusterService_->isError() << ")");
 	}
 
-	if (CP_PREPARE_LONGTERM_SYNC == mode) {
+	if ((CP_BACKUP == mode || CP_BACKUP_START == mode ||
+			CP_INCREMENTAL_BACKUP_LEVEL_0 == mode)) {
+		if ((flag & BACKUP_SKIP_BASELINE_MODE_FLAG) != 0) { 
+			backupInfo_.setCheckCpFileSizeFlag(false);
+		}
+		backupInfo_.startCpFileCopy(pgId, cpId);
+		if ((flag & BACKUP_SKIP_BASELINE_MODE_FLAG) == 0) { 
+
+			GS_TRACE_INFO(
+					CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
+					"[CP_BACKUP_CHUNK_COPY] mode=" <<
+					checkpointModeToString(mode) << ", pgId=" << pgId <<
+					", cpId=" << cpId << ", backupPath=" << backupPath);
+	
+			if (CP_INCREMENTAL_BACKUP_LEVEL_0 == mode) {
+				backupInfo_.startIncrementalBlockCopy(pgId, mode);
+			}
+			uint64_t fileSize =
+					chunkManager_->backupCheckpointFile(pgId, cpId, backupPath);
+	
+			if (CP_INCREMENTAL_BACKUP_LEVEL_0 == mode) {
+				backupInfo_.endIncrementalBlockCopy(pgId, cpId);
+			}
+			backupInfo_.endCpFileCopy(pgId, fileSize);
+		}
+		else {
+			GS_TRACE_INFO(
+					CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
+					"DuplicateLogMode: Baseline backup skipped.");
+		}
+	}
+	else if (CP_PREPARE_LONGTERM_SYNC == mode) {
 
 		assert(ssn != UNDEF_SYNC_SEQ_NUMBER);
 		CpLongtermSyncInfo *info = getCpLongtermSyncInfo(ssn);
@@ -1259,11 +2075,12 @@ void CheckpointService::runGroupCheckpoint(
 			assert(info->targetPId_ != UNDEF_PARTITIONID);
 			assert(pgId == getPGConfig().getPartitionGroupId(info->targetPId_));
 		}
+
 		GS_TRACE_INFO(
 				CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
 				"[CP_PREPARE_LONGTERM_SYNC_CHUNK_COPY_START] mode=" <<
-				checkpointModeToString(mode) << ", pgId=" << pgId <<
-				", cpId=" << cpId << ", synctempPath=" << info->dir_.c_str());
+				checkpointModeToString(mode) << ", pId=" << info->targetPId_ << ", pgId=" << pgId <<
+				", cpId=" << cpId << ", synctempPath=" << info->dir_.c_str() << ", ssn=" << info->ssn_);
 
 		assert(info->newOffsetMap_ == NULL);
 		uint64_t fileSize = 0;
@@ -1275,9 +2092,72 @@ void CheckpointService::runGroupCheckpoint(
 					info->dir_, pgId);
 			info->syncCpFile_->open();
 
-			fileSize = chunkManager_->makeSyncTempCpFile(
-					pgId, info->targetPId_, cpId,
-					info->dir_.c_str(), *info->oldOffsetMap_, *info->newOffsetMap_, *info->syncCpFile_);
+			uint64_t srcFilePos = 0;
+			uint64_t destFilePos = 0;
+			uint64_t writeCount = 0;
+			uint64_t prevDestFilePos = 0;
+
+			ChunkManager::MakeSyncTempCpContext context(alloc);
+			chunkManager_->prepareMakeSyncTempCpFile(
+					pgId, info->targetPId_, cpId, info->dir_.c_str(),
+					*info->syncCpFile_, context);
+			info->totalChunkCount_ = info->oldOffsetMap_->size();
+
+			GS_TRACE_INFO(
+					CHECKPOINT_SERVICE_STATUS_DETAIL, GS_TRACE_CP_STATUS,
+					"makeSyncTempCpFile(start): ssn," << ssn <<
+					",pId," << info->targetPId_ <<
+					",chunkNum," << context.chunkNum_ <<
+					",oldOffsetMapCount," << info->oldOffsetMap_->size());
+
+			bool completed = false;
+			size_t notifyCount = 0;
+			while(!completed) {
+				if (clusterService_->isError()) {
+					GS_THROW_USER_ERROR(
+							GS_ERROR_CP_CONTROLLER_ILLEAGAL_STATE,
+							"[CP_PREPARE_LONGTERM_SYNC_CHUNK_COPY] cancelled ("
+							"systemErrorOccurred=" <<
+							clusterService_->isError() << ")");
+				}
+				if (info->atomicStopFlag_ != 0) {
+					GS_THROW_USER_ERROR(
+							GS_ERROR_CP_CONTROLLER_ILLEAGAL_STATE,
+							"[CP_PREPARE_LONGTERM_SYNC_CHUNK_COPY] cancelled ("
+							"stopRequestFlag=" <<
+							info->atomicStopFlag_ << ")");
+				}
+				completed = chunkManager_->makeSyncTempCpFile(
+						context, *info->oldOffsetMap_, *info->newOffsetMap_,
+						srcFilePos, destFilePos, writeCount);
+				info->readyCount_ = destFilePos;
+				if (prevDestFilePos != destFilePos) {
+					assert(prevDestFilePos < destFilePos);
+					syncService_->notifyCheckpointLongSyncReady(
+							ec, info->targetPId_, &info->longtermSyncInfo_, false);
+					++notifyCount;
+					prevDestFilePos = destFilePos;
+					GS_TRACE_INFO(
+							CHECKPOINT_SERVICE_DETAIL, GS_TRACE_CP_STATUS,
+							"makeSyncTempCpFile(in progress): ssn," << ssn <<
+							",srcFilePos," << srcFilePos <<
+							",totalWriteCount," << writeCount <<
+							",notifyCount," << notifyCount);
+				}
+			}
+			syncService_->notifyCheckpointLongSyncReady(
+					ec, info->targetPId_, &info->longtermSyncInfo_, false);
+			++notifyCount;
+			fileSize = destFilePos * chunkManager_->getConfig().getChunkSize();
+			GS_TRACE_INFO(
+					CHECKPOINT_SERVICE_STATUS_DETAIL, GS_TRACE_CP_STATUS,
+					"makeSyncTempCpFile(completed): ssn," << ssn <<
+					",pId," << info->targetPId_ <<
+					",chunkNum," << context.chunkNum_ <<
+					",newOffsetMapCount," << info->newOffsetMap_->size() <<
+					",totalWriteCount," << writeCount <<
+					",destFillePos," << destFilePos <<
+					",notifyCount," << notifyCount);
 		}
 		catch (std::exception &e) {
 			GS_RETHROW_USER_ERROR(
@@ -1289,15 +2169,137 @@ void CheckpointService::runGroupCheckpoint(
 		GS_TRACE_INFO(
 				CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
 				"[CP_PREPARE_LONGTERM_SYNC_CHUNK_COPY_END] mode=" <<
-				checkpointModeToString(mode) << ", pgId=" << pgId <<
-				", cpId=" << cpId << ", fileSize=" << fileSize);
+				checkpointModeToString(mode) << ", pId=" << info->targetPId_ << ", pgId=" << pgId <<
+				", cpId=" << cpId << ", fileSize=" << fileSize << ", ssn=" << info->ssn_);
 	}
 
+	if (CP_INCREMENTAL_BACKUP_LEVEL_1_CUMULATIVE == mode ||
+			CP_INCREMENTAL_BACKUP_LEVEL_1_DIFFERENTIAL == mode) {
+		GS_TRACE_INFO(CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
+				"[CP_INCREMENTAL_BACKUP_CHUNK_COPY] mode=" <<
+				checkpointModeToString(mode) << ", pgId=" << pgId <<
+				", cpId=" << cpId << ", backupPath=" << backupPath);
+		backupInfo_.startIncrementalBlockCopy(pgId, mode);
+
+		const uint32_t chunkSize = chunkManager_->getConfig().getChunkSize();
+		util::XArray<uint8_t> buffer(alloc);
+		uint8_t temp = 0;
+		buffer.assign(chunkSize, temp);
+
+		LogManager::Config destLogManagerConfig = logManager_->getConfig();
+		destLogManagerConfig.logDirectory_ = backupPath;
+		LogManager destLogManager(destLogManagerConfig);
+		destLogManager.create(pgId, cpId, INCREMENTAL_BACKUP_FILE_SUFFIX);
+
+		BitArray &chunkDiffBitArray = chunkManager_->getBackupBitArray(pgId);
+
+		const PartitionId pId = startPId;
+
+		const uint64_t diffChunkNum = chunkDiffBitArray.countNumOfBits();
+		util::XArray<uint8_t> binaryLogBuf(alloc);
+		binaryLogBuf.clear();
+		destLogManager.putChunkStartLog(binaryLogBuf, pId, 0, diffChunkNum);
+
+		uint64_t chunkCount = 0;
+		for (uint64_t pos = 0; pos < chunkDiffBitArray.length(); ++pos) {
+			binaryLogBuf.clear();
+			if (chunkDiffBitArray.get(pos)) {
+				chunkManager_->getBackupChunk(pgId, pos, buffer.data());
+				destLogManager.putChunkDataLog(
+						binaryLogBuf, pId, chunkCount, chunkSize, buffer.data());
+				++chunkCount;
+			}
+		}
+		binaryLogBuf.clear();
+		destLogManager.putChunkEndLog(binaryLogBuf, pId, chunkCount);
+		assert(chunkCount == diffChunkNum);
+
+		destLogManager.writeBuffer(pgId);
+		destLogManager.flushFile(pgId);
+		destLogManager.close();
+
+		backupInfo_.endIncrementalBlockCopy(pgId, cpId);
+	}
+	if (CP_BACKUP == mode || CP_INCREMENTAL_BACKUP_LEVEL_0 == mode ||
+			CP_INCREMENTAL_BACKUP_LEVEL_1_CUMULATIVE == mode ||
+			CP_INCREMENTAL_BACKUP_LEVEL_1_DIFFERENTIAL == mode) {
+		GS_TRACE_INFO(
+				CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
+				"[CP_BACKUP_LOG_COPY] mode=" <<
+				checkpointModeToString(mode) << ", pgId=" << pgId <<
+				", cpId=" << cpId << ", backupPath=" << backupPath);
+
+		backupInfo_.startLogFileCopy();
+
+		uint64_t fileSize = backupLog(flag, pgId, backupPath);
+
+		backupInfo_.endLogFileCopy(pgId, fileSize);
+
+		lsnInfo_.endCheckpoint(backupPath.c_str());
+
+		lastCompletedBackupStatus_.name_ = backupPath;
+		lastCompletedBackupStatus_.archiveLogMode_ =
+				(flag & BACKUP_ARCHIVE_LOG_MODE_FLAG) != 0;
+		lastCompletedBackupStatus_.duplicateLogMode_ =
+				(flag & BACKUP_DUPLICATE_LOG_MODE_FLAG) != 0;
+		lastCompletedBackupStatus_.skipBaselineMode_ =
+				(flag & BACKUP_SKIP_BASELINE_MODE_FLAG) != 0;  
+		if (CP_INCREMENTAL_BACKUP_LEVEL_0 == mode) {
+			lastCompletedBackupStatus_.incrementalLevel_ = 0;
+			lastCompletedBackupStatus_.cumlativeCount_ = 0;
+			lastCompletedBackupStatus_.differentialCount_ = 0;
+		}
+		else if (CP_INCREMENTAL_BACKUP_LEVEL_1_CUMULATIVE == mode) {
+			lastCompletedBackupStatus_.incrementalLevel_ = 1;
+			++lastCompletedBackupStatus_.cumlativeCount_;
+			lastCompletedBackupStatus_.differentialCount_ = 0;
+		}
+		else if (CP_INCREMENTAL_BACKUP_LEVEL_1_DIFFERENTIAL == mode) {
+			lastCompletedBackupStatus_.incrementalLevel_ = 1;
+			++lastCompletedBackupStatus_.differentialCount_;
+		}
+		else {
+			lastCompletedBackupStatus_.incrementalLevel_ = -1;
+			lastCompletedBackupStatus_.cumlativeCount_ = 0;
+			lastCompletedBackupStatus_.differentialCount_ = 0;
+		}
+	}
+	else if (CP_PREPARE_LONG_ARCHIVE == mode) {
+		GS_TRACE_INFO(
+				CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
+				"[CP_PREPARE_LONG_ARCHIVE_LOG_COPY] mode=" <<
+				checkpointModeToString(mode) << ", pgId=" << pgId <<
+				", cpId=" << cpId << ", backupPath=" << backupPath);
+
+//		uint64_t fileSize = 
+		backupLog(false, pgId, backupPath);
+	}
 	pendingPartitionCount_--;
 
-	lsnInfo_.endCheckpoint();
+	lsnInfo_.endCheckpoint(NULL);
+	if (LogManager::DUPLICATE_LOG_ENABLE == LogManager::getDuplicateLogMode()) {
+		std::string duplicateLogPath;
+		logManager_->getDuplicateLogPath(pgId, duplicateLogPath);
+		if (duplicateLogPath.length() > 0) {
+			lsnInfo_.endCheckpoint(duplicateLogPath.c_str());
+		}
+	}
 }
 
+uint64_t CheckpointService::backupLog(
+	uint32_t flag, PartitionGroupId pgId, const std::string &backupPath) {
+	if ((flag & BACKUP_DUPLICATE_LOG_MODE_FLAG) != 0) {
+		assert(backupPath.length() > 0);
+		logManager_->setDuplicateLogPath(pgId, backupPath.c_str());
+	}
+	else {
+		logManager_->setDuplicateLogPath(pgId, NULL);
+	}
+	uint64_t destLogFileSize =
+			logManager_->copyLogFile(pgId, backupPath.c_str());
+
+	return destLogFileSize;
+}
 
 
 /*!
@@ -1363,6 +2365,19 @@ void CheckpointOperationHandler::operator()(EventContext &ec, Event &ev) {
 			chunkManager_->cleanCheckpointData(pgId);
 			break;
 
+		case CLEANUP_LOG_FILES:
+			logManager_->cleanupLogFiles(
+					pgId, checkpointService_->getLastArchivedCpId(pgId));
+			{
+				util::StackAllocator &alloc = ec.getAllocator();
+				util::StackAllocator::Scope scope(alloc);
+				util::XArray<uint8_t> binaryLogRecords(alloc);
+				PartitionTable *pt = checkpointService_->getPartitionTable();
+				CheckpointId cpId = logManager_->getFirstCheckpointId(pgId);
+				logManager_->updateAvailableStartLsn(
+						pt, pgId, binaryLogRecords, cpId);
+			}
+			break;
 		case CP_TXN_STOP_LONGTERM_SYNC:
 			{
 				assert(ssn != CheckpointService::UNDEF_SYNC_SEQ_NUMBER);
@@ -1379,6 +2394,41 @@ void CheckpointOperationHandler::operator()(EventContext &ec, Event &ev) {
 
 			checkpointService_->setCurrentCpGrpId(pgId);
 
+			{
+				uint16_t newestLogVersion = checkpointService_->getNewestLogVersion();
+				uint16_t logVersion = logManager_->getLogVersion(pId);
+				uint16_t version = LogManager::selectNewerVersion(
+						newestLogVersion, logVersion);
+				if (newestLogVersion != version) {
+					logManager_->setLogVersion(pId, version);
+					checkpointService_->setNewestLogVersion(version);
+					GS_TRACE_INFO(
+							CHECKPOINT_SERVICE_DETAIL, GS_TRACE_CP_STATUS,
+							"setLogVersion: pId=" << pId <<
+							", old=" << logVersion << ", new=" << version
+					);
+				}
+			}
+			if (mode == CP_NORMAL) {
+				const PartitionGroupConfig &pgConfig =
+						checkpointService_->getPGConfig();
+				const PartitionId startPId =
+						pgConfig.getGroupBeginPartitionId(pgId);
+				const PartitionId endPId =
+						pgConfig.getGroupEndPartitionId(pgId);
+				LogSequentialNumber lsnDiff = 0;
+				for (PartitionId pId = startPId; pId < endPId; pId++) {
+					lsnDiff += checkpointService_->diffLastCpStartLsn(
+							pId, logManager_->getLSN(pId));  
+					if (lsnDiff != 0) {
+						break;
+					}
+				}
+				checkpointService_->setNeedGroupCheckpoint(pgId, (lsnDiff != 0));
+				if (lsnDiff == 0) {
+					break; 
+				}
+			}
 			chunkManager_->startCheckpoint(pgId, cpId);
 			logManager_->prepareCheckpoint(pgId, cpId);
 
@@ -1408,12 +2458,25 @@ void CheckpointOperationHandler::operator()(EventContext &ec, Event &ev) {
 				checkpointService_->setCheckpointReady(pId, checkpointReady);
 				if (checkpointReady) {
 					chunkManager_->startCheckpoint(pId);
+					if (CP_INCREMENTAL_BACKUP_LEVEL_0 == mode) {
+						resetIncrementalBackupFilePos(pId);
+					}
+					else if (CP_INCREMENTAL_BACKUP_LEVEL_1_CUMULATIVE == mode ||
+							 CP_INCREMENTAL_BACKUP_LEVEL_1_DIFFERENTIAL == mode) {
+						BitArray &chunkDiffBitArray =
+								chunkManager_->getBackupBitArray(pgId);
+
+						bool isCumulative =
+						  (CP_INCREMENTAL_BACKUP_LEVEL_1_CUMULATIVE == mode);
+						setIncrementalBackupFilePos(
+								pId, isCumulative, chunkDiffBitArray);
+					}
 				}
-//				LogSequentialNumber lsn = 
-				writeCheckpointStartLog(
+				LogSequentialNumber lsn = writeCheckpointStartLog(
 						alloc, mode, pgId, pId, cpId);
 				writeChunkMetaDataLog(
 						alloc, mode, pgId, pId, cpId, checkpointReady);
+				checkpointService_->setLastCpStartLsn(pId, lsn);
 			}
 			break;
 
@@ -1477,13 +2540,6 @@ void CheckpointOperationHandler::operator()(EventContext &ec, Event &ev) {
 				CheckpointId cpId = logManager_->getFirstCheckpointId(pgId);
 				logManager_->updateAvailableStartLsn(
 						pt, pgId, binaryLogRecords, cpId);
-
-				const PartitionId startPId =
-						pgConfig.getGroupBeginPartitionId(pgId);
-				const PartitionId endPId =
-						pgConfig.getGroupEndPartitionId(pgId);
-				clusterService_->requestUpdateStartLsn(
-						ec, ec.getAllocator(), startPId, endPId);
 			}
 			if (ssn != CheckpointService::UNDEF_SYNC_SEQ_NUMBER) {
 				CheckpointService::CpLongtermSyncInfo *info =
@@ -1510,7 +2566,7 @@ void CheckpointOperationHandler::operator()(EventContext &ec, Event &ev) {
 			}
 		} break;
 		}
-		WATCHER_END_3(getEventTypeName(ev.getType()), pId, pgId);
+		WATCHER_END_DETAIL(getEventTypeName(ev.getType()), pId, pgId);
 	}
 	catch (std::exception &e) {
 		clusterService_->setError(ec, &e);
@@ -1520,6 +2576,77 @@ void CheckpointOperationHandler::operator()(EventContext &ec, Event &ev) {
 	}
 }
 
+void CheckpointOperationHandler::setIncrementalBackupFilePos(
+	PartitionId pId, bool isCumulative, BitArray &bitArray) {
+	try {
+		const PartitionGroupId pgId =
+				checkpointService_->getPGConfig().getPartitionGroupId(pId);
+		const uint64_t fileBlockNum =
+				chunkManager_->getChunkManagerStats().getCheckpointFileSize(pgId) /
+				chunkManager_->getConfig().getChunkSize();
+		bitArray.reserve(fileBlockNum);
+
+		ChunkCategoryId categoryId;
+		ChunkId chunkId;
+		int64_t scanSize = chunkManager_->getScanSize(pId);
+		ChunkKey *chunkKey;
+		ChunkManager::MetaChunk *metaChunk =
+				chunkManager_->begin(pId, categoryId, chunkId, chunkKey);
+		if (isCumulative) {
+			for (int64_t index = 0; index < scanSize; index++) {
+				if (metaChunk) {
+					if (metaChunk->getCumulativeDirtyFlag()) {
+						int64_t filePos = metaChunk->getCheckpointPos();
+						assert(filePos != -1);
+						assert(!bitArray.get(filePos));
+						bitArray.set(filePos, true);
+						metaChunk->setDifferentialDirtyFlag(false);
+					}
+				}
+				metaChunk = chunkManager_->next(pId, categoryId, chunkId, chunkKey);
+			}
+		}
+		else {
+			for (int64_t index = 0; index < scanSize; index++) {
+				if (metaChunk) {
+					if (metaChunk->getDifferentialDirtyFlag()) {
+						int64_t filePos = metaChunk->getCheckpointPos();
+						assert(filePos != -1);
+						assert(!bitArray.get(filePos));
+						bitArray.set(filePos, true);
+						metaChunk->setDifferentialDirtyFlag(false);
+					}
+				}
+				metaChunk = chunkManager_->next(pId, categoryId, chunkId, chunkKey);
+			}
+		}
+	}
+	catch (std::exception &e) {
+		GS_RETHROW_USER_OR_SYSTEM(
+				e, GS_EXCEPTION_MERGE_MESSAGE(e,
+						"Failed to set incremental backup position: "
+						"pId," <<
+						pId << ",isChumulative," <<
+						(isCumulative ? "true" : "false")));
+	}
+}
+
+void CheckpointOperationHandler::resetIncrementalBackupFilePos(
+		PartitionId pId) {
+	ChunkCategoryId categoryId;
+	ChunkId chunkId;
+	int64_t scanSize = chunkManager_->getScanSize(pId);
+	ChunkKey *chunkKey;
+	ChunkManager::MetaChunk *metaChunk =
+			chunkManager_->begin(pId, categoryId, chunkId, chunkKey);
+	for (int64_t index = 0; index < scanSize; index++) {
+		if (metaChunk) {
+			metaChunk->setCumulativeDirtyFlag(false);
+			metaChunk->setDifferentialDirtyFlag(false);
+		}
+		metaChunk = chunkManager_->next(pId, categoryId, chunkId, chunkKey);
+	}
+}
 
 /*!
 	@brief Outputs a log of starting a Checkpoint.
@@ -1566,7 +2693,7 @@ void CheckpointOperationHandler::compressChunkMetaDataLog(
 		util::XArray<uint8_t> &logBuffer,
 		util::XArray<uint8_t> &metaDataEmptySize,
 		util::XArray<uint8_t> &metaDataFileOffset,
-		util::XArray<uint8_t> &metaDataChunkKey
+		util::XArray<uint8_t> &metaDataChunkKey, int32_t validCount
 ) {
 	util::XArray<uint8_t> compressBuffer(alloc);
 	util::XArray<uint8_t> compressSource(alloc);
@@ -1598,17 +2725,17 @@ void CheckpointOperationHandler::compressChunkMetaDataLog(
 			compressBuffer.resize(compSize);
 			logManager_->putChunkMetaDataLog(
 					logBuffer, pId, categoryId, startChunkId, count,
-					origSize, &compressBuffer, false);
+					validCount, origSize, &compressBuffer, false);
 		}
 		else {
 			logManager_->putChunkMetaDataLog(
 					logBuffer, pId, categoryId, startChunkId, count,
-					0, &compressSource, false);
+					validCount, 0, &compressSource, false);
 		}
 	} catch(std::exception &e) {
 		logManager_->putChunkMetaDataLog(
 				logBuffer, pId, categoryId, startChunkId, count,
-				0, &compressSource, false);
+				validCount, 0, &compressSource, false);
 		GS_TRACE_WARNING(CHECKPOINT_SERVICE,
 				GS_TRACE_CM_COMPRESSION_FAILED,
 				"Compress chunk meta data log failed. (reason="
@@ -1619,7 +2746,8 @@ void CheckpointOperationHandler::compressChunkMetaDataLog(
 					"writeChunkMetaDaLog,pgId," <<
 					pgId << ",pId," << pId << ",chunkCategoryId," <<
 					(int32_t)categoryId << ",startChunkId," <<
-					startChunkId << ",chunkNum," << count);
+					startChunkId << ",chunkNum," << count <<
+					",validChunkNum," << validCount );
 }
 
 /*!
@@ -1632,6 +2760,7 @@ void CheckpointOperationHandler::writeChunkMetaDataLog(
 
 		if (isRestored) {
 			int32_t count = 0;
+			int32_t validCount = 0;
 			util::XArray<uint8_t> logBuffer(alloc);
 			util::XArray<uint8_t> metaDataEmptySize(alloc);
 			util::XArray<uint8_t> metaDataFileOffset(alloc);
@@ -1668,6 +2797,7 @@ void CheckpointOperationHandler::writeChunkMetaDataLog(
 					}
 				}
 				else {
+					++validCount;
 					uint8_t unoccupiedSize = metaChunk->getUnoccupiedSize();
 					metaDataEmptySize.push_back(unoccupiedSize);
 
@@ -1704,10 +2834,11 @@ void CheckpointOperationHandler::writeChunkMetaDataLog(
 					compressChunkMetaDataLog(
 							alloc, pgId, pId, categoryId, startChunkId, count,
 							logBuffer, metaDataEmptySize,
-							metaDataFileOffset, metaDataChunkKey);
+							metaDataFileOffset, metaDataChunkKey, validCount);
 
 					startChunkId += count;
 					count = 0;
+					validCount = 0;
 					prevPos = 0;
 					prevChunkKey = 0;
 					metaDataEmptySize.clear();
@@ -1724,10 +2855,11 @@ void CheckpointOperationHandler::writeChunkMetaDataLog(
 						compressChunkMetaDataLog(
 								alloc, pgId, pId, prevCategoryId, startChunkId, count,
 								logBuffer, metaDataEmptySize,
-								metaDataFileOffset, metaDataChunkKey);
+								metaDataFileOffset, metaDataChunkKey, validCount);
 
 						startChunkId = 0;
 						count = 0;
+						validCount = 0;
 						prevPos = 0;
 						prevChunkKey = 0;
 						metaDataEmptySize.clear();
@@ -1739,12 +2871,12 @@ void CheckpointOperationHandler::writeChunkMetaDataLog(
 			}  
 			logBuffer.clear();
 			logManager_->putChunkMetaDataLog(
-					logBuffer, pId, UNDEF_CHUNK_CATEGORY_ID, 0, 1, 0, NULL, true);
+					logBuffer, pId, UNDEF_CHUNK_CATEGORY_ID, 0, 1, 0, 0, NULL, true);
 		}
 		else {
 			util::XArray<uint8_t> logBuffer(alloc);
 			logManager_->putChunkMetaDataLog(
-					logBuffer, pId, UNDEF_CHUNK_CATEGORY_ID, 0, 0, 0, NULL, true);
+					logBuffer, pId, UNDEF_CHUNK_CATEGORY_ID, 0, 0, 0, 0, NULL, true);
 		}  
 	}
 	catch (std::exception &e) {
@@ -1778,7 +2910,49 @@ void FlushLogPeriodicallyHandler::operator()(EventContext &ec) {
 	}
 }
 
+bool CheckpointService::makeBackupDirectory(
+	int32_t mode, const std::string &backupPath) {
+	if (mode == CP_BACKUP || mode == CP_BACKUP_START ||
+			mode == CP_INCREMENTAL_BACKUP_LEVEL_0 ||
+			mode == CP_INCREMENTAL_BACKUP_LEVEL_1_CUMULATIVE ||
+			mode == CP_INCREMENTAL_BACKUP_LEVEL_1_DIFFERENTIAL) {
+		try {
+			util::FileSystem::createDirectoryTree(backupPath.c_str());
+		}
+		catch (std::exception &) {
+			return false;
+		}
+	}
+	return true;
+}
 
+void CheckpointService::setLastCpStartLsn(
+		PartitionId pId, LogSequentialNumber lsn) {
+	lastCpStartLsnList_[pId] = lsn;
+}
+
+LogSequentialNumber CheckpointService::diffLastCpStartLsn(
+		PartitionId pId, LogSequentialNumber lsn) {
+	return lsn - lastCpStartLsnList_[pId];
+}
+
+void CheckpointService::setNeedGroupCheckpoint(
+		PartitionGroupId pgId, bool needCp) {
+	needGroupCheckpoint_[pgId] = needCp;
+}
+
+bool CheckpointService::makeLongArchiveDirectory(
+	int32_t mode, const std::string &longArchivePath) {
+	if (mode == CP_PREPARE_LONG_ARCHIVE) {
+		try {
+			util::FileSystem::createDirectoryTree(longArchivePath.c_str());
+		}
+		catch (std::exception &) {
+			return false;
+		}
+	}
+	return true;
+}
 /*!
 	@brief Locks a Partition group.
 */
@@ -1830,8 +3004,8 @@ void CheckpointService::PIdLsnInfo::setConfigValue(
 
 void CheckpointService::PIdLsnInfo::startCheckpoint() {}
 
-void CheckpointService::PIdLsnInfo::endCheckpoint() {
-	writeFile();
+void CheckpointService::PIdLsnInfo::endCheckpoint(const char8_t *backupPath) {
+	writeFile(backupPath);
 }
 
 void CheckpointService::PIdLsnInfo::setLsn(
@@ -1839,15 +3013,13 @@ void CheckpointService::PIdLsnInfo::setLsn(
 	lsnList_[pId] = lsn;
 }
 
-void CheckpointService::PIdLsnInfo::writeFile() {
+void CheckpointService::PIdLsnInfo::writeFile(const char8_t *backupPath) {
 	util::LockGuard<util::Mutex> guard(mutex_);
 	std::string lsnInfoFileName;
 	util::NamedFile file;
 	try {
 		picojson::object jsonNodeInfo;
-		NodeAddress &address =
-				checkpointService_->partitionTable_->
-				getNodeInfo(0).getNodeAddress();
+		NodeAddress &address = checkpointService_->partitionTable_->getNodeAddress(0);
 		jsonNodeInfo["address"] = picojson::value(address.toString(false));
 		jsonNodeInfo["port"] =
 				picojson::value(static_cast<double>(address.port_));
@@ -1870,8 +3042,14 @@ void CheckpointService::PIdLsnInfo::writeFile() {
 
 		std::string jsonString(picojson::value(jsonObject).serialize());
 
-		util::FileSystem::createPath(
-				path_.c_str(), PID_LSN_INFO_FILE_NAME.c_str(), lsnInfoFileName);
+		if (backupPath) {
+			util::FileSystem::createPath(
+					backupPath, PID_LSN_INFO_FILE_NAME.c_str(), lsnInfoFileName);
+		}
+		else {
+			util::FileSystem::createPath(
+					path_.c_str(), PID_LSN_INFO_FILE_NAME.c_str(), lsnInfoFileName);
+		}
 		file.open(
 				lsnInfoFileName.c_str(),
 						util::FileFlag::TYPE_READ_WRITE |
@@ -1937,6 +3115,10 @@ void CheckpointService::StatSetUpHandler::operator()(StatTable &stat) {
 	STAT_ADD(STAT_TABLE_CP_PENDING_PARTITION);
 	STAT_ADD(STAT_TABLE_CP_NORMAL_CHECKPOINT_OPERATION);
 	STAT_ADD(STAT_TABLE_CP_REQUESTED_CHECKPOINT_OPERATION);
+	STAT_ADD(STAT_TABLE_CP_PERIODIC_CHECKPOINT);  
+	STAT_ADD(STAT_TABLE_CP_BACKUP_OPERATION);
+	STAT_ADD(STAT_TABLE_CP_ARCHIVE_LOG);
+	STAT_ADD(STAT_TABLE_CP_DUPLICATE_LOG);
 
 	parentId = STAT_TABLE_ROOT;
 	stat.resolveGroup(parentId, STAT_TABLE_PERF, "performance");
@@ -1959,6 +3141,7 @@ bool CheckpointService::StatUpdator::operator()(StatTable &stat) {
 	}
 
 	CheckpointService &svc = *service_;
+	LogManager &logMgr = *svc.logManager_;
 
 	ChunkManager::ChunkManagerStats &cmStats =
 			svc.chunkManager_->getChunkManagerStats();
@@ -1979,6 +3162,13 @@ bool CheckpointService::StatUpdator::operator()(StatTable &stat) {
 
 		stat.set(STAT_TABLE_CP_REQUESTED_CHECKPOINT_OPERATION,
 			svc.getTotalRequestedCpOperation());
+		stat.set(STAT_TABLE_CP_BACKUP_OPERATION, svc.getTotalBackupOperation());
+
+		stat.set(STAT_TABLE_CP_ARCHIVE_LOG, svc.getArchiveLogMode());
+
+		stat.set(STAT_TABLE_CP_DUPLICATE_LOG, logMgr.getDuplicateLogMode());
+		stat.set(
+			STAT_TABLE_CP_PERIODIC_CHECKPOINT, svc.getPeriodicCheckpointFlag() ? "ACTIVE" : "INACTIVE");
 	}
 
 
@@ -2052,6 +3242,7 @@ void CheckpointService::requestStartCheckpointForLongtermSync(
 		info.targetPId_ = pId;
 		info.dir_ = syncTempPath;
 		info.longtermSyncInfo_.copy(*longtermSyncInfo);
+		info.chunkSize_ = 1 << chunkManager_->getConfig().getChunkExpSize();
 		bool success = setCpLongtermSyncInfo(ssn, info);
 		if (!success) {
 			GS_THROW_USER_ERROR(GS_ERROR_CP_LONGTERM_SYNC_FAILED,
@@ -2126,6 +3317,7 @@ void CheckpointService::requestStopCheckpointForLongtermSync(
 	CpLongtermSyncInfo* longSyncInfo = getCpLongtermSyncInfo(ssn);
 	if (longSyncInfo != NULL) {
 		try {
+			longSyncInfo->atomicStopFlag_ = 1; 
 			GS_TRACE_INFO(
 					CHECKPOINT_SERVICE, GS_TRACE_CP_STATUS,
 					"[StopCpLongtermSync] requested (SSN=" << ssn << ")");
@@ -2152,5 +3344,12 @@ void CheckpointService::requestStopCheckpointForLongtermSync(
 					GS_EXCEPTION_MESSAGE(e) << ")");
 		}
 	}
-	}
+}
+
+void CheckpointService::setPeriodicCheckpointFlag(bool flag) {
+	enablePeriodicCheckpoint_ = flag;
+}
+bool CheckpointService::getPeriodicCheckpointFlag() {
+	return enablePeriodicCheckpoint_;
+}
 

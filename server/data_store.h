@@ -29,6 +29,8 @@
 #include "message_row_store.h"
 #include "object_manager.h"
 #include "container_key.h"
+#include "archive.h"
+
 #include <map>
 #include <utility>
 
@@ -295,20 +297,23 @@ public:
 	uint32_t getLimitContainerNameSize() const {
 		return limitContainerNameSize_;
 	}
-
+	uint32_t getLimitIndexNum() const {
+		return limitIndexNumSize_;
+	}
 private:
-	static const int32_t DS_CHUNK_EXP_SIZE_MIN = 15;
 	static const uint32_t LIMIT_SMALL_SIZE_LIST[6];
 	static const uint32_t LIMIT_BIG_SIZE_LIST[6];
 	static const uint32_t LIMIT_ARRAY_NUM_LIST[6];
 	static const uint32_t LIMIT_COLUMN_NUM_LIST[6];
 	static const uint32_t LIMIT_CONTAINER_NAME_SIZE_LIST[6];
+	static const uint32_t LIMIT_INDEX_NUM_LIST[6];
 
 	uint32_t limitSmallSize_;
 	uint32_t limitBigSize_;
 	uint32_t limitArrayNumSize_;
 	uint32_t limitColumnNumSize_;
 	uint32_t limitContainerNameSize_;
+	uint32_t limitIndexNumSize_;
 };
 
 /*!
@@ -332,6 +337,7 @@ public:
 		SAME_SCHEMA,
 		PROPERY_DIFFERENCE,
 		COLUMNS_DIFFERENCE,
+		COLUMNS_ADD,
 	};
 
 	/*!
@@ -481,10 +487,8 @@ public:
 
 	static const size_t RESULTSET_POOL_BLOCK_SIZE_BITS = 20;
 
-	static const size_t CHUNKKEY_BIT_NUM =
-		22;  
-	static const size_t CHUNKKEY_BITS =
-		0x3FFFFF;  
+	static const size_t CHUNKKEY_BIT_NUM = ChunkManager::CHUNKKEY_BIT_NUM;
+	static const size_t CHUNKKEY_BITS = ChunkManager::CHUNKKEY_BITS;
 
 	static const uint32_t MAX_PARTITION_NUM = 10000;
 	static const uint32_t MAX_CONCURRENCY = 128;
@@ -508,10 +512,23 @@ public:
 	void getContainerNameList(TransactionContext &txn, PartitionId pId,
 		int64_t start, ResultSize limit, const DatabaseId dbId,
 		ContainerCondition &condition, util::XArray<FullContainerKey> &nameList);
+	class ContainerListHandler {
+	public:
+		virtual ~ContainerListHandler();
+		virtual void operator()(
+				TransactionContext &txn,
+				ContainerId id, DatabaseId dbId, ContainerAttribute attribute,
+				BaseContainer &container) const = 0;
+	};
+	bool scanContainerList(
+		TransactionContext &txn, PartitionId pId, ContainerId startContainerId,
+		uint64_t limit, const DatabaseId *dbId, ContainerCondition &condition,
+		const ContainerListHandler &handler);
 
 	BaseContainer *putContainer(TransactionContext &txn, PartitionId pId,
 		const FullContainerKey &containerKey, ContainerType containerType,
 		uint32_t schemaSize, const uint8_t *containerSchema, bool isEnable,
+		int32_t featureVersion,
 		PutStatus &status, bool isCaseSensitive = false);
 
 	void dropContainer(TransactionContext &txn, PartitionId pId,
@@ -519,20 +536,15 @@ public:
 		bool isCaseSensitive = false);
 	BaseContainer *getContainer(TransactionContext &txn, PartitionId pId,
 		const FullContainerKey &containerKey, ContainerType containerType,
-		bool isCaseSensitive = false);
+		bool isCaseSensitive = false, bool allowExpiration = false);
 	BaseContainer *getContainer(TransactionContext &txn, PartitionId pId,
 		ContainerId containerId,
-		ContainerType containerType);  
+		ContainerType containerType, bool allowExpiration = false);  
 	BaseContainer *getContainer(TransactionContext &txn, PartitionId pId,
-		const ContainerCursor &containerCursor) {
+		const ContainerCursor &containerCursor, bool allowExpiration = false) {
 		return getBaseContainer(txn, pId, containerCursor.getContainerOId(), 
-			ANY_CONTAINER);
+			ANY_CONTAINER, allowExpiration);
 	}
-
-	Collection *getCollection(
-		TransactionContext &txn, PartitionId pId, ContainerId containerId);
-	TimeSeries *getTimeSeries(
-		TransactionContext &txn, PartitionId pId, ContainerId containerId);
 
 	BaseContainer *getContainerForRestore(TransactionContext &txn,
 		PartitionId pId, OId oId,
@@ -552,7 +564,6 @@ public:
 		util::XArray<const uint8_t *> &binary, int64_t triggerHashKey);
 
 	ChunkKey getLastChunkKey(TransactionContext &txn);
-	void setLastChunkKey(PartitionId pId, ChunkKey chunkKey);
 
 	const DataStoreValueLimitConfig &getValueLimitConfig() {
 		return dsValueLimitConfig_;
@@ -597,6 +608,9 @@ public:
 		const char *fileName);
 	std::string dump(TransactionContext &txn, PartitionId pId);
 	void dumpContainerIdTable(PartitionId pId);
+	void archive(util::StackAllocator &alloc, TransactionManager &txnMgr, BibInfo &bibInfo);
+	void setLastExpiredTime(PartitionId pId, Timestamp time, bool force = false);
+	void setLatestBatchFreeTime(PartitionId pId, Timestamp time, bool force = false);
 
 	ResultSet *createResultSet(TransactionContext &txn, ContainerId containerId,
 		SchemaVersionId versionId, int64_t emNow, bool noExpire = false);
@@ -638,9 +652,17 @@ public:
 
 	bool executeBatchFree(PartitionId pId, Timestamp timestamp,
 		uint64_t maxScanNum, uint64_t &scanNum);
+	Timestamp getLatestExpirationCheckTime(PartitionId pId) {
+		return expirationStat_[pId].expiredTime_;
+	}
+	Timestamp getLatestBatchFreeTime(TransactionContext &txn);
 
 	struct Config;
 	Config& getConfig() { return config_; }
+
+	static PartitionId resolvePartitionId(
+			util::StackAllocator &alloc, const FullContainerKey &containerKey,
+			PartitionId partitionCount, ContainerHashMode hashMode);
 
 
 
@@ -688,6 +710,8 @@ private:
 	struct containerIdMapAsc {
 		bool operator()(const std::pair<ContainerId, ContainerInfoCache> &left,
 			const std::pair<ContainerId, ContainerInfoCache> &right) const;
+		bool operator()(const std::pair<ContainerId, const ContainerInfoCache*> &left,
+			const std::pair<ContainerId, const ContainerInfoCache*> &right) const;
 	};
 
 	/*!
@@ -703,6 +727,7 @@ private:
 	public:
 		typedef util::XArray<std::pair<ContainerId, ContainerInfoCache> >
 			ContainerIdList;
+		typedef util::XArray< std::pair<ContainerId, const ContainerInfoCache*> > ContainerIdRefList;
 		ContainerIdTable(uint32_t partitionNum);
 		~ContainerIdTable();
 		void set(PartitionId pId, ContainerId containerId, OId oId,
@@ -719,6 +744,10 @@ private:
 		}
 		void getList(PartitionId pId, int64_t start, ResultSize limit,
 			ContainerIdList &containerInfoCacheList);
+		bool getListOrdered(
+			PartitionId pId, ContainerId startId, uint64_t limit,
+			const DatabaseId *dbId, ContainerCondition &condition,
+			ContainerIdRefList &list) const;
 
 	private:
 		ContainerIdMap *containerIdMap_;
@@ -730,7 +759,7 @@ private:
 		@brief DataStore meta data format
 	*/
 	struct DataStorePartitionHeader {
-		static const int32_t PADDING_SIZE = 448;
+		static const int32_t PADDING_SIZE = 432;
 		OId metaMapOId_;
 		OId schemaMapOId_;
 		OId triggerMapOId_;
@@ -739,6 +768,8 @@ private:
 		uint32_t padding0_;
 		OId backgroundMapOId_;
 		uint64_t maxBackgroundId_;
+		Timestamp latestCheckTime_;
+		Timestamp latestBatchFreeTime_;
 		uint8_t padding_[PADDING_SIZE];
 	};
 
@@ -778,9 +809,23 @@ private:
 			getObjectManager()->setDirty(getPartitionId(), getBaseOId());
 			get()->maxContainerId_++;
 		}
-		void setChunkKey(ChunkKey chunkKey) {
-			getObjectManager()->setDirty(getPartitionId(), getBaseOId());
-			get()->chunkKey_ = chunkKey;
+		void setChunkKey(ChunkKey chunkKey, bool force = false) {
+			if (force || get()->chunkKey_  < chunkKey) {
+				getObjectManager()->setDirty(getPartitionId(), getBaseOId());
+				get()->chunkKey_ = chunkKey;
+			}
+		}
+		void setLatestCheckTime(Timestamp timestamp, bool force = false) {
+			if (force || get()->latestCheckTime_  < timestamp) {
+				getObjectManager()->setDirty(getPartitionId(), getBaseOId());
+				get()->latestCheckTime_ = timestamp;
+			}
+		}
+		void setLatestBatchFreeTime(Timestamp timestamp, bool force = false) {
+			if (force || get()->latestBatchFreeTime_  < timestamp) {
+				getObjectManager()->setDirty(getPartitionId(), getBaseOId());
+				get()->latestBatchFreeTime_ = timestamp;
+			}
 		}
 		OId getMetaMapOId() const {
 			return get()->metaMapOId_;
@@ -803,7 +848,12 @@ private:
 		ChunkKey getChunkKey() const {
 			return get()->chunkKey_;
 		}
-
+		Timestamp getLatestCheckTime() const {
+			return get()->latestCheckTime_;
+		}
+		Timestamp getLatestBatchFreeTime() const {
+			return get()->latestBatchFreeTime_;
+		}
 		void initialize(
 			TransactionContext &txn, const AllocateStrategy &allocateStrategy);
 		void finalize(
@@ -845,9 +895,113 @@ private:
 		}
 		void setBackgroundMinRate(double rate);
 
+		util::Atomic<bool> isAutoExpire_;
+		bool isAutoExpire() const {
+			return isAutoExpire_;
+		}
+		void setAutoExpire(bool state) {
+			isAutoExpire_ = state;
+		}
+		util::Atomic<Timestamp> erasableExpiredTime_;
+		Timestamp getErasableExpiredTime() const {
+			return erasableExpiredTime_;
+		}
+		void setErasableExpiredTime(const char8_t *timeStr) {
+			util::DateTime dateTime(timeStr, false);
+			erasableExpiredTime_ = dateTime.getUnixTime();
+		}
+		util::Atomic<Timestamp> simulateErasableExpiredTime_;
+		Timestamp getSimulateErasableExpiredTime() const {
+			return simulateErasableExpiredTime_;
+		}
+		void setSimulateErasableExpiredTime(const char8_t *timeStr) {
+			util::DateTime dateTime(timeStr, false);
+			simulateErasableExpiredTime_ = dateTime.getUnixTime();
+		}
+		util::Atomic<int32_t> batchScanNum_;
+		int32_t getBatchScanNum() const {
+			return batchScanNum_;
+		}
+		void setBatchScanNum(int32_t scanNum) {
+			batchScanNum_ = scanNum;
+		}
+		util::Atomic<int32_t> rowArrayRateExponent_;
+		int32_t getRowArrayRateExponent() const {
+			return rowArrayRateExponent_;
+		}
+		void setRowArrayRateExponent(int32_t rowArrayRateExponent) {
+			rowArrayRateExponent_ = rowArrayRateExponent;
+		}
+		util::Atomic<bool> isRowArraySizeControlMode_;
+		bool isRowArraySizeControlMode() const {
+			return isRowArraySizeControlMode_;
+		}
+		void setRowArraySizeControlMode(bool state) {
+			isRowArraySizeControlMode_ = state;
+		}
 		util::Atomic<int64_t> backgroundMinRate_;
 		double backgroundWaitWeight_;
+		int32_t checkErasableExpiredInterval_;
+		int32_t concurrencyNum_;
+
+		void setCheckErasableExpiredInterval(int32_t val, int32_t coucurrency) {
+			concurrencyNum_ = coucurrency;
+			setCheckErasableExpiredInterval(val);
+		}
+
+		void setCheckErasableExpiredInterval(int32_t val) {
+			if (val == 0) {
+				checkErasableExpiredInterval_ = 1;
+			}
+			else {
+				checkErasableExpiredInterval_ = val;
+		}
+		}
+
+		int32_t getCheckErasableExpiredInterval() {
+			return checkErasableExpiredInterval_;
+		}
+
 	} config_;
+
+	struct ExpirationStat {
+		ExpirationStat() : expiredTime_(0), simulateTime_(0), preSimulateTime_(0),
+			simulateCount_(0), preSimulateCount_(0), preExpiredNum_(0), 
+			expiredNum_(0), diffExpiredNum_(0), totalScanTime_(0), totalScanNum_(0) {}
+
+		Timestamp expiredTime_;
+		Timestamp simulateTime_;
+		Timestamp preSimulateTime_;
+		size_t simulateCount_;
+		size_t preSimulateCount_;
+		size_t preExpiredNum_;
+		size_t expiredNum_;
+		int64_t diffExpiredNum_;
+		int64_t totalScanTime_;
+		int64_t totalScanNum_;
+	};
+	void updateExpirationStat(PartitionId pId, size_t expiredNum,
+		size_t erasableNum, size_t scanNum, bool isTail, int64_t scanTime)
+	{
+		ExpirationStat &stat = expirationStat_[pId];
+
+		stat.expiredNum_ += expiredNum;
+		stat.simulateCount_ += erasableNum;
+		stat.totalScanTime_ += scanTime;
+		stat.totalScanNum_ += scanNum;
+		if (isTail) {
+			stat.diffExpiredNum_ = static_cast<int64_t>(stat.expiredNum_) - 
+				static_cast<int64_t>(stat.preExpiredNum_);
+			stat.preExpiredNum_ = stat.expiredNum_;
+			stat.expiredNum_ = 0;
+			stat.preSimulateCount_ = stat.simulateCount_;
+			stat.preSimulateTime_ = stat.simulateTime_;
+			stat.simulateTime_ = config_.getSimulateErasableExpiredTime();
+			stat.simulateCount_ = 0;
+			stat.totalScanTime_ = 0;
+			stat.totalScanNum_ = 0;
+		}
+	}
 
 	static const ChunkId INITIAL_CHUNK_ID = 0;
 	static const uint32_t FIRST_OBJECT_OFFSET =
@@ -872,6 +1026,8 @@ private:
 		*resultSetMap_;
 	std::vector<BGTask> currentBackgroundList_;
 	std::vector<uint64_t> activeBackgroundCount_;
+	std::vector<ExpirationStat> expirationStat_;
+
 	static const int32_t RESULTSET_MAP_HASH_SIZE = 100;
 	static const size_t RESULTSET_FREE_ELEMENT_LIMIT =
 		10 * RESULTSET_MAP_HASH_SIZE;
@@ -880,6 +1036,7 @@ private:
 	ContainerIdTable *containerIdTable_;
 	ObjectManager *objectManager_;
 	ClusterService *clusterService_;
+
 
 
 private:  
@@ -891,7 +1048,7 @@ private:
 		TransactionContext &txn, ClusterService *clusterService);
 	void restoreBackground(TransactionContext &txn, 
 		ClusterService *clusterService);
-
+	void restoreLastExpiredTime(TransactionContext &txn, ClusterService *clusterService);
 	void setUnrestored(PartitionId pId);
 	void setRestored(PartitionId pId);
 
@@ -911,8 +1068,11 @@ private:
 		util::XArray<uint32_t> &copyColumnMap);
 	void changeContainerProperty(TransactionContext &txn, PartitionId pId,
 		BaseContainer *&container, MessageSchema *messageSchema);
+	void addContainerSchema(TransactionContext &txn, PartitionId pId,
+		BaseContainer *&container, MessageSchema *messageSchema);
+
 	BaseContainer *getBaseContainer(TransactionContext &txn, PartitionId pId,
-		OId oId, ContainerType containerType);
+		OId oId, ContainerType containerType, bool allowExpiration = false);
 
 	BtreeMap *getBackgroundMap(TransactionContext &txn, PartitionId pId);
 	uint64_t getBGTaskCount(PartitionId pId) {
@@ -925,6 +1085,14 @@ private:
 	void updateBGTask(TransactionContext &txn, PartitionId pId, BackgroundId bgId, 
 		BackgroundData &beforBgData, BackgroundData &afterBgData);
 	bool executeBGTaskInternal(TransactionContext &txn, BackgroundData &bgData);
+
+	ExpirationStat getExpirationStat(PartitionId pId) {
+		return expirationStat_[pId];
+	}
+	BaseContainer *getBaseContainer(TransactionContext &txn, PartitionId pId, 
+		const BibInfo::Container &bibInfo);
+	MessageSchema *makeMessageSchema(TransactionContext &txn, ContainerType containerType, const BibInfo::Container &bibInfo);
+	ShareValueList *makeCommonContainerSchema(TransactionContext &txn, int64_t schemaHashKey, MessageSchema *messageSchema);
 
 
 	static class ConfigSetUpHandler : public ConfigTable::SetUpHandler {

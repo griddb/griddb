@@ -655,12 +655,12 @@ void TriggerHandler::checkTrigger(TriggerService &triggerService,
 				container.getDataStore()->getValueLimitConfig(), schema,
 				numColumn, const_cast<void *>(putRowData),
 				static_cast<uint32_t>(putRowDataSize), numRow,
-				container.getRowFixedSize()));
+				container.getRowFixedDataSize()));
 		}
 		else {
 			rowStore.reset(UTIL_NEW InputMessageRowStore(
 				container.getDataStore()->getValueLimitConfig(), schema,
-				numColumn, NULL, 0, 0, container.getRowFixedSize()));
+				numColumn, NULL, 0, 0, container.getRowFixedDataSize()));
 		}
 
 		for (size_t i = 0; i < triggerList.size(); i++) {
@@ -858,6 +858,7 @@ bool TriggerHandler::isSupportedColumnType(ColumnType type) {
 		return true;
 		break;
 
+	case COLUMN_TYPE_GEOMETRY:
 	case COLUMN_TYPE_BLOB:
 	case COLUMN_TYPE_OID:
 	case COLUMN_TYPE_STRING_ARRAY:
@@ -978,6 +979,7 @@ void TriggerHandler::convertColumnDataToString(
 		ss << tmp;
 		str.append(ss.str().c_str());
 	} break;
+	case COLUMN_TYPE_GEOMETRY:
 	case COLUMN_TYPE_BLOB:
 	case COLUMN_TYPE_OID:
 	case COLUMN_TYPE_STRING_ARRAY:
@@ -1530,6 +1532,7 @@ void JmsTriggerHandler::createJmsMessage(const std::string &containerName,
 			const double tmp = *reinterpret_cast<const double *>(data);
 			message->setDoubleProperty(columnName, tmp);
 		} break;
+		case COLUMN_TYPE_GEOMETRY:
 		case COLUMN_TYPE_BLOB:
 		case COLUMN_TYPE_OID:
 		case COLUMN_TYPE_STRING_ARRAY:

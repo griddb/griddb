@@ -250,11 +250,15 @@ const TransactionManager::TransactionMode
 		(TransactionManager::NO_AUTO_COMMIT_BEGIN |
 			TransactionManager::NO_AUTO_COMMIT_CONTINUE);
 
-TransactionManager::TransactionManager(const ConfigTable &config)
+TransactionManager::TransactionManager(ConfigTable &config)
 	: pgConfig_(config),
 	  replicationMode_(config.get<int32_t>(CONFIG_TABLE_TXN_REPLICATION_MODE)),
 	  replicationTimeoutInterval_(
 		  config.get<int32_t>(CONFIG_TABLE_TXN_REPLICATION_TIMEOUT_INTERVAL)),
+	  authenticationTimeoutInterval_(config.get<int32_t>(
+		  CONFIG_TABLE_TXN_AUTHENTICATION_TIMEOUT_INTERVAL)),
+	  reauthConfig_(
+		  config.get<int32_t>(CONFIG_TABLE_TXN_REAUTHENTICATION_INTERVAL)),  
 	  txnTimeoutLimit_(
 		  config.get<int32_t>(CONFIG_TABLE_TXN_TRANSACTION_TIMEOUT_LIMIT)),
 	  txnContextMapManager_(pgConfig_.getPartitionGroupCount(), NULL),
@@ -263,9 +267,12 @@ TransactionManager::TransactionManager(const ConfigTable &config)
 	  activeTxnMap_(pgConfig_.getPartitionGroupCount(), NULL),
 	  replContextMapManager_(pgConfig_.getPartitionGroupCount(), NULL),
 	  replContextMap_(pgConfig_.getPartitionGroupCount(), NULL),
+	  authContextMapManager_(pgConfig_.getPartitionGroupCount(), NULL),
+	  authContextMap_(pgConfig_.getPartitionGroupCount(), NULL),
 	  replAllocator_(pgConfig_.getPartitionGroupCount(), NULL),
 	  partition_(pgConfig_.getPartitionCount(), NULL),
 	  replContextPartition_(pgConfig_.getPartitionCount(), NULL),
+	  authContextPartition_(pgConfig_.getPartitionCount(), NULL),
 	  ptLock_(pgConfig_.getPartitionCount(), 0),
 	  ptLockMutex_(NULL)
 {
@@ -303,11 +310,22 @@ TransactionManager::TransactionManager(const ConfigTable &config)
 				(TXN_STABLE_TRANSACTION_TIMEOUT_INTERVAL + TIMER_MERGIN_SEC) *
 					1000,
 				TIMER_INTERVAL_MILLISEC);
+			authContextMapManager_[pgId] =
+				UTIL_NEW AuthenticationContextMap::Manager(util::AllocatorInfo(
+					ALLOCATOR_GROUP_TXN_WORK, "authenticationMap"));
+			authContextMapManager_[pgId]->setFreeElementLimit(
+				DEFAULT_FREE_ELEMENT_LIMIT);
+			authContextMap_[pgId] = authContextMapManager_[pgId]->create(
+				HASH_SIZE,
+				(TXN_STABLE_TRANSACTION_TIMEOUT_INTERVAL + TIMER_MERGIN_SEC) *
+					1000,
+				TIMER_INTERVAL_MILLISEC);
 
 			replAllocator_[pgId] =
 				UTIL_NEW util::VariableSizeAllocator<>(util::AllocatorInfo(
 					ALLOCATOR_GROUP_REPLICATION, "replicationVar"));
 		}
+		reauthConfig_.setUpConfigHandler(config);
 	}
 	catch (std::exception &e) {
 		finalize();
@@ -974,6 +992,7 @@ void TransactionManager::finalize() {
 	}
 
 	removeAllReplicationContext();
+	removeAllAuthenticationContext();
 
 	for (PartitionGroupId pgId = 0; pgId < pgConfig_.getPartitionGroupCount();
 		 pgId++) {
@@ -992,6 +1011,10 @@ void TransactionManager::finalize() {
 			delete replContextMapManager_[pgId];
 		}
 
+		if (authContextMapManager_[pgId] != NULL) {
+			authContextMapManager_[pgId]->remove(authContextMap_[pgId]);
+			delete authContextMapManager_[pgId];
+		}
 
 		if (replAllocator_[pgId] != NULL) {
 			delete replAllocator_[pgId];
@@ -1020,6 +1043,23 @@ void TransactionManager::createReplContextPartition(PartitionId pId) {
 	}
 }
 
+void TransactionManager::createAuthContextPartition(PartitionId pId) {
+	if (authContextPartition_[pId] != NULL) {
+		return;
+	}
+
+	try {
+		const PartitionGroupId pgId = pgConfig_.getPartitionGroupId(pId);
+		authContextPartition_[pId] =
+			UTIL_NEW AuthenticationContextPartition(pId, authContextMap_[pgId]);
+	}
+	catch (std::exception &e) {
+		GS_RETHROW_USER_OR_SYSTEM(e,
+			"Failed to create partition "
+			"(pId="
+				<< pId << ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+}
 
 TransactionManager::Partition::Partition(PartitionId pId,
 	int32_t txnTimeoutLimit, TransactionContextMap *txnContextMap,
@@ -1611,6 +1651,12 @@ void TransactionManager::removeAllReplicationContext() {
 		replContextPartition_[pId] = NULL;
 	}
 }
+void TransactionManager::removeAllAuthenticationContext() {
+	for (PartitionId pId = 0; pId < pgConfig_.getPartitionCount(); pId++) {
+		delete authContextPartition_[pId];
+		authContextPartition_[pId] = NULL;
+	}
+}
 
 void TransactionManager::updateRequestTimeout(
 	PartitionGroupId pgId, const TransactionContext &txn) {
@@ -1661,6 +1707,17 @@ void TransactionManager::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.setMin(1)
 		.setMax(300)
 		.setDefault(TXN_STABLE_TRANSACTION_TIMEOUT_INTERVAL);
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_TXN_AUTHENTICATION_TIMEOUT_INTERVAL, INT32)
+		.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
+		.setMin(1)
+		.setMax(300)
+		.setDefault(5);
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_TXN_REAUTHENTICATION_INTERVAL, INT32)
+		.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
+		.setMin(0)
+		.setDefault(0);
 
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TXN_CONNECTION_LIMIT, INT32)
 		.setMin(3)

@@ -26,6 +26,8 @@
 #include "btree_map.h"
 #include "gs_error.h"
 #include "value_processor.h"
+#include "query.h"
+#include "gis_quadraticsurface.h"
 #include <sstream>
 
 /*!

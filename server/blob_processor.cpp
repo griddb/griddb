@@ -79,7 +79,7 @@ BlobCursor::BlobCursor(PartitionId pId, ObjectManager &objectManager,
 					   baseAddr_(ptr), topArrayAddr_(NULL),
 					   curObj_(pId, objectManager), arrayCursor_(NULL),
 					   currentElem_(-1), maxElem_(0), currentDepth_(0),
-					   maxDepth_(0), logDevide_(objectManager), neighborOId_(UNDEF_OID) {
+					   maxDepth_(0),  logDevide_(objectManager), neighborOId_(UNDEF_OID) {
 	for (uint32_t i = 0; i < MAX_DEPTH; i++) {
 		stackCusor_[i].reset(pId, objectManager);
 	}
@@ -366,16 +366,42 @@ void BlobCursor::addBinary(const uint8_t *addr, uint32_t size) {
 	memcpy(curObj_.getBaseAddr(), addr, size);
 }
 
-void BlobCursor::dump(util::NormalOStringStream &ss) {
+void BlobCursor::dump(util::NormalOStringStream &ss, bool forExport) {
 	uint64_t blobSize = getTotalSize();
-	ss << "(BLOB)length=" << blobSize;
+	if (!forExport) {
+		ss << "(BLOB)length=" << blobSize << "'";
+	} else {
+		ss << "x'";
+	}
 	while (next()) {
 		uint32_t srcDataSize = 0;
 		const uint8_t *srcData = NULL;
 		getCurrentBinary(srcData, srcDataSize);
-		ss << ",(" << currentElem_ << ",size=" << srcDataSize << ")";
+		if (!forExport) {
+			ss << ",(" << currentElem_ << ",size=" << srcDataSize << ")";
+		} else {
+			util::NormalIStringStream iss(
+					u8string(reinterpret_cast<const char8_t*>(srcData), srcDataSize));
+			util::HexConverter::encode(ss, iss);
+		}
 	}
+	ss << "'";
 }
+
+uint8_t *BlobCursor::getBinary(util::StackAllocator &alloc) {
+	uint64_t blobSize = getTotalSize();
+	uint8_t *destAddr = static_cast<uint8_t *>(alloc.allocate(blobSize));
+	uint8_t *current = destAddr;
+	while (next()) {
+		uint32_t srcDataSize = 0;
+		const uint8_t *srcData = NULL;
+		getCurrentBinary(srcData, srcDataSize);
+		memcpy(current, srcData, srcDataSize);
+		current += srcDataSize;
+	}
+	return destAddr;
+}
+
 
 /*!
 	@brief Compare message field value with object field value

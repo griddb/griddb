@@ -92,7 +92,7 @@ public class ContainerKeyConverter {
 			}
 			else {
 				final ContainerKeyConverter converter =
-						getInstance(LATEST_VERSION, true);
+						getInstance(LATEST_VERSION, true, true);
 				final int[] caseOffsetRef = new int[1];
 				try {
 					converter.decomposeInternal(
@@ -175,7 +175,7 @@ public class ContainerKeyConverter {
 			final int version = isCompatible() ?
 					LATEST_COMPATIBLE_VERSION : LATEST_VERSION;
 			final ContainerKeyConverter converter =
-					new ContainerKeyConverter(version, true);
+					getInstance(version, true, true);
 
 			final StringBuilder builder = new StringBuilder();
 			try {
@@ -348,32 +348,50 @@ public class ContainerKeyConverter {
 	private static final String EXTRA_SYMBOLS1 = ".-/=";
 
 	private static final ContainerKeyConverter DEFAULT_INSTANCE =
-			new ContainerKeyConverter(DEFAULT_VERSION, false);
+			new ContainerKeyConverter(
+					DEFAULT_VERSION, false, false);
+
+	private static final ContainerKeyConverter DEFAULT_SYSTEM_INSTANCE =
+			new ContainerKeyConverter(
+					DEFAULT_VERSION, false, true);
 
 	private static final ContainerKeyConverter DEFAULT_INTERNAL_INSTANCE =
-			new ContainerKeyConverter(DEFAULT_VERSION, true);
+			new ContainerKeyConverter(
+					DEFAULT_VERSION, true, true);
 
-	private int version;
+	private final int version;
 
-	private boolean internalMode;
+	private final boolean internalMode;
 
-	public ContainerKeyConverter(int version, boolean internalMode) {
+	private final boolean systemAllowed;
+
+	public ContainerKeyConverter(
+			int version, boolean internalMode, boolean systemAllowed) {
 		this.version = version;
 		this.internalMode = internalMode;
+		this.systemAllowed = systemAllowed;
 	}
 
 	public static ContainerKeyConverter getInstance(
 			int version, boolean internalMode) {
+		return getInstance(version, internalMode, internalMode);
+	}
+
+	public static ContainerKeyConverter getInstance(
+			int version, boolean internalMode, boolean systemAllowed) {
 		if (version <= 0 || version == DEFAULT_VERSION) {
 			if (internalMode) {
 				return DEFAULT_INTERNAL_INSTANCE;
+			}
+			else if (systemAllowed) {
+				return DEFAULT_SYSTEM_INSTANCE;
 			}
 			else {
 				return DEFAULT_INSTANCE;
 			}
 		}
 
-		return new ContainerKeyConverter(version, internalMode);
+		return new ContainerKeyConverter(version, internalMode, systemAllowed);
 	}
 
 	public static long getPublicDatabaseId() {
@@ -706,7 +724,7 @@ public class ContainerKeyConverter {
 				break;
 			case SYSTEM_SEP:
 				if (!systemFound && since14()) {
-					if (!internalMode) {
+					if (!internalMode && !systemAllowed) {
 						throw errorCharacter(ch, source.at(off), null, null);
 					}
 					endOff = findSeparator(str, NON_SYSTEM_SEP, off + 1);

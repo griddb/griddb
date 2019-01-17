@@ -1,0 +1,190 @@
+#!/usr/bin/python -B
+# coding=UTF-8
+
+import sys
+import log
+import os
+import json
+import re
+import copy
+from optparse import OptionParser
+
+import util
+util.install_sigint_handler()
+(homedir,logdir) = util.get_required_env()
+
+parser = OptionParser(usage="%prog --cluster HOST:PORT [-w [WAIT_TIME]] " + util.CLIENT_OPTIONS_USAGE,
+                      description=u"Add a new node to a cluster in operation,",
+			version="%prog [V3.0.00]")
+util.add_client_options(parser)
+parser.add_option("--cluster", metavar="HOST:PORT", type="string",
+		dest="cluster",
+		help=u'Specify the server name (address) and port number of the node joined to the GridDB cluster.'
+)
+parser.add_option("-w", "--wait", action='callback', callback=\
+                                        util.optional_arg(0), dest="wait_time",default=None,
+                  help=u"Wait for the GridDB node to append.")
+(options, args) = parser.parse_args()
+
+
+if options.username is None:
+	print u"A20001: The user and password are required. (-u USER/PASS)"
+	sys.exit(2)
+if options.cluster is None:
+	print u"A20002: The IP address and port number of node joined to the GridDB cluster have not been specified. (--cluster HOST:PORT)."
+	sys.exit(2)
+else:
+	m = re.match(r"^([^:]+):(\d+)$", options.cluster)
+        if m is None:
+		print u"A20003: Specify --cluster option in the format HOST:PORT."
+		sys.exit(2)
+	clusterserver = m.group(1)
+	clusterport = m.group(2)
+
+if options.wait_time is not None:
+        try:
+                wait_time = int(options.wait_time)
+        except ValueError:
+                print u"A20004: Specify seconds to wait.(-w WAIT_TIME)"
+                sys.exit(2)
+
+log = log.logger(__file__, log.DEBUG)
+log.info("%s start." % (__file__))
+tmpoptions = copy.deepcopy(options)
+tmpoptions.password = "***"
+log.info(tmpoptions)
+
+nodestatus = util.get_nodestat(options, log)
+if nodestatus is None:
+	print u"A20100: Failed to obtain the node information. (node="+options.server+":"+str(options.port)+")"
+	log.error("A20100: Failed to obtain the node information. (node="+options.server+":"+str(options.port)+")")
+	sys.exit(1)
+elif nodestatus != "INACTIVE":
+	if nodestatus == "ACTIVE":
+		print u"A20101: The node has already been joined to the GridDB cluster. (node="+options.server+":"+str(options.port)+", nodestatus="+nodestatus+")"
+		log.error("A20101: The node has already been joined to the GridDB cluster. (node="+options.server+":"+str(options.port)+" status="+nodestatus+")")
+		sys.exit(3)
+	else:
+		print u"A20102: The node is invalid state joined to the GridDB cluster. (node="+options.server+":"+str(options.port)+", nodestatus="+nodestatus+")"
+		log.error("A20102: The node is invalid state joined to the GridDB cluster. (node="+options.server+":"+str(options.port)+" status="+nodestatus+")")
+		sys.exit(3)
+
+
+nodeServer = options.server
+nodePort = options.port
+options.server = clusterserver
+options.port = clusterport
+
+nodestatus = util.get_nodestat(options, log)
+if nodestatus is None:
+	print u"A20103: Failed to obtain the node information. (node="+options.server+":"+str(options.port)+")"
+	log.error("A20103: Failed to obtain the node information. (node="+options.server+":"+str(options.port)+")")
+	sys.exit(1)
+elif nodestatus != "ACTIVE":
+	print u"A20104: The node specified --cluster option has not been joined to the GridDB cluster."+"  (node="+options.server+":"+str(options.port)+", nodestatus="+nodestatus+")"
+	log.error("A20104: The node specified --cluster option has not been joined to the GridDB cluster. (node="+options.server+":"+str(options.port)+" status="+nodestatus+")")
+	sys.exit(3)
+
+clusterstatus = util.get_clusterstat(options, log)
+if clusterstatus is None:
+        print u"A20105: Failed to obtain the status of the GridDB cluster."
+	log.error("A20105: Failed to obtain the status of the GridDB cluster.")
+        sys.exit(1)
+elif clusterstatus == "SUB_CLUSTER":
+        print u"A20106: The GridDB cluster is in an unstable state. (node="+options.server+":"+str(options.port)+", clusterstatus="+clusterstatus+")"
+        log.error("A20106: The GridDB cluster is in an unstable state. (status="+clusterstatus+")")
+        sys.exit(3)
+
+(options.server,options.port) = util.get_master_addr(options,log)
+if options.server is None:
+	print u"A20107: Failed to obtain address of the master node.(node="+options.server+":"+str(options.port)+")"
+	log.error("A20107: Failed to obtain address of the master node.")
+	sys.exit(1)
+
+masterServer = options.server
+masterPort = options.port
+
+
+a_num = util.get_active_num(options, log)
+d_num = util.get_designated_num(options, log)
+if a_num is None or d_num is None:
+	print u"A20108: Failed to obtain the node information."
+	log.error("A20108: Failed to obtain the node information.")
+	sys.exit(1)
+if not a_num == d_num:
+	# the cluster is not stable
+	print u"A20109: Cannot be expanded when the GridDB cluster is in an unstable state."
+	print u"(master="+options.server+":"+str(options.port)+" , the number of nodes joined to the GridDB cluster="+str(a_num )+",  the number of configuration nodes="+str(d_num)+")"
+	log.error("A20109: Cannot be expanded when the GridDB cluster is in an unstable state. (master="+options.server+":"+str(options.port)+", activeNum="+str(a_num)+", designatedNum="+str(d_num)+")")
+	sys.exit(3)
+elif d_num == 1:
+	# to avoid split-brain
+	print u"A2010A: Cannot be expanded when the cluster is configured of one node."
+	print u"Stop the GridDB cluster and configure again."
+	print u"(master="+options.server+":"+str(options.port)+" , the number of nodes joined to the GridDB cluster="+str(a_num)+",  the number of configuration nodes="+str(d_num)+")"
+	log.error("A2010A: Cannot be expanded when the GridDB cluster is configured of one node. (master="+masterServer+":"+str(masterPort)+" activeNum="+str(a_num)+" designatedNum="+str(d_num)+")")
+	sys.exit(3)
+
+clusterName = util.get_cluster_name(options, log)
+if clusterName is None:
+	print u"A2010B: Failed to obtain the name of cluster.(master="+options.server+":"+str(options.port)+")"
+        log.error("A2010B: Failed to obtain the name of cluster. (master="+options.server+":"+str(options.port)+")")
+        sys.exit(1)
+
+log.info("cluster info (master="+masterServer+":"+str(masterPort)+" clusterName="+clusterName+" activeNum="+str(a_num)+" designatedNum="+str(d_num)+")")
+
+options.server = nodeServer
+options.port = nodePort
+method = "POST"
+path = "/node/join"
+data = { "clusterName": clusterName,
+         "minNodeNum": 0 }
+(res, code) = util.request_rest(method, path, data, options, log)
+if code != 200:
+	print u"A2010C: Failed to join to the GridDB cluster."
+	log.error("A2010C: Failed to join to the GridDB cluster.")
+	sys.exit(1)
+
+
+options.server = masterServer
+options.port = masterPort
+method = "POST"
+path = "/cluster/increase"
+data = {}
+(res, code) = util.request_rest(method, path, data, options, log)
+
+if code != 200:
+	options.server = nodeServer
+	options.port = nodePort
+	method = "POST"
+	path = "/node/leave"
+	data = {}
+	(res, code) = util.request_rest(method, path, data, options, log)
+	print u"A2010D: Failed to add a new node to the GridDB cluster."
+	log.error("A2010D: Failed to add a new node to the GridDB cluster. (master="+masterServer+":"+str(masterPort)+")")
+	sys.exit(1)
+
+if options.wait_time is not None:
+	options.server = nodeServer
+	options.port = nodePort
+	e = 0
+	clustered = util.is_active_cluster(options, log)
+        sleep_time = 0
+        while not clustered:
+                util.wait_one_sec()
+                sleep_time += 1
+                clustered = util.is_active_cluster(options, log)
+                if clustered is None:
+                        e = 1
+                        break
+                if sleep_time == wait_time:
+                        e = 2
+                        break
+        util.wait_error_case(e,log,u"\nThe GridDB cluster has been expanded.")
+        log.info("%s end." % (__file__))
+        sys.exit(e)
+
+log.info("%s end." % (__file__))
+
+
+

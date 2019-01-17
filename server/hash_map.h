@@ -1627,6 +1627,9 @@ private:
 		case COLUMN_TYPE_TIMESTAMP:
 			return checkHashAddr<Timestamp>(txn, addr, bucket);
 			break;
+		case COLUMN_TYPE_GEOMETRY:
+			return checkHashAddr<uint8_t>(txn, addr, bucket);
+			break;
 		case COLUMN_TYPE_BLOB:
 			return checkHashAddr<uint8_t>(txn, addr, bucket);
 			break;

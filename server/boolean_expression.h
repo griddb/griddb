@@ -27,6 +27,7 @@
 #include "expression.h"
 #include "hash_map.h"
 #include "qp_def.h"
+#include "rtree_map.h"
 
 class Expr;
 class QueryForCollection;
@@ -109,6 +110,10 @@ public:
 	static void toSearchContext(TransactionContext &txn,
 		util::XArray<BoolExpr *> &andList, ColumnInfo *indexColumnInfo,
 		QueryForCollection &queryObj, HashMap::SearchContext &sc,
+		uint32_t &restEval, ResultSize limit = MAX_RESULT_SIZE);
+	static void toSearchContext(TransactionContext &txn,
+		util::XArray<BoolExpr *> &andList, ColumnInfo *indexColumnInfo,
+		QueryForCollection &queryObj, RtreeMap::SearchContext &sc,
 		uint32_t &restEval, ResultSize limit = MAX_RESULT_SIZE);
 
 	static void toSearchContext(TransactionContext &txn,

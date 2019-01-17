@@ -28,8 +28,11 @@
 #include "value_operator.h"
 #include "transaction_manager.h"
 #include "btree_map.h"
+#include "gis_quadraticsurface.h"
+#include "rtree_map.h"
 #include "data_store_common.h"
 #include "gs_error.h"
+#include "picojson.h"
 #include <sstream>
 
 const char8_t *const QueryProcessor::ANALYZE_QUERY = "#analyze";
@@ -70,6 +73,7 @@ void QueryProcessor::executeTQL(TransactionContext &txn,
 			Collection *collection = reinterpret_cast<Collection *>(&container);
 			QueryStopwatchHook *hook = NULL;
 			QueryForCollection queryObj(txn, *collection, tqlInfo, limit, hook);
+			queryObj.setQueryOption(txn, resultSet);
 			if (queryObj.getLimit() == 0) {
 				ResultType resultType = RESULT_ROWSET;
 				if (queryObj.hasAggregationClause()) {
@@ -96,6 +100,7 @@ void QueryProcessor::executeTQL(TransactionContext &txn,
 			TimeSeries *timeSeries = reinterpret_cast<TimeSeries *>(&container);
 			QueryStopwatchHook *hook = NULL;
 			QueryForTimeSeries queryObj(txn, *timeSeries, tqlInfo, limit, hook);
+			queryObj.setQueryOption(txn, resultSet);
 
 			if (queryObj.getLimit() == 0) {
 				ResultType resultType = RESULT_ROWSET;
@@ -128,5 +133,165 @@ void QueryProcessor::executeTQL(TransactionContext &txn,
 	}
 }
 
+void QueryProcessor::executeMetaTQL(
+		TransactionContext &txn, MetaContainer &container,
+		MetaProcessorSource &processorSource, ResultSize limit,
+		const TQLInfo &tqlInfo, ResultSet &resultSet) {
+	QueryForMetaContainer query(txn, container, tqlInfo, limit, NULL);
+	query.doQuery(txn, processorSource, resultSet);
+}
+
+/*!
+	@brief Obtain a set of Rows satisfying the specified spatial range condition
+*/
+void QueryProcessor::searchGeometryRelated(TransactionContext &txn,
+	Collection &collection, ResultSize limit, uint32_t columnId,
+	uint32_t geometrySize, uint8_t *geometry, GeometryOperator geometryOp,
+	ResultSet &resultSet) {
+	try {
+		ObjectManager &objectManager = *(collection.getObjectManager());
+		util::XArray<OId> &oIdList = *resultSet.getOIdList();
+		Geometry *geom = Geometry::deserialize(txn, geometry, geometrySize);
+
+		oIdList.clear();
+		ColumnInfo *cInfoList = collection.getColumnInfoList();
+		ColumnInfo *columnInfo = &cInfoList[columnId];
+
+		if (columnInfo->getColumnType() != COLUMN_TYPE_GEOMETRY) {
+			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
+				"Cannot search not-geometry collection by spacial condition.");
+		}
+
+		if (!collection.hasIndex(txn, columnId, MAP_TYPE_SPATIAL)) {
+			util::XArray<OId> tmpOIdList(txn.getDefaultAllocator());
+			tmpOIdList.clear();
+			BtreeMap::SearchContext sc;
+			collection.searchRowIdIndex(txn, sc, tmpOIdList, ORDER_UNDEFINED);
+			util::XArray<OId>::iterator itr;
+			BaseContainer::RowArray rowArray(txn, &collection);
+			for (itr = tmpOIdList.begin(); itr != tmpOIdList.end(); itr++) {
+				rowArray.load(txn, *itr, &collection, OBJECT_READ_ONLY);
+				BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);
+				ContainerValue value(txn.getPartitionId(), objectManager);
+				row.getField(txn, *columnInfo, value);
+				Geometry *geom2 = Geometry::deserialize(
+					txn, value.getValue().data(), value.getValue().size());
+				bool conditionFlag;
+				switch (geometryOp) {
+				case GEOMETRY_INTERSECT:
+					conditionFlag = geom->isBoundingRectIntersects(*geom2);
+					break;
+				case GEOMETRY_INCLUDE:
+					conditionFlag = geom->isBoundingRectInclude(*geom2);
+					break;
+				default:
+					GS_THROW_USER_ERROR(
+						GS_ERROR_TQ_INTERNAL_GIS_UNKNOWN_RELATIONSHIP,
+						"Invalid relationship of Geometry is specified.");
+				}
+				if (conditionFlag) {
+					oIdList.push_back(*itr);
+				}
+			}
+		}
+		else {
+			RtreeMap::SearchContext sc;
+			sc.valid_ = true;
+			sc.columnId_ = columnId;
+			if (geom->getType() == Geometry::QUADRATICSURFACE) {
+				if (geometryOp == GEOMETRY_INTERSECT ||
+					geometryOp == GEOMETRY_QSF_INTERSECT) {
+					QuadraticSurface *qsf =
+						dynamic_cast<QuadraticSurface *>(geom);
+					if (geom == NULL) {
+						GS_THROW_USER_ERROR(
+							GS_ERROR_TQ_CONSTRAINT_GIS_CANNOT_GET_VALUE,
+							"Quadratic surface does not have pv3key");
+					}
+					sc.relation_ = GEOMETRY_QSF_INTERSECT;
+					sc.pkey_ = qsf->getPv3Key();
+				}
+				else {
+					GS_THROW_USER_ERROR(
+						GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_RANGE,
+						"Invalid operation for quadratic surface");
+				}
+			}
+			else {
+				sc.rect_[0] = geom->getBoundingRect();
+				sc.relation_ = geometryOp;
+			}
+			sc.limit_ = limit;
+			collection.searchColumnIdIndex(txn, sc, oIdList);
+		}
+		resultSet.setResultType(RESULT_ROW_ID_SET, oIdList.size());
+	}
+	catch (std::exception &e) {
+		collection.handleSearchError(
+			txn, e, GS_ERROR_QP_SEARCH_GEOM_RELATED_FAILED);
+	}
+}
+
+/*!
+	@brief Obtain a set of Rows satisfying a spatial range condition specifying
+   an excluded range
+*/
+void QueryProcessor::searchGeometry(TransactionContext &txn,
+	Collection &collection, ResultSize limit, uint32_t columnId,
+	uint32_t geometrySize1, uint8_t *geometry1, uint32_t geometrySize2,
+	uint8_t *geometry2, ResultSet &resultSet) {
+	try {
+		ObjectManager &objectManager = *(collection.getObjectManager());
+		util::XArray<OId> &oIdList = *resultSet.getOIdList();
+
+		Geometry *geom1 = Geometry::deserialize(txn, geometry1, geometrySize1);
+		Geometry *geom2 = Geometry::deserialize(txn, geometry2, geometrySize2);
+
+
+		oIdList.clear();
+		ColumnInfo *cInfoList = collection.getColumnInfoList();
+		ColumnInfo *columnInfo = &cInfoList[columnId];
+		if (columnInfo->getColumnType() != COLUMN_TYPE_GEOMETRY) {
+			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_MAP_NOT_FOUND,
+				"Cannot search not-geometry collection by spacial condition.");
+		}
+
+		if (!collection.hasIndex(txn, columnId, MAP_TYPE_SPATIAL)) {
+			util::XArray<OId> tmpOIdList(txn.getDefaultAllocator());
+			tmpOIdList.clear();
+			BtreeMap::SearchContext sc;
+			collection.searchRowIdIndex(txn, sc, tmpOIdList, ORDER_UNDEFINED);
+			util::XArray<OId>::iterator itr;
+			BaseContainer::RowArray rowArray(txn, &collection);
+			for (itr = tmpOIdList.begin(); itr != tmpOIdList.end(); itr++) {
+				rowArray.load(txn, *itr, &collection, OBJECT_READ_ONLY);
+				BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);
+				ContainerValue value(txn.getPartitionId(), objectManager);
+				row.getField(txn, *columnInfo, value);
+				Geometry *geom = Geometry::deserialize(
+					txn, value.getValue().data(), value.getValue().size());
+			bool conditionFlag = geom1->isBoundingRectIntersects(*geom) &&
+								 !geom2->isBoundingRectIntersects(*geom);
+
+			if (conditionFlag) {
+				oIdList.push_back(*itr);
+			}
+			}
+		}
+		else {
+			RtreeMap::SearchContext sc;
+			sc.valid_ = true;
+			sc.rect_[0] = geom1->getBoundingRect();
+			sc.rect_[1] = geom2->getBoundingRect();
+			sc.relation_ = GEOMETRY_DIFFERENTIAL;
+			sc.limit_ = limit;
+			collection.searchColumnIdIndex(txn, sc, oIdList);
+		}
+		resultSet.setResultType(RESULT_ROW_ID_SET, oIdList.size());
+	}
+	catch (std::exception &e) {
+		collection.handleSearchError(txn, e, GS_ERROR_QP_SEARCH_GEOM_FAILED);
+	}
+}
 
 

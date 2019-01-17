@@ -348,21 +348,25 @@ ExpirableMap<K, V, T, Hash>::~ExpirableMap() {
 */
 template <typename K, typename V, typename T, typename Hash>
 V &ExpirableMap<K, V, T, Hash>::create(K key, const T &timeout) {
-	Entry *entry = NULL;
+	Entry *entry = create();
 
 	try {
-		entry = create();
 		entry->key_ = key;
-		insertTimer(entry, timeout);
 		insertHash(entry);
+
+		try {
+			insertTimer(entry, timeout);
+		}
+		catch (...) {
+			removeHash(key);
+			throw;
+		}
 
 		return entry->value_;
 	}
-	catch (std::exception &e) {
-		removeHash(key);
-		removeTimer(entry);
+	catch (...) {
 		remove(entry);
-
+		std::exception e;
 		GS_RETHROW_USER_ERROR(e, "");
 	}
 }
@@ -372,19 +376,17 @@ V &ExpirableMap<K, V, T, Hash>::create(K key, const T &timeout) {
 */
 template <typename K, typename V, typename T, typename Hash>
 V &ExpirableMap<K, V, T, Hash>::createNoExpire(K key) {
-	Entry *entry = NULL;
+	Entry *entry = create();
 
 	try {
-		entry = create();
 		entry->key_ = key;
 		insertHash(entry);
 
 		return entry->value_;
 	}
-	catch (std::exception &e) {
-		removeHash(key);
+	catch (...) {
 		remove(entry);
-
+		std::exception e;
 		GS_RETHROW_USER_ERROR(e, "");
 	}
 }
@@ -638,7 +640,9 @@ void ExpirableMap<K, V, T, Hash>::insertHash(Entry *entry) {
 
 	}
 	else {
-		UTIL_THROW_ERROR(0, "");
+		GS_THROW_USER_ERROR(
+				GS_ERROR_CM_INTERNAL_ERROR,
+				"Key of expirable entry conflicted");
 	}
 }
 

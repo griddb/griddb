@@ -35,7 +35,7 @@ public class SubnetPartitionController
 implements PartitionController, Extensibles.AsPartitionController {
 
 	
-	static final boolean WORKAROUND_WRONG_API_TEST = true;
+	static final boolean WORKAROUND_WRONG_API_TEST = false;
 
 	private static final ContainerKeyPredicate DEFAULT_PREDICATE =
 			ContainerKeyPredicate.ofDefaultAttributes(true);
@@ -113,7 +113,7 @@ implements PartitionController, Extensibles.AsPartitionController {
 	@Override
 	public long getContainerCount(
 			int partitionIndex, ContainerKeyPredicate pred,
-			boolean systemMode) throws GSException {
+			boolean internalMode) throws GSException {
 
 		checkOpened();
 		checkPartitionIndex(partitionIndex);
@@ -124,7 +124,7 @@ implements PartitionController, Extensibles.AsPartitionController {
 		channel.setupRequestBuffer(req);
 
 		SubnetGridStore.tryPutSystemOptionalRequest(
-				req, context, systemMode, false, null);
+				req, context, internalMode, false, null);
 
 		final long start = 0;
 		final long limit = 0;
@@ -156,7 +156,7 @@ implements PartitionController, Extensibles.AsPartitionController {
 	@Override
 	public List<String> getContainerNames(
 			int partitionIndex, long start, Long limit,
-			ContainerKeyPredicate pred, boolean systemMode)
+			ContainerKeyPredicate pred, boolean internalMode)
 			throws GSException {
 
 		checkOpened();
@@ -167,7 +167,7 @@ implements PartitionController, Extensibles.AsPartitionController {
 
 		channel.setupRequestBuffer(req);
 		SubnetGridStore.tryPutSystemOptionalRequest(
-				req, context, systemMode, false, null);
+				req, context, internalMode, false, null);
 
 		req.putLong(start);
 		req.putLong(limit == null ? Long.MAX_VALUE : limit);
@@ -178,7 +178,7 @@ implements PartitionController, Extensibles.AsPartitionController {
 				partitionIndex, 0, req, resp, null);
 
 		final ContainerKeyConverter keyConverter =
-				context.getKeyConverter(systemMode);
+				context.getKeyConverter(internalMode, false);
 
 		
 		resp.base().getLong();
@@ -257,33 +257,33 @@ implements PartitionController, Extensibles.AsPartitionController {
 	@Override
 	public int getPartitionIndexOfContainer(String containerName)
 			throws GSException {
-		final boolean systemMode = WORKAROUND_WRONG_API_TEST;
-		return getPartitionIndexOfContainer(containerName, systemMode);
+		final boolean internalMode = WORKAROUND_WRONG_API_TEST;
+		return getPartitionIndexOfContainer(containerName, internalMode);
 	}
 
 	@Override
 	public int getPartitionIndexOfContainer(
-			String containerName, boolean systemMode) throws GSException {
+			String containerName, boolean internalMode) throws GSException {
 		checkOpened();
 		final ContainerKeyConverter keyConverter =
-				context.getKeyConverter(systemMode);
+				context.getKeyConverter(internalMode, false);
 		final ContainerKey containerKey;
 		try {
-			containerKey = keyConverter.parse(containerName, systemMode);
+			containerKey = keyConverter.parse(containerName, internalMode);
 		}
 		catch (NullPointerException e) {
 			throw GSErrorCode.checkNullParameter(
 					containerName, "containerName", e);
 		}
-		return getPartitionIndexOfContainer(containerKey, systemMode);
+		return getPartitionIndexOfContainer(containerKey, internalMode);
 	}
 
 	@Override
 	public int getPartitionIndexOfContainer(
-			ContainerKey containerKey, boolean systemMode) throws GSException {
+			ContainerKey containerKey, boolean internalMode) throws GSException {
 		checkOpened();
 		try {
-			return channel.resolvePartitionId(context, containerKey, systemMode);
+			return channel.resolvePartitionId(context, containerKey, internalMode);
 		}
 		catch (NullPointerException e) {
 			throw GSErrorCode.checkNullParameter(

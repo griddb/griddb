@@ -152,6 +152,10 @@ int32_t HashMap::insert(
 		return insertObject<Timestamp>(txn, *reinterpret_cast<uint64_t*>(key),
 			FixedSizeOfColumnType[hashMapImage_->keyType_], oId);
 		break;
+	case COLUMN_TYPE_GEOMETRY:
+		return insertObject<uint8_t>(txn, *reinterpret_cast<uint8_t*>(key),
+			FixedSizeOfColumnType[hashMapImage_->keyType_], oId);
+		break;
 	case COLUMN_TYPE_BLOB:
 		return insertObject<uint8_t>(txn, *reinterpret_cast<uint8_t*>(key),
 			FixedSizeOfColumnType[hashMapImage_->keyType_], oId);
@@ -213,6 +217,10 @@ int32_t HashMap::remove(
 		break;
 	case COLUMN_TYPE_TIMESTAMP:
 		return removeObject<Timestamp>(txn, *reinterpret_cast<uint64_t*>(key),
+			FixedSizeOfColumnType[hashMapImage_->keyType_], oId);
+		break;
+	case COLUMN_TYPE_GEOMETRY:
+		return removeObject<uint8_t>(txn, *reinterpret_cast<uint8_t*>(key),
 			FixedSizeOfColumnType[hashMapImage_->keyType_], oId);
 		break;
 	case COLUMN_TYPE_BLOB:
@@ -278,6 +286,10 @@ int32_t HashMap::update(
 		return updateObject<Timestamp>(txn, *reinterpret_cast<uint64_t*>(key),
 			FixedSizeOfColumnType[hashMapImage_->keyType_], oId, newOId);
 		break;
+	case COLUMN_TYPE_GEOMETRY:
+		return updateObject<uint8_t>(txn, *reinterpret_cast<uint8_t*>(key),
+			FixedSizeOfColumnType[hashMapImage_->keyType_], oId, newOId);
+		break;
 	case COLUMN_TYPE_BLOB:
 		return updateObject<uint8_t>(txn, *reinterpret_cast<uint8_t*>(key),
 			FixedSizeOfColumnType[hashMapImage_->keyType_], oId, newOId);
@@ -337,6 +349,10 @@ int32_t HashMap::search(
 	case COLUMN_TYPE_TIMESTAMP:
 		oId = searchObject<Timestamp>(
 			txn, *reinterpret_cast<uint64_t*>(key), size);
+		break;
+	case COLUMN_TYPE_GEOMETRY:
+		oId =
+			searchObject<uint8_t>(txn, *reinterpret_cast<uint8_t*>(key), size);
 		break;
 	case COLUMN_TYPE_BLOB:
 		oId =
@@ -407,6 +423,10 @@ int32_t HashMap::search(TransactionContext &txn, SearchContext &sc,
 	case COLUMN_TYPE_TIMESTAMP:
 		return searchObject<Timestamp>(
 			txn, *reinterpret_cast<uint64_t*>(key), size, limit, idList);
+		break;
+	case COLUMN_TYPE_GEOMETRY:
+		return searchObject<uint8_t>(
+			txn, *reinterpret_cast<uint8_t*>(key), size, limit, idList);
 		break;
 	case COLUMN_TYPE_BLOB:
 		return searchObject<uint8_t>(
@@ -744,29 +764,13 @@ void HashMap::merge(TransactionContext& txn) {
 template <class T>
 T* HashMap::getField(TransactionContext& txn, OId oId) {
 	OId validOId = resetModuleFlagOId(oId);
-	switch (container_->getContainerType()) {
-	case COLLECTION_CONTAINER: {
-		Collection::RowArray rowArray(txn, validOId,
-			reinterpret_cast<Collection*>(container_), OBJECT_READ_ONLY);
-		Collection::RowArray::Row row(rowArray.getRow(), &rowArray);
-		BaseObject baseFieldObject(txn.getPartitionId(), *getObjectManager());
-		row.getField(txn, container_->getColumnInfo(hashMapImage_->columnId_),
-			baseFieldObject);
-		return reinterpret_cast<T*>(baseFieldObject.getCursor<uint8_t>());
-	} break;
-	case TIME_SERIES_CONTAINER: {
-		TimeSeries::RowArray rowArray(txn, validOId,
-			reinterpret_cast<TimeSeries*>(container_), OBJECT_READ_ONLY);
-		TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);
-		BaseObject baseFieldObject(txn.getPartitionId(), *getObjectManager());
-		row.getField(txn, container_->getColumnInfo(hashMapImage_->columnId_),
-			baseFieldObject);
-		return reinterpret_cast<T*>(baseFieldObject.getCursor<uint8_t>());
-	} break;
-	default:
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_HM_UNEXPECTED_ERROR, "");
-		break;
-	}
+	BaseContainer::RowArray *rowArray = container_->getCacheRowArray(txn);
+	rowArray->load(txn, validOId, container_, OBJECT_READ_ONLY);
+	BaseContainer::RowArray::Row row(rowArray->getRow(), rowArray);
+	BaseObject baseFieldObject(txn.getPartitionId(), *getObjectManager());
+	row.getField(txn, container_->getColumnInfo(hashMapImage_->columnId_),
+		baseFieldObject);
+	return reinterpret_cast<T*>(baseFieldObject.getCursor<uint8_t>());
 }
 
 std::string HashMap::dump(TransactionContext& txn, uint8_t mode) {

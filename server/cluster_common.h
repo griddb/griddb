@@ -29,8 +29,9 @@ typedef int32_t NodeId;
 typedef int32_t AddressType;
 static const ClusterVersionId GS_CLUSTER_MESSAGE_BEFORE_V_1_5 = 1;
 
+typedef int64_t PartitionRevisionNo;
 
-const ClusterVersionId GS_CLUSTER_MESSAGE_CURRENT_VERSION = 26;
+const ClusterVersionId GS_CLUSTER_MESSAGE_CURRENT_VERSION = 31;
 
 static const int32_t SERVICE_MAX = 4;
 
@@ -88,8 +89,15 @@ static const std::string makeString(
 
 static const int32_t EE_PRIORITY_HIGH = static_cast<int32_t>(-2147483647);
 
-static const int32_t secLimit = INT32_MAX / 1000;
+static inline std::string getTimeStr(int64_t timeval) {
+	util::NormalOStringStream oss;
+	oss.clear();
+	util::DateTime dtime(timeval);
+	dtime.format(oss, true);
+	return oss.str();
+}
 
+static const int32_t secLimit = INT32_MAX / 1000;
 static inline int32_t changeTimeSecToMill(int32_t sec) {
 	if (sec > secLimit) {
 		return INT32_MAX;
@@ -124,7 +132,7 @@ static inline int32_t changeTimeSecToMill(int32_t sec) {
 #define TRACE_SYNC_HANDLER_DETAIL(ev, eventType, pId, level, str) \
 	GS_TRACE_##level(SYNC_SERVICE, GS_TRACE_SYNC_HANDLER_DETAIL,  \
 		str << ", eventType:" << getEventTypeName(eventType)      \
-			<< ", pId:" << pId << ", sender:" << ev.getSenderND());
+			<< ", pId=" << pId << ", sender:" << ev.getSenderND());
 
 #define TRACE_CLUSTER_HANDLER(eventType, level, str)       \
 	GS_TRACE_##level(CLUSTER_SERVICE, GS_TRACE_CS_HANDLER, \
@@ -133,7 +141,7 @@ static inline int32_t changeTimeSecToMill(int32_t sec) {
 #define TRACE_SYNC_HANDLER(eventType, pId, level, str)               \
 	GS_TRACE_##level(SYNC_SERVICE, GS_TRACE_SYNC_HANDLER,            \
 		"{" << str << "}, eventType:" << getEventTypeName(eventType) \
-			<< ", pId:" << pId);
+			<< ", pId=" << pId);
 
 #define TRACE_CLUSTER_OPERATION(eventType, level, str)         \
 	GS_TRACE_##level(CLUSTER_OPERATION, GS_TRACE_CS_OPERATION, \
@@ -167,29 +175,21 @@ static inline int32_t changeTimeSecToMill(int32_t sec) {
 
 #define TRACE_CLUSTER_EXCEPTION(e, eventType, level, str) \
 	UTIL_TRACE_EXCEPTION_##level(CLUSTER_SERVICE, e,      \
-		"{" << str << "}, eventType:" << getEventTypeName(eventType));
+		str << ", eventType=" << getEventTypeName(eventType));
 
 #define TRACE_SYNC_EXCEPTION(e, eventType, pId, level, str)                 \
 	UTIL_TRACE_EXCEPTION_##level(SYNC_SERVICE, e,                           \
-		"[INFO] {" << str << "}, eventType:" << getEventTypeName(eventType) \
-				<< ", pId:" << pId);
+		str << ", eventType=" << getEventTypeName(eventType) \
+				<< ", pId=" << pId);
 
 #define TRACE_CLUSTER_EE_SEND(eventType, nd, level, str)             \
 	GS_TRACE_##level(CLUSTER_SERVICE, GS_TRACE_CS_EVENT_SEND,        \
-		"{" << str << "}, eventType:" << getEventTypeName(eventType) \
-			<< ", nd:" << nd);
-
-#define TRACE_SYNC_EE_SEND(eventType, pId, nd, level, str)           \
-	GS_TRACE_##level(SYNC_SERVICE, GS_TRACE_SYNC_EVENT_SEND,         \
-		"{" << str << "}, eventType:" << getEventTypeName(eventType) \
-			<< ", nd:" << nd << ", pId:" << pId);
-
-#define TRACE_CLUSTER_EE_ADD(eventType, level, str) \
-	TRACE_CLUSTER_HANDLER(eventType, level, str);
+		str << ", eventType=" << getEventTypeName(eventType) \
+			<< ", nd=" << nd);
 
 #define WATCHER_START util::Stopwatch watch(util::Stopwatch::STATUS_STARTED);
 
-#define WATCHER_END_1(eventType)                                 \
+#define WATCHER_END_NORMAL(eventType)                                 \
 	{                                                            \
 		const uint32_t lap = watch.elapsedMillis();              \
 		if (lap > IO_MONITOR_DEFAULT_WARNING_THRESHOLD_MILLIS) { \
@@ -208,7 +208,7 @@ static inline int32_t changeTimeSecToMill(int32_t sec) {
 		}                                                        \
 	}
 
-#define WATCHER_END_3(eventType, pId, pgId)                             \
+#define WATCHER_END_DETAIL(eventType, pId, pgId)                             \
 	{                                                                   \
 		const uint32_t lap = watch.elapsedMillis();                     \
 		if (lap > IO_MONITOR_DEFAULT_WARNING_THRESHOLD_MILLIS) {        \
@@ -216,26 +216,6 @@ static inline int32_t changeTimeSecToMill(int32_t sec) {
 				"eventType=" << eventType << ", pId=" << pId            \
 							<< ", pgId=" << pgId << ", time=" << lap); \
 		}                                                               \
-	}
-
-#define WATCHER_END_4(eventType, str)                                          \
-	{                                                                          \
-		const uint32_t lap = watch.elapsedMillis();                            \
-		if (lap > IO_MONITOR_DEFAULT_WARNING_THRESHOLD_MILLIS) {               \
-			GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_EVENT,               \
-				"eventType=" << eventType << ", " << str << ", time=" << lap); \
-		}                                                                      \
-	}
-
-#define WATCHER_END_5(eventType, no, lastLap, pId, pgId)                     \
-	{                                                                        \
-		const uint32_t lap = watch.elapsedMillis();                          \
-		if (lap - lastLap > IO_MONITOR_DEFAULT_WARNING_THRESHOLD_MILLIS) {   \
-			GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_EVENT,             \
-				"eventType=" << eventType << ",no=" << no << ", pId=" << pId \
-							<< ", pgId=" << pgId << ", time=" << lap);      \
-		}                                                                    \
-		lastLap = lap;                                                       \
 	}
 
 static inline const std::string dumpChangePartitionType(
@@ -270,6 +250,20 @@ static inline std::string dumpList(T &list) {
 	ss << "[";
 	for (size_t pos = 0; pos < list.size(); pos++) {
 		ss << list[pos].dump();
+		if (pos != list.size() - 1) {
+			ss << ",";
+		}
+	}
+	ss << "]";
+	return ss.str();
+}
+
+template <class T>
+static inline std::string dumpArray(T &list) {
+	util::NormalOStringStream ss;
+	ss << "[";
+	for (size_t pos = 0; pos < list.size(); pos++) {
+		ss << list[pos];
 		if (pos != list.size() - 1) {
 			ss << ",";
 		}
@@ -332,5 +326,15 @@ static inline std::ostream &operator<<(
 	ss << "]";
 	return ss;
 }
+
+extern bool g_clusterDump;
+
+#define SET_CLUSTER_DUMP(flag) {g_clusterDump = flag;}
+
+#define DUMP_CLUSTER(s) {if (g_clusterDump) { \
+	GS_TRACE_INFO(CLUSTER_DUMP, GS_TRACE_CS_TRACE_DUMP, s); \
+	std::cout << s << std::endl; \
+	}}
+
 
 #endif

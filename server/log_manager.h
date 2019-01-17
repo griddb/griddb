@@ -85,6 +85,8 @@ public:
 		LOG_TYPE_CONTINUE_CREATE_INDEX, /*!< continue to alter Container */
 		LOG_TYPE_CONTINUE_ALTER_CONTAINER, /*!< continue to alter Container */
 
+		LOG_TYPE_PARTITION_EXPIRATION_PUT_CONTAINER,	/*!< put Container with partition expiration*/
+
 		LOG_TYPE_WITH_BEGIN = 0x80,		/*!< flags for transaction start */
 		LOG_TYPE_IS_AUTO_COMMIT = 0x40,	/*!< flags for autocommit transaction */
 		LOG_TYPE_CLEAR_FLAGS = 0x3f,	/*!< empty flag */
@@ -92,6 +94,18 @@ public:
 		LOG_TYPE_NOOP = 0x3e
 	};
 
+	enum ArchiveLogMode {
+		ARCHIVE_LOG_DISABLE = 0,
+		ARCHIVE_LOG_ENABLE,
+		ARCHIVE_LOG_RUNNING,
+		ARCHIVE_LOG_ERROR = -1
+	};
+
+	enum DuplicateLogMode {
+		DUPLICATE_LOG_DISABLE = 0,
+		DUPLICATE_LOG_ENABLE,
+		DUPLICATE_LOG_ERROR = -1
+	};
 
 	/*!
 		@brief Persistency mode of logs
@@ -186,7 +200,7 @@ public:
 			uint32_t extensionNameLen, const char *extensionName,
 			int32_t txnTimeoutInterval,
 			int32_t txnContextCreateMode, bool withBegin,
-			bool isAutoCommit, RowId cursorRowId);
+			bool isAutoCommit, RowId cursorRowId, bool isPartitionExpiration);
 
 	LogSequentialNumber putDropContainerLog(
 			util::XArray<uint8_t> &binaryLogBuf,
@@ -286,7 +300,7 @@ public:
 			util::XArray<uint8_t> &binaryLogBuf,
 			PartitionId pId, ChunkCategoryId categoryId,
 			ChunkId startChunkId, int32_t chunkNum,
-			uint32_t expandedSize,
+			int32_t validChunkNum, uint32_t expandedSize,
 			const util::XArray<uint8_t> *chunkMetaDataList,
 			bool sentinel);
 
@@ -318,10 +332,13 @@ public:
 	void addSyncLogManager(LogManager *logMgr, PartitionId filterPId);
 	void removeSyncLogManager(LogManager *logMgr, PartitionId filterPId);
 
-	static uint16_t getVersion();
+	static uint16_t getBaseVersion();
+	static uint16_t getLatestVersion();
 
 	static bool isAcceptableVersion(uint16_t version);
+	void setLogVersion(PartitionId pId, uint16_t version);
 
+	uint16_t getLogVersion(PartitionId pId);
 	uint64_t copyLogFile(PartitionGroupId pgId, const char8_t *dirPath);
 
 	static uint32_t parseLogHeader(const uint8_t *&addr, LogRecord &record);
@@ -335,6 +352,31 @@ public:
 
 	static bool isLsnAssignable(uint8_t logType);
 
+	void setAutoCleanupLogFlag(bool flag);
+	bool getAutoCleanupLogFlag();
+
+	void setArchiveLogMode(ArchiveLogMode mode) {
+		archiveLogMode_ = mode;
+	};
+	ArchiveLogMode getArchiveLogMode() {
+		return archiveLogMode_;
+	};
+
+	static void setDuplicateLogMode(int32_t mode) {
+		duplicateLogMode_ = mode;
+	};
+	static int32_t getDuplicateLogMode() {
+		return duplicateLogMode_;
+	};
+
+	void setDuplicateLogPath(PartitionGroupId pgId, const char8_t *duplicatePath);
+	void getDuplicateLogPath(PartitionGroupId pgId, std::string& duplicatePath);
+
+	void setStopOnDuplicateErrorFlag(bool flag);
+
+	void cleanupLogFiles(PartitionGroupId pgId, CheckpointId baseCpId);
+
+	CheckpointId getLastArchivedCpId(PartitionGroupId pgId);
 
 	bool isLongtermSyncLogAvailable() const;
 
@@ -342,6 +384,7 @@ public:
 
 	std::string getLongtermSyncLogErrorMessage() const;
 
+	static uint16_t selectNewerVersion(uint16_t arg1, uint16_t arg2);
 	static bool checkFileName(
 			const std::string &name,
 			PartitionGroupId &pgId, CheckpointId &cpId);
@@ -394,6 +437,7 @@ public:
 
 private:
 	friend class LogCursor;
+	friend class LogManagerFunctionTest;
 
 	class ConflictionDetector;
 	class ConflictionDetectorScope;
@@ -458,6 +502,7 @@ private:
 	static uint32_t getBlockRemaining(
 			const Config &config, uint64_t fileOffset);
 
+	static int32_t getLogVersionScore(uint16_t version);
 	static class ConfigSetUpHandler : public ConfigTable::SetUpHandler {
 		virtual void operator()(ConfigTable &config);
 	} configSetUpHandler_;
@@ -467,6 +512,9 @@ private:
 	std::vector<PartitionInfo> partitionInfoList_;
 	std::vector<PartitionGroupManager*> pgManagerList_;
 
+	ArchiveLogMode archiveLogMode_; 
+	static int32_t duplicateLogMode_; 
+	bool stopOnDuplicateErrorFlag_; 
 	std::vector<LogManager*> childLogManagerList_; 
 	PartitionId filterPId_; 
 };
@@ -524,6 +572,13 @@ public:
 
 	util::NamedFile* getFileDirect() { return file_; }
 
+	void setDuplicateLogFile(util::NamedFile* file) { file2_ = file; }
+
+	void setDuplicateLogPath(const char8_t* duplicatePath);
+
+	void setStopOnDuplicateErrorFlag(bool flag) { stopOnDuplicateErrorFlag_ = flag; }
+
+	void createDuplicateLog(PartitionGroupId pgId, const char8_t *duplicatePath);
 
 private:
 	void lock();
@@ -531,9 +586,13 @@ private:
 	ReferenceCounter referenceCounter_;
 	CheckpointId cpId_;
 	util::NamedFile *file_;
+	util::NamedFile *file2_; 
 	uint64_t fileSize_;
 	uint64_t availableFileSize_;
 	const Config *config_;
+	std::string duplicateLogPath_; 
+	bool stopOnDuplicateErrorFlag_; 
+	int32_t duplicateLogMode_; 
 };
 
 /*!
@@ -544,8 +603,8 @@ public:
 
 	static const uint32_t LOGBLOCK_HEADER_SIZE = sizeof(uint32_t) * 16;
 
-	static const uint16_t LOGBLOCK_VERSION;
-
+	static const uint16_t LOGBLOCK_BASE_VERSION;
+	static const uint16_t LOGBLOCK_LATEST_VERSION;
 	LogBlocksInfo();
 
 	void initialize(const Config &config, BlockPool &blocksPool,
@@ -570,7 +629,7 @@ public:
 	uint32_t copyAllFromFile(LogFileInfo &fileInfo);
 	void copyToFile(LogFileInfo &fileInfo, uint64_t index);
 
-	void initializeBlockHeader(uint64_t index);
+	void initializeBlockHeader(uint64_t index, uint16_t logVersion);
 
 	uint64_t getLastCheckpointId(uint64_t index) const;
 	void setLastCheckpointId(uint64_t index, uint64_t cpId);
@@ -831,11 +890,21 @@ public:
 	void writeBuffer();
 	void flushFile();
 
-	uint64_t copyLogFile(PartitionGroupId pgId, const char8_t *dirPath);
+	uint64_t copyLogFile(
+			PartitionGroupId pgId, const char8_t *dirPath, bool duplicateLogMode);
 
 	void prepareCheckpoint();
 
-	void cleanupLogFiles();
+	void cleanupLogFiles(CheckpointId baseCpId = UNDEF_CHECKPOINT_ID);
+
+	void setAutoCleanupLogFlag(bool flag);
+	bool getAutoCleanupLogFlag();
+
+	void setDuplicateLogPath(const char8_t *duplicateLogPath);
+
+	void getDuplicateLogPath(std::string& duplicatePath);
+
+	void setStopOnDuplicateErrorFlag(bool flag);
 	bool getLongtermSyncLogErrorFlag() const;
 
 	void setLongtermSyncLogError(const std::string &message);
@@ -855,6 +924,9 @@ public:
 			CheckpointId cpId, bool expectExisting, const char8_t *suffix);
 	void unlatchFile(LogFileInfo *&fileInfo);
 
+
+	void setLogVersion(uint16_t version);
+	uint16_t getLogVersion();
 
 private:
 	typedef std::map<CheckpointId, LogFileInfo*> FileInfoMap;
@@ -878,8 +950,10 @@ private:
 	bool prepareBlockForScan(
 			LogBlocksLatch &blocksLatch, uint64_t &offset,
 			bool sameFileOnly, const BlockPosition *endPosition = NULL);
+	uint16_t getLogVersion(LogManager::LogType type);
 	void prepareBlockForAppend(
-			PartitionId activePId, LogSequentialNumber activeLsn);
+			PartitionId activePId, LogSequentialNumber activeLsn, 
+			uint16_t logVersion);
 
 	void scanExistingFiles(
 			LogFileLatch &fileLatch, LogBlocksLatch &blocksLatch,
@@ -906,15 +980,19 @@ private:
 	bool tailReadOnly_;
 	bool checkOnly_;
 
+	bool execAutoCleanup_;
+
+	bool stopOnDuplicateErrorFlag_;
 	std::string longtermSyncLogErrorMessage_; 
 
 	bool longtermSyncLogErrorFlag_; 
-
+	uint16_t logVersion_;
 	const Config *config_;
 	UTIL_UNIQUE_PTR<BlockPool> blocksPool_;
 	std::vector<PartitionInfo> *partitionInfoList_;
 
 	util::Atomic<util::NamedFile*> lastLogFile_;
+	std::string duplicateLogPath_;
 };
 
 /*!
@@ -1125,6 +1203,25 @@ inline PartitionGroupId LogManager::calcPartitionGroupId(
 inline PartitionId LogManager::calcGroupTopPartitionId(
 		PartitionGroupId pgId) const {
 	return config_.pgConfig_.getGroupBeginPartitionId(pgId);
+}
+
+inline void LogManager::setLogVersion(PartitionId pId, uint16_t version) {
+	PartitionGroupManager &pgManager =
+			*pgManagerList_[calcPartitionGroupId(pId)];
+	pgManager.setLogVersion(version);
+}
+
+inline uint16_t LogManager::getLogVersion(PartitionId pId) {
+	PartitionGroupManager &pgManager =
+			*pgManagerList_[calcPartitionGroupId(pId)];
+	return pgManager.getLogVersion();
+}
+
+inline uint16_t LogManager::selectNewerVersion(uint16_t arg1, uint16_t arg2) {
+	int32_t score1 = getLogVersionScore(arg1);
+	int32_t score2 = getLogVersionScore(arg2);
+	assert(score1 != 0 && score2 != 0);
+	return score1 > score2 ? arg1 : arg2;
 }
 
 template<typename Stream>

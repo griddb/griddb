@@ -46,8 +46,11 @@ const char *const LogManager::LOG_DUMP_FILE_EXTENSION = ".txt";
 /*!
     @brief Constructor of LogManager
 */
+int32_t LogManager::duplicateLogMode_ = LogManager::DUPLICATE_LOG_DISABLE;
 LogManager::LogManager(const Config &config) :
 	config_(config)
+	,archiveLogMode_(ARCHIVE_LOG_DISABLE),
+	stopOnDuplicateErrorFlag_(true)
 	,filterPId_(UNDEF_PARTITIONID)  
 {
 	if (config_.getBlockSize() <=
@@ -194,6 +197,16 @@ void LogManager::open(
 						}
 
 						CheckpointId first = list.front();
+						if (isIncrementalBackup) {
+							CheckpointId prev = list.front();
+							CheckpointIdList::iterator itr;
+							for (itr = list.begin() + 1; itr != list.end(); ++itr) {
+								if (*itr - prev > 1) {
+									first = *itr;
+								}
+								prev = *itr;
+							}
+						}
 						pgManagerList_[pgId]->open(
 								pgId, config_, first, list.back() + 1,
 								partitionInfoList_, config_.emptyFileAppendable_,
@@ -228,6 +241,16 @@ void LogManager::open(
 					}
 
 					CheckpointId first = list.front();
+					if (isIncrementalBackup) {
+						CheckpointId prev = list.front();
+						CheckpointIdList::iterator itr;
+						for (itr = list.begin() + 1; itr != list.end(); ++itr) {
+							if (*itr - prev > 1) {
+								first = *itr;
+							}
+							prev = *itr;
+						}
+					}
 					pgManagerList_[pgId]->open(
 							pgId, config_, first, list.back() + 1,
 							partitionInfoList_, config_.emptyFileAppendable_,
@@ -426,7 +449,6 @@ LogSequentialNumber LogManager::putCheckpointStartLog(
 		const util::XArray<StatementId> &lastExecStmtIds,
 		const util::XArray<int32_t> &txnTimeoutIntervalSec)
 {
-	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
 	LogSequentialNumber lsn = 0;
 	try {
 		const uint32_t partitionCount = config_.pgConfig_.getPartitionCount();
@@ -485,7 +507,6 @@ LogSequentialNumber LogManager::putCommitTransactionLog(
 		ContainerId containerId,
 		StatementId stmtId)
 {
-	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
 	LogSequentialNumber lsn = 0;
 	try {
 		lsn = serializeLogCommonPart(
@@ -520,7 +541,6 @@ LogSequentialNumber LogManager::putAbortTransactionLog(
 		ContainerId containerId,
 		StatementId stmtId)
 {
-	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
 	LogSequentialNumber lsn = 0;
 	try {
 		lsn = serializeLogCommonPart(
@@ -551,7 +571,6 @@ LogSequentialNumber LogManager::putDropPartitionLog(
 		util::XArray<uint8_t> &binaryLogBuf,
 		PartitionId pId)
 {
-	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
 	LogSequentialNumber lsn = 0;
 	try {
 		lsn = serializeLogCommonPart(
@@ -584,14 +603,34 @@ LogSequentialNumber LogManager::putPutContainerLog(
 		uint32_t extensionNameLen, const char *extensionName,
 		int32_t txnTimeoutInterval,
 		int32_t txnContextCreateMode, bool withBegin,
-		bool isAutoCommit, RowId cursorRowId)
-
+		bool isAutoCommit, RowId cursorRowId, bool isPartitionExpiration)
 {
-	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
 	LogSequentialNumber lsn = 0;
 	try {
+		LogType logType;
+		if (isPartitionExpiration) { 
+			logType = LOG_TYPE_PARTITION_EXPIRATION_PUT_CONTAINER;
+			setLogVersion(pId, getLatestVersion());
+			if (childLogManagerList_[pId] != NULL) {
+				try {
+					childLogManagerList_[pId]->setLogVersion(pId, getLatestVersion());
+				}
+				catch(std::exception &e) {
+					util::NormalOStringStream oss;
+					oss << "setLogversion failed. pId=" << pId <<
+					  ", reason=(" << GS_EXCEPTION_MESSAGE(e) << ")";
+					childLogManagerList_[pId]->setLongtermSyncLogError(oss.str());
+					childLogManagerList_[pId] = NULL; 
+					GS_TRACE_WARNING(
+						LOG_MANAGER, GS_TRACE_LM_PUT_SYNC_TEMP_LOG_FAILED, oss);
+				}
+			}
+		}
+		else {
+			logType = LOG_TYPE_PUT_CONTAINER;
+		}
 		lsn = serializeLogCommonPart(
-				binaryLogBuf, LOG_TYPE_PUT_CONTAINER,
+				binaryLogBuf, logType,
 				pId, clientId.sessionId_, txnId, containerId);
 
 		uint8_t tmp[LOGMGR_VARINT_MAX_LEN * 4];
@@ -639,8 +678,6 @@ LogSequentialNumber LogManager::putDropContainerLog(
 		ContainerId containerId,
 		uint32_t containerNameLen, const uint8_t *containerName)
 {
-	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
-
 	LogSequentialNumber lsn = 0;
 	try {
 		lsn = serializeLogCommonPart(
@@ -680,8 +717,6 @@ LogSequentialNumber LogManager::putContinueCreateIndexLog(
 		bool isAutoCommit,
 		RowId cursorRowId)
 {
-	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
-
 	LogSequentialNumber lsn = 0;
 	try {
 		lsn = serializeLogCommonPart(
@@ -720,8 +755,6 @@ LogSequentialNumber LogManager::putContinueAlterContainerLog(
 		bool isAutoCommit,
 		RowId cursorRowId)
 {
-	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
-
 	LogSequentialNumber lsn = 0;
 	try {
 		lsn = serializeLogCommonPart(
@@ -764,8 +797,6 @@ LogSequentialNumber LogManager::putCreateIndexLog(
 		bool isAutoCommit, RowId cursorRowId)
 
 {
-	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
-
 	LogSequentialNumber lsn = 0;
 	try {
 		lsn = serializeLogCommonPart(
@@ -839,8 +870,6 @@ LogSequentialNumber LogManager::putDropIndexLog(
 		const util::XArray<uint32_t> &paramDataLen,
 		const util::XArray<const uint8_t*> &paramData)
 {
-	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
-
 	LogSequentialNumber lsn = 0;
 	try {
 		lsn = serializeLogCommonPart(
@@ -898,8 +927,6 @@ LogSequentialNumber LogManager::putCreateTriggerLog(
 		uint32_t nameLen, const char *name,
 		const util::XArray<uint8_t> &triggerInfo)
 {
-	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
-
 	LogSequentialNumber lsn = 0;
 	try {
 		lsn = serializeLogCommonPart(
@@ -936,8 +963,6 @@ LogSequentialNumber LogManager::putDropTriggerLog(
 		uint32_t nameLen,
 		const char *name)
 {
-	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
-
 	LogSequentialNumber lsn = 0;
 	try {
 		lsn = serializeLogCommonPart(
@@ -978,8 +1003,6 @@ LogSequentialNumber LogManager::putPutRowLog(
 		int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
 		bool withBegin, bool isAutoCommit)
 {
-	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
-
 	return putPutOrUpdateRowLog(
 			LOG_TYPE_PUT_ROW, binaryLogBuf, pId,
 			clientId, txnId, containerId, stmtId,
@@ -1003,8 +1026,6 @@ LogSequentialNumber LogManager::putUpdateRowLog(
 		int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
 		bool withBegin, bool isAutoCommit)
 {
-	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
-
 	return putPutOrUpdateRowLog(LOG_TYPE_UPDATE_ROW, binaryLogBuf, pId,
 			clientId, txnId, containerId, stmtId,
 			numRowId, rowIds, numRow, rowData,
@@ -1028,7 +1049,6 @@ LogSequentialNumber LogManager::putRemoveRowLog(
 {
 	assert(!(withBegin && isAutoCommit));
 
-	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
 	LogSequentialNumber lsn = 0;
 	try {
 		uint8_t beginFlag = withBegin ? LOG_TYPE_WITH_BEGIN : 0;
@@ -1077,7 +1097,6 @@ LogSequentialNumber LogManager::putLockRowLog(
 {
 	assert(!(withBegin && isAutoCommit));
 
-	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
 	LogSequentialNumber lsn = 0;
 	try {
 		uint8_t beginFlag = withBegin ? LOG_TYPE_WITH_BEGIN : 0;
@@ -1116,7 +1135,6 @@ LogSequentialNumber LogManager::putCheckpointEndLog(
 		PartitionId pId,
 		BitArray &validBlockInfo)
 {
-	GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_START, "start");
 	LogSequentialNumber lsn = 0;
 	try {
 		const uint32_t partitionCount = config_.pgConfig_.getPartitionCount();
@@ -1157,15 +1175,16 @@ LogSequentialNumber LogManager::putChunkMetaDataLog(
 		util::XArray<uint8_t> &binaryLogBuf,
 		PartitionId pId, ChunkCategoryId categoryId,
 		ChunkId startChunkId, int32_t chunkNum,
-		uint32_t expandedSize,
+		int32_t validChunkNum, uint32_t expandedSize,
 		const util::XArray<uint8_t> *chunkMetaDataList,
 		bool sentinel) {
 	LogSequentialNumber lsn = 0;
 	try {
 		const ContainerId cId = sentinel ? UNDEF_CONTAINERID : 0;
+		TransactionId txnId = getLogVersion(pId);
 		lsn = serializeLogCommonPart(
 				binaryLogBuf, LOG_TYPE_CHUNK_META_DATA,
-				pId, 0, 0, cId);
+				pId, 0, txnId, cId);
 
 		uint8_t tmp[LOGMGR_VARINT_MAX_LEN * 4];
 		uint8_t *addr = tmp;
@@ -1206,6 +1225,7 @@ LogSequentialNumber LogManager::putChunkMetaDataLog(
 				",categoryId," << static_cast<int32_t>(categoryId) <<
 				",startChunkId," << startChunkId <<
 				",chunkNum," << chunkNum <<
+				",validChunkNum," << validChunkNum <<
 				",logSize," << binaryLogBuf.size());
 	} catch(std::exception &e) {
 		GS_RETHROW_SYSTEM_ERROR(
@@ -1326,6 +1346,9 @@ void LogManager::prepareCheckpoint(PartitionGroupId pgId, CheckpointId cpId) {
 			GS_THROW_SYSTEM_ERROR(
 					GS_ERROR_LM_INTERNAL_INVALID_ARGUMENT,
 					"Illegal checkpoint ID");
+		}
+		if (DUPLICATE_LOG_ERROR == duplicateLogMode_) {
+			pgManagerList_[pgId]->setDuplicateLogPath(NULL);
 		}
 		pgManagerList_[pgId]->prepareCheckpoint();
 	}
@@ -1471,8 +1494,11 @@ void LogManager::removeSyncLogManager(LogManager *target, PartitionId filterPId)
 /*!
     @brief Returns of version of the Log.
 */
-uint16_t LogManager::getVersion() {
-	return LogBlocksInfo::LOGBLOCK_VERSION;
+uint16_t LogManager::getBaseVersion() {
+	return LogBlocksInfo::LOGBLOCK_BASE_VERSION;
+};
+uint16_t LogManager::getLatestVersion() {
+	return LogBlocksInfo::LOGBLOCK_LATEST_VERSION;
 };
 
 /*!
@@ -1489,7 +1515,8 @@ uint64_t LogManager::copyLogFile(PartitionGroupId pgId, const char8_t *dirPath) 
 	try {
 		LOG_MANAGER_CONFLICTION_DETECTOR_SCOPE(pgId, true);
 
-		return pgManagerList_[pgId]->copyLogFile(pgId, dirPath);
+		bool duplicateLogMode = (duplicateLogMode_ == DUPLICATE_LOG_ENABLE);
+		return pgManagerList_[pgId]->copyLogFile(pgId, dirPath, duplicateLogMode);
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_USER_ERROR(
@@ -1571,6 +1598,7 @@ uint32_t LogManager::parseLogBody(const uint8_t *&addr, LogRecord &record) {
 		break;
 
 	case LOG_TYPE_PUT_CONTAINER:
+	case LOG_TYPE_PARTITION_EXPIRATION_PUT_CONTAINER:
 		addr += util::varIntDecode32(addr, flagValue);
 		addr += util::varIntDecode32(addr, record.containerNameLen_);
 		addr += util::varIntDecode32(addr, record.containerInfoLen_);
@@ -1835,6 +1863,15 @@ bool LogManager::isLsnAssignable(uint8_t logType) {
 	}
 }
 
+void LogManager::setAutoCleanupLogFlag(bool flag) {
+	for (size_t i = 0; i < pgManagerList_.size(); i++) {
+		pgManagerList_[i]->setAutoCleanupLogFlag(flag);
+	}
+}
+
+bool LogManager::getAutoCleanupLogFlag() {
+	return pgManagerList_[0]->getAutoCleanupLogFlag();
+}
 
 /*!
     @brief Converts LogType to a string.
@@ -1931,6 +1968,10 @@ const char* LogManager::logTypeToString(LogType type) {
 
 	case LOG_TYPE_CONTINUE_ALTER_CONTAINER:
 		return "CONTINUE_ALTER_CONTAINER";
+		break;
+
+	case LOG_TYPE_PARTITION_EXPIRATION_PUT_CONTAINER:
+		return "PATIION_EXPIRATION_PUT_CONTAINER";
 		break;
 
 	case LOG_TYPE_UNDEF:
@@ -2168,6 +2209,25 @@ void LogManager::ConfigSetUpHandler::operator()(ConfigTable &config) {
 			setDefault(2);
 }
 
+void LogManager::setDuplicateLogPath(PartitionGroupId pgId, const char8_t *duplicateLogPath) {
+	assert(pgId < pgManagerList_.size());
+	pgManagerList_[pgId]->setDuplicateLogPath(duplicateLogPath);
+}
+
+void LogManager::getDuplicateLogPath(PartitionGroupId pgId, std::string& duplicatePath) {
+	assert(pgId < pgManagerList_.size());
+	pgManagerList_[pgId]->getDuplicateLogPath(duplicatePath);
+}
+
+void LogManager::setStopOnDuplicateErrorFlag(bool flag) {
+	for (size_t i = 0; i < pgManagerList_.size(); i++) {
+		pgManagerList_[i]->setStopOnDuplicateErrorFlag(flag);
+	}
+}
+void LogManager::cleanupLogFiles(PartitionGroupId pgId, CheckpointId baseCpId) {
+	assert(pgId < pgManagerList_.size());
+	pgManagerList_[pgId]->cleanupLogFiles(baseCpId);
+}
 
 bool LogManager::isLongtermSyncLogAvailable() const {
 	if (filterPId_ != UNDEF_PARTITIONID) {
@@ -2302,9 +2362,11 @@ size_t LogManager::ReferenceCounter::decrement() {
 LogManager::LogFileInfo::LogFileInfo() :
 		cpId_(UNDEF_CHECKPOINT_ID),
 		file_(NULL),
+		file2_(NULL),
 		fileSize_(0),
 		availableFileSize_(0),
 		config_(NULL)
+		,stopOnDuplicateErrorFlag_(true)
 {
 }
 
@@ -2329,6 +2391,13 @@ void LogManager::LogFileInfo::open(const Config &config,
 		file_ = file.release();
 		config_ = &config;
 
+		if (duplicateLogPath_.length() > 0) {
+			const std::string file2Path = createLogFilePath(
+					duplicateLogPath_.c_str(), pgId, cpId);
+			UTIL_UNIQUE_PTR<util::NamedFile> file2(UTIL_NEW util::NamedFile());
+			file2->open(file2Path.c_str(), flags);
+			file2_ = file2.release();
+		}
 
 		if (!checkOnly) {
 			lock();
@@ -2369,15 +2438,20 @@ void LogManager::LogFileInfo::close() {
 	}
 
 	UTIL_UNIQUE_PTR<util::File> file(file_);
+	UTIL_UNIQUE_PTR<util::File> file2(file2_);
 
 	cpId_ = UNDEF_CHECKPOINT_ID;
 	file_ = NULL;
+	file2_ = NULL;
 	fileSize_ = 0;
 	availableFileSize_ = 0;
 	config_ = NULL;
 
 	try {
 		file->close();
+		if (file2.get()) {
+			file2->close();
+		}
 	}
 	catch(std::exception &e) {
 		GS_RETHROW_USER_ERROR(
@@ -2463,14 +2537,10 @@ uint32_t LogManager::LogFileInfo::readBlock(
 	const uint32_t requestSize = static_cast<uint32_t>(endOffset - startOffset);
 	try {
 		util::Stopwatch watch(util::Stopwatch::STATUS_STARTED);
-		const int64_t resultSize = file_->read(buffer, requestSize, startOffset);
-		const uint32_t lap = watch.elapsedMillis();
-		if (lap > config_->ioWarningThresholdMillis_) { 
-			GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_IO,
-					"[LONG I/O] read time," << lap <<
-					",fileName," << file_->getName() <<
-					",startIndex," << startIndex << ",count," << count);
-		}
+		GS_FILE_READ_ALL(
+				IO_MONITOR, (*file_), buffer, requestSize, startOffset,
+				config_->ioWarningThresholdMillis_);
+		const int64_t resultSize = requestSize;
 		if (resultSize != static_cast<int64_t>(requestSize)) {
 			GS_THROW_USER_ERROR(GS_ERROR_LM_READ_LOG_BLOCK_FAILED,
 					"Result size unmatched (path=" << file_->getName() << ")");
@@ -2505,15 +2575,11 @@ void LogManager::LogFileInfo::writeBlock(
 
 	const uint32_t requestSize = static_cast<uint32_t>(endOffset - startOffset);
 	try {
-		util::Stopwatch watch(util::Stopwatch::STATUS_STARTED);
-		const int64_t resultSize = file_->write(buffer, requestSize, startOffset);
-		const uint32_t lap = watch.elapsedMillis();
-		if (lap > config_->ioWarningThresholdMillis_) { 
-			GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_IO,
-					"[LONG I/O] write time," << lap <<
-					",fileName," << file_->getName() <<
-					",startIndex," << startIndex << ",count," << count);
-		}
+		GS_FILE_WRITE_ALL(
+				IO_MONITOR, (*file_), buffer,
+				requestSize, startOffset,
+				config_->ioWarningThresholdMillis_);
+		const int64_t resultSize = requestSize;
 		if (resultSize != static_cast<int64_t>(requestSize)) {
 			GS_THROW_USER_ERROR(GS_ERROR_LM_WRITE_LOG_BLOCK_FAILED,
 					"Result size unmatched (path=" << file_->getName() << ")");
@@ -2533,11 +2599,75 @@ void LogManager::LogFileInfo::writeBlock(
 				e, "Write log block failed. reason=(" <<
 				GS_EXCEPTION_MESSAGE(e) << ")");
 	}
+	try {
+		if (file2_) {
+			GS_FILE_WRITE_ALL(
+					IO_MONITOR, (*file2_), buffer,
+					requestSize, startOffset,
+					config_->ioWarningThresholdMillis_);
+			const int64_t resultSize = requestSize;
+			if (resultSize != static_cast<int64_t>(requestSize)) {
+				try {
+					file2_->close();
+				}
+				catch (...) {
+				}
+				LogManager::setDuplicateLogMode(DUPLICATE_LOG_ERROR);
+				if (stopOnDuplicateErrorFlag_) {
+					file2_ = NULL;
+					GS_THROW_USER_ERROR(GS_ERROR_LM_WRITE_LOG_BLOCK_FAILED,
+							"Result size unmatched (path=" << file2_->getName() << ")");
+				} else {
+					GS_TRACE_ERROR(LOG_MANAGER,
+							GS_TRACE_LM_WRITE_DUPLICATE_LOG_FAILED,
+							"Write duplicate log failed(continue). " <<
+							"Result size unmatched (path=" <<
+							file2_->getName() << ")");
+					file2_ = NULL;
+				}
+			}
+		}
+	}
+	catch (std::exception &e) {
+		try {
+			file2_->close();
+			file2_ = NULL;
+		}
+		catch (...) {
+		}
+		LogManager::setDuplicateLogMode(DUPLICATE_LOG_ERROR);
+		if (stopOnDuplicateErrorFlag_) {
+			GS_RETHROW_USER_ERROR(e,
+					"Write duplicate log failed(continue). reason=(" <<
+					GS_EXCEPTION_MESSAGE(e) << ")");
+		} else {
+			GS_TRACE_ERROR(LOG_MANAGER,
+					GS_TRACE_LM_WRITE_DUPLICATE_LOG_FAILED,
+					"Write duplicate log failed(continue).");
+		}
+	}
 }
 
 void LogManager::LogFileInfo::flush() {
 	assert(!isClosed());
 	flush(*file_, *config_, true);
+	if (file2_) {
+		try {
+			flush(*file2_, *config_, true);
+		} catch(std::exception &) {
+			LogManager::setDuplicateLogMode(DUPLICATE_LOG_ERROR);
+			if (stopOnDuplicateErrorFlag_) {
+				file2_ = NULL;
+				throw;
+			} else {
+				GS_TRACE_ERROR(LOG_MANAGER,
+						GS_TRACE_LM_FLUSH_DUPLICATE_LOG_FAILED,
+						"Flush duplicate log failed(continue). (path=" <<
+						file2_->getName() << ")");
+				file2_ = NULL;
+			}
+		}
+	}
 }
 
 void LogManager::LogFileInfo::flush(
@@ -2598,16 +2728,105 @@ void LogManager::LogFileInfo::lock() {
 	}
 }
 
+void LogManager::LogFileInfo::setDuplicateLogPath(const char8_t *duplicatePath) {
+	if (duplicatePath && strlen(duplicatePath) > 0) {
+		duplicateLogPath_.assign(duplicatePath);
+	}
+	else {
+		duplicateLogPath_.clear();
+	}
+}
+
+void LogManager::LogFileInfo::createDuplicateLog(
+		PartitionGroupId pgId, const char8_t *duplicatePath) {
+	if (duplicatePath && strlen(duplicatePath) > 0) {
+		duplicateLogPath_.assign(duplicatePath);
+		const std::string file2Path = createLogFilePath(
+			duplicateLogPath_.c_str(), pgId, cpId_);
+		try {
+			util::FileFlag flags = util::FileFlag::TYPE_READ_WRITE
+					| util::FileFlag::TYPE_CREATE | util::FileFlag::TYPE_EXCLUSIVE;
+			UTIL_UNIQUE_PTR<util::NamedFile> file2(UTIL_NEW util::NamedFile());
+			file2->open(file2Path.c_str(), flags);
+			file2_ = file2.release();
+			util::FileStatus status;
+			file2_->getStatus(&status);
+			uint64_t fileSize = status.getSize();
+			if (fileSize != 0) {
+				LogManager::setDuplicateLogMode(DUPLICATE_LOG_ERROR);
+				if (stopOnDuplicateErrorFlag_) {
+					GS_THROW_USER_ERROR(GS_ERROR_LM_CREATE_LOG_FILE_FAILED,
+							"Created file is not empty");
+				} else {
+					GS_TRACE_ERROR(LOG_MANAGER,
+							GS_TRACE_LM_CREATE_LOG_FILE_FAILED,
+							"Created duplicate log file is not empty(continue).");
+					try {
+						UTIL_UNIQUE_PTR<util::File> file2(file2_);
+						file2_ = NULL;
+						if (file2.get()) {
+							file2->close();
+						}
+					}
+					catch (...) {
+					}
+				}
+			}
+		}
+		catch(std::exception &e) {
+			try {
+				UTIL_UNIQUE_PTR<util::File> file2(file2_);
+				file2_ = NULL;
+				if (file2.get()) {
+					file2->close();
+				}
+			}
+			catch (...) {
+			}
+			LogManager::setDuplicateLogMode(DUPLICATE_LOG_ERROR);
+			if (stopOnDuplicateErrorFlag_) {
+				GS_RETHROW_USER_ERROR(e,
+						"Create duplicate log failed. (path=" << file2Path <<
+						", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+			} else {
+				UTIL_TRACE_EXCEPTION_WARNING(LOG_MANAGER, e,
+						"Create duplicate log failed(continue). reason=("
+						<< GS_EXCEPTION_MESSAGE(e) << ")");
+			}
+		}
+	}
+	else {
+		duplicateLogPath_.clear();
+	}
+}
 
 
-const uint16_t LogManager::LogBlocksInfo::LOGBLOCK_VERSION = 0x19;
+const uint16_t LogManager::LogBlocksInfo::LOGBLOCK_BASE_VERSION = 0x19;
+const uint16_t LogManager::LogBlocksInfo::LOGBLOCK_LATEST_VERSION = 0x24;
 
 const uint16_t
 LogManager::LogBlocksInfo::LOGBLOCK_ACCEPTABLE_VERSIONS[] = {
-		LOGBLOCK_VERSION,
+		LOGBLOCK_BASE_VERSION,
+		0x24,
 		0x21,
+		LOGBLOCK_LATEST_VERSION,
 		0 /* sentinel */
 };
+
+int32_t LogManager::getLogVersionScore(uint16_t version) {
+	switch(version) {
+	case LogBlocksInfo::LOGBLOCK_BASE_VERSION:
+		return 3;
+	case LogBlocksInfo::LOGBLOCK_LATEST_VERSION:
+		return 4;
+//	case 0x24:
+//		return 2;
+	case 0x21:
+		return 1;
+	default:
+		return 0;
+	}
+}
 
 LogManager::LogBlocksInfo::LogBlocksInfo() :
 		blocks_(NULL),
@@ -2802,7 +3021,9 @@ uint32_t LogManager::LogBlocksInfo::copyAllFromFile(LogFileInfo &fileInfo) {
 				UTIL_TRACE_EXCEPTION_WARNING(
 						LOG_MANAGER, e, "Tail block is corrupted (checkpointId=" <<
 						fileInfo.getCheckpointId() << ", blockIndex=" << index << ")");
-
+				if (e.getErrorCode() == GS_ERROR_LM_LOG_FILE_VERSION_UNMATCHED) {
+					GS_RETHROW_SYSTEM_ERROR(e, "Log version error");
+				}
 				availableBlockCount = index;
 			}
 			fileInfo.setAvailableFileSize(
@@ -2826,9 +3047,9 @@ void LogManager::LogBlocksInfo::copyToFile(
 	fileInfo.writeBlock(src, index, 1);
 }
 
-void LogManager::LogBlocksInfo::initializeBlockHeader(uint64_t index) {
+void LogManager::LogBlocksInfo::initializeBlockHeader(uint64_t index, uint16_t logVersion) {
 	memset(blocks_ + getBlockHeadOffset(index), 0, LOGBLOCK_HEADER_SIZE);
-	setHeaderFileld(index, LOGBLOCK_VERSION_OFFSET, LOGBLOCK_VERSION);
+	setHeaderFileld(index, LOGBLOCK_VERSION_OFFSET, logVersion);
 	setHeaderFileld(index, LOGBLOCK_MAGIC_OFFSET, LOGBLOCK_MAGIC_NUMBER);
 	setHeaderFileld<uint32_t>(index, LOGBLOCK_LSN_INFO_OFFSET, 0);
 }
@@ -2958,17 +3179,16 @@ void LogManager::LogBlocksInfo::validate(uint64_t index) const {
 	const uint16_t version =
 			getHeaderFileld<uint16_t>(index, LOGBLOCK_VERSION_OFFSET);
 
-	if (!isAcceptableVersion(version)) {
-		GS_THROW_USER_ERROR(
-				GS_ERROR_LM_LOG_FILE_VERSION_UNMATCHED,
-				"Version unmatched (version=" << version << ")");
-	}
-
 	if (getHeaderFileld<uint16_t>(index, LOGBLOCK_MAGIC_OFFSET) !=
 			LOGBLOCK_MAGIC_NUMBER) {
 		GS_THROW_USER_ERROR(
 				GS_ERROR_LM_INVALID_LOG_BLOCK,
 				"Log file corrupted (Invalid magic number)");
+	}
+	if (!isAcceptableVersion(version)) {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_LM_LOG_FILE_VERSION_UNMATCHED,
+				"Version unmatched (version=" << version << ")");
 	}
 }
 
@@ -3644,7 +3864,10 @@ LogManager::PartitionGroupManager::PartitionGroupManager() :
 		flushRequired_(false),
 		normalShutdownCompleted_(false),
 		tailReadOnly_(false),
+		execAutoCleanup_(true),
+		stopOnDuplicateErrorFlag_(true),
 		longtermSyncLogErrorFlag_(false), 
+		logVersion_(LogManager::getBaseVersion()),
 		config_(NULL),
 		partitionInfoList_(NULL) {
 }
@@ -3823,7 +4046,7 @@ bool LogManager::PartitionGroupManager::findLog(
 	getAllBlockRange(start, end);
 
 
-	if (end.second <= 0) {
+	if (start.first == end.first && end.second <= 0) {
 		return false;
 	}
 
@@ -4293,9 +4516,10 @@ void LogManager::PartitionGroupManager::putLog(
 				"Read only log file");
 	}
 
+	uint16_t logVersion = getLogVersion(static_cast<LogManager::LogType>(logRecord.type_));
 
 
-	prepareBlockForAppend(UNDEF_PARTITIONID, UNDEF_LSN);
+	prepareBlockForAppend(UNDEF_PARTITIONID, UNDEF_LSN, logVersion);
 
 	const uint32_t lastBlockRemaining = getBlockRemaining(*config_, tailOffset_);
 	if (lastBlockRemaining < LogRecord::LOG_HEADER_SIZE) {
@@ -4311,7 +4535,7 @@ void LogManager::PartitionGroupManager::putLog(
 		tailOffset_ += lastBlockRemaining;
 		dirty_ = true;
 
-		prepareBlockForAppend(UNDEF_PARTITIONID, UNDEF_LSN);
+		prepareBlockForAppend(UNDEF_PARTITIONID, UNDEF_LSN, logVersion);
 	}
 
 	if (logRecord.type_ == LOG_TYPE_CHECKPOINT_END) {
@@ -4348,7 +4572,7 @@ void LogManager::PartitionGroupManager::putLog(
 			break;
 		}
 
-		prepareBlockForAppend(logRecord.partitionId_, logRecord.lsn_);
+		prepareBlockForAppend(logRecord.partitionId_, logRecord.lsn_, logVersion);
 	}
 }
 
@@ -4375,7 +4599,7 @@ void LogManager::PartitionGroupManager::flushFile() {
 }
 
 uint64_t LogManager::PartitionGroupManager::copyLogFile(
-		PartitionGroupId pgId, const char8_t *dirPath) {
+		PartitionGroupId pgId, const char8_t *dirPath, bool duplicateLogMode) {
 
 	assert(!isClosed());
 
@@ -4411,12 +4635,24 @@ uint64_t LogManager::PartitionGroupManager::copyLogFile(
 			const uint32_t copySize = config_->getBlockSize() * blockCount;
 
 			const uint64_t copyOffset = config_->getBlockSize() * i;
-			srcFile->read(buffer.data(), copySize, copyOffset);
-			destFile->write(buffer.data(), copySize, copyOffset);
+			GS_FILE_READ_ALL(
+					IO_MONITOR, (*srcFile), buffer.data(), copySize, copyOffset,
+					config_->ioWarningThresholdMillis_);
+			GS_FILE_WRITE_ALL(
+					IO_MONITOR, (*destFile), buffer.data(), copySize, copyOffset,
+					config_->ioWarningThresholdMillis_);
 			i += blockCount;
 		}
 
-		destFile->close();
+		if (duplicateLogMode) {
+			LogFileLatch fileLatch;
+			fileLatch.set(*this, lastCheckpointId_, false);
+			fileLatch.get()->setStopOnDuplicateErrorFlag(stopOnDuplicateErrorFlag_);
+			fileLatch.get()->setDuplicateLogFile(destFile.release());
+		}
+		else {
+			destFile->close();
+		}
 		return totalBlockCount * config_->getBlockSize();
 	}
 	catch (...) {
@@ -4445,6 +4681,8 @@ void LogManager::PartitionGroupManager::prepareCheckpoint() {
 	LogFileLatch fileLatch;
 	fileLatch.set(*this, lastCheckpointId_, false);
 	tailBlocksLatch_.setForAppend(fileLatch);
+	tailBlocksLatch_.getFileInfo()->setStopOnDuplicateErrorFlag(stopOnDuplicateErrorFlag_);
+	tailBlocksLatch_.getFileInfo()->createDuplicateLog(pgId_, duplicateLogPath_.c_str());
 	lastLogFile_ = tailBlocksLatch_.getFileInfo()->getFileDirect();
 
 	if (config_->indexEnabled_) {
@@ -4761,8 +4999,37 @@ bool LogManager::PartitionGroupManager::prepareBlockForScan(
 	}
 }
 
+uint16_t LogManager::PartitionGroupManager::getLogVersion() {
+	assert(LogManager::isAcceptableVersion(logVersion_));
+	return logVersion_;
+}
+
+uint16_t LogManager::PartitionGroupManager::getLogVersion(LogManager::LogType type) {
+	assert(LogManager::isAcceptableVersion(logVersion_));
+	return logVersion_;
+}
+
+void LogManager::PartitionGroupManager::setLogVersion(uint16_t version) {
+	if (!LogManager::isAcceptableVersion(version)) {
+		GS_TRACE_WARNING(LOG_MANAGER, GS_TRACE_LM_LOG_VERSION,
+				"Ignore invalid LogVersion: (pgId=" << pgId_ <<
+				", version=" << version);
+		assert(false);
+		return;
+	}
+	uint16_t oldVersion = logVersion_;
+	logVersion_ = selectNewerVersion(logVersion_, version);
+	if (oldVersion != logVersion_) {
+			GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_LOG_VERSION,
+					"Change LogVersion: (pgId=" << pgId_ <<
+					", old=" << oldVersion <<
+					", new=" << logVersion_);
+	}
+}
+
 void LogManager::PartitionGroupManager::prepareBlockForAppend(
-		PartitionId activePId, LogSequentialNumber activeLsn) {
+		PartitionId activePId, LogSequentialNumber activeLsn,
+		uint16_t logVersion) {
 	uint64_t nextOffset = tailOffset_;
 
 	const bool foundInBuffer =
@@ -4790,7 +5057,7 @@ void LogManager::PartitionGroupManager::prepareBlockForAppend(
 	}
 
 	tailBlocksLatch_.get()->initializeBlockHeader(
-			getBlockIndex(*config_, tailOffset_));
+			getBlockIndex(*config_, tailOffset_), logVersion);
 }
 
 void LogManager::PartitionGroupManager::scanExistingFiles(
@@ -4902,7 +5169,7 @@ void LogManager::PartitionGroupManager::scanExistingFiles(
 	}
 }
 
-void LogManager::PartitionGroupManager::cleanupLogFiles() {
+void LogManager::PartitionGroupManager::cleanupLogFiles(CheckpointId baseCheckpointId) {
 	assert(firstCheckpointId_ != UNDEF_CHECKPOINT_ID);
 	assert(lastCheckpointId_ != UNDEF_CHECKPOINT_ID);
 
@@ -4911,6 +5178,19 @@ void LogManager::PartitionGroupManager::cleanupLogFiles() {
 		return;
 	}
 
+	if (!execAutoCleanup_ && baseCheckpointId == UNDEF_CHECKPOINT_ID) {
+		GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_CLEANUP_LOG_FILES,
+				"Remove log file is skipped (pgId=" << pgId_ << ")");
+		return;
+	} else {
+		if (!execAutoCleanup_) {
+			if (baseCheckpointId > completedCheckpointId_) {
+				baseCheckpointId = completedCheckpointId_;
+			}
+		} else {
+			baseCheckpointId = lastCheckpointId_;
+		}
+	}
 
 	try {
 		CheckpointId requiredCpId;
@@ -4948,8 +5228,8 @@ void LogManager::PartitionGroupManager::cleanupLogFiles() {
 
 		requiredCpId = std::min(
 				requiredCpId,
-				lastCheckpointId_ -
-					std::min(config_->retainedFileCount_, lastCheckpointId_));
+				baseCheckpointId -
+					std::min(config_->retainedFileCount_, baseCheckpointId));
 
 
 		while (firstCheckpointId_ < requiredCpId) {
@@ -5047,6 +5327,34 @@ void LogManager::updateAvailableStartLsn(
 	}
 }
 
+void LogManager::PartitionGroupManager::setAutoCleanupLogFlag(bool flag) {
+	execAutoCleanup_ = flag;
+}
+
+bool LogManager::PartitionGroupManager::getAutoCleanupLogFlag() {
+	return execAutoCleanup_;
+}
+
+void LogManager::PartitionGroupManager::setDuplicateLogPath(
+		const char8_t *duplicateLogPath) {
+	if (duplicateLogPath && strlen(duplicateLogPath) > 0) {
+		duplicateLogPath_.assign(duplicateLogPath);
+	}
+	else {
+		duplicateLogPath_.clear();
+	}
+	tailBlocksLatch_.getFileInfo()->setDuplicateLogPath(duplicateLogPath);
+}
+
+void LogManager::PartitionGroupManager::getDuplicateLogPath(
+		std::string &duplicateLogPath) {
+	duplicateLogPath = duplicateLogPath_;
+}
+
+void LogManager::PartitionGroupManager::setStopOnDuplicateErrorFlag(bool flag) {
+	stopOnDuplicateErrorFlag_ = flag;
+	tailBlocksLatch_.getFileInfo()->setStopOnDuplicateErrorFlag(flag);
+}
 void LogManager::PartitionGroupManager::setLongtermSyncLogError(const std::string &message) {
 	longtermSyncLogErrorFlag_ = true;
 	longtermSyncLogErrorMessage_ = message;

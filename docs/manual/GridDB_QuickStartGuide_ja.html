@@ -7,7 +7,7 @@
 <meta http-equiv="Content-Type" content="text/html;charset=utf-8"/>
 <meta name="title" content="GridDB クイックスタートガイド"/>
 <meta name="generator" content="Org-mode"/>
-<meta name="generated" content="2017-04-13T19:06+0900"/>
+<meta name="generated" content="2019-01-16T13:31+0900"/>
 <meta name="author" content=""/>
 <meta name="description" content=""/>
 <meta name="keywords" content=""/>
@@ -113,9 +113,10 @@ float: none;
 
 
 
-<p>
-<p class="revision">Revision: CE-20180525</p>
-</p>
+
+
+<p class="revision">Revision: CE-20190116</p>
+
 <div id="table-of-contents">
 <h2>Table of Contents</h2>
 <div id="text-table-of-contents">
@@ -188,6 +189,12 @@ float: none;
 <li><a href="#sec-3-2">3.2 各種情報を取得する</a>
 <ul>
 <li><a href="#sec-3-2-1">3.2.1 クラスタ情報を取得する</a></li>
+</ul>
+</li>
+<li><a href="#sec-3-3">3.3 クラスタへのノード増設／切り離し</a>
+<ul>
+<li><a href="#sec-3-3-1">3.3.1 稼働中のクラスタにノードを増設する</a></li>
+<li><a href="#sec-3-3-2">3.3.2 稼働中のクラスタからノードを離脱させる（クラスタの縮小）</a></li>
 </ul></li>
 </ul>
 </li>
@@ -1670,6 +1677,8 @@ Java版クライアントを使用する場合、クライアントライブラ�
 <tr><td class="left">gs_stopcluster</td><td class="left">クラスタを停止する(処理停止する)</td></tr>
 <tr><td class="left">gs_stopnode</td><td class="left">ノードを停止する(シャットダウン)</td></tr>
 <tr><td class="left">gs_leavecluster</td><td class="left">クラスタからノードを離脱させる</td></tr>
+<tr><td class="left">gs_appendcluster</td><td class="left">クラスタを拡張する</td></tr>
+<tr><td class="left">gs_increasecluster</td><td class="left">クラスタ構成ノード数を拡張する</td></tr>
 </tbody>
 <tbody>
 <tr><td class="left">gs_stat</td><td class="left">ノードの内部情報を取得する</td></tr>
@@ -2178,6 +2187,198 @@ $ gs_joincluster -c 設定したクラスタ名 -n 1 -u admin/admin
 
 </div>
 </div>
+
+</div>
+
+<div id="outline-container-3-3" class="outline-3">
+<h3 id="sec-3-3"><span class="section-number-3">3.3</span> クラスタへのノード増設／切り離し</h3>
+<div class="outline-text-3" id="text-3-3">
+
+
+
+</div>
+
+<div id="outline-container-3-3-1" class="outline-4">
+<h4 id="sec-3-3-1"><span class="section-number-4">3.3.1</span> 稼働中のクラスタにノードを増設する</h4>
+<div class="outline-text-4" id="text-3-3-1">
+
+
+<p>
+稼働中のGridDBクラスタに新たにノードを増設します。ノードの増設コマンドは、構成ノード数(クラスタ構成gs_joincluster時に指定した数）を超えて、クラスタにノードを追加したい際に利用します
+</p>
+<p>
+稼働中のクラスタに新たにノードを増設する場合、以下の手順で操作を行います。
+</p>
+<ul>
+<li>クラスタが稼動していることを確認します。
+</li>
+<li>クラスタの稼動情報を確認します。
+</li>
+<li>増設したいノードを起動します。
+<ul>
+<li>増設したいノードのクラスタ定義ファイルが、ノードを追加したいクラスタの他のノードのものと同一であることを確認します。
+</li>
+</ul>
+
+</li>
+<li>「増設したいノード」にノード増設コマンドを実行します。
+<ul>
+<li>増設したいノードのクラスタ情報をgs_statコマンドで取得して、クラスタ状態がFOLLOWERになっていれば、クラスタに参加できています。
+</li>
+</ul>
+
+</li>
+</ul>
+
+
+<p>
+ノードを増設するには、以下のコマンドを実行します。
+</p>
+<ul>
+<li>gs_appendcluster &ndash;cluster 接続サーバ：ポート  [-s 接続サーバ：ポート]  -u ユーザ名/パスワード
+</li>
+</ul>
+
+
+<p>
+clusterオプションには「ノードを追加したいクラスタを構成しているいずれかのノード」のサーバアドレスとポート(運用コマンド用)を指定します。
+以下は、クラスタに新たにノードを追加する具体例です。
+</p>
+<p>
+追加対象のクラスタの状態を確認します。
+</p>
+<p>
+【コマンド実行例】
+</p>
+
+
+<pre class="example">$ gs_stat -s 192.168.33.29:10040  -u admin/admin
+{
+　　　　:
+    "cluster":{                          //クラスタ関連
+        "activeCount":5,                   //有効ノード数
+        "clusterName":"function_1",        //クラスタ名
+        "clusterStatus":"MASTER",          //クラスタ状態
+        "designatedCount":5,               //構成ノード数（既定ノード数）
+        :
+        
+</pre>
+
+<p>
+クラスタの追加は構成ノード=有効ノード数（現在クラスタに参加している台数）の場合に使用できます。
+構成ノード数&gt;有効ノード数の場合、クラスタへのノード追加はgs_joincluster(クラスタ構成への参加）を用います。
+</p>
+<p>
+追加したいノードを起動するマシン上で以下を実行します。
+ノードを追加したいクラスタに参加しているノードのいずれか1台のサーバアドレスおよびポート(運用コマンド用)を指定します（ノードがマスタである必要はありません）。
+</p>
+<p>
+【コマンド実行例】
+</p>
+
+
+<pre class="example">$ gs_startnode -w
+$ gs_appendcluster --cluster 192.168.33.29:10040 -u admin/admin
+</pre>
+
+
+<p>
+ノードを追加後、構成ノード数および、有効ノード数の数が変更されています。
+</p>
+<p>
+【コマンド実行例】
+</p>
+
+
+<pre class="example">$ gs_stat  -u admin/admin
+{
+　　　　　　:
+    "cluster":{                                 //クラスタ関連
+        "activeCount":6,                        //有効ノード数
+        "clusterName":"function_1",             //クラスタ名
+        "clusterStatus":"MASTER",               //クラスタ状態
+        "designatedCount":6,                    //構成ノード数（既定ノード数）
+　　　　　　:
+}
+</pre>
+
+
+
+<p>
+<b>【注意点】</b>
+</p><ul>
+<li>クラスタを停止し、再起動する場合の構成ノード数として使用しますので、クラスタの拡張を実行した際は、gs_statコマンドで構成ノード数を確認してください。
+</li>
+<li>無停止でのGridDBクラスタの拡張(ノードの増設)は1台ずつ行うことになります。
+</li>
+<li>大規模な拡張を行いたい場合は、一旦クラスタを停止させた後で、構成ノード数に拡張後のノード数を指定してクラスタを再構成してください。
+</li>
+</ul>
+
+
+</div>
+
+</div>
+
+<div id="outline-container-3-3-2" class="outline-4">
+<h4 id="sec-3-3-2"><span class="section-number-4">3.3.2</span> 稼働中のクラスタからノードを離脱させる（クラスタの縮小）</h4>
+<div class="outline-text-4" id="text-3-3-2">
+
+
+<p>
+稼働中のGridDBクラスタからノードを1台離脱させます。
+</p>
+<p>
+稼働中のクラスタから任意のノード1台を離脱させたい場合、以下の手順で操作を行います。
+</p>
+<ul>
+<li>クラスタが稼動していることを確認します。
+</li>
+<li>クラスタから離脱させたいノードに、クラスタ離脱コマンドを実行します。
+</li>
+</ul>
+
+
+<p>
+クラスタからノードを離脱させるには、以下のコマンドを実行します。
+</p>
+<ul>
+<li>gs_leavecluster [-s 接続サーバ：ポート] [-f] -u ユーザ名/パスワード
+</li>
+</ul>
+
+
+<p>
+以下は、クラスタからノード1台を離脱させる具体例です。
+</p>
+<p>
+クラスタから離脱させたいノードを起動しているマシン上で以下を実行します。
+</p>
+<p>
+【コマンド実行例】
+</p>
+
+
+<pre class="example">$ gs_leavecluster -u admin/admin
+</pre>
+
+
+<p>
+<b>【注意点】</b>
+</p><ul>
+<li>指定したノードを離脱させるとデータロストが起こる可能性がある場合、クラスタの縮小は行えません。強制的にノードを離脱させたい場合は、-fオプションを使用してください。
+</li>
+<li>無停止でのGridDBクラスタの縮小は1台ずつ行うことになります。
+</li>
+<li>クラスタに参加しているノード数が構成ノード数の半数に満たなくなると、クラスタは停止します。大規模な縮小を行いたい場合は、一旦クラスタを停止させた後で、構成ノード数に縮小後のノード数を指定してクラスタ#を再構成してください。大規模な縮小を行うと、データロストが起こる可能性が高くなります。
+</li>
+</ul>
+
+
+
+
+</div>
+</div>
 </div>
 
 </div>
@@ -2188,8 +2389,6 @@ $ gs_joincluster -c 設定したクラスタ名 -n 1 -u admin/admin
 
 <p>以下はコミュニティ版のみの注意点です。
 </p><ul>
-<li>圧縮機能はサポートしていません。
-</li>
 <li>非常に単純なユーザ認証のみをサポートしています。
 </li>
 <li>登録済の全ユーザがアクセス可能な「public」という名前の1個のデータベースのみをサポートしています。
@@ -2252,7 +2451,7 @@ GridDBの定義ファイルであるノード定義ファイルとクラスタ�
 <tr><td class="left">/dataStore/affinityGroupSize</td><td class="left">int</td><td class="left">アフィニティグループ数</td><td class="left">4</td></tr>
 </tbody>
 <tbody>
-<tr><td class="left">/checkpoint/checkpointInterval</td><td class="left">string</td><td class="left">チェックポイント実行間隔</td><td class="left">"60s"</td></tr>
+<tr><td class="left">/checkpoint/checkpointInterval</td><td class="left">string</td><td class="left">チェックポイント実行間隔</td><td class="left">"1200s"</td></tr>
 <tr><td class="left">/checkpoint/checkpointMemoryLimit</td><td class="left">string</td><td class="left">チェックポイント用メモリバッファサイズ</td><td class="left">"1024MB"</td></tr>
 <tr><td class="left">/checkpoint/useParallelMode</td><td class="left">boolean</td><td class="left">チェックポイントの並列動作(false:無効、true:有効)</td><td class="left">false</td></tr>
 </tbody>
@@ -2341,7 +2540,6 @@ GridDBの定義ファイルであるノード定義ファイルとクラスタ�
 <tr><td class="left">/transaction/replicationMode</td><td class="left">int</td><td class="left">レプリケーション方法(0:非同期、1:準同期)</td><td class="left">0</td></tr>
 </tbody>
 </table>
-
 
 
 
