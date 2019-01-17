@@ -14,7 +14,7 @@
 
 ## Quick start
 ### Build a server and client(Java)
-    We have confirmed the operation on CentOS 6.9 and gcc version 4.4.7.
+    We have confirmed the operation on CentOS 6.10 (gcc 4.4.7) and CentOS 7.4 (gcc 4.8.5).
 
     $ ./bootstrap.sh
     $ ./configure
@@ -49,6 +49,7 @@
   - [RPM Installation Guide](https://griddb.github.io/griddb_nosql/manual/GridDB_RPM_InstallGuide.html) (manual/GridDB_RPM_InstallGuide.html)
   - [V3.0 Release Notes](docs/GridDB-3.0.0-CE-RELEASE_NOTES.md) (GridDB-3.0.0-CE-RELEASE_NOTES.md)
   - [V4.0 Release Notes](docs/GridDB-4.0-CE-RELEASE_NOTES.md) (GridDB-4.0-CE-RELEASE_NOTES.md)
+  - [V4.1 Release Notes](docs/GridDB-4.1-CE-RELEASE_NOTES.md) (GridDB-4.1-CE-RELEASE_NOTES.md)
 
 ## Client and Connector
   There are other clients for GridDB.

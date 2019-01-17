@@ -14,7 +14,7 @@
 
 ## クイックスタート
 ### サーバ、クライアント(java)のビルド
-    CentOS6.9及びgccのバージョン4.4.7の環境での動作を確認しています。
+    CentOS 6.10(gcc 4.4.7)及びCentOS 7.4(gcc 4.8.5)の環境での動作を確認しています。
 
     $ ./bootstrap.sh
     $ ./configure
@@ -49,6 +49,7 @@
   * [RPMインストールガイド](https://griddb.github.io/griddb_nosql/manual/GridDB_RPM_InstallGuide.html) (manual/GridDB_RPM_InstallGuide.html)
   * [V3.0 Release Notes](docs/GridDB-3.0.0-CE-RELEASE_NOTES_ja.md) (GridDB-3.0.0-CE-RELEASE_NOTES_ja.md)
   * [V4.0 Release Notes](docs/GridDB-4.0-CE-RELEASE_NOTES_ja.md) (GridDB-4.0-CE-RELEASE_NOTES_ja.md)
+  * [V4.1 Release Notes](docs/GridDB-4.1-CE-RELEASE_NOTES_ja.md) (GridDB-4.1-CE-RELEASE_NOTES_ja.md)
 
 ## クライアントとコネクタ
   Java以外のクライアントもあります。
