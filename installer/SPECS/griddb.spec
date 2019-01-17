@@ -1,5 +1,5 @@
 %define griddb_name griddb_nosql
-%define griddb_ver 4.0.0
+%define griddb_ver 4.1.0
 %define griddb_instdir /usr/griddb-%{griddb_ver}
 %define griddb_homedir /var/lib/gridstore
 # do not strip
@@ -62,6 +62,8 @@ install -c -m 750 bin/gs_startnode         %{buildroot}%{griddb_instdir}/bin
 install -c -m 750 bin/gs_stat              %{buildroot}%{griddb_instdir}/bin
 install -c -m 750 bin/gs_stopcluster       %{buildroot}%{griddb_instdir}/bin
 install -c -m 750 bin/gs_stopnode          %{buildroot}%{griddb_instdir}/bin
+install -c -m 750 bin/gs_appendcluster     %{buildroot}%{griddb_instdir}/bin
+install -c -m 750 bin/gs_increasecluster   %{buildroot}%{griddb_instdir}/bin
 install -c -m 640 bin/log.py               %{buildroot}%{griddb_instdir}/bin
 install -c -m 640 bin/util.py              %{buildroot}%{griddb_instdir}/bin
 
@@ -108,6 +110,8 @@ ln -sf %{griddb_instdir}/bin/gs_startnode          %{buildroot}/usr/bin
 ln -sf %{griddb_instdir}/bin/gs_stat               %{buildroot}/usr/bin
 ln -sf %{griddb_instdir}/bin/gs_stopcluster        %{buildroot}/usr/bin
 ln -sf %{griddb_instdir}/bin/gs_stopnode           %{buildroot}/usr/bin
+ln -sf %{griddb_instdir}/bin/gs_appendcluster      %{buildroot}/usr/bin
+ln -sf %{griddb_instdir}/bin/gs_increasecluster    %{buildroot}/usr/bin
 
 ln -sf %{griddb_instdir}/bin/gridstore-%{version}.jar         %{buildroot}/usr/share/java/gridstore.jar
 ln -sf %{griddb_instdir}/bin/gridstore-conf-%{version}.jar    %{buildroot}/usr/share/java/gridstore-conf.jar
@@ -272,6 +276,8 @@ fi
 %{griddb_instdir}/bin/gs_stat
 %{griddb_instdir}/bin/gs_stopcluster
 %{griddb_instdir}/bin/gs_stopnode
+%{griddb_instdir}/bin/gs_appendcluster
+%{griddb_instdir}/bin/gs_increasecluster
 %{griddb_instdir}/bin/log.py
 %{griddb_instdir}/bin/util.py
 %{griddb_instdir}/bin/gridstore-%{version}.jar
@@ -311,9 +317,11 @@ fi
 /usr/bin/gs_stat
 /usr/bin/gs_stopcluster
 /usr/bin/gs_stopnode
+/usr/bin/gs_appendcluster
+/usr/bin/gs_increasecluster
 /usr/share/java/gridstore.jar
 /usr/share/java/gridstore-conf.jar
 
 %changelog
-* Mon May 28 2018 Toshiba Digital Solutions Corporation
-- 4.0.0
+* Thu Jan 17 2019 Toshiba Digital Solutions Corporation
+- 4.1.0
