@@ -12,6 +12,9 @@
 
   本リポジトリにはサーバとJavaクライアントがあります。
 
+  (追加情報)  
+  [Maven Central Repository上にv4.0.0のJavaクライアント・パッケージ(Jar)](https://search.maven.org/search?q=g:com.github.griddb)があります。
+
 ## クイックスタート
 ### サーバ、クライアント(java)のビルド
     CentOS 6.10(gcc 4.4.7)及びCentOS 7.4(gcc 4.8.5)の環境での動作を確認しています。
