@@ -1,0 +1,653 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+               "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en">
+<head>
+<title>GridDB DEB Install Guide</title>
+<meta http-equiv="Content-Type" content="text/html;charset=utf-8"/>
+<meta name="title" content="GridDB DEB Install Guide"/>
+<meta name="generator" content="Org-mode"/>
+<meta name="generated" content="2019-02-14T09:22+0900"/>
+<meta name="author" content=""/>
+<meta name="description" content=""/>
+<meta name="keywords" content=""/>
+<style type="text/css">
+ <!--/*--><![CDATA[/*><!--*/
+  html { font-family: Helvetica; font-size: 12pt; }
+  .title  { text-align: center; }
+  .todo   { color: red; }
+  .done   { color: green; }
+  .tag    { background-color: #add8e6; font-weight:normal }
+  .target { }
+  .timestamp { color: #bebebe; }
+  .timestamp-kwd { color: #5f9ea0; }
+  p.verse { margin-left: 3% }
+  pre {
+	border: 1pt solid #AEBDCC;
+	background-color: #F3F5F7;
+	padding: 5pt;
+	font-family: Courier New, Courier, monospace;
+        font-size: 90%;
+        overflow:auto;
+  }
+  table { border-collapse: collapse; }
+  td, th { vertical-align: top; }
+  dt { font-weight: bold; }
+  div.figure { padding: 0.5em; }
+  div.figure p { text-align: center; }
+  .linenr { font-size:smaller }
+  .code-highlighted {background-color:#ffff00;}
+  .org-info-js_info-navigation { border-style:none; }
+  #org-info-js_console-label { font-size:10px; font-weight:bold;
+                               white-space:nowrap; }
+  .org-info-js_search-highlight {background-color:#ffff00; color:#000000;
+                                 font-weight:bold; }
+  del { color: gray; }
+  /*]]>*/-->
+    </style>
+<STYLE type="text/css">
+<!-
+.break { page-break-before: always; }
+-->
+</STYLE>
+<script type="text/javascript">
+/*
+@licstart  The following is the entire license notice for the
+JavaScript code in this tag.
+
+Copyright (C) 2012-2013 Free Software Foundation, Inc.
+
+The JavaScript code in this tag is free software: you can
+redistribute it and/or modify it under the terms of the GNU
+General Public License (GNU GPL) as published by the Free Software
+Foundation, either version 3 of the License, or (at your option)
+any later version.  The code is distributed WITHOUT ANY WARRANTY;
+without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE.  See the GNU GPL for more details.
+
+As additional permission under GNU GPL version 3 section 7, you
+may distribute non-source (e.g., minimized or compacted) forms of
+that code without the copy of the GNU GPL normally required by
+section 4, provided you include this license notice and a URL
+through which recipients can access the Corresponding Source.
+
+
+@licend  The above is the entire license notice
+for the JavaScript code in this tag.
+*/
+<!--/*--><![CDATA[/*><!--*/
+ function CodeHighlightOn(elem, id)
+ {
+   var target = document.getElementById(id);
+   if(null != target) {
+     elem.cacheClassElem = elem.className;
+     elem.cacheClassTarget = target.className;
+     target.className = "code-highlighted";
+     elem.className   = "code-highlighted";
+   }
+ }
+ function CodeHighlightOff(elem, id)
+ {
+   var target = document.getElementById(id);
+   if(elem.cacheClassElem)
+     elem.className = elem.cacheClassElem;
+   if(elem.cacheClassTarget)
+     target.className = elem.cacheClassTarget;
+ }
+/*]]>*///-->
+</script>
+
+</head>
+<body>
+
+<div id="preamble">
+
+</div>
+
+<div id="content">
+<h1 class="title">GridDB DEB Install Guide</h1>
+
+
+
+
+<div id="table-of-contents">
+<h2>Table of Contents</h2>
+<div id="text-table-of-contents">
+<ul>
+<li><a href="#sec-1">1 Installating and Setting Up GridDB with DEB</a>
+<ul>
+<li><a href="#sec-1-1">1.1 Confirming the Environment</a></li>
+<li><a href="#sec-1-2">1.2 Confirming Packages</a></li>
+<li><a href="#sec-1-3">1.3 Installing DEB package</a></li>
+<li><a href="#sec-1-4">1.4 Confirmation After Installation</a></li>
+<li><a href="#sec-1-5">1.5 Setting up an administrator user (Mandatory)</a></li>
+<li><a href="#sec-1-6">1.6 Editing Definition Files</a></li>
+<li><a href="#sec-1-7">1.7 Setting Up Libraries</a></li>
+<li><a href="#sec-1-8">1.8 Setting Up a Client</a></li>
+<li><a href="#sec-1-9">1.9 Uninstalling GridDB</a></li>
+</ul>
+</li>
+<li><a href="#sec-2">2 Trademark</a></li>
+</ul>
+</div>
+</div>
+
+
+
+
+<DIV class="break"></DIV><BR>
+
+
+<div id="outline-container-1" class="outline-2">
+<h2 id="sec-1"><span class="section-number-2">1</span> Installating and Setting Up GridDB with DEB</h2>
+<div class="outline-text-2" id="text-1">
+
+
+<p>
+This section shows how to install GridDB on a single machine.
+</p>
+
+</div>
+
+<div id="outline-container-1-1" class="outline-3">
+<h3 id="sec-1-1"><span class="section-number-3">1.1</span> Confirming the Environment</h3>
+<div class="outline-text-3" id="text-1-1">
+
+
+<p>
+Confirm that OS is Ubuntu 18.04.1 LTS
+</p>
+
+
+
+<pre class="example">$ lsb_release -id
+Distributor ID: Ubuntu
+Description:    Ubuntu 18.04.1 LTS
+</pre>
+
+
+<p>
+Make sure that Java is installed.
+</p>
+
+
+
+<pre class="example">$ java -version
+openjdk version "10.0.2" 2018-07-17
+OpenJDK Runtime Environment (build 10.0.2+13-Ubuntu-1ubuntu0.18.04.4)
+OpenJDK 64-Bit Server VM (build 10.0.2+13-Ubuntu-1ubuntu0.18.04.4, mixed mode)
+</pre>
+
+
+</div>
+
+</div>
+
+<div id="outline-container-1-2" class="outline-3">
+<h3 id="sec-1-2"><span class="section-number-3">1.2</span> Confirming Packages</h3>
+<div class="outline-text-3" id="text-1-2">
+
+
+<p>
+The following package is used to install a GridDB node, Java client, and commands.
+</p>
+<table  border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides" align="center">
+<colgroup><col class="left" /><col class="left" /><col class="left" />
+</colgroup>
+<thead>
+<tr><th scope="col" class="left">Package name</th><th scope="col" class="left">File name</th><th scope="col" class="left">Content</th></tr>
+</thead>
+<tbody>
+<tr><td class="left">griddb_nosql</td><td class="left">griddb_nosql-X.X.X_amd64.deb</td><td class="left">Contains GridDB's node module, Java client, commands, etc.</td></tr>
+</tbody>
+</table>
+
+
+<p>
+*: X.X.X is the GridDB version 
+</p>
+<p>
+First, make sure that you have all the necessary DEB packages.
+Confirm the following files:
+</p>
+
+
+
+<pre class="example">$ ls
+griddb_nosql-X.X.X_amd64.deb
+</pre>
+
+
+</div>
+
+</div>
+
+<div id="outline-container-1-3" class="outline-3">
+<h3 id="sec-1-3"><span class="section-number-3">1.3</span> Installing DEB package</h3>
+<div class="outline-text-3" id="text-1-3">
+
+
+<p>
+Switch to the root user and install the necessary DEB packages by the "dpkg" command, as shown below.
+</p>
+
+
+
+<pre class="example">$ su
+// create user and group for running GridDB's node module and operational commands.
+# dpkg -i griddb_nosql-X.X.X_amd64.deb
+(Reading database ... 209716 files and directories currently installed.)
+Preparing to unpack .../griddb-nosql_X.X.X_amd64.deb ...
+Unpacking griddb-nosql (X.X.X) over (X.X.X) ...
+Setting up griddb-nosql (X.X.X) ...
+</pre>
+
+
+<p>
+After installing GridDB's node module, the following user and group are created. Use the user and group for running a node module and operational commands.
+</p>
+<table  border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides" align="center">
+<colgroup><col class="left" /><col class="left" /><col class="left" />
+</colgroup>
+<thead>
+<tr><th scope="col" class="left">Group</th><th scope="col" class="left">User</th><th scope="col" class="left">Home directory</th></tr>
+</thead>
+<tbody>
+<tr><td class="left">gridstore</td><td class="left">gsadm</td><td class="left">/var/lib/gridstore</td></tr>
+</tbody>
+</table>
+
+
+<p>
+<b>[NOTE]</b>
+</p><ul>
+<li>The password of the user "gsadm" has not been set. Please set the password by using OS command.
+</li>
+</ul>
+
+
+<p>
+For the user "gsadm," two environment variables are defined as below.
+</p>
+<table  border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides" align="center">
+<colgroup><col class="left" /><col class="left" /><col class="left" />
+</colgroup>
+<thead>
+<tr><th scope="col" class="left">Environment variable</th><th scope="col" class="left">Value</th><th scope="col" class="left">Meaning</th></tr>
+</thead>
+<tbody>
+<tr><td class="left">GS_HOME</td><td class="left">/var/lib/gridstore</td><td class="left">gsadm/GridDB home directory</td></tr>
+<tr><td class="left">GS_LOG</td><td class="left">/var/lib/gridstore/log</td><td class="left">Event log file output directory</td></tr>
+</tbody>
+</table>
+
+
+<p>
+<b>[Note]</b>
+</p><ul>
+<li>These environment variables are referenced by the operational commands. If you execute those commands as other than this user, you need to define the environment variables as above.
+</li>
+</ul>
+
+
+
+</div>
+
+</div>
+
+<div id="outline-container-1-4" class="outline-3">
+<h3 id="sec-1-4"><span class="section-number-3">1.4</span> Confirmation After Installation</h3>
+<div class="outline-text-3" id="text-1-4">
+
+
+<p>
+Confirm the directory structure of the installed GridDB node.
+If installation completed normally, the following directories and files are created as well as necessary modules and commands.
+</p>
+
+
+
+<pre class="example">/var/lib/gridstore/        # GridDB home directory
+     backup/               # Backup directory(unused)
+     conf/                 # Directory storing definition files
+         gs_cluster.json   # Cluster definition file
+         gs_node.json      # Node definition file
+         password          # User definition file
+     data/                 # Directory storing database files
+     log/                  # Directory storing event log files
+</pre>
+
+
+<p>
+Below is shown how to use commands for confirmation.
+</p>
+<p>
+First, confirm whether the following files exist.
+</p>
+
+
+
+<pre class="example">$ ls /usr/griddb-X.X.X/*
+/usr/griddb-X.X.X/RPM-README.md
+
+/usr/griddb-X.X.X/3rd_party:
+3rd_party.md            apr              json-simple      picojson  slf4j
+activemq-cpp-library    BSD_License.txt  MessagePack      purewell  yield
+Apache_License-2.0.txt  ebb              MIT_License.txt  sha2
+
+/usr/griddb-X.X.X/bin:
+gridstore-X.X.X.jar       gs_joincluster   gs_startnode    log.py
+gridstore-conf-X.X.X.jar  gs_leavecluster  gs_stat         util.py
+gs_adduser                gs_passwd        gs_stopcluster
+gs_deluser                gsserver         gs_stopnode
+
+/usr/griddb-X.X.X/conf:
+gs_cluster.json  gs_node.json  password
+
+/usr/griddb-X.X.X/docs:
+manual  sample
+</pre>
+
+
+<p>
+Similarly, confirm whether the following files and directories exist.
+</p>
+
+
+
+<pre class="example">$ ls /var/lib/gridstore/*
+/var/lib/gridstore/backup:
+
+/var/lib/gridstore/conf:
+gs_cluster.json  gs_node.json  password
+
+/var/lib/gridstore/data:
+
+/var/lib/gridstore/log:
+</pre>
+
+
+<p>
+Confirm the directory structure of the installed GridDB client libraries.
+If installation completed normally, the following files are created.
+</p>
+
+
+
+<pre class="example">$ ls -l /usr/share/java/*gridstore*
+lrwxrwxrwx 1 gsadm gridstore 46 Apr 11 20:43 /usr/share/java/gridstore-conf.jar -&gt; /usr/griddb-X.X.X/bin/gridstore-conf-X.X.X.jar
+lrwxrwxrwx 1 gsadm gridstore 41 Apr 11 20:43 /usr/share/java/gridstore.jar -&gt; /usr/griddb-X.X.X/bin/gridstore-X.X.X.jar
+</pre>
+
+
+<p>
+If you start a GridDB node and then access and run the node from a client, the following files are created in the directories to store database files and event log files.
+</p>
+<p>
+[Database file]
+</p>
+
+
+<pre class="example">/var/lib/gridstore/        # GridDB home directory
+     data/                 # Directory storing database files
+         gs_log_n_m.log    # File recording transaction logs (n, m: positive number)
+         gs_cp_n_p.dat     # Checkpoint file recording data regularly (n, p: positive number)
+</pre>
+
+
+<p>
+[Event log file]
+</p>
+
+
+<pre class="example">/var/lib/gridstore/              # GridDB home directory
+     log/                        # Directory storing event logs
+         gridstore-%Y%m%d-n.log  # Event log file
+</pre>
+
+
+<p>
+You can change the directories to store files by editing the relevant parameters in the node definition file.
+</p>
+</div>
+
+</div>
+
+<div id="outline-container-1-5" class="outline-3">
+<h3 id="sec-1-5"><a name="setup_admin" id="setup_admin"></a><span class="section-number-3">1.5</span> Setting up an administrator user (Mandatory)</h3>
+<div class="outline-text-3" id="text-1-5">
+
+
+<p>
+An administrator user is used for authentication purposes in nodes and clusters. Administrator user information is stored in the 
+<b>User definition file</b>. The default file is as shown below.
+</p><ul>
+<li>$GS_HOME/conf/password
+</li>
+</ul>
+
+
+<p>
+The following default users exist just after installation.
+</p>
+<table  border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides" align="center">
+<colgroup><col class="left" /><col class="left" />
+</colgroup>
+<thead>
+<tr><th scope="col" class="left">User</th><th scope="col" class="left">Password</th></tr>
+</thead>
+<tbody>
+<tr><td class="left">admin</td><td class="left">No settings</td></tr>
+</tbody>
+</table>
+
+
+<p>
+Administrator user information including the above-mentioned default users can be changed using the user administration command in the operating commands.
+</p>
+<table  border="2" cellspacing="0" cellpadding="6" rules="groups" frame="hsides" align="center">
+<colgroup><col class="left" /><col class="left" />
+</colgroup>
+<thead>
+<tr><th scope="col" class="left">Command</th><th scope="col" class="left">Function</th></tr>
+</thead>
+<tbody>
+<tr><td class="left">gs_adduser</td><td class="left">Add an administrator user</td></tr>
+<tr><td class="left">gs_deluser</td><td class="left">Delete an administrator user</td></tr>
+<tr><td class="left">gs_passwd</td><td class="left">Change the password of an administrator user</td></tr>
+</tbody>
+</table>
+
+
+<p>
+Change the password as shown below when using a default user.
+The password is encrypted during registration.
+</p>
+<p>
+<b>[Note]</b>
+</p><ul>
+<li><span style="text-decoration:underline;">Default user password has not been set. Be sure to change the password as the server will not start if the administrator user password is not set.</span>
+</li>
+</ul>
+
+
+
+
+
+<pre class="example">$ gs_passwd admin
+Password:（Input password）
+Retype password:（Input password again）
+</pre>
+
+
+<p>
+<span style="text-decoration:underline;">When adding a new administrator user except a default user, the user name has to start with gs#.</span>
+</p>
+<p>
+One or more ASCII alphanumeric characters and the underscore sign “_” can be used after gs#.
+</p>
+<p>
+An example on adding a new administrator user is shown below.
+</p>
+
+
+
+<pre class="example">$ gs_adduser gs#newuser
+Password:（Input password）
+Retype password:（Input password again）
+</pre>
+
+
+<p>
+<b>[Note]</b>
+</p><ul>
+<li><span style="text-decoration:underline;">A change in the administrator user information using a user administration command becomes valid when a node is restarted.</span>
+</li>
+<li>User information is used for client authentication, <span style="text-decoration:underline;">so the common user information must be registered in all nodes</span>. Make sure that the common user information is referred to by all nodes, by copying the user definition file.
+</li>
+</ul>
+
+
+</div>
+
+</div>
+
+<div id="outline-container-1-6" class="outline-3">
+<h3 id="sec-1-6"><span class="section-number-3">1.6</span> Editing Definition Files</h3>
+<div class="outline-text-3" id="text-1-6">
+
+
+<p>
+There are two kinds of definition files for GridDB:
+</p>
+<ul>
+<li>Cluster definition file
+</li>
+<li>Node definition file
+</li>
+</ul>
+
+
+<p>
+The cluster definition file is a file which defines the setting values commonly used in the entire cluster.
+The node definition file is a file which defines different setting values for each node.
+</p>
+<p>
+Templates for these definition files are installed as shown below.
+You can create definition files for GridDB by copying and editing these templates.
+</p>
+
+
+
+<pre class="example">/usr/griddb-X.X.X/        # Installation directory
+     conf/                # Directory storing definition files
+         gs_cluster.json  # Template for cluster definition file
+         gs_node.json     # Template for node definition file
+</pre>
+
+
+<p>
+Save an edited file with the predetermined name in the predetermined directory shown below.
+</p>
+
+
+
+<pre class="example">/var/lib/gridstore/       # GridDB home directory
+     conf/                # Directory storing definition files
+         gs_cluster.json  # (Edited) Cluster definition file
+         gs_node.json     # (Edited) Node definition file
+</pre>
+
+
+<p>
+For details on definition files, refer to "2.3 Configure environment-dependent parameters." of "Quick Start Guide" (GridDB_QuickStartGuide.html)
+</p>
+</div>
+
+</div>
+
+<div id="outline-container-1-7" class="outline-3">
+<h3 id="sec-1-7"><span class="section-number-3">1.7</span> Setting Up Libraries</h3>
+<div class="outline-text-3" id="text-1-7">
+
+
+<p>
+If you use a Java-based client, add the client library path to CLASSPATH.
+</p>
+
+
+
+<pre class="example">$ export CLASSPATH=${CLASSPATH}:/usr/share/java/gridstore.jar
+</pre>
+
+
+</div>
+
+</div>
+
+<div id="outline-container-1-8" class="outline-3">
+<h3 id="sec-1-8"><span class="section-number-3">1.8</span> Setting Up a Client</h3>
+<div class="outline-text-3" id="text-1-8">
+
+
+<p>
+There is no definition file for setting up a client.
+Specify the connection point and user/password in the client program.
+</p>
+<p>
+For details on the NoSQL specifications, refer to "GridDB API Reference" (GridDB_API_Reference.html)
+</p>
+</div>
+
+</div>
+
+<div id="outline-container-1-9" class="outline-3">
+<h3 id="sec-1-9"><span class="section-number-3">1.9</span> Uninstalling GridDB</h3>
+<div class="outline-text-3" id="text-1-9">
+
+
+<p>
+If GridDB is no longer necessary, uninstall all the packages.
+Follow the uninstallation procedure shown below:
+</p>
+
+
+
+<pre class="example">$ su
+# dpkg -P griddb_nosql
+</pre>
+
+
+</div>
+</div>
+
+</div>
+
+<div id="outline-container-2" class="outline-2">
+<h2 id="sec-2"><span class="section-number-2">2</span> Trademark</h2>
+<div class="outline-text-2" id="text-2">
+
+
+<ul>
+<li>GridDB is a trademark of Toshiba Digital Solutions Corporation.
+</li>
+<li>Oracle and Java are registered trademarks of Oracle and/or its affiliates.
+</li>
+<li>Other product names are trademarks or registered trademarks of the respective owners.
+</li>
+</ul>
+
+
+
+<p>
+                            Copyright (C) 2019 TOSHIBA Digital Solutions Corporation
+</p></div>
+</div>
+</div>
+
+<div id="postamble">
+
+
+</div>
+</body>
+</html>
