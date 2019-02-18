@@ -53,6 +53,7 @@
   - [V3.0 Release Notes](docs/GridDB-3.0.0-CE-RELEASE_NOTES.md) (GridDB-3.0.0-CE-RELEASE_NOTES.md)
   - [V4.0 Release Notes](docs/GridDB-4.0-CE-RELEASE_NOTES.md) (GridDB-4.0-CE-RELEASE_NOTES.md)
   - [V4.1 Release Notes](docs/GridDB-4.1-CE-RELEASE_NOTES.md) (GridDB-4.1-CE-RELEASE_NOTES.md)
+  - [DEB Installation Guide](https://griddb.github.io/griddb_nosql/manual/GridDB_DEB_InstallGuide.html) (manual/GridDB_DEB_InstallGuide.html)
 
 ## Client and Connector
   There are other clients for GridDB.
