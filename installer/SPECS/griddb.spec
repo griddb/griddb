@@ -169,7 +169,7 @@ else
     exit 1
   else
     groupadd -g 124 -o -r gridstore >/dev/null 2>&1 || :
-    useradd -M -n -g gridstore -o -r -d %{griddb_homedir} -s /bin/bash \
+    useradd -M -N -g gridstore -o -r -d %{griddb_homedir} -s /bin/bash \
 		-c "GridDB" -u 124 gsadm >/dev/null 2>&1 || :
     echo ""
     echo "------------------------------------------------------------"
