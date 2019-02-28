@@ -1406,7 +1406,10 @@ void StatementHandler::checkExecutable(
 	TXN_THROW_DENY_ERROR(errorCode,                                 \
 		"(pId=" << pId << ", required={" << partitionStatusToStr(requiredPartitionStatus) << "}" \
 					<< ", actual="                                  \
-					<< partitionStatusToStr(actualPartitionStatus) << ", revision=" << pt->getPartitionRevision(pId, 0) << ")")
+					<< partitionStatusToStr(actualPartitionStatus) \
+					<< ", revision=" << pt->getPartitionRevision(pId, 0) \
+					<< ", LSN=" << pt->getLSN(pId) \
+					<< ")")
 
 	const PartitionTable::PartitionStatus actualPartitionStatus =
 		partitionTable_->getPartitionStatus(pId);
@@ -1467,7 +1470,7 @@ void StatementHandler::checkExecutable(
 			"(pId=" << pId << ", required={" << partitionRoleTypeToStr(requiredPartitionRole) << "}"
 						<< ", actual="
 						<< partitionRoleTypeToStr(actualPartitionRole) 
-						<< ", revision=" << pt->getPartitionRevision(pId, 0) << ")");
+						<< ", revision=" << pt->getPartitionRevision(pId, 0) << ", LSN=" << pt->getLSN(pId) << ")");
 	}
 
 	const bool isMaster = partitionTable_->isMaster();
@@ -1483,7 +1486,7 @@ void StatementHandler::checkExecutable(
 		TXN_THROW_DENY_ERROR(GS_ERROR_TXN_CLUSTER_ROLE_UNMATCH,
 			"(pId=" << pId << ", required={" << clusterRoleToStr(requiredClusterRole) << "}"
 						<< ", actual="
-						<< clusterRoleToStr(actualClusterRole) << ")");
+						<< clusterRoleToStr(actualClusterRole) << ", LSN=" << pt->getLSN(pId) << ")");
 	}
 
 #undef TXN_THROW_PT_STATE_UNMATCH_ERROR
@@ -1514,8 +1517,6 @@ void StatementHandler::checkExecutable(ClusterRole requiredClusterRole) {
 
 #undef TXN_THROW_PT_STATE_UNMATCH_ERROR
 }
-
-
 
 /*!
 	@brief Checks if transaction timeout
@@ -3408,7 +3409,7 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 
 		if (clusterName.size() > 0) {
 			const std::string currentClusterName =
-				clusterService_->getClusterName();
+				clusterService_->getManager()->getClusterName();
 			if (clusterName.compare(currentClusterName) != 0) {
 				TXN_THROW_DENY_ERROR(GS_ERROR_TXN_CLUSTER_NAME_INVALID,
 					"cluster name invalid (input="
@@ -8859,7 +8860,6 @@ void MultiPutHandler::checkSchema(
 			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID, "");
 		}
 
-
 		const char8_t *name1Ptr =
 			info.getColumnName(txn, *(container.getObjectManager()));
 		const char8_t *name2Ptr = schema.getColumnName(i).c_str();
@@ -10133,6 +10133,7 @@ void ReplicationLogHandler::operator()(EventContext &ec, Event &ev)
 		decodeReplicationAck(in, request);
 
 		clusterService_->checkVersion(request.clusterVer_);
+
 		const ClusterRole clusterRole = (CROLE_MASTER | CROLE_FOLLOWER);
 		const PartitionRoleType partitionRole = (PROLE_OWNER | PROLE_BACKUP);
 		const PartitionStatus partitionStatus = (PSTATE_ON | PSTATE_SYNC);
@@ -10219,13 +10220,18 @@ void ReplicationLogHandler::operator()(EventContext &ec, Event &ev)
 				}
 			}
 			break;
-		default:
+		default: {
 			isTrace = true;
+			PartitionId pId = ev.getPartitionId();
+			if (partitionTable_->checkClearRole(pId)) {
+				clusterService_->requestChangePartitionStatus(ec,
+						alloc, pId, PartitionTable::PT_OFF, PT_CHANGE_NORMAL);
+			}
+		}
 			break;
 		}
-		if (isTrace) {
+		if (isTrace && partitionTable_->getPartitionStatus(ev.getPartitionId()) == PartitionTable::PT_ON) {
 			UTIL_TRACE_EXCEPTION(TRANSACTION_SERVICE, e,
-
 				"Failed to redo log (nd="
 					<< ev.getSenderND() << ", pId=" << ev.getPartitionId()
 					<< ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
@@ -11123,21 +11129,10 @@ void BackgroundHandler::operator()(EventContext &ec, Event &ev) {
 }
 
 int32_t BackgroundHandler::getWaitTime(EventContext &ec, Event &ev, int32_t opeTime) {
-	const PartitionGroupId pgId = ec.getWorkerId();
 	int64_t executableCount = 0;
 	int64_t afterCount = 0;
-	EventEngine::Tool::getLiveStats(ec.getEngine(), pgId,
-		EventEngine::Stats::EVENT_ACTIVE_EXECUTABLE_COUNT,
-		executableCount, &ec, &ev);
-	EventEngine::Tool::getLiveStats(ec.getEngine(), pgId,
-		EventEngine::Stats::EVENT_CYCLE_HANDLING_AFTER_COUNT,
-		afterCount, &ec, &ev);
-	int32_t waitTime = 0;
-	if (executableCount + afterCount > 0) {
-		double baseTime = (opeTime == 0) ? 0.5 : static_cast<double>(opeTime);
-		waitTime = static_cast<uint32_t>(ceil(baseTime * dataStore_->getConfig().getBackgroundWaitWeight()));
-	}
-
+	int32_t waitTime = transactionService_->getWaitTime(
+			ec, &ev, opeTime, executableCount, afterCount, TXN_BACKGROUND);
 	GS_TRACE_INFO(
 		DATASTORE_BACKGROUND, GS_ERROR_DS_BACKGROUND_TASK_INVALID,
 			"[BackgroundHandler PartitionId = " << ev.getPartitionId()
@@ -12000,8 +11995,10 @@ void TransactionService::initialize(const ManagerSet &mgrSet) {
 		ee_->setHandler(TXN_LONGTERM_SYNC_LOG_ACK, longTermSyncHandler_);
 		ee_->setHandler(TXN_LONGTERM_SYNC_PREPARE_ACK, longTermSyncHandler_);
 
-		syncTimeoutHandler_.initialize(mgrSet);
-		ee_->setHandler(TXN_SYNC_TIMEOUT, syncTimeoutHandler_);
+		syncCheckEndHandler_.initialize(mgrSet);
+		ee_->setHandler(TXN_SYNC_TIMEOUT, syncCheckEndHandler_);
+		ee_->setHandler(TXN_SYNC_CHECK_END, syncCheckEndHandler_);
+
 		changePartitionTableHandler_.initialize(mgrSet);
 		ee_->setHandler(
 			TXN_CHANGE_PARTITION_TABLE, changePartitionTableHandler_);
@@ -12060,6 +12057,10 @@ void TransactionService::initialize(const ManagerSet &mgrSet) {
 		statUpdator_.service_ = this;
 		statUpdator_.manager_ = mgrSet.txnMgr_;
 		mgrSet.stats_->addUpdator(&statUpdator_);
+
+		syncManager_ = mgrSet.syncMgr_;
+		dataStore_ = mgrSet.ds_;
+		checkpointService_ = mgrSet.cpSvc_;
 
 		initalized_ = true;
 	}
@@ -12357,6 +12358,59 @@ bool TransactionService::StatUpdator::operator()(StatTable &stat) {
 
 	return true;
 }
+
+int32_t TransactionService::getWaitTime(EventContext &ec, Event *ev, int32_t opeTime,
+		int64_t &executableCount, int64_t &afterCount, BackgroundEventType type) {
+	int32_t waitTime = 0;
+	const PartitionGroupId pgId = ec.getWorkerId();
+	if (type == TXN_BACKGROUND) {
+//		PartitionId pId = (*ev).getPartitionId();
+//		EventType eventType = (*ev).getType();
+		EventEngine::Tool::getLiveStats(ec.getEngine(), pgId,
+			EventEngine::Stats::EVENT_ACTIVE_EXECUTABLE_COUNT,
+			executableCount, &ec, ev);
+		EventEngine::Tool::getLiveStats(ec.getEngine(), pgId,
+			EventEngine::Stats::EVENT_CYCLE_HANDLING_AFTER_COUNT,
+			afterCount, &ec, ev);
+		if (executableCount + afterCount > 0) {
+			double baseTime = (opeTime == 0) ? 0.5 : static_cast<double>(opeTime);
+			waitTime = static_cast<uint32_t>(
+				ceil(baseTime * dataStore_->getConfig().getBackgroundWaitWeight()));
+		}
+	}
+	else {
+		EventEngine::Stats stats;
+		if (ec.getEngine().getStats(pgId, stats)) {
+			int32_t queueSizeLimit;
+			int32_t interval = 0;
+			switch (type) {
+				case SYNC_EXEC: {
+					EventType eventType = (*ev).getType();
+					if (eventType != TXN_LONGTERM_SYNC_CHUNK
+						|| eventType != TXN_LONGTERM_SYNC_LOG) {
+							return 0;
+					}
+					queueSizeLimit = syncManager_->getExtraConfig().getLimitLongtermQueueSize();
+					interval = syncManager_->getExtraConfig().getLongtermHighLoadInterval();
+					break;
+				}
+				case CP_CHUNKCOPY:
+					queueSizeLimit = checkpointService_->getChunkCopyLimitQueueSize();
+					interval = checkpointService_->getChunkCopyInterval();
+					break;
+				default:
+					return 0;
+			}
+			int32_t queueSize =  static_cast<int32_t>(
+				stats.get(EventEngine::Stats::EVENT_ACTIVE_QUEUE_SIZE_CURRENT));
+			if (queueSize > queueSizeLimit) {
+				return interval;
+			}
+		}
+	}
+	return waitTime;
+}
+
 
 TransactionService::StatUpdator::StatUpdator()
 	: service_(NULL), manager_(NULL) {}

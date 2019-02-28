@@ -796,7 +796,7 @@ void RecoveryManager::redoLogList(util::StackAllocator &alloc, Mode mode,
 			if (mode != MODE_RECOVERY && pId != logRecord.partitionId_) {
 				RM_THROW_LOG_REDO_ERROR(
 					GS_ERROR_TXN_REPLICATION_LOG_LSN_INVALID,
-					"Invalid logRecord, target pId:" << pId << ", log pId:"
+					"Invalid logRecord, target pId=" << pId << ", log pId="
 													 << logRecord.partitionId_);
 			}
 

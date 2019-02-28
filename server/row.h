@@ -944,10 +944,6 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getField(Transac
 		} else {
 			baseObject.copyReference(this->rowArrayCursor_->getBaseOId(),
 				this->getFixedAddr() - rowArrayCursor_->currentParam_.columnOffsetDiff_ + columnInfo.getColumnOffset());
-			assert(baseObject.getCursor<void *>() == (
-				(rowArrayCursor_->getContainer().getContainerType() == COLLECTION_CONTAINER) ? 
-				getFixedField(BaseContainer::RowArray::getColumn<Collection>(columnInfo)) : 
-				getFixedField(BaseContainer::RowArray::getColumn<TimeSeries>(columnInfo))));
 		}
 	}
 	else {
@@ -962,10 +958,6 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getField(Transac
 				txn, objectManager, variableOId, OBJECT_READ_ONLY);
 			if (columnInfo.getColumnOffset() < variableArrayCursor.getArrayLength()) {
 				variableArrayCursor.getField(columnInfo, baseObject);
-				assert(baseObject.getCursor<void *>() == (
-					(rowArrayCursor_->getContainer().getContainerType() == COLLECTION_CONTAINER) ? 
-					getVariableField(BaseContainer::RowArray::getColumn<Collection>(columnInfo)) : 
-					getVariableField(BaseContainer::RowArray::getColumn<TimeSeries>(columnInfo))));
 			} else {
 				void *valueAddr = const_cast<void *>(Value::getDefaultVariableValue(columnInfo.getColumnType()));
 				baseObject.setBaseAddr(reinterpret_cast<uint8_t *>(valueAddr));
@@ -1518,7 +1510,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::initializeParam() {
 				}
 			}
 //			uint32_t oldRrowFixedColumnSize_ = oldRowSize_ - currentParam_.nullsOffset_ - currentParam_.nullbitsSize_;
-			assert(oldRrowFixedColumnSize_ == currentParam_.rowFixedColumnSize_);
+//			assert(oldRrowFixedColumnSize_ == currentParam_.rowFixedColumnSize_);
 			assert(oldRowSize_ == currentParam_.rowSize_);
 		}
 

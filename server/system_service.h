@@ -199,6 +199,8 @@ public:
 			bool force = false, bool isSelf = false, bool lsnDump = false,
 			bool notDumpRole = false, uint32_t partitionGroupNo = UINT32_MAX, bool sqlOwnerDump=false);
 
+	void getGoalPartitions(util::StackAllocator &alloc, picojson::value &result);
+
 	void getLogs(
 			picojson::value &result, std::string &searchStr,
 			std::string &searchStr2, std::string &ignoreStr, uint32_t length);

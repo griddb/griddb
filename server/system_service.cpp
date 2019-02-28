@@ -40,12 +40,17 @@
 
 using util::ValueFormatter;
 
-extern bool g_clusterDump;
-
 
 #ifndef _WIN32
 #include <signal.h>  
 #endif
+
+#define GS_TRACE_CLUSTER_INFO(s) \
+	GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_CLUSTER_STATUS, s); \
+
+#define GS_TRACE_CLUSTER_DUMP(s) \
+	GS_TRACE_DEBUG(CLUSTER_OPERATION, GS_TRACE_CS_CLUSTER_STATUS, s);
+
 
 
 
@@ -244,7 +249,7 @@ bool SystemService::joinCluster(const Event::Source &eventSource,
 		joinClusterInfo.set(clusterName, minNodeNum);
 
 		try {
-			clsMgr_->set(joinClusterInfo);
+			clsMgr_->setJoinClusterInfo(joinClusterInfo);
 		}
 		catch (UserException &e) {
 			picojson::object errorInfo;
@@ -325,7 +330,7 @@ bool SystemService::leaveCluster(const Event::Source &eventSource,
 			alloc, 0, true, isForce);
 
 		try {
-			clsMgr_->set(leaveClusterInfo);
+			clsMgr_->setLeaveClusterInfo(leaveClusterInfo);
 		}
 		catch (UserException &e) {
 			UTIL_TRACE_EXCEPTION_INFO(SYSTEM_SERVICE, e,
@@ -429,7 +434,7 @@ bool SystemService::decreaseCluster(const Event::Source &eventSource,
 		ClusterManager::DecreaseClusterInfo decreaseClusterInfo(
 			alloc, 0, pt_, true, isAutoLeave, leaveNum);
 		try {
-			clsMgr_->set(decreaseClusterInfo);
+			clsMgr_->setDecreaseClusterInfo(decreaseClusterInfo);
 		}
 		catch (UserException &e) {
 			UTIL_TRACE_EXCEPTION_INFO(SYSTEM_SERVICE, e,
@@ -933,7 +938,7 @@ void SystemService::getPartitions(
 					getServiceAddress(pt_, ownerNodeId, master, addressType);
 
 					if ((ownerNodeId != UNDEF_NODEID) || (pt_->isBackup(pId))) {
-						if (pt_->isMaster() ||
+						if ((pt_->isMaster() && ownerNodeId != UNDEF_NODEID) ||
 							(pt_->isFollower() && ownerNodeId == 0)) {
 							lsn = pt_->getLSN(pId, ownerNodeId);
 						}
@@ -1069,15 +1074,54 @@ void SystemService::getPartitions(
 				partition["pgId"] =
 					picojson::value(makeString(oss, partitionGroupNo));
 			}
-
 			partitionList.push_back(picojson::value(partition));
 		}
 	}
+	catch (UserException &e) {
+		GS_RETHROW_USER_OR_SYSTEM(
+			e, GS_EXCEPTION_MERGE_MESSAGE(e, "Get partition failed, target node"));
+	}
 	catch (std::exception &e) {
 		GS_RETHROW_USER_OR_SYSTEM(
-			e, GS_EXCEPTION_MERGE_MESSAGE(e, "Get hosts failed"));
+			e, GS_EXCEPTION_MERGE_MESSAGE(e, "Get partition failed"));
 	}
 }
+
+void SystemService::getGoalPartitions(util::StackAllocator &alloc, picojson::value &result) {
+	try {
+		GS_TRACE_DEBUG(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
+			"Get goal partitions called");
+		util::Vector<PartitionRole> goalList(alloc);
+		pt_->copyGoal(goalList);
+		picojson::array &partitionList = setJsonArray(result);
+		for (uint32_t pId = 0; pId < goalList.size(); pId++) {
+			picojson::object partition;
+			PartitionRole &currentRole = goalList[pId];
+			NodeId ownerNodeId = currentRole.getOwner();
+			picojson::object master;
+			getServiceAddress(pt_, ownerNodeId, master, CLUSTER_SERVICE);
+			if (ownerNodeId != UNDEF_NODEID) {
+				partition["owner"] = picojson::value(master);
+			}
+			else {
+				partition["owner"] = picojson::value();
+			}
+//			picojson::array &nodeList = 
+			setJsonArray(partition["backup"]);
+			std::vector<NodeId> &backups = currentRole.getBackups();
+			for (size_t pos = 0; pos < backups.size(); pos++) {
+				picojson::object backup;
+				NodeId backupNodeId = backups[pos];
+				getServiceAddress(
+					pt_, backupNodeId, backup, CLUSTER_SERVICE);
+			}
+			partitionList.push_back(picojson::value(partition));
+		}	
+	}
+	catch (std::exception &e) {
+	}
+}
+
 
 /*!
 	@brief Handles getStats command
@@ -2252,7 +2296,6 @@ void SystemService::ListenerSocketHandler::dispatch(
 				response.setMethodError();
 				return;
 			}
-
 			picojson::value result;
 			if (!sysSvc_->getOrSetConfig(
 					alloc_, namePath, result, paramValue, noUnit)) {
@@ -2732,23 +2775,10 @@ void SystemService::ListenerSocketHandler::dispatch(
 				return;
 			}
 
-			if (request.parameterMap_.find("clusterTrace") != request.parameterMap_.end()) {
-				const std::string str = request.parameterMap_["clusterTrace"];
-				if (str == "true") {
-					g_clusterDump = true;
-				}
-				else if (str == "false") {
-					g_clusterDump = false;
-				}
-				return;
-			}
-
 			std::cout << clsMgr_->dump();
 			{
 				std::cout << pt_->dumpPartitions(
 					alloc_, PartitionTable::PT_CURRENT_OB);
-				std::cout << pt_->dumpPartitions(
-					alloc_, PartitionTable::PT_NEXT_OB);
 			}
 			std::cout << pt_->dumpDatas(true);
 
@@ -2765,10 +2795,6 @@ void SystemService::ListenerSocketHandler::dispatch(
 							GS_TRACE_CS_CLUSTER_STATUS,
 							pt_->dumpPartitions(
 								alloc_, PartitionTable::PT_CURRENT_OB));
-						GS_TRACE_INFO(CLUSTER_OPERATION,
-							GS_TRACE_CS_CLUSTER_STATUS,
-							pt_->dumpPartitions(
-								alloc_, PartitionTable::PT_NEXT_OB));
 					}
 					GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_CLUSTER_STATUS,
 						pt_->dumpDatas(true));
@@ -2863,7 +2889,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 			}
 
 			bool isRepair = false;
-			bool isShuffle = false;
+//			bool isShuffle = false;
 
 			clsMgr_->setUpdatePartition();
 
@@ -2882,86 +2908,216 @@ void SystemService::ListenerSocketHandler::dispatch(
 				GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
 					"Failover called.");
 			}
-
-			if (request.parameterMap_.find("shuffle") !=
-				request.parameterMap_.end()) {
-				const std::string retStr = request.parameterMap_["shuffle"];
-				if (retStr == "true") {
-					clsMgr_->setShufflePartition();
-					isShuffle = true;
-					GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
-						"Failover with shuffle called.");
-				}
-			}
-			if (!isShuffle) {
-				GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
-					"Failover with shuffle called.");
-			}
 		}
 		else if (request.pathElements_.size() == 2 &&
 				 request.pathElements_[1] == "loadBalance") {
-			if (request.method_ != EBB_POST) {
-				response.setMethodError();
-				return;
-			}
-
-			bool currentMode = clsMgr_->checkLoadBalance();
-			bool nextMode = true;
-
-			if (request.parameterMap_.find("enable") !=
-				request.parameterMap_.end()) {
-				const std::string retStr = request.parameterMap_["enable"];
-				if (retStr == "true") {
-					nextMode = true;
-				}
-				else if (retStr == "false") {
-					nextMode = false;
+			if (request.method_ == EBB_GET) {
+				picojson::value result;
+				sysSvc_->getGoalPartitions(alloc_, result);
+				std::string jsonString(picojson::value(result).serialize());
+				if (request.parameterMap_.find("callback") !=
+					request.parameterMap_.end()) {
+					response.setJson(request.parameterMap_["callback"], result);
 				}
 				else {
-					response.setMethodError();
-					return;
-				}
-			}
-
-			if (request.parameterMap_.find("syncMode") !=
-				request.parameterMap_.end()) {
-				const std::string retStr = request.parameterMap_["syncMode"];
-				if (retStr == "normal") {
-					syncMgr_->setSyncMode(SyncManager::SYNC_MODE_NORMAL);
-				}
-				else if (retStr == "chunk") {
-					syncMgr_->setSyncMode(SyncManager::SYNC_MODE_RETRY_CHUNK);
-				}
-				else {
-					response.setMethodError();
-					return;
-				}
-			}
-
-			if (currentMode != nextMode) {
-				clsMgr_->setLoadBalance(nextMode);
-				if (nextMode == true) {
-					GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
-						"Load balancer configuration is called, "
-						"current:INACTIVE, next:ACTIVE");
-				}
-				else {
-					GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
-						"Load balancer configuration is called, "
-						"current:ACTIVE, next:INACTIVE");
+					response.setJson(result);
 				}
 			}
 			else {
-				if (nextMode == true) {
-					GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
-						"Load balancer configuration is called, keep ACTIVE");
+				bool currentMode = clsMgr_->checkLoadBalance();
+				bool nextMode = true;
+				if (request.parameterMap_.find("enable") !=
+					request.parameterMap_.end()) {
+					const std::string retStr = request.parameterMap_["enable"];
+					if (retStr == "true") {
+						nextMode = true;
+					}
+					else if (retStr == "false") {
+						nextMode = false;
+					}
+					else {
+						response.setMethodError();
+						return;
+					}
+				}
+				if (currentMode != nextMode) {
+					clsMgr_->setLoadBalance(nextMode);
+					if (nextMode == true) {
+						GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
+							"Load balancer configuration is called, "
+							"current:INACTIVE, next:ACTIVE");
+					}
+					else {
+						GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
+							"Load balancer configuration is called, "
+							"current:ACTIVE, next:INACTIVE");
+					}
 				}
 				else {
-					GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
-						"Load balancer configuration is called, keep INACTIVE");
+					if (nextMode == true) {
+						GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
+							"Load balancer configuration is called, keep ACTIVE");
+					}
+					else {
+						GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
+							"Load balancer configuration is called, keep INACTIVE");
+					}
+				}
+				const picojson::value *paramValue = request.jsonValue_.get();
+				if (paramValue != NULL) {
+					std::string jsonString(picojson::value(*paramValue).serialize());
+					const picojson::array &entryList = JsonUtils::as<picojson::array>(*paramValue);
+					for (picojson::array::const_iterator entryIt = entryList.begin();
+							entryIt != entryList.end(); ++entryIt) {
+						const picojson::value &entry = *entryIt;
+						std::string pname = JsonUtils::as<std::string>(entry, "pId");
+					const picojson::value *owner =
+							JsonUtils::find<picojson::value>(entry, "owner");
+					const picojson::array *backupList =
+							JsonUtils::find<picojson::array>(entry, "backup");
+//						int64_t intVal;
+						PartitionId pId = 0;
+						std::string str(pname.data(), pname.size());
+						pId = std::atoi(str.c_str());
+						PartitionRole role;
+						role.init(pId);
+						util::Set<NodeId> assignedList(alloc_);
+						for (size_t i = 0;; i++) {
+							const picojson::value *addressValue;
+							if (i == 0) {
+								addressValue = owner;
+							}
+							else {
+								if (backupList == NULL || i > backupList->size()) {
+									break;
+								}
+								addressValue =
+										JsonUtils::find<picojson::value>((*backupList)[i - 1]);
+							}
+							if (addressValue == NULL ||
+									!addressValue->is<picojson::object>()) {
+								continue;
+							}
+							const util::SocketAddress address(
+									JsonUtils::as<std::string>(*addressValue, "address").c_str(),
+									static_cast<uint16_t>(
+											JsonUtils::asInt<int16_t>(*addressValue, "port")));
+							const NodeDescriptor &nd = clsSvc_->getEE()->getServerND(address);
+							if (nd.isEmpty()) {
+								std::cout << "Resolve failed!" << JsonUtils::as<std::string>(*addressValue, "address").c_str() 
+									<< static_cast<uint16_t>(JsonUtils::asInt<int16_t>(*addressValue, "port")) << std::endl;
+								GS_THROW_USER_ERROR(0, "");
+							}
+							const NodeId nodeId = static_cast<NodeId>(nd.getId());
+							util::Set<NodeId>::iterator it = assignedList.find(nodeId);
+							if (it != assignedList.end()) {
+								GS_THROW_USER_ERROR(0, "");
+							}
+							assignedList.insert(nodeId);
+							NodeAddress nodeAddress;
+							nodeAddress.set(address);
+							if (i == 0) {
+								role.setOwner(nodeId);
+								role.getOwnerAddress() = nodeAddress;
+							}
+							else {
+								role.getBackups().push_back(nodeId);
+							}
+						}
+						GS_TRACE_CLUSTER_DUMP(role);
+						role.encodeAddress(pt_, role);
+						pt_->updateGoal(role);
+					}
+					GS_TRACE_CLUSTER_INFO("GOAL PARTITION");
+					GS_TRACE_CLUSTER_INFO("================");
+					GS_TRACE_CLUSTER_INFO(pt_->dumpPartitionsNew(alloc_, PartitionTable::PT_CURRENT_GOAL));
+					GS_TRACE_CLUSTER_INFO("================");
 				}
 			}
 		}
+		else if (request.pathElements_.size() == 2 &&
+			request.pathElements_[1] == "partition") {
+			if (request.method_ == EBB_GET) {
+				picojson::value result;
+				sysSvc_->getGoalPartitions(alloc_, result);
+				std::string jsonString(picojson::value(result).serialize());
+				if (request.parameterMap_.find("callback") !=
+					request.parameterMap_.end()) {
+					response.setJson(request.parameterMap_["callback"], result);
+				}
+				else {
+					response.setJson(result);
+				}
+			}
+			else {
+				const picojson::value *paramValue = request.jsonValue_.get();
+				std::string jsonString(picojson::value(*paramValue).serialize());
+				const picojson::array &entryList = JsonUtils::as<picojson::array>(*paramValue);
+				for (picojson::array::const_iterator entryIt = entryList.begin();
+						entryIt != entryList.end(); ++entryIt) {
+					const picojson::value &entry = *entryIt;
+					std::string pname = JsonUtils::as<std::string>(entry, "pId");
+				const picojson::value *owner =
+						JsonUtils::find<picojson::value>(entry, "owner");
+				const picojson::array *backupList =
+						JsonUtils::find<picojson::array>(entry, "backup");
+//					int64_t intVal;
+					PartitionId pId = 0;
+					std::string str(pname.data(), pname.size());
+					pId = std::atoi(str.c_str());
+					PartitionRole role;
+					role.init(pId);
+					util::Set<NodeId> assignedList(alloc_);
+					for (size_t i = 0;; i++) {
+						const picojson::value *addressValue;
+						if (i == 0) {
+							addressValue = owner;
+						}
+						else {
+							if (backupList == NULL || i > backupList->size()) {
+								break;
+							}
+							addressValue =
+									JsonUtils::find<picojson::value>((*backupList)[i - 1]);
+						}
+						if (addressValue == NULL ||
+								!addressValue->is<picojson::object>()) {
+							continue;
+						}
+						const util::SocketAddress address(
+								JsonUtils::as<std::string>(*addressValue, "address").c_str(),
+								static_cast<uint16_t>(
+										JsonUtils::asInt<int16_t>(*addressValue, "port")));
+						const NodeDescriptor &nd = clsSvc_->getEE()->getServerND(address);
+						if (nd.isEmpty()) {
+							std::cout << "Resolve failed!" << JsonUtils::as<std::string>(*addressValue, "address").c_str() 
+								<< static_cast<uint16_t>(JsonUtils::asInt<int16_t>(*addressValue, "port")) << std::endl;
+							GS_THROW_USER_ERROR(0, "");
+						}
+						const NodeId nodeId = static_cast<NodeId>(nd.getId());
+						util::Set<NodeId>::iterator it = assignedList.find(nodeId);
+						if (it != assignedList.end()) {
+							GS_THROW_USER_ERROR(0, "");
+						}
+						assignedList.insert(nodeId);
+						NodeAddress nodeAddress;
+						nodeAddress.set(address);
+						if (i == 0) {
+							role.setOwner(nodeId);
+							role.getOwnerAddress() = nodeAddress;
+						}
+						else {
+							role.getBackups().push_back(nodeId);
+						}
+					}
+					GS_TRACE_CLUSTER_DUMP(role);
+					role.encodeAddress(pt_, role);
+					pt_->updateGoal(role);
+				}
+				GS_TRACE_CLUSTER_INFO(pt_->dumpPartitionsNew(alloc_, PartitionTable::PT_CURRENT_GOAL));
+			}
+		}
+
 		else {
 			response.setBadRequestError();
 			return;

@@ -28,12 +28,10 @@
 #include "cluster_common.h"
 #include "data_type.h"
 #include "config_table.h"
-#include "event_engine.h"
 class ClusterManager;
 
 #include "msgpack_utils.h"
 class ConfigTable;
-
 
 typedef int32_t NodeId;
 
@@ -42,119 +40,12 @@ const int64_t UNDEF_TTL = 0;
 const int64_t NOT_UNDEF_TTL = 1;
 const NodeId SELF_NODEID = 0;
 
-const int32_t PARTITION_STATUS_SUCCESS = 0;
-const int32_t OWNER_ROLE_UNMATCH = 1;
-const int32_t OWNER_STATUS_UNMATCH = 2;
-const int32_t OWNER_REVISION_UNMATCH = 3;
-const int32_t OWNER_RECIEVE_ERROR = 4;
-const int32_t BACKUP_ROLE_UNMATCH = 5;
-const int32_t BACKUP_STATUS_UNMATCH = 6;
-const int32_t BACKUP_REIVION_UNMATCH = 7;
-const int32_t BACKUP_RECIEVE_ERROR = 8;
-
-const int32_t CATCHUP_ROLE_UNMATCH = 9;
-const int32_t CATCHUP_STATUS_UNMATCH = 10;
-const int32_t CATCHUP_REIVION_UNMATCH = 11;
-const int32_t CATCHUP_RECIEVE_ERROR = 12;
-const int32_t CATCHUP_PROMOTION = 13;
-
 class SubPartitionTable;
 class SubPartition;
 
 namespace picojson {
-class value;
+	class value;
 }
-/*
-static std::string dumpPartitionReason(int32_t reason) {
-	switch (reason) {
-	case PARTITION_STATUS_SUCCESS:
-		return "PARTITION_STATUS_SUCCESS";
-	case OWNER_ROLE_UNMATCH:
-		return "OWNER_ROLE_UNMATCH";
-	case OWNER_STATUS_UNMATCH:
-		return "OWNER_STATUS_UNMATCH";
-	case OWNER_REVISION_UNMATCH:
-		return "OWNER_REVISION_UNMATCH";
-	case OWNER_RECIEVE_ERROR:
-		return "OWNER_RECIEVE_ERROR";
-	case BACKUP_ROLE_UNMATCH:
-		return "BACKUP_ROLE_UNMATCH";
-	case BACKUP_STATUS_UNMATCH:
-		return "BACKUP_STATUS_UNMATCH";
-	case BACKUP_REIVION_UNMATCH:
-		return "BACKUP_REIVION_UNMATCH";
-	case BACKUP_RECIEVE_ERROR:
-		return "BACKUP_RECIEVE_ERROR";
-	case CATCHUP_ROLE_UNMATCH:
-		return "CATCHUP_ROLE_UNMATCH";
-	case CATCHUP_STATUS_UNMATCH:
-		return "CATCHUP_STATUS_UNMATCH";
-	case CATCHUP_REIVION_UNMATCH:
-		return "CATCHUP_REIVION_UNMATCH";
-	case CATCHUP_RECIEVE_ERROR:
-		return "CATCHUP_RECIEVE_ERROR";
-	case CATCHUP_PROMOTION:
-		return "CATCHUP_PROMOTION";
-	default:
-		return "";
-	}
-}
-*/
-class	ClusterExecStatus {
-public:
-	static const int32_t STATUS_INITAL = 0;
-	static const int32_t STATUS_RECONSTRUCT = 1;
-	static const int32_t STATUS_NORMAL = 2;
-	static const int32_t STATUS_NODE_DOWN = 3;
-	static const int32_t STATUS_SHORT_SYNC = 4;
-	static const int32_t STATUS_LONG_SYNC = 5;
-	static const int32_t STATUS_MAX = 6;
-
-	static const int32_t DETECT_FAIL_SINGLE = 0;
-	static const int32_t DETECT_FAIL_MULTI = 1;
-	static const int32_t DETECT_NODE_RECOVERY = 2;
-	static const int32_t DETECT_INCREASE_NODE = 3;
-	static const int32_t DETECT_CATCHUP_NODE = 4;
-	static const int32_t DETECT_INVALID_SELECT_OWNER = 5;
-	static const int32_t DETECT_SHORT_SYNC_TIMEOUT = 6;
-	static const int32_t DETECT_INVALID_LOG = 7;
-	static const int32_t DETECT_INVALID_CHUNK = 8;
-	static const int32_t DETECT_DEATCITVATE_OWNER = 9;
-	static const int32_t DETECT_NOT_BALANCE = 10;
-	static const int32_t DETECT_MAX = 11;
-
-	static const int32_t NEXT_NORMAL = 0;
-	static const int32_t NEXT_RESCUE_MODE = 1;
-	static const int32_t NEXT_OWNER_CHANGE = 2;
-	static const int32_t NEXT_OWNER_CATCHUP = 3;
-	static const int32_t NEXT_MAX = 4;
-
-	static const int32_t CURRENT_STATUS_MAX = 3;
-	int32_t status_[CURRENT_STATUS_MAX];
-	std::vector< std::vector< std::vector<int64_t> > > coverageList_;
-	
-	ClusterExecStatus() :
-	coverageList_(STATUS_MAX, std::vector<std::vector<int64_t> >(DETECT_MAX, std::vector<int64_t>(NEXT_MAX)))
-	{
-	}
-
-	void init() {
-		for (int32_t pos = 0; pos < CURRENT_STATUS_MAX; pos++) {
-			status_[pos] = -1;
-		}
-	}
-
-	void exec();
-	std::string dumpClusterStatus(int32_t status);
-	std::string dumpDetection(int32_t status);
-	std::string dumpNext(int32_t status);
-
-	void setClusterStatus(int32_t status);
-	void setDetection(int32_t status);
-	void setNext(int32_t status);
-	static void trace();
-};
-
 
 /*!
 	@brief Encodes node address
@@ -285,12 +176,8 @@ struct AddressInfo {
 		PT_ABNORMAL
 	};
 
-//static int32_t PT_ERROR_SHORT_OWNER_BACKUP_INVALID = -3;
-static const int32_t PT_ERROR_LONG_SYNC_FAIL = -2;
-static const int32_t PT_ERROR_SHORT_SYNC_FAIL = -1;
 static const int32_t PT_ERROR_NORMAL = 0;
 static const int32_t PT_OTHER_NORMAL = 0;
-static const int32_t PT_OTHER_SHORT_SYNC_COMPLETE = 1;
 
 	struct LoadSummary {
 		LoadSummary(util::StackAllocator &alloc, int32_t nodeLimit)
@@ -433,7 +320,6 @@ static const int32_t PT_OTHER_SHORT_SYNC_COMPLETE = 1;
 		util::XArray<uint32_t> dataLoadList_;
 		util::XArray<uint8_t> liveNodeList_;
 		int32_t nodeNum_;
-
 };
 
 	struct DropNodeSet {
@@ -451,18 +337,21 @@ static const int32_t PT_OTHER_SHORT_SYNC_COMPLETE = 1;
 			pos_ = 0;
 			NodeAddress tmp(address_, port_);
 			nodeAddress_ = tmp;
+			nodeId_ = 0;
 		}
 		NodeAddress &getNodeAddress() {
 			return nodeAddress_;
 		}
+		
+		std::string dump();
 
 		MSGPACK_DEFINE(address_, port_, pIdList_, revisionList_);
 
 		NodeAddress nodeAddress_;
-
 		AddressType address_;
 		uint16_t port_;
 		int32_t pos_;
+		NodeId nodeId_;
 		std::vector<PartitionId> pIdList_;
 		std::vector<PartitionRevisionNo> revisionList_;
 	};
@@ -470,7 +359,7 @@ static const int32_t PT_OTHER_SHORT_SYNC_COMPLETE = 1;
 	class  DropPartitionNodeInfo {
 	public:
 		DropPartitionNodeInfo(util::StackAllocator &alloc) : alloc_(alloc), tmpDropNodeMap_(alloc) {}
-		void set(PartitionId pId, NodeAddress &address, PartitionRevisionNo revision) {
+		void set(PartitionId pId, NodeAddress &address, PartitionRevisionNo revision, NodeId nodeId) {
 			util::Map<NodeAddress, DropNodeSet>::iterator it = tmpDropNodeMap_.find(address);
 			if (it != tmpDropNodeMap_.end()) {
 				(*it).second.append(pId, revision);
@@ -482,6 +371,7 @@ static const int32_t PT_OTHER_SHORT_SYNC_COMPLETE = 1;
 				target.setAddress(address);
 				target.append(pId, revision);
 				target.pos_ = dropNodeMap_.size();
+				target.nodeId_ = nodeId;
 				dropNodeMap_.push_back(target);
 				tmpDropNodeMap_.insert(std::make_pair(address, target));
 			}
@@ -498,12 +388,16 @@ static const int32_t PT_OTHER_SHORT_SYNC_COMPLETE = 1;
 		}
 
 		DropNodeSet *get(size_t pos) {
+			if (pos >= dropNodeMap_.size()) {
+				return NULL;
+			}
 			return &dropNodeMap_[pos];
 		}
 
 		bool check() {
 			return true;
 		}
+		std::string dump();
 
 		MSGPACK_DEFINE(dropNodeMap_);
 
@@ -528,6 +422,12 @@ public:
 	static const int32_t PARTITION_ASSIGN_NORMAL = 0;
 	static const int32_t PARTITION_ASSIGN_SHUFFLE = 1;
 
+	static const int32_t PARTITION_RULE_UNDEF = -1;
+	static const int32_t PARTITION_RULE_INITIAL = 1;
+	static const int32_t PARTITION_RULE_ADD = 2;
+	static const int32_t PARTITION_RULE_REMOVE = 3;
+	static const int32_t PARTITION_RULE_SWAP = 4;
+
 	/*!
 		@brief Target queue type of change
 	*/
@@ -546,8 +446,8 @@ public:
 		@brief Entry type of PartitionTable
 	*/
 	enum TableType {
-		PT_NEXT_OB,
 		PT_CURRENT_OB,
+		PT_CURRENT_GOAL,
 		PT_TABLE_MAX = 2
 	};
 
@@ -662,26 +562,27 @@ public:
 		}
 
 		PartitionRole(PartitionId pId, PartitionRevision revision, TableType type) : 
-			pId_(pId),
-			revision_(revision),
-			type_(type),
-			ownerNodeId_(UNDEF_NODEID),
-			messageType_(static_cast<int8_t>(type)),
-			isSelfBackup_(false),
-			isSelfCatchup_(false)
-			{}
+				pId_(pId),
+				revision_(revision),
+				type_(type),
+				ownerNodeId_(UNDEF_NODEID),
+				isSelfBackup_(false),
+				isSelfCatchup_(false) {}
 
-		void init(PartitionId pId, TableType type = PT_NEXT_OB) {
+		void init(PartitionId pId, TableType type = PT_CURRENT_OB) {
 			pId_ = pId;
 			ownerNodeId_ = UNDEF_NODEID;
 			type_ = type;
-			messageType_ = static_cast<int8_t>(type_);
 			isSelfBackup_ = false;
 			isSelfCatchup_ = false;
 		}
 
 		PartitionRevision &getRevision() {
 			return revision_;
+		}
+
+		void setRevision(PartitionRevision &revision) {
+			revision_ = revision;
 		}
 
 		PartitionRevisionNo getRevisionNo() {
@@ -702,6 +603,12 @@ public:
 			memcpy(catchups.data(), reinterpret_cast<uint8_t *>(&catchups_[0]), size);
 		}
 
+		void clearCatchup() {
+			catchups_.clear();
+			catchupAddressList_.clear();
+			isSelfCatchup_ = false;
+		}
+
 		std::vector<NodeId> &getBackups() {
 			return backups_;
 		}
@@ -714,22 +621,6 @@ public:
 			return static_cast<int32_t>(backups_.size());
 		}
 
-		int32_t getCatchupSize() {
-			return static_cast<int32_t>(catchups_.size());
-		}
-
-		void clearBackup() {
-			backups_.clear();
-			backupAddressList_.clear();
-			isSelfBackup_ = false;
-		}
-
-		void clearCatchup() {
-			catchups_.clear();
-			catchupAddressList_.clear();
-			isSelfCatchup_ = false;
-		}
-
 		void clear() {
 			ownerNodeId_ = UNDEF_NODEID;
 			backups_.clear();
@@ -740,15 +631,8 @@ public:
 			isSelfCatchup_ = false;
 		}
 
-		void clearAddress() {
-			backupAddressList_.clear();
-			isSelfBackup_ = false;
-			catchupAddressList_.clear();
-			isSelfCatchup_ = false;
-		}
-
-		bool isOwnerOrBackup() {
-			return (isOwner() || isBackup());
+		bool isOwnerOrBackup(NodeId nodeId = 0) {
+			return (isOwner(nodeId) || isBackup(nodeId));
 		}
 
 		NodeId getOwner() {
@@ -763,17 +647,20 @@ public:
 			checkCatchup();
 		}
 
+		void set(PartitionRole *role) {
+			ownerNodeId_ = role->ownerNodeId_;
+			backups_ = role->backups_;
+			catchups_ = role->catchups_;
+			checkBackup();
+			checkCatchup();
+		}
+
 		void setOwner(NodeId owner) {
 			ownerNodeId_ = owner;
 		}
 
 		void set(TableType type) {
 			type_ = type;
-			messageType_ = static_cast<uint8_t>(type);
-		}
-
-		void restoreType() {
-			type_ = static_cast<TableType>(messageType_);
 		}
 
 		void set(PartitionRevision &revision) {
@@ -811,6 +698,22 @@ public:
 			}
 			else {
 				return false;
+			}
+		}
+
+		void promoteCatchup() {
+			if (catchups_.size() == 0) return;
+			isSelfCatchup_ = false;
+			backupAddressList_.push_back(catchupAddressList_[0]);
+			backups_.push_back(catchups_[0]);
+			catchups_.clear();
+			catchupAddressList_.clear();
+			std::sort(backups_.begin(), backups_.end());
+			if (backups_[0] == 0) {
+				isSelfBackup_ = true;
+			}
+			else {
+				isSelfBackup_ = false;
 			}
 		}
 
@@ -902,8 +805,7 @@ public:
 		std::string dump(PartitionTable *pt, ServiceType type = CLUSTER_SERVICE);
 
 		MSGPACK_DEFINE(
-				pId_, ownerAddress_, backupAddressList_, catchupAddressList_, revision_, messageType_);
-
+				pId_, ownerAddress_, backupAddressList_, catchupAddressList_, revision_);
 
 		void checkBackup() {
 			if (backups_.size() > 0) {
@@ -942,7 +844,6 @@ public:
 		std::vector<NodeAddress> backupAddressList_;
 		TableType type_;
 		NodeId ownerNodeId_;
-		int8_t messageType_;
 		std::vector<NodeId> backups_;
 		bool isSelfBackup_;
 		std::vector<NodeAddress> catchupAddressList_;
@@ -956,73 +857,131 @@ public:
 	struct PartitionContext {
 
 		PartitionContext(util::StackAllocator &alloc, PartitionTable *pt,
-				bool needUpdatePartition, SubPartitionTable &subPartitionTable) : 
+				bool &needUpdatePartition, 
+				SubPartitionTable &subPartitionTable,
+				DropPartitionNodeInfo &dropNodeInfo) : 
 			alloc_(&alloc),
-			changedShortTermPIdList_(alloc),
-			changedLongTermPIdList_(alloc),
-			changedPIdSet_(alloc),
-			shortTermPIdList_(alloc),
 			needUpdatePartition_(needUpdatePartition),
-			shortTermTimeout_(UNDEF_TTL),
+			currentRuleLimitTime_(UNDEF_TTL),
 			pt_(pt),
 			isRepairPartition_(false),
-			isShufflePartition_(false),
 			subPartitionTable_(subPartitionTable),
-			tmpSubPartitionList_(alloc),
-			enableDrop_(false),
-			balanceCheck_(false),
-			irregularPartitionList_(alloc),
-			promoteFlag_(false),
+			dropNodeInfo_(dropNodeInfo),
 			currentTime_(0),
-			withRescue_(false),
-			errorPId_(0),
-			errorReason_(0)
-		{
-		}
+			isConfigurationChange_(false),
+			backupNum_(0),
+			isGoalPartition_(false),
+			isLoadBalance_(true)
+			{}
 
-		void setChangePId(SyncMode mode, PartitionId pId, PartitionRole &role);
-
-		util::XArray<PartitionId> &getShortTermPIdList() {
-			return shortTermPIdList_;
-		}
-
-		void setShorTermSyncLimitTime(int64_t shortTermTimeout) {
-			shortTermTimeout_ = shortTermTimeout;
+		void setRuleLimitTime(int64_t limitTime) {
+			currentRuleLimitTime_ = limitTime;
 		}
 
 		void setRepairPartition(bool isRepair) {
 			isRepairPartition_ = isRepair;
 		}
 
-		void setShufflePartition(bool isShuffle);
+		void setConfigurationChange() {
+			isConfigurationChange_ = true;
+		}
+
+		bool isConfigurationChange() {
+			return isConfigurationChange_;
+		}
 
 		util::StackAllocator *alloc_;
-		util::XArray<PartitionId> changedShortTermPIdList_;
-		util::XArray<PartitionId> changedLongTermPIdList_;
-		util::Set<PartitionId> changedPIdSet_;
-		util::XArray<PartitionId> shortTermPIdList_;
-		bool needUpdatePartition_;
-		int64_t shortTermTimeout_;
+		bool &needUpdatePartition_;
+		int64_t currentRuleLimitTime_;
 		PartitionTable *pt_;
 		bool isRepairPartition_;
-		bool isShufflePartition_;
 		SubPartitionTable &subPartitionTable_;
-		util::Vector<SubPartition> tmpSubPartitionList_;
-		bool enableDrop_;
-		bool balanceCheck_;
-		util::Vector<PartitionId> irregularPartitionList_;
-		bool promoteFlag_;
+		DropPartitionNodeInfo &dropNodeInfo_;
 		int64_t currentTime_;
-		bool withRescue_;
-		PartitionId errorPId_;
-		int32_t errorReason_;
+		bool isConfigurationChange_;
+		int32_t backupNum_;
+		bool isGoalPartition_;
+		bool isLoadBalance_;
 	};
 
 	PartitionTable(const ConfigTable &configTable);
 	~PartitionTable();
 
-	void initialize() {
+	struct GoalPartition {
+
+		void init(PartitionTable *pt) {
+			util::LockGuard<util::Mutex> guard(lock_);
+			for (PartitionId pId = 0; pId < pt->getPartitionNum(); pId++) {
+				PartitionRole role(pId, pt->getPartitionRevision(), PT_CURRENT_OB);
+				role.encodeAddress(pt, role);
+				role.checkBackup();
+				role.checkCatchup();
+				goalPartitions_.push_back(role);
+			}
+		}
+
+		void set(PartitionTable *pt, util::Vector<PartitionRole> &goalList) {
+			util::LockGuard<util::Mutex> guard(lock_);
+			goalPartitions_.clear();
+			for (size_t pos = 0; pos < goalList.size(); pos++) {
+				goalList[pos].encodeAddress(pt, goalList[pos]);
+				goalList[pos].checkBackup();
+				goalList[pos].checkCatchup();
+				goalPartitions_.push_back(goalList[pos]);
+			}
+		}
+		void setPartitionRole(PartitionRole &role) {
+			util::LockGuard<util::Mutex> guard(lock_);
+			goalPartitions_.push_back(role);
+		}
+
+		PartitionRole &getPartitionRole(PartitionId pId) {
+			util::LockGuard<util::Mutex> guard(lock_);
+			return goalPartitions_[pId];
+		}
+
+		size_t size() {
+			util::LockGuard<util::Mutex> guard(lock_);
+			return goalPartitions_.size();
+		}
+
+		void update(PartitionRole &role) {
+			util::LockGuard<util::Mutex> guard(lock_);
+			PartitionId rolePId = role.getPartitionId();
+			if (goalPartitions_.size() <= rolePId) {
+				return;
+			}
+			role.checkBackup();
+			role.checkCatchup();
+			goalPartitions_[rolePId] = role;
+		};
+
+		void copy(util::Vector<PartitionRole> &roleList) {
+			util::LockGuard<util::Mutex> guard(lock_);
+			for (size_t pos = 0; pos < goalPartitions_.size(); pos++) {
+				roleList.push_back(goalPartitions_[pos]);
+			}
+		}
+
+		std::string dump();
+		std::vector<PartitionRole> goalPartitions_;
+		util::Mutex lock_;
+	};
+
+	void copyGoal(util::Vector<PartitionRole> &roleList) {
+		goal_.copy(roleList);
 	}
+
+	void setGoal(PartitionTable *pt, util::Vector<PartitionRole> &goalList) {
+		goal_.set(pt, goalList);
+	}
+
+	void updateGoal(PartitionRole &role) {
+		goal_.update(role);
+	}
+
+	void clearPartitionRole(PartitionId pId);
+	void clearCatchupRole(PartitionId pId);
 
 	NodeId getOwner(PartitionId pId, TableType type = PT_CURRENT_OB);
 
@@ -1044,6 +1003,8 @@ public:
 	void getCatchup(PartitionId pId, std::vector<NodeId> &catchups,
 			TableType type = PT_CURRENT_OB); 
 
+	NodeId getCatchup(PartitionId pId);
+
 	bool isBackup(PartitionId pId, NodeId targetNodeId = 0,
 		TableType type = PT_CURRENT_OB);
 
@@ -1051,21 +1012,19 @@ public:
 			TableType type = PT_CURRENT_OB);
 
 	bool hasCatchupRole(PartitionId pId, TableType type = PT_CURRENT_OB);
-	void clearCatchupRole(PartitionId pId, TableType type = PT_CURRENT_OB);
 
-	size_t getBackupSize(PartitionId pId, TableType type = PT_CURRENT_OB) {
-		std::vector<NodeId> backups;
+
+	size_t getBackupSize(util::StackAllocator &alloc, PartitionId pId, TableType type = PT_CURRENT_OB) {
+		util::XArray<NodeId> backups(alloc);
 		getBackup(pId, backups, type);
 		return backups.size();
 	}
 
-	bool isChangeToOwner(PartitionId pId, ChangePartitionType changePartitionType) {
-		return (!isOwner(pId, PartitionTable::PT_CURRENT_OB)
-				&& isOwner(pId, 0, PartitionTable::PT_NEXT_OB)
-				&& changePartitionType != PT_CHANGE_SYNC_END);
-	}
-
 	void resetDownNode(NodeId targetNodeId);
+
+	bool checkTargetPartition(PartitionId pId, bool &catchupWait);
+
+	bool checkConfigurationChange(util::StackAllocator &alloc, PartitionContext &context, bool checkFlag);
 
 	LogSequentialNumber getLSN(PartitionId pId, NodeId targetNodeId = 0) {
 		util::LockGuard<util::ReadLock> currentLock(partitionLockList_[pId]);
@@ -1099,6 +1058,10 @@ public:
 		maxLsnList = maxLsnList_;
 	}
 
+	std::vector<LogSequentialNumber> getMaxLsnList() {
+		return maxLsnList_;
+	}
+
 	void changeClusterStatus(ClusterStatus status,
 			NodeId masterNodeId, int64_t currentTime, int64_t nextHeartbeatTimeout);
 
@@ -1106,13 +1069,28 @@ public:
 		return currentRevisionNo_;
 	}
 
+	void setGoalPartition(GoalPartition &goal);
+	void planNext(PartitionContext &context);
+	bool checkDrop(util::StackAllocator &alloc, DropPartitionNodeInfo &dropInfo);
+	void planGoal(PartitionContext &context);
+	bool check();
 
-	bool isAvailable(PartitionId pId) {
-		return partitions_[pId].partitionInfo_.available_;
+	std::string dumpPartitionRule(int32_t ruleNo) {
+	switch (ruleNo) {
+		case PartitionTable::PARTITION_RULE_INITIAL: return "Initial";
+		case PartitionTable::PARTITION_RULE_ADD: return "Add";
+		case PartitionTable::PARTITION_RULE_REMOVE: return "Remove";
+		case PartitionTable::PARTITION_RULE_SWAP: return "Swap";
+		default: return "None";
+	}
+	};
+
+	std::string dumpCurrentRule() {
+		return dumpPartitionRule(currentRuleNo_);
 	}
 
-	void setAvailable(PartitionId pId, bool available) {
-		partitions_[pId].partitionInfo_.available_ = available;
+	int64_t getRuleLimitTime() {
+		return nextApplyRuleLimitTime_;
 	}
 
 	void setLSN(
@@ -1131,11 +1109,6 @@ public:
 		PartitionId pId, LogSequentialNumber lsn, NodeId targetNodeId = 0) {
 		util::LockGuard<util::WriteLock> currentLock(partitionLockList_[pId]);
 		currentPartitions_[pId].setLsn(targetNodeId, lsn, true);
-	}
-
-	int32_t getLsnChangeCount(PartitionId pId, NodeId targetNode = 0) {
-		util::LockGuard<util::ReadLock> currentLock(partitionLockList_[pId]);
-		return currentPartitions_[pId].getLsnChangeCount(targetNode);
 	}
 
 	PartitionStatus getPartitionStatus(PartitionId pId, NodeId targetNode = 0) {
@@ -1177,89 +1150,61 @@ public:
 		return partitions_[pId].roles_[type].getRevisionNo();
 	}
 
-	void setOtherStatus(
-			PartitionId pId, int32_t status, NodeId targetNode = 0) {
-		util::LockGuard<util::WriteLock> currentLock(partitionLockList_[pId]);
-		currentPartitions_[pId].setOtherStatus(targetNode, status);
-	};
-
-	int32_t  getOtherStatus(PartitionId pId, NodeId targetNode) {
-		util::LockGuard<util::ReadLock> currentLock(partitionLockList_[pId]);
-		return currentPartitions_[pId].getOtherStatus(targetNode);
-	}
-
-	void setErrorStatus(
-			PartitionId pId, int32_t status, NodeId targetNode = 0) {
-		util::LockGuard<util::WriteLock> currentLock(partitionLockList_[pId]);
-		currentPartitions_[pId].setErrorStatus(targetNode, status);
-	};
-
-	int32_t  getErrorStatus(PartitionId pId, NodeId targetNode) {
-		util::LockGuard<util::ReadLock> currentLock(partitionLockList_[pId]);
-		return currentPartitions_[pId].getErrorStatus(targetNode);
-	}
-
-	void setPartitionChunkNum(
-			PartitionId pId, int64_t chunkNum, NodeId targetNode = 0) {
-		util::LockGuard<util::WriteLock> currentLock(partitionLockList_[pId]);
-		currentPartitions_[pId].setPartitionChunkCount(targetNode, chunkNum);
-	};
-
-	int64_t getPartitionChunkNum(PartitionId pId, NodeId targetNode) {
-		util::LockGuard<util::ReadLock> currentLock(partitionLockList_[pId]);
-		return currentPartitions_[pId].getPartitionChunkCount(targetNode);
-	}
-
-	bool checkActivePartition(PartitionId pId, PartitionRoleStatus role, NodeId targetNode);
-
-	void updatePartitionRole(PartitionId pId, TableType type = PT_CURRENT_OB);
-
 	void getPartitionRole(
-		PartitionId pId, PartitionRole &role, TableType type = PT_CURRENT_OB) {
-		util::LockGuard<util::ReadLock> currentLock(partitionLockList_[pId]);
-		role = partitions_[pId].roles_[type];
+			PartitionId pId, PartitionRole &role, TableType type = PT_CURRENT_OB) {
+		switch (type) {
+		case PT_CURRENT_OB: {
+			util::LockGuard<util::ReadLock> currentLock(partitionLockList_[pId]);
+			role = partitions_[pId].roles_[type];
+			break;
+		}
+		case PT_CURRENT_GOAL: {
+			role = goal_.getPartitionRole(pId);
+			break;
+		}
+		default:
+			break;
+		}
 	}
 
 	void setPartitionRole(
 			PartitionId pId, PartitionRole &role, TableType type = PT_CURRENT_OB) {
-		util::LockGuard<util::WriteLock> currentLock(partitionLockList_[pId]);
-		partitions_[pId].roles_[type] = role;
-		partitions_[pId].roles_[type].set(type);
-		if (type == PT_CURRENT_OB) {
+		switch (type) {
+		case PT_CURRENT_OB: {
+			util::LockGuard<util::WriteLock> currentLock(partitionLockList_[pId]);
+			partitions_[pId].roles_[type] = role;
+			partitions_[pId].roles_[type].set(type);
 			PartitionRoleStatus nextStatus =
 				partitions_[pId].roles_[type].getPartitionRoleStatus();
 			currentPartitions_[pId].setPartitionRoleStatus(SELF_NODEID, nextStatus);
 			currentPartitions_[pId].setPartitionRevision(SELF_NODEID, role.getRevisionNo());
+			break;
+		}
+		case PT_CURRENT_GOAL: {
+			goal_.update(role);
+			break;
+		}
+		default:
+			break;
 		}
 	}
 	
-void setPartitionRoleWithCheck(
-		PartitionId pId, PartitionRole &role, TableType type = PT_CURRENT_OB) {
-		util::LockGuard<util::WriteLock> currentLock(partitionLockList_[pId]);
-		if (role.getRevisionNo() <= partitions_[pId].roles_[type].getRevisionNo()) {
-			return;
-		}
-		partitions_[pId].roles_[type] = role;
-		partitions_[pId].roles_[type].set(type);
-		if (type == PT_CURRENT_OB) {
-			PartitionRoleStatus nextStatus =
-				partitions_[pId].roles_[type].getPartitionRoleStatus();
-			currentPartitions_[pId].setPartitionRoleStatus(SELF_NODEID, nextStatus);
-			currentPartitions_[pId].setPartitionRevision(SELF_NODEID, role.getRevisionNo());
-		}
-	}
-
-
-
 	bool isRepairedPartition() {
 		bool retVal = isRepaired_;
 		isRepaired_ = false;
 		return retVal;
 	}
 
-	void check(PartitionContext &context, bool balanceCheck, bool dropCheck, DropPartitionNodeInfo &dropNodeInfo);
+	void setRepairedPartition() {
+		isRepaired_ = true;
+	}
 
-	void setChangePartition(PartitionId pId = UNDEF_PARTITIONID);
+	bool check(PartitionContext &context);
+	int32_t checkRoleStatus(util::StackAllocator &alloc);
+
+	void setBlockQueue(PartitionId pId,
+		ChangeTableType tableType = PT_CHANGE_NEXT_TABLE,
+		NodeId targetNode = UNDEF_NODEID);
 
 	void resetBlockQueue() {
 		util::LockGuard<util::WriteLock> lock(lock_);
@@ -1270,23 +1215,12 @@ void setPartitionRoleWithCheck(
 	void resetBlockQueue(ChangeTableType type) {
 		util::LockGuard<util::WriteLock> lock(lock_);
 		if (type == PT_CHANGE_NEXT_TABLE) {
-		nextBlockQueue_.clear();
+			nextBlockQueue_.clear();
 		}
 		else {
-		goalBlockQueue_.clear();
+			goalBlockQueue_.clear();
 		}
 	};
-
-	void setBlockQueue(PartitionId pId,
-		ChangeTableType tableType = PT_CHANGE_NEXT_TABLE,
-		NodeId targetNode = UNDEF_NODEID);
-
-	void setSubPartiton(PartitionContext &context,
-			SubPartitionTable &subTable);
-
-	bool findBlockQueue(PartitionId pId,
-			ChangeTableType tableType = PT_CHANGE_NEXT_TABLE,
-			NodeId targetNode = UNDEF_NODEID);
 
 	CheckedPartitionStat checkPartitionStat(bool firstCheckSkip = true);
 
@@ -1299,7 +1233,6 @@ void setPartitionRoleWithCheck(
 
 	bool checkNextBackup(PartitionId pId, NodeId checkedNode, LogSequentialNumber checkedLsn,
 			LogSequentialNumber currentOwnerStartLsn, LogSequentialNumber currentOwnerLsn);
-
 
 	template <class T>
 	bool getLiveNodeIdList(T &liveNodeIdList, int64_t checkTime = UNDEF_TTL,
@@ -1318,16 +1251,6 @@ void setPartitionRoleWithCheck(
 			}
 		}
 		return isDownNode;
-	}
-
-	int32_t getLiveNum(int64_t checkTime = UNDEF_TTL) {
-		int32_t count = 0;
-		for (NodeId nodeId = 0; nodeId < nodeNum_; nodeId++) {
-			if (nodes_[nodeId].isAlive(checkTime)) {
-				count++;
-			}
-		}
-		return count;
 	}
 
 	bool checkLiveNode(NodeId nodeId, int64_t limitTime = UNDEF_TTL) {
@@ -1358,6 +1281,7 @@ void setPartitionRoleWithCheck(
 	void clearCurrentStatus();
 	void clearRole(PartitionId pId);
 	void set(SubPartition &subPartition);
+	bool checkClearRole(PartitionId pId);
 
 	void getNodeAddressInfo(std::vector<AddressInfo> &addressInfoList) {
 		int32_t nodeNum = getNodeNum();
@@ -1395,46 +1319,8 @@ void setPartitionRoleWithCheck(
 		return partitions_[pId].partitionInfo_.pgId_;
 	}
 
-	void createNextPartition(PartitionContext &context);
-
-	void createCatchupPartition(PartitionContext &context, bool isSkip = false);
-
 	void updatePartitionRevision(PartitionRevisionNo partitionSequentialNumber);
 
-	void getChangeTargetPIdList(util::XArray<PartitionId> &pIdList) {
-		util::LockGuard<util::WriteLock> lock(lock_);
-		for (std::set<PartitionId>::iterator it = targetChangePartitonList_.begin();
-			it != targetChangePartitonList_.end(); it++) {
-			pIdList.push_back(*it);
-		}
-		targetChangePartitonList_.clear();
-	}
-
-	bool checkShorTermSyncTimeout(PartitionId pId, int64_t checkTime);
-
-	int64_t getShorTermSyncTimeout(PartitionId pId) {
-		return partitions_[pId].partitionInfo_.shortTermTimeout_;
-		}
-
-	void setShorTermSyncTimeout(PartitionId pId, int64_t timeout) {
-		partitions_[pId].partitionInfo_.shortTermTimeout_ = timeout;
-	}
-
-	void clearChangePartition() {
-		util::LockGuard<util::WriteLock> lock(lock_);
-		targetChangePartitonList_.clear();
-	}
-	void setCatchupError(PartitionId pId) {
-		if (currentCatchupPId_ == pId) {
-		failCatchup_ = true;
-	}
-	}
-
-	bool isCatchupError() {
-		bool retVal = failCatchup_;
-		failCatchup_ = false;
-		return retVal;
-	}
 
 	NodeAddress &getNodeAddress(NodeId nodeId, ServiceType type = CLUSTER_SERVICE) {
 		return getNodeInfo(nodeId).getNodeAddress(type);
@@ -1464,41 +1350,24 @@ void setPartitionRoleWithCheck(
 		return revision_.sequentialNumber_;
 	}
 
-	bool checkPartitionRevision(PartitionRevisionNo revision, int32_t diff) {
-		if (revision == (getPartitionRevisionNo() + diff)) {
-			return true;
-		}
-		else {
-			return false;
-		}
-	}
-
 	NodeId getMaster() {
 		return masterNodeId_;
 	}
-
 	void setMaster(NodeId nodeId) {
 		masterNodeId_ = nodeId;
 	}
 	bool isMaster() {
 		return (masterNodeId_ == 0);
 	}
-
 	bool isSubMaster() {
 		return (masterNodeId_ == UNDEF_NODEID);
 	}
-
 	bool isFollower() {
 		return (masterNodeId_ > 0);
 	}
 
 	PartitionConfig &getConfig() {
 		return config_;
-	}
-
-	void setDownNode(NodeId nodeId) {
-		util::LockGuard<util::Mutex> lock(nodeInfoLock_);
-		downNodeList_.insert(nodeId);
 	}
 
 	void getDownNodes(util::Set<NodeId> &downNodes, bool isClear = true) {
@@ -1515,11 +1384,6 @@ void setPartitionRoleWithCheck(
 		return prevCatchupPId_;
 	}
 
-	void setCatchupPId(PartitionId prevPId, NodeId prevNodeId) {
-		prevCatchupPId_ = prevPId;
-		prevCatchupNodeId_ = prevNodeId;
-	}
-
 	void getAddNodes(util::Set<NodeId> &nodeIds) {
 		util::LockGuard<util::Mutex> lock(nodeInfoLock_);
 		NodeId nodeId = getNodeNum();
@@ -1533,35 +1397,12 @@ void setPartitionRoleWithCheck(
 		}
 	}
 
-	bool isSet(NodeId nodeId) {
-		if (nodeId >= nodeNum_) {
-			return false;
-		}
-		return nodes_[nodeId].nodeBaseInfo_[CLUSTER_SERVICE + 1].check();
-	}
-
 	std::string dumpNodeAddress(
 		NodeId nodeId, ServiceType type = CLUSTER_SERVICE) {
 		if (nodeId >= nodeNum_ || nodeId < 0) {
 			return std::string("");
 		}
 		return nodes_[nodeId].nodeBaseInfo_[type].address_.toString();
-	}
-
-	std::string dumpNodeSet(util::Set<NodeId> &nodeSet) {
-		util::NormalOStringStream ss;
-		int32_t listSize = static_cast<int32_t>(nodeSet.size());
-		int32_t pos = 0;
-		ss << "[";
-		for (util::Set<NodeId>::iterator it = nodeSet.begin();
-			it != nodeSet.end(); it++, pos++) {
-			ss << dumpNodeAddress(*it);
-			if (pos != listSize - 1) {
-				ss << ",";
-			}
-		}
-		ss << "]";
-		return ss.str().c_str();
 	}
 
 	template <class T>
@@ -1594,27 +1435,10 @@ void setPartitionRoleWithCheck(
 		return ss.str().c_str();
 	}
 
-	std::string dumpNodeAddressSet(
-		util::Set<NodeId> &nodeSet, ServiceType type = CLUSTER_SERVICE) {
-		util::NormalOStringStream ss;
-		ss << "[";
-		int32_t setSize = static_cast<int32_t>(nodeSet.size());
-		int32_t pos = 0;
-		for (util::Set<NodeId>::iterator it = nodeSet.begin();
-			it != nodeSet.end(); it++, pos++) {
-			ss << dumpNodeAddress(*it, type);
-			if (pos != setSize - 1) {
-				ss << ",";
-			}
-		}
-		ss << "]";
-		return ss.str().c_str();
-	}
-
 	std::string dumpNodes();
 	std::string dumpPartitions(util::StackAllocator &alloc, TableType type);
 	std::string dumpPartitionsList(util::StackAllocator &alloc, TableType type);
-	std::string dumpPartitionsNew(util::StackAllocator &alloc, TableType type);
+	std::string dumpPartitionsNew(util::StackAllocator &alloc, TableType type, SubPartitionTable *subTable = NULL);
 
 void genPartitionColumnStr(
 		util::NormalOStringStream &ss, std::string &roleName, PartitionId pId,
@@ -1676,22 +1500,16 @@ void getActiveNodeList(T1 &activeNodeList,  T2 &downNodeSet, int64_t currentTime
 private:
 	struct PartitionInfo {
 		PartitionInfo() : 
-			shortTermTimeout_(UNDEF_TTL),
 			pgId_(0),
 			partitionRevision_(PartitionRevision::INITIAL_CLUSTER_REVISION),
-			failed_(false),
 			available_(true)
 		{}
 		void clear() {
-			shortTermTimeout_ = UNDEF_TTL;
 			partitionRevision_ = PartitionRevision::INITIAL_CLUSTER_REVISION;
-			failed_ = false;
 			available_ = true;
 		}
-		int64_t shortTermTimeout_;
 		PartitionGroupId pgId_;
 		PartitionRevisionNo partitionRevision_;
-		bool failed_;
 		bool available_;
 	};
 
@@ -1730,7 +1548,7 @@ private:
 
 		void init(util::StackAllocator &alloc) {
 			alloc_ = &alloc;
-			nodeBaseInfo_ = ALLOC_NEW(alloc) NodeBaseInfo[SERVICE_MAX];
+			nodeBaseInfo_ = ALLOC_NEW(alloc) NodeBaseInfo [SERVICE_MAX];
 		}
 
 		NodeAddress &getNodeAddress(ServiceType type = CLUSTER_SERVICE) {
@@ -1818,7 +1636,6 @@ private:
 	struct CurrentPartitionInfo {
 		CurrentPartitionInfo() : lsn_(0), startLsn_(0), status_(PT_OFF), roleStatus_(PT_NONE), 
 			partitionRevision_(1), chunkCount_(0),
-			notUpdateCount_(0), notLongtermUdatedCount_(0),
 			otherStatus_(PT_OTHER_NORMAL), errorStatus_(PT_OTHER_NORMAL) {}
 		LogSequentialNumber lsn_;
 		LogSequentialNumber startLsn_;
@@ -1826,9 +1643,6 @@ private:
 		PartitionRoleStatus roleStatus_;
 		PartitionRevisionNo partitionRevision_;
 		int64_t chunkCount_;
-		int32_t notUpdateCount_;
-		int32_t notLongtermUdatedCount_;
-
 		int32_t otherStatus_;
 		int32_t errorStatus_;
 
@@ -1837,15 +1651,10 @@ private:
 			status_ = PT_OFF;
 			roleStatus_ = PT_NONE;
 			partitionRevision_ = PartitionRevision::INITIAL_CLUSTER_REVISION;
-			notUpdateCount_ = 0;
 			chunkCount_ = 0;
-			notLongtermUdatedCount_ = 0;
-			otherStatus_ = PT_OTHER_NORMAL;
 			errorStatus_ = PT_OTHER_NORMAL;
 		}
 	};
-
-	void setPartitionInfos(PartitionId pId, CurrentPartitionInfo &info);
 
 private:
 
@@ -1864,37 +1673,28 @@ private:
 				}
 			}
 			currentPartitionInfos_.resize(nodeNum);
-			}
+		}
 
 		LogSequentialNumber getLsn(NodeId nodeId) {
 			checkSize(nodeId);
 			return currentPartitionInfos_[nodeId].lsn_;
-			}
+		}
 
 		void setLsn(NodeId nodeId, LogSequentialNumber lsn, bool updateCheck = false) {
 			checkSize(nodeId);
-			if (updateCheck) {
-				if (currentPartitionInfos_[nodeId].lsn_ == lsn) {
-					if (currentPartitionInfos_[nodeId].notUpdateCount_ != INT32_MAX) {
-						currentPartitionInfos_[nodeId].notUpdateCount_++;
-			}
-		}
-				else {
-					currentPartitionInfos_[nodeId].notUpdateCount_ = 0;
-				}
-			}
 			currentPartitionInfos_[nodeId].lsn_ = lsn;
 		}
 
 		LogSequentialNumber getStartLsn(NodeId nodeId) {
 			checkSize(nodeId);
 			return currentPartitionInfos_[nodeId].startLsn_;
-			}
+		}
 
 		void setStartLsn(NodeId nodeId, LogSequentialNumber startLsn) {
 			checkSize(nodeId);
+			if (currentPartitionInfos_[nodeId].startLsn_ < startLsn)
 			currentPartitionInfos_[nodeId].startLsn_ = startLsn;
-			}
+		}
 
 		PartitionStatus getPartitionStatus(NodeId nodeId) {
 			checkSize(nodeId);
@@ -1904,12 +1704,12 @@ private:
 		void setPartitionStatus(NodeId nodeId, PartitionStatus status) {
 			checkSize(nodeId);
 			currentPartitionInfos_[nodeId].status_ = status;
-			}
+		}
 
 		PartitionRoleStatus getPartitionRoleStatus(NodeId nodeId) {
 			checkSize(nodeId);
 			return currentPartitionInfos_[nodeId].roleStatus_;
-			}
+		}
 
 		void setPartitionRoleStatus(NodeId nodeId, PartitionRoleStatus roleStatus) {
 			checkSize(nodeId);
@@ -1919,62 +1719,25 @@ private:
 		PartitionRevisionNo getPartitionRevision(NodeId nodeId) {
 			checkSize(nodeId);
 			return currentPartitionInfos_[nodeId].partitionRevision_;
-			}
+		}
 
 		void setPartitionRevision(NodeId nodeId, PartitionRevisionNo partitionRevision) {
 			checkSize(nodeId);
 			currentPartitionInfos_[nodeId].partitionRevision_ = partitionRevision;
-			}
-
-		int64_t getPartitionChunkCount(NodeId nodeId) {
-			checkSize(nodeId);
-			return currentPartitionInfos_[nodeId].chunkCount_;
-		}
-
-		void setPartitionChunkCount(NodeId nodeId, int64_t chunkCount) {
-			checkSize(nodeId);
-			currentPartitionInfos_[nodeId].chunkCount_ = chunkCount;
-			}
-
-		int32_t getOtherStatus(NodeId nodeId) {
-			checkSize(nodeId);
-			return currentPartitionInfos_[nodeId].otherStatus_;
-			}
-
-		void setErrorStatus(NodeId nodeId, int32_t status) {
-			checkSize(nodeId);
-			currentPartitionInfos_[nodeId].errorStatus_ = status;
-				}
-
-		int32_t getErrorStatus(NodeId nodeId) {
-			checkSize(nodeId);
-			int32_t ret = currentPartitionInfos_[nodeId].errorStatus_;
-			currentPartitionInfos_[nodeId].errorStatus_ = 0;
-			return ret;
-			}
-
-		void setOtherStatus(NodeId nodeId, int32_t status) {
-			checkSize(nodeId);
-			currentPartitionInfos_[nodeId].otherStatus_ = status;
-			}
-
-		int32_t getLsnChangeCount(NodeId nodeId) {
-			checkSize(nodeId);
-			return currentPartitionInfos_[nodeId].notUpdateCount_;
 		}
 
 		void resetPartitionInfo(NodeId nodeId) {
 			checkSize(nodeId);
 			currentPartitionInfos_[nodeId].roleStatus_ = PT_NONE;
 			currentPartitionInfos_[nodeId].status_ = PT_OFF;
-			}
+		}
 
 	private:
 		void checkSize(NodeId nodeId) {
 			if (static_cast<size_t>(nodeId) >= currentPartitionInfos_.size()) {
 				GS_THROW_USER_ERROR(GS_ERROR_PT_INTERAL,
-						"Specifed nodeId is over limit, nodeId=" << nodeId
-						<< ", current=" << currentPartitionInfos_.size());
+						"Specifed nodeId is invalid, nodeId=" << nodeId
+						<< ", max node size=" << currentPartitionInfos_.size());
 			}
 		}
 
@@ -2056,7 +1819,6 @@ private:
 			}
 			limitOwnerBackupLsnGap_ = gap;
 			limitOwnerBackupLsnDetectErrorGap_ = limitOwnerBackupLsnGap_ * PT_BACKUP_GAP_FACTOR;
-			limitOwnerBackupLsnDropGap_ = limitOwnerBackupLsnGap_ * PT_BACKUP_GAP_FACTOR;
 			return true;
 		}
 
@@ -2074,18 +1836,6 @@ private:
 
 		int32_t getLimitOwnerBackupLsnDetectErrorGap() {
 			return limitOwnerBackupLsnDetectErrorGap_;
-		}
-
-		bool setLimitOwnerBackupLsnDropGap(int32_t gap) {
-			if (gap < 0 || gap > INT32_MAX) {
-				return false;
-			}
-			limitOwnerBackupLsnDropGap_ = gap;
-			return true;
-		}
-
-		int32_t getLimitOwnerBackupLsnDropGap() {
-			return limitOwnerBackupLsnDropGap_;
 		}
 
 		bool setLimitOwnerCatchupLsnGap(int32_t gap) {
@@ -2128,14 +1878,12 @@ private:
 		int32_t replicationNum_;
 		int32_t limitOwnerBackupLsnGap_;
 		int32_t limitOwnerBackupLsnDetectErrorGap_;
-		int32_t limitOwnerBackupLsnDropGap_;
 		int32_t limitOwnerCatchupLsnGap_;
 		int32_t limitClusterNodeNum_;
 		int32_t limitMaxLsnGap_;
 		uint32_t ownerLoadLimit_;
 		uint32_t dataLoadLimit_;
 		int32_t maxNodeNum_;
-		int32_t assignMode_;
 	};
 
 	static bool cmpReplica(const ReplicaInfo &a, const ReplicaInfo &b) {
@@ -2264,7 +2012,6 @@ private:
 		std::sort(orderList.begin(), orderList.end(), func);
 	}
 
-
 	bool isBalance(uint32_t minLoad, uint32_t maxLoad, bool isOwnerCheck) {
 		if (isOwnerCheck) {
 			return (maxLoad - minLoad <= config_.ownerLoadLimit_);
@@ -2274,42 +2021,10 @@ private:
 		}
 	}
 
-	void adjustMaxLSN(LogSequentialNumber &maxLSN, int32_t maxLsnGap);
-
-	bool checkLsnGap(LogSequentialNumber ownerLSN,
-		LogSequentialNumber backupLSN, uint64_t gapValue) {
-		if (ownerLSN >= backupLSN) {
-			return (ownerLSN - backupLSN > gapValue);
-		}
-		else {
-			return (backupLSN - ownerLSN > gapValue);
-		}
-	}
-
 	bool checkLimitOwnerBackupLsnGap(LogSequentialNumber ownerLSN,
 		LogSequentialNumber backupLSN, int32_t gapFactor = 1) {
 		uint64_t gapValue =
 			static_cast<uint64_t>(config_.limitOwnerBackupLsnGap_ * gapFactor);
-		if (ownerLSN >= backupLSN) {
-			return (ownerLSN - backupLSN > gapValue);
-		}
-		else {
-			return (backupLSN - ownerLSN > gapValue);
-		}
-	}
-
-	bool checkOwnerBackupLsnGap(PartitionId pId, NodeId owner, NodeId backup) {
-		bool isOwnerChanged = (getLsnChangeCount(pId, owner) == 0);
-		bool isBackupNotChanged =
-			(getLsnChangeCount(pId, backup) >= PT_LSN_NOTCHANGE_COUNT_MAX);
-		return (checkLimitOwnerBackupLsnDetectErrorGap(getLSN(pId, owner), getLSN(pId, backup)) &&
-				isOwnerChanged && isBackupNotChanged);
-	}
-
-	bool checkLimitOwnerBackupLsnDetectErrorGap(
-		LogSequentialNumber ownerLSN, LogSequentialNumber backupLSN) {
-		uint64_t gapValue =
-			static_cast<uint64_t>(config_.limitOwnerBackupLsnDetectErrorGap_);
 		if (ownerLSN >= backupLSN) {
 			return (ownerLSN - backupLSN > gapValue);
 		}
@@ -2336,26 +2051,6 @@ private:
 		}
 	}
 
-	bool checkNextCandOwner(PartitionId pId, NodeId nodeId, bool isOwnerActive,
-		PartitionRole *currentRole) {
-		LogSequentialNumber targetLsn = getLSN(pId, nodeId);
-		LogSequentialNumber &maxLsn = maxLsnList_[pId];
-		if (isOwnerActive) {
-			if (((getPartitionStatus(pId, nodeId) == PT_ON) &&
-					currentRole->isOwner(nodeId)) ||
-				currentRole->isBackup(nodeId) ||
-				(prevCatchupPId_ == pId && prevCatchupNodeId_ == nodeId &&
-					checkPromoteOwnerCatchupLsnGap(maxLsn, targetLsn))) {
-				return true;
-			}
-		}
-		else {
-			if (maxLsn <= targetLsn) {
-				return true;
-			}
-		}
-	}
-
 	NodeInfo &getNodeInfo(NodeId nodeId) {
 		if (nodeId >= config_.maxNodeNum_ || nodeId == UNDEF_NODEID) {
 			GS_THROW_USER_ERROR(GS_ERROR_CS_SERVICE_CLUSTER_INTERNAL_FAILED, "");
@@ -2363,10 +2058,101 @@ private:
 		return nodes_[nodeId];
 	}
 
-	NodeId repairNotAvailablePartition(util::StackAllocator &alloc,
-			PartitionId pId, LoadSummary &loadInfo, util::XArray<NodeId> &liveNodeList);
+	bool isAvailable(PartitionId pId) {
+		return partitions_[pId].partitionInfo_.available_;
+	}
+	bool applyInitialRule(PartitionContext &context);
+	bool applyAddRule(PartitionContext &context);
+	bool applyRemoveRule(PartitionContext &context);
+	bool applySwapRule(PartitionContext &context);
 
-	void resetPrevCatchup(PartitionContext &context, PartitionId targetPId = UNDEF_PARTITIONID);
+	void checkRepairPartition(PartitionContext &context);
+
+
+struct ScoreNode {
+	ScoreNode(double score, NodeId nodeId, int32_t count, int32_t ownerCount) : 
+			score_(score), nodeId_(nodeId), count_(count), ownerCount_(ownerCount) {}
+	double score_;
+	NodeId nodeId_;
+	int32_t count_;
+	int32_t ownerCount_;
+};
+
+struct ScoreInfo {
+	ScoreInfo(double score, PartitionId pId) : score_(score), pId_(pId), assigned_(false), nodeId_(0), randVal_(0) {}
+	double score_;
+	PartitionId pId_;
+	bool assigned_;
+	NodeId nodeId_;
+	int32_t randVal_;
+};
+
+static bool cmpScoreNode(
+	const ScoreInfo &a, const ScoreInfo &b) {
+	if (a.score_ > b.score_) {
+		return true;
+	}
+	else if (a.score_ < b.score_) {
+		return false;
+	}
+	else {
+		if (a.nodeId_ > b.nodeId_) {
+			return true;
+		}
+		else if (a.nodeId_ > b.nodeId_) {
+			return false;
+		}
+		else {
+			return (a.randVal_ > b.randVal_);
+		}
+	}
+};
+
+static bool cmpScore(
+const ScoreNode &a, const ScoreNode &b) {
+	if (a.score_ > b.score_) {
+		return true;
+	}
+	else if (a.score_ < b.score_) {
+		return false;
+	}
+	else {
+		if (a.count_ < b.count_) {
+			return true;
+		}
+		else if (a.count_ > b.count_) {
+			return false;
+		}
+		else {
+			return (a.ownerCount_ < b.ownerCount_);
+		}
+	}
+};
+
+	void modifyBackup(util::StackAllocator &alloc,
+		util::XArray<NodeId> &nodeIdList,
+		int32_t nodePos,
+		util::Vector<util::Vector<ScoreInfo> > &scoreTable,
+		util::Vector<NodeId> &countList,
+		util::Vector<PartitionRole> &roleList);
+
+	void prepareGoalTable(
+		util::StackAllocator &alloc,
+		util::XArray<NodeId> &nodeIdList,
+		util::Vector<util::Vector<ScoreInfo> > &scoreTable,
+		util::Vector<PartitionRole> &roleList);
+
+	void assignGoalTable(
+		util::StackAllocator &alloc,
+		util::XArray<NodeId> &nodeIdList,
+		util::Vector<util::Vector<ScoreInfo> > &scoreTable,
+		util::Vector<PartitionRole> &roleList);
+
+	void modifyGoalTable(
+		util::StackAllocator &alloc,
+		util::XArray<NodeId> &nodeIdList,
+		util::Vector<PartitionRole> &roleList);
+
 
 	util::FixedSizeAllocator<util::Mutex> fixedSizeAlloc_;
 	util::StackAllocator alloc_;
@@ -2374,7 +2160,6 @@ private:
 	int32_t nodeNum_;
 	NodeId masterNodeId_;
 	PartitionRevision revision_;
-	std::set<PartitionId> targetChangePartitonList_;
 	std::vector<LogSequentialNumber> maxLsnList_;
 
 	util::Mutex revisionLock_;
@@ -2385,14 +2170,16 @@ private:
 	std::set<NodeId> downNodeList_;
 	std::set<NodeId> addNodeList_;
 
+	GoalPartition goal_;
+	int32_t currentRuleNo_;
+	int64_t nextApplyRuleLimitTime_;
+
 	PartitionConfig config_;
 	NodeId prevMaxNodeId_;
 
 	BlockQueue nextBlockQueue_;
 	BlockQueue goalBlockQueue_;
 	PartitionId prevCatchupPId_;
-	PartitionId currentCatchupPId_;
-	NodeId prevCatchupNodeId_;
 
 	Partition *partitions_;
 	CurrentPartitions *currentPartitions_;
@@ -2404,9 +2191,9 @@ private:
 	int32_t partitionDigit_;
 	int32_t lsnDigit_;
 
-	bool failCatchup_;
 	bool isRepaired_;
 	PartitionRevisionNo currentRevisionNo_;
+	PartitionRevisionNo prevDropRevisionNo_;
 };
 
 typedef PartitionTable::PartitionStatus PartitionStatus;
@@ -2425,14 +2212,11 @@ public:
 	SubPartition() {}
 	SubPartition(PartitionId pId,
 		PartitionRole &role, NodeAddress &currentOwner)
-		: pId_(pId),
-		role_(role),
-		currentOwner_(currentOwner){};
+		: pId_(pId), role_(role), currentOwner_(currentOwner), currentOwnerId_(UNDEF_NODEID) {};
 
 	SubPartition(PartitionId pId,
 		PartitionRole &role)
-		: pId_(pId),
-		role_(role){};
+		: pId_(pId), role_(role){};
 
 	void setCurrentOwner(PartitionTable *pt, NodeId currentOwner, NodeId nextOwner) {
 		if (nextOwner == UNDEF_NODEID) {
@@ -2450,7 +2234,7 @@ public:
 
 	std::string dump(PartitionTable *pt = NULL) {
 		util::NormalOStringStream ss;
-		ss << "SubPartition:{"
+		ss << "Partition:{"
 		<< "pId=" << pId_;
 		if (pt == NULL) {
 			ss << ", role:" << role_.dump();
@@ -2462,10 +2246,10 @@ public:
 		return ss.str();
 	}
 
-
 	PartitionId pId_;
 	PartitionRole role_;
 	NodeAddress currentOwner_;
+	NodeId currentOwnerId_;
 };
 
 std::ostream &operator<<(std::ostream &stream, SubPartition &subPartition);
@@ -2476,12 +2260,10 @@ std::ostream &operator<<(std::ostream &stream, PartitionRevision &revision);
 /*!
 	@brief SubPartition Table
 */
+class EventEngine;
 class SubPartitionTable {
 public:
 	SubPartitionTable() {}
-	bool check() {
-		return true;
-	}
 
 	int32_t size() {
 		return static_cast<int32_t>(subPartitionList_.size());
@@ -2489,6 +2271,15 @@ public:
 	SubPartition &getSubPartition(int32_t pos) {
 		return subPartitionList_[pos];
 	}
+
+	void init(PartitionTable *pt, EventEngine *ee);
+
+	void prepareMap(util::Map<PartitionId, PartitionRole*> &roleMap) {
+		for (size_t pos = 0; pos < subPartitionList_.size(); pos++) {
+			roleMap[subPartitionList_[pos].pId_] = &subPartitionList_[pos].role_;
+		}
+	}
+
 	void set(PartitionTable *pt, PartitionId pId,
 		PartitionRole &role, NodeAddress &ownerAddress) {
 		SubPartition subPartition(pId, role, ownerAddress);
@@ -2508,24 +2299,44 @@ public:
 		return nodeAddressList_;
 	}
 
-	void validate(PartitionTable *pt);
-
+	void set(PartitionTable *pt) {
+		for (PartitionId pId = 0; pId < pt->getPartitionNum(); pId++) {
+			PartitionRole tmpRole;
+			pt->getPartitionRole(pId, tmpRole);
+			set(pt, pId, tmpRole);
+		}
+	}
+	bool check() {
+		return true;
+	}
 
 	PartitionRevision &getRevision() {
 		return revision_;
 	}
 
+	void clear() {
+		subPartitionList_.clear();
+	}
+
+	void setRevision(PartitionRevision &revison) {
+		revision_ = revison;
+	}
+
 	MSGPACK_DEFINE(subPartitionList_, nodeAddressList_, revision_);
 
-	std::string dump() {
+	std::string dump(bool isTrace = true) {
 		util::NormalOStringStream ss;
-		ss << "subPartitionTable:{"
-		<< "ptRev=" << revision_.toString();
+		ss << "NextPartitionTable:{";
+		ss << "revision=" << revision_.sequentialNumber_;
 		ss << ", [";
-		ss << std::endl;
+		if (!isTrace) {
+			ss << std::endl;
+		}
 		for (size_t pos = 0; pos < subPartitionList_.size(); pos++) {
 			ss << subPartitionList_[pos].dump();
-			ss <<std::endl;
+			if (!isTrace) {
+				ss << std::endl;
+			}
 			if (pos != subPartitionList_.size() - 1) {
 				ss << ",";
 			}
@@ -2554,29 +2365,6 @@ static inline const std::string dumpPartitionStatus(PartitionStatus status) {
 	}
 };
 
-static inline const std::string dumpPartitionTableType(
-	PartitionTable::TableType type) {
-	switch (type) {
-	case PartitionTable::PT_NEXT_OB:
-		return "NEXT_OB";
-	case PartitionTable::PT_CURRENT_OB:
-		return "CURRENT_OB";
-	default:
-		return "";
-	}
-}
-
-static inline const std::string dumpPartitionTableType(uint8_t type) {
-	TableType tableType = static_cast<TableType>(type);
-	switch (tableType) {
-	case PartitionTable::PT_NEXT_OB:
-		return "NEXT_OB";
-	case PartitionTable::PT_CURRENT_OB:
-		return "CURRENT_OB";
-	default:
-		return "";
-	}
-}
 
 static inline const std::string dumpPartitionRoleStatus(
 	PartitionTable::PartitionRoleStatus status) {

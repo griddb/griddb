@@ -93,6 +93,13 @@ public:
 	virtual ~EncodeDecodeException() throw() {}
 };
 
+enum BackgroundEventType {
+	TXN_BACKGROUND,
+	SYNC_EXEC,
+	CP_CHUNKCOPY
+};
+
+
 struct StatementMessage {
 	typedef int32_t FixedType;
 	typedef int16_t OptionCategory;
@@ -382,6 +389,7 @@ private:
 			T == QUERY_TIME_SERIES_RANGE ||
 			T == QUERY_TIME_SERIES_SAMPLING ||
 			T == FETCH_RESULT_SET
+
 			?
 			FixedTypes::ROW :
 
@@ -1358,7 +1366,6 @@ public:
 			PartitionId pId, ClusterRole requiredClusterRole,
 			PartitionRoleType requiredPartitionRole,
 			PartitionStatus requiredPartitionStatus, PartitionTable *pt);
-
 
 	void checkExecutable(ClusterRole requiredClusterRole);
 
@@ -2751,6 +2758,10 @@ public:
 
 	EventEngine *getEE();
 
+	int32_t getWaitTime(EventContext &ec, Event *ev, int32_t opeTime,
+			int64_t &executableCount, int64_t &afterCount,
+			BackgroundEventType type);
+
 	void checkNoExpireTransaction(util::StackAllocator &alloc, PartitionId pId);
 	void changeTimeoutCheckMode(PartitionId pId,
 		PartitionTable::PartitionStatus after, ChangePartitionType changeType,
@@ -2910,12 +2921,16 @@ private:
 
 	ShortTermSyncHandler shortTermSyncHandler_;
 	LongTermSyncHandler longTermSyncHandler_;
-	SyncTimeoutHandler syncTimeoutHandler_;
+	SyncCheckEndHandler syncCheckEndHandler_;
 	DropPartitionHandler dropPartitionHandler_;
 	ChangePartitionStateHandler changePartitionStateHandler_;
 	ChangePartitionTableHandler changePartitionTableHandler_;
 
 	CheckpointOperationHandler checkpointOperationHandler_;
+
+	SyncManager *syncManager_;
+	DataStore *dataStore_;
+	CheckpointService *checkpointService_;
 
 	RemoveRowSetByIdHandler removeRowSetByIdHandler_;
 	UpdateRowSetByIdHandler updateRowSetByIdHandler_;

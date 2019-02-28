@@ -123,47 +123,6 @@ static inline int32_t changeTimeSecToMill(int32_t sec) {
 		UTIL_TRACE_EXCEPTION_ERROR(CLUSTER_OPERATION, e, ""); \
 	}
 
-
-#define TRACE_CLUSTER_HANDLER_DETAIL(ev, eventType, level, str)   \
-	GS_TRACE_##level(CLUSTER_SERVICE, GS_TRACE_CS_HANDLER_DETAIL, \
-		str << ", eventType:" << getEventTypeName(eventType)      \
-			<< ", sender:" << ev.getSenderND());
-
-#define TRACE_SYNC_HANDLER_DETAIL(ev, eventType, pId, level, str) \
-	GS_TRACE_##level(SYNC_SERVICE, GS_TRACE_SYNC_HANDLER_DETAIL,  \
-		str << ", eventType:" << getEventTypeName(eventType)      \
-			<< ", pId=" << pId << ", sender:" << ev.getSenderND());
-
-#define TRACE_CLUSTER_HANDLER(eventType, level, str)       \
-	GS_TRACE_##level(CLUSTER_SERVICE, GS_TRACE_CS_HANDLER, \
-		"{" << str << "}, eventType:" << getEventTypeName(eventType));
-
-#define TRACE_SYNC_HANDLER(eventType, pId, level, str)               \
-	GS_TRACE_##level(SYNC_SERVICE, GS_TRACE_SYNC_HANDLER,            \
-		"{" << str << "}, eventType:" << getEventTypeName(eventType) \
-			<< ", pId=" << pId);
-
-#define TRACE_CLUSTER_OPERATION(eventType, level, str)         \
-	GS_TRACE_##level(CLUSTER_OPERATION, GS_TRACE_CS_OPERATION, \
-		"{" << str << "}, eventType:" << getEventTypeName(eventType));
-
-#define TRACE_CLUSTER_OPERATION_CONDITION(eventType, level, str, cond)    \
-	if (cond) {                                                           \
-		GS_TRACE_##level(CLUSTER_OPERATION, GS_TRACE_CS_OPERATION,        \
-			"{" << str << "}, eventType:" << getEventTypeName(eventType)) \
-	};
-
-#define TRACE_CLUSTER_NORMAL(level, str) \
-	GS_TRACE_##level(CLUSTER_SERVICE, GS_TRACE_CS_NORMAL, str);
-
-#define TRACE_CLUSTER_NORMAL_CONDITION(cond, level1, level2, str)    \
-	if (cond) {                                                      \
-		GS_TRACE_##level1(CLUSTER_SERVICE, GS_TRACE_CS_NORMAL, str); \
-	}                                                                \
-	else {                                                           \
-		GS_TRACE_##level2(CLUSTER_SERVICE, GS_TRACE_CS_NORMAL, str); \
-	}
-
 #define TRACE_CLUSTER_NORMAL_OPERATION(level, str) \
 	GS_TRACE_##level(CLUSTER_OPERATION, GS_TRACE_CS_NORMAL_OPERATION, str);
 
@@ -326,15 +285,5 @@ static inline std::ostream &operator<<(
 	ss << "]";
 	return ss;
 }
-
-extern bool g_clusterDump;
-
-#define SET_CLUSTER_DUMP(flag) {g_clusterDump = flag;}
-
-#define DUMP_CLUSTER(s) {if (g_clusterDump) { \
-	GS_TRACE_INFO(CLUSTER_DUMP, GS_TRACE_CS_TRACE_DUMP, s); \
-	std::cout << s << std::endl; \
-	}}
-
 
 #endif

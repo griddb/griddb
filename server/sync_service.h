@@ -89,6 +89,10 @@ public:
 		eventType_ = eventType;
 	}
 
+	util::StackAllocator &getAllocator() {
+		return *alloc_;
+	}
+
 	void encode(EventByteOutStream &out);
 	void decode(EventByteInStream &in, const char8_t *bodyBuffer);
 
@@ -129,12 +133,14 @@ public:
 		request_.ptRev_ = context->getPartitionRevision();
 		context->getSyncId(syncId_);
 		backupSyncId_ = backupSyncId;
-		request_.stmtId_ = context->createStatementId();
 		request_.ownerLsn_ = lsn;
 	}
 
 	void set(EventType eventType) {
 		eventType_ = eventType;
+	}
+	bool check() {
+		return true;
 	}
 
 	void noUseLog() {
@@ -179,7 +185,8 @@ public:
 		return request_.numChunk_;
 	}
 
-	bool getLogs(PartitionId pId, int64_t sId, LogManager *logMgr, CheckpointService *cpSvc);
+	bool getLogs(PartitionId pId, int64_t sId, LogManager *logMgr,
+			CheckpointService *cpSvc, bool useLongSyncLog, bool isCheck = false);
 	bool getChunks(util::StackAllocator &alloc, PartitionId pId, PartitionTable *pt,
 			LogManager *logMgr, ChunkManager *chunkMgr,
 			CheckpointService *cpSvc, int64_t syncId, uint64_t &totalCount);
@@ -198,10 +205,9 @@ public:
 		@brief Encodes/Decodes the message for sync request
 	*/
 	struct Request {
-		Request(int32_t mode) : syncMode_(mode), stmtId_(UNDEF_STATEMENTID),
+		Request(int32_t mode) : syncMode_(mode),
 				ownerLsn_(UNDEF_LSN), startLsn_(UNDEF_LSN), endLsn_(UNDEF_LSN),
-				chunkSize_(0), numChunk_(0), binaryLogSize_(0),
-				globalSequentialNumber_(0)
+				chunkSize_(0), numChunk_(0), binaryLogSize_(0)
 		{}
 
 		~Request(){};
@@ -215,14 +221,12 @@ public:
 
 		int32_t syncMode_;
 		PartitionRevision ptRev_;
-		StatementId stmtId_;
 		LogSequentialNumber ownerLsn_;
 		LogSequentialNumber startLsn_;
 		LogSequentialNumber endLsn_;
 		uint32_t chunkSize_;
 		uint32_t numChunk_;
 		uint32_t binaryLogSize_;
-		int64_t globalSequentialNumber_;
 		SyncRequestInfo *requestInfo_;
 	};
 
@@ -233,7 +237,6 @@ public:
 		return request_.endLsn_;
 	}
 
-private:
 	/*!
 		@brief Represents the information for search condition
 	*/
@@ -271,7 +274,6 @@ public:
 		response_.ptRev_ = syncRequestInfo.request_.ptRev_;
 		syncId_ = syncRequestInfo.syncId_;
 		backupSyncId_ = syncRequestInfo.backupSyncId_;
-		response_.stmtId_ = syncRequestInfo.request_.stmtId_;
 		response_.targetLsn_ = lsn;
 		if (context != NULL) {
 			context->getSyncId(backupSyncId_);
@@ -293,7 +295,7 @@ public:
 	*/
 	struct Response {
 		Response(int32_t mode) : syncMode_(mode),
-				stmtId_(UNDEF_STATEMENTID), targetLsn_(UNDEF_LSN) {}
+				targetLsn_(UNDEF_LSN) {}
 
 		~Response(){};
 
@@ -305,7 +307,6 @@ public:
 
 		int32_t syncMode_;
 		PartitionRevision ptRev_;
-		StatementId stmtId_;
 		LogSequentialNumber targetLsn_;
 		SyncResponseInfo *responseInfo_;
 	};
@@ -319,9 +320,9 @@ private:
 /*!
 	@brief Represents the information for sync timeout
 */
-class SyncTimeoutInfo : public SyncManagerInfo {
+class SyncCheckEndInfo : public SyncManagerInfo {
 public:
-	SyncTimeoutInfo(util::StackAllocator &alloc, EventType eventType,
+	SyncCheckEndInfo(util::StackAllocator &alloc, EventType eventType,
 			SyncManager *syncMgr, PartitionId pId, SyncMode mode, SyncContext *context)
 			: SyncManagerInfo(alloc, eventType, syncMgr, pId),
 			syncMode_(mode), context_(context) {
@@ -331,7 +332,6 @@ public:
 		}
 	};
 
-	bool check(PartitionId pId, PartitionTable *pt);
 	void encode(EventByteOutStream &out);
 	void decode(EventByteInStream &in, const char8_t *bodyBuffer);
 
@@ -389,6 +389,7 @@ private:
 */
 class SyncHandler : public EventHandler {
 public:
+	static const int32_t UNDEF_DELAY_TIME = -1;
 	SyncHandler() {};
 	~SyncHandler() {};
 
@@ -396,32 +397,13 @@ public:
 
 	void operator()(EventContext &, EventEngine::Event &) {};
 
-	void removePartition(EventContext &ec, EventEngine::Event &ev);
+	void removePartition(util::StackAllocator &alloc,
+		PartitionId pId, EventType eventType, const util::DateTime &now,
+		const EventMonotonicTime emNow);
 
 	/*!
 		@brief Represents the context to control the synchronization
 	*/
-	struct SyncControlContext {
-		SyncControlContext(EventType eventType, PartitionId pId, LogSequentialNumber lsn)
-				: eventType_(eventType), waitTime_(0), sendLogSize_(0), sendChunkNum_(0),
-				pId_(pId), lsn_(lsn) {};
-
-		int32_t getWaitTime() {
-			return waitTime_;
-		}
-
-		EventRequestOption *getOption() {
-			return &option_;
-		}
-
-		EventType eventType_;
-		int32_t waitTime_;
-		int32_t sendLogSize_;
-		int32_t sendChunkNum_;
-		PartitionId pId_;
-		LogSequentialNumber lsn_;
-		EventRequestOption option_;
-	};
 
 
 	PartitionTable *pt_;
@@ -444,26 +426,29 @@ public:
 
 protected:
 
-	void sendEvent(EventContext &Ec, EventEngine &ee, NodeId targetNodeId,
-			Event &ev, int32_t delayTime = -1);
+	void sendResponse(EventContext &ec, EventType eventType,
+			PartitionId pId, SyncRequestInfo &requestInfo,
+			SyncResponseInfo &responseInfo, SyncContext *context,  NodeId senderNodeId);
 
-	class SyncPartitionLock {
-	public:
-		SyncPartitionLock(TransactionManager *txnMgr, PartitionId pId);
-		~SyncPartitionLock();
+	void sendEvent(EventContext &ec, EventEngine &ee, NodeId targetNodeId,
+			Event &ev, int32_t delayTime = UNDEF_DELAY_TIME);
 
-	private:
-		TransactionManager *txnMgr_;
-		PartitionId pId_;
-	};
+	void sendRequest(EventContext &ec, EventEngine &ee, EventType eventType,
+			PartitionId pId, SyncRequestInfo &requestInfo,
+			NodeId senderNodeId, int32_t waitTime = 0);
 
-	int32_t getTransactionEEQueueSize(PartitionId pId);
+	template <typename T>
+	void sendMultiRequest(EventContext &ec, EventEngine &ee, EventType eventType,
+			PartitionId pId, SyncRequestInfo &requestInfo,
+			T &t, SyncContext *context);
 
-	void addTimeoutEvent(EventContext &ec, PartitionId pId,
+	void checkRestored(util::StackAllocator &alloc, PartitionId pId,
+			EventType eventType, const util::DateTime &now,
+			const EventMonotonicTime emNow);
+
+	void addCheckEndEvent(EventContext &ec, PartitionId pId,
 			util::StackAllocator &alloc, SyncMode mode, SyncContext *context,
 			bool isImmediate = false);
-
-	bool controlSyncLoad(SyncControlContext &control);
 };
 
 /*!
@@ -475,7 +460,46 @@ public:
 
 	void operator()(EventContext &ec, EventEngine::Event &ev);
 
+private:
+	void decodeLongSyncRequestInfo(
+			PartitionId pId, EventByteInStream &in,
+			SyncId &longSyncId, SyncContext *&longSyncContext);
+
+	int64_t getTargetSSN(PartitionId pId, SyncContext *context);
+
 	void undoPartition(util::StackAllocator &alloc, SyncContext *context, PartitionId pId);
+
+	void executeSyncRequest(EventContext &ec, Event &ev, PartitionId pId,
+			SyncContext *context, SyncRequestInfo &syncRequestInfo,
+			SyncResponseInfo &syncResponseInfo);
+
+	void executeSyncStart(EventContext &ec, Event &ev, PartitionId pId,
+			SyncContext *context, SyncRequestInfo &syncRequestInfo,
+			SyncResponseInfo &syncResponseInfo, NodeId senderNodeId);
+
+	void executeSyncStartAck(EventContext &ec, Event &ev, PartitionId pId,
+			SyncContext *context, SyncRequestInfo &syncRequestInfo,
+			SyncResponseInfo &syncResponseInfo, NodeId senderNodeId);
+
+	void executeSyncLog(EventContext &ec, Event &ev, PartitionId pId,
+			SyncContext *context, SyncRequestInfo &syncRequestInfo,
+			SyncResponseInfo &syncResponseInfo, NodeId senderNodeId);
+
+	void executeSyncLogAck(EventContext &ec, Event &ev, PartitionId pId,
+			SyncContext *context, SyncRequestInfo &syncRequestInfo,
+			SyncResponseInfo &syncResponseInfo, NodeId senderNodeId);
+
+	void executeSyncEnd(EventContext &ec, Event &ev, PartitionId pId,
+			SyncContext *context, SyncRequestInfo &syncRequestInfo,
+			SyncResponseInfo &syncResponseInfo, NodeId senderNodeId);
+
+	void executeSyncEndAck(EventContext &ec, Event &ev, PartitionId pId,
+			SyncContext *context, SyncRequestInfo &syncRequestInfo,
+			SyncResponseInfo &syncResponseInfo, NodeId senderNodeId);
+
+	void checkOwner(LogSequentialNumber ownerLsn, SyncContext *context, bool isOwner = true);
+	void checkBackup(NodeId backupNodeId,
+			LogSequentialNumber backupLsn, SyncContext *context);
 };
 
 /*!
@@ -486,14 +510,49 @@ public:
 	LongTermSyncHandler(){};
 
 	void operator() (EventContext &ec, EventEngine::Event &ev);
+
+	void requestShortTermSync(EventContext &ec, PartitionId pId, SyncContext *context);
+
+	void executeSyncRequest(EventContext &ec, Event &ev, PartitionId pId,
+			SyncContext *context, SyncRequestInfo &syncRequestInfo,
+			SyncResponseInfo &syncResponseInfo);
+
+	void executeSyncPrepareAck(EventContext &ec, Event &ev, PartitionId pId,
+			SyncContext *context, SyncRequestInfo &syncRequestInfo,
+			SyncResponseInfo &syncResponseInfo, LongtermSyncInfo &syncInfo);
+
+	void executeSyncStart(EventContext &ec, Event &ev, PartitionId pId,
+			SyncContext *context, SyncRequestInfo &syncRequestInfo,
+			SyncResponseInfo &syncResponseInfo, NodeId senderNodeId);
+	
+	void executeSyncStartAck(EventContext &ec, Event &ev, PartitionId pId,
+			SyncContext *context, SyncRequestInfo &syncRequestInfo,
+			SyncResponseInfo &syncResponseInfo, NodeId senderNodeId);
+
+	void executeSyncChunk(EventContext &ec, Event &ev, PartitionId pId,
+			SyncContext *context, SyncRequestInfo &syncRequestInfo,
+			SyncResponseInfo &syncResponseInfo, NodeId senderNodeId);
+
+	void executeSyncChunkAck(EventContext &ec, Event &ev, PartitionId pId,
+			SyncContext *context, SyncRequestInfo &syncRequestInfo,
+			SyncResponseInfo &syncResponseInfo, NodeId senderNodeId);
+
+	void executeSyncLog(EventContext &ec, Event &ev, PartitionId pId,
+			SyncContext *context, SyncRequestInfo &syncRequestInfo,
+			SyncResponseInfo &syncResponseInfo, NodeId senderNodeId);
+
+	void executeSyncLogAck(EventContext &ec, Event &ev, PartitionId pId,
+			SyncContext *context, SyncRequestInfo &syncRequestInfo,
+			SyncResponseInfo &syncResponseInfo, NodeId senderNodeId);
 };
+
 
 /*!
 	@brief Handles Sync Timeout
 */
-class SyncTimeoutHandler : public SyncHandler {
+class SyncCheckEndHandler : public SyncHandler {
 public:
-	SyncTimeoutHandler(){};
+	SyncCheckEndHandler(){};
 	void operator() (EventContext &ec, EventEngine::Event &ev);
 };
 
@@ -550,9 +609,10 @@ public:
 	}
 
 	template <class T>
-			void decode(util::StackAllocator &alloc, EventEngine::Event &ev, T &t);
+			void decode(util::StackAllocator &alloc, EventEngine::Event &ev, T &t, EventByteInStream &in);
+
 	template <class T>
-			void encode(EventEngine::Event &ev, T &t);
+			void encode(EventEngine::Event &ev, T &t, EventByteOutStream &out);
 
 	void requestDrop(const Event::Source &eventSource,
 		util::StackAllocator &alloc, PartitionId pId, bool isForce, PartitionRevisionNo revision = 0);

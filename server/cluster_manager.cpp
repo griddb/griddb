@@ -22,42 +22,44 @@
 #include "cluster_manager.h"
 #include "picojson.h"
 #include "sha2.h"
-
 #include "cluster_service.h"
 #include "container_key.h"
 
 #include "uuid_utils.h"
 
-
 UTIL_TRACER_DECLARE(CLUSTER_SERVICE);
 UTIL_TRACER_DECLARE(CLUSTER_OPERATION);
 UTIL_TRACER_DECLARE(CLUSTER_DUMP);
 
+#define GS_TRACE_CLUSTER_INFO(s) \
+	GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_CLUSTER_STATUS, s); \
+
+#define GS_TRACE_CLUSTER_DUMP(s) \
+	GS_TRACE_DEBUG(CLUSTER_OPERATION, GS_TRACE_CS_CLUSTER_STATUS, s);
 
 #define TEST_PRINT(s)
 #define TEST_PRINT1(s, d)
 
-
 ClusterManager::ClusterManager(const ConfigTable &configTable,
 		PartitionTable *partitionTable, ClusterVersionId versionId) :
 	clusterConfig_(configTable), clusterInfo_(partitionTable),
-		pt_(partitionTable), versionId_(versionId), isSignalBeforeRecovery_(false),
-		ee_(NULL), clsSvc_(NULL)
+	pt_(partitionTable), versionId_(versionId),
+	isSignalBeforeRecovery_(false), ee_(NULL), clsSvc_(NULL)
 {
 	statUpdator_.manager_ = this;
 	try {
 		clusterInfo_.startupTime_ = util::DateTime::now(TRIM_MILLISECONDS).getUnixTime();
 		std::string currentClusterName =
-			configTable.get<const char8_t *>(CONFIG_TABLE_CS_CLUSTER_NAME);
+				configTable.get<const char8_t *>(CONFIG_TABLE_CS_CLUSTER_NAME);
 		if (currentClusterName.length() > 0) {
 			JoinClusterInfo joinInfo(true);
 			joinInfo.set(currentClusterName, 0);
-			set(joinInfo);
+			setJoinClusterInfo(joinInfo);
 			clusterConfig_.setClusterName(currentClusterName);
 		}
 		else {
 			GS_THROW_USER_ERROR(GS_ERROR_CT_PARAMETER_INVALID,
-					"Parameter must be specified (source=gs_cluster.json:gs_node.json, "
+				"Parameter must be specified (source=gs_cluster.json:gs_node.json, "
 				"name=cluster.clusterName)");
 		}
 		concurrency_ = configTable.get<int32_t>(CONFIG_TABLE_DS_CONCURRENCY);
@@ -93,7 +95,7 @@ void ClusterManager::checkActiveStatus() {
 /*!
 	@brief Checks if a specified operation is executable
 */
-void ClusterManager::checkCommandStatus(ClusterOperationType operation) {
+void ClusterManager::checkCommandStatus(EventType operation) {
 	if (!statusInfo_.checkCommandStatus(operation)) {
 		GS_THROW_USER_ERROR(GS_ERROR_CLM_CLUSTER_OPERATION_CHECK_FAILED, "");
 	}
@@ -102,7 +104,7 @@ void ClusterManager::checkCommandStatus(ClusterOperationType operation) {
 /*!
 	@brief Updates node status
 */
-void ClusterManager::updateNodeStatus(ClusterOperationType operation) {
+void ClusterManager::updateNodeStatus(EventType operation) {
 	statusInfo_.updateNodeStatus(operation);
 }
 
@@ -117,24 +119,24 @@ bool ClusterManager::NodeStatusInfo::checkNodeStatus() {
 	@brief Checks if status match target
 */
 bool ClusterManager::NodeStatusInfo::checkCommandStatus(
-	ClusterOperationType operation) {
+	EventType operation) {
 	NodeStatus targetCurrentStatus, targetNextStatus;
 	switch (operation) {
-	case OP_JOIN_CLUSTER: {
+	case CS_JOIN_CLUSTER: {
 		targetCurrentStatus = SYS_STATUS_INACTIVE;
 		targetNextStatus = SYS_STATUS_INACTIVE;
 		break;
 	}
-	case OP_LEAVE_CLUSTER:
-	case OP_SHUTDOWN_CLUSTER:
-	case OP_INCREASE_CLUSTER:
-	case OP_DECREASE_CLUSTER:
+	case CS_LEAVE_CLUSTER:
+	case CS_SHUTDOWN_CLUSTER:
+	case CS_INCREASE_CLUSTER:
+	case CS_DECREASE_CLUSTER:
 	{
 		targetCurrentStatus = SYS_STATUS_ACTIVE;
 		targetNextStatus = SYS_STATUS_ACTIVE;
 		break;
 	}
-	case OP_SHUTDOWN_NODE_NORMAL: {
+	case CS_SHUTDOWN_NODE_NORMAL: {
 		targetCurrentStatus = SYS_STATUS_INACTIVE;
 		targetNextStatus = nextStatus_;
 		if (currentStatus_ == SYS_STATUS_ACTIVE) {
@@ -144,17 +146,17 @@ bool ClusterManager::NodeStatusInfo::checkCommandStatus(
 		}
 		break;
 	}
-	case OP_COMPLETE_CHECKPOINT_FOR_SHUTDOWN: {
+	case CS_COMPLETE_CHECKPOINT_FOR_SHUTDOWN: {
 		targetCurrentStatus = SYS_STATUS_INACTIVE;
 		targetNextStatus = SYS_STATUS_SHUTDOWN_NORMAL;
 		break;
 	}
-	case OP_COMPLETE_CHECKPOINT_FOR_RECOVERY: {
+	case CS_COMPLETE_CHECKPOINT_FOR_RECOVERY: {
 		targetCurrentStatus = SYS_STATUS_BEFORE_RECOVERY;
 		targetNextStatus = SYS_STATUS_BEFORE_RECOVERY;
 		break;
 	}
-	case OP_SHUTDOWN_NODE_FORCE: {
+	case CS_SHUTDOWN_NODE_FORCE: {
 		targetCurrentStatus = currentStatus_;
 		targetNextStatus = nextStatus_;
 		isShutdown_ = true;
@@ -228,29 +230,29 @@ const char8_t *ClusterManager::NodeStatusInfo::getSystemStatus() const {
 	@brief Updates node status
 */
 void ClusterManager::NodeStatusInfo::updateNodeStatus(
-	ClusterOperationType operation) {
+	EventType operation) {
 	switch (operation) {
-	case OP_JOIN_CLUSTER: {
+	case CS_JOIN_CLUSTER: {
 		currentStatus_ = SYS_STATUS_ACTIVE;
 		nextStatus_ = SYS_STATUS_ACTIVE;
 		break;
 	}
-	case OP_LEAVE_CLUSTER: {
+	case CS_LEAVE_CLUSTER: {
 		currentStatus_ = SYS_STATUS_INACTIVE;
 		nextStatus_ = SYS_STATUS_INACTIVE;
 		break;
 	}
-	case OP_SHUTDOWN_NODE_NORMAL: {
+	case CS_SHUTDOWN_NODE_NORMAL: {
 		nextStatus_ = SYS_STATUS_SHUTDOWN_NORMAL;
 		isNormalShutdownCall_ = true;
 		break;
 	}
-	case OP_COMPLETE_CHECKPOINT_FOR_SHUTDOWN: {
+	case CS_COMPLETE_CHECKPOINT_FOR_SHUTDOWN: {
 		currentStatus_ = SYS_STATUS_SHUTDOWN_NORMAL;
 		isShutdown_ = true;
 		break;
 	}
-	case OP_COMPLETE_CHECKPOINT_FOR_RECOVERY: {
+	case CS_COMPLETE_CHECKPOINT_FOR_RECOVERY: {
 		currentStatus_ = SYS_STATUS_INACTIVE;
 		nextStatus_ = SYS_STATUS_INACTIVE;
 		break;
@@ -260,21 +262,19 @@ void ClusterManager::NodeStatusInfo::updateNodeStatus(
 				"Operation=" << static_cast<int32_t>(operation) << " is unacceptable");
 	}
 	}
-	TRACE_CLUSTER_NORMAL(
-			INFO, "Status updated (current=" << getSystemStatus() << ")");
 };
 
 /*!
 	@brief Checks cluster status
 */
-void ClusterManager::checkClusterStatus(ClusterOperationType operation) {
+void ClusterManager::checkClusterStatus(EventType operation) {
 	switch (operation) {
-	case OP_COMPLETE_CHECKPOINT_FOR_RECOVERY:
-	case OP_COMPLETE_CHECKPOINT_FOR_SHUTDOWN:
-	case OP_SHUTDOWN_NODE_FORCE:
-	case OP_SHUTDOWN_NODE_NORMAL:
-	case OP_JOIN_CLUSTER:
-	case OP_CHANGE_PARTITION_STATUS: {
+	case CS_COMPLETE_CHECKPOINT_FOR_RECOVERY:
+	case CS_COMPLETE_CHECKPOINT_FOR_SHUTDOWN:
+	case CS_SHUTDOWN_NODE_FORCE:
+	case CS_SHUTDOWN_NODE_NORMAL:
+	case CS_JOIN_CLUSTER:
+	case TXN_CHANGE_PARTITION_STATE: {
 		break;
 	}
 	default: {
@@ -285,63 +285,62 @@ void ClusterManager::checkClusterStatus(ClusterOperationType operation) {
 	}
 	}
 	switch (operation) {
-	case OP_TIMER_CHECK_CLUSTER:
-	case OP_LEAVE_CLUSTER:
-	case OP_SHUTDOWN_NODE_NORMAL:
-	case OP_SHUTDOWN_NODE_FORCE:
-	case OP_COMPLETE_CHECKPOINT_FOR_SHUTDOWN:
-	case OP_CHANGE_PARTITION_STATUS:
-	case OP_CHANGE_PARTITION_TABLE: {
+	case CS_TIMER_CHECK_CLUSTER:
+	case CS_LEAVE_CLUSTER:
+	case CS_SHUTDOWN_NODE_NORMAL:
+	case CS_SHUTDOWN_NODE_FORCE:
+	case CS_COMPLETE_CHECKPOINT_FOR_SHUTDOWN:
+	case TXN_CHANGE_PARTITION_STATE:
+	case TXN_CHANGE_PARTITION_TABLE: {
 		break;
 	}
-	case OP_UPDATE_PARTITION:
-	case OP_TIMER_CHECK_LOAD_BALANCE:
-	case OP_ORDER_DROP_PARTITION: {
+	case CS_UPDATE_PARTITION:
+	case CS_TIMER_CHECK_LOAD_BALANCE:
+	case CS_ORDER_DROP_PARTITION: {
 		if (pt_->isSubMaster()) {
 			GS_THROW_USER_ERROR(GS_ERROR_CLM_CLUSTER_STATUS_IS_SUBMASTER, "");
 		}
 		break;
 	}
-	case OP_TIMER_NOTIFY_CLUSTER:
-	case OP_HEARTBEAT_RES:
-	case OP_NOTIFY_CLUSTER:
-	case OP_NOTIFY_CLUSTER_RES:
+	case CS_TIMER_NOTIFY_CLUSTER:
+	case CS_HEARTBEAT_RES:
+	case CS_NOTIFY_CLUSTER:
+	case CS_NOTIFY_CLUSTER_RES:
 	{
 		if (pt_->isFollower()) {
 			GS_THROW_USER_ERROR(GS_ERROR_CLM_CLUSTER_STATUS_IS_FOLLOWER, "");
 		}
 		break;
 	}
-	case OP_INCREASE_CLUSTER:
-	case OP_DECREASE_CLUSTER:
-	case OP_SHUTDOWN_CLUSTER: {
+	case CS_INCREASE_CLUSTER:
+	case CS_DECREASE_CLUSTER:
+	case CS_SHUTDOWN_CLUSTER: {
 		if (!pt_->isMaster()) {
 			GS_THROW_USER_ERROR(GS_ERROR_CLM_CLUSTER_STATUS_NOT_MASTER, "");
 		}
 		break;
 	}
-	case OP_TIMER_NOTIFY_CLIENT:
-	case OP_GOSSIP:
+	case CS_TIMER_NOTIFY_CLIENT:
 	{
 		if (!pt_->isMaster()) {
 			GS_THROW_USER_ERROR(GS_ERROR_CLM_CLUSTER_STATUS_NOT_MASTER, "");
 		}
 		break;
 	}
-	case OP_HEARTBEAT: {
+	case CS_HEARTBEAT: {
 		if (!pt_->isFollower()) {
 			GS_THROW_USER_ERROR(GS_ERROR_CLM_CLUSTER_STATUS_NOT_FOLLOWER, "");
 		}
 		break;
 	}
-	case OP_JOIN_CLUSTER: {
+	case CS_JOIN_CLUSTER: {
 		if (isJoinCluster()) {
 			GS_THROW_USER_ERROR(
 				GS_ERROR_CLM_CLUSTER_STATUS_ALREADY_JOIN_CLUSTER, "");
 		}
 		break;
 	}
-	case OP_COMPLETE_CHECKPOINT_FOR_RECOVERY: {
+	case CS_COMPLETE_CHECKPOINT_FOR_RECOVERY: {
 		if (!pt_->isSubMaster()) {
 			GS_THROW_USER_ERROR(GS_ERROR_CLM_CLUSTER_STATUS_NOT_SUBMASTER, "");
 		}
@@ -364,20 +363,20 @@ void ClusterManager::updateClusterStatus(
 		switch (status) {
 		case TO_SUBMASTER: {
 			TRACE_CLUSTER_EXCEPTION_FORCE(GS_ERROR_CLM_STATUS_TO_SUBMASTER,
-						"Cluster status change to SUB_MASTER");
+					"Cluster status change to SUB_MASTER");
 			setNotifyPendingCount();
 			clearActiveNodeList();
 			if (isLeave) {
 				setJoinCluster(false);
 			}
-				pt_->changeClusterStatus(PartitionTable::SUB_MASTER, 0, 0, 0);
+			pt_->changeClusterStatus(PartitionTable::SUB_MASTER, 0, 0, 0);
 			break;
 		}
 		case TO_MASTER: {
 			TRACE_CLUSTER_EXCEPTION_FORCE(GS_ERROR_CLM_STATUS_TO_MASTER,
-						"Cluster status change to MASTER");
+					"Cluster status change to MASTER");
 			setInitialCluster(false);
-				pt_->changeClusterStatus(PartitionTable::MASTER, 0, 0, 0);
+			pt_->changeClusterStatus(PartitionTable::MASTER, 0, 0, 0);
 			break;
 		}
 		case KEEP: {
@@ -397,14 +396,13 @@ void ClusterManager::updateClusterStatus(
 /*!
 	@brief Gets HeartbeatInfo
 */
-void ClusterManager::get(HeartbeatInfo &heartbeatInfo) {
+void ClusterManager::getHeartbeatInfo(HeartbeatInfo &heartbeatInfo) {
 	try {
 		heartbeatInfo.set(clusterInfo_);
 		if (pt_->isMaster()) {
 			heartbeatInfo.setMaxLsnList();
 		}
-		std::vector<AddressInfo> &addressList = heartbeatInfo.getNodeAddressList();
-		pt_->getNodeAddressInfo(addressList);
+		pt_->getNodeAddressInfo(heartbeatInfo.getNodeAddressList());
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_USER_OR_SYSTEM(e, "");
@@ -414,13 +412,26 @@ void ClusterManager::get(HeartbeatInfo &heartbeatInfo) {
 /*!
 	@brief Sets HeartbeatInfo
 */
-bool ClusterManager::set(HeartbeatInfo &heartbeatInfo) {
+bool ClusterManager::setHeartbeatInfo(HeartbeatInfo &heartbeatInfo) {
 	try {
 		bool isParentMaster = heartbeatInfo.isParentMaster();
 		NodeId senderNodeId = heartbeatInfo.getSenderNodeId();
 		int64_t baseTime = getMonotonicTime();
 		pt_->setHeartbeatTimeout(SELF_NODEID, nextHeartbeatTime(baseTime));
+
+
 		if (!pt_->isFollower()) {
+			NodeId nodeId = pt_->getOwner(0);  
+			if (nodeId >= 0) {
+				NodeAddress &address = pt_->getNodeAddress(nodeId, TRANSACTION_SERVICE);
+				heartbeatInfo.setPartition0NodeAddr(address);
+				TEST_PRINT1("NodeAddress %s(1)\n", address.dump().c_str());
+			}
+			else {
+				NodeAddress address;  
+				heartbeatInfo.setPartition0NodeAddr(address);
+				TEST_PRINT1("NodeAddress %s(2)\n", address.dump().c_str());
+			}
 			for (PartitionId pId = 0; pId < pt_->getPartitionNum(); pId++) {
 				LogSequentialNumber lsn = pt_->getLSN(pId);
 				pt_->setLsnWithCheck(pId, lsn);
@@ -485,8 +496,7 @@ bool ClusterManager::set(HeartbeatInfo &heartbeatInfo) {
 /*!
 	@brief Gets HeartbeatResInfo
 */
-void ClusterManager::get(
-	HeartbeatResInfo &heartbeatResInfo) {
+void ClusterManager::getHeartbeatResInfo(HeartbeatResInfo &heartbeatResInfo) {
 	try {
 		PartitionId pId;
 		for (pId = 0; pId < pt_->getPartitionNum(); pId++) {
@@ -496,10 +506,10 @@ void ClusterManager::get(
 					pt_->getStartLSN(pId, SELF_NODEID),
 					pt_->getPartitionRoleStatus(pId, SELF_NODEID),
 					pt_->getPartitionRevision(pId, SELF_NODEID),
-					pt_->getPartitionChunkNum(pId, SELF_NODEID),
-					pt_->getOtherStatus(pId, SELF_NODEID),
-					pt_->getErrorStatus(pId, SELF_NODEID)
-					);
+					0,
+					PT_OTHER_NORMAL,
+					PT_ERROR_NORMAL
+			);
 		}
 		SyncStat &stat = getSyncStat();
 		heartbeatResInfo.set(stat);
@@ -512,7 +522,7 @@ void ClusterManager::get(
 /*!
 	@brief Sets HeartbeatResInfo
 */
-void ClusterManager::set(HeartbeatResInfo &heartbeatResInfo) {
+void ClusterManager::setHeartbeatResInfo(HeartbeatResInfo &heartbeatResInfo) {
 	try {
 		NodeId senderNodeId = heartbeatResInfo.getSenderNodeId();
 		assert(senderNodeId > 0);
@@ -549,9 +559,6 @@ void ClusterManager::set(HeartbeatResInfo &heartbeatResInfo) {
 			pt_->setPartitionStatus(pId, status, senderNodeId);
 			pt_->setPartitionRoleStatus(pId, roleStatus, senderNodeId);
 			pt_->setPartitionRevision(pId, partitionRevision, senderNodeId);
-			pt_->setPartitionChunkNum(pId, chunkNum, senderNodeId);
-			pt_->setOtherStatus(pId, otherStatus, senderNodeId);
-			pt_->setErrorStatus(pId, errorStatus, senderNodeId);
 		}
 		heartbeatResInfo.setSyncInfo(getSyncStat());
 	}
@@ -579,13 +586,22 @@ void ClusterManager::HeartbeatResInfo::add(PartitionId pId,
 /*!
 	@brief Gets HeartbeatCheckInfo
 */
-void ClusterManager::get(HeartbeatCheckInfo &heartbeatCheckInfo) {
+void ClusterManager::getHeartbeatCheckInfo(HeartbeatCheckInfo &heartbeatCheckInfo) {
 	try {
 		int64_t currentTime = getMonotonicTime();
 		ClusterStatusTransition nextTransition = KEEP;
 		bool isAddNewNode = false;
 		std::vector<NodeId> &activeNodeList = heartbeatCheckInfo.getActiveNodeList();
 		util::StackAllocator &alloc = heartbeatCheckInfo.getAllocator();
+
+		int32_t periodicCount 
+				= getConfig().getCheckLoadBalanceInterval()  / getConfig().getHeartbeatInterval();
+		if ((pt_->getPartitionRevisionNo() % periodicCount) == 0) {
+			pt_->checkPartitionStat();
+		}
+		if ((pt_->getPartitionRevisionNo() % getConfig().getBlockClearInterval()) == 0) {
+			pt_->resetBlockQueue();
+		}
 		if (!pt_->isFollower()) {
 			pt_->setHeartbeatTimeout(SELF_NODEID, nextHeartbeatTime(currentTime));
 			util::Set<NodeId> downNodeSet(alloc);
@@ -596,6 +612,7 @@ void ClusterManager::get(HeartbeatCheckInfo &heartbeatCheckInfo) {
 			if (pt_->isMaster()) {
 				for (util::Set<NodeId>::iterator it = downNodeSet.begin();
 					it != downNodeSet.end(); it++) {
+						GS_TRACE_CLUSTER_DUMP("Follower heartbeat timeout, follower=" << pt_->dumpNodeAddress(*it));
 					TRACE_CLUSTER_EXCEPTION_FORCE_ERROR(
 						GS_ERROR_CLM_DETECT_HEARTBEAT_TO_FOLLOWER,
 							"Follower heartbeat timeout, follower=" << pt_->dumpNodeAddress(*it));
@@ -616,6 +633,8 @@ void ClusterManager::get(HeartbeatCheckInfo &heartbeatCheckInfo) {
 				if (checkedNodeNum != 1) {
 					for (size_t pos = 0; pos < activeNodeList.size(); pos++) {
 						if (!pt_->getAckHeartbeat(activeNodeList[pos])) {
+							GS_TRACE_CLUSTER_DUMP("Pending cluster active, not ack heartbeat="
+									<< pt_->dumpNodeAddress(activeNodeList[pos]));
 							UTIL_TRACE_INFO(CLUSTER_SERVICE,
 									"Pending cluster active, not ack heartbeat="
 									<< pt_->dumpNodeAddress(activeNodeList[pos]));
@@ -630,6 +649,9 @@ void ClusterManager::get(HeartbeatCheckInfo &heartbeatCheckInfo) {
 			int32_t prevActiveNodeNum = getActiveNum();
 			if (pt_->isMaster() && !isCheckedOk) {
 				nextTransition = TO_SUBMASTER;
+				GS_TRACE_CLUSTER_DUMP("Detect cluster status change (active nodeCount="
+						<< currentActiveNodeNum << ", quorum=" << checkedNodeNum 
+						<< ")");
 				TRACE_CLUSTER_NORMAL_OPERATION(INFO,
 						"Detect cluster status change (active nodeCount="
 							<< currentActiveNodeNum
@@ -637,6 +659,9 @@ void ClusterManager::get(HeartbeatCheckInfo &heartbeatCheckInfo) {
 			}
 			else if (pt_->isSubMaster() && isCheckedOk) {
 				nextTransition = TO_MASTER;
+				GS_TRACE_CLUSTER_DUMP("Detect cluster status change (active nodeCount="
+						<< currentActiveNodeNum << ", checked nodeNum="
+						<< checkedNodeNum << ")");
 				TRACE_CLUSTER_NORMAL_OPERATION(INFO,
 						"Detect cluster status change (active nodeCount="
 							<< currentActiveNodeNum
@@ -646,18 +671,23 @@ void ClusterManager::get(HeartbeatCheckInfo &heartbeatCheckInfo) {
 				nextTransition = KEEP;
 			}
 			if (currentActiveNodeNum != 1 && currentActiveNodeNum > prevActiveNodeNum) {
-				TRACE_CLUSTER_NORMAL(WARNING,
+				GS_TRACE_WARNING(CLUSTER_SERVICE, GS_TRACE_CS_TRACE_STATS,
 						"Detect new active node, "<< "currentActiveNum:" << currentActiveNodeNum
 								<< ", prevActiveNum:" << prevActiveNodeNum);
 				setAddOrDownNode();
 				isAddNewNode = true;
-
+				GS_TRACE_CLUSTER_DUMP("Detect new active node, "
+						<< "currentActiveNum:" << currentActiveNodeNum
+						<< ", prevActiveNum:" << prevActiveNodeNum);
 			}
-
 			setActiveNodeList(activeNodeList);
 		}
 		else {
 			if (pt_->getHeartbeatTimeout(0) < currentTime) {
+				GS_TRACE_CLUSTER_DUMP("Master heartbeat timeout, master="
+						<< pt_->dumpNodeAddress(pt_->getMaster())
+						<< ", current_time=" << getTimeStr(currentTime) 
+						<< ", last_time=" << getTimeStr(pt_->getHeartbeatTimeout(0)));
 				TRACE_CLUSTER_EXCEPTION_FORCE_ERROR(
 					GS_ERROR_CLM_DETECT_HEARTBEAT_TO_MASTER,
 						"Master heartbeat timeout, master="
@@ -677,166 +707,120 @@ void ClusterManager::get(HeartbeatCheckInfo &heartbeatCheckInfo) {
 /*!
 	@brief Sets UpdatePartitionInfo
 */
-void ClusterManager::get(UpdatePartitionInfo &updatePartitionInfo) {
+void ClusterManager::setupPartitionContext(PartitionTable::PartitionContext &context) {
+	context.setRepairPartition(isRepairPartition());
+	int64_t baseTime = getMonotonicTime();
+	int64_t limitTime = baseTime + clusterConfig_.getRuleLimitInterval();
+	context.setRuleLimitTime(limitTime);
+	context.currentTime_ = baseTime;
+	context.subPartitionTable_.setRevision(pt_->getPartitionRevision());
+	context.isLoadBalance_ = checkLoadBalance();
+}
+
+void ClusterManager::getUpdatePartitionInfo(UpdatePartitionInfo &updatePartitionInfo) {
 	try {
 		util::StackAllocator &alloc = updatePartitionInfo.getAllocator();
-		util::Set<NodeId> addNodeSet(alloc);
-		util::Set<NodeId> downNodeSet(alloc);
-		pt_->getAddNodes(addNodeSet);
-		pt_->getDownNodes(downNodeSet);
-		bool isAddOrDownNode = (addNodeSet.size() > 0 || downNodeSet.size() > 0);
-
-
-
-		SubPartitionTable &subPartitionTable = updatePartitionInfo.getSubPartitionTable();
 		PartitionTable::PartitionContext context(
 				alloc, pt_, updatePartitionInfo.isNeedUpdatePartition(),
-				subPartitionTable);
-		context.setRepairPartition(isRepairPartition());
-		context.setShufflePartition(isShufflePartition());
-		context.currentTime_ = getMonotonicTime();
-		bool &execBalanceCheck = context.balanceCheck_;
-		bool &execDrop = context.enableDrop_;
-		int32_t periodicCount 
-				= getConfig().getCheckLoadBalanceInterval()  / getConfig().getHeartbeatInterval();
-		bool balanceCheck = ((pt_->getPartitionRevisionNo() % periodicCount) == 0);
-		bool dropCheck = ((pt_->getPartitionRevisionNo() % (periodicCount*10)) == 0);
-		if (!checkLoadBalance()) {
-			balanceCheck = false;
-			dropCheck = false;
-		}
-
-		pt_->check(context, balanceCheck, dropCheck,
+				updatePartitionInfo.getSubPartitionTable(),
 				updatePartitionInfo.getDropPartitionNodeInfo());
-
-		bool &needUpdatePartition = context.needUpdatePartition_;
-		util::XArray<PartitionId> &pIdList = context.getShortTermPIdList();
-		if (isAddOrDownNode ||
-			updatePartitionInfo.isNeedUpdatePartition()) {
-			execDrop = false;
-			for (PartitionId pId = 0; pId < pt_->getPartitionNum(); pId++) {
-				pIdList.push_back(pId);
-			}
-			needUpdatePartition = true;
-			pt_->clearChangePartition();
-		}
-		else {
-			pt_->getChangeTargetPIdList(pIdList);
-			if (pIdList.size() == 0) {
-				if (execDrop || execBalanceCheck) {
-					needUpdatePartition = true;
-					if (execBalanceCheck) {
-						for (PartitionId pId = 0; pId < pt_->getPartitionNum(); pId++) {
-							pIdList.push_back(pId);
-						}
-					}
-				}
-				else {
-						needUpdatePartition = false;
-				}
-			}
-			else {
-				execDrop = false;
-				needUpdatePartition = true;
-			}
+		setupPartitionContext(context);
+		bool isConfigurationChange = pt_->checkConfigurationChange(
+				alloc, context, updatePartitionInfo.isAddNewNode());
+		if (!isConfigurationChange && !pt_->check(context)) {
+			return;
 		}
 
-		if (needUpdatePartition) {
-			PartitionRevisionNo revisionNo = pt_->getPartitionRevision().sequentialNumber_;
-			if (isAddOrDownNode || context.errorReason_ == PARTITION_STATUS_SUCCESS) {
-				GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_NORMAL_OPERATION, 
-					"Create cluster next partition revision=" << revisionNo 
-					<< ", reason=new cluster construction");
-			}
-			else if (execDrop) {
-				GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_NORMAL_OPERATION, 
-					"Create cluster next partition revision=" << revisionNo 
-					<< ", reason=check drop partition");
-			}
-			else if (context.balanceCheck_) {
-				GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_NORMAL_OPERATION, 
-					"Create cluster next partition revision=" << revisionNo 
-					<< ", reason=resolve node balance");
-			}
-			else {
-				if (context.errorReason_ == CATCHUP_PROMOTION) {
-				GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_NORMAL_OPERATION, 
-					"Create cluster next partition revision=" << revisionNo 
-					<< ", reason=catchup promotion, pId=" << context.errorPId_);
-				}
-				else {
-//					GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_NORMAL_OPERATION, 
-//						"Create cluster next partition revision=" << revisionNo 
-//						<< ", reason=detect partition irregular, pId="
-//						<< context.errorPId_ << ", reason=" << dumpPartitionReason(context.errorReason_));
-					GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_NORMAL_OPERATION, 
-						"Create cluster next partition revision=" << revisionNo 
-						<< ", reason=detect partition irregular, pId="
-						<< context.errorPId_);
-				}
-			}
-			updatePartitionInfo.setNeedUpdatePartition(true);
-			for(NodeId nodeId = 0; nodeId < pt_->getNodeNum(); nodeId++) {
-				if (pt_->getHeartbeatTimeout(nodeId) == UNDEF_TTL) {
-					pt_->resetDownNode(nodeId);
-				}
-			}
-			if (execDrop) {
-				context.needUpdatePartition_ = true;
-				updatePartitionInfo.getSubPartitionTable().getRevision().sequentialNumber_ = revisionNo;
-				return;
-			}
-			if (addNodeSet.size() != 0 || downNodeSet.size() != 0 || updatePartitionInfo.isAddNewNode()) {
-				context.irregularPartitionList_.clear();
-			}
+		pt_->planNext(context);
 
 			UUIDUtils::generate(uuid_);
-			if (!checkLoadBalance()) {
-				bool isDown = ((addNodeSet.size() > 0 || downNodeSet.size() > 0) || updatePartitionInfo.isToMaster());
-				if (isDown) {
-					pt_->createNextPartition(context);
+	}
+	catch (std::exception &e) {
+		GS_RETHROW_USER_OR_SYSTEM(e, "");
+	}
+}
+
+void ClusterManager::setUpdatePartitionInfo(UpdatePartitionInfo &updatePartitionInfo) {
+	try {
+		util::StackAllocator &alloc = updatePartitionInfo.getAllocator();
+		SubPartitionTable &subPartitionTable = updatePartitionInfo.getSubPartitionTable();
+		int32_t subPartitionSize = subPartitionTable.size();
+
+		util::XArray<PartitionId> currentOwnerList(alloc);
+		util::XArray<PartitionId> nextOwnerList(alloc);
+		util::XArray<PartitionId> nextBackupList(alloc);
+		util::XArray<PartitionId> nextGoalOwnerList(alloc);
+		util::XArray<PartitionId> nextGoalCatchupList(alloc);
+		util::Vector<PartitionId> &shorttermSyncPIdList = updatePartitionInfo.getShorttermSyncPIdList();
+		util::Vector<PartitionId> &longtermSyncPIdList = updatePartitionInfo.getLongtermSyncPIdList();
+		util::Vector<PartitionId> &changePartitionPIdList = updatePartitionInfo.getChangePartitonPIdList();
+
+		for (int32_t pos = 0; pos < subPartitionSize; pos++) {
+			SubPartition &subPartition = subPartitionTable.getSubPartition(pos);
+			bool isCurrentOwner = (subPartition.currentOwnerId_ == 0);
+			PartitionId pId = subPartition.pId_;
+			PartitionRole &role = subPartition.role_;
+			bool isNextOwner = role.isOwner();
+			bool isNextBackup = role.isBackup();
+			bool isNextCatchup = role.isCatchup();
+			bool isLongtermSync = role.hasCatchupRole();
+			if (!isLongtermSync) {
+				if (isCurrentOwner) {
+					currentOwnerList.push_back(pId);
+						shorttermSyncPIdList.push_back(pos);
 				}
-				else {
-					TRACE_CLUSTER_NORMAL_OPERATION(INFO,
-							"Skip short term sync (Load balancer is not enable)");
+				if (isNextOwner) {
+					nextOwnerList.push_back(pId);
+				}
+				else if (isNextBackup) {
+					nextBackupList.push_back(pId);
 				}
 			}
 			else {
-				pt_->createNextPartition(context);
+				if (isCurrentOwner) {
+					nextGoalOwnerList.push_back(pId);
+					longtermSyncPIdList.push_back(pos);
+				}
+				else if (isNextCatchup) {
+					nextGoalCatchupList.push_back(pId);
+				}
 			}
-
-			if (pt_->isRepairedPartition()) {
-				updatePartitionInfo.setMaxLsnList();
+			if (!isCurrentOwner && !isNextOwner
+					&& !isNextBackup) {
+				changePartitionPIdList.push_back(pos);
 			}
-			int64_t baseTime = getMonotonicTime();
-			int64_t shortTermSyncLimitTime =
-					baseTime + clusterConfig_.getShortTermTimeoutInterval() + clusterConfig_.getHeartbeatInterval();
-			context.setShorTermSyncLimitTime(shortTermSyncLimitTime);
-
-			if (checkLoadBalance()) {
-				pt_->createCatchupPartition(context);
-			}
-			else {
-				TRACE_CLUSTER_NORMAL_OPERATION(INFO,
-						"Skip long term sync (Load balancer is not enable)");
-				pt_->createCatchupPartition(context, true);
-			}
-
-			pt_->setSubPartiton(context, subPartitionTable);
-
-			subPartitionTable.revision_ = pt_->getPartitionRevision();
-			std::vector<AddressInfo> &nodeList = subPartitionTable.getNodeAddressList();
-			pt_->getNodeAddressInfo(nodeList);
-
-			DUMP_CLUSTER(pt_->dumpPartitionsNew(alloc, PartitionTable::PT_CURRENT_OB));
-			DUMP_CLUSTER(pt_->dumpPartitionsNew(alloc, PartitionTable::PT_NEXT_OB));
+		}
 
 
-			TRACE_CLUSTER_NORMAL(WARNING, pt_->dumpNodes());
-			TRACE_CLUSTER_NORMAL(WARNING,
-				pt_->dumpPartitions(alloc, PartitionTable::PT_CURRENT_OB));
-			TRACE_CLUSTER_NORMAL(WARNING, pt_->dumpDatas(true));
+		PartitionRevisionNo revisionNo = subPartitionTable.getRevision().sequentialNumber_;
+		TRACE_CLUSTER_NORMAL_OPERATION(INFO, "Recieve next partition, revision=" << revisionNo);
 
+		PartitionRevision &currentRevision = subPartitionTable.getRevision();
+		if (currentOwnerList.size() > 0) {
+			TRACE_CLUSTER_NORMAL_OPERATION(INFO,
+				"Short term sync current owners (partitions="
+					<< dumpPartitionList(pt_, currentOwnerList) << ")");
+		}
+		if (nextOwnerList.size() > 0) {
+			TRACE_CLUSTER_NORMAL_OPERATION(INFO,
+				"Short term sync next owners (revision=" << currentRevision << ", partitions="
+					<< dumpPartitionList(pt_, nextOwnerList) << ")");
+		}
+		if (nextBackupList.size() > 0) {
+			TRACE_CLUSTER_NORMAL_OPERATION(INFO,
+				"Short term sync next backups (revision=" << currentRevision << ", partitions="
+					<< dumpPartitionList(pt_, nextBackupList) << ")");
+		}
+		if (nextGoalOwnerList.size() > 0) {
+			TRACE_CLUSTER_NORMAL_OPERATION(INFO,
+				"Long term sync next owners (revision=" << currentRevision << ", partitions="
+				<< dumpPartitionList(pt_, nextGoalOwnerList) << ")");
+		}
+		if (nextGoalCatchupList.size() > 0) {
+			TRACE_CLUSTER_NORMAL_OPERATION(INFO,
+					"Long term sync next catchups  (revision=" << currentRevision << ", partitions="
+					<< currentRevision << "," << dumpPartitionList(
+					pt_, nextGoalCatchupList));
 		}
 	}
 	catch (std::exception &e) {
@@ -847,13 +831,13 @@ void ClusterManager::get(UpdatePartitionInfo &updatePartitionInfo) {
 /*!
 	@brief Gets NotifyClusterInfo
 */
-void ClusterManager::get(NotifyClusterInfo &notifyClusterInfo) {
+void ClusterManager::getNotifyClusterInfo(NotifyClusterInfo &notifyClusterInfo) {
 	try {
 		int32_t notifyPendingCount = updateNotifyPendingCount();
 		if (notifyPendingCount > 0) {
 			GS_THROW_USER_ERROR(GS_ERROR_CLM_CLUSTER_IS_PENDING,
 					"Cluster notification message will send after " << notifyPendingCount *
-						clusterConfig_.getNotifyClusterInterval() << " seconds");
+						clusterConfig_.getNotifyClusterInterval()/1000 << " seconds");
 		}
 		notifyClusterInfo.set(clusterInfo_, pt_);
 	}
@@ -865,7 +849,7 @@ void ClusterManager::get(NotifyClusterInfo &notifyClusterInfo) {
 /*!
 	@brief Sets NotifyClusterInfo
 */
-bool ClusterManager::set(NotifyClusterInfo &notifyClusterInfo) {
+bool ClusterManager::setNotifyClusterInfo(NotifyClusterInfo &notifyClusterInfo) {
 	try {
 		NodeId senderNodeId = notifyClusterInfo.getSenderNodeId();
 		bool isFollowerMaster = notifyClusterInfo.isMaster();
@@ -926,6 +910,8 @@ bool ClusterManager::set(NotifyClusterInfo &notifyClusterInfo) {
 		if (notifyFlag) {
 			TRACE_CLUSTER_EXCEPTION_FORCE(GS_ERROR_CLM_STATUS_TO_FOLLOWER,
 					"Cluster status change to FOLLOWER");
+			GS_TRACE_CLUSTER_INFO("Cluster status change to FOLLOWER, MASTER="
+					<< pt_->dumpNodeAddress(senderNodeId));
 			setIntialClusterNum(notifyClusterInfo.getReserveNum());
 			int64_t baseTime = getMonotonicTime();
 			pt_->changeClusterStatus(PartitionTable::FOLLOWER, senderNodeId, baseTime, nextHeartbeatTime(baseTime));
@@ -964,7 +950,7 @@ void ClusterManager::NotifyClusterInfo::set(
 /*!
 	@brief Gets NotifyClusterResInfo
 */
-void ClusterManager::get(NotifyClusterResInfo &notifyClusterResInfo) {
+void ClusterManager::getNotifyClusterResInfo(NotifyClusterResInfo &notifyClusterResInfo) {
 	try {
 		notifyClusterResInfo.set(clusterInfo_, pt_);
 	}
@@ -979,7 +965,7 @@ void ClusterManager::NotifyClusterResInfo::set(
 		reserveNum_ = clusterInfo.reserveNum_;
 		startupTime_ = clusterInfo.startupTime_;
 		partitionSequentialNumber_ =
-			pt->getPartitionRevision().sequentialNumber_;
+				pt->getPartitionRevision().sequentialNumber_;
 		for (PartitionId pId = 0; pId < pt->getPartitionNum(); pId++) {
 			lsnList_.push_back(pt->getLSN(pId));
 			maxLsnList_.push_back(pt->getMaxLsn(pId));
@@ -1002,7 +988,7 @@ void ClusterManager::NotifyClusterResInfo::set(
 /*!
 	@brief Sets NotifyClusterResInfo
 */
-void ClusterManager::set(NotifyClusterResInfo &notifyClusterResInfo) {
+void ClusterManager::setNotifyClusterResInfo(NotifyClusterResInfo &notifyClusterResInfo) {
 	try {
 		NodeId senderNodeId = notifyClusterResInfo.getSenderNodeId();
 		int32_t reserveNum = notifyClusterResInfo.getReserveNum();
@@ -1013,6 +999,9 @@ void ClusterManager::set(NotifyClusterResInfo &notifyClusterResInfo) {
 		util::XArray<NodeId> liveNodeIdList(alloc);
 		if (checkActiveNodeMax()) {
 			pt_->setHeartbeatTimeout(senderNodeId, UNDEF_TTL);
+			GS_TRACE_CLUSTER_INFO("Cluster live node num is already reached to reserved num="
+				<< getReserveNum() << ", sender node can not join, node="
+				<< pt_->dumpNodeAddress(senderNodeId));
 			GS_THROW_USER_ERROR(GS_ERROR_CLM_ALREADY_STABLE,
 				"Cluster live node num is already reached to reserved num="
 					<< getReserveNum());
@@ -1026,9 +1015,10 @@ void ClusterManager::set(NotifyClusterResInfo &notifyClusterResInfo) {
 				notifyClusterResInfo.getPartitionRevisionNo());
 
 		if (getReserveNum() < reserveNum) {
-			TRACE_CLUSTER_NORMAL(WARNING,
+			GS_TRACE_WARNING(CLUSTER_SERVICE,
+				GS_TRACE_CS_CLUSTER_STATUS,
 				"Modify cluster reserver num=" << getReserveNum() << " to "
-												<< reserveNum);
+				<< reserveNum);
 			setReserveNum(reserveNum);
 		}
 		for (pId = 0; pId < static_cast<uint32_t>(lsnList.size()); pId++) {
@@ -1045,7 +1035,7 @@ void ClusterManager::set(NotifyClusterResInfo &notifyClusterResInfo) {
 /*!
 	@brief Sets JoinClusterInfo
 */
-void ClusterManager::set(JoinClusterInfo &joinClusterInfo) {
+void ClusterManager::setJoinClusterInfo(JoinClusterInfo &joinClusterInfo) {
 	try {
 		std::string &clusterName = joinClusterInfo.getClusterName();
 		int32_t minNodeNum = joinClusterInfo.getMinNodeNum();
@@ -1095,12 +1085,13 @@ void ClusterManager::set(JoinClusterInfo &joinClusterInfo) {
 /*!
 	@brief Sets LeaveClusterInfo
 */
-void ClusterManager::set(LeaveClusterInfo &leaveClusterInfo) {
+void ClusterManager::setLeaveClusterInfo(LeaveClusterInfo &leaveClusterInfo) {
 	try {
 		if (!leaveClusterInfo.isForceLeave()) {
+			util::StackAllocator &alloc = leaveClusterInfo.getAllocator();
 			for (PartitionId pId = 0; pId < pt_->getPartitionNum(); pId++) {
 				bool isOwner = pt_->isOwner(pId);
-				int32_t backupSize = pt_->getBackupSize(pId);
+				size_t backupSize = pt_->getBackupSize(alloc, pId);
 				if (isOwner && backupSize == 0) {
 					leaveClusterInfo.setErrorType(WEBAPI_CS_LEAVE_NOT_SAFETY_NODE);
 					GS_THROW_USER_ERROR(GS_ERROR_SC_LEAVE_NOT_SAFETY_NODE,
@@ -1120,7 +1111,7 @@ void ClusterManager::set(LeaveClusterInfo &leaveClusterInfo) {
 /*!
 	@brief Sets IncreaseClusterInfo
 */
-void ClusterManager::set(IncreaseClusterInfo &increaseClusterInfo) {
+void ClusterManager::setIncreaseClusterInfo(IncreaseClusterInfo &increaseClusterInfo) {
 	try {
 		if (!checkSteadyStatus()) {
 			increaseClusterInfo.setErrorType(WEBAPI_CS_CLUSTER_IS_STABLE);
@@ -1144,7 +1135,7 @@ void ClusterManager::set(IncreaseClusterInfo &increaseClusterInfo) {
 /*!
 	@brief Sets DecreaseClusterInfo
 */
-void ClusterManager::set(DecreaseClusterInfo &decreaseClusterInfo) {
+void ClusterManager::setDecreaseClusterInfo(DecreaseClusterInfo &decreaseClusterInfo) {
 	try {
 		if (!checkSteadyStatus()) {
 			decreaseClusterInfo.setErrorType(WEBAPI_CS_CLUSTER_IS_STABLE);
@@ -1233,93 +1224,15 @@ void ClusterManager::getSafetyLeaveNodeList(util::StackAllocator &alloc,
 }
 
 /*!
-	@brief Gets GossipInfo
-*/
-void ClusterManager::get(GossipInfo &gossipInfo) {
-	try {
-		PartitionId pId;
-		NodeId nodeId;
-		GossipType gossipType;
-		gossipInfo.get(pId, nodeId, gossipType);
-		NodeAddress &address = pt_->getNodeAddress(nodeId);
-		if (address.isValid()) {
-			gossipInfo.setAddress(address);
-		}
-		else {
-			GS_THROW_USER_ERROR(GS_ERROR_CLM_INVALID_NODE_ID, "");
-		}
-	}
-	catch (std::exception &e) {
-		GS_RETHROW_USER_OR_SYSTEM(e, "");
-	}
-}
-
-/*!
-	@brief Sets GossipInfo
-*/
-void ClusterManager::set(GossipInfo &gossipInfo) {
-	try {
-		PartitionId pId = UNDEF_PARTITIONID;
-		NodeId nodeId = UNDEF_NODEID;
-		GossipType gossipType;
-		gossipInfo.get(pId, nodeId, gossipType);
-
-		if (pId == UNDEF_PARTITIONID && nodeId >= 0 &&
-			nodeId < pt_->getNodeNum()) {
-			TRACE_CLUSTER_NORMAL_OPERATION(INFO,
-					"Receive gossip message(node) from node=" << pt_->dumpNodeAddress(nodeId));
-			pt_->setHeartbeatTimeout(nodeId, UNDEF_TTL);
-			pt_->setDownNode(nodeId);
-			return;
-		}
-		if (pId >= pt_->getPartitionNum() || nodeId >= pt_->getNodeNum()) {
-			GS_THROW_USER_ERROR(GS_ERROR_CLM_INVALID_PARTITION_NUM,
-					"Invalid gossip message from node=" << pt_->dumpNodeAddress(nodeId));
-		}
-			if (!pt_->checkLiveNode(nodeId)) {
-					TRACE_CLUSTER_NORMAL_OPERATION(INFO,
-							"Receive gossip message from node=" << pt_->dumpNodeAddress(nodeId)
-							<< ", pId=" << pId << ", but this node is not alive");
-			}
-			else if (pId != UNDEF_PARTITIONID) {
-			pt_->setChangePartition(pId);
-				switch (gossipType) {
-				case GOSSIP_INVALID_NODE:
-					TRACE_CLUSTER_NORMAL_OPERATION(INFO,
-							"Receive gossip message(partition) from node=" << pt_->dumpNodeAddress(nodeId)
-							<< ", pId=" << pId);
-						pt_->setBlockQueue(pId, PartitionTable::PT_CHANGE_NEXT_TABLE, nodeId);
-					break;
-				case GOSSIP_INVALID_CATHCUP_PARTITION:
-					TRACE_CLUSTER_NORMAL_OPERATION(INFO,
-							"Receive gossip message(catchup partition) from node=" << pt_->dumpNodeAddress(nodeId)
-							<< ", pId=" << pId);
-					pt_->setCatchupError(pId);
-					break;
-				default:
-					TRACE_CLUSTER_NORMAL(INFO, "Invalid gossip type=" << static_cast<int32_t>(gossipType));
-					break;
-				}
-			}
-		}
-	catch (std::exception &e) {
-		GS_RETHROW_USER_OR_SYSTEM(e, "");
-	}
-}
-
-/*!
 	@brief Sets ChangePartitionStatusInfo
 */
-void ClusterManager::set(ChangePartitionStatusInfo &changePartitionStatusInfo) {
+void ClusterManager::setChangePartitionStatusInfo(ChangePartitionStatusInfo &changePartitionStatusInfo) {
 	try {
 		PartitionId pId;
 		PartitionStatus status;
 		changePartitionStatusInfo.getPartitionStatus(pId, status);
-		int32_t otherStatus = PT_OTHER_NORMAL;
 		switch (status) {
 		case PartitionTable::PT_ON:
-			otherStatus = PT_OTHER_SHORT_SYNC_COMPLETE;
-			break;
 		case PartitionTable::PT_OFF:
 		case PartitionTable::PT_SYNC:
 		case PartitionTable::PT_STOP:
@@ -1328,9 +1241,20 @@ void ClusterManager::set(ChangePartitionStatusInfo &changePartitionStatusInfo) {
 			GS_THROW_USER_ERROR(GS_ERROR_TXN_PARTITION_STATE_INVALID, "");
 		}
 		pt_->setPartitionStatus(pId, status);
-		pt_->setOtherStatus(pId, otherStatus);
 		if (changePartitionStatusInfo.isToSubMaster()) {
 			pt_->clearRole(pId);
+			pt_->setPartitionRoleStatus(pId, PartitionTable::PT_NONE);
+		}
+		if (status == PartitionTable::PT_OFF) {
+			PartitionRoleStatus roleStatus = pt_->getPartitionRoleStatus(pId);
+			if (roleStatus != PartitionTable::PT_NONE) {
+				pt_->clearRole(pId);
+				pt_->setPartitionRoleStatus(pId, PartitionTable::PT_NONE);
+			}
+		}
+		if (status == PartitionTable::PT_STOP) {
+			pt_->setPartitionRoleStatus(pId, PartitionTable::PT_NONE);
+			pt_->setPartitionRevision(pId, 1);
 		}
 	}
 	catch (std::exception &e) {
@@ -1341,40 +1265,20 @@ void ClusterManager::set(ChangePartitionStatusInfo &changePartitionStatusInfo) {
 /*!
 	@brief Sets ChangePartitionTableInfo
 */
-void ClusterManager::set(ChangePartitionTableInfo &changePartitionTableInfo) {
+bool ClusterManager::setChangePartitionTableInfo(
+		ChangePartitionTableInfo &changePartitionTableInfo) {
 	try {
+		bool currentBackupChange = false;
 		PartitionRole &candRole = changePartitionTableInfo.getPartitionRole();
 		PartitionId pId = candRole.getPartitionId();
-		PartitionTable::TableType tableType = candRole.getTableType();
-		PartitionTable::TableType nextTableType;
-
-		if (tableType == PartitionTable::PT_NEXT_OB) {
-			nextTableType = PartitionTable::PT_CURRENT_OB;
+		if (pt_->isBackup(pId, SELF_NODEID) && candRole.isOwner(SELF_NODEID)) {
+			currentBackupChange = true;
 		}
-		else if (tableType == PartitionTable::PT_CURRENT_OB) {
-			nextTableType = PartitionTable::PT_CURRENT_OB;
-		}
-		else {
-			GS_THROW_USER_ERROR(0, "");
-		}
-
-		PartitionRole nextRole;
-		pt_->getPartitionRole(pId, nextRole, tableType);
-		if (nextRole.getRevision() > candRole.getRevision()) {
-			if (tableType == PartitionTable::PT_CURRENT_OB && pt_->isMaster()) {
-			}
-			else {
-				GS_THROW_USER_ERROR(
-					GS_ERROR_CLM_CHANGE_PARTITION_TABLE_SET_CHECK_FAILED,
-					"Next revision:" << nextRole.getRevision().toString()
-									<< ", cand revision:"
-									<< candRole.getRevision().toString());
-			}
-		}
-		pt_->setPartitionRole(pId, candRole, nextTableType);
+		pt_->setPartitionRole(pId, candRole);
 		if (!pt_->isOwnerOrBackup(pId, SELF_NODEID)) {
 			pt_->setPartitionStatus(pId, PartitionTable::PT_OFF);
 		}
+		return currentBackupChange;
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_USER_OR_SYSTEM(e, "");
@@ -1644,7 +1548,7 @@ void ClusterManager::ConfigSetUpHandler::operator()(ConfigTable &config) {
 
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_CS_OWNER_BACKUP_LSN_GAP, INT32)
 		.setMin(0)
-		.setDefault(50000);
+		.setDefault(1000);
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_CS_OWNER_CATCHUP_LSN_GAP, INT32)
 		.setMin(0)
 		.setDefault(20000);
@@ -1657,31 +1561,6 @@ void ClusterManager::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		config, CONFIG_TABLE_CS_MAX_LSN_REPLICATION_NUM, INT32)
 		.setMin(1)
 		.setDefault(1000);
-
-	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_CS_CATCHUP_NUM, INT32)
-		.setMin(0)
-		.setDefault(1);
-
-	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_CS_CONNECTION_LIMIT, INT32)
-		.setMin(3)
-		.setMax(65536)
-		.setDefault(5000);
-
-	CONFIG_TABLE_ADD_PARAM(
-		config, CONFIG_TABLE_CS_CHECKPOINT_DELAY_INTERVAL, INT32)
-		.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
-		.setMin(0)
-		.setDefault(1200);
-
-	CONFIG_TABLE_ADD_PARAM(
-		config, CONFIG_TABLE_CS_CATCHUP_PROMOTION_CHECK_INTERVAL, INT32)
-		.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
-		.setMin(0)
-		.setDefault(0);
-
-	CONFIG_TABLE_ADD_PARAM(
-		config, CONFIG_TABLE_CS_PARTITION_ASSIGN_MODE, INT32)
-		.setDefault(0);
 
 	picojson::value defaultValue;
 
@@ -1738,6 +1617,10 @@ void ClusterManager::StatSetUpHandler::operator()(StatTable &stat) {
 
 	STAT_ADD(STAT_TABLE_CS_CLUSTER_REVISION_ID);
 
+	STAT_ADD(STAT_TABLE_CS_CURRENT_RULE);
+	STAT_ADD(STAT_TABLE_CS_APPLY_RULE_LIMIT_TIME);
+	STAT_ADD(STAT_TABLE_CS_CLUSTER_REVISION_NO);
+
 	stat.resolveGroup(parentId, STAT_TABLE_CS_ERROR, "errorInfo");
 
 	parentId = STAT_TABLE_CS_ERROR;
@@ -1745,6 +1628,7 @@ void ClusterManager::StatSetUpHandler::operator()(StatTable &stat) {
 	STAT_ADD(STAT_TABLE_CS_ERROR_CLUSTER_VERSION);
 	STAT_ADD(STAT_TABLE_CS_ERROR_ALREADY_APPLIED_LOG);
 	STAT_ADD(STAT_TABLE_CS_ERROR_INVALID_LOG);
+	STAT_ADD(STAT_TABLE_CS_INVALID_PARTITION_STATUS);
 
 	parentId = STAT_TABLE_ROOT;
 	stat.resolveGroup(parentId, STAT_TABLE_PERF, "performance");
@@ -1772,7 +1656,6 @@ bool ClusterManager::StatUpdator::operator()(StatTable &stat) {
 
 	ClusterService *clsSvc = mgr.getService();
 	ClusterService::NotificationManager &notifyMgr = clsSvc->getNotificationManager();
-
 	if (notifyMgr.getMode() != NOTIFICATION_MULTICAST &&
 		stat.getDisplayOption(STAT_TABLE_DISPLAY_OPTIONAL_NOTIFICATION_MEMBER)) {
 		picojson::value value;
@@ -1856,6 +1739,14 @@ bool ClusterManager::StatUpdator::operator()(StatTable &stat) {
 		UUIDUtils::unparse(mgr.uuid_, (char *)tmpBuffer);
 		stat.set(STAT_TABLE_CS_CLUSTER_REVISION_ID, &tmpBuffer[0]);
 
+		if (pt.isMaster()) {
+			stat.set(STAT_TABLE_CS_CURRENT_RULE, pt.dumpCurrentRule());
+			if (pt.getRuleLimitTime() > 0) {
+				stat.set(STAT_TABLE_CS_APPLY_RULE_LIMIT_TIME, getTimeStr(pt.getRuleLimitTime()));
+			}
+		}
+		stat.set(STAT_TABLE_CS_CLUSTER_REVISION_NO, pt.getPartitionRevisionNo());
+
 		const char8_t *loadBalancer;
 		if (mgr.checkLoadBalance()) {
 			loadBalancer = "ACTIVE";
@@ -1905,11 +1796,13 @@ bool ClusterManager::StatUpdator::operator()(StatTable &stat) {
 		const ErrorCode codeList[] = {GS_ERROR_TXN_CLUSTER_ROLE_UNMATCH,
 			GS_ERROR_CS_ENCODE_DECODE_VERSION_CHECK,
 			GS_ERROR_RM_ALREADY_APPLY_LOG,
-			GS_ERROR_TXN_REPLICATION_LOG_LSN_INVALID};
+			GS_ERROR_TXN_REPLICATION_LOG_LSN_INVALID,
+			GS_ERROR_PT_CHECK_PARTITION_STATUS_FAILED};
 		const StatTableParamId paramList[] = {STAT_TABLE_CS_ERROR_REPLICATION,
 			STAT_TABLE_CS_ERROR_CLUSTER_VERSION,
 			STAT_TABLE_CS_ERROR_ALREADY_APPLIED_LOG,
-			STAT_TABLE_CS_ERROR_INVALID_LOG};
+			STAT_TABLE_CS_ERROR_INVALID_LOG,
+			STAT_TABLE_CS_INVALID_PARTITION_STATUS};
 		for (size_t i = 0; i < sizeof(codeList) / sizeof(*codeList); i++) {
 			const uint64_t value = mgr.getErrorCount(codeList[i]);
 			if (value > 0) {
@@ -1917,7 +1810,6 @@ bool ClusterManager::StatUpdator::operator()(StatTable &stat) {
 			}
 		}
 	}
-
 	int32_t ownerCount  = 0;
 	int32_t backupCount = 0;
 	uint64_t  totalOwnerLsn = 0;
@@ -1945,10 +1837,9 @@ bool ClusterManager::StatUpdator::operator()(StatTable &stat) {
 	return true;
 }
 
-void ClusterManager::initialize(ClusterService *clsSvc) {
+void ClusterManager::initialize(ClusterService *clsSvc, EventEngine *ee) {
 	clsSvc_ = clsSvc;
-	ee_ = clsSvc->getEE();
-	pt_->initialize();
+	ee_ = ee;
 	int64_t baseTime = ee_->getMonotonicTime();
 	pt_->setHeartbeatTimeout(SELF_NODEID, nextHeartbeatTime(baseTime));
 }
@@ -1961,10 +1852,6 @@ void ClusterManager::Config::setUpConfigHandler(
 	ClusterManager *clsMgr, ConfigTable &configTable) {
 	clsMgr_ = clsMgr;
 	configTable.setParamHandler(
-		CONFIG_TABLE_CS_CHECKPOINT_DELAY_INTERVAL, *this);
-	configTable.setParamHandler(
-		CONFIG_TABLE_CS_CATCHUP_PROMOTION_CHECK_INTERVAL, *this);
-	configTable.setParamHandler(
 		CONFIG_TABLE_CS_OWNER_BACKUP_LSN_GAP, *this);
 	configTable.setParamHandler(
 		CONFIG_TABLE_CS_OWNER_CATCHUP_LSN_GAP, *this);
@@ -1975,10 +1862,6 @@ void ClusterManager::Config::operator()(
 	switch (id) {
 	case CONFIG_TABLE_CS_CHECKPOINT_DELAY_INTERVAL:
 		break;
-	case CONFIG_TABLE_CS_CATCHUP_PROMOTION_CHECK_INTERVAL:
-		clsMgr_->getConfig().setOwnerCatchupPromoteCheckInterval(
-			changeTimeSecToMill(value.get<int32_t>()));
-		break;
 	case CONFIG_TABLE_CS_OWNER_BACKUP_LSN_GAP:
 		clsMgr_->getPartitionTable()->getConfig().setLimitOwnerBackupLsnGap(value.get<int32_t>());
 		break;
@@ -1986,4 +1869,9 @@ void ClusterManager::Config::operator()(
 		clsMgr_->getPartitionTable()->getConfig().setLimitOwnerCatchupLsnGap(value.get<int32_t>());
 		break;
 	}
+}
+
+EventMonotonicTime ClusterManager::getMonotonicTime() {
+	return ee_->getMonotonicTime() + clusterInfo_.startupTime_ +
+		EVENT_MONOTONIC_ADJUST_TIME;
 }

@@ -282,6 +282,7 @@ enum GSEventType {
 	SYC_LONGTERM_SYNC_LOG, /*!< long-term log synchronization via SyncService */
 	SYC_LONGTERM_SYNC_CHUNK, /*!< long-term chunk synchronization via
 								SyncService */
+	TXN_SYNC_CHECK_END,
 
 
 

@@ -770,6 +770,7 @@ T* HashMap::getField(TransactionContext& txn, OId oId) {
 	BaseObject baseFieldObject(txn.getPartitionId(), *getObjectManager());
 	row.getField(txn, container_->getColumnInfo(hashMapImage_->columnId_),
 		baseFieldObject);
+	rowArray->reset();
 	return reinterpret_cast<T*>(baseFieldObject.getCursor<uint8_t>());
 }
 

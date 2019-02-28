@@ -726,7 +726,7 @@ void autoJoinCluster(const Event::Source &eventSource,
 		bool completeFlag = true;
 
 		try {
-			clsMgr.checkCommandStatus(OP_LEAVE_CLUSTER);
+			clsMgr.checkCommandStatus(CS_LEAVE_CLUSTER);
 		}
 		catch (std::exception &) {
 			completeFlag = false;
@@ -738,8 +738,7 @@ void autoJoinCluster(const Event::Source &eventSource,
 			std::vector<NodeId> backups;
 			for (pId = 0; pId < pt.getPartitionNum(); pId++) {
 				pt.setPartitionStatus(pId, PartitionTable::PT_ON);
-				PartitionRole role(
-					pId, rev, PartitionTable::PT_CURRENT_OB);
+				PartitionRole role(pId, rev, PartitionTable::PT_CURRENT_OB);
 				pt.setPartitionRole(pId, role);
 			}
 			break;

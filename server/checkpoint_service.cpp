@@ -1964,10 +1964,15 @@ void CheckpointService::runGroupCheckpoint(
 
 				totalWriteCount += chunkManager_->writeChunk(pId);
 
-				int32_t queueSize = getTransactionEEQueueSize(pgId);
-				if (mode != CP_AFTER_RECOVERY && mode != CP_SHUTDOWN &&
-						(queueSize > CP_CHUNK_COPY_WITH_SLEEP_LIMIT_QUEUE_SIZE)) {
-					util::Thread::sleep(chunkCopyIntervalMillis_);
+				if (mode != CP_AFTER_RECOVERY && mode != CP_SHUTDOWN) {
+					int64_t executableCount = 0;
+					int64_t afterCount = 0;
+					int32_t opeTime = 0;
+					int32_t waitTime = transactionService_->getWaitTime(ec, NULL,
+							opeTime, executableCount, afterCount, CP_CHUNKCOPY);
+					if (waitTime != 0) {
+						util::Thread::sleep(waitTime);
+					}
 				}
 			}
 

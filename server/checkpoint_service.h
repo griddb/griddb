@@ -502,6 +502,14 @@ public:
 
 	uint16_t getNewestLogVersion();
 	void setNewestLogVersion(uint16_t version);
+	
+	int32_t getChunkCopyInterval() {
+		return chunkCopyIntervalMillis_;
+	}
+
+	int32_t getChunkCopyLimitQueueSize() {
+		return CP_CHUNK_COPY_WITH_SLEEP_LIMIT_QUEUE_SIZE;
+	}
 
 private:
 	static const int32_t CP_CHUNK_COPY_WITH_SLEEP_LIMIT_QUEUE_SIZE = 40;

@@ -52,76 +52,19 @@ class ClusterService;
 */
 enum ClusterStatusTransition { TO_MASTER, TO_SUBMASTER, KEEP };
 
-static const std::string getClusterStatusTransition(
-	ClusterStatusTransition type) {
-	switch (type) {
-	case TO_MASTER:
-		return "TO_MASTER";
-	case TO_SUBMASTER:
-		return "TO_SUBMASTER";
-	case KEEP:
-		return "KEEP";
-	default:
-		return "";
-	}
-}
-
-/*!
-	@brief Gossip type
-*/
-enum GossipType {
-	GOSSIP_INVALID_NODE = 0,
-	GOSSIP_PENDING = 1,
-	GOSSIP_LEAVE = 2,
-	GOSSIP_INVALID_CATHCUP_PARTITION_WITH_BLOCK = 3,
-	GOSSIP_INVALID_CATHCUP_PARTITION = 4,
-	GOSSIP_INVALID_PARTITION = 5
-};
-
-/*!
-	@brief Operation type related with cluster management
-*/
-enum ClusterOperationType {
-	OP_HEARTBEAT,
-	OP_HEARTBEAT_RES,
-	OP_NOTIFY_CLUSTER,
-	OP_NOTIFY_CLUSTER_RES,
-	OP_JOIN_CLUSTER,
-	OP_LEAVE_CLUSTER,
-	OP_SHUTDOWN_NODE_NORMAL,
-	OP_SHUTDOWN_NODE_FORCE,
-	OP_INCREASE_CLUSTER,
-	OP_DECREASE_CLUSTER,
-	OP_SHUTDOWN_CLUSTER,
-	OP_COMPLETE_CHECKPOINT_FOR_SHUTDOWN,
-	OP_COMPLETE_CHECKPOINT_FOR_RECOVERY,
-	OP_TIMER_CHECK_CLUSTER,
-	OP_TIMER_NOTIFY_CLUSTER,
-	OP_TIMER_NOTIFY_CLIENT,
-	OP_TIMER_CHECK_LOAD_BALANCE,
-	OP_UPDATE_PARTITION,
-	OP_GOSSIP,
-	OP_CHANGE_PARTITION_STATUS,
-	OP_CHANGE_PARTITION_TABLE,
-	OP_ORDER_DROP_PARTITION,
-	OP_UNDEF_TYPE
-};
-/*
-static ClusterOperationType getOperationType(EventType eventType) {
-	switch (eventType) {
-	case CS_JOIN_CLUSTER: return OP_JOIN_CLUSTER;
-	case CS_LEAVE_CLUSTER: return OP_LEAVE_CLUSTER;
-	case CS_INCREASE_CLUSTER : return OP_INCREASE_CLUSTER;
-	case CS_DECREASE_CLUSTER : return OP_DECREASE_CLUSTER;
-	case CS_SHUTDOWN_NODE_FORCE : return OP_SHUTDOWN_NODE_FORCE;
-	case CS_SHUTDOWN_NODE_NORMAL : return OP_SHUTDOWN_NODE_NORMAL;
-	case CS_SHUTDOWN_CLUSTER : return OP_SHUTDOWN_CLUSTER;
-	case CS_COMPLETE_CHECKPOINT_FOR_SHUTDOWN : return OP_COMPLETE_CHECKPOINT_FOR_SHUTDOWN;
-	case CS_COMPLETE_CHECKPOINT_FOR_RECOVERY : return OP_COMPLETE_CHECKPOINT_FOR_RECOVERY;
-	default : return OP_UNDEF_TYPE;
-	}
-}
-*/
+//static const std::string getClusterStatusTransition(
+//	ClusterStatusTransition type) {
+//	switch (type) {
+//	case TO_MASTER:
+//		return "TO_MASTER";
+//	case TO_SUBMASTER:
+//		return "TO_SUBMASTER";
+//	case KEEP:
+//		return "KEEP";
+//	default:
+//		return "";
+//	}
+//}
 
 /*!
 	@brief ClusterManager
@@ -193,12 +136,7 @@ public:
 				statusInfo_.nextStatus_ == SYS_STATUS_ACTIVE);
 	}
 
-	void checkCommandStatus(ClusterOperationType operation);
-
-	std::string getClusterName() {
-		util::LockGuard<util::Mutex> lock(clusterLock_);
-		return clusterInfo_.clusterName_;
-	}
+	void checkCommandStatus(EventType operation);
 
 	NodeAddress getPartition0NodeAddr() {
 		util::LockGuard<util::Mutex> lock(clusterLock_);
@@ -214,18 +152,16 @@ public:
 
 	uint8_t uuid_[16];
 
-	void initialize(ClusterService *clsSvc);
-
-	EventMonotonicTime getMonotonicTime() {
-		return ee_->getMonotonicTime() + clusterInfo_.startupTime_ +
-			EVENT_MONOTONIC_ADJUST_TIME;
+	void initialize(ClusterService *clsSvc, EventEngine *ee);
+	EventMonotonicTime getMonotonicTime();
+	std::string getClusterName() {
+		util::LockGuard<util::Mutex> lock(clusterLock_);
+		return clusterInfo_.clusterName_;
 	}
 
-	void getSafetyLeaveNodeList(util::StackAllocator &alloc,
-		std::vector<NodeId> &candList, int32_t removeNodeNum = 1);
+	void checkClusterStatus(EventType operation);
+	void updateNodeStatus(EventType eventType);
 
-	void checkClusterStatus(ClusterOperationType operation);
-	void updateNodeStatus(ClusterOperationType eventType);
 
 	bool isShutdownPending() {
 		return statusInfo_.isShutdownPending_;
@@ -280,16 +216,6 @@ public:
 
 	void setRepairPartition() {
 		clusterInfo_.isRepairPartition_ = true;
-	}
-
-	bool isShufflePartition() {
-		bool retVal = clusterInfo_.isShufflePartition_;
-		clusterInfo_.isShufflePartition_ = false;
-		return retVal;
-	}
-
-	void setShufflePartition() {
-		clusterInfo_.isShufflePartition_ = true;
 	}
 
 	bool isAddOrDownNode() {
@@ -363,11 +289,7 @@ public:
 	*/
 	class ErrorManager {
 	public:
-#ifdef GD_ENABLE_UNICAST_NOTIFICATION
-		static const int32_t MAX_ERROR_COUNT = 6;
-#else
-		static const int32_t MAX_ERROR_COUNT = 5;
-#endif
+		static const int32_t MAX_ERROR_COUNT = 7;
 		static const int32_t DEFAULT_DUMP_COUNT = 1000;
 
 		ErrorManager() {
@@ -377,12 +299,9 @@ public:
 			dumpCountList_[1] = 10000;
 			dumpCountList_[2] = 10000;
 			dumpCountList_[3] = 10000;
-#ifdef GD_ENABLE_UNICAST_NOTIFICATION
 			dumpCountList_[4] = 10;
 			dumpCountList_[5] = DEFAULT_DUMP_COUNT;
-#else
-			dumpCountList_[4] = DEFAULT_DUMP_COUNT;
-#endif
+			dumpCountList_[6] = DEFAULT_DUMP_COUNT;
 		}
 
 		void reset() {
@@ -397,7 +316,7 @@ public:
 			dumpCountList_[listNo] = count;
 		}
 
-		bool reportError(ErrorCode errorCode) {
+		bool reportError(ErrorCode errorCode, int32_t counter = 1) {
 			uint32_t listNo = getListNo(errorCode);
 			bool retFlag;
 			if (errorCountList_[listNo] % dumpCountList_[listNo] == 0) {
@@ -406,7 +325,7 @@ public:
 			else {
 				retFlag = false;
 			}
-			errorCountList_[listNo]++;
+			errorCountList_[listNo] += counter;
 			return retFlag;
 		}
 
@@ -428,24 +347,20 @@ public:
 			case GS_ERROR_TXN_PARTITION_ROLE_UNMATCH:
 			case GS_ERROR_TXN_PARTITION_STATE_UNMATCH:
 				return 3;
-
-#ifdef GD_ENABLE_UNICAST_NOTIFICATION
 			case GS_ERROR_CS_PROVIDER_TIMEOUT:
 				return 4;
+			case GS_ERROR_PT_CHECK_PARTITION_STATUS_FAILED:
+				return 5;
 			default:
 				return MAX_ERROR_COUNT - 1;
-#else
-			default:
-				return 4;
-#endif
 			}
 		}
 		std::vector<uint64_t> errorCountList_;
 		std::vector<uint64_t> dumpCountList_;
 	};
 
-	bool reportError(int32_t errorCode) {
-		return errorMgr_.reportError(static_cast<ErrorCode>(errorCode));
+	bool reportError(int32_t errorCode, int32_t count = 1) {
+		return errorMgr_.reportError(static_cast<ErrorCode>(errorCode), count);
 	}
 
 	uint64_t getErrorCount(int32_t errorCode) {
@@ -506,7 +421,6 @@ public:
 		WebAPIErrorType errorType_;
 	};
 
-
 	class RefreshPartitionInfo : public ClusterManagerInfo
 	{
 	public:
@@ -528,10 +442,6 @@ public:
 
 		std::vector<PartitionId> &getSyncPIdList() {
 			return syncPIdList_;
-		}
-
-		std::string dump() {
-			return std::string();
 		}
 
 		MSGPACK_DEFINE(syncPIdList_);
@@ -567,28 +477,12 @@ public:
 			}
 		}
 
-		std::string dump(bool detail = true) {
-			util::NormalOStringStream ss;
-			ss << "HeartbeatInfo={" << std::endl;
-			ss << "\tisMaster=" << isMaster_ << std::endl;
-			ss << "\treserveNum=" << reserveNum_ << std::endl;
-			ss << "\tsecondMasterNode=" << secondMasterNode_.dump() << std::endl;
-			ss << "\tpartitionSequentialNumber=" << partitionSequentialNumber_ << std::endl;
-			if (detail) {
-				ss << "\tmaxLsn=" << dumpArray(maxLsnList_) << std::endl;
-		}
-			else {
-				ss << "\tmaxLsnSize=" << maxLsnList_.size() << std::endl;
-		}
-			ss<< "\tnodeList=" << pt_->dumpNodeAddressInfoList(nodeList_) << std::endl;
-			ss << "\tisAddNewNode=" << isAddNewNode_ << std::endl;
-			ss << "\tisStatusChange=" << isStatusChange_ << std::endl;
-				ss << "}" << std::endl;
-			return ss.str();
-		}
-
 		bool isParentMaster() {
 			return isMaster_;
+		}
+
+		void setAddOrNewNode() {
+			isAddNewNode_ = true;
 		}
 
 		std::vector<LogSequentialNumber> &getMaxLsnList() {
@@ -654,7 +548,6 @@ public:
 			partitionSequentialNumber_, maxLsnList_, nodeList_,
 			isInitialCluster_, partition0NodeAddr_);
 
-
 	private:
 		bool isMaster_;
 		int32_t reserveNum_;
@@ -711,20 +604,6 @@ public:
 				}
 			}
 
-			std::string dump() {
-				util::NormalOStringStream ss;
-				ss << "HeartbeatResValue:{"
-				<< "pId=" << pId_ << ", status:"
-				<< dumpPartitionStatus(static_cast<PartitionStatus>(status_))
-				<< ", lsn:" << lsn_ << ", startLsn:" << startLsn_ << ", roleStatus:"
-				<< dumpPartitionRoleStatus(
-						static_cast<PartitionRoleStatus>(roleStatus_))
-				<< ", revision=" << partitionRevision_
-				<< ", chunkCount=" << chunkCount_
-				<< "}";
-				return ss.str();
-			};
-
 			MSGPACK_DEFINE(pId_, status_, lsn_, startLsn_, roleStatus_,
 					partitionRevision_, chunkCount_, otherStatus_, errorStatus_);
 
@@ -778,12 +657,6 @@ public:
 
 		MSGPACK_DEFINE(heartbeatResValues_,
 				syncChunkNum_, syncApplyNum_, partitionSequentialNumber_);
-
-		std::string dump() {
-			util::NormalOStringStream ss;
-			ss << "HeartbeatResInfo:{" << dumpList(heartbeatResValues_) << "}";
-			return ss.str();
-		}
 
 		PartitionRevisionNo getPartitionRevisionNo() {
 			return partitionSequentialNumber_;
@@ -852,19 +725,6 @@ public:
 
 		MSGPACK_DEFINE(isMaster_, isStable_, reserveNum_, startupTime_,
 			nodeList_, clusterName_, digest_);
-
-		std::string dump() {
-			util::NormalOStringStream ss;
-			ss << "NotifyClusterInfo:"
-			<< "{"
-			<< "isMaster:" << isMaster_ << ", isStable:" << isStable_
-			<< ", reserveNum:" << reserveNum_
-			<< ", startupTime:" << getTimeStr(startupTime_)
-			<< ", nodeListSize:" << pt_->dumpNodeAddressInfoList(nodeList_)
-			<< ", clusterName:" << clusterName_ << ", digest:" << digest_
-			<< ", isFollow:" << isFollow_ << "}";
-			return ss.str();
-		}
 
 	private:
 
@@ -941,19 +801,6 @@ public:
 		MSGPACK_DEFINE(reserveNum_, startupTime_, partitionSequentialNumber_,
 			lsnList_, maxLsnList_, nodeList_);
 
-		std::string dump() {
-			util::NormalOStringStream ss;
-			ss << "NotifyClusterResInfo:{"
-			<< "reserveNum:" << reserveNum_
-			<< ", startupTime:" << getTimeStr(startupTime_)
-			<< ", partitionSequentialNumber:" << partitionSequentialNumber_
-			<< ", lsnListSize:" << lsnList_.size()
-			<< ", maxLsnListSize:" << maxLsnList_.size()
-			<< ", nodeList:" << pt_->dumpNodeAddressInfoList(nodeList_)
-			<< "}";
-			return ss.str();
-		}
-
 	private:
 
 		int32_t reserveNum_;
@@ -1002,15 +849,6 @@ public:
 
 		MSGPACK_DEFINE(clusterName_, minNodeNum_);
 
-		std::string dump() {
-			util::NormalOStringStream ss;
-			ss << "JoinClusterInfo:{"
-			<< "clusterName:" << clusterName_
-			<< ", minNodeNum:" << minNodeNum_
-			<< ", isPreCheck:" << isPreCheck_ << "}";
-			return ss.str();
-		}
-
 	private:
 
 		std::string clusterName_;
@@ -1040,14 +878,6 @@ public:
 
 		bool isPreCheck() {
 			return isPreCheck_;
-		}
-
-		std::string dump() {
-			util::NormalOStringStream ss;
-			ss << "LeaveClusterInfo:{"
-			<< ", isPreCheck:" << isPreCheck_ << ", isForce:" << isForce_
-			<< "}";
-			return ss.str();
 		}
 
 	private:
@@ -1086,16 +916,6 @@ public:
 		}
 
 		MSGPACK_DEFINE(addNodeNum_, targetAddress_);
-
-		std::string dump() {
-			util::NormalOStringStream ss;
-			ss << "IncreaseClusterInfo:{"
-			<< ", addNodeNum:" << addNodeNum_
-			<< ", targetAddress:" << targetAddress_
-			<< ", isPreCheck:" << isPreCheck_
-			<< ", targetNodeId:" << targetNodeId_ << "}";
-			return ss.str();
-		}
 
 	private:
 
@@ -1148,16 +968,6 @@ public:
 
 		MSGPACK_DEFINE(isAutoLeave_, leaveNodeNum_, leaveNodeList_);
 
-		std::string dump() {
-			util::NormalOStringStream ss;
-			ss << "DecreaseClusterInfo:{"
-			<< ", isAutoLeave:" << isAutoLeave_
-			<< ", leaveNodeNum:" << leaveNodeNum_
-			<< ", leaveNodeList:" << pt_->dumpNodeAddressList(leaveNodeList_)
-			<< ", isPreCheck:" << isPreCheck_ << "}";
-			return ss.str();
-		}
-
 	private:
 
 		bool isAutoLeave_;
@@ -1186,13 +996,6 @@ public:
 
 		MSGPACK_DEFINE(isForce_);
 
-		std::string dump() {
-			util::NormalOStringStream ss;
-			ss << "ShutdownNodeInfo:{"
-			<< ", isForce:" << isForce_ << "}";
-			return ss.str();
-		}
-
 	private:
 
 		bool isForce_;
@@ -1210,13 +1013,6 @@ public:
 		bool check() {
 			return true;
 		}
-
-		std::string dump() {
-			util::NormalOStringStream ss;
-			ss << "ShutdownClusterInfo:{"
-			<< "}";
-			return ss.str();
-		}
 	};
 
 	/*!
@@ -1231,13 +1027,6 @@ public:
 
 		bool check() {
 			return true;
-		}
-
-		std::string dump() {
-			util::NormalOStringStream ss;
-			ss << "CompleteCheckpointInfo:{"
-			<< "}";
-			return ss.str();
 		}
 	};
 
@@ -1274,16 +1063,6 @@ public:
 			isAddNewNode_ = isAddNewNode;
 		}
 
-		std::string dump() {
-			util::NormalOStringStream ss;
-			ss << "HeartbeatCheckInfo:{"
-			<< "nextTransition:"
-			<< getClusterStatusTransition(nextTransition_)
-			<< ", activeNodeListSize:" << activeNodeList_.size()
-			<< ", isAddNewNode:" << isAddNewNode_ << "}";
-			return ss.str();
-		}
-
 	private:
 
 		ClusterStatusTransition nextTransition_;
@@ -1301,6 +1080,9 @@ public:
 			PartitionTable *pt, bool isAddNewNode = false, bool needUpdatePartition = false)
 			: ClusterManagerInfo(alloc, nodeId),
 			dropPartitionNodeInfo_(alloc),
+			shorttermSyncPosList_(alloc),
+			changePartitionPosList_(alloc),
+			longtermSyncPosList_(alloc),
 			isAddNewNode_(isAddNewNode),
 			needUpdatePartition_(needUpdatePartition),
 			pt_(pt),
@@ -1327,8 +1109,8 @@ public:
 			needUpdatePartition_ = needUpdatePartition;
 		}
 
-		bool isNeedUpdatePartition() {
-			return (needUpdatePartition_);
+		bool &isNeedUpdatePartition() {
+			return needUpdatePartition_;
 		}
 
 		SubPartitionTable &getSubPartitionTable() {
@@ -1350,105 +1132,38 @@ public:
 		bool isAddNewNode() {
 			return isAddNewNode_;
 		}
+		void setAddOrDownNode() {
+			isAddNewNode_ = true;
+		}
+
+		util::Vector<PartitionId> &getShorttermSyncPIdList() {
+			return shorttermSyncPosList_;
+		}
+
+		util::Vector<PartitionId> &getLongtermSyncPIdList() {
+			return longtermSyncPosList_;
+		}
+
+		util::Vector<PartitionId> &getChangePartitonPIdList() {
+			return changePartitionPosList_;
+		}
 
 		MSGPACK_DEFINE(subPartitionTable_, nodeList_, maxLsnList_);
-
-		std::string dump() {
-			util::NormalOStringStream ss;
-			ss << "UpdatePartitionInfo:{" << subPartitionTable_.dump()
-			<< ", nodeList:" << pt_->dumpNodeAddressInfoList(nodeList_)
-			<< ", isAddNewNode:" << isAddNewNode_
-			<< ", needUpdatePartition:" << needUpdatePartition_
-			<< ", maxLsnListSize:" << maxLsnList_.size() << "}";
-			return ss.str();
-		}
 
 	private:
 
 		SubPartitionTable subPartitionTable_;
 		std::vector<AddressInfo> nodeList_;
 		std::vector<LogSequentialNumber> maxLsnList_;
+		util::Vector<PartitionId> shorttermSyncPosList_;
+		util::Vector<PartitionId> changePartitionPosList_;
+		util::Vector<PartitionId> longtermSyncPosList_;
+
 
 		bool isAddNewNode_;
 		bool needUpdatePartition_;
 		PartitionTable *pt_;
 		bool isToMaster_;
-	};
-
-	/*!
-		@brief Represents the information of Gossip event
-	*/
-	class GossipInfo : public ClusterManagerInfo {
-	public:
-
-		GossipInfo(util::StackAllocator &alloc, NodeId nodeId = 0)
-			: ClusterManagerInfo(alloc, nodeId),
-			pId_(UNDEF_PARTITIONID),
-			gossipMessageType_(0),
-			gossipType_(GOSSIP_INVALID_NODE),
-			nodeId_(UNDEF_NODEID),
-			isValid_(false) {}
-
-		bool check() {
-			gossipType_ = static_cast<GossipType>(gossipMessageType_);
-			if (!targetNode_.isValid()) {
-				return false;
-			}
-			return true;
-		}
-
-		void setAddress(NodeAddress &address) {
-			targetNode_ = address;
-			isValid_ = true;
-		}
-
-		NodeAddress &getAddress() {
-			return targetNode_;
-		}
-
-		void setTarget(PartitionId pId = UNDEF_PARTITIONID, NodeId nodeId = 0,
-			GossipType gossipType = GOSSIP_INVALID_NODE) {
-			pId_ = pId;
-			nodeId_ = nodeId;
-			gossipType_ = gossipType;
-			gossipMessageType_ = static_cast<int8_t>(gossipType);
-		}
-
-		void setNodeId(NodeId nodeId) {
-			nodeId_ = nodeId;
-		}
-
-		bool isValid() {
-			return isValid_;
-		}
-
-		void get(PartitionId &pId, NodeId &nodeId, GossipType &gossipType) {
-			pId = pId_;
-			nodeId = nodeId_;
-			gossipType = gossipType_;
-		}
-
-		MSGPACK_DEFINE(pId_, targetNode_, gossipMessageType_);
-
-		std::string dump() {
-			util::NormalOStringStream ss;
-			ss << "GossipInfo:{"
-			<< "pId=" << pId_ << ", targetNode:" << targetNode_
-			<< ", gossipMessageType:" << static_cast<int32_t>(gossipMessageType_)
-			<< ", gossipType:" << static_cast<int32_t>(gossipType_) << ", nodeId:" << nodeId_
-			<< ", isValid:" << isValid_ << "}";
-			return ss.str();
-		}
-
-	private:
-
-		PartitionId pId_;
-		NodeAddress targetNode_;
-		int8_t gossipMessageType_;
-
-		GossipType gossipType_;
-		NodeId nodeId_;
-		bool isValid_;
 	};
 
 	/*!
@@ -1488,20 +1203,6 @@ public:
 
 		MSGPACK_DEFINE(pId_, status_, isToSubMaster_, changePartitionType_);
 
-		std::string dump() {
-			util::NormalOStringStream ss;
-
-			ss << "ChangePartitionStatusInfo:{"
-			<< "pId=" << pId_ << ", status:"
-			<< dumpPartitionStatus(static_cast<PartitionStatus>(status_))
-			<< ", isToSubMaster:" << isToSubMaster_
-			<< ", changePartitionType:"
-			<< dumpChangePartitionType(
-					static_cast<ChangePartitionType>(changePartitionType_))
-			<< "}";
-			return ss.str();
-		}
-
 	private:
 
 		PartitionId pId_;
@@ -1523,7 +1224,6 @@ public:
 		ChangePartitionTableInfo(util::StackAllocator &alloc, NodeId nodeId)
 			: ClusterManagerInfo(alloc, nodeId) {}
 		bool check() {
-			role_.restoreType();
 			return true;
 		}
 
@@ -1533,14 +1233,6 @@ public:
 
 		MSGPACK_DEFINE(role_);
 
-		std::string dump() {
-			util::NormalOStringStream ss;
-
-			ss << "ChangePartitionTableInfo:{"
-			<< "role:" << role_ << "}";
-			return ss.str();
-		}
-
 	private:
 
 		PartitionRole role_;
@@ -1548,44 +1240,47 @@ public:
 
 
 
-	void get(HeartbeatInfo &heartbeatInfo);
+	void getHeartbeatInfo(HeartbeatInfo &heartbeatInfo);
 
-	bool set(HeartbeatInfo &heartbeatInfo);
+	bool setHeartbeatInfo(HeartbeatInfo &heartbeatInfo);
 
-	void get(HeartbeatResInfo &heartbeatResInfo);
+	void getHeartbeatResInfo(HeartbeatResInfo &heartbeatResInfo);
 
-	void set(HeartbeatResInfo &heartbeatResInfo);
+	void setHeartbeatResInfo(HeartbeatResInfo &heartbeatResInfo);
 
-	void get(HeartbeatCheckInfo &heartbeatCheckInfo);
+	void getHeartbeatCheckInfo(HeartbeatCheckInfo &heartbeatCheckInfo);
 
-	void get(UpdatePartitionInfo &updatePartitionInfo);
+	void getUpdatePartitionInfo(UpdatePartitionInfo &updatePartitionInfo);
 
-	void get(NotifyClusterInfo &notifyClusterInfo);
+	void setUpdatePartitionInfo(UpdatePartitionInfo &updatePartitionInfo);
 
-	bool set(NotifyClusterInfo &notifyClusterInfo);
+	void getNotifyClusterInfo(NotifyClusterInfo &notifyClusterInfo);
 
-	void get(NotifyClusterResInfo &notifyClusterResInfo);
+	bool setNotifyClusterInfo(NotifyClusterInfo &notifyClusterInfo);
 
-	void set(NotifyClusterResInfo &notifyClusterResInfo);
+	void getNotifyClusterResInfo(NotifyClusterResInfo &notifyClusterResInfo);
 
-	void set(JoinClusterInfo &joinClusterInfo);
+	void setNotifyClusterResInfo(NotifyClusterResInfo &notifyClusterResInfo);
 
-	void set(LeaveClusterInfo &leaveClusterInfo);
+	void setJoinClusterInfo(JoinClusterInfo &joinClusterInfo);
 
-	void set(IncreaseClusterInfo &increaseClusterInfo);
+	void setLeaveClusterInfo(LeaveClusterInfo &leaveClusterInfo);
 
-	void set(DecreaseClusterInfo &decreaseClusterInfo);
-	void get(GossipInfo &gossipInfo);
+	void setIncreaseClusterInfo(IncreaseClusterInfo &increaseClusterInfo);
 
-	void set(GossipInfo &gossipInfo);
+	void setDecreaseClusterInfo(DecreaseClusterInfo &decreaseClusterInfo);
 
-	void set(ChangePartitionStatusInfo &changePartitionStatusInfo);
+	void setChangePartitionStatusInfo(ChangePartitionStatusInfo &changePartitionStatusInfo);
 
-	void set(ChangePartitionTableInfo &changePartitionStatusInfo);
+	bool setChangePartitionTableInfo(ChangePartitionTableInfo &changePartitionStatusInfo);
 
 	int64_t nextHeartbeatTime(int64_t baseTime) {
 		return (baseTime + clusterConfig_.getHeartbeatInterval() * 2 +
 				extraConfig_.getNextHeartbeatMargin());
+	}
+
+	bool isSecondMaster() {
+		return clusterInfo_.isSecondMaster_;
 	}
 
 #ifdef GD_ENABLE_UNICAST_NOTIFICATION
@@ -1602,6 +1297,8 @@ public:
 
 private:
 
+	void getSafetyLeaveNodeList(util::StackAllocator &alloc,
+		std::vector<NodeId> &candList, int32_t removeNodeNum = 1);
 
 	bool isJoinCluster() {
 		return clusterInfo_.isJoinCluster_;
@@ -1715,6 +1412,8 @@ private:
 	void updateSecondMaster(NodeId target, int64_t startupTime);
 
 
+
+
 	void setShutdownPending() {
 		statusInfo_.isShutdownPending_ = true;
 	}
@@ -1727,7 +1426,7 @@ private:
 	*/
 	class ClusterConfig {
 	public:
-		static const uint32_t CATCHUP_PROMOTION_CHECK_INTERVAL = 60;
+		static const int32_t DEFAULT_CLEAR_BLOCK_INTERVAL = 60;
 
 		ClusterConfig(const ConfigTable &config) {
 			heartbeatInterval_ = changeTimeSecToMill(
@@ -1745,13 +1444,8 @@ private:
 			shortTermTimeoutInterval_ = changeTimeSecToMill(
 				config.get<int32_t>(CONFIG_TABLE_SYNC_TIMEOUT_INTERVAL));
 
-			longTermTimeoutInterval_ = changeTimeSecToMill(config.get<int32_t>(
-				CONFIG_TABLE_SYNC_LONG_SYNC_TIMEOUT_INTERVAL));
-			duplicateMaxLsnNodeNum_ =
-				config.get<int32_t>(CONFIG_TABLE_CS_MAX_LSN_REPLICATION_NUM);
-
-			ownerCatchupPromoteCheckInterval_ = changeTimeSecToMill(
-				config.get<int32_t>(CONFIG_TABLE_CS_CATCHUP_PROMOTION_CHECK_INTERVAL));
+			blockClearInterval_ = DEFAULT_CLEAR_BLOCK_INTERVAL;
+			ruleLimitInterval_ = shortTermTimeoutInterval_ + heartbeatInterval_*2;
 		}
 
 		int32_t getHeartbeatInterval() const {
@@ -1778,20 +1472,8 @@ private:
 			return shortTermTimeoutInterval_;
 		}
 
-		int32_t getLongTermTimeoutInterval() const {
-			return longTermTimeoutInterval_;
-		}
-
-		int32_t getDuplicateMaxLsnNodeNum() const {
-			return duplicateMaxLsnNodeNum_;
-		}
-
 		void setClusterName(std::string &clusterName) {
 			setClusterName_ = clusterName;
-		}
-
-		void setDuplicateMaxLsnNodeNum(int32_t nodeNum) {
-			duplicateMaxLsnNodeNum_ = nodeNum;
 		}
 
 		bool setShortTermTimeoutInterval(int32_t interval) {
@@ -1802,24 +1484,16 @@ private:
 			return true;
 		}
 
-		bool setLongTermTimeoutInterval(int32_t interval) {
-			if (interval <= 0 || interval > INT32_MAX) {
-				return false;
-			}
-			longTermTimeoutInterval_ = interval;
-			return true;
+		int32_t getBlockClearInterval() {
+			return blockClearInterval_;
 		}
 
-		int32_t getOwnerCatchupPromoteCheckInterval() const {
-			return ownerCatchupPromoteCheckInterval_;
+		void setRuleLimitInterval(int32_t interval) {
+			ruleLimitInterval_ = interval;
 		}
 
-		bool setOwnerCatchupPromoteCheckInterval(int32_t interval) {
-			if (interval < 0 || interval > INT32_MAX) {
-				return false;
-			}
-			ownerCatchupPromoteCheckInterval_ = interval;
-			return true;
+		int32_t getRuleLimitInterval() {
+			return ruleLimitInterval_;
 		}
 
 	private:
@@ -1829,10 +1503,9 @@ private:
 		int32_t notifyClientInterval_;
 		int32_t checkLoadBalanceInterval_;
 		int32_t shortTermTimeoutInterval_;
-		int32_t longTermTimeoutInterval_;
-		int32_t duplicateMaxLsnNodeNum_;
+		int32_t blockClearInterval_;
+		int32_t ruleLimitInterval_;
 		std::string setClusterName_;
-		int32_t ownerCatchupPromoteCheckInterval_;
 	};
 
 	/*!
@@ -1924,7 +1597,6 @@ private:
 			isLoadBalance_(true),
 			isUpdatePartition_(false),
 			isRepairPartition_(false),
-			isShufflePartition_(false),
 			isAddOrDownNode_(false),
 			pt_(pt)
 #ifdef GD_ENABLE_UNICAST_NOTIFICATION
@@ -1954,7 +1626,6 @@ private:
 			isLoadBalance_ = true;
 			isUpdatePartition_ = false;
 			isRepairPartition_ = false;
-			isShufflePartition_ = false;
 			downNodeList_.clear();
 			isInitialCluster_ = true;
 			isAddOrDownNode_ = false;
@@ -1980,7 +1651,6 @@ private:
 		bool isLoadBalance_;
 		bool isUpdatePartition_;
 		bool isRepairPartition_;
-		bool isShufflePartition_;
 		bool isAddOrDownNode_;
 		PartitionTable *pt_;
 		std::set<NodeId> downNodeList_;
@@ -1988,38 +1658,17 @@ private:
 #ifdef GD_ENABLE_UNICAST_NOTIFICATION
 		ClusterNotificationMode mode_;
 #endif
-
-		std::string dump() {
-			util::NormalOStringStream ss;
-			ss << "ClusterInfo:{"
-			<< "clusterName:" << clusterName_ << ", digest:" << digest_
-			<< ", startupTime:" << startupTime_
-			<< ", reserveNum:" << reserveNum_
-			<< ", isSecondMaster:" << isSecondMaster_
-			<< ", isJoinCluster:" << isJoinCluster_
-			<< ", isInitialCluster:" << isInitialCluster_
-			<< ", initialClusterConstructNum:" << initialClusterConstructNum_
-			<< ", isParentMaster:" << isParentMaster_
-			<< ", secondMasterNodeId:" << secondMasterNodeId_
-			<< ", secondMasterNodeAddress:" << secondMasterNodeAddress_
-			<< ", notifyPendingCount:" << notifyPendingCount_
-			<< ", activeNodeNum:" << activeNodeNum_ << ", quorum:" << quorum_
-			<< ", prevMaxNodeId:" << prevMaxNodeId_
-			<< ", isLoadBalance:" << isLoadBalance_
-			<< ", isForceSync:" << isUpdatePartition_
-			<< ", isRepairPartition:" << isRepairPartition_
-			<< ", isShufflePartition:" << isShufflePartition_
-			<< ", downNodeList:" << downNodeList_
-			<< ", partition0NodeAddr:" << partition0NodeAddr_
-			<< "}";
-			return ss.str();
-		}
 	};
 
 	ClusterInfo &getClusterInfo() {
 		return clusterInfo_;
 	}
+	
+	void dumpPartition(util::StackAllocator &alloc, PartitionTable::TableType tableType);
+
 private:
+
+	void setupPartitionContext(PartitionTable::PartitionContext &context);
 
 	/*!
 		@brief Represents node status
@@ -2035,23 +1684,11 @@ private:
 
 		bool checkNodeStatus();
 
-		bool checkCommandStatus(ClusterOperationType operation);
+		bool checkCommandStatus(EventType operation);
 
-		void updateNodeStatus(ClusterOperationType operation);
+		void updateNodeStatus(EventType operation);
 
 		const char8_t *getSystemStatus() const;
-
-		std::string dump() {
-			util::NormalOStringStream ss;
-			ss << "NodeStatusInfo:{"
-			<< "isSystemError:" << isSystemError_
-			<< ", status:" << dumpNodeStatus()
-			<< ", currentStatus:" << static_cast<int32_t>(currentStatus_)
-			<< ", nextStatus:" << static_cast<int32_t>(nextStatus_)
-			<< ", isShutdown:" << isShutdown_
-			<< ", isShutdownPending:" << isShutdownPending_ << "}";
-			return ss.str();
-		};
 
 		bool setSystemError(bool reset = true) {
 			if (isSystemError_) {
@@ -2123,6 +1760,23 @@ private:
 	ClusterService *clsSvc_;
 	Config config_;
 };
+
+template <class T>
+std::string dumpPartitionList(PartitionTable *pt, T &partitionList) {
+	util::NormalOStringStream ss;
+	int32_t listSize = static_cast<int32_t>(partitionList.size());
+	ss << "[";
+	for (int32_t pos = 0; pos < listSize; pos++) {
+		ss << "(pId=" << partitionList[pos];
+		ss << ", lsn=" << pt->getLSN(partitionList[pos]) << ")";
+		if (pos != listSize - 1) {
+			ss << ",";
+		}
+	}
+	ss << "]";
+	return ss.str().c_str();
+}
+
 
 typedef ClusterManager::HeartbeatResInfo::HeartbeatResValue HeartbeatResValue;
 typedef ClusterManager::SyncStat SyncStat;
