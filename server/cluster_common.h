@@ -31,7 +31,7 @@ static const ClusterVersionId GS_CLUSTER_MESSAGE_BEFORE_V_1_5 = 1;
 
 typedef int64_t PartitionRevisionNo;
 
-const ClusterVersionId GS_CLUSTER_MESSAGE_CURRENT_VERSION = 31;
+const ClusterVersionId GS_CLUSTER_MESSAGE_CURRENT_VERSION = 33;
 
 static const int32_t SERVICE_MAX = 4;
 
