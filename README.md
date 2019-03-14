@@ -1,3 +1,8 @@
+<img src="http://griddb.org/Image/GridDB_logo.png" align="center" height="48" alt="GridDB"/>
+
+[![Visit Website](https://img.shields.io/badge/website-visit-orange.svg)](https://griddb.net) 
+![GitHub All Releases](https://img.shields.io/github/downloads/griddb/griddb_nosql/total.svg) 
+![GitHub release](https://img.shields.io/github/release/griddb/griddb_nosql.svg)
 ## Overview
   GridDB has a KVS (Key-Value Store)-type data model that is suitable for sensor data stored in a timeseries. It is a database that can be easily scaled-out according to the number of sensors.
 
