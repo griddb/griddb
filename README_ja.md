@@ -56,7 +56,7 @@
   * [DEBインストールガイド](https://griddb.github.io/griddb_nosql/manual/GridDB_DEB_InstallGuide.html) (manual/GridDB_DEB_InstallGuide.html)
 
 ## クライアントとコネクタ
-  Java以外のクライアントもあります。
+  Java以外のクライアント、APIもあります。
   * [GridDB C Client](https://github.com/griddb/c_client/blob/master/README_ja.md)
   * [GridDB Python Client](https://github.com/griddb/python_client)
   * [GridDB Ruby Client](https://github.com/griddb/griddb_client)
@@ -64,6 +64,7 @@
   * [GridDB Node.JS Client](https://github.com/griddb/nodejs_client)
   * [GridDB PHP Client](https://github.com/griddb/php_client)
   * [GridDB Perl Client](https://github.com/griddb/perl_client)
+  * [GridDB WebAPI](https://github.com/griddb/webapi)
 
   他のOSSと接続するためのコネクタもあります。
   * [GridDB connector for Apache Hadoop MapReduce](https://github.com/griddb/griddb_hadoop_mapreduce/blob/master/README_ja.md)

@@ -61,7 +61,7 @@
   - [DEB Installation Guide](https://griddb.github.io/griddb_nosql/manual/GridDB_DEB_InstallGuide.html) (manual/GridDB_DEB_InstallGuide.html)
 
 ## Client and Connector
-  There are other clients for GridDB.
+  There are other clients and API for GridDB.
   * [GridDB C Client](https://github.com/griddb/c_client)
   * [GridDB Python Client](https://github.com/griddb/python_client)
   * [GridDB Ruby Client](https://github.com/griddb/griddb_client)
@@ -69,6 +69,7 @@
   * [GridDB Node.JS Client](https://github.com/griddb/nodejs_client)
   * [GridDB PHP Client](https://github.com/griddb/php_client)
   * [GridDB Perl Client](https://github.com/griddb/perl_client)
+  * [GridDB WebAPI](https://github.com/griddb/webapi)
 
   There are some connectors for other OSS.
   * [GridDB connector for Apache Hadoop MapReduce](https://github.com/griddb/griddb_hadoop_mapreduce)
