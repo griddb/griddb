@@ -64,7 +64,7 @@
   There are other clients and API for GridDB.
   * [GridDB C Client](https://github.com/griddb/c_client)
   * [GridDB Python Client](https://github.com/griddb/python_client)
-  * [GridDB Ruby Client](https://github.com/griddb/griddb_client)
+  * [GridDB Ruby Client](https://github.com/griddb/ruby_client)
   * [GridDB Go Client](https://github.com/griddb/go_client)
   * [GridDB Node.JS Client](https://github.com/griddb/nodejs_client)
   * [GridDB PHP Client](https://github.com/griddb/php_client)
