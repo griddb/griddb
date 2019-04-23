@@ -1,0 +1,122 @@
+#include <iostream> // wejście wyjście
+#include <time.h> // time(NULL)
+#include <Windows.h> // Sleep()
+#include <math.h> // sqrt
+#include <list> // list
+#include <algorithm> // for_each
+#include <iterator> // ostream_iterator
+ 
+ 
+#define scope 10 // Zasięg (stała) dyrektywa #define preprocesora
+ 
+using namespace std;
+ 
+class Point2D {
+    int x; // prywatne zmienne x,y
+    int y;
+public:
+    void randomizePoint() { // funkcja do randomizacji punktu
+        if ((int)(rand() % 2) == 1) { // losujemy 0 lub 1 / jeśli 1 to znak - / jeśli 0 to znak +
+            x = -rand() % scope;
+        }
+        else {
+            x = rand() % scope;
+        }
+        if ((int)(rand() % 2) == 1) { // to samo co wyżej
+            y = -rand() % scope;
+        }
+        else {
+            y = rand() % scope;
+        }
+    }
+    friend void Mover(Point2D &obj);// zaprzyjaźniamy funkcje Mover żeby miała dostęp do prywatnych x i y
+    void movePoint() {  // Funkcja przesuwająca punkt
+        int tmp = rand() % 4; // 0 - góra / 1 - prawo / 2 - dół / 3s - lewo
+ 
+        if (tmp == 0) {
+            x += 1;
+        }
+        else if (tmp == 1) {
+            y += 1;
+        }
+        else if (tmp == 2) {
+            x -= 1;
+        }
+        else if (tmp == 3) {
+            y -= 1;
+        }
+    }
+    float calculateDistance() const{ // funkcja do liczenia dystansu od (0,0) (const żeby można było wywołać dla stałych obiektów)
+        return sqrt(pow(x, 2) + pow(y, 2)); // wzór
+    }
+    bool ifTracked() { // funkcja sprawdzająca "czy śledzić"
+        if (calculateDistance() < scope) { // używamy funkcji calculateDistance() i sprawdzamy czy jest mniejsza niż zasięg
+            return true; //jeśli tak to true
+        }
+        return false;//jeśli nie to false
+    }
+    bool operator()(Point2D obj) { // przeciążony operator() - przyda się później
+        return sqrt(pow(obj.x, 2) + pow(obj.y, 2)) > scope; // liczymy dystans i sprawdzamy czy jest mniejszy niż zasięg (scope)
+    }
+    friend ostream& operator<<(ostream &output, const Point2D &D) { // przeciążenie operatora << służące do wyświetlania
+        output << "x: " << D.x << "  y: " << D.y << "     Odleglosc od (0,0): " << D.calculateDistance() << endl;
+        return output;
+    }
+};
+ 
+bool check(Point2D &obj) { // Funkcja poruszająca punkt i zwracająca wynik ifTracked() (true lub false)
+    obj.movePoint();
+    return obj.ifTracked();
+}
+ 
+void Mover(Point2D &obj) { // Kolejna funkcja przesuwająca (poza klasą) - jest zaprzyjaźniona!
+    int tmp = rand() % 4; // 0 - góra / 1 - prawo / 2 - dół / 3 - lewo
+ 
+    if (tmp == 0) {
+        obj.x += 1;
+    }
+    else if (tmp == 1) {
+        obj.y += 1;
+    }
+    else if (tmp == 2) {
+        obj.x -= 1;
+    }
+    else if (tmp == 3) {
+        obj.y -= 1;
+    }
+}
+ 
+ 
+int main()
+{
+ 
+    srand(time(NULL)); // Niepowtarzalne wyniki
+ 
+    list<Point2D> Container; // lista Punktów
+ 
+    while (1) { // główna pętla
+ 
+        Sleep(1000); // delay 1000ms
+        system("cls"); // czyszczenie CMD
+           
+        Point2D punkt; // Tworzymy punkt
+        punkt.randomizePoint();  // Randomizujemy go
+ 
+        if (Container.size() < 10) { // Dodaj tylko jeśli śledzisz mniej niż 10 obiektów (do 10)
+            Container.push_back(punkt); // jeśli mniej niż 10 to dodaj nasz punkt do listy śledzonych obiektow
+        }
+ 
+        for_each(Container.begin(), Container.end(), Mover); // Dla każdego obiektu z Container czyli naszej listy wykonujemy funkcje Mover
+ 
+        Container.remove_if(Point2D()); // Point2D() wrzuci tu obiekt (nazwa: funktor, bo ma przeciążony operator () ) który wywoła przeciążony operator ()
+        // jeśli ten operator zwróci false to znaczy, że odległość jest mniejsza niż 10 - zostawiamy obiekt na liście
+        // jeśli ten operator zwróci true to znaczy, że odległość jest większa niż 10 - przestajemy śledzić obiekt - wyrzucamy obiekt z listy
+ 
+        copy(Container.begin(), Container.end(), ostream_iterator<Point2D, char>(cout, " ")); // wyśwetlamy każdy element za pomocą ostream_iterator cout (normalnie) i oddzielamy to spacją (" ")
+ 
+    }
+ 
+   
+    return 0;
+}
+
