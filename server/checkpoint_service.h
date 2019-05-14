@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -29,6 +29,7 @@
 #include "gs_error.h"
 #include "recovery_manager.h"  
 #include "system_service.h"	
+#include "sync_manager.h"
 
 
 
@@ -69,12 +70,10 @@ static const uint32_t CP_SERIALIZED_PARTITION_ID = 0;
 
 static const int32_t secondLimit = INT32_MAX / 1000;
 
-static const int32_t CP_SYNC_DELAY_INTERVAL = 30 * 1000;
-
 /*!
 	@brief Converts time unit from second to millisecond.
 */
-static inline const int32_t changeTimeSecondToMilliSecond(int32_t second) {
+static inline int32_t changeTimeSecondToMilliSecond(int32_t second) {
 	if (second > secondLimit) {
 		return INT32_MAX;
 	}
@@ -100,7 +99,7 @@ public:
 
 	void initialize(const ManagerSet &mgrSet);
 
-	void operator()(EventContext &ec, Event &ev){};
+	void operator()(EventContext &ec, Event &ev) {};
 
 	TransactionService *transactionService_;
 	TransactionManager *transactionManager_;
@@ -143,13 +142,29 @@ public:
 
 	CheckpointOperationHandler(){};
 	void operator()(EventContext &ec, Event &ev);
-	void writeCheckpointStartLog(util::StackAllocator &alloc, int32_t mode,
-		PartitionGroupId pgId, PartitionId pId, CheckpointId cpId);
+	LogSequentialNumber writeCheckpointStartLog(
+			util::StackAllocator &alloc, int32_t mode,
+			PartitionGroupId pgId, PartitionId pId, CheckpointId cpId);
 
-	void writeChunkMetaDataLog(util::StackAllocator &alloc, int32_t mode,
-		PartitionGroupId pgId, PartitionId pId, CheckpointId cpId,
-		bool isRestored);
+	void writeChunkMetaDataLog(
+			util::StackAllocator &alloc, int32_t mode,
+			PartitionGroupId pgId, PartitionId pId, CheckpointId cpId,
+			bool isRestored);
 
+	void compressChunkMetaDataLog(
+			util::StackAllocator &alloc,
+			PartitionGroupId pgId, PartitionId pId,
+			ChunkCategoryId categoryId,
+			ChunkId startChunkId, int32_t count,
+			util::XArray<uint8_t> &logBuffer,
+			util::XArray<uint8_t> &metaDataEmptySize,
+			util::XArray<uint8_t> &metaDataFileOffset,
+			util::XArray<uint8_t> &metaDataChunkKey, int32_t validCount);
+
+	void setIncrementalBackupFilePos(
+			PartitionId pId, bool isCumulative, BitArray &bitArray);
+
+	void resetIncrementalBackupFilePos(PartitionId pId);
 };
 
 /*!
@@ -164,6 +179,8 @@ public:
 /*!
 	@brief Operates Checkpoint events.
 */
+class CheckpointFile;   
+class LongtermSyncInfo; 
 class CheckpointService {
 public:
 	friend class CheckpointOperationHandler;
@@ -175,6 +192,22 @@ public:
 		1000;  
 	static const std::string PID_LSN_INFO_FILE_NAME;
 	static const uint32_t PID_LSN_INFO_FILE_VERSION = 0x1;  
+
+	static const uint32_t BACKUP_ARCHIVE_LOG_MODE_FLAG = 1;
+	static const uint32_t BACKUP_DUPLICATE_LOG_MODE_FLAG = 1 << 1;
+	static const uint32_t BACKUP_SKIP_BASELINE_MODE_FLAG = 1 << 2; 
+	static const uint64_t INCREMENTAL_BACKUP_COUNT_LIMIT = 999;
+
+	static const char *const INCREMENTAL_BACKUP_FILE_SUFFIX;
+	static const uint32_t MAX_BACKUP_NAME_LEN;
+	static const uint32_t MAX_LONG_ARCHIVE_NAME_LEN;
+
+	static const char *const SYNC_TEMP_FILE_SUFFIX; 
+
+	typedef int64_t SyncSequentialNumber; 
+
+	static const SyncSequentialNumber UNDEF_SYNC_SEQ_NUMBER; 
+	static const SyncSequentialNumber MAX_SYNC_SEQ_NUMBER; 
 
 
 	/*!
@@ -191,10 +224,95 @@ public:
 	*/
 	enum GroupCheckpointStatus { GROUP_CP_COMPLETED = 0, GROUP_CP_RUNNING };
 
+	enum ArchiveLogMode {
+		ARCHIVE_LOG_OFF = 0,
+		ARCHIVE_LOG_ON,
+		ARCHIVE_LOG_RUNNING
+	};
 
-	CheckpointService(const ConfigTable &config, EventEngine::Config eeConfig,
-		EventEngine::Source source, const char8_t *name,
-		ServiceThreadErrorHandler &serviceThreadErrorHandler);
+	enum DuplicateLogMode {
+		DUPLICATE_LOG_OFF = 0,
+		DUPLICATE_LOG_ON,
+		DUPLICATE_LOG_ERROR = -1
+	};
+
+	/*!
+		@brief Status of backup
+	*/
+	struct BackupStatus {
+		BackupStatus()
+			: name_(""),
+			  cumlativeCount_(0),
+			  differentialCount_(0),
+			  incrementalLevel_(-1),
+			  archiveLogMode_(false),
+			  skipBaselineMode_(false),  
+			  duplicateLogMode_(false){};
+
+		void reset() {
+			name_.clear();
+			cumlativeCount_ = 0;
+			differentialCount_ = 0;
+			incrementalLevel_ = 0;
+			archiveLogMode_ = false;
+			skipBaselineMode_ = false;  
+			duplicateLogMode_ = false;
+		}
+
+		u8string name_;
+		uint64_t cumlativeCount_;
+		uint64_t differentialCount_;
+		int32_t incrementalLevel_;
+		bool archiveLogMode_;
+		bool skipBaselineMode_;  
+		bool duplicateLogMode_;
+	};
+	typedef std::map<int64_t, int64_t> CpLongtermSyncOffsetMap;
+	struct CpLongtermSyncInfo {
+		CpLongtermSyncInfo()
+			: ssn_(UNDEF_SYNC_SEQ_NUMBER),
+			  targetPId_(UNDEF_PARTITIONID),
+			  logManager_(NULL),
+			  syncCpFile_(NULL),
+			  startLsn_(0),
+			  cpId_(UNDEF_CHECKPOINT_ID),
+			  readItr_(NULL),
+			  newOffsetMap_(NULL),
+			  oldOffsetMap_(NULL),
+			  readCount_(0),
+			  eventSrc_(NULL),
+			  errorOccured_(false),
+			  chunkSize_(0),
+			  totalChunkCount_(0),
+			  readyCount_(0),
+			  atomicStopFlag_(0),
+			  startTime_(0) {};
+
+		SyncSequentialNumber ssn_;
+		PartitionId targetPId_;
+		LogManager* logManager_;
+		CheckpointFile* syncCpFile_;
+		u8string dir_; 
+		LogSequentialNumber startLsn_;
+		CheckpointId cpId_;
+		CpLongtermSyncOffsetMap::iterator readItr_;
+		CpLongtermSyncOffsetMap *newOffsetMap_;
+		CpLongtermSyncOffsetMap *oldOffsetMap_;
+		uint64_t readCount_;
+		EventEngine::Source *eventSrc_;
+		LongtermSyncInfo longtermSyncInfo_;
+		bool errorOccured_;
+		uint32_t chunkSize_;  
+		size_t totalChunkCount_;  
+		util::Atomic<uint64_t> readyCount_;  
+		util::Atomic<uint32_t> atomicStopFlag_;  
+		uint64_t startTime_;
+	};
+
+	CheckpointService(
+			const ConfigTable &config, EventEngine::Config eeConfig,
+			EventEngine::Source source, const char8_t *name,
+			ServiceThreadErrorHandler &serviceThreadErrorHandler);
 
 	~CheckpointService();
 
@@ -213,11 +331,28 @@ public:
 
 	void requestNormalCheckpoint(const Event::Source &eventSource);
 
+	bool requestOnlineBackup(
+			const Event::Source &eventSource,
+			const std::string &backupName, int32_t mode,
+			const SystemService::BackupOption &option,
+			picojson::value &result);
+
+	void requestCleanupLogFiles(const Event::Source &eventSource);
+
+	bool requestPrepareLongArchive(
+		const Event::Source &eventSource,
+		const std::string &archiveName, picojson::value &result);
+
+	bool checkLongtermSyncIsReady(SyncSequentialNumber ssn);
 
 	void requestShutdownCheckpoint(const Event::Source &eventSource);
 
-	void executeOnTransactionService(EventContext &ec, GSEventType eventType,
-		int32_t mode, PartitionId pId, CheckpointId cpId, bool executeAndWait);
+	void executeOnTransactionService(
+			EventContext &ec, GSEventType eventType,
+			int32_t mode, PartitionId pId, CheckpointId cpId,
+			const std::string &backupPath, bool executeAndWait,
+			SyncSequentialNumber ssn);
+
 	CheckpointId getLastCompletedCheckpointId(PartitionGroupId pgId) const;
 
 	CheckpointId getCurrentCheckpointId(PartitionGroupId pgId) const;
@@ -268,6 +403,9 @@ public:
 		return totalRequestedCpOperation_;
 	}
 
+	int64_t getTotalBackupOperation() const {
+		return totalBackupOperation_;
+	}
 
 	void setCurrentCpGrpId(PartitionGroupId pgId) {
 		currentCpGrpId_ = pgId;
@@ -285,6 +423,46 @@ public:
 		return currentCpPId_;
 	}
 
+	void updateLastArchivedCpIdList();
+	CheckpointId getLastArchivedCpId(PartitionGroupId pgId);
+
+	void setArchiveLogMode(int32_t mode) {
+		archiveLogMode_ = mode;
+	}
+
+	int32_t getArchiveLogMode() const {
+		return archiveLogMode_;
+	}
+
+	BackupStatus &getLastQueuedBackupStatus() {
+		return lastQueuedBackupStatus_;
+	}
+
+	BackupStatus &getLastCompletedBackupStatus() {
+		return lastCompletedBackupStatus_;
+	}
+
+
+	bool getLongSyncChunk(
+			SyncSequentialNumber ssn, uint64_t size, uint8_t* buffer,
+			uint64_t &resultSize, uint64_t &totalCount,
+			uint64_t &completedCount, uint64_t &readyCount);
+	bool getLongSyncLog(SyncSequentialNumber ssn,
+			LogSequentialNumber starLsn, LogCursor &cursor);
+
+	bool getLongSyncCheckpointStartLog(SyncSequentialNumber ssn, LogCursor &cursor);
+
+	bool isEntry(SyncSequentialNumber ssn);
+
+	SyncSequentialNumber getCurrentSyncSequentialNumber(PartitionId pId);
+
+	CpLongtermSyncInfo* getCpLongtermSyncInfo(SyncSequentialNumber ssn);
+
+	bool setCpLongtermSyncInfo(SyncSequentialNumber id, const CpLongtermSyncInfo &cpLongtermSyncInfo);
+
+	bool updateCpLongtermSyncInfo(SyncSequentialNumber id, const CpLongtermSyncInfo &cpLongtermSyncInfo);
+
+	bool removeCpLongtermSyncInfo(SyncSequentialNumber id);
 
 	PartitionTable *getPartitionTable() {
 		return partitionTable_;
@@ -298,10 +476,40 @@ public:
 		return currentCheckpointIdList_[pId];
 	}
 
+	void setCheckpointReady(PartitionId pId, bool flag) {
+		checkpointReadyList_[pId] = (flag ? 1 : 0);
+	}
+
+	bool isCheckpointReady(PartitionId pId) {
+		return (checkpointReadyList_[pId] == 1);
+	}
+
 	/*!
 		@brief Gets transactionEE queue size
 	*/
 	int32_t getTransactionEEQueueSize(PartitionGroupId pgId);
+
+	void requestStartCheckpointForLongtermSync(
+			const Event::Source &eventSource,
+			PartitionId pId, LongtermSyncInfo *longtermSynInfo);
+
+	void requestStopCheckpointForLongtermSync(
+			const Event::Source &eventSource,
+			PartitionId pId, int64_t syncSequentialNumber);
+
+	void setPeriodicCheckpointFlag(bool flag);
+	bool getPeriodicCheckpointFlag();
+
+	uint16_t getNewestLogVersion();
+	void setNewestLogVersion(uint16_t version);
+	
+	int32_t getChunkCopyInterval() {
+		return chunkCopyIntervalMillis_;
+	}
+
+	int32_t getChunkCopyLimitQueueSize() {
+		return CP_CHUNK_COPY_WITH_SLEEP_LIMIT_QUEUE_SIZE;
+	}
 
 private:
 	static const int32_t CP_CHUNK_COPY_WITH_SLEEP_LIMIT_QUEUE_SIZE = 40;
@@ -314,17 +522,19 @@ private:
 		PIdLsnInfo();
 		~PIdLsnInfo();
 
-		void setConfigValue(CheckpointService *cpService, uint32_t partitionNum,
-			uint32_t partitionGroupNum, const std::string &path);
+		void setConfigValue(
+				CheckpointService *cpService, uint32_t partitionNum,
+				uint32_t partitionGroupNum, const std::string &path);
 
 		void startCheckpoint();  
 
 		void setLsn(PartitionId pId, LogSequentialNumber lsn);
 
-		void endCheckpoint();  
+		void endCheckpoint(const char8_t *
+				backupPath);  
 
 	private:
-		void writeFile();
+		void writeFile(const char8_t *backupPath = NULL);
 
 		CheckpointService *checkpointService_;
 		util::Mutex mutex_;
@@ -336,16 +546,34 @@ private:
 	};
 
 	static EventEngine::Config &createEEConfig(
-		const ConfigTable &config, EventEngine::Config &eeConfig);
+			const ConfigTable &config, EventEngine::Config &eeConfig);
 
-	void runCheckpoint(EventContext &ec, int32_t mode, uint32_t flag);
+	void runCheckpoint(
+			EventContext &ec, int32_t mode, uint32_t flag,
+			const std::string &backupPath, SyncSequentialNumber ssn);
 
 	void runGroupCheckpoint(
-		PartitionGroupId pgId, EventContext &ec, int32_t mode, uint32_t flag);
+			PartitionGroupId pgId, EventContext &ec,
+			int32_t mode, uint32_t flag, const std::string &backupPath,
+			SyncSequentialNumber ssn);
 
 	void waitAllGroupCheckpointEnd();
 
+	uint64_t backupLog(
+			uint32_t flag, PartitionGroupId pgId, const std::string &backupPath);
 
+	bool makeBackupDirectory(int32_t mode, const std::string &backupName);
+
+	void setLastCpStartLsn(PartitionId pId, LogSequentialNumber lsn);
+
+	LogSequentialNumber diffLastCpStartLsn(
+			PartitionId pId, LogSequentialNumber lsn);
+
+	void setNeedGroupCheckpoint(PartitionGroupId pgId, bool needCp);
+
+	bool makeLongArchiveDirectory(
+			int32_t mode, const std::string &longArchivePath);
+	std::string getChunkHeaderDumpString(const uint8_t* chunk);
 
 	inline int32_t getCheckpointInterval() const {
 		return cpInterval_;
@@ -386,6 +614,8 @@ private:
 	PartitionTable *partitionTable_;
 	bool initailized_;
 
+	SyncService *syncService_;
+
 	GlobalFixedSizeAllocator *fixedSizeAlloc_;
 
 	util::Atomic<bool> requestedShutdownCheckpoint_;
@@ -394,11 +624,20 @@ private:
 
 	const int32_t cpInterval_;	
 	const int32_t logWriteMode_;  
+	const std::string backupTopPath_;  
+	util::Mutex cpLongtermSyncMutex_;
+	const std::string syncTempTopPath_;  
+	const std::string longArchiveTopPath_;  
+	util::Mutex cpLongtermSyncSessionMutex_;
+
+	typedef std::map<SyncSequentialNumber, CpLongtermSyncInfo> CpLongtermSyncInfoMap;
+	CpLongtermSyncInfoMap cpLongtermSyncInfoMap_;
+	std::vector<SyncSequentialNumber> ssnList_; 
+
 	util::Atomic<int32_t>
 		chunkCopyIntervalMillis_;  
 
-	int32_t delaySleepTime_;
-
+	volatile bool backupEndPending_;
 
 	std::string lastBackupPath_;
 	bool currentDuplicateLogMode_;
@@ -406,6 +645,7 @@ private:
 	PartitionGroupId currentCpGrpId_;
 	PartitionId currentCpPId_;
 
+	RecoveryManager::BackupInfo backupInfo_;
 
 	std::vector<uint8_t> groupCheckpointStatus_;
 	bool parallelCheckpoint_;
@@ -416,6 +656,9 @@ private:
 
 	std::vector<CheckpointId> lastArchivedCpIdList_;
 
+	std::vector<LogSequentialNumber> lastCpStartLsnList_;
+	std::vector<uint8_t> needGroupCheckpoint_;
+
 
 	util::Atomic<int32_t> lastMode_;
 	util::Atomic<int64_t> startTime_;
@@ -423,11 +666,30 @@ private:
 	util::Atomic<int32_t> pendingPartitionCount_;
 	util::Atomic<int64_t> totalNormalCpOperation_;
 	util::Atomic<int64_t> totalRequestedCpOperation_;
+	util::Atomic<int64_t> totalBackupOperation_;
 
+	util::Atomic<int32_t> archiveLogMode_;
+	util::Atomic<int32_t> duplicateLogMode_;
+
+	BackupStatus lastQueuedBackupStatus_;
+	BackupStatus lastCompletedBackupStatus_;
+	util::Atomic<bool> enablePeriodicCheckpoint_;
 	std::vector<CheckpointId> currentCheckpointIdList_;
 
+	std::vector<uint8_t> checkpointReadyList_;
 
+
+
+	util::Atomic<int32_t> newestLogVersion_;
 };
 
+
+inline uint16_t CheckpointService::getNewestLogVersion() {
+	return static_cast<uint16_t>(newestLogVersion_);
+}
+
+inline void CheckpointService::setNewestLogVersion(uint16_t version) {
+	newestLogVersion_ = static_cast<int32_t>(version);
+}
 
 #endif  

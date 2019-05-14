@@ -10,9 +10,14 @@
   * 高度なデータモデルと操作モデル  
     従来の分散KVSでは、Put/Get/Removeという操作によりデータを操作します。GridDB/NoSQLは、これを大幅に拡張し、構造化データの定義機能、SQLライクなクエリ機能、トランザクション機能、JavaのAPI(Application Programming Interface)をサポートしており、RDBユーザがスムーズに導入できるようになっています。キー・バリューをキー・コンテナと呼ぶレコードの集合体でデータを表現します。これはRDBのテーブル名とテーブルの関係に類似しています。また、センサーデータ管理向けの応用機能も備わっています。
 
-##クイックスタート
-### サーバのビルド
-    CentOS6.7及びgccのバージョン4.4.7の環境での動作を確認しています。
+  本リポジトリにはサーバとJavaクライアントがあります。
+
+  (追加情報)  
+  [Maven Central Repository上にv4.0.0のJavaクライアント・パッケージ(Jar)](https://search.maven.org/search?q=g:com.github.griddb)があります。
+
+## クイックスタート
+### サーバ、クライアント(java)のビルド
+    CentOS 6.10(gcc 4.4.7)及びCentOS 7.4(gcc 4.8.5)の環境での動作を確認しています。
 
     $ ./bootstrap.sh
     $ ./configure
@@ -29,9 +34,6 @@
     $ export no_proxy=127.0.0.1
     $ bin/gs_startnode
     $ bin/gs_joincluster -c your_clustername -u admin/your_password
-    
-### クライアント(Java)のビルド
-    $ ant -f java_client/build.xml
 
 ### サンプルプログラムの実行
     $ export CLASSPATH=${CLASSPATH}:$GS_HOME/bin/gridstore.jar
@@ -44,10 +46,34 @@
 ## ドキュメント
   docsフォルダに以下のドキュメントがあります。
 
-  * クラスタ設計書(GridDBTechnicalDesignDocument_ja.pdf)
-  * スタートアップガイド(manual/GridDB_QuickStartGuide_ja.html)
-  * APIリファレンス(manual/GridDB_API_Reference_ja.html)
-  * RPMインストールガイド(manual/GridDB_RPM_InstallGuide.html)
+  * [クラスタ設計書](https://griddb.github.io/griddb_nosql/manual/GridDBTechnicalDesignDocument_ja.pdf) (GridDBTechnicalDesignDocument_ja.pdf)
+  * [スタートアップガイド](https://griddb.github.io/griddb_nosql/manual/GridDB_QuickStartGuide_ja.html) (manual/GridDB_QuickStartGuide_ja.html)
+  * [APIリファレンス](https://griddb.github.io/griddb_nosql/manual/GridDB_API_Reference_ja.html) (manual/GridDB_API_Reference_ja.html)
+  * [RPMインストールガイド](https://griddb.github.io/griddb_nosql/manual/GridDB_RPM_InstallGuide.html) (manual/GridDB_RPM_InstallGuide.html)
+  * [V3.0 Release Notes](docs/GridDB-3.0.0-CE-RELEASE_NOTES_ja.md) (GridDB-3.0.0-CE-RELEASE_NOTES_ja.md)
+  * [V4.0 Release Notes](docs/GridDB-4.0-CE-RELEASE_NOTES_ja.md) (GridDB-4.0-CE-RELEASE_NOTES_ja.md)
+  * [V4.1 Release Notes](docs/GridDB-4.1-CE-RELEASE_NOTES_ja.md) (GridDB-4.1-CE-RELEASE_NOTES_ja.md)
+  * [DEBインストールガイド](https://griddb.github.io/griddb_nosql/manual/GridDB_DEB_InstallGuide.html) (manual/GridDB_DEB_InstallGuide.html)
+
+## クライアントとコネクタ
+  Java以外のクライアント、APIもあります。
+  * [GridDB C Client](https://github.com/griddb/c_client/blob/master/README_ja.md)
+  * [GridDB Python Client](https://github.com/griddb/python_client)
+  * [GridDB Ruby Client](https://github.com/griddb/ruby_client)
+  * [GridDB Go Client](https://github.com/griddb/go_client)
+  * [GridDB Node.JS Client](https://github.com/griddb/nodejs_client)
+  * [GridDB PHP Client](https://github.com/griddb/php_client)
+  * [GridDB Perl Client](https://github.com/griddb/perl_client)
+  * [GridDB WebAPI](https://github.com/griddb/webapi)
+
+  他のOSSと接続するためのコネクタもあります。
+  * [GridDB connector for Apache Hadoop MapReduce](https://github.com/griddb/griddb_hadoop_mapreduce/blob/master/README_ja.md)
+  * [GridDB connector for YCSB](https://github.com/griddb/griddb_ycsb)
+  * [GridDB connector for KairosDB](https://github.com/griddb/griddb_kairosdb)
+  * [GridDB connector for Apache Spark](https://github.com/griddb/griddb_spark)
+  * [GridDB Foreign Data Wrapper for PostgreSQL (https://github.com/pgspider/griddb_fdw)](https://github.com/pgspider/griddb_fdw)
+  * [GridDB Sample Application for Apache Kafka](https://github.com/griddb/griddb_kafka_sample_app)
+  * [GridDB Data Source for Grafana](https://github.com/griddb/griddb-datasource)
 
 ## コミュニティ
   * Issues  
@@ -58,5 +84,5 @@
 
 ## ライセンス
   サーバソースのライセンスはGNU Affero General Public License (AGPL)、
-  クライアントライブラリと運用コマンドのライセンスはApache License, version 2.0です。
-  サードパーティのソースとライセンスについては3rd_party.mdを参照ください。
+  Javaクライアントと運用コマンドのライセンスはApache License, version 2.0です。
+  サードパーティのソースとライセンスについては3rd_party/3rd_party.mdを参照ください。

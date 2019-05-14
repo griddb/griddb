@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -48,8 +48,9 @@ BoolExpr::BoolExpr(
 		operands_.push_back(e2);
 	}
 	unary_ = NULL;
-	this->type_ = opType;
+	this->opeType_ = opType;
 	noEval_ = false;
+	type_ = BOOL_EXPR;
 }
 
 /*!
@@ -63,8 +64,9 @@ BoolExpr::BoolExpr(Operation opType, BoolTerms &terms, TransactionContext &txn)
 	: Expr(txn), operands_(txn.getDefaultAllocator()) {
 	operands_.assign(terms.begin(), terms.end());
 	unary_ = NULL;
-	this->type_ = opType;
+	this->opeType_ = opType;
 	noEval_ = false;
+	type_ = BOOL_EXPR;
 }
 
 /*!
@@ -77,7 +79,7 @@ BoolExpr::BoolExpr(Operation opType, BoolTerms &terms, TransactionContext &txn)
 BoolExpr::BoolExpr(Operation opType, TransactionContext &txn, int size, ...)
 	: Expr(txn), operands_(txn.getDefaultAllocator()) {
 	unary_ = NULL;
-	this->type_ = opType;
+	this->opeType_ = opType;
 
 	va_list argptr;
 	va_start(argptr, size);
@@ -91,6 +93,7 @@ BoolExpr::BoolExpr(Operation opType, TransactionContext &txn, int size, ...)
 	}
 	va_end(argptr);
 	noEval_ = false;
+	type_ = BOOL_EXPR;
 }
 
 /*!
@@ -103,8 +106,9 @@ BoolExpr::BoolExpr(Expr *e, TransactionContext &txn)
 	: Expr(txn), operands_(txn.getDefaultAllocator()) {
 	unary_ = e;
 	assert(e != NULL);
-	type_ = UNARY;
+	opeType_ = UNARY;
 	noEval_ = false;
+	type_ = BOOL_EXPR;
 }
 
 /*!
@@ -117,8 +121,28 @@ BoolExpr::BoolExpr(bool b, TransactionContext &txn)
 	: Expr(txn),
 	  operands_(txn.getDefaultAllocator()),
 	  unary_(Expr::newBooleanValue(b, txn)),
-	  type_(UNARY),
-	  noEval_(false) {}
+	  opeType_(UNARY),
+	  noEval_(false) {
+
+	type_ = BOOL_EXPR;
+}
+
+/*!
+* @brief Constructor as unary
+*
+* @param b a boolean value
+* @param txn The transaction context
+*/
+BoolExpr::BoolExpr(TrivalentLogicType b, TransactionContext &txn)
+	: Expr(txn),
+	  operands_(txn.getDefaultAllocator()),
+	  unary_(QP_NEW_BY_TXN(txn) Expr(b, txn)),
+	  opeType_(UNARY),
+	  noEval_(false) {
+
+	type_ = BOOL_EXPR;
+}
+
 
 /*!
 * @brief Generate full duplicate of the expression. (Deep copy)
@@ -129,13 +153,13 @@ BoolExpr::BoolExpr(bool b, TransactionContext &txn)
 BoolExpr *BoolExpr::dup(TransactionContext &txn, ObjectManager &objectManager) {
 	BoolExpr *b = NULL;
 
-	if (type_ == UNARY) {
+	if (opeType_ == UNARY) {
 		b = QP_NEW BoolExpr(unary_->dup(txn, objectManager), txn);
 		b->noEval_ = noEval_;
 	}
 	else {
 		b = QP_NEW BoolExpr(txn);
-		b->type_ = type_;
+		b->opeType_ = opeType_;
 		b->noEval_ = noEval_;
 		for (BoolTerms::const_iterator it = operands_.begin();
 			 it != operands_.end(); it++) {
@@ -151,7 +175,7 @@ BoolExpr *BoolExpr::dup(TransactionContext &txn, ObjectManager &objectManager) {
 *
 */
 BoolExpr::~BoolExpr() {
-	if (type_ == UNARY) {
+	if (opeType_ == UNARY) {
 		QP_SAFE_DELETE(unary_);
 	}
 	else {
@@ -173,38 +197,42 @@ BoolExpr::~BoolExpr() {
 *
 * @return Evaluation result
 */
-bool BoolExpr::eval(TransactionContext &txn, ObjectManager &objectManager,
+TrivalentLogicType BoolExpr::eval(TransactionContext &txn, ObjectManager &objectManager,
 	ContainerRowWrapper *column_values, FunctionMap *function_map,
-	bool default_return) {
-	bool x;
-	bool thrown = false;
+	TrivalentLogicType default_return) {
+	TrivalentLogicType x;
+	TrivalentLogicType thrown = TRI_FALSE;
 	util::Exception ex;
 	if (this->noEval_) {
 		return default_return;  
 	}
-	switch (type_) {
+	switch (opeType_) {
 	case AND: {
+		TrivalentLogicType ret = TRI_TRUE;
 		for (BoolTerms::const_iterator it = operands_.begin();
 			 it != operands_.end(); it++) {
 			try {
 				util::StackAllocator::Scope scope(txn.getDefaultAllocator());
 				x = (*it)->eval(txn, objectManager, column_values, function_map,
-					true);  
-				if (x == false) {
-					return false;
+					TRI_TRUE);  
+				if (x == TRI_FALSE) {
+					return TRI_FALSE;
+				} else if (x == TRI_NULL) {
+					ret = TRI_NULL;
 				}
 			}
 			catch (util::Exception &e) {
 				ex = e;
-				thrown = true;  
+				thrown = TRI_TRUE;  
 			}
 		}
-		if (thrown) {
+		if (thrown != TRI_FALSE) {
 			throw ex;
 		}
-		return true;
+		return ret;
 	}
 	case OR: {
+		TrivalentLogicType ret = TRI_FALSE;
 		for (BoolTerms::const_iterator it = operands_.begin();
 			 it != operands_.end(); it++) {
 			try {
@@ -212,34 +240,36 @@ bool BoolExpr::eval(TransactionContext &txn, ObjectManager &objectManager,
 					util::StackAllocator::Scope scope(
 						txn.getDefaultAllocator());
 					x = (*it)->eval(txn, objectManager, column_values,
-						function_map, false);  
-					if (x == true) {
-						return true;
+						function_map, TRI_FALSE);  
+					if (x == TRI_TRUE) {
+						return TRI_TRUE;
+					} else if (x == TRI_NULL) {
+						ret = TRI_NULL;
 					}
 				}
 			}
 			catch (util::Exception &e) {
 				ex = e;
-				thrown = true;  
+				thrown = TRI_TRUE;  
 			}
 		}
-		if (thrown) {
+		if (thrown != TRI_FALSE) {
 			throw ex;
 		}
-		return false;
+		return ret;
 	}
 	case NOT: {
 		util::StackAllocator::Scope scope(txn.getDefaultAllocator());
 		x = operands_[0]->eval(
-			txn, objectManager, column_values, function_map, !default_return);
-		return !x;
+			txn, objectManager, column_values, function_map, default_return);
+		return notTrivalentLogic(x);
 	}
 	case UNARY: {
 		Expr *e;
 		util::StackAllocator::Scope scope(txn.getDefaultAllocator());
 		e = unary_->eval(
 			txn, objectManager, column_values, function_map, EVAL_MODE_NORMAL);
-		x = *e;
+		x = e->castTrivalentLogicValue();
 		QP_DELETE(e);
 		return x;
 	}
@@ -263,14 +293,14 @@ BoolExpr *BoolExpr::makeDNF(
 	BoolTerms cExprs(txn.getDefaultAllocator());
 	BoolTerms::const_iterator it1, it2, it3, it4;
 
-	if (type_ == UNARY) {
+	if (opeType_ == UNARY) {
 		return this->dup(txn, objectManager);
 	}
-	else if (type_ == NOT) {
-		if (operands_[0]->type_ == UNARY) {
+	else if (opeType_ == NOT) {
+		if (operands_[0]->opeType_ == UNARY) {
 			return this->dup(txn, objectManager);
 		}
-		else if (operands_[0]->type_ == NOT) {
+		else if (operands_[0]->opeType_ == NOT) {
 			return operands_[0]->operands_[0]->makeDNF(txn, objectManager);
 		}
 		else {
@@ -287,7 +317,7 @@ BoolExpr *BoolExpr::makeDNF(
 
 	if (isAllHaveTheType(UNARY, cExprs)) {
 		BoolExpr *b = QP_NEW BoolExpr(txn);
-		b->type_ = type_;
+		b->opeType_ = opeType_;
 		for (it1 = cExprs.begin(); it1 != cExprs.end(); it1++) {
 			b->addOperand(txn, objectManager, *it1);
 			QP_DELETE(*it1);
@@ -296,11 +326,11 @@ BoolExpr *BoolExpr::makeDNF(
 		return b;  
 	}
 
-	if (type_ == AND && isNooneHaveTheType(OR, cExprs)) {
+	if (opeType_ == AND && isNooneHaveTheType(OR, cExprs)) {
 		BoolExpr *b = QP_NEW BoolExpr(txn);
-		b->type_ = AND;
+		b->opeType_ = AND;
 		for (it1 = cExprs.begin(); it1 != cExprs.end(); it1++) {
-			if ((*it1)->type_ == UNARY || (*it1)->type_ == NOT) {
+			if ((*it1)->opeType_ == UNARY || (*it1)->opeType_ == NOT) {
 				b->addOperand(txn, objectManager, *it1);
 			}
 			else {
@@ -312,11 +342,11 @@ BoolExpr *BoolExpr::makeDNF(
 		return b;
 	}
 
-	if (type_ == OR && isNooneHaveTheType(AND, cExprs)) {
+	if (opeType_ == OR && isNooneHaveTheType(AND, cExprs)) {
 		BoolExpr *b = QP_NEW BoolExpr(txn);
-		b->type_ = OR;
+		b->opeType_ = OR;
 		for (it1 = cExprs.begin(); it1 != cExprs.end(); it1++) {
-			if ((*it1)->type_ == UNARY || (*it1)->type_ == NOT) {
+			if ((*it1)->opeType_ == UNARY || (*it1)->opeType_ == NOT) {
 				b->addOperand(txn, objectManager, *it1);
 			}
 			else {
@@ -328,12 +358,12 @@ BoolExpr *BoolExpr::makeDNF(
 		return b;
 	}
 
-	if (type_ == NOT) {
+	if (opeType_ == NOT) {
 
-		assert(cExprs[0]->type_ == AND || cExprs[0]->type_ == OR);
+		assert(cExprs[0]->opeType_ == AND || cExprs[0]->opeType_ == OR);
 		BoolExpr *b = QP_NEW BoolExpr(txn);
-		if (cExprs[0]->type_ == AND) {  
-			b->type_ = OR;
+		if (cExprs[0]->opeType_ == AND) {  
+			b->opeType_ = OR;
 			for (it1 = cExprs[0]->operands_.begin();
 				 it1 != cExprs[0]->operands_.end(); it1++) {
 				BoolExpr *x = QP_NEW BoolExpr(NOT, *it1, NULL, txn);
@@ -349,8 +379,8 @@ BoolExpr *BoolExpr::makeDNF(
 			return b;
 		}
 		else {  
-			assert(cExprs[0]->type_ == OR);
-			b->type_ = AND;
+			assert(cExprs[0]->opeType_ == OR);
+			b->opeType_ = AND;
 			for (it1 = cExprs[0]->operands_.begin();
 				 it1 != cExprs[0]->operands_.end(); it1++) {
 				BoolExpr *x = QP_NEW BoolExpr(NOT, *it1, NULL, txn);
@@ -366,12 +396,12 @@ BoolExpr *BoolExpr::makeDNF(
 			return r;
 		}
 	}
-	else if (type_ == AND) {
+	else if (opeType_ == AND) {
 
 		BoolTerms tmpTerms1(txn.getDefaultAllocator()),
 			tmpTerms2(txn.getDefaultAllocator()),
 			tmpTerms3(txn.getDefaultAllocator());
-		if (cExprs[0]->type_ == OR) {
+		if (cExprs[0]->opeType_ == OR) {
 			tmpTerms3.assign(
 				cExprs[0]->operands_.begin(), cExprs[0]->operands_.end());
 		}
@@ -382,7 +412,7 @@ BoolExpr *BoolExpr::makeDNF(
 		it2 = cExprs.begin();
 		while (++it2 != cExprs.end()) {
 			tmpTerms1.assign(tmpTerms3.begin(), tmpTerms3.end());
-			if ((*it2)->type_ == OR) {
+			if ((*it2)->opeType_ == OR) {
 				tmpTerms2.assign(
 					(*it2)->operands_.begin(), (*it2)->operands_.end());
 			}
@@ -396,13 +426,13 @@ BoolExpr *BoolExpr::makeDNF(
 				for (it4 = tmpTerms2.begin(); it4 != tmpTerms2.end(); it4++) {
 					BoolExpr *e = (*it3)->makeDNF(txn, objectManager);
 					BoolExpr *f = (*it4)->makeDNF(txn, objectManager);
-					if (e->type_ == AND) {
+					if (e->opeType_ == AND) {
 						e->addOperand(txn, objectManager, f);
 						tmpTerms3.push_back(e->makeDNF(txn, objectManager));
 					}
 					else {
 						BoolExpr *b = QP_NEW BoolExpr(txn);
-						b->type_ = AND;
+						b->opeType_ = AND;
 						b->addOperand(txn, objectManager, e);
 						b->addOperand(txn, objectManager, f);
 						tmpTerms3.push_back(b->makeDNF(txn, objectManager));
@@ -421,12 +451,12 @@ BoolExpr *BoolExpr::makeDNF(
 		b->checkDNF();
 		return b;
 	}
-	else if (type_ == OR) {
+	else if (opeType_ == OR) {
 
 		BoolExpr *b = QP_NEW BoolExpr(txn);
-		b->type_ = OR;
+		b->opeType_ = OR;
 		for (it1 = cExprs.begin(); it1 != cExprs.end(); it1++) {
-			switch ((*it1)->type_) {
+			switch ((*it1)->opeType_) {
 			case UNARY:
 			case NOT:
 			case AND:
@@ -489,7 +519,7 @@ void BoolExpr::dumpTreeSub(TransactionContext &txn,
 	ObjectManager &objectManager, std::ostream &os, int level, const char *head,
 	ContainerRowWrapper *column_values, FunctionMap *function_map) {
 	os << head << ':';
-	switch (type_) {
+	switch (opeType_) {
 	case AND:
 		os << "AND" << std::endl;
 		break;
@@ -508,7 +538,7 @@ void BoolExpr::dumpTreeSub(TransactionContext &txn,
 		break;
 	}
 	}
-	if (type_ != UNARY) {
+	if (opeType_ != UNARY) {
 		util::String x("", QP_ALLOCATOR);
 		for (int i = 0; i < level; i++) {
 			x += "  ";
@@ -554,7 +584,7 @@ BoolExpr *BoolExpr::makeOptimizedExpr(TransactionContext &txn,
 	BoolTerms::iterator it;
 
 
-	if (type_ == AND) {
+	if (opeType_ == AND) {
 		BoolTerms newOps(txn.getDefaultAllocator());
 		for (it = operands_.begin(); it != operands_.end(); it++) {
 			BoolExpr *bExpr = (*it)->makeOptimizedExpr(
@@ -564,7 +594,7 @@ BoolExpr *BoolExpr::makeOptimizedExpr(TransactionContext &txn,
 		return QP_NEW BoolExpr(AND, newOps, txn);
 
 	}
-	else if (type_ == OR) {
+	else if (opeType_ == OR) {
 		BoolTerms newOps(txn.getDefaultAllocator());
 		for (it = operands_.begin(); it != operands_.end(); it++) {
 			BoolExpr *bExpr = (*it)->makeOptimizedExpr(
@@ -574,18 +604,18 @@ BoolExpr *BoolExpr::makeOptimizedExpr(TransactionContext &txn,
 		return QP_NEW BoolExpr(OR, newOps, txn);
 
 	}
-	else if (type_ == NOT) {
+	else if (opeType_ == NOT) {
 		BoolExpr *bExpr = operands_[0]->makeOptimizedExpr(
 			txn, objectManager, column_values, function_map);
-		bool b;
 		try {
+			TrivalentLogicType b;
 			{
 				util::StackAllocator::Scope scope(txn.getDefaultAllocator());
 				b = bExpr->eval(
-					txn, objectManager, column_values, function_map, true);
+					txn, objectManager, column_values, function_map, TRI_TRUE);
 				QP_DELETE(bExpr);
 			}
-			return QP_NEW BoolExpr(!b, txn);
+			return QP_NEW BoolExpr(notTrivalentLogic(b), txn);
 		}
 		catch (util::Exception &) {
 			BoolExpr *p = QP_NEW BoolExpr(NOT, bExpr, NULL, txn);
@@ -594,7 +624,7 @@ BoolExpr *BoolExpr::makeOptimizedExpr(TransactionContext &txn,
 			return r;
 		}
 	}
-	else if (type_ == UNARY) {
+	else if (opeType_ == UNARY) {
 		Expr *e = NULL;
 		e = unary_->eval(txn, objectManager, column_values, function_map,
 			EVAL_MODE_CONTRACT);
@@ -616,7 +646,7 @@ void BoolExpr::toOrList(util::XArray<BoolExpr *> &orList) {
 	assert(orList.empty());
 	this->checkDNF();
 
-	switch (type_) {
+	switch (opeType_) {
 	case AND:
 	case UNARY:
 	case NOT:
@@ -643,7 +673,7 @@ void BoolExpr::toAndList(util::XArray<BoolExpr *> &andList) {
 	assert(andList.empty());
 	this->checkDNF();
 
-	switch (type_) {
+	switch (opeType_) {
 	case UNARY:
 	case NOT:  
 		andList.push_back(this);  
@@ -670,20 +700,21 @@ void BoolExpr::toAndList(util::XArray<BoolExpr *> &andList) {
 bool BoolExpr::getCondition(TransactionContext &txn, MapType type,
 	uint32_t indexColumnId, Query &queryObj, TermCondition *&cond,
 	const void *&startKey, uint32_t &startKeySize, int32_t &isStartKeyIncluded,
-	const void *&endKey, uint32_t &endKeySize, int32_t &isEndKeyIncluded) {
+	const void *&endKey, uint32_t &endKeySize, int32_t &isEndKeyIncluded,
+	NullCondition &nullCond) {
 	Expr *unary;
 	const void *startKey2 = startKey, *endKey2 = endKey;
-	if (this->type_ == UNARY) {
+	if (this->opeType_ == UNARY) {
 		unary = this->unary_;
 		cond = unary->toCondition(txn, type, indexColumnId, queryObj, startKey,
 			startKeySize, isStartKeyIncluded, endKey, endKeySize,
-			isEndKeyIncluded, false);
+			isEndKeyIncluded, nullCond, false);
 	}
-	else if (this->type_ == NOT) {
+	else if (this->opeType_ == NOT) {
 		unary = this->operands_[0]->unary_;
 		cond = unary->toCondition(txn, type, indexColumnId, queryObj, startKey,
 			startKeySize, isStartKeyIncluded, endKey, endKeySize,
-			isEndKeyIncluded, true);
+			isEndKeyIncluded, nullCond, true);
 	}
 	else {
 		GS_THROW_USER_ERROR(GS_ERROR_TQ_CRITICAL_LOGIC_ERROR,
@@ -718,7 +749,7 @@ void BoolExpr::toSearchContext(TransactionContext &txn,
 		TermCondition *c = NULL;
 		conditionDealed = andList[i]->getCondition(txn, MAP_TYPE_BTREE, cid,
 			queryObj, c, sc.startKey_, sc.startKeySize_, sc.isStartKeyIncluded_,
-			sc.endKey_, sc.endKeySize_, sc.isEndKeyIncluded_);
+			sc.endKey_, sc.endKeySize_, sc.isEndKeyIncluded_, sc.nullCond_);
 		if (c) {
 			sc.conditionList_[sc.conditionNum_++] = *c;
 		}
@@ -758,7 +789,7 @@ void BoolExpr::toSearchContext(TransactionContext &txn,
 		TermCondition *c = NULL;
 		conditionDealed = andList[i]->getCondition(txn, MAP_TYPE_HASH,
 			sc.columnId_, queryObj, c, sc.key_, sc.keySize_, dummyBool,
-			dummyKey, dummySize, dummyBool);
+			dummyKey, dummySize, dummyBool, sc.nullCond_);
 		if (c) {
 			sc.conditionList_[sc.conditionNum_++] = *c;
 		}
@@ -772,6 +803,60 @@ void BoolExpr::toSearchContext(TransactionContext &txn,
 	sc.limit_ = (0 == restEval) ? limit : MAX_RESULT_SIZE;
 }
 
+/*!
+ * @brief transform and expressions into RtreeMap's SearchContext
+ *
+ */
+void BoolExpr::toSearchContext(TransactionContext &txn,
+	util::XArray<BoolExpr *> &andList, ColumnInfo *indexColumnInfo,
+	QueryForCollection &queryObj, RtreeMap::SearchContext &sc,
+	uint32_t &restEval, ResultSize limit) {
+	uint32_t cid = (indexColumnInfo == NULL) ? UNDEF_COLUMNID
+											 : indexColumnInfo->getColumnId();
+	sc = RtreeMap::SearchContext();
+	sc.conditionList_ =
+		reinterpret_cast<TermCondition *>(txn.getDefaultAllocator().allocate(
+			sizeof(TermCondition) * andList.size()));
+	sc.columnId_ = cid;
+	restEval = 0;
+
+	uint32_t dummySize;
+	int32_t dummyBool = 0, conditionDealed;
+//	uint32_t dummyColumnId = 0;
+	uint32_t dummyRelation = 0;
+	const void *r1 = NULL, *r2 = NULL;
+
+	for (size_t i = 0; i < andList.size(); i++) {
+		TermCondition *c = NULL;
+		conditionDealed = andList[i]->getCondition(txn, MAP_TYPE_SPATIAL,
+			sc.columnId_, queryObj, c, r1, dummyRelation, dummyBool, r2,
+			dummySize, dummyBool, sc.nullCond_);
+		if (c) {
+			sc.conditionList_[sc.conditionNum_++] = *c;
+		}
+		if (r1) {
+			sc.relation_ = dummyRelation;
+			if (sc.relation_ == GEOMETRY_QSF_INTERSECT) {
+				sc.pkey_ = *reinterpret_cast<const TrPv3Key *>(r1);
+			}
+			else {
+				sc.rect_[0] = *reinterpret_cast<const TrRectTag *>(r1);
+				if (r2) {
+					sc.rect_[1] = *reinterpret_cast<const TrRectTag *>(r2);
+				}
+			}
+			sc.columnId_ = indexColumnInfo->getColumnId();
+			sc.valid_ = true;
+		}
+		if (conditionDealed) {
+			andList[i]->enableEvaluationFilter();
+		}
+		else {
+			restEval++;
+		}
+	}
+	sc.limit_ = (0 == restEval) ? limit : MAX_RESULT_SIZE;
+}
 
 /*!
  * @brief transform and expressions into BtreeMap's SearchContext
@@ -803,7 +888,7 @@ void BoolExpr::toSearchContext(TransactionContext &txn,
 		conditionDealed = andList[i]->getCondition(txn, MAP_TYPE_BTREE,
 			sc.columnId_, queryObj, c, sc.startKey_, sc.startKeySize_,
 			sc.isStartKeyIncluded_, sc.endKey_, sc.endKeySize_,
-			sc.isEndKeyIncluded_);
+			sc.isEndKeyIncluded_, sc.nullCond_);
 		if (c) {
 			sc.conditionList_[sc.conditionNum_++] = *c;
 		}
@@ -848,7 +933,7 @@ void BoolExpr::toSearchContext(TransactionContext &txn,
 			memset(&c, 0, sizeof(TermCondition));
 			c.columnOffset_ = 0;
 			c.columnId_ = 0;
-			c.operator_ = gtTable[COLUMN_TYPE_TIMESTAMP][COLUMN_TYPE_TIMESTAMP];
+			c.operator_ = ComparatorTable::gtTable_[COLUMN_TYPE_TIMESTAMP][COLUMN_TYPE_TIMESTAMP];
 			c.value_ = reinterpret_cast<uint8_t *>(&expireTs);
 			sc.conditionList_[sc.conditionNum_++] = c;
 		}
@@ -864,7 +949,7 @@ void BoolExpr::getIndexBitmapAndInfo(TransactionContext &txn,
 	ColumnInfo *&indexColumnInfo) {
 	Expr *unary;
 	Expr::Operation op = Expr::NONE;
-	if (this->type_ == UNARY) {
+	if (this->opeType_ == UNARY) {
 		unary = this->unary_;
 		unary->getIndexBitmapAndInfo(txn, baseContainer, queryObj, mapBitmap,
 			indexColumnInfo, op, false);
@@ -881,7 +966,7 @@ void BoolExpr::getIndexBitmapAndInfo(TransactionContext &txn,
 			}
 		}
 	}
-	else if (this->type_ == NOT) {
+	else if (this->opeType_ == NOT) {
 		unary = this->operands_[0]->unary_;
 		unary->getIndexBitmapAndInfo(
 			txn, baseContainer, queryObj, mapBitmap, indexColumnInfo, op, true);
@@ -906,13 +991,19 @@ void BoolExpr::getIndexBitmapAndInfo(TransactionContext &txn,
 Expr *BoolExpr::eval(TransactionContext &txn, ObjectManager &objectManager,
 	ContainerRowWrapper *column_values, FunctionMap *function_map,
 	EvalMode mode) {
-	bool b;
 	switch (mode) {
 	case EVAL_MODE_NORMAL: {
-		util::StackAllocator::Scope scope(txn.getDefaultAllocator());
-		b = this->eval(txn, objectManager, column_values, function_map, true);
+		TrivalentLogicType b;
+		{
+			util::StackAllocator::Scope scope(txn.getDefaultAllocator());
+			b = this->eval(txn, objectManager, column_values, function_map, TRI_TRUE);
+		}
+		if (b == TRI_NULL) {
+			return Expr::newNullValue(txn);
+		} else {
+			return Expr::newBooleanValue(b == TRI_TRUE, txn);
+		}
 	}
-		return Expr::newBooleanValue(b, txn);
 	case EVAL_MODE_PRINT: {
 		util::NormalOStringStream os;
 		dumpTreeSub(txn, objectManager, os, 0, "", column_values, function_map);

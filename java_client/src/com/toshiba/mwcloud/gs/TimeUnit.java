@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -16,7 +16,11 @@
 package com.toshiba.mwcloud.gs;
 
 /**
+ * <div lang="ja">
+ * 時系列処理で用いる時間の単位を示します。
+ * </div><div lang="en">
  * Represents the time unit(s) used in TimeSeries data operation.
+ * </div>
  */
 public enum TimeUnit {
 

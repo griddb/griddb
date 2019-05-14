@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -36,6 +36,7 @@ import com.toshiba.mwcloud.gs.GSException;
 import com.toshiba.mwcloud.gs.common.BasicBuffer;
 import com.toshiba.mwcloud.gs.common.GSConnectionException;
 import com.toshiba.mwcloud.gs.common.GSErrorCode;
+import com.toshiba.mwcloud.gs.common.GSStatementException;
 import com.toshiba.mwcloud.gs.common.InternPool;
 import com.toshiba.mwcloud.gs.common.LoggingUtils;
 import com.toshiba.mwcloud.gs.common.LoggingUtils.BaseGridStoreLogger;
@@ -77,18 +78,8 @@ public class NodeResolver implements Closeable {
 
 	private InetSocketAddress masterAddress;
 
-	private InetSocketAddress prevMasterAddress;
-
 	private final NodeConnection.Config connectionConfig =
 			new NodeConnection.Config();
-
-	private final NodeConnection.LoginInfo loginInfo;
-
-	private int partitionCount;
-
-	private int notifiedPartitionCount;
-
-	private ContainerHashMode containerHashMode;
 
 	private NodeConnection masterConnection;
 
@@ -101,6 +92,8 @@ public class NodeResolver implements Closeable {
 	private volatile long connectionTrialCounter;
 
 	private boolean connectionFailedPreviously;
+
+	private Throwable lastProblem;
 
 	private final InternPool<InetSocketAddress> addressCache =
 			new InternPool<InetSocketAddress>();
@@ -122,15 +115,14 @@ public class NodeResolver implements Closeable {
 	private ProtocolConfig protocolConfig;
 
 	public enum ContainerHashMode {
-		CRC32
+		COMPATIBLE1,
+		MD5
 	}
 
 	public NodeResolver(
 			NodeConnectionPool pool,
 			boolean passive, InetSocketAddress address,
 			NodeConnection.Config connectionConfig,
-			NodeConnection.LoginInfo loginInfo,
-			int partitionCount,
 			ServiceAddressResolver.Config sarConfig,
 			List<InetSocketAddress> memberList,
 			AddressConfig addressConfig) throws GSException {
@@ -141,12 +133,6 @@ public class NodeResolver implements Closeable {
 		this.notificationAddress = (passive ? address : null);
 		this.masterAddress = (passive ? null : address);
 		this.connectionConfig.set(connectionConfig);
-		this.loginInfo = new NodeConnection.LoginInfo(loginInfo);
-		this.loginInfo.setDatabase(
-				NodeConnection.LoginInfo.DEFAULT_DATABASE_NAME);
-		this.loginInfo.setOwnerMode(false);
-		this.partitionCount = partitionCount;
-		this.containerHashMode = (passive ? null : ContainerHashMode.CRC32);
 		this.preferableConnectionPoolSize = pool.getMaxSize();
 		this.serviceAddressResolver = makeServiceAddressResolver(
 				sarConfig, memberList, addressConfig);
@@ -188,14 +174,6 @@ public class NodeResolver implements Closeable {
 		return resolver;
 	}
 
-	public synchronized void setUser(String user) {
-		loginInfo.setUser(user);
-	}
-
-	public synchronized void setPassword(String password) {
-		loginInfo.setPassword(password);
-	}
-
 	public synchronized void setConnectionConfig(
 			NodeConnection.Config connectionConfig) {
 		this.connectionConfig.set(connectionConfig);
@@ -216,35 +194,51 @@ public class NodeResolver implements Closeable {
 		this.protocolConfig = protocolConfig;
 	}
 
-	public int getPartitionCount() throws GSException {
-		final long startTrialCount = connectionTrialCounter;
-		synchronized (this) {
-			if (partitionCount <= 0) {
-				prepareMasterConnection(startTrialCount);
+	public int getPartitionCount(ClusterInfo clusterInfo) throws GSException {
+		if (clusterInfo.getPartitionCount() == null) {
+			final long startTrialCount = connectionTrialCounter;
+			synchronized (this) {
+				prepareConnectionAndClusterInfo(clusterInfo, startTrialCount);
 			}
-
-			return partitionCount;
 		}
+		return clusterInfo.getPartitionCount();
 	}
 
-	public ContainerHashMode getContainerHashMode()
+	public ContainerHashMode getContainerHashMode(ClusterInfo clusterInfo)
 			throws GSException {
-		final long startTrialCount = connectionTrialCounter;
-		synchronized (this) {
-			if (containerHashMode == null) {
-				prepareMasterConnection(startTrialCount);
+		if (clusterInfo.getHashMode() == null) {
+			final long startTrialCount = connectionTrialCounter;
+			synchronized (this) {
+				prepareConnectionAndClusterInfo(clusterInfo, startTrialCount);
 			}
-
-			return containerHashMode;
 		}
+		return clusterInfo.getHashMode();
 	}
 
-	public InetSocketAddress getMasterAddress()
+	public long getDatabaseId(ClusterInfo clusterInfo) throws GSException {
+		if (clusterInfo.getDatabaseId() == null) {
+			final long startTrialCount = connectionTrialCounter;
+			synchronized (this) {
+				prepareConnectionAndClusterInfo(clusterInfo, startTrialCount);
+			}
+		}
+		return clusterInfo.getDatabaseId();
+	}
+
+	public void acceptDatabaseId(
+			ClusterInfo clusterInfo, long databaseId,
+			InetSocketAddress address) throws GSException {
+		final boolean byConnection = true;
+		acceptClusterInfo(
+				clusterInfo, null, null, databaseId, address, byConnection);
+	}
+
+	public InetSocketAddress getMasterAddress(ClusterInfo clusterInfo)
 			throws GSException {
 		final long startTrialCount = connectionTrialCounter;
 		synchronized (this) {
 			if (masterAddress == null) {
-				prepareMasterConnection(startTrialCount);
+				prepareConnectionAndClusterInfo(clusterInfo, startTrialCount);
 			}
 
 			return masterAddress;
@@ -252,20 +246,21 @@ public class NodeResolver implements Closeable {
 	}
 
 	public InetSocketAddress getNodeAddress(
-			int partitionId, boolean backupPreferred) throws GSException {
-		return getNodeAddress(partitionId, backupPreferred, -1, null);
+			ClusterInfo clusterInfo, int partitionId, boolean backupPreferred)
+			throws GSException {
+		return getNodeAddress(
+				clusterInfo, partitionId, backupPreferred, null);
 	}
 
 	public InetSocketAddress getNodeAddress(
-			int partitionId, boolean backupPreferred,
-			int partitionCount, InetAddress preferableHost)
-			throws GSException {
+			ClusterInfo clusterInfo, int partitionId, boolean backupPreferred,
+			InetAddress preferableHost) throws GSException {
 		final long startTrialCount = connectionTrialCounter;
 
 		final InetSocketAddress[] addressList;
 		synchronized (this) {
 			addressList = getNodeAddressList(
-					partitionId, backupPreferred, partitionCount, startTrialCount,
+					clusterInfo, partitionId, backupPreferred, startTrialCount,
 					false);
 		}
 
@@ -292,22 +287,21 @@ public class NodeResolver implements Closeable {
 	}
 
 	public InetSocketAddress[] getNodeAddressList(
-			int partitionId) throws GSException {
+			ClusterInfo clusterInfo, int partitionId) throws GSException {
 		final long startTrialCount = connectionTrialCounter;
 
 		final InetSocketAddress[] addressList;
 		synchronized (this) {
 			addressList = getNodeAddressList(
-					partitionId, true, partitionCount, startTrialCount, false);
+					clusterInfo, partitionId, true, startTrialCount, false);
 		}
 
 		return Arrays.copyOf(addressList, addressList.length);
 	}
 
 	private InetSocketAddress[] getNodeAddressList(
-			int partitionId, boolean backupPreferred,
-			int partitionCount, long startTrialCount, boolean allowEmpty)
-			throws GSException {
+			ClusterInfo clusterInfo, int partitionId, boolean backupPreferred,
+			long startTrialCount, boolean allowEmpty) throws GSException {
 		final Integer partitionIdKey = partitionId;
 		InetSocketAddress[] addressList;
 		addressList = nodeAddressMap.get(partitionId);
@@ -315,31 +309,12 @@ public class NodeResolver implements Closeable {
 			return addressList;
 		}
 
-		prepareMasterConnection(startTrialCount);
-
-		if (partitionCount > 0 && this.partitionCount > 0 &&
-				partitionCount != this.partitionCount) {
-			throw new GSConnectionException(
-					GSErrorCode.INTERNAL_ERROR,
-					"Internal error by inconsistent partition count (" +
-					"expected=" + partitionCount +
-					", current=" + this.partitionCount +
-					", currentMaster=" + masterAddress +
-					", previousMaster=" + prevMasterAddress + ")");
-		}
-
-		if (partitionId < 0 ||
-				this.partitionCount > 0 && partitionId >= this.partitionCount) {
-			throw new GSException(
-					GSErrorCode.INTERNAL_ERROR,
-					"Internal error by invalid partition ID (" +
-					"partitionId=" + partitionId +
-					", partitionCount=" + partitionCount +
-					", masterAddress=" + masterAddress + ")");
+		if (masterConnection == null ||
+				clusterInfo.partitionCount.get() == null) {
+			prepareConnectionAndClusterInfo(clusterInfo, startTrialCount);
 		}
 
 		NodeConnection.fillRequestHead(ipv6Enabled, req);
-		boolean succeeded = false;
 		try {
 			NodeConnection.tryPutEmptyOptionalRequest(req);
 			masterConnection.executeStatementDirect(
@@ -347,7 +322,10 @@ public class NodeResolver implements Closeable {
 							Statement.GET_PARTITION_ADDRESS),
 					partitionId, 0, req, resp, null);
 
-			acceptPartitionCount(resp.base().getInt(), false);
+			final int partitionCount = resp.base().getInt();
+			acceptClusterInfo(
+					clusterInfo, partitionCount, null, null, masterAddress,
+					true);
 
 			final byte[] addressBuffer = new byte[getInetAddressSize()];
 			final int sockAddrSize =
@@ -408,13 +386,14 @@ public class NodeResolver implements Closeable {
 
 			updateConnectionPoolSize();
 
-			succeeded = true;
-			connectionFailedPreviously = false;
+			clearLastProblem();
 			return addressList;
 		}
-		finally {
-			if (!succeeded) {
-				connectionFailedPreviously = true;
+		catch (Throwable t) {
+			try {
+				throw acceptProblem(t, true);
+			}
+			finally {
 				try {
 					masterConnection.close();
 				}
@@ -445,51 +424,86 @@ public class NodeResolver implements Closeable {
 		catch (UnknownHostException e) {
 			throw new GSConnectionException(
 					GSErrorCode.MESSAGE_CORRUPTED,
-					"Prorotol error by invalid address (" +
+					"Protocol error by invalid address (" +
 					"reason=" + e.getMessage() + ")", e);
 		}
 		catch (IllegalArgumentException e) {
 			throw new GSConnectionException(
 					GSErrorCode.MESSAGE_CORRUPTED,
-					"Prorotol error by invalid address (" +
+					"Protocol error by invalid address (" +
 					"reason=" + e.getMessage() + ")", e);
 		}
 
 		return addressCache.intern(address);
 	}
 
-	private void prepareMasterConnection(
-			long startTrialCount) throws GSException {
-		boolean succeeded = false;
-		try {
-			if (connectionFailedPreviously &&
-					startTrialCount != connectionTrialCounter) {
-				throw new GSConnectionException(
-						GSErrorCode.CONNECTION_TIMEOUT,
-						"Previously failed in the other thread");
+	private void checkLastProblem(long startTrialCount) throws GSException {
+		if (connectionFailedPreviously &&
+				startTrialCount != connectionTrialCounter) {
+			int errorCode = GSErrorCode.BAD_CONNECTION;
+			String reason = "(unknown)";
+
+			if (lastProblem != null) {
+				errorCode = 0;
+				reason = lastProblem.getMessage();
 			}
+
+			throw new GSConnectionException(
+					errorCode,
+					"Previously failed in the other thread (reason=" +
+					reason + ")");
+		}
+	}
+
+	private GSException acceptProblem(
+			Throwable cause, boolean lastProblemChecked) {
+		connectionFailedPreviously = true;
+		if (lastProblemChecked) {
+			lastProblem = cause;
+		}
+		return GSErrorCode.acceptGSException(cause);
+	}
+
+	private void clearLastProblem() {
+		connectionFailedPreviously = false;
+		lastProblem = null;
+	}
+
+	private void prepareConnectionAndClusterInfo(
+			ClusterInfo clusterInfo, long startTrialCount) throws GSException {
+		boolean lastProblemChecked = false;
+		try {
+			checkLastProblem(startTrialCount);
+			lastProblemChecked = true;
 
 			if (masterAddress == null) {
 				connectionTrialCounter++;
 				if (serviceAddressResolver == null) {
-					updateMasterInfo();
+					updateMasterInfo(clusterInfo);
 				}
 				else {
 					updateNotificationMember();
 				}
 			}
 
-			while (!tryUpdateMasterConnection()) {
+			while (!updateConnectionAndClusterInfo(clusterInfo)) {
 				connectionTrialCounter++;
 			}
 
-			succeeded = true;
-			connectionFailedPreviously = false;
+			clearLastProblem();
 		}
-		finally {
-			if (!succeeded) {
-				connectionFailedPreviously = true;
-				invalidateMaster();
+		catch (Throwable t) {
+			final boolean invalidated = clusterInfo.invalidate();
+			if (invalidated || !(t instanceof GSStatementException)) {
+				try {
+					invalidateMaster(clusterInfo);
+				}
+				catch (Throwable t2) {
+				}
+				throw acceptProblem(t, lastProblemChecked);
+			}
+			else {
+				throw GSErrorCode.acceptGSException(t);
 			}
 		}
 	}
@@ -538,11 +552,8 @@ public class NodeResolver implements Closeable {
 		}
 	}
 
-	private boolean tryUpdateMasterConnection() throws GSException {
-		if (masterConnection != null) {
-			return true;
-		}
-
+	private boolean updateConnectionAndClusterInfo(ClusterInfo clusterInfo)
+			throws GSException {
 		NodeConnection pendingConnection = null;
 		try {
 			final InetSocketAddress address;
@@ -569,38 +580,54 @@ public class NodeResolver implements Closeable {
 				address = serviceAddressResolver.getAddress(index, 0);
 				if (alwaysMaster) {
 					masterAddress = address;
-					containerHashMode = ContainerHashMode.CRC32;
 				}
 			}
 			else {
 				address = masterAddress;
 			}
-			final boolean masterResolving = (masterAddress == null);
+
+			final boolean masterUnresolved = (masterAddress == null);
+
+			final boolean masterResolvable =
+					GridStoreChannel.isMasterResolvableByConnection();
+			if (masterUnresolved && !masterResolvable) {
+				throw new GSException(GSErrorCode.INTERNAL_ERROR, "");
+			}
 
 			LOGGER.debug(
-					"discovery.checkingMaster",
-					masterAddress,
-					address);
+					"discovery.checkingMaster", masterAddress, address);
 
-			pendingConnection = pool.resolve(
-					address, req, resp, connectionConfig,
-					loginInfo, !connectionFailedPreviously);
+			final NodeConnection.LoginInfo loginInfo = clusterInfo.loginInfo;
+			final long[] databaseIdRef = new long[1];
+			final NodeConnection connection;
+			if (masterConnection == null) {
+				connection = pool.resolve(
+						address, req, resp, connectionConfig, loginInfo,
+						databaseIdRef, !connectionFailedPreviously);
+				pendingConnection = connection;
+			}
+			else {
+				connection = masterConnection;
+				connection.login(req, resp, loginInfo, databaseIdRef);
+			}
 
 			NodeConnection.fillRequestHead(ipv6Enabled, req);
 			NodeConnection.tryPutEmptyOptionalRequest(req);
 
-			if (masterResolving) {
+			if (masterResolvable) {
 				req.putBoolean(true);
 			}
 
 			final int partitionId = 0;
-			pendingConnection.executeStatementDirect(
+			connection.executeStatementDirect(
 					protocolConfig.getNormalStatementType(
 							Statement.GET_PARTITION_ADDRESS),
 					partitionId, 0, req, resp, null);
 
 			final int partitionCount = resp.base().getInt();
-			if (masterResolving) {
+			final boolean masterMatched;
+			final ContainerHashMode hashMode;
+			if (masterResolvable) {
 				final byte ownerCount = resp.base().get();
 				final byte backupCount = resp.base().get();
 				if (ownerCount != 0 || backupCount != 0 ||
@@ -610,37 +637,42 @@ public class NodeResolver implements Closeable {
 							"Protocol error by invalid master location");
 				}
 
-				final boolean masterMatched = resp.getBoolean();
-				containerHashMode = decodeContainerHashMode(resp);
+				masterMatched = resp.getBoolean();
+				hashMode = decodeContainerHashMode(resp);
 				masterAddress = decodeSocketAddress(
 						resp, new byte[getInetAddressSize()]);
 
-				LOGGER.debug(
-						"discovery.masterFound",
-						masterAddress,
-						pendingConnection.getRemoteSocketAddress(),
-						containerHashMode,
-						partitionCount);
-
-				if (!masterMatched) {
-					final NodeConnection connection = pendingConnection;
-					pendingConnection = null;
-					pool.add(connection);
+				if (masterUnresolved) {
+					LOGGER.debug(
+							"discovery.masterFound",
+							masterAddress,
+							connection.getRemoteSocketAddress(),
+							hashMode,
+							partitionCount);
 				}
 			}
+			else {
+				masterMatched = true;
+				hashMode = GridStoreChannel.getDefaultContainerHashMode();
+			}
 
-			if (pendingConnection != null) {
+			if (masterMatched && pendingConnection != null) {
+				masterConnection = pendingConnection;
+				pendingConnection = null;
+			}
+
+			final long databaseId = databaseIdRef[0];
+			if (masterConnection != null) {
+				acceptClusterInfo(
+						clusterInfo, partitionCount, hashMode, databaseId,
+						masterAddress, true);
+
 				LOGGER.debug(
 						"discovery.masterUpdated",
 						notificationAddress,
 						masterAddress,
-						containerHashMode,
+						hashMode,
 						partitionCount);
-
-				acceptPartitionCount(partitionCount, false);
-
-				masterConnection = pendingConnection;
-				pendingConnection = null;
 			}
 		}
 		finally {
@@ -652,7 +684,7 @@ public class NodeResolver implements Closeable {
 		return (masterConnection != null);
 	}
 
-	private void updateMasterInfo() throws GSException {
+	private void updateMasterInfo(ClusterInfo clusterInfo) throws GSException {
 		MulticastSocket socket = null;
 		try {
 			if (LOGGER.isDebugEnabled()) {
@@ -703,7 +735,7 @@ public class NodeResolver implements Closeable {
 				throw new GSConnectionException(
 						GSErrorCode.MESSAGE_CORRUPTED,
 						"Protocol error by illegal statement type (" +
-						"type=" + resp.base().getInt() + ")");
+						"type=" + statementType + ")");
 			}
 
 			final byte[] addressData = new byte[getInetAddressSize()];
@@ -717,19 +749,21 @@ public class NodeResolver implements Closeable {
 						GSErrorCode.MESSAGE_CORRUPTED,
 						"Protocol error by negative partition count");
 			}
-			final ContainerHashMode containerHashMode =
+			final ContainerHashMode hashMode =
 					decodeContainerHashMode(resp);
 
-			acceptPartitionCount(partitionCount, true);
+			acceptClusterInfo(
+					clusterInfo, partitionCount, hashMode, null,
+					notificationAddress, false);
+
 			this.masterAddress = masterAddress;
-			this.containerHashMode = containerHashMode;
 
 			if (LOGGER.isDebugEnabled()) {
 				LOGGER.debug(
 						"discovery.masterUpdated",
 						notificationAddress,
 						masterAddress,
-						containerHashMode,
+						hashMode,
 						partitionCount);
 			}
 		}
@@ -760,96 +794,178 @@ public class NodeResolver implements Closeable {
 		}
 	}
 
-	public synchronized void invalidateMaster() {
+	public synchronized void invalidateMaster(ClusterInfo clusterInfo) {
+		clusterInfo.invalidate();
+
 		if (LOGGER.isDebugEnabled()) {
 			LOGGER.debug(
 					"discovery.invalidatingMaster",
 					notificationAddress,
 					masterAddress,
-					containerHashMode,
-					partitionCount,
+					clusterInfo.hashMode.get(),
+					clusterInfo.partitionCount.get(),
 					(masterConnection != null));
 		}
 
-		nodeAddressMap.clear();
-		addressCache.clear();
-
-		notifiedPartitionCount = 0;
-
 		if (notificationAddress != null || serviceAddressResolver != null) {
 			masterAddress = null;
-			containerHashMode = null;
 		}
 
-		if (masterConnection != null) {
-			try {
-				masterConnection.close();
-			}
-			catch (GSException e) {
-			}
-			masterConnection = null;
+		try {
+			releaseMasterCache(true);
+		}
+		catch (GSException e) {
 		}
 
 		updateConnectionPoolSize();
 	}
 
-	private void acceptPartitionCount(
-			int partitionCount, boolean fromNotification)
-			throws GSConnectionException {
-		if (partitionCount <= 0) {
-			throw new GSConnectionException(
-					GSErrorCode.MESSAGE_CORRUPTED,
-					"Protocol error by negative partition count");
-		}
+	public synchronized void releaseMasterCache(boolean forceClose)
+			throws GSException {
+		nodeAddressMap.clear();
+		addressCache.clear();
 
-		if (partitionCount == this.partitionCount) {
-			return;
-		}
+		if (masterConnection != null) {
+			final NodeConnection connection = masterConnection;
+			masterConnection = null;
 
-		do {
-			if (this.partitionCount > 0) {
-				break;
-			}
-
-			if (fromNotification) {
-				notifiedPartitionCount = partitionCount;
+			if (forceClose) {
+				connection.close();
 			}
 			else {
-				if (notifiedPartitionCount > 0 &&
-						partitionCount != notifiedPartitionCount) {
-					break;
-				}
-
-				this.partitionCount = partitionCount;
-				prevMasterAddress = masterAddress;
+				pool.add(connection);
 			}
+		}
+	}
+
+	private void acceptClusterInfo(
+			ClusterInfo clusterInfo, Integer partitionCount,
+			ContainerHashMode hashMode, Long databaseId,
+			InetSocketAddress address, boolean byConnection)
+			throws GSException {
+		if (partitionCount != null && partitionCount <= 0) {
+			throw new GSConnectionException(
+					GSErrorCode.MESSAGE_CORRUPTED,
+					"Protocol error by non positive partition count (" +
+					"value=" + partitionCount + ")");
+		}
+
+		if (databaseId != null && databaseId < 0) {
+			throw new GSConnectionException(
+					GSErrorCode.MESSAGE_CORRUPTED,
+					"Protocol error by negative database ID (" +
+					"value=" + databaseId + ")");
+		}
+
+		for (boolean checkOnly = true;; checkOnly = false) {
+			acceptClusterInfoEntry(
+					clusterInfo, clusterInfo.partitionCount, "partition count",
+					partitionCount, address, byConnection, checkOnly);
+			acceptClusterInfoEntry(
+					clusterInfo, clusterInfo.hashMode, "container hash mode",
+					hashMode, address, byConnection, checkOnly);
+			acceptClusterInfoEntry(
+					clusterInfo, clusterInfo.databaseId, "database ID",
+					databaseId, address, byConnection, checkOnly);
+
+			if (!checkOnly) {
+				break;
+			}
+		}
+	}
+
+	private <T> void acceptClusterInfoEntry(
+			ClusterInfo clusterInfo, ClusterInfoEntry<T> entry,
+			String name, T value, InetSocketAddress address,
+			boolean byConnection, boolean checkOnly)
+			throws GSException {
+		if (entry.tryAccept(value, address, byConnection, checkOnly)) {
 			return;
 		}
-		while (false);
 
-		final String clusterName = (loginInfo.getClusterName() == null ||
-				loginInfo.getClusterName().isEmpty() ? null :
-				loginInfo.getClusterName());
-		throw new GSConnectionException(
-				GSErrorCode.ILLEGAL_PARTITION_COUNT,
-				"Multiple cluster detected with same network configuration " +
-				"or fundamental cluster configuration has been changed " +
-				"by receiving different partition count. " +
-				"Same cluster name might be assigned at the different " +
-				"cluster. " +
-				"Please check cluster configuration (" +
-				"specifiedPartitionCount=" + partitionCount +
-				", prevPartitionCount=" + (this.partitionCount <= 0 ?
-						"(not yet set)" : this.partitionCount) +
-				", prevMasterAddress=" + (prevMasterAddress == null ?
-						"(not yet set)" : prevMasterAddress) +
-				", fromNotification=" + fromNotification +
-				(fromNotification ?
-						", notificationAddress=" + notificationAddress :
-						", masterAddress=" + masterAddress) +
-				", clusterName=" +(clusterName == null ?
-						"(not specified)" : clusterName) +
-				")");
+		final StringBuilder builder = new StringBuilder();
+		final NodeConnection.LoginInfo loginInfo = clusterInfo.loginInfo;
+
+		if (entry == clusterInfo.databaseId) {
+			builder.append(
+					"Database may be dropped and created again with same " +
+					"database name ");
+		}
+		else {
+			builder.append(
+					"Multiple cluster may have been existent with same " +
+					"network configuration ");
+		}
+
+		builder.append(
+				"or fundamental cluster configuration may have been " +
+				"changed ");
+
+		builder.append("detected by receiving different ");
+		builder.append(name);
+		builder.append(". ");
+
+		builder.append(
+				"Please check previous operations or cluster configuration (");
+
+		builder.append("receivedValue=");
+		builder.append(value);
+		builder.append(", previousValue=");
+		builder.append(entry.get());
+
+		builder.append(", ");
+		formatAddressParameter(builder, "receivedAddress", address);
+		builder.append(", ");
+		formatAddressParameter(
+				builder, "previousAddress", entry.acceptedAddress);
+
+		builder.append(", ");
+		formatStringParameter(
+				builder, "clusterName", loginInfo.getClusterName());
+
+		if (entry == clusterInfo.databaseId) {
+			builder.append(", ");
+			formatStringParameter(
+					builder, "database", loginInfo.getDatabase());
+		}
+
+		builder.append(")");
+
+		final int errorCode = (entry == clusterInfo.partitionCount ?
+				GSErrorCode.ILLEGAL_PARTITION_COUNT :
+				GSErrorCode.ILLEGAL_CONFIG);
+		if (byConnection) {
+			throw new GSException(errorCode, builder.toString());
+		}
+		else {
+			throw new GSConnectionException(errorCode, builder.toString());
+		}
+	}
+
+	private static void formatAddressParameter(
+			StringBuilder builder, String name, InetSocketAddress value) {
+		builder.append(name);
+		builder.append("=");
+		if (value == null) {
+			builder.append("(manually specified)");
+		}
+		else {
+			builder.append(value);
+		}
+	}
+
+	private static void formatStringParameter(
+			StringBuilder builder, String name, String value) {
+		builder.append(name);
+		builder.append("=");
+		if (value == null) {
+			builder.append("(not specified)");
+		}
+		else {
+			builder.append("\"");
+			builder.append(value);
+			builder.append("\"");
+		}
 	}
 
 	private void updateConnectionPoolSize() {
@@ -858,10 +974,100 @@ public class NodeResolver implements Closeable {
 	}
 
 	public synchronized void close() throws GSException {
-		if (masterConnection != null) {
-			pool.add(masterConnection);
-			masterConnection = null;
+		releaseMasterCache(false);
+	}
+
+	private static class ClusterInfoEntry<T> {
+
+		T value;
+
+		boolean acceptedByConnection;
+
+		InetSocketAddress acceptedAddress;
+
+		T get() {
+			return value;
 		}
+
+		boolean tryAccept(
+				T value, InetSocketAddress address, boolean byConnection,
+				boolean checkOnly) {
+			if (value == null) {
+				return true;
+			}
+
+			if (this.value == null) {
+				if (!checkOnly) {
+					this.value = value;
+				}
+			}
+			else if (!this.value.equals(value)) {
+				return false;
+			}
+
+			if (!checkOnly) {
+				acceptedByConnection |= byConnection;
+				acceptedAddress = address;
+			}
+
+			return true;
+		}
+
+		boolean invalidate() {
+			if (!acceptedByConnection && value != null) {
+				value = null;
+				return true;
+			}
+			return false;
+		}
+
+	}
+
+	public static class ClusterInfo {
+
+		final NodeConnection.LoginInfo loginInfo;
+
+		final ClusterInfoEntry<Integer> partitionCount =
+				new ClusterInfoEntry<Integer>();
+
+		final ClusterInfoEntry<ContainerHashMode> hashMode =
+				new ClusterInfoEntry<ContainerHashMode>();
+
+		final ClusterInfoEntry<Long> databaseId = new ClusterInfoEntry<Long>();
+
+		public ClusterInfo(NodeConnection.LoginInfo loginInfo) {
+			this.loginInfo = new NodeConnection.LoginInfo(loginInfo);
+			this.loginInfo.setOwnerMode(false);
+		}
+
+		boolean invalidate() {
+			boolean invalidated = false;
+			invalidated |= partitionCount.invalidate();
+			invalidated |= hashMode.invalidate();
+			invalidated |= databaseId.invalidate();
+			return invalidated;
+		}
+
+		public Integer getPartitionCount() {
+			return partitionCount.get();
+		}
+
+		public ContainerHashMode getHashMode() {
+			return hashMode.get();
+		}
+
+		public Long getDatabaseId() {
+			return databaseId.get();
+		}
+
+		public void setPartitionCount(Integer partitionCount) {
+			if (partitionCount != null && partitionCount <= 0) {
+				return;
+			}
+
+			this.partitionCount.tryAccept(partitionCount, null, true, false);
+		}
+
 	}
 
 	public static abstract class ProtocolConfig {
@@ -882,7 +1088,8 @@ public class NodeResolver implements Closeable {
 		@Override
 		public int getNormalStatementType(Statement statement) {
 			if (statement == Statement.GET_PARTITION_ADDRESS) {
-				return NodeConnection.statementToNumber(statement);
+				return NodeConnection.statementToNumber(
+						statement.generalize());
 			}
 			else {
 				throw new Error();
@@ -950,7 +1157,7 @@ public class NodeResolver implements Closeable {
 			throw new GSException(
 					GSErrorCode.ILLEGAL_PARAMETER,
 					"Port out of range (" +
-					"port=" + port + ", propertyName=" + portKey +  ")");
+					"port=" + port + ", propertyName=" + portKey + ")");
 		}
 
 		if (address == null) {

@@ -1,5 +1,5 @@
 ﻿/*
-    Copyright (c) 2012 TOSHIBA CORPORATION.
+    Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
     
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License as
@@ -60,65 +60,6 @@
 
 namespace util {
 
-#if UTIL_MINOR_MODULE_ENABLED
-
-
-struct Barrier::Data {
-#ifdef UTIL_HAVE_POSIX_BARRIER
-	pthread_barrier_t barrier_;
-#endif
-};
-
-struct BarrierAttribute::Data {
-#ifdef UTIL_HAVE_POSIX_BARRIER
-	pthread_barrierattr_t attr_;
-#endif
-};
-
-Barrier::Barrier(size_t count, const BarrierAttribute *attr) : data_(new Data) {
-#ifdef UTIL_HAVE_POSIX_BARRIER
-	if (0 != pthread_barrier_init(&data_->barrier_,
-		(attr ? &attr->data_->attr_ : NULL), count))
-	{
-		UTIL_THROW_PLATFORM_ERROR(NULL);
-	}
-#else
-	UTIL_THROW_NOIMPL_UTIL();
-#endif
-}
-
-Barrier::~Barrier() {
-#ifdef UTIL_HAVE_POSIX_BARRIER
-	pthread_barrier_destroy(&data_->barrier_);
-#endif
-}
-
-void Barrier::wait(void) {
-#ifdef UTIL_HAVE_POSIX_BARRIER
-	const int result = pthread_barrier_wait(&data_->barrier_);
-	if (0 != result && PTHREAD_BARRIER_SERIAL_THREAD != result) {
-		UTIL_THROW_PLATFORM_ERROR(NULL);
-	}
-#else
-	UTIL_THROW_NOIMPL_UTIL();
-#endif
-}
-
-BarrierAttribute::BarrierAttribute() : data_(new Data) {
-#ifdef UTIL_HAVE_POSIX_BARRIER
-	if (0 != pthread_barrierattr_init(&data_->attr_)) {
-		UTIL_THROW_PLATFORM_ERROR(NULL);
-	}
-#endif
-}
-
-BarrierAttribute::~BarrierAttribute() {
-#ifdef UTIL_HAVE_POSIX_BARRIER
-	pthread_barrierattr_destroy(&data_->attr_);
-#endif
-}
-
-#endif 
 
 
 struct Condition::Data {

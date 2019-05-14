@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -29,23 +29,41 @@ import java.util.TimeZone;
 import com.toshiba.mwcloud.gs.common.GSErrorCode;
 
 /**
+ * <div lang="ja">
+ * 時刻データを操作するためのユーティリティ機能を提供します。
+ * </div><div lang="en">
  * Provides the utilities for manipulating time data.
+ * </div>
  */
 public class TimestampUtils {
 
 	private static final boolean TRIM_MILLISECONDS = false;
 
+	@Deprecated
+	public TimestampUtils() {
+	}
+
 	/**
+	 * <div lang="ja">
+	 * 現在時刻を求めます。
+	 * </div><div lang="en">
 	 * Returns the current time.
+	 * </div>
 	 */
 	public static Date current() {
 		return currentCalendar().getTime();
 	}
 
 	/**
+	 * <div lang="ja">
+	 * 現在時刻を{@link Calendar}として求めます。
+	 *
+	 * <p>現バージョンでは、タイムゾーンは常にUTCに設定されます。</p>
+	 * </div><div lang="en">
 	 * Returns the current time as a {@link Calendar} object.
 	 *
 	 * <p>The current version always uses the UTC timezone.</p>
+	 * </div>
 	 */
 	public static Calendar currentCalendar() {
 		final Calendar calendar =
@@ -57,21 +75,43 @@ public class TimestampUtils {
 	}
 
 	/**
+	 * <div lang="ja">
+	 * 時刻に一定の値を加算します。
+	 *
+	 * <p>{@code amount}に負の値を指定することで、指定の時刻より
+	 * 前の時刻を求めることができます。</p>
+	 *
+	 * <p>現バージョンでは、算出の際に使用されるタイムゾーンはUTCです。</p>
+	 *
+	 * @param timestamp 対象とする時刻
+	 * @param amount 加算する値
+	 * @param timeUnit 加算する値の単位
+	 *
+	 * @throws NullPointerException {@code timestamp}、{@code timeUnit}に
+	 * {@code null}が指定された場合
+	 * </div><div lang="en">
 	 * Adds a specific value to the specified time.
 	 *
 	 * <p>An earlier time than the specified time can be obtained by specifying a negative value as {@code amount}.</p>
 	 *
 	 * <p>The current version uses the UTC timezone for calculation.</p>
+	 *
+	 * @param timestamp target time
+	 * @param amount value to be added
+	 * @param timeUnit unit of value to be added
+	 *
+	 * @throws NullPointerException when {@code null} is specified for {@code timestamp}, {@code timeUnit}
+	 * </div>
 	 */
-	public static Date add(Date timeStamp, int amount, TimeUnit timeUnit) {
+	public static Date add(Date timestamp, int amount, TimeUnit timeUnit) {
 		final Calendar calendar = currentCalendar();
 
 		try {
-			calendar.setTime(timeStamp);
+			calendar.setTime(timestamp);
 			calendar.add(toCalendarField(timeUnit), amount);
 		}
 		catch (NullPointerException e) {
-			GSErrorCode.checkNullParameter(timeStamp, "timeStamp", e);
+			GSErrorCode.checkNullParameter(timestamp, "timestamp", e);
 			GSErrorCode.checkNullParameter(timeUnit, "timeUnit", e);
 			throw e;
 		}
@@ -106,23 +146,50 @@ public class TimestampUtils {
 	}
 
 	/**
+	 * <div lang="ja">
+	 * TQLのTIMESTAMP値表記に従い、時刻の文字列表現を求めます。
+	 *
+	 * <p>現バージョンでは、変換の際に使用されるタイムゾーンはUTCです。</p>
+	 *
+	 * @param timestamp 対象とする時刻
+	 *
+	 * @throws NullPointerException 引数に{@code null}が指定された場合
+	 * </div><div lang="en">
 	 * Returns the string representing the specified time, according to the TIMESTAMP value notation of TQL.
 	 *
 	 * <p>The current version uses the UTC timezone for conversion.</p>
+	 *
+	 * @param timestamp target time
+	 *
+	 * @throws NullPointerException when {@code null} is specified as argument
+	 * </div>
 	 */
-	public static String format(Date timeStamp) {
+	public static String format(Date timestamp) {
 		try {
-			return getFormat().format(timeStamp);
+			return getFormat().format(timestamp);
 		}
 		catch (NullPointerException e) {
-			throw GSErrorCode.checkNullParameter(timeStamp, "timeStamp", e);
+			throw GSErrorCode.checkNullParameter(timestamp, "timestamp", e);
 		}
 	}
 
 	/**
+	 * <div lang="ja">
+	 * TQLのTIMESTAMP値表記に従い、指定の文字列に対応する{@link Date}を
+	 * 求めます。
+	 *
+	 * @param source 対象とする時刻の文字列表現
+	 *
+	 * @throws ParseException 時刻の文字列表記と一致しない文字列が指定された場合
+	 * @throws NullPointerException 引数に{@code null}が指定された場合
+	 * </div><div lang="en">
 	 * Returns a {@link Date} object corresponding to the specified string, according to the TIMESTAMP value notation of TQL.
 	 *
+	 * @param source string representation of target time
+	 *
 	 * @throws ParseException if the specified string does not match any time representation.
+	 * @throws NullPointerException when {@code null} is specified as argument
+	 * </div>
 	 */
 	public static Date parse(String source) throws ParseException {
 		try {
@@ -134,9 +201,15 @@ public class TimestampUtils {
 	}
 
 	/**
+	 * <div lang="ja">
+	 * TQLのTIMESTAMP値表記と対応する、日付フォーマットを求めます。
+	 *
+	 * <p>年の値が負となる時刻は扱えません。</p>
+	 * </div><div lang="en">
 	 * Returns the date format conforming to the TIMESTAMP value notation of TQL.
 	 *
 	 * <p>The time representation containing a negative year value is not supported.</p>
+	 * </div>
 	 */
 	public static DateFormat getFormat() {
 		return new CustomDateFormat();

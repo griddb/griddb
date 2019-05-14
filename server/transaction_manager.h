@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -28,8 +28,6 @@
 #include "expirable_map.h"
 #include "transaction_context.h"
 
-#ifndef NDEBUG
-#endif
 
 class BaseContainer;
 
@@ -59,6 +57,47 @@ public:
 	virtual ~ContextNotFoundException() throw() {}
 };
 
+typedef uint64_t AuthenticationId;
+const AuthenticationId TXN_UNDEF_AUTHENTICATIONID = 0;
+
+/*!
+	@brief Represents contextual information around the current authentication
+*/
+class AuthenticationContext {
+	friend class TransactionManager;
+
+public:
+	AuthenticationContext();
+	~AuthenticationContext();
+
+	AuthenticationContext &operator=(const AuthenticationContext &authContext);
+
+	AuthenticationId getAuthenticationId() const;
+
+	PartitionId getPartitionId() const;
+
+	StatementId getStatementId() const;
+
+	const NodeDescriptor &getConnectionND() const;
+
+	EventMonotonicTime getExpireTime() const;
+
+
+private:
+	AuthenticationId id_;
+
+	PartitionId pId_;
+	StatementId stmtId_;
+
+	NodeDescriptor clientNd_;
+
+	EventMonotonicTime timeout_;
+
+
+	AuthenticationContext(const AuthenticationContext &authContext);
+	void clear();
+};
+
 
 typedef uint64_t ReplicationId;
 const ReplicationId TXN_UNDEF_REPLICATIONID = 0;
@@ -70,6 +109,8 @@ class ReplicationContext {
 	friend class TransactionManager;
 
 public:
+	typedef util::XArray<uint8_t, util::StdAllocator<uint8_t, void> > BinaryData;
+
 	ReplicationContext();
 	~ReplicationContext();
 
@@ -85,6 +126,9 @@ public:
 
 	ContainerId getContainerId() const;
 
+	SchemaVersionId getContainerSchemaVersionId() const;
+	void setContainerSchemaVersionId(SchemaVersionId schemaVersionId);
+
 	StatementId getStatementId() const;
 
 	const NodeDescriptor &getConnectionND() const;
@@ -97,6 +141,29 @@ public:
 	bool getExistFlag() const;
 	void setExistFlag(bool flag);
 
+	/*!
+		@brief Task status
+	*/
+	enum TaskStatus {
+		TASK_FINISHED = 0,
+		TASK_CONTINUE = 1,
+	};
+
+	void setTaskStatus(TaskStatus status) {
+		taskStatus_ =  status;
+	}
+	TaskStatus getTaskStatus() const {
+		return taskStatus_;
+	}
+	void setOriginalStmtId(StatementId stmtId) {
+		originalStmtId_ = stmtId;
+	}
+	StatementId getOriginalStatementId() const {
+		return originalStmtId_;
+	}
+
+	void setBinaryData(const void *data, size_t size);
+	const std::vector<BinaryData*>& getBinaryDatas() const;
 
 private:
 	ReplicationId id_;
@@ -104,9 +171,11 @@ private:
 	int32_t stmtType_;
 
 	ClientId clientId_;
+	ClientId ackClientId_;
 
 	PartitionId pId_;
 	ContainerId containerId_;
+	SchemaVersionId schemaVersionId_;
 	StatementId stmtId_;
 
 	NodeDescriptor clientNd_;
@@ -114,11 +183,22 @@ private:
 	int32_t ackCounter_;
 	EventMonotonicTime timeout_;
 
+	TaskStatus taskStatus_;
+	StatementId originalStmtId_;
+
 	bool existFlag_;
 
+
+	bool isSync_;
+	int32_t subContainerId_;
+	StatementId execId_;
+
+	util::VariableSizeAllocator<> *alloc_;
+	std::vector<BinaryData*> binaryDatas_;
+	
 	ReplicationContext(const ReplicationContext &replContext);
 	void clear();
-
+	void clearBinaryData();
 };
 
 /*!
@@ -133,7 +213,7 @@ public:
 	*/
 	enum ReplicationMode { REPLICATION_ASYNC, REPLICATION_SEMISYNC };
 
-	TransactionManager(const ConfigTable &config);
+	TransactionManager(ConfigTable &config);
 	~TransactionManager();
 
 	void createPartition(PartitionId pId);
@@ -147,6 +227,9 @@ public:
 	int32_t getReplicationMode() const;
 
 	int32_t getReplicationTimeoutInterval() const;
+	int32_t getAuthenticationTimeoutInterval() const;
+
+	int32_t getReauthenticationInterval() const;
 
 	typedef uint8_t GetMode;
 	static const GetMode AUTO;  
@@ -159,9 +242,12 @@ public:
 
 	typedef uint8_t TransactionMode;
 	static const TransactionMode AUTO_COMMIT;  
-	static const TransactionMode NO_AUTO_COMMIT_BEGIN;  
-	static const TransactionMode NO_AUTO_COMMIT_CONTINUE;			
-	static const TransactionMode NO_AUTO_COMMIT_BEGIN_OR_CONTINUE;  
+	static const TransactionMode
+		NO_AUTO_COMMIT_BEGIN;  
+	static const TransactionMode
+		NO_AUTO_COMMIT_CONTINUE;  
+	static const TransactionMode
+		NO_AUTO_COMMIT_BEGIN_OR_CONTINUE;  
 
 	/*!
 		@brief ContextSource
@@ -184,6 +270,11 @@ public:
 	};
 
 	TransactionContext &put(util::StackAllocator &alloc, PartitionId pId,
+		const ClientId &clientId, const ContextSource &src,
+		const util::DateTime &now, EventMonotonicTime emNow,
+		bool isRedo = false, TransactionId txnId = UNDEF_TXNID);
+
+	TransactionContext &putNoExpire(util::StackAllocator &alloc, PartitionId pId,
 		const ClientId &clientId, const ContextSource &src,
 		const util::DateTime &now, EventMonotonicTime emNow,
 		bool isRedo = false, TransactionId txnId = UNDEF_TXNID);
@@ -222,6 +313,13 @@ public:
 		const util::XArray<bool> &checkPartitionFlagList,
 		util::XArray<PartitionId> &pIds, util::XArray<ClientId> &clientIds);
 
+	void getKeepaliveTimeoutContextId(util::StackAllocator &alloc,
+		PartitionGroupId pgId, EventMonotonicTime emNow,
+		const util::XArray<bool> &checkPartitionFlagList,
+		util::XArray<PartitionId> &pIds, util::XArray<ClientId> &clientIds);
+	void getNoExpireTransactionContextId(util::StackAllocator &alloc,
+		PartitionId pId, util::XArray<ClientId> &clientIds);
+
 	void backupTransactionActiveContext(PartitionId pId,
 		TransactionId &maxTxnId, util::XArray<ClientId> &clientIds,
 		util::XArray<TransactionId> &activeTxnIds,
@@ -247,16 +345,33 @@ public:
 		util::XArray<ReplicationId> &replIds);
 
 
+	AuthenticationContext &putAuth(PartitionId pId, StatementId stmtId,
+		NodeDescriptor ND, EventMonotonicTime emNow, bool isNewSQL = false);
+
+	AuthenticationContext &getAuth(PartitionId pId, AuthenticationId authId);
+
+	void removeAuth(PartitionId pId, AuthenticationId authId);
+
+	void removeAllAuthenticationContext();
+
+	void getAuthenticationTimeoutContextId(PartitionGroupId pgId,
+		EventMonotonicTime emNow, util::XArray<PartitionId> &pIds,
+		util::XArray<AuthenticationId> &authIds);
+
 	void checkActiveTransaction(PartitionGroupId pgId);
 
 	uint64_t getTransactionContextCount(PartitionGroupId pgId);
 	uint64_t getActiveTransactionCount(PartitionGroupId pgId);
 	uint64_t getReplicationContextCount(PartitionGroupId pgId);
+	uint64_t getAuthenticationContextCount(PartitionGroupId pgId);
 
 	uint64_t getRequestTimeoutCount(PartitionId pId) const;
 	uint64_t getTransactionTimeoutCount(PartitionId pId) const;
 	uint64_t getReplicationTimeoutCount(PartitionId pId) const;
 
+	uint64_t getAuthenticationTimeoutCount(PartitionId pId) const;
+
+	uint64_t getNoExpireTransactionCount(PartitionGroupId pgId) const;
 
 	size_t getMemoryUsage(
 		PartitionGroupId pgId, bool includeFreeMemory = false);
@@ -272,6 +387,7 @@ private:
 	static const TransactionId INITIAL_TXNID =
 		TransactionContext::AUTO_COMMIT_TXNID;
 	static const ReplicationId INITIAL_REPLICATIONID = 1;
+	static const AuthenticationId INITIAL_AUTHENTICATIONID = 1;
 
 	static const size_t DEFAULT_BLOCK_SIZE_BITS =
 		20;  
@@ -333,6 +449,23 @@ private:
 			return static_cast<size_t>(key.replId_);
 		}
 	};
+	struct AuthenticationContextKey {
+		AuthenticationId authId_;
+		PartitionId pId_;
+
+		AuthenticationContextKey() : authId_(0), pId_(0) {}
+		AuthenticationContextKey(PartitionId pId, AuthenticationId authId)
+			: authId_(authId), pId_(pId) {}
+
+		bool operator==(const AuthenticationContextKey &key) const {
+			return (authId_ == key.authId_ && pId_ == key.pId_);
+		}
+	};
+	struct AuthenticationContextKeyHash {
+		size_t operator()(const AuthenticationContextKey &key) {
+			return static_cast<size_t>(key.authId_);
+		}
+	};
 
 	typedef util::ExpirableMap<ClientId, TransactionContext, EventMonotonicTime,
 		TransactionContextKeyHash>
@@ -343,6 +476,9 @@ private:
 	typedef util::ExpirableMap<ReplicationContextKey, ReplicationContext,
 		EventMonotonicTime, ReplicationContextKeyHash>
 		ReplicationContextMap;
+	typedef util::ExpirableMap<AuthenticationContextKey, AuthenticationContext,
+		EventMonotonicTime, AuthenticationContextKeyHash>
+		AuthenticationContextMap;
 
 	/*!
 		@brief Provides the functions of managing each partition
@@ -361,7 +497,7 @@ private:
 			StatementId stmtId, int32_t txnTimeoutInterval,
 			const util::DateTime &now, EventMonotonicTime emNow,
 			GetMode getMode, TransactionMode txnMode, bool isUpdateStmt,
-			bool isRedo, TransactionId txnId);
+			bool isRedo, TransactionId txnId, bool isExistTimeoutLimit);
 		TransactionContext &get(
 			util::StackAllocator &alloc, const ClientId &clientId);
 		void remove(const ClientId &clientId);
@@ -422,7 +558,8 @@ private:
 
 	public:
 		ReplicationContextPartition(
-			PartitionId pId, ReplicationContextMap *replContextMap);
+			PartitionId pId, ReplicationContextMap *replContextMap,
+			util::VariableSizeAllocator<> *replAllocator);
 		~ReplicationContextPartition();
 
 		ReplicationContext &put(const ClientId &clientId,
@@ -440,14 +577,61 @@ private:
 
 		ReplicationContextMap *replContextMap_;
 
+		util::VariableSizeAllocator<> *replAllocator_;
+
 		uint64_t replTimeoutCount_;
 	};
 
+	class AuthenticationContextPartition {
+		friend class TransactionManager;
 
+	public:
+		AuthenticationContextPartition(
+			PartitionId pId, AuthenticationContextMap *authContextMap);
+		~AuthenticationContextPartition();
+
+		AuthenticationContext &putAuth(StatementId stmtId, NodeDescriptor ND,
+			int32_t authTimeoutInterval, EventMonotonicTime emNow,
+			bool isSQLService = false);
+		AuthenticationContext &getAuth(AuthenticationId authId);
+		void removeAuth(AuthenticationId authId);
+
+		uint64_t getAuthenticationTimeoutCount() const;
+
+	private:
+		const PartitionId pId_;
+		AuthenticationId maxAuthId_;
+
+		AuthenticationContextMap *authContextMap_;
+
+		uint64_t authTimeoutCount_;
+	};
+
+	/*!
+		@brief Represents config
+	*/
+	struct Config : public ConfigTable::ParamHandler {
+		Config(int32_t reauthenticationInterval);
+
+		void setUpConfigHandler(ConfigTable &configTable);
+		virtual void operator()(
+			ConfigTable::ParamId id, const ParamValue &value);
+
+		int32_t getAtomicReauthenticationInterval() const {
+			return atomicReauthenticationInterval_;
+		}
+		void setAtomicReauthenticationInterval(int32_t val) {
+			atomicReauthenticationInterval_ = val;
+		}
+
+		util::Atomic<int32_t> atomicReauthenticationInterval_;
+	};
 
 	const PartitionGroupConfig pgConfig_;
 	const int32_t replicationMode_;
 	const int32_t replicationTimeoutInterval_;
+	const int32_t authenticationTimeoutInterval_;
+	Config reauthConfig_;
 	const int32_t txnTimeoutLimit_;
 
 	std::vector<TransactionContextMap::Manager *> txnContextMapManager_;
@@ -459,9 +643,14 @@ private:
 	std::vector<ReplicationContextMap::Manager *> replContextMapManager_;
 	std::vector<ReplicationContextMap *> replContextMap_;
 
+	std::vector<AuthenticationContextMap::Manager *> authContextMapManager_;
+	std::vector<AuthenticationContextMap *> authContextMap_;
+
+	std::vector<util::VariableSizeAllocator<> *> replAllocator_;
 
 	std::vector<Partition *> partition_;
 	std::vector<ReplicationContextPartition *> replContextPartition_;
+	std::vector<AuthenticationContextPartition *> authContextPartition_;
 
 	std::vector<int32_t> ptLock_;
 	util::Mutex *ptLockMutex_;
@@ -469,8 +658,14 @@ private:
 	void finalize();
 
 	void createReplContextPartition(PartitionId pId);
+	void createAuthContextPartition(PartitionId pId);
 
 	void begin(TransactionContext &txn, EventMonotonicTime emNow);
+
+	void updateRequestTimeout(
+		PartitionGroupId pgId, const TransactionContext &txn);
+	void updateTransactionOrRequestTimeout(
+		PartitionGroupId pgId, const TransactionContext &txn);
 
 
 	/*!

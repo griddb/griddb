@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -63,33 +63,40 @@ class ObjectManager;
 struct ManagerSet {
 	ManagerSet(ClusterService *clsSvc, SyncService *syncSvc,
 		TransactionService *txnSvc, CheckpointService *cpSvc,
-		SystemService *sysSvc, TriggerService *trgSvc, PartitionTable *pt,
-		DataStore *ds, LogManager *logMgr, ClusterManager *clsMgr,
-		SyncManager *syncMgr, TransactionManager *txnMgr,
-		ChunkManager *chunkMgr, RecoveryManager *recoveryMgr,
-		ObjectManager *objectMgr, GlobalFixedSizeAllocator *fixedSizeAlloc,
+		SystemService *sysSvc, TriggerService *trgSvc,
+		PartitionTable *pt, DataStore *ds, LogManager *logMgr,
+		ClusterManager *clsMgr, SyncManager *syncMgr,
+		TransactionManager *txnMgr, ChunkManager *chunkMgr,
+		RecoveryManager *recoveryMgr, ObjectManager *objectMgr,
+		GlobalFixedSizeAllocator *fixedSizeAlloc,
 		GlobalVariableSizeAllocator *varSizeAlloc, ConfigTable *config,
 		StatTable *stats
 		)
 		: clsSvc_(clsSvc),
-		  syncSvc_(syncSvc),
-		  txnSvc_(txnSvc),
-		  cpSvc_(cpSvc),
-		  sysSvc_(sysSvc),
-		  trgSvc_(trgSvc),
-		  pt_(pt),
-		  ds_(ds),
-		  logMgr_(logMgr),
-		  clsMgr_(clsMgr),
-		  syncMgr_(syncMgr),
-		  txnMgr_(txnMgr),
-		  chunkMgr_(chunkMgr),
-		  recoveryMgr_(recoveryMgr),
-		  objectMgr_(objectMgr),
-		  fixedSizeAlloc_(fixedSizeAlloc),
-		  varSizeAlloc_(varSizeAlloc),
-		  config_(config),
-		  stats_(stats) {
+		syncSvc_(syncSvc),
+		txnSvc_(txnSvc),
+		cpSvc_(cpSvc),
+		sysSvc_(sysSvc),
+		trgSvc_(trgSvc),
+		pt_(pt),
+		ds_(ds),
+		logMgr_(logMgr),
+		clsMgr_(clsMgr),
+		syncMgr_(syncMgr),
+		txnMgr_(txnMgr),
+		chunkMgr_(chunkMgr),
+		recoveryMgr_(recoveryMgr),
+		objectMgr_(objectMgr),
+		fixedSizeAlloc_(fixedSizeAlloc),
+		varSizeAlloc_(varSizeAlloc),
+		config_(config),
+		stats_(stats) {
+	}
+	ManagerSet() :
+	clsSvc_(NULL), syncSvc_(NULL), txnSvc_(NULL), cpSvc_(NULL), sysSvc_(NULL), trgSvc_(NULL),
+	pt_(NULL), ds_(NULL), logMgr_(NULL), clsMgr_(NULL), syncMgr_(NULL),
+	txnMgr_(NULL), chunkMgr_(NULL), recoveryMgr_(NULL), objectMgr_(NULL),
+	fixedSizeAlloc_(NULL), varSizeAlloc_(NULL), config_(NULL), stats_(NULL) {
 	}
 
 
@@ -114,6 +121,7 @@ struct ManagerSet {
 	ConfigTable *config_;
 	StatTable *stats_;
 };
+
 
 /*!
 	@brief Represents cluster statistics
@@ -177,7 +185,7 @@ struct ClusterStats {
 			eventErrorCount_[eventType]++;
 			totalErrorCount_++;
 		}
-		if (pId != UNDEF_PARTITIONID && pId >= 0 && pId < partitionNum_) {
+		if (pId != UNDEF_PARTITIONID && pId < partitionNum_) {
 			partitionErrorCount_[pId]++;
 		}
 	}
@@ -239,24 +247,24 @@ public:
 
 	ClusterHandler()
 		: pt_(NULL),
-		  clsMgr_(NULL),
-		  clsEE_(NULL),
-		  clsSvc_(NULL),
-		  txnSvc_(NULL),
-		  txnEE_(NULL),
-		  cpSvc_(NULL),
-		  cpEE_(NULL),
-		  sysSvc_(NULL),
-		  syncEE_(NULL),
-		  syncMgr_(NULL),
-		  chunkMgr_(NULL) {}
+		clsMgr_(NULL),
+		clsEE_(NULL),
+		clsSvc_(NULL),
+		txnSvc_(NULL),
+		txnEE_(NULL),
+		cpSvc_(NULL),
+		cpEE_(NULL),
+		sysSvc_(NULL),
+		syncEE_(NULL),
+		syncMgr_(NULL),
+		chunkMgr_(NULL) {}
 
 	~ClusterHandler() {}
 
 	void initialize(const ManagerSet &mgrSet);
 
 #ifdef GD_ENABLE_UNICAST_NOTIFICATION
-	static NodeId checkAddress(PartitionTable *pt, EventType type,
+	static NodeId checkAddress(PartitionTable *pt,
 		NodeAddress &address, NodeId clusterNodeId, ServiceType serviceType,
 		EventEngine *ee);
 #endif
@@ -265,17 +273,18 @@ protected:
 
 #ifdef GD_ENABLE_UNICAST_NOTIFICATION
 	template <class T>
-	void updateNodeList(EventType type, T &AddressInfoList);
+	void updateNodeList(T &AddressInfoList);
 #else
-	void updateNodeList(
-		EventType type, std::vector<AddressInfo> &AddressInfoList);
+	void updateNodeList(std::vector<AddressInfo> &AddressInfoList);
 
-	NodeId checkAddress(EventType type, NodeAddress &address,
+	NodeId checkAddress(EventType type,
 		NodeId clusterNodeId, ServiceType serviceType, EventEngine *ee);
 
 #endif
 
 	void checkAutoNdNumbering(const NodeDescriptor &nd);
+
+	void resolveAddress(PartitionRole &role);
 
 
 	PartitionTable *pt_;
@@ -302,6 +311,20 @@ public:
 	HeartbeatHandler() {}
 
 	void operator()(EventContext &ec, Event &ev);
+
+private:
+
+	void doAfterHeartbeatInfo(EventContext &ec,
+			ClusterManager::HeartbeatInfo &heartbeatInfo);
+};
+
+
+class SQLTimerNotifyClientHandler : public ClusterHandler {
+public:
+	void operator()(EventContext &ec, Event &ev);
+
+private:
+	void encode(EventByteOutStream &out, EventContext &ec);
 };
 
 /*!
@@ -312,6 +335,11 @@ public:
 	NotifyClusterHandler() {}
 
 	void operator()(EventContext &ec, Event &ev);
+
+private:
+	template<class T>
+	void doAfterNotifyCluster(T &t);
+	void handleError(Event &ev, UserException &e);
 };
 
 /*!
@@ -322,15 +350,19 @@ public:
 	UpdatePartitionHandler() {}
 
 	void operator()(EventContext &ec, Event &ev);
+
+private:
+	void checkAndRequestDropPartition(EventContext &ec,
+			ClusterManager::UpdatePartitionInfo &updatePartitionInfo);
+	void updateNodeInfo(EventContext &ec,
+			ClusterManager::UpdatePartitionInfo &updatePartitionInfo);
+	bool resolveAddress(SubPartition &subPartition);
+	void requestSync(EventContext &ec,
+			PartitionId pId, PartitionRole &role, bool isShorttermSync);
 };
 
-/*!
-	@brief Handles Gossip event
-*/
-class GossipHandler : public ClusterHandler {
+class NewSQLPartitionRefreshHandler : public ClusterHandler {
 public:
-	GossipHandler() {}
-
 	void operator()(EventContext &ec, Event &ev);
 };
 
@@ -342,6 +374,39 @@ public:
 	SystemCommandHandler() {}
 
 	void operator()(EventContext &ec, Event &ev);
+private:
+	void doJoinCluster(ClusterManager *clsMgr,
+		ClusterManager::JoinClusterInfo &joinClusterInfo, EventContext &ec);
+
+	void doLeaveCluster(ClusterManager *clsMgr, CheckpointService *cpSvc,
+			ClusterManager::LeaveClusterInfo &leaveClusterInfo, EventContext &ec);
+	void doIncreaseCluster(ClusterManager *clsMgr,
+			ClusterManager::IncreaseClusterInfo &increaseClusterInfo);
+
+		void doDecreaseCluster(ClusterManager *clsMgr,
+			ClusterManager::DecreaseClusterInfo &increaseClusterInfo, EventContext &ec);
+
+		void doShutdownNodeForce(ClusterManager *clsMgr,
+			CheckpointService *cpSvc, TransactionService *txnSvc, SyncService *syncSvc,
+				SystemService *systemSvc
+				);
+
+	void doShutdownNormal(ClusterManager *clsMgr, CheckpointService *cpSvc,
+			ClusterManager::ShutdownNodeInfo &shutdownNodeInfo, EventContext &ec);
+
+	void doShutdownCluster(ClusterManager *clsMgr, EventContext &ec, NodeId senderNodeId);
+
+		void doCompleteCheckpointForShutdown(ClusterManager *clsMgr,
+			CheckpointService *cpSvc, TransactionService *txnSvc, SyncService *syncSvc,
+				SystemService *systemSvc
+				);
+
+		void doCompleteCheckpointForRecovery(ClusterManager *clsMgr,
+			CheckpointService *cpSvc, TransactionService *txnSvc, SyncService *syncSvc,
+				SystemService *systemSvc
+				);
+
+
 };
 
 /*!
@@ -352,6 +417,21 @@ public:
 	TimerCheckClusterHandler() {}
 
 	void operator()(EventContext &ec, Event &ev);
+
+private:
+	void doAfterHeartbeatCheckInfo(EventContext &ec,
+			ClusterManager::HeartbeatCheckInfo &heartbeatCheckInfo);
+
+	void doAfterUpdatePartitionInfo(EventContext &ec,
+			ClusterManager::HeartbeatInfo &heartbeatInfo,
+			ClusterManager::HeartbeatCheckInfo &heartbeatCheckInfo);
+
+	void sendHeartbeat(EventContext &ec,
+			ClusterManager::HeartbeatInfo &heartbeatInfo,
+			ClusterManager::HeartbeatCheckInfo &heartbeatCheckInfo);
+	void sendUpdatePartitionInfo(EventContext &ec,
+		ClusterManager::UpdatePartitionInfo &updatePartitionInfo,
+		std::vector<NodeId> &activeNodeList);
 };
 
 /*!
@@ -372,24 +452,21 @@ public:
 	TimerNotifyClientHandler() {}
 
 	void operator()(EventContext &ec, Event &ev);
+
+private:
+	void encode(Event &ev);
 };
 
-/*!
-	@brief Handles periodic CheckLoadBalance event
-*/
-class TimerCheckLoadBalanceHandler : public ClusterHandler {
+class TimerSQLNotifyClientHandler : public ClusterHandler {
 public:
-	TimerCheckLoadBalanceHandler() {}
+	TimerSQLNotifyClientHandler() {}
 
 	void operator()(EventContext &ec, Event &ev);
 };
 
-/*!
-	@brief Handles DropPartition event from master node to follower nodes
-*/
-class OrderDropPartitionHandler : public ClusterHandler {
+class TimerRequestSQLCheckTimeoutHandler : public ClusterHandler {
 public:
-	OrderDropPartitionHandler() {}
+	TimerRequestSQLCheckTimeoutHandler() {}
 
 	void operator()(EventContext &ec, Event &ev);
 };
@@ -424,8 +501,6 @@ public:
 	void operator()(EventContext &ec, Event &ev);
 };
 
-
-
 /*!
 	@brief ClusterService
 */
@@ -444,8 +519,7 @@ public:
 		ClusterVersionId versionId,
 		ServiceThreadErrorHandler &serviceThreadErrorHandler
 #ifdef GD_ENABLE_UNICAST_NOTIFICATION
-		,
-		const util::StdAllocator<void, void> &alloc
+		, util::VariableSizeAllocator<> &notifyAlloc
 #endif
 		);
 
@@ -471,6 +545,7 @@ public:
 		return isSystemServiceError_;
 	}
 
+
 	bool isError() {
 		return clsMgr_->isError();
 	}
@@ -481,7 +556,13 @@ public:
 	void encode(Event &ev, T &t);
 
 	template <class T>
-	void decode(Event &ev, T &t);
+	void encode(T &t, EventByteOutStream &out);
+
+	template <class T>
+	void decode(util::StackAllocator &alloc, Event &ev, T &t);
+
+	template <class T>
+	void decode(util::StackAllocator &alloc, Event &ev, T &t, EventByteInStream &in);
 
 	template <class T>
 	void request(const Event::Source &eventSource, EventType eventType,
@@ -489,37 +570,30 @@ public:
 
 	void encodeNotifyClient(Event &ev);
 
-	void requestGossip(const Event::Source &eventSource,
-		util::StackAllocator &alloc, PartitionId pId = UNDEF_PARTITIONID,
-		NodeId nodeId = 0, GossipType gossipType = GOSSIP_NORMAL);
-
-
+	void requestRefreshPartition(
+		EventContext &ec, util::XArray<PartitionId> *pIdList = NULL);
 
 	void requestChangePartitionStatus(EventContext &ec,
 		util::StackAllocator &alloc, PartitionId pId, PartitionStatus status);
 
-	void requestChangePartitionStatus(util::StackAllocator &alloc,
+	void requestChangePartitionStatus(EventContext &ec, util::StackAllocator &alloc,
 		PartitionId pId, PartitionStatus status,
 		ChangePartitionType changePartitionType);
 
 	void requestCompleteCheckpoint(const Event::Source &eventSource,
 		util::StackAllocator &alloc, bool isRecovery);
 
-	void requestUpdateStartLsn(const Event::Source &eventSource,
-		util::StackAllocator &alloc, PartitionId startPId, PartitionId endPId);
-
 	ClusterManager *getManager() {
 		return clsMgr_;
 	}
 
-	std::string getClusterName() {
-		return clsMgr_->getClusterName();
+	SystemService *getSystemService() {
+		return sysSvc_;
 	}
 
 	static NodeId resolveSenderND(Event &ev);
 
-	static void changeAddress(NodeAddress &nodeAddress, NodeId nodeId,
-		ServiceType serviceType, EventEngine *ee);
+	static void changeAddress(NodeAddress &nodeAddress, NodeId nodeId, EventEngine *ee);
 
 	static NodeId changeNodeId(NodeAddress &nodeAddress, EventEngine *ee);
 
@@ -529,7 +603,7 @@ public:
 
 #ifdef GD_ENABLE_UNICAST_NOTIFICATION
 	template <class T>
-	void updateNodeList(EventType type, T &AddressInfoList);
+	void updateNodeList(T &AddressInfoList);
 
 	NotificationManager &getNotificationManager();
 #endif
@@ -539,30 +613,27 @@ public:
 #endif
 
 
+	void checkVersion(ClusterVersionId decodedVersion);
+
 
 private:
 
 	EventEngine::Config &createEEConfig(
 		const ConfigTable &config, EventEngine::Config &eeConfig);
 
-	void checkVersion(ClusterVersionId decodedVersion);
-
 
 
 	HeartbeatHandler heartbeatHandler_;
 	NotifyClusterHandler notifyClusterHandler_;
 	UpdatePartitionHandler updatePartitionHandler_;
-	GossipHandler gossipHandler_;
 	SystemCommandHandler systemCommandHandler_;
 	TimerCheckClusterHandler timerCheckClusterHandler_;
 	TimerNotifyClusterHandler timerNotifyClusterHandler_;
 	TimerNotifyClientHandler timerNotifyClientHandler_;
-	TimerCheckLoadBalanceHandler timerCheckLoadBalanceHandler_;
-	OrderDropPartitionHandler orderDropPartitionHandler_;
+
 
 	UnknownClusterEventHandler unknownEventHandler_;
 	ServiceThreadErrorHandler serviceThreadErrorHandler_;
-
 
 	EventEngine ee_;
 	ClusterVersionId versionId_;
@@ -595,7 +666,7 @@ private:
 			@brief Constructor of NotificationManager
 		*/
 		NotificationManager(ClusterManager *clsMgr,
-			const util::StdAllocator<void, void> &valloc);
+			util::VariableSizeAllocator<> &valloc);
 
 		/*!
 			@brief Destructor of NotificationManager
@@ -605,7 +676,7 @@ private:
 		/*!
 			@brief Initializer
 		*/
-		void initialize(util::StackAllocator &alloc, const ConfigTable &config);
+		void initialize(const ConfigTable &config);
 
 		/*!
 			@brief Sets resolver updating interval
@@ -646,6 +717,7 @@ private:
 			return fixedNodeNum_;
 		}
 
+
 		/*!
 			@brief Requests the resolver the next update.
 		*/
@@ -662,14 +734,12 @@ private:
 
 		void getNotificationMember(picojson::value &target);
 
-
-
 	private:
 		ClusterManager *clsMgr_;
 
 		PartitionTable *pt_;
 
-		const util::StdAllocator<void, void> &valloc_;
+		util::VariableSizeAllocator<> &valloc_;
 
 		ClusterNotificationMode mode_;
 
@@ -683,6 +753,8 @@ private:
 
 		int32_t resolverCheckInterval_;
 		int32_t resolverCheckLongInterval_;
+		util::Mutex lock_;
+		picojson::value *value_;
 	};
 
 	NotificationManager notificationManager_;

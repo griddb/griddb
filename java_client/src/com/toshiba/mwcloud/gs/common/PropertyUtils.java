@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -181,7 +181,7 @@ public class PropertyUtils {
 			return (value == null ? defaultValue : value);
 		}
 
-		public Set<String> getUnknowNames() {
+		public Set<String> getUnknownNames() {
 			final Set<String> names = new HashSet<String>(
 					base.stringPropertyNames());
 			names.removeAll(visited.keySet());

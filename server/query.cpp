@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -20,6 +20,8 @@
 */
 
 #include "transaction_context.h"
+#include "gis_generator.h"
+#include "gis_geomfromtext.h"
 #include "collection.h"
 #include "qp_def.h"
 #include "query.h"
@@ -32,6 +34,8 @@
 
 #include "boolean_expression.h"
 #include "result_set.h"
+
+#include "meta_store.h"
 
 bool Query::sIsTrace_ = false;
 
@@ -46,8 +50,8 @@ bool Query::sIsTrace_ = false;
 *
 */
 Query::Query(TransactionContext &txn, ObjectManager &objectManager,
-	const char *str, uint64_t limit, QueryHookClass *hook)
-	: str_(str),
+	const TQLInfo &tqlInfo, uint64_t limit, QueryHookClass *hook)
+	: tqlInfo_(tqlInfo),
 	  pErrorMsg_(NULL),
 	  pSelectionExprList_(NULL),
 	  pWhereExpr_(NULL),
@@ -62,86 +66,18 @@ Query::Query(TransactionContext &txn, ObjectManager &objectManager,
 	  pGroupByExpr_(NULL),
 	  pHavingExpr_(NULL),
 	  pOrderByExpr_(NULL) {
-	if (util::stricmp(str_, "") == 0) return;  
+	if (util::stricmp(tqlInfo.query_, "") == 0) return;  
 
 	if (hook_) {
 		hook_->qpBuildBeginHook(*this);
 	}
 
-	this->str_ = str;
 	isSetError_ = false;
 	isExplainExecute_ = true;
 	explainAllocNum_ = 0;
 	explainNum_ = 0;
 	setDefaultFunctionMap();
 	parseState_ = PARSESTATE_SELECTION;
-	lemon_tqlParser::tqlParser *x = QP_NEW lemon_tqlParser::tqlParser();
-	if (x == NULL) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_CM_NO_MEMORY, "Cannot allocate TQL parser");
-	}
-	Token t;
-	int ret;
-	const char *c_str = str;
-#ifndef NDEBUG
-	if (sIsTrace_) {
-		x->tqlParserSetTrace(&std::cerr, "trace: ");
-	}
-	else {
-		x->tqlParserSetTrace(NULL, "");
-	}
-#endif
-	do {
-		ret = Lexer::gsGetToken(c_str, t);
-		if (ret <= 0) break;
-		if (t.id == TK_ILLEGAL) {
-			isSetError_ = true;
-			break;
-		}
-		if (t.id != TK_SPACE) {
-			x->Execute(t.id, t, this);
-			if (isSetError_) {
-				QP_SAFE_DELETE(x);
-				GS_THROW_USER_ERROR(
-					GS_ERROR_TQ_SYNTAX_ERROR_EXECUTION, pErrorMsg_->c_str());
-			}
-		}
-		c_str += t.n;
-	} while (1);
-
-	if (!isSetError_) {
-		x->Execute(0, t, this);
-	}
-
-	QP_SAFE_DELETE(x);
-
-	if (isSetError_) {
-		if (pSelectionExprList_) {
-			for (ExprList::iterator it = pSelectionExprList_->begin();
-				 it != pSelectionExprList_->end(); it++) {
-				QP_SAFE_DELETE(*it);
-			}
-		}
-		QP_SAFE_DELETE(pSelectionExprList_);
-		QP_SAFE_DELETE(pWhereExpr_);
-
-		if (t.id == TK_ILLEGAL) {
-			GS_THROW_USER_ERROR(GS_ERROR_TQ_SYNTAX_ERROR_INVALID_TOKEN,
-				(util::String("Invalid token \'", QP_ALLOCATOR) +
-					util::String(t.z, t.n, QP_ALLOCATOR) + '\'')
-					.c_str());
-		}
-		else {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_TQ_SYNTAX_ERROR_EXECUTION, pErrorMsg_->c_str());
-		}
-	}
-
-	contractCondition();
-
-	if (hook_) {
-		hook_->qpBuildFinishHook(*this);
-	}
 }
 
 /*!
@@ -203,6 +139,16 @@ size_t Query::getSelectionExprLength() const {
  */
 void Query::getConditionAsOrList(util::XArray<BoolExpr *> &orList) {
 	this->pWhereExpr_->toOrList(orList);
+}
+
+MetaContainer* Query::getMetaContainer(
+		Collection &collection, TimeSeries &timeSeries) {
+	BaseContainer *base1 = &collection;
+	BaseContainer *base2 = &timeSeries;
+	if (base1 != base2) {
+		return NULL;
+	}
+	return static_cast<MetaContainer*>(base1);
 }
 
 /*!
@@ -279,7 +225,7 @@ void Query::evalConditionExpr(ContainerRowWrapper *x) {
 	if (pWhereExpr_ != NULL) {
 		std::cout << "EVAL_RESULT="
 				  << pWhereExpr_->eval(
-						 txn_, objectManager_, x, functionMap_, true)
+						 txn_, objectManager_, x, functionMap_, TRI_TRUE)
 				  << std::endl;
 	}
 }
@@ -298,7 +244,7 @@ void Query::dumpConditionExpr(
 		os << std::endl;
 		try {
 			os << "EVAL_RESULT="
-			   << pWhereExpr_->eval(txn, objectManager_, x, functionMap_, true)
+			   << pWhereExpr_->eval(txn, objectManager_, x, functionMap_, TRI_TRUE)
 			   << std::endl;
 		}
 		catch (util::Exception &e) {
@@ -324,7 +270,7 @@ void Query::dumpConditionExprDNF(
 		os << std::endl;
 		try {
 			os << "EVAL_RESULT="
-			   << e->eval(txn, objectManager_, x, functionMap_, true)
+			   << e->eval(txn, objectManager_, x, functionMap_, TRI_TRUE)
 			   << std::endl;
 		}
 		catch (util::Exception &e) {
@@ -352,7 +298,7 @@ void Query::dumpConditionExprOptimized(
 		os << std::endl;
 		try {
 			os << "EVAL_RESULT="
-			   << e->eval(txn, objectManager_, x, functionMap_, true)
+			   << e->eval(txn, objectManager_, x, functionMap_, TRI_TRUE)
 			   << std::endl;
 		}
 		catch (util::Exception &e) {
@@ -412,38 +358,73 @@ void Query::dumpSelectOptions(TransactionContext &txn, std::ostream &os) {
  * @param name1 DB name
  * @param txn The transaction context
 */
-void Query::setFromCollection(Token &name1, Token &, TransactionContext &txn) {
-	char *collectionName;
+void Query::setFromCollection(Token &name1, Token &name2, TransactionContext &txn) {
+	const Token *dbNameToken = NULL;
+	const Token *containerNameToken = &name1;
+	if (name2.n != 0) {
+		dbNameToken = &name1;
+		containerNameToken = &name2;
+
+		char *dbStr = static_cast<char *>(txn.getDefaultAllocator().allocate(dbNameToken->n + 1));
+		memcpy(dbStr, dbNameToken->z, dbNameToken->n + 1);
+		dbStr[dbNameToken->n] = '\0';
+
+		bool isQuoted = false;
+		const char *dbName = Expr::dequote(txn.getDefaultAllocator(), dbStr, isQuoted);
+
+		bool isExist = 
+			eqCaseStringString(txn_, dbName,
+				static_cast<uint32_t>(strlen(dbName)),
+				tqlInfo_.dbName_, static_cast<uint32_t>(strlen(tqlInfo_.dbName_)), isQuoted);
+		if (!isExist) {
+			GS_THROW_USER_ERROR(GS_ERROR_TQ_INVALID_COLLECTION_NAME,
+				"Database names given to API and specified in FROM clause "
+				"are not equal.");
+		}
+	}
+	const char *collectionName;
 	const char *pCollectionName = NULL;
 	uint32_t collectionNameLen = 0;
 	char *str;
-	if (this->getCollection() != NULL) {
-		ExtendedContainerName *extContainerName;
-		getCollection()->getExtendedContainerName(txn, extContainerName);
-		pCollectionName = extContainerName->getContainerName();
+	util::String containerName(txn.getDefaultAllocator());
+	if (tqlInfo_.containerKey_ != NULL) {
+		tqlInfo_.containerKey_->toString(txn.getDefaultAllocator(), containerName);
+		pCollectionName = containerName.c_str();
 		collectionNameLen = static_cast<uint32_t>(strlen(pCollectionName));
 	}
-	else if (this->getTimeSeries() != NULL) {
-		ExtendedContainerName *extContainerName;
-		getTimeSeries()->getExtendedContainerName(txn, extContainerName);
-		pCollectionName = extContainerName->getContainerName();
+	else if (getMetaContainer() != NULL) {
+		const FullContainerKey containerKey = getMetaContainer()->getContainerKey(txn);
+		containerKey.toString(txn.getDefaultAllocator(), containerName);
+		pCollectionName = containerName.c_str();
+		collectionNameLen = static_cast<uint32_t>(strlen(pCollectionName));
+	}
+	else if (getCollection() != NULL) {
+		const FullContainerKey containerKey = getCollection()->getContainerKey(txn);
+		containerKey.toString(txn.getDefaultAllocator(), containerName);
+		pCollectionName = containerName.c_str();
+		collectionNameLen = static_cast<uint32_t>(strlen(pCollectionName));
+	}
+	else if (getTimeSeries() != NULL) {
+		const FullContainerKey containerKey = getTimeSeries()->getContainerKey(txn);
+		containerKey.toString(txn.getDefaultAllocator(), containerName);
+		pCollectionName = containerName.c_str();
 		collectionNameLen = static_cast<uint32_t>(strlen(pCollectionName));
 	}
 	else {
 	}
 
-	str = static_cast<char *>(txn.getDefaultAllocator().allocate(name1.n + 1));
-	memcpy(str, name1.z, name1.n + 1);
-	str[name1.n] = '\0';
+	str = static_cast<char *>(txn.getDefaultAllocator().allocate(containerNameToken->n + 1));
+	memcpy(str, containerNameToken->z, containerNameToken->n + 1);
+	str[containerNameToken->n] = '\0';
 
-	collectionName = Expr::dequote(txn.getDefaultAllocator(), str);
-
+	bool isQuoted = false;
+	collectionName = Expr::dequote(txn.getDefaultAllocator(), str, isQuoted);
 	if (pCollectionName) {
-		if (!eqCaseStringStringI(txn_,
-				reinterpret_cast<const uint8_t *>(collectionName),
+		bool isExist = 
+			eqCaseStringString(txn_, collectionName,
 				static_cast<uint32_t>(strlen(collectionName)),
-				reinterpret_cast<const uint8_t *>(pCollectionName),
-				collectionNameLen)) {
+				pCollectionName, collectionNameLen, isQuoted);
+		if (!isExist) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_INVALID_COLLECTION_NAME,
 				"Collection names given to API and specified in FROM clause "
 				"are not equal.");
@@ -514,6 +495,10 @@ void Query::getIndexInfoInAndList(TransactionContext &txn,
 				if (((1 << k) & mapBitmap) != 0) {
 					const char *str = "";
 					switch (k) {
+					case 2:
+						mapType = MAP_TYPE_SPATIAL;
+						str = "SPATIAL";
+						break;
 					case 1:
 						mapType = MAP_TYPE_HASH;
 						str = "HASH";
@@ -575,7 +560,6 @@ void Query::enableExplain(bool doExecute) {
  * @param value_string Explain value
  * @param statement The related statement
  */
-#ifdef QP_ENABLE_EXPLAIN
 void Query::addExplain(uint32_t depth, const char *exp_type,
 	const char *value_type, const char *value_string, const char *statement) {
 	if (explainAllocNum_ > 0) {
@@ -601,7 +585,6 @@ void Query::addExplain(uint32_t depth, const char *exp_type,
 		}
 	}
 }
-#endif
 
 void Query::serializeExplainData(TransactionContext &txn, uint64_t &resultNum,
 	MessageRowStore *messageRowStore) {
@@ -653,7 +636,8 @@ void Query::contractCondition() {
 void Query::finishQuery(
 	TransactionContext &txn, ResultSet &resultSet, BaseContainer &container) {
 	if (hook_) {
-		hook_->qpExecuteFinishHook(*this);
+		hook_->qpExecuteFinishHook(*this);	
+
 	}
 	if (doExplain()) {
 		util::XArray<uint8_t> &serializedRowList =
@@ -675,3 +659,239 @@ void Query::finishQuery(
 	}
 }
 
+void Query::setQueryOption(TransactionContext &txn, ResultSet &resultSet) {
+	ResultSet::QueryOption &queryOption = resultSet.getQueryOption();
+
+	if (queryOption.isPartial() || queryOption.isDistribute()) {
+		size_t numSelection = getSelectionExprLength();
+		if (pOrderByExpr_  != NULL || numSelection == 0 || 
+			strcmp("*", getSelectionExpr(0)->getValueAsString(txn)) != 0) {
+			GS_THROW_USER_ERROR(
+				GS_ERROR_TQ_SYNTAX_ERROR_EXECUTION, "Partial/Distribute TQL does not support "
+				<< "order by and selection expression except for '*'");
+		}
+
+		queryOption.setDistLimit(nActualLimit_);
+		queryOption.setDistOffset(nOffset_);
+
+		{
+			int64_t filteredNum = queryOption.getFilteredNum();
+			if (filteredNum != 0) {
+				if (nOffset_ <= static_cast<ResultSize>(filteredNum)) {
+					nOffset_ = 0;
+					filteredNum -= nOffset_;
+				}
+				if (static_cast<ResultSize>(filteredNum) > nLimit_) {
+					GS_THROW_USER_ERROR(
+						GS_ERROR_DS_FETCH_PARAMETER_INVALID, "Invalid Parameter, filtered num exceeds limit");
+				}
+				if (filteredNum > 0) {
+					nLimit_ -= filteredNum;
+					nActualLimit_ -= filteredNum;
+				}
+			}
+			if (queryOption.isDistribute()) {
+				nActualLimit_ = nLimit_;
+				nOffset_ = 0;
+			}
+		}
+	}
+}
+
+void Query::doQueryPartial(
+	TransactionContext &txn, BaseContainer &container, ResultSet &resultSet) {
+	ResultSet::QueryOption &queryOption = resultSet.getQueryOption();
+		
+	if (doExplain()) {
+		addExplain(0, "SELECTION", "CONDITION", "NULL", "");
+		addExplain(1, "INDEX", "BTREE", "ROWMAP", "");
+	}
+	if (!doExecute()) {
+		queryOption.setMinRowId(MAX_ROWID);
+		queryOption.setMaxRowId(MAX_ROWID);
+		return;
+	}
+
+	util::StackAllocator &alloc = txn.getDefaultAllocator();
+
+	util::XArray<BoolExpr *> orList(alloc);  
+	if (getConditionExpr() != NULL) {  
+		getConditionAsOrList(orList);
+		nLimit_ = MAX_RESULT_SIZE;
+	}
+	util::XArray< util::XArray<BoolExpr *> *> andLists(alloc);
+	for (uint32_t p = 0; p < orList.size(); p++) {
+		util::XArray<BoolExpr *> *andList= QP_NEW util::XArray<BoolExpr *>(alloc);  
+		orList[p]->toAndList(*andList);
+		andLists.push_back(andList);
+	}
+
+	uint64_t *pBitmap = reinterpret_cast<uint64_t *>(alloc.allocate(
+		sizeof(uint64_t) * ((container.getColumnNum() / 64) + 1)));
+	ContainerRowWrapper *row = NULL;
+	bool isWithRowId = true;
+	ColumnId rowColumnId = UNDEF_COLUMNID;
+	OutputOrder outputOrder = ORDER_ASCENDING;
+	switch (container.getContainerType()) {
+	case COLLECTION_CONTAINER:
+		isWithRowId = true;
+		rowColumnId = UNDEF_COLUMNID;
+		row = ALLOC_NEW(alloc) CollectionRowWrapper(txn, *static_cast<Collection *>(&container), pBitmap);
+		break;
+	case TIME_SERIES_CONTAINER:
+		isWithRowId = false;
+		rowColumnId = ColumnInfo::ROW_KEY_COLUMN_ID;
+		row = ALLOC_NEW(alloc) TimeSeriesRowWrapper(txn, *static_cast<TimeSeries *>(&container), pBitmap);
+		break;
+	default:
+		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_TYPE_INVALID, "");
+		break;
+	}
+	StackAllocAutoPtr<ContainerRowWrapper> stackAutoPtr(alloc, row);
+
+	OutputMessageRowStore outputMessageRowStore(
+		container.getDataStore()->getValueLimitConfig(),
+		container.getColumnInfoList(), container.getColumnNum(),
+		*resultSet.getRowDataFixedPartBuffer(), 
+		*resultSet.getRowDataVarPartBuffer(), isWithRowId);
+
+	ResultSize scanLimit;
+	size_t repeatNum = 10;
+	scanLimit = ResultSet::QueryOption::PARTIAL_SCAN_LIMIT / repeatNum / container.getNormalRowArrayNum() + 1;
+
+	ResultSize resultNum = 0;
+	ResultSize currentOffset = nOffset_;
+	RowId lastRowId = queryOption.getMinRowId();
+	bool isFetchSizeLimit = false;
+	bool isAllFinished = false;
+//	bool enablePartialSuspend = !doExplain();
+
+	util::XArray<OId> scanOIdList(alloc);
+	for (size_t nth = 0; ; nth++) {
+		scanOIdList.clear();
+		RowId minRowId = queryOption.getMinRowId();
+		RowId maxRowId = queryOption.getMaxRowId();
+		BtreeMap::SearchContext sc(
+			rowColumnId, &minRowId, 0, true, &maxRowId, 0, true, 0, NULL, nLimit_);
+		sc.suspendLimit_ = scanLimit;
+		container.searchRowIdIndex(txn, sc, scanOIdList, outputOrder);
+
+		uint32_t i = 0;
+		for (; i < scanOIdList.size(); i++) {
+			OId oId = scanOIdList[i];
+			row->load(oId);
+			lastRowId = row->getRowId();
+			bool conditionFlag = true;
+			for (uint32_t p = 0; p < orList.size(); p++) {
+				util::StackAllocator::Scope scope(alloc);
+				util::XArray<BoolExpr *> &andList = *(andLists[p]);
+				assert(!andList.empty());  
+
+				conditionFlag = true;
+				for (uint32_t q = 0; q < andList.size(); q++) {
+					util::StackAllocator::Scope scope(alloc);
+					TrivalentLogicType evalResult = andList[q]->eval(
+						txn, objectManager_, row, getFunctionMap(), TRI_TRUE);
+					if (evalResult != TRI_TRUE) {
+						conditionFlag = false;
+						break;
+					}
+				}
+				if (conditionFlag) {
+					break;
+				}
+			}  
+			if (conditionFlag) {
+				if (currentOffset > 0) {
+					currentOffset--;
+					continue;
+				} else {
+					resultNum++;
+					if (!doExplain()) {
+						row->getImage(txn, &outputMessageRowStore, isWithRowId);
+						outputMessageRowStore.next();
+
+						if (queryOption.isPartial()) {
+							const uint8_t *data1, *data2;
+							uint32_t fixedSize, variableSize;
+							outputMessageRowStore.getAllFixedPart(data1, fixedSize);
+							outputMessageRowStore.getAllVariablePart(data2, variableSize);
+							if (fixedSize + variableSize > static_cast<uint32_t>(queryOption.getFetchByteSize())) {
+								isFetchSizeLimit = true;
+
+							}
+						}
+					}
+				}
+			}
+
+			if (resultNum >= nActualLimit_ || isFetchSizeLimit) {
+				break;
+			}
+		}
+		queryOption.setMinRowId(lastRowId + 1);
+
+		if ((!sc.isSuspended_ && !isFetchSizeLimit) || resultNum >= nActualLimit_) {
+			isAllFinished = true;
+		}
+
+		if (isAllFinished || isFetchSizeLimit || 
+			(queryOption.isPartial() && !doExplain() && 
+			resultNum > 0 && nth >= repeatNum)) {
+			break;
+		}
+	}
+
+	if (isAllFinished) {
+		queryOption.setMinRowId(MAX_ROWID);
+		queryOption.setMaxRowId(MAX_ROWID);
+	} else {
+		if (queryOption.getMaxRowId() == MAX_ROWID) {
+			RowId maxRowId = container.getMaxRowId(txn);
+			queryOption.setMaxRowId(maxRowId);
+		}
+		queryOption.setFilteredNum(queryOption.getFilteredNum() + resultNum);
+	}
+	resultSet.setResultNum(resultNum);
+}
+
+const BoolExpr* Query::QueryAccessor::findWhereExpr(const Query &query) {
+	return query.pWhereExpr_;
+}
+
+Expr::Type Query::ExprAccessor::getType(const Expr &expr) {
+	return static_cast<const ExprAccessor&>(expr).type_;
+}
+
+Expr::Operation Query::ExprAccessor::getOp(const Expr &expr) {
+	return static_cast<const ExprAccessor&>(expr).op_;
+}
+
+const Value* Query::ExprAccessor::getValue(const Expr &expr) {
+	return static_cast<const ExprAccessor&>(expr).value_;
+}
+
+const ExprList* Query::ExprAccessor::getArgList(const Expr &expr) {
+	return static_cast<const ExprAccessor&>(expr).arglist_;
+}
+
+uint32_t Query::ExprAccessor::getColumnId(const Expr &expr) {
+	return static_cast<const ExprAccessor&>(expr).columnId_;
+}
+
+ColumnType Query::ExprAccessor::getExprColumnType(const Expr &expr) {
+	return static_cast<const ExprAccessor&>(expr).columnType_;
+}
+
+const BoolExpr::BoolTerms& Query::BoolExprAccessor::getOperands(
+		const BoolExpr &expr) {
+	return static_cast<const BoolExprAccessor&>(expr).operands_;
+}
+
+const Expr* Query::BoolExprAccessor::getUnary(const BoolExpr &expr) {
+	return static_cast<const BoolExprAccessor&>(expr).unary_;
+}
+
+BoolExpr::Operation Query::BoolExprAccessor::getOpType(const BoolExpr &expr) {
+	return static_cast<const BoolExprAccessor&>(expr).opeType_;
+}

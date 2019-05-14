@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 package com.toshiba.mwcloud.gs.common;
 
 import java.lang.reflect.AccessibleObject;
+import java.lang.reflect.AnnotatedElement;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
@@ -25,8 +26,10 @@ import java.sql.Blob;
 import java.sql.SQLException;
 import java.text.ParseException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -39,8 +42,6 @@ import java.util.WeakHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import javax.sql.rowset.serial.SerialBlob;
-
 import com.toshiba.mwcloud.gs.AggregationResult;
 import com.toshiba.mwcloud.gs.ColumnInfo;
 import com.toshiba.mwcloud.gs.ContainerInfo;
@@ -48,12 +49,15 @@ import com.toshiba.mwcloud.gs.ContainerType;
 import com.toshiba.mwcloud.gs.GSException;
 import com.toshiba.mwcloud.gs.GSType;
 import com.toshiba.mwcloud.gs.Geometry;
+import com.toshiba.mwcloud.gs.NotNull;
+import com.toshiba.mwcloud.gs.Nullable;
 import com.toshiba.mwcloud.gs.QueryAnalysisEntry;
 import com.toshiba.mwcloud.gs.Row;
 import com.toshiba.mwcloud.gs.RowField;
 import com.toshiba.mwcloud.gs.RowKey;
 import com.toshiba.mwcloud.gs.TimestampUtils;
 import com.toshiba.mwcloud.gs.TransientRowField;
+import com.toshiba.mwcloud.gs.common.BasicBuffer.BufferUtils;
 
 public class RowMapper {
 
@@ -61,17 +65,18 @@ public class RowMapper {
 
 	protected static boolean restrictKeyOrderFirst = true;
 
+	private static final boolean STRING_FIELD_ENCODING_STRICT = true; 
+
 	private static final RowMapper AGGREGATION_RESULT_MAPPER;
 
 	static {
 		try {
 			AGGREGATION_RESULT_MAPPER = new RowMapper(
 					AggregationResult.class,
-					AggregationResultImpl.class.getConstructor(),
+					AggregationResultImpl.class.getDeclaredConstructor(),
 					Collections.<String, Entry>emptyMap(),
 					Collections.<Entry>emptyList(),
-					null,
-					false);
+					null, null, false);
 		}
 		catch (NoSuchMethodException e) {
 			throw new Error(e);
@@ -81,7 +86,7 @@ public class RowMapper {
 	private static final byte[] EMPTY_LONG_BYTES =
 			new byte[Long.SIZE / Byte.SIZE];
 
-	private static final int MAX_VAR_SIZE_LENGTH = 4;
+	private static final int MAX_VAR_SIZE_LENGTH = 8;
 
 	private static final GSType[] TYPE_CONSTANTS = GSType.values();
 
@@ -99,18 +104,14 @@ public class RowMapper {
 
 	}
 
-	private static final BlobFactory SERIAL_BLOB_FACTORY =
-			new BlobFactory() {
-				@Override
-				public Blob createBlob(byte[] data) throws GSException {
-					try {
-						return new SerialBlob(data);
-					}
-					catch (SQLException e) {
-						throw new Error(e);
-					}
-				}
-			};
+	private static final BlobFactory DIRECT_BLOB_FACTORY = new BlobFactory() {
+		@Override
+		public Blob createBlob(byte[] data) throws GSException {
+			final BlobImpl blob = new BlobImpl(null);
+			blob.setDataDirect(data);
+			return blob;
+		}
+	};
 
 	private static final Pattern METHOD_PATTERN =
 			Pattern.compile("^((get)|(set)|(is))(.+)$");
@@ -119,53 +120,78 @@ public class RowMapper {
 
 	private static final byte ANY_NULL_TYPE = -1;
 
-	private Class<?> rowType;
+	private static final Map<Class<?>, GSType> ELEMENT_TYPE_MAP =
+			createElementTypeMap();
 
-	private Constructor<?> rowConstructor;
+	private static final Map<GSType, Object> EMPTY_ELEMENT_VALUES =
+			createEmptyValueMap(false);
 
-	private final Map<String, Entry> entryMap;
+	private static final Map<GSType, Object> EMPTY_ARRAY_VALUES =
+			createEmptyValueMap(true);
+
+	private static final Config BASIC_CONFIG = new Config(false, false, true);
+
+	private static final Config GENERAL_CONFIG = new Config(true, true, true);
+
+	private static final List<Integer> EMPTY_KEY_LIST =
+			Collections.emptyList();
+
+	private static final List<Integer> SINGLE_FIRST_KEY_LIST =
+			Collections.singletonList(0);
+
+	private final Class<?> rowType;
+
+	private transient final Constructor<?> rowConstructor;
+
+	private transient final Map<String, Entry> entryMap;
 
 	private final List<Entry> entryList;
 
-	private Entry keyEntry;
+	private transient Entry keyEntry;
 
 	private final boolean forTimeSeries;
 
-	private final Set<String> transientRowFilelds = new HashSet<String>();
+	private final boolean nullableAllowed;
 
-	private final int variableEntryCount;
+	private transient final int variableEntryCount;
+
+	private transient Object[] emptyFieldArray;
 
 	private RowMapper(
 			Class<?> rowType, Constructor<?> rowConstructor,
 			Map<String, Entry> entryMap,
 			List<Entry> entryList, Entry keyEntry,
-			boolean forTimeSeries) {
+			ContainerType containerType, boolean nullableAllowed) {
 		this.rowType = rowType;
 		this.rowConstructor = rowConstructor;
 		this.entryMap = entryMap;
 		this.entryList = entryList;
 		this.keyEntry = keyEntry;
-		this.forTimeSeries = forTimeSeries;
+		this.forTimeSeries = (containerType == ContainerType.TIME_SERIES);
+		this.nullableAllowed = nullableAllowed;
 		this.variableEntryCount = calculateVariableEntryCount(entryList);
 	}
 
 	private RowMapper(
-			Class<?> rowType, boolean forTimeSeries)
-			throws GSException, SecurityException {
+			Class<?> rowType, ContainerType containerType,
+			boolean nullableAllowed) throws GSException {
 		this.rowType = rowType;
 		this.entryMap = new HashMap<String, Entry>();
 		this.entryList = new ArrayList<Entry>();
-		this.forTimeSeries = forTimeSeries;
+		this.forTimeSeries = (containerType == ContainerType.TIME_SERIES);
+		this.nullableAllowed = nullableAllowed;
 		this.rowConstructor = getRowConstructor(rowType);
 
+		final Set<String> transientRowFields = new HashSet<String>();
 		for (Field field : rowType.getDeclaredFields()) {
-			accept(field);
+			accept(transientRowFields, field);
 		}
 		for (Method method : rowType.getDeclaredMethods()) {
-			accept(method);
+			accept(transientRowFields, method);
 		}
 
-		applyOrder(restrictKeyOrderFirst);
+		applyOrder(transientRowFields, restrictKeyOrderFirst);
+		applyNullable(nullableAllowed);
 		checkKeyType(forTimeSeries);
 
 		this.variableEntryCount = calculateVariableEntryCount(entryList);
@@ -173,7 +199,8 @@ public class RowMapper {
 
 	private RowMapper(
 			ContainerType containerType, ContainerInfo containerInfo,
-			boolean anyTypeAllowed) throws GSException {
+			boolean anyTypeAllowed, boolean nullableAllowed)
+			throws GSException {
 		final ContainerType anotherContainerType = containerInfo.getType();
 		if (anotherContainerType != null &&
 				anotherContainerType != containerType) {
@@ -184,8 +211,8 @@ public class RowMapper {
 		this.rowType = Row.class;
 		this.entryMap = new HashMap<String, Entry>();
 		this.entryList = new ArrayList<Entry>();
-		this.forTimeSeries =
-				(containerType == ContainerType.TIME_SERIES);
+		this.forTimeSeries = (containerType == ContainerType.TIME_SERIES);
+		this.nullableAllowed = nullableAllowed;
 		this.rowConstructor = null;
 
 		final int columnCount = containerInfo.getColumnCount();
@@ -194,13 +221,12 @@ public class RowMapper {
 					GSErrorCode.ILLEGAL_SCHEMA, "Empty schema");
 		}
 
+		final boolean rowKeyAssigned = containerInfo.isRowKeyAssigned();
 		for (int i = 0; i < columnCount; i++) {
-			accept(containerInfo.getColumnInfo(i), anyTypeAllowed);
-		}
-
-		if (containerInfo.isRowKeyAssigned()) {
-			this.keyEntry = entryList.get(0);
-			this.keyEntry.keyType = true;
+			accept(
+					containerInfo.getColumnInfo(i),
+					(i == 0 && rowKeyAssigned),
+					anyTypeAllowed, nullableAllowed);
 		}
 
 		checkKeyType(forTimeSeries);
@@ -220,36 +246,31 @@ public class RowMapper {
 	}
 
 	public static RowMapper getInstance(
-			Class<?> rowType, boolean forTimeSeries)
-			throws GSException, SecurityException {
+			Class<?> rowType, ContainerType containerType, Config config)
+			throws GSException {
 		if (rowType == AggregationResult.class) {
 			throw new GSException(
 					GSErrorCode.ILLEGAL_PARAMETER, "Illegal row type");
 		}
 
-		return CACHE.getInstance(rowType, forTimeSeries);
-	}
-
-	public static RowMapper getInstance(
-			ContainerType containerType, ContainerInfo containerInfo)
-			throws GSException {
-		return CACHE.intern(
-				new RowMapper(containerType, containerInfo, false));
+		return CACHE.getInstance(rowType, containerType, config);
 	}
 
 	public static RowMapper getInstance(
 			ContainerType containerType, ContainerInfo containerInfo,
-			boolean anyTypeAllowed) throws GSException {
-		return CACHE.intern(
-				new RowMapper(containerType, containerInfo, anyTypeAllowed));
+			Config config) throws GSException {
+		return CACHE.intern(new RowMapper(
+				containerType, containerInfo, config.anyTypeAllowed,
+				config.nullableAllowed));
 	}
 
-	public static RowMapper getInstance(Row row) throws GSException {
+	public static RowMapper getInstance(Row row, Config config)
+			throws GSException {
 		if (row instanceof ArrayRow) {
 			return ((ArrayRow) row).mapper;
 		}
 
-		return getInstance(null, row.getSchema());
+		return getInstance(null, row.getSchema(), config);
 	}
 
 	public static RowMapper getAggregationResultMapper() {
@@ -257,32 +278,20 @@ public class RowMapper {
 	}
 
 	public static RowMapper getInstance(
-			BasicBuffer in, boolean forTimeSeries) throws GSException {
-		return getInstance(in, forTimeSeries, false);
-	}
-
-	public static RowMapper getInstance(
-			BasicBuffer in, boolean forTimeSeries, boolean anyTypeAllowed)
+			BasicBuffer in, ContainerType containerType, Config config)
 			throws GSException {
-		final ContainerType containerType = (forTimeSeries ?
-				ContainerType.TIME_SERIES : ContainerType.COLLECTION);
-		final int columnCount = in.base().getInt();
-		final int keyIndex = in.base().getInt();
+		final int columnCount = importColumnCount(in);
+		List<Integer> keyList = importKeyListBegin(in, config, columnCount);
 
 		final List<ColumnInfo> columnInfoList = new ArrayList<ColumnInfo>();
 		for (int i = 0; i < columnCount; i++) {
-			final String columnName = in.getString();
-			final GSType elementType = getType(in);
-			final boolean arrayUsed = in.getBoolean();
-
-			columnInfoList.add(new ColumnInfo(
-					(columnName.isEmpty() && anyTypeAllowed ? null : columnName),
-					toFullType(elementType, arrayUsed)));
+			columnInfoList.add(importColumnSchema(in, config));
 		}
 
+		keyList = importKeyListEnd(in, config, columnCount, keyList);
 		return getInstance(containerType, new ContainerInfo(
-				null, containerType, columnInfoList, keyIndex == 0),
-				anyTypeAllowed);
+				null, containerType, columnInfoList, !keyList.isEmpty()),
+				config);
 	}
 
 	public void checkSchemaMatched(RowMapper mapper) throws GSException {
@@ -316,23 +325,24 @@ public class RowMapper {
 			}
 
 			if (!thisEntry.columnName.equals(entry.columnName) &&
-					!normalizeSymbol(thisEntry.columnName).equals(
-							normalizeSymbol(entry.columnName))) {
+					!normalizeSymbolUnchecked(thisEntry.columnName).equals(
+							normalizeSymbolUnchecked(entry.columnName))) {
 				throw new GSException(GSErrorCode.ILLEGAL_SCHEMA, "");
 			}
 		}
 	}
 
 	public RowMapper reorderBySchema(
-			BasicBuffer in, boolean columnOrderIgnorable) throws GSException {
-		final int size = in.base().getInt();
+			BasicBuffer in, Config config, boolean columnOrderIgnorable)
+			throws GSException {
+		final int size = importColumnCount(in);
 		if (size != entryList.size()) {
 			throw new GSException(
 					GSErrorCode.ILLEGAL_SCHEMA,
 					"Inconsistent remote schema (column count)");
 		}
 
-		final int newKeyIndex = in.base().getInt();
+		List<Integer> keyList = importKeyListBegin(in, config, size);
 
 		final Map<String, Entry> newEntryMap = new HashMap<String, Entry>();
 		final List<Entry> newEntryList = new ArrayList<Entry>(size);
@@ -342,9 +352,10 @@ public class RowMapper {
 
 		for (int i = 0; i < size; i++) {
 			final Entry newEntry = new Entry(null);
-			newEntry.importColumnSchema(in, i);
+			newEntry.importColumnSchema(in, i, nullableAllowed);
 
-			final String normalizedName = normalizeSymbol(newEntry.columnName);
+			final String normalizedName =
+					normalizeSymbolUnchecked(newEntry.columnName);
 			final Entry orgEntry = entryMap.get(normalizedName);
 			if (orgEntry == null) {
 				throw new GSException(
@@ -362,9 +373,11 @@ public class RowMapper {
 			newEntryMap.put(normalizedName, newEntry);
 		}
 
+		keyList = importKeyListEnd(in, config, size, keyList);
+
 		final Entry newKeyEntry;
 		if (keyEntry == null) {
-			if (newKeyIndex >= 0) {
+			if (!keyList.isEmpty()) {
 				throw new GSException(
 						GSErrorCode.ILLEGAL_SCHEMA,
 						"Remote schema must not have a key");
@@ -372,15 +385,16 @@ public class RowMapper {
 			newKeyEntry = null;
 		}
 		else {
-			if (newKeyIndex < 0) {
+			if (keyList.isEmpty()) {
 				throw new GSException(
 						GSErrorCode.ILLEGAL_SCHEMA,
 						"Remote schema must have a key");
 			}
-			newKeyEntry = newEntryList.get(newKeyIndex);
-			final String normalizedName = normalizeSymbol(keyEntry.columnName);
+			newKeyEntry = newEntryList.get(keyList.get(0));
+			final String normalizedName =
+					normalizeSymbolUnchecked(keyEntry.columnName);
 			if (!normalizedName.equals(
-					normalizeSymbol(newKeyEntry.columnName))) {
+					normalizeSymbolUnchecked(newKeyEntry.columnName))) {
 				throw new GSException(
 						GSErrorCode.ILLEGAL_SCHEMA,
 						"Inconsistent remote schema (column name)");
@@ -389,8 +403,107 @@ public class RowMapper {
 		}
 
 		return CACHE.intern(new RowMapper(
-				rowType, rowConstructor, newEntryMap, newEntryList, newKeyEntry,
-				forTimeSeries));
+				rowType, rowConstructor, newEntryMap, newEntryList,
+				newKeyEntry, getContainerType(), nullableAllowed));
+	}
+
+	public static int importColumnCount(BasicBuffer in) throws GSException {
+		return BufferUtils.getNonNegativeInt(in.base());
+	}
+
+	public static void exportColumnCount(
+			BasicBuffer out, int columnCount) throws GSException {
+		out.putInt(columnCount);
+	}
+
+	public static List<Integer> importKeyListBegin(
+			BasicBuffer in, Config config, int columnCount)
+			throws GSException {
+		if (!config.keyExtensible) {
+			final int columnId = in.base().getInt();
+			if (!(columnId == 0 || columnId == -1) ||
+					columnId >= columnCount) {
+				throw new GSConnectionException(
+						GSErrorCode.MESSAGE_CORRUPTED,
+						"Protocol error by illegal index of row key " +
+						"column (keyColumn=" + columnId + ")");
+			}
+			return toKeyList(columnId >= 0);
+		}
+
+		return null;
+	}
+
+	public static List<Integer> importKeyListEnd(
+			BasicBuffer in, Config config, int columnCount,
+			List<Integer> lastKeyList) throws GSException {
+		if (config.keyExtensible) {
+			final int count = in.base().getShort();
+			if (!(count == 0 || count == 1)) {
+				throw new GSConnectionException(
+						GSErrorCode.MESSAGE_CORRUPTED,
+						"Protocol error by illegal row key count (" +
+						"count=" + count + ")");
+			}
+
+			for (int i = 0; i < count; i++) {
+				final int columnId = in.base().getShort();
+				if (columnId != 0 || columnId >= columnCount) {
+					throw new GSConnectionException(
+							GSErrorCode.MESSAGE_CORRUPTED,
+							"Protocol error by illegal index of row key " +
+							"column (keyColumn=" + columnId + ")");
+				}
+			}
+
+			return toKeyList(count > 0);
+		}
+
+		return lastKeyList;
+	}
+
+	public static void exportKeyListBegin(
+			BasicBuffer out, Config config, List<Integer> keyList)
+			throws GSException {
+		if (!config.keyExtensible) {
+			out.putInt((keyList.isEmpty() ? -1 : 0));
+		}
+	}
+
+	public static void exportKeyListEnd(
+			BasicBuffer out, Config config, List<Integer> keyList)
+			throws GSException {
+		if (config.keyExtensible) {
+			final int count = keyList.size();
+			if (count > 1) {
+				throw new GSException(GSErrorCode.INTERNAL_ERROR, "");
+			}
+			out.putShort((short) count);
+			for (int keyIndex : keyList) {
+				if (keyIndex != 0) {
+					throw new GSException(GSErrorCode.INTERNAL_ERROR, "");
+				}
+				out.putShort((short) keyIndex);
+			}
+		}
+	}
+
+	public static ColumnInfo importColumnSchema(
+			BasicBuffer in, Config config) throws GSException {
+		final Entry entry = new Entry(null);
+		entry.importColumnSchema(in, -1, config.nullableAllowed);
+		entry.filterNullable(
+				entry.columnNullable, null, config.nullableAllowed);
+
+		if (config.anyTypeAllowed && entry.columnName.isEmpty()) {
+			entry.columnName = null;
+		}
+
+		return entry.getColumnInfo();
+	}
+
+	public static List<Integer> toKeyList(boolean rowKeyAssigned) {
+		return rowKeyAssigned ? SINGLE_FIRST_KEY_LIST : EMPTY_KEY_LIST;
 	}
 
 	public RowMapper applyResultType(Class<?> rowType) throws GSException {
@@ -401,7 +514,7 @@ public class RowMapper {
 			return AGGREGATION_RESULT_MAPPER;
 		}
 		else if (rowType == QueryAnalysisEntry.class) {
-			return getInstance(QueryAnalysisEntry.class, false);
+			return getInstance(QueryAnalysisEntry.class, null, BASIC_CONFIG);
 		}
 		else if (rowType == null) {
 			return null;
@@ -442,6 +555,16 @@ public class RowMapper {
 		return false;
 	}
 
+	public boolean isDefaultValueSpecified() {
+		for (Entry entry : entryList) {
+			if (entry.initialValueSpecified) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
 	private int getVariableEntryCount() {
 		return variableEntryCount;
 	}
@@ -473,28 +596,36 @@ public class RowMapper {
 		return new ContainerInfo(null, null, columnInfoList, hasKey());
 	}
 
-	public void exportSchema(BasicBuffer out) throws GSException {
+	public void exportSchema(BasicBuffer out, Config config)
+			throws GSException {
 		if (rowType == AggregationResult.class) {
 			throw new GSException(
 					GSErrorCode.INTERNAL_ERROR,
 					"Unexpected row type: AggregationResult");
 		}
 
-		out.putInt(entryList.size());
-		out.putInt(keyEntry == null ? -1 : keyEntry.order);
+		final List<Integer> keyList = toKeyList(keyEntry != null);
+
+		exportColumnCount(out, entryList.size());
+		exportKeyListBegin(out, config, keyList);
 		for (Entry entry : entryList) {
 			entry.exportColumnSchema(out);
 		}
+		exportKeyListEnd(out, config, keyList);
 	}
 
 	public int resolveColumnId(String name) throws GSException {
-		final Entry entry = entryMap.get(normalizeSymbol(name));
+		final Entry entry = entryMap.get(normalizeSymbol(name, "column name"));
 		if (entry == null) {
 			throw new GSException(
 					GSErrorCode.UNKNOWN_COLUMN_NAME,
 					"Unknown column: \"" + name + "\"");
 		}
 		return entry.order;
+	}
+
+	public Object resolveField(Object rowObj, int column) throws GSException {
+		return entryList.get(column).getFieldObj(rowObj, isGeneral());
 	}
 
 	public Object resolveKey(
@@ -551,7 +682,7 @@ public class RowMapper {
 	}
 
 	public Row createGeneralRow() throws GSException {
-		return new ArrayRow(this);
+		return ArrayRow.create(this, true);
 	}
 
 	public Object createRow(boolean general) throws GSException {
@@ -659,7 +790,7 @@ public class RowMapper {
 		}
 
 		if (rowType == Row.class || general) {
-			getInstance((Row) rowObj).checkSchemaMatched(this);
+			getInstance((Row) rowObj, GENERAL_CONFIG).checkSchemaMatched(this);
 		}
 
 		cursor.beginRowOutput();
@@ -671,11 +802,12 @@ public class RowMapper {
 				entry.encode(cursor, keyObj, rowObj, general);
 			}
 		}
-		cursor.endRow();
+		cursor.endRowOutput();
 	}
 
 	public Object decode(Cursor cursor, boolean general) throws GSException {
-		final Object rowObj = createRow(general);
+		final Object rowObj = (general ?
+				ArrayRow.createUninitialized(this) : createRow(false));
 		cursor.decode(general, rowObj);
 		return rowObj;
 	}
@@ -727,7 +859,7 @@ public class RowMapper {
 		in.base().position(cursor.topPos);
 	}
 
-	private int scanVarDataStartOffset(Cursor cursor) {
+	private int scanVarDataStartOffset(Cursor cursor) throws GSException {
 		final BasicBuffer in = cursor.buffer;
 
 		if (cursor.mode == MappingMode.ROWWISE_SEPARATED_V2) {
@@ -744,7 +876,7 @@ public class RowMapper {
 				in.base().position(in.base().position() +
 						getFixedFieldPartSize(i, cursor.mode));
 			}
-			cursor.endRow();
+			cursor.endRowInput();
 
 			return startOffset;
 		}
@@ -761,7 +893,7 @@ public class RowMapper {
 						getFixedFieldPartSize(entry.order, cursor.getMode()));
 			}
 		}
-		cursor.endRow();
+		cursor.endRowInput();
 
 		if (startOffset == Integer.MAX_VALUE) {
 			startOffset = 0;
@@ -770,7 +902,7 @@ public class RowMapper {
 		return startOffset;
 	}
 
-	private int scanVarDataEndOffset(Cursor cursor) {
+	private int scanVarDataEndOffset(Cursor cursor) throws GSException {
 		final BasicBuffer in = cursor.buffer;
 
 		if (cursor.mode == MappingMode.ROWWISE_SEPARATED_V2) {
@@ -779,7 +911,7 @@ public class RowMapper {
 				in.base().position(in.base().position() +
 						getFixedFieldPartSize(i, cursor.mode));
 			}
-			cursor.endRow();
+			cursor.endRowInput();
 
 			final int endOffset;
 			if (cursor.hasNext()) {
@@ -818,7 +950,7 @@ public class RowMapper {
 						getFixedFieldPartSize(entry.order, cursor.getMode()));
 			}
 		}
-		cursor.endRow();
+		cursor.endRowInput();
 
 		return endOffset;
 	}
@@ -839,13 +971,14 @@ public class RowMapper {
 		if (defaultConstructor == null) {
 			throw new GSException(
 					GSErrorCode.ILLEGAL_PARAMETER,
-					"Default construtor not found or specified class is non-static");
+					"Default constructor not found or specified class is non-static");
 		}
 		defaultConstructor.setAccessible(true);
 		return defaultConstructor;
 	}
 
-	private void accept(Field field) throws GSException {
+	private void accept(
+			Set<String> transientRowFields, Field field) throws GSException {
 		final int modifier = field.getModifiers();
 		if (Modifier.isFinal(modifier) || Modifier.isPrivate(modifier) ||
 				Modifier.isStatic(modifier) || Modifier.isTransient(modifier)) {
@@ -855,9 +988,10 @@ public class RowMapper {
 		final RowField rowField = field.getAnnotation(RowField.class);
 		final String orgName = (rowField == null || rowField.name().isEmpty() ?
 				field.getName() : rowField.name());
-		final String name = normalizeSymbol(orgName);
+		final String name =
+				normalizeSymbol(orgName, "field name of row class");
 		if (field.getAnnotation(TransientRowField.class) != null) {
-			transientRowFilelds.add(name);
+			transientRowFields.add(name);
 			return;
 		}
 
@@ -876,7 +1010,9 @@ public class RowMapper {
 		acceptKeyEntry(entry);
 	}
 
-	private void accept(Method method) throws GSException {
+	private void accept(
+			Set<String> transientRowFields, Method method)
+			throws GSException {
 		final int modifier = method.getModifiers();
 		if (Modifier.isPrivate(modifier) || Modifier.isStatic(modifier)) {
 			return;
@@ -890,9 +1026,10 @@ public class RowMapper {
 
 		final String orgName = (rowField == null || rowField.name().isEmpty() ?
 				matcher.group(5) : rowField.name());
-		final String name = normalizeSymbol(orgName);
+		final String name =
+				normalizeSymbol(orgName, "method name of row class");
 		if (method.getAnnotation(TransientRowField.class) != null) {
-			transientRowFilelds.add(name);
+			transientRowFields.add(name);
 			return;
 		}
 
@@ -946,11 +1083,14 @@ public class RowMapper {
 	}
 
 	private void accept(
-			ColumnInfo columnInfo, boolean anyTypeAllowed) throws GSException {
+			ColumnInfo columnInfo, boolean keyType, boolean anyTypeAllowed,
+			boolean nullableAllowed) throws GSException {
 		final String orgName = columnInfo.getName();
 		final String normalizedName =
-				(anyTypeAllowed && orgName == null ?
-						orgName : normalizeSymbol(orgName));
+				(orgName == null ? null : normalizeSymbolUnchecked(orgName));
+		if (!anyTypeAllowed || orgName != null) {
+			RowMapper.checkSymbol(orgName, "column name");
+		}
 
 		if (entryMap.containsKey(normalizedName)) {
 			throw new GSException("Duplicate column name (" + orgName + ")");
@@ -968,18 +1108,25 @@ public class RowMapper {
 			}
 		}
 		entry.order = entryList.size();
+		entry.keyType = keyType;
+		entry.setNullableGeneral(columnInfo.getNullable(), nullableAllowed);
+		entry.setInitialValueNull(columnInfo.getDefaultValueNull());
 
 		if (normalizedName != null) {
 			entryMap.put(normalizedName, entry);
 		}
 		entryList.add(entry);
+
+		if (keyType) {
+			keyEntry = entry;
+		}
 	}
 
 	private Entry putEntry(String name, RowField rowField) throws GSException {
-		Entry entry = entryMap.get(normalizeSymbol(name));
+		Entry entry = entryMap.get(normalizeSymbolUnchecked(name));
 		if (entry == null) {
 			entry = new Entry(name);
-			entryMap.put(normalizeSymbol(name), entry);
+			entryMap.put(normalizeSymbolUnchecked(name), entry);
 			entryList.add(entry);
 		}
 
@@ -1011,13 +1158,16 @@ public class RowMapper {
 		}
 	}
 
-	private void applyOrder(boolean keyFirst) throws GSException {
+	private void applyOrder(
+			Set<String> transientRowFields, boolean keyFirst)
+			throws GSException {
 		boolean specified = false;
 		for (Iterator<Entry> i = entryList.iterator(); i.hasNext();) {
 			final Entry entry = i.next();
-			final String normalizedName = normalizeSymbol(entry.columnName);
+			final String normalizedName =
+					normalizeSymbolUnchecked(entry.columnName);
 			if (!entry.reduceByAccessors() ||
-					transientRowFilelds.contains(normalizedName)) {
+					transientRowFields.contains(normalizedName)) {
 				entryMap.remove(normalizedName);
 				i.remove();
 			}
@@ -1081,11 +1231,36 @@ public class RowMapper {
 		}
 
 		if (rest != 0) {
-			throw new InternalError();
+			throw new Error();
 		}
 
 		if (keyEntry != null && keyFirst && !entryList.get(0).keyType) {
 			throw new GSException("Key must be first column");
+		}
+	}
+
+	private void applyNullable(boolean nullableAllowed) throws GSException {
+		Boolean nullableDefault = null;
+
+		for (Class<?> type = rowType;
+				type != null; type = type.getEnclosingClass()) {
+			nullableDefault =
+					Entry.findNullableFromAccessor(type, null, null, null);
+			if (nullableDefault != null) {
+				break;
+			}
+		}
+
+		if (nullableDefault == null) {
+			final AnnotatedElement target = rowType.getPackage();
+			if (target != null) {
+				nullableDefault = Entry.findNullableFromAccessor(
+						target, null, null, null);
+			}
+		}
+
+		for (Entry entry : entryList) {
+			entry.setNullableByAccessors(nullableDefault, nullableAllowed);
 		}
 	}
 
@@ -1250,7 +1425,7 @@ public class RowMapper {
 			entry.setFieldObj(rowObj, fieldObj, general);
 		}
 
-		cursor.endRow();
+		cursor.endRowInput();
 	}
 
 	private int getNullsByteSize(int fieldNum) {
@@ -1289,24 +1464,31 @@ public class RowMapper {
 		return entryList.get(index);
 	}
 
+	private void getAllInitialValue(boolean nullable, Object[] dest) {
+		Object[] target = emptyFieldArray;
+		if (target == null || nullable) {
+			final int count = getColumnCount();
+			target = (nullable ? dest : new Object[count]);
+			for (int i = 0; i < count; i++) {
+				target[i] = getEntry(i).getInitialObj(nullable, true);
+			}
+			if (nullable) {
+				return;
+			}
+			emptyFieldArray = target;
+		}
+		System.arraycopy(target, 0, dest, 0, target.length);
+	}
+
 	@Override
 	public int hashCode() {
 		final int prime = 31;
 		int result = 1;
 		result = prime * result +
 				((entryList == null) ? 0 : entryList.hashCode());
-		result = prime * result +
-				((entryMap == null) ? 0 : entryMap.hashCode());
 		result = prime * result + (forTimeSeries ? 1231 : 1237);
-		result = prime * result +
-				((keyEntry == null) ? 0 : keyEntry.hashCode());
-		result = prime * result +
-				((rowConstructor == null) ? 0 : rowConstructor.hashCode());
+		result = prime * result + (nullableAllowed ? 1231 : 1237);
 		result = prime * result + ((rowType == null) ? 0 : rowType.hashCode());
-		result = prime *
-				result +
-				((transientRowFilelds == null) ? 0 : transientRowFilelds
-						.hashCode());
 		return result;
 	}
 
@@ -1322,137 +1504,102 @@ public class RowMapper {
 		if (entryList == null) {
 			if (other.entryList != null)
 				return false;
-		} else if (!entryList.equals(other.entryList))
-			return false;
-		if (entryMap == null) {
-			if (other.entryMap != null)
-				return false;
-		} else if (!entryMap.equals(other.entryMap))
+		}
+		else if (!entryList.equals(other.entryList))
 			return false;
 		if (forTimeSeries != other.forTimeSeries)
 			return false;
-		if (keyEntry == null) {
-			if (other.keyEntry != null)
-				return false;
-		} else if (!keyEntry.equals(other.keyEntry))
-			return false;
-		if (rowConstructor == null) {
-			if (other.rowConstructor != null)
-				return false;
-		} else if (!rowConstructor.equals(other.rowConstructor))
+		if (nullableAllowed != other.nullableAllowed)
 			return false;
 		if (rowType == null) {
 			if (other.rowType != null)
 				return false;
-		} else if (!rowType.equals(other.rowType))
-			return false;
-		if (transientRowFilelds == null) {
-			if (other.transientRowFilelds != null)
-				return false;
-		} else if (!transientRowFilelds.equals(other.transientRowFilelds))
+		}
+		else if (!rowType.equals(other.rowType))
 			return false;
 		return true;
 	}
 
 	private static GSType resolveElementType(
-			Class<?> type, boolean subClassAllowed, boolean validating)
+			Class<?> objectType, boolean subClassAllowed, boolean validating)
 			throws GSException {
-		final Class<?> elementTypeBase;
-		if (type.isArray()) {
-			elementTypeBase = type.getComponentType();
+		final Class<?> objectElementType;
+		if (objectType.isArray()) {
+			objectElementType = objectType.getComponentType();
 		}
 		else {
-			elementTypeBase = type;
+			objectElementType = objectType;
 		}
 
-		do {
-			if (elementTypeBase == boolean.class) {
-				return GSType.BOOL;
-			}
-			else if (elementTypeBase == byte.class) {
-				return GSType.BYTE;
-			}
-			else if (elementTypeBase == short.class) {
-				return GSType.SHORT;
-			}
-			else if (elementTypeBase == int.class) {
-				return GSType.INTEGER;
-			}
-			else if (elementTypeBase == long.class) {
-				return GSType.LONG;
-			}
-			else if (elementTypeBase == float.class) {
-				return GSType.FLOAT;
-			}
-			else if (elementTypeBase == double.class) {
-				return GSType.DOUBLE;
-			}
-			else if (elementTypeBase == String.class) {
-				return GSType.STRING;
-			}
-			else if (elementTypeBase == Date.class) {
+		final GSType elementType = ELEMENT_TYPE_MAP.get(objectElementType);
+		if (elementType == null) {
+			if (Date.class.isAssignableFrom(objectElementType)) {
 				return GSType.TIMESTAMP;
 			}
-			else if (elementTypeBase == Geometry.class) {
-				if (validating && type.isArray()) {
-					break;
-				}
+			if (Geometry.class.isAssignableFrom(objectElementType)) {
 				return GSType.GEOMETRY;
 			}
-			else if (elementTypeBase == Blob.class) {
-				if (validating && type.isArray()) {
-					break;
-				}
-				return GSType.BLOB;
-			}
-			else if (type.isArray()) {
-				break;
-			}
-			else if (elementTypeBase == Boolean.class) {
-				return GSType.BOOL;
-			}
-			else if (elementTypeBase == Byte.class) {
-				return GSType.BYTE;
-			}
-			else if (elementTypeBase == Short.class) {
-				return GSType.SHORT;
-			}
-			else if (elementTypeBase == Integer.class) {
-				return GSType.INTEGER;
-			}
-			else if (elementTypeBase == Long.class) {
-				return GSType.LONG;
-			}
-			else if (elementTypeBase == Float.class) {
-				return GSType.FLOAT;
-			}
-			else if (elementTypeBase == Double.class) {
-				return GSType.DOUBLE;
-			}
-			else if (!subClassAllowed) {
-				break;
-			}
-			else if (Date.class.isAssignableFrom(elementTypeBase)) {
-				return GSType.TIMESTAMP;
-			}
-			else if (Geometry.class.isAssignableFrom(elementTypeBase)) {
-				return GSType.GEOMETRY;
-			}
-			else if (Blob.class.isAssignableFrom(elementTypeBase)) {
+			if (Blob.class.isAssignableFrom(objectElementType)) {
 				return GSType.BLOB;
 			}
 		}
-		while (false);
+		else if (objectType.isArray()) {
+			if (objectElementType.isPrimitive()) {
+				return elementType;
+			}
+			else {
+				switch (elementType) {
+				case STRING:
+				case TIMESTAMP:
+					return elementType;
+				case GEOMETRY:
+				case BLOB:
+					if (!validating) {
+						return elementType;
+					}
+					break;
+				default:
+					break;
+				}
+			}
+		}
+		else {
+			return elementType;
+		}
 
 		if (validating) {
 			throw new GSException(
 					GSErrorCode.UNSUPPORTED_FIELD_TYPE,
 					"Unsupported field type (" +
-					"className=" + type.getName() +
-					", elementClassName=" + elementTypeBase +
-					", arrayType=" + type.isArray() + ")");
+					"className=" + objectType.getName() +
+					", elementClassName=" + objectElementType.getName() +
+					", arrayType=" + objectType.isArray() + ")");
 		}
+
 		return null;
+	}
+
+	private static Map<Class<?>, GSType> createElementTypeMap() {
+		final Map<Class<?>, GSType> map = new HashMap<Class<?>, GSType>();
+		map.put(String.class, GSType.STRING);
+		map.put(boolean.class, GSType.BOOL);
+		map.put(byte.class, GSType.BYTE);
+		map.put(short.class, GSType.SHORT);
+		map.put(int.class, GSType.INTEGER);
+		map.put(long.class, GSType.LONG);
+		map.put(float.class, GSType.FLOAT);
+		map.put(double.class, GSType.DOUBLE);
+		map.put(Date.class, GSType.TIMESTAMP);
+		map.put(Geometry.class, GSType.GEOMETRY);
+		map.put(Blob.class, GSType.BLOB);
+		map.put(Boolean.class, GSType.BOOL);
+		map.put(Byte.class, GSType.BYTE);
+		map.put(Short.class, GSType.SHORT);
+		map.put(Integer.class, GSType.INTEGER);
+		map.put(Long.class, GSType.LONG);
+		map.put(Float.class, GSType.FLOAT);
+		map.put(Double.class, GSType.DOUBLE);
+		return map;
 	}
 
 	private static void putArraySizeInfo(
@@ -1596,7 +1743,7 @@ public class RowMapper {
 						GSErrorCode.UNSUPPORTED_FIELD_TYPE,
 						"Illegal array type");
 			default:
-				throw new InternalError();
+				throw new Error();
 			}
 			cursor.endVarData();
 		}
@@ -1679,7 +1826,7 @@ public class RowMapper {
 				break;
 			}
 			default:
-				throw new InternalError();
+				throw new Error();
 			}
 		}
 		else {
@@ -1801,7 +1948,7 @@ public class RowMapper {
 						GSErrorCode.UNSUPPORTED_FIELD_TYPE,
 						"Illegal array type");
 			default:
-				throw new InternalError();
+				throw new Error();
 			}
 			cursor.endVarData();
 			return result;
@@ -1855,7 +2002,7 @@ public class RowMapper {
 				in.base().get(rawArray);
 				final Blob blob;
 				if (cursor.blobFactory == null) {
-					blob = SERIAL_BLOB_FACTORY.createBlob(rawArray);
+					blob = DIRECT_BLOB_FACTORY.createBlob(rawArray);
 				}
 				else {
 					blob = cursor.blobFactory.createBlob(rawArray);
@@ -1864,7 +2011,7 @@ public class RowMapper {
 				return blob;
 			}
 			default:
-				throw new InternalError();
+				throw new Error();
 			}
 		}
 		else {
@@ -1942,7 +2089,7 @@ public class RowMapper {
 					return Long.SIZE / Byte.SIZE;
 				}
 			default:
-				throw new InternalError();
+				throw new Error();
 			}
 		}
 		else {
@@ -1996,6 +2143,36 @@ public class RowMapper {
 		}
 	}
 
+	private static Map<GSType, Object> createEmptyValueMap(boolean arrayUsed) {
+		final Map<GSType, Object> map =
+				new EnumMap<GSType, Object>(GSType.class);
+		if (arrayUsed) {
+			map.put(GSType.STRING, new String[0]);
+			map.put(GSType.BOOL, new boolean[0]);
+			map.put(GSType.BYTE, new byte[0]);
+			map.put(GSType.SHORT, new short[0]);
+			map.put(GSType.INTEGER, new int[0]);
+			map.put(GSType.LONG, new long[0]);
+			map.put(GSType.FLOAT, new float[0]);
+			map.put(GSType.DOUBLE, new double[0]);
+			map.put(GSType.TIMESTAMP, new Date[0]);
+		}
+		else {
+			map.put(GSType.STRING, "");
+			map.put(GSType.BOOL, false);
+			map.put(GSType.BYTE, (byte) 0);
+			map.put(GSType.SHORT, (short) 0);
+			map.put(GSType.INTEGER, (int) 0);
+			map.put(GSType.LONG, (long) 0);
+			map.put(GSType.FLOAT, (float) 0);
+			map.put(GSType.DOUBLE, (double) 0);
+			map.put(GSType.TIMESTAMP, new Date(0));
+			map.put(GSType.GEOMETRY, Geometry.valueOf("POINT(EMPTY)"));
+			map.put(GSType.BLOB, new BlobImpl());
+		}
+		return map;
+	}
+
 	public static GSType toFullType(GSType elementType, boolean arrayUsed) {
 		if (arrayUsed) {
 			switch (elementType) {
@@ -2018,7 +2195,7 @@ public class RowMapper {
 			case TIMESTAMP:
 				return GSType.TIMESTAMP_ARRAY;
 			default:
-				throw new InternalError();
+				throw new Error();
 			}
 		}
 		else {
@@ -2051,53 +2228,112 @@ public class RowMapper {
 		}
 	}
 
-	public static String normalizeSymbol(String value) throws GSException {
-
-		return normalizeExtendedSymbol(value, false);
+	public static String normalizeSymbol(String symbol, String typeName)
+			throws GSException {
+		checkSymbol(symbol, typeName);
+		return normalizeSymbolUnchecked(symbol);
 	}
 
-	public static String normalizeExtendedSymbol(String value, boolean extend)
-			throws GSException {
-		final String result = value.toLowerCase(Locale.US);
-		if (result.isEmpty()) {
-			throw new GSException(
-					GSErrorCode.EMPTY_PARAMETER,
-					"Empty symbol (value=\"" + value + "\")");
-		}
+	public static String normalizeSymbolUnchecked(String symbol) {
+		return symbol.toLowerCase(Locale.ROOT);
+	}
 
-		final char charArray[] = result.toCharArray();
-		for (int i = 0; i < charArray.length; i++) {
-			final char ch = charArray[i];
-			if (!('a' <= ch && ch <= 'z' || 'A' <= ch && ch <= 'Z' ||
-					'0' <= ch && ch <= '9' || ch == '_')) {
-				if (!extend || !(ch == '@' || ch == '/' || ch == '#')) {
-					throw new GSException(
-						GSErrorCode.ILLEGAL_SYMBOL_CHARACTER,
-						"Illegal char in symbol (value=\"" + value + "\")");
-				}
-			}
-			if (i == 0 && '0' <= ch && ch <= '9') {
+	public static void checkSymbol(String symbol, String typeName)
+			throws GSException {
+		if (symbol == null || symbol.isEmpty()) {
+			throw new GSException(
+					GSErrorCode.EMPTY_PARAMETER, "Empty " + typeName);
+		}
+		checkString(symbol, typeName);
+	}
+
+	public static void checkString(String value, String typeName)
+			throws GSException {
+		boolean highSurrogateLast = false;
+		boolean surrogateIllegal = false;
+
+		final int length = value.length();
+		for (int i = 0; i < length; i++) {
+			final char ch = value.charAt(i);
+			if (ch == '\0') {
 				throw new GSException(
 						GSErrorCode.ILLEGAL_SYMBOL_CHARACTER,
-						"Illegal char in symbol (value=\"" + value + "\")");
+						"Illegal '\\0' character found in " + typeName);
+			}
+			else if (highSurrogateLast) {
+				if (!Character.isLowSurrogate(ch)) {
+					surrogateIllegal = true;
+					break;
+				}
+				highSurrogateLast = false;
+			}
+			else if (Character.isHighSurrogate(ch)) {
+				if (highSurrogateLast) {
+					surrogateIllegal = true;
+					break;
+				}
+				highSurrogateLast = true;
+			}
+			else if (Character.isLowSurrogate(ch)) {
+				surrogateIllegal = true;
+				break;
 			}
 		}
-		return result;
+
+		if (highSurrogateLast || surrogateIllegal) {
+			throw new GSException(
+					GSErrorCode.ILLEGAL_SYMBOL_CHARACTER,
+					"Illegal surrogate character found in " + typeName);
+		}
 	}
 
-	private static class Entry implements Cloneable {
+	public static BlobFactory getDirectBlobFactory() {
+		return DIRECT_BLOB_FACTORY;
+	}
+
+	public static class Config {
+
+		public boolean anyTypeAllowed;
+
+		public boolean nullableAllowed;
+
+		public boolean keyExtensible;
+
+		public Config(
+				boolean anyTypeAllowed,
+				boolean nullableAllowed,
+				boolean keyExtensible) {
+			this.anyTypeAllowed = anyTypeAllowed;
+			this.nullableAllowed = nullableAllowed;
+			this.keyExtensible = keyExtensible;
+		}
+
+	}
+
+	private static class Entry {
+
+		private static final int COLUMN_FLAG_ARRAY = 1 << 0;
+
+		private static final int COLUMN_FLAG_NOT_NULL = 1 << 2;
+
 		String columnName;
-		String nameByField;
-		String nameByGetter;
-		Field rowTypeField;
-		Method getterMethod;
-		Method setterMethod;
+		transient String nameByField;
+		transient String nameByGetter;
+		transient Field rowTypeField;
+		transient Method getterMethod;
+		transient Method setterMethod;
 
 		GSType elementType;
 		boolean arrayUsed;
 		boolean keyType;
-		int order = -1;
-		boolean orderSpecified;
+		transient int order = -1;
+		transient boolean orderSpecified;
+
+		boolean columnNullable;
+		boolean objectNullable;
+
+		boolean initialValueSpecified;
+		boolean initialValueNull;
 
 		Entry(String columnName) {
 			this.columnName = columnName;
@@ -2119,9 +2355,9 @@ public class RowMapper {
 					return true;
 				}
 				if (getterMethod == null &&
-						setterMethod.getAnnotation(RowField.class) != null ||
+						findMappingAnnotations(setterMethod) ||
 						setterMethod == null &&
-						getterMethod.getAnnotation(RowField.class) != null) {
+						findMappingAnnotations(getterMethod)) {
 					throw new GSException("Inconsistent annotation");
 				}
 				getterMethod = null;
@@ -2139,6 +2375,123 @@ public class RowMapper {
 			return false;
 		}
 
+		static boolean findMappingAnnotations(AccessibleObject ao) {
+			return ao.getAnnotation(RowField.class) != null ||
+					ao.getAnnotation(Nullable.class) != null ||
+					ao.getAnnotation(NotNull.class) != null;
+		}
+
+		void setNullableByAccessors(
+				Boolean nullableDefault, boolean nullableAllowed)
+				throws GSException {
+			Boolean nullable = null;
+			AccessibleObject lastFoundTarget = null;
+			for (int i = 0; i < 3; i++) {
+				final AccessibleObject target = (i == 0 ? rowTypeField :
+						(i == 1 ? getterMethod : setterMethod));
+				if (target == null) {
+					continue;
+				}
+				final Boolean nextNullable = findNullableFromAccessor(
+						target, lastFoundTarget, nullable, this);
+				if (nullable == null && nextNullable != null) {
+					lastFoundTarget = target;
+					nullable = nextNullable;
+				}
+			}
+
+			columnNullable =
+					filterNullable(nullable, nullableDefault, nullableAllowed);
+		}
+
+		static Boolean findNullableFromAccessor(
+				AnnotatedElement target, AnnotatedElement lastFoundTarget,
+				Boolean lastNullable, Entry entry) throws GSException {
+			Boolean nullable = lastNullable;
+			boolean curAccepted = false;
+			do {
+				if (target.getAnnotation(NotNull.class) != null) {
+					if (nullable != null && nullable) {
+						break;
+					}
+					nullable = false;
+					curAccepted = true;
+				}
+
+				if (target.getAnnotation(Nullable.class) != null) {
+					if (nullable != null && !nullable) {
+						break;
+					}
+					nullable = true;
+				}
+
+				return nullable;
+			}
+			while (false);
+
+			throw new GSException(
+					GSErrorCode.ILLEGAL_SCHEMA,
+					"Inconsistent nullability annotations specified (" +
+					(entry == null ?
+							"" : "column=" + entry.columnName + ", ") +
+					"target=" + target +
+					(!curAccepted && lastFoundTarget != null ?
+							", conflictingTarget=" + lastFoundTarget : "") +
+					")");
+		}
+
+		void setNullableGeneral(Boolean nullable, boolean nullableAllowed)
+				throws GSException {
+			columnNullable = filterNullable(nullable, null, nullableAllowed);
+			objectNullable = true;
+		}
+
+		void setInitialValueNull(Boolean valueNull) throws GSException {
+			if (valueNull != null) {
+				if (valueNull && !columnNullable) {
+					throw new GSException(
+							GSErrorCode.ILLEGAL_SCHEMA,
+							"Default value cannot set be null for " +
+							"non-nullable column (" +
+							"column=" + columnName + ")");
+				}
+				initialValueSpecified = true;
+				initialValueNull = valueNull;
+			}
+		}
+
+		boolean filterNullable(
+				Boolean nullable, Boolean nullableDefault,
+				boolean nullableAllowed) throws GSException {
+			if (nullable != null && nullable) {
+				if (!nullableAllowed) {
+					throw new GSException(
+							GSErrorCode.ILLEGAL_SCHEMA,
+							"Nullable column is not currently available (" +
+							"column=" + columnName + ")");
+				}
+
+				if (keyType) {
+					throw new GSException(
+							GSErrorCode.ILLEGAL_SCHEMA,
+							"Row key cannot be null (" +
+							"column=" + columnName + ")");
+				}
+			}
+
+			if (nullable == null) {
+				if (keyType) {
+					return false;
+				}
+				if (nullableDefault != null) {
+					return nullableDefault;
+				}
+				return nullableAllowed;
+			}
+
+			return nullable;
+		}
+
 		void setObjectType(Class<?> objectType) throws GSException {
 			elementType = resolveElementType(objectType, false, false);
 			if (objectType.isArray()) {
@@ -2154,23 +2507,48 @@ public class RowMapper {
 			else {
 				arrayUsed = false;
 			}
+			objectNullable = !objectType.isPrimitive();
+		}
+
+		GSType getFullType() {
+			return toFullType(elementType, arrayUsed);
+		}
+
+		Boolean getInitialValueNull() {
+			if (initialValueSpecified) {
+				return initialValueNull;
+			}
+			return null;
 		}
 
 		ColumnInfo getColumnInfo() {
-			return new ColumnInfo(columnName, toFullType(elementType, arrayUsed));
+			return new ColumnInfo(
+					columnName, getFullType(), columnNullable,
+					getInitialValueNull(), null);
 		}
 
 		void exportColumnSchema(BasicBuffer out) {
-			out.putString(columnName);
+			out.putString((columnName == null ? "" : columnName));
 			out.prepare(1);
 			putTypePrepared(out, elementType);
-			out.putBoolean(arrayUsed);
+
+			byte flags = 0;
+			flags |= (arrayUsed ? COLUMN_FLAG_ARRAY : 0);
+			flags |= (columnNullable ? 0 : COLUMN_FLAG_NOT_NULL);
+			out.put(flags);
 		}
 
-		void importColumnSchema(BasicBuffer in, int order) throws GSException {
+		void importColumnSchema(
+				BasicBuffer in, int order, boolean nullableAllowed)
+				throws GSException {
 			columnName = in.getString();
 			elementType = getType(in);
-			arrayUsed = in.getBoolean();
+
+			final byte flags = in.base().get();
+			arrayUsed = (flags & COLUMN_FLAG_ARRAY) != 0;
+			columnNullable = (nullableAllowed &&
+					(flags & COLUMN_FLAG_NOT_NULL) == 0);
+
 			this.order = order;
 		}
 
@@ -2186,10 +2564,11 @@ public class RowMapper {
 			}
 			order = orgEntry.order;
 
-			if (!normalizeSymbol(columnName).equals(
-					normalizeSymbol(orgEntry.columnName)) ||
+			if (!normalizeSymbolUnchecked(columnName).equals(
+					normalizeSymbolUnchecked(orgEntry.columnName)) ||
 					elementType != orgEntry.elementType ||
-					arrayUsed != orgEntry.arrayUsed) {
+					arrayUsed != orgEntry.arrayUsed ||
+					columnNullable != orgEntry.columnNullable) {
 				throw new GSException(
 						GSErrorCode.ILLEGAL_SCHEMA,
 						"Inconsistent remote column");
@@ -2198,27 +2577,48 @@ public class RowMapper {
 			rowTypeField = orgEntry.rowTypeField;
 			getterMethod = orgEntry.getterMethod;
 			setterMethod = orgEntry.setterMethod;
+			objectNullable = orgEntry.objectNullable;
 		}
 
-		void encode(Cursor cursor,
-				Object keyObj, Object rowObj, boolean general) throws GSException {
-			final Object fieldObj = (!keyType || keyObj == null ?
+		void encode(
+				Cursor cursor, Object keyObj, Object rowObj,
+				boolean general) throws GSException {
+			Object fieldObj = (!keyType || keyObj == null ?
 					getFieldObj(rowObj, general) : keyObj);
 
 			if (fieldObj == null && elementType != null) {
-				throw new NullPointerException(
-						"Null field (columnName=" + columnName +
-						", type=" + toFullType(elementType, arrayUsed) + ")");
+				if (!columnNullable) {
+					throw new NullPointerException(
+							"Null field (columnName=" + columnName +
+							", type=" + getFullType() + ")");
+				}
+				cursor.setNull(order);
+				fieldObj = getInitialObj(false, general);
 			}
 
 			putField(cursor, fieldObj, elementType, arrayUsed);
 		}
 
-		void decode(Cursor cursor,
-				Object rowObj, boolean general) throws GSException {
-			setFieldObj(rowObj,
-					getField(cursor, elementType, arrayUsed),
-					general);
+		void decode(
+				Cursor cursor, Object rowObj,
+				boolean general) throws GSException {
+			Object fieldObj = getField(cursor, elementType, arrayUsed);
+			if (cursor.isNull(order)) {
+				if (objectNullable && columnNullable) {
+					fieldObj = null;
+				}
+				else {
+					fieldObj = getInitialObj(false, general);
+				}
+			}
+			setFieldObj(rowObj, fieldObj, general);
+		}
+
+		void decodeNoNull(
+				Cursor cursor, Object rowObj,
+				boolean general) throws GSException {
+			final Object fieldObj = getField(cursor, elementType, arrayUsed);
+			setFieldObj(rowObj, fieldObj, general);
 		}
 
 		Object getFieldObj(Object rowObj, boolean general) throws GSException {
@@ -2246,7 +2646,7 @@ public class RowMapper {
 				Object fieldObj, boolean general) throws GSException {
 			if (general) {
 				if (rowObj.getClass() == ArrayRow.class) {
-					((ArrayRow) rowObj).setValueDirect(order, fieldObj);
+					((ArrayRow) rowObj).setAnyValueDirect(order, fieldObj);
 				}
 				else {
 					((Row) rowObj).setValue(order, fieldObj);
@@ -2270,6 +2670,31 @@ public class RowMapper {
 			}
 		}
 
+		Object getInitialObj(boolean nullable, boolean general) {
+			if (nullable && (general || objectNullable) && columnNullable &&
+					initialValueNull) {
+				return null;
+			}
+
+			if (elementType == null) {
+				return null;
+			}
+
+			final Object emptyObj;
+			if (arrayUsed) {
+				emptyObj = EMPTY_ARRAY_VALUES.get(elementType);
+			}
+			else {
+				emptyObj = EMPTY_ELEMENT_VALUES.get(elementType);
+			}
+
+			if (emptyObj == null) {
+				throw new Error();
+			}
+
+			return emptyObj;
+		}
+
 		@Override
 		public int hashCode() {
 			final int prime = 31;
@@ -2277,21 +2702,13 @@ public class RowMapper {
 			result = prime * result + (arrayUsed ? 1231 : 1237);
 			result = prime * result +
 					((columnName == null) ? 0 : columnName.hashCode());
+			result = prime * result + (columnNullable ? 1231 : 1237);
+			result = prime * result + (initialValueNull ? 1231 : 1237);
+			result = prime * result + (initialValueSpecified ? 1231 : 1237);
 			result = prime * result +
 					((elementType == null) ? 0 : elementType.hashCode());
-			result = prime * result +
-					((getterMethod == null) ? 0 : getterMethod.hashCode());
 			result = prime * result + (keyType ? 1231 : 1237);
-			result = prime * result +
-					((nameByField == null) ? 0 : nameByField.hashCode());
-			result = prime * result +
-					((nameByGetter == null) ? 0 : nameByGetter.hashCode());
-			result = prime * result + order;
-			result = prime * result + (orderSpecified ? 1231 : 1237);
-			result = prime * result +
-					((rowTypeField == null) ? 0 : rowTypeField.hashCode());
-			result = prime * result +
-					((setterMethod == null) ? 0 : setterMethod.hashCode());
+			result = prime * result + (objectNullable ? 1231 : 1237);
 			return result;
 		}
 
@@ -2309,40 +2726,20 @@ public class RowMapper {
 			if (columnName == null) {
 				if (other.columnName != null)
 					return false;
-			} else if (!columnName.equals(other.columnName))
+			}
+			else if (!columnName.equals(other.columnName))
+				return false;
+			if (columnNullable != other.columnNullable)
+				return false;
+			if (initialValueNull != other.initialValueNull)
+				return false;
+			if (initialValueSpecified != other.initialValueSpecified)
 				return false;
 			if (elementType != other.elementType)
 				return false;
-			if (getterMethod == null) {
-				if (other.getterMethod != null)
-					return false;
-			} else if (!getterMethod.equals(other.getterMethod))
-				return false;
 			if (keyType != other.keyType)
 				return false;
-			if (nameByField == null) {
-				if (other.nameByField != null)
-					return false;
-			} else if (!nameByField.equals(other.nameByField))
-				return false;
-			if (nameByGetter == null) {
-				if (other.nameByGetter != null)
-					return false;
-			} else if (!nameByGetter.equals(other.nameByGetter))
-				return false;
-			if (order != other.order)
-				return false;
-			if (orderSpecified != other.orderSpecified)
-				return false;
-			if (rowTypeField == null) {
-				if (other.rowTypeField != null)
-					return false;
-			} else if (!rowTypeField.equals(other.rowTypeField))
-				return false;
-			if (setterMethod == null) {
-				if (other.setterMethod != null)
-					return false;
-			} else if (!setterMethod.equals(other.setterMethod))
+			if (objectNullable != other.objectNullable)
 				return false;
 			return true;
 		}
@@ -2365,6 +2762,8 @@ public class RowMapper {
 
 		private int fieldIndex = -1;
 
+		private final int fixedRowPartSize;
+
 		private final int topPos;
 
 		private final int varDataTop;
@@ -2379,9 +2778,12 @@ public class RowMapper {
 
 		private long varDataBaseOffset;
 
-		private int nullsByteSize;
+		private byte[] nullsBytes;
 
-		private Cursor(BasicBuffer buffer, MappingMode mode, int rowCount,
+		private boolean nullFound;
+
+		private Cursor(
+				BasicBuffer buffer, MappingMode mode, int rowCount,
 				boolean rowIdIncluded, BlobFactory blobFactory) {
 			this.buffer = buffer;
 			this.mode = mode;
@@ -2389,22 +2791,21 @@ public class RowMapper {
 			this.rowIdIncluded = rowIdIncluded;
 			this.blobFactory = blobFactory;
 
+			this.fixedRowPartSize = getFixedRowPartSize(rowIdIncluded, mode);
 			this.topPos = buffer.base().position();
 			switch (mode) {
 			case ROWWISE_SEPARATED:
-				varDataTop =
-						topPos + getFixedRowPartSize(rowIdIncluded, mode) * rowCount;
+				varDataTop = topPos + fixedRowPartSize * rowCount;
 				break;
 			case ROWWISE_SEPARATED_V2:
-				varDataTop =
-						topPos + getFixedRowPartSize(rowIdIncluded, mode) * rowCount;
-				nullsByteSize = getNullsByteSize(entryList.size());
+				varDataTop = topPos + fixedRowPartSize * rowCount;
+				nullsBytes = new byte[getNullsByteSize(entryList.size())];
 				break;
 			case COLUMNWISE_SEPARATED:
 				if (rowIdIncluded) {
 					throw new IllegalArgumentException();
 				}
-				varDataTop = topPos + getFixedRowPartSize(false, mode) * rowCount;
+				varDataTop = topPos + fixedRowPartSize * rowCount;
 				break;
 			default:
 				varDataTop = -1;
@@ -2447,13 +2848,18 @@ public class RowMapper {
 			fieldIndex = -1;
 
 			buffer.base().position(topPos);
-			if (varDataTop >= 0) {
-				buffer.base().limit(varDataTop);
+			if (varDataLast >= 0) {
+				buffer.base().limit(varDataLast);
 			}
 			varDataLast = varDataTop;
 			partialVarDataOffset = 0;
 			pendingPos = -1;
 			lastRowId = -1;
+
+			if (nullsBytes != null) {
+				Arrays.fill(nullsBytes, (byte) 0);
+			}
+			nullFound = false;
 		}
 
 		public void resetBuffer() {
@@ -2472,10 +2878,17 @@ public class RowMapper {
 				}
 
 				beginRowInput();
-				for (Entry entry : entryList) {
-					entry.decode(this, rowObj, general);
+				if (nullFound) {
+					for (Entry entry : entryList) {
+						entry.decode(this, rowObj, general);
+					}
 				}
-				endRow();
+				else {
+					for (Entry entry : entryList) {
+						entry.decodeNoNull(this, rowObj, general);
+					}
+				}
+				endRowInput();
 			}
 		}
 
@@ -2513,11 +2926,10 @@ public class RowMapper {
 			}
 
 			rowIndex += skipCount;
-			buffer.base().position(topPos +
-					getFixedRowPartSize(rowIdIncluded, mode) * (rowIndex + 1));
+			buffer.base().position(topPos + fixedRowPartSize * (rowIndex + 1));
 		}
 
-		private void beginRowInput() {
+		private void beginRowInput() throws GSException {
 			rowIndex++;
 			fieldIndex = -1;
 			if (rowIdIncluded) {
@@ -2534,12 +2946,18 @@ public class RowMapper {
 					
 					final int savePos = buffer.base().position();
 					buffer.base().position(varDataLast);
-					final int elemCount = getVarSize(buffer);
+					getVarSize(buffer);
 					varDataLast = buffer.base().position();
 					buffer.base().position(savePos);
 				}
-				
-				buffer.base().position(buffer.base().position() + nullsByteSize);
+				buffer.base().get(nullsBytes);
+				nullFound = false;
+				for (int i = 0; i < nullsBytes.length; i++) {
+					if (nullsBytes[i] != 0) {
+						nullFound = true;
+						break;
+					}
+				}
 			}
 		}
 
@@ -2558,7 +2976,7 @@ public class RowMapper {
 			if (mode == MappingMode.ROWWISE_SEPARATED_V2) {
 				if (getVariableEntryCount() > 0) {
 					final long varOffset = varDataLast - varDataTop;
-					buffer.base().putLong(varOffset);
+					buffer.putLong(varOffset);
 					
 					final int savePos = buffer.base().position();
 					buffer.base().position(varDataLast);
@@ -2567,19 +2985,37 @@ public class RowMapper {
 					buffer.base().position(savePos);
 				}
 				
-				for (int i = nullsByteSize; i > 0; --i) {
-					final byte nullByte = 0;
-					buffer.base().put(nullByte);
-				}
+				buffer.prepare(nullsBytes.length);
+				buffer.base().put(nullsBytes);
 			}
 			rowIndex++;
 			fieldIndex = -1;
 		}
 
-		private void endRow() {
+		private void endRowInput() {
 			if (varDataLast >= 0 && rowIndex + 1 >= rowCount) {
 				buffer.base().position(varDataLast);
 			}
+		}
+
+		private void endRowOutput() {
+			if (nullFound) {
+				final int lastPos = buffer.base().position();
+
+				final int nullsOffset = (Long.SIZE / Byte.SIZE) *
+						((rowIdIncluded ? 1 : 0) +
+						(getVariableEntryCount() > 0 ? 1 : 0));
+				buffer.base().position(
+						lastPos - fixedRowPartSize + nullsOffset);
+
+				buffer.base().put(nullsBytes);
+				buffer.base().position(lastPos);
+
+				Arrays.fill(nullsBytes, (byte) 0);
+				nullFound = false;
+			}
+
+			endRowInput();
 		}
 
 		private void beginField() {
@@ -2646,6 +3082,16 @@ public class RowMapper {
 			}
 		}
 
+		private boolean isNull(int ordinal) {
+			return (nullsBytes[ordinal / Byte.SIZE] &
+					(1 << (ordinal % Byte.SIZE))) != 0;
+		}
+
+		private void setNull(int ordinal) {
+			nullsBytes[ordinal / Byte.SIZE] |= (1 << (ordinal % Byte.SIZE));
+			nullFound = true;
+		}
+
 	}
 
 	private static class ArrayRow implements Row {
@@ -2654,165 +3100,158 @@ public class RowMapper {
 
 		private final Object[] fieldArray;
 
-		ArrayRow(RowMapper mapper) throws GSException {
+		private ArrayRow(
+				RowMapper mapper, Object[] fieldArray) throws GSException {
 			if (mapper.getContainerType() == null) {
 				throw new GSException(GSErrorCode.UNSUPPORTED_OPERATION, "");
 			}
 
 			this.mapper = mapper;
-			this.fieldArray = new Object[mapper.getColumnCount()];
+			this.fieldArray = fieldArray;
 		}
 
-		private Object getInitialValue(int column) throws GSException {
-			final Entry entry = mapper.entryList.get(column);
-			if (entry.arrayUsed) {
-				switch (entry.elementType) {
-				case STRING:
-					return new String[0];
-				case BOOL:
-					return new boolean[0];
-				case BYTE:
-					return new byte[0];
-				case SHORT:
-					return new short[0];
-				case INTEGER:
-					return new int[0];
-				case LONG:
-					return new long[0];
-				case FLOAT:
-					return new float[0];
-				case DOUBLE:
-					return new double[0];
-				case TIMESTAMP:
-					return new Date[0];
-				default:
-					throw new InternalError();
-				}
+		static ArrayRow create(
+				RowMapper mapper, boolean nullable) throws GSException {
+			final Object[] fieldArray = new Object[mapper.getColumnCount()];
+			mapper.getAllInitialValue(nullable, fieldArray);
+			return new ArrayRow(mapper, fieldArray);
+		}
+
+		static ArrayRow createUninitialized(
+				RowMapper mapper) throws GSException {
+			final Object[] fieldArray = new Object[mapper.getColumnCount()];
+			return new ArrayRow(mapper, fieldArray);
+		}
+
+		private void setAnyValueDirect(int column, Object fieldValue) {
+			fieldArray[column] = fieldValue;
+		}
+
+		private Object getAnyValue(int column) throws GSException {
+			try {
+				return fieldArray[column];
 			}
-			else if (entry.elementType != null) {
-				switch (entry.elementType) {
-				case STRING:
-					return "";
-				case BOOL:
-					return false;
-				case BYTE:
-					return (byte) 0;
-				case SHORT:
-					return (short) 0;
-				case INTEGER:
-					return (int) 0;
-				case LONG:
-					return (long) 0;
-				case FLOAT:
-					return (float) 0;
-				case DOUBLE:
-					return (double) 0;
-				case TIMESTAMP:
-					return new Date(0);
-				case GEOMETRY:
-					return Geometry.valueOf("POINT(EMPTY)");
-				case BLOB:
-					return SERIAL_BLOB_FACTORY.createBlob(new byte[0]);
-				default:
-					throw new InternalError();
-				}
+			catch (IndexOutOfBoundsException e) {
+				throw errorColumnNumber(column, e);
 			}
-			else {
-				return null;
-			}
+		}
+
+		private void setPrimitiveNull(
+				int column, GSType elementType) throws GSException {
+			final Entry entry = getEntry(column);
+			checkNullable(entry);
+			checkType(entry, elementType, false);
+			setAnyValueDirect(column, null);
+		}
+
+		private void setArrayNull(
+				int column, GSType elementType) throws GSException {
+			final Entry entry = getEntry(column);
+			checkNullable(entry);
+			checkType(entry, elementType, true);
+			setAnyValueDirect(column, null);
 		}
 
 		private void checkPrimitiveType(
 				int column, GSType elementType) throws GSException {
-			final Entry entry;
-			try {
-				entry = mapper.entryList.get(column);
-			}
-			catch (IndexOutOfBoundsException e) {
-				throw new GSException(GSErrorCode.ILLEGAL_PARAMETER, "", e);
-			}
-
-			if (entry.arrayUsed || elementType != entry.elementType) {
-				throw new GSException(GSErrorCode.ILLEGAL_PARAMETER, "");
-			}
+			final Entry entry = getEntry(column);
+			checkType(entry, elementType, false);
 		}
 
 		private void checkArrayType(
 				int column, GSType elementType) throws GSException {
-			final Entry entry;
-			try {
-				entry = mapper.entryList.get(column);
-			}
-			catch (IndexOutOfBoundsException e) {
-				throw new GSException(GSErrorCode.ILLEGAL_PARAMETER, "", e);
-			}
+			final Entry entry = getEntry(column);
+			checkType(entry, elementType, true);
+		}
 
-			if (!entry.arrayUsed || elementType != entry.elementType) {
-				throw new GSException(GSErrorCode.ILLEGAL_PARAMETER, "");
+		private void checkNullable(Entry entry) throws GSException {
+			if (!entry.columnNullable && entry.elementType != null) {
+				throw errorNull(entry.order, null);
 			}
 		}
 
-		private void setValueDirect(int column, Object fieldValue)
+		private void checkType(
+				Entry entry, GSType elementType, boolean arrayUsed)
 				throws GSException {
-			try {
-				if (fieldValue == null) {
-					if (mapper.entryList.get(column).elementType != null) {
-						throw new GSException(GSErrorCode.EMPTY_PARAMETER, "");
-					}
-				}
-
-				fieldArray[column] = fieldValue;
-			}
-			catch (IndexOutOfBoundsException e) {
-				throw new GSException(GSErrorCode.ILLEGAL_PARAMETER, e);
-			}
-		}
-
-		private Object getValueDirect(int column) throws GSException {
-			final Object fieldValue;
-			try {
-				fieldValue = fieldArray[column];
-			}
-			catch (IndexOutOfBoundsException e) {
-				throw new GSException(GSErrorCode.ILLEGAL_PARAMETER, e);
-			}
-
-			if (fieldValue == null) {
-				return getInitialValue(column);
-			}
-
-			return fieldValue;
-		}
-
-		private void setNonNullValueDirect(int column, Object fieldValue)
-				throws GSException {
-			try {
-				fieldArray[column] = fieldValue;
-			}
-			catch (IndexOutOfBoundsException e) {
-				throw new GSException(GSErrorCode.ILLEGAL_PARAMETER, e);
+			if (entry.arrayUsed != arrayUsed ||
+					elementType != entry.elementType) {
+				final GSType expectedType = toFullType(elementType, arrayUsed);
+				throw errorTypeUnmatch(entry.order, expectedType, null);
 			}
 		}
 
 		private void checkObjectArrayElements(
-				Object[] arrayElements) throws GSException {
-			for (Object element : arrayElements) {
-				if (element == null) {
-					throw new GSException(GSErrorCode.EMPTY_PARAMETER, "");
+				int column, Object[] arrayElements) throws GSException {
+			for (int i = 0; i < arrayElements.length; i++) {
+				if (arrayElements[i] == null) {
+					throw errorNull(column, i);
 				}
 			}
 		}
 
-		private Blob tryCopyBlob(Blob src) throws GSException {
-			if (src == null) {
-				return null;
-			}
-
+		private Entry getEntry(int column) throws GSException {
 			try {
-				if (src.length() == 0) {
-					return SERIAL_BLOB_FACTORY.createBlob(new byte[0]);
-				}
-				return new SerialBlob(src);
+				return mapper.getEntry(column);
+			}
+			catch (IndexOutOfBoundsException e) {
+				throw errorColumnNumber(column, e);
+			}
+		}
+
+		private GSException errorNull(int column, Integer arrayIndex) {
+			final Entry entry = (column < mapper.getColumnCount() ?
+					mapper.getEntry(column) : null);
+			return new GSException(
+					GSErrorCode.EMPTY_PARAMETER,
+					"Null is not allowed" +
+					(arrayIndex == null ? "" : " for array element") + " (" +
+					(arrayIndex == null ?
+							"" : "arrayIndex=" + arrayIndex + ", ") +
+					(entry == null ?
+							"" : "column=" + entry.columnName + ", ") +
+					"columnNumber=" + column + ")");
+		}
+
+		private GSException errorColumnNumber(
+				int column, IndexOutOfBoundsException cause) {
+			return new GSException(
+					GSErrorCode.ILLEGAL_PARAMETER,
+					"Column number out of bounds (" +
+					"columnNumber=" + column + ", " +
+					"columnCount=" + mapper.getColumnCount() + ")",
+					cause);
+		}
+
+		private GSException errorTypeUnmatch(
+				int column, GSType specifiedType, ClassCastException cause) {
+			return errorTypeUnmatch(column, specifiedType, null, cause);
+		}
+
+		private GSException errorTypeUnmatch(
+				int column, GSType specifiedType, Object specifiedValue,
+				ClassCastException cause) {
+			final String specifiedTypeName = (specifiedType == null ?
+					(specifiedValue == null ?
+							"null" : specifiedValue.getClass().getName()) :
+					specifiedType.name());
+			final Entry entry = (column < mapper.getColumnCount() ?
+					mapper.getEntry(column) : null);
+			return new GSException(
+					GSErrorCode.ILLEGAL_PARAMETER,
+					"Column type unmatched (" +
+					(specifiedTypeName == null ?
+							"" : "specifiedType=" + specifiedTypeName + ", ") +
+					(entry == null ?
+							"" : "actualType=" + entry.getFullType() + ", ") +
+					(entry == null ?
+							"" : "column=" + entry.columnName + ", ") +
+					"columnNumber=" + column + ")",
+					cause);
+		}
+
+		private static Blob shareBlob(Blob src) throws GSException {
+			try {
+				return BlobImpl.share(src);
 			}
 			catch (SQLException e) {
 				throw new GSException(e);
@@ -2827,147 +3266,99 @@ public class RowMapper {
 		@Override
 		public void setValue(int column, Object fieldValue)
 				throws GSException {
-			final Entry entry;
+			if (fieldValue == null) {
+				setNull(column);
+				return;
+			}
+
+			final Entry entry = getEntry(column);
 			try {
-				entry = mapper.entryList.get(column);
-			}
-			catch (IndexOutOfBoundsException e) {
-				throw new GSException(GSErrorCode.ILLEGAL_PARAMETER, "", e);
-			}
-
-			final boolean typeMatched;
-			if (entry.arrayUsed) {
-				switch (entry.elementType) {
-				case STRING:
-					if (fieldValue instanceof String[]) {
+				if (entry.arrayUsed) {
+					switch (entry.elementType) {
+					case STRING:
 						setStringArray(column, (String[]) fieldValue);
-						return;
-					}
-					break;
-				case BOOL:
-					if (fieldValue instanceof boolean[]) {
+						break;
+					case BOOL:
 						setBoolArray(column, (boolean[]) fieldValue);
-						return;
-					}
-					break;
-				case BYTE:
-					if (fieldValue instanceof byte[]) {
+						break;
+					case BYTE:
 						setByteArray(column, (byte[]) fieldValue);
-						return;
-					}
-					break;
-				case SHORT:
-					if (fieldValue instanceof short[]) {
+						break;
+					case SHORT:
 						setShortArray(column, (short[]) fieldValue);
-						return;
-					}
-					break;
-				case INTEGER:
-					if (fieldValue instanceof int[]) {
+						break;
+					case INTEGER:
 						setIntegerArray(column, (int[]) fieldValue);
-						return;
-					}
-					break;
-				case LONG:
-					if (fieldValue instanceof long[]) {
+						break;
+					case LONG:
 						setLongArray(column, (long[]) fieldValue);
-						return;
-					}
-					break;
-				case FLOAT:
-					if (fieldValue instanceof float[]) {
+						break;
+					case FLOAT:
 						setFloatArray(column, (float[]) fieldValue);
-						return;
-					}
-					break;
-				case DOUBLE:
-					if (fieldValue instanceof double[]) {
+						break;
+					case DOUBLE:
 						setDoubleArray(column, (double[]) fieldValue);
-						return;
-					}
-					break;
-				case TIMESTAMP:
-					if (fieldValue instanceof Date[]) {
+						break;
+					case TIMESTAMP:
 						setTimestampArray(column, (Date[]) fieldValue);
-						return;
+						break;
+					default:
+						throw new Error();
 					}
-					break;
-				default:
-					throw new InternalError();
 				}
-				typeMatched = false;
-			}
-			else if (entry.elementType != null) {
-				switch (entry.elementType) {
-				case STRING:
-					typeMatched = (fieldValue instanceof String);
-					break;
-				case BOOL:
-					typeMatched = (fieldValue instanceof Boolean);
-					break;
-				case BYTE:
-					typeMatched = (fieldValue instanceof Byte);
-					break;
-				case SHORT:
-					typeMatched = (fieldValue instanceof Short);
-					break;
-				case INTEGER:
-					typeMatched = (fieldValue instanceof Integer);
-					break;
-				case LONG:
-					typeMatched = (fieldValue instanceof Long);
-					break;
-				case FLOAT:
-					typeMatched = (fieldValue instanceof Float);
-					break;
-				case DOUBLE:
-					typeMatched = (fieldValue instanceof Double);
-					break;
-				case TIMESTAMP:
-					typeMatched = (fieldValue instanceof Date);
-					break;
-				case GEOMETRY:
-					typeMatched = (fieldValue instanceof Geometry);
-					break;
-				case BLOB:
-					if (fieldValue instanceof Blob) {
-						setBlob(column, (Blob) fieldValue);
-						return;
+				else if (entry.elementType != null) {
+					switch (entry.elementType) {
+					case STRING:
+						setAnyValueDirect(column, (String) fieldValue);
+						break;
+					case BOOL:
+						setAnyValueDirect(column, (Boolean) fieldValue);
+						break;
+					case BYTE:
+						setAnyValueDirect(column, (Byte) fieldValue);
+						break;
+					case SHORT:
+						setAnyValueDirect(column, (Short) fieldValue);
+						break;
+					case INTEGER:
+						setAnyValueDirect(column, (Integer) fieldValue);
+						break;
+					case LONG:
+						setAnyValueDirect(column, (Long) fieldValue);
+						break;
+					case FLOAT:
+						setAnyValueDirect(column, (Float) fieldValue);
+						break;
+					case DOUBLE:
+						setAnyValueDirect(column, (Double) fieldValue);
+						break;
+					case TIMESTAMP:
+						setAnyValueDirect(column, (Date) fieldValue);
+						break;
+					case GEOMETRY:
+						setAnyValueDirect(column, (Geometry) fieldValue);
+						break;
+					case BLOB:
+						setAnyValueDirect(
+								column, shareBlob((Blob) fieldValue));
+						break;
+					default:
+						throw new Error();
 					}
-					typeMatched = false;
-					break;
-				default:
-					throw new InternalError();
-				}
-			}
-			else {
-				if (fieldValue != null) {
-					resolveElementType(fieldValue.getClass(), true, true);
-				}
-				typeMatched = true;
-			}
-
-			if (!typeMatched) {
-				if (fieldValue == null) {
-					throw new GSException(GSErrorCode.EMPTY_PARAMETER, "");
 				}
 				else {
-					throw new GSException(GSErrorCode.ILLEGAL_PARAMETER, "");
+					resolveElementType(fieldValue.getClass(), true, true);
+					setAnyValueDirect(column, fieldValue);
 				}
 			}
-			setValueDirect(column, fieldValue);
+			catch (ClassCastException e) {
+				throw errorTypeUnmatch(column, null, fieldValue, e);
+			}
 		}
 
 		@Override
 		public Object getValue(int column) throws GSException {
-			final Entry entry;
-			try {
-				entry = mapper.entryList.get(column);
-			}
-			catch (IndexOutOfBoundsException e) {
-				throw new GSException(GSErrorCode.ILLEGAL_PARAMETER, "", e);
-			}
-
+			final Entry entry = getEntry(column);
 			if (entry.arrayUsed) {
 				switch (entry.elementType) {
 				case STRING:
@@ -2989,181 +3380,275 @@ public class RowMapper {
 				case TIMESTAMP:
 					return getTimestampArray(column);
 				default:
-					throw new InternalError();
+					throw new Error();
 				}
 			}
-			else {
-				if (entry.elementType == GSType.BLOB) {
+			else if (entry.elementType != null) {
+				switch (entry.elementType) {
+				case TIMESTAMP:
+					return getTimestamp(column);
+				case BLOB:
 					return getBlob(column);
+				default:
+					break;
 				}
-				return getValueDirect(column);
 			}
+			return getAnyValue(column);
 		}
 
 		@Override
 		public void setString(int column, String fieldValue)
 				throws GSException {
+			if (fieldValue == null) {
+				setPrimitiveNull(column, GSType.STRING);
+				return;
+			}
 			checkPrimitiveType(column, GSType.STRING);
-			setValueDirect(column, fieldValue);
+			setAnyValueDirect(column, fieldValue);
 		}
 
 		@Override
 		public String getString(int column) throws GSException {
-			checkPrimitiveType(column, GSType.STRING);
-			return (String) getValueDirect(column);
+			final String src;
+			try {
+				src = (String) getAnyValue(column);
+			}
+			catch (ClassCastException e) {
+				throw errorTypeUnmatch(column, GSType.STRING, e);
+			}
+			return (src == null ? null : src);
 		}
 
 		@Override
 		public void setBool(int column, boolean fieldValue)
 				throws GSException {
 			checkPrimitiveType(column, GSType.BOOL);
-			setValueDirect(column, fieldValue);
+			setAnyValueDirect(column, fieldValue);
 		}
 
 		@Override
 		public boolean getBool(int column) throws GSException {
-			checkPrimitiveType(column, GSType.BOOL);
-			return (Boolean) getValueDirect(column);
+			final Boolean src;
+			try {
+				src = (Boolean) getAnyValue(column);
+			}
+			catch (ClassCastException e) {
+				throw errorTypeUnmatch(column, GSType.BOOL, e);
+			}
+			return (src == null ? false : src);
 		}
 
 		@Override
 		public void setByte(int column, byte fieldValue)
 				throws GSException {
 			checkPrimitiveType(column, GSType.BYTE);
-			setValueDirect(column, fieldValue);
+			setAnyValueDirect(column, fieldValue);
 		}
 
 		@Override
 		public byte getByte(int column) throws GSException {
-			checkPrimitiveType(column, GSType.BYTE);
-			return (Byte) getValueDirect(column);
+			final Byte src;
+			try {
+				src = (Byte) getAnyValue(column);
+			}
+			catch (ClassCastException e) {
+				throw errorTypeUnmatch(column, GSType.BYTE, e);
+			}
+			return (src == null ? 0 : src);
 		}
 
 		@Override
 		public void setShort(int column, short fieldValue)
 				throws GSException {
 			checkPrimitiveType(column, GSType.SHORT);
-			setValueDirect(column, fieldValue);
+			setAnyValueDirect(column, fieldValue);
 		}
 
 		@Override
 		public short getShort(int column) throws GSException {
-			checkPrimitiveType(column, GSType.SHORT);
-			return (Short) getValueDirect(column);
+			final Short src;
+			try {
+				src = (Short) getAnyValue(column);
+			}
+			catch (ClassCastException e) {
+				throw errorTypeUnmatch(column, GSType.SHORT, e);
+			}
+			return (src == null ? 0 : src);
 		}
 
 		@Override
 		public void setInteger(int column, int fieldValue)
 				throws GSException {
 			checkPrimitiveType(column, GSType.INTEGER);
-			setValueDirect(column, fieldValue);
+			setAnyValueDirect(column, fieldValue);
 		}
 
 		@Override
 		public int getInteger(int column) throws GSException {
-			checkPrimitiveType(column, GSType.INTEGER);
-			return (Integer) getValueDirect(column);
+			final Integer src;
+			try {
+				src = (Integer) getAnyValue(column);
+			}
+			catch (ClassCastException e) {
+				throw errorTypeUnmatch(column, GSType.INTEGER, e);
+			}
+			return (src == null ? 0 : src);
 		}
 
 		@Override
 		public void setLong(int column, long fieldValue)
 				throws GSException {
 			checkPrimitiveType(column, GSType.LONG);
-			setValueDirect(column, fieldValue);
+			setAnyValueDirect(column, fieldValue);
 		}
 
 		@Override
 		public long getLong(int column) throws GSException {
-			checkPrimitiveType(column, GSType.LONG);
-			return (Long) getValueDirect(column);
+			final Long src;
+			try {
+				src = (Long) getAnyValue(column);
+			}
+			catch (ClassCastException e) {
+				throw errorTypeUnmatch(column, GSType.LONG, e);
+			}
+			return (src == null ? 0 : src);
 		}
 
 		@Override
 		public void setFloat(int column, float fieldValue)
 				throws GSException {
 			checkPrimitiveType(column, GSType.FLOAT);
-			setValueDirect(column, fieldValue);
+			setAnyValueDirect(column, fieldValue);
 		}
 
 		@Override
 		public float getFloat(int column) throws GSException {
-			checkPrimitiveType(column, GSType.FLOAT);
-			return (Float) getValueDirect(column);
+			final Float src;
+			try {
+				src = (Float) getAnyValue(column);
+			}
+			catch (ClassCastException e) {
+				throw errorTypeUnmatch(column, GSType.FLOAT, e);
+			}
+			return (src == null ? 0 : src);
 		}
 
 		@Override
 		public void setDouble(int column, double fieldValue)
 				throws GSException {
 			checkPrimitiveType(column, GSType.DOUBLE);
-			setValueDirect(column, fieldValue);
+			setAnyValueDirect(column, fieldValue);
 		}
 
 		@Override
 		public double getDouble(int column) throws GSException {
-			checkPrimitiveType(column, GSType.DOUBLE);
-			return (Double) getValueDirect(column);
+			final Double src;
+			try {
+				src = (Double) getAnyValue(column);
+			}
+			catch (ClassCastException e) {
+				throw errorTypeUnmatch(column, GSType.DOUBLE, e);
+			}
+			return (src == null ? 0 : src);
 		}
 
 		@Override
 		public void setTimestamp(int column, Date fieldValue)
 				throws GSException {
+			if (fieldValue == null) {
+				setPrimitiveNull(column, GSType.TIMESTAMP);
+				return;
+			}
 			checkPrimitiveType(column, GSType.TIMESTAMP);
-			setValueDirect(column, fieldValue);
+			setAnyValueDirect(column, fieldValue);
 		}
 
 		@Override
 		public Date getTimestamp(int column) throws GSException {
-			checkPrimitiveType(column, GSType.TIMESTAMP);
-			return (Date) getValueDirect(column);
+			final Date src;
+			try {
+				src = (Date) getAnyValue(column);
+			}
+			catch (ClassCastException e) {
+				throw errorTypeUnmatch(column, GSType.TIMESTAMP, e);
+			}
+			return (src == null ? null : new Date(src.getTime()));
 		}
 
 		@Override
 		public void setGeometry(int column, Geometry fieldValue)
 				throws GSException {
+			if (fieldValue == null) {
+				setPrimitiveNull(column, GSType.GEOMETRY);
+				return;
+			}
 			checkPrimitiveType(column, GSType.GEOMETRY);
-			setValueDirect(column, fieldValue);
+			setAnyValueDirect(column, fieldValue);
 		}
 
 		@Override
 		public Geometry getGeometry(int column) throws GSException {
-			checkPrimitiveType(column, GSType.GEOMETRY);
-			return (Geometry) getValueDirect(column);
+			final Geometry src;
+			try {
+				src = (Geometry) getAnyValue(column);
+			}
+			catch (ClassCastException e) {
+				throw errorTypeUnmatch(column, GSType.GEOMETRY, e);
+			}
+			return (src == null ? null : src);
 		}
 
 		@Override
-		public void setBlob(int column, Blob fieldValue)
-				throws GSException {
+		public void setBlob(int column, Blob fieldValue) throws GSException {
+			if (fieldValue == null) {
+				setPrimitiveNull(column, GSType.BLOB);
+				return;
+			}
 			checkPrimitiveType(column, GSType.BLOB);
-			setValueDirect(column, tryCopyBlob(fieldValue));
+			setAnyValueDirect(column, shareBlob(fieldValue));
 		}
 
 		@Override
 		public Blob getBlob(int column) throws GSException {
-			checkPrimitiveType(column, GSType.BLOB);
-			if (fieldArray[column] == null) {
-				return (Blob) getInitialValue(column);
+			final BlobImpl src;
+			try {
+				src = (BlobImpl) getAnyValue(column);
 			}
-			return tryCopyBlob((Blob) getValueDirect(column));
+			catch (ClassCastException e) {
+				throw errorTypeUnmatch(column, GSType.BLOB, e);
+			}
+			if (src == null) {
+				return null;
+			}
+			return BlobImpl.shareDirect(src);
 		}
 
 		@Override
 		public void setStringArray(int column, String[] fieldValue)
 				throws GSException {
-			checkArrayType(column, GSType.STRING);
 			if (fieldValue == null) {
-				setValueDirect(column, null);
+				setArrayNull(column, GSType.STRING);
 				return;
 			}
-			checkObjectArrayElements(fieldValue);
+			checkArrayType(column, GSType.STRING);
 			final String[] dest = new String[fieldValue.length];
 			System.arraycopy(fieldValue, 0, dest, 0, fieldValue.length);
-			setNonNullValueDirect(column, dest);
+			checkObjectArrayElements(column, dest);
+			setAnyValueDirect(column, dest);
 		}
 
 		@Override
 		public String[] getStringArray(int column) throws GSException {
-			checkArrayType(column, GSType.STRING);
-			final String[] src = (String[]) getValueDirect(column);
+			final String[] src;
+			try {
+				src = (String[]) getAnyValue(column);
+			}
+			catch (ClassCastException e) {
+				throw errorTypeUnmatch(column, GSType.STRING_ARRAY, e);
+			}
+			if (src == null) {
+				return null;
+			}
 			final String[] dest = new String[src.length];
 			System.arraycopy(src, 0, dest, 0, src.length);
 			return dest;
@@ -3172,20 +3657,28 @@ public class RowMapper {
 		@Override
 		public void setBoolArray(int column, boolean[] fieldValue)
 				throws GSException {
-			checkArrayType(column, GSType.BOOL);
 			if (fieldValue == null) {
-				setValueDirect(column, null);
+				setArrayNull(column, GSType.BOOL);
 				return;
 			}
+			checkArrayType(column, GSType.BOOL);
 			final boolean[] dest = new boolean[fieldValue.length];
 			System.arraycopy(fieldValue, 0, dest, 0, fieldValue.length);
-			setNonNullValueDirect(column, dest);
+			setAnyValueDirect(column, dest);
 		}
 
 		@Override
 		public boolean[] getBoolArray(int column) throws GSException {
-			checkArrayType(column, GSType.BOOL);
-			final boolean[] src = (boolean[]) getValueDirect(column);
+			final boolean[] src;
+			try {
+				src = (boolean[]) getAnyValue(column);
+			}
+			catch (ClassCastException e) {
+				throw errorTypeUnmatch(column, GSType.BOOL_ARRAY, e);
+			}
+			if (src == null) {
+				return null;
+			}
 			final boolean[] dest = new boolean[src.length];
 			System.arraycopy(src, 0, dest, 0, src.length);
 			return dest;
@@ -3194,20 +3687,28 @@ public class RowMapper {
 		@Override
 		public void setByteArray(int column, byte[] fieldValue)
 				throws GSException {
-			checkArrayType(column, GSType.BYTE);
 			if (fieldValue == null) {
-				setValueDirect(column, null);
+				setArrayNull(column, GSType.BYTE);
 				return;
 			}
+			checkArrayType(column, GSType.BYTE);
 			final byte[] dest = new byte[fieldValue.length];
 			System.arraycopy(fieldValue, 0, dest, 0, fieldValue.length);
-			setNonNullValueDirect(column, dest);
+			setAnyValueDirect(column, dest);
 		}
 
 		@Override
 		public byte[] getByteArray(int column) throws GSException {
-			checkArrayType(column, GSType.BYTE);
-			final byte[] src = (byte[]) getValueDirect(column);
+			final byte[] src;
+			try {
+				src = (byte[]) getAnyValue(column);
+			}
+			catch (ClassCastException e) {
+				throw errorTypeUnmatch(column, GSType.BYTE_ARRAY, e);
+			}
+			if (src == null) {
+				return null;
+			}
 			final byte[] dest = new byte[src.length];
 			System.arraycopy(src, 0, dest, 0, src.length);
 			return dest;
@@ -3216,20 +3717,28 @@ public class RowMapper {
 		@Override
 		public void setShortArray(int column, short[] fieldValue)
 				throws GSException {
-			checkArrayType(column, GSType.SHORT);
 			if (fieldValue == null) {
-				setValueDirect(column, null);
+				setArrayNull(column, GSType.SHORT);
 				return;
 			}
+			checkArrayType(column, GSType.SHORT);
 			final short[] dest = new short[fieldValue.length];
 			System.arraycopy(fieldValue, 0, dest, 0, fieldValue.length);
-			setNonNullValueDirect(column, dest);
+			setAnyValueDirect(column, dest);
 		}
 
 		@Override
 		public short[] getShortArray(int column) throws GSException {
-			checkArrayType(column, GSType.SHORT);
-			final short[] src = (short[]) getValueDirect(column);
+			final short[] src;
+			try {
+				src = (short[]) getAnyValue(column);
+			}
+			catch (ClassCastException e) {
+				throw errorTypeUnmatch(column, GSType.SHORT_ARRAY, e);
+			}
+			if (src == null) {
+				return null;
+			}
 			final short[] dest = new short[src.length];
 			System.arraycopy(src, 0, dest, 0, src.length);
 			return dest;
@@ -3238,20 +3747,28 @@ public class RowMapper {
 		@Override
 		public void setIntegerArray(int column, int[] fieldValue)
 				throws GSException {
-			checkArrayType(column, GSType.INTEGER);
 			if (fieldValue == null) {
-				setValueDirect(column, null);
+				setArrayNull(column, GSType.INTEGER);
 				return;
 			}
+			checkArrayType(column, GSType.INTEGER);
 			final int[] dest = new int[fieldValue.length];
 			System.arraycopy(fieldValue, 0, dest, 0, fieldValue.length);
-			setNonNullValueDirect(column, dest);
+			setAnyValueDirect(column, dest);
 		}
 
 		@Override
 		public int[] getIntegerArray(int column) throws GSException {
-			checkArrayType(column, GSType.INTEGER);
-			final int[] src = (int[]) getValueDirect(column);
+			final int[] src;
+			try {
+				src = (int[]) getAnyValue(column);
+			}
+			catch (ClassCastException e) {
+				throw errorTypeUnmatch(column, GSType.INTEGER_ARRAY, e);
+			}
+			if (src == null) {
+				return null;
+			}
 			final int[] dest = new int[src.length];
 			System.arraycopy(src, 0, dest, 0, src.length);
 			return dest;
@@ -3260,20 +3777,28 @@ public class RowMapper {
 		@Override
 		public void setLongArray(int column, long[] fieldValue)
 				throws GSException {
-			checkArrayType(column, GSType.LONG);
 			if (fieldValue == null) {
-				setValueDirect(column, null);
+				setArrayNull(column, GSType.LONG);
 				return;
 			}
+			checkArrayType(column, GSType.LONG);
 			final long[] dest = new long[fieldValue.length];
 			System.arraycopy(fieldValue, 0, dest, 0, fieldValue.length);
-			setNonNullValueDirect(column, dest);
+			setAnyValueDirect(column, dest);
 		}
 
 		@Override
 		public long[] getLongArray(int column) throws GSException {
-			checkArrayType(column, GSType.LONG);
-			final long[] src = (long[]) getValueDirect(column);
+			final long[] src;
+			try {
+				src = (long[]) getAnyValue(column);
+			}
+			catch (ClassCastException e) {
+				throw errorTypeUnmatch(column, GSType.LONG_ARRAY, e);
+			}
+			if (src == null) {
+				return null;
+			}
 			final long[] dest = new long[src.length];
 			System.arraycopy(src, 0, dest, 0, src.length);
 			return dest;
@@ -3282,20 +3807,28 @@ public class RowMapper {
 		@Override
 		public void setFloatArray(int column, float[] fieldValue)
 				throws GSException {
-			checkArrayType(column, GSType.FLOAT);
 			if (fieldValue == null) {
-				setValueDirect(column, null);
+				setArrayNull(column, GSType.FLOAT);
 				return;
 			}
+			checkArrayType(column, GSType.FLOAT);
 			final float[] dest = new float[fieldValue.length];
 			System.arraycopy(fieldValue, 0, dest, 0, fieldValue.length);
-			setNonNullValueDirect(column, dest);
+			setAnyValueDirect(column, dest);
 		}
 
 		@Override
 		public float[] getFloatArray(int column) throws GSException {
-			checkArrayType(column, GSType.FLOAT);
-			final float[] src = (float[]) getValueDirect(column);
+			final float[] src;
+			try {
+				src = (float[]) getAnyValue(column);
+			}
+			catch (ClassCastException e) {
+				throw errorTypeUnmatch(column, GSType.FLOAT_ARRAY, e);
+			}
+			if (src == null) {
+				return null;
+			}
 			final float[] dest = new float[src.length];
 			System.arraycopy(src, 0, dest, 0, src.length);
 			return dest;
@@ -3304,20 +3837,28 @@ public class RowMapper {
 		@Override
 		public void setDoubleArray(int column, double[] fieldValue)
 				throws GSException {
-			checkArrayType(column, GSType.DOUBLE);
 			if (fieldValue == null) {
-				setValueDirect(column, null);
+				setArrayNull(column, GSType.DOUBLE);
 				return;
 			}
+			checkArrayType(column, GSType.DOUBLE);
 			final double[] dest = new double[fieldValue.length];
 			System.arraycopy(fieldValue, 0, dest, 0, fieldValue.length);
-			setNonNullValueDirect(column, dest);
+			setAnyValueDirect(column, dest);
 		}
 
 		@Override
 		public double[] getDoubleArray(int column) throws GSException {
-			checkArrayType(column, GSType.DOUBLE);
-			final double[] src = (double[]) getValueDirect(column);
+			final double[] src;
+			try {
+				src = (double[]) getAnyValue(column);
+			}
+			catch (ClassCastException e) {
+				throw errorTypeUnmatch(column, GSType.DOUBLE_ARRAY, e);
+			}
+			if (src == null) {
+				return null;
+			}
 			final double[] dest = new double[src.length];
 			System.arraycopy(src, 0, dest, 0, src.length);
 			return dest;
@@ -3326,24 +3867,43 @@ public class RowMapper {
 		@Override
 		public void setTimestampArray(int column, Date[] fieldValue)
 				throws GSException {
-			checkArrayType(column, GSType.TIMESTAMP);
 			if (fieldValue == null) {
-				setValueDirect(column, null);
+				setArrayNull(column, GSType.TIMESTAMP);
 				return;
 			}
-			checkObjectArrayElements(fieldValue);
+			checkArrayType(column, GSType.TIMESTAMP);
 			final Date[] dest = new Date[fieldValue.length];
 			System.arraycopy(fieldValue, 0, dest, 0, fieldValue.length);
-			setNonNullValueDirect(column, dest);
+			checkObjectArrayElements(column, dest);
+			setAnyValueDirect(column, dest);
 		}
 
 		@Override
 		public Date[] getTimestampArray(int column) throws GSException {
-			checkArrayType(column, GSType.TIMESTAMP);
-			final Date[] src = (Date[]) getValueDirect(column);
+			final Date[] src;
+			try {
+				src = (Date[]) getAnyValue(column);
+			}
+			catch (ClassCastException e) {
+				throw errorTypeUnmatch(column, GSType.TIMESTAMP_ARRAY, e);
+			}
+			if (src == null) {
+				return null;
+			}
 			final Date[] dest = new Date[src.length];
 			System.arraycopy(src, 0, dest, 0, src.length);
 			return dest;
+		}
+
+		@Override
+		public void setNull(int column) throws GSException {
+			checkNullable(getEntry(column));
+			setAnyValueDirect(column, null);
+		}
+
+		@Override
+		public boolean isNull(int column) throws GSException {
+			return getAnyValue(column) == null;
 		}
 
 	}
@@ -3360,13 +3920,17 @@ public class RowMapper {
 				new InternPool<RowMapper>();
 
 		synchronized RowMapper getInstance(
-				Class<?> rowType, boolean forTimeSeries)
+				Class<?> rowType, ContainerType containerType, Config config)
 				throws GSException {
 			final Map<Class<?>, RowMapper> map =
-					(forTimeSeries ? timeSeriesMap : collectionMap);
+					(containerType == ContainerType.TIME_SERIES ?
+							timeSeriesMap : collectionMap);
+
 			RowMapper mapper = map.get(rowType);
-			if (mapper == null) {
-				mapper = new RowMapper(rowType, forTimeSeries);
+			if (mapper == null ||
+					mapper.nullableAllowed != config.nullableAllowed) {
+				mapper = new RowMapper(
+						rowType, containerType, config.nullableAllowed);
 				map.put(rowType, mapper);
 				internPool.intern(mapper);
 			}
@@ -3398,8 +3962,10 @@ public class RowMapper {
 		}
 
 		public static RowMapper resolveMapper(
-					ContainerInfo containerSchema) throws GSException {
-			return getInstance(containerSchema.getType(), containerSchema);
+				ContainerInfo containerSchema) throws GSException {
+			return getInstance(
+					containerSchema.getType(), containerSchema,
+					GENERAL_CONFIG);
 		}
 
 		public static int getColumnCount(RowMapper mapper) {
@@ -3416,6 +3982,10 @@ public class RowMapper {
 
 		public static boolean isArrayColumn(RowMapper mapper, int index) {
 			return mapper.getEntry(index).arrayUsed;
+		}
+
+		public static boolean isColumnNullable(RowMapper mapper, int index) {
+			return mapper.getEntry(index).columnNullable;
 		}
 
 		public static int getKeyColumnId(RowMapper mapper) {
@@ -3443,6 +4013,10 @@ public class RowMapper {
 			mapper.getEntry(index).setFieldObj(rowObj, fieldObj, mapper.isGeneral());
 		}
 
+		public static Blob createBlob(byte[] bytes) throws GSException {
+			return DIRECT_BLOB_FACTORY.createBlob(bytes);
+		}
+
 		/*
 		 * For NewSQL
 		 */
@@ -3454,7 +4028,7 @@ public class RowMapper {
 				value = generatedRow.getValue(column);
 			}
 			else {
-				value = ((ArrayRow) generatedRow).getValueDirect(column);
+				value = ((ArrayRow) generatedRow).getAnyValue(column);
 			}
 
 			if (value == null) {
@@ -3474,18 +4048,10 @@ public class RowMapper {
 	
 	
 	
-	
-	static final int VAR_SIZE_1BYTE_THRESHOLD = 128;
 
-	static final boolean varSizeIs1Byte(int val) {
-		return ((val & 0x01) == 0x01);
-	}
-	static final boolean varSizeIs4Byte(int val) {
-		return ((val & 0x03) == 0x00);
-	}
-	static final boolean varSizeIsOId(int val) {
-		return ((val & 0x03) == 0x02);
-	}
+	static final long VAR_SIZE_1BYTE_THRESHOLD = 1L << (Byte.SIZE - 1);
+	static final long VAR_SIZE_4BYTE_THRESHOLD = 1L << (Integer.SIZE - 2);
+	static final long VAR_SIZE_8BYTE_THRESHOLD = 1L << (Long.SIZE - 2);
 
 	static final boolean varSizeIs1Byte(byte val) {
 		return ((val & 0x01) == 0x01);
@@ -3493,11 +4059,12 @@ public class RowMapper {
 	static final boolean varSizeIs4Byte(byte val) {
 		return ((val & 0x03) == 0x00);
 	}
-	static final boolean varSizeIsOId(byte val) {
+	static final boolean varSizeIs8Byte(byte val) {
 		return ((val & 0x03) == 0x02);
 	}
 
-	static final int decode1ByteVarSize(int val) { 
+	static final int decode1ByteVarSize(byte byteVal) { 
+		int val = byteVal;
 		return (val & 0xff) >>> 1; 
 	}
 	static final int decode4ByteVarSize(int val) { 
@@ -3507,8 +4074,8 @@ public class RowMapper {
 		return val >>> 2;
 	}
 
-	static final int encode1ByteVarSize(int val) {
-		return (val << 1) | 0x1;
+	static final byte encode1ByteVarSize(byte val) {
+		return (byte) ((val << 1) | 0x1);
 	}
 	static final int encode4ByteVarSize(int val) {
 		return val << 2;
@@ -3517,24 +4084,15 @@ public class RowMapper {
 		return (val << 2) | 0x2;
 	}
 
-	static final int encodeVarSize(int val) {
-		if (val < VAR_SIZE_1BYTE_THRESHOLD) {
-			return ((val << 1L) | 0x01);
-		} else {
-			return (val << 2L);
-		}
-	}
-
-	static final long encodeVarSizeOId(long val) {
-		
-		return (val << 2L) | 0x02;
-	}
-
 	static final int getEncodedLength(int val) {
 		if (val < VAR_SIZE_1BYTE_THRESHOLD) {
 			return 1;
-		} else {
+		}
+		else if (val < VAR_SIZE_4BYTE_THRESHOLD) {
 			return 4;
+		}
+		else {
+			return 8;
 		}
 	}
 
@@ -3549,21 +4107,29 @@ public class RowMapper {
 
 	static final void putVarSize(BasicBuffer out, int value) {
 		if (value < VAR_SIZE_1BYTE_THRESHOLD) {
-			out.put((byte)(encode1ByteVarSize(value)));
-		} else {
+			out.put(encode1ByteVarSize((byte) value));
+		}
+		else if (value < VAR_SIZE_4BYTE_THRESHOLD) {
 			out.putInt(encode4ByteVarSize(value));
+		}
+		else {
+			out.putLong(encode8ByteVarSize(value));
 		}
 	}
 
 	static void putVarSizePrepared(BasicBuffer out, int value) {
 		if (value < VAR_SIZE_1BYTE_THRESHOLD) {
-			out.base().put((byte)(encode1ByteVarSize(value)));
-		} else {
+			out.base().put(encode1ByteVarSize((byte) value));
+		}
+		else if (value < VAR_SIZE_4BYTE_THRESHOLD) {
 			out.base().putInt(encode4ByteVarSize(value));
+		}
+		else {
+			out.base().putLong(encode8ByteVarSize(value));
 		}
 	}
 
-	static final int getVarSize(BasicBuffer in) {
+	static final int getVarSize(BasicBuffer in) throws GSException {
 		final byte first = in.base().get();
 		if (varSizeIs1Byte(first)) {
 			return decode1ByteVarSize(first);
@@ -3574,29 +4140,60 @@ public class RowMapper {
 			return decode4ByteVarSize(rawSize);
 		}
 		else {
-			throw new RuntimeException();
+			in.base().position(in.base().position() - Byte.SIZE / Byte.SIZE);
+			final long rawSize = in.base().getLong();
+			final long decodedSize = decode8ByteVarSize(rawSize);
+			if (decodedSize > Integer.MAX_VALUE) {
+				throw new GSException(
+						GSErrorCode.MESSAGE_CORRUPTED,
+						"Decoded size = " + decodedSize);
+			}
+			else {
+				return (int) decodedSize;
+			}
 		}
 	}
 
-	static void putString(BasicBuffer out, String value, boolean varSizeMode) {
+	static void putString(BasicBuffer out, String value, boolean varSizeMode)
+			throws GSException {
 		if (varSizeMode) {
 			final byte[] buf = value.getBytes(BasicBuffer.DEFAULT_CHARSET);
 			out.prepare(MAX_VAR_SIZE_LENGTH + buf.length);
 			putVarSizePrepared(out, buf.length);
-			out.base().put(buf);
+
+			if (STRING_FIELD_ENCODING_STRICT) {
+				final int pos = out.base().position();
+				final byte[] dest = out.base().array();
+				for (int i = 0; i < buf.length; i++) {
+					if (buf[i] == 0) {
+						throw errorNullCharacter();
+					}
+					dest[pos + i] = buf[i];
+				}
+				out.base().position(pos + buf.length);
+			}
+			else {
+				out.base().put(buf);
+			}
 		}
 		else {
 			out.putString(value);
 		}
 	}
 
-	static String getString(BasicBuffer in, boolean varSizeMode) {
+	static String getString(BasicBuffer in, boolean varSizeMode) throws GSException {
 		final int bytesLength =
 				varSizeMode ? getVarSize(in) : in.base().getInt();
 
 		final byte[] buf = new byte[bytesLength];
 		in.base().get(buf);
 		return new String(buf, 0, buf.length, BasicBuffer.DEFAULT_CHARSET);
+	}
+
+	private static GSException errorNullCharacter() {
+		return new GSException(
+				GSErrorCode.ILLEGAL_VALUE_FORMAT,
+				"Illegal '\\0' character found");
 	}
 
 }

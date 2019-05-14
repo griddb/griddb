@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -44,14 +44,17 @@ const uint8_t ObjectAllocator::ZeroTable[256] = {
 /*!
 	@brief Constructor of ObjectAllocator
 */
-ObjectAllocator::ObjectAllocator(uint8_t chunkExpSize, uint32_t chunkHeaderSize)
+ObjectAllocator::ObjectAllocator(uint8_t chunkExpSize, uint32_t chunkHeaderSize, bool isZeroFill)
 	: CHUNK_EXP_SIZE_(chunkExpSize),
 	  CHUNK_SIZE_(1L << CHUNK_EXP_SIZE_),
 	  chunkHeaderSize_(chunkHeaderSize),
 	  minPower_(0),
 	  maxPower_(0),
 	  tableSize_(0),
-	  hSize_(0) {
+	  hSize_(0)
+	  ,
+	  isZeroFill_(isZeroFill)
+	  {
 	hSize_ = sizeof(uint32_t);  
 
 	minPower_ = ObjectAllocator::log2(
@@ -197,6 +200,12 @@ uint8_t ObjectAllocator::free(
 
 	uint8_t k = header->getPower();
 	uint8_t freedBlockSize = k;
+
+	if (isZeroFill_) {
+		Size_t objectSize = (1U << k) - hSize_;
+		memset(objectAddr, 0, objectSize);
+	}
+
 	int32_t mask = 1L << k;
 	HeaderBlock *buddy = getHeaderBlock(chunkTop, (headerOffset ^ mask));
 	for (;;) {
@@ -406,6 +415,80 @@ std::string ObjectAllocator::dump(uint8_t *top, int32_t level) const {
 	stream << "totalFreeSize = " << totalFreeSize << std::endl;
 	stream << "totalUseSize = " << CHUNK_SIZE_ - totalFreeSize - chunkHeaderSize
 		   << std::endl;
+	return stream.str();
+}
+
+std::string ObjectAllocator::dumpDigest(uint8_t *top) const {
+	util::NormalOStringStream stream;
+
+	uint32_t *freeList = getFreeList(top);
+	uint32_t totalFreeSize = 0;
+	std::map<int32_t, uint32_t> freeOffsetMap;
+	for (uint8_t k = minPower_; k <= maxPower_; ++k) {
+		uint32_t powerFreeSize = 0;
+		getHeaderBlock(top, freeList[k]);
+
+		int32_t counter = 0;
+		uint32_t offset = freeList[k];
+		if (offset != UINT32_MAX) {
+			HeaderBlock *start = getHeaderBlock(top, offset);
+			HeaderBlock *cursor = start;
+			while (true) {
+				freeOffsetMap.insert(std::make_pair(
+					static_cast<int32_t>(
+						reinterpret_cast<uint8_t *>(cursor) - top),
+					1UL << k));
+				counter++;
+				if (static_cast<int32_t>(reinterpret_cast<uint8_t *>(cursor) -
+										 top) == cursor->prev_) {
+					break;
+				}
+				cursor = getHeaderBlock(top, cursor->prev_);
+				if (start == cursor) {
+					break;
+				}
+			}
+		}
+		powerFreeSize = (1UL << k) * counter;
+		totalFreeSize += powerFreeSize;
+	}
+
+	int32_t objOffset = 0;
+	std::map<int32_t, uint32_t>::iterator offsetItr;
+	std::map<int8_t, std::pair<uint32_t, uint32_t> > typeStatMap;
+	std::map<int8_t, std::pair<uint32_t, uint32_t> >::iterator typeItr;
+	while (objOffset < CHUNK_SIZE_) {
+		offsetItr = freeOffsetMap.find(objOffset);
+		if (offsetItr != freeOffsetMap.end()) {
+			objOffset += offsetItr->second;
+		}
+		else {
+			HeaderBlock *header = getHeaderBlock(top, objOffset);
+			uint32_t objSize = (1UL << header->getPower());
+			if (!header->isUsed()) {
+				stream << "<Bad Status : not used>" << std::endl;
+			}
+			if (!header->isValid()) {
+				stream << "<Bad Status : is not valid>" << std::endl;
+			}
+			objOffset += objSize;
+
+			typeItr = typeStatMap.find(header->getType());
+			if (typeItr != typeStatMap.end()) {
+				typeItr->second.first++;
+				typeItr->second.second += objSize;
+			}
+			else {
+				std::pair<uint32_t, uint32_t> typePair(1, objSize);
+				typeStatMap.insert(std::make_pair(header->getType(), typePair));
+			}
+		}
+	}
+
+	const uint32_t chunkHeaderSize =
+		ObjectAllocator::align(chunkHeaderSize_ - hSize_);
+	stream << ",totalFreeSize," << totalFreeSize;
+	stream << ",totalUseSize," << CHUNK_SIZE_ - totalFreeSize - chunkHeaderSize;
 	return stream.str();
 }
 

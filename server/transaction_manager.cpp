@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -22,6 +22,7 @@
 #include "cluster_event_type.h"
 #include "gs_error.h"
 #include "transaction_context.h"
+#include "transaction_service.h"
 
 #include "base_container.h"
 
@@ -43,11 +44,16 @@ ReplicationContext::ReplicationContext()
 	  clientId_(TXN_EMPTY_CLIENTID),
 	  pId_(UNDEF_PARTITIONID),
 	  containerId_(UNDEF_CONTAINERID),
+	  schemaVersionId_(UNDEF_SCHEMAVERSIONID),
 	  stmtId_(0),
 	  clientNd_(NodeDescriptor::EMPTY_ND),
 	  ackCounter_(0),
 	  timeout_(0),
+	  taskStatus_(TASK_FINISHED),
+	  originalStmtId_(UNDEF_STATEMENTID),
 	  existFlag_(false)
+	, isSync_(false), subContainerId_(0), execId_(0)
+	, alloc_(NULL)
 {
 }
 ReplicationContext::ReplicationContext(const ReplicationContext &replContext)
@@ -56,14 +62,21 @@ ReplicationContext::ReplicationContext(const ReplicationContext &replContext)
 	  clientId_(replContext.clientId_),
 	  pId_(replContext.pId_),
 	  containerId_(replContext.containerId_),
+	  schemaVersionId_(replContext.schemaVersionId_),
 	  stmtId_(replContext.stmtId_),
 	  clientNd_(replContext.clientNd_),
 	  ackCounter_(replContext.ackCounter_),
 	  timeout_(replContext.timeout_),
+	  taskStatus_(replContext.taskStatus_),
+	  originalStmtId_(replContext.originalStmtId_),
 	  existFlag_(replContext.existFlag_)
+	, isSync_(false), subContainerId_(0), execId_(0)
+	, alloc_(replContext.alloc_)
 {
 }
-ReplicationContext::~ReplicationContext() {}
+ReplicationContext::~ReplicationContext() {
+	clearBinaryData();
+}
 ReplicationContext &ReplicationContext::operator=(
 	const ReplicationContext &replContext) {
 	if (this == &replContext) {
@@ -74,15 +87,25 @@ ReplicationContext &ReplicationContext::operator=(
 	clientId_ = replContext.clientId_;
 	pId_ = replContext.pId_;
 	containerId_ = replContext.containerId_;
+	schemaVersionId_ = replContext.schemaVersionId_;
 	stmtId_ = replContext.stmtId_;
 	clientNd_ = replContext.clientNd_;
 	ackCounter_ = replContext.ackCounter_;
 	timeout_ = replContext.timeout_;
 	existFlag_ = replContext.existFlag_;
 
+	  taskStatus_ = replContext.taskStatus_;
+	  originalStmtId_ = replContext.originalStmtId_;
+
+	clearBinaryData();
+	for (size_t i = 0; i < replContext.binaryDatas_.size(); i++) {
+		setBinaryData(replContext.binaryDatas_[i]->data(), replContext.binaryDatas_[i]->size());
+	}
 
 	return *this;
 }
+
+
 ReplicationId ReplicationContext::getReplicationId() const {
 	return id_;
 }
@@ -98,6 +121,15 @@ PartitionId ReplicationContext::getPartitionId() const {
 ContainerId ReplicationContext::getContainerId() const {
 	return containerId_;
 }
+
+SchemaVersionId ReplicationContext::getContainerSchemaVersionId() const {
+	return schemaVersionId_;
+}
+
+void ReplicationContext::setContainerSchemaVersionId(SchemaVersionId schemaVersionId) {
+	schemaVersionId_ = schemaVersionId;
+}
+
 StatementId ReplicationContext::getStatementId() const {
 	return stmtId_;
 }
@@ -125,16 +157,51 @@ bool ReplicationContext::getExistFlag() const {
 void ReplicationContext::setExistFlag(bool flag) {
 	existFlag_ = flag;
 }
+
+void ReplicationContext::setBinaryData(const void *data, size_t size) {
+	BinaryData *newData = NULL;
+
+	try {
+		newData = ALLOC_VAR_SIZE_NEW(*alloc_) BinaryData(*alloc_);
+		newData->push_back(static_cast<const uint8_t*>(data), size);
+		binaryDatas_.push_back(newData);
+
+	} catch (...) {
+		ALLOC_VAR_SIZE_DELETE(*alloc_, newData);
+		throw;
+	}
+}
+
+const std::vector<ReplicationContext::BinaryData*>& ReplicationContext::getBinaryDatas() const {
+	return binaryDatas_;
+}
+
 void ReplicationContext::clear() {
 	id_ = TXN_UNDEF_REPLICATIONID;
 	stmtType_ = 0;
 	clientId_ = TXN_EMPTY_CLIENTID;
 	pId_ = UNDEF_PARTITIONID;
 	containerId_ = UNDEF_CONTAINERID;
-	stmtId_ = TXN_MIN_CLIENT_STATEMENTID, clientNd_ = NodeDescriptor::EMPTY_ND;
+	schemaVersionId_ = UNDEF_SCHEMAVERSIONID;
+	stmtId_ = TXN_MIN_CLIENT_STATEMENTID,
+	clientNd_ = NodeDescriptor::EMPTY_ND;
 	ackCounter_ = 0;
 	timeout_ = 0;
 	existFlag_ = false;
+	taskStatus_ = TASK_FINISHED;
+	originalStmtId_ = UNDEF_STATEMENTID;
+
+
+	clearBinaryData();
+}
+
+void ReplicationContext::clearBinaryData() {
+	if (alloc_ != NULL) {
+		for (size_t i = 0; i < binaryDatas_.size(); i++) {
+			ALLOC_VAR_SIZE_DELETE(*alloc_, binaryDatas_[i]);
+		}
+	}
+	binaryDatas_.clear();
 }
 
 TransactionManager::ContextSource::ContextSource()
@@ -183,11 +250,15 @@ const TransactionManager::TransactionMode
 		(TransactionManager::NO_AUTO_COMMIT_BEGIN |
 			TransactionManager::NO_AUTO_COMMIT_CONTINUE);
 
-TransactionManager::TransactionManager(const ConfigTable &config)
+TransactionManager::TransactionManager(ConfigTable &config)
 	: pgConfig_(config),
 	  replicationMode_(config.get<int32_t>(CONFIG_TABLE_TXN_REPLICATION_MODE)),
 	  replicationTimeoutInterval_(
 		  config.get<int32_t>(CONFIG_TABLE_TXN_REPLICATION_TIMEOUT_INTERVAL)),
+	  authenticationTimeoutInterval_(config.get<int32_t>(
+		  CONFIG_TABLE_TXN_AUTHENTICATION_TIMEOUT_INTERVAL)),
+	  reauthConfig_(
+		  config.get<int32_t>(CONFIG_TABLE_TXN_REAUTHENTICATION_INTERVAL)),  
 	  txnTimeoutLimit_(
 		  config.get<int32_t>(CONFIG_TABLE_TXN_TRANSACTION_TIMEOUT_LIMIT)),
 	  txnContextMapManager_(pgConfig_.getPartitionGroupCount(), NULL),
@@ -196,10 +267,15 @@ TransactionManager::TransactionManager(const ConfigTable &config)
 	  activeTxnMap_(pgConfig_.getPartitionGroupCount(), NULL),
 	  replContextMapManager_(pgConfig_.getPartitionGroupCount(), NULL),
 	  replContextMap_(pgConfig_.getPartitionGroupCount(), NULL),
+	  authContextMapManager_(pgConfig_.getPartitionGroupCount(), NULL),
+	  authContextMap_(pgConfig_.getPartitionGroupCount(), NULL),
+	  replAllocator_(pgConfig_.getPartitionGroupCount(), NULL),
 	  partition_(pgConfig_.getPartitionCount(), NULL),
 	  replContextPartition_(pgConfig_.getPartitionCount(), NULL),
+	  authContextPartition_(pgConfig_.getPartitionCount(), NULL),
 	  ptLock_(pgConfig_.getPartitionCount(), 0),
-	  ptLockMutex_(NULL) {
+	  ptLockMutex_(NULL)
+{
 	try {
 		ptLockMutex_ = UTIL_NEW util::Mutex[NUM_LOCK_MUTEX];
 
@@ -234,7 +310,22 @@ TransactionManager::TransactionManager(const ConfigTable &config)
 				(TXN_STABLE_TRANSACTION_TIMEOUT_INTERVAL + TIMER_MERGIN_SEC) *
 					1000,
 				TIMER_INTERVAL_MILLISEC);
+			authContextMapManager_[pgId] =
+				UTIL_NEW AuthenticationContextMap::Manager(util::AllocatorInfo(
+					ALLOCATOR_GROUP_TXN_WORK, "authenticationMap"));
+			authContextMapManager_[pgId]->setFreeElementLimit(
+				DEFAULT_FREE_ELEMENT_LIMIT);
+			authContextMap_[pgId] = authContextMapManager_[pgId]->create(
+				HASH_SIZE,
+				(TXN_STABLE_TRANSACTION_TIMEOUT_INTERVAL + TIMER_MERGIN_SEC) *
+					1000,
+				TIMER_INTERVAL_MILLISEC);
+
+			replAllocator_[pgId] =
+				UTIL_NEW util::VariableSizeAllocator<>(util::AllocatorInfo(
+					ALLOCATOR_GROUP_REPLICATION, "replicationVar"));
 		}
+		reauthConfig_.setUpConfigHandler(config);
 	}
 	catch (std::exception &e) {
 		finalize();
@@ -327,9 +418,28 @@ TransactionContext &TransactionManager::put(util::StackAllocator &alloc,
 	const util::DateTime &now, EventMonotonicTime emNow, bool isRedo,
 	TransactionId txnId) {
 	createPartition(pId);
+	bool isExistTimeoutLimit = true;
 	TransactionContext &txn = partition_[pId]->put(alloc, clientId,
 		src.containerId_, src.stmtId_, src.txnTimeoutInterval_, now, emNow,
-		src.getMode_, src.txnMode_, src.isUpdateStmt_, isRedo, txnId);
+		src.getMode_, src.txnMode_, src.isUpdateStmt_, isRedo, txnId,
+		isExistTimeoutLimit);
+	txn.manager_ = this;
+	return txn;
+}
+
+/*!
+	@brief Creates no expired transaction context
+*/
+TransactionContext &TransactionManager::putNoExpire(util::StackAllocator &alloc,
+	PartitionId pId, const ClientId &clientId, const ContextSource &src,
+	const util::DateTime &now, EventMonotonicTime emNow, bool isRedo,
+	TransactionId txnId) {
+	createPartition(pId);
+	bool isExistTimeoutLimit = false;
+	TransactionContext &txn = partition_[pId]->put(alloc, clientId,
+		src.containerId_, src.stmtId_, TXN_NO_TRANSACTION_TIMEOUT_INTERVAL,
+		now, emNow, src.getMode_, src.txnMode_, src.isUpdateStmt_, isRedo,
+		txnId, isExistTimeoutLimit);
 	txn.manager_ = this;
 	return txn;
 }
@@ -478,6 +588,7 @@ void TransactionManager::getTransactionTimeoutContextId(
 
 	try {
 		util::XArray<ClientId *> updateContextIds(alloc);
+
 		util::XArray<ClientId *> updateContextIds2(alloc);
 
 		ClientId *key;
@@ -504,20 +615,12 @@ void TransactionManager::getTransactionTimeoutContextId(
 		for (size_t i = 0; i < updateContextIds.size(); i++) {
 			TransactionContext *txn =
 				txnContextMap_[pgId]->get(*updateContextIds[i]);
-			if (txn->isActive()) {
-				txnContextMap_[pgId]->update(
-					txn->getClientId(), txn->getTransactionExpireTime());
-			}
-			else {
-				txnContextMap_[pgId]->update(
-					txn->getClientId(), txn->getExpireTime());
-			}
+			updateTransactionOrRequestTimeout(pgId, *txn);
 		}
 		for (size_t i = 0; i < updateContextIds2.size(); i++) {
 			TransactionContext *txn =
 				txnContextMap_[pgId]->get(*updateContextIds2[i]);
-			txnContextMap_[pgId]->update(
-				txn->getClientId(), txn->getExpireTime());
+			updateRequestTimeout(pgId, *txn);
 		}
 
 		assert(pIds.size() == clientIds.size());
@@ -565,14 +668,7 @@ void TransactionManager::getRequestTimeoutContextId(util::StackAllocator &alloc,
 		for (size_t i = 0; i < updateContextIds.size(); i++) {
 			TransactionContext *txn =
 				txnContextMap_[pgId]->get(*updateContextIds[i]);
-			if (txn->isActive()) {
-				txnContextMap_[pgId]->update(
-					txn->getClientId(), txn->getTransactionExpireTime());
-			}
-			else {
-				txnContextMap_[pgId]->update(
-					txn->getClientId(), txn->getExpireTime());
-			}
+			updateTransactionOrRequestTimeout(pgId, *txn);
 		}
 
 		assert(pIds.size() == clientIds.size());
@@ -582,6 +678,96 @@ void TransactionManager::getRequestTimeoutContextId(util::StackAllocator &alloc,
 			"Failed to check request timeout "
 			"(pgId="
 				<< pgId << ", emNow=" << emNow
+				<< ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+}
+
+/*!
+	@brief Gets list of keepalive timed out context ID (clientID) in a
+   specified partition
+*/
+void TransactionManager::getKeepaliveTimeoutContextId(util::StackAllocator &alloc,
+	PartitionGroupId pgId, EventMonotonicTime emNow,
+	const util::XArray<bool> &checkPartitionFlagList,
+	util::XArray<PartitionId> &pIds, util::XArray<ClientId> &clientIds) {
+	const PartitionId beginPId = pgConfig_.getGroupBeginPartitionId(pgId);
+
+	try {
+		ActiveTransactionMap::Cursor cursor = activeTxnMap_[pgId]->getCursor();
+		for (ActiveTransaction *activeTxn = cursor.next(); activeTxn != NULL;
+			 activeTxn = cursor.next()) {
+			const TransactionContext *txn =
+				txnContextMap_[pgId]->get(activeTxn->clientId_);
+
+			assert(txn->getPartitionId() >= beginPId);
+
+			const PartitionId relativePId = txn->getPartitionId() - beginPId;
+
+			if (checkPartitionFlagList[relativePId] &&
+				txn->isActive() && !txn->getSenderND().isEmpty() &&
+				txn->getTransationTimeoutInterval() == TXN_NO_TRANSACTION_TIMEOUT_INTERVAL) {
+
+				StatementHandler::ConnectionOption &connOption =
+				txn->getSenderND().getUserData<StatementHandler::ConnectionOption>();
+				if (connOption.keepaliveTime_ != 0 &&
+					connOption.keepaliveTime_ +
+					CONNECTION_KEEPALIVE_TIMEOUT_INTERVAL <= emNow) {
+					pIds.push_back(txn->getPartitionId());
+					clientIds.push_back(txn->getClientId());
+					partition_[txn->getPartitionId()]->reqTimeoutCount_++;
+					GS_TRACE_INFO(
+						DATASTORE_BACKGROUND, GS_ERROR_DS_BACKGROUND_TASK_INVALID,
+							"[KeepaliveTimeout ND = "
+							<< txn->getSenderND() << ", txnId "
+							<< txn->getId() << "connOption.keepaliveTime_="
+							<< connOption.keepaliveTime_ << ", emNow "
+							<< emNow);
+				}
+			}
+		}
+
+		assert(pIds.size() == clientIds.size());
+	}
+	catch (std::exception &e) {
+		GS_RETHROW_USER_OR_SYSTEM(e,
+			"Failed to check keepalive timeout "
+			"(pgId="
+				<< pgId << ", emNow=" << emNow
+				<< ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+}
+
+/*!
+	@brief Gets list of no expire context ID (clientID) in a
+   specified partition
+*/
+void TransactionManager::getNoExpireTransactionContextId(util::StackAllocator &alloc,
+	PartitionId pId, util::XArray<ClientId> &clientIds) {
+	const PartitionGroupId pgId = pgConfig_.getPartitionGroupId(pId);
+
+	try {
+		ActiveTransactionMap::Cursor cursor = activeTxnMap_[pgId]->getCursor();
+		for (ActiveTransaction *activeTxn = cursor.next(); activeTxn != NULL;
+			 activeTxn = cursor.next()) {
+			const TransactionContext *txn =
+				txnContextMap_[pgId]->get(activeTxn->clientId_);
+
+			if (txn->getPartitionId() == pId && txn->isActive()
+				&& txn->getTransationTimeoutInterval() == TXN_NO_TRANSACTION_TIMEOUT_INTERVAL) {
+				clientIds.push_back(activeTxn->clientId_);
+				partition_[txn->getPartitionId()]->reqTimeoutCount_++;
+				GS_TRACE_INFO(
+					DATASTORE_BACKGROUND, GS_ERROR_DS_BACKGROUND_TASK_INVALID,
+						"[No expire transaction abort pId " << pId << "txnId "
+						<< txn->getId());
+			}
+		}
+	}
+	catch (std::exception &e) {
+		GS_RETHROW_USER_OR_SYSTEM(e,
+			"Failed to check no expire transaction"
+			"(pId="
+				<< pId
 				<< ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
@@ -721,6 +907,21 @@ uint64_t TransactionManager::getReplicationTimeoutCount(PartitionId pId) const {
 			   ? 0
 			   : replContextPartition_[pId]->getReplicationTimeoutCount();
 }
+
+uint64_t TransactionManager::getNoExpireTransactionCount(PartitionGroupId pgId) const {
+	uint64_t noExpiretxnCount = 0;
+	ActiveTransactionMap::Cursor cursor = activeTxnMap_[pgId]->getCursor();
+	for (ActiveTransaction *activeTxn = cursor.next(); activeTxn != NULL;
+		 activeTxn = cursor.next()) {
+		const TransactionContext *txn =
+			txnContextMap_[pgId]->get(activeTxn->clientId_);
+		if (txn != NULL && txn->getTransationTimeoutInterval() == TXN_NO_TRANSACTION_TIMEOUT_INTERVAL) {
+			noExpiretxnCount++;
+		}
+	}
+	return noExpiretxnCount;
+}
+
 /*!
 	@brief Gets memory usage on a specified partition group
 */
@@ -732,8 +933,9 @@ size_t TransactionManager::getMemoryUsage(
 	const size_t activeTxnUsage = activeTxnMapManager_[pgId]->getElementSize() *
 								  activeTxnMapManager_[pgId]->getElementCount();
 	const size_t replContextUsage =
-		replContextMapManager_[pgId]->getElementSize() *
-		replContextMapManager_[pgId]->getElementCount();
+		(replContextMapManager_[pgId]->getElementSize() *
+		replContextMapManager_[pgId]->getElementCount())
+		+ replAllocator_[pgId]->getTotalElementSize();
 
 	const size_t txnContextFree =
 		(includeFreeMemory
@@ -747,8 +949,9 @@ size_t TransactionManager::getMemoryUsage(
 				: 0);
 	const size_t replContextFree =
 		(includeFreeMemory
-				? replContextMapManager_[pgId]->getElementSize() *
-					  replContextMapManager_[pgId]->getFreeElementCount()
+				? (replContextMapManager_[pgId]->getElementSize() *
+					  replContextMapManager_[pgId]->getFreeElementCount())
+				  + replAllocator_[pgId]->getFreeElementSize()
 				: 0);
 
 	return (txnContextUsage + activeTxnUsage + replContextUsage +
@@ -789,6 +992,7 @@ void TransactionManager::finalize() {
 	}
 
 	removeAllReplicationContext();
+	removeAllAuthenticationContext();
 
 	for (PartitionGroupId pgId = 0; pgId < pgConfig_.getPartitionGroupCount();
 		 pgId++) {
@@ -807,6 +1011,14 @@ void TransactionManager::finalize() {
 			delete replContextMapManager_[pgId];
 		}
 
+		if (authContextMapManager_[pgId] != NULL) {
+			authContextMapManager_[pgId]->remove(authContextMap_[pgId]);
+			delete authContextMapManager_[pgId];
+		}
+
+		if (replAllocator_[pgId] != NULL) {
+			delete replAllocator_[pgId];
+		}
 	}
 
 	delete[] ptLockMutex_;
@@ -820,7 +1032,8 @@ void TransactionManager::createReplContextPartition(PartitionId pId) {
 	try {
 		const PartitionGroupId pgId = pgConfig_.getPartitionGroupId(pId);
 		replContextPartition_[pId] =
-			UTIL_NEW ReplicationContextPartition(pId, replContextMap_[pgId]);
+			UTIL_NEW ReplicationContextPartition(pId,
+				replContextMap_[pgId], replAllocator_[pgId]);
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_USER_OR_SYSTEM(e,
@@ -830,6 +1043,23 @@ void TransactionManager::createReplContextPartition(PartitionId pId) {
 	}
 }
 
+void TransactionManager::createAuthContextPartition(PartitionId pId) {
+	if (authContextPartition_[pId] != NULL) {
+		return;
+	}
+
+	try {
+		const PartitionGroupId pgId = pgConfig_.getPartitionGroupId(pId);
+		authContextPartition_[pId] =
+			UTIL_NEW AuthenticationContextPartition(pId, authContextMap_[pgId]);
+	}
+	catch (std::exception &e) {
+		GS_RETHROW_USER_OR_SYSTEM(e,
+			"Failed to create partition "
+			"(pId="
+				<< pId << ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+}
 
 TransactionManager::Partition::Partition(PartitionId pId,
 	int32_t txnTimeoutLimit, TransactionContextMap *txnContextMap,
@@ -867,9 +1097,11 @@ TransactionContext &TransactionManager::Partition::put(
 	ContainerId containerId, StatementId stmtId, int32_t txnTimeoutInterval,
 	const util::DateTime &now, EventMonotonicTime emNow, GetMode getMode,
 	TransactionMode txnMode, bool isUpdateStmt, bool isRedo,
-	TransactionId txnId) {
+	TransactionId txnId, bool isExistTimeoutLimit) {
 	try {
-		if (txnTimeoutInterval < TXN_MIN_TRANSACTION_TIMEOUT_INTERVAL) {
+		if (!isExistTimeoutLimit) {
+		}
+		else if (txnTimeoutInterval < TXN_MIN_TRANSACTION_TIMEOUT_INTERVAL) {
 			txnTimeoutInterval = TXN_STABLE_TRANSACTION_TIMEOUT_INTERVAL;
 		}
 		else if (txnTimeoutInterval > txnTimeoutLimit_) {
@@ -1293,10 +1525,12 @@ void TransactionManager::Partition::endTransaction(TransactionContext &txn) {
 }
 
 TransactionManager::ReplicationContextPartition::ReplicationContextPartition(
-	PartitionId pId, ReplicationContextMap *replContextMap)
+	PartitionId pId, ReplicationContextMap *replContextMap,
+	util::VariableSizeAllocator<> *replAllocator)
 	: pId_(pId),
 	  maxReplId_(INITIAL_REPLICATIONID),
 	  replContextMap_(replContextMap),
+	  replAllocator_(replAllocator),
 	  replTimeoutCount_(0) {
 }
 
@@ -1326,6 +1560,7 @@ ReplicationContext &TransactionManager::ReplicationContextPartition::put(
 		const ReplicationContextKey key(pId_, replId);
 		ReplicationContext &replContext =
 			replContextMap_->create(key, replTimeout);
+		replContext.alloc_ = replAllocator_;
 		replContext.clear();
 		replContext.pId_ = pId_;
 		replContext.id_ = replId;
@@ -1416,6 +1651,29 @@ void TransactionManager::removeAllReplicationContext() {
 		replContextPartition_[pId] = NULL;
 	}
 }
+void TransactionManager::removeAllAuthenticationContext() {
+	for (PartitionId pId = 0; pId < pgConfig_.getPartitionCount(); pId++) {
+		delete authContextPartition_[pId];
+		authContextPartition_[pId] = NULL;
+	}
+}
+
+void TransactionManager::updateRequestTimeout(
+	PartitionGroupId pgId, const TransactionContext &txn) {
+	txnContextMap_[pgId]->update(
+		txn.getClientId(), txn.getExpireTime());
+}
+
+void TransactionManager::updateTransactionOrRequestTimeout(
+	PartitionGroupId pgId, const TransactionContext &txn) {
+	if (txn.isActive()) {
+		txnContextMap_[pgId]->update(
+			txn.getClientId(), txn.getTransactionExpireTime());
+	}
+	else {
+		updateRequestTimeout(pgId, txn);
+	}
+}
 
 
 TransactionManager::ConfigSetUpHandler TransactionManager::configSetUpHandler_;
@@ -1449,6 +1707,17 @@ void TransactionManager::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.setMin(1)
 		.setMax(300)
 		.setDefault(TXN_STABLE_TRANSACTION_TIMEOUT_INTERVAL);
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_TXN_AUTHENTICATION_TIMEOUT_INTERVAL, INT32)
+		.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
+		.setMin(1)
+		.setMax(300)
+		.setDefault(5);
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_TXN_REAUTHENTICATION_INTERVAL, INT32)
+		.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
+		.setMin(0)
+		.setDefault(0);
 
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TXN_CONNECTION_LIMIT, INT32)
 		.setMin(3)
@@ -1476,6 +1745,10 @@ void TransactionManager::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.setUnit(ConfigTable::VALUE_UNIT_SIZE_MB)
 		.setMin(1)
 		.setDefault(1024);
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TXN_WORK_MEMORY_LIMIT, INT32)
+		.setUnit(ConfigTable::VALUE_UNIT_SIZE_MB)
+		.setMin(1)
+		.setDefault(128);
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TXN_USE_KEEPALIVE, BOOL)
 		.setExtendedType(ConfigTable::EXTENDED_TYPE_LAX_BOOL)
 		.setDefault(true);

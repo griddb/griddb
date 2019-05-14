@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -43,14 +43,14 @@ static size_t time_binary_search(TransactionContext &txn,
 	midPos = highPos / 2;
 
 	found = false;
-	TimeSeries::RowArray rowArray(txn, &timeSeries);  
+	BaseContainer::RowArray rowArray(txn, &timeSeries);  
 	while (lowPos <= highPos) {
 		midPos = (lowPos + highPos) / 2;
 		rowArray.load(txn, resultRowIdList[midPos], &timeSeries,
 			OBJECT_READ_ONLY);  
-		TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
+		BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
 
-		ts = row.getTime();
+		ts = row.getRowId();
 		if (ts < targetTs) {
 			lowPos = midPos + 1;
 		}
@@ -65,9 +65,9 @@ static size_t time_binary_search(TransactionContext &txn,
 	}
 	rowArray.load(txn, resultRowIdList[midPos], &timeSeries,
 		OBJECT_READ_ONLY);  
-	TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
+	BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
 
-	ts = row.getTime();
+	ts = row.getRowId();
 	return midPos;
 }
 
@@ -87,10 +87,20 @@ int SelectionTimeFind<isJustInclude, isAscending>::operator()(
 			"Invalid argument count for selection");
 	}
 
+	if (!args[0]->isColumn()) {
+		GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
+			"Invalid argument type for aggregation, first arg must be *");
+	}
+	uint32_t aggColumnId = args[0]->getColumnId();
+	if (aggColumnId != UNDEF_COLUMNID) {
+		GS_THROW_USER_ERROR(GS_ERROR_TQ_COLUMN_CANNOT_AGGREGATE,
+			"Invalid column for aggregation, first arg must be *");
+	}
+
 	ObjectManager &objectManager = *(timeSeries.getObjectManager());
 	Expr *tsExpr =
 		args[1]->eval(txn, objectManager, NULL, NULL, EVAL_MODE_NORMAL);
-	Timestamp baseTs = tsExpr->getValueAsInt64();
+	Timestamp baseTs = tsExpr->getTimeStamp();
 	Timestamp ts;
 	bool found;
 	size_t pos;
@@ -106,11 +116,11 @@ int SelectionTimeFind<isJustInclude, isAscending>::operator()(
 	pos =
 		time_binary_search(txn, timeSeries, resultRowIdList, baseTs, found, ts);
 
+	BaseContainer::RowArray rowArray(txn, &timeSeries);  
 	if (isJustInclude && found) {
-		TimeSeries::RowArray rowArray(txn, &timeSeries);  
 		rowArray.load(txn, resultRowIdList[pos], &timeSeries,
 			OBJECT_READ_ONLY);  
-		TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
+		BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
 		row.getImage(txn, messageRowStore, false);					  
 		messageRowStore->next();									  
 		resultType = RESULT_ROWSET;
@@ -125,10 +135,9 @@ int SelectionTimeFind<isJustInclude, isAscending>::operator()(
 				if (resultRowIdList.size() == 1) return 0;  
 				pos++;
 			}
-			TimeSeries::RowArray rowArray(txn, &timeSeries);  
 			rowArray.load(txn, resultRowIdList[pos], &timeSeries,
 				OBJECT_READ_ONLY);  
-			TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
+			BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
 			row.getImage(txn, messageRowStore, false);					  
 			messageRowStore->next();									  
 			resultType = RESULT_ROWSET;
@@ -143,10 +152,9 @@ int SelectionTimeFind<isJustInclude, isAscending>::operator()(
 			if (!isJustInclude && ts == baseTs) {
 				pos--;
 			}
-			TimeSeries::RowArray rowArray(txn, &timeSeries);  
 			rowArray.load(txn, resultRowIdList[pos], &timeSeries,
 				OBJECT_READ_ONLY);  
-			TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
+			BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
 			row.getImage(txn, messageRowStore, false);					  
 			messageRowStore->next();									  
 			resultType = RESULT_ROWSET;
@@ -173,10 +181,9 @@ int SelectionTimeFind<isJustInclude, isAscending>::operator()(
 		}
 	}
 
-	TimeSeries::RowArray rowArray(txn, &timeSeries);  
 	rowArray.load(txn, resultRowIdList[pos], &timeSeries,
 		OBJECT_READ_ONLY);  
-	TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
+	BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
 	row.getImage(txn, messageRowStore, false);					  
 	messageRowStore->next();									  
 	resultType = RESULT_ROWSET;
@@ -191,7 +198,7 @@ int SelectionTimeFind<isJustInclude, isAscending>::operator()(
  */
 template <bool isJustInclude, bool isAscending>
 uint64_t SelectionTimeFind<isJustInclude, isAscending>::apiPassThrough(
-	TransactionContext &txn, TimeSeries &timeSeries, BtreeMap::SearchContext &,
+	TransactionContext &txn, TimeSeries &timeSeries, BtreeMap::SearchContext &sc,
 	OutputOrder, uint64_t, uint64_t offset, ExprList &args,
 	OutputMessageRowStore *messageRowStore, ResultType &resultType) {
 	TimeOperator timeOp;
@@ -201,6 +208,17 @@ uint64_t SelectionTimeFind<isJustInclude, isAscending>::apiPassThrough(
 		GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 			"Invalid argument count for selection");
 	}
+
+	if (!args[0]->isColumn()) {
+		GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
+			"Invalid argument type for aggregation, first arg must be *");
+	}
+	uint32_t aggColumnId = args[0]->getColumnId();
+	if (aggColumnId != UNDEF_COLUMNID) {
+		GS_THROW_USER_ERROR(GS_ERROR_TQ_COLUMN_CANNOT_AGGREGATE,
+			"Invalid column for aggregation, first arg must be *");
+	}
+
 	if (offset > 0) {
 		return 0;
 	}
@@ -226,25 +244,24 @@ uint64_t SelectionTimeFind<isJustInclude, isAscending>::apiPassThrough(
 	ObjectManager &objectManager = *(timeSeries.getObjectManager());
 	Expr *tsExpr =
 		args[1]->eval(txn, objectManager, NULL, NULL, EVAL_MODE_NORMAL);
-	Timestamp ts = tsExpr->getValueAsInt64();
-	QP_SAFE_DELETE(tsExpr);
-
-	Timestamp expiredTime = timeSeries.getCurrentExpiredTime(txn);
-	if (expiredTime > ts) {  
+	if (tsExpr->isNullValue()) {
 		resultNum = 0;
 		return 0;
 	}
+	Timestamp ts = tsExpr->getTimeStamp();
+	QP_SAFE_DELETE(tsExpr);
+
 	OId targetOId;
-	timeSeries.searchTimeOperator(txn, ts, timeOp, targetOId);
+	timeSeries.searchTimeOperator(txn, sc, ts, timeOp, targetOId);
 	if (UNDEF_OID == targetOId) {
 		resultNum = 0;
 		return 0;
 	}
 	resultNum = 1;
-	TimeSeries::RowArray rowArray(txn, &timeSeries);  
+	BaseContainer::RowArray rowArray(txn, &timeSeries);  
 	rowArray.load(
 		txn, targetOId, &timeSeries, OBJECT_READ_ONLY);  
-	TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
+	BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
 	row.getImage(txn, messageRowStore, false);					  
 	messageRowStore->next();									  
 	resultType = RESULT_ROWSET;
@@ -258,32 +275,21 @@ uint64_t SelectionTimeFind<isJustInclude, isAscending>::apiPassThrough(
 void SelectionTimeInterpolated::getInterpolatedValue(TransactionContext &txn,
 	Timestamp t, const Value &v1, const Value &v2, Timestamp t1, Timestamp t2,
 	Value &v) {
+	if (v1.isNullValue() || v2.isNullValue()) {
+		v.setNull();
+		return;
+	}
 	v.set(0.0);  
-#ifndef QP_ENABLE_SELECTION_DOUBLE_INTERPOLATION
-	Value tdiff1, tdiff2, vdiff, tmp1, tmp2;
-	subTable[v2.getType()][v1.getType()](txn, v2.data(), 0, v1.data(), 0,
-		vdiff);  
-	tdiff1.set(t2 - t1);
-	tdiff2.set(t - t1);
-
-	divTable[vdiff.getType()][tdiff1.getType()](
-		txn, vdiff.data(), 0, tdiff1.data(), 0, tmp1);  
-	mulTable[tmp1.getType()][tdiff2.getType()](txn, tmp1.data(), 0,
-		tdiff2.data(), 0, tmp2);  
-	addTable[tmp2.getType()][v1.getType()](
-		txn, tmp2.data(), 0, v1.data(), 0, v);  
-#else
 	Value tmp1, tmp2, vdiff;
 	double rate = static_cast<double>(t - t1) / static_cast<double>(t2 - t1);
 	tmp1.set(rate);
 
-	subTable[v2.getType()][v1.getType()](txn, v2.data(), 0, v1.data(), 0,
+	CalculatorTable::subTable_[v2.getType()][v1.getType()](txn, v2.data(), 0, v1.data(), 0,
 		vdiff);  
-	mulTable[tmp1.getType()][vdiff.getType()](
+	CalculatorTable::mulTable_[tmp1.getType()][vdiff.getType()](
 		txn, tmp1.data(), 0, vdiff.data(), 0, tmp2);
-	addTable[tmp2.getType()][v1.getType()](
+	CalculatorTable::addTable_[tmp2.getType()][v1.getType()](
 		txn, tmp2.data(), 0, v1.data(), 0, v);
-#endif
 	int64_t i = v.getLong();
 	double d = v.getDouble();
 	switch (v1.getType()) {
@@ -334,11 +340,17 @@ int SelectionTimeInterpolated::operator()(TransactionContext &txn,
 		GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 			"Column required for interpolation");
 	}
+	else if (args[0]->isNullValue() || args[1]->isNullValue()) {
+		return 0;
+	}
 
 	Value v;
 	Expr *tsExpr =
 		args[1]->eval(txn, objectManager, NULL, NULL, EVAL_MODE_NORMAL);
-	Timestamp baseTs = tsExpr->getValueAsInt64();
+	if (tsExpr->isNullValue()) {
+		return 0;
+	}
+	Timestamp baseTs = tsExpr->getTimeStamp();
 	Timestamp ts;
 	bool found;
 	size_t pos;
@@ -377,10 +389,10 @@ int SelectionTimeInterpolated::operator()(TransactionContext &txn,
 		time_binary_search(txn, timeSeries, resultRowIdList, baseTs, found, ts);
 
 	if (found) {
-		TimeSeries::RowArray rowArray(txn, &timeSeries);  
+		BaseContainer::RowArray rowArray(txn, &timeSeries);  
 		rowArray.load(txn, resultRowIdList[pos], &timeSeries,
 			OBJECT_READ_ONLY);  
-		TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
+		BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
 		row.getImage(txn, messageRowStore, false);					  
 		messageRowStore->next();									  
 		resultType = RESULT_ROWSET;
@@ -399,38 +411,39 @@ int SelectionTimeInterpolated::operator()(TransactionContext &txn,
 
 	Timestamp t1, t2;
 
-	TimeSeries::RowArray rowArray(txn, &timeSeries);  
+	BaseContainer::RowArray rowArray(txn, &timeSeries);  
 	rowArray.load(txn, resultRowIdList[pos - 1], &timeSeries,
 		OBJECT_READ_ONLY);  
-	TimeSeries::RowArray::Row row1(rowArray.getRow(), &rowArray);  
+	BaseContainer::RowArray::Row row1(rowArray.getRow(), &rowArray);  
 	rowArray.load(txn, resultRowIdList[pos], &timeSeries,
 		OBJECT_READ_ONLY);  
-	TimeSeries::RowArray::Row row2(rowArray.getRow(), &rowArray);  
+	BaseContainer::RowArray::Row row2(rowArray.getRow(), &rowArray);  
 
-	t1 = row1.getTime();
-	t2 = row2.getTime();  
+	t1 = row1.getRowId();
+	t2 = row2.getRowId();  
 	if (ts > t2) {
 		GS_THROW_USER_ERROR(GS_ERROR_TQ_TIM_SAMPLE_FAILED,
 			"Specified time is later than all timestamp in resultset.");
 	}
 
-	ContainerValue v1(txn, objectManager), v2(txn, objectManager);
+	ContainerValue v1(txn.getPartitionId(), objectManager);
+	ContainerValue v2(txn.getPartitionId(), objectManager);
 	ColumnInfo &interpolateColumnInfo =
 		timeSeries.getColumnInfo(columnId);  
 	rowArray.load(txn, resultRowIdList[pos - 1], &timeSeries,
 		OBJECT_READ_ONLY);  
-	TimeSeries::RowArray::Row row3(rowArray.getRow(), &rowArray);  
+	BaseContainer::RowArray::Row row3(rowArray.getRow(), &rowArray);  
 	row3.getField(txn, interpolateColumnInfo, v1);				   
 	rowArray.load(txn, resultRowIdList[pos], &timeSeries,
 		OBJECT_READ_ONLY);  
-	TimeSeries::RowArray::Row row4(rowArray.getRow(), &rowArray);  
+	BaseContainer::RowArray::Row row4(rowArray.getRow(), &rowArray);  
 	row4.getField(txn, interpolateColumnInfo, v2);				   
 
 	getInterpolatedValue(txn, baseTs, v1.getValue(), v2.getValue(), t1, t2, v);
 
 	rowArray.load(txn, resultRowIdList[pos - 1], &timeSeries,
 		OBJECT_READ_ONLY);  
-	TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
+	BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
 	row.getImage(txn, messageRowStore, false);					  
 	messageRowStore->setField(columnId, v);
 	Value timeVal(baseTs);
@@ -458,6 +471,9 @@ uint64_t SelectionTimeInterpolated::apiPassThrough(TransactionContext &txn,
 		GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 			"Column required for interpolation");
 	}
+	else if (args[0]->isNullValue() || args[1]->isNullValue()) {
+		return 0;
+	}
 
 	uint32_t columnId = args[0]->getColumnId();
 	const ColumnInfo *columnInfo = NULL;
@@ -478,14 +494,12 @@ uint64_t SelectionTimeInterpolated::apiPassThrough(TransactionContext &txn,
 
 	Expr *tsExpr = args[1]->eval(
 		txn, *(timeSeries.getObjectManager()), NULL, NULL, EVAL_MODE_NORMAL);
-	Timestamp ts = tsExpr->getValueAsInt64();
-	QP_SAFE_DELETE(tsExpr);
-
-	Timestamp expiredTime = timeSeries.getCurrentExpiredTime(txn);
-	if (expiredTime > ts) {  
-		resultNum = 0;
+	if (tsExpr->isNullValue()) {
 		return 0;
 	}
+	Timestamp ts = tsExpr->getTimeStamp();
+	QP_SAFE_DELETE(tsExpr);
+
 	if (offset > 0) {
 		return 0;
 	}
@@ -526,8 +540,11 @@ int SelectionTimeSampling::operator()(TransactionContext &txn,
 					  (*orderByExpr)[0].order == ASC);
 
 	ObjectManager &objectManager = *(timeSeries.getObjectManager());
-	parseArgument(txn, objectManager, args, columnId, columnType, fType,
+	bool isNullValue = parseArgument(txn, objectManager, args, columnId, columnType, fType,
 		targetTs, endTs, duration);
+	if (isNullValue) {
+		return 0;
+	}
 
 	SamplingRow tmpRow;
 	tmpRow.value = NULL;
@@ -550,13 +567,13 @@ int SelectionTimeSampling::operator()(TransactionContext &txn,
 	if (currentTs > targetTs && i >= 1) {
 		i--;  
 	}
-	TimeSeries::RowArray rowArray(txn, &timeSeries);  
+	BaseContainer::RowArray rowArray(txn, &timeSeries);  
 	if (i >= 1) {
 		Value v;
 		rowArray.load(txn, resultRowIdList[i - 1], &timeSeries,
 			OBJECT_READ_ONLY);  
-		TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
-		prevTs = row.getTime();
+		BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
+		prevTs = row.getRowId();
 	}
 	else {
 		prevTs = -1;
@@ -576,8 +593,8 @@ int SelectionTimeSampling::operator()(TransactionContext &txn,
 		targetTs = dt.getUnixTime();
 		rowArray.load(txn, resultRowIdList[i], &timeSeries,
 			OBJECT_READ_ONLY);  
-		TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
-		currentTs = row.getTime();
+		BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
+		currentTs = row.getRowId();
 
 		if (i == 0) {
 			while (targetTs < currentTs) {
@@ -595,10 +612,10 @@ int SelectionTimeSampling::operator()(TransactionContext &txn,
 			tmpRow.key = targetTs;
 			if (columnId != UNDEF_COLUMNID) {
 				Value *v = QP_NEW Value();
-				ContainerValue currentContainerValue(txn, objectManager);
+				ContainerValue currentContainerValue(txn.getPartitionId(), objectManager);
 				rowArray.load(txn, resultRowIdList[i], &timeSeries,
 					OBJECT_READ_ONLY);  
-				TimeSeries::RowArray::Row row(
+				BaseContainer::RowArray::Row row(
 					rowArray.getRow(), &rowArray);  
 				row.getField(txn, timeSeries.getColumnInfo(columnId),
 					currentContainerValue);  
@@ -620,16 +637,17 @@ int SelectionTimeSampling::operator()(TransactionContext &txn,
 			tmpRow.key = targetTs;
 			if (columnId != UNDEF_COLUMNID) {
 				Value *v = QP_NEW Value();
-				ContainerValue v1(txn, objectManager), v2(txn, objectManager);
+				ContainerValue v1(txn.getPartitionId(), objectManager);
+				ContainerValue v2(txn.getPartitionId(), objectManager);
 				rowArray.load(txn, resultRowIdList[i - 1], &timeSeries,
 					OBJECT_READ_ONLY);  
-				TimeSeries::RowArray::Row row1(
+				BaseContainer::RowArray::Row row1(
 					rowArray.getRow(), &rowArray);  
 				row1.getField(
 					txn, timeSeries.getColumnInfo(columnId), v1);  
 				rowArray.load(txn, resultRowIdList[i], &timeSeries,
 					OBJECT_READ_ONLY);  
-				TimeSeries::RowArray::Row row2(
+				BaseContainer::RowArray::Row row2(
 					rowArray.getRow(), &rowArray);  
 				row2.getField(
 					txn, timeSeries.getColumnInfo(columnId), v2);  
@@ -674,7 +692,7 @@ int SelectionTimeSampling::operator()(TransactionContext &txn,
 	for (uint32_t i = 0; i < starIdList.size(); ++i) {
 		rowArray.load(txn, starIdList[i], &timeSeries,
 			OBJECT_READ_ONLY);  
-		TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);  
+		BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
 		row.getImage(txn, messageRowStore, false);					  
 		Value v1, v2;
 		v1.setTimestamp(arRowList[i].key);
@@ -690,7 +708,7 @@ int SelectionTimeSampling::operator()(TransactionContext &txn,
 	return static_cast<int>(arRowList.size());
 }
 
-void SelectionTimeSampling::parseArgument(TransactionContext &txn,
+bool SelectionTimeSampling::parseArgument(TransactionContext &txn,
 	ObjectManager &objectManager, ExprList &args, uint32_t &columnId,
 	ColumnType &columnType, util::DateTime::FieldType &fType,
 	Timestamp &targetTs, Timestamp &endTs, int32_t &duration) {
@@ -698,7 +716,8 @@ void SelectionTimeSampling::parseArgument(TransactionContext &txn,
 		GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 			"Invalid argument count for selection");
 	}
-	else if (!args[0]->isColumn() || !args[3]->isValue() ||
+	else if (!args[0]->isColumn() ||
+			 !(args[3]->isNullValue() || args[3]->isValue()) ||
 			 !(args[4]->isColumn() || args[4]->isString())) {
 		GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 			"Invalid arguments for selection");
@@ -719,16 +738,19 @@ void SelectionTimeSampling::parseArgument(TransactionContext &txn,
 	}
 
 	const char *unitStr;
-	Expr *e;
-	e = args[1]->eval(txn, objectManager, NULL, NULL, EVAL_MODE_NORMAL);
-	targetTs = e->getValueAsInt64();
-	QP_SAFE_DELETE(e);
-	e = args[2]->eval(txn, objectManager, NULL, NULL, EVAL_MODE_NORMAL);
-	endTs = e->getValueAsInt64();
-	QP_SAFE_DELETE(e);
-	e = args[3]->eval(txn, objectManager, NULL, NULL, EVAL_MODE_NORMAL);
-	duration = e->getValueAsInt();
-	QP_SAFE_DELETE(e);
+	Expr *e1, *e2, *e3;
+	e1 = args[1]->eval(txn, objectManager, NULL, NULL, EVAL_MODE_NORMAL);
+	e2 = args[2]->eval(txn, objectManager, NULL, NULL, EVAL_MODE_NORMAL);
+	e3 = args[3]->eval(txn, objectManager, NULL, NULL, EVAL_MODE_NORMAL);
+	if (e1->isNullValue() || e2->isNullValue() || e3->isNullValue()) {
+		return true;
+	}
+	targetTs = e1->getTimeStamp();
+	endTs = e2->getTimeStamp();
+	duration = e3->getValueAsInt();
+	QP_SAFE_DELETE(e1);
+	QP_SAFE_DELETE(e2);
+	QP_SAFE_DELETE(e3);
 
 	if (duration <= 0) {
 		GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_RANGE,
@@ -736,9 +758,12 @@ void SelectionTimeSampling::parseArgument(TransactionContext &txn,
 	}
 
 	if (!args[4]->isColumn()) {
-		e = args[4]->eval(txn, objectManager, NULL, NULL, EVAL_MODE_NORMAL);
-		unitStr = e->getValueAsString(txn);
-		QP_SAFE_DELETE(e);
+		Expr *e4 = args[4]->eval(txn, objectManager, NULL, NULL, EVAL_MODE_NORMAL);
+		if (e4->isNullValue()) {
+			return true;
+		}
+		unitStr = e4->getValueAsString(txn);
+		QP_SAFE_DELETE(e4);
 	}
 	else {
 		unitStr = args[4]->getValueAsString(txn);
@@ -763,6 +788,7 @@ void SelectionTimeSampling::parseArgument(TransactionContext &txn,
 		GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_RANGE,
 			"Invalid time type for TIME_SAMPLING()");
 	}
+	return false;
 }
 
 /*!
@@ -783,8 +809,11 @@ uint64_t SelectionTimeSampling::apiPassThrough(TransactionContext &txn,
 	int64_t duration_msec;
 
 	ObjectManager &objectManager = *(timeSeries.getObjectManager());
-	parseArgument(txn, objectManager, args, columnId, columnType, fType,
+	bool isNullValue = parseArgument(txn, objectManager, args, columnId, columnType, fType,
 		startTs, endTs, duration);
+	if (isNullValue) {
+		return 0;
+	}
 
 	Timestamp expiredTime = timeSeries.getCurrentExpiredTime(txn);
 
@@ -960,44 +989,54 @@ int SelectionMaxMinRows<aggregateType>::execute(TransactionContext &txn,
 		return 0;
 	}
 
-	bool doSort = (container->getContainerType() == TIME_SERIES_CONTAINER) &&
-				  orderByExpr &&
-				  !((*orderByExpr)[0].expr->isColumn() &&
-					  (*orderByExpr)[0].expr->getColumnId() == 0 &&
-					  (*orderByExpr)[0].order == ASC);
+	bool doSort = orderByExpr &&
+				((container->getContainerType() != TIME_SERIES_CONTAINER) ||
+				 !((*orderByExpr)[0].expr->isColumn() &&
+					 (*orderByExpr)[0].expr->getColumnId() == 0 &&
+					 (*orderByExpr)[0].order == ASC));
 	if (doSort) {
-		TimeSeriesOrderByComparator comp(txn,
-			*reinterpret_cast<TimeSeries *>(container), function_map,
-			*orderByExpr);
-		std::sort(resultRowIdList.begin(), resultRowIdList.end(), comp);
+		if (container->getContainerType() == TIME_SERIES_CONTAINER) {  
+			TimeSeriesOrderByComparator comp(txn,
+				*reinterpret_cast<TimeSeries *>(container), function_map,
+				*orderByExpr);
+			std::sort(resultRowIdList.begin(), resultRowIdList.end(), comp);
+		}
+		else {
+			CollectionOrderByComparator comp(txn,
+				*reinterpret_cast<Collection *>(container), function_map,
+				*orderByExpr);
+			std::sort(resultRowIdList.begin(), resultRowIdList.end(), comp);
+		}
 	}
 
 	if (offset > 0 && limit != MAX_RESULT_SIZE) {
 		limit += offset;
 	}
 
-	assert(comparatorTable[columnType][columnType] != NULL);
+	assert(ComparatorTable::comparatorTable_[columnType][columnType] != NULL);
 
+	bool isFirst = true;
 	Value maxMinVal;
 	util::XArray<PointRowId> maxMinPosList(
 		txn.getDefaultAllocator());  
 	ObjectManager &objectManager = *(container->getObjectManager());
+	BaseContainer::RowArray rowArray(txn, container);
 	for (size_t i = 0; i < resultRowIdList.size(); i++) {
-		typename R::RowArray rowArray(txn, resultRowIdList[i],
-			reinterpret_cast<R *>(container),
-			OBJECT_READ_ONLY);  
-		typename R::RowArray::Row row(rowArray.getRow(), &rowArray);  
-		ContainerValue currentContainerValue(txn, objectManager);
+		rowArray.load(txn, resultRowIdList[i], container, OBJECT_READ_ONLY);  
+		BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
+		ContainerValue currentContainerValue(txn.getPartitionId(), objectManager);
 		row.getField(txn, columnInfo, currentContainerValue);  
-
-		if (i == 0) {
+		if (currentContainerValue.getValue().isNullValue()) {
+		}
+		else if (isFirst) {
+			isFirst = false;
 			maxMinVal.copy(
 				txn, objectManager, currentContainerValue.getValue());
 			maxMinPosList.push_back(resultRowIdList[i]);
 		}
 		else {
 			int32_t ret =
-				comparatorTable[columnType][columnType](txn, maxMinVal.data(),
+				ComparatorTable::comparatorTable_[columnType][columnType](txn, maxMinVal.data(),
 					maxMinVal.size(), currentContainerValue.getValue().data(),
 					currentContainerValue.getValue().size());
 			if (ret == 0) {
@@ -1033,10 +1072,8 @@ int SelectionMaxMinRows<aggregateType>::execute(TransactionContext &txn,
 	uint64_t resultNum = maxMinPosList.size();
 
 	for (size_t i = 0; i < maxMinPosList.size(); ++i) {
-		typename R::RowArray rowArray(txn, maxMinPosList[i],
-			reinterpret_cast<R *>(container),
-			OBJECT_READ_ONLY);  
-		typename R::RowArray::Row row(rowArray.getRow(), &rowArray);  
+		rowArray.load(txn, maxMinPosList[i], container, OBJECT_READ_ONLY);  
+		BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
 		if (container->getContainerType() == TIME_SERIES_CONTAINER) {  
 			row.getImage(txn, messageRowStore, false);				   
 		}

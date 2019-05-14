@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -18,20 +18,27 @@ package com.toshiba.mwcloud.gs.subnet;
 import java.net.URL;
 import java.sql.Blob;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.Date;
 import java.util.EnumMap;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.SortedMap;
+import java.util.TreeMap;
 
 import com.toshiba.mwcloud.gs.AggregationResult;
+import com.toshiba.mwcloud.gs.ColumnInfo;
 import com.toshiba.mwcloud.gs.Container;
+import com.toshiba.mwcloud.gs.ContainerInfo;
 import com.toshiba.mwcloud.gs.ContainerType;
 import com.toshiba.mwcloud.gs.GSException;
-import com.toshiba.mwcloud.gs.GSRecoverableException;
+import com.toshiba.mwcloud.gs.IndexInfo;
 import com.toshiba.mwcloud.gs.IndexType;
 import com.toshiba.mwcloud.gs.QueryAnalysisEntry;
 import com.toshiba.mwcloud.gs.Row;
@@ -39,29 +46,35 @@ import com.toshiba.mwcloud.gs.RowSet;
 import com.toshiba.mwcloud.gs.TriggerInfo;
 import com.toshiba.mwcloud.gs.TriggerInfo.EventType;
 import com.toshiba.mwcloud.gs.common.BasicBuffer;
+import com.toshiba.mwcloud.gs.common.BasicBuffer.BufferUtils;
 import com.toshiba.mwcloud.gs.common.BlobImpl;
+import com.toshiba.mwcloud.gs.common.ContainerKeyConverter.ContainerKey;
+import com.toshiba.mwcloud.gs.common.Extensibles;
 import com.toshiba.mwcloud.gs.common.GSConnectionException;
 import com.toshiba.mwcloud.gs.common.GSErrorCode;
 import com.toshiba.mwcloud.gs.common.GSStatementException;
 import com.toshiba.mwcloud.gs.common.LoggingUtils;
+import com.toshiba.mwcloud.gs.common.LoggingUtils.BaseGridStoreLogger;
 import com.toshiba.mwcloud.gs.common.PropertyUtils;
 import com.toshiba.mwcloud.gs.common.RowMapper;
-import com.toshiba.mwcloud.gs.common.LoggingUtils.BaseGridStoreLogger;
 import com.toshiba.mwcloud.gs.common.RowMapper.BlobFactory;
 import com.toshiba.mwcloud.gs.common.RowMapper.Cursor;
 import com.toshiba.mwcloud.gs.common.RowMapper.MappingMode;
 import com.toshiba.mwcloud.gs.common.Statement;
+import com.toshiba.mwcloud.gs.experimental.Experimentals;
 import com.toshiba.mwcloud.gs.subnet.GridStoreChannel.ContainerCache;
 import com.toshiba.mwcloud.gs.subnet.GridStoreChannel.Context;
 import com.toshiba.mwcloud.gs.subnet.GridStoreChannel.ContextMonitor;
 import com.toshiba.mwcloud.gs.subnet.GridStoreChannel.RemoteReference;
 import com.toshiba.mwcloud.gs.subnet.GridStoreChannel.SessionInfo;
 import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequest;
+import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequestSource;
 import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequestType;
+import com.toshiba.mwcloud.gs.subnet.SubnetQuery.QueryParameters;
 
-@SuppressWarnings("deprecation")
-public abstract class SubnetContainer<K, R> implements Container<K, R>,
-		BlobFactory {
+public abstract class SubnetContainer<K, R>
+implements Container<K, R>, BlobFactory,
+Extensibles.AsContainer<K, R>, Experimentals.AsContainer<K, R> {
 
 	private static final boolean BLOB_CLEAR_ON_OPERATION_ENABLED = false;
 
@@ -121,6 +134,9 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 		set.add(Statement.ABORT_TRANSACTION);
 	}
 
+	private static final QueryResultType[] QUERY_RESULT_TYPES =
+			QueryResultType.values();
+
 	private final ContextMonitor contextMonitor =
 			GridStoreChannel.createContextMonitorIfAvailable();
 
@@ -143,7 +159,7 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 
 	private final long containerId;
 
-	private final String normalizedContainerName;
+	private final ContainerKey normalizedContainerKey;
 
 	protected long sessionId = 0;
 
@@ -168,8 +184,8 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 	protected SubnetContainer(SubnetGridStore store, GridStoreChannel channel,
 			Context context, Class<R> rowType, RowMapper mapper,
 			int schemaVerId, int partitionId, long containerId,
-			String normalizedContainerName,
-			String remoteContainerName) throws GSException {
+			ContainerKey normalizedContainerKey,
+			ContainerKey remoteContainerKey) throws GSException {
 		this.store = store;
 		this.channel = channel;
 		this.context = context;
@@ -178,9 +194,9 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 		this.schemaVerId = schemaVerId;
 		this.partitionId = partitionId;
 		this.containerId = containerId;
-		this.normalizedContainerName = normalizedContainerName;
+		this.normalizedContainerKey = normalizedContainerKey;
 		if (contextMonitor != null) {
-			contextMonitor.setContainerName(remoteContainerName);
+			contextMonitor.setContainerKey(remoteContainerKey);
 		}
 		store.createReference(this);
 	}
@@ -189,7 +205,8 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 		return store;
 	}
 
-	Class<R> getRowType() {
+	@Override
+	public Class<R> getRowType() {
 		return rowType;
 	}
 
@@ -205,8 +222,8 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 		return containerId;
 	}
 
-	public String getNormalizedContainerName() {
-		return normalizedContainerName;
+	public ContainerKey getNormalizedContainerKey() {
+		return normalizedContainerKey;
 	}
 
 	protected void clearBlob(boolean force) {
@@ -222,10 +239,10 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 		}
 
 		cacheDisabled = true;
-		if (normalizedContainerName != null) {
+		if (normalizedContainerKey != null) {
 			final ContainerCache cache = context.getContainerCache();
 			if (cache != null) {
-				cache.removeSchema(normalizedContainerName);
+				cache.removeSchema(normalizedContainerKey);
 			}
 		}
 	}
@@ -272,7 +289,8 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 			final int requestSize = req.base().position();
 			try {
 				if (contextMonitor != null) {
-					contextMonitor.startStatement(statement, statementId,
+					contextMonitor.startStatement(
+							statement.generalize(), statementId,
 							getPartitionId(), getContainerId());
 				}
 
@@ -287,8 +305,9 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 				}
 
 				channel.executeStatement(
-						context, actualStatement, getPartitionId(),
-						statementId, req, resp, contextMonitor);
+						context, actualStatement.generalize(),
+						getPartitionId(), statementId, req, resp,
+						contextMonitor);
 
 				if (sessionRequired) {
 					if (!sessionPrepared) {
@@ -634,7 +653,7 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 		NodeConnection.tryPutEmptyOptionalRequest(req);
 
 		channel.executeStatement(
-				context, Statement.CLOSE_SESSION,
+				context, Statement.CLOSE_SESSION.generalize(),
 				sessionInfo.getPartitionId(),
 				sessionInfo.getLastStatementId() + 1, req, resp, null);
 	}
@@ -686,7 +705,8 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 				}
 
 				channel.executeStatement(
-						context, Statement.CLOSE_MULTIPLE_SESSIONS,
+						context,
+						Statement.CLOSE_MULTIPLE_SESSIONS.generalize(),
 						partitionId, 0, req, resp, null);
 			}
 			catch (Exception e) {
@@ -727,6 +747,13 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 	protected void putTransactionInfo(
 			BasicBuffer req, StatementFamily familyForSession,
 			TransactionInfoType type, Boolean forUpdate) {
+		putTransactionInfo(req, familyForSession, type, forUpdate, null);
+	}
+
+	protected void putTransactionInfo(
+			BasicBuffer req, StatementFamily familyForSession,
+			TransactionInfoType type, Boolean forUpdate,
+			OptionalRequestSource source) {
 		final boolean sessionRequired = (familyForSession != null);
 		if (sessionRequired && sessionId == 0) {
 			throw new Error("Internal error by invalid session parameters");
@@ -770,19 +797,24 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 			}
 		}
 
-		tryPutOptionalRequest(req, (forUpdate != null && forUpdate), true);
+		tryPutOptionalRequest(
+				req, (forUpdate != null && forUpdate), true, false, source);
 	}
 
-	protected void tryPutOptionalRequest(BasicBuffer req,
-			boolean forUpdate, boolean containerLockAwared) {
+	protected void tryPutOptionalRequest(
+			BasicBuffer req, boolean forUpdate, boolean containerLockAware,
+			boolean forCreationDDL, OptionalRequestSource source) {
 		if (!NodeConnection.isOptionalRequestEnabled()) {
 			return;
 		}
 
 		final boolean containerLockRequired =
-				(containerLockAwared && containerLocked);
+				(containerLockAware && containerLocked);
+		final boolean clientIdRequired =
+				forCreationDDL && SubnetGridStore.isClientIdEnabled();
 
-		if (forUpdate || containerLockRequired) {
+		if (forUpdate || containerLockRequired || clientIdRequired ||
+				(source != null && source.hasOptions())) {
 			final OptionalRequest optionalRequest =
 					context.getOptionalRequest();
 
@@ -793,6 +825,16 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 			if (containerLockRequired) {
 				optionalRequest.put(
 						OptionalRequestType.CONTAINER_LOCK_REQUIRED, true);
+			}
+
+			if (clientIdRequired) {
+				optionalRequest.put(
+						OptionalRequestType.CLIENT_ID,
+						context.generateClientId());
+			}
+
+			if (source != null) {
+				source.putOptions(optionalRequest);
 			}
 
 			optionalRequest.format(req);
@@ -1035,6 +1077,12 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 		return autoCommit;
 	}
 
+	private void commitForDDL() throws GSException {
+		if (!autoCommit && transactionStarted) {
+			commit();
+		}
+	}
+
 	public long getSessionId() {
 		return sessionId;
 	}
@@ -1238,7 +1286,7 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 		final RowMapper resultMapper = mapper.applyResultType(rowType);
 
 		return new SubnetQuery<S>(this, rowType, resultMapper,
-				Statement.QUERY_TQL, new QueryFormatter() {
+				new QueryFormatter(Statement.QUERY_TQL) {
 					@Override
 					public void format(BasicBuffer inBuf) {
 						try {
@@ -1289,12 +1337,13 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 		}
 	}
 
-	<S> SubnetRowSet<S> queryAndFetch(Statement statement,
+	<S> SubnetRowSet<S> queryAndFetch(
 			Class<S> resultType, RowMapper resultMapper,
-			QueryFormatter formatter, boolean forUpdate,
-			long fetchSize) throws GSException {
-		final StatementFamily family = prepareSession(forUpdate ?
-				StatementFamily.LOCK : StatementFamily.QUERY);
+			QueryFormatter formatter, QueryParameters parameters,
+			boolean forUpdate) throws GSException {
+		final boolean neverCreate = false;
+		final StatementFamily family =
+				prepareQuerySession(parameters, forUpdate, neverCreate);
 
 		clearBlob(false);
 		final BasicBuffer req = context.getRequestBuffer();
@@ -1302,7 +1351,11 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 
 		channel.setupRequestBuffer(req);
 		req.putLong(getContainerId());
-		putTransactionInfo(req, family, null, forUpdate);
+		putTransactionInfo(
+				req, family, null, forUpdate,
+				context.bindQueryOptions(parameters));
+
+		QueryParameters.get(parameters).putFixed(req);
 		formatter.format(req);
 
 		Object targetConnection;
@@ -1312,7 +1365,7 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 			}
 
 			try {
-				executeStatement(statement, req, resp, family);
+				executeStatement(formatter.getStatement(), req, resp, family);
 			}
 			finally {
 				if (contextMonitor != null) {
@@ -1323,77 +1376,137 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 			targetConnection = channel.getLastConnection(context);
 		}
 
-		return acceptQueryResponse(statement, resultType, resultMapper,
-				forUpdate, fetchSize, resp, targetConnection, true);
+		return acceptQueryResponse(
+				resultType, resultMapper, formatter, parameters,
+				forUpdate, resp, targetConnection, true);
 	}
 
-	void makeQueryRequest(Statement statement,
-			QueryFormatter formatter, boolean forUpdate,
-			long fetchSize, BasicBuffer req,
-			boolean noUUID) throws GSException {
-		if (forUpdate && (!sessionPrepared || sessionId == 0)) {
-			throw new Error("Internal error by invalid session status");
-		}
-
-		final StatementFamily family = prepareSession(forUpdate ?
-				StatementFamily.LOCK : StatementFamily.QUERY);
+	void makeQueryRequest(
+			QueryFormatter formatter, QueryParameters parameters,
+			boolean forUpdate, BasicBuffer req, boolean noUUID)
+			throws GSException {
+		final boolean neverCreate = true;
+		final StatementFamily family =
+				prepareQuerySession(parameters, forUpdate, neverCreate);
 
 		final TransactionInfoType type =
 				(noUUID ? TransactionInfoType.NO_UUID : null);
 
 		req.putLong(getContainerId());
-		putTransactionInfo(req, family, type, forUpdate);
+		putTransactionInfo(req, family, type, forUpdate, parameters);
+
+		QueryParameters.get(parameters).putFixed(req);
 		formatter.format(req);
 	}
 
-	<S> SubnetRowSet<S> acceptQueryResponse(Statement statement,
+	<S> SubnetRowSet<S> acceptQueryResponse(
 			Class<S> resultType, RowMapper resultMapper,
-			boolean forUpdate, long fetchSize,
-			BasicBuffer resp, Object targetConnection,
+			QueryFormatter formatter, QueryParameters parameters,
+			boolean forUpdate, BasicBuffer resp, Object targetConnection,
 			boolean bufSwapAllowed) throws GSException {
+		final int resultLimit = resp.base().limit();
 		final Class<?> mapperRowType;
 		final MappingMode mode;
 		final boolean rowIdIncluded;
-		final boolean partial;
-		if (isAnyQueryResultTypeEnabled(
+
+		Map<Integer, byte[]> extResultMap = null;
+		PartialFetchStatus fetchStatus = null;
+		PartialExecutionStatus executionStatus = null;
+
+		if (SubnetGridStore.isQueryOptionsExtensible()) {
+			QueryResultType rowSetType = null;
+			QueryResultType partialType = null;
+			int rowSetPos = -1;
+			int rowSetLimit = -1;
+
+			final int count = BufferUtils.getNonNegativeInt(resp.base());
+			for (int i = 0; i < count; i++) {
+				final int rawType = resp.base().get() & 0xff;
+				final int size = resp.base().getInt();
+
+				if (rawType >= QUERY_RESULT_TYPES.length) {
+					QueryParameters.get(parameters).checkResultType(rawType);
+
+					if (extResultMap == null) {
+						extResultMap = new HashMap<Integer, byte[]>();
+					}
+					final byte[] value =
+							new byte[BufferUtils.checkSize(resp.base(), size)];
+					resp.base().get(value);
+
+					extResultMap.put(rawType, value);
+					continue;
+				}
+
+				final int orgLimit =
+						BufferUtils.limitForward(resp.base(), size);
+
+				final QueryResultType type = QUERY_RESULT_TYPES[rawType];
+				final QueryResultType lastType;
+				if (type == QueryResultType.PARTIAL_FETCH_STATE ||
+						type == QueryResultType.PARTIAL_EXECUTION_STATE) {
+					lastType = partialType;
+					partialType = type;
+
+					if (type == QueryResultType.PARTIAL_FETCH_STATE) {
+						fetchStatus = new PartialFetchStatus(resp);
+					}
+					else {
+						executionStatus = new PartialExecutionStatus(resp);
+					}
+				}
+				else {
+					lastType = rowSetType;
+					rowSetType = type;
+					rowSetPos = resp.base().position();
+					rowSetLimit = resp.base().limit();
+				}
+
+				if (lastType != null) {
+					throw new GSException(
+							GSErrorCode.MESSAGE_CORRUPTED,
+							"Protocol error by query result type confliction (" +
+							"lastType=" + lastType + ", type=" + type + ")");
+				}
+
+				BufferUtils.restoreLimit(resp.base(), orgLimit);
+			}
+
+			if (rowSetType == null) {
+				if (QueryParameters.get(parameters).containerLostAcceptable) {
+					return null;
+				}
+				throw new GSException(
+						GSErrorCode.MESSAGE_CORRUPTED,
+						"Protocol error by no query result type");
+			}
+
+			resp.base().position(rowSetPos);
+			resp.base().limit(rowSetLimit);
+
+			mapperRowType = getResultMapperRowType(rowSetType);
+			mode = getResultRowMappingMode(rowSetType);
+			rowIdIncluded = isResultRowIdIncluded(rowSetType);
+		}
+		else if (isAnyQueryResultTypeEnabled(
 				NodeConnection.getProtocolVersion()) ||
-				statement == Statement.QUERY_TQL ||
+				formatter.getStatement() == Statement.QUERY_TQL ||
 				!bufSwapAllowed) {
-			switch (resp.getByteEnum(QueryResultType.class)) {
-			case ROW_SET:
-				mapperRowType = mapper.getRowType();
-				mode = getRowMappingMode();
-				rowIdIncluded = !mapper.isForTimeSeries();
-				partial = false;
-				break;
-			case AGGREGATION_RESULT:
-				mapperRowType = AggregationResult.class;
-				mode = MappingMode.AGGREGATED;
-				rowIdIncluded = false;
-				partial = false;
-				break;
-			case QUERY_ANALYSIS:
-				mapperRowType = QueryAnalysisEntry.class;
-				mode = getRowMappingMode();
-				rowIdIncluded = false;
-				partial = false;
-				break;
-			case PARTIAL_ROW_SET:
-				mode = getRowMappingMode();
-				rowIdIncluded = !mapper.isForTimeSeries();
-				mapperRowType = mapper.getRowType();
-				partial = true;
-				break;
-			default:
-				throw new GSException(GSErrorCode.MESSAGE_CORRUPTED,
-						"Protocol error by unknown result type");
+			final QueryResultType type =
+					resp.getByteEnum(QueryResultType.class);
+
+			mapperRowType = getResultMapperRowType(type);
+			mode = getResultRowMappingMode(type);
+			rowIdIncluded = isResultRowIdIncluded(type);
+
+			if (type == QueryResultType.PARTIAL_FETCH_STATE) {
+				fetchStatus = new PartialFetchStatus(resp);
 			}
 		}
 		else {
 			mode = getRowMappingMode();
 			rowIdIncluded = !mapper.isForTimeSeries();
 			mapperRowType = mapper.getRowType();
-			partial = false;
 		}
 
 		if (resultType != null && resultType != mapperRowType) {
@@ -1413,52 +1526,229 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 					"actualType=" + mapperRowType + ")");
 		}
 
-		if (forUpdate) {
+		if (QueryParameters.isForUpdate(parameters, forUpdate)) {
 			setTransactionStarted(true);
 		}
 
-		final long rowSetTransactionId = (forUpdate ? transactionId : 0);
-		if (partial) {
-			final long totalRowCount = resp.base().getLong();
-			final long rowSetId = resp.base().getLong();
-			final long rowSetIdHint =
-					(isRowSetIdHintDisabled() ? 0 : resp.base().getLong());
+		final QueryParameters rowSetParameters = QueryParameters.inherit(
+				parameters, forUpdate, (isAutoCommit() ? 0 : transactionId),
+				isTransactionStarted(), executionStatus);
 
-			final RowMapper.Cursor cursor;
-			{
-				final int rowCount = getResultRowSetCount(resp);
-				final BasicBuffer resultBuffer =
-						getResultBuffer(resp, bufSwapAllowed);
-				cursor = resultMapper.createCursor(
-						resultBuffer, mode, rowCount, rowIdIncluded, this);
-			}
-
-			return new SubnetRowSet<S>(this, resultType, resultMapper,
-					cursor, rowSetTransactionId, totalRowCount,
-					rowSetId, rowSetIdHint, fetchSize, targetConnection);
-		}
-		else {
-			final int rowCount = getResultRowSetCount(resp);
-			final BasicBuffer resultBuffer =
-					getResultBuffer(resp, bufSwapAllowed);
-			final RowMapper.Cursor cursor = resultMapper.createCursor(resultBuffer,
-					mode, rowCount, rowIdIncluded, this);
-
-			return new SubnetRowSet<S>(
-					this, resultType, resultMapper, cursor,
-					forUpdate ? transactionId : 0);
-		}
+		final int rowCount = getResultRowSetCount(resp);
+		final BasicBuffer resultBuffer =
+				getResultBuffer(resp, resultLimit, bufSwapAllowed);
+		final RowMapper.Cursor cursor = resultMapper.createCursor(
+				resultBuffer, mode, rowCount, rowIdIncluded, this);
+		return new SubnetRowSet<S>(
+				this, resultType, resultMapper, cursor, extResultMap,
+				formatter, rowSetParameters, fetchStatus, targetConnection);
 	}
 
 	public enum QueryResultType {
 		ROW_SET,
-		AGGREGATION_RESULT,
+		AGGREGATION,
 		QUERY_ANALYSIS,
-		PARTIAL_ROW_SET
+		PARTIAL_FETCH_STATE,
+		PARTIAL_EXECUTION_STATE
+	}
+
+	static final class PartialFetchStatus {
+
+		final long totalRowCount;
+
+		final long rowSetId;
+
+		final long rowSetIdHint;
+
+		PartialFetchStatus(BasicBuffer in) {
+			totalRowCount = in.base().getLong();
+			rowSetId = in.base().getLong();
+			rowSetIdHint =
+					(isRowSetIdHintDisabled() ? 0 : in.base().getLong());
+		}
+
+	}
+
+	static class PartialExecutionStatus {
+
+		static final PartialExecutionStatus DISABLED =
+				new PartialExecutionStatus(false);
+
+		static final PartialExecutionStatus ENABLED_INITIAL =
+				new PartialExecutionStatus(true);
+
+		private final boolean enabled;
+
+		private final SortedMap<Integer, byte[]> entryMap;
+
+		PartialExecutionStatus(boolean enabled) {
+			this.enabled = enabled;
+			entryMap = null;
+		}
+
+		PartialExecutionStatus(BasicBuffer in) throws GSException {
+			this.enabled = in.getBoolean();
+
+			final int count = BufferUtils.getNonNegativeInt(in.base());
+			if (count > 0) {
+				entryMap = new TreeMap<Integer, byte[]>();
+				for (int i = 0; i < count; i++) {
+					final int type = in.base().get();
+					final int size = BufferUtils.getIntSize(in.base());
+					final byte[] bytes = new byte[size];
+					in.base().get(bytes);
+					entryMap.put(type, bytes);
+				}
+			}
+			else {
+				entryMap = null;
+			}
+		}
+
+		void put(BasicBuffer out) {
+			out.putBoolean(enabled);
+
+			final int count = (entryMap == null ? 0 : entryMap.size());
+			out.putInt(count);
+			if (count == 0) {
+				return;
+			}
+
+			for (Map.Entry<Integer, byte[]> entry : entryMap.entrySet()) {
+				out.put((byte) (int) entry.getKey());
+				final byte[] bytes = entry.getValue();
+				out.putInt(bytes.length);
+				out.prepare(bytes.length);
+				out.base().put(bytes);
+			}
+		}
+
+		boolean isEnabled() {
+			return enabled;
+		}
+
+		static boolean isEnabled(PartialExecutionStatus status) {
+			return (status != null && status.isEnabled());
+		}
+
+		static PartialExecutionStatus inherit(
+				PartialExecutionStatus prev, PartialExecutionStatus next)
+				throws GSException {
+			if (!isEnabled(next)) {
+				return DISABLED;
+			}
+
+			if (!isEnabled(prev) || next.entryMap.isEmpty()) {
+				throw new GSException(
+						GSErrorCode.MESSAGE_CORRUPTED,
+						"Protocol error by unexpected partial execution");
+			}
+
+			do {
+				if (prev.entryMap == null ||
+						prev.entryMap.size() != next.entryMap.size()) {
+					break;
+				}
+
+				boolean progressed = false;
+				for (Map.Entry<Integer, byte[]> entry :
+						prev.entryMap.entrySet()) {
+					final byte[] prevBytes = entry.getValue();
+					final byte[] nextBytes = next.entryMap.get(entry.getKey());
+					if (!Arrays.equals(prevBytes, nextBytes)) {
+						progressed = true;
+						break;
+					}
+				}
+
+				if (progressed) {
+					break;
+				}
+				throw new GSException(
+						GSErrorCode.MESSAGE_CORRUPTED,
+						"Protocol error by no progress on partial execution");
+			}
+			while (false);
+
+			return next;
+		}
+
+	}
+
+	private StatementFamily prepareQuerySession(
+			QueryParameters parameters, boolean forUpdate,
+			boolean neverCreate) throws GSException {
+		final boolean forUpdateActual =
+				QueryParameters.isForUpdate(parameters, forUpdate);
+
+		final Long initialTransactionId =
+				QueryParameters.findInitialTransactionId(parameters);
+		if (initialTransactionId != null) {
+			checkTransactionPreserved(
+					forUpdateActual, initialTransactionId,
+					QueryParameters.isInitialTransactionStarted(parameters),
+					true);
+		}
+
+		final StatementFamily baseFamily;
+		if (forUpdateActual) {
+			if (QueryParameters.get(
+					parameters).isPartialExecutionConfigured()) {
+				throw new GSException(
+						GSErrorCode.UNSUPPORTED_OPERATION,
+						"Partial execution not supported for update " +
+						"or on manual commit (forUpdate=" +
+						QueryParameters.isForUpdate(parameters, forUpdate) +
+						", autoCommit=" + isAutoCommit() + ")");
+			}
+
+			if (neverCreate && (!sessionPrepared || sessionId == 0)) {
+				throw new Error("Internal error by invalid session status");
+			}
+			baseFamily = StatementFamily.LOCK;
+		}
+		else {
+			baseFamily = StatementFamily.QUERY;
+		}
+
+		return prepareSession(baseFamily);
+	}
+
+	private Class<?> getResultMapperRowType(QueryResultType type) {
+		switch (type) {
+		case AGGREGATION:
+			return AggregationResult.class;
+		case QUERY_ANALYSIS:
+			return QueryAnalysisEntry.class;
+		default:
+			return mapper.getRowType();
+		}
+	}
+
+	private static MappingMode getResultRowMappingMode(QueryResultType type) {
+		if (type == QueryResultType.AGGREGATION) {
+			return MappingMode.AGGREGATED;
+		}
+		return getRowMappingMode();
+	}
+
+	private boolean isResultRowIdIncluded(QueryResultType type) {
+		if (mapper.isForTimeSeries()) {
+			return false;
+		}
+		else {
+			switch (type) {
+			case AGGREGATION:
+			case QUERY_ANALYSIS:
+				return false;
+			default:
+				return true;
+			}
+		}
 	}
 
 	private BasicBuffer getResultBuffer(
-			BasicBuffer resp, boolean bufSwapAllowed) {
+			BasicBuffer resp, int orgLimit, boolean bufSwapAllowed) {
 		final int resultDataSize = resp.base().remaining();
 		final BasicBuffer resultBuffer;
 		if (!bufSwapAllowed ||
@@ -1466,6 +1756,8 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 			resultBuffer = new BasicBuffer(resultDataSize);
 			resultBuffer.base().put(resp.base());
 			resultBuffer.base().flip();
+
+			resp.base().limit(orgLimit);
 		}
 		else {
 			
@@ -1493,8 +1785,7 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 
 	static void closeRowSet(
 			GridStoreChannel channel, Context context,
-			int partitionId, long containerId,
-			long rowSetId, long rowSetIdHint,
+			int partitionId, long containerId, PartialFetchStatus fetchStatus,
 			Object targetConnection) throws GSException {
 
 		synchronized (context) {
@@ -1505,55 +1796,68 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 			req.putLong(containerId);
 			NodeConnection.tryPutEmptyOptionalRequest(req);
 
-			req.putLong(rowSetId);
+			req.putLong(fetchStatus.rowSetId);
 			if (!isRowSetIdHintDisabled()) {
-				req.putLong(rowSetIdHint);
+				req.putLong(fetchStatus.rowSetIdHint);
 			}
 
 			channel.checkActiveConnection(
 					context, partitionId, targetConnection);
 			channel.executeStatement(
-					context, Statement.CLOSE_ROW_SET,
+					context, Statement.CLOSE_ROW_SET.generalize(),
 					partitionId, 0, req, resp, null);
 		}
 	}
 
-	public RowMapper.Cursor fetchRowSet(
-			long rowSetId, long rowSetIdHint,
-			long totalCount, long remainingCount, long fetchSize,
-			Object[] targetConnection,
+	RowMapper.Cursor fetchRowSet(
+			long remainingCount, PartialFetchStatus fetchStatus,
+			QueryParameters parameters, Object[] targetConnection,
 			RowMapper resultMapper) throws GSException {
+		final boolean neverCreate = true;
+		final StatementFamily family =
+				prepareQuerySession(parameters, false, neverCreate);
+
 		final BasicBuffer req = context.getRequestBuffer();
 		final BasicBuffer resp = context.getResponseBuffer();
 
 		channel.setupRequestBuffer(req);
 		req.putLong(getContainerId());
-		req.putInt(getSchemaVersionId());
-		tryPutOptionalRequest(req, false, true);
 
-		req.putLong(rowSetId);
-		if (!isRowSetIdHintDisabled()) {
-			req.putLong(rowSetIdHint);
+		if (SubnetGridStore.isQueryOptionsExtensible()) {
+			final boolean forUpdate =
+					QueryParameters.isForUpdate(parameters, false);
+			putTransactionInfo(req, family, null, forUpdate, parameters);
 		}
-		req.putLong(totalCount - remainingCount);
-		req.putLong(fetchSize);
+		else {
+			req.putInt(getSchemaVersionId());
+			tryPutOptionalRequest(req, false, true, false, null);
+		}
+
+		req.putLong(fetchStatus.rowSetId);
+		if (!isRowSetIdHintDisabled()) {
+			req.putLong(fetchStatus.rowSetIdHint);
+		}
+		req.putLong(fetchStatus.totalRowCount - remainingCount);
+		req.putLong(QueryParameters.get(parameters).fetchSize);
 
 		synchronized (context) {
 			channel.checkActiveConnection(
 					context, partitionId, targetConnection[0]);
 			try {
-				executeStatement(Statement.FETCH_ROW_SET, req, resp, null);
+				executeStatement(Statement.FETCH_ROW_SET, req, resp, family);
 			}
-			catch (GSRecoverableException e) {
+			catch (@SuppressWarnings("deprecation")
+			com.toshiba.mwcloud.gs.GSRecoverableException e) {
 				targetConnection[0] = null;
 				throw e;
 			}
 			catch (GSStatementException e) {
 				if (e.getErrorCode() == ROW_SET_NOT_FOUND_ERROR_CODE) {
 					targetConnection[0] = null;
-					throw new GSRecoverableException(
+					throw GSErrorCode.newGSRecoverableException(
 							GSErrorCode.RECOVERABLE_ROW_SET_LOST,
-							"Row set temporarily lost by connection problem (" +
+							"Row set temporarily lost " +
+							"by connection problem (" +
 							"reason=" + e.getMessage() + ")", e);
 				}
 				throw e;
@@ -1581,7 +1885,8 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 					", remainingCount=" + remainingCount + ")");
 		}
 
-		final BasicBuffer resultBuffer = getResultBuffer(resp, true);
+		final BasicBuffer resultBuffer =
+				getResultBuffer(resp, resp.base().limit(), true);
 		boolean rowIdIncluded = !mapper.isForTimeSeries();
 
 		final RowMapper.Cursor cursor = resultMapper.createCursor(
@@ -1611,16 +1916,12 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 		return found;
 	}
 
-	public void remove(RowMapper resolvedMapper, long transactionId,
+	void remove(
+			RowMapper resolvedMapper, long transactionId,
+			boolean transactionStarted, boolean updatable,
 			long rowId, Object key) throws GSException {
-		if (transactionId != this.transactionId || autoCommit) {
-			if (transactionId == 0) {
-				throw new GSException(GSErrorCode.NOT_LOCKED,
-						"Update option must be turned on");
-			}
-			throw new GSException(GSErrorCode.TRANSACTION_CLOSED,
-					"Transaction expired");
-		}
+		checkTransactionPreserved(
+				true, transactionId, transactionStarted, updatable);
 
 		final BasicBuffer req = context.getRequestBuffer();
 		final BasicBuffer resp = context.getResponseBuffer();
@@ -1644,21 +1945,17 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 		}
 	}
 
-	public void update(RowMapper resolvedMapper, long transactionId,
+	void update(
+			RowMapper resolvedMapper, long transactionId,
+			boolean transactionStarted, boolean updatable,
 			long rowId, Object key, Object newRowObj) throws GSException {
 		if (this.mapper.isForTimeSeries() && !timeSeriesUpdateEnabled) {
 			throw new GSException(GSErrorCode.UNSUPPORTED_OPERATION,
 					"TimeSeries row can not be updated");
 		}
 
-		if (transactionId != this.transactionId || autoCommit) {
-			if (transactionId == 0) {
-				throw new GSException(GSErrorCode.NOT_LOCKED,
-						"Update option must be turned on");
-			}
-			throw new GSException(GSErrorCode.TRANSACTION_CLOSED,
-					"Transaction expired");
-		}
+		checkTransactionPreserved(
+				true, transactionId, transactionStarted, updatable);
 
 		final BasicBuffer req = context.getRequestBuffer();
 		final BasicBuffer resp = context.getResponseBuffer();
@@ -1684,6 +1981,71 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 		resolvedMapper.encode(
 				req, getRowMappingMode(), key, newRowObj);
 		executeStatement(statement, req, resp, family);
+	}
+
+	@Override
+	public void removeRowById(
+			long transactionId, long baseId) throws GSException {
+		final long rowId = resolveRowIdForUpdate(baseId);
+		final Object key = resolveRowKeyForUpdate(baseId);
+		remove(
+				mapper, transactionId, isTransactionStarted(), true,
+				rowId, key);
+	}
+
+	@Override
+	public void updateRowById(
+			long transactionId, long baseId, R rowObj) throws GSException {
+		final long rowId = resolveRowIdForUpdate(baseId);
+		final Object key = resolveRowKeyForUpdate(baseId);
+		update(
+				mapper, transactionId, isTransactionStarted(), true,
+				rowId, key, rowObj);
+	}
+
+	private void checkTransactionPreserved(
+			boolean forUpdate, long transactionId, boolean transactionStarted,
+			boolean updatable) throws GSException {
+		if (forUpdate && (transactionId == 0 || !updatable)) {
+			throw new GSException(GSErrorCode.NOT_LOCKED,
+					"Update option must be turned on");
+		}
+
+		if (transactionId == 0) {
+			if (!autoCommit) {
+				throw new GSException(
+						GSErrorCode.ILLEGAL_COMMIT_MODE,
+						"Illegal operation for partial row set " +
+						"by auto commit query " +
+						"because of currently manual commit mode");
+			}
+		}
+		else {
+			if (transactionId != this.transactionId ||
+					transactionStarted != this.transactionStarted ||
+					autoCommit) {
+				throw new GSException(GSErrorCode.TRANSACTION_CLOSED,
+						"Transaction expired");
+			}
+		}
+	}
+
+	private long resolveRowIdForUpdate(long baseId) {
+		if (mapper.isForTimeSeries()) {
+			return 0;
+		}
+		else {
+			return baseId;
+		}
+	}
+
+	private Object resolveRowKeyForUpdate(long baseId) {
+		if (mapper.isForTimeSeries()) {
+			return new Date(baseId);
+		}
+		else {
+			return null;
+		}
 	}
 
 	@Override
@@ -1714,25 +2076,29 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 
 	@Override
 	public void createIndex(String columnName) throws GSException {
-		final IndexType indexType;
-		try {
-			indexType = getDefaultIndexType(columnName);
-		}
-		catch (NullPointerException e) {
-			throw GSErrorCode.checkNullParameter(columnName, "columnName", e);
-		}
-
-		if (indexType == null) {
-			throw new GSException(GSErrorCode.UNSUPPORTED_DEFAULT_INDEX,
-					"Default index can not be assigned (" +
-					"columnName=" + columnName + ")");
-		}
-		createIndex(columnName, indexType);
+		createIndex(columnName, IndexType.DEFAULT);
 	}
 
 	@Override
 	public void createIndex(
 			String columnName, IndexType type) throws GSException {
+		GSErrorCode.checkNullParameter(columnName, "columnName", null);
+		GSErrorCode.checkNullParameter(type, "type", null);
+		createIndex(IndexInfo.createByColumn(columnName, type));
+	}
+
+	@Override
+	public void createIndex(IndexInfo info) throws GSException {
+		createIndex(info, null);
+	}
+
+	@Override
+	public void createIndex(IndexInfo info, OptionalRequestSource source)
+			throws GSException {
+		GSErrorCode.checkNullParameter(info, "info", null);
+		final IndexInfo filteredInfo = filterIndexInfo(info, true);
+
+		commitForDDL();
 
 		final StatementFamily family = (isDDLSessionEnabled() ?
 				prepareSession(StatementFamily.POST) : null);
@@ -1746,40 +2112,50 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 			putSessionInfo(req, sessionId);
 		}
 		req.putInt(getSchemaVersionId());
-		tryPutOptionalRequest(req, false, true);
+		tryPutOptionalRequest(req, false, true, true, source);
 
-		try {
-			req.putInt(mapper.resolveColumnId(columnName));
-			req.putByteEnum(type);
+		final Statement statement;
+		if (SubnetGridStore.isIndexDetailEnabled()) {
+			statement = Statement.CREATE_INDEX_DETAIL;
+			SubnetGridStore.exportIndexInfo(req, filteredInfo, false);
 		}
-		catch (NullPointerException e) {
-			GSErrorCode.checkNullParameter(columnName, "columnName", e);
-			GSErrorCode.checkNullParameter(type, "type", e);
-			throw e;
+		else {
+			statement = Statement.CREATE_INDEX;
+			req.putInt(filteredInfo.getColumn());
+			req.putByteEnum(filteredInfo.getType());
 		}
 
-		executeStatement(Statement.CREATE_INDEX, req, resp, family);
+		executeStatement(statement, req, resp, family);
 	}
 
 	@Override
 	public void dropIndex(String columnName) throws GSException {
-		final IndexType indexType;
-		try {
-			indexType = getDefaultIndexType(columnName);
-		}
-		catch (NullPointerException e) {
-			throw GSErrorCode.checkNullParameter(columnName, "columnName", e);
-		}
-
-		if (indexType == null) {
-			return;
-		}
-		dropIndex(columnName, indexType);
+		dropIndex(columnName, IndexType.DEFAULT);
 	}
 
 	@Override
 	public void dropIndex(
 			String columnName, IndexType type) throws GSException {
+		GSErrorCode.checkNullParameter(columnName, "columnName", null);
+		GSErrorCode.checkNullParameter(type, "type", null);
+		dropIndex(IndexInfo.createByColumn(columnName, type), null);
+	}
+
+	@Override
+	public void dropIndex(IndexInfo info) throws GSException {
+		dropIndex(info, null);
+	}
+
+	@Override
+	public void dropIndex(IndexInfo info, OptionalRequestSource source)
+			throws GSException {
+		GSErrorCode.checkNullParameter(info, "info", null);
+		final IndexInfo filteredInfo = filterIndexInfo(info, false);
+		if (filteredInfo == null) {
+			return;
+		}
+
+		commitForDDL();
 
 		final StatementFamily family = (isDDLSessionEnabled() ?
 				prepareSession(StatementFamily.POST) : null);
@@ -1793,23 +2169,109 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 			putSessionInfo(req, sessionId);
 		}
 		req.putInt(getSchemaVersionId());
-		tryPutOptionalRequest(req, false, true);
+		tryPutOptionalRequest(req, false, true, false, source);
 
-		try {
-			req.putInt(mapper.resolveColumnId(columnName));
-			req.putByteEnum(type);
+		final Statement statement;
+		if (SubnetGridStore.isIndexDetailEnabled()) {
+			statement = Statement.DROP_INDEX_DETAIL;
+			SubnetGridStore.exportIndexInfo(req, filteredInfo, true);
 		}
-		catch (NullPointerException e) {
-			GSErrorCode.checkNullParameter(columnName, "columnName", e);
-			GSErrorCode.checkNullParameter(type, "type", e);
-			throw e;
+		else {
+			statement = Statement.DROP_INDEX;
+
+			if (filteredInfo.getColumn() == null) {
+				throw new GSException(
+						GSErrorCode.EMPTY_PARAMETER,
+						"Column must be specified");
+			}
+			req.putInt(filteredInfo.getColumn());
+
+			if (filteredInfo.getType() == null) {
+				throw new GSException(
+						GSErrorCode.EMPTY_PARAMETER,
+						"Index type must be specified");
+			}
+			req.putByteEnum(filteredInfo.getType());
 		}
 
-		executeStatement(Statement.DROP_INDEX, req, resp, family);
+		executeStatement(statement, req, resp, family);
 	}
 
-	private IndexType getDefaultIndexType(String columnName) throws GSException {
-		final int columnId = mapper.resolveColumnId(columnName);
+	private IndexInfo filterIndexInfo(
+			IndexInfo info, boolean forCreation) throws GSException {
+		IndexInfo filteredInfo = info;
+
+		if (filteredInfo.getName() != null) {
+			RowMapper.checkSymbol(filteredInfo.getName(), "index name");
+		}
+
+		final Integer column = filteredInfo.getColumn();
+		String columnNameById = null;
+		if (column != null) {
+			final ContainerInfo containerInfo = mapper.getContainerInfo();
+			final ColumnInfo columnInfo;
+			try {
+				columnInfo = containerInfo.getColumnInfo(column);
+			}
+			catch (IllegalArgumentException e) {
+				throw new GSException(GSErrorCode.ILLEGAL_PARAMETER, e);
+			}
+			columnNameById = columnInfo.getName();
+		}
+
+		String columnName = filteredInfo.getColumnName();
+		if (columnName == null) {
+			columnName = columnNameById;
+		}
+		else {
+			final int columnByName = mapper.resolveColumnId(columnName);
+			if (column == null) {
+				filteredInfo = new IndexInfo(filteredInfo);
+				filteredInfo.setColumn(columnByName);
+			}
+			else if (column != columnByName) {
+				throw new GSException(
+						GSErrorCode.ILLEGAL_PARAMETER,
+						"Inconsistent column specified (" +
+						"specifiedNumber=" + column +
+						" (actualName=" + columnNameById + "), " +
+						"specifiedName=" + columnName +
+						" (actualNumber=" + columnByName + "))");
+			}
+		}
+
+		if (forCreation && filteredInfo.getColumn() == null) {
+			throw new GSException(
+					GSErrorCode.EMPTY_PARAMETER,
+					"Column must be specified");
+		}
+
+		final IndexType type = filteredInfo.getType();
+		if (!SubnetGridStore.isIndexDetailEnabled() &&
+				((forCreation && type == null) || type == IndexType.DEFAULT)) {
+			if (filteredInfo == info) {
+				filteredInfo = new IndexInfo(filteredInfo);
+			}
+
+			final Integer filteredColumn = filteredInfo.getColumn();
+			final IndexType defaultType = (filteredColumn == null ?
+					null : getDefaultIndexType(filteredColumn));
+			if (defaultType == null) {
+				if (!forCreation) {
+					return null;
+				}
+				throw new GSException(GSErrorCode.UNSUPPORTED_DEFAULT_INDEX,
+						"Default index can not be assigned (" +
+						"columnName=" + columnName + ")");
+			}
+
+			filteredInfo.setType(defaultType);
+		}
+
+		return filteredInfo;
+	}
+
+	private IndexType getDefaultIndexType(int columnId) throws GSException {
 		if (mapper.isArray(columnId)) {
 			return null;
 		}
@@ -1833,6 +2295,7 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 	}
 
 	@Override
+	@Deprecated
 	public void createEventNotification(URL url) throws GSException {
 		final BasicBuffer req = context.getRequestBuffer();
 		final BasicBuffer resp = context.getResponseBuffer();
@@ -1854,6 +2317,7 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 	}
 
 	@Override
+	@Deprecated
 	public void dropEventNotification(URL url) throws GSException {
 		final BasicBuffer req = context.getRequestBuffer();
 		final BasicBuffer resp = context.getResponseBuffer();
@@ -1926,9 +2390,22 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 		}
 	}
 
-	public interface QueryFormatter {
-		public void format(BasicBuffer inBuf) throws GSException;
-		public String getQueryString();
+	static abstract class QueryFormatter {
+
+		private final Statement statement;
+
+		QueryFormatter(Statement statement) {
+			this.statement = statement;
+		}
+
+		public Statement getStatement() {
+			return statement;
+		}
+
+		abstract void format(BasicBuffer out) throws GSException;
+
+		abstract String getQueryString();
+
 	}
 
 	@Override
@@ -1945,8 +2422,9 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 
 	
 
+	@Override
 	public RowSet<Row> getRowSet(
-			long[] position, long fetchLimit) throws GSException {
+			Object[] position, long fetchLimit) throws GSException {
 		final BasicBuffer req = context.getRequestBuffer();
 		final BasicBuffer resp = context.getResponseBuffer();
 
@@ -1958,7 +2436,7 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 				req, family, TransactionInfoType.SKIP_COMMIT_MODE, null);
 
 		req.putLong(fetchLimit);
-		req.putLong(position[0]);
+		req.putLong((Long) position[0]);
 
 		executeStatement(
 				Statement.GET_MULTIPLE_ROWS, req, resp, family);
@@ -1980,7 +2458,8 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 		final RowMapper.Cursor cursor = mapper.createCursor(
 				resultData, getRowMappingMode(), (int) rowCount, false, this);
 
-		return new SubnetRowSet<Row>(this, Row.class, mapper, cursor, 0);
+		return new SubnetRowSet<Row>(
+				this, Row.class, mapper, cursor, null, null, null, null, null);
 	}
 
 	public boolean putRowSet(SubnetRowSet<?> rowSet) throws GSException {
@@ -2026,7 +2505,7 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 			putSessionInfo(req, sessionId);
 		}
 		req.putInt(getSchemaVersionId());
-		tryPutOptionalRequest(req, false, true);
+		tryPutOptionalRequest(req, false, true, true, null);
 
 		if (info.getName() == null) {
 			throw new GSException(GSErrorCode.EMPTY_PARAMETER,
@@ -2112,10 +2591,15 @@ public abstract class SubnetContainer<K, R> implements Container<K, R>,
 			putSessionInfo(req, sessionId);
 		}
 		req.putInt(getSchemaVersionId());
-		tryPutOptionalRequest(req, false, true);
+		tryPutOptionalRequest(req, false, true, false, null);
 		req.putString(name);
 
 		executeStatement(Statement.DROP_TRIGGER, req, resp, family);
+	}
+
+	@Override
+	public Object getRowValue(Object rowObj, int column) throws GSException {
+		return mapper.resolveField(rowObj, column);
 	}
 
 }

@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -34,14 +34,60 @@ public class BlobImpl implements Blob {
 
 	private long streamOutputPos;
 
+	private boolean shared;
+
 	private boolean closed;
 
 	public BlobImpl() {
-		chain = null;
+		this(null);
 	}
 
 	public BlobImpl(BlobImpl chain) {
 		this.chain = chain;
+	}
+
+	public static BlobImpl share(Blob src) throws SQLException {
+		if (src instanceof BlobImpl) {
+			return share((BlobImpl) src);
+		}
+
+		final long length = src.length();
+		if (length == 0) {
+			return new BlobImpl();
+		}
+		else if (length < 0 || length > Integer.MAX_VALUE) {
+			throw new SQLException(
+					"Too long or unacceptable blob length " +
+					"(length=" + length + ")");
+		}
+		else {
+			final BlobImpl dest = new BlobImpl();
+			dest.data = src.getBytes(1, (int) length);
+			return dest;
+		}
+	}
+
+	public static BlobImpl share(BlobImpl src) throws SQLException {
+		src.checkAvailable();
+		src.prepareData();
+
+		final BlobImpl dest = new BlobImpl();
+		dest.data = src.data;
+
+		src.shared = true;
+		dest.shared = true;
+
+		return dest;
+	}
+
+	public static BlobImpl shareDirect(BlobImpl src) {
+		final BlobImpl dest = new BlobImpl();
+		dest.data = src.data;
+
+		src.shared = true;
+		dest.shared = true;
+
+		return dest;
 	}
 
 	public byte[] getDataDirect() throws SQLException {
@@ -53,6 +99,7 @@ public class BlobImpl implements Blob {
 		this.data = data;
 		streamOutput = null;
 		streamOutputPos = 0;
+		shared = false;
 	}
 
 	public void close() {
@@ -162,16 +209,18 @@ public class BlobImpl implements Blob {
 		final byte[] newData;
 		if (internalArray && orgLength == 0 && orgLength == minLength) {
 			data = bytes;
+			shared = false;
 			return;
 		}
-		else if (minLength <= orgLength) {
+		else if (!shared && minLength <= orgLength) {
 			newData = data;
 		}
 		else {
-			newData = new byte[minLength];
+			newData = new byte[Math.max(orgLength, minLength)];
 			if (orgLength > 0) {
 				System.arraycopy(data, 0, newData, 0, orgLength);
 			}
+			shared = false;
 		}
 
 		System.arraycopy(bytes, offset, newData, (int) pos - 1, len);
@@ -201,6 +250,7 @@ public class BlobImpl implements Blob {
 		data = null;
 		streamOutput = null;
 		streamOutputPos = 0;
+		shared = false;
 	}
 
 	@Override

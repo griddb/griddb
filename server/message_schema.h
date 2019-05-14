@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -21,7 +21,6 @@
 #ifndef MESSAGE_SCHEMA_H_
 #define MESSAGE_SCHEMA_H_
 
-#include "collection.h"
 #include "time_series.h"
 #include "value_operator.h"
 
@@ -32,9 +31,9 @@ struct CompareStringI {
 public:
 	bool operator()(const util::String &right, const util::String &left) const {
 		return (compareStringStringI(
-					reinterpret_cast<const uint8_t *>(right.c_str()),
+					right.c_str(),
 					static_cast<uint32_t>(right.length()),
-					reinterpret_cast<const uint8_t *>(left.c_str()),
+					left.c_str(),
 					static_cast<uint32_t>(left.length())) < 0);
 	}
 };
@@ -44,9 +43,22 @@ public:
 */
 class MessageSchema {
 public:
+	static const int32_t DEFAULT_VERSION;
+	static const int32_t V4_1_VERSION;
+	enum OptionType {
+
+		PARTITION_EXPIRATION = 100,
+
+		OPTION_END = 0xFFFFFFFF
+	};
+public:
 	MessageSchema(util::StackAllocator &alloc,
 		const DataStoreValueLimitConfig &dsValueLimitConfig,
-		const char *containerName, util::ArrayByteInStream &in);
+		const char *containerName, util::ArrayByteInStream &in, int32_t featureVersion);
+	MessageSchema(util::StackAllocator &alloc,
+		const DataStoreValueLimitConfig &dsValueLimitConfig,
+		const BibInfo::Container &bibInfo);
+
 	virtual ~MessageSchema() {}
 
 
@@ -54,12 +66,16 @@ public:
 		return containerType_;
 	}
 
+
 	uint32_t getColumnCount() const {
 		return columnNum_;
 	}
 
-	ColumnId getRowKeyColumnId() const {
-		return keyColumnId_;
+	const util::XArray<ColumnId>& getRowKeyColumnIdList() const {
+		return keyColumnIds_;
+	}
+	uint32_t getRowKeyNum() const {
+		return static_cast<uint32_t>(keyColumnIds_.size());
 	}
 
 	ColumnType getColumnType(ColumnId columnId) const {
@@ -69,7 +85,20 @@ public:
 	ColumnType getColumnFullType(ColumnId columnId) const;
 
 	bool getIsArray(ColumnId columnId) const {
-		return isArrayList_[columnId];
+		return (flagsList_[columnId] & COLUMN_FLAG_ARRAY) != 0;
+	}
+	bool getIsNotNull(ColumnId columnId) const {
+		return (flagsList_[columnId] & COLUMN_FLAG_NOT_NULL) != 0;
+	}
+	static void setArray(uint8_t &flag) {
+		flag |= COLUMN_FLAG_ARRAY;
+	}
+
+	static void setNotNull(uint8_t &flag) {
+		flag |= COLUMN_FLAG_NOT_NULL;
+	}
+	bool getIsVirtual(ColumnId columnId) const {
+		return (flagsList_[columnId] & COLUMN_FLAG_VIRTUAL) != 0;
 	}
 
 	const util::String &getColumnName(ColumnId columnId) const {
@@ -84,15 +113,67 @@ public:
 		return containerAttribute_;
 	}
 
+	static int64_t getTimestampDuration(int32_t elapsedTime, TimeUnit unit) {
+		int64_t duration = 0;
+		if (elapsedTime > 0) {
+			switch (unit) {
+			case TIME_UNIT_DAY:
+				duration =
+					static_cast<int64_t>(elapsedTime) * 24 * 60 * 60 * 1000LL;
+				break;
+			case TIME_UNIT_HOUR:
+				duration =
+					static_cast<int64_t>(elapsedTime) * 60 * 60 * 1000LL;
+				break;
+			case TIME_UNIT_MINUTE:
+				duration=
+					static_cast<int64_t>(elapsedTime) * 60 * 1000LL;
+				break;
+			case TIME_UNIT_SECOND:
+				duration =
+					static_cast<int64_t>(elapsedTime) * 1000LL;
+				break;
+			case TIME_UNIT_MILLISECOND:
+				duration = static_cast<int64_t>(elapsedTime);
+				break;
+			default:
+				GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
+					"Timeunit not supported, unit="	<< (int32_t)unit);
+				break;
+			}
+		}
+		return duration;
+	}
+	Timestamp getContainerExpirationStartTime() const {
+		return containerExpirationStartTime_;
+	}
+
+	BaseContainer::ContainerExpirationInfo &getContainerExpirationInfo() {
+		return containerExpirationInfo_;
+	}
+
 
 	void setAffinityStr(const char *affinity) {
 		affinityStr_ = affinity;
+	}
+	void setFirstSchema(uint32_t columnNum, uint32_t varColumnNum, uint32_t rowFixedColumnSize) {
+		oldColumnNum_ = columnNum;
+		oldVarColumnNum_ = varColumnNum;
+		oldRowFixedColumnSize_ = rowFixedColumnSize;
+	}
+	void getFirstSchema(uint32_t &columnNum, uint32_t &varColumnNum, uint32_t &rowFixedColumnSize) {
+		columnNum = oldColumnNum_;
+		varColumnNum = oldVarColumnNum_;
+		rowFixedColumnSize = oldRowFixedColumnSize_;
 	}
 
 protected:
 	void validateColumnSchema(util::ArrayByteInStream &in);
 	void validateContainerOption(util::ArrayByteInStream &in);
-
+	void validateColumnSchema(const BibInfo::Container &bibInfo);
+	void validateContainerOption(const BibInfo::Container &bibInfo);
+	void validateContainerExpiration(util::ArrayByteInStream &in);
+	void validateContainerExpiration(const BibInfo::Container &bibInfo);
 	util::StackAllocator &getAllocator() {
 		return alloc_;
 	}
@@ -101,8 +182,6 @@ protected:
 	void setRowKeyColumnId(ColumnId columnId);
 
 	void setColumnType(ColumnId columnId, ColumnType type);
-
-	void setIsArray(ColumnId columnId, bool isArray);
 
 	void setColumnName(ColumnId columnId, const void *data, uint32_t size);
 
@@ -114,15 +193,24 @@ protected:
 	const DataStoreValueLimitConfig &dsValueLimitConfig_;
 	ContainerType containerType_;
 	util::String affinityStr_;  
-private:
+	Timestamp containerExpirationStartTime_;  
+	BaseContainer::ContainerExpirationInfo containerExpirationInfo_;  
+
+	static const uint8_t COLUMN_FLAG_ARRAY = 0x01;
+	static const uint8_t COLUMN_FLAG_VIRTUAL = 0x02;
+	static const uint8_t COLUMN_FLAG_NOT_NULL = 0x04;
+
 	uint32_t columnNum_;
-	ColumnId keyColumnId_;
+	util::XArray<ColumnId> keyColumnIds_;
 	util::XArray<ColumnType> columnTypeList_;
-	util::XArray<bool> isArrayList_;
+	util::XArray<uint8_t> flagsList_;
 	util::Vector<util::String> columnNameList_;
 	util::Map<util::String, ColumnId, CompareStringI> columnNameMap_;
 	util::StackAllocator &alloc_;
 	ContainerAttribute containerAttribute_;
+	uint32_t oldColumnNum_;
+	uint32_t oldVarColumnNum_;
+	uint32_t oldRowFixedColumnSize_;
 };
 
 /*!
@@ -132,11 +220,13 @@ class MessageCollectionSchema : public MessageSchema {
 public:
 	MessageCollectionSchema(util::StackAllocator &alloc,
 		const DataStoreValueLimitConfig &dsValueLimitConfig,
-		const char *containerName, util::ArrayByteInStream &in);
+		const char *containerName, util::ArrayByteInStream &in, int32_t featureVersion);
+	MessageCollectionSchema(util::StackAllocator &alloc,
+		const DataStoreValueLimitConfig &dsValueLimitConfig,
+		const BibInfo::Container &bibInfo);
 
 	~MessageCollectionSchema() {}
-
-private:
+protected:
 };
 
 /*!
@@ -146,30 +236,72 @@ class MessageTimeSeriesSchema : public MessageSchema {
 public:
 	MessageTimeSeriesSchema(util::StackAllocator &alloc,
 		const DataStoreValueLimitConfig &dsValueLimitConfig,
-		const char *containerName, util::ArrayByteInStream &in);
+		const char *containerName, util::ArrayByteInStream &in, int32_t featureVersion);
+	MessageTimeSeriesSchema(util::StackAllocator &alloc,
+		const DataStoreValueLimitConfig &dsValueLimitConfig,
+		const BibInfo::Container &bibInfo);
 
 	~MessageTimeSeriesSchema() {}
 
-	TimeSeries::ExpirationInfo &getExpirationInfo() {
+	BaseContainer::ExpirationInfo &getExpirationInfo() {
 		return expirationInfo_;
 	}
 
+	uint32_t getCompressionInfoNum() const {
+		return compressionInfoNum_;
+	}
+
+	DurationInfo &getDurationInfo() {
+		return compressionWindowInfo_;
+	}
+
+	MessageCompressionInfo &getCompressionInfo(ColumnId columnId) {
+		return compressionInfoList_[columnId];
+	}
+
+	util::XArray<ColumnId> &getCompressionColumnIdList() {
+		return compressionColumnIdList_;
+	}
+
+	COMPRESSION_TYPE getCompressionType() const {
+		return compressionType_;
+	}
 	bool isExistTimeSeriesOption() const {
 		return isExistTimeSeriesOption_;
 	}
 
 
-	void setExpirationInfo(TimeSeries::ExpirationInfo &expirationInfo) {
+	void setExpirationInfo(const BaseContainer::ExpirationInfo &expirationInfo) {
 		expirationInfo_ = expirationInfo;
 	}
 
+	void setCompressionInfoNum(uint32_t num) {
+		compressionInfoNum_ = num;
+	}
+
+	void setDurationInfo(DurationInfo &durationInfo) {
+		compressionWindowInfo_ = durationInfo;
+	}
+
+	void addCompressionInfo(MessageCompressionInfo &compressionInfo);
+
+	void setCompressionType(COMPRESSION_TYPE compressionType) {
+		compressionType_ = compressionType;
+	}
+protected:
 private:
 	void validateRowKeySchema();
 	void validateOption(util::ArrayByteInStream &in);
+	void validateOption(const BibInfo::Container &bibInfo);
 
 private:
-	TimeSeries::ExpirationInfo expirationInfo_;  
+	BaseContainer::ExpirationInfo expirationInfo_;  
 	bool isExistTimeSeriesOption_;
+	uint32_t compressionInfoNum_;
+	DurationInfo compressionWindowInfo_;  
+	util::XArray<MessageCompressionInfo> compressionInfoList_;
+	util::XArray<ColumnId> compressionColumnIdList_;
+	COMPRESSION_TYPE compressionType_;
 };
 
 #endif

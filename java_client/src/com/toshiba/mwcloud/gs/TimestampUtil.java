@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -21,13 +21,25 @@ import java.util.Calendar;
 import java.util.Date;
 
 /**
+ * <div lang="ja">
+ * @deprecated {@link TimestampUtils}に置き換えられました。
+ * </div><div lang="en">
  * @deprecated
+ * </div>
  */
 @Deprecated
 public class TimestampUtil {
 
+	@Deprecated
+	public TimestampUtil() {
+	}
+
 	/**
+	 * <div lang="ja">
+	 * @deprecated {@link TimestampUtils#current()}に置き換えられました。
+	 * </div><div lang="en">
 	 * @deprecated
+	 * </div>
 	 */
 	@Deprecated
 	public static Date current() {
@@ -35,7 +47,11 @@ public class TimestampUtil {
 	}
 
 	/**
+	 * <div lang="ja">
+	 * @deprecated {@link TimestampUtils#currentCalendar()}に置き換えられました。
+	 * </div><div lang="en">
 	 * @deprecated
+	 * </div>
 	 */
 	@Deprecated
 	public static Calendar currentCalendar() {
@@ -43,7 +59,12 @@ public class TimestampUtil {
 	}
 
 	/**
+	 * <div lang="ja">
+	 * @deprecated {@link TimestampUtils#add(Date, int, TimeUnit)}
+	 * に置き換えられました。
+	 * </div><div lang="en">
 	 * @deprecated
+	 * </div>
 	 */
 	@Deprecated
 	public static Date add(Date timeStamp, int amount, TimeUnit timeUnit) {
@@ -51,7 +72,11 @@ public class TimestampUtil {
 	}
 
 	/**
+	 * <div lang="ja">
+	 * @deprecated {@link TimestampUtils#format(Date)}に置き換えられました。
+	 * </div><div lang="en">
 	 * @deprecated
+	 * </div>
 	 */
 	@Deprecated
 	public static String format(Date timeStamp) {
@@ -59,7 +84,11 @@ public class TimestampUtil {
 	}
 
 	/**
+	 * <div lang="ja">
+	 * @deprecated {@link TimestampUtils#parse(String)}に置き換えられました。
+	 * </div><div lang="en">
 	 * @deprecated
+	 * </div>
 	 */
 	@Deprecated
 	public static Date parse(String source) throws ParseException {
@@ -67,7 +96,11 @@ public class TimestampUtil {
 	}
 
 	/**
+	 * <div lang="ja">
+	 * @deprecated {@link TimestampUtils#getFormat()}に置き換えられました。
+	 * </div><div lang="en">
 	 * @deprecated
+	 * </div>
 	 */
 	@Deprecated
 	public static DateFormat getFormat() {

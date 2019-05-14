@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -30,7 +30,10 @@ import java.util.Set;
 import com.toshiba.mwcloud.gs.GSException;
 import com.toshiba.mwcloud.gs.GridStore;
 import com.toshiba.mwcloud.gs.GridStoreFactory;
+import com.toshiba.mwcloud.gs.common.Extensibles;
 import com.toshiba.mwcloud.gs.common.GSErrorCode;
+import com.toshiba.mwcloud.gs.common.GridStoreFactoryProvider;
+import com.toshiba.mwcloud.gs.common.GridStoreFactoryProvider.ChainProvidable;
 import com.toshiba.mwcloud.gs.common.LoggingUtils;
 import com.toshiba.mwcloud.gs.common.LoggingUtils.BaseGridStoreLogger;
 import com.toshiba.mwcloud.gs.common.PropertyUtils.WrappedProperties;
@@ -62,8 +65,22 @@ public class SubnetGridStoreFactory extends GridStoreFactory {
 		this(true);
 	}
 
+	public SubnetGridStoreFactory(Set<Class<?>> chainProviderClasses) {
+		this(!isConfigurableProviderChained(chainProviderClasses));
+	}
+
 	private SubnetGridStoreFactory(boolean configured) {
 		ConfigUtils.checkNewFactory(configured);
+	}
+
+	private static boolean isConfigurableProviderChained(
+			Set<Class<?>> chainProviderClasses) {
+		for (Class<?> c : chainProviderClasses) {
+			if (ConfigProvidable.class.isAssignableFrom(c)) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	@Override
@@ -90,7 +107,6 @@ public class SubnetGridStoreFactory extends GridStoreFactory {
 			channelMap.put(source.getKey(), channel);
 		}
 		else {
-			channel.apply(source);
 			channel.apply(channelConfig);
 		}
 
@@ -186,15 +202,68 @@ public class SubnetGridStoreFactory extends GridStoreFactory {
 		}
 	}
 
+	public static class ExtensibleFactory extends Extensibles.AsStoreFactory {
+
+		
+		
+		
+		
+		
+		private static final String ACCEPTABLE_VERSION = "4";
+
+		private final SubnetGridStoreFactory base;
+
+		public ExtensibleFactory(Set<Class<?>> chainProviderClasses) {
+			base = new SubnetGridStoreFactory(chainProviderClasses);
+		}
+
+		@Override
+		public Extensibles.AsStore getExtensibleStore(
+				Properties properties,
+				Properties extProperties) throws GSException {
+
+			final String version = extProperties.getProperty(VERSION_KEY, "");
+			if (!version.equals(ACCEPTABLE_VERSION)) {
+				throw new GSException(
+						GSErrorCode.ILLEGAL_CONFIG,
+						"Library version unmatched (required=" + version +
+						", acceptable=" + ACCEPTABLE_VERSION + ")");
+			}
+
+			return base.getGridStore(properties);
+		}
+
+		@Override
+		public GridStoreFactory getBaseFactory() {
+			return base;
+		}
+
+	}
+
+	public interface ConfigProvidable {
+	}
+
 	public static class ConfigurableFactory extends GridStoreFactory {
 
-		private final GridStoreFactory base =
-				new SubnetGridStoreFactory(false);
+		private final GridStoreFactory base;
 
 		private final Properties storeProperties = new Properties();
 
-		private final GSException lastException =
-				ConfigUtils.loadConfig(base, storeProperties);
+		private final GSException lastException;
+
+		public ConfigurableFactory(
+				Set<Class<?>> chainProviderClasses,
+				Set<Class<?>> visitedProviderClasses) {
+			final ChainProvidable provider =
+					GridStoreFactoryProvider.getProvider(
+							ChainProvidable.class,
+							ConfigurableFactory.class,
+							chainProviderClasses);
+			base = provider.getFactory(
+					chainProviderClasses, visitedProviderClasses);
+			lastException =
+					ConfigUtils.loadConfig(base, storeProperties);
+		}
 
 		@Override
 		public GridStore getGridStore(Properties properties)
@@ -251,7 +320,7 @@ public class SubnetGridStoreFactory extends GridStoreFactory {
 
 		static void checkProperties(WrappedProperties props, String type) {
 			{
-				final Set<String> names = props.getUnknowNames();
+				final Set<String> names = props.getUnknownNames();
 				if (!names.isEmpty()) {
 					LOGGER.warn("config.unknownProperty", type, names);
 				}

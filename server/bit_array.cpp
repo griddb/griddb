@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -154,11 +154,12 @@ void BitArray::copyAll(util::NormalXArray<uint8_t> &buf) const {
 
 void BitArray::putAll(const uint8_t *buf, uint64_t bitNum) {
 	try {
-		uint64_t unitNum = unitNth(bitNum) + 1;
-		uint64_t byteSize = unitNum * sizeof(uint64_t);
+		size_t byteSize = static_cast<size_t>((bitNum + CHAR_BIT - 1) / CHAR_BIT);
 		if (bitNum > 0) {
 			reserve(bitNum + 1);
-			memcpy(data_, buf, static_cast<size_t>(byteSize));
+			memset(data_, 0, static_cast<size_t>(
+					sizeof(uint64_t) * reservedUnitNum_));
+			memcpy(data_, buf, byteSize);
 		}
 		else {
 			byteSize = 0;

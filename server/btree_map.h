@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -26,9 +26,10 @@
 #include "data_type.h"
 #include "gs_error.h"
 #include "object_manager.h"
-#include "string_processor.h"  
+#include "value_processor.h"  
 #include "value.h"			   
 #include "value_operator.h"
+#include "container_key.h"
 #include <iomanip>
 #include <iostream>
 
@@ -58,6 +59,78 @@ struct StringKey {
 	}
 };
 
+class FullContainerKeyCursor : public BaseObject {
+public:
+	FullContainerKeyCursor(
+		TransactionContext &txn, ObjectManager &objectManager, OId oId) :
+		BaseObject(txn.getPartitionId(), objectManager, oId),
+		body_(NULL), bodySize_(0), key_(NULL) {
+		bodySize_ = ValueProcessor::decodeVarSize(getBaseAddr());
+		body_ = getBaseAddr() + ValueProcessor::getEncodedVarSize(bodySize_);  
+	}
+	FullContainerKeyCursor(
+		PartitionId pId, ObjectManager &objectManager) :
+		BaseObject(pId, objectManager), body_(NULL), bodySize_(0), key_(NULL) {};
+	FullContainerKeyCursor(FullContainerKey *key) : 
+		BaseObject(NULL), body_(NULL), bodySize_(0), key_(key) {
+		const void *srcBody;
+		size_t srcSize;
+		key->toBinary(srcBody, srcSize);
+		body_ = const_cast<uint8_t *>(static_cast<const uint8_t *>(srcBody));
+		bodySize_ = srcSize;
+	}
+	void initialize(TransactionContext &txn, const FullContainerKey &src, const AllocateStrategy &allocateStrategy) {
+//		util::StackAllocator &alloc = txn.getDefaultAllocator();
+		const void *srcBody;
+		size_t srcSize;
+		src.toBinary(srcBody, srcSize);
+		bodySize_ = srcSize;
+
+		uint32_t headerSize = ValueProcessor::getEncodedVarSize(bodySize_);  
+
+		OId oId;
+//		uint8_t *binary = 
+		allocate<uint8_t>(headerSize + bodySize_, allocateStrategy, 
+			oId, OBJECT_TYPE_VARIANT);
+
+		uint64_t encodedLength = ValueProcessor::encodeVarSize(bodySize_);
+		memcpy(getBaseAddr(), &encodedLength, headerSize);
+		body_ = getBaseAddr() + headerSize;
+		memcpy(body_, static_cast<const uint8_t *>(srcBody), bodySize_);
+	}
+	FullContainerKey getKey() const {
+		if (key_ == NULL) {
+			return FullContainerKey(KeyConstraint(), getBaseAddr());
+		} else {
+			return *key_;
+		}
+	}
+	const uint8_t *getKeyBody() const {
+		return body_;
+	}
+private:
+	uint8_t *body_;
+	uint64_t bodySize_;
+	FullContainerKey *key_;
+};
+
+struct FullContainerKeyObject {
+	FullContainerKeyObject(const FullContainerKeyCursor *ptr) : ptr_(reinterpret_cast<const uint8_t *>(ptr)) {}
+	FullContainerKeyObject() : ptr_(NULL) {}
+	const uint8_t *ptr_;
+};
+
+/*!
+	@brief For String-type Btree key
+*/
+struct FullContainerKeyAddr {
+	OId oId_;
+	friend std::ostream &operator<<(std::ostream &output, const FullContainerKeyAddr &kv) {
+		output << kv.oId_;
+		return output;
+	}
+};
+
 /*!
 	@brief a pair of (Key, Value) For Btree
 */
@@ -67,6 +140,7 @@ struct KeyValue {
 	V value_;
 
 	KeyValue() : key_(), value_() {}
+	KeyValue(const K &key, const V &val) : key_(key), value_(val) {}
 
 	friend std::ostream &operator<<(
 		std::ostream &output, const KeyValue<K, V> &kv) {
@@ -79,7 +153,7 @@ struct KeyValue {
 
 static inline int32_t keyCmp(TransactionContext &txn,
 	ObjectManager &objectManager, const KeyValue<StringObject, OId> &e1,
-	const KeyValue<StringKey, OId> &e2) {
+	const KeyValue<StringKey, OId> &e2, bool) {
 	StringCursor *obj1 = reinterpret_cast<StringCursor *>(e1.key_.ptr_);
 	StringCursor obj2(txn, objectManager, e2.key_.oId_);
 	return compareStringString(txn, obj1->str(), obj1->stringLength(),
@@ -88,25 +162,66 @@ static inline int32_t keyCmp(TransactionContext &txn,
 
 static inline int32_t keyCmp(TransactionContext &txn,
 	ObjectManager &objectManager, const KeyValue<StringKey, OId> &e1,
-	const KeyValue<StringObject, OId> &e2) {
+	const KeyValue<StringObject, OId> &e2, bool) {
 	StringCursor obj1(txn, objectManager, e1.key_.oId_);
 	StringCursor *obj2 = reinterpret_cast<StringCursor *>(e2.key_.ptr_);
 	return compareStringString(txn, obj1.str(), obj1.stringLength(),
 		obj2->str(), obj2->stringLength());
 }
 
-template <typename K, typename V>
 static inline int32_t keyCmp(TransactionContext &txn,
+	ObjectManager &objectManager, const KeyValue<FullContainerKeyObject, OId> &e1,
+	const KeyValue<FullContainerKeyAddr, OId> &e2, bool isCaseSensitive) {
+	const FullContainerKeyCursor *obj1 = reinterpret_cast<const FullContainerKeyCursor *>(e1.key_.ptr_);
+	FullContainerKeyCursor obj2(txn, objectManager, e2.key_.oId_);
+	return FullContainerKey::compareTo(txn, obj1->getKeyBody(), obj2.getKeyBody(), isCaseSensitive);
+}
+
+static inline int32_t keyCmp(TransactionContext &txn,
+	ObjectManager &objectManager, const KeyValue<FullContainerKeyAddr, OId> &e1,
+	const KeyValue<FullContainerKeyObject, OId> &e2, bool isCaseSensitive) {
+	FullContainerKeyCursor obj1(txn, objectManager, e1.key_.oId_);
+	const FullContainerKeyCursor *obj2 = reinterpret_cast<const FullContainerKeyCursor *>(e2.key_.ptr_);
+
+	return FullContainerKey::compareTo(txn, obj1.getKeyBody(), obj2->getKeyBody(), isCaseSensitive);
+}
+
+template <typename K, typename V>
+static inline int32_t keyCmp(TransactionContext &, ObjectManager &,
+	const KeyValue<K, V> &e1, const KeyValue<K, V> &e2, bool) {
+	UTIL_STATIC_ASSERT((!util::IsSame<K, StringKey>::VALUE));
+	UTIL_STATIC_ASSERT((!util::IsSame<K, StringObject>::VALUE));
+	UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyAddr>::VALUE));
+	UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyObject>::VALUE));
+	UTIL_STATIC_ASSERT((!util::IsSame<K, float>::VALUE));
+	UTIL_STATIC_ASSERT((!util::IsSame<K, double>::VALUE));
+	return e1.key_ < e2.key_ ? -1 : (e1.key_ == e2.key_ ? 0 : 1);
+}
+
+template <>
+inline int32_t keyCmp(TransactionContext &txn,
 	ObjectManager &objectManager, const KeyValue<StringKey, OId> &e1,
-	const KeyValue<StringKey, OId> &e2) {
+	const KeyValue<StringKey, OId> &e2, bool) {
 	StringCursor obj1(txn, objectManager, e1.key_.oId_);
 	StringCursor obj2(txn, objectManager, e2.key_.oId_);
 	return compareStringString(
 		txn, obj1.str(), obj1.stringLength(), obj2.str(), obj2.stringLength());
 }
 
-static inline int32_t keyCmp(TransactionContext &, ObjectManager &,
-	const KeyValue<double, OId> &e1, const KeyValue<double, OId> &e2) {
+template <>
+inline int32_t keyCmp(TransactionContext &txn,
+	ObjectManager &objectManager, const KeyValue<FullContainerKeyAddr, OId> &e1,
+	const KeyValue<FullContainerKeyAddr, OId> &e2, bool isCaseSensitive) {
+
+	FullContainerKeyCursor obj1(txn, objectManager, e1.key_.oId_);
+	FullContainerKeyCursor obj2(txn, objectManager, e2.key_.oId_);
+
+	return FullContainerKey::compareTo(txn, obj1.getKeyBody(), obj2.getKeyBody(), isCaseSensitive);
+}
+
+template <>
+inline int32_t keyCmp(TransactionContext &, ObjectManager &,
+	const KeyValue<double, OId> &e1, const KeyValue<double, OId> &e2, bool) {
 	if (util::isNaN(e1.key_)) {
 		if (util::isNaN(e2.key_)) {
 			return 0;
@@ -123,8 +238,9 @@ static inline int32_t keyCmp(TransactionContext &, ObjectManager &,
 	}
 }
 
-static inline int32_t keyCmp(TransactionContext &, ObjectManager &,
-	const KeyValue<float, OId> &e1, const KeyValue<float, OId> &e2) {
+template <>
+inline int32_t keyCmp(TransactionContext &, ObjectManager &,
+	const KeyValue<float, OId> &e1, const KeyValue<float, OId> &e2, bool) {
 	if (util::isNaN(e1.key_)) {
 		if (util::isNaN(e2.key_)) {
 			return 0;
@@ -141,15 +257,10 @@ static inline int32_t keyCmp(TransactionContext &, ObjectManager &,
 	}
 }
 
-template <typename K, typename V>
-static inline int32_t keyCmp(TransactionContext &, ObjectManager &,
-	const KeyValue<K, V> &e1, const KeyValue<K, V> &e2) {
-	return e1.key_ < e2.key_ ? -1 : (e1.key_ == e2.key_ ? 0 : 1);
-}
 
 static inline int32_t valueCmp(TransactionContext &txn,
 	ObjectManager &objectManager, const KeyValue<StringObject, OId> &e1,
-	const KeyValue<StringKey, OId> &e2) {
+	const KeyValue<StringKey, OId> &e2, bool) {
 	StringCursor *obj1 = reinterpret_cast<StringCursor *>(e1.key_.ptr_);
 	StringCursor obj2(txn, objectManager, e2.key_.oId_);
 	int32_t ret = compareStringString(txn, obj1->str(), obj1->stringLength(),
@@ -165,7 +276,72 @@ static inline int32_t valueCmp(TransactionContext &txn,
 
 static inline int32_t valueCmp(TransactionContext &txn,
 	ObjectManager &objectManager, const KeyValue<StringKey, OId> &e1,
-	const KeyValue<StringKey, OId> &e2) {
+	const KeyValue<StringObject, OId> &e2, bool) {
+	StringCursor obj1(txn, objectManager, e1.key_.oId_);
+	StringCursor *obj2 = reinterpret_cast<StringCursor *>(e2.key_.ptr_);
+	int32_t ret = compareStringString(txn, obj1.str(), obj1.stringLength(),
+		obj2->str(), obj2->stringLength());
+	if (ret != 0) {
+		return ret;
+	}
+	else {
+		return e1.value_ < e2.value_ ? -1 : (e1.value_ == e2.value_ ? 0 : 1);
+	}
+	return 0;
+}
+
+static inline int32_t valueCmp(TransactionContext &txn,
+	ObjectManager &objectManager, const KeyValue<FullContainerKeyObject, OId> &e1,
+	const KeyValue<FullContainerKeyAddr, OId> &e2, bool isCaseSensitive) {
+	const FullContainerKeyCursor *obj1 = reinterpret_cast<const FullContainerKeyCursor *>(e1.key_.ptr_);
+	FullContainerKeyCursor obj2(txn, objectManager, e2.key_.oId_);
+
+	int32_t ret = FullContainerKey::compareTo(txn, obj1->getKeyBody(), obj2.getKeyBody(), isCaseSensitive);
+	if (ret != 0) {
+		return ret;
+	}
+	else {
+		return e1.value_ < e2.value_ ? -1 : (e1.value_ == e2.value_ ? 0 : 1);
+	}
+	return 0;
+}
+static inline int32_t valueCmp(TransactionContext &txn,
+	ObjectManager &objectManager, const KeyValue<FullContainerKeyAddr, OId> &e1,
+	const KeyValue<FullContainerKeyObject, OId> &e2, bool isCaseSensitive) {
+
+	FullContainerKeyCursor obj1(txn, objectManager, e1.key_.oId_);
+	const FullContainerKeyCursor *obj2 = reinterpret_cast<const FullContainerKeyCursor *>(e2.key_.ptr_);
+
+	int32_t ret = FullContainerKey::compareTo(txn, obj1.getKeyBody(), obj2->getKeyBody(), isCaseSensitive);
+
+	if (ret != 0) {
+		return ret;
+	}
+	else {
+		return e1.value_ < e2.value_ ? -1 : (e1.value_ == e2.value_ ? 0 : 1);
+	}
+	return 0;
+}
+
+template <typename K, typename V>
+static inline int32_t valueCmp(TransactionContext &, ObjectManager &,
+	const KeyValue<K, V> &e1, const KeyValue<K, V> &e2, bool) {
+	UTIL_STATIC_ASSERT((!util::IsSame<K, StringKey>::VALUE));
+	UTIL_STATIC_ASSERT((!util::IsSame<K, StringObject>::VALUE));
+	UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyAddr>::VALUE));
+	UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyObject>::VALUE));
+	UTIL_STATIC_ASSERT((!util::IsSame<K, float>::VALUE));
+	UTIL_STATIC_ASSERT((!util::IsSame<K, double>::VALUE));
+	if (e1.key_ == e2.key_) {
+		return e1.value_ < e2.value_ ? -1 : (e1.value_ == e2.value_ ? 0 : 1);
+	}
+	return e1.key_ < e2.key_ ? -1 : 1;
+}
+
+template <>
+inline int32_t valueCmp(TransactionContext &txn,
+	ObjectManager &objectManager, const KeyValue<StringKey, OId> &e1,
+	const KeyValue<StringKey, OId> &e2, bool) {
 	StringCursor obj1(txn, objectManager, e1.key_.oId_);
 	StringCursor obj2(txn, objectManager, e2.key_.oId_);
 	int32_t ret = compareStringString(
@@ -179,59 +355,71 @@ static inline int32_t valueCmp(TransactionContext &txn,
 	return 0;
 }
 
-static inline int32_t valueCmp(TransactionContext &, ObjectManager &,
-	const KeyValue<double, OId> &e1, const KeyValue<double, OId> &e2) {
-	if (util::isNaN(e1.key_)) {
-		if (util::isNaN(e2.key_)) {
-			return e1.value_ < e2.value_ ? -1
-										 : (e1.value_ == e2.value_ ? 0 : 1);
-		}
-		else {
-			return 1;
-		}
-	}
-	else if (util::isNaN(e2.key_)) {
-		return -1;
+template <>
+inline int32_t valueCmp(TransactionContext &txn,
+	ObjectManager &objectManager, const KeyValue<FullContainerKeyAddr, OId> &e1,
+	const KeyValue<FullContainerKeyAddr, OId> &e2, bool isCaseSensitive) {
+
+	FullContainerKeyCursor obj1(txn, objectManager, e1.key_.oId_);
+	FullContainerKeyCursor obj2(txn, objectManager, e2.key_.oId_);
+
+	int32_t ret = FullContainerKey::compareTo(txn, obj1.getKeyBody(), obj2.getKeyBody(), isCaseSensitive);
+	if (ret != 0) {
+		return ret;
 	}
 	else {
-		if (e1.key_ == e2.key_) {
-			return e1.value_ < e2.value_ ? -1
-										 : (e1.value_ == e2.value_ ? 0 : 1);
-		}
-		return e1.key_ < e2.key_ ? -1 : 1;
-	}
-}
-
-static inline int32_t valueCmp(TransactionContext &, ObjectManager &,
-	const KeyValue<float, OId> &e1, const KeyValue<float, OId> &e2) {
-	if (util::isNaN(e1.key_)) {
-		if (util::isNaN(e2.key_)) {
-			return e1.value_ < e2.value_ ? -1
-										 : (e1.value_ == e2.value_ ? 0 : 1);
-		}
-		else {
-			return 1;
-		}
-	}
-	else if (util::isNaN(e2.key_)) {
-		return -1;
-	}
-	else {
-		if (e1.key_ == e2.key_) {
-			return e1.value_ < e2.value_ ? -1
-										 : (e1.value_ == e2.value_ ? 0 : 1);
-		}
-		return e1.key_ < e2.key_ ? -1 : 1;
-	}
-}
-
-template <typename K, typename V>
-static inline int32_t valueCmp(TransactionContext &, ObjectManager &,
-	const KeyValue<K, V> &e1, const KeyValue<K, V> &e2) {
-	if (e1.key_ == e2.key_) {
 		return e1.value_ < e2.value_ ? -1 : (e1.value_ == e2.value_ ? 0 : 1);
 	}
-	return e1.key_ < e2.key_ ? -1 : 1;
+	return 0;
+}
+
+
+template <>
+inline int32_t valueCmp(TransactionContext &, ObjectManager &,
+	const KeyValue<double, OId> &e1, const KeyValue<double, OId> &e2, bool) {
+	if (util::isNaN(e1.key_)) {
+		if (util::isNaN(e2.key_)) {
+			return e1.value_ < e2.value_ ? -1
+										 : (e1.value_ == e2.value_ ? 0 : 1);
+		}
+		else {
+			return 1;
+		}
+	}
+	else if (util::isNaN(e2.key_)) {
+		return -1;
+	}
+	else {
+		if (e1.key_ == e2.key_) {
+			return e1.value_ < e2.value_ ? -1
+										 : (e1.value_ == e2.value_ ? 0 : 1);
+		}
+		return e1.key_ < e2.key_ ? -1 : 1;
+	}
+}
+
+template <>
+inline int32_t valueCmp(TransactionContext &, ObjectManager &,
+	const KeyValue<float, OId> &e1, const KeyValue<float, OId> &e2, bool) {
+	if (util::isNaN(e1.key_)) {
+		if (util::isNaN(e2.key_)) {
+			return e1.value_ < e2.value_ ? -1
+										 : (e1.value_ == e2.value_ ? 0 : 1);
+		}
+		else {
+			return 1;
+		}
+	}
+	else if (util::isNaN(e2.key_)) {
+		return -1;
+	}
+	else {
+		if (e1.key_ == e2.key_) {
+			return e1.value_ < e2.value_ ? -1
+										 : (e1.value_ == e2.value_ ? 0 : 1);
+		}
+		return e1.key_ < e2.key_ ? -1 : 1;
+	}
 }
 
 /*!
@@ -250,13 +438,13 @@ public:
 
 	BtreeMap(TransactionContext &txn, ObjectManager &objectManager,
 		const AllocateStrategy &strategy, BaseContainer *container = NULL)
-		: BaseIndex(txn, objectManager, strategy, container),
+		: BaseIndex(txn, objectManager, strategy, container, MAP_TYPE_BTREE),
 		  nodeMaxSize_(NORMAL_MAX_ITEM_SIZE),
 		  nodeMinSize_(NORMAL_MIN_ITEM_SIZE),
 		  nodeBlockType_(DEFAULT_NODE_BLOCK_TYPE) {}
 	BtreeMap(TransactionContext &txn, ObjectManager &objectManager, OId oId,
 		const AllocateStrategy &strategy, BaseContainer *container = NULL)
-		: BaseIndex(txn, objectManager, oId, strategy, container) {
+		: BaseIndex(txn, objectManager, oId, strategy, container, MAP_TYPE_BTREE) {
 		BNode<char, char> rootNode(this, allocateStrategy_);
 		nodeBlockType_ = rootNode.getNodeBlockType();
 		nodeMaxSize_ = NORMAL_MAX_ITEM_SIZE;
@@ -266,6 +454,8 @@ public:
 
 	static const int32_t ROOT_UPDATE = 0x80000000;  
 	static const int32_t TAIL_UPDATE = 0x40000000;  
+	static const ResultSize MINIMUM_SUSPEND_SIZE =
+		2;  
 
 	/*!
 		@brief Represents the type(s) of dump
@@ -292,6 +482,20 @@ public:
 		ColumnType keyType_;  
 		bool isEqual_;		  
 
+		bool isSuspended_;		   
+		ResultSize suspendLimit_;  
+		uint8_t *suspendKey_;  
+		uint32_t suspendKeySize_;  
+		uint8_t *suspendValue_;  
+		uint32_t suspendValueSize_;  
+		const void *startValue_;  
+		uint32_t startValueSize_;  
+		const void *endValue_;  
+		uint32_t endValueSize_;
+		bool isNullSuspended_;
+		bool isCaseSensitive_;
+		RowId suspendRowId_;
+
 		SearchContext()
 			: BaseIndex::SearchContext(),
 			  startKey_(NULL),
@@ -301,7 +505,20 @@ public:
 			  endKeySize_(0),
 			  isEndKeyIncluded_(true),
 			  keyType_(COLUMN_TYPE_WITH_BEGIN),
-			  isEqual_(false)
+			  isEqual_(false),
+			  isSuspended_(false),
+			  suspendLimit_(MAX_RESULT_SIZE),
+			  suspendKey_(NULL),
+			  suspendKeySize_(0),
+			  suspendValue_(NULL),
+			  suspendValueSize_(0),
+			  startValue_(NULL),
+			  startValueSize_(0),
+			  endValue_(NULL),
+			  endValueSize_(0),
+			  isNullSuspended_(false),
+			  isCaseSensitive_(true),
+			  suspendRowId_(UNDEF_ROWID)
 		{
 		}
 
@@ -319,7 +536,20 @@ public:
 			  endKeySize_(endKeySize),
 			  isEndKeyIncluded_(isEndKeyIncluded),
 			  keyType_(keyType),
-			  isEqual_(false)
+			  isEqual_(false),
+			  isSuspended_(false),
+			  suspendLimit_(MAX_RESULT_SIZE),
+			  suspendKey_(NULL),
+			  suspendKeySize_(0),
+			  suspendValue_(NULL),
+			  suspendValueSize_(0),
+			  startValue_(NULL),
+			  startValueSize_(0),
+			  endValue_(NULL),
+			  endValueSize_(0),
+			  isNullSuspended_(false),
+			  isCaseSensitive_(true),
+			  suspendRowId_(UNDEF_ROWID)
 		{
 		}
 		SearchContext(ColumnId columnId, const void *key, uint32_t keySize,
@@ -334,8 +564,53 @@ public:
 			  endKeySize_(keySize),
 			  isEndKeyIncluded_(true),
 			  keyType_(keyType),
-			  isEqual_(true)
+			  isEqual_(true),
+			  isSuspended_(false),
+			  suspendLimit_(MAX_RESULT_SIZE),
+			  suspendKey_(NULL),
+			  suspendKeySize_(0),
+			  suspendValue_(NULL),
+			  suspendValueSize_(0),
+			  startValue_(NULL),
+			  startValueSize_(0),
+			  endValue_(NULL),
+			  endValueSize_(0),
+			  isNullSuspended_(false),
+			  isCaseSensitive_(true),
+			  suspendRowId_(UNDEF_ROWID)
 		{
+		}
+
+		void setCaseSensitive(bool isCaseSensitive) {
+			isCaseSensitive_ = isCaseSensitive;
+		}
+
+		void setSuspendPoint(
+			TransactionContext &txn, const void *suspendKey, uint32_t keySize, OId suspendValue) {
+			suspendKey_ = ALLOC_NEW(txn.getDefaultAllocator()) uint8_t[keySize];
+			memcpy(suspendKey_, suspendKey, keySize);
+			suspendKeySize_ = keySize;
+
+			uint32_t valueSize = sizeof(OId);
+			suspendValue_ = ALLOC_NEW(txn.getDefaultAllocator()) uint8_t[valueSize];
+			memcpy(suspendValue_, &suspendValue, valueSize);
+			suspendValueSize_ = valueSize;
+		}
+		template <typename K, typename V>
+		void setSuspendPoint(
+			TransactionContext &txn, ObjectManager &, const K &suspendKey, const V &suspendValue) {
+			 UTIL_STATIC_ASSERT((!util::IsSame<K, StringKey>::VALUE));
+			 UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyAddr>::VALUE));
+			uint32_t keySize = sizeof(K);
+			suspendKey_ =
+				ALLOC_NEW(txn.getDefaultAllocator()) uint8_t[keySize];
+			memcpy(suspendKey_, &suspendKey, keySize);
+			suspendKeySize_ = keySize;
+
+			uint32_t valueSize = sizeof(V);
+			suspendValue_ = ALLOC_NEW(txn.getDefaultAllocator()) uint8_t[valueSize];
+			memcpy(suspendValue_, &suspendValue, valueSize);
+			suspendValueSize_ = valueSize;
 		}
 	};
 
@@ -356,21 +631,18 @@ public:
 	template <typename K, typename V>
 	int32_t initialize(TransactionContext &txn, ColumnType columnType,
 		bool isUnique, BtreeMapType btreeMapType);
-	int32_t finalize(TransactionContext &txn);
-	int32_t clear(TransactionContext &txn) {
-		return finalize(txn);
-	}
+	bool finalize(TransactionContext &txn);
 
 	int32_t insert(TransactionContext &txn, const void *key, OId oId);
 	int32_t remove(TransactionContext &txn, const void *key, OId oId);
 	int32_t update(
 		TransactionContext &txn, const void *key, OId oId, OId newOId);
 	template <typename K, typename V>
-	int32_t insert(TransactionContext &txn, K &key, V &value);
+	int32_t insert(TransactionContext &txn, K &key, V &value, bool isCaseSensitive);
 	template <typename K, typename V>
-	int32_t remove(TransactionContext &txn, K &key, V &value);
+	int32_t remove(TransactionContext &txn, K &key, V &value, bool isCaseSensitive );
 	template <typename K, typename V>
-	int32_t update(TransactionContext &txn, K &key, V &oldValue, V &newValue);
+	int32_t update(TransactionContext &txn, K &key, V &oldValue, V &newValue, bool isCaseSensitive);
 
 	int32_t search(TransactionContext &txn, const void *key, uint32_t keySize,
 		OId &oId);  
@@ -379,8 +651,22 @@ public:
 		util::XArray<OId> &idList, OutputOrder outputOrder = ORDER_UNDEFINED);
 
 	template <typename K, typename V, typename R>
+	int32_t search(TransactionContext &txn, K &key, R &retVal, bool isCaseSensitive) {
+		UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyAddr>::VALUE));
+		UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyCursor>::VALUE));
+		UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyObject>::VALUE));
+		if (isEmpty()) {
+			return GS_FAIL;
+		}
+		return find<K, K, V>(txn, key, retVal, isCaseSensitive);	
+	}
+
+	template <typename K, typename V, typename R>
 	int32_t search(TransactionContext &txn, SearchContext &sc,
 		util::XArray<R> &idList, OutputOrder outputOrder = ORDER_UNDEFINED) {
+		UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyAddr>::VALUE));
+		UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyCursor>::VALUE));
+		UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyObject>::VALUE));
 		if (isEmpty()) {
 			return GS_FAIL;
 		}
@@ -393,10 +679,68 @@ public:
 		util::XArray<OId> &idList, BtreeCursor &cursor);
 	template <typename K, typename V>
 	int32_t getAll(TransactionContext &txn, ResultSize limit,
-		util::XArray<std::pair<K, V> > &keyValueList);
+		util::XArray<std::pair<K, V> > &keyValueList) {
+		if (isEmpty()) {
+			return GS_SUCCESS;
+		}
+		BNode<K, V> node(txn, *getObjectManager(), allocateStrategy_);
+		getHeadNode<K, V>(txn, node);
+
+		int32_t loc = 0;
+		while (true) {
+			keyValueList.push_back(std::make_pair(
+				node.getKeyValue(loc).key_, node.getKeyValue(loc).value_));
+			if (!nextPos(txn, node, loc) || keyValueList.size() >= limit) {
+				break;
+			}
+		}
+		return GS_SUCCESS;
+	}
+
 	template <typename K, typename V>
 	int32_t getAll(TransactionContext &txn, ResultSize limit,
-		util::XArray<std::pair<K, V> > &keyValueList, BtreeCursor &cursor);
+		util::XArray<std::pair<K, V> > &idList, BtreeMap::BtreeCursor &cursor) {
+		if (isEmpty()) {
+			return GS_SUCCESS;
+		}
+		if (limit == 0) {
+			return GS_SUCCESS;
+		}
+
+		BNode<K, V> node(txn, *getObjectManager(), allocateStrategy_);
+		int32_t loc = 0;
+		if (cursor.nodeId_ == UNDEF_OID) {
+			getHeadNode<K, V>(txn, node);
+			loc = 0;
+		}
+		else {
+			node.load(cursor.nodeId_);
+			loc = cursor.loc_;
+		}
+		bool hasNext = false;
+		while (true) {
+			idList.push_back(std::make_pair(
+				node.getKeyValue(loc).key_, node.getKeyValue(loc).value_));
+			hasNext = nextPos(txn, node, loc);
+			if (!hasNext || idList.size() >= limit) {
+				break;
+			}
+		}
+		if (hasNext) {
+			cursor.nodeId_ = node.getSelfOId();
+			cursor.loc_ = loc;
+			return GS_FAIL;
+		}
+		else {
+			return GS_SUCCESS;
+		}
+	}
+
+	template <typename V>
+	V getMaxValue();
+	template <typename V>
+	V getMinValue();
+
 
 	inline OId getTailNodeOId() const {
 		BNode<char, char> rootNode(this, allocateStrategy_);
@@ -555,20 +899,21 @@ private:
 			TransactionContext &txn, const KeyValue<K, V> &val,
 			int32_t (*cmp)(TransactionContext &txn,
 				ObjectManager &objectManager, const KeyValue<K, V> &e1,
-				const KeyValue<K, V> &e2)) {
+				const KeyValue<K, V> &e2, bool isCaseSensitive),
+				bool isCaseSensitive) {
 			BNodeImage<K, V> *image = getImage();
 			if (image->header_.size_ == 0) {
 				image->keyValues_[0] = val;
 			}
 			else if (cmp(txn, *getObjectManager(), val,
-						 getKeyValue(numkeyValues() - 1)) > 0) {
+						 getKeyValue(numkeyValues() - 1), isCaseSensitive) > 0) {
 				image->keyValues_[numkeyValues()] = val;
 			}
 			else {
 				int32_t i, j;
 				for (i = 0; i < image->header_.size_; ++i) {
 					if (cmp(txn, *getObjectManager(), val,
-							image->keyValues_[i]) < 0) {
+							image->keyValues_[i], isCaseSensitive) < 0) {
 						for (j = image->header_.size_; j > i; --j) {
 							image->keyValues_[j] = image->keyValues_[j - 1];
 						}
@@ -638,39 +983,64 @@ private:
 			image->keyValues_[m].value_ = e.value_;
 			image->header_.size_++;
 		}
+
+		inline void allocateVal(
+			TransactionContext &txn, int32_t m, KeyValue<FullContainerKeyObject, OId> e) {
+			BNodeImage<K, V> *image = getImage();
+			const FullContainerKeyCursor *keyCursor =
+				reinterpret_cast<const FullContainerKeyCursor *>(e.key_.ptr_);
+			image->keyValues_[m].key_.oId_ = keyCursor->getBaseOId();
+			image->keyValues_[m].value_ = e.value_;
+			image->header_.size_++;
+		}
+
 		inline void allocateVal(
 			TransactionContext &txn, int32_t m, KeyValue<K, V> e) {
+			UTIL_STATIC_ASSERT((!util::IsSame<K, StringObject>::VALUE));
+			UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyObject>::VALUE));
 			getImage()->keyValues_[m] = e;
 			getImage()->header_.size_++;
 		}
-		inline void freeVal(TransactionContext &, int32_t m) {}
+		inline void freeVal(TransactionContext &, int32_t m) {
+			UTIL_STATIC_ASSERT((!util::IsSame<K, StringKey>::VALUE));
+			UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyAddr>::VALUE));
+		}
 
-		inline void finalize(TransactionContext &txn) {
+		inline bool finalize(TransactionContext &txn, ResultSize &removeNum) {
 			BNodeImage<K, V> *image = getImage();
-			for (int32_t i = 0; i < image->header_.size_; ++i) {
-				freeVal(txn, i);
-			}
-			if (!isLeaf()) {
-				util::XArray<OId> childOIdList(txn.getDefaultAllocator());
-				util::XArray<OId>::iterator itr;
-				for (int32_t i = 0; i < image->header_.size_ + 1; ++i) {
-					OId childOId = getChild(txn, i);
-					childOIdList.push_back(childOId);
-				}
-				getObjectManager()->free(
-					txn.getPartitionId(), image->header_.children_);
-
-				for (itr = childOIdList.begin(); itr != childOIdList.end();
-					 itr++) {
-					if (*itr != UNDEF_OID) {
+			int32_t valueNum = image->header_.size_;
+//			bool isSuspend = false;
+			while (valueNum >= 0) {
+				if (!isLeaf()) {
+					OId childOId = getChild(txn, valueNum);
+					if (childOId != UNDEF_OID) {
 						BNode<K, V> dirtyChildNode(
 							txn, *getObjectManager(), allocateStrategy_);
-						dirtyChildNode.load(*itr, true);
-						dirtyChildNode.finalize(txn);
+						dirtyChildNode.load(childOId, true);
+						dirtyChildNode.finalize(txn, removeNum);
+						if (removeNum > 0) {
+							removeNum--;
+						} else {
+							break;
+						}
 					}
 				}
+				if (valueNum > 0) {
+					freeVal(txn, valueNum - 1);
+					removeVal(valueNum - 1);
+				} else {
+					image->header_.size_ = -1;
+				}
+				valueNum--;
 			}
-			BaseObject::finalize();
+			if (removeNum > 0) {
+				if (!isLeaf()) {
+					getObjectManager()->free(
+						txn.getPartitionId(), image->header_.children_);
+				}
+				BaseObject::finalize();
+			}
+			return removeNum > 0;
 		}
 
 		inline void remove(TransactionContext &txn) {
@@ -752,7 +1122,6 @@ private:
 		}
 	};
 
-
 	template <typename K, typename V>
 	BNode<K, V> *getRootNodeAddr() {
 		return reinterpret_cast<BNode<K, V> *>(this);
@@ -762,7 +1131,6 @@ private:
 	const BNode<K, V> *getRootNodeAddr() const {
 		return reinterpret_cast<const BNode<K, V> *>(this);
 	}
-
 
 	template <typename K, typename V>
 	static int32_t getInitialNodeSize() {
@@ -814,7 +1182,8 @@ private:
 		BNode<K, V> &node, int32_t &loc,
 		int32_t (*keyCmpLeft)(TransactionContext &txn,
 					  ObjectManager &objectManager, const KeyValue<P, V> &e1,
-					  const KeyValue<K, V> &e2)) {
+					  const KeyValue<K, V> &e2, bool isCaseSensitive),
+		bool isCaseSensitive) {
 		if (isEmpty()) {
 			node.reset();  
 			loc = 0;
@@ -829,7 +1198,7 @@ private:
 				OId nodeId;
 				size = currentNode->numkeyValues();
 				if (keyCmpLeft(txn, *getObjectManager(), val,
-						currentNode->getKeyValue(size - 1)) > 0) {
+						currentNode->getKeyValue(size - 1), isCaseSensitive) > 0) {
 					if (currentNode->isLeaf()) {
 						loc = size;
 						return false;
@@ -844,7 +1213,7 @@ private:
 						int32_t i = (l + r) >> 1;
 						int32_t currentCmpResult =
 							keyCmpLeft(txn, *getObjectManager(), val,
-								currentNode->getKeyValue(i));
+								currentNode->getKeyValue(i), isCaseSensitive);
 						if (currentCmpResult > 0) {
 							l = i + 1;
 						}
@@ -858,7 +1227,7 @@ private:
 					}
 					assert(r == l);
 					int32_t cmpResult = keyCmpLeft(txn, *getObjectManager(),
-						val, currentNode->getKeyValue(l));
+						val, currentNode->getKeyValue(l), isCaseSensitive);
 					if (cmpResult < 0) {
 						if (currentNode->isLeaf()) {
 							loc = l;
@@ -1054,118 +1423,127 @@ private:
 		TransactionContext &txn, P key, V value,
 		int32_t (*cmpInput)(TransactionContext &txn,
 			ObjectManager &objectManager, const KeyValue<P, V> &e1,
-			const KeyValue<K, V> &e2),
+			const KeyValue<K, V> &e2, bool isCaseSensitive),
 		int32_t (*cmpInternal)(TransactionContext &txn,
 			ObjectManager &objectManager, const KeyValue<K, V> &e1,
-			const KeyValue<K, V> &e2));
+			const KeyValue<K, V> &e2, bool isCaseSensitive),
+		bool isCaseSensitive);
 	template <typename P, typename K, typename V>
 	bool removeInternal(
 		TransactionContext &txn, P key, V value,
 		int32_t (*cmpInput)(TransactionContext &txn,
 			ObjectManager &objectManager, const KeyValue<P, V> &e1,
-			const KeyValue<K, V> &e2),
+			const KeyValue<K, V> &e2, bool isCaseSensitive),
 		int32_t (*cmpInternal)(TransactionContext &txn,
 			ObjectManager &objectManager, const KeyValue<K, V> &e1,
-			const KeyValue<K, V> &e2));
+			const KeyValue<K, V> &e2, bool isCaseSensitive),
+		bool isCaseSensitive);
 	template <typename P, typename K, typename V>
 	bool updateInternal(
 		TransactionContext &txn, P key, V value, V newValue,
 		int32_t (*cmpInput)(TransactionContext &txn,
 			ObjectManager &objectManager, const KeyValue<P, V> &e1,
-			const KeyValue<K, V> &e2));
+			const KeyValue<K, V> &e2, bool isCaseSensitive),
+		bool isCaseSensitive);
 
 	template <typename P, typename K, typename V, typename R>
-	bool findLess(TransactionContext &txn, P key, int32_t isIncluded,
+	bool findLess(TransactionContext &txn, KeyValue<P, V> &keyValue, int32_t isIncluded,
 		ResultSize limit,
-		int32_t (*keyCmpRight)(TransactionContext &txn,
+		int32_t (*cmpFuncRight)(TransactionContext &txn,
 					  ObjectManager &objectManager, const KeyValue<K, V> &e1,
-					  const KeyValue<P, V> &e2),
-		util::XArray<R> &result);
+					  const KeyValue<P, V> &e2, bool isCaseSensitive),
+		util::XArray<R> &result, ResultSize suspendLimit, KeyValue<K, V> &suspendKeyValue,
+		bool isCaseSensitive);
 	template <typename P, typename K, typename V, typename R>
 	bool findLessByDescending(
-		TransactionContext &txn, P key, int32_t isIncluded, ResultSize limit,
-		int32_t (*keyCmpLeft)(TransactionContext &txn,
+		TransactionContext &txn, KeyValue<P, V> &keyValue, int32_t isIncluded, ResultSize limit,
+		int32_t (*cmpFuncLeft)(TransactionContext &txn,
 			ObjectManager &objectManager, const KeyValue<P, V> &e1,
-			const KeyValue<K, V> &e2),
-		int32_t (*keyCmpRight)(TransactionContext &txn,
+			const KeyValue<K, V> &e2, bool isCaseSensitive),
+		int32_t (*cmpFuncRight)(TransactionContext &txn,
 			ObjectManager &objectManager, const KeyValue<K, V> &e1,
-			const KeyValue<P, V> &e2),
-		util::XArray<R> &result);
+			const KeyValue<P, V> &e2, bool isCaseSensitive),
+		util::XArray<R> &result, ResultSize suspendLimit, KeyValue<K, V> &suspendKeyValue,
+		bool isCaseSensitive);
 	template <typename P, typename K, typename V, typename R>
-	bool findGreater(TransactionContext &txn, P key, int32_t isIncluded,
+	bool findGreater(TransactionContext &txn, KeyValue<P, V> &keyValue, int32_t isIncluded,
 		ResultSize limit,
-		int32_t (*keyCmpLeft)(TransactionContext &txn,
+		int32_t (*cmpFuncLeft)(TransactionContext &txn,
 						 ObjectManager &objectManager, const KeyValue<P, V> &e1,
-						 const KeyValue<K, V> &e2),
-		util::XArray<R> &result);
+						 const KeyValue<K, V> &e2, bool isCaseSensitive),
+		util::XArray<R> &result, ResultSize suspendLimit, KeyValue<K, V> &suspendKeyValue,
+		bool isCaseSensitive);
 	template <typename P, typename K, typename V, typename R>
 	bool findGreaterByDescending(
-		TransactionContext &txn, P key, int32_t isIncluded, ResultSize limit,
-		int32_t (*keyCmpLeft)(TransactionContext &txn,
+		TransactionContext &txn, KeyValue<P, V> &keyValue, int32_t isIncluded, ResultSize limit,
+		int32_t (*cmpFuncLeft)(TransactionContext &txn,
 			ObjectManager &objectManager, const KeyValue<P, V> &e1,
-			const KeyValue<K, V> &e2),
-		util::XArray<R> &result);
+			const KeyValue<K, V> &e2, bool isCaseSensitive),
+		util::XArray<R> &result, ResultSize suspendLimit, KeyValue<K, V> &suspendKeyValue,
+		bool isCaseSensitive);
 	template <typename P, typename K, typename V, typename R>
-	bool findRange(TransactionContext &txn, P startKey, int32_t isStartIncluded,
-		P endKey, int32_t isEndIncluded, ResultSize limit,
-		int32_t (*keyCmpLeft)(TransactionContext &txn,
+	bool findRange(TransactionContext &txn, KeyValue<P, V> &startKeyValue, int32_t isStartIncluded,
+		KeyValue<P, V> &endKeyValue, int32_t isEndIncluded, ResultSize limit,
+		int32_t (*cmpFuncLeft)(TransactionContext &txn,
 					   ObjectManager &objectManager, const KeyValue<P, V> &e1,
-					   const KeyValue<K, V> &e2),
-		int32_t (*keyCmpRight)(TransactionContext &txn,
+					   const KeyValue<K, V> &e2, bool isCaseSensitive),
+		int32_t (*cmpFuncRight)(TransactionContext &txn,
 					   ObjectManager &objectManager, const KeyValue<K, V> &e1,
-					   const KeyValue<P, V> &e2),
-		util::XArray<R> &result);
+					   const KeyValue<P, V> &e2, bool isCaseSensitive),
+		util::XArray<R> &result, ResultSize suspendLimit, KeyValue<K, V> &suspendKeyValue,
+		bool isCaseSensitive);
 	template <typename P, typename K, typename V, typename R>
 	bool findRangeByDescending(
-		TransactionContext &txn, P startKey, int32_t isStartIncluded, P endKey,
+		TransactionContext &txn, KeyValue<P, V> &startKeyValue, int32_t isStartIncluded, KeyValue<P, V> &endKeyValue,
 		int32_t isEndIncluded, ResultSize limit,
-		int32_t (*keyCmpLeft)(TransactionContext &txn,
+		int32_t (*cmpFuncLeft)(TransactionContext &txn,
 			ObjectManager &objectManager, const KeyValue<P, V> &e1,
-			const KeyValue<K, V> &e2),
-		int32_t (*keyCmpRight)(TransactionContext &txn,
+			const KeyValue<K, V> &e2, bool isCaseSensitive),
+		int32_t (*cmpFuncRight)(TransactionContext &txn,
 			ObjectManager &objectManager, const KeyValue<K, V> &e1,
-			const KeyValue<P, V> &e2),
-		util::XArray<R> &result);
+			const KeyValue<P, V> &e2, bool isCaseSensitive),
+		util::XArray<R> &result, ResultSize suspendLimit, KeyValue<K, V> &suspendKeyValue,
+		bool isCaseSensitive);
 
 	template <typename K, typename V>
 	void split(TransactionContext &txn, BNode<K, V> &node,
 		int32_t (*cmpInternal)(TransactionContext &txn,
 				   ObjectManager &objectManager, const KeyValue<K, V> &e1,
-				   const KeyValue<K, V> &e2));
+				   const KeyValue<K, V> &e2, bool isCaseSensitive), bool isCaseSensitive);
 	template <typename K, typename V>
 	void merge(TransactionContext &txn, BNode<K, V> &node,
 		int32_t (*cmpInternal)(TransactionContext &txn,
 				   ObjectManager &objectManager, const KeyValue<K, V> &e1,
-				   const KeyValue<K, V> &e2));
+				   const KeyValue<K, V> &e2, bool isCaseSensitive), bool isCaseSensitive);
 
 private:
 	template <typename P, typename K, typename V>
-	int32_t insertInternal(TransactionContext &txn, P key, V value) {
+	int32_t insertInternal(TransactionContext &txn, P key, V value, bool isCaseSensitive) {
 		bool ret;
-		ret = insertInternal<P, K, V>(txn, key, value, &valueCmp, &valueCmp);
+		ret = insertInternal<P, K, V>(txn, key, value, &valueCmp, &valueCmp, isCaseSensitive);
 		return (ret) ? GS_SUCCESS : GS_FAIL;
 	}
 
 	template <typename P, typename K, typename V>
-	int32_t removeInternal(TransactionContext &txn, P key, V value) {
+	int32_t removeInternal(TransactionContext &txn, P key, V value, bool isCaseSensitive) {
 		bool ret;
-		ret = removeInternal<P, K, V>(txn, key, value, &valueCmp, &valueCmp);
+		ret = removeInternal<P, K, V>(txn, key, value, &valueCmp, &valueCmp, isCaseSensitive);
 		return (ret) ? GS_SUCCESS : GS_FAIL;
 	}
 
 	template <typename P, typename K, typename V>
 	int32_t updateInternal(
-		TransactionContext &txn, P key, V value, V newValue) {
+		TransactionContext &txn, P key, V value, V newValue, bool isCaseSensitive) {
 		bool ret;
 		if (isUnique()) {
-			ret = updateInternal<P, K, V>(txn, key, value, newValue, &valueCmp);
+			ret = updateInternal<P, K, V>(txn, key, value, newValue, &valueCmp, isCaseSensitive);
 		}
 		else {
 			ret =
-				removeInternal<P, K, V>(txn, key, value, &valueCmp, &valueCmp);
+				removeInternal<P, K, V>(txn, key, value, &valueCmp, &valueCmp, isCaseSensitive);
 			if (ret) {
 				ret = insertInternal<P, K, V>(
-					txn, key, newValue, &valueCmp, &valueCmp);
+					txn, key, newValue, &valueCmp, &valueCmp, isCaseSensitive);
 			}
 		}
 		return (ret) ? GS_SUCCESS : GS_FAIL;
@@ -1174,30 +1552,36 @@ private:
 	}
 
 	template <typename K, typename V>
-	void finalizeInternal(TransactionContext &txn) {
+	bool finalizeInternal(TransactionContext &txn) {
+		uint64_t removeNum = NUM_PER_EXEC;
 		OId rootOId = getRootOId();
 		if (rootOId != UNDEF_OID) {
 			BNode<K, V> dirtyRootNode(this, allocateStrategy_);
-			dirtyRootNode.finalize(txn);
-			BaseObject::finalize();
+			dirtyRootNode.finalize(txn, removeNum);
+			if (removeNum > 0) {
+				BaseObject::finalize();
+			}
 		}
+		return removeNum > 0;
 	}
 	template <typename P, typename K, typename V>
-	int32_t find(TransactionContext &txn, P key, V &value) {
+	int32_t find(TransactionContext &txn, P key, V &value, bool isCaseSensitive) {
 		KeyValue<K, V> keyValue;
-		int32_t ret = find<P, K, V>(txn, key, keyValue);
-		value = keyValue.value_;
+		int32_t ret = find<P, K, V>(txn, key, keyValue, isCaseSensitive);
+		if (ret == GS_SUCCESS) {
+			value = keyValue.value_;
+		}
 		return ret;
 	}
 
 	template <typename P, typename K, typename V>
-	int32_t find(TransactionContext &txn, P key, KeyValue<K, V> &keyValue) {
+	int32_t find(TransactionContext &txn, P key, KeyValue<K, V> &keyValue, bool isCaseSensitive) {
 		KeyValue<P, V> val;
 		val.key_ = key;
 		val.value_ = V();
 		BNode<K, V> node(txn, *getObjectManager(), allocateStrategy_);
 		int32_t loc;
-		bool ret = findNode<P, K, V>(txn, val, node, loc, &keyCmp);
+		bool ret = findNode<P, K, V>(txn, val, node, loc, &keyCmp, isCaseSensitive);
 		if (ret) {
 			keyValue = node.getKeyValue(loc);
 			return GS_SUCCESS;
@@ -1221,6 +1605,10 @@ private:
 	template <typename P, typename K, typename V, typename R>
 	int32_t find(TransactionContext &txn, SearchContext &sc,
 		util::XArray<R> &idList, OutputOrder outputOrder) {
+		UTIL_STATIC_ASSERT((!util::IsSame<V, uint32_t>::VALUE));
+
+		KeyValue<K, V> suspendKeyValue;
+		bool isSuspend = false;
 		if (sc.isEqual_ && isUnique()) {
 			if (sc.startKey_ == NULL) {
 				GS_THROW_USER_ERROR(
@@ -1228,54 +1616,108 @@ private:
 			}
 			P key = *reinterpret_cast<const P *>(sc.startKey_);
 			KeyValue<K, V> keyValue;
-			int32_t ret = find<P, K, V>(txn, key, keyValue);
+			int32_t ret = find<P, K, V>(txn, key, keyValue, sc.isCaseSensitive_);
 			if (ret == GS_SUCCESS) {
 				pushResultList<K, V, R>(keyValue, idList);
 			}
 		}
 		else if (sc.startKey_ != NULL) {
-			P startKey = *reinterpret_cast<const P *>(sc.startKey_);
+			int32_t (*cmpFuncLeft)(TransactionContext &txn,
+						   ObjectManager &objectManager, const KeyValue<P, V> &e1,
+						   const KeyValue<K, V> &e2, bool) = &keyCmp;
+			int32_t (*cmpFuncRight)(TransactionContext &txn,
+						   ObjectManager &objectManager, const KeyValue<K, V> &e1,
+						   const KeyValue<P, V> &e2, bool) = &keyCmp;
+			KeyValue<P, V> startKeyVal(*reinterpret_cast<const P *>(sc.startKey_), V()); 
+			bool isValueCmp = sc.startValue_ != NULL || sc.endValue_ != NULL;
+			if (isValueCmp) {
+				cmpFuncLeft = &valueCmp;
+				cmpFuncRight = &valueCmp;
+				if (sc.startValue_ != NULL) {
+					startKeyVal.value_ = *reinterpret_cast<const V *>(sc.startValue_);
+				} else {
+					startKeyVal.value_ = getMinValue<V>();
+				}
+			}
 			if (sc.endKey_ != NULL) {
-				P endKey = *reinterpret_cast<const P *>(sc.endKey_);
+				KeyValue<P, V> endKeyVal(*reinterpret_cast<const P *>(sc.endKey_), V()); 
+				if (isValueCmp) {
+					if (sc.endValue_ != NULL) {
+						endKeyVal.value_ = *reinterpret_cast<const V *>(sc.endValue_);
+					} else {
+						endKeyVal.value_ = getMaxValue<V>();
+					}
+				}
 				if (outputOrder != ORDER_DESCENDING) {
-					findRange<P, K, V, R>(txn, startKey, sc.isStartKeyIncluded_,
-						endKey, sc.isEndKeyIncluded_, sc.limit_, &keyCmp,
-						&keyCmp, idList);
+					isSuspend = findRange<P, K, V, R>(txn, startKeyVal,
+						sc.isStartKeyIncluded_, endKeyVal, sc.isEndKeyIncluded_,
+						sc.limit_, cmpFuncLeft, cmpFuncRight, idList, sc.suspendLimit_,
+						suspendKeyValue, sc.isCaseSensitive_);
 				}
 				else {
-					findRangeByDescending<P, K, V, R>(txn, startKey,
-						sc.isStartKeyIncluded_, endKey, sc.isEndKeyIncluded_,
-						sc.limit_, &keyCmp, &keyCmp, idList);
+					isSuspend = findRangeByDescending<P, K, V, R>(txn, startKeyVal,
+						sc.isStartKeyIncluded_, endKeyVal, sc.isEndKeyIncluded_,
+						sc.limit_, cmpFuncLeft, cmpFuncRight, idList, sc.suspendLimit_,
+						suspendKeyValue, sc.isCaseSensitive_);
 				}
 			}
 			else {
 				if (outputOrder != ORDER_DESCENDING) {
-					findGreater<P, K, V, R>(txn, startKey,
-						sc.isStartKeyIncluded_, sc.limit_, &keyCmp, idList);
+					isSuspend = findGreater<P, K, V, R>(txn, startKeyVal,
+						sc.isStartKeyIncluded_, sc.limit_, cmpFuncLeft, idList,
+						sc.suspendLimit_, suspendKeyValue, sc.isCaseSensitive_);
 				}
 				else {
-					findGreaterByDescending<P, K, V, R>(txn, startKey,
-						sc.isStartKeyIncluded_, sc.limit_, &keyCmp, idList);
+					isSuspend = findGreaterByDescending<P, K, V, R>(txn,
+						startKeyVal, sc.isStartKeyIncluded_, sc.limit_, cmpFuncLeft,
+						idList, sc.suspendLimit_, suspendKeyValue, sc.isCaseSensitive_);
 				}
 			}
 		}
 		else if (sc.endKey_ != NULL) {
-			P endKey = *reinterpret_cast<const P *>(sc.endKey_);
+			int32_t (*cmpFuncLeft)(TransactionContext &txn,
+						   ObjectManager &objectManager, const KeyValue<P, V> &e1,
+						   const KeyValue<K, V> &e2, bool isCaseSensitive) = &keyCmp;
+			int32_t (*cmpFuncRight)(TransactionContext &txn,
+						   ObjectManager &objectManager, const KeyValue<K, V> &e1,
+						   const KeyValue<P, V> &e2, bool isCaseSensitive) = &keyCmp;
+			KeyValue<P, V> endKeyVal(*reinterpret_cast<const P *>(sc.endKey_), V()); 
+			bool isValueCmp = sc.endValue_ != NULL;
+			if (isValueCmp) {
+				endKeyVal.value_ = *reinterpret_cast<const V *>(sc.endValue_);
+				cmpFuncLeft = &valueCmp;
+				cmpFuncRight = &valueCmp;
+			}
 			if (outputOrder != ORDER_DESCENDING) {
-				findLess<P, K, V, R>(txn, endKey, sc.isEndKeyIncluded_,
-					sc.limit_, &keyCmp, idList);
+				isSuspend = findLess<P, K, V, R>(txn, endKeyVal,
+					sc.isEndKeyIncluded_, sc.limit_, cmpFuncRight, idList,
+					sc.suspendLimit_, suspendKeyValue, sc.isCaseSensitive_);
 			}
 			else {
-				findLessByDescending<P, K, V, R>(txn, endKey,
-					sc.isEndKeyIncluded_, sc.limit_, &keyCmp, &keyCmp, idList);
+				isSuspend = findLessByDescending<P, K, V, R>(txn, endKeyVal,
+					sc.isEndKeyIncluded_, sc.limit_, cmpFuncLeft, cmpFuncRight, idList,
+					sc.suspendLimit_, suspendKeyValue, sc.isCaseSensitive_);
 			}
 		}
 		else {
 			if (outputOrder != ORDER_DESCENDING) {
-				getAllByAscending<K, V, R>(txn, sc.limit_, idList);
+				isSuspend = getAllByAscending<K, V, R>(
+					txn, sc.limit_, idList, sc.suspendLimit_, suspendKeyValue);
 			}
 			else {
-				getAllByDescending<K, V, R>(txn, sc.limit_, idList);
+				isSuspend = getAllByDescending<K, V, R>(
+					txn, sc.limit_, idList, sc.suspendLimit_, suspendKeyValue);
+			}
+		}
+		if (isSuspend) {
+			sc.isSuspended_ = true;
+			sc.setSuspendPoint<K, V>(txn, *getObjectManager(), 
+				suspendKeyValue.key_, suspendKeyValue.value_);
+		}
+		else {
+			sc.suspendLimit_ -= idList.size();
+			if (sc.suspendLimit_ < MINIMUM_SUSPEND_SIZE) {
+				sc.suspendLimit_ = MINIMUM_SUSPEND_SIZE;
 			}
 		}
 		if (idList.empty()) {
@@ -1287,26 +1729,43 @@ private:
 	}
 
 	template <typename K, typename V, typename R>
-	int32_t getAllByAscending(
-		TransactionContext &txn, ResultSize limit, util::XArray<R> &result) {
+	bool getAllByAscending(TransactionContext &txn, ResultSize limit,
+		util::XArray<R> &result, ResultSize suspendLimit, 
+		KeyValue<K, V> &suspendKeyValue) {
+		bool isSuspend = false;
 		if (isEmpty()) {
-			return GS_SUCCESS;
+			return isSuspend;
 		}
 		BNode<K, V> node(txn, *getObjectManager(), allocateStrategy_);
 		getHeadNode<K, V>(txn, node);
 		int32_t loc = 0;
 		while (true) {
-			pushResultList<K, V, R>(node.getKeyValue(loc), result);
+			KeyValue<K, V> currentVal = node.getKeyValue(loc);
+			pushResultList<K, V, R>(currentVal, result);
 			if (!nextPos(txn, node, loc) || result.size() >= limit) {
 				break;
 			}
+			if (result.size() >= suspendLimit) {
+				isSuspend = true;
+				suspendKeyValue = node.getKeyValue(loc);
+				break;
+			}
 		}
+		return isSuspend;
+	}
+
+	template <typename K, typename V, typename R>
+	int32_t getAllByAscending(
+		TransactionContext &txn, ResultSize limit, util::XArray<R> &result) {
+		KeyValue<K, V> suspendKeyValue;
+		getAllByAscending<K, V, R>(
+			txn, limit, result, MAX_RESULT_SIZE, suspendKeyValue);
 		return GS_SUCCESS;
 	}
 
-	template <typename K, typename V>
+	template <typename K, typename V, typename R>
 	int32_t getAllByAscending(TransactionContext &txn, ResultSize limit,
-		util::XArray<V> &result, BtreeMap::BtreeCursor &cursor) {
+		util::XArray<R> &result, BtreeMap::BtreeCursor &cursor) {
 		if (isEmpty()) {
 			return GS_SUCCESS;
 		}
@@ -1322,7 +1781,7 @@ private:
 		}
 		bool hasNext = false;
 		while (true) {
-			result.push_back(node.getKeyValue(loc).value_);
+			pushResultList<K, V, R>(node.getKeyValue(loc), result);
 			hasNext = nextPos(txn, node, loc);
 
 			if (!hasNext || result.size() >= limit) {
@@ -1340,21 +1799,29 @@ private:
 	}
 
 	template <typename K, typename V, typename R>
-	int32_t getAllByDescending(
-		TransactionContext &txn, ResultSize limit, util::XArray<R> &result) {
+	bool getAllByDescending(TransactionContext &txn, ResultSize limit,
+		util::XArray<R> &result, ResultSize suspendLimit, 
+		KeyValue<K, V> &suspendKeyValue) {
+		bool isSuspend = false;
 		if (isEmpty()) {
-			return GS_SUCCESS;
+			return isSuspend;
 		}
 		BNode<K, V> node(
 			txn, *getObjectManager(), getTailNodeOId(), allocateStrategy_);
 		int32_t loc = node.numkeyValues() - 1;
 		while (true) {
-			pushResultList<K, V, R>(node.getKeyValue(loc), result);
+			KeyValue<K, V> currentVal = node.getKeyValue(loc);
+			pushResultList<K, V, R>(currentVal, result);
 			if (!prevPos(txn, node, loc) || result.size() >= limit) {
 				break;
 			}
+			if (result.size() >= suspendLimit) {
+				isSuspend = true;
+				suspendKeyValue = node.getKeyValue(loc);
+				break;
+			}
 		}
-		return GS_SUCCESS;
+		return isSuspend;
 	}
 private:
 	template <typename K, typename V, typename R>
@@ -1483,7 +1950,8 @@ template <typename K, typename V>
 void BtreeMap::split(TransactionContext &txn, BNode<K, V> &dirtyNode1,
 	int32_t (*cmpInternal)(TransactionContext &txn,
 						 ObjectManager &objectManager, const KeyValue<K, V> &e1,
-						 const KeyValue<K, V> &e2)) {
+						 const KeyValue<K, V> &e2, bool isCaseSensitive),
+	bool isCaseSensitive) {
 	if (dirtyNode1.numkeyValues() == 2 * nodeMinSize_ + 1) {
 		int32_t i, j;
 		OId parentOId;
@@ -1511,7 +1979,7 @@ void BtreeMap::split(TransactionContext &txn, BNode<K, V> &dirtyNode1,
 			dirtyParentNode.load(dirtyNode1.getParentOId(), OBJECT_FOR_UPDATE);
 			int32_t parentNodeSize = dirtyParentNode.numkeyValues();
 			if (cmpInternal(txn, *getObjectManager(), middleVal,
-					dirtyParentNode.getKeyValue(parentNodeSize - 1)) > 0) {
+					dirtyParentNode.getKeyValue(parentNodeSize - 1), isCaseSensitive) > 0) {
 				dirtyParentNode.setChild(
 					txn, parentNodeSize + 1, dirtyNode2.getSelfOId());
 				dirtyParentNode.setKeyValue(parentNodeSize, middleVal);
@@ -1520,7 +1988,7 @@ void BtreeMap::split(TransactionContext &txn, BNode<K, V> &dirtyNode1,
 			else {
 				for (i = 0; i < parentNodeSize; ++i) {
 					if (cmpInternal(txn, *getObjectManager(), middleVal,
-							dirtyParentNode.getKeyValue(i)) < 0) {
+							dirtyParentNode.getKeyValue(i), isCaseSensitive) < 0) {
 						for (j = parentNodeSize; j > i; --j) {
 							dirtyParentNode.setKeyValue(
 								j, dirtyParentNode.getKeyValue(j - 1));
@@ -1542,7 +2010,7 @@ void BtreeMap::split(TransactionContext &txn, BNode<K, V> &dirtyNode1,
 			setTailNodeOId(txn, dirtyNode2.getSelfOId());
 		}
 
-		split<K, V>(txn, dirtyParentNode, cmpInternal);
+		split<K, V>(txn, dirtyParentNode, cmpInternal, isCaseSensitive);
 	}
 }
 
@@ -1550,7 +2018,8 @@ template <typename K, typename V>
 void BtreeMap::merge(TransactionContext &txn, BNode<K, V> &node,
 	int32_t (*cmpInternal)(TransactionContext &txn,
 						 ObjectManager &objectManager, const KeyValue<K, V> &e1,
-						 const KeyValue<K, V> &e2)) {
+						 const KeyValue<K, V> &e2, bool isCaseSensitive),
+	bool isCaseSensitive) {
 	if (node.numkeyValues() < nodeMinSize_ && !node.isRoot()) {
 		int32_t upIndex;
 		findUpNode(txn, node, upIndex);
@@ -1583,7 +2052,7 @@ void BtreeMap::merge(TransactionContext &txn, BNode<K, V> &node,
 				dirtyNode->insertChild(txn, 0, dirtyChildNode);
 			}
 			dirtyNode->insertVal(
-				txn, dirtyParentNode->getKeyValue(upIndex - 1), cmpInternal);
+				txn, dirtyParentNode->getKeyValue(upIndex - 1), cmpInternal, isCaseSensitive);
 
 			dirtyParentNode->setKeyValue(
 				upIndex - 1, dirtyPreSibNode->getKeyValue(sibNodeSize - 1));
@@ -1621,7 +2090,7 @@ void BtreeMap::merge(TransactionContext &txn, BNode<K, V> &node,
 						txn, nodeObjectSize + 1, dirtyChildNode);
 				}
 				dirtyNode->insertVal(
-					txn, dirtyParentNode->getKeyValue(upIndex), cmpInternal);
+					txn, dirtyParentNode->getKeyValue(upIndex), cmpInternal, isCaseSensitive);
 
 				dirtyParentNode->setKeyValue(
 					upIndex, dirtyFollowSibNode->getKeyValue(0));
@@ -1645,7 +2114,7 @@ void BtreeMap::merge(TransactionContext &txn, BNode<K, V> &node,
 				int32_t sibNodeSize = preSibNode.numkeyValues();
 
 				dirtyPreSibNode->insertVal(txn,
-					dirtyParentNode->getKeyValue(upIndex - 1), cmpInternal);
+					dirtyParentNode->getKeyValue(upIndex - 1), cmpInternal, isCaseSensitive);
 
 				for (int32_t i = 0; i < dirtyNode->numkeyValues(); ++i) {
 					dirtyPreSibNode->setKeyValue(
@@ -1690,7 +2159,7 @@ void BtreeMap::merge(TransactionContext &txn, BNode<K, V> &node,
 				int32_t sibNodeSize = dirtyFollowSibNode->numkeyValues();
 
 				dirtyNode->insertVal(
-					txn, dirtyParentNode->getKeyValue(upIndex), cmpInternal);
+					txn, dirtyParentNode->getKeyValue(upIndex), cmpInternal, isCaseSensitive);
 
 				for (int32_t i = 0; i < sibNodeSize; ++i) {
 					dirtyNode->setKeyValue(nodeObjectSize + i + 1,
@@ -1721,7 +2190,7 @@ void BtreeMap::merge(TransactionContext &txn, BNode<K, V> &node,
 				dirtyFollowSibNode->remove(txn);
 			}
 		}
-		merge(txn, parentNode, cmpInternal);
+		merge(txn, parentNode, cmpInternal, isCaseSensitive);
 	}
 }
 
@@ -1729,15 +2198,17 @@ template <typename P, typename K, typename V>
 bool BtreeMap::insertInternal(
 	TransactionContext &txn, P key, V value,
 	int32_t (*cmpInput)(TransactionContext &txn, ObjectManager &objectManager,
-		const KeyValue<P, V> &e1, const KeyValue<K, V> &e2),
+		const KeyValue<P, V> &e1, const KeyValue<K, V> &e2, bool isCaseSensitive),
 	int32_t (*cmpInternal)(TransactionContext &txn,
 		ObjectManager &objectManager, const KeyValue<K, V> &e1,
-		const KeyValue<K, V> &e2)) {
+		const KeyValue<K, V> &e2, bool isCaseSensitive),
+	bool isCaseSensitive) {
 	KeyValue<P, V> val;
 	val.key_ = key;
 	val.value_ = value;
 	if (isEmpty()) {
-		BNode<K, V> dirtyNode(txn, *getObjectManager(), allocateStrategy_);
+		BNode<K, V> dirtyNode(
+			txn, *getObjectManager(), allocateStrategy_);
 		getRootBNodeObject<K, V>(dirtyNode);
 		dirtyNode.allocateVal(txn, 0, val);
 		setTailNodeOId(txn, getRootOId());
@@ -1770,13 +2241,13 @@ bool BtreeMap::insertInternal(
 			{
 				dirtyNode1.load(getTailNodeOId());
 				if (cmpInput(txn, *getObjectManager(), val,
-						dirtyNode1.getKeyValue(dirtyNode1.numkeyValues() - 1)) >
+						dirtyNode1.getKeyValue(dirtyNode1.numkeyValues() - 1), isCaseSensitive) >
 					0) {
 					loc = dirtyNode1.numkeyValues();
 				}
 				else {
 					if (findNode<P, K, V>(
-							txn, val, dirtyNode1, loc, cmpInput) &&
+							txn, val, dirtyNode1, loc, cmpInput, isCaseSensitive) &&
 						isUnique()) {
 						return false;
 					}
@@ -1791,7 +2262,7 @@ bool BtreeMap::insertInternal(
 
 			dirtyNode1.allocateVal(txn, loc, val);
 
-			split<K, V>(txn, dirtyNode1, cmpInternal);
+			split<K, V>(txn, dirtyNode1, cmpInternal, isCaseSensitive);
 		}
 	}
 	return true;
@@ -1801,10 +2272,11 @@ template <typename P, typename K, typename V>
 bool BtreeMap::removeInternal(
 	TransactionContext &txn, P key, V value,
 	int32_t (*cmpInput)(TransactionContext &txn, ObjectManager &objectManager,
-		const KeyValue<P, V> &e1, const KeyValue<K, V> &e2),
+		const KeyValue<P, V> &e1, const KeyValue<K, V> &e2, bool isCaseSensitive),
 	int32_t (*cmpInternal)(TransactionContext &txn,
 		ObjectManager &objectManager, const KeyValue<K, V> &e1,
-		const KeyValue<K, V> &e2)) {
+		const KeyValue<K, V> &e2, bool isCaseSensitive),
+		bool isCaseSensitive) {
 	{
 		KeyValue<P, V> val;
 		val.key_ = key;
@@ -1813,7 +2285,7 @@ bool BtreeMap::removeInternal(
 		BNode<K, V> dirtyUpdateNode(txn, *getObjectManager(),
 			allocateStrategy_);  
 
-		if (!findNode<P, K, V>(txn, val, dirtyUpdateNode, loc, cmpInput)) {
+		if (!findNode<P, K, V>(txn, val, dirtyUpdateNode, loc, cmpInput, isCaseSensitive)) {
 			return false;
 		}
 
@@ -1848,7 +2320,7 @@ bool BtreeMap::removeInternal(
 		}
 		else {
 			dirtyUpdateNode.removeVal(loc);
-			merge(txn, dirtyUpdateNode, cmpInternal);
+			merge(txn, dirtyUpdateNode, cmpInternal, isCaseSensitive);
 		}
 	}
 	{
@@ -1894,7 +2366,8 @@ template <typename P, typename K, typename V>
 bool BtreeMap::updateInternal(
 	TransactionContext &txn, P key, V value, V newValue,
 	int32_t (*cmpInput)(TransactionContext &txn, ObjectManager &objectManager,
-		const KeyValue<P, V> &e1, const KeyValue<K, V> &e2)) {
+		const KeyValue<P, V> &e1, const KeyValue<K, V> &e2, bool isCaseSensitive),
+		bool isCaseSensitive) {
 	KeyValue<P, V> val;
 	val.key_ = key;
 	val.value_ = value;
@@ -1902,7 +2375,7 @@ bool BtreeMap::updateInternal(
 
 	BNode<K, V> dirtyOrgNode(txn, *getObjectManager(),
 		allocateStrategy_);  
-	if (!findNode<P, K, V>(txn, val, dirtyOrgNode, orgLoc, cmpInput)) {
+	if (!findNode<P, K, V>(txn, val, dirtyOrgNode, orgLoc, cmpInput, isCaseSensitive)) {
 		return false;
 	}
 	getObjectManager()->setDirty(
@@ -1913,29 +2386,30 @@ bool BtreeMap::updateInternal(
 	return true;
 }
 
-
 template <typename P, typename K, typename V, typename R>
-bool BtreeMap::findLess(TransactionContext &txn, P key, int32_t isIncluded,
-	ResultSize limit, int32_t (*keyCmpRight)(TransactionContext &txn,
+bool BtreeMap::findLess(TransactionContext &txn, KeyValue<P, V> &keyValue, int32_t isIncluded,
+	ResultSize limit, int32_t (*cmpFuncRight)(TransactionContext &txn,
 							ObjectManager &objectManager,
-							const KeyValue<K, V> &e1, const KeyValue<P, V> &e2),
-	util::XArray<R> &result) {
-	KeyValue<P, V> val;
+							const KeyValue<K, V> &e1, const KeyValue<P, V> &e2,
+							bool isCaseSensitive),
+	util::XArray<R> &result, ResultSize suspendLimit, KeyValue<K, V> &suspendKeyValue,
+	bool isCaseSensitive) {
+	bool isSuspend = false;
 	BNode<K, V> node(txn, *getObjectManager(), allocateStrategy_);
 	int32_t loc;
-	val.key_ = key;
 
 	if (isEmpty()) {
-		return false;
+		return isSuspend;
 	}
 	else {
 		getHeadNode<K, V>(txn, node);
 		loc = 0;
 	}
 	while (true) {
-		if (keyCmpRight(txn, *getObjectManager(), node.getKeyValue(loc), val) <
-			isIncluded) {
-			pushResultList<K, V, R>(node.getKeyValue(loc), result);
+		KeyValue<K, V> currentVal = node.getKeyValue(loc);
+		if (cmpFuncRight(txn, *getObjectManager(), currentVal, keyValue, 
+			isCaseSensitive) <	isIncluded) {
+			pushResultList<K, V, R>(currentVal, result);
 		}
 		else {
 			break;
@@ -1943,39 +2417,53 @@ bool BtreeMap::findLess(TransactionContext &txn, P key, int32_t isIncluded,
 		if (!nextPos(txn, node, loc) || result.size() >= limit) {
 			break;
 		}
+		if (result.size() >= suspendLimit) {
+			if (cmpFuncRight(txn, *getObjectManager(), node.getKeyValue(loc),
+					keyValue, isCaseSensitive) < isIncluded) {
+				isSuspend = true;
+				suspendKeyValue = node.getKeyValue(loc);
+			}
+			break;
+		}
 	}
-	return true;
+	return isSuspend;
 }
 
 template <typename P, typename K, typename V, typename R>
 bool BtreeMap::findLessByDescending(
-	TransactionContext &txn, P key, int32_t isIncluded, ResultSize limit,
-	int32_t (*keyCmpLeft)(TransactionContext &txn, ObjectManager &objectManager,
-		const KeyValue<P, V> &e1, const KeyValue<K, V> &e2),
-	int32_t (*keyCmpRight)(TransactionContext &txn,
+	TransactionContext &txn, KeyValue<P, V> &keyValue, int32_t isIncluded, ResultSize limit,
+	int32_t (*cmpFuncLeft)(TransactionContext &txn, ObjectManager &objectManager,
+		const KeyValue<P, V> &e1, const KeyValue<K, V> &e2, bool isCaseSensitive),
+	int32_t (*cmpFuncRight)(TransactionContext &txn,
 		ObjectManager &objectManager, const KeyValue<K, V> &e1,
-		const KeyValue<P, V> &e2),
-	util::XArray<R> &result) {
-	KeyValue<P, V> val;
+		const KeyValue<P, V> &e2, bool isCaseSensitive),
+	util::XArray<R> &result, ResultSize suspendLimit, KeyValue<K, V> &suspendKeyValue,
+	bool isCaseSensitive) {
+	bool isSuspend = false;
 	BNode<K, V> node(txn, *getObjectManager(), allocateStrategy_);
 	int32_t loc;
-	val.key_ = key;
-	findNode(txn, val, node, loc, keyCmpLeft);
+	findNode(txn, keyValue, node, loc, cmpFuncLeft, isCaseSensitive);
 	if (loc >= node.numkeyValues()) {
-		while (true) {
-			if (!prevPos(txn, node, loc) || result.size() >= limit) {
-				break;
-			}
-			else {
-				pushResultList<K, V, R>(node.getKeyValue(loc), result);
+		if (prevPos(txn, node, loc)) {
+			while (true) {
+				KeyValue<K, V> currentVal = node.getKeyValue(loc);
+				pushResultList<K, V, R>(currentVal, result);
+				if (!prevPos(txn, node, loc) || result.size() >= limit) {
+					break;
+				}
+				if (result.size() >= suspendLimit) {
+					isSuspend = true;
+					suspendKeyValue = node.getKeyValue(loc);
+					break;
+				}
 			}
 		}
-		return true;
+		return isSuspend;
 	}
 	else {
 		while (isIncluded) {
-			if (keyCmpLeft(
-					txn, *getObjectManager(), val, node.getKeyValue(loc)) < 0) {
+			if (cmpFuncLeft(
+					txn, *getObjectManager(), keyValue, node.getKeyValue(loc), isCaseSensitive) < 0) {
 				break;
 			}
 			if (!nextPos(txn, node, loc)) {
@@ -1984,43 +2472,55 @@ bool BtreeMap::findLessByDescending(
 		}
 		bool start = false;
 		while (true) {
+			KeyValue<K, V> currentVal = node.getKeyValue(loc);
 			if (start) {
-				pushResultList<K, V, R>(node.getKeyValue(loc), result);
+				pushResultList<K, V, R>(currentVal, result);
 			}
 			else {
-				if (keyCmpRight(txn, *getObjectManager(), node.getKeyValue(loc),
-						val) < isIncluded) {
-					pushResultList<K, V, R>(node.getKeyValue(loc), result);
+				if (cmpFuncRight(txn, *getObjectManager(), currentVal, keyValue, isCaseSensitive) <
+					isIncluded) {
+					pushResultList<K, V, R>(currentVal, result);
 					start = true;
 				}
 			}
 			if (!prevPos(txn, node, loc) || result.size() >= limit) {
 				break;
 			}
+			if (result.size() >= suspendLimit) {
+				isSuspend = true;
+				suspendKeyValue = node.getKeyValue(loc);
+				break;
+			}
 		}
-		return true;
+		return isSuspend;
 	}
 }
 
 template <typename P, typename K, typename V, typename R>
 bool BtreeMap::findGreater(
-	TransactionContext &txn, P key, int32_t isIncluded, ResultSize limit,
-	int32_t (*keyCmpLeft)(TransactionContext &txn, ObjectManager &objectManager,
-		const KeyValue<P, V> &e1, const KeyValue<K, V> &e2),
-	util::XArray<R> &result) {
-	KeyValue<P, V> val;
+	TransactionContext &txn, KeyValue<P, V> &keyValue, int32_t isIncluded, ResultSize limit,
+	int32_t (*cmpFuncLeft)(TransactionContext &txn, ObjectManager &objectManager,
+		const KeyValue<P, V> &e1, const KeyValue<K, V> &e2, bool isCaseSensitive),
+	util::XArray<R> &result, ResultSize suspendLimit, KeyValue<K, V> &suspendKeyValue,
+	bool isCaseSensitive) {
+	bool isSuspend = false;
 	BNode<K, V> node(txn, *getObjectManager(), allocateStrategy_);
 	int32_t loc;
-	val.key_ = key;
-	bool isEqual = findNode(txn, val, node, loc, keyCmpLeft);
+	bool isEqual = findNode(txn, keyValue, node, loc, cmpFuncLeft, isCaseSensitive);
 
 	if (getBtreeMapType() == TYPE_UNIQUE_RANGE_KEY) {
 		if (loc >= node.numkeyValues() || !isEqual) {
 			prevPos(txn, node, loc);
 		}
 		while (true) {
-			pushResultList<K, V, R>(node.getKeyValue(loc), result);
+			KeyValue<K, V> currentVal = node.getKeyValue(loc);
+			pushResultList<K, V, R>(currentVal, result);
 			if (!nextPos(txn, node, loc) || result.size() >= limit) {
+				break;
+			}
+			if (result.size() >= suspendLimit) {
+				isSuspend = true;
+				suspendKeyValue = node.getKeyValue(loc);
 				break;
 			}
 		}
@@ -2031,8 +2531,8 @@ bool BtreeMap::findGreater(
 		}
 		else {
 			while (isIncluded) {
-				if (keyCmpLeft(txn, *getObjectManager(), val,
-						node.getKeyValue(loc)) > 0) {
+				if (cmpFuncLeft(txn, *getObjectManager(), keyValue,
+						node.getKeyValue(loc), isCaseSensitive) > 0) {
 					break;
 				}
 				if (!prevPos(txn, node, loc)) {
@@ -2042,37 +2542,43 @@ bool BtreeMap::findGreater(
 		}
 		bool start = false;
 		while (true) {
+			KeyValue<K, V> currentVal = node.getKeyValue(loc);
 			if (start) {
-				pushResultList<K, V, R>(node.getKeyValue(loc), result);
+				pushResultList<K, V, R>(currentVal, result);
 			}
 			else {
-				if (keyCmpLeft(txn, *getObjectManager(), val,
-						node.getKeyValue(loc)) < isIncluded) {
-					pushResultList<K, V, R>(node.getKeyValue(loc), result);
+				if (cmpFuncLeft(txn, *getObjectManager(), keyValue, currentVal,
+					isCaseSensitive) < isIncluded) {
+					pushResultList<K, V, R>(currentVal, result);
 					start = true;
 				}
 			}
 			if (!nextPos(txn, node, loc) || result.size() >= limit) {
 				break;
 			}
+			if (result.size() >= suspendLimit) {
+				isSuspend = true;
+				suspendKeyValue = node.getKeyValue(loc);
+				break;
+			}
 		}
 	}
-	return true;
+	return isSuspend;
 }
 
 template <typename P, typename K, typename V, typename R>
 bool BtreeMap::findGreaterByDescending(
-	TransactionContext &txn, P key, int32_t isIncluded, ResultSize limit,
-	int32_t (*keyCmpLeft)(TransactionContext &txn, ObjectManager &objectManager,
-		const KeyValue<P, V> &e1, const KeyValue<K, V> &e2),
-	util::XArray<R> &result) {
-	KeyValue<P, V> val;
+	TransactionContext &txn, KeyValue<P, V> &keyValue, int32_t isIncluded, ResultSize limit,
+	int32_t (*cmpFuncLeft)(TransactionContext &txn, ObjectManager &objectManager,
+		const KeyValue<P, V> &e1, const KeyValue<K, V> &e2, bool isCaseSensitive),
+	util::XArray<R> &result, ResultSize suspendLimit, KeyValue<K, V> &suspendKeyValue,
+	bool isCaseSensitive) {
+	bool isSuspend = false;
 	BNode<K, V> node(txn, *getObjectManager(), allocateStrategy_);
 	int32_t loc;
-	val.key_ = key;
 
 	if (isEmpty()) {
-		return false;
+		return isSuspend;
 	}
 	else {
 		node.load(getTailNodeOId());
@@ -2081,27 +2587,34 @@ bool BtreeMap::findGreaterByDescending(
 	if (getBtreeMapType() == TYPE_UNIQUE_RANGE_KEY) {
 		int32_t ret, prevRet = -1;
 		while (true) {
-			ret = keyCmpLeft(
-				txn, *getObjectManager(), val, node.getKeyValue(loc));
+			KeyValue<K, V> currentVal = node.getKeyValue(loc);
+			ret = cmpFuncLeft(txn, *getObjectManager(), keyValue, currentVal, 
+				isCaseSensitive);
 			if (ret < isIncluded) {
-				pushResultList<K, V, R>(node.getKeyValue(loc), result);
+				pushResultList<K, V, R>(currentVal, result);
 				prevRet = ret;
 			}
 			else {
 				if (ret == 0 || prevRet != 0) {
-					pushResultList<K, V, R>(node.getKeyValue(loc), result);
+					pushResultList<K, V, R>(currentVal, result);
 				}
 				break;
 			}
 			if (!prevPos(txn, node, loc) || result.size() >= limit) {
 				break;
 			}
+			if (result.size() >= suspendLimit) {
+				isSuspend = true;
+				suspendKeyValue = node.getKeyValue(loc);
+				break;
+			}
 		}
 	}
 	else {
 		while (true) {
-			if (keyCmpLeft(txn, *getObjectManager(), val,
-					node.getKeyValue(loc)) < isIncluded) {
+			KeyValue<K, V> currentVal = node.getKeyValue(loc);
+			if (cmpFuncLeft(txn, *getObjectManager(), keyValue, currentVal,
+				isCaseSensitive) < isIncluded) {
 				pushResultList<K, V, R>(node.getKeyValue(loc), result);
 			}
 			else {
@@ -2110,41 +2623,55 @@ bool BtreeMap::findGreaterByDescending(
 			if (!prevPos(txn, node, loc) || result.size() >= limit) {
 				break;
 			}
+			if (result.size() >= suspendLimit) {
+				if (cmpFuncLeft(txn, *getObjectManager(), keyValue,
+						node.getKeyValue(loc), isCaseSensitive) < isIncluded) {
+					isSuspend = true;
+					suspendKeyValue = node.getKeyValue(loc);
+				}
+				break;
+			}
 		}
 	}
-	return true;
+	return isSuspend;
 }
 
 template <typename P, typename K, typename V, typename R>
 bool BtreeMap::findRange(
-	TransactionContext &txn, P startKey, int32_t isStartIncluded, P endKey,
+	TransactionContext &txn, KeyValue<P, V> &startKeyValue, int32_t isStartIncluded, KeyValue<P, V> &endKeyValue,
 	int32_t isEndIncluded, ResultSize limit,
-	int32_t (*keyCmpLeft)(TransactionContext &txn, ObjectManager &objectManager,
-		const KeyValue<P, V> &e1, const KeyValue<K, V> &e2),
-	int32_t (*keyCmpRight)(TransactionContext &txn,
+	int32_t (*cmpFuncLeft)(TransactionContext &txn, ObjectManager &objectManager,
+		const KeyValue<P, V> &e1, const KeyValue<K, V> &e2, bool isCaseSensitive),
+	int32_t (*cmpFuncRight)(TransactionContext &txn,
 		ObjectManager &objectManager, const KeyValue<K, V> &e1,
-		const KeyValue<P, V> &e2),
-	util::XArray<R> &result) {
-	KeyValue<P, V> startVal, endVal;
+		const KeyValue<P, V> &e2, bool isCaseSensitive),
+	util::XArray<R> &result, ResultSize suspendLimit, KeyValue<K, V> &suspendKeyValue,
+	bool isCaseSensitive) {
+	bool isSuspend = false;
 	BNode<K, V> node(txn, *getObjectManager(), allocateStrategy_);
 	int32_t loc;
-	startVal.key_ = startKey;
-	endVal.key_ = endKey;
-	bool isEqual = findNode<P, K, V>(txn, startVal, node, loc, keyCmpLeft);
+	bool isEqual = findNode<P, K, V>(txn, startKeyValue, node, loc, cmpFuncLeft,
+		isCaseSensitive);
 	if (getBtreeMapType() == TYPE_UNIQUE_RANGE_KEY) {
 		if (loc >= node.numkeyValues() || !isEqual) {
 			prevPos(txn, node, loc);
 		}
 		while (true) {
-			if (keyCmpRight(txn, *getObjectManager(), node.getKeyValue(loc),
-					endVal) < isEndIncluded) {
-				pushResultList<K, V, R>(node.getKeyValue(loc), result);
+			KeyValue<K, V> currentVal = node.getKeyValue(loc);
+			if (cmpFuncRight(txn, *getObjectManager(), currentVal, endKeyValue, 
+					isCaseSensitive) < isEndIncluded) {
+				pushResultList<K, V, R>(currentVal, result);
 			}
 			else {
 				break;
 			}
 
 			if (!nextPos(txn, node, loc) || result.size() >= limit) {
+				break;
+			}
+			if (result.size() >= suspendLimit) {
+				isSuspend = true;
+				suspendKeyValue = node.getKeyValue(loc);
 				break;
 			}
 		}
@@ -2155,8 +2682,8 @@ bool BtreeMap::findRange(
 		}
 		else {
 			while (isStartIncluded) {
-				if (keyCmpLeft(txn, *getObjectManager(), startVal,
-						node.getKeyValue(loc)) > 0) {
+				if (cmpFuncLeft(txn, *getObjectManager(), startKeyValue,
+						node.getKeyValue(loc), isCaseSensitive) > 0) {
 					break;
 				}
 				if (!prevPos(txn, node, loc)) {
@@ -2166,21 +2693,22 @@ bool BtreeMap::findRange(
 		}
 		bool start = false;
 		while (true) {
+			KeyValue<K, V> currentVal = node.getKeyValue(loc);
 			if (start) {
-				if (keyCmpRight(txn, *getObjectManager(), node.getKeyValue(loc),
-						endVal) < isEndIncluded) {
-					pushResultList<K, V, R>(node.getKeyValue(loc), result);
+				if (cmpFuncRight(txn, *getObjectManager(), currentVal, endKeyValue,
+						isCaseSensitive) < isEndIncluded) {
+					pushResultList<K, V, R>(currentVal, result);
 				}
 				else {
 					break;
 				}
 			}
 			else {
-				if (keyCmpLeft(txn, *getObjectManager(), startVal,
-						node.getKeyValue(loc)) < isStartIncluded) {
-					if (keyCmpRight(txn, *getObjectManager(),
-							node.getKeyValue(loc), endVal) < isEndIncluded) {
-						pushResultList<K, V, R>(node.getKeyValue(loc), result);
+				if (cmpFuncLeft(txn, *getObjectManager(), startKeyValue, currentVal,
+						isCaseSensitive) < isStartIncluded) {
+					if (cmpFuncRight(txn, *getObjectManager(), currentVal,
+							endKeyValue, isCaseSensitive) < isEndIncluded) {
+						pushResultList<K, V, R>(currentVal, result);
 						start = true;
 					}
 					else {
@@ -2192,27 +2720,34 @@ bool BtreeMap::findRange(
 			if (!nextPos(txn, node, loc) || result.size() >= limit) {
 				break;
 			}
+			if (result.size() >= suspendLimit) {
+				if (cmpFuncRight(txn, *getObjectManager(), node.getKeyValue(loc),
+						endKeyValue, isCaseSensitive) < isEndIncluded) {
+					isSuspend = true;
+					suspendKeyValue = node.getKeyValue(loc);
+				}
+				break;
+			}
 		}
 	}
-	return true;
+	return isSuspend;
 }
 
 template <typename P, typename K, typename V, typename R>
 bool BtreeMap::findRangeByDescending(
-	TransactionContext &txn, P startKey, int32_t isStartIncluded, P endKey,
+	TransactionContext &txn, KeyValue<P, V> &startKeyValue, int32_t isStartIncluded, KeyValue<P, V> &endKeyValue,
 	int32_t isEndIncluded, ResultSize limit,
-	int32_t (*keyCmpLeft)(TransactionContext &txn, ObjectManager &objectManager,
-		const KeyValue<P, V> &e1, const KeyValue<K, V> &e2),
-	int32_t (*keyCmpRight)(TransactionContext &txn,
+	int32_t (*cmpFuncLeft)(TransactionContext &txn, ObjectManager &objectManager,
+		const KeyValue<P, V> &e1, const KeyValue<K, V> &e2, bool isCaseSensitive),
+	int32_t (*cmpFuncRight)(TransactionContext &txn,
 		ObjectManager &objectManager, const KeyValue<K, V> &e1,
-		const KeyValue<P, V> &e2),
-	util::XArray<R> &result) {
-	KeyValue<P, V> startVal, endVal;
+		const KeyValue<P, V> &e2, bool isCaseSensitive),
+	util::XArray<R> &result, ResultSize suspendLimit, KeyValue<K, V> &suspendKeyValue,
+	bool isCaseSensitive) {
+	bool isSuspend = false;
 	BNode<K, V> node(txn, *getObjectManager(), allocateStrategy_);
 	int32_t loc;
-	startVal.key_ = startKey;
-	endVal.key_ = endKey;
-	bool isEqual = findNode(txn, endVal, node, loc, keyCmpLeft);
+	bool isEqual = findNode(txn, endKeyValue, node, loc, cmpFuncLeft, isCaseSensitive);
 
 	if (getBtreeMapType() == TYPE_UNIQUE_RANGE_KEY) {
 		if (loc >= node.numkeyValues() || (isEqual && !isEndIncluded)) {
@@ -2221,34 +2756,34 @@ bool BtreeMap::findRangeByDescending(
 		int32_t ret, prevRet = -1;
 		bool start = false;
 		while (true) {
+			KeyValue<K, V> currentVal = node.getKeyValue(loc);
 			if (start) {
-				ret = keyCmpLeft(
-					txn, *getObjectManager(), startVal, node.getKeyValue(loc));
+				ret =
+					cmpFuncLeft(txn, *getObjectManager(), startKeyValue, currentVal, isCaseSensitive);
 				if (ret < isStartIncluded) {
-					pushResultList<K, V, R>(node.getKeyValue(loc), result);
+					pushResultList<K, V, R>(currentVal, result);
 					prevRet = ret;
 				}
 				else {
 					if (ret == 0 || prevRet != 0) {
-						pushResultList<K, V, R>(node.getKeyValue(loc), result);
+						pushResultList<K, V, R>(currentVal, result);
 					}
 					break;
 				}
 			}
 			else {
-				if (keyCmpRight(txn, *getObjectManager(), node.getKeyValue(loc),
-						endVal) < isEndIncluded) {
-					ret = keyCmp(txn, *getObjectManager(), startVal,
-						node.getKeyValue(loc));
+				if (cmpFuncRight(txn, *getObjectManager(), currentVal, endKeyValue, 
+						isCaseSensitive) < isEndIncluded) {
+					ret =
+						keyCmp(txn, *getObjectManager(), startKeyValue, currentVal, isCaseSensitive);
 					if (ret < isStartIncluded) {
-						pushResultList<K, V, R>(node.getKeyValue(loc), result);
+						pushResultList<K, V, R>(currentVal, result);
 						prevRet = ret;
 						start = true;
 					}
 					else {
 						if (ret == 0 || prevRet != 0) {
-							pushResultList<K, V, R>(
-								node.getKeyValue(loc), result);
+							pushResultList<K, V, R>(currentVal, result);
 						}
 						break;
 					}
@@ -2257,8 +2792,13 @@ bool BtreeMap::findRangeByDescending(
 			if (!prevPos(txn, node, loc) || result.size() >= limit) {
 				break;
 			}
+			if (result.size() >= suspendLimit) {
+				isSuspend = true;
+				suspendKeyValue = node.getKeyValue(loc);
+				break;
+			}
 		}
-		return true;
+		return isSuspend;
 	}
 	else {
 		if (loc >= node.numkeyValues()) {
@@ -2266,8 +2806,8 @@ bool BtreeMap::findRangeByDescending(
 		}
 		else {
 			while (isEndIncluded) {
-				if (keyCmpLeft(txn, *getObjectManager(), endVal,
-						node.getKeyValue(loc)) < 0) {
+				if (cmpFuncLeft(txn, *getObjectManager(), endKeyValue,
+						node.getKeyValue(loc), isCaseSensitive) < 0) {
 					break;
 				}
 				if (!nextPos(txn, node, loc)) {
@@ -2277,21 +2817,22 @@ bool BtreeMap::findRangeByDescending(
 		}
 		bool start = false;
 		while (true) {
+			KeyValue<K, V> currentVal = node.getKeyValue(loc);
 			if (start) {
-				if (keyCmpLeft(txn, *getObjectManager(), startVal,
-						node.getKeyValue(loc)) < isStartIncluded) {
-					pushResultList<K, V, R>(node.getKeyValue(loc), result);
+				if (cmpFuncLeft(txn, *getObjectManager(), startKeyValue, currentVal,
+						isCaseSensitive) < isStartIncluded) {
+					pushResultList<K, V, R>(currentVal, result);
 				}
 				else {
 					break;
 				}
 			}
 			else {
-				if (keyCmpRight(txn, *getObjectManager(), node.getKeyValue(loc),
-						endVal) < isEndIncluded) {
-					if (keyCmp(txn, *getObjectManager(), startVal,
-							node.getKeyValue(loc)) < isStartIncluded) {
-						pushResultList<K, V, R>(node.getKeyValue(loc), result);
+				if (cmpFuncRight(txn, *getObjectManager(), currentVal, endKeyValue,
+						isCaseSensitive) < isEndIncluded) {
+					if (keyCmp(txn, *getObjectManager(), startKeyValue, currentVal,
+							isCaseSensitive) < isStartIncluded) {
+						pushResultList<K, V, R>(currentVal, result);
 						start = true;
 					}
 					else {
@@ -2302,10 +2843,19 @@ bool BtreeMap::findRangeByDescending(
 			if (!prevPos(txn, node, loc) || result.size() >= limit) {
 				break;
 			}
+			if (result.size() >= suspendLimit) {
+				if (cmpFuncLeft(txn, *getObjectManager(), startKeyValue,
+						node.getKeyValue(loc), isCaseSensitive) < isStartIncluded) {
+					isSuspend = true;
+					suspendKeyValue = node.getKeyValue(loc);
+				}
+				break;
+			}
 		}
-		return true;
+		return isSuspend;
 	}
 }
+
 template <>
 inline void BtreeMap::BNode<StringKey, OId>::freeVal(
 	TransactionContext &txn, int32_t m) {
@@ -2325,5 +2875,165 @@ inline std::string BtreeMap::BNode<StringKey, OId>::dump(
 	}
 	return out.str();
 }
+template <>
+inline void BtreeMap::BNode<FullContainerKeyAddr, OId>::freeVal(
+	TransactionContext &txn, int32_t m) {
+}
+template <>
+inline std::string BtreeMap::BNode<FullContainerKeyAddr, OId>::dump(
+	TransactionContext &txn) {
+	util::NormalOStringStream out;
+	out << "(@@Node@@)";
+	for (int32_t i = 0; i < numkeyValues(); ++i) {
+		StringCursor obj(txn, *getObjectManager(), getKeyValue(i).key_.oId_);
+		util::NormalString tmp(
+			reinterpret_cast<const char *>(obj.str()), obj.stringLength());
+		out << "[" << tmp << "," << getKeyValue(i).value_ << "], ";
+	}
+	return out.str();
+}
+
+template <typename K, typename V>
+int32_t BtreeMap::initialize(TransactionContext &txn, ColumnType columnType,
+	bool isUnique, BtreeMapType btreeMapType) {
+	UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyCursor>::VALUE));
+	UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyObject>::VALUE));
+	BaseObject::allocate<BNodeImage<K, V> >(getInitialNodeSize<K, V>(),
+		allocateStrategy_, getBaseOId(), OBJECT_TYPE_BTREE_MAP);
+	BNode<K, V> rootNode(this, allocateStrategy_);
+	rootNode.initialize(txn, getBaseOId(), true,
+		getInitialItemSizeThreshold<K, V>(), nodeBlockType_);
+
+	rootNode.setRootNodeHeader(
+		columnType, btreeMapType, static_cast<uint8_t>(isUnique), UNDEF_OID);
+
+	return GS_SUCCESS;
+}
+template <typename K, typename V>
+int32_t BtreeMap::insert(TransactionContext &txn, K &key, V &value, bool isCaseSensitive) {
+	UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyAddr>::VALUE));
+	UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyCursor>::VALUE));
+	UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyObject>::VALUE));
+	setDirty();
+
+	OId beforeRootOId = getRootOId();
+	OId beforeTailOId = getTailNodeOId();
+	bool isSuccess =
+		insertInternal<K, K, V>(txn, key, value, &valueCmp, &valueCmp, isCaseSensitive);
+
+	int32_t ret = (isSuccess) ? GS_SUCCESS : GS_FAIL;
+	assert(ret == GS_SUCCESS);
+	if (beforeRootOId != getRootOId()) {
+		ret = (ret | ROOT_UPDATE);
+	}
+	if (beforeTailOId != getTailNodeOId()) {
+		ret = (ret | TAIL_UPDATE);
+	}
+	return ret;
+}
+template <typename K, typename V>
+int32_t BtreeMap::remove(TransactionContext &txn, K &key, V &value, bool isCaseSensitive) {
+	UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyAddr>::VALUE));
+	UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyCursor>::VALUE));
+	UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyObject>::VALUE));
+	setDirty();
+
+	OId beforeRootOId = getRootOId();
+	OId beforeTailOId = getTailNodeOId();
+	bool isSuccess =
+		removeInternal<K, K, V>(txn, key, value, &valueCmp, &valueCmp, isCaseSensitive);
+
+	int32_t ret = (isSuccess) ? GS_SUCCESS : GS_FAIL;
+	assert(ret == GS_SUCCESS);
+	if (beforeRootOId != getRootOId()) {
+		ret = (ret | ROOT_UPDATE);
+	}
+	if (beforeTailOId != getTailNodeOId()) {
+		ret = (ret | TAIL_UPDATE);
+	}
+	return ret;
+}
+template <typename K, typename V>
+int32_t BtreeMap::update(
+	TransactionContext &txn, K &key, V &oldValue, V &newValue, bool isCaseSensitive) {
+	UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyAddr>::VALUE));
+	UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyCursor>::VALUE));
+	UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyObject>::VALUE));
+	setDirty();
+
+	OId beforeRootOId = getRootOId();
+	OId beforeTailOId = getTailNodeOId();
+	int32_t ret;
+	if (isUnique()) {
+		ret = updateInternal<K, K, V>(txn, key, oldValue, newValue, &valueCmp, isCaseSensitive);
+	}
+	else {
+		bool isSuccess;
+		isSuccess =
+			removeInternal<K, K, V>(txn, key, oldValue, &valueCmp, &valueCmp, isCaseSensitive);
+		if (isSuccess) {
+			isSuccess = insertInternal<K, K, V>(
+				txn, key, newValue, &valueCmp, &valueCmp, isCaseSensitive);
+		}
+		ret = (isSuccess) ? GS_SUCCESS : GS_FAIL;
+	}
+
+	assert(ret == GS_SUCCESS);
+	if (beforeRootOId != getRootOId()) {
+		ret = (ret | ROOT_UPDATE);
+	}
+	if (beforeTailOId != getTailNodeOId()) {
+		ret = (ret | TAIL_UPDATE);
+	}
+	return ret;
+}
+
+struct MvccRowImage;
+template<>
+MvccRowImage BtreeMap::getMaxValue();
+template <typename V>
+V BtreeMap::getMaxValue() {
+	return std::numeric_limits<V>::max();
+}
+
+template<>
+MvccRowImage BtreeMap::getMinValue();
+template <typename V>
+V BtreeMap::getMinValue() {
+	return std::numeric_limits<V>::min();
+}
+
+template <>
+void BtreeMap::SearchContext::setSuspendPoint(TransactionContext &txn,
+	ObjectManager &objectManager, const StringKey &suspendKey, const OId &suspendValue);
+
+template <>
+void BtreeMap::SearchContext::setSuspendPoint(TransactionContext &txn,
+	ObjectManager &objectManager, const FullContainerKeyAddr &suspendKey, const OId &suspendValue);
+template <>
+int32_t BtreeMap::initialize<FullContainerKeyCursor, OId>(TransactionContext &txn, ColumnType columnType,
+													bool isUnique, BtreeMapType btreeMapType);
+
+template <>
+int32_t BtreeMap::insert(TransactionContext &txn, FullContainerKeyCursor &key, OId &value, bool isCaseSensitive);
+
+template <>
+int32_t BtreeMap::remove(TransactionContext &txn, FullContainerKeyCursor &key, OId &value, bool isCaseSensitive);
+
+template <>
+int32_t BtreeMap::update(TransactionContext &txn, FullContainerKeyCursor &key, OId &oldValue, OId &newValue, bool isCaseSensitive);
+
+template <>
+int32_t BtreeMap::search<FullContainerKeyCursor, OId, OId>(TransactionContext &txn, FullContainerKeyCursor &key, OId &retVal, bool isCaseSensitive);
+
+template <>
+int32_t BtreeMap::search<FullContainerKeyCursor, OId, OId>(TransactionContext &txn, SearchContext &sc, util::XArray<OId> &idList, OutputOrder outputOrder);
+
+template <typename K, typename V>
+int32_t BtreeMap::getInitialItemSizeThreshold() {
+	return INITIAL_DEFAULT_ITEM_SIZE_THRESHOLD;
+}
+template <>
+int32_t BtreeMap::getInitialItemSizeThreshold<TransactionId, MvccRowImage>();
 
 #endif  

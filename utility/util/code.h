@@ -1,5 +1,5 @@
 ﻿/*
-    Copyright (c) 2012 TOSHIBA CORPORATION.
+    Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
     
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License as
@@ -52,7 +52,6 @@
 #include <limits>
 #include <stdlib.h>
 #include <string.h>
-
 
 namespace util {
 
@@ -674,6 +673,59 @@ struct StreamErrors {
 }
 
 typedef ByteStream<util::ArrayInStream> ArrayByteInStream;
+
+
+namespace detail {
+struct NameCoderImpl {
+	typedef std::pair<const char8_t*, int32_t> Entry;
+
+	struct EntryPred {
+		bool operator()(const Entry &entry1, const Entry &entry2) const;
+	};
+
+	static void initialize(
+			const char8_t **nameList, Entry *entryList, size_t count);
+
+	static const char8_t* findName(
+			const char8_t *const *nameList, size_t count, int32_t id,
+			const char8_t *defaultName);
+
+	static const Entry* findEntry(
+			const Entry *entryList, size_t count, const char8_t *name);
+
+	static const char8_t* removePrefix(
+			const char8_t *name, size_t prefixWordCount);
+};
+} 
+
+template<typename T>
+struct NameCoderEntry {
+	const char8_t *name_;
+	T id_;
+};
+
+template<typename T, size_t Count>
+class NameCoder {
+public:
+	typedef NameCoderEntry<T> Entry;
+
+	NameCoder(const Entry (&entryList)[Count], size_t prefixWordCount);
+
+	const char8_t* operator()(T id, const char8_t *defaultName = NULL) const;
+	bool operator()(const char8_t *name, T &id) const;
+
+private:
+	typedef detail::NameCoderImpl Impl;
+	typedef Impl::Entry BaseEntry;
+
+	const char8_t *nameList_[Count];
+	BaseEntry entryList_[Count];
+};
+
+#define UTIL_NAME_CODER_ENTRY_CUSTOM(name, id) { name, id }
+#define UTIL_NAME_CODER_ENTRY(id) UTIL_NAME_CODER_ENTRY_CUSTOM(#id, id)
+#define UTIL_NAME_CODER_NON_NAME_ENTRY(id) \
+		UTIL_NAME_CODER_ENTRY_CUSTOM(NULL, id)
 
 
 
@@ -1349,6 +1401,25 @@ UTIL_FORCEINLINE int32_t varIntEncode32_fast_short(uint8_t *p, uint32_t v) {
 	return varIntEncode64(p, v);
 }
 
+/*
+	https://developers.google.com/protocol-buffers/docs/encoding#types
+*/
+inline uint32_t zigzagEncode32(int32_t n) {
+	return (static_cast<uint32_t>(n) << 1) ^ static_cast<uint32_t>(n >> 31);
+}
+
+inline int32_t zigzagDecode32(uint32_t n) {
+	return static_cast<int32_t>(n >> 1) ^ (-1) * static_cast<int32_t>(n & 1);
+}
+
+inline uint64_t zigzagEncode64(int64_t n) {
+	return (static_cast<uint64_t>(n) << 1) ^ static_cast<uint64_t>(n >> 63);
+}
+
+inline int64_t zigzagDecode64(uint64_t n) {
+	return static_cast<int64_t>(n >> 1) ^ (-1) * static_cast<int64_t>(n & 1);
+}
+
 
 
 template<typename S>
@@ -1665,6 +1736,42 @@ inline ByteStream<S, F>& ByteStream<S, F>::put(
 		const std::basic_string<E, T, A> &str, FalseType) {
 	formatter_.put(*this, str);
 	return *this;
+}
+
+
+
+template<typename T, size_t Count>
+NameCoder<T, Count>::NameCoder(
+		const Entry (&entryList)[Count], size_t prefixWordCount) {
+
+	const Entry *const end = entryList + Count;
+	BaseEntry *destIt = entryList_;
+
+	for (const Entry *it = entryList; it != end; ++it, ++destIt) {
+		destIt->first = Impl::removePrefix(it->name_, prefixWordCount);
+		destIt->second = it->id_;
+	}
+
+	Impl::initialize(nameList_, entryList_, Count);
+}
+
+template<typename T, size_t Count>
+const char8_t* NameCoder<T, Count>::operator()(
+		T id, const char8_t *defaultName) const {
+	return Impl::findName(nameList_, Count, id, defaultName);
+}
+
+template<typename T, size_t Count>
+bool NameCoder<T, Count>::operator()(const char8_t *name, T &id) const {
+	const BaseEntry *entry = Impl::findEntry(entryList_, Count, name);
+
+	if (entry == NULL) {
+		id = T();
+		return false;
+	}
+
+	id = static_cast<T>(entry->second);
+	return true;
 }
 
 

@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -60,6 +60,9 @@ public:
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
 		}
+		else if (args[0]->isNullValue()) {
+			return Expr::newNullValue(txn);
+		}
 		else if (!args[0]->isString()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 				"Argument 1 is not a string value");
@@ -88,6 +91,9 @@ public:
 		if (args.empty() || args.size() != 1) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
+		}
+		else if (args[0]->isNullValue()) {
+			return Expr::newNullValue(txn);
 		}
 		if (!args[0]->isNumeric()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
@@ -119,6 +125,9 @@ public:
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
 		}
+		else if (args[0]->isNullValue()) {
+			return Expr::newNullValue(txn);
+		}
 		if (!args[0]->isNumericInteger()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 				"Argument 1 is not an integer value");
@@ -147,6 +156,9 @@ public:
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
 		}
+		else if (args[0]->isNullValue()) {
+			return Expr::newNullValue(txn);
+		}
 		if (!args[0]->isTimestamp()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 				"Argument 1 is not a timestamp value");
@@ -170,11 +182,15 @@ public:
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
 		}
+		else if (args[0]->isNullValue()) {
+			return Expr::newNullValue(txn);
+		}
 		if (!args[0]->isTimestamp()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 				"Argument 1 is not a timestamp value");
 		}
-		return Expr::newNumericValue(args[0]->getValueAsInt64(), txn);
+		int64_t value = static_cast<int64_t>(args[0]->getTimeStamp());
+		return Expr::newNumericValue(value, txn);
 	}
 
 	virtual ~FunctorToEpochMS() {}
@@ -194,7 +210,10 @@ public:
 		}
 		else if (!args[0]->isString()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
-				"Argument 1 is not a string value");
+				"Argument 1 is not DURATION(YEAR|MONTH|DAY|HOUR|MINUTE|SECOND|MILLISECOND)");
+		}
+		else if (args[1]->isNullValue() || args[2]->isNullValue()) {
+			return Expr::newNullValue(txn);
 		}
 		else if (!args[1]->isTimestamp()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
@@ -296,6 +315,9 @@ public:
 		else if (!args[0]->isString()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 				"Argument 1 is not a string value");
+		}
+		else if (args[0]->isNullValue() || args[1]->isNullValue() || args[2]->isNullValue()) {
+			return Expr::newNullValue(txn);
 		}
 		else if (!args[1]->isTimestamp()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,

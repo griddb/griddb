@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -76,7 +76,7 @@ private:
 */
 class OutputStatsHandler : public EventHandler {
 public:
-	OutputStatsHandler() : sysSvc_(NULL){};
+	OutputStatsHandler() : sysSvc_(NULL), pt_(NULL), clsMgr_(NULL) {};
 
 	void operator()(EventContext &ec, Event &ev);
 
@@ -84,6 +84,8 @@ public:
 
 private:
 	SystemService *sysSvc_;
+	PartitionTable *pt_;
+	ClusterManager *clsMgr_;
 };
 
 /*!
@@ -138,8 +140,40 @@ public:
 
 	void shutdownCluster(
 		const Event::Source &eventSource, util::StackAllocator &alloc);
+	void increaseCluster(
+		const Event::Source &eventSource, util::StackAllocator &alloc);
+
+	bool decreaseCluster(const Event::Source &eventSource,
+		util::StackAllocator &alloc, picojson::value &result,
+		bool isAutoLeave = false, int32_t leaveNum = 1);
+	struct BackupOption {
+		bool logArchive_;
+		bool logDuplicate_;
+		bool stopOnDuplicateError_;
+		bool isIncrementalBackup_;
+		int32_t incrementalBackupLevel_;
+		bool isCumulativeBackup_;
+		bool skipBaseline_;
+	};
+
+
+	bool backupNode(
+			const Event::Source &eventSource, const char8_t *backupName,
+			int32_t mode, 
+			BackupOption &option,
+			picojson::value &result);
+
+	bool archiveLog(
+			const Event::Source &eventSource, const char8_t *backupName,
+			int32_t mode, picojson::value &result);
+
+	bool prepareLongArchive(
+			const Event::Source &eventSource, const char8_t *longArchiveName,
+			picojson::value &result);
 
 	void checkpointNode(const Event::Source &eventSource);
+
+	void setPeriodicCheckpointFlag(bool flag);  
 
 	void getHosts(picojson::value &result, int32_t addressTypeNum);
 
@@ -149,28 +183,65 @@ public:
 
 	void getPGStoreMemoryLimitStats(picojson::value &result);
 
-	void getMemoryStats(picojson::value &result, const char8_t *namePrefix,
-		const char8_t *selectedType, int64_t minSize);
+	void getMemoryStats(
+			picojson::value &result, const char8_t *namePrefix,
+			const char8_t *selectedType, int64_t minSize);
 
-	bool getOrSetConfig(const std::vector<std::string> namePath,
-		picojson::value &result, const picojson::value *paramValue,
-		bool noUnit);
 
-	void getPartitions(picojson::value &result, int32_t partitionNo,
-		int32_t addressTypeNum, bool lossOnly = false, bool force = false,
-		bool isSelf = false, bool lsnDump = false, bool notDumpRole = false,
-		uint32_t partitionGroupNo = UINT32_MAX);
+	bool getOrSetConfig(
+			util::StackAllocator &alloc,
+			const std::vector<std::string> namePath, picojson::value &result,
+			const picojson::value *paramValue, bool noUnit);
 
-	void getLogs(picojson::value &result, std::string &searchStr,
-		std::string &searchStr2, std::string &ignoreStr, uint32_t length);
+	void getPartitions(
+			picojson::value &result, int32_t partitionNo,
+			int32_t addressTypeNum, bool lossOnly = false,
+			bool force = false, bool isSelf = false, bool lsnDump = false,
+			bool notDumpRole = false, uint32_t partitionGroupNo = UINT32_MAX, bool sqlOwnerDump=false);
+
+	void getGoalPartitions(util::StackAllocator &alloc, picojson::value &result);
+
+	void getLogs(
+			picojson::value &result, std::string &searchStr,
+			std::string &searchStr2, std::string &ignoreStr, uint32_t length);
 
 	bool setEventLogLevel(
-		const std::string &categoryName, const std::string &level, bool force);
+			const std::string &categoryName, const std::string &level,
+			bool force);
 
 	void getEventLogLevel(picojson::value &result);
 
 	bool getEventStats(picojson::value &result, bool reset);
 	void testEventLogLevel();
+
+
+	bool getSQLProcessorProfile(
+			util::StackAllocator &alloc,
+			EventEngine::VariableSizeAllocator &varSizeAlloc,
+			picojson::value &result, const int64_t *id);
+
+	bool getSQLProcessorGlobalProfile(picojson::value &result);
+
+	bool setSQLProcessorConfig(
+			const char8_t *key, const char8_t *value, bool forProfiler);
+	bool getSQLProcessorConfig(bool forProfiler, picojson::value &result);
+
+	bool getSQLProcessorPartialStatus(picojson::value &result);
+
+	bool setSQLProcessorSimulation(
+			util::StackAllocator &alloc, const picojson::value &request);
+	bool getSQLProcessorSimulation(
+			util::StackAllocator &alloc, picojson::value &result);
+
+	bool getSQLCompilerProfile(
+			util::StackAllocator &alloc, int32_t index,
+			const util::Set<util::String> &filteringSet,
+			picojson::value &result);
+
+	bool setSQLCompilerConfig(
+			const char8_t *category, const char8_t *key, const char8_t *value);
+	bool getSQLCompilerConfig(
+			const char8_t *category, picojson::value &result);
 
 
 	EventEngine *getEE() {
@@ -243,11 +314,13 @@ private:
 		ClusterService *clsSvc_;
 		SyncService *syncSvc_;
 		SystemService *sysSvc_;
+		TransactionService *txnSvc_;
 		PartitionTable *pt_;
 		SyncManager *syncMgr_;
 		ClusterManager *clsMgr_;
 		ChunkManager *chunkMgr_;
 		CheckpointService *cpSvc_;
+		DataStore *dataStore_;
 		GlobalFixedSizeAllocator *fixedSizeAlloc_;
 		EventEngine::VariableSizeAllocator varSizeAlloc_;
 		util::StackAllocator alloc_;
@@ -400,6 +473,7 @@ private:
 	StatTable *baseStats_;
 
 	std::set<std::string> moduleList_;
+
 
 };
 

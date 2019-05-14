@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -14,6 +14,10 @@
    limitations under the License.
 */
 /**
- * Defines public interface of GridData.
+ * <div lang="ja">
+ * GridDBの公開インタフェースを定義します。
+ * </div><div lang="en">
+ * Defines public interface of GridDB.
+ * </div>
  */
 package com.toshiba.mwcloud.gs;

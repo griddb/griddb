@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -73,19 +73,32 @@ int32_t HashMap::initialize(TransactionContext& txn, ColumnType columnType,
 /*!
 	@brief Free Objects related to HashMap
 */
-int32_t HashMap::finalize(TransactionContext& txn) {
+bool HashMap::finalize(TransactionContext& txn) {
 	setDirty();
+
+	uint64_t removeNum = NUM_PER_EXEC;
 	if (size() > 0) {
+		uint32_t counter = 0;
 		for (uint64_t i = 0; i < hashMapImage_->rear_; i++) {
 			Bucket bucket(txn, *getObjectManager(), maxArraySize_,
 				maxCollisionArraySize_);
-			hashArray_.get(txn, i, bucket);
+			hashArray_.get(txn, hashMapImage_->rear_ - i - 1, bucket);
 			bucket.clear(txn);
+			counter++;
+			removeNum--;
+			if (removeNum == 0) {
+				break;
+			}
 		}
+		hashMapImage_->rear_ -= counter;
 	}
-	hashArray_.finalize(txn);
-	BaseObject::finalize();
-	return GS_SUCCESS;
+	if (removeNum > 0) {
+		hashArray_.finalize(txn, removeNum);
+	}
+	if (removeNum > 0) {
+		BaseObject::finalize();
+	}
+	return removeNum > 0;
 }
 
 /*!
@@ -137,6 +150,10 @@ int32_t HashMap::insert(
 		break;
 	case COLUMN_TYPE_TIMESTAMP:
 		return insertObject<Timestamp>(txn, *reinterpret_cast<uint64_t*>(key),
+			FixedSizeOfColumnType[hashMapImage_->keyType_], oId);
+		break;
+	case COLUMN_TYPE_GEOMETRY:
+		return insertObject<uint8_t>(txn, *reinterpret_cast<uint8_t*>(key),
 			FixedSizeOfColumnType[hashMapImage_->keyType_], oId);
 		break;
 	case COLUMN_TYPE_BLOB:
@@ -202,6 +219,10 @@ int32_t HashMap::remove(
 		return removeObject<Timestamp>(txn, *reinterpret_cast<uint64_t*>(key),
 			FixedSizeOfColumnType[hashMapImage_->keyType_], oId);
 		break;
+	case COLUMN_TYPE_GEOMETRY:
+		return removeObject<uint8_t>(txn, *reinterpret_cast<uint8_t*>(key),
+			FixedSizeOfColumnType[hashMapImage_->keyType_], oId);
+		break;
 	case COLUMN_TYPE_BLOB:
 		return removeObject<uint8_t>(txn, *reinterpret_cast<uint8_t*>(key),
 			FixedSizeOfColumnType[hashMapImage_->keyType_], oId);
@@ -265,6 +286,10 @@ int32_t HashMap::update(
 		return updateObject<Timestamp>(txn, *reinterpret_cast<uint64_t*>(key),
 			FixedSizeOfColumnType[hashMapImage_->keyType_], oId, newOId);
 		break;
+	case COLUMN_TYPE_GEOMETRY:
+		return updateObject<uint8_t>(txn, *reinterpret_cast<uint8_t*>(key),
+			FixedSizeOfColumnType[hashMapImage_->keyType_], oId, newOId);
+		break;
 	case COLUMN_TYPE_BLOB:
 		return updateObject<uint8_t>(txn, *reinterpret_cast<uint8_t*>(key),
 			FixedSizeOfColumnType[hashMapImage_->keyType_], oId, newOId);
@@ -325,6 +350,10 @@ int32_t HashMap::search(
 		oId = searchObject<Timestamp>(
 			txn, *reinterpret_cast<uint64_t*>(key), size);
 		break;
+	case COLUMN_TYPE_GEOMETRY:
+		oId =
+			searchObject<uint8_t>(txn, *reinterpret_cast<uint8_t*>(key), size);
+		break;
 	case COLUMN_TYPE_BLOB:
 		oId =
 			searchObject<uint8_t>(txn, *reinterpret_cast<uint8_t*>(key), size);
@@ -339,8 +368,8 @@ int32_t HashMap::search(
 /*!
 	@brief Search Row Objects
 */
-int32_t HashMap::search(TransactionContext& txn, SearchContext& sc,
-	util::XArray<OId>& idList, OutputOrder outputOrder) {
+int32_t HashMap::search(TransactionContext &txn, SearchContext &sc,
+	util::XArray<OId> &idList, OutputOrder outputOrder) {
 	ResultSize limit = sc.limit_;
 	const void* constKey = sc.key_;
 	uint32_t size = sc.keySize_;
@@ -394,6 +423,10 @@ int32_t HashMap::search(TransactionContext& txn, SearchContext& sc,
 	case COLUMN_TYPE_TIMESTAMP:
 		return searchObject<Timestamp>(
 			txn, *reinterpret_cast<uint64_t*>(key), size, limit, idList);
+		break;
+	case COLUMN_TYPE_GEOMETRY:
+		return searchObject<uint8_t>(
+			txn, *reinterpret_cast<uint8_t*>(key), size, limit, idList);
 		break;
 	case COLUMN_TYPE_BLOB:
 		return searchObject<uint8_t>(
@@ -731,29 +764,14 @@ void HashMap::merge(TransactionContext& txn) {
 template <class T>
 T* HashMap::getField(TransactionContext& txn, OId oId) {
 	OId validOId = resetModuleFlagOId(oId);
-	switch (container_->getContainerType()) {
-	case COLLECTION_CONTAINER: {
-		Collection::RowArray rowArray(txn, validOId,
-			reinterpret_cast<Collection*>(container_), OBJECT_READ_ONLY);
-		Collection::RowArray::Row row(rowArray.getRow(), &rowArray);
-		BaseObject baseFieldObject(txn.getPartitionId(), *getObjectManager());
-		row.getField(txn, container_->getColumnInfo(hashMapImage_->columnId_),
-			baseFieldObject);
-		return reinterpret_cast<T*>(baseFieldObject.getCursor<uint8_t>());
-	} break;
-	case TIME_SERIES_CONTAINER: {
-		TimeSeries::RowArray rowArray(txn, validOId,
-			reinterpret_cast<TimeSeries*>(container_), OBJECT_READ_ONLY);
-		TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);
-		BaseObject baseFieldObject(txn.getPartitionId(), *getObjectManager());
-		row.getField(txn, container_->getColumnInfo(hashMapImage_->columnId_),
-			baseFieldObject);
-		return reinterpret_cast<T*>(baseFieldObject.getCursor<uint8_t>());
-	} break;
-	default:
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_HM_UNEXPECTED_ERROR, "");
-		break;
-	}
+	BaseContainer::RowArray *rowArray = container_->getCacheRowArray(txn);
+	rowArray->load(txn, validOId, container_, OBJECT_READ_ONLY);
+	BaseContainer::RowArray::Row row(rowArray->getRow(), rowArray);
+	BaseObject baseFieldObject(txn.getPartitionId(), *getObjectManager());
+	row.getField(txn, container_->getColumnInfo(hashMapImage_->columnId_),
+		baseFieldObject);
+	rowArray->reset();
+	return reinterpret_cast<T*>(baseFieldObject.getCursor<uint8_t>());
 }
 
 std::string HashMap::dump(TransactionContext& txn, uint8_t mode) {
@@ -793,7 +811,8 @@ std::string HashMap::dump(TransactionContext& txn, uint8_t mode) {
 							 ? 0
 							 : mapStat.useNum_ * 100 / mapStat.allocateNum_;
 		theoreticalStatus =
-			(mapStat.allocateNum_ + mapStat.activeBucket_) * 8;  
+			(mapStat.allocateNum_ + mapStat.activeBucket_) *
+			8;  
 		strstrm << ", " << totalRequest << ", " << currentStatus << ", "
 				<< mapStat.bucketNum_ << ", " << mapStat.activeBucket_ << ", "
 				<< mapStat.allocateNum_ << ", " << mapStat.useNum_ << ", "

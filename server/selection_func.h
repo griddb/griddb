@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -154,7 +154,7 @@ public:
 		uint64_t offset, FunctionMap &function_map, ExprList &args,
 		OutputMessageRowStore *messageRowStore, ResultType &resultType);
 	QpPassMode getPassMode() {
-		return QP_PASSMODE_PASS;
+		return QP_PASSMODE_PASS_IF_NO_WHERE;
 	}
 	uint64_t apiPassThrough(TransactionContext &txn, TimeSeries &timeSeries,
 		BtreeMap::SearchContext &sc, OutputOrder apiOutputOrder, uint64_t limit,
@@ -188,7 +188,7 @@ public:
 	virtual ~SelectionTimeSampling() {}
 
 private:
-	void parseArgument(TransactionContext &txn, ObjectManager &objectManager,
+	bool parseArgument(TransactionContext &txn, ObjectManager &objectManager,
 		ExprList &args, uint32_t &columnId, ColumnType &columnType,
 		util::DateTime::FieldType &fType, Timestamp &targetTs, Timestamp &endTs,
 		int32_t &duration);

@@ -1,3 +1,8 @@
+<img src="http://griddb.org/Image/GridDB_logo.png" align="center" height="48" alt="GridDB"/>
+
+[![Visit Website](https://img.shields.io/badge/website-visit-orange.svg)](https://griddb.net) 
+![GitHub All Releases](https://img.shields.io/github/downloads/griddb/griddb_nosql/total.svg) 
+![GitHub release](https://img.shields.io/github/release/griddb/griddb_nosql.svg)
 ## Overview
   GridDB has a KVS (Key-Value Store)-type data model that is suitable for sensor data stored in a timeseries. It is a database that can be easily scaled-out according to the number of sensors.
 
@@ -10,9 +15,14 @@
   * Advanced data model and operation model  
     In a traditional distributed KVS, data is handled using operations such as Put/Get/Remove. GridDB expands these functions greatly to support the definition function for organizational data, SQL-like query function, transaction function and Java API (Application Programming Interface) so that RDB users are able to introduce the system smoothly. The key value represents the data in a set of records known as a key container. This is similar to the relationship between a RDB table name and table. It is also equipped with an application function for sensor data management.
 
+  This repository includes server and Java client.
+
+  (Additional infomation)  
+  There is [Java client Package (Jar) for v4.0.0 on Maven Central Repository](https://search.maven.org/search?q=g:com.github.griddb) .
+
 ## Quick start
-### Build a server
-    We have confirmed the operation on CentOS 6.7 and gcc version 4.4.7.
+### Build a server and client(Java)
+    We have confirmed the operation on CentOS 6.10 (gcc 4.4.7) and CentOS 7.4 (gcc 4.8.5).
 
     $ ./bootstrap.sh
     $ ./configure
@@ -29,9 +39,6 @@
     $ export no_proxy=127.0.0.1
     $ bin/gs_startnode
     $ bin/gs_joincluster -c your_clustername -u admin/your_password
-    
-### Build a client (Java)
-    $ ant -f java_client/build.xml
 
 ### Execute a sample program
     $ export CLASSPATH=${CLASSPATH}:$GS_HOME/bin/gridstore.jar
@@ -44,10 +51,34 @@
 ## Document
   Refer to the file below for more detailed information.  
   The documents below are stored in the docs folder.
-  * GridDB Technical Design Document  (GridDBTechnicalDesignDocument.pdf)
-  * [Quick Start Guide](https://griddb.github.io/docs/manual/GridDB_QuickStartGuide.html)(manual/GridDB_QuickStartGuide.html)
-  * [API Reference](https://griddb.github.io/docs/manual/GridDB_API_Reference.html)(manual/GridDB_API_Reference.html)
-  * [RPM Install Guide](https://griddb.github.io/docs/manual/GridDB_RPM_InstallGuide.html)(manual/GridDB_RPM_InstallGuide.html)
+  - [GridDB Technical Design Document](https://griddb.github.io/griddb_nosql/manual/GridDBTechnicalDesignDocument.pdf)  (manual/GridDBTechnicalDesignDocument.pdf)
+  - [Quick Start Guide](https://griddb.github.io/griddb_nosql/manual/GridDB_QuickStartGuide.html) (manual/GridDB_QuickStartGuide.html)
+  - [API Reference](https://griddb.github.io/griddb_nosql/manual/GridDB_API_Reference.html) (manual/GridDB_API_Reference.html)
+  - [RPM Installation Guide](https://griddb.github.io/griddb_nosql/manual/GridDB_RPM_InstallGuide.html) (manual/GridDB_RPM_InstallGuide.html)
+  - [V3.0 Release Notes](docs/GridDB-3.0.0-CE-RELEASE_NOTES.md) (GridDB-3.0.0-CE-RELEASE_NOTES.md)
+  - [V4.0 Release Notes](docs/GridDB-4.0-CE-RELEASE_NOTES.md) (GridDB-4.0-CE-RELEASE_NOTES.md)
+  - [V4.1 Release Notes](docs/GridDB-4.1-CE-RELEASE_NOTES.md) (GridDB-4.1-CE-RELEASE_NOTES.md)
+  - [DEB Installation Guide](https://griddb.github.io/griddb_nosql/manual/GridDB_DEB_InstallGuide.html) (manual/GridDB_DEB_InstallGuide.html)
+
+## Client and Connector
+  There are other clients and API for GridDB.
+  * [GridDB C Client](https://github.com/griddb/c_client)
+  * [GridDB Python Client](https://github.com/griddb/python_client)
+  * [GridDB Ruby Client](https://github.com/griddb/ruby_client)
+  * [GridDB Go Client](https://github.com/griddb/go_client)
+  * [GridDB Node.JS Client](https://github.com/griddb/nodejs_client)
+  * [GridDB PHP Client](https://github.com/griddb/php_client)
+  * [GridDB Perl Client](https://github.com/griddb/perl_client)
+  * [GridDB WebAPI](https://github.com/griddb/webapi)
+
+  There are some connectors for other OSS.
+  * [GridDB connector for Apache Hadoop MapReduce](https://github.com/griddb/griddb_hadoop_mapreduce)
+  * [GridDB connector for YCSB](https://github.com/griddb/griddb_ycsb)
+  * [GridDB connector for KairosDB](https://github.com/griddb/griddb_kairosdb)
+  * [GridDB connector for Apache Spark](https://github.com/griddb/griddb_spark)
+  * [GridDB Foreign Data Wrapper for PostgreSQL (https://github.com/pgspider/griddb_fdw)](https://github.com/pgspider/griddb_fdw)
+  * [GridDB Sample Application for Apache Kafka](https://github.com/griddb/griddb_kafka_sample_app)
+  * [GridDB Data Source for Grafana](https://github.com/griddb/griddb-datasource)
 
 ## Community
   * Issues  
@@ -59,6 +90,6 @@
 
 ## License
   The server source license is GNU Affero General Public License (AGPL), 
-  while the client library license and the operational commands is Apache License, version 2.0.
+  while the Java client library license and the operational commands is Apache License, version 2.0.
   See 3rd_party/3rd_party.md for the source and license of the third party.
 

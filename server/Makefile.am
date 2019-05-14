@@ -1,14 +1,18 @@
-bin_PROGRAMS = gsserver
+serverbinname = gsserver
+serverenvname = buildenv-server.txt
+
+bin_PROGRAMS = $(serverbinname)
+buildenvname = $(serverenvname)
 
 srcdir = .
 bindir = $(srcdir)/../bin
-buildenvfile = $(bindir)/buildenv-server.txt
 deploybinfile = $(bindir)/$(bin_PROGRAMS)
+buildenvfile = $(bindir)/$(buildenvname)
 
 topdir = $(srcdir)/..
 utildir = $(topdir)/utility
 libdir = $(topdir)/3rd_party
-incdir = $(srcdir)/include
+trdir = $(srcdir)/tr-cpp
 
 all-local: $(buildenvfile)
 
@@ -41,7 +45,7 @@ $(buildenvfile): $(deploybinfile)
 	@CXX@ --version >> $(buildenvfile)
 
 clean-local:
-	rm -fv $(buildenvfile)
+	rm -fv $(bindir)/$(serverbinname) $(bindir)/$(serverenvname)
 
 distclean-local:
 	rm -fv Makefile.in
@@ -60,11 +64,9 @@ $(activemqinclude)/ActiveMQCPP.h:
 	mv $(libdir)/activemq-cpp-library/activemq-cpp-library-3.7.1 $(libdir)/activemq-cpp-library/org
 	$(libdir)/activemq-cpp-library/build.sh
 
-if BUILD_SH_DEBUG
-buildshopt=--debug
-else !BUILD_SH_DEBUG
-buildshopt=
-endif !BUILD_SH_DEBUG
+$(trdir)/libtrcpp.a:
+	./configure
+	make
 
 if LINK_ACTIVEMQ
 aprinclude=$(libdir)/apr/install/include/apr-1
@@ -89,10 +91,18 @@ $(activemqheaders)
 QP_SOURCES= \
 	$(srcdir)/tql.h \
 	$(srcdir)/tql_token.h \
+	$(srcdir)/wkt.cpp \
+	$(srcdir)/wkt.h \
 	$(srcdir)/boolean_expression.h \
 	$(srcdir)/boolean_expression.cpp \
 	$(srcdir)/expression.cpp \
 	$(srcdir)/expression.h \
+	$(srcdir)/gis_geomfromtext.h \
+	$(srcdir)/gis_geometry.h \
+	$(srcdir)/gis_pointgeom.h \
+	$(srcdir)/gis_polygon.h \
+	$(srcdir)/gis_surface.h \
+	$(srcdir)/gis_geometry.cpp \
 	$(srcdir)/lexer.h \
 	$(srcdir)/lexer.cpp \
 	$(srcdir)/function_map.cpp \
@@ -100,13 +110,30 @@ QP_SOURCES= \
 	$(srcdir)/tql.cpp \
 	$(srcdir)/query.cpp \
 	$(srcdir)/query.h \
-	$(srcdir)/value_operator.h
+	$(srcdir)/value_operator.h \
+	$(srcdir)/rtree_map.h \
+	$(srcdir)/rtree_map.cpp
 
-gsserver_SOURCES = \
+QP_INCLUDE=../server/tr-cpp
+QP_LDADD=../server/tr-cpp/libtrcpp.a
+
+NOSQL_SOURCES = \
 $(QP_SOURCES)\
 $(libdir)/ebb/ebb_request_parser.c \
 $(libdir)/sha2/sha2.c \
+$(libdir)/uuid/uuid/clear.c \
+$(libdir)/uuid/uuid/compare.c \
+$(libdir)/uuid/uuid/copy.c \
+$(libdir)/uuid/uuid/gen_uuid.c \
+$(libdir)/uuid/uuid/isnull.c \
+$(libdir)/uuid/uuid/pack.c \
+$(libdir)/uuid/uuid/parse.c \
+$(libdir)/uuid/uuid/unpack.c \
+$(libdir)/uuid/uuid/unparse.c \
+$(libdir)/uuid/uuid/uuid_time.c \
+$(srcdir)/zlib_utils.cpp \
 $(srcdir)/array_processor.cpp \
+$(srcdir)/authentication.cpp \
 $(srcdir)/base_container.cpp \
 $(srcdir)/bit_array.cpp \
 $(srcdir)/blob_processor.cpp \
@@ -119,8 +146,11 @@ $(srcdir)/cluster_manager.cpp \
 $(srcdir)/cluster_service.cpp \
 $(srcdir)/collection.cpp \
 $(srcdir)/config_table.cpp \
+$(srcdir)/container_archive.cpp \
+$(srcdir)/container_key.cpp \
 $(srcdir)/data_store.cpp \
 $(srcdir)/event_engine.cpp \
+$(srcdir)/geometry_processor.cpp \
 $(srcdir)/gs_error.cpp \
 $(srcdir)/hash_map.cpp \
 $(srcdir)/http.cpp \
@@ -128,6 +158,7 @@ $(srcdir)/json.cpp \
 $(srcdir)/log_manager.cpp \
 $(srcdir)/message_row_store.cpp \
 $(srcdir)/message_schema.cpp \
+$(srcdir)/meta_store.cpp \
 $(srcdir)/object_allocator.cpp \
 $(srcdir)/object_manager.cpp \
 $(srcdir)/partition_table.cpp \
@@ -149,33 +180,47 @@ $(srcdir)/system_service.cpp \
 $(srcdir)/time_series.cpp \
 $(srcdir)/transaction_context.cpp \
 $(srcdir)/transaction_manager.cpp \
+$(srcdir)/transaction_manager_authentication.cpp \
 $(srcdir)/transaction_service.cpp \
+$(srcdir)/transaction_service_user_management.cpp \
 $(srcdir)/trigger_service.cpp \
+$(srcdir)/uuid_utils.cpp \
 $(srcdir)/value.cpp \
+$(srcdir)/value_operator.cpp \
 $(srcdir)/value_processor.cpp \
 $(srcdir)/main.cpp
 
-gsserver_CPPFLAGS = \
--DGD_ENABLE_UNICAST_NOTIFICATION \
-$(NOSQL_INCLUDES)
+BASE_CPPFLAGS = \
+-DGD_ENABLE_UNICAST_NOTIFICATION
 
-gsserver_LDADD = \
+NOSQL_CPPFLAGS = \
+$(BASE_CPPFLAGS)
+
+NOSQL_LDADD = \
+$(QP_LDADD) \
 $(utildir)/libutil.a \
 $(libdir)/MessagePack/libmsgpack.a \
 $(activemqldadd) \
 $(aprldadd) \
 -lpthread -lrt -ldl -lstdc++ -lz
 
-gsserver_LDFLAGS = -rdynamic
-
 NOSQL_INCLUDES = \
 -I$(srcdir) \
 -I$(utildir) \
--I$(incdir) \
 -I$(libdir)/MessagePack/include \
 -I$(libdir)/picojson/include \
 -I$(libdir)/ebb \
 -I$(libdir)/sha2 \
+-I$(libdir)/omaha/omaha/base/security \
+-I$(libdir)/uuid \
+-I$(srcdir)/tr-cpp \
 -I$(aprinclude) \
 -I$(activemqinclude)
 
+NOSQL_LDFLAG = \
+-rdynamic
+
+gsserver_SOURCES = $(NOSQL_SOURCES)
+gsserver_CPPFLAGS = $(NOSQL_CPPFLAGS) $(NOSQL_INCLUDES)
+gsserver_LDADD = $(NOSQL_LDADD)
+gsserver_LDFLAGS = $(NOSQL_LDFLAG)

@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -53,7 +53,7 @@ typedef uint64_t LogSequentialNumber; /*!< Log sequential Number (unique witihin
 										 a partition) */
 
 typedef uint64_t
-	TransactionId; /*!< Transaction ID (unique witihin a partition) */
+	TransactionId;			/*!< Transaction ID (unique witihin a partition) */
 
 typedef uint64_t SessionId; /*!< Session ID (decide by client) */
 
@@ -67,6 +67,8 @@ typedef uint64_t
 	CheckpointId; /*!< Checkpoint ID (unique witihin a partition group) */
 
 typedef uint64_t ResultSize;  
+
+typedef uint64_t BackgroundId; /*! Background Id (unique witihin a partition) */
 
 typedef uint32_t Size_t;
 typedef int32_t Offset_t;
@@ -124,7 +126,13 @@ const CheckpointId MAX_CHECKPOINT_ID = UNDEF_CHECKPOINT_ID - 1;
 const ResultSize UNDEF_RESULT_SIZE = UINT64_MAX;
 const ResultSize MAX_RESULT_SIZE = UNDEF_RESULT_SIZE - 1;
 
+const BackgroundId UNDEF_BACKGROUND_ID = UINT64_MAX;
+
 const bool TRIM_MILLISECONDS = false;  
+
+typedef int64_t TablePartitioningVersionId;
+const TablePartitioningVersionId UNDEF_TABLE_PARTITIONING_VERSIONID = -1;
+const TablePartitioningVersionId MAX_TABLE_PARTITIONING_VERSIONID = INT64_MAX;
 
 const uint32_t IO_MONITOR_DEFAULT_WARNING_THRESHOLD_MILLIS = 5000;
 
@@ -157,10 +165,12 @@ typedef uint8_t ContainerHashMode;
 const ContainerHashMode CONTAINER_HASH_MODE_CRC32 = 0;
 
 typedef uint64_t AffinityGroupId;
+typedef uint16_t ExpireIntervalCategoryId;  
+typedef uint16_t UpdateIntervalCategoryId;  
 
 typedef RowId DatabaseId;  
 
-
+//#define GD_ENABLE_UNICAST_NOTIFICATION
 
 
 #endif

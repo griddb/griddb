@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -44,7 +44,13 @@ ObjectManager::ObjectManager(
 	  maxObjectSize_(
 		  (1 << (CHUNK_EXP_SIZE_ - 1)) - ObjectAllocator::BLOCK_HEADER_SIZE),
 	  halfOfMaxObjectSize_(
-		  (1 << (CHUNK_EXP_SIZE_ - 2)) - ObjectAllocator::BLOCK_HEADER_SIZE) {
+		  (1 << (CHUNK_EXP_SIZE_ - 2)) - ObjectAllocator::BLOCK_HEADER_SIZE),
+	  recommendLimitObjectSize_(
+		  (1 << (CHUNK_EXP_SIZE_ - 4)) - ObjectAllocator::BLOCK_HEADER_SIZE)
+	  ,
+	  isZeroFill_(configTable.get<int32_t>(CONFIG_TABLE_DS_STORE_COMPRESSION_MODE) == 
+				  0 ? false: true)
+	{
 	if (CHUNK_EXP_SIZE_ <= 0 || MAX_CHUNK_EXP_SIZE < CHUNK_EXP_SIZE_) {
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_OM_INVALID_CHUNK_EXP_SIZE, "");
 	}
@@ -55,7 +61,7 @@ ObjectManager::ObjectManager(
 
 	try {
 		objectAllocator_ =
-			UTIL_NEW ObjectAllocator(CHUNK_EXP_SIZE_, CHUNK_HEADER_BLOCK_SIZE);
+			UTIL_NEW ObjectAllocator(CHUNK_EXP_SIZE_, CHUNK_HEADER_BLOCK_SIZE, isZeroFill_);
 	}
 	catch (std::exception &e) {
 		delete objectAllocator_;
@@ -72,7 +78,10 @@ ObjectManager::ObjectManager()
 	  maxObjectSize_(
 		  (1 << (CHUNK_EXP_SIZE_ - 1)) - ObjectAllocator::BLOCK_HEADER_SIZE),
 	  halfOfMaxObjectSize_(
-		  (1 << (CHUNK_EXP_SIZE_ - 2)) - ObjectAllocator::BLOCK_HEADER_SIZE) {}
+		  (1 << (CHUNK_EXP_SIZE_ - 2)) - ObjectAllocator::BLOCK_HEADER_SIZE)
+	  ,
+	  isZeroFill_(false)
+{}
 
 /*!
 	@brief Destructor of ObjectManager
@@ -84,19 +93,19 @@ ObjectManager::~ObjectManager() {
 uint8_t *ObjectManager::allocateObject(PartitionId pId, Size_t requestSize,
 	const AllocateStrategy &allocateStrategy, OId &oId, ObjectType objectType) {
 	const ChunkCategoryId categoryId = allocateStrategy.categoryId_;
-	const AffinityGroupId affinityValue = allocateStrategy.affinityGroupId_;
+	const DataAffinityInfo affinityInfo = makeDataAffinityInfo(allocateStrategy);
 	try {
 		const uint8_t powerSize =
 			objectAllocator_->getObjectExpSize(requestSize);
 
 		ChunkId cId;
 		MetaChunk *metaChunk = chunkManager_->searchChunk(pId, categoryId,
-			affinityValue, allocateStrategy.chunkKey_, powerSize, cId);
+				affinityInfo, allocateStrategy.chunkKey_, powerSize, cId);
 		assert(cId != UNDEF_CHUNKID);
 
 		if (metaChunk == NULL) {
 			metaChunk = chunkManager_->allocateChunk(pId, categoryId,
-				affinityValue, allocateStrategy.chunkKey_, cId);
+					affinityInfo, allocateStrategy.chunkKey_, cId);
 			assert(cId <= OBJECT_MAX_CHUNK_ID_);  
 			uint8_t maxFreeExpSize;
 			objectAllocator_->initializeChunk(
@@ -212,3 +221,4 @@ void* ObjectManager::reload(PartitionId pId, OId oId, OId *lastOId, const Object
 
 	return getForUpdate<uint8_t>(pId, oId);
 }
+

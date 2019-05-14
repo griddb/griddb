@@ -1,5 +1,5 @@
 ﻿/*
-    Copyright (c) 2012 TOSHIBA CORPORATION.
+    Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
     
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License as
@@ -27,8 +27,6 @@
 #include "util/container.h"
 
 
-
-
 class PartitionGroupConfig;
 struct NodeDescriptor;
 /*!
@@ -41,6 +39,8 @@ public:
 	struct Config;
 	struct Source;
 	struct EventRequestOption;
+	class BufferManager;
+	class ExternalBuffer;
 	class Buffer;
 	class Event;
 	class EventContext;
@@ -48,6 +48,7 @@ public:
 	class EventCoder;
 	class ThreadErrorHandler;
 	class Stats;
+	struct Tool;
 
 	typedef int32_t EventType;
 	typedef int64_t EventMonotonicTime;
@@ -58,6 +59,8 @@ public:
 			uint8_t, VariableSizeAllocator> > EventOutStream;
 	typedef util::ArrayByteInStream EventByteInStream;
 	typedef util::ByteStream<EventOutStream> EventByteOutStream;
+	typedef std::pair<uint64_t, uint64_t> BufferId;
+
 	/*!
 		@brief Event handling mode
 	*/
@@ -66,6 +69,7 @@ public:
 		HANDLING_IMMEDIATE,
 		HANDLING_QUEUEING
 	};
+
 	/*!
 		@brief Local event type
 	*/
@@ -75,6 +79,7 @@ public:
 		LOCAL_IO_WORKER_STARTED,
 		LOCAL_IO_WORKER_TERMINATING
 	};
+
 	/*!
 		@brief Resume condition at pending
 	*/
@@ -157,6 +162,9 @@ private:
 
 	typedef util::LockGuard<util::Mutex> LockGuard;
 
+	typedef std::vector< Event*, util::StdAllocator<
+			Event*, VariableSizeAllocator> > EventList;
+
 	EventEngine(const EventEngine&);
 	EventEngine& operator=(const EventEngine&);
 
@@ -183,6 +191,7 @@ private:
 	UTIL_UNIQUE_PTR<Listener> listener_;
 	IOWorker *ioWorkerList_;
 	EventWorker *eventWorkerList_;
+	BufferManager *bufferManager_;
 };
 
 typedef EventEngine::EventRequestOption EventRequestOption;
@@ -267,6 +276,8 @@ public:
 	util::SocketAddress serverAddress_;
 
 	double ioConcurrencyRate_;
+	bool secondaryIOEnabled_;
+	bool ioNegotiationMinimum_;
 
 	bool keepaliveEnabled_;
 	int32_t keepaliveIdle_;
@@ -309,6 +320,7 @@ struct EventEngine::Source {
 
 	VariableSizeAllocator *varAllocator_;
 	FixedSizeAllocator *fixedAllocator_;
+	BufferManager *bufferManager_;
 };
 
 /*!
@@ -319,6 +331,77 @@ struct EventEngine::EventRequestOption {
 	bool operator==(const EventRequestOption &option) const;
 
 	int32_t timeoutMillis_;
+	bool onSecondary_;
+};
+
+class EventEngine::BufferManager {
+public:
+	virtual ~BufferManager();
+
+	virtual size_t getUnitSize() = 0;
+
+	virtual std::pair<BufferId, void*> allocate() = 0;
+	virtual void deallocate(const BufferId &id) = 0;
+
+	virtual void* latch(const BufferId &id) = 0;
+	virtual void unlatch(const BufferId &id) = 0;
+};
+
+class EventEngine::ExternalBuffer {
+public:
+	class Reader;
+	class Writer;
+
+	explicit ExternalBuffer(BufferManager *manager = NULL);
+	~ExternalBuffer();
+
+	void clear();
+	void swap(ExternalBuffer &another);
+
+	bool isEmpty() const;
+	size_t getSize() const;
+	size_t getCapacity() const;
+
+private:
+	ExternalBuffer(const ExternalBuffer&);
+	ExternalBuffer& operator=(const ExternalBuffer&);
+
+	BufferManager *manager_;
+	BufferId id_;
+	size_t size_;
+	size_t capacity_;
+};
+
+class EventEngine::ExternalBuffer::Reader {
+public:
+	explicit Reader(const ExternalBuffer &buffer);
+	~Reader();
+
+	const void* data();
+
+private:
+	Reader(const Reader&);
+	Reader& operator=(const Reader&);
+
+	BufferManager *manager_;
+	BufferId id_;
+	const void *data_;
+};
+
+class EventEngine::ExternalBuffer::Writer {
+public:
+	explicit Writer(ExternalBuffer &buffer);
+	~Writer();
+
+	size_t tryAppend(const void *data, size_t size);
+
+private:
+	Writer(const Writer&);
+	Writer& operator=(const Writer&);
+
+	ExternalBuffer &bufferRef_;
+	ExternalBuffer buffer_;
+	void *data_;
 };
 
 /*!
@@ -353,11 +436,17 @@ public:
 
 	void transferTo(Buffer &another) const;
 
+	ExternalBuffer& prepareExternal(BufferManager *manager);
+	const ExternalBuffer* getExternal() const;
+	size_t getExternalOffset() const;
+	void setExternalOffset(size_t offset);
+
 private:
 	struct Body;
 
 	mutable Body *body_;
 	size_t offset_;
+	size_t extOffset_;
 };
 
 /*!
@@ -406,6 +495,8 @@ public:
 	size_t getExtraMessageCount() const;
 	void getExtraMessage(size_t index, const void *&ptr, size_t &size) const;
 	void addExtraMessage(const void *ptr, size_t size);
+
+	Source getSource();
 
 	uint16_t getTailMetaMessageSize() const;
 	void setTailMetaMessageSize(uint16_t size);
@@ -485,6 +576,7 @@ public:
 
 	uint32_t getWorkerId() const;
 	bool isOnIOWorker() const;
+	bool isOnSecondaryIOWorker() const;
 
 
 	int64_t getLastEventCycle() const;
@@ -513,8 +605,10 @@ private:
 
 	uint32_t workerId_;
 	bool onIOWorker_;
+	bool onSecondaryIOWorker_;
 
-	Event *scannerEvent_;
+	const EventList *eventList_;
+
 };
 
 /*!
@@ -534,6 +628,8 @@ struct EventEngine::EventContext::Source {
 	Stats *workerStats_;
 	uint32_t workerId_;
 	bool onIOWorker_;
+	bool onSecondaryIOWorker_;
+	const EventList *eventList_;
 };
 
 /*!
@@ -635,6 +731,7 @@ public:
 		IO_REQUEST_CANCEL_COUNT,
 		IO_REQUEST_CONNECT_COUNT,
 		IO_REQUEST_ADD_COUNT,
+		IO_REQUEST_MOVE_COUNT,
 		IO_REQUEST_REMOVE_COUNT,
 		IO_REQUEST_MODIFY_COUNT,
 		IO_REQUEST_SUSPEND_COUNT,
@@ -659,6 +756,13 @@ public:
 		EVENT_PENDING_QUEUE_SIZE_CURRENT,
 		EVENT_PENDING_QUEUE_SIZE_MAX,
 
+		STATS_LIVE_TYPE_START,
+
+		EVENT_ACTIVE_EXECUTABLE_COUNT =
+				STATS_LIVE_TYPE_START, 
+		EVENT_CYCLE_HANDLING_COUNT, 
+		EVENT_CYCLE_HANDLING_AFTER_COUNT, 
+
 		STATS_TYPE_MAX
 	};
 
@@ -674,14 +778,14 @@ public:
 	void increment(Type type);
 	void decrement(Type type);
 
-	void merge(Type type, int64_t value);
-	void mergeAll(const Stats &stats);
+	void merge(Type type, int64_t value, bool sumOnly = false);
+	void mergeAll(const Stats &stats, bool sumOnly = false);
 
 	static const char8_t* typeToString(Type type);
 	void dump(std::ostream &out) const;
 
 private:
-	static const char8_t *const STATS_TYPE_NAMES[];
+	static const char8_t *const STATS_TYPE_NAMES[STATS_TYPE_MAX];
 
 	static const Type STATS_MAX_INITIAL_VALUE_TYPES[];
 	static const Type STATS_MIN_INITIAL_VALUE_TYPES[];
@@ -693,6 +797,13 @@ private:
 	static bool findType(const Type (&typeArray)[N], Type type);
 
 	int64_t valueList_[STATS_TYPE_MAX];
+};
+
+struct EventEngine::Tool {
+	static bool getLiveStats(
+			EventEngine &ee, PartitionGroupId pgId, Stats::Type type,
+			int64_t &value, const EventContext *ec, const Event *ev,
+			const EventMonotonicTime *now = NULL);
 };
 
 
@@ -710,16 +821,34 @@ public:
 		ND_SOCKET_MAX
 	};
 
+	enum SocketMode {
+		SOCKET_MODE_SINGLE,
+		SOCKET_MODE_RESOLVING,
+		SOCKET_MODE_FULL,
+		SOCKET_MODE_MIXED
+	};
+
 	typedef EventEngine::EventSocket EventSocket;
 	typedef EventEngine::NDPool NDPool;
 	typedef EventEngine::LockGuard LockGuard;
 	typedef EventEngine::VariableSizeAllocator VariableSizeAllocator;
 
-	Body(NodeDescriptorId id, Type type, bool self, EventEngine &ee);
+	Body(
+			NodeDescriptorId id, Type type, bool self, bool onSecondary,
+			EventEngine &ee);
 	~Body();
 
 	EventEngine& getEngine();
 	util::Mutex& getLock();
+
+	Body* findPrimary();
+	Body* findSecondary();
+
+	void setSocketMode(LockGuard &ndGuard, SocketMode mode);
+	SocketMode getSocketMode(LockGuard &ndGuard);
+
+	bool findSocketType(
+			LockGuard &ndGuard, EventSocket *socket, SocketType &type);
 
 	void setSocket(LockGuard &ndGuard, EventSocket *socket, SocketType type);
 
@@ -747,6 +876,8 @@ private:
 	const NodeDescriptorId id_;
 	const Type type_;
 	const bool self_;
+	const bool onSecondary_;
+	SocketMode mode_;
 	util::Atomic<const util::SocketAddress*> address_;
 	EventEngine &ee_;
 
@@ -757,6 +888,8 @@ private:
 	util::Mutex mutex_;
 	TimeMap *eventTimeMap_;
 	EventSocket *socketList_[ND_SOCKET_MAX];
+
+	Body *another_;
 };
 
 struct EventEngine::Buffer::Body {
@@ -767,12 +900,13 @@ struct EventEngine::Buffer::Body {
 	explicit Body(VariableSizeAllocator &allocator);
 
 	VariableSizeAllocator& getAllocator();
-	uint64_t getReferenceCount();
+	ExternalBuffer& prepareExternal(BufferManager *manager);
 
 	Body(const Body&);
 	Body& operator=(const Body&);
 	uint64_t refCount_;
 	XArray storage_;
+	ExternalBuffer ext_;
 };
 
 class EventEngine::NDPool {
@@ -883,7 +1017,7 @@ public:
 	explicit SocketPool(EventEngine &ee);
 	~SocketPool();
 
-	EventSocket* allocate();
+	EventSocket* allocate(bool onSecondary);
 	void deallocate(EventSocket *socket, bool workerAlive, LockGuard *ndGuard);
 
 private:
@@ -892,10 +1026,13 @@ private:
 
 	EventEngine &ee_;
 	const size_t ioConcurrency_;
+	const size_t primaryIOConcurrency_;
+	const size_t secondaryIOConcurrency_;
 
 	util::Mutex mutex_;
 	util::ObjectPool<EventSocket> base_;
-	size_t workerSelectionSeed_;
+	size_t primaryWorkerSeed_;
+	size_t secondaryWorkerSeed_;
 
 };
 
@@ -908,6 +1045,13 @@ public:
 		DISPATCH_RESULT_DONE,
 		DISPATCH_RESULT_CANCELED,
 		DISPATCH_RESULT_CLOSED
+	};
+
+	enum ControlEventType {
+		CONTROL_PRIMARY = -1,
+		CONTROL_SECONDARY = -2,
+		CONTROL_MIXED = -3,
+		CONTROL_TYPE_END = -4
 	};
 
 	explicit Dispatcher(EventEngine &ee);
@@ -961,11 +1105,14 @@ private:
 	Dispatcher& operator=(const Dispatcher&);
 
 	void handleEvent(EventContext &ec, Event &ev, HandlerEntry &entry);
-	void handleUnknownEvent(EventContext &ec, Event &ev);
+	void handleUnknownOrControlEvent(EventContext &ec, Event &ev);
 
 	void setHandlerEntry(EventType type, HandlerEntry entry);
 	HandlerEntry* findHandlerEntry(EventType type, bool handlerRequired);
 	void filterImmediatePartitionId(Event &ev);
+
+	static void resolveEventTimeout(
+			EventContext &ec, Event &ev, int32_t &timeoutMillis);
 
 	EventEngine &ee_;
 
@@ -1008,10 +1155,13 @@ private:
 };
 
 struct EventEngine::Manipulator {
-	static NodeDescriptor::Body& getNDBody(const NodeDescriptor &nd);
+	static NodeDescriptor::Body& getNDBody(
+			const NodeDescriptor &nd, bool onSecondary);
+	static NodeDescriptor::Body* findNDBody(
+			const NodeDescriptor &nd, bool onSecondary);
 	static util::SocketAddress resolveListenAddress(const Config &config);
 	static bool isListenerEnabled(const Config &config);
-	static uint32_t getIOConcurrency(const Config &config);
+	static uint32_t getIOConcurrency(const Config &config, bool withSecondary);
 	static Stats& getStats(const EventContext &ec);
 
 	static void mergeAllocatorStats(Stats &stats, VariableSizeAllocator &alloc);
@@ -1019,6 +1169,9 @@ struct EventEngine::Manipulator {
 
 	static void prepareMulticastSocket(
 			const Config &config, NDPool &ndPool, SocketPool &socketPool);
+
+	static size_t getHandlingEventCount(
+			const EventContext &ec, const Event *ev, bool includesStarted);
 };
 
 class EventEngine::ClockGenerator : public util::ThreadRunner {
@@ -1083,7 +1236,7 @@ public:
 
 	IOWorker();
 	virtual ~IOWorker();
-	void initialize(EventEngine &ee, uint32_t id);
+	void initialize(EventEngine &ee, uint32_t id, bool secondary);
 	virtual void run();
 
 	void start();
@@ -1104,6 +1257,7 @@ public:
 	bool reconnectSocket(EventSocket *socket, util::IOPollEvent pollEvent);
 	bool addSocket(EventSocket *socket, util::IOPollEvent pollEvent);
 	void removeSocket(EventSocket *socket);
+	void moveSocket(EventSocket *socket);
 	void modifySocket(EventSocket *socket, util::IOPollEvent pollEvent);
 	void suspendSocket(EventSocket *socket, util::IOPollEvent pollEvent);
 
@@ -1119,6 +1273,7 @@ private:
 		SOCKET_OPERATION_NONE,
 		SOCKET_OPERATION_RECONNECT,
 		SOCKET_OPERATION_ADD,
+		SOCKET_OPERATION_MOVE,
 		SOCKET_OPERATION_REMOVE,
 		SOCKET_OPERATION_MODIFY,
 		SOCKET_OPERATION_SUSPEND
@@ -1159,6 +1314,7 @@ private:
 
 	EventEngine *ee_;
 	uint32_t id_;
+	bool secondary_;
 
 	bool runnable_;
 	bool suspended_;
@@ -1204,6 +1360,9 @@ public:
 	const Stats& getStats() const;
 	void mergeExtraStats(Stats &stats);
 
+	bool getLiveStats(
+			Stats::Type type, EventMonotonicTime now, int64_t &value);
+
 private:
 	struct ActiveEntry {
 		ActiveEntry(int64_t time, int32_t periodicInterval);
@@ -1228,9 +1387,6 @@ private:
 	typedef std::deque< Event*, util::StdAllocator<
 			Event*, VariableSizeAllocator> > EventQueue;
 
-	typedef std::vector< Event*, util::StdAllocator<
-			Event*, VariableSizeAllocator> > EventList;
-
 	typedef std::vector<
 			EventProgressWatcher*,
 			util::StdAllocator<
@@ -1241,7 +1397,8 @@ private:
 	EventWorker(const EventWorker&);
 	EventWorker& operator=(const EventWorker&);
 
-	EventContext::Source createContextSource(util::StackAllocator &allocator);
+	EventContext::Source createContextSource(
+			util::StackAllocator &allocator, const EventList *eventList);
 
 
 	bool popActiveEvents(EventList &eventList, int64_t &nextTimeDiff);
@@ -1264,6 +1421,9 @@ private:
 			VariableSizeAllocator &allocator, EventContainer &eventContainer);
 	static void clearEvents(
 			VariableSizeAllocator &allocator, ActiveQueue &activeQueue);
+
+	size_t getExecutableActiveEventCount(
+			EventMonotonicTime now, const util::LockGuard<util::Condition>&);
 
 	EventEngine *ee_;
 	uint32_t id_;
@@ -1305,12 +1465,18 @@ public:
 
 	SocketPool& getParentPool();
 
+	bool isConnectionPending(LockGuard &ndGuard);
+
 	bool openAsClient(LockGuard &ndGuard, const util::SocketAddress &address);
-	bool openAsServer(util::Socket &acceptedSocket,
+	bool openAsServer(
+			util::Socket &acceptedSocket,
 			const util::SocketAddress &acceptedAddress);
 	bool openAsMulticast(const util::SocketAddress &address);
 
+	void sendNegotiationEvent(
+			LockGuard &ndGuard, const Event::Source &eventSource);
 	void send(LockGuard &ndGuard, Event &ev, const EventRequestOption *option);
+
 	void shutdown(LockGuard &ndGuard);
 
 	bool reconnectLocal(bool polling);
@@ -1318,7 +1484,12 @@ public:
 
 	void handleDisconnectionLocal();
 
-	void closeLocal(bool workerAlive, LockGuard *ndGuard);
+	bool addLocal();
+	void moveLocal();
+
+	void closeLocal(bool workerAlive, LockGuard *ndGuard) throw();
+
+	static Event::Source eventToSource(Event &ev);
 
 private:
 	typedef IOWorker::BufferQueue BufferQueue;
@@ -1329,6 +1500,7 @@ private:
 	EventSocket(const EventSocket&);
 	EventSocket& operator=(const EventSocket&);
 
+	bool acceptInitialEvent(EventType type, const NodeDescriptor &nd);
 	void initializeND(LockGuard &ndGuard, const NodeDescriptor &nd);
 	void dispatchEvent(Event &ev, const EventRequestOption &option);
 
@@ -1340,6 +1512,10 @@ private:
 
 	bool handleIOError(std::exception &e) throw();
 
+	void transferSendBuffer(EventSocket &dest) const;
+	void appendToSendBuffer(
+			const void *data, size_t size, size_t offset);
+
 
 	EventEngine &ee_;
 	IOWorker &parentWorker_;
@@ -1349,10 +1525,14 @@ private:
 	util::Socket base_;
 	util::SocketAddress address_;
 	bool multicast_;
+	const bool onSecondary_;
 
 	bool firstEventSent_;
+	bool firstEventReceived_;
+	bool negotiationEventDone_;
 	Event receiveEvent_;
 	Buffer *receiveBuffer_;
+	BufferQueue *receiveBufferQueue_;
 	BufferQueue *sendBufferQueue_;
 
 	size_t nextReceiveSize_;
@@ -1364,6 +1544,7 @@ private:
 	EventRequestOption pendingOption_;
 
 	NodeDescriptor nd_;
+	NodeDescriptor::Body::SocketType ndSocketPendingType_;
 };
 
 /*!
@@ -1567,15 +1748,18 @@ inline void EventEngine::setEventCoder(EventCoder &coder) {
 }
 
 inline void EventEngine::resetConnection(const NodeDescriptor &nd) {
-	if (nd.isEmpty()) {
+	if (nd.getType() == NodeDescriptor::ND_TYPE_MULTICAST) {
 		return;
 	}
 
-	NodeDescriptor::Body &body = Manipulator::getNDBody(nd);
-	LockGuard guard(body.getLock());
+	for (size_t i = 0; i < 2; i++) {
+		const bool onSecondary = (i > 0);
+		NodeDescriptor::Body *body = Manipulator::findNDBody(nd, onSecondary);
+		LockGuard guard(body->getLock());
 
-	body.setSocket(guard, NULL, NodeDescriptor::Body::ND_SOCKET_RECEIVER);
-	body.setSocket(guard, NULL, NodeDescriptor::Body::ND_SOCKET_SENDER);
+		body->setSocket(guard, NULL, NodeDescriptor::Body::ND_SOCKET_RECEIVER);
+		body->setSocket(guard, NULL, NodeDescriptor::Body::ND_SOCKET_SENDER);
+	}
 }
 
 inline void EventEngine::setHandler(EventType type, EventHandler &handler) {
@@ -1628,13 +1812,14 @@ inline void EventEngine::getStats(Stats &stats) {
 	stats = *stats_;
 
 	for (uint32_t i = 0; i < config_->concurrency_; i++) {
-		stats.mergeAll(eventWorkerList_[i].getStats());
+		stats.mergeAll(eventWorkerList_[i].getStats(), true);
 		eventWorkerList_[i].mergeExtraStats(stats);
 	}
 
-	const uint32_t ioConcurrency = Manipulator::getIOConcurrency(*config_);
+	const uint32_t ioConcurrency =
+			Manipulator::getIOConcurrency(*config_, true);
 	for (uint32_t i = 0; i < ioConcurrency; i++) {
-		stats.mergeAll(ioWorkerList_[i].getStats());
+		stats.mergeAll(ioWorkerList_[i].getStats(), true);
 		ioWorkerList_[i].mergeExtraStats(stats);
 	}
 }
@@ -1737,7 +1922,8 @@ inline EventEngine::Source::Source(
 		VariableSizeAllocator &varAllocator,
 		FixedSizeAllocator &fixedAllocator) :
 		varAllocator_(&varAllocator),
-		fixedAllocator_(&fixedAllocator) {
+		fixedAllocator_(&fixedAllocator),
+		bufferManager_(NULL) {
 }
 
 inline EventEngine::VariableSizeAllocator&
@@ -1762,23 +1948,27 @@ EventEngine::Source::resolveFixedSizeAllocator() const {
 
 
 inline EventEngine::EventRequestOption::EventRequestOption() :
-		timeoutMillis_(0) {
+		timeoutMillis_(0),
+		onSecondary_(false) {
 }
 
 inline bool EventEngine::EventRequestOption::operator==(
 		const EventRequestOption &option) const {
-	return (timeoutMillis_ == option.timeoutMillis_);
+	return (timeoutMillis_ == option.timeoutMillis_ &&
+			onSecondary_ == option.onSecondary_);
 }
 
 
 inline EventEngine::Buffer::Buffer(VariableSizeAllocator &allocator) :
 		body_(Body::newInstance(allocator)),
-		offset_(0) {
+		offset_(0),
+		extOffset_(0) {
 }
 
 inline EventEngine::Buffer::Buffer() :
 		body_(NULL),
-		offset_(0) {
+		offset_(0),
+		extOffset_(0) {
 }
 
 inline EventEngine::Buffer::~Buffer() try {
@@ -1789,7 +1979,8 @@ catch (...) {
 
 inline EventEngine::Buffer::Buffer(const Buffer &another) :
 		body_(Body::duplicateReference(another.body_)),
-		offset_(another.offset_) {
+		offset_(another.offset_),
+		extOffset_(another.extOffset_) {
 }
 
 inline EventEngine::Buffer& EventEngine::Buffer::operator=(
@@ -1802,6 +1993,7 @@ inline EventEngine::Buffer& EventEngine::Buffer::operator=(
 
 	body_ = Body::duplicateReference(another.body_);
 	offset_ = another.offset_;
+	extOffset_ = another.extOffset_;
 
 	return *this;
 }
@@ -1860,6 +2052,7 @@ inline bool EventEngine::Buffer::isEmpty() const {
 
 inline void EventEngine::Buffer::clear() {
 	offset_ = 0;
+	extOffset_ = 0;
 
 	if (body_ == NULL) {
 		return;
@@ -1933,6 +2126,26 @@ inline void EventEngine::Buffer::setOffset(size_t offset) {
 	}
 
 	offset_ = offset;
+}
+
+inline EventEngine::ExternalBuffer& EventEngine::Buffer::prepareExternal(
+		BufferManager *manager) {
+	assert(body_ != NULL);
+	return body_->prepareExternal(manager);
+}
+
+inline const EventEngine::ExternalBuffer*
+EventEngine::Buffer::getExternal() const {
+	assert(body_ != NULL);
+	return (body_->ext_.isEmpty() ? NULL : &body_->ext_);
+}
+
+inline size_t EventEngine::Buffer::getExternalOffset() const {
+	return extOffset_;
+}
+
+inline void EventEngine::Buffer::setExternalOffset(size_t offset) {
+	extOffset_ = offset;
 }
 
 
@@ -2144,6 +2357,13 @@ inline void EventEngine::Event::addExtraMessage(const void *ptr, size_t size) {
 	extraMessageCount_++;
 }
 
+inline Event::Source EventEngine::Event::getSource() {
+	VariableSizeAllocator *allocator = messageBuffer_.getAllocator();
+	assert(allocator != NULL);
+
+	return Event::Source(*allocator);
+}
+
 inline uint16_t EventEngine::Event::getTailMetaMessageSize() const {
 	return static_cast<uint16_t>(
 			std::min<size_t>(messageBuffer_.getSize(), tailMetaMessageSize_));
@@ -2244,7 +2464,9 @@ inline EventEngine::EventContext::EventContext(const Source &source) :
 		eventSource_(*source.varAllocator_),
 		workerStats_(*source.workerStats_),
 		workerId_(source.workerId_),
-		onIOWorker_(source.onIOWorker_)
+		onIOWorker_(source.onIOWorker_),
+		onSecondaryIOWorker_(source.onSecondaryIOWorker_),
+		eventList_(source.eventList_)
 {
 
 	if (source.varAllocator_ == NULL || source.allocator_ == NULL ||
@@ -2336,6 +2558,10 @@ inline bool EventEngine::EventContext::isOnIOWorker() const {
 	return onIOWorker_;
 }
 
+inline bool EventEngine::EventContext::isOnSecondaryIOWorker() const {
+	return onSecondaryIOWorker_;
+}
+
 
 inline int64_t EventEngine::EventContext::getLastEventCycle() const {
 	return workerStats_.get(Stats::EVENT_CYCLE_COUNT);
@@ -2378,18 +2604,24 @@ inline EventEngine::EventContext::Source::Source(
 		progressWatcher_(NULL),
 		workerStats_(&workerStats),
 		workerId_(0),
-		onIOWorker_(false) {
+		onIOWorker_(false),
+		onSecondaryIOWorker_(false),
+		eventList_(NULL) {
 }
 
 
 inline NodeDescriptor::Body::Body(
-		NodeDescriptorId id, Type type, bool self, EventEngine &ee) :
+		NodeDescriptorId id, Type type, bool self, bool onSecondary,
+		EventEngine &ee) :
 		id_(id),
 		type_(type),
 		self_(self),
+		onSecondary_(onSecondary),
+		mode_(SOCKET_MODE_SINGLE),
 		ee_(ee),
 		freeLink_(NULL),
-		eventTimeMap_(NULL) {
+		eventTimeMap_(NULL),
+		another_(NULL) {
 	std::fill(socketList_, socketList_ + ND_SOCKET_MAX,
 			static_cast<EventSocket*>(NULL));
 }
@@ -2409,6 +2641,14 @@ inline util::Mutex& NodeDescriptor::Body::getLock() {
 	return mutex_;
 }
 
+inline NodeDescriptor::Body* NodeDescriptor::Body::findPrimary() {
+	return (onSecondary_ ? another_ : this);
+}
+
+inline NodeDescriptor::Body* NodeDescriptor::Body::findSecondary() {
+	return (onSecondary_ ? this : another_);
+}
+
 inline void NodeDescriptor::Body::setSocket(
 		LockGuard &ndGuard, EventSocket *socket, SocketType type) {
 
@@ -2420,7 +2660,8 @@ inline void NodeDescriptor::Body::setSocket(
 	}
 
 	if (socket != NULL) {
-		socket->initializeND(ndGuard, NodeDescriptor(*this));
+		assert(!onSecondary_ == !socket->onSecondary_);
+		socket->initializeND(ndGuard, NodeDescriptor(*findPrimary()));
 		storedSocket = socket;
 	}
 }
@@ -2497,6 +2738,7 @@ inline void* NodeDescriptor::Body::resolveUserData(
 inline NodeDescriptor::Body* NodeDescriptor::Body::duplicateReference(
 		Body *body) {
 	if (body != NULL) {
+		assert(!body->onSecondary_);
 		++body->refCount_;
 	}
 
@@ -2547,12 +2789,103 @@ inline void EventEngine::Buffer::Body::removeReference(Body *&body) {
 
 inline EventEngine::Buffer::Body::Body(VariableSizeAllocator &allocator) :
 		refCount_(0),
-		storage_(allocator) {
+		storage_(allocator),
+		ext_(NULL) {
 }
 
 inline EventEngine::VariableSizeAllocator&
 EventEngine::Buffer::Body::getAllocator() {
 	return *storage_.get_allocator().base();
+}
+
+inline EventEngine::ExternalBuffer&
+EventEngine::Buffer::Body::prepareExternal(BufferManager *manager) {
+	if (ext_.isEmpty()) {
+		ExternalBuffer ext(manager);
+		ext_.swap(ext);
+	}
+	return ext_;
+}
+
+/*!
+	@brief Deallocates body objects
+*/
+inline void EventEngine::NDPool::deallocateBody(NodeDescriptor::Body *body) {
+	if (body == NULL) {
+		return;
+	}
+
+	LockGuard guard(poolMutex_);
+
+	switch (body->type_) {
+	case NodeDescriptor::ND_TYPE_CLIENT:
+		ee_.stats_->increment(Stats::ND_CLIENT_REMOVE_COUNT);
+		break;
+	case NodeDescriptor::ND_TYPE_SERVER:
+		ee_.stats_->increment(Stats::ND_SERVER_REMOVE_COUNT);
+		break;
+	case NodeDescriptor::ND_TYPE_MULTICAST:
+		ee_.stats_->increment(Stats::ND_MCAST_REMOVE_COUNT);
+		break;
+	default:
+		assert(false);
+	}
+
+	if (!body->onSecondary_ && body->another_ != NULL) {
+		UTIL_OBJECT_POOL_DELETE(bodyPool_, body->another_);
+	}
+	body->another_ = NULL;
+
+	if (body->type_ == NodeDescriptor::ND_TYPE_CLIENT) {
+		body->freeLink_ = bodyFreeLink_;
+		bodyFreeLink_ = body;
+	}
+	else {
+		UTIL_OBJECT_POOL_DELETE(bodyPool_, body);
+	}
+}
+
+/*!
+	@brief Deallocates user data
+*/
+inline void EventEngine::NDPool::deallocateUserData(void *userData) {
+	if (userData == NULL) {
+		return;
+	}
+
+	LockGuard guard(userDataMutex_);
+
+	if (userDataPool_.get() == NULL) {
+		return;
+	}
+
+	try {
+		(*userDataDestructor_)(userData);
+	}
+	catch (...) {
+	}
+
+	userDataPool_->deallocate(userData);
+
+	ee_.stats_->increment(Stats::ND_USER_DATA_REMOVE_COUNT);
+}
+
+inline void EventEngine::Stats::increment(Type type) {
+	assert(0 <= type && type < STATS_TYPE_MAX);
+	valueList_[type]++;
+}
+
+inline void EventEngine::Stats::decrement(Type type) {
+	assert(0 <= type && type < STATS_TYPE_MAX);
+	valueList_[type]--;
+}
+
+inline void EventEngine::NDPool::releaseTimeMap(TimeMap *&map) {
+	if (map != NULL) {
+		LockGuard guard(poolMutex_);
+		UTIL_OBJECT_POOL_DELETE(timeMapPool_, map);
+		map = NULL;
+	}
 }
 
 #endif

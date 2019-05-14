@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -53,6 +53,9 @@ typedef ObjectAccessType<OBJECT_FOR_UPDATE> ObjectWriteType;
 			   (1L << UNIT_OFFSET_ROUND_BIT) ==                 \
 		   0);
 
+#define ASSERT_ISVALID_USER(user)                           \
+	assert(0 <= user && user < (1L << MAX_USER_BIT));
+
 struct AllocateStrategy;
 
 /*!
@@ -60,6 +63,7 @@ struct AllocateStrategy;
 */
 class ObjectManager {
 	typedef ChunkManager::MetaChunk MetaChunk;
+	typedef ChunkManager::DataAffinityInfo DataAffinityInfo;
 
 public:
 	/*!
@@ -155,6 +159,9 @@ public:
 		return (1U << objectAllocator_->getObjectExpSize(requestSize)) -
 			   ObjectAllocator::BLOCK_HEADER_SIZE;
 	}
+	Size_t getAllocateSize(uint32_t exponent) {
+		return (1 << (CHUNK_EXP_SIZE_ - exponent)) - ObjectAllocator::BLOCK_HEADER_SIZE;
+	}
 
 	/*!
 		@brief Returns an allocated and fixed Object for requested size for
@@ -191,19 +198,28 @@ public:
 
 	void free(PartitionId pId, OId oId);
 
+	uint32_t getChunkSize() const {
+		return chunkManager_->getConfig().getChunkSize();
+	}
+
 	/*!
 		@brief Frees all Objects on the Chunks, older than timestamp of
 	   ChunkKey.
 	*/
 	bool batchFree(PartitionId pId, ChunkKey chunkKey, uint64_t maxScanNum,
-		uint64_t& scanNum, uint64_t& freeChunkNum) {
+		uint64_t& scanNum, uint64_t& freeChunkNum,
+		ChunkKey simulateChunkKey, uint64_t& simulateFreeNum) {
 		try {
 			return chunkManager_->batchFreeChunk(
-				pId, chunkKey, maxScanNum, scanNum, freeChunkNum);
+				pId, chunkKey, maxScanNum, scanNum, freeChunkNum,
+				simulateChunkKey, simulateFreeNum);
 		}
 		catch (std::exception& e) {
 			GS_RETHROW_SYSTEM_ERROR(e, "");
 		}
+	};
+	void purgeDataAffinityInfo(PartitionId pId, Timestamp baseTime) {
+		return chunkManager_->purgeDataAffinityInfo(pId, baseTime);
 	};
 
 	/*!
@@ -263,12 +279,9 @@ public:
 	UTIL_FORCEINLINE T* load(
 		PartitionId pId, OId oId, OId* lastOId, uint8_t* lastAddr) {
 		assert(oId != UNDEF_OID);
-		const OId offsetMask =
-			(((static_cast<OId>(1) << CATEGORY_ID_SHIFT_BIT) - 1) ^
-				~((static_cast<OId>(1) << UNIT_OFFSET_SHIFT_BIT) - 1));
 
 		T* result;
-		if ((oId & offsetMask) != (*lastOId & offsetMask)) {
+		if (notEqualChunk(oId, *lastOId)) {
 			typedef ObjectAccessType<mode> AccessModeType;
 			result = static_cast<T*>(reload(pId, oId, lastOId, AccessModeType()));
 		}
@@ -334,6 +347,9 @@ public:
 	uint32_t getHalfOfMaxObjectSize() const {
 		return halfOfMaxObjectSize_;
 	}
+	uint32_t getRecommendtLimitObjectSize() const {
+		return recommendLimitObjectSize_;
+	}
 
 	/*!
 		@brief Validates RefCounter of fixing and unfixing.
@@ -343,7 +359,8 @@ public:
 			ChunkCategoryId categoryId = 0;
 			ChunkId cId = 0;
 			uint64_t chunkNum = chunkManager_->getScanSize(pId);
-			MetaChunk* metaChunk = chunkManager_->begin(pId, categoryId, cId);
+			ChunkKey* chunkKey;
+			MetaChunk* metaChunk = chunkManager_->begin(pId, categoryId, cId, chunkKey);
 			for (uint64_t i = 0; i < chunkNum; i++) {
 				if (metaChunk && !metaChunk->isFree()) {
 					int32_t refCount =
@@ -357,7 +374,101 @@ public:
 								<< ", cId = " << i << ", ref = " << refCount);
 					}
 				}
-				metaChunk = chunkManager_->next(pId, categoryId, cId);
+				metaChunk = chunkManager_->next(pId, categoryId, cId, chunkKey);
+			}
+		}
+	}
+
+	void dumpRefCounter(PartitionId pId) {
+		if (existPartition(pId)) {
+			std::cout << "=========== dumpRefCounter pId = " << pId
+					  << " =======" << std::endl;
+			ChunkCategoryId categoryId = 0;
+			ChunkId cId = 0;
+			uint64_t chunkNum = chunkManager_->getScanSize(pId);
+			ChunkKey *chunkKey;
+			MetaChunk* metaChunk = chunkManager_->begin(pId, categoryId, cId, chunkKey);
+			for (uint64_t i = 0; i < chunkNum; i++) {
+				if (metaChunk && !metaChunk->isFree()) {
+					int32_t refCount =
+						chunkManager_->getRefCount(pId, categoryId, cId);
+					std::cout << "pId = " << pId
+							  << ", categoryId = " << (int32_t)categoryId
+							  << ", cId = " << i << ", ref = " << refCount
+							  << std::endl;
+				}
+				ChunkKey *chunkKey;
+				metaChunk = chunkManager_->next(pId, categoryId, cId, chunkKey);
+			}
+		}
+	}
+
+	void dumpObject(PartitionId pId, int32_t level = 1) {
+		if (existPartition(pId)) {
+			try {
+				std::cout << "=====pId, " << pId << std::endl;
+				ChunkCategoryId categoryId = 0;
+				ChunkCategoryId prevCategoryId = -1;
+				ChunkId cId = 0;
+				uint64_t chunkNum = chunkManager_->getScanSize(pId);
+				ChunkKey *chunkKey;
+				MetaChunk* metaChunk =
+						chunkManager_->begin(pId, categoryId, cId, chunkKey);
+				for (uint64_t i = 0; i < chunkNum; i++) {
+					if (categoryId != prevCategoryId) {
+						std::cout << "<<<<<categoryId, " << (int32_t)categoryId
+								  << std::endl;
+					}
+					if (metaChunk && !metaChunk->isFree()) {
+						metaChunk =
+							chunkManager_->getChunk(pId, categoryId, cId);
+						std::string str =
+							objectAllocator_->dump(metaChunk->getPtr(), 1);
+						std::cout << "-----cId, " << cId << std::endl;
+						std::cout << str << std::endl;
+						chunkManager_->unfix(pId, categoryId, cId);
+					}
+					prevCategoryId = categoryId;
+					metaChunk = chunkManager_->next(pId, categoryId, cId, chunkKey);
+				}
+			}
+			catch (std::exception& e) {
+				GS_RETHROW_SYSTEM_ERROR(e, "");
+			}
+		}
+	}
+
+	void dumpObjectDigest(PartitionId pId) {
+		if (existPartition(pId)) {
+			try {
+				ChunkCategoryId categoryId = 0;
+				ChunkCategoryId prevCategoryId = -1;
+				ChunkId cId = 0;
+				uint64_t chunkNum = chunkManager_->getScanSize(pId);
+				ChunkKey *chunkKey;
+				MetaChunk* metaChunk =
+						chunkManager_->begin(pId, categoryId, cId, chunkKey);
+				for (uint64_t i = 0; i < chunkNum; i++) {
+					if (categoryId != prevCategoryId) {
+					}
+					if (metaChunk && !metaChunk->isFree()) {
+						metaChunk =
+							chunkManager_->getChunk(pId, categoryId, cId);
+						std::cout << "pId," << pId << ",categoryId," <<
+								(int32_t)categoryId << ",cId," << cId;
+						std::string str =
+							objectAllocator_->dumpDigest(metaChunk->getPtr());
+						std::cout << str;
+						str = ChunkManager::ChunkHeader::dump(metaChunk->getPtr());
+						std::cout << "," << str << std::endl;
+						chunkManager_->unfix(pId, categoryId, cId);
+					}
+					prevCategoryId = categoryId;
+					metaChunk = chunkManager_->next(pId, categoryId, cId, chunkKey);
+				}
+			}
+			catch (std::exception& e) {
+				GS_RETHROW_SYSTEM_ERROR(e, "");
 			}
 		}
 	}
@@ -372,6 +483,18 @@ private:
 	ObjectAllocator* objectAllocator_;  
 	uint32_t maxObjectSize_;
 	uint32_t halfOfMaxObjectSize_;
+	uint32_t recommendLimitObjectSize_;
+	bool isZeroFill_; 
+
+	inline static DataAffinityInfo makeDataAffinityInfo(const AllocateStrategy &strategy) {
+		assert(strategy.expireCategoryId_ < ChunkManager::EXPIRE_INTERVAL_CATEGORY_COUNT);
+		DataAffinityInfo affinityInfo;
+		affinityInfo.expireCategory_ =
+				strategy.expireCategoryId_ % ChunkManager::EXPIRE_INTERVAL_CATEGORY_COUNT;
+		affinityInfo.updateCategory_ =
+				strategy.affinityGroupId_ % ChunkManager::UPDATE_INTERVAL_CATEGORY_COUNT;
+		return affinityInfo;
+	}
 
 	uint8_t* allocateObject(MetaChunk& metaChunk, uint8_t powerSize,
 		ObjectType objectType, uint32_t& offset, Size_t& size) {
@@ -433,21 +556,32 @@ private:
 	}
 
 
+
 	static const uint64_t MASK_32BIT = 0xFFFFFFFFULL;
 	static const uint64_t MASK_16BIT = 0x0000FFFFULL;
 	static const uint64_t MASK_3BIT = 0x00000007ULL;
 
 	static const int32_t MAGIC_NUMBER_EXP_SIZE = 3;
-	static const uint64_t MASK_MAGIC = 0x0038000000000000ULL;
-	static const uint64_t MAGIC_NUMBER = 0x0028000000000000ULL;
+	static const uint64_t MASK_MAGIC = 0x000000000000e000ULL;
+	static const uint64_t MAGIC_NUMBER = 0x000000000000a000ULL;
+
+	static const uint64_t MASK_USER = 0x000003FFULL;
 
 	static const uint32_t UNIT_OFFSET_ROUND_BIT = 4;
 
 	static const uint32_t MAX_CHUNK_EXP_SIZE = 20;
 
-	static const uint32_t UNIT_OFFSET_SHIFT_BIT = 32;
-	static const uint32_t CATEGORY_ID_SHIFT_BIT = 32 + 16;
-	static const uint32_t MAGIC_SHIFT_BIT = 3 + 32 + 16;
+	static const uint32_t UNIT_CHUNK_SHIFT_BIT = 32;
+	static const uint32_t UNIT_OFFSET_SHIFT_BIT = 16;
+	static const uint32_t CATEGORY_ID_SHIFT_BIT = 10;
+	static const uint32_t MAGIC_SHIFT_BIT = 1 + 12;
+
+	static const uint32_t MAX_USER_BIT = 10;
+
+	static const uint32_t MAX_UNIT_OFFSET_BIT = 16;
+	static const uint64_t MASK_UNIT_OFFSET =
+			((static_cast<uint64_t>(1) << MAX_UNIT_OFFSET_BIT) - 1) <<
+					UNIT_OFFSET_SHIFT_BIT;
 
 public:
 	inline static OId getOId(
@@ -455,7 +589,7 @@ public:
 		ASSERT_ISVALID_CATEGORYID(categoryId);
 		ASSERT_ISVALID_CHUNKID(cId);
 		ASSERT_ISVALID_OFFSET(offset);
-		OId chunkIdOId = ((OId)cId);
+		OId chunkIdOId = ((OId)cId << UNIT_CHUNK_SHIFT_BIT);
 		OId unitOffsetOId = (((OId)offset >> UNIT_OFFSET_ROUND_BIT)
 							 << UNIT_OFFSET_SHIFT_BIT);  
 		OId categoryIdOId = ((OId)categoryId << CATEGORY_ID_SHIFT_BIT);
@@ -464,16 +598,13 @@ public:
 	}
 
 	inline static ChunkId getChunkId(OId oId) {
-		ChunkId cId = static_cast<ChunkId>(MASK_32BIT & (oId));
+		ChunkId cId = static_cast<ChunkId>(MASK_32BIT & (oId >> UNIT_CHUNK_SHIFT_BIT));
 		ASSERT_ISVALID_CHUNKID(cId);
 		return cId;
 	}
 
 	inline static Offset_t getOffset(OId oId) {
-		Offset_t offset =
-			(static_cast<int32_t>(MASK_16BIT & (oId >> UNIT_OFFSET_SHIFT_BIT))
-				<< UNIT_OFFSET_ROUND_BIT) +
-			ObjectAllocator::BLOCK_HEADER_SIZE;
+		Offset_t offset = getRelativeOffset(oId) + ObjectAllocator::BLOCK_HEADER_SIZE;
 		ASSERT_ISVALID_OFFSET(offset);
 		return offset;
 	}
@@ -495,10 +626,29 @@ public:
 		return categoryId;
 	}
 
+	inline static OId getUserArea(OId oId) {
+		OId userArea = oId & MASK_USER;
+		return userArea;
+	}
+
+	inline static OId setUserArea(OId oId, OId userArea) {
+		ASSERT_ISVALID_USER(userArea);
+		OId addedOId = getBaseArea(oId) | userArea;
+		return addedOId;
+	}
+
+	inline static OId getBaseArea(OId oId) {
+		OId baseArea = oId & (~MASK_USER);
+		return baseArea;
+	}
 private:
 	inline static bool isValidOId(OId oId) {
 		uint64_t magic = static_cast<uint64_t>(MASK_MAGIC & oId);
 		return (magic == MAGIC_NUMBER);
+	}
+
+	inline static bool notEqualChunk(OId oId1, OId oId2) {
+		return ((oId1 & ~MASK_UNIT_OFFSET) != (oId2 & ~MASK_UNIT_OFFSET));
 	}
 
 public:

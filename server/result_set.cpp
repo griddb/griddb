@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -49,7 +49,10 @@ ResultSet::ResultSet()
 	  resultType_(RESULT_NONE),
 	  isId_(false),
 	  isRowIdInclude_(false),
-	  useRSRowImage_(false)
+	  useRSRowImage_(false),
+	  distributedTarget_(NULL),
+	  distributedTargetUncovered_(false),
+	  distributedTargetReduced_(false)
 {
 }
 
@@ -58,6 +61,7 @@ ResultSet::~ResultSet() {
 		ALLOC_DELETE((*rsAlloc_), rowIdList_);
 		ALLOC_DELETE((*rsAlloc_), rsSerializedRowList_);
 		ALLOC_DELETE((*rsAlloc_), rsSerializedVarDataList_);
+		ALLOC_DELETE((*rsAlloc_), distributedTarget_);
 	}
 }
 
@@ -99,10 +103,14 @@ void ResultSet::clear() {
 		ALLOC_DELETE((*rsAlloc_), rowIdList_);
 		ALLOC_DELETE((*rsAlloc_), rsSerializedRowList_);
 		ALLOC_DELETE((*rsAlloc_), rsSerializedVarDataList_);
+		ALLOC_DELETE((*rsAlloc_), distributedTarget_);
 	}
 	rowIdList_ = NULL;
 	rsSerializedRowList_ = NULL;
 	rsSerializedVarDataList_ = NULL;
+	distributedTarget_ = NULL;
+	distributedTargetUncovered_ = false;
+	distributedTargetReduced_ = false;
 
 	rsetId_ = UNDEF_RESULTSETID;
 	txnId_ = UNDEF_TXNID;
@@ -238,3 +246,214 @@ bool ResultSet::isRelease() const {
 		   (resultType_ != PARTIAL_RESULT_ROWSET);
 }
 
+const util::Vector<int64_t>* ResultSet::getDistributedTarget() const {
+	return distributedTarget_;
+}
+
+util::Vector<int64_t>* ResultSet::getDistributedTarget() {
+	assert(rsAlloc_);
+	if (distributedTarget_ == NULL) {
+		distributedTarget_ =
+				ALLOC_NEW(*rsAlloc_) util::Vector<int64_t>(*rsAlloc_);
+	}
+	return distributedTarget_;
+}
+
+void ResultSet::getDistributedTargetStatus(
+		bool &uncovered, bool &reduced) const {
+	uncovered = distributedTargetUncovered_;
+	reduced = distributedTargetReduced_;
+}
+
+void ResultSet::setDistributedTargetStatus(bool uncovered, bool reduced) {
+	distributedTargetUncovered_ = uncovered;
+	distributedTargetReduced_ = reduced;
+}
+
+
+ResultSetHolderManager::ResultSetHolderManager() :
+		alloc_(util::AllocatorInfo(
+				ALLOCATOR_GROUP_TXN_RESULT, "resultSetHolder")),
+		config_(NULL, alloc_),
+		groupList_(alloc_) {
+}
+
+ResultSetHolderManager::~ResultSetHolderManager() try {
+	clear();
+}
+catch (...) {
+	assert(false);
+}
+
+void ResultSetHolderManager::initialize(const PartitionGroupConfig &config) {
+	if (config_.get() != NULL) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
+
+	clear();
+
+	const uint32_t groupCount = config.getPartitionGroupCount();
+	groupList_.reserve(groupCount);
+
+	for (uint32_t i = 0; i < groupCount; i++) {
+		groupList_.push_back(ALLOC_VAR_SIZE_NEW(alloc_) Group(alloc_));
+	}
+
+	config_.reset(ALLOC_VAR_SIZE_NEW(alloc_) PartitionGroupConfig(config));
+}
+
+void ResultSetHolderManager::closeAll(
+		TransactionContext &txn, DataStore &dataStore) {
+	closeAll(
+			txn.getDefaultAllocator(),
+			getPartitionGroupId(txn.getPartitionId()),
+			dataStore);
+}
+
+void ResultSetHolderManager::closeAll(
+		util::StackAllocator &alloc, PartitionGroupId pgId,
+		DataStore &dataStore) {
+	util::Vector<EntryKey> rsIdList(alloc);
+	pullCloseable(pgId, rsIdList);
+
+	for (util::Vector<EntryKey>::iterator it = rsIdList.begin();
+			it != rsIdList.end(); ++it) {
+		dataStore.closeResultSet(it->first, it->second);
+	}
+}
+
+void ResultSetHolderManager::add(PartitionId pId, ResultSetId rsId) {
+	if (rsId == UNDEF_RESULTSETID) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
+
+	const EntryKey key(pId, rsId);
+	Group &group = getGroup(getPartitionGroupId(pId));
+
+	util::LockGuard<util::Mutex> guard(mutex_);
+
+	util::AllocUniquePtr<Entry> entry(
+			ALLOC_VAR_SIZE_NEW(alloc_) Entry(key), alloc_);
+
+	if (!group.map_.insert(std::make_pair(key, entry.get())).second) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
+
+	entry.release();
+}
+
+void ResultSetHolderManager::setCloseable(PartitionId pId, ResultSetId rsId) {
+	const EntryKey key(pId, rsId);
+	Group &group = getGroup(getPartitionGroupId(pId));
+
+	util::LockGuard<util::Mutex> guard(mutex_);
+
+	Map::iterator it = group.map_.find(key);
+	if (it == group.map_.end() || it->second->next_ != NULL) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
+
+	it->second->next_ = group.closeableEntry_;
+	group.closeableEntry_ = it->second;
+	group.map_.erase(it);
+	group.version_++;
+}
+
+void ResultSetHolderManager::release(PartitionId pId, ResultSetId rsId) {
+	const EntryKey key(pId, rsId);
+	Group &group = getGroup(getPartitionGroupId(pId));
+
+	util::LockGuard<util::Mutex> guard(mutex_);
+
+	Map::iterator it = group.map_.find(key);
+	if (it == group.map_.end() || it->second->next_ != NULL) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
+
+	ALLOC_VAR_SIZE_DELETE(alloc_, it->second);
+	group.map_.erase(it);
+}
+
+void ResultSetHolderManager::clear() {
+	config_.reset();
+
+	while (!groupList_.empty()) {
+		{
+			Group *group = groupList_.back();
+			clearEntries(*group, true);
+			ALLOC_VAR_SIZE_DELETE(alloc_, group);
+		}
+		groupList_.pop_back();
+	}
+}
+
+void ResultSetHolderManager::clearEntries(Group &group, bool withMap) {
+	if (withMap) {
+		for (Map::iterator it = group.map_.begin();
+				it != group.map_.end(); ++it) {
+			ALLOC_VAR_SIZE_DELETE(alloc_, it->second);
+		}
+		group.map_.clear();
+	}
+
+	for (Entry *entry = group.closeableEntry_; entry != NULL;) {
+		Entry *next = entry->next_;
+		ALLOC_VAR_SIZE_DELETE(alloc_, entry);
+		entry = next;
+	}
+
+	group.closeableEntry_ = NULL;
+}
+
+void ResultSetHolderManager::pullCloseable(
+		PartitionGroupId pgId, util::Vector<EntryKey> &keyList) {
+	Group &group = getGroup(pgId);
+
+	if (group.checkedVersion_ != group.version_) {
+		util::LockGuard<util::Mutex> guard(mutex_);
+
+		for (Entry *entry = group.closeableEntry_;
+				entry != NULL; entry = entry->next_) {
+			keyList.push_back(entry->key_);
+		}
+
+		clearEntries(group, false);
+
+		group.checkedVersion_ = group.version_;
+	}
+}
+
+ResultSetHolderManager::Group& ResultSetHolderManager::getGroup(
+		PartitionGroupId pgId) {
+	if (pgId >= groupList_.size()) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
+	return *groupList_[pgId];
+}
+
+PartitionGroupId ResultSetHolderManager::getPartitionGroupId(
+		PartitionId pId) const {
+	if (config_.get() == NULL) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
+	return config_->getPartitionGroupId(pId);
+}
+
+ResultSetHolderManager::Entry::Entry(const EntryKey &key) :
+		key_(key),
+		next_(NULL) {
+}
+
+ResultSetHolderManager::Group::Group(Allocator &alloc) :
+		map_(alloc),
+		version_(0),
+		checkedVersion_(0),
+		closeableEntry_(NULL) {
+}

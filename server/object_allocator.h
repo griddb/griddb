@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -21,7 +21,7 @@
 #ifndef OBJECT_ALLOCATOR_H_
 #define OBJECT_ALLOCATOR_H_
 
-#include "data_type.h"  
+#include "data_type.h"
 #include <cassert>
 #include <iostream>
 #include <map>
@@ -41,7 +41,7 @@ public:
 	static const uint8_t BLOCK_HEADER_SIZE =
 		static_cast<uint8_t>(sizeof(uint32_t));
 
-	ObjectAllocator(uint8_t chunkExpSize, uint32_t chunkHeaderSize);
+	ObjectAllocator(uint8_t chunkExpSize, uint32_t chunkHeaderSize, bool isZeroFill = false);
 	~ObjectAllocator();
 
 	void initializeChunk(uint8_t *chunkTop, uint8_t &maxFreeExpSize);
@@ -73,7 +73,7 @@ public:
 		assert(isValidObject(objectAddr));
 		HeaderBlock *header = getHeaderBlock(objectAddr, -hSize_);
 		uint8_t k = header->getPower();
-		uint32_t freedBlockSize = 1UL << k;
+		uint32_t freedBlockSize = UINT32_C(1) << k;
 		return freedBlockSize - hSize_;
 	}
 
@@ -118,7 +118,7 @@ private:
 
 		void setUsed(
 			bool isUsed, uint32_t power, int8_t type = OBJECT_TYPE_UNKNOWN) {
-			power_ = 0x80u * isUsed + static_cast<uint8_t>(power & 0x0000007fu);
+			power_ = static_cast<uint8_t>(0x80u * isUsed + (power & 0x0000007fu));
 			type_ = type;
 			check_ = MAGIC_NUMBER;
 		}
@@ -177,9 +177,12 @@ private:
 	uint8_t minPower_;  
 	uint8_t maxPower_;  
 	uint32_t tableSize_;
-	uint8_t hSize_;  
-	int32_t freeListOffset_;  
+	uint8_t
+		hSize_;  
+	int32_t
+		freeListOffset_;  
 	int32_t maxFreeExpSizeOffset_;
+	bool isZeroFill_; 
 
 	ObjectAllocator(const ObjectAllocator &);
 	ObjectAllocator &operator=(const ObjectAllocator &);
@@ -188,6 +191,7 @@ public:
 	void dumpFreeChain(uint8_t *top, int32_t offset, int32_t k) const;
 	void dumpFreeChain(uint8_t *top, int32_t k) const;
 	std::string dump(uint8_t *chunk, int32_t level = 0) const;
+	std::string dumpDigest(uint8_t *chunk) const;
 	void dumpSummary(uint8_t *top,
 		std::map<int8_t, std::pair<uint32_t, uint32_t> > &typeStatMap,
 		uint64_t &summaryFreeSize, uint64_t &summaryUseSize) const;
@@ -212,7 +216,7 @@ private:
 		assert(x);
 
 		uint32_t y = 0;
-		uint8_t nlz = 32;
+		uint32_t nlz = 32;
 
 		y = x >> 16;
 		if (0 != y) {
@@ -226,7 +230,7 @@ private:
 		}
 		nlz -= ZeroTable[x];
 
-		return 31 - nlz;
+		return static_cast<uint8_t>(31 - nlz);
 	};
 };
 

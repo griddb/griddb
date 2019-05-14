@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2013 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -569,7 +569,10 @@ void TriggerHandler::checkEventNotificationUrl(
 */
 void TriggerHandler::checkTriggerRegistration(
 	util::StackAllocator &alloc, TriggerInfo &info) {
-	validateName(info.name_.c_str(), LIMIT_COLUMN_NAME_SIZE);
+	NoEmptyKey::validate(
+		KeyConstraint::getUserKeyConstraint(LIMIT_COLUMN_NAME_SIZE),
+		info.name_.c_str(), static_cast<uint32_t>(info.name_.size()),
+		"triggerName");
 
 	if (info.operation_ == TriggerService::NO_OPERATION) {
 		GS_THROW_USER_ERROR(GS_ERROR_TRIG_TARGET_OPERATION_INVALID,
@@ -639,10 +642,9 @@ void TriggerHandler::checkTrigger(TriggerService &triggerService,
 			return;
 		}
 
-		ExtendedContainerName *extContainerName;
-		container.getExtendedContainerName(txn, extContainerName);
-		const char8_t *name = extContainerName->getContainerName();
-		const util::String containerName(name, alloc);
+		const FullContainerKey containerKey = container.getContainerKey(txn);
+		util::String containerName(alloc);
+		containerKey.toString(alloc, containerName);
 
 		ColumnInfo *schema = container.getColumnInfoList();
 		const uint32_t numColumn = container.getColumnNum();
@@ -653,12 +655,12 @@ void TriggerHandler::checkTrigger(TriggerService &triggerService,
 				container.getDataStore()->getValueLimitConfig(), schema,
 				numColumn, const_cast<void *>(putRowData),
 				static_cast<uint32_t>(putRowDataSize), numRow,
-				container.getRowFixedSize()));
+				container.getRowFixedDataSize()));
 		}
 		else {
 			rowStore.reset(UTIL_NEW InputMessageRowStore(
 				container.getDataStore()->getValueLimitConfig(), schema,
-				numColumn, NULL, 0, 0, container.getRowFixedSize()));
+				numColumn, NULL, 0, 0, container.getRowFixedDataSize()));
 		}
 
 		for (size_t i = 0; i < triggerList.size(); i++) {
@@ -856,6 +858,7 @@ bool TriggerHandler::isSupportedColumnType(ColumnType type) {
 		return true;
 		break;
 
+	case COLUMN_TYPE_GEOMETRY:
 	case COLUMN_TYPE_BLOB:
 	case COLUMN_TYPE_OID:
 	case COLUMN_TYPE_STRING_ARRAY:
@@ -916,6 +919,11 @@ void TriggerHandler::convertColumnDataToString(
 	ColumnType type, const uint8_t *data, size_t size, util::String &str) {
 	str.clear();
 
+	if (data == NULL) {
+		const char *nullStr = "null";
+		str.append(nullStr, strlen(nullStr));
+	} else {
+
 	switch (type) {
 	case COLUMN_TYPE_STRING:
 		str.append(reinterpret_cast<const char *>(data), size);
@@ -971,6 +979,7 @@ void TriggerHandler::convertColumnDataToString(
 		ss << tmp;
 		str.append(ss.str().c_str());
 	} break;
+	case COLUMN_TYPE_GEOMETRY:
 	case COLUMN_TYPE_BLOB:
 	case COLUMN_TYPE_OID:
 	case COLUMN_TYPE_STRING_ARRAY:
@@ -985,6 +994,7 @@ void TriggerHandler::convertColumnDataToString(
 	case COLUMN_TYPE_WITH_BEGIN:
 	default:
 		break;
+	}
 	}
 }
 
@@ -1277,9 +1287,11 @@ void RestTriggerHandler::createRestContent(util::StackAllocator &alloc,
 			content.append("\"");
 			content.append(columnName->c_str(), columnName->size());
 			content.append("\":");
-			if (isQuoteColumnType(columnType)) content.append("\"");
+			if (columnData != NULL && 
+				isQuoteColumnType(columnType)) content.append("\"");
 			content.append(columnDataStr);
-			if (isQuoteColumnType(columnType)) content.append("\"");
+			if (columnData != NULL && 
+				isQuoteColumnType(columnType)) content.append("\"");
 			content.append(",");
 		}
 
@@ -1483,7 +1495,9 @@ void JmsTriggerHandler::createJmsMessage(const std::string &containerName,
 			columnNameList[i]->c_str(), columnNameList[i]->size());
 		const uint8_t *data = columnDataList[i]->data();
 		const uint32_t size = static_cast<uint32_t>(columnDataList[i]->size());
-
+		if (data == NULL) {
+			continue;
+		}
 		switch (columnType) {
 		case COLUMN_TYPE_STRING: {
 			const std::string tmp(reinterpret_cast<const char *>(data), size);
@@ -1518,6 +1532,7 @@ void JmsTriggerHandler::createJmsMessage(const std::string &containerName,
 			const double tmp = *reinterpret_cast<const double *>(data);
 			message->setDoubleProperty(columnName, tmp);
 		} break;
+		case COLUMN_TYPE_GEOMETRY:
 		case COLUMN_TYPE_BLOB:
 		case COLUMN_TYPE_OID:
 		case COLUMN_TYPE_STRING_ARRAY:

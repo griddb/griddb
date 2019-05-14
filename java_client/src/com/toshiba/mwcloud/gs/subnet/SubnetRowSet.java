@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -15,23 +15,38 @@
 */
 package com.toshiba.mwcloud.gs.subnet;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Date;
 import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
+import com.toshiba.mwcloud.gs.Collection;
 import com.toshiba.mwcloud.gs.Container;
 import com.toshiba.mwcloud.gs.GSException;
-import com.toshiba.mwcloud.gs.GSRecoverableException;
 import com.toshiba.mwcloud.gs.Row;
 import com.toshiba.mwcloud.gs.RowSet;
+import com.toshiba.mwcloud.gs.TimeSeries;
+import com.toshiba.mwcloud.gs.common.BasicBuffer;
+import com.toshiba.mwcloud.gs.common.Extensibles;
 import com.toshiba.mwcloud.gs.common.GSErrorCode;
 import com.toshiba.mwcloud.gs.common.RowMapper;
+import com.toshiba.mwcloud.gs.common.BasicBuffer.BufferUtils;
+import com.toshiba.mwcloud.gs.experimental.Experimentals;
 import com.toshiba.mwcloud.gs.subnet.GridStoreChannel.Context;
 import com.toshiba.mwcloud.gs.subnet.GridStoreChannel.RemoteReference;
 import com.toshiba.mwcloud.gs.subnet.SubnetContainer.ContainerSubResource;
+import com.toshiba.mwcloud.gs.subnet.SubnetContainer.PartialExecutionStatus;
+import com.toshiba.mwcloud.gs.subnet.SubnetContainer.PartialFetchStatus;
+import com.toshiba.mwcloud.gs.subnet.SubnetContainer.QueryFormatter;
 import com.toshiba.mwcloud.gs.subnet.SubnetContainer.TransactionalResource;
+import com.toshiba.mwcloud.gs.subnet.SubnetQuery.QueryParameters;
 
-@SuppressWarnings("deprecation")
-public class SubnetRowSet<R> implements RowSet<R> {
+public class SubnetRowSet<R>
+implements RowSet<R>, Extensibles.AsRowSet<R>, Experimentals.AsRowSet<R> {
 
 	private final SubnetContainer<?, ?> container;
 
@@ -41,23 +56,25 @@ public class SubnetRowSet<R> implements RowSet<R> {
 
 	private RowMapper.Cursor resultCursor;
 
-	private final long transactionId;
-
 	private Object lastKey;
 
 	private final long totalRowCount;
 
 	private long remainingRowCount;
 
-	private final long rowSetId;
+	private Map<Integer, byte[]> extResultMap;
 
-	private final long rowSetIdHint;
+	private final QueryFormatter queryFormatter;
 
-	private final long fetchSize;
+	private QueryParameters queryParameters;
+
+	private final PartialFetchStatus fetchStatus;
 
 	private Object targetConnection;
 
-	private final boolean partial;
+	private Throwable lastProblem;
+
+	private boolean previousFound;
 
 	private boolean followingLost;
 
@@ -65,55 +82,55 @@ public class SubnetRowSet<R> implements RowSet<R> {
 
 	private final PartialRowSetReference remoteRef;
 
-	public SubnetRowSet(SubnetContainer<?, ?> container, Class<R> rowType,
+	public SubnetRowSet(
+			SubnetContainer<?, ?> container, Class<R> rowType,
 			RowMapper mapper, RowMapper.Cursor resultCursor,
-			long transactionId) {
+			Map<Integer, byte[]> extResultMap,
+			QueryFormatter queryFormatter, QueryParameters queryParameters,
+			PartialFetchStatus fetchStatus, Object targetConnection)
+			throws GSException {
 		this.container = container;
 		this.rowType = rowType;
 		this.mapper = mapper;
 		this.resultCursor = resultCursor;
-		this.transactionId = transactionId;
-		this.totalRowCount = resultCursor.getRowCount();
-		this.rowSetId = 0;
-		this.rowSetIdHint = 0;
-		this.fetchSize = 0;
-		this.partial = false;
-		this.remoteRef = null;
-	}
 
-	public SubnetRowSet(SubnetContainer<?, ?> container, Class<R> rowType,
-			RowMapper mapper, RowMapper.Cursor resultCursor,
-			long transactionId, long totalRowCount,
-			long rowSetId, long rowSetIdHint, long fetchSize,
-			Object targetConnection) throws GSException {
-		this.container = container;
-		this.rowType = rowType;
-		this.mapper = mapper;
-		this.resultCursor = resultCursor;
-		this.transactionId = transactionId;
-		this.totalRowCount = totalRowCount;
-		this.remainingRowCount = totalRowCount - resultCursor.getRowCount();
-		this.rowSetId = rowSetId;
-		this.rowSetIdHint = rowSetIdHint;
-		this.fetchSize = fetchSize;
-		this.targetConnection = targetConnection;
-		this.partial = true;
-
-		synchronized (container.context) {
-			container.channel.cleanRemoteResources(
-					container.context, new HashSet<Class<?>>(
-							Arrays.<Class<?>>asList(
-									NormalTarget.class,
-									TransactionalTarget.class)));
-
-			remoteRef = new PartialRowSetReference(
-					this, rowSetId, rowSetIdHint, targetConnection);
-			container.context.addRemoteReference(remoteRef);
+		PartialRowSetReference remoteRef = null;
+		if (fetchStatus == null) {
+			if (QueryParameters.get(
+					queryParameters).isPartialExecutionConfigured()) {
+				totalRowCount = -1;
+			}
+			else {
+				totalRowCount = resultCursor.getRowCount();
+			}
+			remainingRowCount = 0;
 		}
-	}
+		else {
+			totalRowCount = fetchStatus.totalRowCount;
+			remainingRowCount = totalRowCount - resultCursor.getRowCount();
+		}
 
-	public boolean isPartial() {
-		return partial;
+		this.extResultMap = extResultMap;
+		this.queryFormatter = queryFormatter;
+		this.queryParameters = queryParameters;
+		this.fetchStatus = fetchStatus;
+
+		if (fetchStatus != null) {
+			this.targetConnection = targetConnection;
+
+			synchronized (container.context) {
+				container.channel.cleanRemoteResources(
+						container.context, new HashSet<Class<?>>(
+								Arrays.<Class<?>>asList(
+										NormalTarget.class,
+										TransactionalTarget.class)));
+
+				remoteRef = new PartialRowSetReference(
+						this, fetchStatus, targetConnection);
+				container.context.addRemoteReference(remoteRef);
+			}
+		}
+		this.remoteRef = remoteRef;
 	}
 
 	private void checkOpened() throws GSException {
@@ -123,9 +140,38 @@ public class SubnetRowSet<R> implements RowSet<R> {
 
 		if (closed || container.isClosed() ||
 				(remoteRef != null && remoteRef.closed)) {
+			final Throwable lastProblem;
+			synchronized (container.context) {
+				lastProblem = this.lastProblem;
+			}
+			if (lastProblem != null) {
+				throw new GSException(
+						"Row set already closed by other problem (" +
+						"reason=" + lastProblem.getMessage() + ")",
+						lastProblem);
+			}
+
 			throw new GSException(GSErrorCode.RESOURCE_CLOSED,
 					"This row set or related container has been closed");
 		}
+	}
+
+	private GSException closeByProblem(Throwable cause) {
+		try {
+			close();
+		}
+		catch (Throwable t) {
+		}
+		finally {
+			synchronized (container.context) {
+				lastProblem = cause;
+			}
+		}
+
+		if (cause instanceof GSException) {
+			return (GSException) cause;
+		}
+		return new GSException(cause);
 	}
 
 	@Override
@@ -152,7 +198,32 @@ public class SubnetRowSet<R> implements RowSet<R> {
 
 	@Override
 	public boolean hasNext() throws GSException {
-		return (resultCursor.hasNext() || remainingRowCount > 0);
+		return resultCursor.hasNext();
+	}
+
+	void prepareFollowing() throws GSException {
+		checkOpened();
+
+		try {
+			prepareFollowingDirect();
+		}
+		catch (Throwable t) {
+			throw closeByProblem(t);
+		}
+	}
+
+	private void prepareFollowingDirect() throws GSException {
+		if (!resultCursor.hasNext()) {
+			if (fetchStatus != null) {
+				if (remainingRowCount > 0) {
+					fetchFollowing();
+				}
+			}
+			else if (QueryParameters.get(
+					queryParameters).executionStatus.isEnabled()) {
+				executeFollowing();
+			}
+		}
 	}
 
 	private void fetchFollowing() throws GSException {
@@ -172,9 +243,8 @@ public class SubnetRowSet<R> implements RowSet<R> {
 				boolean succeeded = false;
 				try {
 					resultCursor = container.fetchRowSet(
-							rowSetId, rowSetIdHint,
-							totalRowCount, remainingRowCount,
-							fetchSize, targetConnectionResult, mapper);
+							remainingRowCount, fetchStatus, queryParameters,
+							targetConnectionResult, mapper);
 					succeeded = true;
 				}
 				finally {
@@ -208,11 +278,29 @@ public class SubnetRowSet<R> implements RowSet<R> {
 			}
 			while (false);
 
-			throw new GSRecoverableException(
+			throw GSErrorCode.newGSRecoverableException(
 					GSErrorCode.RECOVERABLE_ROW_SET_LOST,
 					"Row set lost by modifications (" +
-					"remainingRowCount=" + remainingRowCount + ")");
+					"remainingRowCount=" + remainingRowCount + ")", null);
 		}
+	}
+
+	private void executeFollowing() throws GSException {
+		do {
+			final SubnetRowSet<R> rowSet = container.queryAndFetch(
+					rowType, mapper, queryFormatter, queryParameters, false);
+			if (rowSet == null) {
+				queryParameters.executionStatus =
+						PartialExecutionStatus.DISABLED;
+			}
+			else {
+				resultCursor = rowSet.resultCursor;
+				extResultMap = rowSet.extResultMap;
+				queryParameters = rowSet.queryParameters;
+			}
+		}
+		while (!resultCursor.hasNext() &&
+				queryParameters.executionStatus.isEnabled());
 	}
 
 	@Override
@@ -220,30 +308,36 @@ public class SubnetRowSet<R> implements RowSet<R> {
 		checkOpened();
 
 		if (!resultCursor.hasNext()) {
-			if (remainingRowCount <= 0) {
-				throw new GSException(
-						GSErrorCode.NO_SUCH_ELEMENT,
-						"No more rows were found");
-			}
-			fetchFollowing();
+			throw new GSException(
+					GSErrorCode.NO_SUCH_ELEMENT, "No more rows were found");
 		}
 
 		final R rowObj;
-		if (rowType == null) {
-			@SuppressWarnings("unchecked")
-			final R unchekedRowObj = (R) mapper.decode(resultCursor);
+		try {
+			if (rowType == null) {
+				@SuppressWarnings("unchecked")
+				final R uncheckedRowObj = (R) mapper.decode(resultCursor);
 
-			rowObj = unchekedRowObj;
-		}
-		else {
-			rowObj = rowType.cast(mapper.decode(resultCursor));
-		}
+				rowObj = uncheckedRowObj;
+			}
+			else {
+				rowObj = rowType.cast(mapper.decode(resultCursor));
+			}
 
-		if (mapper.hasKey()) {
-			lastKey = mapper.resolveKey(null, rowObj);
+			if (mapper.hasKey()) {
+				lastKey = mapper.resolveKey(null, rowObj);
+			}
+			else {
+				lastKey = null;
+			}
+
+			if (!resultCursor.hasNext()) {
+				prepareFollowingDirect();
+				previousFound = true;
+			}
 		}
-		else {
-			lastKey = null;
+		catch (Throwable t) {
+			throw closeByProblem(t);
 		}
 
 		return rowObj;
@@ -252,32 +346,93 @@ public class SubnetRowSet<R> implements RowSet<R> {
 	@Override
 	public void remove() throws GSException {
 		checkOpened();
+		checkInRange();
 
-		if (!resultCursor.isInRange()) {
-			throw new GSException(
-					GSErrorCode.NO_SUCH_ELEMENT, "Cursor out of range");
-		}
-
-		container.remove(mapper, transactionId,
-				resultCursor.getLastRowId(), lastKey);
+		container.remove(
+				mapper, getTransactionId(), isTransactionStarted(),
+				isUpdatable(), resultCursor.getLastRowId(), lastKey);
 	}
 
 	@Override
 	public void update(R rowObj) throws GSException {
 		checkOpened();
+		checkInRange();
 
-		if (!resultCursor.isInRange()) {
+		container.update(
+				mapper, getTransactionId(), isTransactionStarted(),
+				isUpdatable(), resultCursor.getLastRowId(), lastKey, rowObj);
+	}
+
+	private void checkInRange() throws GSException {
+		if (!resultCursor.isInRange() && !previousFound) {
 			throw new GSException(
 					GSErrorCode.NO_SUCH_ELEMENT, "Cursor out of range");
 		}
+	}
 
-		container.update(mapper, transactionId,
-				resultCursor.getLastRowId(), lastKey, rowObj);
+	private long getTransactionId() {
+		return QueryParameters.resolveInitialTransactionId(queryParameters);
+	}
+
+	private boolean isTransactionStarted() {
+		return QueryParameters.isInitialTransactionStarted(queryParameters);
+	}
+
+	private boolean isUpdatable() {
+		return QueryParameters.isForUpdate(queryParameters, false);
 	}
 
 	@Override
 	public int size() {
+		if (totalRowCount < 0) {
+			raiseSizeError();
+		}
+
 		return (int) totalRowCount;
+	}
+
+	private static void raiseSizeError() {
+		try {
+			throw new GSException(
+					GSErrorCode.UNSUPPORTED_OPERATION,
+					"Size of row set with partial execution is not supported");
+		}
+		catch (GSException e) {
+			throw new IllegalStateException(e);
+		}
+	}
+
+	@Override
+	public Class<R> getRowType() throws GSException {
+		return rowType;
+	}
+
+	@Override
+	public Set<Integer> getExtOptionKeys() throws GSException {
+		if (extResultMap == null) {
+			return Collections.emptySet();
+		}
+		return extResultMap.keySet();
+	}
+
+	@Override
+	public byte[] getExtOption(int key) throws GSException {
+		if (extResultMap == null) {
+			return null;
+		}
+		return extResultMap.get(key);
+	}
+
+	public static DistributedQueryTarget getDistTarget(
+			Extensibles.AsRowSet<?> rowSet) throws GSException {
+		final byte[] bytes =
+				rowSet.getExtOption(ExtResultOptionType.DIST_TARGET);
+		if (bytes == null) {
+			return null;
+		}
+		final BasicBuffer buf = BasicBuffer.wrap(bytes);
+
+		return new DistributedQueryTarget(buf);
 	}
 
 	private static interface NormalTarget extends ContainerSubResource {
@@ -290,28 +445,27 @@ public class SubnetRowSet<R> implements RowSet<R> {
 	private static class PartialRowSetReference
 	extends RemoteReference<RowSet<?>> {
 
-		private final long rowSetId;
-		private final long rowSetIdHint;
+		private final PartialFetchStatus fetchStatus;
 		private final Object targetConnection;
 		private boolean closed;
 
 		PartialRowSetReference(
 				SubnetRowSet<?> rowSet,
-				long rowSetId, long rowSetIdHint, Object targetConnection) {
-			super(rowSet, selectTargetClass(rowSet), rowSet.container.context,
+				PartialFetchStatus fetchStatus, Object targetConnection) {
+			super(rowSet, selectTargetClass(rowSet),
+					rowSet.container.context,
 					rowSet.container.getPartitionId(),
 					rowSet.container.getContainerId());
-			this.rowSetId = rowSetId;
-			this.rowSetIdHint = rowSetIdHint;
+			this.fetchStatus = fetchStatus;
 			this.targetConnection = targetConnection;
 		}
 
 		private static Class<?> selectTargetClass(SubnetRowSet<?> rowSet) {
-			if (rowSet.transactionId == 0) {
-				return NormalTarget.class;
+			if (rowSet.isTransactionStarted()) {
+				return TransactionalTarget.class;
 			}
 			else {
-				return TransactionalTarget.class;
+				return NormalTarget.class;
 			}
 		}
 
@@ -325,12 +479,12 @@ public class SubnetRowSet<R> implements RowSet<R> {
 			closed = true;
 			SubnetContainer.closeRowSet(
 					channel, context, partitionId, containerId,
-					rowSetId, rowSetIdHint, targetConnection);
+					fetchStatus, targetConnection);
 		}
 
 	}
 
-	public static class Tool {
+	private static class Tool {
 
 		private Tool() {
 		}
@@ -340,7 +494,7 @@ public class SubnetRowSet<R> implements RowSet<R> {
 		}
 
 		public static long getTransactionId(SubnetRowSet<?> rowSet) {
-			return rowSet.transactionId;
+			return rowSet.getTransactionId();
 		}
 
 		public static long getRowId(
@@ -381,7 +535,7 @@ public class SubnetRowSet<R> implements RowSet<R> {
 
 	
 
-	public Row nextGeneralRow() throws GSException {
+	Row nextGeneralRow() throws GSException {
 		checkOpened();
 
 		if (!hasNext()) {
@@ -399,6 +553,60 @@ public class SubnetRowSet<R> implements RowSet<R> {
 		}
 
 		return rowObj;
+	}
+
+	@Override
+	public Experimentals.RowId getRowIdForUpdate() throws GSException {
+		final Container<?, ?> container = Tool.getContainer(this);
+
+		final long transactionId = Tool.getTransactionId(this);
+		if (transactionId == 0) {
+			throw new GSException("Not locked");
+		}
+
+		final long baseId;
+		if (container instanceof Collection) {
+			baseId = Tool.getRowId(this);
+		}
+		else if (container instanceof TimeSeries) {
+			baseId = ((Date) Tool.getRowKey(this)).getTime();
+		}
+		else {
+			throw new Error("Unsupported container type");
+		}
+
+		return new Experimentals.RowId(container, transactionId, baseId);
+	}
+
+	public static class ExtResultOptionType {
+
+		public static final int DIST_TARGET = 32;
+
+	}
+
+	public static class DistributedQueryTarget {
+
+		public final boolean uncovered;
+
+		public final boolean targeted;
+
+		public final List<Long> targetList;
+
+		DistributedQueryTarget(BasicBuffer buf) throws GSException {
+			uncovered = buf.getBoolean();
+			targeted = buf.getBoolean();
+			if (!targeted) {
+				targetList = null;
+				return;
+			}
+
+			final int count = BufferUtils.getNonNegativeInt(buf.base());
+			targetList = new ArrayList<Long>();
+			for (int i = 0; i < count; i++) {
+				targetList.add(buf.base().getLong());
+			}
+		}
+
 	}
 
 }

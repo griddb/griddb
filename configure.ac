@@ -1,5 +1,5 @@
 AC_PREREQ(2.61)
-AC_INIT([GridDB], [3.0])
+AC_INIT([GridDB_NoSQL], [4.1.1])
 AM_INIT_AUTOMAKE
 
 CF_ORG="$CFLAGS"
@@ -42,5 +42,5 @@ CX_STRICT="$CF_STRICT -Weffc++ -Wsynth -Wold-style-cast" ])
 CFLAGS="$CF_ORG $C_COMMON$CF_OPTIMIZE$CF_STRICT"
 CXXFLAGS="$CX_ORG $CX_COMMON$CX_OPTIMIZE$CX_STRICT"
 
-AC_CONFIG_FILES([Makefile 3rd_party/MessagePack/Makefile utility/Makefile server/Makefile])
+AC_CONFIG_FILES([Makefile 3rd_party/MessagePack/Makefile server/tr-cpp/Makefile utility/Makefile server/Makefile])
 AC_OUTPUT

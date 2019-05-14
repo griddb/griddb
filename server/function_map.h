@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -97,6 +97,26 @@ public:
 	virtual ~TqlFunc() {}
 };
 
+/*!
+ * @brief Class for GIS function object (functor)
+ */
+class TqlGisFunc : public TqlFunc {
+public:
+	/*!
+	 * @brief Get parameter to index
+	 *
+	 * @param txn The transaction context
+	 * @param args Argument list
+	 * @param[out] outSearchType search type
+	 * @param[out] outParam1 parameter1 (RtreeMap::SearchContext::rect1)
+	 * @param[out] outParam2 parameter2 (RtreeMap::SearchContext::rect2)
+	 */
+	virtual void getIndexParam(TransactionContext &txn, ExprList &args,
+		GeometryOperator &outSearchType, const void *&outParam1,
+		const void *&outParam2) = 0;
+
+	virtual ~TqlGisFunc() {}
+};
 
 /*!
  * @brief Hash table

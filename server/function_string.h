@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -44,6 +44,9 @@ public:
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
 		}
+		else if (args[0]->isNullValue()) {
+			return Expr::newNullValue(txn);
+		}
 		return Expr::newStringValue(args[0]->getValueAsString(txn), txn);
 	}
 	virtual ~FunctorString() {}
@@ -61,6 +64,9 @@ public:
 		if (args.size() != 1) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
+		}
+		else if (args[0]->isNullValue()) {
+			return Expr::newNullValue(txn);
 		}
 		else if (!args[0]->isString()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
@@ -91,6 +97,9 @@ public:
 		size_t i;
 		util::String s("", QP_ALLOCATOR);  
 		for (i = 0; i < args.size(); i++) {
+			if (args[i]->isNullValue()) {
+				continue; 
+			}
 			if (!args[i]->isString()) {
 				util::NormalOStringStream os;
 				os << "Argument " << i + 1 << " is not a string";
@@ -187,7 +196,7 @@ class FunctorLike : public TqlFunc {
 					}
 				}
 				else if (c == matchSet) {
-					if (esc != 0) { /* This is GLOB, not LIKE */
+					if (esc != 0) { /* This is GLOB, not LIKE */	
 						GS_THROW_USER_ERROR(
 							GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 							"GLOB cannot take ESCAPE");
@@ -238,7 +247,7 @@ class FunctorLike : public TqlFunc {
 			}
 			else if (c == matchSet) {
 				int prior_c = 0;
-				if (esc != 0) { /* This only occurs for GLOB, not LIKE */
+				if (esc != 0) { /* This only occurs for GLOB, not LIKE */	
 					GS_THROW_USER_ERROR(
 						GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 						"GLOB cannot take ESCAPE");
@@ -317,6 +326,11 @@ public:
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
 		}
+		else if (args[0]->isNullValue() || args[1]->isNullValue() || 
+			args[2]->isNullValue() ||
+			(args.size() == 4 && args[3]->isNullValue())) {
+			return Expr::newNullValue(txn);
+		}
 		else if (!args[0]->isString()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 				"Argument 1 is not a string");
@@ -376,6 +390,10 @@ public:
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
 		}
+		else if (args[0]->isNullValue() || args[1]->isNullValue() || 
+			(args.size() == 3 && args[2]->isNullValue())) {
+			return Expr::newNullValue(txn);
+		}
 		else if (!args[0]->isString()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 				"Argument 1 is not a string");
@@ -434,6 +452,9 @@ public:
 		if (args.empty() || args.size() > 1) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
+		}
+		else if (args[0]->isNullValue()) {
+			return Expr::newNullValue(txn);
 		}
 		else if (!args[0]->isString()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,

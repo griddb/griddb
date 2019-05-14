@@ -1,5 +1,5 @@
 ﻿/*
-    Copyright (c) 2012 TOSHIBA CORPORATION.
+    Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
     
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License as
@@ -967,6 +967,18 @@ template<typename T, typename U> struct IsSame {
 };
 
 template<typename T> struct IsSame<T, T> {
+	typedef TrueType Type;
+	enum Value { VALUE = Type::VALUE };
+};
+
+template<typename>
+struct IsPointer {
+	typedef FalseType Type;
+	enum Value { VALUE = Type::VALUE };
+};
+
+template<typename E>
+struct IsPointer<E*> {
 	typedef TrueType Type;
 	enum Value { VALUE = Type::VALUE };
 };

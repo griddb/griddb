@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -43,23 +43,25 @@
 #endif
 
 #ifdef MAIN_CAPTURE_SIGNAL
-#include <errno.h>
 #include <execinfo.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <errno.h>
 #endif  
+
+
+#include <fstream>
 
 
 
 const char8_t *const GS_PRODUCT_NAME = "GridDB";
-const int32_t GS_MAJOR_VERSION = 3;
-const int32_t GS_MINOR_VERSION = 0;
-const int32_t GS_BASE_REVISION = 0;
-const int32_t GS_BUILD_NO = 27877;
+const int32_t GS_MAJOR_VERSION = 4;
+const int32_t GS_MINOR_VERSION = 1;
+const int32_t GS_REVISION = 1;
+const int32_t GS_BUILD_NO = 34792;
 
-const int32_t GS_REVISION = GS_BASE_REVISION;
 const char8_t *const GS_EDITION_NAME = "Community Edition";
 const char8_t *const GS_EDITION_NAME_SHORT = "CE";
 
@@ -69,7 +71,6 @@ const char8_t *const SYS_DEVELOPER_FILE_NAME = "gs_developer.json";
 const char8_t *const GS_CLUSTER_PARAMATER_DIFF_FILE_NAME = "gs_diff.json";
 
 const char8_t *const GS_TRACE_SECRET_HEX_KEY = "7B790AB2C82F01B3";
-
 
 static void autoJoinCluster(const Event::Source &eventSource,
 	util::StackAllocator &alloc, SystemService &sysSvc, PartitionTable &pt,
@@ -84,7 +85,7 @@ static class MainConfigSetUpHandler : public ConfigTable::SetUpHandler {
 
 } g_mainConfigSetUpHandler;
 
-static void setUpTrace(const ConfigTable *param, bool checkOnly);
+static void setUpTrace(const ConfigTable *param, bool checkOnly, bool longArchive = false);
 static void setUpAllocator();
 
 /*!
@@ -102,6 +103,9 @@ void cleanupPidFile(const std::string &fileName, util::PIdFile &pidFile);
 
 static void cleanupOnNormalShutdown(const Event::Source &eventSource,
 	util::StackAllocator &alloc, SystemService &sysSvc, ClusterManager &clsMgr);
+
+static void forceShutdown(ClusterService &clsSvc,
+	const std::string &pidFileName, util::PIdFile &pidFile, bool checkOnly);
 
 
 #ifdef MAIN_CAPTURE_SIGNAL
@@ -137,6 +141,38 @@ public:
 	const ConfigTable &config_;
 };
 
+
+void setUpArchive(const char *bibFile, ConfigTable &config, BibInfo &bibInfo) {
+	std::string jsonString;
+	if (bibFile != NULL) {
+		std::string inputFilePathPath;
+		const char *bibDir = ".";
+
+		util::FileSystem::createPath(
+			bibDir, bibFile, inputFilePathPath);
+		std::ifstream ifs(inputFilePathPath.c_str());
+		if (!ifs) {
+			GS_THROW_USER_ERROR(GS_ERROR_CM_FILE_NOT_FOUND,
+				std::string(bibFile) + " not found");
+		}
+		std::string tmpStr;
+		while (std::getline(ifs, tmpStr)) {
+			jsonString += tmpStr;
+			jsonString += "\n";
+		}
+	} else {
+		std::istreambuf_iterator<char> first(std::cin), last;
+		jsonString.append(first, last);
+	}
+	bibInfo.load(jsonString);
+	config.set(CONFIG_TABLE_DS_STORE_MEMORY_LIMIT, bibInfo.option_.storeMemoryLimit_,
+		"dataStore", &ConfigTable::silentHandler());
+	config.set(CONFIG_TABLE_SYS_EVENT_LOG_PATH, bibInfo.option_.logDirectory_,
+		"system", &ConfigTable::silentHandler());
+	config.set(CONFIG_TABLE_TRACE_RECOVERY_MANAGER, "LEVEL_WARNING",
+		"trace", &ConfigTable::silentHandler());
+}
+
 /*!
 	@brief main function
 */
@@ -157,11 +193,14 @@ int main(int argc, char **argv) {
 		version << GS_MAJOR_VERSION << "." << GS_MINOR_VERSION << "."
 				<< GS_REVISION;
 		util::NormalOStringStream simpleVersion;
-		simpleVersion << version.str() << "-" << GS_BUILD_NO << " "
-					  << GS_EDITION_NAME_SHORT;
+		simpleVersion << version.str()
+					<< "-" << GS_BUILD_NO
+					<< " " << GS_EDITION_NAME_SHORT;
 		util::NormalOStringStream fullVersion;
-		fullVersion << GS_PRODUCT_NAME << " version " << version.str()
-					<< " build " << GS_BUILD_NO << " " << GS_EDITION_NAME;
+		fullVersion << GS_PRODUCT_NAME
+					<< " version " << version.str()
+					<< " build " << GS_BUILD_NO
+					<< " " << GS_EDITION_NAME;
 
 		util::VariableSizeAllocator<> tableAlloc(
 			(util::AllocatorInfo(ALLOCATOR_GROUP_MAIN, "tableAlloc")));
@@ -182,6 +221,10 @@ int main(int argc, char **argv) {
 		bool forceRecoveryFromExistingFiles = false;  
 		std::string recoveryTargetPartition;		  
 		bool fileVersionDump = false;				  
+		bool releaseUnusedFileBlocks = false;		  
+		bool longArchive = false;					  
+		const char8_t *bibFile = NULL;				  
+		u8string longArchiveLogDir;					  
 
 		if (argc >= 3) {
 			if (strcmp(argv[1], "--conf") == 0) {
@@ -207,6 +250,9 @@ int main(int argc, char **argv) {
 					else if (strcmp(argv[3], "--fileversiondump") == 0) {
 						checkOnly = true;
 						fileVersionDump = true;
+					}
+					else if (strcmp(argv[3], "--release-unused-file-blocks") == 0) {
+						releaseUnusedFileBlocks = true;
 					}
 					else {
 						needHelp = true;
@@ -272,6 +318,8 @@ int main(int argc, char **argv) {
 						 "[--force-recovery-from-existing-files] "
 						 "[--recovery-target-partition a,b-c,d]"
 					  << std::endl;
+			std::cerr << "Usage: --conf (Config dir) --release-unused-file-blocks"
+					  << std::endl;
 			std::cerr << "Usage: --conf (Config dir) --dbdump (Dump dir)"
 					  << std::endl;
 			std::cerr << "Usage: --conf (Config dir) --logdump (GroupId) (Dump "
@@ -283,12 +331,25 @@ int main(int argc, char **argv) {
 			return EXIT_FAILURE;
 		}
 
+
+		BibInfo bibInfo;
+		if (longArchive) {
+			try {
+				setUpArchive(bibFile, config, bibInfo);
+			} catch (std::exception &e) {
+				std::cerr << "bib information is invalid :" << e.what() << std::endl;
+				return EXIT_FAILURE;
+			}
+		}
+
 		MainTraceHandler traceHandler(config);
-		setUpTrace(&config, checkOnly);
+		setUpTrace(&config, checkOnly, longArchive);
 		config.setTraceEnabled(true);
 
 #ifdef MAIN_CAPTURE_SIGNAL
-		const int syncSignals[] = {SIGSEGV};
+		const int syncSignals[] = {
+			SIGSEGV
+		};
 		const int signalNum = sizeof(syncSignals) / sizeof(*syncSignals);
 
 		struct sigaction sa;
@@ -302,7 +363,7 @@ int main(int argc, char **argv) {
 		for (int i = 0; i < signalNum; i++) {
 			if (0 != sigaction(syncSignals[i], &sa, NULL)) {
 				UTIL_THROW_PLATFORM_ERROR(UTIL_EXCEPTION_CREATE_MESSAGE_CHARS(
-					"signal=" << syncSignals[i]));
+						"signal=" << syncSignals[i]));
 			}
 		}
 
@@ -319,10 +380,10 @@ int main(int argc, char **argv) {
 		sigset_t ss2;
 		sigemptyset(&ss2);
 
-		for (int i = 0; i < signalNum; i++) {
+		for (int i= 0; i < signalNum; i++) {
 			if (0 != sigaddset(&ss2, syncSignals[i])) {
 				UTIL_THROW_PLATFORM_ERROR(UTIL_EXCEPTION_CREATE_MESSAGE_CHARS(
-					"signal=" << syncSignals[i]));
+						"signal=" << syncSignals[i]));
 			}
 		}
 #endif  
@@ -350,8 +411,10 @@ int main(int argc, char **argv) {
 #endif  
 
 		bool createMode = false;
-		RecoveryManager::checkExistingFiles1(
-			config, createMode, forceRecoveryFromExistingFiles);
+		bool existBackupInfoFile = false;
+
+		RecoveryManager::checkExistingFiles1(config, createMode,
+			existBackupInfoFile, forceRecoveryFromExistingFiles);
 
 		EventEngine::VariableSizeAllocator eeVarSizeAlloc(
 			(util::AllocatorInfo(ALLOCATOR_GROUP_MAIN, "eeVar")));
@@ -375,12 +438,22 @@ int main(int argc, char **argv) {
 
 		PartitionTable pt(config);
 
-		RecoveryManager recoveryMgr(config);
-		LogManager logMgr(config);
-		logMgr.open(checkOnly, forceRecoveryFromExistingFiles);
+		RecoveryManager recoveryMgr(config, releaseUnusedFileBlocks);
+		bool isIncrementalBackup = false;
+		if (existBackupInfoFile) {
+			isIncrementalBackup = recoveryMgr.readBackupInfoFile();
+		}
 
-		RecoveryManager::checkExistingFiles2(
-			config, logMgr, createMode, forceRecoveryFromExistingFiles);
+		LogManager::Config logManagerConfig(config);
+		if (longArchive && !longArchiveLogDir.empty()) {
+			logManagerConfig.logDirectory_ = longArchiveLogDir;
+		}
+		LogManager logMgr(logManagerConfig);
+		logMgr.open(
+			checkOnly, forceRecoveryFromExistingFiles, isIncrementalBackup);
+
+		RecoveryManager::checkExistingFiles2(config, logMgr, createMode,
+			existBackupInfoFile, forceRecoveryFromExistingFiles);
 
 		ClusterVersionId clsVersionId = GS_CLUSTER_MESSAGE_CURRENT_VERSION;
 		ClusterManager clsMgr(config, &pt, clsVersionId);
@@ -399,7 +472,8 @@ int main(int argc, char **argv) {
 			}
 		}
 		ChunkManager chunkMgr(config, DS_CHUNK_CATEGORY_SIZE,
-			chunkCategoryAttributeList, checkOnly, createMode);
+			chunkCategoryAttributeList, checkOnly,
+			createMode);
 		delete[] chunkCategoryAttributeList;
 
 		DataStore dataStore(config, &chunkMgr);
@@ -447,7 +521,8 @@ int main(int argc, char **argv) {
 			&pt, &dataStore, &logMgr, &clsMgr, &syncMgr, &txnMgr, &chunkMgr,
 			&recoveryMgr, objectMgr, &fixedSizeAlloc, &varSizeAlloc, &config,
 			&stats
-			);
+		);
+
 
 		recoveryMgr.initialize(mgrSet);
 
@@ -456,6 +531,7 @@ int main(int argc, char **argv) {
 		txnSvc.initialize(mgrSet);
 		sysSvc.initialize(mgrSet);
 		cpSvc.initialize(mgrSet);
+		dataStore.initialize(mgrSet);
 
 		if (logDump) {
 			util::StackAllocator alloc(
@@ -492,17 +568,18 @@ int main(int argc, char **argv) {
 
 
 		try {
-			sysSvc.start();
+			if (!longArchive) { 
+				sysSvc.start();
 #ifdef GD_ENABLE_UNICAST_NOTIFICATION
-			clsSvc.start(source);
+				clsSvc.start(source);
 #else
-			clsSvc.start();
+				clsSvc.start();
 #endif
-			syncSvc.start();
-			txnSvc.start();
-			cpSvc.start(source);
+				syncSvc.start();
+				txnSvc.start();
+				cpSvc.start(source);
 
-
+			}
 			std::cout << "Running..." << std::endl;
 
 			if (config.get<bool>(CONFIG_TABLE_DEV_RECOVERY)) {
@@ -510,13 +587,30 @@ int main(int argc, char **argv) {
 				util::StackAllocator alloc(
 					util::AllocatorInfo(ALLOCATOR_GROUP_MAIN, "recoveryStack"),
 					&fixedSizeAlloc);
-				recoveryMgr.recovery(alloc, recoveryTargetPartition);
+				recoveryMgr.recovery(alloc, existBackupInfoFile,
+					forceRecoveryFromExistingFiles, recoveryTargetPartition,
+					longArchive);
 			}
 			else {
 				std::cout << "Skip Open DB" << std::endl;
 			}
+			if (longArchive) {
+				try {
+					util::StackAllocator alloc(
+						util::AllocatorInfo(ALLOCATOR_GROUP_MAIN, "dbStack"),
+						&fixedSizeAlloc);
+					dataStore.archive(alloc, txnMgr, bibInfo);
+				} catch (std::exception &e) {
+					UTIL_TRACE_EXCEPTION(MAIN, e, "");
+					return EXIT_FAILURE;
+				}
 
+				return EXIT_SUCCESS;
+			}
 			cpSvc.executeRecoveryCheckpoint(source);
+			if (existBackupInfoFile) {
+				recoveryMgr.removeBackupInfoFile();
+			}
 
 			if (config.get<bool>(CONFIG_TABLE_DEV_AUTO_JOIN_CLUSTER)) {
 				util::StackAllocator alloc(
@@ -530,19 +624,25 @@ int main(int argc, char **argv) {
 			while (1) {
 				if (sigwait(&ss1, &signo) == 0) {
 					if (SIGINT == signo) {  
-						if (!checkOnly) {
-							cleanupPidFile(pidFileName, pidFile);
-						}
-						clsSvc.shutdownAllService();
+						forceShutdown(clsSvc, pidFileName, pidFile, checkOnly);
 						signalOccured = true;
 						break;
 					}
 					if (SIGTERM == signo) {  
-						util::StackAllocator alloc(
-							util::AllocatorInfo(
-								ALLOCATOR_GROUP_MAIN, "shutdownStack"),
-							&fixedSizeAlloc);
-						cleanupOnNormalShutdown(source, alloc, sysSvc, clsMgr);
+						if (clsMgr.isSystemError()) {
+							forceShutdown(clsSvc, pidFileName, pidFile, checkOnly);
+							signalOccured = true;
+							const char8_t *msg = "Requested normal shutdown node, but node status is ABNORMAL, so that executes force shutdown node.";
+							std::cerr << msg << std::endl;
+							GS_TRACE_WARNING(MAIN, GS_TRACE_SC_FORCE_SHUTDOWN, msg);
+						}
+						else {
+							util::StackAllocator alloc(
+								util::AllocatorInfo(
+									ALLOCATOR_GROUP_MAIN, "shutdownStack"),
+								&fixedSizeAlloc);
+							cleanupOnNormalShutdown(source, alloc, sysSvc, clsMgr);
+						}
 						break;
 					}
 				}
@@ -556,6 +656,7 @@ int main(int argc, char **argv) {
 			sysSvc.waitForShutdown();
 
 
+
 			systemErrorOccurred = clsSvc.isSystemServiceError();
 
 			if (signalOccured) {
@@ -566,18 +667,21 @@ int main(int argc, char **argv) {
 							 " See message logs"
 						  << std::endl;
 			}
+
 		}
 		catch (std::exception &e) {
 			systemErrorOccurred = true;
 			UTIL_TRACE_EXCEPTION(MAIN, e, "");
 
 			try {
-				clsSvc.shutdownAllService();
-				clsSvc.waitForShutdown();
-				syncSvc.waitForShutdown();
-				txnSvc.waitForShutdown();
-				cpSvc.waitForShutdown();
-				sysSvc.waitForShutdown();
+				if (!longArchive) {
+					clsSvc.shutdownAllService();
+					clsSvc.waitForShutdown();
+					syncSvc.waitForShutdown();
+					txnSvc.waitForShutdown();
+					cpSvc.waitForShutdown();
+					sysSvc.waitForShutdown();
+				}
 			}
 			catch (...) {
 				UTIL_TRACE_EXCEPTION(
@@ -622,7 +726,7 @@ void autoJoinCluster(const Event::Source &eventSource,
 		bool completeFlag = true;
 
 		try {
-			clsMgr.checkCommandStatus(OP_LEAVE_CLUSTER);
+			clsMgr.checkCommandStatus(CS_LEAVE_CLUSTER);
 		}
 		catch (std::exception &) {
 			completeFlag = false;
@@ -634,8 +738,7 @@ void autoJoinCluster(const Event::Source &eventSource,
 			std::vector<NodeId> backups;
 			for (pId = 0; pId < pt.getPartitionNum(); pId++) {
 				pt.setPartitionStatus(pId, PartitionTable::PT_ON);
-				PartitionRole role(
-					pId, rev, 0, backups, PartitionTable::PT_CURRENT_OB);
+				PartitionRole role(pId, rev, PartitionTable::PT_CURRENT_OB);
 				pt.setPartitionRole(pId, role);
 			}
 			break;
@@ -717,6 +820,14 @@ static void cleanupOnNormalShutdown(const Event::Source &eventSource,
 	sysSvc.shutdownNode(eventSource, alloc, normalShutdown);
 }
 
+static void forceShutdown(ClusterService &clsSvc,
+		const std::string &pidFileName, util::PIdFile &pidFile, bool checkOnly) {
+	if (!checkOnly) {
+		cleanupPidFile(pidFileName, pidFile);
+	}
+	clsSvc.shutdownAllService();
+}
+
 
 #ifdef MAIN_CAPTURE_SIGNAL
 void signal_handler(int sig, siginfo_t *siginfo, void *param) {
@@ -759,6 +870,7 @@ void MainConfigSetUpHandler::operator()(ConfigTable &config) {
 	MAIN_TRACE_DECLARE(config, CHECKPOINT_FILE, ERROR);
 	MAIN_TRACE_DECLARE(config, CHECKPOINT_SERVICE, INFO);
 	MAIN_TRACE_DECLARE(config, CHECKPOINT_SERVICE_DETAIL, ERROR);
+	MAIN_TRACE_DECLARE(config, CHECKPOINT_SERVICE_STATUS_DETAIL, ERROR);
 	MAIN_TRACE_DECLARE(config, LOG_MANAGER, WARNING);
 	MAIN_TRACE_DECLARE(config, IO_MONITOR, WARNING);
 	MAIN_TRACE_DECLARE(config, CLUSTER_OPERATION, INFO);
@@ -784,6 +896,14 @@ void MainConfigSetUpHandler::operator()(ConfigTable &config) {
 	MAIN_TRACE_DECLARE(config, SYSTEM, ERROR);
 	MAIN_TRACE_DECLARE(config, BTREE_MAP, ERROR);
 	MAIN_TRACE_DECLARE(config, AUTHENTICATION_TIMEOUT, ERROR);
+	MAIN_TRACE_DECLARE(config, DATASTORE_BACKGROUND, ERROR);
+	MAIN_TRACE_DECLARE(config, SYNC_DETAIL, WARNING);
+	MAIN_TRACE_DECLARE(config, CLUSTER_DETAIL, WARNING);
+	MAIN_TRACE_DECLARE(config, CLUSTER_DUMP, WARNING);
+
+	MAIN_TRACE_DECLARE(config, ZLIB_UTILS, ERROR);
+	MAIN_TRACE_DECLARE(config, SIZE_MONITOR, WARNING);
+	MAIN_TRACE_DECLARE(config, LONG_ARCHIVE, WARNING);
 
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TRACE_OUTPUT_TYPE, INT32)
 		.setExtendedType(ConfigTable::EXTENDED_TYPE_ENUM)
@@ -848,14 +968,15 @@ ConfigTable::Constraint &MainConfigSetUpHandler::declareTraceConfigConstraints(
 }
 
 
-void setMinOutputLevel(const ConfigTable *config, util::TraceManager &manager,
-	ConfigTable::ParamId id) {
+void setMinOutputLevel(
+		const ConfigTable *config, util::TraceManager &manager,
+		ConfigTable::ParamId id) {
 	util::Tracer &tracer = manager.resolveTracer(
 		ParamTable::getParamSymbol(config->getName(id), false, 3).c_str());
 	tracer.setMinOutputLevel(config->get<int32_t>(id));
 }
 
-void setUpTrace(const ConfigTable *config, bool checkOnly) {
+void setUpTrace(const ConfigTable *config, bool checkOnly, bool longArchive) {
 	util::TraceManager &manager = util::TraceManager::getInstance();
 
 	static GSTraceFormatter formatter(GS_TRACE_SECRET_HEX_KEY);
@@ -874,7 +995,11 @@ void setUpTrace(const ConfigTable *config, bool checkOnly) {
 		manager.setRotationFilesDirectory(eventLogPath);
 	}
 
-	manager.setRotationFileName("gridstore");
+	if (longArchive) {
+		manager.setRotationFileName("gs_archive_svr");
+	} else {
+		manager.setRotationFileName("gridstore");
+	}
 
 	for (ConfigTable::ParamId id = CONFIG_TABLE_TRACE_TRACER_ID_START;
 		 ++id < CONFIG_TABLE_TRACE_TRACER_ID_END;) {
@@ -885,7 +1010,7 @@ void setUpTrace(const ConfigTable *config, bool checkOnly) {
 
 	manager.setRotationMode(util::TraceOption::ROTATION_DALILY);
 
-	if (!checkOnly) {
+	if (!checkOnly || longArchive) {
 		manager.setOutputType(static_cast<util::TraceOption::OutputType>(
 			config->get<int32_t>(CONFIG_TABLE_TRACE_OUTPUT_TYPE)));
 	}
@@ -914,3 +1039,4 @@ void setUpAllocator() {
 void StackMemoryLimitOverErrorHandler::operator()(util::Exception &e) {
 	GS_RETHROW_USER_OR_SYSTEM(e, "");
 }
+

@@ -1,5 +1,5 @@
 ﻿/*
-    Copyright (c) 2012 TOSHIBA CORPORATION.
+    Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
     
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License as
@@ -21,8 +21,12 @@
 
 #include "message_row_store.h"
 #include "data_store.h"
+#include "value.h"
+#include "gis_geometry.h"
 #include <algorithm>
 
+
+int g_nullTestCounter = 0;
 
 MessageRowStore::MessageRowStore(const DataStoreValueLimitConfig &dsValueLimitConfig, const ColumnInfo *columnInfoList, uint32_t columnCount) :
 		dsValueLimitConfig_(dsValueLimitConfig),
@@ -39,7 +43,7 @@ MessageRowStore::~MessageRowStore() {
 /*!
 	@brief Set Row
 */
-void MessageRowStore::setRow(const MessageRowStore &source) {
+void MessageRowStore::setRow(MessageRowStore &source) {
 	assert (getColumnInfoList() == source.getColumnInfoList());
 	assert (getColumnCount() == source.getColumnCount());
 
@@ -58,7 +62,7 @@ void MessageRowStore::setRow(const MessageRowStore &source) {
 /*!
 	@brief Set field value
 */
-void MessageRowStore::setField(const MessageRowStore &source, ColumnId columnId) {
+void MessageRowStore::setField(MessageRowStore &source, ColumnId columnId) {
 	assert (getColumnInfoList() == source.getColumnInfoList());
 	assert (getColumnCount() == source.getColumnCount());
 
@@ -114,7 +118,7 @@ uint8_t* MessageRowStore::getRowVariablePart() const {
 	@brief Set field value
 */
 void MessageRowStore::getField(
-		ColumnId, const void *&, uint32_t &) const {
+		ColumnId, const void *&, uint32_t &) {
 	GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "Unsupported operation");
 }
 
@@ -122,7 +126,7 @@ void MessageRowStore::getField(
 	@brief Set field value
 */
 void MessageRowStore::getField(
-		ColumnId columnId, const uint8_t *&data, uint32_t &size) const {
+		ColumnId columnId, const uint8_t *&data, uint32_t &size) {
 	getField(columnId, reinterpret_cast<const void*&>(data), size);
 }
 
@@ -155,6 +159,26 @@ void MessageRowStore::getArrayElement(ColumnId columnId,
 		uint32_t arrayIndex, const uint8_t *&data, uint32_t &size) const {
 	getArrayElement(
 			columnId, arrayIndex, reinterpret_cast<const void*&>(data), size);
+}
+
+/*!
+	@brief Check if value is null
+*/
+bool MessageRowStore::isNullValue(ColumnId columnId) const {
+	GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "Unsupported operation");
+}
+/*!
+	@brief Get pointer of nullbits
+*/
+const uint8_t *MessageRowStore::getNullsAddr() const {
+	GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "Unsupported operation");
+}
+
+/*!
+	@brief set null
+*/
+void MessageRowStore::setNull(ColumnId columnId) {
+	GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "Unsupported operation");
 }
 
 /*!
@@ -236,16 +260,9 @@ void MessageRowStore::setVarSize(uint32_t) {
 }
 
 /*!
-	@brief Set uint64 data
-*/
-void MessageRowStore::setUInt64(uint64_t) {
-	GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "Unsupported operation");
-}
-
-/*!
 	@brief Validate current Row
 */
-void MessageRowStore::validate() const {
+void MessageRowStore::validate() {
 	GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "Unsupported operation");
 }
 
@@ -258,14 +275,9 @@ const ColumnInfo& MessageRowStore::getColumnInfo(ColumnId columnId) const {
 bool MessageRowStore::isVariableColumn(ColumnId columnId) const {
 	const ColumnInfo &info = getColumnInfo(columnId);
 	return (info.getColumnType() == COLUMN_TYPE_STRING ||
+			info.getColumnType() == COLUMN_TYPE_GEOMETRY ||
 			info.getColumnType() == COLUMN_TYPE_BLOB ||
 			info.isArray());
-}
-
-bool MessageRowStore::isLinkedVariableColumn(ColumnId columnId) const {
-	const ColumnInfo &info = getColumnInfo(columnId);
-	return (info.getColumnType() == COLUMN_TYPE_BLOB
-			|| info.getColumnType() == COLUMN_TYPE_STRING_ARRAY);
 }
 
 uint32_t MessageRowStore::getColumnElementFixedSize(const ColumnInfo &info) {
@@ -303,7 +315,7 @@ InputMessageRowStore::InputMessageRowStore(
 		fixedData_(static_cast<uint8_t*>(data)),
 		nextRowPosition_(0),
 		lastVarColumnNth_(0), lastVarColumnOffset_(0) {
-	rowFixedSize_ = 0;
+	rowFixedColumnSize_ = 0;
 	variableColumnNum_ = 0;
 	nullsOffset_ = 0;
 	for (uint32_t columnId = 0; columnId < columnCount; ++columnId) {
@@ -312,11 +324,11 @@ InputMessageRowStore::InputMessageRowStore(
 			++variableColumnNum_;
 			nullsOffset_ = sizeof(OId);
 		} else {
-			rowFixedSize_ += info.getColumnSize();
+			rowFixedColumnSize_ += info.getColumnSize();
 		}
 	}
 	nullsBytes_ = ValueProcessor::calcNullsByteSize(columnCount);
-	rowImageSize_ = (rowIdIncluded_ ? sizeof(RowId) : 0) + nullsOffset_ + nullsBytes_ + rowFixedSize_;
+	rowImageSize_ = (rowIdIncluded_ ? sizeof(RowId) : 0) + nullsOffset_ + nullsBytes_ + rowFixedColumnSize_;
 
 	if (validateOnConstruct) {
 		while (next()) {
@@ -340,7 +352,7 @@ InputMessageRowStore::InputMessageRowStore(
 		fixedData_(static_cast<uint8_t*>(fixedData)),
 		nextRowPosition_(0),
 		lastVarColumnNth_(0), lastVarColumnOffset_(0) {
-	rowFixedSize_ = 0;
+	rowFixedColumnSize_ = 0;
 	variableColumnNum_ = 0;
 	nullsOffset_ = 0;
 	for (uint32_t columnId = 0; columnId < columnCount; ++columnId) {
@@ -349,11 +361,11 @@ InputMessageRowStore::InputMessageRowStore(
 			++variableColumnNum_;
 			nullsOffset_ = sizeof(OId);
 		} else {
-			rowFixedSize_ += info.getColumnSize();
+			rowFixedColumnSize_ += info.getColumnSize();
 		}
 	}
 	nullsBytes_ = ValueProcessor::calcNullsByteSize(columnCount);
-	rowImageSize_ = (rowIdIncluded_ ? sizeof(RowId) : 0) + nullsOffset_ + nullsBytes_ + rowFixedSize_;
+	rowImageSize_ = (rowIdIncluded_ ? sizeof(RowId) : 0) + nullsOffset_ + nullsBytes_ + rowFixedColumnSize_;
 
 	if (validateOnConstruct) {
 		while (next()) {
@@ -388,6 +400,7 @@ bool InputMessageRowStore::next() {
 		}
 	}
 	nextRowPosition_++;
+	resetVarOffset();
 
 	validate();
 
@@ -401,6 +414,7 @@ void InputMessageRowStore::reset() {
 	varDataIn_.base().position(0);
 	fixedDataIn_.base().position(0);
 	nextRowPosition_ = 0;
+	resetVarOffset();
 }
 
 /*!
@@ -439,9 +453,9 @@ void InputMessageRowStore::position(uint64_t p) {
 			fixedDataIn_.base().position(pos);
 		}
 		nextRowPosition_ = p + 1;
+		resetVarOffset();
 	}
 }
-
 
 uint64_t InputMessageRowStore::getRowCount() {
 	return rowCount_;
@@ -468,14 +482,14 @@ uint8_t* InputMessageRowStore::getRowVariablePart() const {
 /*!
 	@brief Get array length
 */
-uint32_t InputMessageRowStore::getArrayLength(ColumnId columnId) const {
+uint32_t InputMessageRowStore::getArrayLength(ColumnId columnId) {
 	assert(hasActiveRow());
 
 	util::ByteStream<util::ArrayInStream> varDataIn = varDataIn_;
 	varDataIn.base().position(getVarDataOffset(columnId));
 
-	MessageRowStore::getVarSize(varDataIn); 
-	uint32_t elementNum = MessageRowStore::getVarSize(varDataIn); 
+	ValueProcessor::getVarSize(varDataIn); 
+	uint32_t elementNum = ValueProcessor::getVarSize(varDataIn); 
 
 	return elementNum;
 }
@@ -483,13 +497,13 @@ uint32_t InputMessageRowStore::getArrayLength(ColumnId columnId) const {
 /*!
 	@brief Get array data size
 */
-uint32_t InputMessageRowStore::getTotalArraySize(ColumnId columnId) const {
+uint32_t InputMessageRowStore::getTotalArraySize(ColumnId columnId) {
 	assert(hasActiveRow());
 
 	util::ByteStream<util::ArrayInStream> varDataIn = varDataIn_;
 	varDataIn.base().position(getVarDataOffset(columnId));
 
-	uint32_t length = MessageRowStore::getVarSize(varDataIn); 
+	uint32_t length = ValueProcessor::getVarSize(varDataIn); 
 
 	return length;
 }
@@ -498,7 +512,7 @@ uint32_t InputMessageRowStore::getTotalArraySize(ColumnId columnId) const {
 	@brief Get element of array
 */
 void InputMessageRowStore::getArrayElement(ColumnId columnId,
-		uint32_t arrayIndex, const void *&data, uint32_t &size) const {
+		uint32_t arrayIndex, const void *&data, uint32_t &size) {
 	assert(hasActiveRow());
 
 	const ColumnInfo &info = getColumnInfo(columnId);
@@ -507,20 +521,21 @@ void InputMessageRowStore::getArrayElement(ColumnId columnId,
 	util::ByteStream<util::ArrayInStream> varDataIn = varDataIn_;
 	varDataIn.base().position(getVarDataOffset(columnId));
 
-	MessageRowStore::getVarSize(varDataIn); 
-	uint32_t elementNum = MessageRowStore::getVarSize(varDataIn); 
+	ValueProcessor::getVarSize(varDataIn); 
+	uint32_t elementNum = ValueProcessor::getVarSize(varDataIn); 
 	UNUSED_VARIABLE(elementNum);
 
 	assert(elementNum > arrayIndex);
 	if (info.getColumnType() == COLUMN_TYPE_STRING_ARRAY) {
 		for (uint32_t i = 0; i <= arrayIndex; i++) {
-			size = MessageRowStore::getVarSize(varDataIn);
+			size = ValueProcessor::getVarSize(varDataIn);
 			data = varData_ + varDataIn.base().position();
 			varDataIn.base().position(varDataIn.base().position() + size);
 		}
 	}
 	else {
 		assert(info.getColumnType() != COLUMN_TYPE_BLOB);
+		assert(info.getColumnType() != COLUMN_TYPE_GEOMETRY);
 
 		size = getColumnElementFixedSize(info);
 		assert(size > 0);
@@ -529,30 +544,6 @@ void InputMessageRowStore::getArrayElement(ColumnId columnId,
 		data = varData_ + varDataIn.base().position();
 		varDataIn.base().position(varDataIn.base().position() + size);
 	}
-}
-
-/*!
-	@brief Get offset of fixed-type values and variable-typed values
-*/
-bool InputMessageRowStore::getStartOffset(uint64_t startPos, uint64_t &fixedOffset, uint64_t &varOffset) {
-	bool valid = true;
-	if (startPos > rowCount_) {
-		valid = false;
-	} else if (startPos == rowCount_) {
-		util::ByteStream<util::ArrayInStream> fixedDataIn = fixedDataIn_;
-		fixedDataIn.base().position(0);
-		fixedOffset = fixedDataIn.base().remaining();
-		util::ByteStream<util::ArrayInStream> varDataIn = varDataIn_;
-		varDataIn.base().position(0);
-		varOffset = varDataIn.base().remaining();
-	} else {
-		uint64_t currentPos = position();
-		position(startPos);
-		fixedOffset = fixedDataIn_.base().position();;
-		varOffset = varDataIn_.base().position();;
-		position(currentPos);
-	}
-	return valid;
 }
 
 
@@ -668,22 +659,73 @@ bool InputMessageRowStore::hasActiveRow() const {
 }
 
 /*!
+	@brief move variable field
+*/
+void InputMessageRowStore::moveVarData(const ColumnInfo &info, 
+		util::ByteStream<util::ArrayInStream> &varDataIn) {
+
+	ValueProcessor::getVarSize(varDataIn); 
+	if (info.getColumnOffset() > 0) {
+		if (lastVarColumnNth_ > info.getColumnOffset()) {
+			resetVarOffset();
+		} else if (lastVarColumnNth_ != 0) {
+			varDataIn.base().position(lastVarColumnOffset_);
+		}
+		for (; lastVarColumnNth_ < info.getColumnOffset(); lastVarColumnNth_++) {
+			uint32_t varElemSize = ValueProcessor::getVarSize(varDataIn); 
+			varDataIn.base().position(varDataIn.base().position() + varElemSize);
+			lastVarColumnOffset_ = varDataIn.base().position();
+		}
+	}
+}
+
+/*!
 	@brief Validate current Row
 */
-void InputMessageRowStore::validate() const {
+void InputMessageRowStore::validate() {
+	uint64_t varidateVarSize = 0, totalVarSize = 0;
+
+	if (getVariableColumnNum() == 0) {
+		totalVarSize = 0;
+	} else if (nextRowPosition_ >= rowCount_) {
+		totalVarSize = varDataIn_.base().remaining();
+	} else {
+		uint64_t currentRowPos = position();
+		size_t currentVarPos = varDataIn_.base().position();
+		if (nextRowPosition_ > 0) {
+			fixedDataIn_.base().position(
+					fixedDataIn_.base().position() + rowImageSize_);
+//			uint64_t pos = fixedDataIn_.base().position();
+			if (rowIdIncluded_) {
+				RowId rowId;
+				fixedDataIn_ >> rowId;
+			}
+			uint64_t varOffset = 0;
+			fixedDataIn_ >> varOffset;
+			varDataIn_.base().position(varOffset);
+		}
+		totalVarSize = varDataIn_.base().position() - currentVarPos;
+		position(currentRowPos);
+	}
 	for (ColumnId id = 0; id < getColumnCount(); id++) {
 
 		const ColumnInfo &columnInfo =  getColumnInfo(id);
 		const void *data; 
 		uint32_t size;
+		uint32_t varidateVarColumnSize = 0;
+		if (columnInfo.isNotNull()){
+			if (RowNullBits::isNullValue(getNullsAddr(), id)) {
+				GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Null value of Column[" << id << "] is not allowed");
+			}
+		}
 		if (columnInfo.isArray()){
 			uint32_t totalSize = getTotalArraySize(id);
-			UNUSED_VARIABLE(totalSize);
+			if (totalSize > dsValueLimitConfig_.getLimitBigSize()) {
+				GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Size of Column[" << id << "] exceeds maximum size : " << totalSize);
+			}
+
 			uint32_t elementNum = getArrayLength(id);
 			uint32_t elementSize = FixedSizeOfColumnType[columnInfo.getSimpleColumnType()];
-			if (elementSize != 0) {
-				assert(elementNum == (totalSize - ValueProcessor::getEncodedVarSize(elementNum)) / elementSize);
-			}
 			if (elementNum > dsValueLimitConfig_.getLimitArrayNum()){
 				GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Array length of Column[" << id << "] exceeds maximum size : " << elementNum);
 			}
@@ -695,6 +737,7 @@ void InputMessageRowStore::validate() const {
 						if (size > dsValueLimitConfig_.getLimitSmallSize()) {
 							GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Size of element[" << nth << "] of Column[" << id << "] exceeds maximum size");
 						}
+						varidateVarColumnSize += ValueProcessor::getEncodedVarSize(size) + size;
 					}
 				}
 				break;
@@ -711,10 +754,17 @@ void InputMessageRowStore::validate() const {
 						}
 					}
 				}
+				varidateVarColumnSize += elementNum * elementSize;
 				break;
 			default:
+				varidateVarColumnSize += elementNum * elementSize;
 				break;
 			}
+			varidateVarColumnSize += ValueProcessor::getEncodedVarSize(elementNum);
+			if (varidateVarColumnSize != totalSize) {
+				GS_THROW_USER_ERROR(GS_ERROR_DS_INPUT_MESSAGE_INVALID, "Size of Column[" << id << "] is invalid : message data may be broken");
+			}
+			varidateVarColumnSize += ValueProcessor::getEncodedVarSize(totalSize);
 		} else {
 			switch (columnInfo.getColumnType()) {
 			case COLUMN_TYPE_STRING :
@@ -723,6 +773,28 @@ void InputMessageRowStore::validate() const {
 					if (size > dsValueLimitConfig_.getLimitSmallSize()) {
 						GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Size of Column[" << id << "] exceeds maximum size : " << size);
 					}
+					varidateVarColumnSize += ValueProcessor::getEncodedVarSize(size) + size;
+				}
+				break;
+			case COLUMN_TYPE_GEOMETRY :
+				{
+					getField(id, data, size);
+					if (size > dsValueLimitConfig_.getLimitSmallSize()) {
+						GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Size of Column[" << id << "] exceeds maximum size : " << size);
+					}
+					if (!RowNullBits::isNullValue(getNullsAddr(), id)) {
+						int16_t typex = 0;
+						BinaryObject tmpVariant(const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(data)));
+						bool isEmpty = Geometry::deserializeHeader(tmpVariant.data(), tmpVariant.size(), typex);
+						
+						if (typex == Geometry::QUADRATICSURFACE){
+							GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "QUADRATICSURFACE value of Column[" << id << "] is not supported");
+						}
+						if (isEmpty) {
+							GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Empty value of Column[" << id << "] is not supported");
+						}
+					}
+					varidateVarColumnSize += ValueProcessor::getEncodedVarSize(size) + size;
 				}
 				break;
 			case COLUMN_TYPE_TIMESTAMP :
@@ -743,12 +815,20 @@ void InputMessageRowStore::validate() const {
 					if (size > dsValueLimitConfig_.getLimitBigSize()) {
 						GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Size of Column[" << id << "] exceeds maximum size : " << size);
 					}
+					varidateVarColumnSize += ValueProcessor::getEncodedVarSize(size) + size;
 				}
 				break;
 			default:
 				break;
 			}
 		}
+		varidateVarSize += varidateVarColumnSize;
+	}
+	if (getVariableColumnNum() != 0) {
+		varidateVarSize += ValueProcessor::getEncodedVarSize(getVariableColumnNum());
+	}
+	if (varidateVarSize != totalVarSize) {
+		GS_THROW_USER_ERROR(GS_ERROR_DS_INPUT_MESSAGE_INVALID, "Size of variable data is invalid : message data may be broken");
 	}
 }
 
@@ -776,18 +856,18 @@ OutputMessageRowStore::OutputMessageRowStore(
 	rowIdSize_ = rowIdIncluded ? sizeof(RowId) : 0;
 	variableColumnNum_ = 0;
 	nullsOffset_ = 0;
-	rowFixedSize_ = 0;
+	rowFixedColumnSize_ = 0;
 	for (uint32_t columnId = 0; columnId < columnCount; ++columnId) {
 		const ColumnInfo &info = columnInfoList[columnId];
 		if (info.isVariable()) {
 			++variableColumnNum_;
 			nullsOffset_ = sizeof(OId);
 		} else {
-			rowFixedSize_ += info.getColumnSize();
+			rowFixedColumnSize_ += info.getColumnSize();
 		}
 	}
 	nullsBytes_ = ValueProcessor::calcNullsByteSize(columnCount);
-	rowImageSize_ = (rowIdIncluded ? sizeof(RowId) : 0) + nullsOffset_ + nullsBytes_ + rowFixedSize_;
+	rowImageSize_ = (rowIdIncluded ? sizeof(RowId) : 0) + nullsOffset_ + nullsBytes_ + rowFixedColumnSize_;
 }
 
 /*!
@@ -855,23 +935,16 @@ uint64_t OutputMessageRowStore::getRowCount() {
 	@brief Set variable size of variable-type field value
 */
 void OutputMessageRowStore::setVarSize(uint32_t varSize) {
-	uint32_t encodedVarSize = ValueProcessor::encodeVarSize(varSize);
-	if (varSize <= OBJECT_MAX_1BYTE_LENGTH_VALUE) {
-		varDataOut_ << static_cast<uint8_t>(encodedVarSize);
+	if (varSize < VAR_SIZE_1BYTE_THRESHOLD) {
+		varDataOut_ << ValueProcessor::encode1ByteVarSize(static_cast<uint8_t>(varSize));
+	} else if (varSize < VAR_SIZE_4BYTE_THRESHOLD) {
+		varDataOut_ << ValueProcessor::encode4ByteVarSize(static_cast<uint32_t>(varSize));
 	} else {
-		varDataOut_ << encodedVarSize;
+		if (varSize > static_cast<uint32_t>(std::numeric_limits<int32_t>::max())) {
+			UTIL_THROW_ERROR(GS_ERROR_DS_OUT_OF_RANGE, "");
+		}
+		varDataOut_ << ValueProcessor::encode8ByteVarSize(static_cast<uint64_t>(varSize));
 	}
-}
-
-/*!
-	@brief Set uint64 data
-*/
-void OutputMessageRowStore::setUInt64(uint64_t data) {
-	varDataOut_ << data;
-}
-
-void OutputMessageRowStore::setNextOId(OId oId) {
-	varDataOut_ << ValueProcessor::encodeVarSizeOId(oId);
 }
 
 /*!
@@ -1116,6 +1189,82 @@ void OutputMessageRowStore::getAllVariablePart(
 	size = static_cast<uint32_t>(varData_.size());
 }
 
+void OutputMessageRowStore::setNull(ColumnId columnId) {
+	StreamResetter< util::ByteStream< util::XArrayOutStream<> > > resetter(
+			fixedDataOut_);
+
+	setInitField(columnId);
+
+	size_t nullBytePos = fixedDataOut_.base().position() + rowIdSize_ + 
+		nullsOffset_ + RowNullBits::getBytePos(columnId);
+
+	uint8_t nullByte = *(fixedData_.data() + nullBytePos);
+	RowNullBits::setBit(nullByte, RowNullBits::getBitPos(columnId));
+
+	fixedDataOut_.base().position(nullBytePos);
+	fixedDataOut_.writeAll(&nullByte, sizeof(uint8_t));
+}
+
+void OutputMessageRowStore::setInitField(ColumnId columnId) {
+	const ColumnInfo &info = getColumnInfo(columnId);
+	if (isVariableColumn(columnId)) {
+		setField(columnId, NULL, 0);
+	} else {
+		switch (info.getColumnType()) {
+		case COLUMN_TYPE_BOOL:
+			{
+				int8_t val = 0;
+				setField<COLUMN_TYPE_BOOL>(columnId, val);
+			}
+			break;
+		case COLUMN_TYPE_BYTE:
+			{
+				int8_t val = 0;
+				setField<COLUMN_TYPE_BYTE>(columnId, val);
+			}
+			break;
+		case COLUMN_TYPE_SHORT:
+			{
+				int16_t val = 0;
+				setField<COLUMN_TYPE_SHORT>(columnId, val);
+			}
+			break;
+		case COLUMN_TYPE_INT:
+			{
+				int32_t val = 0;
+				setField<COLUMN_TYPE_INT>(columnId, val);
+			}
+			break;
+		case COLUMN_TYPE_LONG:
+			{
+				int64_t val = 0;
+				setField<COLUMN_TYPE_LONG>(columnId, val);
+			}
+			break;
+		case COLUMN_TYPE_FLOAT:
+			{
+				float val = 0;
+				setField<COLUMN_TYPE_FLOAT>(columnId, val);
+			}
+			break;
+		case COLUMN_TYPE_DOUBLE:
+			{
+				double val = 0;
+				setField<COLUMN_TYPE_DOUBLE>(columnId, val);
+			}
+			break;
+		case COLUMN_TYPE_TIMESTAMP:
+			{
+				Timestamp val = 0;
+				setField<COLUMN_TYPE_TIMESTAMP>(columnId, val);
+			}
+			break;
+		default:
+			GS_THROW_USER_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
+		}
+	}
+}
+
 MessageRowKeyCoder::MessageRowKeyCoder(ColumnType keyType) :
 		keyType_(keyType) {
 	switch (keyType) {
@@ -1141,8 +1290,8 @@ void MessageRowKeyCoder::decode(
 	if (keyType_ == COLUMN_TYPE_STRING) {
 		const size_t orgPos = in.base().position();
 
-		size = MessageRowStore::getVarSize(in);
-		size += (size <= OBJECT_MAX_1BYTE_LENGTH_VALUE) ? 1 : 4;
+		size = ValueProcessor::getVarSize(in);
+		size += ValueProcessor::getEncodedVarSize(size);
 
 		in.base().position(orgPos);
 	}

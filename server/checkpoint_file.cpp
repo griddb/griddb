@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -44,7 +44,7 @@ const char8_t *const CheckpointFile::gsCpFileSeparator = "_";
 CheckpointFile::CheckpointFile(
 	uint8_t chunkExpSize, const std::string &dir, PartitionGroupId pgId)
 	: BLOCK_EXP_SIZE_(chunkExpSize),
-	  BLOCK_SIZE_(1UL << chunkExpSize),
+	  BLOCK_SIZE_(static_cast<Size_t>(1UL << chunkExpSize)),
 	  file_(NULL),
 	  usedChunkInfo_(10240),
 	  validChunkInfo_(10240),
@@ -106,9 +106,11 @@ bool CheckpointFile::open(bool checkOnly, bool createMode) {
 			file_->open(fileName_.c_str(),
 				(checkOnly ? util::FileFlag::TYPE_READ_ONLY
 						   : util::FileFlag::TYPE_READ_WRITE));
+#ifndef _WIN32 
 			if (!checkOnly) {
 				file_->lock();
 			}
+#endif
 			util::FileStatus status;
 			file_->getStatus(&status);
 			int64_t chunkNum =
@@ -136,7 +138,9 @@ bool CheckpointFile::open(bool checkOnly, bool createMode) {
 			file_ = UTIL_NEW util::NamedFile();
 			file_->open(fileName_.c_str(),
 				util::FileFlag::TYPE_CREATE | util::FileFlag::TYPE_READ_WRITE);
+#ifndef _WIN32 
 			file_->lock();
+#endif
 			blockNum_ = 0;
 			freeUseBitNum_ = 0;
 			freeBlockSearchCursor_ = 0;
@@ -168,7 +172,9 @@ void CheckpointFile::truncate() {
 										   util::FileFlag::TYPE_TRUNCATE |
 										   util::FileFlag::TYPE_READ_WRITE);
 		UTIL_TRACE_WARNING(CHECKPOINT_FILE, "file truncated.");
+#ifndef _WIN32 
 		file_->lock();
+#endif
 		blockNum_ = 0;
 		freeUseBitNum_ = 0;
 		freeBlockSearchCursor_ = 0;
@@ -321,31 +327,105 @@ void CheckpointFile::initializeValidBlockInfo(
 	@brief Write chunkSize-block.
 */
 void CheckpointFile::punchHoleBlock(uint32_t size, uint64_t offset) {
+
 #ifdef _WIN32
 #else
-	const uint64_t startClock = util::Stopwatch::currentClock();  
+	const uint64_t startClock =
+		util::Stopwatch::currentClock();  
 	try {
-		if (0 < size) {
-			file_->preAllocate(
-				FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE, offset, size);
+		if (file_ && !file_->isClosed() && 0 < size) {
+			file_->preAllocate(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE,
+				offset, size);
 		}
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_SYSTEM_ERROR(e, "Checkpoint file fallocate failed. (reason="
 									   << GS_EXCEPTION_MESSAGE(e) << fileName_
-									   << ",pgId," << pgId_ << ",offset,"
-									   << offset << ",size," << size << ")");
+									   << ",pgId," << pgId_ 
+									   << ",offset," << offset
+									   << ",size," << size << ")");
 	}
 
 	const uint32_t lap = util::Stopwatch::clockToMillis(
 		util::Stopwatch::currentClock() - startClock);
 	if (lap > ioWarningThresholdMillis_) {  
-		UTIL_TRACE_WARNING(IO_MONITOR,
-			"[LONG I/O] punching hole time,"
-				<< lap << ",fileName," << fileName_ << ",pgId," << pgId_
-				<< ",chunkNth," << offset << ",size," << size
-				<< ",writeBlockCount_=" << writeBlockCount_);
+		UTIL_TRACE_WARNING(
+			IO_MONITOR, "[LONG I/O] punching hole time,"
+							<< lap << ",fileName," << fileName_ << ",pgId,"
+							<< pgId_ << ",offset," << offset
+							<< ",size," << size
+							<< ",writeBlockCount_=" << writeBlockCount_);
 	}
+#endif
+}
+
+void CheckpointFile::zerofillUnusedBlock(const uint64_t blockNum) {
+#ifdef _WIN32
+#else
+
+
+	uint64_t headBlockId = 0;
+	size_t count = 0;
+	off_t offset = 0;
+	off_t length = 0;
+	size_t punchCount = 0;
+	size_t totalCount = 0;
+
+	const uint64_t startClock = util::Stopwatch::currentClock();
+	try {
+		for (uint64_t i = 1; i < blockNum; ++i) {
+			if (usedChunkInfo_.get(i)) {
+				if (count > 0) {
+					offset = headBlockId * BLOCK_SIZE_;
+					length = count * BLOCK_SIZE_;
+					file_->preAllocate(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE,
+							offset, length);
+					totalCount += count;
+					++punchCount;
+					count = 0;
+					headBlockId = 0;
+				}
+				else {
+				}
+			}
+			else {
+				if (count > 0) {
+					++count;
+				}
+				else {
+					headBlockId = i;
+					count = 1;
+				}
+			}
+		}
+		if (count > 0) {
+			offset = headBlockId * BLOCK_SIZE_;
+			length = count * BLOCK_SIZE_;
+			file_->preAllocate(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE,
+					offset, length);
+			totalCount += count;
+			++punchCount;
+			count = 0;
+			headBlockId = 0;
+		}
+	}
+	catch (std::exception &e) {
+		GS_RETHROW_SYSTEM_ERROR(e,
+				"Punching holes in checkpoint file has failed. (reason="
+				<< GS_EXCEPTION_MESSAGE(e) << fileName_
+				<< ",pgId," << pgId_
+				<< ",offset," << offset
+				<< ",size," << length << ")");
+	}
+
+	const uint32_t lap = util::Stopwatch::clockToMillis(
+			util::Stopwatch::currentClock() - startClock);
+	UTIL_TRACE_INFO(
+			IO_MONITOR, "Punching hole time," << lap
+			<< ",fileName," << fileName_ << ",pgId,"
+			<< pgId_ << ",holePunchCount," << punchCount
+			<< ",holeBlockCount," << totalCount
+			<< ",totalBlockCount," << blockNum);
 #endif
 }
 
@@ -359,34 +439,21 @@ int64_t CheckpointFile::writeBlock(
 			file_ = UTIL_NEW util::NamedFile();
 			file_->open(fileName_.c_str(),
 				util::FileFlag::TYPE_CREATE | util::FileFlag::TYPE_READ_WRITE);
+#ifndef _WIN32 
 			file_->lock();
+#endif
 		}
-
-		const uint64_t startClock =
-			util::Stopwatch::currentClock();  
-		ssize_t writtenSize = file_->write(
-			buffer, (size << BLOCK_EXP_SIZE_), (blockNo << BLOCK_EXP_SIZE_));
-		if (static_cast<uint64_t>(writtenSize) != (size << BLOCK_EXP_SIZE_)) {
-			GS_THROW_SYSTEM_ERROR(GS_ERROR_CF_WRITE_CHUNK_FAILED,
-				"invalid size, expected = " << (size << BLOCK_EXP_SIZE_)
-											<< ", actural = " << writtenSize);
-		}
-
-		const uint32_t lap = util::Stopwatch::clockToMillis(
-			util::Stopwatch::currentClock() - startClock);
-		if (lap > ioWarningThresholdMillis_) {  
-			UTIL_TRACE_WARNING(
-				IO_MONITOR, "[LONG I/O] write time,"
-								<< lap << ",fileName," << fileName_ << ",pgId,"
-								<< pgId_ << ",chunkNth," << blockNo
-								<< ",writeBlockCount_=" << writeBlockCount_);
-		}
-
+		GS_FILE_WRITE_ALL(
+				IO_MONITOR, (*file_), buffer,
+				(size << BLOCK_EXP_SIZE_), (blockNo << BLOCK_EXP_SIZE_),
+				ioWarningThresholdMillis_);
+		ssize_t writtenSize = size << BLOCK_EXP_SIZE_;
 		if (blockNum_ < (size + blockNo)) {
 			blockNum_ = (size + blockNo);
-			UTIL_TRACE_INFO(CHECKPOINT_FILE,
-				fileName_ + " extended. File size = "
-					<< (blockNo + size) << ",blockNum_=" << blockNum_);
+			UTIL_TRACE_INFO(
+				CHECKPOINT_FILE, fileName_ + " extended. File size = "
+									 << (blockNo + size) 
+									 << ",blockNum_=" << blockNum_);
 		}
 
 		uint64_t writeBlockNum = (writtenSize >> BLOCK_EXP_SIZE_);
@@ -409,34 +476,20 @@ int64_t CheckpointFile::writeBlock(
 */
 int64_t CheckpointFile::writePartialBlock(
 	const uint8_t *buffer, uint32_t size, uint64_t offset) {
-	assert(offset >= 0);
 	try {
 		if (!file_) {
 			file_ = UTIL_NEW util::NamedFile();
 			file_->open(fileName_.c_str(),
 				util::FileFlag::TYPE_CREATE | util::FileFlag::TYPE_READ_WRITE);
+#ifndef _WIN32 
 			file_->lock();
+#endif
 		}
 
-		const uint64_t startClock =
-			util::Stopwatch::currentClock();  
-		ssize_t writtenSize = file_->write(buffer, size, offset);
-
-		if (static_cast<uint64_t>(writtenSize) != size) {
-			GS_THROW_SYSTEM_ERROR(GS_ERROR_CF_WRITE_CHUNK_FAILED,
-				"invalid size, expected = " << size
-											<< ", actural = " << writtenSize);
-		}
-
-		const uint32_t lap = util::Stopwatch::clockToMillis(
-			util::Stopwatch::currentClock() - startClock);  
-		if (lap > ioWarningThresholdMillis_) {				
-			UTIL_TRACE_WARNING(IO_MONITOR, "[LONG I/O] write time,"
-											   << lap << ",fileName,"
-											   << fileName_ << ",pgId," << pgId_
-											   << ",chunkNth," << offset);
-		}
-
+		GS_FILE_WRITE_ALL(
+				IO_MONITOR, (*file_), buffer, size, offset,
+				ioWarningThresholdMillis_);
+		ssize_t writtenSize = size << BLOCK_EXP_SIZE_;
 		if ((blockNum_ << BLOCK_EXP_SIZE_) < size + offset) {
 			blockNum_ = ((size + offset + BLOCK_SIZE_ - 1) >> BLOCK_EXP_SIZE_);
 			UTIL_TRACE_INFO(
@@ -454,6 +507,7 @@ int64_t CheckpointFile::writePartialBlock(
 		GS_RETHROW_SYSTEM_ERROR(e, "Checkpoint file write failed. (reason="
 									   << GS_EXCEPTION_MESSAGE(e) << ")");
 	}
+
 }
 
 /*!
@@ -461,11 +515,12 @@ int64_t CheckpointFile::writePartialBlock(
 */
 int64_t CheckpointFile::readBlock(
 	uint8_t *buffer, uint32_t size, uint64_t blockNo) {
+
 	if (blockNum_ < size + blockNo - 1) {
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_CF_READ_CHUNK_FAILED,
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_CF_READ_CHUNK_FAILED, 
 			"Checkpoint file read failed. (reason= invalid parameter."
-				<< " size = " << size << ", blockNo = " << blockNo
-				<< ", blockNum = " << blockNum_ << ")");
+			<< " size = " << size << ", blockNo = " << blockNo
+			<< ", blockNum = " << blockNum_ << ")");
 	}
 
 	try {
@@ -473,42 +528,19 @@ int64_t CheckpointFile::readBlock(
 			if (util::FileSystem::exists(fileName_.c_str())) {
 				file_ = UTIL_NEW util::NamedFile();
 				file_->open(fileName_.c_str(), util::FileFlag::TYPE_READ_WRITE);
+#ifndef _WIN32 
 				file_->lock();
+#endif
 			}
 			else {
 				return 0;
 			}
 		}
-		const uint64_t startClock =
-			util::Stopwatch::currentClock();  
-		ssize_t readSize = file_->read(
-			buffer, (size << BLOCK_EXP_SIZE_), (blockNo << BLOCK_EXP_SIZE_));
-
-		if (static_cast<uint64_t>(readSize) != (size << BLOCK_EXP_SIZE_)) {
-			util::FileStatus status;
-			file_->getStatus(&status);
-			if ((readSize < (size << BLOCK_EXP_SIZE_)) &&
-				(static_cast<uint64_t>(status.getSize()) < ((blockNo + size) << BLOCK_EXP_SIZE_))) {
-				uint32_t tailBlankSize = (size << BLOCK_EXP_SIZE_) - readSize;
-				memset(buffer + readSize, 0, tailBlankSize);
-				readSize += tailBlankSize;
-			}
-			else {
-				GS_THROW_SYSTEM_ERROR(GS_ERROR_CF_READ_CHUNK_FAILED,
-					"invalid size, expected = " << (size << BLOCK_EXP_SIZE_)
-												<< ", actural = " << readSize);
-			}
-		}
-
-		const uint32_t lap = util::Stopwatch::clockToMillis(
-			util::Stopwatch::currentClock() - startClock);  
-		if (lap > ioWarningThresholdMillis_) {				
-			UTIL_TRACE_WARNING(IO_MONITOR,
-				"[LONG I/O] read time," << lap << ",fileName," << fileName_
-										<< ",blockNo," << blockNo
-										<< ",blockCount," << size);
-		}
-
+		GS_FILE_READ_ALL(
+				IO_MONITOR, (*file_), buffer,
+				(size << BLOCK_EXP_SIZE_), (blockNo << BLOCK_EXP_SIZE_),
+				ioWarningThresholdMillis_);
+		ssize_t readSize = size << BLOCK_EXP_SIZE_;
 		int64_t readBlockNum = (readSize >> BLOCK_EXP_SIZE_);
 		readBlockCount_ += readBlockNum;
 		UTIL_TRACE_INFO(CHECKPOINT_FILE,

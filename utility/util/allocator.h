@@ -1,5 +1,5 @@
 ﻿/*
-    Copyright (c) 2012 TOSHIBA CORPORATION.
+    Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
     
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License as
@@ -55,6 +55,10 @@
 #define UTIL_ALLOCATOR_BASIC_STRING_SUBSTRING_ENABLED 0
 #endif
 
+#ifndef UTIL_ALLOCATOR_FIXED_ALLOCATOR_RESERVE_UNIT_SMALL
+#define UTIL_ALLOCATOR_FIXED_ALLOCATOR_RESERVE_UNIT_SMALL 1
+#endif
+
 #ifndef UTIL_ALLOCATOR_SUBSTITUTE_FIXED_ALLOCATOR
 #define UTIL_ALLOCATOR_SUBSTITUTE_FIXED_ALLOCATOR 0
 #endif
@@ -90,14 +94,30 @@ extern int64_t g_limitSizeCount;
 #endif
 #endif
 
+#ifndef UTIL_ALLOCATOR_DIFF_REPORTER_TRACE_ENABLED
+#define UTIL_ALLOCATOR_DIFF_REPORTER_TRACE_ENABLED 0
+#endif
+
+#ifndef UTIL_ALLOCATOR_DIFF_REPORTER_ENABLED
+#if UTIL_ALLOCATOR_DIFF_REPORTER_TRACE_ENABLED
+#define UTIL_ALLOCATOR_DIFF_REPORTER_ENABLED 1
+#else
+#define UTIL_ALLOCATOR_DIFF_REPORTER_ENABLED 0
+#endif
+#endif
+
 #ifndef UTIL_ALLOCATOR_CHECK_CONFLICTION
 #define UTIL_ALLOCATOR_CHECK_CONFLICTION 0
 #endif
 
 #if UTIL_ALLOCATOR_CHECK_CONFLICTION
-#define UTIL_ALLOCATOR_DETAIL_STAT_GUARD(mutex) do {} while(false)
+#define UTIL_ALLOCATOR_DETAIL_STAT_GUARD(guard, mutex) \
+	LockGuard<Mutex> &guard(*static_cast<LockGuard<Mutex>*>(NULL)); \
+	static_cast<void>(mutex) \
+	static_cast<void>(guard)
 #else
-#define UTIL_ALLOCATOR_DETAIL_STAT_GUARD(mutex) LockGuard<Mutex> guard(mutex_)
+#define UTIL_ALLOCATOR_DETAIL_STAT_GUARD(guard, mutex) \
+	LockGuard<Mutex> guard(mutex)
 #endif
 
 namespace util {
@@ -176,6 +196,10 @@ class AllocatorLimitter;
 */
 class AllocatorInfo {
 public:
+	class ManagerInside {
+		friend class AllocatorManager;
+	};
+
 	AllocatorInfo(AllocatorGroupId groupId, const char8_t *nameLiteral,
 			AllocatorManager *manager = NULL);
 
@@ -190,7 +214,7 @@ public:
 
 	void format(
 			std::ostream &stream, bool partial = false, bool nameOnly = false,
-			bool withUnit = true) const;
+			bool withUnit = true, const ManagerInside *inside = NULL) const;
 
 	static void formatUnitSize(std::ostream &stream, int64_t size, bool exact);
 
@@ -228,6 +252,64 @@ struct AllocatorStats {
 	int64_t values_[STAT_TYPE_END];
 };
 
+class AllocatorDiffReporter {
+public:
+	class Scope;
+	class ActivationSaver;
+
+	AllocatorDiffReporter();
+	~AllocatorDiffReporter();
+
+	void setGroup(AllocatorGroupId groupId);
+	void setNamePrefix(const char8_t *prefix);
+
+	void start(const AllocatorInfo &startInfo);
+	void finish(std::ostream *out = NULL);
+
+private:
+	struct Body;
+	struct ActivationState;
+
+	Body& prepare();
+	void clear();
+
+	static std::ostream& resolveOutput(std::ostream *out);
+
+	Body *body_;
+};
+
+class AllocatorDiffReporter::Scope {
+public:
+	Scope(AllocatorDiffReporter &base, const AllocatorInfo &startInfo);
+	~Scope();
+
+private:
+	AllocatorDiffReporter &base_;
+};
+
+class AllocatorDiffReporter::ActivationSaver {
+public:
+	typedef AllocatorInfo::ManagerInside ManagerInside;
+
+	ActivationSaver();
+	~ActivationSaver();
+
+	void onAllocated(void *ptr);
+	void onDeallocated(void *ptr);
+
+	void saveSnapshot(size_t id);
+	void removeSnapshot(size_t id);
+	void compareSnapshot(
+			size_t id, const AllocatorInfo &info, std::ostream *out,
+			const ManagerInside *inside = NULL);
+
+private:
+	ActivationState& prepare();
+	void clear();
+
+	ActivationState *state_;
+};
+
 /*!
 	@brief Allocates fixed size memory.
 */
@@ -254,6 +336,8 @@ public:
 
 	void setErrorHandler(AllocationErrorHandler *errorHandler);
 
+	Mutex& getLock();
+
 
 	size_t getTotalElementLimit();
 	size_t getFreeElementLimit();
@@ -266,6 +350,20 @@ public:
 	void getStats(AllocatorStats &stats);
 	void setLimit(AllocatorStats::Type type, size_t value);
 	void setLimit(AllocatorStats::Type type, AllocatorLimitter *limitter);
+
+#if UTIL_ALLOCATOR_DIFF_REPORTER_TRACE_ENABLED
+	class ManagerTool {
+		friend class AllocatorManager;
+		typedef Mutex MutexType;
+		static AllocatorDiffReporter::ActivationSaver& getActivationSaver(
+				FixedSizeAllocator &alloc) {
+			return alloc.activationSaver_;
+		}
+		static MutexType& getLock(FixedSizeAllocator &alloc) {
+			return alloc.mutex_;
+		}
+	};
+#endif
 
 private:
 	struct FreeLink {
@@ -300,6 +398,10 @@ private:
 	int64_t limitSizeOverCount_;
 	int64_t limitCallOverCount_;
 	int64_t callCount_;
+#endif
+
+#if UTIL_ALLOCATOR_DIFF_REPORTER_TRACE_ENABLED
+	AllocatorDiffReporter::ActivationSaver activationSaver_;
 #endif
 
 	AllocatorStats stats_;
@@ -365,6 +467,20 @@ public:
 	void setLimit(AllocatorStats::Type type, size_t value);
 	void setLimit(AllocatorStats::Type type, AllocatorLimitter *limitter);
 
+#if UTIL_ALLOCATOR_DIFF_REPORTER_TRACE_ENABLED
+	class ManagerTool {
+		friend class AllocatorManager;
+		typedef Mutex MutexType;
+		static AllocatorDiffReporter::ActivationSaver& getActivationSaver(
+				VariableSizeAllocator &alloc) {
+			return alloc.activationSaver_;
+		}
+		static MutexType& getLock(VariableSizeAllocator &alloc) {
+			return alloc.mutex_;
+		}
+	};
+#endif
+
 private:
 	VariableSizeAllocator(const VariableSizeAllocator&);
 	VariableSizeAllocator& operator=(const VariableSizeAllocator&);
@@ -385,6 +501,10 @@ private:
 
 #if UTIL_ALLOCATOR_REPORTER_ENABLED2
 	std::map<void*, std::string> stackTraceMap_;
+#endif
+
+#if UTIL_ALLOCATOR_DIFF_REPORTER_TRACE_ENABLED
+	AllocatorDiffReporter::ActivationSaver activationSaver_;
 #endif
 
 	AllocatorStats stats_;
@@ -434,6 +554,7 @@ class StackAllocator {
 #endif
 public:
 	class Scope;
+	class ConfigScope;
 
 	typedef FixedSizeAllocator<Mutex> BaseAllocator;
 
@@ -480,7 +601,25 @@ public:
 
 	struct Tool {
 		static void forceReset(StackAllocator &alloc);
+
+		static size_t getRestSize(StackAllocator &alloc);
+		static size_t getRestSizeAligned(StackAllocator &alloc);
 	};
+
+#if UTIL_ALLOCATOR_DIFF_REPORTER_TRACE_ENABLED
+	class ManagerTool {
+		friend class AllocatorManager;
+		typedef NoopMutex MutexType;
+		static AllocatorDiffReporter::ActivationSaver& getActivationSaver(
+				StackAllocator &alloc) {
+			return alloc.activationSaver_;
+		}
+		static MutexType& getLock(StackAllocator&) {
+			static MutexType mutex;
+			return mutex;
+		}
+	};
+#endif
 
 private:
 	struct BlockHead {
@@ -525,11 +664,15 @@ private:
 
 	AllocatorStats stats_;
 	AllocatorLimitter *limitter_;
+
+#if UTIL_ALLOCATOR_DIFF_REPORTER_TRACE_ENABLED
+	AllocatorDiffReporter::ActivationSaver activationSaver_;
+#endif
 };
 
 class StackAllocator::Scope {
 public:
-	Scope(StackAllocator &allocator);
+	explicit Scope(StackAllocator &allocator);
 
 	~Scope();
 
@@ -541,6 +684,23 @@ private:
 
 	BlockHead *lastBlock_;
 	size_t lastRestSize_;
+};
+
+class StackAllocator::ConfigScope {
+public:
+	explicit ConfigScope(StackAllocator &allocator);
+	~ConfigScope();
+
+	void reset();
+
+private:
+	ConfigScope(const ConfigScope&);
+	ConfigScope& operator=(const ConfigScope&);
+
+	StackAllocator *allocator_;
+
+	size_t totalSizeLimit_;
+	size_t freeSizeLimit_;
 };
 }	
 
@@ -882,6 +1042,15 @@ private:
 				BaseAllocator, typename BaseAllocator::value_type>::execute);
 	}
 
+	template<typename BaseAllocator>
+	inline static WrapperResult wrapOther(
+			BaseAllocator *base,
+			typename BaseAllocator::StdAllocatorResolver::
+					template Rebind<Placeholder>::Other::ValueType*) throw() {
+		typedef typename BaseAllocator::StdAllocatorResolver Resolver;
+		return WrapperResult(base, Resolver()(base).wrapper_);
+	}
+
 	template<typename Alloc>
 	inline static Alloc* ensureNonConstAllocator(Alloc *alloc) {
 		return alloc;
@@ -971,8 +1140,44 @@ inline bool operator!=(
 	return op1.base() != op2.base();
 }
 
+template< typename T, typename Alloc = StdAllocator<T, void> >
+class AllocDefaultDelete {
+public:
+	AllocDefaultDelete(const Alloc &alloc) throw();
+	void operator()(T *ptr);
+
+private:
+	Alloc alloc_;
+};
+
+template< typename T, typename D = AllocDefaultDelete<T> >
+class AllocUniquePtr {
+public:
+	typedef T element_type;
+	typedef D deleter_type;
+	typedef element_type *pointer;
+
+	template<typename B> AllocUniquePtr(pointer ptr, B &deleterBase);
+	~AllocUniquePtr();
+
+	pointer get() const throw();
+	element_type& operator*() const;
+	pointer operator->() const throw();
+
+	pointer release() throw();
+	void reset(pointer ptr = pointer()) throw();
+
+private:
+	AllocUniquePtr(const AllocUniquePtr&);
+	AllocUniquePtr& operator=(const AllocUniquePtr&);
+
+	pointer ptr_;
+	deleter_type deleter_;
+};
+
 class AllocatorManager {
 public:
+	typedef AllocatorInfo::ManagerInside ManagerInside;
 
 	typedef AllocatorGroupId GroupId;
 	static const AllocatorGroupId GROUP_ID_ROOT = 0;
@@ -1001,11 +1206,11 @@ public:
 	template<typename Alloc>
 	static bool removeAllocator(const AllocatorInfo &info, Alloc &alloc);
 
-	bool getParentId(GroupId &id);
+	bool getParentId(GroupId &id, const ManagerInside *inside = NULL);
 	template<typename InsertIterator> void listSubGroup(
 			GroupId id, InsertIterator it, bool recursive = false);
 
-	const char8_t* getName(GroupId id);
+	const char8_t* getName(GroupId id, const ManagerInside *inside = NULL);
 
 	void getGroupStats(
 			const GroupId *idList, size_t idCount, AllocatorStats *statsList);
@@ -1016,21 +1221,36 @@ public:
 
 	void setLimit(GroupId id, LimitType limitType, size_t limit);
 
+#if UTIL_ALLOCATOR_DIFF_REPORTER_TRACE_ENABLED
+	void saveReporterSnapshots(
+			const GroupId *idList, size_t idCount, const char8_t *prefix,
+			void *requester);
+	void removeReporterSnapshots(
+			const GroupId *idList, size_t idCount, const char8_t *prefix,
+			void *requester);
+	void compareReporterSnapshots(
+			const GroupId *idList, size_t idCount, const char8_t *prefix,
+			void *requester, std::ostream *out);
+#endif
+
 	struct Initializer;
 
 private:
 	enum Command {
 		COMMAND_GET_STAT,
 		COMMAND_SET_TOTAL_LIMITTER,
-		COMMAND_SET_EACH_LIMIT
+		COMMAND_SET_EACH_LIMIT,
+		COMMAND_SAVE_REPORTER_SNAPSHOT,
+		COMMAND_REMOVE_REPORTER_SNAPSHOT,
+		COMMAND_COMPARE_REPORTER_SNAPSHOT
 	};
 
 	template<typename Alloc> struct Accessor;
+	struct AccessorParams;
 	struct AllocatorEntry;
 	struct GroupEntry;
 
-	typedef void (AccessorFunc)(void*, Command, size_t,
-		AllocatorStats*, AllocatorLimitter*, AllocatorStats::Type);
+	typedef void (AccessorFunc)(void*, Command, const AccessorParams&);
 
 	template<typename T> struct TinyList {
 	public:
@@ -1060,6 +1280,12 @@ private:
 
 	AllocatorEntry *findAllocatorEntry(void *alloc, GroupEntry &groupEntry);
 
+#if UTIL_ALLOCATOR_DIFF_REPORTER_TRACE_ENABLED
+	void operateReporterSnapshots(
+			const GroupId *idList, size_t idCount, const char8_t *prefix,
+			void *requester, Command command, std::ostream *out);
+#endif
+
 	static AllocatorManager *defaultInstance_;
 
 	util::Mutex mutex_;
@@ -1078,9 +1304,17 @@ private:
 template<typename Alloc>
 struct AllocatorManager::Accessor {
 	static void access(
-			void* allocator, Command command, size_t size,
-			AllocatorStats *stats, AllocatorLimitter *limitter,
-			AllocatorStats::Type type);
+			void* allocator, Command command, const AccessorParams &params);
+};
+
+struct AllocatorManager::AccessorParams {
+	AccessorParams();
+
+	size_t size_;
+	AllocatorStats *stats_;
+	AllocatorLimitter *limitter_;
+	AllocatorStats::Type type_;
+	std::ostream *out_;
 };
 
 struct AllocatorManager::AllocatorEntry {
@@ -1124,100 +1358,6 @@ private:
 	util::Mutex mutex_;
 };
 
-
-
-#define UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL1(func) \
-		template<typename A1> \
-		inline ThisType& func(A1 a1) { \
-			BaseType::func(a1); \
-			return *this; \
-		}
-
-#define UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL2(func) \
-		template<typename A1, typename A2> \
-		inline ThisType& func(A1 a1, A2 a2) { \
-			BaseType::func(a1, a2); \
-			return *this; \
-		}
-
-#define UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL3(func) \
-		template<typename A1, typename A2, typename A3> \
-		inline ThisType& func(A1 a1, A2 a2, A3 a3) { \
-			BaseType::func(a1, a2, a3); \
-			return *this; \
-		}
-
-#define UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL4(func) \
-		template<typename A1, typename A2, typename A3, typename A4> \
-		inline ThisType& func(A1 a1, A2 a2, A3 a3, A4 a4) { \
-			BaseType::func(a1, a2, a3, a4); \
-			return *this; \
-		}
-
-#define UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL5(func) \
-		template<typename A1, typename A2, typename A3, \
-		typename A4, typename A5> \
-		inline ThisType& func(A1 a1, A2 a2, A3 a3, A4 a4, A5 a5) { \
-			BaseType::func(a1, a2, a3, a4, a5); \
-			return *this; \
-		}
-
-#define UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL1_NG(func) \
-		template<typename A1> \
-		inline ThisType& func(A1 a1) { \
-			UTIL_STATIC_ASSERT(sizeof(A1) < 0); \
-		}
-
-#define UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL2_NG(func) \
-		template<typename A1, typename A2> \
-		inline ThisType& func(A1 a1, A2 a2) { \
-			UTIL_STATIC_ASSERT(sizeof(A1) < 0); \
-		}
-
-#define UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL4_NG(func) \
-		template<typename A1, typename A2, typename A3, typename A4> \
-		inline ThisType& func(A1 a1, A2 a2, A3 a3, A4 a4) { \
-			UTIL_STATIC_ASSERT(sizeof(A1) < 0); \
-		}
-
-#define UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL5_NG(func) \
-		template<typename A1, typename A2, typename A3, \
-		typename A4, typename A5> \
-		inline ThisType& func(A1 a1, A2 a2, A3 a3, A4 a4, A5 a5) { \
-			UTIL_STATIC_ASSERT(sizeof(A1) < 0); \
-		}
-
-#define UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL6_NG(func) \
-		template<typename A1, typename A2, typename A3, \
-		typename A4, typename A5, typename A6> \
-		inline ThisType& func(A1 a1, A2 a2, A3 a3, A4 a4, A5 a5, A6 a6) { \
-			UTIL_STATIC_ASSERT(sizeof(A1) < 0); \
-		}
-
-namespace detail {
-struct IntTag {
-};
-
-struct NonIntTag {
-};
-
-template<typename T>
-struct IntDetector {
-	typedef NonIntTag Result;
-};
-
-template<> struct IntDetector<char> { typedef IntTag Result; };
-template<> struct IntDetector<wchar_t> { typedef IntTag Result; };
-template<> struct IntDetector<int8_t> { typedef IntTag Result; };
-template<> struct IntDetector<int16_t> { typedef IntTag Result; };
-template<> struct IntDetector<int32_t> { typedef IntTag Result; };
-template<> struct IntDetector<int64_t> { typedef IntTag Result; };
-template<> struct IntDetector<uint8_t> { typedef IntTag Result; };
-template<> struct IntDetector<uint16_t> { typedef IntTag Result; };
-template<> struct IntDetector<uint32_t> { typedef IntTag Result; };
-template<> struct IntDetector<uint64_t> { typedef IntTag Result; };
-}	
-
 /*!
 	@brief STL string template for using allocators with members.
 */
@@ -1227,8 +1367,14 @@ template<
 		typename Alloc = std::allocator<CharT> >
 class BasicString : public std::basic_string<CharT, Traits, Alloc> {
 private:
-	typedef BasicString<CharT, Traits, Alloc>ThisType;
+	typedef BasicString<CharT, Traits, Alloc> ThisType;
 	typedef std::basic_string<CharT, Traits, Alloc> BaseType;
+
+	template<typename T>
+	struct IntDetector {
+		enum { VALUE = std::numeric_limits<T>::is_integer };
+		typedef typename BoolType<VALUE>::Result Result;
+	};
 
 public:
 	typedef typename BaseType::iterator iterator;
@@ -1275,39 +1421,114 @@ public:
 	inline ~BasicString() {
 	}
 
-	UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL1(operator=)
+	inline ThisType& operator=(const BaseType &str) {
+		BaseType::operator=(str);
+		return *this;
+	}
+
+	inline ThisType& operator=(const CharT *s) {
+		BaseType::operator=(s);
+		return *this;
+	}
+
+	inline ThisType& operator=(CharT c) {
+		BaseType::operator=(c);
+		return *this;
+	}
 
 #if UTIL_ALLOCATOR_BASIC_STRING_ALTER_MODIFIERS
 
-	UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL1(operator+=)
+	inline ThisType& operator+=(const BaseType &str) {
+		BaseType::operator+=(str);
+		return *this;
+	}
 
-	UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL1(append)
-	UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL2(append)
-	UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL3(append)
-	UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL4_NG(append)
-	UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL5_NG(append)
-	UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL6_NG(append)
+	inline ThisType& operator+=(const CharT *s) {
+		BaseType::operator+=(s);
+		return *this;
+	}
 
-	UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL1(assign)
-	UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL2(assign)
-	UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL3(assign)
-	UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL4_NG(assign)
-	UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL5_NG(assign)
-	UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL6_NG(assign)
+	inline ThisType& operator+=(CharT c) {
+		BaseType::operator+=(c);
+		return *this;
+	}
 
-	UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL1_NG(insert)
-	UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL2(insert)
-	UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL3(insert)
-	UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL4(insert)
-	UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL5_NG(insert)
-	UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL6_NG(insert)
+	inline ThisType& append(const BaseType &str) {
+		BaseType::append(str);
+		return *this;
+	}
 
-	UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL1_NG(replace)
-	UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL2_NG(replace)
-	UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL3(replace)
-	UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL4(replace)
-	UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL5(replace)
-	UTIL_ALLOCATOR_BASIC_STRING_ALTER_IMPL6_NG(replace)
+	inline ThisType& append(const BaseType &str, size_type pos, size_type n) {
+		BaseType::append(str, pos, n);
+		return *this;
+	}
+
+	inline ThisType& append(const CharT *s) {
+		BaseType::append(s);
+		return *this;
+	}
+
+	inline ThisType& append(const CharT *s, size_type n) {
+		BaseType::append(s, n);
+		return *this;
+	}
+
+	inline ThisType& append(size_type n, CharT c) {
+		BaseType::append(n, c);
+		return *this;
+	}
+
+	inline ThisType& assign(const BaseType &str) {
+		BaseType::assign(str);
+		return *this;
+	}
+
+	inline ThisType& assign(const BaseType &str, size_type pos, size_type n) {
+		BaseType::assign(str, pos, n);
+		return *this;
+	}
+
+	inline ThisType& assign(const CharT *s) {
+		BaseType::assign(s);
+		return *this;
+	}
+
+	inline ThisType& assign(const CharT *s, size_type n) {
+		BaseType::assign(s, n);
+		return *this;
+	}
+
+	inline ThisType& assign(size_type n, CharT c) {
+		BaseType::assign(n, c);
+		return *this;
+	}
+
+	inline ThisType& insert(size_type pos, const BaseType &str) {
+		BaseType::insert(pos, str);
+		return *this;
+	}
+
+	inline ThisType& insert(
+			size_type pos, const BaseType &str,
+			size_type subPos, size_type n) {
+		BaseType::insert(pos, str, subPos, n);
+		return *this;
+	}
+
+	inline ThisType& insert(size_type pos, const CharT *s) {
+		BaseType::insert(pos, s);
+		return *this;
+	}
+
+	inline ThisType& insert(size_type pos, const CharT *s, size_type n) {
+		BaseType::insert(pos, s, n);
+		return *this;
+	}
+
+	inline ThisType& insert(size_type pos, size_type n, CharT c) {
+		BaseType::insert(pos, n, c);
+		return *this;
+	}
 
 	inline void insert(iterator p, size_type n, CharT c) {
 		BaseType::insert(p, n, c);
@@ -1315,6 +1536,59 @@ public:
 
 	inline iterator insert(iterator p, CharT c) {
 		return BaseType::insert(p, c);
+	}
+
+	inline ThisType& replace(
+			size_type pos, size_type len, const BaseType &str) {
+		BaseType::replace(pos, len, str);
+		return *this;
+	}
+
+	inline ThisType& replace(
+			iterator i1, iterator i2, const BaseType &str) {
+		BaseType::replace(i1, i2, str);
+		return *this;
+	}
+
+	inline ThisType& replace(
+			size_type pos, size_type len, const BaseType &str,
+			size_type subPos, size_type n) {
+		BaseType::replace(pos, len, str, subPos, n);
+		return *this;
+	}
+
+	inline ThisType& replace(size_type pos, size_type len, const CharT *s) {
+		BaseType::replace(pos, len, s);
+		return *this;
+	}
+
+	inline ThisType& replace(iterator i1, iterator i2, const CharT *s) {
+		BaseType::replace(i1, i2, s);
+		return *this;
+	}
+
+	inline ThisType& replace(
+			size_type pos, size_type len, const CharT *s, size_type n) {
+		BaseType::replace(pos, len, s, n);
+		return *this;
+	}
+
+	inline ThisType& replace(
+			iterator i1, iterator i2, const CharT *s, size_type n) {
+		BaseType::replace(i1, i2, s, n);
+		return *this;
+	}
+
+	inline ThisType& replace(
+			size_type pos, size_type len, size_type n, CharT c) {
+		BaseType::replace(pos, len, n, c);
+		return *this;
+	}
+
+	inline ThisType& replace(
+			iterator i1, iterator i2, size_type n, CharT c) {
+		BaseType::replace(i1, i2, n, c);
+		return *this;
 	}
 
 	inline ThisType& erase(size_type pos = 0, size_type len = ThisType::npos) {
@@ -1332,26 +1606,26 @@ public:
 
 	template<typename InputIterator>
 	inline ThisType& append(InputIterator first, InputIterator last) {
-		typedef typename detail::IntDetector<InputIterator>::Result Tag;
+		typedef typename IntDetector<InputIterator>::Result Tag;
 		return replaceByRange(this->end(), this->end(), first, last, Tag());
 	}
 
 	template<typename InputIterator>
 	inline ThisType& assign(InputIterator first, InputIterator last) {
-		typedef typename detail::IntDetector<InputIterator>::Result Tag;
+		typedef typename IntDetector<InputIterator>::Result Tag;
 		return replaceByRange(this->begin(), this->end(), first, last, Tag());
 	}
 
 	template<typename InputIterator>
 	inline void insert(iterator p, InputIterator first, InputIterator last) {
-		typedef typename detail::IntDetector<InputIterator>::Result Tag;
+		typedef typename IntDetector<InputIterator>::Result Tag;
 		replaceByRange(p, p, first, last, Tag());
 	}
 
 	template<typename InputIterator>
 	inline ThisType& replace(
 			iterator i1, iterator i2, InputIterator first, InputIterator last) {
-		typedef typename detail::IntDetector<InputIterator>::Result Tag;
+		typedef typename IntDetector<InputIterator>::Result Tag;
 		return replaceByRange(i1, i2, first, last, Tag());
 	}
 
@@ -1360,7 +1634,7 @@ public:
 	inline ThisType substr(
 			size_type pos = 0, size_type len = ThisType::npos) const {
 #if UTIL_ALLOCATOR_BASIC_STRING_SUBSTRING_ENABLED
-		return ThisType(*this, pos, len, get_allocator());
+		return ThisType(*this, pos, len, this->get_allocator());
 #else
 		(void) pos;
 		(void) len;
@@ -1373,7 +1647,7 @@ private:
 	template<typename InputIterator>
 	inline ThisType& replaceByRange(
 			iterator i1, iterator i2, InputIterator n, InputIterator c,
-			detail::IntTag) {
+			const TrueType&) {
 		BaseType::replace(i1, i2, n, c);
 		return *this;
 	}
@@ -1381,7 +1655,7 @@ private:
 	template<typename InputIterator>
 	inline ThisType& replaceByRange(
 			iterator i1, iterator i2, InputIterator first, InputIterator last,
-			detail::NonIntTag) {
+			const FalseType&) {
 		const ThisType str(first, last, this->get_allocator());
 		BaseType::replace(i1, i2, str);
 		return *this;
@@ -1530,6 +1804,10 @@ inline void* FixedSizeAllocator<Mutex>::allocate() {
 	stackTraceMap_.insert(std::make_pair(element, oss.str()));
 #endif
 
+#if UTIL_ALLOCATOR_DIFF_REPORTER_TRACE_ENABLED
+	activationSaver_.onAllocated(element);
+#endif
+
 	return element;
 #endif
 }
@@ -1550,6 +1828,10 @@ inline void FixedSizeAllocator<Mutex>::deallocate(void *element) {
 	stackTraceMap_.erase(element);
 #endif
 
+#if UTIL_ALLOCATOR_DIFF_REPORTER_TRACE_ENABLED
+	activationSaver_.onDeallocated(element);
+#endif
+
 	FreeLink *next = freeLink_;
 	freeLink_ = static_cast<FreeLink*>(element);
 	freeLink_->next_ = next;
@@ -1565,13 +1847,13 @@ inline void FixedSizeAllocator<Mutex>::deallocate(void *element) {
 
 template<typename Mutex>
 inline void FixedSizeAllocator<Mutex>::setTotalElementLimit(size_t limit) {
-	UTIL_ALLOCATOR_DETAIL_STAT_GUARD(mutex_);
+	UTIL_ALLOCATOR_DETAIL_STAT_GUARD(guard, mutex_);
 	totalElementLimit_ = limit;
 }
 
 template<typename Mutex>
 void FixedSizeAllocator<Mutex>::setFreeElementLimit(size_t limit) {
-	UTIL_ALLOCATOR_DETAIL_STAT_GUARD(mutex_);
+	UTIL_ALLOCATOR_DETAIL_STAT_GUARD(guard, mutex_);
 	freeElementLimit_ = limit;
 	clear(freeElementLimit_);
 }
@@ -1583,14 +1865,19 @@ inline void FixedSizeAllocator<Mutex>::setErrorHandler(
 }
 
 template<typename Mutex>
+inline Mutex& FixedSizeAllocator<Mutex>::getLock() {
+	return mutex_;
+}
+
+template<typename Mutex>
 inline size_t FixedSizeAllocator<Mutex>::getTotalElementLimit() {
-	UTIL_ALLOCATOR_DETAIL_STAT_GUARD(mutex_);
+	UTIL_ALLOCATOR_DETAIL_STAT_GUARD(guard, mutex_);
 	return totalElementLimit_;
 }
 
 template<typename Mutex>
 inline size_t FixedSizeAllocator<Mutex>::getFreeElementLimit() {
-	UTIL_ALLOCATOR_DETAIL_STAT_GUARD(mutex_);
+	UTIL_ALLOCATOR_DETAIL_STAT_GUARD(guard, mutex_);
 	return freeElementLimit_;
 }
 
@@ -1601,19 +1888,19 @@ inline size_t FixedSizeAllocator<Mutex>::getElementSize() {
 
 template<typename Mutex>
 inline size_t FixedSizeAllocator<Mutex>::getTotalElementCount() {
-	UTIL_ALLOCATOR_DETAIL_STAT_GUARD(mutex_);
+	UTIL_ALLOCATOR_DETAIL_STAT_GUARD(guard, mutex_);
 	return totalElementCount_;
 }
 
 template<typename Mutex>
 inline size_t FixedSizeAllocator<Mutex>::getFreeElementCount() {
-	UTIL_ALLOCATOR_DETAIL_STAT_GUARD(mutex_);
+	UTIL_ALLOCATOR_DETAIL_STAT_GUARD(guard, mutex_);
 	return freeElementCount_;
 }
 
 template<typename Mutex>
 void FixedSizeAllocator<Mutex>::getStats(AllocatorStats &stats) {
-	UTIL_ALLOCATOR_DETAIL_STAT_GUARD(mutex_);
+	UTIL_ALLOCATOR_DETAIL_STAT_GUARD(guard, mutex_);
 
 	stats.merge(stats_);
 	stats.values_[AllocatorStats::STAT_CACHE_SIZE] +=
@@ -1623,7 +1910,7 @@ void FixedSizeAllocator<Mutex>::getStats(AllocatorStats &stats) {
 template<typename Mutex>
 void FixedSizeAllocator<Mutex>::setLimit(
 		AllocatorStats::Type type, size_t value) {
-	UTIL_ALLOCATOR_DETAIL_STAT_GUARD(mutex_);
+	UTIL_ALLOCATOR_DETAIL_STAT_GUARD(guard, mutex_);
 
 	switch (type) {
 	case AllocatorStats::STAT_CACHE_LIMIT:
@@ -1642,7 +1929,7 @@ void FixedSizeAllocator<Mutex>::setLimit(
 template<typename Mutex>
 void FixedSizeAllocator<Mutex>::setLimit(
 		AllocatorStats::Type type, AllocatorLimitter *limitter) {
-	UTIL_ALLOCATOR_DETAIL_STAT_GUARD(mutex_);
+	UTIL_ALLOCATOR_DETAIL_STAT_GUARD(guard, mutex_);
 
 	switch (type) {
 	case AllocatorStats::STAT_GROUP_TOTAL_LIMIT:
@@ -1667,7 +1954,13 @@ inline void FixedSizeAllocator<Mutex>::reserve() {
 			std::max(stableElementLimit_, totalElementCount_) -
 			totalElementCount_;
 
-	const size_t unitCount = std::min<size_t>(128, 1024 * 1024 / elementSize_);
+#if UTIL_ALLOCATOR_FIXED_ALLOCATOR_RESERVE_UNIT_SMALL
+	const size_t maxUnitSize = 1024;
+#else
+	const size_t maxUnitSize = 1024 * 1024;
+#endif
+
+	const size_t unitCount = std::min<size_t>(128, maxUnitSize / elementSize_);
 	const size_t localCount = std::min(rest, std::max<size_t>(
 			1, std::min(steadyRest, unitCount)));
 
@@ -1922,6 +2215,10 @@ inline void* VariableSizeAllocator<Mutex, Traits>::allocate(size_t size) {
 			oss << StackTraceUtils::getStackTrace;
 			stackTraceMap_.insert(std::make_pair(ptr, oss.str()));
 #endif
+
+#if UTIL_ALLOCATOR_DIFF_REPORTER_TRACE_ENABLED
+			activationSaver_.onAllocated(ptr);
+#endif
 		}
 	}
 	catch (Exception &e) {
@@ -1965,6 +2262,10 @@ inline void VariableSizeAllocator<Mutex, Traits>::deallocate(void *element) {
 #if UTIL_ALLOCATOR_REPORTER_ENABLED2
 		assert(stackTraceMap_.find(ptr) != stackTraceMap_.end());
 		stackTraceMap_.erase(ptr);
+#endif
+
+#if UTIL_ALLOCATOR_DIFF_REPORTER_TRACE_ENABLED
+	activationSaver_.onDeallocated(ptr);
 #endif
 
 		UTIL_FREE(ptr);
@@ -2080,7 +2381,7 @@ void VariableSizeAllocator<Mutex, Traits>::setLimit(
 template<typename Mutex, typename Traits>
 void VariableSizeAllocator<Mutex, Traits>::setLimit(
 		AllocatorStats::Type type, AllocatorLimitter *limitter) {
-	UTIL_ALLOCATOR_DETAIL_STAT_GUARD(mutex_);
+	UTIL_ALLOCATOR_DETAIL_STAT_GUARD(guard, mutex_);
 
 	switch (type) {
 	case AllocatorStats::STAT_GROUP_TOTAL_LIMIT:
@@ -2242,6 +2543,87 @@ inline StackAllocator::Scope::~Scope() {
 }
 
 
+inline StackAllocator::ConfigScope::ConfigScope(StackAllocator &allocator) :
+		allocator_(&allocator),
+		totalSizeLimit_(allocator.getTotalSizeLimit()),
+		freeSizeLimit_(allocator.getFreeSizeLimit()) {
+}
+
+inline StackAllocator::ConfigScope::~ConfigScope() {
+	reset();
+}
+
+inline void StackAllocator::ConfigScope::reset() {
+	if (allocator_ == NULL) {
+		return;
+	}
+
+	allocator_->setTotalSizeLimit(totalSizeLimit_);
+	allocator_->setFreeSizeLimit(freeSizeLimit_);
+	allocator_ = NULL;
+}
+
+
+template<typename T, typename Alloc>
+inline AllocDefaultDelete<T, Alloc>::AllocDefaultDelete(
+		const Alloc &alloc) throw() : alloc_(alloc) {
+}
+
+template<typename T, typename Alloc>
+inline void AllocDefaultDelete<T, Alloc>::operator()(T *ptr) {
+	if (ptr != NULL) {
+		alloc_.destroy(ptr);
+		alloc_.deallocate(ptr, 1);
+	}
+}
+
+
+template<typename T, typename D>
+template<typename B>
+inline AllocUniquePtr<T, D>::AllocUniquePtr(pointer ptr, B &deleterBase) :
+		ptr_(ptr),
+		deleter_(deleterBase) {
+}
+
+template<typename T, typename D>
+inline AllocUniquePtr<T, D>::~AllocUniquePtr() {
+	reset();
+}
+
+template<typename T, typename D>
+inline typename AllocUniquePtr<T, D>::pointer
+AllocUniquePtr<T, D>::get() const throw() {
+	return ptr_;
+}
+
+template<typename T, typename D>
+inline typename AllocUniquePtr<T, D>::element_type&
+AllocUniquePtr<T, D>::operator*() const {
+	assert(ptr_ != pointer());
+	return *ptr_;
+}
+
+template<typename T, typename D>
+inline typename AllocUniquePtr<T, D>::pointer
+AllocUniquePtr<T, D>::operator->() const throw() {
+	return &(**this);
+}
+
+template<typename T, typename D>
+inline typename AllocUniquePtr<T, D>::pointer
+AllocUniquePtr<T, D>::release() throw() {
+	pointer ptr = ptr_;
+	ptr_ = pointer();
+	return ptr;
+}
+
+template<typename T, typename D>
+inline void AllocUniquePtr<T, D>::reset(pointer ptr) throw() {
+	deleter_(ptr_);
+	ptr_ = ptr;
+}
+
+
 template<typename Alloc>
 inline bool AllocatorManager::addAllocator(GroupId id, Alloc &alloc) {
 	util::LockGuard<util::Mutex> guard(mutex_);
@@ -2331,8 +2713,10 @@ void AllocatorManager::getAllocatorStats(
 		for (AllocatorEntry *entryIt = entry.allocatorList_.begin_;
 				entryIt != entry.allocatorList_.end_; ++entryIt) {
 			AllocatorStats stats;
-			(*entryIt->accessor_)(entryIt->allocator_, COMMAND_GET_STAT, 0,
-					&stats, NULL, AllocatorStats::STAT_TYPE_END);
+			AccessorParams params;
+			params.stats_ = &stats;
+			(*entryIt->accessor_)(
+					entryIt->allocator_, COMMAND_GET_STAT, params);
 			*it++ = stats;
 		}
 	}
@@ -2340,23 +2724,47 @@ void AllocatorManager::getAllocatorStats(
 
 template<typename Alloc>
 inline void AllocatorManager::Accessor<Alloc>::access(
-		void* allocator, Command command, size_t size,
-		AllocatorStats *stats, AllocatorLimitter *limitter,
-		AllocatorStats::Type type) {
+		void* allocator, Command command, const AccessorParams &params) {
 	assert(allocator != NULL);
+	Alloc *target = static_cast<Alloc*>(allocator);
+
+#if UTIL_ALLOCATOR_DIFF_REPORTER_TRACE_ENABLED
+	typedef typename Alloc::ManagerTool ManagerTool;
+	typedef typename ManagerTool::MutexType MutexType;
+	ManagerInside inside;
+#endif
 
 	switch (command) {
 	case COMMAND_GET_STAT:
-		assert(stats != NULL);
-		static_cast<Alloc*>(allocator)->getStats(*stats);
+		assert(params.stats_ != NULL);
+		target->getStats(*params.stats_);
 		break;
 	case COMMAND_SET_TOTAL_LIMITTER:
-		static_cast<Alloc*>(allocator)->setLimit(type, size);
+		target->setLimit(params.type_, params.size_);
 		break;
 	case COMMAND_SET_EACH_LIMIT:
-		assert(limitter != NULL);
-		static_cast<Alloc*>(allocator)->setLimit(type, limitter);
+		assert(params.limitter_ != NULL);
+		target->setLimit(params.type_, params.limitter_);
 		break;
+#if UTIL_ALLOCATOR_DIFF_REPORTER_TRACE_ENABLED
+	case COMMAND_SAVE_REPORTER_SNAPSHOT: {
+		LockGuard<MutexType> guard(ManagerTool::getLock(*target));
+		ManagerTool::getActivationSaver(*target).saveSnapshot(params.size_);
+		break;
+	}
+	case COMMAND_REMOVE_REPORTER_SNAPSHOT: {
+		LockGuard<MutexType> guard(ManagerTool::getLock(*target));
+		ManagerTool::getActivationSaver(*target).removeSnapshot(params.size_);
+		break;
+	}
+	case COMMAND_COMPARE_REPORTER_SNAPSHOT: {
+		assert(params.stats_ != NULL);
+		LockGuard<MutexType> guard(ManagerTool::getLock(*target));
+		ManagerTool::getActivationSaver(*target).compareSnapshot(
+				params.size_, params.stats_->info_, params.out_, &inside);
+		break;
+	}
+#endif
 	default:
 		assert(false);
 		break;

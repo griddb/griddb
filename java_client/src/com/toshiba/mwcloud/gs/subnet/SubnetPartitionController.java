@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -18,19 +18,30 @@ package com.toshiba.mwcloud.gs.subnet;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
-import java.util.EnumSet;
 import java.util.List;
 
 import com.toshiba.mwcloud.gs.GSException;
 import com.toshiba.mwcloud.gs.PartitionController;
 import com.toshiba.mwcloud.gs.common.BasicBuffer;
+import com.toshiba.mwcloud.gs.common.ContainerKeyConverter;
+import com.toshiba.mwcloud.gs.common.ContainerKeyConverter.ContainerKey;
+import com.toshiba.mwcloud.gs.common.ContainerKeyPredicate;
+import com.toshiba.mwcloud.gs.common.Extensibles;
 import com.toshiba.mwcloud.gs.common.GSErrorCode;
 import com.toshiba.mwcloud.gs.common.Statement;
-import com.toshiba.mwcloud.gs.experimental.ContainerAttribute;
-import com.toshiba.mwcloud.gs.experimental.ContainerCondition;
 import com.toshiba.mwcloud.gs.subnet.GridStoreChannel.Context;
 
-public class SubnetPartitionController implements PartitionController {
+public class SubnetPartitionController
+implements PartitionController, Extensibles.AsPartitionController {
+
+	
+	static final boolean WORKAROUND_WRONG_API_TEST = false;
+
+	private static final ContainerKeyPredicate DEFAULT_PREDICATE =
+			ContainerKeyPredicate.ofDefaultAttributes(true);
+
+	private static final ContainerKeyPredicate COMPATIBLE_PREDICATE =
+			ContainerKeyPredicate.ofDefaultAttributes(false);
 
 	private final GridStoreChannel channel;
 
@@ -63,6 +74,30 @@ public class SubnetPartitionController implements PartitionController {
 		}
 	}
 
+	private static ContainerKeyPredicate getContainerKeyPredicate() {
+		if (SubnetGridStore.isContainerAttributeUnified()) {
+			return DEFAULT_PREDICATE;
+		}
+		else {
+			return COMPATIBLE_PREDICATE;
+		}
+	}
+
+	private static void putContainerKeyPredicate(
+			BasicBuffer req, ContainerKeyPredicate pred) throws GSException {
+		final int[] attributes = pred.getAttributes();
+		if (attributes.length > 0) {
+			req.putInt(attributes.length);
+			for (int attribute : attributes) {
+				req.putInt(attribute);
+			}
+		}
+		else {
+			throw new GSException(GSErrorCode.EMPTY_PARAMETER,
+					"No container attribute specified");
+		}
+	}
+
 	@Override
 	public int getPartitionCount() throws GSException {
 		checkOpened();
@@ -71,14 +106,14 @@ public class SubnetPartitionController implements PartitionController {
 
 	@Override
 	public long getContainerCount(int partitionIndex) throws GSException {
-		ContainerCondition cond = new ContainerCondition();
-		cond.setAttributes(EnumSet.of(ContainerAttribute.BASE));
-		return getContainerCount(partitionIndex, cond, false);
+		final ContainerKeyPredicate pred = getContainerKeyPredicate();
+		return getContainerCount(partitionIndex, pred, false);
 	}
 
+	@Override
 	public long getContainerCount(
-			int partitionIndex, ContainerCondition cond,
-			boolean systemMode) throws GSException {
+			int partitionIndex, ContainerKeyPredicate pred,
+			boolean internalMode) throws GSException {
 
 		checkOpened();
 		checkPartitionIndex(partitionIndex);
@@ -88,26 +123,18 @@ public class SubnetPartitionController implements PartitionController {
 
 		channel.setupRequestBuffer(req);
 
-		SubnetGridStore.tryPutSystemOptionalRequest(req, context, systemMode);
+		SubnetGridStore.tryPutSystemOptionalRequest(
+				req, context, internalMode, false, null);
 
 		final long start = 0;
 		final long limit = 0;
 
 		req.putLong(start);
 		req.putLong(limit);
-
-		req.putInt(cond.getAttributes().size());
-		if (0 < cond.getAttributes().size()) {
-			for (ContainerAttribute attribute : cond.getAttributes()) {
-				req.putInt(SubnetGridStore.getContainerAttributeFlag(attribute));
-			}
-		} else {
-			throw new GSException(GSErrorCode.EMPTY_PARAMETER,
-					"Container attribute is not specified.");
-		}
+		putContainerKeyPredicate(req, pred);
 
 		channel.executeStatement(
-				context, Statement.GET_PARTITION_CONTAINER_NAMES,
+				context, Statement.GET_PARTITION_CONTAINER_NAMES.generalize(),
 				partitionIndex, 0, req, resp, null);
 
 		final long totalCount = resp.base().getLong();
@@ -122,14 +149,15 @@ public class SubnetPartitionController implements PartitionController {
 	@Override
 	public List<String> getContainerNames(
 			int partitionIndex, long start, Long limit) throws GSException {
-		ContainerCondition cond = new ContainerCondition();
-		cond.setAttributes(EnumSet.of(ContainerAttribute.BASE));
-		return getContainerNames(partitionIndex, start, limit, cond, false);
+		final ContainerKeyPredicate pred = getContainerKeyPredicate();
+		return getContainerNames(partitionIndex, start, limit, pred, false);
 	}
 
+	@Override
 	public List<String> getContainerNames(
 			int partitionIndex, long start, Long limit,
-			ContainerCondition cond, boolean systemMode) throws GSException {
+			ContainerKeyPredicate pred, boolean internalMode)
+			throws GSException {
 
 		checkOpened();
 		checkPartitionIndex(partitionIndex);
@@ -138,24 +166,19 @@ public class SubnetPartitionController implements PartitionController {
 		final BasicBuffer resp = context.getResponseBuffer();
 
 		channel.setupRequestBuffer(req);
-		SubnetGridStore.tryPutSystemOptionalRequest(req, context, systemMode);
+		SubnetGridStore.tryPutSystemOptionalRequest(
+				req, context, internalMode, false, null);
 
 		req.putLong(start);
 		req.putLong(limit == null ? Long.MAX_VALUE : limit);
-
-		req.putInt(cond.getAttributes().size());
-		if (0 < cond.getAttributes().size()) {
-			for (ContainerAttribute attribute : cond.getAttributes()) {
-				req.putInt(SubnetGridStore.getContainerAttributeFlag(attribute));
-			}
-		} else {
-			throw new GSException(GSErrorCode.EMPTY_PARAMETER,
-					"Container attribute is not specified.");
-		}
+		putContainerKeyPredicate(req, pred);
 
 		channel.executeStatement(
-				context, Statement.GET_PARTITION_CONTAINER_NAMES,
+				context, Statement.GET_PARTITION_CONTAINER_NAMES.generalize(),
 				partitionIndex, 0, req, resp, null);
+
+		final ContainerKeyConverter keyConverter =
+				context.getKeyConverter(internalMode, false);
 
 		
 		resp.base().getLong();
@@ -163,7 +186,7 @@ public class SubnetPartitionController implements PartitionController {
 		final int entryCount = resp.base().getInt();
 		final List<String> list = new ArrayList<String>();
 		for (int i = 0; i < entryCount; i++) {
-			list.add(resp.getString());
+			list.add(keyConverter.get(resp, false, true).toString());
 		}
 
 		return list;
@@ -234,13 +257,37 @@ public class SubnetPartitionController implements PartitionController {
 	@Override
 	public int getPartitionIndexOfContainer(String containerName)
 			throws GSException {
+		final boolean internalMode = WORKAROUND_WRONG_API_TEST;
+		return getPartitionIndexOfContainer(containerName, internalMode);
+	}
+
+	@Override
+	public int getPartitionIndexOfContainer(
+			String containerName, boolean internalMode) throws GSException {
 		checkOpened();
+		final ContainerKeyConverter keyConverter =
+				context.getKeyConverter(internalMode, false);
+		final ContainerKey containerKey;
 		try {
-			return channel.resolvePartitionId(context, containerName);
+			containerKey = keyConverter.parse(containerName, internalMode);
 		}
 		catch (NullPointerException e) {
 			throw GSErrorCode.checkNullParameter(
 					containerName, "containerName", e);
+		}
+		return getPartitionIndexOfContainer(containerKey, internalMode);
+	}
+
+	@Override
+	public int getPartitionIndexOfContainer(
+			ContainerKey containerKey, boolean internalMode) throws GSException {
+		checkOpened();
+		try {
+			return channel.resolvePartitionId(context, containerKey, internalMode);
+		}
+		catch (NullPointerException e) {
+			throw GSErrorCode.checkNullParameter(
+					containerKey, "containerKey", e);
 		}
 	}
 

@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -58,14 +58,16 @@ private:
 class BaseObject {
 public:
 	BaseObject(PartitionId pId, ObjectManager &objectManager)
-		: baseOId_(UNDEF_OID),
+		: forUpdate_(false),
+		  baseOId_(UNDEF_OID),
 		  baseAddr_(NULL),
 		  cursor_(NULL),
 		  pId_(pId),
 		  objectManager_(&objectManager) {}
 
 	BaseObject(PartitionId pId, ObjectManager &objectManager, OId oId)
-		: baseOId_(oId), pId_(pId), objectManager_(&objectManager) {
+		: forUpdate_(false), baseOId_(oId), pId_(pId),
+		  objectManager_(&objectManager) {
 		baseAddr_ = cursor_ =
 			objectManager_->getForRead<uint8_t>(pId_, baseOId_);
 	}
@@ -100,6 +102,7 @@ public:
 			baseAddr_ = cursor_ = objectManager_->load<uint8_t, OBJECT_READ_ONLY>(pId_, oId, &baseOId_, baseAddr_);
 		} else {
 			baseAddr_ = cursor_ = objectManager_->load<uint8_t, OBJECT_FOR_UPDATE>(pId_, oId, &baseOId_, baseAddr_);
+			forUpdate_ = true;
 		}
 	}
 	/*!
@@ -119,6 +122,7 @@ public:
 		baseAddr_ = cursor_ = objectManager_->allocate<uint8_t>(
 			pId_, requestSize, allocateStrategy, baseOId_, objectType);
 		oId = getBaseOId();
+		forUpdate_ = true;
 		return reinterpret_cast<T *>(getBaseAddr());
 	}
 
@@ -141,6 +145,7 @@ public:
 		baseAddr_ = cursor_ = objectManager_->allocateNeighbor<uint8_t>(pId_,
 			requestSize, allocateStrategy, baseOId_, neighborOId, objectType);
 		oId = getBaseOId();
+		forUpdate_ = true;
 		return reinterpret_cast<T *>(getBaseAddr());
 	}
 	/*!
@@ -167,6 +172,7 @@ public:
 				GS_ERROR_CM_INTERNAL_ERROR, "invalid implementation");
 		}
 		objectManager_->setDirty(pId_, baseOId_);
+		forUpdate_ = true;
 	}
 
 	/*!
@@ -174,6 +180,7 @@ public:
 	*/
 	void copyReference(const BaseObject &srcBaseObject) {
 		copyReference(srcBaseObject.getBaseOId(), srcBaseObject.getBaseAddr());
+		forUpdate_ = srcBaseObject.forUpdate();
 	}
 
 	/*!
@@ -184,7 +191,14 @@ public:
 			objectManager_->unfix(pId_, baseOId_);
 			baseOId_ = UNDEF_OID;
 			baseAddr_ = cursor_ = NULL;
+			forUpdate_ = false;
 		}
+	}
+
+	void reset(PartitionId pId, ObjectManager &objectManager) {
+		reset();
+		objectManager_ = &objectManager;
+		pId_ = pId;
 	}
 
 	/*!
@@ -222,21 +236,8 @@ public:
 	/*!
 		@brief Get address of Object
 	*/
-	uint8_t *getBaseAddr() {
-		return baseAddr_;
-	}
-	/*!
-		@brief Get address of Object
-	*/
 	template <class T>
 	T getBaseAddr() const {
-		return reinterpret_cast<T>(baseAddr_);
-	}
-	/*!
-		@brief Get address of Object
-	*/
-	template <class T>
-	T getBaseAddr() {
 		return reinterpret_cast<T>(baseAddr_);
 	}
 	/*!
@@ -244,13 +245,6 @@ public:
 	*/
 	template <typename V>
 	V *getCursor() const {
-		return reinterpret_cast<V *>(cursor_);
-	}
-	/*!
-		@brief Get address of cursor
-	*/
-	template <typename V>
-	V *getCursor() {
 		return reinterpret_cast<V *>(cursor_);
 	}
 	/*!
@@ -302,12 +296,18 @@ public:
 		else {
 			baseAddr_ = cursor_ =
 				objectManager_->getForUpdate<uint8_t>(pId_, oId);
+			forUpdate_ = true;
 		}
 		setBaseOId(oId);
 	}
 	PartitionId getPartitionId() const {
 		return pId_;
 	}
+	bool forUpdate() const {
+		return forUpdate_;
+	}
+private:
+	bool forUpdate_;
 	OId baseOId_;
 	uint8_t *baseAddr_;
 	uint8_t *cursor_;
@@ -346,15 +346,15 @@ public:
 		@brief Get Object from Chunk for updating
 	*/
 	void load(OId oId) {
-		if (pId_ == UNDEF_PARTITIONID) {
+		if (getPartitionId() == UNDEF_PARTITIONID) {
 			GS_THROW_SYSTEM_ERROR(
 				GS_ERROR_CM_INTERNAL_ERROR, "invalid implementation");
 		}
 		if (getBaseOId() != UNDEF_OID) {
-			objectManager_->unfix(pId_, getBaseOId());
-			baseOId_ = UNDEF_OID;
+			objectManager_->unfix(getPartitionId(), getBaseOId());
+			setBaseOId(UNDEF_OID);
 		}
-		uint8_t *baseAddr = objectManager_->getForUpdate<uint8_t>(pId_, oId);
+		uint8_t *baseAddr = objectManager_->getForUpdate<uint8_t>(getPartitionId(), oId);
 		setBaseOId(oId);
 		setBaseAddr(baseAddr);
 	}

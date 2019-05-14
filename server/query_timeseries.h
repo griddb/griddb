@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -39,7 +39,7 @@ class QueryForTimeSeries : public Query {
 
 public:
 	QueryForTimeSeries(TransactionContext &txn, TimeSeries &timeSeries,
-		const char *statement, uint64_t limit = MAX_RESULT_SIZE,
+		const TQLInfo &tqlInfo, uint64_t limit = MAX_RESULT_SIZE,
 		QueryHookClass *hook = NULL);
 	QueryForTimeSeries(TransactionContext &txn, TimeSeries &timeSeries)
 		: Query(txn, *(timeSeries.getObjectManager())),
@@ -61,7 +61,8 @@ protected:
 
 	TimeSeries
 		*timeSeries_;  
-	Timestamp expireTs_;  
+	Timestamp
+		expireTs_;  
 
 	void doQueryWithoutCondition(
 		TransactionContext &txn, TimeSeries &timeSeries, ResultSet &resultSet);
@@ -70,13 +71,15 @@ protected:
 	void doSelection(
 		TransactionContext &txn, TimeSeries &timeSeries, ResultSet &resultSet);
 	void doSelectionByAPI(TransactionContext &txn, TimeSeries &timeSeries,
-		ResultType &type, ResultSize &resultNum,
-		util::XArray<uint8_t> &serializedRowList,
-		util::XArray<uint8_t> &serializedVarDataList);
-	BtreeMap::SearchContext scPass_;   
-	QpPassMode nPassSelectRequested_;  
-	bool isRowKeySearched_;  
-	OutputOrder apiOutputOrder_;  
+		ResultSet &resultSet);
+	BtreeMap::SearchContext
+		scPass_;  
+	QpPassMode
+		nPassSelectRequested_;  
+	bool
+		isRowKeySearched_;  
+	OutputOrder
+		apiOutputOrder_;  
 
 	void tsResultMerge(TransactionContext &txn, TimeSeries &timeSeries,
 
@@ -94,15 +97,17 @@ public:
 		: txn_(txn),
 		  timeSeries_(timeSeries),
 		  rowId_(rowId),
+		  rowArray_(txn_, &timeSeries_),
 		  pBitmap_(pBitmap),
 		  varrayCounter_(0) {
+		rowArray_.load(txn_, rowId_, &timeSeries_, OBJECT_READ_ONLY);
 		util::StackAllocator &alloc = txn_.getDefaultAllocator();
 		varray_ = reinterpret_cast<ContainerValue *>(
 			alloc.allocate(sizeof(ContainerValue) * timeSeries.getColumnNum()));
 		try {
 			for (uint32_t i = 0; i < timeSeries_.getColumnNum(); i++) {
 				new (&(varray_[i])) ContainerValue(
-					txn,
+					txn.getPartitionId(),
 					*(timeSeries
 							.getObjectManager()));  
 				varrayCounter_++;
@@ -112,7 +117,41 @@ public:
 		}
 		catch (...) {
 			for (uint32_t i = 0; i < varrayCounter_; i++) {
-				varray_[i].getBaseObject().reset();  
+				varray_[i]
+					.getBaseObject()
+					.reset();  
+			}
+			ALLOC_DELETE((alloc), varray_);
+			throw;
+		}
+	}
+	TimeSeriesRowWrapper(TransactionContext &txn, TimeSeries &timeSeries,
+		uint64_t *pBitmap)
+		: txn_(txn),
+		  timeSeries_(timeSeries),
+		  rowId_(UNDEF_OID),
+		  rowArray_(txn_, &timeSeries_),
+		  pBitmap_(pBitmap),
+		  varrayCounter_(0) {
+		util::StackAllocator &alloc = txn_.getDefaultAllocator();
+		varray_ = reinterpret_cast<ContainerValue *>(
+			alloc.allocate(sizeof(ContainerValue) * timeSeries_.getColumnNum()));
+		try {
+			for (uint32_t i = 0; i < timeSeries_.getColumnNum(); i++) {
+				new (&(varray_[i])) ContainerValue(
+					txn.getPartitionId(),
+					*(timeSeries_
+							.getObjectManager()));  
+				varrayCounter_++;
+			}
+			memset(pBitmap, 0,
+				sizeof(uint64_t) * ((timeSeries_.getColumnNum() / 64) + 1));
+		}
+		catch (...) {
+			for (uint32_t i = 0; i < varrayCounter_; i++) {
+				varray_[i]
+					.getBaseObject()
+					.reset();  
 			}
 			ALLOC_DELETE((alloc), varray_);
 			throw;
@@ -121,21 +160,41 @@ public:
 	~TimeSeriesRowWrapper() {
 		util::StackAllocator &alloc = txn_.getDefaultAllocator();
 		for (uint32_t i = 0; i < varrayCounter_; i++) {
-			varray_[i].getBaseObject().reset();  
+			varray_[i]
+				.getBaseObject()
+				.reset();  
 		}
 		ALLOC_DELETE((alloc), varray_);
+	}
+	void load(OId oId) {
+		rowId_ = oId;
+		rowArray_.load(txn_, rowId_, &timeSeries_, OBJECT_READ_ONLY);
+//		util::StackAllocator &alloc = txn_.getDefaultAllocator();
+		memset(pBitmap_, 0,
+			sizeof(uint64_t) * ((timeSeries_.getColumnNum() / 64) + 1));
+		for (uint32_t i = 0; i < varrayCounter_; i++) {
+			varray_[i].getBaseObject().reset();  
+		}
 	}
 
 	const Value *getColumn(uint32_t k) {
 		ContainerValue &v = varray_[k];
 		if (bit_off(pBitmap_[k / 64], k % 64)) {
-			TimeSeries::RowArray rowArray(
-				txn_, rowId_, &timeSeries_, OBJECT_READ_ONLY);
-			TimeSeries::RowArray::Row row(rowArray.getRow(), &rowArray);
+			BaseContainer::RowArray::Row row(rowArray_.getRow(), &rowArray_);
 			row.getField(txn_, timeSeries_.getColumnInfo(k), v);
 			set_bit(pBitmap_[k / 64], k % 64);
 		}
 		return &(v.getValue());
+	}
+
+	RowId getRowId() {
+		BaseContainer::RowArray::Row row(rowArray_.getRow(), &rowArray_);
+		return row.getRowId();
+	}
+	void getImage(TransactionContext &txn,
+		MessageRowStore *messageRowStore, bool isWithRowId) {
+		BaseContainer::RowArray::Row row(rowArray_.getRow(), &rowArray_);
+		row.getImage(txn, messageRowStore, isWithRowId);
 	}
 
 	void setValue(const Value &v, uint32_t columnId) {
@@ -154,6 +213,7 @@ private:
 	TimeSeries &timeSeries_;
 	PointRowId rowId_;
 	ContainerValue *varray_;
+	BaseContainer::RowArray rowArray_;
 	uint64_t *pBitmap_;
 	size_t varrayCounter_;
 };
@@ -200,7 +260,7 @@ public:
 				&fmap_, EVAL_MODE_NORMAL);
 			Expr *e2 = e->eval(txn_, *(timeSeries_.getObjectManager()), &row2,
 				&fmap_, EVAL_MODE_NORMAL);
-			int ret = e1->compareAsValue(txn_, e2);
+			int ret = e1->compareAsValue(txn_, e2, orderByExprList_[i].nullsLast);
 			QP_SAFE_DELETE(e);
 			QP_SAFE_DELETE(e1);
 			QP_SAFE_DELETE(e2);
@@ -237,7 +297,7 @@ public:
 				&fmap_, EVAL_MODE_NORMAL);
 			Expr *e2 = e->eval(txn_, *(timeSeries_.getObjectManager()), &row2,
 				&fmap_, EVAL_MODE_NORMAL);
-			int ret = e1->compareAsValue(txn_, e2);
+			int ret = e1->compareAsValue(txn_, e2, orderByExprList_[i].nullsLast);
 			QP_SAFE_DELETE(e);
 			QP_SAFE_DELETE(e1);
 			QP_SAFE_DELETE(e2);

@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -20,6 +20,7 @@
 */
 #include "collection.h"
 #include "hash_map.h"
+#include "rtree_map.h"
 #include "util/trace.h"
 #include "btree_map.h"
 #include "data_store.h"
@@ -39,7 +40,7 @@ const bool Collection::indexMapTable[][MAP_TYPE_NUM] = {
 	{true, true, false},  
 	{true, true, false},  
 	{true, true, false},  
-	{false, false, false},  
+	{false, false, true},  
 	{false, false, false}  
 };
 
@@ -51,6 +52,7 @@ void Collection::initialize(TransactionContext& txn) {
 	baseContainerImage_ =
 		BaseObject::allocate<CollectionImage>(sizeof(CollectionImage),
 			getMetaAllcateStrategy(), getBaseOId(), OBJECT_TYPE_COLLECTION);
+	memset(baseContainerImage_, 0, sizeof(CollectionImage));
 	baseContainerImage_->containerType_ =
 		static_cast<int8_t>(COLLECTION_CONTAINER);
 	baseContainerImage_->status_ = 0;  
@@ -65,12 +67,12 @@ void Collection::initialize(TransactionContext& txn) {
 	baseContainerImage_->lastLsn_ = UNDEF_LSN;
 	baseContainerImage_->rowNum_ = 0;
 	baseContainerImage_->versionId_ = 0;
+	baseContainerImage_->tablePartitioningVersionId_ = UNDEF_TABLE_PARTITIONING_VERSIONID;
+	baseContainerImage_->startTime_ = 0;
 
 	reinterpret_cast<CollectionImage*>(baseContainerImage_)->maxRowId_ = -1;
-	reinterpret_cast<CollectionImage*>(baseContainerImage_)->padding2_ = 0;
-	reinterpret_cast<CollectionImage*>(baseContainerImage_)->padding3_ = 0;
-	reinterpret_cast<CollectionImage*>(baseContainerImage_)->padding4_ = 0;
-	reinterpret_cast<CollectionImage*>(baseContainerImage_)->padding5_ = 0;
+	reinterpret_cast<CollectionImage *>(baseContainerImage_)->padding1_ = 0;
+	reinterpret_cast<CollectionImage *>(baseContainerImage_)->padding2_ = 0;
 
 	rowImageSize_ = 0;
 	metaAllocateStrategy_ = AllocateStrategy();
@@ -81,18 +83,15 @@ void Collection::initialize(TransactionContext& txn) {
 /*!
 	@brief Set Collection Schema
 */
-void Collection::set(TransactionContext& txn, const char8_t* containerName,
+void Collection::set(TransactionContext& txn, const FullContainerKey &containerKey,
 	ContainerId containerId, OId columnSchemaOId,
 	MessageSchema* containerSchema) {
 	baseContainerImage_->containerId_ = containerId;
+	setContainerExpirationStartTime(containerSchema->getContainerExpirationStartTime());
 
-	uint32_t containerNameSize = static_cast<uint32_t>(strlen(containerName));
-
-	BaseObject stringObject(txn.getPartitionId(), *getObjectManager());
-	char* stringPtr = stringObject.allocate<char>(containerNameSize + 1,
-		getMetaAllcateStrategy(), baseContainerImage_->containerNameOId_,
-		OBJECT_TYPE_VARIANT);
-	memcpy(stringPtr, containerName, containerNameSize + 1);
+	FullContainerKeyCursor keyCursor(txn.getPartitionId(), *getObjectManager());
+	keyCursor.initialize(txn, containerKey, getMetaAllcateStrategy());
+	baseContainerImage_->containerNameOId_ = keyCursor.getBaseOId();
 
 	baseContainerImage_->columnSchemaOId_ = columnSchemaOId;
 	commonContainerSchema_ =
@@ -104,16 +103,22 @@ void Collection::set(TransactionContext& txn, const char8_t* containerName,
 
 	indexSchema_ = ALLOC_NEW(txn.getDefaultAllocator())
 		IndexSchema(txn, *getObjectManager(), getMetaAllcateStrategy());
-	indexSchema_->initialize(txn, IndexSchema::INITIALIZE_RESERVE_NUM);
+	bool onMemory = false;
+	indexSchema_->initialize(txn, IndexSchema::INITIALIZE_RESERVE_NUM, 0, getColumnNum(), onMemory);
 	baseContainerImage_->indexSchemaOId_ = indexSchema_->getBaseOId();
 
 	rowFixedDataSize_ = calcRowFixedDataSize();
 	rowImageSize_ = calcRowImageSize(rowFixedDataSize_);
 
-	baseContainerImage_->normalRowArrayNum_ =
-		calcRowArrayNum(ROW_ARRAY_MAX_SIZE);
+	baseContainerImage_->normalRowArrayNum_ = calcRowArrayNum(
+		txn, getDataStore()->getConfig().isRowArraySizeControlMode(),
+		ROW_ARRAY_MAX_SIZE);
 
 	setAllocateStrategy();
+
+	if (isExpired(txn)) {
+		dataStore_->setLastExpiredTime(txn.getPartitionId(), txn.getStatementStartTime().getUnixTime());
+	} else {
 
 	BtreeMap map(txn, *getObjectManager(), getMapAllcateStrategy(), this);
 	map.initialize(
@@ -125,48 +130,57 @@ void Collection::set(TransactionContext& txn, const char8_t* containerName,
 		txn, COLUMN_TYPE_OID, false, BtreeMap::TYPE_SINGLE_KEY);
 	baseContainerImage_->mvccMapOId_ = mvccMap.getBaseOId();
 
-	if (containerSchema->getRowKeyColumnId() != UNDEF_COLUMNID) {
-		IndexInfo indexInfo(ColumnInfo::ROW_KEY_COLUMN_ID, MAP_TYPE_BTREE);
-		createIndex(txn, indexInfo);
+	if (!containerSchema->getRowKeyColumnIdList().empty()) {
+		IndexInfo indexInfo(txn.getDefaultAllocator(),
+			ColumnInfo::ROW_KEY_COLUMN_ID, MAP_TYPE_BTREE);
+		IndexCursor indexCursor(true);
+		createIndex(txn, indexInfo, indexCursor);
+	}
 	}
 
-	GS_TRACE_INFO(BASE_CONTAINER, GS_TRACE_DS_CON_DATA_AFFINITY_DEFINED,
-		"ContainerName = " << containerName << ", Affinity = "
-						   << containerSchema->getAffinityStr()
-						   << ", AffinityHashVal = "
-						   << calcAffnityGroupId(getAffinity()));
+	setNullsStatsStatus();
+
+	rowArrayCache_ = ALLOC_NEW(txn.getDefaultAllocator())
+		RowArray(txn, this);
 }
 
 /*!
 	@brief Free Objects related to Collection
 */
-void Collection::finalize(TransactionContext& txn) {
+bool Collection::finalize(TransactionContext& txn) {
 	try {
 		setDirty();
-		if (baseContainerImage_->rowIdMapOId_ != UNDEF_OID) {
+		RowArray rowArray(txn, this);
+		if (baseContainerImage_->rowIdMapOId_ != UNDEF_OID && !isExpired(txn)) {
 			BtreeMap::BtreeCursor btreeCursor;
 			StackAllocAutoPtr<BtreeMap> rowIdMap(
 				txn.getDefaultAllocator(), getRowIdMap(txn));
-			while (1) {
-				util::StackAllocator::Scope scope(txn.getDefaultAllocator());
-				util::XArray<OId> idList(txn.getDefaultAllocator());
-				util::XArray<OId>::iterator itr;
-				int32_t getAllStatus = rowIdMap.get()->getAll(
-					txn, PARTIAL_RESULT_SIZE, idList, btreeCursor);
+			ResultSize limit = (ContainerCursor::getNum() / getNormalRowArrayNum() <= 2) ?
+				2 : (ContainerCursor::getNum() / getNormalRowArrayNum());
+			util::StackAllocator::Scope scope(txn.getDefaultAllocator());
+			util::XArray<OId> idList(txn.getDefaultAllocator());
+			util::XArray<OId>::iterator itr;
+			int32_t getAllStatus = rowIdMap.get()->getAll(
+				txn, limit, idList, btreeCursor);
 
-				for (itr = idList.begin(); itr != idList.end(); itr++) {
-					RowArray rowArray(txn, *itr, this, OBJECT_FOR_UPDATE);
-					rowArray.finalize(txn);
-				}
-				if (getAllStatus == GS_SUCCESS) {
-					break;
-				}
+			for (itr = idList.begin(); itr != idList.end(); itr++) {
+//				bool isOldSchema = 
+				rowArray.load(txn, *itr, this, OBJECT_FOR_UPDATE);
+//				assert(isOldSchema || !isOldSchema);
+				RowId rowArrayId = rowArray.getRowId();
+				removeRowIdMap(txn, rowIdMap.get(),
+					&rowArrayId, *itr); 
+				rowArray.finalize(txn);
 			}
 
-			rowIdMap.get()->finalize(txn);
+			if (getAllStatus != GS_SUCCESS) {
+				return false;
+			}
+
+			getDataStore()->finalizeMap(txn, getMapAllcateStrategy(), rowIdMap.get());
 		}
 
-		if (baseContainerImage_->mvccMapOId_ != UNDEF_OID) {
+		if (baseContainerImage_->mvccMapOId_ != UNDEF_OID && !isExpired(txn)) {
 			BtreeMap::BtreeCursor btreeCursor;
 			StackAllocAutoPtr<BtreeMap> mvccMap(
 				txn.getDefaultAllocator(), getMvccMap(txn));
@@ -179,27 +193,40 @@ void Collection::finalize(TransactionContext& txn) {
 				int32_t getAllStatus =
 					mvccMap.get()->getAll<TransactionId, MvccRowImage>(
 						txn, PARTIAL_RESULT_SIZE, idList, btreeCursor);
-
 				for (itr = idList.begin(); itr != idList.end(); itr++) {
-					if (itr->second.type_ == MVCC_UPDATE ||
-						itr->second.type_ == MVCC_DELETE) {
-						RowArray rowArray(txn, itr->second.snapshotRowOId_,
-							this, OBJECT_FOR_UPDATE);
-						rowArray.finalize(txn);
+					switch (itr->second.type_) {
+					case MVCC_CREATE:
+					case MVCC_SELECT:
+					case MVCC_INDEX:
+					case MVCC_CONTAINER:
+						break;
+					case MVCC_UPDATE:
+					case MVCC_DELETE:
+						{
+//							bool isOldSchema = 
+							rowArray.load(txn, itr->second.snapshotRowOId_,
+								this, OBJECT_FOR_UPDATE);
+//							assert(isOldSchema || !isOldSchema);
+							rowArray.finalize(txn);
+						}
+						break;
+					default:
+						GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
+						break;
 					}
 				}
 				if (getAllStatus == GS_SUCCESS) {
 					break;
 				}
 			}
-			mvccMap.get()->finalize(txn);
+			getDataStore()->finalizeMap(txn, getMapAllcateStrategy(), mvccMap.get());
 		}
+
+		finalizeIndex(txn);
 
 		commonContainerSchema_->reset();  
 		getDataStore()->removeColumnSchema(
 			txn, txn.getPartitionId(), baseContainerImage_->columnSchemaOId_);
-
-		finalizeIndex(txn);
 
 		OId triggerOId = getTriggerOId();
 		if (triggerOId != UNDEF_OID) {
@@ -216,51 +243,262 @@ void Collection::finalize(TransactionContext& txn) {
 	catch (std::exception& e) {
 		handleUpdateError(txn, e, GS_ERROR_DS_DS_DROP_COLLECTION_FAILED);
 	}
+
+	return true;
 }
 
 /*!
 	@brief Creates a specifed type of index on the specified Column
 */
-void Collection::createIndex(TransactionContext& txn, IndexInfo& indexInfo) {
+void Collection::createIndex(TransactionContext& txn, 
+	const IndexInfo& indexInfo, IndexCursor& indexCursor,
+	bool isIndexNameCaseSensitive) {
 	try {
-		GS_TRACE_INFO(COLLECTION, GS_TRACE_DS_CON_CREATE_INDEX,
-			"Collection Id = " << getContainerId()
-							   << " columnId = " << indexInfo.columnId
-							   << " type = " << indexInfo.mapType);
-
 		if (isInvalid()) {  
 			GS_THROW_USER_ERROR(GS_ERROR_DS_CON_STATUS_INVALID,
 				"can not create index. container's status is invalid.");
 		}
+		if (isExpired(txn)) {
+			indexCursor.setRowId(MAX_ROWID);
+			dataStore_->setLastExpiredTime(txn.getPartitionId(), txn.getStatementStartTime().getUnixTime());
+			return;
+		}
+		IndexInfo realIndexInfo = indexInfo;
+		if (realIndexInfo.columnIds_.size() != 1 || realIndexInfo.anyTypeMatches_ != 0 || realIndexInfo.anyNameMatches_ != 0) {
+			GS_THROW_USER_ERROR(
+				GS_ERROR_CM_NOT_SUPPORTED, 
+				"Invalid parameter, number of columnName is invalid or anyType is specified or any index name is specified, "
+					<< " number of columnName = " << realIndexInfo.columnIds_.size()
+					<< ", anyTypeMatches = " << (uint32_t)realIndexInfo.anyTypeMatches_
+					<< ", anyNameMatches = " << (uint32_t)realIndexInfo.anyNameMatches_);
+		}
+		EmptyAllowedKey::validate(
+			KeyConstraint::getUserKeyConstraint(
+				getDataStore()->getValueLimitConfig().getLimitContainerNameSize()),
+			realIndexInfo.indexName_.c_str(),
+			static_cast<uint32_t>(realIndexInfo.indexName_.size()),
+			"indexName");
 
-		if (indexInfo.columnId >= getColumnNum()) {
+		ColumnId inputColumnId = realIndexInfo.columnIds_[0];
+		if (inputColumnId >= getColumnNum()) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_COLUMN_ID_INVALID, "");
 		}
-		if (!isSupportIndex(indexInfo)) {
+
+		ColumnInfo& columnInfo = getColumnInfo(inputColumnId);
+		if (realIndexInfo.mapType == MAP_TYPE_DEFAULT) {
+			realIndexInfo.mapType = defaultIndexType[columnInfo.getColumnType()];
+		}
+		MapType inputMapType = realIndexInfo.mapType;
+
+		GS_TRACE_INFO(COLLECTION, GS_TRACE_DS_CON_CREATE_INDEX,
+			"Collection Id = " << getContainerId()
+							   << ", columnNumber = " << inputColumnId
+							   << ", type = " << getMapTypeStr(inputMapType));
+
+		if (!isSupportIndex(realIndexInfo)) {
 			GS_THROW_USER_ERROR(
 				GS_ERROR_CM_NOT_SUPPORTED, "not support this index type");
 		}
 
-		if (hasIndex(txn, indexInfo.columnId, indexInfo.mapType)) {
+		util::Vector<IndexInfo> matchList(txn.getDefaultAllocator());
+		util::Vector<IndexInfo> mismatchList(txn.getDefaultAllocator());
+		bool withUncommitted = true;
+
+		indexSchema_->getIndexInfoList(txn, this, realIndexInfo, 
+			withUncommitted, matchList, mismatchList, isIndexNameCaseSensitive);
+		if (!mismatchList.empty()) {
+			for (size_t i = 0; i < mismatchList.size(); i++) {
+				IndexData indexData;
+				bool isExist = getIndexData(txn, 
+					mismatchList[0].columnIds_[0], mismatchList[0].mapType, 
+					withUncommitted, indexData);
+				if (isExist && indexData.status_ != DDL_READY) {
+					DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_COL_LOCK_CONFLICT,
+						"createIndex(pId=" << txn.getPartitionId()
+							<< ", index name = \"" << realIndexInfo.indexName_.c_str()
+							<< ", type=" << getMapTypeStr(inputMapType)
+							<< ", columnNumber=" << (int32_t)inputColumnId
+							<< ", txnId=" << txn.getId() << ")");
+				} else {
+					util::NormalOStringStream strstrm;
+					strstrm << "The specified parameter caused inconsistency to the existing index"
+							<< ", existing index name = \"" << mismatchList[0].indexName_.c_str()
+							<< ", \" existing columnNumber = " << mismatchList[0].columnIds_[0]
+							<< ", existing type = " << getMapTypeStr(mismatchList[0].mapType)
+							<< ", input index name = \"" << realIndexInfo.indexName_.c_str()
+							<< ", \" input columnNumbers = [";
+					for (size_t j = 0; j < realIndexInfo.columnIds_.size(); j++) {
+						if (j != 0) {
+							strstrm << ",";
+						}
+						strstrm << realIndexInfo.columnIds_[j] << ",";
+					}
+					strstrm << "]";
+					strstrm << ", input mapType = " << getMapTypeStr(realIndexInfo.mapType)
+							<< ", input anyTypeMatches = " << (int32_t)realIndexInfo.anyTypeMatches_
+							<< ", input anyNameMatches = " << (int32_t)realIndexInfo.anyNameMatches_
+							<< ", input case sensitivity = " << (int32_t)isIndexNameCaseSensitive;
+					GS_THROW_USER_ERROR(GS_ERROR_CM_NOT_SUPPORTED, strstrm.str().c_str());
+				}
+			}
+		}
+
+		if (isAlterContainer()) {
+			DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_COL_LOCK_CONFLICT,
+				"(pId=" << txn.getPartitionId() << ", containerId=" << getContainerId()
+						<< ", txnId=" << txn.getId() << ")");
+		}
+
+		indexCursor.setColumnId(inputColumnId);
+		indexCursor.setMapType(inputMapType);
+		IndexData indexData;
+		bool isExist = getIndexData(txn, inputColumnId, inputMapType, 
+			withUncommitted, indexData);
+		if (isExist && indexData.status_ == DDL_READY) {
+			indexCursor.setRowId(MAX_ROWID);
 			return;
 		}
 
-		ColumnInfo& columnInfo = getColumnInfo(indexInfo.columnId);
-
-		bool isUnique = false;
-		if (definedRowKey() &&
-			indexInfo.columnId == ColumnInfo::ROW_KEY_COLUMN_ID) {
-			isUnique = true;
+		if (isExist && indexCursor.isImmediateMode()) {
+			GS_THROW_USER_ERROR(
+				GS_ERROR_CM_NOT_SUPPORTED, 
+				"Immediate mode of createIndex is forbidden under constructing, "
+					<< " columnNumber = " << inputColumnId
+					<< " type = " << getMapTypeStr(inputMapType));
+			return;
 		}
-		if (indexSchema_->createIndexInfo(
-				txn, indexInfo.columnId, indexInfo.mapType)) {
-			replaceIndexSchema(txn);
-		}
-		indexSchema_->createIndexData(txn, indexInfo.columnId,
-			indexInfo.mapType, columnInfo.getColumnType(), this,
-			UNDEF_CONTAINER_POS, isUnique);
 
-		indexInsert(txn, indexInfo);
+		uint32_t limitNum = getDataStore()->getValueLimitConfig().getLimitIndexNum();
+		if (!isExist && indexSchema_->getIndexNum() == limitNum) {
+			GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED, "Num of index"
+				<< " exceeds maximum num : " << limitNum);
+		}
+		setDirty();
+
+		TransactionId tId = txn.getId();
+		StackAllocAutoPtr<BtreeMap> mvccMap(
+			txn.getDefaultAllocator(), getMvccMap(txn));
+		MvccRowImage beforeImage;
+		if (isExist) {
+			util::XArray<MvccRowImage> mvccList(txn.getDefaultAllocator());
+			util::XArray<MvccRowImage>::iterator itr;
+			BtreeMap::SearchContext sc(
+				UNDEF_COLUMNID, &tId, sizeof(tId), 0, NULL, MAX_RESULT_SIZE);
+			mvccMap.get()->search<TransactionId, MvccRowImage, MvccRowImage>(
+				txn, sc, mvccList);
+			if (!mvccList.empty()) {
+				for (itr = mvccList.begin(); itr != mvccList.end(); itr++) {
+					if (itr->type_ == MVCC_INDEX) {
+						beforeImage = *itr;
+					} else {
+						GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
+					}
+				}
+			} else {
+				DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_COL_LOCK_CONFLICT,
+					"createIndex(pId=" << txn.getPartitionId()
+						<< ", index name = \"" << realIndexInfo.indexName_.c_str()
+						<< ", type=" << getMapTypeStr(inputMapType)
+						<< ", columnNumber=" << (int32_t)inputColumnId
+						<< ", txnId=" << txn.getId() << ")");
+			}
+		} else {
+			if (indexSchema_->createIndexInfo(txn, realIndexInfo)) {
+				replaceIndexSchema(txn);
+			}
+
+			ColumnInfo& columnInfo = getColumnInfo(inputColumnId);
+			bool isUnique = definedRowKey() &&
+				inputColumnId == ColumnInfo::ROW_KEY_COLUMN_ID;
+			indexData = indexSchema_->createIndexData(txn, inputColumnId,
+				inputMapType, columnInfo.getColumnType(), this,
+				UNDEF_CONTAINER_POS, isUnique);
+			if (!indexCursor.isImmediateMode()) {
+				beforeImage = indexCursor.getMvccImage();
+				insertMvccMap(txn, mvccMap.get(), tId, beforeImage);
+			} else {
+				indexSchema_->commit(txn, inputColumnId, inputMapType);
+			}
+		}
+
+		indexInsertImpl<Collection>(txn, indexData, indexCursor.isImmediateMode());
+
+		indexCursor.setRowId(indexData.cursor_);
+		updateIndexData(txn, indexData);
+
+	}
+	catch (std::exception& e) {
+		handleUpdateError(txn, e, GS_ERROR_DS_COL_CREATE_INDEX_FAILED);
+	}
+}
+
+/*!
+	@brief Continues to create a specifed type of index on the specified Column
+*/
+void Collection::continueCreateIndex(TransactionContext& txn, 
+	IndexCursor& indexCursor) {
+	try {
+		setDirty();
+		if (isExpired(txn)) {
+			indexCursor.setRowId(MAX_ROWID);
+			dataStore_->setLastExpiredTime(txn.getPartitionId(), txn.getStatementStartTime().getUnixTime());
+			return;
+		}
+
+		MvccRowImage beforeImage = indexCursor.getMvccImage();
+		IndexData indexData;
+		bool withUncommitted = true;
+		bool isExist = getIndexData(txn, indexCursor.getColumnId(), indexCursor.getMapType(), 
+			withUncommitted, indexData);
+		if (!isExist) {
+			GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR,
+				"can not continue to create index. index data does not existed.");
+		}
+		if (indexData.status_ == DDL_READY) {
+			indexCursor.setRowId(MAX_ROWID);
+			return;
+		}
+		indexInsertImpl<Collection>(txn, indexData, indexCursor.isImmediateMode());
+
+		indexCursor.setRowId(indexData.cursor_);
+		updateIndexData(txn, indexData);
+	}
+	catch (std::exception& e) {
+		handleUpdateError(txn, e, GS_ERROR_DS_COL_CREATE_INDEX_FAILED);
+	}
+}
+
+void Collection::continueChangeSchema(TransactionContext &txn,
+	ContainerCursor &containerCursor) {
+
+	try {
+		setDirty();
+		if (isExpired(txn)) {
+			containerCursor.setRowId(MAX_ROWID);
+			dataStore_->setLastExpiredTime(txn.getPartitionId(), txn.getStatementStartTime().getUnixTime());
+			return;
+		}
+
+		MvccRowImage beforeImage = containerCursor.getMvccImage();
+		ContainerAutoPtr containerAutoPtr(txn, dataStore_, 
+			txn.getPartitionId(), containerCursor);
+		BaseContainer *newContainer = containerAutoPtr.getBaseContainer();
+
+		util::XArray<uint32_t> copyColumnMap(txn.getDefaultAllocator());
+		makeCopyColumnMap(txn, *newContainer, copyColumnMap);
+
+		RowId rowIdCursor = containerCursor.getRowId();
+		changeSchemaRecord<Collection>(txn, *newContainer, copyColumnMap,
+			rowIdCursor, containerCursor.isImmediateMode());
+
+		newContainer->commit(txn);
+		containerCursor.setRowId(rowIdCursor);
+		if (!containerCursor.isImmediateMode()) {
+			MvccRowImage mvccImage = containerCursor.getMvccImage();
+			StackAllocAutoPtr<BtreeMap> mvccMap(
+				txn.getDefaultAllocator(), getMvccMap(txn));
+			updateMvccMap(txn, mvccMap.get(), txn.getId(), beforeImage, mvccImage);
+		}
 	}
 	catch (std::exception& e) {
 		handleUpdateError(txn, e, GS_ERROR_DS_COL_CREATE_INDEX_FAILED);
@@ -270,31 +508,84 @@ void Collection::createIndex(TransactionContext& txn, IndexInfo& indexInfo) {
 /*!
 	@brief Creates a specifed type of index on the specified Column
 */
-void Collection::dropIndex(TransactionContext& txn, IndexInfo& indexInfo) {
+void Collection::dropIndex(TransactionContext& txn, IndexInfo& indexInfo,
+						   bool isIndexNameCaseSensitive) {
 	try {
 		GS_TRACE_DEBUG(COLLECTION, GS_TRACE_DS_CON_DROP_INDEX,
-			"Collection Id = "
-				<< getContainerId() << " columnId = " << indexInfo.columnId
-				<< " type = " << static_cast<uint32_t>(indexInfo.mapType));
+			"Collection Id = " << getContainerId());
 
 		if (isInvalid()) {  
 			GS_THROW_USER_ERROR(GS_ERROR_DS_CON_STATUS_INVALID,
 				"can not delete index. container's status is invalid.");
 		}
-
-		if (indexInfo.columnId >= getColumnNum()) {
-			GS_THROW_USER_ERROR(GS_ERROR_DS_COLUMN_ID_INVALID, "");
+		if (isExpired(txn)) {
+			dataStore_->setLastExpiredTime(txn.getPartitionId(), txn.getStatementStartTime().getUnixTime());
+			return;
 		}
 
-		if (hasIndex(txn, indexInfo.columnId, indexInfo.mapType)) {
-			indexSchema_->dropIndexData(txn, indexInfo.columnId,
-				indexInfo.mapType, this, UNDEF_CONTAINER_POS, true);
+		util::Vector<IndexInfo> matchList(txn.getDefaultAllocator());
+		util::Vector<IndexInfo> mismatchList(txn.getDefaultAllocator());
+		bool withUncommitted = false;
+		indexSchema_->getIndexInfoList(txn, this, indexInfo, withUncommitted,
+			matchList, mismatchList, isIndexNameCaseSensitive);
+
+		if (isAlterContainer() && !matchList.empty()) {
+			DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_COL_LOCK_CONFLICT,
+				"(pId=" << txn.getPartitionId() << ", containerId=" << getContainerId()
+						<< ", txnId=" << txn.getId() << ")");
+		}
+
+		for (size_t i = 0; i < matchList.size(); i++) {
+			ColumnId inputColumnId = matchList[i].columnIds_[0];
+			MapType inputMapType = matchList[i].mapType;
+			indexSchema_->dropIndexData(txn, inputColumnId,
+				inputMapType, this, UNDEF_CONTAINER_POS, true);
 			indexSchema_->dropIndexInfo(
-				txn, indexInfo.columnId, indexInfo.mapType);
+				txn, inputColumnId, inputMapType);
 		}
 	}
 	catch (std::exception& e) {
 		handleUpdateError(txn, e, GS_ERROR_DS_COL_DROP_INDEX_FAILED);
+	}
+}
+
+/*!
+	@brief Newly creates or updates a Row, based on the specified Row object and
+   also the Row key specified as needed
+*/
+void Collection::putRow(TransactionContext &txn, uint32_t rowSize,
+	const uint8_t *rowData, RowId &rowId, bool rowIdSpecified, 
+	DataStore::PutStatus &status, PutRowOption putRowOption)
+{
+	try {
+		util::StackAllocator::Scope scope(txn.getDefaultAllocator());
+		setDirty();
+
+		if (isInvalid()) {  
+			GS_THROW_USER_ERROR(GS_ERROR_DS_CON_STATUS_INVALID,
+				"can not put. container's status is invalid.");
+		}
+		if (isExpired(txn)) {
+			status = DataStore::NOT_EXECUTED;
+			return;
+		}
+		InputMessageRowStore inputMessageRowStore(
+			getDataStore()->getValueLimitConfig(), getRealColumnInfoList(txn),
+			getRealColumnNum(txn), const_cast<uint8_t *>(rowData), rowSize, 1,
+			getRealRowFixedDataSize(txn), false);
+		inputMessageRowStore.next();
+
+		if (isAlterContainer()) {
+			DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_COL_LOCK_CONFLICT,
+				"(pId=" << txn.getPartitionId() << ", containerId=" << getContainerId()
+						<< ", txnId=" << txn.getId() << ")");
+		}
+
+		putRow(txn, &inputMessageRowStore, rowId, rowIdSpecified, status,
+			putRowOption);
+	}
+	catch (std::exception &e) {
+		handleUpdateError(txn, e, GS_ERROR_DS_COL_PUT_ROW_FAILED);
 	}
 }
 
@@ -312,11 +603,28 @@ void Collection::deleteRow(TransactionContext& txn, uint32_t rowKeySize,
 				"can not delete. container's status is invalid.");
 		}
 
+		if (isExpired(txn)) {
+			rowId = UNDEF_ROWID;
+			existing = false;
+			return;
+		}
+
+		if (isAlterContainer()) {
+			DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_COL_LOCK_CONFLICT,
+				"(pId=" << txn.getPartitionId() << ", containerId=" << getContainerId()
+						<< ", txnId=" << txn.getId() << ")");
+		}
+
 		if (!definedRowKey()) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_COL_ROWKEY_UNDEFINED, "");
 		}
 		RowArray rowArray(txn, this);
 		if (!isUnique(txn, rowKeySize, rowKey, rowArray)) {
+			bool isOldSchema = rowArray.setDirty(txn);
+			if (isOldSchema) {
+				RowScope rowScope(*this, TO_NORMAL);
+				convertRowArraySchema(txn, rowArray, false);
+			}
 			deleteRowInternal(txn, rowArray, rowId);
 			existing = true;
 			decrementRowNum();
@@ -342,15 +650,35 @@ void Collection::deleteRow(
 				"can not delete. container's status is invalid.");
 		}
 
+		if (isExpired(txn)) {
+			existing = false;
+			return;
+		}
+
+		if (isAlterContainer() && !isForceLock) {
+			DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_COL_LOCK_CONFLICT,
+				"(pId=" << txn.getPartitionId() << ", containerId=" << getContainerId()
+						<< ", txnId=" << txn.getId() << ")");
+		}
+
+		RowArray rowArray(txn, this);
 		BtreeMap::SearchContext sc(UNDEF_COLUMNID, &rowId, 0, 0, NULL, 1);
 		util::XArray<OId> oIdList(txn.getDefaultAllocator());
 		searchRowIdIndex(txn, sc, oIdList, ORDER_UNDEFINED);
 		if (!oIdList.empty()) {
-			RowArray rowArray(txn, oIdList[0], this, OBJECT_FOR_UPDATE);
+			bool isOldSchema = rowArray.load(txn, oIdList[0], this, OBJECT_FOR_UPDATE);
+			if (isOldSchema) {
+				RowScope rowScope(*this, TO_NORMAL);
+				convertRowArraySchema(txn, rowArray, false); 
+			}
 			RowArray::Row row(rowArray.getRow(), &rowArray);
 			if (!isForceLock &&
 				row.getTxnId() != txn.getId()) {  
-				GS_THROW_USER_ERROR(GS_ERROR_DS_COL_NOLOCK, "");
+				if (txn.getManager().isActiveTransaction(
+					txn.getPartitionId(), row.getTxnId())) {
+						DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_COL_LOCK_CONFLICT,
+							"(txnId=" << txn.getId() << ", rowTxnId=" << row.getTxnId() << ")");
+				}
 			}
 			RowId dummyRowId;
 			deleteRowInternal(txn, rowArray, dummyRowId);
@@ -378,17 +706,33 @@ void Collection::updateRow(TransactionContext& txn, uint32_t rowSize,
 				"can not delete. container's status is invalid.");
 		}
 
+		if (isExpired(txn)) {
+			status = DataStore::NOT_EXECUTED;
+			return;
+		}
+
 		InputMessageRowStore inputMessageRowStore(
 			getDataStore()->getValueLimitConfig(), getColumnInfoList(),
 			getColumnNum(), const_cast<uint8_t*>(rowData), rowSize, 1,
 			rowFixedDataSize_);
 		inputMessageRowStore.next();
 
+		if (isAlterContainer()) {
+			DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_COL_LOCK_CONFLICT,
+				"(pId=" << txn.getPartitionId() << ", containerId=" << getContainerId()
+						<< ", txnId=" << txn.getId() << ")");
+		}
+
+		RowArray rowArray(txn, this);
 		BtreeMap::SearchContext sc(UNDEF_COLUMNID, &rowId, 0, 0, NULL, 1);
 		util::XArray<OId> oIdList(txn.getDefaultAllocator());
 		searchRowIdIndex(txn, sc, oIdList, ORDER_UNDEFINED);
 		if (!oIdList.empty()) {
-			RowArray rowArray(txn, oIdList[0], this, OBJECT_FOR_UPDATE);
+			bool isOldSchema = rowArray.load(txn, oIdList[0], this, OBJECT_FOR_UPDATE);
+			if (isOldSchema) {
+				RowScope rowScope(*this, TO_NORMAL);
+				convertRowArraySchema(txn, rowArray, false); 
+			}
 			RowArray::Row row(rowArray.getRow(), &rowArray);
 
 			if (definedRowKey()) {
@@ -405,7 +749,11 @@ void Collection::updateRow(TransactionContext& txn, uint32_t rowSize,
 			}
 			if (!isForceLock &&
 				row.getTxnId() != txn.getId()) {  
-				GS_THROW_USER_ERROR(GS_ERROR_DS_COL_NOLOCK, "");
+				if (txn.getManager().isActiveTransaction(
+					txn.getPartitionId(), row.getTxnId())) {
+						DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_COL_LOCK_CONFLICT,
+							"(txnId=" << txn.getId() << ", rowTxnId=" << row.getTxnId() << ")");
+				}
 			}
 			updateRowInternal(txn, &inputMessageRowStore, rowArray, rowId);
 			status = DataStore::UPDATE;
@@ -435,6 +783,11 @@ void Collection::abortInternal(TransactionContext& txn, TransactionId tId) {
 				"can not delete. container's status is invalid.");
 		}
 
+		if (isExpired(txn)) {
+			dataStore_->setLastExpiredTime(txn.getPartitionId(), txn.getStatementStartTime().getUnixTime());
+			return;
+		}
+
 		StackAllocAutoPtr<BtreeMap> mvccMap(
 			txn.getDefaultAllocator(), getMvccMap(txn));
 		if (mvccMap.get()->isEmpty()) {
@@ -450,7 +803,17 @@ void Collection::abortInternal(TransactionContext& txn, TransactionId tId) {
 
 		if (!mvccList.empty()) {
 			setDirty();
+			RowArray rowArray(txn, this);
 			for (itr = mvccList.begin(); itr != mvccList.end(); itr++) {
+				if (isAlterContainer() && itr->type_ != MVCC_CONTAINER) {
+					GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_COL_LOCK_CONFLICT, 
+						"abort : container already locked "
+						<< ", partitionId = " << txn.getPartitionId()
+						<< ", txnId = " << txn.getId()
+						<< ", containerId = " << getContainerId()
+						);
+				}
+
 				if (itr->type_ == MVCC_CREATE) {
 					RowId startKey = itr->firstCreateRowId_;
 					RowId endKey = itr->lastCreateRowId_;
@@ -466,13 +829,21 @@ void Collection::abortInternal(TransactionContext& txn, TransactionId tId) {
 						}
 						for (rowItr = oIdList.begin(); rowItr != oIdList.end();
 							 rowItr++) {
-							RowArray rowArray(
-								txn, *rowItr, this, OBJECT_FOR_UPDATE);
+//							bool isOldSchema = 
+							rowArray.load(
+								txn, *rowItr, this, OBJECT_READ_ONLY);
+//							assert(isOldSchema || !isOldSchema);
+							bool isUndo = false;
 							for (rowArray.begin(); !rowArray.end();
 								 rowArray.next()) {
 								RowArray::Row row(rowArray.getRow(), &rowArray);
-								if (row.getTxnId() == tId &&
-									!row.isFirstUpdate()) {
+								if (row.getTxnId() == tId && !row.isFirstUpdate()) {
+									if (!isUndo) {
+										isUndo = true;
+//										bool isOldSchema = 
+										rowArray.setDirty(txn);
+//										assert(isOldSchema || !isOldSchema);
+									}
 									undoCreateRow(txn, rowArray);
 									if (rowArray.getActiveRowNum() == 0) {
 										RowId rowId = rowArray.getRowId();
@@ -488,18 +859,62 @@ void Collection::abortInternal(TransactionContext& txn, TransactionId tId) {
 							}
 						}
 					}
-					removeMvccMap(txn, mvccMap.get(), tId, *itr);
 				}
 			}
 			for (itr = mvccList.begin(); itr != mvccList.end(); itr++) {
-				if (itr->type_ == MVCC_SELECT) {
+				switch (itr->type_) {
+				case MVCC_SELECT:
+				case MVCC_CREATE: 
 					removeMvccMap(txn, mvccMap.get(), tId, *itr);
-				}
-				else if (itr->type_ != MVCC_CREATE) {
-					RowArray rowArray(
-						txn, itr->snapshotRowOId_, this, OBJECT_FOR_UPDATE);
-					undoUpdateRow(txn, rowArray);
-					removeMvccMap(txn, mvccMap.get(), tId, *itr);
+					break;
+				case MVCC_INDEX:
+					{
+						IndexCursor indexCursor = IndexCursor(*itr);
+						indexSchema_->dropIndexData(txn, indexCursor.getColumnId(),
+							indexCursor.getMapType(), this, UNDEF_CONTAINER_POS, true);
+						indexSchema_->dropIndexInfo(
+							txn, indexCursor.getColumnId(), indexCursor.getMapType());
+						removeMvccMap(txn, mvccMap.get(), tId, *itr);
+
+						GS_TRACE_INFO(
+							DATA_STORE, GS_ERROR_DS_BACKGROUND_TASK_INVALID, 
+							"abort createIndex, " 
+							<< "containerId = " << getContainerId()
+							<< ", columnNumber =" << indexCursor.getColumnId()
+							<< ", mapType=" << (int)indexCursor.getMapType());
+					}
+					break;
+				case MVCC_CONTAINER:
+					{
+						ContainerCursor containerCursor(*itr);
+						resetAlterContainer();
+						ContainerAutoPtr containerAutoPtr(txn, dataStore_, 
+							txn.getPartitionId(), containerCursor);
+						BaseContainer *container = containerAutoPtr.getBaseContainer();
+						dataStore_->finalizeContainer(txn, container);
+						removeMvccMap(txn, mvccMap.get(), tId, *itr);
+
+						GS_TRACE_INFO(
+							DATA_STORE, GS_ERROR_DS_BACKGROUND_TASK_INVALID, 
+							"abort alter, "
+							<< "containerId = " << getContainerId()
+							<< ", txnId = " << txn.getId());
+					}
+					break;
+				case MVCC_UPDATE:
+				case MVCC_DELETE:
+					{
+//						bool isOldSchema = 
+						rowArray.load(txn, itr->snapshotRowOId_, this,
+							OBJECT_FOR_UPDATE);
+//						assert(isOldSchema || !isOldSchema);
+						undoUpdateRow(txn, rowArray);
+						removeMvccMap(txn, mvccMap.get(), tId, *itr);
+					}
+					break;
+				default:
+					GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
+					break;
 				}
 			}
 		}
@@ -520,43 +935,87 @@ void Collection::commit(TransactionContext& txn) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_CON_STATUS_INVALID,
 				"can not delete. container's status is invalid.");
 		}
-
-		StackAllocAutoPtr<BtreeMap> mvccMap(
-			txn.getDefaultAllocator(), getMvccMap(txn));
-		if (mvccMap.get()->isEmpty()) {
+		if (isExpired(txn)) {
+			dataStore_->setLastExpiredTime(txn.getPartitionId(), txn.getStatementStartTime().getUnixTime());
 			return;
 		}
 
-		TransactionId tId = txn.getId();
-		util::XArray<MvccRowImage> mvccList(txn.getDefaultAllocator());
-		util::XArray<MvccRowImage>::iterator itr;
-		BtreeMap::SearchContext sc(
-			UNDEF_COLUMNID, &tId, sizeof(tId), 0, NULL, MAX_RESULT_SIZE);
-		mvccMap.get()->search<TransactionId, MvccRowImage, MvccRowImage>(
-			txn, sc, mvccList);
+		bool isFinalize = false;
 
-		if (!mvccList.empty()) {
-			setDirty();
-			for (itr = mvccList.begin(); itr != mvccList.end(); itr++) {
-				switch (itr->type_) {
-				case MVCC_CREATE:
-				case MVCC_SELECT:
-					{ removeMvccMap(txn, mvccMap.get(), tId, *itr); }
-					break;
-				case MVCC_UPDATE:
-				case MVCC_DELETE:
-					{
-						RowArray rowArray(
-							txn, itr->snapshotRowOId_, this, OBJECT_FOR_UPDATE);
-						rowArray.finalize(txn);
-						removeMvccMap(txn, mvccMap.get(), tId, *itr);
+		{
+			StackAllocAutoPtr<BtreeMap> mvccMap(
+				txn.getDefaultAllocator(), getMvccMap(txn));
+			if (mvccMap.get()->isEmpty()) {
+				return;
+			}
+
+			TransactionId tId = txn.getId();
+			util::XArray<MvccRowImage> mvccList(txn.getDefaultAllocator());
+			util::XArray<MvccRowImage>::iterator itr;
+			BtreeMap::SearchContext sc(
+				UNDEF_COLUMNID, &tId, sizeof(tId), 0, NULL, MAX_RESULT_SIZE);
+			mvccMap.get()->search<TransactionId, MvccRowImage, MvccRowImage>(
+				txn, sc, mvccList);
+
+			if (!mvccList.empty()) {
+				setDirty();
+				RowArray rowArray(txn, this);
+				for (itr = mvccList.begin(); itr != mvccList.end(); itr++) {
+					if (isAlterContainer() && itr->type_ != MVCC_CONTAINER) {
+						GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_COL_LOCK_CONFLICT, 
+							"commit : container already locked "
+							<< ", partitionId = " << txn.getPartitionId()
+							<< ", txnId = " << txn.getId()
+							<< ", containerId = " << getContainerId()
+							);
 					}
-					break;
-				default:
-					GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
-					break;
+					switch (itr->type_) {
+					case MVCC_CREATE:
+					case MVCC_SELECT:
+						{ removeMvccMap(txn, mvccMap.get(), tId, *itr); }
+						break;
+					case MVCC_UPDATE:
+					case MVCC_DELETE:
+						{
+//							bool isOldSchema = 
+							rowArray.load(
+								txn, itr->snapshotRowOId_, this, OBJECT_FOR_UPDATE);
+//							assert(isOldSchema || !isOldSchema);
+							rowArray.finalize(txn);
+							removeMvccMap(txn, mvccMap.get(), tId, *itr);
+						}
+						break;
+					case MVCC_INDEX:
+						{
+							IndexCursor indexCursor = createCursor(txn, *itr);
+							while (!indexCursor.isFinished()) {
+								continueCreateIndex(txn, indexCursor);
+							}
+							indexSchema_->commit(txn, indexCursor.getColumnId(), indexCursor.getMapType());
+							removeMvccMap(txn, mvccMap.get(), tId, *itr);
+						}
+						break;
+					case MVCC_CONTAINER:
+						{
+							ContainerCursor containerCursor(*itr);
+							while (!containerCursor.isFinished()) {
+								continueChangeSchema(txn, containerCursor);
+							}
+							resetAlterContainer();
+							removeMvccMap(txn, mvccMap.get(), tId, *itr);
+							dataStore_->updateContainer(txn, this, containerCursor.getContainerOId());
+							isFinalize = true; 
+						}
+						break;
+					default:
+						GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
+						break;
+					}
 				}
 			}
+		}
+		if (isFinalize) {
+			dataStore_->finalizeContainer(txn, this);
 		}
 	}
 	catch (std::exception& e) {
@@ -566,42 +1025,12 @@ void Collection::commit(TransactionContext& txn) {
 
 
 /*!
-	@brief Change new Column layout
-*/
-void Collection::changeSchema(TransactionContext& txn,
-	BaseContainer& newContainer, util::XArray<uint32_t>& copyColumnMap) {
-	try {
-		setDirty();
-
-		newContainer.setTriggerOId(getTriggerOId());
-		setTriggerOId(UNDEF_OID);
-
-		for (uint32_t columnId = 0; columnId < copyColumnMap.size();
-			 columnId++) {
-			uint32_t oldColumnId = copyColumnMap[columnId];
-			if (oldColumnId != UNDEF_COLUMNID) {
-				if (hasIndex(txn, oldColumnId, MAP_TYPE_BTREE)) {
-					IndexInfo indexInfo(columnId, MAP_TYPE_BTREE);
-					newContainer.createIndex(txn, indexInfo);
-				}
-				if (hasIndex(txn, oldColumnId, MAP_TYPE_HASH)) {
-					IndexInfo indexInfo(columnId, MAP_TYPE_HASH);
-					newContainer.createIndex(txn, indexInfo);
-				}
-			}
-		}
-		changeSchemaRecord(txn, newContainer, copyColumnMap);
-	}
-	catch (std::exception& e) {
-		handleUpdateError(
-			txn, e, GS_ERROR_DS_DS_CHANGE_COLLECTION_SCHEMA_FAILED);
-	}
-}
-
-/*!
 	@brief Check if Container has data of uncommited transaction
 */
 bool Collection::hasUncommitedTransaction(TransactionContext& txn) {
+	if (isExpired(txn)) {
+		return false;
+	}
 	StackAllocAutoPtr<BtreeMap> mvccMap(
 		txn.getDefaultAllocator(), getMvccMap(txn));
 	if (mvccMap.get()->isEmpty()) {
@@ -611,6 +1040,7 @@ bool Collection::hasUncommitedTransaction(TransactionContext& txn) {
 		return true;
 	}
 }
+
 
 /*!
 	@brief Search Btree Index of RowId
@@ -627,10 +1057,13 @@ void Collection::searchRowIdIndex(TransactionContext& txn,
 	util::XArray<OId> mvccList(txn.getDefaultAllocator());
 	ResultSize limitBackup = sc.limit_;
 	sc.limit_ = MAX_RESULT_SIZE;
-	searchMvccMap<Collection, BtreeMap::SearchContext>(txn, sc, mvccList);
+	bool isCheckOnly = false;
+	const bool ignoreTxnCheck = false;
+	searchMvccMap<Collection, BtreeMap::SearchContext>(txn, sc, mvccList, isCheckOnly, ignoreTxnCheck);
+
 	sc.limit_ = limitBackup;
 
-	ContainerValue containerValue(txn, *getObjectManager());
+	ContainerValue containerValue(txn.getPartitionId(), *getObjectManager());
 	util::XArray<OId> oIdList(txn.getDefaultAllocator());
 	util::XArray<OId>::iterator itr;
 
@@ -646,10 +1079,16 @@ void Collection::searchRowIdIndex(TransactionContext& txn,
 	rowIdMap.get()->search(txn, sc, oIdList, outputOrder);
 	sc.limit_ = limitBackup;
 
+	RowArray rowArray(txn, this);
 	for (itr = oIdList.begin(); itr != oIdList.end(); itr++) {
-		RowArray rowArray(txn, *itr, this, OBJECT_READ_ONLY);
+		rowArray.load(txn, *itr, this, OBJECT_READ_ONLY);
 		if (outputOrder != ORDER_DESCENDING) {
-			for (rowArray.begin(); !rowArray.end(); rowArray.next()) {
+			if (op1 != 0 && *static_cast<const Timestamp*>(sc.startKey_) > rowArray.getRowId()) {
+				rowArray.searchNextRowId(*static_cast<const Timestamp*>(sc.startKey_));
+			} else {
+				rowArray.begin();
+			}
+			for (; !rowArray.end(); rowArray.next()) {
 				RowArray::Row row(rowArray.getRow(), &rowArray);
 				if (!isExclusive() && txn.getId() != row.getTxnId() &&
 					!row.isFirstUpdate() &&
@@ -687,8 +1126,13 @@ void Collection::searchRowIdIndex(TransactionContext& txn,
 			}
 		}
 		else {
-			for (bool isRend = rowArray.tail(); isRend;
-				 isRend = rowArray.prev()) {
+			bool isRend;
+			if (op2 != 0 && *static_cast<const Timestamp*>(sc.endKey_) > rowArray.getRowId()) {
+				isRend = rowArray.searchPrevRowId(*static_cast<const Timestamp*>(sc.endKey_));
+			} else {
+				isRend = rowArray.tail();
+			}
+			for (; isRend; isRend = rowArray.prev()) {
 				RowArray::Row row(rowArray.getRow(), &rowArray);
 				if (!isExclusive() && txn.getId() != row.getTxnId() &&
 					!row.isFirstUpdate() &&
@@ -725,6 +1169,9 @@ void Collection::searchRowIdIndex(TransactionContext& txn,
 				}
 			}
 		}
+		if (resultList.size() >= sc.limit_) {
+			break;
+		}
 	}
 
 	if (!mvccList.empty() && outputOrder != ORDER_UNDEFINED) {
@@ -735,39 +1182,36 @@ void Collection::searchRowIdIndex(TransactionContext& txn,
 			util::StackAllocator::Scope scope(
 				txn.getDefaultAllocator());  
 
-			RowArray rowArray(txn, this);
 			ColumnType targetType = COLUMN_TYPE_ROWID;
 			util::XArray<SortKey> indexSortKeyList(txn.getDefaultAllocator());
 			util::XArray<SortKey> mvccSortKeyList(txn.getDefaultAllocator());
 			for (itr = mvccList.begin(); itr != mvccList.end(); itr++) {
 				rowArray.load(txn, *itr, this, OBJECT_READ_ONLY);
 				RowArray::Row row(rowArray.getRow(), &rowArray);
-				uint8_t* objectRowField;
-				row.getRowIdField(objectRowField);
-
+				RowId rowId = row.getRowId();
 				SortKey sortKey;
-				sortKey.set(txn, targetType, objectRowField, *itr);
+				sortKey.set(txn, targetType, reinterpret_cast<uint8_t *>(&rowId), *itr);
 				mvccSortKeyList.push_back(sortKey);
 			}
 
+			bool isNullLast = outputOrder == ORDER_ASCENDING;
 			const Operator* sortOp;
 			if (outputOrder == ORDER_ASCENDING) {
-				sortOp = &ltTable[targetType][targetType];
+				sortOp = &ComparatorTable::ltTable_[targetType][targetType];
 			}
 			else {
-				sortOp = &gtTable[targetType][targetType];
+				sortOp = &ComparatorTable::gtTable_[targetType][targetType];
 			}
 			std::sort(mvccSortKeyList.begin(), mvccSortKeyList.end(),
-				SortPred(txn, sortOp, targetType));
+				SortPred(txn, sortOp, targetType, isNullLast));
 
 			for (itr = resultList.begin(); itr != resultList.end(); itr++) {
 				rowArray.load(txn, *itr, this, OBJECT_READ_ONLY);
 				RowArray::Row row(rowArray.getRow(), &rowArray);
-				uint8_t* objectRowField;
-				row.getRowIdField(objectRowField);
+				RowId rowId = row.getRowId();
 
 				SortKey sortKey;
-				sortKey.set(txn, targetType, objectRowField, *itr);
+				sortKey.set(txn, targetType, reinterpret_cast<uint8_t *>(&rowId), *itr);
 				indexSortKeyList.push_back(sortKey);
 			}
 
@@ -848,15 +1292,18 @@ void Collection::searchRowIdIndex(TransactionContext& txn, uint64_t start,
 	rowIdMap.get()->search<RowId, OId, KeyValue<RowId, OId> >(
 		txn, sc, keyValueList, ORDER_ASCENDING);
 
+	bool isCheckOnly = false;
 	util::XArray<OId> mvccList(txn.getDefaultAllocator());
-	searchMvccMap<Collection, BtreeMap::SearchContext>(txn, sc, mvccList);
+	const bool ignoreTxnCheck = false;
+	searchMvccMap<Collection, BtreeMap::SearchContext>(txn, sc, mvccList, isCheckOnly, ignoreTxnCheck);
 	util::Map<RowId, OId> mvccRowIdMap(txn.getDefaultAllocator());
+	RowArray rowArray(txn, this);
 	for (util::XArray<OId>::iterator mvccItr = mvccList.begin();
 		 mvccItr != mvccList.end(); mvccItr++) {
-		RowArray mvccRowArray(txn, *mvccItr, this, OBJECT_READ_ONLY);
-		RowArray::Row mvccRow(mvccRowArray.getRow(), &mvccRowArray);
+		rowArray.load(txn, *mvccItr, this, OBJECT_READ_ONLY);
+		RowArray::Row mvccRow(rowArray.getRow(), &rowArray);
 		mvccRowIdMap.insert(
-			std::make_pair(mvccRow.getRowId(), mvccRowArray.getOId()));
+			std::make_pair(mvccRow.getRowId(), rowArray.getOId()));
 	}
 
 	util::XArray<std::pair<RowId, int64_t> >::iterator currentItr =
@@ -872,7 +1319,7 @@ void Collection::searchRowIdIndex(TransactionContext& txn, uint64_t start,
 							 : MAX_ROWID;  
 		RowId currentRowId = currentItr->first;
 		if (currentRowId >= startRowId && currentRowId < endRowId) {
-			RowArray rowArray(txn, keyValueItr->value_, this, OBJECT_READ_ONLY);
+			rowArray.load(txn, keyValueItr->value_, this, OBJECT_READ_ONLY);
 			for (rowArray.begin();
 				 !rowArray.end() && currentRowId < endRowId;) {
 				RowArray::Row row(rowArray.getRow(), &rowArray);
@@ -944,7 +1391,6 @@ void Collection::searchRowIdIndex(TransactionContext& txn, uint64_t start,
 		else {
 			resultList[currentItr->second] = mvccRowIdMapItr->second;
 		}
-		currentItr++;
 	}
 	if (skipped > 0) {
 		for (size_t outPos = 0, curPos = 0; curPos < resultList.size();
@@ -958,6 +1404,25 @@ void Collection::searchRowIdIndex(TransactionContext& txn, uint64_t start,
 }
 
 
+/*!
+	@brief Get max RowId
+*/
+RowId Collection::getMaxRowId(TransactionContext& txn) {
+	BtreeMap::SearchContext sc(
+		UNDEF_COLUMNID, NULL, 0, true, &MAX_ROWID, 0, true, 0, NULL, 1);
+	util::XArray<OId> oIdList(txn.getDefaultAllocator());
+
+	searchRowIdIndex(txn, sc, oIdList, ORDER_DESCENDING);
+	if (oIdList.empty()) {
+		return UNDEF_ROWID;
+	}
+	else {
+		RowArray rowArray(txn, this);
+		rowArray.load(txn, oIdList[0], this, OBJECT_READ_ONLY);
+		RowArray::Row row(rowArray.getRow(), &rowArray);
+		return row.getRowId();
+	}
+}
 
 /*!
 	@brief Lock Rows
@@ -969,6 +1434,19 @@ void Collection::lockRowList(
 			GS_THROW_USER_ERROR(GS_ERROR_DS_CON_STATUS_INVALID,
 				"can not lock. container's status is invalid.");
 		}
+
+		if (isExpired(txn)) {
+			dataStore_->setLastExpiredTime(txn.getPartitionId(), txn.getStatementStartTime().getUnixTime());
+			return;
+		}
+
+		if (isAlterContainer()) {
+			DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_COL_LOCK_CONFLICT,
+				"(pId=" << txn.getPartitionId() << ", containerId=" << getContainerId()
+						<< ", txnId=" << txn.getId() << ")");
+		}
+
+		RowArray rowArray(txn, this);
 		for (size_t i = 0; i < rowIdList.size(); i++) {
 			util::StackAllocator::Scope scope(txn.getDefaultAllocator());
 			BtreeMap::SearchContext sc(
@@ -976,7 +1454,9 @@ void Collection::lockRowList(
 			util::XArray<OId> oIdList(txn.getDefaultAllocator());
 			searchRowIdIndex(txn, sc, oIdList, ORDER_UNDEFINED);
 			if (!oIdList.empty()) {
-				RowArray rowArray(txn, oIdList[0], this, OBJECT_FOR_UPDATE);
+//				bool isOldSchema = 
+				rowArray.load(txn, oIdList[0], this, OBJECT_FOR_UPDATE);
+//				assert(isOldSchema || !isOldSchema);
 				RowArray::Row row(rowArray.getRow(), &rowArray);
 				row.lock(txn);
 			}
@@ -991,43 +1471,10 @@ void Collection::lockRowList(
 	}
 }
 
-/*!
-	@brief Check if Row is locked
-*/
-bool Collection::isLocked(
-	TransactionContext& txn, uint32_t rowKeySize, const uint8_t* rowKey) {
-	try {
-		util::StackAllocator::Scope scope(txn.getDefaultAllocator());
-		if (!definedRowKey()) {
-			GS_THROW_USER_ERROR(GS_ERROR_DS_COL_ROWKEY_UNDEFINED, "");
-		}
-
-		RowArray rowArray(txn, this);
-		if (isUnique(txn, rowKeySize, rowKey, rowArray)) {
-			RowArray::Row row(rowArray.getRow(), &rowArray);
-			if (txn.getManager().isActiveTransaction(
-					txn.getPartitionId(), row.getTxnId())) {
-				return true;
-			}
-			else {
-				return false;
-			}
-		}
-		else {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_DS_COL_ROWKEY_INVALID, "rowKey not exist");
-		}
-	}
-	catch (std::exception& e) {
-		handleSearchError(txn, e, GS_ERROR_DS_COL_GET_LOCK_ID_INVALID);
-	}
-
-	return false;
-}
-
 
 void Collection::putRow(TransactionContext& txn,
 	InputMessageRowStore* inputMessageRowStore, RowId& rowId,
+	bool rowIdSpecified,
 	DataStore::PutStatus& status, PutRowOption putRowOption) {
 	util::StackAllocator::Scope scope(txn.getDefaultAllocator());
 	PutMode mode = UNDEFINED_STATUS;
@@ -1042,7 +1489,9 @@ void Collection::putRow(TransactionContext& txn,
 			txn.getDefaultAllocator(), getRowIdMap(txn));
 		OId tailOId = rowIdMap.get()->getTail(txn);
 		if (tailOId != UNDEF_OID) {
-			rowArray.load(txn, tailOId, this, OBJECT_FOR_UPDATE);
+//			bool isOldSchema = 
+			rowArray.load(txn, tailOId, this, OBJECT_READ_ONLY);
+//			assert(isOldSchema || !isOldSchema);
 			rowArray.tail();
 		}
 		mode = APPEND;
@@ -1050,13 +1499,20 @@ void Collection::putRow(TransactionContext& txn,
 	else {
 		mode = UPDATE;
 	}
+	if (!rowArray.isNotInitialized()) {
+		bool isOldSchema = rowArray.setDirty(txn);
+		if (isOldSchema) {
+			RowScope rowScope(*this, TO_NORMAL);
+			convertRowArraySchema(txn, rowArray, false);
+		}
+	}
 	switch (mode) {
 	case APPEND:
 		if (putRowOption == PUT_UPDATE_ONLY) {
 			GS_THROW_USER_ERROR(GS_ERROR_CON_PUT_ROW_OPTION_INVALID,
 				"update row, but row not exists");
 		}
-		appendRowInternal(txn, inputMessageRowStore, rowArray, rowId);
+		appendRowInternal(txn, inputMessageRowStore, rowArray, rowId, rowIdSpecified);
 		status = DataStore::CREATE;
 		incrementRowNum();
 		break;
@@ -1122,22 +1578,30 @@ bool Collection::isUnique(TransactionContext& txn, uint32_t rowKeySize,
 		isFound = searchRowKeyWithMvccMap(txn, rowKeySize, rowKey, oId);
 	}
 	if (isFound) {
-		rowArray.load(txn, oId, this, OBJECT_FOR_UPDATE);
+//		bool isOldSchema = 
+		rowArray.load(txn, oId, this, OBJECT_READ_ONLY);
+//		assert(isOldSchema || !isOldSchema);
 	}
 	return !isFound;
 }
 
 void Collection::appendRowInternal(TransactionContext& txn,
-	MessageRowStore* messageRowStore, RowArray& rowArray, RowId& rowId) {
-	rowId = allocateRowId();
+	MessageRowStore* messageRowStore, RowArray& rowArray, RowId& rowId,
+	bool rowIdSpecified) {
+	if (rowIdSpecified) {
+		setMaxRowId(rowId);
+	} else {
+		rowId = allocateRowId();
+	}
 
 	if (rowArray.isNotInitialized() || rowArray.isFull()) {
 		StackAllocAutoPtr<BtreeMap> rowIdMap(
 			txn.getDefaultAllocator(), getRowIdMap(txn));
 		rowArray.reset();
 		if (getRowNum() == 0) {
+			bool isRowArraySizeControlMode = false;
 			uint32_t smallRowArrayNum =
-				calcRowArrayNum(SMALL_ROW_ARRAY_MAX_SIZE);
+				calcRowArrayNum(txn, isRowArraySizeControlMode, getSmallRowArrayNum());
 			rowArray.initialize(txn, rowId, smallRowArrayNum);
 		}
 		else {
@@ -1146,37 +1610,45 @@ void Collection::appendRowInternal(TransactionContext& txn,
 		insertRowIdMap(txn, rowIdMap.get(), &rowId, rowArray.getBaseOId());
 	}
 	else {
+		RowScope rowScope(*this, TO_NORMAL);
 		if (rowArray.isTailPos()) {
 			shift(txn, rowArray, true);
 			rowArray.tail();
 		}
 	}
+	{
+		RowScope rowScope(*this, TO_NORMAL);
 
-	rowArray.append(txn, messageRowStore, rowId);
-
-	RowArray::Row row(rowArray.getRow(), &rowArray);
-
-	row.lock(txn);
-	row.resetFirstUpdate();
-
-	util::XArray<IndexData> indexList(txn.getDefaultAllocator());
-	getIndexList(txn, indexList);
-	for (size_t i = 0; i < indexList.size(); i++) {
-		StackAllocAutoPtr<BaseIndex> map(txn.getDefaultAllocator(),
-			getIndex(txn, indexList[i].mapType_, indexList[i].columnId_));
-		if (map.get() == NULL) {
-			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
+		rowArray.append(txn, messageRowStore, rowId);
+	
+		RowArray::Row row(rowArray.getRow(), &rowArray);
+	
+		row.lock(txn);
+		row.resetFirstUpdate();
+	
+		util::XArray<IndexData> indexList(txn.getDefaultAllocator());
+		bool withUncommitted = true;
+		getIndexList(txn, withUncommitted, indexList);
+		for (size_t i = 0; i < indexList.size(); i++) {
+			if (indexList[i].cursor_ < row.getRowId()) {
+				continue;
+			}
+			ValueMap valueMap(txn, this, indexList[i]);
+			ColumnInfo& columnInfo = getColumnInfo(indexList[i].columnId_);
+			bool isNullValue = row.isNullValue(columnInfo);
+			BaseObject baseFieldObject(txn.getPartitionId(), *getObjectManager());
+			const void *fieldValue = &NULL_VALUE;
+			if (!isNullValue) {
+				row.getField(txn, columnInfo, baseFieldObject);
+				fieldValue = baseFieldObject.getCursor<void>();
+			}
+			insertValueMap(txn, valueMap, fieldValue, rowArray.getOId(),
+				isNullValue);
 		}
 
-		ColumnInfo& columnInfo = getColumnInfo(indexList[i].columnId_);
-		BaseObject baseFieldObject(txn.getPartitionId(), *getObjectManager());
-		row.getField(txn, columnInfo, baseFieldObject);
-		insertValueMap(txn, map.get(), baseFieldObject.getCursor<uint8_t>(),
-			rowArray.getOId(), indexList[i].columnId_, indexList[i].mapType_);
-	}
-
-	if (!txn.isAutoCommit()) {  
-		setCreateRowId(txn, rowId);
+		if (!txn.isAutoCommit()) {  
+			setCreateRowId(txn, rowId);
+		}
 	}
 }
 
@@ -1187,6 +1659,7 @@ void Collection::updateRowInternal(TransactionContext& txn,
 	row.lock(txn);
 
 	if (!txn.isAutoCommit() && row.isFirstUpdate()) {
+		RowScope rowScope(*this, TO_MVCC);
 		row.resetFirstUpdate();
 		RowArray snapShotRowArray(txn, this);
 		snapShotRowArray.initialize(
@@ -1199,48 +1672,51 @@ void Collection::updateRowInternal(TransactionContext& txn,
 			txn.getDefaultAllocator(), getMvccMap(txn));
 		insertMvccMap(txn, mvccMap.get(), tId, mvccRowImage);
 	}
-
-	util::XArray<IndexData> indexList(txn.getDefaultAllocator());
-	getIndexList(txn, indexList);
-	if (!indexList.empty()) {
-		for (size_t i = 0; i < indexList.size(); i++) {
-			ColumnId columnId = indexList[i].columnId_;
-
-			ColumnInfo& columnInfo = getColumnInfo(columnId);
-
-			BaseObject baseFieldObject(
-				txn.getPartitionId(), *getObjectManager());
-			row.getField(txn, columnInfo, baseFieldObject);
-			int32_t result =
-				ValueProcessor::compare(txn, *getObjectManager(), columnId,
-					messageRowStore, baseFieldObject.getCursor<uint8_t>());
-			if (result != 0) {
-				StackAllocAutoPtr<BaseIndex> map(txn.getDefaultAllocator(),
-					getIndex(txn, indexList[i].mapType_,
-													 indexList[i].columnId_));
-				if (map.get() == NULL) {
-					GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
+	{
+		RowScope rowScope(*this, TO_NORMAL);
+		util::XArray<IndexData> indexList(txn.getDefaultAllocator());
+		bool withUncommitted = true;
+		getIndexList(txn, withUncommitted, indexList);
+		if (!indexList.empty()) {
+			for (size_t i = 0; i < indexList.size(); i++) {
+				if (indexList[i].cursor_ < row.getRowId()) {
+					continue;
 				}
-				ColumnInfo& columnInfo = getColumnInfo(indexList[i].columnId_);
+				ColumnId columnId = indexList[i].columnId_;
+
+				ColumnInfo& columnInfo = getColumnInfo(columnId);
+				bool isInputNullValue = messageRowStore->isNullValue(columnInfo.getColumnId());
+				bool isCurrentNullValue = row.isNullValue(columnInfo);
+
 				BaseObject baseFieldObject(
 					txn.getPartitionId(), *getObjectManager());
-				row.getField(txn, columnInfo, baseFieldObject);
-				removeValueMap(txn, map.get(),
-					baseFieldObject.getCursor<uint8_t>(), rowArray.getOId(),
-					indexList[i].columnId_, indexList[i].mapType_);
+				const void *currentValue = &NULL_VALUE;
+				if (!isCurrentNullValue) {
+					row.getField(txn, columnInfo, baseFieldObject);
+					currentValue = baseFieldObject.getCursor<void>();
+				}
 
-				const uint8_t* messageRowField;
-				uint32_t messageRowFieldSize;
-				messageRowStore->getField(columnInfo.getColumnId(),
-					messageRowField, messageRowFieldSize);
-				insertValueMap(txn, map.get(), messageRowField,
-					rowArray.getOId(), indexList[i].columnId_,
-					indexList[i].mapType_);
+				if (isInputNullValue != isCurrentNullValue || 
+					(!isInputNullValue && !isCurrentNullValue &&
+					ValueProcessor::compare(txn, *getObjectManager(), columnId,
+						messageRowStore, reinterpret_cast<uint8_t *>(const_cast<void *>(currentValue))) != 0)) {
+					ValueMap valueMap(txn, this, indexList[i]);
+					removeValueMap(txn, valueMap, currentValue, rowArray.getOId(),
+						isCurrentNullValue);
+					const void *inputValue = &NULL_VALUE;
+					if (!isInputNullValue) {
+						uint32_t inputValueSize;
+						messageRowStore->getField(columnInfo.getColumnId(),
+							inputValue, inputValueSize);
+					}
+					insertValueMap(txn, valueMap, inputValue,
+						rowArray.getOId(), isInputNullValue);
+				}
 			}
 		}
-	}
 
-	rowArray.update(txn, messageRowStore);
+		rowArray.update(txn, messageRowStore);
+	}
 }
 
 void Collection::deleteRowInternal(
@@ -1250,6 +1726,7 @@ void Collection::deleteRowInternal(
 	row.lock(txn);
 
 	if (!txn.isAutoCommit() && row.isFirstUpdate()) {
+		RowScope rowScope(*this, TO_MVCC);
 		row.resetFirstUpdate();
 		RowArray snapShotRowArray(txn, this);
 		snapShotRowArray.initialize(
@@ -1262,53 +1739,69 @@ void Collection::deleteRowInternal(
 			txn.getDefaultAllocator(), getMvccMap(txn));
 		insertMvccMap(txn, mvccMap.get(), tId, mvccRowImage);
 	}
+	{
+		RowScope rowScope(*this, TO_NORMAL);
 
-	util::XArray<IndexData> indexList(txn.getDefaultAllocator());
-	getIndexList(txn, indexList);
-	if (!indexList.empty()) {
-		for (size_t i = 0; i < indexList.size(); i++) {
-			StackAllocAutoPtr<BaseIndex> map(txn.getDefaultAllocator(),
-				getIndex(txn, indexList[i].mapType_, indexList[i].columnId_));
-			if (map.get() == NULL) {
-				GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
+		util::XArray<IndexData> indexList(txn.getDefaultAllocator());
+		bool withUncommitted = true;
+		getIndexList(txn, withUncommitted, indexList);
+		if (!indexList.empty()) {
+			for (size_t i = 0; i < indexList.size(); i++) {
+				if (indexList[i].cursor_ < row.getRowId()) {
+					continue;
+				}
+				ValueMap valueMap(txn, this, indexList[i]);
+				ColumnInfo& columnInfo = getColumnInfo(indexList[i].columnId_);
+				bool isNullValue = row.isNullValue(columnInfo);
+				BaseObject baseFieldObject(
+					txn.getPartitionId(), *getObjectManager());
+				const void *fieldValue = &NULL_VALUE;
+				if (!isNullValue) {
+					row.getField(txn, columnInfo, baseFieldObject);
+					fieldValue = baseFieldObject.getCursor<void>();
+				}
+				removeValueMap(txn, valueMap, fieldValue, rowArray.getOId(),
+					isNullValue);
+		}
+		}
+
+		rowArray.remove(txn);
+
+		uint16_t halfRowNum = rowArray.getMaxRowNum() / 2;
+		uint16_t activeNum = rowArray.getActiveRowNum(halfRowNum);
+		if (activeNum == 0) {
+			RowId rowId = rowArray.getRowId();
+			StackAllocAutoPtr<BtreeMap> rowIdMap(
+				txn.getDefaultAllocator(), getRowIdMap(txn));
+			removeRowIdMap(txn, rowIdMap.get(), &rowId, rowArray.getBaseOId());
+			rowArray.finalize(txn);
+		}
+		else if (activeNum < halfRowNum) {
+			RowArray neighborRowArray(txn, this);
+			bool isOldSchema = false;
+			bool isExist =
+				rowArray.nextRowArray(txn, neighborRowArray, isOldSchema, OBJECT_FOR_UPDATE);
+			if (isOldSchema) {
+				neighborRowArray.begin();
+				convertRowArraySchema(txn, neighborRowArray, false); 
 			}
-			ColumnInfo& columnInfo = getColumnInfo(indexList[i].columnId_);
-			BaseObject baseFieldObject(
-				txn.getPartitionId(), *getObjectManager());
-			row.getField(txn, columnInfo, baseFieldObject);
-			removeValueMap(txn, map.get(), baseFieldObject.getCursor<uint8_t>(),
-				rowArray.getOId(), indexList[i].columnId_,
-				indexList[i].mapType_);
-		}
-	}
-
-	rowArray.remove(txn);
-
-	uint16_t activeNum = rowArray.getActiveRowNum();
-	if (activeNum == 0) {
-		RowId rowId = rowArray.getRowId();
-		StackAllocAutoPtr<BtreeMap> rowIdMap(
-			txn.getDefaultAllocator(), getRowIdMap(txn));
-		removeRowIdMap(txn, rowIdMap.get(), &rowId, rowArray.getBaseOId());
-		rowArray.finalize(txn);
-	}
-	else if (activeNum < rowArray.getMaxRowNum() / 2) {
-		RowArray nextRowArray(txn, this);
-		bool isExist =
-			rowArray.nextRowArray(txn, nextRowArray, OBJECT_FOR_UPDATE);
-		if (isExist &&
-			activeNum + nextRowArray.getActiveRowNum() <=
-				rowArray.getMaxRowNum()) {
-			merge(txn, rowArray, nextRowArray);
-		}
-		else {
-			RowArray prevRowArray(txn, this);
-			isExist =
-				rowArray.prevRowArray(txn, prevRowArray, OBJECT_FOR_UPDATE);
 			if (isExist &&
-				activeNum + prevRowArray.getActiveRowNum() <=
-					prevRowArray.getMaxRowNum()) {
-				merge(txn, prevRowArray, rowArray);
+				activeNum + neighborRowArray.getActiveRowNum(rowArray.getMaxRowNum() - activeNum + 1) <=
+					rowArray.getMaxRowNum()) {
+				merge(txn, rowArray, neighborRowArray);
+			}
+			else {
+				isExist =
+					rowArray.prevRowArray(txn, neighborRowArray, isOldSchema, OBJECT_FOR_UPDATE);
+				if (isOldSchema) {
+					neighborRowArray.tail();
+					convertRowArraySchema(txn, neighborRowArray, false); 
+				}
+				if (isExist &&
+					activeNum + neighborRowArray.getActiveRowNum() <=
+						neighborRowArray.getMaxRowNum()) {
+					merge(txn, neighborRowArray, rowArray);
+				}
 			}
 		}
 	}
@@ -1329,36 +1822,46 @@ void Collection::insertRowInternal(
 		}
 	}
 	else {
+		RowScope rowScope(*this, TO_NORMAL);
 		if (destRowArray.isFull()) {
 			RowId splitRowId;
 			RowArray splitRowArray(txn, this);
 			split(txn, destRowArray, insertRowId, splitRowArray, splitRowId);
 			if (splitRowId < srcRow.getRowId()) {
+//				bool isOldSchema = 
 				destRowArray.load(
 					txn, splitRowArray.getOId(), this, OBJECT_FOR_UPDATE);
+//				assert(!isOldSchema);
 			}
 		}
 		else {
 			shift(txn, destRowArray, false);
 		}
 	}
-	srcRowArray.move(txn, destRowArray);
-	RowArray::Row row(destRowArray.getRow(), &destRowArray);
+	{
+		RowScope rowScope(*this, TO_NORMAL);
+		srcRowArray.move(txn, destRowArray);
+		RowArray::Row row(destRowArray.getRow(), &destRowArray);
 
-	util::XArray<IndexData> indexList(txn.getDefaultAllocator());
-	getIndexList(txn, indexList);
-	for (size_t i = 0; i < indexList.size(); i++) {
-		StackAllocAutoPtr<BaseIndex> map(txn.getDefaultAllocator(),
-			getIndex(txn, indexList[i].mapType_, indexList[i].columnId_));
-		if (map.get() == NULL) {
-			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
+		util::XArray<IndexData> indexList(txn.getDefaultAllocator());
+		bool withUncommitted = true;
+		getIndexList(txn, withUncommitted, indexList);
+		for (size_t i = 0; i < indexList.size(); i++) {
+			if (indexList[i].cursor_ < row.getRowId()) {
+				continue;
+			}
+			ValueMap valueMap(txn, this, indexList[i]);
+			ColumnInfo& columnInfo = getColumnInfo(indexList[i].columnId_);
+			bool isNullValue = row.isNullValue(columnInfo);
+			BaseObject baseFieldObject(txn.getPartitionId(), *getObjectManager());
+			const void *fieldValue = &NULL_VALUE;
+			if (!isNullValue) {
+				row.getField(txn, columnInfo, baseFieldObject);
+				fieldValue = baseFieldObject.getCursor<void>();
+			}
+			insertValueMap(txn, valueMap, fieldValue, destRowArray.getOId(),
+				isNullValue);
 		}
-		ColumnInfo& columnInfo = getColumnInfo(indexList[i].columnId_);
-		BaseObject baseFieldObject(txn.getPartitionId(), *getObjectManager());
-		row.getField(txn, columnInfo, baseFieldObject);
-		insertValueMap(txn, map.get(), baseFieldObject.getCursor<uint8_t>(),
-			destRowArray.getOId(), indexList[i].columnId_,
-			indexList[i].mapType_);
 	}
 }
 
@@ -1367,30 +1870,7 @@ void Collection::shift(
 	util::XArray<std::pair<OId, OId> > moveList(txn.getDefaultAllocator());
 	util::XArray<std::pair<OId, OId> >::iterator itr;
 	rowArray.shift(txn, isForce, moveList);
-	util::XArray<IndexData> indexList(txn.getDefaultAllocator());
-	getIndexList(txn, indexList);
-	if (!indexList.empty()) {
-		for (size_t i = 0; i < indexList.size(); i++) {
-			StackAllocAutoPtr<BaseIndex> map(txn.getDefaultAllocator(),
-				getIndex(txn, indexList[i].mapType_, indexList[i].columnId_));
-			if (map.get() == NULL) {
-				GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
-			}
-			ColumnInfo& columnInfo = getColumnInfo(indexList[i].columnId_);
-
-			RowArray moveRowArray(txn, this);
-			for (itr = moveList.begin(); itr != moveList.end(); itr++) {
-				moveRowArray.load(txn, itr->second, this, OBJECT_READ_ONLY);
-				RowArray::Row row(moveRowArray.getRow(), &moveRowArray);
-				BaseObject baseFieldObject(
-					txn.getPartitionId(), *getObjectManager());
-				row.getField(txn, columnInfo, baseFieldObject);
-				updateValueMap(txn, map.get(),
-					baseFieldObject.getCursor<uint8_t>(), itr->first,
-					itr->second, indexList[i].columnId_, indexList[i].mapType_);
-			}
-		}
-	}
+	updateValueMaps(txn, moveList);
 }
 
 void Collection::split(TransactionContext& txn, RowArray& rowArray,
@@ -1406,30 +1886,7 @@ void Collection::split(TransactionContext& txn, RowArray& rowArray,
 	insertRowIdMap(
 		txn, rowIdMap.get(), &splitRowId, splitRowArray.getBaseOId());
 
-	util::XArray<IndexData> indexList(txn.getDefaultAllocator());
-	getIndexList(txn, indexList);
-	if (!indexList.empty()) {
-		for (size_t i = 0; i < indexList.size(); i++) {
-			StackAllocAutoPtr<BaseIndex> map(txn.getDefaultAllocator(),
-				getIndex(txn, indexList[i].mapType_, indexList[i].columnId_));
-			if (map.get() == NULL) {
-				GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
-			}
-			ColumnInfo& columnInfo = getColumnInfo(indexList[i].columnId_);
-
-			RowArray moveRowArray(txn, this);
-			for (itr = moveList.begin(); itr != moveList.end(); itr++) {
-				moveRowArray.load(txn, itr->second, this, OBJECT_READ_ONLY);
-				RowArray::Row row(moveRowArray.getRow(), &moveRowArray);
-				BaseObject baseFieldObject(
-					txn.getPartitionId(), *getObjectManager());
-				row.getField(txn, columnInfo, baseFieldObject);
-				updateValueMap(txn, map.get(),
-					baseFieldObject.getCursor<uint8_t>(), itr->first,
-					itr->second, indexList[i].columnId_, indexList[i].mapType_);
-			}
-		}
-	}
+	updateValueMaps(txn, moveList);
 }
 
 void Collection::merge(
@@ -1438,30 +1895,7 @@ void Collection::merge(
 	util::XArray<std::pair<OId, OId> >::iterator itr;
 	rowArray.merge(txn, nextRowArray, moveList);
 
-	util::XArray<IndexData> indexList(txn.getDefaultAllocator());
-	getIndexList(txn, indexList);
-	if (!indexList.empty()) {
-		for (size_t i = 0; i < indexList.size(); i++) {
-			StackAllocAutoPtr<BaseIndex> map(txn.getDefaultAllocator(),
-				getIndex(txn, indexList[i].mapType_, indexList[i].columnId_));
-			if (map.get() == NULL) {
-				GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
-			}
-			ColumnInfo& columnInfo = getColumnInfo(indexList[i].columnId_);
-
-			RowArray moveRowArray(txn, this);
-			for (itr = moveList.begin(); itr != moveList.end(); itr++) {
-				moveRowArray.load(txn, itr->second, this, OBJECT_READ_ONLY);
-				RowArray::Row row(moveRowArray.getRow(), &moveRowArray);
-				BaseObject baseFieldObject(
-					txn.getPartitionId(), *getObjectManager());
-				row.getField(txn, columnInfo, baseFieldObject);
-				updateValueMap(txn, map.get(),
-					baseFieldObject.getCursor<uint8_t>(), itr->first,
-					itr->second, indexList[i].columnId_, indexList[i].mapType_);
-			}
-		}
-	}
+	updateValueMaps(txn, moveList);
 
 	RowId rowId = nextRowArray.getRowId();
 	StackAllocAutoPtr<BtreeMap> rowIdMap(
@@ -1476,11 +1910,12 @@ bool Collection::searchRowKeyWithRowIdMap(TransactionContext& txn,
 
 	ColumnInfo& columnInfo = getColumnInfo(ColumnInfo::ROW_KEY_COLUMN_ID);
 	ColumnType type = columnInfo.getColumnType();
-	const Operator eq = eqTable[type][type];
-	ContainerValue containerValue(txn, *getObjectManager());
+	const Operator eq = ComparatorTable::eqTable_[type][type];
+	ContainerValue containerValue(txn.getPartitionId(), *getObjectManager());
 
 	BtreeMap::BtreeCursor btreeCursor;
 
+	RowArray rowArray(txn, this);
 	while (1) {
 		util::StackAllocator::Scope scope(txn.getDefaultAllocator());
 		util::XArray<OId> idList(txn.getDefaultAllocator());  
@@ -1491,7 +1926,7 @@ bool Collection::searchRowKeyWithRowIdMap(TransactionContext& txn,
 			txn, PARTIAL_RESULT_SIZE, idList, btreeCursor);
 
 		for (itr = idList.begin(); itr != idList.end(); itr++) {
-			RowArray rowArray(txn, *itr, this, OBJECT_READ_ONLY);
+			rowArray.load(txn, *itr, this, OBJECT_READ_ONLY);
 			for (rowArray.begin(); !rowArray.end(); rowArray.next()) {
 				RowArray::Row row(rowArray.getRow(), &rowArray);
 				row.getField(txn, columnInfo, containerValue);
@@ -1521,34 +1956,44 @@ bool Collection::searchRowKeyWithMvccMap(TransactionContext& txn,
 
 	ColumnInfo& columnInfo = getColumnInfo(ColumnInfo::ROW_KEY_COLUMN_ID);
 	ColumnType type = columnInfo.getColumnType();
-	const Operator eq = eqTable[type][type];
+	const Operator eq = ComparatorTable::eqTable_[type][type];
 	Value value;
 
+	RowArray rowArray(txn, this);
 	util::XArray<std::pair<TransactionId, MvccRowImage> > idList(
 		txn.getDefaultAllocator());
 	util::XArray<std::pair<TransactionId, MvccRowImage> >::iterator itr;
 	mvccMap.get()->getAll<TransactionId, MvccRowImage>(
 		txn, MAX_RESULT_SIZE, idList);
 	for (itr = idList.begin(); itr != idList.end(); itr++) {
-		if (itr->second.type_ == MVCC_SELECT) {
-			continue;
-		}
-		else if (itr->second.type_ == MVCC_CREATE) {
-			continue;
-		}
-		RowArray rowArray(
-			txn, itr->second.snapshotRowOId_, this, OBJECT_READ_ONLY);
-		RowArray::Row row(rowArray.getRow(), &rowArray);
-		if (row.getTxnId() != txn.getId()) {
-			BaseObject baseFieldObject(
-				txn.getPartitionId(), *getObjectManager());
-			row.getField(txn, columnInfo, baseFieldObject);
-			value.set(baseFieldObject.getCursor<uint8_t>(),
-				columnInfo.getColumnType());
-			if (eq(txn, value.data(), value.size(), rowKey, rowKeySize)) {
-				oId = itr->second.snapshotRowOId_;
-				return true;
+		switch (itr->second.type_) {
+		case MVCC_SELECT:
+		case MVCC_INDEX:
+		case MVCC_CONTAINER:
+		case MVCC_CREATE:
+			break;
+		case MVCC_UPDATE:
+		case MVCC_DELETE:
+			{
+				rowArray.load(
+					txn, itr->second.snapshotRowOId_, this, OBJECT_READ_ONLY);
+				RowArray::Row row(rowArray.getRow(), &rowArray);
+				if (row.getTxnId() != txn.getId()) {
+					BaseObject baseFieldObject(
+						txn.getPartitionId(), *getObjectManager());
+					row.getField(txn, columnInfo, baseFieldObject);
+					value.set(baseFieldObject.getCursor<uint8_t>(),
+						columnInfo.getColumnType());
+					if (eq(txn, value.data(), value.size(), rowKey, rowKeySize)) {
+						oId = itr->second.snapshotRowOId_;
+						return true;
+					}
+				}
 			}
+			break;
+		default:
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
+			break;
 		}
 	}
 
@@ -1557,22 +2002,26 @@ bool Collection::searchRowKeyWithMvccMap(TransactionContext& txn,
 
 void Collection::undoCreateRow(TransactionContext& txn, RowArray& rowArray) {
 	util::XArray<IndexData> indexList(txn.getDefaultAllocator());
-	getIndexList(txn, indexList);
+	bool withUncommitted = true;
+	getIndexList(txn, withUncommitted, indexList);
 	if (!indexList.empty()) {
 		RowArray::Row row(rowArray.getRow(), &rowArray);
 		for (size_t i = 0; i < indexList.size(); i++) {
-			StackAllocAutoPtr<BaseIndex> map(txn.getDefaultAllocator(),
-				getIndex(txn, indexList[i].mapType_, indexList[i].columnId_));
-			if (map.get() == NULL) {
-				GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
+			if (indexList[i].cursor_ < row.getRowId()) {
+				continue;
 			}
+			ValueMap valueMap(txn, this, indexList[i]);
 			ColumnInfo& columnInfo = getColumnInfo(indexList[i].columnId_);
+			bool isNullValue = row.isNullValue(columnInfo);
 			BaseObject baseFieldObject(
 				txn.getPartitionId(), *getObjectManager());
-			row.getField(txn, columnInfo, baseFieldObject);
-			removeValueMap(txn, map.get(), baseFieldObject.getCursor<uint8_t>(),
-				rowArray.getOId(), indexList[i].columnId_,
-				indexList[i].mapType_);
+			const void *fieldValue = &NULL_VALUE;
+			if (!isNullValue) {
+				row.getField(txn, columnInfo, baseFieldObject);
+				fieldValue = baseFieldObject.getCursor<void>();
+			}
+			removeValueMap(txn, valueMap, fieldValue, rowArray.getOId(),
+				isNullValue);
 		}
 	}
 	rowArray.remove(txn);
@@ -1582,9 +2031,6 @@ void Collection::undoCreateRow(TransactionContext& txn, RowArray& rowArray) {
 void Collection::undoUpdateRow(
 	TransactionContext& txn, RowArray& beforeRowArray) {
 	AbortStatus status = ABORT_UNDEF_STATUS;
-
-	util::XArray<IndexData> indexList(txn.getDefaultAllocator());
-	getIndexList(txn, indexList);
 
 	RowArray::Row beforeRow(beforeRowArray.getRow(), &beforeRowArray);
 	RowArray rowArray(txn, this);
@@ -1598,13 +2044,17 @@ void Collection::undoUpdateRow(
 			txn.getDefaultAllocator(), getRowIdMap(txn));
 		rowIdMap.get()->search(txn, sc, oIdList, ORDER_DESCENDING);
 		if (!oIdList.empty()) {
-			rowArray.load(txn, oIdList[0], this, OBJECT_FOR_UPDATE);
-			bool isFound = rowArray.searchRowId(rowId);
+			bool isOldSchema = rowArray.load(txn, oIdList[0], this, OBJECT_FOR_UPDATE);
+			bool isFound = rowArray.searchNextRowId(rowId);
 			if (isFound) {
 				status = ABORT_UPDATE_ROW_ARRAY;
 			}
 			else {
 				status = ABORT_INSERT_ROW_ARRAY;
+			}
+			if (isOldSchema) {
+				RowScope rowScope(*this, TO_NORMAL);
+				convertRowArraySchema(txn, rowArray, false); 
 			}
 		}
 		else {
@@ -1617,43 +2067,53 @@ void Collection::undoUpdateRow(
 		insertRowInternal(txn, beforeRowArray, rowArray);
 		break;
 	case ABORT_UPDATE_ROW_ARRAY: {
+		RowScope rowScope(*this, TO_NORMAL);
+		util::XArray<IndexData> indexList(txn.getDefaultAllocator());
+		bool withUncommitted = true;
+		getIndexList(txn, withUncommitted, indexList);
 		RowArray::Row row(rowArray.getRow(), &rowArray);
 		if (!row.isRemoved()) {
 			for (size_t i = 0; i < indexList.size(); i++) {
-				StackAllocAutoPtr<BaseIndex> map(txn.getDefaultAllocator(),
-					getIndex(txn, indexList[i].mapType_,
-													 indexList[i].columnId_));
-				if (map.get() == NULL) {
-					GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
+				if (indexList[i].cursor_ < row.getRowId()) {
+					continue;
 				}
+				ValueMap valueMap(txn, this, indexList[i]);
 				ColumnInfo& columnInfo = getColumnInfo(indexList[i].columnId_);
+				bool isNullValue = row.isNullValue(columnInfo);
 				BaseObject baseFieldObject(
 					txn.getPartitionId(), *getObjectManager());
-				row.getField(txn, columnInfo, baseFieldObject);
-				removeValueMap(txn, map.get(),
-					baseFieldObject.getCursor<uint8_t>(), rowArray.getOId(),
-					indexList[i].columnId_, indexList[i].mapType_);
+				const void *fieldValue = &NULL_VALUE;
+				if (!isNullValue) {
+					row.getField(txn, columnInfo, baseFieldObject);
+					fieldValue = baseFieldObject.getCursor<void>();
+				}
+				removeValueMap(txn, valueMap, fieldValue, rowArray.getOId(),
+					isNullValue);
 			}
 			row.finalize(txn);
 		}
 		beforeRowArray.move(txn, rowArray);
 
 		for (size_t i = 0; i < indexList.size(); i++) {
-			StackAllocAutoPtr<BaseIndex> map(txn.getDefaultAllocator(),
-				getIndex(txn, indexList[i].mapType_, indexList[i].columnId_));
-			if (map.get() == NULL) {
-				GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
+			if (indexList[i].cursor_ < row.getRowId()) {
+				continue;
 			}
+			ValueMap valueMap(txn, this, indexList[i]);
 			ColumnInfo& columnInfo = getColumnInfo(indexList[i].columnId_);
+			bool isNullValue = row.isNullValue(columnInfo);
 			BaseObject baseFieldObject(
 				txn.getPartitionId(), *getObjectManager());
-			row.getField(txn, columnInfo, baseFieldObject);
-			insertValueMap(txn, map.get(), baseFieldObject.getCursor<uint8_t>(),
-				rowArray.getOId(), indexList[i].columnId_,
-				indexList[i].mapType_);
+			const void *fieldValue = &NULL_VALUE;
+			if (!isNullValue) {
+				row.getField(txn, columnInfo, baseFieldObject);
+				fieldValue = baseFieldObject.getCursor<void>();
+			}
+			insertValueMap(txn, valueMap, fieldValue, rowArray.getOId(),
+				isNullValue);
 		}
 	} break;
 	case ABORT_CREATE_FIRST_ROW_ARRAY: {
+		RowScope rowScope(*this, TO_NORMAL);
 		RowId baseRowId = 0;
 		rowArray.initialize(txn, baseRowId, getNormalRowArrayNum());
 		StackAllocAutoPtr<BtreeMap> rowIdMap(
@@ -1662,19 +2122,26 @@ void Collection::undoUpdateRow(
 		beforeRowArray.move(txn, rowArray);
 
 		RowArray::Row row(rowArray.getRow(), &rowArray);
+		util::XArray<IndexData> indexList(txn.getDefaultAllocator());
+		bool withUncommitted = true;
+		getIndexList(txn, withUncommitted, indexList);
+
 		for (size_t i = 0; i < indexList.size(); i++) {
-			StackAllocAutoPtr<BaseIndex> map(txn.getDefaultAllocator(),
-				getIndex(txn, indexList[i].mapType_, indexList[i].columnId_));
-			if (map.get() == NULL) {
-				GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
+			if (indexList[i].cursor_ < row.getRowId()) {
+				continue;
 			}
+			ValueMap valueMap(txn, this, indexList[i]);
 			ColumnInfo& columnInfo = getColumnInfo(indexList[i].columnId_);
+			bool isNullValue = row.isNullValue(columnInfo);
 			BaseObject baseFieldObject(
 				txn.getPartitionId(), *getObjectManager());
-			row.getField(txn, columnInfo, baseFieldObject);
-			insertValueMap(txn, map.get(), baseFieldObject.getCursor<uint8_t>(),
-				rowArray.getOId(), indexList[i].columnId_,
-				indexList[i].mapType_);
+			const void *fieldValue = &NULL_VALUE;
+			if (!isNullValue) {
+				row.getField(txn, columnInfo, baseFieldObject);
+				fieldValue = baseFieldObject.getCursor<void>();
+			}
+			insertValueMap(txn, valueMap, fieldValue, rowArray.getOId(),
+				isNullValue);
 		}
 	} break;
 	default:
@@ -1710,7 +2177,9 @@ void Collection::lockIdList(TransactionContext& txn, util::XArray<OId>& oIdList,
 	try {
 		RowArray rowArray(txn, this);
 		for (size_t i = 0; i < oIdList.size(); i++) {
+//			bool isOldSchema = 
 			rowArray.load(txn, oIdList[i], this, OBJECT_FOR_UPDATE);
+//			assert(isOldSchema || !isOldSchema);
 			RowArray::Row row(rowArray.getRow(), &rowArray);
 			row.lock(txn);
 			idList.push_back(row.getRowId());
@@ -1761,6 +2230,10 @@ void Collection::getContainerOptionInfo(
 	return;
 }
 
+util::String Collection::getBibContainerOptionInfo(TransactionContext &txn) {
+	return "";
+}
+
 void Collection::checkContainerOption(
 	MessageSchema*, util::XArray<uint32_t>&, bool&) {
 	return;
@@ -1770,7 +2243,7 @@ void Collection::checkExclusive(TransactionContext& txn) {
 	if (isExclusiveUpdate()) {  
 		return;
 	}
-	setExclusiveStatus(IS_EXCLUSIVE);
+	setExclusiveStatus(NO_ROW_TRANSACTION);
 
 	StackAllocAutoPtr<BtreeMap> mvccMap(
 		txn.getDefaultAllocator(), getMvccMap(txn));
@@ -1778,31 +2251,65 @@ void Collection::checkExclusive(TransactionContext& txn) {
 		return;
 	}
 
-	Value value;
 	util::XArray<std::pair<TransactionId, MvccRowImage> > idList(
 		txn.getDefaultAllocator());
 	util::XArray<std::pair<TransactionId, MvccRowImage> >::iterator itr;
 	mvccMap.get()->getAll<TransactionId, MvccRowImage>(
 		txn, MAX_RESULT_SIZE, idList);
 	for (itr = idList.begin(); itr != idList.end(); itr++) {
-		if (itr->second.type_ == MVCC_SELECT) {
-			continue;
-		}
-		else if (itr->second.type_ == MVCC_CREATE) {
-			if (getExclusiveStatus() == IS_EXCLUSIVE &&
-				txn.getId() != itr->first) {  
-				setExclusiveStatus(IS_NOT_EXCLUSIVE_CREATE_EXIST);
+		switch (itr->second.type_) {
+		case MVCC_SELECT:
+			{
+				if (isNoRowTransaction()) {
+					setExclusiveStatus(EXCLUSIVE);
+				}
 			}
-		}
-		else {
-			if (txn.getId() !=
-				itr->first) {  
-				setExclusiveStatus(IS_NOT_EXCLUSIVE);
-				break;
+		case MVCC_INDEX:
+		case MVCC_CONTAINER:
+			break;
+		case MVCC_CREATE:
+			{
+				if (isExclusive() && txn.getId() != itr->first) {
+					setExclusiveStatus(NOT_EXCLUSIVE_CREATE_EXIST);
+				}
+				else if (isNoRowTransaction()) {
+					setExclusiveStatus(EXCLUSIVE);
+				} 
 			}
+			break;
+		case MVCC_UPDATE:
+		case MVCC_DELETE:
+			{
+				if (isNoRowTransaction()) {
+					setExclusiveStatus(EXCLUSIVE);
+				} 
+				if (txn.getId() != itr->first) {
+					setExclusiveStatus(NOT_EXCLUSIVE);
+					break;
+				}
+			}
+			break;
+		default:
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
+			break;
 		}
 	}
 }
+
+bool Collection::getIndexData(TransactionContext &txn, ColumnId columnId,
+	MapType mapType, bool withUncommitted, IndexData &indexData) const {
+	bool isExist = indexSchema_->getIndexData(
+		txn, columnId, mapType, UNDEF_CONTAINER_POS, withUncommitted, indexData);
+	return isExist;
+}
+
+void Collection::getIndexList(
+		TransactionContext &txn, bool withUncommitted, 
+		util::XArray<IndexData> &list) const
+{
+	indexSchema_->getIndexList(txn, UNDEF_CONTAINER_POS, withUncommitted, list);
+}
+
 
 void Collection::insertRowIdMap(
 	TransactionContext& txn, BtreeMap* map, const void* constKey, OId oId) {
@@ -1815,23 +2322,20 @@ void Collection::insertRowIdMap(
 
 void Collection::insertMvccMap(TransactionContext& txn, BtreeMap* map,
 	TransactionId tId, MvccRowImage& mvccImage) {
+	bool isCaseSensitive = true;
 	int32_t status =
-		map->insert<TransactionId, MvccRowImage>(txn, tId, mvccImage);
+		map->insert<TransactionId, MvccRowImage>(txn, tId, mvccImage, isCaseSensitive);
 	if ((status & BtreeMap::ROOT_UPDATE) != 0) {
 		setDirty();
 		baseContainerImage_->mvccMapOId_ = map->getBaseOId();
 	}
 }
 
-void Collection::insertValueMap(TransactionContext& txn, BaseIndex* map,
-	const void* constKey, OId oId, ColumnId columnId, MapType mapType) {
-	int32_t status = map->insert(txn, constKey, oId);
-	if (mapType == MAP_TYPE_BTREE && (status & BtreeMap::ROOT_UPDATE) != 0) {
-		IndexData indexData;
-		indexData.columnId_ = columnId;
-		indexData.mapType_ = mapType;
-		indexData.oId_ = map->getBaseOId();
-		updateIndexData(txn, indexData);
+void Collection::insertValueMap(TransactionContext& txn, ValueMap &valueMap,
+	const void* constKey, OId oId, bool isNullVal) {
+	int32_t status = valueMap.putValueMap(txn, isNullVal)->insert(txn, constKey, oId);
+	if ((status & BtreeMap::ROOT_UPDATE) != 0) {
+		valueMap.updateIndexData(txn);
 	}
 }
 
@@ -1846,24 +2350,20 @@ void Collection::updateRowIdMap(TransactionContext& txn, BtreeMap* map,
 
 void Collection::updateMvccMap(TransactionContext& txn, BtreeMap* map,
 	TransactionId tId, MvccRowImage& oldMvccImage, MvccRowImage& newMvccImage) {
+	bool isCaseSensitive = true;
 	int32_t status = map->update<TransactionId, MvccRowImage>(
-		txn, tId, oldMvccImage, newMvccImage);
+		txn, tId, oldMvccImage, newMvccImage, isCaseSensitive);
 	if ((status & BtreeMap::ROOT_UPDATE) != 0) {
 		setDirty();
 		baseContainerImage_->mvccMapOId_ = map->getBaseOId();
 	}
 }
 
-void Collection::updateValueMap(TransactionContext& txn, BaseIndex* map,
-	const void* constKey, OId oldOId, OId newOId, ColumnId columnId,
-	MapType mapType) {
-	int32_t status = map->update(txn, constKey, oldOId, newOId);
-	if (mapType == MAP_TYPE_BTREE && (status & BtreeMap::ROOT_UPDATE) != 0) {
-		IndexData indexData;
-		indexData.columnId_ = columnId;
-		indexData.mapType_ = mapType;
-		indexData.oId_ = map->getBaseOId();
-		updateIndexData(txn, indexData);
+void Collection::updateValueMap(TransactionContext& txn, ValueMap &valueMap,
+	const void* constKey, OId oldOId, OId newOId, bool isNullVal) {
+	int32_t status = valueMap.putValueMap(txn, isNullVal)->update(txn, constKey, oldOId, newOId);
+	if ((status & BtreeMap::ROOT_UPDATE) != 0) {
+		valueMap.updateIndexData(txn);
 	}
 }
 
@@ -1878,51 +2378,66 @@ void Collection::removeRowIdMap(
 
 void Collection::removeMvccMap(TransactionContext& txn, BtreeMap* map,
 	TransactionId tId, MvccRowImage& mvccImage) {
+	bool isCaseSensitive = true;
 	int32_t status =
-		map->remove<TransactionId, MvccRowImage>(txn, tId, mvccImage);
+		map->remove<TransactionId, MvccRowImage>(txn, tId, mvccImage, isCaseSensitive);
 	if ((status & BtreeMap::ROOT_UPDATE) != 0) {
 		setDirty();
 		baseContainerImage_->mvccMapOId_ = map->getBaseOId();
 	}
 }
 
-void Collection::removeValueMap(TransactionContext& txn, BaseIndex* map,
-	const void* constKey, OId oId, ColumnId columnId, MapType mapType) {
-	int32_t status = map->remove(txn, constKey, oId);
-	if (mapType == MAP_TYPE_BTREE && (status & BtreeMap::ROOT_UPDATE) != 0) {
-		IndexData indexData;
-		indexData.columnId_ = columnId;
-		indexData.mapType_ = mapType;
-		indexData.oId_ = map->getBaseOId();
-		updateIndexData(txn, indexData);
+void Collection::removeValueMap(TransactionContext& txn, ValueMap &valueMap,
+	const void* constKey, OId oId, bool isNullVal) {
+	int32_t status = valueMap.putValueMap(txn, isNullVal)->remove(txn, constKey, oId);
+	if ((status & BtreeMap::ROOT_UPDATE) != 0) {
+		valueMap.updateIndexData(txn);
 	}
 }
 
-void Collection::updateIndexData(TransactionContext& txn, IndexData indexData) {
+void Collection::updateIndexData(TransactionContext& txn, const IndexData &indexData) {
 	indexSchema_->updateIndexData(txn, indexData, UNDEF_CONTAINER_POS);
 }
 
-uint16_t Collection::calcRowArrayNum(uint16_t baseRowNum) {
-	uint32_t pointArrayObjectSize = static_cast<uint32_t>(
-		RowArray::getHeaderSize() + rowImageSize_ * baseRowNum);
-	Size_t estimateAllocateSize =
-		getObjectManager()->estimateAllocateSize(pointArrayObjectSize);
-	if (estimateAllocateSize > getObjectManager()->getHalfOfMaxObjectSize()) {
-		uint32_t oneRowObjectSize = static_cast<uint32_t>(
-			RowArray::getHeaderSize() + rowImageSize_ * 1);
-		Size_t estimateOneRowAllocateSize =
-			getObjectManager()->estimateAllocateSize(oneRowObjectSize);
-		if (estimateOneRowAllocateSize >
-			getObjectManager()->getHalfOfMaxObjectSize()) {
-			estimateAllocateSize = getObjectManager()->getMaxObjectSize();
-		}
-		else {
-			estimateAllocateSize = getObjectManager()->getHalfOfMaxObjectSize();
-		}
-	}
-	return (estimateAllocateSize - RowArray::getHeaderSize()) / rowImageSize_;
+
+
+util::String Collection::getBibInfo(TransactionContext &txn, const char* dbName) {
+	return getBibInfoImpl(txn, dbName, 0, false);
 }
 
+void Collection::getActiveTxnList(
+	TransactionContext &txn, util::Set<TransactionId> &txnList) {
+	getActiveTxnListImpl(txn, txnList);
+}
+
+void Collection::getErasableList(TransactionContext &txn, Timestamp erasableTimeUpperLimit, util::XArray<ArchiveInfo> &list) {
+	Timestamp erasableTimeLowerLimit = getDataStore()->getLatestBatchFreeTime(txn);
+	if (erasableTimeLowerLimit < dataStore_->getConfig().getErasableExpiredTime()) {
+		erasableTimeLowerLimit = dataStore_->getConfig().getErasableExpiredTime();
+	}
+	ExpireType type = getExpireType();
+	if (type == TABLE_EXPIRE && baseContainerImage_->rowIdMapOId_ != UNDEF_OID
+		&& baseContainerImage_->mvccMapOId_ != UNDEF_OID) {
+		ArchiveInfo info;
+		info.rowIdMapOId_ = baseContainerImage_->rowIdMapOId_;
+		info.mvccMapOId_ = baseContainerImage_->mvccMapOId_;
+		info.start_ = getContainerExpirationStartTime();
+		info.end_ = getContainerExpirationEndTime();
+		info.expired_ = getContainerExpirationTime();
+		info.erasable_ = DataStore::convertChunkKey2Timestamp(getRowAllcateStrategy().chunkKey_);
+		if (erasableTimeLowerLimit >= info.erasable_ || info.erasable_ > erasableTimeUpperLimit) {
+			return;
+		}
+		list.push_back(info);
+	}
+}
+
+ExpireType Collection::getExpireType() const {
+	if (getContainerExpirationDutation() != INT64_MAX) {
+		return TABLE_EXPIRE;
+	}
+	return NO_EXPIRE;
+}
 
 /*!
 	@brief Validates Rows and Indexes

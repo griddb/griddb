@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2012 TOSHIBA CORPORATION.
+   Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -20,7 +20,6 @@ import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
-import java.sql.Blob;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -45,8 +44,8 @@ import com.toshiba.mwcloud.gs.ContainerType;
 import com.toshiba.mwcloud.gs.GSException;
 import com.toshiba.mwcloud.gs.GSType;
 import com.toshiba.mwcloud.gs.GridStore;
+import com.toshiba.mwcloud.gs.IndexInfo;
 import com.toshiba.mwcloud.gs.IndexType;
-import com.toshiba.mwcloud.gs.PartitionController;
 import com.toshiba.mwcloud.gs.Query;
 import com.toshiba.mwcloud.gs.Row;
 import com.toshiba.mwcloud.gs.RowKeyPredicate;
@@ -55,20 +54,31 @@ import com.toshiba.mwcloud.gs.TimeSeriesProperties;
 import com.toshiba.mwcloud.gs.TimeUnit;
 import com.toshiba.mwcloud.gs.TriggerInfo;
 import com.toshiba.mwcloud.gs.common.BasicBuffer;
-import com.toshiba.mwcloud.gs.common.BlobImpl;
+import com.toshiba.mwcloud.gs.common.BasicBuffer.BufferUtils;
+import com.toshiba.mwcloud.gs.common.ContainerKeyConverter;
+import com.toshiba.mwcloud.gs.common.ContainerKeyConverter.ContainerKey;
+import com.toshiba.mwcloud.gs.common.ContainerKeyPredicate;
+import com.toshiba.mwcloud.gs.common.ContainerProperties;
+import com.toshiba.mwcloud.gs.common.ContainerProperties.ContainerIdInfo;
+import com.toshiba.mwcloud.gs.common.ContainerProperties.ContainerVisibility;
+import com.toshiba.mwcloud.gs.common.ContainerProperties.MetaContainerType;
+import com.toshiba.mwcloud.gs.common.ContainerProperties.MetaNamingType;
+import com.toshiba.mwcloud.gs.common.Extensibles;
+import com.toshiba.mwcloud.gs.common.Extensibles.MultiOperationContext;
+import com.toshiba.mwcloud.gs.common.Extensibles.MultiTargetConsumer;
+import com.toshiba.mwcloud.gs.common.Extensibles.StatementHandler;
 import com.toshiba.mwcloud.gs.common.GSConnectionException;
 import com.toshiba.mwcloud.gs.common.GSErrorCode;
 import com.toshiba.mwcloud.gs.common.GSStatementException;
 import com.toshiba.mwcloud.gs.common.LoggingUtils;
 import com.toshiba.mwcloud.gs.common.LoggingUtils.BaseGridStoreLogger;
 import com.toshiba.mwcloud.gs.common.RowMapper;
-import com.toshiba.mwcloud.gs.common.RowMapper.BlobFactory;
 import com.toshiba.mwcloud.gs.common.RowMapper.Cursor;
 import com.toshiba.mwcloud.gs.common.Statement;
+import com.toshiba.mwcloud.gs.common.Statement.GeneralStatement;
 import com.toshiba.mwcloud.gs.experimental.ContainerAttribute;
-import com.toshiba.mwcloud.gs.experimental.ContainerCondition;
 import com.toshiba.mwcloud.gs.experimental.DatabaseInfo;
-import com.toshiba.mwcloud.gs.experimental.ExtendedContainerInfo;
+import com.toshiba.mwcloud.gs.experimental.Experimentals;
 import com.toshiba.mwcloud.gs.experimental.PrivilegeInfo;
 import com.toshiba.mwcloud.gs.experimental.UserInfo;
 import com.toshiba.mwcloud.gs.subnet.GridStoreChannel.ContainerCache;
@@ -78,43 +88,47 @@ import com.toshiba.mwcloud.gs.subnet.GridStoreChannel.ContextReference;
 import com.toshiba.mwcloud.gs.subnet.GridStoreChannel.LocatedSchema;
 import com.toshiba.mwcloud.gs.subnet.GridStoreChannel.RemoteReference;
 import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequest;
+import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequestSource;
 import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequestType;
+import com.toshiba.mwcloud.gs.subnet.SubnetCollection.MetaCollection;
 import com.toshiba.mwcloud.gs.subnet.SubnetContainer.SessionMode;
 import com.toshiba.mwcloud.gs.subnet.SubnetContainer.TransactionMode;
 
-public class SubnetGridStore implements GridStore {
+public class SubnetGridStore implements GridStore, Extensibles.AsStore,
+Experimentals.AsStore, Experimentals.StoreProvider {
 
 	private static final boolean ENABLE_COMPRESSION_WINDOW_SIZE = true;
 
-	private static boolean OLD_TIME_SERIES_PRORERTIES = false;
+	private static boolean OLD_TIME_SERIES_PROPERTIES = false;
 
-	private static final BlobFactory BLOB_FACTORY = new BlobFactory() {
-
-		@Override
-		public Blob createBlob(byte[] data) throws GSException {
-			final BlobImpl blob = new BlobImpl(null);
-			blob.setDataDirect(data);
-			return blob;
-		}
-
-	};
+	
+	static final boolean WORKAROUND_WRONG_API_TEST = false;
 
 	private static final BaseGridStoreLogger LOGGER =
 			LoggingUtils.getLogger("Transaction");
 
+	private static final String ERROR_PARAM_CONTAINER = "container";
+
 	private static boolean pathKeyOperationEnabled = false;
 
-	static final String SYSTEM_USER_CONTAINER_NAME = "gs#users@0";
-
-	private static final byte DEFAULT_DBUSER_PROPERTY = (byte)0;
+	private static final int SYSTEM_USER_PARTITION_ID = 0;
 
 	private static final String DEFAULT_PRIVILEGE = "ALL";
 
-	private static final int USER_INFO_COUNT_LIMIT = 128;	
+	private static final int MAX_PASSWORD_BYTES_LENGTH = 64;
 
-	private static final int DATABASE_INFO_COUNT_LIMIT = 128;	
+	private static final IndexType[] INDEX_TYPE_CONSTANTS = IndexType.values();
 
-	private static final int USER_PASSWORD_LENGTH_LIMIT = 64;
+	private static final byte INDEX_TYPE_DEFAULT_VALUE = -1;
+
+	private static final RowMapper.Config DEFAULT_MAPPER_CONFIG =
+			new RowMapper.Config(false, true, true);
+
+	private static final RowMapper.Config COMPATIBLE_MAPPER_CONFIG_14 =
+			new RowMapper.Config(false, true, false);
+
+	private static final RowMapper.Config COMPATIBLE_MAPPER_CONFIG_13 =
+			new RowMapper.Config(false, false, false);
 
 	private final GridStoreChannel channel;
 
@@ -163,23 +177,38 @@ public class SubnetGridStore implements GridStore {
 		return context;
 	}
 
+	@Override
+	public void executeStatement(
+			GeneralStatement statement, int partitionIndex,
+			StatementHandler handler) throws GSException {
+		final BasicBuffer req = context.getRequestBuffer();
+		final BasicBuffer resp = context.getResponseBuffer();
+
+		handler.makeRequest(req);
+		channel.executeStatement(
+				context, statement, partitionIndex, 0, req, resp,
+				contextMonitor);
+		handler.acceptResponse(resp);
+	}
+
 	private void executeStatement(
 			Statement statement, int partitionId,
-			BasicBuffer req, BasicBuffer resp, String containerName)
+			BasicBuffer req, BasicBuffer resp, ContainerKey key)
 			throws GSException {
 
-		beginComplexedStatement(statement, partitionId, containerName);
+		beginComplexedStatement(statement, partitionId, key);
 		channel.executeStatement(
-				context, statement, partitionId, 0, req, resp,
+				context, statement.generalize(), partitionId, 0, req, resp,
 				contextMonitor);
 		endComplexedStatement();
 	}
 
 	private void beginComplexedStatement(
-			Statement statement, int partitionId, String containerName) {
+			Statement statement, int partitionId, ContainerKey key) {
 		if (contextMonitor != null) {
-			contextMonitor.setContainerName(containerName);
-			contextMonitor.startStatement(statement, 0, partitionId, null);
+			contextMonitor.setContainerKey(key);
+			contextMonitor.startStatement(
+					statement.generalize(), 0, partitionId, null);
 		}
 	}
 
@@ -191,13 +220,13 @@ public class SubnetGridStore implements GridStore {
 
 	public static abstract class NamedContainerMap<C extends Container<?, ?>> {
 
-		private final Map<String, List<WeakReference<C>>> base =
-				new HashMap<String, List<WeakReference<C>>>();
+		private final Map<ContainerKey, List<WeakReference<C>>> base =
+				new HashMap<ContainerKey, List<WeakReference<C>>>();
 
 		public synchronized C get(
-				String normalizedName, Class<?> rowType) throws GSException {
+				ContainerKey key, Class<?> rowType) throws GSException {
 			final List<WeakReference<C>> list =
-					base.get(RowMapper.normalizeExtendedSymbol(normalizedName, true));
+					base.get(key.toCaseSensitive(false));
 			if (list != null) {
 				do {
 					for (WeakReference<C> containerRef : list) {
@@ -217,17 +246,19 @@ public class SubnetGridStore implements GridStore {
 			return null;
 		}
 
-		public synchronized void add(String normalizedName, C container) {
-			List<WeakReference<C>> list = base.get(normalizedName);
+		public synchronized void add(
+				ContainerKey normalizedKey, C container) {
+			List<WeakReference<C>> list = base.get(normalizedKey);
 			if (list == null) {
 				list = new LinkedList<WeakReference<C>>();
-				base.put(normalizedName, list);
+				base.put(normalizedKey, list);
 			}
 			list.add(new WeakReference<C>(container));
 		}
 
-		public synchronized void remove(String normalizedName, C container) {
-			final List<WeakReference<C>> list = base.get(normalizedName);
+		public synchronized void remove(
+				ContainerKey normalizedKey, C container) {
+			final List<WeakReference<C>> list = base.get(normalizedKey);
 			if (list == null) {
 				return;
 			}
@@ -241,7 +272,7 @@ public class SubnetGridStore implements GridStore {
 			}
 
 			if (list.isEmpty()) {
-				base.remove(normalizedName);
+				base.remove(normalizedKey);
 			}
 		}
 
@@ -249,7 +280,7 @@ public class SubnetGridStore implements GridStore {
 	}
 
 	private SubnetContainer<?, ?> resolveContainer(
-			String containerName, Class<?> rowType) throws GSException {
+			ContainerKey containerKey, Class<?> rowType) throws GSException {
 		if (containerMap == null) {
 			throw new GSException(
 					GSErrorCode.UNSUPPORTED_OPERATION,
@@ -257,12 +288,12 @@ public class SubnetGridStore implements GridStore {
 		}
 
 		final SubnetContainer<?, ?> container =
-				containerMap.get(containerName, rowType);
+				containerMap.get(containerKey, rowType);
 		if (container == null) {
 			throw new GSException(
 					GSErrorCode.CONTAINER_NOT_OPENED,
 					"Related container not opened " +
-					"(name=" + containerName + ", rowType=" +
+					"(name=" + containerKey + ", rowType=" +
 							(rowType == null ? "" : rowType.getName()) + ")");
 		}
 
@@ -297,7 +328,7 @@ public class SubnetGridStore implements GridStore {
 			return;
 		}
 
-		containerMap.add(container.getNormalizedContainerName(), container);
+		containerMap.add(container.getNormalizedContainerKey(), container);
 	}
 
 	void removeReference(SubnetContainer<?, ?> container) {
@@ -305,14 +336,15 @@ public class SubnetGridStore implements GridStore {
 			return;
 		}
 
-		containerMap.remove(container.getNormalizedContainerName(), container);
+		containerMap.remove(container.getNormalizedContainerKey(), container);
 	}
 
 	@Override
+	@Deprecated
 	public boolean put(String pathKey, Object rowObject) throws GSException {
 		final String[] keyElements = splitPathKey(pathKey);
-		final SubnetContainer<?, ?> container =
-				resolveContainer(keyElements[0], rowObject.getClass());
+		final SubnetContainer<?, ?> container = resolveContainer(
+				parseContainerKey(keyElements[0]), rowObject.getClass());
 		try {
 			final RowMapper mapper = container.getRowMapper();
 			final Object key = mapper.resolveKey(keyElements[1]);
@@ -333,11 +365,13 @@ public class SubnetGridStore implements GridStore {
 	}
 
 	@Override
+	@Deprecated
 	public Object get(String pathKey) throws GSException {
 		return getByPathKey(pathKey, null);
 	}
 
 	@Override
+	@Deprecated
 	public <R> R get(String pathKey, Class<R> rowType) throws GSException {
 		return rowType.cast(getByPathKey(pathKey, rowType));
 	}
@@ -346,8 +380,8 @@ public class SubnetGridStore implements GridStore {
 			String pathKey, Class<?> rowType) throws GSException {
 		final String[] keyElements = splitPathKey(pathKey);
 		final SubnetContainer<Object, ?> container =
-				disguiseTypedContainer(
-						resolveContainer(keyElements[0], rowType));
+				disguiseTypedContainer(resolveContainer(
+						parseContainerKey(keyElements[0]), rowType));
 		try {
 			final RowMapper mapper = container.getRowMapper();
 			final Object key = mapper.resolveKey(keyElements[1]);
@@ -359,11 +393,12 @@ public class SubnetGridStore implements GridStore {
 	}
 
 	@Override
+	@Deprecated
 	public boolean remove(String pathKey) throws GSException {
 		final String[] keyElements = splitPathKey(pathKey);
 		final SubnetContainer<Object, ?> container =
-				disguiseTypedContainer(
-						resolveContainer(keyElements[0], null));
+				disguiseTypedContainer(resolveContainer(
+						parseContainerKey(keyElements[0]), null));
 		try {
 			final RowMapper mapper = container.getRowMapper();
 			final Object key = mapper.resolveKey(keyElements[1]);
@@ -385,126 +420,260 @@ public class SubnetGridStore implements GridStore {
 		return components;
 	}
 
-	private static void tryPutDatabaseOptionalRequest(
-			BasicBuffer req, Context context) {
-		NodeConnection.tryPutEmptyOptionalRequest(req);
+	@Override
+	public long getDatabaseId() throws GSException {
+		return channel.getDatabaseId(context);
 	}
 
-	public static void tryPutSystemOptionalRequest(
-			BasicBuffer req, Context context, boolean systemMode) {
-		if (!systemMode) {
+	@Override
+	public ContainerKeyConverter getContainerKeyConverter(
+			boolean internalMode, boolean forModification) throws GSException {
+		return context.getKeyConverter(internalMode, forModification);
+	}
+
+	private ContainerKey parseContainerKey(String name) throws GSException {
+		return parseContainerKey(name, false, false);
+	}
+
+	private ContainerKey parseContainerKey(
+			String name, boolean internalMode, boolean forModification)
+			throws GSException {
+		final boolean caseSensitive = false;
+		return getContainerKeyConverter(
+				internalMode, forModification).parse(name, caseSensitive);
+	}
+
+	private void putContainerKey(
+			BasicBuffer req, ContainerKey key,
+			ContainerKeyConverter keyConverter) throws GSException {
+		final long databaseId = channel.getDatabaseId(context);
+		keyConverter.put(key, databaseId, req);
+	}
+
+	static void tryPutSystemOptionalRequest(
+			BasicBuffer req, Context context, boolean internalMode,
+			boolean forCreationDDL, Integer containerAttribute) {
+		tryPutSystemOptionalRequest(
+				req, context, internalMode, forCreationDDL, containerAttribute,
+				null);
+	}
+
+	static void tryPutSystemOptionalRequest(
+			BasicBuffer req, Context context, boolean internalMode,
+			boolean forCreationDDL, Integer containerAttribute,
+			OptionalRequestSource source) {
+		final boolean clientIdRequired =
+				forCreationDDL && SubnetGridStore.isClientIdEnabled();
+
+		if (!internalMode && !clientIdRequired && containerAttribute == null &&
+				(source == null || !source.hasOptions())) {
 			NodeConnection.tryPutEmptyOptionalRequest(req);
 			return;
 		}
 
 		final OptionalRequest optionalRequest = context.getOptionalRequest();
-		optionalRequest.put(OptionalRequestType.SYSTEM_MODE, systemMode);
+		if (internalMode) {
+			optionalRequest.put(OptionalRequestType.SYSTEM_MODE, internalMode);
+		}
+		if (containerAttribute != null) {
+			optionalRequest.put(
+					OptionalRequestType.CONTAINER_ATTRIBUTE,
+					containerAttribute);
+		}
+		if (clientIdRequired) {
+			optionalRequest.put(
+					OptionalRequestType.CLIENT_ID, context.generateClientId());
+		}
+		if (source != null) {
+			source.putOptions(optionalRequest);
+		}
 		optionalRequest.format(req);
 	}
 
-	
-	
-	
-	
-	
-	public static int getContainerAttributeFlag(ContainerAttribute attribute) throws GSException {
-		switch(attribute) {
-		case BASE:
-			return 0x00000000;
-		case BASE_SYSTEM:
-			return 0x00000001;
-		case SINGLE:
-			return 0x00000010;
-		case SINGLE_SYSTEM:
-			return 0x00000011;
-		case SINGLE_SEMI_PERMANENT_SYSTEM:
-			return 0x00000015;
-		case LARGE:
-			return 0x00000020;
-		case SUB:
-			return 0x00000030;
-		default:
-			throw new InternalError();
-		}
-	}
-
-	public static ContainerAttribute getContainerAttribute(int flag) throws GSException {
-		for (ContainerAttribute elem : ContainerAttribute.values()) {
-			if (getContainerAttributeFlag(elem) == flag) {
-				return elem;
-			}
-		}
-		return null;
-	}
-
-	private static void tryPutAttributeOptionalRequest(
-			BasicBuffer req, Context context, boolean systemMode,
-			ContainerInfo containerInfo) throws GSException {
-		final ContainerAttribute attribute;
-		if (containerInfo instanceof ExtendedContainerInfo) {
-			attribute = ((ExtendedContainerInfo) containerInfo).getAttribute();
-		}
-		else {
-			attribute = null;
-		}
-
-		if (!systemMode && attribute == null) {
+	private static void tryPutDatabaseOptionalRequest(
+			BasicBuffer req, Context context, OptionalRequestSource source) {
+		if (source == null || !source.hasOptions()) {
 			NodeConnection.tryPutEmptyOptionalRequest(req);
 			return;
 		}
 
 		final OptionalRequest optionalRequest = context.getOptionalRequest();
-		if (systemMode) {
-			optionalRequest.put(OptionalRequestType.SYSTEM_MODE, systemMode);
-		}
-		if (attribute != null) {
-			optionalRequest.put(
-					OptionalRequestType.CONTAINER_ATTRIBUTE, getContainerAttributeFlag(attribute));
-		}
+		source.putOptions(optionalRequest);
 		optionalRequest.format(req);
 	}
 
 	@Override
 	public ContainerInfo getContainerInfo(String name) throws GSException {
-		return getExtendedContainerInfo(name, false);
+		return ContainerProperties.findInfo(getContainerProperties(
+				parseContainerKey(name), null, null, false));
 	}
 
-	public ExtendedContainerInfo getExtendedContainerInfo(
-			String name, boolean systemMode) throws GSException {
-		return getExtendedContainerInfo(
-				name, EnumSet.allOf(ContainerPropertyType.class), null,
-				systemMode);
+	@Override
+	public ContainerProperties getContainerProperties(
+			ContainerKey key, ContainerProperties.KeySet propKeySet,
+			Integer attribute, boolean internalMode) throws GSException {
+		return getAllContainerProperties(
+				Collections.singletonList(key),
+				propKeySet, attribute, internalMode).get(0);
 	}
 
-	private ExtendedContainerInfo getExtendedContainerInfo(
-			String name, EnumSet<ContainerPropertyType> typeSet,
-			ContainerIdInfo[] containerIdInfoResult, boolean systemMode)
-			throws GSException {
+	@Override
+	public List<ContainerProperties> getAllContainerProperties(
+			List<ContainerKey> keyList, ContainerProperties.KeySet propKeySet,
+			Integer attribute, boolean internalMode) throws GSException {
+		final int keyCount = keyList.size();
+
+		final Map<Integer, List<Integer>> indexMap =
+				new HashMap<Integer, List<Integer>>();
+		for (int i = 0; i < keyCount; i++) {
+			final int partitionId = channel.resolvePartitionId(
+					context, keyList.get(i),
+					(WORKAROUND_WRONG_API_TEST ? true : internalMode));
+			List<Integer> list = indexMap.get(partitionId);
+			if (list == null) {
+				list = new ArrayList<Integer>();
+				indexMap.put(partitionId, list);
+			}
+			list.add(i);
+		}
+
+		final List<ContainerProperties> propsList =
+				new ArrayList<ContainerProperties>();
+		for (int i = 0; i < keyCount; i++) {
+			propsList.add(null);
+		}
+
+		for (Map.Entry<Integer, List<Integer>> entry : indexMap.entrySet()) {
+			final int partitionId = entry.getKey();
+			final List<Integer> indexList = entry.getValue();
+			final int indexCount = indexList.size();
+
+			final List<ContainerKey> subKeyList =
+					new ArrayList<ContainerKey>();
+			for (int i = 0; i < indexCount; i++) {
+				final int index = indexList.get(i);
+				subKeyList.add(keyList.get(index));
+			}
+
+			final List<ContainerProperties> subPropsList =
+					getAllContainerProperties(
+							partitionId, subKeyList, propKeySet, attribute,
+							internalMode);
+
+			for (int i = 0; i < indexCount; i++) {
+				final int index = indexList.get(i);
+				propsList.set(index, subPropsList.get(i));
+			}
+		}
+
+		return propsList;
+	}
+
+	private List<ContainerProperties> getAllContainerProperties(
+			int partitionId, List<ContainerKey> keyList,
+			ContainerProperties.KeySet propKeySet,
+			Integer attribute, boolean internalMode) throws GSException {
+		if (keyList.isEmpty()) {
+			throw new IllegalArgumentException();
+		}
+
+		if (propKeySet == null) {
+			propKeySet = ContainerPropertyKeysConstants.resolveDefault();
+		}
+
 		final BasicBuffer req = context.getRequestBuffer();
 		final BasicBuffer resp = context.getResponseBuffer();
 
 		channel.setupRequestBuffer(req);
 
-		tryPutSystemOptionalRequest(req, context, systemMode);
+		tryPutSystemOptionalRequest(
+				req, context, internalMode, false, attribute,
+				getContainerPropertyResuestSource());
 
-		final int partitionId = channel.resolvePartitionId(context, name);
-		req.putString(name);
+		final ContainerKeyConverter keyConverter =
+				getContainerKeyConverter(internalMode, false);
 
-		req.putInt(typeSet.size());
+		final Integer[] rawPropKeys = propKeySet.getRawKeys();
 
-		if (NodeConnection.getProtocolVersion() < 2 ||
-				GridStoreChannel.v1ProtocolCompatible_1_1_103x) {
-			typeSet = typeSet.clone();
-			typeSet.remove(ContainerPropertyType.TRIGGER);
+		final int keyCount = keyList.size();
+		for (int i = 0; i < keyCount; i++) {
+			putContainerKey(req, keyList.get(i), keyConverter);
+
+			if (i == 0) {
+				req.putInt(rawPropKeys.length);
+				for (int propKey : rawPropKeys) {
+					req.put((byte) propKey);
+				}
+
+				if (keyCount > 1) {
+					req.putInt(keyCount);
+				}
+			}
 		}
 
-		for (ContainerPropertyType type : typeSet) {
-			req.putByteEnum(type);
-		}
-
+		final ContainerKey singleKey = (keyCount > 1 ? null : keyList.get(0));
 		executeStatement(
 				Statement.GET_CONTAINER_PROPERTIES,
-				partitionId, req, resp, name);
+				partitionId, req, resp, singleKey);
+
+		final List<ContainerProperties> propsList =
+				new ArrayList<ContainerProperties>();
+		for (int i = 0; i < keyCount; i++) {
+			propsList.add(importContainerPropertiesResult(
+					resp, attribute, internalMode, keyConverter, rawPropKeys));
+
+			if (i == 0 && keyCount > 1) {
+				final int remaining = resp.base().getInt();
+				if (remaining != keyCount - 1) {
+					throw new GSConnectionException(
+							GSErrorCode.MESSAGE_CORRUPTED,
+							"Protocol error by illegal result count " +
+							"of properties");
+				}
+			}
+		}
+
+		return propsList;
+	}
+
+	private OptionalRequestSource getContainerPropertyResuestSource() {
+		final EnumSet<ContainerVisibility> visibilities =
+				context.getConfig().containerVisibility;
+		final MetaNamingType metaNamingType =
+				context.getConfig().metaNamingType;
+		if (visibilities.isEmpty() && metaNamingType == null) {
+			return null;
+		}
+
+		return new OptionalRequestSource() {
+			@Override
+			public void putOptions(OptionalRequest optionalRequest) {
+				if (!visibilities.isEmpty()) {
+					int flags = 0;
+					for (ContainerVisibility elem : visibilities) {
+						flags |= 1 << elem.ordinal();
+					}
+					optionalRequest.put(
+							OptionalRequestType.CONTAINER_VISIBILITY, flags);
+				}
+				if (metaNamingType != null) {
+					optionalRequest.put(
+							OptionalRequestType.META_NAMING_TYPE,
+							(byte) metaNamingType.ordinal());
+				}
+			}
+
+			@Override
+			public boolean hasOptions() {
+				return true;
+			}
+		};
+	}
+
+	private static ContainerProperties importContainerPropertiesResult(
+			BasicBuffer resp, Integer attribute, boolean internalMode,
+			ContainerKeyConverter keyConverter, Integer[] rawPropKeys)
+			throws GSException {
 
 		final boolean found = resp.getBoolean();
 		if (!found) {
@@ -512,69 +681,66 @@ public class SubnetGridStore implements GridStore {
 		}
 
 		final int propertyCount = resp.base().getInt();
-		if (propertyCount != typeSet.size()) {
+		if (propertyCount != rawPropKeys.length) {
 			throw new GSConnectionException(GSErrorCode.MESSAGE_CORRUPTED,
 					"Protocol error by illegal property count (" +
-					"expected=" + typeSet.size() +
+					"expected=" + rawPropKeys.length +
 					", actual=" + propertyCount + ")");
 		}
 
+		final ContainerInfo containerInfo = new ContainerInfo();
+
 		ContainerIdInfo containerIdInfo = null;
-
-		final Boolean[] keyAssigned = new Boolean[1];
-		final String[] dataAffinity = new String[1];
-		final ContainerType[] containerType = new ContainerType[1];
-		final List<String> columnNameList = new ArrayList<String>();
-		final List<GSType> columnTypeList = new ArrayList<GSType>();
-		TimeSeriesProperties tsProps = null;
-		ContainerAttribute containerAttribute = null;
-
-		final List<Set<IndexType>> indexTypesList =
-				new ArrayList<Set<IndexType>>();
-		final List<URL> eventNotificationList =
-				new ArrayList<URL>();
-		final List<TriggerInfo> triggerList =
-				new ArrayList<TriggerInfo>();
+		List<ColumnInfo> columnInfoList = null;
+		List<IndexInfo> indexInfoList = null;
+		Integer respAttribute = null;
+		Map<Integer, byte[]> rawEntries = null;
 
 		for (int i = 0; i < propertyCount; i++) {
-			final ContainerPropertyType propertyType =
-					resp.getByteEnum(ContainerPropertyType.class);
+			final byte rawPropertyKey = resp.base().get();
 
-			final int propertySize = resp.base().getInt();
-			if (propertySize < 0 ||
-					propertySize > resp.base().remaining()) {
-				throw new GSConnectionException(
-						GSErrorCode.MESSAGE_CORRUPTED,
-						"Protocol error by illegal property size");
+			final int propertySize = BufferUtils.getIntSize(resp.base());
+
+			final ContainerProperties.Key propertyKey =
+					ContainerProperties.tryResolveKey(rawPropertyKey);
+			if (propertyKey == null) {
+				final byte[] rawProperty = new byte[propertySize];
+				resp.base().get(rawProperty);
+
+				if (rawEntries == null) {
+					rawEntries = new HashMap<Integer, byte[]>();
+				}
+				rawEntries.put((int) rawPropertyKey, rawProperty);
+				continue;
 			}
 
 			final int curEnd = resp.base().position() + propertySize;
 
-			switch (propertyType) {
+			switch (propertyKey) {
 			case ID:
-				containerIdInfo = importIdProperty(resp);
-				if (containerIdInfoResult != null) {
-					containerIdInfoResult[0] = containerIdInfo;
-				}
+				containerIdInfo = importIdProperty(resp, keyConverter, curEnd);
 				break;
 			case SCHEMA:
-				importSchemaProperty(resp, columnNameList, columnTypeList,
-						containerType, keyAssigned);
-				tsProps = importContainerProperties(
-						resp, columnNameList, dataAffinity, containerType[0]);
+				columnInfoList = new ArrayList<ColumnInfo>();
+				importSchemaProperty(resp, containerInfo, columnInfoList);
+				importContainerProperties(resp, containerInfo, columnInfoList);
 				break;
 			case INDEX:
-				importIndexProperty(resp, indexTypesList, columnNameList.size());
+				importIndexProperty(resp, columnInfoList);
 				break;
 			case EVENT_NOTIFICATION:
 				
-				importEventNotificationProperty(resp, eventNotificationList);
+				importEventNotificationProperty(resp, new ArrayList<URL>());
 				break;
 			case TRIGGER:
-				importTriggerProperty(resp, columnNameList, triggerList);
+				importTriggerProperty(resp, containerInfo, columnInfoList);
 				break;
 			case ATTRIBUTE:
-				containerAttribute = getContainerAttribute(resp.base().getInt());
+				respAttribute = importAttributeProperty(resp, attribute);
+				break;
+			case INDEX_DETAIL:
+				indexInfoList = new ArrayList<IndexInfo>();
+				importIndexDetailProperty(resp, indexInfoList);
 				break;
 			default:
 				throw new GSConnectionException(
@@ -589,65 +755,78 @@ public class SubnetGridStore implements GridStore {
 			}
 		}
 
-		final List<ColumnInfo> columnInfoList = new ArrayList<ColumnInfo>();
-		for (int i = 0; i < columnNameList.size(); i++) {
-			columnInfoList.add(new ColumnInfo(
-					columnNameList.get(i),
-					columnTypeList.get(i),
-					indexTypesList.get(i)));
+		if (containerIdInfo != null) {
+			containerInfo.setName(containerIdInfo.remoteKey.toString());
 		}
 
-		final ExtendedContainerInfo containerInfo = new ExtendedContainerInfo();
-		containerInfo.setName(containerIdInfo.remoteName);
-		containerInfo.setType(containerType[0]);
-		containerInfo.setColumnInfoList(columnInfoList);
-		containerInfo.setRowKeyAssigned(keyAssigned[0]);
-		containerInfo.setAttribute(containerAttribute);
-		containerInfo.setTimeSeriesProperties(tsProps);
-		containerInfo.setTriggerInfoList(triggerList);
-		containerInfo.setDataAffinity(dataAffinity[0]);
+		if (columnInfoList != null) {
+			containerInfo.setColumnInfoList(columnInfoList);
+		}
 
-		return containerInfo;
+		if (indexInfoList != null) {
+			assignIndexColumnNames(
+					containerInfo, indexInfoList, respAttribute, internalMode);
+			containerInfo.setIndexInfoList(indexInfoList);
+		}
+
+		final ContainerProperties containerProps = new ContainerProperties();
+		containerProps.setInfo(containerInfo);
+		containerProps.setIdInfo(containerIdInfo);
+		containerProps.setAttribute(respAttribute);
+		containerProps.setRawEntries(rawEntries);
+
+		return containerProps;
 	}
 
 	@Override
 	public <K, R> SubnetCollection<K, R> putCollection(
-			String name, Class<R> rowType)
-			throws GSException {
+			String name, Class<R> rowType) throws GSException {
 		return putCollection(name, rowType, false);
 	}
 
-	public static String normalizeFullContainerName(String name) throws GSException {
-		return RowMapper.normalizeExtendedSymbol(name, true);
+	private static ContainerKey normalizeFullContainerKey(
+			ContainerKey key, boolean internalMode) throws GSException {
+		return key.toCaseSensitive(false);
 	}
 
 	private <K, R> SubnetContainer<K, R> findContainerByCache(
-			ContainerCache cache, String name, Class<R> rowType,
-			ContainerType containerType) throws GSException {
-		final String normalizedName = normalizeFullContainerName(name);
+			ContainerCache cache, ContainerKey key, Class<R> rowType,
+			ContainerType containerType, boolean internalMode)
+			throws GSException {
+		final ContainerKey normalizedKey =
+				normalizeFullContainerKey(key, internalMode);
 		final LocatedSchema schema =
-				cache.findSchema(normalizedName, rowType, containerType);
+				cache.findSchema(normalizedKey, rowType, containerType);
 
 		if (schema == null) {
 			return null;
 		}
 
-		final int partitionId =
-				channel.resolvePartitionId(context, normalizedName);
+		final int partitionId = channel.resolvePartitionId(
+				context, normalizedKey, internalMode);
 
 		if (containerType == ContainerType.COLLECTION) {
 			return new SubnetCollection<K, R>(
 					this, channel, context, rowType,
 					schema.getMapper(), schema.getVersionId(),
-					partitionId, schema.getContainerId(), normalizedName,
-					schema.getContainerName());
+					partitionId, schema.getContainerId(), normalizedKey,
+					schema.getContainerKey());
 		}
 		else {
 			return disguiseTypedContainer(new SubnetTimeSeries<R>(
 					this, channel, context, rowType,
 					schema.getMapper(), schema.getVersionId(),
-					partitionId, schema.getContainerId(), normalizedName,
-					schema.getContainerName()));
+					partitionId, schema.getContainerId(), normalizedKey,
+					schema.getContainerKey()));
+		}
+	}
+
+	@Override
+	public void removeContainerCache(
+			ContainerKey key, boolean internalMode) throws GSException {
+		final ContainerCache cache = context.getContainerCache();
+		if (cache != null) {
+			cache.removeSchema(key.toCaseSensitive(false));
 		}
 	}
 
@@ -662,6 +841,48 @@ public class SubnetGridStore implements GridStore {
 	public static boolean isTSDivisionAndAffinityEnabled() {
 		return NodeConnection.getProtocolVersion() >= 3 &&
 				!GridStoreChannel.v15TSPropsCompatible;
+	}
+
+	public static boolean isClientIdEnabled() {
+		return NodeConnection.getProtocolVersion() >= 13;
+	}
+
+	public static boolean isIndexDetailEnabled() {
+		return NodeConnection.getProtocolVersion() >= 13;
+	}
+
+	public static boolean isContainerAttributeUnified() {
+		return NodeConnection.getProtocolVersion() >= 13;
+	}
+
+	public static boolean isAttributeVerifiable() {
+		return NodeConnection.getProtocolVersion() >= 13;
+	}
+
+	public static boolean isNullableColumnAllowed(int protocolVersion) {
+		return protocolVersion >= 13;
+	}
+
+	public static boolean isQueryOptionsExtensible() {
+		return NodeConnection.getProtocolVersion() >= 14 &&
+				!GridStoreChannel.v40QueryCompatible;
+	}
+
+	public static RowMapper.Config getRowMapperConfig() {
+		return getRowMapperConfig(NodeConnection.getProtocolVersion());
+	}
+
+	public static RowMapper.Config getRowMapperConfig(int protocolVersion) {
+		if (protocolVersion >= 14 &&
+				!GridStoreChannel.v40SchemaCompatible) {
+			return DEFAULT_MAPPER_CONFIG;
+		}
+		else if (isNullableColumnAllowed(protocolVersion)) {
+			return COMPATIBLE_MAPPER_CONFIG_14;
+		}
+		else {
+			return COMPATIBLE_MAPPER_CONFIG_13;
+		}
 	}
 
 	private static Statement getContainerStatement(
@@ -711,14 +932,18 @@ public class SubnetGridStore implements GridStore {
 	}
 
 	private <K, R> SubnetContainer<K, R> putContainer(
-			String name, ContainerType containerType, Class<R> rowType,
-			ContainerInfo info, boolean modifiable)
+			ContainerKey key, ContainerType containerType, Class<R> rowType,
+			ContainerProperties props, boolean modifiable, boolean internalMode)
 			throws GSException {
+		final ContainerInfo info = findContainerInfo(props);
+
+		final ContainerKeyConverter keyConverter =
+				getContainerKeyConverter(internalMode, true);
 
 		final ContainerCache cache = context.getContainerCache();
 		if (cache != null && !modifiable && info == null) {
 			final Container<K, R> cachedContainer = findContainerByCache(
-					cache, name, rowType, containerType);
+					cache, key, rowType, containerType, internalMode);
 			if (cachedContainer != null) {
 				return (SubnetContainer<K, R>) cachedContainer;
 			}
@@ -728,18 +953,20 @@ public class SubnetGridStore implements GridStore {
 		final BasicBuffer resp = context.getResponseBuffer();
 
 		channel.setupRequestBuffer(req);
-		tryPutSystemOptionalRequest(req, context, false);
 
-		final boolean forTimeSeries =
-				(containerType == ContainerType.TIME_SERIES);
+		final RowMapper orgMapper = RowMapper.getInstance(
+				rowType, containerType, getRowMapperConfig());
+		final OptionalRequestSource propsOption =
+				containerPropertiesToOption(props, orgMapper);
+		tryPutSystemOptionalRequest(
+				req, context, internalMode, true, null, propsOption);
 
-		final RowMapper orgMapper =
-				RowMapper.getInstance(rowType, forTimeSeries);
-		final int partitionId = channel.resolvePartitionId(context, name);
-		req.putString(name);
+		final int partitionId =
+				channel.resolvePartitionId(context, key, internalMode);
+		putContainerKey(req, key, keyConverter);
 		tryPutContainerType(req, containerType);
 		req.putBoolean(modifiable);
-		orgMapper.exportSchema(req);
+		orgMapper.exportSchema(req, getRowMapperConfig());
 
 		if (info != null && (info.getColumnCount() > 0 ||
 				info.isRowKeyAssigned() ||
@@ -751,36 +978,39 @@ public class SubnetGridStore implements GridStore {
 					"columnOrderIgnorable=" +
 							info.isColumnOrderIgnorable() + ")");
 		}
-		exportContainerProperties(req, containerType, info, orgMapper, name);
+		exportContainerProperties(
+				req, containerType, props, orgMapper, key, propsOption);
 
 		final Statement statement = getContainerStatement(
 				Statement.PUT_CONTAINER, containerType);
 
-		executeStatement(statement, partitionId, req, resp, name);
+		executeStatement(statement, partitionId, req, resp, key);
 
 		final int schemaVerId = resp.base().getInt();
 		final long containerId = resp.base().getLong();
 
-		final String[] acceptedNames = acceptRemoteContainerName(resp, name);
-		final String normalizedName = acceptedNames[0];
-		final String remoteName = acceptedNames[1];
+		final ContainerKey[] acceptedKeys =
+				acceptRemoteContainerKey(resp, keyConverter, key);
+		final ContainerKey normalizedKey = acceptedKeys[0];
+		final ContainerKey remoteKey = acceptedKeys[1];
 
-		final RowMapper mapper = orgMapper.reorderBySchema(resp, true);
+		final RowMapper mapper =
+				orgMapper.reorderBySchema(resp, getRowMapperConfig(), true);
 
 		if (cache != null) {
-			cache.cacheSchema(normalizedName, new LocatedSchema(
-					mapper, containerId, schemaVerId, remoteName));
+			cache.cacheSchema(normalizedKey, new LocatedSchema(
+					mapper, containerId, schemaVerId, remoteKey));
 		}
 
-		if (forTimeSeries) {
+		if (mapper.isForTimeSeries()) {
 			return disguiseTypedContainer(new SubnetTimeSeries<R>(
 					this, channel, context, rowType, mapper, schemaVerId,
-					partitionId, containerId, normalizedName, remoteName));
+					partitionId, containerId, normalizedKey, remoteKey));
 		}
 		else {
 			return new SubnetCollection<K, R>(
 					this, channel, context, rowType, mapper, schemaVerId,
-					partitionId, containerId, normalizedName, remoteName);
+					partitionId, containerId, normalizedKey, remoteKey);
 		}
 	}
 
@@ -789,7 +1019,9 @@ public class SubnetGridStore implements GridStore {
 			String name, Class<R> rowType,
 			boolean modifiable) throws GSException {
 		final SubnetContainer<K, R> container = putContainer(
-				name, ContainerType.COLLECTION, rowType, null, modifiable);
+				parseContainerKey(name, false, true),
+				ContainerType.COLLECTION,
+				rowType, null, modifiable, false);
 		return (SubnetCollection<K, R>) container;
 	}
 
@@ -798,7 +1030,9 @@ public class SubnetGridStore implements GridStore {
 			String name, Class<R> rowType)
 			throws GSException {
 		final SubnetContainer<Date, R> container = putContainer(
-				name, ContainerType.TIME_SERIES, rowType, null, false);
+				parseContainerKey(name, false, true),
+				ContainerType.TIME_SERIES,
+				rowType, null, false, false);
 		return (SubnetTimeSeries<R>) container;
 	}
 
@@ -810,49 +1044,103 @@ public class SubnetGridStore implements GridStore {
 		info.setTimeSeriesProperties(props);
 
 		final SubnetContainer<Date, R> container = putContainer(
-				name, ContainerType.TIME_SERIES, rowType, info, modifiable);
+				parseContainerKey(name, false, true),
+				ContainerType.TIME_SERIES,
+				rowType, new ContainerProperties(info), modifiable, false);
 		return (SubnetTimeSeries<R>) container;
 	}
 
-	private String[] acceptRemoteContainerName(
-			BasicBuffer in, String localName) throws GSException {
-		final String remoteName = in.getString();
-		return filterRemoteContainerName(remoteName, localName);
+	private ContainerKey[] acceptRemoteContainerKey(
+			BasicBuffer in, ContainerKeyConverter keyConverter,
+			ContainerKey localKey) throws GSException {
+		final ContainerKey remoteKey = keyConverter.get(in, false, true);
+		return filterRemoteContainerKey(remoteKey, localKey);
 	}
 
-	private String[] filterRemoteContainerName(
-			String remoteName, String localName) throws GSException {
+	private ContainerKey[] filterRemoteContainerKey(
+			ContainerKey remoteKey, ContainerKey localKey) throws GSException {
 
-		final String normalizedLocalName =
-				RowMapper.normalizeExtendedSymbol(localName, true);
-		if (!remoteName.equals(localName) &&
-				!RowMapper.normalizeExtendedSymbol(
-						remoteName, true).equals(normalizedLocalName)) {
+		final ContainerKey normalizedLocalKey =
+				localKey.toCaseSensitive(false);
+		if (!remoteKey.equals(localKey) &&
+				!remoteKey.toCaseSensitive(false).equals(normalizedLocalKey)) {
 			throw new GSConnectionException(
 					GSErrorCode.MESSAGE_CORRUPTED,
 					"Protocol error by inconsistent container name (" +
-					"localName=" + localName +
-					", remoteName=" + remoteName + ")");
+					"localName=" + localKey +
+					", remoteName=" + remoteKey + ")");
 		}
 
-		return new String[] {
+		return new ContainerKey[] {
 				(!pathKeyOperationEnabled &&
 						context.getContainerCache() == null ?
-						null : normalizedLocalName),
-				(contextMonitor == null ? null : remoteName)
+						null : normalizedLocalKey),
+				(contextMonitor == null ? null : remoteKey)
 		};
 	}
 
+	private static OptionalRequestSource containerPropertiesToOption(
+				ContainerProperties props, RowMapper mapper)
+				throws GSException {
+		if (mapper.isDefaultValueSpecified()) {
+			throw new GSException(
+					GSErrorCode.UNSUPPORTED_OPERATION,
+					"Default value can not specified for container " +
+					"definition in the current version");
+		}
+
+		if (props == null ||
+				(props.getReservedValue() == null &&
+				props.getSchemaOptions() == null)) {
+			return null;
+		}
+
+		final OptionalRequest request = new OptionalRequest();
+		request.putFeatureVersion(1);
+		return request;
+	}
+
 	private void exportContainerProperties(
+			BasicBuffer out, ContainerType type, ContainerProperties props,
+			RowMapper mapper, ContainerKey containerKey,
+			OptionalRequestSource source) throws GSException {
+		exportBasicContainerProperties(
+				out, type, findContainerInfo(props), mapper, containerKey);
+		if (source == null) {
+			return;
+		}
+
+		final Integer attribute = findContainerAttribute(props);
+		out.putInt((attribute == null ?
+				ContainerAttribute.SINGLE.flag() : attribute));
+
+		final Long reservedValue = props.getReservedValue();
+		out.putLong((reservedValue == null ? 0 : reservedValue));
+
+		final Map<Integer, byte[]> schemaOptions = props.getSchemaOptions();
+		if (schemaOptions != null) {
+			for (Map.Entry<Integer, byte[]> entry : schemaOptions.entrySet()) {
+				final byte[] value = entry.getValue();
+				out.putInt(entry.getKey());
+				out.putInt(value.length);
+				out.base().put(value);
+			}
+		}
+		out.putInt(-1);
+	}
+
+	private void exportBasicContainerProperties(
 			BasicBuffer out, ContainerType type, ContainerInfo info,
-			RowMapper mapper, String containerName) throws GSException {
+			RowMapper mapper, ContainerKey containerKey) throws GSException {
 
 		if (isTSDivisionAndAffinityEnabled() &&
 				!GridStoreChannel.v20AffinityCompatible) {
 			final String dataAffinity =
 					(info == null ? null : info.getDataAffinity());
 			out.putString(dataAffinity == null ?
-					context.getDataAffinityPattern().match(containerName, "") :
+					context.getDataAffinityPattern().match(
+							containerKey, "",
+							getContainerKeyConverter(true, false)) :
 					dataAffinity);
 		}
 
@@ -868,7 +1156,7 @@ public class SubnetGridStore implements GridStore {
 			return;
 		}
 
-		if (OLD_TIME_SERIES_PRORERTIES) {
+		if (OLD_TIME_SERIES_PROPERTIES) {
 			out.putInt(-1);		
 			out.putByteEnum(TimeUnit.DAY);		
 			out.putInt(-1);		
@@ -935,26 +1223,24 @@ public class SubnetGridStore implements GridStore {
 		}
 	}
 
-	private static TimeSeriesProperties importContainerProperties(
-			BasicBuffer in, List<String> columnNameList,
-			String[] dataAffinity, ContainerType containerType)
-			throws GSException {
+	private static void importContainerProperties(
+			BasicBuffer in, ContainerInfo containerInfo,
+			List<ColumnInfo> columnInfoList) throws GSException {
 
 		if (isTSDivisionAndAffinityEnabled() &&
 				!GridStoreChannel.v20AffinityCompatible) {
-			dataAffinity[0] = in.getString();
-			if (dataAffinity[0].isEmpty()) {
-				dataAffinity[0] = null;
-			}
+			final String dataAffinity = in.getString();
+			containerInfo.setDataAffinity(
+					dataAffinity.isEmpty() ? null : dataAffinity);
 		}
 
-		if (containerType != ContainerType.TIME_SERIES) {
-			return null;
+		if (containerInfo.getType() != ContainerType.TIME_SERIES) {
+			return;
 		}
 
 		final boolean exists = in.getBoolean();
 		if (!exists) {
-			return null;
+			return;
 		}
 
 		final TimeSeriesProperties props = new TimeSeriesProperties();
@@ -962,7 +1248,7 @@ public class SubnetGridStore implements GridStore {
 			final int rowExpirationTime = in.base().getInt();
 			final TimeUnit timeUnit = in.getByteEnum(TimeUnit.class);
 
-			if (rowExpirationTime >= 0) {
+			if (rowExpirationTime > 0) {
 				props.setRowExpiration(rowExpirationTime, timeUnit);
 			}
 		}
@@ -982,8 +1268,7 @@ public class SubnetGridStore implements GridStore {
 			final int compressionWindowSize = in.base().getInt();
 			final TimeUnit timeUnit = in.getByteEnum(TimeUnit.class);
 
-
-			if (compressionWindowSize >= 0) {
+			if (compressionWindowSize > 0) {
 				props.setCompressionWindowSize(compressionWindowSize, timeUnit);
 			}
 		}
@@ -992,7 +1277,7 @@ public class SubnetGridStore implements GridStore {
 				in.getByteEnum(CompressionMethod.class);
 		props.setCompressionMethod(compressionMethod);
 
-		final int entryCount = in.base().getInt();
+		final int entryCount = BufferUtils.getNonNegativeInt(in.base());
 
 		if (entryCount > 0 && compressionMethod != CompressionMethod.HI) {
 			throw new GSException(GSErrorCode.MESSAGE_CORRUPTED,
@@ -1009,13 +1294,13 @@ public class SubnetGridStore implements GridStore {
 
 		for (int i = 0; i < entryCount; i++) {
 			final int columnId = in.base().getInt();
-			if (columnId < 0 || columnId >= columnNameList.size()) {
+			if (columnId < 0 || columnId >= columnInfoList.size()) {
 				throw new GSException(GSErrorCode.MESSAGE_CORRUPTED,
 						"Protocol error by illegal column ID (" +
 						"columnId=" + columnId + ", " +
-						"columnCount=" + columnNameList.size() + ")");
+						"columnCount=" + columnInfoList.size() + ")");
 			}
-			final String columnName = columnNameList.get(columnId);
+			final String columnName = columnInfoList.get(columnId).getName();
 
 			final boolean relative = in.getBoolean();
 			if (relative) {
@@ -1029,16 +1314,17 @@ public class SubnetGridStore implements GridStore {
 			}
 		}
 
-		return props;
+		containerInfo.setTimeSeriesProperties(props);
 	}
 
-	private <K, R> SubnetContainer<K, R> getContainer(
-			String name, ContainerType containerType, Class<R> rowType,
-			boolean systemMode) throws GSException {
+	@Override
+	public <K, R> SubnetContainer<K, R> getContainer(
+			ContainerKey key, ContainerType containerType, Class<R> rowType,
+			Integer attribute, boolean internalMode) throws GSException {
 		final ContainerCache cache = context.getContainerCache();
-		if (cache != null && !systemMode) {
+		if (cache != null && !internalMode) {
 			final Container<K, R> cachedContainer = findContainerByCache(
-					cache, name, rowType, containerType);
+					cache, key, rowType, containerType, internalMode);
 			if (cachedContainer != null) {
 				return (SubnetContainer<K, R>) cachedContainer;
 			}
@@ -1048,21 +1334,22 @@ public class SubnetGridStore implements GridStore {
 		final BasicBuffer resp = context.getResponseBuffer();
 
 		channel.setupRequestBuffer(req);
-		tryPutSystemOptionalRequest(req, context, systemMode);
+		tryPutSystemOptionalRequest(
+				req, context, internalMode, false, attribute);
 
-		final boolean forTimeSeries =
-				(containerType == ContainerType.TIME_SERIES);
-
-		final RowMapper orgMapper =
-				RowMapper.getInstance(rowType, forTimeSeries);
-		final int partitionId = channel.resolvePartitionId(context, name);
-		req.putString(name);
+		final RowMapper orgMapper = RowMapper.getInstance(
+				rowType, containerType, getRowMapperConfig());
+		final int partitionId =
+				channel.resolvePartitionId(context, key, internalMode);
+		final ContainerKeyConverter keyConverter =
+				getContainerKeyConverter(internalMode, false);
+		putContainerKey(req, key, keyConverter);
 		tryPutContainerType(req, containerType);
 
 		final Statement statement = getContainerStatement(
 				Statement.GET_CONTAINER, containerType);
 
-		executeStatement(statement, partitionId, req, resp, name);
+		executeStatement(statement, partitionId, req, resp, key);
 
 		final boolean found = resp.getBoolean();
 		if (!found) {
@@ -1072,53 +1359,61 @@ public class SubnetGridStore implements GridStore {
 		final int schemaVerId = resp.base().getInt();
 		final long containerId = resp.base().getLong();
 
-		final String[] acceptedNames = acceptRemoteContainerName(resp, name);
-		final String normalizedName = acceptedNames[0];
-		final String remoteName = acceptedNames[1];
+		final ContainerKey[] acceptedKeys =
+				acceptRemoteContainerKey(resp, keyConverter, key);
+		final ContainerKey normalizedKey = acceptedKeys[0];
+		final ContainerKey remoteKey = acceptedKeys[1];
 
-		final RowMapper mapper = orgMapper.reorderBySchema(resp, true);
+		final RowMapper mapper =
+				orgMapper.reorderBySchema(resp, getRowMapperConfig(), true);
 
-		if (cache != null && !systemMode) {
-			cache.cacheSchema(normalizedName, new LocatedSchema(
-					mapper, containerId, schemaVerId, remoteName));
+		if (cache != null && !internalMode) {
+			cache.cacheSchema(normalizedKey, new LocatedSchema(
+					mapper, containerId, schemaVerId, remoteKey));
 		}
 
-		if (forTimeSeries) {
+		if (mapper.isForTimeSeries()) {
 			return disguiseTypedContainer(new SubnetTimeSeries<R>(
 					this, channel, context, rowType, mapper, schemaVerId,
-					partitionId, containerId, normalizedName, remoteName));
+					partitionId, containerId, normalizedKey, remoteKey));
 		}
 		else {
 			return new SubnetCollection<K, R>(
 					this, channel, context, rowType, mapper, schemaVerId,
-					partitionId, containerId, normalizedName, remoteName);
+					partitionId, containerId, normalizedKey, remoteKey);
 		}
 	}
 
 	@Override
 	public <K, R> SubnetCollection<K, R> getCollection(
 			String name, Class<R> rowType) throws GSException {
-		final SubnetContainer<K, R> container =
-				getContainer(name, ContainerType.COLLECTION, rowType, false);
+		final SubnetContainer<K, R> container = getContainer(
+				parseContainerKey(name), ContainerType.COLLECTION,
+				rowType, null, false);
 		return (SubnetCollection<K, R>) container;
 	}
 
 	@Override
 	public <R> SubnetTimeSeries<R> getTimeSeries(
 			String name, Class<R> rowType) throws GSException {
-		final SubnetContainer<Date, R> container =
-				getContainer(name, ContainerType.TIME_SERIES, rowType, false);
+		final SubnetContainer<Date, R> container = getContainer(
+				parseContainerKey(name), ContainerType.TIME_SERIES,
+				rowType, null, false);
 		return (SubnetTimeSeries<R>) container;
 	}
 
 	@Override
 	public void dropCollection(String name) throws GSException {
-		dropContainer(name, ContainerType.COLLECTION, false);
+		dropContainer(
+				parseContainerKey(name, false, true),
+				ContainerType.COLLECTION, false);
 	}
 
 	@Override
 	public void dropTimeSeries(String name) throws GSException {
-		dropContainer(name, ContainerType.TIME_SERIES, false);
+		dropContainer(
+				parseContainerKey(name, false, true),
+				ContainerType.TIME_SERIES, false);
 	}
 
 	@Override
@@ -1158,102 +1453,111 @@ public class SubnetGridStore implements GridStore {
 
 	}
 
-	
+	private static class ContainerPropertyKeysConstants {
 
-	private enum ContainerPropertyType {
+		static final ContainerProperties.KeySet DEFAULT = create();
 
-		ID,
+		static final ContainerProperties.KeySet COMPATIBLE_TRIGGER = create(
+				ContainerProperties.Key.TRIGGER,
+				ContainerProperties.Key.INDEX_DETAIL);
 
-		SCHEMA,
+		static final ContainerProperties.KeySet COMPATIBLE_INDEX = create(
+				ContainerProperties.Key.INDEX_DETAIL);
 
-		INDEX,
+		static final ContainerProperties.KeySet FOR_OBJECT =
+				new ContainerProperties.KeySet(EnumSet.of(
+						ContainerProperties.Key.ID,
+						ContainerProperties.Key.SCHEMA,
+						ContainerProperties.Key.ATTRIBUTE));
 
-		EVENT_NOTIFICATION,
+		private static ContainerProperties.KeySet create(
+				ContainerProperties.Key ...exclusiveKeys) {
+			final EnumSet<ContainerProperties.Key> keySet =
+					EnumSet.allOf(ContainerProperties.Key.class);
+			for (ContainerProperties.Key key : exclusiveKeys) {
+				keySet.remove(key);
+			}
+			return new ContainerProperties.KeySet(keySet);
+		}
 
-		TRIGGER,
-
-		ATTRIBUTE,
-
-	}
-
-	private static class ContainerIdInfo {
-
-		final int versionId;
-
-		final long containerId;
-
-		final String remoteName;
-
-		public ContainerIdInfo(
-				int versionId, long containerId, String remoteName) {
-			this.versionId = versionId;
-			this.containerId = containerId;
-			this.remoteName = remoteName;
+		private static ContainerProperties.KeySet resolveDefault() {
+			if (isIndexDetailEnabled()) {
+				return DEFAULT;
+			}
+			else if (NodeConnection.getProtocolVersion() < 2 ||
+					GridStoreChannel.v1ProtocolCompatible_1_1_103x) {
+				return COMPATIBLE_TRIGGER;
+			}
+			else {
+				return COMPATIBLE_INDEX;
+			}
 		}
 
 	}
 
-	private static ContainerIdInfo importIdProperty(BasicBuffer in) throws GSException {
+	private static ContainerIdInfo importIdProperty(
+			BasicBuffer in, ContainerKeyConverter keyConverter, int endPos)
+			throws GSException {
 		final int versionId = in.base().getInt();
 		final long containerId = in.base().getLong();
-		final String remoteName = in.getString();
+		final ContainerKey remoteKey = keyConverter.get(in, false, true);
 
-		return new ContainerIdInfo(versionId, containerId, remoteName);
+		MetaContainerType metaContainerType = MetaContainerType.NONE;
+		long metaContainerId = -1;
+		MetaNamingType metaNamingType = null;
+		if (in.base().position() < endPos) {
+			metaContainerType = in.getByteEnum(MetaContainerType.class);
+
+			final int size =
+					BufferUtils.checkSize(in.base(), in.base().getInt());
+			final int orgLimit = BufferUtils.limitForward(in.base(), size);
+			metaContainerId = in.base().getLong();
+			metaNamingType = in.getByteEnum(MetaNamingType.class);
+			BufferUtils.restoreLimitExact(in.base(), orgLimit);
+		}
+
+		return new ContainerIdInfo(
+				versionId, containerId, remoteKey,
+				metaContainerType, metaContainerId, metaNamingType);
 	}
 
 	private static void importSchemaProperty(
-			BasicBuffer in, List<String> columnNameList,
-			List<GSType> columnTypeList,
-			ContainerType[] containerType, Boolean[] keyAssigned)
-			throws GSException {
-		columnNameList.clear();
-		columnTypeList.clear();
+			BasicBuffer in, ContainerInfo containerInfo,
+			List<ColumnInfo> columnInfoList) throws GSException {
+		columnInfoList.clear();
+		final RowMapper.Config config = getRowMapperConfig();
 
-		containerType[0] = in.getByteEnum(ContainerType.class);
+		containerInfo.setType(in.getByteEnum(ContainerType.class));
 
-		final int columnCount = in.base().getInt();
-		if (columnCount <= 0) {
-			throw new GSConnectionException(GSErrorCode.MESSAGE_CORRUPTED,
-					"Protocol error by non positive column count (" +
-					"columnCount=" + columnCount + ")");
-		}
-
-		final int keyIndex = in.base().getInt();
-		if (!(keyIndex == 0 || keyIndex == -1)) {
-			throw new GSConnectionException(GSErrorCode.MESSAGE_CORRUPTED,
-					"Protocol error by illegal row key index (" +
-					"keyIndex=" + keyIndex + ")");
-		}
-		keyAssigned[0] = (keyIndex >= 0);
+		final int columnCount = RowMapper.importColumnCount(in);
+		List<Integer> keyList =
+				RowMapper.importKeyListBegin(in, config, columnCount);
 
 		for (int i = 0; i < columnCount; i++) {
-			final String columnName = in.getString();
-			final GSType elementType = in.getByteEnum(GSType.class);
-			final boolean arrayUsed = in.getBoolean();
-
-			columnNameList.add(columnName);
-			columnTypeList.add(RowMapper.toFullType(elementType, arrayUsed));
+			columnInfoList.add(RowMapper.importColumnSchema(in, config));
 		}
+
+		keyList = RowMapper.importKeyListEnd(in, config, columnCount, keyList);
+		containerInfo.setRowKeyAssigned(!keyList.isEmpty());
 	}
 
 	private static void importIndexProperty(
-			BasicBuffer in, List<Set<IndexType>> indexTypesList,
-			int columnCount) throws GSException {
-		indexTypesList.clear();
+			BasicBuffer in, List<ColumnInfo> columnInfoList)
+			throws GSException {
+		final List<Set<IndexType>> indexTypesList =
+				new ArrayList<Set<IndexType>>();
+
+		final int columnCount =
+				(columnInfoList == null ? -1 : columnInfoList.size());
 		for (int i = 0; i < columnCount; i++) {
 			indexTypesList.add(Collections.<IndexType>emptySet());
 		}
 
-		final int entryCount = in.base().getInt();
-		if (entryCount < 0) {
-			throw new GSConnectionException(GSErrorCode.MESSAGE_CORRUPTED,
-					"Protocol error by negative entry count (" +
-					"entryCount=" + entryCount + ")");
-		}
-
+		final int entryCount = BufferUtils.getNonNegativeInt(in.base());
 		for (int i = 0; i < entryCount; i++) {
 			final int columnId = in.base().getInt();
-			if (columnId < 0 || columnId >= columnCount) {
+			if (columnId < 0 ||
+					(columnId >= columnCount && columnCount >= 0)) {
 				throw new GSException(GSErrorCode.MESSAGE_CORRUPTED,
 						"Protocol error by illegal column ID (" +
 						"entryCount=" + columnId + ", " +
@@ -1267,7 +1571,18 @@ public class SubnetGridStore implements GridStore {
 			}
 
 			final IndexType indexType = in.getByteEnum(IndexType.class);
+			if (indexType == IndexType.DEFAULT) {
+				throw new GSException(GSErrorCode.MESSAGE_CORRUPTED,
+						"Protocol error by illegal index type");
+			}
 			indexTypeSet.add(indexType);
+		}
+
+		for (int i = 0; i < columnCount; i++) {
+			final ColumnInfo srcInfo = columnInfoList.get(i);
+			columnInfoList.set(i, new ColumnInfo(
+					srcInfo.getName(), srcInfo.getType(),
+					srcInfo.getNullable(), indexTypesList.get(i)));
 		}
 	}
 
@@ -1297,15 +1612,18 @@ public class SubnetGridStore implements GridStore {
 	}
 
 	private static void importTriggerProperty(
-			BasicBuffer in, List<String> columnNameList,
-			List<TriggerInfo> triggerInfoList)
-			throws GSException {
-		triggerInfoList.clear();
+			BasicBuffer in, ContainerInfo containerInfo,
+			List<ColumnInfo> columnInfoList) throws GSException {
+		final List<TriggerInfo> triggerInfoList = new ArrayList<TriggerInfo>();
 
 		final int entryCount = in.base().getInt();
 		if (entryCount < 0) {
+			containerInfo.setTriggerInfoList(triggerInfoList);
 			return;
 		}
+
+		final int schemaColumnCount =
+				(columnInfoList == null ? -1 : columnInfoList.size());
 
 		for (int i = 0; i < entryCount; i++) {
 			final String name = in.getString();
@@ -1313,23 +1631,28 @@ public class SubnetGridStore implements GridStore {
 			final String uriString = in.getString();
 			final int eventTypeFlag = in.base().getInt();
 			final Set<TriggerInfo.EventType> eventSet = EnumSet.noneOf(TriggerInfo.EventType.class);
-			final Set<TriggerInfo.EventType> allEvantSet = EnumSet.allOf(TriggerInfo.EventType.class);
-			for (TriggerInfo.EventType e : allEvantSet) {
+			final Set<TriggerInfo.EventType> allEventSet = EnumSet.allOf(TriggerInfo.EventType.class);
+			for (TriggerInfo.EventType e : allEventSet) {
 				if ((eventTypeFlag & (1 << e.ordinal())) != 0) {
 					eventSet.add(e);
 				}
 			}
 			final Set<String> columnSet = new HashSet<String>();
 			final int columnCount = in.base().getInt();
-			for (int j=0; j<columnCount; j++) {
+			for (int j = 0; j < columnCount; j++) {
 				int columnId = in.base().getInt();
-				if (columnId < 0 || columnId >= columnNameList.size()) {
+				if (schemaColumnCount < 0) {
+					continue;
+				}
+				if (columnId < 0 || (columnId >= schemaColumnCount &&
+						schemaColumnCount >= 0)) {
 					throw new GSException(GSErrorCode.MESSAGE_CORRUPTED,
 							"Protocol error by illegal column ID (" +
 							"entryCount=" + columnId + ", " +
-							"columnCount=" + columnNameList.size() + ")");
+							"columnCount=" + schemaColumnCount + ")");
 				}
-				final String columnName = columnNameList.get(columnId);
+				final String columnName =
+						columnInfoList.get(columnId).getName();
 				columnSet.add(columnName);
 			}
 			in.getString();
@@ -1360,6 +1683,165 @@ public class SubnetGridStore implements GridStore {
 
 			triggerInfoList.add(info);
 		}
+		containerInfo.setTriggerInfoList(triggerInfoList);
+	}
+
+	private static int importAttributeProperty(
+			BasicBuffer in, Integer expectedAttribute) throws GSException {
+		final int attribute = in.base().getInt();
+		if (expectedAttribute != null && attribute != expectedAttribute) {
+			if (!isAttributeVerifiable()) {
+				throw new Error();
+			}
+			throw new GSConnectionException(
+					GSErrorCode.MESSAGE_CORRUPTED,
+					"Protocol error by unexpected container attribute (" +
+					"expected=" + expectedAttribute +
+					", actual=" + attribute + ")");
+		}
+
+		return attribute;
+	}
+
+	private static void importIndexDetailProperty(
+			BasicBuffer in, List<IndexInfo> indexInfoList) throws GSException {
+		indexInfoList.clear();
+
+		final int entryCount = BufferUtils.getIntSize(in.base());
+		for (int i = 0; i < entryCount; i++) {
+			final IndexInfo indexInfo = new IndexInfo();
+			importIndexInfo(in, indexInfo, false, false);
+			indexInfoList.add(indexInfo);
+		}
+	}
+
+	private static void assignIndexColumnNames(
+			ContainerInfo containerInfo, List<IndexInfo> indexInfoList,
+			Integer attribute, boolean internalMode) throws GSException {
+		if (internalMode && (attribute == null ||
+				(attribute != ContainerKeyPredicate.ATTRIBUTE_BASE &&
+				attribute != ContainerKeyPredicate.ATTRIBUTE_SINGLE))) {
+			return;
+		}
+
+		for (IndexInfo indexInfo : indexInfoList) {
+			final Integer column = indexInfo.getColumn();
+			if (column != null) {
+				final ColumnInfo columnInfo;
+				try {
+					columnInfo = containerInfo.getColumnInfo(column);
+				}
+				catch (IllegalArgumentException e) {
+					throw new GSConnectionException(
+							GSErrorCode.MESSAGE_CORRUPTED,
+							"Protocol error by illegal index column", e);
+				}
+				indexInfo.setColumnName(columnInfo.getName());
+
+				final IndexType type = indexInfo.getType();
+				final Set<IndexType> typeSet =
+						columnInfo.getIndexTypes();
+				if (typeSet != null && !typeSet.contains(type)) {
+					throw new GSConnectionException(
+							GSErrorCode.MESSAGE_CORRUPTED,
+							"Protocol error by inconsistent index type (" +
+							"type=" + type + ")");
+				}
+			}
+		}
+	}
+
+	public static void importIndexInfo(
+			BasicBuffer in, IndexInfo indexInfo, boolean withMatchOptions,
+			boolean defaultTypeAllowed) throws GSException {
+		final int infoSize = in.base().getInt();
+		final int orgLimit = BufferUtils.limitForward(in.base(), infoSize);
+
+		final String name = in.getString();
+		if (!name.isEmpty()) {
+			indexInfo.setName(name);
+		}
+
+		final int columnCount = BufferUtils.getNonNegativeInt(in.base());
+		for (int i = 0; i < columnCount; i++) {
+			final int column = in.base().getInt();
+			if (i == 0) {
+				indexInfo.setColumn(column);
+			}
+		}
+
+		final byte rawType = in.base().get();
+		final IndexType type;
+		if (rawType == INDEX_TYPE_DEFAULT_VALUE) {
+			type = IndexType.DEFAULT;
+		}
+		else {
+			try {
+				type = INDEX_TYPE_CONSTANTS[rawType & 0xff];
+			}
+			catch (IndexOutOfBoundsException e) {
+				throw new GSException(GSErrorCode.MESSAGE_CORRUPTED,
+						"Protocol error by illegal index type (reason=" +
+						e.getMessage() + ")", e);
+			}
+		}
+		if (type == IndexType.DEFAULT && !defaultTypeAllowed) {
+			throw new GSException(GSErrorCode.MESSAGE_CORRUPTED,
+					"Protocol error by illegal index type");
+		}
+		indexInfo.setType(type);
+
+		BufferUtils.restoreLimit(in.base(), orgLimit);
+
+		if (withMatchOptions) {
+			final boolean anyNameMatches = in.getBoolean();
+			final boolean anyTypeMatches = in.getBoolean();
+			if (anyNameMatches) {
+				indexInfo.setName(null);
+			}
+			if (anyTypeMatches) {
+				indexInfo.setType(null);
+			}
+		}
+	}
+
+	public static void exportIndexInfo(
+			BasicBuffer out, IndexInfo indexInfo, boolean withMatchOptions) {
+		final int headPos = out.base().position();
+		out.putInt(0);
+
+		final int startPos = out.base().position();
+
+		final String name = indexInfo.getName();
+		out.putString((name == null ? "" : name));
+
+		final Integer column = indexInfo.getColumn();
+		final int columnCount = (column == null ? 0 : 1);
+		out.putInt(columnCount);
+		if (columnCount > 0) {
+			out.putInt(column);
+		}
+
+		final IndexType type = indexInfo.getType();
+		if (type == null || type == IndexType.DEFAULT) {
+			out.put(INDEX_TYPE_DEFAULT_VALUE);
+		}
+		else {
+			out.putByteEnum(type);
+		}
+
+		final int endPos = out.base().position();
+
+		out.base().position(headPos);
+		out.putInt(endPos - startPos);
+		out.base().position(endPos);
+
+		if (withMatchOptions) {
+			final boolean anyNameMatches = (indexInfo.getName() == null);
+			final boolean anyTypeMatches = (indexInfo.getType() == null);
+			out.putBoolean(anyNameMatches);
+			out.putBoolean(anyTypeMatches);
+		}
 	}
 
 	@SuppressWarnings("unchecked")
@@ -1368,26 +1850,36 @@ public class SubnetGridStore implements GridStore {
 		return (SubnetContainer<K, R>) container;
 	}
 
-	private static String resolveContainerName(
-			String name, ContainerInfo info) throws GSException {
-		return validateName(name, info.getName());
+	private ContainerKey resolveContainerKey(
+			ContainerKey key, ContainerInfo info,
+			ContainerKeyConverter keyConverter) throws GSException {
+		final boolean caseSensitive = true;
+		final String anotherName = info.getName();
+
+		final ContainerKey specifiedKey = (key == null ?
+				null : key.toCaseSensitive(caseSensitive));
+		final ContainerKey anotherKey = (anotherName == null ?
+				null : keyConverter.parse(anotherName, caseSensitive));
+
+		return resolveName(
+				specifiedKey, anotherKey, "container name");
 	}
 
-	private static String validateName(
-			String name, String anotherName) throws GSException {
-		final String another = (anotherName == null ? null : anotherName);
+	private static <T> T resolveName(
+			T name, T anotherName, String objectName) throws GSException {
+		final T another = (anotherName == null ? null : anotherName);
 
 		if (name == null) {
 			if (another == null) {
 				throw new GSException(GSErrorCode.EMPTY_PARAMETER,
-						"Name not specified");
+						"Non-specified" + objectName);
 			}
 			return another;
 		}
 		else if (another != null) {
 			if (!name.equals(another)) {
 				throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
-						"Inconsistent name (" +
+						"Inconsistent " + objectName + " (" +
 						"specifiedName=" + name +
 						", nameOnInfo=" + another + ")");
 			}
@@ -1417,11 +1909,26 @@ public class SubnetGridStore implements GridStore {
 		return type;
 	}
 
-	private <K> Container<K, Row> getContainer(
-			String name, ContainerType expectedType, boolean systemMode)
-			throws GSException {
-		if (CONTEXT_CONTROLLER_NAME.equals(name)) {
-			final Collection<K, Row> container =
+	private static ContainerInfo findContainerInfo(ContainerProperties props) {
+		if (props == null) {
+			return null;
+		}
+		return props.getInfo();
+	}
+
+	private static Integer findContainerAttribute(ContainerProperties props) {
+		if (props == null) {
+			return null;
+		}
+		return props.getAttribute();
+	}
+
+	@Override
+	public <K> SubnetContainer<K, Row> getContainer(
+			ContainerKey key, ContainerType expectedType,
+			Integer attribute, boolean internalMode) throws GSException {
+		if (CONTEXT_CONTROLLER_KEY.equals(key)) {
+			final SubnetContainer<K, Row> container =
 					getContextControllerCollection(expectedType);
 			if (container != null) {
 				return container;
@@ -1429,91 +1936,105 @@ public class SubnetGridStore implements GridStore {
 		}
 
 		final ContainerCache cache = context.getContainerCache();
-		if (cache != null && !systemMode) {
-			final Container<K, Row> cachedContainer = findContainerByCache(
-					cache, name, Row.class, expectedType);
+		if (cache != null) {
+			final SubnetContainer<K, Row> cachedContainer =
+					findContainerByCache(
+							cache, key, Row.class, expectedType, internalMode);
 			if (cachedContainer != null) {
 				return cachedContainer;
 			}
 		}
 
-		final ContainerIdInfo[] idInfo = new ContainerIdInfo[1];
-		final ContainerInfo containerInfo = getExtendedContainerInfo(
-				name, EnumSet.allOf(ContainerPropertyType.class), idInfo,
-				systemMode);
-
-		if (containerInfo == null) {
+		final ContainerProperties containerProps = getContainerProperties(
+				key, ContainerPropertyKeysConstants.FOR_OBJECT,
+				attribute, internalMode);
+		if (containerProps == null) {
 			return null;
 		}
+
+		final ContainerInfo containerInfo = containerProps.getInfo();
+		final ContainerIdInfo idInfo = containerProps.getIdInfo();
 
 		final ContainerType resolvedType =
 				resolveContainerType(expectedType, containerInfo);
 
-		final int partitionId = channel.resolvePartitionId(context, name);
-		final RowMapper mapper =
-				RowMapper.getInstance(resolvedType, containerInfo);
+		final int partitionId =
+				channel.resolvePartitionId(context, key, internalMode);
+		final RowMapper mapper = RowMapper.getInstance(
+				resolvedType, containerInfo, getRowMapperConfig());
 
-		final String[] acceptedNames =
-				filterRemoteContainerName(containerInfo.getName(), name);
-		final String normalizedName = acceptedNames[0];
-		final String remoteName = acceptedNames[1];
+		final ContainerKey[] acceptedKeys =
+				filterRemoteContainerKey(idInfo.remoteKey, key);
+		final ContainerKey normalizedKey = acceptedKeys[0];
+		final ContainerKey remoteKey = acceptedKeys[1];
 
-		if (cache != null && !systemMode) {
-			cache.cacheSchema(normalizedName, new LocatedSchema(
-					mapper, idInfo[0].containerId, idInfo[0].versionId,
-					remoteName));
+		if (idInfo.metaContainerType != MetaContainerType.NONE) {
+			return disguiseTypedContainer(new MetaCollection<Object, Row>(
+					this, channel, context, Row.class, mapper,
+					idInfo.versionId, partitionId,
+					idInfo.metaContainerType,
+					idInfo.metaContainerId, idInfo.metaNamingType,
+					normalizedKey, idInfo.remoteKey));
 		}
 
-		if (containerInfo.getType() == ContainerType.TIME_SERIES) {
+		if (cache != null) {
+			cache.cacheSchema(normalizedKey, new LocatedSchema(
+					mapper, idInfo.containerId, idInfo.versionId,
+					remoteKey));
+		}
+
+		if (mapper.isForTimeSeries()) {
 			return disguiseTypedContainer(new SubnetTimeSeries<Row>(
 					this, channel, context, Row.class, mapper,
-					idInfo[0].versionId, partitionId, idInfo[0].containerId,
-					normalizedName, remoteName));
+					idInfo.versionId, partitionId, idInfo.containerId,
+					normalizedKey, remoteKey));
 		}
 		else {
 			return disguiseTypedContainer(new SubnetCollection<Object, Row>(
 					this, channel, context, Row.class, mapper,
-					idInfo[0].versionId, partitionId, idInfo[0].containerId,
-					normalizedName, remoteName));
+					idInfo.versionId, partitionId, idInfo.containerId,
+					normalizedKey, remoteKey));
 		}
 	}
 
 	public <K> Container<K, Row> getContainer(String name) throws GSException {
-		return getContainer(name, null, false);
-	}
-
-	public <K> Container<K, Row> getContainer(
-			String name, boolean systemMode) throws GSException {
-		return getContainer(name, null, systemMode);
+		return getContainer(parseContainerKey(name), null, null, false);
 	}
 
 	@Override
-	public <K> Collection<K, Row> getCollection(
-			String name) throws GSException {
-		final Container<K, Row> container =
-				getContainer(name, ContainerType.COLLECTION, false);
+	public <K> Collection<K, Row> getCollection(String name)
+			throws GSException {
+		final Container<K, Row> container = getContainer(
+				parseContainerKey(name), ContainerType.COLLECTION,
+				null, false);
 		return (Collection<K, Row>) container;
 	}
 
 	@Override
 	public TimeSeries<Row> getTimeSeries(String name) throws GSException {
-		final Container<Date, Row> container =
-				getContainer(name, ContainerType.TIME_SERIES, false);
+		final Container<Date, Row> container = getContainer(
+				parseContainerKey(name), ContainerType.TIME_SERIES,
+				null, false);
 		return (TimeSeries<Row>) container;
 	}
 
 	private <K> Container<K, Row> putContainer(
-			String name, ContainerType containerType,
-			ContainerInfo containerInfo,
-			boolean modifiable, boolean systemMode) throws GSException {
-		name = resolveContainerName(name, containerInfo);
+			ContainerKey key, ContainerType containerType,
+			ContainerProperties props, boolean modifiable,
+			boolean internalMode) throws GSException {
+		final ContainerInfo containerInfo = findContainerInfo(props);
+		final Integer containerAttribute = findContainerAttribute(props);
+
+		final ContainerKeyConverter keyConverter =
+				getContainerKeyConverter(internalMode, true);
+		key = resolveContainerKey(key, containerInfo, keyConverter);
 		containerType = resolveContainerType(containerType, containerInfo);
 
 		final ContainerCache cache = context.getContainerCache();
-		if (cache != null && !modifiable && !systemMode &&
+		if (cache != null && !modifiable && !internalMode &&
 				containerInfo.getTimeSeriesProperties() != null) {
 			final Container<K, Row> container = findContainerByCache(
-					cache, name, Row.class, containerType);
+					cache, key, Row.class, containerType, internalMode);
 			if (container != null) {
 				return container;
 			}
@@ -1523,152 +2044,405 @@ public class SubnetGridStore implements GridStore {
 		final BasicBuffer resp = context.getResponseBuffer();
 
 		channel.setupRequestBuffer(req);
-		tryPutAttributeOptionalRequest(req, context, systemMode, containerInfo);
 
-		final RowMapper orgMapper =
-				RowMapper.getInstance(containerType, containerInfo);
-		final int partitionId = channel.resolvePartitionId(context, name);
-		req.putString(name);
+		final RowMapper orgMapper = RowMapper.getInstance(
+				containerType, containerInfo, getRowMapperConfig());
+		final OptionalRequestSource propsOption =
+				containerPropertiesToOption(props, orgMapper);
+		tryPutSystemOptionalRequest(
+				req, context, internalMode, true, containerAttribute,
+				propsOption);
+
+		final int partitionId =
+				channel.resolvePartitionId(context, key, internalMode);
+		putContainerKey(req, key, keyConverter);
 		tryPutContainerType(req, containerType);
 		req.putBoolean(modifiable);
-		orgMapper.exportSchema(req);
+		orgMapper.exportSchema(req, getRowMapperConfig());
 
 		exportContainerProperties(
-				req, containerType, containerInfo, orgMapper, name);
+				req, containerType, props, orgMapper, key, propsOption);
 
 		final Statement statement = getContainerStatement(
 				Statement.PUT_CONTAINER, containerType);
 
-		executeStatement(statement, partitionId, req, resp, name);
+		executeStatement(statement, partitionId, req, resp, key);
 
 		final int schemaVerId = resp.base().getInt();
 		final long containerId = resp.base().getLong();
 
-		final String[] acceptedNames =
-				acceptRemoteContainerName(resp, name);
-		final String normalizedName = acceptedNames[0];
-		final String remoteName = acceptedNames[1];
+		final ContainerKey[] acceptedKeys =
+				acceptRemoteContainerKey(resp, keyConverter, key);
+		final ContainerKey normalizedKey = acceptedKeys[0];
+		final ContainerKey remoteKey = acceptedKeys[1];
 
+		final RowMapper.Config config = getRowMapperConfig();
 		final RowMapper mapper = orgMapper.reorderBySchema(
-				resp, containerInfo.isColumnOrderIgnorable());
+				resp, config, containerInfo.isColumnOrderIgnorable());
 
-		if (cache != null && !systemMode) {
-			cache.cacheSchema(normalizedName, new LocatedSchema(
-					mapper, containerId, schemaVerId, remoteName));
+		if (cache != null && !internalMode) {
+			cache.cacheSchema(normalizedKey, new LocatedSchema(
+					mapper, containerId, schemaVerId, remoteKey));
 		}
 
-		if (containerType == ContainerType.TIME_SERIES) {
+		if (mapper.isForTimeSeries()) {
 			return disguiseTypedContainer(new SubnetTimeSeries<Row>(
 					this, channel, context, Row.class, mapper, schemaVerId,
-					partitionId, containerId, normalizedName, remoteName));
+					partitionId, containerId, normalizedKey, remoteKey));
 		}
 		else {
 			return disguiseTypedContainer(new SubnetCollection<Object, Row>(
 					this, channel, context, Row.class, mapper, schemaVerId,
-					partitionId, containerId, normalizedName, remoteName));
+					partitionId, containerId, normalizedKey, remoteKey));
 		}
 	}
 
+	@Override
 	public <K> Container<K, Row> putContainer(
-			String name, ContainerInfo info, boolean modifiable,
-			boolean systemMode) throws GSException {
+			ContainerKey key, ContainerProperties props, boolean modifiable,
+			boolean internalMode) throws GSException {
 		return putContainer(
-				name, (ContainerType) null, info, modifiable, systemMode);
+				key, (ContainerType) null, props, modifiable, internalMode);
 	}
 
 	@Override
 	public <K> Container<K, Row> putContainer(
 			String name, ContainerInfo info, boolean modifiable)
 			throws GSException {
+		final ContainerKey key =
+				(name == null ? null : parseContainerKey(name, false, true));
 		return putContainer(
-				name, (ContainerType) null, info, modifiable, false);
+				key, (ContainerType) null,
+				new ContainerProperties(info), modifiable, false);
 	}
 
 	@Override
 	public <K> Collection<K, Row> putCollection(
 			String name, ContainerInfo info, boolean modifiable)
 			throws GSException {
+		final ContainerKey key =
+				(name == null ? null : parseContainerKey(name, false, true));
 
 		final Container<K, Row> container = putContainer(
-				name, ContainerType.COLLECTION, info, modifiable, false);
+				key, ContainerType.COLLECTION,
+				new ContainerProperties(info), modifiable, false);
 		return (Collection<K, Row>) container;
 	}
 
 	@Override
 	public TimeSeries<Row> putTimeSeries(String name,
 			ContainerInfo info, boolean modifiable) throws GSException {
+		final ContainerKey key =
+				(name == null ? null : parseContainerKey(name, false, true));
 
 		final Container<Date, Row> container = putContainer(
-				name, ContainerType.TIME_SERIES, info, modifiable, false);
+				key, ContainerType.TIME_SERIES,
+				new ContainerProperties(info), modifiable, false);
 		return (TimeSeries<Row>) container;
 	}
 
-	private void dropContainer(
-			String name, ContainerType containerType, boolean systemMode)
+	@Override
+	public void dropContainer(
+			ContainerKey key, ContainerType containerType, boolean internalMode)
 			throws GSException {
+		final ContainerKeyConverter keyConverter =
+				getContainerKeyConverter(internalMode, true);
 
 		final BasicBuffer req = context.getRequestBuffer();
 		final BasicBuffer resp = context.getResponseBuffer();
 
 		channel.setupRequestBuffer(req);
-		tryPutSystemOptionalRequest(req, context, systemMode);
+		tryPutSystemOptionalRequest(req, context, internalMode, false, null);
 
-		req.putString(name);
+		putContainerKey(req, key, keyConverter);
 		tryPutContainerType(req, containerType);
 
-		final int partitionId = channel.resolvePartitionId(context, name);
+		final int partitionId =
+				channel.resolvePartitionId(context, key, internalMode);
 		final Statement statement = getContainerStatement(
 				Statement.DROP_CONTAINER, containerType);
 
-		executeStatement(statement, partitionId, req, resp, name);
+		executeStatement(statement, partitionId, req, resp, key);
 
 		final ContainerCache cache = context.getContainerCache();
-		if (cache != null && !systemMode) {
-			cache.removeSchema(RowMapper.normalizeExtendedSymbol(name, true));
+		if (cache != null) {
+			cache.removeSchema(key.toCaseSensitive(false));
 		}
-	}
-
-	public void dropContainer(String name, boolean systemMode) throws GSException {
-		dropContainer(name, null, systemMode);
 	}
 
 	@Override
 	public void dropContainer(String name) throws GSException {
-		dropContainer(name, null, false);
+		dropContainer(parseContainerKey(name, false, true), null, false);
 	}
 
 	@Override
 	public Row createRow(ContainerInfo info) throws GSException {
 		channel.checkContextAvailable(context);
-		final RowMapper mapper = RowMapper.getInstance(info.getType(), info);
+		final RowMapper mapper = RowMapper.getInstance(
+				info.getType(), info, getRowMapperConfig());
 		return mapper.createGeneralRow();
 	}
 
-	private interface MultiTransactionalStatement {
+	private static class UnnamedMultiOperationContext<K, V, R>
+	implements MultiOperationContext<K, V, R> {
 
-		boolean makeCreateSessionRequest(BasicBuffer req,
-				GridStoreChannel channel, Context context)
-				throws GSException;
+		private final Iterable<? extends V> iterable;
+
+		private UnnamedMultiOperationContext(Iterable<? extends V> iterable) {
+			this.iterable = iterable;
+		}
+
+		@Override
+		public void listTarget(MultiTargetConsumer<K, V> consumer)
+				throws GSException {
+			for (V value : iterable) {
+				consumer.consume(null, value, null, null);
+			}
+		}
+
+		@Override
+		public boolean acceptException(GSException exception)
+				throws GSException {
+			return false;
+		}
+
+		@Override
+		public void acceptCompletion(K key, R result) throws GSException {
+		}
+
+		@Override
+		public boolean isRemaining() throws GSException {
+			return false;
+		}
+
+	}
+
+	private static class NamedMultiOperationContext<V, R>
+	implements MultiOperationContext<ContainerKey, V, R> {
+
+		private final Map<String, V> targetMap;
+
+		private final ContainerKeyConverter keyConverter;
+
+		public NamedMultiOperationContext(
+				Map<String, V> targetMap,
+				ContainerKeyConverter keyConverter) {
+			this.targetMap = targetMap;
+			this.keyConverter = keyConverter;
+		}
+
+		@Override
+		public void listTarget(MultiTargetConsumer<ContainerKey, V> consumer)
+				throws GSException {
+			for (Map.Entry<String, V> entry : targetMap.entrySet()) {
+				consumer.consume(
+						keyConverter.parse(entry.getKey(), false),
+						entry.getValue(), null, null);
+			}
+		}
+
+		@Override
+		public boolean acceptException(GSException exception) {
+			return false;
+		}
+
+		@Override
+		public void acceptCompletion(ContainerKey key, R result) {
+		}
+
+		@Override
+		public boolean isRemaining() throws GSException {
+			return false;
+		}
+
+	}
+
+	private static class ListingMultiOperationContext<V, E>
+	extends NamedMultiOperationContext<V, List<E>> {
+
+		private final Map<String, List<E>> resultMap =
+				new HashMap<String, List<E>>();
+
+		public ListingMultiOperationContext(
+				Map<String, V> targetMap, ContainerKeyConverter keyConverter) {
+			super(targetMap, keyConverter);
+		}
+
+		@Override
+		public void acceptCompletion(
+				ContainerKey containerKey, List<E> result) {
+			final String name = containerKey.toString();
+			List<E> list = resultMap.get(name);
+			if (list == null) {
+				list = new ArrayList<E>();
+				resultMap.put(name, list);
+			}
+			list.addAll(result);
+		}
+
+		public Map<String, List<E>> getAllResult() {
+			return resultMap;
+		}
+
+		public static <V, E> ListingMultiOperationContext<V, E> create(
+				Map<String, V> targetMap, ContainerKeyConverter keyConverter) {
+			return new ListingMultiOperationContext<V, E>(
+					targetMap, keyConverter);
+		}
+
+	}
+
+	private abstract static class MultiOperationStatement<K, T> {
+
+		abstract static class Factory<K, T, V, R> {
+
+			private final MultiOperationContext<K, V, R> multiContext;
+
+			private final ContainerKeyConverter keyConverter;
+
+			Factory(
+					MultiOperationContext<K, V, R> multiContext,
+					ContainerKeyConverter keyConverter) {
+				this.multiContext = multiContext;
+				this.keyConverter = keyConverter;
+			}
+
+			abstract MultiOperationStatement<K, T> create();
+
+			MultiOperationStatement<K, T> resolveMultiStatement(
+					Map<Integer, MultiOperationStatement<K, T>> requestMap,
+					int partitionId) {
+				MultiOperationStatement<K, T> multiStatement =
+						requestMap.get(partitionId);
+				if (multiStatement == null) {
+					multiStatement = create();
+					requestMap.put(partitionId, multiStatement);
+				}
+				return multiStatement;
+			}
+
+			MultiOperationContext<K, V, R> getMultiContext() {
+				return multiContext;
+			}
+
+			ContainerKeyConverter getKeyConverter() {
+				return keyConverter;
+			}
+
+			abstract MultiTargetConsumer<K, V> createConsumer(
+					Map<Integer, MultiOperationStatement<K, T>> requestMap,
+					GridStoreChannel channel, Context context,
+					boolean internalMode);
+
+		}
+
+		abstract static class BasicFactory<V, R>
+		extends Factory<ContainerKey, V, V, R> {
+
+			private BasicFactory(
+					MultiOperationContext<ContainerKey, V, R> multiContext,
+					ContainerKeyConverter keyConverter) {
+				super(multiContext, keyConverter);
+			}
+
+			@Override
+			MultiTargetConsumer<ContainerKey, V> createConsumer(
+					Map<Integer,
+					MultiOperationStatement<ContainerKey, V>> requestMap,
+					GridStoreChannel channel, Context context,
+					boolean internalMode) {
+				return new BasicConsumer<V, R>(
+						this, requestMap, channel, context, internalMode);
+			}
+
+		}
+
+		static class BasicConsumer<V, R>
+		implements MultiTargetConsumer<ContainerKey, V> {
+
+			private final BasicFactory<V, R> factory;
+
+			private final Map<
+			Integer, MultiOperationStatement<ContainerKey, V>> requestMap;
+
+			private final GridStoreChannel channel;
+
+			private final Context context;
+
+			private final boolean internalMode;
+
+			private BasicConsumer(
+					BasicFactory<V, R> factory,
+					Map<Integer,
+					MultiOperationStatement<ContainerKey, V>> requestMap,
+					GridStoreChannel channel, Context context,
+					boolean internalMode) {
+				this.factory = factory;
+				this.requestMap = requestMap;
+				this.channel = channel;
+				this.context = context;
+				this.internalMode = internalMode;
+			}
+
+			@Override
+			public void consume(
+					ContainerKey key, V value, Integer attribute,
+					OptionalRequestSource source) throws GSException {
+				final int partitionId =
+						channel.resolvePartitionId(context, key, internalMode);
+				final MultiOperationStatement<ContainerKey, V> multiStatement =
+						factory.resolveMultiStatement(requestMap, partitionId);
+				multiStatement.addRequestValue(key, value, attribute, source);
+			}
+
+		};
+
+		abstract void addRequestValue(
+				K key, T value, Integer attribute,
+				OptionalRequestSource source) throws GSException;
+
+		boolean makeCreateSessionRequest(
+				BasicBuffer req, GridStoreChannel channel, Context context,
+				boolean internalMode) throws GSException {
+			return false;
+		}
 
 		void acceptCreateSessionResponse(BasicBuffer resp)
-				throws GSException;
+				throws GSException {
+		}
 
-		boolean makeMainRequest(BasicBuffer req, Context context) throws GSException;
+		abstract boolean makeMainRequest(
+				BasicBuffer req, GridStoreChannel channel, Context context,
+				boolean internalMode) throws GSException;
 
-		void acceptMainResponse(
+		abstract void acceptMainResponse(
 				BasicBuffer resp, Object targetConnection) throws GSException;
 
-		boolean makeCloseSessionRequest(BasicBuffer req, Context context) throws GSException;
+		boolean makeCloseSessionRequest(
+				BasicBuffer req, Context context) throws GSException {
+			return false;
+		}
 
-		void acceptSessionClosed() throws GSException;
+		void acceptSessionClosed() throws GSException {
+		}
 
 		boolean acceptStatementErrorForSession(
-				GSStatementException cause) throws GSException;
+				GSStatementException cause) throws GSException {
+			return false;
+		}
+
+		<R> void repairOperation(MultiOperationContext<K, ?, R> multiContext)
+				throws GSException {
+		}
 
 	}
 
 	private static class MultiQueryStatement
-	implements MultiTransactionalStatement {
+	extends MultiOperationStatement<Integer, SubnetQuery<?>> {
+
+		private final MultiOperationContext<Integer, ?, Query<?>> multiContext;
+
+		private final List<Integer> keyList = new ArrayList<Integer>();
 
 		private final List<SubnetQuery<?>> queryList =
 				new ArrayList<SubnetQuery<?>>();
@@ -1678,6 +2452,57 @@ public class SubnetGridStore implements GridStore {
 		boolean updateQueryFound;
 
 		UUID sessionUUID;
+
+		private MultiQueryStatement(
+				MultiOperationContext<Integer, ?, Query<?>> multiContext) {
+			this.multiContext = multiContext;
+		}
+
+		static <V extends Query<?>> MultiQueryFactory<V> newFactory(
+				MultiOperationContext<Integer, V, Query<?>> multiContext,
+				SubnetGridStore store) {
+			return new MultiQueryFactory<V>(multiContext, store);
+		}
+
+		static class MultiQueryFactory<V extends Query<?>>
+		extends Factory<Integer, SubnetQuery<?>, V, Query<?>> {
+
+			private final SubnetGridStore store;
+
+			MultiQueryFactory(
+					MultiOperationContext<Integer, V, Query<?>> multiContext,
+					SubnetGridStore store) {
+				super(multiContext, null);
+				this.store = store;
+			}
+
+			@Override
+			MultiQueryStatement create() {
+				return new MultiQueryStatement(getMultiContext());
+			}
+
+			@Override
+			MultiTargetConsumer<Integer, V> createConsumer(
+					final Map<Integer, MultiOperationStatement<
+					Integer, SubnetQuery<?>>> requestMap,
+					GridStoreChannel channel, Context context,
+					boolean internalMode) {
+				return new MultiTargetConsumer<Integer, V>() {
+					@Override
+					public void consume(
+							Integer key, V value, Integer attribute,
+							OptionalRequestSource source) throws GSException {
+						final SubnetQuery<?> query = check(value, store);
+						final int partitionId =
+								query.getContainer().getPartitionId();
+						resolveMultiStatement(
+								requestMap, partitionId).addRequestValue(
+										key, query, attribute, source);
+					}
+				};
+			}
+
+		}
 
 		static SubnetQuery<?> check(
 				Query<?> query, SubnetGridStore store) throws GSException {
@@ -1704,16 +2529,20 @@ public class SubnetGridStore implements GridStore {
 			return subnetQuery;
 		}
 
-		void add(SubnetQuery<?> query) throws GSException {
-			query.getContainer().clearBlob(false);
-			updateQueryFound |= query.isForUpdate();
-			queryList.add(query);
+		@Override
+		void addRequestValue(
+				Integer key, SubnetQuery<?> value, Integer attribute,
+				OptionalRequestSource source) throws GSException {
+			value.getContainer().clearBlob(false);
+			updateQueryFound |= value.isForUpdate();
+			keyList.add(key);
+			queryList.add(value);
 		}
 
 		@Override
-		public boolean makeCreateSessionRequest(
-				BasicBuffer req, GridStoreChannel channel, Context context)
-				throws GSException {
+		boolean makeCreateSessionRequest(
+				BasicBuffer req, GridStoreChannel channel, Context context,
+				boolean internalMode) throws GSException {
 			sessionUUID = context.getSessionUUID();
 			if (!updateQueryFound || queryList.isEmpty()) {
 				return false;
@@ -1736,7 +2565,7 @@ public class SubnetGridStore implements GridStore {
 				req.putUUID(sessionUUID);
 			}
 
-			tryPutDatabaseOptionalRequest(req, context);
+			tryPutDatabaseOptionalRequest(req, context, null);
 
 			boolean withId = true;
 			req.putBoolean(withId);
@@ -1763,7 +2592,7 @@ public class SubnetGridStore implements GridStore {
 		}
 
 		@Override
-		public void acceptCreateSessionResponse(BasicBuffer resp)
+		void acceptCreateSessionResponse(BasicBuffer resp)
 				throws GSException {
 			final int sessionCount = resp.base().getInt();
 			if (optionalQueryList.size() != sessionCount) {
@@ -1799,7 +2628,9 @@ public class SubnetGridStore implements GridStore {
 		}
 
 		@Override
-		public boolean makeMainRequest(BasicBuffer req, Context context) throws GSException {
+		boolean makeMainRequest(
+				BasicBuffer req, GridStoreChannel channel, Context context,
+				boolean internalMode) throws GSException {
 			if (queryList.isEmpty()) {
 				return false;
 			}
@@ -1809,13 +2640,20 @@ public class SubnetGridStore implements GridStore {
 				req.putUUID(sessionUUID);
 			}
 
-			tryPutDatabaseOptionalRequest(req, context);
+			tryPutDatabaseOptionalRequest(
+					req, context, context.bindQueryOptions(null));
 
 			req.putInt(queryList.size());
 			for (SubnetQuery<?> query : queryList) {
 				final SubnetContainer<?, ?> container = query.getContainer();
-				final long statementId = (container.isAutoCommit() ?
-						0 : container.updateStatementIdDirect());
+				final long statementId;
+				if (container.isAutoCommit() ||
+						container.getSessionIdDirect() == 0) {
+					statementId = 0;
+				}
+				else {
+					statementId = container.updateStatementIdDirect();
+				}
 
 				req.putInt(GridStoreChannel.statementToNumber(
 						query.getStatement()));
@@ -1827,7 +2665,7 @@ public class SubnetGridStore implements GridStore {
 		}
 
 		@Override
-		public void acceptMainResponse(
+		void acceptMainResponse(
 				BasicBuffer resp, Object targetConnection) throws GSException {
 			final int count = resp.base().getInt();
 			if (queryList.size() != count) {
@@ -1837,34 +2675,31 @@ public class SubnetGridStore implements GridStore {
 			}
 
 			final int totalEndPos = resp.base().limit();
-			for (SubnetQuery<?> query : queryList) {
-				final long size = resp.base().getLong();
-				if (size < 0 || size > resp.base().remaining()) {
-					throw new GSConnectionException(
-							GSErrorCode.MESSAGE_CORRUPTED,
-							"Protocol error by invalid query message size");
-				}
+			for (int i = 0; i < count; i++) {
+				final int size = (int) BufferUtils.getLongSize(resp.base());
 
-				resp.base().limit(resp.base().position() + (int) size);
+				BufferUtils.limitForward(resp.base(), size);
 
+				final SubnetQuery<?> query = queryList.get(i);
 				query.acceptResponse(resp, targetConnection, false);
+				multiContext.acceptCompletion(keyList.get(i), query);
 
-				resp.base().limit(totalEndPos);
+				BufferUtils.restoreLimit(resp.base(), totalEndPos);
 			}
 		}
 
 		@Override
-		public boolean makeCloseSessionRequest(BasicBuffer req, Context context)
+		boolean makeCloseSessionRequest(BasicBuffer req, Context context)
 				throws GSException {
 			return false;
 		}
 
 		@Override
-		public void acceptSessionClosed() throws GSException {
+		void acceptSessionClosed() throws GSException {
 		}
 
 		@Override
-		public boolean acceptStatementErrorForSession(
+		boolean acceptStatementErrorForSession(
 				GSStatementException cause) throws GSException {
 			if (!updateQueryFound) {
 				return false;
@@ -1893,38 +2728,23 @@ public class SubnetGridStore implements GridStore {
 
 	@Override
 	public void fetchAll(List<? extends Query<?>> queryList) throws GSException {
-		final Map<Integer, MultiQueryStatement> requestMap =
-				new HashMap<Integer, MultiQueryStatement>();
+		fetchAll(new UnnamedMultiOperationContext<Integer, Query<?>, Query<?>>(
+				queryList));
+	}
 
-		for (Query<?> query : queryList) {
-			final SubnetQuery<?> subnetQuery =
-					MultiQueryStatement.check(query, this);
-
-			final int partitionId =
-					subnetQuery.getContainer().getPartitionId();
-
-			MultiQueryStatement multiStatement = requestMap.get(partitionId);
-			if (multiStatement == null) {
-				multiStatement = new MultiQueryStatement();
-				requestMap.put(partitionId, multiStatement);
-			}
-
-			multiStatement.add(subnetQuery);
-		}
-
-		final Statement statement = Statement.EXECUTE_MULTIPLE_QUERIES;
-		beginComplexedStatement(statement, 0, null);
-		for (Map.Entry<Integer, MultiQueryStatement> entry :
-				requestMap.entrySet()) {
-			final int partitionId = entry.getKey();
-			final MultiQueryStatement multiStatement = entry.getValue();
-			executeStatement(partitionId, statement, multiStatement);
-		}
-		endComplexedStatement();
+	@Override
+	public void fetchAll(
+			MultiOperationContext<Integer, Query<?>, Query<?>> multiContext)
+			throws GSException {
+		final boolean internalMode = false;
+		executeAllMulti(
+				Statement.EXECUTE_MULTIPLE_QUERIES,
+				MultiQueryStatement.newFactory(multiContext, this),
+				internalMode);
 	}
 
 	private static class MultiPutStatement
-	implements MultiTransactionalStatement {
+	extends MultiOperationStatement<ContainerKey, List<Row>> {
 
 		private static class SubEntry {
 
@@ -1938,47 +2758,62 @@ public class SubnetGridStore implements GridStore {
 
 			boolean listMerged;
 
+			Integer attribute;
+
 		}
 
 		final List<RowMapper> mapperList = new ArrayList<RowMapper>();
 
-		final List<String> containerNameList = new ArrayList<String>();
+		final List<ContainerKey> containerKeyList =
+				new ArrayList<ContainerKey>();
 
-		final Map<String, SubEntry> subEntryMap =
-				new HashMap<String, SubEntry>();
+		final Map<ContainerKey, SubEntry> subEntryMap =
+				new HashMap<ContainerKey, SubEntry>();
 
 		UUID sessionUUID;
 
-		void add(String containerName, List<Row> rowList,
-				RowMapper mapper) throws GSException {
-			if (rowList.isEmpty()) {
+		static BasicFactory<List<Row>, Void> newFactory(
+				MultiOperationContext<
+				ContainerKey, List<Row>, Void> multiContext) {
+			return new BasicFactory<List<Row>, Void>(multiContext, null) {
+				@Override
+				public MultiPutStatement create() {
+					return new MultiPutStatement();
+				}
+			};
+		}
+
+		@Override
+		void addRequestValue(
+				ContainerKey key, List<Row> value, Integer attribute,
+				OptionalRequestSource source) throws GSException {
+			if (value.isEmpty()) {
 				return;
 			}
 
-			final String normalizedName =
-					RowMapper.normalizeExtendedSymbol(containerName, true);
-			SubEntry entry = subEntryMap.get(normalizedName);
+			final ContainerKey normalizedKey = key.toCaseSensitive(false);
+			SubEntry entry = subEntryMap.get(normalizedKey);
 
-			for (Row row : rowList) {
+			RowMapper mapper = null;
+			for (Row row : value) {
 				if (mapper == null) {
-					if (entry == null) {
-						mapper = RowMapper.getInstance(row);
-					}
-					else {
-						mapper = RowMapper.getInstance(
-								entry.rowList.get(0));
-					}
+					final Row lastRow =
+							(entry == null ? row : entry.rowList.get(0));
+					mapper = RowMapper.getInstance(
+							lastRow, getRowMapperConfig());
 				}
 				else {
-					mapper.checkSchemaMatched(RowMapper.getInstance(row));
+					mapper.checkSchemaMatched(RowMapper.getInstance(
+							row, getRowMapperConfig()));
 				}
 			}
 
 			if (entry == null) {
 				entry = new SubEntry();
-				entry.rowList = rowList;
-				subEntryMap.put(normalizedName, entry);
-				containerNameList.add(normalizedName);
+				entry.rowList = value;
+				entry.attribute = attribute;
+				subEntryMap.put(normalizedKey, entry);
+				containerKeyList.add(normalizedKey);
 
 				entry.mapperIndex = indexOf(mapper);
 				if (entry.mapperIndex < 0) {
@@ -1991,15 +2826,15 @@ public class SubnetGridStore implements GridStore {
 					entry.rowList = new ArrayList<Row>(entry.rowList);
 					entry.listMerged = true;
 				}
-				entry.rowList.addAll(rowList);
+				entry.rowList.addAll(value);
 			}
 		}
 
-		public boolean makeCreateSessionRequest(
-				BasicBuffer req, GridStoreChannel channel, Context context)
-				throws GSException {
+		boolean makeCreateSessionRequest(
+				BasicBuffer req, GridStoreChannel channel, Context context,
+				boolean internalMode) throws GSException {
 			sessionUUID = context.getSessionUUID();
-			if (containerNameList.isEmpty()) {
+			if (containerKeyList.isEmpty()) {
 				return false;
 			}
 
@@ -2008,20 +2843,30 @@ public class SubnetGridStore implements GridStore {
 				req.putUUID(sessionUUID);
 			}
 
-			tryPutDatabaseOptionalRequest(req, context);
+			tryPutSystemOptionalRequest(req, context, internalMode, false, null);
+
+			final ContainerKeyConverter keyConverter =
+					context.getKeyConverter(internalMode, true);
+			final long databaseId = channel.getDatabaseId(context);
 
 			boolean withId = false;
 			req.putBoolean(withId);
-			req.putInt(containerNameList.size());
-			for (String containerName : containerNameList) {
-				req.putString(containerName);
+			req.putInt(containerKeyList.size());
+			for (ContainerKey containerKey : containerKeyList) {
+				if (isAttributeVerifiable()) {
+					final SubEntry entry = subEntryMap.get(containerKey);
+					tryPutSystemOptionalRequest(
+							req, context, false, false, entry.attribute);
+				}
+
+				keyConverter.put(containerKey, databaseId, req);
 
 				if (!summarized) {
 					req.putUUID(sessionUUID);
 				}
 
 				if (SubnetContainer.isSessionIdGeneratorEnabled()) {
-					final SubEntry entry = subEntryMap.get(containerName);
+					final SubEntry entry = subEntryMap.get(containerKey);
 					entry.sessionId = context.generateSessionId();
 					req.putLong(entry.sessionId);
 				}
@@ -2033,7 +2878,7 @@ public class SubnetGridStore implements GridStore {
 			return true;
 		}
 
-		public void acceptCreateSessionResponse(BasicBuffer resp)
+		void acceptCreateSessionResponse(BasicBuffer resp)
 				throws GSException {
 			final int sessionCount = resp.base().getInt();
 			if (subEntryMap.size() != sessionCount) {
@@ -2042,8 +2887,8 @@ public class SubnetGridStore implements GridStore {
 						"Protocol error by inconsistent session count");
 			}
 
-			for (String containerName : containerNameList) {
-				final SubEntry entry = subEntryMap.get(containerName);
+			for (ContainerKey containerKey : containerKeyList) {
+				final SubEntry entry = subEntryMap.get(containerKey);
 				entry.containerId = resp.base().getLong();
 
 				if (!SubnetContainer.isSessionIdGeneratorEnabled()) {
@@ -2057,8 +2902,10 @@ public class SubnetGridStore implements GridStore {
 			}
 		}
 
-		public boolean makeMainRequest(BasicBuffer req, Context context) throws GSException {
-			if (containerNameList.isEmpty()) {
+		boolean makeMainRequest(
+				BasicBuffer req, GridStoreChannel channel, Context context,
+				boolean internalMode) throws GSException {
+			if (containerKeyList.isEmpty()) {
 				return false;
 			}
 
@@ -2067,18 +2914,18 @@ public class SubnetGridStore implements GridStore {
 				req.putUUID(sessionUUID);
 			}
 
-			tryPutDatabaseOptionalRequest(req, context);
+			tryPutDatabaseOptionalRequest(req, context, null);
 
 			req.putInt(mapperList.size());
 			for (RowMapper mapper : mapperList) {
 				req.putByteEnum(mapper.isForTimeSeries() ?
 						ContainerType.TIME_SERIES : ContainerType.COLLECTION);
-				mapper.exportSchema(req);
+				mapper.exportSchema(req, getRowMapperConfig());
 			}
 
-			req.putInt(containerNameList.size());
-			for (String containerName : containerNameList) {
-				final SubEntry entry = subEntryMap.get(containerName);
+			req.putInt(containerKeyList.size());
+			for (ContainerKey containerKey : containerKeyList) {
+				final SubEntry entry = subEntryMap.get(containerKey);
 
 				NodeConnection.putStatementId(req, 1);
 				req.putLong(entry.containerId);
@@ -2091,7 +2938,8 @@ public class SubnetGridStore implements GridStore {
 					req.putByteEnum(SessionMode.GET);
 					req.putByteEnum(TransactionMode.AUTO);
 				}
-				NodeConnection.tryPutEmptyOptionalRequest(req);
+				tryPutSystemOptionalRequest(
+						req, context, false, false, entry.attribute);
 
 				req.putInt(entry.mapperIndex);
 
@@ -2117,12 +2965,12 @@ public class SubnetGridStore implements GridStore {
 			return true;
 		}
 
-		public void acceptMainResponse(
+		void acceptMainResponse(
 				BasicBuffer resp, Object targetConnection) {
 		}
 
-		public boolean makeCloseSessionRequest(BasicBuffer req, Context context) {
-			if (containerNameList.isEmpty()) {
+		boolean makeCloseSessionRequest(BasicBuffer req, Context context) {
+			if (containerKeyList.isEmpty()) {
 				return false;
 			}
 
@@ -2131,11 +2979,11 @@ public class SubnetGridStore implements GridStore {
 				req.putUUID(sessionUUID);
 			}
 
-			tryPutDatabaseOptionalRequest(req, context);
+			tryPutDatabaseOptionalRequest(req, context, null);
 
-			req.putInt(containerNameList.size());
-			for (String containerName : containerNameList) {
-				final SubEntry entry = subEntryMap.get(containerName);
+			req.putInt(containerKeyList.size());
+			for (ContainerKey containerKey : containerKeyList) {
+				final SubEntry entry = subEntryMap.get(containerKey);
 
 				NodeConnection.putStatementId(req, 2);
 				req.putLong(entry.containerId);
@@ -2148,13 +2996,22 @@ public class SubnetGridStore implements GridStore {
 			return true;
 		}
 
-		public void acceptSessionClosed() {
+		void acceptSessionClosed() {
 		}
 
-		public boolean acceptStatementErrorForSession(
+		boolean acceptStatementErrorForSession(
 				GSStatementException cause) throws GSException {
 			return SubnetContainer.isInitialSessionLost(
 					Statement.CREATE_MULTIPLE_SESSIONS, 1, false, cause);
+		}
+
+		@Override
+		<R> void repairOperation(
+				MultiOperationContext<ContainerKey, ?, R> multiContext)
+				throws GSException {
+			for (ContainerKey key : subEntryMap.keySet()) {
+				multiContext.acceptCompletion(key, null);
+			}
 		}
 
 		int indexOf(RowMapper mapper) {
@@ -2171,39 +3028,116 @@ public class SubnetGridStore implements GridStore {
 	@Override
 	public void multiPut(
 			Map<String, List<Row>> containerRowsMap) throws GSException {
-		final Map<Integer, MultiPutStatement> requestMap =
-				new HashMap<Integer, MultiPutStatement>();
+		multiPut(new NamedMultiOperationContext<List<Row>, Void>(
+				containerRowsMap,
+				getContainerKeyConverter(false, true)), false);
+	}
 
-		for (Map.Entry<String, List<Row>> entry :
-				containerRowsMap.entrySet()) {
-			final String containerName = entry.getKey();
-			final int partitionId =
-					channel.resolvePartitionId(context, containerName);
+	@Override
+	public void multiPut(
+			MultiOperationContext<ContainerKey, List<Row>, Void> multiContext,
+			final boolean internalMode) throws GSException {
+		executeAllMulti(
+				Statement.PUT_MULTIPLE_CONTAINER_ROWS,
+				MultiPutStatement.newFactory(multiContext), internalMode);
+	}
 
-			MultiPutStatement multiStatement = requestMap.get(partitionId);
-			if (multiStatement == null) {
-				multiStatement = new MultiPutStatement();
-				requestMap.put(partitionId, multiStatement);
+	private <K, T, V, R> void executeAllMulti(
+			final Statement statement,
+			final MultiOperationStatement.Factory<K, T, V, R> factory,
+			final boolean internalMode) throws GSException {
+		final MultiOperationContext<K, V, R> multiContext =
+				factory.getMultiContext();
+
+		final Map<Integer, MultiOperationStatement<K, T>> requestMap =
+				new HashMap<Integer, MultiOperationStatement<K, T>>();
+		final MultiTargetConsumer<K, V> consumer = factory.createConsumer(
+				requestMap, channel, context, internalMode);
+
+		beginComplexedStatement(statement, 0, null);
+
+		int lastIncompleteCount = -1;
+		int noProgressCount = 0;
+		for (int trialCount = 0;; trialCount++) {
+			multiContext.listTarget(consumer);
+
+			Set<Integer> incompleteSet = null;
+			final Iterator<
+			Map.Entry<Integer, MultiOperationStatement<K, T>>> it =
+					requestMap.entrySet().iterator();
+			while (it.hasNext()) {
+				final Map.Entry<
+				Integer, MultiOperationStatement<K, T>> entry = it.next();
+				final int partitionId = entry.getKey();
+				final MultiOperationStatement<K, T> multiStatement =
+						entry.getValue();
+				try {
+					executeMulti(
+							partitionId, statement, multiStatement,
+							internalMode);
+				}
+				catch (GSStatementException e) {
+					if (multiContext.acceptException(e)) {
+						incompleteSet = new HashSet<Integer>();
+						incompleteSet.add(partitionId);
+						while (it.hasNext()) {
+							incompleteSet.add(it.next().getKey());
+						}
+
+						if (lastIncompleteCount != incompleteSet.size()) {
+							noProgressCount = -1;
+						}
+
+						final int maxNoProgressCount = 1;
+						if (++noProgressCount <= maxNoProgressCount) {
+							lastIncompleteCount = incompleteSet.size();
+							LOGGER.info(
+									"transaction.repairingMultiOperation",
+									ContextMonitor.getObjectId(context),
+									statement,
+									trialCount,
+									lastIncompleteCount,
+									e);
+							break;
+						}
+					}
+					final Map<String, String> filteredParams =
+							filterMultiOperationParamters(e.getParameters());
+					throw new GSStatementException(
+							0, null,
+							formatMultiOperationDescription(e, filteredParams),
+							filteredParams, e);
+				}
+				noProgressCount = 0;
 			}
 
-			multiStatement.add(containerName, entry.getValue(), null);
+			if (incompleteSet == null) {
+				if (multiContext.isRemaining()) {
+					requestMap.clear();
+					lastIncompleteCount = -1;
+					noProgressCount = 0;
+					continue;
+				}
+				break;
+			}
+
+			for (Map.Entry<Integer, MultiOperationStatement<K, T>> entry :
+					requestMap.entrySet()) {
+				if (incompleteSet.contains(entry.getKey())) {
+					continue;
+				}
+				entry.getValue().repairOperation(multiContext);
+			}
+			requestMap.clear();
 		}
 
-		final Statement statement = Statement.PUT_MULTIPLE_CONTAINER_ROWS;
-		beginComplexedStatement(statement, 0, null);
-		for (Map.Entry<Integer, MultiPutStatement> entry :
-				requestMap.entrySet()) {
-			final int partitionId = entry.getKey();
-			final MultiPutStatement multiStatement = entry.getValue();
-			executeStatement(partitionId, statement, multiStatement);
-		}
 		endComplexedStatement();
 	}
 
-	private void executeStatement(
+	private void executeMulti(
 			int partitionId, Statement statement,
-			MultiTransactionalStatement multiStatement)
-			throws GSException {
+			MultiOperationStatement<?, ?> multiStatement,
+			boolean internalMode) throws GSException {
 		final BasicBuffer req = context.getRequestBuffer();
 		final BasicBuffer resp = context.getResponseBuffer();
 
@@ -2214,12 +3148,13 @@ public class SubnetGridStore implements GridStore {
 				for (int sessionTrial = 0;; sessionTrial++) {
 					channel.setupRequestBuffer(req);
 					if (multiStatement.makeCreateSessionRequest(
-							req, channel, context)) {
+							req, channel, context, internalMode)) {
 
 						try {
 							channel.executeStatement(
 									context,
-									Statement.CREATE_MULTIPLE_SESSIONS,
+									Statement.CREATE_MULTIPLE_SESSIONS.
+									generalize(),
 									partitionId, 0, req, resp, contextMonitor);
 						}
 						catch (GSStatementException e) {
@@ -2265,15 +3200,16 @@ public class SubnetGridStore implements GridStore {
 
 				try {
 					channel.setupRequestBuffer(req);
-					if (!multiStatement.makeMainRequest(req, context)) {
+					if (!multiStatement.makeMainRequest(
+							req, channel, context, internalMode)) {
 						break;
 					}
 
 					final Object targetConnection;
 					synchronized (context) {
 						channel.executeStatement(
-								context, statement, partitionId, 0, req, resp,
-								contextMonitor);
+								context, statement.generalize(),
+								partitionId, 0, req, resp, contextMonitor);
 						targetConnection = channel.getLastConnection(context);
 					}
 					multiStatement.acceptMainResponse(resp, targetConnection);
@@ -2309,7 +3245,8 @@ public class SubnetGridStore implements GridStore {
 				if (multiStatement.makeCloseSessionRequest(req, context)) {
 
 					channel.executeStatement(
-							context, Statement.CLOSE_MULTIPLE_SESSIONS,
+							context,
+							Statement.CLOSE_MULTIPLE_SESSIONS.generalize(),
 							partitionId, 0, req, resp, contextMonitor);
 
 					multiStatement.acceptSessionClosed();
@@ -2324,6 +3261,63 @@ public class SubnetGridStore implements GridStore {
 		}
 	}
 
+	private String formatMultiOperationDescription(
+			GSException e, Map<String, String> filteredParams) {
+		final String description = GSErrorCode.getDescription(e);
+		final String containerName =
+				filteredParams.get(ERROR_PARAM_CONTAINER);
+		final StringBuilder sb = new StringBuilder();
+		if (description != null) {
+			sb.append(description);
+			sb.append(" ");
+		}
+		sb.append("(containerName=");
+		if (containerName == null) {
+			sb.append("(unidentified)");
+		}
+		else {
+			sb.append(containerName);
+		}
+		sb.append(")");
+		return sb.toString();
+	}
+
+	private Map<String, String> filterMultiOperationParamters(
+			Map<String, String> src) {
+		final String orgContainerName = src.get(ERROR_PARAM_CONTAINER);
+		if (orgContainerName == null) {
+			return src;
+		}
+
+		try {
+			final ContainerKeyConverter keyConverter =
+					getContainerKeyConverter(true, false);
+			final ContainerKeyConverter.Components components =
+					new ContainerKeyConverter.Components();
+
+			keyConverter.decompose(
+					keyConverter.parse(orgContainerName, true), components);
+			if (components.largeId == -1 && components.subCount == -1) {
+				return src;
+			}
+
+			components.largeId = -1;
+			components.subCount = -1;
+			components.affinityNum = -1;
+			components.affinityStr = null;
+			final String filteredContainerName =
+					keyConverter.compose(components, true).toString();
+
+			final Map<String, String> dest = GSErrorCode.newParameters(src);
+			dest.put(ERROR_PARAM_CONTAINER, filteredContainerName);
+			return dest;
+		}
+		catch (GSException e) {
+		}
+
+		return src;
+	}
+
 	private enum PredicateType {
 
 		RANGE,
@@ -2332,26 +3326,73 @@ public class SubnetGridStore implements GridStore {
 
 	}
 
-	private static class MultiGetRequest {
+	private static class MultiGetRequest<V extends RowKeyPredicate<?>>
+	extends MultiOperationStatement<ContainerKey, V> {
+
+		private static class SubEntry {
+
+			ContainerKey containerKey;
+
+			Integer attribute;
+
+			OptionalRequestSource source;
+
+			int predicateIndex;
+
+		}
+
+		final MultiOperationContext<ContainerKey, V, List<Row>> multiContext;
 
 		final List<RowKeyPredicate<?>> predicateList =
 				new ArrayList<RowKeyPredicate<?>>();
 
-		final List<String> containerNameList = new ArrayList<String>();
+		final List<SubEntry> entryList = new ArrayList<SubEntry>();
 
-		void add(String containerName, RowKeyPredicate<?> predicate) {
-			if (!predicateList.contains(predicate)) {
-				predicateList.add(predicate);
-			}
-			containerNameList.add(containerName);
+		final ContainerKeyConverter keyConverter;
+
+		MultiGetRequest(
+				MultiOperationContext<ContainerKey, V, List<Row>> multiContext,
+				ContainerKeyConverter keyConverter) {
+			this.multiContext = multiContext;
+			this.keyConverter = keyConverter;
 		}
 
-		boolean makeRequest(
-				BasicBuffer req,
-				Map<String, ? extends RowKeyPredicate<?>>
-				containerPredicateMap,
-				Context context) throws GSException {
-			if (containerNameList.isEmpty()) {
+		static <V extends RowKeyPredicate<?>>
+		BasicFactory<V, List<Row>> newFactory(
+				MultiOperationContext<ContainerKey, V, List<Row>> multiContext,
+				ContainerKeyConverter keyConverter) {
+			return new BasicFactory<V, List<Row>>(multiContext, keyConverter) {
+				@Override
+				public MultiGetRequest<V> create() {
+					return new MultiGetRequest<V>(
+							getMultiContext(), getKeyConverter());
+				}
+			};
+		}
+
+		@Override
+		void addRequestValue(
+				ContainerKey key, V value, Integer attribute,
+				OptionalRequestSource source) throws GSException {
+			final SubEntry entry = new SubEntry();
+
+			entry.containerKey = key;
+			entry.predicateIndex = predicateList.indexOf(value);
+			if (entry.predicateIndex < 0) {
+				entry.predicateIndex = predicateList.size();
+				predicateList.add(value);
+			}
+			entry.attribute = attribute;
+			entry.source = source;
+
+			entryList.add(entry);
+		}
+
+		@Override
+		boolean makeMainRequest(
+				BasicBuffer req, GridStoreChannel channel, Context context,
+				boolean internalMode) throws GSException {
+			if (entryList.isEmpty()) {
 				return false;
 			}
 
@@ -2359,14 +3400,18 @@ public class SubnetGridStore implements GridStore {
 				req.putUUID(context.getSessionUUID());
 			}
 
-			tryPutDatabaseOptionalRequest(req, context);
+			tryPutSystemOptionalRequest(req, context, internalMode, false, null);
+
+			final RowMapper.MappingMode mappingMode =
+					SubnetContainer.getRowMappingMode();
 
 			req.putInt(predicateList.size());
 			for (RowKeyPredicate<?> predicate : predicateList) {
 				final GSType keyType = predicate.getKeyType();
 				req.putByteEnum(keyType);
 
-				final java.util.Collection<?> distinctKeys = predicate.getDistinctKeys();
+				final java.util.Collection<?> distinctKeys =
+						predicate.getDistinctKeys();
 				final Object startKey = predicate.getStart();
 				final Object finishKey = predicate.getFinish();
 
@@ -2375,103 +3420,59 @@ public class SubnetGridStore implements GridStore {
 
 					req.putBoolean(startKey != null);
 					if (startKey != null) {
-						RowMapper.encodeKey(req, startKey, keyType, SubnetContainer.getRowMappingMode());
+						RowMapper.encodeKey(
+								req, startKey, keyType, mappingMode);
 					}
 
 					req.putBoolean(finishKey != null);
 					if (finishKey != null) {
-						RowMapper.encodeKey(req, finishKey, keyType, SubnetContainer.getRowMappingMode());
+						RowMapper.encodeKey(
+								req, finishKey, keyType, mappingMode);
 					}
 				}
 				else {
 					req.putByteEnum(PredicateType.DISTINCT);
 					req.putInt(distinctKeys.size());
 					for (Object key : distinctKeys) {
-						RowMapper.encodeKey(req, key, keyType, SubnetContainer.getRowMappingMode());
+						RowMapper.encodeKey(req, key, keyType, mappingMode);
 					}
 				}
 			}
 
-			req.putInt(containerNameList.size());
-			for (String containerName : containerNameList) {
-				final RowKeyPredicate<?> predicate =
-						containerPredicateMap.get(containerName);
-				final int predicateIndex = predicateList.indexOf(predicate);
-				if (predicateIndex < 0) {
-					throw new Error("Internal error by unregistered predicate");
+			final long databaseId = channel.getDatabaseId(context);
+
+			req.putInt(entryList.size());
+			for (SubEntry entry : entryList) {
+				if (isAttributeVerifiable()) {
+					tryPutSystemOptionalRequest(
+							req, context, false, false, entry.attribute,
+							entry.source);
 				}
 
-				req.putString(containerName);
-				req.putInt(predicateIndex);
+				keyConverter.put(entry.containerKey, databaseId, req);
+				req.putInt(entry.predicateIndex);
 			}
 
 			return true;
 		}
 
-	}
-
-	@Override
-	public Map<String, List<Row>> multiGet(
-			Map<String, ? extends RowKeyPredicate<?>> containerPredicateMap)
-			throws GSException {
-		final Map<Integer, MultiGetRequest> requestMap =
-				new HashMap<Integer, MultiGetRequest>();
-
-		for (Map.Entry<String, ? extends RowKeyPredicate<?>> entry :
-				containerPredicateMap.entrySet()) {
-			final String containerName = entry.getKey();
-			final int partitionId =
-					channel.resolvePartitionId(context, containerName);
-
-			MultiGetRequest request = requestMap.get(partitionId);
-			if (request == null) {
-				request = new MultiGetRequest();
-				requestMap.put(partitionId, request);
-			}
-
-			final RowKeyPredicate<?> predicate = entry.getValue();
-			request.add(containerName, predicate);
-		}
-
-		final Statement statement = Statement.GET_MULTIPLE_CONTAINER_ROWS;
-		beginComplexedStatement(statement, 0, null);
-
-		final BasicBuffer req = context.getRequestBuffer();
-		final BasicBuffer resp = context.getResponseBuffer();
-
-		final Map<String, List<Row>> resultMap =
-				new HashMap<String, List<Row>>();
-		for (Map.Entry<Integer, MultiGetRequest> entry :
-				requestMap.entrySet()) {
-			channel.setupRequestBuffer(req);
-
-			final int partitionId = entry.getKey();
-			final MultiGetRequest request = entry.getValue();
-			if (!request.makeRequest(req, containerPredicateMap, context)) {
-				continue;
-			}
-
-			channel.executeStatement(
-					context, statement, partitionId, 0, req, resp, contextMonitor);
-
+		@Override
+		void acceptMainResponse(BasicBuffer resp, Object targetConnection)
+				throws GSException {
 			final int headCount = resp.base().getInt();
 			final List<RowMapper> mapperList = new ArrayList<RowMapper>();
 			for (int i = 0; i < headCount; i++) {
 				final ContainerType containerType =
 						resp.getByteEnum(ContainerType.class);
 				mapperList.add(RowMapper.getInstance(
-						resp, containerType == ContainerType.TIME_SERIES));
+						resp, containerType, getRowMapperConfig()));
 			}
 
+			final List<Row> rowList = new ArrayList<Row>();
 			final int bodyCount = resp.base().getInt();
 			for (int i = 0; i < bodyCount; i++) {
-				final String containerName = resp.getString();
-
-				List<Row> rowList = resultMap.get(containerName);
-				if (rowList == null) {
-					rowList = new ArrayList<Row>();
-					resultMap.put(containerName, rowList);
-				}
+				final ContainerKey containerKey =
+						keyConverter.get(resp, false, true);
 
 				final int mapperIndex = resp.base().getInt();
 				final RowMapper mapper = mapperList.get(mapperIndex);
@@ -2480,26 +3481,67 @@ public class SubnetGridStore implements GridStore {
 				final int rowCount = (int) resp.base().getLong();
 				final Cursor cursor = mapper.createCursor(
 						resp, SubnetContainer.getRowMappingMode(), rowCount,
-						rowIdIncluded, BLOB_FACTORY);
+						rowIdIncluded, RowMapper.getDirectBlobFactory());
 
 				for (int j = 0; j < rowCount; j++) {
 					rowList.add((Row) mapper.decode(cursor));
 				}
+
+				multiContext.acceptCompletion(containerKey, rowList);
+				rowList.clear();
 			}
 		}
-		endComplexedStatement();
 
-		return resultMap;
 	}
 
 	@Override
-	public PartitionController getPartitionController() throws GSException {
+	public Map<String, List<Row>> multiGet(
+			Map<String, ? extends RowKeyPredicate<?>> containerPredicateMap)
+			throws GSException {
+		final ContainerKeyConverter keyConverter =
+				getContainerKeyConverter(false, false);
+		final ListingMultiOperationContext<
+		? extends RowKeyPredicate<?>, Row> multiContext =
+				ListingMultiOperationContext.create(
+						containerPredicateMap, keyConverter);
+
+		multiGet(multiContext, false);
+		return multiContext.getAllResult();
+	}
+
+	@Override
+	public void multiGet(
+			MultiOperationContext<ContainerKey,
+			? extends RowKeyPredicate<?>, List<Row>> multiContext,
+			boolean internalMode) throws GSException {
+		final ContainerKeyConverter keyConverter =
+				getContainerKeyConverter(internalMode, false);
+		executeAllMulti(
+				Statement.GET_MULTIPLE_CONTAINER_ROWS,
+				MultiGetRequest.newFactory(multiContext, keyConverter),
+				internalMode);
+	}
+
+	@Override
+	public SubnetPartitionController getPartitionController()
+			throws GSException {
 		channel.checkContextAvailable(context);
 		return new SubnetPartitionController(channel, context);
 	}
 
-	private static final String CONTEXT_CONTROLLER_NAME =
-			"##internal.contextController";
+	private static final ContainerKey CONTEXT_CONTROLLER_KEY =
+			createSystemContainerKey("#_internal_context_controller");
+
+	private static ContainerKey createSystemContainerKey(String name) {
+		final ContainerKeyConverter keyConverter =
+				ContainerKeyConverter.getInstance(0, true, true);
+		try {
+			return keyConverter.parse(name, false);
+		}
+		catch (GSException e) {
+			throw new Error(e);
+		}
+	}
 
 	private <K> SubnetCollection<K, Row> getContextControllerCollection(
 			ContainerType expectedType) throws GSException {
@@ -2511,11 +3553,12 @@ public class SubnetGridStore implements GridStore {
 				null, null, Arrays.asList(
 						new ColumnInfo("name", GSType.STRING),
 						new ColumnInfo("value", GSType.STRING)),
-						true));
+						true),
+				getRowMapperConfig());
 
 		return new SubnetCollection<K, Row>(
 				this, channel, context, Row.class, mapper, -1, -1, -1,
-				CONTEXT_CONTROLLER_NAME, null) {
+				CONTEXT_CONTROLLER_KEY, null) {
 
 					@Override
 					public Row get(K key, boolean forUpdate) throws GSException {
@@ -2576,23 +3619,24 @@ public class SubnetGridStore implements GridStore {
 	public <K, R> Container<K, R> putContainer(
 			String name, Class<R> rowType,
 			ContainerInfo info, boolean modifiable) throws GSException {
+		final ContainerKeyConverter keyConverter =
+				getContainerKeyConverter(false, true);
 		return putContainer(
-				resolveContainerName(name, info),
-				resolveContainerType(null, info),
-				rowType, info, modifiable);
+				resolveContainerKey(
+						keyConverter.parse(name, false), info, keyConverter),
+				resolveContainerType(null, info), rowType,
+				new ContainerProperties(info), modifiable, false);
 	}
 
-	private static void setUserInfoRequest(BasicBuffer req,
-			String userName)
+	private void setUserInfoRequest(BasicBuffer req, String userName)
 			throws GSException {
-
 		
-		RowMapper.normalizeSymbol(userName);
+		RowMapper.checkSymbol(userName, "user name");
 		req.putString(userName);		
 	}
 
-	private void setUserInfoRequest(BasicBuffer req,
-			String userName, byte prop, String hashPassword)
+	private void setUserInfoRequest(
+			BasicBuffer req, String userName, byte prop, String hashPassword)
 			throws GSException {
 
 		
@@ -2602,13 +3646,14 @@ public class SubnetGridStore implements GridStore {
 		req.put(prop);		
 
 		if (hashPassword != null) {
-			if (hashPassword.length() == 0) {
+			if (hashPassword.isEmpty()) {
 				throw new GSException(
-						GSErrorCode.ILLEGAL_PARAMETER, "invalid parameter string length.");
+						GSErrorCode.EMPTY_PARAMETER, "Empty hash password");
 			}
 			req.putBoolean(true);		
 			req.putString(hashPassword);
-		} else {
+		}
+		else {
 			req.putBoolean(false);		
 			
 		}
@@ -2616,7 +3661,7 @@ public class SubnetGridStore implements GridStore {
 
 	private Map<String, UserInfo> getUserInfoMap(BasicBuffer resp) throws GSException {
 
-		final Map<String, UserInfo> map = new HashMap<String, UserInfo>();
+		Map<String, UserInfo> map = new HashMap<String, UserInfo>();
 
 		
 		final int userInfoCount = resp.base().getInt();	
@@ -2627,26 +3672,18 @@ public class SubnetGridStore implements GridStore {
 		}
 
 		
-		if (USER_INFO_COUNT_LIMIT < userInfoCount) {
-			throw new GSConnectionException(GSErrorCode.MESSAGE_CORRUPTED,
-					"Protocol error by too many result num (" +
-					"expected less than " + USER_INFO_COUNT_LIMIT +
-					": but " + userInfoCount + ")");
-		}
-
-		
 		for (int i = 0; i < userInfoCount; i++) {
 
 			String userName = resp.getString();		
 			Byte property = resp.base().get();		
-			boolean passwordExist = resp.getBoolean();	
+			Boolean passwordExist = resp.getBoolean();	
 			String hashPassword = "";
 
 			if (passwordExist) {
 				hashPassword = resp.getString();
 			}
 
-			map.put(userName, new UserInfo(userName, hashPassword, (property != 0)));
+			map.put(userName, new UserInfo(userName, hashPassword, (Boolean)(property != 0)));
 		}
 
 		return map;
@@ -2655,10 +3692,10 @@ public class SubnetGridStore implements GridStore {
 	public void putUser(String name, UserInfo userInfo, boolean modifiable)
 			throws GSException {
 
+		GSErrorCode.checkNullParameter(userInfo, "userInfo", null);
+
 		
-		name = validateName(name, userInfo.getName());
-		
-		RowMapper.normalizeSymbol(name);
+		name = resolveName(name, userInfo.getName(), "user name");
 
 		final BasicBuffer req = context.getRequestBuffer();
 		final BasicBuffer resp = context.getResponseBuffer();
@@ -2667,45 +3704,47 @@ public class SubnetGridStore implements GridStore {
 
 		NodeConnection.tryPutEmptyOptionalRequest(req);
 
-		final int partitionId = channel.resolvePartitionId(context, SYSTEM_USER_CONTAINER_NAME);
+		final int partitionId = SYSTEM_USER_PARTITION_ID;
 
-		if (userInfo.getPassword() != null && userInfo.getHashPassword() == null) {
+		final String password = userInfo.getPassword();
+		final String hashPassword = userInfo.getHashPassword();
 
-			if (userInfo.getPassword().length() == 0 || USER_PASSWORD_LENGTH_LIMIT < userInfo.getPassword().length()) {
+		if (password != null && hashPassword == null) {
+			RowMapper.checkString(password, "password");
+
+			final int bytesLength =
+					password.getBytes(BasicBuffer.DEFAULT_CHARSET).length;
+			if (bytesLength > MAX_PASSWORD_BYTES_LENGTH) {
 				throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
-						"Illegal password length");
+						"The length of password string bytes exceeded (max=" +
+						MAX_PASSWORD_BYTES_LENGTH + ")");
 			}
 
-			String hashPassword = NodeConnection.getDigest(userInfo.getPassword());
-			setUserInfoRequest(req, name, DEFAULT_DBUSER_PROPERTY, hashPassword);
-
-		} else if (userInfo.getPassword() == null && userInfo.getHashPassword() != null) {
-			setUserInfoRequest(req, name, DEFAULT_DBUSER_PROPERTY, userInfo.getHashPassword());
-
-		} else if (userInfo.getPassword() == null) {
+			setUserInfoRequest(
+					req, name, (byte) 0, NodeConnection.getDigest(password));
+		}
+		else if (password == null && hashPassword != null) {
+			setUserInfoRequest(req, name, (byte) 0, hashPassword);
+		}
+		else if (password == null) {
 			throw new GSException(GSErrorCode.EMPTY_PARAMETER,
-					"Password or hash password not specified");
-		} else {
-			throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
 					"Password and hash password not specified");
+		}
+		else {
+			throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
+					"Both password and hash password specified");
 		}
 
 		req.putBoolean(modifiable);
 
-		executeStatement(
-				Statement.PUT_USER,
-				partitionId, req, resp, null);
+		executeStatement(Statement.PUT_USER, partitionId, req, resp, null);
 	}
 
 	public void dropUser(String name) throws GSException {
-
-		if (name == null) {
-			throw new GSException(GSErrorCode.EMPTY_PARAMETER,
-					"Name not specified");
-		}
+		GSErrorCode.checkNullParameter(name, "name", null);
 
 		
-		RowMapper.normalizeSymbol(name);
+		name = resolveName(name, null, "user name");
 
 		final BasicBuffer req = context.getRequestBuffer();
 		final BasicBuffer resp = context.getResponseBuffer();
@@ -2714,13 +3753,11 @@ public class SubnetGridStore implements GridStore {
 
 		NodeConnection.tryPutEmptyOptionalRequest(req);
 
-		final int partitionId = channel.resolvePartitionId(context, SYSTEM_USER_CONTAINER_NAME);
+		final int partitionId = SYSTEM_USER_PARTITION_ID;
 
 		setUserInfoRequest(req, name);
 
-		executeStatement(
-				Statement.DROP_USER,
-				partitionId, req, resp, null);
+		executeStatement(Statement.DROP_USER, partitionId, req, resp, null);
 	}
 
 	public Map<String, UserInfo> getUsers() throws GSException {
@@ -2732,16 +3769,15 @@ public class SubnetGridStore implements GridStore {
 
 		NodeConnection.tryPutEmptyOptionalRequest(req);
 
-		final int partitionId = channel.resolvePartitionId(context, SYSTEM_USER_CONTAINER_NAME);
+		final int partitionId = SYSTEM_USER_PARTITION_ID;
 
 		req.putBoolean(false);	
-		req.put(DEFAULT_DBUSER_PROPERTY);		
+		
+		req.put((byte) 0);		
 
-		executeStatement(
-				Statement.GET_USERS,
-				partitionId, req, resp, null);
+		executeStatement(Statement.GET_USERS, partitionId, req, resp, null);
 
-		final Map<String, UserInfo> map = getUserInfoMap(resp);
+		Map<String, UserInfo> map = getUserInfoMap(resp);
 
 		return map;
 	}
@@ -2755,20 +3791,15 @@ public class SubnetGridStore implements GridStore {
 
 		NodeConnection.tryPutEmptyOptionalRequest(req);
 
-		final int partitionId = channel.resolvePartitionId(context, SYSTEM_USER_CONTAINER_NAME);
-
-		
-		RowMapper.normalizeExtendedSymbol(context.getUser(), true);
+		final int partitionId = SYSTEM_USER_PARTITION_ID;
 
 		req.putBoolean(true);	
 		req.putString(context.getUser());	
-		req.put(DEFAULT_DBUSER_PROPERTY);		
+		req.put((byte) 0);		
 
-		executeStatement(
-				Statement.GET_USERS,
-				partitionId, req, resp, null);
+		executeStatement(Statement.GET_USERS, partitionId, req, resp, null);
 
-		final Map<String, UserInfo> map = getUserInfoMap(resp);
+		Map<String, UserInfo> map = getUserInfoMap(resp);
 
 		
 		if (map.size() != 1) {
@@ -2789,17 +3820,15 @@ public class SubnetGridStore implements GridStore {
 		return userInfo;
 	}
 
-	private void setDatabaseInfoRequest(BasicBuffer req,
-			String dbName)
+	private void setDatabaseInfoRequest(BasicBuffer req, String dbName)
 			throws GSException {
-
-		RowMapper.normalizeSymbol(dbName);
+		RowMapper.checkSymbol(dbName, "database name");
 		req.putString(dbName);		
 	}
 
-	private void setDatabaseInfoRequest(BasicBuffer req,
-			String dbName, byte prop, Map<String, PrivilegeInfo> privileges)
-			throws GSException {
+	private void setDatabaseInfoRequest(
+			BasicBuffer req, String dbName, byte prop,
+			Map<String, PrivilegeInfo> privileges) throws GSException {
 
 		
 
@@ -2808,39 +3837,41 @@ public class SubnetGridStore implements GridStore {
 		req.put(prop);		
 
 		if (privileges != null) {
-
 			req.base().putInt(privileges.size());	
 
 			
 			for (Entry<String, PrivilegeInfo> privilegeEntry : privileges.entrySet()) {
 
-				RowMapper.normalizeSymbol(privilegeEntry.getKey());
+				RowMapper.checkSymbol(privilegeEntry.getKey(), "privilege name");
 				req.putString(privilegeEntry.getKey());	
 				PrivilegeInfo privilegeInfo = privilegeEntry.getValue();	
 				if (privilegeInfo == null) {
-					throw new GSException(GSErrorCode.EMPTY_PARAMETER,
-							"PrivilegeInfo not specified");
+					throw new GSException(
+							GSErrorCode.EMPTY_PARAMETER,
+							"Privilege info not specified");
 				}
 				req.putString(DEFAULT_PRIVILEGE);		
 			}
-		} else {
-
+		}
+		else {
 			req.base().putInt(0);	
 		}
 	}
 
-	private void setDatabaseInfoRequest(BasicBuffer req,
-			String dbName, byte prop, String userName, PrivilegeInfo info)
-			throws GSException {
+	private void setDatabaseInfoRequest(
+			BasicBuffer req, String dbName, byte prop, String userName,
+			PrivilegeInfo info) throws GSException {
+		RowMapper.checkSymbol(userName, "user name");
 
-		final Map<String, PrivilegeInfo> map = new HashMap<String, PrivilegeInfo>();
+		Map<String, PrivilegeInfo> map = new HashMap<String, PrivilegeInfo>();
 		map.put(userName, info);
-		setDatabaseInfoRequest(req, dbName, DEFAULT_DBUSER_PROPERTY, map);
+		setDatabaseInfoRequest(req, dbName, (byte) 0, map);
 	}
 
-	private Map<String, DatabaseInfo> getDatabaseInfoMap(BasicBuffer resp) throws GSException {
+	private Map<String, DatabaseInfo> getDatabaseInfoMap(BasicBuffer resp)
+			throws GSException {
 
-		final Map<String, DatabaseInfo> map = new HashMap<String, DatabaseInfo>();
+		Map<String, DatabaseInfo> map = new HashMap<String, DatabaseInfo>();
 
 		
 		final int databaseInfoCount = resp.base().getInt();	
@@ -2851,29 +3882,21 @@ public class SubnetGridStore implements GridStore {
 		}
 
 		
-		if (DATABASE_INFO_COUNT_LIMIT < databaseInfoCount) {
-			throw new GSConnectionException(GSErrorCode.MESSAGE_CORRUPTED,
-					"Protocol error by too many result num (" +
-					"expected less than " + DATABASE_INFO_COUNT_LIMIT +
-					": but " + databaseInfoCount + ")");
-		}
-
-		
 		for (int i = 0; i < databaseInfoCount; i++) {
 
-			String databaseName = resp.getString();	
-			@SuppressWarnings("unused")
-			Byte property = resp.base().get();		
+			final String databaseName = resp.getString();	
+			resp.base().get();		
 
 			final int privilegeInfoCount = resp.base().getInt();	
 
-			Map<String, PrivilegeInfo> privilegeInfoMap = new HashMap<String, PrivilegeInfo>();
+			final Map<String, PrivilegeInfo> privilegeInfoMap =
+					new HashMap<String, PrivilegeInfo>();
 			for (int j = 0; j < privilegeInfoCount; j++) {
-				String userName = resp.getString();		
-				String privilegeData = resp.getString();	
+				final String userName = resp.getString();		
+				final String privilegeData = resp.getString();	
 				if (!privilegeData.equals(DEFAULT_PRIVILEGE)) {
 					throw new GSConnectionException(GSErrorCode.MESSAGE_CORRUPTED,
-							"Protocol error by illegal privilegeDataSize (" +
+							"Protocol error by illegal privilege (" +
 							"expected=" + DEFAULT_PRIVILEGE +
 							", actual=" + privilegeData + ")");
 				}
@@ -2889,14 +3912,10 @@ public class SubnetGridStore implements GridStore {
 
 	public void putDatabase(String name, DatabaseInfo info, boolean modifiable)
 			throws GSException {
-
-		if (name == null) {
-			throw new GSException(GSErrorCode.EMPTY_PARAMETER,
-					"Name not specified");
-		}
+		GSErrorCode.checkNullParameter(info, "info", null);
 
 		
-		RowMapper.normalizeSymbol(name);
+		name = resolveName(name, info.getName(), "database name");
 
 		
 		modifiable = false;
@@ -2908,50 +3927,55 @@ public class SubnetGridStore implements GridStore {
 
 		NodeConnection.tryPutEmptyOptionalRequest(req);
 
-		final int partitionId = channel.resolvePartitionId(context, SYSTEM_USER_CONTAINER_NAME);
+		final int partitionId = SYSTEM_USER_PARTITION_ID;
 
 		
-		setDatabaseInfoRequest(req, name, DEFAULT_DBUSER_PROPERTY, null);
+		setDatabaseInfoRequest(req, name, (byte) 0, null);
 		req.putBoolean(modifiable);
 
-		executeStatement(
-				Statement.PUT_DATABASE,
-				partitionId, req, resp, null);
+		executeStatement(Statement.PUT_DATABASE, partitionId, req, resp, null);
 	}
 
 	public void dropDatabase(String name) throws GSException {
+		GSErrorCode.checkNullParameter(name, "name", null);
 
-		DatabaseInfo info = getCurrentDatabase();
-		if (!info.getName().equals(name)) {
+		final DatabaseInfo info = getCurrentDatabase();
+		if (!RowMapper.normalizeSymbolUnchecked(info.getName()).equals(
+				RowMapper.normalizeSymbolUnchecked(name))) {
 			throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
-					"Illegal database is specified; different from connected database");
+					"Only connected database can be dropped (" +
+					"connected=" + info.getName() +
+					", specified=" + name + ")");
 		}
 
-		PartitionController partitionController = getPartitionController();
-		int partitionCount = partitionController.getPartitionCount();
-		ContainerCondition cond = new ContainerCondition();
-		cond.setAttributes(EnumSet.of(ContainerAttribute.BASE,
+		final SubnetPartitionController partitionController =
+				getPartitionController();
+		final int partitionCount = partitionController.getPartitionCount();
+
+		final EnumSet<ContainerAttribute> attributeSet = EnumSet.of(
+				ContainerAttribute.BASE,
 				ContainerAttribute.SINGLE_SYSTEM,
 				ContainerAttribute.SINGLE,
 				ContainerAttribute.LARGE,
-				ContainerAttribute.SUB
-				));
+				ContainerAttribute.SUB);
+		if (isContainerAttributeUnified()) {
+			attributeSet.remove(ContainerAttribute.BASE);
+		}
+
+		final ContainerKeyPredicate pred =
+				new ContainerKeyPredicate(attributeSet);
 
 		for (int partitionIndex = 0; partitionIndex < partitionCount; partitionIndex++) {
-			long containerCount = ((SubnetPartitionController)partitionController).getContainerCount(partitionIndex, cond, true);
+			final long containerCount =
+					partitionController.getContainerCount(partitionIndex, pred, true);
 			if (0 < containerCount) {
-
 				throw new GSException(GSErrorCode.DATABASE_NOT_EMPTY,
-						"Illegal target error by non-empty database");
+						"Non-empty database cannot be dropped");
 			}
 		}
 
-		if (name == null) {
-			throw new GSException(GSErrorCode.EMPTY_PARAMETER, "Name not specified");
-		}
-
 		
-		RowMapper.normalizeSymbol(name);
+		name = resolveName(name, null, "database name");
 
 		final BasicBuffer req = context.getRequestBuffer();
 		final BasicBuffer resp = context.getResponseBuffer();
@@ -2960,13 +3984,12 @@ public class SubnetGridStore implements GridStore {
 
 		NodeConnection.tryPutEmptyOptionalRequest(req);
 
-		final int partitionId = channel.resolvePartitionId(context, SYSTEM_USER_CONTAINER_NAME);
+		final int partitionId = SYSTEM_USER_PARTITION_ID;
 
 		setDatabaseInfoRequest(req, name);
 
 		executeStatement(
-				Statement.DROP_DATABASE,
-				partitionId, req, resp, null);
+				Statement.DROP_DATABASE, partitionId, req, resp, null);
 	}
 
 	public Map<String, DatabaseInfo> getDatabases() throws GSException {
@@ -2978,16 +4001,16 @@ public class SubnetGridStore implements GridStore {
 
 		NodeConnection.tryPutEmptyOptionalRequest(req);
 
-		final int partitionId = channel.resolvePartitionId(context, SYSTEM_USER_CONTAINER_NAME);
+		final int partitionId = SYSTEM_USER_PARTITION_ID;
 
 		req.putBoolean(false);	
-		req.put(DEFAULT_DBUSER_PROPERTY);		
+		
+		req.put((byte) 0);		
 
 		executeStatement(
-				Statement.GET_DATABASES,
-				partitionId, req, resp, null);
+				Statement.GET_DATABASES, partitionId, req, resp, null);
 
-		final Map<String, DatabaseInfo> map = getDatabaseInfoMap(resp);
+		Map<String, DatabaseInfo> map = getDatabaseInfoMap(resp);
 
 		return map;
 	}
@@ -3001,13 +4024,13 @@ public class SubnetGridStore implements GridStore {
 
 		NodeConnection.tryPutEmptyOptionalRequest(req);
 
-		final int partitionId = channel.resolvePartitionId(context, SYSTEM_USER_CONTAINER_NAME);
+		final int partitionId = SYSTEM_USER_PARTITION_ID;
 
 		final String dbName = context.getDatabaseName();
 
 		req.putBoolean(true);	
 		req.putString(dbName == null ? "" : dbName);	
-		req.put(DEFAULT_DBUSER_PROPERTY);		
+		req.put((byte) 0);		
 
 		executeStatement(
 				Statement.GET_DATABASES, partitionId, req, resp, null);
@@ -3029,11 +4052,10 @@ public class SubnetGridStore implements GridStore {
 			if (info == null) {
 				throw new GSConnectionException(GSErrorCode.MESSAGE_CORRUPTED,
 						"Protocol error by illegal database name (" +
-						"expected=" + context.getDatabaseName() + ")");
+						"expected=" + dbName + ")");
 			}
-
-		} else {
-
+		}
+		else {
 			
 			throw new GSConnectionException(GSErrorCode.MESSAGE_CORRUPTED,
 					"Protocol error by illegal database info count (" +
@@ -3045,10 +4067,9 @@ public class SubnetGridStore implements GridStore {
 
 	public void putPrivilege(String dbName, String userName, PrivilegeInfo info)
 			throws GSException {
-
-		
-		RowMapper.normalizeSymbol(dbName);
-		RowMapper.normalizeSymbol(userName);
+		GSErrorCode.checkNullParameter(dbName, "dbName", null);
+		GSErrorCode.checkNullParameter(userName, "userName", null);
+		GSErrorCode.checkNullParameter(info, "info", null);
 
 		final BasicBuffer req = context.getRequestBuffer();
 		final BasicBuffer resp = context.getResponseBuffer();
@@ -3057,20 +4078,19 @@ public class SubnetGridStore implements GridStore {
 
 		NodeConnection.tryPutEmptyOptionalRequest(req);
 
-		final int partitionId = channel.resolvePartitionId(context, SYSTEM_USER_CONTAINER_NAME);
+		final int partitionId = SYSTEM_USER_PARTITION_ID;
 
-		setDatabaseInfoRequest(req, dbName, DEFAULT_DBUSER_PROPERTY, userName, info);
+		setDatabaseInfoRequest(req, dbName, (byte) 0, userName, info);
 
 		executeStatement(
-				Statement.PUT_PRIVILEGE,
-				partitionId, req, resp, null);
+				Statement.PUT_PRIVILEGE, partitionId, req, resp, null);
 	}
 
-	public void dropPrivilege(String dbName, String userName, PrivilegeInfo info) throws GSException {
-
-		
-		RowMapper.normalizeSymbol(dbName);
-		RowMapper.normalizeSymbol(userName);
+	public void dropPrivilege(String dbName, String userName, PrivilegeInfo info)
+			throws GSException {
+		GSErrorCode.checkNullParameter(dbName, "dbName", null);
+		GSErrorCode.checkNullParameter(userName, "userName", null);
+		GSErrorCode.checkNullParameter(info, "info", null);
 
 		final BasicBuffer req = context.getRequestBuffer();
 		final BasicBuffer resp = context.getResponseBuffer();
@@ -3079,14 +4099,17 @@ public class SubnetGridStore implements GridStore {
 
 		NodeConnection.tryPutEmptyOptionalRequest(req);
 
-		final int partitionId = channel.resolvePartitionId(context, SYSTEM_USER_CONTAINER_NAME);
+		final int partitionId = SYSTEM_USER_PARTITION_ID;
 
-		setDatabaseInfoRequest(req, dbName, DEFAULT_DBUSER_PROPERTY, userName, info);
+		setDatabaseInfoRequest(req, dbName, (byte) 0, userName, info);
 
 		executeStatement(
-				Statement.DROP_PRIVILEGE,
-				partitionId, req, resp, null);
+				Statement.DROP_PRIVILEGE, partitionId, req, resp, null);
+	}
+
+	@Override
+	public Experimentals.AsStore getExperimentalStore() {
+		return this;
 	}
 
 }
-

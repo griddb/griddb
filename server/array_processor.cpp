@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -77,7 +77,7 @@ int32_t ArrayProcessor::compare(TransactionContext &txn, ObjectManager &,
 	@brief Set field value to message
 */
 void ArrayProcessor::getField(TransactionContext &, ObjectManager &,
-	ColumnId columnId, Value *objectValue, MessageRowStore *messageRowStore) {
+	ColumnId columnId, const Value *objectValue, MessageRowStore *messageRowStore) {
 	messageRowStore->setArrayField(columnId);
 	if (objectValue->data() != NULL) {
 		const ArrayObject arrayObject(
@@ -92,7 +92,7 @@ void ArrayProcessor::getField(TransactionContext &, ObjectManager &,
 		messageRowStore->setVarSize(num);  
 		for (uint32_t i = 0; i < num; i++) {
 			const uint8_t *elemData =
-				arrayObject.getArrayElement(i, simpleType);
+				arrayObject.getArrayElement(i, FixedSizeOfColumnType[simpleType]);
 			messageRowStore->addArrayElement(
 				elemData, FixedSizeOfColumnType[simpleType]);
 		}

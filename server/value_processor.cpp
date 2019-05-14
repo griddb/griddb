@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -22,6 +22,7 @@
 #include "message_row_store.h"
 #include "schema.h"
 #include "value_operator.h"
+#include "geometry_processor.h"
 #include "util/time.h"
 #include "array_processor.h"
 #include "blob_processor.h"
@@ -60,11 +61,15 @@ int32_t ValueProcessor::compare(TransactionContext &txn,
 	case COLUMN_TYPE_DOUBLE:
 	case COLUMN_TYPE_TIMESTAMP: {
 		uint32_t objectRowFieldSize = 0;
-		result = comparatorTable[type][type](txn, inputField, inputFieldSize,
+		result = ComparatorTable::comparatorTable_[type][type](txn, inputField, inputFieldSize,
 			objectRowField, objectRowFieldSize);
 	} break;
 	case COLUMN_TYPE_STRING:
 		result = StringProcessor::compare(
+			txn, objectManager, columnId, messageRowStore, objectRowField);
+		break;
+	case COLUMN_TYPE_GEOMETRY:
+		result = GeometryProcessor::compare(
 			txn, objectManager, columnId, messageRowStore, objectRowField);
 		break;
 	case COLUMN_TYPE_BLOB:
@@ -110,12 +115,16 @@ int32_t ValueProcessor::compare(TransactionContext &txn,
 	case COLUMN_TYPE_TIMESTAMP: {
 		uint32_t srcObjectRowFieldSize = 0;
 		uint32_t targetObjectRowFieldSize = 0;
-		result = comparatorTable[type][type](txn, srcObjectRowField,
+		result = ComparatorTable::comparatorTable_[type][type](txn, srcObjectRowField,
 			srcObjectRowFieldSize, targetObjectRowField,
 			targetObjectRowFieldSize);
 	} break;
 	case COLUMN_TYPE_STRING:
 		result = StringProcessor::compare(
+			txn, objectManager, type, srcObjectRowField, targetObjectRowField);
+		break;
+	case COLUMN_TYPE_GEOMETRY:
+		result = GeometryProcessor::compare(
 			txn, objectManager, type, srcObjectRowField, targetObjectRowField);
 		break;
 	case COLUMN_TYPE_BLOB:
@@ -147,8 +156,14 @@ int32_t ValueProcessor::compare(TransactionContext &txn,
 	@brief Set field value to message
 */
 void ValueProcessor::getField(TransactionContext &txn,
-	ObjectManager &objectManager, ColumnId columnId, Value *objectValue,
+	ObjectManager &objectManager, ColumnId columnId, const Value *objectValue,
 	MessageRowStore *messageRowStore) {
+
+	if (objectValue->isNullValue()) {
+		messageRowStore->setNull(columnId);
+		return;
+	}
+
 	ColumnType type =
 		messageRowStore->getColumnInfoList()[columnId].getColumnType();
 
@@ -166,6 +181,10 @@ void ValueProcessor::getField(TransactionContext &txn,
 		break;
 	case COLUMN_TYPE_STRING:
 		StringProcessor::getField(
+			txn, objectManager, columnId, objectValue, messageRowStore);
+		break;
+	case COLUMN_TYPE_GEOMETRY:
+		GeometryProcessor::getField(
 			txn, objectManager, columnId, objectValue, messageRowStore);
 		break;
 	case COLUMN_TYPE_BLOB:
@@ -187,39 +206,6 @@ void ValueProcessor::getField(TransactionContext &txn,
 		ArrayProcessor::getField(
 			txn, objectManager, columnId, objectValue, messageRowStore);
 		break;
-	default:
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
-	}
-}
-
-/*!
-	@brief Set default field value
-*/
-void ValueProcessor::initField(ColumnType type, void *objectField) {
-	switch (type) {
-	case COLUMN_TYPE_BOOL:
-	case COLUMN_TYPE_BYTE:
-	case COLUMN_TYPE_SHORT:
-	case COLUMN_TYPE_INT:
-	case COLUMN_TYPE_LONG:
-	case COLUMN_TYPE_FLOAT:
-	case COLUMN_TYPE_DOUBLE:
-	case COLUMN_TYPE_TIMESTAMP:
-	case COLUMN_TYPE_OID:
-		memset(objectField, 0, FixedSizeOfColumnType[type]);
-		break;
-	case COLUMN_TYPE_STRING:
-	case COLUMN_TYPE_BLOB:
-	case COLUMN_TYPE_STRING_ARRAY:
-	case COLUMN_TYPE_BOOL_ARRAY:
-	case COLUMN_TYPE_BYTE_ARRAY:
-	case COLUMN_TYPE_SHORT_ARRAY:
-	case COLUMN_TYPE_INT_ARRAY:
-	case COLUMN_TYPE_LONG_ARRAY:
-	case COLUMN_TYPE_FLOAT_ARRAY:
-	case COLUMN_TYPE_DOUBLE_ARRAY:
-	case COLUMN_TYPE_TIMESTAMP_ARRAY: {
-	} break;
 	default:
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
 	}
@@ -482,7 +468,7 @@ StringCursor::StringCursor(
 		setBaseAddr(
 			ALLOC_NEW(txn.getDefaultAllocator()) uint8_t[offset + length_]);
 
-		uint32_t encodedLength = ValueProcessor::encodeVarSize(length_);
+		uint64_t encodedLength = ValueProcessor::encodeVarSize(length_);
 		memcpy(getBaseAddr(), &encodedLength, offset);
 		memcpy(getBaseAddr() + offset, str, length_);
 		moveCursor(offset);
@@ -502,7 +488,7 @@ StringCursor::StringCursor(TransactionContext &txn, const char *str)
 		setBaseAddr(
 			ALLOC_NEW(txn.getDefaultAllocator()) uint8_t[offset + length_]);
 
-		uint32_t encodedLength = ValueProcessor::encodeVarSize(length_);
+		uint64_t encodedLength = ValueProcessor::encodeVarSize(length_);
 		memcpy(getBaseAddr(), &encodedLength, offset);
 		memcpy(getBaseAddr() + offset, str, length_);
 		moveCursor(offset);
@@ -517,68 +503,124 @@ uint32_t StringCursor::getObjectSize() {
 }
 
 std::string ValueProcessor::getTypeName(ColumnType type) {
-	std::string str;
+	return getTypeNameChars(type);
+}
+
+const char8_t* ValueProcessor::getTypeNameChars(ColumnType type) {
 	switch (type) {
 	case COLUMN_TYPE_BOOL:
-		str = "BOOL";
-		break;
+		return "BOOL";
 	case COLUMN_TYPE_BYTE:
-		str = "BYTE";
-		break;
+		return "BYTE";
 	case COLUMN_TYPE_SHORT:
-		str = "SHORT";
-		break;
+		return "SHORT";
 	case COLUMN_TYPE_INT:
-		str = "INT";
-		break;
+		return "INTEGER";
 	case COLUMN_TYPE_LONG:
-		str = "LONG";
-		break;
+		return "LONG";
 	case COLUMN_TYPE_FLOAT:
-		str = "FLOAT";
-		break;
+		return "FLOAT";
 	case COLUMN_TYPE_DOUBLE:
-		str = "DOUBLE";
-		break;
+		return "DOUBLE";
 	case COLUMN_TYPE_TIMESTAMP:
-		str = "TIMESTAMP";
-		break;
+		return "TIMESTAMP";
 	case COLUMN_TYPE_STRING:
-		str = "STRING";
-		break;
+		return "STRING";
+	case COLUMN_TYPE_GEOMETRY:
+		return "GEOMETRY";
 	case COLUMN_TYPE_BLOB:
-		str = "BLOB";
-		break;
+		return "BLOB";
 	case COLUMN_TYPE_STRING_ARRAY:
-		str = "STRING_ARRAY";
-		break;
+		return "STRING_ARRAY";
 	case COLUMN_TYPE_BOOL_ARRAY:
-		str = "BOOL_ARRAY";
-		break;
+		return "BOOL_ARRAY";
 	case COLUMN_TYPE_BYTE_ARRAY:
-		str = "BYTE_ARRAY";
-		break;
+		return "BYTE_ARRAY";
 	case COLUMN_TYPE_SHORT_ARRAY:
-		str = "SHORT_ARRAY";
-		break;
+		return "SHORT_ARRAY";
 	case COLUMN_TYPE_INT_ARRAY:
-		str = "INT_ARRAY";
-		break;
+		return "INT_ARRAY";
 	case COLUMN_TYPE_LONG_ARRAY:
-		str = "LONG_ARRAY";
-		break;
+		return "LONG_ARRAY";
 	case COLUMN_TYPE_FLOAT_ARRAY:
-		str = "FLOAT_ARRAY";
-		break;
+		return "FLOAT_ARRAY";
 	case COLUMN_TYPE_DOUBLE_ARRAY:
-		str = "DOUBLE_ARRAY";
-		break;
+		return "DOUBLE_ARRAY";
 	case COLUMN_TYPE_TIMESTAMP_ARRAY:
-		str = "TIMESTAMP_ARRAY";
-		break;
+		return "TIMESTAMP_ARRAY";
 	default:
-		str = "UNKNON_TYPE";
-		break;
+		return "UNKNON_TYPE";
 	}
-	return str;
+}
+
+void ValueProcessor::dumpSimpleValue(util::NormalOStringStream &stream, ColumnType columnType, const void *data, uint32_t size, bool withType) {
+	if (isArray(columnType)) {
+		stream << "(support only simple type";
+	} else {
+		if (withType) {
+			stream << "(" << getTypeName(columnType) << ")";
+		}
+		switch (columnType) {
+		case COLUMN_TYPE_STRING :
+			{
+				util::NormalXArray<char> binary;
+				binary.push_back(static_cast<const char *>(data) + ValueProcessor::getEncodedVarSize(size), size);
+				binary.push_back('\0');
+				stream << "'" << binary.data() << "'";
+			}
+			break;
+		case COLUMN_TYPE_TIMESTAMP :
+			{
+				Timestamp val = *static_cast<const Timestamp *>(data);
+				util::DateTime dateTime(val);
+				dateTime.format(stream, false, false);
+			}
+			break;
+		case COLUMN_TYPE_GEOMETRY :
+		case COLUMN_TYPE_BLOB:
+			{
+				stream << "x'";
+				util::NormalIStringStream iss(
+						u8string(static_cast<const char8_t*>(data) + ValueProcessor::getEncodedVarSize(size), size));
+				util::HexConverter::encode(stream, iss);
+				stream << "'";
+			}
+			break;
+		case COLUMN_TYPE_BOOL:
+			if (*static_cast<const bool *>(data)) {
+				stream << "TRUE";
+			} else {
+				stream << "FALSE";
+			}
+			break;
+		case COLUMN_TYPE_BYTE: 
+			{
+				int16_t byteVal = 
+					*static_cast<const int8_t *>(data);
+				stream << byteVal;
+			}
+			break;
+		case COLUMN_TYPE_SHORT:
+			stream << *static_cast<const int16_t *>(data);
+			break;
+		case COLUMN_TYPE_INT:
+			stream << *static_cast<const int32_t *>(data);
+			break;
+		case COLUMN_TYPE_LONG:
+			stream << *static_cast<const int64_t *>(data);
+			break;
+		case COLUMN_TYPE_FLOAT:
+			stream << *static_cast<const float *>(data);
+			break;
+		case COLUMN_TYPE_DOUBLE:
+			stream << *static_cast<const double *>(data);
+			break;
+		case COLUMN_TYPE_NULL:
+			stream << "NULL";
+			break;
+		default:
+			stream << "(not implement)";
+			break;
+		}
+	}
 }

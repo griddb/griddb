@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -34,10 +34,17 @@ class TransactionManager;
 
 const int32_t TXN_MIN_TRANSACTION_TIMEOUT_INTERVAL = 0;
 
+#include "event_engine.h"
+
+const int32_t TXN_NO_TRANSACTION_TIMEOUT_INTERVAL = INT32_MAX;
+
+
 const int32_t TXN_STABLE_TRANSACTION_TIMEOUT_INTERVAL = 300;
 
 const int32_t TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL =
 	TXN_STABLE_TRANSACTION_TIMEOUT_INTERVAL;
+
+const int32_t CONNECTION_KEEPALIVE_TIMEOUT_INTERVAL = (TXN_STABLE_TRANSACTION_TIMEOUT_INTERVAL + 3) * 1000;
 
 const StatementId TXN_MIN_CLIENT_STATEMENTID = 1;
 
@@ -135,7 +142,7 @@ public:
 
 	TransactionManager &getManager();
 
-	void replaceAllocator(util::StackAllocator *allocator) {
+	void replaceDefaultAllocator(util::StackAllocator *allocator) {
 		alloc_ = allocator;
 	}
 	util::StackAllocator &getDefaultAllocator();
@@ -171,8 +178,14 @@ public:
 	int64_t getTransactionExpireTime() const;
 
 	int32_t getTransationTimeoutInterval() const;
+	void setTransationTimeoutInterval(int32_t interval);
 
 	int64_t getExpireTime() const;
+
+	const NodeDescriptor& getSenderND() const;
+
+	void setSenderND(const NodeDescriptor &nd);
+	void setContainerId(ContainerId containerId);
 
 private:
 	typedef int32_t State;  
@@ -205,6 +218,8 @@ private:
 	int64_t contextExpireTime_;
 
 	int32_t txnTimeoutInterval_;
+
+	NodeDescriptor senderND_;
 
 	TransactionContext(const TransactionContext &txn);
 	void set(const ClientId &clientId, PartitionId pId, ContainerId containerId,
@@ -378,11 +393,39 @@ inline int32_t TransactionContext::getTransationTimeoutInterval() const {
 	return txnTimeoutInterval_;
 }
 
+inline void TransactionContext::setTransationTimeoutInterval(int32_t interval) {
+	if (!isAutoCommit()) {
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
+	else if (clientId_ != TXN_EMPTY_CLIENTID) {
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
+	txnTimeoutInterval_ = interval;
+}
+
 /*!
 	@brief Gets this context expire time
 */
 inline int64_t TransactionContext::getExpireTime() const {
 	return contextExpireTime_;
+}
+
+/*!
+	@brief Sets this context NodeDescriptor
+*/
+inline void TransactionContext::setSenderND(const NodeDescriptor &nd) {
+	senderND_ = nd;
+}
+
+/*!
+	@brief Gets this context NodeDescriptor
+*/
+inline const NodeDescriptor& TransactionContext::getSenderND() const {
+	return senderND_;
+}
+
+inline void TransactionContext::setContainerId(ContainerId containerId) {
+	containerId_ = containerId;
 }
 
 inline void TransactionContext::clear() {

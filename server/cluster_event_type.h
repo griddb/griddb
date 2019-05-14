@@ -1,5 +1,5 @@
 ﻿/*
-	Copyright (c) 2012 TOSHIBA CORPORATION.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
@@ -47,19 +47,23 @@ enum WebAPIErrorType {
 	WEBAPI_CS_LEAVE_NOT_SAFETY_NODE,
 
 	WEBAPI_CP_OTHER_REASON = 200,
-	WEBAPI_RESERVED_ETYPE201,
-	WEBAPI_RESERVED_ETYPE202,
-	WEBAPI_RESERVED_ETYPE203,
+	WEBAPI_CP_BACKUPNAME_IS_EMPTY,
+	WEBAPI_CP_CREATE_BACKUP_PATH_FAILED,
+	WEBAPI_CP_BACKUPNAME_ALREADY_EXIST,
 	WEBAPI_CP_SHUTDOWN_IS_ALREADY_IN_PROGRESS,
-	WEBAPI_RESERVED_ETYPE205,
-	WEBAPI_RESERVED_ETYPE206,
-	WEBAPI_RESERVED_ETYPE207,
-	WEBAPI_RESERVED_ETYPE208,
+	WEBAPI_CP_BACKUP_MODE_IS_INVALID,
+	WEBAPI_CP_PREVIOUS_BACKUP_MODE_IS_NOT_INCREMENTAL_MODE,
+	WEBAPI_CP_INCREMENTAL_BACKUP_LEVEL_IS_INVALID,
+	WEBAPI_CP_INCREMENTAL_BACKUP_COUNT_EXCEEDS_LIMIT,
 
-	WEBAPI_RESERVED_ETYPE210 = 210,
-	WEBAPI_RESERVED_ETYPE211,
+	WEBAPI_CP_BACKUPNAME_UNMATCH = 210,
+	WEBAPI_CP_BACKUP_MODE_IS_NOT_ARCHIVELOG_MODE,
 	WEBAPI_CP_PARTITION_STATUS_IS_CHANGED,
-	WEBAPI_RESERVED_ETYPE212,
+	WEBAPI_CP_ARCHIVELOG_MODE_IS_INVALID,
+	WEBAPI_CP_LONGTERM_SYNC_IS_NOT_READY,
+	WEBAPI_CP_LONG_ARCHIVE_NAME_IS_EMPTY,
+	WEBAPI_CP_LONG_ARCHIVE_NAME_ALREADY_EXIST,
+	WEBAPI_CP_CREATE_LONG_ARCHIVE_PATH_FAILED,
 
 	WEBAPI_NOT_RECOVERY_CHECKPOINT = 400,
 	WEBAPI_CONFIG_SET_ERROR,
@@ -94,8 +98,10 @@ enum GSEventType {
 						   later */
 	CREATE_SESSION,		/*!< same as CREATE_TRANSACTION_CONTEXT */
 	CLOSE_SESSION,		/*!< same as CLOSE_TRANSACTION_CONTEXT */
-	CREATE_INDEX,		/*!< create index */
-	DELETE_INDEX,		/*!< delete index */
+	V_3_2_CREATE_INDEX,	/*!< obsolete event, not supported for version 3.5 or
+						  later */
+	V_3_2_DELETE_INDEX,	/*!< obsolete event, not supported for version 3.5 or
+						  later */
 	CREATE_EVENT_NOTIFICATION, /*!< obsolete event, not supported for version
 								  2.0 or later */
 	DELETE_EVENT_NOTIFICATION, /*!< obsolete event, not supported for version
@@ -106,8 +112,8 @@ enum GSEventType {
 	ABORT_TRANSACTION,  /*!< abort transaction */
 	GET_COLLECTION_ROW,   /*!< same as GET_ROW */
 	QUERY_COLLECTION_TQL, /*!< same as QUERY_TQL */
-	RESERVED_EVENT1,
-	RESERVED_EVENT2,
+	QUERY_COLLECTION_GEOMETRY_RELATED,
+	QUERY_COLLECTION_GEOMETRY_WITH_EXCLUSION,
 	PUT_COLLECTION_ROW,			 /*!< same as PUT_ROW */
 	PUT_COLLECTION_ROWSET,		 /*!< same as PUT_MULTIPLE_ROWS */
 	UPDATE_COLLECTION_ROW_BY_ID, /*!< same as UPDATE_ROW_BY_ID */
@@ -183,8 +189,16 @@ enum GSEventType {
 	DROP_DATABASE,   /*!< remove database */
 	PUT_PRIVILEGE,   /*!< put privilege */
 	DROP_PRIVILEGE,  /*!< remove privilege */
-	RESERVED_EVENT162 = 162,
-	RESERVED_EVENT163,
+	CREATE_INDEX,		/*!< create index */
+	DELETE_INDEX,		/*!< delete index */
+
+	PUT_LARGE_CONTAINER = 300,
+	UPDATE_CONTAINER_STATUS,
+	CREATE_LARGE_INDEX,
+	DROP_LARGE_INDEX,
+
+	REMOVE_MULTIPLE_ROWS_BY_ID_SET,
+	UPDATE_MULTIPLE_ROWS_BY_ID_SET,
 
 	CLIENT_STATEMENT_TYPE_MAX =
 		499,  
@@ -200,6 +214,11 @@ enum GSEventType {
 	CHUNK_EXPIRE_PERIODICALLY,  /*!< periodic removal of expired chunk blocks */
 	ADJUST_STORE_MEMORY_PERIODICALLY, /*!< periodic adjustment of store block
 										 memory */
+	BACK_GROUND,				
+	CONTINUE_CREATE_INDEX,
+	CONTINUE_ALTER_CONTAINER,
+	UPDATE_DATA_STORE_STATUS, 
+	PURGE_DATA_AFFINITY_INFO_PERIODICALLY,
 
 	AUTHENTICATION = 700, /*!< authentication */
 	AUTHENTICATION_ACK,   /*!< authentication ack */
@@ -214,8 +233,8 @@ enum GSEventType {
 	CS_UPDATE_PARTITION,   
 	CS_JOIN_CLUSTER,	   /*!< join cluster (Web API) */
 	CS_LEAVE_CLUSTER,	  /*!< leave cluster (Web API) */
-	RESERVED_EVENT1101,
-	RESERVED_EVENT1102,
+	CS_INCREASE_CLUSTER, /*!< increase cluster (Web API) */
+	CS_DECREASE_CLUSTER, /*!< decrease cluster (Web API) */
 	CS_SHUTDOWN_NODE_NORMAL,			 /*!< shutdown node (Web API) */
 	CS_SHUTDOWN_NODE_FORCE,				 /*!< force shutdown node (Web API) */
 	CS_GOSSIP,							 /*!< gossip */
@@ -236,10 +255,9 @@ enum GSEventType {
 	CS_TIMER_CHECK_LOAD_BALANCE, /*!< periodic check of load balancing */
 	CS_SYNC_TEST,
 
-#ifdef GD_ENABLE_UNICAST_NOTIFICATION
 	CS_UPDATE_PROVIDER,
 	CS_CHECK_PROVIDER,
-#endif
+
 
 
 	TXN_SHORTTERM_SYNC_REQUEST =
@@ -258,12 +276,15 @@ enum GSEventType {
 	TXN_LONGTERM_SYNC_LOG,		  /*!< long-term log synchronization */
 	TXN_LONGTERM_SYNC_LOG_ACK,	/*!< LONGTERM_SYNC_LOG ack */
 	TXN_SYNC_TIMEOUT,			  /*!< synchronization timeout */
-
+	TXN_LONGTERM_SYNC_PREPARE_ACK,
 	SYC_SHORTTERM_SYNC_LOG =
 		2500,			   /*!< shor-term synchronization via SyncService */
 	SYC_LONGTERM_SYNC_LOG, /*!< long-term log synchronization via SyncService */
 	SYC_LONGTERM_SYNC_CHUNK, /*!< long-term chunk synchronization via
 								SyncService */
+	TXN_SYNC_CHECK_END,
+
+
 
 	PARTITION_GROUP_START =
 		3000,			 /*!< start of checkpoint among a group of Partitions */
@@ -273,10 +294,13 @@ enum GSEventType {
 	PARTITION_GROUP_END, /*!< end of checkpoint among a group of Partitions */
 	WRITE_LOG_PERIODICALLY, /*!< periodic write to log */
 	CLEANUP_CP_DATA,		/*!< cleanup checkpoint information */
-	RESERVED_EVENT3001,
+	CLEANUP_LOG_FILES,				
+	CP_TXN_PREPARE_LONGTERM_SYNC,	
+	CP_TXN_STOP_LONGTERM_SYNC,		
 
 	SYS_EVENT_SIMULATE_FAILURE = 3500,
 	SYS_EVENT_OUTPUT_STATS, /*!< get statistics (Web API) */
+
 
 
 
