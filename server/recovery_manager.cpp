@@ -49,7 +49,6 @@ UTIL_TRACER_DECLARE(RECOVERY_MANAGER_DETAIL);
 	GS_RETHROW_CUSTOM_ERROR(LogRedoException, GS_ERROR_DEFAULT, cause, message)
 
 
-
 const std::string RecoveryManager::BACKUP_INFO_FILE_NAME("gs_backup_info.json");
 const std::string RecoveryManager::BACKUP_INFO_DIGEST_FILE_NAME(
 	"gs_backup_info_digest.json");
@@ -796,7 +795,7 @@ void RecoveryManager::redoLogList(util::StackAllocator &alloc, Mode mode,
 			if (mode != MODE_RECOVERY && pId != logRecord.partitionId_) {
 				RM_THROW_LOG_REDO_ERROR(
 					GS_ERROR_TXN_REPLICATION_LOG_LSN_INVALID,
-					"Invalid logRecord, target pId=" << pId << ", log pId="
+					"Invalid logRecord, target pId:" << pId << ", log pId:"
 													 << logRecord.partitionId_);
 			}
 
@@ -1787,7 +1786,8 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 			const TransactionManager::ContextSource src(COMMIT_TRANSACTION,
 				logRecord.stmtId_, logRecord.containerId_,
 				logRecord.txnTimeout_, TransactionManager::PUT,
-				TransactionManager::NO_AUTO_COMMIT_BEGIN_OR_CONTINUE);
+				TransactionManager::NO_AUTO_COMMIT_BEGIN_OR_CONTINUE,
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
 			TransactionContext &txn =
 				txnMgr_->put(alloc, pId, logRecord.clientId_, src,
 					stmtStartTime, stmtStartEmTime, REDO, logRecord.txnId_);
@@ -1818,7 +1818,8 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 			const TransactionManager::ContextSource src(ABORT_TRANSACTION,
 				logRecord.stmtId_, logRecord.containerId_,
 				logRecord.txnTimeout_, TransactionManager::PUT,
-				TransactionManager::NO_AUTO_COMMIT_BEGIN_OR_CONTINUE);
+				TransactionManager::NO_AUTO_COMMIT_BEGIN_OR_CONTINUE,
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
 			TransactionContext &txn =
 				txnMgr_->put(alloc, pId, logRecord.clientId_, src,
 					stmtStartTime, stmtStartEmTime, REDO, logRecord.txnId_);
@@ -1881,7 +1882,8 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 					static_cast<TransactionManager::GetMode>(
 						logRecord.txnContextCreationMode_)),
 				txnMgr_->getTransactionModeForRecovery(
-					logRecord.withBegin_, logRecord.isAutoCommit_));
+					logRecord.withBegin_, logRecord.isAutoCommit_),
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
 			GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL, GS_TRACE_RM_REDO_LOG_STATUS,
 				"LOG_TYPE_CREATE_CONTAINER(pId="
 					<< pId << ", lsn=" << logRecord.lsn_
@@ -1943,7 +1945,8 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 			const TransactionManager::ContextSource src(DROP_CONTAINER,
 				logRecord.stmtId_, logRecord.containerId_,
 				TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL,
-				TransactionManager::AUTO, TransactionManager::AUTO_COMMIT);
+				TransactionManager::AUTO, TransactionManager::AUTO_COMMIT,
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
 			TransactionContext &txn = txnMgr_->put(alloc, pId,
 				TXN_EMPTY_CLIENTID, src, stmtStartTime, stmtStartEmTime, REDO);
 
@@ -1966,7 +1969,8 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 					static_cast<TransactionManager::GetMode>(
 						logRecord.txnContextCreationMode_)),
 				txnMgr_->getTransactionModeForRecovery(
-					logRecord.withBegin_, logRecord.isAutoCommit_));
+					logRecord.withBegin_, logRecord.isAutoCommit_),
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
 			GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL, GS_TRACE_RM_REDO_LOG_STATUS,
 				"LOG_TYPE_CREATE_INDEX(pId="
 					<< pId << ", lsn=" << logRecord.lsn_
@@ -2021,7 +2025,8 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 					static_cast<TransactionManager::GetMode>(
 						logRecord.txnContextCreationMode_)),
 				txnMgr_->getTransactionModeForRecovery(
-					logRecord.withBegin_, logRecord.isAutoCommit_));
+					logRecord.withBegin_, logRecord.isAutoCommit_),
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
 			GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL, GS_TRACE_RM_REDO_LOG_STATUS,
 				"LOG_TYPE_CREATE_INDEX(pId=" << pId
 					<< ", lsn=" << logRecord.lsn_
@@ -2112,7 +2117,8 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 			const TransactionManager::ContextSource src(DELETE_INDEX,
 				logRecord.stmtId_, logRecord.containerId_,
 				TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL,
-				TransactionManager::AUTO, TransactionManager::AUTO_COMMIT);
+				TransactionManager::AUTO, TransactionManager::AUTO_COMMIT,
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
 			TransactionContext &txn = txnMgr_->put(alloc, pId,
 				TXN_EMPTY_CLIENTID, src, stmtStartTime, stmtStartEmTime, REDO);
 
@@ -2156,7 +2162,8 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 			const TransactionManager::ContextSource src(CREATE_TRIGGER,
 				logRecord.stmtId_, logRecord.containerId_,
 				TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL,
-				TransactionManager::AUTO, TransactionManager::AUTO_COMMIT);
+				TransactionManager::AUTO, TransactionManager::AUTO_COMMIT,
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
 			TransactionContext &txn = txnMgr_->put(alloc, pId,
 				TXN_EMPTY_CLIENTID, src, stmtStartTime, stmtStartEmTime, REDO);
 
@@ -2183,7 +2190,8 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 			const TransactionManager::ContextSource src(DELETE_TRIGGER,
 				logRecord.stmtId_, logRecord.containerId_,
 				TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL,
-				TransactionManager::AUTO, TransactionManager::AUTO_COMMIT);
+				TransactionManager::AUTO, TransactionManager::AUTO_COMMIT,
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
 			TransactionContext &txn = txnMgr_->put(alloc, pId,
 				TXN_EMPTY_CLIENTID, src, stmtStartTime, stmtStartEmTime, REDO);
 
@@ -2209,7 +2217,8 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 					static_cast<TransactionManager::GetMode>(
 						logRecord.txnContextCreationMode_)),
 				txnMgr_->getTransactionModeForRecovery(
-					logRecord.withBegin_, logRecord.isAutoCommit_));
+					logRecord.withBegin_, logRecord.isAutoCommit_),
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
 			GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL, GS_TRACE_RM_REDO_LOG_STATUS,
 				"LOG_TYPE_PUT_ROW(pId="
 					<< pId << ", lsn=" << logRecord.lsn_
@@ -2280,7 +2289,8 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 					static_cast<TransactionManager::GetMode>(
 						logRecord.txnContextCreationMode_)),
 				txnMgr_->getTransactionModeForRecovery(
-					logRecord.withBegin_, logRecord.isAutoCommit_));
+					logRecord.withBegin_, logRecord.isAutoCommit_),
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
 			GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL, GS_TRACE_RM_REDO_LOG_STATUS,
 				"LOG_TYPE_UPDATE_ROW(pId="
 					<< pId << ", lsn=" << logRecord.lsn_
@@ -2340,7 +2350,8 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 					static_cast<TransactionManager::GetMode>(
 						logRecord.txnContextCreationMode_)),
 				txnMgr_->getTransactionModeForRecovery(
-					logRecord.withBegin_, logRecord.isAutoCommit_));
+					logRecord.withBegin_, logRecord.isAutoCommit_),
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
 			GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL, GS_TRACE_RM_REDO_LOG_STATUS,
 				"LOG_TYPE_REMOVE_ROW(pId="
 					<< pId << ", lsn=" << logRecord.lsn_
@@ -2397,7 +2408,8 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 					static_cast<TransactionManager::GetMode>(
 						logRecord.txnContextCreationMode_)),
 				txnMgr_->getTransactionModeForRecovery(
-					logRecord.withBegin_, logRecord.isAutoCommit_));
+					logRecord.withBegin_, logRecord.isAutoCommit_),
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
 			GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL, GS_TRACE_RM_REDO_LOG_STATUS,
 				"LOG_TYPE_LOCK_ROW(pId="
 					<< pId << ", lsn=" << logRecord.lsn_

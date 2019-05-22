@@ -945,8 +945,9 @@ void StatementHandler::executeAuthenticationInternal(
 		query.append("'");
 
 		ResultSet *rs = dataStore_->createResultSet(
-			txn, container->getContainerId(), container->getVersionId(), emNow);
-		const ResultSetGuard rsGuard(*dataStore_, *rs);
+			txn, container->getContainerId(), container->getVersionId(), emNow,
+			NULL);
+		const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
 		QueryProcessor::executeTQL(
 			txn, *container, MAX_RESULT_SIZE, TQLInfo(GS_SYSTEM, NULL, query.c_str()), *rs);  
 		rs->setResultType(RESULT_ROWSET);
@@ -959,7 +960,7 @@ void StatementHandler::executeAuthenticationInternal(
 		if (*count != 1) {
 			TEST_PRINT("count!=1(userName)\n");
 			GS_THROW_USER_ERROR(GS_ERROR_TXN_AUTH_FAILED,
-				"invalid user name or password (user mame = " << userName
+				"invalid user name or password (user name = " << userName
 															  << ")");
 		}
 
@@ -1008,8 +1009,9 @@ void StatementHandler::executeAuthenticationInternal(
 		makeRowKey(dbUserName.c_str(), rowKey);
 
 		ResultSet *rs = dataStore_->createResultSet(
-			txn, container->getContainerId(), container->getVersionId(), emNow);
-		const ResultSetGuard rsGuard(*dataStore_, *rs);
+			txn, container->getContainerId(), container->getVersionId(), emNow,
+			NULL);
+		const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
 		QueryProcessor::get(txn, *container,
 			static_cast<uint32_t>(rowKey.size()), rowKey.data(), *rs);
 		rs->setResultType(RESULT_ROWSET);
@@ -1065,8 +1067,9 @@ void StatementHandler::executeAuthenticationInternal(
 		makeRowKey(dbUserName.c_str(), rowKey);
 
 		ResultSet *rs = dataStore_->createResultSet(
-			txn, container->getContainerId(), container->getVersionId(), emNow);
-		const ResultSetGuard rsGuard(*dataStore_, *rs);
+			txn, container->getContainerId(), container->getVersionId(), emNow,
+			NULL);
+		const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
 		QueryProcessor::get(txn, *container,
 			static_cast<uint32_t>(rowKey.size()), rowKey.data(), *rs);
 		rs->setResultType(RESULT_ROWSET);
@@ -1162,8 +1165,8 @@ int64_t StatementHandler::count(
 		query.append("select count(*)");
 	}
 	ResultSet *rs = dataStore_->createResultSet(
-		txn, container->getContainerId(), container->getVersionId(), emNow);
-	const ResultSetGuard rsGuard(*dataStore_, *rs);
+		txn, container->getContainerId(), container->getVersionId(), emNow, NULL);
+	const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
 
 	QueryProcessor::executeTQL(
 		txn, *container, MAX_RESULT_SIZE, TQLInfo(GS_SYSTEM, NULL, query.c_str()), *rs);
@@ -1210,8 +1213,8 @@ void StatementHandler::checkUser(
 	makeRowKey(userName, rowKey);
 
 	ResultSet *rs = dataStore_->createResultSet(
-		txn, container->getContainerId(), container->getVersionId(), emNow);
-	const ResultSetGuard rsGuard(*dataStore_, *rs);
+		txn, container->getContainerId(), container->getVersionId(), emNow, NULL);
+	const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
 	QueryProcessor::get(txn, *container, static_cast<uint32_t>(rowKey.size()),
 		rowKey.data(), *rs);
 	rs->setResultType(RESULT_ROWSET);
@@ -1252,8 +1255,8 @@ void StatementHandler::checkUserWithTQL(
 	query.append("')");
 
 	ResultSet *rs = dataStore_->createResultSet(
-		txn, container->getContainerId(), container->getVersionId(), emNow);
-	const ResultSetGuard rsGuard(*dataStore_, *rs);
+		txn, container->getContainerId(), container->getVersionId(), emNow, NULL);
+	const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
 
 	QueryProcessor::executeTQL(
 		txn, *container, MAX_RESULT_SIZE, TQLInfo(GS_SYSTEM, NULL, query.c_str()), *rs);
@@ -1527,8 +1530,8 @@ void DropUserHandler::executeTQLAndRemoveDatabaseRow(
 		query.append("'");
 
 		ResultSet *rs = dataStore_->createResultSet(
-			txn, container->getContainerId(), container->getVersionId(), emNow);
-		const ResultSetGuard rsGuard(*dataStore_, *rs);
+			txn, container->getContainerId(), container->getVersionId(), emNow, NULL);
+		const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
 
 		QueryProcessor::executeTQL(
 			txn, *container, MAX_RESULT_SIZE, TQLInfo(GS_SYSTEM, NULL, query.c_str()), *rs);
@@ -1785,8 +1788,8 @@ void StatementHandler::executeTQLUser(
 
 
 	ResultSet *rs = dataStore_->createResultSet(
-		txn, container->getContainerId(), container->getVersionId(), emNow);
-	const ResultSetGuard rsGuard(*dataStore_, *rs);
+		txn, container->getContainerId(), container->getVersionId(), emNow, NULL);
+	const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
 	QueryProcessor::executeTQL(
 		txn, *container, MAX_RESULT_SIZE, TQLInfo(GS_SYSTEM, NULL, query.c_str()), *rs);
 	rs->setResultType(RESULT_ROWSET);
@@ -1982,8 +1985,8 @@ void PutDatabaseHandler::checkDatabaseWithTQL(
 	query.append("') and property=1");
 
 	ResultSet *rs = dataStore_->createResultSet(
-		txn, container->getContainerId(), container->getVersionId(), emNow);
-	const ResultSetGuard rsGuard(*dataStore_, *rs);
+		txn, container->getContainerId(), container->getVersionId(), emNow, NULL);
+	const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
 	QueryProcessor::executeTQL(
 		txn, *container, MAX_RESULT_SIZE, TQLInfo(GS_SYSTEM, NULL, query.c_str()), *rs);
 	rs->setResultType(RESULT_ROWSET);
@@ -2214,8 +2217,8 @@ void DropDatabaseHandler::executeTQLAndRemoveDatabaseRow(
 	}
 
 	ResultSet *rs = dataStore_->createResultSet(
-		txn, container->getContainerId(), container->getVersionId(), emNow);
-	const ResultSetGuard rsGuard(*dataStore_, *rs);
+		txn, container->getContainerId(), container->getVersionId(), emNow, NULL);
+	const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
 	QueryProcessor::executeTQL(
 		txn, *container, MAX_RESULT_SIZE, TQLInfo(GS_SYSTEM, NULL, query.c_str()), *rs);
 	rs->setResultType(RESULT_ROWSET);
@@ -2416,8 +2419,8 @@ void GetDatabasesHandler::executeTQLDatabase(
 	}
 
 	ResultSet *rs = dataStore_->createResultSet(
-		txn, container->getContainerId(), container->getVersionId(), emNow);
-	const ResultSetGuard rsGuard(*dataStore_, *rs);
+		txn, container->getContainerId(), container->getVersionId(), emNow, NULL);
+	const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
 	QueryProcessor::executeTQL(
 		txn, *container, MAX_RESULT_SIZE, TQLInfo(GS_SYSTEM, NULL, query.c_str()), *rs);
 	rs->setResultType(RESULT_ROWSET);
@@ -2551,8 +2554,8 @@ void StatementHandler::checkDatabaseWithTQL(
 	query.append("'");
 
 	ResultSet *rs = dataStore_->createResultSet(
-		txn, container->getContainerId(), container->getVersionId(), emNow);
-	const ResultSetGuard rsGuard(*dataStore_, *rs);
+		txn, container->getContainerId(), container->getVersionId(), emNow, NULL);
+	const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
 	QueryProcessor::executeTQL(
 		txn, *container, MAX_RESULT_SIZE, TQLInfo(GS_SYSTEM, NULL, query.c_str()), *rs);
 	rs->setResultType(RESULT_ROWSET);
@@ -2598,8 +2601,8 @@ void StatementHandler::checkDetailDatabaseWithTQL(
 	query.append("' and property=0");
 
 	ResultSet *rs = dataStore_->createResultSet(
-		txn, container->getContainerId(), container->getVersionId(), emNow);
-	const ResultSetGuard rsGuard(*dataStore_, *rs);
+		txn, container->getContainerId(), container->getVersionId(), emNow, NULL);
+	const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
 	QueryProcessor::executeTQL(
 		txn, *container, MAX_RESULT_SIZE, TQLInfo(GS_SYSTEM, NULL, query.c_str()), *rs);
 	rs->setResultType(RESULT_ROWSET);
@@ -2924,7 +2927,6 @@ void StatementHandler::replySuccess(
 		Event ev(ec, LOGIN, authContext.getPartitionId());
 		setSuccessReply(alloc, ev, authContext.getStatementId(), status,
 			response);  
-
 		ec.getEngine().send(ev, authContext.getConnectionND());
 
 		TEST_PRINT("replySuccess() END\n");

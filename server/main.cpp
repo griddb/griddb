@@ -58,9 +58,9 @@
 
 const char8_t *const GS_PRODUCT_NAME = "GridDB";
 const int32_t GS_MAJOR_VERSION = 4;
-const int32_t GS_MINOR_VERSION = 1;
-const int32_t GS_REVISION = 1;
-const int32_t GS_BUILD_NO = 34792;
+const int32_t GS_MINOR_VERSION = 2;
+const int32_t GS_REVISION = 0;
+const int32_t GS_BUILD_NO = 35233;
 
 const char8_t *const GS_EDITION_NAME = "Community Edition";
 const char8_t *const GS_EDITION_NAME_SHORT = "CE";
@@ -70,7 +70,7 @@ const char8_t *const SYS_NODE_FILE_NAME = "gs_node.json";
 const char8_t *const SYS_DEVELOPER_FILE_NAME = "gs_developer.json";
 const char8_t *const GS_CLUSTER_PARAMATER_DIFF_FILE_NAME = "gs_diff.json";
 
-const char8_t *const GS_TRACE_SECRET_HEX_KEY = "7B790AB2C82F01B3";
+const char8_t *const GS_TRACE_SECRET_HEX_KEY = "7B790AB2C82F01B3"; 
 
 static void autoJoinCluster(const Event::Source &eventSource,
 	util::StackAllocator &alloc, SystemService &sysSvc, PartitionTable &pt,
@@ -140,7 +140,6 @@ public:
 
 	const ConfigTable &config_;
 };
-
 
 void setUpArchive(const char *bibFile, ConfigTable &config, BibInfo &bibInfo) {
 	std::string jsonString;
@@ -738,7 +737,8 @@ void autoJoinCluster(const Event::Source &eventSource,
 			std::vector<NodeId> backups;
 			for (pId = 0; pId < pt.getPartitionNum(); pId++) {
 				pt.setPartitionStatus(pId, PartitionTable::PT_ON);
-				PartitionRole role(pId, rev, PartitionTable::PT_CURRENT_OB);
+				PartitionRole role(
+					pId, rev, PartitionTable::PT_CURRENT_OB);
 				pt.setPartitionRole(pId, role);
 			}
 			break;
@@ -1008,7 +1008,7 @@ void setUpTrace(const ConfigTable *config, bool checkOnly, bool longArchive) {
 	manager.setMaxRotationFileCount(
 		config->get<int32_t>(CONFIG_TABLE_TRACE_FILE_COUNT));
 
-	manager.setRotationMode(util::TraceOption::ROTATION_DALILY);
+	manager.setRotationMode(util::TraceOption::ROTATION_DAILY);
 
 	if (!checkOnly || longArchive) {
 		manager.setOutputType(static_cast<util::TraceOption::OutputType>(

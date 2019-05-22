@@ -599,8 +599,9 @@ Timestamp Expr::getTimeStamp() {
 	if (value_->getType() == COLUMN_TYPE_TIMESTAMP) {
 		return *reinterpret_cast<const Timestamp *>(value_->data());
 	}
-	GS_THROW_USER_ERROR(GS_ERROR_TQ_CRITICAL_LOGIC_ERROR,
-		"Internal logic error: getTimeStamp() is called in invalid context.");
+
+	GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
+		"Invalid datatypes: argument is not a timestamp value");
 }
 
 /*!
@@ -1185,7 +1186,6 @@ Expr *Expr::eval(TransactionContext &txn, ObjectManager &objectManager,
 			case BITMINUS:
 				return evalSubUnaryOpBaseZero(txn, objectManager, CalculatorTable::subTable_,
 					column_values, function_map, "-", mode);
-
 			case IS:
 				return evalSubBinOp(txn, objectManager, this->op_, column_values,
 					function_map, "IS", mode);
@@ -1269,9 +1269,9 @@ Expr *Expr::eval(TransactionContext &txn, ObjectManager &objectManager,
 			case EVAL_MODE_CONTRACT:
 				return this->dup(txn, objectManager);
 			default:
-				GS_THROW_USER_ERROR(GS_ERROR_TQ_INTERNAL_INVALID_ARGUMENT,
+				GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 					(util::String(
-						 "Internal logic error: cannot bind ", QP_ALLOCATOR) +
+						 "Invalid argument type : cannot bind ", QP_ALLOCATOR) +
 						getValueAsString(txn))
 						.c_str());
 			}
@@ -1336,8 +1336,8 @@ Expr *Expr::eval(TransactionContext &txn, ObjectManager &objectManager,
 			default:
 				break;  
 			}
-			GS_THROW_USER_ERROR(GS_ERROR_TQ_CRITICAL_LOGIC_ERROR,
-				"Internal logic error: Unknown data type_ or "
+			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
+				"Invalid argument type: Unknown data type_ or "
 				"cannot evaluate in this context.");
 		}
 		else {
@@ -1418,8 +1418,8 @@ Expr *Expr::eval(TransactionContext &txn, ObjectManager &objectManager,
 			return newExprLabel(str.c_str(), txn);
 		}
 	default:
-		GS_THROW_USER_ERROR(GS_ERROR_TQ_CRITICAL_LOGIC_ERROR,
-			"Internal logic error: Unknown data type_ or "
+		GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
+			"Invalid argument type: Unknown data type_ or "
 			"cannot evaluate in this context.");
 	}
 }

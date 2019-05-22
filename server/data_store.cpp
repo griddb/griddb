@@ -50,9 +50,9 @@ const uint32_t DataStoreValueLimitConfig::LIMIT_BIG_SIZE_LIST[6] = {
 	1024 * 1024 * 1024 - 1, 1024 * 1024 * 1024 - 1};
 const uint32_t DataStoreValueLimitConfig::LIMIT_ARRAY_NUM_LIST[6] = {
 	2000, 4000, 8000, 16000, 32000, 65000};
-	const uint32_t DataStoreValueLimitConfig::LIMIT_COLUMN_NUM_LIST[6] = {
+const uint32_t DataStoreValueLimitConfig::LIMIT_COLUMN_NUM_LIST[6] = {
 	512, 1024, 1024, 1000*8, 1000*16, 1000*32};
-	const uint32_t DataStoreValueLimitConfig::LIMIT_INDEX_NUM_LIST[6] = {
+const uint32_t DataStoreValueLimitConfig::LIMIT_INDEX_NUM_LIST[6] = {
 	512, 1024, 1024, 1000*4, 1000*8, 1000*16};
 const uint32_t DataStoreValueLimitConfig::LIMIT_CONTAINER_NAME_SIZE_LIST[6] = {
 	8 * 1024, 16 * 1024, 32 * 1024, 64 * 1024, 128 * 1024, 128 * 1024};
@@ -79,7 +79,7 @@ DataStoreValueLimitConfig::DataStoreValueLimitConfig(
 
 ResultSet *DataStore::createResultSet(TransactionContext &txn,
 	ContainerId containerId, SchemaVersionId schemaVersionId, int64_t emNow,
-	bool noExpire) {
+	ResultSetOption *queryOption, bool noExpire) {
 	PartitionGroupId pgId = calcPartitionGroupId(txn.getPartitionId());
 	ResultSetId rsId = ++resultSetIdList_[pgId];
 	int32_t rsTimeout = txn.getTransationTimeoutInterval();
@@ -106,6 +106,7 @@ ResultSet *DataStore::createResultSet(TransactionContext &txn,
 	rs.setStartLsn(0);
 	rs.setTimeoutTime(rsTimeout);
 	rs.setPartitionId(txn.getPartitionId());
+	rs.setQueryOption(queryOption);
 	return &rs;
 }
 
@@ -117,6 +118,8 @@ ResultSet *DataStore::getResultSet(TransactionContext &txn, ResultSetId rsId) {
 		resultSetMap_[calcPartitionGroupId(txn.getPartitionId())]->get(rsId);
 	if (rs) {
 		rs->setTxnAllocator(&txn.getDefaultAllocator());
+		ResultSetOption &queryOption = rs->getQueryOption();
+		getObjectManager()->setSwapOutCounter(txn.getPartitionId(), queryOption.getSwapOutNum());
 	}
 	return rs;
 }
@@ -147,6 +150,8 @@ void DataStore::closeOrClearResultSet(PartitionId pId, ResultSetId rsId) {
 	ResultSet *rs = resultSetMap_[pgId]->get(rsId);
 	if (rs) {
 		rs->releaseTxnAllocator();
+		ResultSetOption &queryOption = rs->getQueryOption();
+		queryOption.setSwapOutNum(getObjectManager()->getSwapOutCounter(pId));
 	}
 	if (rs && (rs->getResultType() != PARTIAL_RESULT_ROWSET)) {
 		closeResultSetInternal(pgId, *rs);
@@ -182,7 +187,6 @@ void DataStore::checkTimeoutResultSet(
 		rs = resultSetMap_[pgId]->refresh(checkTime, rsIdPtr);
 	}
 }
-
 
 
 void DataStore::forceCloseAllResultSet(PartitionId pId) {
@@ -846,6 +850,10 @@ bool DataStore::executeBGTaskInternal(TransactionContext &txn, BackgroundData &b
 		isFinished = true;
 		return isFinished;
 	}
+
+	const double FORCE_COLD_SWAP_RATE = 0;
+	getObjectManager()->setStoreMemoryAgingSwapRate(txn.getPartitionId(), FORCE_COLD_SWAP_RATE);
+
 	switch (bgData.getEventType()) {
 	case BackgroundData::DROP_CONTAINER:
 		{
@@ -1189,6 +1197,7 @@ void DataStore::changeContainerProperty(TransactionContext &txn, PartitionId pId
 	ALLOC_DELETE(txn.getDefaultAllocator(), container);
 	container = getContainer(txn, pId, containerId, containerType);
 }
+
 void DataStore::addContainerSchema(TransactionContext &txn, PartitionId pId,
 	BaseContainer *&container, MessageSchema *messageSchema) {
 
@@ -2046,6 +2055,8 @@ void *LoadLibOrDie(const std::string& path) {
 
 void DataStore::archive(util::StackAllocator &alloc, TransactionManager &txnMgr, BibInfo &bibInfo) {
 	try {
+
+
 		std::string fileType = bibInfo.option_.containerFileType_;
 		int64_t flushThreshold = bibInfo.option_.flushThreshold_;
 		int64_t blockSize = bibInfo.option_.blockSize_;
@@ -2090,7 +2101,8 @@ void DataStore::archive(util::StackAllocator &alloc, TransactionManager &txnMgr,
 						INITIAL_STATEMENTID, container->getContainerId(),
 						TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL, 
 						TransactionManager::PUT,
-						TransactionManager::NO_AUTO_COMMIT_BEGIN_OR_CONTINUE);
+						TransactionManager::NO_AUTO_COMMIT_BEGIN_OR_CONTINUE,
+						false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
 //					TransactionContext &txn =
 						txnMgr.put(alloc, pId, mvccClientId, src,
 							now, emNow, isRedo, *txnItr);
@@ -2165,7 +2177,6 @@ ShareValueList *DataStore::makeCommonContainerSchema(TransactionContext &txn, in
 
 	return commonContainerSchema;
 }
-
 
 BaseContainer *DataStore::getBaseContainer(TransactionContext &txn, PartitionId pId,
 	const BibInfo::Container &bibInfo) {
@@ -2370,6 +2381,11 @@ DataStore::Latch::Latch(TransactionContext &txn, PartitionId pId,
 	  clusterService_(clusterService) {
 	dataStore_->getObjectManager()->checkDirtyFlag(
 		txn.getPartitionId());  
+	ObjectManager &objectManager = *(dataStore_->getObjectManager());
+	if (dataStore_ != NULL && objectManager.existPartition(pId_)) {
+		const double HOT_MODE_RATE = 1.0;
+		objectManager.setStoreMemoryAgingSwapRate(pId_, HOT_MODE_RATE);
+	}
 }
 
 DataStore::Latch::~Latch() {
@@ -2380,6 +2396,7 @@ DataStore::Latch::~Latch() {
 				txn_.getPartitionId());  
 			objectManager.resetRefCounter(pId_);
 			objectManager.freeLastLatchPhaseMemory(pId_);
+			objectManager.setSwapOutCounter(pId_, 0);
 		}
 	}
 	catch (std::exception &e) {
@@ -2483,6 +2500,7 @@ bool DataStore::executeBatchFree(PartitionId pId, Timestamp timestamp,
 		bool isTail = true;
 		return isTail;
 	}
+
 	util::Stopwatch timer;
 	timer.start();
 	Timestamp expireTime = timestamp;
@@ -2500,9 +2518,9 @@ bool DataStore::executeBatchFree(PartitionId pId, Timestamp timestamp,
 		simulateChunkKey, simulateFreeNum);
 
 	if (freeChunkNum > 0) {
-			setLastExpiredTime(pId, DataStore::convertChunkKey2Timestamp(chunkKey));
-			setLatestBatchFreeTime(pId, DataStore::convertChunkKey2Timestamp(chunkKey));
-		}
+		setLastExpiredTime(pId, DataStore::convertChunkKey2Timestamp(chunkKey));
+		setLatestBatchFreeTime(pId, DataStore::convertChunkKey2Timestamp(chunkKey));
+	}
 
 	int64_t scanTime = timer.elapsedNanos() / 1000;
 	updateExpirationStat(pId, freeChunkNum, 
@@ -2627,7 +2645,7 @@ void DataStore::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.setMin(60)
 		.setDefault(60*60*6)
 		.setMax(INT32_MAX);
-	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_STORE_MEMORY_REDISTRIBUTE_SHIFTABLE_MEMORY_RATIO, INT32)
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_STORE_MEMORY_REDISTRIBUTE_SHIFTABLE_MEMORY_RATE, INT32)
 		.setMin(0)
 		.setMax(100)
 		.setDefault(80);
@@ -2635,6 +2653,14 @@ void DataStore::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.setMin(2)
 		.setMax(10000)
 		.setDefault(240); 
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_STORE_MEMORY_AGING_SWAP_RATE, DOUBLE)
+		.setMin(0.0)
+		.setDefault(0.0005)
+		.setMax(1.0);
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_STORE_MEMORY_COLD_RATE, DOUBLE)
+		.setMin(0.0)
+		.setDefault(0.375)
+		.setMax(1.0);
 }
 
 DataStore::StatSetUpHandler DataStore::statSetUpHandler_;
@@ -2760,6 +2786,7 @@ DataStore::Config::Config(ConfigTable &configTable) :
 		backgroundMinRate_(10), backgroundWaitWeight_(9)
 		, checkErasableExpiredInterval_(60*60*24),
 		concurrencyNum_(1)
+		, storeMemoryAgingSwapRate_(0)
 		{
 	setUpConfigHandler(configTable);
 	setBackgroundMinRate(configTable.get<double>(CONFIG_TABLE_DS_BACKGROUND_MIN_RATE));
@@ -2772,6 +2799,7 @@ DataStore::Config::Config(ConfigTable &configTable) :
 	setCheckErasableExpiredInterval(
 		configTable.get<int32_t>(CONFIG_TABLE_DS_PARTITION_BATCH_FREE_CHECK_INTERVAL),
 		configTable.get<int32_t>(CONFIG_TABLE_DS_CONCURRENCY));
+	setStoreMemoryAgingSwapRate(configTable.get<double>(CONFIG_TABLE_DS_STORE_MEMORY_AGING_SWAP_RATE));
 }
 
 void DataStore::Config::setUpConfigHandler(ConfigTable &configTable) {
@@ -2783,6 +2811,7 @@ void DataStore::Config::setUpConfigHandler(ConfigTable &configTable) {
 	configTable.setParamHandler(CONFIG_TABLE_DS_ROW_ARRAY_RATE_EXPONENT, *this);
 	configTable.setParamHandler(CONFIG_TABLE_DS_ROW_ARRAY_SIZE_CONTROL_MODE, *this);
 	configTable.setParamHandler(CONFIG_TABLE_DS_PARTITION_BATCH_FREE_CHECK_INTERVAL, *this);
+	configTable.setParamHandler(CONFIG_TABLE_DS_STORE_MEMORY_AGING_SWAP_RATE, *this);
 }
 
 void DataStore::Config::setBackgroundMinRate(double rate) {
@@ -2820,6 +2849,9 @@ void DataStore::Config::operator()(
 		break;
 	case CONFIG_TABLE_DS_PARTITION_BATCH_FREE_CHECK_INTERVAL:
 		setCheckErasableExpiredInterval(value.get<int32_t>());
+		break;
+	case CONFIG_TABLE_DS_STORE_MEMORY_AGING_SWAP_RATE:
+		setStoreMemoryAgingSwapRate(value.get<double>());
 		break;
 	}
 }

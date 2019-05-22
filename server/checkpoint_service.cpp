@@ -1327,8 +1327,12 @@ bool CheckpointService::getLongSyncChunk(
 	completedCount = 0;
 	readyCount = 0;
 	if (ssn != UNDEF_SYNC_SEQ_NUMBER) {
-		util::LockGuard<util::Mutex> guard(cpLongtermSyncSessionMutex_);
 		CpLongtermSyncInfo *info = getCpLongtermSyncInfo(ssn);
+		if (info && info->atomicStopFlag_ == 1) {
+			GS_THROW_USER_ERROR(
+					GS_ERROR_CP_LONGTERM_SYNC_FAILED,
+					"LongtermSync cancelled: ssn=" << ssn);
+		}
 		if (info && info->newOffsetMap_) {
 			totalCount = info->totalChunkCount_;
 			completedCount = info->readCount_;
@@ -1342,7 +1346,7 @@ bool CheckpointService::getLongSyncChunk(
 				return true;
 			}
 			if (info->readCount_ >= info->readyCount_) {
-				GS_TRACE_INFO(
+				GS_TRACE_DEBUG(
 						CHECKPOINT_SERVICE_STATUS_DETAIL, GS_TRACE_CP_STATUS,
 						"[CP_GET_LONGTERM_SYNC_CHUNK_AT_TAIL]: totalCount," << totalCount <<
 						",completedCount," << completedCount <<
@@ -1365,7 +1369,6 @@ bool CheckpointService::getLongSyncChunk(
 						"Invalid size (specified size=" << size <<
 						", chunkSize=" << chunkSize << ")");
 			}
-
 			ChunkManager::FileManager fileManager(chunkManager_->getConfig(), *(info->syncCpFile_));
 			uint32_t remain = size / chunkSize;
 			size_t fileRemain = info->readyCount_ - info->readCount_;
@@ -1384,7 +1387,7 @@ bool CheckpointService::getLongSyncChunk(
 			completedCount = info->readCount_;
 			readyCount = info->readyCount_;
 
-			GS_TRACE_INFO(
+			GS_TRACE_DEBUG(
 					CHECKPOINT_SERVICE_STATUS_DETAIL, GS_TRACE_CP_STATUS,
 					"[CP_GET_LONGTERM_SYNC_CHUNK]: totalCount," << totalCount <<
 					",completedCount," << completedCount <<
@@ -1831,7 +1834,6 @@ void CheckpointService::runGroupCheckpoint(
 	}
 	if (mode == CP_STOP_LONGTERM_SYNC) {
 		assert(ssn != UNDEF_SYNC_SEQ_NUMBER);
-		util::LockGuard<util::Mutex> guard(cpLongtermSyncSessionMutex_);
 		CpLongtermSyncInfo *info = getCpLongtermSyncInfo(ssn);
 		if (info != NULL) {
 			CpLongtermSyncInfo tmpInfo = *info;
@@ -1964,15 +1966,10 @@ void CheckpointService::runGroupCheckpoint(
 
 				totalWriteCount += chunkManager_->writeChunk(pId);
 
-				if (mode != CP_AFTER_RECOVERY && mode != CP_SHUTDOWN) {
-					int64_t executableCount = 0;
-					int64_t afterCount = 0;
-					int32_t opeTime = 0;
-					int32_t waitTime = transactionService_->getWaitTime(ec, NULL,
-							opeTime, executableCount, afterCount, CP_CHUNKCOPY);
-					if (waitTime != 0) {
-						util::Thread::sleep(waitTime);
-					}
+				int32_t queueSize = getTransactionEEQueueSize(pgId);
+				if (mode != CP_AFTER_RECOVERY && mode != CP_SHUTDOWN &&
+						(queueSize > CP_CHUNK_COPY_WITH_SLEEP_LIMIT_QUEUE_SIZE)) {
+					util::Thread::sleep(chunkCopyIntervalMillis_);
 				}
 			}
 
@@ -2388,6 +2385,9 @@ void CheckpointOperationHandler::operator()(EventContext &ec, Event &ev) {
 				assert(ssn != CheckpointService::UNDEF_SYNC_SEQ_NUMBER);
 				CheckpointService::CpLongtermSyncInfo *info =
 						checkpointService_->getCpLongtermSyncInfo(ssn);
+				if (info) {
+					info->atomicStopFlag_ = 1;
+				}
 				if (info && info->logManager_) {
 					logManager_->removeSyncLogManager(info->logManager_, info->targetPId_);
 					delete info->logManager_;
@@ -2690,6 +2690,7 @@ LogSequentialNumber CheckpointOperationHandler::writeCheckpointStartLog(
 				cpId << ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
+
 void CheckpointOperationHandler::compressChunkMetaDataLog(
 		util::StackAllocator &alloc,
 		PartitionGroupId pgId, PartitionId pId,
@@ -3186,6 +3187,7 @@ bool CheckpointService::StatUpdator::operator()(StatTable &stat) {
 
 	stat.set(STAT_TABLE_PERF_STORE_COMPRESSION_MODE,
 			cmStats.getActualCompressionMode());
+
 	stat.set(STAT_TABLE_PERF_CHECKPOINT_FILE_ALLOCATE_SIZE,
 			cmStats.getCheckpointFileAllocateSize());
 

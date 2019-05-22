@@ -47,8 +47,8 @@ class BaseContainer;
 */
 class LogRedoException : public util::Exception {
 public:
-	LogRedoException(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw()
-		: Exception(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_SET) {}
+	explicit LogRedoException(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw() :
+			Exception(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_SET) {}
 	virtual ~LogRedoException() throw() {}
 };
 

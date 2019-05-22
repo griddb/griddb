@@ -1419,7 +1419,6 @@ private:
 	HashMapImage* hashMapImage_;
 	HashArray hashArray_;
 
-
 	static const uint64_t MAGIC_NUMBER = 0x000000000000a000ULL;
 
 	static const uint64_t MODULE_NUMBER = 0x0000000000004000ULL;

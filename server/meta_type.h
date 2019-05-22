@@ -70,6 +70,7 @@ struct MetaContainerInfo {
 	bool forCore_;
 	bool internal_;
 	bool adminOnly_;
+	bool nodeDistribution_;
 	NameInfo name_;
 	const MetaColumnInfo *columnList_;
 	size_t columnCount_;
@@ -90,13 +91,10 @@ struct MetaType {
 		TYPE_INDEX,
 		TYPE_TRIGGER,
 		TYPE_ERASABLE,
+		TYPE_EVENT,
+		TYPE_SOCKET,
 		END_TYPE
 
-	};
-
-	enum DistributionType {
-		DIST_PARTITION_FULL,
-		DIST_PARTITION_SINGLE
 	};
 
 	enum NamingType {
@@ -200,6 +198,33 @@ struct MetaType {
 		END_ERASABLE
 	};
 
+	enum EventMeta {
+		EVENT_NODE_ADDRESS,
+		EVENT_NODE_PORT,
+		EVENT_START_TIME,
+		EVENT_APPLICATION_NAME,
+		EVENT_SERVICE_TYPE,
+		EVENT_EVENT_TYPE,
+		EVENT_WORKER_INDEX,
+		EVENT_CLUSTER_PARTITION_INDEX,
+		END_EVENT
+	};
+
+	enum SocketMeta {
+		SOCKET_SERVICE_TYPE,
+		SOCKET_TYPE,
+		SOCKET_NODE_ADDRESS,
+		SOCKET_NODE_PORT,
+		SOCKET_REMOTE_ADDRESS,
+		SOCKET_REMOTE_PORT,
+		SOCKET_APPLICATION_NAME,
+		SOCKET_CREATION_TIME,
+		SOCKET_DISPATCHING_EVENT_COUNT,
+		SOCKET_SENDING_EVENT_COUNT,
+		END_SOCKET,
+	};
+
+
 
 	enum StringConstants {
 		STR_CONTAINER_NAME,
@@ -256,6 +281,21 @@ struct MetaType {
 		STR_ERASABLE_TIME,
 		STR_ROW_INDEX_OID,
 		STR_MVCC_INDEX_OID,
+		STR_NODE_ADDRESS,
+
+		STR_NODE_PORT,
+		STR_START_TIME,
+		STR_APPLICATION_NAME,
+		STR_SERVICE_TYPE,
+		STR_WORKER_INDEX,
+
+		STR_SOCKET_TYPE,
+		STR_REMOTE_ADDRESS,
+		STR_REMOTE_PORT,
+		STR_CREATION_TIME,
+		STR_DISPATCHING_EVENT_COUNT,
+		STR_SENDING_EVENT_COUNT,
+
 
 		END_STR
 	};
@@ -267,12 +307,16 @@ struct MetaType::Coders {
 	static const util::NameCoderEntry<IndexMeta> LIST_INDEX[];
 	static const util::NameCoderEntry<TriggerMeta> LIST_TRIGGER[];
 	static const util::NameCoderEntry<ErasableMeta> LIST_ERASABLE[];
+	static const util::NameCoderEntry<EventMeta> LIST_EVENT[];
+	static const util::NameCoderEntry<SocketMeta> LIST_SOCKET[];
 
 	static const util::NameCoder<ContainerMeta, END_CONTAINER> CODER_CONTAINER;
 	static const util::NameCoder<ColumnMeta, END_COLUMN> CODER_COLUMN;
 	static const util::NameCoder<IndexMeta, END_INDEX> CODER_INDEX;
 	static const util::NameCoder<TriggerMeta, END_TRIGGER> CODER_TRIGGER;
 	static const util::NameCoder<ErasableMeta, END_ERASABLE> CODER_ERASABLE;
+	static const util::NameCoder<EventMeta, END_EVENT> CODER_EVENT;
+	static const util::NameCoder<SocketMeta, END_SOCKET> CODER_SOCKET;
 
 	static const util::NameCoderEntry<StringConstants> LIST_STR[];
 	static const util::NameCoder<StringConstants, END_STR> CODER_STR;
@@ -308,6 +352,8 @@ struct MetaType::CoreColumns {
 	static const Entry<IndexMeta> COLUMNS_INDEX[];
 	static const Entry<TriggerMeta> COLUMNS_TRIGGER[];
 	static const Entry<ErasableMeta> COLUMNS_ERASABLE[];
+	static const Entry<EventMeta> COLUMNS_EVENT[]; 
+	static const Entry<SocketMeta> COLUMNS_SOCKET[]; 
 
 	template<typename T>
 	static Entry<T> of(T id);
@@ -328,6 +374,8 @@ struct MetaType::RefColumns {
 	static const Entry<IndexMeta> COLUMNS_INDEX[];
 	static const Entry<TriggerMeta> COLUMNS_TRIGGER[];
 	static const Entry<ErasableMeta> COLUMNS_ERASABLE[];
+	static const Entry<EventMeta> COLUMNS_EVENT[]; 
+	static const Entry<SocketMeta> COLUMNS_SOCKET[]; 
 
 	template<typename T>
 	static Entry<T> of(
@@ -361,6 +409,7 @@ private:
 	static MetaContainerInfo noneOf(MetaContainerType type);
 
 	static MetaContainerInfo toInternal(const MetaContainerInfo &src);
+	static MetaContainerInfo toNodeDistribution(const MetaContainerInfo &src);
 
 	static void setUpCoreColumnInfo(
 			size_t index, ColumnId id, uint8_t type, bool nullable,

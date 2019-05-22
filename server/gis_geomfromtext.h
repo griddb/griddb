@@ -36,7 +36,6 @@
 #include "wkt.h"
 #include "wkt_token.h"
 
-//#define WKT_TRACE
 
 /*!
  * @brief GeomFromText Functor

@@ -39,7 +39,7 @@ UTIL_TRACER_DECLARE(SYNC_DETAIL);
 UTIL_TRACER_DECLARE(CLUSTER_DUMP);
 
 #define GS_TRACE_CLUSTER_INFO(s) \
-	GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_CLUSTER_STATUS, s); \
+	GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_CLUSTER_STATUS, s); 
 
 #define GS_TRACE_CLUSTER_DUMP(s) \
 	GS_TRACE_DEBUG(CLUSTER_OPERATION, GS_TRACE_CS_CLUSTER_STATUS, s); 
@@ -241,11 +241,9 @@ void SyncHandler::sendEvent(
 
 	if (targetNodeId == SELF_NODEID) {
 		if (delayTime == UNDEF_DELAY_TIME) {
-			ee.add(ev);
+			delayTime = EE_PRIORITY_HIGH;
 		}
-		else {
-			ee.addTimer(ev, delayTime);
-		}
+		ee.addTimer(ev, delayTime);
 	}
 	else {
 		EventRequestOption sendOption;
@@ -272,6 +270,7 @@ void ShortTermSyncHandler::operator()(EventContext &ec, Event &ev) {
 //	const NodeDescriptor &senderNd = ev.getSenderND();
 	NodeId senderNodeId = ClusterService::resolveSenderND(ev);
 	SyncId longSyncId;
+	EVENT_START(ec, ev, txnMgr_);
 	try {
 		util::StackAllocator &alloc = ec.getAllocator();
 		util::StackAllocator::Scope scope(alloc);
@@ -373,11 +372,12 @@ void ShortTermSyncHandler::operator()(EventContext &ec, Event &ev) {
 		WATCHER_END_SYNC(getEventTypeName(eventType), pId);
 	}
 	catch (UserException &e) {
-//			int32_t errorCode = e.getErrorCode();
 		if (context != NULL) {
 			UTIL_TRACE_EXCEPTION(SYNC_DETAIL, e, "Short term sync faild, pId=" << pId 
+				<< ", lsn=" << pt_->getLSN(pId)
 				<< ", revision=" << context->getPartitionRevision().sequentialNumber_ 
-				<< ", event=" << getEventTypeName(eventType));
+				<< ", event=" << getEventTypeName(eventType) 
+				<< ", reason=" << GS_EXCEPTION_MESSAGE(e));
 			addCheckEndEvent(ec, pId,ec.getAllocator(), MODE_SHORTTERM_SYNC, context, true);
 		}
 		else {
@@ -423,6 +423,7 @@ void LongTermSyncHandler::operator()(EventContext &ec, Event &ev) {
 	EventType eventType = ev.getType();
 //	const NodeDescriptor &senderNd = ev.getSenderND();
 	NodeId senderNodeId = ClusterService::resolveSenderND(ev);
+	EVENT_START(ec, ev, txnMgr_);
 	
 
 	try {
@@ -567,7 +568,7 @@ void LongTermSyncHandler::operator()(EventContext &ec, Event &ev) {
 	}
 	catch (UserException &e) {
 		TRACE_SYNC_EXCEPTION(e, eventType, pId, WARNING,
-				"Long term sync operation is failed.");
+				"Long term sync operation is failed. reason=" << GS_EXCEPTION_MESSAGE(e));
 		bool isPending = false;
 			int32_t errorCode = e.getErrorCode();
 		if (context != NULL) {
@@ -576,7 +577,7 @@ void LongTermSyncHandler::operator()(EventContext &ec, Event &ev) {
 				UTIL_TRACE_EXCEPTION(SYNC_SERVICE, e, "LONGTERM SYNC FAILED, pId=" << pId 
 					<< ", ssn=" <<  context->getSequentialNumber() 
 					<< ", revision=" << context->getPartitionRevision().sequentialNumber_ 
-					<< ", event=" << getEventTypeName(eventType));
+					<< ", event=" << getEventTypeName(eventType) << ", reason=" << GS_EXCEPTION_MESSAGE(e));
 				if (context->isCatchupSync()) {
 					isPending = true;
 				}
@@ -726,6 +727,7 @@ void SyncCheckEndHandler::operator()(EventContext &ec, Event &ev) {
 	SyncContext *context = NULL;
 	PartitionId pId = ev.getPartitionId();
 	EventType eventType = ev.getType();
+	EVENT_START(ec, ev, txnMgr_);
 	try {
 		util::StackAllocator &alloc = ec.getAllocator();
 		util::StackAllocator::Scope scope(alloc);
@@ -753,7 +755,8 @@ void SyncCheckEndHandler::operator()(EventContext &ec, Event &ev) {
 					GS_TRACE_SYNC(context, "Shortterm sync timeout", "");
 				}
 				else {
-					GS_TRACE_SYNC(context, "Shortterm sync error", "");
+					GS_TRACE_SYNC(context, "Short term sync error", ", check previous trace," 
+							" key SSN=" << context->getSequentialNumber());
 				}
 //				PartitionRoleStatus roleStatus = pt_->getPartitionRoleStatus(pId);
 				PartitionRole currentRole;
@@ -775,14 +778,14 @@ void SyncCheckEndHandler::operator()(EventContext &ec, Event &ev) {
 			if (context->getSyncMode() == MODE_SHORTTERM_SYNC ||
 				(context->getSyncMode() == MODE_LONGTERM_SYNC && !context->isCatchupSync())) {
 					if (context->getSyncMode() == MODE_LONGTERM_SYNC) {
-						GS_TRACE_SYNC(context, "Remove long term sync context", "");
+						GS_TRACE_SYNC_INFO(context, "Remove long term sync context", "");
 					}
 				syncMgr_->removeSyncContext(ec, pId, context, true);
 			}
 		}
 	}
 	catch (UserException &e) {
-		UTIL_TRACE_EXCEPTION_WARNING(SYNC_SERVICE, e, "");
+		UTIL_TRACE_EXCEPTION_WARNING(SYNC_SERVICE, e, "reason=" << GS_EXCEPTION_MESSAGE(e));
 		if (context) {
 			syncMgr_->removeSyncContext(ec, pId, context, true);
 		}
@@ -801,6 +804,7 @@ void SyncCheckEndHandler::operator()(EventContext &ec, Event &ev) {
 void DropPartitionHandler::operator()(EventContext &ec, Event &ev) {
 	PartitionId pId = ev.getPartitionId();
 	EventType eventType = ev.getType();
+	EVENT_START(ec, ev, txnMgr_);
 	try {
 		clsMgr_->checkNodeStatus();
 		util::StackAllocator &alloc = ec.getAllocator();
@@ -836,7 +840,6 @@ void DropPartitionHandler::operator()(EventContext &ec, Event &ev) {
 		DataStore::Latch latch(txn, pId, ds_, clsSvc_);
 		{
 			SyncPartitionLock partitionLock(txnMgr_, pId);
-			syncMgr_->removePartition(pId);
 			LogSequentialNumber prevLsn = pt_->getLSN(pId, 0);
 			recoveryMgr_->dropPartition(txn, alloc, pId);
 			TRACE_CLUSTER_NORMAL_OPERATION(INFO,
@@ -906,7 +909,7 @@ void RecvSyncMessageHandler::operator()(EventContext &ec, Event &ev) {
 	}
 	catch (UserException &e) {
 		TRACE_SYNC_EXCEPTION(
-				e, syncEventType, pId, ERROR, "Recv sync is failed.");
+				e, syncEventType, pId, ERROR, "Recv sync message failed, ");
 	}
 	catch (std::exception &e) {
 		clsSvc_->setError(ec, &e);
@@ -920,7 +923,7 @@ void SyncHandler::addCheckEndEvent(EventContext &ec, PartitionId pId,
 	util::StackAllocator &alloc, SyncMode mode, SyncContext *context,
 	bool isImmediate) {
 	try {
-		int32_t timeoutInterval = INT32_MAX;;
+		int32_t timeoutInterval = 0;
 		if (isImmediate) {
 			timeoutInterval = 0;
 		}
@@ -1298,7 +1301,6 @@ void SyncHandler::removePartition(util::StackAllocator &alloc,
 	DataStore::Latch latch(txn, pId, ds_, clsSvc_);
 	{
 		SyncPartitionLock partitionLock(txnMgr_, pId);
-		syncMgr_->removePartition(pId);
 //		LogSequentialNumber prevLsn = pt_->getLSN(pId, 0);
 		recoveryMgr_->dropPartition(txn, alloc, pId, true);
 	}
@@ -1325,7 +1327,7 @@ void ShortTermSyncHandler::decodeLongSyncRequestInfo(
 	if (in.base().remaining()) {
 		in >> longSyncId.contextId_;
 		in >> longSyncId.contextVersion_;
-		GS_TRACE_SYNC_NORAML("Catchup promotion sync start, pId="
+		GS_TRACE_SYNC_NORAML("[OWNER] Catchup promotion sync start, pId="
 				<< pId << ", syncId=" << longSyncId.dump());
 		longSyncContext = syncMgr_->getSyncContext(pId, longSyncId);
 		if (longSyncContext) {
@@ -1386,7 +1388,7 @@ void LongTermSyncHandler::requestShortTermSync(
 
 	syncRequestInfo.setPartitionRole(nextRole);
 	GS_TRACE_SYNC(context, 
-			"Request promoted partition short term sync", ", role=" << nextRole);
+			"[OWNER] Request promoted partition short term sync", ", role=" << nextRole);
 
 	Event requestEvent(ec, TXN_SHORTTERM_SYNC_REQUEST, pId);
 	EventByteOutStream out = requestEvent.getOutStream();
@@ -1461,7 +1463,7 @@ void ShortTermSyncHandler::executeSyncStart(EventContext &ec, Event &ev, Partiti
 			syncRequestInfo, syncResponseInfo, context, senderNodeId);
 	context->startAll();
 }
-	
+
 void ShortTermSyncHandler::checkBackup(
 		NodeId backupNodeId, LogSequentialNumber backupLsn, SyncContext *context) {
 	LogSequentialNumber sendLsn = context->getSyncTargetEndLsn(backupNodeId);
@@ -1585,6 +1587,7 @@ void ShortTermSyncHandler::executeSyncEnd(
 		SyncResponseInfo &syncResponseInfo, NodeId senderNodeId) {
 	util::StackAllocator &alloc = ec.getAllocator();
 	if (context != NULL) {
+		checkOwner(pt_->getLSN(pId), context, false);
 //		PartitionStatus nextStatus = 
 		syncMgr_->setShorttermSyncEnd(context);
 		clsSvc_->requestChangePartitionStatus(ec,
@@ -1684,7 +1687,6 @@ void LongTermSyncHandler::executeSyncStartAck(EventContext &ec, Event &ev, Parti
 		else {
 			syncMgr_->setLongGetSyncChunk(context, syncRequestInfo, syncResponseInfo,
 				ev.getType(), ec.getHandlerStartTime(), ec.getHandlerStartMonotonicTime(), senderNodeId);
-//			syncRequestInfo.request_.numChunk_;
 			sendRequest(ec, *syncEE_, SYC_LONGTERM_SYNC_CHUNK, pId, syncRequestInfo, senderNodeId);
 		}
 	}

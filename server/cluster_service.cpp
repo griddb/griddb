@@ -614,7 +614,7 @@ void TimerNotifyClientHandler::encode(Event &ev) {
 		uint16_t port;
 		const NodeDescriptor &nd = clsSvc_->getEE(TRANSACTION_SERVICE)->getSelfServerND();
 		if (nd.isEmpty()) {
-			GS_THROW_USER_ERROR(GS_ERROR_CS_INVALID_SENDER_ND, "");
+			GS_THROW_USER_ERROR(GS_ERROR_EE_PARAMETER_INVALID, "ND is empty");
 		}
 		nd.getAddress().getIP(&address, &port);
 		out.writeAll(&address, sizeof(address));
@@ -638,7 +638,7 @@ void ClusterService::encodeNotifyClient(Event &ev) {
 		uint16_t port;
 		const NodeDescriptor &nd = getEE(TRANSACTION_SERVICE)->getSelfServerND();
 		if (nd.isEmpty()) {
-			GS_THROW_USER_ERROR(GS_ERROR_CS_INVALID_SENDER_ND, "");
+			GS_THROW_USER_ERROR(GS_ERROR_EE_PARAMETER_INVALID, "ND is empty");
 		}
 		nd.getAddress().getIP(&address, &port);
 		out.writeAll(&address, sizeof(address));
@@ -1038,13 +1038,6 @@ void TimerCheckClusterHandler::operator()(EventContext &ec, Event &ev) {
 		util::StackAllocator &alloc = ec.getAllocator();
 		util::StackAllocator::Scope scope(alloc);
 
-		if (!pt_->isSubMaster()) {
-			int32_t invalidCount = pt_->checkRoleStatus(alloc);
-			if (invalidCount > 0) {
-				clsMgr_->reportError(
-						GS_ERROR_PT_CHECK_PARTITION_STATUS_FAILED, invalidCount);
-			}
-		}
 
 		ClusterManager::HeartbeatCheckInfo heartbeatCheckInfo(alloc);
 		clsMgr_->getHeartbeatCheckInfo(heartbeatCheckInfo);
@@ -1120,14 +1113,14 @@ void TimerNotifyClusterHandler::operator()(EventContext &ec, Event &ev) {
 				Event notifyClusterEvent(ec, CS_NOTIFY_CLUSTER, CS_HANDLER_PARTITION_ID);
 				bool isFirst = true;
 				for (int32_t nodeId = 1; nodeId < manager.getFixedNodeNum();nodeId++) {
-						const NodeDescriptor &nd = clsEE_->getServerND(nodeId);
-						if (isFirst) {
-							clsMgr_->getNotifyClusterInfo(notifyClusterInfo);
-							clsSvc_->encode(notifyClusterEvent, notifyClusterInfo);
-							isFirst = false;
-						}
-						clsEE_->send(notifyClusterEvent, nd);
+					const NodeDescriptor &nd = clsEE_->getServerND(nodeId);
+					if (isFirst) {
+						clsMgr_->getNotifyClusterInfo(notifyClusterInfo);
+						clsSvc_->encode(notifyClusterEvent, notifyClusterInfo);
+						isFirst = false;
 					}
+					clsEE_->send(notifyClusterEvent, nd);
+				}
 				break;
 			}
 			case NOTIFICATION_RESOLVER: {
@@ -1295,7 +1288,7 @@ void TimerNotifyClientHandler::operator()(EventContext &ec, Event &ev) {
 			txnEE_->send(notifyClientEvent, nd);
 		}
 		else {
-			GS_THROW_USER_ERROR(GS_ERROR_CS_INVALID_SENDER_ND, "");
+			GS_THROW_USER_ERROR(GS_ERROR_EE_PARAMETER_INVALID, "ND is empty");
 		}
 	}
 	catch (UserException &e) {
@@ -1530,7 +1523,7 @@ void ClusterService::changeAddress(NodeAddress &nodeAddress, NodeId nodeId,
 	uint16_t port;
 	const NodeDescriptor &nd = ee->getServerND(nodeId);
 	if (nd.isEmpty()) {
-		GS_THROW_USER_ERROR(GS_ERROR_CS_INVALID_ND, "");
+		GS_THROW_USER_ERROR(GS_ERROR_EE_PARAMETER_INVALID, "ND is empty");
 	}
 	nd.getAddress().getIP(&address, &port);
 	nodeAddress.address_ = *reinterpret_cast<AddressType *>(&address);

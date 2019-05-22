@@ -26,6 +26,8 @@
 #include "lexer.h"
 
 #include "result_set.h"
+#include "partition_table.h"
+#include "transaction_service.h"
 
 
 MetaColumnInfo::MetaColumnInfo() :
@@ -49,6 +51,7 @@ MetaContainerInfo::MetaContainerInfo() :
 		forCore_(false),
 		internal_(false),
 		adminOnly_(false),
+		nodeDistribution_(false),
 		columnList_(NULL),
 		columnCount_(0) {
 }
@@ -156,6 +159,33 @@ const util::NameCoderEntry<MetaType::ErasableMeta>
 	UTIL_NAME_CODER_ENTRY(ERASABLE_MVCC_INDEX_OID)
 };
 
+const util::NameCoderEntry<MetaType::EventMeta>
+		MetaType::Coders::LIST_EVENT[] = {
+	UTIL_NAME_CODER_ENTRY(EVENT_NODE_ADDRESS),
+	UTIL_NAME_CODER_ENTRY(EVENT_NODE_PORT),
+	UTIL_NAME_CODER_ENTRY(EVENT_START_TIME),
+	UTIL_NAME_CODER_ENTRY(EVENT_APPLICATION_NAME),
+	UTIL_NAME_CODER_ENTRY(EVENT_SERVICE_TYPE),
+	UTIL_NAME_CODER_ENTRY(EVENT_EVENT_TYPE),
+	UTIL_NAME_CODER_ENTRY(EVENT_WORKER_INDEX),
+	UTIL_NAME_CODER_ENTRY(EVENT_CLUSTER_PARTITION_INDEX)
+};
+
+const util::NameCoderEntry<MetaType::SocketMeta>
+		MetaType::Coders::LIST_SOCKET[] = {
+	UTIL_NAME_CODER_ENTRY(SOCKET_SERVICE_TYPE),
+	UTIL_NAME_CODER_ENTRY(SOCKET_TYPE),
+	UTIL_NAME_CODER_ENTRY(SOCKET_NODE_ADDRESS),
+	UTIL_NAME_CODER_ENTRY(SOCKET_NODE_PORT),
+	UTIL_NAME_CODER_ENTRY(SOCKET_REMOTE_ADDRESS),
+	UTIL_NAME_CODER_ENTRY(SOCKET_REMOTE_PORT),
+	UTIL_NAME_CODER_ENTRY(SOCKET_APPLICATION_NAME),
+	UTIL_NAME_CODER_ENTRY(SOCKET_CREATION_TIME),
+	UTIL_NAME_CODER_ENTRY(SOCKET_DISPATCHING_EVENT_COUNT),
+	UTIL_NAME_CODER_ENTRY(SOCKET_SENDING_EVENT_COUNT)
+};
+
+
 
 const util::NameCoder<MetaType::ContainerMeta, MetaType::END_CONTAINER>
 		MetaType::Coders::CODER_CONTAINER(LIST_CONTAINER, 1);
@@ -167,6 +197,10 @@ const util::NameCoder<MetaType::TriggerMeta, MetaType::END_TRIGGER>
 		 MetaType::Coders::CODER_TRIGGER(LIST_TRIGGER, 1);
 const util::NameCoder<MetaType::ErasableMeta, MetaType::END_ERASABLE>
 		 MetaType::Coders::CODER_ERASABLE(LIST_ERASABLE, 1);
+const util::NameCoder<MetaType::EventMeta, MetaType::END_EVENT>
+		MetaType::Coders::CODER_EVENT(LIST_EVENT, 1);
+const util::NameCoder<MetaType::SocketMeta, MetaType::END_SOCKET>
+		MetaType::Coders::CODER_SOCKET(LIST_SOCKET, 1);
 
 const util::NameCoderEntry<MetaType::StringConstants>
 		MetaType::Coders::LIST_STR[] = {
@@ -225,6 +259,19 @@ const util::NameCoderEntry<MetaType::StringConstants>
 	UTIL_NAME_CODER_ENTRY(STR_ERASABLE_TIME),
 	UTIL_NAME_CODER_ENTRY(STR_ROW_INDEX_OID),
 	UTIL_NAME_CODER_ENTRY(STR_MVCC_INDEX_OID)
+	,
+	UTIL_NAME_CODER_ENTRY(STR_NODE_ADDRESS),
+	UTIL_NAME_CODER_ENTRY(STR_NODE_PORT),
+	UTIL_NAME_CODER_ENTRY(STR_START_TIME),
+	UTIL_NAME_CODER_ENTRY(STR_APPLICATION_NAME),
+	UTIL_NAME_CODER_ENTRY(STR_SERVICE_TYPE),
+	UTIL_NAME_CODER_ENTRY(STR_WORKER_INDEX),
+	UTIL_NAME_CODER_ENTRY(STR_SOCKET_TYPE),
+	UTIL_NAME_CODER_ENTRY(STR_REMOTE_ADDRESS),
+	UTIL_NAME_CODER_ENTRY(STR_REMOTE_PORT),
+	UTIL_NAME_CODER_ENTRY(STR_CREATION_TIME),
+	UTIL_NAME_CODER_ENTRY(STR_DISPATCHING_EVENT_COUNT),
+	UTIL_NAME_CODER_ENTRY(STR_SENDING_EVENT_COUNT)
 
 };
 const util::NameCoder<MetaType::StringConstants, MetaType::END_STR>
@@ -292,26 +339,56 @@ const MetaType::CoreColumns::Entry<MetaType::TriggerMeta>
 	of(TRIGGER_USER).asString(true),
 	of(TRIGGER_PASSWORD).asString(true)
 };
+
 const MetaType::CoreColumns::Entry<MetaType::ErasableMeta>
 		MetaType::CoreColumns::COLUMNS_ERASABLE[] = {
-	of(ERASABLE_DATABASE_ID).asLong(),
+	of(ERASABLE_DATABASE_ID).asString(),
 	of(ERASABLE_DATABASE_NAME).asString().asDbName(),
 	of(ERASABLE_TYPE_NAME).asString(),
-	of(ERASABLE_CONTAINER_ID).asLong().asContainerId(),
+	of(ERASABLE_CONTAINER_ID).asString().asContainerId(),
 	of(ERASABLE_CONTAINER_NAME).asString(),
 	of(ERASABLE_PARTITION_NAME).asString(true),
 	of(ERASABLE_CLUSTER_PARTITION).asInteger().asPartitionIndex(),
-	of(ERASABLE_LARGE_CONTAINER_ID).asLong(true),
+	of(ERASABLE_LARGE_CONTAINER_ID).asString(true),
 	of(ERASABLE_SCHEMA_VERSION_ID).asInteger(),
-	of(ERASABLE_INIT_SCHEMA_STATUS).asLong(true),
+	of(ERASABLE_INIT_SCHEMA_STATUS).asString(true),
 	of(ERASABLE_EXPIRATION_TYPE).asString(),
 	of(ERASABLE_LOWER_BOUNDARY_TIME).asTimestamp(),
 	of(ERASABLE_UPPER_BOUNDARY_TIME).asTimestamp(),
 	of(ERASABLE_EXPIRATION_TIME).asTimestamp(),
 	of(ERASABLE_ERASABLE_TIME).asTimestamp(),
-	of(ERASABLE_ROW_INDEX_OID).asLong(),
-	of(ERASABLE_MVCC_INDEX_OID).asLong()
+	of(ERASABLE_ROW_INDEX_OID).asString(),
+	of(ERASABLE_MVCC_INDEX_OID).asString()
 };
+
+const MetaType::CoreColumns::Entry<MetaType::EventMeta>
+		MetaType::CoreColumns::COLUMNS_EVENT[] = {
+	of(EVENT_NODE_ADDRESS).asString(),
+	of(EVENT_NODE_PORT).asString().asInteger(),
+	of(EVENT_START_TIME).asTimestamp(),
+	of(EVENT_APPLICATION_NAME).asString(true),
+	of(EVENT_SERVICE_TYPE).asString(),
+	of(EVENT_EVENT_TYPE).asString(),
+	of(EVENT_WORKER_INDEX).asInteger(),
+	of(EVENT_CLUSTER_PARTITION_INDEX).asInteger()
+};
+
+const MetaType::CoreColumns::Entry<MetaType::SocketMeta>
+		MetaType::CoreColumns::COLUMNS_SOCKET[] = {
+	of(SOCKET_SERVICE_TYPE).asString(),
+	of(SOCKET_TYPE).asString(true),
+	of(SOCKET_NODE_ADDRESS).asString(true),
+	of(SOCKET_NODE_PORT).asInteger(true),
+	of(SOCKET_REMOTE_ADDRESS).asString(true),
+	of(SOCKET_REMOTE_PORT).asInteger(true),
+	of(SOCKET_APPLICATION_NAME).asString(true),
+	of(SOCKET_CREATION_TIME).asTimestamp(),
+	of(SOCKET_DISPATCHING_EVENT_COUNT).asLong(),
+	of(SOCKET_SENDING_EVENT_COUNT).asLong()
+};
+
+
+
 
 template<typename T>
 MetaType::CoreColumns::Entry<T> MetaType::CoreColumns::of(T id) {
@@ -462,6 +539,7 @@ const MetaType::RefColumns::Entry<MetaType::TriggerMeta>
 	of(TRIGGER_USER, STR_USER),
 	of(TRIGGER_PASSWORD, STR_PASSWORD)
 };
+
 const MetaType::RefColumns::Entry<MetaType::ErasableMeta>
 		MetaType::RefColumns::COLUMNS_ERASABLE[] = {
 	of(ERASABLE_DATABASE_NAME, STR_DATABASE_NAME),
@@ -483,6 +561,33 @@ const MetaType::RefColumns::Entry<MetaType::ErasableMeta>
 	of(ERASABLE_ROW_INDEX_OID, STR_ROW_INDEX_OID),
 	of(ERASABLE_MVCC_INDEX_OID, STR_MVCC_INDEX_OID)
 };
+
+const MetaType::RefColumns::Entry<MetaType::EventMeta>
+		MetaType::RefColumns::COLUMNS_EVENT[] = {
+	of(EVENT_NODE_ADDRESS, STR_NODE_ADDRESS),
+	of(EVENT_NODE_PORT, STR_NODE_PORT),
+	of(EVENT_START_TIME, STR_START_TIME),
+	of(EVENT_APPLICATION_NAME, STR_APPLICATION_NAME),
+	of(EVENT_SERVICE_TYPE, STR_SERVICE_TYPE),
+	of(EVENT_EVENT_TYPE, STR_EVENT_TYPE),
+	of(EVENT_WORKER_INDEX, STR_WORKER_INDEX),
+	of(EVENT_CLUSTER_PARTITION_INDEX, STR_CLUSTER_PARTITION_INDEX)
+};
+
+const MetaType::RefColumns::Entry<MetaType::SocketMeta>
+		MetaType::RefColumns::COLUMNS_SOCKET[] = {
+	of(SOCKET_SERVICE_TYPE, STR_SERVICE_TYPE),
+	of(SOCKET_TYPE, STR_SOCKET_TYPE),
+	of(SOCKET_NODE_ADDRESS, STR_NODE_ADDRESS),
+	of(SOCKET_NODE_PORT, STR_NODE_PORT),
+	of(SOCKET_REMOTE_ADDRESS, STR_REMOTE_ADDRESS),
+	of(SOCKET_REMOTE_PORT, STR_REMOTE_PORT),
+	of(SOCKET_APPLICATION_NAME, STR_APPLICATION_NAME),
+	of(SOCKET_CREATION_TIME, STR_CREATION_TIME),
+	of(SOCKET_DISPATCHING_EVENT_COUNT, STR_DISPATCHING_EVENT_COUNT),
+	of(SOCKET_SENDING_EVENT_COUNT, STR_SENDING_EVENT_COUNT)
+};
+
 
 template<typename T>
 MetaType::RefColumns::Entry<T> MetaType::RefColumns::of(
@@ -514,11 +619,17 @@ const MetaContainerInfo MetaType::Containers::CONTAINERS_CORE[] = {
 			CoreColumns::COLUMNS_INDEX, Coders::CODER_INDEX, 0),
 	coreOf(
 			TYPE_TRIGGER, "_core_event_triggers",
-			CoreColumns::COLUMNS_TRIGGER, Coders::CODER_TRIGGER, 0)
-	,
+			CoreColumns::COLUMNS_TRIGGER, Coders::CODER_TRIGGER, 0),
 	coreOf(
 			TYPE_ERASABLE, "_core_internal_erasables",
-			CoreColumns::COLUMNS_ERASABLE, Coders::CODER_ERASABLE, 0)
+			CoreColumns::COLUMNS_ERASABLE, Coders::CODER_ERASABLE, 0),
+	toNodeDistribution(coreOf(
+			TYPE_EVENT, "_core_events",
+			CoreColumns::COLUMNS_EVENT, Coders::CODER_EVENT, 0)),
+	toNodeDistribution(coreOf(
+			TYPE_SOCKET, "_core_sockets",
+			CoreColumns::COLUMNS_SOCKET, Coders::CODER_SOCKET, 0))
+
 };
 
 const MetaContainerInfo MetaType::Containers::CONTAINERS_REF[] = {
@@ -535,13 +646,17 @@ const MetaContainerInfo MetaType::Containers::CONTAINERS_REF[] = {
 			RefColumns::COLUMNS_INDEX, 0),
 	refOf(TYPE_TRIGGER,
 			"event_triggers", "container_event_triggers", "table_event_triggers",
-			RefColumns::COLUMNS_TRIGGER, 0)
-	,
+			RefColumns::COLUMNS_TRIGGER, 0),
 	toInternal(refOf(
 			TYPE_ERASABLE,
 			"_internal_erasables",
 			"_internal_container_erasables", "_internal_table_erasables",
-			RefColumns::COLUMNS_ERASABLE, 0))
+			RefColumns::COLUMNS_ERASABLE, 0)),
+	refOf(TYPE_EVENT,
+			"events", "container_events", "table_events",
+			RefColumns::COLUMNS_EVENT, 0),
+	refOf(TYPE_SOCKET,
+			"sockets", NULL, NULL, RefColumns::COLUMNS_SOCKET, 0)
 };
 
 MetaContainerId MetaType::Containers::typeToId(MetaContainerType type) {
@@ -615,11 +730,16 @@ MetaContainerInfo MetaType::Containers::refOf(
 	}
 
 	{
+		size_t coreIndex;
+		idToIndex(resolvedRefType, coreIndex);
+
 		MetaContainerInfo info;
 		info.id_ = typeToId(type);
 		info.refId_ = typeToId(resolvedRefType);
 		info.versionId_ = makeSchemaVersionId(version, N);
 		info.forCore_ = false;
+		info.nodeDistribution_ =
+				CONTAINERS_CORE[coreIndex].nodeDistribution_;
 		info.name_.neutral_ = name;
 		info.name_.forContainer_ = nameForContainer;
 		info.name_.forTable_ = nameForTable;
@@ -639,6 +759,13 @@ MetaContainerInfo MetaType::Containers::toInternal(
 		const MetaContainerInfo &src) {
 	MetaContainerInfo info = src;
 	info.internal_ = true;
+	return info;
+}
+
+MetaContainerInfo MetaType::Containers::toNodeDistribution(
+		const MetaContainerInfo &src) {
+	MetaContainerInfo info = src;
+	info.nodeDistribution_ = true;
 	return info;
 }
 
@@ -864,6 +991,10 @@ void MetaType::InfoTable::setUpNameEntries(
 		const MetaContainerInfo &info = infoList[i];
 		assert(info.isEmpty() || !info.forCore_ == !forCore);
 
+		if (forCore) {
+			assert(!info.internal_);
+		}
+
 		size_t expectedIndex;
 		Containers::idToIndex(info.id_, expectedIndex);
 		assert(i == expectedIndex);
@@ -922,6 +1053,12 @@ void MetaProcessor::scan(
 		case MetaType::TYPE_ERASABLE:
 			scanCore<ErasableHandler>(txn, cxt);
 			break;
+		case MetaType::TYPE_EVENT: 
+			scanCore<EventHandler>(txn, cxt);
+			break;
+		case MetaType::TYPE_SOCKET: 
+			scanCore<SocketHandler>(txn, cxt);
+			break;
 		default:
 			GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 		}
@@ -933,6 +1070,10 @@ void MetaProcessor::scan(
 
 		if (info_.id_ == MetaType::TYPE_KEY) {
 			KeyRefHandler refHandler(txn, info_, handler);
+			subProcessor.scan(txn, source, refHandler);
+		}
+		else if (info_.id_ == MetaType::TYPE_CONTAINER) {
+			ContainerRefHandler refHandler(txn, info_, handler);
 			subProcessor.scan(txn, source, refHandler);
 		}
 		else {
@@ -972,6 +1113,20 @@ void MetaProcessor::scanCore(TransactionContext &txn, Context &cxt) {
 	const bool singleRequired = true;
 	const bool largeRequired = (info_.id_ != MetaType::TYPE_ERASABLE);
 	const bool subRequired = (info_.id_ == MetaType::TYPE_ERASABLE);
+
+	const bool viewRequired = false;
+	if (info_.nodeDistribution_) {
+		HandlerType handler(cxt);
+		DataStore *dataStore = cxt.getSource().dataStore_;
+		BaseContainer *container = ALLOC_NEW(txn.getDefaultAllocator()) Collection(txn, dataStore);
+		handler(
+				txn, UNDEF_CONTAINERID, UNDEF_DBID,
+				CONTAINER_ATTR_ANY, *container);
+		setNextContainerId(UNDEF_CONTAINERID);
+		ALLOC_DELETE(txn.getDefaultAllocator(), container);
+		return;
+	}
+
 	if (singleRequired) {
 		condition.insertAttribute(CONTAINER_ATTR_SINGLE);
 	}
@@ -980,6 +1135,9 @@ void MetaProcessor::scanCore(TransactionContext &txn, Context &cxt) {
 	}
 	if (subRequired) {
 		condition.insertAttribute(CONTAINER_ATTR_SUB);
+	}
+	if (viewRequired) {
+		condition.insertAttribute(CONTAINER_ATTR_VIEW);
 	}
 
 	HandlerType handler(cxt);
@@ -1000,11 +1158,23 @@ void MetaProcessor::scanCore(TransactionContext &txn, Context &cxt) {
 				txn, dataStore, txn.getPartitionId(), *containerKey_,
 				ANY_CONTAINER);
 		BaseContainer *container = containerPtr.getBaseContainer();
-		if (container != NULL) {
+		do {
+			if (container == NULL) {
+				break;
+			}
+
+			const util::Set<ContainerAttribute> &attributeSet =
+					condition.getAttributes();
+			const ContainerAttribute attribute = container->getAttribute();
+			if (attributeSet.find(attribute) == attributeSet.end()) {
+				break;
+			}
+
 			handler(
-					txn, container->getContainerId(), dbId,
-					container->getAttribute(), *container);
+					txn, container->getContainerId(), dbId, attribute,
+					*container);
 		}
+		while (false);
 		setNextContainerId(UNDEF_CONTAINERID);
 	}
 }
@@ -1871,24 +2041,29 @@ void MetaProcessor::ErasableHandler::execute(
 	uint32_t schemaVersionId = schemaContainer.getVersionId();
 	int64_t initSchemaStatus = schemaContainer.getInitSchemaStatus();
 
+	util::NormalOStringStream oss;
 	const char8_t *dbName;
 	const char8_t *name;
 	getNames(txn, container, dbName, name);
 
 	ExpireType expireType = container.getExpireType();
 
+	oss.str("");
+	oss << dbId;
 	builder.set(
 			MetaType::ERASABLE_DATABASE_ID,
-			ValueUtils::makeLong(dbId));
+			ValueUtils::makeString(alloc, oss.str().c_str()));
 	builder.set(
 			MetaType::ERASABLE_DATABASE_NAME,
 			ValueUtils::makeString(alloc, dbName));
 	builder.set(
 			MetaType::ERASABLE_TYPE_NAME,
 			ValueUtils::makeString(alloc, containerTypeToName(type)));
+	oss.str("");
+	oss << containerId;
 	builder.set(
 			MetaType::ERASABLE_CONTAINER_ID,
-			ValueUtils::makeLong(containerId));
+			ValueUtils::makeString(alloc, oss.str().c_str()));
 		builder.set(
 				MetaType::ERASABLE_CONTAINER_NAME,
 				ValueUtils::makeString(alloc, name));
@@ -1904,9 +2079,11 @@ void MetaProcessor::ErasableHandler::execute(
 	builder.set(
 			MetaType::ERASABLE_SCHEMA_VERSION_ID,
 			ValueUtils::makeInteger(schemaVersionId));
+	oss.str("");
+	oss << initSchemaStatus;
 	builder.set(
 			MetaType::ERASABLE_INIT_SCHEMA_STATUS,
-			ValueUtils::makeLong(initSchemaStatus));
+			ValueUtils::makeString(alloc, oss.str().c_str()));
 	builder.set(
 			MetaType::ERASABLE_EXPIRATION_TYPE,
 			ValueUtils::makeString(alloc, expirationTypeToName(expireType)));
@@ -1926,12 +2103,16 @@ void MetaProcessor::ErasableHandler::execute(
 		builder.set(
 				MetaType::ERASABLE_ERASABLE_TIME,
 				ValueUtils::makeTimestamp(itr->erasable_));
+		oss.str("");
+		oss << itr->rowIdMapOId_;
 		builder.set(
 				MetaType::ERASABLE_ROW_INDEX_OID,
-				ValueUtils::makeLong(itr->rowIdMapOId_));
+				ValueUtils::makeString(alloc, oss.str().c_str()));
+		oss.str("");
+		oss << itr->mvccMapOId_;
 		builder.set(
 				MetaType::ERASABLE_MVCC_INDEX_OID,
-				ValueUtils::makeLong(itr->mvccMapOId_));
+				ValueUtils::makeString(alloc, oss.str().c_str()));
 
 		getContext().getRowHandler()(txn, builder.build());
 	}
@@ -1951,6 +2132,227 @@ const char8_t* MetaProcessor::ErasableHandler::expirationTypeToName(
 	default:
 		assert(false);
 		return "";
+	}
+}
+
+
+MetaProcessor::EventHandler::EventHandler(Context &cxt) :
+		StoreCoreHandler(cxt) {
+}
+
+void MetaProcessor::EventHandler::operator()(
+		TransactionContext &txn, ContainerId id, DatabaseId dbId,
+		ContainerAttribute attribute, BaseContainer &container) const {
+	ValueListBuilder<MetaType::EventMeta> builder(
+			getContext().getValueListSource());
+	util::StackAllocator &alloc = txn.getDefaultAllocator();
+
+	PartitionTable *pt = getContext().getSource().partitionTable_;
+	NodeAddress &address = pt->getNodeAddress(0, SYSTEM_SERVICE);
+
+	EventMonitor &monitor = getContext().getSource().transactionManager_->getEventMonitor();
+	util::StackAllocator::Scope scope(alloc);
+	for (size_t pos = 0; pos < monitor.eventInfoList_.size(); pos++) {
+		EventMonitor::EventInfo &eventInfo = monitor.eventInfoList_[pos];
+		EventType eventType = eventInfo.eventType_;
+		if (eventInfo.eventType_ != UNDEF_EVENT_TYPE) {
+			builder.set(
+					MetaType::EVENT_NODE_ADDRESS,
+					ValueUtils::makeString(alloc, address.dump(false).c_str()));
+			builder.set(
+					MetaType::EVENT_NODE_PORT,
+					ValueUtils::makeInteger(address.port_));
+
+			builder.set(
+					MetaType::EVENT_START_TIME,
+					ValueUtils::makeTimestamp(
+							eventInfo.startTime_));
+
+			std::string applicationName;
+			builder.set(
+					MetaType::EVENT_APPLICATION_NAME,
+					ValueUtils::makeNull());
+
+			const char *serviceName;
+			if (eventType < TXN_SHORTTERM_SYNC_REQUEST) {
+				serviceName = "TRANSACTION";
+			}
+			else if (eventType < PARTITION_GROUP_START) {
+				serviceName = "SYNC";
+			}
+			else if (eventType < RECV_NOTIFY_MASTER) {
+				serviceName = "CHECKPOINT";
+			}
+			else {
+				serviceName = "TRANSACTION_SERVICE";
+			}
+
+			builder.set(
+					MetaType::EVENT_SERVICE_TYPE,
+					ValueUtils::makeString(alloc, serviceName));
+
+			builder.set(
+					MetaType::EVENT_EVENT_TYPE,
+					ValueUtils::makeString(alloc, getEventTypeName(eventType)));
+
+			builder.set(
+					MetaType::EVENT_WORKER_INDEX,
+					ValueUtils::makeInteger(pos));
+
+			builder.set(
+					MetaType::EVENT_CLUSTER_PARTITION_INDEX,
+					ValueUtils::makeInteger(eventInfo.pId_));
+
+			getContext().getRowHandler()(txn, builder.build());
+		}
+	}
+}
+
+
+MetaProcessor::SocketHandler::SocketHandler(Context &cxt) :
+		StoreCoreHandler(cxt) {
+}
+
+void MetaProcessor::SocketHandler::operator()(
+		TransactionContext &txn, ContainerId id, DatabaseId dbId,
+		ContainerAttribute attribute, BaseContainer &container) const {
+	static_cast<void>(id);
+	static_cast<void>(dbId);
+	static_cast<void>(attribute);
+	static_cast<void>(container);
+
+	ValueListBuilder<MetaType::SocketMeta> builder(
+			getContext().getValueListSource());
+	util::StackAllocator &alloc = txn.getDefaultAllocator();
+
+	if (getContext().getSource().transactionService_ == NULL) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
+
+
+	EventEngine *eeList[] = {
+		getContext().getSource().transactionService_->getEE(),
+		NULL
+	};
+
+	for (EventEngine **eeIt = eeList; *eeIt != NULL; ++eeIt) {
+		typedef EventEngine::SocketInfo Info;
+		typedef EventEngine::SocketStats Stats;
+		typedef util::Vector< std::pair<Info, Stats> > StatsList;
+
+		util::StackAllocator::Scope scope(alloc);
+
+		EventEngine &ee = **eeIt;
+
+		StatsList statsList(alloc);
+		ee.getSocketStats(statsList);
+
+		util::String eeName(ee.getName(), alloc);
+		{
+			const char8_t *suffix = "_SERVICE";
+			const size_t pos = eeName.find(suffix);
+			if (pos != util::String::npos &&
+					pos + strlen(suffix) == eeName.size()) {
+				eeName.erase(pos);
+			}
+		}
+
+		for (StatsList::const_iterator it = statsList.begin();
+				it != statsList.end(); ++it) {
+			util::StackAllocator::Scope subScope(alloc);
+
+			const Info &info = it->first;
+			const Stats &stats = it->second;
+
+			builder.set(
+					MetaType::SOCKET_SERVICE_TYPE,
+					ValueUtils::makeString(alloc, eeName.c_str()));
+
+			const bool ndEmpty = info.nd_.isEmpty();
+			const NodeDescriptor::Type ndType = info.multicast_ ?
+					NodeDescriptor::ND_TYPE_MULTICAST :
+					(ndEmpty ? NodeDescriptor::Type() : info.nd_.getType());
+			const bool ndTypeSpecified = (!ndEmpty || info.multicast_);
+			util::String ndTypeStr(
+					(ndTypeSpecified ?
+							NodeDescriptor::typeToString(ndType) : ""),
+					alloc);
+			ValueUtils::toUpperString(ndTypeStr);
+
+			util::String applicationName(alloc);
+			findApplicationName(info.nd_, applicationName);
+
+			builder.set(
+					MetaType::SOCKET_TYPE, ndTypeSpecified ?
+							ValueUtils::makeString(alloc, ndTypeStr.c_str()) :
+							ValueUtils::makeNull());
+
+			buildSocketAddress(
+					alloc, builder,
+					MetaType::SOCKET_NODE_ADDRESS,
+					MetaType::SOCKET_NODE_PORT, info.localAddress_);
+
+			buildSocketAddress(
+					alloc, builder,
+					MetaType::SOCKET_REMOTE_ADDRESS,
+					MetaType::SOCKET_REMOTE_PORT, info.remoteAddress_);
+
+			builder.set(
+					MetaType::SOCKET_APPLICATION_NAME,
+					applicationName.empty() ?
+							ValueUtils::makeNull() :
+							ValueUtils::makeString(alloc, applicationName.c_str()));
+
+			builder.set(
+					MetaType::SOCKET_CREATION_TIME,
+					ValueUtils::makeTimestamp(
+							stats.initialTime_.getUnixTime()));
+
+			builder.set(
+					MetaType::SOCKET_DISPATCHING_EVENT_COUNT,
+					ValueUtils::makeLong(stats.dispatchingEventCount_));
+			builder.set(
+					MetaType::SOCKET_SENDING_EVENT_COUNT,
+					ValueUtils::makeLong(stats.sendingEventCount_));
+
+			getContext().getRowHandler()(txn, builder.build());
+		}
+	}
+}
+
+bool MetaProcessor::SocketHandler::findApplicationName(
+		const NodeDescriptor &nd, util::String &name) {
+	name = "";
+
+	if (nd.isEmpty() || nd.getType() != NodeDescriptor::ND_TYPE_CLIENT) {
+		return false;
+	}
+
+	return StatementHandler::getApplicationNameByOptionsOrND(
+			NULL, &nd, &name, NULL);
+}
+
+template<typename T>
+void MetaProcessor::SocketHandler::buildSocketAddress(
+		util::StackAllocator &alloc, ValueListBuilder<T> &builder,
+		T addressType, T portType,
+		const util::SocketAddress &socketAddress) const {
+	if (socketAddress.isEmpty()) {
+		builder.set(addressType, ValueUtils::makeNull());
+		builder.set(portType, ValueUtils::makeNull());
+	}
+	else {
+		u8string addressStr;
+		uint16_t port;
+		socketAddress.getIP(&addressStr, &port);
+
+		builder.set(
+				addressType,
+				ValueUtils::makeString(alloc, addressStr.c_str()));
+		builder.set(
+				portType,
+				ValueUtils::makeInteger(static_cast<int32_t>(port)));
 	}
 }
 
@@ -1975,13 +2377,34 @@ bool MetaProcessor::KeyRefHandler::filter(
 }
 
 
+MetaProcessor::ContainerRefHandler::ContainerRefHandler(
+		TransactionContext &txn, const MetaContainerInfo &refInfo,
+		RowHandler &rowHandler) :
+		RefHandler(txn, refInfo, rowHandler) {
+	assert(refInfo.id_ == MetaType::TYPE_CONTAINER);
+}
+
+bool MetaProcessor::ContainerRefHandler::filter(
+		TransactionContext &txn, const ValueList &valueList) {
+	static_cast<void>(txn);
+
+	assert(MetaType::CONTAINER_ATTRIBUTE < valueList.size());
+	const Value &attributeValue = valueList[MetaType::CONTAINER_ATTRIBUTE];
+
+	assert(attributeValue.getType() == COLUMN_TYPE_INT);
+	return (attributeValue.getInt() == CONTAINER_ATTR_VIEW);
+}
+
+
 MetaProcessorSource::MetaProcessorSource(
 		DatabaseId dbId, const char8_t *dbName) :
 		dbId_(dbId),
 		dbName_(dbName),
 		eventContext_(NULL),
 		transactionManager_(NULL),
-		partitionTable_(NULL) {
+		transactionService_(NULL),
+		partitionTable_(NULL)
+{
 }
 
 

@@ -137,6 +137,7 @@ void ResultSet::clear() {
 
 	rsAlloc_->setFreeSizeLimit(rsAlloc_->base().getElementSize());
 	rsAlloc_->trim();
+	queryOption_ = ResultSetOption();
 }
 
 /*!

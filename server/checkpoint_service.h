@@ -628,7 +628,6 @@ private:
 	util::Mutex cpLongtermSyncMutex_;
 	const std::string syncTempTopPath_;  
 	const std::string longArchiveTopPath_;  
-	util::Mutex cpLongtermSyncSessionMutex_;
 
 	typedef std::map<SyncSequentialNumber, CpLongtermSyncInfo> CpLongtermSyncInfoMap;
 	CpLongtermSyncInfoMap cpLongtermSyncInfoMap_;

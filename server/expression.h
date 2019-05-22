@@ -580,8 +580,8 @@ public:
 			}
 #endif
 			else {
-				GS_THROW_USER_ERROR(GS_ERROR_TQ_INTERNAL_DATA_CANNOT_COMPARE,
-					"Internal logic error: Cannot compare non-comparable "
+				GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
+					"Invalid argument type: Cannot compare non-comparable "
 					"types");
 			}
 		}
@@ -596,8 +596,9 @@ public:
 				return 0;
 			}
 			else {
-				GS_THROW_USER_ERROR(GS_ERROR_TQ_INTERNAL_DATA_CANNOT_COMPARE,
-					"Internal logic error: Cannot compare non-value data");
+				GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
+					"Invalid argument type: Cannot compare non-comparable "
+					"types");
 			}
 		}
 	}

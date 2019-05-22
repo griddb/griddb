@@ -28,6 +28,7 @@
 
 class ObjectManager;
 
+
 static const uint32_t VAR_SIZE_1BYTE_THRESHOLD = 128;
 static const uint32_t VAR_SIZE_4BYTE_THRESHOLD = UINT32_C(1) << 30;
 static const uint64_t VAR_SIZE_8BYTE_THRESHOLD = UINT64_C(1) << 62;
@@ -250,6 +251,8 @@ enum ContainerAttribute {
 		0x00000020,  
 	CONTAINER_ATTR_SUB =
 		0x00000030,  
+	CONTAINER_ATTR_VIEW =
+		0x00000040,  
 	CONTAINER_ATTR_ANY = 0x0000007f
 };
 

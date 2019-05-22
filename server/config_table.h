@@ -130,7 +130,8 @@ public:
 	typedef int32_t ParamId;
 	static const ParamId PARAM_ID_ROOT;
 
-	typedef std::set< ParamId, std::less<ParamId>,
+	typedef std::set<
+			ParamId, std::set<ParamId>::key_compare,
 			util::StdAllocator<ParamId, void> > IdSet;
 	typedef std::vector<
 			const char8_t*, util::StdAllocator<ParamId, void> > SubPath;
@@ -230,8 +231,10 @@ protected:
 private:
 	class SilentParamHandler;
 
-	typedef std::map< String, ParamId, std::less<String>, util::StdAllocator<
-			std::pair<const String, ParamId>, void> > NameMap;
+	typedef std::map<
+			String, ParamId, std::map<String, ParamId>::key_compare,
+			util::StdAllocator<
+					std::pair<const String, ParamId>, void> > NameMap;
 	typedef std::vector< ParamId, util::StdAllocator<ParamId, void> > IdList;
 
 	struct Entry {
@@ -250,8 +253,10 @@ private:
 		bool modified_;
 	};
 
-	typedef std::map< ParamId, Entry, std::less<ParamId>, util::StdAllocator<
-			std::pair<const ParamId, Entry>, void> > EntryMap;
+	typedef std::map<
+			ParamId, Entry, std::map<ParamId, Entry>::key_compare,
+			util::StdAllocator<
+					std::pair<const ParamId, Entry>, void> > EntryMap;
 
 	typedef std::pair<util::Exception::NamedErrorCode, String> Problem;
 	typedef std::vector< Problem, util::StdAllocator<Problem, void> > ProblemList;
@@ -876,6 +881,7 @@ enum ConfigTableParamId {
 	CONFIG_TABLE_CS_MAX_LSN_GAP,
 	CONFIG_TABLE_CS_MAX_LSN_REPLICATION_NUM,
 	CONFIG_TABLE_CS_CATCHUP_NUM,
+	CONFIG_TABLE_CS_CHECK_RULE_INTERVAL,
 
 	CONFIG_TABLE_SYNC_TIMEOUT_INTERVAL,
 
@@ -942,7 +948,9 @@ enum ConfigTableParamId {
 	CONFIG_TABLE_DS_ROW_ARRAY_RATE_EXPONENT,
 	CONFIG_TABLE_DS_ROW_ARRAY_SIZE_CONTROL_MODE,
 	CONFIG_TABLE_DS_PARTITION_BATCH_FREE_CHECK_INTERVAL,
-	CONFIG_TABLE_DS_STORE_MEMORY_REDISTRIBUTE_SHIFTABLE_MEMORY_RATIO,
+	CONFIG_TABLE_DS_STORE_MEMORY_AGING_SWAP_RATE,
+	CONFIG_TABLE_DS_STORE_MEMORY_COLD_RATE,
+	CONFIG_TABLE_DS_STORE_MEMORY_REDISTRIBUTE_SHIFTABLE_MEMORY_RATE,
 	CONFIG_TABLE_DS_STORE_MEMORY_REDISTRIBUTE_EMA_HALF_LIFE_PERIOD,
 
 	CONFIG_TABLE_CP_CHECKPOINT_INTERVAL,
@@ -1164,6 +1172,8 @@ enum StatTableParamId {
 	STAT_TABLE_CS_APPLY_RULE_LIMIT_TIME,
 	STAT_TABLE_CS_CLUSTER_REVISION_NO,
 
+	STAT_TABLE_CS_AUTO_GOAL,
+
 	STAT_TABLE_PERF_OWNER_COUNT,
 	STAT_TABLE_PERF_BACKUP_COUNT,
 	STAT_TABLE_PERF_TOTAL_OWNER_LSN,
@@ -1191,8 +1201,10 @@ enum StatTableParamId {
 
 	STAT_TABLE_PERF_CHECKPOINT_FILE_SIZE,	
 	STAT_TABLE_PERF_CHECKPOINT_FILE_USAGE_RATE,	
+
 	STAT_TABLE_PERF_STORE_COMPRESSION_MODE,
 	STAT_TABLE_PERF_CHECKPOINT_FILE_ALLOCATE_SIZE,	
+
 	STAT_TABLE_PERF_CURRENT_CHECKPOINT_WRITE_BUFFER_SIZE,
 	STAT_TABLE_PERF_CHECKPOINT_WRITE_SIZE,	
 	STAT_TABLE_PERF_CHECKPOINT_WRITE_TIME,

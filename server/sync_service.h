@@ -237,6 +237,7 @@ public:
 		return request_.endLsn_;
 	}
 
+private:
 	/*!
 		@brief Represents the information for search condition
 	*/
@@ -400,10 +401,6 @@ public:
 	void removePartition(util::StackAllocator &alloc,
 		PartitionId pId, EventType eventType, const util::DateTime &now,
 		const EventMonotonicTime emNow);
-
-	/*!
-		@brief Represents the context to control the synchronization
-	*/
 
 
 	PartitionTable *pt_;

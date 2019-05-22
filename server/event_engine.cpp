@@ -1056,7 +1056,10 @@ EventEngine::SocketPool::SocketPool(EventEngine &ee) :
 		secondaryIOConcurrency_(ioConcurrency_ - primaryIOConcurrency_),
 		base_(util::AllocatorInfo(ee.config_->allocatorGroupId_, "eeSocket")),
 		primaryWorkerSeed_(0),
-		secondaryWorkerSeed_(0) {
+		secondaryWorkerSeed_(0),
+		varAlloc_(util::AllocatorInfo(
+				ee.config_->allocatorGroupId_, "eeSocketVar")),
+		socketSet_(SocketSet::key_compare(), varAlloc_) {
 	assert(primaryIOConcurrency_ <= ioConcurrency_);
 }
 
@@ -1065,6 +1068,9 @@ EventEngine::SocketPool::~SocketPool() {
 
 EventEngine::EventSocket* EventEngine::SocketPool::allocate(bool onSecondary) {
 	assert(ioConcurrency_ > 0);
+
+	const util::DateTime initialTime =
+			ee_.clockGenerator_->getCurrentApproximately();
 
 	LockGuard guard(mutex_);
 
@@ -1100,7 +1106,17 @@ EventEngine::EventSocket* EventEngine::SocketPool::allocate(bool onSecondary) {
 	EventSocket *socket = UTIL_OBJECT_POOL_NEW(base_) EventSocket(
 			ee_, ee_.ioWorkerList_[id]);
 
-	ee_.stats_->increment(Stats::SOCKET_CREATE_COUNT);
+	try {
+		ee_.stats_->increment(Stats::SOCKET_CREATE_COUNT);
+		socket->stats_.initialTime_ = initialTime;
+
+		socketSet_.insert(socket);
+	}
+	catch (...) {
+		UTIL_OBJECT_POOL_DELETE(base_, socket);
+		throw;
+	}
+
 	return socket;
 }
 
@@ -1112,9 +1128,21 @@ void EventEngine::SocketPool::deallocate(
 
 	{
 		LockGuard guard(mutex_);
+		socketSet_.erase(socket);
 		UTIL_OBJECT_POOL_DELETE(base_, socket);
 
 		ee_.stats_->increment(Stats::SOCKET_REMOVE_COUNT);
+	}
+}
+
+void EventEngine::SocketPool::getSocketStats(
+		util::Vector<SocketStatsWithInfo> &statsList) {
+	LockGuard guard(mutex_);
+	for (SocketSet::const_iterator it = socketSet_.begin();
+			it != socketSet_.end(); ++it) {
+		EventSocket *socket = *it;
+		statsList.push_back(SocketStatsWithInfo(
+				socket->getInfo(), socket->getStats()));
 	}
 }
 
@@ -3368,6 +3396,7 @@ bool EventEngine::EventSocket::openAsClient(
 	try {
 		if (onSecondary_) {
 			address_ = address;
+			base_.getSocketName(localAddress_);
 			negotiationEventDone_ = true;
 			firstEventSent_ = true;
 			connectStartTime_ = ee_.clockGenerator_->getMonotonicTime();
@@ -3394,6 +3423,7 @@ bool EventEngine::EventSocket::openAsServer(
 	try {
 		base_.attach(acceptedSocket.detach());
 		address_ = acceptedAddress;
+		base_.getSocketName(localAddress_);
 
 		base_.setBlockingMode(false);
 		base_.setNoDelay(ee_.config_->tcpNoDelay_);
@@ -3478,6 +3508,10 @@ void EventEngine::EventSocket::send(
 	try {
 		if (!negotiationEventDone_) {
 			sendNegotiationEvent(ndGuard, ev.getSource());
+		}
+
+		if (!Dispatcher::isSpecialEventType(ev.getType())) {
+			stats_.sendingEventCount_++;
 		}
 
 		if (ev.getExtraMessageCount() > 0 && (multicast_ || option != NULL)) {
@@ -3812,6 +3846,7 @@ void EventEngine::EventSocket::moveLocal() {
 
 		socket->base_.attach(base_.detach());
 		socket->address_ = address_;
+		socket->localAddress_ = localAddress_;
 
 		socket->firstEventSent_ = firstEventSent_;
 		socket->firstEventReceived_ = firstEventReceived_;
@@ -3842,6 +3877,8 @@ void EventEngine::EventSocket::moveLocal() {
 
 		socket->nd_ = nd_;
 		socket->ndSocketPendingType_ = ndSocketPendingType_;
+
+		socket->stats_ = stats_;
 
 		if (socket->parentWorker_.addSocket(
 				socket, util::IOPollEvent::TYPE_READ_WRITE)) {
@@ -3921,6 +3958,19 @@ void EventEngine::EventSocket::closeLocal(
 catch (...) {
 	std::exception e;
 	UTIL_TRACE_EXCEPTION(EVENT_ENGINE, e, "");
+}
+
+EventEngine::SocketInfo EventEngine::EventSocket::getInfo() const {
+	SocketInfo info;
+	info.nd_ = nd_;
+	info.remoteAddress_ = address_;
+	info.localAddress_ = localAddress_;
+	info.multicast_ = multicast_;
+	return info;
+}
+
+EventEngine::SocketStats EventEngine::EventSocket::getStats() const {
+	return stats_;
 }
 
 bool EventEngine::EventSocket::acceptInitialEvent(
@@ -4056,6 +4106,10 @@ void EventEngine::EventSocket::initializeND(
 
 void EventEngine::EventSocket::dispatchEvent(
 		Event &ev, const EventRequestOption &option) {
+
+	if (!Dispatcher::isSpecialEventType(ev.getType())) {
+		stats_.dispatchingEventCount_++;
+	}
 
 	EventContext &ec = parentWorker_.getLocalEventContext();
 	const bool suspended = parentWorker_.isSuspendedLocal();
@@ -4493,7 +4547,11 @@ void EventEngine::EventSocket::transferSendBuffer(EventSocket &dest) const {
 
 void EventEngine::EventSocket::appendToSendBuffer(
 		const void *data, size_t size, size_t offset) {
-	const bool extEnabled = (ee_.bufferManager_ != NULL);
+	bool extEnabled = (ee_.bufferManager_ != NULL);
+
+	if (!nd_.isEmpty() && nd_.getType() == NodeDescriptor::ND_TYPE_CLIENT) {
+		extEnabled = false;
+	}
 
 	typedef VariableSizeAllocator::TraitsType Traits;
 	const size_t threshold =
@@ -5378,6 +5436,17 @@ void EventEngine::Stats::dump(std::ostream &out) const {
 template<size_t N>
 bool EventEngine::Stats::findType(const Type (&typeArray)[N], Type type) {
 	return (std::find(typeArray, typeArray + N, type) != typeArray + N);
+}
+
+
+EventEngine::SocketInfo::SocketInfo() :
+		multicast_(false) {
+}
+
+
+EventEngine::SocketStats::SocketStats() :
+		dispatchingEventCount_(0),
+		sendingEventCount_(0) {
 }
 
 

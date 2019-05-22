@@ -63,6 +63,7 @@ class PartitionTable;
 class DataStore;
 class LogManager;
 class ResultSet;
+class ResultSetOption;
 class MetaContainer;
 struct ManagerSet;
 
@@ -73,13 +74,14 @@ UTIL_TRACER_DECLARE(TRANSACTION_TIMEOUT);
 UTIL_TRACER_DECLARE(REPLICATION_TIMEOUT);
 UTIL_TRACER_DECLARE(AUTHENTICATION_TIMEOUT);
 
+
 /*!
 	@brief Exception class for denying the statement execution
 */
 class DenyException : public util::Exception {
 public:
-	DenyException(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw()
-		: Exception(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_SET) {}
+	explicit DenyException(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw() :
+			Exception(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_SET) {}
 	virtual ~DenyException() throw() {}
 };
 
@@ -88,8 +90,9 @@ public:
 */
 class EncodeDecodeException : public util::Exception {
 public:
-	EncodeDecodeException(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw()
-		: Exception(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_SET) {}
+	explicit EncodeDecodeException(
+			UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw() :
+			Exception(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_SET) {}
 	virtual ~EncodeDecodeException() throw() {}
 };
 
@@ -110,6 +113,7 @@ struct StatementMessage {
 	template<EventType T> struct FixedTypeResolver;
 
 	template<typename T, T D, int> struct PrimitiveOptionCoder;
+	template<typename T, int> struct FloatingOptionCoder;
 	template<typename T, T D, int, typename S = int8_t> struct EnumOptionCoder;
 	template<int> struct StringOptionCoder;
 	template<typename T, int> struct CustomOptionCoder;
@@ -132,11 +136,12 @@ struct StatementMessage {
 	struct FixedRequest;
 	struct Request;
 
-	enum FeatureTypes {
-		FEATURE_V40 = 0,
-		FEATURE_V41 = 1,
+	enum FeatureVersion {
+		FEATURE_V4_0 = 0,
+		FEATURE_V4_1 = 1,
+		FEATURE_V4_2 = 2,
 
-		FEATURE_SUPPORTED_MAX = FEATURE_V41
+		FEATURE_SUPPORTED_MAX = FEATURE_V4_2
 	};
 
 	struct FixedTypes {
@@ -209,6 +214,8 @@ struct StatementMessage {
 		static const OptionType CONTAINER_VISIBILITY = 11006;
 		static const OptionType META_NAMING_TYPE = 11007;
 		static const OptionType QUERY_CONTAINER_KEY = 11008;
+		static const OptionType APPLICATION_NAME = 11009; 
+		static const OptionType STORE_MEMORY_AGING_SWAP_RATE = 11010; 
 
 
 
@@ -319,6 +326,14 @@ struct StatementMessage {
 	template<int C> struct OptionCoder<Options::QUERY_CONTAINER_KEY, C> :
 			public CustomOptionCoder<QueryContainerKey*, C> {
 	};
+	template<int C> struct OptionCoder<Options::APPLICATION_NAME, C> :
+			public StringOptionCoder<C> {
+	};
+	template<int C> struct OptionCoder<Options::STORE_MEMORY_AGING_SWAP_RATE, C> :
+			public FloatingOptionCoder<double, C> {
+		OptionCoder() :
+					FloatingOptionCoder<double, C>(TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE) {}
+	};
 
 
 
@@ -350,6 +365,8 @@ private:
 			T == GET_DATABASES ||
 			T == PUT_PRIVILEGE ||
 			T == DROP_PRIVILEGE ||
+			T == REPLICATION_LOG2 ||
+			T == REPLICATION_ACK2 ||
 			T == UPDATE_DATA_STORE_STATUS ||
 			T == UPDATE_CONTAINER_STATUS ?
 			FixedTypes::BASIC :
@@ -447,6 +464,24 @@ struct StatementMessage::PrimitiveOptionCoder<bool, D, C> {
 	ValueType decode(EventByteInStream &in, util::StackAllocator&) const {
 		return Utils::decodeBool(in);
 	}
+};
+
+template<typename T, int> struct StatementMessage::FloatingOptionCoder {
+	typedef T ValueType;
+	typedef ValueType StorableType;
+	explicit FloatingOptionCoder(const T defaultValue) : defaultValue_(defaultValue) {
+		UTIL_STATIC_ASSERT((std::numeric_limits<T>::has_infinity));
+	}
+	ValueType getDefault() const { return defaultValue_; }
+	void encode(EventByteOutStream &out, const ValueType &value) const {
+		out << value;
+	}
+	ValueType decode(EventByteInStream &in, util::StackAllocator&) const {
+		ValueType value;
+		in >> value;
+		return value;
+	}
+	T defaultValue_;
 };
 
 template<typename T, T D, int, typename S>
@@ -1287,6 +1322,7 @@ public:
 		@brief Represents the information about a connection
 	*/
 	struct ConnectionOption {
+	public:
 		ConnectionOption()
 			: clientVersion_(PROTOCOL_VERSION_UNDEFINED),
 			  txnTimeoutInterval_(TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL),
@@ -1300,13 +1336,15 @@ public:
 			  ,
 			  authMode_(0)
 			  ,
+			  storeMemoryAgingSwapRate_(TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE)
+			  ,
 				clientId_()
 			  ,
 			  keepaliveTime_(0)
 		{
 		}
 
-			void clear() {
+		void clear() {
 			clientVersion_ = PROTOCOL_VERSION_UNDEFINED;
 			txnTimeoutInterval_ = TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL;
 			isAuthenticated_ = false;
@@ -1317,12 +1355,36 @@ public:
 			authenticationTime_ = 0;
 			requestType_ = Message::REQUEST_NOSQL;
 
-			userName_.clear();
-			dbName_.clear();
-			clientId_ = ClientId();
+			storeMemoryAgingSwapRate_ = TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE;
 			keepaliveTime_ = 0;
 			currentSessionId_ = 0;
+			initializeCoreInfo();
 		}
+
+
+		void setLoginInfo(const char8_t *userName,
+				const char8_t *dbName, const char8_t *applicationName);
+
+		void setApplicationName(const char8_t *name);
+		void initializeCoreInfo();
+
+		template<typename Alloc>
+		bool getApplicationName(
+				util::BasicString<
+						char8_t, std::char_traits<char8_t>, Alloc> &name) {
+			util::BasicString<
+					char8_t, std::char_traits<char8_t>,
+					util::StdAllocator<char8_t, void> > localName(
+					*name.get_allocator().base());
+			const bool ret = getApplicationName(&localName);
+			name = localName.c_str();
+			return ret;
+		}
+		bool getApplicationName(
+				util::BasicString<
+						char8_t, std::char_traits<char8_t>,
+						util::StdAllocator<char8_t, void> > *name);
+		void getApplicationName(std::ostream &os);
 
 		ProtocolVersion clientVersion_;
 		int32_t txnTimeoutInterval_;
@@ -1338,9 +1400,14 @@ public:
 		std::string userName_;
 		std::string dbName_;
 		const int8_t authMode_;
+		double storeMemoryAgingSwapRate_;
 		ClientId clientId_;
 		EventMonotonicTime keepaliveTime_;
 		SessionId currentSessionId_;
+
+	private:
+		util::Mutex mutex_;
+		std::string applicationName_;
 	};
 
 	struct LockConflictStatus {
@@ -1358,6 +1425,57 @@ public:
 		EventMonotonicTime emNow_;
 	};
 
+	struct ErrorMessage {
+		ErrorMessage(
+				std::exception &cause, const char8_t *description,
+				const Event &ev, const Request &request) :
+				elements_(
+						cause, description, ev,
+						request.fixed_, &request.optional_) {
+		}
+
+		ErrorMessage(
+				std::exception &cause, const char8_t *description,
+				const Event &ev, const FixedRequest &request) :
+				elements_(cause, description, ev, request, NULL) {
+		}
+
+		ErrorMessage withDescription(const char8_t *description) const {
+			ErrorMessage org = *this;
+			org.elements_.description_ = description;
+			return org;
+		}
+
+		void format(std::ostream &os) const;
+		void formatParameters(std::ostream &os) const;
+
+		struct Elements {
+			Elements(
+					std::exception &cause, const char8_t *description,
+					const Event &ev, const FixedRequest &request,
+					const OptionSet *options) :
+					cause_(cause),
+					description_(description),
+					ev_(ev),
+					pId_(ev_.getPartitionId()),
+					stmtType_(ev_.getType()),
+					clientId_(request.clientId_),
+					stmtId_(request.cxtSrc_.stmtId_),
+					containerId_(request.cxtSrc_.containerId_),
+					options_(options) {
+			}
+			std::exception &cause_;
+			const char8_t *description_;
+			const Event &ev_;
+			PartitionId pId_;
+			EventType stmtType_;
+			ClientId clientId_;
+			StatementId stmtId_;
+			ContainerId containerId_;
+			const OptionSet *options_;
+		} elements_;
+	};
+
 
 	void checkAuthentication(
 			const NodeDescriptor &ND, EventMonotonicTime emNow);
@@ -1366,8 +1484,8 @@ public:
 			PartitionId pId, ClusterRole requiredClusterRole,
 			PartitionRoleType requiredPartitionRole,
 			PartitionStatus requiredPartitionStatus, PartitionTable *pt);
-
 	void checkExecutable(ClusterRole requiredClusterRole);
+	static void checkExecutable(ClusterRole requiredClusterRole, PartitionTable *pt);
 
 	void checkTransactionTimeout(
 			EventMonotonicTime now,
@@ -1396,10 +1514,12 @@ public:
 	void checkQueryOption(
 			const OptionSet &optionSet,
 			const FetchOption &fetchOption, bool isPartial, bool isTQL);
-	void applyQueryOption(
-			ResultSet &rs, const OptionSet &optionSet,
+
+	void createResultSetOption(
+			const OptionSet &optionSet,
 			const int32_t *fetchBytesSize, bool partial,
-			const PartialQueryOption &partialOption);
+			const PartialQueryOption &partialOption,
+			ResultSetOption &queryOption);
 	static void checkLogVersion(uint16_t logVersion);
 
 
@@ -1480,6 +1600,9 @@ public:
 
 	static void decodeReplicationAck(
 		util::ByteStream<util::ArrayInStream> &in, ReplicationAck &ack);
+	static void decodeStoreMemoryAgingSwapRate(
+		util::ByteStream<util::ArrayInStream> &in,
+		double &storeMemoryAgingSwapRate);
 	static void decodeUserInfo(
 		util::ByteStream<util::ArrayInStream> &in, UserInfo &userInfo);
 	static void decodeDatabaseInfo(util::ByteStream<util::ArrayInStream> &in,
@@ -1530,6 +1653,8 @@ public:
 		int32_t taskStatus);
 	static int32_t encodeDistributedResult(
 		EventByteOutStream &out, const ResultSet &rs, int64_t *encodedSize);
+	static void encodeStoreMemoryAgingSwapRate(
+		EventByteOutStream &out, double storeMemoryAgingSwapRate);
 
 
 	static bool isUpdateStatement(EventType stmtType);
@@ -1583,7 +1708,8 @@ public:
 			const Response &response);
 	void replyReplicationAck(
 			EventContext &ec, util::StackAllocator &alloc,
-			const NodeDescriptor &ND, const ReplicationAck &request);
+			const NodeDescriptor &ND, const ReplicationAck &ack,
+			bool optionalFormat);
 
 	void handleError(
 			EventContext &ec, util::StackAllocator &alloc, Event &ev,
@@ -1612,6 +1738,7 @@ public:
 	bool checkPrivilege(
 			EventType command,
 			UserType userType, RequestType requestType, bool isSystemMode,
+			int32_t featureVersion,
 			ContainerType resourceType, ContainerAttribute resourceSubType,
 			ContainerAttribute expectedResourceSubType = CONTAINER_ATTR_ANY);
 
@@ -1628,6 +1755,10 @@ public:
 	static const char8_t *clusterRoleToStr(ClusterRole role);
 	static const char8_t *partitionRoleTypeToStr(PartitionRoleType role);
 	static const char8_t *partitionStatusToStr(PartitionStatus status);
+
+	static bool getApplicationNameByOptionsOrND(
+			const OptionSet *optionSet, const NodeDescriptor *nd,
+			util::String *nameStr, std::ostream *os);
 
 protected:
 	const KeyConstraint& getKeyConstraint(
@@ -1732,6 +1863,12 @@ void StatementHandler::encodeEnumData(
 	}
 }
 
+inline std::ostream& operator<<(
+		std::ostream &os, const StatementHandler::ErrorMessage &errorMessage) {
+	errorMessage.format(os);
+	return os;
+}
+
 /*!
 	@brief Handles CONNECT statement
 */
@@ -1794,6 +1931,8 @@ public:
 */
 class LoginHandler : public StatementHandler {
 public:
+	static const uint32_t MAX_APPLICATION_NAME_LEN = 64;
+
 	void operator()(EventContext &ec, Event &ev);
 };
 
@@ -1857,9 +1996,10 @@ private:
 		CONTAINER_PROPERTY_PARTITIONING_METADATA = 16
 	};
 
-	enum MetaContainerType {
-		META_NONE,
-		META_FULL
+	enum MetaDistributionType {
+		META_DIST_NONE,
+		META_DIST_FULL,
+		META_DIST_NODE
 	};
 
 	void encodeResultListHead(EventByteOutStream &out, uint32_t totalCount);
@@ -1867,10 +2007,11 @@ private:
 	void encodeId(
 			EventByteOutStream &out, SchemaVersionId schemaVersionId,
 			ContainerId containerId, const FullContainerKey &containerKey,
-			ContainerId metaContainerId, int8_t metaNamingType);
+			ContainerId metaContainerId, MetaDistributionType metaDistType,
+			int8_t metaNamingType);
 	void encodeMetaId(
 			EventByteOutStream &out, ContainerId metaContainerId,
-			int8_t metaNamingType);
+			MetaDistributionType metaDistType, int8_t metaNamingType);
 	void encodeSchema(EventByteOutStream &out, ContainerType containerType,
 			const util::XArray<uint8_t> &serializedCollectionInfo);
 	void encodeIndex(
@@ -2201,7 +2342,11 @@ private:
 	@brief Handles multi-type statement
 */
 class MultiStatementHandler : public StatementHandler {
-	TXN_PROTECTED : enum ContainerResult {
+public:
+	struct MultiOpErrorMessage;
+
+TXN_PROTECTED :
+	enum ContainerResult {
 		CONTAINER_RESULT_SUCCESS,
 		CONTAINER_RESULT_ALREADY_EXECUTED,
 		CONTAINER_RESULT_FAIL
@@ -2230,10 +2375,11 @@ class MultiStatementHandler : public StatementHandler {
 	};
 
 	void handleExecuteError(
-			util::StackAllocator &alloc, PartitionId pId,
-			const ClientId &clientId, const TransactionManager::ContextSource &src,
-			Progress &progress, std::exception &e, EventType stmtType,
-			const char8_t *executionName);
+			util::StackAllocator &alloc,
+			const Event &ev, const Request &wholeRequest,
+			EventType stmtType, PartitionId pId, const ClientId &clientId,
+			const TransactionManager::ContextSource &src, Progress &progress,
+			std::exception &e, const char8_t *executionName);
 
 	void handleWholeError(
 			EventContext &ec, util::StackAllocator &alloc,
@@ -2243,6 +2389,43 @@ class MultiStatementHandler : public StatementHandler {
 			EventByteInStream &in, const FixedRequest &fixedRequest,
 			OptionSet &optionSet);
 };
+
+struct MultiStatementHandler::MultiOpErrorMessage {
+	MultiOpErrorMessage(
+			std::exception &cause, const char8_t *description,
+			const Event &ev, const Request &wholeRequest,
+			EventType stmtType, PartitionId pId, const ClientId &clientId,
+			const TransactionManager::ContextSource &cxtSrc,
+			const char8_t *containerName, const char8_t *executionName) :
+			base_(cause, description, ev, wholeRequest),
+			containerName_(containerName),
+			executionName_(executionName) {
+		base_.elements_.stmtType_ = stmtType;
+		base_.elements_.pId_ = pId;
+		base_.elements_.stmtId_ = UNDEF_STATEMENTID;
+		base_.elements_.clientId_ = clientId;
+		base_.elements_.containerId_ = cxtSrc.containerId_;
+	}
+
+	MultiOpErrorMessage withDescription(const char8_t *description) const {
+		MultiOpErrorMessage org = *this;
+		org.base_.elements_.description_ = description;
+		return org;
+	}
+
+	void format(std::ostream &os) const;
+
+	ErrorMessage base_;
+	const char8_t *containerName_;
+	const char8_t *executionName_;
+};
+
+inline std::ostream& operator<<(
+		std::ostream &os,
+		const MultiStatementHandler::MultiOpErrorMessage &errorMessage) {
+	errorMessage.format(os);
+	return os;
+}
 
 /*!
 	@brief Handles MULTI_PUT statement
@@ -2281,7 +2464,7 @@ private:
 	typedef util::SortedList<CheckedSchemaId> CheckedSchemaIdSet;
 
 	void execute(
-			EventContext &ec, const Request &request,
+			EventContext &ec, const Event &ev, const Request &request,
 			const RowSetRequest &rowSetRequest, const MessageSchema &schema,
 			CheckedSchemaIdSet &idSet, Progress &progress,
 			PutRowOption putRowOption);
@@ -2344,7 +2527,7 @@ private:
 	};
 
 	uint32_t execute(
-			EventContext &ec, const Request &request,
+			EventContext &ec, const Event &ev, const Request &request,
 			const SearchEntry &entry, const SchemaMap &schemaMap,
 			EventByteOutStream &replyOut, Progress &progress);
 
@@ -2424,10 +2607,9 @@ private:
 	typedef util::XArray<const QueryRequest *> QueryRequestList;
 
 	void execute(
-			EventContext &ec, const Request &request,
-			int32_t &fetchByteSize,
-			const QueryRequest &queryRequest, EventByteOutStream &replyOut,
-			Progress &progress);
+			EventContext &ec, const Event &ev, const Request &request,
+			int32_t &fetchByteSize, const QueryRequest &queryRequest,
+			EventByteOutStream &replyOut, Progress &progress);
 
 	TransactionManager::ContextSource createContextSource(
 			const Request &request, const QueryRequest &queryRequest);
@@ -2452,6 +2634,15 @@ private:
 class ReplicationLogHandler : public StatementHandler {
 public:
 	void operator()(EventContext &ec, Event &ev);
+protected:
+	virtual void decode(EventByteInStream &in, ReplicationAck &ack, Request &requestOption, 
+		ConnectionOption &connOption) {
+		decodeReplicationAck(in, ack);
+	}
+
+	virtual bool isOptionalFormat() const {
+		return false;
+	}
 };
 /*!
 	@brief Handles REPLICATION_ACK statement requested from another node
@@ -2459,6 +2650,40 @@ public:
 class ReplicationAckHandler : public StatementHandler {
 public:
 	void operator()(EventContext &ec, Event &ev);
+protected:
+	virtual void decode(EventByteInStream &in, ReplicationAck &ack, Request &requestOption, 
+		ConnectionOption &connOption) {
+		decodeReplicationAck(in, ack);
+	}
+};
+
+/*!
+	@brief Handles REPLICATION_LOG2 statement requested from another node
+*/
+class ReplicationLog2Handler : public ReplicationLogHandler {
+public:
+protected:
+	void decode(EventByteInStream &in, ReplicationAck &ack, Request &requestOption, 
+		ConnectionOption &connOption) {
+		decodeRequestCommonPart(in, requestOption, connOption);
+		decodeReplicationAck(in, ack);
+	}
+	bool isOptionalFormat() const {
+		return true;
+	}
+};
+
+/*!
+	@brief Handles REPLICATION_ACK2 statement requested from another node
+*/
+class ReplicationAck2Handler : public ReplicationAckHandler {
+public:
+protected:
+	void decode(EventByteInStream &in, ReplicationAck &ack, Request &requestOption,
+		ConnectionOption &connOption) {
+		decodeRequestCommonPart(in, requestOption, connOption);
+		decodeReplicationAck(in, ack);
+	}
 };
 
 /*!
@@ -2896,6 +3121,8 @@ private:
 	MultiQueryHandler multiQueryHandler_;
 	ReplicationLogHandler replicationLogHandler_;
 	ReplicationAckHandler replicationAckHandler_;
+	ReplicationLog2Handler replicationLog2Handler_;
+	ReplicationAck2Handler replicationAck2Handler_;
 	AuthenticationHandler authenticationHandler_;
 	AuthenticationAckHandler authenticationAckHandler_;
 	PutUserHandler putUserHandler_;

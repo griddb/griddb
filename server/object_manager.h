@@ -152,6 +152,19 @@ public:
 		}
 	};
 
+
+	void setSwapOutCounter(PartitionId pId, int64_t counter) {
+		chunkManager_->setSwapOutCounter(pId, counter);
+	}
+	int64_t getSwapOutCounter(PartitionId pId) {
+		return chunkManager_->getSwapOutCounter(pId);
+	}
+	void setStoreMemoryAgingSwapRate(PartitionId pId, double ratio) {
+		chunkManager_->setStoreMemoryAgingSwapRate(pId, ratio);
+	}
+	double getStoreMemoryAgingSwapRate(PartitionId pId) {
+		return chunkManager_->getStoreMemoryAgingSwapRate(pId);
+	}
 	/*!
 		@brief Returns an estimated size of the Object for requested size.
 	*/
