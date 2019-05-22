@@ -720,6 +720,7 @@ private:
 	PIdFile& operator=(const PIdFile&);
 
 	NamedFile base_;
+	bool locked_;
 };
 
 } 

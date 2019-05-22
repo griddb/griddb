@@ -50,6 +50,7 @@
 #include "util/type.h"
 #include <set>
 #include <limits>
+#include <algorithm> 
 #include <stdlib.h>
 #include <string.h>
 
@@ -95,6 +96,16 @@ public:
 */
 template<typename T>
 struct LexicalConverter {
+	bool operator()(const char8_t *src, T &dest);
+	T operator()(const char8_t *src);
+
+	bool operator()(const u8string &src, T &dest);
+	T operator()(const u8string &src);
+};
+
+template<typename T>
+struct StrictLexicalConverter {
+public:
 	bool operator()(const char8_t *src, T &dest);
 	T operator()(const char8_t *src);
 
@@ -700,8 +711,9 @@ struct NameCoderImpl {
 
 template<typename T>
 struct NameCoderEntry {
+	typedef T Id;
 	const char8_t *name_;
-	T id_;
+	Id id_;
 };
 
 template<typename T, size_t Count>
@@ -713,6 +725,8 @@ public:
 
 	const char8_t* operator()(T id, const char8_t *defaultName = NULL) const;
 	bool operator()(const char8_t *name, T &id) const;
+
+	size_t getSize() const { return Count; }
 
 private:
 	typedef detail::NameCoderImpl Impl;
@@ -726,6 +740,36 @@ private:
 #define UTIL_NAME_CODER_ENTRY(id) UTIL_NAME_CODER_ENTRY_CUSTOM(#id, id)
 #define UTIL_NAME_CODER_NON_NAME_ENTRY(id) \
 		UTIL_NAME_CODER_ENTRY_CUSTOM(NULL, id)
+
+class GeneralNameCoder {
+public:
+	typedef int32_t Id;
+
+	GeneralNameCoder();
+
+	template<typename C>
+	GeneralNameCoder(const C *baseCoder);
+
+	const char8_t* operator()(Id id, const char8_t *defaultName = NULL) const;
+	bool operator()(const char8_t *name, Id &id) const;
+
+	size_t getSize() const;
+
+private:
+	typedef const char8_t* (*CoderFunc)(
+			const void*, bool, const char8_t*, Id&);
+
+	template<typename C>
+	static const char8_t* coderFunc(
+			const void *coder, bool nameResolving, const char8_t *name, Id &id);
+
+	static const char8_t* emptyCoderFunc(
+			const void *coder, bool nameResolving, const char8_t *name, Id &id);
+
+	const void *coder_;
+	CoderFunc coderFunc_;
+	size_t size_;
+};
 
 
 
@@ -759,6 +803,59 @@ struct GeneralParser {
 		return false;
 	}
 };
+
+template<typename T>
+struct StrictParser {
+	bool operator()(const std::string &src, T &dest) const;
+};
+
+template<typename T>
+bool StrictParser<T>::operator()(const std::string &src, T &dest) const {
+	for (;;) {
+		util::NormalIStringStream iss(src);
+		iss.peek();
+		if (iss.eof()) {
+			break;
+		}
+
+		iss.unsetf(std::ios::skipws);
+		if (std::numeric_limits<T>::is_integer &&
+				sizeof(T) < sizeof(int32_t)) {
+			int32_t int32Dest;
+			iss >> int32Dest;
+			if (iss.bad() || int32Dest <
+					static_cast<int32_t>(std::numeric_limits<T>::min()) ||
+					int32Dest >
+					static_cast<int32_t>(std::numeric_limits<T>::max()) ) {
+				break;
+			}
+			dest = static_cast<T>(int32Dest);
+		}
+		else {
+			iss >> dest;
+		}
+
+		if (iss.bad()) {
+			break;
+		}
+		if (!iss.eof()) {
+			break;
+		}
+
+		if (std::numeric_limits<T>::is_integer) {
+			util::NormalOStringStream oss;
+			oss << dest;
+			if (iss.str() != oss.str()) {
+				break;
+			}
+		}
+
+		return true;
+	}
+
+	dest = T();
+	return false;
+}
 
 template<typename T>
 struct GeneralFormatter {
@@ -852,6 +949,13 @@ template<> struct ValueParserTraits<int16_t> {
 template<> struct ValueParserTraits<uint16_t> {
 	typedef SmallNumberParser<uint16_t, uint32_t> Parser; };
 
+template< typename T, typename P = StrictParser<T> >
+struct StrictValueParserTraits {
+	typedef P Parser;
+};
+template<> struct StrictValueParserTraits<bool> {
+	typedef BoolParser Parser; };
+
 template< typename T, typename F = GeneralFormatter<T> >
 struct ValueFormatterTraits {
 	typedef F Formatter;
@@ -917,6 +1021,38 @@ struct LexicalConverter<u8string> {
 		return oss.str();
 	}
 };
+
+template<typename T>
+inline bool StrictLexicalConverter<T>::operator()(const char8_t *src, T &dest) {
+	typedef typename detail::StrictValueParserTraits<T>::Parser Parser;
+	return Parser()(src, dest);
+}
+
+template<typename T>
+inline T StrictLexicalConverter<T>::operator()(const char8_t *src) {
+	T dest;
+	if (!this->operator()(src, dest)) {
+		UTIL_THROW_UTIL_ERROR_CODED(CODE_INVALID_PARAMETER);
+	}
+
+	return dest;
+}
+
+template<typename T>
+inline bool StrictLexicalConverter<T>::operator()(const u8string &src, T &dest) {
+	typedef typename detail::StrictValueParserTraits<T>::Parser Parser;
+	return Parser()(src, dest);
+}
+
+template<typename T>
+inline T StrictLexicalConverter<T>::operator()(const u8string &src) {
+	T dest;
+	if (!this->operator()(src, dest)) {
+		UTIL_THROW_UTIL_ERROR_CODED(CODE_INVALID_PARAMETER);
+	}
+
+	return dest;
+}
 
 template<typename T>
 inline void FormattedValue<T>::operator()(std::ostream &stream) const {
@@ -1772,6 +1908,54 @@ bool NameCoder<T, Count>::operator()(const char8_t *name, T &id) const {
 
 	id = static_cast<T>(entry->second);
 	return true;
+}
+
+
+inline GeneralNameCoder::GeneralNameCoder() :
+		coder_(NULL),
+		coderFunc_(&emptyCoderFunc),
+		size_(0) {
+}
+
+template<typename C>
+inline GeneralNameCoder::GeneralNameCoder(const C *baseCoder) :
+		coder_(baseCoder),
+		coderFunc_(&coderFunc<C>),
+		size_(baseCoder == NULL ? 0 : baseCoder->getSize()) {
+}
+
+inline const char8_t* GeneralNameCoder::operator()(
+		Id id, const char8_t *defaultName) const {
+	const bool nameResolving = true;
+	return coderFunc_(coder_, nameResolving, defaultName, id);
+}
+
+inline bool GeneralNameCoder::operator()(const char8_t *name, Id &id) const {
+	const bool nameResolving = false;
+	return coderFunc_(coder_, nameResolving, name, id) != NULL;
+}
+
+inline size_t GeneralNameCoder::getSize() const {
+	return size_;
+}
+
+template<typename C>
+const char8_t* GeneralNameCoder::coderFunc(
+		const void *coder, bool nameResolving, const char8_t *name, Id &id) {
+	if (coder == NULL) {
+		return emptyCoderFunc(coder, nameResolving, name, id);
+	}
+
+	const C &typedCoder = *static_cast<const C*>(coder);
+	if (nameResolving) {
+		return typedCoder(id, name);
+	}
+	else {
+		typename C::Entry::Id baseId;
+		const bool found = typedCoder(name, baseId);
+		id = baseId;
+		return found ? "" : NULL;
+	}
 }
 
 

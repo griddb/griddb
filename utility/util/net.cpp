@@ -842,6 +842,13 @@ void Socket::setMulticastInterfaceOption(
 		UTIL_THROW_UTIL_ERROR_CODED(CODE_ILLEGAL_ARGUMENT);
 	}
 
+#ifndef _WIN32
+	if (join) {
+		int value = 0;
+		setOption(IPPROTO_IP, IP_MULTICAST_ALL, &value, sizeof(value));
+	}
+#endif
+
 	struct sockaddr_storage ss;
 	switch (multicastAddr.getFamily()) {
 	case AF_INET: {

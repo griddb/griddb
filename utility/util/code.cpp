@@ -1055,6 +1055,9 @@ const NameCoderImpl::Entry* NameCoderImpl::findEntry(
 
 const char8_t* NameCoderImpl::removePrefix(
 		const char8_t *name, size_t prefixWordCount) {
+	if (name == NULL) {
+		return NULL;
+	}
 
 	const char8_t *ret = name;
 	for (size_t i = prefixWordCount; i > 0; i--) {
@@ -1078,6 +1081,16 @@ bool NameCoderImpl::EntryPred::operator()(
 	return strcmp(entry1.first, entry2.first) < 0;
 }
 } 
+
+const char8_t* GeneralNameCoder::emptyCoderFunc(
+		const void *coder, bool nameResolving, const char8_t *name, Id &id) {
+	static_cast<void>(coder);
+	static_cast<void>(name);
+	if (!nameResolving) {
+		id = -1;
+	}
+	return NULL;
+}
 
 
 } 

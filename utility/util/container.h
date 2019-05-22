@@ -420,8 +420,10 @@ inline bool operator>=(
 /*!
 	@brief std::map, using StackAllocator in default
 */
-template< typename K, typename V, typename Comp = std::less<K>,
-	typename Alloc = StdAllocator<std::pair<K, V>, StackAllocator> >
+template<
+		typename K, typename V,
+		typename Comp = typename std::map<K, V>::key_compare,
+		typename Alloc = StdAllocator<std::pair<K, V>, StackAllocator> >
 class Map : public std::map<K, V, Comp, Alloc> {
 private:
 	typedef Map<K, V, Comp, Alloc> ThisType;
@@ -514,8 +516,10 @@ inline bool operator>=(
 /*!
 	@brief std::multimup, using StackAllocator in default
 */
-template< typename K, typename V, typename Comp = std::less<K>,
-	typename Alloc = StdAllocator<std::pair<K, V>, StackAllocator> >
+template<
+		typename K, typename V,
+		typename Comp = typename std::multimap<K, V>::key_compare,
+		typename Alloc = StdAllocator<std::pair<K, V>, StackAllocator> >
 class MultiMap : public std::multimap<K, V, Comp, Alloc> {
 private:
 	typedef MultiMap<K, V, Comp, Alloc> ThisType;
@@ -614,8 +618,9 @@ inline bool operator>=(
 /*!
 	@brief std::set, using StackAllocator in default
 */
-template< typename T, typename Comp = std::less<T>,
-	typename Alloc = StdAllocator<T, StackAllocator> >
+template<
+		typename T, typename Comp = typename std::set<T>::key_compare,
+		typename Alloc = StdAllocator<T, StackAllocator> >
 class Set : public std::set<T, Comp, Alloc> {
 private:
 	typedef Set<T, Comp, Alloc> ThisType;
@@ -708,8 +713,9 @@ inline bool operator>=(
 /*!
 	@brief std::multiset, using StackAllocator in default
 */
-template< typename T, typename Comp = std::less<T>,
-	typename Alloc = StdAllocator<T, StackAllocator> >
+template<
+		typename T, typename Comp = typename std::multiset<T>::key_compare,
+		typename Alloc = StdAllocator<T, StackAllocator> >
 class MultiSet : public std::multiset<T, Comp, Alloc> {
 private:
 	typedef MultiSet<T, Comp, Alloc> ThisType;
@@ -1273,8 +1279,9 @@ public:
 /*!
 	@brief Lists data in order.
 */
-template< typename T, typename Comp = std::less<T>,
-	typename Base = XArray<T> >
+template<
+		typename T, typename Comp = typename std::set<T>::key_compare,
+		typename Base = XArray<T> >
 class SortedList {
 public:
 	typedef Comp value_compare;
@@ -1372,7 +1379,7 @@ private:
 /*!
 	@brief Lists data in order using usual dynamic memory allocator.
 */
-template< typename T, typename Comp = std::less<T> >
+template< typename T, typename Comp = typename std::set<T>::key_compare >
 class NormalSortedList : public SortedList< T, Comp, NormalXArray<T> > {
 private:
 	typedef SortedList< T, Comp, NormalXArray<T> > BaseType;

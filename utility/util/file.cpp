@@ -762,7 +762,7 @@ void NamedFile::open(const char8_t *name, FileFlag flags, FilePermission perm) {
 	}
 
 	std::wstring encodedName;
-	CodeConverter(Code::WCHAR_T, Code::UTF8)(nameStr, encodedName);
+	CodeConverter(Code::UTF8, Code::WCHAR_T)(nameStr, encodedName);
 
 	const uint32_t MAX_RETRIES = 10;
 	const DWORD RETRY_DELAY = 250;
@@ -1081,7 +1081,7 @@ Directory::Directory(const char8_t *path) : data_(new Data()) {
 	}
 #else
 	std::wstring &pattern = data_->pathPattern_;
-	CodeConverter(Code::WCHAR_T, Code::CHAR)(path, pattern);
+	CodeConverter(Code::UTF8, Code::WCHAR_T)(path, pattern);
 	if (!pattern.empty()) {
 		const wchar_t tail = *(--pattern.end());
 		if (tail == L'\\') {
@@ -1178,18 +1178,22 @@ bool Directory::isParentOrSelfChecked() {
 
 
 bool FileStatus::isSocket(void) const {
-#if defined(S_ISSOCK)
+#if !defined(_WIN32) && defined(S_ISSOCK)
 	return 0 != S_ISSOCK(mode_);
+#elif !defined(_WIN32)
+#error
 #else
 	UTIL_THROW_NOIMPL_UTIL();
 #endif
 }
 
 bool FileStatus::isRegularFile(void) const {
-#if defined(S_ISREG)
+#if !defined(_WIN32) && defined(S_ISREG)
 	return 0 != S_ISREG(mode_);
-#elif defined(S_IFREG)
+#elif !defined(_WIN32) && defined(S_IFREG)
 	return S_IFREG == ((S_IFMT & mode_) & S_IFREG);
+#elif !defined(_WIN32)
+#error
 #else
 	return ((attributes_ & FILE_ATTRIBUTE_DIRECTORY) == 0 &&
 			(attributes_ & FILE_ATTRIBUTE_DEVICE));
@@ -1197,44 +1201,54 @@ bool FileStatus::isRegularFile(void) const {
 }
 
 bool FileStatus::isDirectory(void) const {
-#if defined(S_ISDIR)
+#if !defined(_WIN32) && defined(S_ISDIR)
 	return 0 != S_ISDIR(mode_);
+#elif !defined(_WIN32)
+#error
 #else
 	return ((attributes_ & FILE_ATTRIBUTE_DIRECTORY) != 0);
 #endif
 }
 
 bool FileStatus::isCharacterDevice(void) const {
-#if defined(S_ISCHR)
+#if !defined(_WIN32) && defined(S_ISCHR)
 	return 0 != S_ISCHR(mode_);
-#elif defined(S_IFCHR)
+#elif !defined(_WIN32) && defined(S_IFCHR)
 	return S_IFCHR == ((S_IFMT & mode_) & S_IFCHR);
-#elif defined(_S_IFCHR)
+#elif !defined(_WIN32) && defined(_S_IFCHR)
 	return 0 != _S_IFCHR(mode_);
+#elif !defined(_WIN32)
+#error
 #else
 	UTIL_THROW_NOIMPL_UTIL();
 #endif
 }
 
 bool FileStatus::isBlockDevice(void) const {
-#if defined(S_ISBLK)
+#if !defined(_WIN32) && defined(S_ISBLK)
 	return 0 != S_ISBLK(mode_);
+#elif !defined(_WIN32)
+#error
 #else
 	UTIL_THROW_NOIMPL_UTIL();
 #endif
 }
 
 bool FileStatus::isFIFO(void) const {
-#if defined(S_ISFIFO)
+#if !defined(_WIN32) && defined(S_ISFIFO)
 	return 0 != S_ISFIFO(mode_);
+#elif !defined(_WIN32)
+#error
 #else
 	UTIL_THROW_NOIMPL_UTIL();
 #endif
 }
 
 bool FileStatus::isSymbolicLink(void) const {
-#if defined(S_ISLINK)
+#if !defined(_WIN32) && defined(S_ISLINK)
 	return 0 != S_ISLNK(mode_);
+#elif !defined(_WIN32)
+	UTIL_THROW_NOIMPL_UTIL();
 #else
 	UTIL_THROW_NOIMPL_UTIL();
 #endif
@@ -1953,7 +1967,7 @@ bool FileSystem::setFDLimit(int32_t cur, int32_t max) {
 #endif
 }
 
-PIdFile::PIdFile() {
+PIdFile::PIdFile() : locked_(false) {
 };
 
 PIdFile::~PIdFile() {
@@ -1965,6 +1979,8 @@ PIdFile::~PIdFile() {
 };
 
 void PIdFile::open(const char8_t *name) {
+	assert(base_.isClosed());
+
 	base_.open(name,
 			util::FileFlag::TYPE_READ_WRITE | util::FileFlag::TYPE_CREATE);
 
@@ -1987,15 +2003,19 @@ void PIdFile::open(const char8_t *name) {
 		}
 		throw;
 	}
+
+	locked_ = true;
 }
 
 void PIdFile::close() {
 	if (base_.isClosed()) {
 		return;
 	}
-	base_.setSize(0);
-	base_.unlink();
-	base_.unlock();
+	if (locked_) {
+		base_.setSize(0);
+		base_.unlink();
+		base_.unlock();
+	}
 	base_.close();
 }
 

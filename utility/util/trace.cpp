@@ -23,6 +23,7 @@
 #include "util/thread.h"
 #include "util/os.h"
 #include <iomanip>
+#include <functional> 
 
 #define NEW_LOG_FORMAT 
 
@@ -100,6 +101,40 @@ void TraceFormatter::handleTraceFailure(const char8_t *formattingString) {
 	}
 	catch (...) {
 	}
+}
+
+void TraceFormatter::escapeControlChars(NormalOStringStream &oss) {
+	bool found = false;
+	{
+		const u8string &str = oss.str();
+		for (u8string::const_iterator it = str.begin(); it != str.end(); ++it) {
+			if (isControlChar(*it)) {
+				found = true;
+				break;
+			}
+		}
+	}
+
+	if (found) {
+		const u8string str = oss.str();
+		oss.str("");
+
+		oss.fill('0');
+		oss << std::hex;
+
+		for (u8string::const_iterator it = str.begin(); it != str.end(); ++it) {
+			if (isControlChar(*it)) {
+				oss << "\\x" << std::setw(2) << static_cast<uint32_t>(*it);
+			}
+			else {
+				oss.put(*it);
+			}
+		}
+	}
+}
+
+bool TraceFormatter::isControlChar(char8_t ch) {
+	return ((0x0 <= ch && ch <= 0x1f) || ch == 0x7f);
 }
 
 void TraceFormatter::formatFiltered(
@@ -356,7 +391,7 @@ bool FileTraceWriter::prepareFile(
 	}
 
 	u8string lastPath;
-	if (rotationMode_ == TraceOption::ROTATION_DALILY) {
+	if (rotationMode_ == TraceOption::ROTATION_DAILY) {
 		u8string baseName;
 		{
 			int32_t year, month, monthDay, hour, minute, second, milliSecond;
@@ -630,6 +665,7 @@ void Tracer::put(
 
 		NormalOStringStream oss;
 		formatter->format(oss, record);
+		formatter->escapeControlChars(oss);
 		oss << std::endl;
 
 		TraceWriter *writer = writer_;
@@ -744,6 +780,11 @@ void TraceManager::setOutputType(TraceOption::OutputType outputType) {
 	}
 
 	outputType_ = outputType;
+}
+
+void TraceManager::resetFileWriter() {
+	delete filesWriter_;
+	filesWriter_ = NULL;
 }
 
 void TraceManager::setFormatter(TraceFormatter *formatter) {

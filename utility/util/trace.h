@@ -51,7 +51,7 @@ public:
 
 	enum RotationMode {
 		ROTATION_SEQUENTIAL,
-		ROTATION_DALILY
+		ROTATION_DAILY
 	};
 };
 
@@ -101,6 +101,9 @@ public:
 
 	virtual void format(std::ostream &stream, TraceRecord &record);
 	virtual void handleTraceFailure(const char8_t *formattingString);
+
+	virtual void escapeControlChars(NormalOStringStream &oss);
+	static bool isControlChar(char8_t ch);
 
 protected:
 	virtual void formatFiltered(
@@ -171,6 +174,8 @@ public:
 	void getAllTracers(std::vector<Tracer*> &tracerList);
 
 	void setOutputType(TraceOption::OutputType outputType);
+
+	void resetFileWriter();
 
 	void setFormatter(TraceFormatter *formatter);
 
