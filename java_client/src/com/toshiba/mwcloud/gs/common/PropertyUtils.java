@@ -158,6 +158,25 @@ public class PropertyUtils {
 			}
 		}
 
+		public Double getDoubleProperty(
+				String name, boolean deprecated) throws GSException {
+			final String strValue = getProperty(name, deprecated);
+			if (strValue == null) {
+				return null;
+			}
+
+			try {
+				return Double.valueOf(strValue);
+			}
+			catch (NumberFormatException e) {
+				throw new GSException(
+						GSErrorCode.ILLEGAL_VALUE_FORMAT,
+						"Failed to parse as double (value=" + strValue +
+						", propertyName=" + name +
+						", reason=" + e.getMessage() + ")", e);
+			}
+		}
+
 		public Boolean getBooleanProperty(
 				String name, Boolean defaultValue,
 				boolean deprecated) throws GSException {

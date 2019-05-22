@@ -58,8 +58,8 @@ import com.toshiba.mwcloud.gs.common.PropertyUtils.WrappedProperties;
 import com.toshiba.mwcloud.gs.common.RowMapper;
 import com.toshiba.mwcloud.gs.common.ServiceAddressResolver;
 import com.toshiba.mwcloud.gs.common.ServiceAddressResolver.SocketAddressComparator;
-import com.toshiba.mwcloud.gs.common.Statement.GeneralStatement;
 import com.toshiba.mwcloud.gs.common.Statement;
+import com.toshiba.mwcloud.gs.common.Statement.GeneralStatement;
 import com.toshiba.mwcloud.gs.subnet.NodeConnection.LoginInfo;
 import com.toshiba.mwcloud.gs.subnet.NodeConnection.MessageDigestFactory;
 import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequest;
@@ -232,6 +232,8 @@ public class GridStoreChannel implements Closeable {
 
 		final MetaNamingType metaNamingType;
 
+		boolean containerMonitoring;
+
 		public LocalConfig(WrappedProperties props) throws GSException {
 			this.failoverTimeoutMillis = props.getTimeoutProperty(
 					"failoverTimeout", (long) -1, false);
@@ -357,12 +359,42 @@ public class GridStoreChannel implements Closeable {
 
 			this.loginInfo = new LoginInfo(
 					user, password, !backupPreferred, database, clusterName,
-					localConfig.transactionTimeoutMillis);
+					localConfig.transactionTimeoutMillis,
+					resolveApplicationName(props),
+					resolveStoreMemoryAgingSwapRate(props));
 			this.keyConverter = ContainerKeyConverter.getInstance(
 					NodeConnection.getProtocolVersion(), false, false);
 			this.dataAffinityPattern = new DataAffinityPattern(
 					props.getProperty("dataAffinityPattern", false),
 					keyConverter);
+		}
+
+		private static String resolveApplicationName(WrappedProperties props)
+				throws GSException {
+			String applicationName =
+					props.getProperty("applicationName", null, false);
+			if (applicationName != null) {
+				RowMapper.checkSymbol(applicationName, "application name");
+			}
+			return applicationName;
+		}
+
+		private static double resolveStoreMemoryAgingSwapRate(
+				WrappedProperties props) throws GSException {
+			final String name = "storeMemoryAgingSwapRate";
+			final Double value = props.getDoubleProperty(name, false);
+			if (value == null) {
+				return -1;
+			}
+
+			if (!(0 <= value && value <= 1)) {
+				throw new GSException(
+						GSErrorCode.ILLEGAL_PROPERTY_ENTRY,
+						"Property value out of range (name=" + name +
+						", value=" + value + ")");
+			}
+
+			return value;
 		}
 
 		public NodeConnection.LoginInfo getLoginInfo() {
@@ -533,7 +565,7 @@ public class GridStoreChannel implements Closeable {
 	public static class Context {
 
 		private final ContextMonitor contextMonitor =
-				createContextMonitorIfAvailable();
+				tryCreateGeneralContextMonitor();
 
 		private final LocalConfig localConfig;
 
@@ -591,6 +623,8 @@ public class GridStoreChannel implements Closeable {
 		private ContainerKeyConverter systemKeyConverter;
 
 		private ContainerKeyConverter internalKeyConverter;
+
+		private InetSocketAddress fixedAddress;
 
 		private Context(
 				LocalConfig localConfig, NodeConnection.LoginInfo loginInfo,
@@ -824,6 +858,28 @@ public class GridStoreChannel implements Closeable {
 
 		public LocalConfig getConfig() {
 			return localConfig;
+		}
+
+		public static class FixedAddressScope implements Closeable {
+
+			private final Context context;
+
+			public FixedAddressScope(
+					Context context, InetSocketAddress address) {
+				this.context = context;
+
+				this.context.fixedAddress = address;
+				this.context.lastConnection = null;
+				this.context.partitionId = -1;
+			}
+
+			@Override
+			public void close() {
+				this.context.fixedAddress = null;
+				this.context.lastConnection = null;
+				this.context.partitionId = -1;
+			}
+
 		}
 
 	}
@@ -1698,6 +1754,10 @@ public class GridStoreChannel implements Closeable {
 						localMonitor.endStatementIO();
 					}
 
+					if (context.fixedAddress != null) {
+						throw e;
+					}
+
 					if (statement != null &&
 							isConnectionDependentStatement(statement)) {
 						throw GSErrorCode.newGSRecoverableException(
@@ -1868,6 +1928,11 @@ public class GridStoreChannel implements Closeable {
 
 		final InetSocketAddress address;
 		do {
+			if (context.fixedAddress != null) {
+				address = context.fixedAddress;
+				break;
+			}
+
 			if (partitionId >= 0 && partitionId < context.addressCache.size()) {
 				final InetSocketAddress cachedAddress =
 						context.addressCache.get(partitionId);
@@ -1970,6 +2035,20 @@ public class GridStoreChannel implements Closeable {
 			}
 
 			return clusterInfo.getDatabaseId();
+		}
+	}
+
+	public Set<InetSocketAddress> getActiveNodeAddressSet(
+			Context context) throws GSException {
+		synchronized (context) {
+			final ClusterInfo clusterInfo = context.clusterInfo;
+			return executeResolver(
+					context, new ResolverExecutor<Set<InetSocketAddress>>() {
+				@Override
+				public void execute() throws GSException {
+					result = nodeResolver.getActiveNodeAddressSet(clusterInfo);
+				}
+			});
 		}
 	}
 
@@ -2136,8 +2215,18 @@ public class GridStoreChannel implements Closeable {
 		}
 	}
 
-	static ContextMonitor createContextMonitorIfAvailable() {
+	static ContextMonitor tryCreateGeneralContextMonitor() {
 		if (STATEMENT_LOGGER.isDebugEnabled()) {
+			return new ContextMonitor();
+		}
+		else {
+			return null;
+		}
+	}
+
+	static ContextMonitor tryCreateContainerContextMonitor(Context context) {
+		if (STATEMENT_LOGGER.isDebugEnabled() ||
+				context.getConfig().containerMonitoring) {
 			return new ContextMonitor();
 		}
 		else {

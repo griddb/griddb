@@ -242,6 +242,13 @@ public abstract class GridStoreFactory implements Closeable {
 	 * notificationAddressおよびnotificationMemberと同時に指定することはできない。
 	 * バージョン2.9よりサポート
 	 * </td></tr>
+	 * <tr><td>applicationName</td><td>アプリケーションの名前。
+	 * アプリケーションの識別を補助するための情報として、接続先のクラスタ上での
+	 * 各種管理情報の出力の際に含められる場合がある。ただし、アプリケーションの
+	 * 同一性を どのように定義するかについては関与しない。省略時は
+	 * アプリケーション名の指定がなかったものとみなされる。空文字列は指定
+	 * できない。
+	 * バージョン4.2よりサポート</td></tr>
 	 * </tbody>
 	 * </table>
 	 *
@@ -374,6 +381,12 @@ public abstract class GridStoreFactory implements Closeable {
 	 * This property is supported on version 2.9 or later.
 	 *
 	 * </td></tr>
+	 * <tr><td>applicationName</td><td>Name of an application. It may be
+	 * contained in various information for management on the connected
+	 * cluster. However, the cluster shall not be involved with the identity of
+	 * applications. If the property is omitted, it is regarded that the name
+	 * is not specified. Empty string cannot be specified.
+	 * This property is supported on version 4.2 or later.</td></tr>
 	 * </tbody>
 	 * </table>
 	 *

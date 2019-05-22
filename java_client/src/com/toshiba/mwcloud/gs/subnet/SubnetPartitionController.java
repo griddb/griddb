@@ -30,6 +30,9 @@ import com.toshiba.mwcloud.gs.common.Extensibles;
 import com.toshiba.mwcloud.gs.common.GSErrorCode;
 import com.toshiba.mwcloud.gs.common.Statement;
 import com.toshiba.mwcloud.gs.subnet.GridStoreChannel.Context;
+import com.toshiba.mwcloud.gs.subnet.NodeConnection.FeatureVersion;
+import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequest;
+import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequestSource;
 
 public class SubnetPartitionController
 implements PartitionController, Extensibles.AsPartitionController {
@@ -42,6 +45,9 @@ implements PartitionController, Extensibles.AsPartitionController {
 
 	private static final ContainerKeyPredicate COMPATIBLE_PREDICATE =
 			ContainerKeyPredicate.ofDefaultAttributes(false);
+
+	private static final OptionalRequestSource CONTAINER_NAMES_REQUEST_SOURCE =
+			createContaierNamesRequestSource();
 
 	private final GridStoreChannel channel;
 
@@ -124,7 +130,8 @@ implements PartitionController, Extensibles.AsPartitionController {
 		channel.setupRequestBuffer(req);
 
 		SubnetGridStore.tryPutSystemOptionalRequest(
-				req, context, internalMode, false, null);
+				req, context, internalMode, false, null,
+				CONTAINER_NAMES_REQUEST_SOURCE);
 
 		final long start = 0;
 		final long limit = 0;
@@ -167,7 +174,8 @@ implements PartitionController, Extensibles.AsPartitionController {
 
 		channel.setupRequestBuffer(req);
 		SubnetGridStore.tryPutSystemOptionalRequest(
-				req, context, internalMode, false, null);
+				req, context, internalMode, false, null,
+				CONTAINER_NAMES_REQUEST_SOURCE);
 
 		req.putLong(start);
 		req.putLong(limit == null ? Long.MAX_VALUE : limit);
@@ -294,6 +302,21 @@ implements PartitionController, Extensibles.AsPartitionController {
 	@Override
 	public void close() throws GSException {
 		closed = true;
+	}
+
+	private static OptionalRequestSource createContaierNamesRequestSource() {
+		return new OptionalRequestSource() {
+			@Override
+			public void putOptions(OptionalRequest optionalRequest) {
+				optionalRequest.putAcceptableFeatureVersion(
+						FeatureVersion.V4_2);
+			}
+
+			@Override
+			public boolean hasOptions() {
+				return true;
+			}
+		};
 	}
 
 }

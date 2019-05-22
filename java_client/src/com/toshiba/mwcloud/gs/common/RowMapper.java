@@ -65,7 +65,7 @@ public class RowMapper {
 
 	protected static boolean restrictKeyOrderFirst = true;
 
-	private static final boolean STRING_FIELD_ENCODING_STRICT = true; 
+	private static final boolean STRING_FIELD_ENCODING_STRICT = true;
 
 	private static final RowMapper AGGREGATION_RESULT_MAPPER;
 
@@ -4166,7 +4166,7 @@ public class RowMapper {
 				final byte[] dest = out.base().array();
 				for (int i = 0; i < buf.length; i++) {
 					if (buf[i] == 0) {
-						throw errorNullCharacter();
+						throw BasicBuffer.errorNullCharacter();
 					}
 					dest[pos + i] = buf[i];
 				}
@@ -4188,12 +4188,6 @@ public class RowMapper {
 		final byte[] buf = new byte[bytesLength];
 		in.base().get(buf);
 		return new String(buf, 0, buf.length, BasicBuffer.DEFAULT_CHARSET);
-	}
-
-	private static GSException errorNullCharacter() {
-		return new GSException(
-				GSErrorCode.ILLEGAL_VALUE_FORMAT,
-				"Illegal '\\0' character found");
 	}
 
 }

@@ -127,6 +127,10 @@ public class Extensibles {
 				? extends RowKeyPredicate<?>, List<Row>> multiContext,
 				boolean internalMode) throws GSException;
 
+		public void setContainerMonitoring(boolean monitoring);
+
+		public boolean isContainerMonitoring();
+
 		@Override
 		public AsPartitionController getPartitionController()
 				throws GSException;
@@ -144,6 +148,8 @@ public class Extensibles {
 
 		public void dropIndex(IndexInfo info, OptionalRequestSource source)
 				throws GSException;
+
+		public ContainerKey getKey();
 
 		@Override
 		public <S> AsQuery<S> query(final String tql, Class<S> rowType)
@@ -168,6 +174,12 @@ public class Extensibles {
 		public void setContainerLostAcceptable(
 				boolean acceptable) throws GSException;
 
+		public QueryInfo getInfo();
+
+		public Query<R> getBaseQuery();
+
+		public AsContainer<?, ?> getContainer();
+
 	}
 
 	public interface AsRowSet<R> extends RowSet<R> {
@@ -177,6 +189,10 @@ public class Extensibles {
 		public Set<Integer> getExtOptionKeys() throws GSException;
 
 		public byte[] getExtOption(int key) throws GSException;
+
+		public QueryInfo getQueryInfo();
+
+		public AsContainer<?, ?> getContainer();
 
 	}
 
@@ -226,6 +242,12 @@ public class Extensibles {
 		void makeRequest(BasicBuffer buf) throws GSException;
 
 		void acceptResponse(BasicBuffer buf) throws GSException;
+
+	}
+
+	public interface QueryInfo {
+
+		String getQueryString();
 
 	}
 

@@ -28,9 +28,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 
 import com.toshiba.mwcloud.gs.GSException;
 import com.toshiba.mwcloud.gs.common.BasicBuffer;
@@ -88,6 +90,8 @@ public class NodeResolver implements Closeable {
 	private final BasicBuffer resp = new BasicBuffer(64);
 
 	private long notificationReceiveTimeoutMillis = NOTIFICATION_RECEIVE_TIMEOUT;
+
+	private long masterCacheCounter = 1;
 
 	private volatile long connectionTrialCounter;
 
@@ -199,6 +203,7 @@ public class NodeResolver implements Closeable {
 			final long startTrialCount = connectionTrialCounter;
 			synchronized (this) {
 				prepareConnectionAndClusterInfo(clusterInfo, startTrialCount);
+				applyMasterCacheCounter(clusterInfo);
 			}
 		}
 		return clusterInfo.getPartitionCount();
@@ -210,6 +215,7 @@ public class NodeResolver implements Closeable {
 			final long startTrialCount = connectionTrialCounter;
 			synchronized (this) {
 				prepareConnectionAndClusterInfo(clusterInfo, startTrialCount);
+				applyMasterCacheCounter(clusterInfo);
 			}
 		}
 		return clusterInfo.getHashMode();
@@ -220,6 +226,7 @@ public class NodeResolver implements Closeable {
 			final long startTrialCount = connectionTrialCounter;
 			synchronized (this) {
 				prepareConnectionAndClusterInfo(clusterInfo, startTrialCount);
+				applyMasterCacheCounter(clusterInfo);
 			}
 		}
 		return clusterInfo.getDatabaseId();
@@ -233,6 +240,30 @@ public class NodeResolver implements Closeable {
 				clusterInfo, null, null, databaseId, address, byConnection);
 	}
 
+	public Set<InetSocketAddress> getActiveNodeAddressSet(
+			ClusterInfo clusterInfo) throws GSException {
+		final Set<InetSocketAddress> set = new HashSet<InetSocketAddress>();
+
+		final int partitionCount = getPartitionCount(clusterInfo);
+		for (int i = 0; i < partitionCount; i++) {
+			final int partitionId = i;
+			final long startTrialCount = connectionTrialCounter;
+
+			final InetSocketAddress[] addressList;
+			synchronized (this) {
+				addressList = getNodeAddressList(
+						clusterInfo, partitionId, true, startTrialCount, false,
+						false);
+				applyMasterCacheCounter(clusterInfo);
+			}
+			for (InetSocketAddress address : addressList) {
+				set.add(address);
+			}
+		}
+
+		return set;
+	}
+
 	public InetSocketAddress getMasterAddress(ClusterInfo clusterInfo)
 			throws GSException {
 		final long startTrialCount = connectionTrialCounter;
@@ -240,6 +271,7 @@ public class NodeResolver implements Closeable {
 			if (masterAddress == null) {
 				prepareConnectionAndClusterInfo(clusterInfo, startTrialCount);
 			}
+			applyMasterCacheCounter(clusterInfo);
 
 			return masterAddress;
 		}
@@ -261,7 +293,8 @@ public class NodeResolver implements Closeable {
 		synchronized (this) {
 			addressList = getNodeAddressList(
 					clusterInfo, partitionId, backupPreferred, startTrialCount,
-					false);
+					false, true);
+			applyMasterCacheCounter(clusterInfo);
 		}
 
 		final int backupCount = addressList.length - 1;
@@ -293,18 +326,25 @@ public class NodeResolver implements Closeable {
 		final InetSocketAddress[] addressList;
 		synchronized (this) {
 			addressList = getNodeAddressList(
-					clusterInfo, partitionId, true, startTrialCount, false);
+					clusterInfo, partitionId, true, startTrialCount, false,
+					true);
+			applyMasterCacheCounter(clusterInfo);
 		}
 
 		return Arrays.copyOf(addressList, addressList.length);
 	}
 
+	public synchronized void invalidateMaster(ClusterInfo clusterInfo) {
+		invalidateMasterInternal(clusterInfo, false);
+	}
+
 	private InetSocketAddress[] getNodeAddressList(
 			ClusterInfo clusterInfo, int partitionId, boolean backupPreferred,
-			long startTrialCount, boolean allowEmpty) throws GSException {
+			long startTrialCount, boolean allowEmpty, boolean cacheReading)
+			throws GSException {
 		final Integer partitionIdKey = partitionId;
 		InetSocketAddress[] addressList;
-		addressList = nodeAddressMap.get(partitionId);
+		addressList = (cacheReading ? nodeAddressMap.get(partitionId) : null);
 		if (addressList != null) {
 			return addressList;
 		}
@@ -496,7 +536,7 @@ public class NodeResolver implements Closeable {
 			final boolean invalidated = clusterInfo.invalidate();
 			if (invalidated || !(t instanceof GSStatementException)) {
 				try {
-					invalidateMaster(clusterInfo);
+					invalidateMasterInternal(clusterInfo, true);
 				}
 				catch (Throwable t2) {
 				}
@@ -794,8 +834,14 @@ public class NodeResolver implements Closeable {
 		}
 	}
 
-	public synchronized void invalidateMaster(ClusterInfo clusterInfo) {
+	private void invalidateMasterInternal(
+			ClusterInfo clusterInfo, boolean inside) {
+
 		clusterInfo.invalidate();
+		if (!clusterInfo.acceptMasterInvalidation(masterCacheCounter) &&
+				!inside) {
+			return;
+		}
 
 		if (LOGGER.isDebugEnabled()) {
 			LOGGER.debug(
@@ -818,9 +864,12 @@ public class NodeResolver implements Closeable {
 		}
 
 		updateConnectionPoolSize();
+
+		while (++masterCacheCounter == 0) {
+		}
 	}
 
-	public synchronized void releaseMasterCache(boolean forceClose)
+	private synchronized void releaseMasterCache(boolean forceClose)
 			throws GSException {
 		nodeAddressMap.clear();
 		addressCache.clear();
@@ -836,6 +885,10 @@ public class NodeResolver implements Closeable {
 				pool.add(connection);
 			}
 		}
+	}
+
+	private void applyMasterCacheCounter(ClusterInfo clusterInfo) {
+		clusterInfo.lastMasterCacheCounter = masterCacheCounter;
 	}
 
 	private void acceptClusterInfo(
@@ -1035,6 +1088,8 @@ public class NodeResolver implements Closeable {
 
 		final ClusterInfoEntry<Long> databaseId = new ClusterInfoEntry<Long>();
 
+		long lastMasterCacheCounter;
+
 		public ClusterInfo(NodeConnection.LoginInfo loginInfo) {
 			this.loginInfo = new NodeConnection.LoginInfo(loginInfo);
 			this.loginInfo.setOwnerMode(false);
@@ -1046,6 +1101,14 @@ public class NodeResolver implements Closeable {
 			invalidated |= hashMode.invalidate();
 			invalidated |= databaseId.invalidate();
 			return invalidated;
+		}
+
+		boolean acceptMasterInvalidation(long masterCacheCounter) {
+			if (lastMasterCacheCounter != masterCacheCounter) {
+				return false;
+			}
+			lastMasterCacheCounter = 0;
+			return true;
 		}
 
 		public Integer getPartitionCount() {
