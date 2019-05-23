@@ -30,7 +30,9 @@ public enum ContainerAttribute {
 
 	LARGE(0x00000020),
 
-	SUB(0x00000030)
+	SUB(0x00000030),
+
+	VIEW(0x00000040)
 	;
 
 	private int flag;

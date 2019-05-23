@@ -204,35 +204,39 @@ void ReplicationContext::clearBinaryData() {
 	binaryDatas_.clear();
 }
 
-TransactionManager::ContextSource::ContextSource()
-	: stmtType_(-1),
-	  isUpdateStmt_(false),
-	  stmtId_(TXN_MIN_CLIENT_STATEMENTID),
-	  containerId_(UNDEF_CONTAINERID),
-	  txnTimeoutInterval_(TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL),
-	  getMode_(AUTO),
-	  txnMode_(AUTO_COMMIT) {}
+TransactionManager::ContextSource::ContextSource() :
+		stmtType_(-1),
+		isUpdateStmt_(false),
+		stmtId_(TXN_MIN_CLIENT_STATEMENTID),
+		containerId_(UNDEF_CONTAINERID),
+		txnTimeoutInterval_(TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL),
+		getMode_(AUTO),
+		txnMode_(AUTO_COMMIT),
+		storeMemoryAgingSwapRate_(TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE) {}
 
 TransactionManager::ContextSource::ContextSource(
-	int32_t stmtType, bool isUpdateStmt)
-	: stmtType_(stmtType),
-	  isUpdateStmt_(isUpdateStmt),
-	  stmtId_(TXN_MIN_CLIENT_STATEMENTID),
-	  containerId_(UNDEF_CONTAINERID),
-	  txnTimeoutInterval_(TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL),
-	  getMode_(AUTO),
-	  txnMode_(AUTO_COMMIT) {}
+		int32_t stmtType, bool isUpdateStmt) :
+		stmtType_(stmtType),
+		isUpdateStmt_(isUpdateStmt),
+		stmtId_(TXN_MIN_CLIENT_STATEMENTID),
+		containerId_(UNDEF_CONTAINERID),
+		txnTimeoutInterval_(TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL),
+		getMode_(AUTO),
+		txnMode_(AUTO_COMMIT),
+		storeMemoryAgingSwapRate_(TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE) {}
 
-TransactionManager::ContextSource::ContextSource(int32_t stmtType,
-	StatementId stmtId, ContainerId containerId, int32_t txnTimeoutInterval,
-	GetMode getMode, TransactionMode txnMode, bool isUpdateStmt)
-	: stmtType_(stmtType),
-	  isUpdateStmt_(isUpdateStmt),
-	  stmtId_(stmtId),
-	  containerId_(containerId),
-	  txnTimeoutInterval_(txnTimeoutInterval),
-	  getMode_(getMode),
-	  txnMode_(txnMode) {}
+TransactionManager::ContextSource::ContextSource(
+		int32_t stmtType, StatementId stmtId, ContainerId containerId,
+		int32_t txnTimeoutInterval, GetMode getMode, TransactionMode txnMode,
+		bool isUpdateStmt, double storeMemoryAgingSwapRate) :
+		stmtType_(stmtType),
+		isUpdateStmt_(isUpdateStmt),
+		stmtId_(stmtId),
+		containerId_(containerId),
+		txnTimeoutInterval_(txnTimeoutInterval),
+		getMode_(getMode),
+		txnMode_(txnMode),
+		storeMemoryAgingSwapRate_(storeMemoryAgingSwapRate) {}
 
 const TransactionManager::GetMode TransactionManager::AUTO = 0;
 const TransactionManager::GetMode TransactionManager::CREATE = 1 << 0;
@@ -261,6 +265,7 @@ TransactionManager::TransactionManager(ConfigTable &config)
 		  config.get<int32_t>(CONFIG_TABLE_TXN_REAUTHENTICATION_INTERVAL)),  
 	  txnTimeoutLimit_(
 		  config.get<int32_t>(CONFIG_TABLE_TXN_TRANSACTION_TIMEOUT_LIMIT)),
+	  eventMonitor_(pgConfig_.getPartitionGroupCount()),
 	  txnContextMapManager_(pgConfig_.getPartitionGroupCount(), NULL),
 	  txnContextMap_(pgConfig_.getPartitionGroupCount(), NULL),
 	  activeTxnMapManager_(pgConfig_.getPartitionGroupCount(), NULL),
@@ -278,7 +283,6 @@ TransactionManager::TransactionManager(ConfigTable &config)
 {
 	try {
 		ptLockMutex_ = UTIL_NEW util::Mutex[NUM_LOCK_MUTEX];
-
 		for (PartitionGroupId pgId = 0;
 			 pgId < pgConfig_.getPartitionGroupCount(); pgId++) {
 			txnContextMapManager_[pgId] =
@@ -419,12 +423,20 @@ TransactionContext &TransactionManager::put(util::StackAllocator &alloc,
 	TransactionId txnId) {
 	createPartition(pId);
 	bool isExistTimeoutLimit = true;
-	TransactionContext &txn = partition_[pId]->put(alloc, clientId,
-		src.containerId_, src.stmtId_, src.txnTimeoutInterval_, now, emNow,
-		src.getMode_, src.txnMode_, src.isUpdateStmt_, isRedo, txnId,
-		isExistTimeoutLimit);
+	TransactionContext &txn = partition_[pId]->put(
+			alloc, clientId,
+			src.containerId_, src.stmtId_, src.txnTimeoutInterval_, now, emNow,
+			src.getMode_, src.txnMode_, src.isUpdateStmt_, isRedo, txnId,
+			isExistTimeoutLimit, src.storeMemoryAgingSwapRate_);
 	txn.manager_ = this;
 	return txn;
+}
+
+TransactionContext &TransactionManager::putAuto(util::StackAllocator &alloc) {
+	TransactionContext *txn = ALLOC_NEW(alloc) TransactionContext;
+	txn->clear();
+	txn->alloc_ = &alloc;
+	return *txn;
 }
 
 /*!
@@ -436,10 +448,11 @@ TransactionContext &TransactionManager::putNoExpire(util::StackAllocator &alloc,
 	TransactionId txnId) {
 	createPartition(pId);
 	bool isExistTimeoutLimit = false;
-	TransactionContext &txn = partition_[pId]->put(alloc, clientId,
-		src.containerId_, src.stmtId_, TXN_NO_TRANSACTION_TIMEOUT_INTERVAL,
-		now, emNow, src.getMode_, src.txnMode_, src.isUpdateStmt_, isRedo,
-		txnId, isExistTimeoutLimit);
+	TransactionContext &txn = partition_[pId]->put(
+			alloc, clientId,
+			src.containerId_, src.stmtId_, TXN_NO_TRANSACTION_TIMEOUT_INTERVAL,
+			now, emNow, src.getMode_, src.txnMode_, src.isUpdateStmt_, isRedo,
+			txnId, isExistTimeoutLimit, src.storeMemoryAgingSwapRate_);
 	txn.manager_ = this;
 	return txn;
 }
@@ -1093,11 +1106,12 @@ TransactionManager::Partition::~Partition() {
 	@brief Creates transaction context
 */
 TransactionContext &TransactionManager::Partition::put(
-	util::StackAllocator &alloc, const ClientId &clientId,
-	ContainerId containerId, StatementId stmtId, int32_t txnTimeoutInterval,
-	const util::DateTime &now, EventMonotonicTime emNow, GetMode getMode,
-	TransactionMode txnMode, bool isUpdateStmt, bool isRedo,
-	TransactionId txnId, bool isExistTimeoutLimit) {
+		util::StackAllocator &alloc, const ClientId &clientId,
+		ContainerId containerId, StatementId stmtId, int32_t txnTimeoutInterval,
+		const util::DateTime &now, EventMonotonicTime emNow, GetMode getMode,
+		TransactionMode txnMode, bool isUpdateStmt, bool isRedo,
+		TransactionId txnId, bool isExistTimeoutLimit,
+		double storeMemoryAgingSwapRate) {
 	try {
 		if (!isExistTimeoutLimit) {
 		}
@@ -1128,8 +1142,9 @@ TransactionContext &TransactionManager::Partition::put(
 			else {
 				txn = &txnContextMap_->create(clientId, newReqExpireTime);
 				txn->clear();
-				txn->set(clientId, pId_, containerId, newReqExpireTime,
-					txnTimeoutInterval);
+				txn->set(
+						clientId, pId_, containerId, newReqExpireTime,
+						txnTimeoutInterval, storeMemoryAgingSwapRate);
 			}
 			break;
 
@@ -1151,8 +1166,9 @@ TransactionContext &TransactionManager::Partition::put(
 			}
 			txn = getAutoContext();
 			txn->clear();
-			txn->set(clientId, pId_, containerId, newReqExpireTime,
-				txnTimeoutInterval);
+			txn->set(
+					clientId, pId_, containerId, newReqExpireTime,
+					txnTimeoutInterval, storeMemoryAgingSwapRate);
 			break;
 
 		case PUT:  
@@ -1160,8 +1176,9 @@ TransactionContext &TransactionManager::Partition::put(
 			if (txn == NULL) {
 				txn = &txnContextMap_->create(clientId, newReqExpireTime);
 				txn->clear();
-				txn->set(clientId, pId_, containerId, newReqExpireTime,
-					txnTimeoutInterval);
+				txn->set(
+						clientId, pId_, containerId, newReqExpireTime,
+						txnTimeoutInterval, storeMemoryAgingSwapRate);
 			}
 			else {
 				txn->contextExpireTime_ = newReqExpireTime;

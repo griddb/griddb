@@ -30,6 +30,7 @@
 #include <limits>
 #include <cstdlib>
 #include <cassert>
+#include <algorithm> 
 
 #ifndef UTIL_ALLOCATOR_EMPTY_ALLOCATOR_CONSTRUCTOR_ALLOWED
 #if defined(_GLIBCXX_FULLY_DYNAMIC_STRING) && _GLIBCXX_FULLY_DYNAMIC_STRING

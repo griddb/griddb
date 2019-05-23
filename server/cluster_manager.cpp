@@ -596,9 +596,6 @@ void ClusterManager::getHeartbeatCheckInfo(HeartbeatCheckInfo &heartbeatCheckInf
 
 		int32_t periodicCount 
 				= getConfig().getCheckLoadBalanceInterval()  / getConfig().getHeartbeatInterval();
-		if ((pt_->getPartitionRevisionNo() % periodicCount) == 0) {
-			pt_->checkPartitionStat();
-		}
 		if ((pt_->getPartitionRevisionNo() % getConfig().getBlockClearInterval()) == 0) {
 			pt_->resetBlockQueue();
 		}
@@ -610,6 +607,9 @@ void ClusterManager::getHeartbeatCheckInfo(HeartbeatCheckInfo &heartbeatCheckInf
 				setAddOrDownNode();
 			}
 			if (pt_->isMaster()) {
+				if ((pt_->getPartitionRevisionNo() % periodicCount) == 0) {
+					pt_->checkPartitionStat(alloc);
+				}
 				for (util::Set<NodeId>::iterator it = downNodeSet.begin();
 					it != downNodeSet.end(); it++) {
 						GS_TRACE_CLUSTER_DUMP("Follower heartbeat timeout, follower=" << pt_->dumpNodeAddress(*it));
@@ -715,6 +715,7 @@ void ClusterManager::setupPartitionContext(PartitionTable::PartitionContext &con
 	context.currentTime_ = baseTime;
 	context.subPartitionTable_.setRevision(pt_->getPartitionRevision());
 	context.isLoadBalance_ = checkLoadBalance();
+	context.isAutoGoal_ = checkAutoGoal();
 }
 
 void ClusterManager::getUpdatePartitionInfo(UpdatePartitionInfo &updatePartitionInfo) {
@@ -767,7 +768,7 @@ void ClusterManager::setUpdatePartitionInfo(UpdatePartitionInfo &updatePartition
 			if (!isLongtermSync) {
 				if (isCurrentOwner) {
 					currentOwnerList.push_back(pId);
-						shorttermSyncPIdList.push_back(pos);
+					shorttermSyncPIdList.push_back(pos);
 				}
 				if (isNextOwner) {
 					nextOwnerList.push_back(pId);
@@ -780,6 +781,9 @@ void ClusterManager::setUpdatePartitionInfo(UpdatePartitionInfo &updatePartition
 				if (isCurrentOwner) {
 					nextGoalOwnerList.push_back(pId);
 					longtermSyncPIdList.push_back(pos);
+				}
+				else if (isNextBackup) {
+					changePartitionPIdList.push_back(pos);
 				}
 				else if (isNextCatchup) {
 					nextGoalCatchupList.push_back(pId);
@@ -970,7 +974,8 @@ void ClusterManager::NotifyClusterResInfo::set(
 			lsnList_.push_back(pt->getLSN(pId));
 			maxLsnList_.push_back(pt->getMaxLsn(pId));
 		}
-		for (NodeId nodeId = 0; nodeId < pt->getNodeNum(); nodeId++) {
+		NodeId nodeNum = pt->getNodeNum();
+		for (NodeId nodeId = 0; nodeId < nodeNum; nodeId++) {
 			AddressInfo addressInfo(
 					pt->getNodeAddress(nodeId, CLUSTER_SERVICE),
 					pt->getNodeAddress(nodeId, TRANSACTION_SERVICE),
@@ -1182,7 +1187,7 @@ void ClusterManager::getSafetyLeaveNodeList(util::StackAllocator &alloc,
 		int32_t target;
 		for (PartitionId pId = 0; pId < pt_->getPartitionNum(); pId++) {
 			owner = pt_->getOwner(pId);
-			if (owner == UNDEF_NODEID) {
+			if (owner == UNDEF_NODEID || owner >= nodeNum) {
 				continue;
 			}
 			util::XArray<NodeId> backups(alloc);
@@ -1190,6 +1195,9 @@ void ClusterManager::getSafetyLeaveNodeList(util::StackAllocator &alloc,
 			if (backups.size() == 0) continue;
 			backupCount = 0;
 			for (target = 0; target < static_cast<int32_t>(backups.size());target++) {
+				if (backups[target] >= nodeNum) {
+					continue;
+				}
 				if (pt_->checkLiveNode(backups[target])) {
 					backupCount++;
 				}
@@ -1206,7 +1214,10 @@ void ClusterManager::getSafetyLeaveNodeList(util::StackAllocator &alloc,
 
 		int32_t activeNum = static_cast<int32_t>(activeNodeList.size());
 		for (target = 1; target < activeNum; target++) {
-			if (candFlagList[target] && pt_->checkLiveNode(activeNodeList[target])) {
+			if (activeNodeList[target] >= nodeNum) {
+				continue;
+			}
+			if (candFlagList[activeNodeList[target]] && pt_->checkLiveNode(activeNodeList[target])) {
 				if (activeNum - 1 < quorum) {
 					break;
 				}
@@ -1562,6 +1573,11 @@ void ClusterManager::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.setMin(1)
 		.setDefault(1000);
 
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_CS_CHECK_RULE_INTERVAL, INT32)
+		.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
+		.setMin(10)
+		.setDefault(40);
+	
 	picojson::value defaultValue;
 
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_CS_NOTIFICATION_MEMBER, JSON)
@@ -1620,6 +1636,7 @@ void ClusterManager::StatSetUpHandler::operator()(StatTable &stat) {
 	STAT_ADD(STAT_TABLE_CS_CURRENT_RULE);
 	STAT_ADD(STAT_TABLE_CS_APPLY_RULE_LIMIT_TIME);
 	STAT_ADD(STAT_TABLE_CS_CLUSTER_REVISION_NO);
+	STAT_ADD(STAT_TABLE_CS_AUTO_GOAL);
 
 	stat.resolveGroup(parentId, STAT_TABLE_CS_ERROR, "errorInfo");
 
@@ -1756,6 +1773,15 @@ bool ClusterManager::StatUpdator::operator()(StatTable &stat) {
 		}
 		stat.set(STAT_TABLE_CS_LOAD_BALANCER, loadBalancer);
 
+		const char8_t *autoGoal;
+		if (mgr.checkAutoGoal()) {
+			autoGoal = "ACTIVE";
+		}
+		else {
+			autoGoal = "INACTIVE";
+		}
+		stat.set(STAT_TABLE_CS_AUTO_GOAL, autoGoal);
+
 		if (mgr.isInitialCluster()) {
 			stat.set(STAT_TABLE_CS_INITIAL_CLUSTER, 1);
 		}
@@ -1855,6 +1881,8 @@ void ClusterManager::Config::setUpConfigHandler(
 		CONFIG_TABLE_CS_OWNER_BACKUP_LSN_GAP, *this);
 	configTable.setParamHandler(
 		CONFIG_TABLE_CS_OWNER_CATCHUP_LSN_GAP, *this);
+	configTable.setParamHandler(
+		CONFIG_TABLE_CS_CHECK_RULE_INTERVAL, *this);
 }
 
 void ClusterManager::Config::operator()(
@@ -1867,6 +1895,9 @@ void ClusterManager::Config::operator()(
 		break;
 	case CONFIG_TABLE_CS_OWNER_CATCHUP_LSN_GAP:
 		clsMgr_->getPartitionTable()->getConfig().setLimitOwnerCatchupLsnGap(value.get<int32_t>());
+		break;
+	case CONFIG_TABLE_CS_CHECK_RULE_INTERVAL:
+		clsMgr_->getConfig().setRuleLimitInterval(value.get<int32_t>());
 		break;
 	}
 }

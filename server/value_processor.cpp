@@ -432,6 +432,7 @@ void VariableArrayCursor::finalize() {
 	}
 }
 
+
 StringCursor::StringCursor(
 	TransactionContext &txn, ObjectManager &objectManager, OId oId)
 	: BaseObject(txn.getPartitionId(), objectManager, oId),
@@ -539,7 +540,7 @@ const char8_t* ValueProcessor::getTypeNameChars(ColumnType type) {
 	case COLUMN_TYPE_SHORT_ARRAY:
 		return "SHORT_ARRAY";
 	case COLUMN_TYPE_INT_ARRAY:
-		return "INT_ARRAY";
+		return "INTEGER_ARRAY";
 	case COLUMN_TYPE_LONG_ARRAY:
 		return "LONG_ARRAY";
 	case COLUMN_TYPE_FLOAT_ARRAY:

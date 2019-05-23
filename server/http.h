@@ -360,8 +360,10 @@ public:
 
 	typedef std::vector<
 			String, util::StdAllocator<String, void> > PathElements;
-	typedef std::map< String, String, std::less<String>, util::StdAllocator<
-			std::pair<const String, String>, void> > ParameterMap;
+	typedef std::map<
+			String, String, std::map<String, String>::key_compare,
+			util::StdAllocator<
+					std::pair<const String, String>, void> > ParameterMap;
 
 	typedef int32_t Method;
 

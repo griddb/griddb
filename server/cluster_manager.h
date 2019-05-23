@@ -52,19 +52,6 @@ class ClusterService;
 */
 enum ClusterStatusTransition { TO_MASTER, TO_SUBMASTER, KEEP };
 
-//static const std::string getClusterStatusTransition(
-//	ClusterStatusTransition type) {
-//	switch (type) {
-//	case TO_MASTER:
-//		return "TO_MASTER";
-//	case TO_SUBMASTER:
-//		return "TO_SUBMASTER";
-//	case KEEP:
-//		return "KEEP";
-//	default:
-//		return "";
-//	}
-//}
 
 /*!
 	@brief ClusterManager
@@ -194,9 +181,18 @@ public:
 		return clusterInfo_.isLoadBalance_;
 	}
 
+	bool checkAutoGoal() {
+		return clusterInfo_.isAutoGoal_;
+	}
+
 	void setLoadBalance(bool flag) {
 		clusterInfo_.isLoadBalance_ = flag;
 	}
+
+	void setAutoGoal(bool flag) {
+		clusterInfo_.isAutoGoal_ = flag;
+	}
+
 
 	bool isUpdatePartition() {
 		bool retVal = clusterInfo_.isUpdatePartition_;
@@ -1445,6 +1441,7 @@ private:
 				config.get<int32_t>(CONFIG_TABLE_SYNC_TIMEOUT_INTERVAL));
 
 			blockClearInterval_ = DEFAULT_CLEAR_BLOCK_INTERVAL;
+
 			ruleLimitInterval_ = shortTermTimeoutInterval_ + heartbeatInterval_*2;
 		}
 
@@ -1489,7 +1486,12 @@ private:
 		}
 
 		void setRuleLimitInterval(int32_t interval) {
-			ruleLimitInterval_ = interval;
+			if (interval * 1000 > INT32_MAX) {
+				ruleLimitInterval_ = INT32_MAX;
+			}
+			else {
+				ruleLimitInterval_ = interval * 1000;
+			}
 		}
 
 		int32_t getRuleLimitInterval() {
@@ -1595,10 +1597,11 @@ private:
 			quorum_(0),
 			prevMaxNodeId_(1),
 			isLoadBalance_(true),
+			isAutoGoal_(true),
 			isUpdatePartition_(false),
 			isRepairPartition_(false),
-			isAddOrDownNode_(false),
-			pt_(pt)
+			pt_(pt),
+			isAddOrDownNode_(false)
 #ifdef GD_ENABLE_UNICAST_NOTIFICATION
 			,
 			mode_(NOTIFICATION_MULTICAST)
@@ -1624,6 +1627,7 @@ private:
 			quorum_ = 0;
 			prevMaxNodeId_ = 0;
 			isLoadBalance_ = true;
+			isAutoGoal_ = true;
 			isUpdatePartition_ = false;
 			isRepairPartition_ = false;
 			downNodeList_.clear();
@@ -1649,12 +1653,14 @@ private:
 		int32_t quorum_;
 		NodeId prevMaxNodeId_;
 		bool isLoadBalance_;
+		bool isAutoGoal_;
 		bool isUpdatePartition_;
 		bool isRepairPartition_;
-		bool isAddOrDownNode_;
 		PartitionTable *pt_;
 		std::set<NodeId> downNodeList_;
 		NodeAddress partition0NodeAddr_;  
+		bool isAddOrDownNode_;
+
 #ifdef GD_ENABLE_UNICAST_NOTIFICATION
 		ClusterNotificationMode mode_;
 #endif

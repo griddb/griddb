@@ -211,7 +211,7 @@ private:
 private:  
 private:  
 	bool isUnique(TransactionContext &txn, uint32_t rowKeySize,
-		const uint8_t *rowKey, RowArray &rowArray);
+		const uint8_t *rowKey, OId &oId);
 	bool searchRowKeyWithRowIdMap(TransactionContext &txn, uint32_t rowKeySize,
 		const uint8_t *rowKey, OId &oId);
 	bool searchRowKeyWithMvccMap(TransactionContext &txn, uint32_t rowKeySize,

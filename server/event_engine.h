@@ -48,6 +48,8 @@ public:
 	class EventCoder;
 	class ThreadErrorHandler;
 	class Stats;
+	struct SocketInfo;
+	struct SocketStats;
 	struct Tool;
 
 	typedef int32_t EventType;
@@ -60,6 +62,7 @@ public:
 	typedef util::ArrayByteInStream EventByteInStream;
 	typedef util::ByteStream<EventOutStream> EventByteOutStream;
 	typedef std::pair<uint64_t, uint64_t> BufferId;
+	typedef std::pair<SocketInfo, SocketStats> SocketStatsWithInfo;
 
 	/*!
 		@brief Event handling mode
@@ -133,6 +136,7 @@ public:
 
 	void getStats(Stats &stats);
 	bool getStats(PartitionGroupId pgId, Stats &stats);
+	void getSocketStats(util::Vector<SocketStatsWithInfo> &statsList);
 
 	EventMonotonicTime getMonotonicTime();
 
@@ -799,6 +803,23 @@ private:
 	int64_t valueList_[STATS_TYPE_MAX];
 };
 
+struct EventEngine::SocketInfo {
+	SocketInfo();
+
+	NodeDescriptor nd_;
+	util::SocketAddress localAddress_;
+	util::SocketAddress remoteAddress_;
+	bool multicast_;
+};
+
+struct EventEngine::SocketStats {
+	SocketStats();
+
+	int64_t dispatchingEventCount_;
+	int64_t sendingEventCount_;
+	util::DateTime initialTime_;
+};
+
 struct EventEngine::Tool {
 	static bool getLiveStats(
 			EventEngine &ee, PartitionGroupId pgId, Stats::Type type,
@@ -862,7 +883,8 @@ public:
 private:
 	typedef std::pair<EventType, int64_t> TimeMapEntry;
 
-	typedef std::map< EventType, int64_t, std::less<EventType>,
+	typedef std::map<
+			EventType, int64_t, std::map<EventType, int64_t>::key_compare,
 			util::StdAllocator<TimeMapEntry, VariableSizeAllocator> > TimeMap;
 
 	Body(const Body&);
@@ -915,7 +937,8 @@ public:
 
 	typedef std::pair<EventType, int64_t> TimeMapEntry;
 
-	typedef std::map< EventType, int64_t, std::less<EventType>,
+	typedef std::map<
+			EventType, int64_t, std::map<EventType, int64_t>::key_compare,
 			util::StdAllocator<TimeMapEntry, VariableSizeAllocator> > TimeMap;
 
 	explicit NDPool(EventEngine &ee);
@@ -1020,7 +1043,14 @@ public:
 	EventSocket* allocate(bool onSecondary);
 	void deallocate(EventSocket *socket, bool workerAlive, LockGuard *ndGuard);
 
+	void getSocketStats(util::Vector<SocketStatsWithInfo> &statsList);
+
 private:
+	typedef std::set<
+			EventSocket*, std::set<EventSocket*>::key_compare,
+			util::StdAllocator<EventSocket*, VariableSizeAllocator> >
+			SocketSet;
+
 	SocketPool(const SocketPool&);
 	SocketPool& operator=(const SocketPool&);
 
@@ -1033,6 +1063,9 @@ private:
 	util::ObjectPool<EventSocket> base_;
 	size_t primaryWorkerSeed_;
 	size_t secondaryWorkerSeed_;
+
+	VariableSizeAllocator varAlloc_;
+	SocketSet socketSet_;
 
 };
 
@@ -1088,6 +1121,8 @@ public:
 
 	EventCoder& getEventCoder();
 
+
+	static bool isSpecialEventType(EventType type);
 
 private:
 	struct HandlerEntry {
@@ -1185,6 +1220,8 @@ public:
 	void waitForShutdown();
 
 	bool isShutdownRequested();
+
+	util::DateTime getCurrentApproximately();
 
 	util::DateTime getCurrent();
 	EventMonotonicTime getMonotonicTime();
@@ -1288,13 +1325,15 @@ private:
 	typedef std::pair<EventSocket*, SocketOperationEntry> OperationMapEntry;
 
 	typedef std::map<
-			EventSocket*, SocketOperationEntry, std::less<EventSocket*>,
+			EventSocket*, SocketOperationEntry,
+			std::map<EventSocket*, SocketOperationEntry>::key_compare,
 			util::StdAllocator<SocketOperationEntry, VariableSizeAllocator> >
 			OperationMap;
 
 	typedef std::pair<EventSocket*, bool> SocketMapEntry;
 
-	typedef std::map< EventSocket*, bool, std::less<EventSocket*>,
+	typedef std::map<
+			EventSocket*, bool, std::map<EventSocket*, bool>::key_compare,
 			util::StdAllocator<SocketMapEntry, VariableSizeAllocator> >
 			SocketMap;
 
@@ -1489,6 +1528,9 @@ public:
 
 	void closeLocal(bool workerAlive, LockGuard *ndGuard) throw();
 
+	SocketInfo getInfo() const;
+	SocketStats getStats() const;
+
 	static Event::Source eventToSource(Event &ev);
 
 private:
@@ -1545,6 +1587,9 @@ private:
 
 	NodeDescriptor nd_;
 	NodeDescriptor::Body::SocketType ndSocketPendingType_;
+
+	util::SocketAddress localAddress_;
+	SocketStats stats_;
 };
 
 /*!
@@ -1830,6 +1875,11 @@ inline bool EventEngine::getStats(PartitionGroupId pgId, Stats &stats) {
 	}
 	stats = eventWorkerList_[pgId].getStats();
 	return true;
+}
+
+inline void EventEngine::getSocketStats(
+		util::Vector<SocketStatsWithInfo> &statsList) {
+	socketPool_->getSocketStats(statsList);
 }
 
 
@@ -2886,6 +2936,23 @@ inline void EventEngine::NDPool::releaseTimeMap(TimeMap *&map) {
 		UTIL_OBJECT_POOL_DELETE(timeMapPool_, map);
 		map = NULL;
 	}
+}
+
+
+inline bool EventEngine::Dispatcher::isSpecialEventType(EventType type) {
+	return type < 0;
+}
+
+
+inline util::DateTime EventEngine::ClockGenerator::getCurrentApproximately() {
+	util::DateTime time = correctedTime_.load();
+
+	if (time == util::DateTime()) {
+		const bool trimMilliseconds = false;
+		time = util::DateTime::now(trimMilliseconds);
+	}
+
+	return time;
 }
 
 #endif

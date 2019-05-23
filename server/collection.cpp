@@ -74,6 +74,7 @@ void Collection::initialize(TransactionContext& txn) {
 	reinterpret_cast<CollectionImage *>(baseContainerImage_)->padding1_ = 0;
 	reinterpret_cast<CollectionImage *>(baseContainerImage_)->padding2_ = 0;
 
+
 	rowImageSize_ = 0;
 	metaAllocateStrategy_ = AllocateStrategy();
 	rowAllocateStrategy_ = AllocateStrategy();
@@ -618,9 +619,10 @@ void Collection::deleteRow(TransactionContext& txn, uint32_t rowKeySize,
 		if (!definedRowKey()) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_COL_ROWKEY_UNDEFINED, "");
 		}
-		RowArray rowArray(txn, this);
-		if (!isUnique(txn, rowKeySize, rowKey, rowArray)) {
-			bool isOldSchema = rowArray.setDirty(txn);
+		OId targetOId = UNDEF_OID;
+		if (!isUnique(txn, rowKeySize, rowKey, targetOId)) {
+			RowArray rowArray(txn, this);
+			bool isOldSchema = rowArray.load(txn, targetOId, this, OBJECT_FOR_UPDATE);
 			if (isOldSchema) {
 				RowScope rowScope(*this, TO_NORMAL);
 				convertRowArraySchema(txn, rowArray, false);
@@ -1023,7 +1025,6 @@ void Collection::commit(TransactionContext& txn) {
 	}
 }
 
-
 /*!
 	@brief Check if Container has data of uncommited transaction
 */
@@ -1204,7 +1205,6 @@ void Collection::searchRowIdIndex(TransactionContext& txn,
 			}
 			std::sort(mvccSortKeyList.begin(), mvccSortKeyList.end(),
 				SortPred(txn, sortOp, targetType, isNullLast));
-
 			for (itr = resultList.begin(); itr != resultList.end(); itr++) {
 				rowArray.load(txn, *itr, this, OBJECT_READ_ONLY);
 				RowArray::Row row(rowArray.getRow(), &rowArray);
@@ -1484,27 +1484,29 @@ void Collection::putRow(TransactionContext& txn,
 		ColumnInfo::ROW_KEY_COLUMN_ID, rowKey, rowKeySize);
 
 	RowArray rowArray(txn, this);
-	if (!definedRowKey() || isUnique(txn, rowKeySize, rowKey, rowArray)) {
+	OId targetOId = UNDEF_OID;
+	if (!definedRowKey() || isUnique(txn, rowKeySize, rowKey, targetOId)) {
 		StackAllocAutoPtr<BtreeMap> rowIdMap(
 			txn.getDefaultAllocator(), getRowIdMap(txn));
 		OId tailOId = rowIdMap.get()->getTail(txn);
 		if (tailOId != UNDEF_OID) {
-//			bool isOldSchema = 
-			rowArray.load(txn, tailOId, this, OBJECT_READ_ONLY);
-//			assert(isOldSchema || !isOldSchema);
+			bool isOldSchema = rowArray.load(txn, tailOId, this, OBJECT_FOR_UPDATE);
+			assert(isOldSchema || !isOldSchema);
 			rowArray.tail();
+			if (isOldSchema) {
+				RowScope rowScope(*this, TO_NORMAL);
+				convertRowArraySchema(txn, rowArray, false);
+			}
 		}
 		mode = APPEND;
 	}
 	else {
-		mode = UPDATE;
-	}
-	if (!rowArray.isNotInitialized()) {
-		bool isOldSchema = rowArray.setDirty(txn);
+		bool isOldSchema = rowArray.load(txn, targetOId, this, OBJECT_FOR_UPDATE);
 		if (isOldSchema) {
 			RowScope rowScope(*this, TO_NORMAL);
 			convertRowArraySchema(txn, rowArray, false);
 		}
+		mode = UPDATE;
 	}
 	switch (mode) {
 	case APPEND:
@@ -1530,7 +1532,7 @@ void Collection::putRow(TransactionContext& txn,
 }
 
 bool Collection::isUnique(TransactionContext& txn, uint32_t rowKeySize,
-	const uint8_t* rowKey, RowArray& rowArray) {
+	const uint8_t* rowKey, OId &oId) {
 	bool isFound = false;
 
 	ColumnInfo& keyColumnInfo = getColumnInfo(ColumnInfo::ROW_KEY_COLUMN_ID);
@@ -1554,7 +1556,7 @@ bool Collection::isUnique(TransactionContext& txn, uint32_t rowKeySize,
 		}
 	}
 
-	OId oId = UNDEF_OID;
+	oId = UNDEF_OID;
 	IndexTypes indexBit = getIndexTypes(txn, ColumnInfo::ROW_KEY_COLUMN_ID);
 	if (hasIndex(indexBit, MAP_TYPE_HASH)) {
 		StackAllocAutoPtr<HashMap> hmap(txn.getDefaultAllocator(),
@@ -1576,11 +1578,6 @@ bool Collection::isUnique(TransactionContext& txn, uint32_t rowKeySize,
 
 	if (!isFound && !isExclusive()) {
 		isFound = searchRowKeyWithMvccMap(txn, rowKeySize, rowKey, oId);
-	}
-	if (isFound) {
-//		bool isOldSchema = 
-		rowArray.load(txn, oId, this, OBJECT_READ_ONLY);
-//		assert(isOldSchema || !isOldSchema);
 	}
 	return !isFound;
 }
@@ -1861,6 +1858,7 @@ void Collection::insertRowInternal(
 			}
 			insertValueMap(txn, valueMap, fieldValue, destRowArray.getOId(),
 				isNullValue);
+
 		}
 	}
 }
@@ -2400,7 +2398,6 @@ void Collection::updateIndexData(TransactionContext& txn, const IndexData &index
 }
 
 
-
 util::String Collection::getBibInfo(TransactionContext &txn, const char* dbName) {
 	return getBibInfoImpl(txn, dbName, 0, false);
 }
@@ -2453,4 +2450,6 @@ bool Collection::validate(TransactionContext& txn, std::string& errorMessage) {
 std::string Collection::dump(TransactionContext& txn) {
 	return dumpImpl<Collection>(txn);
 }
+
+
 

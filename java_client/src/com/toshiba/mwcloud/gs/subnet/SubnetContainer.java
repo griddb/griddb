@@ -137,8 +137,7 @@ Extensibles.AsContainer<K, R>, Experimentals.AsContainer<K, R> {
 	private static final QueryResultType[] QUERY_RESULT_TYPES =
 			QueryResultType.values();
 
-	private final ContextMonitor contextMonitor =
-			GridStoreChannel.createContextMonitorIfAvailable();
+	private final ContextMonitor contextMonitor;
 
 	private static final BaseGridStoreLogger LOGGER =
 			LoggingUtils.getLogger("Transaction");
@@ -186,6 +185,8 @@ Extensibles.AsContainer<K, R>, Experimentals.AsContainer<K, R> {
 			int schemaVerId, int partitionId, long containerId,
 			ContainerKey normalizedContainerKey,
 			ContainerKey remoteContainerKey) throws GSException {
+		this.contextMonitor =
+				GridStoreChannel.tryCreateContainerContextMonitor(context);
 		this.store = store;
 		this.channel = channel;
 		this.context = context;
@@ -2390,7 +2391,7 @@ Extensibles.AsContainer<K, R>, Experimentals.AsContainer<K, R> {
 		}
 	}
 
-	static abstract class QueryFormatter {
+	static abstract class QueryFormatter implements Extensibles.QueryInfo {
 
 		private final Statement statement;
 
@@ -2404,7 +2405,7 @@ Extensibles.AsContainer<K, R>, Experimentals.AsContainer<K, R> {
 
 		abstract void format(BasicBuffer out) throws GSException;
 
-		abstract String getQueryString();
+		public abstract String getQueryString();
 
 	}
 
@@ -2600,6 +2601,15 @@ Extensibles.AsContainer<K, R>, Experimentals.AsContainer<K, R> {
 	@Override
 	public Object getRowValue(Object rowObj, int column) throws GSException {
 		return mapper.resolveField(rowObj, column);
+	}
+
+	@Override
+	public ContainerKey getKey() {
+		if (!context.getConfig().containerMonitoring ||
+				contextMonitor == null) {
+			return null;
+		}
+		return contextMonitor.containerKey;
 	}
 
 }

@@ -58,7 +58,8 @@ TransactionContext::TransactionContext()
 	  txnStartTime_(0),
 	  txnExpireTime_(0),
 	  contextExpireTime_(0),
-	  txnTimeoutInterval_(TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL) {}
+	  txnTimeoutInterval_(TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL),
+	  storeMemoryAgingSwapRate_(TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE) {}
 
 TransactionContext::TransactionContext(const TransactionContext &txn)
 	: manager_(txn.manager_),
@@ -77,8 +78,8 @@ TransactionContext::TransactionContext(const TransactionContext &txn)
 	  txnStartTime_(txn.txnStartTime_),
 	  txnExpireTime_(txn.txnExpireTime_),
 	  contextExpireTime_(txn.contextExpireTime_),
-	  txnTimeoutInterval_(txn.txnTimeoutInterval_) {}
-
+	  txnTimeoutInterval_(txn.txnTimeoutInterval_),
+	  storeMemoryAgingSwapRate_(txn.storeMemoryAgingSwapRate_) {}
 TransactionContext::~TransactionContext() {}
 
 TransactionContext::TransactionContext(util::StackAllocator &alloc)
@@ -98,5 +99,6 @@ TransactionContext::TransactionContext(util::StackAllocator &alloc)
 	  txnStartTime_(0),
 	  txnExpireTime_(0),
 	  contextExpireTime_(0),
-	  txnTimeoutInterval_(TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL) {}
+	  txnTimeoutInterval_(TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL),
+	  storeMemoryAgingSwapRate_(TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE) {}
 

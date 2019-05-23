@@ -27,6 +27,7 @@
 #include "event_engine.h"
 #include "expirable_map.h"
 #include "transaction_context.h"
+#include "cluster_event_type.h"
 
 
 class BaseContainer;
@@ -36,14 +37,73 @@ UTIL_TRACER_DECLARE(TRANSACTION_MANAGER);
 #define TM_OUTPUT_GETMODE(getMode) static_cast<uint32_t>(getMode)
 #define TM_OUTPUT_TXNMODE(txnMode) static_cast<uint32_t>(txnMode)
 
+class EventStart;
+class EventMonitor {
+public:
+	
+	EventMonitor(uint32_t concurrency) {
+		eventInfoList_.assign(concurrency, EventInfo());
+	}
+	void initialize(uint32_t concurrency) {
+		eventInfoList_.assign(concurrency, EventInfo());
+	}
+	void set(EventStart &eventStart);
+	void reset(EventStart &eventStart);
+	std::string dump();
+		struct EventInfo {
+		void init() {
+			eventType_ = UNDEF_EVENT_TYPE;
+			pId_ = UNDEF_PARTITIONID;
+			startTime_ = 0;
+		}
+		EventInfo() {
+			init();
+		}
+		PartitionId pId_;
+		EventType eventType_;
+		int64_t startTime_;
+	};
+	std::vector<EventInfo> eventInfoList_;
+	std::vector<util::String> applicationNameList_;
+};
+
+class EventStart {
+public:
+	EventStart(EventContext &ec, Event &ev, EventMonitor &monitor, bool check = true) :
+			ec_(ec), ev_(ev), monitor_(monitor), check_(check) {
+		if (check_) {
+			monitor_.set(*this);
+		}
+	}
+	~EventStart() {
+		if (check_) {
+			monitor_.reset(*this);
+		}
+	}
+	EventContext &getEventContext() {
+		return ec_;
+	}
+	Event &getEvent() {
+		return ev_;
+	}
+
+private:
+	EventContext &ec_;
+	Event &ev_;
+	EventMonitor &monitor_;
+	bool check_;
+};
+
+#define EVENT_START(ec, ev, sv) EventStart start(ec, ev, sv->getEventMonitor());
+
 /*!
 	@brief Exception class to notify duplicated statement execution
 */
 class StatementAlreadyExecutedException : public util::Exception {
 public:
-	StatementAlreadyExecutedException(
-		UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw()
-		: Exception(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_SET) {}
+	explicit StatementAlreadyExecutedException(
+			UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw() :
+			Exception(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_SET) {}
 	virtual ~StatementAlreadyExecutedException() throw() {}
 };
 
@@ -52,8 +112,9 @@ public:
 */
 class ContextNotFoundException : public UserException {
 public:
-	ContextNotFoundException(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw()
-		: UserException(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_SET) {}
+	explicit ContextNotFoundException(
+			UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw() :
+			UserException(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_SET) {}
 	virtual ~ContextNotFoundException() throw() {}
 };
 
@@ -260,19 +321,22 @@ public:
 		int32_t txnTimeoutInterval_;
 		GetMode getMode_;
 		TransactionMode txnMode_;
+		double storeMemoryAgingSwapRate_;
 
 		ContextSource();
 		explicit ContextSource(int32_t stmtType, bool isUpdateStmt = false);
 		ContextSource(int32_t stmtType, StatementId stmtId,
 			ContainerId containerId, int32_t txnTimeoutInterval,
 			GetMode getMode, TransactionMode txnMode,
-			bool isUpdateStmt = false);
+			bool isUpdateStmt, double storeMemoryAgingSwapRate);
 	};
 
 	TransactionContext &put(util::StackAllocator &alloc, PartitionId pId,
 		const ClientId &clientId, const ContextSource &src,
 		const util::DateTime &now, EventMonotonicTime emNow,
 		bool isRedo = false, TransactionId txnId = UNDEF_TXNID);
+
+	TransactionContext &putAuto(util::StackAllocator &alloc);
 
 	TransactionContext &putNoExpire(util::StackAllocator &alloc, PartitionId pId,
 		const ClientId &clientId, const ContextSource &src,
@@ -383,6 +447,10 @@ public:
 	bool lockPartition(PartitionId pId);
 	void unlockPartition(PartitionId pId);
 
+	EventMonitor &getEventMonitor() {
+		return eventMonitor_;
+	}
+
 private:
 	static const TransactionId INITIAL_TXNID =
 		TransactionContext::AUTO_COMMIT_TXNID;
@@ -398,6 +466,7 @@ private:
 	static const uint32_t TIMER_INTERVAL_MILLISEC = 1000;
 
 	static const uint32_t NUM_LOCK_MUTEX = 13;
+
 
 	struct TransactionContextKeyHash {
 		size_t operator()(const ClientId &key) {
@@ -497,7 +566,8 @@ private:
 			StatementId stmtId, int32_t txnTimeoutInterval,
 			const util::DateTime &now, EventMonotonicTime emNow,
 			GetMode getMode, TransactionMode txnMode, bool isUpdateStmt,
-			bool isRedo, TransactionId txnId, bool isExistTimeoutLimit);
+			bool isRedo, TransactionId txnId, bool isExistTimeoutLimit,
+			double storeMemoryAgingSwapRate);
 		TransactionContext &get(
 			util::StackAllocator &alloc, const ClientId &clientId);
 		void remove(const ClientId &clientId);
@@ -633,6 +703,8 @@ private:
 	const int32_t authenticationTimeoutInterval_;
 	Config reauthConfig_;
 	const int32_t txnTimeoutLimit_;
+	EventMonitor eventMonitor_;
+
 
 	std::vector<TransactionContextMap::Manager *> txnContextMapManager_;
 	std::vector<TransactionContextMap *> txnContextMap_;

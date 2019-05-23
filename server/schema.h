@@ -531,7 +531,6 @@ public:
 		return (flag & COLUMN_FLAG_NOT_NULL) != 0;
 	}
 
-
 private:
 
 	union {
@@ -996,6 +995,7 @@ public:
 			keyColumnIdList.push_back(columnId);
 		}
 	}
+
 	bool isFirstColumnAdd() const {
 		uint32_t columnNum, varColumnNum, rowFixedColumnSize;
 		getFirstSchema(columnNum, varColumnNum, rowFixedColumnSize);
@@ -1071,6 +1071,7 @@ struct MapOIds {
 		return output;
 	}
 };
+
 static const MapOIds UNDEF_MAP_OIDS;
 
 typedef uint8_t DDLStatus;
@@ -1353,6 +1354,7 @@ private:
 		}
 	}
 
+
 	void setMapOIds(TransactionContext &txn, uint8_t *cursor, uint64_t containerPos,
 		const MapOIds oIds) {
 		if (containerPos == UNDEF_CONTAINER_POS) {
@@ -1569,16 +1571,16 @@ struct BibInfo {
 
 		std::string containerFileBase_;
 
-		int64_t databaseId_;
-		int64_t containerId_;
-		int64_t rowIndexOId_;
-		int64_t mvccIndexOId_;
+		DatabaseId databaseId_;
+		ContainerId containerId_;
+		OId rowIndexOId_;
+		OId mvccIndexOId_;
 		int64_t initSchemaStatus_;
-		int64_t schemaVersion_;
+		SchemaVersionId schemaVersion_;
 		std::string database_;
 		std::string container_;
 		std::string dataAffinity_;
-		int64_t partitionNo_;
+		PartitionId partitionNo_;
 		std::string containerType_;
 		bool rowKeyAssigned_;
 		struct Column {
@@ -1594,11 +1596,11 @@ struct BibInfo {
 			void load(const picojson::value &json);
 
 			bool isExist_;
-			int64_t rowExpirationElapsedTime_;
+			int32_t rowExpirationElapsedTime_;
 			std::string rowExpirationTimeUnit_;
-			int64_t expirationDivisionCount_;
+			int32_t expirationDivisionCount_;
 			std::string compressionMethod_;
-			int64_t compressionWindowSize_;
+			int32_t compressionWindowSize_;
 			std::string compressionWindowSizeUnit_;
 		};
 		struct CompressionInfo {
@@ -1618,10 +1620,12 @@ struct BibInfo {
 	Option option_;
 	std::vector< Container > containers_;
 
-	static bool setBoolKey(const picojson::value &json, const char *key, bool &output, bool isOption); 
-	static bool setDoubleKey(const picojson::value &json, const char *key, double &output, bool isOption); 
-	static bool setLongKey(const picojson::value &json, const char *key, int64_t &output, bool isOption); 
-	static bool setStringKey(const picojson::value &json, const char *key, std::string &output, bool isOption); 
+	template<typename T> static bool setKey(
+		const picojson::value &json, const char *key, T &output, bool isOption);
+	template<typename T> static bool setIntegerKey(
+		const picojson::value &json, const char *key, T &output, bool isOption);
+	template<typename T> static bool setStringIntegerKey(
+		const picojson::value &json, const char *key, T &output, bool isOption);
 private:
 };
 #endif

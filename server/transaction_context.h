@@ -48,6 +48,8 @@ const int32_t CONNECTION_KEEPALIVE_TIMEOUT_INTERVAL = (TXN_STABLE_TRANSACTION_TI
 
 const StatementId TXN_MIN_CLIENT_STATEMENTID = 1;
 
+const double TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE = -1.0;
+
 const size_t TXN_CLIENT_UUID_BYTE_SIZE = 16;
 
 /*!
@@ -187,6 +189,10 @@ public:
 	void setSenderND(const NodeDescriptor &nd);
 	void setContainerId(ContainerId containerId);
 
+	double getStoreMemoryAgingSwapRate() const;
+	bool isStoreMemoryAgingSwapRateEnabled() const;
+	static bool isStoreMemoryAgingSwapRateSpecified(double storeMemoryAgingSwapRate);
+
 private:
 	typedef int32_t State;  
 	static const State ACTIVE = 1;  
@@ -221,9 +227,11 @@ private:
 
 	NodeDescriptor senderND_;
 
+	double storeMemoryAgingSwapRate_;
+
 	TransactionContext(const TransactionContext &txn);
 	void set(const ClientId &clientId, PartitionId pId, ContainerId containerId,
-		int64_t contextExpireTime, int32_t txnTimeoutInterval);
+		int64_t contextExpireTime, int32_t txnTimeoutInterval, double storeMemoryAgingSwapRate);
 	void clear();
 
 public:
@@ -254,6 +262,7 @@ inline TransactionContext &TransactionContext::operator=(
 	txnExpireTime_ = txn.txnExpireTime_;
 	contextExpireTime_ = txn.contextExpireTime_;
 	txnTimeoutInterval_ = txn.txnTimeoutInterval_;
+	storeMemoryAgingSwapRate_ = txn.storeMemoryAgingSwapRate_;
 	return *this;
 }
 
@@ -349,12 +358,13 @@ inline bool TransactionContext::isCancelRequested() const {
 
 inline void TransactionContext::set(const ClientId &clientId, PartitionId pId,
 	ContainerId containerId, int64_t contextExpireTime,
-	int32_t txnTimeoutInterval) {
+	int32_t txnTimeoutInterval, double storeMemoryAgingSwapRate) {
 	clientId_ = clientId;
 	pId_ = pId;
 	containerId_ = containerId;
 	contextExpireTime_ = contextExpireTime;
 	txnTimeoutInterval_ = txnTimeoutInterval;
+	storeMemoryAgingSwapRate_ = storeMemoryAgingSwapRate;
 }
 
 /*!
@@ -428,6 +438,19 @@ inline void TransactionContext::setContainerId(ContainerId containerId) {
 	containerId_ = containerId;
 }
 
+inline double TransactionContext::getStoreMemoryAgingSwapRate() const {
+	return storeMemoryAgingSwapRate_;
+}
+
+inline bool TransactionContext::isStoreMemoryAgingSwapRateEnabled() const {
+	return isStoreMemoryAgingSwapRateSpecified(storeMemoryAgingSwapRate_);
+}
+
+inline bool TransactionContext::isStoreMemoryAgingSwapRateSpecified(
+		double storeMemoryAgingSwapRate) {
+	return (storeMemoryAgingSwapRate >= 0);
+}
+
 inline void TransactionContext::clear() {
 	alloc_ = NULL;
 	clientId_ = TXN_EMPTY_CLIENTID;
@@ -444,6 +467,7 @@ inline void TransactionContext::clear() {
 	txnExpireTime_ = 0;
 	contextExpireTime_ = 0;
 	txnTimeoutInterval_ = TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL;
+	storeMemoryAgingSwapRate_ = TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE;
 }
 
 #define TXN_CHECK_NOT_CANCELLED(txn)                                        \

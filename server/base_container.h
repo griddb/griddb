@@ -68,7 +68,6 @@ public:
 		Timestamp startTime_;	
 	};
 
-
 	class ValueMap {
 	public:
 		ValueMap(TransactionContext &txn, BaseContainer *container, IndexData &indexData)
@@ -318,6 +317,7 @@ public:
 	void makeCopyColumnMap(TransactionContext &txn,
 		MessageSchema *messageSchema, util::XArray<uint32_t> &copyColumnMap,
 		DataStore::SchemaState &schemaState);
+
 	void changeNullStats(TransactionContext& txn, uint32_t oldColumnNum);
 
 	virtual bool hasUncommitedTransaction(TransactionContext &txn) = 0;
@@ -369,7 +369,9 @@ public:
 	OId getContainerKeyOId() {
 		return baseContainerImage_->containerNameOId_;
 	}
-
+	/*!
+		@brief Get FullContainerKey
+	*/
 	FullContainerKey getContainerKey(TransactionContext &txn) {
 		if (containerKeyCursor_ .getBaseOId() == UNDEF_OID) {
 			if (baseContainerImage_->containerNameOId_ != UNDEF_OID) {
@@ -452,7 +454,6 @@ public:
 	DataStore *getDataStore() {
 		return dataStore_;
 	}
-
 
 	void getNullsStats(util::XArray<uint8_t> &nullsList) const {
 		uint16_t limitSize = sizeof(int64_t);
@@ -739,6 +740,7 @@ protected:
 			}
 		}
 	};
+
 
 	enum ToRowMode {
 		TO_MVCC,
@@ -1126,6 +1128,7 @@ protected:
 		TransactionId tId, MvccRowImage &mvccImage) = 0;
 	virtual void removeValueMap(TransactionContext &txn, ValueMap &valueMap,
 		const void *constKey, OId oId, bool isNull) = 0;
+
 	virtual void updateIndexData(
 		TransactionContext &txn, const IndexData &indexData) = 0;
 	void updateValueMaps(TransactionContext &txn, 

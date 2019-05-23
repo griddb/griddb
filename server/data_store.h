@@ -61,8 +61,9 @@ class ClusterService;
 */
 class LockConflictException : public util::Exception {
 public:
-	LockConflictException(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw()
-		: Exception(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_SET) {}
+	explicit LockConflictException(
+			UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw() :
+			Exception(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_SET) {}
 	virtual ~LockConflictException() throw() {}
 };
 #define DS_RETHROW_LOCK_CONFLICT_ERROR(cause, message) \
@@ -76,6 +77,7 @@ class ObjectManager;
 class ChunktManager;
 class ColumnInfo;
 class ResultSet;  
+class ResultSetOption;
 
 class Cursor {
 	virtual bool isFinished() const = 0;
@@ -613,7 +615,8 @@ public:
 	void setLatestBatchFreeTime(PartitionId pId, Timestamp time, bool force = false);
 
 	ResultSet *createResultSet(TransactionContext &txn, ContainerId containerId,
-		SchemaVersionId versionId, int64_t emNow, bool noExpire = false);
+		SchemaVersionId versionId, int64_t emNow, 
+		ResultSetOption *rsOption, bool noExpire = false);
 
 	ResultSet *getResultSet(TransactionContext &txn, ResultSetId resultSetId);
 
@@ -961,7 +964,20 @@ private:
 		int32_t getCheckErasableExpiredInterval() {
 			return checkErasableExpiredInterval_;
 		}
+		double storeMemoryAgingSwapRate_;
 
+		void setStoreMemoryAgingSwapRate(double val) {
+			if (val < 0) {
+				storeMemoryAgingSwapRate_ = 0;
+			}
+			else {
+				storeMemoryAgingSwapRate_ = val;
+			}
+		}
+
+		double getStoreMemoryAgingSwapRate() {
+			return storeMemoryAgingSwapRate_;
+		}
 	} config_;
 
 	struct ExpirationStat {

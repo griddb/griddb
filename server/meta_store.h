@@ -27,6 +27,8 @@
 class TransactionManager;
 class PartitionTable;
 struct MetaProcessorSource;
+class TransactionService;
+
 
 class MetaProcessor {
 public:
@@ -67,8 +69,13 @@ private:
 	class IndexHandler;
 	class MetaTriggerHandler;
 	class ErasableHandler;
+	class EventHandler;
+	class SocketHandler;
+	class SQLHandler;
 
 	class KeyRefHandler;
+
+	class ContainerRefHandler; 
 
 	MetaProcessor(const MetaProcessor &another);
 	MetaProcessor& operator=(const MetaProcessor &another);
@@ -273,9 +280,51 @@ private:
 };
 
 
+class MetaProcessor::EventHandler :
+		public MetaProcessor::StoreCoreHandler { 
+public:
+	explicit EventHandler(Context &cxt);
+
+	virtual void operator()(
+			TransactionContext &txn, ContainerId id, DatabaseId dbId,
+			ContainerAttribute attribute, BaseContainer &container) const;
+
+	void exec(TransactionContext &txn);
+
+};
+
+class MetaProcessor::SocketHandler : public MetaProcessor::StoreCoreHandler {
+public:
+	explicit SocketHandler(Context &cxt);
+
+	virtual void operator()(
+			TransactionContext &txn, ContainerId id, DatabaseId dbId,
+			ContainerAttribute attribute, BaseContainer &container) const;
+
+	static bool findApplicationName(
+			const NodeDescriptor &nd, util::String &name);
+
+private:
+	template<typename T>
+	void buildSocketAddress(
+			util::StackAllocator &alloc, ValueListBuilder<T> &builder,
+			T addressType, T portType,
+			const util::SocketAddress &address) const;
+};
+
 class MetaProcessor::KeyRefHandler : public MetaProcessor::RefHandler {
 public:
 	KeyRefHandler(
+			TransactionContext &txn, const MetaContainerInfo &refInfo,
+			RowHandler &rowHandler);
+
+protected:
+	virtual bool filter(TransactionContext &txn, const ValueList &valueList);
+};
+
+class MetaProcessor::ContainerRefHandler : public MetaProcessor::RefHandler {
+public:
+	ContainerRefHandler(
 			TransactionContext &txn, const MetaContainerInfo &refInfo,
 			RowHandler &rowHandler);
 
@@ -292,7 +341,9 @@ struct MetaProcessorSource {
 	DataStore *dataStore_;
 	EventContext *eventContext_;
 	TransactionManager *transactionManager_;
+	TransactionService *transactionService_;
 	PartitionTable *partitionTable_;
+
 };
 
 class MetaContainer : public BaseContainer {
@@ -374,7 +425,7 @@ public:
 		static_cast<void>(isIndexNameCaseSensitive);
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}
-	virtual void continueCreateIndex(TransactionContext& txn, 
+	virtual void continueCreateIndex(TransactionContext& txn,
 			IndexCursor& indexCursor) {
 		static_cast<void>(txn);
 		static_cast<void>(indexCursor);
@@ -610,7 +661,7 @@ protected:
 		static_cast<void>(list);
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}
-	virtual void createNullIndexData(TransactionContext &txn, 
+	virtual void createNullIndexData(TransactionContext &txn,
 			IndexData &indexData) {
 		static_cast<void>(txn);
 		static_cast<void>(indexData);

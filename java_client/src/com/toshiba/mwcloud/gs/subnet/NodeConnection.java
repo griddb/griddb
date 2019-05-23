@@ -902,6 +902,17 @@ public class NodeConnection implements Closeable {
 			if (loginInfo.clientId != null && isClientIdOnLoginEnabled()) {
 				request.put(OptionalRequestType.CLIENT_ID, loginInfo.clientId);
 			}
+
+			if (loginInfo.applicationName != null) {
+				request.put(
+						OptionalRequestType.APPLICATION_NAME,
+						loginInfo.applicationName);
+			}
+			if (loginInfo.storeMemoryAgingSwapRate >= 0) {
+				request.put(
+						OptionalRequestType.STORE_MEMORY_AGING_SWAP_RATE,
+						loginInfo.storeMemoryAgingSwapRate);
+			}
 			request.format(req);
 		}
 
@@ -1168,10 +1179,15 @@ public class NodeConnection implements Closeable {
 
 		private ClientId clientId;
 
+		private String applicationName;
+
+		private double storeMemoryAgingSwapRate;
+
 		public LoginInfo(
 				String user, String password, boolean ownerMode,
 				String database, String clusterName,
-				long transactionTimeoutMillis) {
+				long transactionTimeoutMillis,
+				String applicationName, double storeMemoryAgingSwapRate) {
 			this.user = user;
 			this.passwordDigest = Challenge.makeDigest(user, password);
 			this.database = database;
@@ -1180,6 +1196,8 @@ public class NodeConnection implements Closeable {
 			this.transactionTimeoutSecs =
 					PropertyUtils.timeoutPropertyToIntSeconds(
 							transactionTimeoutMillis);
+			this.applicationName = applicationName;
+			this.storeMemoryAgingSwapRate = storeMemoryAgingSwapRate;
 		}
 
 		public LoginInfo(LoginInfo loginInfo) {
@@ -1193,6 +1211,9 @@ public class NodeConnection implements Closeable {
 			this.ownerMode = loginInfo.ownerMode;
 			this.clusterName = loginInfo.clusterName;
 			this.transactionTimeoutSecs = loginInfo.transactionTimeoutSecs;
+			this.clientId = loginInfo.clientId;
+			this.applicationName = loginInfo.applicationName;
+			this.storeMemoryAgingSwapRate = loginInfo.storeMemoryAgingSwapRate;
 		}
 
 		public void setUser(String user) {
@@ -1233,6 +1254,14 @@ public class NodeConnection implements Closeable {
 
 		public ClientId getClientId() {
 			return clientId;
+		}
+
+		public String getApplicationName() {
+			return applicationName;
+		}
+
+		public double getStoreMemoryAgingSwapRate() {
+			return storeMemoryAgingSwapRate;
 		}
 
 	}
@@ -1489,6 +1518,12 @@ public class NodeConnection implements Closeable {
 
 	}
 
+	public enum FeatureVersion {
+		V4_0,
+		V4_1,
+		V4_2
+	}
+
 	public static class MessageDigestFactory {
 
 		public static final MessageDigestFactory SHA256 =
@@ -1562,7 +1597,9 @@ public class NodeConnection implements Closeable {
 		ACCEPTABLE_FEATURE_VERSION(11005, Integer.class),
 		CONTAINER_VISIBILITY(11006, Integer.class),
 		META_NAMING_TYPE(11007, Byte.class),
-		QUERY_CONTAINER_KEY(11008, byte[].class);
+		QUERY_CONTAINER_KEY(11008, byte[].class),
+		APPLICATION_NAME(11009, String.class),
+		STORE_MEMORY_AGING_SWAP_RATE(11010, Double.class);
 
 		private final int id;
 
@@ -1693,9 +1730,15 @@ public class NodeConnection implements Closeable {
 			extRequestMap = null;
 		}
 
-		public void putFeatureVersion(int version) {
+		public void putFeatureVersion(FeatureVersion version) {
 			put(OptionalRequestType.LEGACY_VERSION_BLOCK, (byte) 1);
-			put(OptionalRequestType.FEATURE_VERSION, version);
+			put(OptionalRequestType.FEATURE_VERSION, version.ordinal());
+		}
+
+		public void putAcceptableFeatureVersion(FeatureVersion version) {
+			put(
+					OptionalRequestType.ACCEPTABLE_FEATURE_VERSION,
+					version.ordinal());
 		}
 
 		public void put(OptionalRequestType type, Object value) {
@@ -1770,6 +1813,9 @@ public class NodeConnection implements Closeable {
 				}
 				else if (valueType == Byte.class) {
 					req.put((Byte) value);
+				}
+				else if (valueType == Double.class) {
+					req.putDouble((Double) value);
 				}
 				else if (valueType == ClientId.class) {
 					final ClientId clientId = (ClientId) value;

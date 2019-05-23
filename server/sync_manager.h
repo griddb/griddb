@@ -46,7 +46,6 @@ typedef util::VariableSizeAllocator<util::Mutex,
 
 static const int32_t DEFAULT_DETECT_SYNC_ERROR_COUNT = 3;
 
-
 #define GS_THROW_SYNC_ERROR(errorCode, context, s1, s2) \
 	GS_THROW_USER_ERROR(errorCode, s1 << ", (pId=" << context->getPartitionId() \
 	<< ", SSN=" << context->getSequentialNumber()  << ", revision=" << context->getPartitionRevision().sequentialNumber_ \
@@ -66,6 +65,12 @@ static const int32_t DEFAULT_DETECT_SYNC_ERROR_COUNT = 3;
 	GS_TRACE_WARNING(SYNC_DETAIL, GS_TRACE_SYNC_OPERATION, s1 << ", (pId=" << context->getPartitionId() \
 	<< ", SSN=" << context->getSequentialNumber()  << ", revision=" << context->getPartitionRevision().sequentialNumber_ \
 	<< ", lsn=" << pt_->getLSN(context->getPartitionId()) << ")" << s2);
+
+#define GS_TRACE_SYNC_INFO(context, s1, s2) \
+	GS_TRACE_INFO(SYNC_DETAIL, GS_TRACE_SYNC_OPERATION, s1 << ", (pId=" << context->getPartitionId() \
+	<< ", SSN=" << context->getSequentialNumber()  << ", revision=" << context->getPartitionRevision().sequentialNumber_ \
+	<< ", lsn=" << pt_->getLSN(context->getPartitionId()) << ")" << s2);
+
 
 #define GS_TRACE_SYNC_NORAML(s1) \
 	GS_TRACE_WARNING(SYNC_DETAIL, GS_TRACE_SYNC_OPERATION, s1);
@@ -568,6 +573,8 @@ private:
 	bool isSyncStartCompleted_;
 	SyncContext *nextEmptyChain_;
 	PartitionRevision ptRev_;
+	bool isDump_;
+	bool isSendReady_;
 
 	util::NormalXArray<SendBackup> sendBackups_;
 
@@ -597,9 +604,6 @@ private:
 	int64_t syncSequentialNumber_;
 	util::Stopwatch watch_;
 	PartitionTable *pt_;
-
-	bool isDump_;
-	bool isSendReady_;
 };
 
 struct SyncStatus {
@@ -772,7 +776,7 @@ public:
 		return retVal;
 	}
 
-	void checkCurrentContext(EventContext &ec);
+	void checkCurrentContext(EventContext &ec, PartitionRevision &revision);
 	void resetCurrentSyncId(SyncContext *context);
 
 	void setCurrentSyncId(PartitionId pId, SyncContext *context) {
@@ -801,7 +805,6 @@ public:
 
 	void removeSyncContext(EventContext &ec, PartitionId pId, SyncContext *&context, bool isFailed);
 
-	void removePartition(PartitionId pId);
 
 	void checkExecutable(
 		EventType operation, PartitionId pId, PartitionRole &role);
@@ -841,6 +844,8 @@ public:
 	uint8_t *getChunkBuffer(PartitionGroupId pgId) {
 		return &chunkBufferList_[chunkSize_ * pgId];
 	}
+
+	void checkActiveStatus();
 
 private:
 	static const uint32_t DEFAULT_CONTEXT_SLOT_NUM = 1;
@@ -937,10 +942,10 @@ private:
 	public:
 		ExtraConfig(const ConfigTable &config)
 			: 
-		longtermNearestLsnGap_(config.get<int32_t>(
-				CONFIG_TABLE_SYNC_APPROXIMATE_GAP_LSN)),
-			lockConflictPendingInterval_(changeTimeSecToMill(
+		lockConflictPendingInterval_(changeTimeSecToMill(
 				config.get<int32_t>(CONFIG_TABLE_SYNC_LOCKCONFLICT_INTERVAL))),
+			longtermNearestLsnGap_(config.get<int32_t>(
+				CONFIG_TABLE_SYNC_APPROXIMATE_GAP_LSN)),
 			longtermNearestInterval_(changeTimeSecToMill(
 				config.get<int32_t>(CONFIG_TABLE_SYNC_APPROXIMATE_WAIT_INTERVAL))),
 			longtermLimitQueueSize_(
@@ -1023,8 +1028,8 @@ private:
 		}
 
 	private:
-		int32_t longtermNearestLsnGap_;
 		int32_t lockConflictPendingInterval_;
+		int32_t longtermNearestLsnGap_;
 		int32_t longtermNearestInterval_;
 		int32_t longtermLimitQueueSize_;
 		int32_t longtermHighLoadInterval_;
@@ -1064,27 +1069,28 @@ private:
 	SyncVariableSizeAllocator varSizeAlloc_;
 
 	util::RWLock allocLock;
+
 	SyncContextTable **syncContextTables_;
 	PartitionTable *pt_;
-	Size_t chunkSize_;
-	int32_t syncMode_;
-	Config config_;
 
 	SyncConfig syncConfig_;
 	ExtraConfig extraConfig_;
 
 	uint8_t *chunkBufferList_;
+	Size_t chunkSize_;
+	int32_t syncMode_;
+	Config config_;
+
 	int64_t syncSequentialNumber_;
-	CheckpointService *cpSvc_;
 	LogManager *logMgr_;
+	CheckpointService *cpSvc_;
 	DataStore *ds_;
 	SyncService *syncSvc_;
 	TransactionService *txnSvc_;
 	TransactionManager *txnMgr_;
-	ClusterManager *clsMgr_;
 	ClusterService *clsSvc_;
+	ClusterManager *clsMgr_;
 	RecoveryManager *recoveryMgr_;
-
 	ChunkManager *chunkMgr_;
 	SyncStatus currentSyncStatus_;
 };

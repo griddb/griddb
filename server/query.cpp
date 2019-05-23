@@ -245,6 +245,7 @@ void Query::dumpConditionExpr(
 		try {
 			os << "EVAL_RESULT="
 			   << pWhereExpr_->eval(txn, objectManager_, x, functionMap_, TRI_TRUE)
+
 			   << std::endl;
 		}
 		catch (util::Exception &e) {
@@ -660,7 +661,7 @@ void Query::finishQuery(
 }
 
 void Query::setQueryOption(TransactionContext &txn, ResultSet &resultSet) {
-	ResultSet::QueryOption &queryOption = resultSet.getQueryOption();
+	ResultSetOption &queryOption = resultSet.getQueryOption();
 
 	if (queryOption.isPartial() || queryOption.isDistribute()) {
 		size_t numSelection = getSelectionExprLength();
@@ -700,7 +701,7 @@ void Query::setQueryOption(TransactionContext &txn, ResultSet &resultSet) {
 
 void Query::doQueryPartial(
 	TransactionContext &txn, BaseContainer &container, ResultSet &resultSet) {
-	ResultSet::QueryOption &queryOption = resultSet.getQueryOption();
+	ResultSetOption &queryOption = resultSet.getQueryOption();
 		
 	if (doExplain()) {
 		addExplain(0, "SELECTION", "CONDITION", "NULL", "");
@@ -711,6 +712,8 @@ void Query::doQueryPartial(
 		queryOption.setMaxRowId(MAX_ROWID);
 		return;
 	}
+
+	container.getObjectManager()->setSwapOutCounter(txn.getPartitionId(), queryOption.getSwapOutNum());
 
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
 
@@ -757,7 +760,7 @@ void Query::doQueryPartial(
 
 	ResultSize scanLimit;
 	size_t repeatNum = 10;
-	scanLimit = ResultSet::QueryOption::PARTIAL_SCAN_LIMIT / repeatNum / container.getNormalRowArrayNum() + 1;
+	scanLimit = ResultSetOption::PARTIAL_SCAN_LIMIT / repeatNum / container.getNormalRowArrayNum() + 1;
 
 	ResultSize resultNum = 0;
 	ResultSize currentOffset = nOffset_;
@@ -851,6 +854,7 @@ void Query::doQueryPartial(
 			queryOption.setMaxRowId(maxRowId);
 		}
 		queryOption.setFilteredNum(queryOption.getFilteredNum() + resultNum);
+		queryOption.setSwapOutNum(container.getObjectManager()->getSwapOutCounter(txn.getPartitionId()));
 	}
 	resultSet.setResultNum(resultNum);
 }

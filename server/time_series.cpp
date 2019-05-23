@@ -1059,7 +1059,6 @@ void TimeSeries::commit(TransactionContext &txn) {
 	}
 }
 
-
 /*!
 	@brief Check if Container has data of uncommited transaction
 */
@@ -1770,7 +1769,6 @@ void TimeSeries::aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 		}
 	} break;
 	}
-
 }
 
 /*!
@@ -2457,7 +2455,7 @@ void TimeSeries::sampleWithoutInterp(TransactionContext &txn,
 							 columnId++) {
 							ColumnInfo &columnInfo = getColumnInfo(columnId);
 							value.init(columnInfo.getColumnType());
-							value.get(txn, *getObjectManager(), 
+							value.get(txn, *getObjectManager(),
 								messageRowStore, columnId);
 						}
 						messageRowStore->next();
@@ -2536,7 +2534,7 @@ LABEL_FINISH:
 			for (uint32_t columnId = 1; columnId < getColumnNum(); columnId++) {
 				ColumnInfo &columnInfo = getColumnInfo(columnId);
 				value.init(columnInfo.getColumnType());
-				value.get(txn, *getObjectManager(), 
+				value.get(txn, *getObjectManager(),
 					messageRowStore, columnId);
 			}
 			messageRowStore->next();
@@ -3493,9 +3491,6 @@ void TimeSeries::searchRowArrayList(TransactionContext &txn,
 				txn, MAX_RESULT_SIZE, mvccKeyValueList);
 			mvccOIdList.reserve(mvccKeyValueList.size());  
 			{
-				util::StackAllocator::Scope scope(
-					txn.getDefaultAllocator());  
-
 				ColumnType targetType = COLUMN_TYPE_ROWID;
 				util::XArray<SortKey> mvccSortKeyList(
 					txn.getDefaultAllocator());
@@ -3613,7 +3608,6 @@ void TimeSeries::removeValueMap(TransactionContext& txn, ValueMap &valueMap,
 void TimeSeries::updateIndexData(TransactionContext &, const IndexData &) {
 	GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_UNEXPECTED_ERROR, "");
 }
-
 
 
 /*!
@@ -3862,4 +3856,5 @@ std::string TimeSeries::dump(TransactionContext &txn) {
 	}
 	return strstrm.str();
 }
+
 

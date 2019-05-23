@@ -85,7 +85,6 @@ public:
 
 	util::SocketAddress makeSocketAddress(const char8_t *host, int64_t port);
 
-
 private:
 	struct Entry;
 	struct EntryLess;
@@ -95,10 +94,13 @@ private:
 			util::StdAllocator<char8_t, void> > String;
 
 	typedef std::vector<String, util::StdAllocator<String, void> > TypeList;
-	typedef std::map< String, uint32_t, std::less<String>, util::StdAllocator<
-			std::pair<const String, uint32_t>, void> > TypeMap;
+	typedef std::map<
+			String, uint32_t, std::map<String, uint32_t>::key_compare,
+			util::StdAllocator<
+					std::pair<const String, uint32_t>, void> > TypeMap;
 
-	typedef std::set< util::SocketAddress, std::less<util::SocketAddress>,
+	typedef std::set<
+			util::SocketAddress, std::set<util::SocketAddress>::key_compare,
 			util::StdAllocator<util::SocketAddress, void> > AddressSet;
 	typedef std::vector<Entry, util::StdAllocator<Entry, void> > EntryList;
 

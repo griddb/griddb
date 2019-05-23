@@ -89,11 +89,11 @@ static const std::string makeString(
 
 static const int32_t EE_PRIORITY_HIGH = static_cast<int32_t>(-2147483647);
 
-static inline std::string getTimeStr(int64_t timeval) {
+static inline std::string getTimeStr(int64_t timeval, bool trim = false) {
 	util::NormalOStringStream oss;
 	oss.clear();
 	util::DateTime dtime(timeval);
-	dtime.format(oss, true);
+	dtime.format(oss, trim);
 	return oss.str();
 }
 
@@ -134,12 +134,12 @@ static inline int32_t changeTimeSecToMill(int32_t sec) {
 
 #define TRACE_CLUSTER_EXCEPTION(e, eventType, level, str) \
 	UTIL_TRACE_EXCEPTION_##level(CLUSTER_SERVICE, e,      \
-		str << ", eventType=" << getEventTypeName(eventType));
+		str << ", eventType=" << getEventTypeName(eventType) << ", reason=" << GS_EXCEPTION_MESSAGE(e));
 
 #define TRACE_SYNC_EXCEPTION(e, eventType, pId, level, str)                 \
 	UTIL_TRACE_EXCEPTION_##level(SYNC_SERVICE, e,                           \
 		str << ", eventType=" << getEventTypeName(eventType) \
-				<< ", pId=" << pId);
+				<< ", pId=" << pId << ", reason=" << ", reason=" << GS_EXCEPTION_MESSAGE(e))
 
 #define TRACE_CLUSTER_EE_SEND(eventType, nd, level, str)             \
 	GS_TRACE_##level(CLUSTER_SERVICE, GS_TRACE_CS_EVENT_SEND,        \

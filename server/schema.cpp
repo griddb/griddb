@@ -1194,16 +1194,19 @@ BaseIndex *IndexSchema::getIndex(TransactionContext &txn, const IndexData &index
 	return map;
 }
 
+
 void IndexSchema::expand(TransactionContext &txn) {
 	setDirty();
 	uint16_t orgIndexNum = getIndexNum();
 	uint16_t newReserveIndexNum = getReserveNum() * 2;
 	OId duplicateOId;
+
 	uint8_t *toIndexSchema = getObjectManager()->allocate<uint8_t>(
 		txn.getPartitionId(), getAllocateSize(newReserveIndexNum, getNullbitsSize()),
 		allocateStrategy_, duplicateOId, OBJECT_TYPE_COLUMNINFO);
 	memset(toIndexSchema, 0, getAllocateSize(newReserveIndexNum, getNullbitsSize()));
 	memcpy(toIndexSchema, getBaseAddr(), getAllocateSize(orgIndexNum, getNullbitsSize()));
+
 	BaseObject::finalize();
 
 	setBaseOId(duplicateOId);
@@ -1211,6 +1214,7 @@ void IndexSchema::expand(TransactionContext &txn) {
 	setNum(orgIndexNum);
 	setReserveNum(newReserveIndexNum);
 }
+
 bool IndexSchema::expandNullStats(TransactionContext &txn, uint32_t oldColumnNum, uint32_t newColumnNum) {
 	uint16_t oldNullBitsSize = RowNullBits::calcBitsSize(oldColumnNum);
 	uint16_t newNullBitsSize = RowNullBits::calcBitsSize(newColumnNum);
@@ -2103,9 +2107,11 @@ BibInfo::Container::TimeSeriesProperties::TimeSeriesProperties() : isExist_(fals
 	compressionMethod_("NO"), compressionWindowSize_(-1) {}
 BibInfo::Container::CompressionInfo::CompressionInfo() : rate_(0),span_(0),width_(0) {}
 
-bool BibInfo::setBoolKey(const picojson::value &json, const char *key, bool &output, bool isOption) {
+template<typename T>
+bool BibInfo::setKey(const picojson::value &json, const char *key, T &output, bool isOption) {
 //	const picojson::value &existKey = json.get(key);
-	const bool *jsonValue = JsonUtils::find< bool >(json, key);
+	const T *jsonValue = 
+		JsonUtils::find< T >(json, key);
 	if (jsonValue == NULL && !json.get(key).is<picojson::null>()) {
 		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
 			"Json key type unmatched , key = " << key);
@@ -2117,50 +2123,36 @@ bool BibInfo::setBoolKey(const picojson::value &json, const char *key, bool &out
 	bool exist = false;
 	if (jsonValue != NULL) {
 		output = *jsonValue;
-		exist = true;
-	}
-	return exist;
-}
-bool BibInfo::setDoubleKey(const picojson::value &json, const char *key, double &output, bool isOption) {
-//	const picojson::value &existKey = json.get(key);
-	const double *jsonValue = 
-		JsonUtils::find< double >(json, key);
-	if (jsonValue == NULL && !json.get(key).is<picojson::null>()) {
-		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
-			"Json key type unmatched , key = " << key);
-	}
-	if (jsonValue == NULL && !isOption) {
-		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
-			"Json key not found, key = " << key);
-	}
-	bool exist = false;
-	if (jsonValue != NULL) {
-		output = *jsonValue;
-		exist = true;
-	}
-	return exist;
-}
-bool BibInfo::setLongKey(const picojson::value &json, const char *key, int64_t &output, bool isOption) {
-//	const picojson::value &existKey = json.get(key);
-	const double *jsonValue = 
-		JsonUtils::find< double >(json, key);
-	if (jsonValue == NULL && !json.get(key).is<picojson::null>()) {
-		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
-			"Json key type unmatched , key = " << key);
-	}
-	if (jsonValue == NULL && !isOption) {
-		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
-			"Json key not found, key = " << key);
-	}
-	bool exist = false;
-	if (jsonValue != NULL) {
-		output = JsonUtils::asInt<int64_t>(*jsonValue);
 		exist = true;
 	}
 	return exist;
 }
 
-bool BibInfo::setStringKey(const picojson::value &json, const char *key, std::string &output, bool isOption) {
+template<typename T>
+bool BibInfo::setIntegerKey(const picojson::value &json, const char *key, T &output, bool isOption) {
+	UTIL_STATIC_ASSERT(std::numeric_limits<T>::is_integer);
+//	const picojson::value &existKey = json.get(key);
+	const double *jsonValue = 
+		JsonUtils::find< double >(json, key);
+	if (jsonValue == NULL && !json.get(key).is<picojson::null>()) {
+		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+			"Json key type unmatched , key = " << key);
+	}
+	if (jsonValue == NULL && !isOption) {
+		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+			"Json key not found, key = " << key);
+	}
+	bool exist = false;
+	if (jsonValue != NULL) {
+		output = JsonUtils::asInt<T>(*jsonValue);
+		exist = true;
+	}
+	return exist;
+}
+
+template<typename T>
+bool BibInfo::setStringIntegerKey(const picojson::value &json, const char *key, T &output, bool isOption) {
+	UTIL_STATIC_ASSERT(std::numeric_limits<T>::is_integer);
 //	const picojson::value &existKey = json.get(key);
 	const std::string *jsonValue = 
 		JsonUtils::find< std::string >(json, key);
@@ -2174,17 +2166,17 @@ bool BibInfo::setStringKey(const picojson::value &json, const char *key, std::st
 	}
 	bool exist = false;
 	if (jsonValue != NULL) {
-		output = *jsonValue;
+		util::StrictLexicalConverter<T>()(jsonValue->c_str(), output);
 		exist = true;
 	}
 	return exist;
 }
 
 void BibInfo::Option::load(const picojson::value &json) {
-	BibInfo::setStringKey(json, "containerFileType", containerFileType_, false);
-	BibInfo::setStringKey(json, "storeMemoryLimit", storeMemoryLimit_, false);
-	BibInfo::setStringKey(json, "logDirectory", logDirectory_, false);
-	BibInfo::setLongKey(json, "flushThreshold", flushThreshold_, true);
+	BibInfo::setKey<std::string>(json, "containerFileType", containerFileType_, false);
+	BibInfo::setKey<std::string>(json, "storeMemoryLimit", storeMemoryLimit_, false);
+	BibInfo::setKey<std::string>(json, "logDirectory", logDirectory_, false);
+	BibInfo::setIntegerKey<int64_t>(json, "flushThreshold", flushThreshold_, true);
 	if (flushThreshold_ < 0) {
 		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
 			"Value of flushThreshold is invalid, flushThreshold = " << flushThreshold_);
@@ -2193,7 +2185,7 @@ void BibInfo::Option::load(const picojson::value &json) {
 		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
 			"Value of flushThreshold is over, limit =  " << LIMIT_FLUSH_THRESHOLD);
 	}
-	BibInfo::setLongKey(json, "blockSize", blockSize_, true);
+	BibInfo::setIntegerKey<int64_t>(json, "blockSize", blockSize_, true);
 	if (blockSize_ < 0) {
 		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
 			"Value of blockSize is invalid, blockSize = " << blockSize_);
@@ -2202,7 +2194,7 @@ void BibInfo::Option::load(const picojson::value &json) {
 		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
 			"Value of blockSize is over, limit =  " << LIMIT_BLOCK_SIZE);
 	}
-	BibInfo::setLongKey(json, "preReadNum", preReadNum_, true);
+	BibInfo::setIntegerKey<int64_t>(json, "preReadNum", preReadNum_, true);
 	if (preReadNum_ < 0) {
 		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
 			"Value of preReadNum is invalid, preReadNum = " << preReadNum_);
@@ -2210,27 +2202,27 @@ void BibInfo::Option::load(const picojson::value &json) {
 }
 
 void BibInfo::Container::load(const picojson::value &json) {
-	BibInfo::setStringKey(json, "containerFileBase", containerFileBase_, false);
+	BibInfo::setKey<std::string>(json, "containerFileBase", containerFileBase_, false);
 	const picojson::value *attrJson = JsonUtils::find<picojson::value>(json, "containerAttribute");
 	if (attrJson == NULL) {
 		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
 			"Json key not found or type unmatched , key = " << "containerAttribute");
 	}
 
-	BibInfo::setStringKey(*attrJson, "database", database_, true);
-	BibInfo::setStringKey(*attrJson, "container", container_, false);
-	BibInfo::setStringKey(*attrJson, "dataAffinity", dataAffinity_, true);
-	BibInfo::setStringKey(*attrJson, "containerType", containerType_, false);
+	BibInfo::setKey<std::string>(*attrJson, "database", database_, true);
+	BibInfo::setKey<std::string>(*attrJson, "container", container_, false);
+	BibInfo::setKey<std::string>(*attrJson, "dataAffinity", dataAffinity_, true);
+	BibInfo::setKey<std::string>(*attrJson, "containerType", containerType_, false);
 
-	BibInfo::setLongKey(*attrJson, "databaseId", databaseId_, false);
-	BibInfo::setLongKey(*attrJson, "containerId", containerId_, false);
-	BibInfo::setLongKey(*attrJson, "rowIndexOId", rowIndexOId_, false);
-	BibInfo::setLongKey(*attrJson, "mvccIndexOId", mvccIndexOId_, false);
-	BibInfo::setLongKey(*attrJson, "initSchemaStatus", initSchemaStatus_, true);
-	BibInfo::setLongKey(*attrJson, "schemaVersion", schemaVersion_, false);
-	BibInfo::setLongKey(*attrJson, "partitionNo", partitionNo_, false);
+	BibInfo::setStringIntegerKey<DatabaseId>(*attrJson, "databaseId", databaseId_, false);
+	BibInfo::setStringIntegerKey<ContainerId>(*attrJson, "containerId", containerId_, false);
+	BibInfo::setStringIntegerKey<OId>(*attrJson, "rowIndexOId", rowIndexOId_, false);
+	BibInfo::setStringIntegerKey<OId>(*attrJson, "mvccIndexOId", mvccIndexOId_, false);
+	BibInfo::setStringIntegerKey<int64_t>(*attrJson, "initSchemaStatus", initSchemaStatus_, true);
+	BibInfo::setIntegerKey<SchemaVersionId>(*attrJson, "schemaVersion", schemaVersion_, false);
+	BibInfo::setIntegerKey<PartitionId>(*attrJson, "partitionNo", partitionNo_, false);
 
-	BibInfo::setBoolKey(*attrJson, "rowKeyAssigned", rowKeyAssigned_, true);
+	BibInfo::setKey<bool>(*attrJson, "rowKeyAssigned", rowKeyAssigned_, true);
 
 	const picojson::value *timeSeriesProperties = JsonUtils::find<picojson::value>(*attrJson, "timeSeriesProperties");
 	if (timeSeriesProperties != NULL) {
@@ -2278,27 +2270,27 @@ void BibInfo::Container::load(const picojson::value &json) {
 }
 
 void BibInfo::Container::Column::load(const picojson::value &json) {
-	BibInfo::setStringKey(json, "columnName", columnName_, false);
-	BibInfo::setStringKey(json, "type", type_, false);
-	BibInfo::setBoolKey(json, "notNull", notNull_, true);
+	BibInfo::setKey<std::string>(json, "columnName", columnName_, false);
+	BibInfo::setKey<std::string>(json, "type", type_, false);
+	BibInfo::setKey<bool>(json, "notNull", notNull_, true);
 }
 
 void BibInfo::Container::TimeSeriesProperties::load(const picojson::value &json) {
 	isExist_ = true;
-	BibInfo::setStringKey(json, "rowExpirationTimeUnit", rowExpirationTimeUnit_, true);
-	BibInfo::setStringKey(json, "compressionMethod", compressionMethod_, true);
-	BibInfo::setStringKey(json, "compressionWindowSizeUnit", compressionWindowSizeUnit_, true);
-	BibInfo::setLongKey(json, "rowExpirationElapsedTime", rowExpirationElapsedTime_, true);
-	BibInfo::setLongKey(json, "expirationDivisionCount", expirationDivisionCount_, true);
-	BibInfo::setLongKey(json, "compressionWindowSize", compressionWindowSize_, true);
+	BibInfo::setKey<std::string>(json, "rowExpirationTimeUnit", rowExpirationTimeUnit_, true);
+	BibInfo::setKey<std::string>(json, "compressionMethod", compressionMethod_, true);
+	BibInfo::setKey<std::string>(json, "compressionWindowSizeUnit", compressionWindowSizeUnit_, true);
+	BibInfo::setIntegerKey<int32_t>(json, "rowExpirationElapsedTime", rowExpirationElapsedTime_, true);
+	BibInfo::setIntegerKey<int32_t>(json, "expirationDivisionCount", expirationDivisionCount_, true);
+	BibInfo::setIntegerKey<int32_t>(json, "compressionWindowSize", compressionWindowSize_, true);
 }
 
 void BibInfo::Container::CompressionInfo::load(const picojson::value &json) {
-	BibInfo::setStringKey(json, "columnName", columnName_, false);
-	BibInfo::setStringKey(json, "compressionType", compressionType_, false);
-	bool existRate = BibInfo::setDoubleKey(json, "rate", rate_, true);
-	bool existSpan = BibInfo::setDoubleKey(json, "span", span_, true);
-	bool existWidth = BibInfo::setDoubleKey(json, "width", width_, true);
+	BibInfo::setKey<std::string>(json, "columnName", columnName_, false);
+	BibInfo::setKey<std::string>(json, "compressionType", compressionType_, false);
+	bool existRate = BibInfo::setKey<double>(json, "rate", rate_, true);
+	bool existSpan = BibInfo::setKey<double>(json, "span", span_, true);
+	bool existWidth = BibInfo::setKey<double>(json, "width", width_, true);
 	if (compressionType_.compare("ABSOLUTE") == 0 && !existWidth) {
 		GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
 			"Json key 'width' must be defined, if Json key 'compressionType_' is 'ABSOLUTE'");

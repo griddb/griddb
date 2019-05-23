@@ -25,7 +25,6 @@
 #include "util/container.h"
 #include "util/trace.h"
 
-
 #define UNUSED_VARIABLE(b) (void)(b)
 
 /*!
@@ -35,7 +34,8 @@ class GSExceptionRegenerator {
 public:
 	typedef util::Exception::NamedErrorCode NamedErrorCode;
 
-	GSExceptionRegenerator(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw();
+	explicit GSExceptionRegenerator(
+			UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw();
 
 	void generate(util::Exception &dest, const char8_t *typeName) const throw();
 	template <typename T>
@@ -85,6 +85,7 @@ public:
 	void setSecret(bool secret);
 	void setTraceLocationVisible(bool visible);
 
+
 	virtual void format(std::ostream &stream, util::TraceRecord &record);
 
 protected:
@@ -106,8 +107,8 @@ private:
 */
 class SystemException : public util::Exception {
 public:
-	SystemException(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw()
-		: Exception(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_SET) {
+	explicit SystemException(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw() :
+			Exception(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_SET) {
 	}
 	virtual ~SystemException() throw() {}
 
@@ -131,8 +132,8 @@ inline T SystemException::raiseCustomOrSystem(
 */
 class UserException : public util::Exception {
 public:
-	UserException(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw()
-		: Exception(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_SET) {}
+	explicit UserException(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw() :
+			Exception(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_SET) {}
 	virtual ~UserException() throw() {}
 };
 
@@ -678,6 +679,12 @@ enum ErrorCode {
 	GS_ERROR_SC_ARCHIVE_LOG_FAILED,
 	GS_ERROR_SC_TOO_LARGE_REQUEST,
 
+	GS_ERROR_SC_GOAL_DUPLICATE_PARTITION,
+	GS_ERROR_SC_GOAL_NOT_OWNER,
+	GS_ERROR_SC_GOAL_RESOLVE_NODE_FAILED,
+	GS_ERROR_SC_GOAL_NOT_CLUSTERED_NODE,
+	GS_ERROR_SC_GOAL_INVALID_FORMAT,
+
 	GS_ERROR_DS_UNDEFINED = 60000,
 	GS_ERROR_DS_DS_STATEMENT_FAILED,
 	GS_ERROR_DS_DS_VERSION_INVALID,
@@ -998,7 +1005,7 @@ enum ErrorCode {
 	GS_ERROR_PT_CHECK_PARTITION_STATUS_FAILED,
 	GS_ERROR_PT_CHECK_PARTITION_RELATION_FAILED,
 	GS_ERROR_PT_FILTER_PARTITION_FAILED,
-	GS_ERROR_PT_INTERAL,
+	GS_ERROR_PT_INTERNAL,
 
 	GS_ERROR_CT_PARAMETER_FILE_LOAD_FAILED = 100000,
 	GS_ERROR_CT_PARAMETER_FILE_TOO_LARGE,
@@ -1321,7 +1328,7 @@ enum TraceCode {
 	GS_TRACE_SYNC_OPERATION,
 	GS_TRACE_SYNC_NORMAL,
 	GS_TRACE_SYNC_EVENT_SEND,
-	GS_TRACE_SYNC_TRACE_STATS, 
+	GS_TRACE_SYNC_TRACE_STATS,
 	GS_TRACE_SYNC_SIMULATE_FAILURE,
 
 	GS_TRACE_CP_CONTROLLER_ILLEAGAL_STATE = 30900,

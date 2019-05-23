@@ -15,6 +15,7 @@
 */
 package com.toshiba.mwcloud.gs.subnet;
 
+import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -28,7 +29,7 @@ import com.toshiba.mwcloud.gs.Query;
 import com.toshiba.mwcloud.gs.RowSet;
 import com.toshiba.mwcloud.gs.common.BasicBuffer;
 import com.toshiba.mwcloud.gs.common.ContainerKeyConverter.ContainerKey;
-import com.toshiba.mwcloud.gs.common.ContainerProperties.MetaContainerType;
+import com.toshiba.mwcloud.gs.common.ContainerProperties.MetaDistributionType;
 import com.toshiba.mwcloud.gs.common.ContainerProperties.MetaNamingType;
 import com.toshiba.mwcloud.gs.common.GSErrorCode;
 import com.toshiba.mwcloud.gs.common.GeometryUtils;
@@ -151,20 +152,23 @@ extends SubnetContainer<K, R> implements Collection<K, R> {
 		private static final Set<Integer> QUERY_RESULT_OPTIONS =
 				Collections.singleton(ExtResultOptionType.DIST_TARGET);
 
+		private final GridStoreChannel channel;
+
+		private final Context context;
+
+		private final MetaDistributionType metaDistType;
+
 		private final long metaContainerId;
 
 		private final MetaNamingType metaNamingType;
 
 		private final ContainerKey queryContainerKey;
 
-		private final ArrayList<SubnetCollection<K, R>> subList =
-				new ArrayList<SubnetCollection<K,R>>();
-
 		public MetaCollection(
 				SubnetGridStore store, GridStoreChannel channel,
 				Context context, Class<R> rowType, RowMapper mapper,
 				int schemaVerId, int partitionId,
-				MetaContainerType metaContainerType,
+				MetaDistributionType metaDistType,
 				long metaContainerId, MetaNamingType metaNamingType,
 				ContainerKey normalizedContainerKey,
 				ContainerKey remoteContainerKey)
@@ -172,31 +176,12 @@ extends SubnetContainer<K, R> implements Collection<K, R> {
 			super(store, channel, context, rowType, mapper, schemaVerId,
 					partitionId, -1, normalizedContainerKey,
 					remoteContainerKey);
+			this.channel = channel;
+			this.context = context;
+			this.metaDistType = metaDistType;
 			this.metaContainerId = metaContainerId;
 			this.metaNamingType = metaNamingType;
 			this.queryContainerKey = remoteContainerKey;
-			boolean succeeded = false;
-			try {
-				if (metaContainerType != MetaContainerType.FULL) {
-					throw new GSException(
-							GSErrorCode.UNSUPPORTED_OPERATION, "");
-				}
-
-				final int count = channel.getPartitionCount(context);
-				subList.ensureCapacity(count);
-				for (int i = 0; i < count; i++) {
-					subList.add(new SubnetCollection<K, R>(
-							store, channel, context, rowType, mapper,
-							schemaVerId, i, -1,
-							normalizedContainerKey, remoteContainerKey));
-				}
-				succeeded = true;
-			}
-			finally {
-				if (!succeeded) {
-					close();
-				}
-			}
 		}
 
 		@Override
@@ -214,45 +199,83 @@ extends SubnetContainer<K, R> implements Collection<K, R> {
 		@Override
 		public <S> SubnetQuery<S> query(final String tql, Class<S> rowType)
 				throws GSException {
-			List<SubnetQuery<S>> subQueryList =
-					new ArrayList<SubnetQuery<S>>(subList.size());
-			try {
-				for (SubnetCollection<?, R> sub : subList) {
-					final SubnetQuery<S> subQuery = sub.query(tql, rowType);
-					subQuery.setAcceptableResultKeys(QUERY_RESULT_OPTIONS);
-					subQueryList.add(subQuery);
-				}
-				for (SubnetQuery<S> subQuery : subQueryList) {
-					subQuery.setMetaContainerId(
-							metaContainerId, metaNamingType);
-					subQuery.setQeuryContainerKey(true, queryContainerKey);
-				}
-
-				final MetaQuery<S> query = new MetaQuery<S>(
-						this, rowType, getRowMapper(), subQueryList);
-				subQueryList = null;
-				return query;
-			}
-			finally {
-				if (subQueryList != null) {
-					MetaQuery.closeSub(subQueryList, true);
-				}
-			}
+			checkOpened();
+			return new MetaQuery<S>(this, rowType, getRowMapper(), tql);
 		}
 
 		@Override
 		public void close() throws GSException {
+			super.close();
+		}
+
+		private List<SubnetCollection<?, ?>> createSubList(
+				List<InetSocketAddress> addressList) throws GSException {
+			addressList.clear();
+			final List<SubnetCollection<?, ?>> subList =
+					new ArrayList<SubnetCollection<?, ?>>();
+
+			switch (metaDistType) {
+			case FULL: {
+				final int count = channel.getPartitionCount(context);
+				for (int i = 0; i < count; i++) {
+					subList.add(createSub(i));
+					addressList.add(null);
+				}
+				break;
+			}
+			case NODE:
+				for (InetSocketAddress address :
+						channel.getActiveNodeAddressSet(context)) {
+					subList.add(createSub(0));
+					addressList.add(address);
+				}
+				break;
+			default:
+				throw new GSException(
+						GSErrorCode.UNSUPPORTED_OPERATION, "");
+			}
+
+			return subList;
+		}
+
+		private SubnetCollection<K, R> createSub(int partitionId)
+				throws GSException {
+			return new SubnetCollection<K, R>(
+					getStore(), channel, context, getRowType(), getRowMapper(),
+					getSchemaVersionId(), partitionId, -1,
+					getNormalizedContainerKey(), queryContainerKey);
+		}
+
+		<S> RowSet<S> fetchInternal(
+				SubnetQuery<S> query, InetSocketAddress address,
+				boolean forUpdate) throws GSException {
+			if (address == null) {
+				query.setAcceptableResultKeys(QUERY_RESULT_OPTIONS);
+				query.setMetaContainerId(
+						metaContainerId, metaNamingType);
+				query.setQeuryContainerKey(
+						true, queryContainerKey);
+
+				return query.fetch(forUpdate);
+			}
+
+			final Context.FixedAddressScope scope =
+					new Context.FixedAddressScope(context, address);
 			try {
-				closeSub(subList, false);
+				return fetchInternal(query, null, forUpdate);
 			}
 			finally {
-				super.close();
+				scope.close();
 			}
 		}
 
-		static <K, R> void closeSub(
-				List<SubnetCollection<K, R>> subList, boolean silent)
+		static void closeSub(
+				List<SubnetCollection<?, ?>> subList, boolean silent)
 				throws GSException {
+			if (subList == null) {
+				return;
+			}
+
 			try {
 				for (SubnetContainer<?, ?> sub : subList) {
 					if (silent) {
@@ -278,21 +301,27 @@ extends SubnetContainer<K, R> implements Collection<K, R> {
 
 	public static class MetaQuery<R> extends SubnetQuery<R> {
 
-		private final List<SubnetQuery<R>> subList;
+		private final MetaCollection<?, ?> container;
+
+		private final Class<R> resultType;
+
+		private final String tql;
 
 		private MetaQuery(
-				SubnetContainer<?, ?> container,
-				Class<R> resultType, RowMapper mapper,
-				List<SubnetQuery<R>> subList) {
-			super(container, resultType, mapper, createFormatter());
-			this.subList = subList;
+				MetaCollection<?, ?> container,
+				Class<R> resultType, RowMapper mapper, String tql) {
+			super(container, resultType, mapper, createFormatter(tql));
+			this.container = container;
+			this.resultType = resultType;
+			this.tql = tql;
 		}
 
-		private static <R> SubnetContainer.QueryFormatter createFormatter() {
+		private static <R> SubnetContainer.QueryFormatter createFormatter(
+				final String tql) {
 			return new SubnetContainer.QueryFormatter(null) {
 				@Override
-				String getQueryString() {
-					throw new IllegalStateException();
+				public String getQueryString() {
+					return tql;
 				}
 
 				@Override
@@ -305,14 +334,84 @@ extends SubnetContainer<K, R> implements Collection<K, R> {
 
 		@Override
 		public RowSet<R> fetch(boolean forUpdate) throws GSException {
+			checkOpened();
+
+			List<SubnetCollection<?, ?>> subContainerList = null;
+			List<SubnetQuery<R>> subList = null;
+			List<RowSet<R>> subRowSetList = null;
+
+			final List<InetSocketAddress> addressList =
+					new ArrayList<InetSocketAddress>();
+
+			boolean succeeded = false;
+			try {
+				subContainerList = container.createSubList(addressList);
+				subList = createSubList(subContainerList);
+				subRowSetList =
+						fetchAllInternal(subList, addressList, forUpdate);
+
+				final MetaRowSet<R> rowSet = new MetaRowSet<R>(
+						subContainerList, subList, subRowSetList);
+
+				succeeded = true;
+				return rowSet;
+			}
+			finally {
+				if (!succeeded) {
+					MetaRowSet.closeAllSub(
+							subContainerList, subList, subRowSetList, true);
+				}
+			}
+		}
+
+		@Override
+		public void close() throws GSException {
+			super.close();
+		}
+
+		private void checkOpened() throws GSException {
+			super.getFetchLimit();
+		}
+
+		private List<SubnetQuery<R>> createSubList(
+				List<SubnetCollection<?, ?>> subContainerList)
+				throws GSException {
+			final List<SubnetQuery<R>> subList =
+					new ArrayList<SubnetQuery<R>>();
+			boolean succeeded = false;
+			try {
+				for (SubnetCollection<?, ?> subContainer : subContainerList) {
+					final SubnetQuery<R> subQuery =
+							subContainer.query(tql, resultType);
+					subList.add(subQuery);
+				}
+				succeeded = true;
+				return subList;
+			}
+			finally {
+				if (!succeeded) {
+					closeSub(subList, true);
+				}
+			}
+		}
+
+		private List<RowSet<R>> fetchAllInternal(
+				List<SubnetQuery<R>> subList,
+				List<InetSocketAddress> addressList, boolean forUpdate)
+				throws GSException {
 			final int subCount = subList.size();
-			List<RowSet<R>> subRowSetList = new ArrayList<RowSet<R>>(subCount);
+			final List<RowSet<R>> subRowSetList =
+					new ArrayList<RowSet<R>>(subCount);
+
+			boolean succeeded = false;
 			try {
 				List<Long> targetList = null;
 				final int firstTarget = 0;
 				if (subCount > 0) {
 					final SubnetQuery<R> subQuery = subList.get(firstTarget);
-					subQuery.fetch(forUpdate);
+
+					container.fetchInternal(
+							subQuery, addressList.get(firstTarget), forUpdate);
 
 					final SubnetRowSet<R> subRowSet = subQuery.getRowSet();
 					subRowSetList.add(subRowSet);
@@ -326,7 +425,8 @@ extends SubnetContainer<K, R> implements Collection<K, R> {
 
 				if (targetList == null) {
 					for (int i = 1; i < subCount; i++) {
-						subRowSetList.add(subList.get(i).fetch());
+						subRowSetList.add(container.fetchInternal(
+								subList.get(i), addressList.get(i), forUpdate));
 					}
 				}
 				else {
@@ -340,28 +440,30 @@ extends SubnetContainer<K, R> implements Collection<K, R> {
 						else if (targetId == firstTarget) {
 							continue;
 						}
-						subRowSetList.add(subList.get((int) targetId).fetch());
+						final int intTargetId = (int) targetId;
+						subRowSetList.add(container.fetchInternal(
+								subList.get(intTargetId),
+								addressList.get(intTargetId), forUpdate));
 					}
 				}
 
-				final RowSet<R> rowSet = new MetaRowSet<R>(subRowSetList);
-				subRowSetList = null;
-				return rowSet;
+				succeeded = true;
+				return subRowSetList;
 			}
 			finally {
-				if (subRowSetList != null) {
+				if (!succeeded) {
 					MetaRowSet.closeSub(subRowSetList, true);
 				}
 			}
 		}
 
-		@Override
-		public void close() throws GSException {
-			closeSub(subList, false);
-		}
-
-		static <R> void closeSub(List<SubnetQuery<R>> subList, boolean silent)
+		static <R> void closeSub(
+				List<SubnetQuery<R>> subList, boolean silent)
 				throws GSException {
+			if (subList == null) {
+				return;
+			}
+
 			try {
 				for (SubnetQuery<?> sub : subList) {
 					if (silent) {
@@ -387,6 +489,10 @@ extends SubnetContainer<K, R> implements Collection<K, R> {
 
 	public static class MetaRowSet<R> implements RowSet<R> {
 
+		private final List<SubnetCollection<?, ?>> subContainerList;
+
+		private final List<SubnetQuery<R>> subQueryList;
+
 		private final List<RowSet<R>> subList;
 
 		private RowSet<R> nextSub;
@@ -395,8 +501,14 @@ extends SubnetContainer<K, R> implements Collection<K, R> {
 
 		private int size = -1;
 
-		MetaRowSet(List<RowSet<R>> subList) throws GSException {
+		MetaRowSet(
+				List<SubnetCollection<?, ?>> subContainerList,
+				List<SubnetQuery<R>> subQueryList,
+				List<RowSet<R>> subList) throws GSException {
+			this.subContainerList = subContainerList;
+			this.subQueryList = subQueryList;
 			this.subList = subList;
+
 			nextSub = this.subList.get(nextIndex);
 			prepareNext();
 		}
@@ -469,11 +581,33 @@ extends SubnetContainer<K, R> implements Collection<K, R> {
 
 		@Override
 		public void close() throws GSException {
-			closeSub(subList, false);
+			closeAllSub(subContainerList, subQueryList, subList, false);
+		}
+
+		static <R> void closeAllSub(
+				List<SubnetCollection<?, ?>> subContainerList,
+				List<SubnetQuery<R>> subQueryList,
+				List<RowSet<R>> subRowSetList, boolean silent)
+				throws GSException {
+			try {
+				try {
+					MetaCollection.closeSub(subContainerList, silent);
+				}
+				finally {
+					MetaQuery.closeSub(subQueryList, silent);
+				}
+			}
+			finally {
+				closeSub(subRowSetList, silent);
+			}
 		}
 
 		static <R> void closeSub(List<RowSet<R>> subList, boolean silent)
 				throws GSException {
+			if (subList == null) {
+				return;
+			}
+
 			try {
 				for (RowSet<?> sub : subList) {
 					if (silent) {

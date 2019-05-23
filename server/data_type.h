@@ -170,7 +170,4 @@ typedef uint16_t UpdateIntervalCategoryId;
 
 typedef RowId DatabaseId;  
 
-//#define GD_ENABLE_UNICAST_NOTIFICATION
-
-
 #endif

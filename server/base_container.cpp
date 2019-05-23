@@ -92,6 +92,7 @@ void BaseContainer::getContainerInfo(TransactionContext &txn,
 					reinterpret_cast<uint8_t *>(&rowKeyColumnId), sizeof(int16_t));
 			}
 		}
+
 		if (optionIncluded) {
 			getCommonContainerOptionInfo(containerSchema);
 			getContainerOptionInfo(txn, containerSchema);
@@ -430,6 +431,7 @@ void BaseContainer::deleteTrigger(TransactionContext &txn, const char *name) {
 			dataStore_->setLastExpiredTime(txn.getPartitionId(), txn.getStatementStartTime().getUnixTime());
 			return;
 		}
+
 		if (isAlterContainer()) {
 			DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_COL_LOCK_CONFLICT,
 				"(pId=" << txn.getPartitionId() << ", containerId=" << getContainerId()
@@ -672,8 +674,6 @@ void BaseContainer::searchColumnIdIndex(TransactionContext &txn,
 		break;
 	}
 }
-
-
 
 /*!
 	@brief Search Index of column
@@ -1001,6 +1001,7 @@ void BaseContainer::makeCopyColumnMap(TransactionContext &txn,
 				"RowKey column name is different");
 		}
 	}
+
 	ColumnInfo *columnInfoList = getColumnInfoList();
 	util::Map<const char *, ColumnId, CompareCharI> columnNameMap(txn.getDefaultAllocator());
 	for (uint32_t j = 0; j < getColumnNum(); j++) {
@@ -1249,7 +1250,7 @@ void BaseContainer::indexInsertImpl(
 					txn.getPartitionId(), *getObjectManager());
 				const void *fieldValue = &NULL_VALUE;
 				if (!isNullValue) {
-					row.getField(txn, columnInfo, baseFieldObject); 
+					row.getField(txn, columnInfo, baseFieldObject);
 					fieldValue = baseFieldObject.getCursor<void>();
 				}
 				insertValueMap(txn, valueMap, fieldValue, rowArray.getOId(),
@@ -1283,12 +1284,13 @@ void BaseContainer::indexInsertImpl(
 						txn.getPartitionId(), *getObjectManager());
 					const void *fieldValue = &NULL_VALUE;
 					if (!isNullValue) {
-						row.getField(txn, columnInfo, baseFieldObject); 
+						row.getField(txn, columnInfo, baseFieldObject);
 						fieldValue = baseFieldObject.getCursor<void>();
 					}
 					insertValueMap(txn, valueMap, fieldValue, rowArray.getOId(),
 						isNullValue);
 				}
+
 			}
 			if (getAllStatus == GS_SUCCESS) {
 				indexData.cursor_ = MAX_ROWID;
@@ -1304,6 +1306,7 @@ bool BaseContainer::getKeyCondition(TransactionContext &txn,
 	op1 = NULL;
 	op2 = NULL;
 	bool isValid = true;
+
 	if (sc.nullCond_ != BaseIndex::SearchContext::NOT_IS_NULL) {
 	} else
 	if (sc.startKey_ != NULL || sc.endKey_ != NULL) {
@@ -1974,6 +1977,7 @@ void BaseContainer::mergeRowList(TransactionContext &txn,
 		if (!isList1Sorted) {
 			std::sort(sortKeyList1.begin(), sortKeyList1.end(),
 				SortPred(txn, sortOp, targetType, isNullLast));
+
 		}
 
 		for (itr = inputList2.begin(); itr != inputList2.end(); itr++) {
@@ -2162,7 +2166,6 @@ void BaseContainer::getRowIdListImpl(TransactionContext &txn,
 		rowIdList.push_back(row.getRowId());
 	}
 }
-
 
 void BaseContainer::getCommonContainerOptionInfo(
 	util::XArray<uint8_t> &containerSchema) {
@@ -2636,7 +2639,6 @@ uint16_t BaseContainer::calcRowArrayNumByBaseRowNum(TransactionContext& txn, uin
 		(estimateAllocateSize - rowArrayHeaderSize) / rowImageSize_);
 }
 
-
 util::String BaseContainer::getBibInfoImpl(TransactionContext &txn, const char* dbName, uint64_t pos, bool isEmptyId) {
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
 	util::NormalOStringStream strstrm;
@@ -2651,14 +2653,14 @@ util::String BaseContainer::getBibInfoImpl(TransactionContext &txn, const char* 
 
 		strstrm << "\"containerAttribute\": {" << std::endl;
 
-		strstrm << "\"databaseId\": " << keyComponents.dbId_ << "," << std::endl; 
-		strstrm << "\"containerId\": " << getContainerId() << "," << std::endl; 
+		strstrm << "\"databaseId\": \"" << keyComponents.dbId_ << "\"," << std::endl; 
+		strstrm << "\"containerId\": \"" << getContainerId() << "\"," << std::endl; 
 		if (isEmptyId) {
-			strstrm << "\"rowIndexOId\": " << UNDEF_OID << "," << std::endl; 
-			strstrm << "\"mvccIndexOId\": " << UNDEF_OID << "," << std::endl; 
+			strstrm << "\"rowIndexOId\": \"" << UNDEF_OID << "\"," << std::endl; 
+			strstrm << "\"mvccIndexOId\": \"" << UNDEF_OID << "\"," << std::endl; 
 		} else {
-			strstrm << "\"rowIndexOId\": " << baseContainerImage_->rowIdMapOId_ << "," << std::endl; 
-			strstrm << "\"mvccIndexOId\": " << baseContainerImage_->mvccMapOId_ << "," << std::endl; 
+			strstrm << "\"rowIndexOId\": \"" << baseContainerImage_->rowIdMapOId_ << "\"," << std::endl; 
+			strstrm << "\"mvccIndexOId\": \"" << baseContainerImage_->mvccMapOId_ << "\"," << std::endl; 
 		}
 		strstrm << "\"initSchemaStatus\": " << "null" << "," << std::endl; 
 		strstrm << "\"schemaVersion\": " << getVersionId() << "," << std::endl; 
@@ -2673,7 +2675,7 @@ util::String BaseContainer::getBibInfoImpl(TransactionContext &txn, const char* 
 		strstrm << "\"expiredTime\": " << "null" << "," << std::endl; 
 		strstrm << "\"erasableTime\": " << "null" << "," << std::endl; 
 
-		strstrm << "\"largeContainerId\": " << keyComponents.largeContainerId_ << "," << std::endl; 
+		strstrm << "\"largeContainerId\": \"" << keyComponents.largeContainerId_ << "\"," << std::endl; 
 
 		strstrm << "\"tableExpirationElapsedTime\": " << "null" << "," << std::endl; 
 		strstrm << "\"tableExpirationTimeUnit\": " << "null" << "," << std::endl; 
@@ -2724,8 +2726,6 @@ util::String BaseContainer::getBibInfoImpl(TransactionContext &txn, const char* 
 	return result;
 }
 
-
-
 template <typename T>
 int32_t BaseContainer::ValueMap::search(TransactionContext &txn, 
 	typename T::SearchContext &sc, util::XArray<OId> &oIdList,
@@ -2762,8 +2762,6 @@ int32_t BaseContainer::ValueMap::search(TransactionContext &txn,
 
 	return GS_SUCCESS;
 }
-
-
 
 
 

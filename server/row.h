@@ -1000,11 +1000,12 @@ template<typename Container, RowArrayType rowArrayType>
 const void *BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getFixedField(const BaseContainer::RowArray::Column &column) {
 	if (util::IsSame<RowArrayAccessType<rowArrayType>, RowArrayGeneralType>::VALUE) {
 		const ColumnInfo &columnInfo = column.getColumnInfo();
+		if (columnInfo.getColumnId() == std::numeric_limits<uint16_t>::max()) {
+			assert(getRowId() == *getRowIdAddr());
+			return reinterpret_cast<const void *>(getRowIdAddr());
+		}
 		if (rowArrayCursor_->isNotExistColumn(columnInfo)) {
 			return Value::getDefaultFixedValue(columnInfo.getColumnType());
-		}
-		if (columnInfo.getColumnId() == std::numeric_limits<uint16_t>::max()) {
-			return reinterpret_cast<const void *>(getRowIdAddr());
 		}
 		return getFixedAddr() - rowArrayCursor_->currentParam_.columnOffsetDiff_ + column.getColumnInfo().getColumnOffset();
 	}
@@ -1346,7 +1347,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getImage(Transac
 						messageRowStore->setVarDataHeaderField(columnId, 1);
 						messageRowStore->setVarSize(0);  
 					} else if (columnInfo.getColumnType() == COLUMN_TYPE_BLOB) {
-						messageRowStore->setVarSize(0);
+						messageRowStore->setVarDataHeaderField(columnId, 0);
 					} else {
 						const void *elemData = Value::getDefaultVariableValue(columnInfo.getColumnType());
 						uint32_t elemSize = ValueProcessor::decodeVarSize(elemData);
@@ -1370,7 +1371,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getImage(Transac
 							messageRowStore->setVarDataHeaderField(columnId, 1);
 							messageRowStore->setVarSize(0);  
 						} else if (columnInfo.getColumnType() == COLUMN_TYPE_BLOB) {
-							messageRowStore->setVarSize(0);
+							messageRowStore->setVarDataHeaderField(columnId, 0);
 						} else {
 							const void *elemData = Value::getDefaultVariableValue(columnInfo.getColumnType());
 							uint32_t elemSize = ValueProcessor::decodeVarSize(elemData);
@@ -1415,11 +1416,11 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getImage(Transac
 					case COLUMN_TYPE_BLOB: {
 						Value value;
 						value.set(elemData, COLUMN_TYPE_BLOB);
-						BlobProcessor::getField(txn, objectManager, columnId, 
+						BlobProcessor::getField(txn, objectManager, columnId,
 						&value, messageRowStore);
 					} break;
 					default:
-						messageRowStore->setField(columnId, elemData, elemSize); 
+						messageRowStore->setField(columnId, elemData, elemSize);
 					}
 				}
 			}
@@ -1511,7 +1512,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::initializeParam() {
 			}
 //			uint32_t oldRrowFixedColumnSize_ = oldRowSize_ - currentParam_.nullsOffset_ - currentParam_.nullbitsSize_;
 //			assert(oldRrowFixedColumnSize_ == currentParam_.rowFixedColumnSize_);
-			assert(oldRowSize_ == currentParam_.rowSize_);
+//			assert(oldRowSize_ == currentParam_.rowSize_);
 		}
 
 		if (container_->getContainerType() == TIME_SERIES_CONTAINER) {
@@ -2675,6 +2676,7 @@ std::string BaseContainer::RowArrayImpl<Container, rowArrayType>::dump(Transacti
 	return strstrm.str();
 }
 
+
 template<typename Container, RowArrayType rowArrayType>
 bool BaseContainer::RowArrayImpl<Container, rowArrayType>::validate() {
 	return true;
@@ -2702,5 +2704,6 @@ std::string BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::dump(Tran
 	strstrm << ")";
 	return strstrm.str();
 }
+
 
 #endif

@@ -285,6 +285,12 @@ bool StatementMessage::OptionTypeSwitcher<
 	case Options::QUERY_CONTAINER_KEY:
 		action.template opType<Options::QUERY_CONTAINER_KEY>();
 		break;
+	case Options::APPLICATION_NAME:
+		action.template opType<Options::APPLICATION_NAME>();
+		break;
+	case Options::STORE_MEMORY_AGING_SWAP_RATE:
+		action.template opType<Options::STORE_MEMORY_AGING_SWAP_RATE>();
+		break;
 	default:
 		return false;
 	}
@@ -514,6 +520,12 @@ bool StatementMessage::EventTypeSwitcher::switchByEventType(
 		break;
 	case UPDATE_MULTIPLE_ROWS_BY_ID_SET:
 		action.template opEventType<UPDATE_MULTIPLE_ROWS_BY_ID_SET>();
+		break;
+	case REPLICATION_LOG2:
+		action.template opEventType<REPLICATION_LOG2>();
+		break;
+	case REPLICATION_ACK2:
+		action.template opEventType<REPLICATION_ACK2>();
 		break;
 	default:
 		return false;
@@ -1158,7 +1170,7 @@ void StatementHandler::setSuccessReply(
 			switch (response.rs_->getResultType()) {
 			case RESULT_ROWSET: {
 				PartialQueryOption partialQueryOption(alloc);
-				response.rs_->encodePartialQueryOption(alloc, partialQueryOption);
+				response.rs_->getQueryOption().encodePartialQueryOption(alloc, partialQueryOption);
 
 				const size_t entryNumPos = out.base().position();
 				int32_t entryNum = 0;
@@ -1518,6 +1530,24 @@ void StatementHandler::checkExecutable(ClusterRole requiredClusterRole) {
 #undef TXN_THROW_PT_STATE_UNMATCH_ERROR
 }
 
+void StatementHandler::checkExecutable(ClusterRole requiredClusterRole, PartitionTable *pt) {
+	const bool isMaster = pt->isMaster();
+	const bool isFollower = pt->isFollower();
+	const bool isSubmaster = (!isMaster && !isFollower);
+	assert((isMaster && isFollower) == false);
+	ClusterRole actualClusterRole = CROLE_UNKNOWN;
+	actualClusterRole |= isMaster ? CROLE_MASTER : CROLE_UNKNOWN;
+	actualClusterRole |= isFollower ? CROLE_FOLLOWER : CROLE_UNKNOWN;
+	actualClusterRole |= isSubmaster ? CROLE_SUBMASTER : CROLE_UNKNOWN;
+	assert(actualClusterRole != CROLE_UNKNOWN);
+	if (!(actualClusterRole & requiredClusterRole)) {
+		TXN_THROW_DENY_ERROR(GS_ERROR_TXN_CLUSTER_ROLE_UNMATCH,
+			"(required={" << clusterRoleToStr(requiredClusterRole) << "}"
+						<< ", actual="
+						<< clusterRoleToStr(actualClusterRole) << ")");
+	}
+}
+
 /*!
 	@brief Checks if transaction timeout
 */
@@ -1621,14 +1651,15 @@ void StatementHandler::checkQueryOption(
 	}
 }
 
-void StatementHandler::applyQueryOption(
-		ResultSet &rs, const OptionSet &optionSet,
+void StatementHandler::createResultSetOption(
+		const OptionSet &optionSet,
 		const int32_t *fetchBytesSize, bool partial,
-		const PartialQueryOption &partialOption) {
+		const PartialQueryOption &partialOption,
+		ResultSetOption &queryOption) {
 
 	const bool distributed = false;
 
-	rs.setQueryOption(
+	queryOption.set(
 			(fetchBytesSize == NULL ?
 					optionSet.get<Options::FETCH_BYTES_SIZE>() :
 					*fetchBytesSize),
@@ -1689,6 +1720,14 @@ void StatementHandler::decodeRequestOptionPart(
 					connOption.txnTimeoutInterval_;
 			request.optional_.set<Options::TXN_TIMEOUT_INTERVAL>(
 					TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL);
+		}
+
+		request.fixed_.cxtSrc_.storeMemoryAgingSwapRate_ =
+				request.optional_.get<Options::STORE_MEMORY_AGING_SWAP_RATE>();
+		if (!TransactionContext::isStoreMemoryAgingSwapRateSpecified(
+				request.fixed_.cxtSrc_.storeMemoryAgingSwapRate_)) {
+			request.fixed_.cxtSrc_.storeMemoryAgingSwapRate_ =
+					connOption.storeMemoryAgingSwapRate_;
 		}
 	}
 	catch (std::exception &e) {
@@ -2680,33 +2719,47 @@ bool StatementHandler::executeReplication(
 void StatementHandler::replyReplicationAck(
 		EventContext &ec,
 		util::StackAllocator &alloc, const NodeDescriptor &ND,
-		const ReplicationAck &request) {
+		const ReplicationAck &ack, bool optionalFormat) {
 
 #define TXN_TRACE_REPLY_ACK_ERROR(request, ND)                             \
-	"(mode=" << request.replMode_ << ", owner=" << ND                      \
-			 << ", replId=" << request.replId_ << ", pId=" << request.pId_ \
-			 << ", eventType=" << request.replStmtType_                    \
-			 << ", stmtId=" << request.replStmtId_                         \
-			 << ", clientId=" << request.clientId_                         \
-			 << ", taskStatus=" << request.taskStatus_ << ")"
+	"(mode=" << ack.replMode_ << ", owner=" << ND                      \
+			 << ", replId=" << ack.replId_ << ", pId=" << ack.pId_ \
+			 << ", eventType=" << ack.replStmtType_                    \
+			 << ", stmtId=" << ack.replStmtId_                         \
+			 << ", clientId=" << ack.clientId_                         \
+			 << ", taskStatus=" << ack.taskStatus_ << ")"
 
 	util::StackAllocator::Scope scope(alloc);
 
-	if (request.replMode_ != TransactionManager::REPLICATION_SEMISYNC) {
+	if (ack.replMode_ != TransactionManager::REPLICATION_SEMISYNC) {
 		return;
 	}
 
 	try {
-		Event replAckEvent(ec, REPLICATION_ACK, request.pId_);
+		GSEventType eventType = REPLICATION_ACK;
+		if (optionalFormat) {
+			eventType = REPLICATION_ACK2;
+		}
+		Event replAckEvent(ec, eventType, ack.pId_);
 		EventByteOutStream out = replAckEvent.getOutStream();
-		encodeReplicationAckPart(out, request.clusterVer_, request.replMode_,
-			request.clientId_, request.replId_, request.replStmtType_,
-			request.replStmtId_, request.taskStatus_);
+		if (optionalFormat) {
+			FixedRequest::Source source(ack.pId_, eventType);
+			FixedRequest request(source);
+			request.cxtSrc_.stmtId_ = UNDEF_STATEMENTID;
+			request.encode(out);
+
+			OptionSet optionSet(alloc);
+
+			optionSet.encode(out);
+		}
+		encodeReplicationAckPart(out, ack.clusterVer_, ack.replMode_,
+			ack.clientId_, ack.replId_, ack.replStmtType_,
+			ack.replStmtId_, ack.taskStatus_);
 
 		ec.getEngine().send(replAckEvent, ND);
 
 		GS_TRACE_INFO(REPLICATION, GS_TRACE_TXN_SEND_ACK,
-			TXN_TRACE_REPLY_ACK_ERROR(request, ND));
+			TXN_TRACE_REPLY_ACK_ERROR(ack, ND));
 	}
 	catch (EncodeDecodeException &e) {
 		TXN_RETHROW_ENCODE_ERROR(e, TXN_TRACE_REPLY_ACK_ERROR(request, ND));
@@ -2722,48 +2775,38 @@ void StatementHandler::replyReplicationAck(
 	@brief Handles error
 */
 void StatementHandler::handleError(
-		EventContext &ec,
-		util::StackAllocator &alloc, Event &ev, const Request &request,
-		std::exception &) {
-#define TXN_TRACE_ON_ERROR_MINIMUM(cause, category, ev, request, extra)      \
-	GS_EXCEPTION_MESSAGE(cause)                                              \
-		<< " (" << category << ", nd=" << ev.getSenderND()                   \
-		<< ", pId=" << ev.getPartitionId() << ", eventType=" << ev.getType() \
-		<< extra << ")"
-
-#define TXN_TRACE_ON_ERROR(cause, category, ev, request)                      \
-	TXN_TRACE_ON_ERROR_MINIMUM(cause, category, ev, request,                  \
-		", stmtId=" << request.fixed_.cxtSrc_.stmtId_                                \
-					<< ", clientId=" << request.fixed_.clientId_ << ", containerId=" \
-					<< ((request.fixed_.cxtSrc_.containerId_ == UNDEF_CONTAINERID)   \
-							   ? 0                                            \
-							   : request.fixed_.cxtSrc_.containerId_))
-
+		EventContext &ec, util::StackAllocator &alloc, Event &ev,
+		const Request &request, std::exception &e) {
 	util::StackAllocator::Scope scope(alloc);
+	ErrorMessage errorMessage(e, "", ev, request);
 
 	try {
 		try {
 			throw;
 		}
-		catch (StatementAlreadyExecutedException &e) {
-			UTIL_TRACE_EXCEPTION_INFO(TRANSACTION_SERVICE, e,
-				TXN_TRACE_ON_ERROR(e, "Statement already executed", ev,
-										  request));
+		catch (StatementAlreadyExecutedException&) {
+			UTIL_TRACE_EXCEPTION_INFO(
+					TRANSACTION_SERVICE, e, errorMessage.withDescription(
+							"Statement already executed"));
 			Response response(alloc);
 			response.existFlag_ = false;
 			replySuccess(ec, alloc, ev.getSenderND(), ev.getType(),
 				TXN_STATEMENT_SUCCESS, request, response, NO_REPLICATION);
 		}
-		catch (EncodeDecodeException &e) {
+		catch (EncodeDecodeException&) {
 
 			UTIL_TRACE_EXCEPTION(
-				TRANSACTION_SERVICE, e,
-				TXN_TRACE_ON_ERROR_MINIMUM(
-					e, "Failed to encode or decode message", ev, request, ""));
+					TRANSACTION_SERVICE, e, errorMessage.withDescription(
+								"Failed to encode or decode message"));
+
+			replyError(
+					ec, alloc, ev.getSenderND(), ev.getType(),
+					TXN_STATEMENT_ERROR, request, e);
 		}
-		catch (LockConflictException &e) {
-			UTIL_TRACE_EXCEPTION_INFO(TRANSACTION_SERVICE, e,
-				TXN_TRACE_ON_ERROR(e, "Lock conflicted", ev, request));
+		catch (LockConflictException &e2) {
+			UTIL_TRACE_EXCEPTION_INFO(
+					TRANSACTION_SERVICE, e, errorMessage.withDescription(
+							"Lock conflicted"));
 			try {
 				TransactionContext &txn = transactionManager_->get(
 					alloc, ev.getPartitionId(), request.fixed_.clientId_);
@@ -2803,46 +2846,48 @@ void StatementHandler::handleError(
 						request.fixed_.pId_, request.fixed_.clientId_);
 				}
 			}
-			catch (ContextNotFoundException &) {
-				UTIL_TRACE_EXCEPTION_INFO(TRANSACTION_SERVICE, e,
-					TXN_TRACE_ON_ERROR(e, "Context not found", ev, request));
+			catch (ContextNotFoundException&) {
+				UTIL_TRACE_EXCEPTION_INFO(
+						TRANSACTION_SERVICE, e, errorMessage.withDescription(
+								"Context not found"));
 			}
 
 			const LockConflictStatus lockConflictStatus(getLockConflictStatus(
 					ev, ec.getHandlerStartMonotonicTime(), request));
 			try {
-				checkLockConflictStatus(lockConflictStatus, e);
+				checkLockConflictStatus(lockConflictStatus, e2);
 			}
 			catch (LockConflictException&) {
 				assert(false);
 				throw;
 			}
 			catch (...) {
-				std::exception e2;
-				handleError(ec, alloc, ev, request, e2);
+				handleError(ec, alloc, ev, request, e);
 				return;
 			}
 			retryLockConflictedRequest(ec, ev, lockConflictStatus);
 		}
-		catch (DenyException &e) {
-			UTIL_TRACE_EXCEPTION(TRANSACTION_SERVICE, e,
-				TXN_TRACE_ON_ERROR(e, "Request denied", ev, request));
+		catch (DenyException&) {
+			UTIL_TRACE_EXCEPTION(
+					TRANSACTION_SERVICE, e, errorMessage.withDescription(
+							"Request denied"));
 			replyError(ec, alloc, ev.getSenderND(), ev.getType(),
-				TXN_STATEMENT_DENY, request, e);
+					TXN_STATEMENT_DENY, request, e);
 		}
-		catch (ContextNotFoundException &e) {
-			UTIL_TRACE_EXCEPTION_WARNING(TRANSACTION_SERVICE, e,
-				TXN_TRACE_ON_ERROR(e, "Context not found", ev, request));
+		catch (ContextNotFoundException&) {
+			UTIL_TRACE_EXCEPTION_WARNING(
+					TRANSACTION_SERVICE, e, errorMessage.withDescription(
+							"Context not found"));
 			replyError(ec, alloc, ev.getSenderND(), ev.getType(),
-				TXN_STATEMENT_ERROR, request, e);
+					TXN_STATEMENT_ERROR, request, e);
 		}
-		catch (std::exception &e) {
+		catch (std::exception&) {
 			if (GS_EXCEPTION_CHECK_CRITICAL(e)) {
 				throw;
 			}
 			else {
 				const util::Exception utilException =
-					GS_EXCEPTION_CONVERT(e, "");
+						GS_EXCEPTION_CONVERT(e, "");
 
 				Response response(alloc);
 
@@ -2850,16 +2895,16 @@ void StatementHandler::handleError(
 					utilException.getErrorCode(utilException.getMaxDepth()) ==
 						GS_ERROR_TM_TRANSACTION_NOT_FOUND) {
 					UTIL_TRACE_EXCEPTION_WARNING(
-						TRANSACTION_SERVICE, e,
-						TXN_TRACE_ON_ERROR(e,
-							"Transaction is already timed out", ev, request));
+						TRANSACTION_SERVICE, e, errorMessage.withDescription(
+								"Transaction is already timed out"));
 					replySuccess(ec, alloc, ev.getSenderND(), ev.getType(),
 						TXN_STATEMENT_SUCCESS, request, response,
 						NO_REPLICATION);
 				}
 				else {
-					UTIL_TRACE_EXCEPTION(TRANSACTION_SERVICE, e,
-						TXN_TRACE_ON_ERROR(e, "User error", ev, request));
+					UTIL_TRACE_EXCEPTION(
+							TRANSACTION_SERVICE, e, errorMessage.withDescription(
+									"User error"));
 					try {
 						TransactionContext &txn = transactionManager_->get(
 							alloc, ev.getPartitionId(), request.fixed_.clientId_);
@@ -2888,10 +2933,10 @@ void StatementHandler::handleError(
 								request.fixed_.pId_, request.fixed_.clientId_);
 						}
 					}
-					catch (ContextNotFoundException &) {
-						UTIL_TRACE_EXCEPTION_INFO(TRANSACTION_SERVICE, e,
-							TXN_TRACE_ON_ERROR(e, "Context not found", ev,
-													  request));
+					catch (ContextNotFoundException&) {
+						UTIL_TRACE_EXCEPTION_INFO(
+								TRANSACTION_SERVICE, e, errorMessage.withDescription(
+										"Context not found"));
 					}
 
 					replyError(ec, alloc, ev.getSenderND(), ev.getType(),
@@ -2900,16 +2945,14 @@ void StatementHandler::handleError(
 			}
 		}
 	}
-	catch (std::exception &e) {
-		UTIL_TRACE_EXCEPTION(TRANSACTION_SERVICE, e,
-			TXN_TRACE_ON_ERROR(e, "System error", ev, request));
+	catch (std::exception&) {
+		UTIL_TRACE_EXCEPTION(
+				TRANSACTION_SERVICE, e, errorMessage.withDescription(
+						"System error"));
 		replyError(ec, alloc, ev.getSenderND(), ev.getType(),
-			TXN_STATEMENT_NODE_ERROR, request, e);
+				TXN_STATEMENT_NODE_ERROR, request, e);
 		clusterService_->setError(ec, &e);
 	}
-
-#undef TXN_TRACE_ON_ERROR
-#undef TXN_TRACE_ON_ERROR_MINIMUM
 }
 
 /*!
@@ -3014,10 +3057,12 @@ void StatementHandler::updateLockConflictStatus(
 			ec.getAllocator(), ev, status.initialConflictMillis_);
 }
 
-bool StatementHandler::checkPrivilege(EventType command,
-									  UserType userType, RequestType requestType, bool isSystemMode,
-									  ContainerType resourceType, ContainerAttribute resourceSubType,
-									  ContainerAttribute expectedResourceSubType) {
+bool StatementHandler::checkPrivilege(
+		EventType command,
+		UserType userType, RequestType requestType, bool isSystemMode,
+		int32_t featureVersion,
+		ContainerType resourceType, ContainerAttribute resourceSubType,
+		ContainerAttribute expectedResourceSubType) {
 
 
 
@@ -3091,6 +3136,7 @@ bool StatementHandler::isSupportedContainerAttribute(ContainerAttribute attribut
 	case CONTAINER_ATTR_SINGLE_SYSTEM:
 	case CONTAINER_ATTR_LARGE:
 	case CONTAINER_ATTR_SUB:
+	case CONTAINER_ATTR_VIEW:
 		return true;
 	default:
 		return false;
@@ -3131,6 +3177,44 @@ const char8_t *StatementHandler::partitionStatusToStr(
 								 : partitionStatusStr[status];
 }
 
+bool StatementHandler::getApplicationNameByOptionsOrND(
+		const OptionSet *optionSet, const NodeDescriptor *nd,
+		util::String *nameStr, std::ostream *os) {
+
+	const char8_t *name = (optionSet == NULL ?
+			"" : optionSet->get<Options::APPLICATION_NAME>());
+	bool found = (strlen(name) > 0);
+
+	ConnectionOption *connOption = NULL;
+	if (!found && nd != NULL) {
+		connOption = &nd->getUserData<ConnectionOption>();
+		if (connOption->getApplicationName(NULL)) {
+			found = true;
+		}
+	}
+
+	if (found) {
+		if (connOption == NULL) {
+			if (os != NULL) {
+				*os << name;
+			}
+			if (nameStr != NULL) {
+				*nameStr = name;
+			}
+		}
+		else {
+			if (os != NULL) {
+				connOption->getApplicationName(*os);
+			}
+			if (nameStr != NULL) {
+				connOption->getApplicationName(*nameStr);
+			}
+		}
+	}
+
+	return found;
+}
+
 const KeyConstraint& StatementHandler::getKeyConstraint(
 		const OptionSet &optionSet, bool checkLength) const {
 	return getKeyConstraint(
@@ -3145,6 +3229,87 @@ const KeyConstraint& StatementHandler::getKeyConstraint(
 		[((containerAttribute & CONTAINER_ATTR_IS_SYSTEM) != 0 ? 1 : 0)]
 		[((containerAttribute & CONTAINER_ATTR_FOR_PARTITIONING) != 0 ? 1 : 0)]
 		[(checkLength ? 1 : 0)];
+}
+
+void StatementHandler::ConnectionOption::setApplicationName(
+		const char8_t *name) {
+	util::LockGuard<util::Mutex> guard(mutex_);
+	applicationName_ = name;
+}
+
+void StatementHandler::ConnectionOption::setLoginInfo(
+		const char8_t *userName, const char8_t *dbName,
+		const char8_t *applicationName) {
+	util::LockGuard<util::Mutex> guard(mutex_);
+	userName_ = userName;
+	dbName_ = dbName;
+	applicationName_ = applicationName;
+}
+
+
+bool StatementHandler::ConnectionOption::getApplicationName(
+		util::BasicString<
+				char8_t, std::char_traits<char8_t>,
+				util::StdAllocator<char8_t, void> > *name) {
+	util::LockGuard<util::Mutex> guard(mutex_);
+	if (name != NULL) {
+		*name = applicationName_.c_str();
+	}
+	return !applicationName_.empty();
+}
+
+
+
+void StatementHandler::ConnectionOption::getApplicationName(
+		std::ostream &os) {
+	util::LockGuard<util::Mutex> guard(mutex_);
+	os << applicationName_;
+}
+
+void StatementHandler::ErrorMessage::format(std::ostream &os) const {
+	os << GS_EXCEPTION_MESSAGE(elements_.cause_);
+	os << " (" << elements_.description_;
+	formatParameters(os);
+	os << ")";
+}
+
+void StatementHandler::ConnectionOption::initializeCoreInfo() {
+	util::LockGuard<util::Mutex> guard(mutex_);
+
+	userName_.clear();
+	dbName_.clear();
+	applicationName_ = "";
+
+	clientId_ = ClientId();
+
+
+}
+
+void StatementHandler::ErrorMessage::formatParameters(std::ostream &os) const {
+	const NodeDescriptor &nd =  elements_.ev_.getSenderND();
+
+	if (getApplicationNameByOptionsOrND(
+			elements_.options_, &nd, NULL, NULL)) {
+		os << ", application=";
+		getApplicationNameByOptionsOrND(
+				elements_.options_, &nd, NULL, &os);
+	}
+
+	os << ", nd=" << nd;
+	os << ", eventType=" << elements_.stmtType_;
+	os << ", partition=" << elements_.pId_;
+
+	if (elements_.stmtId_ != UNDEF_STATEMENTID) {
+		os << ", statementId=" << elements_.stmtId_;
+	}
+
+	if (elements_.clientId_ != ClientId()) {
+		os << ", transaction=" << elements_.clientId_;
+	}
+
+	if (elements_.containerId_ != UNDEF_CONTAINERID) {
+		os << ", containerId=" << elements_.containerId_;
+	}
 }
 
 ConnectHandler::ConnectHandler(ProtocolVersion currentVersion,
@@ -3163,7 +3328,6 @@ void ConnectHandler::operator()(EventContext &ec, Event &ev) {
 
 	ConnectRequest request(ev.getPartitionId(), ev.getType());
 	Response response(alloc);
-
 	try {
 
 		EventByteInStream in(ev.getInStream());
@@ -3266,61 +3430,57 @@ void ConnectHandler::replyError(EventContext &ec, util::StackAllocator &alloc,
 	}
 }
 
-void ConnectHandler::handleError(EventContext &ec, util::StackAllocator &alloc,
-	Event &ev, const ConnectRequest &request, std::exception &) {
-#define TXN_TRACE_ON_ERROR_MINIMUM(cause, category, ev, request, extra)      \
-	GS_EXCEPTION_MESSAGE(cause)                                              \
-		<< " (" category << ", nd=" << ev.getSenderND()                      \
-		<< ", pId=" << ev.getPartitionId() << ", eventType=" << ev.getType() \
-		<< extra << ")"
-
-#define TXN_TRACE_ON_ERROR(cause, category, ev, request) \
-	TXN_TRACE_ON_ERROR_MINIMUM(                          \
-		cause, category, ev, request, ", stmtId=" << request.oldStmtId_)
-
+void ConnectHandler::handleError(
+		EventContext &ec, util::StackAllocator &alloc,
+		Event &ev, const ConnectRequest &request, std::exception &e) {
 	util::StackAllocator::Scope scope(alloc);
+
+	FixedRequest fixedRequest(getRequestSource(ev));
+	fixedRequest.cxtSrc_.stmtId_ = request.oldStmtId_;
+	ErrorMessage errorMessage(e, "", ev, fixedRequest);
 
 	try {
 		try {
 			throw;
 
 		}
-		catch (EncodeDecodeException &e) {
+		catch (EncodeDecodeException&) {
 			UTIL_TRACE_EXCEPTION(
-				TRANSACTION_SERVICE, e,
-				TXN_TRACE_ON_ERROR_MINIMUM(
-					e, "Failed to encode or decode message", ev, request, ""));
-
-		}
-		catch (DenyException &e) {
-			UTIL_TRACE_EXCEPTION(TRANSACTION_SERVICE, e,
-				TXN_TRACE_ON_ERROR(e, "Request denied", ev, request));
+					TRANSACTION_SERVICE, e, errorMessage.withDescription(
+							"Failed to encode or decode message"));
 			replyError(ec, alloc, ev.getSenderND(), ev.getType(),
-				TXN_STATEMENT_DENY, request, e);
+					TXN_STATEMENT_ERROR, request, e);
 
 		}
-		catch (std::exception &e) {
+		catch (DenyException&) {
+			UTIL_TRACE_EXCEPTION(
+					TRANSACTION_SERVICE, e, errorMessage.withDescription(
+							"Request denied"));
+			replyError(ec, alloc, ev.getSenderND(), ev.getType(),
+					TXN_STATEMENT_DENY, request, e);
+
+		}
+		catch (std::exception&) {
 			if (GS_EXCEPTION_CHECK_CRITICAL(e)) {
 				throw;
 			}
 			else {
-				UTIL_TRACE_EXCEPTION(TRANSACTION_SERVICE, e,
-					TXN_TRACE_ON_ERROR(e, "User error", ev, request));
+				UTIL_TRACE_EXCEPTION(
+						TRANSACTION_SERVICE, e, errorMessage.withDescription(
+								"User error"));
 				replyError(ec, alloc, ev.getSenderND(), ev.getType(),
-					TXN_STATEMENT_ERROR, request, e);
+						TXN_STATEMENT_ERROR, request, e);
 			}
 		}
 	}
-	catch (std::exception &e) {
-		UTIL_TRACE_EXCEPTION(TRANSACTION_SERVICE, e,
-			TXN_TRACE_ON_ERROR(e, "System error", ev, request));
+	catch (std::exception&) {
+		UTIL_TRACE_EXCEPTION(
+				TRANSACTION_SERVICE, e, errorMessage.withDescription(
+						"System error"));
 		replyError(ec, alloc, ev.getSenderND(), ev.getType(),
-			TXN_STATEMENT_NODE_ERROR, request, e);
+				TXN_STATEMENT_NODE_ERROR, request, e);
 		clusterService_->setError(ec, &e);
 	}
-
-#undef TXN_TRACE_ON_ERROR
-#undef TXN_TRACE_ON_ERROR_MINIMUM
 }
 
 /*!
@@ -3358,6 +3518,7 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -3374,6 +3535,10 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 				(request.optional_.get<Options::TXN_TIMEOUT_INTERVAL>() >= 0 ?
 				request.optional_.get<Options::TXN_TIMEOUT_INTERVAL>() :
 				TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL);
+		const char8_t *applicationName =
+				request.optional_.get<Options::APPLICATION_NAME>();
+		const double storeMemoryAgingSwapRate =
+				request.optional_.get<Options::STORE_MEMORY_AGING_SWAP_RATE>();
 
 		util::String userName(alloc);
 		util::String digest(alloc);
@@ -3417,7 +3582,23 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 						<< ")");
 			}
 		}
+
+		if (strlen(applicationName) != 0) {
+			try {
+				NoEmptyKey::validate(
+						KeyConstraint::getUserKeyConstraint(MAX_APPLICATION_NAME_LEN),
+						applicationName, static_cast<uint32_t>(strlen(applicationName)),
+						"applicationName");
+			}
+			catch (UserException &e) {
+				GS_RETHROW_USER_ERROR(e, GS_EXCEPTION_MERGE_MESSAGE(e,
+						"Application name invalid (input=" <<
+						applicationName << ")"));
+			}
+		}
+
 		connOption.clientId_ = request.fixed_.clientId_;
+		connOption.storeMemoryAgingSwapRate_ = storeMemoryAgingSwapRate;
 		DatabaseId dbId = UNDEF_DBID;
 
 		if ((strcmp(dbName, GS_PUBLIC) == 0) ||
@@ -3436,8 +3617,7 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 						GS_THROW_USER_ERROR(GS_ERROR_TXN_AUTH_FAILED,
 								"database name invalid (" << dbName << ")");
 					}
-					connOption.userName_ = userName.c_str();
-					connOption.dbName_ = dbName;
+					connOption.setLoginInfo(userName.c_str(), dbName, applicationName);
 					connOption.requestType_ = requestType;
 					connOption.isAdminAndPublicDB_ = true;
 					connOption.isAuthenticated_ = true;
@@ -3457,7 +3637,7 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 				}
 				else {
 					GS_THROW_USER_ERROR(GS_ERROR_TXN_AUTH_FAILED,
-							"invalid user name or password (user mame = " <<
+							"invalid user name or password (user name = " <<
 							userName.c_str() << ")");
 				}
 			}
@@ -3491,9 +3671,8 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 					connOption.isImmediateConsistency_ = isImmediateConsistency;
 					connOption.txnTimeoutInterval_ = txnTimeoutInterval;
 					connOption.userType_ = Message::USER_NORMAL;
-					connOption.userName_ = userName.c_str();
-					connOption.dbName_ = dbName;
 					connOption.requestType_ = requestType;
+					connOption.setLoginInfo(userName.c_str(), dbName, applicationName);
 					connOption.isAdminAndPublicDB_ = false;
 
 					executeAuthenticationInternal(
@@ -3516,9 +3695,8 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 					connOption.isImmediateConsistency_ = isImmediateConsistency;
 					connOption.txnTimeoutInterval_ = txnTimeoutInterval;
 					connOption.userType_ = Message::USER_NORMAL;
-					connOption.userName_ = userName.c_str();
-					connOption.dbName_ = dbName;
 					connOption.requestType_ = requestType;
+					connOption.setLoginInfo(userName.c_str(), dbName, applicationName);
 					connOption.isAdminAndPublicDB_ = false;
 
 					executeAuthentication(
@@ -3561,9 +3739,8 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 								isImmediateConsistency;
 						connOption.txnTimeoutInterval_ = txnTimeoutInterval;
 						connOption.userType_ = Message::USER_ADMIN;
-						connOption.userName_ = userName.c_str();
-						connOption.dbName_ = dbName;
 						connOption.requestType_ = requestType;
+						connOption.setLoginInfo(userName.c_str(), dbName, applicationName);
 						connOption.isAdminAndPublicDB_ = false;
 
 						executeAuthenticationInternal(
@@ -3587,9 +3764,8 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 							isImmediateConsistency;
 						connOption.txnTimeoutInterval_ = txnTimeoutInterval;
 						connOption.userType_ = Message::USER_ADMIN;
-						connOption.userName_ = userName.c_str();
-						connOption.dbName_ = dbName;
 						connOption.requestType_ = requestType;
+						connOption.setLoginInfo(userName.c_str(), dbName, applicationName);
 						connOption.isAdminAndPublicDB_ = false;
 
 						executeAuthentication(
@@ -3604,7 +3780,7 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 				}
 				else {
 					GS_THROW_USER_ERROR(GS_ERROR_TXN_AUTH_FAILED,
-						"invalid user name or password (user mame = "
+						"invalid user name or password (user name = "
 							<< userName.c_str() << ")");
 				}
 			}
@@ -3618,9 +3794,8 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 					connOption.isImmediateConsistency_ = isImmediateConsistency;
 					connOption.txnTimeoutInterval_ = txnTimeoutInterval;
 					connOption.userType_ = Message::USER_NORMAL;
-					connOption.userName_ = userName.c_str();
-					connOption.dbName_ = dbName;
 					connOption.requestType_ = requestType;
+					connOption.setLoginInfo(userName.c_str(), dbName, applicationName);
 					connOption.isAdminAndPublicDB_ = false;
 
 					executeAuthenticationInternal(
@@ -3643,9 +3818,8 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 					connOption.isImmediateConsistency_ = isImmediateConsistency;
 					connOption.txnTimeoutInterval_ = txnTimeoutInterval;
 					connOption.userType_ = Message::USER_NORMAL;
-					connOption.userName_ = userName.c_str();
-					connOption.dbName_ = dbName;
 					connOption.requestType_ = requestType;
+					connOption.setLoginInfo(userName.c_str(), dbName, applicationName);
 					connOption.isAdminAndPublicDB_ = false;
 
 					executeAuthentication(
@@ -3677,6 +3851,7 @@ void LogoutHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -3706,6 +3881,7 @@ void GetPartitionAddressHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -3742,6 +3918,9 @@ void GetPartitionAddressHandler::operator()(EventContext &ec, Event &ev) {
 			out << static_cast<uint8_t>(1);
 			const NodeDescriptor &ownerND =
 				transactionService_->getEE()->getServerND(ownerNodeId);
+			if (ownerND.isEmpty()) {
+				GS_THROW_USER_ERROR(GS_ERROR_EE_PARAMETER_INVALID, "ND is empty");
+			}
 			util::SocketAddress::Inet addr;
 			uint16_t port;
 			ownerND.getAddress().getIP(&addr, &port);
@@ -3763,6 +3942,9 @@ void GetPartitionAddressHandler::operator()(EventContext &ec, Event &ev) {
 		for (uint8_t i = 0; i < numBackup; i++) {
 			const NodeDescriptor &backupND =
 				transactionService_->getEE()->getServerND(backupNodeIds[i]);
+			if (backupND.isEmpty()) {
+				GS_THROW_USER_ERROR(GS_ERROR_EE_PARAMETER_INVALID, "ND is empty");
+			}
 			util::SocketAddress::Inet addr;
 			uint16_t port;
 			backupND.getAddress().getIP(&addr, &port);
@@ -3789,7 +3971,14 @@ void GetPartitionAddressHandler::encodeClusterInfo(
 		util::XArrayByteOutStream &out, EventEngine &ee,
 		PartitionTable &partitionTable, ContainerHashMode hashMode) {
 	const NodeId masterNodeId = partitionTable.getMaster();
+	if (masterNodeId == UNDEF_NODEID) {
+		TXN_THROW_DENY_ERROR(GS_ERROR_TXN_CLUSTER_ROLE_UNMATCH, 
+			"(required={MASTER}, actual={SUB_CLUSTER})");
+	}
 	const NodeDescriptor &masterND = ee.getServerND(masterNodeId);
+	if (masterND.isEmpty()) {
+		GS_THROW_USER_ERROR(GS_ERROR_EE_PARAMETER_INVALID, "ND is empty");
+	}
 
 	const int8_t masterMatched = masterND.isSelf();
 	out << masterMatched;
@@ -3817,6 +4006,7 @@ void GetPartitionContainerNamesHandler::operator()(
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -3865,6 +4055,7 @@ void GetPartitionContainerNamesHandler::operator()(
 					ev.getType(),
 					connOption.userType_, connOption.requestType_,
 					request.optional_.get<Options::SYSTEM_MODE>(),
+					request.optional_.get<Options::ACCEPTABLE_FEATURE_VERSION>(),
 					ANY_CONTAINER, *itr)) {
 				validContainerCondition.insertAttribute(*itr);
 			}
@@ -3898,6 +4089,7 @@ void GetContainerPropertiesHandler::operator()(EventContext &ec, Event &ev)
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -3961,6 +4153,9 @@ void GetContainerPropertiesHandler::operator()(EventContext &ec, Event &ev)
 		const DataStore::Latch latch(
 				txn, txn.getPartitionId(), dataStore_, clusterService_);
 
+		const int32_t acceptableFeatureVersion =
+				request.optional_.get<Options::ACCEPTABLE_FEATURE_VERSION>();
+
 		int64_t currentTime = ec.getHandlerStartTime().getUnixTime();
 
 		util::String containerNameStr(alloc);
@@ -3983,6 +4178,7 @@ void GetContainerPropertiesHandler::operator()(EventContext &ec, Event &ev)
 					ev.getType(),
 					connOption.userType_, connOption.requestType_,
 					request.optional_.get<Options::SYSTEM_MODE>(),
+					request.optional_.get<Options::ACCEPTABLE_FEATURE_VERSION>(),
 					container->getContainerType(),
 					container->getAttribute(),
 					request.optional_.get<Options::CONTAINER_ATTRIBUTE>())) {
@@ -4006,6 +4202,12 @@ void GetContainerPropertiesHandler::operator()(EventContext &ec, Event &ev)
 
 				if (metaContainer != NULL && !isMetaContainerVisible(
 						*metaContainer, visibility)) {
+					metaContainer = NULL;
+				}
+
+				if (metaContainer != NULL &&
+						metaContainer->getMetaContainerInfo().nodeDistribution_ &&
+						acceptableFeatureVersion < Message::FEATURE_V4_2) {
 					metaContainer = NULL;
 				}
 
@@ -4064,18 +4266,23 @@ void GetContainerPropertiesHandler::encodeContainerProps(
 		const SchemaVersionId schemaVersionId =
 				container->getVersionId();
 
+		MetaDistributionType metaDistType = META_DIST_NONE;
 		ContainerId metaContainerId = UNDEF_CONTAINERID;
 		int8_t metaNamingType = -1;
 		if (forMeta) {
 			MetaContainer *metaContainer =
 					static_cast<MetaContainer*>(container);
+			metaDistType = META_DIST_FULL;
+			if (metaContainer->getMetaContainerInfo().nodeDistribution_ ) {
+				metaDistType = META_DIST_NODE;
+			}
 			metaContainerId = metaContainer->getMetaContainerId();
 			metaNamingType = metaContainer->getColumnNamingType();
 		}
 
 		encodeId(
 				out, schemaVersionId, containerId, realContainerKey,
-				metaContainerId, metaNamingType);
+				metaContainerId, metaDistType, metaNamingType);
 	}
 
 	if ((propFlags & (1 << CONTAINER_PROPERTY_SCHEMA)) != 0) {
@@ -4162,7 +4369,8 @@ void GetContainerPropertiesHandler::encodePropsHead(
 void GetContainerPropertiesHandler::encodeId(
 		EventByteOutStream &out, SchemaVersionId schemaVersionId,
 		ContainerId containerId, const FullContainerKey &containerKey,
-		ContainerId metaContainerId, int8_t metaNamingType) {
+		ContainerId metaContainerId, MetaDistributionType metaDistType,
+		int8_t metaNamingType) {
 	try {
 		encodeEnumData<ContainerProperty>(out, CONTAINER_PROPERTY_ID);
 
@@ -4173,7 +4381,7 @@ void GetContainerPropertiesHandler::encodeId(
 		out << schemaVersionId;
 		out << containerId;
 		encodeContainerKey(out, containerKey);
-		encodeMetaId(out, metaContainerId, metaNamingType);
+		encodeMetaId(out, metaContainerId, metaDistType, metaNamingType);
 
 		const size_t lastPos = out.base().position();
 		size = static_cast<uint32_t>(lastPos - sizePos - sizeof(size));
@@ -4188,14 +4396,13 @@ void GetContainerPropertiesHandler::encodeId(
 
 void GetContainerPropertiesHandler::encodeMetaId(
 		EventByteOutStream &out, ContainerId metaContainerId,
-		int8_t metaNamingType) {
+		MetaDistributionType metaDistType, int8_t metaNamingType) {
 	if (metaContainerId == UNDEF_CONTAINERID) {
 		return;
 	}
 
 	try {
-		const MetaContainerType type = META_FULL;
-		encodeEnumData<MetaContainerType>(out, type);
+		encodeEnumData<MetaDistributionType>(out, metaDistType);
 
 		const size_t sizePos = out.base().position();
 		uint32_t size = 0;
@@ -4456,6 +4663,7 @@ void PutContainerHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -4517,6 +4725,7 @@ void PutContainerHandler::operator()(EventContext &ec, Event &ev) {
 				ev.getType(),
 				connOption.userType_, connOption.requestType_,
 				request.optional_.get<Options::SYSTEM_MODE>(),
+				request.optional_.get<Options::ACCEPTABLE_FEATURE_VERSION>(),
 				ANY_CONTAINER,
 				request.optional_.get<Options::CONTAINER_ATTRIBUTE>())) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_CON_ACCESS_INVALID,
@@ -4780,6 +4989,7 @@ void DropContainerHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -4827,6 +5037,7 @@ void DropContainerHandler::operator()(EventContext &ec, Event &ev) {
 					ev.getType(),
 					connOption.userType_, connOption.requestType_,
 					request.optional_.get<Options::SYSTEM_MODE>(),
+					request.optional_.get<Options::ACCEPTABLE_FEATURE_VERSION>(),
 					container->getContainerType(), container->getAttribute())) {
 				GS_THROW_USER_ERROR(GS_ERROR_DS_CON_ACCESS_INVALID,
 						"Can not drop container attribute : " <<
@@ -4886,6 +5097,7 @@ void GetContainerHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -4934,6 +5146,7 @@ void GetContainerHandler::operator()(EventContext &ec, Event &ev) {
 				ev.getType(),
 				connOption.userType_, connOption.requestType_,
 				request.optional_.get<Options::SYSTEM_MODE>(),
+				request.optional_.get<Options::ACCEPTABLE_FEATURE_VERSION>(),
 				container->getContainerType(),
 				container->getAttribute(),
 				request.optional_.get<Options::CONTAINER_ATTRIBUTE>())) {
@@ -4970,6 +5183,7 @@ void CreateIndexHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -5262,6 +5476,7 @@ void DropIndexHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -5475,6 +5690,7 @@ void CreateDropTriggerHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -5564,6 +5780,7 @@ void FlushLogHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -5603,6 +5820,8 @@ void FlushLogHandler::operator()(EventContext &ec, Event &ev) {
 void WriteLogPeriodicallyHandler::operator()(EventContext &ec, Event &ev) {
 	TXN_TRACE_HANDLER_CALLED(ev);
 
+	EVENT_START(ec, ev, transactionManager_);
+
 	try {
 		const PartitionGroupId pgId = ec.getWorkerId();
 
@@ -5633,6 +5852,7 @@ void CreateTransactionContextHandler::operator()(EventContext &ec, Event &ev)
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -5679,6 +5899,7 @@ void CloseTransactionContextHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -5783,6 +6004,7 @@ void CommitAbortTransactionHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -5885,6 +6107,7 @@ void PutRowHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -5996,6 +6219,7 @@ void PutRowSetHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -6160,6 +6384,7 @@ void RemoveRowHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -6264,6 +6489,7 @@ void UpdateRowByIdHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -6373,6 +6599,7 @@ void RemoveRowByIdHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -6470,6 +6697,7 @@ void RemoveRowSetByIdHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -6608,6 +6836,7 @@ void UpdateRowSetByIdHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -6770,6 +6999,7 @@ void GetRowHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -6807,8 +7037,8 @@ void GetRowHandler::operator()(EventContext &ec, Event &ev) {
 		checkContainerSchemaVersion(container, request.fixed_.schemaVersionId_);
 
 		response.rs_ = dataStore_->createResultSet(
-			txn, txn.getContainerId(), container->getVersionId(), emNow);
-		const ResultSetGuard rsGuard(*dataStore_, *response.rs_);
+			txn, txn.getContainerId(), container->getVersionId(), emNow, NULL);
+		const ResultSetGuard rsGuard(txn, *dataStore_, *response.rs_);
 
 		util::XArray<RowId> lockedRowId(alloc);
 		{
@@ -6877,6 +7107,7 @@ void GetRowSetHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -6926,8 +7157,8 @@ void GetRowSetHandler::operator()(EventContext &ec, Event &ev) {
 		checkContainerSchemaVersion(container, request.fixed_.schemaVersionId_);
 
 		response.rs_ = dataStore_->createResultSet(
-			txn, txn.getContainerId(), container->getVersionId(), emNow);
-		const ResultSetGuard rsGuard(*dataStore_, *response.rs_);
+			txn, txn.getContainerId(), container->getVersionId(), emNow, NULL);
+		const ResultSetGuard rsGuard(txn, *dataStore_, *response.rs_);
 
 		{
 			const util::StackAllocator::ConfigScope queryScope(alloc);
@@ -6967,6 +7198,7 @@ void QueryTqlHandler::operator()(EventContext &ec, Event &ev)
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -6995,11 +7227,27 @@ void QueryTqlHandler::operator()(EventContext &ec, Event &ev)
 					keyBinary.data(), keyBinary.size());
 		}
 
+		const ContainerId metaContainerId =
+				request.optional_.get<Options::META_CONTAINER_ID>();
+		bool nodeDistribution = false;
+		if (metaContainerId != UNDEF_CONTAINERID) {
+			const bool forCore = true;
+			const MetaType::InfoTable &infoTable =
+					MetaType::InfoTable::getInstance();
+			const MetaContainerInfo *info =
+					infoTable.findInfo(metaContainerId, forCore);
+			if (info != NULL) {
+				nodeDistribution = info->nodeDistribution_;
+			}
+		}
+
 		const bool forUpdate = request.optional_.get<Options::FOR_UPDATE>();
 		const ClusterRole clusterRole = (CROLE_MASTER | CROLE_FOLLOWER);
-		const PartitionRoleType partitionRole =
-				forUpdate ? PROLE_OWNER : (PROLE_OWNER | PROLE_BACKUP);
-		const PartitionStatus partitionStatus = PSTATE_ON;
+		const PartitionRoleType partitionRole = nodeDistribution ?
+				PROLE_ANY :
+				(forUpdate ? PROLE_OWNER : (PROLE_OWNER | PROLE_BACKUP));
+		const PartitionStatus partitionStatus = nodeDistribution ?
+				PSTATE_ANY : PSTATE_ON;
 
 		checkAuthentication(ev.getSenderND(), emNow);  
 		checkConsistency(ev.getSenderND(), forUpdate);
@@ -7012,14 +7260,16 @@ void QueryTqlHandler::operator()(EventContext &ec, Event &ev)
 
 
 
-		const ContainerId metaContainerId =
-				request.optional_.get<Options::META_CONTAINER_ID>();
 		if (metaContainerId != UNDEF_CONTAINERID) {
 			TransactionContext &txn = transactionManager_->put(
 					alloc, request.fixed_.pId_,
 					TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
-			const DataStore::Latch latch(
-					txn, txn.getPartitionId(), dataStore_, clusterService_);
+
+			util::AllocUniquePtr<DataStore::Latch> latch(NULL, alloc);
+			if (!nodeDistribution) {
+				latch.reset(ALLOC_NEW(alloc) DataStore::Latch(
+						txn, txn.getPartitionId(), dataStore_, clusterService_));
+			}
 			MetaStore metaStore(*dataStore_);
 
 			MetaType::NamingType columnNamingType;
@@ -7032,14 +7282,15 @@ void QueryTqlHandler::operator()(EventContext &ec, Event &ev)
 
 			response.rs_ = dataStore_->createResultSet(
 					txn, txn.getContainerId(),
-					metaContainer->getVersionId(), emNow);
-			const ResultSetGuard rsGuard(*dataStore_, *response.rs_);
+					metaContainer->getVersionId(), emNow, NULL);
+			const ResultSetGuard rsGuard(txn, *dataStore_, *response.rs_);
 
 			MetaProcessorSource source(
 					connOption.dbId_, connOption.dbName_.c_str());
 			source.dataStore_ = dataStore_;
 			source.eventContext_= &ec;
 			source.transactionManager_ = transactionManager_;
+			source.transactionService_ = transactionService_;
 			source.partitionTable_ = partitionTable_;
 
 			QueryProcessor::executeMetaTQL(
@@ -7066,17 +7317,20 @@ void QueryTqlHandler::operator()(EventContext &ec, Event &ev)
 		BaseContainer *container = containerAutoPtr.getBaseContainer();
 		checkContainerSchemaVersion(container, request.fixed_.schemaVersionId_);
 
+		ResultSetOption queryOption;
+		createResultSetOption(
+				request.optional_, NULL, isPartial, partialQueryOption,
+				queryOption);
 		response.rs_ = dataStore_->createResultSet(
-			txn, txn.getContainerId(), container->getVersionId(), emNow);
-		const ResultSetGuard rsGuard(*dataStore_, *response.rs_);
+				txn, txn.getContainerId(), container->getVersionId(), emNow,
+				&queryOption);
+		const ResultSetGuard rsGuard(txn, *dataStore_, *response.rs_);
 
 		util::XArray<RowId> lockedRowId(alloc);
 		{
 			const util::StackAllocator::ConfigScope queryScope(alloc);
 			alloc.setTotalSizeLimit(transactionService_->getWorkMemoryByteSizeLimit());
 
-			applyQueryOption(
-					*response.rs_, request.optional_, NULL, isPartial, partialQueryOption);
 			QueryProcessor::executeTQL(
 					txn, *container, fetchOption.limit_,
 					TQLInfo(
@@ -7146,6 +7400,7 @@ void AppendRowHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -7250,6 +7505,7 @@ void QueryGeometryRelatedHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -7295,8 +7551,8 @@ void QueryGeometryRelatedHandler::operator()(EventContext &ec, Event &ev) {
 		checkContainerSchemaVersion(container, request.fixed_.schemaVersionId_);
 
 		response.rs_ = dataStore_->createResultSet(
-			txn, txn.getContainerId(), container->getVersionId(), emNow);
-		const ResultSetGuard rsGuard(*dataStore_, *response.rs_);
+			txn, txn.getContainerId(), container->getVersionId(), emNow, NULL);
+		const ResultSetGuard rsGuard(txn, *dataStore_, *response.rs_);
 
 		util::XArray<RowId> lockedRowId(alloc);
 		{
@@ -7365,6 +7621,7 @@ void QueryGeometryWithExclusionHandler::operator()(
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -7409,8 +7666,8 @@ void QueryGeometryWithExclusionHandler::operator()(
 		checkContainerSchemaVersion(container, request.fixed_.schemaVersionId_);
 
 		response.rs_ = dataStore_->createResultSet(
-			txn, txn.getContainerId(), container->getVersionId(), emNow);
-		const ResultSetGuard rsGuard(*dataStore_, *response.rs_);
+			txn, txn.getContainerId(), container->getVersionId(), emNow, NULL);
+		const ResultSetGuard rsGuard(txn, *dataStore_, *response.rs_);
 
 		util::XArray<RowId> lockedRowId(alloc);
 		{
@@ -7483,6 +7740,7 @@ void GetRowTimeRelatedHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -7526,8 +7784,8 @@ void GetRowTimeRelatedHandler::operator()(EventContext &ec, Event &ev) {
 		checkContainerSchemaVersion(container, request.fixed_.schemaVersionId_);
 
 		response.rs_ = dataStore_->createResultSet(
-			txn, txn.getContainerId(), container->getVersionId(), emNow);
-		const ResultSetGuard rsGuard(*dataStore_, *response.rs_);
+			txn, txn.getContainerId(), container->getVersionId(), emNow, NULL);
+		const ResultSetGuard rsGuard(txn, *dataStore_, *response.rs_);
 
 		{
 			const util::StackAllocator::ConfigScope queryScope(alloc);
@@ -7567,6 +7825,7 @@ void GetRowInterpolateHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -7610,8 +7869,8 @@ void GetRowInterpolateHandler::operator()(EventContext &ec, Event &ev) {
 		checkContainerSchemaVersion(container, request.fixed_.schemaVersionId_);
 
 		response.rs_ = dataStore_->createResultSet(
-			txn, txn.getContainerId(), container->getVersionId(), emNow);
-		const ResultSetGuard rsGuard(*dataStore_, *response.rs_);
+			txn, txn.getContainerId(), container->getVersionId(), emNow, NULL);
+		const ResultSetGuard rsGuard(txn, *dataStore_, *response.rs_);
 
 		{
 			const util::StackAllocator::ConfigScope queryScope(alloc);
@@ -7651,6 +7910,7 @@ void AggregateHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -7694,8 +7954,8 @@ void AggregateHandler::operator()(EventContext &ec, Event &ev) {
 		checkContainerSchemaVersion(container, request.fixed_.schemaVersionId_);
 
 		response.rs_ = dataStore_->createResultSet(
-			txn, txn.getContainerId(), container->getVersionId(), emNow);
-		const ResultSetGuard rsGuard(*dataStore_, *response.rs_);
+			txn, txn.getContainerId(), container->getVersionId(), emNow, NULL);
+		const ResultSetGuard rsGuard(txn, *dataStore_, *response.rs_);
 
 		{
 			const util::StackAllocator::ConfigScope queryScope(alloc);
@@ -7736,6 +7996,7 @@ void QueryTimeRangeHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -7780,8 +8041,8 @@ void QueryTimeRangeHandler::operator()(EventContext &ec, Event &ev) {
 		checkContainerSchemaVersion(container, request.fixed_.schemaVersionId_);
 
 		response.rs_ = dataStore_->createResultSet(
-			txn, txn.getContainerId(), container->getVersionId(), emNow);
-		const ResultSetGuard rsGuard(*dataStore_, *response.rs_);
+			txn, txn.getContainerId(), container->getVersionId(), emNow, NULL);
+		const ResultSetGuard rsGuard(txn, *dataStore_, *response.rs_);
 
 		util::XArray<RowId> lockedRowId(alloc);
 		{
@@ -7851,6 +8112,7 @@ void QueryTimeSamplingHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -7895,8 +8157,8 @@ void QueryTimeSamplingHandler::operator()(EventContext &ec, Event &ev) {
 		checkContainerSchemaVersion(container, request.fixed_.schemaVersionId_);
 
 		response.rs_ = dataStore_->createResultSet(
-			txn, txn.getContainerId(), container->getVersionId(), emNow);
-		const ResultSetGuard rsGuard(*dataStore_, *response.rs_);
+			txn, txn.getContainerId(), container->getVersionId(), emNow, NULL);
+		const ResultSetGuard rsGuard(txn, *dataStore_, *response.rs_);
 
 		util::XArray<RowId> lockedRowId(alloc);
 		{
@@ -7966,6 +8228,7 @@ void FetchResultSetHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -8009,7 +8272,7 @@ void FetchResultSetHandler::operator()(EventContext &ec, Event &ev) {
 				GS_ERROR_DS_DS_RESULT_ID_INVALID, "(rsId=" << rsId << ")");
 		}
 
-		const ResultSetGuard rsGuard(*dataStore_, *response.rs_);
+		const ResultSetGuard rsGuard(txn, *dataStore_, *response.rs_);
 
 		{
 			const util::StackAllocator::ConfigScope queryScope(alloc);
@@ -8044,6 +8307,7 @@ void CloseResultSetHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -8092,6 +8356,7 @@ void MultiCreateTransactionContextHandler::operator()(
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -8150,6 +8415,7 @@ void MultiCreateTransactionContextHandler::operator()(
 						ev.getType(),
 						connOption.userType_, connOption.requestType_,
 						request.optional_.get<Options::SYSTEM_MODE>(),
+						request.optional_.get<Options::ACCEPTABLE_FEATURE_VERSION>(),
 						container->getContainerType(),
 						container->getAttribute(), entry.containerAttribute_)) {
 					container = NULL;
@@ -8162,7 +8428,8 @@ void MultiCreateTransactionContextHandler::operator()(
 					request.fixed_.stmtType_,
 					request.fixed_.cxtSrc_.stmtId_, entry.containerId_,
 					TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL,
-					TransactionManager::CREATE, TransactionManager::AUTO_COMMIT);
+					TransactionManager::CREATE, TransactionManager::AUTO_COMMIT,
+					false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
 			TransactionContext &txn = transactionManager_->put(
 					alloc, request.fixed_.pId_, clientId, cxtSrc, now, emNow);
 
@@ -8230,6 +8497,7 @@ void MultiCloseTransactionContextHandler::operator()(
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -8363,23 +8631,12 @@ void MultiCloseTransactionContextHandler::decodeMultiTransactionCloseEntry(
 /*!
 	@brief Handles error
 */
-void MultiStatementHandler::handleExecuteError(util::StackAllocator &alloc,
-	PartitionId pId, const ClientId &clientId,
-	const TransactionManager::ContextSource &src, Progress &progress,
-	std::exception &, EventType stmtType, const char8_t *executionName) {
-#define TXN_TRACE_MULTI_OP_ERROR_MESSAGE(                                     \
-	category, pId, clientId, src, stmtType, executionName, containerName) \
-		" (" << category \
-		<< ", containerName=" << containerName \
-		<< ", stmtType=" << stmtType \
-		<< ", executionName=" << executionName << ", pId=" << pId \
-		<< ", clientId=" << clientId << ", containerId=" << src.containerId_ \
-		<< ")"
-
-#define TXN_TRACE_MULTI_OP_ERROR(                                    \
-	cause, category, pId, clientId, src, stmtType, executionName, containerName)    \
-	GS_EXCEPTION_MESSAGE(cause) << TXN_TRACE_MULTI_OP_ERROR_MESSAGE( \
-		category, pId, clientId, src, stmtType, executionName, containerName)
+void MultiStatementHandler::handleExecuteError(
+		util::StackAllocator &alloc,
+		const Event &ev, const Request &wholeRequest,
+		EventType stmtType, PartitionId pId, const ClientId &clientId,
+		const TransactionManager::ContextSource &src, Progress &progress,
+		std::exception &e, const char8_t *executionName) {
 
 	util::String containerName(alloc);
 	ExceptionParameterList paramList(alloc);
@@ -8387,7 +8644,8 @@ void MultiStatementHandler::handleExecuteError(util::StackAllocator &alloc,
 		const TransactionManager::ContextSource subSrc(
 				stmtType, 0, src.containerId_,
 				TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL,
-				TransactionManager::AUTO, TransactionManager::AUTO_COMMIT);
+				TransactionManager::AUTO, TransactionManager::AUTO_COMMIT,
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
 		TransactionContext &txn = transactionManager_->put(
 				alloc, pId, TXN_EMPTY_CLIENTID, subSrc, 0, 0);
 
@@ -8413,21 +8671,25 @@ void MultiStatementHandler::handleExecuteError(util::StackAllocator &alloc,
 	}
 
 	try {
+		MultiOpErrorMessage errorMessage(
+				e, "", ev, wholeRequest,
+				stmtType, pId, clientId, src,
+				containerName.c_str(), executionName);
+
 		try {
 			throw;
 		}
-		catch (StatementAlreadyExecutedException &e) {
+		catch (StatementAlreadyExecutedException&) {
 			UTIL_TRACE_EXCEPTION_INFO(
-				TRANSACTION_SERVICE, e,
-				TXN_TRACE_MULTI_OP_ERROR(e, "Statement already executed", pId,
-						clientId, src, stmtType, executionName, containerName));
+					TRANSACTION_SERVICE, e,
+					errorMessage.withDescription("Statement already executed"));
 			progress.containerResult_.push_back(
-				CONTAINER_RESULT_ALREADY_EXECUTED);
+					CONTAINER_RESULT_ALREADY_EXECUTED);
 		}
-		catch (LockConflictException &e) {
-			UTIL_TRACE_EXCEPTION_INFO(TRANSACTION_SERVICE, e,
-				TXN_TRACE_MULTI_OP_ERROR(e, "Lock conflicted", pId, clientId,
-						src, stmtType, executionName, containerName));
+		catch (LockConflictException &e2) {
+			UTIL_TRACE_EXCEPTION_INFO(
+					TRANSACTION_SERVICE, e,
+					errorMessage.withDescription("Lock conflicted"));
 
 			if (src.txnMode_ == TransactionManager::NO_AUTO_COMMIT_BEGIN) {
 				try {
@@ -8446,40 +8708,37 @@ void MultiStatementHandler::handleExecuteError(util::StackAllocator &alloc,
 						}
 					}
 				}
-				catch (ContextNotFoundException &) {
+				catch (ContextNotFoundException&) {
 					UTIL_TRACE_EXCEPTION_INFO(
-						TRANSACTION_SERVICE, e,
-						TXN_TRACE_MULTI_OP_ERROR(e, "Context not found", pId,
-								clientId, src, stmtType, executionName, containerName));
+							TRANSACTION_SERVICE, e,
+							errorMessage.withDescription("Context not found"));
 				}
 			}
 
 			try {
-				checkLockConflictStatus(progress.lockConflictStatus_, e);
+				checkLockConflictStatus(progress.lockConflictStatus_, e2);
 			}
 			catch (LockConflictException&) {
 				assert(false);
 				throw;
 			}
 			catch (...) {
-				std::exception e2;
 				handleExecuteError(
-						alloc, pId, clientId, src, progress, e2, stmtType,
-						executionName);
+						alloc, ev, wholeRequest, stmtType, pId, clientId, src,
+						progress, e, executionName);
 				return;
 			}
 			progress.lockConflicted_ = true;
 		}
-		catch (std::exception &e) {
+		catch (std::exception&) {
 			if (GS_EXCEPTION_CHECK_CRITICAL(e)) {
 				GS_RETHROW_SYSTEM_ERROR(
-					e, TXN_TRACE_MULTI_OP_ERROR_MESSAGE("System error", pId,
-						   clientId, src, stmtType, executionName, containerName));
+						e, errorMessage.withDescription("System error"));
 			}
 			else {
-				UTIL_TRACE_EXCEPTION(TRANSACTION_SERVICE, e,
-					TXN_TRACE_MULTI_OP_ERROR(e, "User error", pId, clientId,
-							src, stmtType, executionName, containerName));
+				UTIL_TRACE_EXCEPTION(
+						TRANSACTION_SERVICE, e,
+						errorMessage.withDescription("User error"));
 
 				try {
 					TransactionContext &txn =
@@ -8492,9 +8751,8 @@ void MultiStatementHandler::handleExecuteError(util::StackAllocator &alloc,
 				}
 				catch (ContextNotFoundException &) {
 					UTIL_TRACE_EXCEPTION_INFO(
-						TRANSACTION_SERVICE, e,
-						TXN_TRACE_MULTI_OP_ERROR(e, "Context not found", pId,
-								clientId, src, stmtType, executionName, containerName));
+							TRANSACTION_SERVICE, e,
+							errorMessage.withDescription("Context not found"));
 				}
 
 				progress.lastExceptionData_.clear();
@@ -8507,11 +8765,9 @@ void MultiStatementHandler::handleExecuteError(util::StackAllocator &alloc,
 			}
 		}
 	}
-	catch (std::exception &e) {
+	catch (std::exception&) {
 		GS_RETHROW_SYSTEM_ERROR(e, "");
 	}
-
-#undef TXN_TRACE_MULTI_OP_ERROR
 }
 
 /*!
@@ -8520,45 +8776,35 @@ void MultiStatementHandler::handleExecuteError(util::StackAllocator &alloc,
 void MultiStatementHandler::handleWholeError(
 		EventContext &ec, util::StackAllocator &alloc,
 		const Event &ev, const Request &request, std::exception &e) {
+	ErrorMessage errorMessage(e, "", ev, request);
 	try {
 		throw;
 	}
 	catch (EncodeDecodeException &) {
 		UTIL_TRACE_EXCEPTION(
-				TRANSACTION_SERVICE, e,
-				GS_EXCEPTION_MESSAGE(e) <<
-				" (Failed to encode or decode message"
-				", nd=" << ev.getSenderND() <<
-				", pId=" << ev.getPartitionId() << 
-				", eventType=" << ev.getType() << ")");
+				TRANSACTION_SERVICE, e, errorMessage.withDescription(
+						"Failed to encode or decode message"));
+		replyError(
+				ec, alloc, ev.getSenderND(), ev.getType(),
+				TXN_STATEMENT_ERROR, request, e);
 	}
 	catch (DenyException &) {
 		UTIL_TRACE_EXCEPTION(
-				TRANSACTION_SERVICE, e,
-				GS_EXCEPTION_MESSAGE(e) <<
-				" (Request denied"
-				", nd=" << ev.getSenderND() <<
-				", pId=" << ev.getPartitionId() <<
-				", eventType=" << ev.getType() <<
-				", stmtId=" << request.fixed_.cxtSrc_.stmtId_ << ")");
+				TRANSACTION_SERVICE, e, errorMessage.withDescription(
+						"Request denied"));
 		replyError(
 				ec, alloc, ev.getSenderND(), ev.getType(),
 				TXN_STATEMENT_DENY, request, e);
 	}
 	catch (std::exception &) {
 		const bool isCritical = GS_EXCEPTION_CHECK_CRITICAL(e);
-		const char8_t *category = (isCritical ? "System error" : "User error");
+		const char8_t *description = (isCritical ? "System error" : "User error");
 		const StatementExecStatus returnStatus =
 				(isCritical ? TXN_STATEMENT_NODE_ERROR : TXN_STATEMENT_ERROR);
 
 		UTIL_TRACE_EXCEPTION(
-				TRANSACTION_SERVICE, e,
-				GS_EXCEPTION_MESSAGE(e) <<
-				" (" << category <<
-				", nd=" << ev.getSenderND() <<
-				", pId=" << ev.getPartitionId() <<
-				", eventType=" << ev.getType() <<
-				", stmtId=" << request.fixed_.cxtSrc_.stmtId_ << ")");
+				TRANSACTION_SERVICE, e, errorMessage.withDescription(
+						description));
 		replyError(
 				ec, alloc, ev.getSenderND(), ev.getType(), returnStatus,
 				request, e);
@@ -8586,6 +8832,18 @@ void MultiStatementHandler::decodeContainerOptionPart(
 	}
 }
 
+void MultiStatementHandler::MultiOpErrorMessage::format(
+		std::ostream &os) const {
+	const ErrorMessage::Elements &elements = base_.elements_;
+
+	os << GS_EXCEPTION_MESSAGE(elements.cause_);
+	os << " (" << elements.description_;
+	os << ", containerName=" << containerName_;
+	os << ", executionName=" << executionName_;
+	base_.formatParameters(os);
+	os << ")";
+}
+
 /*!
 	@brief Handler Operator
 */
@@ -8598,6 +8856,7 @@ void MultiPutHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -8639,8 +8898,9 @@ void MultiPutHandler::operator()(EventContext &ec, Event &ev) {
 			const MessageSchema &messageSchema =
 				*(schemaList[rowSetRequest.schemaIndex_]);
 
-			execute(ec, request, rowSetRequest, messageSchema,
-				checkedSchemaIdSet, progress, putRowOption);
+			execute(
+					ec, ev, request, rowSetRequest, messageSchema,
+					checkedSchemaIdSet, progress, putRowOption);
 
 			if (!progress.lastExceptionData_.empty() ||
 				progress.lockConflicted_) {
@@ -8698,9 +8958,10 @@ void MultiPutHandler::operator()(EventContext &ec, Event &ev) {
 }
 
 void MultiPutHandler::execute(
-		EventContext &ec, const Request &request,
+		EventContext &ec, const Event &ev, const Request &request,
 		const RowSetRequest &rowSetRequest, const MessageSchema &schema,
-		CheckedSchemaIdSet &idSet, Progress &progress, PutRowOption putRowOption) {
+		CheckedSchemaIdSet &idSet, Progress &progress,
+		PutRowOption putRowOption) {
 	util::StackAllocator &alloc = ec.getAllocator();
 	const util::DateTime now = ec.getHandlerStartTime();
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
@@ -8824,8 +9085,8 @@ void MultiPutHandler::execute(
 		catch (...) {
 		}
 		handleExecuteError(
-				alloc, request.fixed_.pId_, clientId, src, progress, e,
-				PUT_MULTIPLE_CONTAINER_ROWS, "put");
+				alloc, ev, request, PUT_MULTIPLE_CONTAINER_ROWS,
+				request.fixed_.pId_, clientId, src, progress, e, "put");
 	}
 }
 
@@ -8902,11 +9163,13 @@ void MultiPutHandler::checkSchema(
 TransactionManager::ContextSource MultiPutHandler::createContextSource(
 		const Request &request, const RowSetRequest &rowSetRequest) {
 	return TransactionManager::ContextSource(
-			request.fixed_.stmtType_,
-			rowSetRequest.stmtId_, rowSetRequest.containerId_,
+			request.fixed_.stmtType_, rowSetRequest.stmtId_,
+			rowSetRequest.containerId_,
 			rowSetRequest.option_.get<Options::TXN_TIMEOUT_INTERVAL>(),
 			rowSetRequest.getMode_,
-			rowSetRequest.txnMode_);
+			rowSetRequest.txnMode_,
+			false,
+			request.fixed_.cxtSrc_.storeMemoryAgingSwapRate_);
 }
 
 void MultiPutHandler::decodeMultiSchema(
@@ -8994,6 +9257,7 @@ void MultiGetHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -9052,7 +9316,8 @@ void MultiGetHandler::operator()(EventContext &ec, Event &ev) {
 			for (size_t i = 0; i < searchList.size(); i++) {
 				const SearchEntry &entry = searchList[i];
 
-				entryCount += execute(ec, request, entry, schemaMap, out, progress);
+				entryCount += execute(
+						ec, ev, request, entry, schemaMap, out, progress);
 
 				if (!progress.lastExceptionData_.empty() ||
 					progress.lockConflicted_) {
@@ -9095,7 +9360,7 @@ void MultiGetHandler::operator()(EventContext &ec, Event &ev) {
 }
 
 uint32_t MultiGetHandler::execute(
-		EventContext &ec, const Request &request,
+		EventContext &ec, const Event &ev, const Request &request,
 		const SearchEntry &entry, const SchemaMap &schemaMap,
 		EventByteOutStream &replyOut, Progress &progress) {
 	util::StackAllocator &alloc = ec.getAllocator();
@@ -9129,8 +9394,9 @@ uint32_t MultiGetHandler::execute(
 
 		if (entry.predicate_->distinctKeys_ == NULL) {
 			ResultSet *rs = dataStore_->createResultSet(txn,
-				container->getContainerId(), container->getVersionId(), emNow);
-			const ResultSetGuard rsGuard(*dataStore_, *rs);
+				container->getContainerId(), container->getVersionId(), emNow,
+				NULL);
+			const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
 
 			QueryProcessor::search(txn, *container, MAX_RESULT_SIZE,
 				predicate.startKey_, predicate.finishKey_, *rs);
@@ -9157,8 +9423,8 @@ uint32_t MultiGetHandler::execute(
 
 				ResultSet *rs = dataStore_->createResultSet(txn,
 					container->getContainerId(), container->getVersionId(),
-					emNow);
-				const ResultSetGuard rsGuard(*dataStore_, *rs);
+					emNow, NULL);
+				const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
 
 				QueryProcessor::get(txn, *container,
 					static_cast<uint32_t>(rowKey.size()), rowKey.data(), *rs);
@@ -9180,8 +9446,8 @@ uint32_t MultiGetHandler::execute(
 	}
 	catch (std::exception &e) {
 		handleExecuteError(
-				alloc, request.fixed_.pId_, clientId, src, progress, e,
-				GET_MULTIPLE_CONTAINER_ROWS, getType);
+				alloc, ev, request, GET_MULTIPLE_CONTAINER_ROWS,
+				request.fixed_.pId_, clientId, src, progress, e, getType);
 	}
 
 	return entryCount;
@@ -9216,9 +9482,11 @@ void MultiGetHandler::buildSchemaMap(
 		}
 
 		const ContainerId containerId = it->containerId_;
-		const TransactionManager::ContextSource src(GET_MULTIPLE_CONTAINER_ROWS,
-			0, containerId, TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL,
-			TransactionManager::AUTO, TransactionManager::AUTO_COMMIT);
+		const TransactionManager::ContextSource src(
+				GET_MULTIPLE_CONTAINER_ROWS,
+				0, containerId, TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL,
+				TransactionManager::AUTO, TransactionManager::AUTO_COMMIT,
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
 		TransactionContext &txn =
 			transactionManager_->put(alloc, pId, TXN_EMPTY_CLIENTID, src, 0, 0);
 
@@ -9277,9 +9545,11 @@ void MultiGetHandler::buildSchemaMap(
 	for (util::XArray<SearchEntry>::const_iterator it = searchList.begin();
 		 it != searchList.end(); ++it) {
 		const ContainerId containerId = it->containerId_;
-		const TransactionManager::ContextSource src(GET_MULTIPLE_CONTAINER_ROWS,
-			0, containerId, TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL,
-			TransactionManager::AUTO, TransactionManager::AUTO_COMMIT);
+		const TransactionManager::ContextSource src(
+				GET_MULTIPLE_CONTAINER_ROWS,
+				0, containerId, TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL,
+				TransactionManager::AUTO, TransactionManager::AUTO_COMMIT,
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
 		TransactionContext &txn =
 			transactionManager_->put(alloc, pId, TXN_EMPTY_CLIENTID, src, 0, 0);
 
@@ -9361,9 +9631,13 @@ void MultiGetHandler::checkContainerRowKey(
 TransactionManager::ContextSource MultiGetHandler::createContextSource(
 		const Request &request, const SearchEntry &entry) {
 	return TransactionManager::ContextSource(
-				request.fixed_.stmtType_, entry.stmtId_,
-				entry.containerId_, request.fixed_.cxtSrc_.txnTimeoutInterval_, entry.getMode_,
-				entry.txnMode_);
+			request.fixed_.stmtType_, entry.stmtId_,
+			entry.containerId_,
+			request.fixed_.cxtSrc_.txnTimeoutInterval_,
+			entry.getMode_,
+			entry.txnMode_,
+			false,
+			request.fixed_.cxtSrc_.storeMemoryAgingSwapRate_);
 }
 
 void MultiGetHandler::decodeMultiSearchEntry(
@@ -9429,6 +9703,7 @@ void MultiGetHandler::decodeMultiSearchEntry(
 				if (container != NULL && !checkPrivilege(
 						GET_MULTIPLE_CONTAINER_ROWS,
 						userType, requestType, isSystemMode,
+						optionSet.get<Options::ACCEPTABLE_FEATURE_VERSION>(),
 						container->getContainerType(),
 						container->getAttribute(),
 						optionSet.get<Options::CONTAINER_ATTRIBUTE>())) {
@@ -9549,6 +9824,7 @@ void MultiQueryHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption &connOption =
@@ -9606,9 +9882,8 @@ void MultiQueryHandler::operator()(EventContext &ec, Event &ev) {
 						queryRequest.optionSet_,
 						queryRequest.fetchOption_, queryRequest.isPartial_, isTQL);
 				execute(
-						ec, request,
-						fetchByteSize,
-						queryRequest, out, progress);
+						ec, ev, request, fetchByteSize, queryRequest, out,
+						progress);
 
 				if (!progress.lastExceptionData_.empty() ||
 						progress.lockConflicted_) {
@@ -9663,10 +9938,9 @@ void MultiQueryHandler::operator()(EventContext &ec, Event &ev) {
 }
 
 void MultiQueryHandler::execute(
-		EventContext &ec, const Request &request,
-		int32_t &fetchByteSize,
-		const QueryRequest &queryRequest, EventByteOutStream &replyOut,
-		Progress &progress) {
+		EventContext &ec, const Event &ev, const Request &request,
+		int32_t &fetchByteSize, const QueryRequest &queryRequest,
+		EventByteOutStream &replyOut, Progress &progress) {
 	util::StackAllocator &alloc = ec.getAllocator();
 	const util::DateTime now = ec.getHandlerStartTime();
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
@@ -9686,12 +9960,15 @@ void MultiQueryHandler::execute(
 				txn, txn.getPartitionId(), dataStore_, clusterService_);
 
 		const FetchOption &fetchOption = queryRequest.fetchOption_;
+		ResultSetOption queryOption;
+		createResultSetOption(
+				queryRequest.optionSet_, &fetchByteSize,
+				queryRequest.isPartial_, queryRequest.partialQueryOption_,
+				queryOption);
 		ResultSet *rs = dataStore_->createResultSet(
-				txn, txn.getContainerId(), UNDEF_SCHEMAVERSIONID, emNow);
-		const ResultSetGuard rsGuard(*dataStore_, *rs);
-		applyQueryOption(
-				*rs, queryRequest.optionSet_, &fetchByteSize,
-				queryRequest.isPartial_, queryRequest.partialQueryOption_);
+				txn, txn.getContainerId(), UNDEF_SCHEMAVERSIONID, emNow,
+				&queryOption);
+		const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
 
 		switch (queryRequest.stmtType_) {
 		case QUERY_TQL: {
@@ -9802,19 +10079,21 @@ void MultiQueryHandler::execute(
 	catch (std::exception &e) {
 
 		handleExecuteError(
-				alloc, request.fixed_.pId_, clientId, src, progress, e,
-				EXECUTE_MULTIPLE_QUERIES, queryType);
+				alloc, ev, request, EXECUTE_MULTIPLE_QUERIES,
+				request.fixed_.pId_, clientId, src, progress, e, queryType);
 	}
 }
 
 TransactionManager::ContextSource MultiQueryHandler::createContextSource(
 		const Request &request, const QueryRequest &queryRequest) {
 	return TransactionManager::ContextSource(
-			request.fixed_.stmtType_,
-			queryRequest.stmtId_, queryRequest.containerId_,
+			request.fixed_.stmtType_, queryRequest.stmtId_,
+			queryRequest.containerId_,
 			queryRequest.optionSet_.get<Options::TXN_TIMEOUT_INTERVAL>(),
 			queryRequest.getMode_,
-			queryRequest.txnMode_);
+			queryRequest.txnMode_,
+			false,
+			request.fixed_.cxtSrc_.storeMemoryAgingSwapRate_);
 }
 
 void MultiQueryHandler::decodeMultiQuery(
@@ -9931,7 +10210,7 @@ void MultiQueryHandler::encodeSearchResult(
 		switch (rs.getResultType()) {
 		case RESULT_ROWSET: {
 			PartialQueryOption partialQueryOption(alloc);
-			rs.encodePartialQueryOption(alloc, partialQueryOption);
+			rs.getQueryOption().encodePartialQueryOption(alloc, partialQueryOption);
 
 			const size_t entryNumPos = out.base().position();
 			int32_t entryNum = 0;
@@ -10126,11 +10405,15 @@ void ReplicationLogHandler::operator()(EventContext &ec, Event &ev)
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	ReplicationAck request(ev.getPartitionId());
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		EventByteInStream in(ev.getInStream());
 
-		decodeReplicationAck(in, request);
+		ConnectionOption &connOption =
+				ev.getSenderND().getUserData<ConnectionOption>();
+		Request requestOption(alloc, getRequestSource(ev));
+		decode(in, request, requestOption, connOption);
 
 		clusterService_->checkVersion(request.clusterVer_);
 
@@ -10170,7 +10453,7 @@ void ReplicationLogHandler::operator()(EventContext &ec, Event &ev)
 					 << ", closedResourceIdCount=" << closedResourceIdCount
 					 << ", logRecordCount=" << logRecordCount << ")");
 
-		replyReplicationAck(ec, alloc, ev.getSenderND(), request);
+		replyReplicationAck(ec, alloc, ev.getSenderND(), request, isOptionalFormat());
 
 		recoveryManager_->redoLogList(alloc, RecoveryManager::MODE_REPLICATION,
 			request.pId_, now, emNow, logRecordList.data(),
@@ -10178,6 +10461,15 @@ void ReplicationLogHandler::operator()(EventContext &ec, Event &ev)
 
 		for (size_t i = 0; i < closedResourceIds.size(); i++) {
 			transactionManager_->remove(request.pId_, closedResourceIds[i]);
+		}
+
+		if (partitionTable_->getPartitionStatus(request.pId_) == PartitionTable::PT_SYNC
+				&& partitionTable_->isOwner(request.pId_)) {
+			GS_TRACE_WARNING(TRANSACTION_SERVICE, GS_TRACE_TXN_RECEIVE_LOG,
+				"Redo log under sync operation ("
+						 << "node=" << ev.getSenderND()
+						 << ", pId=" << request.pId_ 
+						 << ", eventType=" << getEventTypeName(request.replStmtType_));
 		}
 	}
 	catch (DenyException &e) {
@@ -10261,11 +10553,15 @@ void ReplicationAckHandler::operator()(EventContext &ec, Event &ev) {
 	util::StackAllocator &alloc = ec.getAllocator();
 
 	ReplicationAck ack(ev.getPartitionId());
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		EventByteInStream in(ev.getInStream());
 
-		decodeReplicationAck(in, ack);
+		ConnectionOption &connOption =
+				ev.getSenderND().getUserData<ConnectionOption>();
+		Request requestOption(alloc, getRequestSource(ev));
+		decode(in, ack, requestOption, connOption);
 
 		clusterService_->checkVersion(ack.clusterVer_);
 		const ClusterRole clusterRole = (CROLE_MASTER | CROLE_FOLLOWER);
@@ -10314,7 +10610,6 @@ void CheckTimeoutHandler::operator()(EventContext &ec, Event &ev) {
 	TXN_TRACE_HANDLER_CALLED(ev);
 
 	util::StackAllocator &alloc = ec.getAllocator();
-
 	try {
 		{
 			const util::StackAllocator::Scope scope(alloc);
@@ -10536,11 +10831,12 @@ void CheckTimeoutHandler::checkRequestTimeout(
 					}
 
 					const TransactionManager::ContextSource src(
-						TXN_COLLECT_TIMEOUT_RESOURCE, txn.getLastStatementId(),
-						txn.getContainerId(),
-						txn.getTransationTimeoutInterval(),
-						TransactionManager::AUTO,
-						TransactionManager::AUTO_COMMIT);
+							TXN_COLLECT_TIMEOUT_RESOURCE, txn.getLastStatementId(),
+							txn.getContainerId(),
+							txn.getTransationTimeoutInterval(),
+							TransactionManager::AUTO,
+							TransactionManager::AUTO_COMMIT,
+							false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
 
 					transactionManager_->remove(pIds[i], timeoutResourceIds[i]);
 					closedResourceIds.push_back(timeoutResourceIds[i]);
@@ -10646,11 +10942,12 @@ void CheckTimeoutHandler::checkKeepaliveTimeout(
 					}
 
 					const TransactionManager::ContextSource src(
-						TXN_COLLECT_TIMEOUT_RESOURCE, txn.getLastStatementId(),
-						txn.getContainerId(),
-						txn.getTransationTimeoutInterval(),
-						TransactionManager::AUTO,
-						TransactionManager::AUTO_COMMIT);
+							TXN_COLLECT_TIMEOUT_RESOURCE, txn.getLastStatementId(),
+							txn.getContainerId(),
+							txn.getTransationTimeoutInterval(),
+							TransactionManager::AUTO,
+							TransactionManager::AUTO_COMMIT,
+							false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
 
 					transactionManager_->remove(pIds[i], timeoutResourceIds[i]);
 					closedResourceIds.push_back(timeoutResourceIds[i]);
@@ -10747,11 +11044,12 @@ void CheckTimeoutHandler::checkNoExpireTransaction(util::StackAllocator &alloc, 
 				}
 
 				const TransactionManager::ContextSource src(
-					TXN_COLLECT_TIMEOUT_RESOURCE, txn.getLastStatementId(),
-					txn.getContainerId(),
-					txn.getTransationTimeoutInterval(),
-					TransactionManager::AUTO,
-					TransactionManager::AUTO_COMMIT);
+						TXN_COLLECT_TIMEOUT_RESOURCE, txn.getLastStatementId(),
+						txn.getContainerId(),
+						txn.getTransationTimeoutInterval(),
+						TransactionManager::AUTO,
+						TransactionManager::AUTO_COMMIT,
+						false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
 
 				transactionManager_->remove(pId, noExpireResourceIds[i]);
 				closedResourceIds.push_back(noExpireResourceIds[i]);
@@ -11048,6 +11346,7 @@ void BackgroundHandler::operator()(EventContext &ec, Event &ev) {
 	util::StackAllocator &alloc = ec.getAllocator();
 	const util::DateTime now = ec.getHandlerStartTime();
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
+	EVENT_START(ec, ev, transactionManager_);
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
@@ -11178,6 +11477,7 @@ void ContinueCreateDDLHandler::operator()(EventContext &ec, Event &ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
+	EVENT_START(ec, ev, transactionManager_);
 
 
 	if (clusterManager_->isSystemError() || clusterManager_->isNormalShutdownCall()) {
@@ -11365,6 +11665,7 @@ void UpdateDataStoreStatusHandler::operator()(EventContext &ec, Event &ev) {
 	Response response(alloc);
 	BGTask currentTask;
 	currentTask.pId_ = request.fixed_.pId_;
+	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		EventByteInStream in(ev.getInStream());
@@ -11442,6 +11743,7 @@ void TransactionService::requestUpdateDataStoreStatus(
 */
 void UnsupportedStatementHandler::operator()(EventContext &ec, Event &ev) {
 	util::StackAllocator &alloc = ec.getAllocator();
+	EVENT_START(ec, ev, transactionManager_);
 
 	if (ev.getSenderND().isEmpty()) return;
 
@@ -11464,6 +11766,7 @@ void UnsupportedStatementHandler::operator()(EventContext &ec, Event &ev) {
 	@brief Handler Operator
 */
 void UnknownStatementHandler::operator()(EventContext &ec, Event &ev) {
+	EVENT_START(ec, ev, transactionManager_);
 	try {
 		GS_THROW_USER_ERROR(
 			GS_ERROR_TXN_STATEMENT_TYPE_UNKNOWN, "Unknown statement type");
@@ -11828,6 +12131,16 @@ void TransactionService::initialize(const ManagerSet &mgrSet) {
 		ee_->setHandler(REPLICATION_ACK, replicationAckHandler_);
 		ee_->setHandlingMode(
 			REPLICATION_ACK, EventEngine::HANDLING_PARTITION_SERIALIZED);
+
+		replicationLog2Handler_.initialize(mgrSet);
+		ee_->setHandler(REPLICATION_LOG2, replicationLog2Handler_);
+		ee_->setHandlingMode(
+			REPLICATION_LOG2, EventEngine::HANDLING_PARTITION_SERIALIZED);
+
+		replicationAck2Handler_.initialize(mgrSet);
+		ee_->setHandler(REPLICATION_ACK2, replicationAck2Handler_);
+		ee_->setHandlingMode(
+			REPLICATION_ACK2, EventEngine::HANDLING_PARTITION_SERIALIZED);
 
 		authenticationHandler_.initialize(mgrSet);
 		ee_->setHandler(AUTHENTICATION, authenticationHandler_);
@@ -12387,8 +12700,8 @@ int32_t TransactionService::getWaitTime(EventContext &ec, Event *ev, int32_t ope
 				case SYNC_EXEC: {
 					EventType eventType = (*ev).getType();
 					if (eventType != TXN_LONGTERM_SYNC_CHUNK
-						|| eventType != TXN_LONGTERM_SYNC_LOG) {
-							return 0;
+							&& eventType != TXN_LONGTERM_SYNC_LOG) {
+						return 0;
 					}
 					queueSizeLimit = syncManager_->getExtraConfig().getLimitLongtermQueueSize();
 					interval = syncManager_->getExtraConfig().getLongtermHighLoadInterval();
@@ -12414,4 +12727,28 @@ int32_t TransactionService::getWaitTime(EventContext &ec, Event *ev, int32_t ope
 
 TransactionService::StatUpdator::StatUpdator()
 	: service_(NULL), manager_(NULL) {}
+
+void EventMonitor::reset(EventStart &eventStart) {
+	PartitionGroupId pgId = eventStart.getEventContext().getWorkerId();
+	eventInfoList_[pgId].init();
+}
+
+void EventMonitor::set(EventStart &eventStart) {
+	PartitionGroupId pgId = eventStart.getEventContext().getWorkerId();
+	eventInfoList_[pgId].eventType_ = eventStart.getEvent().getType();
+	eventInfoList_[pgId].pId_ = eventStart.getEvent().getPartitionId();
+	eventInfoList_[pgId].startTime_
+			= eventStart.getEventContext().getHandlerStartTime().getUnixTime();
+}
+std::string EventMonitor::dump() {
+	util::NormalOStringStream strstrm;
+	for (size_t pos = 0; pos < eventInfoList_.size(); pos++) {
+		strstrm << "pos=" << pos 
+			<< ", event=" << getEventTypeName(eventInfoList_[pos].eventType_)
+			<< ", pId=" << eventInfoList_[pos].pId_
+			<< ", startTime=" << getTimeStr(eventInfoList_[pos].startTime_)
+			<< std::endl;
+	}
+	return strstrm.str().c_str();
+}
 

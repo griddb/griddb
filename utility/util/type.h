@@ -263,29 +263,38 @@
 #define LARGE_FILES
 #endif
 
+#define __STDC_CONSTANT_MACROS
+#ifndef __STDC_LIMIT_MACROS
+#define __STDC_LIMIT_MACROS
+#endif
+
+#if UTIL_CXX11_SUPPORTED
+#include <cstdint>
+#else
+#ifdef _MSC_STDINT_H_
+#error "Do not include stdint.h before this header is included"
+#endif
+#if defined(_MSC_VER) && (_MSC_VER <= 1500)
+#include "util/stdint/stdint.h"
+#else
+#include <stdint.h>
+#endif 
+#endif 
+
+#ifndef UINT64_MAX
+#error "Integer limit macros are not defined"
+#endif
+
+#ifndef UINT64_C
+#error "Integer constant macros are not defined"
+#endif
+
 #include <exception>
 #include <sstream>
 
 #ifndef _WIN32
 #include <sys/types.h>
 #endif
-
-#define __STDC_CONSTANT_MACROS
-#if UTIL_CXX11_SUPPORTED
-#include <cstdint>
-#else
-#ifndef __STDC_LIMIT_MACROS
-#define __STDC_LIMIT_MACROS
-#endif
-#if defined(_MSC_VER) && (_MSC_VER <= 1500)
-#ifdef _MSC_STDINT_H_
-#error "Do not include stdint.h before this header is included"
-#endif
-#include "util/stdint.h"
-#else
-#include <stdint.h>
-#endif 
-#endif 
 
 #ifdef UTIL_HAVE_STDDEF_H
 #include <stddef.h>
@@ -406,13 +415,14 @@ const int32_t ERROR_UNDEF = 0;
 namespace util {
 
 #define UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL \
-		const util::Exception::NamedErrorCode &namedErrorCode, \
-		const char8_t *message, \
-		const util::Exception::SourceSymbolChar *fileNameLiteral, \
-		const util::Exception::SourceSymbolChar *functionNameLiteral, \
-		int32_t lineNumber, \
-		const std::exception *causeInHandling, \
-		const char8_t *typeNameLiteral, \
+		const util::Exception::NamedErrorCode &namedErrorCode = \
+				util::Exception::NamedErrorCode(), \
+		const char8_t *message = NULL, \
+		const util::Exception::SourceSymbolChar *fileNameLiteral = NULL, \
+		const util::Exception::SourceSymbolChar *functionNameLiteral = NULL, \
+		int32_t lineNumber = 0, \
+		const std::exception *causeInHandling = NULL, \
+		const char8_t *typeNameLiteral = NULL, \
 		util::Exception::StackTraceMode stackTraceMode = \
 				util::Exception::STACK_TRACE_NONE, \
 		util::Exception::DuplicatedLiteralFlags literalFlags = \
@@ -487,16 +497,7 @@ public:
 	static const DuplicatedLiteralFlags LITERAL_ALL_DUPLICATED;
 
 
-	explicit Exception(
-			const NamedErrorCode &namedErrorCode = NamedErrorCode(),
-			const char8_t *message = NULL,
-			const SourceSymbolChar *fileNameLiteral = NULL,
-			const SourceSymbolChar *functionNameLiteral = NULL,
-			int32_t lineNumber = 0,
-			const std::exception *causeInHandling = NULL,
-			const char8_t *typeNameLiteral = NULL,
-			StackTraceMode stackTraceMode = STACK_TRACE_NONE,
-			DuplicatedLiteralFlags literalFlags = LITERAL_NORMAL) throw();
+	explicit Exception(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw();
 
 	virtual ~Exception() throw();
 
@@ -698,13 +699,13 @@ std::ostream& operator<<(std::ostream &s, const Exception::Field &field);
 */
 class PlatformException : public Exception {
 public:
-	PlatformException(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw();
+	explicit PlatformException(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw();
 	virtual ~PlatformException() throw();
 };
 
 class UtilityException : public Exception {
 public:
-	UtilityException(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw();
+	explicit UtilityException(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw();
 	virtual ~UtilityException() throw();
 
 	static UtilityException inherit(

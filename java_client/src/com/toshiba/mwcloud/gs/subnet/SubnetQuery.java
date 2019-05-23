@@ -30,6 +30,7 @@ import com.toshiba.mwcloud.gs.common.ContainerKeyConverter.ContainerKey;
 import com.toshiba.mwcloud.gs.common.ContainerProperties.MetaNamingType;
 import com.toshiba.mwcloud.gs.common.ContainerKeyConverter;
 import com.toshiba.mwcloud.gs.common.Extensibles;
+import com.toshiba.mwcloud.gs.common.Extensibles.QueryInfo;
 import com.toshiba.mwcloud.gs.common.GSErrorCode;
 import com.toshiba.mwcloud.gs.common.RowMapper;
 import com.toshiba.mwcloud.gs.common.Statement;
@@ -69,7 +70,8 @@ implements Query<R>, Extensibles.AsQuery<R>, Experimentals.AsQuery<R> {
 		this.formatter = formatter;
 	}
 
-	SubnetContainer<?, ?> getContainer() {
+	@Override
+	public SubnetContainer<?, ?> getContainer() {
 		return container;
 	}
 
@@ -337,6 +339,16 @@ implements Query<R>, Extensibles.AsQuery<R>, Experimentals.AsQuery<R> {
 		checkOpened();
 		parameters = QueryParameters.resolve(parameters);
 		parameters.containerLostAcceptable = acceptable;
+	}
+
+	@Override
+	public QueryInfo getInfo() {
+		return formatter;
+	}
+
+	@Override
+	public Query<R> getBaseQuery() {
+		return this;
 	}
 
 	static class QueryParameters implements OptionalRequestSource {

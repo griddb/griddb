@@ -143,8 +143,8 @@ public:
 	virtual void putValue(TransactionContext &, const Value &input) {
 		i++;
 		if (cType != COLUMN_TYPE_WITH_BEGIN && input.getType() != cType) {
-			GS_THROW_USER_ERROR(GS_ERROR_TQ_INTERNAL_INVALID_ARGUMENT,
-				"Internal logic error: Values of different type are passed to "
+			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
+				"Values of different type are passed to "
 				"count()");
 		}
 		cType = input.getType();
@@ -228,8 +228,8 @@ public:
 			value.set(0.0);
 			break;
 		default:
-			GS_THROW_USER_ERROR(GS_ERROR_TQ_INTERNAL_INVALID_ARGUMENT,
-				"Internal logic error: Invalid type for aggregation");
+			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
+				"Invalid type for aggregation");
 		}
 
 		b = false;
@@ -244,8 +244,8 @@ public:
 	 */
 	virtual void putValue(TransactionContext &txn, const Value &input) {
 		if (!input.isNumerical()) {
-			GS_THROW_USER_ERROR(GS_ERROR_TQ_INTERNAL_INVALID_ARGUMENT,
-				"Internal logic error: Invalid value for aggregation");
+			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
+				"Invalid type for aggregation");
 		}
 		ColumnType type = input.getType();
 		assert(CalculatorTable::addTable_[type][value.getType()] != NULL);
@@ -318,8 +318,8 @@ public:
 	 */
 	virtual void putValue(TransactionContext &, const Value &input) {
 		if (!input.isNumerical()) {
-			GS_THROW_USER_ERROR(GS_ERROR_TQ_INTERNAL_INVALID_ARGUMENT,
-				"Internal logic error: Invalid value for aggregation");
+			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
+				"Invalid type for aggregation");
 		}
 		v += input.getDouble();
 		i++;
@@ -391,8 +391,8 @@ public:
 	 */
 	virtual void putValue(TransactionContext &, const Value &input) {
 		if (!input.isNumerical()) {
-			GS_THROW_USER_ERROR(GS_ERROR_TQ_INTERNAL_INVALID_ARGUMENT,
-				"Internal logic error: Invalid value for aggregation");
+			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
+				"Invalid type for aggregation");
 		}
 		double inputValue;
 		inputValue = input.getDouble();
@@ -642,8 +642,8 @@ public:
 		}
 		else {
 			if (!input.isNumerical()) {
-				GS_THROW_USER_ERROR(GS_ERROR_TQ_INTERNAL_INVALID_ARGUMENT,
-					"Internal logic error: Invalid value for aggregation");
+				GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
+					"Invalid type for aggregation");
 			}
 
 			if (resultFlag) {
@@ -821,12 +821,12 @@ public:
 	virtual void putValue(
 		TransactionContext &, const Value &inputKey, const Value &inputValue) {
 		if (inputKey.getType() != COLUMN_TYPE_TIMESTAMP) {
-			GS_THROW_USER_ERROR(GS_ERROR_TQ_INTERNAL_INVALID_ARGUMENT,
-				"Internal logic error: Aggregation key must be a timestamp.");
+			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
+				"Aggregation key must be a timestamp.");
 		}
 		if (!inputValue.isNumerical()) {
-			GS_THROW_USER_ERROR(GS_ERROR_TQ_INTERNAL_INVALID_ARGUMENT,
-				"Internal logic error: Aggregation value must be a numeric "
+			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
+				"Aggregation value must be a numeric "
 				"value.");
 		}
 		numCount++;

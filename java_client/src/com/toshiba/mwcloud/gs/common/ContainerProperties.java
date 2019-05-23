@@ -35,7 +35,7 @@ public class ContainerProperties {
 
 		public final ContainerKey remoteKey;
 
-		public final MetaContainerType metaContainerType;
+		public final MetaDistributionType metaDistType;
 
 		public final long metaContainerId;
 
@@ -43,12 +43,12 @@ public class ContainerProperties {
 
 		public ContainerIdInfo(
 				int versionId, long containerId, ContainerKey remoteKey,
-				MetaContainerType metaContainerType, long metaContainerId,
+				MetaDistributionType metaDistType, long metaContainerId,
 				MetaNamingType metaNamingType) {
 			this.versionId = versionId;
 			this.containerId = containerId;
 			this.remoteKey = remoteKey;
-			this.metaContainerType = metaContainerType;
+			this.metaDistType = metaDistType;
 			this.metaContainerId = metaContainerId;
 			this.metaNamingType = metaNamingType;
 		}
@@ -184,9 +184,10 @@ public class ContainerProperties {
 
 	}
 
-	public enum MetaContainerType {
+	public enum MetaDistributionType {
 		NONE,
-		FULL
+		FULL,
+		NODE
 	}
 
 	public enum MetaNamingType {

@@ -61,7 +61,7 @@ import com.toshiba.mwcloud.gs.common.ContainerKeyPredicate;
 import com.toshiba.mwcloud.gs.common.ContainerProperties;
 import com.toshiba.mwcloud.gs.common.ContainerProperties.ContainerIdInfo;
 import com.toshiba.mwcloud.gs.common.ContainerProperties.ContainerVisibility;
-import com.toshiba.mwcloud.gs.common.ContainerProperties.MetaContainerType;
+import com.toshiba.mwcloud.gs.common.ContainerProperties.MetaDistributionType;
 import com.toshiba.mwcloud.gs.common.ContainerProperties.MetaNamingType;
 import com.toshiba.mwcloud.gs.common.Extensibles;
 import com.toshiba.mwcloud.gs.common.Extensibles.MultiOperationContext;
@@ -87,6 +87,7 @@ import com.toshiba.mwcloud.gs.subnet.GridStoreChannel.ContextMonitor;
 import com.toshiba.mwcloud.gs.subnet.GridStoreChannel.ContextReference;
 import com.toshiba.mwcloud.gs.subnet.GridStoreChannel.LocatedSchema;
 import com.toshiba.mwcloud.gs.subnet.GridStoreChannel.RemoteReference;
+import com.toshiba.mwcloud.gs.subnet.NodeConnection.FeatureVersion;
 import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequest;
 import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequestSource;
 import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequestType;
@@ -139,7 +140,7 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 	private final NamedContainerMap<SubnetContainer<?, ?>> containerMap;
 
 	private final ContextMonitor contextMonitor =
-			GridStoreChannel.createContextMonitorIfAvailable();
+			GridStoreChannel.tryCreateGeneralContextMonitor();
 
 	public SubnetGridStore(
 			GridStoreChannel channel, Context context) throws GSException {
@@ -661,6 +662,8 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 							OptionalRequestType.META_NAMING_TYPE,
 							(byte) metaNamingType.ordinal());
 				}
+				optionalRequest.putAcceptableFeatureVersion(
+						FeatureVersion.V4_2);
 			}
 
 			@Override
@@ -1075,7 +1078,8 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 				(!pathKeyOperationEnabled &&
 						context.getContainerCache() == null ?
 						null : normalizedLocalKey),
-				(contextMonitor == null ? null : remoteKey)
+				(contextMonitor == null && !isContainerMonitoring() ?
+						null : remoteKey)
 		};
 	}
 
@@ -1096,7 +1100,7 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		}
 
 		final OptionalRequest request = new OptionalRequest();
-		request.putFeatureVersion(1);
+		request.putFeatureVersion(FeatureVersion.V4_1);
 		return request;
 	}
 
@@ -1502,11 +1506,11 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		final long containerId = in.base().getLong();
 		final ContainerKey remoteKey = keyConverter.get(in, false, true);
 
-		MetaContainerType metaContainerType = MetaContainerType.NONE;
+		MetaDistributionType metaDistType = MetaDistributionType.NONE;
 		long metaContainerId = -1;
 		MetaNamingType metaNamingType = null;
 		if (in.base().position() < endPos) {
-			metaContainerType = in.getByteEnum(MetaContainerType.class);
+			metaDistType = in.getByteEnum(MetaDistributionType.class);
 
 			final int size =
 					BufferUtils.checkSize(in.base(), in.base().getInt());
@@ -1518,7 +1522,7 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 
 		return new ContainerIdInfo(
 				versionId, containerId, remoteKey,
-				metaContainerType, metaContainerId, metaNamingType);
+				metaDistType, metaContainerId, metaNamingType);
 	}
 
 	private static void importSchemaProperty(
@@ -1968,11 +1972,11 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		final ContainerKey normalizedKey = acceptedKeys[0];
 		final ContainerKey remoteKey = acceptedKeys[1];
 
-		if (idInfo.metaContainerType != MetaContainerType.NONE) {
+		if (idInfo.metaDistType != MetaDistributionType.NONE) {
 			return disguiseTypedContainer(new MetaCollection<Object, Row>(
 					this, channel, context, Row.class, mapper,
 					idInfo.versionId, partitionId,
-					idInfo.metaContainerType,
+					idInfo.metaDistType,
 					idInfo.metaContainerId, idInfo.metaNamingType,
 					normalizedKey, idInfo.remoteKey));
 		}
@@ -2506,6 +2510,7 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 
 		static SubnetQuery<?> check(
 				Query<?> query, SubnetGridStore store) throws GSException {
+			final Query<?> baseQuery;
 			if (!(query instanceof SubnetQuery)) {
 				if (query == null) {
 					throw new GSException(
@@ -2513,13 +2518,21 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 							"Empty query object");
 				}
 
-				throw new GSException(
-						GSErrorCode.ILLEGAL_PARAMETER,
-						"Query type not matched (class=" +
-						query.getClass() + ")");
+				if (!(query instanceof Extensibles.AsQuery) ||
+						!((baseQuery = ((Extensibles.AsQuery<?>)
+								query).getBaseQuery()) instanceof
+								SubnetQuery)) {
+					throw new GSException(
+							GSErrorCode.ILLEGAL_PARAMETER,
+							"Query type not matched (class=" +
+							query.getClass() + ")");
+				}
+			}
+			else {
+				baseQuery = query;
 			}
 
-			final SubnetQuery<?> subnetQuery = (SubnetQuery<?>) query;
+			final SubnetQuery<?> subnetQuery = (SubnetQuery<?>) baseQuery;
 			if (subnetQuery.getContainer().getStore() != store) {
 				throw new GSException(
 						GSErrorCode.ILLEGAL_PARAMETER,
@@ -2610,7 +2623,7 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 					if (containerId != container.getContainerId()) {
 						throw new GSConnectionException(
 								GSErrorCode.MESSAGE_CORRUPTED,
-								"Protocol error by inconsistent session ID");
+								"Protocol error by inconsistent container ID");
 					}
 
 					final long sessionId = resp.base().getLong();
@@ -3520,6 +3533,16 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 				Statement.GET_MULTIPLE_CONTAINER_ROWS,
 				MultiGetRequest.newFactory(multiContext, keyConverter),
 				internalMode);
+	}
+
+	@Override
+	public void setContainerMonitoring(boolean monitoring) {
+		context.getConfig().containerMonitoring = monitoring;
+	}
+
+	@Override
+	public boolean isContainerMonitoring() {
+		return context.getConfig().containerMonitoring;
 	}
 
 	@Override

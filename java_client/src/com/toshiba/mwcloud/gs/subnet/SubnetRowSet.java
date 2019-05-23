@@ -32,6 +32,8 @@ import com.toshiba.mwcloud.gs.RowSet;
 import com.toshiba.mwcloud.gs.TimeSeries;
 import com.toshiba.mwcloud.gs.common.BasicBuffer;
 import com.toshiba.mwcloud.gs.common.Extensibles;
+import com.toshiba.mwcloud.gs.common.Extensibles.AsContainer;
+import com.toshiba.mwcloud.gs.common.Extensibles.QueryInfo;
 import com.toshiba.mwcloud.gs.common.GSErrorCode;
 import com.toshiba.mwcloud.gs.common.RowMapper;
 import com.toshiba.mwcloud.gs.common.BasicBuffer.BufferUtils;
@@ -421,6 +423,16 @@ implements RowSet<R>, Extensibles.AsRowSet<R>, Experimentals.AsRowSet<R> {
 			return null;
 		}
 		return extResultMap.get(key);
+	}
+
+	@Override
+	public QueryInfo getQueryInfo() {
+		return queryFormatter;
+	}
+
+	@Override
+	public AsContainer<?, ?> getContainer() {
+		return container;
 	}
 
 	public static DistributedQueryTarget getDistTarget(

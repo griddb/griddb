@@ -132,6 +132,9 @@ public class BasicBuffer {
 	}
 
 	public void putString(String value) {
+		if (value.indexOf('\0') >= 0) {
+			throw errorNullCharacterRuntime();
+		}
 		final byte[] buf = value.getBytes(DEFAULT_CHARSET);
 		prepare(Integer.SIZE / Byte.SIZE + buf.length);
 		base.putInt(buf.length);
@@ -240,6 +243,21 @@ public class BasicBuffer {
 
 	public void clear() {
 		base.clear();
+	}
+
+	public static IllegalArgumentException errorNullCharacterRuntime() {
+		try {
+			throw errorNullCharacter();
+		}
+		catch (GSException e) {
+			throw new IllegalArgumentException(e);
+		}
+	}
+
+	public static GSException errorNullCharacter() {
+		return new GSException(
+				GSErrorCode.ILLEGAL_VALUE_FORMAT,
+				"Illegal '\\0' character found");
 	}
 
 	public static class BufferUtils {

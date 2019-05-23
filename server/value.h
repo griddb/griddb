@@ -445,6 +445,7 @@ public:
 		return type_ == COLUMN_TYPE_NULL;
 	}
 
+
 	/*!
 		@brief Cast boolean value
 	*/
@@ -588,13 +589,8 @@ public:
 					objectData + ValueProcessor::getEncodedVarSize(varDataSize);
 				uint32_t totalSize = *reinterpret_cast<const uint32_t *>(addr);
 				addr += sizeof(uint32_t);
-				const OId *oId = reinterpret_cast<const OId *>(addr);
-				if (*oId != UNDEF_OID) {
-					data_.object_.set(objectData, totalSize, true);
-				}
-				else {
-					data_.object_.set(NULL, 0, true);
-				}
+//				const OId *oId = reinterpret_cast<const OId *>(addr);
+				data_.object_.set(objectData, totalSize, true);
 			}
 			else {
 				data_.object_.set(NULL, 0, true);

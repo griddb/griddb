@@ -83,6 +83,9 @@ public:
 	BitArray &getValidBitArray() {
 		return validChunkInfo_;
 	}
+	BitArray &getUsedBitArray() {
+		return usedChunkInfo_;
+	}
 
 	bool open(bool checkOnly = false, bool createMode = true);
 	void close();
