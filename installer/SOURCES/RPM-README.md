@@ -13,7 +13,7 @@
 ## Quick start
   When you install this package, a gsadm OS user are created in the OS.  
   Execute the operating command as a gsadm user.  
-  We have confirmed the operation on CentOS 6.10 and 7.4.
+  We have confirmed the operation on CentOS 7.6.
 
 ### Start a server
     $ gs_passwd admin
