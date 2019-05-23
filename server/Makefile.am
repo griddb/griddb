@@ -70,7 +70,7 @@ $(trdir)/libtrcpp.a:
 
 if LINK_ACTIVEMQ
 aprinclude=$(libdir)/apr/install/include/apr-1
-aprldadd=$(libdir)/apr/install/lib/libapr-1.a -lssl
+aprldadd=$(libdir)/apr/install/lib/libapr-1.a -lssl -lcrypto
 activemqinclude=$(libdir)/activemq-cpp-library/install/include/activemq-cpp-3.7.1
 activemqldadd=$(libdir)/activemq-cpp-library/install/lib/libactivemq-cpp.a
 aprheaders = $(aprinclude)/apr.h
