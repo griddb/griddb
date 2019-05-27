@@ -1,0 +1,22 @@
+#!/usr/bin/make -f
+
+#%:
+#	dh $@
+
+configure: clean
+	./bootstrap.sh
+	./configure
+
+build: configure
+	make
+
+binary:
+	dh_install
+	dh_installdeb
+	dh_gencontrol
+	dh_link
+	dh_builddeb
+
+clean:
+
+.PHONY: clean configure build binary

@@ -1,0 +1,14 @@
+Source: griddb-nosql
+Section: unknown
+Priority: extra
+Maintainer: Katsuhiko Nonomura <contact@griddb.org>
+Build-Depends: debhelper (>= 10)
+Standards-Version: 4.2.0
+Homepage: https://github.com/griddb/griddb_nosql
+
+Package: griddb-nosql
+Architecture: amd64
+Depends: libc6 (>= 2.15), libgcc1 (>= 1:3.0), libstdc++6 (>= 4.8)
+Description: GridDB Community Edition
+ GridDB is a high performance, high scalability and high reliability database for big data.
+ .
