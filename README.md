@@ -74,7 +74,7 @@
 
   There are some connectors for other OSS.
   * [GridDB connector for Apache Hadoop MapReduce](https://github.com/griddb/griddb_hadoop_mapreduce)
-  * [GridDB connector for YCSB](https://github.com/griddb/griddb_ycsb)
+  * [GridDB connector for YCSB (https://github.com/brianfrankcooper/YCSB/tree/master/griddb)](https://github.com/brianfrankcooper/YCSB/tree/master/griddb)
   * [GridDB connector for KairosDB](https://github.com/griddb/griddb_kairosdb)
   * [GridDB connector for Apache Spark](https://github.com/griddb/griddb_spark)
   * [GridDB Foreign Data Wrapper for PostgreSQL (https://github.com/pgspider/griddb_fdw)](https://github.com/pgspider/griddb_fdw)
