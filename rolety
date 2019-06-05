@@ -1,0 +1,220 @@
+// Enable debug prints to serial monitor
+#define MY_DEBUG
+// Enable serial gateway
+#define MY_GATEWAY_SERIAL
+// Define a lower baud rate for Arduino's running on 8 MHz (Arduino Pro Mini 3.3V & SenseBender)
+#if F_CPU == 8000000L
+#define MY_BAUD_RATE 38400
+#endif
+
+
+
+// Set inclusion mode duration (in seconds)
+#define MY_INCLUSION_MODE_DURATION 60 
+// Digital pin used for inclusion mode button
+#define MY_INCLUSION_MODE_BUTTON_PIN  3 
+
+
+#include <Bounce2.h>
+#include <MySensors.h>
+#include <SPI.h>
+
+// Enable repeater functionality for this node
+#define MY_REPEATER_FEATURE
+
+
+#define BUTTON_PIN A0     // Sypialnia
+#define BUTTON2_PIN A1     // Sypialnia
+#define BUTTON_PIN2 A2    // Pokój mały
+#define BUTTON2_PIN2 A3    // Pokój mały
+#define BUTTON_PIN3 A4    // Taras
+#define BUTTON2_PIN3 A5    // Taras
+#define BUTTON_PIN4 A6    // Kuchnia
+#define BUTTON2_PIN4 A7    // Kuchnia
+#define BUTTON_PIN5 A8    // Salon
+#define BUTTON2_PIN5 A9    // Salon
+// Definicja SSR
+#define UP_SYPIALNIA 24
+#define DOWN_SYPIALNIA 25
+#define UP_POKOJ_MALY 26
+#define DOWN_POKOJ_MALY 27
+#define UP_TARAS 28
+#define DOWN_TARAS 29
+#define UP_KUCHNIA 30
+#define DOWN_KUCHNIA 31
+#define UP_SALON 32
+#define DOWN_SALON 33
+
+// Enable repeater functionality for this node
+#define MY_REPEATER_FEATURE
+
+// Inicjalizacja obiektu Bounce
+Bounce debouncer = Bounce();
+Bounce debouncer2 = Bounce();
+Bounce debouncer3 = Bounce();
+Bounce debouncer4 = Bounce();
+Bounce debouncer5 = Bounce();
+Bounce debouncer6 = Bounce();
+Bounce debouncer7 = Bounce();
+Bounce debouncer8 = Bounce();
+Bounce debouncer9 = Bounce();
+Bounce debouncer10 = Bounce();
+
+
+
+void setup() {
+  delay(10000);
+  // Konfiguracja pinu przycisku i aktywowanie rezystora podciągającego:
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(BUTTON2_PIN, INPUT_PULLUP);
+  pinMode(BUTTON_PIN2, INPUT_PULLUP);
+  pinMode(BUTTON2_PIN2, INPUT_PULLUP);
+  pinMode(BUTTON_PIN3, INPUT_PULLUP);
+  pinMode(BUTTON2_PIN3, INPUT_PULLUP);
+  pinMode(BUTTON_PIN4, INPUT_PULLUP);
+  pinMode(BUTTON2_PIN4, INPUT_PULLUP);
+  pinMode(BUTTON_PIN5, INPUT_PULLUP);
+  pinMode(BUTTON2_PIN5, INPUT_PULLUP);
+
+  // Po konfiguracji przycisku, ustawienie działania funkcji Bounce :
+  debouncer.attach(BUTTON_PIN);
+  debouncer.interval(5); // interwał w ms
+  debouncer2.attach(BUTTON2_PIN);
+  debouncer2.interval(5); // interwał w ms
+  debouncer3.attach(BUTTON_PIN2);
+  debouncer3.interval(5); // interwał w ms
+  debouncer4.attach(BUTTON2_PIN2);
+  debouncer4.interval(5); // interwał w ms
+  debouncer5.attach(BUTTON_PIN3);
+  debouncer5.interval(5); // interwał w ms
+  debouncer6.attach(BUTTON2_PIN3);
+  debouncer6.interval(5); // interwał w ms
+  debouncer7.attach(BUTTON_PIN4);
+  debouncer7.interval(5); // interwał w ms
+  debouncer8.attach(BUTTON2_PIN4);
+  debouncer8.interval(5); // interwał w ms
+  debouncer9.attach(BUTTON_PIN5);
+  debouncer9.interval(5); // interwał w ms
+  debouncer10.attach(BUTTON2_PIN5);
+  debouncer10.interval(5); // interwał w ms
+
+  //Konfiguracja pinu diody LED :
+    pinMode(UP_SYPIALNIA, OUTPUT);
+  pinMode(DOWN_SYPIALNIA, OUTPUT);
+    pinMode(UP_POKOJ_MALY, OUTPUT);
+  pinMode(DOWN_POKOJ_MALY, OUTPUT);
+    pinMode(UP_TARAS, OUTPUT);
+  pinMode(DOWN_TARAS, OUTPUT);
+    pinMode(UP_KUCHNIA, OUTPUT);
+  pinMode(DOWN_KUCHNIA, OUTPUT);
+    pinMode(UP_SALON, OUTPUT);
+  pinMode(DOWN_SALON, OUTPUT);
+
+
+
+}
+MyMessage msg(1, V_LIGHT);
+MyMessage msg2(2, V_LIGHT);
+MyMessage msg3(3, V_LIGHT);
+MyMessage msg4(4, V_LIGHT);
+MyMessage msg5(5, V_LIGHT);
+MyMessage msg6(6, V_LIGHT);
+MyMessage msg7(7, V_LIGHT);
+MyMessage msg8(8, V_LIGHT);
+MyMessage msg9(9, V_LIGHT);
+MyMessage msg10(10, V_LIGHT);
+void loop() {
+  // Aktualizacja funkcji Bounce :
+  if (debouncer.update()){
+     int value = debouncer.read();
+  if ( value == LOW ) {
+    digitalWrite(UP_SYPIALNIA, HIGH );
+  }
+  else {
+    digitalWrite(UP_SYPIALNIA, LOW );
+  }
+  }
+  if (debouncer2.update()){
+      int value2 = debouncer2.read();
+  if ( value2 == LOW ) {
+    digitalWrite(DOWN_SYPIALNIA, HIGH );
+  }
+  else {
+    digitalWrite(DOWN_SYPIALNIA, LOW );
+  }
+  }
+  if (debouncer3.update()) {
+      int value3 = debouncer3.read();
+  if ( value3 == LOW ) {
+    digitalWrite(UP_POKOJ_MALY, HIGH );
+  }
+  else {
+    digitalWrite(UP_POKOJ_MALY, LOW );
+  }
+  }
+  if (debouncer4.update()) {
+      int value4 = debouncer4.read();
+  if ( value4 == LOW ) {
+    digitalWrite(DOWN_POKOJ_MALY, HIGH );
+  }
+  else {
+    digitalWrite(DOWN_POKOJ_MALY, LOW );
+  }
+  }
+  if (debouncer5.update()) {
+      int value5 = debouncer5.read();
+  if ( value5 == LOW ) {
+    digitalWrite(UP_TARAS, HIGH );
+  }
+  else {
+    digitalWrite(UP_TARAS, LOW );
+  }
+  }
+  if (debouncer6.update()){
+      int value6 = debouncer6.read();
+  if ( value6 == LOW ) {
+    digitalWrite(DOWN_TARAS, HIGH );
+  }
+  else {
+    digitalWrite(DOWN_TARAS, LOW );
+  }
+  }
+  if (debouncer7.update()) {
+      int value7 = debouncer7.read();
+  if ( value7 == LOW ) {
+    digitalWrite(UP_KUCHNIA, HIGH );
+  }
+  else {
+    digitalWrite(UP_KUCHNIA, LOW );
+  }
+  }
+  if (debouncer8.update()) {
+      int value8 = debouncer8.read();
+  if ( value8 == LOW ) {
+    digitalWrite(DOWN_KUCHNIA, HIGH );
+  }
+  else {
+    digitalWrite(DOWN_KUCHNIA, LOW );
+  }
+  }
+  if (debouncer9.update()) {
+      int value9 = debouncer9.read();
+  if ( value9 == LOW ) {
+    digitalWrite(UP_SALON, HIGH );
+  }
+  else {
+    digitalWrite(UP_SALON, LOW );
+  }
+  }
+  if (debouncer10.update()) {
+      int value10 = debouncer10.read();
+  if ( value10 == LOW ) {
+    digitalWrite(DOWN_SALON, HIGH );
+  }
+  else {
+    digitalWrite(DOWN_SALON, LOW );
+  }
+  }
+}
+  
+  
