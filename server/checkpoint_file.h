@@ -68,16 +68,13 @@ public:
 
 	void setUsedBlockInfo(uint64_t blockNo, bool flag);
 	bool getUsedBlockInfo(uint64_t blockNo);
-	void initializeUsedBlockInfo(const uint8_t *bitList, const uint64_t bitNum);
-
+	void initializeUsedBlockInfo();
 	void setValidBlockInfo(uint64_t blockNo, bool flag);
 	bool getValidBlockInfo(uint64_t blockNo);
-	uint64_t saveValidBlockInfo(util::XArray<uint8_t> &buf);
 	inline int64_t getValidBlockInfoSize() const {
 		return validChunkInfo_.length();
 	};
-	void initializeValidBlockInfo(
-		const uint8_t *bitList, const uint64_t bitNum);
+	void initializeValidBlockInfo();
 
 public:
 	BitArray &getValidBitArray() {

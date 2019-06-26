@@ -879,7 +879,7 @@ private:
 		int32_t numCounter_;
 		SyncContext *freeList_;
 		int32_t numUsed_;
-		util::StackAllocator *alloc_;
+		util::StackAllocator *globalStackAlloc_;
 		util::XArray<SyncContext *> slots_;
 		SyncVariableSizeAllocator *varSizeAlloc_;
 	};
@@ -1064,7 +1064,7 @@ private:
 
 	util::FixedSizeAllocator<util::Mutex> fixedSizeAlloc_;
 
-	util::StackAllocator alloc_;
+	util::StackAllocator globalStackAlloc_;
 
 	SyncVariableSizeAllocator varSizeAlloc_;
 

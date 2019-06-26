@@ -297,8 +297,8 @@ void RecoveryManager::checkExistingFiles1(ConfigTable &param, bool &createFlag,
 void RecoveryManager::checkExistingFiles2(ConfigTable &param,
 	LogManager &logMgr, bool &createFlag, bool existBackupInfoFile,
 	bool forceRecoveryFromExistingFiles) {
-	bool existBackupInfoFile1 = false;
-	bool existBackupInfoFile2 = false;
+//	bool existBackupInfoFile1 = false;
+//	bool existBackupInfoFile2 = false;
 	if (createFlag) {
 		return;
 	}
@@ -339,10 +339,10 @@ void RecoveryManager::checkExistingFiles2(ConfigTable &param,
 				cpFileInfoList[pgId] = 1;
 			}
 			else if (checkBackupInfoFileName(fileName)) {
-				existBackupInfoFile1 = true;
+//				existBackupInfoFile1 = true;
 			}
 			else if (checkBackupInfoDigestFileName(fileName)) {
-				existBackupInfoFile2 = true;
+//				existBackupInfoFile2 = true;
 			}
 			else {
 				continue;
@@ -671,9 +671,7 @@ void RecoveryManager::recovery(util::StackAllocator &alloc, bool existBackup,
 								 << ")");
 				}
 				if (!isIncrementalBackup) {
-					chunkMgr_->setCheckpointBit(
-						pgId, record.rowData_, record.numRow_,
-						releaseUnusedFileBlocks_);
+					chunkMgr_->resetCheckpointBit(pgId);
 				}
 			}  
 
@@ -973,6 +971,10 @@ void RecoveryManager::dumpCheckpointFile(
 						 << CheckpointIdFormatter(recoveryStartCpId) << ")");
 		}
 
+		logMgr_->findCheckpointStartLog(cursor, pgId, recoveryStartCpId);
+		BitArray validBitArray(record.numRow_);
+		reconstructValidBitArray(alloc, MODE_RECOVERY, cursor, validBitArray);
+
 		util::NamedFile dumpFile;
 		{
 			util::NormalOStringStream oss;
@@ -991,9 +993,6 @@ void RecoveryManager::dumpCheckpointFile(
 			util::NormalOStringStream oss;
 			oss << "#, isValid, " << chunkMgr_->dumpChunkCSVField();
 			oss << std::endl;
-
-			BitArray validBitArray(record.numRow_);
-			validBitArray.putAll(record.rowData_, record.numRow_);
 
 			for (uint64_t blockNo = 0; blockNo < blockCount; ++blockNo) {
 				if (validBitArray.get(blockNo)) {
@@ -1021,6 +1020,109 @@ void RecoveryManager::dumpCheckpointFile(
 
 		std::cout << " done." << std::endl;
 	}
+}
+
+void RecoveryManager::reconstructValidBitArray(
+		util::StackAllocator &alloc, Mode mode,
+		LogCursor &cursor, BitArray &validBitArray) {
+
+	util::XArray<uint64_t> numRedoLogRecord(alloc);
+	numRedoLogRecord.assign(pgConfig_.getPartitionCount(), 0);
+
+	util::XArray<uint64_t> numAfterDropLogs(alloc);
+	numAfterDropLogs.assign(pgConfig_.getPartitionCount(), 0);
+
+	util::XArray<LogSequentialNumber> redoStartLsn(alloc);
+	redoStartLsn.assign(pgConfig_.getPartitionCount(), 0);
+
+//	const uint32_t traceIntervalMillis = 15000;
+	util::Stopwatch traceTimer(util::Stopwatch::STATUS_STARTED);
+
+	LogRecord logRecord;
+	util::XArray<uint8_t> binaryLogRecord(alloc);
+
+	const PartitionGroupId pgId = cursor.getProgress().pgId_;
+	const PartitionId beginPId = pgConfig_.getGroupBeginPartitionId(pgId);
+	const PartitionId endPId = pgConfig_.getGroupEndPartitionId(pgId);
+
+//	uint64_t startTime = util::Stopwatch::currentClock();
+	for (uint64_t logCount = 0;; logCount++) {
+		binaryLogRecord.clear();
+		if (!cursor.nextLog(logRecord, binaryLogRecord)) {
+			break;
+		}
+		const PartitionId pId = logRecord.partitionId_;
+		if (!(beginPId <= pId && pId < endPId)) {
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_RM_PARTITION_NUM_NOT_MATCH,
+					"Invalid PartitionId: " << pId
+					<< ", config partitionNum=" << pgConfig_.getPartitionCount()
+					<< ", pgId=" << pgId << ", beginPId="
+					<< beginPId << ", endPId=" << endPId);
+		}
+		const LogSequentialNumber lsn = logRecord.lsn_;
+
+//		const LogSequentialNumber prevLsn =
+//			logMgr_->getLSN(logRecord.partitionId_);
+//		const bool lsnAssignable =
+//			LogManager::isLsnAssignable(static_cast<uint8_t>(logRecord.type_));
+
+		if (numAfterDropLogs[pId] > 0) {
+			numAfterDropLogs[pId]++;
+			continue;
+		}
+		if (numRedoLogRecord[pId] == 0) {
+			bool checkCpStart = true;
+
+			if (checkCpStart &&
+					(logRecord.type_ != LogManager::LOG_TYPE_CHECKPOINT_START)) {
+				continue;
+			}
+			redoStartLsn[pId] = lsn;
+		}
+
+		const Timestamp stmtStartTime = 0;
+		const EventMonotonicTime stmtStartEmTime = 0;
+		try {
+			util::StackAllocator::Scope scope(alloc);
+			LogSequentialNumber nextLsn = logRecord.lsn_;
+
+//			const KeyConstraint containerKeyConstraint =
+//					KeyConstraint::getSystemKeyConstraint(
+//						ds_->getValueLimitConfig().getLimitContainerNameSize());
+
+			switch (logRecord.type_) {
+				case LogManager::LOG_TYPE_CHECKPOINT_START:
+					redoCheckpointStartLog(
+							alloc, mode, pId, stmtStartTime,
+							stmtStartEmTime, logRecord, redoStartLsn[pId],
+							false, false);
+					break;
+
+				case LogManager::LOG_TYPE_CHUNK_META_DATA:
+					redoChunkMetaDataLog(
+							alloc, mode, pId, stmtStartTime,
+							stmtStartEmTime, logRecord, redoStartLsn[pId],
+							false, false);
+					break;
+				default:
+					break;
+			}
+			logMgr_->setLSN(logRecord.partitionId_, nextLsn);
+			pt_->setLSN(logRecord.partitionId_, nextLsn);
+
+			if (logRecord.type_ == LogManager::LOG_TYPE_DROP_PARTITION) {
+				numAfterDropLogs[pId]++;
+			}
+			numRedoLogRecord[logRecord.partitionId_]++;
+		}
+		catch (std::exception &e) {
+			RM_RETHROW_LOG_REDO_ERROR(
+					e, "(pId=" << pId << ", lsn=" << logRecord.lsn_
+					<< ", type=" << logRecord.type_
+					<< ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+		}
+	}
+	validBitArray = chunkMgr_->getCheckpointBit(pgId);
 }
 
 /*!
@@ -1206,9 +1308,7 @@ void RecoveryManager::redoChunkLog(util::StackAllocator &alloc,
 				"(pgId=" << pgId << ", recoveryStartCpId="
 						 << CheckpointIdFormatter(cpId) << ")");
 		}
-		chunkMgr_->setCheckpointBit(
-				pgId, record.rowData_, record.numRow_,
-				releaseUnusedFileBlocks_);
+		chunkMgr_->resetCheckpointBit(pgId);
 	}
 	chunkMgr_->isValidFileHeader(pgId);
 

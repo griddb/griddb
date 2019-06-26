@@ -392,7 +392,7 @@ void ShortTermSyncHandler::operator()(EventContext &ec, Event &ev) {
 		}
 	}
 	catch (LockConflictException &e) {
-//			int32_t errorCode = e.getErrorCode();
+//		int32_t errorCode = e.getErrorCode();
 		if (context != NULL) {
 			addCheckEndEvent(ec, pId,ec.getAllocator(), MODE_SHORTTERM_SYNC, context, true);
 		}
@@ -402,7 +402,7 @@ void ShortTermSyncHandler::operator()(EventContext &ec, Event &ev) {
 		TRACE_SYNC_EXCEPTION(e, eventType, pId, ERROR,
 				"Short term sync failed, log redo exception is occurred.");
 		if (context != NULL) {
-				addCheckEndEvent(ec, pId,ec.getAllocator(), MODE_SHORTTERM_SYNC, context, true);
+			addCheckEndEvent(ec, pId,ec.getAllocator(), MODE_SHORTTERM_SYNC, context, true);
 		}
 	}
 	catch (std::exception &e) {
@@ -574,6 +574,7 @@ void LongTermSyncHandler::operator()(EventContext &ec, Event &ev) {
 		if (context != NULL) {
 			if (errorCode != GS_ERROR_SYM_INVALID_PARTITION_REVISION
 				&& errorCode != GS_ERROR_SYM_INVALID_PARTITION_ROLE) {
+				pt_->setErrorStatus(pId, PT_ERROR_LONG_SYNC_FAIL);
 				UTIL_TRACE_EXCEPTION(SYNC_SERVICE, e, "LONGTERM SYNC FAILED, pId=" << pId 
 					<< ", ssn=" <<  context->getSequentialNumber() 
 					<< ", revision=" << context->getPartitionRevision().sequentialNumber_ 
@@ -588,7 +589,7 @@ void LongTermSyncHandler::operator()(EventContext &ec, Event &ev) {
 		}
 	}
 	catch (LockConflictException &e) {
-//			int32_t errorCode = e.getErrorCode();
+//		int32_t errorCode = e.getErrorCode();
 		TRACE_SYNC_EXCEPTION(e, eventType, pId, ERROR,
 				"Long term sync failed, checkpoint-sync lock confict exception is occurred, retry after "
 				<< syncMgr_->getExtraConfig().getLockConflictPendingInterval() / 1000 << " sec");
@@ -596,10 +597,11 @@ void LongTermSyncHandler::operator()(EventContext &ec, Event &ev) {
 			ev, syncMgr_->getExtraConfig().getLockConflictPendingInterval());
 	}
 	catch (LogRedoException &e) {
-//			int32_t errorCode = e.getErrorCode();
+//		int32_t errorCode = e.getErrorCode();
 		TRACE_SYNC_EXCEPTION(e, eventType, pId, ERROR,
 				"Long term sync failed, log redo exception is occurred."
 				<< syncMgr_->getExtraConfig().getLockConflictPendingInterval());
+		pt_->setErrorStatus(pId, PT_ERROR_LONG_SYNC_FAIL);
 		if (context != NULL) {
 			addCheckEndEvent(ec, pId,ec.getAllocator(), MODE_LONGTERM_SYNC, context, true);
 		}
@@ -608,6 +610,7 @@ void LongTermSyncHandler::operator()(EventContext &ec, Event &ev) {
 		if (context != NULL) {
 			addCheckEndEvent(ec, pId,ec.getAllocator(), MODE_LONGTERM_SYNC, context, true);
 		}
+		pt_->setErrorStatus(pId, PT_ERROR_LONG_SYNC_FAIL);
 		clsSvc_->setError(ec, &e);
 	}
 }
@@ -726,7 +729,7 @@ bool SyncRequestInfo::getChunks(util::StackAllocator &alloc, PartitionId pId, Pa
 void SyncCheckEndHandler::operator()(EventContext &ec, Event &ev) {
 	SyncContext *context = NULL;
 	PartitionId pId = ev.getPartitionId();
-	EventType eventType = ev.getType();
+//	EventType eventType = ev.getType();
 	EVENT_START(ec, ev, txnMgr_);
 	try {
 		util::StackAllocator &alloc = ec.getAllocator();
@@ -768,8 +771,6 @@ void SyncCheckEndHandler::operator()(EventContext &ec, Event &ev) {
 						alloc, pId, PartitionTable::PT_OFF, PT_CHANGE_SYNC_END);
 			}
 			if (context->getSyncMode() == MODE_LONGTERM_SYNC) {
-				if (eventType == TXN_SYNC_CHECK_END) {
-				}
 				PartitionRole catchupRole;
 				pt_->getPartitionRole(pId, catchupRole);
 				catchupRole.clearCatchup();
@@ -792,7 +793,7 @@ void SyncCheckEndHandler::operator()(EventContext &ec, Event &ev) {
 	}
 	catch (std::exception &e) {
 		if (context) {
-		syncMgr_->removeSyncContext(ec, pId, context, true);
+			syncMgr_->removeSyncContext(ec, pId, context, true);
 		}
 		clsSvc_->setError(ec, &e);
 	}
@@ -813,23 +814,15 @@ void DropPartitionHandler::operator()(EventContext &ec, Event &ev) {
 				alloc, TXN_DROP_PARTITION, syncMgr_, pId, false);
 		clsSvc_->decode(alloc, ev, dropPartitionInfo);
 		if (!dropPartitionInfo.isForce()) {
+			syncMgr_->checkActiveStatus();
 			if (pt_->getLSN(pId) == 0 && !chunkMgr_->existPartition(pId)) {
 				return;
 			}
 			if (pt_->getPartitionRoleStatus(pId) != PartitionTable::PT_NONE) {
 				return;
 			}
-			if (pt_->getPartitionStatus(pId) != PartitionTable::PT_OFF) {
-				return;
-			}
-			if (pt_->getPartitionRevision(pId, 0) != dropPartitionInfo.getPartitionRevision()) {
-				return;
-			}
-			if (pt_->getPartitionRoleRevision(pId, PartitionTable::PT_CURRENT_OB)
+			if (pt_->getPartitionRevision(pId, PartitionTable::PT_CURRENT_OB)
 					!= dropPartitionInfo.getPartitionRevision()) {
-				return;
-			}
-			if (pt_->isCatchup(pId, 0, PartitionTable::PT_CURRENT_OB)) {
 				return;
 			}
 		}
@@ -1429,7 +1422,8 @@ void ShortTermSyncHandler::executeSyncRequest(EventContext &ec, Event &ev,
 	clsSvc_->requestChangePartitionStatus(ec,
 			alloc, pId, PartitionTable::PT_SYNC, PT_CHANGE_SYNC_START);
 	util::Set<NodeId> syncTargetNodeSet(alloc);
-	syncMgr_->setShortermSyncRequest(context, syncRequestInfo, syncTargetNodeSet);
+	syncMgr_->setShortermSyncRequest(
+			context, syncRequestInfo, syncTargetNodeSet);
 	addCheckEndEvent(ec, pId, alloc, MODE_SHORTTERM_SYNC, context);
 	if (syncTargetNodeSet.size() > 0) {
 		sendMultiRequest(ec, *txnEE_, TXN_SHORTTERM_SYNC_START,

@@ -1320,7 +1320,7 @@ void UpdatePartitionHandler::checkAndRequestDropPartition(EventContext &ec,
 
 void UpdatePartitionHandler::updateNodeInfo(EventContext &ec,
 		ClusterManager::UpdatePartitionInfo &updatePartitionInfo) {
-	bool needCancel = false;
+//	bool needCancel = false;
 	SubPartitionTable &subPartitionTable = updatePartitionInfo.getSubPartitionTable();
 	clsSvc_->updateNodeList(subPartitionTable.getNodeAddressList());
 
@@ -1343,23 +1343,23 @@ void UpdatePartitionHandler::updateNodeInfo(EventContext &ec,
 			}
 			else {
 				if (addressInfoList[pos].isActive_) {
-					if (pt_->getHeartbeatTimeout(nodeId) == UNDEF_TTL) {
-						needCancel = true;
-					}
+//					if (pt_->getHeartbeatTimeout(nodeId) == UNDEF_TTL) {
+//						needCancel = true;
+//					}
 					pt_->setHeartbeatTimeout(nodeId, NOT_UNDEF_TTL);
 				}
 				else {
-					if (pt_->getHeartbeatTimeout(nodeId) != UNDEF_TTL) {
-						needCancel = true;
-					}
+//					if (pt_->getHeartbeatTimeout(nodeId) != UNDEF_TTL) {
+//						needCancel = true;
+//					}
 					pt_->setHeartbeatTimeout(nodeId, UNDEF_TTL);
 				}
 			}
 		}
 	}
-	else if (pt_->isMaster()) {
-		needCancel = clsMgr_->isAddOrDownNode();
-	}
+//	else if (pt_->isMaster()) {
+//		needCancel = clsMgr_->isAddOrDownNode();
+//	}
 }
 	
 void ClusterHandler::resolveAddress(PartitionRole &role) {
@@ -1437,22 +1437,9 @@ void UpdatePartitionHandler::operator()(EventContext &ec, Event &ev) {
 		clsSvc_->decode(alloc, ev, updatePartitionInfo, in);
 		if (in.base().remaining()) {
 			clsSvc_->decode(alloc, ev, updatePartitionInfo.dropPartitionNodeInfo_, in);
-			DropPartitionNodeInfo &dropPartitionNodeInfo = updatePartitionInfo.dropPartitionNodeInfo_;
-			dropPartitionNodeInfo.init();
-			for (size_t pos = 0; pos < dropPartitionNodeInfo.getSize(); pos++) {
-				DropNodeSet *dropInfo = dropPartitionNodeInfo.get(pos);
-				NodeAddress &selfAddress = pt_->getNodeAddress(SELF_NODEID);
-				if (dropInfo->getNodeAddress() == selfAddress) {
-					for (size_t i = 0; i < dropInfo->pIdList_.size(); i++) {
-						syncSvc_->requestDrop(ec, alloc, dropInfo->pIdList_[i], false,
-								dropInfo->revisionList_[i]);
-					}
-					break;
-				}
-			}
+			checkAndRequestDropPartition(ec, updatePartitionInfo);
 		}
 		updateNodeInfo(ec, updatePartitionInfo);
-		checkAndRequestDropPartition(ec, updatePartitionInfo);
 		SubPartitionTable &subPartitionTable = updatePartitionInfo.getSubPartitionTable();
 		clsMgr_->setUpdatePartitionInfo(updatePartitionInfo);
 		util::Vector<PartitionId> &shorttermSyncPIdList = updatePartitionInfo.getShorttermSyncPIdList();
@@ -1783,7 +1770,7 @@ ClusterService::NotificationManager::NotificationManager(
 	ClusterManager *clsMgr,  util::VariableSizeAllocator<> &valloc)
 	: clsMgr_(clsMgr),
 	pt_(clsMgr->getPartitionTable()),
-	valloc_(valloc),
+	localVarAlloc_(valloc),
 	mode_(NOTIFICATION_MULTICAST),
 	fixedNodeNum_(0),
 	resolverUpdateInterval_(0),
@@ -1832,7 +1819,7 @@ void ClusterService::NotificationManager::initialize(const ConfigTable &config) 
 			}
 			resolverList_.reserve(resolverList_.size() + 1);
 			ServiceAddressResolver *resolver =
-				UTIL_NEW ServiceAddressResolver(valloc_, resolverConfig);
+				UTIL_NEW ServiceAddressResolver(localVarAlloc_, resolverConfig);
 			resolverList_.push_back(resolver);
 			for (int32_t i = 0; i < SERVICE_MAX; i++) {
 				resolver->initializeType(

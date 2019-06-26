@@ -1132,8 +1132,7 @@ LogSequentialNumber LogManager::putLockRowLog(
 */
 LogSequentialNumber LogManager::putCheckpointEndLog(
 		util::XArray<uint8_t> &binaryLogBuf,
-		PartitionId pId,
-		BitArray &validBlockInfo)
+		PartitionId pId)
 {
 	LogSequentialNumber lsn = 0;
 	try {
@@ -1146,13 +1145,11 @@ LogSequentialNumber LogManager::putCheckpointEndLog(
 		GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_PUT_LOG_INFO,
 				"writeCPFileInfoLog: lsn=" << lsn << ", pId=" << pId);
 
-		uint64_t validBlockInfoBitsSize = validBlockInfo.length();
+		uint64_t validBlockInfoBitsSize = 0; 
 		uint8_t tmp[LOGMGR_VARINT_MAX_LEN * 1];
 		uint8_t *addr = tmp;
 		addr += util::varIntEncode64(addr, validBlockInfoBitsSize);
 		binaryLogBuf.push_back(tmp, (addr - tmp));
-		validBlockInfo.copyAll(binaryLogBuf);
-
 		putLog(pId, lsn, binaryLogBuf.data(), binaryLogBuf.size(), true);
 
 		putBlockTailNoopLog(binaryLogBuf, pId);
@@ -1194,6 +1191,7 @@ LogSequentialNumber LogManager::putChunkMetaDataLog(
 		addr += util::varIntEncode32(addr, startChunkId);
 		addr += util::varIntEncode32(addr, chunkNum);
 		addr += util::varIntEncode32(addr, expandedSize);
+
 		uint32_t dataLen = 0;
 		if (chunkMetaDataList) {
 			dataLen = static_cast<uint32_t>(chunkMetaDataList->size());
@@ -1971,7 +1969,7 @@ const char* LogManager::logTypeToString(LogType type) {
 		break;
 
 	case LOG_TYPE_PARTITION_EXPIRATION_PUT_CONTAINER:
-		return "PATIION_EXPIRATION_PUT_CONTAINER";
+		return "PARTITION_EXPIRATION_PUT_CONTAINER";
 		break;
 
 	case LOG_TYPE_UNDEF:
@@ -5486,11 +5484,13 @@ void LogRecord::reset() {
 	refContainerIds_ = NULL;
 	lastExecStmtIds_ = NULL;
 	txnTimeouts_ = NULL;
+
 	startChunkId_ = 0;
 	chunkNum_ = 0;
 	chunkCategoryId_ = 0;
 	emptyInfo_ = 0;
 	expandedLen_ = 0;
+
 	extensionNameLen_ = 0;
 	extensionName_ = NULL;
 	paramCount_ = 0;

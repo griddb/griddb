@@ -79,7 +79,8 @@ ClusterManager::~ClusterManager() {}
 */
 void ClusterManager::checkNodeStatus() {
 	if (!statusInfo_.checkNodeStatus()) {
-		GS_THROW_USER_ERROR(GS_ERROR_CLM_NODE_STATUS_CHECK_FAILED, "");
+		GS_THROW_USER_ERROR(GS_ERROR_CLM_NODE_STATUS_CHECK_FAILED,
+				"Target node is shutdowning or abnormal");
 	}
 }
 
@@ -370,6 +371,7 @@ void ClusterManager::updateClusterStatus(
 				setJoinCluster(false);
 			}
 			pt_->changeClusterStatus(PartitionTable::SUB_MASTER, 0, 0, 0);
+			pt_->setPartitionSummaryStatus(PT_INITIAL);
 			break;
 		}
 		case TO_MASTER: {
@@ -500,6 +502,7 @@ void ClusterManager::getHeartbeatResInfo(HeartbeatResInfo &heartbeatResInfo) {
 	try {
 		PartitionId pId;
 		for (pId = 0; pId < pt_->getPartitionNum(); pId++) {
+			int32_t errorStatus = pt_->getErrorStatus(pId, SELF_NODEID);
 			heartbeatResInfo.add(pId,
 					pt_->getPartitionStatus(pId, SELF_NODEID),
 					pt_->getLSN(pId, SELF_NODEID),
@@ -508,7 +511,7 @@ void ClusterManager::getHeartbeatResInfo(HeartbeatResInfo &heartbeatResInfo) {
 					pt_->getPartitionRevision(pId, SELF_NODEID),
 					0,
 					PT_OTHER_NORMAL,
-					PT_ERROR_NORMAL
+					errorStatus
 			);
 		}
 		SyncStat &stat = getSyncStat();
@@ -534,8 +537,8 @@ void ClusterManager::setHeartbeatResInfo(HeartbeatResInfo &heartbeatResInfo) {
 		PartitionStatus status;
 		PartitionRoleStatus roleStatus;
 		PartitionRevisionNo partitionRevision;
-		int64_t chunkNum;
-		int32_t otherStatus;
+//		int64_t chunkNum;
+//		int32_t otherStatus;
 		int32_t errorStatus;
 		int64_t baseTime = getMonotonicTime();
 		pt_->setHeartbeatTimeout(senderNodeId, nextHeartbeatTime(baseTime));
@@ -549,9 +552,10 @@ void ClusterManager::setHeartbeatResInfo(HeartbeatResInfo &heartbeatResInfo) {
 			status = static_cast<PartitionStatus>(resValue.status_);
 			roleStatus = static_cast<PartitionRoleStatus>(resValue.roleStatus_);
 			partitionRevision = resValue.partitionRevision_;
-			chunkNum = resValue.chunkCount_;
-			otherStatus = resValue.otherStatus_;
+//			chunkNum = resValue.chunkCount_;
+//			otherStatus = resValue.otherStatus_;
 			errorStatus = resValue.errorStatus_;
+			pt_->handleErrorStatus(pId, senderNodeId, errorStatus);
 
 			pt_->setLsnWithCheck(pId, resValue.lsn_, senderNodeId);
 			pt_->setMaxLsn(pId, resValue.lsn_);
@@ -608,7 +612,7 @@ void ClusterManager::getHeartbeatCheckInfo(HeartbeatCheckInfo &heartbeatCheckInf
 			}
 			if (pt_->isMaster()) {
 				if ((pt_->getPartitionRevisionNo() % periodicCount) == 0) {
-					pt_->checkPartitionStat(alloc);
+					pt_->checkPartitionSummaryStatus(alloc);
 				}
 				for (util::Set<NodeId>::iterator it = downNodeSet.begin();
 					it != downNodeSet.end(); it++) {
@@ -728,6 +732,17 @@ void ClusterManager::getUpdatePartitionInfo(UpdatePartitionInfo &updatePartition
 		setupPartitionContext(context);
 		bool isConfigurationChange = pt_->checkConfigurationChange(
 				alloc, context, updatePartitionInfo.isAddNewNode());
+
+		int32_t periodicCount 
+				= getConfig().getCheckDropInterval()  / getConfig().getHeartbeatInterval();
+		if (periodicCount == 0) periodicCount = 1;
+		if ((pt_->getPartitionRevisionNo() % periodicCount) == 0) {
+			if (pt_->checkPeriodicDrop(alloc, context.dropNodeInfo_)) {
+				context.needUpdatePartition_ = true;
+				context.subPartitionTable_.setRevision(pt_->getPartitionRevision());
+			}
+		}
+
 		if (!isConfigurationChange && !pt_->check(context)) {
 			return;
 		}
@@ -918,7 +933,9 @@ bool ClusterManager::setNotifyClusterInfo(NotifyClusterInfo &notifyClusterInfo) 
 					<< pt_->dumpNodeAddress(senderNodeId));
 			setIntialClusterNum(notifyClusterInfo.getReserveNum());
 			int64_t baseTime = getMonotonicTime();
-			pt_->changeClusterStatus(PartitionTable::FOLLOWER, senderNodeId, baseTime, nextHeartbeatTime(baseTime));
+			pt_->changeClusterStatus(PartitionTable::FOLLOWER,
+					senderNodeId, baseTime, nextHeartbeatTime(baseTime));
+			pt_->setPartitionSummaryStatus(PT_NORMAL);
 		}
 		notifyClusterInfo.setFollow(notifyFlag);
 
@@ -1578,6 +1595,12 @@ void ClusterManager::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.setMin(10)
 		.setDefault(40);
 	
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_CS_DROP_CHECK_INTERVAL, INT32)
+		.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
+		.setMin(30)
+		.setDefault(300);
+
 	picojson::value defaultValue;
 
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_CS_NOTIFICATION_MEMBER, JSON)
@@ -1655,6 +1678,7 @@ void ClusterManager::StatSetUpHandler::operator()(StatTable &stat) {
 	STAT_ADD(STAT_TABLE_PERF_TOTAL_OWNER_LSN);
 	STAT_ADD(STAT_TABLE_PERF_TOTAL_BACKUP_LSN);
 	STAT_ADD(STAT_TABLE_PERF_TOTAL_OTHER_LSN);
+	STAT_ADD(STAT_TABLE_PERF_TOTAL_CLUSTER_OTHER_LSN);
 }
 
 /*!
@@ -1712,7 +1736,7 @@ bool ClusterManager::StatUpdator::operator()(StatTable &stat) {
 		stat.set(STAT_TABLE_CS_CLUSTER_STATUS, clusterStatus);
 
 		const char8_t *partitionStatus;
-		switch (pt.getPartitionStat()) {
+		switch (pt.getPartitionSummaryStatus()) {
 		case PT_NORMAL:
 			partitionStatus = "NORMAL";
 			break;
@@ -1722,9 +1746,12 @@ bool ClusterManager::StatUpdator::operator()(StatTable &stat) {
 		case PT_NOT_BALANCE:
 			partitionStatus = "NOT_BALANCE";
 			break;
-		case PT_PARTIAL_STOP:
+		case PT_OWNER_LOSS:
 		case PT_ABNORMAL:
 			partitionStatus = "OWNER_LOSS";
+			break;
+		case PT_INITIAL:
+			partitionStatus = "INITIAL";
 			break;
 		default:
 			partitionStatus = "UNKNOWN";
@@ -1733,6 +1760,7 @@ bool ClusterManager::StatUpdator::operator()(StatTable &stat) {
 		stat.set(STAT_TABLE_CS_PARTITION_STATUS, partitionStatus);
 	}
 
+	bool isDetail = false;
 	if (stat.getDisplayOption(STAT_TABLE_DISPLAY_WEB_ONLY)) {
 		ServiceType addressType;
 		if (stat.getDisplayOption(STAT_TABLE_DISPLAY_ADDRESS_CLUSTER)) {
@@ -1819,6 +1847,7 @@ bool ClusterManager::StatUpdator::operator()(StatTable &stat) {
 
 	if (stat.getDisplayOption(STAT_TABLE_DISPLAY_WEB_ONLY) &&
 		stat.getDisplayOption(STAT_TABLE_DISPLAY_OPTIONAL_CS)) {
+		isDetail = true;
 		const ErrorCode codeList[] = {GS_ERROR_TXN_CLUSTER_ROLE_UNMATCH,
 			GS_ERROR_CS_ENCODE_DECODE_VERSION_CHECK,
 			GS_ERROR_RM_ALREADY_APPLY_LOG,
@@ -1841,6 +1870,8 @@ bool ClusterManager::StatUpdator::operator()(StatTable &stat) {
 	uint64_t  totalOwnerLsn = 0;
 	uint64_t totalBackupLsn = 0;
 	uint64_t totalOtherLsn = 0;
+	uint64_t clusterTotalOtherLsn = 0;
+	bool isMaster = pt.isMaster();
 	for (PartitionId pId = 0; pId < pt.getPartitionNum(); pId++) {
 		if (pt.isOwner(pId)) {
 			ownerCount++;
@@ -1852,6 +1883,17 @@ bool ClusterManager::StatUpdator::operator()(StatTable &stat) {
 		}
 		else {
 			totalOtherLsn += pt.getLSN(pId);
+			clusterTotalOtherLsn += pt.getLSN(pId);
+		}
+		if (isMaster && isDetail) {
+			for (NodeId nodeId = 1;nodeId < pt.getNodeNum();nodeId++) {
+				if (!pt.checkLiveNode(nodeId)) {
+					continue;
+				}
+				if (!pt.isOwnerOrBackup(pId, nodeId, PartitionTable::PT_CURRENT_OB)) {
+					clusterTotalOtherLsn += pt.getLSN(pId, nodeId);
+				}
+			}
 		}
 	}
 	stat.set(STAT_TABLE_PERF_OWNER_COUNT, ownerCount);
@@ -1859,7 +1901,9 @@ bool ClusterManager::StatUpdator::operator()(StatTable &stat) {
 	stat.set(STAT_TABLE_PERF_TOTAL_OWNER_LSN, totalOwnerLsn);
 	stat.set(STAT_TABLE_PERF_TOTAL_BACKUP_LSN, totalBackupLsn);
 	stat.set(STAT_TABLE_PERF_TOTAL_OTHER_LSN, totalOtherLsn);
-
+	if (isMaster && isDetail) {
+		stat.set(STAT_TABLE_PERF_TOTAL_CLUSTER_OTHER_LSN, clusterTotalOtherLsn);
+	}
 	return true;
 }
 
@@ -1883,6 +1927,8 @@ void ClusterManager::Config::setUpConfigHandler(
 		CONFIG_TABLE_CS_OWNER_CATCHUP_LSN_GAP, *this);
 	configTable.setParamHandler(
 		CONFIG_TABLE_CS_CHECK_RULE_INTERVAL, *this);
+	configTable.setParamHandler(
+		CONFIG_TABLE_CS_DROP_CHECK_INTERVAL, *this);
 }
 
 void ClusterManager::Config::operator()(
@@ -1898,6 +1944,9 @@ void ClusterManager::Config::operator()(
 		break;
 	case CONFIG_TABLE_CS_CHECK_RULE_INTERVAL:
 		clsMgr_->getConfig().setRuleLimitInterval(value.get<int32_t>());
+		break;
+	case CONFIG_TABLE_CS_DROP_CHECK_INTERVAL:
+		clsMgr_->getConfig().setCheckDropInterval(value.get<int32_t>());
 		break;
 	}
 }

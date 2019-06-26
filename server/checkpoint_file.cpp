@@ -255,7 +255,7 @@ void CheckpointFile::freeBlock(uint64_t blockNo) {
 	@brief Set a flag of the used block.
 */
 void CheckpointFile::setUsedBlockInfo(uint64_t blockNo, bool flag) {
-	UTIL_TRACE_INFO(
+	UTIL_TRACE_DEBUG(
 		CHECKPOINT_FILE, "setUsedBlock: " << blockNo << ",val," << flag);
 
 	bool oldFlag = usedChunkInfo_.get(blockNo);
@@ -281,18 +281,14 @@ bool CheckpointFile::getUsedBlockInfo(uint64_t blockNo) {
 /*!
 	@brief Initialize a flag of the used block.
 */
-void CheckpointFile::initializeUsedBlockInfo(
-	const uint8_t *bitList, const uint64_t blockNum) {
-	usedChunkInfo_.putAll(bitList, blockNum);
-	freeUseBitNum_ = 0;
-	for (uint64_t i = 0; i < blockNum; ++i) {
-		if (!usedChunkInfo_.get(i)) {
-			++freeUseBitNum_;
-		}
+void CheckpointFile::initializeUsedBlockInfo() {
+	usedChunkInfo_.clear();
+	usedChunkInfo_.reserve(blockNum_);
+	freeUseBitNum_ = blockNum_;
+	for (uint64_t pos = 0; pos < blockNum_; ++pos) {
+		usedChunkInfo_.append(false);
 	}
 	assert(freeUseBitNum_ <= usedChunkInfo_.length());
-	UTIL_TRACE_INFO(CHECKPOINT_FILE,
-		"initializeUsedBlockInfo: freeBlockNum=" << freeUseBitNum_);
 }
 
 /*!
@@ -310,18 +306,15 @@ bool CheckpointFile::getValidBlockInfo(uint64_t blockNo) {
 }
 
 /*!
-	@brief Return set of recent checkpoint block flags.
+	@brief Initialize a flag of the used block.
 */
-uint64_t CheckpointFile::saveValidBlockInfo(util::XArray<uint8_t> &buf) {
-	validChunkInfo_.copyAll(buf);
-	return validChunkInfo_.length();
+void CheckpointFile::initializeValidBlockInfo() {
+	validChunkInfo_.clear();
+	validChunkInfo_.reserve(blockNum_);
+	for (uint64_t pos = 0; pos < blockNum_; ++pos) {
+		validChunkInfo_.append(false);
+	}
 }
-
-void CheckpointFile::initializeValidBlockInfo(
-	const uint8_t *bitList, const uint64_t blockNum) {
-	validChunkInfo_.putAll(bitList, blockNum);
-}
-
 
 /*!
 	@brief Write chunkSize-block.

@@ -652,6 +652,9 @@ private:
 
 #ifdef GD_ENABLE_UNICAST_NOTIFICATION
 
+	/*!
+		@brief NotificationManager
+	*/
 	class NotificationManager {
 	public:
 		static const int32_t DEFAULT_CHECK_INTERVAL = 1 * 1000;
@@ -739,7 +742,7 @@ private:
 
 		PartitionTable *pt_;
 
-		util::VariableSizeAllocator<> &valloc_;
+		util::VariableSizeAllocator<> &localVarAlloc_;
 
 		ClusterNotificationMode mode_;
 

@@ -40,6 +40,7 @@
 #include <queue>
 #include <vector>
 
+
 #ifdef WIN32
 static inline uint32_t __builtin_clz(uint32_t x) {
 	return 31 - util::nlz(x);
@@ -639,9 +640,7 @@ public:
 
 
 	void isValidFileHeader(PartitionGroupId pgId);
-	void setCheckpointBit(
-			PartitionGroupId pgId, const uint8_t* bitList, uint64_t bitNum,
-			bool releaseUnusedFileBlocks = false);
+	void resetCheckpointBit(PartitionGroupId pgId);
 	void recoveryChunk(PartitionId pId, ChunkCategoryId categoryId, ChunkId cId,
 			ChunkKey chunkKey, uint8_t unoccupiedSize, uint64_t filePos);
 	void recoveryChunk(PartitionId pId, const uint8_t* chunk, uint32_t size,
@@ -1458,11 +1457,11 @@ private:
 		CheckpointId getPGCompletedCheckpointId() const;
 		void switchPGCheckpointBit(CheckpointId cpId);
 		BitArray& getPGCheckpointBit();
-		void setPGCheckpointBit(
-				const uint8_t* bitList, const uint64_t bitNum,
-				bool releaseUnusedFileBlocks);
+		void initializePGCheckpointBit();
+		void setPGCheckpointBit(const uint64_t pos);
 		void flushPGFile();
 		void clearPG();
+		void releaseUnusedPGFileBlocks(const uint64_t bitNum);
 		BitArray& getPGBackupBit();  
 		void clearPGBackupBit();	 
 		void appendNewCheckpointChunkId(PartitionId pId,

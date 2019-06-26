@@ -293,8 +293,7 @@ public:
 
 	LogSequentialNumber putCheckpointEndLog(
 			util::XArray<uint8_t> &binaryLogBuf,
-			PartitionId pId,
-			BitArray &validBlockInfo);
+			PartitionId pId);
 
 	LogSequentialNumber putChunkMetaDataLog(
 			util::XArray<uint8_t> &binaryLogBuf,
@@ -1051,6 +1050,7 @@ public:
 	uint8_t chunkCategoryId_;
 	uint8_t emptyInfo_;
 	uint32_t expandedLen_;   
+
 	uint32_t extensionNameLen_;
 	const char *extensionName_;
 	uint32_t paramCount_;

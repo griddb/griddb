@@ -1443,6 +1443,8 @@ private:
 			blockClearInterval_ = DEFAULT_CLEAR_BLOCK_INTERVAL;
 
 			ruleLimitInterval_ = shortTermTimeoutInterval_ + heartbeatInterval_*2;
+			checkDropInterval_ = changeTimeSecToMill(config.get<int32_t>(
+				CONFIG_TABLE_CS_DROP_CHECK_INTERVAL));
 		}
 
 		int32_t getHeartbeatInterval() const {
@@ -1459,6 +1461,14 @@ private:
 
 		int32_t getCheckLoadBalanceInterval() const {
 			return checkLoadBalanceInterval_;
+		}
+
+		int32_t getCheckDropInterval() {
+			return checkDropInterval_;
+		}
+
+		int32_t setCheckDropInterval(int32_t interval)  {
+			return checkDropInterval_ = interval;
 		}
 
 		const std::string getSetClusterName() const {
@@ -1507,6 +1517,7 @@ private:
 		int32_t shortTermTimeoutInterval_;
 		int32_t blockClearInterval_;
 		int32_t ruleLimitInterval_;
+		int32_t checkDropInterval_;
 		std::string setClusterName_;
 	};
 

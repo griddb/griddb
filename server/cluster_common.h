@@ -35,6 +35,9 @@ const ClusterVersionId GS_CLUSTER_MESSAGE_CURRENT_VERSION = 33;
 
 static const int32_t SERVICE_MAX = 4;
 
+static const uint32_t IMMEDIATE_PARTITION_ID = 0;
+static const uint32_t SYSTEM_CONTAINER_PARTITION_ID = 0;
+
 /*!
 	@brief Status of ChangePartition
 */

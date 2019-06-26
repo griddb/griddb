@@ -2515,8 +2515,6 @@ void CheckpointOperationHandler::operator()(EventContext &ec, Event &ev) {
 			checkpointService_->setCurrentCpGrpId(UINT32_MAX);
 
 
-			BitArray &validBitArray = chunkManager_->getCheckpointBit(pgId);
-
 			const PartitionGroupConfig &pgConfig =
 					checkpointService_->getPGConfig();
 			{
@@ -2531,8 +2529,7 @@ void CheckpointOperationHandler::operator()(EventContext &ec, Event &ev) {
 			}
 			logManager_->putCheckpointEndLog(
 					binaryLogBuf,
-					pgConfig.getGroupBeginPartitionId(pgId),
-					validBitArray);
+					pgConfig.getGroupBeginPartitionId(pgId));
 
 			logManager_->writeBuffer(pgId);
 			logManager_->flushFile(pgId);

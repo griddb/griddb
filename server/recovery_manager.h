@@ -269,6 +269,10 @@ private:
 
 	void parseRecoveryTargetPartition(const std::string &str);
 
+	void reconstructValidBitArray(
+			util::StackAllocator &alloc, Mode mode,
+			LogCursor &cursor, BitArray &validBitArray);
+
 	void checkContainerExistence(
 		BaseContainer *container, ContainerId containerId);
 	void checkContainerExistence(

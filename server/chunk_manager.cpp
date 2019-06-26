@@ -637,17 +637,11 @@ void ChunkManager::isValidFileHeader(PartitionGroupId pgId) {
 	}
 }
 
-/*!
-	@brief Set checkpoint block bits to the CheckpointFile for recovery.
-*/
-void ChunkManager::setCheckpointBit(
-		PartitionGroupId pgId, const uint8_t* bitList, uint64_t bitNum,
-		bool releaseUnusedFileBlocks) {
+void ChunkManager::resetCheckpointBit(PartitionGroupId pgId) {
 	try {
 		assert(pgId < getConfig().getPartitionGroupNum());
 		CheckpointManager& pgCheckpointManager = getPGCheckpointManager(pgId);
-		pgCheckpointManager.setPGCheckpointBit(
-				bitList, bitNum, releaseUnusedFileBlocks);
+		pgCheckpointManager.initializePGCheckpointBit();
 	}
 	catch (std::exception& e) {
 		GS_RETHROW_SYSTEM_ERROR(e, "");
@@ -668,13 +662,8 @@ void ChunkManager::recoveryChunk(
 				<< filePos);
 	}
 	CheckpointManager& checkpointManager = getCheckpointManager(pId);
-	if (!checkpointManager.getPGCheckpointBit().get(filePos)) {
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_CHM_INVALID_FILE_POS,
-				"filePos, " << filePos << " must be checkpoint chunk, "
-				<< checkpointManager.getPGFileNum()
-				<< getTraceInfo(pId, categoryId, cId));
-	}
 
+	checkpointManager.setPGCheckpointBit(filePos);
 	try {
 		GS_TRACE_INFO(CHUNK_MANAGER_DETAIL, GS_TRACE_CHM_INTERNAL_INFO,
 				getTraceInfo(pId, categoryId, cId)
@@ -3903,16 +3892,25 @@ void ChunkManager::CheckpointManager::switchPGCheckpointBit(CheckpointId cpId) {
 		}
 	}
 }
-void ChunkManager::CheckpointManager::setPGCheckpointBit(
-		const uint8_t* bitList, const uint64_t bitNum,
-		bool releaseUnusedFileBlocks) {
+
+void ChunkManager::CheckpointManager::initializePGCheckpointBit() {
 	CheckpointFile& checkpointFile = getCheckpointFile();
-	checkpointFile.initializeValidBlockInfo(bitList, bitNum);
-	checkpointFile.initializeUsedBlockInfo(bitList, bitNum);
-	if (releaseUnusedFileBlocks) {
-		checkpointFile.zerofillUnusedBlock(bitNum);
-	}
+	checkpointFile.initializeValidBlockInfo();
+	checkpointFile.initializeUsedBlockInfo();
 }
+
+void ChunkManager::CheckpointManager::setPGCheckpointBit(const uint64_t pos) {
+	CheckpointFile& checkpointFile = getCheckpointFile();
+	checkpointFile.setValidBlockInfo(pos, true);
+	checkpointFile.setUsedBlockInfo(pos, true);
+}
+
+void ChunkManager::CheckpointManager::releaseUnusedPGFileBlocks(
+		const uint64_t bitNum) {
+	CheckpointFile& checkpointFile = getCheckpointFile();
+	checkpointFile.zerofillUnusedBlock(bitNum);
+}
+
 void ChunkManager::CheckpointManager::flushPGFile() {
 	return getCheckpointFile().flush();
 }
@@ -4150,21 +4148,11 @@ bool ChunkManager::CheckpointManager::readRecoveryChunk(uint8_t* buffer) {
 	assert(buffer);
 
 	uint64_t checkBlockPos = 0;
-	CheckpointFile& checkpointFile = getCheckpointFile();
-	uint64_t blockNum = checkpointFile.getBlockNum();
+//	CheckpointFile& checkpointFile = getCheckpointFile();
+//	uint64_t blockNum = checkpointFile.getBlockNum();
 	bool validBlockFound = false;
-	for (; checkBlockPos < blockNum; ++checkBlockPos) {
-		if (checkpointFile.getValidBlockInfo(checkBlockPos)) {
-			validBlockFound = true;
-			break;
-		}
-	}
-	if (!validBlockFound) {
-		checkBlockPos = 0;  
-	}
 	try {
 		int64_t ioTime = fileManagerTxnThread_.readChunk(buffer, 1, checkBlockPos);
-		fileManagerTxnThread_.isValidCheckSum(buffer);
 		fileManagerTxnThread_.uncompressChunk(buffer);
 		pgStats_.recoveryReadCount_++;
 		pgStats_.recoveryReadTime_ += ioTime;

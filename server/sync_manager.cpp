@@ -51,7 +51,7 @@ SyncManager::SyncManager(const ConfigTable &configTable, PartitionTable *pt)
 	: syncOptStat_(pt->getPartitionNum()),
 	fixedSizeAlloc_(
 			util::AllocatorInfo(ALLOCATOR_GROUP_CS, "syncManagerFixed"), 1 << 18),
-	alloc_(
+	globalStackAlloc_(
 			util::AllocatorInfo(ALLOCATOR_GROUP_CS, "syncManagerStack"), &fixedSizeAlloc_),
 	varSizeAlloc_(util::AllocatorInfo(ALLOCATOR_GROUP_CS, "syncManagerVar")),
 	syncContextTables_(NULL), pt_(pt), syncConfig_(configTable), extraConfig_(configTable),
@@ -64,28 +64,28 @@ SyncManager::SyncManager(const ConfigTable &configTable, PartitionTable *pt)
 		if (partitionNum <= 0 || partitionNum != pt->getPartitionNum()) {
 			GS_THROW_USER_ERROR(GS_ERROR_SYM_INVALID_PARTITION_INFO, "");
 		}
-		syncContextTables_ = ALLOC_NEW(alloc_) SyncContextTable * [partitionNum];
+		syncContextTables_ = ALLOC_NEW(globalStackAlloc_) SyncContextTable * [partitionNum];
 		for (PartitionId pId = 0; pId < partitionNum; pId++) {
-			syncContextTables_[pId] = ALLOC_NEW(alloc_) SyncContextTable(
-					alloc_, pId, DEFAULT_CONTEXT_SLOT_NUM, &varSizeAlloc_);
+			syncContextTables_[pId] = ALLOC_NEW(globalStackAlloc_) SyncContextTable(
+					globalStackAlloc_, pId, DEFAULT_CONTEXT_SLOT_NUM, &varSizeAlloc_);
 		}
 		chunkSize_ = configTable.getUInt32(CONFIG_TABLE_DS_STORE_BLOCK_SIZE);
-		chunkBufferList_ = ALLOC_NEW(alloc_) uint8_t [
+		chunkBufferList_ = ALLOC_NEW(globalStackAlloc_) uint8_t [
 				chunkSize_ * configTable.getUInt32(CONFIG_TABLE_DS_CONCURRENCY)];
 		ConfigTable *tmpTable = const_cast<ConfigTable*>(&configTable);
 		config_.setUpConfigHandler(this, *tmpTable);
 	}
 	catch (std::exception &e) {
-		ALLOC_DELETE(alloc_, chunkBufferList_);
+		ALLOC_DELETE(globalStackAlloc_, chunkBufferList_);
 		GS_RETHROW_USER_OR_SYSTEM(e, "");
 	}
 }
 
 SyncManager::~SyncManager() {
-	ALLOC_DELETE(alloc_, chunkBufferList_);
+	ALLOC_DELETE(globalStackAlloc_, chunkBufferList_);
 	for (PartitionId pId = 0; pId < pt_->getPartitionNum(); pId++) {
 		if (syncContextTables_[pId]) {
-			ALLOC_DELETE(alloc_, syncContextTables_[pId]);
+			ALLOC_DELETE(globalStackAlloc_, syncContextTables_[pId]);
 		}
 	}
 }
@@ -706,7 +706,7 @@ void SyncManager::setLongtermSyncChunk(SyncContext *context,
 	int32_t logBufferSize = 0;
 	context->getLogBuffer(logBuffer, logBufferSize);
 	if (logBuffer != NULL && logBufferSize > 0) {
-//		LogSequentialNumber startLsn = 
+//		LogSequentialNumber startLsn =
 		recoveryMgr_->restoreTransaction(pId, logBuffer, emNow);
 		GS_TRACE_SYNC(context, "Long term chunk sync completed", "");;
 		context->freeBuffer(varSizeAlloc, LOG_SYNC, getSyncOptStat());
@@ -947,8 +947,8 @@ void SyncManager::createPartition(PartitionId pId) {
 		return;
 	}
 	try {
-		syncContextTables_[pId] = ALLOC_NEW(alloc_) SyncContextTable(
-				alloc_, pId, DEFAULT_CONTEXT_SLOT_NUM, &varSizeAlloc_);
+		syncContextTables_[pId] = ALLOC_NEW(globalStackAlloc_) SyncContextTable(
+				globalStackAlloc_, pId, DEFAULT_CONTEXT_SLOT_NUM, &varSizeAlloc_);
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_USER_OR_SYSTEM(e, GS_EXCEPTION_MERGE_MESSAGE(
@@ -959,11 +959,11 @@ void SyncManager::createPartition(PartitionId pId) {
 
 SyncManager::SyncContextTable::SyncContextTable(util::StackAllocator &alloc,
 		PartitionId pId, uint32_t numInitialSlot, SyncVariableSizeAllocator *varSizeAlloc)
-	: pId_(pId), numCounter_(0), freeList_(NULL), numUsed_(0), alloc_(&alloc),
+	: pId_(pId), numCounter_(0), freeList_(NULL), numUsed_(0), globalStackAlloc_(&alloc),
 			slots_(alloc), varSizeAlloc_(varSizeAlloc) {
 	try {
 		for (uint32_t i = 0; i < numInitialSlot; i++) {
-			SyncContext *slot = ALLOC_NEW(alloc) SyncContext [SLOT_SIZE];
+			SyncContext *slot = ALLOC_NEW(*globalStackAlloc_) SyncContext [SLOT_SIZE];
 			slots_.push_back(slot);
 			for (uint32_t j = 0; j < SLOT_SIZE; j++) {
 				slot[j].setPartitionId(pId_);
@@ -976,9 +976,9 @@ SyncManager::SyncContextTable::SyncContextTable(util::StackAllocator &alloc,
 	catch (std::exception &e) {
 		for (size_t i = 0; i < slots_.size(); i++) {
 			for (uint32_t j = 0; j < SLOT_SIZE; j++) {
-				ALLOC_DELETE(alloc, &slots_[i][j]);
+				ALLOC_DELETE(*globalStackAlloc_, &slots_[i][j]);
 			}
-			ALLOC_DELETE(alloc, slots_[i]);
+			ALLOC_DELETE(*globalStackAlloc_, slots_[i]);
 		}
 		GS_RETHROW_SYSTEM_ERROR(e, "");
 	}
@@ -988,9 +988,9 @@ SyncManager::SyncContextTable::~SyncContextTable() {
 	for (size_t i = 0; i < slots_.size(); i++) {
 		for (uint32_t j = 0; j < SLOT_SIZE; j++) {
 			slots_[i][j].clear(*varSizeAlloc_, NULL);
-			ALLOC_DELETE(*alloc_, &slots_[i][j]);
+			ALLOC_DELETE(*globalStackAlloc_, &slots_[i][j]);
 		}
-		ALLOC_DELETE(*alloc_, slots_[i]);
+		ALLOC_DELETE(*globalStackAlloc_, slots_[i]);
 	}
 }
 
@@ -1002,7 +1002,7 @@ SyncContext *SyncManager::SyncContextTable::createSyncContext(
 	try {
 		SyncContext *context = freeList_;
 		if (context == NULL) {
-			SyncContext *slot = ALLOC_NEW(*alloc_) SyncContext [SLOT_SIZE];
+			SyncContext *slot = ALLOC_NEW(*globalStackAlloc_) SyncContext [SLOT_SIZE];
 			slots_.push_back(slot);
 			for (uint32_t j = 0; j < SLOT_SIZE; j++) {
 				slot[j].setPartitionId(pId_);
@@ -1776,5 +1776,10 @@ bool SyncManager::controlSyncLoad(EventContext &ec, Event &ev, PartitionId pId,
 void SyncManager::checkActiveStatus() {
 	const StatementHandler::ClusterRole clusterRole = 
 		(StatementHandler::CROLE_MASTER | StatementHandler::CROLE_FOLLOWER);
-	StatementHandler::checkExecutable(clusterRole, pt_);
+	try {
+		StatementHandler::checkExecutable(clusterRole, pt_);
+	}
+	catch (std::exception &e) {
+		GS_RETHROW_USER_ERROR(e, "");
+	}
 }

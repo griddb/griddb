@@ -168,16 +168,19 @@ struct AddressInfo {
 	/*!
 		@brief Result of Partition statistics check
 	*/
-	enum CheckedPartitionStat {
+	enum CheckedPartitionSummaryStatus {
 		PT_NORMAL,
 		PT_NOT_BALANCE,
 		PT_REPLICA_LOSS,
-		PT_PARTIAL_STOP,
-		PT_ABNORMAL
+		PT_OWNER_LOSS,
+		PT_ABNORMAL,
+		PT_INITIAL
 	};
 
 static const int32_t PT_ERROR_NORMAL = 0;
 static const int32_t PT_OTHER_NORMAL = 0;
+static const int32_t PT_ERROR_LONG_SYNC_FAIL = -2;
+static const int32_t PT_ERROR_SHORT_SYNC_FAIL = -1;
 
 struct LoadSummary {
 	LoadSummary(util::StackAllocator &alloc, int32_t nodeLimit)
@@ -186,7 +189,7 @@ struct LoadSummary {
 		liveNodeList_(alloc),
 		ownerLimit_(PT_OWNER_LOAD_LIMIT),
 		dataLimit_(PT_DATA_LOAD_LIMIT),
-		status_(PT_NORMAL),
+		status_(PT_INITIAL),
 		nodeNum_(0),
 		ownerLoadCount_(0),
 		dataLoadCount_(0) {
@@ -283,7 +286,7 @@ struct LoadSummary {
 	util::XArray<uint8_t> liveNodeList_;
 	uint32_t ownerLimit_;
 	uint32_t dataLimit_;
-	CheckedPartitionStat status_;
+	CheckedPartitionSummaryStatus status_;
 	int32_t nodeNum_;
 	int32_t ownerLoadCount_;
 	int32_t dataLoadCount_;
@@ -438,22 +441,6 @@ public:
 		PT_NONE,
 		PT_ROLE_MAX = 5
 	};
-
-	std::string dumpPartitionStat(CheckedPartitionStat stat) {
-		std::string returnStr;
-		switch (stat) {
-		case PT_NORMAL:
-			return "PT_NORMAL";
-		case PT_REPLICA_LOSS:
-			return "PT_REPLICA_LOSS";
-		case PT_NOT_BALANCE:
-			return "PT_NOT_BALANCE";
-		case PT_PARTIAL_STOP:
-			return "PT_PARTIAL_STOP";
-		default:
-			return "UNDEFINED";
-		}
-	}
 
 	/*!
 		@brief Represents the revision of each address
@@ -815,11 +802,11 @@ public:
 	*/
 	struct PartitionContext {
 
-		PartitionContext(util::StackAllocator &alloc, PartitionTable *pt,
+		PartitionContext(util::StackAllocator &eventStackAlloc, PartitionTable *pt,
 				bool &needUpdatePartition, 
 				SubPartitionTable &subPartitionTable,
 				DropPartitionNodeInfo &dropNodeInfo) : 
-			alloc_(&alloc),
+			eventStackAlloc_(&eventStackAlloc),
 			needUpdatePartition_(needUpdatePartition),
 			currentRuleLimitTime_(UNDEF_TTL),
 			pt_(pt),
@@ -850,7 +837,11 @@ public:
 			return isConfigurationChange_;
 		}
 
-		util::StackAllocator *alloc_;
+		util::StackAllocator &getAllocator() {
+			return *eventStackAlloc_;
+		}
+
+		util::StackAllocator *eventStackAlloc_;
 		bool &needUpdatePartition_;
 		int64_t currentRuleLimitTime_;
 		PartitionTable *pt_;
@@ -1055,7 +1046,7 @@ public:
 
 	void setGoalPartition(GoalPartition &goal);
 	void planNext(PartitionContext &context);
-	bool checkDrop(util::StackAllocator &alloc, DropPartitionNodeInfo &dropInfo);
+	bool checkPeriodicDrop(util::StackAllocator &alloc, DropPartitionNodeInfo &dropInfo);
 	void planGoal(PartitionContext &context);
 	bool check();
 
@@ -1167,14 +1158,6 @@ public:
 		return currentPartitions_[pId].getPartitionRevision(targetNode);
 	}
 
-	PartitionRevisionNo getPartitionRoleRevision(PartitionId pId, TableType type) {
-		if (pId >= config_.partitionNum_) {
-			GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
-		}
-		util::LockGuard<util::ReadLock> currentLock(partitionLockList_[pId]);
-		return partitions_[pId].roles_[type].getRevisionNo();
-	}
-
 	void getPartitionRole(
 			PartitionId pId, PartitionRole &role, TableType type = PT_CURRENT_OB) {
 		if (pId >= config_.partitionNum_) {
@@ -1218,6 +1201,19 @@ public:
 			break;
 		}
 	}
+
+	void setErrorStatus(PartitionId pId, int32_t status, NodeId targetNode = 0) {
+		util::LockGuard<util::WriteLock> currentLock(partitionLockList_[pId]);
+		currentPartitions_[pId].setErrorStatus(targetNode, status);
+	};
+
+	int32_t  getErrorStatus(PartitionId pId, NodeId targetNode) {
+		util::LockGuard<util::ReadLock> currentLock(partitionLockList_[pId]);
+		return currentPartitions_[pId].getErrorStatus(targetNode);
+	}
+
+	void handleErrorStatus(PartitionId pId, NodeId targetNode, int32_t status);
+
 	bool check(PartitionContext &context);
 
 	void setBlockQueue(PartitionId pId,
@@ -1230,11 +1226,15 @@ public:
 		goalBlockQueue_.clear();
 	};
 
-	CheckedPartitionStat checkPartitionStat(
+	CheckedPartitionSummaryStatus checkPartitionSummaryStatus(
 			util::StackAllocator &alloc, bool isBalanceCheck = false);
 
-	CheckedPartitionStat getPartitionStat() {
+	CheckedPartitionSummaryStatus getPartitionSummaryStatus() {
 		return loadInfo_.status_;
+	}
+
+	void setPartitionSummaryStatus(CheckedPartitionSummaryStatus status) {
+		loadInfo_.status_ = status;
 	}
 
 	bool checkNextOwner(PartitionId pId, NodeId checkedNode,
@@ -1353,7 +1353,7 @@ public:
 	PartitionRevision &incPartitionRevision() {
 		util::LockGuard<util::Mutex> lock(revisionLock_);
 		if (revision_.sequentialNumber_ == INT64_MAX) {
-			GS_THROW_SYSTEM_ERROR(GS_ERROR_CS_MAX_PARTITION_REIVISION,
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_CS_MAX_PARTITION_REVISION,
 					"Cluster partition sequence number is limit");
 		}
 		else {
@@ -1555,18 +1555,18 @@ private:
 			: nodeBaseInfo_(NULL),
 			heartbeatTimeout_(UNDEF_TTL),
 			isAcked_(false),
-			alloc_(NULL) {}
+			globalStackAlloc_(NULL) {}
 
 		~NodeInfo() {
 			if (nodeBaseInfo_) {
 				for (int32_t pos = 0; pos < SERVICE_MAX; pos++) {
-					ALLOC_DELETE(*alloc_, &nodeBaseInfo_[pos]);
+					ALLOC_DELETE(*globalStackAlloc_, &nodeBaseInfo_[pos]);
 				}
 			}
 		}
 
 		void init(util::StackAllocator &alloc) {
-			alloc_ = &alloc;
+			globalStackAlloc_ = &alloc;
 			nodeBaseInfo_ = ALLOC_NEW(alloc) NodeBaseInfo [SERVICE_MAX];
 		}
 
@@ -1608,7 +1608,7 @@ private:
 		NodeBaseInfo *nodeBaseInfo_;
 		int64_t heartbeatTimeout_;
 		bool isAcked_;
-		util::StackAllocator *alloc_;
+		util::StackAllocator *globalStackAlloc_;
 	};
 
 	class BlockQueue {
@@ -1620,14 +1620,14 @@ private:
 		~BlockQueue() {
 			if (queueList_) {
 				for (uint32_t pos = 0; pos < partitionNum_; pos++) {
-					ALLOC_DELETE(*alloc_, &queueList_[pos]);
+					ALLOC_DELETE(*globalStackAlloc_, &queueList_[pos]);
 				}
 			}
 		};
 
 		void init(util::StackAllocator &alloc) {
-			alloc_ = &alloc;
-			queueList_ = ALLOC_NEW(alloc) std::set<NodeId>[partitionNum_];
+			globalStackAlloc_ = &alloc;
+			queueList_ = ALLOC_NEW(*globalStackAlloc_) std::set<NodeId>[partitionNum_];
 		}
 
 		bool find(PartitionId pId, NodeId nodeId);
@@ -1647,7 +1647,7 @@ private:
 		std::set<NodeId> *queueList_;
 		uint32_t partitionNum_;
 		int32_t queueSize_;
-		util::StackAllocator *alloc_;
+		util::StackAllocator *globalStackAlloc_;
 	};
 
 
@@ -1714,6 +1714,18 @@ private:
 			currentPartitionInfos_[nodeId].startLsn_ = startLsn;
 		}
 
+		void setErrorStatus(NodeId nodeId, int32_t status) {
+			checkSize(nodeId);
+			currentPartitionInfos_[nodeId].errorStatus_ = status;
+		}
+
+		int32_t getErrorStatus(NodeId nodeId) {
+			checkSize(nodeId);
+			int32_t ret = currentPartitionInfos_[nodeId].errorStatus_;
+			currentPartitionInfos_[nodeId].errorStatus_ = PT_ERROR_NORMAL;
+			return ret;
+		}
+
 		PartitionStatus getPartitionStatus(NodeId nodeId) {
 			checkSize(nodeId);
 			return currentPartitionInfos_[nodeId].status_;
@@ -1764,18 +1776,18 @@ private:
 
 	class Partition {
 	public:
-		Partition() : roles_(NULL), alloc_(NULL) {}
+		Partition() : roles_(NULL), globalStackAlloc_(NULL) {}
 		~Partition() {
 			if (roles_) {
 				for (int32_t pos = 0; pos < PT_TABLE_MAX; pos++) {
-					ALLOC_DELETE(*alloc_, &roles_[pos]);
+					ALLOC_DELETE(*globalStackAlloc_, &roles_[pos]);
 				}
 			}
 		}
 
 		void init(util::StackAllocator &alloc, PartitionId pId,
 				PartitionGroupId pgId, int32_t nodeLimit) {
-			alloc_ = &alloc;
+			globalStackAlloc_ = &alloc;
 			roles_ = ALLOC_NEW(alloc) PartitionRole[PT_TABLE_MAX];
 			for (int32_t pos = 0; pos < PT_TABLE_MAX; pos++) {
 				roles_[pos].init(pId, static_cast<TableType>(pos));
@@ -1799,7 +1811,7 @@ private:
 		PartitionRole *roles_;
 		PartitionInfo partitionInfo_;
 	private:
-		util::StackAllocator *alloc_;
+		util::StackAllocator *globalStackAlloc_;
 	};
 
 	struct ReplicaInfo {
@@ -1932,7 +1944,7 @@ private:
 		partitions_[pId].partitionInfo_.available_ = available;
 	}
 
-	bool checkTargetPartition(PartitionId pId, bool &catchupWait);
+	bool checkTargetPartition(PartitionId pId, int32_t backupNum, bool &catchupWait);
 
 	void clearPartitionRole(PartitionId pId);
 	void clearCatchupRole(PartitionId pId);
@@ -1993,10 +2005,13 @@ private:
 		util::StackAllocator &alloc,
 		util::XArray<NodeId> &nodeIdList,
 		util::Vector<PartitionRole> &roleList);
-
+	void modifyGoalTable(
+		util::StackAllocator &alloc,
+		util::XArray<NodeId> &nodeIdList,
+		util::Vector<PartitionRole> &roleList);
 
 	util::FixedSizeAllocator<util::Mutex> fixedSizeAlloc_;
-	util::StackAllocator alloc_;
+	util::StackAllocator globalStackAlloc_;
 
 	int32_t nodeNum_;
 	NodeId masterNodeId_;
@@ -2021,6 +2036,7 @@ private:
 	BlockQueue nextBlockQueue_;
 	BlockQueue goalBlockQueue_;
 	PartitionId prevCatchupPId_;
+	NodeId prevCatchupNodeId_;
 
 	Partition *partitions_;
 	CurrentPartitions *currentPartitions_;
