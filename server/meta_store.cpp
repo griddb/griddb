@@ -2034,9 +2034,9 @@ void MetaProcessor::ErasableHandler::execute(
 	const ContainerId containerId = schemaContainer.getContainerId();
 	const PartitionId pId = txn.getPartitionId();
 
-	BaseContainer *archiveContainer = const_cast<BaseContainer *>(&schemaContainer);
-	const FullContainerKey &cotainerKey = archiveContainer->getContainerKey(txn);
-	FullContainerKeyComponents component = cotainerKey.getComponents(alloc);
+//	BaseContainer *archiveContainer = const_cast<BaseContainer *>(&schemaContainer);
+//	const FullContainerKey &cotainerKey = archiveContainer->getContainerKey(txn);
+//	FullContainerKeyComponents component = cotainerKey.getComponents(alloc);
 //	const ContainerId largeContainerId = component.largeContainerId_;
 	uint32_t schemaVersionId = schemaContainer.getVersionId();
 	int64_t initSchemaStatus = schemaContainer.getInitSchemaStatus();

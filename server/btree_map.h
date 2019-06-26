@@ -1006,6 +1006,7 @@ private:
 			UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyAddr>::VALUE));
 		}
 
+
 		inline bool finalize(TransactionContext &txn, ResultSize &removeNum) {
 			BNodeImage<K, V> *image = getImage();
 			int32_t valueNum = image->header_.size_;
@@ -3035,5 +3036,6 @@ int32_t BtreeMap::getInitialItemSizeThreshold() {
 }
 template <>
 int32_t BtreeMap::getInitialItemSizeThreshold<TransactionId, MvccRowImage>();
+
 
 #endif  

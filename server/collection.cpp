@@ -446,7 +446,7 @@ void Collection::continueCreateIndex(TransactionContext& txn,
 			return;
 		}
 
-		MvccRowImage beforeImage = indexCursor.getMvccImage();
+//		MvccRowImage beforeImage = indexCursor.getMvccImage();
 		IndexData indexData;
 		bool withUncommitted = true;
 		bool isExist = getIndexData(txn, indexCursor.getColumnId(), indexCursor.getMapType(), 

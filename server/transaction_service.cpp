@@ -3065,15 +3065,14 @@ bool StatementHandler::checkPrivilege(
 		ContainerAttribute expectedResourceSubType) {
 
 
-
-	bool isWriteMode = false;
+//	bool isWriteMode = false;
 	switch (command) {
 		case PUT_CONTAINER:
 		case DROP_CONTAINER:
-			isWriteMode = true;
+//			isWriteMode = true;
 			break;
-		default:
-			isWriteMode = false;
+//		default:
+//			isWriteMode = false;
 	}
 
 
@@ -11169,7 +11168,7 @@ void DataStorePeriodicallyHandler::operator()(EventContext &ec, Event &ev) {
 		if (clusterManager_->checkRecoveryCompleted()) {
 			WATCHER_START;
 //			util::StackAllocator &alloc = ec.getAllocator();
-			const util::DateTime now = ec.getHandlerStartTime();
+//			const util::DateTime now = ec.getHandlerStartTime();
 //			const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 			const PartitionGroupId pgId = ec.getWorkerId();
 			const PartitionGroupConfig &pgConfig =

@@ -25,7 +25,6 @@
 #include "schema.h"
 #include "value_operator.h"
 
-
 const double LogDevide::EFFICENCY_THRESHOLD = 1 / (1 / static_cast<double>(1 << MAX_DIVIDED_NUM));
 
 void LogDevide::initialize(uint64_t inputSize) {
@@ -246,18 +245,18 @@ bool BlobCursor::next(CURSOR_MODE mode) {
 		if (mode == REMOVE) {
 			arrayCursor_->finalize();
 		}
-		bool isExist = (currentDepth_ > 0);
+//		bool isExist = (currentDepth_ > 0);
 		while (currentDepth_ > 0) {
 			currentDepth_--;
 			arrayCursor_ = &(stackCusor_[currentDepth_]);
 			if (arrayCursor_->next()) {
-				isExist = true;
+//				isExist = true;
 				break;
 			} else if (mode == REMOVE) {
 				arrayCursor_->finalize();
 			}
 		}
-		assert(isExist);
+//		assert(isExist);
 		down(mode);
 	}
 	return true;
@@ -388,6 +387,7 @@ void BlobCursor::dump(util::NormalOStringStream &ss, bool forExport) {
 	ss << "'";
 }
 
+
 uint8_t *BlobCursor::getBinary(util::StackAllocator &alloc) {
 	uint64_t blobSize = getTotalSize();
 	uint8_t *destAddr = static_cast<uint8_t *>(alloc.allocate(blobSize));
@@ -496,6 +496,7 @@ int32_t BlobProcessor::compare(TransactionContext &txn,
 void BlobProcessor::getField(TransactionContext &txn,
 	ObjectManager &objectManager, ColumnId columnId, const Value *objectValue,
 	MessageRowStore *messageRowStore) {
+
 	if (objectValue->data() == NULL) {
 		messageRowStore->setVarDataHeaderField(columnId, 0);
 		return;
@@ -562,4 +563,5 @@ void BlobProcessor::setField(TransactionContext &txn,
 	destSize = blobCursor.initialize(destAddr, srcSize);
 	blobCursor.setBinary(currentAddr, srcSize);
 }
+
 

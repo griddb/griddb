@@ -3179,7 +3179,7 @@ void AuthenticationAckHandler::operator()(EventContext &ec, Event &ev) {
 	TXN_TRACE_HANDLER_CALLED(ev);
 
 	util::StackAllocator &alloc = ec.getAllocator();
-	const util::DateTime now = ec.getHandlerStartTime();
+//	const util::DateTime now = ec.getHandlerStartTime();
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	AuthenticationAck ack(ev.getPartitionId());

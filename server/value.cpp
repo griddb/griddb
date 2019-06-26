@@ -418,7 +418,7 @@ void Value::archive(TransactionContext &txn, ObjectManager &objectManager, Archi
 						handler->appendArray(simpleType, cursor.str(), cursor.stringLength());
 						++count;
 					}
-					assert(num == count);
+//					assert(num == count);
 				}
 			}
 		}

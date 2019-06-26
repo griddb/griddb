@@ -847,8 +847,8 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::updateFields(
 	const uint32_t variableColumnNum =
 		rowArrayCursor_->getContainer().getVariableColumnNum();
 	if (variableColumnNum > 0) {
-		const AllocateStrategy allocateStrategy =
-			rowArrayCursor_->getContainer().getRowAllcateStrategy();
+//		const AllocateStrategy allocateStrategy =
+//			rowArrayCursor_->getContainer().getRowAllcateStrategy();
 
 		setVariableArray(UNDEF_OID);
 		util::XArray<uint32_t> varColumnIdList(alloc);
@@ -1501,12 +1501,12 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::initializeParam() {
 		currentParam_.rowSize_ = currentParam_.nullsOffset_ + currentParam_.nullbitsSize_ + currentParam_.rowFixedColumnSize_;
 
 		{
-			uint32_t oldRowSize_ = currentParam_.nullsOffset_ + currentParam_.nullbitsSize_;
+//			uint32_t oldRowSize_ = currentParam_.nullsOffset_ + currentParam_.nullbitsSize_;
 			for (uint32_t i = currentParam_.columnNum_; i != 0; i--) {
 				ColumnInfo &columnInfo =
 					getContainer().getColumnInfo(i - 1);
 				if (!columnInfo.isVariable()) {
-					oldRowSize_ = currentParam_.rowDataOffset_ + columnInfo.getColumnOffset() + columnInfo.getColumnSize() - currentParam_.columnOffsetDiff_;
+//					oldRowSize_ = currentParam_.rowDataOffset_ + columnInfo.getColumnOffset() + columnInfo.getColumnSize() - currentParam_.columnOffsetDiff_;
 					break;
 				}
 			}

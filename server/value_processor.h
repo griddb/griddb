@@ -1131,13 +1131,14 @@ private:
 	};
 
 	uint32_t calcArrayNum(int32_t currentElem, size_t depth) {
-		uint32_t lowerArrayNum = 0, lowerArrayPos = 0;
+		uint32_t lowerArrayNum = 0;
+//		, lowerArrayPos = 0;
 		uint32_t upperArrayNum = maxElem_, upperArrayPos = currentElem;
 		size_t currentDepth = maxDepth_;
 		uint32_t maxArrayNum = getMaxArrayNum(objectManager_);
 		while (currentDepth-- != depth) {
 			lowerArrayNum = upperArrayNum;
-			lowerArrayPos = upperArrayPos;
+//			lowerArrayPos = upperArrayPos;
 			upperArrayNum = static_cast<uint32_t>(ceil(static_cast<double>(upperArrayNum) / maxArrayNum));
 			upperArrayPos = upperArrayPos / maxArrayNum;
 		}
