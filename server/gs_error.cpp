@@ -197,8 +197,9 @@ GSExceptionRegenerator::selectErrorCode(
 	return (primary.isEmpty() ? secondary : primary);
 }
 
-GSTraceFormatter::GSTraceFormatter(const char8_t *secretHexKey)
-	: secret_(true), traceLocationVisible_(false) {
+GSTraceFormatter::GSTraceFormatter(const char8_t *secretHexKey) :
+		secret_(true), traceLocationVisible_(false)
+{
 	util::NormalIStringStream iss(secretHexKey);
 	util::NormalOStringStream oss;
 	util::HexConverter::decode(oss, iss);
@@ -224,6 +225,7 @@ void GSTraceFormatter::setSecret(bool secret) {
 void GSTraceFormatter::setTraceLocationVisible(bool visible) {
 	traceLocationVisible_ = visible;
 }
+
 
 /*!
 	@brief Formats error message

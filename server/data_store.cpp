@@ -1677,7 +1677,7 @@ bool DataStore::restoreContainerIdTable(
 		}
 	}
 
-	GS_TRACE_INFO(DATA_STORE, GS_TRACE_DS_DS_CONTAINTER_ID_TABLE_STATUS,
+	GS_TRACE_INFO(DATA_STORE, GS_TRACE_DS_DS_CONTAINER_ID_TABLE_STATUS,
 		"restore pId," << txn.getPartitionId() << ",containerListSize,"
 					   << containerListSize);
 
@@ -1809,7 +1809,7 @@ void DataStore::ContainerIdTable::remove(
 	PartitionId pId, ContainerId containerId) {
 	ContainerIdMap::size_type result = containerIdMap_[pId].erase(containerId);
 	if (result == 0) {
-		GS_TRACE_WARNING(DATA_STORE, GS_TRACE_DS_DS_CONTAINTER_ID_TABLE_STATUS,
+		GS_TRACE_WARNING(DATA_STORE, GS_TRACE_DS_DS_CONTAINER_ID_TABLE_STATUS,
 			"DataStore::ContainerIdTable::remove: out of bounds");
 	}
 }

@@ -1186,7 +1186,7 @@ TransactionContext &TransactionManager::Partition::put(
 			break;
 
 		default:
-			GS_THROW_USER_ERROR(GS_ERROR_TM_CREATETION_MODE_INVALID, "");
+			GS_THROW_USER_ERROR(GS_ERROR_TM_CREATION_MODE_INVALID, "");
 		}
 
 		assert(txn != NULL);

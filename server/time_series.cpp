@@ -468,7 +468,7 @@ void TimeSeries::continueCreateIndex(TransactionContext& txn,
 			return;
 		}
 
-		MvccRowImage beforeImage = indexCursor.getMvccImage();
+//		MvccRowImage beforeImage = indexCursor.getMvccImage();
 		IndexData indexData;
 		bool withUncommitted = true;
 		bool isExist = getIndexData(txn, indexCursor.getColumnId(), indexCursor.getMapType(), 
@@ -1806,7 +1806,7 @@ void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 							  .getColumnType();
 		if (!ValueProcessor::isNumerical(type)) {
 			GS_THROW_USER_ERROR(
-				GS_ERROR_DS_TIM_INTERPORATED_COLUMN_TYPE_INVALID, "");
+				GS_ERROR_DS_TIM_INTERPOLATED_COLUMN_TYPE_INVALID, "");
 		}
 	}
 
@@ -2158,7 +2158,7 @@ void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 									} break;
 									default:
 										GS_THROW_USER_ERROR(
-											GS_ERROR_DS_TIM_INTERPORATED_COLUMN_TYPE_INVALID,
+											GS_ERROR_DS_TIM_INTERPOLATED_COLUMN_TYPE_INVALID,
 											"");
 									}
 									}
@@ -2287,7 +2287,7 @@ void TimeSeries::sampleWithoutInterp(TransactionContext &txn,
 	}
 	if (sampling.interpolatedColumnIdList_.size() != 0) {
 		GS_THROW_USER_ERROR(
-			GS_ERROR_DS_TIM_INTERPORATED_COLUMN_IDLIST_INVALID, "");
+			GS_ERROR_DS_TIM_INTERPOLATED_COLUMN_IDLIST_INVALID, "");
 	}
 
 	Timestamp interval = 0;
@@ -2552,7 +2552,7 @@ LABEL_FINISH:
 void TimeSeries::searchTimeOperator(
 	TransactionContext &txn, Timestamp ts, TimeOperator timeOp, OId &oId) {
 	BtreeMap::SearchContext sc(ColumnInfo::ROW_KEY_COLUMN_ID, NULL, 0, false,
-		false, 0, false, 0, NULL, 1);
+		NULL, 0, false, 0, NULL, 1);
 	searchTimeOperator(txn, sc, ts, timeOp, oId);
 }
 
