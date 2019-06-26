@@ -215,6 +215,8 @@ inline bool InterruptionChecker::check() {
 
 #define GS_EXCEPTION_MESSAGE(cause) \
 	GS_EXCEPTION_CONVERT(cause, "").getField(util::Exception::FIELD_MESSAGE)
+#define GS_EXCEPTION_MESSAGE_ON(cause, message) \
+	GS_EXCEPTION_MESSAGE(cause) << " on " << message
 #define GS_EXCEPTION_MERGE_MESSAGE(cause, message) \
 	message << " (reason=" << GS_EXCEPTION_MESSAGE(cause) << ")"
 

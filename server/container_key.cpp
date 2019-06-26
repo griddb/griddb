@@ -200,7 +200,7 @@ FullContainerKey::FullContainerKey(const KeyConstraint &constraint,
 	try {
 		if (data == NULL) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_NAME_INVALID,
-				"container/table name is empty");
+				"Container/Table name is empty");
 		}
 
 		ContainerKeyInStream in(util::ArrayInStream(data, sizeof(uint32_t)));
@@ -210,15 +210,15 @@ FullContainerKey::FullContainerKey(const KeyConstraint &constraint,
 		}
 		else {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_NAME_INVALID,
-				"failed to decode container/table name size");
+				"Unexpected container/table name size");
 		}
 
 		body_ = static_cast<const uint8_t*>(data) + in.base().position();
 
 	}
 	catch (std::exception &e) {
-		GS_RETHROW_USER_ERROR(e,
-			GS_EXCEPTION_MERGE_MESSAGE(e, "failed to construct container/table name"));
+		GS_RETHROW_USER_ERROR(e, GS_EXCEPTION_MESSAGE_ON(
+				e, "constructing container/table name"));
 	}
 }
 
@@ -236,8 +236,8 @@ FullContainerKey::FullContainerKey(util::StackAllocator &alloc,
 
 	}
 	catch (std::exception &e) {
-		GS_RETHROW_USER_ERROR(e,
-			GS_EXCEPTION_MERGE_MESSAGE(e, "failed to construct container/table name"));
+		GS_RETHROW_USER_ERROR(e, GS_EXCEPTION_MESSAGE_ON(
+				e, "constructing container/table name with size"));
 	}
 }
 	
@@ -254,8 +254,8 @@ FullContainerKey::FullContainerKey(util::StackAllocator &alloc,
 
 	}
 	catch (std::exception &e) {
-		GS_RETHROW_USER_ERROR(e,
-			GS_EXCEPTION_MERGE_MESSAGE(e, "failed to construct container/table name"));
+		GS_RETHROW_USER_ERROR(e, GS_EXCEPTION_MESSAGE_ON(
+				e, "constructing container/table name with string"));
 	}
 }
 
@@ -273,8 +273,8 @@ FullContainerKey::FullContainerKey(util::StackAllocator &alloc,
 
 	}
 	catch (std::exception &e) {
-		GS_RETHROW_USER_ERROR(e,
-			GS_EXCEPTION_MERGE_MESSAGE(e, "failed to construct container/table name"));
+		GS_RETHROW_USER_ERROR(e, GS_EXCEPTION_MESSAGE_ON(
+				e, "constructing container/table name with components"));
 	}
 }
 
@@ -348,8 +348,8 @@ void FullContainerKey::toString(util::StackAllocator &alloc, util::String &str) 
 
 	}
 	catch (std::exception &e) {
-		GS_RETHROW_USER_ERROR_CODED(GS_ERROR_DS_DS_CONTAINER_NAME_INVALID, e,
-			"failed to get container/table name");
+		GS_RETHROW_USER_ERROR(e, GS_EXCEPTION_MESSAGE_ON(
+				e, "formatting container/table name"));
 	}
 }
 
@@ -498,8 +498,8 @@ int32_t FullContainerKey::compareTo(TransactionContext &txn, const uint8_t *key1
 		return 0;
 	}
 	catch (std::exception &e) {
-		GS_RETHROW_USER_ERROR_CODED(GS_ERROR_DS_DS_CONTAINER_NAME_INVALID, e,
-			"failed to compare container/table name");
+		GS_RETHROW_USER_ERROR(e, GS_EXCEPTION_MESSAGE_ON(
+				e, "comparing container/table name"));
 	}
 }
 
@@ -635,8 +635,8 @@ int32_t FullContainerKey::compareTo(util::StackAllocator &alloc,
 
 	}
 	catch (std::exception &e) {
-		GS_RETHROW_USER_ERROR_CODED(GS_ERROR_DS_DS_CONTAINER_NAME_INVALID, e,
-			"failed to compare container/table name");
+		GS_RETHROW_USER_ERROR(e, GS_EXCEPTION_MESSAGE_ON(
+				e, "comparing container/table name"));
 	}
 }
 
@@ -652,11 +652,11 @@ void FullContainerKey::parseAndValidate(DatabaseId dbId, const char8_t *str, uin
 		size_t len = length;
 		if (len <= 0) {
 			GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-				"size of container/table name is zero");
+				"Size of container/table name is zero");
 		}
 		if (len > constraint_.maxTotalLength_) {
 			GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-				"size of container/table name exceeds maximum size");
+				"Size of container/table name exceeds maximum size");
 		}
 
 		size_t partCounter = 0;
@@ -672,11 +672,11 @@ void FullContainerKey::parseAndValidate(DatabaseId dbId, const char8_t *str, uin
 				sharpCounter++;
 				if (sharpCounter > 1) {
 					GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-						"system part must be exactly one");
+						"System part must be exactly one");
 				}
 				else if (atmarkCounter > 0) {
 					GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-						"system part can not be described after node affinity");
+						"System part can not be described after node affinity");
 				}
 
 				partCounter++;
@@ -689,7 +689,7 @@ void FullContainerKey::parseAndValidate(DatabaseId dbId, const char8_t *str, uin
 				atmarkCounter++;
 				if (atmarkCounter > 2) {
 					GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-						"node affinity or largeId can not be described twice or more");
+						"Node affinity or largeId can not be described twice or more");
 				}
 
 				partCounter++;
@@ -718,11 +718,11 @@ void FullContainerKey::parseAndValidate(DatabaseId dbId, const char8_t *str, uin
 
 		if (!constraint_.systemPartAllowed_ && hasSystemPart) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_NAME_INVALID,
-				"system part is not allowed");
+				"System part is not allowed");
 		}
 		if (!constraint_.largeContainerIdAllowed_ && hasLargeContainerId) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_NAME_INVALID,
-				"largeId is not allowed");
+				"LargeId is not allowed");
 		}
 
 		validateBaseContainerName(
@@ -752,8 +752,8 @@ void FullContainerKey::parseAndValidate(DatabaseId dbId, const char8_t *str, uin
 
 	}
 	catch (std::exception &e) {
-		GS_RETHROW_USER_ERROR_CODED(GS_ERROR_DS_DS_CONTAINER_NAME_INVALID, e,
-			"failed to parse and validate container/table name : " << str);
+		GS_RETHROW_USER_ERROR(e, GS_EXCEPTION_MESSAGE_ON(
+				e, "parsing and validating container/table name"));
 	}
 }
 
@@ -769,11 +769,11 @@ void FullContainerKey::validate(const FullContainerKeyComponents &components) co
 
 		if (!constraint_.systemPartAllowed_ && hasSystemPart) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_NAME_INVALID,
-				"system part is not allowed");
+				"System part is not allowed");
 		}
 		if (!constraint_.largeContainerIdAllowed_ && hasLargeContainerId) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_NAME_INVALID,
-				"largeId is not allowed");
+				"LargeId is not allowed");
 		}
 
 		validateBaseContainerName(
@@ -815,17 +815,17 @@ void FullContainerKey::validate(const FullContainerKeyComponents &components) co
 
 		if (totalLength <= 0) {
 			GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-				"size of container/table name is zero");
+				"Size of container/table name is zero");
 		}
 		if (totalLength > constraint_.maxTotalLength_) {
 			GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-				"size of container/table name exceeds maximum size");
+				"Size of container/table name exceeds maximum size");
 		}
 
 	}
 	catch (std::exception &e) {
-		GS_RETHROW_USER_ERROR_CODED(GS_ERROR_DS_DS_CONTAINER_NAME_INVALID, e,
-			"failed to validate container/table name");
+		GS_RETHROW_USER_ERROR(e, GS_EXCEPTION_MESSAGE_ON(
+				e, "validating container/table name"));
 	}
 }
 
@@ -906,7 +906,7 @@ void FullContainerKey::serialize(util::StackAllocator &alloc,
 
 		if (binary.size() >= static_cast<size_t>(UINT32_MAX)) {
 			GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-				"size of serialized container/table name exceeds maximum size");
+				"Size of serialized container/table name exceeds maximum size");
 		}
 
 		body_ = binary.data();
@@ -915,8 +915,8 @@ void FullContainerKey::serialize(util::StackAllocator &alloc,
 
 	}
 	catch (std::exception &e) {
-		GS_RETHROW_USER_ERROR_CODED(GS_ERROR_DS_DS_CONTAINER_NAME_INVALID, e,
-			"failed to serialize container/table name");
+		GS_RETHROW_USER_ERROR(e, GS_EXCEPTION_MESSAGE_ON(
+				e, "serializing container/table name"));
 	}
 }
 
@@ -927,7 +927,7 @@ void FullContainerKey::deserialize(util::StackAllocator &alloc,
 	try {
 		if (isEmpty()) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_NAME_INVALID,
-				"container/table name is empty");
+				"Container/table name is empty");
 		}
 
 		components.clear();
@@ -979,7 +979,7 @@ void FullContainerKey::deserialize(util::StackAllocator &alloc,
 
 		if (in.base().remaining() != strLengthToBitLength(strLength)) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_NAME_INVALID,
-				"size of container/table name is invalid");
+				"Size of container/table name is invalid");
 		}
 		else {
 			upperCaseBit.reserve(strLength);
@@ -989,7 +989,7 @@ void FullContainerKey::deserialize(util::StackAllocator &alloc,
 
 		if (in.base().position() != size_) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_NAME_INVALID,
-				"size of container/table name is invalid");
+				"Size of container/table name is invalid");
 		}
 
 
@@ -1029,8 +1029,8 @@ void FullContainerKey::deserialize(util::StackAllocator &alloc,
 
 	}
 	catch (std::exception &e) {
-		GS_RETHROW_USER_ERROR_CODED(GS_ERROR_DS_DS_CONTAINER_NAME_INVALID, e,
-			"failed to deserialize container/table name");
+		GS_RETHROW_USER_ERROR(e, GS_EXCEPTION_MESSAGE_ON(
+				e, "deserializing container/table name"));
 	}
 }
 
@@ -1056,7 +1056,7 @@ void FullContainerKey::encodeVarInt(ContainerKeyOutStream &out,
 									uint32_t val) const {
 	if (val > VAR_SIZE_4BYTE_THRESHOLD) {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_NAME_INVALID,
-			"too large value to encode : " << val);
+			"Too large value to encode : " << val);
 	}
 	switch (getEncodedVarSize32(val)) {
 		case 1:
@@ -1067,7 +1067,7 @@ void FullContainerKey::encodeVarInt(ContainerKeyOutStream &out,
 			break;
 		default:
 			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_NAME_INVALID,
-				"value is not encodable : " << val);
+				"Value is not encodable : " << val);
 	}
 }
 
@@ -1075,7 +1075,7 @@ void FullContainerKey::encodeVarLong(ContainerKeyOutStream &out,
 									 uint64_t val) const {
 	if (val > VAR_SIZE_8BYTE_THRESHOLD) {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_NAME_INVALID,
-			"too large value to encode : " << val);
+			"Too large value to encode : " << val);
 	}
 	switch (getEncodedVarSize64(val)) {
 		case 1:
@@ -1089,7 +1089,7 @@ void FullContainerKey::encodeVarLong(ContainerKeyOutStream &out,
 			break;
 		default:
 			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_NAME_INVALID,
-				"value is not encodable : " << val);
+				"Value is not encodable : " << val);
 	}
 }
 
@@ -1127,7 +1127,7 @@ uint64_t FullContainerKey::decodeVarLong(ContainerKeyInStream &in) const {
 		return ValueProcessor::decode8ByteVarSize(rawData);
 	} else {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_NAME_INVALID,
-			"size of encoded value is invalid");
+			"Size of encoded value is invalid");
 	}
 }
 
@@ -1163,7 +1163,7 @@ void FullContainerKey::createOriginalString(char8_t const *src, uint32_t size, c
 void FullContainerKey::validateDbId(DatabaseId dbId) const {
 	if (dbId < 0 || dbId > MAX_DBID) {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_NAME_INVALID,
-			"invalid database id : " << dbId);
+			"Invalid database id : " << dbId);
 	}
 }
 
@@ -1174,11 +1174,11 @@ void FullContainerKey::validateBaseContainerName(const char8_t *baseName,
 	const uint32_t len = baseNameLength;
 	if ((str == NULL || len <= 0) && !systemPartExists) {
 		GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-			"size of base name is zero");
+			"Size of base name is zero");
 	}
 	else if (len > constraint_.maxTotalLength_) {
 		GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-			"size of base name exceeds maximum size : " << str);
+			"Size of base name exceeds maximum size : " << str);
 	}
 
 	for (size_t i = 0; forbiddenPattern[i] != NULL; i++) {
@@ -1186,7 +1186,7 @@ void FullContainerKey::validateBaseContainerName(const char8_t *baseName,
 				forbiddenPattern[i], static_cast<uint32_t>(strlen(forbiddenPattern[i])),
 				false) == 0) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_NAME_INVALID,
-				"base name contains forbidden patterns : " << forbiddenPattern[i]);
+				"Base name contains forbidden patterns : " << forbiddenPattern[i]);
 		}
 	}
 	
@@ -1194,7 +1194,7 @@ void FullContainerKey::validateBaseContainerName(const char8_t *baseName,
 		const unsigned char ch = static_cast<unsigned char>(str[i]);
 		if (!isalpha(ch) && !isdigit(ch) && !isSymbol(ch)) {
 			GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-				"base name contains forbidden characters : " << ch);
+				"Base name contains forbidden characters : " << ch);
 		}
 	}
 }
@@ -1205,11 +1205,11 @@ bool FullContainerKey::validateExtendedName(const char8_t *str, uint32_t len,
 
 	if (str == NULL || len <= 0) {
 		GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-			"size of " << partName << " string is zero : " << str);
+			"Size of " << partName << " string is zero : " << str);
 	}
 	if (len > constraint_.maxTotalLength_) {
 		GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-			"size of " << partName << " string exceeds maximum size : " << str);
+			"Size of " << partName << " string exceeds maximum size : " << str);
 	}
 
 	for (uint32_t i = 0; i < len; i++) {
@@ -1242,11 +1242,11 @@ void FullContainerKey::validateNumeric(const char8_t *str, uint32_t len,
 									   const char8_t *partName) const {
 	if (str == NULL || len <= 0) {
 		GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-			"size of " << partName << " string is zero");
+			"Size of " << partName << " string is zero");
 	}
 	if (len > constraint_.maxTotalLength_) {
 		GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-			"size of " << partName << " string exceeds maximum size");
+			"Size of " << partName << " string exceeds maximum size");
 	}
 
 	for (uint32_t i = 0; i < len; i++) {
@@ -1263,28 +1263,28 @@ void FullContainerKey::validateNumeric(const char8_t *str, uint32_t len,
 	}
 	else if (len > MAX_LARGE_CONTAINERID_DIGITS) {
 		GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-			"number of digits of " << partName << " exceeds maximum size");
+			"Number of digits of " << partName << " exceeds maximum size");
 	}
 }
 
 void FullContainerKey::validateAffinityNumber(NodeAffinityNumber affinityNumber) const {
 	if (!isEncodableVarLong(affinityNumber)) {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_NAME_INVALID,
-			"invalid node affinity : " << affinityNumber);
+			"Invalid node affinity : " << affinityNumber);
 	}
 }
 
 void FullContainerKey::validateLargeContainerId(LargeContainerId largeContainerId) const {
 	if (!isEncodableVarLong(largeContainerId)) {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_NAME_INVALID,
-			"invalid largeId : " << largeContainerId);
+			"Invalid largeId : " << largeContainerId);
 	}
 }
 
 void FullContainerKey::validateSystemPartId(SystemPartId systemPartId) const {
 	if (!isEncodableVarLong(systemPartId)) {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_NAME_INVALID,
-			"invalid system internal id : " << systemPartId);
+			"Invalid system internal id : " << systemPartId);
 	}
 }
 
@@ -1456,7 +1456,7 @@ void EmptyAllowedKey::validate(
 
 	if (length > constraint.maxTotalLength_) {
 		GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-			"size of " << keyName << " exceeds maximum size : " << str);
+			"Size of " << keyName << " exceeds maximum size : " << str);
 	}
 
 	for (uint32_t i = 0; i < length; i++) {
@@ -1479,11 +1479,11 @@ void NoEmptyKey::validate(
 	const char8_t *keyName) {
 	if (length <= 0) {
 		GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-			"size of " << keyName << " is zero");
+			"Size of " << keyName << " is zero");
 	}
 	if (length > constraint.maxTotalLength_) {
 		GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-			"size of " << keyName << " exceeds maximum size : " << str);
+			"Size of " << keyName << " exceeds maximum size : " << str);
 	}
 
 	for (uint32_t i = 0; i < length; i++) {
@@ -1505,11 +1505,11 @@ void AlphaOrDigitKey::validate(
 	const char8_t *keyName) {
 	if (length <= 0) {
 		GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-			"size of " << keyName << " is zero");
+			"Size of " << keyName << " is zero");
 	}
 	if (length > maxLength) {
 		GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-			"size of " << keyName << " exceeds maximum size : " << str);
+			"Size of " << keyName << " exceeds maximum size : " << str);
 	}
 
 	for (uint32_t i = 0; i < length; i++) {
