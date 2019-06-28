@@ -3,7 +3,7 @@ Section: unknown
 Priority: extra
 Maintainer: Katsuhiko Nonomura <contact@griddb.org>
 Build-Depends: debhelper (>= 10)
-Standards-Version: 4.2.0
+Standards-Version: 4.2.1
 Homepage: https://github.com/griddb/griddb_nosql
 
 Package: griddb-nosql
