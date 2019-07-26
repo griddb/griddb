@@ -1,0 +1,131 @@
+## Use this only for Azure AD service-to-service authentication
+from azure.common.credentials import ServicePrincipalCredentials
+
+## Use this only for Azure AD end-user authentication
+from azure.common.credentials import UserPassCredentials
+
+## Use this only for Azure AD multi-factor authentication
+from msrestazure.azure_active_directory import AADTokenCredentials
+
+## Required for Azure Data Lake Storage Gen1 account management
+from azure.mgmt.datalake.store import DataLakeStoreAccountManagementClient
+from azure.mgmt.datalake.store.models import DataLakeStoreAccount
+
+## Required for Azure Data Lake Storage Gen1 filesystem management
+from azure.datalake.store import core, lib, multithread
+#from azure.keyvault import key_vault_client, key_vault_authentication
+# Common Azure imports
+from azure.mgmt.resource.resources import ResourceManagementClient
+from azure.mgmt.resource.resources.models import ResourceGroup
+
+
+
+import logging, getpass, pprint, uuid, time
+
+## Create a filesystem client object
+
+## Use this only for Azure AD service-to-service authentication
+from azure.common.credentials import ServicePrincipalCredentials
+
+## Required for Azure Data Lake Store filesystem management
+from azure.datalake.store import core, lib, multithread
+
+## Declare variables
+
+
+
+import numpy as np
+import pandas as pd
+import pandas as pd
+
+from fbprophet import Prophet
+#bas_data=pd.read_csv('adl://capstonelake.azuredatalakestore.net/retail_data.csv',sep = ';')
+with adl.open('retail_data.csv', 'rb') as f:
+    bas_data = pd.read_csv(f,sep=',')
+
+bas_data.reset_index()
+#bas_data[bas_data['Store']=='a']
+#sales = bas_data.groupby('Date')['Sales'].sum()
+#bas_holidays=pd.read_csv('retail_holidays.csv', sep = ';')
+
+with adl.open('retail_holidays.csv', 'rb') as f:
+    bas_holidays = pd.read_csv(f)
+
+holiday = bas_holidays.iloc[:,[1,0]]
+holiday.columns = ['holiday', 'ds']
+
+store_list = {}
+results = {}
+future = {}
+forecast = {}
+csv_store = {}
+csv_store_final=pd.DataFrame()
+for name in bas_data.Store.unique():
+    #store_list[name] = pd.DataFrame()
+    store_list[name] = bas_data[bas_data['Store']==name].groupby('Date')['Sales'].sum()
+    store_list[name]  = pd.DataFrame(store_list[name] ).reset_index()
+    store_list[name] .columns = ['ds', 'y']
+    m = Prophet(changepoint_prior_scale=0.05, holidays=holiday)
+    m.add_seasonality(name='monthly', period=30.5, fourier_order=5)
+    results[name] = m.fit(store_list[name])
+    future[name]  = m.make_future_dataframe(periods=365)
+    forecast[name]  = m.predict(future[name])
+    #forecast[name].to_csv('store_' + str(name))
+    #forecast[name],bas_data[bas_data['Store']==name]['Store']
+    csv_store[name]=forecast[name].assign(store=name)
+    csv_store_final = pd.concat(csv_store)
+ 
+
+#csv_store_final.to_csv('final_stores_group.csv')
+
+#1st excel file
+csv_store_final_azure = csv_store_final.to_csv()
+with adl.open('/prediction_result/final_stores_group.csv', 'wb') as f:
+    f.write(str.encode(csv_store_final_azure))
+    f.close()
+
+#csv_store_final = pd.read_csv('final_stores_group.csv', sep=',')
+#sort by bas_data by store
+bas_data['Date'] = pd.to_datetime(bas_data['Date'])
+#bas_data['Date'] = bas_data['Date'].dt.strftime('%d/%m/%Y')
+#bas_2009 = bas_data[bas_data['Date'].dt.year == 2009]
+#bas_data = bas_data.sort_values(by=['Date','Store'], inplace=True)
+#remove whitespaces from WeekDay
+bas_data['WeekDay'] = [x.replace(' ','') for x in bas_data['WeekDay']]
+
+csv_store_final_2 = csv_store_final[['store','ds','trend','trend_lower','trend_upper','yhat_lower','yhat_upper','yhat']]
+
+#change format of date into dd/mm/yyyy
+csv_store_final_2['ds'] = pd.to_datetime(csv_store_final_2['ds'])
+csv_store_final_2['ds'] = csv_store_final_2['ds'].dt.strftime('%d/%m/%Y')
+
+#make a new column Store_date key
+csv_store_final_2['store_date_key'] = csv_store_final_2[['store', 'ds']].apply(lambda x: '-'.join(x), axis=1)
+csv_store_final_2['ds'] = pd.to_datetime(csv_store_final_2['ds'])
+#rename column Key to store_date_key from bas_data dataframe
+bas_data.rename(columns={'Key': 'store_date_key'}, inplace=True)
+bas_data.rename(columns={'Date': 'ds'}, inplace=True)
+
+#join bas_data and csv_store_final
+bas_final = pd.merge(bas_data, csv_store_final_2, on='store_date_key', how='outer')
+#bas_final = pd.merge(bas_data, csv_store_final_2, on='ds', how='outer')
+bas_final = bas_final.fillna(0)
+#bas_final.to_csv('lalala.csv')
+bas_final['Store_final'] = [x.split('-')[0] for x in bas_final['store_date_key']]
+bas_final['Date_final'] = [x.split('-')[1] for x in bas_final['store_date_key']]
+
+#bas_final_all.columns
+bas_final_all = bas_final[['store_date_key','Store_final','Date_final','trend','WeekDay','Sales','trend_lower','trend_upper','yhat_lower','yhat_upper','yhat']]
+bas_final_all['Actual_vs_Budget'] = bas_final_all['Sales'] - bas_final_all['yhat']
+bas_final_all.rename(columns={'Store_final': 'store'}, inplace=True)
+bas_final_all.rename(columns={'Date_final': 'ds'}, inplace=True)
+
+#bas_final_all.to_csv('lalala.csv')
+
+
+
+#bas_final_all['ds'] = pd.to_datetime(bas_final_all['ds'])
+bas_final_all = bas_final_all.to_csv(index=False)
+with adl.open('/model_creation/prediction_model.csv', 'wb') as f:
+    f.write(str.encode(bas_final_all))
+    f.close()
