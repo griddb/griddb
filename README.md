@@ -22,7 +22,7 @@
 
 ## Quick start
 ### Build a server and client(Java)
-    We have confirmed the operation on CentOS 7.6 (gcc 4.8.5).
+    We have confirmed the operation on CentOS 7.6 (gcc 4.8.5) and Ubuntu 18.04(gcc 4.8.5).
 
     $ ./bootstrap.sh
     $ ./configure

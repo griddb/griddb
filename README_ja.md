@@ -17,7 +17,7 @@
 
 ## クイックスタート
 ### サーバ、クライアント(java)のビルド
-    CentOS 7.6(gcc 4.8.5)の環境での動作を確認しています。
+    CentOS 7.6(gcc 4.8.5)、Ubuntu 18.04(gcc 4.8.5)の環境での動作を確認しています。
 
     $ ./bootstrap.sh
     $ ./configure
