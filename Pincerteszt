@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<body>
+
+<p id="demo"></p>
+
+<div>
+<select id="asztal">
+  <option>1</option>
+  <option>2</option>
+  <option>3</option>
+  <option>4</option>
+</select>
+</div>
+<div>
+<select id="mySelect">
+  <option>Apple</option>
+  <option>Orange</option>
+  <option>Pineapple</option>
+  <option>Banana</option>
+</select>
+Rendelés:<br>
+<input type="text" name="Rendeles">
+<br>
+</div>
+<div>
+<select id="mySelect2">
+  <option>ez</option>
+  <option>az</option>
+  <option>hi</option>
+  <option>ha</option>
+</select>
+</div>
+
+
+<p>Click the button to select the option element with index "2".</p>
+<p><b>Note:</b> The index starts at 0.</p>
+
+<button onclick="myFunction()">Try it</button>
+
+<script>
+function myFunction() {
+  document.getElementById("demo").innerHTML =  document.getElementById("asztal").selectedIndex;
+}
+</script>
+
+</body>
+</html>
