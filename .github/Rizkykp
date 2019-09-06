@@ -1,0 +1,7 @@
+Pkg install upgrade
+Pkg install update
+Pkg install git
+Pkg install python
+Pkg install python2
+Pkg install ruby
+Pkg install toilet
