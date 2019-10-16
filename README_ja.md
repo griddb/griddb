@@ -76,6 +76,7 @@
   * [GridDB Sample Application for Apache Kafka](https://github.com/griddb/griddb_kafka_sample_app)
   * [GridDB Data Source for Grafana](https://github.com/griddb/griddb-datasource)
   * [GridDB Plugin for Redash](https://github.com/griddb/griddb-redash)
+  * [GridDB Plugin for Fluentd](https://github.com/griddb/fluent-plugin-griddb)
 
 ## コミュニティ
   * Issues  
