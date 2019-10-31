@@ -15,9 +15,11 @@
   (追加情報)  
   [Maven Central Repository上にv4.0.0のJavaクライアント・パッケージ(Jar)](https://search.maven.org/search?q=g:com.github.griddb)があります。
 
-## クイックスタート
+## クイックスタート (ソースコードの利用)
+
+  CentOS 7.6(gcc 4.8.5)、Ubuntu 18.04(gcc 4.8.5)の環境での動作を確認しています。
+
 ### サーバ、クライアント(java)のビルド
-    CentOS 7.6(gcc 4.8.5)、Ubuntu 18.04(gcc 4.8.5)の環境での動作を確認しています。
 
     $ ./bootstrap.sh
     $ ./configure
@@ -42,6 +44,46 @@
     $ javac gsSample/Sample1.java
     $ java gsSample/Sample1 239.0.0.1 31999 your_clustername admin your_password
       --> Person:  name=name02 status=false count=2 lob=[65, 66, 67, 68, 69, 70, 71, 72, 73, 74]
+
+### サーバの停止
+    $ bin/gs_stopcluster -u admin/your_password
+    $ bin/gs_stopnode -u admin/your_password
+
+## クイックスタート (RPM/DEBファイルの利用)
+  CentOS 7.6、Ubuntu 18.04の環境での動作を確認しています。
+
+  ※ このパッケージをインストールすると、OS内にgsadmユーザが作成されます。運用コマンドはgsadmユーザで操作してください。  
+  ※ gsadmユーザでログインすると環境変数 GS_HOMEとGS_LOGが自動的に設定されます。
+
+### インストール
+    (CentOS)
+    $ sudo rpm -ivh griddb_nosql-X.X.X-linux.x86_64.rpm
+
+    (Ubuntu)
+    $ sudo dpkg -i griddb_nosql-X.X.X_amd64.deb
+
+    ※ X.X.Xはバージョンを意味します。
+
+### サーバの起動
+    [gsadm]$ gs_passwd admin
+      #input your_password
+    [gsadm]$ vi conf/gs_cluster.json
+      #    "clusterName":"your_clustername" #<-- input your_clustername
+    [gsadm]$ export no_proxy=127.0.0.1
+    [gsadm]$ gs_startnode
+    [gsadm]$ gs_joincluster -c your_clustername -u admin/your_password
+
+### サンプルプログラムの実行
+    $ export CLASSPATH=${CLASSPATH}:/usr/share/java/gridstore.jar
+    $ mkdir gsSample
+    $ cp /usr/griddb-X.X.X/docs/sample/program/Sample1.java gsSample/.
+    $ javac gsSample/Sample1.java
+    $ java gsSample/Sample1 239.0.0.1 31999 your_clustername admin your_password
+      --> Person:  name=name02 status=false count=2 lob=[65, 66, 67, 68, 69, 70, 71, 72, 73, 74]
+
+### サーバの停止
+    [gsadm]$ gs_stopcluster -u admin/your_password
+    [gsadm]$ gs_stopnode -u admin/your_password
 
 ## ドキュメント
   以下のドキュメントがあります。
