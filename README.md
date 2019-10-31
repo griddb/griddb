@@ -50,16 +50,15 @@
 
 ## Document
   Refer to the file below for more detailed information.  
-  The documents below are stored in the docs folder.
-  - [GridDB Technical Design Document](https://griddb.github.io/griddb_nosql/manual/GridDBTechnicalDesignDocument.pdf)  (manual/GridDBTechnicalDesignDocument.pdf)
-  - [Quick Start Guide](https://griddb.github.io/griddb_nosql/manual/GridDB_QuickStartGuide.html) (manual/GridDB_QuickStartGuide.html)
-  - [API Reference](https://griddb.github.io/griddb_nosql/manual/GridDB_API_Reference.html) (manual/GridDB_API_Reference.html)
-  - [RPM Installation Guide](https://griddb.github.io/griddb_nosql/manual/GridDB_RPM_InstallGuide.html) (manual/GridDB_RPM_InstallGuide.html)
-  - [V3.0 Release Notes](docs/GridDB-3.0.0-CE-RELEASE_NOTES.md) (GridDB-3.0.0-CE-RELEASE_NOTES.md)
-  - [V4.0 Release Notes](docs/GridDB-4.0-CE-RELEASE_NOTES.md) (GridDB-4.0-CE-RELEASE_NOTES.md)
-  - [V4.1 Release Notes](docs/GridDB-4.1-CE-RELEASE_NOTES.md) (GridDB-4.1-CE-RELEASE_NOTES.md)
-  - [V4.2 Release Notes](docs/GridDB-4.2-CE-RELEASE_NOTES.md) (GridDB-4.2-CE-RELEASE_NOTES.md)
-  - [DEB Installation Guide](https://griddb.github.io/griddb_nosql/manual/GridDB_DEB_InstallGuide.html) (manual/GridDB_DEB_InstallGuide.html)
+  - [GridDB Technical Design Document](https://griddb.github.io/griddb_nosql/manual/GridDBTechnicalDesignDocument.pdf)
+  - [Quick Start Guide](https://griddb.github.io/griddb_nosql/manual/GridDB_QuickStartGuide.html)
+  - [API Reference](https://griddb.github.io/griddb_nosql/manual/GridDB_API_Reference.html)
+  - [RPM Installation Guide](https://griddb.github.io/griddb_nosql/manual/GridDB_RPM_InstallGuide.html)
+  - [V3.0 Release Notes](docs/GridDB-3.0.0-CE-RELEASE_NOTES.md)
+  - [V4.0 Release Notes](docs/GridDB-4.0-CE-RELEASE_NOTES.md)
+  - [V4.1 Release Notes](docs/GridDB-4.1-CE-RELEASE_NOTES.md)
+  - [V4.2 Release Notes](docs/GridDB-4.2-CE-RELEASE_NOTES.md)
+  - [DEB Installation Guide](https://griddb.github.io/griddb_nosql/manual/GridDB_DEB_InstallGuide.html)
 
 ## Client and Connector
   There are other clients and API for GridDB.
