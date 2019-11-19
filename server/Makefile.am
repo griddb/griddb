@@ -182,8 +182,8 @@ $(srcdir)/transaction_context.cpp \
 $(srcdir)/transaction_manager.cpp \
 $(srcdir)/transaction_manager_authentication.cpp \
 $(srcdir)/transaction_service.cpp \
-$(srcdir)/transaction_service_user_management.cpp \
 $(srcdir)/trigger_service.cpp \
+$(srcdir)/user_management.cpp \
 $(srcdir)/uuid_utils.cpp \
 $(srcdir)/value.cpp \
 $(srcdir)/value_operator.cpp \
