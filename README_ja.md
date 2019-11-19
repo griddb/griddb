@@ -91,11 +91,12 @@
   * [スタートアップガイド](https://griddb.github.io/griddb_nosql/manual/GridDB_QuickStartGuide_ja.html)
   * [APIリファレンス](https://griddb.github.io/griddb_nosql/manual/GridDB_API_Reference_ja.html)
   * [RPMインストールガイド](https://griddb.github.io/griddb_nosql/manual/GridDB_RPM_InstallGuide.html)
+  * [DEBインストールガイド](https://griddb.github.io/griddb_nosql/manual/GridDB_DEB_InstallGuide.html)
   * [V3.0 Release Notes](docs/GridDB-3.0.0-CE-RELEASE_NOTES_ja.md)
   * [V4.0 Release Notes](docs/GridDB-4.0-CE-RELEASE_NOTES_ja.md)
   * [V4.1 Release Notes](docs/GridDB-4.1-CE-RELEASE_NOTES_ja.md)
   * [V4.2 Release Notes](docs/GridDB-4.2-CE-RELEASE_NOTES_ja.md)
-  * [DEBインストールガイド](https://griddb.github.io/griddb_nosql/manual/GridDB_DEB_InstallGuide.html)
+  * [V4.3 Release Notes](docs/GridDB-4.3-CE-RELEASE_NOTES_ja.md)
 
 ## クライアントとコネクタ
   Java以外のクライアント、APIもあります。
