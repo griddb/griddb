@@ -25,7 +25,8 @@
     $ ./configure
     $ make 
     
-  ※JavaクライアントをMavenでビルドしたい場合は以下のコマンドを実行してください。gridstore-X.X.X.jarがtarget/の下に生成されます。  
+  ※JavaクライアントをMavenでビルドしたい場合は以下のコマンドを実行してください。gridstore-X.X.X.jarがtarget/の下に生成されます。 
+
     $ cd java_client
     $ ./make_source_for_mvn.sh
     $ mvn clean

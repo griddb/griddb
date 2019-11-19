@@ -29,6 +29,7 @@
     $ make 
     
   Note: When you use maven build for Java client, please run the following command. Then gridstore-X.X.X.jar file is created on target/.  
+
     $ cd java_client
     $ ./make_source_for_mvn.sh
     $ mvn clean
