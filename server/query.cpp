@@ -481,10 +481,11 @@ void Query::setPragma(Token *pName1, Token *pName2, Token *pValue, int) {
 * @param[out] indexColumnInfo returns ColumnInfo to use its index. returns NULL
 * if we cannot use any index.
 */
-void Query::getIndexInfoInAndList(TransactionContext &txn,
+bool Query::getIndexDataInAndList(TransactionContext &txn,
 	BaseContainer &container, util::XArray<BoolExpr *> &andList,
-	MapType &mapType,
-	ColumnInfo *&indexColumnInfo) {
+	IndexData &indexData) {
+	MapType mapType;
+	ColumnInfo *indexColumnInfo;
 	uint32_t mapBitmap = 0;
 	indexColumnInfo = NULL;
 	for (uint32_t i = 0; i < andList.size(); i++) {
@@ -505,18 +506,55 @@ void Query::getIndexInfoInAndList(TransactionContext &txn,
 						str = "HASH";
 						break;
 					case 0:
+					default:
 						mapType = MAP_TYPE_BTREE;
 						str = "BTREE";
 						break;
 					}
 					this->addExplain(1, "USE_INDEX", "STRING", str, "");
-					return;
+					{
+						util::Vector<ColumnId> columnIds(txn.getDefaultAllocator());
+						columnIds.push_back(indexColumnInfo->getColumnId());
+						bool withPartialMatch = true;
+						util::Vector<IndexData> indexDataList(txn.getDefaultAllocator());
+						container.getIndexDataList(txn, mapType, columnIds,
+							indexDataList, withPartialMatch);
+						assert(!indexDataList.empty());
+						indexData = indexDataList[0];
+						if (indexDataList.size() > 1) {
+							uint32_t maxConditionNum = 0;
+							util::Vector<IndexData>::iterator dataItr;
+							for (dataItr = indexDataList.begin(); dataItr != indexDataList.end(); dataItr++) {
+								uint32_t restConditions = 0;
+								BtreeMap::SearchContext *sc = NULL;
+								if (container.getContainerType() == COLLECTION_CONTAINER) {
+									BoolExpr::toSearchContext(txn, andList,
+										&(*dataItr), *static_cast<QueryForCollection*>(this), 
+										sc, restConditions,  MAX_RESULT_SIZE);
+								} else {
+									Timestamp dummy = 0;
+									BoolExpr::toSearchContext(txn, andList, dummy,
+										&(*dataItr), *static_cast<QueryForTimeSeries*>(this), 
+										sc, restConditions,  MAX_RESULT_SIZE);
+								}
+								uint32_t indexConditionNum = sc->getRangeConditionNum();
+								if (maxConditionNum < indexConditionNum) {
+									indexData = *dataItr;
+									maxConditionNum = indexConditionNum;
+								} else if (maxConditionNum == indexConditionNum && 
+									indexData.columnIds_->size() > dataItr->columnIds_->size()) {
+									indexData = *dataItr;
+									maxConditionNum = indexConditionNum;
+								}
+							}
+						}
+					}
+					return true;
 				}
 			}
 		}
 	}
-	indexColumnInfo = NULL;
-	return;
+	return false;
 }
 
 #include "function_array.h"
@@ -733,17 +771,15 @@ void Query::doQueryPartial(
 		sizeof(uint64_t) * ((container.getColumnNum() / 64) + 1)));
 	ContainerRowWrapper *row = NULL;
 	bool isWithRowId = true;
-	ColumnId rowColumnId = UNDEF_COLUMNID;
+	ColumnId rowColumnId = container.getRowIdColumnId();
 	OutputOrder outputOrder = ORDER_ASCENDING;
 	switch (container.getContainerType()) {
 	case COLLECTION_CONTAINER:
 		isWithRowId = true;
-		rowColumnId = UNDEF_COLUMNID;
 		row = ALLOC_NEW(alloc) CollectionRowWrapper(txn, *static_cast<Collection *>(&container), pBitmap);
 		break;
 	case TIME_SERIES_CONTAINER:
 		isWithRowId = false;
-		rowColumnId = ColumnInfo::ROW_KEY_COLUMN_ID;
 		row = ALLOC_NEW(alloc) TimeSeriesRowWrapper(txn, *static_cast<TimeSeries *>(&container), pBitmap);
 		break;
 	default:
@@ -767,16 +803,19 @@ void Query::doQueryPartial(
 	RowId lastRowId = queryOption.getMinRowId();
 	bool isFetchSizeLimit = false;
 	bool isAllFinished = false;
-//	bool enablePartialSuspend = !doExplain();
+	bool enablePartialSuspend = !doExplain();
 
 	util::XArray<OId> scanOIdList(alloc);
 	for (size_t nth = 0; ; nth++) {
 		scanOIdList.clear();
 		RowId minRowId = queryOption.getMinRowId();
 		RowId maxRowId = queryOption.getMaxRowId();
-		BtreeMap::SearchContext sc(
-			rowColumnId, &minRowId, 0, true, &maxRowId, 0, true, 0, NULL, nLimit_);
-		sc.suspendLimit_ = scanLimit;
+		TermCondition startCond(container.getRowIdColumnType(), container.getRowIdColumnType(), 
+			DSExpression::GE, rowColumnId, &minRowId, sizeof(minRowId));
+		TermCondition endCond(container.getRowIdColumnType(), container.getRowIdColumnType(), 
+			DSExpression::LE, rowColumnId, &maxRowId, sizeof(maxRowId));
+		BtreeMap::SearchContext sc(txn.getDefaultAllocator(), startCond, endCond, nLimit_);
+		sc.setSuspendLimit(scanLimit);
 		container.searchRowIdIndex(txn, sc, scanOIdList, outputOrder);
 
 		uint32_t i = 0;
@@ -834,7 +873,7 @@ void Query::doQueryPartial(
 		}
 		queryOption.setMinRowId(lastRowId + 1);
 
-		if ((!sc.isSuspended_ && !isFetchSizeLimit) || resultNum >= nActualLimit_) {
+		if ((!sc.isSuspended() && !isFetchSizeLimit) || resultNum >= nActualLimit_) {
 			isAllFinished = true;
 		}
 

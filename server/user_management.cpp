@@ -52,163 +52,37 @@
 							   << ", pId=" << ev.getPartitionId() << ")")
 
 
-/*!
-	@brief Checks user name
-*/
-void StatementHandler::checkUserName(const char8_t *userName, bool detailed) {
-	if (detailed) {
-		NoEmptyKey::validate(
-			KeyConstraint::getUserKeyConstraint(USER_NAME_SIZE_MAX),
-			userName, static_cast<uint32_t>(strlen(userName)),
-			"userName");
-	}
+const ColumnId COLUMN_ID_USERS_USERNAME = 0;
+const ColumnId COLUMN_ID_USERS_DIGEST   = 1;
+const ColumnId COLUMN_ID_USERS_PROPERTY = 2;
+const ColumnId COLUMN_ID_USERS_MAX      = 3;
 
-	size_t len = strlen(userName);
-	if (len == 5) {
-		if (util::stricmp(userName, GS_CAPITAL_ADMIN_USER) == 0) {
-			GS_THROW_USER_ERROR(GS_ERROR_TXN_USER_NAME_INVALID,
-				"(user name = " << userName << ")");
-		}
-	}
-	else if (len == 6) {
-		if (util::stricmp(userName, GS_CAPITAL_SYSTEM_USER) == 0) {
-			GS_THROW_USER_ERROR(GS_ERROR_TXN_USER_NAME_INVALID,
-				"(user name = " << userName << ")");
-		}
-	}
+static const DbUserHandler::DUColumnInfo USER_COLUMN_LIST[] = { 
+	{"userName", COLUMN_TYPE_STRING},
+	{"digest", COLUMN_TYPE_STRING},
+	{"property", COLUMN_TYPE_BYTE},
+};
 
-	if (len >= 3) {
-		char head[4];
-		memset(head, 0, 4);
-		memcpy(head, userName, 3);
-		if (util::stricmp(head, GS_CAPITAL_PREFIX) == 0) {
-			GS_THROW_USER_ERROR(GS_ERROR_TXN_USER_NAME_INVALID,
-				"(user name = " << userName << ")");
-		}
-	}
-}
+const ColumnId COLUMN_ID_DBS_DBUSERNAME = 0;
+const ColumnId COLUMN_ID_DBS_DBNAME     = 1;
+const ColumnId COLUMN_ID_DBS_PROPERTY   = 2;
+const ColumnId COLUMN_ID_DBS_USERNAME   = 3;
+const ColumnId COLUMN_ID_DBS_PRIVILEGE  = 4;
+const ColumnId COLUMN_ID_DBS_MAX        = 5;
 
-/*!
-	@brief Checks if user is admin
-*/
-void StatementHandler::checkAdminUser(UserType userType) {
-	if (userType == Message::USER_NORMAL) {
-		GS_THROW_USER_ERROR(GS_ERROR_TXN_OPERATION_NOT_ALLOWED,
-			"only administrator can execute the statement");
-	}
-}
+static const DbUserHandler::DUColumnInfo DB_COLUMN_LIST[] = { 
+	{"dbUserName", COLUMN_TYPE_STRING},
+	{"dbName", COLUMN_TYPE_STRING},
+	{"property", COLUMN_TYPE_BYTE},
+	{"userName", COLUMN_TYPE_STRING},
+	{"privilege", COLUMN_TYPE_STRING},
+};
 
-/*!
-	@brief Checks database name
-*/
-void StatementHandler::checkDatabaseName(const char8_t *dbName) {
-	NoEmptyKey::validate(
-		KeyConstraint::getUserKeyConstraint(DATABASE_NAME_SIZE_MAX),
-		dbName, static_cast<uint32_t>(strlen(dbName)),
-		"databaseName");
-
-	size_t len;
-	len = strlen(dbName);
-	if (len == 6) {
-		if (util::stricmp(dbName, GS_CAPITAL_PUBLIC) == 0) {
-			GS_THROW_USER_ERROR(GS_ERROR_TXN_DATABASE_NAME_INVALID,
-				"(database name = " << dbName << ")");
-		}
-	}
-	else if (len == 18) {
-		if (util::stricmp(dbName, GS_CAPITAL_INFO_SCHEMA) == 0) {
-			GS_THROW_USER_ERROR(GS_ERROR_TXN_DATABASE_NAME_INVALID,
-				"(database name = " << dbName << ")");
-		}
-	}
-	if (len >= 3) {
-		char head[4];
-		memset(head, 0, 4);
-		memcpy(head, dbName, 3);
-		if (util::stricmp(head, GS_CAPITAL_PREFIX) == 0) {
-			GS_THROW_USER_ERROR(GS_ERROR_TXN_DATABASE_NAME_INVALID,
-				"(database name = " << dbName << ")");
-		}
-	}
-}
-
-/*!
-	@brief Checks connected database name
-*/
-void StatementHandler::checkConnectedDatabaseName(
-		ConnectionOption &connOption, const char8_t *dbName) {
-	if ((connOption.requestType_ != Message::REQUEST_NEWSQL) && 
-			strcmp(dbName, connOption.dbName_.c_str()) != 0) {
-		GS_THROW_USER_ERROR(
-				GS_ERROR_TXN_DATABASE_NAME_INVALID,
-				"database name invalid (" << dbName << ")");
-	}
-}
-
-/*!
-	@brief Checks connected user name
-*/
-void StatementHandler::checkConnectedUserName(
-		ConnectionOption &connOption, const char8_t *userName) {
-	if ((connOption.requestType_ != Message::REQUEST_NEWSQL) &&
-			(strcmp(userName, connOption.userName_.c_str()) != 0)) {
-		GS_THROW_USER_ERROR(GS_ERROR_TXN_MESSAGE_INVALID,
-				"user name invalid (" << userName << ")");
-	}
-}
-
-/*!
-	@brief Checks partition id
-*/
-void StatementHandler::checkPartitionIdZero(PartitionId pId) {
-	if (pId != 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_CM_INTERNAL_ERROR, "partition id is not 0");
-	}
-}
-
-/*!
-	@brief Checks digest
-*/
-void StatementHandler::checkDigest(const char8_t *digest, size_t maxStrLength) {
-	size_t len;
-	len = strlen(digest);
-	if (len <= 0) {
-		GS_THROW_USER_ERROR(GS_ERROR_TXN_MESSAGE_INVALID,
-			"invalid digest.");
-	}
-	else if (len > maxStrLength) {
-		GS_THROW_USER_ERROR(GS_ERROR_TXN_MESSAGE_INVALID,
-			"digest length exceeds maximum size.");
-	}
-}
-
-/*!
-	@brief Checks the size of privilege information
-*/
-void StatementHandler::checkPrivilegeSize(DatabaseInfo &dbInfo, size_t size) {
-	if (dbInfo.privilegeInfoList_.size() != size) {
-		GS_THROW_USER_ERROR(GS_ERROR_TXN_MESSAGE_INVALID,
-			"privilege number invalid (" << dbInfo.privilegeInfoList_.size()
-										 << ")");
-	}
-}
-
-/*!
-	@brief Checks modifiable value
-*/
-void StatementHandler::checkModifiable(bool modifiable, bool value) {
-	if (modifiable != value) {
-		GS_THROW_USER_ERROR(GS_ERROR_TXN_MESSAGE_INVALID,
-			"modifiable invalid (" << modifiable << ")");
-	}
-}
+static const char *const PROPERTY_USER_NORMAL = "0";
+static const char *const PROPERTY_USER_ADMIN  = "1";
 
 
-/*!
-	@brief Decodes UserInfo
-*/
-void StatementHandler::decodeUserInfo(
+void DbUserHandler::decodeUserInfo(
 		util::ByteStream<util::ArrayInStream> &in, UserInfo &userInfo) {
 
 	try {
@@ -226,15 +100,9 @@ void StatementHandler::decodeUserInfo(
 		TXN_RETHROW_DECODE_ERROR(e, "");
 	}
 }
-
-/*!
-	@brief Decodes DatabaseInfo
-*/
-void StatementHandler::decodeDatabaseInfo(
-		util::ByteStream<util::ArrayInStream> &in, DatabaseInfo &dbInfo,
-		util::StackAllocator &alloc) {
+void DbUserHandler::decodeDatabaseInfo(util::ByteStream<util::ArrayInStream> &in,
+		DatabaseInfo &dbInfo, util::StackAllocator &alloc) {
 	try {
-
 		decodeStringData<util::String>(in, dbInfo.dbName_);
 		in >> dbInfo.property_;
 		int32_t num;
@@ -252,21 +120,17 @@ void StatementHandler::decodeDatabaseInfo(
 		TXN_RETHROW_DECODE_ERROR(e, "");
 	}
 }
-
-/*!
-	@brief Makes schema data about USERS Container
-*/
-void StatementHandler::makeUsersSchema(util::XArray<uint8_t> &containerSchema) {
-	TEST_PRINT("makeUsersSchema() S\n");
-
+		
+void DbUserHandler::makeSchema(util::XArray<uint8_t> &containerSchema, const DUColumnInfo *columnInfoList, int n) {
+	TEST_PRINT("makeSchema() S\n");
 
 	{
-		uint32_t columnNum = 3;
+		uint32_t columnNum = n;
 		containerSchema.push_back(
 			reinterpret_cast<uint8_t *>(&columnNum), sizeof(uint32_t));
 	}
-	{
-		char *columnName = const_cast<char *>("userName");
+	for (int i = 0; i < n; i++) {
+		char *columnName = const_cast<char *>(columnInfoList[i].name);
 		int32_t columnNameLen = static_cast<int32_t>(strlen(columnName));
 		containerSchema.push_back(
 			reinterpret_cast<uint8_t *>(&columnNameLen), sizeof(int32_t));
@@ -274,44 +138,12 @@ void StatementHandler::makeUsersSchema(util::XArray<uint8_t> &containerSchema) {
 			reinterpret_cast<uint8_t *>(columnName), columnNameLen);
 
 		int8_t tmp = static_cast<int8_t>(
-			ValueProcessor::getSimpleColumnType(COLUMN_TYPE_STRING));
+			ValueProcessor::getSimpleColumnType(columnInfoList[i].type));
 		containerSchema.push_back(
 			reinterpret_cast<uint8_t *>(&tmp), sizeof(int8_t));
 
 		uint8_t flag = 0;
 		flag |= ColumnInfo::COLUMN_FLAG_NOT_NULL;
-		containerSchema.push_back(&flag, sizeof(uint8_t));
-	}
-	{
-		char *columnName = const_cast<char *>("digest");
-		int32_t columnNameLen = static_cast<int32_t>(strlen(columnName));
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(&columnNameLen), sizeof(int32_t));
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(columnName), columnNameLen);
-
-		int8_t tmp = static_cast<int8_t>(
-			ValueProcessor::getSimpleColumnType(COLUMN_TYPE_STRING));
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(&tmp), sizeof(int8_t));
-
-		uint8_t flag = 0;
-		containerSchema.push_back(&flag, sizeof(uint8_t));
-	}
-	{
-		char *columnName = const_cast<char *>("property");
-		int32_t columnNameLen = static_cast<int32_t>(strlen(columnName));
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(&columnNameLen), sizeof(int32_t));
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(columnName), columnNameLen);
-
-		int8_t tmp = static_cast<int8_t>(
-			ValueProcessor::getSimpleColumnType(COLUMN_TYPE_BYTE));
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(&tmp), sizeof(int8_t));
-
-		uint8_t flag = 0;
 		containerSchema.push_back(&flag, sizeof(uint8_t));
 	}
 	{
@@ -342,140 +174,13 @@ void StatementHandler::makeUsersSchema(util::XArray<uint8_t> &containerSchema) {
 		containerSchema.push_back(
 			reinterpret_cast<uint8_t *>(&containerAttribute), sizeof(int32_t));
 	}
-	TEST_PRINT("makeUsersSchema() E\n");
+	TEST_PRINT("makeSchema() E\n");
 }
 
-/*!
-	@brief Makes schema data about DATABASES Container
-*/
-void StatementHandler::makeDatabasesSchema(
-		util::XArray<uint8_t> &containerSchema) {
-	TEST_PRINT("makeDatabasesSchema() S\n");
-
-
-	{
-		uint32_t columnNum = 5;
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(&columnNum), sizeof(uint32_t));
-	}
-	{
-		char *columnName = const_cast<char *>("dbUserName");
-		int32_t columnNameLen = static_cast<int32_t>(strlen(columnName));
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(&columnNameLen), sizeof(int32_t));
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(columnName), columnNameLen);
-
-		int8_t tmp = static_cast<int8_t>(
-			ValueProcessor::getSimpleColumnType(COLUMN_TYPE_STRING));
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(&tmp), sizeof(int8_t));
-
-		uint8_t flag = 0;
-		flag |= ColumnInfo::COLUMN_FLAG_NOT_NULL;
-		containerSchema.push_back(&flag, sizeof(uint8_t));
-	}
-	{
-		char *columnName = const_cast<char *>("dbName");
-		int32_t columnNameLen = static_cast<int32_t>(strlen(columnName));
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(&columnNameLen), sizeof(int32_t));
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(columnName), columnNameLen);
-
-		int8_t tmp = static_cast<int8_t>(
-			ValueProcessor::getSimpleColumnType(COLUMN_TYPE_STRING));
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(&tmp), sizeof(int8_t));
-
-		uint8_t flag = 0;
-		containerSchema.push_back(&flag, sizeof(uint8_t));
-	}
-	{
-		char *columnName = const_cast<char *>("property");
-		int32_t columnNameLen = static_cast<int32_t>(strlen(columnName));
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(&columnNameLen), sizeof(int32_t));
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(columnName), columnNameLen);
-
-		int8_t tmp = static_cast<int8_t>(
-			ValueProcessor::getSimpleColumnType(COLUMN_TYPE_BYTE));
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(&tmp), sizeof(int8_t));
-
-		uint8_t flag = 0;
-		containerSchema.push_back(&flag, sizeof(uint8_t));
-	}
-	{
-		char *columnName = const_cast<char *>("userName");
-		int32_t columnNameLen = static_cast<int32_t>(strlen(columnName));
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(&columnNameLen), sizeof(int32_t));
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(columnName), columnNameLen);
-
-		int8_t tmp = static_cast<int8_t>(
-			ValueProcessor::getSimpleColumnType(COLUMN_TYPE_STRING));
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(&tmp), sizeof(int8_t));
-
-		uint8_t flag = 0;
-		containerSchema.push_back(&flag, sizeof(uint8_t));
-	}
-	{
-		char *columnName = const_cast<char *>("privilege");
-		int32_t columnNameLen = static_cast<int32_t>(strlen(columnName));
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(&columnNameLen), sizeof(int32_t));
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(columnName), columnNameLen);
-
-		int8_t tmp = static_cast<int8_t>(
-			ValueProcessor::getSimpleColumnType(COLUMN_TYPE_STRING));
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(&tmp), sizeof(int8_t));
-
-		uint8_t flag = 0;
-		containerSchema.push_back(&flag, sizeof(uint8_t));
-	}
-	{
-		int16_t rowKeyNum = 1;
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(&rowKeyNum), sizeof(int16_t));
-		int16_t keyColumnId = static_cast<int16_t>(ColumnInfo::ROW_KEY_COLUMN_ID);
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(&keyColumnId), sizeof(int16_t));
-	}
-	{
-		char affinityStr[AFFINITY_STRING_MAX_LENGTH + 1];
-		memcpy(
-			affinityStr, DEFAULT_AFFINITY_STRING, AFFINITY_STRING_MAX_LENGTH);
-		affinityStr[AFFINITY_STRING_MAX_LENGTH] =
-			'\0';  
-		int32_t affinityStrLen =
-			static_cast<int32_t>(strlen(reinterpret_cast<char *>(affinityStr)));
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(&affinityStrLen), sizeof(int32_t));
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(affinityStr), affinityStrLen);
-	}
-	{
-		int32_t containerAttribute =
-			static_cast<int32_t>(CONTAINER_ATTR_SINGLE_SYSTEM);
-		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(&containerAttribute), sizeof(int32_t));
-	}
-	TEST_PRINT("makeDatabasesSchema() E\n");
-}
-
-/*!
-	@brief Makes Row data in USERS Container
-*/
-void StatementHandler::makeUsersRow(
+void DbUserHandler::makeRow(
 		util::StackAllocator &alloc, const ColumnInfo *columnInfoList,
-		uint32_t columnNum, UserInfo &userInfo, RowData &rowData) {
-	TEST_PRINT("makeUsersRow(userInfo) S\n");
+		uint32_t columnNum, DUColumnValue *valueList, RowData &rowData) {
+	TEST_PRINT("makeRow() S\n");
 
 	util::XArray<uint8_t> list1(alloc);
 	util::XArray<uint8_t> list2(alloc);
@@ -483,99 +188,437 @@ void StatementHandler::makeUsersRow(
 		columnInfoList, columnNum, list1, list2, false);
 
 	messageRowStore.beginRow();
-
-	{
-		char *elemData = const_cast<char *>(userInfo.userName_.c_str());
-		int32_t elemSize = static_cast<int32_t>(strlen(elemData));
-		messageRowStore.setFieldForRawData(0, elemData, elemSize);
-	}
-	{
-		char *elemData = const_cast<char *>(userInfo.digest_.c_str());
-		int32_t elemSize = static_cast<int32_t>(strlen(elemData));
-		messageRowStore.setFieldForRawData(1, elemData, elemSize);
-	}
-	{
-		char elemData = 0;
-		messageRowStore.setField(
-			2, &elemData, FixedSizeOfColumnType[COLUMN_TYPE_BYTE]);
+	for (uint32_t i = 0; i < columnNum; i++) {
+		if (valueList[i].type == COLUMN_TYPE_STRING) {
+			char *elemData = const_cast<char *>(valueList[i].sval);
+			int32_t elemSize = static_cast<int32_t>(strlen(elemData));
+			messageRowStore.setFieldForRawData(i, elemData, elemSize);
+		} else { 
+			char elemData = valueList[i].bval;
+			messageRowStore.setField(
+				i, &elemData, FixedSizeOfColumnType[COLUMN_TYPE_BYTE]);
+		}
 	}
 	messageRowStore.next();
 
 	list1.push_back(list2.data(), list2.size());
 	rowData.swap(list1);
-
-	TEST_PRINT("makeUsersRow() E\n");
+	TEST_PRINT("makeRow() E\n");
 }
 
-/*!
-	@brief Makes Row data in DATABASES Container
-*/
-void StatementHandler::makeDatabasesRow(
-		util::StackAllocator &alloc, const ColumnInfo *columnInfoList,
-		uint32_t columnNum, DatabaseInfo &dbInfo, bool isCreate,
-		RowData &rowData) {
-	TEST_PRINT("makeDatabasesRow(dbInfo) S\n");
+void DbUserHandler::makeRowKey(const char *name, RowKeyData &rowKey) {
+	uint32_t varSize = static_cast<uint32_t>(strlen(name));
+	if (varSize < VAR_SIZE_1BYTE_THRESHOLD) {
+		uint8_t varSize8 = ValueProcessor::encode1ByteVarSize(static_cast<uint8_t>(varSize));
+		rowKey.push_back(
+			reinterpret_cast<uint8_t *>(&varSize8), sizeof(uint8_t));
+	}
+	else if (varSize < VAR_SIZE_4BYTE_THRESHOLD) {
+		uint32_t varSize32 = ValueProcessor::encode4ByteVarSize(static_cast<uint32_t>(varSize));
+		rowKey.push_back(
+			reinterpret_cast<uint8_t *>(&varSize32), sizeof(uint32_t));
+	}
+	else {
+		if (varSize > static_cast<uint32_t>(std::numeric_limits<int32_t>::max())) {
+			UTIL_THROW_ERROR(GS_ERROR_DS_OUT_OF_RANGE, "");
+		}
+		uint64_t varSize64 = ValueProcessor::encode8ByteVarSize(static_cast<uint64_t>(varSize));
+		rowKey.push_back(
+			reinterpret_cast<uint8_t *>(&varSize64), sizeof(uint64_t));
+	}
+	rowKey.push_back(
+		reinterpret_cast<uint8_t *>(const_cast<char *>(name)), varSize);
+}
 
-	util::XArray<uint8_t> list1(alloc);
-	util::XArray<uint8_t> list2(alloc);
-	OutputMessageRowStore messageRowStore(dataStore_->getValueLimitConfig(),
-		columnInfoList, columnNum, list1, list2, false);
-
-	messageRowStore.beginRow();
-
+void DbUserHandler::makeRowKey(DatabaseInfo &dbInfo, RowKeyData &rowKey) {
+	assert(dbInfo.privilegeInfoList_.size() == 1);
+	const char *userName = dbInfo.privilegeInfoList_[0]->userName_.c_str();
 	{
-		util::String dbUserName(alloc);
-		dbUserName.append(dbInfo.dbName_);
-		dbUserName.append(":");
-		if (isCreate) {
-			dbUserName.append(
-				"admin");  
+		size_t dbNameSize = strlen(dbInfo.dbName_.c_str());
+		size_t userNameSize = strlen(userName);
+		uint32_t varSize = static_cast<uint32_t>(dbNameSize + 1 + userNameSize);
+		char tmp = ':';
+		if (varSize < VAR_SIZE_1BYTE_THRESHOLD) {
+			uint8_t varSize8 = ValueProcessor::encode1ByteVarSize(static_cast<uint8_t>(varSize));
+			rowKey.push_back(
+				reinterpret_cast<uint8_t *>(&varSize8), sizeof(uint8_t));
+		}
+		else if (varSize < VAR_SIZE_4BYTE_THRESHOLD) {
+			uint32_t varSize32 = ValueProcessor::encode4ByteVarSize(static_cast<uint32_t>(varSize));
+			rowKey.push_back(
+				reinterpret_cast<uint8_t *>(&varSize32), sizeof(uint32_t));
 		}
 		else {
-			dbUserName.append(dbInfo.privilegeInfoList_[0]->userName_);
+			if (varSize > static_cast<uint32_t>(std::numeric_limits<int32_t>::max())) {
+				UTIL_THROW_ERROR(GS_ERROR_DS_OUT_OF_RANGE, "");
+			}
+			uint64_t varSize64 = ValueProcessor::encode8ByteVarSize(static_cast<uint64_t>(varSize));
+			rowKey.push_back(
+				reinterpret_cast<uint8_t *>(&varSize64), sizeof(uint64_t));
 		}
-
-		char *elemData = const_cast<char *>(dbUserName.c_str());
-		int32_t elemSize = static_cast<int32_t>(strlen(elemData));
-		messageRowStore.setFieldForRawData(0, elemData, elemSize);
+		rowKey.push_back(reinterpret_cast<uint8_t *>(
+							 const_cast<char *>(dbInfo.dbName_.c_str())),
+			dbNameSize);
+		rowKey.push_back(reinterpret_cast<uint8_t *>(&tmp), 1);
+		rowKey.push_back(
+			reinterpret_cast<uint8_t *>(const_cast<char *>(userName)),
+			userNameSize);
 	}
-	{
-		char *elemData = const_cast<char *>(dbInfo.dbName_.c_str());
-		int32_t elemSize = static_cast<int32_t>(strlen(elemData));
-		messageRowStore.setFieldForRawData(1, elemData, elemSize);
-	}
-	{
-		char elemData = 0;
-		if (isCreate) {
-			elemData = 1;
-		}
-		messageRowStore.setField(
-			2, &elemData, FixedSizeOfColumnType[COLUMN_TYPE_BYTE]);
-	}
-	{
-		char *elemData =
-			const_cast<char *>(dbInfo.privilegeInfoList_[0]->userName_.c_str());
-		int32_t elemSize = static_cast<int32_t>(strlen(elemData));
-		messageRowStore.setFieldForRawData(3, elemData, elemSize);
-	}
-	{
-		char *elemData = const_cast<char *>("ALL");
-		int32_t elemSize = static_cast<int32_t>(strlen(elemData));
-		messageRowStore.setFieldForRawData(4, elemData, elemSize);
-	}
-
-	messageRowStore.next();
-
-	list1.push_back(list2.data(), list2.size());
-	rowData.swap(list1);
-
-	TEST_PRINT("makeDatabasesRow() E\n");
 }
 
-/*!
-	@brief Makes DatabaseInfo list
-*/
-void StatementHandler::makeDatabaseInfoList(
+void DbUserHandler::putContainer(util::StackAllocator &alloc, 
+		util::XArray<uint8_t> &containerInfo, const char *name,
+		const util::DateTime now, const EventMonotonicTime emNow, const Request &request,
+		util::XArray<const util::XArray<uint8_t>*> &logRecordList) {
+
+	Response response(alloc);
+
+	TransactionContext &txn = transactionManager_->put(
+			alloc, 0 /*pId*/,
+			TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
+	const DataStore::Latch latch(
+			txn, txn.getPartitionId(), dataStore_, clusterService_);
+
+	DataStore::PutStatus putStatus;
+	const FullContainerKey containerKey(
+		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM), GS_SYSTEM_DB_ID,
+		name, static_cast<uint32_t>(strlen(name)));
+	ContainerAutoPtr containerAutoPtr(txn, dataStore_,
+		txn.getPartitionId(), containerKey, COLLECTION_CONTAINER,
+		static_cast<uint32_t>(containerInfo.size()),
+		containerInfo.data(), true /*modifiable*/, 
+		MessageSchema::DEFAULT_VERSION, putStatus);
+	BaseContainer *container = containerAutoPtr.getBaseContainer();
+
+	response.schemaVersionId_ = container->getVersionId();
+	response.containerId_ = container->getContainerId();
+	const void *createdContainerNameBinary;
+	size_t createdContainerNameBinarySize;
+	containerKey.toBinary(
+		createdContainerNameBinary, createdContainerNameBinarySize);
+
+	response.binaryData2_.assign(
+		static_cast<const uint8_t*>(createdContainerNameBinary),
+		static_cast<const uint8_t*>(createdContainerNameBinary) + createdContainerNameBinarySize);
+
+	const bool optionIncluded = true;
+	bool internalOptionIncluded = true;
+	container->getContainerInfo(
+		txn, response.binaryData_, optionIncluded, internalOptionIncluded);
+
+	if (putStatus != DataStore::NOT_EXECUTED) {
+		const util::String emptyExtensionName(alloc);
+		util::XArray<uint8_t> *log =
+			ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
+		const LogSequentialNumber lsn = logManager_->putPutContainerLog(
+				*log,
+				txn.getPartitionId(), txn.getClientId(), UNDEF_TXNID,
+				response.containerId_, request.fixed_.cxtSrc_.stmtId_,
+				static_cast<uint32_t>(response.binaryData2_.size()),
+				response.binaryData2_.data(),
+				response.binaryData_,
+				container->getContainerType(),
+				static_cast<uint32_t>(emptyExtensionName.size()),
+				emptyExtensionName.c_str(),
+				txn.getTransationTimeoutInterval(),
+				request.fixed_.cxtSrc_.getMode_, false, true, MAX_ROWID,
+				(container->getExpireType() == TABLE_EXPIRE));
+		partitionTable_->setLSN(txn.getPartitionId(), lsn);
+		logRecordList.push_back(log);
+	}
+
+	transactionManager_->update(txn, request.fixed_.cxtSrc_.stmtId_);
+}
+
+bool DbUserHandler::checkContainer(
+		EventContext &ec, Request &request, const char8_t *containerName) {
+	util::StackAllocator &alloc = ec.getAllocator();
+	const util::DateTime now = ec.getHandlerStartTime();
+	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
+
+	TransactionContext &txn = transactionManager_->put(
+			alloc, request.fixed_.pId_,
+			TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
+	const DataStore::Latch latch(
+			txn, txn.getPartitionId(), dataStore_, clusterService_);
+
+	const FullContainerKey containerKey(
+		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
+		containerName, static_cast<uint32_t>(strlen(containerName)));
+	ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
+		containerKey, COLLECTION_CONTAINER);
+	BaseContainer *container = containerAutoPtr.getBaseContainer();
+	if (container == 0) {
+		TEST_PRINT1("%s not found.\n", containerName);
+		return true;
+	}
+	else {
+		return false;
+	}
+}
+
+void DbUserHandler::putRow(
+		EventContext &ec, Event &ev, const Request &request,
+		const char8_t *containerName, DUColumnValue *cvList,
+		util::XArray<const util::XArray<uint8_t>*> &logRecordList) {
+
+	util::StackAllocator &alloc = ec.getAllocator();
+	const util::DateTime now = ec.getHandlerStartTime();
+	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
+
+	const uint64_t numRow = 1;
+
+	TransactionContext &txn = transactionManager_->put(
+			alloc, request.fixed_.pId_,
+			TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
+	const DataStore::Latch latch(
+			txn, txn.getPartitionId(), dataStore_, clusterService_);
+
+	const FullContainerKey containerKey(
+		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
+		containerName, static_cast<uint32_t>(strlen(containerName)));
+	ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
+		containerKey, COLLECTION_CONTAINER);
+	BaseContainer *container = containerAutoPtr.getBaseContainer();
+	if (container == 0) {
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
+
+	RowData rowData(alloc);
+	makeRow(alloc, container->getColumnInfoList(),
+			container->getColumnNum(), cvList, rowData);
+
+	util::XArray<RowId> rowIds(alloc);
+	rowIds.assign(numRow, UNDEF_ROWID);
+	DataStore::PutStatus putStatus;
+	container->putRow(txn, static_cast<uint32_t>(rowData.size()),
+		rowData.data(), rowIds[0], putStatus,
+		PUT_INSERT_OR_UPDATE);  
+	const bool executed = (putStatus != DataStore::NOT_EXECUTED);
+
+	{
+		const bool withBegin = (request.fixed_.cxtSrc_.txnMode_ ==
+				TransactionManager::NO_AUTO_COMMIT_BEGIN);
+		const bool isAutoCommit = (request.fixed_.cxtSrc_.txnMode_ ==
+				TransactionManager::AUTO_COMMIT);
+		assert(!(withBegin && isAutoCommit));
+		assert(numRow == rowIds.size());
+		assert((executed && rowIds[0] != UNDEF_ROWID) ||
+			   (!executed && rowIds[0] == UNDEF_ROWID));
+		util::XArray<uint8_t> *log =
+			ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
+		const LogSequentialNumber lsn = logManager_->putPutRowLog(
+				*log,
+				txn.getPartitionId(), TXN_EMPTY_CLIENTID, txn.getId(),
+				container->getContainerId(), request.fixed_.cxtSrc_.stmtId_,
+				(executed ? rowIds.size() : 0), rowIds, (executed ? numRow : 0),
+				rowData, txn.getTransationTimeoutInterval(),
+				request.fixed_.cxtSrc_.getMode_, withBegin, isAutoCommit);
+		partitionTable_->setLSN(txn.getPartitionId(), lsn);
+		logRecordList.push_back(log);
+	}
+
+	transactionManager_->update(txn, request.fixed_.cxtSrc_.stmtId_);
+}
+
+void DbUserHandler::fetchRole(TransactionContext &txn, util::StackAllocator &alloc, 
+	BaseContainer *container, ResultSet *rs, RoleType &role) {
+		OutputMessageRowStore outputMessageRowStore(
+			dataStore_->getValueLimitConfig(), container->getColumnInfoList(),
+			container->getColumnNum(), *(rs->getRowDataFixedPartBuffer()),
+			*(rs->getRowDataVarPartBuffer()), false /*isRowIdIncluded*/);
+		ResultSize resultNum;
+		container->getRowList(txn, *(rs->getOIdList()), rs->getResultNum(),
+			resultNum, &outputMessageRowStore, false /*isRowIdIncluded*/, 0);
+
+		const uint8_t *data1;
+		uint32_t size1;
+		outputMessageRowStore.getAllFixedPart(data1, size1);
+		const uint8_t *data2;
+		uint32_t size2;
+		outputMessageRowStore.getAllVariablePart(data2, size2);
+
+		InputMessageRowStore inputMessageRowStore(
+			dataStore_->getValueLimitConfig(), container->getColumnInfoList(),
+			container->getColumnNum(),
+			reinterpret_cast<void *>(const_cast<uint8_t *>(data1)), size1,
+			reinterpret_cast<void *>(const_cast<uint8_t *>(data2)), size2, 1,
+			false);
+
+		util::String targetPrivilege(alloc);
+		const uint8_t *field;
+		uint32_t fieldSize;
+
+		inputMessageRowStore.next();  
+
+		inputMessageRowStore.getField(COLUMN_ID_DBS_PRIVILEGE, field, fieldSize);  
+		targetPrivilege.append(
+			reinterpret_cast<const char *>(field + 1), (size_t)fieldSize);
+		targetPrivilege.append("\0");
+
+		if (strcmp(targetPrivilege.c_str(), "ALL") == 0) {
+			role = ALL;
+		} else {
+			role = READ;
+		}
+}
+
+void DbUserHandler::removeRowWithRowKey(TransactionContext &txn, util::StackAllocator &alloc, 
+	const TransactionManager::ContextSource &cxtSrc, 
+	BaseContainer *container, const RowKeyData &rowKey,
+	util::XArray<const util::XArray<uint8_t> *> &logRecordList) {
+	util::XArray<RowId> rowIds(alloc);
+	const uint64_t numRow = 1;
+	rowIds.assign(numRow, UNDEF_ROWID);
+	bool existFlag;
+	container->deleteRow(txn, static_cast<uint32_t>(rowKey.size()),
+		rowKey.data(), rowIds[0], existFlag);
+	const bool executed = existFlag;
+
+	{
+		const bool withBegin = (cxtSrc.txnMode_ ==
+				TransactionManager::NO_AUTO_COMMIT_BEGIN);
+		const bool isAutoCommit = (cxtSrc.txnMode_ ==
+				TransactionManager::AUTO_COMMIT);
+		assert(!(withBegin && isAutoCommit));
+		assert(numRow == rowIds.size());
+		assert((executed && rowIds[0] != UNDEF_ROWID) ||
+			   (!executed && rowIds[0] == UNDEF_ROWID));
+		util::XArray<uint8_t> *log =
+				ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
+		const LogSequentialNumber lsn = logManager_->putRemoveRowLog(
+				*log, txn.getPartitionId(),
+				TXN_EMPTY_CLIENTID, txn.getId(), container->getContainerId(),
+				cxtSrc.stmtId_, (executed ? rowIds.size() : 0), rowIds,
+				txn.getTransationTimeoutInterval(), cxtSrc.getMode_,
+				withBegin, isAutoCommit);
+		partitionTable_->setLSN(txn.getPartitionId(), lsn);
+		logRecordList.push_back(log);
+	}
+
+	transactionManager_->update(txn, cxtSrc.stmtId_);
+}
+
+void DbUserHandler::runWithRowKey(
+		EventContext &ec, const TransactionManager::ContextSource &cxtSrc, 
+		const char8_t *containerName, const RowKeyData &rowKey,
+		DUGetInOut *option) {
+	TEST_PRINT("runWithRowKey() S\n");
+	util::StackAllocator &alloc = ec.getAllocator();
+	const util::DateTime now = ec.getHandlerStartTime();
+	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
+
+	TransactionContext &txn = transactionManager_->put(
+			alloc, 0 /*pId*/,
+			TXN_EMPTY_CLIENTID, cxtSrc, now, emNow);
+	const DataStore::Latch latch(
+			txn, txn.getPartitionId(), dataStore_, clusterService_);
+
+	const FullContainerKey containerKey(
+		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
+		containerName, static_cast<uint32_t>(strlen(containerName)));
+	ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
+		containerKey, COLLECTION_CONTAINER);
+	BaseContainer *container = containerAutoPtr.getBaseContainer();
+	if (container == 0) {
+		switch (option->type) {
+		case DUGetInOut::DBID:
+			assert(option->s);
+			assert(strcmp(containerName, GS_DATABASES) == 0);
+			TEST_PRINT1("%s not found.\n", containerName);
+			GS_THROW_USER_ERROR(GS_ERROR_TXN_AUTH_FAILED,
+				"database name invalid (" << option->s << ")");
+		case DUGetInOut::RESULT_NUM:
+			GS_THROW_USER_ERROR(GS_ERROR_TXN_USER_OR_DATABASE_NOT_EXIST, "");
+		default:
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+		}
+	}
+
+	if (option->type != DUGetInOut::REMOVE) {
+		ResultSet *rs = dataStore_->createResultSet(
+			txn, container->getContainerId(), container->getVersionId(), emNow, NULL);
+		const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
+		QueryProcessor::get(txn, *container, static_cast<uint32_t>(rowKey.size()),
+			rowKey.data(), *rs);
+		rs->setResultType(RESULT_ROWSET);
+		TEST_PRINT1("getResultNum() %d\n", rs->getResultNum());
+
+		switch (option->type) {
+		case DUGetInOut::RESULT_NUM: {
+			option->count = rs->getResultNum();
+			break;
+		}
+		case DUGetInOut::DBID: {
+			if (rs->getResultNum() != 1) {
+				TEST_PRINT("count!=1(dbName)\n");
+				GS_THROW_USER_ERROR(GS_ERROR_TXN_AUTH_FAILED,
+					"database name invalid (" << option->s << ")");
+			}
+			if (option->userType != Message::USER_NORMAL) {
+				util::XArray<RowId> rowIdList(alloc);
+				container->getRowIdList(txn, *(rs->getOIdList()), rowIdList);
+				int64_t dbId = rowIdList[0] + DBID_RESERVED_RANGE;
+				option->dbId = dbId;
+			} else {
+				option->dbId = UNDEF_DBID;
+			}
+			break;
+		}
+		case DUGetInOut::ROLE: {
+			fetchRole(txn, alloc, container, rs, option->role);
+			break;
+		}
+		}
+	} else {
+		removeRowWithRowKey(txn, alloc, cxtSrc, container, rowKey, *(option->logRecordList));
+	}
+	TEST_PRINT("runWithRowKey() E\n");
+}
+
+void DbUserHandler::checkDigest(TransactionContext &txn, util::StackAllocator &alloc, 
+	BaseContainer *container, ResultSet *rs, const char8_t *digest) {
+
+	OutputMessageRowStore outputMessageRowStore(
+		dataStore_->getValueLimitConfig(), container->getColumnInfoList(),
+		container->getColumnNum(), *(rs->getRowDataFixedPartBuffer()),
+		*(rs->getRowDataVarPartBuffer()), false /*isRowIdIncluded*/);
+	ResultSize resultNum;
+	container->getRowList(txn, *(rs->getOIdList()), rs->getResultNum(),
+		resultNum, &outputMessageRowStore, false /*isRowIdIncluded*/, 0);
+
+	const uint8_t *data1;
+	uint32_t size1;
+	outputMessageRowStore.getAllFixedPart(data1, size1);
+	const uint8_t *data2;
+	uint32_t size2;
+	outputMessageRowStore.getAllVariablePart(data2, size2);
+
+	InputMessageRowStore inputMessageRowStore(
+		dataStore_->getValueLimitConfig(), container->getColumnInfoList(),
+		container->getColumnNum(),
+		reinterpret_cast<void *>(const_cast<uint8_t *>(data1)), size1,
+		reinterpret_cast<void *>(const_cast<uint8_t *>(data2)), size2, 1,
+		false);
+
+	util::String targetDigest(alloc);
+	const uint8_t *field;
+	uint32_t fieldSize;
+
+	inputMessageRowStore.next();  
+
+	inputMessageRowStore.getField(COLUMN_ID_USERS_DIGEST, field, fieldSize);  
+	targetDigest.append(
+		reinterpret_cast<const char *>(field + 1), (size_t)fieldSize);
+	targetDigest.append("\0");
+
+	if (strcmp(digest, targetDigest.c_str()) != 0) {
+		TEST_PRINT("digest unmatch\n");
+		GS_THROW_USER_ERROR(GS_ERROR_TXN_USER_NAME_ALREADY_EXISTS, "");
+	}
+}
+
+void DbUserHandler::makeDatabaseInfoList(
 		TransactionContext &txn, util::StackAllocator &alloc,
 		BaseContainer &container, ResultSet &rs,
 		util::XArray<DatabaseInfo*> &dbInfoList) {
@@ -612,10 +655,9 @@ void StatementHandler::makeDatabaseInfoList(
 	int8_t property;
 
 	for (size_t i = 0; i < rs.getResultNum(); i++) {
-		inputMessageRowStore
-			.next();  
+		inputMessageRowStore.next();  
 
-		inputMessageRowStore.getField(1, field, fieldSize);  
+		inputMessageRowStore.getField(COLUMN_ID_DBS_DBNAME, field, fieldSize);  
 		dbName.append(
 			reinterpret_cast<const char *>(field + 1), (size_t)fieldSize);
 		dbName.append("\0");
@@ -634,642 +676,74 @@ void StatementHandler::makeDatabaseInfoList(
 		}
 		dbName.clear();
 
-		inputMessageRowStore.getField(2, field, fieldSize);  
+		inputMessageRowStore.getField(COLUMN_ID_DBS_PROPERTY, field, fieldSize);  
 		property = *reinterpret_cast<int8_t *>(const_cast<uint8_t *>(field));
 
 		if (property == 0) {  
-
 			PrivilegeInfo *prInfo = ALLOC_NEW(alloc) PrivilegeInfo(alloc);
 
-			inputMessageRowStore.getField(3, field, fieldSize);  
+			inputMessageRowStore.getField(COLUMN_ID_DBS_USERNAME, field, fieldSize);  
 			prInfo->userName_.append(
 				reinterpret_cast<const char *>(field + 1), (size_t)fieldSize);
 			prInfo->userName_.append("\0");
 
-			inputMessageRowStore.getField(4, field, fieldSize);  
+			inputMessageRowStore.getField(COLUMN_ID_DBS_PRIVILEGE, field, fieldSize);  
 			prInfo->privilege_.append(
 				reinterpret_cast<const char *>(field + 1), (size_t)fieldSize);
 			prInfo->privilege_.append("\0");
 
 			dbInfo->privilegeInfoList_.push_back(prInfo);
 		}
-
 	}
-
 	TEST_PRINT("makeDatabaseInfoList() E\n");
 }
 
-/*!
-	@brief Makes Row key data
-*/
-void StatementHandler::makeRowKey(const char *name, RowKeyData &rowKey) {
-	uint32_t varSize = static_cast<uint32_t>(strlen(name));
-	if (varSize < VAR_SIZE_1BYTE_THRESHOLD) {
-		uint8_t varSize8 = ValueProcessor::encode1ByteVarSize(static_cast<uint8_t>(varSize));
-		rowKey.push_back(
-			reinterpret_cast<uint8_t *>(&varSize8), sizeof(uint8_t));
-	}
-	else if (varSize < VAR_SIZE_4BYTE_THRESHOLD) {
-		uint32_t varSize32 = ValueProcessor::encode4ByteVarSize(static_cast<uint32_t>(varSize));
-		rowKey.push_back(
-			reinterpret_cast<uint8_t *>(&varSize32), sizeof(uint32_t));
-	}
-	else {
-		if (varSize > static_cast<uint32_t>(std::numeric_limits<int32_t>::max())) {
-			UTIL_THROW_ERROR(GS_ERROR_DS_OUT_OF_RANGE, "");
-		}
-		uint64_t varSize64 = ValueProcessor::encode8ByteVarSize(static_cast<uint64_t>(varSize));
-		rowKey.push_back(
-			reinterpret_cast<uint8_t *>(&varSize64), sizeof(uint64_t));
-	}
-	rowKey.push_back(
-		reinterpret_cast<uint8_t *>(const_cast<char *>(name)), varSize);
-}
+bool DbUserHandler::checkPrivilege(TransactionContext &txn, util::StackAllocator &alloc, 
+	BaseContainer *container, ResultSet *rs, DatabaseInfo &dbInfo) {
 
-/*!
-	@brief Makes Row key data in DATABASES Container
-*/
-void StatementHandler::makeDatabaseRowKey(
-		DatabaseInfo &dbInfo, RowKeyData &rowKey) {
-	const char *userName = dbInfo.privilegeInfoList_[0]->userName_.c_str();
-	{
-		size_t dbNameSize = strlen(dbInfo.dbName_.c_str());
-		size_t userNameSize = strlen(userName);
-		uint32_t varSize = static_cast<uint32_t>(dbNameSize + 1 + userNameSize);
-//		uint32_t encodedVarSize = ValueProcessor::encodeVarSize(varSize);
-		char tmp = ':';
-		if (varSize < VAR_SIZE_1BYTE_THRESHOLD) {
-			uint8_t varSize8 = ValueProcessor::encode1ByteVarSize(static_cast<uint8_t>(varSize));
-			rowKey.push_back(
-				reinterpret_cast<uint8_t *>(&varSize8), sizeof(uint8_t));
-		}
-		else if (varSize < VAR_SIZE_4BYTE_THRESHOLD) {
-			uint32_t varSize32 = ValueProcessor::encode4ByteVarSize(static_cast<uint32_t>(varSize));
-			rowKey.push_back(
-				reinterpret_cast<uint8_t *>(&varSize32), sizeof(uint32_t));
-		}
-		else {
-			if (varSize > static_cast<uint32_t>(std::numeric_limits<int32_t>::max())) {
-				UTIL_THROW_ERROR(GS_ERROR_DS_OUT_OF_RANGE, "");
-			}
-			uint64_t varSize64 = ValueProcessor::encode8ByteVarSize(static_cast<uint64_t>(varSize));
-			rowKey.push_back(
-				reinterpret_cast<uint8_t *>(&varSize64), sizeof(uint64_t));
-		}
-		rowKey.push_back(reinterpret_cast<uint8_t *>(
-							 const_cast<char *>(dbInfo.dbName_.c_str())),
-			dbNameSize);
-		rowKey.push_back(reinterpret_cast<uint8_t *>(&tmp), 1);
-		rowKey.push_back(
-			reinterpret_cast<uint8_t *>(const_cast<char *>(userName)),
-			userNameSize);
-	}
-}
-
-/*!
-	@brief Initializes SYSTEM Container
-*/
-void StatementHandler::initializeMetaContainer(
-		EventContext &ec, Event &ev, const Request &request,
-		util::XArray<const util::XArray<uint8_t>*> &logRecordList) {
-	TEST_PRINT("initializeMetaContainer() S\n");
-
-	util::StackAllocator &alloc = ec.getAllocator();
-	const util::DateTime now = ec.getHandlerStartTime();
-	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
-
-	try {
-		{
-			TEST_PRINT("initializeMetaContainer() gs_users\n");
-
-			Response response(alloc);
-
-			util::XArray<uint8_t> containerInfo(alloc);
-			makeUsersSchema(containerInfo);
-
-			TransactionContext &txn = transactionManager_->put(
-					alloc, 0 /*pId*/,
-					TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
-			const DataStore::Latch latch(
-					txn, txn.getPartitionId(), dataStore_, clusterService_);
-
-			DataStore::PutStatus putStatus;
-			const FullContainerKey containerKey(
-				alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM), GS_SYSTEM_DB_ID,
-				GS_USERS, strlen(GS_USERS));
-			ContainerAutoPtr containerAutoPtr(txn, dataStore_,
-				txn.getPartitionId(), containerKey, COLLECTION_CONTAINER,
-				static_cast<uint32_t>(containerInfo.size()),
-				containerInfo.data(), true /*modifiable*/, 
-				MessageSchema::DEFAULT_VERSION, putStatus);
-			BaseContainer *container = containerAutoPtr.getBaseContainer();
-
-			response.schemaVersionId_ = container->getVersionId();
-			response.containerId_ = container->getContainerId();
-			const void *createdContainerNameBinary;
-			size_t createdContainerNameBinarySize;
-			containerKey.toBinary(
-				createdContainerNameBinary, createdContainerNameBinarySize);
-
-			response.binaryData2_.assign(
-				static_cast<const uint8_t*>(createdContainerNameBinary),
-				static_cast<const uint8_t*>(createdContainerNameBinary) + createdContainerNameBinarySize);
-
-			const bool optionIncluded = true;
-			bool internalOptionIncluded = true;
-			container->getContainerInfo(
-				txn, response.binaryData_, optionIncluded, internalOptionIncluded);
-
-			if (putStatus != DataStore::NOT_EXECUTED) {
-				const util::String emptyExtensionName(alloc);
-				util::XArray<uint8_t> *log =
-					ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
-				const LogSequentialNumber lsn = logManager_->putPutContainerLog(
-						*log,
-						txn.getPartitionId(), txn.getClientId(), UNDEF_TXNID,
-						response.containerId_, request.fixed_.cxtSrc_.stmtId_,
-						static_cast<uint32_t>(response.binaryData2_.size()),
-						response.binaryData2_.data(),
-						response.binaryData_,
-						container->getContainerType(),
-						static_cast<uint32_t>(emptyExtensionName.size()),
-						emptyExtensionName.c_str(),
-						txn.getTransationTimeoutInterval(),
-						request.fixed_.cxtSrc_.getMode_, false, true, MAX_ROWID,
-						(container->getExpireType() == TABLE_EXPIRE));
-				partitionTable_->setLSN(txn.getPartitionId(), lsn);
-				logRecordList.push_back(log);
-			}
-
-			transactionManager_->update(txn, request.fixed_.cxtSrc_.stmtId_);
-		}
-		{
-			TEST_PRINT("initializeMetaContainer() gs_databases\n");
-
-			Response response(alloc);
-
-			util::XArray<uint8_t> containerInfo(alloc);
-			makeDatabasesSchema(containerInfo);
-
-			TransactionContext &txn = transactionManager_->put(
-					alloc, 0 /*pId*/,
-					TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
-
-			const DataStore::Latch latch(
-					txn, txn.getPartitionId(), dataStore_, clusterService_);
-
-			DataStore::PutStatus putStatus;
-			const FullContainerKey containerKey(
-				alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM), GS_SYSTEM_DB_ID,
-				GS_DATABASES, strlen(GS_DATABASES));
-			ContainerAutoPtr containerAutoPtr(txn, dataStore_,
-				txn.getPartitionId(), containerKey, COLLECTION_CONTAINER,
-				static_cast<uint32_t>(containerInfo.size()),
-				containerInfo.data(), true /*modifiable*/, 
-				MessageSchema::DEFAULT_VERSION, putStatus);
-			BaseContainer *container = containerAutoPtr.getBaseContainer();
-
-			response.schemaVersionId_ = container->getVersionId();
-			response.containerId_ = container->getContainerId();
-			const void *createdContainerNameBinary;
-			size_t createdContainerNameBinarySize;
-			containerKey.toBinary(
-				createdContainerNameBinary, createdContainerNameBinarySize);
-
-			response.binaryData2_.assign(
-				static_cast<const uint8_t*>(createdContainerNameBinary),
-				static_cast<const uint8_t*>(createdContainerNameBinary) + createdContainerNameBinarySize);
-
-			const bool optionIncluded = true;
-			bool internalOptionIncluded = true;
-			container->getContainerInfo(
-				txn, response.binaryData_, optionIncluded, internalOptionIncluded);
-
-			if (putStatus != DataStore::NOT_EXECUTED) {
-				const util::String emptyExtensionName(alloc);
-				util::XArray<uint8_t> *log =
-					ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
-				const LogSequentialNumber lsn = logManager_->putPutContainerLog(
-						*log,
-						txn.getPartitionId(), txn.getClientId(), UNDEF_TXNID,
-						response.containerId_, request.fixed_.cxtSrc_.stmtId_,
-						static_cast<uint32_t>(response.binaryData2_.size()),
-						response.binaryData2_.data(),
-						response.binaryData_,
-						container->getContainerType(),
-						static_cast<uint32_t>(emptyExtensionName.size()),
-						emptyExtensionName.c_str(),
-						txn.getTransationTimeoutInterval(),
-						request.fixed_.cxtSrc_.getMode_, false, true, MAX_ROWID,
-						(container->getExpireType() == TABLE_EXPIRE));
-
-				partitionTable_->setLSN(txn.getPartitionId(), lsn);
-				logRecordList.push_back(log);
-			}
-
-			transactionManager_->update(txn, request.fixed_.cxtSrc_.stmtId_);
-		}
-
-		TEST_PRINT("initializeMetaContainer() E\n");
-	}
-	catch (std::exception &) {
-		TEST_PRINT("initializeMetaContainer() exception\n");
-		TransactionContext &txn = transactionManager_->put(
-				alloc, request.fixed_.pId_,
-				TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
-
-		Response response(alloc);
-		executeReplication(
-				request, ec, alloc, NodeDescriptor::EMPTY_ND, txn,
-				ev.getType(), txn.getLastStatementId(),
-				TransactionManager::REPLICATION_ASYNC, NULL, 0,
-				logRecordList.data(), logRecordList.size(), response);
-
-		throw;
-	}
-}
-
-/*!
-	@brief Internal method for Authentication
-*/
-void StatementHandler::executeAuthenticationInternal(
-		EventContext &ec, util::StackAllocator &alloc,
-		TransactionManager::ContextSource &cxtSrc,
-		const char8_t *userName, const char8_t *digest, const char8_t *dbName,
-		UserType userType, int checkLevel, DatabaseId &dbId) {
-	TEST_PRINT("executeAuthenticationInternal() S\n");
-
-	if (strcmp(dbName, GS_PUBLIC) == 0) {
-		dbId = GS_PUBLIC_DB_ID;
-	}
-	else if (strcmp(dbName, GS_SYSTEM) == 0) {
-		dbId = GS_SYSTEM_DB_ID;
-	}
-	else {
-		dbId = UNDEF_DBID;
-	}
-
-	if ((checkLevel & 0x01) && (userType == Message::USER_NORMAL)) {
-		TEST_PRINT("executeAuthenticationInterval() (Ph1) S\n");
-
-		const util::StackAllocator::Scope scope(alloc);
-
-		const util::DateTime now = ec.getHandlerStartTime();
-		const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
-
-		TransactionContext &txn = transactionManager_->put(
-				alloc, 0 /*pId*/, TXN_EMPTY_CLIENTID, cxtSrc, now, emNow);
-		const DataStore::Latch latch(
-			txn, txn.getPartitionId(), dataStore_, clusterService_);
-
-		const FullContainerKey containerKey(
-			alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
-			GS_USERS, strlen(GS_USERS));
-		ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
-			containerKey, COLLECTION_CONTAINER);
-		BaseContainer *container = containerAutoPtr.getBaseContainer();
-		if (container == 0) {
-			TEST_PRINT("gs_users not found.\n");
-			GS_THROW_USER_ERROR(GS_ERROR_TXN_AUTH_FAILED,
-				"user name invalid (" << userName << ")");
-		}
-		else {
-			TEST_PRINT("gs_users found.\n");
-		}
-
-		util::String query(alloc);
-		query.append("select count(*) where userName='");
-		query.append(userName);
-		query.append("' and digest='");
-		query.append(digest);
-		query.append("'");
-
-		ResultSet *rs = dataStore_->createResultSet(
-			txn, container->getContainerId(), container->getVersionId(), emNow,
-			NULL);
-		const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
-		QueryProcessor::executeTQL(
-			txn, *container, MAX_RESULT_SIZE, TQLInfo(GS_SYSTEM, NULL, query.c_str()), *rs);  
-		rs->setResultType(RESULT_ROWSET);
-
-		TEST_PRINT1("getResultNum() %d\n", rs->getResultNum());
-		int8_t *tmp = reinterpret_cast<int8_t *>(
-			const_cast<uint8_t *>(rs->getFixedStartData()));
-		tmp++;
-		int64_t *count = reinterpret_cast<int64_t *>(tmp);
-		if (*count != 1) {
-			TEST_PRINT("count!=1(userName)\n");
-			GS_THROW_USER_ERROR(GS_ERROR_TXN_AUTH_FAILED,
-				"invalid user name or password (user name = " << userName
-															  << ")");
-		}
-
-		TEST_PRINT("executeAuthenticationInterval() (Ph1) E\n");
-	}
-	if (checkLevel & 0x02) {
-		TEST_PRINT("executeAuthenticationInterval() (Ph2) S\n");
-
-		const util::StackAllocator::Scope scope(alloc);
-
-		const util::DateTime now = ec.getHandlerStartTime();
-		const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
-
-		TransactionContext &txn = transactionManager_->put(
-			alloc, 0 /*pId*/, TXN_EMPTY_CLIENTID, cxtSrc, now, emNow);
-		const DataStore::Latch latch(
-			txn, txn.getPartitionId(), dataStore_, clusterService_);
-
-		const FullContainerKey containerKey(
-			alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
-			GS_DATABASES, strlen(GS_DATABASES));
-		ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
-			containerKey, COLLECTION_CONTAINER);
-		BaseContainer *container = containerAutoPtr.getBaseContainer();
-		if (container == 0) {
-			TEST_PRINT("gs_databases not found.\n");
-			GS_THROW_USER_ERROR(GS_ERROR_TXN_AUTH_FAILED,
-				"database name invalid (" << dbName << ")");
-		}
-		else {
-			TEST_PRINT("gs_databases found.\n");
-		}
-
-		util::String dbUserName(alloc);
-		dbUserName.append(dbName);
-		dbUserName.append(":");
-		if (userType == Message::USER_NORMAL) {
-			dbUserName.append(userName);
-		}
-		else {
-			dbUserName.append(
-				"admin");  
-		}
-
-		RowKeyData rowKey(alloc);
-		makeRowKey(dbUserName.c_str(), rowKey);
-
-		ResultSet *rs = dataStore_->createResultSet(
-			txn, container->getContainerId(), container->getVersionId(), emNow,
-			NULL);
-		const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
-		QueryProcessor::get(txn, *container,
-			static_cast<uint32_t>(rowKey.size()), rowKey.data(), *rs);
-		rs->setResultType(RESULT_ROWSET);
-
-		TEST_PRINT1("getResultNum() %d\n", rs->getResultNum());
-
-		if (rs->getResultNum() != 1) {
-			TEST_PRINT("count!=1(dbName)\n");
-			GS_THROW_USER_ERROR(GS_ERROR_TXN_AUTH_FAILED,
-				"database name invalid (" << dbName << ")");
-		}
-
-		if (userType != Message::USER_NORMAL) {
-			util::XArray<RowId> rowIdList(alloc);
-			container->getRowIdList(txn, *(rs->getOIdList()), rowIdList);
-			dbId = rowIdList[0] + DBID_RESERVED_RANGE;
-		}
-
-		TEST_PRINT("executeAuthenticationInterval() (Ph2) E\n");
-	}
-	if ((checkLevel & 0x02) && (userType == Message::USER_NORMAL)) {
-		TEST_PRINT("executeAuthenticationInterval() (Ph3) S\n");
-
-		const util::StackAllocator::Scope scope(alloc);
-
-		const util::DateTime now = ec.getHandlerStartTime();
-		const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
-
-		TransactionContext &txn = transactionManager_->put(
-			alloc, 0 /*pId*/, TXN_EMPTY_CLIENTID, cxtSrc, now, emNow);
-		const DataStore::Latch latch(
-			txn, txn.getPartitionId(), dataStore_, clusterService_);
-
-		const FullContainerKey containerKey(
-			alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
-			GS_DATABASES, strlen(GS_DATABASES));
-		ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
-			containerKey, COLLECTION_CONTAINER);
-		BaseContainer *container = containerAutoPtr.getBaseContainer();
-		if (container == 0) {
-			TEST_PRINT("gs_databases not found.\n");
+	ResultSize resultNum = rs->getResultNum();
+	
+	util::XArray<DatabaseInfo *> dbInfoList(alloc);
+	makeDatabaseInfoList(txn, alloc, *container, *rs, dbInfoList);
+	if (dbInfoList.size() > 1) {
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	} else if (dbInfoList.size() == 1) {
+		if (dbInfoList[0]->privilegeInfoList_.size() != resultNum) {
 			GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 		}
-		else {
-			TEST_PRINT("gs_databases found.\n");
+	}
+	const char *userName = dbInfo.privilegeInfoList_[0]->userName_.c_str();
+	const char *privilege = dbInfo.privilegeInfoList_[0]->privilege_.c_str();
+
+	for (ResultSize i = 0; i < resultNum; i++) {
+		const char *targetUserName =
+			dbInfoList[0]->privilegeInfoList_[i]->userName_.c_str();
+		if (strcmp(userName, targetUserName) == 0) {
+			const char *targetPrivilege =
+				dbInfoList[0]->privilegeInfoList_[i]->privilege_.c_str();
+			if (strcmp(privilege, targetPrivilege) == 0) {
+				return true;
+			} else {
+				GS_THROW_USER_ERROR(GS_ERROR_TXN_OTHER_PRIVILEGE_EXISTS,
+					"(input user name = " << userName << ", input database name = "
+										  << dbInfo.dbName_.c_str() << ")");  
+			}
 		}
-
-		util::String dbUserName(alloc);
-		dbUserName.append(dbName);
-		dbUserName.append(":admin");
-
-		RowKeyData rowKey(alloc);
-		makeRowKey(dbUserName.c_str(), rowKey);
-
-		ResultSet *rs = dataStore_->createResultSet(
-			txn, container->getContainerId(), container->getVersionId(), emNow,
-			NULL);
-		const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
-		QueryProcessor::get(txn, *container,
-			static_cast<uint32_t>(rowKey.size()), rowKey.data(), *rs);
-		rs->setResultType(RESULT_ROWSET);
-
-		TEST_PRINT1("getResultNum() %d\n", rs->getResultNum());
-
-		if (rs->getResultNum() != 1) {
-			TEST_PRINT("count!=1(dbName)\n");
-			GS_THROW_USER_ERROR(GS_ERROR_TXN_AUTH_FAILED,
-				"database name invalid (" << dbName << ")");
-		}
-
-		util::XArray<RowId> rowIdList(alloc);
-		container->getRowIdList(txn, *(rs->getOIdList()), rowIdList);
-		dbId = rowIdList[0] + DBID_RESERVED_RANGE;
-
-		TEST_PRINT("executeAuthenticationInterval() (Ph3) E\n");
 	}
-	TEST_PRINT("executeAuthenticationInternal() E\n");
+
+	return false;
 }
 
-
-/*!
-	@brief Checks if a specified password(not digest) is proper length
-*/
-void StatementHandler::checkPasswordLength(const char8_t *password) {
-	if (strlen(password) > PASSWORD_SIZE_MAX) {
-		GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-			"password length exceeds maximum size.");
-	}
-}
-
-/*!
-	@brief Checks if a specified Container exists
-*/
-bool StatementHandler::checkContainer(
-		EventContext &ec, Request &request, const char8_t *containerName) {
-	util::StackAllocator &alloc = ec.getAllocator();
-	const util::DateTime now = ec.getHandlerStartTime();
-	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
-
-	TransactionContext &txn = transactionManager_->put(
-			alloc, request.fixed_.pId_,
-			TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
-	const DataStore::Latch latch(
-			txn, txn.getPartitionId(), dataStore_, clusterService_);
-
-	const FullContainerKey containerKey(
-		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
-		containerName, strlen(containerName));
-	ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
-		containerKey, COLLECTION_CONTAINER);
-	BaseContainer *container = containerAutoPtr.getBaseContainer();
-	if (container == 0) {
-		TEST_PRINT1("%s not found.\n", containerName);
-		return true;
-	}
-	else {
-		return false;
-	}
-}
-
-/*!
-	@brief Counts the number of Rows in a specified Container
-*/
-int64_t StatementHandler::count(
-		EventContext &ec, const Request &request, const char8_t *containerName) {
-	util::StackAllocator &alloc = ec.getAllocator();
-	const util::DateTime now = ec.getHandlerStartTime();
-	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
-
-	TransactionContext &txn = transactionManager_->put(
-			alloc, request.fixed_.pId_,
-			TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
-	const DataStore::Latch latch(
-			txn, txn.getPartitionId(), dataStore_, clusterService_);
-
-	const FullContainerKey containerKey(
-		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
-		containerName, strlen(containerName));
-	ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
-		containerKey, COLLECTION_CONTAINER);
-	BaseContainer *container = containerAutoPtr.getBaseContainer();
-	if (container == 0) {
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
-	}
-
-	util::String query(alloc);
-	if (strcmp(containerName, GS_DATABASES) == 0) {  
-		query.append("select count(*) where property=1");
-	}
-	else {
-		query.append("select count(*)");
-	}
-	ResultSet *rs = dataStore_->createResultSet(
-		txn, container->getContainerId(), container->getVersionId(), emNow, NULL);
-	const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
-
-	QueryProcessor::executeTQL(
-		txn, *container, MAX_RESULT_SIZE, TQLInfo(GS_SYSTEM, NULL, query.c_str()), *rs);
-	rs->setResultType(RESULT_ROWSET);
-
-	TEST_PRINT1("getResultNum() %d\n", rs->getResultNum());
-	int8_t *tmp = reinterpret_cast<int8_t *>(
-		const_cast<uint8_t *>(rs->getFixedStartData()));
-	tmp++;
-	int64_t *count = reinterpret_cast<int64_t *>(tmp);
-
-	return (*count);
-}
-
-/*!
-	@brief Checks if a specifed user exists
-*/
-void StatementHandler::checkUser(
-		EventContext &ec, const Request &request, const char8_t *userName,
-		bool &existFlag) {
-	existFlag = false;
-
-	util::StackAllocator &alloc = ec.getAllocator();
-	const util::DateTime now = ec.getHandlerStartTime();
-	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
-
-	TransactionContext &txn = transactionManager_->put(
-			alloc, request.fixed_.pId_,
-			TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
-	const DataStore::Latch latch(
-			txn, txn.getPartitionId(), dataStore_, clusterService_);
-
-	const FullContainerKey containerKey(
-		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
-		GS_USERS, strlen(GS_USERS));
-	ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
-		containerKey, COLLECTION_CONTAINER);
-	BaseContainer *container = containerAutoPtr.getBaseContainer();
-	if (container == 0) {
-		GS_THROW_USER_ERROR(GS_ERROR_TXN_USER_OR_DATABASE_NOT_EXIST, "");
-	}
-
-	RowKeyData rowKey(alloc);
-	makeRowKey(userName, rowKey);
-
-	ResultSet *rs = dataStore_->createResultSet(
-		txn, container->getContainerId(), container->getVersionId(), emNow, NULL);
-	const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
-	QueryProcessor::get(txn, *container, static_cast<uint32_t>(rowKey.size()),
-		rowKey.data(), *rs);
-	rs->setResultType(RESULT_ROWSET);
-	existFlag = (rs->getResultNum() > 0);
-}
-
-/*!
-	@brief Checks with TQL if a specifed user exists
-*/
-void StatementHandler::checkUserWithTQL(
-		EventContext &ec, const Request &request, const char8_t *userName,
-		const char8_t *digest, bool detailFlag, bool &existFlag) {
-	existFlag = false;
-
-	util::StackAllocator &alloc = ec.getAllocator();
-	const util::DateTime now = ec.getHandlerStartTime();
-	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
-
-	TransactionContext &txn = transactionManager_->put(
-			alloc, request.fixed_.pId_,
-			TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
-	const DataStore::Latch latch(
-			txn, txn.getPartitionId(), dataStore_, clusterService_);
-
-	const FullContainerKey containerKey(
-		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
-		GS_USERS, strlen(GS_USERS));
-	ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
-		containerKey, COLLECTION_CONTAINER);
-	BaseContainer *container = containerAutoPtr.getBaseContainer();
-	if (container == 0) {
-		GS_THROW_USER_ERROR(GS_ERROR_TXN_USER_OR_DATABASE_NOT_EXIST, "");
-	}
-
-	util::String query(alloc);
-	query.append("select * where UPPER(userName)=UPPER('");
-	query.append(userName);
-	query.append("')");
-
-	ResultSet *rs = dataStore_->createResultSet(
-		txn, container->getContainerId(), container->getVersionId(), emNow, NULL);
-	const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
-
-	QueryProcessor::executeTQL(
-		txn, *container, MAX_RESULT_SIZE, TQLInfo(GS_SYSTEM, NULL, query.c_str()), *rs);
-	rs->setResultType(RESULT_ROWSET);
-	existFlag = (rs->getResultNum() > 0);
-
-	if (detailFlag && existFlag) {
+void DbUserHandler::makeUserInfoList(
+		TransactionContext &txn, util::StackAllocator &alloc,
+		BaseContainer &container, ResultSet &rs,
+		util::XArray<UserInfo*> &userInfoList) {
 		OutputMessageRowStore outputMessageRowStore(
-			dataStore_->getValueLimitConfig(), container->getColumnInfoList(),
-			container->getColumnNum(), *(rs->getRowDataFixedPartBuffer()),
-			*(rs->getRowDataVarPartBuffer()), false /*isRowIdIncluded*/);
+			dataStore_->getValueLimitConfig(), container.getColumnInfoList(),
+			container.getColumnNum(), *(rs.getRowDataFixedPartBuffer()),
+			*(rs.getRowDataVarPartBuffer()), false /*isRowIdIncluded*/);
 		ResultSize resultNum;
-		container->getRowList(txn, *(rs->getOIdList()), rs->getResultNum(),
+		container.getRowList(txn, *(rs.getOIdList()), rs.getResultNum(),
 			resultNum, &outputMessageRowStore, false /*isRowIdIncluded*/, 0);
 
 		const uint8_t *data1;
@@ -1280,123 +754,525 @@ void StatementHandler::checkUserWithTQL(
 		outputMessageRowStore.getAllVariablePart(data2, size2);
 
 		InputMessageRowStore inputMessageRowStore(
-			dataStore_->getValueLimitConfig(), container->getColumnInfoList(),
-			container->getColumnNum(),
+			dataStore_->getValueLimitConfig(), container.getColumnInfoList(),
+			container.getColumnNum(),
 			reinterpret_cast<void *>(const_cast<uint8_t *>(data1)), size1,
-			reinterpret_cast<void *>(const_cast<uint8_t *>(data2)), size2, 1,
-			false);
+			reinterpret_cast<void *>(const_cast<uint8_t *>(data2)), size2,
+			resultNum, false);
 
-		util::String targetDigest(alloc);
 		const uint8_t *field;
 		uint32_t fieldSize;
+		util::String userName(alloc);
+		for (ResultSize i = 0; i < rs.getResultNum(); i++) {
+			inputMessageRowStore.next();  
 
-		inputMessageRowStore
-			.next();  
+			UserInfo *outUserInfo = ALLOC_NEW(alloc) UserInfo(alloc);
 
-		inputMessageRowStore.getField(1, field, fieldSize);  
-		targetDigest.append(
-			reinterpret_cast<const char *>(field + 1), (size_t)fieldSize);
-		targetDigest.append("\0");
+			inputMessageRowStore.getField(COLUMN_ID_USERS_USERNAME, field, fieldSize);  
+			outUserInfo->userName_.append(
+				reinterpret_cast<const char *>(field + 1), (size_t)fieldSize);
+			outUserInfo->userName_.append("\0");
 
-		if (strcmp(digest, targetDigest.c_str()) != 0) {
-			TEST_PRINT("digest unmatch\n");
-			GS_THROW_USER_ERROR(GS_ERROR_TXN_USER_NAME_ALREADY_EXISTS, "");
+			inputMessageRowStore.getField(COLUMN_ID_USERS_DIGEST, field, fieldSize);  
+			outUserInfo->digest_.append(
+				reinterpret_cast<const char *>(field + 1), (size_t)fieldSize);
+			outUserInfo->digest_.append("\0");
+
+			inputMessageRowStore.getField(COLUMN_ID_USERS_PROPERTY, field, fieldSize);  
+			outUserInfo->property_ =
+				(*reinterpret_cast<int8_t *>(const_cast<uint8_t *>(field)));
+
+			outUserInfo->withDigest_ = true;
+
+			userInfoList.push_back(outUserInfo);
+		}
+
+}
+
+void DbUserHandler::removeRowWithRS(TransactionContext &txn, util::StackAllocator &alloc, 
+	const TransactionManager::ContextSource &cxtSrc,
+	BaseContainer &container, ResultSet &rs,
+	util::XArray<const util::XArray<uint8_t> *> &logRecordList) {
+
+	util::XArray<RowId> rowIdList(alloc);
+	container.getRowIdList(txn, *(rs.getOIdList()), rowIdList);
+
+	util::XArray<RowId> rowIds(alloc);
+	for (size_t i = 0; i < rowIdList.size(); i++) {
+		bool existFlag;
+		container.redoDeleteRow(txn, rowIdList[i], existFlag);
+		const bool executed = existFlag;
+
+		rowIds.push_back(rowIdList[i]);
+
+		{
+			const bool withBegin = (cxtSrc.txnMode_ ==
+					TransactionManager::NO_AUTO_COMMIT_BEGIN);
+			const bool isAutoCommit = (cxtSrc.txnMode_ ==
+					TransactionManager::AUTO_COMMIT);
+			assert(!(withBegin && isAutoCommit));
+			assert(1 == rowIds.size());
+			assert(rowIds[0] != UNDEF_ROWID);
+			util::XArray<uint8_t> *log =
+				ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
+			const LogSequentialNumber lsn = logManager_->putRemoveRowLog(
+					*log, txn.getPartitionId(), txn.getClientId(), txn.getId(),
+					container.getContainerId(), cxtSrc.stmtId_,
+					(executed ? rowIds.size() : 0), rowIds,
+					txn.getTransationTimeoutInterval(),
+					cxtSrc.getMode_, withBegin, isAutoCommit);
+			partitionTable_->setLSN(txn.getPartitionId(), lsn);
+			logRecordList.push_back(log);
+		}
+
+		transactionManager_->update(txn, cxtSrc.stmtId_);
+
+		rowIds.clear();
+	}
+}
+
+void DbUserHandler::runWithTQL(
+		EventContext &ec, const TransactionManager::ContextSource &cxtSrc, 
+		const char8_t *containerName, const char8_t *tql,
+		DUQueryInOut *option) {
+	util::StackAllocator &alloc = ec.getAllocator();
+	const util::DateTime now = ec.getHandlerStartTime();
+	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
+
+	TransactionContext &txn = transactionManager_->put(
+			alloc, 0 /*pId*/,
+			TXN_EMPTY_CLIENTID, cxtSrc, now, emNow);
+	const DataStore::Latch latch(
+			txn, txn.getPartitionId(), dataStore_, clusterService_);
+
+	const FullContainerKey containerKey(
+		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
+		containerName, static_cast<uint32_t>(strlen(containerName)));
+	ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
+		containerKey, COLLECTION_CONTAINER);
+	BaseContainer *container = containerAutoPtr.getBaseContainer();
+	if (container == 0) {
+		switch (option->phase) {
+		case DUQueryInOut::AUTH:
+			assert(option->type == DUQueryInOut::AGG);
+			assert(option->s);
+			assert(strcmp(containerName, GS_USERS) == 0);
+			TEST_PRINT1("%s not found.\n", containerName);
+			GS_THROW_USER_ERROR(GS_ERROR_TXN_AUTH_FAILED,
+				"user name invalid (" << option->s << ")");
+		case DUQueryInOut::GET:
+			return;
+		case DUQueryInOut::NORMAL:
+			GS_THROW_USER_ERROR(GS_ERROR_TXN_USER_OR_DATABASE_NOT_EXIST, "");
+		default:
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+		}
+	}
+
+	ResultSet *rs = dataStore_->createResultSet(
+		txn, container->getContainerId(), container->getVersionId(), emNow, NULL);
+	const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
+
+	QueryProcessor::executeTQL(
+		txn, *container, MAX_RESULT_SIZE, TQLInfo(GS_SYSTEM, NULL, tql), *rs);
+
+	rs->setResultType(RESULT_ROWSET);
+
+	TEST_PRINT1("getResultNum() %d\n", rs->getResultNum());
+	switch (option->type) {
+	case DUQueryInOut::RESULT_NUM:
+		option->count = rs->getResultNum();
+		break;
+	case DUQueryInOut::AGG: {
+		int8_t *tmp = reinterpret_cast<int8_t *>(
+			const_cast<uint8_t *>(rs->getFixedStartData()));
+		tmp++;
+		option->count = *(reinterpret_cast<int64_t *>(tmp));
+		break;
+	}
+	case DUQueryInOut::USER_DETAILS: {
+		int64_t count = rs->getResultNum();
+		if (count > 0) {
+			option->flag = true;
+			checkDigest(txn, alloc, container, rs, option->s);
+		} else {
+			option->flag = false;
+		}
+		break;
+	}
+	case DUQueryInOut::DB_DETAILS: {
+		option->flag = checkPrivilege(txn, alloc, container, rs, *(option->dbInfo));
+		break;
+	}
+	case DUQueryInOut::USER_INFO: {
+		makeUserInfoList(txn, alloc, *container, *rs, *(option->userInfoList));
+		break;
+	}
+	case DUQueryInOut::DB_INFO: {
+		if (option->dbNameSpecified && rs->getResultNum() == 0) {
+			GS_THROW_USER_ERROR(
+				GS_ERROR_TXN_CURRENT_DATABASE_REMOVED, "[GetDatabases]");
+		}
+		makeDatabaseInfoList(txn, alloc, *container, *rs, *(option->dbInfoList));
+		break;
+	}
+	case DUQueryInOut::REMOVE: {
+		removeRowWithRS(txn, alloc, cxtSrc, *container, *rs, *(option->logRecordList));
+		break;
+	}
+	}
+}
+
+
+/*!
+	@brief Checks if a specified password(not digest) is proper length
+*/
+void DbUserHandler::checkPasswordLength(const char8_t *password) {
+	if (strlen(password) > PASSWORD_SIZE_MAX) {
+		GS_THROW_USER_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
+			"password length exceeds maximum size.");
+	}
+}
+
+void DbUserHandler::checkUserName(const char8_t *userName, bool detailed) {
+	if (detailed) {
+		NoEmptyKey::validate(
+			KeyConstraint::getUserKeyConstraint(USER_NAME_SIZE_MAX),
+			userName, static_cast<uint32_t>(strlen(userName)),
+			"userName");
+	}
+
+	size_t len = strlen(userName);
+	if (len == 5) {
+		if (util::stricmp(userName, GS_CAPITAL_ADMIN_USER) == 0) {
+			GS_THROW_USER_ERROR(GS_ERROR_TXN_USER_NAME_INVALID,
+				"(user name = " << userName << ")");
+		}
+	}
+	else if (len == 6) {
+		if (util::stricmp(userName, GS_CAPITAL_SYSTEM_USER) == 0) {
+			GS_THROW_USER_ERROR(GS_ERROR_TXN_USER_NAME_INVALID,
+				"(user name = " << userName << ")");
+		}
+	}
+
+	if (len >= 3) {
+		char head[4];
+		memset(head, 0, 4);
+		memcpy(head, userName, 3);
+		if (util::stricmp(head, GS_CAPITAL_PREFIX) == 0) {
+			GS_THROW_USER_ERROR(GS_ERROR_TXN_USER_NAME_INVALID,
+				"(user name = " << userName << ")");
 		}
 	}
 }
 
+void DbUserHandler::checkAdminUser(UserType userType) {
+	if (userType == Message::USER_NORMAL) {
+		GS_THROW_USER_ERROR(GS_ERROR_TXN_OPERATION_NOT_ALLOWED,
+			"only administrator can execute the statement");
+	}
+}
+
+void DbUserHandler::checkDatabaseName(const char8_t *dbName) {
+	NoEmptyKey::validate(
+		KeyConstraint::getUserKeyConstraint(DATABASE_NAME_SIZE_MAX),
+		dbName, static_cast<uint32_t>(strlen(dbName)),
+		"databaseName");
+
+	size_t len;
+	len = strlen(dbName);
+	if (len == 6) {
+		if (util::stricmp(dbName, GS_CAPITAL_PUBLIC) == 0) {
+			GS_THROW_USER_ERROR(GS_ERROR_TXN_DATABASE_NAME_INVALID,
+				"(database name = " << dbName << ")");
+		}
+	}
+	else if (len == 18) {
+		if (util::stricmp(dbName, GS_CAPITAL_INFO_SCHEMA) == 0) {
+			GS_THROW_USER_ERROR(GS_ERROR_TXN_DATABASE_NAME_INVALID,
+				"(database name = " << dbName << ")");
+		}
+	}
+	if (len >= 3) {
+		char head[4];
+		memset(head, 0, 4);
+		memcpy(head, dbName, 3);
+		if (util::stricmp(head, GS_CAPITAL_PREFIX) == 0) {
+			GS_THROW_USER_ERROR(GS_ERROR_TXN_DATABASE_NAME_INVALID,
+				"(database name = " << dbName << ")");
+		}
+	}
+}
+
+void DbUserHandler::checkConnectedDatabaseName(
+		ConnectionOption &connOption, const char8_t *dbName) {
+	if ((connOption.requestType_ != Message::REQUEST_NEWSQL) && 
+			strcmp(dbName, connOption.dbName_.c_str()) != 0) {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_TXN_DATABASE_NAME_INVALID,
+				"database name invalid (" << dbName << ")");
+	}
+}
+
+void DbUserHandler::checkConnectedUserName(
+		ConnectionOption &connOption, const char8_t *userName) {
+	if ((connOption.requestType_ != Message::REQUEST_NEWSQL) &&
+			(strcmp(userName, connOption.userName_.c_str()) != 0)) {
+		GS_THROW_USER_ERROR(GS_ERROR_TXN_MESSAGE_INVALID,
+				"user name invalid (" << userName << ")");
+	}
+}
+
+void DbUserHandler::checkPartitionIdForUsers(PartitionId pId) {
+	if (pId != 0) {
+		GS_THROW_USER_ERROR(
+			GS_ERROR_CM_INTERNAL_ERROR, "partition id is not 0");
+	}
+}
+
 /*!
-	@brief Puts Row in USERS Container
+	@brief Checks digest
 */
-void StatementHandler::putUserRow(
+void DbUserHandler::checkDigest(const char8_t *digest, size_t maxStrLength) {
+	size_t len;
+	len = strlen(digest);
+	if (len <= 0) {
+		GS_THROW_USER_ERROR(GS_ERROR_TXN_MESSAGE_INVALID,
+			"invalid digest.");
+	}
+	else if (len > maxStrLength) {
+		GS_THROW_USER_ERROR(GS_ERROR_TXN_MESSAGE_INVALID,
+			"digest length exceeds maximum size.");
+	}
+}
+
+/*!
+	@brief Checks the size of privilege information
+*/
+void DbUserHandler::checkPrivilegeSize(DatabaseInfo &dbInfo, size_t size) {
+	if (dbInfo.privilegeInfoList_.size() != size) {
+		GS_THROW_USER_ERROR(GS_ERROR_TXN_MESSAGE_INVALID,
+			"privilege number invalid (" << dbInfo.privilegeInfoList_.size()
+										 << ")");
+	}
+}
+
+/*!
+	@brief Checks modifiable value
+*/
+void DbUserHandler::checkModifiable(bool modifiable, bool value) {
+	if (modifiable != value) {
+		GS_THROW_USER_ERROR(GS_ERROR_TXN_MESSAGE_INVALID,
+			"modifiable invalid (" << modifiable << ")");
+	}
+}
+
+
+void DbUserHandler::initializeMetaContainer(
 		EventContext &ec, Event &ev, const Request &request,
-		UserInfo &userInfo,
 		util::XArray<const util::XArray<uint8_t>*> &logRecordList) {
-	TEST_PRINT("executeUserPutRow() S\n");
+	TEST_PRINT("initializeMetaContainer() S\n");
 
 	util::StackAllocator &alloc = ec.getAllocator();
 	const util::DateTime now = ec.getHandlerStartTime();
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
-	const uint64_t numRow = 1;
+	{
+		TEST_PRINT("initializeMetaContainer() gs_users\n");
 
-	TransactionContext &txn = transactionManager_->put(
-			alloc, request.fixed_.pId_,
-			TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
-	const DataStore::Latch latch(
-			txn, txn.getPartitionId(), dataStore_, clusterService_);
-
-	try {
-		const FullContainerKey containerKey(
-			alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
-			GS_USERS, strlen(GS_USERS));
-		ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
-			containerKey, COLLECTION_CONTAINER);
-		BaseContainer *container = containerAutoPtr.getBaseContainer();
-		if (container == 0) {
-			GS_THROW_USER_ERROR(GS_ERROR_TXN_USER_OR_DATABASE_NOT_EXIST, "");
-		}
-
-		RowData rowData(alloc);
-		makeUsersRow(alloc, container->getColumnInfoList(),
-			container->getColumnNum(), userInfo, rowData);
-
-		util::XArray<RowId> rowIds(alloc);
-		rowIds.assign(numRow, UNDEF_ROWID);
-		DataStore::PutStatus putStatus;
-		container->putRow(txn, static_cast<uint32_t>(rowData.size()),
-			rowData.data(), rowIds[0], putStatus,
-			PUT_INSERT_OR_UPDATE);  
-		const bool executed = (putStatus != DataStore::NOT_EXECUTED);
-
-		{
-			const bool withBegin = (request.fixed_.cxtSrc_.txnMode_ ==
-					TransactionManager::NO_AUTO_COMMIT_BEGIN);
-			const bool isAutoCommit = (request.fixed_.cxtSrc_.txnMode_ ==
-					TransactionManager::AUTO_COMMIT);
-			assert(!(withBegin && isAutoCommit));
-			assert(numRow == rowIds.size());
-			assert((executed && rowIds[0] != UNDEF_ROWID) ||
-				   (!executed && rowIds[0] == UNDEF_ROWID));
-			util::XArray<uint8_t> *log =
-				ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
-			const LogSequentialNumber lsn = logManager_->putPutRowLog(
-					*log,
-					txn.getPartitionId(), TXN_EMPTY_CLIENTID, txn.getId(),
-					container->getContainerId(), request.fixed_.cxtSrc_.stmtId_,
-					(executed ? rowIds.size() : 0), rowIds, (executed ? numRow : 0),
-					rowData, txn.getTransationTimeoutInterval(),
-					request.fixed_.cxtSrc_.getMode_, withBegin, isAutoCommit);
-			partitionTable_->setLSN(txn.getPartitionId(), lsn);
-			logRecordList.push_back(log);
-		}
-
-		transactionManager_->update(txn, request.fixed_.cxtSrc_.stmtId_);
-
-		TEST_PRINT("executeUserPutRow() E\n");
+		util::XArray<uint8_t> containerInfo(alloc);
+		makeSchema(containerInfo, USER_COLUMN_LIST, COLUMN_ID_USERS_MAX);
+		
+		putContainer(alloc, containerInfo, GS_USERS, now, emNow, request, logRecordList);
 	}
-	catch (std::exception &) {
-		TEST_PRINT("executeUserPutRow() exception\n");
-		Response response(alloc);
-		executeReplication(request, ec, alloc, NodeDescriptor::EMPTY_ND, txn,
-			ev.getType(), txn.getLastStatementId(),
-			TransactionManager::REPLICATION_ASYNC, NULL, 0,
-			logRecordList.data(), logRecordList.size(), response);
+	{
+		TEST_PRINT("initializeMetaContainer() gs_databases\n");
 
-		throw;
+		util::XArray<uint8_t> containerInfo(alloc);
+		makeSchema(containerInfo, DB_COLUMN_LIST, COLUMN_ID_DBS_MAX);
+		
+		putContainer(alloc, containerInfo, GS_DATABASES, now, emNow, request, logRecordList);
 	}
+	TEST_PRINT("initializeMetaContainer() E\n");
 }
 
-/*!
-	@brief Handler Operator
-*/
-void PutUserHandler::operator()(EventContext &ec, Event &ev) {
-	TEST_PRINT("<<<PutUserHandler>>> START\n");
+int64_t DbUserHandler::getCount(
+		EventContext &ec, const Request &request, const char8_t *containerName) {
+	util::StackAllocator &alloc = ec.getAllocator();
 
-	TXN_TRACE_HANDLER_CALLED(ev);
+	util::String query(alloc);
+	if (strcmp(containerName, GS_DATABASES) == 0) {  
+		query.append("select count(*) where property=");
+		query.append(PROPERTY_USER_ADMIN);
+	}
+	else {
+		query.append("select count(*)");
+	}
+
+	DUQueryInOut option;
+	option.setForAgg();
+	runWithTQL(ec, request.fixed_.cxtSrc_, containerName, query.c_str(), &option);
+	return option.count;
+}
+
+void DbUserHandler::checkUser(
+		EventContext &ec, const Request &request, const char8_t *userName,
+		bool &existFlag) {
+	existFlag = false;
 
 	util::StackAllocator &alloc = ec.getAllocator();
-	const util::DateTime now = ec.getHandlerStartTime();
+
+	RowKeyData rowKey(alloc);
+	makeRowKey(userName, rowKey);
+		
+	DUGetInOut option;
+	runWithRowKey(ec, request.fixed_.cxtSrc_, GS_USERS, rowKey, &option);
+	existFlag = (option.count > 0);
+}
+
+void DbUserHandler::checkDatabase(
+		EventContext &ec, const Request &request, DatabaseInfo &dbInfo) {
+	util::StackAllocator &alloc = ec.getAllocator();
+
+	util::String query(alloc);
+	query.append("select * where dbName='");
+	query.append(dbInfo.dbName_.c_str());
+	query.append("'");
+	
+	DUQueryInOut option;
+	runWithTQL(ec, request.fixed_.cxtSrc_, GS_DATABASES, query.c_str(), &option);
+	if (option.count <= 0) {
+		GS_THROW_USER_ERROR(GS_ERROR_TXN_DATABASE_NOT_EXIST,
+			"(database name = " << dbInfo.dbName_.c_str() << ")");  
+	}			
+}
+
+void DbUserHandler::checkDatabaseDetails(
+		EventContext &ec, const Request &request, DatabaseInfo &dbInfo,
+		bool &existFlag) {
+	existFlag = false;
+	util::StackAllocator &alloc = ec.getAllocator();
+
+	util::String query(alloc);
+	query.append("select * where dbName='");
+	query.append(dbInfo.dbName_.c_str());
+	query.append("' and property=");
+	query.append(PROPERTY_USER_NORMAL);
+
+	DUQueryInOut option;
+	option.setForDatabaseDetails(&dbInfo);
+	runWithTQL(ec, request.fixed_.cxtSrc_, GS_DATABASES, query.c_str(), &option);
+	existFlag = option.flag;
+}
+
+void DbUserHandler::putDatabaseRow(
+		EventContext &ec, Event &ev, const Request &request,
+		DatabaseInfo &dbInfo, bool isCreate,
+		util::XArray<const util::XArray<uint8_t>*> &logRecordList) {
+
+	assert(dbInfo.privilegeInfoList_.size() == 1);
+
+	util::StackAllocator &alloc = ec.getAllocator();
+
+	util::String dbUserName(alloc);
+	dbUserName.append(dbInfo.dbName_);
+	dbUserName.append(":");
+	if (isCreate) {
+		dbUserName.append(
+			"admin");  
+	}
+	else {
+		dbUserName.append(dbInfo.privilegeInfoList_[0]->userName_);
+	}
+
+	char elemData = 0;
+	if (isCreate) {
+		elemData = 1;
+	}
+
+	DUColumnValue cvList[5] = { 
+		{COLUMN_TYPE_STRING, dbUserName.c_str(), 0},
+		{COLUMN_TYPE_STRING, dbInfo.dbName_.c_str(), 0},
+		{COLUMN_TYPE_BYTE, NULL, elemData},
+		{COLUMN_TYPE_STRING, dbInfo.privilegeInfoList_[0]->userName_.c_str(), 0},
+		{COLUMN_TYPE_STRING, dbInfo.privilegeInfoList_[0]->privilege_.c_str(), 0},
+	};
+
+	putRow(ec, ev, request, GS_DATABASES, cvList, logRecordList);
+}
+
+void DbUserHandler::getUserInfoList(
+		EventContext &ec, 
+		const Request &request, const char8_t *userName,
+		UserType userType, util::XArray<UserInfo*> &userInfoList) {
+
+	util::StackAllocator &alloc = ec.getAllocator();
+			
+	util::String query(alloc);
+	if (userType != Message::USER_NORMAL) {  
+		query.append("select *");
+	}
+	else {
+		query.append("select * where userName='");
+		query.append(userName);
+		query.append("'");
+	}
+
+	DUQueryInOut option;
+	option.setForUserInfoList(&userInfoList);
+	runWithTQL(ec, request.fixed_.cxtSrc_, GS_USERS, query.c_str(), &option);
+}
+
+
+void PutUserHandler::checkUserDetails(
+		EventContext &ec, const Request &request, const char8_t *userName,
+		const char8_t *digest, bool detailFlag, bool &existFlag) {
+	TEST_PRINT("checkUserDetails() S\n");
+	existFlag = false;
+
+	util::StackAllocator &alloc = ec.getAllocator();
+
+	util::String query(alloc);
+	query.append("select * where UPPER(userName)=UPPER('");
+	query.append(userName);
+	query.append("')");
+	
+	DUQueryInOut option;
+	if (detailFlag) {
+		option.setForUserDetails(digest);
+		runWithTQL(ec, request.fixed_.cxtSrc_, GS_USERS, query.c_str(), &option);
+		existFlag = option.flag;
+	} else {
+		runWithTQL(ec, request.fixed_.cxtSrc_, GS_USERS, query.c_str(), &option);
+		existFlag = (option.count > 0);
+	}
+	TEST_PRINT("checkUserDetails() E\n");
+}
+
+
+void PutUserHandler::putUserRow(
+		EventContext &ec, Event &ev, const Request &request,
+		UserInfo &userInfo,
+		util::XArray<const util::XArray<uint8_t>*> &logRecordList) {
+	TEST_PRINT("putUserRow() S\n");
+	util::StackAllocator &alloc = ec.getAllocator();
+
+	DUColumnValue cvList[3] = { 
+		{COLUMN_TYPE_STRING, userInfo.userName_.c_str(), 0},
+		{COLUMN_TYPE_STRING, userInfo.digest_.c_str(), 0},
+		{COLUMN_TYPE_BYTE, 0, 0},
+	};
+
+	putRow(ec, ev, request, GS_USERS, cvList, logRecordList);
+	TEST_PRINT("putUserRow() E\n");
+}
+
+void PutUserHandler::operator()(EventContext &ec, Event &ev) {
+	TXN_TRACE_HANDLER_CALLED(ev);
+	TEST_PRINT("<<<PutUserHandler>>> START\n");
+
+	util::StackAllocator &alloc = ec.getAllocator();
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Request request(alloc, getRequestSource(ev));
@@ -1429,7 +1305,7 @@ void PutUserHandler::operator()(EventContext &ec, Event &ev) {
 		checkExecutable(
 				request.fixed_.pId_, clusterRole, partitionRole, partitionStatus, partitionTable_);
 
-		checkPartitionIdZero(request.fixed_.pId_);
+		checkPartitionIdForUsers(request.fixed_.pId_);
 		if (connOption.userType_ == Message::USER_NORMAL) {
 			checkModifiable(modifiable, true);
 			checkConnectedUserName(connOption, userInfo.userName_.c_str());
@@ -1441,38 +1317,58 @@ void PutUserHandler::operator()(EventContext &ec, Event &ev) {
 
 		util::XArray<const util::XArray<uint8_t> *> logRecordList(alloc);
 
-		if (checkContainer(ec, request, GS_USERS) ||
-			checkContainer(ec, request, GS_DATABASES)) {
-			initializeMetaContainer(ec, ev, request, logRecordList);
-		}
-		bool existFlag;
-		if (modifiable == false) {  
-			checkUserWithTQL(ec, request, userInfo.userName_.c_str(),
-				userInfo.digest_.c_str(), true, existFlag);  
-			if (existFlag == false) {
-				if (count(ec, request, GS_USERS) >=
-					static_cast<int64_t>(USER_NUM_MAX)) {
-					GS_THROW_USER_ERROR(
-						GS_ERROR_TXN_USER_LIMIT_OVER, "[PutUser]");
+		try {
+			if (checkContainer(ec, request, GS_USERS) ||
+				checkContainer(ec, request, GS_DATABASES)) {
+				initializeMetaContainer(ec, ev, request, logRecordList);
+			}
+			bool existFlag;
+			if (modifiable == false) {  
+				checkUserDetails(ec, request, userInfo.userName_.c_str(),
+					userInfo.digest_.c_str(), true, existFlag);  
+				if (existFlag == false) {
+					if (getCount(ec, request, GS_USERS) >=
+						static_cast<int64_t>(USER_NUM_MAX)) {
+						GS_THROW_USER_ERROR(
+							GS_ERROR_TXN_USER_LIMIT_OVER, "[PutUser]");
+					}
+					putUserRow(ec, ev, request, userInfo, logRecordList);
+				}
+			}
+			else {  
+				checkUser(ec, request, userInfo.userName_.c_str(), existFlag);
+				if (existFlag == false) {
+					if (connOption.userType_ == Message::USER_NORMAL) {
+						GS_THROW_USER_ERROR(
+							GS_ERROR_TXN_CURRENT_USER_REMOVED, "[PutUser]");
+					}
+					else {
+						GS_THROW_USER_ERROR(
+							GS_ERROR_TXN_USER_NOT_EXIST, "[PutUser]");
+					}
 				}
 				putUserRow(ec, ev, request, userInfo, logRecordList);
 			}
 		}
-		else {  
-			checkUser(ec, request, userInfo.userName_.c_str(), existFlag);
-			if (existFlag == false) {
-				if (connOption.userType_ == Message::USER_NORMAL) {
-					GS_THROW_USER_ERROR(
-						GS_ERROR_TXN_CURRENT_USER_REMOVED, "[PutUser]");
-				}
-				else {
-					GS_THROW_USER_ERROR(
-						GS_ERROR_TXN_USER_NOT_EXIST, "[PutUser]");
-				}
-			}
-			putUserRow(ec, ev, request, userInfo, logRecordList);
+		catch (std::exception &) {
+			const util::DateTime now = ec.getHandlerStartTime();
+			const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
+			TransactionContext &txn = transactionManager_->put(
+					alloc, request.fixed_.pId_,
+					TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
+
+			Response response(alloc);
+			executeReplication(
+					request, ec, alloc, NodeDescriptor::EMPTY_ND, txn,
+					ev.getType(), txn.getLastStatementId(),
+					TransactionManager::REPLICATION_ASYNC, NULL, 0,
+					logRecordList.data(), logRecordList.size(), response);
+
+			throw;
 		}
 
+		const util::DateTime now = ec.getHandlerStartTime();
+		const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 		TransactionContext &txn = transactionManager_->put(
 				alloc, request.fixed_.pId_,
 				TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
@@ -1485,7 +1381,7 @@ void PutUserHandler::operator()(EventContext &ec, Event &ev) {
 
 		replySuccess(ec, alloc, ev.getSenderND(), ev.getType(),
 			TXN_STATEMENT_SUCCESS, request, response, ackWait);
-
+		
 		TEST_PRINT("<<<PutUserHandler>>> END\n");
 	}
 	catch (std::exception &e) {
@@ -1494,186 +1390,42 @@ void PutUserHandler::operator()(EventContext &ec, Event &ev) {
 
 }
 
-/*!
-	@brief Removes Row in DATABASES Container with TQL
-*/
-void DropUserHandler::executeTQLAndRemoveDatabaseRow(
+void DropUserHandler::removeUserRowInDB(
 		EventContext &ec, Event &ev, const Request &request,
 		const char8_t *userName,
 		util::XArray<const util::XArray<uint8_t> *> &logRecordList) {
-	TEST_PRINT("executeDatabaseTQLAndRemoveRow() S\n");
-
+	TEST_PRINT("removeUserRowInDB() S\n");
 	util::StackAllocator &alloc = ec.getAllocator();
-	const util::DateTime now = ec.getHandlerStartTime();
-	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
-	TransactionContext &txn = transactionManager_->put(
-			alloc, request.fixed_.pId_,
-			TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
-	const DataStore::Latch latch(
-			txn, txn.getPartitionId(), dataStore_, clusterService_);
+	util::String query(alloc);
+	query.append("select * where userName='");
+	query.append(userName);
+	query.append("'");
 
-	try {
-		const FullContainerKey containerKey(
-			alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
-			GS_DATABASES, strlen(GS_DATABASES));
-		ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
-			containerKey, COLLECTION_CONTAINER);
-		BaseContainer *container = containerAutoPtr.getBaseContainer();
-		if (container == 0) {
-			GS_THROW_USER_ERROR(GS_ERROR_TXN_USER_OR_DATABASE_NOT_EXIST, "");
-		}
-
-		util::String query(alloc);
-		query.append("select * where userName='");
-		query.append(userName);
-		query.append("'");
-
-		ResultSet *rs = dataStore_->createResultSet(
-			txn, container->getContainerId(), container->getVersionId(), emNow, NULL);
-		const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
-
-		QueryProcessor::executeTQL(
-			txn, *container, MAX_RESULT_SIZE, TQLInfo(GS_SYSTEM, NULL, query.c_str()), *rs);
-		rs->setResultType(RESULT_ROWSET);
-
-
-		util::XArray<RowId> rowIdList(alloc);
-		container->getRowIdList(txn, *(rs->getOIdList()), rowIdList);
-
-		util::XArray<RowId> rowIds(alloc);
-		for (size_t i = 0; i < rowIdList.size(); i++) {
-			bool existFlag;
-			container->redoDeleteRow(txn, rowIdList[i], existFlag);
-			const bool executed = existFlag;
-
-			rowIds.push_back(rowIdList[i]);
-
-			{
-				const bool withBegin = (request.fixed_.cxtSrc_.txnMode_ ==
-						TransactionManager::NO_AUTO_COMMIT_BEGIN);
-				const bool isAutoCommit = (request.fixed_.cxtSrc_.txnMode_ ==
-						TransactionManager::AUTO_COMMIT);
-				assert(!(withBegin && isAutoCommit));
-				assert(1 == rowIds.size());
-				assert(rowIds[0] != UNDEF_ROWID);
-				util::XArray<uint8_t> *log =
-					ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
-				const LogSequentialNumber lsn = logManager_->putRemoveRowLog(
-						*log, txn.getPartitionId(), txn.getClientId(), txn.getId(),
-						container->getContainerId(), request.fixed_.cxtSrc_.stmtId_,
-						(executed ? rowIds.size() : 0), rowIds,
-						txn.getTransationTimeoutInterval(),
-						request.fixed_.cxtSrc_.getMode_, withBegin, isAutoCommit);
-				partitionTable_->setLSN(txn.getPartitionId(), lsn);
-				logRecordList.push_back(log);
-			}
-
-			transactionManager_->update(txn, request.fixed_.cxtSrc_.stmtId_);
-
-			rowIds.clear();
-		}
-
-		TEST_PRINT("executeDatabaseTQLAndRemoveRow() E\n");
-	}
-	catch (std::exception &) {
-		TEST_PRINT("executeDatabaseTQLAndRemoveRow() exception\n");
-		Response response(alloc);
-		executeReplication(request, ec, alloc, NodeDescriptor::EMPTY_ND, txn,
-			ev.getType(), txn.getLastStatementId(),
-			TransactionManager::REPLICATION_ASYNC, NULL, 0,
-			logRecordList.data(), logRecordList.size(), response);
-
-		throw;
-	}
+	DUQueryInOut option;
+	option.setForRemove(&logRecordList);
+	runWithTQL(ec, request.fixed_.cxtSrc_, GS_DATABASES, query.c_str(), &option);
+	TEST_PRINT("removeUserRowInDB() E\n");
 }
 
-/*!
-	@brief Removes Row in USERS Container
-*/
 void DropUserHandler::removeUserRow(
 		EventContext &ec, Event &ev, const Request &request,
 		const char8_t *userName,
 		util::XArray<const util::XArray<uint8_t>*> &logRecordList) {
-	TEST_PRINT("executeUserRemoveRow() S\n");
-
-	const uint64_t numRow = 1;
-
+	TEST_PRINT("removeUserRow() S\n");
 	util::StackAllocator &alloc = ec.getAllocator();
-	const util::DateTime now = ec.getHandlerStartTime();
-	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
-	TransactionContext &txn = transactionManager_->put(
-			alloc, 0 /*pId*/,
-			TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
-	const DataStore::Latch latch(
-			txn, txn.getPartitionId(), dataStore_, clusterService_);
-
-	try {
-		const FullContainerKey containerKey(
-			alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
-			GS_USERS, strlen(GS_USERS));
-		ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
-			containerKey, COLLECTION_CONTAINER);
-		BaseContainer *container = containerAutoPtr.getBaseContainer();
-		if (container == 0) {
-			GS_THROW_USER_ERROR(GS_ERROR_TXN_USER_OR_DATABASE_NOT_EXIST, "");
-		}
-
-		RowKeyData rowKey(alloc);
-		makeRowKey(userName, rowKey);
-
-		util::XArray<RowId> rowIds(alloc);
-		rowIds.assign(numRow, UNDEF_ROWID);
-		bool existFlag;
-		container->deleteRow(txn, static_cast<uint32_t>(rowKey.size()),
-			rowKey.data(), rowIds[0], existFlag);
-		const bool executed = existFlag;
-
-		{
-			const bool withBegin = (request.fixed_.cxtSrc_.txnMode_ ==
-					TransactionManager::NO_AUTO_COMMIT_BEGIN);
-			const bool isAutoCommit = (request.fixed_.cxtSrc_.txnMode_ ==
-					TransactionManager::AUTO_COMMIT);
-			assert(!(withBegin && isAutoCommit));
-			assert(numRow == rowIds.size());
-			assert((executed && rowIds[0] != UNDEF_ROWID) ||
-				   (!executed && rowIds[0] == UNDEF_ROWID));
-			util::XArray<uint8_t> *log =
-					ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
-			const LogSequentialNumber lsn = logManager_->putRemoveRowLog(
-					*log,
-					txn.getPartitionId(), TXN_EMPTY_CLIENTID, txn.getId(),
-					container->getContainerId(), request.fixed_.cxtSrc_.stmtId_,
-					(executed ? rowIds.size() : 0), rowIds,
-					txn.getTransationTimeoutInterval(), request.fixed_.cxtSrc_.getMode_,
-					withBegin, isAutoCommit);
-			partitionTable_->setLSN(txn.getPartitionId(), lsn);
-			logRecordList.push_back(log);
-		}
-
-		transactionManager_->update(txn, request.fixed_.cxtSrc_.stmtId_);
-
-		TEST_PRINT("executeUserRemoveRow() E\n");
-	}
-	catch (std::exception &) {
-		TEST_PRINT("executeUserRemoveRow() exception\n");
-		Response response(alloc);
-		executeReplication(request, ec, alloc, NodeDescriptor::EMPTY_ND, txn,
-			ev.getType(), txn.getLastStatementId(),
-			TransactionManager::REPLICATION_ASYNC, NULL, 0,
-			logRecordList.data(), logRecordList.size(), response);
-
-		throw;
-	}
+	RowKeyData rowKey(alloc);
+	makeRowKey(userName, rowKey);
+			
+	DUGetInOut option;
+	option.setForRemove(&logRecordList);
+	runWithRowKey(ec, request.fixed_.cxtSrc_, GS_USERS, rowKey, &option);
+	TEST_PRINT("removeUserRow() E\n");
 }
 
-/*!
-	@brief Handler Operator
-*/
 void DropUserHandler::operator()(EventContext &ec, Event &ev) {
 	TXN_TRACE_HANDLER_CALLED(ev);
-
 	TEST_PRINT("<<<DropUserHandler>>> START\n");
 
 	util::StackAllocator &alloc = ec.getAllocator();
@@ -1691,7 +1443,6 @@ void DropUserHandler::operator()(EventContext &ec, Event &ev) {
 
 		util::String userName(alloc);
 		decodeStringData<util::String>(in, userName);
-
 		TEST_PRINT("[RequestMesg]\n");
 		TEST_PRINT1("\tuserName=%s\n", userName.c_str());
 
@@ -1707,22 +1458,40 @@ void DropUserHandler::operator()(EventContext &ec, Event &ev) {
 				request.fixed_.pId_, clusterRole, partitionRole, partitionStatus, partitionTable_);
 
 		checkAdminUser(connOption.userType_);
-		checkPartitionIdZero(request.fixed_.pId_);
+		checkPartitionIdForUsers(request.fixed_.pId_);
 		checkUserName(userName.c_str(), false);
 
 
 		util::XArray<const util::XArray<uint8_t> *> logRecordList(alloc);
 
-		bool existFlag;
-		checkUser(ec, request, userName.c_str(), existFlag);
+		try {
+			bool existFlag;
+			checkUser(ec, request, userName.c_str(), existFlag);
 
-		if (existFlag == true) {
-			executeTQLAndRemoveDatabaseRow(
-				ec, ev, request, userName.c_str(), logRecordList);
+			if (existFlag == true) {
+				removeUserRowInDB(
+					ec, ev, request, userName.c_str(), logRecordList);
 
-			removeUserRow(ec, ev, request, userName.c_str(), logRecordList);
+				removeUserRow(ec, ev, request, userName.c_str(), logRecordList);
+			}
+
 		}
+		catch (std::exception &) {
+			const util::DateTime now = ec.getHandlerStartTime();
+			const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
+			TransactionContext &txn = transactionManager_->put(
+					alloc, request.fixed_.pId_,
+					TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
 
+			Response response(alloc);
+			executeReplication(
+					request, ec, alloc, NodeDescriptor::EMPTY_ND, txn,
+					ev.getType(), txn.getLastStatementId(),
+					TransactionManager::REPLICATION_ASYNC, NULL, 0,
+					logRecordList.data(), logRecordList.size(), response);
+
+			throw;
+		}
 
 		const util::DateTime now = ec.getHandlerStartTime();
 		const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
@@ -1739,124 +1508,34 @@ void DropUserHandler::operator()(EventContext &ec, Event &ev) {
 		replySuccess(
 				ec, alloc, ev.getSenderND(), ev.getType(),
 				TXN_STATEMENT_SUCCESS, request, response, ackWait);
-
+		
 		TEST_PRINT("<<<DropUserHandler>>> END\n");
 	}
 	catch (std::exception &e) {
 		handleError(ec, alloc, ev, request, e);
 	}
 }
-
-/*!
-	@brief Searches USERS Container
-*/
-void StatementHandler::executeTQLUser(
-		EventContext &ec, const Request &request, const char8_t *userName,
-		UserType userType,
-		util::XArray<UserInfo*> &userInfoList) {
-	TEST_PRINT("executeTQL() S\n");
-
-	util::StackAllocator &alloc = ec.getAllocator();
-	const util::DateTime now = ec.getHandlerStartTime();
-	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
-
-	TransactionContext &txn = transactionManager_->put(
-			alloc, request.fixed_.pId_,
-			TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
-	const DataStore::Latch latch(
-			txn, txn.getPartitionId(), dataStore_, clusterService_);
-
-	const FullContainerKey containerKey(
-		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
-		GS_USERS, strlen(GS_USERS));
-	ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
-		containerKey, COLLECTION_CONTAINER);
-	BaseContainer *container = containerAutoPtr.getBaseContainer();
-	if (container == 0) {
-		return;
+void GetUsersHandler::checkNormalUser(UserType userType, const char8_t *userName) {
+	if ((userType == Message::USER_NORMAL) &&
+			(strcmp(userName, "") == 0)) {
+		GS_THROW_USER_ERROR(GS_ERROR_TXN_MESSAGE_INVALID,
+			"[GetUsers] user name must specified");
 	}
-
-	util::String query(alloc);
-	if (userType != Message::USER_NORMAL) {  
-		query.append("select *");
-	}
-	else {
-		query.append("select * where userName='");
-		query.append(userName);
-		query.append("'");
-	}
-
-
-	ResultSet *rs = dataStore_->createResultSet(
-		txn, container->getContainerId(), container->getVersionId(), emNow, NULL);
-	const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
-	QueryProcessor::executeTQL(
-		txn, *container, MAX_RESULT_SIZE, TQLInfo(GS_SYSTEM, NULL, query.c_str()), *rs);
-	rs->setResultType(RESULT_ROWSET);
-
-
-	if (rs->getResultNum() > 0) {
-		OutputMessageRowStore outputMessageRowStore(
-			dataStore_->getValueLimitConfig(), container->getColumnInfoList(),
-			container->getColumnNum(), *(rs->getRowDataFixedPartBuffer()),
-			*(rs->getRowDataVarPartBuffer()), false /*isRowIdIncluded*/);
-		ResultSize resultNum;
-		container->getRowList(txn, *(rs->getOIdList()), rs->getResultNum(),
-			resultNum, &outputMessageRowStore, false /*isRowIdIncluded*/, 0);
-
-		const uint8_t *data1;
-		uint32_t size1;
-		outputMessageRowStore.getAllFixedPart(data1, size1);
-		const uint8_t *data2;
-		uint32_t size2;
-		outputMessageRowStore.getAllVariablePart(data2, size2);
-
-		InputMessageRowStore inputMessageRowStore(
-			dataStore_->getValueLimitConfig(), container->getColumnInfoList(),
-			container->getColumnNum(),
-			reinterpret_cast<void *>(const_cast<uint8_t *>(data1)), size1,
-			reinterpret_cast<void *>(const_cast<uint8_t *>(data2)), size2,
-			resultNum, false);
-
-		const uint8_t *field;
-		uint32_t fieldSize;
-		util::String userName(alloc);
-		for (ResultSize i = 0; i < rs->getResultNum(); i++) {
-			inputMessageRowStore
-				.next();  
-
-			UserInfo *outUserInfo = ALLOC_NEW(alloc) UserInfo(alloc);
-
-			inputMessageRowStore.getField(0, field, fieldSize);  
-			outUserInfo->userName_.append(
-				reinterpret_cast<const char *>(field + 1), (size_t)fieldSize);
-			outUserInfo->userName_.append("\0");
-
-			inputMessageRowStore.getField(1, field, fieldSize);  
-			outUserInfo->digest_.append(
-				reinterpret_cast<const char *>(field + 1), (size_t)fieldSize);
-			outUserInfo->digest_.append("\0");
-
-			inputMessageRowStore.getField(2, field, fieldSize);  
-			outUserInfo->property_ =
-				(*reinterpret_cast<int8_t *>(const_cast<uint8_t *>(field)));
-
-			outUserInfo->withDigest_ = true;
-
-			userInfoList.push_back(outUserInfo);
-
-		}
-	}
-
-	TEST_PRINT("executeTQL() E\n");
 }
 
-/*!
-	@brief Handler Operator
-*/
+void GetUsersHandler::makeUserInfoListForAdmin(util::StackAllocator &alloc,
+	const char8_t *userName, util::XArray<UserInfo*> &userInfoList) {
+	TEST_PRINT("makeUserInfoListForAdmin() S\n");
+	UserInfo *outUserInfo = ALLOC_NEW(alloc) UserInfo(alloc);
+	outUserInfo->userName_.append(userName);
+	outUserInfo->property_ = 1;
+	outUserInfo->withDigest_ = false;
+	userInfoList.push_back(outUserInfo);
+	TEST_PRINT("makeUserInfoListForAdmin() E\n");
+}
+		
 void GetUsersHandler::operator()(EventContext &ec, Event &ev) {
 	TXN_TRACE_HANDLER_CALLED(ev);
-
 	TEST_PRINT("<<<GetUsersHandler>>> START\n");
 
 	util::StackAllocator &alloc = ec.getAllocator();
@@ -1875,14 +1554,13 @@ void GetUsersHandler::operator()(EventContext &ec, Event &ev) {
 		bool withFilter;
 		UserInfo userInfo(alloc);
 		util::String userName(alloc);
-		int8_t property = 0;  
+		int8_t property = Message::USER_NORMAL;  
 
 		decodeBooleanData(in, withFilter);
 		if (withFilter) {
 			decodeStringData<util::String>(in, userName);
 			in >> property;
 		}
-
 		TEST_PRINT("[RequestMesg]\n");
 		TEST_PRINT1("\twithFilter=%d\n", withFilter);
 		TEST_PRINT1("\tuserName=%s\n", userName.c_str());
@@ -1899,25 +1577,17 @@ void GetUsersHandler::operator()(EventContext &ec, Event &ev) {
 		checkExecutable(
 				request.fixed_.pId_, clusterRole, partitionRole, partitionStatus, partitionTable_);
 
-		checkPartitionIdZero(request.fixed_.pId_);
+		checkPartitionIdForUsers(request.fixed_.pId_);
 		if (withFilter) {
 			checkConnectedUserName(connOption, userName.c_str());
 		}
-		if ((connOption.userType_ == Message::USER_NORMAL) &&
-				(strcmp(userName.c_str(), "") == 0)) {
-			GS_THROW_USER_ERROR(GS_ERROR_TXN_MESSAGE_INVALID,
-				"[GetUsers] user name must specified");
-		}
+		checkNormalUser(connOption.userType_, userName.c_str());
 
 		if (withFilter && (connOption.userType_ != Message::USER_NORMAL)) {
-			UserInfo *outUserInfo = ALLOC_NEW(alloc) UserInfo(alloc);
-			outUserInfo->userName_.append(userName.c_str());
-			outUserInfo->property_ = 1;
-			outUserInfo->withDigest_ = false;
-			response.userInfoList_.push_back(outUserInfo);
+			makeUserInfoListForAdmin(alloc, userName.c_str(), response.userInfoList_);
 		}
 		else {
-			executeTQLUser(ec, request, connOption.userName_.c_str(),
+			getUserInfoList(ec, request, connOption.userName_.c_str(),
 				connOption.userType_, response.userInfoList_);
 		}
 
@@ -1942,7 +1612,7 @@ void GetUsersHandler::operator()(EventContext &ec, Event &ev) {
 
 		replySuccess(ec, alloc, ev.getSenderND(), ev.getType(),
 			TXN_STATEMENT_SUCCESS, request, response, false);
-
+		
 		TEST_PRINT("<<<GetUsersHandler>>> END\n");
 	}
 	catch (std::exception &e) {
@@ -1950,138 +1620,39 @@ void GetUsersHandler::operator()(EventContext &ec, Event &ev) {
 	}
 }
 
-/*!
-	@brief Checks with TQL if the Row corresponds a specified Database exists in
-   DATABASES Container
-*/
-void PutDatabaseHandler::checkDatabaseWithTQL(
+void PutDatabaseHandler::setPrivilegeInfoListForAdmin(util::StackAllocator &alloc,
+	const char8_t *userName, util::XArray<PrivilegeInfo *> &privilegeInfoList) {
+	TEST_PRINT("setPrivilegeInfoListForAdmin() S\n");
+	PrivilegeInfo *prInfo = ALLOC_NEW(alloc) PrivilegeInfo(alloc);
+
+	prInfo->userName_.append(userName);
+	prInfo->privilege_.append("ALL");
+
+	privilegeInfoList.push_back(prInfo);
+	TEST_PRINT("setPrivilegeInfoListForAdmin() E\n");
+}
+
+void PutDatabaseHandler::checkDatabase(
 		EventContext &ec, const Request &request, DatabaseInfo &dbInfo,
-		bool &existFlag) {
+	bool &existFlag) {
+	TEST_PRINT("checkDatabase() S\n");
 	existFlag = false;
-
 	util::StackAllocator &alloc = ec.getAllocator();
-	const util::DateTime now = ec.getHandlerStartTime();
-	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
-
-	TransactionContext &txn = transactionManager_->put(
-			alloc, request.fixed_.pId_,
-			TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
-	const DataStore::Latch latch(
-			txn, txn.getPartitionId(), dataStore_, clusterService_);
-
-	const FullContainerKey containerKey(
-		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
-		GS_DATABASES, strlen(GS_DATABASES));
-	ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
-		containerKey, COLLECTION_CONTAINER);
-	BaseContainer *container = containerAutoPtr.getBaseContainer();
-	if (container == 0) {
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
-	}
 
 	util::String query(alloc);
 	query.append("select * where UPPER(dbName)=UPPER('");
 	query.append(dbInfo.dbName_.c_str());
-	query.append("') and property=1");
-
-	ResultSet *rs = dataStore_->createResultSet(
-		txn, container->getContainerId(), container->getVersionId(), emNow, NULL);
-	const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
-	QueryProcessor::executeTQL(
-		txn, *container, MAX_RESULT_SIZE, TQLInfo(GS_SYSTEM, NULL, query.c_str()), *rs);
-	rs->setResultType(RESULT_ROWSET);
-	existFlag = (rs->getResultNum() > 0);
+	query.append("') and property=");
+	query.append(PROPERTY_USER_ADMIN);
+		
+	DUQueryInOut option;
+	runWithTQL(ec, request.fixed_.cxtSrc_, GS_DATABASES, query.c_str(), &option);
+	existFlag = (option.count > 0);
+	TEST_PRINT("checkDatabase() E\n");
 }
 
-/*!
-	@brief Put Row in DATABASES Container
-*/
-void StatementHandler::putDatabaseRow(
-		EventContext &ec, Event &ev, const Request &request,
-		DatabaseInfo &dbInfo, bool isCreate,
-		util::XArray<const util::XArray<uint8_t>*> &logRecordList) {
-	TEST_PRINT("executeDatabasePutRow() S\n");
-
-	util::StackAllocator &alloc = ec.getAllocator();
-	const util::DateTime now = ec.getHandlerStartTime();
-	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
-
-	const uint64_t numRow = 1;
-
-	TransactionContext &txn = transactionManager_->put(
-			alloc, request.fixed_.pId_,
-			TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
-	const DataStore::Latch latch(
-			txn, txn.getPartitionId(), dataStore_, clusterService_);
-
-	try {
-	const FullContainerKey containerKey(
-		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
-		GS_DATABASES, strlen(GS_DATABASES));
-	ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
-		containerKey, COLLECTION_CONTAINER);
-		BaseContainer *container = containerAutoPtr.getBaseContainer();
-		if (container == 0) {
-			GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
-		}
-
-		RowData rowData(alloc);
-		makeDatabasesRow(alloc, container->getColumnInfoList(),
-			container->getColumnNum(), dbInfo, isCreate, rowData);
-
-		util::XArray<RowId> rowIds(alloc);
-		rowIds.assign(numRow, UNDEF_ROWID);
-		DataStore::PutStatus putStatus;
-		container->putRow(txn, static_cast<uint32_t>(rowData.size()),
-			rowData.data(), rowIds[0], putStatus,
-			PUT_INSERT_OR_UPDATE);  
-		const bool executed = (putStatus != DataStore::NOT_EXECUTED);
-
-		{
-			const bool withBegin = (request.fixed_.cxtSrc_.txnMode_ ==
-					TransactionManager::NO_AUTO_COMMIT_BEGIN);
-			const bool isAutoCommit = (request.fixed_.cxtSrc_.txnMode_ ==
-					TransactionManager::AUTO_COMMIT);
-			assert(!(withBegin && isAutoCommit));
-			assert(numRow == rowIds.size());
-			assert((executed && rowIds[0] != UNDEF_ROWID) ||
-				   (!executed && rowIds[0] == UNDEF_ROWID));
-			util::XArray<uint8_t> *log =
-					ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
-			const LogSequentialNumber lsn = logManager_->putPutRowLog(
-					*log,
-					txn.getPartitionId(), TXN_EMPTY_CLIENTID, txn.getId(),
-					container->getContainerId(), request.fixed_.cxtSrc_.stmtId_,
-					(executed ? rowIds.size() : 0), rowIds, (executed ? numRow : 0),
-					rowData, txn.getTransationTimeoutInterval(),
-					request.fixed_.cxtSrc_.getMode_, withBegin, isAutoCommit);
-			partitionTable_->setLSN(txn.getPartitionId(), lsn);
-			logRecordList.push_back(log);
-		}
-
-		transactionManager_->update(txn, request.fixed_.cxtSrc_.stmtId_);
-
-		TEST_PRINT("executeDatabasePutRow() E\n");
-	}
-	catch (std::exception &) {
-		TEST_PRINT("executeDatabasePutRow() exception\n");
-
-		Response response(alloc);
-		executeReplication(request, ec, alloc, NodeDescriptor::EMPTY_ND, txn,
-			ev.getType(), txn.getLastStatementId(),
-			TransactionManager::REPLICATION_ASYNC, NULL, 0,
-			logRecordList.data(), logRecordList.size(), response);
-
-		throw;
-	}
-}
-
-/*!
-	@brief Handler Operator
-*/
 void PutDatabaseHandler::operator()(EventContext &ec, Event &ev) {
 	TXN_TRACE_HANDLER_CALLED(ev);
-
 	TEST_PRINT("<<<PutDatabaseHandler>>> START\n");
 
 	util::StackAllocator &alloc = ec.getAllocator();
@@ -2102,7 +1673,6 @@ void PutDatabaseHandler::operator()(EventContext &ec, Event &ev) {
 
 		decodeDatabaseInfo(in, dbInfo, alloc);
 		decodeBooleanData(in, modifiable);
-
 		TEST_PRINT("[RequestMesg]\n");
 		TEST_PRINT1("%s\n", dbInfo.dump().c_str());
 		TEST_PRINT1("\tmodifiable=%d\n", modifiable);
@@ -2119,7 +1689,7 @@ void PutDatabaseHandler::operator()(EventContext &ec, Event &ev) {
 				request.fixed_.pId_, clusterRole, partitionRole, partitionStatus, partitionTable_);
 
 		checkAdminUser(connOption.userType_);
-		checkPartitionIdZero(request.fixed_.pId_);
+		checkPartitionIdForUsers(request.fixed_.pId_);
 		checkModifiable(modifiable, false);
 		checkDatabaseName(dbInfo.dbName_.c_str());
 		checkPrivilegeSize(dbInfo, 0);
@@ -2127,31 +1697,42 @@ void PutDatabaseHandler::operator()(EventContext &ec, Event &ev) {
 
 		util::XArray<const util::XArray<uint8_t> *> logRecordList(alloc);
 
-		{
-			PrivilegeInfo *prInfo = ALLOC_NEW(alloc) PrivilegeInfo(alloc);
+		try {
+			setPrivilegeInfoListForAdmin(alloc, connOption.userName_.c_str(), dbInfo.privilegeInfoList_);
 
-			prInfo->userName_.append(connOption.userName_.c_str());
-			prInfo->privilege_.append("ALL");
-
-			dbInfo.privilegeInfoList_.push_back(prInfo);
-		}
-
-		if (checkContainer(ec, request, GS_USERS) ||
-			checkContainer(ec, request, GS_DATABASES)) {
-			initializeMetaContainer(ec, ev, request, logRecordList);
-		}
-		bool existFlag;
-		checkDatabaseWithTQL(ec, request, dbInfo, existFlag);
-		if (existFlag == false) {
-			if (count(ec, request, GS_DATABASES) >=
-				static_cast<int64_t>(DATABASE_NUM_MAX)) {
-				GS_THROW_USER_ERROR(
-					GS_ERROR_TXN_DATABASE_LIMIT_OVER, "[PutDatabase]");
+			if (checkContainer(ec, request, GS_USERS) ||
+				checkContainer(ec, request, GS_DATABASES)) {
+				initializeMetaContainer(ec, ev, request, logRecordList);
 			}
-			putDatabaseRow(
-				ec, ev, request, dbInfo, true, logRecordList);  
-		}
+			bool existFlag;
+			checkDatabase(ec, request, dbInfo, existFlag);
+			if (existFlag == false) {
+				if (getCount(ec, request, GS_DATABASES) >=
+					static_cast<int64_t>(DATABASE_NUM_MAX)) {
+					GS_THROW_USER_ERROR(
+						GS_ERROR_TXN_DATABASE_LIMIT_OVER, "[PutDatabase]");
+				}
+				putDatabaseRow(
+					ec, ev, request, dbInfo, true, logRecordList);  
+			}
 
+		}
+		catch (std::exception &) {
+			const util::DateTime now = ec.getHandlerStartTime();
+			const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
+			TransactionContext &txn = transactionManager_->put(
+					alloc, request.fixed_.pId_,
+					TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
+
+			Response response(alloc);
+			executeReplication(
+					request, ec, alloc, NodeDescriptor::EMPTY_ND, txn,
+					ev.getType(), txn.getLastStatementId(),
+					TransactionManager::REPLICATION_ASYNC, NULL, 0,
+					logRecordList.data(), logRecordList.size(), response);
+
+			throw;
+		}
 		const util::DateTime now = ec.getHandlerStartTime();
 		const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 		TransactionContext &txn = transactionManager_->put(
@@ -2168,7 +1749,7 @@ void PutDatabaseHandler::operator()(EventContext &ec, Event &ev) {
 		replySuccess(
 				ec, alloc, ev.getSenderND(), ev.getType(),
 				TXN_STATEMENT_SUCCESS, request, response, ackWait);
-
+		
 		TEST_PRINT("<<<PutDatabaseHandler>>> END\n");
 	}
 	catch (std::exception &e) {
@@ -2176,98 +1757,33 @@ void PutDatabaseHandler::operator()(EventContext &ec, Event &ev) {
 	}
 }
 
-/*!
-	@brief Removes Row in DATABASES Container with TQL
-*/
-void DropDatabaseHandler::executeTQLAndRemoveDatabaseRow(
-		EventContext &ec, Event &ev, const Request &request,
-		const char8_t *dbName, bool isAdmin,
-		util::XArray<const util::XArray<uint8_t>*> &logRecordList) {
-	TEST_PRINT("executeDatabaseTQLAndRemoveRow() S\n");
+void DropDatabaseHandler::removeDatabaseRow(
+		EventContext &ec, Event &ev,
+		const Request &request, const char8_t *dbName, bool isAdmin,
+		util::XArray<const util::XArray<uint8_t> *> &logRecordList) {
+	TEST_PRINT("removeDatabaseRow() S\n");
 
 	util::StackAllocator &alloc = ec.getAllocator();
-	const util::DateTime now = ec.getHandlerStartTime();
-	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
-
-	TransactionContext &txn = transactionManager_->put(
-			alloc, request.fixed_.pId_,
-			TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
-	const DataStore::Latch latch(
-			txn, txn.getPartitionId(), dataStore_, clusterService_);
-
-	const FullContainerKey containerKey(
-		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
-		GS_DATABASES, strlen(GS_DATABASES));
-	ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
-		containerKey, COLLECTION_CONTAINER);
-	BaseContainer *container = containerAutoPtr.getBaseContainer();
-	if (container == 0) {
-		GS_THROW_USER_ERROR(GS_ERROR_TXN_USER_OR_DATABASE_NOT_EXIST, "");
-	}
-
+			
 	util::String query(alloc);
 	query.append("select * where dbName='");
 	query.append(dbName);
-	query.append("'");
+	query.append("' and property=");
 	if (isAdmin) {
-		query.append(" and property=1");
+		query.append(PROPERTY_USER_ADMIN);
 	}
 	else {
-		query.append(" and property=0");
+		query.append(PROPERTY_USER_NORMAL);
 	}
 
-	ResultSet *rs = dataStore_->createResultSet(
-		txn, container->getContainerId(), container->getVersionId(), emNow, NULL);
-	const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
-	QueryProcessor::executeTQL(
-		txn, *container, MAX_RESULT_SIZE, TQLInfo(GS_SYSTEM, NULL, query.c_str()), *rs);
-	rs->setResultType(RESULT_ROWSET);
-
-
-	util::XArray<RowId> rowIdList(alloc);
-	container->getRowIdList(txn, *(rs->getOIdList()), rowIdList);
-
-	util::XArray<RowId> rowIds(alloc);
-	for (size_t i = 0; i < rowIdList.size(); i++) {
-		bool existFlag;
-		container->redoDeleteRow(txn, rowIdList[i], existFlag);
-		const bool executed = existFlag;
-
-		rowIds.push_back(rowIdList[i]);
-
-		{
-			const bool withBegin = (request.fixed_.cxtSrc_.txnMode_ ==
-					TransactionManager::NO_AUTO_COMMIT_BEGIN);
-			const bool isAutoCommit = (request.fixed_.cxtSrc_.txnMode_ ==
-					TransactionManager::AUTO_COMMIT);
-			assert(!(withBegin && isAutoCommit));
-			assert(1 == rowIds.size());
-			assert(rowIds[0] != UNDEF_ROWID);
-			util::XArray<uint8_t> *log =
-					ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
-			const LogSequentialNumber lsn = logManager_->putRemoveRowLog(
-					*log, txn.getPartitionId(),
-					txn.getClientId(), txn.getId(), container->getContainerId(),
-					request.fixed_.cxtSrc_.stmtId_, (executed ? rowIds.size() : 0),
-					rowIds, txn.getTransationTimeoutInterval(),
-					request.fixed_.cxtSrc_.getMode_, withBegin, isAutoCommit);
-			partitionTable_->setLSN(txn.getPartitionId(), lsn);
-			logRecordList.push_back(log);
-		}
-
-		transactionManager_->update(txn, request.fixed_.cxtSrc_.stmtId_);
-
-		rowIds.clear();
-	}
-	TEST_PRINT("executeDatabaseTQLAndRemoveRow() E\n");
+	DUQueryInOut option;
+	option.setForRemove(&logRecordList);
+	runWithTQL(ec, request.fixed_.cxtSrc_, GS_DATABASES, query.c_str(), &option);
+	TEST_PRINT("removeDatabaseRow() E\n");
 }
 
-/*!
-	@brief Handler Operator
-*/
 void DropDatabaseHandler::operator()(EventContext &ec, Event &ev) {
 	TXN_TRACE_HANDLER_CALLED(ev);
-
 	TEST_PRINT("<<<DropDatabaseHandler>>> START\n");
 
 	util::StackAllocator &alloc = ec.getAllocator();
@@ -2285,7 +1801,6 @@ void DropDatabaseHandler::operator()(EventContext &ec, Event &ev) {
 
 		util::String dbName(alloc);
 		decodeStringData<util::String>(in, dbName);
-
 		TEST_PRINT("[RequestMesg]\n");
 		TEST_PRINT1("\tdbName=%s\n", dbName.c_str());
 
@@ -2301,18 +1816,35 @@ void DropDatabaseHandler::operator()(EventContext &ec, Event &ev) {
 				request.fixed_.pId_, clusterRole, partitionRole, partitionStatus, partitionTable_);
 
 		checkAdminUser(connOption.userType_);
-		checkPartitionIdZero(request.fixed_.pId_);
+		checkPartitionIdForUsers(request.fixed_.pId_);
 		checkConnectedDatabaseName(connOption, dbName.c_str());
 		checkDatabaseName(dbName.c_str());
 
 
 		util::XArray<const util::XArray<uint8_t> *> logRecordList(alloc);
 
-		executeTQLAndRemoveDatabaseRow(
-			ec, ev, request, dbName.c_str(), false, logRecordList);
-		executeTQLAndRemoveDatabaseRow(
-			ec, ev, request, dbName.c_str(), true, logRecordList);
+		try {
+			removeDatabaseRow(
+				ec, ev, request, dbName.c_str(), false, logRecordList);
+			removeDatabaseRow(
+				ec, ev, request, dbName.c_str(), true, logRecordList);
+		}
+		catch (std::exception &) {
+			const util::DateTime now = ec.getHandlerStartTime();
+			const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
+			TransactionContext &txn = transactionManager_->put(
+					alloc, request.fixed_.pId_,
+					TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
 
+			Response response(alloc);
+			executeReplication(
+					request, ec, alloc, NodeDescriptor::EMPTY_ND, txn,
+					ev.getType(), txn.getLastStatementId(),
+					TransactionManager::REPLICATION_ASYNC, NULL, 0,
+					logRecordList.data(), logRecordList.size(), response);
+
+			throw;
+		}
 
 		const util::DateTime now = ec.getHandlerStartTime();
 		const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
@@ -2328,7 +1860,7 @@ void DropDatabaseHandler::operator()(EventContext &ec, Event &ev) {
 
 		replySuccess(ec, alloc, ev.getSenderND(), ev.getType(),
 			TXN_STATEMENT_SUCCESS, request, response, ackWait);
-
+		
 		TEST_PRINT("<<<DropDatabaseHandler>>> END\n");
 	}
 	catch (std::exception &e) {
@@ -2336,12 +1868,11 @@ void DropDatabaseHandler::operator()(EventContext &ec, Event &ev) {
 	}
 }
 
-/*!
-	@brief Makes PUBLIC DatabaseInfo list
-*/
-void GetDatabasesHandler::makePublicDatabaseInfoList(
-	util::StackAllocator &alloc, util::XArray<UserInfo *> &userInfoList,
-	util::XArray<DatabaseInfo *> &dbInfoList) {
+void GetDatabasesHandler::makeDatabaseInfoListForPublic(
+		util::StackAllocator &alloc,
+		util::XArray<UserInfo *> &userInfoList,
+		util::XArray<DatabaseInfo *> &dbInfoList) {
+	TEST_PRINT("makeDatabaseInfoListForPublic() S\n");
 	DatabaseInfo *dbInfo = ALLOC_NEW(alloc) DatabaseInfo(alloc);
 	dbInfo->dbName_.append(GS_PUBLIC);
 	dbInfo->property_ = 0;
@@ -2355,36 +1886,17 @@ void GetDatabasesHandler::makePublicDatabaseInfoList(
 
 		dbInfo->privilegeInfoList_.push_back(prInfo);
 	}
+	TEST_PRINT("makeDatabaseInfoListForPublic() E\n");
 }
 
-/*!
-	@brief Searches DATABASES Container
-*/
-void GetDatabasesHandler::executeTQLDatabase(
-		EventContext &ec, const Request &request, const char8_t *dbName,
-		const char8_t *userName, util::XArray<DatabaseInfo*> &dbInfoList) {
-	TEST_PRINT("executeTQL() S\n");
-
+void GetDatabasesHandler::getDatabaseInfoList(
+		EventContext &ec, const Request &request,
+		const char8_t *dbName, const char8_t *userName,
+		util::XArray<DatabaseInfo *> &dbInfoList) {
+	TEST_PRINT("getDatabaseInfoList() S\n");
+			
 	bool dbNameSpecified = false;
 	util::StackAllocator &alloc = ec.getAllocator();
-	const util::DateTime now = ec.getHandlerStartTime();
-	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
-
-	TransactionContext &txn = transactionManager_->put(
-			alloc, request.fixed_.pId_,
-			TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
-	const DataStore::Latch latch(
-			txn, txn.getPartitionId(), dataStore_, clusterService_);
-
-	const FullContainerKey containerKey(
-		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
-		GS_DATABASES, strlen(GS_DATABASES));
-	ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
-		containerKey, COLLECTION_CONTAINER);
-	BaseContainer *container = containerAutoPtr.getBaseContainer();
-	if (container == 0) {
-		return;
-	}
 
 	util::String query(alloc);
 	if (strcmp(userName, "") == 0) {
@@ -2418,29 +1930,32 @@ void GetDatabasesHandler::executeTQLDatabase(
 		}
 	}
 
-	ResultSet *rs = dataStore_->createResultSet(
-		txn, container->getContainerId(), container->getVersionId(), emNow, NULL);
-	const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
-	QueryProcessor::executeTQL(
-		txn, *container, MAX_RESULT_SIZE, TQLInfo(GS_SYSTEM, NULL, query.c_str()), *rs);
-	rs->setResultType(RESULT_ROWSET);
-
-	TEST_PRINT1("rs resultNum=%d\n", rs->getResultNum());
-
-	if (dbNameSpecified && rs->getResultNum() == 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_TXN_CURRENT_DATABASE_REMOVED, "[GetDatabases]");
-	}
-
-	makeDatabaseInfoList(txn, alloc, *container, *rs, dbInfoList);
+	DUQueryInOut option;
+	option.setForDbInfoList(dbNameSpecified, &dbInfoList);
+	runWithTQL(ec, request.fixed_.cxtSrc_, GS_DATABASES, query.c_str(), &option);
+	TEST_PRINT("getDatabaseInfoList() E\n");
 }
 
-/*!
-	@brief Handler Operator
-*/
+void GetDatabasesHandler::checkDatabaseInfoList(int32_t featureVersion, util::XArray<DatabaseInfo *> &dbInfoList) {
+	if (featureVersion < StatementMessage::FEATURE_V4_3) {
+		for (size_t i = 0; i < dbInfoList.size(); i++) {
+			if (dbInfoList[i]->privilegeInfoList_.size() > 1) {
+				GS_THROW_USER_ERROR(GS_ERROR_DS_CON_ACCESS_INVALID,
+					"Can not create database infomation list");
+			}
+			
+			for (size_t j = 0; j < dbInfoList[i]->privilegeInfoList_.size(); j++) {
+				if (strcmp(dbInfoList[i]->privilegeInfoList_[j]->privilege_.c_str(), "READ") == 0) {
+					GS_THROW_USER_ERROR(GS_ERROR_DS_CON_ACCESS_INVALID,
+						"Can not create database infomation list");
+				}
+			}
+		}
+	}
+}
+
 void GetDatabasesHandler::operator()(EventContext &ec, Event &ev) {
 	TXN_TRACE_HANDLER_CALLED(ev);
-
 	TEST_PRINT("<<<GetDatabasesHandler>>> START\n");
 
 	util::StackAllocator &alloc = ec.getAllocator();
@@ -2468,7 +1983,6 @@ void GetDatabasesHandler::operator()(EventContext &ec, Event &ev) {
 			}
 			in >> property;
 		}
-
 		TEST_PRINT("[RequestMesg]\n");
 		TEST_PRINT1("\twithFilter=%d\n", withFilter);
 		TEST_PRINT1("\tdbName=%s\n", dbName.c_str());
@@ -2484,27 +1998,29 @@ void GetDatabasesHandler::operator()(EventContext &ec, Event &ev) {
 		checkExecutable(
 				request.fixed_.pId_, clusterRole, partitionRole, partitionStatus, partitionTable_);
 
-		checkPartitionIdZero(request.fixed_.pId_);
+		checkPartitionIdForUsers(request.fixed_.pId_);
 		if (withFilter) {
 			checkConnectedDatabaseName(connOption, dbName.c_str());
 		}
 
 		if (strcmp(dbName.c_str(), GS_PUBLIC) == 0) {
-			executeTQLUser(ec, request, connOption.userName_.c_str(),
+			getUserInfoList(ec, request, connOption.userName_.c_str(),
 				connOption.userType_, response.userInfoList_);
-			makePublicDatabaseInfoList(
+			makeDatabaseInfoListForPublic(
 				alloc, response.userInfoList_, response.databaseInfoList_);
 		}
 		else {
 			if (connOption.userType_ != Message::USER_NORMAL) {
-				executeTQLDatabase(ec, request, dbName.c_str(), "",
+				getDatabaseInfoList(ec, request, dbName.c_str(), "",
 					response.databaseInfoList_);
 			}
 			else {
-				executeTQLDatabase(ec, request, dbName.c_str(),
+				getDatabaseInfoList(ec, request, dbName.c_str(),
 					connOption.userName_.c_str(), response.databaseInfoList_);
 			}
 		}
+
+		checkDatabaseInfoList(request.optional_.get<Options::ACCEPTABLE_FEATURE_VERSION>(), response.databaseInfoList_);
 
 		TEST_PRINT("[ResponseMesg]\n");
 		TEST_PRINT1(
@@ -2515,7 +2031,7 @@ void GetDatabasesHandler::operator()(EventContext &ec, Event &ev) {
 
 		replySuccess(ec, alloc, ev.getSenderND(), ev.getType(),
 			TXN_STATEMENT_SUCCESS, request, response, false);
-
+		
 		TEST_PRINT("<<<GetDatabasesHandler>>> END\n");
 	}
 	catch (std::exception &e) {
@@ -2523,117 +2039,8 @@ void GetDatabasesHandler::operator()(EventContext &ec, Event &ev) {
 	}
 }
 
-/*!
-	@brief Checks with TQL if a specified database exists
-*/
-void StatementHandler::checkDatabaseWithTQL(
-		EventContext &ec, const Request &request, DatabaseInfo &dbInfo) {
-	util::StackAllocator &alloc = ec.getAllocator();
-	const util::DateTime now = ec.getHandlerStartTime();
-	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
-
-	TransactionContext &txn = transactionManager_->put(
-			alloc, request.fixed_.pId_,
-			TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
-	const DataStore::Latch latch(
-			txn, txn.getPartitionId(), dataStore_, clusterService_);
-
-	const FullContainerKey containerKey(
-		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
-		GS_DATABASES, strlen(GS_DATABASES));
-	ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
-		containerKey, COLLECTION_CONTAINER);
-	BaseContainer *container = containerAutoPtr.getBaseContainer();
-	if (container == 0) {
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
-	}
-
-	util::String query(alloc);
-	query.append("select * where dbName='");
-	query.append(dbInfo.dbName_.c_str());
-	query.append("'");
-
-	ResultSet *rs = dataStore_->createResultSet(
-		txn, container->getContainerId(), container->getVersionId(), emNow, NULL);
-	const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
-	QueryProcessor::executeTQL(
-		txn, *container, MAX_RESULT_SIZE, TQLInfo(GS_SYSTEM, NULL, query.c_str()), *rs);
-	rs->setResultType(RESULT_ROWSET);
-
-	bool existFlag = (rs->getResultNum() > 0);
-	if (existFlag == false) {
-		GS_THROW_USER_ERROR(GS_ERROR_TXN_DATABASE_NOT_EXIST,
-			"(database name = " << dbInfo.dbName_.c_str() << ")");  
-	}
-}
-
-/*!
-	@brief Checks with TQL if a specified database and normal user exists
-*/
-void StatementHandler::checkDetailDatabaseWithTQL(
-		EventContext &ec, const Request &request, DatabaseInfo &dbInfo,
-		bool &existFlag) {
-	existFlag = false;
-
-	util::StackAllocator &alloc = ec.getAllocator();
-	const util::DateTime now = ec.getHandlerStartTime();
-	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
-
-	TransactionContext &txn = transactionManager_->put(
-			alloc, request.fixed_.pId_,
-			TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
-	const DataStore::Latch latch(
-			txn, txn.getPartitionId(), dataStore_, clusterService_);
-
-	const FullContainerKey containerKey(
-		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
-		GS_DATABASES, strlen(GS_DATABASES));
-	ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
-		containerKey, COLLECTION_CONTAINER);
-	BaseContainer *container = containerAutoPtr.getBaseContainer();
-	if (container == 0) {
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
-	}
-
-	util::String query(alloc);
-	query.append("select * where dbName='");
-	query.append(dbInfo.dbName_.c_str());
-	query.append("' and property=0");
-
-	ResultSet *rs = dataStore_->createResultSet(
-		txn, container->getContainerId(), container->getVersionId(), emNow, NULL);
-	const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
-	QueryProcessor::executeTQL(
-		txn, *container, MAX_RESULT_SIZE, TQLInfo(GS_SYSTEM, NULL, query.c_str()), *rs);
-	rs->setResultType(RESULT_ROWSET);
-
-	ResultSize resultNum = rs->getResultNum();
-	if (resultNum == 1) {
-		util::XArray<DatabaseInfo *> dbInfoList(alloc);
-		makeDatabaseInfoList(txn, alloc, *container, *rs, dbInfoList);
-		const char *userName = dbInfo.privilegeInfoList_[0]->userName_.c_str();
-		const char *targetUserName =
-			dbInfoList[0]->privilegeInfoList_[0]->userName_.c_str();
-		if (strcmp(userName, targetUserName) != 0) {
-			GS_THROW_USER_ERROR(GS_ERROR_TXN_OTHER_PRIVILEGE_EXISTS,
-				"(input user name = " << userName << ", input database name = "
-									  << dbInfo.dbName_.c_str() << ")");  
-		}
-		else {
-			existFlag = true;
-		}
-	}
-	else if (resultNum > 1) {
-		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
-	}
-}
-
-/*!
-	@brief Handler Operator
-*/
 void PutPrivilegeHandler::operator()(EventContext &ec, Event &ev) {
 	TXN_TRACE_HANDLER_CALLED(ev);
-
 	TEST_PRINT("<<<PutPrivilegeHandler>>> START\n");
 
 	util::StackAllocator &alloc = ec.getAllocator();
@@ -2650,9 +2057,7 @@ void PutPrivilegeHandler::operator()(EventContext &ec, Event &ev) {
 		decodeRequestCommonPart(in, request, connOption);
 
 		DatabaseInfo dbInfo(alloc);
-
 		decodeDatabaseInfo(in, dbInfo, alloc);
-
 		TEST_PRINT("[RequestMesg]\n");
 		TEST_PRINT1("dbInfo=%s\n", dbInfo.dump().c_str());
 
@@ -2668,9 +2073,9 @@ void PutPrivilegeHandler::operator()(EventContext &ec, Event &ev) {
 				request.fixed_.pId_, clusterRole, partitionRole, partitionStatus, partitionTable_);
 
 		checkAdminUser(connOption.userType_);
-		checkPartitionIdZero(request.fixed_.pId_);
-		checkPrivilegeSize(dbInfo, 1);
-
+		checkPartitionIdForUsers(request.fixed_.pId_);
+		checkPrivilegeSize(dbInfo, 1); 
+		
 		util::XArray<const util::XArray<uint8_t> *> logRecordList(alloc);
 		bool ackWait = false;
 
@@ -2683,9 +2088,9 @@ void PutPrivilegeHandler::operator()(EventContext &ec, Event &ev) {
 					<< dbInfo.privilegeInfoList_[0]->userName_.c_str() << ")");
 		}
 
-		checkDatabaseWithTQL(ec, request, dbInfo);
+		checkDatabase(ec, request, dbInfo);
 
-		checkDetailDatabaseWithTQL(ec, request, dbInfo, existFlag);
+		checkDatabaseDetails(ec, request, dbInfo, existFlag);
 		if (existFlag == false) {
 			putDatabaseRow(ec, ev, request, dbInfo, false,
 				logRecordList);  
@@ -2705,95 +2110,33 @@ void PutPrivilegeHandler::operator()(EventContext &ec, Event &ev) {
 
 		replySuccess(ec, alloc, ev.getSenderND(), ev.getType(),
 			TXN_STATEMENT_SUCCESS, request, response, ackWait);
-
+		
 		TEST_PRINT("<<<PutPrivilegeHandler>>> END\n");
+
 	}
 	catch (std::exception &e) {
 		handleError(ec, alloc, ev, request, e);
 	}
 }
 
-/*!
-	@brief Removes Row in DATABASES Container
-*/
-bool DropPrivilegeHandler::removeDatabaseRow(
-		EventContext &ec, Event &ev, const Request &request,
-		DatabaseInfo &dbInfo) {
-	TEST_PRINT("executeDatabaseRemoveRow() xxx S\n");
-
+void DropPrivilegeHandler::removeDatabaseRow(
+		EventContext &ec, Event &ev, const Request &request, 
+		DatabaseInfo &dbInfo,
+		util::XArray<const util::XArray<uint8_t> *> &logRecordList) {
+	TEST_PRINT("removeDatabaseRow() S\n");
 	util::StackAllocator &alloc = ec.getAllocator();
-	const util::DateTime now = ec.getHandlerStartTime();
-	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
-
-	TransactionContext &txn = transactionManager_->put(
-			alloc, request.fixed_.pId_,
-			TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
-	const DataStore::Latch latch(
-			txn, txn.getPartitionId(), dataStore_, clusterService_);
-
-	const FullContainerKey containerKey(
-		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
-		GS_DATABASES, strlen(GS_DATABASES));
-	ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
-		containerKey, COLLECTION_CONTAINER);
-	BaseContainer *container = containerAutoPtr.getBaseContainer();
-	if (container == 0) {
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
-	}
 
 	RowKeyData rowKey(alloc);
-	makeDatabaseRowKey(dbInfo, rowKey);
+	makeRowKey(dbInfo, rowKey);
 
-	util::XArray<RowId> rowIds(alloc);
-	const uint64_t numRow = 1;
-	rowIds.assign(numRow, UNDEF_ROWID);
-	bool existFlag;
-	container->deleteRow(txn, static_cast<uint32_t>(rowKey.size()),
-		rowKey.data(), rowIds[0], existFlag);
-	const bool executed = existFlag;
-
-	util::XArray<const util::XArray<uint8_t> *> logRecordList(alloc);
-	{
-		const bool withBegin = (request.fixed_.cxtSrc_.txnMode_ ==
-				TransactionManager::NO_AUTO_COMMIT_BEGIN);
-		const bool isAutoCommit = (request.fixed_.cxtSrc_.txnMode_ ==
-				TransactionManager::AUTO_COMMIT);
-		assert(!(withBegin && isAutoCommit));
-		assert(numRow == rowIds.size());
-		assert((executed && rowIds[0] != UNDEF_ROWID) ||
-			   (!executed && rowIds[0] == UNDEF_ROWID));
-		util::XArray<uint8_t> *log =
-				ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
-		const LogSequentialNumber lsn = logManager_->putRemoveRowLog(
-				*log, txn.getPartitionId(),
-				TXN_EMPTY_CLIENTID, txn.getId(), container->getContainerId(),
-				request.fixed_.cxtSrc_.stmtId_, (executed ? rowIds.size() : 0), rowIds,
-				txn.getTransationTimeoutInterval(), request.fixed_.cxtSrc_.getMode_,
-				withBegin, isAutoCommit);
-		partitionTable_->setLSN(txn.getPartitionId(), lsn);
-		logRecordList.push_back(log);
-	}
-
-	transactionManager_->update(txn, request.fixed_.cxtSrc_.stmtId_);
-
-	Response response(alloc);
-	response.existFlag_ = existFlag;
-	const bool ackWait = executeReplication(
-			request, ec, alloc,
-			ev.getSenderND(), txn, ev.getType(), request.fixed_.cxtSrc_.stmtId_,
-			transactionManager_->getReplicationMode(), NULL, 0,
-			logRecordList.data(), logRecordList.size(), response);
-
-	TEST_PRINT("executeDatabaseRemoveRow() E\n");
-	return ackWait;
+	DUGetInOut option;
+	option.setForRemove(&logRecordList);
+	runWithRowKey(ec, request.fixed_.cxtSrc_, GS_DATABASES, rowKey, &option);
+	TEST_PRINT("removeDatabaseRow() E\n");
 }
 
-/*!
-	@brief Handler Operator
-*/
 void DropPrivilegeHandler::operator()(EventContext &ec, Event &ev) {
 	TXN_TRACE_HANDLER_CALLED(ev);
-
 	TEST_PRINT("<<<DropPrivilegeHandler>>> START\n");
 
 	util::StackAllocator &alloc = ec.getAllocator();
@@ -2810,9 +2153,7 @@ void DropPrivilegeHandler::operator()(EventContext &ec, Event &ev) {
 		decodeRequestCommonPart(in, request, connOption);
 
 		DatabaseInfo dbInfo(alloc);
-
 		decodeDatabaseInfo(in, dbInfo, alloc);
-
 		TEST_PRINT("[RequestMesg]\n");
 		TEST_PRINT1("dbInfo=%s\n", dbInfo.dump().c_str());
 
@@ -2828,10 +2169,11 @@ void DropPrivilegeHandler::operator()(EventContext &ec, Event &ev) {
 				request.fixed_.pId_, clusterRole, partitionRole, partitionStatus, partitionTable_);
 
 		checkAdminUser(connOption.userType_);
-		checkPartitionIdZero(request.fixed_.pId_);
-		checkPrivilegeSize(dbInfo, 1);
+		checkPartitionIdForUsers(request.fixed_.pId_);
+		checkPrivilegeSize(dbInfo, 1); 
 		checkDatabaseName(dbInfo.dbName_.c_str());
 
+		util::XArray<const util::XArray<uint8_t> *> logRecordList(alloc);
 		bool ackWait = false;
 
 		bool existFlag;
@@ -2843,17 +2185,32 @@ void DropPrivilegeHandler::operator()(EventContext &ec, Event &ev) {
 					<< dbInfo.privilegeInfoList_[0]->userName_.c_str() << ")");
 		}
 
-		checkDatabaseWithTQL(ec, request, dbInfo);
+		checkDatabase(ec, request, dbInfo);
 
-		checkDetailDatabaseWithTQL(ec, request, dbInfo, existFlag);
+		checkDatabaseDetails(ec, request, dbInfo, existFlag);
 		if (existFlag) {
-			ackWait = removeDatabaseRow(ec, ev, request, dbInfo);
+			removeDatabaseRow(ec, ev, request, dbInfo, logRecordList);
 		}
+
+		const util::DateTime now = ec.getHandlerStartTime();
+		const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
+
+		TransactionContext &txn = transactionManager_->put(
+				alloc, request.fixed_.pId_,
+				TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
+
+		response.existFlag_ = existFlag;
+		ackWait = executeReplication(
+				request, ec, alloc, ev.getSenderND(), txn,
+				ev.getType(), request.fixed_.cxtSrc_.stmtId_,
+				transactionManager_->getReplicationMode(), NULL, 0,
+				logRecordList.data(), logRecordList.size(), response);
 
 		replySuccess(ec, alloc, ev.getSenderND(), ev.getType(),
 			TXN_STATEMENT_SUCCESS, request, response, ackWait);
 
 		TEST_PRINT("<<<DropPrivilegeHandler>>> END\n");
+
 	}
 	catch (std::exception &e) {
 		handleError(ec, alloc, ev, request, e);
@@ -2861,152 +2218,115 @@ void DropPrivilegeHandler::operator()(EventContext &ec, Event &ev) {
 }
 
 
-/*!
-	@brief Decodes AuthenticationAck
-*/
-void StatementHandler::decodeAuthenticationAck(
-		util::ByteStream<util::ArrayInStream> &in, AuthenticationAck &ack) {
-
-
-	try {
-		in >> ack.clusterVer_;
-		in >> ack.authId_;
-		in >> ack.authPId_;
-	}
-	catch (std::exception &e) {
-		TXN_RETHROW_DECODE_ERROR(e, "");
-	}
-}
-
-/*!
-	@brief Encodes AuthenticationAck
-*/
-void StatementHandler::encodeAuthenticationAckPart(
-		EventByteOutStream &out, ClusterVersionId clusterVer,
-		AuthenticationId authId, PartitionId authPId) {
-
-
-	try {
-		out << clusterVer;
-		out << authId;
-		out << authPId;
-	}
-	catch (std::exception &e) {
-		TXN_RETHROW_ENCODE_ERROR(e, "");
-	}
-}
-
-/*!
-	@brief Replies success message in authentication
-*/
-void StatementHandler::replySuccess(
+void LoginHandler::executeAuthenticationInternal(
 		EventContext &ec, util::StackAllocator &alloc,
-		StatementExecStatus status, const Request &request,
-		const AuthenticationContext &authContext)  
-{
-#define TXN_TRACE_REPLY_SUCCESS_ERROR(replContext)     \
-	"(nd=" << authContext.getConnectionND()            \
-		   << ", pId=" << authContext.getPartitionId() \
-		   << ", stmtId=" << authContext.getStatementId() << ")"
+		TransactionManager::ContextSource &cxtSrc,
+		const char8_t *userName, const char8_t *digest, const char8_t *dbName,
+		UserType userType, int checkLevel, DatabaseId &dbId, RoleType &role) {
+	TEST_PRINT("executeAuthenticationInternal() S\n");
 
-	TEST_PRINT("replySuccess() START\n");
-
-	util::StackAllocator::Scope scope(alloc);
-
-	if (authContext.getConnectionND().isEmpty()) {
-		return;
+	if (checkPublicDB(dbName)) {
+		dbId = GS_PUBLIC_DB_ID;
+		role = ALL;
+	}
+	else if (checkSystemDB(dbName)) {
+		dbId = GS_SYSTEM_DB_ID;
+	}
+	else {
+		dbId = UNDEF_DBID;
 	}
 
-	TEST_PRINT1("pId=%d\n", authContext.getPartitionId());
-	TEST_PRINT1("stmtId=%d\n", authContext.getStatementId());
+	if ((checkLevel & 0x01) && (userType == Message::USER_NORMAL)) {
+		TEST_PRINT("executeAuthenticationInterval() (Ph1) S\n");
 
-	try {
-		Response response(alloc);
-		response.connectionOption_ = &(authContext.getConnectionND().getUserData<ConnectionOption>());
+		const util::StackAllocator::Scope scope(alloc);
+		
+		util::String query(alloc);
+		query.append("select count(*) where userName='");
+		query.append(userName);
+		query.append("' and digest='");
+		query.append(digest);
+		query.append("'");
 
-		Event ev(ec, LOGIN, authContext.getPartitionId());
-		setSuccessReply(alloc, ev, authContext.getStatementId(), status,
-			response);  
-		ec.getEngine().send(ev, authContext.getConnectionND());
-
-		TEST_PRINT("replySuccess() END\n");
-		GS_TRACE_INFO(REPLICATION, GS_TRACE_TXN_REPLY_CLIENT,
-			TXN_TRACE_REPLY_SUCCESS_ERROR(replContext));
+		DUQueryInOut option;
+		option.setForAgg(userName);
+		runWithTQL(ec, cxtSrc, GS_USERS, query.c_str(), &option);
+		if (option.count != 1) {
+			TEST_PRINT("count!=1(userName)\n");
+			GS_THROW_USER_ERROR(GS_ERROR_TXN_AUTH_FAILED,
+				"invalid user name or password (user name = " << userName
+															  << ")");
+		}
+		TEST_PRINT("executeAuthenticationInterval() (Ph1) E\n");
 	}
-	catch (EncodeDecodeException &e) {
-		GS_RETHROW_USER_ERROR(e, TXN_TRACE_REPLY_SUCCESS_ERROR(replContext));
-	}
-	catch (std::exception &e) {
-		GS_RETHROW_USER_OR_SYSTEM(
-			e, TXN_TRACE_REPLY_SUCCESS_ERROR(replContext));
-	}
+	if (checkLevel & 0x02) {
+		TEST_PRINT("executeAuthenticationInterval() (Ph2) S\n");
 
-#undef TXN_TRACE_REPLY_SUCCESS_ERROR
-}
-
-/*!
-	@brief Sends AuthenticationACK to a request node
-*/
-void StatementHandler::replyAuthenticationAck(
-		EventContext &ec, util::StackAllocator &alloc,
-		const NodeDescriptor &ND, const AuthenticationAck &request,
-		DatabaseId dbId) {
-#define TXN_TRACE_REPLY_ACK_ERROR(request, ND)        \
-	"(owner=" << ND << ", authId=" << request.authId_ \
-			  << ", pId=" << request.pId_ << ")"
-
-	TEST_PRINT("replyAuthenticationAck() START\n");
-
-	util::StackAllocator::Scope scope(alloc);
-
-	util::String dbName(alloc);  
-
-	try {
-		TEST_PRINT1("request.pId=%d\n", request.pId_);
-		TEST_PRINT1("request.authPId=%d\n", request.authPId_);
-		Event authAckEvent(ec, AUTHENTICATION_ACK, request.authPId_);
-		EventByteOutStream out = authAckEvent.getOutStream();
-		encodeAuthenticationAckPart(out, request.clusterVer_, request.authId_,
-			request.authPId_);  
-		int32_t num = 0;
-		if (dbId == UNDEF_DBID) {
-			out << num;
+		const util::StackAllocator::Scope scope(alloc);
+		
+		util::String dbUserName(alloc);
+		dbUserName.append(dbName);
+		dbUserName.append(":");
+		if (userType == Message::USER_NORMAL) {
+			dbUserName.append(userName);
 		}
 		else {
-			num = 1;
-			out << num;
-			out << dbName;  
-			out << dbId;
+			dbUserName.append(
+				"admin");  
 		}
-		TEST_PRINT1("num=%d\n", num);
-		TEST_PRINT1("dbId=%d\n", dbId);
 
-		ec.getEngine().send(authAckEvent, ND);
+		RowKeyData rowKey(alloc);
+		makeRowKey(dbUserName.c_str(), rowKey);
+		
+		{
+			DUGetInOut option;
+			option.setForDbId(dbName, userType);
+			runWithRowKey(ec, cxtSrc, GS_DATABASES, rowKey, &option);
+			dbId = option.dbId;
+			TEST_PRINT1("dbId=%d\n", dbId);
+		}
+		{
+			DUGetInOut option;
+			option.setForRole();
+			runWithRowKey(ec, cxtSrc, GS_DATABASES, rowKey, &option);
+			role = option.role;
+			TEST_PRINT1("role=%d\n", role);
+		}
+		TEST_PRINT("executeAuthenticationInterval() (Ph2) E\n");
+	}
+	if ((checkLevel & 0x02) && (userType == Message::USER_NORMAL)) {
+		TEST_PRINT("executeAuthenticationInterval() (Ph3) S\n");
 
-		TEST_PRINT("replyAuthenticationAck() END\n");
-		GS_TRACE_INFO(REPLICATION, GS_TRACE_TXN_SEND_ACK,
-			TXN_TRACE_REPLY_ACK_ERROR(request, ND));
-	}
-	catch (EncodeDecodeException &e) {
-		TXN_RETHROW_ENCODE_ERROR(e, TXN_TRACE_REPLY_ACK_ERROR(request, ND));
-	}
-	catch (std::exception &e) {
-		GS_RETHROW_USER_OR_SYSTEM(e, TXN_TRACE_REPLY_ACK_ERROR(request, ND));
-	}
+		const util::StackAllocator::Scope scope(alloc);
 
-#undef TXN_TRACE_REPLY_ACK_ERROR
+		util::String dbUserName(alloc);
+		dbUserName.append(dbName);
+		dbUserName.append(":admin");
+
+		RowKeyData rowKey(alloc);
+		makeRowKey(dbUserName.c_str(), rowKey);
+
+		{
+			DUGetInOut option;
+			option.setForDbId(dbName, Message::USER_ADMIN);
+			runWithRowKey(ec, cxtSrc, GS_DATABASES, rowKey, &option);
+			dbId = option.dbId;
+			TEST_PRINT1("dbId=%d\n", dbId);
+		}
+		TEST_PRINT("executeAuthenticationInterval() (Ph3) E\n");
+	}
+	TEST_PRINT("executeAuthenticationInternal() E\n");
 }
 
-/*!
-	@brief Request to an authentication node
-*/
-void StatementHandler::executeAuthentication(
+void LoginHandler::executeAuthentication(
 		EventContext &ec, Event &ev,
 		const NodeDescriptor &clientND, StatementId authStmtId,
 		const char8_t *userName, const char8_t *digest,
 		const char8_t *dbName, UserType userType) {
 	TEST_PRINT("executeAuthentication() S\n");
 	TEST_PRINT1("ev.pId=%d\n", ev.getPartitionId());
+
+	util::StackAllocator &alloc = ec.getAllocator();
 
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
@@ -3019,14 +2339,13 @@ void StatementHandler::executeAuthentication(
 	authId = authContext.getAuthenticationId();
 	TEST_PRINT1("authId=%d\n", authId);
 
-
 	Event authEvent(ec, AUTHENTICATION, 0 /*pId*/);
 	EventByteOutStream out = authEvent.getOutStream();
 	encodeAuthenticationAckPart(
 		out, GS_CLUSTER_MESSAGE_CURRENT_VERSION, authId, ev.getPartitionId());
-	TEST_PRINT1("userName=%s\n", userName.c_str());
-	TEST_PRINT1("digest=%s\n", digest.c_str());
-	TEST_PRINT1("dbName=%s\n", dbName.c_str());
+	TEST_PRINT1("userName=%s\n", userName);
+	TEST_PRINT1("digest=%s\n", digest);
+	TEST_PRINT1("dbName=%s\n", dbName);
 	TEST_PRINT1("userType=%d\n", userType);
 	encodeStringData(out, userName);
 	encodeStringData(out, digest);
@@ -3034,6 +2353,10 @@ void StatementHandler::executeAuthentication(
 	char8_t byteData = userType;
 	out << byteData;
 
+
+	StatementMessage::OptionSet optionalRequest(alloc);
+	optionalRequest.set<StatementMessage::Options::ACCEPTABLE_FEATURE_VERSION>(StatementMessage::FEATURE_V4_3);
+	optionalRequest.encode(out);
 
 	NodeAddress nodeAddress = clusterManager_->getPartition0NodeAddr();
 	TEST_PRINT1("NodeAddress(TS) %s\n", nodeAddress.dump().c_str());
@@ -3043,13 +2366,9 @@ void StatementHandler::executeAuthentication(
 			nodeAddress.toString(false).c_str(), nodeAddress.port_));
 
 	transactionService_->getEE()->send(authEvent, nd);
-
 	TEST_PRINT("executeAuthentication() E\n");
 }
 
-/*!
-	@brief Handler Operator
-*/
 void AuthenticationHandler::operator()(EventContext &ec, Event &ev) {
 	TEST_PRINT("<<<AuthenticationHandler>>> START\n");
 
@@ -3079,6 +2398,8 @@ void AuthenticationHandler::operator()(EventContext &ec, Event &ev) {
 		in >> byteData;
 		userType = static_cast<UserType>(byteData);
 
+		StatementMessage::OptionSet optionalRequest(alloc);
+		optionalRequest.decode(in);
 
 		TEST_PRINT1("userName=%s\n", userName.c_str());
 		TEST_PRINT1("digest=%s\n", digest.c_str());
@@ -3093,29 +2414,35 @@ void AuthenticationHandler::operator()(EventContext &ec, Event &ev) {
 		checkExecutable(
 			request.pId_, clusterRole, partitionRole, partitionStatus, partitionTable_);
 
-		checkPartitionIdZero(request.pId_);
+		checkPartitionIdForUsers(request.pId_);
 
 		DatabaseId dbId = UNDEF_DBID;
+		RoleType role = READ;
 
 		{
 			TEST_PRINT("LOGIN\n");
 			try {
-				if (strcmp(dbName.c_str(), GS_PUBLIC) != 0) {
-					StatementHandler::executeAuthenticationInternal(ec, alloc,
-						cxtSrc, userName.c_str(), digest.c_str(),
-						dbName.c_str(), userType, 3, dbId);  
-				}
-				else {
+				if (checkPublicDB(dbName.c_str())) {
 					executeAuthenticationInternal(ec, alloc, cxtSrc,
 						userName.c_str(), digest.c_str(), dbName.c_str(),
-						userType, 1, dbId);  
+						userType, 1, dbId, role);  
+				} else {
+					executeAuthenticationInternal(ec, alloc,
+						cxtSrc, userName.c_str(), digest.c_str(),
+						dbName.c_str(), userType, 3, dbId, role);  
+				}
+				const int32_t featureVersion = optionalRequest.get<Options::ACCEPTABLE_FEATURE_VERSION>();
+				if ((featureVersion < StatementMessage::FEATURE_V4_3) && (role == READ)) {
+						GS_THROW_USER_ERROR(GS_ERROR_TXN_AUTH_FAILED,
+							"Unsupported feature requested "
+							"(requestedVersion=" << featureVersion << ")");
 				}
 			}
 			catch (std::exception &) {
 				dbId = UNDEF_DBID;
 			}
 
-			replyAuthenticationAck(ec, alloc, ev.getSenderND(), request, dbId);
+			replyAuthenticationAck(ec, alloc, ev.getSenderND(), request, dbId, role);
 		}
 		TEST_PRINT("<<<AuthenticationHandler>>> END\n");
 	}
@@ -3128,6 +2455,142 @@ void AuthenticationHandler::operator()(EventContext &ec, Event &ev) {
 	}
 }
 
+
+/*!
+	@brief Decodes AuthenticationAck
+*/
+void LoginHandler::decodeAuthenticationAck(
+		util::ByteStream<util::ArrayInStream> &in, AuthenticationAck &ack) {
+
+
+	try {
+		in >> ack.clusterVer_;
+		in >> ack.authId_;
+		in >> ack.authPId_;
+	}
+	catch (std::exception &e) {
+		TXN_RETHROW_DECODE_ERROR(e, "");
+	}
+}
+
+/*!
+	@brief Encodes AuthenticationAck
+*/
+void LoginHandler::encodeAuthenticationAckPart(
+		EventByteOutStream &out, ClusterVersionId clusterVer,
+		AuthenticationId authId, PartitionId authPId) {
+
+
+	try {
+		out << clusterVer;
+		out << authId;
+		out << authPId;
+	}
+	catch (std::exception &e) {
+		TXN_RETHROW_ENCODE_ERROR(e, "");
+	}
+}
+
+void AuthenticationAckHandler::replySuccess(
+		EventContext &ec, util::StackAllocator &alloc,
+		StatementExecStatus status, const Request &request,
+		const AuthenticationContext &authContext)  
+{
+#define TXN_TRACE_REPLY_SUCCESS_ERROR(replContext)     \
+	"(nd=" << authContext.getConnectionND()            \
+		   << ", pId=" << authContext.getPartitionId() \
+		   << ", stmtId=" << authContext.getStatementId() << ")"
+
+	TEST_PRINT("replySuccess() START\n");
+	util::StackAllocator::Scope scope(alloc);
+
+	if (authContext.getConnectionND().isEmpty()) {
+		return;
+	}
+
+	TEST_PRINT1("pId=%d\n", authContext.getPartitionId());
+	TEST_PRINT1("stmtId=%d\n", authContext.getStatementId());
+	try {
+		Response response(alloc);
+		response.connectionOption_ = &(authContext.getConnectionND().getUserData<ConnectionOption>());
+
+		Event ev(ec, LOGIN, authContext.getPartitionId());
+		setSuccessReply(alloc, ev, authContext.getStatementId(), status,
+			response);  
+		ec.getEngine().send(ev, authContext.getConnectionND());
+
+		TEST_PRINT("replySuccess() END\n");
+		GS_TRACE_INFO(REPLICATION, GS_TRACE_TXN_REPLY_CLIENT,
+			TXN_TRACE_REPLY_SUCCESS_ERROR(replContext));
+	}
+	catch (EncodeDecodeException &e) {
+		GS_RETHROW_USER_ERROR(e, TXN_TRACE_REPLY_SUCCESS_ERROR(replContext));
+	}
+	catch (std::exception &e) {
+		GS_RETHROW_USER_OR_SYSTEM(
+			e, TXN_TRACE_REPLY_SUCCESS_ERROR(replContext));
+	}
+
+#undef TXN_TRACE_REPLY_SUCCESS_ERROR
+}
+
+void AuthenticationHandler::replyAuthenticationAck(
+		EventContext &ec, util::StackAllocator &alloc,
+		const NodeDescriptor &ND, const AuthenticationAck &request,
+		DatabaseId dbId, RoleType role, bool isNewSQL) {
+#define TXN_TRACE_REPLY_ACK_ERROR(request, ND)        \
+	"(owner=" << ND << ", authId=" << request.authId_ \
+			  << ", pId=" << request.pId_ << ")"
+
+	TEST_PRINT("replyAuthenticationAck() START\n");
+	util::StackAllocator::Scope scope(alloc);
+
+	util::String dbName(alloc);  
+	util::String privilege(alloc);
+	try {
+		TEST_PRINT1("request.pId=%d\n", request.pId_);
+		TEST_PRINT1("request.authPId=%d\n", request.authPId_);
+		Event authAckEvent(ec, AUTHENTICATION_ACK, request.authPId_);
+		EventByteOutStream out = authAckEvent.getOutStream();
+		encodeAuthenticationAckPart(out, request.clusterVer_, request.authId_,
+			request.authPId_);  
+		int32_t num = 0;
+		if (dbId == UNDEF_DBID) {
+			out << num;
+		}
+		else {
+			num = 1;
+			out << num;
+			out << dbName;  
+			out << dbId;
+			if (role == ALL) {
+				privilege.append("ALL");
+			} else {
+				privilege.append("READ");
+			}
+			out << privilege;
+		}
+		TEST_PRINT1("num=%d\n", num);
+		TEST_PRINT1("dbId=%d\n", dbId);
+		TEST_PRINT1("role=%d\n", role);
+		TEST_PRINT1("privilege=%s\n", privilege.c_str());
+		
+		ec.getEngine().send(authAckEvent, ND);
+
+		TEST_PRINT("replyAuthenticationAck() END\n");
+		GS_TRACE_INFO(REPLICATION, GS_TRACE_TXN_SEND_ACK,
+			TXN_TRACE_REPLY_ACK_ERROR(request, ND));
+	}
+	catch (EncodeDecodeException &e) {
+		TXN_RETHROW_ENCODE_ERROR(e, TXN_TRACE_REPLY_ACK_ERROR(request, ND));
+	}
+	catch (std::exception &e) {
+		GS_RETHROW_USER_OR_SYSTEM(e, TXN_TRACE_REPLY_ACK_ERROR(request, ND));
+	}
+
+#undef TXN_TRACE_REPLY_ACK_ERROR
+}
+
 /*!
 	@brief Handles error in authentication
 */
@@ -3135,7 +2598,6 @@ void AuthenticationAckHandler::authHandleError(
 		EventContext &ec, AuthenticationAck &ack, std::exception &e) {
 	try {
 		TEST_PRINT("authHandleError() S\n");
-
 		AuthenticationContext &authContext = transactionManager_->getAuth(
 			ack.pId_, ack.authId_);
 
@@ -3159,8 +2621,8 @@ void AuthenticationAckHandler::authHandleError(
 			TEST_PRINT("send\n");
 			ec.getEngine().send(ev, authContext.getConnectionND());
 		}
-		transactionManager_->removeAuth(ack.pId_, ack.authId_);
 
+		transactionManager_->removeAuth(ack.pId_, ack.authId_);
 		TEST_PRINT("authHandleError() E\n");
 	}
 	catch (ContextNotFoundException &) {
@@ -3174,12 +2636,11 @@ void AuthenticationAckHandler::authHandleError(
 	@brief Handler Operator
 */
 void AuthenticationAckHandler::operator()(EventContext &ec, Event &ev) {
+	TXN_TRACE_HANDLER_CALLED(ev);
 	TEST_PRINT("<<<AuthenticationAckHandler>>> START\n");
 
-	TXN_TRACE_HANDLER_CALLED(ev);
-
 	util::StackAllocator &alloc = ec.getAllocator();
-//	const util::DateTime now = ec.getHandlerStartTime();
+	const util::DateTime now = ec.getHandlerStartTime();
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	AuthenticationAck ack(ev.getPartitionId());
@@ -3188,11 +2649,14 @@ void AuthenticationAckHandler::operator()(EventContext &ec, Event &ev) {
 	try {
 		int32_t num;
 		DatabaseId dbId = UNDEF_DBID;
+		char8_t byteData;
+		RoleType role = ALL;
 
 		EventByteInStream in(ev.getInStream());
 
 		util::String dbName(alloc);
-
+		util::String privilege(alloc);
+		
 		decodeAuthenticationAck(in, ack);
 		TEST_PRINT1("(authId=%d\n)", ack.authId_);
 		TEST_PRINT1("(authPId=%d\n)", ack.authPId_);
@@ -3200,11 +2664,20 @@ void AuthenticationAckHandler::operator()(EventContext &ec, Event &ev) {
 		if (num > 0) {
 			decodeStringData<util::String>(in, dbName);
 			in >> dbId;
+			{
+				decodeStringData<util::String>(in, privilege);
+				if (strcmp(privilege.c_str(), "ALL") == 0) {
+					role = ALL;
+				} else {
+					role = READ;
+				}
+			}
 		}
 		else {
 			GS_THROW_USER_ERROR(GS_ERROR_TXN_AUTH_FAILED, "");
 		}
 		TEST_PRINT1("dbId=%d\n", dbId);
+		TEST_PRINT1("role=%d\n", role);
 
 		clusterService_->checkVersion(ack.clusterVer_);
 
@@ -3219,9 +2692,7 @@ void AuthenticationAckHandler::operator()(EventContext &ec, Event &ev) {
 
 		ConnectionOption &connOption =
 				authContext.getConnectionND().getUserData<ConnectionOption>();
-		connOption.isAuthenticated_ = true;
-		connOption.dbId_ = dbId;
-		connOption.authenticationTime_ = emNow;
+		connOption.setAfterAuth(dbId, emNow, role);
 
 		replySuccess(
 				ec, alloc, TXN_STATEMENT_SUCCESS, request,
@@ -3229,6 +2700,7 @@ void AuthenticationAckHandler::operator()(EventContext &ec, Event &ev) {
 		transactionManager_->removeAuth(ack.pId_, ack.authId_);
 
 		TEST_PRINT("<<<AuthenticationAckHandler>>> END\n");
+		TEST_PRINT("[A3/5/7] E\n");
 	}
 	catch (ContextNotFoundException &e) {
 		UTIL_TRACE_EXCEPTION_INFO(TRANSACTION_SERVICE, e,

@@ -495,10 +495,7 @@ public:
 	}
 
 	TermCondition *toCondition(TransactionContext &txn, MapType mapType,
-		uint32_t indexColumnId, Query &queryObj, const void *&startKey,
-		uint32_t &startKeySize, int32_t &isStartKeyIncluded,
-		const void *&endKey, uint32_t &endKeySize, int32_t &isEndKeyIncluded,
-		NullCondition &nullCond, bool notFlag);
+		Query &queryObj, bool notFlag);
 
 	bool aggregate(TransactionContext &txn, Collection &collection,
 		util::XArray<OId> &resultRowIdList, Value &result);
@@ -685,7 +682,7 @@ protected:
 			"context");
 	}
 
-	bool checkValueRange(ColumnType t1, ColumnType t2, const uint8_t *value,
+	bool checkValueRange(ColumnType t1, ColumnType t2, const void *value,
 		int64_t &i64, double &d) {
 		if (t1 <= COLUMN_TYPE_LONG) {
 			switch (t2) {

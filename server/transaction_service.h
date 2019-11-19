@@ -67,6 +67,15 @@ class ResultSetOption;
 class MetaContainer;
 struct ManagerSet;
 
+class PutUserHandler;
+class DropUserHandler;
+class GetUsersHandler;
+class PutDatabaseHandler;
+class DropDatabaseHandler;
+class GetDatabasesHandler;
+class PutPrivilegeHandler;
+class DropPrivilegeHandler;
+
 UTIL_TRACER_DECLARE(TRANSACTION_SERVICE);
 UTIL_TRACER_DECLARE(REPLICATION);
 UTIL_TRACER_DECLARE(SESSION_TIMEOUT);
@@ -74,6 +83,10 @@ UTIL_TRACER_DECLARE(TRANSACTION_TIMEOUT);
 UTIL_TRACER_DECLARE(REPLICATION_TIMEOUT);
 UTIL_TRACER_DECLARE(AUTHENTICATION_TIMEOUT);
 
+enum RoleType {
+	ALL,
+	READ
+};
 
 /*!
 	@brief Exception class for denying the statement execution
@@ -140,8 +153,9 @@ struct StatementMessage {
 		FEATURE_V4_0 = 0,
 		FEATURE_V4_1 = 1,
 		FEATURE_V4_2 = 2,
+		FEATURE_V4_3 = 3,
 
-		FEATURE_SUPPORTED_MAX = FEATURE_V4_2
+		FEATURE_SUPPORTED_MAX = FEATURE_V4_3
 	};
 
 	struct FixedTypes {
@@ -216,6 +230,7 @@ struct StatementMessage {
 		static const OptionType QUERY_CONTAINER_KEY = 11008;
 		static const OptionType APPLICATION_NAME = 11009; 
 		static const OptionType STORE_MEMORY_AGING_SWAP_RATE = 11010; 
+		static const OptionType TIME_ZONE_OFFSET = 11011;
 
 
 
@@ -235,8 +250,8 @@ struct StatementMessage {
 		@brief User type
 	*/
 	enum UserType {
-		USER_ADMIN,
-		USER_NORMAL,
+		USER_ADMIN = 0,
+		USER_NORMAL = 1,
 	};
 
 	enum CreateDropIndexMode {
@@ -255,6 +270,7 @@ struct StatementMessage {
 
 	struct CaseSensitivity;
 	struct QueryContainerKey;
+
 
 
 	template<int C> struct OptionCoder<Options::LEGACY_VERSION_BLOCK, C> :
@@ -333,6 +349,9 @@ struct StatementMessage {
 			public FloatingOptionCoder<double, C> {
 		OptionCoder() :
 					FloatingOptionCoder<double, C>(TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE) {}
+	};
+	template<int C> struct OptionCoder<Options::TIME_ZONE_OFFSET, C> :
+			public CustomOptionCoder<util::TimeZone, C> {
 	};
 
 
@@ -824,6 +843,8 @@ struct StatementMessage::QueryContainerKey {
 };
 
 
+
+
 /*!
 	@brief Handles the statement(event) requested from a client or another node
 */
@@ -1132,9 +1153,11 @@ public:
 
 
 
+
 		util::XArray<UserInfo *> userInfoList_;
 
 		util::XArray<DatabaseInfo *> databaseInfoList_;
+
 		ContainerAttribute containerAttribute_;
 
 		uint8_t putRowOption_;
@@ -1157,100 +1180,6 @@ public:
 		ClientId clientId_;
 		int32_t taskStatus_;
 	};
-
-	/*!
-		@brief Represents the information about AuthenticationAck
-	*/
-	struct AuthenticationAck {
-		explicit AuthenticationAck(PartitionId pId) : pId_(pId) {}
-
-		PartitionId pId_;
-		ClusterVersionId clusterVer_;
-		AuthenticationId authId_;
-
-		PartitionId authPId_;
-	};
-
-	void executeAuthentication(
-			EventContext &ec, Event &ev,
-			const NodeDescriptor &clientND, StatementId authStmtId,
-			const char8_t *userName, const char8_t *digest,
-			const char8_t *dbName, UserType userType);
-
-	void executeAuthenticationInternal(
-			EventContext &ec,
-			util::StackAllocator &alloc, TransactionManager::ContextSource &cxtSrc,
-			const char8_t *userName, const char8_t *digest, const char8_t *dbName,
-			UserType userType, int checkLevel, DatabaseId &dbId);
-
-	void replyAuthenticationAck(EventContext &ec, util::StackAllocator &alloc,
-		const NodeDescriptor &ND, const AuthenticationAck &request,
-		DatabaseId dbId);
-
-	void decodeAuthenticationAck(
-		util::ByteStream<util::ArrayInStream> &in, AuthenticationAck &ack);
-	void encodeAuthenticationAckPart(EventByteOutStream &out,
-		ClusterVersionId clusterVer, AuthenticationId authId, PartitionId authPId);
-
-	void makeUsersSchema(util::XArray<uint8_t> &containerSchema);
-	void makeDatabasesSchema(util::XArray<uint8_t> &containerSchema);
-	void makeUsersRow(util::StackAllocator &alloc,
-		const ColumnInfo *columnInfoList, RowData &rowData);
-	void makeUsersRow(util::StackAllocator &alloc,
-		const ColumnInfo *columnInfoList, uint32_t columnNum,
-		UserInfo &userInfo, RowData &rowData);
-	void makeDatabasesRow(util::StackAllocator &alloc,
-		const ColumnInfo *columnInfoList, RowData &rowData);
-	void makeDatabasesRow(util::StackAllocator &alloc,
-		const ColumnInfo *columnInfoList, uint32_t columnNum,
-		DatabaseInfo &dbInfo, bool isCreate, RowData &rowData);
-
-	void makeDatabaseInfoList(TransactionContext &txn,
-		util::StackAllocator &alloc, BaseContainer &container, ResultSet &rs,
-		util::XArray<DatabaseInfo *> &dbInfoList);
-
-	void makeRowKey(const char *name, RowKeyData &rowKey);
-	void makeDatabaseRowKey(DatabaseInfo &dbInfo, RowKeyData &rowKey);
-
-	void initializeMetaContainer(
-			EventContext &ec, Event &ev, const Request &request,
-			util::XArray<const util::XArray<uint8_t>*> &logRecordList);
-
-	static void checkPasswordLength(const char8_t *password);
-
-	bool checkContainer(
-			EventContext &ec, Request &request, const char8_t *containerName);
-	int64_t count(
-			EventContext &ec, const Request &request,
-			const char8_t *containerName);
-
-	void checkUser(
-			EventContext &ec, const Request &request,
-			const char8_t *userName, bool &existFlag);
-
-	void putUserRow(
-			EventContext &ec, Event &ev, const Request &request,
-			UserInfo &userInfo,
-			util::XArray<const util::XArray<uint8_t> *> &logRecordList);
-	void putDatabaseRow(
-			EventContext &ec, Event &ev, const Request &request,
-			DatabaseInfo &dbInfo, bool isCreate,
-			util::XArray<const util::XArray<uint8_t> *> &logRecordList);
-
-	void checkUserWithTQL(
-			EventContext &ec, const Request &request,
-			const char8_t *userName, const char8_t *digest, bool detailFlag,
-			bool &existFlag);
-	void executeTQLUser(
-			EventContext &ec, const Request &request,
-			const char8_t *userName, UserType userType,
-			util::XArray<UserInfo *> &userInfoList);
-
-	void checkDatabaseWithTQL(
-			EventContext &ec, const Request &request, DatabaseInfo &dbInfo);
-	void checkDetailDatabaseWithTQL(
-			EventContext &ec, const Request &request,
-			DatabaseInfo &dbInfo, bool &existFlag);
 
 	void setSuccessReply(
 			util::StackAllocator &alloc, Event &ev, StatementId stmtId,
@@ -1336,7 +1265,8 @@ public:
 			  ,
 			  authMode_(0)
 			  ,
-			  storeMemoryAgingSwapRate_(TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE)
+			  storeMemoryAgingSwapRate_(TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE),
+			  timeZone_(util::TimeZone())
 			  ,
 				clientId_()
 			  ,
@@ -1356,17 +1286,23 @@ public:
 			requestType_ = Message::REQUEST_NOSQL;
 
 			storeMemoryAgingSwapRate_ = TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE;
+			timeZone_ = util::TimeZone();
 			keepaliveTime_ = 0;
 			currentSessionId_ = 0;
 			initializeCoreInfo();
 		}
 
 
-		void setLoginInfo(const char8_t *userName,
-				const char8_t *dbName, const char8_t *applicationName);
-
-		void setApplicationName(const char8_t *name);
 		void initializeCoreInfo();
+
+		void setFirstStep(ClientId &clientId, double storeMemoryAgingSwapRate, const util::TimeZone &timeZone);
+		void setBeforeAuth(const char8_t *userName, const char8_t *dbName, const char8_t *applicationName,
+			bool isImmediateConsistency, int32_t txnTimeoutInterval, UserType userType,
+			RequestType requestType, bool isAdminAndPublicDB);
+		void setAfterAuth(DatabaseId dbId, EventMonotonicTime authenticationTime, RoleType role);
+
+		void checkPrivilegeForOperator();
+		void checkForUpdate(bool forUpdate);
 
 		template<typename Alloc>
 		bool getApplicationName(
@@ -1399,8 +1335,10 @@ public:
 
 		std::string userName_;
 		std::string dbName_;
+		RoleType role_;
 		const int8_t authMode_;
 		double storeMemoryAgingSwapRate_;
+		util::TimeZone timeZone_;
 		ClientId clientId_;
 		EventMonotonicTime keepaliveTime_;
 		SessionId currentSessionId_;
@@ -1494,17 +1432,7 @@ public:
 	void checkContainerExistence(BaseContainer *container);
 	void checkContainerSchemaVersion(
 			BaseContainer *container, SchemaVersionId schemaVersionId);
-	void checkUserName(const char8_t *userName, bool detailed);
-	void checkAdminUser(UserType userType);
-	void checkDatabaseName(const char8_t *dbName);
-	void checkConnectedDatabaseName(
-			ConnectionOption &connOption, const char8_t *dbName);
-	void checkConnectedUserName(
-			ConnectionOption &connOption, const char8_t *userName);
-	void checkPartitionIdZero(PartitionId pId);
-	void checkDigest(const char8_t *digest, size_t maxStrLength);
-	void checkPrivilegeSize(DatabaseInfo &dbInfo, size_t size);
-	void checkModifiable(bool modifiable, bool value);
+
 	void checkFetchOption(FetchOption fetchOption);
 	void checkSizeLimit(ResultSize limit);
 	static void checkLoggedInDatabase(
@@ -1655,6 +1583,9 @@ public:
 		EventByteOutStream &out, const ResultSet &rs, int64_t *encodedSize);
 	static void encodeStoreMemoryAgingSwapRate(
 		EventByteOutStream &out, double storeMemoryAgingSwapRate);
+	static void encodeTimeZone(
+		EventByteOutStream &out, const util::TimeZone &timeZone);
+
 
 
 	static bool isUpdateStatement(EventType stmtType);
@@ -1674,10 +1605,7 @@ public:
 	void replySuccess(
 			EventContext &ec, util::StackAllocator &alloc,
 			StatementExecStatus status, const ReplicationContext &replContext);
-	void replySuccess(
-			EventContext &ec, util::StackAllocator &alloc,
-			StatementExecStatus status, const Request &request,
-			const AuthenticationContext &authContext);
+
 	void replyError(
 			EventContext &ec, util::StackAllocator &alloc,
 			const NodeDescriptor &ND, EventType stmtType,
@@ -1927,16 +1855,6 @@ public:
 };
 
 /*!
-	@brief Handles LOGIN statement
-*/
-class LoginHandler : public StatementHandler {
-public:
-	static const uint32_t MAX_APPLICATION_NAME_LEN = 64;
-
-	void operator()(EventContext &ec, Event &ev);
-};
-
-/*!
 	@brief Handles LOGOUT statement
 */
 class LogoutHandler : public StatementHandler {
@@ -1977,7 +1895,8 @@ public:
 			uint32_t propFlags, uint32_t propTypeCount, bool forMeta,
 			EventMonotonicTime emNow, util::String &containerNameStr,
 			const char8_t *dbName
-		, int64_t currentTime
+			, int64_t currentTime
+			, int32_t acceptableFeatureVersion
 			);
 
 
@@ -2035,6 +1954,12 @@ private:
 	void encodeNulls(
 			EventByteOutStream &out,
 			const util::XArray<uint8_t> &nullsList);
+
+	static void checkIndexInfoVersion(
+			const util::Vector<IndexInfo> indexInfoList,
+			int32_t acceptableFeatureVersion);
+	static void checkIndexInfoVersion(
+			const IndexInfo &info, int32_t acceptableFeatureVersion);
 };
 
 /*!
@@ -2063,7 +1988,6 @@ public:
 	bool checkCreateIndex(IndexInfo &indexInfo,
 			ColumnType targetColumnType, ContainerType targetContainerType);
 
-private:
 };
 
 /*!
@@ -2495,14 +2419,18 @@ private:
 	typedef util::XArray<RowKeyData *> RowKeyDataList;
 	typedef int32_t LocalSchemaId;
 	typedef util::Map<ContainerId, LocalSchemaId> SchemaMap;
+	typedef util::XArray<ColumnType> RowKeyColumnTypeList;
 
 	enum RowKeyPredicateType { PREDICATE_TYPE_RANGE, PREDICATE_TYPE_DISTINCT };
 
 	struct RowKeyPredicate {
 		ColumnType keyType_;
-		RowKeyData *startKey_;
-		RowKeyData *finishKey_;
-		RowKeyDataList *distinctKeys_;
+		RowKeyPredicateType predicateType_;
+		int8_t rangeFlags_[2];
+		int32_t rowCount_;
+		RowKeyDataList *keys_;
+		RowKeyData *compositeKeys_;
+		RowKeyColumnTypeList *compositeColumnTypes_;
 	};
 
 	struct SearchEntry {
@@ -2524,6 +2452,12 @@ private:
 
 		const FullContainerKey *containerKey_;
 		const RowKeyPredicate *predicate_;
+	};
+
+	enum OptionType {
+
+
+		OPTION_END = 0xFFFFFFFF
 	};
 
 	uint32_t execute(
@@ -2554,6 +2488,15 @@ private:
 	void encodeEntry(
 			const FullContainerKey &containerKey, ContainerId containerId,
 			const SchemaMap &schemaMap, ResultSet &rs, EventByteOutStream &out);
+
+	void executeRange(
+			EventContext &ec, const SchemaMap &schemaMap,
+			TransactionContext &txn, BaseContainer *container, const RowKeyData *startKey,
+			const RowKeyData *finishKey, EventByteOutStream &replyOut, Progress &progress);
+	void executeGet(
+			EventContext &ec, const SchemaMap &schemaMap,
+			TransactionContext &txn, BaseContainer *container, const RowKeyData &rowKey,
+			EventByteOutStream &replyOut, Progress &progress);
 };
 /*!
 	@brief Handles MULTI_QUERY statement
@@ -2686,107 +2629,330 @@ protected:
 	}
 };
 
-/*!
-	@brief Handles AUTHENTICATION statement requested from another node
-*/
-class AuthenticationHandler : public StatementHandler {
-public:
-	void operator()(EventContext &ec, Event &ev);
-};
-/*!
-	@brief Handles AUTHENTICATION_ACK statement requested from another node
-*/
-class AuthenticationAckHandler : public StatementHandler {
-public:
-	void operator()(EventContext &ec, Event &ev);
 
-	void authHandleError(
-		EventContext &ec, AuthenticationAck &ack, std::exception &e);
+class DbUserHandler : public StatementHandler {
+public:
+	static void checkPasswordLength(const char8_t *password);
+
+	struct DUColumnInfo {
+		const char *name;
+		ColumnType type;
+	};
+
+	struct DUColumnValue {
+		ColumnType type;
+		const char8_t *sval;
+		int8_t bval;
+	};
+
+protected:
+	struct DUGetInOut {
+		enum DUGetType {
+			RESULT_NUM,
+			DBID,
+			ROLE,
+			REMOVE,
+		};
+
+		explicit DUGetInOut()
+			: type(RESULT_NUM),
+			  count(-1), s(NULL), dbId(UNDEF_DBID), role(READ),
+			  logRecordList(NULL) {}
+
+		void setForDbId(const char8_t *dbName, UserType userType) {
+			type = DBID;
+			s = dbName;
+			this->userType = userType;
+		}
+
+		void setForRole() {
+			type = ROLE;
+		}
+		void setForRemove(util::XArray<const util::XArray<uint8_t> *> *logRecordList) {
+			type = REMOVE;
+			this->logRecordList = logRecordList;
+		}
+
+		int8_t type;
+		int64_t count;
+		const char8_t *s;
+		UserType userType;
+		DatabaseId dbId;
+		RoleType role;
+		util::XArray<const util::XArray<uint8_t> *> *logRecordList;
+	};
+
+	struct DUQueryInOut {
+		enum DUQueryType {
+			RESULT_NUM,
+			AGG,
+			USER_DETAILS,
+			DB_DETAILS,
+			USER_INFO,
+			DB_INFO,
+			REMOVE,
+		};
+
+		enum DUQueryPhase {
+			AUTH,
+			GET,
+			NORMAL,
+			SYSTEM,
+		};
+
+		explicit DUQueryInOut()
+			: type(RESULT_NUM), phase(NORMAL),
+			  count(-1), s(NULL), 
+			  dbInfo(NULL),
+			  flag(false),
+			  userInfoList(NULL),
+			  dbNameSpecified(false), dbInfoList(NULL),
+			  logRecordList(NULL) {}
+
+		void setForAgg(const char8_t *userName = NULL) {
+			type = AGG;
+			if (userName) {
+				this->phase = AUTH;
+			}
+			s = userName;
+			
+		}
+		void setForUserDetails(const char8_t *digest) {
+			type = USER_DETAILS;
+			phase = SYSTEM;
+			s = digest;
+		}
+		void setForDatabaseDetails(DatabaseInfo *dbInfo) {
+			type = DB_DETAILS;
+			phase = SYSTEM;
+			this->dbInfo = dbInfo;
+		}
+		void setForUserInfoList(util::XArray<UserInfo*> *userInfoList) {
+			type = USER_INFO;
+			phase = GET;
+			this->userInfoList = userInfoList;
+		}
+		void setForDbInfoList(bool dbNameSpecified, util::XArray<DatabaseInfo*> *dbInfoList) {
+			type = DB_INFO;
+			phase = GET;
+			this->dbNameSpecified = dbNameSpecified;
+			this->dbInfoList = dbInfoList;
+		}
+		void setForRemove(util::XArray<const util::XArray<uint8_t> *> *logRecordList) {
+			type = REMOVE;
+			phase = SYSTEM;
+			this->logRecordList = logRecordList;
+		}
+
+		int8_t type;
+		int8_t phase;
+		int64_t count;
+		const char8_t *s;
+		DatabaseInfo *dbInfo;
+		bool flag;
+		util::XArray<UserInfo*> *userInfoList;
+		bool dbNameSpecified;
+		util::XArray<DatabaseInfo*> *dbInfoList;
+		util::XArray<const util::XArray<uint8_t> *> *logRecordList;
+	};
+
+	static void decodeUserInfo(
+		util::ByteStream<util::ArrayInStream> &in, UserInfo &userInfo);
+	static void decodeDatabaseInfo(util::ByteStream<util::ArrayInStream> &in,
+		DatabaseInfo &dbInfo, util::StackAllocator &alloc);
+	
+	void makeSchema(util::XArray<uint8_t> &containerSchema, const DUColumnInfo *columnInfoList, int n);
+
+	void makeRow(
+		util::StackAllocator &alloc, const ColumnInfo *columnInfoList,
+		uint32_t columnNum, DUColumnValue *valueList, RowData &rowData);
+
+	void makeRowKey(const char *name, RowKeyData &rowKey);
+	void makeRowKey(DatabaseInfo &dbInfo, RowKeyData &rowKey);
+
+
+	void putContainer(util::StackAllocator &alloc, 
+		util::XArray<uint8_t> &containerInfo, const char *name,
+		const util::DateTime now, const EventMonotonicTime emNow, const Request &request,
+		util::XArray<const util::XArray<uint8_t>*> &logRecordList);
+	bool checkContainer(
+		EventContext &ec, Request &request, const char8_t *containerName);
+	void putRow(
+		EventContext &ec, Event &ev, const Request &request,
+		const char8_t *containerName, DUColumnValue *cvList,
+		util::XArray<const util::XArray<uint8_t>*> &logRecordList);
+			
+	void runWithRowKey(
+		EventContext &ec, const TransactionManager::ContextSource &cxtSrc, 
+		const char8_t *containerName, const RowKeyData &rowKey,
+		DUGetInOut *option);
+	void runWithTQL(
+		EventContext &ec, const TransactionManager::ContextSource &cxtSrc, 
+		const char8_t *containerName, const char8_t *tql,
+		DUQueryInOut *option);
+
+	void checkUserName(const char8_t *userName, bool detailed);
+	void checkAdminUser(UserType userType);
+	void checkDatabaseName(const char8_t *dbName);
+	void checkConnectedDatabaseName(
+		ConnectionOption &connOption, const char8_t *dbName);
+	void checkConnectedUserName(
+		ConnectionOption &connOption, const char8_t *userName);
+	void checkPartitionIdForUsers(PartitionId pId);
+	void checkDigest(const char8_t *digest, size_t maxStrLength);
+	void checkPrivilegeSize(DatabaseInfo &dbInfo, size_t size);
+	void checkModifiable(bool modifiable, bool value);
+
+
+	void initializeMetaContainer(
+		EventContext &ec, Event &ev, const Request &request,
+		util::XArray<const util::XArray<uint8_t>*> &logRecordList);
+
+	int64_t getCount(
+		EventContext &ec, const Request &request, const char8_t *containerName);
+	
+	void checkUser(
+		EventContext &ec, const Request &request, const char8_t *userName,
+		bool &existFlag);
+	void checkDatabase(
+		EventContext &ec, const Request &request, DatabaseInfo &dbInfo);
+	void checkDatabaseDetails(
+		EventContext &ec, const Request &request, DatabaseInfo &dbInfo,
+		bool &existFlag);
+
+	void putDatabaseRow(
+		EventContext &ec, Event &ev, const Request &request,
+		DatabaseInfo &dbInfo, bool isCreate,
+		util::XArray<const util::XArray<uint8_t>*> &logRecordList);
+
+	void getUserInfoList(
+		EventContext &ec, 
+		const Request &request, const char8_t *userName,
+		UserType userType, util::XArray<UserInfo*> &userInfoList);
+	
+private:
+	void fetchRole(TransactionContext &txn, util::StackAllocator &alloc, 
+		BaseContainer *container, ResultSet *rs, RoleType &role);
+	void removeRowWithRowKey(TransactionContext &txn, util::StackAllocator &alloc, 
+		const TransactionManager::ContextSource &cxtSrc, 
+		BaseContainer *container, const RowKeyData &rowKey,
+		util::XArray<const util::XArray<uint8_t> *> &logRecordList);
+	
+	void checkDigest(TransactionContext &txn, util::StackAllocator &alloc, 
+		BaseContainer *container, ResultSet *rs, const char8_t *digest);
+	bool checkPrivilege(TransactionContext &txn, util::StackAllocator &alloc, 
+		BaseContainer *container, ResultSet *rs, DatabaseInfo &dbInfo);
+	void makeUserInfoList(
+		TransactionContext &txn, util::StackAllocator &alloc,
+		BaseContainer &container, ResultSet &rs,
+		util::XArray<UserInfo*> &userInfoList);
+	void makeDatabaseInfoList(
+		TransactionContext &txn, util::StackAllocator &alloc,
+		BaseContainer &container, ResultSet &rs,
+		util::XArray<DatabaseInfo*> &dbInfoList);
+	void removeRowWithRS(TransactionContext &txn, util::StackAllocator &alloc, 
+		const TransactionManager::ContextSource &cxtSrc,
+		BaseContainer &container, ResultSet &rs,
+		util::XArray<const util::XArray<uint8_t> *> &logRecordList);
 };
 
 /*!
 	@brief Handles PUT_USER statement
 */
-class PutUserHandler : public StatementHandler {
+class PutUserHandler : public DbUserHandler {
 public:
 	void operator()(EventContext &ec, Event &ev);
+private:
+	void checkUserDetails(
+		EventContext &ec, const Request &request, const char8_t *userName,
+		const char8_t *digest, bool detailFlag, bool &existFlag);
+
+	void putUserRow(
+		EventContext &ec, Event &ev, const Request &request,
+		UserInfo &userInfo,
+		util::XArray<const util::XArray<uint8_t>*> &logRecordList);
 };
 
 /*!
 	@brief Handles DROP_USER statement
 */
-class DropUserHandler : public StatementHandler {
+class DropUserHandler : public DbUserHandler {
 public:
 	void operator()(EventContext &ec, Event &ev);
-
 private:
-	void executeTQLAndRemoveDatabaseRow(
-			EventContext &ec, Event &ev,
-			const Request &request, const char8_t *userName,
-			util::XArray<const util::XArray<uint8_t> *> &logRecordList);
+	void removeUserRowInDB(
+		EventContext &ec, Event &ev,
+		const Request &request, const char8_t *userName,
+		util::XArray<const util::XArray<uint8_t> *> &logRecordList);
 	void removeUserRow(
-			EventContext &ec, Event &ev, const Request &request,
-			const char8_t *userName,
-			util::XArray<const util::XArray<uint8_t> *> &logRecordList);
+		EventContext &ec, Event &ev, const Request &request,
+		const char8_t *userName,
+		util::XArray<const util::XArray<uint8_t> *> &logRecordList);
 };
 
 /*!
 	@brief Handles GET_USERS statement
 */
-class GetUsersHandler : public StatementHandler {
+class GetUsersHandler : public DbUserHandler {
 public:
 	void operator()(EventContext &ec, Event &ev);
+private:
+	void checkNormalUser(UserType userType, const char8_t *userName);
+	
+	void makeUserInfoListForAdmin(util::StackAllocator &alloc,
+		const char8_t *userName, util::XArray<UserInfo*> &userInfoList);
 };
 
 /*!
 	@brief Handles PUT_DATABASE statement
 */
-class PutDatabaseHandler : public StatementHandler {
+class PutDatabaseHandler : public DbUserHandler {
 public:
 	void operator()(EventContext &ec, Event &ev);
-
 private:
-	void checkDatabaseWithTQL(
-			EventContext &ec, const Request &request,
-			DatabaseInfo &dbInfo, bool &existFlag);
+	void setPrivilegeInfoListForAdmin(util::StackAllocator &alloc,
+		const char8_t *userName, util::XArray<PrivilegeInfo *> &privilegeInfoList);
+	void checkDatabase(
+		EventContext &ec, const Request &request, DatabaseInfo &dbInfo,
+		bool &existFlag);
 };
 
 /*!
 	@brief Handles DROP_DATABASE statement
 */
-class DropDatabaseHandler : public StatementHandler {
+class DropDatabaseHandler : public DbUserHandler {
 public:
 	void operator()(EventContext &ec, Event &ev);
-
 private:
-	void executeTQLAndRemoveDatabaseRow(
-			EventContext &ec, Event &ev,
-			const Request &request, const char8_t *dbName, bool isAdmin,
-			util::XArray<const util::XArray<uint8_t> *> &logRecordList);
+	void removeDatabaseRow(
+		EventContext &ec, Event &ev,
+		const Request &request, const char8_t *dbName, bool isAdmin,
+		util::XArray<const util::XArray<uint8_t> *> &logRecordList);
 };
 
 /*!
 	@brief Handles GET_DATABASES statement
 */
-class GetDatabasesHandler : public StatementHandler {
+class GetDatabasesHandler : public DbUserHandler {
 public:
 	void operator()(EventContext &ec, Event &ev);
-
 private:
-	void makePublicDatabaseInfoList(
-			util::StackAllocator &alloc,
-			util::XArray<UserInfo *> &userInfoList,
-			util::XArray<DatabaseInfo *> &dbInfoList);
-	void executeTQLDatabase(
-			EventContext &ec, const Request &request,
-			const char8_t *dbName, const char8_t *userName,
-			util::XArray<DatabaseInfo *> &dbInfoList);
+	void makeDatabaseInfoListForPublic(
+		util::StackAllocator &alloc,
+		util::XArray<UserInfo *> &userInfoList,
+		util::XArray<DatabaseInfo *> &dbInfoList);
+	void getDatabaseInfoList(
+		EventContext &ec, const Request &request,
+		const char8_t *dbName, const char8_t *userName,
+		util::XArray<DatabaseInfo *> &dbInfoList);
+	
+	void checkDatabaseInfoList(int32_t featureVersion, util::XArray<DatabaseInfo *> &dbInfoList);
 };
 
 /*!
 	@brief Handles PUT_PRIVILEGE statement
 */
-class PutPrivilegeHandler : public StatementHandler {
+class PutPrivilegeHandler : public DbUserHandler {
 public:
 	void operator()(EventContext &ec, Event &ev);
 };
@@ -2794,15 +2960,97 @@ public:
 /*!
 	@brief Handles DROP_PRIVILEGE statement
 */
-class DropPrivilegeHandler : public StatementHandler {
+class DropPrivilegeHandler : public DbUserHandler {
+public:
+	void operator()(EventContext &ec, Event &ev);
+private:
+	void removeDatabaseRow(
+		EventContext &ec, Event &ev,
+		const Request &request, DatabaseInfo &dbInfo,
+		util::XArray<const util::XArray<uint8_t> *> &logRecordList);
+};
+
+
+
+/*!
+	@brief Handles LOGIN statement
+*/
+class LoginHandler : public DbUserHandler {
+public:
+	/*!
+		@brief Represents the information about AuthenticationAck
+	*/
+	struct AuthenticationAck {
+		explicit AuthenticationAck(PartitionId pId) : pId_(pId) {}
+
+		PartitionId pId_;
+		ClusterVersionId clusterVer_;
+		AuthenticationId authId_;
+
+		PartitionId authPId_;
+	};
+	
+	static const uint32_t MAX_APPLICATION_NAME_LEN = 64;
+
+	void operator()(EventContext &ec, Event &ev);
+
+protected:
+	bool checkPublicDB(const char8_t *dbName);
+
+	void decodeAuthenticationAck(
+		util::ByteStream<util::ArrayInStream> &in, AuthenticationAck &ack);
+	void encodeAuthenticationAckPart(EventByteOutStream &out,
+		ClusterVersionId clusterVer, AuthenticationId authId, PartitionId authPId);
+
+	void executeAuthenticationInternal(
+		EventContext &ec,
+		util::StackAllocator &alloc, TransactionManager::ContextSource &cxtSrc,
+		const char8_t *userName, const char8_t *digest, const char8_t *dbName,
+		UserType userType, int checkLevel, DatabaseId &dbId, RoleType &role);
+
+private:
+	void checkClusterName(std::string &clusterName);
+	void checkApplicationName(const char8_t *applicationName);
+	
+	bool checkSystemDB(const char8_t *dbName);
+	bool checkAdmin(util::String &userName);
+	bool checkLocalAuthNode();
+	
+	void executeAuthentication(
+		EventContext &ec, Event &ev,
+		const NodeDescriptor &clientND, StatementId authStmtId,
+		const char8_t *userName, const char8_t *digest,
+		const char8_t *dbName, UserType userType);
+
+};
+
+/*!
+	@brief Handles AUTHENTICATION statement requested from another node
+*/
+class AuthenticationHandler : public LoginHandler {
+public:
+	void operator()(EventContext &ec, Event &ev);
+private:
+	void replyAuthenticationAck(EventContext &ec, util::StackAllocator &alloc,
+		const NodeDescriptor &ND, const AuthenticationAck &request,
+		DatabaseId dbId, RoleType role, bool isNewSQL = false);
+};
+/*!
+	@brief Handles AUTHENTICATION_ACK statement requested from another node
+*/
+class AuthenticationAckHandler : public LoginHandler {
 public:
 	void operator()(EventContext &ec, Event &ev);
 
+	void authHandleError(
+		EventContext &ec, AuthenticationAck &ack, std::exception &e);
 private:
-	bool removeDatabaseRow(
-			EventContext &ec, Event &ev,
-			const Request &request, DatabaseInfo &dbInfo);
+	void replySuccess(
+			EventContext &ec, util::StackAllocator &alloc,
+			StatementExecStatus status, const Request &request,
+			const AuthenticationContext &authContext);
 };
+
 
 /*!
 	@brief Handles CHECK_TIMEOUT event

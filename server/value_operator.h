@@ -1535,6 +1535,10 @@ public:
 
 	static const Operator isNull_;
 	static const Operator isNotNull_;
+	static const Operator geomOp_;
+
+	static const Operator getOperator(DSExpression::Operation op, 
+		ColumnType type1, ColumnType type2);
 };
 
 static inline void addByteByte(TransactionContext&, uint8_t const* p, uint32_t,

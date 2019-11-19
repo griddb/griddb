@@ -115,6 +115,9 @@ public:
 		PERSISTENCY_KEEP_ALL_LOG = 2
 	};
 
+	uint64_t getFileFlushCount() const;
+	uint64_t getFileFlushTime() const;
+
 	explicit LogManager(const Config &config);	
 
 	~LogManager();
@@ -431,6 +434,7 @@ public:
 		uint32_t ioWarningThresholdMillis_;
 
 		uint64_t retainedFileCount_;
+		uint32_t logFileClearCacheInterval_;
 		bool lsnBaseFileRetention_;
 	};
 
@@ -566,9 +570,12 @@ public:
 	void writeBlock(const void *buffer, uint64_t startIndex, uint32_t count);
 
 	void flush();
-	static void flush(
-			util::NamedFile &file, const Config &config, bool failOnClose);
-
+	static void clearCache(
+			util::NamedFile &file, const Config &config,
+			uint64_t flushCount, bool forceClearCache);
+	static uint64_t flush(
+			util::NamedFile &file, const Config &config, bool failOnClose,
+			uint64_t flushCount, bool forceClearCache);
 	util::NamedFile* getFileDirect() { return file_; }
 
 	void setDuplicateLogFile(util::NamedFile* file) { file2_ = file; }
@@ -887,7 +894,7 @@ public:
 	void putLog(const uint8_t *data, uint32_t size);
 
 	void writeBuffer();
-	void flushFile();
+	void flushFile(bool forceClearCache = false);
 
 	uint64_t copyLogFile(
 			PartitionGroupId pgId, const char8_t *dirPath, bool duplicateLogMode);
@@ -926,6 +933,13 @@ public:
 
 	void setLogVersion(uint16_t version);
 	uint16_t getLogVersion();
+
+	uint64_t getFileFlushCount() {
+		return flushCount_;
+	}
+	uint64_t getFileFlushTime() {
+		return flushTime_;
+	}
 
 private:
 	typedef std::map<CheckpointId, LogFileInfo*> FileInfoMap;
@@ -986,6 +1000,8 @@ private:
 
 	bool longtermSyncLogErrorFlag_; 
 	uint16_t logVersion_;
+	util::Atomic<uint64_t> flushCount_; 
+	util::Atomic<uint64_t> flushTime_;
 	const Config *config_;
 	UTIL_UNIQUE_PTR<BlockPool> blocksPool_;
 	std::vector<PartitionInfo> *partitionInfoList_;

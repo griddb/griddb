@@ -235,28 +235,30 @@ public:
 		std::transform(
 			s.begin(), s.end(), s.begin(), (int (*)(int))std::toupper);
 
+		util::DateTime::ZonedOption zonedOption = util::DateTime::ZonedOption::create(false, txn.getTimeZone());
+
 		if (s.compare("YEAR") == 0) {
-			t1.addField(static_cast<int32_t>(t2), util::DateTime::FIELD_YEAR);
+			t1.addField(static_cast<int32_t>(t2), util::DateTime::FIELD_YEAR, zonedOption);
 		}
 		else if (s.compare("MONTH") == 0) {
-			t1.addField(static_cast<int32_t>(t2), util::DateTime::FIELD_MONTH);
+			t1.addField(static_cast<int32_t>(t2), util::DateTime::FIELD_MONTH, zonedOption);
 		}
 		else if (s.compare("DAY") == 0) {
 			t1.addField(
-				static_cast<int32_t>(t2), util::DateTime::FIELD_DAY_OF_MONTH);
+				static_cast<int32_t>(t2), util::DateTime::FIELD_DAY_OF_MONTH, zonedOption);
 		}
 		else if (s.compare("HOUR") == 0) {
-			t1.addField(static_cast<int32_t>(t2), util::DateTime::FIELD_HOUR);
+			t1.addField(static_cast<int32_t>(t2), util::DateTime::FIELD_HOUR, zonedOption);
 		}
 		else if (s.compare("MINUTE") == 0) {
-			t1.addField(static_cast<int32_t>(t2), util::DateTime::FIELD_MINUTE);
+			t1.addField(static_cast<int32_t>(t2), util::DateTime::FIELD_MINUTE, zonedOption);
 		}
 		else if (s.compare("SECOND") == 0) {
-			t1.addField(static_cast<int32_t>(t2), util::DateTime::FIELD_SECOND);
+			t1.addField(static_cast<int32_t>(t2), util::DateTime::FIELD_SECOND, zonedOption);
 		}
 		else if (s.compare("MILLISECOND") == 0) {
 			t1.addField(
-				static_cast<int32_t>(t2), util::DateTime::FIELD_MILLISECOND);
+				static_cast<int32_t>(t2), util::DateTime::FIELD_MILLISECOND, zonedOption);
 		}
 		else {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_RANGE,
@@ -365,7 +367,8 @@ public:
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_RANGE,
 				"This time kind is invalid or not supported.");
 		}
-		result = dt1.getDifference(dt2, field_type);
+		util::DateTime::ZonedOption zonedOption = util::DateTime::ZonedOption::create(false, txn.getTimeZone());
+		result = dt1.getDifference(dt2, field_type, zonedOption);
 
 		return Expr::newNumericValue(result, txn);
 	}

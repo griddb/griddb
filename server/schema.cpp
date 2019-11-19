@@ -83,7 +83,7 @@ void TriggerInfo::encode(
 		out << info.operation_;
 
 		out << static_cast<uint32_t>(info.columnIds_.size());
-		for (util::XArray<ColumnId>::const_iterator it =
+		for (util::Vector<ColumnId>::const_iterator it =
 				 info.columnIds_.begin();
 			 it != info.columnIds_.end(); ++it) {
 			out << *it;
@@ -308,7 +308,7 @@ bool TriggerList::updateImage(TransactionContext &txn,
 			TriggerInfo before(alloc);
 			TriggerInfo::decode(encodedTrigger, before);
 
-			util::XArray<ColumnId> afterColumnIds(alloc);
+			util::Vector<ColumnId> afterColumnIds(alloc);
 			for (size_t j = 0; j < before.columnIds_.size(); j++) {
 				const ColumnId oldColumnId = before.columnIds_[j];
 				const util::String *oldColumName = oldColumnNameList[oldColumnId];
@@ -451,10 +451,10 @@ void ColumnInfo::set(TransactionContext &txn, ObjectManager &objectManager,
 
 	flags_ = 0;
 
-//	int64_t hashVal = messageSchema->getColumnCount();
-	const util::XArray<ColumnId> &keyColumnIds =
+	int64_t hashVal = messageSchema->getColumnCount();
+	const util::Vector<ColumnId> &keyColumnIds =
 		messageSchema->getRowKeyColumnIdList();
-	util::XArray<ColumnId>::const_iterator itr = 
+	util::Vector<ColumnId>::const_iterator itr = 
 		std::find(keyColumnIds.begin(), keyColumnIds.end(), fromColumnId);
 	if (itr != keyColumnIds.end()) {
 		flags_ |= COLUMN_FLAG_KEY;
@@ -563,85 +563,64 @@ void ColumnSchema::set(TransactionContext &txn, ObjectManager &objectManager,
 	MessageSchema *messageSchema, const AllocateStrategy &allocateStrategy,
 	bool onMemory) {
 	ColumnInfo *columnInfoList = getColumnInfoList();
-	if (!messageSchema->getRowKeyColumnIdList().empty()) {
-		ColumnId messageRowKeyColumnId = messageSchema->getRowKeyColumnIdList().front();
-		bool hasVariableColumn = false;
-		uint32_t columnId = 1;
-		for (uint32_t i = 0; i < columnNum_; i++) {
-			if (i == messageRowKeyColumnId) {
-				columnInfoList[0].initialize();
-				columnInfoList[0].set(
-					txn, objectManager, 0, i, messageSchema, allocateStrategy, onMemory);
-				if (!hasVariableColumn && columnInfoList[0].isVariable()) {
-					hasVariableColumn = true;
-				}
-			}
-			else {
-				columnInfoList[columnId].initialize();
-				columnInfoList[columnId].set(txn, objectManager, columnId, i,
-					messageSchema, allocateStrategy, onMemory);
-				if (!hasVariableColumn &&
-					columnInfoList[columnId].isVariable()) {
-					hasVariableColumn = true;
-				}
-				columnId++;
-			}
-		}
-		uint32_t nullsAndVarOffset =
-			ValueProcessor::calcNullsByteSize(columnNum_) +
-			(hasVariableColumn ? sizeof(OId) : 0);
-		rowFixedColumnSize_ = 0;
-		uint16_t variableColumnIndex = 0;  
-		for (uint16_t i = 0; i < columnNum_; i++) {
-			if (columnInfoList[i].isVariable()) {
-				columnInfoList[i].setOffset(
-					variableColumnIndex);  
-				++variableColumnIndex;
-			}
-			else {
-				columnInfoList[i].setOffset(nullsAndVarOffset + rowFixedColumnSize_);
-				rowFixedColumnSize_ += columnInfoList[i].getColumnSize();
-			}
-		}
-		variableColumnNum_ = variableColumnIndex;
-	}
-	else {
-		uint16_t variableColumnIndex = 0;  
-		uint32_t nullsAndVarOffset =
-			ValueProcessor::calcNullsByteSize(columnNum_);  
-		for (uint16_t i = 0; i < columnNum_; i++) {
-			columnInfoList[i].initialize();
-			columnInfoList[i].set(
-				txn, objectManager, i, i, messageSchema, allocateStrategy,
-				onMemory);
-			if (columnInfoList[i].isVariable()) {
-				columnInfoList[i].setOffset(
-					variableColumnIndex);  
-				++variableColumnIndex;
-			}
-			else {
-				columnInfoList[i].setOffset(nullsAndVarOffset + rowFixedColumnSize_);
-				rowFixedColumnSize_ += columnInfoList[i].getColumnSize();
-			}
-		}
-		variableColumnNum_ = variableColumnIndex;
+	const util::Vector<ColumnId> &keyColumnIds = messageSchema->getRowKeyColumnIdList();
+	uint16_t *rowKeyNumPtr = reinterpret_cast<uint16_t *>(getRowKeyPtr());
+	uint16_t rowKeyNum = static_cast<uint16_t>(keyColumnIds.size());
+	*rowKeyNumPtr = rowKeyNum;
+	rowKeyNumPtr++;
+	bool hasVariableColumn = false;
 
-		if (variableColumnIndex > 0) {
-			nullsAndVarOffset =
-				ValueProcessor::calcNullsByteSize(columnNum_) + sizeof(OId);
-			rowFixedColumnSize_ = 0;
-			for (uint16_t i = 0; i < columnNum_; i++) {
-				if (!columnInfoList[i].isVariable()) {
-					columnInfoList[i].setOffset(
-						nullsAndVarOffset + rowFixedColumnSize_);
-					rowFixedColumnSize_ += columnInfoList[i].getColumnSize();
-				}
+	uint32_t columnId = 0;
+	util::Vector<ColumnId>::const_iterator itr;
+	for (itr = keyColumnIds.begin(); itr != keyColumnIds.end(); itr++) {
+		uint32_t i = *itr;
+		columnInfoList[columnId].initialize();
+		columnInfoList[columnId].set(txn, objectManager, columnId, i,
+			messageSchema, allocateStrategy, onMemory);
+		if (!hasVariableColumn &&
+			columnInfoList[columnId].isVariable()) {
+			hasVariableColumn = true;
+		}
+
+		*rowKeyNumPtr = columnId;
+		rowKeyNumPtr++;
+
+		columnId++;
+	}
+	for (uint32_t i = 0; i < columnNum_; i++) {
+		util::Vector<ColumnId>::const_iterator itr = 
+			std::find(keyColumnIds.begin(), keyColumnIds.end(), i);
+		if (itr == keyColumnIds.end()) {
+			columnInfoList[columnId].initialize();
+			columnInfoList[columnId].set(txn, objectManager, columnId, i,
+				messageSchema, allocateStrategy, onMemory);
+			if (!hasVariableColumn &&
+				columnInfoList[columnId].isVariable()) {
+				hasVariableColumn = true;
 			}
+			columnId++;
 		}
 	}
+	uint32_t nullsAndVarOffset =
+		ValueProcessor::calcNullsByteSize(columnNum_) +
+		(hasVariableColumn ? sizeof(OId) : 0);
+	rowFixedColumnSize_ = 0;
+	uint16_t variableColumnIndex = 0;  
+	for (uint16_t i = 0; i < columnNum_; i++) {
+		if (columnInfoList[i].isVariable()) {
+			columnInfoList[i].setOffset(
+				variableColumnIndex);  
+			++variableColumnIndex;
+		}
+		else {
+			columnInfoList[i].setOffset(nullsAndVarOffset + rowFixedColumnSize_);
+			rowFixedColumnSize_ += columnInfoList[i].getColumnSize();
+		}
+	}
+	variableColumnNum_ = variableColumnIndex;
 	{
 		uint16_t *rowKeyNumPtr = reinterpret_cast<uint16_t *>(getRowKeyPtr());
-		const util::XArray<ColumnId> &schemaKeyColumnIdList = messageSchema->getRowKeyColumnIdList();
+		const util::Vector<ColumnId> &schemaKeyColumnIdList = messageSchema->getRowKeyColumnIdList();
 		uint16_t rowKeyNum = static_cast<uint16_t>(schemaKeyColumnIdList.size());
 		*rowKeyNumPtr = rowKeyNum;
 		rowKeyNumPtr++;
@@ -655,6 +634,42 @@ void ColumnSchema::set(TransactionContext &txn, ObjectManager &objectManager,
 	messageSchema->getFirstSchema(columnNum, varColumnNum, rowFixedColumnSize);
 	if (columnNum != 0) {
 		setFirstSchema(columnNum, varColumnNum, rowFixedColumnSize);
+	}
+}
+
+void ColumnSchema::set(util::StackAllocator &alloc,
+		ColumnSchema *srcSchema,
+		const util::Vector<ColumnId> &columnIds) {
+	ColumnInfo *columnInfoList = getColumnInfoList();
+	uint16_t variableColumnIndex = 0;  
+	uint32_t nullsAndVarOffset =
+		ValueProcessor::calcNullsByteSize(columnNum_);  
+	for (uint16_t i = 0; i < columnNum_; i++) {
+		ColumnId oldColumnId = columnIds[i];
+		columnInfoList[i] = srcSchema->getColumnInfo(oldColumnId);
+		if (columnInfoList[i].isVariable()) {
+			columnInfoList[i].setOffset(
+				variableColumnIndex);  
+			++variableColumnIndex;
+		}
+		else {
+			columnInfoList[i].setOffset(nullsAndVarOffset + rowFixedColumnSize_);
+			rowFixedColumnSize_ += columnInfoList[i].getColumnSize();
+		}
+	}
+	variableColumnNum_ = variableColumnIndex;
+
+	if (variableColumnIndex > 0) {
+		nullsAndVarOffset =
+			ValueProcessor::calcNullsByteSize(columnNum_) + sizeof(OId);
+		rowFixedColumnSize_ = 0;
+		for (uint16_t i = 0; i < columnNum_; i++) {
+			if (!columnInfoList[i].isVariable()) {
+				columnInfoList[i].setOffset(
+					nullsAndVarOffset + rowFixedColumnSize_);
+				rowFixedColumnSize_ += columnInfoList[i].getColumnSize();
+			}
+		}
 	}
 }
 
@@ -683,8 +698,8 @@ void ColumnSchema::getColumnInfo(TransactionContext &txn,
 */
 int64_t ColumnSchema::calcSchemaHashKey(MessageSchema *messageSchema) {
 	int64_t hashVal = messageSchema->getColumnCount();
-	const util::XArray<ColumnId> &keyColumnIds = messageSchema->getRowKeyColumnIdList();
-	util::XArray<ColumnId>::const_iterator itr;
+	const util::Vector<ColumnId> &keyColumnIds = messageSchema->getRowKeyColumnIdList();
+	util::Vector<ColumnId>::const_iterator itr;
 	for (itr = keyColumnIds.begin(); itr != keyColumnIds.end(); itr++) {
 		hashVal += *itr;
 	}
@@ -709,7 +724,7 @@ int64_t ColumnSchema::calcSchemaHashKey(MessageSchema *messageSchema) {
 bool ColumnSchema::schemaCheck(TransactionContext &txn,
 	ObjectManager &objectManager, MessageSchema *messageSchema) {
 	bool isSameSchema = true;
-	util::XArray<ColumnId> columnMap(txn.getDefaultAllocator());
+	util::Vector<ColumnId> columnMap(txn.getDefaultAllocator());
 
 	uint32_t columnNum = messageSchema->getColumnCount();
 
@@ -729,9 +744,9 @@ bool ColumnSchema::schemaCheck(TransactionContext &txn,
 		}
 	}
 	if (isSameSchema) {
-		util::XArray<ColumnId> keyColumnIdList(txn.getDefaultAllocator());
+		util::Vector<ColumnId> keyColumnIdList(txn.getDefaultAllocator());
 		getKeyColumnIdList(keyColumnIdList);
-		const util::XArray<ColumnId> &schemaKeyColumnIdList = messageSchema->getRowKeyColumnIdList();
+		const util::Vector<ColumnId> &schemaKeyColumnIdList = messageSchema->getRowKeyColumnIdList();
 		if (keyColumnIdList.size() != schemaKeyColumnIdList.size()) {
 			isSameSchema = false;
 		}
@@ -785,6 +800,14 @@ bool ColumnSchema::schemaCheck(TransactionContext &txn,
 	return isSameSchema;
 }
 
+std::string ColumnSchema::dump(TransactionContext &txn, ObjectManager &objectManager) {
+	util::NormalOStringStream ss;
+	for (size_t i = 0; i < getColumnNum(); i++) {
+		ss << "[" << i << "]" << getColumnInfo(i).dump(txn, objectManager) << std::endl;
+	}
+	return ss.str();
+}
+
 /*!
 	@brief Allocate IndexSchema Object
 */
@@ -828,15 +851,17 @@ bool IndexSchema::createIndexInfo(
 	@brief Deletes Index Info from Index Schema
 */
 void IndexSchema::dropIndexInfo(
-	TransactionContext &txn, ColumnId columnId, MapType mapType) {
+	TransactionContext &txn, util::Vector<ColumnId> &columnIds, MapType mapType) {
 	setDirty();
 
 	bool isFound = false;
-	IndexData indexData;
+	IndexData indexData(txn.getDefaultAllocator());
 	AllocateStrategy allocateStrategy;
 	for (uint16_t i = 0; i < getIndexNum(); i++) {
 		getIndexData(txn, i, UNDEF_CONTAINER_POS, indexData);
-		if (indexData.columnId_ == columnId && indexData.mapType_ == mapType) {
+		if (indexData.mapType_ == mapType &&
+			(columnIds.size() == indexData.columnIds_->size()) &&
+			std::equal(columnIds.begin(), columnIds.end(), indexData.columnIds_->begin())) {
 			isFound = true;
 			OId optionOId = getOptionOId(getElemHead() + (getIndexDataSize() * i));
 			getObjectManager()->free(txn.getPartitionId(), optionOId);
@@ -858,38 +883,51 @@ void IndexSchema::dropIndexInfo(
 /*!
 	@brief Creates Index Object
 */
-IndexData IndexSchema::createIndexData(TransactionContext &txn, ColumnId columnId,
-	MapType mapType, ColumnType columnType, BaseContainer *container,
+IndexData IndexSchema::createIndexData(TransactionContext &txn, const util::Vector<ColumnId> &columnIds,
+	MapType mapType, const util::Vector<ColumnType> &columnTypes, BaseContainer *container,
 	uint64_t containerPos, bool isUnique) {
 	setDirty();
 
+	TreeFuncInfo *funcInfo = container->createTreeFuncInfo(txn, columnIds);
 	OId oId;
 	switch (mapType) {
 	case MAP_TYPE_BTREE: {
+		uint32_t elemSize = BtreeMap::getDefaultElemSize();
+		ColumnType columntype = columnTypes[0];
+		if (columnIds.size() > 1) {
+			columntype = COLUMN_TYPE_COMPOSITE;
+			ColumnSchema *columnSchema = funcInfo->getColumnSchema();
+			uint32_t fixedColumnsSize = columnSchema->getRowFixedColumnSize();
+			bool hasVariable = columnSchema->getVariableColumnNum() > 0;
+			elemSize = CompositeInfoObject::calcSize(
+				columnSchema->getColumnNum(),
+				fixedColumnsSize, hasVariable) + sizeof(OId);
+		}
 		BtreeMap map(txn, *getObjectManager(),
-			container->getMapAllcateStrategy(), container);
-		map.initialize(txn, columnType, isUnique, BtreeMap::TYPE_SINGLE_KEY);
+			container->getMapAllcateStrategy(), container, funcInfo);
+		map.initialize(txn, columntype, isUnique, BtreeMap::TYPE_SINGLE_KEY, elemSize);
 		oId = map.getBaseOId();
 	} break;
 	case MAP_TYPE_HASH: {
 		HashMap map(txn, *getObjectManager(),
-			container->getMapAllcateStrategy(), container);
-		map.initialize(txn, columnType, columnId,
+			container->getMapAllcateStrategy(), container, funcInfo);
+		map.initialize(txn, columnTypes[0], columnIds[0],
 			container->getMetaAllcateStrategy(), isUnique);
 		oId = map.getBaseOId();
 	} break;
 	case MAP_TYPE_SPATIAL: {
 		RtreeMap map(txn, *getObjectManager(),
-			container->getMapAllcateStrategy(), container);
-		map.initialize(txn, columnType, columnId,
+			container->getMapAllcateStrategy(), container, funcInfo);
+		map.initialize(txn, columnTypes[0], columnIds[0],
 			container->getMetaAllcateStrategy(), isUnique);
 		oId = map.getBaseOId();
 	} break;
 	default:
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
 	}
-	IndexData indexData;
-	uint16_t nth = getNth(columnId, mapType);
+	IndexData indexData(txn.getDefaultAllocator());
+	bool withPartialMatch = false;
+	uint16_t nth = getNth(txn, columnIds, mapType, withPartialMatch);
 	getIndexData(txn, nth, UNDEF_CONTAINER_POS, indexData);
 	indexData.oIds_.mainOId_ = oId;
 	setIndexData(txn, nth, containerPos, indexData);
@@ -898,34 +936,41 @@ IndexData IndexSchema::createIndexData(TransactionContext &txn, ColumnId columnI
 }
 
 void IndexSchema::createDummyIndexData(TransactionContext &txn,
-	ColumnId columnId, MapType mapType, uint64_t containerPos) {
+	IndexInfo &indexInfo, uint64_t containerPos) {
 	setDirty();
 
 	OId oId = UNDEF_OID;
-	IndexData indexData;
-	uint16_t nth = getNth(columnId, mapType);
-	getIndexData(txn, nth, UNDEF_CONTAINER_POS, indexData);
+	IndexData indexData(txn.getDefaultAllocator());
+	bool withUncommitted = true;
+	bool withPartialMatch = false;
+	getIndexData(txn, indexInfo.columnIds_, indexInfo.mapType, UNDEF_CONTAINER_POS, 
+		withUncommitted, withPartialMatch, indexData);
+	uint16_t nth = getNth(txn, *(indexData.columnIds_), indexData.mapType_, withPartialMatch);
 	indexData.oIds_.mainOId_ = oId;
 	uint8_t *indexDataPos =	getElemHead() + (getIndexDataSize() * nth);
 	setMapOIds(txn, indexDataPos, containerPos, indexData.oIds_);
 }
 
+
 /*!
 	@brief Free Index Object
 */
-void IndexSchema::dropIndexData(TransactionContext &txn, ColumnId columnId,
+void IndexSchema::dropIndexData(TransactionContext &txn, util::Vector<ColumnId> &columnIds,
 	MapType mapType, BaseContainer *container, uint64_t containerPos,
 	bool isMapFinalize) {
+	bool withPartialMatch = false;
 	setDirty();
 	if (isMapFinalize) {
 		bool withUncommitted = true; 
-		IndexData indexData;
-		if (getIndexData(txn, columnId, mapType, containerPos, withUncommitted,
-			indexData)) {
+		IndexData indexData(txn.getDefaultAllocator());
+		if (getIndexData(txn, columnIds, mapType, containerPos, withUncommitted,
+			withPartialMatch, indexData)) {
 			StackAllocAutoPtr<BaseIndex> mainMap(txn.getDefaultAllocator(),
 				getIndex(txn, indexData, false, container));
-			container->getDataStore()->finalizeMap
-				(txn, container->getMapAllcateStrategy(), mainMap.get());
+			if (mainMap.get() != NULL) {
+				container->getDataStore()->finalizeMap
+					(txn, container->getMapAllcateStrategy(), mainMap.get());
+			}
 			StackAllocAutoPtr<BaseIndex> nullMap(txn.getDefaultAllocator(),
 				getIndex(txn, indexData, true, container));
 			if (nullMap.get() != NULL) {
@@ -934,7 +979,7 @@ void IndexSchema::dropIndexData(TransactionContext &txn, ColumnId columnId,
 			}
 		}
 	}
-	uint16_t nth = getNth(columnId, mapType);
+	uint16_t nth = getNth(txn, columnIds, mapType, withPartialMatch);
 	uint8_t *indexDataPos = getElemHead() + (getIndexDataSize() * nth);
 	removeMapOIds(txn, indexDataPos, containerPos);
 }
@@ -945,7 +990,8 @@ void IndexSchema::dropIndexData(TransactionContext &txn, ColumnId columnId,
 void IndexSchema::updateIndexData(
 	TransactionContext &txn, const IndexData &updateIndexData, uint64_t containerPos) {
 	setDirty();
-	uint16_t nth = getNth(updateIndexData.columnId_, updateIndexData.mapType_);
+	bool withPartialMatch = false;
+	uint16_t nth = getNth(txn, *(updateIndexData.columnIds_), updateIndexData.mapType_, withPartialMatch);
 	uint8_t *indexDataPos = getElemHead() + (getIndexDataSize() * nth);
 	updateMapOIds(txn, indexDataPos, containerPos, updateIndexData.oIds_);
 	if (updateIndexData.status_!= DDL_READY) {
@@ -956,26 +1002,30 @@ void IndexSchema::updateIndexData(
 	}
 }
 
-void IndexSchema::commit(TransactionContext &txn, ColumnId columnId, MapType mapType) {
+void IndexSchema::commit(TransactionContext &txn, IndexCursor &indexCursor) {
 	setDirty();
-	uint16_t nth = getNth(columnId, mapType);
+	uint16_t nth = getNth(indexCursor.getColumnId(), indexCursor.getMapType(), indexCursor.getOId());
 	uint8_t *indexDataPos = getElemHead() + (getIndexDataSize() * nth);
 	if (nth == UNDEF_INDEX_POS || getStatus(indexDataPos) == DDL_READY) {
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "nth=" << nth
-			<< "columnId=" << columnId << ", mapType=" << (int32_t)mapType);
+			<< ", optionOId=" << indexCursor.getOId() 
+			<< ", columnId=" << indexCursor.getColumnId() 
+			<< ", mapType=" << (int32_t)indexCursor.getMapType());
 	}
 	setStatus(indexDataPos, DDL_READY);
 }
+
 
 /*!
 	@brief Check if Index is defined
 */
 bool IndexSchema::hasIndex(
-	TransactionContext &txn, ColumnId columnId, MapType mapType) const {
-	IndexData indexData;
+	TransactionContext &txn, util::Vector<ColumnId> &columnIds,
+	MapType mapType, bool withPartialMatch) const {
+	IndexData indexData(txn.getDefaultAllocator());
 	bool withUncommitted = false;
-	return getIndexData(txn, columnId, mapType, UNDEF_CONTAINER_POS, 
-		withUncommitted, indexData);
+	return getIndexData(txn, columnIds, mapType, UNDEF_CONTAINER_POS, 
+		withUncommitted, withPartialMatch, indexData);
 }
 
 /*!
@@ -989,20 +1039,42 @@ bool IndexSchema::hasIndex(IndexTypes indexType, MapType mapType) {
 	@brief Get list of Index type defined on Column
 */
 IndexTypes IndexSchema::getIndexTypes(
+	TransactionContext &txn, util::Vector<ColumnId> &columnIds, 
+	bool withPartialMatch) const {
+	IndexTypes indexType = 0;
+	bool withUncommitted = false;
+	for (uint16_t i = 0; i < getIndexNum(); i++) {
+		uint8_t *indexDataPos = getElemHead() + (getIndexDataSize() * i);
+		DDLStatus status = getStatus(indexDataPos);
+		if (compareColumnIds(txn, indexDataPos, columnIds, 
+				getOptionOId(indexDataPos), withPartialMatch) &&
+			(withUncommitted || status == DDL_READY)) {
+			MapType mapType = getMapType(indexDataPos);
+			indexType |= (1 << mapType);
+		}
+	}
+
+	return indexType;
+}
+
+IndexTypes IndexSchema::getIndexTypes(
 	TransactionContext &txn, ColumnId columnId) const {
 	IndexTypes indexType = 0;
-	IndexData indexData;
+	IndexData indexData(txn.getDefaultAllocator());
+	util::Vector<ColumnId> columnIds(txn.getDefaultAllocator());
+	columnIds.push_back(columnId);
 	bool withUncommitted = false;
-	if (getIndexData(txn, columnId, MAP_TYPE_BTREE, UNDEF_CONTAINER_POS,
-		withUncommitted, indexData)) {
+	bool withPartialMatch = true;
+	if (getIndexData(txn, columnIds, MAP_TYPE_BTREE, UNDEF_CONTAINER_POS,
+		withUncommitted, withPartialMatch, indexData)) {
 		indexType |= (1 << MAP_TYPE_BTREE);
 	}
-	if (getIndexData(txn, columnId, MAP_TYPE_HASH, UNDEF_CONTAINER_POS,
-		withUncommitted, indexData)) {
+	if (getIndexData(txn, columnIds, MAP_TYPE_HASH, UNDEF_CONTAINER_POS,
+		withUncommitted, withPartialMatch, indexData)) {
 		indexType |= (1 << MAP_TYPE_HASH);
 	}
-	if (getIndexData(txn, columnId, MAP_TYPE_SPATIAL, UNDEF_CONTAINER_POS, 
-		withUncommitted, indexData)) {
+	if (getIndexData(txn, columnIds, MAP_TYPE_SPATIAL, UNDEF_CONTAINER_POS, 
+		withUncommitted, withPartialMatch, indexData)) {
 		indexType |= (1 << MAP_TYPE_SPATIAL);
 	}
 	return indexType;
@@ -1014,7 +1086,7 @@ IndexTypes IndexSchema::getIndexTypes(
 void IndexSchema::getIndexList(TransactionContext &txn, uint64_t containerPos,
 	bool withUncommitted, util::XArray<IndexData> &list) const {
 	for (uint16_t i = 0; i < getIndexNum(); i++) {
-		IndexData indexData;
+		IndexData indexData(txn.getDefaultAllocator());
 		getIndexData(txn, i, containerPos, indexData);
 		if (withUncommitted || indexData.status_ == DDL_READY) {
 			list.push_back(indexData);
@@ -1025,19 +1097,70 @@ void IndexSchema::getIndexList(TransactionContext &txn, uint64_t containerPos,
 /*!
 	@brief Get Index Data defined on Column
 */
-bool IndexSchema::getIndexData(TransactionContext &txn, ColumnId columnId,
-	MapType mapType, uint64_t containerPos, bool withUncommitted, 
+bool IndexSchema::getIndexData(TransactionContext &txn, const util::Vector<ColumnId> &columnIds,
+	MapType mapType, uint64_t containerPos, bool withUncommitted, bool withPartialMatch, 
 	IndexData &indexData) const {
 	bool isFound = false;
 	for (uint16_t i = 0; i < getIndexNum(); i++) {
 		uint8_t *indexDataPos = getElemHead() + (getIndexDataSize() * i);
 		DDLStatus status = getStatus(indexDataPos);
-		if (getColumnId(indexDataPos) == columnId &&
-			getMapType(indexDataPos) == mapType &&
+		if (getMapType(indexDataPos) == mapType &&
+		    compareColumnIds(txn, indexDataPos, columnIds, 
+				getOptionOId(indexDataPos), withPartialMatch) &&
 			(withUncommitted || status == DDL_READY)) {
 			indexData.oIds_ = getMapOIds(txn, indexDataPos, containerPos);
-			indexData.columnId_ = getColumnId(indexDataPos);
+			indexData.optionOId_ = getOptionOId(indexDataPos);
 			indexData.mapType_ = getMapType(indexDataPos);
+			indexData.columnIds_->clear();
+			if (isComposite(indexDataPos)) {
+				BaseObject option(txn.getPartitionId(), *getObjectManager(),
+					getOptionOId(indexDataPos));
+				getCompositeColumnIds(option.getBaseAddr(), *(indexData.columnIds_));
+			} else {
+				indexData.columnIds_->push_back(getColumnId(indexDataPos));
+			}
+
+			indexData.status_ = getStatus(indexDataPos);
+			if (status != DDL_READY) {
+				BaseObject option(txn.getPartitionId(), *getObjectManager(),
+					getOptionOId(indexDataPos));
+				indexData.cursor_ = getRowId(option.getBaseAddr());
+			} else {
+				indexData.cursor_ = MAX_ROWID;
+			}
+			isFound = true;
+			break;
+		}
+	}
+	return isFound;
+}
+
+bool IndexSchema::getIndexData(TransactionContext &txn, const IndexCursor &indexCursor,
+	uint64_t containerPos, IndexData &indexData) const {
+
+	ColumnId firstColumnId = indexCursor.getColumnId();
+	MapType mapType = indexCursor.getMapType();
+	OId optionOId = indexCursor.getOId();
+
+	bool isFound = false;
+	for (uint16_t i = 0; i < getIndexNum(); i++) {
+		uint8_t *indexDataPos = getElemHead() + (getIndexDataSize() * i);
+		DDLStatus status = getStatus(indexDataPos);
+		if (getMapType(indexDataPos) == mapType &&
+			getColumnId(indexDataPos) == firstColumnId &&
+			getOptionOId(indexDataPos) == optionOId) {
+			indexData.oIds_ = getMapOIds(txn, indexDataPos, containerPos);
+			indexData.optionOId_ = getOptionOId(indexDataPos);
+			indexData.mapType_ = getMapType(indexDataPos);
+			indexData.columnIds_->clear();
+			if (isComposite(indexDataPos)) {
+				BaseObject option(txn.getPartitionId(), *getObjectManager(),
+					getOptionOId(indexDataPos));
+				getCompositeColumnIds(option.getBaseAddr(), *(indexData.columnIds_));
+			} else {
+				indexData.columnIds_->push_back(getColumnId(indexDataPos));
+			}
+
 			indexData.status_ = getStatus(indexDataPos);
 			if (status != DDL_READY) {
 				BaseObject option(txn.getPartitionId(), *getObjectManager(),
@@ -1064,7 +1187,8 @@ void IndexSchema::createNullIndexData(TransactionContext &txn,
 	map.initialize(txn, nullType, isUnique, BtreeMap::TYPE_SINGLE_KEY);
 	indexData.oIds_.nullOId_ = map.getBaseOId();
 
-	uint16_t nth = getNth(indexData.columnId_, indexData.mapType_);
+	bool withPartialMatch = false;
+	uint16_t nth = getNth(txn, *(indexData.columnIds_), indexData.mapType_, withPartialMatch);
 	uint8_t *indexDataPos = getElemHead() + (getIndexDataSize() * nth);
 	updateMapOIds(txn, indexDataPos, containerPos, indexData.oIds_);
 }
@@ -1073,9 +1197,10 @@ void IndexSchema::getIndexInfoList(TransactionContext &txn,
 	BaseContainer *container, const IndexInfo &indexInfo, 
 	bool withUncommitted, util::Vector<IndexInfo> &matchList, 
 	util::Vector<IndexInfo> &mismatchList,
-	bool isIndexNameCaseSensitive) {
+	bool isIndexNameCaseSensitive,
+	bool withPartialMatch) {
 	for (uint16_t i = 0; i < getIndexNum(); i++) {
-		IndexData indexData;
+		IndexData indexData(txn.getDefaultAllocator());
 		getIndexData(txn, i, UNDEF_CONTAINER_POS, indexData);
 		if (!withUncommitted && indexData.status_ != DDL_READY) {
 			continue;
@@ -1083,9 +1208,11 @@ void IndexSchema::getIndexInfoList(TransactionContext &txn,
 
 		IndexInfo currentIndexInfo(txn.getDefaultAllocator());
 		getIndexInfo(txn, i, currentIndexInfo);
-		bool isColumnIdsMatch = 
-			std::find(indexInfo.columnIds_.begin(), indexInfo.columnIds_.end(), currentIndexInfo.columnIds_[0])
-			!= indexInfo.columnIds_.end();
+		bool isColumnIdsMatch = false;
+		if ((!withPartialMatch && indexInfo.columnIds_.size() == currentIndexInfo.columnIds_.size()) ||
+			(withPartialMatch && indexInfo.columnIds_.size() <= currentIndexInfo.columnIds_.size())) {
+			isColumnIdsMatch = std::equal(indexInfo.columnIds_.begin(), indexInfo.columnIds_.end(), currentIndexInfo.columnIds_.begin());
+		}
 
 		bool isMapTypeMatch;
 		if (indexInfo.mapType == MAP_TYPE_DEFAULT) {
@@ -1137,6 +1264,30 @@ void IndexSchema::getIndexInfoList(TransactionContext &txn,
 	}
 }
 
+void IndexSchema::getIndexDataList(TransactionContext &txn, util::Vector<ColumnId> &columnIds,
+	MapType mapType, bool withUncommitted, 
+	util::Vector<IndexData> &indexDataList, bool withPartialMatch) {
+	for (uint16_t i = 0; i < getIndexNum(); i++) {
+		IndexData indexData(txn.getDefaultAllocator());
+		getIndexData(txn, i, UNDEF_CONTAINER_POS, indexData);
+		if (!withUncommitted && indexData.status_ != DDL_READY) {
+			continue;
+		}
+		bool isMapTypeMatch;
+		if (mapType != indexData.mapType_) {
+			continue;
+		}
+		bool isColumnIdsMatch = false;
+		if ((!withPartialMatch && columnIds.size() == columnIds.size()) ||
+			(withPartialMatch && columnIds.size() <= columnIds.size())) {
+			isColumnIdsMatch = std::equal(columnIds.begin(), columnIds.end(), indexData.columnIds_->begin());
+		}
+		if (isColumnIdsMatch) {
+			indexDataList.push_back(indexData);
+		}
+	}
+}
+
 /*!
 	@brief Free all Index Objects
 */
@@ -1148,7 +1299,7 @@ void IndexSchema::dropAll(TransactionContext &txn, BaseContainer *container,
 		bool withUncommitted = true;
 		getIndexList(txn, containerPos, withUncommitted, list);
 		for (size_t i = 0; i < list.size(); i++) {
-			dropIndexData(txn, list[i].columnId_, list[i].mapType_, container,
+			dropIndexData(txn, *(list[i].columnIds_), list[i].mapType_, container,
 				containerPos, isMapFinalize);
 		}
 	}
@@ -1164,7 +1315,7 @@ void IndexSchema::finalize(TransactionContext &txn) {
 		bool withUncommitted = true;
 		getIndexList(txn, UNDEF_CONTAINER_POS, withUncommitted, list);
 		for (size_t i = 0; i < list.size(); i++) {
-			dropIndexInfo(txn, list[i].columnId_, list[i].mapType_);
+			dropIndexInfo(txn, *(list[i].columnIds_), list[i].mapType_);
 		}
 		BaseObject::finalize();
 	}
@@ -1189,8 +1340,9 @@ BaseIndex *IndexSchema::getIndex(TransactionContext &txn, const IndexData &index
 	if (mapOId == UNDEF_OID) {
 		return NULL;
 	}
+	TreeFuncInfo *funcInfo = container->createTreeFuncInfo(txn, *(indexData.columnIds_));
 	BaseIndex *map = DataStore::getIndex(txn, *getObjectManager(), mapType, 
-		mapOId, strategy, container);
+		mapOId, strategy, container, funcInfo);
 	return map;
 }
 
@@ -1265,7 +1417,7 @@ bool CompressionSchema::isHiCompression(ColumnId columnId) const {
 }
 
 void CompressionSchema::getHiCompressionColumnList(
-	util::XArray<ColumnId> &list) const {
+	util::Vector<ColumnId> &list) const {
 	HiCompressionData *hiCompressionDataList = getHiCompressionDataList();
 	for (uint16_t i = 0; i < hiCompressionColumnNum_; i++) {
 		list.push_back(hiCompressionDataList[i].getColumnId());
@@ -2109,7 +2261,6 @@ BibInfo::Container::CompressionInfo::CompressionInfo() : rate_(0),span_(0),width
 
 template<typename T>
 bool BibInfo::setKey(const picojson::value &json, const char *key, T &output, bool isOption) {
-//	const picojson::value &existKey = json.get(key);
 	const T *jsonValue = 
 		JsonUtils::find< T >(json, key);
 	if (jsonValue == NULL && !json.get(key).is<picojson::null>()) {
@@ -2131,7 +2282,6 @@ bool BibInfo::setKey(const picojson::value &json, const char *key, T &output, bo
 template<typename T>
 bool BibInfo::setIntegerKey(const picojson::value &json, const char *key, T &output, bool isOption) {
 	UTIL_STATIC_ASSERT(std::numeric_limits<T>::is_integer);
-//	const picojson::value &existKey = json.get(key);
 	const double *jsonValue = 
 		JsonUtils::find< double >(json, key);
 	if (jsonValue == NULL && !json.get(key).is<picojson::null>()) {
@@ -2153,7 +2303,6 @@ bool BibInfo::setIntegerKey(const picojson::value &json, const char *key, T &out
 template<typename T>
 bool BibInfo::setStringIntegerKey(const picojson::value &json, const char *key, T &output, bool isOption) {
 	UTIL_STATIC_ASSERT(std::numeric_limits<T>::is_integer);
-//	const picojson::value &existKey = json.get(key);
 	const std::string *jsonValue = 
 		JsonUtils::find< std::string >(json, key);
 	if (jsonValue == NULL && !json.get(key).is<picojson::null>()) {
@@ -2222,7 +2371,7 @@ void BibInfo::Container::load(const picojson::value &json) {
 	BibInfo::setIntegerKey<SchemaVersionId>(*attrJson, "schemaVersion", schemaVersion_, false);
 	BibInfo::setIntegerKey<PartitionId>(*attrJson, "partitionNo", partitionNo_, false);
 
-	BibInfo::setKey<bool>(*attrJson, "rowKeyAssigned", rowKeyAssigned_, true);
+	bool isRowKeyAssignedExist = BibInfo::setKey<bool>(*attrJson, "rowKeyAssigned", rowKeyAssigned_, true);
 
 	const picojson::value *timeSeriesProperties = JsonUtils::find<picojson::value>(*attrJson, "timeSeriesProperties");
 	if (timeSeriesProperties != NULL) {
@@ -2233,8 +2382,9 @@ void BibInfo::Container::load(const picojson::value &json) {
 		timeSeriesProperties_.load(*timeSeriesProperties);
 	}
 
-	const std::vector<picojson::value> *columnSetValue = 
-		JsonUtils::find< std::vector<picojson::value> >(*attrJson, "columnSet");
+	const picojson::array *columnSetValue = 
+		JsonUtils::find< picojson::array >(*attrJson, "columnSet");
+
 	{
 		if (columnSetValue == NULL) {
 			GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
@@ -2248,6 +2398,30 @@ void BibInfo::Container::load(const picojson::value &json) {
 			Column columnValue;
 			columnValue.load((*columnSetValue)[i]);
 			columnSet_.push_back(columnValue);
+		}
+	}
+	const picojson::value *rowKeySetValue = JsonUtils::find<picojson::value>(*attrJson, "rowKeySet");
+	if (isRowKeyAssignedExist) {
+		if (rowKeySetValue != NULL) {
+			GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+				"Format version error, rowKeySet and rowKeyAssigned must not exist together");
+		}
+		if (rowKeyAssigned_) {
+			rowKeySet_.push_back(columnSet_[0].columnName_);
+		}
+	} else if (rowKeySetValue != NULL) {
+		if (!(rowKeySetValue->is<picojson::array>())) {
+			GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+				"Json key type unmatched , rowKeySet");
+		}
+		const picojson::array &list = rowKeySetValue->get<picojson::array>();
+		for (picojson::array::const_iterator itr = list.begin();
+			itr != list.end(); itr++) {
+			if (!(itr->is<std::string>())) {
+				GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+					"Json key type unmatched , element of rowKeySet");
+			}
+			rowKeySet_.push_back(itr->get<std::string>());
 		}
 	}
 
@@ -2319,8 +2493,8 @@ void BibInfo::load(std::string &jsonString) {
 				"Json key not found or type unmatched , key = " << "option");
 		}
 		option_.load(*optionValue);
-		const std::vector<picojson::value> *containersValue = 
-			JsonUtils::find< std::vector<picojson::value> >(bibValue, "containers");
+		const picojson::array *containersValue = 
+			JsonUtils::find< picojson::array >(bibValue, "containers");
 		if (containersValue == NULL) {
 			GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
 				"Json key not found or type unmatched , key = " << "containers");

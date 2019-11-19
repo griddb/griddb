@@ -356,6 +356,7 @@ EventEngine::Config::Config() :
 		serverNDAutoNumbering_(false),
 		listenAddress_(),
 		multicastAddress_(),
+		multicastInterfaceAddress_(),
 		serverAddress_(),
 		ioConcurrencyRate_(1.0),
 		secondaryIOEnabled_(false),
@@ -403,6 +404,12 @@ EventEngine::Config& EventEngine::Config::setListenAddress(
 EventEngine::Config& EventEngine::Config::setMulticastAddress(
 		const char8_t *address, uint16_t port) {
 	multicastAddress_.assign(address, port);
+	return *this;
+}
+
+EventEngine::Config& EventEngine::Config::setMulticastIntefaceAddress(
+		const char8_t *address, uint16_t port) {
+	multicastInterfaceAddress_.assign(address, port);
 	return *this;
 }
 
@@ -1811,7 +1818,8 @@ void EventEngine::Manipulator::prepareMulticastSocket(
 	LockGuard guard(body.getLock());
 
 	SocketReference multicastSocket(socketPool.allocate(onSecondary), &guard);
-	if (!multicastSocket.get()->openAsMulticast(config.multicastAddress_)) {
+	if (!multicastSocket.get()->openAsMulticast(config.multicastAddress_,
+		&config.multicastInterfaceAddress_)) {
 		return;
 	}
 
@@ -3450,7 +3458,9 @@ bool EventEngine::EventSocket::openAsServer(
 }
 
 bool EventEngine::EventSocket::openAsMulticast(
-		const util::SocketAddress &address) {
+		const util::SocketAddress &address
+		, const util::SocketAddress *interfaceAddr
+) {
 	assert(base_.isClosed());
 
 	try {
@@ -3461,7 +3471,8 @@ bool EventEngine::EventSocket::openAsMulticast(
 
 		base_.bind(
 				util::SocketAddress(NULL, address.getPort(), address.getFamily()));
-		base_.joinMulticastGroup(address);
+
+		base_.joinMulticastGroup(address, interfaceAddr);
 		base_.setMulticastLoopback(true);
 
 		address_ = address;

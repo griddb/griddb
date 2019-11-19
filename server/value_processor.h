@@ -646,6 +646,7 @@ public:
 	uint8_t *getElement(uint32_t &elemSize, uint32_t &elemCount);
 
 	bool nextElement(bool forRemove = false);
+	bool moveElement(uint32_t pos);
 
 	OId getElementOId();
 
@@ -682,6 +683,25 @@ public:
 	static uint32_t divisionThreshold(uint32_t size) {
 		return size + (size >> 1);
 	}
+
+	static void checkVarDataSize(TransactionContext &txn,
+		ObjectManager &objectManager,
+		const util::XArray< std::pair<uint8_t *, uint32_t> > &varList,
+		const util::XArray<ColumnType> &columnTypeList,
+		bool isConvertSpecialType,
+		util::XArray<uint32_t> &varDataObjectSizeList,
+		util::XArray<uint32_t> &varDataObjectPosList);
+
+	static OId createVariableArrayCursor(TransactionContext &txn,
+		ObjectManager &objectManager,
+		const AllocateStrategy &allocateStrategy,
+		const util::XArray< std::pair<uint8_t *, uint32_t> > &varList,
+		const util::XArray<ColumnType> &columnTypeList,
+		bool isConvertSpecialType,
+		const util::XArray<uint32_t> &varDataObjectSizeList,
+		const util::XArray<uint32_t> &varDataObjectPosList,
+		const util::XArray<OId> &oldVarDataOIdList,
+		OId neighborOId);
 
 private:  
 	struct VariableColumnInfo {
@@ -1131,14 +1151,13 @@ private:
 	};
 
 	uint32_t calcArrayNum(int32_t currentElem, size_t depth) {
-		uint32_t lowerArrayNum = 0;
-//		, lowerArrayPos = 0;
+		uint32_t lowerArrayNum = 0, lowerArrayPos = 0;
 		uint32_t upperArrayNum = maxElem_, upperArrayPos = currentElem;
 		size_t currentDepth = maxDepth_;
 		uint32_t maxArrayNum = getMaxArrayNum(objectManager_);
 		while (currentDepth-- != depth) {
 			lowerArrayNum = upperArrayNum;
-//			lowerArrayPos = upperArrayPos;
+			lowerArrayPos = upperArrayPos;
 			upperArrayNum = static_cast<uint32_t>(ceil(static_cast<double>(upperArrayNum) / maxArrayNum));
 			upperArrayPos = upperArrayPos / maxArrayNum;
 		}

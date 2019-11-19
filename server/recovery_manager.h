@@ -77,6 +77,17 @@ public:
 	static void checkExistingFiles1(ConfigTable &configTable, bool &createFrag,
 		bool &existBackupFile, bool forceRecoveryFromExistingFiles);
 
+	static void checkExistingDbDir(
+			const char8_t *const, uint32_t splitCount,
+			ConfigTable &param, bool &createFlag, bool &createNew);
+
+	static void scanExistingFiles(
+			ConfigTable &param, bool &createFlag,
+			bool &existBackupInfoFile, bool forceRecoveryFromExistingFiles,
+			std::vector<std::vector<CheckpointId> > &logFileInfoList,
+			std::vector< std::set<int32_t> > &cpFileInfoList,
+			bool &existBackupInfoFile1, bool &existBackupInfoFile2);
+
 	static void checkExistingFiles2(ConfigTable &configTable,
 		LogManager &logMgr, bool &createFrag, bool existBackupFile,
 		bool forceRecoveryFromExistingFiles);

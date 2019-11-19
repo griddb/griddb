@@ -30,6 +30,8 @@
 #include <cassert>
 #include <iostream>
 
+const ColumnId ColumnInfo::ROW_KEY_COLUMN_ID;
+
 /*!
 * @brief Constructor. Boolean expressions passed by the arguments are copied as
 * pointer
@@ -142,7 +144,6 @@ BoolExpr::BoolExpr(TrivalentLogicType b, TransactionContext &txn)
 
 	type_ = BOOL_EXPR;
 }
-
 
 /*!
 * @brief Generate full duplicate of the expression. (Deep copy)
@@ -623,6 +624,7 @@ BoolExpr *BoolExpr::makeOptimizedExpr(TransactionContext &txn,
 			QP_DELETE(p);
 			return r;
 		}
+
 	}
 	else if (opeType_ == UNARY) {
 		Expr *e = NULL;
@@ -698,30 +700,22 @@ void BoolExpr::toAndList(util::XArray<BoolExpr *> &andList) {
  * @return true : success, false : fail to get
  */
 bool BoolExpr::getCondition(TransactionContext &txn, MapType type,
-	uint32_t indexColumnId, Query &queryObj, TermCondition *&cond,
-	const void *&startKey, uint32_t &startKeySize, int32_t &isStartKeyIncluded,
-	const void *&endKey, uint32_t &endKeySize, int32_t &isEndKeyIncluded,
-	NullCondition &nullCond) {
+	Query &queryObj, TermCondition *&cond) {
 	Expr *unary;
-	const void *startKey2 = startKey, *endKey2 = endKey;
 	if (this->opeType_ == UNARY) {
 		unary = this->unary_;
-		cond = unary->toCondition(txn, type, indexColumnId, queryObj, startKey,
-			startKeySize, isStartKeyIncluded, endKey, endKeySize,
-			isEndKeyIncluded, nullCond, false);
+		cond = unary->toCondition(txn, type, queryObj, false);
 	}
 	else if (this->opeType_ == NOT) {
 		unary = this->operands_[0]->unary_;
-		cond = unary->toCondition(txn, type, indexColumnId, queryObj, startKey,
-			startKeySize, isStartKeyIncluded, endKey, endKeySize,
-			isEndKeyIncluded, nullCond, true);
+		cond = unary->toCondition(txn, type, queryObj, true);
 	}
 	else {
 		GS_THROW_USER_ERROR(GS_ERROR_TQ_CRITICAL_LOGIC_ERROR,
 			"Internal logic error: Invalid boolean expression type.");
 	}
 
-	return (cond != NULL) || (startKey2 != startKey) || (endKey2 != endKey);
+	return (cond != NULL);
 }
 
 /*!
@@ -729,38 +723,41 @@ bool BoolExpr::getCondition(TransactionContext &txn, MapType type,
  *
  */
 void BoolExpr::toSearchContext(TransactionContext &txn,
-	util::XArray<BoolExpr *> &andList, ColumnInfo *indexColumnInfo,
-	QueryForCollection &queryObj, BtreeMap::SearchContext &sc,
+	util::XArray<BoolExpr *> &andList, IndexData *indexData,
+	QueryForCollection &queryObj, BtreeMap::SearchContext *&sc,
 	uint32_t &restEval, ResultSize limit) {
-	sc = BtreeMap::SearchContext();
-	sc.conditionList_ =
-		reinterpret_cast<TermCondition *>(txn.getDefaultAllocator().allocate(
-			sizeof(TermCondition) * andList.size()));
-	sc.isStartKeyIncluded_ = true;
-	sc.isEndKeyIncluded_ = true;
+	util::StackAllocator &alloc = txn.getDefaultAllocator();
+	if (indexData != NULL) {
+		sc = ALLOC_NEW(alloc) BtreeMap::SearchContext (alloc, *(indexData->columnIds_));
+	} else {
+		util::Vector<ColumnId> columnIds(alloc);
+		columnIds.push_back(queryObj.collection_->getRowIdColumnId());
+		sc = ALLOC_NEW(alloc) BtreeMap::SearchContext (alloc, columnIds);
+	}
+	sc->reserveCondition(andList.size());
 	restEval = 0;
-
-	bool conditionDealed;
-	uint32_t cid = (indexColumnInfo == NULL) ? UNDEF_COLUMNID
-											 : indexColumnInfo->getColumnId();
-	sc.columnId_ = cid;
-
+	util::Vector<ColumnId>::const_iterator columnIdItr;
+	const util::Vector<ColumnId> &columnIds = sc->getColumnIds();
 	for (size_t i = 0; i < andList.size(); i++) {
 		TermCondition *c = NULL;
-		conditionDealed = andList[i]->getCondition(txn, MAP_TYPE_BTREE, cid,
-			queryObj, c, sc.startKey_, sc.startKeySize_, sc.isStartKeyIncluded_,
-			sc.endKey_, sc.endKeySize_, sc.isEndKeyIncluded_, sc.nullCond_);
-		if (c) {
-			sc.conditionList_[sc.conditionNum_++] = *c;
-		}
-		if (conditionDealed) {
-			andList[i]->enableEvaluationFilter();
-		}
-		else {
+		andList[i]->getCondition(txn, MAP_TYPE_BTREE, queryObj, c);
+		if (c == NULL) {
 			restEval++;
+		} else {
+			andList[i]->enableEvaluationFilter();
+			columnIdItr = std::find(columnIds.begin(), 
+				columnIds.end(), c->columnId_);
+			bool isKey = false;
+			if (columnIdItr != columnIds.end()) {
+				isKey = true;
+				if (c->opType_ == DSExpression::IS && sc->getKeyColumnNum() == 1) {
+					sc->setNullCond(BaseIndex::SearchContext::IS_NULL);
+				}
+			}
+			sc->addCondition(*c, isKey);
 		}
 	}
-	sc.limit_ = (0 == restEval) ? limit : MAX_RESULT_SIZE;
+	sc->limit_ = (0 == restEval) ? limit : MAX_RESULT_SIZE;
 }
 
 /*!
@@ -768,39 +765,50 @@ void BoolExpr::toSearchContext(TransactionContext &txn,
  *
  */
 void BoolExpr::toSearchContext(TransactionContext &txn,
-	util::XArray<BoolExpr *> &andList, ColumnInfo *indexColumnInfo,
-	QueryForCollection &queryObj, HashMap::SearchContext &sc,
+	util::XArray<BoolExpr *> &andList, IndexData *indexData,
+	QueryForCollection &queryObj, HashMap::SearchContext *&sc,
 	uint32_t &restEval, ResultSize limit) {
-	uint32_t cid = (indexColumnInfo == NULL) ? UNDEF_COLUMNID
-											 : indexColumnInfo->getColumnId();
-	sc = HashMap::SearchContext();
-	sc.conditionList_ =
-		reinterpret_cast<TermCondition *>(txn.getDefaultAllocator().allocate(
-			sizeof(TermCondition) * andList.size()));
-	sc.columnId_ = cid;
+	util::StackAllocator &alloc = txn.getDefaultAllocator();
+	if (indexData != NULL) {
+		sc = ALLOC_NEW(alloc) HashMap::SearchContext (alloc, *(indexData->columnIds_));
+	} else {
+		util::Vector<ColumnId> columnIds(alloc);
+		columnIds.push_back(queryObj.collection_->getRowIdColumnId());
+		sc = ALLOC_NEW(alloc) HashMap::SearchContext (alloc, columnIds);
+	}
+	sc->reserveCondition(andList.size());
 	restEval = 0;
 
 	const void *dummyKey = NULL;
 	uint32_t dummySize;
 	int32_t dummyBool;
 	bool conditionDealed = false;
+	const util::Vector<ColumnId> &columnIds = sc->getColumnIds();
 
 	for (size_t i = 0; i < andList.size(); i++) {
 		TermCondition *c = NULL;
 		conditionDealed = andList[i]->getCondition(txn, MAP_TYPE_HASH,
-			sc.columnId_, queryObj, c, sc.key_, sc.keySize_, dummyBool,
-			dummyKey, dummySize, dummyBool, sc.nullCond_);
-		if (c) {
-			sc.conditionList_[sc.conditionNum_++] = *c;
-		}
+			queryObj, c);
 		if (conditionDealed) {
 			andList[i]->enableEvaluationFilter();
+
+			util::Vector<ColumnId>::const_iterator columnIdItr = 
+				std::find(columnIds.begin(), 
+				columnIds.end(), c->columnId_);
+			bool isKey = false;
+			if (columnIdItr != columnIds.end()) {
+				isKey = true;
+				if (c->opType_ == DSExpression::IS && sc->getKeyColumnNum() == 1) {
+					sc->setNullCond(BaseIndex::SearchContext::IS_NULL);
+				}
+			}
+			sc->addCondition(*c, isKey);
 		}
 		else {
 			restEval++;
 		}
 	}
-	sc.limit_ = (0 == restEval) ? limit : MAX_RESULT_SIZE;
+	sc->limit_ = (0 == restEval) ? limit : MAX_RESULT_SIZE;
 }
 
 /*!
@@ -808,54 +816,46 @@ void BoolExpr::toSearchContext(TransactionContext &txn,
  *
  */
 void BoolExpr::toSearchContext(TransactionContext &txn,
-	util::XArray<BoolExpr *> &andList, ColumnInfo *indexColumnInfo,
-	QueryForCollection &queryObj, RtreeMap::SearchContext &sc,
+	util::XArray<BoolExpr *> &andList, IndexData *indexData,
+	QueryForCollection &queryObj, RtreeMap::SearchContext *&sc,
 	uint32_t &restEval, ResultSize limit) {
-	uint32_t cid = (indexColumnInfo == NULL) ? UNDEF_COLUMNID
-											 : indexColumnInfo->getColumnId();
-	sc = RtreeMap::SearchContext();
-	sc.conditionList_ =
-		reinterpret_cast<TermCondition *>(txn.getDefaultAllocator().allocate(
-			sizeof(TermCondition) * andList.size()));
-	sc.columnId_ = cid;
+	util::StackAllocator &alloc = txn.getDefaultAllocator();
+
+	if (indexData != NULL) {
+		sc = ALLOC_NEW(alloc) RtreeMap::SearchContext (alloc, *(indexData->columnIds_));
+	} else {
+		util::Vector<ColumnId> columnIds(alloc);
+		columnIds.push_back(queryObj.collection_->getRowIdColumnId());
+		sc = ALLOC_NEW(alloc) RtreeMap::SearchContext (alloc, columnIds);
+	}
+	sc->reserveCondition(andList.size());
 	restEval = 0;
 
-	uint32_t dummySize;
-	int32_t dummyBool = 0, conditionDealed;
-//	uint32_t dummyColumnId = 0;
-	uint32_t dummyRelation = 0;
-	const void *r1 = NULL, *r2 = NULL;
-
+	int32_t conditionDealed;
+	const util::Vector<ColumnId> &columnIds = sc->getColumnIds();
 	for (size_t i = 0; i < andList.size(); i++) {
 		TermCondition *c = NULL;
 		conditionDealed = andList[i]->getCondition(txn, MAP_TYPE_SPATIAL,
-			sc.columnId_, queryObj, c, r1, dummyRelation, dummyBool, r2,
-			dummySize, dummyBool, sc.nullCond_);
-		if (c) {
-			sc.conditionList_[sc.conditionNum_++] = *c;
-		}
-		if (r1) {
-			sc.relation_ = dummyRelation;
-			if (sc.relation_ == GEOMETRY_QSF_INTERSECT) {
-				sc.pkey_ = *reinterpret_cast<const TrPv3Key *>(r1);
-			}
-			else {
-				sc.rect_[0] = *reinterpret_cast<const TrRectTag *>(r1);
-				if (r2) {
-					sc.rect_[1] = *reinterpret_cast<const TrRectTag *>(r2);
-				}
-			}
-			sc.columnId_ = indexColumnInfo->getColumnId();
-			sc.valid_ = true;
-		}
+			queryObj, c);
 		if (conditionDealed) {
 			andList[i]->enableEvaluationFilter();
+			util::Vector<ColumnId>::const_iterator columnIdItr = 
+				std::find(columnIds.begin(), 
+				columnIds.end(), c->columnId_);
+			bool isKey = false;
+			if (columnIdItr != columnIds.end()) {
+				isKey = true;
+				if (c->opType_ == DSExpression::IS && sc->getKeyColumnNum() == 1) {
+					sc->setNullCond(BaseIndex::SearchContext::IS_NULL);
+				}
+			}
+			sc->addCondition(*c, isKey);
 		}
 		else {
 			restEval++;
 		}
 	}
-	sc.limit_ = (0 == restEval) ? limit : MAX_RESULT_SIZE;
+	sc->limit_ = (0 == restEval) ? limit : MAX_RESULT_SIZE;
 }
 
 /*!
@@ -864,81 +864,48 @@ void BoolExpr::toSearchContext(TransactionContext &txn,
  */
 void BoolExpr::toSearchContext(TransactionContext &txn,
 	util::XArray<BoolExpr *> &andList, Timestamp &expireTs,
-	ColumnInfo *indexColumnInfo, QueryForTimeSeries &queryObj,
-	BtreeMap::SearchContext &sc, uint32_t &restEval, ResultSize limit) {
-	uint32_t cid = (indexColumnInfo == NULL) ? UNDEF_COLUMNID
-											 : indexColumnInfo->getColumnId();
-	sc = BtreeMap::SearchContext();
-	sc.conditionList_ =
-		reinterpret_cast<TermCondition *>(txn.getDefaultAllocator().allocate(
-			sizeof(TermCondition) *
-			(andList.size() + 1)));  
-	sc.columnId_ = cid;
-	if (sc.columnId_ == UNDEF_COLUMNID && indexColumnInfo == NULL) {
-		sc.columnId_ = 0;  
+	IndexData *indexData, QueryForTimeSeries &queryObj,
+	BtreeMap::SearchContext *&sc, uint32_t &restEval, ResultSize limit) {
+	util::StackAllocator &alloc = txn.getDefaultAllocator();
+	if (indexData != NULL) {
+		sc = ALLOC_NEW(alloc) BtreeMap::SearchContext (alloc, *(indexData->columnIds_));
+	} else {
+		util::Vector<ColumnId> columnIds(alloc);
+		columnIds.push_back(queryObj.timeSeries_->getRowIdColumnId());
+		sc = ALLOC_NEW(alloc) BtreeMap::SearchContext (alloc, columnIds);
 	}
-	sc.isStartKeyIncluded_ = true;
-	sc.isEndKeyIncluded_ = true;
+	sc->reserveCondition(andList.size() + 1);  
 	restEval = 0;
 
-	bool conditionDealed = false;
-
+	util::Vector<ColumnId>::const_iterator columnIdItr;
+	const util::Vector<ColumnId> &columnIds = sc->getColumnIds();
 	for (size_t i = 0; i < andList.size(); i++) {
 		TermCondition *c = NULL;
-		conditionDealed = andList[i]->getCondition(txn, MAP_TYPE_BTREE,
-			sc.columnId_, queryObj, c, sc.startKey_, sc.startKeySize_,
-			sc.isStartKeyIncluded_, sc.endKey_, sc.endKeySize_,
-			sc.isEndKeyIncluded_, sc.nullCond_);
-		if (c) {
-			sc.conditionList_[sc.conditionNum_++] = *c;
-		}
-		if (conditionDealed) {
-			andList[i]->enableEvaluationFilter();
-		}
-		else {
+		andList[i]->getCondition(txn, MAP_TYPE_BTREE, queryObj, c);
+		if (c == NULL) {
 			restEval++;
+		} else {
+			andList[i]->enableEvaluationFilter();
+			columnIdItr = std::find(columnIds.begin(), 
+				columnIds.end(), c->columnId_);
+			bool isKey = false;
+			if (columnIdItr != columnIds.end()) {
+				isKey = true;
+				if (c->opType_ == DSExpression::IS && sc->getKeyColumnNum() == 1) {
+					sc->setNullCond(BaseIndex::SearchContext::IS_NULL);
+				}
+			}
+			sc->addCondition(*c, isKey);
 		}
 	}
-	if (sc.columnId_ != UNDEF_COLUMNID && indexColumnInfo != NULL &&
-		indexColumnInfo->isKey() && sc.startKey_ != NULL) {
-		if (compareTimestampTimestamp(txn,
-				reinterpret_cast<uint8_t *>(&expireTs), 0,
-				reinterpret_cast<const uint8_t *>(sc.startKey_), 0) > 0) {
-			sc.startKey_ = &expireTs;
-			sc.isStartKeyIncluded_ = true;  
-		}
-	}
-	else {
-		TermCondition c;
 
-		if (sc.columnId_ == 0) {  
-			if (sc.startKey_ != NULL && expireTs != MINIMUM_EXPIRED_TIMESTAMP) {
-				Timestamp t1 =
-					*reinterpret_cast<const Timestamp *>(sc.startKey_);
-				if (t1 < expireTs) {
-					sc.startKey_ = &expireTs;
-				}
-			}
-			else if (sc.startKey_ == NULL) {
-				if (expireTs == MINIMUM_EXPIRED_TIMESTAMP) {
-					expireTs = 0;
-					sc.startKey_ = &expireTs;
-				}
-				else {
-					sc.startKey_ = &expireTs;
-				}
-			}
-		}
-		else {
-			memset(&c, 0, sizeof(TermCondition));
-			c.columnOffset_ = 0;
-			c.columnId_ = 0;
-			c.operator_ = ComparatorTable::gtTable_[COLUMN_TYPE_TIMESTAMP][COLUMN_TYPE_TIMESTAMP];
-			c.value_ = reinterpret_cast<uint8_t *>(&expireTs);
-			sc.conditionList_[sc.conditionNum_++] = c;
-		}
+	if (expireTs != MINIMUM_EXPIRED_TIMESTAMP) {
+		TermCondition newCond(COLUMN_TYPE_TIMESTAMP, COLUMN_TYPE_TIMESTAMP, 
+			DSExpression::GT, ColumnInfo::ROW_KEY_COLUMN_ID, &expireTs, sizeof(Timestamp));
+		sc->updateCondition(txn, newCond);
 	}
-	sc.limit_ = (0 == restEval) ? limit : MAX_RESULT_SIZE;
+
+	sc->limit_ = (0 == restEval) ? limit : MAX_RESULT_SIZE;
 }
 
 /*!
@@ -1004,6 +971,7 @@ Expr *BoolExpr::eval(TransactionContext &txn, ObjectManager &objectManager,
 			return Expr::newBooleanValue(b == TRI_TRUE, txn);
 		}
 	}
+
 	case EVAL_MODE_PRINT: {
 		util::NormalOStringStream os;
 		dumpTreeSub(txn, objectManager, os, 0, "", column_values, function_map);

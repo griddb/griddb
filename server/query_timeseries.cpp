@@ -47,7 +47,7 @@ QueryForTimeSeries::QueryForTimeSeries(TransactionContext &txn,
 	TimeSeries &timeSeries, const TQLInfo &tqlInfo, uint64_t limit,
 	QueryHookClass *hook)
 	: Query(txn, *(timeSeries.getObjectManager()), tqlInfo, limit, hook),
-	  timeSeries_(&timeSeries) {
+	timeSeries_(&timeSeries), scPass_(txn.getDefaultAllocator(), ColumnInfo::ROW_KEY_COLUMN_ID) {
 	if (hook_) {
 		hook_->qpBuildBeginHook(*this);	
 	}
@@ -216,7 +216,9 @@ void QueryForTimeSeries::doQueryWithoutCondition(
 	}
 	if (doExplain()) {
 		util::NormalOStringStream os;
-		dt.format(os, true);
+		util::DateTime::ZonedOption zonedOption = util::DateTime::ZonedOption::create(true, txn.getTimeZone());
+		zonedOption.asLocalTimeZone_ = USE_LOCAL_TIMEZONE;
+		dt.format(os, zonedOption);
 		addExplain(1, "TIMESERIES_EXPIRE", "TIMESTAMP", os.str().c_str(), "");
 	}
 	if (expireTs_ == MINIMUM_EXPIRED_TIMESTAMP) {  
@@ -224,12 +226,18 @@ void QueryForTimeSeries::doQueryWithoutCondition(
 	}
 
 	if (nPassSelectRequested_ != QP_PASSMODE_NO_PASS && pOrderByExpr_ == NULL) {
-		BtreeMap::SearchContext sc(
-			0, pExpireTs, 0, true, NULL, 0, true, 0, NULL, nLimit_);
+		BtreeMap::SearchContext sc(txn.getDefaultAllocator(), timeSeries_->getRowIdColumnId());
+		if (pExpireTs != NULL) {
+			TermCondition cond(timeSeries_->getRowIdColumnType(), timeSeries_->getRowIdColumnType(),
+				DSExpression::GE, timeSeries_->getRowIdColumnId(), pExpireTs,
+				sizeof(*pExpireTs));
+			sc.addCondition(cond, true);
+		}
+		sc.setLimit(nLimit_);
 		if (doExplain()) {
 			addExplain(1, "API_PASSTHROUGH", "BOOLEAN", "TRUE", "NO ORDERBY");
 		}
-		memcpy(&scPass_, &sc, sizeof(sc));
+		sc.copy(txn.getDefaultAllocator(), scPass_);
 	}
 	else {
 		nPassSelectRequested_ = QP_PASSMODE_NO_PASS;
@@ -241,9 +249,12 @@ void QueryForTimeSeries::doQueryWithoutCondition(
 			uint32_t orderColumnId = (orderExpr.expr)
 										 ? orderExpr.expr->getColumnId()
 										 : UNDEF_COLUMNID;
+			util::Vector<ColumnId> otherColumnIds(txn.getDefaultAllocator());
+			otherColumnIds.push_back(orderColumnId);
+			bool withPartialMatch = false;
 			if (orderExpr.expr &&
 				(orderColumnId == ColumnInfo::ROW_KEY_COLUMN_ID ||
-				timeSeries.hasIndex(txn, orderColumnId, MAP_TYPE_BTREE))) {
+				timeSeries.hasIndex(txn, otherColumnIds, MAP_TYPE_BTREE, withPartialMatch))) {
 				if (doExplain()) {
 					addExplain(0, "QUERY_RESULT_SORT", "BOOLEAN", "TRUE", "");
 					if (orderColumnId == ColumnInfo::ROW_KEY_COLUMN_ID) {
@@ -264,21 +275,16 @@ void QueryForTimeSeries::doQueryWithoutCondition(
 			}
 		}
 
-		BtreeMap::SearchContext sc(
-			searchColumnId, pExpireTs, 0, true, NULL, 0, true, 0, NULL, nLimit_);
-		sc.keyType_ = searchType;
+		BtreeMap::SearchContext sc (txn.getDefaultAllocator(), searchColumnId);
+		sc.setLimit(nLimit_);
 		if (searchColumnId != ColumnInfo::ROW_KEY_COLUMN_ID) {
 			sc.nullCond_ = BaseIndex::SearchContext::ALL;
 		}
-		if (pExpireTs != NULL && searchColumnId != ColumnInfo::ROW_KEY_COLUMN_ID) {
-			sc.startKey_ = NULL;
-			TermCondition *condition = ALLOC_NEW(txn.getDefaultAllocator()) TermCondition;
-			condition->columnId_ = ColumnInfo::ROW_KEY_COLUMN_ID;
-			condition->operator_ = &geTimestampTimestamp;
-			condition->value_ = reinterpret_cast<const uint8_t*>(pExpireTs);
-			condition->valueSize_ = sizeof(Timestamp);
-			sc.conditionList_ = condition;
-			sc.conditionNum_ = 1;
+		if (pExpireTs != NULL) {
+			TermCondition condition(COLUMN_TYPE_TIMESTAMP, COLUMN_TYPE_TIMESTAMP,
+				DSExpression::GT, ColumnInfo::ROW_KEY_COLUMN_ID, pExpireTs,  sizeof(*pExpireTs));
+			bool isKey = searchColumnId == ColumnInfo::ROW_KEY_COLUMN_ID;
+			sc.addCondition(condition, isKey);
 		}
 		if (searchColumnId != ColumnInfo::ROW_KEY_COLUMN_ID || outputOrder == ORDER_DESCENDING) {
 			isRowKeySearched_ = false;
@@ -339,7 +345,9 @@ void QueryForTimeSeries::doQueryWithCondition(
 	}
 	if (doExplain()) {
 		util::NormalOStringStream os;
-		dt.format(os, true);
+		util::DateTime::ZonedOption zonedOption = util::DateTime::ZonedOption::create(true, txn.getTimeZone());
+		zonedOption.asLocalTimeZone_ = USE_LOCAL_TIMEZONE;
+		dt.format(os, zonedOption);
 		addExplain(1, "TIMESERIES_EXPIRE", "TIMESTAMP", os.str().c_str(), "");
 	}
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
@@ -369,15 +377,13 @@ void QueryForTimeSeries::doQueryWithCondition(
 		orList[p]->toAndList(andList);
 		assert(!andList.empty());  
 
-		MapType indexType;
-		ColumnInfo *indexColumnInfo;
+		IndexData indexData(txn.getDefaultAllocator());
 
-		getIndexInfoInAndList(
-			txn, timeSeries, andList, indexType, indexColumnInfo);
+		bool indexFound = getIndexDataInAndList(
+			txn, timeSeries, andList, indexData);
 
-		if (indexColumnInfo == NULL) {
-			BtreeMap::SearchContext sc(
-				0, pExpireTs, 0, true, NULL, 0, true, 0, NULL, nLimit_);
+		if (!indexFound) {
+			BtreeMap::SearchContext *sc = NULL;
 			BoolExpr::toSearchContext(txn, andList, expireTs_, NULL, *this, sc,
 				restConditions, nLimit_);
 
@@ -385,13 +391,13 @@ void QueryForTimeSeries::doQueryWithCondition(
 				(nPassSelectRequested_ == QP_PASSMODE_PASS ||
 					(nPassSelectRequested_ == QP_PASSMODE_PASS_IF_NO_WHERE &&
 						pWhereExpr_ == NULL)) &&
-				restConditions == 0 && sc.conditionNum_ == 0 &&
+				restConditions == 0 && sc->getRestConditionNum() == 0 &&
 				pOrderByExpr_ == NULL) {
 				if (doExplain()) {
 					addExplain(1, "API_PASSTHROUGH", "BOOLEAN", "TRUE",
 						"TIME_CONDITIONS_ONLY");
 				}
-				memcpy(&scPass_, &sc, sizeof(sc));
+				sc->copy(txn.getDefaultAllocator(), scPass_);
 			}
 			else {
 				nPassSelectRequested_ = QP_PASSMODE_NO_PASS;
@@ -422,18 +428,20 @@ void QueryForTimeSeries::doQueryWithCondition(
 					addExplain(
 						2, "SEARCH_MAP", "STRING", "TIME_SERIES_ROW_MAP", "");
 					operatorOutPointRowIdArray.clear();
-					timeSeries.searchRowIdIndex(txn, sc,
+					timeSeries.searchRowIdIndex(txn, *sc,
 						operatorOutPointRowIdArray, outputOrder);  
 				}
 			}
 		}
 		else {
-			switch (indexType) {
+			assert(!indexData.columnIds_->empty());
+			ColumnInfo *indexColumnInfo = &(timeSeries.getColumnInfo((*(indexData.columnIds_))[0]));
+			switch (indexData.mapType_) {
 			case MAP_TYPE_BTREE: {
 				assert(indexColumnInfo != NULL);
-				BtreeMap::SearchContext sc;
+				BtreeMap::SearchContext *sc = NULL;
 				BoolExpr::toSearchContext(txn, andList, expireTs_,
-					indexColumnInfo, *this, sc, restConditions, nLimit_);
+					&indexData, *this, sc, restConditions, nLimit_);
 
 				nPassSelectRequested_ = QP_PASSMODE_NO_PASS;
 				if (isIndexSortAvailable(timeSeries, orList.size())) {
@@ -456,17 +464,48 @@ void QueryForTimeSeries::doQueryWithCondition(
 										  : ORDER_DESCENDING;  
 						setLimitByIndexSort();
 						BoolExpr::toSearchContext(txn, andList, expireTs_,
-							indexColumnInfo, *this, sc, restConditions, nLimit_);
+							&indexData, *this, sc, restConditions, nLimit_);
+
 					}
 				}
 				if (doExecute()) {
-					addExplain(
-						1, "SEARCH_EXECUTE", "MAP_TYPE", "BTREE", "");
-					const char *columnName =
-						indexColumnInfo->getColumnName(txn, objectManager_);
-					addExplain(2, "SEARCH_MAP", "STRING", columnName, "");
+					util::NormalOStringStream os;
+					{
+						util::Vector<TermCondition> condList(alloc);
+						sc->getConditionList(condList, BaseIndex::SearchContext::COND_KEY);
+						util::Set<ColumnId> useColumnSet(alloc);
+						util::Set<ColumnId>::iterator itr;
+						bool isFirstColumn = true;
+						for (size_t i = 0; i < condList.size(); i++) {
+							itr = useColumnSet.find(condList[i].columnId_);
+							if (itr == useColumnSet.end()) {
+								useColumnSet.insert(condList[i].columnId_);
+								if (!isFirstColumn) {
+									os << " ";
+								} else {
+									isFirstColumn = false;
+								}
+								ColumnInfo &columnInfo = timeSeries.getColumnInfo(condList[i].columnId_);
+								os << columnInfo.getColumnName(txn, objectManager_);
+							}
+						}
+						addExplain(
+							1, "SEARCH_EXECUTE", "MAP_TYPE", "BTREE", os.str().c_str());
+					}
+					{
+						os.str("");
+						for (size_t i = 0; i < indexData.columnIds_->size(); i++) {
+							if (i != 0) {
+								os << " ";
+							}
+							ColumnInfo &columnInfo = timeSeries.getColumnInfo((*(indexData.columnIds_))[i]);
+							os << columnInfo.getColumnName(txn, objectManager_);
+						}
+
+						addExplain(2, "SEARCH_MAP", "STRING", os.str().c_str(), "");
+					}
 					operatorOutPointRowIdArray.clear();
-					timeSeries.searchColumnIdIndex(txn, sc,
+					timeSeries.searchColumnIdIndex(txn, *sc,
 						operatorOutPointRowIdArray, outputOrder);  
 				}
 			} break;
@@ -539,7 +578,7 @@ void QueryForTimeSeries::doQueryWithCondition(
 	}  
 
 	if (resultOIdList.size() > nLimit_) {
-//		ResultSize eraseSize = resultOIdList.size() - nLimit_;
+		ResultSize eraseSize = resultOIdList.size() - nLimit_;
 		resultOIdList.erase(
 			resultOIdList.begin() + static_cast<size_t>(nLimit_),
 			resultOIdList.end());
@@ -664,8 +703,8 @@ void QueryForTimeSeries::doSelection(
 								static_cast<size_t>(nOffset_));
 
 						if (nActualLimit_ < resultOIdList.size()) {
-//							ResultSize eraseSize =
-//								resultOIdList.size() - nActualLimit_;
+							ResultSize eraseSize =
+								resultOIdList.size() - nActualLimit_;
 							resultOIdList.erase(
 								resultOIdList.begin() +
 									static_cast<size_t>(nActualLimit_),
@@ -989,34 +1028,8 @@ QueryForTimeSeries *QueryForTimeSeries::dup(
 	query->scPass_ =
 		scPass_;  
 	{
-		if (scPass_.startKeySize_ > 0) {
-			query->scPass_.startKey_ =
-				QP_ALLOC_NEW(alloc) uint8_t[scPass_.startKeySize_];
-			memcpy(const_cast<void *>(query->scPass_.startKey_),
-				scPass_.startKey_, scPass_.startKeySize_);
-		}
-		if (scPass_.endKeySize_ > 0) {
-			query->scPass_.endKey_ =
-				QP_ALLOC_NEW(alloc) uint8_t[scPass_.endKeySize_];
-			memcpy(const_cast<void *>(query->scPass_.endKey_), scPass_.endKey_,
-				scPass_.endKeySize_);
-		}
-		if (scPass_.conditionNum_ > 0) {
-			query->scPass_.conditionList_ =
-				QP_ALLOC_NEW(alloc) TermCondition[scPass_.conditionNum_];
-			memcpy(query->scPass_.conditionList_, scPass_.conditionList_,
-				scPass_.conditionNum_);
-		}
-		for (uint32_t i = 0; i < scPass_.conditionNum_; i++) {
-			if (scPass_.conditionList_[i].valueSize_ > 0) {
-				query->scPass_.conditionList_[i].value_ = QP_ALLOC_NEW(alloc)
-					uint8_t[scPass_.conditionList_[i].valueSize_];
-				memcpy(const_cast<uint8_t *>(
-						   query->scPass_.conditionList_[i].value_),
-					scPass_.conditionList_[i].value_,
-					scPass_.conditionList_[i].valueSize_);
-			}
-		}
+
+		scPass_.copy(alloc, query->scPass_);
 	}
 	query->nPassSelectRequested_ = nPassSelectRequested_;
 	query->isRowKeySearched_ = isRowKeySearched_;

@@ -38,12 +38,14 @@ class BaseContainer;
 class RtreeMap : public BaseIndex {
 public:
 	RtreeMap(TransactionContext &txn, ObjectManager &objectManager,
-		const AllocateStrategy &strategy, BaseContainer *container)
-		: BaseIndex(txn, objectManager, strategy, container, MAP_TYPE_SPATIAL),
+		const AllocateStrategy &strategy, BaseContainer *container,
+		TreeFuncInfo *funcInfo)
+		: BaseIndex(txn, objectManager, strategy, container, funcInfo, MAP_TYPE_SPATIAL),
 		  rtreeMapImage_(NULL) {}
 	RtreeMap(TransactionContext &txn, ObjectManager &objectManager, OId oId,
-		const AllocateStrategy &strategy, BaseContainer *container)
-		: BaseIndex(txn, objectManager, oId, strategy, container, MAP_TYPE_SPATIAL) {
+		const AllocateStrategy &strategy, BaseContainer *container,
+		TreeFuncInfo *funcInfo)
+		: BaseIndex(txn, objectManager, oId, strategy, container, funcInfo, MAP_TYPE_SPATIAL) {
 		rtreeMapImage_ = reinterpret_cast<RtreeMapImage *>(getBaseAddr());
 	}
 	~RtreeMap() {}
@@ -70,20 +72,16 @@ private:
 		TransactionContext &txn, TrRect r, OId hitOId, void *arg);
 	static int32_t hitIntersectCallback(
 		TransactionContext &txn, TrRect r, OId hitOId, void *arg);
-
 	struct HitIntersectCallbackArg {
 		TrRect rect;
 		ResultSize limit;
 		ResultSize size;
 		util::XArray<OId> *oidList;
-		TermCondition *conditionList;
-		uint32_t conditionSize;
 		OId oneOId;
 	};
 
 	static int32_t hitIncludeCallback(
 		TransactionContext &txn, TrRect r, OId hitOId, void *arg);
-
 	struct HitIncludeCallbackArg {
 		TrRect rect;
 		ResultSize limit;
@@ -96,7 +94,6 @@ private:
 
 	static int32_t hitDifferentialCallback(
 		TransactionContext &txn, TrRect r, OId hitOId, void *arg);
-
 	struct HitDifferentialCallbackArg {
 		TrRect rect1, rect2;
 		ResultSize limit;
@@ -108,7 +105,6 @@ private:
 
 	static int32_t hitQsfIntersectCallback(
 		TransactionContext &txn, TrRect r, OId hitOId, void *arg);
-
 	struct HitQsfIntersectCallbackArg {
 		TrPv3Key *pkey;
 		ResultSize limit;
@@ -138,17 +134,39 @@ public:
 	 *
 	 */
 	struct SearchContext : BaseIndex::SearchContext {
-		union {
-			TrRectTag rect_[2];
-			TrPv3Key pkey_;
+		struct GeomeryCondition {
+			GeomeryCondition() : relation_(GEOMETRY_INTERSECT),
+				valid_(false) {
+				memset(&pkey_, 0, sizeof(TrPv3Key));
+			}
+			union {
+				TrRectTag rect_[2];
+				TrPv3Key pkey_;
+			};
+			uint8_t relation_;  
+			bool valid_;
 		};
-		uint8_t relation_;  
-		bool valid_;
-		SearchContext()
-			: BaseIndex::SearchContext(),
-			  relation_(GEOMETRY_INTERSECT),
-			  valid_(false) {
-			memset(&pkey_, 0, sizeof(TrPv3Key));
+		TermCondition *getKeyCondition() {
+			assert(columnIdList_.size() == 1);
+			for (util::Vector<size_t>::iterator itr = keyList_.begin(); 
+				itr != keyList_.end(); itr++) {
+				if (conditionList_[*itr].opType_ == DSExpression::GEOM_OP) {
+					return &(conditionList_[*itr]);
+				}
+			}
+			return NULL;
+		}
+		SearchContext(util::StackAllocator &alloc, ColumnId columnId)
+			: BaseIndex::SearchContext(alloc, columnId) {}
+		SearchContext(util::StackAllocator &alloc, util::Vector<ColumnId> &columnIds)
+			: BaseIndex::SearchContext(alloc, columnIds) {}
+		void copy(util::StackAllocator &alloc, SearchContext &dest) {
+			BaseIndex::SearchContext::copy(alloc, dest);
+		}
+		std::string dump() {
+			util::NormalOStringStream strstrm;
+			strstrm << BaseIndex::SearchContext::dump();
+			return strstrm.str();
 		}
 	};
 
@@ -166,7 +184,7 @@ public:
 	int32_t getAll(
 		TransactionContext &txn, ResultSize limit, util::XArray<OId> &idList);
 	int32_t search(
-		TransactionContext &txn, const void *key, uint32_t size, OId &oId);
+		TransactionContext &txn, const void *key, OId &oId);
 
 	void search(TransactionContext &txn, RtreeMap::SearchContext &sc,
 		util::XArray<OId> &oidList, OutputOrder outputOrder);

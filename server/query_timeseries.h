@@ -43,7 +43,7 @@ public:
 		QueryHookClass *hook = NULL);
 	QueryForTimeSeries(TransactionContext &txn, TimeSeries &timeSeries)
 		: Query(txn, *(timeSeries.getObjectManager())),
-		  timeSeries_(&timeSeries) {}
+		  timeSeries_(&timeSeries), scPass_(txn.getDefaultAllocator(), ColumnInfo::ROW_KEY_COLUMN_ID) {}
 	virtual ~QueryForTimeSeries() {}
 
 	void doQuery(
@@ -72,6 +72,7 @@ protected:
 		TransactionContext &txn, TimeSeries &timeSeries, ResultSet &resultSet);
 	void doSelectionByAPI(TransactionContext &txn, TimeSeries &timeSeries,
 		ResultSet &resultSet);
+
 	BtreeMap::SearchContext
 		scPass_;  
 	QpPassMode
@@ -125,6 +126,7 @@ public:
 			throw;
 		}
 	}
+
 	TimeSeriesRowWrapper(TransactionContext &txn, TimeSeries &timeSeries,
 		uint64_t *pBitmap)
 		: txn_(txn),
@@ -157,6 +159,7 @@ public:
 			throw;
 		}
 	}
+
 	~TimeSeriesRowWrapper() {
 		util::StackAllocator &alloc = txn_.getDefaultAllocator();
 		for (uint32_t i = 0; i < varrayCounter_; i++) {
@@ -169,7 +172,7 @@ public:
 	void load(OId oId) {
 		rowId_ = oId;
 		rowArray_.load(txn_, rowId_, &timeSeries_, OBJECT_READ_ONLY);
-//		util::StackAllocator &alloc = txn_.getDefaultAllocator();
+		util::StackAllocator &alloc = txn_.getDefaultAllocator();
 		memset(pBitmap_, 0,
 			sizeof(uint64_t) * ((timeSeries_.getColumnNum() / 64) + 1));
 		for (uint32_t i = 0; i < varrayCounter_; i++) {

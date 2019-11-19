@@ -29,6 +29,7 @@
 #include "util/trace.h"
 #include "data_type.h"
 #include "bit_array.h"
+#include "gs_error.h"
 
 UTIL_TRACER_DECLARE(CHECKPOINT_FILE);
 
@@ -42,12 +43,14 @@ class CheckpointFile {
 
 public:
 	static const int32_t ALLOCATE_BLOCK_SEARCH_LIMIT = 1024;
+	static const int32_t FILE_SPLIT_COUNT_LIMIT = 128;
+	static const int32_t FILE_SPLIT_STRIPE_SIZE_LIMIT = 1024;
 
 	CheckpointFile(
-		uint8_t chunkExpSize, const std::string &dir, PartitionGroupId pgId);
+		uint8_t chunkExpSize, const std::string &dir, PartitionGroupId pgId,
+		uint32_t splitCount, uint32_t stripeSize,
+		const std::vector<std::string> configDirList);
 	~CheckpointFile();
-
-	void initialize(const char8_t *dir, PartitionGroupId pgId);
 
 	void punchHoleBlock(uint32_t size, uint64_t offset);
 
@@ -62,6 +65,10 @@ public:
 	uint64_t getReadBlockCount();
 	void resetWriteBlockCount();
 	void resetReadBlockCount();
+	uint64_t getReadRetryCount();
+	uint64_t getWriteRetryCount();
+	void resetReadRetryCount();
+	void resetWriteRetryCount();
 
 	int64_t allocateBlock();
 	void freeBlock(uint64_t blockNo);
@@ -88,13 +95,18 @@ public:
 	void close();
 	void flush();
 	void truncate();
+	void advise(int32_t advise);
 
 	inline uint64_t getBlockNum() const {
 		return blockNum_;
 	}
 	inline uint64_t getUseBitNum() const {
-		assert(freeUseBitNum_ <= usedChunkInfo_.length());
-		return usedChunkInfo_.length() - freeUseBitNum_;
+		if (freeUseBitNum_ <= usedChunkInfo_.length()) {
+			return usedChunkInfo_.length() - freeUseBitNum_;
+		}
+		else {
+			return 0;
+		}
 	}
 	inline uint64_t getFreeUseBitNum() const {
 		return freeUseBitNum_;
@@ -110,7 +122,7 @@ public:
 		return ioWarningThresholdMillis_;
 	}
 
-	static bool checkFileName(const std::string &name, PartitionGroupId &pgId);
+	static bool checkFileName(const std::string &name, PartitionGroupId &pgId, int32_t &splitId);
 
 	std::string dumpUsedChunkInfo();
 	std::string dumpValidChunkInfo();
@@ -121,27 +133,46 @@ public:
 	size_t getFileSystemBlockSize();
 	std::string dump();
 
+	int64_t getSplitFileSize(uint32_t splitId);
+
+	inline size_t calcFileNth(uint64_t offset) {
+		return static_cast<size_t>((offset / (BLOCK_SIZE_ * stripeSize_)) % splitCount_);
+	}
+
+	inline uint64_t calcFileOffset(uint64_t offset) {
+		uint64_t unit = offset / (BLOCK_SIZE_ * stripeSize_ * splitCount_);
+		return unit * (BLOCK_SIZE_ * stripeSize_) + offset % (BLOCK_SIZE_ * stripeSize_);
+	}
+
 private:
 	static const char8_t *const gsCpFileBaseName;
 	static const char8_t *const gsCpFileExtension;
 	static const char8_t *const gsCpFileSeparator;
 
-	const Size_t BLOCK_EXP_SIZE_;
-	const Size_t BLOCK_SIZE_;
+	const uint64_t BLOCK_EXP_SIZE_;
+	const uint64_t BLOCK_SIZE_;
 
-	util::NamedFile *file_;
 	BitArray usedChunkInfo_;
 	BitArray validChunkInfo_;
 	uint64_t blockNum_;
 	uint64_t freeUseBitNum_;
 	uint64_t freeBlockSearchCursor_;
 	PartitionGroupId pgId_;
-	std::string dir_;
 	util::Mutex mutex_;  
+
+	std::string dir_;
+	bool splitMode_;
+	std::vector<std::string> fileNameList_;
+	std::vector<util::NamedFile *>fileList_;
+	std::vector<std::string> dirList_;
+	std::vector<uint64_t> blockCountList_;
+	uint32_t splitCount_;
+	uint64_t stripeSize_;
 	uint64_t readBlockCount_;
 	uint64_t writeBlockCount_;
+	uint64_t readRetryCount_;
+	uint64_t writeRetryCount_;
 	uint32_t ioWarningThresholdMillis_;
-	std::string fileName_;
 };
 
 #endif

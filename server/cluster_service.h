@@ -57,6 +57,42 @@ class TransactionManager;
 class RecoveryManager;
 class ObjectManager;
 
+struct ClusterAdditionalServiceConfig {
+	ClusterAdditionalServiceConfig(const ConfigTable &config, PartitionTable *pt = NULL);
+	bool hasPublicAddress() {
+		return hasPublic_;
+	}
+	const char *getAddress(ServiceType serviceType, int32_t type = 0);
+
+	const char *getServiceAddress(ServiceType serviceType);
+	uint16_t getPort(ServiceType serviceTy);
+
+	bool isSetServiceAddress() {
+		return (
+			txnAddressSize_ > 0 
+			);
+	}
+
+	bool isSetLocalAddress() {
+		return (
+			txnInternalAddressSize_ > 0 
+			);
+	}
+
+
+	const char *txnServiceAddress_;
+	const char *txnLocalServiceAddress_;
+	size_t txnAddressSize_;
+	size_t txnInternalAddressSize_;
+	uint16_t txnPort_;
+
+
+	bool hasPublic_;
+	int32_t *serviceTypeList_;
+	int32_t serviceTypeSize_;
+	const char8_t *const *serviceTypeNameList_;
+};
+
 /*!
 	@brief Represents the pointer of all manager objects
 */
@@ -272,10 +308,8 @@ public:
 protected:
 
 #ifdef GD_ENABLE_UNICAST_NOTIFICATION
-	template <class T>
-	void updateNodeList(T &AddressInfoList);
 #else
-	void updateNodeList(std::vector<AddressInfo> &AddressInfoList);
+	void updateNodeList(AddressInfoList &AddressInfoList);
 
 	NodeId checkAddress(EventType type,
 		NodeId clusterNodeId, ServiceType serviceType, EventEngine *ee);
@@ -316,6 +350,10 @@ private:
 
 	void doAfterHeartbeatInfo(EventContext &ec,
 			ClusterManager::HeartbeatInfo &heartbeatInfo);
+
+	void decode(util::StackAllocator &alloc, Event &ev,
+			ClusterManager::HeartbeatInfo &heartbeatInfo,
+			PublicAddressInfoMessage &publicAddressInfo);
 };
 
 
@@ -339,6 +377,10 @@ public:
 private:
 	template<class T>
 	void doAfterNotifyCluster(T &t);
+
+	void decode(util::StackAllocator &alloc, Event &ev,
+			ClusterManager::NotifyClusterInfo &notifyClusterInfo);
+
 	void handleError(Event &ev, UserException &e);
 };
 
@@ -359,6 +401,8 @@ private:
 	bool resolveAddress(SubPartition &subPartition);
 	void requestSync(EventContext &ec,
 			PartitionId pId, PartitionRole &role, bool isShorttermSync);
+	void decode(EventContext &ec, Event &ev,
+			ClusterManager::UpdatePartitionInfo &updateParttiionInfo);
 };
 
 class NewSQLPartitionRefreshHandler : public ClusterHandler {
@@ -431,7 +475,7 @@ private:
 			ClusterManager::HeartbeatCheckInfo &heartbeatCheckInfo);
 	void sendUpdatePartitionInfo(EventContext &ec,
 		ClusterManager::UpdatePartitionInfo &updatePartitionInfo,
-		std::vector<NodeId> &activeNodeList);
+		NodeIdList &activeNodeList);
 };
 
 /*!
@@ -440,8 +484,22 @@ private:
 class TimerNotifyClusterHandler : public ClusterHandler {
 public:
 	TimerNotifyClusterHandler() {}
-
 	void operator()(EventContext &ec, Event &ev);
+
+private:
+	bool doProviderEvent(EventContext &ec, Event &ev);
+	void doMulticastNotifyEvent(EventContext &ec, Event &ev);
+	void doFixedListNotifyEvent(EventContext &ec, Event &ev);
+	void doProviderNotifyEvent(EventContext &ec, Event &ev);
+
+	bool checkResolvePublic(int32_t servicePos) {
+		return (servicePos > SERVICE_MAX);
+	}
+	void resolveLocalAddress(const util::SocketAddress &socket,
+			ServiceType serviceType, NodeId &nodeId);
+	void resolvePublicAddress(const util::SocketAddress &socket,
+			ServiceType serviceType, AddressInfo &publicAddressInfo);
+
 };
 
 /*!
@@ -602,8 +660,9 @@ public:
 	}
 
 #ifdef GD_ENABLE_UNICAST_NOTIFICATION
-	template <class T>
-	void updateNodeList(T &AddressInfoList);
+	template <class T1, class T2>
+	void updateNodeList(T1 &AddressInfoList, T2 &publicAddressInfoList);
+
 
 	NotificationManager &getNotificationManager();
 #endif
@@ -713,6 +772,9 @@ private:
 		*/
 		NodeAddressSet &getFixedAddressInfo();
 
+		AddressInfoList &getPublicFixedAddressInfo();
+
+
 		/*!
 			@brief Gets the number of fixed adderss info.
 		*/
@@ -749,6 +811,8 @@ private:
 		std::vector<ServiceAddressResolver *> resolverList_;
 
 		NodeAddressSet fixedAddressInfoSet_;
+
+		AddressInfoList publicFixedAddressInfoSet_;
 
 		int32_t fixedNodeNum_;
 

@@ -30,6 +30,7 @@
 UTIL_TRACER_DECLARE(CLUSTER_SERVICE);
 UTIL_TRACER_DECLARE(CLUSTER_OPERATION);
 UTIL_TRACER_DECLARE(CLUSTER_DUMP);
+UTIL_TRACER_DECLARE(CLUSTER_DETAIL);
 
 #define GS_TRACE_CLUSTER_INFO(s) \
 	GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_CLUSTER_STATUS, s); \
@@ -360,7 +361,7 @@ void ClusterManager::checkClusterStatus(EventType operation) {
 void ClusterManager::updateClusterStatus(
 	ClusterStatusTransition status, bool isLeave) {
 	try {
-//		const std::string &prevStatus = pt_->dumpCurrentClusterStatus();
+		const std::string &prevStatus = pt_->dumpCurrentClusterStatus();
 		switch (status) {
 		case TO_SUBMASTER: {
 			TRACE_CLUSTER_EXCEPTION_FORCE(GS_ERROR_CLM_STATUS_TO_SUBMASTER,
@@ -404,7 +405,8 @@ void ClusterManager::getHeartbeatInfo(HeartbeatInfo &heartbeatInfo) {
 		if (pt_->isMaster()) {
 			heartbeatInfo.setMaxLsnList();
 		}
-		pt_->getNodeAddressInfo(heartbeatInfo.getNodeAddressList());
+		pt_->getNodeAddressInfo(heartbeatInfo.getNodeAddressList(),
+				heartbeatInfo.getPublicNodeAddressList());
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_USER_OR_SYSTEM(e, "");
@@ -471,7 +473,7 @@ bool ClusterManager::setHeartbeatInfo(HeartbeatInfo &heartbeatInfo) {
 				return false;
 			}
 			pt_->setHeartbeatTimeout(senderNodeId, nextHeartbeatTime(baseTime));
-			std::vector<LogSequentialNumber> &maxLsnList = heartbeatInfo.getMaxLsnList();
+			LsnList &maxLsnList = heartbeatInfo.getMaxLsnList();
 			for (PartitionId pId = 0; pId < maxLsnList.size(); pId++) {
 				pt_->setMaxLsn(pId, maxLsnList[pId]);
 			}
@@ -537,8 +539,8 @@ void ClusterManager::setHeartbeatResInfo(HeartbeatResInfo &heartbeatResInfo) {
 		PartitionStatus status;
 		PartitionRoleStatus roleStatus;
 		PartitionRevisionNo partitionRevision;
-//		int64_t chunkNum;
-//		int32_t otherStatus;
+		int64_t chunkNum;
+		int32_t otherStatus;
 		int32_t errorStatus;
 		int64_t baseTime = getMonotonicTime();
 		pt_->setHeartbeatTimeout(senderNodeId, nextHeartbeatTime(baseTime));
@@ -552,17 +554,17 @@ void ClusterManager::setHeartbeatResInfo(HeartbeatResInfo &heartbeatResInfo) {
 			status = static_cast<PartitionStatus>(resValue.status_);
 			roleStatus = static_cast<PartitionRoleStatus>(resValue.roleStatus_);
 			partitionRevision = resValue.partitionRevision_;
-//			chunkNum = resValue.chunkCount_;
-//			otherStatus = resValue.otherStatus_;
+			chunkNum = resValue.chunkCount_;
+			otherStatus = resValue.otherStatus_;
 			errorStatus = resValue.errorStatus_;
 			pt_->handleErrorStatus(pId, senderNodeId, errorStatus);
-
 			pt_->setLsnWithCheck(pId, resValue.lsn_, senderNodeId);
 			pt_->setMaxLsn(pId, resValue.lsn_);
 			pt_->setStartLSN(pId, resValue.startLsn_, senderNodeId);
 			pt_->setPartitionStatus(pId, status, senderNodeId);
 			pt_->setPartitionRoleStatus(pId, roleStatus, senderNodeId);
 			pt_->setPartitionRevision(pId, partitionRevision, senderNodeId);
+			pt_->setErrorStatus(pId, errorStatus, senderNodeId);
 		}
 		heartbeatResInfo.setSyncInfo(getSyncStat());
 	}
@@ -595,7 +597,7 @@ void ClusterManager::getHeartbeatCheckInfo(HeartbeatCheckInfo &heartbeatCheckInf
 		int64_t currentTime = getMonotonicTime();
 		ClusterStatusTransition nextTransition = KEEP;
 		bool isAddNewNode = false;
-		std::vector<NodeId> &activeNodeList = heartbeatCheckInfo.getActiveNodeList();
+		NodeIdList &activeNodeList = heartbeatCheckInfo.getActiveNodeList();
 		util::StackAllocator &alloc = heartbeatCheckInfo.getAllocator();
 
 		int32_t periodicCount 
@@ -812,8 +814,6 @@ void ClusterManager::setUpdatePartitionInfo(UpdatePartitionInfo &updatePartition
 
 
 		PartitionRevisionNo revisionNo = subPartitionTable.getRevision().sequentialNumber_;
-		TRACE_CLUSTER_NORMAL_OPERATION(INFO, "Recieve next partition, revision=" << revisionNo);
-
 		PartitionRevision &currentRevision = subPartitionTable.getRevision();
 		if (currentOwnerList.size() > 0) {
 			TRACE_CLUSTER_NORMAL_OPERATION(INFO,
@@ -873,11 +873,22 @@ bool ClusterManager::setNotifyClusterInfo(NotifyClusterInfo &notifyClusterInfo) 
 		NodeId senderNodeId = notifyClusterInfo.getSenderNodeId();
 		bool isFollowerMaster = notifyClusterInfo.isMaster();
 		if (getClusterName() != notifyClusterInfo.getClusterName()) {
+			GS_TRACE_DEBUG(CLUSTER_DETAIL,
+					GS_TRACE_CS_TRACE_STATS,
+					"Cluster name is not match, self=" << getClusterName()
+							<< ", recv=" << notifyClusterInfo.getClusterName()
+			);
 			GS_THROW_USER_ERROR(GS_ERROR_CLM_UNMATCH_CLUSTER_NAME,
 					"Cluster name is not match, self=" << getClusterName()
 					<< ", recv=" << notifyClusterInfo.getClusterName());
 		}
 		if (getDigest() != notifyClusterInfo.getDigest()) {
+			GS_TRACE_DEBUG(CLUSTER_DETAIL,
+					GS_TRACE_CS_TRACE_STATS,
+				"Cluster digest is not match, self=" << getDigest()
+				<< ", recv=" << notifyClusterInfo.getDigest()
+		);
+
 			GS_THROW_USER_ERROR(GS_ERROR_CLM_UNMATCH_DIGEST,
 					"Cluster digest is not match, self=" << getDigest()
 					<< ", recv=" << notifyClusterInfo.getDigest());
@@ -895,15 +906,28 @@ bool ClusterManager::setNotifyClusterInfo(NotifyClusterInfo &notifyClusterInfo) 
 		}
 		if ((!isNewNode() &&
 				getReserveNum() != notifyClusterInfo.getReserveNum())) {
+			GS_TRACE_DEBUG(CLUSTER_DETAIL,
+					GS_TRACE_CS_TRACE_STATS,
+					"Cluster minNodeNum is not match, self=" << getReserveNum()
+				<< ", recv=" << notifyClusterInfo.getReserveNum()
+			);
 			GS_THROW_USER_ERROR(GS_ERROR_CLM_UNMATCH_RESERVE_NUM,
 					"Cluster minNodeNum is not match, self=" << getReserveNum()
 					<< ", recv=" << notifyClusterInfo.getReserveNum());
 		}
 		if (isFollowerMaster && notifyClusterInfo.isStable()) {
+			GS_TRACE_DEBUG(CLUSTER_DETAIL,
+					GS_TRACE_CS_TRACE_STATS,
+					"Self node cannot join cluster : master node is stable"
+			);
 			GS_THROW_USER_ERROR(GS_ERROR_CLM_CLUSTER_FOLLOWER_IS_STABLE,
 				"Self node cannot join cluster : master node is stable");
 		}
 		if (isNewNode() && !isFollowerMaster) {
+			GS_TRACE_DEBUG(CLUSTER_DETAIL,
+					GS_TRACE_CS_TRACE_STATS,
+					"self is newNode and received message from subMaster"
+			);
 			GS_THROW_USER_ERROR(GS_ERROR_CLM_NEW_NODE_NEED_TO_FOLLOW_MASTER,
 				"Self node cannot join cluster :"
 				"self is newNode and received message from subMaster");
@@ -1014,8 +1038,7 @@ void ClusterManager::setNotifyClusterResInfo(NotifyClusterResInfo &notifyCluster
 	try {
 		NodeId senderNodeId = notifyClusterResInfo.getSenderNodeId();
 		int32_t reserveNum = notifyClusterResInfo.getReserveNum();
-		std::vector<LogSequentialNumber> &lsnList =
-			notifyClusterResInfo.getLsnList();
+		LsnList &lsnList = notifyClusterResInfo.getLsnList();
 
 		util::StackAllocator &alloc = notifyClusterResInfo.getAllocator();
 		util::XArray<NodeId> liveNodeIdList(alloc);
@@ -1166,8 +1189,7 @@ void ClusterManager::setDecreaseClusterInfo(DecreaseClusterInfo &decreaseCluster
 					<< getReserveNum() << ", activeNodeNum:" << getActiveNum());
 		}
 
-		std::vector<NodeId> &leaveNodeList =
-			decreaseClusterInfo.getLeaveNodeList();
+		NodeIdList &leaveNodeList = decreaseClusterInfo.getLeaveNodeList();
 		if (leaveNodeList.size() == 0) {
 			getSafetyLeaveNodeList(
 				decreaseClusterInfo.getAllocator(), leaveNodeList);
@@ -1193,7 +1215,7 @@ void ClusterManager::setDecreaseClusterInfo(DecreaseClusterInfo &decreaseCluster
 	@brief Gets the list of nodes can leave cluster
 */
 void ClusterManager::getSafetyLeaveNodeList(util::StackAllocator &alloc,
-	std::vector<NodeId> &candList, int32_t removeNodeNum) {
+	NodeIdList &candList, int32_t removeNodeNum) {
 	try {
 		int32_t nodeNum = pt_->getNodeNum();
 		util::XArray<bool> candFlagList(alloc);
@@ -1450,28 +1472,24 @@ void ClusterManager::setDigest(const ConfigTable &configTable,
 
 		digest.notificationMode_ = mode;
 
+		digestBinary.push_back(reinterpret_cast<const uint8_t *>(&digest),
+			sizeof(ClusterDigest));
 		if (addressInfoList.size() > 0) {
-			assert(mode == NOTIFICATION_FIXEDLIST);
-			digestBinary.push_back(reinterpret_cast<const uint8_t *>(&digest),
-				sizeof(ClusterDigest));
-
 			AddressInfo info;
-			int32_t p = 0;
 			for (NodeAddressSetItr it = addressInfoList.begin();
-				it != addressInfoList.end(); it++, p++) {
+				it != addressInfoList.end(); it++) {
 				memset((char *)&info, 0, sizeof(AddressInfo));
 				info = (*it);
 				digestBinary.push_back((const uint8_t *)&(info), sizeof(AddressInfo));
 			}
-			SHA256_Data(reinterpret_cast<const uint8_t *>(digestBinary.data()),
+		}
+		if (pt_->hasPublicAddress()) {
+			uint8_t publicVal = 1;
+			digestBinary.push_back((const uint8_t *)&(publicVal), sizeof(uint8_t));
+		}
+		SHA256_Data(reinterpret_cast<const uint8_t *>(digestBinary.data()),
 				digestBinary.size(), digestData);
-			clusterInfo_.digest_ = digestData;
-		}
-		else {
-			SHA256_Data(reinterpret_cast<const uint8_t *>(&digest),
-				sizeof(ClusterDigest), digestData);
-			clusterInfo_.digest_ = digestData;
-		}
+		clusterInfo_.digest_ = digestData;
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_USER_OR_SYSTEM(e, "");
@@ -1622,6 +1640,10 @@ void ClusterManager::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
 		.setMin(1)
 		.setDefault(0);
+
+	CONFIG_TABLE_ADD_PARAM(config,
+			CONFIG_TABLE_CS_NOTIFICATION_INTERFACE_ADDRESS, STRING)
+		.setDefault("");
 
 }
 

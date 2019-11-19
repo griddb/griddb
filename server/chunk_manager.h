@@ -23,6 +23,7 @@
 
 
 
+
 #define TEST_DIRTY_CHECK_SET(pId, categoryId, cId, chunkPtr)
 #define TEST_DIRTY_CHECK_RESET(pId, categoryId, cId)
 #define TEST_DIRTY_CHECK(pId, categoryId, cId, bufferInfo, isForceCheck)
@@ -56,6 +57,12 @@ static inline uint64_t __builtin_clzll(uint64_t x) {
 }
 #endif
 
+
+struct OIdBitUtils {
+	static inline bool isLargeChunkMode(uint32_t chunkExpSize) {
+		return (chunkExpSize > 20) ? true : false;
+	}
+};
 
 #define EXEC_FAILURE(errorNo)
 
@@ -143,9 +150,15 @@ public:
 				int32_t affinitySize, bool isWarmStart, uint64_t storeMemoryLimit,
 				uint64_t checkpointMemoryLimit, uint32_t maxOnceSwapNum
 				, ChunkManager::CompressionMode compressionMode
+			    , ConfigTable &configTable
 				, int32_t shiftableMemRate = 80
 				, int32_t emaHalfLifePeriod_ = 240
 			   , double atomicStoreMemoryColdRate_ = 3.0 / 8.0
+			   , uint64_t cpFileFlushSize = 0
+			   , bool cpFileFlushAutoClearCache = true
+				, double bufferHashTableSizeRate = 0.01   
+			   , uint32_t cpFileSplitCount = 1 
+			   , uint32_t cpFileSplitStripeSize = 1 
 			);
 		~Config();
 
@@ -209,7 +222,35 @@ public:
 			return static_cast<double>(atomicStoreMemoryColdRate_) / 1.0E6;
 		}
 		bool setAtomicStoreMemoryColdRate(double rate);
+		uint64_t getAtomicCpFileFlushSize() {
+			return atomicCpFileFlushSize_;
+		}
+		bool setAtomicCpFileFlushSize(uint64_t size);
 
+		uint64_t getAtomicCpFileFlushInterval() {
+			return atomicCpFileFlushInterval_;
+		}
+
+		bool getAtomicCpFileAutoClearCache() {
+			return atomicCpFileAutoClearCache_;
+		}
+		bool setAtomicCpFileAutoClearCache(bool flag);
+		double getBufferHashTableSizeRate() {
+			return bufferHashTableSizeRate_;
+		}
+		static std::vector<std::string> parseCpFileDirList(ConfigTable &configTable);
+
+		void setCpFileDirList(const char* jsonArray);
+
+		uint32_t getCpFileSplitCount() {
+			return cpFileSplitCount_;
+		}
+		uint32_t getCpFileSplitStripeSize() {
+			return cpFileSplitStripeSize_;
+		}
+		const std::vector<std::string> &getCpFileDirList() {
+			return cpFileDirList_;
+		}
 		int32_t getAffinitySize() {
 			return atomicAffinitySize_;
 		}
@@ -247,6 +288,13 @@ public:
 		util::Atomic<uint32_t> atomicStorePoolLimitNum_;
 		util::Atomic<uint64_t> atomicCheckpointPoolLimit_;
 		util::Atomic<uint32_t> atomicCheckpointPoolLimitNum_;
+		util::Atomic<uint64_t> atomicCpFileFlushSize_;
+		util::Atomic<uint64_t> atomicCpFileFlushInterval_;
+		util::Atomic<bool> atomicCpFileAutoClearCache_;
+		double bufferHashTableSizeRate_;  
+		std::vector<std::string> cpFileDirList_; 
+		uint32_t cpFileSplitCount_; 
+		uint32_t cpFileSplitStripeSize_; 
 		bool isWarmStart() const {
 			return isWarmStart_;
 		}
@@ -283,6 +331,7 @@ public:
 		uint64_t getStoreMemory(ChunkCategoryId categoryId) const;
 		uint64_t getSwapRead(ChunkCategoryId categoryId) const;
 		uint64_t getSwapWrite(ChunkCategoryId categoryId) const;
+		uint64_t getBufferHashCollisionCount() const;
 		uint64_t getCheckpointFileSize(PartitionGroupId pgId) const;
 		uint64_t getCheckpointFileAllocateSize(PartitionGroupId pgId) const;
 		uint64_t getStoreUse() const;
@@ -313,7 +362,16 @@ public:
 		uint64_t getSwapReadTime() const;
 		uint64_t getSwapWriteTime() const;
 		uint64_t getRecoveryReadTime() const;
+		uint64_t getFileFlushCount() const;
+		uint64_t getFileFlushTime() const;
+		uint64_t getCheckpointWriteCompressTime() const;
+		uint64_t getSyncReadUncompressTime() const;
+		uint64_t getRecoveryReadUncompressTime() const;
 
+		uint64_t getSwapReadUncompressTime() const;
+		uint64_t getSwapWriteCompressTime() const;
+		uint64_t getCpFileReadRetryCount() const;
+		uint64_t getCpFileWriteRetryCount() const;
 		uint64_t getPGStoreMemoryLimit(PartitionGroupId pgId) const;
 		uint64_t getPGStoreMemory(PartitionGroupId pgId) const;
 		uint64_t getPGSwapRead(PartitionGroupId pgId) const;
@@ -369,16 +427,22 @@ public:
 
 	};
 
-	static const uint8_t MAX_CHUNK_EXP_SIZE_ = 20;
+	static const uint8_t MAX_CHUNK_EXP_SIZE_ = 26;
 	static const int32_t MIN_CHUNK_EXP_SIZE_ = 15;
 	static const int32_t CHUNK_CATEGORY_NUM = 5;
-	static const int32_t MAX_CHUNK_ID =
-		INT32_MAX - 1;  
+	const int32_t MAX_CHUNK_ID;
 	static const int32_t CHUNK_HEADER_FULL_SIZE = 256;  
 	static const uint32_t MAX_CHUNK_EXPAND_COUNT = 4096;
-	static const uint32_t LIMIT_CHUNK_NUM_LIST[6];
+	static const uint32_t LIMIT_CHUNK_NUM_LIST[12];
+	static const uint32_t FILE_SYSTEM_BLOCK_SIZE = 4096;
 
 public:
+	static inline uint32_t calcMaxChunkId(uint32_t blockSize) {
+		const uint32_t chunkExpSize = util::nextPowerBitsOf2(blockSize);
+		const bool isLargeChunkMode = OIdBitUtils::isLargeChunkMode(chunkExpSize);
+		return isLargeChunkMode ? ((static_cast<int32_t>(1) << 26) - 2): INT32_MAX - 1;
+	}
+
 	static const size_t EXPIRE_INTERVAL_CATEGORY_COUNT = 6;
 	static const size_t UPDATE_INTERVAL_CATEGORY_COUNT = 7;
 
@@ -387,6 +451,7 @@ public:
 	static const size_t CHUNKKEY_BITS =
 		0x3FFFFF;  
 
+	typedef util::NormalXArray<uint8_t> ByteArray;
 	/*!
 		@brief Manages basic information of all Chunks.
 	*/
@@ -497,10 +562,15 @@ public:
 
 		static const Offset_t CHUNK_DATA_SIZE_OFFSET =
 			CHUNK_PADDING_OFFSET + sizeof(uint8_t) * 3;
-		static const Offset_t CHUNK_DATA_AFFINITY_VALUE =
+		static const Offset_t CHUNK_DATA_AFFINITY_VALUE_OFFSET =
 			CHUNK_DATA_SIZE_OFFSET + sizeof(uint32_t);
+		static const Offset_t CPFILE_SPLIT_COUNT_OFFSET =
+			CHUNK_DATA_AFFINITY_VALUE_OFFSET + sizeof(uint64_t);
+		static const Offset_t CPFILE_SPLIT_STRIPE_SIZE_OFFSET =
+			CPFILE_SPLIT_COUNT_OFFSET + sizeof(uint32_t);
+
 		static const Size_t CHUNK_HEADER_SIZE =
-			CHUNK_DATA_AFFINITY_VALUE + sizeof(uint64_t);
+			CPFILE_SPLIT_STRIPE_SIZE_OFFSET + sizeof(uint32_t);
 
 		static const uint16_t MAGIC_NUMBER = 0xcd14;
 		static const Offset_t CHECK_SUM_START_OFFSET = VERSION_OFFSET;
@@ -510,7 +580,9 @@ public:
 				ChunkCategoryId categoryId, ChunkId cId,
 				ChunkCategoryAttribute& attribute, ChunkKey chunkKey,
 				PartitionGroupId partitionGroupNum, PartitionId partitionNum,
-				ChunkCategoryId categoryNum);
+				ChunkCategoryId categoryNum
+				, uint32_t cpFileSplitCount, uint32_t cpFileSplitStripeSize
+				);
 
 		static uint32_t getCheckSum(const uint8_t* data);
 		static uint32_t calcCheckSum(const uint8_t* data);
@@ -572,6 +644,8 @@ public:
 
 		static void validateHeader(const uint8_t* data,
 				PartitionId expectedPartitionNum, uint8_t expectedChunkExpSize,
+				uint32_t expectedSplitCount, uint32_t expectedSplitStripeSize,
+				bool checkSplitInfo,
 				bool checkCheckSum);
 
 		static uint32_t getCompressedDataSize(const uint8_t* data);
@@ -580,9 +654,16 @@ public:
 		static uint64_t getChunkDataAffinity(const uint8_t* data);
 		static void setChunkDataAffinity(uint8_t* data, uint64_t dataSize);
 
+		static uint32_t getCpFileSplitCount(const uint8_t* data);
+		static void setCpFileSplitCount(uint8_t* data, uint32_t splitCount);
+
+		static uint32_t getCpFileSplitStripeSize(const uint8_t* data);
+		static void setCpFileSplitStripeSize(uint8_t* data, uint32_t stripeSize);
+
 		static std::string dumpFieldName();
 		static std::string dump(const uint8_t* chunk);
 
+		static void dumpHeader(const uint8_t* data, size_t dumpSize = 32, bool hexDump = false);
 	private:
 
 		uint8_t* data_;
@@ -643,6 +724,7 @@ public:
 	void resetCheckpointBit(PartitionGroupId pgId);
 	void recoveryChunk(PartitionId pId, ChunkCategoryId categoryId, ChunkId cId,
 			ChunkKey chunkKey, uint8_t unoccupiedSize, uint64_t filePos);
+
 	void recoveryChunk(PartitionId pId, const uint8_t* chunk, uint32_t size,
 			bool forIncrementalBackup);
 	void adjustPGStoreMemory(PartitionGroupId pgId);
@@ -670,8 +752,25 @@ public:
 	void cleanCheckpointData(PartitionGroupId pgId);
 	uint64_t startSync(CheckpointId cpId, PartitionId pId);
 	bool getCheckpointChunk(PartitionId pId, uint32_t size, uint8_t* buffer);
-	uint64_t backupCheckpointFile(PartitionGroupId pgId, CheckpointId cpId,
+	uint64_t backupCheckpointFile(
+			PartitionGroupId pgId, CheckpointId cpId,
 			const std::string& backupPath);
+
+	uint64_t backupCheckpointFileForLargeChunk(
+			PartitionGroupId pgId, CheckpointId cpId,
+			const std::string& backupPath);
+
+	uint64_t backupCheckpointFileForSmallChunk(
+			PartitionGroupId pgId, CheckpointId cpId,
+			const std::string& backupPath);
+
+	void makeBackupDirList(
+			const std::string& backupPath,
+			std::vector<std::string> &dirList);
+	UTIL_FORCEINLINE ByteArray& getPGBackupBuffer(
+			PartitionGroupId pgId) {
+		return getPGPartitionGroupData(pgId).backupBuffer_;
+	}
 
 	void getBackupChunk(
 			PartitionGroupId pgId, uint64_t filePos, uint8_t* chunk);
@@ -695,7 +794,7 @@ public:
 		uint32_t chunkSize_;
 		uint64_t chunkNum_;
 		uint32_t copyNum_;
-		static const uint32_t IO_SIZE = 1 * 1024 * 1024;
+		static const uint32_t IO_SIZE = 32 * 1024 * 1024;
 	};
 
 	void prepareMakeSyncTempCpFile(
@@ -1142,8 +1241,8 @@ private:
 				  objectAllocateSize_(0) {}
 		};
 
-		static const int32_t MAX_CHUNK_ID = ChunkManager::MAX_CHUNK_ID;
 		Config& config_;
+		const int32_t MAX_CHUNK_ID;
 		PartitionGroupId pgId_;
 		PGStats pgStats_;
 		std::vector<PartitionId>& pIdList_;
@@ -1286,14 +1385,14 @@ public:
 
 		uint32_t getHoleOffset(uint32_t compressedSize, uint32_t &holeSize);
 
-		uint32_t compressChunk(uint8_t* buffer, CompressionMode mode);
-
-		void uncompressChunk(uint8_t* buffer);
-
+		uint32_t compressChunk(uint8_t* buffer, CompressionMode mode, int64_t &time);
+		int64_t uncompressChunk(uint8_t* buffer);
 		int64_t writeHolePunchingChunk(
-				uint8_t* buffer, int64_t writePos, uint32_t holeOffset);
+				uint8_t* buffer, int64_t writePos, uint32_t holeOffset,
+				uint64_t &flushTime);
 
-		int64_t writeChunk(uint8_t* buffer, uint32_t size, int64_t writePos);
+		int64_t writeChunk(uint8_t* buffer, uint32_t size, int64_t writePos,
+				uint64_t &flushTime);
 
 		int64_t readChunk(uint8_t* buffer, uint32_t size, int64_t readPos);
 
@@ -1315,6 +1414,7 @@ public:
 		uint64_t invalidCompressionTraceCount_;
 
 		util::Stopwatch ioTimer_;
+		uint64_t writeChunkCount_;
 		const uint32_t chunkExpSize_;
 		const uint32_t chunkSize_;
 		uint8_t* destBuffer_;
@@ -1369,6 +1469,13 @@ private:
 			uint64_t backupReadTime_;
 			uint64_t backupWriteCount_;
 			uint64_t backupWriteTime_;
+			uint64_t cpFileFlushCount_;
+			uint64_t cpFileFlushTime_;
+			uint64_t checkpointWriteCompressTime_;
+			uint64_t chunkSyncReadUncompressTime_;
+			uint64_t recoveryReadUncompressTime_;
+			uint64_t backupReadUncompressTime_;
+
 			PGStats()
 				: checkpointCount_(0),
 				  checkpointWriteCount_(0),
@@ -1382,7 +1489,12 @@ private:
 				  ,
 				  backupWriteCount_(0),
 				  backupWriteTime_(0)
-			
+				  , cpFileFlushCount_(0)
+				  , cpFileFlushTime_(0)
+				  , checkpointWriteCompressTime_(0)
+				  , chunkSyncReadUncompressTime_(0)
+				  , recoveryReadUncompressTime_(0)
+				  , backupReadUncompressTime_(0)
 				   {}
 		};
 
@@ -1506,11 +1618,17 @@ private:
 		UTIL_FORCEINLINE uint64_t getPGBackupReadTime() const;
 		UTIL_FORCEINLINE uint64_t getPGBackupWriteCount() const;
 		UTIL_FORCEINLINE uint64_t getPGBackupWriteTime() const;
+		UTIL_FORCEINLINE uint64_t getPGCheckpointWriteCompressTime() const;
+		UTIL_FORCEINLINE uint64_t getPGChunkSyncReadUncompressTime() const;
+		UTIL_FORCEINLINE uint64_t getPGRecoveryReadUncompressTime() const;
+		UTIL_FORCEINLINE uint64_t getPGBackupReadUncompressTime() const;
 		UTIL_FORCEINLINE uint64_t getPGFileNum();
 		UTIL_FORCEINLINE uint64_t getPGFileUseNum();
 		UTIL_FORCEINLINE uint64_t getPGFileSize();
 		UTIL_FORCEINLINE uint64_t getPGFileAllocateSize();
 
+		UTIL_FORCEINLINE uint64_t getPGCpFileFlushCount();
+		UTIL_FORCEINLINE uint64_t getPGCpFileFlushTime();
 	};
 
 	/*!
@@ -1566,8 +1684,14 @@ private:
 			double storeMemoryAgingSwapRate_;
 			uint64_t swapNormalReadCount_;
 			uint64_t swapColdBufferingReadCount_;
+			uint64_t cpFileFlushCount_;
+			uint64_t cpFileFlushTime_;
+			uint64_t swapWriteCompressTime_;
+			uint64_t swapReadUncompressTime_;
+			uint64_t enwarmReadUncompressTime_;
 			uint64_t enwarmReadCount_;
 			uint64_t enwarmReadTime_;
+
 			PGStats(ChunkCategoryId categoryNum);
 			~PGStats();
 		};
@@ -1651,9 +1775,13 @@ private:
 		static const uint64_t MINIMUM_BUFFER_INFO_LIST_SIZE =
 			1ULL << 21;  
 
-		static uint64_t getHashTableSize(
+		static uint64_t getHashTableSize(Config& config);
+
+		static uint64_t getHashTableSize1(
 				PartitionGroupId partitionGroupNum,
 				uint64_t totalAtomicMemoryLimitNum);
+
+		static uint64_t getHashTableSize2(Config& config);
 
 		class ChainingHashTableCursor;
 		/*!
@@ -1664,17 +1792,19 @@ private:
 			typedef uint64_t HashValue;
 
 		public:
-			ChainingHashTable(size_t size, ArrayAllocator& allocator);
+			ChainingHashTable(uint64_t size, ArrayAllocator& allocator);
 			~ChainingHashTable();
 
 			void append(BufferId bufferId, BufferInfo* bufferInfo);
 			BufferInfo* get(BufferId bufferId);
 			BufferInfo* remove(BufferId bufferId);
+			uint64_t getCollisionCount();
 		private:
 			static const uint32_t SEED_ = 0;
 			const uint64_t maxSize_;
 			const uint64_t tableMask_;
 			BufferInfoList table_;
+			int64_t collisionCount_;
 			ChainingHashTable(const ChainingHashTable&);
 			ChainingHashTable& operator=(const ChainingHashTable&);
 
@@ -1826,6 +1956,23 @@ private:
 		UTIL_FORCEINLINE uint64_t getPGSwapColdBufferingReadCount() const {
 			return pgStats_.swapColdBufferingReadCount_;
 		}
+		UTIL_FORCEINLINE uint64_t getPGCpFileFlushCount() {
+			return pgStats_.cpFileFlushCount_;
+		}
+		UTIL_FORCEINLINE uint64_t getPGCpFileFlushTime() {
+			return pgStats_.cpFileFlushTime_;
+		}
+		UTIL_FORCEINLINE uint64_t getPGSwapWriteCompressTime() const {
+			return pgStats_.swapWriteCompressTime_;
+		}
+		UTIL_FORCEINLINE uint64_t getPGSwapReadUncompressTime() const {
+			return pgStats_.swapReadUncompressTime_;
+		}
+		UTIL_FORCEINLINE uint64_t getPGEnwarmReadUncompressTime() const {
+			return pgStats_.enwarmReadUncompressTime_;
+		}
+		UTIL_FORCEINLINE uint64_t getPGCpFileReadRetryCount() const;
+		UTIL_FORCEINLINE uint64_t getPGCpFileWriteRetryCount() const;
 		UTIL_FORCEINLINE uint64_t getPGRecoveryReadCount() const {
 			return pgStats_.enwarmReadCount_;
 		}
@@ -1855,11 +2002,13 @@ private:
 		double getStoreMemoryColdRate() {
 			return swapList_.getColdRate();
 		}
+		UTIL_FORCEINLINE uint64_t getPGHashCollisionCount() {
+			return bufferInfoList_.getCollisionCount();
+		}
 		std::string dumpDirtyState(PartitionId pId, ChunkCategoryId categoryId,
 				ChunkId cId, BufferInfo* bufferInfo);
 
 	};
-
 	/*!
 		@brief Balances StoreMemoryLimit of each Partition group, according to
 	   SwapRead.
@@ -1990,7 +2139,9 @@ private:
 		CheckpointManager checkpointManager_;
 		BufferManager bufferManager_;
 		AffinityManager affinityManager_;
-		PartitionGroupData(Config& config, PartitionGroupId pgId,
+		ByteArray backupBuffer_;
+
+		PartitionGroupData(ConfigTable &configTable, Config& config, PartitionGroupId pgId,
 				const std::string& dir, MemoryPool& checkpointMemoryPool,
 				MemoryPool& storeMemoryPool, PartitionDataList& partitionDataList);
 	};
@@ -2161,7 +2312,10 @@ UTIL_FORCEINLINE ChunkManager::MetaChunk* ChunkManager::allocateChunk(
 				getPartitionGroupId(pId), pId, categoryId, cId,
 				getChunkCategoryAttribute(categoryId), chunkKey,
 				getConfig().getPartitionGroupNum(), getConfig().getPartitionNum(),
-				getConfig().getChunkCategoryNum());
+				getConfig().getChunkCategoryNum()
+				, getConfig().getCpFileSplitCount()
+				, getConfig().getCpFileSplitStripeSize()
+			);
 
 		if (metaChunkKey != NULL) {
 			*metaChunkKey = chunkKey;
@@ -2425,7 +2579,10 @@ UTIL_FORCEINLINE void ChunkManager::ChunkHeader::initialize(
 		PartitionId pId, ChunkCategoryId categoryId, ChunkId cId,
 		ChunkCategoryAttribute& attribute, ChunkKey chunkKey,
 		PartitionGroupId partitionGroupNum, PartitionId partitionNum,
-		ChunkCategoryId categoryNum) {
+		ChunkCategoryId categoryNum
+		, uint32_t cpFileSplitCount
+		, uint32_t cpFileSplitStripeSize
+	) {
 	memset(data, 0, CHUNK_HEADER_FULL_SIZE);
 
 	setVersion(data, GS_FILE_VERSION);
@@ -2449,14 +2606,20 @@ UTIL_FORCEINLINE void ChunkManager::ChunkHeader::initialize(
 	setAttribute(data, attribute.freeMode_);
 	setCompressedDataSize(data, 0);
 	setChunkDataAffinity(data, 0);
+	setCpFileSplitCount(data, cpFileSplitCount);
+	setCpFileSplitStripeSize(data, cpFileSplitStripeSize);
 }
 
 UTIL_FORCEINLINE
 uint32_t ChunkManager::ChunkHeader::getCheckSum(const uint8_t* data) {
 	return *(const uint32_t*)(data + CHECKSUM_OFFSET);
 }
+
 UTIL_FORCEINLINE
 uint32_t ChunkManager::ChunkHeader::calcCheckSum(const uint8_t* data) {
+	assert(data);
+	assert(MIN_CHUNK_EXP_SIZE_ <= getChunkExpSize(data)
+		   && getChunkExpSize(data) <= MAX_CHUNK_EXP_SIZE_);
 	return util::fletcher32(
 		data + CHECK_SUM_START_OFFSET,
 		(1ULL << getChunkExpSize(data)) - CHECK_SUM_START_OFFSET);
@@ -2627,13 +2790,32 @@ inline void ChunkManager::ChunkHeader::setCompressedDataSize(
 		uint8_t* data, uint32_t dataSize) {
 	memcpy((data + CHUNK_DATA_SIZE_OFFSET), &dataSize, sizeof(uint32_t));
 }
+
 inline
 uint64_t ChunkManager::ChunkHeader::getChunkDataAffinity(const uint8_t* data) {
-	return *(const uint64_t*)(data + CHUNK_DATA_AFFINITY_VALUE);
+	return *(const uint64_t*)(data + CHUNK_DATA_AFFINITY_VALUE_OFFSET);
 }
 inline void ChunkManager::ChunkHeader::setChunkDataAffinity(
 		uint8_t* data, uint64_t dataSize) {
-	memcpy((data + CHUNK_DATA_AFFINITY_VALUE), &dataSize, sizeof(uint64_t));
+	memcpy((data + CHUNK_DATA_AFFINITY_VALUE_OFFSET), &dataSize, sizeof(uint64_t));
+}
+
+inline
+uint32_t ChunkManager::ChunkHeader::getCpFileSplitCount(const uint8_t* data) {
+	return *(const uint32_t*)(data + CPFILE_SPLIT_COUNT_OFFSET);
+}
+inline void ChunkManager::ChunkHeader::setCpFileSplitCount(
+		uint8_t* data, uint32_t splitCount) {
+	memcpy((data + CPFILE_SPLIT_COUNT_OFFSET), &splitCount, sizeof(uint32_t));
+}
+
+inline
+uint32_t ChunkManager::ChunkHeader::getCpFileSplitStripeSize(const uint8_t* data) {
+	return *(const uint32_t*)(data + CPFILE_SPLIT_STRIPE_SIZE_OFFSET);
+}
+inline void ChunkManager::ChunkHeader::setCpFileSplitStripeSize(
+		uint8_t* data, uint32_t size) {
+	memcpy((data + CPFILE_SPLIT_STRIPE_SIZE_OFFSET), &size, sizeof(uint32_t));
 }
 
 inline void ChunkManager::BaseMetaChunk::reuse(uint8_t initialUnoccupiedSize) {
@@ -2885,6 +3067,22 @@ UTIL_FORCEINLINE
 uint64_t ChunkManager::CheckpointManager::getPGBackupWriteTime() const {
 	return pgStats_.backupWriteTime_;
 }
+UTIL_FORCEINLINE
+uint64_t ChunkManager::CheckpointManager::getPGCheckpointWriteCompressTime() const {
+	return pgStats_.checkpointWriteCompressTime_;
+}
+UTIL_FORCEINLINE
+uint64_t ChunkManager::CheckpointManager::getPGChunkSyncReadUncompressTime() const {
+	return pgStats_.chunkSyncReadUncompressTime_;
+}
+UTIL_FORCEINLINE
+uint64_t ChunkManager::CheckpointManager::getPGRecoveryReadUncompressTime() const {
+	return pgStats_.recoveryReadUncompressTime_;
+}
+UTIL_FORCEINLINE
+uint64_t ChunkManager::CheckpointManager::getPGBackupReadUncompressTime() const {
+	return pgStats_.backupReadUncompressTime_;
+}
 UTIL_FORCEINLINE uint64_t ChunkManager::CheckpointManager::getPGFileNum() {
 	const CheckpointFile& checkpointFile = getCheckpointFile();
 	uint64_t fileNum = checkpointFile.getBlockNum();
@@ -2907,6 +3105,14 @@ uint64_t ChunkManager::CheckpointManager::getPGFileAllocateSize() {
 	return fileAllocateSize;
 }
 
+UTIL_FORCEINLINE
+uint64_t ChunkManager::CheckpointManager::getPGCpFileFlushCount() {
+	return pgStats_.cpFileFlushCount_;
+}
+UTIL_FORCEINLINE
+uint64_t ChunkManager::CheckpointManager::getPGCpFileFlushTime() {
+	return pgStats_.cpFileFlushTime_;
+}
 
 
 inline ChunkManager::BufferInfo*
@@ -3221,6 +3427,9 @@ inline void ChunkManager::BufferManager::ChainingHashTable::append(
 		BufferId bufferId, BufferInfo* bufferInfo) {
 	assert(bufferInfo);
 	HashValue hashValue = calcKey(bufferId);
+	if (table_[hashValue]) {
+		collisionCount_++; 
+	}
 	bufferInfo->nextCollision_ = table_[hashValue];
 	table_[hashValue] = bufferInfo;
 };
@@ -3260,6 +3469,10 @@ ChunkManager::BufferManager::ChainingHashTable::remove(BufferId bufferId) {
 	return NULL;
 };
 
+UTIL_FORCEINLINE
+uint64_t ChunkManager::BufferManager::ChainingHashTable::getCollisionCount() {
+	return collisionCount_;
+}
 
 UTIL_FORCEINLINE ChunkManager::BufferManager::ChainingHashTable::HashValue
 ChunkManager::BufferManager::ChainingHashTable::fnvHash(

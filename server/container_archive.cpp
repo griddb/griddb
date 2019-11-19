@@ -162,6 +162,7 @@ std::string BaseContainer::dump(
 	return strstrm.str();
 }
 
+
 /*!
 	@brief Validates Rows and Indexes
 */
@@ -198,9 +199,9 @@ bool BaseContainer::validateImpl(TransactionContext &txn,
 
 	RowArray rowArray(txn, reinterpret_cast<R *>(this));
 	ContainerId containerId = getContainerId();
-//	uint32_t varColumnNum = getVariableColumnNum();
-//	uint32_t columnNum = getColumnNum();
-//	uint32_t rowFixedColumnSize = getRowFixedColumnSize();
+	uint32_t varColumnNum = getVariableColumnNum();
+	uint32_t columnNum = getColumnNum();
+	uint32_t rowFixedColumnSize = getRowFixedColumnSize();
 
 	std::map<RowId, uint64_t> rowNumMap;
 	std::map<RowId, uint64_t>::iterator rowNumMapItr;
@@ -223,11 +224,9 @@ bool BaseContainer::validateImpl(TransactionContext &txn,
 					break;
 				case MVCC_INDEX:
 					{
-						IndexData indexData;
+						IndexData indexData(txn.getDefaultAllocator());
 						IndexCursor indexCursor = IndexCursor(itr->second);
-						bool withUncommitted = true;
-						bool isExist = getIndexData(txn, indexCursor.getColumnId(), indexCursor.getMapType(), 
-							withUncommitted, indexData);
+						bool isExist = getIndexData(txn, indexCursor, indexData);
 						if (!isExist) {
 							strstrm << (isValid ? ", " : "")
 									<< "\"invalidMvccIndexNotExist"
@@ -472,8 +471,8 @@ bool BaseContainer::validateImpl(TransactionContext &txn,
 						strstrm << (isValid ? ", " : "")
 								<< "{\"invalidGetIndex\",\"type\":"
 								<< (int32_t)indexList[i].mapType_
-								<< ",\"columnId\":"
-								<< (int32_t)indexList[i].columnId_
+								<< ",\"first columnId\":"
+								<< indexList[i].columnIds_->at(0)
 								<< ",\"cursor\":"
 								<< (int32_t)indexList[i].cursor_ << "}";
 						isValid = false;
@@ -502,7 +501,7 @@ bool BaseContainer::validateImpl(TransactionContext &txn,
 						<< (isValid ? ", " : "")
 						<< "{\"invalidIndex\",\"type\":"
 						<< (int32_t)indexList[i].mapType_
-						<< ",\"columnId\":" << (int32_t)indexList[i].columnId_
+						<< ",\"first columnId\":" << indexList[i].columnIds_->at(0)
 						<< ",\"cursor\":" << (int32_t)indexList[i].cursor_
 						<< "}";
 					isValid = false;
@@ -596,7 +595,7 @@ bool BaseContainer::validateImpl(TransactionContext &txn,
 						<< (isValid ? ", " : "")
 						<< "{\"invalidIndex\",\"type\":"
 						<< (int32_t)indexList[i].mapType_
-						<< ",\"columnId\":" << (int32_t)indexList[i].columnId_
+						<< ",\"first columnId\":" << indexList[i].columnIds_->at(0)
 						<< ",\"cursor\":" << (int32_t)indexList[i].cursor_
 						<< "}";
 					isValid = false;
@@ -665,7 +664,7 @@ bool BaseContainer::validateImpl(TransactionContext &txn,
 						<< (isValid ? ", " : "")
 						<< "{\"invalidIndexRowNum\",\"type\":"
 						<< (int32_t)indexList[i].mapType_
-						<< ",\"columnId\":" << (int32_t)indexList[i].columnId_
+						<< ",\"first columnId\":" << indexList[i].columnIds_->at(0)
 						<< ",\"cursor\":" << (int32_t)indexList[i].cursor_
 						<< ", \"rowCount\":" << validateRowNum
 						<< ", \"indexRowCount\":" << valIndexRowNum << "}";
@@ -676,7 +675,7 @@ bool BaseContainer::validateImpl(TransactionContext &txn,
 				strstrm << (isValid ? ", " : "")
 						<< "{\"invalidIndexValue\",\"type\":"
 						<< (int32_t)indexList[i].mapType_
-						<< ",\"columnId\":" << (int32_t)indexList[i].columnId_
+						<< ",\"first columnId\":" << indexList[i].columnIds_->at(0)
 						<< ",\"cursor\":" << (int32_t)indexList[i].cursor_
 						<< "}";
 				isValid = false;
@@ -732,6 +731,8 @@ BaseContainer::BaseContainer(TransactionContext &txn, DataStore *dataStore, Base
 	  rsNotifier_(*dataStore),
 	  containerKeyCursor_(txn.getPartitionId(), *(dataStore->getObjectManager())),
 	  isCompressionErrorMode_(false), rowArrayCache_(NULL)
+		  ,
+	  rowIdFuncInfo_(NULL), mvccFuncInfo_(NULL)
 {
 	columnSchema_ =
 		commonContainerSchema_->get<ColumnSchema>(META_TYPE_COLUMN_SCHEMA);
@@ -774,9 +775,6 @@ BaseContainer::BaseContainerImage *BaseContainer::makeBaseContainerImage(Transac
 
 
 
-
-
-
 void BaseContainer::getActiveTxnListImpl(
 	TransactionContext &txn, util::Set<TransactionId> &txnList) {
 	if (baseContainerImage_->mvccMapOId_ == UNDEF_OID) {
@@ -799,14 +797,12 @@ void BaseContainer::getActiveTxnListImpl(
 	}
 }
 
-
 void BaseContainer::archive(TransactionContext &txn, ArchiveHandler *handler, ResultSize preReadNum) {
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
 	ObjectManager &objectManager = *getObjectManager();
 
 	handler->initialize();
 	{
-
 		uint32_t columnNum = getColumnNum();
 
 		handler->initializeSchema();
@@ -830,9 +826,12 @@ void BaseContainer::archive(TransactionContext &txn, ArchiveHandler *handler, Re
 	while (1) {
 		util::StackAllocator::Scope scope(alloc);
 		util::XArray<OId> scanOIdList(alloc);
-		BtreeMap::SearchContext sc(
-			UNDEF_COLUMNID, &minRowId, 0, true, &maxRowId, 0, true, 0, NULL, MAX_RESULT_SIZE);
-		sc.suspendLimit_ = suspendLimit;
+		TermCondition startCond(getRowIdColumnType(), getRowIdColumnType(), 
+			DSExpression::GE, getRowIdColumnId(), &minRowId, sizeof(minRowId));
+		TermCondition endCond(getRowIdColumnType(), getRowIdColumnType(), 
+			DSExpression::LE, getRowIdColumnId(), &maxRowId, sizeof(maxRowId));
+		BtreeMap::SearchContext sc(txn.getDefaultAllocator(), startCond, endCond, MAX_RESULT_SIZE);
+		sc.setSuspendLimit(suspendLimit);
 		searchRowIdIndex(txn, sc, scanOIdList, ORDER_ASCENDING);
 
 		{
@@ -841,7 +840,7 @@ void BaseContainer::archive(TransactionContext &txn, ArchiveHandler *handler, Re
 			for (size_t i = 0; i < scanOIdList.size(); i++) {
 				util::StackAllocator::Scope scope(alloc);
 				OId oId = scanOIdList[i];
-				ChunkId cId = ObjectManager::getChunkId(oId);
+				ChunkId cId = objectManager.getChunkId(oId);
 				util::Set<ChunkId>::iterator itr = scanChunkSet.find(cId);
 				if (itr != scanChunkSet.end()) {
 					object.load(oId);
@@ -861,12 +860,10 @@ void BaseContainer::archive(TransactionContext &txn, ArchiveHandler *handler, Re
 		}
 		minRowId = lastRowId + 1;
 
-		if (!sc.isSuspended_) {
+		if (!sc.isSuspended()) {
 			break;
 		}
 	}
 	handler->finalize();
 }
-
-
 

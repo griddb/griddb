@@ -244,6 +244,50 @@ const Operator ComparatorTable::geTable_[][11] = {
 const Operator ComparatorTable::isNull_ = &isNullAnyType;
 const Operator ComparatorTable::isNotNull_ = &isNotNullAnyType;
 
+bool geomOperation(TransactionContext& txn, uint8_t const* p,
+				   uint32_t size1, uint8_t const* q, uint32_t size2);
+
+const Operator ComparatorTable::geomOp_ = &geomOperation;
+
+const Operator ComparatorTable::getOperator(
+	DSExpression::Operation opType, ColumnType type1, ColumnType type2) {
+	Operator op = NULL;
+	switch (opType) {
+	case DSExpression::NE:
+		op = ComparatorTable::neTable_[type1][type2];
+		break;
+	case DSExpression::EQ:
+		op = ComparatorTable::eqTable_[type1][type2];
+		break;
+	case DSExpression::LT:
+		op = ComparatorTable::ltTable_[type1][type2];
+		break;
+	case DSExpression::LE:
+		op = ComparatorTable::leTable_[type1][type2];
+		break;
+	case DSExpression::GT:
+		op = ComparatorTable::gtTable_[type1][type2];
+		break;
+	case DSExpression::GE:
+		op = ComparatorTable::geTable_[type1][type2];
+		break;
+	case DSExpression::IS:
+		op = ComparatorTable::isNull_;
+		break;
+	case DSExpression::ISNOT:
+		op = ComparatorTable::isNotNull_;
+		break;
+	case DSExpression::GEOM_OP:
+		op = ComparatorTable::geomOp_;
+		break;
+	default:
+		op = NULL;
+		break;
+	}
+	return op;
+}
+
+
 const Calculator2 CalculatorTable::addTable_[][11] = {
 	{
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,

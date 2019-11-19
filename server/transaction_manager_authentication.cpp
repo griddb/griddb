@@ -110,7 +110,7 @@ TransactionManager::Config::Config(int32_t reauthenticationInterval) :
 	@brief Sets parameter Handler to configTable
 */
 void TransactionManager::Config::setUpConfigHandler(ConfigTable &configTable) {
-	if (!configTable.isSet(CONFIG_TABLE_TXN_REAUTHENTICATION_INTERVAL)) {
+	if (!configTable.isSetParamHandler(CONFIG_TABLE_TXN_REAUTHENTICATION_INTERVAL)) {
 		configTable.setParamHandler(CONFIG_TABLE_TXN_REAUTHENTICATION_INTERVAL, *this);
 	}
 }

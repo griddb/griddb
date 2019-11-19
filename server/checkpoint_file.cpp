@@ -20,7 +20,6 @@
 */
 
 #include "util/trace.h"
-#include "gs_error.h"
 #include "config_table.h"
 #include "checkpoint_file.h"
 #include <algorithm>
@@ -28,7 +27,6 @@
 #include <fcntl.h>
 #include <linux/falloc.h>
 #endif
-
 
 UTIL_TRACER_DECLARE(IO_MONITOR);
 
@@ -42,10 +40,11 @@ const char8_t *const CheckpointFile::gsCpFileSeparator = "_";
 	@brief Constructore of CheckpointFile.
 */
 CheckpointFile::CheckpointFile(
-	uint8_t chunkExpSize, const std::string &dir, PartitionGroupId pgId)
+		uint8_t chunkExpSize, const std::string &dir, PartitionGroupId pgId,
+		uint32_t splitCount, uint32_t stripeSize,
+		const std::vector<std::string> configDirList)
 	: BLOCK_EXP_SIZE_(chunkExpSize),
-	  BLOCK_SIZE_(static_cast<Size_t>(1UL << chunkExpSize)),
-	  file_(NULL),
+	  BLOCK_SIZE_(static_cast<uint64_t>(1ULL << chunkExpSize)),
 	  usedChunkInfo_(10240),
 	  validChunkInfo_(10240),
 	  blockNum_(0),
@@ -53,22 +52,78 @@ CheckpointFile::CheckpointFile(
 	  freeBlockSearchCursor_(0),
 	  pgId_(pgId),
 	  dir_(dir),
+	  splitMode_(splitCount > 0),
+	  splitCount_(splitCount ? splitCount : 1),
+	  stripeSize_(stripeSize),
 	  readBlockCount_(0),
 	  writeBlockCount_(0),
+	  readRetryCount_(0),
+	  writeRetryCount_(0),
 	  ioWarningThresholdMillis_(IO_MONITOR_DEFAULT_WARNING_THRESHOLD_MILLIS) {
-	;
+
+	try {
+		fileList_.assign(splitCount_, NULL);
+		dirList_.assign(splitCount_, "");
+		fileNameList_.assign(splitCount_, "");
+		blockCountList_.assign(splitCount_, 0);
+		size_t configDirCount = configDirList.size();
+		if (splitMode_) {
+			if (configDirCount > splitCount_) {
+				GS_THROW_SYSTEM_ERROR(GS_ERROR_CF_INVALID_DIRECTORY,
+						"Config error: dbFilePathList.size() > dbFileSplitCount");
+			}
+			if (configDirCount == 0) {
+				GS_THROW_SYSTEM_ERROR(GS_ERROR_CF_INVALID_DIRECTORY,
+						"Config error: dbFilePathList is empty");
+			}
+			if (splitCount_ > FILE_SPLIT_COUNT_LIMIT) {
+				GS_THROW_SYSTEM_ERROR(GS_ERROR_CF_INVALID_DIRECTORY,
+						"Config error: dbFileSplitCount is too large");
+			}
+			if (stripeSize_ > FILE_SPLIT_STRIPE_SIZE_LIMIT) {
+				GS_THROW_SYSTEM_ERROR(GS_ERROR_CF_INVALID_DIRECTORY,
+						"Config error: dbFileSplitStripeSize is too large");
+			}
+			for (uint32_t i = 0; i < splitCount_; ++i) {
+				dirList_[i] = configDirList[i % configDirCount];
+				if (util::FileSystem::exists(dirList_[i].c_str())) {
+					if (!util::FileSystem::isDirectory(dirList_[i].c_str())) {
+						GS_THROW_SYSTEM_ERROR(
+							GS_ERROR_CM_IO_ERROR, "Specified file path is exist, but path=\""
+							<< dirList_[i].c_str() << "\" is not directory");
+					}
+				}
+			}
+		}
+		else {
+			if (configDirCount != 0) {
+				GS_THROW_SYSTEM_ERROR(GS_ERROR_CF_INVALID_DIRECTORY,
+						"dbFilePathList.size() > 0, but dbFileSplitCount == 0");
+			}
+			dirList_[0] = dir;
+		}
+	} catch(std::exception &e) {
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_CF_INVALID_DIRECTORY,
+				"Invalid configure found.");
+	}
 }
 
 /*!
 	@brief Destructor of CheckpointFile.
 */
 CheckpointFile::~CheckpointFile() {
-	if (file_ && !file_->isClosed()) {
-		file_->unlock();
-		file_->close();
+	for (uint32_t i = 0; i < splitCount_; ++i) {
+		try {
+			if (fileList_[i] && !fileList_[i]->isClosed()) {
+				fileList_[i]->unlock();
+				fileList_[i]->close();
+			}
+			delete fileList_[i];
+			fileList_[i] = NULL;
+		} catch(...) {
+			;
+		}
 	}
-	delete file_;
-	file_ = NULL;
 }
 
 /*!
@@ -76,78 +131,98 @@ CheckpointFile::~CheckpointFile() {
 */
 bool CheckpointFile::open(bool checkOnly, bool createMode) {
 	try {
-		util::NormalOStringStream ss;
-		if (!dir_.empty()) {
-			if (util::FileSystem::exists(dir_.c_str())) {
-				if (!util::FileSystem::isDirectory(dir_.c_str())) {
-					GS_THROW_SYSTEM_ERROR(GS_ERROR_CF_INVALID_DIRECTORY,
-						"Not direcotry: directoryName=" << dir_.c_str());
+		assert(splitCount_ > 0);
+		int64_t totalBlockCount = 0;
+		for (uint32_t i = 0; i < splitCount_; ++i) {
+			util::NormalOStringStream ss;
+			util::NormalOStringStream ssFile;
+			if (splitMode_) {
+				if (util::FileSystem::exists(dirList_[i].c_str())) {
+					if (!util::FileSystem::isDirectory(dirList_[i].c_str())) {
+						GS_THROW_SYSTEM_ERROR(GS_ERROR_CF_INVALID_DIRECTORY,
+								"Not direcotry: directoryName=" << dirList_[i].c_str());
+					}
 				}
+				else {
+					GS_THROW_SYSTEM_ERROR(GS_ERROR_CF_INVALID_DIRECTORY,
+							"Directory not found: directoryName=" << dirList_[i].c_str());
+				}
+				ss << dirList_[i] << "/";
+				ss << CheckpointFile::gsCpFileBaseName << pgId_
+				  << CheckpointFile::gsCpFileSeparator;
+				ssFile << ss.str() << i << CheckpointFile::gsCpFileExtension;
 			}
 			else {
-				GS_THROW_SYSTEM_ERROR(GS_ERROR_CF_INVALID_DIRECTORY,
-					"Directory not found: directoryName=" << dir_.c_str());
+				assert(!splitMode_);
+				assert(splitCount_ == 1);
+				if (!dir_.empty()) {
+					if (util::FileSystem::exists(dir_.c_str())) {
+						if (!util::FileSystem::isDirectory(dir_.c_str())) {
+							GS_THROW_SYSTEM_ERROR(GS_ERROR_CF_INVALID_DIRECTORY,
+									"Not direcotry: directoryName=" << dir_.c_str());
+						}
+					}
+					else {
+						GS_THROW_SYSTEM_ERROR(GS_ERROR_CF_INVALID_DIRECTORY,
+							"Directory not found: directoryName=" << dir_.c_str());
+					}
+					ss << dir_ << "/";
+				}
+				ss << CheckpointFile::gsCpFileBaseName << pgId_
+				  << CheckpointFile::gsCpFileSeparator;
+				ssFile << ss.str() << 1 << CheckpointFile::gsCpFileExtension;
 			}
-			ss << dir_ << "/";
-		}
-		ss << CheckpointFile::gsCpFileBaseName << pgId_
-		   << CheckpointFile::gsCpFileSeparator;
+			fileNameList_[i].assign(ssFile.str());
 
-		util::NormalOStringStream ssFile;
-		ssFile << ss.str() << "1" << CheckpointFile::gsCpFileExtension;
-		fileName_.assign(ssFile.str());
-
-		if (util::FileSystem::exists(fileName_.c_str())) {
-			if (file_) {
-				delete file_;
-				file_ = NULL;
-			}
-			file_ = UTIL_NEW util::NamedFile();
-			file_->open(fileName_.c_str(),
-				(checkOnly ? util::FileFlag::TYPE_READ_ONLY
-						   : util::FileFlag::TYPE_READ_WRITE));
+			if (util::FileSystem::exists(fileNameList_[i].c_str())) {
+				if (fileList_[i]) {
+					delete fileList_[i];
+					fileList_[i] = NULL;
+				}
+				fileList_[i] = UTIL_NEW util::NamedFile();
+				fileList_[i]->open(fileNameList_[i].c_str(),
+							(checkOnly ? util::FileFlag::TYPE_READ_ONLY
+						 : util::FileFlag::TYPE_READ_WRITE));
 #ifndef _WIN32 
-			if (!checkOnly) {
-				file_->lock();
-			}
+				if (!checkOnly) {
+					fileList_[i]->lock();
+				}
 #endif
-			util::FileStatus status;
-			file_->getStatus(&status);
-			int64_t chunkNum =
-				(status.getSize() + BLOCK_SIZE_ - 1) / BLOCK_SIZE_;
-			blockNum_ = chunkNum;
-			usedChunkInfo_.reserve(chunkNum + 1);
-			usedChunkInfo_.set(chunkNum + 1, false);
-			validChunkInfo_.reserve(chunkNum + 1);
-			validChunkInfo_.set(chunkNum + 1, false);
-			freeUseBitNum_ = usedChunkInfo_.length();  
-			freeBlockSearchCursor_ = 0;
-			assert(freeUseBitNum_ <= usedChunkInfo_.length());
-			return false;
-		}
-		else {
-			if (checkOnly) {
-				GS_THROW_USER_ERROR(GS_ERROR_CM_FILE_NOT_FOUND,
-					"Checkpoint file not found despite check only.");
+				util::FileStatus status;
+				fileList_[i]->getStatus(&status);
+				int64_t chunkNum =
+				  (status.getSize() + BLOCK_SIZE_ - 1) / BLOCK_SIZE_;
+				blockCountList_[i] = chunkNum;
+				totalBlockCount += chunkNum;
 			}
-			if (!createMode) {
-				GS_THROW_USER_ERROR(
-					GS_ERROR_CM_FILE_NOT_FOUND, "Checkpoint file not found.");
-			}
-
-			file_ = UTIL_NEW util::NamedFile();
-			file_->open(fileName_.c_str(),
-				util::FileFlag::TYPE_CREATE | util::FileFlag::TYPE_READ_WRITE);
+			else {
+				if (checkOnly) {
+					GS_THROW_USER_ERROR(GS_ERROR_CM_FILE_NOT_FOUND,
+										"Checkpoint file not found despite check only.");
+				}
+				if (!createMode) {
+					GS_THROW_USER_ERROR(
+						GS_ERROR_CM_FILE_NOT_FOUND, "Checkpoint file not found.");
+				}
+				
+				fileList_[i] = UTIL_NEW util::NamedFile();
+				fileList_[i]->open(fileNameList_[i].c_str(),
+							util::FileFlag::TYPE_CREATE | util::FileFlag::TYPE_READ_WRITE);
 #ifndef _WIN32 
-			file_->lock();
+				fileList_[i]->lock();
 #endif
-			blockNum_ = 0;
-			freeUseBitNum_ = 0;
-			freeBlockSearchCursor_ = 0;
-			usedChunkInfo_.reset();
-			validChunkInfo_.reset();
-			return true;
-		}
+				blockCountList_[i] = 0;
+			}
+		} 
+		blockNum_ = totalBlockCount;
+		usedChunkInfo_.reserve(totalBlockCount + 1);
+		usedChunkInfo_.set(totalBlockCount + 1, false);
+		validChunkInfo_.reserve(totalBlockCount + 1);
+		validChunkInfo_.set(totalBlockCount + 1, false);
+		freeUseBitNum_ = usedChunkInfo_.length();  
+		freeBlockSearchCursor_ = 0;
+		assert(freeUseBitNum_ <= usedChunkInfo_.length());
+		return (totalBlockCount == 0); 
 	}
 	catch (SystemException &e) {
 		GS_RETHROW_SYSTEM_ERROR(e, "Checkpoint file open failed. (reason="
@@ -164,17 +239,20 @@ bool CheckpointFile::open(bool checkOnly, bool createMode) {
 */
 void CheckpointFile::truncate() {
 	try {
-		if (file_) {
-			delete file_;
-		}
-		file_ = UTIL_NEW util::NamedFile();
-		file_->open(fileName_.c_str(), util::FileFlag::TYPE_CREATE |
-										   util::FileFlag::TYPE_TRUNCATE |
-										   util::FileFlag::TYPE_READ_WRITE);
-		UTIL_TRACE_WARNING(CHECKPOINT_FILE, "file truncated.");
+		for (uint32_t i = 0; i < splitCount_; ++i) {
+			if (fileList_[i]) {
+				delete fileList_[i];
+			}
+			fileList_[i] = UTIL_NEW util::NamedFile();
+			fileList_[i]->open(fileNameList_[i].c_str(), util::FileFlag::TYPE_CREATE |
+							   util::FileFlag::TYPE_TRUNCATE |
+							   util::FileFlag::TYPE_READ_WRITE);
+			UTIL_TRACE_WARNING(CHECKPOINT_FILE, "file truncated.");
 #ifndef _WIN32 
-		file_->lock();
+			fileList_[i]->lock();
 #endif
+			blockCountList_[i] = 0;
+		}
 		blockNum_ = 0;
 		freeUseBitNum_ = 0;
 		freeBlockSearchCursor_ = 0;
@@ -185,6 +263,25 @@ void CheckpointFile::truncate() {
 		GS_RETHROW_SYSTEM_ERROR(e, "Checkpoint file truncate failed. (reason="
 									   << GS_EXCEPTION_MESSAGE(e) << ")");
 	}
+}
+
+void CheckpointFile::advise(int32_t advise) {
+#ifndef WIN32
+	for (uint32_t i = 0; i < splitCount_; ++i) {
+		if (fileList_[i] && !fileList_[i]->isClosed()) {
+			int32_t ret = posix_fadvise(fileList_[i]->getHandle(), 0, 0, advise);
+			if (ret > 0) {
+				UTIL_TRACE_WARNING(CHECKPOINT_FILE,
+								   "fadvise failed. :" <<
+								   "cpFile_pgId," << pgId_ <<
+								   ",advise," << advise <<
+								   ",returnCode," << ret);
+			}
+			UTIL_TRACE_INFO(CHECKPOINT_FILE,
+							"advise(POSIX_FADV_DONTNEED) : cpFile_pgId," << pgId_);
+		}
+	}
+#endif
 }
 
 /*!
@@ -261,8 +358,8 @@ void CheckpointFile::setUsedBlockInfo(uint64_t blockNo, bool flag) {
 	bool oldFlag = usedChunkInfo_.get(blockNo);
 	usedChunkInfo_.set(blockNo, flag);
 	if (flag && (oldFlag != flag)) {
+		assert(freeUseBitNum_ != 0);
 		--freeUseBitNum_;
-		assert(freeUseBitNum_ >= 0);
 	}
 	else if (!flag && (oldFlag != flag)) {
 		++freeUseBitNum_;
@@ -325,17 +422,19 @@ void CheckpointFile::punchHoleBlock(uint32_t size, uint64_t offset) {
 #else
 	const uint64_t startClock =
 		util::Stopwatch::currentClock();  
+	size_t fileNth = calcFileNth(offset);
+	uint64_t fileOffset = calcFileOffset(offset);
 	try {
-		if (file_ && !file_->isClosed() && 0 < size) {
-			file_->preAllocate(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE,
-				offset, size);
+		if (fileList_[fileNth] && !fileList_[fileNth]->isClosed() && 0 < size) {
+			fileList_[fileNth]->preAllocate(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE,
+				fileOffset, size);
 		}
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_SYSTEM_ERROR(e, "Checkpoint file fallocate failed. (reason="
-									   << GS_EXCEPTION_MESSAGE(e) << fileName_
+									   << GS_EXCEPTION_MESSAGE(e) << fileNameList_[fileNth]
 									   << ",pgId," << pgId_ 
-									   << ",offset," << offset
+									   << ",offset," << fileOffset
 									   << ",size," << size << ")");
 	}
 
@@ -344,8 +443,8 @@ void CheckpointFile::punchHoleBlock(uint32_t size, uint64_t offset) {
 	if (lap > ioWarningThresholdMillis_) {  
 		UTIL_TRACE_WARNING(
 			IO_MONITOR, "[LONG I/O] punching hole time,"
-							<< lap << ",fileName," << fileName_ << ",pgId,"
-							<< pgId_ << ",offset," << offset
+							<< lap << ",fileName," << fileNameList_[fileNth] << ",pgId,"
+							<< pgId_ << ",offset," << fileOffset
 							<< ",size," << size
 							<< ",writeBlockCount_=" << writeBlockCount_);
 	}
@@ -358,56 +457,37 @@ void CheckpointFile::zerofillUnusedBlock(const uint64_t blockNum) {
 
 
 	uint64_t headBlockId = 0;
-	size_t count = 0;
 	off_t offset = 0;
 	off_t length = 0;
 	size_t punchCount = 0;
 	size_t totalCount = 0;
+	uint64_t fileNth = 0;
+	uint64_t fileOffset = 0;
 
 	const uint64_t startClock = util::Stopwatch::currentClock();
 	try {
 		for (uint64_t i = 1; i < blockNum; ++i) {
-			if (usedChunkInfo_.get(i)) {
-				if (count > 0) {
-					offset = headBlockId * BLOCK_SIZE_;
-					length = count * BLOCK_SIZE_;
-					file_->preAllocate(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE,
-							offset, length);
-					totalCount += count;
-					++punchCount;
-					count = 0;
-					headBlockId = 0;
-				}
-				else {
-				}
+			if (!usedChunkInfo_.get(i)) {
+				offset = i * BLOCK_SIZE_;
+				fileNth = calcFileNth(offset);
+				fileOffset = calcFileOffset(offset);
+				assert(fileList_[fileNth]);
+
+				length = BLOCK_SIZE_;
+				fileList_[fileNth]->preAllocate(
+						FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE,
+						fileOffset, length);
+				++totalCount;
+				++punchCount;
 			}
-			else {
-				if (count > 0) {
-					++count;
-				}
-				else {
-					headBlockId = i;
-					count = 1;
-				}
-			}
-		}
-		if (count > 0) {
-			offset = headBlockId * BLOCK_SIZE_;
-			length = count * BLOCK_SIZE_;
-			file_->preAllocate(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE,
-					offset, length);
-			totalCount += count;
-			++punchCount;
-			count = 0;
-			headBlockId = 0;
 		}
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_SYSTEM_ERROR(e,
 				"Punching holes in checkpoint file has failed. (reason="
-				<< GS_EXCEPTION_MESSAGE(e) << fileName_
+				<< GS_EXCEPTION_MESSAGE(e) << fileNameList_[fileNth]
 				<< ",pgId," << pgId_
-				<< ",offset," << offset
+				<< ",offset," << fileOffset
 				<< ",size," << length << ")");
 	}
 
@@ -415,11 +495,11 @@ void CheckpointFile::zerofillUnusedBlock(const uint64_t blockNum) {
 			util::Stopwatch::currentClock() - startClock);
 	UTIL_TRACE_INFO(
 			IO_MONITOR, "Punching hole time," << lap
-			<< ",fileName," << fileName_ << ",pgId,"
+			<< ",fileName," << fileNameList_[0] << ",pgId,"
 			<< pgId_ << ",holePunchCount," << punchCount
 			<< ",holeBlockCount," << totalCount
 			<< ",totalBlockCount," << blockNum);
-#endif
+#endif 
 }
 
 /*!
@@ -427,24 +507,30 @@ void CheckpointFile::zerofillUnusedBlock(const uint64_t blockNum) {
 */
 int64_t CheckpointFile::writeBlock(
 	const uint8_t *buffer, uint32_t size, uint64_t blockNo) {
+	assert(size != 0);
+	uint64_t offset = blockNo * BLOCK_SIZE_;
+	size_t fileNth = calcFileNth(offset);
+	uint64_t fileOffset = calcFileOffset(offset);
 	try {
-		if (!file_) {
-			file_ = UTIL_NEW util::NamedFile();
-			file_->open(fileName_.c_str(),
+		if (!fileList_[fileNth]) {
+			fileList_[fileNth] = UTIL_NEW util::NamedFile();
+			fileList_[fileNth]->open(fileNameList_[fileNth].c_str(),
 				util::FileFlag::TYPE_CREATE | util::FileFlag::TYPE_READ_WRITE);
 #ifndef _WIN32 
-			file_->lock();
+			fileList_[fileNth]->lock();
 #endif
 		}
+		uint64_t retryCount = 0;
 		GS_FILE_WRITE_ALL(
-				IO_MONITOR, (*file_), buffer,
-				(size << BLOCK_EXP_SIZE_), (blockNo << BLOCK_EXP_SIZE_),
-				ioWarningThresholdMillis_);
+				IO_MONITOR, (*fileList_[fileNth]), buffer,
+				(size << BLOCK_EXP_SIZE_), fileOffset,
+				ioWarningThresholdMillis_, retryCount);
 		ssize_t writtenSize = size << BLOCK_EXP_SIZE_;
+		writeRetryCount_ += retryCount;
 		if (blockNum_ < (size + blockNo)) {
 			blockNum_ = (size + blockNo);
 			UTIL_TRACE_INFO(
-				CHECKPOINT_FILE, fileName_ + " extended. File size = "
+				CHECKPOINT_FILE, fileNameList_[0] + " extended. File size = "
 									 << (blockNo + size) 
 									 << ",blockNum_=" << blockNum_);
 		}
@@ -452,13 +538,13 @@ int64_t CheckpointFile::writeBlock(
 		uint64_t writeBlockNum = (writtenSize >> BLOCK_EXP_SIZE_);
 		writeBlockCount_ += writeBlockNum;
 		UTIL_TRACE_INFO(CHECKPOINT_FILE,
-			fileName_ << ",blockNo," << blockNo
+			fileNameList_[fileNth] << ",blockNo," << blockNo
 					  << ",writeBlockCount=" << writeBlockCount_);
 		return size;
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_SYSTEM_ERROR(e, "Checkpoint file write failed. (reason="
-									   << GS_EXCEPTION_MESSAGE(e) << fileName_
+									   << GS_EXCEPTION_MESSAGE(e) << fileNameList_[fileNth]
 									   << ",pgId," << pgId_ << ",blockNo,"
 									   << blockNo << ")");
 	}
@@ -469,30 +555,34 @@ int64_t CheckpointFile::writeBlock(
 */
 int64_t CheckpointFile::writePartialBlock(
 	const uint8_t *buffer, uint32_t size, uint64_t offset) {
+	size_t fileNth = calcFileNth(offset);
+	uint64_t fileOffset = calcFileOffset(offset);
 	try {
-		if (!file_) {
-			file_ = UTIL_NEW util::NamedFile();
-			file_->open(fileName_.c_str(),
+		if (!fileList_[fileNth]) {
+			fileList_[fileNth] = UTIL_NEW util::NamedFile();
+			fileList_[fileNth]->open(fileNameList_[fileNth].c_str(),
 				util::FileFlag::TYPE_CREATE | util::FileFlag::TYPE_READ_WRITE);
 #ifndef _WIN32 
-			file_->lock();
+			fileList_[fileNth]->lock();
 #endif
 		}
 
+		uint64_t retryCount = 0;
 		GS_FILE_WRITE_ALL(
-				IO_MONITOR, (*file_), buffer, size, offset,
-				ioWarningThresholdMillis_);
-		ssize_t writtenSize = size << BLOCK_EXP_SIZE_;
+				IO_MONITOR, (*fileList_[fileNth]), buffer, size, fileOffset,
+				ioWarningThresholdMillis_, retryCount);
+		ssize_t writtenSize = size;
+		writeRetryCount_ += retryCount;
 		if ((blockNum_ << BLOCK_EXP_SIZE_) < size + offset) {
 			blockNum_ = ((size + offset + BLOCK_SIZE_ - 1) >> BLOCK_EXP_SIZE_);
 			UTIL_TRACE_INFO(
-				CHECKPOINT_FILE, fileName_ + " extended. File size = "
+				CHECKPOINT_FILE, fileNameList_[0] + " extended. File size = "
 									 << (size + offset) << "(Byte)"
 									 << ",blockNum_=" << blockNum_);
 		}
 
 		UTIL_TRACE_INFO(CHECKPOINT_FILE,
-			fileName_ << ",write, offset," << offset << ",size=" << size);
+			fileNameList_[fileNth] << ",write, offset," << fileOffset << ",size=" << size);
 
 		return writtenSize;
 	}
@@ -500,7 +590,6 @@ int64_t CheckpointFile::writePartialBlock(
 		GS_RETHROW_SYSTEM_ERROR(e, "Checkpoint file write failed. (reason="
 									   << GS_EXCEPTION_MESSAGE(e) << ")");
 	}
-
 }
 
 /*!
@@ -509,35 +598,41 @@ int64_t CheckpointFile::writePartialBlock(
 int64_t CheckpointFile::readBlock(
 	uint8_t *buffer, uint32_t size, uint64_t blockNo) {
 
-	if (blockNum_ < size + blockNo - 1) {
+	assert(size != 0);
+	if (blockNum_ < size + blockNo - 1 || size == 0) {
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_CF_READ_CHUNK_FAILED, 
 			"Checkpoint file read failed. (reason= invalid parameter."
 			<< " size = " << size << ", blockNo = " << blockNo
 			<< ", blockNum = " << blockNum_ << ")");
 	}
 
+	uint64_t offset = blockNo * BLOCK_SIZE_;
+	size_t fileNth = calcFileNth(offset);
+	uint64_t fileOffset = calcFileOffset(offset);
 	try {
-		if (!file_) {
-			if (util::FileSystem::exists(fileName_.c_str())) {
-				file_ = UTIL_NEW util::NamedFile();
-				file_->open(fileName_.c_str(), util::FileFlag::TYPE_READ_WRITE);
+		if (!fileList_[fileNth]) {
+			if (util::FileSystem::exists(fileNameList_[fileNth].c_str())) {
+				fileList_[fileNth] = UTIL_NEW util::NamedFile();
+				fileList_[fileNth]->open(fileNameList_[fileNth].c_str(), util::FileFlag::TYPE_READ_WRITE);
 #ifndef _WIN32 
-				file_->lock();
+				fileList_[fileNth]->lock();
 #endif
 			}
 			else {
 				return 0;
 			}
 		}
+		uint64_t retryCount = 0;
 		GS_FILE_READ_ALL(
-				IO_MONITOR, (*file_), buffer,
-				(size << BLOCK_EXP_SIZE_), (blockNo << BLOCK_EXP_SIZE_),
-				ioWarningThresholdMillis_);
+				IO_MONITOR, (*fileList_[fileNth]), buffer,
+				(size << BLOCK_EXP_SIZE_), fileOffset,
+				ioWarningThresholdMillis_, retryCount);
 		ssize_t readSize = size << BLOCK_EXP_SIZE_;
+		readRetryCount_ += retryCount;
 		int64_t readBlockNum = (readSize >> BLOCK_EXP_SIZE_);
 		readBlockCount_ += readBlockNum;
 		UTIL_TRACE_INFO(CHECKPOINT_FILE,
-			fileName_ << ",blockNo," << blockNo
+			fileList_[fileNth] << ",blockNo," << blockNo
 					  << ",readBlockCount_=" << readBlockCount_);
 		return readBlockNum;
 	}
@@ -552,17 +647,33 @@ int64_t CheckpointFile::readBlock(
 	@brief Return file size.
 */
 int64_t CheckpointFile::getFileSize() {
-	int64_t writeOffset;
+	int64_t totalFileSize = 0;
 	try {
-		util::FileStatus fileStatus;
-		file_->getStatus(&fileStatus);
-		writeOffset = fileStatus.getSize();
+		for (uint32_t i = 0; i < splitCount_; ++i) {
+			util::FileStatus fileStatus;
+			if (fileList_[i]) {
+				fileList_[i]->getStatus(&fileStatus);
+				totalFileSize += fileStatus.getSize();
+			}
+		}
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_SYSTEM_ERROR(e, "Checkpoint file read failed. (reason="
 									   << GS_EXCEPTION_MESSAGE(e) << ")");
 	}
-	return writeOffset;
+	return totalFileSize;
+}
+
+int64_t CheckpointFile::getSplitFileSize(uint32_t splitId) {
+	assert(splitId < splitCount_);
+	util::FileStatus fileStatus;
+	if (fileList_[splitId]) {
+		fileList_[splitId]->getStatus(&fileStatus);
+		return fileStatus.getSize();
+	}
+	else {
+		return 0;
+	}
 }
 
 /*!
@@ -573,11 +684,15 @@ int64_t CheckpointFile::getFileAllocateSize() {
 #ifdef _WIN32
 		return getFileSize();
 #else
-		int64_t blockSize;
+		int64_t blockSize = 0;
 		try {
-			util::FileStatus fileStatus;
-			file_->getStatus(&fileStatus);
-			blockSize = fileStatus.getBlockCount() * 512;
+			for (uint32_t i = 0; i < splitCount_; ++i) {
+				util::FileStatus fileStatus;
+				if (fileList_[i]) {
+					fileList_[i]->getStatus(&fileStatus);
+					blockSize += fileStatus.getBlockCount() * 512;
+				}
+			}
 		}
 		catch (std::exception &e) {
 			GS_RETHROW_SYSTEM_ERROR(e, "Checkpoint file read failed. (reason="
@@ -608,26 +723,30 @@ size_t CheckpointFile::getFileSystemBlockSize() {
 }
 
 void CheckpointFile::close() {
-	if (file_) {
-		file_->close();
-		delete file_;
+	for (uint32_t i = 0; i < splitCount_; ++i) {
+		if (fileList_[i]) {
+			fileList_[i]->close();
+			delete fileList_[i];
+		}
+		fileList_[i] = NULL;
 	}
-	file_ = NULL;
 }
 
 /*!
 	@brief Flush the file.
 */
 void CheckpointFile::flush() {
-	if (file_) {
-		const uint64_t startClock =
-			util::Stopwatch::currentClock();  
-		file_->sync();
-		const uint32_t lap = util::Stopwatch::clockToMillis(
-			util::Stopwatch::currentClock() - startClock);  
-		if (lap > ioWarningThresholdMillis_) {				
-			UTIL_TRACE_WARNING(IO_MONITOR,
-				"[LONG I/O] sync time," << lap << ",fileName," << fileName_);
+	for (uint32_t i = 0; i < splitCount_; ++i) {
+		if (fileList_[i]) {
+			uint64_t startClock =
+					util::Stopwatch::currentClock();  
+			fileList_[i]->sync();
+			uint32_t lap = util::Stopwatch::clockToMillis(
+					util::Stopwatch::currentClock() - startClock);  
+			if (lap > ioWarningThresholdMillis_) {				
+				UTIL_TRACE_WARNING(IO_MONITOR,
+						"[LONG I/O] sync time," << lap << ",fileName," << fileNameList_[i]);
+			}
 		}
 	}
 }
@@ -645,12 +764,26 @@ void CheckpointFile::resetWriteBlockCount() {
 	writeBlockCount_ = 0;
 }
 
+uint64_t CheckpointFile::getReadRetryCount() {
+	return readRetryCount_;
+}
+uint64_t CheckpointFile::getWriteRetryCount() {
+	return writeRetryCount_;
+}
+void CheckpointFile::resetReadRetryCount() {
+	readRetryCount_ = 0;
+}
+void CheckpointFile::resetWriteRetryCount() {
+	writeRetryCount_ = 0;
+}
+
 /*!
 	@brief Return if fileName is of a checkpointFile.
 */
 bool CheckpointFile::checkFileName(
-	const std::string &fileName, PartitionGroupId &pgId) {
+	const std::string &fileName, PartitionGroupId &pgId, int32_t &splitId) {
 	pgId = UNDEF_PARTITIONGROUPID;
+	splitId = -1;
 
 	std::string::size_type pos = fileName.find(gsCpFileBaseName);
 	if (0 != pos) {
@@ -666,10 +799,10 @@ bool CheckpointFile::checkFileName(
 
 	util::NormalIStringStream iss(fileName);
 	iss.seekg(strlen(gsCpFileBaseName));
-	uint32_t num32;
-	uint64_t num64;
+	uint32_t num1;
+	int32_t num2;
 	char c;
-	iss >> num32 >> c >> num64;
+	iss >> num1 >> c >> num2;
 
 	if (iss.fail()) {
 		return false;
@@ -677,18 +810,16 @@ bool CheckpointFile::checkFileName(
 	if (c != '_') {
 		return false;
 	}
-	if (num64 != 1) {
-		return false;
-	}
 	if (static_cast<std::string::size_type>(iss.tellg()) != pos) {
 		return false;
 	}
-	pgId = num32;  
+	pgId = num1;  
+	splitId = num2;
 	return true;
 }
 
 std::string CheckpointFile::dump() {
-	return fileName_;
+	return fileNameList_[0];
 }
 
 std::string CheckpointFile::dumpUsedChunkInfo() {

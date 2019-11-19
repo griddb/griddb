@@ -58,9 +58,9 @@
 
 const char8_t *const GS_PRODUCT_NAME = "GridDB";
 const int32_t GS_MAJOR_VERSION = 4;
-const int32_t GS_MINOR_VERSION = 2;
-const int32_t GS_REVISION = 1;
-const int32_t GS_BUILD_NO = 35565;
+const int32_t GS_MINOR_VERSION = 3;
+const int32_t GS_REVISION = 0;
+const int32_t GS_BUILD_NO = 36424;
 
 const char8_t *const GS_EDITION_NAME = "Community Edition";
 const char8_t *const GS_EDITION_NAME_SHORT = "CE";
@@ -71,6 +71,7 @@ const char8_t *const SYS_DEVELOPER_FILE_NAME = "gs_developer.json";
 const char8_t *const GS_CLUSTER_PARAMATER_DIFF_FILE_NAME = "gs_diff.json";
 
 const char8_t *const GS_TRACE_SECRET_HEX_KEY = "7B790AB2C82F01B3"; 
+
 
 static void autoJoinCluster(const Event::Source &eventSource,
 	util::StackAllocator &alloc, SystemService &sysSvc, PartitionTable &pt,
@@ -734,7 +735,7 @@ void autoJoinCluster(const Event::Source &eventSource,
 
 		if (completeFlag) {
 			PartitionRevision &rev = pt.incPartitionRevision();
-			std::vector<NodeId> backups;
+			NodeIdList backups;
 			for (pId = 0; pId < pt.getPartitionNum(); pId++) {
 				pt.setPartitionStatus(pId, PartitionTable::PT_ON);
 				PartitionRole role(

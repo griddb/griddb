@@ -170,4 +170,22 @@ typedef uint16_t UpdateIntervalCategoryId;
 
 typedef RowId DatabaseId;  
 
+#define MAX_COMPOSITE_COLUMN_NUM 16
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 #endif

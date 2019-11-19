@@ -573,7 +573,7 @@ public:
 	 */
 	void getIndexParam(TransactionContext &txn, ExprList &args,
 		GeometryOperator &outSearchType, const void *&outParam1,
-		const void *&outParam2) {
+		const void *&outParam2, ColumnId &indexColumnId) {
 		if (args.size() != 2) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
@@ -591,12 +591,15 @@ public:
 		if (args[0]->isColumn() && args[1]->isGeometry()) {
 			r1 = QP_NEW TrRectTag;
 			*r1 = args[1]->getGeometry()->getBoundingRect();
+			indexColumnId = args[0]->getColumnId();
 		}
 		else if (args[1]->isColumn() && args[0]->isGeometry()) {
 			r1 = QP_NEW TrRectTag;
 			*r1 = args[0]->getGeometry()->getBoundingRect();
+			indexColumnId = args[1]->getColumnId();
 		}
 		else {
+			indexColumnId = args[0]->getColumnId();
 		}
 		outSearchType = GEOMETRY_INTERSECT;
 		outParam1 = reinterpret_cast<void *>(r1);
@@ -687,7 +690,7 @@ public:
 	 */
 	void getIndexParam(TransactionContext &txn, ExprList &args,
 		GeometryOperator &outSearchType, const void *&outParam1,
-		const void *&outParam2) {
+		const void *&outParam2, ColumnId &indexColumnId) {
 		if (args.size() != 2) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
@@ -699,10 +702,12 @@ public:
 		else if (!args[1]->isColumn()) {
 			outParam1 = NULL;
 			outParam2 = NULL;
+			indexColumnId = UNDEF_COLUMNID;
 			return;
 		}
 		else {
 			/* DO NOTHIHG */
+			indexColumnId = args[1]->getColumnId();
 		}
 
 		Geometry *g1 = args[0]->getGeometry();

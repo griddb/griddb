@@ -291,6 +291,9 @@ bool StatementMessage::OptionTypeSwitcher<
 	case Options::STORE_MEMORY_AGING_SWAP_RATE:
 		action.template opType<Options::STORE_MEMORY_AGING_SWAP_RATE>();
 		break;
+	case Options::TIME_ZONE_OFFSET:
+		action.template opType<Options::TIME_ZONE_OFFSET>();
+		break;
 	default:
 		return false;
 	}
@@ -848,6 +851,24 @@ StatementMessage::CustomOptionCoder<
 	value->enabled_ = Utils::decodeBool(in);
 	Utils::decodeVarSizeBinary(in, value->containerKeyBinary_);
 	return value;
+}
+
+template<>
+void StatementMessage::CustomOptionCoder<util::TimeZone, 0>::encode(
+		EventByteOutStream &out, const ValueType &value) const {
+	out << value.getOffsetMillis();
+}
+
+template<>
+util::TimeZone StatementMessage::CustomOptionCoder<util::TimeZone, 0>::decode(
+		EventByteInStream &in, util::StackAllocator &alloc) const {
+	util::TimeZone::Offset offsetMillis;
+	in >> offsetMillis;
+
+	util::TimeZone zone;
+	zone.setOffsetMillis(offsetMillis);
+
+	return zone;
 }
 
 
@@ -1729,6 +1750,12 @@ void StatementHandler::decodeRequestOptionPart(
 			request.fixed_.cxtSrc_.storeMemoryAgingSwapRate_ =
 					connOption.storeMemoryAgingSwapRate_;
 		}
+
+		request.fixed_.cxtSrc_.timeZone_ =
+				request.optional_.get<Options::TIME_ZONE_OFFSET>();
+		if (request.fixed_.cxtSrc_.timeZone_.isEmpty()) {
+			request.fixed_.cxtSrc_.timeZone_ = connOption.timeZone_;
+		}
 	}
 	catch (std::exception &e) {
 		TXN_RETHROW_DECODE_ERROR(e, "");
@@ -1785,7 +1812,7 @@ void StatementHandler::decodeIndexInfo(
 		uint32_t size;
 		in >> size;
 
-//		const size_t startPos = in.base().position();
+		const size_t startPos = in.base().position();
 
 		in >> indexInfo.indexName_;
 
@@ -2504,8 +2531,8 @@ void StatementHandler::replySuccess(
 		   << ", containerId=" << replContext.getContainerId() << ")"
 
 	util::StackAllocator::Scope scope(alloc);
-//	const util::DateTime &now = ec.getHandlerStartTime();
-//	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
+	const util::DateTime &now = ec.getHandlerStartTime();
+	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	if (replContext.getConnectionND().isEmpty()) {
 		return;
@@ -2594,7 +2621,7 @@ void StatementHandler::replyError(
 		const Request &request, const std::exception &e) {
 	util::StackAllocator::Scope scope(alloc);
 
-//	StatementId stmtId = request.fixed_.cxtSrc_.stmtId_;
+	StatementId stmtId = request.fixed_.cxtSrc_.stmtId_;
 	{
 		Event ev(ec, stmtType, request.fixed_.pId_);
 		setErrorReply(ev, request.fixed_.cxtSrc_.stmtId_, status, e, ND);
@@ -3057,6 +3084,19 @@ void StatementHandler::updateLockConflictStatus(
 			ec.getAllocator(), ev, status.initialConflictMillis_);
 }
 
+void StatementHandler::ConnectionOption::checkPrivilegeForOperator() {
+	if (dbId_ != GS_PUBLIC_DB_ID && role_ != ALL) {
+		GS_THROW_USER_ERROR(GS_ERROR_TXN_DB_ACCESS_INVALID, "");
+	}
+}
+
+void StatementHandler::ConnectionOption::checkForUpdate(bool forUpdate) {
+	if (dbId_ != GS_PUBLIC_DB_ID && role_ == READ && forUpdate == true) {
+		GS_THROW_USER_ERROR(GS_ERROR_TXN_DB_ACCESS_INVALID, "");
+	}
+}
+
+
 bool StatementHandler::checkPrivilege(
 		EventType command,
 		UserType userType, RequestType requestType, bool isSystemMode,
@@ -3065,14 +3105,16 @@ bool StatementHandler::checkPrivilege(
 		ContainerAttribute expectedResourceSubType) {
 
 
-//	bool isWriteMode = false;
+
+
+	bool isWriteMode = false;
 	switch (command) {
 		case PUT_CONTAINER:
 		case DROP_CONTAINER:
-//			isWriteMode = true;
+			isWriteMode = true;
 			break;
-//		default:
-//			isWriteMode = false;
+		default:
+			isWriteMode = false;
 	}
 
 
@@ -3230,21 +3272,6 @@ const KeyConstraint& StatementHandler::getKeyConstraint(
 		[(checkLength ? 1 : 0)];
 }
 
-void StatementHandler::ConnectionOption::setApplicationName(
-		const char8_t *name) {
-	util::LockGuard<util::Mutex> guard(mutex_);
-	applicationName_ = name;
-}
-
-void StatementHandler::ConnectionOption::setLoginInfo(
-		const char8_t *userName, const char8_t *dbName,
-		const char8_t *applicationName) {
-	util::LockGuard<util::Mutex> guard(mutex_);
-	userName_ = userName;
-	dbName_ = dbName;
-	applicationName_ = applicationName;
-}
-
 
 bool StatementHandler::ConnectionOption::getApplicationName(
 		util::BasicString<
@@ -3255,6 +3282,35 @@ bool StatementHandler::ConnectionOption::getApplicationName(
 		*name = applicationName_.c_str();
 	}
 	return !applicationName_.empty();
+}
+
+void StatementHandler::ConnectionOption::setFirstStep(ClientId &clientId, double storeMemoryAgingSwapRate,
+	const util::TimeZone &timeZone) {
+	clientId_ = clientId;
+	storeMemoryAgingSwapRate_ = storeMemoryAgingSwapRate;
+	timeZone_ = timeZone;
+}
+
+void StatementHandler::ConnectionOption::setBeforeAuth(const char8_t *userName, const char8_t *dbName, const char8_t *applicationName,
+			bool isImmediateConsistency, int32_t txnTimeoutInterval, UserType userType,
+			RequestType requestType, bool isAdminAndPublicDB) {
+	util::LockGuard<util::Mutex> guard(mutex_);
+	userName_ = userName;
+	dbName_ = dbName;
+	applicationName_ = applicationName;
+	isImmediateConsistency_ = isImmediateConsistency;
+	txnTimeoutInterval_ = txnTimeoutInterval;
+	userType_ = userType;
+	requestType_ = requestType;
+	isAdminAndPublicDB_ = isAdminAndPublicDB;
+}
+
+void StatementHandler::ConnectionOption::setAfterAuth(DatabaseId dbId, EventMonotonicTime authenticationTime, RoleType role) {
+	dbId_ = dbId;
+	authenticationTime_ = authenticationTime;
+	role_ = role;
+	
+	isAuthenticated_ = true;
 }
 
 
@@ -3504,6 +3560,80 @@ void DisconnectHandler::operator()(EventContext &ec, Event &ev) {
 	}
 }
 
+void LoginHandler::checkClusterName(std::string &clusterName) {
+	if (clusterName.size() > 0) {
+		const std::string currentClusterName =
+			clusterService_->getManager()->getClusterName();
+		if (clusterName.compare(currentClusterName) != 0) {
+			TXN_THROW_DENY_ERROR(GS_ERROR_TXN_CLUSTER_NAME_INVALID,
+				"cluster name invalid (input="
+					<< clusterName << ", current=" << currentClusterName
+					<< ")");
+		}
+	}
+}
+
+void LoginHandler::checkApplicationName(const char8_t *applicationName) {
+	if (strlen(applicationName) != 0) {
+		try {
+			NoEmptyKey::validate(
+					KeyConstraint::getUserKeyConstraint(MAX_APPLICATION_NAME_LEN),
+					applicationName, static_cast<uint32_t>(strlen(applicationName)),
+					"applicationName");
+		}
+		catch (UserException &e) {
+			GS_RETHROW_USER_ERROR(e, GS_EXCEPTION_MERGE_MESSAGE(e,
+					"Application name invalid (input=" <<
+					applicationName << ")"));
+		}
+	}
+}
+
+bool LoginHandler::checkPublicDB(const char8_t *dbName) {
+	if (strcmp(dbName, GS_PUBLIC) == 0) {
+		return true;
+	}
+	return false;
+}
+
+bool LoginHandler::checkSystemDB(const char8_t *dbName) {
+	if (strcmp(dbName, GS_SYSTEM) == 0) {
+		return true;
+	}
+	return false;
+}
+
+bool LoginHandler::checkAdmin(util::String &userName) {
+	if ((strcmp(userName.c_str(), GS_ADMIN_USER) == 0) ||
+		(strcmp(userName.c_str(), GS_SYSTEM_USER) == 0) ||
+		(userName.find('#') != std::string::npos)) {
+			return true;
+	}
+	return false;
+}
+
+bool LoginHandler::checkLocalAuthNode() {
+	NodeAddress nodeAddress =
+			clusterManager_->getPartition0NodeAddr();
+	TEST_PRINT1(
+			"NodeAddress(TxnServ) %s\n", nodeAddress.dump().c_str());
+	if (nodeAddress.port_ == 0) {
+		TXN_THROW_DENY_ERROR(
+				GS_ERROR_TXN_AUTHENTICATION_SERVICE_NOT_READY, "");
+	}
+
+	const NodeDescriptor &nd0 =
+		transactionService_->getEE()->getServerND(
+			util::SocketAddress(nodeAddress.toString(false).c_str(),
+				nodeAddress.port_));
+
+	if (nd0.isSelf()) {
+		return true;
+	} else {
+		return false;
+	}
+}
+
 /*!
 	@brief Handler Operator
 */
@@ -3523,13 +3653,14 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 		ConnectionOption &connOption =
 				ev.getSenderND().getUserData<ConnectionOption>();
 		connOption.clear();
+
 		EventByteInStream in(ev.getInStream());
 		decodeRequestCommonPart(in, request, connOption);
 
 		const RequestType requestType =
 				request.optional_.get<Options::REQUEST_MODULE_TYPE>();
 		const char8_t *dbName = request.optional_.get<Options::DB_NAME>();
-//		const bool systemMode = request.optional_.get<Options::SYSTEM_MODE>();
+		const bool systemMode = request.optional_.get<Options::SYSTEM_MODE>();
 		const int32_t txnTimeoutInterval =
 				(request.optional_.get<Options::TXN_TIMEOUT_INTERVAL>() >= 0 ?
 				request.optional_.get<Options::TXN_TIMEOUT_INTERVAL>() :
@@ -3538,6 +3669,8 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 				request.optional_.get<Options::APPLICATION_NAME>();
 		const double storeMemoryAgingSwapRate =
 				request.optional_.get<Options::STORE_MEMORY_AGING_SWAP_RATE>();
+		const util::TimeZone timeZone =
+				request.optional_.get<Options::TIME_ZONE_OFFSET>();
 
 		util::String userName(alloc);
 		util::String digest(alloc);
@@ -3571,68 +3704,42 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 		checkExecutable(
 				request.fixed_.pId_, clusterRole, partitionRole, partitionStatus, partitionTable_);
 
-		if (clusterName.size() > 0) {
-			const std::string currentClusterName =
-				clusterService_->getManager()->getClusterName();
-			if (clusterName.compare(currentClusterName) != 0) {
-				TXN_THROW_DENY_ERROR(GS_ERROR_TXN_CLUSTER_NAME_INVALID,
-					"cluster name invalid (input="
-						<< clusterName << ", current=" << currentClusterName
-						<< ")");
-			}
-		}
+		checkClusterName(clusterName);
+		checkApplicationName(applicationName);
 
-		if (strlen(applicationName) != 0) {
-			try {
-				NoEmptyKey::validate(
-						KeyConstraint::getUserKeyConstraint(MAX_APPLICATION_NAME_LEN),
-						applicationName, static_cast<uint32_t>(strlen(applicationName)),
-						"applicationName");
-			}
-			catch (UserException &e) {
-				GS_RETHROW_USER_ERROR(e, GS_EXCEPTION_MERGE_MESSAGE(e,
-						"Application name invalid (input=" <<
-						applicationName << ")"));
-			}
-		}
+		connOption.setFirstStep(request.fixed_.clientId_, storeMemoryAgingSwapRate, timeZone);
 
-		connOption.clientId_ = request.fixed_.clientId_;
-		connOption.storeMemoryAgingSwapRate_ = storeMemoryAgingSwapRate;
 		DatabaseId dbId = UNDEF_DBID;
+		RoleType role = READ;
 
-		if ((strcmp(dbName, GS_PUBLIC) == 0) ||
-				(strcmp(dbName, GS_SYSTEM) == 0)) {
-			if ((strcmp(userName.c_str(), GS_ADMIN_USER) == 0) ||
-					(strcmp(userName.c_str(), GS_SYSTEM_USER) == 0) ||
-				(userName.find('#') != std::string::npos)) {
-				TEST_PRINT("LoginHandler::operator() public&admin S\n");
+		if (checkPublicDB(dbName) || checkSystemDB(dbName)) {
+			if (checkAdmin(userName)) {
+				TEST_PRINT("LoginHandler::operator() public&admin [A1] S\n");
 				if (systemService_->getUserTable().isValidUser(
 						userName.c_str(), digest.c_str())) {  
+					UserType userType;
 
-					connOption.isImmediateConsistency_ = isImmediateConsistency;
-					connOption.txnTimeoutInterval_ = txnTimeoutInterval;
-					connOption.userType_ = Message::USER_ADMIN;
-					if (strcmp(dbName, GS_SYSTEM) == 0) {
+					userType = Message::USER_ADMIN;
+					if (checkSystemDB(dbName)) {
 						GS_THROW_USER_ERROR(GS_ERROR_TXN_AUTH_FAILED,
 								"database name invalid (" << dbName << ")");
 					}
-					connOption.setLoginInfo(userName.c_str(), dbName, applicationName);
-					connOption.requestType_ = requestType;
-					connOption.isAdminAndPublicDB_ = true;
-					connOption.isAuthenticated_ = true;
-					if (strcmp(dbName, GS_PUBLIC) == 0) {
-						connOption.dbId_ = GS_PUBLIC_DB_ID;
+					connOption.setBeforeAuth(userName.c_str(), dbName, applicationName,
+							isImmediateConsistency, txnTimeoutInterval, userType,
+							requestType, true);
+					if (checkPublicDB(dbName)) {
+						dbId = GS_PUBLIC_DB_ID;
 					}
 					else {
-						connOption.dbId_ = GS_SYSTEM_DB_ID;
+						dbId = GS_SYSTEM_DB_ID;
 					}
-					connOption.authenticationTime_ = emNow;
+					connOption.setAfterAuth(dbId, emNow, ALL);
 
 					replySuccess(
 							ec, alloc, ev.getSenderND(), ev.getType(),
 							TXN_STATEMENT_SUCCESS, request, response,
 							NO_REPLICATION);
-					TEST_PRINT("LoginHandler::operator() public&admin E\n");
+					TEST_PRINT("LoginHandler::operator() public&admin  [A1] E\n");
 				}
 				else {
 					GS_THROW_USER_ERROR(GS_ERROR_TXN_AUTH_FAILED,
@@ -3641,62 +3748,42 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 				}
 			}
 			else {  
-
 				TEST_PRINT("LoginHandler::operator() public&normal S\n");
 
 
-				if (strcmp(dbName, GS_SYSTEM) == 0) {
+				if (checkSystemDB(dbName)) {
 					GS_THROW_USER_ERROR(GS_ERROR_TXN_AUTH_FAILED,
 							"database name invalid (" << dbName << ")");
 				}
 
-				NodeAddress nodeAddress =
-						clusterManager_->getPartition0NodeAddr();
-				TEST_PRINT1(
-						"NodeAddress(TxnServ) %s\n", nodeAddress.dump().c_str());
-
-				if (nodeAddress.port_ == 0) {
-					TXN_THROW_DENY_ERROR(
-							GS_ERROR_TXN_AUTHENTICATION_SERVICE_NOT_READY, "");
-				}
-
-				const NodeDescriptor &nd0 =
-					transactionService_->getEE()->getServerND(
-						util::SocketAddress(nodeAddress.toString(false).c_str(),
-							nodeAddress.port_));
-				if (nd0.isSelf()) {
+				if (checkLocalAuthNode()) {
 					TEST_PRINT("Self\n");
-
-					connOption.isImmediateConsistency_ = isImmediateConsistency;
-					connOption.txnTimeoutInterval_ = txnTimeoutInterval;
-					connOption.userType_ = Message::USER_NORMAL;
-					connOption.requestType_ = requestType;
-					connOption.setLoginInfo(userName.c_str(), dbName, applicationName);
-					connOption.isAdminAndPublicDB_ = false;
+					TEST_PRINT("[A2] S\n");
+					
+					connOption.setBeforeAuth(userName.c_str(), dbName, applicationName,
+							isImmediateConsistency, txnTimeoutInterval, Message::USER_NORMAL,
+							requestType, false);
 
 					executeAuthenticationInternal(
 							ec, alloc, request.fixed_.cxtSrc_,
 							userName.c_str(), digest.c_str(),
 							dbName, Message::USER_NORMAL, 1,
-							dbId);  
+							dbId, role);  
 
-					connOption.isAuthenticated_ = true;
-					connOption.dbId_ = dbId;
-					connOption.authenticationTime_ = emNow;
-
+					connOption.setAfterAuth(dbId, emNow, role);
+					
 					replySuccess(ec, alloc, ev.getSenderND(), ev.getType(),
 						TXN_STATEMENT_SUCCESS, request, response,
 						NO_REPLICATION);
+					TEST_PRINT("[A2] E\n");
 				}
 				else {
 					TEST_PRINT("Other\n");
+					TEST_PRINT("[A3] S\n");
 
-					connOption.isImmediateConsistency_ = isImmediateConsistency;
-					connOption.txnTimeoutInterval_ = txnTimeoutInterval;
-					connOption.userType_ = Message::USER_NORMAL;
-					connOption.requestType_ = requestType;
-					connOption.setLoginInfo(userName.c_str(), dbName, applicationName);
-					connOption.isAdminAndPublicDB_ = false;
+					connOption.setBeforeAuth(userName.c_str(), dbName, applicationName,
+							isImmediateConsistency, txnTimeoutInterval, Message::USER_NORMAL,
+							requestType, false);
 
 					executeAuthentication(
 							ec, ev, ev.getSenderND(),
@@ -3705,67 +3792,50 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 							dbName, connOption.userType_);
 
 				}
-
 				TEST_PRINT("LoginHandler::operator() public&normal E\n");
 			}
 		}
 		else {
-			NodeAddress nodeAddress = clusterManager_->getPartition0NodeAddr();
-			TEST_PRINT1(
-				"NodeAddress(TxnServ) %s\n", nodeAddress.dump().c_str());
+			bool isLocalAuthNode = checkLocalAuthNode();
 
-			if (nodeAddress.port_ == 0) {
-				TXN_THROW_DENY_ERROR(
-					GS_ERROR_TXN_AUTHENTICATION_SERVICE_NOT_READY, "");
-			}
-
-			const NodeDescriptor &nd0 =
-				transactionService_->getEE()->getServerND(util::SocketAddress(
-					nodeAddress.toString(false).c_str(), nodeAddress.port_));
-
-			if ((strcmp(userName.c_str(), GS_ADMIN_USER) == 0) ||
-				(strcmp(userName.c_str(), GS_SYSTEM_USER) == 0) ||
-				(userName.find('#') != std::string::npos)) {
-				TEST_PRINT("LoginHandler::operator() admin S\n");
-
+			if (checkAdmin(userName)) {
 				if (systemService_->getUserTable().isValidUser(
 						userName.c_str(), digest.c_str())) {  
+					TEST_PRINT("LoginHandler::operator() admin S\n");
 
-						if (nd0.isSelf()) {
+					
+					if (isLocalAuthNode) {
 						TEST_PRINT("Self\n");
+						TEST_PRINT("[A4] S\n");
 
-						connOption.isImmediateConsistency_ =
-								isImmediateConsistency;
-						connOption.txnTimeoutInterval_ = txnTimeoutInterval;
-						connOption.userType_ = Message::USER_ADMIN;
-						connOption.requestType_ = requestType;
-						connOption.setLoginInfo(userName.c_str(), dbName, applicationName);
-						connOption.isAdminAndPublicDB_ = false;
+						UserType userType;
+						userType = Message::USER_ADMIN;
+						connOption.setBeforeAuth(userName.c_str(), dbName, applicationName,
+							isImmediateConsistency, txnTimeoutInterval, userType,
+							requestType, false);
 
 						executeAuthenticationInternal(
 								ec, alloc,
 								request.fixed_.cxtSrc_, userName.c_str(), digest.c_str(),
 								dbName, connOption.userType_, 2,
-								dbId);  
+								dbId, role);  
 
-						connOption.isAuthenticated_ = true;
-						connOption.dbId_ = dbId;
-						connOption.authenticationTime_ = emNow;
+						connOption.setAfterAuth(dbId, emNow, role);
 
 						replySuccess(ec, alloc, ev.getSenderND(), ev.getType(),
 							TXN_STATEMENT_SUCCESS, request, response,
 							NO_REPLICATION);
+						TEST_PRINT("[A4] E\n");
 					}
 					else {
 						TEST_PRINT("Other\n");
+						TEST_PRINT("[A5] S\n");
 
-						connOption.isImmediateConsistency_ =
-							isImmediateConsistency;
-						connOption.txnTimeoutInterval_ = txnTimeoutInterval;
-						connOption.userType_ = Message::USER_ADMIN;
-						connOption.requestType_ = requestType;
-						connOption.setLoginInfo(userName.c_str(), dbName, applicationName);
-						connOption.isAdminAndPublicDB_ = false;
+						UserType userType;
+						userType = Message::USER_ADMIN;
+						connOption.setBeforeAuth(userName.c_str(), dbName, applicationName,
+							isImmediateConsistency, txnTimeoutInterval, userType,
+							requestType, false);
 
 						executeAuthentication(
 								ec, ev, ev.getSenderND(),
@@ -3774,7 +3844,6 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 								dbName, connOption.userType_);
 
 					}
-
 					TEST_PRINT("LoginHandler::operator() admin E\n");
 				}
 				else {
@@ -3787,39 +3856,34 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 				TEST_PRINT("LoginHandler::operator() normal S\n");
 
 
-					if (nd0.isSelf()) {
+				if (isLocalAuthNode) {
 					TEST_PRINT("Self\n");
-
-					connOption.isImmediateConsistency_ = isImmediateConsistency;
-					connOption.txnTimeoutInterval_ = txnTimeoutInterval;
-					connOption.userType_ = Message::USER_NORMAL;
-					connOption.requestType_ = requestType;
-					connOption.setLoginInfo(userName.c_str(), dbName, applicationName);
-					connOption.isAdminAndPublicDB_ = false;
+					TEST_PRINT("[A6] S\n");
+					
+					connOption.setBeforeAuth(userName.c_str(), dbName, applicationName,
+							isImmediateConsistency, txnTimeoutInterval, Message::USER_NORMAL,
+							requestType, false);
 
 					executeAuthenticationInternal(
 							ec, alloc, request.fixed_.cxtSrc_,
 							userName.c_str(), digest.c_str(),
 							dbName, Message::USER_NORMAL, 3,
-							dbId);  
+							dbId, role);  
 
-					connOption.isAuthenticated_ = true;
-					connOption.dbId_ = dbId;
-					connOption.authenticationTime_ = emNow;
+					connOption.setAfterAuth(dbId, emNow, role);
 
 					replySuccess(ec, alloc, ev.getSenderND(), ev.getType(),
 						TXN_STATEMENT_SUCCESS, request, response,
 						NO_REPLICATION);
+					TEST_PRINT("[A6] E\n");
 				}
 				else {
 					TEST_PRINT("Other\n");
-
-					connOption.isImmediateConsistency_ = isImmediateConsistency;
-					connOption.txnTimeoutInterval_ = txnTimeoutInterval;
-					connOption.userType_ = Message::USER_NORMAL;
-					connOption.requestType_ = requestType;
-					connOption.setLoginInfo(userName.c_str(), dbName, applicationName);
-					connOption.isAdminAndPublicDB_ = false;
+					TEST_PRINT("[A7] S\n");
+					
+					connOption.setBeforeAuth(userName.c_str(), dbName, applicationName,
+							isImmediateConsistency, txnTimeoutInterval, Message::USER_NORMAL,
+							requestType, false);
 
 					executeAuthentication(
 							ec, ev, ev.getSenderND(),
@@ -3914,18 +3978,13 @@ void GetPartitionAddressHandler::operator()(EventContext &ec, Event &ev) {
 		const NodeId ownerNodeId = (masterResolving ?
 				UNDEF_NODEID : partitionTable_->getOwner(request.fixed_.pId_));
 		if (ownerNodeId != UNDEF_NODEID) {
+			NodeAddress &address = partitionTable_->getPublicNodeAddress(
+					ownerNodeId, TRANSACTION_SERVICE);
 			out << static_cast<uint8_t>(1);
-			const NodeDescriptor &ownerND =
-				transactionService_->getEE()->getServerND(ownerNodeId);
-			if (ownerND.isEmpty()) {
-				GS_THROW_USER_ERROR(GS_ERROR_EE_PARAMETER_INVALID, "ND is empty");
-			}
-			util::SocketAddress::Inet addr;
-			uint16_t port;
-			ownerND.getAddress().getIP(&addr, &port);
-			out << std::pair<const uint8_t *, size_t>(
-				reinterpret_cast<const uint8_t *>(&addr), sizeof(addr));
-			out << static_cast<uint32_t>(port);
+			out << std::pair<const uint8_t*, size_t>(
+					reinterpret_cast<const uint8_t*>(&address.address_),
+					sizeof(AddressType));
+			out << static_cast<uint32_t>(address.port_);
 		}
 		else {
 			out << static_cast<uint8_t>(0);
@@ -3939,17 +3998,13 @@ void GetPartitionAddressHandler::operator()(EventContext &ec, Event &ev) {
 		const uint8_t numBackup = static_cast<uint8_t>(backupNodeIds.size());
 		out << numBackup;
 		for (uint8_t i = 0; i < numBackup; i++) {
-			const NodeDescriptor &backupND =
-				transactionService_->getEE()->getServerND(backupNodeIds[i]);
-			if (backupND.isEmpty()) {
-				GS_THROW_USER_ERROR(GS_ERROR_EE_PARAMETER_INVALID, "ND is empty");
-			}
-			util::SocketAddress::Inet addr;
-			uint16_t port;
-			backupND.getAddress().getIP(&addr, &port);
-			out << std::pair<const uint8_t *, size_t>(
-				reinterpret_cast<const uint8_t *>(&addr), sizeof(addr));
-			out << static_cast<uint32_t>(port);
+
+			NodeAddress &address = partitionTable_->getPublicNodeAddress(
+					backupNodeIds[i], TRANSACTION_SERVICE);
+			out << std::pair<const uint8_t*, size_t>(
+					reinterpret_cast<const uint8_t*>(&address.address_),
+					sizeof(AddressType));
+			out << static_cast<uint32_t>(address.port_);
 		}
 
 		if (masterResolving) {
@@ -4215,6 +4270,7 @@ void GetContainerPropertiesHandler::operator()(EventContext &ec, Event &ev)
 						txn, out, metaContainer, propFlags, propTypeCount,
 						forMeta, emNow, containerNameStr, dbName
 						, currentTime
+						, acceptableFeatureVersion
 						);
 
 				continue;
@@ -4226,6 +4282,7 @@ void GetContainerPropertiesHandler::operator()(EventContext &ec, Event &ev)
 						txn, out, container, propFlags, propTypeCount,
 						forMeta, emNow, containerNameStr, dbName
 						, currentTime
+						, acceptableFeatureVersion
 				);
 			}
 		}
@@ -4244,6 +4301,7 @@ void GetContainerPropertiesHandler::encodeContainerProps(
 		EventMonotonicTime emNow, util::String &containerNameStr,
 		const char8_t *dbName
 		, int64_t currentTime
+		, int32_t acceptableFeatureVersion
 ) {
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
 
@@ -4272,7 +4330,7 @@ void GetContainerPropertiesHandler::encodeContainerProps(
 			MetaContainer *metaContainer =
 					static_cast<MetaContainer*>(container);
 			metaDistType = META_DIST_FULL;
-			if (metaContainer->getMetaContainerInfo().nodeDistribution_ ) {
+			if (metaContainer->getMetaContainerInfo().nodeDistribution_) {
 				metaDistType = META_DIST_NODE;
 			}
 			metaContainerId = metaContainer->getMetaContainerId();
@@ -4285,19 +4343,36 @@ void GetContainerPropertiesHandler::encodeContainerProps(
 	}
 
 	if ((propFlags & (1 << CONTAINER_PROPERTY_SCHEMA)) != 0) {
+		if (acceptableFeatureVersion < StatementMessage::FEATURE_V4_3) {
+			if (container->getRowKeyColumnNum() > 1) {
+				GS_THROW_USER_ERROR(GS_ERROR_TXN_CLIENT_VERSION_NOT_ACCEPTABLE,
+						"ConnectClientVersion not support composite row key");
+			}
+		}
 		const ContainerType containerType =
 				container->getContainerType();
 
 		const bool optionIncluded = true;
 		util::XArray<uint8_t> containerInfo(alloc);
 		container->getContainerInfo(txn, containerInfo, optionIncluded, false);
-
 		encodeSchema(out, containerType, containerInfo);
 	}
 
 	if ((propFlags & (1 << CONTAINER_PROPERTY_INDEX)) != 0) {
 		util::Vector<IndexInfo> indexInfoList(alloc);
 		container->getIndexInfoList(txn, indexInfoList);
+
+		for (util::Vector<IndexInfo>::iterator itr = indexInfoList.begin();
+				itr != indexInfoList.end();) {
+			checkIndexInfoVersion(*itr, acceptableFeatureVersion);
+
+			if (itr->columnIds_.size() > 1) {
+				itr = indexInfoList.erase(itr);
+			}
+			else {
+				++itr;
+			}
+		}
 
 		encodeIndex(out, indexInfoList);
 	}
@@ -4326,6 +4401,7 @@ void GetContainerPropertiesHandler::encodeContainerProps(
 		util::Vector<IndexInfo> indexInfoList(alloc);
 		container->getIndexInfoList(txn, indexInfoList);
 
+		checkIndexInfoVersion(indexInfoList, acceptableFeatureVersion);
 		encodeIndexDetail(out, indexInfoList);
 	}
 
@@ -4590,7 +4666,7 @@ void GetContainerPropertiesHandler::encodeIndexDetail(
 void GetContainerPropertiesHandler::encodeNulls(
 	EventByteOutStream &out, const util::XArray<uint8_t> &nullsList) {
 	try {
-//		util::StackAllocator &alloc = *nullsList.get_allocator().base();
+		util::StackAllocator &alloc = *nullsList.get_allocator().base();
 
 		encodeEnumData<ContainerProperty>(out, CONTAINER_PROPERTY_NULLS_STATISTICS);
 
@@ -4615,6 +4691,24 @@ void GetContainerPropertiesHandler::encodeNulls(
 	}
 }
 
+void GetContainerPropertiesHandler::checkIndexInfoVersion(
+		const util::Vector<IndexInfo> indexInfoList,
+		int32_t acceptableFeatureVersion) {
+	for (util::Vector<IndexInfo>::const_iterator itr = indexInfoList.begin();
+			itr != indexInfoList.end(); ++itr) {
+		checkIndexInfoVersion(*itr, acceptableFeatureVersion);
+	}
+}
+
+void GetContainerPropertiesHandler::checkIndexInfoVersion(
+		const IndexInfo &info, int32_t acceptableFeatureVersion) {
+	if (acceptableFeatureVersion < StatementMessage::FEATURE_V4_3 &&
+			info.columnIds_.size() > 1) {
+		GS_THROW_USER_ERROR(GS_ERROR_TXN_CLIENT_VERSION_NOT_ACCEPTABLE,
+				"ConnectClientVersion not support composite column index");
+	}
+}
+
 void GetContainerPropertiesHandler::encodePartitioningMetaData(
 	EventByteOutStream &out,
 	TransactionContext &txn, EventMonotonicTime emNow,
@@ -4623,7 +4717,7 @@ void GetContainerPropertiesHandler::encodePartitioningMetaData(
 	, int64_t currentTime
 	) {
 	try {
-//		util::StackAllocator &alloc = txn.getDefaultAllocator();
+		util::StackAllocator &alloc = txn.getDefaultAllocator();
 
 		encodeEnumData<ContainerProperty>(out, CONTAINER_PROPERTY_PARTITIONING_METADATA);
 
@@ -4696,6 +4790,7 @@ void PutContainerHandler::operator()(EventContext &ec, Event &ev) {
 		const PartitionRoleType partitionRole = PROLE_OWNER;
 		const PartitionStatus partitionStatus = PSTATE_ON;
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkPrivilegeForOperator();
 		checkConsistency(ev.getSenderND(), IMMEDIATE_CONSISTENCY);
 		checkExecutable(
 				request.fixed_.pId_, clusterRole, partitionRole, partitionStatus, partitionTable_);
@@ -5007,6 +5102,7 @@ void DropContainerHandler::operator()(EventContext &ec, Event &ev) {
 		const PartitionRoleType partitionRole = PROLE_OWNER;
 		const PartitionStatus partitionStatus = PSTATE_ON;
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkPrivilegeForOperator();
 		checkConsistency(ev.getSenderND(), IMMEDIATE_CONSISTENCY);
 		checkExecutable(
 				request.fixed_.pId_, clusterRole, partitionRole, partitionStatus, partitionTable_);
@@ -5210,6 +5306,7 @@ void CreateIndexHandler::operator()(EventContext &ec, Event &ev) {
 		const PartitionRoleType partitionRole = PROLE_OWNER;
 		const PartitionStatus partitionStatus = PSTATE_ON;
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkPrivilegeForOperator();
 		checkConsistency(ev.getSenderND(), IMMEDIATE_CONSISTENCY);
 		checkExecutable(
 				request.fixed_.pId_, clusterRole, partitionRole, partitionStatus, partitionTable_);
@@ -5498,6 +5595,7 @@ void DropIndexHandler::operator()(EventContext &ec, Event &ev) {
 		const PartitionRoleType partitionRole = PROLE_OWNER;
 		const PartitionStatus partitionStatus = PSTATE_ON;
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkPrivilegeForOperator();
 		checkConsistency(ev.getSenderND(), IMMEDIATE_CONSISTENCY);
 		checkExecutable(
 				request.fixed_.pId_, clusterRole, partitionRole, partitionStatus, partitionTable_);
@@ -5702,6 +5800,7 @@ void CreateDropTriggerHandler::operator()(EventContext &ec, Event &ev) {
 		const PartitionRoleType partitionRole = PROLE_OWNER;
 		const PartitionStatus partitionStatus = PSTATE_ON;
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkPrivilegeForOperator();
 		checkConsistency(ev.getSenderND(), IMMEDIATE_CONSISTENCY);
 		checkExecutable(
 				request.fixed_.pId_, clusterRole, partitionRole, partitionStatus, partitionTable_);
@@ -5792,6 +5891,7 @@ void FlushLogHandler::operator()(EventContext &ec, Event &ev) {
 		const PartitionRoleType partitionRole = PROLE_OWNER;
 		const PartitionStatus partitionStatus = PSTATE_ON;
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkPrivilegeForOperator();
 		checkConsistency(ev.getSenderND(), IMMEDIATE_CONSISTENCY);
 		checkTransactionTimeout(
 				emNow, ev.getQueuedMonotonicTime(),
@@ -6016,6 +6116,7 @@ void CommitAbortTransactionHandler::operator()(EventContext &ec, Event &ev) {
 		const PartitionRoleType partitionRole = PROLE_OWNER;
 		const PartitionStatus partitionStatus = PSTATE_ON;
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkPrivilegeForOperator();
 		checkConsistency(ev.getSenderND(), IMMEDIATE_CONSISTENCY);
 		checkTransactionTimeout(
 				emNow, ev.getQueuedMonotonicTime(),
@@ -6124,6 +6225,7 @@ void PutRowHandler::operator()(EventContext &ec, Event &ev) {
 		const PartitionRoleType partitionRole = PROLE_OWNER;
 		const PartitionStatus partitionStatus = PSTATE_ON;
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkPrivilegeForOperator();
 		checkConsistency(ev.getSenderND(), IMMEDIATE_CONSISTENCY);
 		checkTransactionTimeout(
 				emNow, ev.getQueuedMonotonicTime(),
@@ -6237,6 +6339,7 @@ void PutRowSetHandler::operator()(EventContext &ec, Event &ev) {
 		const PartitionRoleType partitionRole = PROLE_OWNER;
 		const PartitionStatus partitionStatus = PSTATE_ON;
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkPrivilegeForOperator();
 		checkConsistency(ev.getSenderND(), IMMEDIATE_CONSISTENCY);
 		checkTransactionTimeout(
 				emNow, ev.getQueuedMonotonicTime(),
@@ -6402,6 +6505,7 @@ void RemoveRowHandler::operator()(EventContext &ec, Event &ev) {
 		const PartitionRoleType partitionRole = PROLE_OWNER;
 		const PartitionStatus partitionStatus = PSTATE_ON;
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkPrivilegeForOperator();
 		checkConsistency(ev.getSenderND(), IMMEDIATE_CONSISTENCY);
 		checkTransactionTimeout(
 				emNow, ev.getQueuedMonotonicTime(),
@@ -6509,6 +6613,7 @@ void UpdateRowByIdHandler::operator()(EventContext &ec, Event &ev) {
 		const PartitionRoleType partitionRole = PROLE_OWNER;
 		const PartitionStatus partitionStatus = PSTATE_ON;
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkPrivilegeForOperator();
 		checkConsistency(ev.getSenderND(), IMMEDIATE_CONSISTENCY);
 		checkTransactionTimeout(
 				emNow, ev.getQueuedMonotonicTime(),
@@ -6617,6 +6722,7 @@ void RemoveRowByIdHandler::operator()(EventContext &ec, Event &ev) {
 		const PartitionRoleType partitionRole = PROLE_OWNER;
 		const PartitionStatus partitionStatus = PSTATE_ON;
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkPrivilegeForOperator();
 		checkConsistency(ev.getSenderND(), IMMEDIATE_CONSISTENCY);
 		checkTransactionTimeout(
 				emNow, ev.getQueuedMonotonicTime(),
@@ -6717,6 +6823,7 @@ void RemoveRowSetByIdHandler::operator()(EventContext &ec, Event &ev) {
 		const PartitionRoleType partitionRole = PROLE_OWNER;
 		const PartitionStatus partitionStatus = PSTATE_ON;
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkPrivilegeForOperator();
 		checkConsistency(ev.getSenderND(), IMMEDIATE_CONSISTENCY);
 		checkTransactionTimeout(emNow, ev.getQueuedMonotonicTime(),
 				request.fixed_.cxtSrc_.txnTimeoutInterval_, ev.getQueueingCount());
@@ -6746,7 +6853,7 @@ void RemoveRowSetByIdHandler::operator()(EventContext &ec, Event &ev) {
 		util::XArray<const util::XArray<uint8_t> *> logRecordList(alloc);
 
 		try {
-//			StatementId rowCounter = 0;
+			StatementId rowCounter = 0;
 			for (StatementId rowStmtId = request.fixed_.cxtSrc_.stmtId_, rowCounter = 0;
 					rowCounter < numRow; rowCounter++, rowStmtId++) {
 				try {
@@ -6858,6 +6965,7 @@ void UpdateRowSetByIdHandler::operator()(EventContext &ec, Event &ev) {
 		const PartitionRoleType partitionRole = PROLE_OWNER;
 		const PartitionStatus partitionStatus = PSTATE_ON;
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkPrivilegeForOperator();
 		checkConsistency(ev.getSenderND(), IMMEDIATE_CONSISTENCY);
 		checkTransactionTimeout(
 				emNow, ev.getQueuedMonotonicTime(),
@@ -7017,6 +7125,7 @@ void GetRowHandler::operator()(EventContext &ec, Event &ev) {
 				forUpdate ? PROLE_OWNER : (PROLE_OWNER | PROLE_BACKUP);
 		const PartitionStatus partitionStatus = PSTATE_ON;
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkForUpdate(forUpdate);
 		checkConsistency(ev.getSenderND(), forUpdate);
 		checkTransactionTimeout(
 				emNow, ev.getQueuedMonotonicTime(),
@@ -7131,6 +7240,7 @@ void GetRowSetHandler::operator()(EventContext &ec, Event &ev) {
 				forUpdate ? PROLE_OWNER : (PROLE_OWNER | PROLE_BACKUP);
 		const PartitionStatus partitionStatus = PSTATE_ON;
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkForUpdate(forUpdate);
 		checkConsistency(ev.getSenderND(), forUpdate);
 		checkTransactionTimeout(
 				emNow, ev.getQueuedMonotonicTime(),
@@ -7249,6 +7359,7 @@ void QueryTqlHandler::operator()(EventContext &ec, Event &ev)
 				PSTATE_ANY : PSTATE_ON;
 
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkForUpdate(forUpdate);
 		checkConsistency(ev.getSenderND(), forUpdate);
 		checkTransactionTimeout(emNow, ev.getQueuedMonotonicTime(),
 				request.fixed_.cxtSrc_.txnTimeoutInterval_, ev.getQueueingCount());
@@ -7417,6 +7528,7 @@ void AppendRowHandler::operator()(EventContext &ec, Event &ev) {
 		const PartitionRoleType partitionRole = PROLE_OWNER;
 		const PartitionStatus partitionStatus = PSTATE_ON;
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkPrivilegeForOperator();
 		checkConsistency(ev.getSenderND(), IMMEDIATE_CONSISTENCY);
 		checkTransactionTimeout(
 				emNow, ev.getQueuedMonotonicTime(),
@@ -7528,6 +7640,7 @@ void QueryGeometryRelatedHandler::operator()(EventContext &ec, Event &ev) {
 				forUpdate ? PROLE_OWNER : (PROLE_OWNER | PROLE_BACKUP);
 		const PartitionStatus partitionStatus = PSTATE_ON;
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkForUpdate(forUpdate);
 		checkConsistency(ev.getSenderND(), forUpdate);
 		checkTransactionTimeout(
 				emNow, ev.getQueuedMonotonicTime(),
@@ -7644,6 +7757,7 @@ void QueryGeometryWithExclusionHandler::operator()(
 				forUpdate ? PROLE_OWNER : (PROLE_OWNER | PROLE_BACKUP);
 		const PartitionStatus partitionStatus = PSTATE_ON;
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkForUpdate(forUpdate);
 		checkConsistency(ev.getSenderND(), forUpdate);
 		checkTransactionTimeout(
 				emNow, ev.getQueuedMonotonicTime(),
@@ -7758,6 +7872,7 @@ void GetRowTimeRelatedHandler::operator()(EventContext &ec, Event &ev) {
 				forUpdate ? PROLE_OWNER : (PROLE_OWNER | PROLE_BACKUP);
 		const PartitionStatus partitionStatus = PSTATE_ON;
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkForUpdate(forUpdate);
 		checkConsistency(ev.getSenderND(), forUpdate);
 		checkTransactionTimeout(
 				emNow, ev.getQueuedMonotonicTime(),
@@ -7843,6 +7958,7 @@ void GetRowInterpolateHandler::operator()(EventContext &ec, Event &ev) {
 				forUpdate ? PROLE_OWNER : (PROLE_OWNER | PROLE_BACKUP);
 		const PartitionStatus partitionStatus = PSTATE_ON;
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkForUpdate(forUpdate);
 		checkConsistency(ev.getSenderND(), forUpdate);
 		checkTransactionTimeout(
 				emNow, ev.getQueuedMonotonicTime(),
@@ -7928,6 +8044,7 @@ void AggregateHandler::operator()(EventContext &ec, Event &ev) {
 				forUpdate ? PROLE_OWNER : (PROLE_OWNER | PROLE_BACKUP);
 		const PartitionStatus partitionStatus = PSTATE_ON;
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkForUpdate(forUpdate);
 		checkConsistency(ev.getSenderND(), forUpdate);
 		checkTransactionTimeout(
 				emNow, ev.getQueuedMonotonicTime(),
@@ -8019,6 +8136,7 @@ void QueryTimeRangeHandler::operator()(EventContext &ec, Event &ev) {
 				forUpdate ? PROLE_OWNER : (PROLE_OWNER | PROLE_BACKUP);
 		const PartitionStatus partitionStatus = PSTATE_ON;
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkForUpdate(forUpdate);
 		checkConsistency(ev.getSenderND(), forUpdate);
 		checkTransactionTimeout(
 				emNow, ev.getQueuedMonotonicTime(),
@@ -8135,6 +8253,7 @@ void QueryTimeSamplingHandler::operator()(EventContext &ec, Event &ev) {
 				forUpdate ? PROLE_OWNER : (PROLE_OWNER | PROLE_BACKUP);
 		const PartitionStatus partitionStatus = PSTATE_ON;
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkForUpdate(forUpdate);
 		checkConsistency(ev.getSenderND(), forUpdate);
 		checkTransactionTimeout(
 				emNow, ev.getQueuedMonotonicTime(),
@@ -8352,6 +8471,7 @@ void MultiCreateTransactionContextHandler::operator()(
 	util::StackAllocator &alloc = ec.getAllocator();
 	const util::DateTime now = ec.getHandlerStartTime();
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
+	util::TimeZone timeZone;
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
@@ -8428,7 +8548,7 @@ void MultiCreateTransactionContextHandler::operator()(
 					request.fixed_.cxtSrc_.stmtId_, entry.containerId_,
 					TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL,
 					TransactionManager::CREATE, TransactionManager::AUTO_COMMIT,
-					false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
+					false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE, timeZone);
 			TransactionContext &txn = transactionManager_->put(
 					alloc, request.fixed_.pId_, clientId, cxtSrc, now, emNow);
 
@@ -8637,6 +8757,7 @@ void MultiStatementHandler::handleExecuteError(
 		const TransactionManager::ContextSource &src, Progress &progress,
 		std::exception &e, const char8_t *executionName) {
 
+	util::TimeZone timeZone;
 	util::String containerName(alloc);
 	ExceptionParameterList paramList(alloc);
 	try {
@@ -8644,7 +8765,7 @@ void MultiStatementHandler::handleExecuteError(
 				stmtType, 0, src.containerId_,
 				TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL,
 				TransactionManager::AUTO, TransactionManager::AUTO_COMMIT,
-				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE, timeZone);
 		TransactionContext &txn = transactionManager_->put(
 				alloc, pId, TXN_EMPTY_CLIENTID, subSrc, 0, 0);
 
@@ -8874,6 +8995,7 @@ void MultiPutHandler::operator()(EventContext &ec, Event &ev) {
 		const PartitionRoleType partitionRole = PROLE_OWNER;
 		const PartitionStatus partitionStatus = PSTATE_ON;
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkPrivilegeForOperator();
 		checkConsistency(ev.getSenderND(), IMMEDIATE_CONSISTENCY);
 		checkTransactionTimeout(
 				emNow, ev.getQueuedMonotonicTime(),
@@ -9143,9 +9265,9 @@ void MultiPutHandler::checkSchema(
 			}
 		}
 	}
-	util::XArray<ColumnId> keyColumnIdList(txn.getDefaultAllocator());
+	util::Vector<ColumnId> keyColumnIdList(txn.getDefaultAllocator());
 	container.getKeyColumnIdList(keyColumnIdList);
-	const util::XArray<ColumnId> &schemaKeyColumnIdList = schema.getRowKeyColumnIdList();
+	const util::Vector<ColumnId> &schemaKeyColumnIdList = schema.getRowKeyColumnIdList();
 	if (keyColumnIdList.size() != schemaKeyColumnIdList.size()) {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID, "");
 	}
@@ -9168,7 +9290,8 @@ TransactionManager::ContextSource MultiPutHandler::createContextSource(
 			rowSetRequest.getMode_,
 			rowSetRequest.txnMode_,
 			false,
-			request.fixed_.cxtSrc_.storeMemoryAgingSwapRate_);
+			request.fixed_.cxtSrc_.storeMemoryAgingSwapRate_,
+			request.fixed_.cxtSrc_.timeZone_);
 }
 
 void MultiPutHandler::decodeMultiSchema(
@@ -9281,6 +9404,7 @@ void MultiGetHandler::operator()(EventContext &ec, Event &ev) {
 				forUpdate ? PROLE_OWNER : (PROLE_OWNER | PROLE_BACKUP);
 		const PartitionStatus partitionStatus = PSTATE_ON;
 		checkAuthentication(ev.getSenderND(), emNow);  
+		connOption.checkForUpdate(forUpdate);
 		checkConsistency(ev.getSenderND(), forUpdate);
 		checkTransactionTimeout(
 				emNow, ev.getQueuedMonotonicTime(),
@@ -9371,7 +9495,8 @@ uint32_t MultiGetHandler::execute(
 			createContextSource(request, entry);
 
 	const char8_t *getType =
-		(entry.predicate_->distinctKeys_ == NULL) ? "rangeKey" : "distinctKey";
+		(entry.predicate_->predicateType_ == PREDICATE_TYPE_RANGE) ? 
+		"rangeKey" : "distinctKey";
 
 	uint32_t entryCount = 0;
 
@@ -9391,54 +9516,73 @@ uint32_t MultiGetHandler::execute(
 		const RowKeyPredicate &predicate = *entry.predicate_;
 		checkContainerRowKey(container, predicate);
 
-		if (entry.predicate_->distinctKeys_ == NULL) {
-			ResultSet *rs = dataStore_->createResultSet(txn,
-				container->getContainerId(), container->getVersionId(), emNow,
-				NULL);
-			const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
+		if (predicate.predicateType_ == PREDICATE_TYPE_RANGE) {
+			RowData *startRowKey = NULL;
+			RowData *finishRowKey = NULL;
 
-			QueryProcessor::search(txn, *container, MAX_RESULT_SIZE,
-				predicate.startKey_, predicate.finishKey_, *rs);
-			rs->setResultType(RESULT_ROWSET);
+			if (predicate.keyType_ == 255) {
+				const bool NO_VALIDATE_ROW_IMAGE = true;
+				InputMessageRowStore inputMessageRowStore(
+					dataStore_->getValueLimitConfig(), container->getRowKeyColumnInfoList(txn),
+					container->getRowKeyColumnNum(),
+					const_cast<uint8_t *>(predicate.compositeKeys_->data()),
+					static_cast<uint32_t>(predicate.compositeKeys_->size()), 
+					predicate.rowCount_, container->getRowKeyFixedDataSize(alloc), 
+					NO_VALIDATE_ROW_IMAGE);
 
-
-			QueryProcessor::fetch(txn, *container, 0, MAX_RESULT_SIZE, rs);
-
-			encodeEntry(
-				container->getContainerKey(txn), container->getContainerId(),
-				schemaMap, *rs, replyOut);
-
+				if (predicate.rangeFlags_[0]) {
+					if (inputMessageRowStore.next()) {
+						startRowKey = ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
+						inputMessageRowStore.getCurrentRowData(*startRowKey);
+					} else {
+						assert(false);
+					}
+				}
+				if (predicate.rangeFlags_[1]) {
+					if (inputMessageRowStore.next()) {
+						finishRowKey = ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
+						inputMessageRowStore.getCurrentRowData(*finishRowKey);
+					} else {
+						assert(false);
+					}
+				}
+			} else {
+				assert(predicate.keys_->size() == 2);
+				startRowKey = (*predicate.keys_)[0]; 
+				finishRowKey = (*predicate.keys_)[1]; 
+			}
+			executeRange(ec, schemaMap, txn, container, startRowKey, 
+				finishRowKey, replyOut, progress);
 			entryCount++;
-			progress.totalRowCount_ += rs->getResultNum();
 		}
 		else {
-			const RowKeyDataList &distinctKeys = *predicate.distinctKeys_;
+			if (predicate.keyType_ == 255) {
+				RowData rowKey(alloc);
 
-			for (RowKeyDataList::const_iterator it = distinctKeys.begin();
-				 it != distinctKeys.end(); ++it) {
-				const util::StackAllocator::Scope scope(alloc);
-
-				const RowKeyData &rowKey = **it;
-
-				ResultSet *rs = dataStore_->createResultSet(txn,
-					container->getContainerId(), container->getVersionId(),
-					emNow, NULL);
-				const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
-
-				QueryProcessor::get(txn, *container,
-					static_cast<uint32_t>(rowKey.size()), rowKey.data(), *rs);
-				rs->setResultType(RESULT_ROWSET);
-
-
-				QueryProcessor::fetch(
-					txn, *container, 0, MAX_RESULT_SIZE, rs);
-
-				encodeEntry(
-					container->getContainerKey(txn),
-					container->getContainerId(), schemaMap, *rs, replyOut);
-
-				entryCount++;
-				progress.totalRowCount_ += rs->getFetchNum();
+				const bool NO_VALIDATE_ROW_IMAGE = true;
+				InputMessageRowStore inputMessageRowStore(
+					dataStore_->getValueLimitConfig(), container->getRowKeyColumnInfoList(txn),
+					container->getRowKeyColumnNum(),
+					const_cast<uint8_t *>(predicate.compositeKeys_->data()),
+					static_cast<uint32_t>(predicate.compositeKeys_->size()), 
+					predicate.rowCount_, container->getRowKeyFixedDataSize(alloc), 
+					NO_VALIDATE_ROW_IMAGE);
+				while (inputMessageRowStore.next()) {
+					rowKey.clear();
+					inputMessageRowStore.getCurrentRowData(rowKey);
+					executeGet(ec, schemaMap, txn, container, rowKey,
+						replyOut, progress);
+					entryCount++;
+				}
+			} else {
+				const RowKeyDataList &distinctKeys = *predicate.keys_;
+				for (RowKeyDataList::const_iterator it = distinctKeys.begin();
+					 it != distinctKeys.end(); ++it) {
+					const RowKeyData &rowKey = **it;
+					executeGet(ec, schemaMap, txn, container, rowKey,
+						replyOut, progress);
+					entryCount++;
+				}
 			}
 		}
 
@@ -9452,6 +9596,56 @@ uint32_t MultiGetHandler::execute(
 	return entryCount;
 }
 
+void MultiGetHandler::executeRange(
+		EventContext &ec, const SchemaMap &schemaMap,
+		TransactionContext &txn, BaseContainer *container, const RowKeyData *startKey,
+		const RowKeyData *finishKey, EventByteOutStream &replyOut, Progress &progress) {
+	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
+
+	ResultSet *rs = dataStore_->createResultSet(txn,
+		container->getContainerId(), container->getVersionId(), emNow,
+		NULL);
+	const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
+
+	QueryProcessor::search(txn, *container, MAX_RESULT_SIZE,
+		startKey, finishKey, *rs);
+	rs->setResultType(RESULT_ROWSET);
+
+
+	QueryProcessor::fetch(txn, *container, 0, MAX_RESULT_SIZE, rs);
+
+	encodeEntry(
+		container->getContainerKey(txn), container->getContainerId(),
+		schemaMap, *rs, replyOut);
+
+	progress.totalRowCount_ += rs->getResultNum();
+}
+
+void MultiGetHandler::executeGet(
+		EventContext &ec, const SchemaMap &schemaMap,
+		TransactionContext &txn, BaseContainer *container, const RowKeyData &rowKey,
+		EventByteOutStream &replyOut, Progress &progress) {
+	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
+	ResultSet *rs = dataStore_->createResultSet(txn,
+		container->getContainerId(), container->getVersionId(),
+		emNow, NULL);
+	const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
+
+	QueryProcessor::get(txn, *container,
+		static_cast<uint32_t>(rowKey.size()), rowKey.data(), *rs);
+	rs->setResultType(RESULT_ROWSET);
+
+
+	QueryProcessor::fetch(
+		txn, *container, 0, MAX_RESULT_SIZE, rs);
+
+	encodeEntry(
+		container->getContainerKey(txn),
+		container->getContainerId(), schemaMap, *rs, replyOut);
+
+	progress.totalRowCount_ += rs->getFetchNum();
+}
+
 void MultiGetHandler::buildSchemaMap(
 		PartitionId pId,
 		const util::XArray<SearchEntry> &searchList, SchemaMap &schemaMap,
@@ -9460,6 +9654,7 @@ void MultiGetHandler::buildSchemaMap(
 	typedef util::Map<ColumnSchemaId, LocalSchemaId> LocalIdMap;
 	typedef LocalIdMap::iterator LocalIdMapItr;
 
+	util::TimeZone timeZone;
 	util::StackAllocator &alloc = *schemaMap.get_allocator().base();
 
 	SchemaData schemaBuf(alloc);
@@ -9485,7 +9680,7 @@ void MultiGetHandler::buildSchemaMap(
 				GET_MULTIPLE_CONTAINER_ROWS,
 				0, containerId, TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL,
 				TransactionManager::AUTO, TransactionManager::AUTO_COMMIT,
-				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE, timeZone);
 		TransactionContext &txn =
 			transactionManager_->put(alloc, pId, TXN_EMPTY_CLIENTID, src, 0, 0);
 
@@ -9548,7 +9743,7 @@ void MultiGetHandler::buildSchemaMap(
 				GET_MULTIPLE_CONTAINER_ROWS,
 				0, containerId, TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL,
 				TransactionManager::AUTO, TransactionManager::AUTO_COMMIT,
-				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE, timeZone);
 		TransactionContext &txn =
 			transactionManager_->put(alloc, pId, TXN_EMPTY_CLIENTID, src, 0, 0);
 
@@ -9620,10 +9815,17 @@ void MultiGetHandler::checkContainerRowKey(
 		GS_THROW_USER_ERROR(GS_ERROR_DS_COL_ROWKEY_UNDEFINED, "");
 	}
 
+	if (predicate.compositeColumnTypes_ != NULL) {
+		bool isMatch = container->checkRowKeySchema(*(predicate.compositeColumnTypes_));
+		if (!isMatch) {
+			GS_THROW_USER_ERROR(GS_ERROR_DS_COL_ROWKEY_INVALID, "");
+		}
+	} else {
 	const ColumnInfo &keyColumnInfo =
 		container->getColumnInfo(ColumnInfo::ROW_KEY_COLUMN_ID);
 	if (predicate.keyType_ != keyColumnInfo.getColumnType()) {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_COL_ROWKEY_INVALID, "");
+	}
 	}
 }
 
@@ -9636,7 +9838,8 @@ TransactionManager::ContextSource MultiGetHandler::createContextSource(
 			entry.getMode_,
 			entry.txnMode_,
 			false,
-			request.fixed_.cxtSrc_.storeMemoryAgingSwapRate_);
+			request.fixed_.cxtSrc_.storeMemoryAgingSwapRate_,
+			request.fixed_.cxtSrc_.timeZone_);
 }
 
 void MultiGetHandler::decodeMultiSearchEntry(
@@ -9737,45 +9940,81 @@ MultiGetHandler::RowKeyPredicate MultiGetHandler::decodePredicate(
 	int8_t keyType;
 	in >> keyType;
 
-	const MessageRowKeyCoder keyCoder(static_cast<ColumnType>(keyType));
-	RowKeyPredicate predicate = {
-		static_cast<ColumnType>(keyType), NULL, NULL, NULL};
-
 	int8_t predicateType;
 	in >> predicateType;
 
-	if (predicateType == PREDICATE_TYPE_RANGE) {
-		RowKeyData **keyList[] = {
-			&predicate.startKey_, &predicate.finishKey_, NULL};
+	if (predicateType != PREDICATE_TYPE_RANGE && predicateType != PREDICATE_TYPE_DISTINCT) {
+		TXN_THROW_DECODE_ERROR(GS_ERROR_TXN_DECODE_FAILED, "");
+	}
+	RowKeyPredicate predicate = {
+		static_cast<ColumnType>(keyType), static_cast<RowKeyPredicateType>(predicateType), {0, 0}, 0, NULL, NULL, NULL};
 
-		for (RowKeyData ***keyPtr = keyList; *keyPtr != NULL; ++keyPtr) {
-			int8_t keyIncluded;
-			in >> keyIncluded;
+	if (keyType == -1) {
+		int32_t columnCount;
+		in >> columnCount;
 
-			if (keyIncluded) {
-				RowKeyData *key = ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
-				keyCoder.decode(in, *key);
-				**keyPtr = key;
+		RowKeyColumnTypeList *columnTypes =
+			ALLOC_NEW(alloc) util::XArray<ColumnType>(alloc);
+		columnTypes->reserve(static_cast<size_t>(columnCount));
+
+		for (int32_t i = 0; i < columnCount; i++) {
+			int8_t columnType;
+			in >> columnType;
+			columnTypes->push_back(static_cast<ColumnType>(columnType));
+		}
+		predicate.compositeColumnTypes_ = columnTypes;
+
+
+		if (predicateType == PREDICATE_TYPE_RANGE) {
+			for (size_t i = 0; i < 2; i++) {
+				in >> predicate.rangeFlags_[i];
 			}
 		}
-	}
-	else if (predicateType == PREDICATE_TYPE_DISTINCT) {
-		int32_t keyCount;
-		in >> keyCount;
+		uint32_t bytesSize;
+		in >> bytesSize;
 
-		RowKeyDataList *distinctKeys =
-			ALLOC_NEW(alloc) util::XArray<RowKeyData *>(alloc);
-		distinctKeys->reserve(static_cast<size_t>(keyCount));
+		predicate.compositeKeys_ = 
+			ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
+		predicate.compositeKeys_->resize(
+			bytesSize - sizeof(predicate.rowCount_));
 
-		for (int32_t i = 0; i < keyCount; i++) {
-			RowKeyData *key = ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
-			keyCoder.decode(in, *key);
-			distinctKeys->push_back(key);
+		in >> predicate.rowCount_;
+		in.readAll(
+			predicate.compositeKeys_->data(), predicate.compositeKeys_->size());
+	} else {
+		const MessageRowKeyCoder keyCoder(static_cast<ColumnType>(keyType));
+		if (predicateType == PREDICATE_TYPE_RANGE) {
+			RowKeyDataList *startFinishKeys =
+				ALLOC_NEW(alloc) util::XArray<RowKeyData *>(alloc);
+
+			for (size_t i = 0; i < 2; i++) {
+				in >> predicate.rangeFlags_[i];
+
+				if (predicate.rangeFlags_[i]) {
+					RowKeyData *key = ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
+					keyCoder.decode(in, *key);
+					startFinishKeys->push_back(key);
+				} else {
+					startFinishKeys->push_back(NULL);
+				}
+			}
+			predicate.keys_ = startFinishKeys;
 		}
-		predicate.distinctKeys_ = distinctKeys;
-	}
-	else {
-		TXN_THROW_DECODE_ERROR(GS_ERROR_TXN_DECODE_FAILED, "");
+		else {
+			int32_t keyCount;
+			in >> keyCount;
+
+			RowKeyDataList *distinctKeys =
+				ALLOC_NEW(alloc) util::XArray<RowKeyData *>(alloc);
+			distinctKeys->reserve(static_cast<size_t>(keyCount));
+
+			for (int32_t i = 0; i < keyCount; i++) {
+				RowKeyData *key = ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
+				keyCoder.decode(in, *key);
+				distinctKeys->push_back(key);
+			}
+			predicate.keys_ = distinctKeys;
+		}
 	}
 
 	return predicate;
@@ -10092,7 +10331,8 @@ TransactionManager::ContextSource MultiQueryHandler::createContextSource(
 			queryRequest.getMode_,
 			queryRequest.txnMode_,
 			false,
-			request.fixed_.cxtSrc_.storeMemoryAgingSwapRate_);
+			request.fixed_.cxtSrc_.storeMemoryAgingSwapRate_,
+			request.fixed_.cxtSrc_.timeZone_);
 }
 
 void MultiQueryHandler::decodeMultiQuery(
@@ -10743,7 +10983,6 @@ void CheckTimeoutHandler::checkTransactionTimeout(
 					}
 				}
 				else {
-					transactionManager_->remove(txn);
 				}
 			}
 			catch (ContextNotFoundException &e) {
@@ -10795,6 +11034,7 @@ void CheckTimeoutHandler::checkRequestTimeout(
 	const util::DateTime &now = ec.getHandlerStartTime();
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 	const PartitionGroupId pgId = ec.getWorkerId();
+	util::TimeZone timeZone;
 
 	util::StackAllocator::Scope scope(alloc);
 
@@ -10835,7 +11075,8 @@ void CheckTimeoutHandler::checkRequestTimeout(
 							txn.getTransationTimeoutInterval(),
 							TransactionManager::AUTO,
 							TransactionManager::AUTO_COMMIT,
-							false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
+							false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE,
+							timeZone);
 
 					transactionManager_->remove(pIds[i], timeoutResourceIds[i]);
 					closedResourceIds.push_back(timeoutResourceIds[i]);
@@ -10906,6 +11147,7 @@ void CheckTimeoutHandler::checkKeepaliveTimeout(
 	const util::DateTime &now = ec.getHandlerStartTime();
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 	const PartitionGroupId pgId = ec.getWorkerId();
+	util::TimeZone timeZone;
 
 	util::StackAllocator::Scope scope(alloc);
 
@@ -10946,7 +11188,8 @@ void CheckTimeoutHandler::checkKeepaliveTimeout(
 							txn.getTransationTimeoutInterval(),
 							TransactionManager::AUTO,
 							TransactionManager::AUTO_COMMIT,
-							false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
+							false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE,
+							timeZone);
 
 					transactionManager_->remove(pIds[i], timeoutResourceIds[i]);
 					closedResourceIds.push_back(timeoutResourceIds[i]);
@@ -11013,6 +11256,7 @@ void CheckTimeoutHandler::checkKeepaliveTimeout(
 
 void CheckTimeoutHandler::checkNoExpireTransaction(util::StackAllocator &alloc, PartitionId pId) {
 
+	util::TimeZone timeZone;
 	util::StackAllocator::Scope scope(alloc);
 	size_t noExpireResourceCount = 0;
 
@@ -11048,7 +11292,8 @@ void CheckTimeoutHandler::checkNoExpireTransaction(util::StackAllocator &alloc, 
 						txn.getTransationTimeoutInterval(),
 						TransactionManager::AUTO,
 						TransactionManager::AUTO_COMMIT,
-						false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
+						false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE,
+						timeZone);
 
 				transactionManager_->remove(pId, noExpireResourceIds[i]);
 				closedResourceIds.push_back(noExpireResourceIds[i]);
@@ -11167,9 +11412,9 @@ void DataStorePeriodicallyHandler::operator()(EventContext &ec, Event &ev) {
 	try {
 		if (clusterManager_->checkRecoveryCompleted()) {
 			WATCHER_START;
-//			util::StackAllocator &alloc = ec.getAllocator();
-//			const util::DateTime now = ec.getHandlerStartTime();
-//			const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
+			util::StackAllocator &alloc = ec.getAllocator();
+			const util::DateTime now = ec.getHandlerStartTime();
+			const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 			const PartitionGroupId pgId = ec.getWorkerId();
 			const PartitionGroupConfig &pgConfig =
 				transactionManager_->getPartitionGroupConfig();
@@ -11685,7 +11930,7 @@ void UpdateDataStoreStatusHandler::operator()(EventContext &ec, Event &ev) {
 
 		const PartitionGroupId pgId = ec.getWorkerId();
 		if (clusterManager_->checkRecoveryCompleted() && dataStore_) {
-//			bool isFinished = true;
+			bool isFinished = true;
 
 			const PartitionGroupConfig &pgConfig = transactionManager_->getPartitionGroupConfig();
 			for (PartitionId currentPId = pgConfig.getGroupBeginPartitionId(pgId);
@@ -11827,8 +12072,9 @@ TransactionService::TransactionService(ConfigTable &config,
 		eeConfig_.setPartitionCount(
 			config.getUInt32(CONFIG_TABLE_DS_PARTITION_NUM));
 
-		eeConfig_.setServerAddress(
-			config.get<const char8_t *>(CONFIG_TABLE_TXN_SERVICE_ADDRESS),
+		ClusterAdditionalServiceConfig addConfig(config);
+		const char *targetAddress = addConfig.getServiceAddress(TRANSACTION_SERVICE);
+		eeConfig_.setServerAddress(targetAddress,
 			config.getUInt16(CONFIG_TABLE_TXN_SERVICE_PORT));
 
 #ifdef GD_ENABLE_UNICAST_NOTIFICATION
@@ -11837,6 +12083,13 @@ TransactionService::TransactionService(ConfigTable &config,
 				config.get<const char8_t *>(
 					CONFIG_TABLE_TXN_NOTIFICATION_ADDRESS),
 				config.getUInt16(CONFIG_TABLE_TXN_NOTIFICATION_PORT));
+			if (strlen(config.get<const char8_t *>(
+					CONFIG_TABLE_TXN_NOTIFICATION_INTERFACE_ADDRESS)) != 0) {
+				eeConfig_.setMulticastIntefaceAddress(
+						config.get<const char8_t *>(
+							CONFIG_TABLE_TXN_NOTIFICATION_INTERFACE_ADDRESS),
+						config.getUInt16(CONFIG_TABLE_TXN_SERVICE_PORT));
+			}
 		}
 #else
 		eeConfig_.setMulticastAddress(
@@ -11863,8 +12116,6 @@ TransactionService::TransactionService(ConfigTable &config,
 		eeConfig_.workAllocatorGroupId_ = ALLOCATOR_GROUP_TXN_WORK;
 
 		ee_ = UTIL_NEW EventEngine(eeConfig_, eeSource_, name);
-
-
 
 
 	}
@@ -12676,8 +12927,8 @@ int32_t TransactionService::getWaitTime(EventContext &ec, Event *ev, int32_t ope
 	int32_t waitTime = 0;
 	const PartitionGroupId pgId = ec.getWorkerId();
 	if (type == TXN_BACKGROUND) {
-//		PartitionId pId = (*ev).getPartitionId();
-//		EventType eventType = (*ev).getType();
+		PartitionId pId = (*ev).getPartitionId();
+		EventType eventType = (*ev).getType();
 		EventEngine::Tool::getLiveStats(ec.getEngine(), pgId,
 			EventEngine::Stats::EVENT_ACTIVE_EXECUTABLE_COUNT,
 			executableCount, &ec, ev);

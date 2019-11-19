@@ -347,9 +347,11 @@ int SelectionTimeInterpolated::operator()(TransactionContext &txn,
 	Value v;
 	Expr *tsExpr =
 		args[1]->eval(txn, objectManager, NULL, NULL, EVAL_MODE_NORMAL);
+
 	if (tsExpr->isNullValue()) {
 		return 0;
 	}
+
 	Timestamp baseTs = tsExpr->getTimeStamp();
 	Timestamp ts;
 	bool found;
@@ -433,11 +435,11 @@ int SelectionTimeInterpolated::operator()(TransactionContext &txn,
 	rowArray.load(txn, resultRowIdList[pos - 1], &timeSeries,
 		OBJECT_READ_ONLY);  
 	BaseContainer::RowArray::Row row3(rowArray.getRow(), &rowArray);  
-	row3.getField(txn, interpolateColumnInfo, v1);				   
+	row3.getField(txn, interpolateColumnInfo, v1);
 	rowArray.load(txn, resultRowIdList[pos], &timeSeries,
 		OBJECT_READ_ONLY);  
 	BaseContainer::RowArray::Row row4(rowArray.getRow(), &rowArray);  
-	row4.getField(txn, interpolateColumnInfo, v2);				   
+	row4.getField(txn, interpolateColumnInfo, v2);
 
 	getInterpolatedValue(txn, baseTs, v1.getValue(), v2.getValue(), t1, t2, v);
 
@@ -505,8 +507,10 @@ uint64_t SelectionTimeInterpolated::apiPassThrough(TransactionContext &txn,
 	}
 
 	Sampling sampling;
-	BtreeMap::SearchContext sc(
-		ColumnInfo::ROW_KEY_COLUMN_ID, &ts, 0, true, NULL, 0, true, 0, NULL, 2);
+	TermCondition cond(timeSeries.getRowIdColumnType(), timeSeries.getRowIdColumnType(),
+		DSExpression::GE, timeSeries.getRowIdColumnId(), &ts,
+		sizeof(ts));
+	BtreeMap::SearchContext sc(txn.getDefaultAllocator(), cond, 2);
 	if (columnId != UNDEF_COLUMNID) {
 		sampling.interpolatedColumnIdList_.push_back(columnId);
 	}
@@ -589,6 +593,7 @@ int SelectionTimeSampling::operator()(TransactionContext &txn,
 		limit = MAX_RESULT_SIZE;
 	}
 
+	util::DateTime::ZonedOption zonedOption = util::DateTime::ZonedOption::create(false, txn.getTimeZone());
 	for (; i < resultRowIdList.size() && limit > arRowList.size();) {
 		targetTs = dt.getUnixTime();
 		rowArray.load(txn, resultRowIdList[i], &timeSeries,
@@ -598,7 +603,7 @@ int SelectionTimeSampling::operator()(TransactionContext &txn,
 
 		if (i == 0) {
 			while (targetTs < currentTs) {
-				dt.addField(duration, fType);  
+				dt.addField(duration, fType, zonedOption);  
 				targetTs = dt.getUnixTime();
 			}
 		}
@@ -626,7 +631,7 @@ int SelectionTimeSampling::operator()(TransactionContext &txn,
 			}
 			arRowList.push_back(tmpRow);
 
-			dt.addField(duration, fType);  
+			dt.addField(duration, fType, zonedOption);  
 
 			prevTs = currentTs;
 			i++;  
@@ -656,7 +661,7 @@ int SelectionTimeSampling::operator()(TransactionContext &txn,
 				tmpRow.value = v;
 			}
 			arRowList.push_back(tmpRow);
-			dt.addField(duration, fType);  
+			dt.addField(duration, fType, zonedOption);  
 			continue;
 		}
 		else {
@@ -815,14 +820,6 @@ uint64_t SelectionTimeSampling::apiPassThrough(TransactionContext &txn,
 		return 0;
 	}
 
-	Timestamp expiredTime = timeSeries.getCurrentExpiredTime(txn);
-
-	if (expiredTime > endTs) {
-		return 0;
-	}
-	if (expiredTime > startTs) {
-		startTs = expiredTime;
-	}
 
 	if (columnId != UNDEF_COLUMNID) {
 		sampling.interpolatedColumnIdList_.push_back(columnId);
@@ -857,47 +854,60 @@ uint64_t SelectionTimeSampling::apiPassThrough(TransactionContext &txn,
 	sampling.timeUnit_ = unit;
 	sampling.mode_ = INTERP_MODE_LINEAR_OR_PREVIOUS;
 
-	if (sc.startKey_ == NULL) {
-		sc.startKey_ = &startTs;
-		sc.startKeySize_ = sizeof(startTs);
-		sc.isStartKeyIncluded_ = true;
+	Timestamp expiredTime = timeSeries.getCurrentExpiredTime(txn);
+
+	if (expiredTime > endTs) {
+		return 0;
+	}
+	if (expiredTime > startTs) {
+		startTs = expiredTime;
+	}
+	TermCondition *currentStartCond = sc.getStartKeyCondition();
+	if (currentStartCond == NULL) {
+		TermCondition startCond(
+			COLUMN_TYPE_TIMESTAMP, COLUMN_TYPE_TIMESTAMP,
+			DSExpression::GE,
+			ColumnInfo::ROW_KEY_COLUMN_ID, reinterpret_cast<uint8_t *>(&startTs), sizeof(startTs));
+		sc.addCondition(startCond, true);
 	}
 	else {
+		bool isReplace = false;
 		Timestamp startTs2 =
-			*static_cast<Timestamp *>(const_cast<void *>(sc.startKey_));
+			*reinterpret_cast<const Timestamp *>(currentStartCond->value_);
 		if (startTs2 > startTs) {
 			Timestamp diff = startTs2 - startTs;
 			int64_t n = diff / duration_msec;
 			startTs = startTs + n * duration_msec;
-			sc.startKey_ = &startTs;
-			sc.isStartKeyIncluded_ = true;
+
+			isReplace = true;
 		}
 		else if (startTs2 < startTs) {
-			sc.startKey_ = &startTs;
-			sc.isStartKeyIncluded_ = true;
+			isReplace = true;
 		}
-		if (startTs2 > endTs) {
-			return 0;
+		else {
 		}
-		startTs = *static_cast<Timestamp *>(const_cast<void *>(sc.startKey_));
+		if (isReplace) {
+			currentStartCond->value_ = reinterpret_cast<uint8_t *>(&startTs);
+		}
 	}
 
-	if (sc.endKey_ == NULL) {
-		sc.endKey_ = &endTs;
-		sc.endKeySize_ = sizeof(endTs);
-		sc.isEndKeyIncluded_ = true;
+	TermCondition *currentEndCond = sc.getEndKeyCondition();
+	if (currentEndCond == NULL) {
+		TermCondition endCond(
+			COLUMN_TYPE_TIMESTAMP, COLUMN_TYPE_TIMESTAMP,
+			DSExpression::LE,
+			ColumnInfo::ROW_KEY_COLUMN_ID, reinterpret_cast<uint8_t *>(&endTs), sizeof(endTs));
+		sc.addCondition(endCond, true);
 	}
 	else {
 		Timestamp endTs2 =
-			*static_cast<Timestamp *>(const_cast<void *>(sc.endKey_));
+			*reinterpret_cast<const Timestamp *>(currentEndCond->value_);
 		if (endTs2 > endTs) {
-			sc.endKey_ = &endTs;
-			sc.isEndKeyIncluded_ = true;
+			currentEndCond->value_ = reinterpret_cast<uint8_t *>(&endTs);
 		}
-		if (endTs2 < startTs) {
-			return 0;
+		else {
+			endTs = endTs2;
 		}
-		endTs = *static_cast<Timestamp *>(const_cast<void *>(sc.endKey_));
 	}
 	if (startTs > endTs) {
 		return 0;
@@ -945,6 +955,172 @@ uint64_t SelectionTimeSampling::apiPassThrough(TransactionContext &txn,
 	resultType = RESULT_ROWSET;
 
 	return resultNum;
+}
+
+/*!
+ * @brief TIME_SAMPLING(*|column, timestamp_start, timestamp_end, interval,
+ * DAY|HOUR|MINUTE|SECOND|MILLISECOND)
+ */
+int SelectionTimeWindowAgg::operator()(TransactionContext &txn,
+	TimeSeries &timeSeries, util::XArray<OId> &resultRowIdList,
+	bool isSorted, OutputOrder, SortExprList *orderByExpr, uint64_t limit,
+	uint64_t offset, FunctionMap &function_map, ExprList &args,
+	OutputMessageRowStore *messageRowStore, ResultType &resultType) {
+	Timestamp startTime, endTime;
+	util::DateTime::FieldType fType;
+	int32_t duration;
+	uint32_t columnId;
+	ColumnType columnType;
+	ResultSize resultNum;
+	AggregationType aggType;
+
+	if (orderByExpr) {
+		GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_SELECTION_ABUSE,
+			"TimeWindowAgg is not support with order by clause");
+	}
+	ObjectManager &objectManager = *(timeSeries.getObjectManager());
+	bool isNullValue = parseArgument(txn, objectManager, args, columnId, columnType, fType,
+		startTime, endTime, duration, aggType);
+	if (isNullValue) {
+		return 0;
+	}
+	Sampling sampling;
+	sampling.interval_ = duration;
+	sampling.timeUnit_ = fType;
+	timeSeries.aggregateByTimeWindow(txn, columnId, aggType, startTime, endTime,
+		sampling, resultRowIdList, resultNum, messageRowStore);
+	resultType = RESULT_ROWSET;
+	return static_cast<int>(resultNum);
+}
+
+bool SelectionTimeWindowAgg::parseArgument(TransactionContext &txn,
+	ObjectManager &objectManager, ExprList &args, uint32_t &columnId,
+	ColumnType &columnType, util::DateTime::FieldType &fType,
+	Timestamp &targetTs, Timestamp &endTs, int32_t &duration,
+	AggregationType &aggType) {
+	if (args.size() != 6) {
+		GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
+			"Invalid argument count for selection");
+	}
+
+	columnId = args[0]->getColumnId();
+	const ColumnInfo *columnInfo = NULL;
+	columnType = COLUMN_TYPE_WITH_BEGIN;
+	if (columnId != UNDEF_COLUMNID) {
+		columnInfo = args[0]->getColumnInfo();
+		columnType = columnInfo->getColumnType();
+
+		if (!(columnType >= COLUMN_TYPE_BYTE &&
+				columnType <= COLUMN_TYPE_DOUBLE)) {
+			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
+				"Cannot aggregate non-numeric column");
+		}
+	} else {
+		GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
+			"column not found");
+	}
+
+	const char *aggStr, *unitStr;
+	Expr *e1, *e2, *e3;
+
+	aggStr = args[1]->getValueAsString(txn);
+	if (util::stricmp(aggStr, "MAX") == 0) {
+		aggType = AGG_MAX;
+	}
+	else if (util::stricmp(aggStr, "MIN") == 0) {
+		aggType = AGG_MIN;
+	}
+	else if (util::stricmp(aggStr, "AVG") == 0) {
+		aggType = AGG_AVG;
+	}
+	else {
+		GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_RANGE,
+			"Invalid aggregation type for TIME_WINDOW_AGG() : " << aggStr);
+	}
+
+	e1 = args[2]->eval(txn, objectManager, NULL, NULL, EVAL_MODE_NORMAL);
+	e2 = args[3]->eval(txn, objectManager, NULL, NULL, EVAL_MODE_NORMAL);
+	e3 = args[4]->eval(txn, objectManager, NULL, NULL, EVAL_MODE_NORMAL);
+	if (e1->isNullValue() || e2->isNullValue() || e3->isNullValue()) {
+			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
+				"Cannot input null value");
+	}
+	targetTs = e1->getTimeStamp();
+	endTs = e2->getTimeStamp();
+	duration = e3->getValueAsInt();
+	QP_SAFE_DELETE(e1);
+	QP_SAFE_DELETE(e2);
+	QP_SAFE_DELETE(e3);
+
+	if (duration <= 0) {
+		GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_RANGE,
+			"Invalid duration for TIME_SAMPLING()");
+	}
+
+	unitStr = args[5]->getValueAsString(txn);
+
+	if (util::stricmp(unitStr, "DAY") == 0) {
+		fType = util::DateTime::FIELD_DAY_OF_MONTH;
+	}
+	else if (util::stricmp(unitStr, "HOUR") == 0) {
+		fType = util::DateTime::FIELD_HOUR;
+	}
+	else if (util::stricmp(unitStr, "MINUTE") == 0) {
+		fType = util::DateTime::FIELD_MINUTE;
+	}
+	else if (util::stricmp(unitStr, "SECOND") == 0) {
+		fType = util::DateTime::FIELD_SECOND;
+	}
+	else if (util::stricmp(unitStr, "MILLISECOND") == 0) {
+		fType = util::DateTime::FIELD_MILLISECOND;
+	}
+	else {
+		GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_RANGE,
+			"Invalid time type for TIME_SAMPLING()");
+	}
+	return false;
+}
+
+/*!
+ * @brief TIME_SAMPLING(*|column, timestamp_start, timestamp_end, interval,
+ * DAY|HOUR|MINUTE|SECOND|MILLISECOND) by Container api
+ */
+uint64_t SelectionTimeWindowAgg::apiPassThrough(TransactionContext &txn,
+	TimeSeries &timeSeries, BtreeMap::SearchContext &sc, OutputOrder,
+	uint64_t limit, uint64_t offset, ExprList &args,
+	OutputMessageRowStore *messageRowStore, ResultType &resultType) {
+	Timestamp startTime, endTime;
+	util::DateTime::FieldType fType;
+	int32_t duration;
+	uint32_t columnId;
+	ColumnType columnType;
+	ResultSize resultNum;
+	AggregationType aggType;
+
+	ObjectManager &objectManager = *(timeSeries.getObjectManager());
+	bool isNullValue = parseArgument(txn, objectManager, args, columnId, columnType, fType,
+		startTime, endTime, duration, aggType);
+	if (isNullValue) {
+		return 0;
+	}
+	ColumnId rowColumnId = timeSeries.getRowIdColumnId();
+	ColumnType rowColumnType = timeSeries.getRowIdColumnType();
+	TermCondition startCond(rowColumnType, rowColumnType, 
+		DSExpression::GE, rowColumnId, &startTime, sizeof(startTime));
+	TermCondition endCond(rowColumnType, rowColumnType, 
+		DSExpression::LE, rowColumnId, &endTime, sizeof(endTime));
+
+	util::XArray<OId> resultRowIdList(txn.getDefaultAllocator());
+	BtreeMap::SearchContext rangeSc(txn.getDefaultAllocator(), startCond, endCond, MAX_RESULT_SIZE);
+		timeSeries.searchRowIdIndex(txn, rangeSc, resultRowIdList, ORDER_ASCENDING);
+
+	Sampling sampling;
+	sampling.interval_ = duration;
+	sampling.timeUnit_ = fType;
+	timeSeries.aggregateByTimeWindow(txn, columnId, aggType, startTime, endTime,
+		sampling, resultRowIdList, resultNum, messageRowStore);
+	resultType = RESULT_ROWSET;
+	return static_cast<int>(resultNum);
 }
 
 /*!
@@ -1025,7 +1201,7 @@ int SelectionMaxMinRows<aggregateType>::execute(TransactionContext &txn,
 		rowArray.load(txn, resultRowIdList[i], container, OBJECT_READ_ONLY);  
 		BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
 		ContainerValue currentContainerValue(txn.getPartitionId(), objectManager);
-		row.getField(txn, columnInfo, currentContainerValue);  
+		row.getField(txn, columnInfo, currentContainerValue);
 		if (currentContainerValue.getValue().isNullValue()) {
 		}
 		else if (isFirst) {

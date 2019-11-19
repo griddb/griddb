@@ -20,6 +20,173 @@
 */
 #include "btree_map.h"
 #include "data_store_common.h"
+#include "schema.h"
+
+
+template<>
+struct BtreeMap::MapKeyTraits<CompositeInfoObject8> {
+	typedef CompositeInfoObject TYPE;
+};
+template<>
+struct BtreeMap::MapKeyTraits<CompositeInfoObject16> {
+	typedef CompositeInfoObject TYPE;
+};
+template<>
+struct BtreeMap::MapKeyTraits<CompositeInfoObject24> {
+	typedef CompositeInfoObject TYPE;
+};
+template<>
+struct BtreeMap::MapKeyTraits<CompositeInfoObject32> {
+	typedef CompositeInfoObject TYPE;
+};
+template<>
+struct BtreeMap::MapKeyTraits<CompositeInfoObject40> {
+	typedef CompositeInfoObject TYPE;
+};
+template<>
+struct BtreeMap::MapKeyTraits<CompositeInfoObject48> {
+	typedef CompositeInfoObject TYPE;
+};
+template<>
+struct BtreeMap::MapKeyTraits<CompositeInfoObject56> {
+	typedef CompositeInfoObject TYPE;
+};
+template<>
+struct BtreeMap::MapKeyTraits<CompositeInfoObject64> {
+	typedef CompositeInfoObject TYPE;
+};
+template<>
+struct BtreeMap::MapKeyTraits<CompositeInfoObject72> {
+	typedef CompositeInfoObject TYPE;
+};
+template<>
+struct BtreeMap::MapKeyTraits<CompositeInfoObject80> {
+	typedef CompositeInfoObject TYPE;
+};template<>
+struct BtreeMap::MapKeyTraits<CompositeInfoObject88> {
+	typedef CompositeInfoObject TYPE;
+};template<>
+struct BtreeMap::MapKeyTraits<CompositeInfoObject96> {
+	typedef CompositeInfoObject TYPE;
+};template<>
+struct BtreeMap::MapKeyTraits<CompositeInfoObject104> {
+	typedef CompositeInfoObject TYPE;
+};template<>
+struct BtreeMap::MapKeyTraits<CompositeInfoObject112> {
+	typedef CompositeInfoObject TYPE;
+};template<>
+struct BtreeMap::MapKeyTraits<CompositeInfoObject120> {
+	typedef CompositeInfoObject TYPE;
+};template<>
+struct BtreeMap::MapKeyTraits<CompositeInfoObject128> {
+	typedef CompositeInfoObject TYPE;
+};template<>
+struct BtreeMap::MapKeyTraits<CompositeInfoObject136> {
+	typedef CompositeInfoObject TYPE;
+};
+
+int32_t BtreeMap::compositeInfoCmp(TransactionContext &txn, ObjectManager &objectManager,
+						 const CompositeInfoObject *e1, const CompositeInfoObject *e2, BaseIndex::Setting &setting) {
+	int32_t ret = 0;
+	TreeFuncInfo *funcInfo = setting.getFuncInfo();
+	assert(funcInfo != NULL);
+	ColumnSchema *columnSchema = funcInfo->getColumnSchema();
+	VariableArrayCursor *cursor1 = NULL, *cursor2 = NULL;
+	for (int32_t i = 0; i < setting.getCompareNum(); i++) {
+		bool isNull1 = e1->isNull(i);
+		bool isNull2 = e2->isNull(i);
+		if (isNull1 || isNull2) {
+			if (isNull1 && isNull2) {
+				ret = 0;
+			} else if (isNull2) {
+				ret = -1;
+			} else {
+				ret = 1;
+			}
+		} else {
+			ColumnInfo &columnInfo = columnSchema->getColumnInfo(i);
+			uint8_t *val1 = e1->getField(txn, objectManager, columnInfo, cursor1);
+			uint8_t *val2 = e2->getField(txn, objectManager, columnInfo, cursor2);
+			ret = ValueProcessor::compare(txn, objectManager, columnInfo.getColumnType(), val1, val2);
+		}
+		if (ret != 0) {
+			break;
+		}
+	}
+	if (cursor1 != NULL) {
+		cursor1->~VariableArrayCursor();
+	}
+	if (cursor2 != NULL) {
+		cursor2->~VariableArrayCursor();
+	}
+	return ret;
+}
+
+template <>
+bool BtreeMap::compositeInfoMatch(TransactionContext &txn, ObjectManager &objectManager,
+						 const CompositeInfoObject *e, BaseIndex::Setting &setting) {
+	bool isMatch = true;
+	TreeFuncInfo *funcInfo = setting.getFuncInfo();
+	VariableArrayCursor *cursor = NULL;
+	util::Vector<TermCondition> *conds = setting.getFilterConds();
+	if (conds != NULL) {
+		ColumnSchema *columnSchema = funcInfo->getColumnSchema();
+		for (uint32_t i = 0; i < conds->size(); i++) {
+			TermCondition &cond = (*conds)[i];
+			bool isNull = e->isNull(cond.columnId_);
+			if (isNull || cond.opType_ == DSExpression::IS) {
+				if (!(isNull && cond.opType_ == DSExpression::IS)) {
+					isMatch = false;
+					break;
+				}
+			} else if (cond.opType_ != DSExpression::ISNOT) {
+				ColumnInfo &columnInfo = columnSchema->getColumnInfo(cond.columnId_);
+				uint8_t *val1 = e->getField(txn, objectManager, columnInfo, cursor);
+				const void *val2 = cond.value_;
+				ColumnType columnType = columnInfo.getColumnType();
+				if (columnType == COLUMN_TYPE_STRING) {
+					StringCursor obj1(const_cast<uint8_t *>(val1));
+					isMatch = cond.operator_(txn, obj1.str(), obj1.stringLength(), 
+						static_cast<const uint8_t *>(cond.value_), cond.valueSize_);
+				} else {
+					assert(ValueProcessor::isSimple(columnType));
+					isMatch = cond.operator_(txn, val1, 0,
+						static_cast<const uint8_t *>(cond.value_), cond.valueSize_);
+				}
+				if (!isMatch) {
+					break;
+				}
+			}
+		}
+	}
+	if (cursor != NULL) {
+		cursor->~VariableArrayCursor();
+	}
+	return isMatch;
+}
+
+template <typename K, typename V>
+std::string BtreeMap::BNode<K, V>::dump(TransactionContext &txn, TreeFuncInfo *funcInfo) {
+	util::NormalOStringStream out;
+	out << "(@@Node@@)";
+	for (int32_t i = 0; i < numkeyValues(); ++i) {
+		out << "(";
+		out << "," << getKeyValue(i).value_ << "), ";
+	}
+	return out.str();
+}
+
+template <>
+std::string BtreeMap::BNode<CompositeInfoObject24, OId>::dump(TransactionContext &txn, TreeFuncInfo *funcInfo) {
+	util::NormalOStringStream out;
+	out << "(@@Node@@)";
+	for (int32_t i = 0; i < numkeyValues(); ++i) {
+		out << "(";
+		getKeyValue(i).key_.dump(txn, *getObjectManager(), *funcInfo, out);
+		out << "," << getKeyValue(i).value_ << "), ";
+	}
+	return out.str();
+}
 
 
 template <>
@@ -27,405 +194,331 @@ int32_t BtreeMap::getInitialItemSizeThreshold<TransactionId, MvccRowImage>() {
 	return INITIAL_MVCC_ITEM_SIZE_THRESHOLD;
 }
 
-/*!
-	@brief Allocate root BtreeMap Object
-*/
-template int32_t BtreeMap::initialize<TransactionId, MvccRowImage>(
-	TransactionContext &txn, ColumnType columnType, bool isUnique,
-	BtreeMapType btreeMapType);
-
-/*!
-	@brief Allocate root BtreeMap Object
-*/
-int32_t BtreeMap::initialize(TransactionContext &txn, ColumnType columnType,
-	bool isUnique, BtreeMapType btreeMapType) {
-	int32_t ret = GS_SUCCESS;
-	switch (columnType) {
-	case COLUMN_TYPE_STRING:
-		ret =
-			initialize<StringKey, OId>(txn, columnType, isUnique, btreeMapType);
-		break;
-	case COLUMN_TYPE_BOOL:
-		ret = initialize<bool, OId>(txn, columnType, isUnique, btreeMapType);
-		break;
-	case COLUMN_TYPE_BYTE:
-	case COLUMN_TYPE_NULL:
-		ret = initialize<int8_t, OId>(txn, columnType, isUnique, btreeMapType);
-		break;
-	case COLUMN_TYPE_SHORT:
-		ret = initialize<int16_t, OId>(txn, columnType, isUnique, btreeMapType);
-		break;
-	case COLUMN_TYPE_INT:
-		ret = initialize<int32_t, OId>(txn, columnType, isUnique, btreeMapType);
-		break;
-	case COLUMN_TYPE_LONG:
-		ret = initialize<int64_t, OId>(txn, columnType, isUnique, btreeMapType);
-		break;
-	case COLUMN_TYPE_FLOAT:
-		ret = initialize<float32, OId>(txn, columnType, isUnique, btreeMapType);
-		break;
-	case COLUMN_TYPE_DOUBLE:
-		ret = initialize<float64, OId>(txn, columnType, isUnique, btreeMapType);
-		break;
-	case COLUMN_TYPE_TIMESTAMP:
-		ret =
-			initialize<Timestamp, OId>(txn, columnType, isUnique, btreeMapType);
-		break;
-	default:
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TM_INSERT_FAILED, "");
-		break;
-	}
-	return ret;
+template<>
+MvccRowImage BtreeMap::getMaxValue() {
+	return MvccRowImage();
 }
 
-/*!
-	@brief Free Objects related to BtreeMap
-*/
-bool BtreeMap::finalize(TransactionContext &txn) {
-	setDirty();
+template<>
+MvccRowImage BtreeMap::getMinValue() {
+	return MvccRowImage();
+}
 
-	bool isFinished = false;
-	switch (getKeyType()) {
+template <>
+void BaseIndex::SearchContext::setSuspendPoint(TransactionContext &txn,
+	ObjectManager &objectManager, TreeFuncInfo *funcInfo, const StringKey &suspendKey, const OId &suspendValue) {
+	StringCursor obj(txn, objectManager, suspendKey.oId_);
+	suspendKey_ = ALLOC_NEW(txn.getDefaultAllocator())
+		uint8_t[obj.stringLength()];
+	memcpy(suspendKey_, obj.str(), obj.stringLength());
+	suspendKeySize_ = obj.stringLength();
+
+	uint32_t valueSize = sizeof(OId);
+	suspendValue_ = ALLOC_NEW(txn.getDefaultAllocator()) uint8_t[valueSize];
+	memcpy(suspendValue_, &suspendValue, valueSize);
+	suspendValueSize_ = valueSize;
+}
+
+template <>
+void BaseIndex::SearchContext::setSuspendPoint(TransactionContext &txn,
+	ObjectManager &objectManager, TreeFuncInfo *funcInfo, const FullContainerKeyAddr &suspendKey, const OId &suspendValue) {
+	FullContainerKeyCursor obj(txn, objectManager, suspendKey.oId_);
+	FullContainerKey containerKey = obj.getKey();
+	const void *keyData;
+	size_t keySize;
+	containerKey.toBinary(keyData, keySize);
+
+	suspendKey_ = ALLOC_NEW(txn.getDefaultAllocator())
+		uint8_t[keySize];
+	memcpy(suspendKey_, keyData, keySize);
+	suspendKeySize_ = keySize;
+
+	uint32_t valueSize = sizeof(OId);
+	suspendValue_ = ALLOC_NEW(txn.getDefaultAllocator()) uint8_t[valueSize];
+	memcpy(suspendValue_, &suspendValue, valueSize);
+	suspendValueSize_ = valueSize;
+}
+
+template <>
+void BaseIndex::SearchContext::setSuspendPoint(TransactionContext &txn,
+	ObjectManager &objectManager, TreeFuncInfo *funcInfo, const CompositeInfoObject &suspendKey, const OId &suspendValue) {
+
+	assert(funcInfo != NULL);
+	suspendKey.serialize(txn, objectManager, *funcInfo, suspendKey_, suspendKeySize_);
+
+	uint32_t valueSize = sizeof(OId);
+	suspendValue_ = ALLOC_NEW(txn.getDefaultAllocator()) uint8_t[valueSize];
+	memcpy(suspendValue_, &suspendValue, valueSize);
+	suspendValueSize_ = valueSize;
+}
+
+template<typename Action>
+void BtreeMap::switchToBasicType(ColumnType type, Action &action) {
+	switch (type) {
+	case COLUMN_TYPE_COMPOSITE: {
+		switch (elemSize_ - sizeof(OId)) {
+		case 8:
+			action.template execute<CompositeInfoObject8, CompositeInfoObject8, OId, OId>();
+			break;
+		case 16:
+			action.template execute<CompositeInfoObject16, CompositeInfoObject16, OId, OId>();
+			break;
+		case 24:
+			action.template execute<CompositeInfoObject24, CompositeInfoObject24, OId, OId>();
+			break;
+		case 32:
+			action.template execute<CompositeInfoObject32, CompositeInfoObject32, OId, OId>();
+			break;
+		case 40:
+			action.template execute<CompositeInfoObject40, CompositeInfoObject40, OId, OId>();
+			break;
+		case 48:
+			action.template execute<CompositeInfoObject48, CompositeInfoObject48, OId, OId>();
+			break;
+		case 56:
+			action.template execute<CompositeInfoObject56, CompositeInfoObject56, OId, OId>();
+			break;
+		case 64:
+			action.template execute<CompositeInfoObject64, CompositeInfoObject64, OId, OId>();
+			break;
+		case 72:
+			action.template execute<CompositeInfoObject72, CompositeInfoObject72, OId, OId>();
+			break;
+		case 80:
+			action.template execute<CompositeInfoObject80, CompositeInfoObject80, OId, OId>();
+			break;
+		case 88:
+			action.template execute<CompositeInfoObject88, CompositeInfoObject88, OId, OId>();
+			break;
+		case 96:
+			action.template execute<CompositeInfoObject96, CompositeInfoObject96, OId, OId>();
+			break;
+		case 104:
+			action.template execute<CompositeInfoObject104, CompositeInfoObject104, OId, OId>();
+			break;
+		case 112:
+			action.template execute<CompositeInfoObject112, CompositeInfoObject112, OId, OId>();
+			break;
+		case 120:
+			action.template execute<CompositeInfoObject120, CompositeInfoObject120, OId, OId>();
+			break;
+		case 128:
+			action.template execute<CompositeInfoObject128, CompositeInfoObject128, OId, OId>();
+			break;
+		case 136:
+			action.template execute<CompositeInfoObject136, CompositeInfoObject136, OId, OId>();
+			break;
+		default:
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TM_INSERT_FAILED,
+				"unknown elem size = " << elemSize_ - sizeof(OId));
+			break;
+		}
+	} break;
 	case COLUMN_TYPE_STRING:
-		isFinished = finalizeInternal<StringKey, OId>(txn);
+		action.template execute<StringObject, StringKey, OId, OId>();
 		break;
 	case COLUMN_TYPE_BOOL:
-		isFinished = finalizeInternal<bool, OId>(txn);
+		action.template execute<bool, bool, OId, OId>();
 		break;
 	case COLUMN_TYPE_BYTE:
 	case COLUMN_TYPE_NULL:
-		isFinished = finalizeInternal<int8_t, OId>(txn);
+		action.template execute<int8_t, int8_t, OId, OId>();
 		break;
 	case COLUMN_TYPE_SHORT:
-		isFinished = finalizeInternal<int16_t, OId>(txn);
+		action.template execute<int16_t, int16_t, OId, OId>();
 		break;
 	case COLUMN_TYPE_INT:
-		isFinished = finalizeInternal<int32_t, OId>(txn);
+		action.template execute<int32_t, int32_t, OId, OId>();
 		break;
 	case COLUMN_TYPE_LONG:
-		isFinished = finalizeInternal<int64_t, OId>(txn);
+		action.template execute<int64_t, int64_t, OId, OId>();
 		break;
 	case COLUMN_TYPE_FLOAT:
-		isFinished = finalizeInternal<float32, OId>(txn);
+		action.template execute<float32, float32, OId, OId>();
 		break;
 	case COLUMN_TYPE_DOUBLE:
-		isFinished = finalizeInternal<float64, OId>(txn);
+		action.template execute<float64, float64, OId, OId>();
 		break;
 	case COLUMN_TYPE_TIMESTAMP:
-		isFinished = finalizeInternal<Timestamp, OId>(txn);
+		action.template execute<Timestamp, Timestamp, OId, OId>();
 		break;
 	case COLUMN_TYPE_OID:
-		isFinished = finalizeInternal<OId, OId>(txn);
+		action.template execute<OId, OId, OId, OId>();
 		break;
 	default:
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TM_INSERT_FAILED, "");
 		break;
 	}
-
-	return isFinished;
 }
 
-/*!
-	@brief Insert Row Object
-*/
+int32_t BtreeMap::initialize(TransactionContext &txn, ColumnType columnType,
+	bool isUnique, BtreeMapType btreeMapType, uint32_t elemSize) {
+	InitializeFunc initializeFunc(txn, columnType, isUnique, btreeMapType,
+		elemSize, this);
+	elemSize_ = elemSize;
+	switchToBasicType(columnType, initializeFunc);
+	return initializeFunc.ret_;
+}
+
+template <typename P, typename K, typename V, typename R>
+void BtreeMap::InitializeFunc::execute() {
+	typedef typename MapKeyTraits<K>::TYPE S;
+	ret_ = tree_->initialize<S, V>(txn_, columnType_,
+		isUnique_, btreeMapType_, elemSize_);
+}
+
+template <>
+int32_t BtreeMap::initialize<FullContainerKeyCursor, OId>(TransactionContext &txn, ColumnType columnType,
+													bool isUnique, BtreeMapType btreeMapType, uint32_t elemSize) {
+	return initialize<FullContainerKeyAddr, OId>(txn, columnType, isUnique, btreeMapType);
+}
+
+template <>
+int32_t BtreeMap::initialize<CompositeInfoObject, OId>(TransactionContext &txn, ColumnType columnType,
+													   bool isUnique, BtreeMapType btreeMapType, uint32_t elemSize) {
+	assert(elemSize != 0);
+	elemSize_ = elemSize; 
+	nodeMaxSize_ = calcNodeMaxSize(elemSize_);
+	nodeMinSize_ = calcNodeMinSize(elemSize_);
+
+	isUnique_ = isUnique;
+	keyType_ = columnType;
+	btreeMapType_ = btreeMapType;
+
+	BaseObject::allocate<BNodeImage<CompositeInfoObject, OId> >(getInitialNodeSize<CompositeInfoObject, OId>(elemSize_),
+		allocateStrategy_, getBaseOId(), OBJECT_TYPE_BTREE_MAP);
+	BNode<CompositeInfoObject, OId> rootNode(this, allocateStrategy_);
+	rootNode.initialize(txn, getBaseOId(), true,
+		getInitialItemSizeThreshold<CompositeInfoObject, OId>(), elemSize_);
+
+	assert(rootNode.getNodeElemSize() != 0);
+
+	rootNode.setRootNodeHeader(
+		columnType, btreeMapType, static_cast<uint8_t>(isUnique), UNDEF_OID);
+
+	return GS_SUCCESS;
+}
+
+bool BtreeMap::finalize(TransactionContext &txn) {
+	setDirty();
+	FinalizeFunc finalizeFunc(txn, this);
+	switchToBasicType(getKeyType(), finalizeFunc);
+	return finalizeFunc.ret_;
+}
+
+template <typename P, typename K, typename V, typename R>
+void BtreeMap::FinalizeFunc::execute() {
+	ret_ = tree_->finalize<K, V>(txn_);
+}
+
+template <typename K, typename V>
+bool BtreeMap::finalize(TransactionContext &txn) {
+	uint64_t removeNum = NUM_PER_EXEC;
+	OId rootOId = getRootOId();
+	if (rootOId != UNDEF_OID) {
+		BNode<K, V> dirtyRootNode(this, allocateStrategy_);
+		dirtyRootNode.finalize(txn, removeNum);
+		if (removeNum > 0) {
+			BaseObject::finalize();
+		}
+	}
+	return removeNum > 0;
+}
+
 int32_t BtreeMap::insert(
 	TransactionContext &txn, const void *constKey, OId oId) {
 	assert(oId != UNDEF_OID);
-	setDirty();
-
-	int32_t ret = GS_SUCCESS;
-
-	OId beforeRootOId = getRootOId();
-	OId beforeTailOId = getTailNodeOId();
-
-	bool isCaseSensitive = true;
-	void *key = const_cast<void *>(constKey);
-	switch (getKeyType()) {
-	case COLUMN_TYPE_STRING: {
-		StringCursor stringCusor(reinterpret_cast<uint8_t *>(key));
-		StringObject convertKey(reinterpret_cast<uint8_t *>(&stringCusor));
-		ret =
-			insertInternal<StringObject, StringKey, OId>(txn, convertKey, oId, isCaseSensitive);
-	} break;
-	case COLUMN_TYPE_BOOL:
-		ret = insertInternal<bool, bool, OId>(
-			txn, *reinterpret_cast<bool *>(key), oId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_BYTE:
-	case COLUMN_TYPE_NULL:
-		ret = insertInternal<int8_t, int8_t, OId>(
-			txn, *reinterpret_cast<int8_t *>(key), oId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_SHORT:
-		ret = insertInternal<int16_t, int16_t, OId>(
-			txn, *reinterpret_cast<int16_t *>(key), oId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_INT:
-		ret = insertInternal<int32_t, int32_t, OId>(
-			txn, *reinterpret_cast<int32_t *>(key), oId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_LONG:
-		ret = insertInternal<int64_t, int64_t, OId>(
-			txn, *reinterpret_cast<int64_t *>(key), oId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_FLOAT:
-		ret = insertInternal<float32, float32, OId>(
-			txn, *reinterpret_cast<float32 *>(key), oId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_DOUBLE:
-		ret = insertInternal<float64, float64, OId>(
-			txn, *reinterpret_cast<float64 *>(key), oId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_TIMESTAMP:
-		ret = insertInternal<Timestamp, Timestamp, OId>(
-			txn, *reinterpret_cast<Timestamp *>(key), oId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_OID:
-		ret = insertInternal<OId, OId, OId>(
-			txn, *reinterpret_cast<OId *>(key), oId, isCaseSensitive);
-		break;
-	default:
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TM_INSERT_FAILED, "");
-		break;
-	}
-	assert(ret == GS_SUCCESS);
-
-	if (beforeRootOId != getRootOId()) {
-		ret = (ret | ROOT_UPDATE);
-	}
-	if (beforeTailOId != getTailNodeOId()) {
-		ret = (ret | TAIL_UPDATE);
-	}
-
-	return ret;
+	InsertFunc insertFunc(txn, constKey, oId, this);
+	switchToBasicType(getKeyType(), insertFunc);
+	return insertFunc.ret_;
 }
 
-/*!
-	@brief Remove Row Object
-*/
+template<>
+void BtreeMap::InsertFunc::execute<StringObject, StringKey, OId, OId>() {
+	StringCursor stringCusor(reinterpret_cast<uint8_t *>(key_));
+	StringObject convertKey(reinterpret_cast<uint8_t *>(&stringCusor));
+	bool isCaseSensitive = true;
+	ret_ = tree_->insertInternal<StringObject, StringKey, OId>(txn_, convertKey, oId_, isCaseSensitive);
+}
+
+template <typename P, typename K, typename V, typename R>
+void BtreeMap::InsertFunc::execute() {
+	bool isCaseSensitive = true;
+	ret_ = tree_->insertInternal<P, K, V>(txn_, *reinterpret_cast<P *>(key_), oId_, isCaseSensitive);
+}
+
 int32_t BtreeMap::remove(
 	TransactionContext &txn, const void *constKey, OId oId) {
 	assert(oId != UNDEF_OID);
-	setDirty();
-	if (isEmpty()) {
-		return GS_FAIL;
-	}
-	int32_t ret = GS_SUCCESS;
-
-	OId beforeRootOId = getRootOId();
-	OId beforeTailOId = getTailNodeOId();
-	bool isCaseSensitive = true;
-
-	void *key = const_cast<void *>(constKey);
-	switch (getKeyType()) {
-	case COLUMN_TYPE_STRING: {
-		StringCursor stringCusor(reinterpret_cast<uint8_t *>(key));
-		StringObject convertKey(reinterpret_cast<uint8_t *>(&stringCusor));
-		ret =
-			removeInternal<StringObject, StringKey, OId>(txn, convertKey, oId, isCaseSensitive);
-	} break;
-	case COLUMN_TYPE_BOOL:
-		ret = removeInternal<bool, bool, OId>(
-			txn, *reinterpret_cast<bool *>(key), oId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_BYTE:
-	case COLUMN_TYPE_NULL:
-		ret = removeInternal<int8_t, int8_t, OId>(
-			txn, *reinterpret_cast<int8_t *>(key), oId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_SHORT:
-		ret = removeInternal<int16_t, int16_t, OId>(
-			txn, *reinterpret_cast<int16_t *>(key), oId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_INT:
-		ret = removeInternal<int32_t, int32_t, OId>(
-			txn, *reinterpret_cast<int32_t *>(key), oId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_LONG:
-		ret = removeInternal<int64_t, int64_t, OId>(
-			txn, *reinterpret_cast<int64_t *>(key), oId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_FLOAT:
-		ret = removeInternal<float32, float32, OId>(
-			txn, *reinterpret_cast<float32 *>(key), oId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_DOUBLE:
-		ret = removeInternal<float64, float64, OId>(
-			txn, *reinterpret_cast<float64 *>(key), oId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_TIMESTAMP:
-		ret = removeInternal<Timestamp, Timestamp, OId>(
-			txn, *reinterpret_cast<Timestamp *>(key), oId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_OID:
-		ret = removeInternal<OId, OId, OId>(
-			txn, *reinterpret_cast<OId *>(key), oId, isCaseSensitive);
-		break;
-	default:
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TM_INSERT_FAILED, "");
-		break;
-	}
-	assert(ret == GS_SUCCESS);
-
-	if (beforeRootOId != getRootOId()) {
-		ret = (ret | ROOT_UPDATE);
-	}
-	if (beforeTailOId != getTailNodeOId()) {
-		ret = (ret | TAIL_UPDATE);
-	}
-
-	return ret;
+	RemoveFunc removeFunc(txn, constKey, oId, this);
+	switchToBasicType(getKeyType(), removeFunc);
+	return removeFunc.ret_;
 }
 
-/*!
-	@brief Update Row Object
-*/
+template<>
+void BtreeMap::RemoveFunc::execute<StringObject, StringKey, OId, OId>() {
+	StringCursor stringCusor(reinterpret_cast<uint8_t *>(key_));
+	StringObject convertKey(reinterpret_cast<uint8_t *>(&stringCusor));
+	bool isCaseSensitive = true;
+	ret_ = tree_->removeInternal<StringObject, StringKey, OId>(txn_, convertKey, oId_, isCaseSensitive);
+}
+
+template <typename P, typename K, typename V, typename R>
+void BtreeMap::RemoveFunc::execute() {
+	bool isCaseSensitive = true;
+	ret_ = tree_->removeInternal<P, K, V>(txn_, *reinterpret_cast<P *>(key_), oId_, isCaseSensitive);
+}
+
 int32_t BtreeMap::update(
 	TransactionContext &txn, const void *constKey, OId oId, OId newOId) {
 	assert(oId != UNDEF_OID && newOId != UNDEF_OID);
-	setDirty();
-
-	if (isEmpty()) {
-		return GS_FAIL;
-	}
-
-	int32_t ret = GS_SUCCESS;
-	OId beforeRootOId = getRootOId();
-	OId beforeTailOId = getTailNodeOId();
-	bool isCaseSensitive = true;
-
-	void *key = const_cast<void *>(constKey);
-	switch (getKeyType()) {
-	case COLUMN_TYPE_STRING: {
-		StringCursor stringCusor(reinterpret_cast<uint8_t *>(key));
-		StringObject convertKey(reinterpret_cast<uint8_t *>(&stringCusor));
-		ret = updateInternal<StringObject, StringKey, OId>(
-			txn, convertKey, oId, newOId, isCaseSensitive);
-	} break;
-	case COLUMN_TYPE_BOOL:
-		ret = updateInternal<bool, bool, OId>(
-			txn, *reinterpret_cast<bool *>(key), oId, newOId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_BYTE:
-	case COLUMN_TYPE_NULL:
-		ret = updateInternal<int8_t, int8_t, OId>(
-			txn, *reinterpret_cast<int8_t *>(key), oId, newOId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_SHORT:
-		ret = updateInternal<int16_t, int16_t, OId>(
-			txn, *reinterpret_cast<int16_t *>(key), oId, newOId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_INT:
-		ret = updateInternal<int32_t, int32_t, OId>(
-			txn, *reinterpret_cast<int32_t *>(key), oId, newOId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_LONG:
-		ret = updateInternal<int64_t, int64_t, OId>(
-			txn, *reinterpret_cast<int64_t *>(key), oId, newOId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_FLOAT:
-		ret = updateInternal<float32, float32, OId>(
-			txn, *reinterpret_cast<float32 *>(key), oId, newOId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_DOUBLE:
-		ret = updateInternal<float64, float64, OId>(
-			txn, *reinterpret_cast<float64 *>(key), oId, newOId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_TIMESTAMP:
-		ret = updateInternal<Timestamp, Timestamp, OId>(
-			txn, *reinterpret_cast<Timestamp *>(key), oId, newOId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_OID:
-		ret = updateInternal<OId, OId, OId>(
-			txn, *reinterpret_cast<OId *>(key), oId, newOId, isCaseSensitive);
-		break;
-	default:
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TM_INSERT_FAILED, "");
-		break;
-	}
-	assert(ret == GS_SUCCESS);
-
-	if (beforeRootOId != getRootOId()) {
-		ret = (ret | ROOT_UPDATE);
-	}
-	if (beforeTailOId != getTailNodeOId()) {
-		ret = (ret | TAIL_UPDATE);
-	}
-
-	return ret;
+	UpdateFunc updateFunc(txn, constKey, oId, newOId, this);
+	switchToBasicType(getKeyType(), updateFunc);
+	return updateFunc.ret_;
 }
 
-/*!
-	@brief Search Row Object
-*/
+template<>
+void BtreeMap::UpdateFunc::execute<StringObject, StringKey, OId, OId>() {
+	StringCursor stringCusor(reinterpret_cast<uint8_t *>(key_));
+	StringObject convertKey(reinterpret_cast<uint8_t *>(&stringCusor));
+	bool isCaseSensitive = true;
+	ret_ = tree_->updateInternal<StringObject, StringKey, OId>(txn_, convertKey, oId_, newOId_, isCaseSensitive);
+}
+
+template <typename P, typename K, typename V, typename R>
+void BtreeMap::UpdateFunc::execute() {
+	bool isCaseSensitive = true;
+	ret_ = tree_->updateInternal<P, K, V>(txn_, *reinterpret_cast<P *>(key_), oId_, newOId_, isCaseSensitive);
+}
+
 int32_t BtreeMap::search(
-	TransactionContext &txn, const void *constKey, uint32_t keySize, OId &oId) {
+	TransactionContext &txn, const void *constKey, OId &oId) {
 	assert(constKey != NULL);
 	if (isEmpty()) {
 		oId = UNDEF_OID;
 		return GS_FAIL;
 	}
-
-	oId = UNDEF_OID;
-	int32_t ret = GS_SUCCESS;
-	bool isCaseSensitive = true;
-
-	void *key = const_cast<void *>(constKey);
-	switch (getKeyType()) {
-	case COLUMN_TYPE_STRING: {
-		StringCursor stringCusor(
-			txn, reinterpret_cast<uint8_t *>(key), keySize);
-		StringObject convertKey(reinterpret_cast<uint8_t *>(&stringCusor));
-		ret = find<StringObject, StringKey, OId>(txn, convertKey, oId, isCaseSensitive);
-	} break;
-	case COLUMN_TYPE_BOOL:
-		ret = find<bool, bool, OId>(txn, *reinterpret_cast<bool *>(key), oId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_BYTE:
-	case COLUMN_TYPE_NULL:
-		ret = find<int8_t, int8_t, OId>(
-			txn, *reinterpret_cast<int8_t *>(key), oId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_SHORT:
-		ret = find<int16_t, int16_t, OId>(
-			txn, *reinterpret_cast<int16_t *>(key), oId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_INT:
-		ret = find<int32_t, int32_t, OId>(
-			txn, *reinterpret_cast<int32_t *>(key), oId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_LONG:
-		ret = find<int64_t, int64_t, OId>(
-			txn, *reinterpret_cast<int64_t *>(key), oId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_FLOAT:
-		ret = find<float32, float32, OId>(
-			txn, *reinterpret_cast<float32 *>(key), oId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_DOUBLE:
-		ret = find<float64, float64, OId>(
-			txn, *reinterpret_cast<float64 *>(key), oId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_TIMESTAMP:
-		ret = find<Timestamp, Timestamp, OId>(
-			txn, *reinterpret_cast<Timestamp *>(key), oId, isCaseSensitive);
-		break;
-	case COLUMN_TYPE_OID:
-		ret = find<OId, OId, OId>(txn, *reinterpret_cast<OId *>(key), oId, isCaseSensitive);
-		break;
-	default:
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TM_SEARCH_FAILED, "");
-		break;
-	}
-	if (ret != GS_SUCCESS) {
+	Setting setting(getKeyType(), true, getFuncInfo());
+	UniqueSearchFunc uniqueSearchFunc(txn, constKey, oId, setting, this);
+	switchToBasicType(getKeyType(), uniqueSearchFunc);
+	if (uniqueSearchFunc.ret_ != GS_SUCCESS) {
 		oId = UNDEF_OID;
 	}
-	return ret;
+	return uniqueSearchFunc.ret_;
 }
 
-/*!
-	@brief Search Row Objects
-*/
+template<>
+void BtreeMap::UniqueSearchFunc::execute<StringObject, StringKey, OId, OId>() {
+	StringCursor stringCusor(reinterpret_cast<uint8_t *>(key_));
+	StringObject convertKey(reinterpret_cast<uint8_t *>(&stringCusor));
+	ret_ = tree_->find<StringObject, StringKey, OId, KEY_COMPONENT>(txn_, convertKey, oId_, setting_);
+}
+
+template <typename P, typename K, typename V, typename R>
+void BtreeMap::UniqueSearchFunc::execute() {
+	ret_ = tree_->find<P, K, V, KEY_COMPONENT>(txn_, *reinterpret_cast<P *>(key_), oId_, setting_);
+}
+
 int32_t BtreeMap::search(TransactionContext &txn, SearchContext &sc,
 	util::XArray<OId> &idList, OutputOrder outputOrder) {
 	if (isEmpty()) {
@@ -434,218 +527,148 @@ int32_t BtreeMap::search(TransactionContext &txn, SearchContext &sc,
 	if (sc.limit_ == 0) {
 		return GS_SUCCESS;
 	}
-	int32_t ret = GS_SUCCESS;
-
-	switch (getKeyType()) {
-	case COLUMN_TYPE_STRING: {
-		void *orgStartKey = const_cast<void *>(sc.startKey_);
-		void *orgEndKey = const_cast<void *>(sc.endKey_);
-		StringCursor startStringCusor(txn,
-			reinterpret_cast<const uint8_t *>(sc.startKey_), sc.startKeySize_);
-		StringObject startConvertKey(
-			reinterpret_cast<uint8_t *>(&startStringCusor));
-		if (sc.startKey_ != NULL) {
-			sc.startKey_ = &startConvertKey;
-		}
-		if (sc.isEqual_ && isUnique()) {
-			ret = find<StringObject, StringKey, OId, OId>(
-				txn, sc, idList, outputOrder);
-			sc.startKey_ = orgStartKey;
-		}
-		else {
-			StringCursor endStringCusor(txn,
-				reinterpret_cast<const uint8_t *>(sc.endKey_), sc.endKeySize_);
-			StringObject endConvertKey(
-				reinterpret_cast<uint8_t *>(&endStringCusor));
-			if (sc.endKey_ != NULL) {
-				sc.endKey_ = &endConvertKey;
-			}
-			ret = find<StringObject, StringKey, OId, OId>(
-				txn, sc, idList, outputOrder);
-			sc.startKey_ = orgStartKey;
-			sc.endKey_ = orgEndKey;
-		}
-	} break;
-	case COLUMN_TYPE_BOOL:
-		ret = find<bool, bool, OId, OId>(txn, sc, idList, outputOrder);
-		break;
-	case COLUMN_TYPE_BYTE:
-	case COLUMN_TYPE_NULL:
-		ret = find<int8_t, int8_t, OId, OId>(txn, sc, idList, outputOrder);
-		break;
-	case COLUMN_TYPE_SHORT:
-		ret = find<int16_t, int16_t, OId, OId>(txn, sc, idList, outputOrder);
-		break;
-	case COLUMN_TYPE_INT:
-		ret = find<int32_t, int32_t, OId, OId>(txn, sc, idList, outputOrder);
-		break;
-	case COLUMN_TYPE_LONG:
-		ret = find<int64_t, int64_t, OId, OId>(txn, sc, idList, outputOrder);
-		break;
-	case COLUMN_TYPE_FLOAT:
-		ret = find<float32, float32, OId, OId>(txn, sc, idList, outputOrder);
-		break;
-	case COLUMN_TYPE_DOUBLE:
-		ret = find<float64, float64, OId, OId>(txn, sc, idList, outputOrder);
-		break;
-	case COLUMN_TYPE_TIMESTAMP:
-		ret =
-			find<Timestamp, Timestamp, OId, OId>(txn, sc, idList, outputOrder);
-		break;
-	case COLUMN_TYPE_OID:
-		ret = find<OId, OId, OId, OId>(txn, sc, idList, outputOrder);
-		break;
-	default:
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TM_SEARCH_FAILED, "");
-		break;
-	}
-	return ret;
+	SearchFunc searchFunc(txn, sc, idList, outputOrder, this);
+	switchToBasicType(getKeyType(), searchFunc);
+	return searchFunc.ret_;
 }
 
-/*!
-	@brief Get all Row Objects
-*/
+template<>
+void BtreeMap::SearchFunc::execute<StringObject, StringKey, OId, OId>() {
+	util::StackAllocator &alloc = txn_.getDefaultAllocator();
+	TermCondition *startCond = sc_.getStartKeyCondition();
+	TermCondition *endCond = sc_.getEndKeyCondition();
+	const void *orgStartKey = NULL;
+	const void *orgEndKey = NULL;
+	if (startCond != NULL) {
+		StringCursor *startStringCusor = ALLOC_NEW(alloc) 
+			StringCursor(txn_, static_cast<const uint8_t *>(startCond->value_), startCond->valueSize_);
+		StringObject *startConvertKey = ALLOC_NEW(alloc) 
+			StringObject(reinterpret_cast<uint8_t *>(startStringCusor));
+		orgStartKey = startCond->value_;
+		startCond->value_ = startConvertKey;
+	}
+	if (endCond != NULL) {
+		StringCursor *endStringCusor = ALLOC_NEW(alloc) 
+			StringCursor(txn_, static_cast<const uint8_t *>(endCond->value_), endCond->valueSize_);
+		StringObject *endConvertKey = ALLOC_NEW(alloc)
+			StringObject(reinterpret_cast<uint8_t *>(endStringCusor));
+		orgEndKey = endCond->value_;
+		endCond->value_ = endConvertKey;
+	}
+	if (sc_.getSuspendValue() != NULL) {
+		ret_ = tree_->find<StringObject, StringKey, OId, OId, KEY_VALUE_COMPONENT>(
+			txn_, sc_, idList_, outputOrder_);
+	} else {
+		ret_ = tree_->find<StringObject, StringKey, OId, OId, KEY_COMPONENT>(
+			txn_, sc_, idList_, outputOrder_);
+	}
+	if (startCond != NULL) {
+		startCond->value_ = orgStartKey;
+	}
+	if (endCond != NULL) {
+		endCond->value_ = orgEndKey;
+	}
+}
+
+template <typename P, typename K, typename V, typename R>
+void BtreeMap::SearchFunc::execute() {
+	if (sc_.getSuspendValue() != NULL) {
+		ret_ = tree_->find<P, K, V, V, KEY_VALUE_COMPONENT>(txn_, sc_, idList_, outputOrder_);
+	} else {
+		ret_ = tree_->find<P, K, V, V, KEY_COMPONENT>(txn_, sc_, idList_, outputOrder_);
+	}
+}
+
 int32_t BtreeMap::getAll(
 	TransactionContext &txn, ResultSize limit, util::XArray<OId> &idList) {
-	int32_t ret = GS_SUCCESS;
 	if (isEmpty()) {
 		return GS_FAIL;
 	}
 	if (limit == 0) {
 		return GS_SUCCESS;
 	}
-	switch (getKeyType()) {
-	case COLUMN_TYPE_STRING:
-		ret = getAllByAscending<StringKey, OId, OId>(txn, limit, idList);
-		break;
-	case COLUMN_TYPE_BOOL:
-		ret = getAllByAscending<bool, OId, OId>(txn, limit, idList);
-		break;
-	case COLUMN_TYPE_BYTE:
-	case COLUMN_TYPE_NULL:
-		ret = getAllByAscending<int8_t, OId, OId>(txn, limit, idList);
-		break;
-	case COLUMN_TYPE_SHORT:
-		ret = getAllByAscending<int16_t, OId, OId>(txn, limit, idList);
-		break;
-	case COLUMN_TYPE_INT:
-		ret = getAllByAscending<int32_t, OId, OId>(txn, limit, idList);
-		break;
-	case COLUMN_TYPE_LONG:
-		ret = getAllByAscending<int64_t, OId, OId>(txn, limit, idList);
-		break;
-	case COLUMN_TYPE_FLOAT:
-		ret = getAllByAscending<float32, OId, OId>(txn, limit, idList);
-		break;
-	case COLUMN_TYPE_DOUBLE:
-		ret = getAllByAscending<float64, OId, OId>(txn, limit, idList);
-		break;
-	case COLUMN_TYPE_TIMESTAMP:
-		ret = getAllByAscending<Timestamp, OId, OId>(txn, limit, idList);
-		break;
-	case COLUMN_TYPE_OID:
-		ret = getAllByAscending<OId, OId, OId>(txn, limit, idList);
-		break;
-	default:
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TM_SEARCH_FAILED, "");
-		break;
-	}
-	return ret;
+	GetAllFunc getAllFunc(txn, limit, idList, this);
+	switchToBasicType(getKeyType(), getAllFunc);
+	return getAllFunc.ret_;
 }
 
-/*!
-	@brief Get all Row Objects all at once
-*/
+template <typename P, typename K, typename V, typename R>
+void BtreeMap::GetAllFunc::execute() {
+	ret_ = tree_->getAllByAscending<K, V, R>(txn_, limit_, idList_);
+}
+
+template <typename K, typename V, typename R>
+int32_t BtreeMap::getAllByAscending(
+	TransactionContext &txn, ResultSize limit, util::XArray<R> &result) {
+	KeyValue<K, V> suspendKeyValue;
+	getAllByAscending<K, V, R>(
+		txn, limit, result, MAX_RESULT_SIZE, suspendKeyValue);
+	return GS_SUCCESS;
+}
+
 int32_t BtreeMap::getAll(TransactionContext &txn, ResultSize limit,
 	util::XArray<OId> &idList, BtreeMap::BtreeCursor &cursor) {
-	int32_t ret = GS_SUCCESS;
 	if (isEmpty()) {
 		return GS_SUCCESS;
 	}
 	if (limit == 0) {
 		return GS_SUCCESS;
 	}
-	switch (getKeyType()) {
-	case COLUMN_TYPE_STRING:
-		ret = getAllByAscending<StringKey, OId>(txn, limit, idList, cursor);
-		break;
-	case COLUMN_TYPE_BOOL:
-		ret = getAllByAscending<bool, OId>(txn, limit, idList, cursor);
-		break;
-	case COLUMN_TYPE_BYTE:
-	case COLUMN_TYPE_NULL:
-		ret = getAllByAscending<int8_t, OId>(txn, limit, idList, cursor);
-		break;
-	case COLUMN_TYPE_SHORT:
-		ret = getAllByAscending<int16_t, OId>(txn, limit, idList, cursor);
-		break;
-	case COLUMN_TYPE_INT:
-		ret = getAllByAscending<int32_t, OId>(txn, limit, idList, cursor);
-		break;
-	case COLUMN_TYPE_LONG:
-		ret = getAllByAscending<int64_t, OId>(txn, limit, idList, cursor);
-		break;
-	case COLUMN_TYPE_FLOAT:
-		ret = getAllByAscending<float32, OId>(txn, limit, idList, cursor);
-		break;
-	case COLUMN_TYPE_DOUBLE:
-		ret = getAllByAscending<float64, OId>(txn, limit, idList, cursor);
-		break;
-	case COLUMN_TYPE_TIMESTAMP:
-		ret = getAllByAscending<Timestamp, OId>(txn, limit, idList, cursor);
-		break;
-	case COLUMN_TYPE_OID:
-		ret = getAllByAscending<OId, OId>(txn, limit, idList, cursor);
-		break;
-	default:
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TM_SEARCH_FAILED, "");
-		break;
+	GetAllCursorFunc getAllCursorFunc(txn, limit, idList, cursor, this);
+	switchToBasicType(getKeyType(), getAllCursorFunc);
+	return getAllCursorFunc.ret_;
+}
+
+template <typename P, typename K, typename V, typename R>
+void BtreeMap::GetAllCursorFunc::execute() {
+	ret_ = tree_->getAllByAscending<K, V, R>(txn_, limit_, idList_, cursor_);
+}
+
+template <typename K, typename V, typename R>
+int32_t BtreeMap::getAllByAscending(TransactionContext &txn, ResultSize limit,
+	util::XArray<R> &result, BtreeMap::BtreeCursor &cursor) {
+	if (isEmpty()) {
+		return GS_SUCCESS;
 	}
-	return ret;
+	BNode<K, V> node(txn, *getObjectManager(), allocateStrategy_);
+	int32_t loc = 0;
+	if (cursor.nodeId_ == UNDEF_OID) {
+		getHeadNode<K, V>(txn, node);
+		loc = 0;
+	}
+	else {
+		node.load(cursor.nodeId_);
+		loc = cursor.loc_;
+	}
+	bool hasNext = false;
+	while (true) {
+		pushResultList<K, V, R>(node.getKeyValue(loc), result);
+		hasNext = nextPos(txn, node, loc);
+
+		if (!hasNext || result.size() >= limit) {
+			break;
+		}
+	}
+	if (hasNext) {
+		cursor.nodeId_ = node.getSelfOId();
+		cursor.loc_ = loc;
+		return GS_FAIL;
+	}
+	else {
+		return GS_SUCCESS;
+	}
 }
 
 
-/*!
-	@brief Validate the map
-*/
 std::string BtreeMap::validate(TransactionContext &txn) {
-	std::string str;
-	switch (getKeyType()) {
-	case COLUMN_TYPE_STRING:
-		str = validateInternal<StringKey, OId>(txn);
-		break;
-	case COLUMN_TYPE_BOOL:
-		str = validateInternal<bool, OId>(txn);
-		break;
-	case COLUMN_TYPE_BYTE:
-	case COLUMN_TYPE_NULL:
-		str = validateInternal<int8_t, OId>(txn);
-		break;
-	case COLUMN_TYPE_SHORT:
-		str = validateInternal<int16_t, OId>(txn);
-		break;
-	case COLUMN_TYPE_INT:
-		str = validateInternal<int32_t, OId>(txn);
-		break;
-	case COLUMN_TYPE_LONG:
-		str = validateInternal<int64_t, OId>(txn);
-		break;
-	case COLUMN_TYPE_FLOAT:
-		str = validateInternal<float32, OId>(txn);
-		break;
-	case COLUMN_TYPE_DOUBLE:
-		str = validateInternal<float64, OId>(txn);
-		break;
-	case COLUMN_TYPE_TIMESTAMP:
-		str = validateInternal<Timestamp, OId>(txn);
-		break;
-	case COLUMN_TYPE_OID:
-		str = validateInternal<OId, OId>(txn);
-		break;
-	default:
-		break;
-	}
-	return str;
+	ValidateFunc validateFunc(txn, this);
+	switchToBasicType(getKeyType(), validateFunc);
+	return validateFunc.ret_;
+}
+
+template <typename P, typename K, typename V, typename R>
+void BtreeMap::ValidateFunc::execute() {
+	ret_ = tree_->validateInternal<K, V>(txn_);
 }
 
 template <typename K, typename V>
@@ -662,6 +685,9 @@ std::string BtreeMap::validateInternal(TransactionContext &txn) {
 		nodeId = node.getChild(txn, 0);
 	}
 
+	CmpFunctor<K, K, V, KEY_VALUE_COMPONENT> cmp;
+
+	Setting setting(getKeyType(), false, getFuncInfo());
 	int32_t loc = 0;
 	KeyValue<K, V> currentVal, nextVal;
 	while (true) {
@@ -671,7 +697,7 @@ std::string BtreeMap::validateInternal(TransactionContext &txn) {
 		}
 		nextVal = node.getKeyValue(loc);
 
-		if (keyCmp<K, V>(txn, *getObjectManager(), currentVal, nextVal, true) > 0) {
+		if (cmp(txn, *getObjectManager(), currentVal, nextVal, setting) > 0) {
 			GS_THROW_USER_ERROR(
 				GS_ERROR_DS_COLUMN_ID_INVALID, "invalid prevKey > nextKey");
 		}
@@ -686,6 +712,53 @@ std::string BtreeMap::validateInternal(TransactionContext &txn) {
 
 	util::NormalOStringStream strstrm;  
 	return "o.k.";
+}
+
+std::string BtreeMap::dump(TransactionContext &txn, uint8_t mode) {
+	util::NormalOStringStream strstrm;
+	if (mode == SUMMARY_DUMP) {
+		OId rootOId = getRootOId();
+		int32_t nodeNum = 0;
+		int32_t realKeyNum = 0;
+		int32_t keySpaceNum = 0;
+		int32_t maxDepth = 0;
+		int32_t minDepth = INT32_MAX;
+		int32_t maxKeyNode = 0;
+		int32_t minKeyNode = INT32_MAX;
+		int32_t depth = 0;
+
+		DumpSummaryFunc dumpSummaryFunc(txn, rootOId, nodeNum, realKeyNum, keySpaceNum,
+			maxDepth, minDepth, maxKeyNode, minKeyNode, depth, this);
+		switchToBasicType(getKeyType(), dumpSummaryFunc);
+		strstrm << "{BTreeStatus:{" << std::endl;
+		strstrm << "\t nodeNum : " << nodeNum << "," << std::endl;
+		strstrm << "\t realKeyNum : " << realKeyNum << "," << std::endl;
+		strstrm << "\t keySpaceNum : " << keySpaceNum << "," << std::endl;
+		strstrm << "\t maxDepth : " << maxDepth << "," << std::endl;
+		strstrm << "\t minDepth : " << minDepth << "," << std::endl;
+		strstrm << "\t maxKeyNode : " << maxKeyNode << "," << std::endl;
+		strstrm << "\t minKeyNode : " << minKeyNode << "," << std::endl;
+		strstrm << "}" << std::endl;
+	} else {
+		OId nodeId = getRootOId();
+		int32_t depth = 1;
+		TreeFuncInfo *funcInfo = getFuncInfo();
+		DumpAllFunc dumpAllFunc(txn, strstrm, nodeId, depth,
+			funcInfo, this);
+		switchToBasicType(getKeyType(), dumpAllFunc);
+	}
+	return strstrm.str();
+}
+
+template <typename P, typename K, typename V, typename R>
+void BtreeMap::DumpSummaryFunc::execute() {
+	tree_->getTreeStatus<K, V>(txn_, nodeId_, nodeNum_, realKeyNum_,
+		keySpaceNum_, maxDepth_, minDepth_, maxKeyNode_, minKeyNode_, depth_);
+}
+
+template <typename P, typename K, typename V, typename R>
+void BtreeMap::DumpAllFunc::execute() {
+	tree_->print<K, V>(txn_, out_, nodeId_, depth_, funcInfo_);
 }
 
 template <typename K, typename V>
@@ -723,264 +796,66 @@ void BtreeMap::getTreeStatus(TransactionContext &txn, OId nodeId,
 	}
 }
 
-std::string BtreeMap::dump(TransactionContext &txn, uint8_t mode) {
-	util::NormalOStringStream strstrm;
-	if (mode == SUMMARY_DUMP) {
-		int32_t nodeNum = 0;
-		int32_t realKeyNum = 0;
-		int32_t keySpaceNum = 0;
-		int32_t maxDepth = 0;
-		int32_t minDepth = INT32_MAX;
-		int32_t maxKeyNode = 0;
-		int32_t minKeyNode = INT32_MAX;
-
-		switch (getKeyType()) {
-		case COLUMN_TYPE_STRING:
-			getTreeStatus<StringKey, OId>(txn, getRootOId(), nodeNum,
-				realKeyNum, keySpaceNum, maxDepth, minDepth, maxKeyNode,
-				minKeyNode, 0);
-			break;
-		case COLUMN_TYPE_BOOL:
-			getTreeStatus<bool, OId>(txn, getRootOId(), nodeNum, realKeyNum,
-				keySpaceNum, maxDepth, minDepth, maxKeyNode, minKeyNode, 0);
-			break;
-		case COLUMN_TYPE_BYTE:
-		case COLUMN_TYPE_NULL:
-			getTreeStatus<int8_t, OId>(txn, getRootOId(), nodeNum, realKeyNum,
-				keySpaceNum, maxDepth, minDepth, maxKeyNode, minKeyNode, 0);
-			break;
-		case COLUMN_TYPE_SHORT:
-			getTreeStatus<int16_t, OId>(txn, getRootOId(), nodeNum, realKeyNum,
-				keySpaceNum, maxDepth, minDepth, maxKeyNode, minKeyNode, 0);
-			break;
-		case COLUMN_TYPE_INT:
-			getTreeStatus<int32_t, OId>(txn, getRootOId(), nodeNum, realKeyNum,
-				keySpaceNum, maxDepth, minDepth, maxKeyNode, minKeyNode, 0);
-			break;
-		case COLUMN_TYPE_LONG:
-			getTreeStatus<int64_t, OId>(txn, getRootOId(), nodeNum, realKeyNum,
-				keySpaceNum, maxDepth, minDepth, maxKeyNode, minKeyNode, 0);
-			break;
-		case COLUMN_TYPE_FLOAT:
-			getTreeStatus<float32, OId>(txn, getRootOId(), nodeNum, realKeyNum,
-				keySpaceNum, maxDepth, minDepth, maxKeyNode, minKeyNode, 0);
-			break;
-		case COLUMN_TYPE_DOUBLE:
-			getTreeStatus<float64, OId>(txn, getRootOId(), nodeNum, realKeyNum,
-				keySpaceNum, maxDepth, minDepth, maxKeyNode, minKeyNode, 0);
-			break;
-		case COLUMN_TYPE_TIMESTAMP:
-			getTreeStatus<Timestamp, OId>(txn, getRootOId(), nodeNum,
-				realKeyNum, keySpaceNum, maxDepth, minDepth, maxKeyNode,
-				minKeyNode, 0);
-			break;
-		case COLUMN_TYPE_OID:
-			getTreeStatus<OId, OId>(txn, getRootOId(), nodeNum, realKeyNum,
-				keySpaceNum, maxDepth, minDepth, maxKeyNode, minKeyNode, 0);
-			break;
-		default:
-			break;
-		}
-
-		strstrm << "{BTreeStatus:{" << std::endl;
-		strstrm << "\t nodeNum : " << nodeNum << "," << std::endl;
-		strstrm << "\t realKeyNum : " << realKeyNum << "," << std::endl;
-		strstrm << "\t keySpaceNum : " << keySpaceNum << "," << std::endl;
-		strstrm << "\t maxDepth : " << maxDepth << "," << std::endl;
-		strstrm << "\t minDepth : " << minDepth << "," << std::endl;
-		strstrm << "\t maxKeyNode : " << maxKeyNode << "," << std::endl;
-		strstrm << "\t minKeyNode : " << minKeyNode << "," << std::endl;
-		strstrm << "}" << std::endl;
-	}
-	else {
-		switch (getKeyType()) {
-		case COLUMN_TYPE_STRING:
-			print<StringKey, OId>(txn, strstrm, getRootOId());
-			break;
-		case COLUMN_TYPE_BOOL:
-			print<bool, OId>(txn, strstrm, getRootOId());
-			break;
-		case COLUMN_TYPE_BYTE:
-		case COLUMN_TYPE_NULL:
-			print<int8_t, OId>(txn, strstrm, getRootOId());
-			break;
-		case COLUMN_TYPE_SHORT:
-			print<int16_t, OId>(txn, strstrm, getRootOId());
-			break;
-		case COLUMN_TYPE_INT:
-			print<int32_t, OId>(txn, strstrm, getRootOId());
-			break;
-		case COLUMN_TYPE_LONG:
-			print<int64_t, OId>(txn, strstrm, getRootOId());
-			break;
-		case COLUMN_TYPE_FLOAT:
-			print<float32, OId>(txn, strstrm, getRootOId());
-			break;
-		case COLUMN_TYPE_DOUBLE:
-			print<float64, OId>(txn, strstrm, getRootOId());
-			break;
-		case COLUMN_TYPE_TIMESTAMP:
-			print<Timestamp, OId>(txn, strstrm, getRootOId());
-			break;
-		case COLUMN_TYPE_OID:
-			print<OId, OId>(txn, strstrm, getRootOId());
-			break;
-		default:
-			break;
-		}
-	}
-	return strstrm.str();
-}
-
 template <typename K, typename V>
-std::string BtreeMap::dump(TransactionContext &txn) {
-	util::NormalOStringStream strstrm;
-	print<K, V>(txn, strstrm, getRootOId());
-	return strstrm.str();
-}
-
-
-template<>
-MvccRowImage BtreeMap::getMaxValue() {
-	return MvccRowImage();
-}
-
-template<>
-MvccRowImage BtreeMap::getMinValue() {
-	return MvccRowImage();
-}
-
-template <>
-void BtreeMap::SearchContext::setSuspendPoint(TransactionContext &txn,
-	ObjectManager &objectManager, const StringKey &suspendKey, const OId &suspendValue) {
-	StringCursor obj(txn, objectManager, suspendKey.oId_);
-	suspendKey_ = ALLOC_NEW(txn.getDefaultAllocator())
-		uint8_t[obj.stringLength()];
-	memcpy(suspendKey_, obj.str(), obj.stringLength());
-	suspendKeySize_ = obj.stringLength();
-
-	uint32_t valueSize = sizeof(OId);
-	suspendValue_ = ALLOC_NEW(txn.getDefaultAllocator()) uint8_t[valueSize];
-	memcpy(suspendValue_, &suspendValue, valueSize);
-	suspendValueSize_ = valueSize;
-}
-
-template <>
-void BtreeMap::SearchContext::setSuspendPoint(TransactionContext &txn,
-	ObjectManager &objectManager, const FullContainerKeyAddr &suspendKey, const OId &suspendValue) {
-	FullContainerKeyCursor obj(txn, objectManager, suspendKey.oId_);
-	FullContainerKey containerKey = obj.getKey();
-	const void *keyData;
-	size_t keySize;
-	containerKey.toBinary(keyData, keySize);
-
-	suspendKey_ = ALLOC_NEW(txn.getDefaultAllocator())
-		uint8_t[keySize];
-	memcpy(suspendKey_, keyData, keySize);
-	suspendKeySize_ = keySize;
-
-	uint32_t valueSize = sizeof(OId);
-	suspendValue_ = ALLOC_NEW(txn.getDefaultAllocator()) uint8_t[valueSize];
-	memcpy(suspendValue_, &suspendValue, valueSize);
-	suspendValueSize_ = valueSize;
-}
-
-template <>
-int32_t BtreeMap::initialize<FullContainerKeyCursor, OId>(TransactionContext &txn, ColumnType columnType,
-													bool isUnique, BtreeMapType btreeMapType) {
-	return initialize<FullContainerKeyAddr, OId>(txn, columnType, isUnique, btreeMapType);
-}
-
-template <>
-int32_t BtreeMap::insert(TransactionContext &txn, FullContainerKeyCursor &key, OId &value, bool isCaseSensitive) {
-	setDirty();
-
-	OId beforeRootOId = getRootOId();
-	OId beforeTailOId = getTailNodeOId();
-	FullContainerKeyObject convertKey(&key);
-	bool isSuccess =
-		insertInternal<FullContainerKeyObject, FullContainerKeyAddr, OId>(txn, convertKey, value, &valueCmp, &valueCmp, isCaseSensitive);
-
-	int32_t ret = (isSuccess) ? GS_SUCCESS : GS_FAIL;
-	assert(ret == GS_SUCCESS);
-	if (beforeRootOId != getRootOId()) {
-		ret = (ret | ROOT_UPDATE);
-	}
-	if (beforeTailOId != getTailNodeOId()) {
-		ret = (ret | TAIL_UPDATE);
-	}
-	return ret;
-}
-
-template <>
-int32_t BtreeMap::remove(TransactionContext &txn, FullContainerKeyCursor &key, OId &value, bool isCaseSensitive) {
-	setDirty();
-
-	OId beforeRootOId = getRootOId();
-	OId beforeTailOId = getTailNodeOId();
-	FullContainerKeyObject convertKey(&key);
-	bool isSuccess =
-		removeInternal<FullContainerKeyObject, FullContainerKeyAddr, OId>(txn, convertKey, value, &valueCmp, &valueCmp, isCaseSensitive);
-
-	int32_t ret = (isSuccess) ? GS_SUCCESS : GS_FAIL;
-	assert(ret == GS_SUCCESS);
-	if (beforeRootOId != getRootOId()) {
-		ret = (ret | ROOT_UPDATE);
-	}
-	if (beforeTailOId != getTailNodeOId()) {
-		ret = (ret | TAIL_UPDATE);
-	}
-	return ret;
-}
-
-template <>
-int32_t BtreeMap::update(TransactionContext &txn, FullContainerKeyCursor &key, OId &oldValue, OId &newValue, bool isCaseSensitive) {
-	setDirty();
-
-	OId beforeRootOId = getRootOId();
-	OId beforeTailOId = getTailNodeOId();
-	int32_t ret;
-	FullContainerKeyObject convertKey(&key);
-	if (isUnique()) {
-		ret = updateInternal<FullContainerKeyObject, FullContainerKeyAddr, OId>(txn, convertKey, oldValue, newValue, &valueCmp, isCaseSensitive);
-	}
-	else {
-		bool isSuccess;
-		isSuccess =
-			removeInternal<FullContainerKeyObject, FullContainerKeyAddr, OId>(txn, convertKey, oldValue, &valueCmp, &valueCmp, isCaseSensitive);
-		if (isSuccess) {
-			isSuccess = insertInternal<FullContainerKeyObject, FullContainerKeyAddr, OId>(
-				txn, convertKey, newValue, &valueCmp, &valueCmp, isCaseSensitive);
+int32_t BtreeMap::print(TransactionContext &txn, std::ostream &out, OId nodeId,
+	int32_t depth, TreeFuncInfo *funcInfo) {
+	int32_t totalSize = 0;
+	if (nodeId != UNDEF_OID) {
+		BNode<K, V> node(
+			txn, *getObjectManager(), nodeId, allocateStrategy_);
+		int32_t i;
+		int32_t size = node.numkeyValues();
+		if (depth >= 1) {
+			out << std::setw((depth)*5) << "|-->[ " << size << "] ";
 		}
-		ret = (isSuccess) ? GS_SUCCESS : GS_FAIL;
+		out << node.dump(txn, funcInfo);
+		out << "\n";
+		if (!node.isLeaf()) {
+			for (i = size; i >= 0; --i) {
+				if (node.getChild(txn, i) != UNDEF_OID) {
+					totalSize +=
+						print<K, V>(txn, out, node.getChild(txn, i), depth + 1, funcInfo);
+				}
+			}
+		}
+		totalSize += size;
 	}
-
-	assert(ret == GS_SUCCESS);
-	if (beforeRootOId != getRootOId()) {
-		ret = (ret | ROOT_UPDATE);
-	}
-	if (beforeTailOId != getTailNodeOId()) {
-		ret = (ret | TAIL_UPDATE);
-	}
-	return ret;
+	return totalSize;
 }
 
-template <>
-int32_t BtreeMap::search<FullContainerKeyCursor, OId, OId>(TransactionContext &txn, FullContainerKeyCursor &key, OId &retVal, bool isCaseSensitive) {
-	FullContainerKeyObject convertKey(&key);
-	if (isEmpty()) {
-		return GS_FAIL;
+uint32_t BtreeMap::SearchContext::getRangeConditionNum() {
+	const size_t UNDEF_POS = -1;
+	uint32_t rangeConditionNum = 0;
+	for (size_t i = 0; i < columnIdList_.size(); i++) { 
+		size_t eqPos = UNDEF_POS;
+		size_t greaterPos = UNDEF_POS;
+		size_t lessPos = UNDEF_POS;
+		for (util::Vector<size_t>::iterator itr = keyList_.begin(); 
+			itr != keyList_.end(); itr++) {
+			if (conditionList_[*itr].columnId_ == columnIdList_[i]) {
+				if (conditionList_[*itr].opType_ == DSExpression::EQ) {
+					eqPos = *itr;
+					break;
+				} else if (conditionList_[*itr].isStartCondition()) {
+					greaterPos = *itr;
+				} else if (conditionList_[*itr].isEndCondition()) {
+					lessPos = *itr;
+				}
+			}
+		}
+		if (eqPos != UNDEF_POS && (greaterPos != UNDEF_POS || lessPos  != UNDEF_POS)) {
+			assert(false);
+		}
+		if (eqPos != UNDEF_POS) {
+			rangeConditionNum++;
+		} else {
+			if (greaterPos != UNDEF_POS || lessPos  != UNDEF_POS) {
+				rangeConditionNum++;
+			}
+			break;
+		}
 	}
-	return find<FullContainerKeyObject, FullContainerKeyAddr, OId>(txn, convertKey, retVal, isCaseSensitive);
-}
-
-template <>
-int32_t BtreeMap::search<FullContainerKeyCursor, OId, OId>(TransactionContext &txn, SearchContext &sc,
-	util::XArray<OId> &idList, OutputOrder outputOrder) {
-	if (isEmpty()) {
-		return GS_FAIL;
-	}
-	return find<FullContainerKeyObject, FullContainerKeyAddr, OId, OId>(txn, sc, idList, outputOrder);
+	return rangeConditionNum;
 }
 
 

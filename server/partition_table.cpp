@@ -110,6 +110,7 @@ PartitionTable::PartitionTable(const ConfigTable &configTable)
 	currentRevisionNo_(1),
 	prevDropRevisionNo_(0),
 	isGoalPartition_(false)
+	, hasPublicAddress_(false)
 {
 	try {
 		uint32_t partitionNum = config_.partitionNum_;
@@ -238,7 +239,7 @@ NodeId PartitionTable::getCatchup(PartitionId pId) {
 		GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 	}
 	util::LockGuard<util::ReadLock> currentLock(partitionLockList_[pId]);
-	std::vector<NodeId> &catchups
+	NodeIdList &catchups
 			= partitions_[pId].roles_[PT_CURRENT_OB].getCatchups();
 	if (catchups.size() == 1) {
 		return catchups[0];
@@ -436,7 +437,7 @@ bool PartitionTable::checkConfigurationChange(
 }
 
 bool PartitionTable::check(PartitionContext &context) {
-//	bool retFlag = false;
+	bool retFlag = false;
 	try {
 		util::StackAllocator &alloc = context.getAllocator();
 		if (context.currentTime_ < nextApplyRuleLimitTime_) {
@@ -503,17 +504,50 @@ void PartitionTable::updatePartitionRevision(
 bool PartitionTable::checkPeriodicDrop(util::StackAllocator &alloc, DropPartitionNodeInfo &dropInfo) {
 	util::XArray<NodeId> activeNodeList(alloc);
 	getLiveNodeIdList(activeNodeList);
-//	int32_t liveNodeListSize = static_cast<int32_t>(activeNodeList.size() - 1);
+	int32_t liveNodeListSize = static_cast<int32_t>(activeNodeList.size() - 1);
+	int32_t liveNum = static_cast<int32_t>(activeNodeList.size());
+	int32_t backupNum = getReplicationNum();
+	if (backupNum > liveNum - 1) {
+		backupNum = liveNum - 1;
+	}
 	bool enableDrop = false;
 	for (PartitionId pId = 0; pId < getPartitionNum(); pId++) {
 		PartitionRole currentRole;
 		PartitionRole goalRole;
 		getPartitionRole(pId, currentRole, PT_CURRENT_OB);
 		getPartitionRole(pId, goalRole, PT_CURRENT_GOAL);
+		if (currentRole.getOwner() == UNDEF_NODEID) {
+			continue;
+		}
+		if (goalRole.getOwner() == UNDEF_NODEID) {
+				continue;
+		}
+		if (getPartitionStatus(pId, currentRole.getOwner()) != PT_ON) {
+			continue;
+		}
+		if (currentRole.getBackupSize() < backupNum
+				|| goalRole.getBackupSize() < backupNum) {
+			continue;
+		}
+		std::vector<NodeId> &backups = currentRole.getBackups();
+		bool allActiveFlag = true;
+		for (size_t pos = 0; pos < backups.size(); pos++) {
+			if (getPartitionStatus(pId, backups[pos]) != PT_ON) {
+				allActiveFlag = false;
+				break;
+			}
+		}
+		if (!allActiveFlag) {
+			continue;
+		}
 		if (currentRole == goalRole) {
 			for (size_t pos = 0; pos < activeNodeList.size(); pos++) {
 				NodeId nodeId = activeNodeList[pos];
 				if (getPartitionRoleStatus(pId, nodeId) != PartitionTable::PT_NONE) {
+					continue;
+				}
+				if (getPartitionStatus(pId, nodeId) == PT_ON
+						|| getPartitionStatus(pId, nodeId) == PT_SYNC) {
 					continue;
 				}
 				NodeAddress &address = getNodeAddress(nodeId);
@@ -531,13 +565,13 @@ bool PartitionTable::PartitionRole::operator==(PartitionRole &role) const {
 	NodeId tmpOwnerId = role.getOwner();
 	if (ownerNodeId_ == tmpOwnerId) {
 		bool retFlag = true;
-		std::vector<NodeId> tmpBackups = role.getBackups();
+		NodeIdList tmpBackups = role.getBackups();
 		if (backups_ == tmpBackups) {
 		}
 		else {
 			retFlag = false;
 		}
-		std::vector<NodeId> tmpCatchups = role.getCatchups();
+		NodeIdList tmpCatchups = role.getCatchups();
 		if (catchups_ == tmpCatchups) {
 		}
 		else {
@@ -558,7 +592,7 @@ void PartitionTable::PartitionRole::encodeAddress(
 	if (ownerNodeId != UNDEF_NODEID) {
 		ownerAddress_ = pt->getNodeInfo(ownerNodeId).getNodeAddress();
 	}
-	std::vector<NodeId> &backups = role.getBackups();
+	NodeIdList &backups = role.getBackups();
 	int32_t backupSize = static_cast<int32_t>(backups.size());
 	backupAddressList_.clear();
 	backupAddressList_.reserve(backupSize);
@@ -567,7 +601,7 @@ void PartitionTable::PartitionRole::encodeAddress(
 		backupAddressList_.push_back(
 			pt->getNodeInfo(backupNodeId).getNodeAddress());
 	}
-	std::vector<NodeId> &catchups = role.getCatchups();
+	NodeIdList &catchups = role.getCatchups();
 	int32_t catchupSize = static_cast<int32_t>(catchups.size());
 	catchupAddressList_.clear();
 	catchupAddressList_.reserve(catchupSize);
@@ -643,7 +677,11 @@ std::string PartitionTable::dumpNodes() {
 	std::string tabCode = "\t";
 
 	NodeInfo *nodeInfo;
-
+	bool usePublic = hasPublicAddress();
+	AddressInfoList addressInfoList;
+	if (usePublic) {
+		getPublicNodeAddress(addressInfoList);
+	}
 	for (NodeId nodeId = 0; nodeId < nodeNum_; nodeId++) {
 		nodeInfo = &nodes_[nodeId];
 		ss << tabCode << "#" << nodeId << " : ";
@@ -668,6 +706,11 @@ std::string PartitionTable::dumpNodes() {
 		}
 		else {
 			ss << getTimeStr(nodeInfo->heartbeatTimeout_);
+		}
+		if (usePublic) {
+			ss << "(";
+			ss << addressInfoList[nodeId].getNodeAddress(TRANSACTION_SERVICE).dump().c_str();
+			ss << ")";
 		}
 		if (nodeId != nodeNum_ - 1) {
 			ss << terminateCode;
@@ -700,8 +743,8 @@ std::string PartitionTable::dumpPartitionsNew(
 	ownerCountList.assign(static_cast<size_t>(nodeNum_), 0);
 	std::string terminateCode = "\n ";
 	uint32_t partitionNum = config_.partitionNum_;
-//	int32_t replicationNum = config_.replicationNum_;
-//	size_t pos = 0;
+	int32_t replicationNum = config_.replicationNum_;
+	size_t pos = 0;
 
 	PartitionId pId;
 	LogSequentialNumber maxLSN = 0;
@@ -785,8 +828,8 @@ std::string PartitionTable::dumpPartitionsNew(
 				continue;
 			}
 		}
-//		int32_t psum = 0;
-//		int32_t currentPos = 0;
+		int32_t psum = 0;
+		int32_t currentPos = 0;
 		ss << "[P" << std::setfill('0') << std::setw(partitionDigit_) << pId;
 		ss << "(" << std::setw(revisionDigit) << role.getRevisionNo() << ")]";
 		NodeId owner = role.getOwner();
@@ -796,7 +839,7 @@ std::string PartitionTable::dumpPartitionsNew(
 		else {
 			genPartitionColumnStr(ss, ownerStr, pId, owner, digit, nodeIdDigit, type);
 		}
-		std::vector<NodeId> &backups = role.getBackups();
+		NodeIdList &backups = role.getBackups();
 		if (backups.size() > 0) {
 			if (owner != UNDEF_NODEID) {
 				ss << ", ";
@@ -808,7 +851,7 @@ std::string PartitionTable::dumpPartitionsNew(
 				}
 			}
 		}
-		std::vector<NodeId> &catchups = role.getCatchups();
+		NodeIdList &catchups = role.getCatchups();
 		if (catchups.size() > 0) {
 			ss << ", ";
 			for (size_t pos = 0; pos < catchups.size(); pos++) {
@@ -881,11 +924,11 @@ std::string PartitionTable::dumpPartitions(
 		<< "]";
 		ss << "[" << dumpPartitionStatusEx(getPartitionStatus(pId)) << "]";
 
-		std::vector<NodeId> currentBackupList;
+		NodeIdList currentBackupList;
 		NodeId curretOwnerNodeId = role.getOwner();
 		PartitionRevision &revision = role.getRevision();
-		std::vector<NodeId> &backups = role.getBackups();
-		std::vector<NodeId> &catchups = role.getCatchups();
+		NodeIdList &backups = role.getBackups();
+		NodeIdList &catchups = role.getCatchups();
 		int32_t backupNum = static_cast<int32_t>(backups.size());
 		int32_t catchupNum = static_cast<int32_t>(catchups.size());
 
@@ -940,8 +983,8 @@ std::string PartitionTable::dumpPartitionsList(
 	countList.assign(static_cast<size_t>(nodeNum_), 0);
 	ownerCountList.assign(static_cast<size_t>(nodeNum_), 0);
 	uint32_t partitionNum = config_.partitionNum_;
-//	int32_t replicationNum = config_.replicationNum_;
-//	size_t pos = 0;
+	int32_t replicationNum = config_.replicationNum_;
+	size_t pos = 0;
 
 	PartitionId pId;
 	LogSequentialNumber maxLSN = 0;
@@ -958,13 +1001,13 @@ std::string PartitionTable::dumpPartitionsList(
 	ss << "[";
 	for (pId = 0; pId < partitionNum; pId++) {
 		PartitionRole *role = &partitions_[pId].roles_[type];
-//		int32_t psum = 0;
-//		int32_t currentPos = 0;
-		std::vector<NodeId> currentBackupList;
+		int32_t psum = 0;
+		int32_t currentPos = 0;
+		NodeIdList currentBackupList;
 		NodeId curretOwnerNodeId = role->getOwner();
-//		PartitionRevision &revision = role->getRevision();
-		std::vector<NodeId> &backups = role->getBackups();
-//		int32_t backupNum = static_cast<int32_t>(backups.size());
+		PartitionRevision &revision = role->getRevision();
+		NodeIdList &backups = role->getBackups();
+		int32_t backupNum = static_cast<int32_t>(backups.size());
 		ss << "{pId=" << pId << ", owner="<< dumpNodeAddress(curretOwnerNodeId) 
 				<< ", backup=" << dumpNodeAddressList(backups) << "}";
 		if (pId != partitionNum - 1) {
@@ -1123,7 +1166,15 @@ void PartitionTable::getServiceAddress(
 	picojson::object &resultObj = result.get<picojson::object>();
 
 	if (nodeId != UNDEF_NODEID) {
-		NodeAddress address = getNodeInfo(nodeId).getNodeAddress(addressType);
+		NodeAddress address;
+		if (hasPublicAddress_ && 
+				(addressType == TRANSACTION_SERVICE
+				)) {
+			address = getNodeInfo(nodeId).publicAddressInfo_.getNodeAddress(addressType);
+		}
+		else {
+			 address = getNodeInfo(nodeId).getNodeAddress(addressType);
+		}
 		resultObj["address"] = picojson::value(address.toString(false));
 		resultObj["port"] = picojson::value(static_cast<double>(address.port_));
 	}
@@ -1263,7 +1314,7 @@ void PartitionTable::getActiveNodeList(T1 &activeNodeList,  T2 &downNodeSet,
 	}
 }
 
-template void PartitionTable::getActiveNodeList(std::vector<NodeId> &activeNodeList,
+template void PartitionTable::getActiveNodeList(NodeIdList &activeNodeList,
 		util::Set<NodeId> &downNodeList, int64_t currentTime);
 
 void PartitionTable::changeClusterStatus(ClusterStatus status,
@@ -1309,9 +1360,9 @@ void PartitionTable::resetDownNode(NodeId targetNodeId) {
 				isDown = true;
 			}
 		}
-		std::vector<NodeId> currentBackups = currentRole.getBackups();
-		std::vector<NodeId> currentCatchups = currentRole.getCatchups();
-		std::vector<NodeId> tmpBackups, tmpCatchups;
+		NodeIdList currentBackups = currentRole.getBackups();
+		NodeIdList currentCatchups = currentRole.getCatchups();
+		NodeIdList tmpBackups, tmpCatchups;
 		for (size_t pos = 0; pos < currentBackups.size(); pos++) {
 			if (nodes_[currentBackups[pos]].heartbeatTimeout_ == UNDEF_TTL) {
 				isDown = true;
@@ -1470,7 +1521,7 @@ bool assignPartition(
 		partitionCountList[pId]++;
 	}
 	else if (role.getBackupSize() < backupNum) {
-		std::vector<NodeId> &backups = role.getBackups();
+		NodeIdList &backups = role.getBackups();
 		backups.push_back(nodeId);
 		dataCountList[nodePos]++;
 		partitionCountList[pId]++;
@@ -1514,7 +1565,7 @@ void PartitionTable::assignGoalTable(
 	int32_t backupNum = getReplicationNum();
 	int32_t partitionNum = getPartitionNum();
 	int32_t nodeNum = nodeIdList.size();
-//	int32_t replicationNum= getReplicationNum();
+	int32_t replicationNum= getReplicationNum();
 	if (backupNum > nodeNum - 1) {
 		backupNum = nodeNum - 1;
 	}
@@ -1566,7 +1617,7 @@ void PartitionTable::assignGoalTable(
 		nodeQueue.push_back(node);
 	}
 
-//	int32_t targetCheckReplicaNum = backupNum + 1;
+	int32_t targetCheckReplicaNum = backupNum + 1;
 	int64_t nodeNumCounter = 0;
 	int32_t totalAssignCount = 0;
 	int32_t dataTotalLimit = (1 + backupNum) * getPartitionNum(); 
@@ -1664,7 +1715,7 @@ void setNodePosition(util::Vector<int32_t> &nodeMap, NodeId nodeId, int32_t pos)
 bool PartitionTable::applyInitialRule(PartitionContext &context) {
 	SubPartitionTable &subPartitionTable = context.subPartitionTable_;
 	subPartitionTable.clear();
-//	bool isConfigurationChange = context.isConfigurationChange();
+	bool isConfigurationChange = context.isConfigurationChange();
 	util::NormalOStringStream strstrm;
 	util::Random random(static_cast<int64_t>(util::DateTime::now(false).getUnixTime()));
 	util::XArray<NodeId> activeNodeList(context.getAllocator());
@@ -1681,10 +1732,10 @@ bool PartitionTable::applyInitialRule(PartitionContext &context) {
 				continue;
 			}
 			LogSequentialNumber goalLsn = getLSN(pId, goalOwner);
-//			NodeId targetNodeId = UNDEF_NODEID;
+			NodeId targetNodeId = UNDEF_NODEID;
 			if (goalLsn >= maxLsn && context.isLoadBalance_) {
-				std::vector<NodeId> &nextBackups = nextRole.getBackups();
-				std::vector<NodeId> &goalBackups = goalRole.getBackups();
+				NodeIdList &nextBackups = nextRole.getBackups();
+				NodeIdList &goalBackups = goalRole.getBackups();
 				nextRole.setOwner(goalOwner);
 				LogSequentialNumber ownerLsn = getLSN(pId, goalOwner);
 				LogSequentialNumber ownerStartLsn = getStartLSN(pId, goalOwner);
@@ -1747,9 +1798,9 @@ bool PartitionTable::applyInitialRule(PartitionContext &context) {
 					}
 				}
 				nextRole.setOwner(targetNodeId);
-				std::vector<NodeId> &nextBackups = nextRole.getBackups();
-				std::vector<NodeId> &goalBackups = goalRole.getBackups();
-				std::vector<NodeId> checkRole = goalBackups;
+				NodeIdList &nextBackups = nextRole.getBackups();
+				NodeIdList &goalBackups = goalRole.getBackups();
+				NodeIdList checkRole = goalBackups;
 				if (context.isLoadBalance_) {
 					if (targetNodeId != goalOwner) {
 						checkRole.push_back(goalOwner);
@@ -1777,13 +1828,13 @@ bool PartitionTable::applyInitialRule(PartitionContext &context) {
 			getPartitionRole(pId, goalRole, PT_CURRENT_GOAL);
 			PartitionRole currentRole;
 			getPartitionRole(pId, currentRole);
-			std::vector<NodeId> &goalBackups = goalRole.getBackups();
-			std::vector<NodeId> &nextBackups = currentRole.getBackups();
+			NodeIdList &goalBackups = goalRole.getBackups();
+			NodeIdList &nextBackups = currentRole.getBackups();
 			currentRole.setRevision(revision_);
 			currentRole.clearCatchup();
 			int32_t backupNum = currentRole.getBackupSize();
 			if (backupNum < context.backupNum_ &&  context.isLoadBalance_) {
-				std::vector<NodeId> checkRole = goalBackups;
+				NodeIdList checkRole = goalBackups;
 				NodeId ownerNodeId = currentRole.getOwner();
 				if (ownerNodeId != UNDEF_NODEID) {
 					LogSequentialNumber ownerLsn = getLSN(pId, ownerNodeId);
@@ -1827,20 +1878,20 @@ bool PartitionTable::applyAddRule(PartitionContext &context) {
 	subPartitionTable.clear();
 	util::StackAllocator &alloc = context.getAllocator();
 	util::StackAllocator::Scope scope(alloc);
-//	uint32_t partitionNum = getPartitionNum();
-//	int32_t targetBackupNum;
-//	int32_t replicationNum =  getReplicationNum();
+	uint32_t partitionNum = getPartitionNum();
+	int32_t targetBackupNum;
+	int32_t replicationNum =  getReplicationNum();
 	util::XArray<ReplicaInfo> resolvePartitonList(alloc);
 	util::XArray<NodeId> liveNodeList(alloc);
 	getLiveNodeIdList(liveNodeList);
 	int32_t backupNum = 0;
-//	size_t currentNodeNum = liveNodeList.size();
-//	if (static_cast<size_t>(replicationNum) > currentNodeNum - 1) {
-//		targetBackupNum = currentNodeNum - 1;
-//	}
-//	else {
-//		targetBackupNum = replicationNum;
-//	}
+	size_t currentNodeNum = liveNodeList.size();
+	if (static_cast<size_t>(replicationNum) > currentNodeNum - 1) {
+		targetBackupNum = currentNodeNum - 1;
+	}
+	else {
+		targetBackupNum = replicationNum;
+	}
 	PartitionId pId;
 
 	util::XArray<PartitionId> pIdList(alloc);
@@ -1887,10 +1938,10 @@ bool PartitionTable::applyAddRule(PartitionContext &context) {
 		if (goalOwner == UNDEF_NODEID) {
 			continue;
 		}
-		std::vector<NodeId> &currentBackups = currentRole.getBackups();
-//		std::vector<NodeId> &nextBackups = nextRole.getBackups();
-		std::vector<NodeId> &goalBackups = goalRole.getBackups();
-		std::vector<NodeId> catchups;
+		NodeIdList &currentBackups = currentRole.getBackups();
+		NodeIdList &nextBackups = nextRole.getBackups();
+		NodeIdList &goalBackups = goalRole.getBackups();
+		NodeIdList catchups;
 		if (!currentRole.isOwnerOrBackup(goalOwner)) {
 			if (goalBlockQueue_.find(targetPId, goalOwner)) {
 				continue;
@@ -1954,7 +2005,7 @@ bool PartitionTable::applyAddRule(PartitionContext &context) {
 bool PartitionTable::applyRemoveRule(PartitionContext &context) {
 	SubPartitionTable &subPartitionTable = context.subPartitionTable_;	
 	subPartitionTable.clear();
-//	util::StackAllocator &alloc = context.getAllocator();
+	util::StackAllocator &alloc = context.getAllocator();
 	for (PartitionId pId = 0; pId < getPartitionNum(); pId++) {
 		NodeId currentOwner = getOwner(pId);
 		if (currentOwner == UNDEF_NODEID) {
@@ -1968,10 +2019,10 @@ bool PartitionTable::applyRemoveRule(PartitionContext &context) {
 		if (goalOwner == UNDEF_NODEID) {
 			continue;
 		}
-		std::vector<NodeId> &currentBackups = currentRole.getBackups();
-		std::vector<NodeId> nextBackups;
-		std::vector<NodeId> nextCatchups;
-//		bool assigned = false;
+		NodeIdList &currentBackups = currentRole.getBackups();
+		NodeIdList nextBackups;
+		NodeIdList nextCatchups;
+		bool assigned = false;
 		if (!currentRole.isOwnerOrBackup(goalOwner)) {
 			continue;
 		}
@@ -2023,7 +2074,7 @@ bool PartitionTable::applyRemoveRule(PartitionContext &context) {
 bool PartitionTable::applySwapRule(PartitionContext &context) {
 	SubPartitionTable &subPartitionTable = context.subPartitionTable_;	
 	subPartitionTable.clear();
-//	util::StackAllocator &alloc = context.getAllocator();
+	util::StackAllocator &alloc = context.getAllocator();
 	for (PartitionId pId = 0; pId < getPartitionNum(); pId++) {
 		NodeId currentOwner = getOwner(pId);
 		if (currentOwner == UNDEF_NODEID) {
@@ -2037,11 +2088,11 @@ bool PartitionTable::applySwapRule(PartitionContext &context) {
 		if (currentOwner == goalOwner) {
 			continue;
 		}
-		std::vector<NodeId> &currentBackups = currentRole.getBackups();
-		std::vector<NodeId> &goalBackups = goalRole.getBackups();
+		NodeIdList &currentBackups = currentRole.getBackups();
+		NodeIdList &goalBackups = goalRole.getBackups();
 
-		std::vector<NodeId> nextBackups;
-		std::vector<NodeId> nextCatchups;
+		NodeIdList nextBackups;
+		NodeIdList nextCatchups;
 		if (!currentRole.isOwnerOrBackup(goalOwner)) {
 			continue;
 		}
@@ -2101,7 +2152,7 @@ void PartitionTable::planNext(PartitionContext &context) {
 	else {
 		context.backupNum_ = backupNum;
 	}
-//	int32_t applyRuleNo = -1;
+	int32_t applyRuleNo = -1;
 	while (true) {
 		if (applyInitialRule(context)) {
 			currentRuleNo_ = PARTITION_RULE_INITIAL;
@@ -2145,8 +2196,11 @@ void PartitionTable::planNext(PartitionContext &context) {
 		}
 	}	
 	context.subPartitionTable_.revision_ = getPartitionRevision();
-	std::vector<AddressInfo> &nodeList = context.subPartitionTable_.getNodeAddressList();
-	getNodeAddressInfo(nodeList);
+	AddressInfoList &nodeList
+			= context.subPartitionTable_.getNodeAddressList();
+	AddressInfoList &publicNodeList
+			= context.subPartitionTable_.getPublicNodeAddressList();
+	getNodeAddressInfo(nodeList, publicNodeList);
 }
 
 std::string DropNodeSet::dump() {
@@ -2194,10 +2248,10 @@ bool PartitionTable::checkTargetPartition(PartitionId pId, int32_t backupNum,
 	PartitionRole currentRole;
 	getPartitionRole(pId, currentRole);
 	NodeId currentOwnerId = currentRole.getOwner();
-	std::vector<NodeId> &currentBackups = currentRole.getBackups();
-	std::vector<NodeId> &currentCatchups = currentRole.getCatchups();
+	NodeIdList &currentBackups = currentRole.getBackups();
+	NodeIdList &currentCatchups = currentRole.getCatchups();
 	bool detectError = false;
-//	PartitionRoleStatus roleStatus;
+	PartitionRoleStatus roleStatus;
 	if (currentOwnerId == UNDEF_NODEID) {
 		loadInfo_.status_ = PT_OWNER_LOSS;
 	}
@@ -2240,6 +2294,21 @@ bool PartitionTable::checkTargetPartition(PartitionId pId, int32_t backupNum,
 			if (currentCatchups[0] != prevCatchupNodeId_) {
 				detectError = true;
 			}
+		}
+	}
+	if (getRuleNo() !=PARTITION_RULE_ADD && currentCatchups.size() > 0) {
+		clearCatchupRole(pId);
+		return true;
+	}
+	if (currentOwnerId != UNDEF_NODEID 
+			&& getErrorStatus(pId, currentOwnerId) == PT_ERROR_LONG_SYNC_FAIL) {
+		clearCatchupRole(pId);
+		return true;
+	}
+	for (size_t pos = 0; pos < currentCatchups.size(); pos++) {
+		if (getErrorStatus(pId, currentCatchups[pos]) == PT_ERROR_LONG_SYNC_FAIL) {
+			clearCatchupRole(pId);
+			return true;
 		}
 	}
 	for (size_t pos = 0; pos < currentCatchups.size(); pos++) {
@@ -2387,7 +2456,7 @@ void PartitionTable::modifyGoalTable(
 				continue;
 			}
 			if (ownerCountList[ownerPosition] == maxOwnerCount) {
-				std::vector<NodeId> &backups = role.getBackups();
+				NodeIdList &backups = role.getBackups();
 				if (backups.size() == 0) {
 					continue;
 				}
@@ -2411,7 +2480,7 @@ void PartitionTable::modifyGoalTable(
 					continue;
 				}
 				NodeId swapOwner = backups[minPos];
-				std::vector<NodeId> &swapBackups = swapRole.getBackups();
+				NodeIdList &swapBackups = swapRole.getBackups();
 				swapRole.setOwner(swapOwner);
 				swapBackups.clear();
 				swapBackups.push_back(owner);
@@ -2430,7 +2499,7 @@ void PartitionTable::modifyGoalTable(
 		}
 	}
 }
-
+	
 void PartitionTable::handleErrorStatus(PartitionId pId, NodeId targetNode, int32_t status) {
 	if (status == PT_ERROR_LONG_SYNC_FAIL) {
 		PartitionRole role;
@@ -2439,6 +2508,49 @@ void PartitionTable::handleErrorStatus(PartitionId pId, NodeId targetNode, int32
 		if (owner == targetNode && role.hasCatchupRole()) {
 			role.clearCatchup();
 			setPartitionRole(pId, role);
+		}
+	}
+}
+
+void PartitionTable::setPublicAddressInfo(
+		NodeId nodeId, AddressInfo &publicAddressInfo) {
+	if (publicAddressInfo.isValid()) {
+		if (!nodes_[nodeId].publicAddressInfo_.isValid()) {
+			nodes_[nodeId].publicAddressInfo_.setNodeAddress(
+					TRANSACTION_SERVICE, publicAddressInfo.transactionAddress_);
+		}
+	}
+}
+
+void PartitionTable::getNodeAddressInfo(
+		AddressInfoList &addressInfoList,
+		AddressInfoList &publicAddressInfoList) {
+	int32_t nodeNum = getNodeNum();
+	for (int32_t nodeId = 0; nodeId < nodeNum; nodeId++) {
+		AddressInfo addressInfo;
+		addressInfo.setNodeAddress(
+			CLUSTER_SERVICE, getNodeInfo(
+					nodeId).getNodeAddress(CLUSTER_SERVICE));
+		addressInfo.setNodeAddress(
+			SYNC_SERVICE, getNodeInfo(
+					nodeId).getNodeAddress(SYNC_SERVICE));
+		addressInfo.setNodeAddress(
+			TRANSACTION_SERVICE, getNodeInfo(
+					nodeId).getNodeAddress(TRANSACTION_SERVICE));
+		if (getHeartbeatTimeout(nodeId) != UNDEF_TTL) {
+			addressInfo.isActive_ = true;
+		}
+		else {
+			addressInfo.isActive_ = false;
+		}
+		addressInfoList.push_back(addressInfo);
+
+		if (getNodeInfo(nodeId).publicAddressInfo_.isValid()) {
+			AddressInfo publicAddressInfo;
+			publicAddressInfo.setNodeAddress(
+				TRANSACTION_SERVICE,
+				getNodeInfo(nodeId).publicAddressInfo_.getNodeAddress(TRANSACTION_SERVICE));
+			publicAddressInfoList.push_back(publicAddressInfo);
 		}
 	}
 }

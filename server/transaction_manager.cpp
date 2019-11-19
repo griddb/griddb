@@ -212,7 +212,8 @@ TransactionManager::ContextSource::ContextSource() :
 		txnTimeoutInterval_(TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL),
 		getMode_(AUTO),
 		txnMode_(AUTO_COMMIT),
-		storeMemoryAgingSwapRate_(TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE) {}
+		storeMemoryAgingSwapRate_(TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE),
+		timeZone_(util::TimeZone()) {}
 
 TransactionManager::ContextSource::ContextSource(
 		int32_t stmtType, bool isUpdateStmt) :
@@ -223,12 +224,14 @@ TransactionManager::ContextSource::ContextSource(
 		txnTimeoutInterval_(TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL),
 		getMode_(AUTO),
 		txnMode_(AUTO_COMMIT),
-		storeMemoryAgingSwapRate_(TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE) {}
+		storeMemoryAgingSwapRate_(TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE),
+		timeZone_(util::TimeZone()) {}
 
 TransactionManager::ContextSource::ContextSource(
 		int32_t stmtType, StatementId stmtId, ContainerId containerId,
 		int32_t txnTimeoutInterval, GetMode getMode, TransactionMode txnMode,
-		bool isUpdateStmt, double storeMemoryAgingSwapRate) :
+		bool isUpdateStmt, double storeMemoryAgingSwapRate,
+		const util::TimeZone &timeZone) :
 		stmtType_(stmtType),
 		isUpdateStmt_(isUpdateStmt),
 		stmtId_(stmtId),
@@ -236,7 +239,8 @@ TransactionManager::ContextSource::ContextSource(
 		txnTimeoutInterval_(txnTimeoutInterval),
 		getMode_(getMode),
 		txnMode_(txnMode),
-		storeMemoryAgingSwapRate_(storeMemoryAgingSwapRate) {}
+		storeMemoryAgingSwapRate_(storeMemoryAgingSwapRate),
+		timeZone_(timeZone) {}
 
 const TransactionManager::GetMode TransactionManager::AUTO = 0;
 const TransactionManager::GetMode TransactionManager::CREATE = 1 << 0;
@@ -254,15 +258,15 @@ const TransactionManager::TransactionMode
 		(TransactionManager::NO_AUTO_COMMIT_BEGIN |
 			TransactionManager::NO_AUTO_COMMIT_CONTINUE);
 
-TransactionManager::TransactionManager(ConfigTable &config)
-	: pgConfig_(config),
+TransactionManager::TransactionManager(ConfigTable &config, bool isSQL)
+: pgConfig_(config),
 	  replicationMode_(config.get<int32_t>(CONFIG_TABLE_TXN_REPLICATION_MODE)),
 	  replicationTimeoutInterval_(
 		  config.get<int32_t>(CONFIG_TABLE_TXN_REPLICATION_TIMEOUT_INTERVAL)),
 	  authenticationTimeoutInterval_(config.get<int32_t>(
 		  CONFIG_TABLE_TXN_AUTHENTICATION_TIMEOUT_INTERVAL)),
 	  reauthConfig_(
-		  config.get<int32_t>(CONFIG_TABLE_TXN_REAUTHENTICATION_INTERVAL)),  
+		  config.get<int32_t>(CONFIG_TABLE_TXN_REAUTHENTICATION_INTERVAL)),
 	  txnTimeoutLimit_(
 		  config.get<int32_t>(CONFIG_TABLE_TXN_TRANSACTION_TIMEOUT_LIMIT)),
 	  eventMonitor_(pgConfig_.getPartitionGroupCount()),
@@ -427,7 +431,8 @@ TransactionContext &TransactionManager::put(util::StackAllocator &alloc,
 			alloc, clientId,
 			src.containerId_, src.stmtId_, src.txnTimeoutInterval_, now, emNow,
 			src.getMode_, src.txnMode_, src.isUpdateStmt_, isRedo, txnId,
-			isExistTimeoutLimit, src.storeMemoryAgingSwapRate_);
+			isExistTimeoutLimit, src.storeMemoryAgingSwapRate_,
+			src.timeZone_);
 	txn.manager_ = this;
 	return txn;
 }
@@ -452,7 +457,8 @@ TransactionContext &TransactionManager::putNoExpire(util::StackAllocator &alloc,
 			alloc, clientId,
 			src.containerId_, src.stmtId_, TXN_NO_TRANSACTION_TIMEOUT_INTERVAL,
 			now, emNow, src.getMode_, src.txnMode_, src.isUpdateStmt_, isRedo,
-			txnId, isExistTimeoutLimit, src.storeMemoryAgingSwapRate_);
+			txnId, isExistTimeoutLimit, src.storeMemoryAgingSwapRate_,
+			src.timeZone_);
 	txn.manager_ = this;
 	return txn;
 }
@@ -1111,7 +1117,7 @@ TransactionContext &TransactionManager::Partition::put(
 		const util::DateTime &now, EventMonotonicTime emNow, GetMode getMode,
 		TransactionMode txnMode, bool isUpdateStmt, bool isRedo,
 		TransactionId txnId, bool isExistTimeoutLimit,
-		double storeMemoryAgingSwapRate) {
+		double storeMemoryAgingSwapRate, const util::TimeZone &timeZone) {
 	try {
 		if (!isExistTimeoutLimit) {
 		}
@@ -1144,7 +1150,8 @@ TransactionContext &TransactionManager::Partition::put(
 				txn->clear();
 				txn->set(
 						clientId, pId_, containerId, newReqExpireTime,
-						txnTimeoutInterval, storeMemoryAgingSwapRate);
+						txnTimeoutInterval, storeMemoryAgingSwapRate,
+						timeZone);
 			}
 			break;
 
@@ -1168,7 +1175,8 @@ TransactionContext &TransactionManager::Partition::put(
 			txn->clear();
 			txn->set(
 					clientId, pId_, containerId, newReqExpireTime,
-					txnTimeoutInterval, storeMemoryAgingSwapRate);
+					txnTimeoutInterval, storeMemoryAgingSwapRate,
+					timeZone);
 			break;
 
 		case PUT:  
@@ -1178,7 +1186,8 @@ TransactionContext &TransactionManager::Partition::put(
 				txn->clear();
 				txn->set(
 						clientId, pId_, containerId, newReqExpireTime,
-						txnTimeoutInterval, storeMemoryAgingSwapRate);
+						txnTimeoutInterval, storeMemoryAgingSwapRate,
+						timeZone);
 			}
 			else {
 				txn->contextExpireTime_ = newReqExpireTime;
@@ -1193,10 +1202,11 @@ TransactionContext &TransactionManager::Partition::put(
 
 		txn->alloc_ = &alloc;
 
+		util::DateTime::ZonedOption zonedOption = util::DateTime::ZonedOption::create(false, timeZone);
 		txn->stmtStartTime_ = now;
 		txn->stmtExpireTime_ = txn->stmtStartTime_;
 		txn->stmtExpireTime_.addField(
-			txn->txnTimeoutInterval_, util::DateTime::FIELD_SECOND);
+			txn->txnTimeoutInterval_, util::DateTime::FIELD_SECOND, zonedOption);
 
 		txn->isRedo_ = isRedo;
 
@@ -1780,4 +1790,11 @@ void TransactionManager::ConfigSetUpHandler::operator()(ConfigTable &config) {
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TXN_KEEPALIVE_COUNT, INT32)
 		.setMin(0)
 		.setDefault(5);
+
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TXN_LOCAL_SERVICE_ADDRESS, STRING)
+		.setDefault("");
+
+	CONFIG_TABLE_ADD_PARAM(config,
+			CONFIG_TABLE_TXN_NOTIFICATION_INTERFACE_ADDRESS, STRING)
+		.setDefault("");
 }

@@ -78,133 +78,7 @@ class ChunktManager;
 class ColumnInfo;
 class ResultSet;  
 class ResultSetOption;
-
-class Cursor {
-	virtual bool isFinished() const = 0;
-public:
-	static const uint64_t NUM_PER_EXEC = 500;
-};
-
-class IndexCursor : Cursor {
-public:
-	IndexCursor() {};
-	IndexCursor(const MvccRowImage &image) {
-		setMvccImage(image);
-	};
-	IndexCursor(bool isImmediate) {
-		if (isImmediate) {
-			setImmediateMode();
-		}
-	};
-
-	bool isFinished() const {
-		return data_.rowId_ == MAX_ROWID;
-	}
-	bool isImmediateMode() const {
-		return data_.type_ == MVCC_UNDEF;
-	}
-
-	void setImmediateMode() {
-		data_.type_ = MVCC_UNDEF;
-	}
-	void setMvccImage(const MvccRowImage &image) {
-		memcpy(&data_, &image, sizeof(Data));
-	}
-	MvccRowImage getMvccImage() const {
-		MvccRowImage image;
-		memcpy(&image, &data_, sizeof(Data));
-		return image;
-	}
-	MapType getMapType() const {return data_.mapType_;}
-	ColumnId getColumnId() const {return data_.columnId_;}
-	RowId getRowId() const {return data_.rowId_;}
-	static uint64_t getNum() {return NUM_PER_EXEC;}
-	void setMapType(MapType mapType) {data_.mapType_ = mapType;}
-	void setColumnId(ColumnId columnId) {data_.columnId_ = columnId;}
-	void setRowId(RowId rowId) {data_.rowId_ = rowId;}
-private:
-	struct Data {
-		Data() {
-			rowId_ = INITIAL_ROWID;
-			padding1_ = 0;
-			type_ = MVCC_INDEX;
-			mapType_ = MAP_TYPE_DEFAULT;
-			padding2_ = 0;
-			columnId_ = UNDEF_COLUMNID;
-		}
-
-		RowId rowId_; 
-		uint64_t padding1_; 
-		MVCC_IMAGE_TYPE type_;
-		MapType mapType_;
-		uint16_t padding2_;
-		ColumnId columnId_;
-	};
-	Data data_;
-};
-
-class ContainerCursor : Cursor {
-public:
-	ContainerCursor() {};
-	ContainerCursor(const MvccRowImage &image) {
-		setMvccImage(image);
-	};
-	ContainerCursor(bool isImmediate) {
-		if (isImmediate) {
-			setImmediateMode();
-		}
-	};
-
-	ContainerCursor(bool isImmediate, OId oId) {
-		if (isImmediate) {
-			setImmediateMode();
-		}
-		setContainerOId(oId);
-	};
-
-	bool isFinished() const {
-		return data_.rowId_ == MAX_ROWID;
-	}
-	bool isImmediateMode() const {
-		return data_.type_ == MVCC_UNDEF;
-	}
-
-	void setImmediateMode() {
-		data_.type_ = MVCC_UNDEF;
-	}
-	void setMvccImage(const MvccRowImage &image) {
-		memcpy(&data_, &image, sizeof(Data));
-	}
-	MvccRowImage getMvccImage() const {
-		MvccRowImage image;
-		memcpy(&image, &data_, sizeof(Data));
-		return image;
-	}
-	static uint64_t getNum() {return NUM_PER_EXEC;}
-	RowId getRowId() const {return data_.rowId_;}
-	void setRowId(RowId rowId) {data_.rowId_ = rowId;}
-	OId getContainerOId() const {return data_.containerOId_;}
-	void setContainerOId(OId oId) {data_.containerOId_ = oId;}
-private:
-	struct Data {
-		Data() {
-			rowId_ = INITIAL_ROWID;
-			containerOId_ = UNDEF_OID;
-			type_ = MVCC_CONTAINER;
-			padding1_ = 0;
-			padding2_ = 0;
-			padding3_ = 0;
-		}
-
-		RowId rowId_; 
-		OId containerOId_; 
-		MVCC_IMAGE_TYPE type_;
-		uint8_t padding1_;
-		uint16_t padding2_;
-		uint32_t padding3_;
-	};
-	Data data_;
-};
+class TreeFuncInfo;
 
 struct BGTask {
 	BGTask() {
@@ -303,13 +177,12 @@ public:
 		return limitIndexNumSize_;
 	}
 private:
-	static const uint32_t LIMIT_SMALL_SIZE_LIST[6];
-	static const uint32_t LIMIT_BIG_SIZE_LIST[6];
-	static const uint32_t LIMIT_ARRAY_NUM_LIST[6];
-	static const uint32_t LIMIT_COLUMN_NUM_LIST[6];
-	static const uint32_t LIMIT_CONTAINER_NAME_SIZE_LIST[6];
-	static const uint32_t LIMIT_INDEX_NUM_LIST[6];
-
+	static const uint32_t LIMIT_SMALL_SIZE_LIST[12];
+	static const uint32_t LIMIT_BIG_SIZE_LIST[12];
+	static const uint32_t LIMIT_ARRAY_NUM_LIST[12];
+	static const uint32_t LIMIT_COLUMN_NUM_LIST[12];
+	static const uint32_t LIMIT_CONTAINER_NAME_SIZE_LIST[12];
+	static const uint32_t LIMIT_INDEX_NUM_LIST[12];
 	uint32_t limitSmallSize_;
 	uint32_t limitBigSize_;
 	uint32_t limitArrayNumSize_;
@@ -577,7 +450,12 @@ public:
 
 	void createPartition(PartitionId pId);
 	void dropPartition(PartitionId pId);
-	UTIL_FORCEINLINE PartitionGroupId calcPartitionGroupId(PartitionId pId);
+	/*!
+		@brief Get PartitionGroupId from PartitionId
+	*/
+	inline PartitionGroupId calcPartitionGroupId(PartitionId pId) {
+		return pgConfig_.getPartitionGroupId(pId);
+	}
 
 	void setCurrentBGTask(PartitionGroupId pgId, const BGTask &bgTask) {
 		currentBackgroundList_[pgId] = bgTask;
@@ -597,7 +475,8 @@ public:
 	void clearAllBGTask(TransactionContext &txn);
 	static BaseIndex *getIndex(TransactionContext &txn, 
 		ObjectManager &objectManager, MapType mapType, OId mapOId, 
-		const AllocateStrategy &strategy, BaseContainer *container);
+		const AllocateStrategy &strategy, BaseContainer *container,
+		TreeFuncInfo *funcInfo);
 
 	friend std::ostream &operator<<(
 		std::ostream &output, const DataStore::BackgroundData &bgData);
@@ -1022,7 +901,7 @@ private:
 	static const ChunkId INITIAL_CHUNK_ID = 0;
 	static const uint32_t FIRST_OBJECT_OFFSET =
 		ObjectManager::CHUNK_HEADER_BLOCK_SIZE * 2 + 4;
-	static const OId PARTITION_HEADER_OID;
+	const OId PARTITION_HEADER_OID;
 
 private:					  
 	std::string cpFilePath_;  

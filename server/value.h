@@ -589,7 +589,7 @@ public:
 					objectData + ValueProcessor::getEncodedVarSize(varDataSize);
 				uint32_t totalSize = *reinterpret_cast<const uint32_t *>(addr);
 				addr += sizeof(uint32_t);
-//				const OId *oId = reinterpret_cast<const OId *>(addr);
+				const OId *oId = reinterpret_cast<const OId *>(addr);
 				data_.object_.set(objectData, totalSize, true);
 			}
 			else {
@@ -686,28 +686,94 @@ typedef void (*Calculator2)(TransactionContext &txn, uint8_t const *p,
 	uint32_t size1, uint8_t const *q, uint32_t size2, Value &value);
 
 /*!
-	@brief Term Condition
+*	@brief Represents the type of Operation
 */
-struct TermCondition {
-	Operator operator_;		 
-	uint32_t columnId_;		 
-	uint32_t columnOffset_;  
-	const uint8_t *value_;   
-	uint32_t valueSize_;  
+class DSExpression {
+public:
+	enum Operation {
+		ADD,
+		SUB,
+		MUL,
+		DIV,
+		REM,
+		IS,
+		ISNOT,
+		BITNOT,
+		BITAND,
+		BITOR,
+		LSHIFT,
+		RSHIFT,
+		NE,
+		EQ,
+		LT,
+		LE,
+		GT,
+		GE,
+		PLUS,
+		MINUS,
+		BITMINUS,
+		BETWEEN,
+		NOTBETWEEN,
+		NONE,
+		IS_NULL,
+		IS_NOT_NULL
+		,
+		GEOM_OP
+	};
 
-	TermCondition()
-		: operator_(NULL),
-		  columnId_(0),
-		  columnOffset_(0),
-		  value_(NULL),
-		  valueSize_(0) {}
-	TermCondition(Operator operatorFunction, uint32_t columnId,
-		uint32_t columnOffset, const uint8_t *value, uint32_t valueSize)
-		: operator_(operatorFunction),
-		  columnId_(columnId),
-		  columnOffset_(columnOffset),
-		  value_(value),
-		  valueSize_(valueSize) {}
+	static const char8_t *getOperationStr(Operation op) {
+		switch (op) {
+		case ADD: return "+"; break;
+		case SUB: return "-"; break;
+		case MUL: return "*"; break;
+		case DIV: return "/"; break;
+		case REM: return "REM"; break;
+		case IS: return "IS"; break;
+		case ISNOT: return "ISNOT"; break;
+		case BITNOT: return "BITNOT"; break;
+		case BITAND: return "BITAND"; break;
+		case BITOR: return "BITOR"; break;
+		case LSHIFT: return "LSHIFT"; break;
+		case RSHIFT: return "RSHIFT"; break;
+		case NE: return "!="; break;
+		case EQ: return "="; break;
+		case LT: return "<"; break;
+		case LE: return "<="; break;
+		case GT: return ">"; break;
+		case GE: return ">="; break;
+		case PLUS: return "PLUS"; break;
+		case MINUS: return "MINUS"; break;
+		case BITMINUS: return "BITMINUS"; break;
+		case BETWEEN: return "BETWEEN"; break;
+		case NOTBETWEEN: return "NOTBETWEEN"; break;
+		case NONE: return "NONE"; break;
+		case IS_NULL: return "IS_NULL"; break;
+		case IS_NOT_NULL: return "IS_NOT_NULL"; break;
+		case GEOM_OP: return "GEOM_OP"; break;
+		default: assert(false);
+		}
+		return NULL;
+	}
+
+	static bool isIncluded(Operation op) {
+		if (op == EQ || op == LE || op == GE) {
+			return true;
+		}
+		return false;
+	}
+	static bool isStartCondition(Operation op) {
+		if (op == GT || op == GE || op == EQ) {
+			return true;
+		}
+		return false;
+	}
+	static bool isEndCondition(Operation op) {
+		if (op == LT || op == LE) {
+			return true;
+		}
+		return false;
+	}
 };
+
 
 #endif

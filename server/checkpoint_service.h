@@ -32,7 +32,6 @@
 #include "sync_manager.h"
 
 
-
 class CheckpointServiceMainHandler;  
 class CheckpointServiceGroupHandler;  
 class CheckpointOperationHandler;   
@@ -98,8 +97,6 @@ public:
 	~CheckpointHandler(){};
 
 	void initialize(const ManagerSet &mgrSet);
-
-	void operator()(EventContext &ec, Event &ev) {};
 
 	TransactionService *transactionService_;
 	TransactionManager *transactionManager_;
@@ -173,7 +170,7 @@ public:
 class FlushLogPeriodicallyHandler : public CheckpointHandler {
 public:
 	FlushLogPeriodicallyHandler(){};
-	void operator()(EventContext &ec);
+	void operator()(EventContext &ec, Event &ev);
 };
 
 /*!
@@ -562,7 +559,9 @@ private:
 	uint64_t backupLog(
 			uint32_t flag, PartitionGroupId pgId, const std::string &backupPath);
 
-	bool makeBackupDirectory(int32_t mode, const std::string &backupName);
+	bool makeBackupDirectory(
+			int32_t mode, bool makeSubDir,
+			const std::string &backupName);
 
 	void setLastCpStartLsn(PartitionId pId, LogSequentialNumber lsn);
 

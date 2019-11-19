@@ -161,11 +161,13 @@ void QueryProcessor::searchGeometryRelated(TransactionContext &txn,
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 				"Cannot search not-geometry collection by spacial condition.");
 		}
-
-		if (!collection.hasIndex(txn, columnId, MAP_TYPE_SPATIAL)) {
+		bool withPartialMatch = false;
+		util::Vector<ColumnId> columnIds(txn.getDefaultAllocator());
+		columnIds.push_back(columnId);
+		if (!collection.hasIndex(txn, columnIds, MAP_TYPE_SPATIAL, withPartialMatch)) {
 			util::XArray<OId> tmpOIdList(txn.getDefaultAllocator());
 			tmpOIdList.clear();
-			BtreeMap::SearchContext sc;
+			BtreeMap::SearchContext sc (txn.getDefaultAllocator(), UNDEF_COLUMNID);
 			collection.searchRowIdIndex(txn, sc, tmpOIdList, ORDER_UNDEFINED);
 			util::XArray<OId>::iterator itr;
 			BaseContainer::RowArray rowArray(txn, &collection);
@@ -195,9 +197,8 @@ void QueryProcessor::searchGeometryRelated(TransactionContext &txn,
 			}
 		}
 		else {
-			RtreeMap::SearchContext sc;
-			sc.valid_ = true;
-			sc.columnId_ = columnId;
+			RtreeMap::SearchContext::GeomeryCondition geomCond;
+			geomCond.valid_ = true;
 			if (geom->getType() == Geometry::QUADRATICSURFACE) {
 				if (geometryOp == GEOMETRY_INTERSECT ||
 					geometryOp == GEOMETRY_QSF_INTERSECT) {
@@ -208,8 +209,8 @@ void QueryProcessor::searchGeometryRelated(TransactionContext &txn,
 							GS_ERROR_TQ_CONSTRAINT_GIS_CANNOT_GET_VALUE,
 							"Quadratic surface does not have pv3key");
 					}
-					sc.relation_ = GEOMETRY_QSF_INTERSECT;
-					sc.pkey_ = qsf->getPv3Key();
+					geomCond.relation_ = GEOMETRY_QSF_INTERSECT;
+					geomCond.pkey_ = qsf->getPv3Key();
 				}
 				else {
 					GS_THROW_USER_ERROR(
@@ -218,10 +219,16 @@ void QueryProcessor::searchGeometryRelated(TransactionContext &txn,
 				}
 			}
 			else {
-				sc.rect_[0] = geom->getBoundingRect();
-				sc.relation_ = geometryOp;
+				geomCond.rect_[0] = geom->getBoundingRect();
+				geomCond.relation_ = geometryOp;
 			}
-			sc.limit_ = limit;
+			TermCondition cond(columnInfo->getColumnType(), 
+				columnInfo->getColumnType(), DSExpression::GEOM_OP, 
+				columnInfo->getColumnId(),
+				&geomCond, sizeof(RtreeMap::SearchContext::GeomeryCondition));
+			RtreeMap::SearchContext sc (txn.getDefaultAllocator(), columnInfo->getColumnId());
+			sc.addCondition(cond, true);
+			sc.setLimit(limit);
 			collection.searchColumnIdIndex(txn, sc, oIdList);
 		}
 		resultSet.setResultType(RESULT_ROW_ID_SET, oIdList.size());
@@ -256,10 +263,13 @@ void QueryProcessor::searchGeometry(TransactionContext &txn,
 				"Cannot search not-geometry collection by spacial condition.");
 		}
 
-		if (!collection.hasIndex(txn, columnId, MAP_TYPE_SPATIAL)) {
+		bool withPartialMatch = false;
+		util::Vector<ColumnId> columnIds(txn.getDefaultAllocator());
+		columnIds.push_back(columnId);
+		if (!collection.hasIndex(txn, columnIds, MAP_TYPE_SPATIAL, withPartialMatch)) {
 			util::XArray<OId> tmpOIdList(txn.getDefaultAllocator());
 			tmpOIdList.clear();
-			BtreeMap::SearchContext sc;
+			BtreeMap::SearchContext sc (txn.getDefaultAllocator(), UNDEF_COLUMNID);
 			collection.searchRowIdIndex(txn, sc, tmpOIdList, ORDER_UNDEFINED);
 			util::XArray<OId>::iterator itr;
 			BaseContainer::RowArray rowArray(txn, &collection);
@@ -279,12 +289,20 @@ void QueryProcessor::searchGeometry(TransactionContext &txn,
 			}
 		}
 		else {
-			RtreeMap::SearchContext sc;
-			sc.valid_ = true;
-			sc.rect_[0] = geom1->getBoundingRect();
-			sc.rect_[1] = geom2->getBoundingRect();
-			sc.relation_ = GEOMETRY_DIFFERENTIAL;
-			sc.limit_ = limit;
+			RtreeMap::SearchContext::GeomeryCondition geomCond;
+			geomCond.valid_ = true;
+			geomCond.rect_[0] = geom1->getBoundingRect();
+			geomCond.rect_[1] = geom2->getBoundingRect();
+			geomCond.relation_ = GEOMETRY_DIFFERENTIAL;
+
+			TermCondition cond(columnInfo->getColumnType(), 
+				columnInfo->getColumnType(), DSExpression::GEOM_OP, 
+				columnInfo->getColumnId(),
+				&geomCond, sizeof(RtreeMap::SearchContext::GeomeryCondition));
+			RtreeMap::SearchContext sc (txn.getDefaultAllocator(), columnInfo->getColumnId());
+			sc.addCondition(cond, true);
+			sc.setLimit(limit);
+
 			collection.searchColumnIdIndex(txn, sc, oIdList);
 		}
 		resultSet.setResultType(RESULT_ROW_ID_SET, oIdList.size());

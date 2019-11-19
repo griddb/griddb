@@ -276,6 +276,8 @@ public:
 
 	util::SocketAddress listenAddress_;
 	util::SocketAddress multicastAddress_;
+	Config& setMulticastIntefaceAddress(const char8_t *address, uint16_t port);
+	util::SocketAddress multicastInterfaceAddress_;
 
 	util::SocketAddress serverAddress_;
 
@@ -1510,7 +1512,9 @@ public:
 	bool openAsServer(
 			util::Socket &acceptedSocket,
 			const util::SocketAddress &acceptedAddress);
-	bool openAsMulticast(const util::SocketAddress &address);
+
+	bool openAsMulticast(const util::SocketAddress &address,
+			const util::SocketAddress *interfaceAddr = NULL);
 
 	void sendNegotiationEvent(
 			LockGuard &ndGuard, const Event::Source &eventSource);

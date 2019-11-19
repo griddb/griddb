@@ -295,6 +295,33 @@ bool VariableArrayCursor::nextElement(bool forRemove) {
 	return true;
 }
 
+
+bool VariableArrayCursor::moveElement(uint32_t pos) {
+	if (pos >= elemNum_) {
+		return false;
+	}
+	if (elemCursor_ == UNDEF_CURSOR_POS || elemCursor_ > pos) {
+		if (elemCursor_ > pos) {
+			reset();
+		}
+		for (uint32_t i = 0; i <= pos; i++) {
+			bool isExist = nextElement();
+			if (!isExist) {
+				return false;
+			}
+		}
+	} else {
+		for (uint32_t i = elemCursor_; i < pos; i++) {
+			bool isExist = nextElement();
+			if (!isExist) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
+
 /*!
 	@brief Clone
 */
@@ -432,6 +459,223 @@ void VariableArrayCursor::finalize() {
 	}
 }
 
+void VariableArrayCursor::checkVarDataSize(TransactionContext &txn,
+	ObjectManager &objectManager,
+	const util::XArray< std::pair<uint8_t *, uint32_t> > &varList,
+	const util::XArray<ColumnType> &columnTypeList,
+	bool isConvertSpecialType,
+	util::XArray<uint32_t> &varDataObjectSizeList,
+	util::XArray<uint32_t> &varDataObjectPosList) {
+	uint32_t variableColumnNum = varList.size();
+
+	uint32_t currentObjectSize = ValueProcessor::getEncodedVarSize(
+		variableColumnNum);  
+	varDataObjectSizeList.push_back(currentObjectSize);  
+	uint32_t varColumnObjectCount = 0;
+	util::XArray<uint32_t> accumulateSizeList(txn.getDefaultAllocator());
+	for (uint32_t elemNth = 0; elemNth < varList.size(); elemNth++) {
+		ColumnType columnType = columnTypeList[elemNth];
+		uint32_t elemSize = varList[elemNth].second;
+		if (isConvertSpecialType) {
+			if (columnType == COLUMN_TYPE_STRING_ARRAY) {
+				elemSize = LINK_VARIABLE_COLUMN_DATA_SIZE;
+			} else if (columnType == COLUMN_TYPE_BLOB) {
+				elemSize = BlobCursor::getPrefixDataSize(objectManager, elemSize);
+			}
+		}
+		for (size_t checkCount = 0; !accumulateSizeList.empty() && 
+			(currentObjectSize + elemSize +
+				ValueProcessor::getEncodedVarSize(elemSize) +
+				NEXT_OBJECT_LINK_INFO_SIZE) >
+			static_cast<uint32_t>(objectManager.getRecommendtLimitObjectSize());
+			checkCount++) {
+			uint32_t dividedObjectSize = currentObjectSize;
+			uint32_t dividedElemNth = elemNth - 1;
+			Size_t estimateAllocateSize =
+				objectManager.estimateAllocateSize(currentObjectSize) + NEXT_OBJECT_LINK_INFO_SIZE;
+			if (checkCount == 0 && VariableArrayCursor::divisionThreshold(currentObjectSize) < estimateAllocateSize) {
+				for (size_t i = 0; i < accumulateSizeList.size(); i++) {
+					uint32_t accumulateSize = accumulateSizeList[accumulateSizeList.size() - 1 - i];
+					if (accumulateSize == currentObjectSize) {
+						continue;
+					}
+					Size_t estimateAllocateSizeFront =
+						objectManager.estimateAllocateSize(accumulateSize + NEXT_OBJECT_LINK_INFO_SIZE) + ObjectAllocator::BLOCK_HEADER_SIZE;
+					Size_t estimateAllocateSizeBack =
+						objectManager.estimateAllocateSize(currentObjectSize - accumulateSize);
+					if (estimateAllocateSizeFront + estimateAllocateSizeBack < estimateAllocateSize && 
+						(VariableArrayCursor::divisionThreshold(accumulateSize + ObjectAllocator::BLOCK_HEADER_SIZE) >= estimateAllocateSizeFront)) {
+						dividedObjectSize = accumulateSize;
+						dividedElemNth -= static_cast<uint32_t>(i);
+						break;
+					}
+				}
+			}
+			varDataObjectPosList.push_back(dividedElemNth);
+			varDataObjectSizeList[varColumnObjectCount] = dividedObjectSize + NEXT_OBJECT_LINK_INFO_SIZE;
+			++varColumnObjectCount;
+			currentObjectSize = currentObjectSize - dividedObjectSize;	 
+			varDataObjectSizeList.push_back(currentObjectSize);  
+			accumulateSizeList.erase(accumulateSizeList.begin(), accumulateSizeList.end() - (elemNth - 1 - dividedElemNth));
+		}
+		currentObjectSize +=
+			elemSize + ValueProcessor::getEncodedVarSize(elemSize);
+		accumulateSizeList.push_back(currentObjectSize);
+	}
+
+	Size_t estimateAllocateSize =
+		objectManager.estimateAllocateSize(currentObjectSize);
+	if (VariableArrayCursor::divisionThreshold(currentObjectSize) < estimateAllocateSize) {
+		uint32_t dividedObjectSize = currentObjectSize;
+		uint32_t dividedElemNth = variableColumnNum - 1;
+		for (size_t i = 0; i < accumulateSizeList.size(); i++) {
+			uint32_t accumulateSize = accumulateSizeList[accumulateSizeList.size() - 1 - i];
+			if (accumulateSize == currentObjectSize) {
+				continue;
+			}
+			Size_t estimateAllocateSizeFront =
+				objectManager.estimateAllocateSize(accumulateSize + NEXT_OBJECT_LINK_INFO_SIZE) + ObjectAllocator::BLOCK_HEADER_SIZE;
+			Size_t estimateAllocateSizeBack =
+				objectManager.estimateAllocateSize(currentObjectSize - accumulateSize);
+			if (estimateAllocateSizeFront + estimateAllocateSizeBack < estimateAllocateSize && 
+				(VariableArrayCursor::divisionThreshold(accumulateSize + ObjectAllocator::BLOCK_HEADER_SIZE) >= estimateAllocateSizeFront)) {
+				dividedObjectSize = accumulateSize;
+				dividedElemNth -= static_cast<uint32_t>(i);
+				break;
+			}
+		}
+		if (dividedObjectSize != currentObjectSize) {
+			varDataObjectPosList.push_back(dividedElemNth);
+			varDataObjectSizeList[varColumnObjectCount] = dividedObjectSize + NEXT_OBJECT_LINK_INFO_SIZE;
+			++varColumnObjectCount;
+			currentObjectSize = currentObjectSize - dividedObjectSize;
+			varDataObjectSizeList.push_back(currentObjectSize);  
+		}
+	}
+	varDataObjectSizeList[varColumnObjectCount] = currentObjectSize;
+	varDataObjectPosList.push_back(
+		static_cast<uint32_t>(variableColumnNum - 1));
+}
+
+OId VariableArrayCursor::createVariableArrayCursor(TransactionContext &txn,
+	ObjectManager &objectManager,
+	const AllocateStrategy &allocateStrategy,
+	const util::XArray< std::pair<uint8_t *, uint32_t> > &varList,
+	const util::XArray<ColumnType> &columnTypeList,
+	bool isConvertSpecialType,
+	const util::XArray<uint32_t> &varDataObjectSizeList,
+	const util::XArray<uint32_t> &varDataObjectPosList,
+	const util::XArray<OId> &oldVarDataOIdList,
+	OId neighborOId) {
+
+	const uint32_t variableColumnNum = static_cast<uint32_t>(columnTypeList.size());
+
+	OId topOId = UNDEF_OID;
+	uint32_t elemNth = 0;
+	uint8_t *destAddr = NULL;
+	OId variableOId = UNDEF_OID;
+	OId oldVarDataOId = UNDEF_OID;
+	BaseObject oldVarObj(txn.getPartitionId(), objectManager);
+	Size_t oldVarObjSize = 0;
+	uint8_t *nextLinkAddr = NULL;
+	for (size_t i = 0; i < varDataObjectSizeList.size(); ++i) {
+		if (i < oldVarDataOIdList.size()) {
+			oldVarDataOId = oldVarDataOIdList[i];
+			oldVarObj.load(oldVarDataOId, OBJECT_FOR_UPDATE);
+			oldVarObjSize =
+				objectManager.getSize(oldVarObj.getBaseAddr());
+		}
+		else {
+			oldVarDataOId = UNDEF_OID;
+			oldVarObjSize = 0;
+		}
+		if (oldVarObjSize >= varDataObjectSizeList[i]) {
+			destAddr = oldVarObj.getBaseAddr();
+			variableOId = oldVarDataOId;
+		}
+		else {
+			if (UNDEF_OID != oldVarDataOId) {
+				oldVarObj.finalize();
+			}
+			destAddr = oldVarObj.allocateNeighbor<uint8_t>(
+				varDataObjectSizeList[i], allocateStrategy, variableOId,
+				neighborOId,
+				OBJECT_TYPE_ROW);  
+			neighborOId = variableOId;
+			assert(destAddr);
+		}
+		if (i == 0) {
+			topOId = variableOId;
+			uint64_t encodedVariableColumnNum =
+				ValueProcessor::encodeVarSize(variableColumnNum);
+			uint32_t encodedVariableColumnNumLen =
+				ValueProcessor::getEncodedVarSize(variableColumnNum);
+			memcpy(destAddr, &encodedVariableColumnNum,
+				encodedVariableColumnNumLen);
+			destAddr += encodedVariableColumnNumLen;
+		}
+		else {
+			assert(nextLinkAddr);
+			uint64_t encodedOId =
+				ValueProcessor::encodeVarSizeOId(variableOId);
+			memcpy(nextLinkAddr, &encodedOId, sizeof(uint64_t));
+			nextLinkAddr = NULL;
+		}
+		for (; elemNth < varList.size(); elemNth++) {
+			uint32_t elemSize = varList[elemNth].second;
+			uint8_t *data = varList[elemNth].first;
+			uint32_t headerSize =
+				ValueProcessor::getEncodedVarSize(elemSize);
+			ColumnType columnType = columnTypeList[elemNth];
+			if (isConvertSpecialType && columnType == COLUMN_TYPE_STRING_ARRAY) {				
+				uint32_t linkHeaderValue =
+					ValueProcessor::encodeVarSize(
+						LINK_VARIABLE_COLUMN_DATA_SIZE);
+				uint32_t linkHeaderSize =
+					ValueProcessor::getEncodedVarSize(
+						LINK_VARIABLE_COLUMN_DATA_SIZE);
+				memcpy(destAddr, &linkHeaderValue, linkHeaderSize);
+				destAddr += linkHeaderSize;
+				memcpy(destAddr, &elemSize,
+					sizeof(uint32_t));  
+				destAddr += sizeof(uint32_t);
+				OId linkOId = UNDEF_OID;
+				if (elemSize > 0) {
+					linkOId = StringArrayProcessor::putToObject(txn,
+						objectManager, data, elemSize,
+						allocateStrategy,
+						variableOId);  
+				}
+				memcpy(destAddr, &linkOId, sizeof(OId));
+				destAddr += sizeof(OId);
+			} else if (isConvertSpecialType && columnType == COLUMN_TYPE_BLOB) {
+				uint32_t destSize;
+				BlobProcessor::setField(txn, objectManager,
+					data, elemSize,
+					destAddr, destSize,
+					allocateStrategy, variableOId);
+				destAddr += destSize;
+			} else {
+				memcpy(destAddr, data, headerSize + elemSize);
+				destAddr += headerSize + elemSize;
+			}
+			nextLinkAddr = destAddr;
+			if (elemNth == varDataObjectPosList[i]) {
+				elemNth++;
+				break;
+			}
+		}
+	}
+	for (size_t i = varDataObjectSizeList.size();
+		 i < oldVarDataOIdList.size(); ++i) {
+		assert(UNDEF_OID != oldVarDataOIdList[i]);
+		if (UNDEF_OID != oldVarDataOIdList[i]) {
+			objectManager.free(txn.getPartitionId(), oldVarDataOIdList[i]);
+		}
+	}
+	return topOId;
+}
+
 
 StringCursor::StringCursor(
 	TransactionContext &txn, ObjectManager &objectManager, OId oId)
@@ -561,6 +805,9 @@ void ValueProcessor::dumpSimpleValue(util::NormalOStringStream &stream, ColumnTy
 		if (withType) {
 			stream << "(" << getTypeName(columnType) << ")";
 		}
+		if (data == NULL && columnType != COLUMN_TYPE_NULL) {
+			stream << "NULL";
+		} else {
 		switch (columnType) {
 		case COLUMN_TYPE_STRING :
 			{
@@ -622,6 +869,7 @@ void ValueProcessor::dumpSimpleValue(util::NormalOStringStream &stream, ColumnTy
 		default:
 			stream << "(not implement)";
 			break;
+		}
 		}
 	}
 }

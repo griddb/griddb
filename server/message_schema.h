@@ -71,7 +71,7 @@ public:
 		return columnNum_;
 	}
 
-	const util::XArray<ColumnId>& getRowKeyColumnIdList() const {
+	const util::Vector<ColumnId>& getRowKeyColumnIdList() const {
 		return keyColumnIds_;
 	}
 	uint32_t getRowKeyNum() const {
@@ -201,7 +201,7 @@ protected:
 	static const uint8_t COLUMN_FLAG_NOT_NULL = 0x04;
 
 	uint32_t columnNum_;
-	util::XArray<ColumnId> keyColumnIds_;
+	util::Vector<ColumnId> keyColumnIds_;
 	util::XArray<ColumnType> columnTypeList_;
 	util::XArray<uint8_t> flagsList_;
 	util::Vector<util::String> columnNameList_;
@@ -259,7 +259,7 @@ public:
 		return compressionInfoList_[columnId];
 	}
 
-	util::XArray<ColumnId> &getCompressionColumnIdList() {
+	util::Vector<ColumnId> &getCompressionColumnIdList() {
 		return compressionColumnIdList_;
 	}
 
@@ -300,7 +300,7 @@ private:
 	uint32_t compressionInfoNum_;
 	DurationInfo compressionWindowInfo_;  
 	util::XArray<MessageCompressionInfo> compressionInfoList_;
-	util::XArray<ColumnId> compressionColumnIdList_;
+	util::Vector<ColumnId> compressionColumnIdList_;
 	COMPRESSION_TYPE compressionType_;
 };
 

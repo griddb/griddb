@@ -1446,18 +1446,35 @@ public:
 		@brief Information related to a search
 	*/
 	struct SearchContext : BaseIndex::SearchContext {
-		const void* key_;   
-		uint32_t keySize_;  
+		SearchContext(util::StackAllocator &alloc, ColumnId columnId) : 
+			BaseIndex::SearchContext(alloc, columnId) {}
 
-		SearchContext() : BaseIndex::SearchContext(), key_(NULL), keySize_(0) {}
+		SearchContext(util::StackAllocator &alloc, util::Vector<ColumnId> &columnIds) : 
+			BaseIndex::SearchContext(alloc, columnIds) {}
 
-		SearchContext(ColumnId columnId, const void* key, uint32_t keySize,
-			uint32_t conditionNum, TermCondition* conditionList,
+		SearchContext(util::StackAllocator &alloc, TermCondition &cond,
 			ResultSize limit)
 			: BaseIndex::SearchContext(
-				  columnId, conditionNum, conditionList, limit),
-			  key_(key),
-			  keySize_(keySize) {}
+				  alloc, cond, limit) {
+		}
+		TermCondition *getKeyCondition() {
+			assert(columnIdList_.size() == 1);
+			for (util::Vector<size_t>::iterator itr = keyList_.begin(); 
+				itr != keyList_.end(); itr++) {
+				if (conditionList_[*itr].opType_ == DSExpression::EQ) {
+					return &(conditionList_[*itr]);
+				}
+			}
+			return NULL;
+		}
+		void copy(util::StackAllocator &alloc, SearchContext &dest) {
+			BaseIndex::SearchContext::copy(alloc, dest);
+		}
+		std::string dump() {
+			util::NormalOStringStream strstrm;
+			strstrm << BaseIndex::SearchContext::dump();
+			return strstrm.str();
+		}
 	};
 
 	/*!
@@ -1510,7 +1527,7 @@ public:
 	int32_t update(
 		TransactionContext& txn, const void* key, OId oId, OId newOId);
 	int32_t search(
-		TransactionContext& txn, const void* key, uint32_t size, OId& oId);
+		TransactionContext& txn, const void* key, OId& oId);
 	int32_t search(TransactionContext &txn, SearchContext &sc,
 		util::XArray<OId> &idList, OutputOrder outputOrder = ORDER_UNDEFINED);
 	int32_t getAll(
@@ -1522,8 +1539,8 @@ public:
 	std::string validate(TransactionContext& txn);
 
 	HashMap(TransactionContext& txn, ObjectManager& objectManager,
-		const AllocateStrategy& strategy, BaseContainer* container)
-		: BaseIndex(txn, objectManager, strategy, container, MAP_TYPE_HASH),
+		const AllocateStrategy& strategy, BaseContainer* container, TreeFuncInfo *funcInfo)
+		: BaseIndex(txn, objectManager, strategy, container, funcInfo, MAP_TYPE_HASH),
 		  maxObjectSize_(objectManager.getMaxObjectSize()),
 		  maxArrayObjectSize_(maxObjectSize_ - ARRAY_OBJECT_HEADER_SIZE),
 		  maxArraySize_(maxArrayObjectSize_ >> OID_BIT_SIZE),
@@ -1536,8 +1553,8 @@ public:
 		  hashMapImage_(NULL),
 		  hashArray_(&objectManager, NULL, maxArraySize_) {}
 	HashMap(TransactionContext& txn, ObjectManager& objectManager, OId oId,
-		const AllocateStrategy& strategy, BaseContainer* container)
-		: BaseIndex(txn, objectManager, oId, strategy, container, MAP_TYPE_HASH),
+		const AllocateStrategy& strategy, BaseContainer* container, TreeFuncInfo *funcInfo)
+		: BaseIndex(txn, objectManager, oId, strategy, container, funcInfo, MAP_TYPE_HASH),
 		  maxObjectSize_(objectManager.getMaxObjectSize()),
 		  maxArrayObjectSize_(maxObjectSize_ - ARRAY_OBJECT_HEADER_SIZE),
 		  maxArraySize_(maxArrayObjectSize_ >> OID_BIT_SIZE),

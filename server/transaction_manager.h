@@ -274,7 +274,7 @@ public:
 	*/
 	enum ReplicationMode { REPLICATION_ASYNC, REPLICATION_SEMISYNC };
 
-	TransactionManager(ConfigTable &config);
+	TransactionManager(ConfigTable &config, bool isSQL = false);
 	~TransactionManager();
 
 	void createPartition(PartitionId pId);
@@ -322,13 +322,15 @@ public:
 		GetMode getMode_;
 		TransactionMode txnMode_;
 		double storeMemoryAgingSwapRate_;
+		util::TimeZone timeZone_;
 
 		ContextSource();
 		explicit ContextSource(int32_t stmtType, bool isUpdateStmt = false);
 		ContextSource(int32_t stmtType, StatementId stmtId,
 			ContainerId containerId, int32_t txnTimeoutInterval,
 			GetMode getMode, TransactionMode txnMode,
-			bool isUpdateStmt, double storeMemoryAgingSwapRate);
+			bool isUpdateStmt, double storeMemoryAgingSwapRate,
+			const util::TimeZone &timeZone);
 	};
 
 	TransactionContext &put(util::StackAllocator &alloc, PartitionId pId,
@@ -567,7 +569,8 @@ private:
 			const util::DateTime &now, EventMonotonicTime emNow,
 			GetMode getMode, TransactionMode txnMode, bool isUpdateStmt,
 			bool isRedo, TransactionId txnId, bool isExistTimeoutLimit,
-			double storeMemoryAgingSwapRate);
+			double storeMemoryAgingSwapRate,
+			const util::TimeZone &timeZone);
 		TransactionContext &get(
 			util::StackAllocator &alloc, const ClientId &clientId);
 		void remove(const ClientId &clientId);

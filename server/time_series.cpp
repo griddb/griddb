@@ -85,8 +85,8 @@ void TimeSeries::initialize(TransactionContext &txn) {
 void TimeSeries::set(TransactionContext &txn, const FullContainerKey &containerKey,
 	ContainerId containerId, OId columnSchemaOId,
 	MessageSchema *orgContainerSchema) {
-//	MessageTimeSeriesSchema *containerSchema =
-//		reinterpret_cast<MessageTimeSeriesSchema *>(orgContainerSchema);
+	MessageTimeSeriesSchema *containerSchema =
+		reinterpret_cast<MessageTimeSeriesSchema *>(orgContainerSchema);
 	baseContainerImage_->containerId_ = containerId;
 	setContainerExpirationStartTime(orgContainerSchema->getContainerExpirationStartTime());
 
@@ -156,7 +156,17 @@ void TimeSeries::set(TransactionContext &txn, const FullContainerKey &containerK
 		dataStore_->setLastExpiredTime(txn.getPartitionId(), txn.getStatementStartTime().getUnixTime());
 	}
 
-	BtreeMap mvccMap(txn, *getObjectManager(), getMapAllcateStrategy(), this);
+	util::StackAllocator &alloc = txn.getDefaultAllocator();
+	util::Vector<ColumnId> columnIds(alloc);
+	columnIds.push_back(ColumnInfo::ROW_KEY_COLUMN_ID);
+	rowIdFuncInfo_ = ALLOC_NEW(alloc) TreeFuncInfo(alloc);
+	rowIdFuncInfo_->initialize(columnIds, NULL);
+
+	columnIds[0] = UNDEF_COLUMNID;
+	mvccFuncInfo_ = ALLOC_NEW(alloc) TreeFuncInfo(alloc);
+	mvccFuncInfo_->initialize(columnIds, NULL);
+
+	BtreeMap mvccMap(txn, *getObjectManager(), getMapAllcateStrategy(), this, mvccFuncInfo_);
 	mvccMap.initialize<TransactionId, MvccRowImage>(
 		txn, COLUMN_TYPE_OID, false, BtreeMap::TYPE_SINGLE_KEY);
 	baseContainerImage_->mvccMapOId_ = mvccMap.getBaseOId();
@@ -251,7 +261,9 @@ void TimeSeries::createIndex(TransactionContext &txn,
 			return;
 		}
 		IndexInfo realIndexInfo = indexInfo;
-		if (realIndexInfo.columnIds_.size() != 1 || realIndexInfo.anyTypeMatches_ != 0 || realIndexInfo.anyNameMatches_ != 0) {
+		if ((realIndexInfo.columnIds_.size() < 1 ||
+			realIndexInfo.columnIds_.size() > MAX_COMPOSITE_COLUMN_NUM) || 
+			realIndexInfo.anyTypeMatches_ != 0 || realIndexInfo.anyNameMatches_ != 0) {
 			GS_THROW_USER_ERROR(
 				GS_ERROR_CM_NOT_SUPPORTED, 
 				"Invalid parameter, number of columnName is invalid or anyType is specified or any index name is specified, "
@@ -266,27 +278,41 @@ void TimeSeries::createIndex(TransactionContext &txn,
 			static_cast<uint32_t>(realIndexInfo.indexName_.size()),
 			"indexName");
 
-		ColumnId inputColumnId = realIndexInfo.columnIds_[0];
-		if (inputColumnId >= getColumnNum()) {
-			GS_THROW_USER_ERROR(GS_ERROR_DS_COLUMN_ID_INVALID, "");
-		}
+		util::Set<ColumnId> columnIdSet(txn.getDefaultAllocator());
+		for (size_t i = 0; i < realIndexInfo.columnIds_.size(); i++) {
+			ColumnId inputColumnId = realIndexInfo.columnIds_[i];
+			if (inputColumnId >= getColumnNum()) {
+				GS_THROW_USER_ERROR(GS_ERROR_DS_COLUMN_ID_INVALID, 
+					"invalid columnId : " << inputColumnId);
+			}
+			if (columnIdSet.find(inputColumnId) != columnIdSet.end()) {
+				GS_THROW_USER_ERROR(GS_ERROR_CM_NOT_SUPPORTED, 
+					"Invalid parameter, same column can not be specified more than one, "
+					   << ", first columnNumber = " << inputColumnId);
+			} else {
+				columnIdSet.insert(inputColumnId);
+			}
 
-		ColumnInfo& columnInfo = getColumnInfo(inputColumnId);
-		if (realIndexInfo.mapType == MAP_TYPE_DEFAULT) {
-			realIndexInfo.mapType = defaultIndexType[columnInfo.getColumnType()];
+			ColumnInfo& columnInfo = getColumnInfo(inputColumnId);
+			if (realIndexInfo.mapType == MAP_TYPE_DEFAULT) {
+				realIndexInfo.mapType = defaultIndexType[columnInfo.getColumnType()];
+			}
 		}
 		MapType inputMapType = realIndexInfo.mapType;
 
 		GS_TRACE_INFO(TIME_SERIES, GS_TRACE_DS_CON_CREATE_INDEX,
 			"TimeSeries Id = " << getContainerId()
-							   << ", columnNumber = " << inputColumnId
+							   << ", first columnNumber = " << realIndexInfo.columnIds_[0]
 							   << ", type = " << getMapTypeStr(inputMapType));
 
 		if (!isSupportIndex(realIndexInfo)) {
 			GS_THROW_USER_ERROR(
 				GS_ERROR_CM_NOT_SUPPORTED, "not support this index type");
 		}
-		if (inputColumnId == ColumnInfo::ROW_KEY_COLUMN_ID) {
+		util::Vector<uint32_t>::iterator itr = 
+			std::find(realIndexInfo.columnIds_.begin(), realIndexInfo.columnIds_.end(),
+			ColumnInfo::ROW_KEY_COLUMN_ID);
+		if (itr != realIndexInfo.columnIds_.end()) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_CREATEINDEX_ON_ROWKEY, "");
 		}
 
@@ -298,16 +324,16 @@ void TimeSeries::createIndex(TransactionContext &txn,
 			withUncommitted, matchList, mismatchList, isIndexNameCaseSensitive);
 		if (!mismatchList.empty()) {
 			for (size_t i = 0; i < mismatchList.size(); i++) {
-				IndexData indexData;
+				IndexData indexData(txn.getDefaultAllocator());
 				bool isExist = getIndexData(txn, 
-					mismatchList[0].columnIds_[0], mismatchList[0].mapType, 
+					mismatchList[0].columnIds_, mismatchList[0].mapType, 
 					withUncommitted, indexData);
 				if (isExist && indexData.status_ != DDL_READY) {
 					DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_COL_LOCK_CONFLICT,
 						"createIndex(pId=" << txn.getPartitionId()
 							<< ", index name = \"" << realIndexInfo.indexName_.c_str()
 							<< ", type=" << getMapTypeStr(inputMapType)
-							<< ", columnNumber=" << (int32_t)inputColumnId
+							<< ", first columnNumber=" << (int32_t)realIndexInfo.columnIds_[0]
 							<< ", txnId=" << txn.getId() << ")");
 				} else {
 					util::NormalOStringStream strstrm;
@@ -338,22 +364,26 @@ void TimeSeries::createIndex(TransactionContext &txn,
 				"(pId=" << txn.getPartitionId() << ", containerId=" << getContainerId()
 						<< ", txnId=" << txn.getId() << ")");
 		}
-		indexCursor.setColumnId(inputColumnId);
+		indexCursor.setColumnId(realIndexInfo.columnIds_[0]);
 		indexCursor.setMapType(inputMapType);
-		IndexData indexData;
-		bool isExist = getIndexData(txn, inputColumnId, inputMapType, 
+		IndexData indexData(txn.getDefaultAllocator());
+		bool isExist = getIndexData(txn, realIndexInfo.columnIds_, inputMapType, 
 			withUncommitted, indexData);
-		if (isExist && indexData.status_ == DDL_READY) {
-			indexCursor.setRowId(MAX_ROWID);
-			return;
-		}
-		if (isExist && indexCursor.isImmediateMode()) {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_CM_NOT_SUPPORTED, 
-				"Immediate mode of createIndex is forbidden under constructing, "
-					<< " columnNumber = " << inputColumnId
-					<< " type = " << getMapTypeStr(inputMapType));
-			return;
+		if (isExist) {
+			indexCursor.setOption(indexData.optionOId_);
+			if (indexData.status_ == DDL_READY) {
+				indexCursor.setRowId(MAX_ROWID);
+				return;
+			}
+
+			if (indexCursor.isImmediateMode()) {
+				GS_THROW_USER_ERROR(
+					GS_ERROR_CM_NOT_SUPPORTED, 
+					"Immediate mode of createIndex is forbidden under constructing, "
+						<< " first columnNumber = " << realIndexInfo.columnIds_[0]
+						<< " type = " << getMapTypeStr(inputMapType));
+				return;
+			}
 		}
 
 		uint32_t limitNum = getDataStore()->getValueLimitConfig().getLimitIndexNum();
@@ -370,8 +400,9 @@ void TimeSeries::createIndex(TransactionContext &txn,
 		if (isExist) {
 			util::XArray<MvccRowImage> mvccList(txn.getDefaultAllocator());
 			util::XArray<MvccRowImage>::iterator itr;
-			BtreeMap::SearchContext sc(
-				UNDEF_COLUMNID, &tId, sizeof(tId), 0, NULL, MAX_RESULT_SIZE);
+			TermCondition cond(COLUMN_TYPE_LONG, COLUMN_TYPE_LONG, 
+				DSExpression::EQ, UNDEF_COLUMNID, &tId, sizeof(tId));
+			BtreeMap::SearchContext sc(txn.getDefaultAllocator(), cond, MAX_RESULT_SIZE);
 			mvccMap.get()->search<TransactionId, MvccRowImage, MvccRowImage>(
 				txn, sc, mvccList);
 			if (!mvccList.empty()) {
@@ -387,7 +418,7 @@ void TimeSeries::createIndex(TransactionContext &txn,
 					"createIndex(pId=" << txn.getPartitionId()
 						<< ", index name = \"" << realIndexInfo.indexName_.c_str()
 						<< ", type=" << getMapTypeStr(inputMapType)
-						<< ", columnNumber=" << (int32_t)inputColumnId
+						<< ", first columnNumber=" << (int32_t)realIndexInfo.columnIds_[0]
 						<< ", txnId=" << txn.getId() << ")");
 			}
 		} else {
@@ -403,7 +434,7 @@ void TimeSeries::createIndex(TransactionContext &txn,
 			{
 				uint64_t expiredNum = subTimeSeriesListHead_->getNum() - subTimeSeriesList.size();
 				for (uint64_t i = 0; i < expiredNum; i++) {
-					indexSchema_->createDummyIndexData(txn, indexCursor.getColumnId(), indexCursor.getMapType(), i);
+					indexSchema_->createDummyIndexData(txn, realIndexInfo, i);
 				}
 			}
 
@@ -414,18 +445,21 @@ void TimeSeries::createIndex(TransactionContext &txn,
 					SubTimeSeries(txn, *itr, this);
 				subContainer->createIndex(txn, realIndexInfo, indexCursor);
 			}
-			getIndexData(txn, indexCursor.getColumnId(), indexCursor.getMapType(), 
+			getIndexData(txn, realIndexInfo.columnIds_, inputMapType, 
 				withUncommitted, indexData);
+			indexCursor.setOption(indexData.optionOId_);
 			if (!indexCursor.isImmediateMode()) {
 				beforeImage = indexCursor.getMvccImage();
 				insertMvccMap(txn, mvccMap.get(), tId, beforeImage);
 			} else {
-				indexSchema_->commit(txn, inputColumnId, inputMapType);
+				indexSchema_->commit(txn, indexCursor);
 			}
 		}
 		{
-			BtreeMap::SearchContext sc(ColumnInfo::ROW_KEY_COLUMN_ID, &indexData.cursor_, 0, false, NULL, 0,
-				false, 0, NULL, MAX_RESULT_SIZE);
+			TermCondition cond(getRowIdColumnType(), getRowIdColumnType(),
+				DSExpression::GT, getRowIdColumnId(), &indexData.cursor_,
+				sizeof(indexData.cursor_));
+			BtreeMap::SearchContext sc(txn.getDefaultAllocator(), cond, MAX_RESULT_SIZE);
 			util::XArray<SubTimeSeriesInfo> subTimeSeriesList(
 				txn.getDefaultAllocator());
 			util::XArray<SubTimeSeriesInfo>::iterator itr;
@@ -468,11 +502,9 @@ void TimeSeries::continueCreateIndex(TransactionContext& txn,
 			return;
 		}
 
-//		MvccRowImage beforeImage = indexCursor.getMvccImage();
-		IndexData indexData;
-		bool withUncommitted = true;
-		bool isExist = getIndexData(txn, indexCursor.getColumnId(), indexCursor.getMapType(), 
-			withUncommitted, indexData);
+		MvccRowImage beforeImage = indexCursor.getMvccImage();
+		IndexData indexData(txn.getDefaultAllocator());
+		bool isExist = getIndexData(txn, indexCursor, indexData);
 		if (!isExist) {
 			GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR,
 				"can not continue to create index. index data does not existed.");
@@ -483,8 +515,10 @@ void TimeSeries::continueCreateIndex(TransactionContext& txn,
 		}
 
 		{
-			BtreeMap::SearchContext sc(ColumnInfo::ROW_KEY_COLUMN_ID, &indexData.cursor_, 0, false, NULL, 0,
-				false, 0, NULL, MAX_RESULT_SIZE);
+			TermCondition cond(getRowIdColumnType(), getRowIdColumnType(),
+				DSExpression::GT, getRowIdColumnId(), &indexData.cursor_,
+				sizeof(indexData.cursor_));
+			BtreeMap::SearchContext sc(txn.getDefaultAllocator(), cond, MAX_RESULT_SIZE);
 			util::XArray<SubTimeSeriesInfo> subTimeSeriesList(
 				txn.getDefaultAllocator());
 			util::XArray<SubTimeSeriesInfo>::iterator itr;
@@ -537,8 +571,10 @@ void TimeSeries::continueChangeSchema(TransactionContext &txn,
 
 		RowId rowIdCursor = containerCursor.getRowId();
 		{
-			BtreeMap::SearchContext sc(ColumnInfo::ROW_KEY_COLUMN_ID, &rowIdCursor, 0, false, NULL, 0,
-				false, 0, NULL, MAX_RESULT_SIZE);
+			TermCondition cond(getRowIdColumnType(), getRowIdColumnType(),
+				DSExpression::GT, getRowIdColumnId(), &rowIdCursor,
+				sizeof(rowIdCursor));
+			BtreeMap::SearchContext sc(txn.getDefaultAllocator(), cond, MAX_RESULT_SIZE);
 			util::XArray<SubTimeSeriesInfo> subTimeSeriesList(
 				txn.getDefaultAllocator());
 			util::XArray<SubTimeSeriesInfo>::iterator itr;
@@ -611,7 +647,7 @@ void TimeSeries::dropIndex(TransactionContext &txn, IndexInfo &indexInfo,
 		}
 
 		for (size_t i = 0; i < matchList.size(); i++) {
-			ColumnId inputColumnId = matchList[i].columnIds_[0];
+			util::Vector<ColumnId> &inputColumnIds = matchList[i].columnIds_;
 			MapType inputMapType = matchList[i].mapType;
 
 			util::XArray<SubTimeSeriesInfo> subTimeSeriesList(
@@ -628,11 +664,11 @@ void TimeSeries::dropIndex(TransactionContext &txn, IndexInfo &indexInfo,
 				uint64_t expiredNum = subTimeSeriesListHead_->getNum() - subTimeSeriesList.size();
 				for (uint64_t i = 0; i < expiredNum; i++) {
 					indexSchema_->dropIndexData(
-						txn, inputColumnId, inputMapType, this, expiredNum - i - 1, false);
+						txn, inputColumnIds, inputMapType, this, expiredNum - i - 1, false);
 				}
 			}
 			indexSchema_->dropIndexInfo(
-				txn, inputColumnId, inputMapType);
+				txn, matchList[i].columnIds_, matchList[i].mapType);
 		}
 	}
 	catch (std::exception &e) {
@@ -882,8 +918,9 @@ void TimeSeries::abort(TransactionContext &txn) {
 			}
 			util::XArray<MvccRowImage> mvccList(txn.getDefaultAllocator());
 			util::XArray<MvccRowImage>::iterator itr;
-			BtreeMap::SearchContext sc(
-				UNDEF_COLUMNID, &tId, sizeof(tId), 0, NULL, MAX_RESULT_SIZE);
+			TermCondition cond(COLUMN_TYPE_LONG, COLUMN_TYPE_LONG, 
+				DSExpression::EQ, UNDEF_COLUMNID, &tId, sizeof(tId));
+			BtreeMap::SearchContext sc(txn.getDefaultAllocator(), cond, MAX_RESULT_SIZE);
 			mvccMap.get()->search<TransactionId, MvccRowImage, MvccRowImage>(
 				txn, sc, mvccList);
 
@@ -904,8 +941,11 @@ void TimeSeries::abort(TransactionContext &txn) {
 					case MVCC_INDEX:
 						{
 							IndexCursor indexCursor = IndexCursor(*itr);
+							IndexData indexData(txn.getDefaultAllocator());
+							bool isExist = getIndexData(txn, indexCursor, indexData);
+
 							IndexInfo indexInfo(txn.getDefaultAllocator(),
-								indexCursor.getColumnId(), indexCursor.getMapType());
+								*(indexData.columnIds_), indexData.mapType_);
 
 							util::XArray<SubTimeSeriesInfo> subTimeSeriesList(
 								txn.getDefaultAllocator());
@@ -919,7 +959,7 @@ void TimeSeries::abort(TransactionContext &txn) {
 								subContainer->dropIndex(txn, indexInfo);
 							}
 							indexSchema_->dropIndexInfo(
-								txn, indexCursor.getColumnId(), indexCursor.getMapType());
+								txn, *(indexData.columnIds_), indexData.mapType_);
 							removeMvccMap(txn, mvccMap.get(), tId, *itr);
 
 							GS_TRACE_INFO(
@@ -1001,8 +1041,9 @@ void TimeSeries::commit(TransactionContext &txn) {
 			TransactionId tId = txn.getId();
 			util::XArray<MvccRowImage> mvccList(txn.getDefaultAllocator());
 			util::XArray<MvccRowImage>::iterator itr;
-			BtreeMap::SearchContext sc(
-				UNDEF_COLUMNID, &tId, sizeof(tId), 0, NULL, MAX_RESULT_SIZE);
+			TermCondition cond(COLUMN_TYPE_LONG, COLUMN_TYPE_LONG, 
+				DSExpression::EQ, UNDEF_COLUMNID, &tId, sizeof(tId));
+			BtreeMap::SearchContext sc(txn.getDefaultAllocator(), cond, MAX_RESULT_SIZE);
 			mvccMap.get()->search<TransactionId, MvccRowImage, MvccRowImage>(
 				txn, sc, mvccList);
 
@@ -1027,7 +1068,7 @@ void TimeSeries::commit(TransactionContext &txn) {
 							while (!indexCursor.isFinished()) {
 								continueCreateIndex(txn, indexCursor);
 							}
-							indexSchema_->commit(txn, indexCursor.getColumnId(), indexCursor.getMapType());
+							indexSchema_->commit(txn, indexCursor);
 							removeMvccMap(txn, mvccMap.get(), tId, *itr);
 						}
 						break;
@@ -1038,7 +1079,8 @@ void TimeSeries::commit(TransactionContext &txn) {
 								continueChangeSchema(txn, containerCursor);
 							}
 							resetAlterContainer();
-							removeMvccMap(txn, mvccMap.get(), tId, *itr);
+							MvccRowImage mvccImage = containerCursor.getMvccImage();
+							removeMvccMap(txn, mvccMap.get(), tId, mvccImage);
 							dataStore_->updateContainer(txn, this, containerCursor.getContainerOId());
 							isFinalize = true; 
 						}
@@ -1090,13 +1132,10 @@ void TimeSeries::searchRowIdIndex(TransactionContext &txn,
 	BtreeMap::SearchContext &sc, util::XArray<OId> &resultList,
 	OutputOrder order) {
 	Timestamp expiredTime = getCurrentExpiredTime(txn);
-	const void *backupStartKey = NULL;
-	const Timestamp *startKeyPtr =
-		reinterpret_cast<const Timestamp *>(sc.startKey_);
-	if (expiredTime != MINIMUM_EXPIRED_TIMESTAMP &&
-		(startKeyPtr == NULL || *startKeyPtr < expiredTime)) {
-		backupStartKey = sc.startKey_;
-		sc.startKey_ = &expiredTime;
+	if (expiredTime != MINIMUM_EXPIRED_TIMESTAMP) {
+		TermCondition newCond(getRowIdColumnType(), getRowIdColumnType(), 
+			DSExpression::GT, getRowIdColumnId(), &expiredTime, sizeof(expiredTime));
+		sc.updateCondition(txn, newCond);
 	}
 	util::XArray<SubTimeSeriesInfo> subTimeSeriesImageList(
 		txn.getDefaultAllocator());
@@ -1123,9 +1162,6 @@ void TimeSeries::searchRowIdIndex(TransactionContext &txn,
 				break;
 			}
 		}
-	}
-	if (backupStartKey != NULL) {
-		sc.startKey_ = backupStartKey;
 	}
 }
 /*!
@@ -1158,8 +1194,11 @@ void TimeSeries::searchRowIdIndex(TransactionContext &txn, uint64_t start,
 	RowId minRowId = sortRowIdList.front().first;
 	RowId maxRowId = sortRowIdList.back().first;
 
-	BtreeMap::SearchContext sc(UNDEF_COLUMNID, &minRowId, 0, true, &maxRowId, 0,
-		true, 0, NULL, MAX_RESULT_SIZE);
+	TermCondition startCond(COLUMN_TYPE_TIMESTAMP, COLUMN_TYPE_TIMESTAMP, 
+		DSExpression::GE, ColumnInfo::ROW_KEY_COLUMN_ID, &minRowId, sizeof(minRowId));
+	TermCondition endCond(COLUMN_TYPE_TIMESTAMP, COLUMN_TYPE_TIMESTAMP, 
+		DSExpression::LE, ColumnInfo::ROW_KEY_COLUMN_ID, &maxRowId, sizeof(maxRowId));
+	BtreeMap::SearchContext sc(txn.getDefaultAllocator(), startCond, endCond, MAX_RESULT_SIZE);
 	util::XArray<KeyValue<RowId, OId> > keyValueList(txn.getDefaultAllocator());
 	util::XArray<OId> mvccList(txn.getDefaultAllocator());
 
@@ -1312,15 +1351,13 @@ void TimeSeries::searchColumnIdIndex(TransactionContext &txn,
 	OutputOrder order, bool neverOrdering)
 {
 	assert(!(order != ORDER_UNDEFINED && neverOrdering));
-	BtreeMap::SearchContext
-		targetContainerSc;  
 	util::XArray<SubTimeSeriesInfo> subTimeSeriesImageList(
 		txn.getDefaultAllocator());
 	getSubTimeSeriesList(txn, sc, subTimeSeriesImageList, false);
 	util::XArray<SubTimeSeriesInfo>::iterator itr;
 	ColumnId sortColumnId;
 	if (order != ORDER_UNDEFINED) {
-		sortColumnId = sc.columnId_;
+		sortColumnId = sc.getScColumnId();
 	}
 	else {
 		sortColumnId = ColumnInfo::ROW_KEY_COLUMN_ID;
@@ -1339,7 +1376,7 @@ void TimeSeries::searchColumnIdIndex(TransactionContext &txn,
 			resultList.swap(mergeList);
 		}
 		else {
-			ResultSize limitBackup = sc.limit_;
+			ResultSize limitBackup = sc.getLimit();
 			sc.limit_ = MAX_RESULT_SIZE;
 			reinterpret_cast<BaseContainer *>(&subContainer)
 				->searchColumnIdIndex(
@@ -1358,8 +1395,8 @@ void TimeSeries::searchColumnIdIndex(TransactionContext &txn,
 		}
 		mergeList.clear();
 	}
-	if (resultList.size() > sc.limit_) {
-		resultList.resize(sc.limit_);
+	if (resultList.size() > sc.getLimit()) {
+		resultList.resize(sc.getLimit());
 	}
 }
 
@@ -1367,8 +1404,6 @@ void TimeSeries::searchColumnIdIndex(TransactionContext &txn,
 	BtreeMap::SearchContext &sc, BtreeMap::SearchContext &orgSc,
 	util::XArray<OId> &normalRowList, util::XArray<OId> &mvccRowList)
 {
-	BtreeMap::SearchContext
-		targetContainerSc;  
 	util::XArray<SubTimeSeriesInfo> subTimeSeriesImageList(
 		txn.getDefaultAllocator());
 	getSubTimeSeriesList(txn, sc, subTimeSeriesImageList, false);
@@ -1380,7 +1415,7 @@ void TimeSeries::searchColumnIdIndex(TransactionContext &txn,
 		util::XArray<OId> subMvccList(txn.getDefaultAllocator());
 		SubTimeSeries subContainer(txn, *itr, this);
 
-		ResultSize limitBackup = sc.limit_;
+		ResultSize limitBackup = sc.getLimit();
 		sc.limit_ = MAX_RESULT_SIZE;
 		reinterpret_cast<BaseContainer *>(&subContainer)
 			->searchColumnIdIndex(
@@ -1393,12 +1428,12 @@ void TimeSeries::searchColumnIdIndex(TransactionContext &txn,
 		}
 		mergeList.clear();
 	}
-	if (normalRowList.size() + mvccRowList.size() > sc.limit_) {
-		if (mvccRowList.size() > sc.limit_) {
-			mvccRowList.resize(sc.limit_);
+	if (normalRowList.size() + mvccRowList.size() > sc.getLimit()) {
+		if (mvccRowList.size() > sc.getLimit()) {
+			mvccRowList.resize(sc.getLimit());
 			normalRowList.clear();
 		} else {
-			normalRowList.resize(sc.limit_ - mvccRowList.size());
+			normalRowList.resize(sc.getLimit() - mvccRowList.size());
 		}
 	}
 }
@@ -1435,11 +1470,12 @@ void TimeSeries::aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 	}
 	util::XArray<OId> normalOIdList(txn.getDefaultAllocator());
 	util::XArray<OId> mvccOIdList(txn.getDefaultAllocator());
-	const Operator *op1, *op2;
-	bool isValid = getKeyCondition(txn, sc, op1, op2);
-	if (isValid) {
-		searchRowArrayList(txn, sc, normalOIdList, mvccOIdList);
-	}
+
+	util::Vector<TermCondition> keyCondList(txn.getDefaultAllocator());
+	sc.getConditionList(keyCondList, BaseIndex::SearchContext::COND_KEY);
+	util::Vector<TermCondition> condList(txn.getDefaultAllocator());
+	sc.getConditionList(condList, BaseIndex::SearchContext::COND_OTHER);
+	searchRowArrayList(txn, sc, normalOIdList, mvccOIdList);
 
 	ContainerValue containerValue(pId, *getObjectManager());
 	switch (type) {
@@ -1506,24 +1542,21 @@ void TimeSeries::aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 					 rowArrayPtr->next()) {
 					RowArray::Row row(rowArrayPtr->getRow(), rowArrayPtr);
 					Timestamp rowId = row.getRowId();
-					if (((op1 != 0) &&
-							!(*op1)(txn,
-								reinterpret_cast<const uint8_t *>(&rowId),
-								sizeof(Timestamp),
-								reinterpret_cast<const uint8_t *>(sc.startKey_),
-								sc.startKeySize_)) ||
-						((op2 != 0) &&
-							!(*op2)(txn,
-								reinterpret_cast<const uint8_t *>(&rowId),
-								sizeof(Timestamp),
-								reinterpret_cast<const uint8_t *>(sc.endKey_),
-								sc.endKeySize_))) {
+					bool isMatch = true;
+					util::Vector<TermCondition>::iterator condItr;
+					for (condItr = keyCondList.begin(); condItr != keyCondList.end(); condItr++) {
+					isMatch = condItr->operator_(txn, reinterpret_cast<const uint8_t *>(&rowId),
+							sizeof(rowId), static_cast<const uint8_t *>(condItr->value_),
+							condItr->valueSize_);
+						if (!isMatch) {
+							break;
+						}
+					}
+					if (!isMatch) {
 						continue;
 					}
-					bool isMatch = true;
-					for (uint32_t c = 0; c < sc.conditionNum_; c++) {
-						if (!row.isMatch(
-								txn, sc.conditionList_[c], containerValue)) {
+					for (condItr = condList.begin(); condItr != condList.end(); condItr++) {
+						if (!row.isMatch(txn, *condItr, containerValue)) {
 							isMatch = false;
 							break;
 						}
@@ -1615,22 +1648,21 @@ void TimeSeries::aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 			for (rowArray.begin(); !rowArray.end(); rowArray.next()) {
 				RowArray::Row row(rowArray.getRow(), &rowArray);
 				Timestamp rowId = row.getRowId();
-				if (((op1 != 0) &&
-						!(*op1)(txn, reinterpret_cast<const uint8_t *>(&rowId),
-							sizeof(Timestamp),
-							reinterpret_cast<const uint8_t *>(sc.startKey_),
-							sc.startKeySize_)) ||
-					((op2 != 0) &&
-						!(*op2)(txn, reinterpret_cast<const uint8_t *>(&rowId),
-							sizeof(Timestamp),
-							reinterpret_cast<const uint8_t *>(sc.endKey_),
-							sc.endKeySize_))) {
+				bool isMatch = true;
+				util::Vector<TermCondition>::iterator condItr;
+				for (condItr = keyCondList.begin(); condItr != keyCondList.end(); condItr++) {
+					isMatch = condItr->operator_(txn, reinterpret_cast<const uint8_t *>(&rowId),
+						sizeof(rowId), static_cast<const uint8_t *>(condItr->value_),
+						condItr->valueSize_);
+					if (!isMatch) {
+						break;
+					}
+				}
+				if (!isMatch) {
 					continue;
 				}
-				bool isMatch = true;
-				for (uint32_t c = 0; c < sc.conditionNum_; c++) {
-					if (!row.isMatch(
-							txn, sc.conditionList_[c], containerValue)) {
+				for (condItr = condList.begin(); condItr != condList.end(); condItr++) {
+					if (!row.isMatch(txn, *condItr, containerValue)) {
 						isMatch = false;
 						break;
 					}
@@ -1648,22 +1680,21 @@ void TimeSeries::aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 			for (rowArray.begin(); !rowArray.end(); rowArray.next()) {
 				RowArray::Row row(rowArray.getRow(), &rowArray);
 				Timestamp rowId = row.getRowId();
-				if (((op1 != 0) &&
-						!(*op1)(txn, reinterpret_cast<const uint8_t *>(&rowId),
-							sizeof(Timestamp),
-							reinterpret_cast<const uint8_t *>(sc.startKey_),
-							sc.startKeySize_)) ||
-					((op2 != 0) &&
-						!(*op2)(txn, reinterpret_cast<const uint8_t *>(&rowId),
-							sizeof(Timestamp),
-							reinterpret_cast<const uint8_t *>(sc.endKey_),
-							sc.endKeySize_))) {
+				bool isMatch = true;
+				util::Vector<TermCondition>::iterator condItr;
+				for (condItr = keyCondList.begin(); condItr != keyCondList.end(); condItr++) {
+					isMatch = condItr->operator_(txn, reinterpret_cast<const uint8_t *>(&rowId),
+						sizeof(rowId), static_cast<const uint8_t *>(condItr->value_),
+						condItr->valueSize_);
+					if (!isMatch) {
+						break;
+					}
+				}
+				if (!isMatch) {
 					continue;
 				}
-				bool isMatch = true;
-				for (uint32_t c = 0; c < sc.conditionNum_; c++) {
-					if (!row.isMatch(
-							txn, sc.conditionList_[c], containerValue)) {
+				for (condItr = condList.begin(); condItr != condList.end(); condItr++) {
+					if (!row.isMatch(txn, *condItr, containerValue)) {
 						isMatch = false;
 						break;
 					}
@@ -1695,22 +1726,21 @@ void TimeSeries::aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 			for (rowArray.begin(); !rowArray.end(); rowArray.next()) {
 				RowArray::Row row(rowArray.getRow(), &rowArray);
 				Timestamp rowId = row.getRowId();
-				if (((op1 != 0) &&
-						!(*op1)(txn, reinterpret_cast<const uint8_t *>(&rowId),
-							sizeof(Timestamp),
-							reinterpret_cast<const uint8_t *>(sc.startKey_),
-							sc.startKeySize_)) ||
-					((op2 != 0) &&
-						!(*op2)(txn, reinterpret_cast<const uint8_t *>(&rowId),
-							sizeof(Timestamp),
-							reinterpret_cast<const uint8_t *>(sc.endKey_),
-							sc.endKeySize_))) {
+				bool isMatch = true;
+				util::Vector<TermCondition>::iterator condItr;
+				for (condItr = keyCondList.begin(); condItr != keyCondList.end(); condItr++) {
+					isMatch = condItr->operator_(txn, reinterpret_cast<const uint8_t *>(&rowId),
+						sizeof(rowId), static_cast<const uint8_t *>(condItr->value_),
+						condItr->valueSize_);
+					if (!isMatch) {
+						break;
+					}
+				}
+				if (!isMatch) {
 					continue;
 				}
-				bool isMatch = true;
-				for (uint32_t c = 0; c < sc.conditionNum_; c++) {
-					if (!row.isMatch(
-							txn, sc.conditionList_[c], containerValue)) {
+				for (condItr = condList.begin(); condItr != condList.end(); condItr++) {
+					if (!row.isMatch(txn, *condItr, containerValue)) {
 						isMatch = false;
 						break;
 					}
@@ -1731,22 +1761,21 @@ void TimeSeries::aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 			for (rowArray.begin(); !rowArray.end(); rowArray.next()) {
 				RowArray::Row row(rowArray.getRow(), &rowArray);
 				Timestamp rowId = row.getRowId();
-				if (((op1 != 0) &&
-						!(*op1)(txn, reinterpret_cast<const uint8_t *>(&rowId),
-							sizeof(Timestamp),
-							reinterpret_cast<const uint8_t *>(sc.startKey_),
-							sc.startKeySize_)) ||
-					((op2 != 0) &&
-						!(*op2)(txn, reinterpret_cast<const uint8_t *>(&rowId),
-							sizeof(Timestamp),
-							reinterpret_cast<const uint8_t *>(sc.endKey_),
-							sc.endKeySize_))) {
+				bool isMatch = true;
+				util::Vector<TermCondition>::iterator condItr;
+				for (condItr = keyCondList.begin(); condItr != keyCondList.end(); condItr++) {
+					isMatch = condItr->operator_(txn, reinterpret_cast<const uint8_t *>(&rowId),
+						sizeof(rowId), static_cast<const uint8_t *>(condItr->value_),
+						condItr->valueSize_);
+					if (!isMatch) {
+						break;
+					}
+				}
+				if (!isMatch) {
 					continue;
 				}
-				bool isMatch = true;
-				for (uint32_t c = 0; c < sc.conditionNum_; c++) {
-					if (!row.isMatch(
-							txn, sc.conditionList_[c], containerValue)) {
+				for (condItr = condList.begin(); condItr != condList.end(); condItr++) {
+					if (!row.isMatch(txn, *condItr, containerValue)) {
 						isMatch = false;
 						break;
 					}
@@ -1772,22 +1801,175 @@ void TimeSeries::aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 }
 
 /*!
+	@brief Performs an aggregation operation on a Row set or its specific
+   Columns, based on the specified start and end times
+*/
+void TimeSeries::aggregateByTimeWindow(TransactionContext &txn,
+	uint32_t columnId, AggregationType type, Timestamp startTime, Timestamp endTime, 
+	const Sampling &sampling, 
+	util::XArray<OId> &oIdList, ResultSize &resultNum,
+	MessageRowStore *messageRowStore) {
+	resultNum = 0;
+	if (type == AGG_UNSUPPORTED_TYPE) {
+		GS_THROW_USER_ERROR(GS_ERROR_DS_AGGREGATED_COLUMN_TYPE_INVALID, "");
+	}
+	else if (type != AGG_COUNT) {
+		if (columnId >= getColumnNum()) {
+			GS_THROW_USER_ERROR(GS_ERROR_DS_COLUMN_ID_INVALID, "");
+		}
+		ColumnType colType = getColumnInfo(columnId).getColumnType();
+		if (type == AGG_MAX || type == AGG_MIN) {
+			if (!ValueProcessor::isNumerical(colType) &&
+				colType != COLUMN_TYPE_TIMESTAMP) {
+				GS_THROW_USER_ERROR(
+					GS_ERROR_DS_AGGREGATED_COLUMN_TYPE_INVALID, "");
+			}
+		}
+		else {
+			if (!ValueProcessor::isNumerical(colType)) {
+				GS_THROW_USER_ERROR(
+					GS_ERROR_DS_AGGREGATED_COLUMN_TYPE_INVALID, "");
+			}
+		}
+	}
+	
+	Timestamp interval = 0;
+	if (sampling.interval_ != 0) {
+		switch (sampling.timeUnit_) {
+		case TIME_UNIT_DAY:
+			interval = static_cast<Timestamp>(sampling.interval_) * 24 * 60 *
+					   60 * 1000LL;
+			break;
+		case TIME_UNIT_HOUR:
+			interval =
+				static_cast<Timestamp>(sampling.interval_) * 60 * 60 * 1000LL;
+			break;
+		case TIME_UNIT_MINUTE:
+			interval = static_cast<Timestamp>(sampling.interval_) * 60 * 1000LL;
+			break;
+		case TIME_UNIT_SECOND:
+			interval = static_cast<Timestamp>(sampling.interval_) * 1000LL;
+			break;
+		case TIME_UNIT_MILLISECOND:
+			interval = static_cast<Timestamp>(sampling.interval_);
+			break;
+		default:
+			GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_SAMPLING_TIME_UNIT_INVALID, "");
+		}
+	}
+	
+	ContainerValue containerValue(txn.getPartitionId(), *getObjectManager());
+	AggregationCursor aggCursor;
+	const AggregatorForLoop *aggLoop = &aggLoopTable[type];
+	ColumnInfo &aggColumnInfo = getColumnInfo(columnId);
+	aggCursor.set(type, aggColumnInfo.getColumnType());
+
+	RowArray rowArray(txn, this);
+	Timestamp firstRowTime = -1;
+	if (!oIdList.empty()) {
+		rowArray.load(txn, oIdList[0], this, OBJECT_READ_ONLY);
+		RowArray::Row row(rowArray.getRow(), &rowArray);
+		firstRowTime = row.getRowId();
+	}
+	
+	Timestamp groupStartTime = startTime;
+	Timestamp groupEndTime = groupStartTime + interval;
+	while (groupEndTime < firstRowTime) {
+		messageRowStore->beginRow();
+		messageRowStore->setField<COLUMN_TYPE_TIMESTAMP>(
+			ColumnInfo::ROW_KEY_COLUMN_ID, groupStartTime);
+		for (ColumnId i = ColumnInfo::ROW_KEY_COLUMN_ID + 1; i < getColumnNum(); i++) {
+			messageRowStore->setNull(i);
+		}
+		messageRowStore->next();
+		groupStartTime = groupEndTime;
+		groupEndTime += interval;
+		resultNum++;
+	}
+	
+	Value value;
+	util::XArray<OId>::iterator itr;
+	for (itr = oIdList.begin(); itr != oIdList.end(); itr++) {
+		rowArray.load(txn, *itr, this, OBJECT_READ_ONLY);
+		RowArray::Row row(rowArray.getRow(), &rowArray);
+		Timestamp rowId = row.getRowId();
+		if (rowId >= groupEndTime) {
+			aggregationPostProcess(aggCursor, value);
+			messageRowStore->beginRow();
+			messageRowStore->setField<COLUMN_TYPE_TIMESTAMP>(
+				ColumnInfo::ROW_KEY_COLUMN_ID, groupStartTime);
+			for (ColumnId i = ColumnInfo::ROW_KEY_COLUMN_ID + 1; i < getColumnNum(); i++) {
+				if (columnId == i && aggCursor.count_ != 0) {
+					aggregationPostProcess(aggCursor, value);
+					messageRowStore
+						->setField<COLUMN_TYPE_DOUBLE>(
+							i, value.getDouble());
+					aggCursor.count_ = 0;
+					aggCursor.value1_ = Value();
+					aggCursor.value2_ = Value();
+				} else {
+					messageRowStore->setNull(i);
+				}
+			}
+			messageRowStore->next();
+
+			groupStartTime = groupEndTime;
+			groupEndTime += interval;
+			resultNum++;
+
+			if (groupEndTime > endTime) {
+				break;
+			}
+		}
+		
+		row.getField(txn, aggColumnInfo, containerValue);
+		if (!containerValue.getValue().isNullValue()) {
+			(*aggLoop)(txn, containerValue.getValue(), aggCursor);
+		}
+	}
+	while (groupStartTime <= endTime) {
+		messageRowStore->beginRow();
+		messageRowStore->setField<COLUMN_TYPE_TIMESTAMP>(
+			ColumnInfo::ROW_KEY_COLUMN_ID, groupStartTime);
+		for (ColumnId i = ColumnInfo::ROW_KEY_COLUMN_ID + 1; i < getColumnNum(); i++) {
+			if (columnId == i && aggCursor.count_ != 0) {
+				aggregationPostProcess(aggCursor, value);
+				messageRowStore
+					->setField<COLUMN_TYPE_DOUBLE>(
+						i, value.getDouble());
+				aggCursor.count_ = 0;
+				aggCursor.value1_ = Value();
+				aggCursor.value2_ = Value();
+			} else {
+				messageRowStore->setNull(i);
+			}
+		}
+		messageRowStore->next();
+		groupStartTime = groupEndTime;
+		groupEndTime += interval;
+		resultNum++;
+	}
+}
+
+/*!
 	@brief Take a sampling of Rows within a specific range
 */
 void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 	const Sampling &sampling, ResultSize &resultNum,
 	MessageRowStore *messageRowStore) {
 	PartitionId pId = txn.getPartitionId();
-	if (sc.startKey_ == NULL) {
+	if (sc.getStartKey<Timestamp>() == NULL) {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_KEY_RANGE_INVALID, "");
 	}
-	if (sc.conditionNum_ > 0) {
+	util::Vector<TermCondition> otherList(txn.getDefaultAllocator());
+	sc.getConditionList(otherList, BaseIndex::SearchContext::COND_OTHER);
+	if (!otherList.empty()) {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_FILTERING_CONDITION_INVALID, "");
 	}
-	if (sc.columnId_ >= getColumnNum()) {
+	if (sc.getScColumnId() >= getColumnNum()) {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_COLUMN_ID_INVALID, "");
 	}
-	if (sc.endKey_ == NULL) {
+	if (sc.getEndKey<Timestamp>() == NULL) {
 		if (sampling.interval_ != 0) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_KEY_RANGE_INVALID, "");
 		}
@@ -1817,29 +1999,24 @@ void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 			sampling.timeUnit_);
 	}
 
-	const Operator *op1, *op2;
-	bool isValid = getKeyCondition(txn, sc, op1, op2);
-	if (!isValid) {
-		resultNum = messageRowStore->getRowCount();
-		return;
-	}
+	util::Vector<TermCondition> condList(txn.getDefaultAllocator());
+	sc.getConditionList(condList, BaseIndex::SearchContext::COND_OTHER);
 
-	Timestamp targetT = *reinterpret_cast<const Timestamp *>(sc.startKey_);
+	Timestamp startT = *sc.getStartKey<Timestamp>();
+	Timestamp targetT = startT;
 	{
 		if (interval != 0) {
 			Timestamp expiredTime = getCurrentExpiredTime(txn);
-			Timestamp oldStartTime =
-				*reinterpret_cast<const Timestamp *>(sc.startKey_);
-			if (oldStartTime < expiredTime) {
-				Timestamp diffTime = expiredTime - oldStartTime;
+			if (targetT < expiredTime) {
+				Timestamp diffTime = expiredTime - targetT;
 				int64_t div = diffTime / interval;
 				int64_t mod = diffTime % interval;
 				Timestamp newStartTime;
 				if (mod == 0) {
-					newStartTime = oldStartTime + (interval * div);
+					newStartTime = targetT + (interval * div);
 				}
 				else {
-					newStartTime = oldStartTime + (interval * (div + 1));
+					newStartTime = targetT + (interval * (div + 1));
 				}
 				targetT = newStartTime;
 			}
@@ -1847,14 +2024,13 @@ void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 	}
 
 	Timestamp expiredTime = getCurrentExpiredTime(txn);
-	const Timestamp *startKeyPtr =
-		reinterpret_cast<const Timestamp *>(sc.startKey_);
-	if (expiredTime != MINIMUM_EXPIRED_TIMESTAMP &&
-		(startKeyPtr == NULL || *startKeyPtr < expiredTime)) {
-		sc.startKey_ = &expiredTime;
+	if (expiredTime != MINIMUM_EXPIRED_TIMESTAMP) {
+		TermCondition newCond(getRowIdColumnType(), getRowIdColumnType(), 
+			DSExpression::GT, getRowIdColumnId(), &expiredTime, sizeof(expiredTime));
+		sc.updateCondition(txn, newCond);
 	}
 
-	ResultSize limit = sc.limit_;
+	ResultSize limit = sc.getLimit();
 	if (interval != 0) {
 		sc.limit_ = MAX_RESULT_SIZE;
 	}
@@ -1872,9 +2048,14 @@ void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 	RowArray *rowArrayPtr = NULL;
 
 	Timestamp endT = UNDEF_TIMESTAMP;
-	if (sc.endKey_ != NULL) {
-		endT = *reinterpret_cast<const Timestamp *>(sc.endKey_);
+	if (sc.getEndKey<Timestamp>() != NULL) {
+		endT = *sc.getEndKey<Timestamp>();
 	}
+	if (startT > endT) {
+		resultNum = messageRowStore->getRowCount();
+		return;
+	}
+
 	if (!sampling.interpolatedColumnIdList_.empty()) {
 		Timestamp normalEndTime = -1, mvccEndTime = -1;
 		RowArray rowArray(txn, this);
@@ -1925,8 +2106,10 @@ void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 				}
 			}
 			if (isNeedNext) {
-				BtreeMap::SearchContext sc(ColumnInfo::ROW_KEY_COLUMN_ID, &endT,
-					0, true, NULL, 0, true, 0, NULL, 1);
+				TermCondition cond(getRowIdColumnType(), getRowIdColumnType(),
+					DSExpression::GE, getRowIdColumnId(), &endT,
+					sizeof(endT));
+				BtreeMap::SearchContext sc(txn.getDefaultAllocator(), cond, 1);
 				util::XArray<OId> postOIdList(txn.getDefaultAllocator());
 				searchRowIdIndex(txn, sc, postOIdList, ORDER_ASCENDING);
 				if (!postOIdList.empty()) {
@@ -1981,8 +2164,10 @@ void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 			isNeedPrev = true;
 		}
 		if (isNeedPrev) {
-			BtreeMap::SearchContext sc(ColumnInfo::ROW_KEY_COLUMN_ID, NULL, 0,
-				true, &targetT, 0, true, 0, NULL, 1);
+			TermCondition cond(getRowIdColumnType(), getRowIdColumnType(),
+				DSExpression::LE, getRowIdColumnId(), &targetT,
+				sizeof(targetT));
+			BtreeMap::SearchContext sc(txn.getDefaultAllocator(), cond, 1);
 			util::XArray<OId> prevOIdList(txn.getDefaultAllocator());
 			searchRowIdIndex(txn, sc, prevOIdList, ORDER_DESCENDING);
 			if (!prevOIdList.empty()) {
@@ -2044,9 +2229,9 @@ void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 				}
 
 				bool isMatch = true;
-				for (uint32_t c = 0; c < sc.conditionNum_; c++) {
-					if (!row.isMatch(
-							txn, sc.conditionList_[c], containerValue)) {
+				util::Vector<TermCondition>::iterator condItr;
+				for (condItr = condList.begin(); condItr != condList.end(); condItr++) {
+					if (!row.isMatch(txn, *condItr, containerValue)) {
 						isMatch = false;
 						break;
 					}
@@ -2062,7 +2247,7 @@ void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 					if (interval == 0) {
 						goto LABEL_FINISH;
 					}
-					if (messageRowStore->getRowCount() >= sc.limit_) {
+					if (messageRowStore->getRowCount() >= sc.getLimit()) {
 						goto LABEL_FINISH;
 					}
 
@@ -2177,7 +2362,7 @@ void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 						if (interval == 0) {
 							goto LABEL_FINISH;
 						}
-						if (messageRowStore->getRowCount() >= sc.limit_) {
+						if (messageRowStore->getRowCount() >= sc.getLimit()) {
 							goto LABEL_FINISH;
 						}
 						targetT += interval;
@@ -2188,7 +2373,7 @@ void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 						if (targetT == rowId) {
 							row.getImage(txn, messageRowStore, isWithRowId);
 							messageRowStore->next();
-							if (messageRowStore->getRowCount() >= sc.limit_) {
+							if (messageRowStore->getRowCount() >= sc.getLimit()) {
 								goto LABEL_FINISH;
 							}
 
@@ -2248,7 +2433,7 @@ void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 			}
 			messageRowStore->next();
 
-			if (messageRowStore->getRowCount() >= sc.limit_) {
+			if (messageRowStore->getRowCount() >= sc.getLimit()) {
 				goto LABEL_FINISH;
 			}
 			targetT += interval;
@@ -2265,16 +2450,18 @@ void TimeSeries::sampleWithoutInterp(TransactionContext &txn,
 	BtreeMap::SearchContext &sc, const Sampling &sampling,
 	ResultSize &resultNum, MessageRowStore *messageRowStore) {
 	PartitionId pId = txn.getPartitionId();
-	if (sc.startKey_ == NULL) {
+	if (sc.getStartKey<Timestamp>() == NULL) {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_KEY_RANGE_INVALID, "");
 	}
-	if (sc.conditionNum_ > 0) {
+	util::Vector<TermCondition> otherList(txn.getDefaultAllocator());
+	sc.getConditionList(otherList, BaseIndex::SearchContext::COND_OTHER);
+	if (!otherList.empty()) {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_FILTERING_CONDITION_INVALID, "");
 	}
-	if (sc.columnId_ >= getColumnNum()) {
+	if (sc.getScColumnId() >= getColumnNum()) {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_COLUMN_ID_INVALID, "");
 	}
-	if (sc.endKey_ == NULL) {
+	if (sc.getEndKey<Timestamp>() == NULL) {
 		if (sampling.interval_ != 0) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_KEY_RANGE_INVALID, "");
 		}
@@ -2297,44 +2484,46 @@ void TimeSeries::sampleWithoutInterp(TransactionContext &txn,
 			sampling.timeUnit_);
 	}
 
-	const Operator *op1, *op2;
-	bool isValid = getKeyCondition(txn, sc, op1, op2);
-	if (!isValid) {
-		resultNum = messageRowStore->getRowCount();
-		return;
-	}
+	util::Vector<TermCondition> condList(txn.getDefaultAllocator());
+	sc.getConditionList(condList, BaseIndex::SearchContext::COND_OTHER);
 
-	Timestamp targetT = *reinterpret_cast<const Timestamp *>(sc.startKey_);
+	Timestamp startT = *sc.getStartKey<Timestamp>();
+	Timestamp targetT = startT;
 	{
 		if (interval != 0) {
 			Timestamp expiredTime = getCurrentExpiredTime(txn);
-			Timestamp oldStartTime =
-				*reinterpret_cast<const Timestamp *>(sc.startKey_);
-			if (oldStartTime < expiredTime) {
-				Timestamp diffTime = expiredTime - oldStartTime;
+			if (targetT < expiredTime) {
+				Timestamp diffTime = expiredTime - targetT;
 				int64_t div = diffTime / interval;
 				int64_t mod = diffTime % interval;
 				Timestamp newStartTime;
 				if (mod == 0) {
-					newStartTime = oldStartTime + (interval * div);
+					newStartTime = targetT + (interval * div);
 				}
 				else {
-					newStartTime = oldStartTime + (interval * (div + 1));
+					newStartTime = targetT + (interval * (div + 1));
 				}
 				targetT = newStartTime;
 			}
 		}
 	}
 
-	Timestamp expiredTime = getCurrentExpiredTime(txn);
-	const Timestamp *startKeyPtr =
-		reinterpret_cast<const Timestamp *>(sc.startKey_);
-	if (expiredTime != MINIMUM_EXPIRED_TIMESTAMP &&
-		(startKeyPtr == NULL || *startKeyPtr < expiredTime)) {
-		sc.startKey_ = &expiredTime;
-	}
 
-	ResultSize limit = sc.limit_;
+	Timestamp expiredTime = getCurrentExpiredTime(txn);
+	if (expiredTime != MINIMUM_EXPIRED_TIMESTAMP) {
+		TermCondition newCond(getRowIdColumnType(), getRowIdColumnType(), 
+			DSExpression::GT, getRowIdColumnId(), &expiredTime, sizeof(expiredTime));
+		sc.updateCondition(txn, newCond);
+	}
+	Timestamp endT = UNDEF_TIMESTAMP;
+	if (sc.getEndKey<Timestamp>() != NULL) {
+		endT = *sc.getEndKey<Timestamp>();
+	}
+	if (startT > endT) {
+		resultNum = messageRowStore->getRowCount();
+		return;
+	}
+	ResultSize limit = sc.getLimit();
 	if (interval != 0) {
 		sc.limit_ = MAX_RESULT_SIZE;
 	}
@@ -2414,9 +2603,9 @@ void TimeSeries::sampleWithoutInterp(TransactionContext &txn,
 				}
 
 				bool isMatch = true;
-				for (uint32_t c = 0; c < sc.conditionNum_; c++) {
-					if (!row.isMatch(
-							txn, sc.conditionList_[c], containerValue)) {
+				util::Vector<TermCondition>::iterator condItr;
+				for (condItr = condList.begin(); condItr != condList.end(); condItr++) {
+					if (!row.isMatch(txn, *condItr, containerValue)) {
 						isMatch = false;
 						break;
 					}
@@ -2425,8 +2614,7 @@ void TimeSeries::sampleWithoutInterp(TransactionContext &txn,
 					continue;
 				}
 
-				if (sc.endKey_ != NULL &&
-					rowId > *reinterpret_cast<const Timestamp *>(sc.endKey_)) {
+				if (endT != UNDEF_TIMESTAMP && rowId > endT) {
 					goto LABEL_FINISH;
 				}
 
@@ -2438,7 +2626,7 @@ void TimeSeries::sampleWithoutInterp(TransactionContext &txn,
 					if (interval == 0) {
 						goto LABEL_FINISH;
 					}
-					if (messageRowStore->getRowCount() >= sc.limit_) {
+					if (messageRowStore->getRowCount() >= sc.getLimit()) {
 						goto LABEL_FINISH;
 					}
 
@@ -2463,7 +2651,7 @@ void TimeSeries::sampleWithoutInterp(TransactionContext &txn,
 						if (interval == 0) {
 							goto LABEL_FINISH;
 						}
-						if (messageRowStore->getRowCount() >= sc.limit_) {
+						if (messageRowStore->getRowCount() >= sc.getLimit()) {
 							goto LABEL_FINISH;
 						}
 						targetT += interval;
@@ -2472,7 +2660,7 @@ void TimeSeries::sampleWithoutInterp(TransactionContext &txn,
 						if (targetT == rowId) {
 							row.getImage(txn, messageRowStore, isWithRowId);
 							messageRowStore->next();
-							if (messageRowStore->getRowCount() >= sc.limit_) {
+							if (messageRowStore->getRowCount() >= sc.getLimit()) {
 								goto LABEL_FINISH;
 							}
 
@@ -2484,9 +2672,7 @@ void TimeSeries::sampleWithoutInterp(TransactionContext &txn,
 					}
 				}
 
-				if (sc.endKey_ != NULL &&
-					targetT >
-						*reinterpret_cast<const Timestamp *>(sc.endKey_)) {
+				if (endT != UNDEF_TIMESTAMP && targetT > endT) {
 					goto LABEL_FINISH;
 				}
 			}
@@ -2516,17 +2702,12 @@ void TimeSeries::sampleWithoutInterp(TransactionContext &txn,
 
 LABEL_FINISH:
 	resultNum = messageRowStore->getRowCount();
-	if (resultNum < sc.limit_ && interval != 0) {
+	if (resultNum < sc.getLimit() && interval != 0) {
 		size_t num =
-			(size_t)((*reinterpret_cast<const Timestamp *>(sc.endKey_) -
-						 *reinterpret_cast<const Timestamp *>(sc.startKey_)) /
-					 interval) +
-			1;
+			(size_t)((endT - startT) / interval) + 1;
 
 		for (ResultSize i = resultNum; i < num; i++) {
-			targetT = *reinterpret_cast<const Timestamp *>(sc.startKey_) +
-					  interval * i;
-
+			targetT = startT + interval * i;
 			messageRowStore->beginRow();
 
 			messageRowStore->setField<COLUMN_TYPE_TIMESTAMP>(
@@ -2538,7 +2719,7 @@ LABEL_FINISH:
 					messageRowStore, columnId);
 			}
 			messageRowStore->next();
-			if (messageRowStore->getRowCount() >= sc.limit_) {
+			if (messageRowStore->getRowCount() >= sc.getLimit()) {
 				break;
 			}
 		}
@@ -2551,8 +2732,8 @@ LABEL_FINISH:
 */
 void TimeSeries::searchTimeOperator(
 	TransactionContext &txn, Timestamp ts, TimeOperator timeOp, OId &oId) {
-	BtreeMap::SearchContext sc(ColumnInfo::ROW_KEY_COLUMN_ID, NULL, 0, false,
-		NULL, 0, false, 0, NULL, 1);
+	BtreeMap::SearchContext sc (txn.getDefaultAllocator(), ColumnInfo::ROW_KEY_COLUMN_ID);
+	sc.setLimit(1);
 	searchTimeOperator(txn, sc, ts, timeOp, oId);
 }
 
@@ -2562,38 +2743,36 @@ void TimeSeries::searchTimeOperator(
 void TimeSeries::searchTimeOperator(
 	TransactionContext &txn, BtreeMap::SearchContext &sc, Timestamp ts, TimeOperator timeOp, OId &oId) {
 	util::XArray<OId> oIdList(txn.getDefaultAllocator());
-	assert(sc.columnId_ == ColumnInfo::ROW_KEY_COLUMN_ID);
-	assert(sc.conditionNum_ == 0);
-	sc.conditionNum_ = 0;
-	sc.conditionList_ = NULL;
+	assert(sc.getScColumnId() == ColumnInfo::ROW_KEY_COLUMN_ID);
+	assert(sc.getRestConditionNum() == 0);
 	sc.limit_ = 1;
 	switch (timeOp) {
 	case TIME_PREV_ONLY: {
-		if (sc.endKey_ == NULL || *(static_cast<const Timestamp *>(sc.endKey_)) >= ts) {
-			sc.endKey_ = &ts;
-			sc.isEndKeyIncluded_ = false;
-		}
+		TermCondition newCond(COLUMN_TYPE_TIMESTAMP, COLUMN_TYPE_TIMESTAMP,
+			DSExpression::LT, ColumnInfo::ROW_KEY_COLUMN_ID,
+			&ts, sizeof(Timestamp));
+		sc.updateCondition(txn, newCond);
 		searchRowIdIndex(txn, sc, oIdList, ORDER_DESCENDING);
 	} break;
 	case TIME_PREV: {
-		if (sc.endKey_ == NULL || *(static_cast<const Timestamp *>(sc.endKey_)) > ts) {
-			sc.endKey_ = &ts;
-			sc.isEndKeyIncluded_ = true;
-		}
+		TermCondition newCond(COLUMN_TYPE_TIMESTAMP, COLUMN_TYPE_TIMESTAMP,
+			DSExpression::LE, ColumnInfo::ROW_KEY_COLUMN_ID,
+			&ts, sizeof(Timestamp));
+		sc.updateCondition(txn, newCond);
 		searchRowIdIndex(txn, sc, oIdList, ORDER_DESCENDING);
 	} break;
 	case TIME_NEXT: {
-		if (sc.startKey_ == NULL || *(static_cast<const Timestamp *>(sc.startKey_)) < ts) {
-			sc.startKey_ = &ts;
-			sc.isStartKeyIncluded_ = true;
-		}
+		TermCondition newCond(COLUMN_TYPE_TIMESTAMP, COLUMN_TYPE_TIMESTAMP,
+			DSExpression::GE, ColumnInfo::ROW_KEY_COLUMN_ID,
+			&ts, sizeof(Timestamp));
+		sc.updateCondition(txn, newCond);
 		searchRowIdIndex(txn, sc, oIdList, ORDER_ASCENDING);
 	} break;
 	case TIME_NEXT_ONLY: {
-		if (sc.startKey_ == NULL || *(static_cast<const Timestamp *>(sc.startKey_)) <= ts) {
-			sc.startKey_ = &ts;
-			sc.isStartKeyIncluded_ = false;
-		}
+		TermCondition newCond(COLUMN_TYPE_TIMESTAMP, COLUMN_TYPE_TIMESTAMP,
+			DSExpression::GT, ColumnInfo::ROW_KEY_COLUMN_ID,
+			&ts, sizeof(Timestamp));
+		sc.updateCondition(txn, newCond);
 		searchRowIdIndex(txn, sc, oIdList, ORDER_ASCENDING);
 	} break;
 	}
@@ -2630,14 +2809,15 @@ void TimeSeries::lockRowList(
 		RowArray rowArray(txn, this);
 		for (size_t i = 0; i < rowIdList.size(); i++) {
 			util::StackAllocator::Scope scope(txn.getDefaultAllocator());
-			BtreeMap::SearchContext sc(UNDEF_COLUMNID, &rowIdList[i], 0, true,
-				&rowIdList[i], 0, true, 0, NULL, 1);
+			TermCondition cond(getRowIdColumnType(), getRowIdColumnType(),
+				DSExpression::EQ, getRowIdColumnId(), &rowIdList[i],
+				sizeof(rowIdList[i]));
+			BtreeMap::SearchContext sc(txn.getDefaultAllocator(), cond, 1);
 			util::XArray<OId> oIdList(txn.getDefaultAllocator());
 			searchRowIdIndex(txn, sc, oIdList, ORDER_UNDEFINED);
 			if (!oIdList.empty()) {
-//				bool isOldSchema = 
-				rowArray.load(txn, oIdList[0], this, OBJECT_FOR_UPDATE);
-//				assert(isOldSchema || !isOldSchema);
+				bool isOldSchema = rowArray.load(txn, oIdList[0], this, OBJECT_FOR_UPDATE);
+				assert(isOldSchema || !isOldSchema);
 				RowArray::Row row(rowArray.getRow(), &rowArray);
 				row.lock(txn);
 			}
@@ -2854,7 +3034,9 @@ bool TimeSeries::findStartSubTimeSeriesPos(TransactionContext &txn,
 }
 
 int32_t TimeSeries::expireSubTimeSeries(
-	TransactionContext &txn, Timestamp erasableTime, bool indexUpdate) {
+	TransactionContext &txn, Timestamp expiredTime, bool indexUpdate) {
+
+	Timestamp erasableTime = expiredTime;
 	int32_t expireNum = 0;
 	if (!dataStore_->getConfig().isAutoExpire()) {
 		Timestamp configErasableTime = dataStore_->getConfig().getErasableExpiredTime();
@@ -2870,13 +3052,16 @@ int32_t TimeSeries::expireSubTimeSeries(
 		ChunkKey subChunkKey = subContainer.getRowAllcateStrategy().chunkKey_;
 		Timestamp subTimeErasableTime = DataStore::convertChunkKey2Timestamp(subChunkKey);
 
-		if (subTimeErasableTime <= erasableTime) {
-			if (indexUpdate) {
-				dataStore_->setLastExpiredTime(txn.getPartitionId(), subTimeErasableTime);
-			}
-			expireNum++;
+		bool isFinish = true;
+		if (subContainer.getEndTime() <= expiredTime && indexUpdate) {
+			dataStore_->setLastExpiredTime(txn.getPartitionId(), txn.getStatementStartTime().getUnixTime());
+			isFinish = false;
 		}
-		else {
+		if (subTimeErasableTime <= erasableTime) {
+			expireNum++;
+			isFinish = false;
+		}
+		if (isFinish) {
 			break;
 		}
 	}
@@ -2891,8 +3076,9 @@ int32_t TimeSeries::expireSubTimeSeries(
 
 SubTimeSeries *TimeSeries::getSubContainer(
 	TransactionContext &txn, Timestamp rowKey, bool forUpdate) {
-	BtreeMap::SearchContext sc(
-		ColumnInfo::ROW_KEY_COLUMN_ID, &rowKey, 0, 0, NULL, 1);
+	TermCondition cond(COLUMN_TYPE_TIMESTAMP, COLUMN_TYPE_TIMESTAMP, 
+		DSExpression::EQ, ColumnInfo::ROW_KEY_COLUMN_ID, &rowKey, sizeof(rowKey));
+	BtreeMap::SearchContext sc(txn.getDefaultAllocator(), cond, 1);
 	util::XArray<SubTimeSeriesInfo> subTimeSeriesList(
 		txn.getDefaultAllocator());
 	util::XArray<SubTimeSeriesInfo>::iterator itr;
@@ -2929,9 +3115,8 @@ void TimeSeries::lockIdList(TransactionContext &txn, util::XArray<OId> &oIdList,
 	try {
 		RowArray rowArray(txn, this);
 		for (size_t i = 0; i < oIdList.size(); i++) {
-//			bool isOldSchema = 
-			rowArray.load(txn, oIdList[i], this, OBJECT_FOR_UPDATE);
-//			assert(isOldSchema || !isOldSchema);
+			bool isOldSchema = rowArray.load(txn, oIdList[i], this, OBJECT_FOR_UPDATE);
+			assert(isOldSchema || !isOldSchema);
 			RowArray::Row row(rowArray.getRow(), &rowArray);
 			row.lock(txn);
 			idList.push_back(row.getRowId());
@@ -2996,7 +3181,7 @@ void TimeSeries::getContainerOptionInfo(
 		containerSchema.push_back(
 			reinterpret_cast<uint8_t *>(&tmpCompressionType), sizeof(int8_t));
 
-		util::XArray<ColumnId> hiCompressionColumnList(
+		util::Vector<ColumnId> hiCompressionColumnList(
 			txn.getDefaultAllocator());
 		compressionSchema.getHiCompressionColumnList(hiCompressionColumnList);
 
@@ -3073,7 +3258,7 @@ util::String TimeSeries::getBibContainerOptionInfo(TransactionContext &txn) {
 	strstrm << "\"compressionInfoSet\" : [" << std::endl;
 	const CompressionSchema &compressionSchema = getCompressionSchema();
 	if (compressionSchema.getCompressionType() == HI_COMPRESSION) {
-		util::XArray<ColumnId> hiCompressionColumnList(alloc);
+		util::Vector<ColumnId> hiCompressionColumnList(alloc);
 		compressionSchema.getHiCompressionColumnList(hiCompressionColumnList);
 		for (uint32_t i = 0; i < hiCompressionColumnList.size(); i++) {
 			if (i != 0) {
@@ -3319,19 +3504,15 @@ void TimeSeries::checkContainerOption(MessageSchema *orgMessageSchema,
 
 void TimeSeries::getSubTimeSeriesList(TransactionContext &txn,
 	util::XArray<SubTimeSeriesInfo> &subTimeSeriesList, bool forUpdate, bool indexUpdate) {
-	BtreeMap::SearchContext sc(
-		UNDEF_COLUMNID, NULL, 0, true, NULL, 0, true, 0, NULL, MAX_RESULT_SIZE);
+	BtreeMap::SearchContext sc (txn.getDefaultAllocator(), ColumnInfo::ROW_KEY_COLUMN_ID);
+	sc.setLimit(MAX_RESULT_SIZE);
 	getSubTimeSeriesList(txn, sc, subTimeSeriesList, forUpdate, indexUpdate);
 }
 
 void TimeSeries::getSubTimeSeriesList(TransactionContext &txn,
 	BtreeMap::SearchContext &sc,
 	util::XArray<SubTimeSeriesInfo> &subTimeSeriesList, bool forUpdate, bool indexUpdate) {
-	const Operator *op1, *op2;
-	bool isValid = getKeyCondition(txn, sc, op1, op2);
-	if (!isValid) {
-		return;
-	}
+
 
 	if (isExpired(txn)) {
 		return;
@@ -3344,34 +3525,36 @@ void TimeSeries::getSubTimeSeriesList(TransactionContext &txn,
 
 	Timestamp scBeginTime = -1;
 	Timestamp scEndTime = MAX_TIMESTAMP;
-	if (sc.columnId_ == ColumnInfo::ROW_KEY_COLUMN_ID) {
-		if (sc.startKey_ != NULL) {
-			scBeginTime = *reinterpret_cast<const Timestamp *>(sc.startKey_);
+	if (sc.getKeyColumnNum() == 1 && sc.getScColumnId() == ColumnInfo::ROW_KEY_COLUMN_ID) {
+		const Timestamp *startKey = sc.getStartKey<Timestamp>();
+		if (startKey != NULL) {
+			scBeginTime = *startKey;
 		}
-		if (sc.endKey_ != NULL) {
-			scEndTime = *reinterpret_cast<const Timestamp *>(sc.endKey_);
+		const Timestamp *endKey = sc.getEndKey<Timestamp>();
+		if (endKey != NULL) {
+			scEndTime = *endKey;
 		}
 	}
 	else {
-		for (uint32_t c = 0; c < sc.conditionNum_; c++) {
-			if (sc.conditionList_[c].columnId_ ==
+		for (uint32_t c = 0; c < sc.getConditionNum(); c++) {
+			if (sc.getCondition(c).columnId_ ==
 				ColumnInfo::ROW_KEY_COLUMN_ID) {
-				if (sc.conditionList_[c].operator_ == &geTimestampTimestamp ||
-					sc.conditionList_[c].operator_ == &gtTimestampTimestamp) {
+				if (sc.getCondition(c).opType_ == DSExpression::GE ||
+					sc.getCondition(c).opType_ == DSExpression::GT) {
 					Timestamp condBeginTime =
 						*reinterpret_cast<const Timestamp *>(
-							sc.conditionList_[c].value_);
+							sc.getCondition(c).value_);
 					if (scBeginTime < condBeginTime) {
 						scBeginTime = condBeginTime;
 					}
 				}
-				else if (sc.conditionList_[c].operator_ ==
-							 &leTimestampTimestamp ||
-						 sc.conditionList_[c].operator_ ==
-							 &ltTimestampTimestamp) {
+				else if (sc.getCondition(c).opType_ ==
+							 DSExpression::LE ||
+						 sc.getCondition(c).opType_ ==
+							 DSExpression::LT) {
 					Timestamp condEndTime =
 						*reinterpret_cast<const Timestamp *>(
-							sc.conditionList_[c].value_);
+							sc.getCondition(c).value_);
 					if (scEndTime > condEndTime) {
 						scEndTime = condEndTime;
 					}
@@ -3751,7 +3934,7 @@ void TimeSeries::getErasableList(TransactionContext &txn, Timestamp erasableTime
 	}
 }
 ExpireType TimeSeries::getExpireType() const {
-//	ContainerExpirationInfo *containerExpirationInfo = getContainerExpirationInfo();
+	ContainerExpirationInfo *containerExpirationInfo = getContainerExpirationInfo();
 	if (getContainerExpirationDutation() != INT64_MAX) {
 		assert(getExpirationInfo().duration_ == INT64_MAX);
 		return TABLE_EXPIRE;
@@ -3805,12 +3988,14 @@ bool TimeSeries::validate(TransactionContext &txn, std::string &errorMessage) {
 			break;
 		}
 		for (size_t i = 0; i < parentIndexList.size(); i++) {
-			if (parentIndexList[i].columnId_ != childIndexList[i].columnId_) {
+			if (!(parentIndexList[i].columnIds_->size() == childIndexList[i].columnIds_->size()) &&
+				std::equal(parentIndexList[i].columnIds_->begin(), 
+				parentIndexList[i].columnIds_->end(), childIndexList[i].columnIds_->begin())) {
 				isValid = false;
-				strstrm << "inValid columnId: parentIndex ColumnId("
-						<< parentIndexList[i].columnId_
-						<< ") != childeIndex ColumnId("
-						<< childIndexList[i].columnId_ << ")" << std::endl;
+				strstrm << "inValid columnId: parentIndex first ColumnId("
+						<< parentIndexList[i].columnIds_->at(0)
+						<< ") != childeIndex first ColumnId("
+						<< childIndexList[i].columnIds_->at(0) << ")" << std::endl;
 				break;
 			}
 			if (parentIndexList[i].mapType_ != childIndexList[i].mapType_) {

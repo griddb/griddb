@@ -369,7 +369,7 @@ public:
 			TransactionContext &txn, util::Vector<IndexInfo> &indexInfoList);
 
 	uint32_t getColumnNum() const;
-	void getKeyColumnIdList(util::XArray<ColumnId> &keyColumnIdList);
+	void getKeyColumnIdList(util::Vector<ColumnId> &keyColumnIdList);
 	void getCommonContainerOptionInfo(
 			util::XArray<uint8_t> &containerSchema);
 	void getColumnSchema(
@@ -542,6 +542,12 @@ public:
 		static_cast<void>(txn);
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}
+	virtual ColumnId getRowIdColumnId() {
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
+	virtual ColumnType getRowIdColumnType() {
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
 	virtual uint32_t getRealColumnNum(TransactionContext &txn) {
 		static_cast<void>(txn);
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
@@ -643,13 +649,20 @@ protected:
 		static_cast<void>(txn);
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}
-
-	virtual bool getIndexData(TransactionContext &txn, ColumnId columnId,
-			MapType mapType, bool withUncommitted, IndexData &indexData) const {
+	virtual bool getIndexData(TransactionContext &txn, const util::Vector<ColumnId> &columnIds,
+			MapType mapType, bool withUncommitted, IndexData &indexData,
+			bool withPartialMatch = false) const {
 		static_cast<void>(txn);
-		static_cast<void>(columnId);
+		static_cast<void>(columnIds);
 		static_cast<void>(mapType);
 		static_cast<void>(withUncommitted);
+		static_cast<void>(indexData);
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
+	virtual bool getIndexData(TransactionContext &txn, IndexCursor &indexCursor,
+		IndexData &indexData) const {
+		static_cast<void>(txn);
+		static_cast<void>(indexCursor);
 		static_cast<void>(indexData);
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}

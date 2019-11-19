@@ -285,6 +285,16 @@ inline BaseContainer::RowArray* BaseContainer::RowArray::Row::getRowArray() {
 	return rowArrayCursor_;
 }
 
+template<typename Container>
+const void *BaseContainer::RowArray::Row::getFields(TransactionContext& txn, TreeFuncInfo *funcInfo, bool &isNull) {
+	return rowArrayCursor_->getImpl<Container, ROW_ARRAY_GENERAL>()->getRowCursor().getFields(txn, funcInfo, isNull);
+}
+template<typename Container>
+void BaseContainer::RowArray::Row::getFields(TransactionContext& txn, util::Vector<ColumnId> &columnIds,
+	util::XArray<KeyData> &fieldList) {
+	rowArrayCursor_->getImpl<Container, ROW_ARRAY_GENERAL>()->getRowCursor().getFields(txn, columnIds, fieldList);
+}
+
 
 template<typename Container, RowArrayType rowArrayType>
 inline BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::Row(uint8_t *rowImage, RowArrayImpl *rowArrayCursor)
@@ -309,8 +319,7 @@ template<typename Container, RowArrayType rowArrayType>
 void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::finalize(TransactionContext &txn) {
 	if (rowArrayCursor_->hasVariableColumn()) {
 		if (getVariableArray() != UNDEF_OID) {
-			BaseObject &frontObject = rowArrayCursor_->rowCache_.getFrontFieldObject();
-			frontObject.reset();
+			rowArrayCursor_->rowCache_.reset();
 
 			ObjectManager &objectManager =
 				*(rowArrayCursor_->getContainer().getObjectManager());
@@ -457,7 +466,7 @@ bool BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::isMatch(Transact
 		RowId rowId = getRowId();
 		isMatch =
 			cond.operator_(txn, reinterpret_cast<uint8_t *>(&rowId),
-				sizeof(RowId), cond.value_, cond.valueSize_);
+				sizeof(RowId), static_cast<const uint8_t *>(cond.value_), cond.valueSize_);
 	}
 	else {
 		ColumnInfo &columnInfo = rowArrayCursor_->getContainer().getColumnInfo(cond.columnId_);
@@ -466,7 +475,7 @@ bool BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::isMatch(Transact
 		} else {
 			getField(txn, columnInfo, tmpValue);
 			isMatch = cond.operator_(txn, tmpValue.getValue().data(),
-				tmpValue.getValue().size(), cond.value_,
+				tmpValue.getValue().size(), static_cast<const uint8_t *>(cond.value_),
 				cond.valueSize_);
 		}
 	}
@@ -487,6 +496,51 @@ bool BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::isNullValue(cons
 	return RowNullBits::isNullValue(getNullsAddr(), columnInfo.getColumnId());
 }
 
+template<typename Container, RowArrayType rowArrayType>
+const void *BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getFields(TransactionContext& txn, TreeFuncInfo *funcInfo, bool &isNull) {
+	UTIL_STATIC_ASSERT((util::IsSame<Container, Collection>::VALUE || util::IsSame<Container, TimeSeries>::VALUE));
+	if (funcInfo->getOrgColumnIds()->size() == 1) {
+		const void *fieldValue = &NULL_VALUE;
+		util::Vector<ColumnId> *orgColumnIds = funcInfo->getOrgColumnIds();
+		ColumnInfo& columnInfo = rowArrayCursor_->getContainer().getColumnInfo((*orgColumnIds)[0]);
+
+		isNull = isNullValue(columnInfo);
+		if (!isNull) {
+			RowArray::Column column = rowArrayCursor_->getColumn(columnInfo);
+			fieldValue = getField(column);
+		}
+		return fieldValue;
+	} else {
+		isNull = false;
+		util::XArray<KeyData> valueList(txn.getDefaultAllocator());
+		getFields(txn, *(funcInfo->getOrgColumnIds()), valueList);
+		CompositeInfoObject *compositeInfo = funcInfo->createCompositeInfo(
+			txn.getDefaultAllocator(), valueList);
+		return compositeInfo;
+	}
+}
+
+template<typename Container, RowArrayType rowArrayType>
+void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getFields(TransactionContext& txn, util::Vector<ColumnId> &columnIds,
+	util::XArray<KeyData> &fieldList) {
+	for (size_t i = 0; i < columnIds.size(); i++) {
+		ColumnInfo& columnInfo = rowArrayCursor_->getContainer().getColumnInfo(columnIds[i]);
+		if (!isNullValue(columnInfo)) {
+			RowArray::Column column = rowArrayCursor_->getColumn(columnInfo);
+			const void *fieldValue = getField(column);
+			if (columnInfo.isVariable()) {
+				uint32_t encodeSize = ValueProcessor::getEncodedVarSize(fieldValue);
+				uint32_t varSize = ValueProcessor::decodeVarSize(fieldValue);
+				fieldList.push_back(
+					KeyData(static_cast<const uint8_t *>(fieldValue) + encodeSize, varSize));
+			} else {
+				fieldList.push_back(KeyData(fieldValue, columnInfo.getColumnSize()));
+			}
+		} else {
+			fieldList.push_back(KeyData(NULL, 0));
+		}
+	}
+}
 
 template<typename Container, RowArrayType rowArrayType>
 inline RowHeader *BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getRowHeaderAddr() const {
@@ -772,8 +826,8 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::setVariableField
 template<typename Container, RowArrayType rowArrayType>
 void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::setFields(
 	TransactionContext &txn, MessageRowStore *messageRowStore) {
-//	ObjectManager &objectManager =
-//		*(rowArrayCursor_->getContainer().getObjectManager());
+	ObjectManager &objectManager =
+		*(rowArrayCursor_->getContainer().getObjectManager());
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
 	const void *source;
 	uint32_t size;
@@ -786,14 +840,16 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::setFields(
 	const uint32_t variableColumnNum =
 		rowArrayCursor_->getContainer().getVariableColumnNum();
 	if (variableColumnNum > 0) {
+		const AllocateStrategy allocateStrategy =
+			rowArrayCursor_->getContainer().getRowAllcateStrategy();
 		setVariableArray(UNDEF_OID);
-		util::XArray<uint32_t> varColumnIdList(alloc);
-		varColumnIdList.reserve(variableColumnNum);
+		util::XArray<ColumnType> varTypeList(alloc);
+		varTypeList.reserve(variableColumnNum);
 		for (uint32_t columnId = 0; columnId < rowArrayCursor_->getColumnNum(); columnId++) {
 			ColumnInfo &columnInfo =
 				rowArrayCursor_->getContainer().getColumnInfo(columnId);
 			if (columnInfo.isVariable()) {
-				varColumnIdList.push_back(columnId);
+				varTypeList.push_back(columnInfo.getColumnType());
 			}
 		}
 		util::XArray< std::pair<uint8_t *, uint32_t> > varList(alloc);
@@ -811,13 +867,19 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::setFields(
 			alloc);  
 		util::XArray<uint32_t> varDataObjectPosList(
 			alloc);  
-		checkVarDataSize(txn, varList, varColumnIdList,
+		VariableArrayCursor::checkVarDataSize(txn, objectManager,
+			varList, varTypeList,
 			isConvertSpecialType, varDataObjectSizeList,
 			varDataObjectPosList);
+		OId neighborOId = rowArrayCursor_->getBaseOId();
 		util::XArray<OId> oldVarDataOIdList(alloc);
-		setVariableFields(txn, varList, varColumnIdList,
+		OId variableOId = VariableArrayCursor::createVariableArrayCursor(
+			txn, objectManager, allocateStrategy,
+			varList, varTypeList,
 			isConvertSpecialType, varDataObjectSizeList,
-			varDataObjectPosList, oldVarDataOIdList);
+			varDataObjectPosList, oldVarDataOIdList,
+			neighborOId);
+		setVariableArray(variableOId);
 
 	}
 }
@@ -838,8 +900,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::updateFields(
 	uint8_t *dest = getFixedAddr();
 	OId oldVarDataOId = UNDEF_OID;
 	if (rowArrayCursor_->hasVariableColumn()) {
-		BaseObject &frontObject = rowArrayCursor_->rowCache_.getFrontFieldObject();
-		frontObject.reset();
+		rowArrayCursor_->rowCache_.reset();
 		oldVarDataOId = getVariableArray();
 	}
 	memcpy(dest, source, size);
@@ -847,38 +908,8 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::updateFields(
 	const uint32_t variableColumnNum =
 		rowArrayCursor_->getContainer().getVariableColumnNum();
 	if (variableColumnNum > 0) {
-//		const AllocateStrategy allocateStrategy =
-//			rowArrayCursor_->getContainer().getRowAllcateStrategy();
-
-		setVariableArray(UNDEF_OID);
-		util::XArray<uint32_t> varColumnIdList(alloc);
-		varColumnIdList.reserve(variableColumnNum);
-		for (uint32_t columnId = 0; columnId < rowArrayCursor_->getColumnNum(); columnId++) {
-			ColumnInfo &columnInfo =
-				rowArrayCursor_->getContainer().getColumnInfo(columnId);
-			if (columnInfo.isVariable()) {
-				varColumnIdList.push_back(columnId);
-			}
-		}
-		util::XArray< std::pair<uint8_t *, uint32_t> > varList(alloc);
-		VariableArrayCursor variableArrayCursor(messageRowStore->getRowVariablePart());
-		while (variableArrayCursor.nextElement()) {
-			uint32_t elemSize;
-			uint32_t elemNth;
-			uint8_t *data =
-				variableArrayCursor.getElement(elemSize, elemNth);
-			varList.push_back(std::make_pair(data, elemSize));
-		}
-
-		bool isConvertSpecialType = true;
-		util::XArray<uint32_t> varDataObjectSizeList(
-			alloc);  
-		util::XArray<uint32_t> varDataObjectPosList(
-			alloc);  
-		checkVarDataSize(txn, varList, varColumnIdList,
-			isConvertSpecialType, varDataObjectSizeList,
-			varDataObjectPosList);
-
+		const AllocateStrategy allocateStrategy =
+			rowArrayCursor_->getContainer().getRowAllcateStrategy();
 		util::XArray<OId> oldVarDataOIdList(alloc);
 		{
 			assert(oldVarDataOId != UNDEF_OID);
@@ -923,9 +954,45 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::updateFields(
 			}
 		}
 
-		setVariableFields(txn, varList, varColumnIdList,
+		setVariableArray(UNDEF_OID);
+		util::XArray<ColumnType> varTypeList(alloc);
+		varTypeList.reserve(variableColumnNum);
+		for (uint32_t columnId = 0; columnId < rowArrayCursor_->getColumnNum(); columnId++) {
+			ColumnInfo &columnInfo =
+				rowArrayCursor_->getContainer().getColumnInfo(columnId);
+			if (columnInfo.isVariable()) {
+				varTypeList.push_back(columnInfo.getColumnType());
+			}
+		}
+
+		util::XArray< std::pair<uint8_t *, uint32_t> > varList(alloc);
+		VariableArrayCursor variableArrayCursor(messageRowStore->getRowVariablePart());
+		while (variableArrayCursor.nextElement()) {
+			uint32_t elemSize;
+			uint32_t elemNth;
+			uint8_t *data =
+				variableArrayCursor.getElement(elemSize, elemNth);
+			varList.push_back(std::make_pair(data, elemSize));
+		}
+
+		bool isConvertSpecialType = true;
+		util::XArray<uint32_t> varDataObjectSizeList(
+			alloc);  
+		util::XArray<uint32_t> varDataObjectPosList(
+			alloc);  
+		VariableArrayCursor::checkVarDataSize(txn, objectManager,
+			varList, varTypeList,
 			isConvertSpecialType, varDataObjectSizeList,
-			varDataObjectPosList, oldVarDataOIdList);
+			varDataObjectPosList);
+
+		OId neighborOId = rowArrayCursor_->getBaseOId();
+		OId variableOId = VariableArrayCursor::createVariableArrayCursor(
+			txn, objectManager, allocateStrategy,
+			varList, varTypeList,
+			isConvertSpecialType, varDataObjectSizeList,
+			varDataObjectPosList, oldVarDataOIdList,
+			neighborOId);
+		setVariableArray(variableOId);
 
 	}
 }
@@ -987,7 +1054,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getField(Transac
 template<typename Container, RowArrayType rowArrayType>
 const void * BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getField(
 	const BaseContainer::RowArray::Column &column) {
-	ColumnInfo &columnInfo = column.getColumnInfo();
+	const ColumnInfo &columnInfo = column.getColumnInfo();
 	if (ValueProcessor::isSimple(columnInfo.getColumnType())) {
 		return getFixedField(column);
 	}
@@ -1501,18 +1568,18 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::initializeParam() {
 		currentParam_.rowSize_ = currentParam_.nullsOffset_ + currentParam_.nullbitsSize_ + currentParam_.rowFixedColumnSize_;
 
 		{
-//			uint32_t oldRowSize_ = currentParam_.nullsOffset_ + currentParam_.nullbitsSize_;
+			uint32_t oldRowSize_ = currentParam_.nullsOffset_ + currentParam_.nullbitsSize_;
 			for (uint32_t i = currentParam_.columnNum_; i != 0; i--) {
 				ColumnInfo &columnInfo =
 					getContainer().getColumnInfo(i - 1);
 				if (!columnInfo.isVariable()) {
-//					oldRowSize_ = currentParam_.rowDataOffset_ + columnInfo.getColumnOffset() + columnInfo.getColumnSize() - currentParam_.columnOffsetDiff_;
+					oldRowSize_ = currentParam_.rowDataOffset_ + columnInfo.getColumnOffset() + columnInfo.getColumnSize() - currentParam_.columnOffsetDiff_;
 					break;
 				}
 			}
-//			uint32_t oldRrowFixedColumnSize_ = oldRowSize_ - currentParam_.nullsOffset_ - currentParam_.nullbitsSize_;
-//			assert(oldRrowFixedColumnSize_ == currentParam_.rowFixedColumnSize_);
-//			assert(oldRowSize_ == currentParam_.rowSize_);
+			uint32_t oldRrowFixedColumnSize_ = oldRowSize_ - currentParam_.nullsOffset_ - currentParam_.nullbitsSize_;
+			assert(oldRrowFixedColumnSize_ == currentParam_.rowFixedColumnSize_);
+			assert(oldRowSize_ == currentParam_.rowSize_);
 		}
 
 		if (container_->getContainerType() == TIME_SERIES_CONTAINER) {
@@ -2164,8 +2231,10 @@ template<typename Container, RowArrayType rowArrayType>
 bool BaseContainer::RowArrayImpl<Container, rowArrayType>::nextRowArray(
 	TransactionContext &txn, RowArrayImpl &neighbor, bool &isOldSchema, uint8_t getOption) {
 	RowId rowId = getRowId();
-	BtreeMap::SearchContext sc(
-		0, &rowId, 0, false, NULL, 0, false, 0, NULL, 2);  
+	TermCondition cond(container_->getRowIdColumnType(), container_->getRowIdColumnType(), 
+		DSExpression::GT, container_->getRowIdColumnId(), &rowId, sizeof(rowId));
+	BtreeMap::SearchContext sc(txn.getDefaultAllocator(),
+		cond, 2);  
 	util::XArray<OId> oIdList(txn.getDefaultAllocator());
 	util::XArray<OId>::iterator itr;
 	StackAllocAutoPtr<BtreeMap> rowIdMap(
@@ -2187,8 +2256,10 @@ template<typename Container, RowArrayType rowArrayType>
 bool BaseContainer::RowArrayImpl<Container, rowArrayType>::prevRowArray(
 	TransactionContext &txn, RowArrayImpl &neighbor, bool &isOldSchema, uint8_t getOption) {
 	RowId rowId = getRowId();
-	BtreeMap::SearchContext sc(
-		0, NULL, 0, false, &rowId, 0, false, 0, NULL, 2);  
+	TermCondition cond(container_->getRowIdColumnType(), container_->getRowIdColumnType(), 
+		DSExpression::LT, container_->getRowIdColumnId(), &rowId, sizeof(rowId));
+	BtreeMap::SearchContext sc(txn.getDefaultAllocator(),
+		cond, 2);  
 	util::XArray<OId> oIdList(txn.getDefaultAllocator());
 	util::XArray<OId>::iterator itr;
 	StackAllocAutoPtr<BtreeMap> rowIdMap(
@@ -2457,12 +2528,11 @@ bool BaseContainer::RowArrayImpl<Container, rowArrayType>::convertSchema(Transac
 	util::XArray< std::pair<RowId, OId> > &splitRAList,
 	util::XArray< std::pair<OId, OId> > &moveOIdList) {
 
-	BaseObject &frontObject = rowCache_.getFrontFieldObject();
-	frontObject.reset();
+	rowCache_.reset();
 
 	bool isRelease = false;
 		
-//	int64_t maxRowNum = getMaxRowNum();
+	int64_t maxRowNum = getMaxRowNum();
 	int64_t activeRowNum = getActiveRowNum();
 	ObjectManager &objectManager =
 		*(getContainer().getObjectManager());
@@ -2476,7 +2546,7 @@ bool BaseContainer::RowArrayImpl<Container, rowArrayType>::convertSchema(Transac
 		thisRowArrayRowNum = activeRowNum;
 	}
 	int64_t currentMaxRowNum = getContainer().getNormalRowArrayNum();
-//	uint16_t currentCursor = elemCursor_;
+	uint16_t currentCursor = elemCursor_;
 	OId currentOId = getOId();
 	OId newCurrentOId = UNDEF_OID;
 
@@ -2663,12 +2733,13 @@ std::string BaseContainer::RowArrayImpl<Container, rowArrayType>::dump(Transacti
 	}
 	strstrm << std::endl;
 	strstrm << "ChunkId,Offset,ElemNum" << std::endl;
+	ObjectManager &objMgr = *getContainer().getObjectManager();
 	for (begin(); !end(); next()) {
 		Row row(getRow(), this);
 		OId oId = getOId();
-		strstrm << ObjectManager::getChunkId(oId) << ","
-				<< ObjectManager::getOffset(oId) << ","
-				<< ObjectManager::getChunkId(oId) << "," << getElemCursor(oId)
+		strstrm << objMgr.getChunkId(oId) << ","
+				<< objMgr.getOffset(oId) << ","
+				<< objMgr.getChunkId(oId) << "," << getElemCursor(oId)
 				<< ",";
 		strstrm << row.dump(txn) << std::endl;
 	}

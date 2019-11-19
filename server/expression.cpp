@@ -419,7 +419,9 @@ const char *Expr::getValueAsString(TransactionContext &txn) {
 			const util::DateTime *d =
 				reinterpret_cast<const util::DateTime *>(value_->data());
 			util::NormalOStringStream os;
-			d->format(os, TRIM_MILLISECONDS, USE_LOCAL_TIMEZONE);
+			util::DateTime::ZonedOption zonedOption = util::DateTime::ZonedOption::create(TRIM_MILLISECONDS, txn.getTimeZone());
+			zonedOption.asLocalTimeZone_ = USE_LOCAL_TIMEZONE;
+			d->format(os, zonedOption);
 			return os2char(txn, os);
 		}
 		case COLUMN_TYPE_GEOMETRY: {
@@ -2017,10 +2019,7 @@ const ColumnInfo *Expr::getColumnInfo() {
  * @return list of TermCondition
  */
 TermCondition *Expr::toCondition(TransactionContext &txn, MapType mapType,
-	uint32_t indexColumnId, Query &queryObj, const void *&startKey,
-	uint32_t &startKeySize, int32_t &isStartKeyIncluded, const void *&endKey,
-	uint32_t &endKeySize, int32_t &isEndKeyIncluded, 
-	NullCondition &nullCond, bool notFlag) {
+	Query &queryObj, bool notFlag) {
 	TermCondition c;
 	Operation op = op_;  
 	bool isValueCastableToKey =
@@ -2052,24 +2051,22 @@ TermCondition *Expr::toCondition(TransactionContext &txn, MapType mapType,
 		else {
 		}
 
-		ColumnType valueType, columnType;  
+		ColumnType columnType;  
 
 		if (argList[0]->type_ == COLUMN) {
 			columnType = argList[0]->columnType_;
-			valueType = argList[1]->value_->getType();
+			c.valueType_ = argList[1]->value_->getType();
 			c.columnId_ = argList[0]->columnId_;
-			c.columnOffset_ = argList[0]->columnInfo_->getColumnOffset();
 			c.value_ = argList[1]->value_->data();
 			c.valueSize_ = argList[1]->value_->size();
 			indexExpr = argList[1];
 		}
 		else {
 			columnType = argList[1]->columnType_;
-			valueType = argList[0]->value_->getType();
+			c.valueType_ = argList[0]->value_->getType();
 			c.value_ = argList[0]->value_->data();
 			c.valueSize_ = argList[0]->value_->size();
 			c.columnId_ = argList[1]->columnId_;
-			c.columnOffset_ = argList[1]->columnInfo_->getColumnOffset();
 			indexExpr = argList[0];
 			switch (op) {
 			case LT:
@@ -2120,17 +2117,9 @@ TermCondition *Expr::toCondition(TransactionContext &txn, MapType mapType,
 			}
 		}
 
-		if (op == IS || op == ISNOT) {
-			if (c.columnId_ == indexColumnId) {
-				if (op == IS) {
-					nullCond = BaseIndex::SearchContext::IS_NULL;
-				}
-				return NULL;
-			}
-		} else {
 		switch (columnType) {
 		case COLUMN_TYPE_STRING:
-			isValueCastableToKey = (valueType == COLUMN_TYPE_STRING &&
+			isValueCastableToKey = (c.valueType_ == COLUMN_TYPE_STRING &&
 									mapType != MAP_TYPE_SPATIAL);
 			break;
 		case COLUMN_TYPE_BYTE:
@@ -2141,10 +2130,10 @@ TermCondition *Expr::toCondition(TransactionContext &txn, MapType mapType,
 			double d;
 			isValueCastableToKey = (
 				mapType != MAP_TYPE_SPATIAL &&
-				valueType <= COLUMN_TYPE_LONG && valueType >= COLUMN_TYPE_BYTE);
-			if (isValueCastableToKey && columnType < valueType) {
+				c.valueType_ <= COLUMN_TYPE_LONG && c.valueType_ >= COLUMN_TYPE_BYTE);
+			if (isValueCastableToKey && columnType < c.valueType_) {
 				isValueCastableToKey =
-					checkValueRange(columnType, valueType, c.value_, i64, d);
+					checkValueRange(columnType, c.valueType_, static_cast<const uint8_t *>(c.value_), i64, d);
 			}
 			break;
 		}
@@ -2152,13 +2141,13 @@ TermCondition *Expr::toCondition(TransactionContext &txn, MapType mapType,
 		case COLUMN_TYPE_DOUBLE: {
 			isValueCastableToKey = (
 				mapType != MAP_TYPE_SPATIAL &&
-				valueType <= COLUMN_TYPE_DOUBLE &&
-				valueType >= COLUMN_TYPE_BYTE);
-			if (isValueCastableToKey && (valueType <= COLUMN_TYPE_LONG ||
-											valueType == COLUMN_TYPE_DOUBLE)) {
+				c.valueType_ <= COLUMN_TYPE_DOUBLE &&
+				c.valueType_ >= COLUMN_TYPE_BYTE);
+			if (isValueCastableToKey && (c.valueType_ <= COLUMN_TYPE_LONG ||
+											c.valueType_ == COLUMN_TYPE_DOUBLE)) {
 				double d;
 				int64_t i64;
-				if (checkValueRange(columnType, valueType, c.value_, i64, d)) {
+				if (checkValueRange(columnType, c.valueType_, c.value_, i64, d)) {
 					if (columnType == COLUMN_TYPE_FLOAT) {
 						float *f = QP_NEW float;
 						if (util::isNaN(d)) {
@@ -2190,113 +2179,21 @@ TermCondition *Expr::toCondition(TransactionContext &txn, MapType mapType,
 		case COLUMN_TYPE_TIMESTAMP:
 			isValueCastableToKey = (
 				mapType != MAP_TYPE_SPATIAL &&
-				valueType == COLUMN_TYPE_TIMESTAMP);
+				c.valueType_ == COLUMN_TYPE_TIMESTAMP);
 			break;
 		default:
 			isValueCastableToKey = false;
 			break;
 		}
 
-		if (isValueCastableToKey && (c.columnId_ == indexColumnId)) {
-			switch (mapType) {
-			case MAP_TYPE_HASH:
-				if (op == EQ) {
-					if (startKey == NULL) {
-						if (queryObj.doExplain()) {
-							queryObj.addExplain(1, "SET_INDEX_KEY", "STRING",
-								"START_KEY", indexExpr->getValueAsString(txn));
-						}
-						startKey = (indexValue == NULL) ? c.value_ : indexValue;
-						startKeySize = (indexValue == NULL) ? c.valueSize_
-															: indexValueSize;
-						isStartKeyIncluded = isEndKeyIncluded = true;
-						return NULL;
-					}
-				}
-				break;
-
-			case MAP_TYPE_BTREE:
-				switch (op) {
-				case EQ:
-					if (startKey == NULL && endKey == NULL) {
-						if (queryObj.doExplain()) {
-							queryObj.addExplain(1, "SET_INDEX_KEY", "STRING",
-								"START_KEY, END_KEY",
-								indexExpr->getValueAsString(txn));
-						}
-						startKey = (indexValue == NULL) ? c.value_ : indexValue;
-						endKey = (indexValue == NULL) ? c.value_ : indexValue;
-						startKeySize = endKeySize = (indexValue == NULL)
-														? c.valueSize_
-														: indexValueSize;
-						isStartKeyIncluded = isEndKeyIncluded = true;
-						return NULL;
-					}
-					break;
-				case LT:
-					if (endKey == NULL) {
-						if (queryObj.doExplain()) {
-							queryObj.addExplain(1, "SET_INDEX_KEY", "STRING",
-								"END_KEY", indexExpr->getValueAsString(txn));
-						}
-						endKey = (indexValue == NULL) ? c.value_ : indexValue;
-						isEndKeyIncluded = false;
-						endKeySize = (indexValue == NULL) ? c.valueSize_
-														  : indexValueSize;
-						return NULL;
-					}
-					break;
-				case LE:
-					if (endKey == NULL) {
-						if (queryObj.doExplain()) {
-							queryObj.addExplain(1, "SET_INDEX_KEY", "STRING",
-								"END_KEY", indexExpr->getValueAsString(txn));
-						}
-						endKey = (indexValue == NULL) ? c.value_ : indexValue;
-						isEndKeyIncluded = true;
-						endKeySize = (indexValue == NULL) ? c.valueSize_
-														  : indexValueSize;
-						return NULL;
-					}
-					break;
-				case GT:
-					if (startKey == NULL) {
-						if (queryObj.doExplain()) {
-							queryObj.addExplain(1, "SET_INDEX_KEY", "STRING",
-								"START_KEY", indexExpr->getValueAsString(txn));
-						}
-						startKey = (indexValue == NULL) ? c.value_ : indexValue;
-						isStartKeyIncluded = false;
-						startKeySize = (indexValue == NULL) ? c.valueSize_
-															: indexValueSize;
-						return NULL;
-					}
-					break;
-				case GE:
-					if (startKey == NULL) {
-						if (queryObj.doExplain()) {
-							queryObj.addExplain(1, "SET_INDEX_KEY", "STRING",
-								"START_KEY", indexExpr->getValueAsString(txn));
-						}
-						startKey = (indexValue == NULL) ? c.value_ : indexValue;
-						isStartKeyIncluded = true;
-						startKeySize = (indexValue == NULL) ? c.valueSize_
-															: indexValueSize;
-						return NULL;
-					}
-					break;
-				case IS:
-				case ISNOT:
-					break;
-				default:
-					break;
-				}
-				break;
-			default:
-				break;  
+		if (isValueCastableToKey) {
+			if (indexValue != NULL) {
+				c.value_ = indexValue;
+				c.valueSize_ = indexValueSize;
+				c.valueType_ = columnType;
 			}
 		}
-		}
+		ColumnType valueType = c.valueType_;
 
 		switch (op) {
 		case NE:
@@ -2326,6 +2223,7 @@ TermCondition *Expr::toCondition(TransactionContext &txn, MapType mapType,
 		default:
 			return NULL;  
 		}
+		c.opType_ = static_cast<DSExpression::Operation>(op);
 	}
 	else if (type_ == COLUMN) {
 		if (columnType_ != COLUMN_TYPE_BOOL) {
@@ -2333,12 +2231,10 @@ TermCondition *Expr::toCondition(TransactionContext &txn, MapType mapType,
 				"Cannot use non-boolean column as search condition");
 		}
 
-		c.columnId_ = columnId_;
-		c.columnOffset_ = columnInfo_->getColumnOffset();
-		c.operator_ = (notFlag) ? ComparatorTable::eqTable_[COLUMN_TYPE_BOOL][COLUMN_TYPE_BOOL]
-								: ComparatorTable::neTable_[COLUMN_TYPE_BOOL][COLUMN_TYPE_BOOL];
-		c.value_ = (QP_NEW Value(false))->data();
-		c.valueSize_ = 0;
+		c = TermCondition(COLUMN_TYPE_BOOL, COLUMN_TYPE_BOOL, 
+			DSExpression::EQ, columnId_, (QP_NEW bool((notFlag) ? false : true)),
+			sizeof(bool));
+
 	}
 	else if (type_ == FUNCTION) {
 		if (notFlag) {
@@ -2352,11 +2248,30 @@ TermCondition *Expr::toCondition(TransactionContext &txn, MapType mapType,
 		case MAP_TYPE_SPATIAL:
 			{
 				TqlGisFunc *f = reinterpret_cast<TqlGisFunc *>(functor_);
+				const void *r1, *r2;
 				GeometryOperator op_g;
-				f->getIndexParam(txn, argList, op_g, startKey, endKey);
-				startKeySize = static_cast<uint32_t>(op_g);
-				if (startKey == NULL) {
+				ColumnId indexColumnId;
+				f->getIndexParam(txn, argList, op_g, r1, r2, indexColumnId);
+				if (r1 == NULL) {
 					return NULL;
+				} else {
+					RtreeMap::SearchContext::GeomeryCondition *geomCond = 
+						QP_NEW RtreeMap::SearchContext::GeomeryCondition();
+					geomCond->relation_ = static_cast<uint32_t>(op_g);
+					if (geomCond->relation_ == GEOMETRY_QSF_INTERSECT) {
+						geomCond->pkey_ = *reinterpret_cast<const TrPv3Key *>(r1);
+					}
+					else {
+						geomCond->rect_[0] = *reinterpret_cast<const TrRectTag *>(r1);
+						if (r2) {
+							geomCond->rect_[1] = *reinterpret_cast<const TrRectTag *>(r2);
+						}
+					}
+					geomCond->valid_ = true;
+
+					c = TermCondition(COLUMN_TYPE_BOOL, COLUMN_TYPE_BOOL, 
+						DSExpression::GEOM_OP, indexColumnId, geomCond,
+						sizeof(RtreeMap::SearchContext::GeomeryCondition));
 				}
 			}
 			break;
@@ -2513,23 +2428,26 @@ void Expr::getIndexBitmapAndInfo(TransactionContext &txn,
 	else if (type_ == COLUMN) {
 		columnInfo = this->columnInfo_;
 		assert(columnInfo != NULL);
-		if (container.hasIndex(
-				txn, columnInfo->getColumnId(), MAP_TYPE_BTREE)) {
+		util::Vector<ColumnId> columnIds(txn.getDefaultAllocator());
+		columnIds.push_back(columnInfo->getColumnId());
+		bool withPartialMatch = true;
+		IndexTypes indexBit = container.getIndexTypes(txn, columnIds, withPartialMatch);
+
+		if (container.hasIndex(indexBit, MAP_TYPE_BTREE)) {
 			mapBitmap |= TOBITMAP(MAP_TYPE_BTREE);
 			if (queryObj.doExplain()) {
 				queryObj.addExplain(
 					1, "INDEX_FOUND", "INDEX_TYPE", "BTREE", label_);
 			}
 		}
-		if (container.hasIndex(txn, columnInfo->getColumnId(), MAP_TYPE_HASH)) {
+		if (container.hasIndex(indexBit, MAP_TYPE_HASH)) {
 			mapBitmap |= TOBITMAP(MAP_TYPE_HASH);
 			if (queryObj.doExplain()) {
 				queryObj.addExplain(
 					1, "INDEX_FOUND", "INDEX_TYPE", "HASH", label_);
 			}
 		}
-		if (container.hasIndex(
-				txn, columnInfo->getColumnId(), MAP_TYPE_SPATIAL)) {
+		if (container.hasIndex(indexBit, MAP_TYPE_SPATIAL)) {
 			mapBitmap |= TOBITMAP(MAP_TYPE_SPATIAL);
 			if (queryObj.doExplain()) {
 				queryObj.addExplain(
@@ -2626,7 +2544,7 @@ Expr *Expr::newColumnNode(Token &colName, TransactionContext &txn,
 	unsigned int parseState, Collection *collection, TimeSeries *timeSeries) {
 	char buf[MAX_COLUMN_NAME_LEN];
 	char *cName = buf;
-//	int i = 0;
+	int i = 0;
 	Expr *ret;
 
 	if (colName.z[0] == '*') {
