@@ -100,7 +100,7 @@ public class UpdateRowByTQL {
 
 
 		// ロウを登録する
-		String[] nameList = {"notebook PC", "desktop PC", "keybord", "mouse", "printer"};
+		String[] nameList = {"notebook PC", "desktop PC", "keyboard", "mouse", "printer"};
 		int[] numberList = {108, 72, 25, 45, 62};
 
 		List<Row> rowList = new ArrayList<Row>();
