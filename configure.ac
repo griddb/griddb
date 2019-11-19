@@ -12,7 +12,7 @@ AM_PROG_INSTALL_STRIP
 AC_PROG_RANLIB
 
 CF_COMMON=" -Wall -finput-charset=UTF-8\
- -Wpointer-arith"
+ -Wpointer-arith -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-function"
 C_COMMON="$CF_COMMON  -Wmissing-prototypes"
 CX_COMMON="$CF_COMMON -std=gnu++0x"
 
