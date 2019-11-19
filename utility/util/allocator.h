@@ -60,6 +60,18 @@
 #define UTIL_ALLOCATOR_FIXED_ALLOCATOR_RESERVE_UNIT_SMALL 1
 #endif
 
+#ifndef UTIL_ALLOCATOR_NO_CACHE
+#define UTIL_ALLOCATOR_NO_CACHE 0
+#endif
+
+#ifndef UTIL_ALLOCATOR_NO_CACHE_FIXED_ALLOCATOR
+#define UTIL_ALLOCATOR_NO_CACHE_FIXED_ALLOCATOR UTIL_ALLOCATOR_NO_CACHE
+#endif
+
+#ifndef UTIL_ALLOCATOR_NO_CACHE_STACK_ALLOCATOR
+#define UTIL_ALLOCATOR_NO_CACHE_STACK_ALLOCATOR UTIL_ALLOCATOR_NO_CACHE
+#endif
+
 #ifndef UTIL_ALLOCATOR_SUBSTITUTE_FIXED_ALLOCATOR
 #define UTIL_ALLOCATOR_SUBSTITUTE_FIXED_ALLOCATOR 0
 #endif
@@ -1718,8 +1730,13 @@ inline FixedSizeAllocator<Mutex>::FixedSizeAllocator(
 		size_t elementSize) :
 		elementSize_(elementSize),
 		totalElementLimit_(std::numeric_limits<size_t>::max()),
+#if UTIL_ALLOCATOR_NO_CACHE_FIXED_ALLOCATOR
+		freeElementLimit_(0),
+		stableElementLimit_(0),
+#else
 		freeElementLimit_(std::numeric_limits<size_t>::max()),
 		stableElementLimit_(std::numeric_limits<size_t>::max()),
+#endif
 		errorHandler_(NULL),
 		freeLink_(NULL),
 		totalElementCount_(0),
@@ -1737,8 +1754,13 @@ inline FixedSizeAllocator<Mutex>::FixedSizeAllocator(
 		const AllocatorInfo &info, size_t elementSize) :
 		elementSize_(elementSize),
 		totalElementLimit_(std::numeric_limits<size_t>::max()),
+#if UTIL_ALLOCATOR_NO_CACHE_FIXED_ALLOCATOR
+		freeElementLimit_(0),
+		stableElementLimit_(0),
+#else
 		freeElementLimit_(std::numeric_limits<size_t>::max()),
 		stableElementLimit_(std::numeric_limits<size_t>::max()),
+#endif
 		errorHandler_(NULL),
 		freeLink_(NULL),
 		totalElementCount_(0),
@@ -1855,7 +1877,11 @@ inline void FixedSizeAllocator<Mutex>::setTotalElementLimit(size_t limit) {
 template<typename Mutex>
 void FixedSizeAllocator<Mutex>::setFreeElementLimit(size_t limit) {
 	UTIL_ALLOCATOR_DETAIL_STAT_GUARD(guard, mutex_);
+#if UTIL_ALLOCATOR_NO_CACHE_FIXED_ALLOCATOR
+	static_cast<void>(limit);
+#else
 	freeElementLimit_ = limit;
+#endif
 	clear(freeElementLimit_);
 }
 
@@ -1914,6 +1940,11 @@ void FixedSizeAllocator<Mutex>::setLimit(
 	UTIL_ALLOCATOR_DETAIL_STAT_GUARD(guard, mutex_);
 
 	switch (type) {
+#if UTIL_ALLOCATOR_NO_CACHE_FIXED_ALLOCATOR
+	default:
+		static_cast<void>(value);
+		break;
+#else
 	case AllocatorStats::STAT_CACHE_LIMIT:
 		freeElementLimit_ = value / elementSize_;
 		break;
@@ -1922,6 +1953,7 @@ void FixedSizeAllocator<Mutex>::setLimit(
 		break;
 	default:
 		break;
+#endif
 	}
 
 	clear(freeElementLimit_);
@@ -2483,7 +2515,11 @@ inline void StackAllocator::setTotalSizeLimit(size_t limit) {
 }
 
 inline void StackAllocator::setFreeSizeLimit(size_t limit) {
+#if UTIL_ALLOCATOR_NO_CACHE_STACK_ALLOCATOR
+	static_cast<void>(limit);
+#else
 	freeSizeLimit_ = limit;
+#endif
 }
 
 inline size_t StackAllocator::getTotalSizeLimit() {

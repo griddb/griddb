@@ -855,6 +855,12 @@ void Socket::setMulticastInterfaceOption(
 		if (interfaceAddr == NULL || interfaceAddr->isEmpty()) {
 			interfaceAddr = &SocketAddress::INET_ANY;
 		}
+		else {
+			setOption(IPPROTO_IP, IP_MULTICAST_IF,
+					(char *)&(reinterpret_cast<sockaddr_in*>(
+					interfaceAddr->getAddress(&ss))->sin_addr), sizeof(in_addr));
+		}
+
 		ip_mreq value;
 		value.imr_multiaddr = reinterpret_cast<sockaddr_in*>(
 				multicastAddr.getAddress(&ss))->sin_addr;

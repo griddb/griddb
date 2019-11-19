@@ -25,6 +25,42 @@
 
 namespace util {
 
+class TimeZone {
+public:
+	typedef int64_t Offset;
+
+	static const size_t MAX_FORMAT_SIZE = 7;
+
+	TimeZone();
+
+	static TimeZone getLocalTimeZone(int64_t unixTimeMillis);
+	static TimeZone getUTCTimeZone();
+
+	bool isEmpty() const;
+	bool checkRange(bool throwOnError) const;
+
+	Offset getOffsetMillis() const;
+	void setOffsetMillis(Offset millis);
+
+	void format(std::ostream &s) const;
+	size_t format(char8_t *buf, size_t size) const;
+
+	bool parse(const char8_t *buf, size_t size, bool throwOnError);
+
+private:
+
+	struct Constants {
+		static Offset emptyOffsetMillis();
+		static Offset offsetMillisRange();
+	};
+
+
+	static const Offset EMPTY_OFFSET_MILLIS;
+	static const Offset OFFSET_MILLIS_RANGE;
+
+	Offset offsetMillis_;
+};
+
 /*!
 	@brief Manages date and time
 */
@@ -38,8 +74,17 @@ public:
 		FIELD_HOUR,
 		FIELD_MINUTE,
 		FIELD_SECOND,
-		FIELD_MILLISECOND
+		FIELD_MILLISECOND,
+
+		FIELD_DAY_OF_WEEK,
+		FIELD_DAY_OF_YEAR
 	};
+
+	struct FieldData;
+	struct Option;
+	struct ZonedOption;
+
+	static const size_t MAX_FORMAT_SIZE = 32;
 
 	static const int64_t INITIAL_UNIX_TIME;
 
@@ -66,7 +111,9 @@ public:
 	int64_t getUnixTime() const;
 
 	void setUnixTime(int64_t unixTimeMillis);
+	void setUnixTime(int64_t unixTimeMillis, const Option &option);
 
+	void getFields(FieldData &fieldData, const ZonedOption &option) const;
 	void getFields(
 			int32_t &year,
 			int32_t &month,
@@ -77,6 +124,11 @@ public:
 			int32_t &milliSecond,
 			bool asLocalTimeZone) const;
 
+	int64_t getField(FieldType type, const ZonedOption &option) const;
+
+	void setFields(
+			const FieldData &fieldData, const ZonedOption &option,
+			bool strict = true);
 	void setFields(
 			int32_t year,
 			int32_t month,
@@ -87,18 +139,32 @@ public:
 			int32_t milliSecond,
 			bool asLocalTimeZone);
 
+	void addField(
+			int64_t amount, FieldType fieldType, const ZonedOption &option);
 	void addField(int64_t amount, FieldType fieldType);
 
+	int64_t getDifference(
+			const DateTime &base, FieldType fieldType,
+			const ZonedOption &option) const;
 	int64_t getDifference(const DateTime &base, FieldType fieldType) const;
 
-	void format(std::ostream &s,
-		bool trimMilliseconds, bool asLocalTimeZone = true) const;
+	void format(std::ostream &s, const ZonedOption &option) const;
+	void format(
+			std::ostream &s, bool trimMilliseconds,
+			bool asLocalTimeZone = true) const;
 
+	size_t format(char8_t *buf, size_t size, const ZonedOption &option) const;
+
+	bool parse(
+			const char8_t *buf, size_t size, bool throwOnError,
+			const ZonedOption &option);
 	static bool parse(
-		const char8_t *str, DateTime &dateTime, bool trimMilliseconds);
+			const char8_t *str, DateTime &dateTime, bool trimMilliseconds);
 
+	static DateTime now(const Option &option);
 	static DateTime now(bool trimMilliseconds);
 
+	static DateTime max(const Option &option);
 	static DateTime max(bool trimMilliseconds);
 
 	bool operator==(const DateTime &another) const;
@@ -109,9 +175,59 @@ public:
 	bool operator<=(const DateTime &another) const;
 
 private:
+	static const int32_t EPOCH_DAY_OF_WEEK;
+
+	static void checkFieldBounds(
+			const FieldData &fields, const ZonedOption &option);
+	static const FieldData* resolveMaxFields(
+			const ZonedOption &option, FieldData &localFields);
+
+	static void checkUnixTimeBounds(
+			int64_t unixTimeMillis, const Option &option);
+	static int64_t resolveMaxUnixTime(const Option &option);
+
 	static int64_t getMaxUnixTime(bool trimMilliseconds);
 
 	int64_t unixTimeMillis_;
+};
+
+struct DateTime::FieldData {
+	void initialize();
+
+	template<FieldType T> int32_t getValue() const;
+	template<FieldType T> void setValue(int32_t value);
+
+	int32_t getValue(FieldType type) const;
+	void setValue(FieldType type, int32_t value);
+
+	int32_t year_;
+	int32_t month_;
+	int32_t monthDay_;
+	int32_t hour_;
+	int32_t minute_;
+	int32_t second_;
+	int32_t milliSecond_;
+};
+
+struct DateTime::Option {
+	Option();
+
+	static Option create(bool trimMilliseconds);
+
+	bool trimMilliseconds_;
+	int64_t maxTimeMillis_;
+};
+
+struct DateTime::ZonedOption {
+	ZonedOption();
+
+	static ZonedOption create(bool trimMilliseconds, const TimeZone &zone);
+
+	Option baseOption_;
+
+	bool asLocalTimeZone_;
+	TimeZone zone_;
+	const FieldData *maxFields_;
 };
 
 /*!
@@ -154,6 +270,11 @@ private:
 	uint64_t elapsedClock_;
 };
 
+
+inline std::ostream& operator<<(std::ostream &s, const util::TimeZone &zone) {
+	zone.format(s);
+	return s;
+}
 
 inline DateTime::DateTime() : unixTimeMillis_(INITIAL_UNIX_TIME) {
 }
@@ -207,6 +328,93 @@ inline std::ostream& operator<<(
 		std::ostream &s, const util::DateTime &dateTime) {
 	dateTime.format(s, false);
 	return s;
+}
+
+template<DateTime::FieldType T> int32_t DateTime::FieldData::getValue() const {
+	UTIL_STATIC_ASSERT(sizeof(T) < 0);
+	return int32_t();
+}
+
+template<> inline
+int32_t DateTime::FieldData::getValue<DateTime::FIELD_YEAR>() const {
+	return year_;
+}
+
+template<> inline
+int32_t DateTime::FieldData::getValue<DateTime::FIELD_MONTH>() const {
+	return month_;
+}
+
+template<> inline
+int32_t DateTime::FieldData::getValue<DateTime::FIELD_DAY_OF_MONTH>() const {
+	return monthDay_;
+}
+
+template<> inline
+int32_t DateTime::FieldData::getValue<DateTime::FIELD_HOUR>() const {
+	return hour_;
+}
+
+template<> inline
+int32_t DateTime::FieldData::getValue<DateTime::FIELD_MINUTE>() const {
+	return minute_;
+}
+
+template<> inline
+int32_t DateTime::FieldData::getValue<DateTime::FIELD_SECOND>() const {
+	return second_;
+}
+
+template<> inline
+int32_t DateTime::FieldData::getValue<DateTime::FIELD_MILLISECOND>() const {
+	return milliSecond_;
+}
+
+template<DateTime::FieldType T>
+void DateTime::FieldData::setValue(int32_t value) {
+	UTIL_STATIC_ASSERT(sizeof(T) < 0);
+}
+
+template<>
+inline void DateTime::FieldData::setValue<DateTime::FIELD_YEAR>(
+		int32_t value) {
+	year_ = value;
+}
+
+template<>
+inline void DateTime::FieldData::setValue<DateTime::FIELD_MONTH>(
+		int32_t value) {
+	month_ = value;
+}
+
+template<>
+inline void DateTime::FieldData::setValue<DateTime::FIELD_DAY_OF_MONTH>(
+		int32_t value) {
+	monthDay_ = value;
+}
+
+template<>
+inline void DateTime::FieldData::setValue<DateTime::FIELD_HOUR>(
+		int32_t value) {
+	hour_ = value;
+}
+
+template<>
+inline void DateTime::FieldData::setValue<DateTime::FIELD_MINUTE>(
+		int32_t value) {
+	minute_ = value;
+}
+
+template<>
+inline void DateTime::FieldData::setValue<DateTime::FIELD_SECOND>(
+		int32_t value) {
+	second_ = value;
+}
+
+template<>
+inline void DateTime::FieldData::setValue<DateTime::FIELD_MILLISECOND>(
+		int32_t value) {
+	milliSecond_ = value;
 }
 
 #if UTIL_FAILURE_SIMULATION_ENABLED
