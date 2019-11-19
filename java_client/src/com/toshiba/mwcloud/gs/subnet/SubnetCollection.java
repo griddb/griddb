@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Set;
 
 import com.toshiba.mwcloud.gs.Collection;
+import com.toshiba.mwcloud.gs.Container;
 import com.toshiba.mwcloud.gs.GSException;
 import com.toshiba.mwcloud.gs.Geometry;
 import com.toshiba.mwcloud.gs.GeometryOperator;
@@ -45,11 +46,12 @@ extends SubnetContainer<K, R> implements Collection<K, R> {
 
 	public SubnetCollection(
 			SubnetGridStore store, GridStoreChannel channel, Context context,
-			Class<R> rowType, RowMapper mapper, int schemaVerId,
+			Container.BindType<K, R, ? extends Container<?, ?>> bindType,
+			RowMapper mapper, int schemaVerId,
 			int partitionId, long containerId, ContainerKey normalizedContainerKey,
 			ContainerKey remoteContainerKey)
 			throws GSException {
-		super(store, channel, context, rowType, mapper, schemaVerId,
+		super(store, channel, context, bindType, mapper, schemaVerId,
 				partitionId, containerId, normalizedContainerKey,
 				remoteContainerKey);
 	}
@@ -80,6 +82,7 @@ extends SubnetContainer<K, R> implements Collection<K, R> {
 	private void formatQuery(BasicBuffer inBuf, String column,
 			Geometry geometry, GeometryOperator geometryOp)
 			throws GSException {
+		GSErrorCode.checkNullParameter(column, "column", null);
 		try {
 			inBuf.putInt(mapper.resolveColumnId(column));
 			RowMapper.putSize(
@@ -89,7 +92,6 @@ extends SubnetContainer<K, R> implements Collection<K, R> {
 			inBuf.putByteEnum(geometryOp);
 		}
 		catch (NullPointerException e) {
-			GSErrorCode.checkNullParameter(column, "column", e);
 			GSErrorCode.checkNullParameter(geometry, "geometry", e);
 			GSErrorCode.checkNullParameter(geometryOp, "geometryOp", e);
 			throw e;
@@ -124,6 +126,7 @@ extends SubnetContainer<K, R> implements Collection<K, R> {
 	private void formatQuery(BasicBuffer inBuf, String column,
 			Geometry geometryIntersection, Geometry geometryDisjoint)
 			throws GSException {
+		GSErrorCode.checkNullParameter(column, "column", null);
 		try {
 			inBuf.putInt(mapper.resolveColumnId(column));
 			final MappingMode mode =
@@ -138,7 +141,6 @@ extends SubnetContainer<K, R> implements Collection<K, R> {
 			GeometryUtils.putGeometry(inBuf, geometryDisjoint);
 		}
 		catch (NullPointerException e) {
-			GSErrorCode.checkNullParameter(column, "column", e);
 			GSErrorCode.checkNullParameter(
 					geometryIntersection, "geometryIntersection", e);
 			GSErrorCode.checkNullParameter(
@@ -166,14 +168,16 @@ extends SubnetContainer<K, R> implements Collection<K, R> {
 
 		public MetaCollection(
 				SubnetGridStore store, GridStoreChannel channel,
-				Context context, Class<R> rowType, RowMapper mapper,
+				Context context, 
+				Container.BindType<K, R, ? extends Container<?, ?>> bindType,
+				RowMapper mapper,
 				int schemaVerId, int partitionId,
 				MetaDistributionType metaDistType,
 				long metaContainerId, MetaNamingType metaNamingType,
 				ContainerKey normalizedContainerKey,
 				ContainerKey remoteContainerKey)
 				throws GSException {
-			super(store, channel, context, rowType, mapper, schemaVerId,
+			super(store, channel, context, bindType, mapper, schemaVerId,
 					partitionId, -1, normalizedContainerKey,
 					remoteContainerKey);
 			this.channel = channel;
@@ -241,7 +245,7 @@ extends SubnetContainer<K, R> implements Collection<K, R> {
 		private SubnetCollection<K, R> createSub(int partitionId)
 				throws GSException {
 			return new SubnetCollection<K, R>(
-					getStore(), channel, context, getRowType(), getRowMapper(),
+					getStore(), channel, context, getBindType(), getRowMapper(),
 					getSchemaVersionId(), partitionId, -1,
 					getNormalizedContainerKey(), queryContainerKey);
 		}

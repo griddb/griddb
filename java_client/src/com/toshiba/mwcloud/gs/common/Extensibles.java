@@ -93,18 +93,14 @@ public class Extensibles {
 				ContainerProperties.KeySet propKeySet,
 				Integer attribute, boolean internalMode) throws GSException;
 
-		public <K> AsContainer<K, Row> getContainer(
-				ContainerKey key, ContainerType expectedType,
-				Integer attribute, boolean internalMode) throws GSException;
-
 		public <K, R> AsContainer<K, R> getContainer(
-				ContainerKey key,
-				ContainerType containerType, Class<R> rowType,
+				ContainerKey key, Container.BindType<K, R, ?> bindType,
 				Integer attribute, boolean internalMode) throws GSException;
 
-		public <K> Container<K, Row> putContainer(
-				ContainerKey key, ContainerProperties props,
-				boolean modifiable, boolean internalMode) throws GSException;
+		public <K, R> Container<K, R> putContainer(
+				ContainerKey key, Container.BindType<K, R, ?> bindType,
+				ContainerProperties props, boolean modifiable,
+				boolean internalMode) throws GSException;
 
 		public void dropContainer(
 				ContainerKey key, ContainerType containerType,
@@ -140,8 +136,13 @@ public class Extensibles {
 
 		public Class<R> getRowType() throws GSException;
 
-		public Object getRowValue(
-				Object rowObj, int column) throws GSException;
+		public ContainerProperties getSchemaProperties() throws GSException;
+
+		public Object getRowValue(Object rowObj, int column)
+				throws GSException;
+
+		public Object getRowKeyValue(Object keyObj, int keyColumn)
+				throws GSException;
 
 		public void createIndex(IndexInfo info, OptionalRequestSource source)
 				throws GSException;
@@ -184,7 +185,7 @@ public class Extensibles {
 
 	public interface AsRowSet<R> extends RowSet<R> {
 
-		public Class<R> getRowType() throws GSException;
+		public Class<?> getMappingRowType() throws GSException;
 
 		public Set<Integer> getExtOptionKeys() throws GSException;
 

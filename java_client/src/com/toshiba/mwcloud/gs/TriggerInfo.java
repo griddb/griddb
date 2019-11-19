@@ -21,6 +21,8 @@ import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.Set;
 
+import com.toshiba.mwcloud.gs.common.GSErrorCode;
+
 /**
  * <div lang="ja">
  * コンテナの更新を監視するためのトリガ情報を表します。
@@ -129,6 +131,39 @@ public class TriggerInfo {
 		this.jmsDestinationName = null;
 		this.user = null;
 		this.password = null;
+	}
+
+	TriggerInfo(TriggerInfo info) {
+		final boolean sameClass;
+		try {
+			sameClass = (info.getClass() == TriggerInfo.class);
+		}
+		catch (NullPointerException e) {
+			throw GSErrorCode.checkNullParameter(info, "info", e);
+		}
+
+		if (sameClass) {
+			this.name = info.name;
+			this.type = info.type;
+			this.uri = info.uri;
+			this.eventSet = info.eventSet;
+			this.columnNameSet = info.columnNameSet;
+			this.jmsDestinationType = info.jmsDestinationType;
+			this.jmsDestinationName = info.jmsDestinationName;
+			this.user = info.user;
+			this.password = info.password;
+		}
+		else {
+			setName(getName());
+			setType(getType());
+			setURI(getURI());
+			setTargetEvents(getTargetEvents());
+			setTargetColumns(getTargetColumns());
+			setJMSDestinationType(getJMSDestinationType());
+			setJMSDestinationName(getJMSDestinationName());
+			setUser(getUser());
+			setPassword(getPassword());
+		}
 	}
 
 	/**
@@ -523,6 +558,76 @@ public class TriggerInfo {
 	@Deprecated
 	public void setJMSPassword(String password) {
 		setPassword(password);
+	}
+
+	static TriggerInfo toImmutable(TriggerInfo base) {
+		if (base instanceof Immutable) {
+			return (Immutable) base;
+		}
+		return new Immutable(base);
+	}
+
+	private static class Immutable extends TriggerInfo {
+
+		Immutable(TriggerInfo info) {
+			super(info);
+		}
+
+		@Override
+		public void setName(String name) {
+			throw new UnsupportedOperationException();
+		}
+
+		@Override
+		public void setType(Type type) {
+			throw new UnsupportedOperationException();
+		}
+
+		@Override
+		public void setURI(URI uri) {
+			throw new UnsupportedOperationException();
+		}
+
+		@Override
+		public void setTargetEvents(Set<EventType> eventSet) {
+			throw new UnsupportedOperationException();
+		}
+
+		@Override
+		public void setTargetColumns(Set<String> columnSet) {
+			throw new UnsupportedOperationException();
+		}
+
+		@Override
+		public void setJMSDestinationType(String destinationType) {
+			throw new UnsupportedOperationException();
+		}
+
+		@Override
+		public void setJMSDestinationName(String destinationName) {
+			throw new UnsupportedOperationException();
+		}
+
+		@Override
+		public void setUser(String user) {
+			throw new UnsupportedOperationException();
+		}
+
+		@Override
+		public void setPassword(String password) {
+			throw new UnsupportedOperationException();
+		}
+
+		@Override
+		public void setJMSUser(String user) {
+			throw new UnsupportedOperationException();
+		}
+
+		@Override
+		public void setJMSPassword(String password) {
+			throw new UnsupportedOperationException();
+		}
+
 	}
 
 }

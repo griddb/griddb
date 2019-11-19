@@ -20,6 +20,7 @@ import java.util.Set;
 
 import com.toshiba.mwcloud.gs.Aggregation;
 import com.toshiba.mwcloud.gs.AggregationResult;
+import com.toshiba.mwcloud.gs.Container;
 import com.toshiba.mwcloud.gs.GSException;
 import com.toshiba.mwcloud.gs.InterpolationMode;
 import com.toshiba.mwcloud.gs.Query;
@@ -45,11 +46,12 @@ extends SubnetContainer<Date, R> implements TimeSeries<R> {
 
 	public SubnetTimeSeries(
 			SubnetGridStore store, GridStoreChannel channel, Context context,
-			Class<R> rowType, RowMapper mapper, int schemaVerId,
+			Container.BindType<Date, R, ? extends Container<?, ?>> bindType,
+			RowMapper mapper, int schemaVerId,
 			int partitionId, long containerId, ContainerKey normalizedContainerKey,
 			ContainerKey remoteContainerKey)
 			throws GSException {
-		super(store, channel, context, rowType, mapper, schemaVerId,
+		super(store, channel, context, bindType, mapper, schemaVerId,
 				partitionId, containerId, normalizedContainerKey,
 				remoteContainerKey);
 	}
@@ -120,13 +122,13 @@ extends SubnetContainer<Date, R> implements TimeSeries<R> {
 
 		try {
 			req.putDate(base);
-			req.putInt(mapper.resolveColumnId(column));
 		}
 		catch (NullPointerException e) {
-			GSErrorCode.checkNullParameter(base, "base", e);
-			GSErrorCode.checkNullParameter(column, "column", e);
-			throw e;
+			throw GSErrorCode.checkNullParameter(base, "base", e);
 		}
+
+		GSErrorCode.checkNullParameter(column, "column", null);
+		req.putInt(mapper.resolveColumnId(column));
 
 		executeStatement(
 				Statement.INTERPOLATE_TIME_SERIES_ROW,

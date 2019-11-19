@@ -916,7 +916,7 @@ public interface GridStore extends Closeable {
 	 * 同様の振る舞いとなる。</td></tr>
 	 * <tr><td>カラムレイアウト</td><td>{@code info}</td>
 	 * <td>{@link Container}にて規定された制約に合致するよう
-	 * {@link ColumnInfo}のリストならびにロウキーの有無を設定する。
+	 * {@link ColumnInfo}のリストならびにロウキーの構成を設定する。
 	 * ただし現バージョンでは、{@link ColumnInfo#getDefaultValueNull()}が
 	 * {@code null}以外を返すような{@link ColumnInfo}を含めることは
 	 * できない。</td></tr>
@@ -966,7 +966,7 @@ public interface GridStore extends Closeable {
 	 *
 	 * @since 1.5
 	 * </div><div lang="en">
-	 * Specify {@link ContainerInfo} and create a new Container or update a Container.
+	 * TODO Specify {@link ContainerInfo} and create a new Container or update a Container.
 	 *
 	 * <p>Excluding the next point, the behavior will be the same
 	 * as {@link #putCollection(String, Class, boolean)}
@@ -1323,6 +1323,123 @@ public interface GridStore extends Closeable {
 
 	/**
 	 * <div lang="ja">
+	 * {@link Container.BindType}を指定して、{@link Container}オブジェクトを
+	 * 取得します。
+	 *
+	 * <p>指定の{@code bindType}に応じて、次のいずれかのメソッドと同様に
+	 * 振る舞います。</p>
+	 * <ul>
+	 * <li>{@link #getContainer(String)}</li>
+	 * <li>{@link #getCollection(String, Class)}</li>
+	 * <li>{@link #getTimeSeries(String, Class)}</li>
+	 * </ul>
+	 *
+	 * @param name 処理対象のコンテナの名前
+	 * @param bindType 処理対象のコンテナと結びつく型情報
+	 *
+	 * @return 対応する{@link Container}またはそのサブインタフェースの型の
+	 * インスタンス
+	 *
+	 * @throws GSException {@code name}ならびに{@code bindType}引数の
+	 * 内容が規則に合致しない場合
+	 * @throws GSException 指定の型がロウオブジェクトの型として適切でない場合。
+	 * 詳しくは{@link Container}の定義を参照
+	 * @throws GSException この処理のタイムアウト、接続障害が発生した場合、
+	 * またはクローズ後に呼び出された場合
+	 * @throws NullPointerException {@code bindType}引数に{@code null}が
+	 * 指定された場合
+	 *
+	 * @since 4.3
+	 * </div><div lang="en">
+	 * TODO
+	 *
+	 * @since 4.3
+	 * </div>
+	 */
+	public <K, R, C extends Container<K, R>> C getContainer(
+			String name,
+			Container.BindType<K, R, C> bindType) throws GSException;
+
+	/**
+	 * <div lang="ja">
+	 * {@link Container.BindType}を指定して、コンテナを新規作成または
+	 * 変更します。
+	 *
+	 * <p>コンテナ情報を指定せず、カラムレイアウト変更を許可しないで
+	 * {@link #putContainer(String, Container.BindType, ContainerInfo, boolean)}
+	 * を呼び出した場合と、同様に振る舞います。</p>
+	 *
+	 * @param name 処理対象のコンテナの名前
+	 * @param bindType 処理対象のコンテナと結びつく型情報
+	 *
+	 * @return 対応する{@link Container}またはそのサブインタフェースの型の
+	 * インスタンス
+	 *
+	 * @throws GSException {@code name}、{@code bindType}の内容が規則に合致
+	 * しない場合。また、指定のコンテナ種別に対応するコンテナ新規作成・変更
+	 * メソッドの規則に合致しない場合
+	 * @throws GSException 指定の型がロウオブジェクトの型として適切でない場合。
+	 * 詳しくは{@link Container}の定義を参照
+	 * @throws GSException この処理のタイムアウト、接続障害が発生した場合、
+	 * またはクローズ後に呼び出された場合
+	 * @throws NullPointerException {@code bindType}引数に{@code null}が
+	 * 指定された場合
+	 *
+	 * @since 4.3
+	 * </div><div lang="en">
+	 * TODO
+	 *
+	 * @since 4.3
+	 * </div>
+	 */
+	public <K, R, C extends Container<K, R>> C putContainer(
+			String name,
+			Container.BindType<K, R, C> bindType) throws GSException;
+
+	/**
+	 * <div lang="ja">
+	 * {@link Container.BindType}と{@link ContainerInfo}を指定して、コンテナを
+	 * 新規作成または変更します。
+	 *
+	 * <p>指定の{@code bindType}に応じて、次のいずれかのメソッドと同様に
+	 * 振る舞います。</p>
+	 * <ul>
+	 * <li>{@link #putContainer(String, ContainerInfo, boolean)}</li>
+	 * <li>{@link #putContainer(String, Class, ContainerInfo, boolean)}</li>
+	 * </ul>
+	 *
+	 * @param name 処理対象のコンテナの名前
+	 * @param bindType 処理対象のコンテナと結びつく型情報
+	 * @param info 処理対象のコンテナの情報。{@code null}の場合は無視される
+	 * @param modifiable 既存コンテナのカラムレイアウト変更を許可するかどうか
+	 *
+	 * @return 対応する{@link Container}またはそのサブインタフェースの型の
+	 * インスタンス
+	 *
+	 * @throws GSException {@code name}、{@code bindType}、ならびに、
+	 * {@code info}引数の内容が規則に合致しない場合。また、指定のコンテナ種別に
+	 * 対応するコンテナ新規作成・変更メソッドの規則に合致しない場合
+	 * @throws GSException 指定の型がロウオブジェクトの型として適切でない場合。
+	 * 詳しくは{@link Container}の定義を参照
+	 * @throws GSException この処理のタイムアウト、接続障害が発生した場合、
+	 * またはクローズ後に呼び出された場合
+	 * @throws NullPointerException {@code bindType}引数に{@code null}が
+	 * 指定された場合
+	 *
+	 * @since 4.3
+	 * </div><div lang="en">
+	 * TODO
+	 *
+	 * @since 4.3
+	 * </div>
+	 */
+	public <K, R, C extends Container<K, R>> C putContainer(
+			String name,
+			Container.BindType<K, R, C> bindType,
+			ContainerInfo info, boolean modifiable) throws GSException;
+
+	/**
+	 * <div lang="ja">
 	 * 指定の名前を持つコンテナを削除します。
 	 *
 	 * <p>削除済みの場合は何も変更しません。</p>
@@ -1376,7 +1493,7 @@ public interface GridStore extends Closeable {
 	 * {@link ContainerInfo}を指定して、{@link Row}を新規作成します。
 	 *
 	 * <p>{@link Container}にて規定された制約に合致するよう、
-	 * {@link ColumnInfo}のリストならびにロウキーの有無を含む
+	 * {@link ColumnInfo}のリストならびにロウキーの構成を含む
 	 * カラムレイアウトを{@link ContainerInfo}に指定します。</p>
 	 *
 	 * <p>また、コンテナ種別を{@link ContainerInfo}に含めることで、
@@ -1426,7 +1543,7 @@ public interface GridStore extends Closeable {
 	 *
 	 * @since 1.5
 	 * </div><div lang="en">
-	 * Specify {@link ContainerInfo} and create a new {@link Row}.
+	 * TODO Specify {@link ContainerInfo} and create a new {@link Row}.
 	 *
 	 * <p>Include the {@link ColumnInfo} list and whether there is any Row key
 	 * so as to conform to the restrictions stipulated in {@link Container}.
@@ -1487,6 +1604,31 @@ public interface GridStore extends Closeable {
 	 * </div>
 	 */
 	public Row createRow(ContainerInfo info) throws GSException;
+
+	/**
+	 * <div lang="ja">
+	 * {@link ContainerInfo}を指定して、{@link Row.Key}を新規作成します。
+	 *
+	 * <p>ロウキー以外のカラムに関する情報は無視されます。それ以外は
+	 * {@link #createRow(ContainerInfo)}と同様に振る舞います。</p>
+	 *
+	 * @param info カラムレイアウトを含むコンテナ情報。その他の内容は無視される
+	 *
+	 * @return 作成された{@link Row.Key}
+	 *
+	 * @throws GSException ロウキーを持たないコンテナ情報が指定された場合
+	 * @throws GSException コンテナ種別もしくはカラムレイアウトの制約に合致しない場合
+	 * @throws GSException クローズ後に呼び出された場合
+	 * @throws NullPointerException 引数に{@code null}が指定された場合
+	 *
+	 * @since 4.3
+	 * </div><div lang="en">
+	 * TODO
+	 *
+	 * @since 4.3
+	 * </div>
+	 */
+	public Row.Key createRowKey(ContainerInfo info) throws GSException;
 
 	/**
 	 * <div lang="ja">

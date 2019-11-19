@@ -49,6 +49,7 @@ import com.toshiba.mwcloud.gs.common.BasicBuffer;
 import com.toshiba.mwcloud.gs.common.BasicBuffer.BufferUtils;
 import com.toshiba.mwcloud.gs.common.BlobImpl;
 import com.toshiba.mwcloud.gs.common.ContainerKeyConverter.ContainerKey;
+import com.toshiba.mwcloud.gs.common.ContainerProperties;
 import com.toshiba.mwcloud.gs.common.Extensibles;
 import com.toshiba.mwcloud.gs.common.GSConnectionException;
 import com.toshiba.mwcloud.gs.common.GSErrorCode;
@@ -67,6 +68,7 @@ import com.toshiba.mwcloud.gs.subnet.GridStoreChannel.Context;
 import com.toshiba.mwcloud.gs.subnet.GridStoreChannel.ContextMonitor;
 import com.toshiba.mwcloud.gs.subnet.GridStoreChannel.RemoteReference;
 import com.toshiba.mwcloud.gs.subnet.GridStoreChannel.SessionInfo;
+import com.toshiba.mwcloud.gs.subnet.NodeConnection.FeatureVersion;
 import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequest;
 import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequestSource;
 import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequestType;
@@ -148,7 +150,11 @@ Extensibles.AsContainer<K, R>, Experimentals.AsContainer<K, R> {
 
 	protected final Context context;
 
+	protected final Class<K> keyType;
+
 	protected final Class<R> rowType;
+
+	protected final Class<? extends Container<?, ?>> containerType;
 
 	protected final RowMapper mapper;
 
@@ -180,17 +186,23 @@ Extensibles.AsContainer<K, R>, Experimentals.AsContainer<K, R> {
 
 	private SessionReference sessionRef;
 
-	protected SubnetContainer(SubnetGridStore store, GridStoreChannel channel,
-			Context context, Class<R> rowType, RowMapper mapper,
+	protected SubnetContainer(
+			SubnetGridStore store, GridStoreChannel channel,
+			Context context,
+			BindType<K, R, ? extends Container<?, ?>> bindType,
+			RowMapper mapper,
 			int schemaVerId, int partitionId, long containerId,
 			ContainerKey normalizedContainerKey,
 			ContainerKey remoteContainerKey) throws GSException {
+		mapper.checkKeyTypeMatched(bindType.getKeyClass());
 		this.contextMonitor =
 				GridStoreChannel.tryCreateContainerContextMonitor(context);
 		this.store = store;
 		this.channel = channel;
 		this.context = context;
-		this.rowType = rowType;
+		this.keyType = bindType.getKeyClass();
+		this.rowType = bindType.getRowClass();
+		this.containerType = bindType.getContainerClass();
 		this.mapper = mapper;
 		this.schemaVerId = schemaVerId;
 		this.partitionId = partitionId;
@@ -2113,7 +2125,9 @@ Extensibles.AsContainer<K, R>, Experimentals.AsContainer<K, R> {
 			putSessionInfo(req, sessionId);
 		}
 		req.putInt(getSchemaVersionId());
-		tryPutOptionalRequest(req, false, true, true, source);
+		tryPutOptionalRequest(
+				req, false, true, true,
+				filterIndexRequestOption(source, filteredInfo));
 
 		final Statement statement;
 		if (SubnetGridStore.isIndexDetailEnabled()) {
@@ -2170,7 +2184,9 @@ Extensibles.AsContainer<K, R>, Experimentals.AsContainer<K, R> {
 			putSessionInfo(req, sessionId);
 		}
 		req.putInt(getSchemaVersionId());
-		tryPutOptionalRequest(req, false, true, false, source);
+		tryPutOptionalRequest(
+				req, false, true, false,
+				filterIndexRequestOption(source, filteredInfo));
 
 		final Statement statement;
 		if (SubnetGridStore.isIndexDetailEnabled()) {
@@ -2180,7 +2196,7 @@ Extensibles.AsContainer<K, R>, Experimentals.AsContainer<K, R> {
 		else {
 			statement = Statement.DROP_INDEX;
 
-			if (filteredInfo.getColumn() == null) {
+			if (filteredInfo.getColumnList().isEmpty()) {
 				throw new GSException(
 						GSErrorCode.EMPTY_PARAMETER,
 						"Column must be specified");
@@ -2200,48 +2216,59 @@ Extensibles.AsContainer<K, R>, Experimentals.AsContainer<K, R> {
 
 	private IndexInfo filterIndexInfo(
 			IndexInfo info, boolean forCreation) throws GSException {
-		IndexInfo filteredInfo = info;
+		IndexInfo filteredInfo = new IndexInfo(info);
 
 		if (filteredInfo.getName() != null) {
 			RowMapper.checkSymbol(filteredInfo.getName(), "index name");
 		}
 
-		final Integer column = filteredInfo.getColumn();
-		String columnNameById = null;
-		if (column != null) {
-			final ContainerInfo containerInfo = mapper.getContainerInfo();
-			final ColumnInfo columnInfo;
-			try {
-				columnInfo = containerInfo.getColumnInfo(column);
-			}
-			catch (IllegalArgumentException e) {
-				throw new GSException(GSErrorCode.ILLEGAL_PARAMETER, e);
-			}
-			columnNameById = columnInfo.getName();
-		}
-
-		String columnName = filteredInfo.getColumnName();
-		if (columnName == null) {
-			columnName = columnNameById;
+		final List<Integer> columnList = filteredInfo.getColumnList();
+		final List<String> columnNameListById;
+		if (columnList.isEmpty()) {
+			columnNameListById = Collections.emptyList();
 		}
 		else {
-			final int columnByName = mapper.resolveColumnId(columnName);
-			if (column == null) {
-				filteredInfo = new IndexInfo(filteredInfo);
-				filteredInfo.setColumn(columnByName);
-			}
-			else if (column != columnByName) {
-				throw new GSException(
-						GSErrorCode.ILLEGAL_PARAMETER,
-						"Inconsistent column specified (" +
-						"specifiedNumber=" + column +
-						" (actualName=" + columnNameById + "), " +
-						"specifiedName=" + columnName +
-						" (actualNumber=" + columnByName + "))");
+			columnNameListById = new ArrayList<String>(columnList.size());
+			final ContainerInfo containerInfo = mapper.getContainerInfo();
+			for (Integer column : columnList) {
+				final ColumnInfo columnInfo;
+				try {
+					columnInfo = containerInfo.getColumnInfo(column);
+				}
+				catch (IllegalArgumentException e) {
+					throw new GSException(GSErrorCode.ILLEGAL_PARAMETER, e);
+				}
+				columnNameListById.add(columnInfo.getName());
 			}
 		}
 
-		if (forCreation && filteredInfo.getColumn() == null) {
+		List<String> columnNameList = filteredInfo.getColumnNameList();
+		if (columnNameList.isEmpty()) {
+			columnNameList = columnNameListById;
+		}
+		else {
+			final List<Integer> columnListByName =
+					new ArrayList<Integer>(columnNameList.size());
+			for (String columnName : columnNameList) {
+				columnListByName.add(mapper.resolveColumnId(columnName));
+			}
+
+			if (columnList.isEmpty()) {
+				filteredInfo = new IndexInfo(filteredInfo);
+				filteredInfo.setColumnList(columnListByName);
+			}
+			else if (!columnList.equals(columnListByName)) {
+				throw new GSException(
+						GSErrorCode.ILLEGAL_PARAMETER,
+						"Inconsistent column(s) specified (" +
+						"specifiedNumber=" + columnList +
+						" (actualName=" + columnNameListById + "), " +
+						"specifiedName=" + columnNameList +
+						" (actualNumber=" + columnListByName + "))");
+			}
+		}
+
+		if (forCreation && filteredInfo.getColumnList().isEmpty()) {
 			throw new GSException(
 					GSErrorCode.EMPTY_PARAMETER,
 					"Column must be specified");
@@ -2254,22 +2281,57 @@ Extensibles.AsContainer<K, R>, Experimentals.AsContainer<K, R> {
 				filteredInfo = new IndexInfo(filteredInfo);
 			}
 
-			final Integer filteredColumn = filteredInfo.getColumn();
-			final IndexType defaultType = (filteredColumn == null ?
-					null : getDefaultIndexType(filteredColumn));
-			if (defaultType == null) {
-				if (!forCreation) {
+			final List<Integer> filteredColumnList = filteredInfo.getColumnList();
+			IndexType resolvedType = null;
+			for (Integer column : filteredColumnList) {
+				final IndexType subType = getDefaultIndexType(column);
+				if (subType == null) {
+					resolvedType = null;
+					break;
+				}
+				else if (resolvedType != null && subType != resolvedType) {
+					throw new GSException(GSErrorCode.UNSUPPORTED_DEFAULT_INDEX,
+							"Multiple default index type found " +
+							"for composite index (" +
+							"columnName=" + columnNameList + ")");
+				}
+				resolvedType = subType;
+			}
+
+			if (resolvedType == null) {
+				if (!forCreation && filteredColumnList.size() <= 1) {
 					return null;
 				}
 				throw new GSException(GSErrorCode.UNSUPPORTED_DEFAULT_INDEX,
-						"Default index can not be assigned (" +
-						"columnName=" + columnName + ")");
+						"Default index type can not be assigned (" +
+						"columnName=" + columnNameList + ")");
 			}
 
-			filteredInfo.setType(defaultType);
+			filteredInfo.setType(resolvedType);
 		}
 
 		return filteredInfo;
+	}
+
+	private OptionalRequestSource filterIndexRequestOption(
+			final OptionalRequestSource base, final IndexInfo info) {
+		if (info.getColumnList().size() > 1) {
+			return new OptionalRequestSource() {
+				@Override
+				public void putOptions(OptionalRequest optionalRequest) {
+					optionalRequest.putFeatureVersion(FeatureVersion.V4_3);
+					if (base != null) {
+						base.putOptions(optionalRequest);
+					}
+				}
+
+				@Override
+				public boolean hasOptions() {
+					return true;
+				}
+			};
+		}
+		return base;
 	}
 
 	private IndexType getDefaultIndexType(int columnId) throws GSException {
@@ -2419,6 +2481,13 @@ Extensibles.AsContainer<K, R>, Experimentals.AsContainer<K, R> {
 	public R createRow() throws GSException {
 		checkOpened();
 		return rowType.cast(mapper.createRow(false));
+	}
+
+	@Override
+	public BindType<K, R, ? extends Container<K, R>> getBindType()
+			throws GSException {
+		return RowMapper.BindingTool.createBindType(
+				keyType, rowType, containerType);
 	}
 
 	
@@ -2599,8 +2668,19 @@ Extensibles.AsContainer<K, R>, Experimentals.AsContainer<K, R> {
 	}
 
 	@Override
+	public ContainerProperties getSchemaProperties() throws GSException {
+		return new ContainerProperties(mapper.getContainerInfo());
+	}
+
+	@Override
 	public Object getRowValue(Object rowObj, int column) throws GSException {
 		return mapper.resolveField(rowObj, column);
+	}
+
+	@Override
+	public Object getRowKeyValue(Object keyObj, int keyColumn)
+			throws GSException {
+		return mapper.resolveKeyField(keyObj, keyColumn);
 	}
 
 	@Override

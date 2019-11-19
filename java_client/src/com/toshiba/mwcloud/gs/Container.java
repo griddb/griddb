@@ -21,6 +21,9 @@ import java.sql.Blob;
 
 import javax.sql.rowset.serial.SerialBlob;
 
+import com.toshiba.mwcloud.gs.common.GSErrorCode;
+import com.toshiba.mwcloud.gs.common.RowMapper;
+
 /**
  * <div lang="ja">
  * 同一タイプのロウ集合からなるGridDBの構成要素に対しての、管理機能を提供します。
@@ -170,7 +173,8 @@ import javax.sql.rowset.serial.SerialBlob;
  * 処理が行われることは、原則としてはありません。例外事項については、個別の操作
  * ごとの説明を参照してください。</p>
  *
- * @param <K> ロウキーの型。ロウキーが存在しない場合は{@link Void}を指定
+ * @param <K> ロウキーの型。ロウキーが存在しない場合は{@link Void}または
+ * {@link Row.Key}を指定
  * @param <R> マッピングに用いるロウオブジェクトの型
  * </div><div lang="en">
  * Provides the functions of managing the components of GridDB,
@@ -998,10 +1002,11 @@ public interface Container<K, R> extends Closeable {
 	 * <div lang="ja">
 	 * {@link IndexInfo}で設定されている内容に従い、索引を作成します。
 	 *
-	 * <p>作成対象の索引のカラムについては、カラム名またはカラム番号の
+	 * <p>作成対象の索引のカラムについては、カラム名列またはカラム番号列の
 	 * 少なくとも一方が設定されており、かつ、対応するコンテナにおいて実在する
-	 * ものが設定されている必要があります。カラム名とカラム番号が共に設定
-	 * されている場合、対応するカラムが互いに一致している必要があります。</p>
+	 * ものが設定されている必要があります。カラム名列とカラム番号列が共に設定
+	 * されている場合、対応するカラム列が順序を含め一致している必要が
+	 * あります。</p>
 	 *
 	 * <p>索引種別が設定されていないか{@link IndexType#DEFAULT}が
 	 * 設定されていた場合、後述の基準に従い、デフォルト種別の索引が
@@ -1027,8 +1032,9 @@ public interface Container<K, R> extends Closeable {
 	 * 索引において、次の条件を満たす場合に索引名を除いて同一設定の
 	 * 索引であるとみなされます。</p>
 	 * <ul>
-	 * <li>索引対象のカラムが一致すること。カラム名、カラム番号といった、
-	 * カラムの指定方法の違いは無視される</li>
+	 * <li>索引対象のカラム列が順序を含め一致すること。カラム名列、カラム
+	 * 番号列、単一カラム指定、といった、カラム列の指定方法の違いは
+	 * 無視される</li>
 	 * <li>索引種別が一致すること。デフォルト指定の有無といった索引種別の
 	 * 指定方法の違いは無視される</li>
 	 * </ul>
@@ -1064,7 +1070,9 @@ public interface Container<K, R> extends Closeable {
 	 * <td>(なし)</td></tr>
 	 * </tbody>
 	 * </table>
-	 * <p>時系列のロウキー(TIMESTAMP型)には索引を設定できません。</p>
+	 * <p>時系列のロウキー(TIMESTAMP型)には索引を設定できません。
+	 * また、カラム列を構成するカラム型によってデフォルト種別が異なる場合
+	 * には、選択できません。</p>
 	 *
 	 * <p>この{@link Container}インスタンスが未コミットのトランザクションを
 	 * 保持していた場合、コミットしてから作成を行います。処理対象のコンテナ
@@ -1092,7 +1100,7 @@ public interface Container<K, R> extends Closeable {
 	 *
 	 * @since 3.5
 	 * </div><div lang="en">
-	 * Create an index according to the contents set in {@link IndexInfo}.
+	 * TODO Create an index according to the contents set in {@link IndexInfo}.
 	 *
 	 * <p>For the column of the index to be created, at least one of the column
 	 * name and column number must be set, and the actual container must be set
@@ -1262,27 +1270,28 @@ public interface Container<K, R> extends Closeable {
 	 * 削除します。
 	 *
 	 * <p>{@link IndexInfo}の設定内容は、削除対象の索引を絞り込む条件として
-	 * 使用されます。絞り込み条件は、カラム、索引種別、索引名の3つに分類
+	 * 使用されます。絞り込み条件は、カラム列、索引種別、索引名の3つに分類
 	 * されます。それぞれ設定するかどうかは任意です。いずれも設定されていない
 	 * 場合は、作成済みのすべての索引が削除されます。</p>
 	 *
-	 * <p>カラム名 またはカラム番号が設定されている場合、対応するコンテナにおいて
-	 * 実在するものである必要があります。カラム名とカラム番号が共に設定されている
-	 * 場合、対応するカラムが互いに一致している必要があります。カラム名ならびに
-	 * カラム番号が共に設定されていない場合、他の絞り込み条件(索引種別、
-	 * 索引名)を満たす任意のカラムに対する索引が削除対象となります。</p>
+	 * <p>カラム名列またはカラム番号列が設定されている場合、対応するコンテナ
+	 * において実在するものである必要があります。カラム名列とカラム番号列が共に
+	 * 設定されている場合、対応するカラムが互いに一致している必要があります。
+	 * カラム名列ならびにカラム番号列が共に設定されていない場合、他の絞り込み
+	 * 条件(索引種別、索引名)を満たす任意のカラム列に対する索引が削除対象
+	 * となります。</p>
 	 *
 	 * <p>索引種別が設定されている場合、指定の種別の索引のみが削除対象と
 	 * なります。{@link IndexType#DEFAULT}が設定されている場合、
 	 * {@link #createIndex(IndexInfo)}の基準に従い、デフォルト種別の索引が
 	 * 選択されます。索引をサポートしていないカラムや指定の種別の索引をサポート
 	 * していないカラムについては、削除対象にはなりません。索引種別が設定されて
-	 * いない場合、他の絞り込み条件(カラム、索引名)を満たす任意の種別の索引が
+	 * いない場合、他の絞り込み条件(カラム列、索引名)を満たす任意の種別の索引が
 	 * 削除対象となります。</p>
 	 *
 	 * <p>索引名が設定されている場合、指定の名前の索引のみが削除対象と
 	 * なります。索引名の同一性は、{@link #createIndex(IndexInfo)}の基準に
-	 * 従います。索引名が設定されていない場合、他の絞り込み条件(カラム、
+	 * 従います。索引名が設定されていない場合、他の絞り込み条件(カラム列、
 	 * 索引種別)を満たす、任意の名前の索引ならびに名前のない索引が削除対象
 	 * となります。</p>
 	 *
@@ -1305,7 +1314,7 @@ public interface Container<K, R> extends Closeable {
 	 *
 	 * @since 3.5
 	 * </div><div lang="en">
-	 * Delete all indexes that match the content set in {@link IndexInfo}.
+	 * TODO Delete all indexes that match the content set in {@link IndexInfo}.
 	 *
 	 * <p>The setting information of {@link IndexInfo} are used as a condition
 	 * to narrow down the index to be deleted. Filtering conditions are classified
@@ -1865,5 +1874,318 @@ public interface Container<K, R> extends Closeable {
 	 * </div>
 	 */
 	public R createRow() throws GSException;
+
+	/**
+	 * <div lang="ja">
+	 * このオブジェクトと結びつく型情報を取得します。
+	 *
+	 * <p>取得する型情報には、このオブジェクトを構築する際に与えられた
+	 * ロウキーの型、ロウオブジェクトの型と同一のものが設定されます。</p>
+	 *
+	 * <p>{@link Container}またはそのサブインタフェースの型については、構築時に
+	 * 与えられた型と同一になるとは限らず、そのサブインタフェースの型が求まる
+	 * 可能性があります。また、{@link ContainerType}により区別されるコンテナ
+	 * 種別と一対一で対応することは保証しません。</p>
+	 *
+	 * @return このオブジェクトと結びつく型情報
+	 *
+	 * @throws GSException クローズ後に呼び出された場合
+	 *
+	 * @since 4.3
+	 * </div><div lang="en">
+	 * TODO
+	 *
+	 * @since 4.3
+	 * </div>
+	 */
+	public BindType<K, R, ? extends Container<K, R>> getBindType()
+			throws GSException;
+
+	/**
+	 * <div lang="ja">
+	 * {@link Container}ならびにその型パラメータと結びつく型情報を表します。
+	 *
+	 * <p>{@link Container}インスタンスを構築する際に与える複数の
+	 * 型情報について、一つのオブジェクトとしてまとめて保持することが
+	 * できます。</p>
+	 *
+	 * <p>ロウキーの型と{@link Container}インスタンスの型との対応関係の妥当性
+	 * など、内容の妥当性については、このクラスのインスタンスの生成段階で
+	 * 必ずしも検査するとは限りません。</p>
+	 *
+	 * @param <K> ロウキーの型。ロウキーが存在しない場合は{@link Void}または
+	 * {@link Row.Key}を指定
+	 * @param <R> マッピングに用いるロウオブジェクトの型
+	 * @param <C> 対応する{@link Container}インスタンスにおいて実装
+	 * されていることを期待する、{@link Container}またはそのサブインタフェースの型
+	 *
+	 * @see GridStore#getContainer(String, Container.BindType)
+	 *
+	 * @since 4.3
+	 * </div><div lang="en">
+	 * TODO
+	 *
+	 * @since 4.3
+	 * </div>
+	 */
+	public class BindType<K, R, C extends Container<K, R>> {
+
+		static {
+			RowMapper.BindingTool.setFactory(createFactory());
+		}
+
+		private final Class<K> keyClass;
+
+		private final Class<R> rowClass;
+
+		private final Class<? extends Container<?, ?>> containerClass;
+
+		<D extends Container<?, ?>> BindType(
+				Class<K> keyClass, Class<R> rowClass, Class<D> containerClass)
+				throws GSException {
+			this.keyClass = keyClass;
+			this.rowClass = rowClass;
+			this.containerClass = containerClass;
+		}
+
+		private static RowMapper.BindingTypeFactory createFactory() {
+			return new RowMapper.BindingTypeFactory() {
+				@Override
+				public
+				<K, R, C extends Container<K, R>, D extends Container<?, ?>>
+				BindType<K, R, C> create(
+						Class<K> keyType, Class<R> rowType,
+						Class<D> containerType) throws GSException {
+					return new BindType<K, R, C>(keyType, rowType, containerType);
+				}
+			};
+		}
+
+		/**
+		 * <div lang="ja">
+		 * 指定のロウオブジェクト型から得られるロウキーの型、指定の
+		 * ロウオブジェクト型、ならびに、任意の型の{@link Container}と結びつく
+		 * {@link BindType}を取得します。
+		 *
+		 * @param <K> ロウキーの型
+		 * @param <R> ロウオブジェクトの型
+		 * @param rowClass ロウオブジェクトの型に対応するクラスオブジェクト
+		 *
+		 * @return 対応する型情報
+		 *
+		 * @throws GSException 指定のロウオブジェクト型からロウキーの型が
+		 * 得られなかった場合
+		 *
+		 * @since 4.3
+		 * </div><div lang="en">
+		 * TODO
+		 *
+		 * @since 4.3
+		 * </div>
+		 */
+		public static <K, R extends Row.WithKey<K>> BindType<
+		K, R, ? extends Container<K, R>> of(Class<R> rowClass)
+				throws GSException {
+			return of(
+					RowMapper.BindingTool.resolveKeyClass(rowClass),
+					rowClass);
+		}
+
+		/**
+		 * <div lang="ja">
+		 * 指定のロウキー型、指定のロウオブジェクト型、ならびに、任意の型の
+		 * {@link Container}と結びつく{@link BindType}を取得します。
+		 *
+		 * @param <K> ロウキーの型
+		 * @param <R> ロウオブジェクトの型
+		 * @param keyClass ロウキーの型に対応するクラスオブジェクト
+		 * @param rowClass ロウオブジェクトの型に対応するクラスオブジェクト
+		 *
+		 * @return 対応する型情報
+		 *
+		 * @throws GSException ロウキーの型と、ロウオブジェクトの型との間で
+		 * 不整合を検出した場合
+		 *
+		 * @since 4.3
+		 * </div><div lang="en">
+		 * TODO
+		 *
+		 * @since 4.3
+		 * </div>
+		 */
+		public static <K, R> BindType<K, R, ? extends Container<K, R>> of(
+				Class<K> keyClass, Class<R> rowClass) throws GSException {
+			return new BindType<K, R, Container<K, R>>(
+					RowMapper.BindingTool.checkKeyClass(keyClass, rowClass),
+					rowClass, Container.class);
+		}
+
+		/**
+		 * <div lang="ja">
+		 * ロウキーを持たず、指定のロウオブジェクト型、ならびに、任意の型の
+		 * {@link Container}と結びつく{@link BindType}を取得します。
+		 *
+		 * @param <R> ロウオブジェクトの型
+		 * @param rowClass ロウオブジェクトの型に対応するクラスオブジェクト
+		 *
+		 * @return 対応する型情報
+		 *
+		 * @throws GSException ロウキーの型と、ロウオブジェクトの型との間で
+		 * 不整合を検出した場合
+		 *
+		 * @since 4.3
+		 * </div><div lang="en">
+		 * TODO
+		 *
+		 * @since 4.3
+		 * </div>
+		 */
+		public static <R> BindType<
+		Void, R, ? extends Container<Void, R>> noKeyOf(Class<R> rowClass)
+				throws GSException {
+			return of(Void.class, rowClass);
+		}
+
+		/**
+		 * <div lang="ja">
+		 * ロウキーの型を取得します。
+		 *
+		 * @return ロウキーの型
+		 *
+		 * @since 4.3
+		 * </div><div lang="en">
+		 * TODO
+		 *
+		 * @since 4.3
+		 * </div>
+		 */
+		public Class<K> getKeyClass() {
+			return keyClass;
+		}
+
+		/**
+		 * <div lang="ja">
+		 * ロウオブジェクトの型を取得します。
+		 *
+		 * @return ロウオブジェクトの型
+		 *
+		 * @since 4.3
+		 * </div><div lang="en">
+		 * TODO
+		 *
+		 * @since 4.3
+		 * </div>
+		 */
+		public Class<R> getRowClass() {
+			return rowClass;
+		}
+
+		/**
+		 * <div lang="ja">
+		 * {@link Container}またはそのサブインタフェースの型を取得します。
+		 *
+		 * @return 対応する{@link Container}インスタンスにおいて実装されている
+		 * ことを期待する、{@link Container}またはそのサブインタフェースの型
+		 *
+		 * @since 4.3
+		 * </div><div lang="en">
+		 * TODO
+		 *
+		 * @since 4.3
+		 * </div>
+		 */
+		public Class<? extends Container<?, ?>> getContainerClass() {
+			return containerClass;
+		}
+
+		/**
+		 * <div lang="ja">
+		 * このオブジェクトが保持するロウキーの型にキャストします。
+		 *
+		 * @param obj キャスト対象のオブジェクト
+		 *
+		 * @return キャストされたオブジェクト
+		 *
+		 * @since 4.3
+		 * </div><div lang="en">
+		 * TODO
+		 *
+		 * @since 4.3
+		 * </div>
+		 */
+		public K castKey(Object obj) {
+			return keyClass.cast(obj);
+		}
+
+		/**
+		 * <div lang="ja">
+		 * このオブジェクトが保持するロウオブジェクトの型にキャストします。
+		 *
+		 * @param obj キャスト対象のオブジェクト
+		 *
+		 * @return キャストされたオブジェクト
+		 *
+		 * @since 4.3
+		 * </div><div lang="en">
+		 * TODO
+		 *
+		 * @since 4.3
+		 * </div>
+		 */
+		public R castRow(Object obj) {
+			return rowClass.cast(obj);
+		}
+
+		/**
+		 * <div lang="ja">
+		 * このオブジェクトが保持するロウキーの型ならびにロウオブジェクトの型を
+		 * 型パラメータとし持つ、{@link Container}またはそのサブインタフェースの
+		 * 型にキャストします。
+		 *
+		 * @param container キャスト対象の{@link Container}インスタンス
+		 *
+		 * @return キャストされたオブジェクト
+		 *
+		 * @throws GSException キャスト対象の{@link Container}インスタンスと、
+		 * このオブジェクトが保持する型情報との間で、ロウキーの型ならびに
+		 * ロウオブジェクトの型が一致しない場合
+		 *
+		 * @since 4.3
+		 * </div><div lang="en">
+		 * TODO
+		 *
+		 * @since 4.3
+		 * </div>
+		 */
+		public C castContainer(Container<?, ?> container) throws GSException {
+			if (container == null) { 
+				return null;
+			}
+
+			final BindType<?, ?, ?> anotherType = container.getBindType();
+
+			if (keyClass != null && keyClass != anotherType.keyClass) {
+				throw new GSException(
+						GSErrorCode.ILLEGAL_PARAMETER,
+						"Can not cast container because of different " +
+						"key class (expected=" + keyClass.getName() +
+						", specified=" + anotherType.keyClass.getName() + ")");
+			}
+
+			if (rowClass != null && rowClass != anotherType.rowClass) {
+				throw new GSException(
+						GSErrorCode.ILLEGAL_PARAMETER,
+						"Can not cast container because of different " +
+						"row class (expected=" + rowClass.getName() +
+						", specified=" + anotherType.rowClass.getName() + ")");
+			}
+
+			@SuppressWarnings("unchecked")
+			final C typedContainer = (C) containerClass.cast(container);
+
+			return typedContainer;
+		}
+
+	}
 
 }

@@ -15,6 +15,10 @@
 */
 package com.toshiba.mwcloud.gs;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
 import com.toshiba.mwcloud.gs.common.GSErrorCode;
 
 /**
@@ -40,9 +44,9 @@ public class IndexInfo {
 
 	private String name;
 
-	private Integer column;
+	private List<Integer> columnList = Collections.emptyList();
 
-	private String columnName;
+	private List<String> columnNameList = Collections.emptyList();
 
 	/**
 	 * <div lang="ja">
@@ -76,14 +80,25 @@ public class IndexInfo {
 	 * </div>
 	 */
 	public IndexInfo(IndexInfo info) {
+		final boolean sameClass;
 		try {
-			type = info.type;
-			name = info.name;
-			column = info.column;
-			columnName = info.columnName;
+			sameClass = (info.getClass() == IndexInfo.class);
 		}
 		catch (NullPointerException e) {
-			GSErrorCode.checkNullParameter(info, "info", e);
+			throw GSErrorCode.checkNullParameter(info, "info", e);
+		}
+
+		if (sameClass) {
+			type = info.type;
+			name = info.name;
+			columnList = info.columnList;
+			columnNameList = info.columnNameList;
+		}
+		else {
+			setType(info.getType());
+			setName(info.getName());
+			setColumnList(info.getColumnList());
+			setColumnNameList(info.getColumnNameList());
 		}
 	}
 
@@ -103,6 +118,32 @@ public class IndexInfo {
 	public static IndexInfo createByColumn(String columnName, IndexType type) {
 		final IndexInfo info = new IndexInfo();
 		info.setColumnName(columnName);
+		info.setType(type);
+		return info;
+	}
+
+	/**
+	 * <div lang="ja">
+	 * 必要に応じカラム名の列と索引種別を指定して索引情報を作成します。
+	 *
+	 * @param columnNames カラム名の列。長さ{@code 0}は許容するが、
+	 * {@code null}は指定できない
+	 * @param type 索引種別。指定しない場合は{@code null}
+	 *
+	 * @throws NullPointerException {@code columnNames}に{@code null}が
+	 * 指定された場合
+	 *
+	 * @since 4.3
+	 * </div><div lang="en">
+	 * TODO
+	 *
+	 * @since 4.3
+	 * </div>
+	 */
+	public static IndexInfo createByColumnList(
+			List<String> columnNames, IndexType type) {
+		final IndexInfo info = new IndexInfo();
+		info.setColumnNameList(columnNames);
 		info.setType(type);
 		return info;
 	}
@@ -190,9 +231,12 @@ public class IndexInfo {
 
 	/**
 	 * <div lang="ja">
-	 * 索引に対応するカラムのカラム番号を取得します。
+	 * 索引に対応する単一のカラムのカラム番号を取得します。
 	 *
 	 * @return カラム番号。未設定の場合は{@code null}
+	 *
+	 * @throws IllegalStateException 複合索引に関するカラム番号の列または
+	 * カラム名の列が設定されていた場合
 	 * </div><div lang="en">
 	 * Get the column number of the column corresponding to the index.
 	 *
@@ -200,29 +244,46 @@ public class IndexInfo {
 	 * </div>
 	 */
 	public Integer getColumn() {
-		return column;
+		if (columnList.size() > 1 || columnNameList.size() > 1) {
+			throw new IllegalStateException(
+					"This method cannot be used for composite index");
+		}
+		else if (columnList.isEmpty()) {
+			return null;
+		}
+		else {
+			return columnList.get(0);
+		}
 	}
 
 	/**
 	 * <div lang="ja">
-	 * 索引に対応するカラムのカラム番号を設定します。
+	 * 索引に対応する、単一のカラムからなるカラム番号列を設定します。
 	 *
 	 * @param column 索引名。{@code null}の場合は未設定状態になる
 	 * </div><div lang="en">
-	 * Set the column number of the column corresponding to the index.
+	 * TODO Set the column number of the column corresponding to the index.
 	 *
 	 * @param column index name. When {@code null} is used, it becomes a not set state.
 	 * </div>
 	 */
 	public void setColumn(Integer column) {
-		this.column = column;
+		if (column == null) {
+			this.columnList = Collections.emptyList();
+		}
+		else {
+			this.columnList = Collections.singletonList(column);
+		}
 	}
 
 	/**
 	 * <div lang="ja">
-	 * 索引に対応するカラムのカラム名を取得します。
+	 * 索引に対応する単一のカラムのカラム名を取得します。
 	 *
 	 * @return カラム名。未設定の場合は{@code null}
+	 *
+	 * @throws IllegalStateException 複合索引に関するカラム番号の列または
+	 * カラム名の列が設定されていた場合
 	 * </div><div lang="en">
 	 * Get the column name of the column corresponding to the index.
 	 *
@@ -230,35 +291,149 @@ public class IndexInfo {
 	 * </div>
 	 */
 	public String getColumnName() {
-		return columnName;
+		if (columnList.size() > 1 || columnNameList.size() > 1) {
+			throw new IllegalStateException(
+					"This method cannot be used for composite index");
+		}
+		else if (columnNameList.isEmpty()) {
+			return null;
+		}
+		else {
+			return columnNameList.get(0);
+		}
 	}
 
 	/**
 	 * <div lang="ja">
-	 * 索引に対応するカラムのカラム名を設定します。
+	 * 索引に対応する、単一のカラムからなるカラム名列を設定します。
 	 *
 	 * @param columnName カラム名。{@code null}の場合は未設定状態になる
 	 * </div><div lang="en">
-	 * Set the column name of the column corresponding to the index.
+	 * TODO Set the column name of the column corresponding to the index.
 	 *
 	 * @param columnName column name. When {@code null} is used, it becomes a not set state.
 	 * </div>
 	 */
 	public void setColumnName(String columnName) {
-		this.columnName = columnName;
+		if (columnName == null) {
+			this.columnNameList = Collections.emptyList();
+		}
+		else {
+			this.columnNameList = Collections.singletonList(columnName);
+		}
 	}
 
-	IndexInfo toUnmodifiable() {
-		return new Unmodifiable(this);
+	/**
+	 * <div lang="ja">
+	 * 索引に対応する任意個数のカラムのカラム番号の列を設定します。
+	 *
+	 * @param columns カラム番号の列。長さ{@code 0}は許容するが、
+	 * {@code null}は指定できない
+	 *
+	 * @throws NullPointerException {@code columns}に{@code null}が
+	 * 指定された場合
+	 *
+	 * @since 4.3
+	 * </div><div lang="en">
+	 * TODO
+	 *
+	 * @since 4.3
+	 * </div>
+	 */
+	public void setColumnList(List<Integer> columns) {
+		final List<Integer> dest;
+		try {
+			dest = Collections.unmodifiableList(
+					new ArrayList<Integer>(columns));
+		}
+		catch (NullPointerException e) {
+			throw GSErrorCode.checkNullParameter(columns, "columns", e);
+		}
+		this.columnList = checkListElements(dest, "columns");
 	}
 
-	private static class Unmodifiable extends IndexInfo {
+	/**
+	 * <div lang="ja">
+	 * 索引に対応する任意個数のカラムのカラム番号の列を取得します。
+	 *
+	 * @return 番号の列。未設定の場合は長さ{@code 0}の列
+	 *
+	 * @since 4.3
+	 * </div><div lang="en">
+	 * TODO
+	 *
+	 * @since 4.3
+	 * </div>
+	 */
+	public List<Integer> getColumnList() {
+		return columnList;
+	}
 
-		Unmodifiable(IndexInfo info) {
-			super.setType(info.getType());
-			super.setName(info.getName());
-			super.setColumn(info.getColumn());
-			super.setColumnName(info.getColumnName());
+	/**
+	 * <div lang="ja">
+	 * 索引に対応する任意個数のカラムのカラム名の列を設定します。
+	 *
+	 * @param columnNames カラム名の列。長さ{@code 0}は許容するが、
+	 * {@code null}は指定できない
+	 *
+	 * @throws NullPointerException {@code columnNames}に{@code null}が
+	 * 指定された場合
+	 *
+	 * @since 4.3
+	 * </div><div lang="en">
+	 * TODO
+	 *
+	 * @since 4.3
+	 * </div>
+	 */
+	public void setColumnNameList(List<String> columnNames) {
+		final List<String> dest;
+		try {
+			dest = Collections.unmodifiableList(
+					new ArrayList<String>(columnNames));
+		}
+		catch (NullPointerException e) {
+			throw GSErrorCode.checkNullParameter(columnNames, "columnNames", e);
+		}
+		this.columnNameList = checkListElements(dest, "columnNames");
+	}
+
+	/**
+	 * <div lang="ja">
+	 * 索引に対応する任意個数のカラムのカラム名の列を取得します。
+	 *
+	 * @return カラム名の列。未設定の場合は長さ{@code 0}の列
+	 *
+	 * @since 4.3
+	 * </div><div lang="en">
+	 * TODO
+	 *
+	 * @since 4.3
+	 * </div>
+	 */
+	public List<String> getColumnNameList() {
+		return columnNameList;
+	}
+
+	private static <T> List<T> checkListElements(List<T> list, String listName) {
+		for (T elem : list) {
+			GSErrorCode.checkNullParameter(
+					elem, "element of " + listName, null);
+		}
+		return list;
+	}
+
+	static IndexInfo toImmutable(IndexInfo base) {
+		if (base instanceof Immutable) {
+			return (Immutable) base;
+		}
+		return new Immutable(base);
+	}
+
+	private static class Immutable extends IndexInfo {
+
+		private Immutable(IndexInfo info) {
+			super(info);
 		}
 
 		@Override
@@ -282,8 +457,13 @@ public class IndexInfo {
 		}
 
 		@Override
-		IndexInfo toUnmodifiable() {
-			return this;
+		public void setColumnList(List<Integer> columns) {
+			throw new UnsupportedOperationException();
+		}
+
+		@Override
+		public void setColumnNameList(List<String> columnNames) {
+			throw new UnsupportedOperationException();
 		}
 
 	}

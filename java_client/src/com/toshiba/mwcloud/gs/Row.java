@@ -1272,4 +1272,80 @@ public interface Row {
 	 */
 	public boolean isNull(int column) throws GSException;
 
+
+	/**
+	 * <div lang="ja">
+	 * 同一のフィールド値からなる新たな{@link Row}インスタンスを作成します。
+	 *
+	 * @return 作成された{@link Row}
+	 *
+	 * @throws GSException 現バージョンでは発生しない
+	 *
+	 * @since 4.3
+	 * </div><div lang="en">
+	 * TODO
+	 *
+	 * @since 4.3
+	 * </div>
+	 */
+	public Row createRow() throws GSException;
+
+
+	/**
+	 * <div lang="ja">
+	 * ロウキーを構成するカラムのみを持ち、それらのカラムについて同一の
+	 * フィールド値からなる新たな{@link Key}インスタンスを作成します。
+	 *
+	 * @return 作成された{@link Key}
+	 *
+	 * @throws GSException ロウキーを持たない場合
+	 *
+	 * @since 4.3
+	 * </div><div lang="en">
+	 * TODO
+	 *
+	 * @since 4.3
+	 * </div>
+	 */
+	public Key createKey() throws GSException;
+
+	/**
+	 * <div lang="ja">
+	 * ロウキーに関するカラムのみから構成される{@link Row}の一種です。
+	 *
+	 * <p>{@link #getSchema()}より返却される{@link ContainerInfo}に
+	 * 含まれるカラム情報は、ロウキーに関するカラムの情報のみとなります。</p>
+	 *
+	 * @since 4.3
+	 * </div><div lang="en">
+	 * TODO
+	 *
+	 * @since 4.3
+	 * </div>
+	 */
+	public interface Key extends Row {
+
+	}
+
+	/**
+	 * <div lang="ja">
+	 * マッピングに用いるロウオブジェクトの型について、常に指定のロウキー型と
+	 * 対応付くことを表します。
+	 *
+	 * <p>このインタフェースを実装するロウオブジェクトの型を指定して、
+	 * {@link Container.BindType#of(Class)}を通じ型情報を求めると、
+	 * {@link Container}インスタンスを生成する際にロウキーの型を明示する必要が
+	 * なくなります。</p>
+	 *
+	 * @since 4.3
+	 * </div><div lang="en">
+	 * TODO
+	 *
+	 * @since 4.3
+	 * </div>
+	 */
+	public interface WithKey<K> {
+
+	}
+
 }

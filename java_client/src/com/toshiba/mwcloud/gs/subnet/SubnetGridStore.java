@@ -74,12 +74,14 @@ import com.toshiba.mwcloud.gs.common.LoggingUtils;
 import com.toshiba.mwcloud.gs.common.LoggingUtils.BaseGridStoreLogger;
 import com.toshiba.mwcloud.gs.common.RowMapper;
 import com.toshiba.mwcloud.gs.common.RowMapper.Cursor;
+import com.toshiba.mwcloud.gs.common.RowMapper.MutableColumnInfo;
 import com.toshiba.mwcloud.gs.common.Statement;
 import com.toshiba.mwcloud.gs.common.Statement.GeneralStatement;
 import com.toshiba.mwcloud.gs.experimental.ContainerAttribute;
 import com.toshiba.mwcloud.gs.experimental.DatabaseInfo;
 import com.toshiba.mwcloud.gs.experimental.Experimentals;
 import com.toshiba.mwcloud.gs.experimental.PrivilegeInfo;
+import com.toshiba.mwcloud.gs.experimental.PrivilegeInfo.RoleType;
 import com.toshiba.mwcloud.gs.experimental.UserInfo;
 import com.toshiba.mwcloud.gs.subnet.GridStoreChannel.ContainerCache;
 import com.toshiba.mwcloud.gs.subnet.GridStoreChannel.Context;
@@ -112,9 +114,12 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 
 	private static boolean pathKeyOperationEnabled = false;
 
+	private static boolean compositeIndexTypeUnified = false;
+
 	private static final int SYSTEM_USER_PARTITION_ID = 0;
 
-	private static final String DEFAULT_PRIVILEGE = "ALL";
+	private static final String ALL_PRIVILEGE = "ALL";
+	private static final String READ_PRIVILEGE = "READ";
 
 	private static final int MAX_PASSWORD_BYTES_LENGTH = 64;
 
@@ -123,13 +128,16 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 	private static final byte INDEX_TYPE_DEFAULT_VALUE = -1;
 
 	private static final RowMapper.Config DEFAULT_MAPPER_CONFIG =
-			new RowMapper.Config(false, true, true);
+			new RowMapper.Config(false, true, true, true);
 
 	private static final RowMapper.Config COMPATIBLE_MAPPER_CONFIG_14 =
-			new RowMapper.Config(false, true, false);
+			new RowMapper.Config(false, true, false, false);
 
 	private static final RowMapper.Config COMPATIBLE_MAPPER_CONFIG_13 =
-			new RowMapper.Config(false, false, false);
+			new RowMapper.Config(false, false, false, false);
+
+	private static final RowMapper.Config ANY_MAPPER_CONFIG =
+			new RowMapper.Config(true, true, true, true);
 
 	private final GridStoreChannel channel;
 
@@ -301,22 +309,23 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		return duplicateContainer(container);
 	}
 
-	private <R> SubnetContainer<?, R> duplicateContainer(
-			SubnetContainer<?, R> base) throws GSException {
+	private <K, R> SubnetContainer<?, R> duplicateContainer(
+			SubnetContainer<K, R> base) throws GSException {
 		final RowMapper mapper = base.getRowMapper();
 		if (mapper.isForTimeSeries()) {
 			return new SubnetTimeSeries<R>(
 					this, channel, context,
-					base.getRowType(), mapper,
+					rebindTimeSeriesType(base.getBindType()),
+					mapper,
 					base.getSchemaVersionId(),
 					base.getPartitionId(),
 					base.getContainerId(),
 					null, null);
 		}
 		else {
-			return new SubnetCollection<Object, R>(
+			return new SubnetCollection<K, R>(
 					this, channel, context,
-					base.getRowType(), mapper,
+					base.getBindType(), mapper,
 					base.getSchemaVersionId(),
 					base.getPartitionId(),
 					base.getContainerId(),
@@ -642,9 +651,6 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 				context.getConfig().containerVisibility;
 		final MetaNamingType metaNamingType =
 				context.getConfig().metaNamingType;
-		if (visibilities.isEmpty() && metaNamingType == null) {
-			return null;
-		}
 
 		return new OptionalRequestSource() {
 			@Override
@@ -663,7 +669,7 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 							(byte) metaNamingType.ordinal());
 				}
 				optionalRequest.putAcceptableFeatureVersion(
-						FeatureVersion.V4_2);
+						FeatureVersion.V4_3);
 			}
 
 			@Override
@@ -694,7 +700,7 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		final ContainerInfo containerInfo = new ContainerInfo();
 
 		ContainerIdInfo containerIdInfo = null;
-		List<ColumnInfo> columnInfoList = null;
+		List<MutableColumnInfo> columnInfoList = null;
 		List<IndexInfo> indexInfoList = null;
 		Integer respAttribute = null;
 		Map<Integer, byte[]> rawEntries = null;
@@ -724,7 +730,7 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 				containerIdInfo = importIdProperty(resp, keyConverter, curEnd);
 				break;
 			case SCHEMA:
-				columnInfoList = new ArrayList<ColumnInfo>();
+				columnInfoList = new ArrayList<MutableColumnInfo>();
 				importSchemaProperty(resp, containerInfo, columnInfoList);
 				importContainerProperties(resp, containerInfo, columnInfoList);
 				break;
@@ -762,14 +768,18 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 			containerInfo.setName(containerIdInfo.remoteKey.toString());
 		}
 
-		if (columnInfoList != null) {
-			containerInfo.setColumnInfoList(columnInfoList);
+		if (indexInfoList != null) {
+			if (columnInfoList != null) {
+				assignIndexColumnNames(
+						columnInfoList, indexInfoList, respAttribute,
+						internalMode);
+			}
+			containerInfo.setIndexInfoList(indexInfoList);
 		}
 
-		if (indexInfoList != null) {
-			assignIndexColumnNames(
-					containerInfo, indexInfoList, respAttribute, internalMode);
-			containerInfo.setIndexInfoList(indexInfoList);
+		if (columnInfoList != null) {
+			containerInfo.setColumnInfoList(
+					new ArrayList<ColumnInfo>(columnInfoList));
 		}
 
 		final ContainerProperties containerProps = new ContainerProperties();
@@ -793,13 +803,14 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 	}
 
 	private <K, R> SubnetContainer<K, R> findContainerByCache(
-			ContainerCache cache, ContainerKey key, Class<R> rowType,
+			ContainerCache cache, ContainerKey key,
+			Container.BindType<K, R, ?> bindType,
 			ContainerType containerType, boolean internalMode)
 			throws GSException {
 		final ContainerKey normalizedKey =
 				normalizeFullContainerKey(key, internalMode);
-		final LocatedSchema schema =
-				cache.findSchema(normalizedKey, rowType, containerType);
+		final LocatedSchema schema = cache.findSchema(
+				normalizedKey, bindType.getRowClass(), containerType);
 
 		if (schema == null) {
 			return null;
@@ -808,16 +819,18 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		final int partitionId = channel.resolvePartitionId(
 				context, normalizedKey, internalMode);
 
-		if (containerType == ContainerType.COLLECTION) {
+		if (schema.getMapper().getContainerType() ==
+				ContainerType.COLLECTION) {
 			return new SubnetCollection<K, R>(
-					this, channel, context, rowType,
+					this, channel, context, bindType,
 					schema.getMapper(), schema.getVersionId(),
 					partitionId, schema.getContainerId(), normalizedKey,
 					schema.getContainerKey());
 		}
 		else {
 			return disguiseTypedContainer(new SubnetTimeSeries<R>(
-					this, channel, context, rowType,
+					this, channel, context,
+					rebindTimeSeriesType(bindType),
 					schema.getMapper(), schema.getVersionId(),
 					partitionId, schema.getContainerId(), normalizedKey,
 					schema.getContainerKey()));
@@ -934,10 +947,21 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		}
 	}
 
-	private <K, R> SubnetContainer<K, R> putContainer(
-			ContainerKey key, ContainerType containerType, Class<R> rowType,
-			ContainerProperties props, boolean modifiable, boolean internalMode)
-			throws GSException {
+	@Override
+	public <K, R> SubnetContainer<K, R> putContainer(
+			ContainerKey key, Container.BindType<K, R, ?> bindType,
+			ContainerProperties props, boolean modifiable,
+			boolean internalMode) throws GSException {
+		if (bindType.getRowClass() == Row.class) {
+			final Container<K, Row> container = putContainerGeneral(
+					key, RowMapper.BindingTool.rebindRow(Row.class, bindType),
+					props, modifiable, internalMode);
+			return (SubnetContainer<K, R>) (Container<K, R>)
+					bindType.castContainer(container);
+		}
+
+		final ContainerType containerType =
+				RowMapper.BindingTool.findContainerType(bindType);
 		final ContainerInfo info = findContainerInfo(props);
 
 		final ContainerKeyConverter keyConverter =
@@ -946,7 +970,7 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		final ContainerCache cache = context.getContainerCache();
 		if (cache != null && !modifiable && info == null) {
 			final Container<K, R> cachedContainer = findContainerByCache(
-					cache, key, rowType, containerType, internalMode);
+					cache, key, bindType, containerType, internalMode);
 			if (cachedContainer != null) {
 				return (SubnetContainer<K, R>) cachedContainer;
 			}
@@ -958,7 +982,7 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		channel.setupRequestBuffer(req);
 
 		final RowMapper orgMapper = RowMapper.getInstance(
-				rowType, containerType, getRowMapperConfig());
+				bindType, containerType, getRowMapperConfig());
 		final OptionalRequestSource propsOption =
 				containerPropertiesToOption(props, orgMapper);
 		tryPutSystemOptionalRequest(
@@ -972,12 +996,12 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		orgMapper.exportSchema(req, getRowMapperConfig());
 
 		if (info != null && (info.getColumnCount() > 0 ||
-				info.isRowKeyAssigned() ||
+				!info.getRowKeyColumnList().isEmpty() ||
 				info.isColumnOrderIgnorable())) {
 			throw new GSException(GSErrorCode.ILLEGAL_SCHEMA,
 					"Schema can not be specified on ContainerInfo (" +
 					"columnCount=" + info.getColumnCount() + ", " +
-					"rowKeyAssigned=" + info.isRowKeyAssigned() + ", " +
+					"rowKeyColumnList=" + info.getRowKeyColumnList() + ", " +
 					"columnOrderIgnorable=" +
 							info.isColumnOrderIgnorable() + ")");
 		}
@@ -1007,12 +1031,13 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 
 		if (mapper.isForTimeSeries()) {
 			return disguiseTypedContainer(new SubnetTimeSeries<R>(
-					this, channel, context, rowType, mapper, schemaVerId,
+					this, channel, context,
+					rebindTimeSeriesType(bindType), mapper, schemaVerId,
 					partitionId, containerId, normalizedKey, remoteKey));
 		}
 		else {
 			return new SubnetCollection<K, R>(
-					this, channel, context, rowType, mapper, schemaVerId,
+					this, channel, context, bindType, mapper, schemaVerId,
 					partitionId, containerId, normalizedKey, remoteKey);
 		}
 	}
@@ -1023,8 +1048,9 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 			boolean modifiable) throws GSException {
 		final SubnetContainer<K, R> container = putContainer(
 				parseContainerKey(name, false, true),
-				ContainerType.COLLECTION,
-				rowType, null, modifiable, false);
+				RowMapper.BindingTool.createCollectionBindType(
+						(Class<K>) null, rowType),
+				null, modifiable, false);
 		return (SubnetCollection<K, R>) container;
 	}
 
@@ -1034,8 +1060,8 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 			throws GSException {
 		final SubnetContainer<Date, R> container = putContainer(
 				parseContainerKey(name, false, true),
-				ContainerType.TIME_SERIES,
-				rowType, null, false, false);
+				RowMapper.BindingTool.createTimeSeriesBindType(rowType),
+				null, false, false);
 		return (SubnetTimeSeries<R>) container;
 	}
 
@@ -1048,8 +1074,8 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 
 		final SubnetContainer<Date, R> container = putContainer(
 				parseContainerKey(name, false, true),
-				ContainerType.TIME_SERIES,
-				rowType, new ContainerProperties(info), modifiable, false);
+				RowMapper.BindingTool.createTimeSeriesBindType(rowType),
+				new ContainerProperties(info), modifiable, false);
 		return (SubnetTimeSeries<R>) container;
 	}
 
@@ -1127,6 +1153,8 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 				final byte[] value = entry.getValue();
 				out.putInt(entry.getKey());
 				out.putInt(value.length);
+
+				out.prepare(value.length);
 				out.base().put(value);
 			}
 		}
@@ -1229,7 +1257,7 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 
 	private static void importContainerProperties(
 			BasicBuffer in, ContainerInfo containerInfo,
-			List<ColumnInfo> columnInfoList) throws GSException {
+			List<? extends ColumnInfo> columnInfoList) throws GSException {
 
 		if (isTSDivisionAndAffinityEnabled() &&
 				!GridStoreChannel.v20AffinityCompatible) {
@@ -1323,12 +1351,22 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 
 	@Override
 	public <K, R> SubnetContainer<K, R> getContainer(
-			ContainerKey key, ContainerType containerType, Class<R> rowType,
+			ContainerKey key, Container.BindType<K, R, ?> bindType,
 			Integer attribute, boolean internalMode) throws GSException {
+		if (bindType.getRowClass() == Row.class) {
+			final Container<K, Row> container = getContainerGeneral(
+					key, RowMapper.BindingTool.rebindRow(Row.class, bindType),
+					attribute, internalMode);
+			return (SubnetContainer<K, R>) (Container<K, R>)
+					bindType.castContainer(container);
+		}
+
+		final ContainerType containerType =
+				RowMapper.BindingTool.findContainerType(bindType);
 		final ContainerCache cache = context.getContainerCache();
 		if (cache != null && !internalMode) {
 			final Container<K, R> cachedContainer = findContainerByCache(
-					cache, key, rowType, containerType, internalMode);
+					cache, key, bindType, containerType, internalMode);
 			if (cachedContainer != null) {
 				return (SubnetContainer<K, R>) cachedContainer;
 			}
@@ -1342,7 +1380,7 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 				req, context, internalMode, false, attribute);
 
 		final RowMapper orgMapper = RowMapper.getInstance(
-				rowType, containerType, getRowMapperConfig());
+				bindType, containerType, getRowMapperConfig());
 		final int partitionId =
 				channel.resolvePartitionId(context, key, internalMode);
 		final ContainerKeyConverter keyConverter =
@@ -1378,12 +1416,13 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 
 		if (mapper.isForTimeSeries()) {
 			return disguiseTypedContainer(new SubnetTimeSeries<R>(
-					this, channel, context, rowType, mapper, schemaVerId,
+					this, channel, context, rebindTimeSeriesType(bindType),
+					mapper, schemaVerId,
 					partitionId, containerId, normalizedKey, remoteKey));
 		}
 		else {
 			return new SubnetCollection<K, R>(
-					this, channel, context, rowType, mapper, schemaVerId,
+					this, channel, context, bindType, mapper, schemaVerId,
 					partitionId, containerId, normalizedKey, remoteKey);
 		}
 	}
@@ -1392,8 +1431,9 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 	public <K, R> SubnetCollection<K, R> getCollection(
 			String name, Class<R> rowType) throws GSException {
 		final SubnetContainer<K, R> container = getContainer(
-				parseContainerKey(name), ContainerType.COLLECTION,
-				rowType, null, false);
+				parseContainerKey(name),
+				RowMapper.BindingTool.createCollectionBindType(
+						(Class<K>) null, rowType), null, false);
 		return (SubnetCollection<K, R>) container;
 	}
 
@@ -1401,8 +1441,9 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 	public <R> SubnetTimeSeries<R> getTimeSeries(
 			String name, Class<R> rowType) throws GSException {
 		final SubnetContainer<Date, R> container = getContainer(
-				parseContainerKey(name), ContainerType.TIME_SERIES,
-				rowType, null, false);
+				parseContainerKey(name),
+				RowMapper.BindingTool.createTimeSeriesBindType(
+						rowType), null, false);
 		return (SubnetTimeSeries<R>) container;
 	}
 
@@ -1527,7 +1568,7 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 
 	private static void importSchemaProperty(
 			BasicBuffer in, ContainerInfo containerInfo,
-			List<ColumnInfo> columnInfoList) throws GSException {
+			List<MutableColumnInfo> columnInfoList) throws GSException {
 		columnInfoList.clear();
 		final RowMapper.Config config = getRowMapperConfig();
 
@@ -1542,11 +1583,11 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		}
 
 		keyList = RowMapper.importKeyListEnd(in, config, columnCount, keyList);
-		containerInfo.setRowKeyAssigned(!keyList.isEmpty());
+		containerInfo.setRowKeyColumnList(keyList);
 	}
 
 	private static void importIndexProperty(
-			BasicBuffer in, List<ColumnInfo> columnInfoList)
+			BasicBuffer in, List<MutableColumnInfo> columnInfoList)
 			throws GSException {
 		final List<Set<IndexType>> indexTypesList =
 				new ArrayList<Set<IndexType>>();
@@ -1583,10 +1624,7 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		}
 
 		for (int i = 0; i < columnCount; i++) {
-			final ColumnInfo srcInfo = columnInfoList.get(i);
-			columnInfoList.set(i, new ColumnInfo(
-					srcInfo.getName(), srcInfo.getType(),
-					srcInfo.getNullable(), indexTypesList.get(i)));
+			columnInfoList.get(i).setIndexTypes(indexTypesList.get(i));
 		}
 	}
 
@@ -1617,7 +1655,7 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 
 	private static void importTriggerProperty(
 			BasicBuffer in, ContainerInfo containerInfo,
-			List<ColumnInfo> columnInfoList) throws GSException {
+			List<? extends ColumnInfo> columnInfoList) throws GSException {
 		final List<TriggerInfo> triggerInfoList = new ArrayList<TriggerInfo>();
 
 		final int entryCount = in.base().getInt();
@@ -1720,8 +1758,9 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 	}
 
 	private static void assignIndexColumnNames(
-			ContainerInfo containerInfo, List<IndexInfo> indexInfoList,
-			Integer attribute, boolean internalMode) throws GSException {
+			List<MutableColumnInfo> columnInfoList,
+			List<IndexInfo> indexInfoList, Integer attribute,
+			boolean internalMode) throws GSException {
 		if (internalMode && (attribute == null ||
 				(attribute != ContainerKeyPredicate.ATTRIBUTE_BASE &&
 				attribute != ContainerKeyPredicate.ATTRIBUTE_SINGLE))) {
@@ -1729,29 +1768,41 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		}
 
 		for (IndexInfo indexInfo : indexInfoList) {
-			final Integer column = indexInfo.getColumn();
-			if (column != null) {
-				final ColumnInfo columnInfo;
+			final IndexType type = indexInfo.getType();
+			final List<Integer> columnList = indexInfo.getColumnList();
+
+			final List<String> columnNameList =
+					new ArrayList<String>(columnList.size());
+			for (Integer column : columnList) {
+				final MutableColumnInfo columnInfo;
 				try {
-					columnInfo = containerInfo.getColumnInfo(column);
+					columnInfo = columnInfoList.get(column);
 				}
-				catch (IllegalArgumentException e) {
+				catch (IndexOutOfBoundsException e) {
 					throw new GSConnectionException(
 							GSErrorCode.MESSAGE_CORRUPTED,
 							"Protocol error by illegal index column", e);
 				}
-				indexInfo.setColumnName(columnInfo.getName());
+				columnNameList.add(columnInfo.getName());
 
-				final IndexType type = indexInfo.getType();
-				final Set<IndexType> typeSet =
-						columnInfo.getIndexTypes();
+				final Set<IndexType> typeSet = columnInfo.getIndexTypes();
 				if (typeSet != null && !typeSet.contains(type)) {
-					throw new GSConnectionException(
-							GSErrorCode.MESSAGE_CORRUPTED,
-							"Protocol error by inconsistent index type (" +
-							"type=" + type + ")");
+					if (columnList.size() == 1) {
+						throw new GSConnectionException(
+								GSErrorCode.MESSAGE_CORRUPTED,
+								"Protocol error by inconsistent index type (" +
+								"type=" + type + ")");
+					}
+					if (compositeIndexTypeUnified) {
+						final Set<IndexType> modTypeSet =
+								EnumSet.noneOf(IndexType.class);
+						modTypeSet.addAll(typeSet);
+						modTypeSet.add(type);
+						columnInfo.setIndexTypes(modTypeSet);
+					}
 				}
 			}
+			indexInfo.setColumnNameList(columnNameList);
 		}
 	}
 
@@ -1767,12 +1818,12 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		}
 
 		final int columnCount = BufferUtils.getNonNegativeInt(in.base());
+		final List<Integer> columnList = new ArrayList<Integer>(columnCount);
 		for (int i = 0; i < columnCount; i++) {
 			final int column = in.base().getInt();
-			if (i == 0) {
-				indexInfo.setColumn(column);
-			}
+			columnList.add(column);
 		}
+		indexInfo.setColumnList(columnList);
 
 		final byte rawType = in.base().get();
 		final IndexType type;
@@ -1819,10 +1870,10 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		final String name = indexInfo.getName();
 		out.putString((name == null ? "" : name));
 
-		final Integer column = indexInfo.getColumn();
-		final int columnCount = (column == null ? 0 : 1);
+		final List<Integer> columnList = indexInfo.getColumnList();
+		final int columnCount = columnList.size();
 		out.putInt(columnCount);
-		if (columnCount > 0) {
+		for (Integer column : columnList) {
 			out.putInt(column);
 		}
 
@@ -1852,6 +1903,13 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 	private static <K, R> SubnetContainer<K, R> disguiseTypedContainer(
 			SubnetContainer<?, R> container) {
 		return (SubnetContainer<K, R>) container;
+	}
+
+	private static <R> Container.BindType<Date, R, ? extends Container<?, ?>>
+	rebindTimeSeriesType(
+			Container.BindType<?, R, ? extends Container<?, ?>> src)
+			throws GSException {
+		return RowMapper.BindingTool.rebindKey(Date.class, src);
 	}
 
 	private ContainerKey resolveContainerKey(
@@ -1927,10 +1985,11 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		return props.getAttribute();
 	}
 
-	@Override
-	public <K> SubnetContainer<K, Row> getContainer(
-			ContainerKey key, ContainerType expectedType,
+	private <K> SubnetContainer<K, Row> getContainerGeneral(
+			ContainerKey key, Container.BindType<K, Row, ?> bindType,
 			Integer attribute, boolean internalMode) throws GSException {
+		ContainerType expectedType =
+				RowMapper.BindingTool.findContainerType(bindType);
 		if (CONTEXT_CONTROLLER_KEY.equals(key)) {
 			final SubnetContainer<K, Row> container =
 					getContextControllerCollection(expectedType);
@@ -1943,7 +2002,7 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		if (cache != null) {
 			final SubnetContainer<K, Row> cachedContainer =
 					findContainerByCache(
-							cache, key, Row.class, expectedType, internalMode);
+							cache, key, bindType, expectedType, internalMode);
 			if (cachedContainer != null) {
 				return cachedContainer;
 			}
@@ -1965,7 +2024,7 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		final int partitionId =
 				channel.resolvePartitionId(context, key, internalMode);
 		final RowMapper mapper = RowMapper.getInstance(
-				resolvedType, containerInfo, getRowMapperConfig());
+				bindType, resolvedType, containerInfo, getRowMapperConfig());
 
 		final ContainerKey[] acceptedKeys =
 				filterRemoteContainerKey(idInfo.remoteKey, key);
@@ -1973,8 +2032,8 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		final ContainerKey remoteKey = acceptedKeys[1];
 
 		if (idInfo.metaDistType != MetaDistributionType.NONE) {
-			return disguiseTypedContainer(new MetaCollection<Object, Row>(
-					this, channel, context, Row.class, mapper,
+			return disguiseTypedContainer(new MetaCollection<K, Row>(
+					this, channel, context, bindType, mapper,
 					idInfo.versionId, partitionId,
 					idInfo.metaDistType,
 					idInfo.metaContainerId, idInfo.metaNamingType,
@@ -1989,27 +2048,33 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 
 		if (mapper.isForTimeSeries()) {
 			return disguiseTypedContainer(new SubnetTimeSeries<Row>(
-					this, channel, context, Row.class, mapper,
+					this, channel, context,
+					rebindTimeSeriesType(bindType), mapper,
 					idInfo.versionId, partitionId, idInfo.containerId,
 					normalizedKey, remoteKey));
 		}
 		else {
-			return disguiseTypedContainer(new SubnetCollection<Object, Row>(
-					this, channel, context, Row.class, mapper,
+			return disguiseTypedContainer(new SubnetCollection<K, Row>(
+					this, channel, context, bindType, mapper,
 					idInfo.versionId, partitionId, idInfo.containerId,
 					normalizedKey, remoteKey));
 		}
 	}
 
 	public <K> Container<K, Row> getContainer(String name) throws GSException {
-		return getContainer(parseContainerKey(name), null, null, false);
+		return getContainer(
+				parseContainerKey(name),
+				RowMapper.BindingTool.createBindType(
+						(Class<K>) null, Row.class, Container.class), null, false);
 	}
 
 	@Override
 	public <K> Collection<K, Row> getCollection(String name)
 			throws GSException {
 		final Container<K, Row> container = getContainer(
-				parseContainerKey(name), ContainerType.COLLECTION,
+				parseContainerKey(name),
+				RowMapper.BindingTool.createCollectionBindType(
+						(Class<K>) null, Row.class),
 				null, false);
 		return (Collection<K, Row>) container;
 	}
@@ -2017,15 +2082,19 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 	@Override
 	public TimeSeries<Row> getTimeSeries(String name) throws GSException {
 		final Container<Date, Row> container = getContainer(
-				parseContainerKey(name), ContainerType.TIME_SERIES,
+				parseContainerKey(name),
+				RowMapper.BindingTool.createTimeSeriesBindType(Row.class),
 				null, false);
 		return (TimeSeries<Row>) container;
 	}
 
-	private <K> Container<K, Row> putContainer(
-			ContainerKey key, ContainerType containerType,
+	private <K> Container<K, Row> putContainerGeneral(
+			ContainerKey key, Container.BindType<K, Row, ?> bindType,
 			ContainerProperties props, boolean modifiable,
 			boolean internalMode) throws GSException {
+		ContainerType containerType =
+				RowMapper.BindingTool.findContainerType(bindType);
+
 		final ContainerInfo containerInfo = findContainerInfo(props);
 		final Integer containerAttribute = findContainerAttribute(props);
 
@@ -2038,7 +2107,7 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		if (cache != null && !modifiable && !internalMode &&
 				containerInfo.getTimeSeriesProperties() != null) {
 			final Container<K, Row> container = findContainerByCache(
-					cache, key, Row.class, containerType, internalMode);
+					cache, key, bindType, containerType, internalMode);
 			if (container != null) {
 				return container;
 			}
@@ -2050,7 +2119,7 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		channel.setupRequestBuffer(req);
 
 		final RowMapper orgMapper = RowMapper.getInstance(
-				containerType, containerInfo, getRowMapperConfig());
+				bindType, containerType, containerInfo, getRowMapperConfig());
 		final OptionalRequestSource propsOption =
 				containerPropertiesToOption(props, orgMapper);
 		tryPutSystemOptionalRequest(
@@ -2091,22 +2160,15 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 
 		if (mapper.isForTimeSeries()) {
 			return disguiseTypedContainer(new SubnetTimeSeries<Row>(
-					this, channel, context, Row.class, mapper, schemaVerId,
+					this, channel, context,
+					rebindTimeSeriesType(bindType), mapper, schemaVerId,
 					partitionId, containerId, normalizedKey, remoteKey));
 		}
 		else {
-			return disguiseTypedContainer(new SubnetCollection<Object, Row>(
-					this, channel, context, Row.class, mapper, schemaVerId,
+			return disguiseTypedContainer(new SubnetCollection<K, Row>(
+					this, channel, context, bindType, mapper, schemaVerId,
 					partitionId, containerId, normalizedKey, remoteKey));
 		}
-	}
-
-	@Override
-	public <K> Container<K, Row> putContainer(
-			ContainerKey key, ContainerProperties props, boolean modifiable,
-			boolean internalMode) throws GSException {
-		return putContainer(
-				key, (ContainerType) null, props, modifiable, internalMode);
 	}
 
 	@Override
@@ -2116,7 +2178,8 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		final ContainerKey key =
 				(name == null ? null : parseContainerKey(name, false, true));
 		return putContainer(
-				key, (ContainerType) null,
+				key, RowMapper.BindingTool.createBindType(
+						(Class<K>) null, Row.class, Container.class),
 				new ContainerProperties(info), modifiable, false);
 	}
 
@@ -2128,7 +2191,8 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 				(name == null ? null : parseContainerKey(name, false, true));
 
 		final Container<K, Row> container = putContainer(
-				key, ContainerType.COLLECTION,
+				key, RowMapper.BindingTool.createCollectionBindType(
+						(Class<K>) null, Row.class),
 				new ContainerProperties(info), modifiable, false);
 		return (Collection<K, Row>) container;
 	}
@@ -2140,7 +2204,7 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 				(name == null ? null : parseContainerKey(name, false, true));
 
 		final Container<Date, Row> container = putContainer(
-				key, ContainerType.TIME_SERIES,
+				key, RowMapper.BindingTool.createTimeSeriesBindType(Row.class),
 				new ContainerProperties(info), modifiable, false);
 		return (TimeSeries<Row>) container;
 	}
@@ -2180,11 +2244,45 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 	}
 
 	@Override
+	public <K, R, C extends Container<K, R>> C getContainer(
+			String name, Container.BindType<K, R, C> bindType)
+			throws GSException {
+		final SubnetContainer<K, R> container = getContainer(
+				parseContainerKey(name), bindType, null, false);
+		return bindType.castContainer(container);
+	}
+
+	@Override
+	public <K, R, C extends Container<K, R>> C putContainer(
+			String name, Container.BindType<K, R, C> bindType)
+			throws GSException {
+		return putContainer(name, bindType, null, false);
+	}
+
+	@Override
+	public <K, R, C extends Container<K, R>> C putContainer(
+			String name, Container.BindType<K, R, C> bindType,
+			ContainerInfo info, boolean modifiable) throws GSException {
+		final Container<K, ?> container = putContainer(
+				parseContainerKey(name, false, true), bindType,
+				new ContainerProperties(info), modifiable, false);
+		return bindType.castContainer(container);
+	}
+
+	@Override
 	public Row createRow(ContainerInfo info) throws GSException {
 		channel.checkContextAvailable(context);
 		final RowMapper mapper = RowMapper.getInstance(
 				info.getType(), info, getRowMapperConfig());
 		return mapper.createGeneralRow();
+	}
+
+	@Override
+	public Row.Key createRowKey(ContainerInfo info) throws GSException {
+		channel.checkContextAvailable(context);
+		final RowMapper mapper = RowMapper.getInstance(
+				info.getType(), info, getRowMapperConfig());
+		return mapper.createGeneralRowKey();
 	}
 
 	private static class UnnamedMultiOperationContext<K, V, R>
@@ -3420,35 +3518,68 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 
 			req.putInt(predicateList.size());
 			for (RowKeyPredicate<?> predicate : predicateList) {
-				final GSType keyType = predicate.getKeyType();
-				req.putByteEnum(keyType);
+				final RowMapper mapper =
+						RowMapper.getInstance(predicate, ANY_MAPPER_CONFIG);
+				final boolean composite = (mapper.getKeyCategory() ==
+						RowMapper.KeyCategory.COMPOSITE);
+
+				mapper.exportKeySchemaSingle(req);
 
 				final java.util.Collection<?> distinctKeys =
 						predicate.getDistinctKeys();
 				final Object startKey = predicate.getStart();
 				final Object finishKey = predicate.getFinish();
 
+				java.util.Collection<?> keys = null;
+
 				if (distinctKeys == null) {
 					req.putByteEnum(PredicateType.RANGE);
+					mapper.exportKeySchemaComposite(req);
+
+					java.util.Collection<Object> rangeKeys = null;
+					if (composite) {
+						rangeKeys = new ArrayList<Object>();
+					}
 
 					req.putBoolean(startKey != null);
 					if (startKey != null) {
-						RowMapper.encodeKey(
-								req, startKey, keyType, mappingMode);
+						if (composite) {
+							rangeKeys.add(startKey);
+						}
+						else {
+							mapper.encodeKey(req, startKey, mappingMode);
+						}
 					}
 
 					req.putBoolean(finishKey != null);
 					if (finishKey != null) {
-						RowMapper.encodeKey(
-								req, finishKey, keyType, mappingMode);
+						if (composite) {
+							rangeKeys.add(finishKey);
+						}
+						else {
+							mapper.encodeKey(req, finishKey, mappingMode);
+						}
 					}
+
+					keys = rangeKeys;
 				}
 				else {
 					req.putByteEnum(PredicateType.DISTINCT);
-					req.putInt(distinctKeys.size());
-					for (Object key : distinctKeys) {
-						RowMapper.encodeKey(req, key, keyType, mappingMode);
+					mapper.exportKeySchemaComposite(req);
+
+					if (composite) {
+						keys = distinctKeys;
 					}
+					else {
+						req.putInt(distinctKeys.size());
+						for (Object key : distinctKeys) {
+							mapper.encodeKey(req, key, mappingMode);
+						}
+					}
+				}
+
+				if (keys != null) {
+					mapper.encodeKey(req, keys, mappingMode, true, true);
 				}
 			}
 
@@ -3579,8 +3710,11 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 						true),
 				getRowMapperConfig());
 
+		final Container.BindType<K, Row, ?> bindType =
+				RowMapper.BindingTool.createCollectionBindType(
+						(Class<K>) null, Row.class);
 		return new SubnetCollection<K, Row>(
-				this, channel, context, Row.class, mapper, -1, -1, -1,
+				this, channel, context, bindType, mapper, -1, -1, -1,
 				CONTEXT_CONTROLLER_KEY, null) {
 
 					@Override
@@ -3647,7 +3781,8 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		return putContainer(
 				resolveContainerKey(
 						keyConverter.parse(name, false), info, keyConverter),
-				resolveContainerType(null, info), rowType,
+				RowMapper.BindingTool.createBindType(
+						(Class<K>) null, rowType, Container.class),
 				new ContainerProperties(info), modifiable, false);
 	}
 
@@ -3860,24 +3995,29 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		req.put(prop);		
 
 		if (privileges != null) {
-			req.base().putInt(privileges.size());	
+			req.putInt(privileges.size());	
 
 			
 			for (Entry<String, PrivilegeInfo> privilegeEntry : privileges.entrySet()) {
 
 				RowMapper.checkSymbol(privilegeEntry.getKey(), "privilege name");
 				req.putString(privilegeEntry.getKey());	
-				PrivilegeInfo privilegeInfo = privilegeEntry.getValue();	
+				PrivilegeInfo privilegeInfo = privilegeEntry.getValue();
 				if (privilegeInfo == null) {
 					throw new GSException(
 							GSErrorCode.EMPTY_PARAMETER,
 							"Privilege info not specified");
 				}
-				req.putString(DEFAULT_PRIVILEGE);		
+				PrivilegeInfo.RoleType role = privilegeInfo.getRole();
+				if (role == RoleType.ALL) {
+					req.putString(ALL_PRIVILEGE);
+				} else {
+					req.putString(READ_PRIVILEGE);
+				}
 			}
 		}
 		else {
-			req.base().putInt(0);	
+			req.putInt(0);	
 		}
 	}
 
@@ -3917,13 +4057,12 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 			for (int j = 0; j < privilegeInfoCount; j++) {
 				final String userName = resp.getString();		
 				final String privilegeData = resp.getString();	
-				if (!privilegeData.equals(DEFAULT_PRIVILEGE)) {
-					throw new GSConnectionException(GSErrorCode.MESSAGE_CORRUPTED,
-							"Protocol error by illegal privilege (" +
-							"expected=" + DEFAULT_PRIVILEGE +
-							", actual=" + privilegeData + ")");
+
+				PrivilegeInfo privilege = new PrivilegeInfo();
+				if (privilegeData.equals(ALL_PRIVILEGE)) {
+					privilege.setRole(PrivilegeInfo.RoleType.ALL);
 				}
-				privilegeInfoMap.put(userName, new PrivilegeInfo());
+				privilegeInfoMap.put(userName, privilege);
 			}
 
 			
@@ -4022,7 +4161,9 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 
 		channel.setupRequestBuffer(req);
 
-		NodeConnection.tryPutEmptyOptionalRequest(req);
+		OptionalRequest opt = new OptionalRequest();
+		opt.putAcceptableFeatureVersion(FeatureVersion.V4_3);
+		opt.format(req);
 
 		final int partitionId = SYSTEM_USER_PARTITION_ID;
 
@@ -4045,7 +4186,9 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 
 		channel.setupRequestBuffer(req);
 
-		NodeConnection.tryPutEmptyOptionalRequest(req);
+		OptionalRequest opt = new OptionalRequest();
+		opt.putAcceptableFeatureVersion(FeatureVersion.V4_3);
+		opt.format(req);
 
 		final int partitionId = SYSTEM_USER_PARTITION_ID;
 
@@ -4099,7 +4242,11 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 
 		channel.setupRequestBuffer(req);
 
-		NodeConnection.tryPutEmptyOptionalRequest(req);
+		OptionalRequest opt = new OptionalRequest();
+		if (info.getRole() == RoleType.READ) {
+			opt.putFeatureVersion(FeatureVersion.V4_3);
+		}
+		opt.format(req);
 
 		final int partitionId = SYSTEM_USER_PARTITION_ID;
 

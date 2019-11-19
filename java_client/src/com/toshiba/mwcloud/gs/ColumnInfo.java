@@ -19,6 +19,8 @@ import java.util.Collections;
 import java.util.EnumSet;
 import java.util.Set;
 
+import com.toshiba.mwcloud.gs.common.GSErrorCode;
+
 /**
  * <div lang="ja">
  * カラムのスキーマに関する情報を表します。
@@ -43,6 +45,31 @@ public class ColumnInfo {
 	private final Boolean defaultValueNull;
 
 	private final Set<IndexType> indexTypes;
+
+	ColumnInfo(ColumnInfo info) {
+		final boolean sameClass;
+		try {
+			sameClass = (info.getClass() == ColumnInfo.class);
+		}
+		catch (NullPointerException e) {
+			throw GSErrorCode.checkNullParameter(info, "info", e);
+		}
+
+		if (sameClass) {
+			this.name = info.name;
+			this.type = info.type;
+			this.nullable = info.nullable;
+			this.defaultValueNull = info.defaultValueNull;
+			this.indexTypes = info.indexTypes;
+		}
+		else {
+			this.name = info.getName();
+			this.type = info.getType();
+			this.nullable = info.getNullable();
+			this.defaultValueNull = info.getDefaultValueNull();
+			this.indexTypes = getImmutableIndexTypes(info.getIndexTypes());
+		}
+	}
 
 	/**
 	 * <div lang="ja">
@@ -178,17 +205,7 @@ public class ColumnInfo {
 		this.type = type;
 		this.nullable = nullable;
 		this.defaultValueNull = defaultValueNull;
-
-		if (indexTypes == null) {
-			this.indexTypes = null;
-		}
-		else if (indexTypes.isEmpty()) {
-			this.indexTypes = Collections.emptySet();
-		}
-		else {
-			this.indexTypes =
-					Collections.unmodifiableSet(EnumSet.copyOf(indexTypes));
-		}
+		this.indexTypes = getImmutableIndexTypes(indexTypes);
 	}
 
 	/**
@@ -289,6 +306,33 @@ public class ColumnInfo {
 	 */
 	public Set<IndexType> getIndexTypes() {
 		return indexTypes;
+	}
+
+	private static Set<IndexType> getImmutableIndexTypes(Set<IndexType> src) {
+		if (src == null) {
+			return null;
+		}
+		else if (src.isEmpty()) {
+			return Collections.emptySet();
+		}
+		else {
+			return Collections.unmodifiableSet(EnumSet.copyOf(src));
+		}
+	}
+
+	static Immutable toImmutable(ColumnInfo base) {
+		if (base instanceof Immutable) {
+			return (Immutable) base;
+		}
+		return new Immutable(base);
+	}
+
+	private static class Immutable extends ColumnInfo {
+
+		Immutable(ColumnInfo base) {
+			super(base);
+		}
+
 	}
 
 }
