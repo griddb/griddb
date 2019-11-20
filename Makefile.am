@@ -47,7 +47,7 @@ $(BINDIRS)/gridstore.jar:
 	cd java_client;ant
 
 dist_noinst_DATA = $(BINFILES) $(CONFFILES) $(OSSFILES) \
-	installer/SOURCES/RPM-README.md \
+	README.md \
 	docs/manual/GridDB_RPM_InstallGuide.html \
 	docs/sample/program/Sample1.java
 

@@ -1,5 +1,5 @@
 %define griddb_name griddb_nosql
-%define griddb_ver 4.2.1
+%define griddb_ver 4.3.0
 %define griddb_instdir /usr/griddb-%{griddb_ver}
 %define griddb_homedir /var/lib/gridstore
 # do not strip
@@ -13,7 +13,7 @@ Version:        %{griddb_ver}
 Release:        1.linux
 Group:          Applications/Databases
 Vendor:         Toshiba Digital Solutions Corporation
-License:        AGPL-3.0 and (Apache-2.0)
+License:        AGPL-3.0 (and Apache-2.0)
 Source:         %{name}-%{version}.zip
 
 %description
@@ -94,7 +94,7 @@ install -c -m 640 3rd_party/uuid/uuid/COPYING                   %{buildroot}%{gr
 install -c -m 640 3rd_party/omaha/COPYING                       %{buildroot}%{griddb_instdir}/3rd_party/omaha
 install -c -m 640 3rd_party/zigzag_encoding/LICENSE             %{buildroot}%{griddb_instdir}/3rd_party/zigzag_encoding
 
-install -c -m 640 installer/SOURCES/RPM-README.md               %{buildroot}%{griddb_instdir}
+install -c -m 640 README.md                                     %{buildroot}%{griddb_instdir}
 install -c -m 644 docs/manual/GridDB_RPM_InstallGuide.html      %{buildroot}%{griddb_instdir}/docs/manual
 install -c -m 644 docs/sample/program/Sample1.java              %{buildroot}%{griddb_instdir}/docs/sample/program
 
@@ -304,7 +304,7 @@ fi
 %{griddb_instdir}/3rd_party/uuid/COPYING
 %{griddb_instdir}/3rd_party/omaha/COPYING
 %{griddb_instdir}/3rd_party/zigzag_encoding/LICENSE
-%{griddb_instdir}/RPM-README.md
+%{griddb_instdir}/README.md
 %{griddb_instdir}/docs/manual/GridDB_RPM_InstallGuide.html
 %{griddb_instdir}/docs/sample/program/Sample1.java
 /usr/bin/gsserver
@@ -323,5 +323,5 @@ fi
 /usr/share/java/gridstore-conf.jar
 
 %changelog
-* Wed Jun 27 2019 Toshiba Digital Solutions Corporation
-- 4.2.1
+* Wed Nov 20 2019 Toshiba Digital Solutions Corporation
+- 4.3.0
