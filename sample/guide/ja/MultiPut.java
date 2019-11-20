@@ -57,7 +57,7 @@ public class MultiPut {
 				}
 
 				// 登録するデータ
-				String[] nameList = {"notebook PC", "desktop PC", "keybord", "mouse", "printer"};
+				String[] nameList = {"notebook PC", "desktop PC", "keyboard", "mouse", "printer"};
 				int[] numberList = {55, 81, 39, 72, 14};
 
 				// ロウにデータをセットする

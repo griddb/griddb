@@ -15,6 +15,8 @@
 */
 package com.toshiba.mwcloud.gs;
 
+import com.toshiba.mwcloud.gs.common.RowMapper;
+
 
 /**
  * <div lang="ja">
@@ -26,6 +28,7 @@ package com.toshiba.mwcloud.gs;
  * <li>INTEGER型({@link Integer})</li>
  * <li>LONG型({@link Long})</li>
  * <li>TIMESTAMP型({@link java.util.Date})</li>
+ * <li>上記の型のカラムを単一または複数持つ(複合)ロウキー({@link Row.Key})</li>
  * </ul>
  * <p>ロウキーの設定は必須ではありません。</p>
  *
@@ -37,7 +40,7 @@ package com.toshiba.mwcloud.gs;
  *
  * <p>ロック粒度はロウ単位です。</p>
  * </div><div lang="en">
- * A general-purpose Container for managing a set of Rows.
+ * TODO A general-purpose Container for managing a set of Rows.
  *
  * <p>The following types are available as a Row key.</p>
  * <ul>
@@ -156,5 +159,106 @@ public interface Collection<K, R> extends Container<K, R> {
 	public Query<R> query(
 			String column, Geometry geometryIntersection, Geometry geometryDisjoint)
 			throws GSException;
+
+	/**
+	 * <div lang="ja">
+	 * {@link Collection}ならびにその型パラメータと結びつく
+	 * {@link Container.BindType}を構築するための、補助クラスです。
+	 *
+	 * @see Container.BindType
+	 *
+	 * @since 4.3
+	 * </div><div lang="en">
+	 * TODO
+	 *
+	 * @since 4.3
+	 * </div>
+	 */
+	public static class BindType {
+
+		private BindType() {
+		}
+
+		/**
+		 * <div lang="ja">
+		 * 指定のロウオブジェクト型から得られるロウキーの型、指定の
+		 * ロウオブジェクト型、ならびに、{@link Collection}と結びつく
+		 * {@link Container.BindType}を取得します。
+		 *
+		 * @param <K> ロウキーの型
+		 * @param <R> ロウオブジェクトの型
+		 * @param rowClass ロウオブジェクトの型に対応するクラスオブジェクト
+		 *
+		 * @throws GSException 指定のロウオブジェクト型からロウキーの型が
+		 * 得られなかった場合
+		 *
+		 * @since 4.3
+		 * </div><div lang="en">
+		 * TODO
+		 *
+		 * @since 4.3
+		 * </div>
+		 */
+		public static <K, R extends Row.WithKey<K>> Container.BindType<
+		K, R, ? extends Collection<K, R>> of(Class<R> rowClass)
+				throws GSException {
+			return of(
+					RowMapper.BindingTool.resolveKeyClass(rowClass),
+					rowClass);
+		}
+
+		/**
+		 * <div lang="ja">
+		 * 指定のロウキー型、指定のロウオブジェクト型、ならびに、
+		 * {@link Collection}と結びつく{@link Container.BindType}を取得します。
+		 *
+		 * @param <K> ロウキーの型
+		 * @param <R> ロウオブジェクトの型
+		 * @param keyClass ロウキーの型に対応するクラスオブジェクト
+		 * @param rowClass ロウオブジェクトの型に対応するクラスオブジェクト
+		 *
+		 * @throws GSException ロウキーの型と、ロウオブジェクトの型との間で
+		 * 不整合を検出した場合
+		 *
+		 * @since 4.3
+		 * </div><div lang="en">
+		 * TODO
+		 *
+		 * @since 4.3
+		 * </div>
+		 */
+		public static <K, R> Container.BindType<
+		K, R, ? extends Collection<K, R>> of(
+				Class<K> keyClass, Class<R> rowClass) throws GSException {
+			return new Container.BindType<K, R, Collection<K, R>>(
+					RowMapper.BindingTool.checkKeyClass(keyClass, rowClass),
+					rowClass, Collection.class);
+		}
+
+		/**
+		 * <div lang="ja">
+		 * ロウキーを持たず、指定のロウオブジェクト型、ならびに、
+		 * {@link Collection}と結びつく{@link Container.BindType}を取得します。
+		 *
+		 * @param <R> ロウオブジェクトの型
+		 * @param rowClass ロウオブジェクトの型に対応するクラスオブジェクト
+		 *
+		 * @throws GSException ロウキーの型と、ロウオブジェクトの型との間で
+		 * 不整合を検出した場合
+		 *
+		 * @since 4.3
+		 * </div><div lang="en">
+		 * TODO
+		 *
+		 * @since 4.3
+		 * </div>
+		 */
+		public static <R> Container.BindType<
+		Void, R, ? extends Collection<Void, R>> noKeyOf(Class<R> rowClass)
+				throws GSException {
+			return of(Void.class, rowClass);
+		}
+
+	}
 
 }

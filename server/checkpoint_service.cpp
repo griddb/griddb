@@ -570,7 +570,9 @@ bool CheckpointService::requestOnlineBackup(
 			}
 		}
 	}
-	if (!makeBackupDirectory(mode, backupPath)) {
+	bool makeSubdir = !((option.incrementalBackupLevel_ == 1) || (option.logDuplicate_ && option.skipBaseline_));
+
+	if (!makeBackupDirectory(mode, makeSubdir, backupPath)) {
 		util::NormalOStringStream oss;
 		oss << "Backup directory can't create (name=" << backupName
 			<< ", path=" << backupPath << ")";
@@ -2089,9 +2091,12 @@ void CheckpointService::runGroupCheckpoint(
 		try {
 			info->newOffsetMap_ = UTIL_NEW CpLongtermSyncOffsetMap;
 			info->readItr_ = info->newOffsetMap_->begin();
+			std::vector<std::string> syncDirList;
+
 			info->syncCpFile_ = UTIL_NEW CheckpointFile(
 					chunkManager_->getConfig().getChunkExpSize(),
-					info->dir_, pgId);
+					info->dir_, pgId, 0, 1,
+					syncDirList);
 			info->syncCpFile_->open();
 
 			uint64_t srcFilePos = 0;
@@ -2183,8 +2188,8 @@ void CheckpointService::runGroupCheckpoint(
 				", cpId=" << cpId << ", backupPath=" << backupPath);
 		backupInfo_.startIncrementalBlockCopy(pgId, mode);
 
+		ChunkManager::ByteArray &buffer = chunkManager_->getPGBackupBuffer(pgId);
 		const uint32_t chunkSize = chunkManager_->getConfig().getChunkSize();
-		util::XArray<uint8_t> buffer(alloc);
 		uint8_t temp = 0;
 		buffer.assign(chunkSize, temp);
 
@@ -2273,8 +2278,7 @@ void CheckpointService::runGroupCheckpoint(
 				checkpointModeToString(mode) << ", pgId=" << pgId <<
 				", cpId=" << cpId << ", backupPath=" << backupPath);
 
-//		uint64_t fileSize = 
-		backupLog(false, pgId, backupPath);
+		uint64_t fileSize = backupLog(false, pgId, backupPath);
 	}
 	pendingPartitionCount_--;
 
@@ -2893,7 +2897,7 @@ void CheckpointOperationHandler::writeChunkMetaDataLog(
 /*!
 	@brief Flushes Log files at fixed intervals.
 */
-void FlushLogPeriodicallyHandler::operator()(EventContext &ec) {
+void FlushLogPeriodicallyHandler::operator()(EventContext &ec, Event &ev) {
 	try {
 		for (uint32_t pgId = 0;
 				 pgId < checkpointService_->getPGConfig().getPartitionGroupCount();
@@ -2901,8 +2905,7 @@ void FlushLogPeriodicallyHandler::operator()(EventContext &ec) {
 			GS_TRACE_INFO(
 					CHECKPOINT_SERVICE_DETAIL, GS_TRACE_CP_FLUSH_LOG,
 					"Flush Log: pgId = " << pgId);
-			logManager_->flushFile(
-					pgId, false);   
+			logManager_->flushFile(pgId, false);
 		}
 	}
 	catch (std::exception &e) {
@@ -2914,13 +2917,24 @@ void FlushLogPeriodicallyHandler::operator()(EventContext &ec) {
 }
 
 bool CheckpointService::makeBackupDirectory(
-	int32_t mode, const std::string &backupPath) {
-	if (mode == CP_BACKUP || mode == CP_BACKUP_START ||
-			mode == CP_INCREMENTAL_BACKUP_LEVEL_0 ||
-			mode == CP_INCREMENTAL_BACKUP_LEVEL_1_CUMULATIVE ||
-			mode == CP_INCREMENTAL_BACKUP_LEVEL_1_DIFFERENTIAL) {
+		int32_t mode, bool makeSubDir,
+		const std::string &backupPath) {
+	if (mode == CP_BACKUP || mode == CP_BACKUP_START) {
 		try {
 			util::FileSystem::createDirectoryTree(backupPath.c_str());
+			if (makeSubDir) {
+				const uint32_t splitCount = chunkManager_->getConfig().getCpFileSplitCount();
+				if (splitCount > 0) {
+					for (uint32_t nth = 0; nth < splitCount; ++nth) {
+						util::NormalOStringStream oss;
+						oss << nth;
+
+						u8string path;
+						util::FileSystem::createPath(backupPath.c_str(), oss.str().c_str(), path);
+						util::FileSystem::createDirectoryTree(path.c_str());
+					}
+				}
+			}
 		}
 		catch (std::exception &) {
 			return false;
@@ -3139,13 +3153,16 @@ void CheckpointService::StatSetUpHandler::operator()(StatTable &stat) {
 }
 
 bool CheckpointService::StatUpdator::operator()(StatTable &stat) {
-	if (!stat.getDisplayOption(STAT_TABLE_DISPLAY_SELECT_CP)) {
-		return true;
-	}
-
 	CheckpointService &svc = *service_;
 	LogManager &logMgr = *svc.logManager_;
 
+	if (stat.getDisplayOption(STAT_TABLE_DISPLAY_SELECT_PERF)) {
+		stat.set(STAT_TABLE_PERF_DS_LOG_FILE_FLUSH_COUNT, logMgr.getFileFlushCount());
+		stat.set(STAT_TABLE_PERF_DS_LOG_FILE_FLUSH_TIME, logMgr.getFileFlushTime());
+	}
+	if (!stat.getDisplayOption(STAT_TABLE_DISPLAY_SELECT_CP)) {
+		return true;
+	}
 	ChunkManager::ChunkManagerStats &cmStats =
 			svc.chunkManager_->getChunkManagerStats();
 	ChunkManager::Config &cmConfig = svc.chunkManager_->getConfig();

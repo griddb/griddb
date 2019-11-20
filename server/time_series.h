@@ -121,6 +121,15 @@ public:
 		setAllocateStrategy();
 		rowArrayCache_ = ALLOC_NEW(txn.getDefaultAllocator())
 			RowArray(txn, this);
+		util::StackAllocator &alloc = txn.getDefaultAllocator();
+		util::Vector<ColumnId> columnIds(alloc);
+		columnIds.push_back(ColumnInfo::ROW_KEY_COLUMN_ID);
+		rowIdFuncInfo_ = ALLOC_NEW(alloc) TreeFuncInfo(alloc);
+		rowIdFuncInfo_->initialize(columnIds, NULL);
+
+		columnIds[0] = UNDEF_COLUMNID;
+		mvccFuncInfo_ = ALLOC_NEW(alloc) TreeFuncInfo(alloc);
+		mvccFuncInfo_->initialize(columnIds, NULL);
 	}
 	TimeSeries(TransactionContext &txn, DataStore *dataStore)
 		: BaseContainer(txn, dataStore), subTimeSeriesListHead_(NULL) {}
@@ -147,6 +156,15 @@ public:
 		rowImageSize_ = calcRowImageSize(rowFixedDataSize_);
 		rowArrayCache_ = ALLOC_NEW(txn.getDefaultAllocator())
 			RowArray(txn, this);
+		util::StackAllocator &alloc = txn.getDefaultAllocator();
+		util::Vector<ColumnId> columnIds(alloc);
+		columnIds.push_back(ColumnInfo::ROW_KEY_COLUMN_ID);
+		rowIdFuncInfo_ = ALLOC_NEW(alloc) TreeFuncInfo(alloc);
+		rowIdFuncInfo_->initialize(columnIds, NULL);
+
+		columnIds[0] = UNDEF_COLUMNID;
+		mvccFuncInfo_ = ALLOC_NEW(alloc) TreeFuncInfo(alloc);
+		mvccFuncInfo_->initialize(columnIds, NULL);
 	}
 
 	~TimeSeries() {
@@ -227,6 +245,13 @@ public:
 	void aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 		uint32_t columnId, AggregationType type, ResultSize &resultNum,
 		Value &value);  
+
+	void aggregateByTimeWindow(TransactionContext &txn,
+		uint32_t columnId, AggregationType type, 
+		Timestamp startTime, Timestamp endTime, const Sampling &sampling, 
+		util::XArray<OId> &oIdList, ResultSize &resultNum,
+		MessageRowStore *messageRowStore);
+
 	void sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 		const Sampling &sampling, ResultSize &resultNum,
 		MessageRowStore *messageRowStore);  
@@ -300,6 +325,13 @@ public:
 		return getExpirationInfo().duration_ != INT64_MAX;
 	}
 
+	ColumnId getRowIdColumnId() {
+		return ColumnInfo::ROW_KEY_COLUMN_ID;
+	}
+	ColumnType getRowIdColumnType() {
+		return COLUMN_TYPE_TIMESTAMP;
+	}
+
 	uint32_t getRealColumnNum(TransactionContext &txn) {
 		return getColumnNum();
 	}
@@ -333,7 +365,6 @@ public:
 	ExpireType getExpireType() const;
 	bool validate(TransactionContext &txn, std::string &errorMessage);
 	std::string dump(TransactionContext &txn);
-
 
 private:  
 	struct OpForSample {
@@ -466,10 +497,17 @@ private:
 	void updateSubTimeSeriesImage(
 		TransactionContext &txn, const SubTimeSeriesInfo &subTimeSeriesInfo);
 
-	bool getIndexData(TransactionContext &txn, ColumnId columnId,
-		MapType mapType, bool withUncommitted, IndexData &indexData) const {
+	bool getIndexData(TransactionContext &txn, const util::Vector<ColumnId> &columnIds,
+		MapType mapType, bool withUncommitted, IndexData &indexData,
+		bool withPartialMatch = false) const {
 		return indexSchema_->getIndexData(
-			txn, columnId, mapType, UNDEF_CONTAINER_POS, withUncommitted, indexData);
+			txn, columnIds, mapType, UNDEF_CONTAINER_POS, withUncommitted, 
+			withPartialMatch, indexData);
+	}
+	bool getIndexData(TransactionContext &txn, IndexCursor &indexCursor,
+		IndexData &indexData) const {
+		return indexSchema_->getIndexData(
+			txn, indexCursor, UNDEF_CONTAINER_POS, indexData);
 	}
 	void createNullIndexData(TransactionContext &txn, IndexData &indexData) {
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_UNEXPECTED_ERROR, "");
@@ -548,6 +586,9 @@ public:
 		indexSchema_ = parent_->indexSchema_;
 		rowArrayCache_ = parent_->rowArrayCache_;
 
+		rowIdFuncInfo_ = parent_->rowIdFuncInfo_;
+		mvccFuncInfo_ = parent_->mvccFuncInfo_;
+
 		if (getExpirationInfo().duration_ == INT64_MAX) {
 			endTime_ = MAX_TIMESTAMP;
 		}
@@ -560,7 +601,10 @@ public:
 		: TimeSeries(txn, parent->getDataStore()),
 		  parent_(parent),
 		  position_(0),
-		  startTime_(0) {}
+		  startTime_(0) {
+		rowIdFuncInfo_ = parent_->rowIdFuncInfo_;
+		mvccFuncInfo_ = parent_->mvccFuncInfo_;
+	}
 	~SubTimeSeries() {
 		commonContainerSchema_ = NULL;
 		columnSchema_ = NULL;
@@ -752,10 +796,17 @@ private:
 
 	void checkExclusive(TransactionContext &) {}
 
-	bool getIndexData(TransactionContext &txn, ColumnId columnId,
-		MapType mapType, bool withUncommitted, IndexData &indexData) const {
+	bool getIndexData(TransactionContext &txn, const util::Vector<ColumnId> &columnIds,
+		MapType mapType, bool withUncommitted, IndexData &indexData,
+		bool withPartialMatch = false) const {
 		return indexSchema_->getIndexData(
-			txn, columnId, mapType, position_, withUncommitted, indexData);
+			txn, columnIds, mapType, position_, withUncommitted, 
+			withPartialMatch, indexData);
+	}
+	bool getIndexData(TransactionContext &txn, IndexCursor &indexCursor,
+		IndexData &indexData) const {
+		return indexSchema_->getIndexData(
+			txn, indexCursor, position_, indexData);
 	}
 	void createNullIndexData(TransactionContext &txn, IndexData &indexData) {
 		indexSchema_->createNullIndexData(txn, position_, indexData, this);

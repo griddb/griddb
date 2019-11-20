@@ -199,8 +199,6 @@ int32_t RtreeMap::getAll(
 	arg.limit = limit;
 	arg.oidList = &idList;
 	arg.size = 0;
-	arg.conditionList = NULL;
-	arg.conditionSize = 0;
 
 	TrIndex_all(
 		txn, *getObjectManager(), rtreeMapImage_->oId_, hitAllCallback, &arg);
@@ -218,7 +216,7 @@ int32_t RtreeMap::getAll(
  * @return void
  */
 int32_t RtreeMap::search(
-	TransactionContext &txn, const void *key, uint32_t, OId &oId) {
+	TransactionContext &txn, const void *key, OId &oId) {
 
 	const Geometry *g = reinterpret_cast<const Geometry *>(key);
 	HitIntersectCallbackArg arg;
@@ -228,8 +226,6 @@ int32_t RtreeMap::search(
 	arg.size = UINT64_MAX;  
 	arg.oidList = NULL;
 	arg.oneOId = UNDEF_OID;
-	arg.conditionList = NULL;
-	arg.conditionSize = 0;
 	TrIndex_search(txn, *getObjectManager(), rtreeMapImage_->oId_,
 		checkCallback, &r, hitIntersectCallback, &arg);
 	oId = arg.oneOId;
@@ -246,56 +242,52 @@ int32_t RtreeMap::search(
 void RtreeMap::search(TransactionContext &txn, RtreeMap::SearchContext &sc,
 	util::XArray<OId> &oidList, OutputOrder outputOrder) {
 
-	if (!sc.valid_) {
+	TermCondition *cond = sc.getKeyCondition();
+	SearchContext::GeomeryCondition *geomCond = 
+		static_cast<SearchContext::GeomeryCondition *>(
+			const_cast<void *>(cond->value_));
+	if (geomCond->valid_) {
 		getAll(txn, sc.limit_, oidList);
 	}
 	else {
-		switch (sc.relation_) {
+		switch (geomCond->relation_) {
 		case GEOMETRY_INTERSECT: {
 			HitIntersectCallbackArg arg;
-			arg.rect = &sc.rect_[0];
+			arg.rect = &(geomCond->rect_[0]);
 			arg.limit = static_cast<ResultSize>(sc.limit_);
 			arg.oidList = &oidList;
 			arg.size = 0;
-			arg.conditionList = sc.conditionList_;
-			arg.conditionSize = sc.conditionNum_;
 			TrIndex_search(txn, *getObjectManager(), rtreeMapImage_->oId_,
 				checkCallback, arg.rect, hitIntersectCallback, &arg);
 			break;
 		}
 		case GEOMETRY_INCLUDE: {
 			HitIncludeCallbackArg arg;
-			arg.rect = &sc.rect_[0];
+			arg.rect = &(geomCond->rect_[0]);
 			arg.limit = static_cast<ResultSize>(sc.limit_);
 			arg.oidList = &oidList;
 			arg.size = 0;
-			arg.conditionList = sc.conditionList_;
-			arg.conditionSize = sc.conditionNum_;
 			TrIndex_search(txn, *getObjectManager(), rtreeMapImage_->oId_,
 				checkCallback, arg.rect, hitIncludeCallback, &arg);
 			break;
 		}
 		case GEOMETRY_DIFFERENTIAL: {
 			HitDifferentialCallbackArg arg;
-			arg.rect1 = &sc.rect_[0];
-			arg.rect2 = &sc.rect_[1];
+			arg.rect1 = &(geomCond->rect_[0]);
+			arg.rect2 = &(geomCond->rect_[1]);
 			arg.limit = static_cast<ResultSize>(sc.limit_);
 			arg.oidList = &oidList;
 			arg.size = 0;
-			arg.conditionList = sc.conditionList_;
-			arg.conditionSize = sc.conditionNum_;
 			TrIndex_search(txn, *getObjectManager(), rtreeMapImage_->oId_,
 				checkCallback, arg.rect1, hitDifferentialCallback, &arg);
 			break;
 		}
 		case GEOMETRY_QSF_INTERSECT: {
 			HitQsfIntersectCallbackArg arg;
-			arg.pkey = &sc.pkey_;
+			arg.pkey = &(geomCond->pkey_);
 			arg.limit = static_cast<ResultSize>(sc.limit_);
 			arg.oidList = &oidList;
 			arg.size = 0;
-			arg.conditionList = sc.conditionList_;
-			arg.conditionSize = sc.conditionNum_;
 			TrIndex_search_quad(txn, *getObjectManager(), rtreeMapImage_->oId_,
 				arg.pkey, hitQsfIntersectCallback, &arg);
 			break;
@@ -486,4 +478,85 @@ int32_t RtreeMap::oIdCmpCallback(
 	TransactionContext &, TrRect, OId oId, void *arg) {
 	OId *p = reinterpret_cast<OId *>(arg);
 	return static_cast<int32_t>(*p == oId);
+}
+
+bool geomOperation(TransactionContext& txn, uint8_t const* p,
+				   uint32_t size1, uint8_t const* q, uint32_t size2) {
+	Geometry *geom = Geometry::deserialize(txn, p, size1);
+	const RtreeMap::SearchContext::GeomeryCondition *geomCond = 
+		reinterpret_cast<const RtreeMap::SearchContext::GeomeryCondition *>(q);
+	assert(geom != NULL);
+
+	bool isMatch = true;
+	switch (geomCond->relation_) {
+	case GEOMETRY_INTERSECT:
+		if (geom->isEmpty()) {
+			isMatch = false;
+		}
+		else {
+			const TrRectTag &a = geomCond->rect_[0];
+			const TrRectTag &b = geom->getBoundingRect();
+			isMatch = ((a.xmin <= b.xmax) && (b.xmin <= a.xmax) &&
+					   ((a.ymin <= b.ymax) && (b.ymin <= a.ymax)) &&
+					   (geom->getDimension() <= 2 ||
+						   ((a.zmin <= b.zmax) && (b.zmin <= a.zmax))));
+		}
+		break;
+	case GEOMETRY_INCLUDE:
+		if (geom->isEmpty()) {
+			isMatch = false;
+		}
+		else {
+			const TrRectTag &out = geomCond->rect_[0];
+			const TrRectTag &in = geom->getBoundingRect();
+			isMatch = (out.xmin <= in.xmin && out.xmax >= in.xmax &&
+					   out.ymin <= in.ymin && out.ymax >= in.ymax &&
+					   (geom->getDimension() <= 2 ||
+						   (out.zmin <= in.zmin && out.zmax >= in.zmax)));
+		}
+		break;
+	case GEOMETRY_DIFFERENTIAL:
+		if (geom->isEmpty()) {
+			isMatch = false;
+		}
+		else {
+			const TrRectTag &a = geomCond->rect_[0];
+			const TrRectTag &a2 = geomCond->rect_[1];
+			const TrRectTag &b = geom->getBoundingRect();
+			bool conditionFlag1 =
+				((a.xmin <= b.xmax) && (b.xmin <= a.xmax) &&
+					((a.ymin <= b.ymax) && (b.ymin <= a.ymax)) &&
+					(geom->getDimension() <= 2 ||
+						((a.zmin <= b.zmax) && (b.zmin <= a.zmax))));
+			bool conditionFlag2 =
+				((a2.xmin <= b.xmax) && (b.xmin <= a2.xmax) &&
+					((a2.ymin <= b.ymax) && (b.ymin <= a2.ymax)) &&
+					(geom->getDimension() <= 2 ||
+						((a2.zmin <= b.zmax) && (b.zmin <= a2.zmax))));
+			isMatch = conditionFlag1 && !conditionFlag2;
+		}
+		break;
+	case GEOMETRY_QSF_INTERSECT:
+
+		if (geom->isEmpty()) {
+			isMatch = false;
+		}
+		else {
+			const TrRectTag r = geom->getBoundingRect();
+			TrPv3Box box;
+			box.p0[0] = r.xmin;
+			box.p0[1] = r.ymin;
+			box.p0[2] = r.zmin;
+			box.p1[0] = r.xmax - r.xmin;
+			box.p1[1] = r.ymax - r.ymin;
+			box.p1[2] = r.zmax - r.zmin;
+			isMatch =
+				(TrPv3Test2(&box, const_cast<TrPv3Key *>(&(geomCond->pkey_))) != 0);
+		}
+		break;
+	default:
+		GS_THROW_USER_ERROR(GS_ERROR_TQ_INTERNAL_GIS_UNKNOWN_RELATIONSHIP,
+			"Invalid relationship of Geometry is specified.");
+	}
+	return isMatch;
 }

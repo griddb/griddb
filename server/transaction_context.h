@@ -114,6 +114,8 @@ struct ClientId {
 			return true;
 		}
 	}
+
+	std::string dump(util::StackAllocator &alloc);
 };
 
 std::ostream &operator<<(std::ostream &stream, const ClientId &id);
@@ -192,6 +194,7 @@ public:
 	double getStoreMemoryAgingSwapRate() const;
 	bool isStoreMemoryAgingSwapRateEnabled() const;
 	static bool isStoreMemoryAgingSwapRateSpecified(double storeMemoryAgingSwapRate);
+	const util::TimeZone &getTimeZone() const;
 
 private:
 	typedef int32_t State;  
@@ -229,9 +232,12 @@ private:
 
 	double storeMemoryAgingSwapRate_;
 
+	util::TimeZone timeZone_;
+
 	TransactionContext(const TransactionContext &txn);
 	void set(const ClientId &clientId, PartitionId pId, ContainerId containerId,
-		int64_t contextExpireTime, int32_t txnTimeoutInterval, double storeMemoryAgingSwapRate);
+		int64_t contextExpireTime, int32_t txnTimeoutInterval, 
+		double storeMemoryAgingSwapRate, const util::TimeZone &timeZone);
 	void clear();
 
 public:
@@ -263,6 +269,7 @@ inline TransactionContext &TransactionContext::operator=(
 	contextExpireTime_ = txn.contextExpireTime_;
 	txnTimeoutInterval_ = txn.txnTimeoutInterval_;
 	storeMemoryAgingSwapRate_ = txn.storeMemoryAgingSwapRate_;
+	timeZone_ = txn.timeZone_;
 	return *this;
 }
 
@@ -358,13 +365,15 @@ inline bool TransactionContext::isCancelRequested() const {
 
 inline void TransactionContext::set(const ClientId &clientId, PartitionId pId,
 	ContainerId containerId, int64_t contextExpireTime,
-	int32_t txnTimeoutInterval, double storeMemoryAgingSwapRate) {
+	int32_t txnTimeoutInterval, double storeMemoryAgingSwapRate,
+	const util::TimeZone &timeZone) {
 	clientId_ = clientId;
 	pId_ = pId;
 	containerId_ = containerId;
 	contextExpireTime_ = contextExpireTime;
 	txnTimeoutInterval_ = txnTimeoutInterval;
 	storeMemoryAgingSwapRate_ = storeMemoryAgingSwapRate;
+	timeZone_ = timeZone;
 }
 
 /*!
@@ -451,6 +460,10 @@ inline bool TransactionContext::isStoreMemoryAgingSwapRateSpecified(
 	return (storeMemoryAgingSwapRate >= 0);
 }
 
+inline const util::TimeZone &TransactionContext::getTimeZone() const {
+	return timeZone_;
+}
+
 inline void TransactionContext::clear() {
 	alloc_ = NULL;
 	clientId_ = TXN_EMPTY_CLIENTID;
@@ -468,6 +481,7 @@ inline void TransactionContext::clear() {
 	contextExpireTime_ = 0;
 	txnTimeoutInterval_ = TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL;
 	storeMemoryAgingSwapRate_ = TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE;
+	timeZone_ = util::TimeZone();
 }
 
 #define TXN_CHECK_NOT_CANCELLED(txn)                                        \

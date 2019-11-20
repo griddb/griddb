@@ -36,7 +36,9 @@
 */
 ObjectManager::ObjectManager(
 	const ConfigTable &configTable, ChunkManager *chunkManager)
-	: PARTITION_NUM_(configTable.getUInt32(CONFIG_TABLE_DS_PARTITION_NUM)),
+	: OBJECT_MAX_CHUNK_ID_(ChunkManager::calcMaxChunkId(
+			configTable.getUInt32(CONFIG_TABLE_DS_STORE_BLOCK_SIZE))),
+	  PARTITION_NUM_(configTable.getUInt32(CONFIG_TABLE_DS_PARTITION_NUM)),
 	  CHUNK_EXP_SIZE_(util::nextPowerBitsOf2(
 		  configTable.getUInt32(CONFIG_TABLE_DS_STORE_BLOCK_SIZE))),
 	  chunkManager_(chunkManager),
@@ -50,6 +52,12 @@ ObjectManager::ObjectManager(
 	  ,
 	  isZeroFill_(configTable.get<int32_t>(CONFIG_TABLE_DS_STORE_COMPRESSION_MODE) == 
 				  0 ? false: true)
+	  , LARGE_CHUNK_MODE_(OIdBitUtils::isLargeChunkMode(CHUNK_EXP_SIZE_))
+	  , UNIT_CHUNK_SHIFT_BIT(calcUnitChunkShiftBit(LARGE_CHUNK_MODE_))
+	  , MAX_UNIT_OFFSET_BIT(calcMaxUnitOffsetBit(LARGE_CHUNK_MODE_))
+	  , MASK_UNIT_OFFSET(
+			(((static_cast<uint64_t>(1) << MAX_UNIT_OFFSET_BIT) - 1) <<
+					UNIT_OFFSET_SHIFT_BIT) | MASK_MAGIC | MASK_USER)
 	{
 	if (CHUNK_EXP_SIZE_ <= 0 || MAX_CHUNK_EXP_SIZE < CHUNK_EXP_SIZE_) {
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_OM_INVALID_CHUNK_EXP_SIZE, "");
@@ -71,7 +79,8 @@ ObjectManager::ObjectManager(
 }
 
 ObjectManager::ObjectManager()
-	: PARTITION_NUM_(1),
+	: OBJECT_MAX_CHUNK_ID_(ChunkManager::calcMaxChunkId(1 << MAX_CHUNK_EXP_SIZE)),
+	  PARTITION_NUM_(1),
 	  CHUNK_EXP_SIZE_(MAX_CHUNK_EXP_SIZE),
 	  chunkManager_(NULL),
 	  objectAllocator_(NULL),
@@ -79,8 +88,13 @@ ObjectManager::ObjectManager()
 		  (1 << (CHUNK_EXP_SIZE_ - 1)) - ObjectAllocator::BLOCK_HEADER_SIZE),
 	  halfOfMaxObjectSize_(
 		  (1 << (CHUNK_EXP_SIZE_ - 2)) - ObjectAllocator::BLOCK_HEADER_SIZE)
-	  ,
-	  isZeroFill_(false)
+	  , isZeroFill_(false)
+	  , LARGE_CHUNK_MODE_(CHUNK_EXP_SIZE_ > 20 ? true : false)
+	  , UNIT_CHUNK_SHIFT_BIT(LARGE_CHUNK_MODE_ ? 38 : 32)
+	  , MAX_UNIT_OFFSET_BIT(LARGE_CHUNK_MODE_ ? 22 : 16)
+	  , MASK_UNIT_OFFSET(
+			(((static_cast<uint64_t>(1) << MAX_UNIT_OFFSET_BIT) - 1) <<
+					UNIT_OFFSET_SHIFT_BIT) | MASK_MAGIC | MASK_USER)
 {}
 
 /*!

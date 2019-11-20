@@ -327,7 +327,7 @@ implements RowSet<R>, Extensibles.AsRowSet<R>, Experimentals.AsRowSet<R> {
 			}
 
 			if (mapper.hasKey()) {
-				lastKey = mapper.resolveKey(null, rowObj);
+				lastKey = mapper.resolveKey(lastKey, rowObj);
 			}
 			else {
 				lastKey = null;
@@ -405,8 +405,8 @@ implements RowSet<R>, Extensibles.AsRowSet<R>, Experimentals.AsRowSet<R> {
 	}
 
 	@Override
-	public Class<R> getRowType() throws GSException {
-		return rowType;
+	public Class<?> getMappingRowType() throws GSException {
+		return mapper.getRowType();
 	}
 
 	@Override
@@ -558,7 +558,7 @@ implements RowSet<R>, Extensibles.AsRowSet<R>, Experimentals.AsRowSet<R> {
 		final Row rowObj = (Row) mapper.decode(resultCursor, true);
 
 		if (mapper.hasKey()) {
-			lastKey = mapper.resolveKey(null, rowObj, true);
+			lastKey = mapper.resolveKey(lastKey, rowObj);
 		}
 		else {
 			lastKey = null;

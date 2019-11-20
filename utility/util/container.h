@@ -35,6 +35,10 @@
 
 #define UTIL_DISABLE_CONTAINER_DEFAULT_CONSTRUCTOR 1
 
+#ifndef UTIL_OBJECT_POOL_NO_CACHE
+#define UTIL_OBJECT_POOL_NO_CACHE UTIL_ALLOCATOR_NO_CACHE
+#endif
+
 namespace util {
 
 namespace detail {
@@ -1643,12 +1647,17 @@ void ObjectPool<T, Mutex>::setTotalElementLimit(size_t limit) {
 
 template<typename T, typename Mutex>
 void ObjectPool<T, Mutex>::setFreeElementLimit(size_t limit) {
+#if UTIL_OBJECT_POOL_NO_CACHE
+	static_cast<void>(limit);
+	clear(freeElementLimit_);
+#else
 	{
 		UTIL_ALLOCATOR_DETAIL_STAT_GUARD(guard, getLock());
 		freeElementLimit_ = limit;
 	}
 
 	clear(limit);
+#endif
 }
 
 template<typename T, typename Mutex>
@@ -1693,11 +1702,17 @@ void ObjectPool<T, Mutex>::getStats(AllocatorStats &stats) {
 template<typename T, typename Mutex>
 void ObjectPool<T, Mutex>::setLimit(AllocatorStats::Type type, size_t value) {
 	switch (type) {
+#if UTIL_OBJECT_POOL_NO_CACHE
+	default:
+		static_cast<void>(value);
+		break;
+#else
 	case AllocatorStats::STAT_CACHE_LIMIT:
 		setFreeElementLimit(value / base_.getElementSize());
 		break;
 	default:
 		break;
+#endif
 	}
 }
 

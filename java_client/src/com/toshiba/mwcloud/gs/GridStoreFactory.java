@@ -249,6 +249,15 @@ public abstract class GridStoreFactory implements Closeable {
 	 * アプリケーション名の指定がなかったものとみなされる。空文字列は指定
 	 * できない。
 	 * バージョン4.2よりサポート</td></tr>
+	 * <tr><td>timeZone</td><td>タイムゾーン情報。
+	 * TQLでのTIMESTAMP値演算などに使用される。
+	 * 「{@code ±hh:mm}」または「{@code ±hhmm}」形式によるオフセット値
+	 * ({@code ±}は{@code +}または{@code -}、{@code hh}は時、
+	 * {@code mm}は分)、 「{@code Z}」({@code +00:00}に相当)、
+	 * 「{@code auto}」(実行環境に応じ自動設定)のいずれかを指定する。
+	 * {@code auto}が使用できるのは夏時間を持たないタイムゾーンに
+	 * 限定される。
+	 * バージョン4.3よりサポート</td></tr>
 	 * </tbody>
 	 * </table>
 	 *
@@ -280,7 +289,7 @@ public abstract class GridStoreFactory implements Closeable {
 	 * @throws NullPointerException {@code properties}に{@code null}が
 	 * 指定された場合
 	 * </div><div lang="en">
-	 * Returns a {@link GridStore} with the specified properties.
+	 * TODO Returns a {@link GridStore} with the specified properties.
 	 *
 	 * <p>When obtaining {@link GridStore}, it just searches for the name of a master node
 	 * (hereafter, a master) administering each {@link Container} as necessary, but

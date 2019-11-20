@@ -1814,6 +1814,7 @@ void MetaProcessor::IndexHandler::execute(
 		builder.set(
 				MetaType::INDEX_TYPE,
 				ValueUtils::makeShort(indexType));
+
 		builder.set(
 				MetaType::INDEX_TYPE_NAME,
 				ValueUtils::makeString(alloc, getMapTypeStr(info.mapType)));
@@ -1904,7 +1905,7 @@ void MetaProcessor::MetaTriggerHandler::execute(
 		bool top = true;
 		uint32_t eventFlags = static_cast<uint32_t>(info.operation_);
 		int32_t eventBit = 0;
-		util::XArray<ColumnId>::iterator columnIt = info.columnIds_.begin();
+		util::Vector<ColumnId>::iterator columnIt = info.columnIds_.begin();
 		for (;;) {
 			bool found = false;
 			util::StackAllocator::Scope allocScope(alloc);
@@ -2034,10 +2035,10 @@ void MetaProcessor::ErasableHandler::execute(
 	const ContainerId containerId = schemaContainer.getContainerId();
 	const PartitionId pId = txn.getPartitionId();
 
-//	BaseContainer *archiveContainer = const_cast<BaseContainer *>(&schemaContainer);
-//	const FullContainerKey &cotainerKey = archiveContainer->getContainerKey(txn);
-//	FullContainerKeyComponents component = cotainerKey.getComponents(alloc);
-//	const ContainerId largeContainerId = component.largeContainerId_;
+	BaseContainer *archiveContainer = const_cast<BaseContainer *>(&schemaContainer);
+	const FullContainerKey &cotainerKey = archiveContainer->getContainerKey(txn);
+	FullContainerKeyComponents component = cotainerKey.getComponents(alloc);
+	const ContainerId largeContainerId = component.largeContainerId_;
 	uint32_t schemaVersionId = schemaContainer.getVersionId();
 	int64_t initSchemaStatus = schemaContainer.getInitSchemaStatus();
 
@@ -2471,12 +2472,12 @@ void MetaContainer::getContainerInfo(
 	}
 
 	{
-		util::XArray<ColumnId> keyColumnIdList(txn.getDefaultAllocator());
+		util::Vector<ColumnId> keyColumnIdList(txn.getDefaultAllocator());
 		getKeyColumnIdList(keyColumnIdList);
 		int16_t rowKeyNum = static_cast<int16_t>(keyColumnIdList.size());
 		containerSchema.push_back(
 				reinterpret_cast<uint8_t *>(&rowKeyNum), sizeof(int16_t));
-		util::XArray<ColumnId>::iterator itr;
+		util::Vector<ColumnId>::iterator itr;
 		for (itr = keyColumnIdList.begin(); itr != keyColumnIdList.end(); itr++) {
 			int16_t rowKeyColumnId = static_cast<int16_t>(*itr);
 			containerSchema.push_back(
@@ -2527,7 +2528,7 @@ uint32_t MetaContainer::getColumnNum() const {
 }
 
 void MetaContainer::getKeyColumnIdList(
-		util::XArray<ColumnId> &keyColumnIdList) {
+		util::Vector<ColumnId> &keyColumnIdList) {
 	static_cast<void>(keyColumnIdList);
 }
 

@@ -49,6 +49,7 @@ UTIL_TRACER_DECLARE(RECOVERY_MANAGER_DETAIL);
 	GS_RETHROW_CUSTOM_ERROR(LogRedoException, GS_ERROR_DEFAULT, cause, message)
 
 
+
 const std::string RecoveryManager::BACKUP_INFO_FILE_NAME("gs_backup_info.json");
 const std::string RecoveryManager::BACKUP_INFO_DIGEST_FILE_NAME(
 	"gs_backup_info_digest.json");
@@ -163,18 +164,42 @@ void RecoveryManager::removeBackupInfoFile() {
 /*!
 	@brief Checks if files exist.
 */
-void RecoveryManager::checkExistingFiles1(ConfigTable &param, bool &createFlag,
-	bool &existBackupInfoFile, bool forceRecoveryFromExistingFiles) {
-	createFlag = false;
-	bool existBackupInfoFile1 = false;
-	bool existBackupInfoFile2 = false;
-	const char8_t *const dbPath =
-		param.get<const char8_t *>(CONFIG_TABLE_DS_DB_PATH);
+void RecoveryManager::checkExistingDbDir(
+		const char8_t *const dbPath, uint32_t splitCount,
+		ConfigTable &param, bool &createFlag, bool &createNew) {
+
+	if (splitCount > 0) {
+		const std::vector<std::string> cpFileDirList =
+				ChunkManager::Config::parseCpFileDirList(param);
+		for (size_t pos = 0; pos < cpFileDirList.size(); ++pos) {
+			const std::string fileDir = cpFileDirList[pos];
+			if (util::FileSystem::exists(fileDir.c_str())) {
+				createNew = false;
+				if (!util::FileSystem::isDirectory(fileDir.c_str())) {
+					GS_THROW_SYSTEM_ERROR(
+						GS_ERROR_CM_IO_ERROR, "Create data directory failed. path=\""
+						<< fileDir.c_str() << "\" is not directory");
+				}
+			}
+			else {
+				try {
+					util::FileSystem::createDirectoryTree(fileDir.c_str());
+				}
+				catch (std::exception &e) {
+					GS_RETHROW_SYSTEM_ERROR(
+						e, "Create data directory failed. (path=\""
+						<< fileDir.c_str() << "\""
+						<< ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+				}
+			}
+		}
+	}
 	if (util::FileSystem::exists(dbPath)) {
+		createNew = false;
 		if (!util::FileSystem::isDirectory(dbPath)) {
 			GS_THROW_SYSTEM_ERROR(
 				GS_ERROR_CM_IO_ERROR, "Create data directory failed. path=\""
-										  << dbPath << "\" is not directory");
+				<< dbPath << "\" is not directory");
 		}
 	}
 	else {
@@ -184,12 +209,154 @@ void RecoveryManager::checkExistingFiles1(ConfigTable &param, bool &createFlag,
 		catch (std::exception &e) {
 			GS_RETHROW_SYSTEM_ERROR(
 				e, "Create data directory failed. (path=\""
-					   << dbPath << "\""
-					   << ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+				<< dbPath << "\""
+				<< ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
 		}
-		createFlag = true;
-		return;
+		if (createNew) {
+			createFlag = true;
+			return;
+		}
 	}
+}
+
+void RecoveryManager::scanExistingFiles(
+		ConfigTable &param, bool &createFlag,
+		bool &existBackupInfoFile, bool forceRecoveryFromExistingFiles,
+		std::vector<std::vector<CheckpointId> > &logFileInfoList,
+		std::vector< std::set<int32_t> > &cpFileInfoList,
+		bool &existBackupInfoFile1, bool &existBackupInfoFile2) {
+
+	const uint32_t partitionGroupNum =
+			param.getUInt32(CONFIG_TABLE_DS_CONCURRENCY);
+
+	const char8_t *const dbPath =
+		param.get<const char8_t *>(CONFIG_TABLE_DS_DB_PATH);
+
+	std::vector<std::string> cpFileDirList =
+			ChunkManager::Config::parseCpFileDirList(param);
+
+	const uint32_t cpFileSplitCount =
+			param.getUInt32(CONFIG_TABLE_DS_DB_FILE_SPLIT_COUNT);
+
+	if (cpFileSplitCount < cpFileDirList.size()) {
+		GS_THROW_SYSTEM_ERROR(
+			GS_ERROR_RM_INVALID_CPFILE_SPLIT_COUNT,
+			"cpFileSplitCount < cpFileDirList.size(): cpFileSplitCount=" <<
+			cpFileSplitCount << ", cpFileDirList.size()=" << cpFileDirList.size());
+	}
+	const bool splitMode = cpFileSplitCount > 0;
+
+	util::Directory dir(dbPath);
+	u8string realDbPath;
+	util::FileSystem::getRealPath(dbPath, realDbPath);
+
+	for (u8string fileName; dir.nextEntry(fileName);) {
+		PartitionGroupId pgId = UNDEF_PARTITIONGROUPID;
+		CheckpointId cpId = UNDEF_CHECKPOINT_ID;
+		int32_t splitId = -1;
+
+		if (LogManager::checkFileName(fileName, pgId, cpId)) {
+			if (pgId >= partitionGroupNum) {
+				GS_THROW_SYSTEM_ERROR(
+						GS_ERROR_RM_PARTITION_GROUP_NUM_NOT_MATCH,
+						"Invalid PartitionGroupId: "
+							<< pgId << ", config partitionGroupNum="
+							<< partitionGroupNum << ", fileName=" << fileName);
+			}
+			logFileInfoList[pgId].push_back(cpId);
+		}
+		else if (CheckpointFile::checkFileName(fileName, pgId, splitId)) {
+			if (pgId >= partitionGroupNum) {
+				GS_THROW_SYSTEM_ERROR(
+						GS_ERROR_RM_PARTITION_GROUP_NUM_NOT_MATCH,
+						"Invalid PartitionGroupId: "
+							<< pgId << ", config partitionGroupNum="
+							<< partitionGroupNum << ", fileName=" << fileName);
+			}
+			if (splitMode) {
+				size_t pos = pgId % cpFileDirList.size();
+				u8string realPath;
+				util::FileSystem::getRealPath(cpFileDirList[pos].c_str(), realPath);
+
+				if (realPath.compare(realDbPath) != 0) {
+					GS_THROW_SYSTEM_ERROR(
+						GS_ERROR_RM_INVALID_FILE_FOUND,
+						"Invalid file found:  fileName=" << fileName);
+				}
+			} else {
+				if (splitId != 1) {
+					GS_THROW_SYSTEM_ERROR(
+						GS_ERROR_RM_INVALID_FILE_FOUND,
+						"Invalid file found:  fileName=" << fileName);
+				}
+			}
+			cpFileInfoList[pgId].insert(splitId);
+		}
+		else if (checkBackupInfoFileName(fileName)) {
+			existBackupInfoFile1 = true;
+		}
+		else if (checkBackupInfoDigestFileName(fileName)) {
+			existBackupInfoFile2 = true;
+		}
+		else {
+			continue;
+		}
+	}
+
+	for (size_t pos = 0; pos < cpFileDirList.size(); ++pos) {
+		util::Directory dir(cpFileDirList[pos].c_str());
+		for (u8string fileName; dir.nextEntry(fileName);) {
+			PartitionGroupId pgId = UNDEF_PARTITIONGROUPID;
+			CheckpointId cpId = UNDEF_CHECKPOINT_ID;
+			int32_t splitId = -1;
+			if (LogManager::checkFileName(fileName, pgId, cpId)) {
+				u8string realPath;
+				util::FileSystem::getRealPath(cpFileDirList[pos].c_str(), realPath);
+				if (realPath.compare(realDbPath) != 0) {
+					GS_THROW_SYSTEM_ERROR(
+						GS_ERROR_RM_INVALID_FILE_FOUND,
+						"Invalid file found " <<
+						": fileName=" << fileName);
+				}
+			}
+			else if (CheckpointFile::checkFileName(fileName, pgId, splitId)) {
+				if (pgId >= partitionGroupNum) {
+					GS_THROW_SYSTEM_ERROR(
+						GS_ERROR_RM_PARTITION_GROUP_NUM_NOT_MATCH,
+						"Invalid PartitionGroupId: " << pgId <<
+						", config partitionGroupNum=" << partitionGroupNum <<
+						", fileName=" << fileName);
+				}
+				if ((splitId % cpFileDirList.size()) != pos) {
+					GS_THROW_SYSTEM_ERROR(
+						GS_ERROR_RM_INVALID_FILE_FOUND,
+						"Invalid filePath: file pgId=" << pgId <<
+						", config cpfileDirList.size()=" << cpFileDirList.size() <<
+						", expected pos=" << (splitId % cpFileDirList.size()) <<
+						", exist pos=" << pos << ", fileName=" << fileName);
+				}
+				cpFileInfoList[pgId].insert(splitId);
+			}
+			else {
+				continue;
+			}
+		}
+	}
+
+}
+
+void RecoveryManager::checkExistingFiles1(ConfigTable &param, bool &createFlag,
+	bool &existBackupInfoFile, bool forceRecoveryFromExistingFiles) {
+	createFlag = false;
+	bool existBackupInfoFile1 = false;
+	bool existBackupInfoFile2 = false;
+	const uint32_t splitCount =
+			param.getUInt32(CONFIG_TABLE_DS_DB_FILE_SPLIT_COUNT);
+	const bool splitMode = splitCount > 0;
+	const char8_t *const dbPath =
+		param.get<const char8_t *>(CONFIG_TABLE_DS_DB_PATH);
+	bool createNew = true;
+	checkExistingDbDir(dbPath, splitCount, param, createFlag, createNew);
 	try {
 		const uint32_t partitionGroupNum =
 			param.getUInt32(CONFIG_TABLE_DS_CONCURRENCY);
@@ -198,42 +365,13 @@ void RecoveryManager::checkExistingFiles1(ConfigTable &param, bool &createFlag,
 
 		std::vector<std::vector<CheckpointId> > logFileInfoList(
 			partitionGroupNum);
-		std::vector<int32_t> cpFileInfoList(partitionGroupNum);
+		std::vector< std::set<int32_t> > cpFileInfoList(partitionGroupNum);
 
-		for (u8string fileName; dir.nextEntry(fileName);) {
-			PartitionGroupId pgId = UNDEF_PARTITIONGROUPID;
-			CheckpointId cpId = UNDEF_CHECKPOINT_ID;
+		scanExistingFiles(param, createFlag,
+				existBackupInfoFile, forceRecoveryFromExistingFiles,
+				logFileInfoList, cpFileInfoList,
+				existBackupInfoFile1, existBackupInfoFile2);
 
-			if (LogManager::checkFileName(fileName, pgId, cpId)) {
-				if (pgId >= partitionGroupNum) {
-					GS_THROW_SYSTEM_ERROR(
-						GS_ERROR_RM_PARTITION_GROUP_NUM_NOT_MATCH,
-						"Invalid PartitionGroupId: "
-							<< pgId << ", config partitionGroupNum="
-							<< partitionGroupNum << ", fileName=" << fileName);
-				}
-				logFileInfoList[pgId].push_back(cpId);
-			}
-			else if (CheckpointFile::checkFileName(fileName, pgId)) {
-				if (pgId >= partitionGroupNum) {
-					GS_THROW_SYSTEM_ERROR(
-						GS_ERROR_RM_PARTITION_GROUP_NUM_NOT_MATCH,
-						"Invalid PartitionGroupId: "
-							<< pgId << ", config partitionGroupNum="
-							<< partitionGroupNum << ", fileName=" << fileName);
-				}
-				cpFileInfoList[pgId] = 1;
-			}
-			else if (checkBackupInfoFileName(fileName)) {
-				existBackupInfoFile1 = true;
-			}
-			else if (checkBackupInfoDigestFileName(fileName)) {
-				existBackupInfoFile2 = true;
-			}
-			else {
-				continue;
-			}
-		}
 		if (existBackupInfoFile1 || existBackupInfoFile2) {
 			if (existBackupInfoFile1 && existBackupInfoFile2) {
 				existBackupInfoFile = true;
@@ -274,7 +412,7 @@ void RecoveryManager::checkExistingFiles1(ConfigTable &param, bool &createFlag,
 		}
 		if (!existLogFile) {
 			for (PartitionGroupId pgId = 0; pgId < partitionGroupNum; ++pgId) {
-				if (cpFileInfoList[pgId] != 0) {
+				if (!cpFileInfoList[pgId].empty()) {
 					GS_THROW_SYSTEM_ERROR(GS_ERROR_RM_CP_FILE_WITH_NO_LOG_FILE,
 						"Checkpoint file is exist, but log files are not "
 						"exist: pgId="
@@ -297,11 +435,14 @@ void RecoveryManager::checkExistingFiles1(ConfigTable &param, bool &createFlag,
 void RecoveryManager::checkExistingFiles2(ConfigTable &param,
 	LogManager &logMgr, bool &createFlag, bool existBackupInfoFile,
 	bool forceRecoveryFromExistingFiles) {
-//	bool existBackupInfoFile1 = false;
-//	bool existBackupInfoFile2 = false;
+	bool existBackupInfoFile1 = false;
+	bool existBackupInfoFile2 = false;
 	if (createFlag) {
 		return;
 	}
+	const uint32_t splitCount =
+			param.getUInt32(CONFIG_TABLE_DS_DB_FILE_SPLIT_COUNT);
+	const bool splitMode = splitCount > 0;
 	const char8_t *const dbPath =
 		param.get<const char8_t *>(CONFIG_TABLE_DS_DB_PATH);
 	try {
@@ -312,42 +453,13 @@ void RecoveryManager::checkExistingFiles2(ConfigTable &param,
 
 		std::vector<std::vector<CheckpointId> > logFileInfoList(
 			partitionGroupNum);
-		std::vector<int32_t> cpFileInfoList(partitionGroupNum);
+		std::vector< std::set<int32_t> > cpFileInfoList(partitionGroupNum);
 
-		for (u8string fileName; dir.nextEntry(fileName);) {
-			PartitionGroupId pgId = UNDEF_PARTITIONGROUPID;
-			CheckpointId cpId = UNDEF_CHECKPOINT_ID;
+		scanExistingFiles(param, createFlag,
+				existBackupInfoFile, forceRecoveryFromExistingFiles,
+				logFileInfoList, cpFileInfoList,
+				existBackupInfoFile1, existBackupInfoFile2);
 
-			if (LogManager::checkFileName(fileName, pgId, cpId)) {
-				if (pgId >= partitionGroupNum) {
-					GS_THROW_SYSTEM_ERROR(
-						GS_ERROR_RM_PARTITION_GROUP_NUM_NOT_MATCH,
-						"Invalid PartitionGroupId: "
-							<< pgId << ", config partitionGroupNum="
-							<< partitionGroupNum << ", fileName=" << fileName);
-				}
-				logFileInfoList[pgId].push_back(cpId);
-			}
-			else if (CheckpointFile::checkFileName(fileName, pgId)) {
-				if (pgId >= partitionGroupNum) {
-					GS_THROW_SYSTEM_ERROR(
-						GS_ERROR_RM_PARTITION_GROUP_NUM_NOT_MATCH,
-						"Invalid PartitionGroupId: "
-							<< pgId << ", config partitionGroupNum="
-							<< partitionGroupNum << ", fileName=" << fileName);
-				}
-				cpFileInfoList[pgId] = 1;
-			}
-			else if (checkBackupInfoFileName(fileName)) {
-//				existBackupInfoFile1 = true;
-			}
-			else if (checkBackupInfoDigestFileName(fileName)) {
-//				existBackupInfoFile2 = true;
-			}
-			else {
-				continue;
-			}
-		}
 		bool existLogFile = false;
 		std::vector<PartitionGroupId> emptyPgIdList;
 		for (PartitionGroupId pgId = 0; pgId < partitionGroupNum; ++pgId) {
@@ -366,7 +478,7 @@ void RecoveryManager::checkExistingFiles2(ConfigTable &param,
 		}
 		if (existLogFile) {
 			for (PartitionGroupId pgId = 0; pgId < partitionGroupNum; ++pgId) {
-				if (cpFileInfoList[pgId] == 0) {
+				if (cpFileInfoList[pgId].empty()) {
 					if (logMgr.getLastCompletedCheckpointId(pgId) !=
 						UNDEF_CHECKPOINT_ID) {
 						if (forceRecoveryFromExistingFiles) {
@@ -391,11 +503,21 @@ void RecoveryManager::checkExistingFiles2(ConfigTable &param,
 						createFlag = true;
 					}
 				}
+				else {
+					for (int32_t splitId = 0; static_cast<uint32_t>(splitId) < splitCount; ++splitId) {
+						if (cpFileInfoList[pgId].find(splitId) == cpFileInfoList[pgId].end()) {
+							GS_THROW_SYSTEM_ERROR(
+								GS_ERROR_RM_INCOMPLETE_CP_FILE,
+								"Checkpoint files are not complete: pgId="
+								<< pgId << ", not found splitId=" << splitId);
+						}
+					}
+				}
 			}
 		}
 		else {
 			for (PartitionGroupId pgId = 0; pgId < partitionGroupNum; ++pgId) {
-				if (cpFileInfoList[pgId] != 0) {
+				if (!cpFileInfoList[pgId].empty()) {
 					GS_THROW_SYSTEM_ERROR(GS_ERROR_RM_CP_FILE_WITH_NO_LOG_FILE,
 						"Checkpoint file is exist, but log files are not "
 						"exist: pgId="
@@ -635,7 +757,7 @@ void RecoveryManager::recovery(util::StackAllocator &alloc, bool existBackup,
 						backupInfo_.getBackupCheckpointFileSize(pgId);
 					bool checkCpFileSize = backupInfo_.getCheckCpFileSizeFlag();
 					if (checkCpFileSize  
-							&& checkpointFileSize != infoCpFileSize) {
+							&& checkpointFileSize < infoCpFileSize) {
 						GS_THROW_SYSTEM_ERROR(GS_ERROR_RM_RECOVERY_FAILED,
 							"Checkpoint file size is wrong. (pgId="
 								<< pgId
@@ -1035,7 +1157,7 @@ void RecoveryManager::reconstructValidBitArray(
 	util::XArray<LogSequentialNumber> redoStartLsn(alloc);
 	redoStartLsn.assign(pgConfig_.getPartitionCount(), 0);
 
-//	const uint32_t traceIntervalMillis = 15000;
+	const uint32_t traceIntervalMillis = 15000;
 	util::Stopwatch traceTimer(util::Stopwatch::STATUS_STARTED);
 
 	LogRecord logRecord;
@@ -1045,7 +1167,7 @@ void RecoveryManager::reconstructValidBitArray(
 	const PartitionId beginPId = pgConfig_.getGroupBeginPartitionId(pgId);
 	const PartitionId endPId = pgConfig_.getGroupEndPartitionId(pgId);
 
-//	uint64_t startTime = util::Stopwatch::currentClock();
+	uint64_t startTime = util::Stopwatch::currentClock();
 	for (uint64_t logCount = 0;; logCount++) {
 		binaryLogRecord.clear();
 		if (!cursor.nextLog(logRecord, binaryLogRecord)) {
@@ -1061,10 +1183,10 @@ void RecoveryManager::reconstructValidBitArray(
 		}
 		const LogSequentialNumber lsn = logRecord.lsn_;
 
-//		const LogSequentialNumber prevLsn =
-//			logMgr_->getLSN(logRecord.partitionId_);
-//		const bool lsnAssignable =
-//			LogManager::isLsnAssignable(static_cast<uint8_t>(logRecord.type_));
+		const LogSequentialNumber prevLsn =
+			logMgr_->getLSN(logRecord.partitionId_);
+		const bool lsnAssignable =
+			LogManager::isLsnAssignable(static_cast<uint8_t>(logRecord.type_));
 
 		if (numAfterDropLogs[pId] > 0) {
 			numAfterDropLogs[pId]++;
@@ -1086,9 +1208,9 @@ void RecoveryManager::reconstructValidBitArray(
 			util::StackAllocator::Scope scope(alloc);
 			LogSequentialNumber nextLsn = logRecord.lsn_;
 
-//			const KeyConstraint containerKeyConstraint =
-//					KeyConstraint::getSystemKeyConstraint(
-//						ds_->getValueLimitConfig().getLimitContainerNameSize());
+			const KeyConstraint containerKeyConstraint =
+					KeyConstraint::getSystemKeyConstraint(
+						ds_->getValueLimitConfig().getLimitContainerNameSize());
 
 			switch (logRecord.type_) {
 				case LogManager::LOG_TYPE_CHECKPOINT_START:
@@ -1620,12 +1742,14 @@ void RecoveryManager::recoveryChunkMetaData(
 			prevChunkKey = chunkKey;
 		}
 	}
+	uint64_t validChunkCount = 0;
 	for (int32_t pos = 0; pos < logRecord.chunkNum_; pos++) {
 		const int32_t chunkId = pos + logRecord.startChunkId_;
 		ChunkKey chunkKey = 0;
 		const uint8_t unoccupiedSize = emptySizeList[pos];
 		const uint64_t filePos = fileOffsetList[pos];
 		if (unoccupiedSize != 0xff) {
+			++validChunkCount;
 			if (isBatchFreeMode) {
 				chunkKey = chunkKeyList[pos];
 			}
@@ -1805,6 +1929,8 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 
 		bool isAllowExpiration = true;
 
+		util::TimeZone timeZone;
+
 		const PartitionGroupId pgId = pgConfig_.getPartitionGroupId(pId);
 		switch (logRecord.type_) {
 		case LogManager::LOG_TYPE_CHECKPOINT_START:
@@ -1887,7 +2013,7 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 				logRecord.stmtId_, logRecord.containerId_,
 				logRecord.txnTimeout_, TransactionManager::PUT,
 				TransactionManager::NO_AUTO_COMMIT_BEGIN_OR_CONTINUE,
-				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE, timeZone);
 			TransactionContext &txn =
 				txnMgr_->put(alloc, pId, logRecord.clientId_, src,
 					stmtStartTime, stmtStartEmTime, REDO, logRecord.txnId_);
@@ -1919,7 +2045,7 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 				logRecord.stmtId_, logRecord.containerId_,
 				logRecord.txnTimeout_, TransactionManager::PUT,
 				TransactionManager::NO_AUTO_COMMIT_BEGIN_OR_CONTINUE,
-				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE, timeZone);
 			TransactionContext &txn =
 				txnMgr_->put(alloc, pId, logRecord.clientId_, src,
 					stmtStartTime, stmtStartEmTime, REDO, logRecord.txnId_);
@@ -1983,7 +2109,7 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 						logRecord.txnContextCreationMode_)),
 				txnMgr_->getTransactionModeForRecovery(
 					logRecord.withBegin_, logRecord.isAutoCommit_),
-				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE, timeZone);
 			GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL, GS_TRACE_RM_REDO_LOG_STATUS,
 				"LOG_TYPE_CREATE_CONTAINER(pId="
 					<< pId << ", lsn=" << logRecord.lsn_
@@ -2046,7 +2172,7 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 				logRecord.stmtId_, logRecord.containerId_,
 				TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL,
 				TransactionManager::AUTO, TransactionManager::AUTO_COMMIT,
-				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE, timeZone);
 			TransactionContext &txn = txnMgr_->put(alloc, pId,
 				TXN_EMPTY_CLIENTID, src, stmtStartTime, stmtStartEmTime, REDO);
 
@@ -2070,7 +2196,7 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 						logRecord.txnContextCreationMode_)),
 				txnMgr_->getTransactionModeForRecovery(
 					logRecord.withBegin_, logRecord.isAutoCommit_),
-				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE, timeZone);
 			GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL, GS_TRACE_RM_REDO_LOG_STATUS,
 				"LOG_TYPE_CREATE_INDEX(pId="
 					<< pId << ", lsn=" << logRecord.lsn_
@@ -2126,7 +2252,7 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 						logRecord.txnContextCreationMode_)),
 				txnMgr_->getTransactionModeForRecovery(
 					logRecord.withBegin_, logRecord.isAutoCommit_),
-				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE, timeZone);
 			GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL, GS_TRACE_RM_REDO_LOG_STATUS,
 				"LOG_TYPE_CREATE_INDEX(pId=" << pId
 					<< ", lsn=" << logRecord.lsn_
@@ -2218,7 +2344,7 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 				logRecord.stmtId_, logRecord.containerId_,
 				TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL,
 				TransactionManager::AUTO, TransactionManager::AUTO_COMMIT,
-				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE, timeZone);
 			TransactionContext &txn = txnMgr_->put(alloc, pId,
 				TXN_EMPTY_CLIENTID, src, stmtStartTime, stmtStartEmTime, REDO);
 
@@ -2263,7 +2389,7 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 				logRecord.stmtId_, logRecord.containerId_,
 				TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL,
 				TransactionManager::AUTO, TransactionManager::AUTO_COMMIT,
-				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE, timeZone);
 			TransactionContext &txn = txnMgr_->put(alloc, pId,
 				TXN_EMPTY_CLIENTID, src, stmtStartTime, stmtStartEmTime, REDO);
 
@@ -2291,7 +2417,7 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 				logRecord.stmtId_, logRecord.containerId_,
 				TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL,
 				TransactionManager::AUTO, TransactionManager::AUTO_COMMIT,
-				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE, timeZone);
 			TransactionContext &txn = txnMgr_->put(alloc, pId,
 				TXN_EMPTY_CLIENTID, src, stmtStartTime, stmtStartEmTime, REDO);
 
@@ -2318,7 +2444,7 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 						logRecord.txnContextCreationMode_)),
 				txnMgr_->getTransactionModeForRecovery(
 					logRecord.withBegin_, logRecord.isAutoCommit_),
-				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE, timeZone);
 			GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL, GS_TRACE_RM_REDO_LOG_STATUS,
 				"LOG_TYPE_PUT_ROW(pId="
 					<< pId << ", lsn=" << logRecord.lsn_
@@ -2390,7 +2516,7 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 						logRecord.txnContextCreationMode_)),
 				txnMgr_->getTransactionModeForRecovery(
 					logRecord.withBegin_, logRecord.isAutoCommit_),
-				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE, timeZone);
 			GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL, GS_TRACE_RM_REDO_LOG_STATUS,
 				"LOG_TYPE_UPDATE_ROW(pId="
 					<< pId << ", lsn=" << logRecord.lsn_
@@ -2451,7 +2577,7 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 						logRecord.txnContextCreationMode_)),
 				txnMgr_->getTransactionModeForRecovery(
 					logRecord.withBegin_, logRecord.isAutoCommit_),
-				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE, timeZone);
 			GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL, GS_TRACE_RM_REDO_LOG_STATUS,
 				"LOG_TYPE_REMOVE_ROW(pId="
 					<< pId << ", lsn=" << logRecord.lsn_
@@ -2509,7 +2635,7 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 						logRecord.txnContextCreationMode_)),
 				txnMgr_->getTransactionModeForRecovery(
 					logRecord.withBegin_, logRecord.isAutoCommit_),
-				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
+				false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE, timeZone);
 			GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL, GS_TRACE_RM_REDO_LOG_STATUS,
 				"LOG_TYPE_LOCK_ROW(pId="
 					<< pId << ", lsn=" << logRecord.lsn_

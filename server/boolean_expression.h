@@ -104,22 +104,22 @@ public:
 	void toAndList(util::XArray<BoolExpr *> &andList);
 
 	static void toSearchContext(TransactionContext &txn,
-		util::XArray<BoolExpr *> &andList, ColumnInfo *indexColumnInfo,
-		QueryForCollection &queryObj, BtreeMap::SearchContext &sc,
+		util::XArray<BoolExpr *> &andList, IndexData *indexData,
+		QueryForCollection &queryObj, BtreeMap::SearchContext *&sc,
 		uint32_t &restEval, ResultSize limit = MAX_RESULT_SIZE);
 	static void toSearchContext(TransactionContext &txn,
-		util::XArray<BoolExpr *> &andList, ColumnInfo *indexColumnInfo,
-		QueryForCollection &queryObj, HashMap::SearchContext &sc,
+		util::XArray<BoolExpr *> &andList, IndexData *indexData,
+		QueryForCollection &queryObj, HashMap::SearchContext *&sc,
 		uint32_t &restEval, ResultSize limit = MAX_RESULT_SIZE);
 	static void toSearchContext(TransactionContext &txn,
-		util::XArray<BoolExpr *> &andList, ColumnInfo *indexColumnInfo,
-		QueryForCollection &queryObj, RtreeMap::SearchContext &sc,
+		util::XArray<BoolExpr *> &andList, IndexData *indexData,
+		QueryForCollection &queryObj, RtreeMap::SearchContext *&sc,
 		uint32_t &restEval, ResultSize limit = MAX_RESULT_SIZE);
 
 	static void toSearchContext(TransactionContext &txn,
 		util::XArray<BoolExpr *> &andList, Timestamp &expireTs,
-		ColumnInfo *indexColumnInfo, QueryForTimeSeries &queryObj,
-		BtreeMap::SearchContext &sc, uint32_t &restEval,
+		IndexData *indexData, QueryForTimeSeries &queryObj,
+		BtreeMap::SearchContext *&sc, uint32_t &restEval,
 		ResultSize limit = MAX_RESULT_SIZE);
 
 	/*!
@@ -136,10 +136,7 @@ public:
 	}
 
 	bool getCondition(TransactionContext &txn, MapType type,
-		uint32_t indexColumnId, Query &queryObj, TermCondition *&cond,
-		const void *&startKey, uint32_t &startKeySize,
-		int32_t &isStartKeyIncluded, const void *&endKey, uint32_t &endKeySize,
-		int32_t &isEndKeyIncluded, NullCondition &nullCond);
+		Query &queryObj, TermCondition *&cond);
 
 	void getIndexBitmapAndInfo(TransactionContext &txn,
 		BaseContainer &baseContainer, Query &queryObj, uint32_t &mapBitmap,

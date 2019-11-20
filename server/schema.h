@@ -332,17 +332,17 @@ struct IndexInfo {
 		extensionOptionFixedPart_(alloc_), extensionOptionVarPart_(alloc_),
 		columnIds_(alloc_),
 		anyNameMatches_(0), anyTypeMatches_(0) {}
-	IndexInfo(util::StackAllocator &alloc, uint32_t columnID, MapType mapTYPE) :
+	IndexInfo(util::StackAllocator &alloc, const util::Vector<uint32_t> &columnIds, MapType mapTYPE) :
 		mapType(mapTYPE), alloc_(alloc),
 		indexName_(alloc_), extensionName_(alloc_),
 		extensionOptionSchema_(alloc_),
 		extensionOptionFixedPart_(alloc_), extensionOptionVarPart_(alloc_),
 		columnIds_(alloc_),
 		anyNameMatches_(0), anyTypeMatches_(0) {
-			columnIds_.push_back(columnID);
+			columnIds_.assign(columnIds.begin(), columnIds.end());
 		}
 	IndexInfo(util::StackAllocator &alloc, const util::String &indexName, 
-		uint32_t columnID, MapType mapTYPE,
+		util::Vector<uint32_t> &columnIds, MapType mapTYPE,
 		uint8_t anyNameMatches = 0, uint8_t anyTypeMatches = 0) :
 		mapType(mapTYPE), alloc_(alloc),
 		indexName_(alloc_), extensionName_(alloc_),
@@ -351,7 +351,7 @@ struct IndexInfo {
 		columnIds_(alloc_),
 		anyNameMatches_(anyNameMatches), anyTypeMatches_(anyTypeMatches) {
 			indexName_ = indexName;
-			columnIds_.push_back(columnID);
+			columnIds_.assign(columnIds.begin(), columnIds.end());
 		}
 	IndexInfo(const IndexInfo &info) :
 		mapType(info.mapType), alloc_(info.alloc_),
@@ -402,6 +402,9 @@ struct IndexInfo {
 		anyTypeMatches_ = info.anyTypeMatches_;
 
 		return *this;
+	}
+	bool isComposite() {
+		return columnIds_.size() > 1;
 	}
 };
 
@@ -519,6 +522,10 @@ public:
 
 	static void setNotNull(uint8_t &flag) {
 		flag |= COLUMN_FLAG_NOT_NULL;
+	}
+
+	void setNotNull() {
+		flags_ |= COLUMN_FLAG_NOT_NULL;
 	}
 	/*!
 		@brief Check if column type is not null
@@ -704,7 +711,7 @@ public:
 	void addHiCompression(uint16_t pos, ColumnId columnId, double threshhold,
 		double rate, double span, bool threshholdRelative);
 	bool isHiCompression(ColumnId columnId) const;
-	void getHiCompressionColumnList(util::XArray<ColumnId> &list) const;
+	void getHiCompressionColumnList(util::Vector<ColumnId> &list) const;
 	void getHiCompressionProperty(ColumnId columnId, double &threshhold,
 		double &rate, double &span, bool &threshholdRelative,
 		uint16_t &compressionPos) const;
@@ -808,7 +815,7 @@ public:
 	util::String name_;
 	util::String uri_;
 	int32_t operation_;
-	util::XArray<ColumnId> columnIds_;
+	util::Vector<ColumnId> columnIds_;
 
 	int32_t jmsProviderType_;
 	util::String jmsProviderTypeName_;
@@ -941,10 +948,19 @@ public:
 	void set(TransactionContext &txn, ObjectManager &objectManager,
 		MessageSchema *collectionSchema, 
 		const AllocateStrategy &allocateStrategy, bool onMemory);
+	void set(util::StackAllocator &alloc,
+		ColumnSchema *srcSchema,
+		const util::Vector<ColumnId> &columnIds);
 	void finalize(TransactionContext &txn, ObjectManager &objectManager);
 
 	uint32_t getColumnNum() const {
 		return columnNum_;
+	}
+
+	uint16_t getRowKeyColumnNum() const {
+		uint16_t *keyNumAddr = reinterpret_cast<uint16_t *>(getRowKeyPtr());
+		uint16_t keyNum = *keyNumAddr;
+		return keyNum;
 	}
 
 	uint32_t getRowFixedColumnSize() const {
@@ -986,7 +1002,7 @@ public:
 		return COLUMN_INFO_OFFSET + (sizeof(ColumnInfo) * columnNum) + 
 			sizeof(uint16_t) + sizeof(uint16_t) * rowKeyNum;
 	}
-	void getKeyColumnIdList(util::XArray<ColumnId> &keyColumnIdList) {
+	void getKeyColumnIdList(util::Vector<ColumnId> &keyColumnIdList) {
 		uint16_t *keyNumAddr = reinterpret_cast<uint16_t *>(getRowKeyPtr());
 		uint16_t keyNum = *keyNumAddr;
 		for (uint16_t i = 0; i <keyNum; i++) {
@@ -1029,9 +1045,10 @@ public:
 		int64_t status = static_cast<int64_t>(orgStatus);
 		return status;
 	}
+	std::string dump(TransactionContext &txn, ObjectManager &objectManager);
 
 private:
-	uint8_t *getRowKeyPtr() {
+	uint8_t *getRowKeyPtr() const {
 		ColumnInfo *columnInfoList = getColumnInfoList();
 		uint8_t *rowKeyPtr = reinterpret_cast<uint8_t *>(
 			columnInfoList + columnNum_);
@@ -1083,23 +1100,21 @@ static const DDLStatus DDL_UNDER_CONSTRUCTION = 1;
 */
 struct IndexData {
 	MapOIds oIds_;
-	ColumnId columnId_;
+	OId optionOId_;
+	util::Vector<ColumnId> *columnIds_;
 	MapType mapType_;
 	DDLStatus status_;
 	RowId cursor_;
-	IndexData() {
+	IndexData(util::StackAllocator &alloc) {
 		oIds_ = UNDEF_MAP_OIDS;
-		columnId_ = UNDEF_COLUMNID;
+		optionOId_ = UNDEF_OID;
+		columnIds_ = ALLOC_NEW(alloc) util::Vector<ColumnId>(alloc);
 		mapType_ = MAP_TYPE_DEFAULT;
 		status_ = DDL_READY;
 		cursor_ = MAX_ROWID;
 	}
-	IndexData(MapOIds oIds, ColumnId columnId, MapType mapType, DDLStatus status, RowId cursor) {
-		oIds_ = oIds;
-		columnId_ = columnId;
-		mapType_ = mapType;
-		status_ = status;
-		cursor_ = cursor;
+	bool isComposite() {
+		return columnIds_->size() > 1;
 	}
 };
 
@@ -1126,15 +1141,17 @@ public:
 	bool createIndexInfo(
 		TransactionContext &txn, const IndexInfo &indexInfo);
 	void dropIndexInfo(
-		TransactionContext &txn, ColumnId columnId, MapType mapType);
-	IndexData createIndexData(TransactionContext &txn, ColumnId columnId,
-		MapType mapType, ColumnType columnType, BaseContainer *container,
-		uint64_t containerPos, bool isUnique);
-	void createDummyIndexData(TransactionContext &txn, ColumnId columnId,
-		MapType mapType, uint64_t containerPos);
-	void dropIndexData(TransactionContext &txn, ColumnId columnId,
+		TransactionContext &txn, util::Vector<ColumnId> &columnIds, MapType mapType);
+	IndexData createIndexData(TransactionContext &txn, 
+		const util::Vector<ColumnId> &columnIds,
+		MapType mapType, const util::Vector<ColumnType> &columnTypes, 
+		BaseContainer *container, uint64_t containerPos, bool isUnique);
+	void createDummyIndexData(TransactionContext &txn, IndexInfo &indexInfo,
+		uint64_t containerPos);
+	void dropIndexData(TransactionContext &txn, util::Vector<ColumnId> &columnIds,
 		MapType mapType, BaseContainer *container, uint64_t containerPos,
 		bool isMapFinalize);
+
 	void dropAll(TransactionContext &txn, BaseContainer *container,
 		uint64_t containerPos, bool isMapFinalize);
 	void finalize(TransactionContext &txn);
@@ -1144,20 +1161,29 @@ public:
 	}
 	void getIndexList(TransactionContext &txn, uint64_t containerPos,
 		bool withUncommitted, util::XArray<IndexData> &list) const;
-	bool getIndexData(TransactionContext &txn, ColumnId columnId,
+	bool getIndexData(TransactionContext &txn, const util::Vector<ColumnId> &columnIds,
 		MapType mapType, uint64_t containerPos, bool withUncommitted, 
-		IndexData &indexData) const;
+		bool withPartialMatch, IndexData &indexData) const;
+	bool getIndexData(TransactionContext &txn, const IndexCursor &indexCursor,
+		uint64_t containerPos, IndexData &indexData) const;
 	void getIndexInfoList(TransactionContext &txn, BaseContainer *container,
 		const IndexInfo &indexInfo, bool withUncommitted, 
 		util::Vector<IndexInfo> &matchList, 
 		util::Vector<IndexInfo> &mismatchList,
-		bool isIndexNameCaseSensitive);
+		bool isIndexNameCaseSensitive,
+		bool withPartialMatch = false);
+	void getIndexDataList(TransactionContext &txn, util::Vector<ColumnId> &columnIds,
+		MapType mapType, bool withUncommitted, 
+		util::Vector<IndexData> &indexDataList, bool withPartialMatch = false);
 	void createNullIndexData(TransactionContext &txn, uint64_t containerPos,
 		IndexData &indexData, BaseContainer *container);
 
 	bool hasIndex(
-		TransactionContext &txn, ColumnId columnId, MapType mapType) const;
+		TransactionContext &txn, util::Vector<ColumnId> &columnIds, 
+		MapType mapType, bool withPartialMatch) const;
 	static bool hasIndex(IndexTypes indexType, MapType mapType);
+	IndexTypes getIndexTypes(TransactionContext &txn, 
+		util::Vector<ColumnId> &columnIds, bool withPartialMatch) const;
 	IndexTypes getIndexTypes(TransactionContext &txn, ColumnId columnId) const;
 
 	BaseIndex *getIndex(
@@ -1165,7 +1191,7 @@ public:
 		BaseContainer *container) const;
 	void updateIndexData(
 		TransactionContext &txn, const IndexData &indexData, uint64_t containerPos);
-	void commit(TransactionContext &txn, ColumnId columnId, MapType mapType);
+	void commit(TransactionContext &txn, IndexCursor &indexCursor);
 	uint8_t *getNullsStats() const {
 		return getBaseAddr() + NULL_STAT_OFFSET;
 	}
@@ -1200,9 +1226,11 @@ private:
 		uint8_t *lowerAddr = getBaseAddr() + NULL_BIT_SIZE_LOWER_OFFSET;
 		*lowerAddr = static_cast<uint8_t>(bitsSize & NULL_BIT_LOWER_FILTER);
 	}
-	static uint32_t getOptionSize(const util::String &name) {
+	static uint32_t getOptionSize(const util::String &name, util::Vector<ColumnId> &columnIds) {
 		size_t offset = ValueProcessor::getEncodedVarSize(name.length());
-		return static_cast<uint32_t>(OPTION_NAME_OFFSET + offset + name.length());
+		size_t columnIdSize = 0;
+		columnIdSize = sizeof(uint16_t) * (columnIds.size() + 1);
+		return static_cast<uint32_t>(OPTION_NAME_OFFSET + offset + name.length() + columnIdSize);
 	}
 
 	/*!
@@ -1246,11 +1274,24 @@ private:
 		return INDEX_DATA_SIZE;
 	}
 
-	uint16_t getNth(ColumnId columnId, MapType mapType) const {
+	uint16_t getNth(TransactionContext &txn, 
+		const util::Vector<ColumnId> &columnIds, MapType mapType, bool withPartialMatch) const {
+		for (uint16_t i = 0; i < getIndexNum(); i++) {
+			uint8_t *indexDataPos = getElemHead() + (getIndexDataSize() * i);
+			if (getMapType(indexDataPos) == mapType && 
+				compareColumnIds(txn, indexDataPos, columnIds, 
+				getOptionOId(indexDataPos), withPartialMatch)) {
+				return i;
+			}
+		}
+		return UNDEF_INDEX_POS;
+	}
+	uint16_t getNth(ColumnId columnId, MapType mapType, OId optionOId) const {
 		for (uint16_t i = 0; i < getIndexNum(); i++) {
 			uint8_t *indexDataPos = getElemHead() + (getIndexDataSize() * i);
 			if (getColumnId(indexDataPos) == columnId &&
-				getMapType(indexDataPos) == mapType) {
+				getMapType(indexDataPos) == mapType &&
+				getOptionOId(indexDataPos) == optionOId) {
 				return i;
 			}
 		}
@@ -1261,8 +1302,16 @@ private:
 		uint64_t containerPos, IndexData &indexData) const {
 		uint8_t *indexDataPos = getElemHead() + (getIndexDataSize() * nth);
 		indexData.oIds_ = getMapOIds(txn, indexDataPos, containerPos);
-		indexData.columnId_ = getColumnId(indexDataPos);
 		indexData.mapType_ = getMapType(indexDataPos);
+		indexData.optionOId_ = getOptionOId(indexDataPos);
+		indexData.columnIds_->clear();
+		if (isComposite(indexDataPos)) {
+			BaseObject option(txn.getPartitionId(), *getObjectManager(),
+				getOptionOId(indexDataPos));
+			getCompositeColumnIds(option.getBaseAddr(), *(indexData.columnIds_));
+		} else {
+			indexData.columnIds_->push_back(getColumnId(indexDataPos));
+		}
 		indexData.status_ = getStatus(indexDataPos);
 		if (indexData.status_!= DDL_READY) {
 			BaseObject option(txn.getPartitionId(), *getObjectManager(),
@@ -1278,17 +1327,20 @@ private:
 		const util::String *name = NULL) {
 		uint8_t *indexDataPos =	getElemHead() + (getIndexDataSize() * nth);
 		setMapOIds(txn, indexDataPos, containerPos, indexData.oIds_);
-		setColumnId(indexDataPos, indexData.columnId_);
-		setMapType(indexDataPos, indexData.mapType_);
+		setMapType(indexDataPos, indexData.mapType_, indexData.isComposite());
+		setColumnId(indexDataPos, indexData.columnIds_->at(0));
 		setStatus(indexDataPos, indexData.status_);
 		if (name != NULL) {
 			OId optionOId;
 			BaseObject option(txn.getPartitionId(), *getObjectManager());
-			uint8_t *optionAddr = option.allocate<uint8_t>(IndexSchema::getOptionSize(*name),
+			uint32_t allocateSize = IndexSchema::getOptionSize(*name, *(indexData.columnIds_));
+			uint8_t *optionAddr = option.allocate<uint8_t>(allocateSize,
 				allocateStrategy_, optionOId, OBJECT_TYPE_COLUMNINFO);
+			memset(optionAddr, 0, allocateSize);
 			setOptionHeader(optionAddr, 0);
 			setRowId(optionAddr, indexData.cursor_);
 			setName(optionAddr, *name);
+			setCompositeColumnIds(optionAddr, *(indexData.columnIds_));
 			setOptionOId(indexDataPos, optionOId);
 		}
 	}
@@ -1296,17 +1348,22 @@ private:
 	void getIndexInfo(TransactionContext &txn, uint16_t nth, 
 		IndexInfo &indexInfo) {
 		uint8_t *indexDataPos = getElemHead() + (getIndexDataSize() * nth);
-		indexInfo.columnIds_.push_back(getColumnId(indexDataPos));
 		indexInfo.mapType = getMapType(indexDataPos);
 		BaseObject option(txn.getPartitionId(), *getObjectManager(),
 			getOptionOId(indexDataPos));
+		if (isComposite(indexDataPos)) {
+			getCompositeColumnIds(option.getBaseAddr(), indexInfo.columnIds_);
+		} else {
+			indexInfo.columnIds_.push_back(getColumnId(indexDataPos));
+		}
 		getName(option.getBaseAddr(), indexInfo.indexName_);
 	}
 
 	void setIndexInfo(TransactionContext &txn, uint16_t nth, 
 		const IndexInfo &indexInfo) {
-		IndexData indexData;
-		indexData.columnId_ = indexInfo.columnIds_[0];
+		IndexData indexData(txn.getDefaultAllocator());
+		indexData.columnIds_->clear();
+		indexData.columnIds_->assign(indexInfo.columnIds_.begin(), indexInfo.columnIds_.end());
 		indexData.mapType_ = indexInfo.mapType;
 		indexData.status_ = DDL_UNDER_CONSTRUCTION;
 		indexData.cursor_ = INITIAL_ROWID;
@@ -1319,7 +1376,11 @@ private:
 	}
 	MapType getMapType(uint8_t *cursor) const {
 		uint8_t type = *(cursor + MAPTYPE_OFFSET);
-		return static_cast<MapType>(type);
+		return static_cast<MapType>(type & MAP_TYPE_MASK);
+	}
+	bool isComposite(uint8_t *cursor) const {
+		uint8_t type = *(cursor + MAPTYPE_OFFSET);
+		return (type & COMPOSITE_FLAG_MASK) != 0;
 	}
 	DDLStatus getStatus(uint8_t *cursor) const {
 		uint8_t type = *(cursor + STATUS_OFFSET);
@@ -1418,13 +1479,29 @@ private:
 			}
 		}
 	}
-
+	bool compareColumnIds(TransactionContext &txn, uint8_t *cursor, 
+		const util::Vector<ColumnId> &columnIds, OId optionOId, bool withPartialMatch) const {
+		bool ret = (getColumnId(cursor) == columnIds[0]);
+		if (ret && (isComposite(cursor) || columnIds.size() > 1)) {
+			BaseObject option(txn.getPartitionId(), *getObjectManager(), optionOId);
+			util::Vector<ColumnId> targetColumnIds(txn.getDefaultAllocator());
+			getCompositeColumnIds(option.getBaseAddr(), targetColumnIds);
+			if (!withPartialMatch) {
+				ret = (columnIds.size() == targetColumnIds.size()) 
+					&& std::equal(columnIds.begin(), columnIds.end(), targetColumnIds.begin());
+			}
+			return ret;
+		} else {
+			return ret;
+		}
+	}
 	void setColumnId(uint8_t *cursor, ColumnId columnId) {
 		*reinterpret_cast<uint16_t *>(cursor + COLUMNID_OFFSET) =
 			static_cast<uint16_t>(columnId);
 	}
-	void setMapType(uint8_t *cursor, MapType mapType) {
-		*(cursor + MAPTYPE_OFFSET) = mapType;
+	void setMapType(uint8_t *cursor, MapType mapType, bool isComposite) {
+		uint8_t value = isComposite ? (COMPOSITE_FLAG_MASK | mapType) : mapType;
+		*(cursor + MAPTYPE_OFFSET) = value;
 	}
 	void setStatus(uint8_t *cursor, DDLStatus status) const {
 		uint8_t *type = cursor + STATUS_OFFSET;
@@ -1452,6 +1529,34 @@ private:
 		memcpy(namePos, &encodedLength, offset);
 		memcpy(namePos + offset, name.c_str(), length);
 	}
+	uint8_t *getCompositeColumnIdsPos(uint8_t *optionCursor) const {
+		uint8_t *namePos = optionCursor + OPTION_NAME_OFFSET;
+		StringCursor strCursor(namePos);
+		uint8_t *columnIdsPos = strCursor.str() + strCursor.stringLength();
+		return columnIdsPos;
+	}
+	void setCompositeColumnIds(uint8_t *optionCursor, const util::Vector<ColumnId> &columnIds) {
+		uint8_t *columnIdsPos = getCompositeColumnIdsPos(optionCursor);
+	    uint16_t *numPos = reinterpret_cast<uint16_t *>(columnIdsPos);
+		*numPos = static_cast<uint16_t>(columnIds.size());
+		if (columnIds.size() > 1) {
+			uint16_t *idPos = ++numPos;
+			for (size_t i = 0; i < columnIds.size(); i++) { 
+				*idPos = static_cast<uint16_t>(columnIds[i]);
+				idPos++;
+			}
+		}
+	}
+	void getCompositeColumnIds(uint8_t *optionCursor, util::Vector<ColumnId> &columnIds) const {
+		uint8_t *columnIdsPos = getCompositeColumnIdsPos(optionCursor);
+	    uint16_t *numPos = reinterpret_cast<uint16_t *>(columnIdsPos);
+		size_t columnNum = static_cast<size_t>(*numPos);
+		uint16_t *idPos = ++numPos;
+		for (size_t i = 0; i < columnNum; i++) { 
+			columnIds.push_back(*idPos);
+			idPos++;
+		}
+	}
 
 	OId getOptionOId(uint8_t *cursor) const {
 		uint8_t *optionOIdPos = cursor + OPTION_OFFSET;
@@ -1469,8 +1574,8 @@ private:
 		util::String &name) const {
 		uint8_t *namePos = optionCursor + OPTION_NAME_OFFSET;
 		StringCursor strCursor(namePos);
-//		char *head = reinterpret_cast<char *>(strCursor.str());
-//		uint32_t length = strCursor.stringLength();
+		char *head = reinterpret_cast<char *>(strCursor.str());
+		uint32_t length = strCursor.stringLength();
 		name.assign(reinterpret_cast<char *>(strCursor.str()), strCursor.stringLength());
 	}
 
@@ -1491,6 +1596,10 @@ private:
 	static const uint32_t OPTION_ROWID_OFFSET = sizeof(uint8_t);
 	static const uint32_t OPTION_NAME_OFFSET = OPTION_ROWID_OFFSET + sizeof(RowId);
 
+	static const uint8_t COMPOSITE_FLAG_MASK = 0x80; 
+	//static const uint8_t MAP_TYPE_MASK = ~COMPOSITE_FLAG_MASK; 
+	static const uint8_t MAP_TYPE_MASK = static_cast<uint8_t>(~COMPOSITE_FLAG_MASK); 
+	
 private:
 	AllocateStrategy allocateStrategy_;
 };
@@ -1616,6 +1725,7 @@ struct BibInfo {
 		std::vector< Column > columnSet_;
 		TimeSeriesProperties timeSeriesProperties_;
 		std::vector< CompressionInfo > compressionInfoSet_;
+		std::vector< std::string > rowKeySet_;
 	};
 	Option option_;
 	std::vector< Container > containers_;

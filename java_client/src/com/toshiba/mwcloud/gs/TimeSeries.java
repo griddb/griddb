@@ -600,4 +600,50 @@ public interface TimeSeries<R> extends Container<Date, R> {
 			Date start, Date end, String column, Aggregation aggregation)
 			throws GSException;
 
+	/**
+	 * <div lang="ja">
+	 * {@link TimeSeries}ならびにその型パラメータと結びつく
+	 * {@link Container.BindType}を構築するための、補助クラスです。
+	 *
+	 * @see Container.BindType
+	 *
+	 * @since 4.3
+	 * </div><div lang="en">
+	 * TODO
+	 *
+	 * @since 4.3
+	 * </div>
+	 */
+	public static class BindType {
+
+		private BindType() {
+		}
+
+		/**
+		 * <div lang="ja">
+		 * 指定のロウオブジェクト型、ならびに、{@link TimeSeries}と結びつく
+		 * {@link Container.BindType}を取得します。
+		 *
+		 * @param <R> ロウオブジェクトの型
+		 * @param rowClass ロウオブジェクトの型に対応するクラスオブジェクト
+		 *
+		 * @throws GSException ロウキーの型と、ロウオブジェクトの型との間で
+		 * 不整合を検出した場合
+		 *
+		 * @since 4.3
+		 * </div><div lang="en">
+		 * TODO
+		 *
+		 * @since 4.3
+		 * </div>
+		 */
+		public static <R> Container.BindType<
+		Date, R, ? extends TimeSeries<R>> of(Class<R> rowClass)
+				throws GSException {
+			return new Container.BindType<Date, R, TimeSeries<R>>(
+					Date.class, rowClass, TimeSeries.class);
+		}
+
+	}
+
 }

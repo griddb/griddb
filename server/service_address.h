@@ -99,7 +99,7 @@ private:
 			util::StdAllocator<
 					std::pair<const String, uint32_t>, void> > TypeMap;
 
-	typedef std::set<
+	typedef std::multiset<
 			util::SocketAddress, std::set<util::SocketAddress>::key_compare,
 			util::StdAllocator<util::SocketAddress, void> > AddressSet;
 	typedef std::vector<Entry, util::StdAllocator<Entry, void> > EntryList;

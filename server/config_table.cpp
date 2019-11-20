@@ -601,6 +601,24 @@ void ParamTable::addDependency(ParamId id, ParamId baseId) {
 	it->second.baseId_ = baseId;
 }
 
+bool ParamTable::isSetParamHandler(ParamId id) {
+	EntryMap::iterator it = entryMap_.find(id);
+	if (it == entryMap_.end()) {
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
+
+	Entry &entry = it->second;
+	if (!entry.referredList_.empty()) {
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
+
+	if (entry.handler_ != NULL) {
+		return true;
+	} else {
+		return false;
+	}
+}
+
 /*!
 	@brief Sets ParamHandler
 */

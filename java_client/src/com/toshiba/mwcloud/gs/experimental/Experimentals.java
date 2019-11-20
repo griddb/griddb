@@ -31,7 +31,7 @@ public class Experimentals {
 
 	public interface StoreProvider {
 
-		public AsStore getExperimentalStore();
+		public AsStore getExperimentalStore() throws GSException;
 
 	}
 
@@ -92,7 +92,7 @@ public class Experimentals {
 
 	}
 
-	public static AsStore get(GridStore store) {
+	public static AsStore get(GridStore store) throws GSException {
 		final StoreProvider provider;
 		try {
 			provider = (StoreProvider) store;

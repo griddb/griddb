@@ -23,8 +23,12 @@ import java.lang.annotation.Target;
 /**
  * <div lang="ja">
  * {@link Container}のキーと対応することを示します。
+ *
+ * <p>複合ロウキーの場合、複合ロウキー全体を一つのオブジェクトとして
+ * 設定・取得するためのフィールド・メソッドに対して使用します。
+ * 複合ロウキーを構成する各ロウフィールドに対しては、使用できません。</p>
  * </div><div lang="en">
- * Indicates the correspondence with a key of {@link Container}.
+ * TODO Indicates the correspondence with a key of {@link Container}.
  * </div>
  */
 @Retention(RetentionPolicy.RUNTIME)

@@ -64,6 +64,56 @@ void BaseContainer::getIndexInfoList(
 	}
 }
 
+void BaseContainer::getIndexInfoList(
+	TransactionContext &txn, MapType mapType, 
+	util::Vector<ColumnId> &columnIds,
+	util::Vector<IndexInfo> &indexInfoList,
+	bool withPartialMatch) {
+	try {
+		bool withUncommitted = false;
+		IndexInfo indexInfo(txn.getDefaultAllocator());
+		indexInfo.mapType = mapType;
+		indexInfo.anyNameMatches_ = 1;
+		indexInfo.columnIds_.clear();
+		indexInfo.columnIds_.assign(columnIds.begin(), columnIds.end()); 
+		indexInfo.anyTypeMatches_ = 0;
+		bool isCaseSensitive = false;
+
+		util::Vector<IndexInfo> mismatchList(txn.getDefaultAllocator());
+		indexSchema_->getIndexInfoList(txn, this, indexInfo, withUncommitted,
+			indexInfoList, mismatchList, isCaseSensitive, withPartialMatch);
+	}
+	catch (std::exception &e) {
+		handleSearchError(txn, e, GS_ERROR_DS_COL_GET_INDEX_INFO_LIST_FAILED);
+	}
+}
+void BaseContainer::getIndexDataList(
+	TransactionContext &txn, MapType mapType, 
+	util::Vector<ColumnId> &columnIds,
+	util::Vector<IndexData> &indexDataList,
+	bool withPartialMatch) {
+	try {
+		bool withUncommitted = false;
+		indexSchema_->getIndexDataList(txn, columnIds, mapType, 
+			withUncommitted, indexDataList, withPartialMatch);
+	}
+	catch (std::exception &e) {
+		handleSearchError(txn, e, GS_ERROR_DS_COL_GET_INDEX_INFO_LIST_FAILED);
+	}
+}
+bool BaseContainer::checkRowKeySchema(util::XArray<ColumnType> &columnTypeList) {
+	if (columnTypeList.size() != getRowKeyColumnNum()) {
+		return false;
+	}
+	for (size_t i = 0; i < columnTypeList.size(); i++) {
+		ColumnInfo &columnInfo = getColumnInfo(static_cast<ColumnId>(i));
+		if (columnInfo.getColumnType() != columnTypeList[i]) {
+			return false;
+		}
+	}
+	return true;
+}
+
 /*!
 	@brief Get Container Schema
 */
@@ -80,12 +130,12 @@ void BaseContainer::getContainerInfo(TransactionContext &txn,
 		}
 
 		{
-			util::XArray<ColumnId> keyColumnIdList(txn.getDefaultAllocator());
+			util::Vector<ColumnId> keyColumnIdList(txn.getDefaultAllocator());
 			getKeyColumnIdList(keyColumnIdList);
 			int16_t rowKeyNum = static_cast<int16_t>(keyColumnIdList.size());
 			containerSchema.push_back(
 				reinterpret_cast<uint8_t *>(&rowKeyNum), sizeof(int16_t));
-			util::XArray<ColumnId>::iterator itr;
+			util::Vector<ColumnId>::iterator itr;
 			for (itr = keyColumnIdList.begin(); itr != keyColumnIdList.end(); itr++) {
 				int16_t rowKeyColumnId = static_cast<int16_t>(*itr);
 				containerSchema.push_back(
@@ -147,8 +197,9 @@ IndexCursor BaseContainer::getIndexCursor(TransactionContext& txn) {
 		if (baseContainerImage_->mvccMapOId_ != UNDEF_OID) {
 			StackAllocAutoPtr<BtreeMap> mvccMap(
 				txn.getDefaultAllocator(), getMvccMap(txn));
-			BtreeMap::SearchContext sc(
-				UNDEF_COLUMNID, &tId, sizeof(tId), 0, NULL, MAX_RESULT_SIZE);
+			TermCondition cond(COLUMN_TYPE_LONG, COLUMN_TYPE_LONG, 
+				DSExpression::EQ, UNDEF_COLUMNID, &tId, sizeof(tId));
+			BtreeMap::SearchContext sc(txn.getDefaultAllocator(), cond, MAX_RESULT_SIZE);
 			mvccMap.get()->search<TransactionId, MvccRowImage, MvccRowImage>(
 				txn, sc, mvccList);
 		}
@@ -194,8 +245,9 @@ ContainerCursor BaseContainer::getContainerCursor(TransactionContext& txn) {
 		if (baseContainerImage_->mvccMapOId_ != UNDEF_OID) {
 			StackAllocAutoPtr<BtreeMap> mvccMap(
 				txn.getDefaultAllocator(), getMvccMap(txn));
-			BtreeMap::SearchContext sc(
-				UNDEF_COLUMNID, &tId, sizeof(tId), 0, NULL, MAX_RESULT_SIZE);
+			TermCondition cond(COLUMN_TYPE_LONG, COLUMN_TYPE_LONG, 
+				DSExpression::EQ, UNDEF_COLUMNID, &tId, sizeof(tId));
+			BtreeMap::SearchContext sc(txn.getDefaultAllocator(), cond, MAX_RESULT_SIZE);
 			mvccMap.get()->search<TransactionId, MvccRowImage, MvccRowImage>(
 				txn, sc, mvccList);
 		}
@@ -558,7 +610,7 @@ void BaseContainer::searchColumnIdIndex(TransactionContext &txn, MapType mapType
 
 	if (!mvccRowList.empty() && outputOrder != ORDER_UNDEFINED) {
 		util::XArray<OId> mergeList(txn.getDefaultAllocator());
-		ColumnInfo &targetColumnInfo = getColumnInfo(sc.columnId_);
+		ColumnInfo &targetColumnInfo = getColumnInfo(sc.getScColumnId());
 		mergeRowList<R>(txn, targetColumnInfo, mvccRowList, false, normalRowList,
 			true, resultList, outputOrder);
 	}
@@ -577,11 +629,6 @@ void BaseContainer::searchColumnIdIndex(TransactionContext &txn, MapType mapType
 	typename T::SearchContext &sc, util::XArray<OId> &normalRowList, 
 	util::XArray<OId> &mvccRowList, OutputOrder outputOrder, bool ignoreTxnCheck) {
 
-	const Operator *op1, *op2;
-	bool isValid = getKeyCondition(txn, sc, op1, op2);
-	if (!isValid) {
-		return;
-	}
 
 	{
 		ResultSize limitBackup = sc.limit_;
@@ -602,21 +649,24 @@ void BaseContainer::searchColumnIdIndex(TransactionContext &txn, MapType mapType
 	{
 		util::XArray<OId> oIdList(txn.getDefaultAllocator());
 		ResultSize limitBackup = sc.limit_;
-		if (sc.conditionNum_ > 0 || !isExclusive()) {
+		if (sc.getRestConditionNum() > 0 || !isExclusive()) {
 			sc.limit_ = MAX_RESULT_SIZE;
 		} else {
 			sc.limit_ -= mvccRowList.size();
 		}
 		bool withUncommitted = false;
-		IndexData indexData;
-		getIndexData(txn, sc.columnId_, mapType, withUncommitted, indexData);
+		const util::Vector<ColumnId> &columnIds = sc.getColumnIds();
+		IndexData indexData(txn.getDefaultAllocator());
+		getIndexData(txn, columnIds, mapType, withUncommitted, indexData);
 		ValueMap valueMap(txn, this, indexData);
 		valueMap.search<T>(txn, sc, oIdList, outputOrder);
 		sc.limit_ = limitBackup;
 
 		ContainerValue containerValue(txn.getPartitionId(), *getObjectManager());
 		util::XArray<OId>::iterator itr;
-		if (sc.conditionNum_ > 0 || (!isExclusive() && !ignoreTxnCheck)) {
+		if (sc.getRestConditionNum() > 0 || (!isExclusive() && !ignoreTxnCheck)) {
+			util::Vector<TermCondition> condList(txn.getDefaultAllocator());
+			sc.getConditionList(condList, BaseIndex::SearchContext::COND_OTHER);
 			RowArray rowArray(txn, reinterpret_cast<R *>(this));
 			for (itr = oIdList.begin(); itr != oIdList.end(); itr++) {
 				rowArray.load(
@@ -629,8 +679,9 @@ void BaseContainer::searchColumnIdIndex(TransactionContext &txn, MapType mapType
 					continue;
 				}
 				bool isMatch = true;
-				for (uint32_t c = 0; c < sc.conditionNum_; c++) {
-					if (!row.isMatch(txn, sc.conditionList_[c], containerValue)) {
+				util::Vector<TermCondition>::iterator condItr;
+				for (condItr = condList.begin(); condItr != condList.end(); condItr++) {
+					if (!row.isMatch(txn, *condItr, containerValue)) {
 						isMatch = false;
 						break;
 					}
@@ -826,6 +877,109 @@ BaseContainer::RowArray *BaseContainer::getCacheRowArray(TransactionContext &txn
 	return rowArrayCache_;
 }
 
+uint32_t BaseContainer::getRowKeyFixedDataSize(util::StackAllocator &alloc) const {
+	util::Vector<ColumnId> columnIds(alloc);
+	for (ColumnId i = 0; i < getRowKeyColumnNum(); i++) {
+		columnIds.push_back(i);
+	}
+	TreeFuncInfo funcInfo(alloc);
+	funcInfo.initialize(columnIds, columnSchema_);
+
+	ColumnSchema *rowKeySchema = funcInfo.getColumnSchema();
+	uint32_t rowFixedDataSize =
+		ValueProcessor::calcNullsByteSize(rowKeySchema->getColumnNum()) +
+		rowKeySchema->getRowFixedColumnSize();
+	if (rowKeySchema->getVariableColumnNum()) {
+		rowFixedDataSize += sizeof(OId);
+	}
+	return rowFixedDataSize;
+}
+
+void BaseContainer::getFields(TransactionContext &txn, 
+	MessageRowStore* messageRowStore, 
+	util::Vector<ColumnId> &columnIdList, util::XArray<KeyData> &fields) {
+	for (util::Vector<ColumnId>::iterator itr = columnIdList.begin();
+		itr != columnIdList.end(); itr++) {
+		ColumnInfo &columnInfo = getColumnInfo(*itr);
+		const uint8_t* data = NULL;
+		uint32_t size = 0;
+		if (!messageRowStore->isNullValue(columnInfo.getColumnId())) {
+			messageRowStore->getField(columnInfo.getColumnId(), data, size);
+			if (columnInfo.isVariable()) {
+				uint32_t encodeSize = ValueProcessor::getEncodedVarSize(data);
+				uint32_t varSize = ValueProcessor::decodeVarSize(data);
+				data = const_cast<uint8_t *>(data) + encodeSize;
+				size = varSize;
+			}
+		}
+		KeyData keyData(data, size);
+		fields.push_back(keyData);
+	}
+}
+
+ColumnInfo *BaseContainer::getRowKeyColumnInfoList(TransactionContext &txn) {
+	if (getRowKeyColumnNum() > 1) {
+		util::StackAllocator &alloc = txn.getDefaultAllocator();
+
+		util::Vector<ColumnId> keyColumnIdList(alloc);
+		getKeyColumnIdList(keyColumnIdList);
+
+		TreeFuncInfo *funcInfo = ALLOC_NEW(alloc) TreeFuncInfo(alloc);
+		funcInfo->initialize(keyColumnIdList, columnSchema_, false);
+		return funcInfo->getColumnSchema()->getColumnInfoList();
+	} else {
+		return getColumnInfoList();
+	}
+}
+
+void BaseContainer::getRowKeyFields(TransactionContext &txn, uint32_t rowKeySize, const uint8_t *rowKey, util::XArray<KeyData> &fields) {
+	if (getRowKeyColumnNum() > 1) {
+		const bool VALIDATE_ROW_IMAGE = true;
+		InputMessageRowStore inputMessageRowStore(
+			getDataStore()->getValueLimitConfig(), getRowKeyColumnInfoList(txn),
+			getRowKeyColumnNum(),
+			const_cast<uint8_t *>(rowKey),
+			rowKeySize, 
+			1, getRowKeyFixedDataSize(txn.getDefaultAllocator()), 
+			VALIDATE_ROW_IMAGE);
+		for (ColumnId i = 0; i < getRowKeyColumnNum(); i++) {
+			ColumnInfo &columnInfo = getColumnInfo(i);
+			const uint8_t *data;
+			uint32_t size;
+			inputMessageRowStore.getField(i, data, size);
+			if (columnInfo.isVariable()) {
+				uint32_t encodeSize = ValueProcessor::getEncodedVarSize(data);
+				uint32_t varSize = ValueProcessor::decodeVarSize(data);
+				data = const_cast<uint8_t *>(data) + encodeSize;
+				size = varSize;
+			}
+			KeyData keyData(data, size);
+			fields.push_back(keyData);
+		}
+	} else {
+		ColumnInfo &columnInfo = getColumnInfo(ColumnInfo::ROW_KEY_COLUMN_ID);
+		if (columnInfo.getColumnType() == COLUMN_TYPE_STRING) {
+			StringCursor stringCusor(const_cast<uint8_t *>(rowKey));
+			rowKey = stringCusor.str();
+			rowKeySize = stringCusor.stringLength();
+			if (rowKeySize >
+				getDataStore()->getValueLimitConfig()
+					.getLimitSmallSize()) {  
+				GS_THROW_USER_ERROR(GS_ERROR_QP_ROW_KEY_INVALID, "");
+			}
+		}
+		else if (columnInfo.getColumnType() == COLUMN_TYPE_TIMESTAMP) {
+			if (!ValueProcessor::validateTimestamp(
+					*reinterpret_cast<const Timestamp *>(rowKey))) {
+				GS_THROW_USER_ERROR(GS_ERROR_QP_TIMESTAMP_RANGE_INVALID,
+					"Timestamp of rowKey out of range (rowKey=" << rowKey
+																<< ")");
+			}
+		}
+		KeyData keyData(rowKey, rowKeySize);
+		fields.push_back(keyData);
+	}
+}
 /*!
 	@brief Handle Exception of update phase
 */
@@ -975,9 +1129,9 @@ void BaseContainer::makeCopyColumnMap(TransactionContext &txn,
 	uint32_t posMatchCount = 0;
 	uint32_t columnNum = messageSchema->getColumnCount();
 
-	util::XArray<ColumnId> keyColumnIdList(txn.getDefaultAllocator());
+	util::Vector<ColumnId> keyColumnIdList(txn.getDefaultAllocator());
 	getKeyColumnIdList(keyColumnIdList);
-	const util::XArray<ColumnId> &schemaKeyColumnIdList =  messageSchema->getRowKeyColumnIdList();
+	const util::Vector<ColumnId> &schemaKeyColumnIdList =  messageSchema->getRowKeyColumnIdList();
 	if (keyColumnIdList.size() != schemaKeyColumnIdList.size()) {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_CHANGE_INVALID,
 			"RowKey of new schema does not match RowKey of current schema");
@@ -1014,7 +1168,7 @@ void BaseContainer::makeCopyColumnMap(TransactionContext &txn,
 		const util::String &newColumnName = messageSchema->getColumnName(i);
 		ColumnType columnType = messageSchema->getColumnType(i);
 		bool isArray = messageSchema->getIsArray(i);
-//		bool isNotNull = messageSchema->getIsNotNull(i);
+		bool isNotNull = messageSchema->getIsNotNull(i);
 
 		bool isMatch = false;
 		util::Map<const char *, ColumnId, CompareCharI>::iterator columnItr;
@@ -1154,8 +1308,9 @@ void BaseContainer::setCreateRowId(TransactionContext &txn, RowId rowId) {
 	if (!mvccMap.get()->isEmpty()) {
 		util::XArray<MvccRowImage> mvccList(txn.getDefaultAllocator());
 		util::XArray<MvccRowImage>::iterator itr;
-		BtreeMap::SearchContext sc(
-			UNDEF_COLUMNID, &tId, sizeof(tId), 0, NULL, MAX_RESULT_SIZE);
+		TermCondition cond(COLUMN_TYPE_LONG, COLUMN_TYPE_LONG, 
+			DSExpression::EQ, UNDEF_COLUMNID, &tId, sizeof(tId));
+		BtreeMap::SearchContext sc(txn.getDefaultAllocator(), cond, MAX_RESULT_SIZE);
 		mvccMap.get()->search<TransactionId, MvccRowImage, MvccRowImage>(
 			txn, sc, mvccList);
 		if (!mvccList.empty()) {
@@ -1180,29 +1335,37 @@ void BaseContainer::setCreateRowId(TransactionContext &txn, RowId rowId) {
 }
 
 bool BaseContainer::isSupportIndex(const IndexInfo &indexInfo) const {
-	ColumnId inputColumnId = indexInfo.columnIds_[0];
 	MapType inputMapType = indexInfo.mapType;
-
-	ColumnInfo &columnInfo = getColumnInfo(inputColumnId);
-	if (columnInfo.isArray()) {
-		return false;
-	}
 	if (inputMapType < 0 || inputMapType >= MAP_TYPE_NUM) {
 		return false;
 	}
-	bool isSuport;
-	switch (getContainerType()) {
-	case COLLECTION_CONTAINER:
-		isSuport = Collection::indexMapTable[columnInfo.getColumnType()]
-											[inputMapType];
-		break;
-	case TIME_SERIES_CONTAINER:
-		isSuport = TimeSeries::indexMapTable[columnInfo.getColumnType()]
-											[inputMapType];
-		break;
-	default:
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
-		break;
+	if (indexInfo.columnIds_.size() > 1 && inputMapType != MAP_TYPE_BTREE) {
+		return false;
+	}
+	bool isSuport = true;
+	for (size_t i = 0; i < indexInfo.columnIds_.size(); i++) {
+		ColumnId inputColumnId = indexInfo.columnIds_[i];
+
+		ColumnInfo &columnInfo = getColumnInfo(inputColumnId);
+		if (columnInfo.isArray()) {
+			return false;
+		}
+		switch (getContainerType()) {
+		case COLLECTION_CONTAINER:
+			isSuport = Collection::indexMapTable[columnInfo.getColumnType()]
+												[inputMapType];
+			break;
+		case TIME_SERIES_CONTAINER:
+			isSuport = TimeSeries::indexMapTable[columnInfo.getColumnType()]
+												[inputMapType];
+			break;
+		default:
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
+			break;
+		}
+		if (!isSuport) {
+			break;
+		}
 	}
 	if (isSuport) {
 		return true;
@@ -1227,9 +1390,10 @@ void BaseContainer::indexInsertImpl(
 		ResultSize limit = (IndexCursor::getNum() / getNormalRowArrayNum() <= 2) ?
 			2 : (IndexCursor::getNum() / getNormalRowArrayNum());
 
-		ColumnInfo &columnInfo = getColumnInfo(indexData.columnId_);
-		BtreeMap::SearchContext sc(UNDEF_COLUMNID, &indexData.cursor_, 0, false,
-			NULL, 0, false, 0, NULL, limit);
+		TermCondition cond(getRowIdColumnType(), getRowIdColumnType(), 
+			DSExpression::GT, getRowIdColumnId(), &indexData.cursor_,
+			sizeof(indexData.cursor_));
+		BtreeMap::SearchContext sc(txn.getDefaultAllocator(), cond, limit);
 
 		util::XArray<OId> oIdList(txn.getDefaultAllocator());
 		util::XArray<OId>::iterator itr;
@@ -1245,14 +1409,9 @@ void BaseContainer::indexInsertImpl(
 				if (indexData.cursor_ >= row.getRowId()) {
 					continue;
 				}
-				bool isNullValue = row.isNullValue(columnInfo);
-				BaseObject baseFieldObject(
-					txn.getPartitionId(), *getObjectManager());
-				const void *fieldValue = &NULL_VALUE;
-				if (!isNullValue) {
-					row.getField(txn, columnInfo, baseFieldObject);
-					fieldValue = baseFieldObject.getCursor<void>();
-				}
+				bool isNullValue;
+				const void *fieldValue = row.getFields<R>(txn, 
+					valueMap.getFuncInfo(txn), isNullValue);
 				insertValueMap(txn, valueMap, fieldValue, rowArray.getOId(),
 					isNullValue);
 				lastRowId = row.getRowId();
@@ -1263,7 +1422,6 @@ void BaseContainer::indexInsertImpl(
 			indexData.cursor_ = MAX_ROWID;
 		}
 	} else {
-		ColumnInfo &columnInfo = getColumnInfo(indexData.columnId_);
 		BtreeMap::BtreeCursor btreeCursor;
 		RowArray rowArray(txn, this);
 		while (1) {
@@ -1279,14 +1437,9 @@ void BaseContainer::indexInsertImpl(
 				ValueMap valueMap(txn, this, indexData);
 				for (rowArray.begin(); !rowArray.end(); rowArray.next()) {
 					RowArray::Row row(rowArray.getRow(), &rowArray);
-					bool isNullValue = row.isNullValue(columnInfo);
-					BaseObject baseFieldObject(
-						txn.getPartitionId(), *getObjectManager());
-					const void *fieldValue = &NULL_VALUE;
-					if (!isNullValue) {
-						row.getField(txn, columnInfo, baseFieldObject);
-						fieldValue = baseFieldObject.getCursor<void>();
-					}
+					bool isNullValue;
+					const void *fieldValue = row.getFields<R>(txn, 
+						valueMap.getFuncInfo(txn), isNullValue);
 					insertValueMap(txn, valueMap, fieldValue, rowArray.getOId(),
 						isNullValue);
 				}
@@ -1300,126 +1453,6 @@ void BaseContainer::indexInsertImpl(
 	}
 }
 
-bool BaseContainer::getKeyCondition(TransactionContext &txn,
-	BtreeMap::SearchContext &sc, const Operator *&op1,
-	const Operator *&op2) const {
-	op1 = NULL;
-	op2 = NULL;
-	bool isValid = true;
-
-	if (sc.nullCond_ != BaseIndex::SearchContext::NOT_IS_NULL) {
-	} else
-	if (sc.startKey_ != NULL || sc.endKey_ != NULL) {
-		if (sc.columnId_ >= getColumnNum() && sc.columnId_ != UNDEF_COLUMNID) {
-			GS_THROW_USER_ERROR(GS_ERROR_DS_COLUMN_ID_INVALID, "");
-		}
-		ColumnType targetType;
-		if (sc.columnId_ != UNDEF_COLUMNID) {
-			ColumnInfo &columnInfo = getColumnInfo(sc.columnId_);
-			targetType = columnInfo.getColumnType();
-		}
-		else {
-			targetType = COLUMN_TYPE_ROWID;
-		}
-		if (ComparatorTable::eqTable_[targetType][targetType] == NULL) {
-			GS_THROW_USER_ERROR(GS_ERROR_TQ_INTERNAL_DATA_CANNOT_COMPARE, "");
-		}
-		if (sc.startKey_ != NULL && sc.endKey_ != NULL) {
-			if (ComparatorTable::eqTable_[targetType][targetType](txn,
-					reinterpret_cast<const uint8_t *>(sc.startKey_),
-					sc.startKeySize_,
-					reinterpret_cast<const uint8_t *>(sc.endKey_),
-					sc.endKeySize_)) {
-				if (!sc.isStartKeyIncluded_ && !sc.isEndKeyIncluded_) {
-					isValid = false;
-				}
-				op1 = &ComparatorTable::eqTable_[targetType][targetType];
-			}
-			else {
-				if (sc.isStartKeyIncluded_) {
-					op1 = &ComparatorTable::geTable_[targetType][targetType];
-				}
-				else {
-					op1 = &ComparatorTable::gtTable_[targetType][targetType];
-				}
-				if (sc.isEndKeyIncluded_) {
-					op2 = &ComparatorTable::leTable_[targetType][targetType];
-				}
-				else {
-					op2 = &ComparatorTable::ltTable_[targetType][targetType];
-				}
-				if ((*op1)(txn, reinterpret_cast<const uint8_t *>(sc.startKey_),
-						sc.startKeySize_,
-						reinterpret_cast<const uint8_t *>(sc.endKey_),
-						sc.endKeySize_)) {
-					isValid = false;
-				}
-			}
-		}
-		else if (sc.startKey_ != NULL) {
-			if (sc.isStartKeyIncluded_) {
-				op1 = &ComparatorTable::geTable_[targetType][targetType];
-			}
-			else {
-				op1 = &ComparatorTable::gtTable_[targetType][targetType];
-			}
-			if (*op1 == NULL) {
-				GS_THROW_USER_ERROR(
-					GS_ERROR_TQ_INTERNAL_DATA_CANNOT_COMPARE, "");
-			}
-		}
-		else if (sc.endKey_ != NULL) {
-			if (sc.isEndKeyIncluded_) {
-				op2 = &ComparatorTable::leTable_[targetType][targetType];
-			}
-			else {
-				op2 = &ComparatorTable::ltTable_[targetType][targetType];
-			}
-			if (*op2 == NULL) {
-				GS_THROW_USER_ERROR(
-					GS_ERROR_TQ_INTERNAL_DATA_CANNOT_COMPARE, "");
-			}
-		}
-	}
-	return isValid;
-}
-
-bool BaseContainer::getKeyCondition(TransactionContext &,
-	HashMap::SearchContext &sc, const Operator *&op1,
-	const Operator *&op2) const {
-	op1 = NULL;
-	op2 = NULL;
-	bool isValid = true;
-	if (sc.nullCond_ != BaseIndex::SearchContext::NOT_IS_NULL) {
-	} else
-	if (sc.key_ != NULL) {
-		if (sc.columnId_ >= getColumnNum() && sc.columnId_ != UNDEF_COLUMNID) {
-			GS_THROW_USER_ERROR(GS_ERROR_DS_COLUMN_ID_INVALID, "");
-		}
-		ColumnType targetType;
-		if (sc.columnId_ != UNDEF_COLUMNID) {
-			ColumnInfo &columnInfo = getColumnInfo(sc.columnId_);
-			targetType = columnInfo.getColumnType();
-		}
-		else {
-			targetType = COLUMN_TYPE_ROWID;
-		}
-		op1 = &ComparatorTable::eqTable_[targetType][targetType];
-		if (op1 == NULL) {
-			GS_THROW_USER_ERROR(GS_ERROR_TQ_INTERNAL_DATA_CANNOT_COMPARE, "");
-		}
-	}
-	return isValid;
-}
-
-bool BaseContainer::getKeyCondition(TransactionContext &,
-	RtreeMap::SearchContext &, const Operator *&op1,
-	const Operator *&op2) const {
-	op1 = NULL;
-	op2 = NULL;
-	bool isValid = true;
-	return isValid;
-}
 
 /*!
 	@brief Change new Column layout
@@ -1456,26 +1489,30 @@ void BaseContainer::changeSchema(TransactionContext& txn,
 
 		util::Vector<IndexInfo> oldIndexInfoList(txn.getDefaultAllocator());
 		getIndexInfoList(txn, oldIndexInfoList);
-		for (uint32_t columnId = 0; columnId < copyColumnMap.size();
-			 columnId++) {
-			uint32_t oldColumnId = copyColumnMap[columnId];
-			if (oldColumnId != UNDEF_COLUMNID) {
-				for (size_t i = 0; i < oldIndexInfoList.size(); i++) {
-					const IndexInfo &oldIndexInfo = oldIndexInfoList[i];
-					
-					
-					if (!oldIndexInfo.columnIds_.empty()
-						&& oldIndexInfo.columnIds_[0] == oldColumnId) {
-						IndexInfo newIndexInfo(txn.getDefaultAllocator(),
-							oldIndexInfo.indexName_, columnId,
-							oldIndexInfo.mapType);
-
-						bool isImmediate = true;
-						IndexCursor indexCusror(isImmediate);
-
-						newContainer.createIndex(txn, newIndexInfo, indexCusror);
-					}
+		for (size_t i = 0; i < oldIndexInfoList.size(); i++) {
+			const IndexInfo &oldIndexInfo = oldIndexInfoList[i];
+			util::Vector<uint32_t> newColumnIds(txn.getDefaultAllocator());
+			bool isExists = true;
+			for (size_t j = 0; j < oldIndexInfo.columnIds_.size(); j++) {
+				ColumnId oldColumnId = oldIndexInfo.columnIds_[j];
+				util::XArray<uint32_t>::iterator itr = std::find(copyColumnMap.begin(), copyColumnMap.end(), oldColumnId);
+				size_t index = std::distance(copyColumnMap.begin(), itr);
+				if (index == copyColumnMap.size()) {
+					isExists = false;
+					break;
 				}
+				ColumnId newColumnId = static_cast<ColumnId>(index);
+				newColumnIds.push_back(newColumnId);
+			}
+			if (isExists) {
+				IndexInfo newIndexInfo(txn.getDefaultAllocator(),
+					oldIndexInfo.indexName_, newColumnIds,
+					oldIndexInfo.mapType);
+
+				bool isImmediate = true;
+				IndexCursor indexCusror(isImmediate);
+
+				newContainer.createIndex(txn, newIndexInfo, indexCusror);
 			}
 		}
 
@@ -1524,8 +1561,10 @@ void BaseContainer::changeSchemaRecord(TransactionContext &txn,
 		RowId lastRowId = INITIAL_ROWID;
 		ResultSize limit = (ContainerCursor::getNum() / getNormalRowArrayNum() <= 2) ?
 			2 : (ContainerCursor::getNum() / getNormalRowArrayNum());
-		BtreeMap::SearchContext sc(UNDEF_COLUMNID, &cursor, 0, false,
-			NULL, 0, false, 0, NULL, limit);
+		TermCondition cond(getRowIdColumnType(), getRowIdColumnType(), 
+			DSExpression::GT, getRowIdColumnId(), &cursor,
+			sizeof(cursor));
+		BtreeMap::SearchContext sc(txn.getDefaultAllocator(), cond, limit);
 
 		util::XArray<OId> oIdList(txn.getDefaultAllocator());
 		util::XArray<OId>::iterator itr;
@@ -1751,11 +1790,6 @@ void BaseContainer::searchMvccMap(
 		return;
 	}
 
-	const Operator *op1, *op2;
-	bool isValid = getKeyCondition(txn, sc, op1, op2);
-	if (!isValid) {
-		return;
-	}
 
 	setExclusiveStatus(NO_ROW_TRANSACTION);
 
@@ -1800,6 +1834,8 @@ void BaseContainer::searchMvccMap(
 				if (isNoRowTransaction()) {
 					setExclusiveStatus(EXCLUSIVE);
 				} 
+				util::Vector<TermCondition> condList(txn.getDefaultAllocator());
+				sc.getConditionList(condList, BaseIndex::SearchContext::COND_ALL);
 				rowArray.load(txn, itr->second.snapshotRowOId_,
 					this, OBJECT_READ_ONLY);
 				for (rowArray.begin(); !rowArray.end(); rowArray.next()) {
@@ -1811,19 +1847,10 @@ void BaseContainer::searchMvccMap(
 					}
 
 					if (!isCheckOnly) {
-						if (sc.columnId_ == UNDEF_COLUMNID) {
-							containerValue.set(row.getRowId());
-						}
-						else {
-							row.getField(txn, getColumnInfo(sc.columnId_), containerValue);
-						}
-						if (!checkScColumnKey(
-								txn, sc, containerValue.getValue(), op1, op2)) {
-							continue;
-						}
 						bool isMatch = true;
-						for (uint32_t c = 0; c < sc.conditionNum_; c++) {
-							if (!row.isMatch(txn, sc.conditionList_[c], containerValue)) {
+						util::Vector<TermCondition>::iterator condItr;
+						for (condItr = condList.begin(); condItr != condList.end(); condItr++) {
+							if (!row.isMatch(txn, *condItr, containerValue)) {
 								isMatch = false;
 								break;
 							}
@@ -1850,59 +1877,6 @@ void BaseContainer::searchMvccMap(
 }
 
 
-template <class R, class S>
-void BaseContainer::searchColumnId(TransactionContext &txn, S &sc,
-	util::XArray<OId> &oIdList, util::XArray<OId> &mvccList,
-	util::XArray<OId> &resultList, OutputOrder outputOrder) {
-
-	ContainerValue containerValue(txn, *getObjectManager());
-	util::XArray<OId>::iterator itr;
-	if (sc.conditionNum_ > 0 || !isExclusive()) {
-		RowArray rowArray(txn, reinterpret_cast<R *>(this));
-		for (itr = oIdList.begin(); itr != oIdList.end(); itr++) {
-			rowArray.load(
-				txn, *itr, reinterpret_cast<R *>(this), OBJECT_READ_ONLY);
-			RowArray::Row row(rowArray.getRow(), &rowArray);
-
-			if (txn.getId() != row.getTxnId() && !row.isFirstUpdate() &&
-				txn.getManager().isActiveTransaction(
-					txn.getPartitionId(), row.getTxnId())) {
-				continue;
-			}
-			bool isMatch = true;
-			for (uint32_t c = 0; c < sc.conditionNum_; c++) {
-				if (!row.isMatch(txn, sc.conditionList_[c], containerValue)) {
-					isMatch = false;
-					break;
-				}
-			}
-			if (isMatch) {
-				resultList.push_back(rowArray.getOId());
-				if (resultList.size() == sc.limit_) {
-					break;
-				}
-			}
-		}
-	}
-	else {
-		resultList.swap(oIdList);
-	}
-
-	if (!mvccList.empty() && outputOrder != ORDER_UNDEFINED) {
-		util::XArray<OId> mergeList(txn.getDefaultAllocator());
-		ColumnInfo &targetColumnInfo = getColumnInfo(sc.columnId_);
-		mergeRowList<R>(txn, targetColumnInfo, mvccList, false, resultList,
-			true, mergeList, outputOrder);
-		resultList.clear();
-		resultList.swap(mergeList);
-	}
-	else {
-		resultList.push_back(mvccList.data(), mvccList.size());
-	}
-	if (resultList.size() > sc.limit_) {
-		resultList.resize(sc.limit_);
-	}
-}
 
 template
 void BaseContainer::mergeRowList<Collection>(TransactionContext &txn,
@@ -2030,128 +2004,6 @@ void BaseContainer::mergeRowList(TransactionContext &txn,
 	}
 }
 
-bool BaseContainer::checkScColumnKey(TransactionContext &txn,
-	BtreeMap::SearchContext &sc, const Value &value, const Operator *op1,
-	const Operator *op2) {
-	bool isMatch = false;
-	if (value.isNullValue()) {
-		isMatch = sc.nullCond_ != BaseIndex::SearchContext::NOT_IS_NULL;
-	} else
-	if (((op1 == 0) || (*op1)(txn, value.data(), value.size(),
-						   reinterpret_cast<const uint8_t *>(sc.startKey_),
-						   sc.startKeySize_)) &&
-		((op2 == 0) || (*op2)(txn, value.data(), value.size(),
-						   reinterpret_cast<const uint8_t *>(sc.endKey_),
-						   sc.endKeySize_))) {
-		isMatch = true;
-	}
-	else {
-		isMatch = false;
-	}
-	return isMatch;
-}
-
-bool BaseContainer::checkScColumnKey(TransactionContext &txn,
-	HashMap::SearchContext &sc, const Value &value, const Operator *op1,
-	const Operator *) {
-	bool isMatch = false;
-	if (value.isNullValue()) {
-		isMatch = sc.nullCond_ != BaseIndex::SearchContext::NOT_IS_NULL;
-	} else
-	if ((op1 == 0) ||
-		(*op1)(txn, value.data(), value.size(),
-			reinterpret_cast<const uint8_t *>(sc.key_), sc.keySize_)) {
-		isMatch = true;
-	}
-	else {
-		isMatch = false;
-	}
-	return isMatch;
-}
-
-bool BaseContainer::checkScColumnKey(TransactionContext &txn,
-	RtreeMap::SearchContext &sc, const Value &value, const Operator *,
-	const Operator *) {
-
-	bool isMatch = false;
-	if (value.isNullValue()) {
-		isMatch = sc.nullCond_ != BaseIndex::SearchContext::NOT_IS_NULL;
-	} else
-	{
-	Geometry *geom = Geometry::deserialize(txn, value.data(), value.size());
-	switch (sc.relation_) {
-	case GEOMETRY_INTERSECT:
-		if (geom->isEmpty()) {
-			isMatch = false;
-		}
-		else {
-			const TrRectTag &a = sc.rect_[0];
-			const TrRectTag &b = geom->getBoundingRect();
-			isMatch = ((a.xmin <= b.xmax) && (b.xmin <= a.xmax) &&
-					   ((a.ymin <= b.ymax) && (b.ymin <= a.ymax)) &&
-					   (geom->getDimension() <= 2 ||
-						   ((a.zmin <= b.zmax) && (b.zmin <= a.zmax))));
-		}
-		break;
-	case GEOMETRY_INCLUDE:
-		if (geom->isEmpty()) {
-			isMatch = false;
-		}
-		else {
-			const TrRectTag &out = sc.rect_[0];
-			const TrRectTag &in = geom->getBoundingRect();
-			isMatch = (out.xmin <= in.xmin && out.xmax >= in.xmax &&
-					   out.ymin <= in.ymin && out.ymax >= in.ymax &&
-					   (geom->getDimension() <= 2 ||
-						   (out.zmin <= in.zmin && out.zmax >= in.zmax)));
-		}
-		break;
-	case GEOMETRY_DIFFERENTIAL:
-		if (geom->isEmpty()) {
-			isMatch = false;
-		}
-		else {
-			const TrRectTag &a = sc.rect_[0];
-			const TrRectTag &a2 = sc.rect_[1];
-			const TrRectTag &b = geom->getBoundingRect();
-			bool conditionFlag1 =
-				((a.xmin <= b.xmax) && (b.xmin <= a.xmax) &&
-					((a.ymin <= b.ymax) && (b.ymin <= a.ymax)) &&
-					(geom->getDimension() <= 2 ||
-						((a.zmin <= b.zmax) && (b.zmin <= a.zmax))));
-			bool conditionFlag2 =
-				((a2.xmin <= b.xmax) && (b.xmin <= a2.xmax) &&
-					((a2.ymin <= b.ymax) && (b.ymin <= a2.ymax)) &&
-					(geom->getDimension() <= 2 ||
-						((a2.zmin <= b.zmax) && (b.zmin <= a2.zmax))));
-			isMatch = conditionFlag1 && !conditionFlag2;
-		}
-		break;
-	case GEOMETRY_QSF_INTERSECT:
-
-		if (geom->isEmpty()) {
-			isMatch = false;
-		}
-		else {
-			const TrRectTag r = geom->getBoundingRect();
-			TrPv3Box box;
-			box.p0[0] = r.xmin;
-			box.p0[1] = r.ymin;
-			box.p0[2] = r.zmin;
-			box.p1[0] = r.xmax - r.xmin;
-			box.p1[1] = r.ymax - r.ymin;
-			box.p1[2] = r.zmax - r.zmin;
-			isMatch =
-				(TrPv3Test2(&box, const_cast<TrPv3Key *>(&sc.pkey_)) != 0);
-		}
-		break;
-	default:
-		GS_THROW_USER_ERROR(GS_ERROR_TQ_INTERNAL_GIS_UNKNOWN_RELATIONSHIP,
-			"Invalid relationship of Geometry is specified.");
-	}
-	}
-	return isMatch;
-}
 
 template <typename R>
 void BaseContainer::getRowIdListImpl(TransactionContext &txn,
@@ -2503,10 +2355,8 @@ void BaseContainer::initializeTrigger(TransactionContext &txn,
 IndexCursor BaseContainer::createCursor(TransactionContext &txn, const MvccRowImage &mvccImage) {
 	IndexCursor indexCursor(mvccImage);
 
-	IndexData indexData;
-	bool withUncommitted = true;
-	bool isExist = getIndexData(txn, indexCursor.getColumnId(), indexCursor.getMapType(), 
-		withUncommitted, indexData);
+	IndexData indexData(txn.getDefaultAllocator());
+	bool isExist = getIndexData(txn, indexCursor, indexData);
 	if (!isExist) {
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR,
 			"can not continue to create index. index data does not existed.");
@@ -2517,6 +2367,7 @@ IndexCursor BaseContainer::createCursor(TransactionContext &txn, const MvccRowIm
 
 void BaseContainer::updateValueMaps(TransactionContext &txn, 
 									const util::XArray<std::pair<OId, OId> > &moveList) {
+	util::StackAllocator::Scope scope(txn.getDefaultAllocator());
 	util::XArray<IndexData> indexList(txn.getDefaultAllocator());
 	bool withUncommitted = true;
 	getIndexList(txn, withUncommitted, indexList);
@@ -2525,7 +2376,6 @@ void BaseContainer::updateValueMaps(TransactionContext &txn,
 		RowArray moveRowArray(txn, this);
 		for (size_t i = 0; i < indexList.size(); i++) {
 			ValueMap valueMap(txn, this, indexList[i]);
-			ColumnInfo& columnInfo = getColumnInfo(indexList[i].columnId_);
 
 			util::XArray<std::pair<OId, OId> >::const_iterator itr;
 			for (itr = moveList.begin(); itr != moveList.end(); itr++) {
@@ -2534,14 +2384,9 @@ void BaseContainer::updateValueMaps(TransactionContext &txn,
 				if (indexList[i].cursor_ < row.getRowId()) {
 					continue;
 				}
-				bool isNullValue = row.isNullValue(columnInfo);
-				BaseObject baseFieldObject(
-					txn.getPartitionId(), *getObjectManager());
-				const void *fieldValue = &NULL_VALUE;
-				if (!isNullValue) {
-					row.getField(txn, columnInfo, baseFieldObject);
-					fieldValue = baseFieldObject.getCursor<void>();
-				}
+				bool isNullValue;
+				const void *fieldValue = row.getFields<TimeSeries>(txn, 
+					valueMap.getFuncInfo(txn), isNullValue);
 				updateValueMap(txn, valueMap, fieldValue, itr->first,
 					itr->second, isNullValue);
 			}
@@ -2684,11 +2529,6 @@ util::String BaseContainer::getBibInfoImpl(TransactionContext &txn, const char* 
 
 		strstrm << "," << std::endl;
 		strstrm << "\"containerType\": \"" << BibInfoUtil::getContainerTypeStr(getContainerType()) << "\"," << std::endl;
-		if (definedRowKey()) {
-			strstrm << "\"rowKeyAssigned\": true" << "," << std::endl;
-		} else {
-			strstrm << "\"rowKeyAssigned\": false" << "," << std::endl;
-		}
 		strstrm << "\"columnSet\": [" << std::endl;
 		for (uint32_t i = 0; i < getColumnNum(); i++) {
 			if (i != 0) {
@@ -2704,6 +2544,20 @@ util::String BaseContainer::getBibInfoImpl(TransactionContext &txn, const char* 
 				strstrm << "\"notNull\": false" << std::endl;
 			}
 			strstrm << "}" << std::endl;
+		}
+		strstrm << "]" << std::endl;
+
+		strstrm << "," << std::endl;
+		util::Vector<ColumnId> keyColumnIdList(txn.getDefaultAllocator());
+		getKeyColumnIdList(keyColumnIdList);
+		strstrm << "\"rowKeySet\": [" << std::endl;
+		for (uint32_t i = 0; i < keyColumnIdList.size(); i++) {
+			ColumnId columnId = keyColumnIdList[i];
+			if (i != 0) {
+				strstrm << "," << std::endl;
+			}
+			ColumnInfo &columnInfo = getColumnInfo(columnId);
+			strstrm << "\"" << columnInfo.getColumnName(txn, *getObjectManager()) << "\"" << std::endl; 
 		}
 		strstrm << "]" << std::endl;
 
@@ -2733,8 +2587,8 @@ int32_t BaseContainer::ValueMap::search(TransactionContext &txn,
 
 	bool isNullLast = outputOrder == ORDER_ASCENDING;
 	if (sc.nullCond_ != BaseIndex::SearchContext::NOT_IS_NULL && !isNullLast) {
-		BtreeMap::SearchContext nullSc(sc.columnId_, NULL, 0, false, NULL, 
-			0, false, 0, NULL, sc.limit_, COLUMN_TYPE_NULL);
+		BtreeMap::SearchContext nullSc (txn.getDefaultAllocator(), UNDEF_COLUMNID);
+		nullSc.setLimit(sc.getLimit());
 		BtreeMap *nullMap = static_cast<BtreeMap *>(getValueMap(txn, true));
 		if (nullMap != NULL) {
 			nullMap->search(txn, nullSc, oIdList, outputOrder);
@@ -2751,8 +2605,8 @@ int32_t BaseContainer::ValueMap::search(TransactionContext &txn,
 	}
 
 	if (sc.nullCond_ != BaseIndex::SearchContext::NOT_IS_NULL && isNullLast) {
-		BtreeMap::SearchContext nullSc(sc.columnId_, NULL, 0, false, NULL, 
-			0, false, 0, NULL, sc.limit_, COLUMN_TYPE_NULL);
+		BtreeMap::SearchContext nullSc (txn.getDefaultAllocator(), UNDEF_COLUMNID);
+		nullSc.setLimit(sc.getLimit());
 		BtreeMap *nullMap = static_cast<BtreeMap *>(getValueMap(txn, true));
 		if (nullMap != NULL) {
 			nullMap->search(txn, nullSc, oIdList, outputOrder);

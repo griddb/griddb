@@ -28,6 +28,13 @@
     $ ./configure
     $ make 
     
+  Note: When you use maven build for Java client, please run the following command. Then gridstore-X.X.X.jar file is created on target/.  
+
+    $ cd java_client
+    $ ./make_source_for_mvn.sh
+    $ mvn clean
+    $ mvn install
+
 ### Start a server
     $ export GS_HOME=$PWD
     $ export GS_LOG=$PWD/log
@@ -99,11 +106,12 @@ Note:
   - [Quick Start Guide](https://griddb.github.io/griddb_nosql/manual/GridDB_QuickStartGuide.html)
   - [API Reference](https://griddb.github.io/griddb_nosql/manual/GridDB_API_Reference.html)
   - [RPM Installation Guide](https://griddb.github.io/griddb_nosql/manual/GridDB_RPM_InstallGuide.html)
+  - [DEB Installation Guide](https://griddb.github.io/griddb_nosql/manual/GridDB_DEB_InstallGuide.html)
   - [V3.0 Release Notes](docs/GridDB-3.0.0-CE-RELEASE_NOTES.md)
   - [V4.0 Release Notes](docs/GridDB-4.0-CE-RELEASE_NOTES.md)
   - [V4.1 Release Notes](docs/GridDB-4.1-CE-RELEASE_NOTES.md)
   - [V4.2 Release Notes](docs/GridDB-4.2-CE-RELEASE_NOTES.md)
-  - [DEB Installation Guide](https://griddb.github.io/griddb_nosql/manual/GridDB_DEB_InstallGuide.html)
+  - [V4.3 Release Notes](docs/GridDB-4.3-CE-RELEASE_NOTES.md)
 
 ## Client and Connector
   There are other clients and API for GridDB.

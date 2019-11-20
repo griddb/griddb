@@ -76,16 +76,24 @@ public class TimeSeriesProperties implements Cloneable {
 	 * </div>
 	 */
 	public TimeSeriesProperties() {
+		rowExpirationTime = -1;
+		rowExpirationTimeUnit = null;
+		compressionWindowSize = -1;
+		compressionWindowSizeUnit = null;
+		compressionMethod = CompressionMethod.NO;
+		entryMap = new HashMap<String, Entry>();
+		expirationDivisionCount = -1;
 	}
 
-	private TimeSeriesProperties(TimeSeriesProperties props) {
+	TimeSeriesProperties(TimeSeriesProperties props) {
 		rowExpirationTime = props.rowExpirationTime;
 		rowExpirationTimeUnit = props.rowExpirationTimeUnit;
 		compressionWindowSize = props.compressionWindowSize;
 		compressionWindowSizeUnit = props.compressionWindowSizeUnit;
 		compressionMethod = props.compressionMethod;
 		expirationDivisionCount = props.expirationDivisionCount;
-		entryMap.putAll(props.entryMap);
+		entryMap = props.entryMap;
+		duplicateDeep();
 	}
 
 	/**
@@ -957,7 +965,23 @@ public class TimeSeriesProperties implements Cloneable {
 	 */
 	@Override
 	public TimeSeriesProperties clone() {
-		return new TimeSeriesProperties(this);
+		final TimeSeriesProperties props;
+		try {
+			props = (TimeSeriesProperties) super.clone();
+		}
+		catch (CloneNotSupportedException e) {
+			throw new Error(e);
+		}
+
+		props.duplicateDeep();
+
+		return props;
+	}
+
+	private void duplicateDeep() {
+		final Map<String, Entry> entryMap = new HashMap<String, Entry>();
+		entryMap.putAll(this.entryMap);
+		this.entryMap = entryMap;
 	}
 
 	private static String normalizeColumn(String column) {

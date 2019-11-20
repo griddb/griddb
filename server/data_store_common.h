@@ -180,6 +180,7 @@ const ColumnType COLUMN_TYPE_DOUBLE_ARRAY = 19;
 const ColumnType COLUMN_TYPE_TIMESTAMP_ARRAY = 20;
 
 const ColumnType COLUMN_TYPE_ROWID = COLUMN_TYPE_LONG;
+const ColumnType COLUMN_TYPE_COMPOSITE = 0xfe;
 const ColumnType COLUMN_TYPE_WITH_BEGIN = 0xff;
 const ColumnType COLUMN_TYPE_NULL = 0xff;  
 const ColumnType COLUMN_TYPE_ANY = 0xff;
@@ -273,6 +274,7 @@ static const MapType MAP_TYPE_NUM = 3;
 
 static const MapType MAP_TYPE_DEFAULT = -1;
 static const MapType MAP_TYPE_VECTOR = -2;
+static const MapType MAP_TYPE_ANY = -3;
 
 const MapType defaultIndexType[] = {
 	MAP_TYPE_BTREE,		
@@ -537,6 +539,141 @@ struct TQLInfo {
 	const char *query_;
 };
 
+class Cursor {
+	virtual bool isFinished() const = 0;
+public:
+	static const uint64_t NUM_PER_EXEC = 500;
+};
+
+class IndexCursor : Cursor {
+public:
+	IndexCursor() {};
+	IndexCursor(const MvccRowImage &image) {
+		setMvccImage(image);
+	};
+	IndexCursor(bool isImmediate) {
+		if (isImmediate) {
+			setImmediateMode();
+		}
+	};
+
+	bool isFinished() const {
+		return data_.rowId_ == MAX_ROWID;
+	}
+	bool isImmediateMode() const {
+		return data_.type_ == MVCC_UNDEF;
+	}
+
+	void setImmediateMode() {
+		data_.type_ = MVCC_UNDEF;
+	}
+	void setMvccImage(const MvccRowImage &image) {
+		memcpy(&data_, &image, sizeof(Data));
+	}
+	MvccRowImage getMvccImage() const {
+		MvccRowImage image;
+		memcpy(&image, &data_, sizeof(Data));
+		return image;
+	}
+	MapType getMapType() const {return data_.mapType_;}
+	ColumnId getColumnId() const {return data_.columnId_;}
+	RowId getRowId() const {return data_.rowId_;}
+	OId getOId() const {return data_.optionOId_;} 
+	static uint64_t getNum() {return NUM_PER_EXEC;}
+	void setMapType(MapType mapType) {data_.mapType_ = mapType;}
+	void setColumnId(ColumnId columnId) {data_.columnId_ = columnId;}
+	void setRowId(RowId rowId) {data_.rowId_ = rowId;}
+	void setOption(OId oId) {data_.optionOId_ = oId;} 
+private:
+	struct Data {
+		Data() {
+			rowId_ = INITIAL_ROWID;
+			optionOId_ = 0; 
+			type_ = MVCC_INDEX;
+			mapType_ = MAP_TYPE_DEFAULT;
+			padding2_ = 0;
+			columnId_ = UNDEF_COLUMNID;
+		}
+
+		RowId rowId_; 
+		OId optionOId_; 
+		MVCC_IMAGE_TYPE type_;
+		MapType mapType_;
+		uint16_t padding2_;
+		ColumnId columnId_;
+	};
+	Data data_;
+};
+
+class ContainerCursor : Cursor {
+public:
+	ContainerCursor() {};
+	ContainerCursor(const MvccRowImage &image) {
+		setMvccImage(image);
+	};
+	ContainerCursor(bool isImmediate) {
+		if (isImmediate) {
+			setImmediateMode();
+		}
+	};
+
+	ContainerCursor(bool isImmediate, OId oId) {
+		if (isImmediate) {
+			setImmediateMode();
+		}
+		setContainerOId(oId);
+	};
+
+	bool isFinished() const {
+		return data_.rowId_ == MAX_ROWID;
+	}
+	bool isImmediateMode() const {
+		return data_.type_ == MVCC_UNDEF;
+	}
+
+	void setImmediateMode() {
+		data_.type_ = MVCC_UNDEF;
+	}
+	void setMvccImage(const MvccRowImage &image) {
+		memcpy(&data_, &image, sizeof(Data));
+	}
+	MvccRowImage getMvccImage() const {
+		MvccRowImage image;
+		memcpy(&image, &data_, sizeof(Data));
+		return image;
+	}
+	static uint64_t getNum() {return NUM_PER_EXEC;}
+	RowId getRowId() const {return data_.rowId_;}
+	void setRowId(RowId rowId) {data_.rowId_ = rowId;}
+	OId getContainerOId() const {return data_.containerOId_;}
+	void setContainerOId(OId oId) {data_.containerOId_ = oId;}
+private:
+	struct Data {
+		Data() {
+			rowId_ = INITIAL_ROWID;
+			containerOId_ = UNDEF_OID;
+			type_ = MVCC_CONTAINER;
+			padding1_ = 0;
+			padding2_ = 0;
+			padding3_ = 0;
+		}
+
+		RowId rowId_; 
+		OId containerOId_; 
+		MVCC_IMAGE_TYPE type_;
+		uint8_t padding1_;
+		uint16_t padding2_;
+		uint32_t padding3_;
+	};
+	Data data_;
+};
+
+struct KeyData {
+	KeyData() : data_(NULL), size_(0) {}
+	KeyData(const void *data, uint32_t size) : data_(data), size_(size) {}
+	const void *data_;
+	uint32_t size_;
+};
 
 
 

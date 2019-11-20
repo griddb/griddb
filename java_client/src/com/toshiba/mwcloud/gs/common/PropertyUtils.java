@@ -18,13 +18,21 @@ package com.toshiba.mwcloud.gs.common;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+import java.util.SimpleTimeZone;
+import java.util.TimeZone;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import com.toshiba.mwcloud.gs.GSException;
 
 public class PropertyUtils {
+
+	private static final Pattern TIME_ZONE_OFFSET_PATTERN =
+			Pattern.compile("([+\\-])([0-9]{2}):?([0-9]{2})");
 
 	private PropertyUtils() {
 	}
@@ -86,6 +94,98 @@ public class PropertyUtils {
 			throw new GSException(
 					GSErrorCode.ILLEGAL_PROPERTY_ENTRY, builder.toString());
 		}
+	}
+
+	public static SimpleTimeZone parseTimeZoneOffset(
+			String str, boolean withAuto) throws GSException {
+		if (str.equals("Z")) {
+			return createTimeZoneOffset(0);
+		}
+		else if (withAuto && str.equals("auto")) {
+			return getLocalTimeZoneOffset();
+		}
+
+		final Matcher matcher = getTimeZoneOffsetPattern().matcher(str);
+		if (!matcher.find() ||
+				matcher.start() != 0 || matcher.end() != str.length()) {
+			throw new GSException(
+					GSErrorCode.ILLEGAL_PROPERTY_ENTRY,
+					"Illegal time zone format (value=" + str + ")");
+		}
+
+		final int sign = matcher.group(1).equals("+") ? 1 : -1;
+		int hour = 0;
+		int min = 0;
+
+		for (int i = 0; i < 2; i++) {
+			final String strElem = matcher.group(i + 2);
+			final int elem = Integer.valueOf(strElem);
+			if (i == 0) {
+				hour = elem;
+			}
+			else {
+				min = elem;
+			}
+		}
+
+		if (hour > 23 || min > 59) {
+			throw new GSException(
+					GSErrorCode.ILLEGAL_PROPERTY_ENTRY,
+					"Illegal time zone format (value=" + str + ")");
+		}
+
+		final int offset = sign * (hour * 60 + min) * 60 * 1000;
+		return createTimeZoneOffset(offset);
+	}
+
+	public static String formatTimeZoneOffset(long offsetMillis, boolean forId) {
+		final String gmtStr = "GMT";
+		if (offsetMillis == 0) {
+			if (forId) {
+				return gmtStr;
+			}
+			else {
+				return "Z";
+			}
+		}
+
+		final long absMillis = (offsetMillis >= 0 ? offsetMillis : -offsetMillis);
+
+		final String elemFormat = "%02d";
+		final StringBuilder sb = new StringBuilder();
+		if (forId) {
+			sb.append(gmtStr);
+		}
+		sb.append(offsetMillis >= 0 ? "+" : "-");
+		sb.append(String.format(
+				Locale.ROOT, elemFormat, absMillis / (60 * 60 * 1000) % 24));
+		sb.append(":");
+		sb.append(String.format(
+				Locale.ROOT, elemFormat, absMillis / (60 * 1000) % 60));
+		return sb.toString();
+	}
+
+	public static SimpleTimeZone getLocalTimeZoneOffset()
+			throws GSException {
+		final TimeZone src = TimeZone.getDefault();
+		if (src.useDaylightTime() || src.getDSTSavings() != 0) {
+			throw new GSException(
+					GSErrorCode.UNSUPPORTED_OPERATION,
+					"Daylight time is not supported (" +
+					"zoneId=" + src.getID() +
+					", zoneName=" + src.getDisplayName(Locale.ROOT) +
+					", zoneDetail=" + src + ")");
+		}
+		return createTimeZoneOffset(src.getRawOffset());
+	}
+
+	public static SimpleTimeZone createTimeZoneOffset(int offsetMillis) {
+		return new SimpleTimeZone(
+				offsetMillis, formatTimeZoneOffset(offsetMillis, true));
+	}
+
+	public static Pattern getTimeZoneOffsetPattern() {
+		return TIME_ZONE_OFFSET_PATTERN;
 	}
 
 	public static class WrappedProperties {

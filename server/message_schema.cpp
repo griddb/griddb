@@ -87,7 +87,6 @@ void MessageSchema::validateColumnSchema(util::ArrayByteInStream &in) {
 			"Number of columns = " << columnNum_ << " is invalid");
 	}
 
-
 	columnNameList_.reserve(columnNum_);
 	columnTypeList_.reserve(columnNum_);
 	flagsList_.reserve(columnNum_);
@@ -128,7 +127,7 @@ void MessageSchema::validateColumnSchema(util::ArrayByteInStream &in) {
 		in >> flagsTmp;
 		flagsList_.push_back(flagsTmp);
 		const bool isArray = getIsArray(i);
-//		const bool isNotNull = getIsNotNull(i);
+		const bool isNotNull = getIsNotNull(i);
 
 		if (!ValueProcessor::isValidArrayAndType(
 				isArray, columnTypeList_[i])) {
@@ -147,17 +146,16 @@ void MessageSchema::validateColumnSchema(util::ArrayByteInStream &in) {
 		} else if (!hasVariableColumn) {
 			hasVariableColumn = true;
 		}
-
-
 	}
+
 	int16_t rowKeyNum;
 	in >> rowKeyNum;
 	for (int16_t i = 0; i < rowKeyNum; i++) {
 		int16_t rowKeyColumnId;
 		in >> rowKeyColumnId;
-		if (rowKeyColumnId != 0) {
+		if (rowKeyColumnId != i) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
-				"ColumnNumber of rowkey = " << rowKeyColumnId << " is invalid");
+				"ColumnNumber of rowkey = " << rowKeyColumnId << " must be sequential from zero");
 		}
 
 		const bool isArray = getIsArray(rowKeyColumnId);
@@ -175,12 +173,10 @@ void MessageSchema::validateColumnSchema(util::ArrayByteInStream &in) {
 		}
 		keyColumnIds_.push_back(rowKeyColumnId);
 	}
-	if (rowKeyNum < 0 || rowKeyNum > 1) {
+	if (rowKeyNum > MAX_COMPOSITE_COLUMN_NUM) {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
-			"Number of rowkey must be one or zero");
+			"Number of rowkey must be less than " << MAX_COMPOSITE_COLUMN_NUM);
 	}
-
-
 }
 
 void MessageSchema::validateColumnSchema(const BibInfo::Container &bibInfo) {
@@ -245,24 +241,41 @@ void MessageSchema::validateColumnSchema(const BibInfo::Container &bibInfo) {
 											 << (int32_t)isArray);
 		}
 	}
-
-	bool rowKeyAssigned = bibInfo.rowKeyAssigned_;
-	if (rowKeyAssigned) {
-		ColumnId rowKeyColumnId = ColumnInfo::ROW_KEY_COLUMN_ID;
-		const bool isArray = getIsArray(rowKeyColumnId);
-		const bool isNotNull = getIsNotNull(rowKeyColumnId);
+	if (bibInfo.rowKeySet_.size() > bibInfo.columnSet_.size()) {
+		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
+			"Rowkey set is more than Column set");
+	}
+	for (uint32_t i = 0; i < bibInfo.rowKeySet_.size(); i++) {
+		const std::string &rowKey = bibInfo.rowKeySet_[i];
+		const std::string &columnName = bibInfo.columnSet_[i].columnName_;
+		int32_t ret = compareStringStringI(
+					rowKey.c_str(),
+					static_cast<uint32_t>(rowKey.length()),
+					columnName.c_str(),
+					static_cast<uint32_t>(columnName.length()));
+		if (ret != 0) {
+			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
+				rowKey << " is invalid name or position, "
+				<< "ColumnNumber of rowkey must be sequential from zero");
+		}
+		const bool isArray = getIsArray(i);
+		const bool isNotNull = getIsNotNull(i);
 		if (!ValueProcessor::validateRowKeyType(
-				isArray, columnTypeList_[rowKeyColumnId])) {
+				isArray, columnTypeList_[i])) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
 				"unsupported RowKey Column type = "
-					<< (int32_t)columnTypeList_[rowKeyColumnId]
+					<< (int32_t)columnTypeList_[i]
 					<< ", array = " << (int32_t)isArray);
 		}
 		if (!isNotNull) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
 				"unsupported RowKey Column is not nullable");
 		}
-		keyColumnIds_.push_back(rowKeyColumnId);
+		keyColumnIds_.push_back(i);
+	}
+	if (keyColumnIds_.size() > MAX_COMPOSITE_COLUMN_NUM) {
+		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
+			"Number of rowkey must be less than " << MAX_COMPOSITE_COLUMN_NUM);
 	}
 }
 
@@ -311,7 +324,6 @@ MessageCollectionSchema::MessageCollectionSchema(util::StackAllocator &alloc,
 	containerType_ = COLLECTION_CONTAINER;
 	validateContainerOption(in);
 	int32_t attribute = CONTAINER_ATTR_SINGLE;
-
 	if (featureVersion > 0) {
 		if (in.base().remaining() != 0) {
 			in >> attribute;
@@ -418,7 +430,7 @@ MessageTimeSeriesSchema::MessageTimeSeriesSchema(util::StackAllocator &alloc,
 }
 
 void MessageTimeSeriesSchema::validateRowKeySchema() {
-	const util::XArray<ColumnId> &keyColumnIds = getRowKeyColumnIdList();
+	const util::Vector<ColumnId> &keyColumnIds = getRowKeyColumnIdList();
 	if (keyColumnIds.size() != 1) {
 		GS_THROW_USER_ERROR(
 			GS_ERROR_DS_DS_SCHEMA_INVALID, "must define one rowkey");

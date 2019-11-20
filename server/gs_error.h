@@ -25,6 +25,7 @@
 #include "util/container.h"
 #include "util/trace.h"
 
+
 #define UNUSED_VARIABLE(b) (void)(b)
 
 /*!
@@ -263,9 +264,9 @@ inline bool InterruptionChecker::check() {
 #define GS_TRACE_DEBUG(tracer, code, message) \
 	GS_TRACER_PUT(tracer, LEVEL_DEBUG, code, message, NULL)
 
-#define GS_FILE_WRITE_ALL(tracer, namedFile, data, size, offset, timeThreshold) \
+#define GS_FILE_WRITE_ALL(tracer, namedFile, data, size, offset, timeThreshold, retryCount) \
 	{ \
-		uint64_t retryCount = 0; \
+		retryCount = 0; \
 		off_t filePos = static_cast<off_t>(offset); \
 		ssize_t writeRemain = size; \
 		const uint8_t *writeAddr = static_cast<const uint8_t*>(data); \
@@ -304,9 +305,9 @@ inline bool InterruptionChecker::check() {
 		} \
 	}
 
-#define GS_FILE_READ_ALL(tracer, namedFile, data, size, offset, timeThreshold) \
+#define GS_FILE_READ_ALL(tracer, namedFile, data, size, offset, timeThreshold, retryCount) \
 	{ \
-		uint64_t retryCount = 0; \
+		retryCount = 0; \
 		off_t filePos = static_cast<off_t>(offset); \
 		ssize_t readRemain = size; \
 		uint8_t *readAddr = static_cast<uint8_t*>(data); \
@@ -513,6 +514,7 @@ enum ErrorCode {
 	GS_ERROR_TXN_INDEX_NOT_FOUND,
 	GS_ERROR_TXN_REPLICATION_LOG_VERSION_NOT_ACCEPTABLE,
 	GS_ERROR_TXN_DATABASE_UNMATCH,
+	GS_ERROR_TXN_DB_ACCESS_INVALID,
 
 	GS_ERROR_SYNC_SERVICE_START_FAILED = 20000,  
 	GS_ERROR_SYNC_SERVICE_ENCODE_FAILED,		 
@@ -946,6 +948,8 @@ enum ErrorCode {
 	GS_ERROR_CHM_COMPRESSION_FAILED,
 	GS_ERROR_CHM_UNCOMPRESSION_FAILED,
 	GS_ERROR_CHM_INCOMPATIBLE_ZLIB_VERSION,
+	GS_ERROR_CHM_INVALID_SPLIT_COUNT,
+	GS_ERROR_CHM_INVALID_SPLIT_STRIPE_SIZE,
 
 	GS_ERROR_QP_UNDEFINED = 70000,
 	GS_ERROR_QP_ROW_KEY_UNDEFINED,
@@ -970,6 +974,10 @@ enum ErrorCode {
 	GS_ERROR_QP_SEARCH_GEOM_FAILED,
 	GS_ERROR_QP_SEARCH_GEOM_RELATED_FAILED,
 	GS_ERROR_QP_FETCH_FAILED,
+
+	GS_ERROR_QF_VALUE_OVERFLOW = 75000,
+	GS_ERROR_QF_DIVIDE_BY_ZERO,
+	GS_ERROR_QF_VALUE_OUT_OF_RANGE,
 
 	GS_ERROR_LM_WRITE_LOG_FAILED = 80000,
 	GS_ERROR_LM_FLUSH_FAILED,
@@ -1186,6 +1194,9 @@ enum ErrorCode {
 	GS_ERROR_RM_INVALID_PARTITION,
 	GS_ERROR_RM_ALREADY_APPLY_LOG,
 	GS_ERROR_RM_INVALID_CHUNK_DATA,
+	GS_ERROR_RM_INVALID_CPFILE_SPLIT_COUNT,
+	GS_ERROR_RM_INVALID_FILE_FOUND,
+	GS_ERROR_RM_INCOMPLETE_CP_FILE,
 
 	GS_ERROR_TRIG_SERVICE_START_FAILED = 170000,  
 	GS_ERROR_TRIG_TYPE_INVALID,					  
@@ -1394,6 +1405,8 @@ enum TraceCode {
 	GS_TRACE_CHM_CONFIG,
 	GS_TRACE_CHM_COMPRESSION_FAILED,
 	GS_TRACE_CHM_INVALID_COMPRESSION,
+	GS_TRACE_CHM_CP_FILE_FLUSH_SIZE,
+	GS_TRACE_CHM_CHUNK_HASH_TABLE_SIZE,
 
 	GS_TRACE_VC_PLUGIN_INFO = 65900,
 	GS_TRACE_VC_PLUGIN_CREATE_INDEX,
@@ -1417,6 +1430,8 @@ enum TraceCode {
 	GS_TRACE_LM_PUT_SYNC_TEMP_LOG_FAILED,
 	GS_TRACE_LM_CHUNK_META_LOG_SIZE,
 	GS_TRACE_LM_LOG_VERSION,
+	GS_TRACE_LM_FADVISE_LOG_FILE_FAILED,
+	GS_TRACE_LM_FADVISE_LOG_FILE_INFO,
 
 	GS_TRACE_EE_TIME_DIFF_ERROR = 130900,
 	GS_TRACE_EE_WAIT_COMPLETION,

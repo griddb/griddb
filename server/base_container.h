@@ -36,6 +36,7 @@ class MessageSchema;
 class ResultSet;
 class ContainerRowScanner;
 class ArchiveHandler;
+class TreeFuncInfo;
 
 
 /*!
@@ -88,6 +89,7 @@ public:
 				if (valueMap_ == NULL) {
 					valueMap_ = container_->getIndex(txn, indexData_, forNull);
 				}
+				assert(valueMap_ != NULL);
 				return valueMap_;
 			}
 		};
@@ -99,11 +101,13 @@ public:
 					}
 					nullMap_ = container_->getIndex(txn, indexData_, forNull);
 				}
+				assert(nullMap_ != NULL);
 				return nullMap_;
 			} else {
 				if (valueMap_ == NULL) {
 					valueMap_ = container_->getIndex(txn, indexData_, forNull);
 				}
+				assert(valueMap_ != NULL);
 				return valueMap_;
 			}
 		};
@@ -122,7 +126,9 @@ public:
 		template <typename T>
 		int32_t search(TransactionContext &txn, typename T::SearchContext &sc,
 			util::XArray<OId> &oIdList, OutputOrder outputOrder);
-
+		TreeFuncInfo *getFuncInfo(TransactionContext &txn) {
+			return getValueMap(txn, false)->getFuncInfo();
+		}
 	private:
 		BaseContainer *container_;
 		BaseIndex *valueMap_;
@@ -224,14 +230,24 @@ public:
 		BaseObject &getFrontFieldObject() {
 			return frontFieldCache_.get()->baseObject_;
 		}
-
+		void reset() {
+			lastCachedField_ = 0;
+			BaseObject &frontObject = getFrontFieldObject();
+			frontObject.reset();
+			for (FieldCacheList::iterator it = fieldCacheList_.begin(); it != fieldCacheList_.end(); ++it) {
+				it->reset();
+			}
+		}
 	public:
 		struct FieldCache {
 			explicit FieldCache(PartitionId partitionId, ObjectManager &objectManager) :
 				baseObject_(partitionId, objectManager),
 				addr_(NULL) {
 			}
-
+			void reset() {
+				baseObject_.reset();
+				addr_ = NULL;
+			}
 			BaseObject baseObject_;
 			const uint8_t *addr_;
 		};
@@ -280,6 +296,17 @@ public:
 		bool isIndexNameCaseSensitive = false) = 0;
 	void getIndexInfoList(
 		TransactionContext &txn, util::Vector<IndexInfo> &indexInfoList);
+	void getIndexInfoList(
+		TransactionContext &txn, MapType mapType, 
+		util::Vector<ColumnId> &columnIds,
+		util::Vector<IndexInfo> &indexInfoList,
+		bool withPartialMatch);
+	void getIndexDataList(
+		TransactionContext &txn, MapType mapType, 
+		util::Vector<ColumnId> &columnIds,
+		util::Vector<IndexData> &indexDataList,
+		bool withPartialMatch);
+	bool checkRowKeySchema(util::XArray<ColumnType> &columnTypeList);
 	void getContainerInfo(TransactionContext &txn,
 		util::XArray<uint8_t> &containerSchema, bool optionIncluded = true, bool internalOptionIncluded = true);
 	virtual util::String getBibInfo(TransactionContext &txn, const char* dbName) = 0;
@@ -389,10 +416,10 @@ public:
 		return indexSchema_->getIndex(txn, indexData, forNull, this);
 	}
 	BaseIndex *getIndex(
-		TransactionContext &txn, MapType mapType, ColumnId columnId, bool forNull = false) {
+		TransactionContext &txn, MapType mapType, util::Vector<ColumnId> &columnIds, bool forNull = false) {
 		bool withUncommitted = true;
-		IndexData indexData;
-		if (getIndexData(txn, columnId, mapType, withUncommitted, indexData)) {
+		IndexData indexData(txn.getDefaultAllocator());
+		if (getIndexData(txn, columnIds, mapType, withUncommitted, indexData)) {
 			return getIndex(txn, indexData, forNull);
 		}
 		else {
@@ -418,7 +445,7 @@ public:
 		return columnSchema_->getColumnInfo(
 			txn, objectManager, name, columnId, columnInfo, isCaseSensitive);
 	}
-	void getKeyColumnIdList(util::XArray<ColumnId> &keyColumnIdList) {
+	void getKeyColumnIdList(util::Vector<ColumnId> &keyColumnIdList) {
 		columnSchema_->getKeyColumnIdList(keyColumnIdList);
 	}
 	uint32_t getVariableColumnNum() const {
@@ -428,11 +455,16 @@ public:
 		return columnSchema_->definedRowKey();
 	}
 	bool hasIndex(
-		TransactionContext &txn, ColumnId columnId, MapType mapType) const {
-		return indexSchema_->hasIndex(txn, columnId, mapType);
+		TransactionContext &txn, util::Vector<ColumnId> &columnIds, 
+		MapType mapType, bool withPartialMatch) const {
+		return indexSchema_->hasIndex(txn, columnIds, mapType, withPartialMatch);
 	}
 	bool hasIndex(IndexTypes indexType, MapType mapType) const {
 		return indexSchema_->hasIndex(indexType, mapType);
+	}
+	IndexTypes getIndexTypes(TransactionContext &txn, 
+		util::Vector<ColumnId> &columnIds, bool withPartialMatch) const {
+		return indexSchema_->getIndexTypes(txn, columnIds, withPartialMatch);
 	}
 	IndexTypes getIndexTypes(TransactionContext &txn, ColumnId columnId) {
 		return indexSchema_->getIndexTypes(txn, columnId);
@@ -451,6 +483,7 @@ public:
 			return *attribute;
 		}
 	}
+
 	DataStore *getDataStore() {
 		return dataStore_;
 	}
@@ -577,6 +610,9 @@ public:
 		indexSchema_->setNullStats(columnId);
 	}
 
+	virtual ColumnId getRowIdColumnId() = 0;
+	virtual ColumnType getRowIdColumnType() = 0;
+
 
 	virtual uint32_t getRealColumnNum(TransactionContext &txn) = 0;
 	virtual ColumnInfo* getRealColumnInfoList(TransactionContext &txn) = 0;
@@ -627,6 +663,22 @@ public:
 
 	RowArray *getCacheRowArray(TransactionContext &txn);
 
+	uint16_t getRowKeyColumnNum() const {
+		return columnSchema_->getRowKeyColumnNum();
+	}
+	uint32_t getRowKeyFixedDataSize(util::StackAllocator &alloc) const;
+	void getFields(TransactionContext &txn, 
+		MessageRowStore* messageRowStore, 
+		util::Vector<ColumnId> &columnIdList, util::XArray<KeyData> &fields);
+	void getRowKeyFields(TransactionContext &txn, uint32_t rowKeySize, const uint8_t *rowKey, util::XArray<KeyData> &fields);
+	ColumnInfo *getRowKeyColumnInfoList(TransactionContext &txn);
+
+	TreeFuncInfo *createTreeFuncInfo(TransactionContext &txn, const util::Vector<ColumnId> &columnIds) {
+		util::StackAllocator &alloc = txn.getDefaultAllocator();
+		TreeFuncInfo *funcInfo = ALLOC_NEW(alloc) TreeFuncInfo(alloc);
+		funcInfo->initialize(columnIds, columnSchema_);
+		return funcInfo;
+	}
 protected:  
 	/*!
 		@brief Mode of operation of put
@@ -807,6 +859,8 @@ protected:
 	FullContainerKeyCursor containerKeyCursor_;
 	bool isCompressionErrorMode_;  
 	RowArray *rowArrayCache_;
+	TreeFuncInfo *rowIdFuncInfo_;
+	TreeFuncInfo *mvccFuncInfo_;
 
 	static const int8_t NULL_VALUE;
 protected:  
@@ -818,7 +872,10 @@ protected:
 		  dataStore_(dataStore),
 		  rsNotifier_(*dataStore),
 		  containerKeyCursor_(txn.getPartitionId(), *(dataStore->getObjectManager())),
-		  isCompressionErrorMode_(false), rowArrayCache_(NULL) {
+		  isCompressionErrorMode_(false), rowArrayCache_(NULL)
+		  ,
+		  rowIdFuncInfo_(NULL), mvccFuncInfo_(NULL)
+		{
 		baseContainerImage_ = getBaseAddr<BaseContainerImage *>();
 		commonContainerSchema_ =
 			ALLOC_NEW(txn.getDefaultAllocator()) ShareValueList(txn,
@@ -842,7 +899,10 @@ protected:
 		  dataStore_(dataStore),
 		  rsNotifier_(*dataStore),
 		  containerKeyCursor_(txn.getPartitionId(), *(dataStore->getObjectManager())),
-		  isCompressionErrorMode_(false), rowArrayCache_(NULL) {}
+		  isCompressionErrorMode_(false), rowArrayCache_(NULL)
+		  ,
+		  rowIdFuncInfo_(NULL), mvccFuncInfo_(NULL)
+	{}
 
 	BaseContainer(TransactionContext &txn, DataStore *dataStore, BaseContainerImage *containerImage, ShareValueList *commonContainerSchema);
 
@@ -854,13 +914,14 @@ protected:
 	BtreeMap *getRowIdMap(TransactionContext &txn) const {
 		return ALLOC_NEW(txn.getDefaultAllocator())
 			BtreeMap(txn, *getObjectManager(),
-				baseContainerImage_->rowIdMapOId_, mapAllocateStrategy_, NULL);
+				baseContainerImage_->rowIdMapOId_, mapAllocateStrategy_, 
+				NULL, rowIdFuncInfo_);
 	}
 
 	BtreeMap *getMvccMap(TransactionContext &txn) const {
 		return ALLOC_NEW(txn.getDefaultAllocator())
 			BtreeMap(txn, *getObjectManager(), baseContainerImage_->mvccMapOId_,
-				mapAllocateStrategy_, NULL);
+				mapAllocateStrategy_, NULL, mvccFuncInfo_);
 	}
 
 	void setCreateRowId(TransactionContext &txn, RowId rowId);
@@ -967,12 +1028,6 @@ protected:
 		const bool isList1Sorted, util::XArray<OId> &inputList2,
 		const bool isList2Sorted, util::XArray<OId> &mergeList,
 		OutputOrder outputOrder);
-	bool checkScColumnKey(TransactionContext &txn, BtreeMap::SearchContext &sc,
-		const Value &value, const Operator *op1, const Operator *op2);
-	bool checkScColumnKey(TransactionContext &txn, HashMap::SearchContext &sc,
-		const Value &value, const Operator *op1, const Operator *op2);
-	bool checkScColumnKey(TransactionContext &txn, RtreeMap::SearchContext &sc,
-		const Value &value, const Operator *op1, const Operator *op2);
 	util::String getBibInfoImpl(TransactionContext &txn, const char* dbName, uint64_t pos, bool isEmptyId);
 	void getActiveTxnListImpl(
 		TransactionContext &txn, util::Set<TransactionId> &txnList);
@@ -1007,8 +1062,29 @@ protected:
 		return exclusiveStatus_;
 	}
 
-	virtual bool getIndexData(TransactionContext &txn, ColumnId columnId,
-		MapType mapType, bool withUncommitted, IndexData &indexData) const = 0;
+	virtual bool getIndexData(TransactionContext &txn, const util::Vector<ColumnId> &columnIds,
+		MapType mapType, bool withUncommitted, IndexData &indexData,
+		bool withPartialMatch = false) const = 0;
+	virtual bool getIndexData(TransactionContext &txn, IndexCursor &indexCursor,
+		IndexData &indexData)  const = 0;
+	const void *getIndexValue(TransactionContext &txn, util::Vector<ColumnId> &columnIds,
+		TreeFuncInfo *funcInfo, util::XArray<KeyData> &keyFieldList) {
+		const void *value = NULL;
+		if (keyFieldList.size() == 1) {
+			ColumnInfo &columnInfo = getColumnInfo(columnIds[0]);
+			KeyData keyData = keyFieldList[0];
+			if (columnInfo.isVariable()) {
+				uint32_t encodeSize = ValueProcessor::getEncodedVarSize(keyData.size_);
+				value = static_cast<const uint8_t *>(keyData.data_) - encodeSize;
+			} else {
+				value = keyData.data_;
+			}
+		} else {
+			value = 
+				funcInfo->createCompositeInfo(txn.getDefaultAllocator(), keyFieldList);
+		}
+		return value;
+	}
 	virtual void getIndexList(
 		TransactionContext &txn, bool withUncommitted, util::XArray<IndexData> &list) const = 0;
 	virtual void createNullIndexData(TransactionContext &txn, 
@@ -1425,6 +1501,12 @@ public:
 	bool isMatch(TransactionContext &txn, TermCondition &cond,
 		ContainerValue &tmpValue);
 	bool isNullValue(const ColumnInfo &columnInfo) const;
+	template<typename Container>
+	const void *getFields(TransactionContext& txn, 
+		TreeFuncInfo *funcInfo, bool &isNullValue);
+	template<typename Container>
+	void getFields(TransactionContext& txn, util::Vector<ColumnId> &columnIds,
+		util::XArray<KeyData> &fields);
 
 	void lock(TransactionContext &txn);
 	void setFirstUpdate();
@@ -1670,6 +1752,10 @@ public:
 	bool isMatch(TransactionContext &txn, TermCondition &cond,
 		ContainerValue &tmpValue);
 	bool isNullValue(const ColumnInfo &columnInfo) const;
+	const void *getFields(TransactionContext& txn, 
+		TreeFuncInfo *funcInfo, bool &isNullValue);
+	void getFields(TransactionContext& txn, util::Vector<ColumnId> &columnIds,
+		util::XArray<KeyData> &fields);
 	void archive(TransactionContext &txn, ArchiveHandler *handler);
 
 	void lock(TransactionContext &txn);

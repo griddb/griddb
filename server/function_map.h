@@ -113,7 +113,7 @@ public:
 	 */
 	virtual void getIndexParam(TransactionContext &txn, ExprList &args,
 		GeometryOperator &outSearchType, const void *&outParam1,
-		const void *&outParam2) = 0;
+		const void *&outParam2, ColumnId &indexColumnId) = 0;
 
 	virtual ~TqlGisFunc() {}
 };

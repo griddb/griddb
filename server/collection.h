@@ -54,6 +54,12 @@ public:
 		setAllocateStrategy();
 		rowArrayCache_ = ALLOC_NEW(txn.getDefaultAllocator())
 			RowArray(txn, this);
+		util::StackAllocator &alloc = txn.getDefaultAllocator();
+		util::Vector<ColumnId> columnIds(alloc);
+		columnIds.push_back(UNDEF_COLUMNID);
+		rowIdFuncInfo_ = ALLOC_NEW(alloc) TreeFuncInfo(alloc);
+		rowIdFuncInfo_->initialize(columnIds, NULL);
+		mvccFuncInfo_ = rowIdFuncInfo_;
 	}
 	Collection(TransactionContext &txn, DataStore *dataStore)
 		: BaseContainer(txn, dataStore) {
@@ -64,6 +70,12 @@ public:
 		rowImageSize_ = calcRowImageSize(rowFixedDataSize_);
 		rowArrayCache_ = ALLOC_NEW(txn.getDefaultAllocator())
 			RowArray(txn, this);
+		util::StackAllocator &alloc = txn.getDefaultAllocator();
+		util::Vector<ColumnId> columnIds(alloc);
+		columnIds.push_back(UNDEF_COLUMNID);
+		rowIdFuncInfo_ = ALLOC_NEW(alloc) TreeFuncInfo(alloc);
+		rowIdFuncInfo_->initialize(columnIds, NULL);
+		mvccFuncInfo_ = rowIdFuncInfo_;
 	}
 
 	~Collection() {}
@@ -164,6 +176,13 @@ public:
 		return AllocateStrategy(chunkCategoryId, groupId, chunkKey, expireCategoryId);
 	}
 
+	ColumnId getRowIdColumnId() {
+		return UNDEF_COLUMNID;
+	}
+	ColumnType getRowIdColumnType() {
+		return COLUMN_TYPE_LONG;
+	}
+
 	uint32_t getRealColumnNum(TransactionContext &txn) {
 		return getColumnNum();
 	}
@@ -210,12 +229,17 @@ private:
 
 private:  
 private:  
-	bool isUnique(TransactionContext &txn, uint32_t rowKeySize,
-		const uint8_t *rowKey, OId &oId);
-	bool searchRowKeyWithRowIdMap(TransactionContext &txn, uint32_t rowKeySize,
-		const uint8_t *rowKey, OId &oId);
-	bool searchRowKeyWithMvccMap(TransactionContext &txn, uint32_t rowKeySize,
-		const uint8_t *rowKey, OId &oId);
+	bool isUnique(TransactionContext &txn, 
+		util::Vector<ColumnId> &keyColumnIdList, 
+		util::XArray<KeyData> &keyFieldList, OId &oId);
+	bool searchRowKeyWithRowIdMap(TransactionContext &txn, 
+		util::XArray<KeyData> &keyFieldList, util::Vector<ColumnId> &keyColumnIdList,
+		OId &oId);
+	bool searchRowKeyWithMvccMap(TransactionContext &txn,
+		BtreeMap::SearchContext &sc, OId &oId);
+	bool searchRowKeyWithMvccMap(TransactionContext &txn,
+		util::XArray<KeyData> &keyFieldList, util::Vector<ColumnId> &keyColumnIdList,
+		OId &oId);
 
 	void deleteRow(
 		TransactionContext &txn, RowId rowId, bool &existing, bool isForceLock);
@@ -314,8 +338,14 @@ private:
 	}
 	void checkExclusive(TransactionContext &txn);
 
-	bool getIndexData(TransactionContext &txn, ColumnId columnId,
-		MapType mapType, bool withUncommitted, IndexData &indexData) const;
+	bool getIndexData(TransactionContext &txn, const util::Vector<ColumnId> &columnIds,
+		MapType mapType, bool withUncommitted, IndexData &indexData, 
+		bool withPartialMatch = false) const;
+	bool getIndexData(TransactionContext &txn, IndexCursor &indexCursor,
+		IndexData &indexData) const {
+		return indexSchema_->getIndexData( 
+			txn, indexCursor, UNDEF_CONTAINER_POS, indexData);
+	}
 	void createNullIndexData(TransactionContext &txn, IndexData &indexData) {
 		indexSchema_->createNullIndexData(txn, UNDEF_CONTAINER_POS, indexData, 
 			this);

@@ -195,6 +195,34 @@ private:
 };
 
 /*!
+ * @brief TIME_WINDOW_AGG(*|column, timestamp_start, timestamp_end, interval,
+ * DAY|HOUR|MINUTE|SECOND|MILLISECOND)
+ */
+class SelectionTimeWindowAgg : public SelectionTimeInterpolated {
+public:
+	using TqlSelection::operator();
+	int operator()(TransactionContext &txn, TimeSeries &timeSeries,
+		util::XArray<PointRowId> &resultRowIdList, bool isSorted,
+		OutputOrder apiOutputOrder, SortExprList *orderByExpr, uint64_t limit,
+		uint64_t offset, FunctionMap &function_map, ExprList &args,
+		OutputMessageRowStore *messageRowStore, ResultType &resultType);
+	QpPassMode getPassMode() {
+		return QP_PASSMODE_PASS_IF_NO_WHERE;
+	}
+	uint64_t apiPassThrough(TransactionContext &txn, TimeSeries &timeSeries,
+		BtreeMap::SearchContext &sc, OutputOrder apiOutputOrder, uint64_t limit,
+		uint64_t offset, ExprList &args, OutputMessageRowStore *messageRowStore,
+		ResultType &resultType);
+	virtual ~SelectionTimeWindowAgg() {}
+
+private:
+	bool parseArgument(TransactionContext &txn, ObjectManager &objectManager,
+		ExprList &args, uint32_t &columnId, ColumnType &columnType,
+		util::DateTime::FieldType &fType, Timestamp &targetTs, Timestamp &endTs,
+		int32_t &duration, AggregationType &aggType);
+};
+
+/*!
  * @brief MAX_ROWS(column)/MIN_ROWS(column)
  *
  */
@@ -289,6 +317,7 @@ public:
 		RegisterFunction<SelectionTimeSampling>("TIME_SAMPLING");
 		RegisterFunction<Selection_max_rows>("MAX_ROWS");
 		RegisterFunction<Selection_min_rows>("MIN_ROWS");
+		RegisterFunction<SelectionTimeWindowAgg>("TIME_WINDOW_AGG");
 	}
 
 private:

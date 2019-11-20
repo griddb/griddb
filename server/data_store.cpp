@@ -39,29 +39,35 @@
 
 
 
-const OId DataStore::PARTITION_HEADER_OID = ObjectManager::getOId(
-	ALLOCATE_META_CHUNK, INITIAL_CHUNK_ID, FIRST_OBJECT_OFFSET);
 
 
-const uint32_t DataStoreValueLimitConfig::LIMIT_SMALL_SIZE_LIST[6] = {
-	15 * 1024, 31 * 1024, 63 * 1024, 127 * 1024, 128 * 1024, 128 * 1024};
-const uint32_t DataStoreValueLimitConfig::LIMIT_BIG_SIZE_LIST[6] = {
-	1024 * 1024 * 1024 - 1, 1024 * 1024 * 1024 - 1, 1024 * 1024 * 1024 - 1, 1024 * 1024 * 1024 - 1,
-	1024 * 1024 * 1024 - 1, 1024 * 1024 * 1024 - 1};
-const uint32_t DataStoreValueLimitConfig::LIMIT_ARRAY_NUM_LIST[6] = {
-	2000, 4000, 8000, 16000, 32000, 65000};
-const uint32_t DataStoreValueLimitConfig::LIMIT_COLUMN_NUM_LIST[6] = {
-	512, 1024, 1024, 1000*8, 1000*16, 1000*32};
-const uint32_t DataStoreValueLimitConfig::LIMIT_INDEX_NUM_LIST[6] = {
-	512, 1024, 1024, 1000*4, 1000*8, 1000*16};
-const uint32_t DataStoreValueLimitConfig::LIMIT_CONTAINER_NAME_SIZE_LIST[6] = {
-	8 * 1024, 16 * 1024, 32 * 1024, 64 * 1024, 128 * 1024, 128 * 1024};
+const uint32_t DataStoreValueLimitConfig::LIMIT_SMALL_SIZE_LIST[12] = {
+	15 * 1024, 31 * 1024, 63 * 1024, 127 * 1024, 128 * 1024, 128 * 1024,
+	128 * 1024, 128 * 1024, 128 * 1024, 128 * 1024, 128 * 1024, 128 * 1024};
+const uint32_t DataStoreValueLimitConfig::LIMIT_BIG_SIZE_LIST[12] = {
+	1024 * 1024 * 1024 - 1, 1024 * 1024 * 1024 - 1, 1024 * 1024 * 1024 - 1,
+	1024 * 1024 * 1024 - 1, 1024 * 1024 * 1024 - 1, 1024 * 1024 * 1024 - 1,
+	1024 * 1024 * 1024 - 1, 1024 * 1024 * 1024 - 1, 1024 * 1024 * 1024 - 1,
+	1024 * 1024 * 1024 - 1, 1024 * 1024 * 1024 - 1, 1024 * 1024 * 1024 - 1};
+const uint32_t DataStoreValueLimitConfig::LIMIT_ARRAY_NUM_LIST[12] = {
+	2000, 4000, 8000, 16000, 32000, 65000,
+	65000, 65000, 65000, 65000, 65000, 65000};
+const uint32_t DataStoreValueLimitConfig::LIMIT_COLUMN_NUM_LIST[12] = {
+	512, 1024, 1024, 1000*8, 1000*16, 1000*32,
+	1000*32, 1000*32, 1000*32, 1000*32, 1000*32, 1000*32};
+const uint32_t DataStoreValueLimitConfig::LIMIT_INDEX_NUM_LIST[12] = {
+	512, 1024, 1024, 1000*4, 1000*8, 1000*16,
+	1000*16, 1000*16, 1000*16, 1000*16, 1000*16, 1000*16};
+const uint32_t DataStoreValueLimitConfig::LIMIT_CONTAINER_NAME_SIZE_LIST[12] = {
+	8 * 1024, 16 * 1024, 32 * 1024, 64 * 1024, 128 * 1024, 128 * 1024,
+	128 * 1024, 128 * 1024, 128 * 1024, 128 * 1024, 128 * 1024, 128 * 1024};
 
 DataStoreValueLimitConfig::DataStoreValueLimitConfig(
 	const ConfigTable &configTable) {
 	int32_t chunkExpSize = util::nextPowerBitsOf2(
 		configTable.getUInt32(CONFIG_TABLE_DS_STORE_BLOCK_SIZE));
 	int32_t nth = chunkExpSize - ChunkManager::MIN_CHUNK_EXP_SIZE_;
+	assert(nth < (sizeof(LIMIT_SMALL_SIZE_LIST) / sizeof(LIMIT_SMALL_SIZE_LIST[0])));
 
 	limitSmallSize_ = LIMIT_SMALL_SIZE_LIST[nth];
 	limitBigSize_ = LIMIT_BIG_SIZE_LIST[nth];
@@ -203,7 +209,12 @@ void DataStore::forceCloseAllResultSet(PartitionId pId) {
 }
 
 DataStore::DataStore(ConfigTable &configTable, ChunkManager *chunkManager)
-	: config_(configTable), pgConfig_(configTable),
+	: config_(configTable),
+	  PARTITION_HEADER_OID(ObjectManager::getOId(
+		  util::nextPowerBitsOf2(
+		  configTable.getUInt32(CONFIG_TABLE_DS_STORE_BLOCK_SIZE)),
+		  ALLOCATE_META_CHUNK, INITIAL_CHUNK_ID, FIRST_OBJECT_OFFSET)),
+	  pgConfig_(configTable),
 	  dsValueLimitConfig_(configTable),
 	  allocateStrategy_(AllocateStrategy(ALLOCATE_META_CHUNK)),
 	  resultSetPool_(
@@ -219,7 +230,17 @@ DataStore::DataStore(ConfigTable &configTable, ChunkManager *chunkManager)
 		ConfigTable::megaBytesToBytes(
 			configTable.getUInt32(CONFIG_TABLE_DS_RESULT_SET_MEMORY_LIMIT)) /
 		(1 << RESULTSET_POOL_BLOCK_SIZE_BITS));
-	resultSetPool_.setFreeElementLimit(0);
+
+	const uint32_t rsCacheSize =
+			configTable.getUInt32(CONFIG_TABLE_DS_RESULT_SET_CACHE_MEMORY);
+	if (rsCacheSize > 0) {
+		resultSetPool_.setLimit(
+				util::AllocatorStats::STAT_STABLE_LIMIT,
+				ConfigTable::megaBytesToBytes(rsCacheSize));
+	}
+	else {
+		resultSetPool_.setFreeElementLimit(0);
+	}
 
 	try {
 		affinityGroupSize_ =
@@ -679,8 +700,7 @@ void DataStore::finalizeContainer(TransactionContext &txn, BaseContainer *contai
 	} else {
 		BackgroundData bgData;
 		bgData.setDropContainerData(container->getBaseOId());
-//		BackgroundId bgId = 
-		insertBGTask(txn, txn.getPartitionId(), bgData);
+		BackgroundId bgId = insertBGTask(txn, txn.getPartitionId(), bgData);
 
 		GS_TRACE_INFO(
 			DATASTORE_BACKGROUND, GS_ERROR_DS_BACKGROUND_TASK_INVALID, 
@@ -700,8 +720,7 @@ void DataStore::finalizeMap(TransactionContext &txn, const AllocateStrategy &all
 	} else {
 		BackgroundData bgData;
 		bgData.setDropIndexData(index->getMapType(), allcateStrategy.chunkKey_, index->getBaseOId());
-//		BackgroundId bgId = 
-		insertBGTask(txn, txn.getPartitionId(), bgData);
+		BackgroundId bgId = insertBGTask(txn, txn.getPartitionId(), bgData);
 
 		GS_TRACE_INFO(
 			DATASTORE_BACKGROUND, GS_ERROR_DS_BACKGROUND_TASK_INVALID,
@@ -727,7 +746,7 @@ template int32_t BtreeMap::getAll(TransactionContext &txn, ResultSize limit,
 	BtreeMap::BtreeCursor &cursor);
 bool DataStore::searchBGTask(TransactionContext &txn, PartitionId pId, BGTask &bgTask) {
 	bool isFound = false;
-//	PartitionGroupId pgId = pgConfig_.getPartitionGroupId(pId);
+	PartitionGroupId pgId = pgConfig_.getPartitionGroupId(pId);
 
 	if (isRestored(pId) && getObjectManager()->existPartition(pId) && getBGTaskCount(pId) > 0) {
 		StackAllocAutoPtr<BtreeMap> map(txn.getDefaultAllocator(),
@@ -773,10 +792,10 @@ bool DataStore::executeBGTask(TransactionContext &txn, const BackgroundId bgId) 
 		{
 			StackAllocAutoPtr<BtreeMap> bgMap(txn.getDefaultAllocator(),
 				getBackgroundMap(txn, txn.getPartitionId()));
-			BtreeMap::SearchContext sc(
-				UNDEF_COLUMNID, &bgId, sizeof(BackgroundId), 0, NULL, MAX_RESULT_SIZE);
-//			int32_t ret = 
-			bgMap.get()->search
+			TermCondition cond(COLUMN_TYPE_LONG, COLUMN_TYPE_LONG, 
+				DSExpression::EQ, UNDEF_COLUMNID, &bgId, sizeof(BackgroundId));
+			BtreeMap::SearchContext sc(txn.getDefaultAllocator(), cond, MAX_RESULT_SIZE);
+			int32_t ret = bgMap.get()->search
 				<BackgroundId, BackgroundData, BackgroundData>(txn, sc, list);
 		}
 
@@ -894,7 +913,7 @@ bool DataStore::executeBGTaskInternal(TransactionContext &txn, BackgroundData &b
 				strategy.chunkKey_ = chunkKey;
 				StackAllocAutoPtr<BaseIndex> map(txn.getDefaultAllocator(),
 					getIndex(txn, *getObjectManager(), mapType, mapOId, 
-					strategy, NULL));
+					strategy, NULL, NULL));
 				isFinished = map.get()->finalize(txn);
 			}
 			if (isFinished) {
@@ -915,20 +934,21 @@ bool DataStore::executeBGTaskInternal(TransactionContext &txn, BackgroundData &b
 
 BaseIndex *DataStore::getIndex(TransactionContext &txn, 
 	ObjectManager &objectManager, MapType mapType, OId mapOId, 
-	const AllocateStrategy &strategy, BaseContainer *container) {
+	const AllocateStrategy &strategy, BaseContainer *container,
+	TreeFuncInfo *funcInfo) {
 	BaseIndex *map = NULL;
 	switch (mapType) {
 	case MAP_TYPE_BTREE:
 		map = ALLOC_NEW(txn.getDefaultAllocator()) BtreeMap(
-			txn, objectManager, mapOId, strategy, container);
+			txn, objectManager, mapOId, strategy, container, funcInfo);
 		break;
 	case MAP_TYPE_HASH:
 		map = ALLOC_NEW(txn.getDefaultAllocator()) HashMap(
-			txn, objectManager, mapOId, strategy, container);
+			txn, objectManager, mapOId, strategy, container, funcInfo);
 		break;
 	case MAP_TYPE_SPATIAL:
 		map = ALLOC_NEW(txn.getDefaultAllocator()) RtreeMap(
-			txn, objectManager, mapOId, strategy, container);
+			txn, objectManager, mapOId, strategy, container, funcInfo);
 		break;
 	default:
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
@@ -981,8 +1001,7 @@ void DataStore::dumpTraceBGTask(TransactionContext &txn, PartitionId pId) {
 		util::XArray< std::pair<BackgroundId, BackgroundData> > idList(
 			txn.getDefaultAllocator());
 		util::XArray< std::pair<BackgroundId, BackgroundData> >::iterator itr;
-//		int32_t getAllStatus = 
-		map.get()->getAll<BackgroundId, BackgroundData>(
+		int32_t getAllStatus = map.get()->getAll<BackgroundId, BackgroundData>(
 			txn, MAX_RESULT_SIZE, idList);
 		stream << "BGTaskRealCount= " << idList.size() << std::endl;
 		for (itr = idList.begin(); itr != idList.end(); itr++) {
@@ -1201,8 +1220,8 @@ void DataStore::changeContainerProperty(TransactionContext &txn, PartitionId pId
 void DataStore::addContainerSchema(TransactionContext &txn, PartitionId pId,
 	BaseContainer *&container, MessageSchema *messageSchema) {
 
-//	bool isFirstUpdate = container->isFirstColumnAdd();
-//	bool oldWithVar = container->getVariableColumnNum() > 0;
+	bool isFirstUpdate = container->isFirstColumnAdd();
+	bool oldWithVar = container->getVariableColumnNum() > 0;
 	uint32_t oldColumnNum = container->getColumnNum();
 
 	ContainerId containerId = container->getContainerId();
@@ -1222,8 +1241,9 @@ OId DataStore::getColumnSchemaId(TransactionContext &txn, PartitionId pId,
 		txn.getDefaultAllocator(), getSchemaMap(txn, pId));
 	OId schemaOId = UNDEF_OID;
 	util::XArray<OId> schemaList(txn.getDefaultAllocator());
-	BtreeMap::SearchContext sc(
-		UNDEF_COLUMNID, &schemaHashKey, 0, 0, NULL, MAX_RESULT_SIZE);
+	TermCondition cond(COLUMN_TYPE_LONG, COLUMN_TYPE_LONG, 
+		DSExpression::EQ, UNDEF_COLUMNID, &schemaHashKey, sizeof(schemaHashKey));
+	BtreeMap::SearchContext sc(txn.getDefaultAllocator(), cond, MAX_RESULT_SIZE);
 	schemaMap.get()->search(txn, sc, schemaList);
 	for (size_t i = 0; i < schemaList.size(); i++) {
 		ShareValueList commonContainerSchema(
@@ -1243,8 +1263,9 @@ OId DataStore::getTriggerId(TransactionContext &txn, PartitionId pId,
 		txn.getDefaultAllocator(), getTriggerMap(txn, pId));
 	OId triggerOId = UNDEF_OID;
 	util::XArray<OId> schemaList(txn.getDefaultAllocator());
-	BtreeMap::SearchContext sc(
-		UNDEF_COLUMNID, &triggerHashKey, 0, 0, NULL, MAX_RESULT_SIZE);
+	TermCondition cond(COLUMN_TYPE_LONG, COLUMN_TYPE_LONG, 
+		DSExpression::EQ, UNDEF_COLUMNID, &triggerHashKey, sizeof(triggerHashKey));
+	BtreeMap::SearchContext sc(txn.getDefaultAllocator(), cond, MAX_RESULT_SIZE);
 	triggerMap.get()->search(txn, sc, schemaList);
 	for (size_t i = 0; i < schemaList.size(); i++) {
 		ShareValueList commonContainerSchema(
@@ -1537,14 +1558,6 @@ void DataStore::updateBGTask(TransactionContext &txn, PartitionId pId, Backgroun
 		partitionHeadearObject.setBackgroundMapOId(
 			bgMap.get()->getBaseOId());
 	}
-}
-
-/*!
-	@brief Get PartitionGroupId from PartitionId
-*/
-UTIL_FORCEINLINE PartitionGroupId DataStore::calcPartitionGroupId(
-	PartitionId pId) {
-	return pgConfig_.getPartitionGroupId(pId);
 }
 
 /*!
@@ -2079,6 +2092,7 @@ void DataStore::archive(util::StackAllocator &alloc, TransactionManager &txnMgr,
 				GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_OM_OPEN_DUMP_FILE_FAILED, "not exist pId = " << pId);
 			}
 
+			util::TimeZone timeZone;
 			ClientId clientId;
 			TransactionManager::ContextSource cxtSrc;
 			util::DateTime now(0);
@@ -2102,8 +2116,8 @@ void DataStore::archive(util::StackAllocator &alloc, TransactionManager &txnMgr,
 						TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL, 
 						TransactionManager::PUT,
 						TransactionManager::NO_AUTO_COMMIT_BEGIN_OR_CONTINUE,
-						false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE);
-//					TransactionContext &txn =
+						false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE, timeZone);
+					TransactionContext &txn =
 						txnMgr.put(alloc, pId, mvccClientId, src,
 							now, emNow, isRedo, *txnItr);
 				}
@@ -2180,7 +2194,7 @@ ShareValueList *DataStore::makeCommonContainerSchema(TransactionContext &txn, in
 
 BaseContainer *DataStore::getBaseContainer(TransactionContext &txn, PartitionId pId,
 	const BibInfo::Container &bibInfo) {
-//	util::StackAllocator &alloc = txn.getDefaultAllocator();
+	util::StackAllocator &alloc = txn.getDefaultAllocator();
 	if (!objectManager_->existPartition(pId)) {
 		return NULL;
 	}
@@ -2564,6 +2578,10 @@ void DataStore::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.add("32KB")
 		.add("64KB")
 		.add("1MB")
+		.add("4MB")
+		.add("8MB")
+		.add("16MB")
+		.add("32MB")
 		.setDefault("64KB");
 
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_DB_PATH, STRING)
@@ -2617,6 +2635,11 @@ void DataStore::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.setUnit(ConfigTable::VALUE_UNIT_SIZE_MB)
 		.setMin(1)
 		.setDefault(10240);
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_DS_RESULT_SET_CACHE_MEMORY, INT32)
+		.setUnit(ConfigTable::VALUE_UNIT_SIZE_MB)
+		.setMin(0)
+		.setDefault(0);
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_RECOVERY_LEVEL, INT32)
 		.add(0)
 		.add(1)
@@ -2661,6 +2684,35 @@ void DataStore::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.setMin(0.0)
 		.setDefault(0.375)
 		.setMax(1.0);
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_DS_CHECKPOINT_FILE_FLUSH_SIZE, INT64)
+		.setUnit(ConfigTable::VALUE_UNIT_SIZE_B)  
+		.setMin(0)
+		.setMax("128TB")
+		.setDefault(0);
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_DS_CHECKPOINT_FILE_AUTO_CLEAR_CACHE, BOOL)
+		.setDefault(true);
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_DS_STORE_BUFFER_TABLE_SIZE_RATE, DOUBLE)
+		.setMin(0.0)
+		.setDefault(0.01)
+		.setMax(1.0);
+	picojson::value defaultValue;
+
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_DS_DB_FILE_PATH_LIST, JSON)
+		.setDefault(defaultValue);
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_DS_DB_FILE_SPLIT_COUNT, INT32)
+		.setMin(1)
+		.setDefault(0)
+		.setMax(128);
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_DS_DB_FILE_SPLIT_STRIPE_SIZE, INT32)
+		.setMin(1)
+		.setDefault(1)
+		.setMax(INT32_MAX);
 }
 
 DataStore::StatSetUpHandler DataStore::statSetUpHandler_;
@@ -2719,8 +2771,7 @@ bool DataStore::StatUpdator::operator()(StatTable &stat) {
 		stat.set(STAT_TABLE_PERF_DS_EXP_ERASABLE_EXPIRED_TIME, strstrm.str());
 	}
 	{
-//		uint64_t totalScanTime_ = 0, totalScanNum_ = 0, 
-		uint64_t lastExpiredNum = 0, 
+		uint64_t totalScanTime_ = 0, totalScanNum_ = 0, lastExpiredNum = 0, 
 			simulateExpiredNum = 0, scanBatchTotalTime = 0, scanBatchTotalNum = 0;
 		int64_t diffExpiredNum = 0;
 		Timestamp maxExpiredTime = 0;

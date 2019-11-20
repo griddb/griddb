@@ -135,6 +135,7 @@ $(srcdir)/zlib_utils.cpp \
 $(srcdir)/array_processor.cpp \
 $(srcdir)/authentication.cpp \
 $(srcdir)/base_container.cpp \
+$(srcdir)/base_index.cpp \
 $(srcdir)/bit_array.cpp \
 $(srcdir)/blob_processor.cpp \
 $(srcdir)/btree_map.cpp \
@@ -182,8 +183,8 @@ $(srcdir)/transaction_context.cpp \
 $(srcdir)/transaction_manager.cpp \
 $(srcdir)/transaction_manager_authentication.cpp \
 $(srcdir)/transaction_service.cpp \
-$(srcdir)/transaction_service_user_management.cpp \
 $(srcdir)/trigger_service.cpp \
+$(srcdir)/user_management.cpp \
 $(srcdir)/uuid_utils.cpp \
 $(srcdir)/value.cpp \
 $(srcdir)/value_operator.cpp \

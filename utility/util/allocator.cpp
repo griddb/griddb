@@ -623,7 +623,11 @@ StackAllocator::StackAllocator(BaseAllocator &base) :
 		topBlock_(NULL),
 		freeBlock_(NULL),
 		totalSizeLimit_(std::numeric_limits<size_t>::max()),
+#if UTIL_ALLOCATOR_NO_CACHE_STACK_ALLOCATOR
+		freeSizeLimit_(0),
+#else
 		freeSizeLimit_(std::numeric_limits<size_t>::max()),
+#endif
 		totalSize_(0),
 		freeSize_(0),
 		hugeCount_(0),
@@ -644,7 +648,11 @@ StackAllocator::StackAllocator(const AllocatorInfo &info, BaseAllocator *base) :
 		topBlock_(NULL),
 		freeBlock_(NULL),
 		totalSizeLimit_(std::numeric_limits<size_t>::max()),
+#if UTIL_ALLOCATOR_NO_CACHE_STACK_ALLOCATOR
+		freeSizeLimit_(0),
+#else
 		freeSizeLimit_(std::numeric_limits<size_t>::max()),
+#endif
 		totalSize_(0),
 		freeSize_(0),
 		hugeCount_(0),
@@ -946,11 +954,17 @@ void StackAllocator::getStats(AllocatorStats &stats) {
 
 void StackAllocator::setLimit(AllocatorStats::Type type, size_t value) {
 	switch (type) {
+#if UTIL_ALLOCATOR_NO_CACHE_STACK_ALLOCATOR
+	default:
+		static_cast<void>(value);
+		break;
+#else
 	case AllocatorStats::STAT_CACHE_LIMIT:
 		freeSizeLimit_ = value;
 		break;
 	default:
 		break;
+#endif
 	}
 }
 

@@ -36,6 +36,7 @@ import java.util.Iterator;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
+import java.util.SimpleTimeZone;
 import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.UUID;
@@ -913,6 +914,11 @@ public class NodeConnection implements Closeable {
 						OptionalRequestType.STORE_MEMORY_AGING_SWAP_RATE,
 						loginInfo.storeMemoryAgingSwapRate);
 			}
+			if (loginInfo.timeZoneOffset != null) {
+				request.put(
+						OptionalRequestType.TIME_ZONE_OFFSET,
+						(long) loginInfo.timeZoneOffset.getRawOffset());
+			}
 			request.format(req);
 		}
 
@@ -1183,11 +1189,14 @@ public class NodeConnection implements Closeable {
 
 		private double storeMemoryAgingSwapRate;
 
+		private SimpleTimeZone timeZoneOffset;
+
 		public LoginInfo(
 				String user, String password, boolean ownerMode,
 				String database, String clusterName,
 				long transactionTimeoutMillis,
-				String applicationName, double storeMemoryAgingSwapRate) {
+				String applicationName, double storeMemoryAgingSwapRate,
+				SimpleTimeZone timeZoneOffset) {
 			this.user = user;
 			this.passwordDigest = Challenge.makeDigest(user, password);
 			this.database = database;
@@ -1198,6 +1207,7 @@ public class NodeConnection implements Closeable {
 							transactionTimeoutMillis);
 			this.applicationName = applicationName;
 			this.storeMemoryAgingSwapRate = storeMemoryAgingSwapRate;
+			this.timeZoneOffset = timeZoneOffset;
 		}
 
 		public LoginInfo(LoginInfo loginInfo) {
@@ -1214,6 +1224,7 @@ public class NodeConnection implements Closeable {
 			this.clientId = loginInfo.clientId;
 			this.applicationName = loginInfo.applicationName;
 			this.storeMemoryAgingSwapRate = loginInfo.storeMemoryAgingSwapRate;
+			this.timeZoneOffset = loginInfo.timeZoneOffset;
 		}
 
 		public void setUser(String user) {
@@ -1262,6 +1273,10 @@ public class NodeConnection implements Closeable {
 
 		public double getStoreMemoryAgingSwapRate() {
 			return storeMemoryAgingSwapRate;
+		}
+
+		public SimpleTimeZone getTimeZoneOffset() {
+			return timeZoneOffset;
 		}
 
 	}
@@ -1521,7 +1536,8 @@ public class NodeConnection implements Closeable {
 	public enum FeatureVersion {
 		V4_0,
 		V4_1,
-		V4_2
+		V4_2,
+		V4_3
 	}
 
 	public static class MessageDigestFactory {
@@ -1599,7 +1615,8 @@ public class NodeConnection implements Closeable {
 		META_NAMING_TYPE(11007, Byte.class),
 		QUERY_CONTAINER_KEY(11008, byte[].class),
 		APPLICATION_NAME(11009, String.class),
-		STORE_MEMORY_AGING_SWAP_RATE(11010, Double.class);
+		STORE_MEMORY_AGING_SWAP_RATE(11010, Double.class),
+		TIME_ZONE_OFFSET(11011, Long.class);
 
 		private final int id;
 

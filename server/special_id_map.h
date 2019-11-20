@@ -76,6 +76,9 @@ public:
 		RegisterFunction("MINUTE");
 		RegisterFunction("SECOND");
 		RegisterFunction("MILLISECOND");
+		RegisterFunction("MAX");
+		RegisterFunction("MIN");
+		RegisterFunction("AVG");
 	}
 
 private:

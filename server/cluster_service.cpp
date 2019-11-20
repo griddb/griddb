@@ -31,7 +31,7 @@
 #include "sync_service.h"
 #include "system_service.h"
 #include "transaction_service.h"
-#include "trigger_service.h"
+
 
 UTIL_TRACER_DECLARE(CLUSTER_INFO_TRACE);
 UTIL_TRACER_DECLARE(CLUSTER_DUMP);
@@ -60,42 +60,6 @@ const char *ClusterService::NotificationManager::CONFIG_URL = "url";
 const char *ClusterService::NotificationManager::CONFIG_UPDATE_INTERVAL =
 	"updateInterval";
 
-
-#define CLUSTER_SET_ADDRESS(info, pos, type, resolver, target, SERVICE_TYPE) \
-	do {                                                                     \
-		const picojson::value &value =                                       \
-			JsonUtils::as<picojson::value>(target, SERVICE_TYPE);            \
-		info.set(JsonUtils::as<std::string>(value, CONFIG_ADDRESS).c_str(),  \
-			JsonUtils::asInt<uint16_t>(value, CONFIG_PORT));                 \
-		resolver.setAddress(pos, type,                                       \
-			resolver.makeSocketAddress(                                      \
-				JsonUtils::as<std::string>(value, CONFIG_ADDRESS).c_str(),   \
-				JsonUtils::asInt<uint16_t>(value, CONFIG_PORT)));            \
-	} while (false)
-
-#define CLUSTER_MAKE_JSON_ADDRESS(entryObj, pos, key, service)                 \
-	do {                                                                       \
-		picojson::object currentObj;                                           \
-		NodeAddress &address = pt_->getNodeInfo(pos).getNodeAddress(service);  \
-		currentObj[CONFIG_ADDRESS] = picojson::value(address.toString(false)); \
-		currentObj[CONFIG_PORT] =                                              \
-			picojson::value(static_cast<double>(address.port_));               \
-		entryObj[key] = picojson::value(currentObj);                           \
-	} while (false)
-
-#define CLUSTER_MAKE_JSON_ADDRESS_FROM_SOCKET(                                \
-	entryObj, resolver, pos, key, service)                                    \
-	do {                                                                      \
-		picojson::object currentObj;                                          \
-		const util::SocketAddress &addr = resolver.getAddress(pos, service);  \
-		u8string addrString;                                                  \
-		uint16_t port;                                                        \
-		addr.getIP(&addrString, &port);                                       \
-		currentObj[CONFIG_ADDRESS] = picojson::value(addrString);             \
-		currentObj[CONFIG_PORT] = picojson::value(static_cast<double>(port)); \
-		entryObj[key] = picojson::value(currentObj);                          \
-	} while (false)
-
 /*!
 	@brief Gets node id of sender ND
 */
@@ -108,6 +72,7 @@ NodeId ClusterService::resolveSenderND(Event &ev) {
 		return SELF_NODEID;
 	}
 }
+
 
 ClusterService::ClusterService(const ConfigTable &config,
 	EventEngine::Config &eeconfig, EventEngine::Source source,
@@ -125,7 +90,7 @@ ClusterService::ClusterService(const ConfigTable &config,
 	sysSvc_(NULL),
 	cpSvc_(NULL),
 	clusterStats_(config.get<int32_t>(CONFIG_TABLE_DS_PARTITION_NUM)),
-	pt_(NULL),
+	pt_(clsMgr.getPartitionTable()),
 	initailized_(false),
 	isSystemServiceError_(false),
 	notificationManager_(clsMgr_, alloc)
@@ -184,6 +149,8 @@ ClusterService::ClusterService(const ConfigTable &config,
 			fixedSizeAlloc_);
 		util::StackAllocator::Scope scope(alloc);
 
+		ClusterAdditionalServiceConfig addConfig(config, pt_);
+
 		notificationManager_.initialize(config);
 		if (notificationManager_.getMode() == NOTIFICATION_RESOLVER) {
 			ee_.setHandler(CS_UPDATE_PROVIDER, timerNotifyClusterHandler_);
@@ -223,7 +190,16 @@ EventEngine::Config &ClusterService::createEEConfig(
 		eeConfig.setMulticastAddress(
 			config.get<const char8_t *>(CONFIG_TABLE_CS_NOTIFICATION_ADDRESS),
 			config.getUInt16(CONFIG_TABLE_CS_NOTIFICATION_PORT));
+
+		if (strlen(config.get<const char8_t *>(
+				CONFIG_TABLE_CS_NOTIFICATION_INTERFACE_ADDRESS)) != 0) {
+			eeConfig.setMulticastIntefaceAddress(
+					config.get<const char8_t *>(
+						CONFIG_TABLE_CS_NOTIFICATION_INTERFACE_ADDRESS),
+					config.getUInt16(CONFIG_TABLE_CS_SERVICE_PORT));
+		}
 	}
+
 	eeConfig.setAllAllocatorGroup(ALLOCATOR_GROUP_CS);
 	return eeConfig;
 }
@@ -256,13 +232,18 @@ void ClusterService::initialize(ManagerSet &mgrSet) {
 		timerNotifyClientHandler_.initialize(mgrSet);
 
 
+		ClusterAdditionalServiceConfig addConfig(*config);
+
 		unknownEventHandler_.initialize(mgrSet);
 		serviceThreadErrorHandler_.initialize(mgrSet);
 
 		NodeAddress clusterAddress, txnAddress, syncAddress;
-		ClusterService::changeAddress(clusterAddress, SELF_NODEID, getEE(CLUSTER_SERVICE));
-		ClusterService::changeAddress(txnAddress, SELF_NODEID, getEE(TRANSACTION_SERVICE));
-		ClusterService::changeAddress(syncAddress, SELF_NODEID, getEE(SYNC_SERVICE));
+		ClusterService::changeAddress(
+				clusterAddress, SELF_NODEID, getEE(CLUSTER_SERVICE));
+		ClusterService::changeAddress(
+				txnAddress, SELF_NODEID, getEE(TRANSACTION_SERVICE));
+		ClusterService::changeAddress(
+				syncAddress, SELF_NODEID, getEE(SYNC_SERVICE));
 
 		EventEngine::Config tmp;
 		tmp.setServerAddress(
@@ -281,14 +262,48 @@ void ClusterService::initialize(ManagerSet &mgrSet) {
 		pt_->setNodeInfo(SELF_NODEID, TRANSACTION_SERVICE, txnAddress);
 		pt_->setNodeInfo(SELF_NODEID, SYNC_SERVICE, syncAddress);
 		pt_->setNodeInfo(SELF_NODEID, SYSTEM_SERVICE, systemAddress);
+
 		if (notificationManager_.getMode() == NOTIFICATION_FIXEDLIST) {
 			NodeAddressSet &addressInfo = notificationManager_.getFixedAddressInfo();
-			bool selfIncluded = false;
+			if (!addConfig.isSetServiceAddress()) {
+					GS_TRACE_WARNING(CLUSTER_OPERATION, GS_TRACE_CS_OPERATION,
+							"Recommended specify fixed list service address");
+			}
+			bool selfIncluded = true;
+			bool unmatchAddress = false;
+			const NodeAddress *failAddress = NULL;
+			const NodeAddress *correctAddress = NULL;
+			ServiceType failType;
 			for (NodeAddressSet::iterator it = addressInfo.begin(); it != addressInfo.end(); it++) {
-				const NodeAddress &address = (*it).clusterAddress_;
-				if (address == clusterAddress) {
+				if ((*it).clusterAddress_ == clusterAddress) {
+					if ((*it).transactionAddress_ == txnAddress) {
+					}
+					else {
+						unmatchAddress = true;
+						failAddress = &(*it).transactionAddress_;
+						correctAddress = &txnAddress;
+						failType = TRANSACTION_SERVICE;
+						break;
+					}
+					if ((*it).syncAddress_ == syncAddress) {
+					}
+					else {
+						unmatchAddress = true;
+						failAddress = &(*it).syncAddress_;
+						correctAddress = &syncAddress;
+						failType = SYNC_SERVICE;
+						break;
+					}
+					if ((*it).systemAddress_ == systemAddress) {
+					}
+					else {
+						unmatchAddress = true;
+						failAddress = &(*it).systemAddress_;
+						correctAddress = &systemAddress;
+						failType = SYSTEM_SERVICE;
+						break;
+					}
 					selfIncluded = true;
-					break;
 				}
 			}
 			if (!selfIncluded) {
@@ -297,7 +312,14 @@ void ClusterService::initialize(ManagerSet &mgrSet) {
 					"Self cluster address is not included in this list "
 						"(address = " << clusterAddress.toString() << ")");
 			}
-			updateNodeList(addressInfo);
+			else if (unmatchAddress) {
+				GS_THROW_USER_ERROR(GS_ERROR_CS_CONFIG_ERROR,
+					"Failed to check notification list in config. "
+					"Self service address (" << dumpServiceType(failType) << ") is not included in this list "
+						"(expected=" << (*correctAddress).toString() << ", actual=" << (*failAddress).toString() << ")");
+			}
+			updateNodeList(addressInfo,
+					notificationManager_.getPublicFixedAddressInfo());
 			if (pt_->getNodeNum() != notificationManager_.getFixedNodeNum()) {
 				GS_THROW_USER_ERROR(GS_ERROR_CS_CONFIG_ERROR,
 					"Failed to check notification member. "
@@ -485,8 +507,8 @@ void ClusterService::decode(
 			GS_THROW_USER_ERROR(GS_ERROR_CS_SERVICE_DECODE_MESSAGE_FAILED,
 				"Event body buffer is null");
 		}
-//		uint32_t remainSize = static_cast<int32_t>(in.base().remaining());
-		uint32_t lastSize = in.base().position() + packedSize;
+		uint32_t remainSize = static_cast<uint32_t>(in.base().remaining());
+		uint32_t lastSize = static_cast<uint32_t>(in.base().position()) + packedSize;
 		try {
 			msgpack::unpacked msg;
 			msgpack::unpack(&msg, bodyBuffer, packedSize);
@@ -703,6 +725,16 @@ void HeartbeatHandler::doAfterHeartbeatInfo(
 	}
 }
 
+void HeartbeatHandler::decode(util::StackAllocator &alloc, Event &ev,
+		ClusterManager::HeartbeatInfo &heartbeatInfo,
+		PublicAddressInfoMessage &publicAddressInfo) {
+	EventByteInStream in = ev.getInStream();
+	clsSvc_->decode(alloc, ev, heartbeatInfo, in);
+	if (in.base().remaining()) {
+		clsSvc_->decode(alloc, ev, publicAddressInfo, in);
+	}
+}
+
 /*!
 	@brief Handler Operator
 */
@@ -725,9 +757,11 @@ void HeartbeatHandler::operator()(EventContext &ec, Event &ev) {
 			}
 
 			ClusterManager::HeartbeatInfo heartbeatInfo(alloc, senderNodeId, pt_);
-			clsSvc_->decode(alloc, ev, heartbeatInfo);
+			PublicAddressInfoMessage publicAddressInfo;
+			decode(alloc, ev, heartbeatInfo, publicAddressInfo);
 
-			clsSvc_->updateNodeList(heartbeatInfo.getNodeAddressList());
+			clsSvc_->updateNodeList(heartbeatInfo.getNodeAddressList(),
+					publicAddressInfo.getPublicNodeAddressList());
 			if (!clsMgr_->setHeartbeatInfo(heartbeatInfo)) {
 				return;
 			}
@@ -766,7 +800,8 @@ void HeartbeatHandler::operator()(EventContext &ec, Event &ev) {
 
 template<class T>
 void NotifyClusterHandler::doAfterNotifyCluster(T &t) {
-	clsSvc_->updateNodeList(t.getNodeAddressInfoList());
+	clsSvc_->updateNodeList(t.getNodeAddressInfoList(),
+			t.getPublicNodeAddressInfoList());
 }
 
 void NotifyClusterHandler::handleError(Event &ev, UserException &e) {
@@ -791,6 +826,18 @@ void NotifyClusterHandler::handleError(Event &ev, UserException &e) {
 		TRACE_CLUSTER_EXCEPTION(e, eventType, WARNING,
 			"Connected cluster node is invalid, address:"
 				<< ev.getSenderND());
+	}
+}
+
+void NotifyClusterHandler::decode(util::StackAllocator &alloc, Event &ev,
+		ClusterManager::NotifyClusterInfo &notifyClusterInfo) {
+	EventByteInStream in = ev.getInStream();
+	clsSvc_->decode(alloc, ev, notifyClusterInfo, in);
+	PublicAddressInfoMessage publicAddressInfo;
+	if (in.base().remaining()) {
+		clsSvc_->decode(alloc, ev, publicAddressInfo, in);
+		notifyClusterInfo.setPublicNodeAddressInfoList(
+			publicAddressInfo.getPublicNodeAddressList());
 	}
 }
 
@@ -819,7 +866,8 @@ void NotifyClusterHandler::operator()(EventContext &ec, Event &ev) {
 			}
 
 			ClusterManager::NotifyClusterInfo recvNotifyClusterInfo(alloc, senderNodeId, pt_);
-			clsSvc_->decode(alloc, ev, recvNotifyClusterInfo);
+			decode(alloc, ev, recvNotifyClusterInfo);
+
 			if (!clsMgr_->setNotifyClusterInfo(recvNotifyClusterInfo)) {
 				return;
 			}
@@ -830,7 +878,14 @@ void NotifyClusterHandler::operator()(EventContext &ec, Event &ev) {
 				clsMgr_->getNotifyClusterResInfo(notifyClusterResInfo);
 
 				Event requestEvent(ec, CS_NOTIFY_CLUSTER_RES, CS_HANDLER_PARTITION_ID);
-				clsSvc_->encode(requestEvent, notifyClusterResInfo);
+				EventByteOutStream out = requestEvent.getOutStream();
+				clsSvc_->encode(notifyClusterResInfo, out);
+
+				if (pt_->hasPublicAddress()) {
+					PublicAddressInfoMessage publicAddressInfo;
+					pt_->getPublicNodeAddress(publicAddressInfo.getPublicNodeAddressList());
+					clsSvc_->encode(publicAddressInfo, out);
+				}
 
 				const NodeDescriptor &nd = ev.getSenderND();
 				if (!nd.isEmpty()) {
@@ -842,8 +897,14 @@ void NotifyClusterHandler::operator()(EventContext &ec, Event &ev) {
 		case CS_NOTIFY_CLUSTER_RES: {
 			clsMgr_->checkClusterStatus(CS_NOTIFY_CLUSTER_RES);
 			ClusterManager::NotifyClusterResInfo notifyClusterResInfo(alloc, senderNodeId, pt_);
-			clsSvc_->decode(alloc, ev, notifyClusterResInfo);
-
+			EventByteInStream in = ev.getInStream();
+			clsSvc_->decode(alloc, ev, notifyClusterResInfo, in);
+			if (in.base().remaining()) {
+				PublicAddressInfoMessage publicAddressInfo;
+				clsSvc_->decode(alloc, ev, publicAddressInfo, in);
+				notifyClusterResInfo.setPublicNodeAddressInfoList(
+						publicAddressInfo.getPublicNodeAddressList());
+			}
 			doAfterNotifyCluster(notifyClusterResInfo);
 
 			clsMgr_->setNotifyClusterResInfo(notifyClusterResInfo);
@@ -945,13 +1006,21 @@ void SystemCommandHandler::operator()(EventContext &ec, Event &ev) {
 void TimerCheckClusterHandler::sendHeartbeat(EventContext &ec,
 		ClusterManager::HeartbeatInfo &heartbeatInfo,
 		ClusterManager::HeartbeatCheckInfo &heartbeatCheckInfo) {
-	std::vector<NodeId> &activeNodeList = heartbeatCheckInfo.getActiveNodeList();
+	NodeIdList &activeNodeList = heartbeatCheckInfo.getActiveNodeList();
 	int32_t activeNodeListSize = static_cast<int32_t>(activeNodeList.size());
-	pt_->incPartitionRevision();
+	if (!clsMgr_->isInitialCluster()) {
+		pt_->incPartitionRevision();
+	}
 	if (activeNodeListSize > 1) {
 		Event heartbeatEvent(ec, CS_HEARTBEAT, CS_HANDLER_PARTITION_ID);
-		clsSvc_->encode(heartbeatEvent, heartbeatInfo);
-//		int64_t currentTime = clsMgr_->getMonotonicTime();
+		EventByteOutStream out = heartbeatEvent.getOutStream();
+		clsSvc_->encode(heartbeatInfo, out);
+		if (pt_->hasPublicAddress() && heartbeatInfo.getNodeAddressList().size() > 0) {
+			PublicAddressInfoMessage publicAddressInfo;
+			pt_->getPublicNodeAddress(publicAddressInfo.getPublicNodeAddressList());
+			clsSvc_->encode(publicAddressInfo, out);
+		}
+		int64_t currentTime = clsMgr_->getMonotonicTime();
 		for (NodeId nodeId = 1; nodeId < activeNodeListSize;nodeId++) {
 			pt_->setAckHeartbeat(activeNodeList[nodeId], false);
 			const NodeDescriptor &nd = clsEE_->getServerND(activeNodeList[nodeId]);
@@ -963,15 +1032,23 @@ void TimerCheckClusterHandler::sendHeartbeat(EventContext &ec,
 }
 
 void TimerCheckClusterHandler::sendUpdatePartitionInfo(EventContext &ec,
-		ClusterManager::UpdatePartitionInfo &updatePartitionInfo, std::vector<NodeId> &activeNodeList) {
+		ClusterManager::UpdatePartitionInfo &updatePartitionInfo, NodeIdList &activeNodeList) {
 	if (updatePartitionInfo.isNeedUpdatePartition()) {
 		Event updatePartitionEvent(ec, CS_UPDATE_PARTITION, CS_HANDLER_PARTITION_ID);
 		EventByteOutStream out = updatePartitionEvent.getOutStream();
 		clsSvc_->encode(updatePartitionInfo, out);
-		if (updatePartitionInfo.dropPartitionNodeInfo_.getSize() > 0) {
+
+		if (updatePartitionInfo.dropPartitionNodeInfo_.getSize() > 0
+			|| pt_->hasPublicAddress()) {
 			clsSvc_->encode(updatePartitionInfo.dropPartitionNodeInfo_, out);
 		}
-		for (std::vector<NodeId>::iterator it = activeNodeList.begin();
+		if (pt_->hasPublicAddress()) {
+			PublicAddressInfoMessage publicAddressInfo;
+			pt_->getPublicNodeAddress(publicAddressInfo.getPublicNodeAddressList());
+			clsSvc_->encode(publicAddressInfo, out);
+		}
+
+		for (NodeIdList::iterator it = activeNodeList.begin();
 			it != activeNodeList.end(); it++) {
 			NodeId nodeId = (*it);
 			if (nodeId == 0) {
@@ -1059,197 +1136,261 @@ void TimerCheckClusterHandler::operator()(EventContext &ec, Event &ev) {
 	}
 }
 
-/*!
-	@brief Handler Operator
-*/
+bool TimerNotifyClusterHandler::doProviderEvent(EventContext &ec, Event &ev) {
+	ClusterService::NotificationManager &manager = clsSvc_->getNotificationManager();
+	switch (ev.getType()) {
+		case CS_UPDATE_PROVIDER: {
+			if (!manager.next()) {
+				Event checkResolverEvent(
+						ec, CS_CHECK_PROVIDER, CS_HANDLER_PARTITION_ID);
+				clsEE_->addTimer(checkResolverEvent, manager.checkResolverInterval());
+			}
+			return false;
+		}
+		case CS_CHECK_PROVIDER: {
+			int32_t interval = manager.check();
+			if (interval > 0) {
+				Event checkResolverEvent(
+						ec, CS_CHECK_PROVIDER, CS_HANDLER_PARTITION_ID);
+				clsEE_->addTimer(checkResolverEvent, interval);
+			}
+			return false;
+		}
+		default:
+			return true;
+	}
+}
+
+void TimerNotifyClusterHandler::doMulticastNotifyEvent(EventContext &ec, Event &ev) {
+	util::StackAllocator &alloc = ec.getAllocator();
+	util::StackAllocator::Scope scope(alloc);
+	ClusterManager::NotifyClusterInfo notifyClusterInfo(alloc, 0, pt_);
+	clsMgr_->getNotifyClusterInfo(notifyClusterInfo);
+	Event notifyClusterEvent(ec, CS_NOTIFY_CLUSTER, CS_HANDLER_PARTITION_ID);
+	EventByteOutStream out = notifyClusterEvent.getOutStream();
+	clsSvc_->encode(notifyClusterInfo, out);
+	if (pt_->hasPublicAddress()) {
+		PublicAddressInfoMessage publicAddressInfo;
+		pt_->getPublicNodeAddress(publicAddressInfo.getPublicNodeAddressList());
+		clsSvc_->encode(publicAddressInfo, out);
+	}
+	const NodeDescriptor &nd = clsEE_->getMulticastND();
+	clsEE_->send(notifyClusterEvent, nd);
+}
+
+void TimerNotifyClusterHandler::doFixedListNotifyEvent(EventContext &ec, Event &ev) {
+	util::StackAllocator &alloc = ec.getAllocator();
+	util::StackAllocator::Scope scope(alloc);
+	ClusterService::NotificationManager &manager = clsSvc_->getNotificationManager();
+	ClusterManager::NotifyClusterInfo notifyClusterInfo(alloc, 0, pt_);
+	Event notifyClusterEvent(ec, CS_NOTIFY_CLUSTER, CS_HANDLER_PARTITION_ID);
+	bool isFirst = true;
+	for (int32_t nodeId = 1; nodeId < manager.getFixedNodeNum();nodeId++) {
+		const NodeDescriptor &nd = clsEE_->getServerND(nodeId);
+		if (isFirst) {
+			clsMgr_->getNotifyClusterInfo(notifyClusterInfo);
+			clsSvc_->encode(notifyClusterEvent, notifyClusterInfo);
+			isFirst = false;
+		}
+		clsEE_->send(notifyClusterEvent, nd);
+	}
+}
+
+void TimerNotifyClusterHandler::resolvePublicAddress(const util::SocketAddress &socket,
+		ServiceType serviceType, AddressInfo &publicAddressInfo) {
+	NodeAddress address;
+	address.set(socket);
+	publicAddressInfo.setNodeAddress(serviceType, address);
+}
+
+void TimerNotifyClusterHandler::resolveLocalAddress(
+		const util::SocketAddress &socket, 
+		ServiceType serviceType, NodeId &nodeId) {
+
+	EventEngine *ee = clsSvc_->getEE(serviceType);
+	if (serviceType == SYSTEM_SERVICE) {
+		NodeAddress ptAddress;
+		ptAddress.set(socket);
+		if (pt_->setNodeInfo(nodeId, serviceType, ptAddress)) {
+			GS_TRACE_INFO(CLUSTER_INFO_TRACE, GS_TRACE_CS_CLUSTER_STATUS,
+				"[RESOLVER] Set entry "
+					<< dumpServiceType(serviceType)
+					<< ", address = "
+					<< socket
+					<< ", nodeId = " << nodeId);
+		}
+		return;
+	}
+
+	if (nodeId != UNDEF_NODEID &&
+			pt_->checkSetService(nodeId, serviceType)) {
+		GS_TRACE_INFO(CLUSTER_INFO_TRACE, GS_TRACE_CS_CLUSTER_STATUS,
+			"[RESOLVER] Duplicate entry "
+					<< dumpServiceType(serviceType)
+				<< ", address = "
+				<< socket
+				<< ", nodeId = " << nodeId);
+		return;
+	}
+
+	if (serviceType != CLUSTER_SERVICE) {
+		ee->setServerNodeId(socket, nodeId, false);
+	}
+	const NodeDescriptor &nd = ee->resolveServerND(socket);
+
+	if (!nd.isEmpty()) {
+		if (serviceType == CLUSTER_SERVICE) {
+			nodeId = static_cast<NodeId>(nd.getId());
+		}
+		else {
+			NodeId tmpNodeId = static_cast<NodeId>(nd.getId());
+			if (tmpNodeId != nodeId) {
+				GS_THROW_USER_ERROR(
+					GS_ERROR_CS_ENTRY_ADDRESS_FAILED,
+					"[RESOLVER] Set entry failed, "
+					"unmatch cluster nodeId, "
+					"cluster = "
+						<< nodeId << ", "
+					<< dumpServiceType(serviceType)
+						<< " = " << tmpNodeId);
+			}
+		}
+		NodeAddress ptAddress;
+		ptAddress.set(socket);
+		if (pt_->setNodeInfo(nodeId, serviceType, ptAddress)) {
+			GS_TRACE_INFO(CLUSTER_INFO_TRACE, GS_TRACE_CS_CLUSTER_STATUS,
+				"[RESOLVER] Set entry "
+					<< dumpServiceType(serviceType)
+					<< ", address = "
+					<< socket
+					<< ", nodeId = " << nodeId);
+		}
+	}
+	else {
+		GS_THROW_USER_ERROR(
+			GS_ERROR_CS_GET_INVALID_NODE_ADDRESS,
+			"Failed to get address "
+			"(address = "
+				<< socket
+				<< ", nodeId = " << nodeId << ")");
+	}
+}
+
+
+void TimerNotifyClusterHandler::doProviderNotifyEvent(EventContext &ec, Event &ev) {
+
+	util::StackAllocator &alloc = ec.getAllocator();
+	ClusterService::NotificationManager &manager = clsSvc_->getNotificationManager();
+	ServiceAddressResolver *resolver = manager.getResolver();
+	size_t entryCount = resolver->getEntryCount();
+	if (entryCount == 0 && resolver->isAvailable()) {
+		GS_TRACE_WARNING(CLUSTER_SERVICE, GS_TRACE_CS_CLUSTER_STATUS,
+			"Notification provider is available, but notification "
+			"member is null");
+	}
+
+	NodeId nodeId;
+	bool isFirst = true;
+	bool isAvailableSend = true;
+	ClusterManager::NotifyClusterInfo notifyClusterInfo(alloc, 0, pt_);
+	Event notifyClusterEvent(ec, CS_NOTIFY_CLUSTER, CS_HANDLER_PARTITION_ID);
+
+	bool usePublic = pt_->hasPublicAddress();
+	int32_t *entryPosList = SERVICE_TYPE_LIST_MAP;
+	ServiceType *serviceTypeList = SERVICE_TYPE_LIST;
+	if (usePublic) {
+		entryPosList = SERVICE_TYPE_LIST_MAP_WITH_PUBLIC;
+		serviceTypeList = SERVICE_TYPE_LIST_WITH_PUBLIC;
+	}
+
+	int32_t entryTypeCount = resolver->getTypeCount();
+	for (size_t pos = 0; pos < entryCount; pos++) {
+		try {
+			nodeId = UNDEF_NODEID;
+			const util::SocketAddress &clusterSocketAddress =
+				resolver->getAddress(pos, static_cast<uint32_t>(CLUSTER_SERVICE));
+			const NodeDescriptor &clusterNd = clsEE_->getServerND(clusterSocketAddress);
+			if (clusterNd.isEmpty()) {
+				AddressInfo publicAddressInfo;
+				for (int32_t i = 0; i < entryTypeCount; i++) {
+					const util::SocketAddress &currentSocketAddress =
+							resolver->getAddress(pos, entryPosList[i]);
+					if (checkResolvePublic(entryPosList[i])) {
+						resolvePublicAddress(currentSocketAddress, serviceTypeList[i], publicAddressInfo);
+					}
+					else {
+						resolveLocalAddress(currentSocketAddress, serviceTypeList[i], nodeId);
+					}
+				}
+				if (publicAddressInfo.isValid()) {
+					pt_->setPublicAddressInfo(nodeId, publicAddressInfo);
+				}
+			}
+			else {
+				nodeId = static_cast<NodeId>(clusterNd.getId());
+			}
+			const NodeDescriptor &targetNd = clsEE_->getServerND(nodeId);
+			if (isFirst && isAvailableSend) {
+				try {
+					clsMgr_->getNotifyClusterInfo(notifyClusterInfo);
+				}
+				catch (std::exception &e3) {
+					isAvailableSend = false;
+					UTIL_TRACE_EXCEPTION(CLUSTER_SERVICE, e3, "");
+					break;
+				}
+				clsSvc_->encode(notifyClusterEvent, notifyClusterInfo);
+				isFirst = false;
+			}
+			if (!isAvailableSend) {
+				continue;
+			}
+			clsEE_->send(notifyClusterEvent, targetNd);
+		}
+		catch (std::exception &e2) {
+			UTIL_TRACE_EXCEPTION(CLUSTER_SERVICE, e2, "");
+		}
+	}
+}
+
+
 void TimerNotifyClusterHandler::operator()(EventContext &ec, Event &ev) {
 	EventType eventType = ev.getType();
 	try {
 		clsMgr_->checkNodeStatus();
 		ClusterService::NotificationManager &manager = clsSvc_->getNotificationManager();
 		ClusterNotificationMode mode = manager.getMode();
-		switch (eventType) {
-		case CS_UPDATE_PROVIDER: {
-			if (!manager.next()) {
-				Event checkResolverEvent(ec, CS_CHECK_PROVIDER, CS_HANDLER_PARTITION_ID);
-				clsEE_->addTimer(checkResolverEvent, manager.checkResolverInterval());
-			}
+
+		if (!doProviderEvent(ec, ev)) {
 			return;
 		}
-		case CS_CHECK_PROVIDER: {
-			int32_t interval = manager.check();
-			if (interval > 0) {
-				Event checkResolverEvent(ec, CS_CHECK_PROVIDER, CS_HANDLER_PARTITION_ID);
-				clsEE_->addTimer(checkResolverEvent, interval);
-			}
-			return;
-		}
-		default:
-			break;
-		}
+
 		try {
 			clsMgr_->checkClusterStatus(CS_TIMER_NOTIFY_CLUSTER);
 		}
 		catch (UserException &) {
 			return;
 		}
-		util::StackAllocator &alloc = ec.getAllocator();
-		util::StackAllocator::Scope scope(alloc);
 
 		switch (eventType) {
-		case CS_TIMER_NOTIFY_CLUSTER: {
-			switch (mode) {
-			case NOTIFICATION_MULTICAST: {
-				ClusterManager::NotifyClusterInfo notifyClusterInfo(alloc, 0, pt_);
-				clsMgr_->getNotifyClusterInfo(notifyClusterInfo);
-				Event notifyClusterEvent(ec, CS_NOTIFY_CLUSTER, CS_HANDLER_PARTITION_ID);
-				clsSvc_->encode(notifyClusterEvent, notifyClusterInfo);
-				const NodeDescriptor &nd = clsEE_->getMulticastND();
-				clsEE_->send(notifyClusterEvent, nd);
-				break;
-			}
-			case NOTIFICATION_FIXEDLIST: {
-				ClusterManager::NotifyClusterInfo notifyClusterInfo(alloc, 0, pt_);
-				Event notifyClusterEvent(ec, CS_NOTIFY_CLUSTER, CS_HANDLER_PARTITION_ID);
-				bool isFirst = true;
-				for (int32_t nodeId = 1; nodeId < manager.getFixedNodeNum();nodeId++) {
-					const NodeDescriptor &nd = clsEE_->getServerND(nodeId);
-					if (isFirst) {
-						clsMgr_->getNotifyClusterInfo(notifyClusterInfo);
-						clsSvc_->encode(notifyClusterEvent, notifyClusterInfo);
-						isFirst = false;
-					}
-					clsEE_->send(notifyClusterEvent, nd);
+			case CS_TIMER_NOTIFY_CLUSTER: {
+				switch (mode) {
+				case NOTIFICATION_MULTICAST: {
+					doMulticastNotifyEvent(ec, ev);
+					break;
 				}
-				break;
-			}
-			case NOTIFICATION_RESOLVER: {
-				ServiceAddressResolver *resolver = manager.getResolver();
-				size_t entryCount = resolver->getEntryCount();
-				if (entryCount == 0 && resolver->isAvailable()) {
-					GS_TRACE_WARNING(CLUSTER_SERVICE, GS_TRACE_CS_CLUSTER_STATUS,
-						"Notification provider is available, but notification "
-						"member is null");
+				case NOTIFICATION_FIXEDLIST: {
+					doFixedListNotifyEvent(ec, ev);
+					break;
 				}
-				NodeId nodeId;
-				bool isFirst = true;
-				bool isAvailableSend = true;
-				ClusterManager::NotifyClusterInfo notifyClusterInfo(alloc, 0, pt_);
-				Event notifyClusterEvent(ec, CS_NOTIFY_CLUSTER, CS_HANDLER_PARTITION_ID);
-				for (size_t pos = 0; pos < entryCount; pos++) {
-					try {
-						nodeId = UNDEF_NODEID;
-						const util::SocketAddress &clusterSocketAddress =
-							resolver->getAddress(
-								pos, static_cast<uint32_t>(CLUSTER_SERVICE));
-						const NodeDescriptor &nd = clsEE_->getServerND(clusterSocketAddress);
-						if (nd.isEmpty()) {
-							for (int32_t i = 0; i < SERVICE_MAX; i++) {
-								ServiceType serviceType = static_cast<ServiceType>(i);
-								EventEngine *ee = clsSvc_->getEE(serviceType);
-								const util::SocketAddress &currentSocketAddress =
-										resolver->getAddress(pos, i);
-								if (serviceType == SYSTEM_SERVICE) {
-									NodeAddress ptAddress;
-									ptAddress.set(currentSocketAddress);
-									if (pt_->setNodeInfo(nodeId, serviceType, ptAddress)) {
-										GS_TRACE_INFO(CLUSTER_INFO_TRACE, GS_TRACE_CS_CLUSTER_STATUS,
-											"[RESOLVER] Set entry "
-												<< SERVICE_TYPE_NAMES[i]
-												<< ", address = "
-												<< currentSocketAddress
-												<< ", nodeId = " << nodeId);
-									}
-									continue;
-								}
-								if (nodeId != UNDEF_NODEID &&
-									pt_->checkSetService(nodeId, serviceType)) {
-									GS_TRACE_INFO(CLUSTER_INFO_TRACE, GS_TRACE_CS_CLUSTER_STATUS,
-										"[RESOLVER] Duplicate entry "
-											<< SERVICE_TYPE_NAMES[i]
-											<< ", address = "
-											<< currentSocketAddress
-											<< ", nodeId = " << nodeId);
-									continue;
-								}
-								if (serviceType != CLUSTER_SERVICE) {
-									ee->setServerNodeId(currentSocketAddress, nodeId, false);
-								}
-								const NodeDescriptor &nd =
-									ee->resolveServerND(currentSocketAddress);
-								if (!nd.isEmpty()) {
-									if (serviceType == CLUSTER_SERVICE) {
-										nodeId = static_cast<NodeId>(nd.getId());
-									}
-									else {
-										NodeId tmpNodeId = static_cast<NodeId>(nd.getId());
-										if (tmpNodeId != nodeId) {
-											GS_THROW_USER_ERROR(
-												GS_ERROR_CS_ENTRY_ADDRESS_FAILED,
-												"[RESOLVER] Set entry failed, "
-												"unmatch cluster nodeId, "
-												"cluster = "
-													<< nodeId << ", "
-													<< SERVICE_TYPE_NAMES[i]
-													<< " = " << tmpNodeId);
-										}
-									}
-									NodeAddress ptAddress;
-									ptAddress.set(currentSocketAddress);
-									if (pt_->setNodeInfo(nodeId, serviceType, ptAddress)) {
-										GS_TRACE_INFO(CLUSTER_INFO_TRACE, GS_TRACE_CS_CLUSTER_STATUS,
-											"[RESOLVER] Set entry "
-												<< SERVICE_TYPE_NAMES[i]
-												<< ", address = "
-												<< currentSocketAddress
-												<< ", nodeId = " << nodeId);
-									}
-								}
-								else {
-									GS_THROW_USER_ERROR(
-										GS_ERROR_CS_GET_INVALID_NODE_ADDRESS,
-										"Failed to get address "
-										"(address = "
-											<< currentSocketAddress
-											<< ", nodeId = " << nodeId << ")");
-								}
-							}
-						}
-						else {
-							nodeId = static_cast<NodeId>(nd.getId());
-						}
-						{
-							const NodeDescriptor &nd = clsEE_->getServerND(nodeId);
-							if (isFirst && isAvailableSend) {
-								try {
-									clsMgr_->getNotifyClusterInfo(notifyClusterInfo);
-								}
-								catch (std::exception &e3) {
-									isAvailableSend = false;
-									UTIL_TRACE_EXCEPTION(CLUSTER_SERVICE, e3, "");
-									break;
-								}
-								clsSvc_->encode(notifyClusterEvent, notifyClusterInfo);
-								isFirst = false;
-							}
-							if (!isAvailableSend) {
-								continue;
-							}
-							clsEE_->send(notifyClusterEvent, nd);
-						}
-					}
-					catch (std::exception &e2) {
-						UTIL_TRACE_EXCEPTION(CLUSTER_SERVICE, e2, "");
-					}
+				case NOTIFICATION_RESOLVER: {
+					doProviderNotifyEvent(ec, ev);
+					break;
 				}
-				break;
+				default:
+					GS_THROW_USER_ERROR(GS_ERROR_CS_SERVICE_CLUSTER_INTERNAL_FAILED, "");
+				}
 			}
-			default: {
-				GS_THROW_USER_ERROR(GS_ERROR_CS_ERROR_INTERNAL,
-					"Invalid notification mode (mode= " << static_cast<uint32_t>(mode) << ")");
-			}
-			}
-		}
 		}
 	}
 	catch (UserException &e) {
@@ -1320,21 +1461,21 @@ void UpdatePartitionHandler::checkAndRequestDropPartition(EventContext &ec,
 
 void UpdatePartitionHandler::updateNodeInfo(EventContext &ec,
 		ClusterManager::UpdatePartitionInfo &updatePartitionInfo) {
-//	bool needCancel = false;
+	bool needCancel = false;
 	SubPartitionTable &subPartitionTable = updatePartitionInfo.getSubPartitionTable();
-	clsSvc_->updateNodeList(subPartitionTable.getNodeAddressList());
+	clsSvc_->updateNodeList(subPartitionTable.getNodeAddressList(),
+			subPartitionTable.getPublicNodeAddressList());
 
 	for (int32_t pos = 0; pos < subPartitionTable.size(); pos++) {
 		resolveAddress(subPartitionTable.getSubPartition(pos));
 	}
 
 	if (pt_->isFollower()) {
-		std::vector<LogSequentialNumber> &maxLsnList =
-			updatePartitionInfo.getMaxLsnList();
+		LsnList &maxLsnList = updatePartitionInfo.getMaxLsnList();
 		for (PartitionId pId = 0; pId < maxLsnList.size(); pId++) {
 			pt_->setRepairedMaxLsn(pId, maxLsnList[pId]);
 		}
-		std::vector<AddressInfo> &addressInfoList = subPartitionTable.getNodeAddressList();
+		AddressInfoList &addressInfoList = subPartitionTable.getNodeAddressList();
 		NodeId masterNodeId = pt_->getMaster();
 		for (size_t pos = 0; pos < addressInfoList.size(); pos++) {
 			NodeId nodeId = ClusterService::changeNodeId(
@@ -1343,23 +1484,23 @@ void UpdatePartitionHandler::updateNodeInfo(EventContext &ec,
 			}
 			else {
 				if (addressInfoList[pos].isActive_) {
-//					if (pt_->getHeartbeatTimeout(nodeId) == UNDEF_TTL) {
-//						needCancel = true;
-//					}
+					if (pt_->getHeartbeatTimeout(nodeId) == UNDEF_TTL) {
+						needCancel = true;
+					}
 					pt_->setHeartbeatTimeout(nodeId, NOT_UNDEF_TTL);
 				}
 				else {
-//					if (pt_->getHeartbeatTimeout(nodeId) != UNDEF_TTL) {
-//						needCancel = true;
-//					}
+					if (pt_->getHeartbeatTimeout(nodeId) != UNDEF_TTL) {
+						needCancel = true;
+					}
 					pt_->setHeartbeatTimeout(nodeId, UNDEF_TTL);
 				}
 			}
 		}
 	}
-//	else if (pt_->isMaster()) {
-//		needCancel = clsMgr_->isAddOrDownNode();
-//	}
+	else if (pt_->isMaster()) {
+		needCancel = clsMgr_->isAddOrDownNode();
+	}
 }
 	
 void ClusterHandler::resolveAddress(PartitionRole &role) {
@@ -1368,7 +1509,7 @@ void ClusterHandler::resolveAddress(PartitionRole &role) {
 	std::vector<NodeAddress> catchupAddressList;
 	role.get(nextOwnerAddress, backupAddressList, catchupAddressList);
 	NodeId nextOwnerId = ClusterService::changeNodeId(nextOwnerAddress, clsEE_);
-	std::vector<NodeId> nextBackups, nextCatchups;
+	NodeIdList nextBackups, nextCatchups;
 	for (int32_t backupPos = 0;
 		backupPos < static_cast<int32_t>(backupAddressList.size());
 		backupPos++) {
@@ -1421,6 +1562,24 @@ void UpdatePartitionHandler::requestSync(EventContext &ec,
 	txnEE_->addTimer(requestEvent, EE_PRIORITY_HIGH);
 }
 
+
+void UpdatePartitionHandler::decode(EventContext &ec, Event &ev,
+		ClusterManager::UpdatePartitionInfo &updatePartitionInfo) {
+	util::StackAllocator &alloc = ec.getAllocator();
+	EventByteInStream in = ev.getInStream();
+	clsSvc_->decode(alloc, ev, updatePartitionInfo, in);
+	if (in.base().remaining()) {
+		clsSvc_->decode(alloc, ev, updatePartitionInfo.dropPartitionNodeInfo_, in);
+		checkAndRequestDropPartition(ec, updatePartitionInfo);
+		if (in.base().remaining()) {
+			PublicAddressInfoMessage publicAddressInfo;
+			clsSvc_->decode(alloc, ev, publicAddressInfo, in);
+			updatePartitionInfo.getSubPartitionTable().setPublicNodeAddressList(
+					publicAddressInfo.getPublicNodeAddressList());
+		}
+	}
+}
+
 /*!
 	@brief Handler Operator
 */
@@ -1433,12 +1592,10 @@ void UpdatePartitionHandler::operator()(EventContext &ec, Event &ev) {
 		util::StackAllocator::Scope scope(alloc);
 		NodeId senderNodeId = ClusterService::resolveSenderND(ev);
 		ClusterManager::UpdatePartitionInfo updatePartitionInfo(alloc, senderNodeId, pt_);
-		EventByteInStream in = ev.getInStream();
-		clsSvc_->decode(alloc, ev, updatePartitionInfo, in);
-		if (in.base().remaining()) {
-			clsSvc_->decode(alloc, ev, updatePartitionInfo.dropPartitionNodeInfo_, in);
-			checkAndRequestDropPartition(ec, updatePartitionInfo);
-		}
+
+		decode(ec, ev, updatePartitionInfo);
+
+		bool traceFlag = (updatePartitionInfo.dropPartitionNodeInfo_.getSize() > 0);
 		updateNodeInfo(ec, updatePartitionInfo);
 		SubPartitionTable &subPartitionTable = updatePartitionInfo.getSubPartitionTable();
 		clsMgr_->setUpdatePartitionInfo(updatePartitionInfo);
@@ -1452,6 +1609,7 @@ void UpdatePartitionHandler::operator()(EventContext &ec, Event &ev) {
 				TXN_SHORTTERM_SYNC_REQUEST, syncMgr_, pId, clsEE_,
 				MODE_SHORTTERM_SYNC);
 			requestSync(ec, pId, role, true);
+			traceFlag = true;
 		}
 		for (PartitionId pos = 0; pos < longtermSyncPIdList.size(); pos++) {
 			PartitionRole &role = subPartitionTable.getSubPartition(longtermSyncPIdList[pos]).role_;
@@ -1460,6 +1618,7 @@ void UpdatePartitionHandler::operator()(EventContext &ec, Event &ev) {
 				TXN_LONGTERM_SYNC_REQUEST, syncMgr_, pId, clsEE_,
 				MODE_LONGTERM_SYNC);
 			requestSync(ec, pId, role, false);
+			traceFlag = true;
 		}
 		for (PartitionId pos = 0; pos < changePartitionPIdList.size(); pos++) {
 			PartitionRole &role = subPartitionTable.getSubPartition(changePartitionPIdList[pos]).role_;
@@ -1468,6 +1627,12 @@ void UpdatePartitionHandler::operator()(EventContext &ec, Event &ev) {
 				changePartitionTableInfo(alloc, 0, role);
 			clsSvc_->request(ec, TXN_CHANGE_PARTITION_TABLE,
 					pId, txnEE_, changePartitionTableInfo);
+			traceFlag = true;
+		}
+
+		if (traceFlag) {
+			TRACE_CLUSTER_NORMAL_OPERATION(INFO,
+					"Recieve next partition, revision=" << subPartitionTable.getRevision().sequentialNumber_);
 		}
 	}
 	catch (UserException &e) {
@@ -1570,11 +1735,13 @@ NodeId ClusterHandler::checkAddress(PartitionTable *pt,
 /*!
 	@brief Updates address of node list
 */
-template <class T>
-void ClusterService::updateNodeList(T &addressInfoList) {
+template <class T1, class T2>
+void ClusterService::updateNodeList(T1 &addressInfoList, T2 &publicAddressInfoList) {
 	try {
-		for (typename T::iterator it = addressInfoList.begin();
-			it != addressInfoList.end(); it++) {
+		bool usePublic = (publicAddressInfoList.size() > 0);
+		int32_t counter = 0;
+		for (typename T1::iterator it = addressInfoList.begin();
+			it != addressInfoList.end(); it++, counter++) {
 			NodeId clusterNodeId = UNDEF_NODEID, tmpNodeId;
 			EventEngine *targetEE;
 			for (int32_t serviceType = 0; serviceType < SERVICE_MAX;serviceType++) {
@@ -1603,6 +1770,9 @@ void ClusterService::updateNodeList(T &addressInfoList) {
 				else {
 					clusterNodeId = tmpNodeId;
 				}
+				if (serviceType == 0 && usePublic) {
+					pt_->setPublicAddressInfo(clusterNodeId, publicAddressInfoList[counter]);
+				}
 			}
 		}
 	}
@@ -1610,7 +1780,6 @@ void ClusterService::updateNodeList(T &addressInfoList) {
 		GS_RETHROW_USER_OR_SYSTEM(e, "");
 	}
 }
-
 /*!
 	@brief Checks partition table and sets node information of a specified ND
 */
@@ -1792,6 +1961,12 @@ ClusterService::NotificationManager::~NotificationManager() {
 	}
 }
 
+
+#define CLUSTER_SET_RESOLVER_ADDRESS(resolver, info, index, type) \
+	info.type##Address_.set(                                      \
+		resolver->getAddress(index, resolver->getType(#type)))
+
+
 /*!
 	@brief Initializer
 */
@@ -1821,32 +1996,56 @@ void ClusterService::NotificationManager::initialize(const ConfigTable &config) 
 			ServiceAddressResolver *resolver =
 				UTIL_NEW ServiceAddressResolver(localVarAlloc_, resolverConfig);
 			resolverList_.push_back(resolver);
-			for (int32_t i = 0; i < SERVICE_MAX; i++) {
-				resolver->initializeType(
-					static_cast<ServiceType>(i), SERVICE_TYPE_NAMES[i]);
+
+			ClusterAdditionalServiceConfig addConfig(config);
+			bool usePublicAddress = addConfig.hasPublicAddress();
+			for (int32_t i = 0;i < addConfig.serviceTypeSize_;i++) {
+				resolver->initializeType(addConfig.serviceTypeList_[i],
+						addConfig.serviceTypeNameList_[i]);
 			}
 			if (mode_ == NOTIFICATION_FIXEDLIST) {
 				resolver->importFrom(memberValue);
 				resolver->normalize();
-
-#define CLUSTER_SET_RESOLVER_ADDRESS(resolver, info, index, type) \
-	info.type##Address_.set(                                      \
-		resolver->getAddress(index, resolver->getType(#type)))
-
 				const size_t count = resolver->getEntryCount();
+				fixedNodeNum_ = static_cast<int32_t>(count);
 				for (size_t index = 0; index < count; index++) {
 					AddressInfo info;
+					AddressInfo publicInfo;
 					memset(&info, 0, sizeof(AddressInfo));
 
-					CLUSTER_SET_RESOLVER_ADDRESS(
-						resolver, info, index, cluster);
-					CLUSTER_SET_RESOLVER_ADDRESS(
-						resolver, info, index, transaction);
+					CLUSTER_SET_RESOLVER_ADDRESS(resolver, info, index, cluster);
+					if (usePublicAddress) {
+						util::SocketAddress localTxnAddress
+								= resolver->getAddress(index, resolver->getType(
+										TYPE_NAME_TRANSACTION_LOCAL));
+						util::SocketAddress txnAddress
+								= resolver->getAddress(index, resolver->getType(
+									TYPE_NAME_TRANSACTION));
+
+						if (localTxnAddress.getPort() != txnAddress.getPort()) {
+							GS_THROW_USER_ERROR(GS_ERROR_CS_CONFIG_ERROR,
+									"Unmatch transaction port, nodeConfig="
+									<< localTxnAddress.getPort() << ", fixedList=" << txnAddress.getPort());
+						}
+						info.transactionAddress_.set(localTxnAddress);
+						publicInfo.transactionAddress_.set(txnAddress);
+
+					}
+					else {
+						if (addConfig.isSetLocalAddress()) {
+							GS_THROW_USER_ERROR(GS_ERROR_CS_CONFIG_ERROR,
+									"LocalServiceAddres is , but not defined node configuration");
+						}
+						CLUSTER_SET_RESOLVER_ADDRESS(resolver, info, index, transaction);
+					}
 					CLUSTER_SET_RESOLVER_ADDRESS(resolver, info, index, sync);
 					CLUSTER_SET_RESOLVER_ADDRESS(resolver, info, index, system);
+
 					fixedAddressInfoSet_.insert(info);
+					if (usePublicAddress) {
+						publicFixedAddressInfoSet_.push_back(publicInfo);
+					}
 				}
-				fixedNodeNum_ = static_cast<int32_t>(count);
 			}
 			else {
 				const int32_t updateInterval = config.get<int32_t>(
@@ -1902,6 +2101,11 @@ bool ClusterService::isMulticastMode(const ConfigTable &config) {
 NodeAddressSet &ClusterService::NotificationManager::getFixedAddressInfo() {
 	return fixedAddressInfoSet_;
 }
+
+AddressInfoList &ClusterService::NotificationManager::getPublicFixedAddressInfo() {
+	return publicFixedAddressInfoSet_;
+}
+
 
 /*!
 	@brief Gets NotificationManager.
@@ -2061,7 +2265,7 @@ void SystemCommandHandler::doDecreaseCluster(ClusterManager *clsMgr,
 	clsMgr->checkCommandStatus(CS_DECREASE_CLUSTER);
 	util::StackAllocator &alloc = ec.getAllocator();
 	clsMgr->setDecreaseClusterInfo(decreaseClusterInfo);
-	std::vector<NodeId> &leaveNodeList = decreaseClusterInfo.getLeaveNodeList();
+	NodeIdList &leaveNodeList = decreaseClusterInfo.getLeaveNodeList();
 	PartitionTable *pt = clsMgr->getPartitionTable();
 	if (leaveNodeList.size() > 0 && decreaseClusterInfo.isAutoLeave()) {
 		TRACE_CLUSTER_NORMAL_OPERATION(INFO,
@@ -2196,3 +2400,85 @@ void SystemCommandHandler::doCompleteCheckpointForRecovery(ClusterManager *clsMg
 		}
 	}
 }
+
+ClusterAdditionalServiceConfig::ClusterAdditionalServiceConfig(
+		const ConfigTable &config, PartitionTable *pt) : hasPublic_(false) {
+	txnServiceAddress_ = config.get<const char8_t *>(
+			CONFIG_TABLE_TXN_SERVICE_ADDRESS);
+	txnLocalServiceAddress_ = config.get<const char8_t *>(
+			CONFIG_TABLE_TXN_LOCAL_SERVICE_ADDRESS);
+	txnAddressSize_ = strlen(txnServiceAddress_) ;
+	txnInternalAddressSize_ =  strlen(txnLocalServiceAddress_);
+	txnPort_ = config.getUInt16(CONFIG_TABLE_TXN_SERVICE_PORT);
+
+
+	serviceTypeList_ = SERVICE_TYPE_LIST_MAP;
+	serviceTypeSize_ = sizeof(SERVICE_TYPE_LIST_MAP)/sizeof(int32_t);
+	serviceTypeNameList_ = SERVICE_TYPE_NAMES;
+
+	if (txnAddressSize_ == 0 && txnInternalAddressSize_ > 0) {
+		GS_THROW_USER_ERROR(GS_ERROR_CS_CONFIG_ERROR, "");
+	}
+	else {
+		if (txnInternalAddressSize_ > 0) {
+			hasPublic_ = true;
+			serviceTypeList_ = SERVICE_TYPE_LIST_MAP_WITH_PUBLIC;
+			serviceTypeSize_ = sizeof(SERVICE_TYPE_LIST_MAP_WITH_PUBLIC)/sizeof(int32_t);
+			serviceTypeNameList_ = SERVICE_TYPE_NAMES_WITH_PUBLIC;
+			if (pt != NULL) {
+				pt->setPublicAddress();
+				AddressInfo publicAddressInfo;
+				NodeAddress txnAddress(txnServiceAddress_, txnPort_);
+				publicAddressInfo.setNodeAddress(TRANSACTION_SERVICE, txnAddress);
+				pt->setPublicAddressInfo(SELF_NODEID, publicAddressInfo);
+			}
+		}
+	}
+};
+
+const char *ClusterAdditionalServiceConfig::getServiceAddress(
+		ServiceType serviceType) {
+	const char *localAddress = NULL;
+	const char *publicAddress = NULL;
+	const char *targetAddress = NULL;
+	switch (serviceType) {
+		case TRANSACTION_SERVICE:
+			targetAddress = txnServiceAddress_;
+			localAddress = txnLocalServiceAddress_;
+			publicAddress = txnServiceAddress_;
+			break;
+		default:
+			GS_THROW_USER_ERROR(GS_ERROR_CS_SERVICE_CLUSTER_INTERNAL_FAILED,"");
+	}
+	if (strlen(publicAddress) > 0) {
+		if (strlen(localAddress) > 0) {
+			targetAddress = localAddress;
+		}
+	}
+	else {
+		if (strlen(localAddress) > 0) {
+			GS_THROW_USER_ERROR(GS_ERROR_CS_CONFIG_ERROR, "");
+		}
+	}
+	return targetAddress;
+}
+
+const char *ClusterAdditionalServiceConfig::getAddress(
+		ServiceType serviceType, int32_t type) {
+	switch (serviceType) {
+		case TRANSACTION_SERVICE:
+			return txnServiceAddress_;
+		default:
+			GS_THROW_USER_ERROR(GS_ERROR_CS_SERVICE_CLUSTER_INTERNAL_FAILED, "");
+	}
+}
+
+uint16_t ClusterAdditionalServiceConfig::getPort(ServiceType serviceType) {
+	switch (serviceType) {
+		case TRANSACTION_SERVICE:
+			return txnPort_;
+		default:
+			GS_THROW_USER_ERROR(GS_ERROR_CS_SERVICE_CLUSTER_INTERNAL_FAILED, "");
+	}
+}
+

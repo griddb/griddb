@@ -35,6 +35,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.SimpleTimeZone;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -54,6 +55,7 @@ import com.toshiba.mwcloud.gs.common.GSStatementException;
 import com.toshiba.mwcloud.gs.common.GSWrongNodeException;
 import com.toshiba.mwcloud.gs.common.LoggingUtils;
 import com.toshiba.mwcloud.gs.common.LoggingUtils.BaseGridStoreLogger;
+import com.toshiba.mwcloud.gs.common.PropertyUtils;
 import com.toshiba.mwcloud.gs.common.PropertyUtils.WrappedProperties;
 import com.toshiba.mwcloud.gs.common.RowMapper;
 import com.toshiba.mwcloud.gs.common.ServiceAddressResolver;
@@ -361,7 +363,8 @@ public class GridStoreChannel implements Closeable {
 					user, password, !backupPreferred, database, clusterName,
 					localConfig.transactionTimeoutMillis,
 					resolveApplicationName(props),
-					resolveStoreMemoryAgingSwapRate(props));
+					resolveStoreMemoryAgingSwapRate(props),
+					resolveTimeZoneOffset(props));
 			this.keyConverter = ContainerKeyConverter.getInstance(
 					NodeConnection.getProtocolVersion(), false, false);
 			this.dataAffinityPattern = new DataAffinityPattern(
@@ -395,6 +398,15 @@ public class GridStoreChannel implements Closeable {
 			}
 
 			return value;
+		}
+
+		private static SimpleTimeZone resolveTimeZoneOffset(
+				WrappedProperties props) throws GSException {
+			final String zoneStr = props.getProperty("timeZone", null, false);
+			if (zoneStr != null) {
+				return PropertyUtils.parseTimeZoneOffset(zoneStr, true);
+			}
+			return null;
 		}
 
 		public NodeConnection.LoginInfo getLoginInfo() {

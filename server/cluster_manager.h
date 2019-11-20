@@ -31,7 +31,7 @@
 #include "partition_table.h"
 #include "util/net.h"
 
-#include "event_engine.h"
+class EventEngine;
 
 typedef std::set<AddressInfo> NodeAddressSet;
 typedef NodeAddressSet::iterator NodeAddressSetItr;
@@ -140,6 +140,7 @@ public:
 	uint8_t uuid_[16];
 
 	void initialize(ClusterService *clsSvc, EventEngine *ee);
+	typedef int64_t EventMonotonicTime;
 	EventMonotonicTime getMonotonicTime();
 	std::string getClusterName() {
 		util::LockGuard<util::Mutex> lock(clusterLock_);
@@ -436,7 +437,7 @@ public:
 
 		bool check() {return true;}
 
-		std::vector<PartitionId> &getSyncPIdList() {
+		PartitionIdList &getSyncPIdList() {
 			return syncPIdList_;
 		}
 
@@ -444,7 +445,7 @@ public:
 
 	private:
 
-		std::vector<PartitionId> syncPIdList_;
+		PartitionIdList syncPIdList_;
 	};
 
 
@@ -481,12 +482,16 @@ public:
 			isAddNewNode_ = true;
 		}
 
-		std::vector<LogSequentialNumber> &getMaxLsnList() {
+		LsnList &getMaxLsnList() {
 			return maxLsnList_;
 		}
 
-		std::vector<AddressInfo> &getNodeAddressList() {
+		AddressInfoList &getNodeAddressList() {
 			return nodeList_;
+		}
+
+		AddressInfoList &getPublicNodeAddressList() {
+			return publicNodeList_;
 		}
 
 		NodeAddress &getSecondMaster() {
@@ -549,13 +554,14 @@ public:
 		int32_t reserveNum_;
 		NodeAddress secondMasterNode_;
 		PartitionRevisionNo partitionSequentialNumber_;
-		std::vector<LogSequentialNumber> maxLsnList_;
-		std::vector<AddressInfo> nodeList_;
+		LsnList maxLsnList_;
+		AddressInfoList nodeList_;
 		bool isInitialCluster_;
 		NodeAddress partition0NodeAddr_;  
 		bool isAddNewNode_;
 		bool isStatusChange_;
 		PartitionTable *pt_;
+		AddressInfoList publicNodeList_;
 	};
 
 	/*!
@@ -661,8 +667,8 @@ public:
 	private:
 
 		std::vector<HeartbeatResValue> heartbeatResValues_;
-		int32_t syncChunkNum_;
-		int32_t syncApplyNum_;
+		int64_t syncChunkNum_;
+		int64_t syncApplyNum_;
 		PartitionRevisionNo partitionSequentialNumber_;
 	};
 
@@ -715,8 +721,15 @@ public:
 
 		void set(ClusterInfo &clusterInfo, PartitionTable *pt);
 
-		std::vector<AddressInfo> &getNodeAddressInfoList() {
+		AddressInfoList &getNodeAddressInfoList() {
 			return nodeList_;
+		}
+
+		AddressInfoList &getPublicNodeAddressInfoList() {
+			return publicNodeList_;
+		}
+		void setPublicNodeAddressInfoList(AddressInfoList &publicNodeList) {
+				publicNodeList_ = publicNodeList;
 		}
 
 		MSGPACK_DEFINE(isMaster_, isStable_, reserveNum_, startupTime_,
@@ -728,9 +741,10 @@ public:
 		bool isStable_;
 		int32_t reserveNum_;
 		int64_t startupTime_;
-		std::vector<AddressInfo> nodeList_;
+		AddressInfoList nodeList_;
 		std::string clusterName_;
 		std::string digest_;
+		AddressInfoList publicNodeList_;
 
 		bool isFollow_;
 		PartitionTable *pt_;
@@ -774,15 +788,15 @@ public:
 			return startupTime_;
 		}
 
-		std::vector<LogSequentialNumber> &getLsnList() {
+		LsnList &getLsnList() {
 			return lsnList_;
 		}
 
-		std::vector<LogSequentialNumber> &getMaxLsnList() {
+		LsnList &getMaxLsnList() {
 			return maxLsnList_;
 		}
 
-		std::vector<AddressInfo> &getNodeAddressList() {
+		AddressInfoList &getNodeAddressList() {
 			return nodeList_;
 		}
 
@@ -790,8 +804,15 @@ public:
 			return partitionSequentialNumber_;
 		}
 
-		std::vector<AddressInfo> &getNodeAddressInfoList() {
+		AddressInfoList &getNodeAddressInfoList() {
 			return nodeList_;
+		}
+
+		void setPublicNodeAddressInfoList(AddressInfoList &addressList) {
+			publicNodeList_ = addressList;
+		}
+		AddressInfoList &getPublicNodeAddressInfoList() {
+			return publicNodeList_;
 		}
 
 		MSGPACK_DEFINE(reserveNum_, startupTime_, partitionSequentialNumber_,
@@ -802,9 +823,10 @@ public:
 		int32_t reserveNum_;
 		int64_t startupTime_;
 		PartitionRevisionNo partitionSequentialNumber_;
-		std::vector<LogSequentialNumber> lsnList_;
-		std::vector<LogSequentialNumber> maxLsnList_;
-		std::vector<AddressInfo> nodeList_;
+		LsnList lsnList_;
+		LsnList maxLsnList_;
+		AddressInfoList nodeList_;
+		AddressInfoList publicNodeList_;
 		PartitionTable *pt_;
 	};
 
@@ -942,7 +964,7 @@ public:
 			return true;
 		}
 
-		std::vector<NodeId> &getLeaveNodeList() {
+		NodeIdList &getLeaveNodeList() {
 			return leaveNodeList_;
 		}
 
@@ -968,7 +990,7 @@ public:
 
 		bool isAutoLeave_;
 		int32_t leaveNodeNum_;
-		std::vector<NodeId> leaveNodeList_;
+		NodeIdList leaveNodeList_;
 
 		bool isPreCheck_;
 
@@ -1046,7 +1068,7 @@ public:
 			return nextTransition_;
 		}
 
-		std::vector<NodeId> &getActiveNodeList() {
+		NodeIdList &getActiveNodeList() {
 			return activeNodeList_;
 		}
 
@@ -1062,7 +1084,7 @@ public:
 	private:
 
 		ClusterStatusTransition nextTransition_;
-		std::vector<NodeId> activeNodeList_;
+		NodeIdList activeNodeList_;
 		bool isAddNewNode_;
 	};
 
@@ -1117,7 +1139,7 @@ public:
 			pt_->setMaxLsnList(maxLsnList_);
 		}
 
-		std::vector<LogSequentialNumber> &getMaxLsnList() {
+		LsnList &getMaxLsnList() {
 			return maxLsnList_;
 		}
 
@@ -1149,8 +1171,8 @@ public:
 	private:
 
 		SubPartitionTable subPartitionTable_;
-		std::vector<AddressInfo> nodeList_;
-		std::vector<LogSequentialNumber> maxLsnList_;
+		AddressInfoList nodeList_;
+		LsnList maxLsnList_;
 		util::Vector<PartitionId> shorttermSyncPosList_;
 		util::Vector<PartitionId> changePartitionPosList_;
 		util::Vector<PartitionId> longtermSyncPosList_;
@@ -1294,7 +1316,7 @@ public:
 private:
 
 	void getSafetyLeaveNodeList(util::StackAllocator &alloc,
-		std::vector<NodeId> &candList, int32_t removeNodeNum = 1);
+		NodeIdList &candList, int32_t removeNodeNum = 1);
 
 	bool isJoinCluster() {
 		return clusterInfo_.isJoinCluster_;
@@ -1360,7 +1382,7 @@ private:
 		return clusterInfo_.activeNodeNum_;
 	}
 
-	void setActiveNodeList(std::vector<NodeId> &activeNodeList) {
+	void setActiveNodeList(NodeIdList &activeNodeList) {
 		clusterInfo_.activeNodeNum_ = static_cast<int32_t>(activeNodeList.size());
 	}
 

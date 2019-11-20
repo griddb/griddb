@@ -22,6 +22,8 @@ import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
 import java.sql.Blob;
 import java.sql.SQLException;
 import java.text.ParseException;
@@ -39,22 +41,29 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import com.toshiba.mwcloud.gs.AggregationResult;
+import com.toshiba.mwcloud.gs.Collection;
 import com.toshiba.mwcloud.gs.ColumnInfo;
+import com.toshiba.mwcloud.gs.Container;
+import com.toshiba.mwcloud.gs.Container.BindType;
 import com.toshiba.mwcloud.gs.ContainerInfo;
 import com.toshiba.mwcloud.gs.ContainerType;
 import com.toshiba.mwcloud.gs.GSException;
 import com.toshiba.mwcloud.gs.GSType;
 import com.toshiba.mwcloud.gs.Geometry;
+import com.toshiba.mwcloud.gs.IndexType;
 import com.toshiba.mwcloud.gs.NotNull;
 import com.toshiba.mwcloud.gs.Nullable;
 import com.toshiba.mwcloud.gs.QueryAnalysisEntry;
 import com.toshiba.mwcloud.gs.Row;
 import com.toshiba.mwcloud.gs.RowField;
 import com.toshiba.mwcloud.gs.RowKey;
+import com.toshiba.mwcloud.gs.RowKeyPredicate;
+import com.toshiba.mwcloud.gs.TimeSeries;
 import com.toshiba.mwcloud.gs.TimestampUtils;
 import com.toshiba.mwcloud.gs.TransientRowField;
 import com.toshiba.mwcloud.gs.common.BasicBuffer.BufferUtils;
@@ -129,9 +138,11 @@ public class RowMapper {
 	private static final Map<GSType, Object> EMPTY_ARRAY_VALUES =
 			createEmptyValueMap(true);
 
-	private static final Config BASIC_CONFIG = new Config(false, false, true);
+	private static final Config BASIC_CONFIG =
+			new Config(false, false, true, true);
 
-	private static final Config GENERAL_CONFIG = new Config(true, true, true);
+	private static final Config GENERAL_CONFIG =
+			new Config(true, true, true, true);
 
 	private static final List<Integer> EMPTY_KEY_LIST =
 			Collections.emptyList();
@@ -147,11 +158,11 @@ public class RowMapper {
 
 	private final List<Entry> entryList;
 
-	private transient Entry keyEntry;
-
 	private final boolean forTimeSeries;
 
 	private final boolean nullableAllowed;
+
+	private transient final RowMapper keyMapper;
 
 	private transient final int variableEntryCount;
 
@@ -160,47 +171,46 @@ public class RowMapper {
 	private RowMapper(
 			Class<?> rowType, Constructor<?> rowConstructor,
 			Map<String, Entry> entryMap,
-			List<Entry> entryList, Entry keyEntry,
+			List<Entry> entryList, RowMapper keyMapper,
 			ContainerType containerType, boolean nullableAllowed) {
 		this.rowType = rowType;
 		this.rowConstructor = rowConstructor;
 		this.entryMap = entryMap;
 		this.entryList = entryList;
-		this.keyEntry = keyEntry;
 		this.forTimeSeries = (containerType == ContainerType.TIME_SERIES);
 		this.nullableAllowed = nullableAllowed;
+		this.keyMapper = keyMapper;
 		this.variableEntryCount = calculateVariableEntryCount(entryList);
 	}
 
 	private RowMapper(
 			Class<?> rowType, ContainerType containerType,
-			boolean nullableAllowed) throws GSException {
+			boolean keyInside, Config config) throws GSException {
 		this.rowType = rowType;
 		this.entryMap = new HashMap<String, Entry>();
 		this.entryList = new ArrayList<Entry>();
 		this.forTimeSeries = (containerType == ContainerType.TIME_SERIES);
-		this.nullableAllowed = nullableAllowed;
+		this.nullableAllowed = config.nullableAllowed;
 		this.rowConstructor = getRowConstructor(rowType);
 
 		final Set<String> transientRowFields = new HashSet<String>();
 		for (Field field : rowType.getDeclaredFields()) {
-			accept(transientRowFields, field);
+			accept(field, transientRowFields, keyInside);
 		}
 		for (Method method : rowType.getDeclaredMethods()) {
-			accept(transientRowFields, method);
+			accept(method, transientRowFields, keyInside);
 		}
 
-		applyOrder(transientRowFields, restrictKeyOrderFirst);
+		applyOrder(transientRowFields, restrictKeyOrderFirst, true);
 		applyNullable(nullableAllowed);
-		checkKeyType(forTimeSeries);
 
+		this.keyMapper = makeKeyMapper(entryList, containerType, config);
 		this.variableEntryCount = calculateVariableEntryCount(entryList);
 	}
 
 	private RowMapper(
 			ContainerType containerType, ContainerInfo containerInfo,
-			boolean anyTypeAllowed, boolean nullableAllowed)
-			throws GSException {
+			Config config) throws GSException {
 		final ContainerType anotherContainerType = containerInfo.getType();
 		if (anotherContainerType != null &&
 				anotherContainerType != containerType) {
@@ -212,25 +222,21 @@ public class RowMapper {
 		this.entryMap = new HashMap<String, Entry>();
 		this.entryList = new ArrayList<Entry>();
 		this.forTimeSeries = (containerType == ContainerType.TIME_SERIES);
-		this.nullableAllowed = nullableAllowed;
+		this.nullableAllowed = config.nullableAllowed;
 		this.rowConstructor = null;
 
 		final int columnCount = containerInfo.getColumnCount();
-		if (columnCount <= 0 && !anyTypeAllowed) {
+		if (columnCount <= 0 && !config.anyTypeAllowed) {
 			throw new GSException(
 					GSErrorCode.ILLEGAL_SCHEMA, "Empty schema");
 		}
 
-		final boolean rowKeyAssigned = containerInfo.isRowKeyAssigned();
 		for (int i = 0; i < columnCount; i++) {
-			accept(
-					containerInfo.getColumnInfo(i),
-					(i == 0 && rowKeyAssigned),
-					anyTypeAllowed, nullableAllowed);
+			accept(containerInfo.getColumnInfo(i), config.anyTypeAllowed);
 		}
+		acceptKeyAndNullable(containerInfo, nullableAllowed);
 
-		checkKeyType(forTimeSeries);
-
+		this.keyMapper = makeKeyMapper(entryList, containerType, config);
 		this.variableEntryCount = calculateVariableEntryCount(entryList);
 	}
 
@@ -243,6 +249,23 @@ public class RowMapper {
 		}
 
 		return count;
+	}
+
+	public static RowMapper getInstance(
+			Container.BindType<?, ?, ?> bindType, ContainerType containerType,
+			Config config) throws GSException {
+		final RowMapper mapper =
+				getInstance(bindType.getRowClass(), containerType, config);
+		mapper.checkKeyTypeMatched(bindType.getKeyClass());
+		return mapper;
+	}
+
+	public static RowMapper getInstance(
+			Container.BindType<?, ?, ?> bindType, ContainerType containerType,
+			ContainerInfo containerInfo, Config config) throws GSException {
+		final RowMapper mapper = getInstance(containerType, containerInfo, config);
+		mapper.checkKeyTypeMatched(bindType.getKeyClass());
+		return mapper;
 	}
 
 	public static RowMapper getInstance(
@@ -260,17 +283,25 @@ public class RowMapper {
 			ContainerType containerType, ContainerInfo containerInfo,
 			Config config) throws GSException {
 		return CACHE.intern(new RowMapper(
-				containerType, containerInfo, config.anyTypeAllowed,
-				config.nullableAllowed));
+				containerType, containerInfo, config));
 	}
 
 	public static RowMapper getInstance(Row row, Config config)
 			throws GSException {
-		if (row instanceof ArrayRow) {
-			return ((ArrayRow) row).mapper;
+		if (row instanceof Provider) {
+			return ((Provider) row).getRowMapper();
 		}
 
 		return getInstance(null, row.getSchema(), config);
+	}
+
+	public static RowMapper getInstance(RowKeyPredicate<?> pred, Config config)
+			throws GSException {
+		if (pred instanceof Provider) {
+			return ((Provider) pred).getRowMapper();
+		}
+
+		return getInstance(null, pred.getKeySchema(), config);
 	}
 
 	public static RowMapper getAggregationResultMapper() {
@@ -289,9 +320,12 @@ public class RowMapper {
 		}
 
 		keyList = importKeyListEnd(in, config, columnCount, keyList);
-		return getInstance(containerType, new ContainerInfo(
-				null, containerType, columnInfoList, !keyList.isEmpty()),
-				config);
+		final ContainerInfo info = new ContainerInfo();
+		info.setType(containerType);
+		info.setColumnInfoList(columnInfoList);
+		info.setRowKeyColumnList(keyList);
+
+		return getInstance(containerType, info, config);
 	}
 
 	public void checkSchemaMatched(RowMapper mapper) throws GSException {
@@ -330,6 +364,50 @@ public class RowMapper {
 				throw new GSException(GSErrorCode.ILLEGAL_SCHEMA, "");
 			}
 		}
+	}
+
+	public void checkKeySchemaMatched(RowMapper mapper) throws GSException {
+		resolveKeyMapper().checkSchemaMatched(mapper.resolveKeyMapper());
+	}
+
+	public void checkKeyTypeMatched(Class<?> keyClass) throws GSException {
+		if (keyClass == null || keyClass == Object.class ||
+				(isGeneral() && keyClass == Row.Key.class)) {
+			return;
+		}
+
+		final RowMapper keyMapper = findKeyMapper();
+		final List<GSType> keyTypeList;
+		if (keyMapper == null) {
+			if (keyClass == Void.class) {
+				return;
+			}
+			keyTypeList = Collections.emptyList();
+		}
+		else {
+			if (keyMapper.getColumnCount() > 1) {
+				if (keyClass == keyMapper.rowType) {
+					return;
+				}
+			}
+			else {
+				final GSType elemType =
+						resolveElementType(keyClass, false, false);
+				if (elemType == keyMapper.getEntry(0).elementType &&
+						!keyClass.isArray()) {
+					return;
+				}
+			}
+			final List<GSType> baseList = new ArrayList<GSType>();
+			for (Entry entry : keyMapper.entryList) {
+				baseList.add(entry.elementType);
+			}
+			keyTypeList = baseList;
+		}
+		throw new GSException(
+				GSErrorCode.KEY_NOT_ACCEPTED,
+				"Unacceptable key class (keyClass=" + keyClass.getName() +
+				", keyTypeList=" + keyTypeList + ")");
 	}
 
 	public RowMapper reorderBySchema(
@@ -375,14 +453,15 @@ public class RowMapper {
 
 		keyList = importKeyListEnd(in, config, size, keyList);
 
-		final Entry newKeyEntry;
-		if (keyEntry == null) {
+		final RowMapper keyMapper = findKeyMapper();
+		final RowMapper newKeyMapper;
+		if (keyMapper == null) {
 			if (!keyList.isEmpty()) {
 				throw new GSException(
 						GSErrorCode.ILLEGAL_SCHEMA,
 						"Remote schema must not have a key");
 			}
-			newKeyEntry = null;
+			newKeyMapper = null;
 		}
 		else {
 			if (keyList.isEmpty()) {
@@ -390,21 +469,39 @@ public class RowMapper {
 						GSErrorCode.ILLEGAL_SCHEMA,
 						"Remote schema must have a key");
 			}
-			newKeyEntry = newEntryList.get(keyList.get(0));
-			final String normalizedName =
-					normalizeSymbolUnchecked(keyEntry.columnName);
-			if (!normalizedName.equals(
-					normalizeSymbolUnchecked(newKeyEntry.columnName))) {
+
+			final List<Entry> newKeyEntryList = new ArrayList<Entry>();
+			for (Integer key : keyList) {
+				final Entry newKeyEntry = newEntryList.get(key);
+
+				final String normalizedName =
+						normalizeSymbolUnchecked(newKeyEntry.columnName);
+				final Entry orgKeyEntry = entryMap.get(normalizedName);
+
+				if (!orgKeyEntry.keyType) {
+					throw new GSException(
+							GSErrorCode.ILLEGAL_SCHEMA,
+							"Inconsistent remote schema (key column (name=" +
+									newKeyEntry.columnName + "))");
+				}
+				newKeyEntry.keyType = true;
+				newKeyEntryList.add(newKeyEntry);
+			}
+
+			newKeyMapper =
+					makeKeyMapper(newKeyEntryList, getContainerType(), config);
+
+			if (keyList.size() != keyMapper.getColumnCount() ||
+					keyList.size() != newKeyMapper.getColumnCount()) {
 				throw new GSException(
 						GSErrorCode.ILLEGAL_SCHEMA,
-						"Inconsistent remote schema (column name)");
+						"Inconsistent remote schema (key column count)");
 			}
-			newKeyEntry.keyType = true;
 		}
 
 		return CACHE.intern(new RowMapper(
 				rowType, rowConstructor, newEntryMap, newEntryList,
-				newKeyEntry, getContainerType(), nullableAllowed));
+				newKeyMapper, getContainerType(), nullableAllowed));
 	}
 
 	public static int importColumnCount(BasicBuffer in) throws GSException {
@@ -428,7 +525,7 @@ public class RowMapper {
 						"Protocol error by illegal index of row key " +
 						"column (keyColumn=" + columnId + ")");
 			}
-			return toKeyList(columnId >= 0);
+			return toSimpleKeyList(columnId >= 0);
 		}
 
 		return null;
@@ -439,24 +536,28 @@ public class RowMapper {
 			List<Integer> lastKeyList) throws GSException {
 		if (config.keyExtensible) {
 			final int count = in.base().getShort();
-			if (!(count == 0 || count == 1)) {
+			if (count < 0 || count > columnCount ||
+					!config.keyComposable && !(count == 0 || count == 1)) {
 				throw new GSConnectionException(
 						GSErrorCode.MESSAGE_CORRUPTED,
 						"Protocol error by illegal row key count (" +
 						"count=" + count + ")");
 			}
 
+			final List<Integer> keyList = new ArrayList<Integer>();
 			for (int i = 0; i < count; i++) {
 				final int columnId = in.base().getShort();
-				if (columnId != 0 || columnId >= columnCount) {
+				if (columnId < 0 || columnId >= columnCount ||
+						(columnId != i && restrictKeyOrderFirst)) {
 					throw new GSConnectionException(
 							GSErrorCode.MESSAGE_CORRUPTED,
 							"Protocol error by illegal index of row key " +
 							"column (keyColumn=" + columnId + ")");
 				}
+				keyList.add(columnId);
 			}
 
-			return toKeyList(count > 0);
+			return keyList;
 		}
 
 		return lastKeyList;
@@ -475,12 +576,12 @@ public class RowMapper {
 			throws GSException {
 		if (config.keyExtensible) {
 			final int count = keyList.size();
-			if (count > 1) {
+			if (!config.keyComposable && count > 1) {
 				throw new GSException(GSErrorCode.INTERNAL_ERROR, "");
 			}
 			out.putShort((short) count);
 			for (int keyIndex : keyList) {
-				if (keyIndex != 0) {
+				if (!config.keyComposable && keyIndex != 0) {
 					throw new GSException(GSErrorCode.INTERNAL_ERROR, "");
 				}
 				out.putShort((short) keyIndex);
@@ -488,7 +589,7 @@ public class RowMapper {
 		}
 	}
 
-	public static ColumnInfo importColumnSchema(
+	public static MutableColumnInfo importColumnSchema(
 			BasicBuffer in, Config config) throws GSException {
 		final Entry entry = new Entry(null);
 		entry.importColumnSchema(in, -1, config.nullableAllowed);
@@ -499,11 +600,42 @@ public class RowMapper {
 			entry.columnName = null;
 		}
 
-		return entry.getColumnInfo();
+		final boolean withKeyInfo = false;
+		return entry.getColumnInfo(withKeyInfo);
 	}
 
-	public static List<Integer> toKeyList(boolean rowKeyAssigned) {
-		return rowKeyAssigned ? SINGLE_FIRST_KEY_LIST : EMPTY_KEY_LIST;
+	private static List<Integer> toKeyList(RowMapper keyMapper) {
+		if (keyMapper == null) {
+			return toKeyList(Collections.<Entry>emptyList());
+		}
+		else {
+			return toKeyList(keyMapper.entryList);
+		}
+	}
+
+	private static List<Integer> toKeyList(List<Entry> keyEntryList) {
+		if (keyEntryList.isEmpty()) {
+			return toSimpleKeyList(false);
+		}
+		else if (keyEntryList.size() == 1 && keyEntryList.get(0).order == 0) {
+			return toSimpleKeyList(true);
+		}
+		else {
+			final List<Integer> list = new ArrayList<Integer>();
+			for (Entry entry : keyEntryList) {
+				list.add(entry.order);
+			}
+			return list;
+		}
+	}
+
+	private static List<Integer> toSimpleKeyList(boolean rowKeyAssigned) {
+		if (rowKeyAssigned) {
+			return SINGLE_FIRST_KEY_LIST;
+		}
+		else {
+			return EMPTY_KEY_LIST;
+		}
 	}
 
 	public RowMapper applyResultType(Class<?> rowType) throws GSException {
@@ -526,7 +658,20 @@ public class RowMapper {
 	}
 
 	public boolean hasKey() {
-		return (keyEntry != null);
+		return findKeyMapper() != null;
+	}
+
+	public KeyCategory getKeyCategory() {
+		final RowMapper keyMapper = findKeyMapper();
+		if (keyMapper == null) {
+			return KeyCategory.NONE;
+		}
+		else if (keyMapper.getColumnCount() > 1) {
+			return KeyCategory.COMPOSITE;
+		}
+		else {
+			return KeyCategory.SINGLE;
+		}
 	}
 
 	public Class<?> getRowType() {
@@ -586,14 +731,22 @@ public class RowMapper {
 			return null;
 		}
 
+		final boolean withKeyInfo = true;
 		final List<ColumnInfo> columnInfoList =
 				new ArrayList<ColumnInfo>(entryList.size());
 		for (Entry entry : entryList) {
-			columnInfoList.add(entry.getColumnInfo());
+			columnInfoList.add(entry.getColumnInfo(withKeyInfo));
 		}
 
 		
-		return new ContainerInfo(null, null, columnInfoList, hasKey());
+		final ContainerInfo info = new ContainerInfo();
+		info.setColumnInfoList(columnInfoList);
+		info.setRowKeyColumnList(toKeyList(findKeyMapper()));
+		return info;
+	}
+
+	public ContainerInfo resolveKeyContainerInfo() throws GSException {
+		return resolveKeyMapper().getContainerInfo();
 	}
 
 	public void exportSchema(BasicBuffer out, Config config)
@@ -604,7 +757,7 @@ public class RowMapper {
 					"Unexpected row type: AggregationResult");
 		}
 
-		final List<Integer> keyList = toKeyList(keyEntry != null);
+		final List<Integer> keyList = toKeyList(findKeyMapper());
 
 		exportColumnCount(out, entryList.size());
 		exportKeyListBegin(out, config, keyList);
@@ -612,6 +765,29 @@ public class RowMapper {
 			entry.exportColumnSchema(out);
 		}
 		exportKeyListEnd(out, config, keyList);
+	}
+
+	public void exportKeySchemaSingle(BasicBuffer out)
+			throws GSException {
+		final RowMapper keyMapper = resolveKeyMapper();
+		if (keyMapper.getColumnCount() > 1) {
+			out.put((byte) -1);
+		}
+		else {
+			out.putByteEnum(keyMapper.getEntry(0).elementType);
+		}
+	}
+
+	public void exportKeySchemaComposite(BasicBuffer out)
+			throws GSException {
+		final RowMapper keyMapper = resolveKeyMapper();
+		final int columnCount = keyMapper.getColumnCount();
+		if (columnCount > 1) {
+			out.putInt(columnCount);
+			for (Entry entry : keyMapper.entryList) {
+				out.putByteEnum(entry.elementType);
+			}
+		}
 	}
 
 	public int resolveColumnId(String name) throws GSException {
@@ -628,31 +804,59 @@ public class RowMapper {
 		return entryList.get(column).getFieldObj(rowObj, isGeneral());
 	}
 
-	public Object resolveKey(
-			Object keyObj, Object rowObj) throws GSException {
-		return resolveKey(keyObj, rowObj, isGeneral());
-	}
-
-	public Object resolveKey(
-			Object keyObj, Object rowObj, boolean general) throws GSException {
-		if (keyObj != null) {
+	public Object resolveKeyField(Object keyObj, int keyColumn)
+			throws GSException {
+		if (!checkKeyComposed(keyObj)) {
+			if (keyColumn != 0) {
+				throw new IllegalArgumentException();
+			}
 			return keyObj;
 		}
 
-		if (keyEntry == null) {
-			throw new GSException(
-					GSErrorCode.KEY_NOT_FOUND, "Row key does not exist");
-		}
+		final RowMapper keyMapper = resolveKeyMapper();
+		return keyMapper.getEntry(keyColumn).getFieldObj(keyObj, isGeneral());
+	}
 
-		return keyEntry.getFieldObj(rowObj, general);
+	public Object resolveKey(Object lastKeyObj, Object rowObj) throws GSException {
+		if (!restrictKeyOrderFirst) {
+			throw new Error();
+		}
+		final RowMapper keyMapper = resolveKeyMapper();
+		final boolean general = isGeneral();
+		final int keyColumnCount = keyMapper.getColumnCount();
+		if (keyColumnCount > 1) {
+			final Object destKey;
+			if (lastKeyObj == null) {
+				destKey = keyMapper.createRow(general);
+			}
+			else {
+				destKey = lastKeyObj;
+			}
+			Object src = findEncodingKeyObj(null, rowObj);
+			if (src == null) {
+				src = rowObj;
+			}
+			for (int i = 0; i < keyColumnCount; i++) {
+				final Object elem = getEntry(i).getFieldObj(src, general);
+				keyMapper.getEntry(i).setFieldObj(destKey, elem, general);
+			}
+			return destKey;
+		}
+		else {
+			return getEntry(0).getFieldObj(rowObj, general);
+		}
 	}
 
 	public Object resolveKey(String keyString) throws GSException {
-		if (keyEntry == null) {
+		final RowMapper keyMapper = resolveKeyMapper();
+
+		if (keyMapper.getColumnCount() != 1) {
 			throw new GSException(
-					GSErrorCode.KEY_NOT_FOUND, "Row key does not exist");
+					GSErrorCode.UNSUPPORTED_KEY_TYPE,
+					"Path key operation not supported for composite key");
 		}
 
+		final Entry keyEntry = keyMapper.entryList.get(0);
 		if (keyEntry.arrayUsed) {
 			throw new GSException(
 					GSErrorCode.UNSUPPORTED_KEY_TYPE, "Unsupported key type");
@@ -682,7 +886,7 @@ public class RowMapper {
 	}
 
 	public Row createGeneralRow() throws GSException {
-		return ArrayRow.create(this, true);
+		return new ArrayRow(this, true, true);
 	}
 
 	public Object createRow(boolean general) throws GSException {
@@ -690,54 +894,75 @@ public class RowMapper {
 			return createGeneralRow();
 		}
 
-		try {
-			return rowConstructor.newInstance();
-		}
-		catch (InstantiationException e) {
-			throw new GSException(GSErrorCode.INTERNAL_ERROR, e);
-		}
-		catch (IllegalAccessException e) {
-			throw new GSException(GSErrorCode.INTERNAL_ERROR, e);
-		}
-		catch (InvocationTargetException e) {
-			throw new GSException(e);
-		}
+		return constructObj(rowConstructor);
+	}
+
+	public Row.Key createGeneralRowKey() throws GSException {
+		return new ArrayRowKey(resolveKeyMapper(), true, true);
+	}
+
+	public static Row.Key createIdenticalRowKey(Row.Key key)
+			throws GSException {
+		return new IdenticalRowKey(key);
+	}
+
+	public void encodeKey(BasicBuffer buffer, Object keyObj, MappingMode mode)
+			throws GSException {
+		encodeKey(buffer, Collections.singleton(keyObj), mode, false, false);
 	}
 
 	public void encodeKey(
-			BasicBuffer buffer, Object keyObj, MappingMode mode) throws GSException {
-		if (keyEntry == null) {
-			throw new GSException(
-					GSErrorCode.KEY_NOT_FOUND, "Row key does not exist");
+			BasicBuffer buffer, java.util.Collection<?> keyObjCollection,
+			MappingMode mode, boolean withEncodedSize,
+			boolean withKeyCount) throws GSException {
+		final RowMapper keyMapper = resolveKeyMapper();
+		final boolean composite = (keyMapper.getColumnCount() > 1);
+
+		final int headPos = buffer.base().position();
+		if (withEncodedSize && composite) {
+			buffer.putInt(0);
+		}
+		final int bodyPos = buffer.base().position();
+
+		final int keyCount = keyObjCollection.size();
+		if (withKeyCount) {
+			buffer.putInt(keyCount);
 		}
 
-		if (keyEntry.arrayUsed) {
-			throw new GSException(
-					GSErrorCode.UNSUPPORTED_KEY_TYPE, "Unsupported key type");
+		final Cursor compositeCursor;
+		if (composite) {
+			compositeCursor = keyMapper.createCursor(
+					buffer, mode, keyCount, false, null);
 		}
-		encodeKey(buffer, keyObj, keyEntry.elementType, mode);
-	}
+		else {
+			compositeCursor = null;
+		}
 
-	public static void encodeKey(
-			BasicBuffer buffer, Object keyObj, GSType type,
-			MappingMode mode) throws GSException {
-		switch (type) {
-		case STRING:
-			putString(buffer, (String) keyObj,
-					(mode == MappingMode.ROWWISE_SEPARATED_V2));
-			break;
-		case INTEGER:
-			buffer.putInt((Integer) keyObj);
-			break;
-		case LONG:
-			buffer.putLong((Long) keyObj);
-			break;
-		case TIMESTAMP:
-			buffer.putDate((Date) keyObj);
-			break;
-		default:
-			throw new GSException(
-					GSErrorCode.UNSUPPORTED_KEY_TYPE, "Unsupported key type");
+		final boolean general = keyMapper.isGeneral();
+		for (Object keyObj : keyObjCollection) {
+			final boolean objComposed = checkKeyComposed(keyObj);
+
+			if (compositeCursor == null) {
+				final Entry entry = keyMapper.entryList.get(0);
+				final Object keyElemObj;
+				if (objComposed) {
+					keyElemObj = entry.getFieldObj(keyObj, general);
+				}
+				else {
+					keyElemObj = keyObj;
+				}
+				encodeKeyField(buffer, keyElemObj, entry.elementType, mode);
+			}
+			else {
+				keyMapper.encode(compositeCursor, null, keyObj);
+			}
+		}
+
+		if (withEncodedSize && composite) {
+			final int endPos = buffer.base().position();
+			buffer.base().position(headPos);
+			buffer.putInt(endPos - bodyPos);
+			buffer.base().position(endPos);
 		}
 	}
 
@@ -767,8 +992,9 @@ public class RowMapper {
 		return decode(cursor, isGeneral());
 	}
 
-	public void encode(Cursor cursor,
-			Object keyObj, Object rowObj, boolean general) throws GSException {
+	public void encode(
+			Cursor cursor, Object keyObj, Object rowObj, boolean general)
+			throws GSException {
 		if (rowType == AggregationResult.class) {
 			throw new GSException(
 					GSErrorCode.INTERNAL_ERROR,
@@ -784,9 +1010,13 @@ public class RowMapper {
 			}
 		}
 
-		if (keyObj != null && keyEntry == null) {
-			throw new GSException(
-					GSErrorCode.KEY_NOT_ACCEPTED, "Key must not be specified");
+		final Object resolvedKeyObj = findEncodingKeyObj(keyObj, rowObj);
+		boolean keyDecomposing;
+		if (resolvedKeyObj == null) {
+			keyDecomposing = false;
+		}
+		else {
+			keyDecomposing = checkKeyComposed(resolvedKeyObj);
 		}
 
 		if (rowType == Row.class || general) {
@@ -799,7 +1029,14 @@ public class RowMapper {
 		}
 		else {
 			for (Entry entry : entryList) {
-				entry.encode(cursor, keyObj, rowObj, general);
+				final Object keyElemObj;
+				if (keyDecomposing && entry.keyType) {
+					keyElemObj = entry.getFieldObj(resolvedKeyObj, general);
+				}
+				else {
+					keyElemObj = resolvedKeyObj;
+				}
+				entry.encode(cursor, keyElemObj, rowObj, general);
 			}
 		}
 		cursor.endRowOutput();
@@ -807,7 +1044,7 @@ public class RowMapper {
 
 	public Object decode(Cursor cursor, boolean general) throws GSException {
 		final Object rowObj = (general ?
-				ArrayRow.createUninitialized(this) : createRow(false));
+				new ArrayRow(this, false, false) : createRow(false));
 		cursor.decode(general, rowObj);
 		return rowObj;
 	}
@@ -956,7 +1193,7 @@ public class RowMapper {
 	}
 
 	private boolean isGeneral() {
-		return (rowType == Row.class);
+		return (rowType == Row.class || rowType == Row.Key.class);
 	}
 
 	private static Constructor<?> getRowConstructor(
@@ -978,7 +1215,8 @@ public class RowMapper {
 	}
 
 	private void accept(
-			Set<String> transientRowFields, Field field) throws GSException {
+			Field field, Set<String> transientRowFields, boolean keyInside)
+			throws GSException {
 		final int modifier = field.getModifiers();
 		if (Modifier.isFinal(modifier) || Modifier.isPrivate(modifier) ||
 				Modifier.isStatic(modifier) || Modifier.isTransient(modifier)) {
@@ -995,23 +1233,30 @@ public class RowMapper {
 			return;
 		}
 
-		if (resolveElementType(field.getType(), false, false) == null) {
-			return;
+		final Class<?> objectType = field.getType();
+		Entry compositeKeyEntry = null;
+		if (resolveElementType(objectType, false, false) == null) {
+			compositeKeyEntry = tryAcceptCompositeKey(
+					objectType, field, null, false, keyInside);
+			if (compositeKeyEntry == null) {
+				return;
+			}
 		}
 
-		final Entry entry = putEntry(orgName, rowField);
+		final Entry entry = putEntry(orgName, rowField, compositeKeyEntry);
 		if (entry.rowTypeField != null) {
-			throw new GSException("Duplicate field name (" + name + ")");
+			throw new GSException(
+					GSErrorCode.ILLEGAL_SCHEMA,
+					"Duplicate field name (" + name + ")");
 		}
 		entry.rowTypeField = field;
 		entry.nameByField = orgName;
 		entry.applyAccessibleObject(field);
 		entry.setObjectType(field.getType());
-		acceptKeyEntry(entry);
 	}
 
 	private void accept(
-			Set<String> transientRowFields, Method method)
+			Method method, Set<String> transientRowFields, boolean keyInside)
 			throws GSException {
 		final int modifier = method.getModifiers();
 		if (Modifier.isPrivate(modifier) || Modifier.isStatic(modifier)) {
@@ -1059,32 +1304,39 @@ public class RowMapper {
 			forGetter = true;
 		}
 
+		Entry compositeKeyEntry = null;
 		if (resolveElementType(objectType, false, false) == null) {
-			return;
+			compositeKeyEntry = tryAcceptCompositeKey(
+					objectType, null, method, forGetter, keyInside);
+			if (compositeKeyEntry == null) {
+				return;
+			}
 		}
 
-		final Entry entry = putEntry(orgName, rowField);
+		final Entry entry = putEntry(orgName, rowField, compositeKeyEntry);
 		if (forGetter) {
 			if (entry.getterMethod != null) {
-				throw new GSException("Duplicate getter name (" + name + ")");
+				throw new GSException(
+						GSErrorCode.ILLEGAL_SCHEMA,
+						"Duplicate getter name (" + name + ")");
 			}
 			entry.getterMethod = method;
 			entry.nameByGetter = orgName;
 		}
 		else{
 			if (entry.setterMethod != null) {
-				throw new GSException("Duplicate setter name (" + name + ")");
+				throw new GSException(
+						GSErrorCode.ILLEGAL_SCHEMA,
+						"Duplicate setter name (" + name + ")");
 			}
 			entry.setterMethod = method;
 		}
 		entry.applyAccessibleObject(method);
 		entry.setObjectType(objectType);
-		acceptKeyEntry(entry);
 	}
 
 	private void accept(
-			ColumnInfo columnInfo, boolean keyType, boolean anyTypeAllowed,
-			boolean nullableAllowed) throws GSException {
+			ColumnInfo columnInfo, boolean anyTypeAllowed) throws GSException {
 		final String orgName = columnInfo.getName();
 		final String normalizedName =
 				(orgName == null ? null : normalizeSymbolUnchecked(orgName));
@@ -1093,7 +1345,9 @@ public class RowMapper {
 		}
 
 		if (entryMap.containsKey(normalizedName)) {
-			throw new GSException("Duplicate column name (" + orgName + ")");
+			throw new GSException(
+					GSErrorCode.ILLEGAL_SCHEMA,
+					"Duplicate column name (" + orgName + ")");
 		}
 
 		final Entry entry = new Entry(orgName);
@@ -1107,35 +1361,91 @@ public class RowMapper {
 				entry.arrayUsed = true;
 			}
 		}
+
 		entry.order = entryList.size();
-		entry.keyType = keyType;
-		entry.setNullableGeneral(columnInfo.getNullable(), nullableAllowed);
-		entry.setInitialValueNull(columnInfo.getDefaultValueNull());
 
 		if (normalizedName != null) {
 			entryMap.put(normalizedName, entry);
 		}
 		entryList.add(entry);
+	}
 
-		if (keyType) {
-			keyEntry = entry;
+	private void acceptKeyAndNullable(
+			ContainerInfo containerInfo, boolean nullableAllowed)
+			throws GSException {
+		final List<Integer> rowKeyColumnList = containerInfo.getRowKeyColumnList();
+		int expectedColumn = 0;
+		for (int column : rowKeyColumnList) {
+			if (column < 0 || column >= entryList.size()) {
+				throw new GSException(
+						GSErrorCode.KEY_NOT_ACCEPTED,
+						"Out of range for row key column number (" +
+						"column=" + column +
+						", columnCount=" + entryList.size() +")");
+			}
+
+			if (column != expectedColumn) {
+				throw new GSException(
+						GSErrorCode.KEY_NOT_ACCEPTED,
+						"Row key column must be ordered as coulmn schema");
+			}
+
+			entryList.get(column).keyType = true;
+			expectedColumn++;
+		}
+
+		final int columnCount = entryList.size();
+		for (int i = 0; i < columnCount; i++) {
+			final ColumnInfo columnInfo = containerInfo.getColumnInfo(i);
+			final Entry entry = entryList.get(i);
+
+			entry.setNullableGeneral(columnInfo.getNullable(), nullableAllowed);
+			entry.setInitialValueNull(columnInfo.getDefaultValueNull());
 		}
 	}
 
-	private Entry putEntry(String name, RowField rowField) throws GSException {
-		Entry entry = entryMap.get(normalizeSymbolUnchecked(name));
-		if (entry == null) {
-			entry = new Entry(name);
-			entryMap.put(normalizeSymbolUnchecked(name), entry);
-			entryList.add(entry);
+	private Entry putEntry(
+			String name, RowField rowField, Entry compositeKeyEntry)
+			throws GSException {
+		final String normalizedName = normalizeSymbolUnchecked(name);
+		Entry entry;
+		if (compositeKeyEntry == null) {
+			entry = entryMap.get(normalizedName);
+			if (entry == null) {
+				entry = new Entry(name);
+				entryMap.put(normalizedName, entry);
+				entryList.add(entry);
+			}
+		}
+		else if (compositeKeyEntry.columnName == null) {
+			compositeKeyEntry.columnName = name;
+			entry = compositeKeyEntry;
+		}
+		else {
+			if (!normalizedName.equals(
+					normalizeSymbolUnchecked(compositeKeyEntry.columnName))) {
+				throw new GSException(
+						GSErrorCode.ILLEGAL_SCHEMA,
+						"Composite row key names unmatched (names=[" +
+						name + ", " + compositeKeyEntry.columnName + "])");
+			}
+			entry = compositeKeyEntry;
 		}
 
 		if (rowField != null) {
+			if (compositeKeyEntry != null) {
+				throw new GSException(
+						GSErrorCode.ILLEGAL_SCHEMA,
+						"RowField annotation cannot be specified for " +
+						"composite row key");
+			}
 			final int order = rowField.columnNumber();
 			if (order >= 0) {
 				if (entry.order >= 0) {
 					if (entry.order != order) {
-						throw new GSException("Illegal column number");
+						throw new GSException(
+								GSErrorCode.ILLEGAL_SCHEMA,
+								"Illegal column number");
 					}
 				}
 				else {
@@ -1148,20 +1458,91 @@ public class RowMapper {
 		return entry;
 	}
 
-	private void acceptKeyEntry(Entry entry) throws GSException {
-		if (entry.keyType) {
-			if (keyEntry != null && keyEntry != entry) {
-				throw new GSException(
-						GSErrorCode.MULTIPLE_KEYS_FOUND, "Multiple keys found");
-			}
-			keyEntry = entry;
+	private Entry tryAcceptCompositeKey(
+			Class<?> objectType, Field field, Method method,
+			boolean forGetter, boolean keyInside) throws GSException {
+		final AccessibleObject ao = (method == null ? field : method);
+		if (ao.getAnnotation(RowKey.class) == null) {
+			return null;
 		}
+
+		if (keyInside) {
+			throw new GSException(
+					GSErrorCode.ILLEGAL_SCHEMA,
+					"Nested composite row key specified");
+		}
+
+		for (Entry entry : entryList) {
+			final CompositeKeyEntry keyEntry = entry.compositeKeyEntry;
+			if (keyEntry != null) {
+				if (keyEntry.keyClass != objectType) {
+					throw new GSException(
+							GSErrorCode.ILLEGAL_SCHEMA,
+							"Inconsistent classes for composite row key(" +
+							"classes=[" + keyEntry.keyClass.getName() + ", " +
+							objectType.getName() + "])");
+				}
+				return keyEntry.base;
+			}
+		}
+
+		final boolean keyInsideSub = true;;
+		final RowMapper keyMapper;
+		try {
+			keyMapper = new RowMapper(
+					objectType, ContainerType.COLLECTION, keyInsideSub,
+					GENERAL_CONFIG);
+		}
+		catch (GSException e) {
+			throw new GSException(
+					GSErrorCode.getDescription(e) +
+					" on checking composite key class (" +
+					"keyClass=" + objectType.getName() + ")", e);
+		}
+
+		if (keyMapper.keyMapper != null) {
+			throw new GSException(
+					GSErrorCode.ILLEGAL_SCHEMA,
+					"Nested single row key specified in composite row key");
+		}
+
+		final CompositeKeyEntry keyEntry = new CompositeKeyEntry(
+				new Entry(null), keyMapper.rowType, keyMapper.rowConstructor);
+
+		for (Map.Entry<String, Entry> entry : keyMapper.entryMap.entrySet()) {
+			final Entry subEntry = entry.getValue();
+			if (entryMap.keySet().contains(entry.getKey())) {
+				throw new GSException(
+						GSErrorCode.ILLEGAL_SCHEMA,
+						"Duplicate field name specified between entries of " +
+						"composite row key and other (name=" +
+						subEntry.columnName + ")");
+			}
+			subEntry.compositeKeyEntry = keyEntry;
+			subEntry.keyType = true;
+		}
+
+		if (keyMapper.entryList.size() != keyMapper.entryMap.size()) {
+			throw new Error();
+		}
+
+		if (keyMapper.entryList.size() <= 1) {
+			throw new GSException(
+					GSErrorCode.KEY_NOT_ACCEPTED,
+					"Composite row key must have multiple row fields (" +
+					"keyClass=" + objectType.getName() + ")");
+		}
+
+		entryList.addAll(keyMapper.entryList);
+		entryMap.putAll(keyMapper.entryMap);
+		return keyEntry.base;
 	}
 
 	private void applyOrder(
-			Set<String> transientRowFields, boolean keyFirst)
-			throws GSException {
+			Set<String> transientRowFields, boolean keyFirst,
+			boolean keyUnified) throws GSException {
 		boolean specified = false;
+		List<Entry> keyEntryList = Collections.emptyList();
 		for (Iterator<Entry> i = entryList.iterator(); i.hasNext();) {
 			final Entry entry = i.next();
 			final String normalizedName =
@@ -1172,6 +1553,12 @@ public class RowMapper {
 				i.remove();
 			}
 			specified |= entry.orderSpecified;
+			if (entry.keyType) {
+				if (keyEntryList.isEmpty()) {
+					keyEntryList = new ArrayList<Entry>();
+				}
+				keyEntryList.add(entry);
+			}
 		}
 
 		if (entryList.isEmpty()) {
@@ -1179,7 +1566,7 @@ public class RowMapper {
 					GSErrorCode.ILLEGAL_SCHEMA, "Empty schema");
 		}
 
-		if (!specified && !(keyFirst && !entryList.get(0).keyType)) {
+		if (!specified && (!keyFirst || keyEntryList.isEmpty())) {
 			int order = 0;
 			for (Entry entry : entryList) {
 				entry.order = order;
@@ -1195,7 +1582,13 @@ public class RowMapper {
 			final int order = entry.order;
 			if (order >= 0) {
 				if (order >= orgList.size() || entryList.get(order) != null) {
-					throw new GSException("Illegal order");
+					throw new GSException(
+							GSErrorCode.ILLEGAL_SCHEMA, "Illegal order");
+				}
+				else if (keyUnified && entry.keyType &&
+						order >= keyEntryList.size()) {
+					throw new GSException(
+							GSErrorCode.ILLEGAL_SCHEMA, "Illegal key order");
 				}
 				entryList.set(order, entry);
 				rest--;
@@ -1205,19 +1598,21 @@ public class RowMapper {
 		if (rest > 0) {
 			ListIterator<Entry> it = entryList.listIterator();
 			boolean keyConsumed = false;
-			if (keyFirst && keyEntry != null) {
-				if (keyEntry.order > 0) {
-					throw new GSException("Key must be first column");
+			if (keyFirst && !keyEntryList.isEmpty()) {
+				for (Entry keyEntry : keyEntryList) {
+					if (keyEntry.order >= 0) {
+						continue;
+					}
+					while (it.next() != null) {
+					}
+					keyEntry.order = it.previousIndex();
+					it.set(keyEntry);
+					rest--;
+					keyConsumed = true;
 				}
-				while (it.next() != null) {
-				}
-				keyEntry.order = it.previousIndex();
-				it.set(keyEntry);
-				rest--;
-				keyConsumed = true;
 			}
 			for (Entry entry : orgList) {
-				if ((entry == keyEntry && keyConsumed) || entry.order >= 0) {
+				if ((entry.keyType && keyConsumed) || entry.order >= 0) {
 					continue;
 				}
 				while (it.next() != null) {
@@ -1232,10 +1627,6 @@ public class RowMapper {
 
 		if (rest != 0) {
 			throw new Error();
-		}
-
-		if (keyEntry != null && keyFirst && !entryList.get(0).keyType) {
-			throw new GSException("Key must be first column");
 		}
 	}
 
@@ -1264,45 +1655,132 @@ public class RowMapper {
 		}
 	}
 
-	private void checkKeyType(boolean forTimeSeries) throws GSException {
-		if (keyEntry == null) {
-			if (forTimeSeries) {
-				throw new GSException("Key must be required for time series");
+	private static RowMapper makeKeyMapper(
+			List<Entry> entryList, ContainerType containerType, Config config)
+			throws GSException {
+		final boolean forTimeSeries =
+				(containerType == ContainerType.TIME_SERIES);
+
+		List<Entry> keyEntryList = Collections.emptyList();
+		Map<String, Entry> entryMap = Collections.emptyMap();
+		CompositeKeyEntry compositeKeyEntry = null;
+		boolean general = true;
+		boolean nested = false;
+		boolean flatten = false;
+
+		for (Entry entry : entryList) {
+			if (!entry.keyType) {
+				continue;
 			}
-			return;
-		}
+			if (entry.order != keyEntryList.size()) {
+				if (restrictKeyOrderFirst) {
+					throw new GSException(
+							GSErrorCode.ILLEGAL_SCHEMA,
+							"Key must be ordered before non key coulumns");
+				}
+				throw new Error();
+			}
 
-		if (keyEntry.arrayUsed) {
-			throw new GSException(
-					GSErrorCode.UNSUPPORTED_KEY_TYPE,
-					"Key type must not be array");
-		}
-
-		if (forTimeSeries) {
-			if (keyEntry.elementType != GSType.TIMESTAMP) {
+			if (entry.arrayUsed) {
 				throw new GSException(
 						GSErrorCode.UNSUPPORTED_KEY_TYPE,
-						"Illegal key type for time series: " + keyEntry.elementType);
+						"Key type must not be array");
+			}
+
+			if (forTimeSeries) {
+				if (entry.elementType != GSType.TIMESTAMP) {
+					throw new GSException(
+							GSErrorCode.UNSUPPORTED_KEY_TYPE,
+							"Illegal key type for time series (" +
+							"type=" + entry.elementType + ")");
+				}
+			}
+			else if (entry.elementType == null) {
+				throw new GSException(
+						GSErrorCode.UNSUPPORTED_KEY_TYPE,
+						"Key must not be any type");
+			}
+			else {
+				switch (entry.elementType) {
+				case STRING:
+				case INTEGER:
+				case LONG:
+				case TIMESTAMP:
+					break;
+				default:
+					throw new GSException(
+							GSErrorCode.UNSUPPORTED_KEY_TYPE,
+							"Illegal key type for collection (" +
+							"type=" + entry.elementType + ")");
+				}
+			}
+
+			if (keyEntryList.isEmpty()) {
+				keyEntryList = new ArrayList<Entry>();
+				entryMap = new HashMap<String, Entry>();
+			}
+
+			general &=
+					(entry.getterMethod == null && entry.rowTypeField == null &&
+					entry.compositeKeyEntry == null);
+
+			keyEntryList.add(entry);
+			if (entry.columnName != null) {
+				entryMap.put(
+						normalizeSymbolUnchecked(entry.columnName), entry);
+			}
+
+			if (entry.compositeKeyEntry == null) {
+				flatten = true;
+			}
+			else {
+				compositeKeyEntry = entry.compositeKeyEntry;
+				nested = true;
 			}
 		}
-		else if (keyEntry.elementType == null) {
+
+		if (keyEntryList.isEmpty()) {
+			if (forTimeSeries) {
+				throw new GSException(
+						GSErrorCode.ILLEGAL_SCHEMA,
+						"Key must be required for time series");
+			}
+			return null;
+		}
+
+		if (keyEntryList.size() > 1) {
+			if (forTimeSeries) {
+				throw new GSException(
+						GSErrorCode.MULTIPLE_KEYS_FOUND,
+						"Multiple keys found for time series");
+			}
+			else if (!general && !config.keyComposable) {
+				throw new GSException(
+						GSErrorCode.MULTIPLE_KEYS_FOUND,
+						"Multiple keys found");
+			}
+		}
+		
+		if (flatten && nested) {
 			throw new GSException(
-					GSErrorCode.UNSUPPORTED_KEY_TYPE,
-					"Key must not be any type");
+					GSErrorCode.ILLEGAL_SCHEMA,
+					"Both composite key and single key found");
+		}
+
+		final Class<?> rowType;
+		final Constructor<?> constructor;
+		if (compositeKeyEntry == null) {
+			rowType = (general ? Row.Key.class : null);
+			constructor = null;
 		}
 		else {
-			switch (keyEntry.elementType) {
-			case STRING:
-			case INTEGER:
-			case LONG:
-			case TIMESTAMP:
-				break;
-			default:
-				throw new GSException(
-						GSErrorCode.UNSUPPORTED_KEY_TYPE,
-						"Illegal key type for collection: " + keyEntry.elementType);
-			}
+			rowType = compositeKeyEntry.keyClass;
+			constructor = compositeKeyEntry.keyConstructor;
 		}
+		final boolean nullableAllowed = false;
+		return new RowMapper(
+				rowType, constructor, entryMap, keyEntryList, null,
+				containerType, nullableAllowed);
 	}
 
 	private void decodeAggregation(
@@ -1382,7 +1860,7 @@ public class RowMapper {
 		}
 		final Entry entry = entryList.get(column);
 		if (type == entry.elementType) {
-			entry.decode(cursor, rowObj, general);
+			entry.decode(cursor, null, rowObj, general);
 		}
 		else {
 			final Object orgValue = getField(cursor, type, false);
@@ -1478,6 +1956,112 @@ public class RowMapper {
 			emptyFieldArray = target;
 		}
 		System.arraycopy(target, 0, dest, 0, target.length);
+	}
+
+	private boolean checkKeyComposed(Object keyObj) throws GSException {
+		final RowMapper keyMapper = findKeyMapper();
+		if (keyMapper == null) {
+			throw new GSException(
+					GSErrorCode.KEY_NOT_ACCEPTED,
+					"Key must not be specified");
+		}
+
+		final GSType keyType =
+				resolveElementType(keyObj.getClass(), true, false);
+		final boolean composed = (keyType == null);
+		if (!composed && keyMapper.getColumnCount() > 1) {
+			throw new GSException(
+					GSErrorCode.KEY_NOT_ACCEPTED,
+					"Unacceptable key type for composite key (" +
+					"keyClass=" + keyObj.getClass().getName() + ")");
+		}
+
+		return composed;
+	}
+
+	private Object findEncodingKeyObj(
+			Object specifiedKeyObj, Object rowObj) throws GSException {
+		if (specifiedKeyObj != null) {
+			return specifiedKeyObj;
+		}
+
+		final CompositeKeyEntry keyEntry = findCompositeKeyEntry();
+		if (keyEntry == null) {
+			return null;
+		}
+
+		final boolean general = false;
+		final Object keyObj = keyEntry.base.getFieldObj(rowObj, general);
+		if (keyObj == null) {
+			throw new GSException(
+					GSErrorCode.EMPTY_ROW_FIELD, "Empty composite row key");
+		}
+		return keyObj;
+	}
+
+	private Object preapereDecodingKeyObj(Object rowObj) throws GSException {
+		final CompositeKeyEntry keyEntry = findCompositeKeyEntry();
+		if (keyEntry == null) {
+			return null;
+		}
+
+		final boolean general = false;
+		final Object existingKeyObj = keyEntry.base.getFieldObj(rowObj, general);
+		if (existingKeyObj != null) {
+			return existingKeyObj;
+		}
+
+		final Object keyObj = constructObj(keyEntry.keyConstructor);
+		keyEntry.base.setFieldObj(rowObj, keyObj, general);
+		return keyObj;
+	}
+
+	private static Object constructObj(Constructor<?> constructor)
+			throws GSException {
+		try {
+			return constructor.newInstance();
+		}
+		catch (InstantiationException e) {
+			throw new GSException(GSErrorCode.INTERNAL_ERROR, e);
+		}
+		catch (IllegalAccessException e) {
+			throw new GSException(GSErrorCode.INTERNAL_ERROR, e);
+		}
+		catch (InvocationTargetException e) {
+			throw new GSException(e);
+		}
+	}
+
+	private CompositeKeyEntry findCompositeKeyEntry() throws GSException {
+		final RowMapper keyMapper = findKeyMapper();
+		if (keyMapper == null || keyMapper == this) {
+			return null;
+		}
+
+		final CompositeKeyEntry keyEntry =
+				keyMapper.entryList.get(0).compositeKeyEntry;
+		if (keyEntry == null) {
+			return null;
+		}
+
+		return keyEntry;
+	}
+
+	private RowMapper resolveKeyMapper() throws GSException {
+		final RowMapper keyMapper = findKeyMapper();
+		if (keyMapper == null) {
+			throw new GSException(
+					GSErrorCode.KEY_NOT_FOUND, "Row key does not exist");
+		}
+		return keyMapper;
+	}
+
+	private RowMapper findKeyMapper() {
+		if (keyMapper == null && rowType == Row.Key.class) {
+			return this;
+		}
+
+		return keyMapper;
 	}
 
 	@Override
@@ -1613,6 +2197,29 @@ public class RowMapper {
 		else {
 			out.putInt((Integer.SIZE + elementSize * elementCount) / Byte.SIZE);
 			out.putInt(elementCount);
+		}
+	}
+
+	private static void encodeKeyField(
+			BasicBuffer buffer, Object keyObj, GSType type,
+			MappingMode mode) throws GSException {
+		switch (type) {
+		case STRING:
+			putString(buffer, (String) keyObj,
+					(mode == MappingMode.ROWWISE_SEPARATED_V2));
+			break;
+		case INTEGER:
+			buffer.putInt((Integer) keyObj);
+			break;
+		case LONG:
+			buffer.putLong((Long) keyObj);
+			break;
+		case TIMESTAMP:
+			buffer.putDate((Date) keyObj);
+			break;
+		default:
+			throw new GSException(
+					GSErrorCode.UNSUPPORTED_KEY_TYPE, "Unsupported key type");
 		}
 	}
 
@@ -1801,7 +2408,9 @@ public class RowMapper {
 						final Blob blob = ((Blob) fieldObj);
 							final long length = blob.length();
 							if (length > Integer.MAX_VALUE) {
-								throw new GSException("Blob size limit exceeded");
+								throw new GSException(
+										GSErrorCode.SIZE_VALUE_OUT_OF_RANGE,
+										"Blob size limit exceeded");
 							}
 							if (length > 0) {
 								rawArray = blob.getBytes(1, (int) length);
@@ -2299,13 +2908,17 @@ public class RowMapper {
 
 		public boolean keyExtensible;
 
+		public boolean keyComposable;
+
 		public Config(
 				boolean anyTypeAllowed,
 				boolean nullableAllowed,
-				boolean keyExtensible) {
+				boolean keyExtensible,
+				boolean keyComposable) {
 			this.anyTypeAllowed = anyTypeAllowed;
 			this.nullableAllowed = nullableAllowed;
 			this.keyExtensible = keyExtensible;
+			this.keyComposable = keyComposable;
 		}
 
 	}
@@ -2322,6 +2935,7 @@ public class RowMapper {
 		transient Field rowTypeField;
 		transient Method getterMethod;
 		transient Method setterMethod;
+		transient CompositeKeyEntry compositeKeyEntry;
 
 		GSType elementType;
 		boolean arrayUsed;
@@ -2358,7 +2972,9 @@ public class RowMapper {
 						findMappingAnnotations(setterMethod) ||
 						setterMethod == null &&
 						findMappingAnnotations(getterMethod)) {
-					throw new GSException("Inconsistent annotation");
+					throw new GSException(
+							GSErrorCode.ILLEGAL_SCHEMA,
+							"Inconsistent annotation");
 				}
 				getterMethod = null;
 				setterMethod = null;
@@ -2521,10 +3137,13 @@ public class RowMapper {
 			return null;
 		}
 
-		ColumnInfo getColumnInfo() {
-			return new ColumnInfo(
-					columnName, getFullType(), columnNullable,
-					getInitialValueNull(), null);
+		MutableColumnInfo getColumnInfo(boolean withKeyInfo) {
+			final MutableColumnInfo info = new MutableColumnInfo();
+			info.setName(columnName);
+			info.setType(getFullType());
+			info.setNullable(columnNullable);
+			info.setDefaultValueNull(getInitialValueNull());
+			return info;
 		}
 
 		void exportColumnSchema(BasicBuffer out) {
@@ -2577,6 +3196,7 @@ public class RowMapper {
 			rowTypeField = orgEntry.rowTypeField;
 			getterMethod = orgEntry.getterMethod;
 			setterMethod = orgEntry.setterMethod;
+			compositeKeyEntry = orgEntry.compositeKeyEntry;
 			objectNullable = orgEntry.objectNullable;
 		}
 
@@ -2600,7 +3220,7 @@ public class RowMapper {
 		}
 
 		void decode(
-				Cursor cursor, Object rowObj,
+				Cursor cursor, Object keyObj, Object rowObj,
 				boolean general) throws GSException {
 			Object fieldObj = getField(cursor, elementType, arrayUsed);
 			if (cursor.isNull(order)) {
@@ -2611,14 +3231,18 @@ public class RowMapper {
 					fieldObj = getInitialObj(false, general);
 				}
 			}
-			setFieldObj(rowObj, fieldObj, general);
+			setFieldObj(
+					(compositeKeyEntry == null ? rowObj : keyObj),
+					fieldObj, general);
 		}
 
 		void decodeNoNull(
-				Cursor cursor, Object rowObj,
+				Cursor cursor, Object keyObj, Object rowObj,
 				boolean general) throws GSException {
 			final Object fieldObj = getField(cursor, elementType, arrayUsed);
-			setFieldObj(rowObj, fieldObj, general);
+			setFieldObj(
+					(compositeKeyEntry == null ? rowObj : keyObj),
+					fieldObj, general);
 		}
 
 		Object getFieldObj(Object rowObj, boolean general) throws GSException {
@@ -2744,6 +3368,18 @@ public class RowMapper {
 			return true;
 		}
 
+	}
+
+	private static class CompositeKeyEntry {
+		final Entry base;
+		final Class<?> keyClass;
+		final Constructor<?> keyConstructor;
+		CompositeKeyEntry(
+				Entry base, Class<?> keyClass, Constructor<?> keyConstructor) {
+			this.base = base;
+			this.keyClass = keyClass;
+			this.keyConstructor = keyConstructor;
+		}
 	}
 
 	public class Cursor {
@@ -2877,15 +3513,16 @@ public class RowMapper {
 							"Unexpected row type: AggregationResult");
 				}
 
+				final Object keyObj = preapereDecodingKeyObj(rowObj);
 				beginRowInput();
 				if (nullFound) {
 					for (Entry entry : entryList) {
-						entry.decode(this, rowObj, general);
+						entry.decode(this, keyObj, rowObj, general);
 					}
 				}
 				else {
 					for (Entry entry : entryList) {
-						entry.decodeNoNull(this, rowObj, general);
+						entry.decodeNoNull(this, keyObj, rowObj, general);
 					}
 				}
 				endRowInput();
@@ -3094,33 +3731,30 @@ public class RowMapper {
 
 	}
 
-	private static class ArrayRow implements Row {
+	public interface Provider {
+
+		public RowMapper getRowMapper();
+
+	}
+
+	private static class ArrayRow implements Row, Provider {
 
 		private final RowMapper mapper;
 
 		private final Object[] fieldArray;
 
-		private ArrayRow(
-				RowMapper mapper, Object[] fieldArray) throws GSException {
+		ArrayRow(
+				RowMapper mapper, boolean initializing, boolean nullable)
+				throws GSException {
 			if (mapper.getContainerType() == null) {
 				throw new GSException(GSErrorCode.UNSUPPORTED_OPERATION, "");
 			}
 
 			this.mapper = mapper;
-			this.fieldArray = fieldArray;
-		}
-
-		static ArrayRow create(
-				RowMapper mapper, boolean nullable) throws GSException {
-			final Object[] fieldArray = new Object[mapper.getColumnCount()];
-			mapper.getAllInitialValue(nullable, fieldArray);
-			return new ArrayRow(mapper, fieldArray);
-		}
-
-		static ArrayRow createUninitialized(
-				RowMapper mapper) throws GSException {
-			final Object[] fieldArray = new Object[mapper.getColumnCount()];
-			return new ArrayRow(mapper, fieldArray);
+			this.fieldArray = new Object[mapper.getColumnCount()];
+			if (initializing) {
+				mapper.getAllInitialValue(nullable, fieldArray);
+			}
 		}
 
 		private void setAnyValueDirect(int column, Object fieldValue) {
@@ -3247,6 +3881,22 @@ public class RowMapper {
 							"" : "column=" + entry.columnName + ", ") +
 					"columnNumber=" + column + ")",
 					cause);
+		}
+
+		private Date[] copyTimestampArray(Date[] src, int column)
+				throws GSException {
+			final Date[] dest = new Date[src.length];
+			for (int i = 0; i < src.length; i++) {
+				final long time;
+				try {
+					time = src[i].getTime();
+				}
+				catch (NullPointerException e) {
+					throw errorNull(column, i);
+				}
+				dest[i] = new Date(time);
+			}
+			return dest;
 		}
 
 		private static Blob shareBlob(Blob src) throws GSException {
@@ -3872,10 +4522,7 @@ public class RowMapper {
 				return;
 			}
 			checkArrayType(column, GSType.TIMESTAMP);
-			final Date[] dest = new Date[fieldValue.length];
-			System.arraycopy(fieldValue, 0, dest, 0, fieldValue.length);
-			checkObjectArrayElements(column, dest);
-			setAnyValueDirect(column, dest);
+			setAnyValueDirect(column, copyTimestampArray(fieldValue, column));
 		}
 
 		@Override
@@ -3890,9 +4537,7 @@ public class RowMapper {
 			if (src == null) {
 				return null;
 			}
-			final Date[] dest = new Date[src.length];
-			System.arraycopy(src, 0, dest, 0, src.length);
-			return dest;
+			return copyTimestampArray(src, column);
 		}
 
 		@Override
@@ -3904,6 +4549,180 @@ public class RowMapper {
 		@Override
 		public boolean isNull(int column) throws GSException {
 			return getAnyValue(column) == null;
+		}
+
+		@Override
+		public Row createRow() throws GSException {
+			final ArrayRow dest = new ArrayRow(mapper, false, false);
+			System.arraycopy(
+					fieldArray, 0, dest.fieldArray, 0, fieldArray.length);
+			return dest;
+		}
+
+		@Override
+		public Key createKey() throws GSException {
+			final RowMapper keyMapper = mapper.resolveKeyMapper();
+
+			if (!restrictKeyOrderFirst) {
+				throw new Error();
+			}
+
+			final ArrayRowKey dest = new ArrayRowKey(keyMapper, false, false);
+			final ArrayRow destRow = dest;
+			for (Entry entry : keyMapper.entryList) {
+				destRow.fieldArray[entry.order] = fieldArray[entry.order];
+			}
+			return dest;
+		}
+
+		@Override
+		public RowMapper getRowMapper() {
+			return mapper;
+		}
+
+		void setRow(Row src) throws GSException {
+			if (src instanceof ArrayRow) {
+				final ArrayRow srcArrayRow = (ArrayRow) src;
+				if (mapper == srcArrayRow.mapper) {
+					System.arraycopy(
+							srcArrayRow.fieldArray, 0, fieldArray, 0,
+							fieldArray.length);
+					return;
+				}
+			}
+			final int columnCount = mapper.getColumnCount();
+			for (int i = 0; i < columnCount; i++) {
+				setValue(i, src.getValue(i));
+			}
+		}
+
+		int getKeyHashCode() {
+			checkKeyType();
+			return Arrays.hashCode(fieldArray);
+		}
+
+		boolean equalsKey(Object another) {
+			if (!(another instanceof ArrayRowKey)) {
+				return false;
+			}
+			return Arrays.equals(fieldArray, ((ArrayRow) another).fieldArray);
+		}
+
+		private void checkKeyType() {
+			if (mapper.rowType != Row.Key.class) {
+				throw new IllegalStateException();
+			}
+			for (Entry entry : mapper.entryList) {
+				switch (entry.elementType) {
+				case STRING:
+					break;
+				case INTEGER:
+					break;
+				case LONG:
+					break;
+				case TIMESTAMP:
+					break;
+				default:
+					throw new IllegalStateException();
+				}
+			}
+		}
+
+	}
+
+	private static class ArrayRowKey extends ArrayRow implements Row.Key {
+
+		ArrayRowKey(
+				RowMapper mapper, boolean initializing, boolean nullable)
+				throws GSException {
+			super(mapper, initializing, nullable);
+		}
+
+	}
+
+	private static class IdenticalRowKey extends ArrayRowKey {
+
+		final int hashCode;
+
+		IdenticalRowKey(Row.Key key) throws GSException {
+			super(
+					getInstance(key, GENERAL_CONFIG).resolveKeyMapper(),
+					true, true);
+			setRow(key);
+			hashCode = getKeyHashCode();
+		}
+
+		@Override
+		public int hashCode() {
+			return hashCode;
+		}
+
+		@Override
+		public boolean equals(Object obj) {
+			return equalsKey(obj);
+		}
+
+	}
+
+	public static class MutableColumnInfo extends ColumnInfo {
+
+		private String name;
+
+		private GSType type;
+
+		private Boolean nullable;
+
+		private Boolean defaultValueNull;
+
+		private Set<IndexType> indexTypes;
+
+		private MutableColumnInfo() {
+			super(null, null);
+		}
+
+		@Override
+		public String getName() {
+			return name;
+		}
+
+		public void setName(String name) {
+			this.name = name;
+		}
+
+		@Override
+		public GSType getType() {
+			return type;
+		}
+
+		public void setType(GSType type) {
+			this.type = type;
+		}
+
+		@Override
+		public Boolean getNullable() {
+			return nullable;
+		}
+
+		public void setNullable(Boolean nullable) {
+			this.nullable = nullable;
+		}
+
+		@Override
+		public Boolean getDefaultValueNull() {
+			return defaultValueNull;
+		}
+
+		public void setDefaultValueNull(Boolean defaultValueNull) {
+			this.defaultValueNull = defaultValueNull;
+		}
+
+		@Override
+		public Set<IndexType> getIndexTypes() {
+			return indexTypes;
+		}
+
+		public void setIndexTypes(Set<IndexType> indexTypes) {
+			this.indexTypes = indexTypes;
 		}
 
 	}
@@ -3929,8 +4748,9 @@ public class RowMapper {
 			RowMapper mapper = map.get(rowType);
 			if (mapper == null ||
 					mapper.nullableAllowed != config.nullableAllowed) {
+				final boolean keyInside = false;
 				mapper = new RowMapper(
-						rowType, containerType, config.nullableAllowed);
+						rowType, containerType, keyInside, config);
 				map.put(rowType, mapper);
 				internPool.intern(mapper);
 			}
@@ -3942,6 +4762,12 @@ public class RowMapper {
 			return internPool.intern(mapper);
 		}
 
+	}
+
+	public enum KeyCategory {
+		NONE,
+		SINGLE,
+		COMPOSITE
 	}
 
 	public static class Tool {
@@ -4036,6 +4862,172 @@ public class RowMapper {
 			}
 
 			return resolveElementType(value.getClass(), true, false);
+		}
+
+	}
+
+	public static abstract class BindingTypeFactory {
+
+		public abstract
+		<K, R, C extends Container<K, R>, D extends Container<?, ?>>
+		BindType<K, R, C> create(
+				Class<K> keyType, Class<R> rowType, Class<D> containerType)
+				throws GSException;
+
+	}
+
+	public static class BindingTool {
+
+		private static AtomicReference<BindingTypeFactory> TYPE_FACTORY =
+				new AtomicReference<BindingTypeFactory>();
+
+		public static <K, R, C extends Container<?, ?>>
+		BindType<K, R, ? extends Container<K, R>> createBindType(
+				Class<K> keyType, Class<R> rowType, Class<C> containerType)
+				throws GSException {
+			return createBindType(
+					keyType, rowType, containerType,
+					(BindType<K, R, ? extends Container<K, R>>) null);
+		}
+
+		public static <K, R>
+		BindType<K, R, Collection<K, R>> createCollectionBindType(
+				Class<K> keyType, Class<R> rowType) throws GSException {
+			return createBindType(
+					keyType, rowType, Collection.class,
+					(BindType<K, R, Collection<K, R>>) null);
+		}
+
+		public static <R>
+		BindType<Date, R, TimeSeries<R>> createTimeSeriesBindType(
+				Class<R> rowType) throws GSException {
+			return createBindType(
+					Date.class, rowType, TimeSeries.class,
+					(BindType<Date, R, TimeSeries<R>>) null);
+		}
+
+		public static <K, R>
+		BindType<K, R, ? extends Container<K, R>> rebindKey(
+				Class<K> keyClass,
+				BindType<?, R, ? extends Container<?, ?>> bindType)
+				throws GSException {
+			return createBindType(
+					keyClass, bindType.getRowClass(),
+					bindType.getContainerClass());
+		}
+
+		public static <K, R>
+		BindType<K, R, ? extends Container<K, R>> rebindRow(
+				Class<R> rowClass,
+				BindType<K, ?, ? extends Container<?, ?>> bindType)
+				throws GSException {
+			return createBindType(
+					bindType.getKeyClass(), rowClass,
+					bindType.getContainerClass());
+		}
+
+		public static <K, R extends Row.WithKey<K>> Class<K> resolveKeyClass(
+				Class<R> rowClass) throws GSException {
+			@SuppressWarnings("unchecked")
+			final Class<K> keyClass = (Class<K>) findKeyClassGeneral(rowClass);
+			if (keyClass == null) {
+				throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
+						"Row key class not found (rowClass=" +
+						rowClass.getName() + ")");
+			}
+			return keyClass;
+		}
+
+		public static <K> Class<K> checkKeyClass(
+				Class<K> keyClass, Class<?> rowClass) throws GSException {
+			final Class<?> foundKeyClass = findKeyClassGeneral(rowClass);
+			if (foundKeyClass != null && (keyClass != foundKeyClass)) {
+				throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
+						"Row key class unmatched (" +
+						"specifiedKeyClass=" + keyClass.getName() +
+						", keyClassFromRow=" + foundKeyClass.getName() +
+						", rowClass=" + rowClass.getName() + ")");
+			}
+			return keyClass;
+		}
+
+		public static ContainerType findContainerType(
+				BindType<?, ?, ?> bindType) {
+			return findContainerType(bindType.getContainerClass());
+		}
+
+		public static ContainerType findContainerType(
+				Class<? extends Container<?, ?>> containerClass) {
+			if (Collection.class.isAssignableFrom(containerClass)) {
+				return ContainerType.COLLECTION;
+			}
+			else if (TimeSeries.class.isAssignableFrom(containerClass)) {
+				return ContainerType.TIME_SERIES;
+			}
+			else {
+				return null;
+			}
+		}
+
+		public static void setFactory(BindingTypeFactory factory) {
+			if (!BindingTool.TYPE_FACTORY.compareAndSet(null, factory)) {
+				throw new Error();
+			}
+		}
+
+		private static
+		<K, R, C extends Container<K, R>, D extends Container<?, ?>>
+		BindType<K, R, C> createBindType(
+				Class<K> keyType, Class<R> rowType, Class<D> containerType,
+				BindType<K, R, C> baseType) throws GSException {
+			return getFactory().<K, R, C, D>create(
+					keyType, rowType, containerType);
+		}
+
+		private static BindingTypeFactory getFactory() {
+			try {
+				Container.BindType.of(Row.Key.class, Row.class);
+			}
+			catch (GSException e) {
+				throw new Error();
+			}
+			final BindingTypeFactory factory = BindingTool.TYPE_FACTORY.get();
+			if (factory == null) {
+				throw new Error();
+			}
+			return factory;
+		}
+
+		private static Class<?> findKeyClassGeneral(Class<?> baseClass)
+				throws GSException {
+			if (baseClass == null) {
+				return null;
+			}
+			for (Type anyType : baseClass.getGenericInterfaces()) {
+				if (anyType instanceof Class<?>) {
+					final Class<?> sub = findKeyClassGeneral((Class<?>) anyType);
+					if (sub != null) {
+						return sub;
+					}
+					continue;
+				}
+				else if (!(anyType instanceof ParameterizedType)) {
+					continue;
+				}
+				final ParameterizedType type = (ParameterizedType) anyType;
+				if (type.getRawType() != Row.WithKey.class) {
+					continue;
+				}
+				final Type[] argList = type.getActualTypeArguments();
+				if (argList.length != 1) {
+					throw new GSException(GSErrorCode.ILLEGAL_PARAMETER, "");
+				}
+				if (!(argList[0] instanceof Class<?>)) {
+					return null;
+				}
+				return (Class<?>) argList[0];
+			}
+			return findKeyClassGeneral(baseClass.getSuperclass());
 		}
 
 	}

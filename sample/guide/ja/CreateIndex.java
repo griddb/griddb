@@ -1,4 +1,5 @@
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Properties;
 
@@ -54,12 +55,24 @@ public class CreateIndex {
 			// (1)索引情報を設定する
 			IndexInfo indexInfo = new IndexInfo();
 			indexInfo.setColumnName("count");
-			indexInfo.setType(IndexType.TREE);
+			indexInfo.setType(IndexType.HASH);
+			indexInfo.setName("hash_index");
 
 			// (2)索引を作成する
 			container.createIndex(indexInfo);
 
 			System.out.println("Create Index");
+			
+			// (3)複合索引の索引情報を設定する
+			IndexInfo compositeInfo = new IndexInfo();
+			compositeInfo.setColumnNameList(Arrays.asList("count","productName"));
+			compositeInfo.setType(IndexType.TREE);
+			compositeInfo.setName("composite_index");
+			
+			// (4)複合索引を作成する
+			container.createIndex(compositeInfo);
+
+			System.out.println("Create Composite Index");
 
 			//===============================================
 			// 終了処理

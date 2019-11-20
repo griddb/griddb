@@ -204,15 +204,17 @@ void QueryForCollection::doQueryWithoutCondition(
 	}
 	OutputOrder outputOrder = ORDER_UNDEFINED;  
 
-	BtreeMap::SearchContext sc(
-		UNDEF_COLUMNID, NULL, 0, true, NULL, 0, true, 0, NULL, nLimit_);
+	ColumnId searchColumnId = UNDEF_COLUMNID;
 
 	if (isIndexSortAvailable(collection, 0)) {
 		SortExpr &orderExpr = (*pOrderByExpr_)[0];
 		uint32_t orderColumnId =
 			(orderExpr.expr) ? orderExpr.expr->getColumnId() : UNDEF_COLUMNID;
+		util::Vector<ColumnId> otherColumnIds(txn.getDefaultAllocator());
+		otherColumnIds.push_back(orderColumnId);
+		bool withPartialMatch = false;
 		if (orderExpr.expr &&
-			collection.hasIndex(txn, orderColumnId, MAP_TYPE_BTREE)) {  
+			collection.hasIndex(txn, otherColumnIds, MAP_TYPE_BTREE, withPartialMatch)) {  
 			if (doExplain()) {
 				addExplain(0, "QUERY_RESULT_SORT", "BOOLEAN", "TRUE", "");
 				addExplain(1, "QUERY_RESULT_SORT_API_INDEX_ORDER", "STRING",
@@ -220,26 +222,25 @@ void QueryForCollection::doQueryWithoutCondition(
 			}
 			outputOrder = (orderExpr.order == ASC) ? ORDER_ASCENDING
 												   : ORDER_DESCENDING;  
-			sc.columnId_ = orderColumnId;
-			sc.keyType_ =
-				collection.getColumnInfo(orderColumnId).getColumnType();
+			searchColumnId = orderColumnId;
 			setLimitByIndexSort();
-			sc.nullCond_ = BaseIndex::SearchContext::ALL;
-			sc.limit_ = nLimit_;
 		}
 	}
-
+	BtreeMap::SearchContext sc (txn.getDefaultAllocator(), searchColumnId);
+	sc.setLimit(nLimit_);
+	if (searchColumnId != UNDEF_COLUMNID) {
+		sc.nullCond_ = BaseIndex::SearchContext::ALL;
+	}
 	if (doExecute()) {
 		if (outputOrder != ORDER_UNDEFINED) {
 			collection.searchColumnIdIndex(txn, sc, resultOIdList, outputOrder);
 		}
 		else {
-			sc.columnId_ = UNDEF_COLUMNID;
 			collection.searchRowIdIndex(txn, sc, resultOIdList, outputOrder);
 		}
 
 		if (resultOIdList.size() > nLimit_) {
-//			ResultSize eraseSize = resultOIdList.size() - nLimit_;
+			ResultSize eraseSize = resultOIdList.size() - nLimit_;
 			resultOIdList.erase(
 				resultOIdList.begin() + static_cast<size_t>(nLimit_),
 				resultOIdList.end());
@@ -287,7 +288,6 @@ void QueryForCollection::doQueryWithCondition(
 	orList.clear();
 	getConditionAsOrList(orList);
 	assert(!orList.empty());  
-
 	for (uint32_t p = 0; p < orList.size(); p++) {
 		if (doExplain()) {
 			util::NormalOStringStream os;
@@ -299,48 +299,23 @@ void QueryForCollection::doQueryWithCondition(
 		orList[p]->toAndList(andList);
 		assert(!andList.empty());  
 
-		MapType indexType;
-		ColumnInfo *indexColumnInfo;
+		IndexData indexData(txn.getDefaultAllocator());
 
 		if (hook_) {
 			hook_->qpBuildTmpHook(*this, 6);	
 		}
-		getIndexInfoInAndList(
-			txn, collection, andList, indexType, indexColumnInfo);
+		bool indexFound = getIndexDataInAndList(
+			txn, collection, andList, indexData);
 
 		if (hook_) {
 			hook_->qpBuildTmpHook(*this, 7);	
 		}
 
-		if (indexColumnInfo == NULL) {
-			BtreeMap::SearchContext sc;
+		if (!indexFound) {
+			BtreeMap::SearchContext *sc = NULL;
 			BoolExpr::toSearchContext(
 				txn, andList, NULL, *this, sc, restConditions, nLimit_);
 
-			if (false) {
-				SortExpr &orderExpr = (*pOrderByExpr_)[0];
-				uint32_t orderColumnId = (orderExpr.expr)
-											 ? orderExpr.expr->getColumnId()
-											 : UNDEF_COLUMNID;
-				if (orderExpr.expr &&
-					collection.hasIndex(txn, orderColumnId, MAP_TYPE_BTREE)) {
-					if (doExplain()) {
-						addExplain(
-							0, "QUERY_RESULT_SORT", "BOOLEAN", "TRUE", "");
-						addExplain(1, "QUERY_RESULT_SORT_API_INDEX_ORDER",
-							"STRING", (orderExpr.order == ASC) ? "ASC" : "DESC",
-							"");
-					}
-					outputOrder = (orderExpr.order == ASC)
-									  ? ORDER_ASCENDING
-									  : ORDER_DESCENDING;  
-					assert(sc.columnId_ == UNDEF_COLUMNID);
-					sc.columnId_ = orderColumnId;
-					sc.keyType_ =
-						collection.getColumnInfo(orderColumnId).getColumnType();
-					setLimitByIndexSort();
-				}
-			}
 			if (doExecute()) {
 				if (doExplain()) {
 					addExplain(0, "SEARCH_EXECUTE", "MAP_TYPE", "BTREE", "");
@@ -349,16 +324,18 @@ void QueryForCollection::doQueryWithCondition(
 				operatorOutOIdArray.clear();
 				if (outputOrder != ORDER_UNDEFINED) {
 					collection.searchColumnIdIndex(
-						txn, sc, operatorOutOIdArray, outputOrder);
+						txn, *sc, operatorOutOIdArray, outputOrder);
 				}
 				else {
 					collection.searchRowIdIndex(
-						txn, sc, operatorOutOIdArray, outputOrder);
+						txn, *sc, operatorOutOIdArray, outputOrder);
 				}
 			}
 		}
 		else {
-			switch (indexType) {
+			assert(!indexData.columnIds_->empty());
+			ColumnInfo *indexColumnInfo = &(collection.getColumnInfo((*(indexData.columnIds_))[0]));
+			switch (indexData.mapType_) {
 			case MAP_TYPE_BTREE: {
 				assert(indexColumnInfo != NULL);
 				if (isIndexSortAvailable(collection, orList.size())) {
@@ -380,26 +357,56 @@ void QueryForCollection::doQueryWithCondition(
 						setLimitByIndexSort();
 					}
 				}
-				BtreeMap::SearchContext sc;
-				BoolExpr::toSearchContext(txn, andList, indexColumnInfo, *this,
+				BtreeMap::SearchContext *sc = NULL;
+				BoolExpr::toSearchContext(txn, andList, &indexData, *this,
 					sc, restConditions, nLimit_);
 
 				if (doExecute()) {
 					if (doExplain()) {
-						addExplain(
-							1, "SEARCH_EXECUTE", "MAP_TYPE", "BTREE", "");
-						const char *columnName =
-							indexColumnInfo->getColumnName(txn, objectManager_);
-						addExplain(2, "SEARCH_MAP", "STRING", columnName, "");
+						util::NormalOStringStream os;
+						{
+							util::Vector<TermCondition> condList(alloc);
+							sc->getConditionList(condList, BaseIndex::SearchContext::COND_KEY);
+							util::Set<ColumnId> useColumnSet(alloc);
+							util::Set<ColumnId>::iterator itr;
+							bool isFirstColumn = true;
+							for (size_t i = 0; i < condList.size(); i++) {
+								itr = useColumnSet.find(condList[i].columnId_);
+								if (itr == useColumnSet.end()) {
+									useColumnSet.insert(condList[i].columnId_);
+									if (!isFirstColumn) {
+										os << " ";
+									} else {
+										isFirstColumn = false;
+									}
+									ColumnInfo &columnInfo = collection.getColumnInfo(condList[i].columnId_);
+									os << columnInfo.getColumnName(txn, objectManager_);
+								}
+							}
+							addExplain(
+								1, "SEARCH_EXECUTE", "MAP_TYPE", "BTREE", os.str().c_str());
+						}
+						{
+							os.str("");
+							for (size_t i = 0; i < indexData.columnIds_->size(); i++) {
+								if (i != 0) {
+									os << " ";
+								}
+								ColumnInfo &columnInfo = collection.getColumnInfo((*(indexData.columnIds_))[0]);
+								os << columnInfo.getColumnName(txn, objectManager_);
+							}
+
+							addExplain(2, "SEARCH_MAP", "STRING", os.str().c_str(), "");
+						}
 					}
 					operatorOutOIdArray.clear();
 					collection.searchColumnIdIndex(
-						txn, sc, operatorOutOIdArray, outputOrder);
+						txn, *sc, operatorOutOIdArray, outputOrder);
 				}
 			} break;
 			case MAP_TYPE_HASH: {
-				HashMap::SearchContext sc;
-				BoolExpr::toSearchContext(txn, andList, indexColumnInfo, *this,
+				HashMap::SearchContext *sc = NULL;
+				BoolExpr::toSearchContext(txn, andList, &indexData, *this,
 					sc, restConditions, nLimit_);
 				if (doExecute()) {
 					if (doExplain()) {
@@ -410,12 +417,12 @@ void QueryForCollection::doQueryWithCondition(
 					}
 					operatorOutOIdArray.clear();
 					collection.searchColumnIdIndex(
-						txn, sc, operatorOutOIdArray);
+						txn, *sc, operatorOutOIdArray);
 				}
 			} break;
 			case MAP_TYPE_SPATIAL: {
-				RtreeMap::SearchContext sc;
-				BoolExpr::toSearchContext(txn, andList, indexColumnInfo, *this,
+				RtreeMap::SearchContext *sc = NULL;
+				BoolExpr::toSearchContext(txn, andList, &indexData, *this,
 					sc, restConditions, nLimit_);
 				if (doExecute()) {
 					if (doExplain()) {
@@ -427,7 +434,7 @@ void QueryForCollection::doQueryWithCondition(
 					}
 					operatorOutOIdArray.clear();
 					collection.searchColumnIdIndex(
-						txn, sc, operatorOutOIdArray);
+						txn, *sc, operatorOutOIdArray);
 				}
 			} break;
 			default:  
@@ -559,8 +566,8 @@ void QueryForCollection::doSelection(
 						resultOIdList.begin() + static_cast<size_t>(nOffset_));
 
 					if (nActualLimit_ < resultOIdList.size()) {
-//						ResultSize eraseSize =
-//							resultOIdList.size() - nActualLimit_;
+						ResultSize eraseSize =
+							resultOIdList.size() - nActualLimit_;
 						resultOIdList.erase(
 							resultOIdList.begin() +
 								static_cast<size_t>(nActualLimit_),

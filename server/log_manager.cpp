@@ -25,6 +25,10 @@
 #include "util/trace.h"
 #include "chunk_manager.h"
 #include "partition_table.h"
+#ifndef _WIN32
+#include <fcntl.h>
+#include <linux/falloc.h>
+#endif
 
 UTIL_TRACER_DECLARE(LOG_MANAGER);
 UTIL_TRACER_DECLARE(IO_MONITOR);
@@ -811,13 +815,11 @@ LogSequentialNumber LogManager::putCreateIndexLog(
 		addr += util::varIntEncode32(addr, extensionNameLen + 1);
 		addr += util::varIntEncode32(addr, static_cast<uint32_t>(paramDataLen.size()));
 		binaryLogBuf.push_back(tmp, (addr - tmp));
-		for (size_t i = 0; i < columnIds.size(); i++) {
 			if (!columnIds.empty()) {
 				binaryLogBuf.push_back(
 						reinterpret_cast<const uint8_t*>(&(columnIds[0])),
 						sizeof(ColumnId)*columnIds.size());
 			}
-		}
 		binaryLogBuf.push_back(
 				reinterpret_cast<const uint8_t*>(indexName),
 				indexNameLen + 1);
@@ -884,13 +886,11 @@ LogSequentialNumber LogManager::putDropIndexLog(
 		addr += util::varIntEncode32(addr, extensionNameLen + 1);
 		addr += util::varIntEncode32(addr, static_cast<uint32_t>(paramDataLen.size()));
 		binaryLogBuf.push_back(tmp, (addr - tmp));
-		for (size_t i = 0; i < columnIds.size(); i++) {
 			if (!columnIds.empty()) {
 				binaryLogBuf.push_back(
 						reinterpret_cast<const uint8_t*>(&(columnIds[0])),
 						sizeof(ColumnId)*columnIds.size());
 			}
-		}
 		binaryLogBuf.push_back(
 				reinterpret_cast<const uint8_t*>(indexName),
 				indexNameLen + 1);
@@ -2205,6 +2205,10 @@ void LogManager::ConfigSetUpHandler::operator()(ConfigTable &config) {
 			config, CONFIG_TABLE_DS_RETAINED_FILE_COUNT, INT32).
 			setMin(2).
 			setDefault(2);
+	CONFIG_TABLE_ADD_PARAM(
+			config, CONFIG_TABLE_DS_LOG_FILE_CLEAR_CACHE_INTERVAL, INT32).
+			setMin(0).
+			setDefault(100);
 }
 
 void LogManager::setDuplicateLogPath(PartitionGroupId pgId, const char8_t *duplicateLogPath) {
@@ -2304,6 +2308,8 @@ LogManager::Config::Config(ConfigTable &configTable) :
 				CONFIG_TABLE_DS_IO_WARNING_THRESHOLD_TIME)),
 		retainedFileCount_(configTable.getUInt32(
 				CONFIG_TABLE_DS_RETAINED_FILE_COUNT)),
+		logFileClearCacheInterval_(configTable.getUInt32(
+				CONFIG_TABLE_DS_LOG_FILE_CLEAR_CACHE_INTERVAL)),
 		lsnBaseFileRetention_(false) {
 	if (logWriteMode_ == 0 || logWriteMode_ == -1) {
 		alwaysFlushOnTxnEnd_ = true;
@@ -2314,6 +2320,9 @@ void LogManager::Config::setUpConfigHandler() {
 	if (!configTable_->isSet(CONFIG_TABLE_DS_RETAINED_FILE_COUNT)) {
 		configTable_->setParamHandler(CONFIG_TABLE_DS_RETAINED_FILE_COUNT, *this);
 	}
+	if (!configTable_->isSetParamHandler(CONFIG_TABLE_DS_LOG_FILE_CLEAR_CACHE_INTERVAL)) {
+		configTable_->setParamHandler(CONFIG_TABLE_DS_LOG_FILE_CLEAR_CACHE_INTERVAL, *this);
+	}
 }
 
 void LogManager::Config::operator()(
@@ -2321,6 +2330,9 @@ void LogManager::Config::operator()(
 	switch (id) {
 	case CONFIG_TABLE_DS_RETAINED_FILE_COUNT:
 		retainedFileCount_ = value.get<int32_t>();
+		break;
+	case CONFIG_TABLE_DS_LOG_FILE_CLEAR_CACHE_INTERVAL:
+		logFileClearCacheInterval_ = value.get<int32_t>();
 		break;
 	}
 }
@@ -2535,9 +2547,10 @@ uint32_t LogManager::LogFileInfo::readBlock(
 	const uint32_t requestSize = static_cast<uint32_t>(endOffset - startOffset);
 	try {
 		util::Stopwatch watch(util::Stopwatch::STATUS_STARTED);
+		uint64_t retryCount = 0;
 		GS_FILE_READ_ALL(
 				IO_MONITOR, (*file_), buffer, requestSize, startOffset,
-				config_->ioWarningThresholdMillis_);
+				config_->ioWarningThresholdMillis_, retryCount);
 		const int64_t resultSize = requestSize;
 		if (resultSize != static_cast<int64_t>(requestSize)) {
 			GS_THROW_USER_ERROR(GS_ERROR_LM_READ_LOG_BLOCK_FAILED,
@@ -2573,10 +2586,11 @@ void LogManager::LogFileInfo::writeBlock(
 
 	const uint32_t requestSize = static_cast<uint32_t>(endOffset - startOffset);
 	try {
+		uint64_t retryCount = 0;
 		GS_FILE_WRITE_ALL(
 				IO_MONITOR, (*file_), buffer,
 				requestSize, startOffset,
-				config_->ioWarningThresholdMillis_);
+				config_->ioWarningThresholdMillis_, retryCount);
 		const int64_t resultSize = requestSize;
 		if (resultSize != static_cast<int64_t>(requestSize)) {
 			GS_THROW_USER_ERROR(GS_ERROR_LM_WRITE_LOG_BLOCK_FAILED,
@@ -2599,10 +2613,11 @@ void LogManager::LogFileInfo::writeBlock(
 	}
 	try {
 		if (file2_) {
+			uint64_t retryCount = 0;
 			GS_FILE_WRITE_ALL(
 					IO_MONITOR, (*file2_), buffer,
 					requestSize, startOffset,
-					config_->ioWarningThresholdMillis_);
+					config_->ioWarningThresholdMillis_, retryCount);
 			const int64_t resultSize = requestSize;
 			if (resultSize != static_cast<int64_t>(requestSize)) {
 				try {
@@ -2648,10 +2663,10 @@ void LogManager::LogFileInfo::writeBlock(
 
 void LogManager::LogFileInfo::flush() {
 	assert(!isClosed());
-	flush(*file_, *config_, true);
+	flush(*file_, *config_, true, 0, false);
 	if (file2_) {
 		try {
-			flush(*file2_, *config_, true);
+			flush(*file2_, *config_, true, 0, false);
 		} catch(std::exception &) {
 			LogManager::setDuplicateLogMode(DUPLICATE_LOG_ERROR);
 			if (stopOnDuplicateErrorFlag_) {
@@ -2668,8 +2683,35 @@ void LogManager::LogFileInfo::flush() {
 	}
 }
 
-void LogManager::LogFileInfo::flush(
-		util::NamedFile &file, const Config &config, bool failOnClose) {
+void LogManager::LogFileInfo::clearCache(
+		util::NamedFile &file, const Config &config,
+		uint64_t flushCount, bool forceClearCache) {
+#ifndef WIN32
+	uint32_t interval = config.logFileClearCacheInterval_;
+	if (!file.isClosed()) {
+		if (forceClearCache || (interval > 0 && (flushCount % interval) == 0)) {
+			try {
+				int32_t ret = posix_fadvise(file.getHandle(), 0, 0, POSIX_FADV_DONTNEED);
+				if (ret > 0) {
+					GS_TRACE_WARNING(LOG_MANAGER, GS_TRACE_LM_FADVISE_LOG_FILE_FAILED,
+							"log file fadvise failed. :" <<
+							" fileName," << file.getName() <<
+							",returnCode," << ret);
+				}
+				GS_TRACE_INFO(LOG_MANAGER, GS_TRACE_LM_FADVISE_LOG_FILE_INFO,
+						"advise(POSIX_FADV_DONTNEED) : fileName," << file.getName() );
+			} catch(...) {
+				; 
+			}
+		}
+	}
+#endif
+}
+
+uint64_t LogManager::LogFileInfo::flush(
+		util::NamedFile &file, const Config &config, bool failOnClose
+		, uint64_t flushCount, bool forceClearCache
+	) {
 	try {
 		util::Stopwatch watch(util::Stopwatch::STATUS_STARTED);
 		file.sync();
@@ -2679,6 +2721,8 @@ void LogManager::LogFileInfo::flush(
 					"[LONG I/O] sync time," << lap <<
 					",fileName," << file.getName());
 		}
+		clearCache(file, config, flushCount, forceClearCache);
+		return lap;
 	}
 	catch (std::exception &e) {
 		if (failOnClose) {
@@ -3866,6 +3910,8 @@ LogManager::PartitionGroupManager::PartitionGroupManager() :
 		stopOnDuplicateErrorFlag_(true),
 		longtermSyncLogErrorFlag_(false), 
 		logVersion_(LogManager::getBaseVersion()),
+		flushCount_(0),
+		flushTime_(0),
 		config_(NULL),
 		partitionInfoList_(NULL) {
 }
@@ -4580,7 +4626,7 @@ void LogManager::PartitionGroupManager::writeBuffer() {
 	updateTailBlock(UNDEF_PARTITIONID, UNDEF_LSN);
 }
 
-void LogManager::PartitionGroupManager::flushFile() {
+void LogManager::PartitionGroupManager::flushFile(bool forceClearCache) {
 	assert(!isClosed());
 
 	util::NamedFile *file = lastLogFile_;
@@ -4591,7 +4637,12 @@ void LogManager::PartitionGroupManager::flushFile() {
 		const bool nextState = false;
 
 		if (flushRequired_.compareExchange(requiredState, nextState)) {
-			LogFileInfo::flush(*file, *config_, false);
+			++flushCount_;
+			flushTime_ += LogFileInfo::flush(*file, *config_, false, flushCount_, forceClearCache);
+		}
+		if (forceClearCache) {
+			LogFileInfo::clearCache(
+					*file, *config_, flushCount_, forceClearCache);
 		}
 	}
 }
@@ -4633,12 +4684,13 @@ uint64_t LogManager::PartitionGroupManager::copyLogFile(
 			const uint32_t copySize = config_->getBlockSize() * blockCount;
 
 			const uint64_t copyOffset = config_->getBlockSize() * i;
+			uint64_t retryCount = 0;
 			GS_FILE_READ_ALL(
 					IO_MONITOR, (*srcFile), buffer.data(), copySize, copyOffset,
-					config_->ioWarningThresholdMillis_);
+					config_->ioWarningThresholdMillis_, retryCount);
 			GS_FILE_WRITE_ALL(
 					IO_MONITOR, (*destFile), buffer.data(), copySize, copyOffset,
-					config_->ioWarningThresholdMillis_);
+					config_->ioWarningThresholdMillis_, retryCount);
 			i += blockCount;
 		}
 
@@ -4667,7 +4719,7 @@ void LogManager::PartitionGroupManager::prepareCheckpoint() {
 	assert(!isClosed());
 
 	writeBuffer();
-	flushFile();
+	flushFile(true);
 
 	tailFileIndex_.clear();
 
@@ -5238,6 +5290,16 @@ void LogManager::PartitionGroupManager::cleanupLogFiles(CheckpointId baseCheckpo
 			const std::string filePath = LogFileInfo::createLogFilePath(
 					config_->logDirectory_.c_str(), pgId_, firstCheckpointId_);
 
+#ifndef WIN32
+			try {
+				util::NamedFile file;
+				file.open(filePath.c_str(), util::FileFlag::TYPE_READ_WRITE);
+				LogFileInfo::clearCache(file, *config_, 0, true);
+			}
+			catch(...) {
+				; 
+			}
+#endif
 			try {
 				util::FileSystem::removeFile(filePath.c_str());
 			}
@@ -5298,7 +5360,7 @@ void LogManager::updateAvailableStartLsn(
 		else {
 			while (itr != startLsnMap.end()) {
 				CheckpointId currentCPId = (*itr).first;
-//				LogSequentialNumber currentLsn = (*itr).second;
+				LogSequentialNumber currentLsn = (*itr).second;
 				if(currentCPId < cpId) {
 					startLsnMap.erase(itr++);
 				}
@@ -5730,4 +5792,22 @@ LogCursor::Progress::Progress() :
 		cpId_(UNDEF_CHECKPOINT_ID),
 		fileSize_(0),
 		offset_(0) {
+}
+
+uint64_t LogManager::getFileFlushCount() const {
+	uint64_t countSum = 0;
+	for (PartitionGroupId pgId = 0;
+			pgId < config_.pgConfig_.getPartitionGroupCount(); pgId++) {
+		countSum += pgManagerList_[pgId]->getFileFlushCount();
+	}
+	return countSum;
+}
+
+uint64_t LogManager::getFileFlushTime() const {
+	uint64_t timeSum = 0;
+	for (PartitionGroupId pgId = 0;
+			pgId < config_.pgConfig_.getPartitionGroupCount(); pgId++) {
+		timeSum += pgManagerList_[pgId]->getFileFlushTime();
+	}
+	return timeSum; 
 }

@@ -213,10 +213,9 @@ protected:
 		pErrorMsg_ = NULL;
 	}
 
-	void getIndexInfoInAndList(TransactionContext &txn,
+	bool getIndexDataInAndList(TransactionContext &txn,
 		BaseContainer &container, util::XArray<BoolExpr *> &andList,
-		MapType &mapType,
-		ColumnInfo *&indexColumnInfo);
+		IndexData &indexData);
 	BoolExpr *getConditionExpr() const;
 	Expr *getSelectionExpr(size_t x) const;
 	size_t getSelectionExprLength() const;
@@ -392,7 +391,7 @@ protected:
 	}
 
 	bool isIndexSortAvailable(BaseContainer &container, size_t orListNum) {
-//		bool isAvailable = false;
+		bool isAvailable = false;
 		if (isSortBeforeSelectClause() && orListNum <= 1 && 
 			pOrderByExpr_) {
 			uint32_t orderColumnId = (*pOrderByExpr_)[0].expr->getColumnId();

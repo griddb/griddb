@@ -19,6 +19,7 @@
 	@brief Implementation of TransactionContext
 */
 #include "transaction_context.h"
+#include "uuid_utils.h"
 
 std::ostream &operator<<(std::ostream &stream, const ClientId &id) {
 	stream << std::hex << static_cast<const uint32_t>(id.uuid_[0])
@@ -41,6 +42,16 @@ std::ostream &operator<<(std::ostream &stream, const ClientId &id) {
 	return stream;
 }
 
+std::string ClientId::dump(util::StackAllocator &alloc) {
+	util::NormalOStringStream strstrm;
+	char tmpBuffer[37];
+	UUIDUtils::unparse(uuid_, tmpBuffer);
+	util::String tmpUUIDStr(tmpBuffer, 36, alloc);	
+	strstrm << tmpUUIDStr.c_str();
+	strstrm << ":" << sessionId_;
+	return strstrm.str().c_str();
+}
+
 TransactionContext::TransactionContext()
 	: manager_(NULL),
 	  alloc_(NULL),
@@ -59,7 +70,8 @@ TransactionContext::TransactionContext()
 	  txnExpireTime_(0),
 	  contextExpireTime_(0),
 	  txnTimeoutInterval_(TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL),
-	  storeMemoryAgingSwapRate_(TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE) {}
+	  storeMemoryAgingSwapRate_(TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE),
+	  timeZone_(util::TimeZone()) {}
 
 TransactionContext::TransactionContext(const TransactionContext &txn)
 	: manager_(txn.manager_),
@@ -79,7 +91,9 @@ TransactionContext::TransactionContext(const TransactionContext &txn)
 	  txnExpireTime_(txn.txnExpireTime_),
 	  contextExpireTime_(txn.contextExpireTime_),
 	  txnTimeoutInterval_(txn.txnTimeoutInterval_),
-	  storeMemoryAgingSwapRate_(txn.storeMemoryAgingSwapRate_) {}
+	  storeMemoryAgingSwapRate_(txn.storeMemoryAgingSwapRate_),
+	  timeZone_(txn.timeZone_) {}
+
 TransactionContext::~TransactionContext() {}
 
 TransactionContext::TransactionContext(util::StackAllocator &alloc)
@@ -100,5 +114,6 @@ TransactionContext::TransactionContext(util::StackAllocator &alloc)
 	  txnExpireTime_(0),
 	  contextExpireTime_(0),
 	  txnTimeoutInterval_(TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL),
-	  storeMemoryAgingSwapRate_(TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE) {}
+	  storeMemoryAgingSwapRate_(TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE),
+	  timeZone_(util::TimeZone()) {}
 

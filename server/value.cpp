@@ -110,7 +110,7 @@ void Value::dump(
 			blobCursor.dump(ss, forExport);
 		} break;
 		default:
-			ValueProcessor::dumpSimpleValue(ss, getType(), data(), size(), !forExport);
+			ValueProcessor::dumpSimpleValue(ss, getType(), getImage(), size(), !forExport);
 			break;
 		}
 	}
@@ -399,15 +399,15 @@ void Value::archive(TransactionContext &txn, ObjectManager &objectManager, Archi
 				uint32_t elemSize =
 					ValueProcessor::decodeVarSize(blobHeaderData);
 				blobHeaderData += ValueProcessor::getEncodedVarSize(elemSize);
-//				uint32_t totalSize =
-//					*reinterpret_cast<const uint32_t *>(blobHeaderData);
+				uint32_t totalSize =
+					*reinterpret_cast<const uint32_t *>(blobHeaderData);
 				blobHeaderData += sizeof(uint32_t);
 
 				OId headerOId = *reinterpret_cast<const OId *>(blobHeaderData);
 				if (headerOId != UNDEF_OID) {
 					VariableArrayCursor arrayCursor(
 						txn, objectManager, headerOId, OBJECT_READ_ONLY);
-//					uint32_t num = arrayCursor.getArrayLength();
+					uint32_t num = arrayCursor.getArrayLength();
 					uint32_t count = 0;
 					uint8_t *elem;
 					uint32_t elemSize;
@@ -418,7 +418,7 @@ void Value::archive(TransactionContext &txn, ObjectManager &objectManager, Archi
 						handler->appendArray(simpleType, cursor.str(), cursor.stringLength());
 						++count;
 					}
-//					assert(num == count);
+					assert(num == count);
 				}
 			}
 		}

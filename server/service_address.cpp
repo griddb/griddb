@@ -660,11 +660,6 @@ void ServiceAddressResolver::setAddress(
 			if (it == storedIt) {
 				return;
 			}
-			GS_COMMON_THROW_USER_ERROR(
-					GS_ERROR_SA_ADDRESS_CONFLICTED,
-					"Address conflicted (index=" << index <<
-					", type=" << getTypeName(type) <<
-					", address=" << addr << ")");
 		}
 
 		const int family = config_.addressFamily_;

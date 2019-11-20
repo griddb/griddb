@@ -42,10 +42,13 @@ const NodeId SELF_NODEID = 0;
 
 class SubPartitionTable;
 class SubPartition;
+struct AddressInfo;
+typedef std::vector<AddressInfo> AddressInfoList;
 
 namespace picojson {
 	class value;
 }
+
 
 /*!
 	@brief Encodes node address
@@ -94,7 +97,7 @@ struct NodeAddress {
 		return toString(flag);
 	}
 
-	std::string toString(bool isPort = true) {
+	std::string toString(bool isPort = true) const {
 		util::NormalOStringStream ss;
 		util::SocketAddress::Inet *tmp = (util::SocketAddress::Inet *)&address_;
 		ss << (int32_t)tmp->value_[0] << "." << (int32_t)tmp->value_[1] << "."
@@ -150,6 +153,10 @@ struct AddressInfo {
 		return ss.str();
 	}
 
+	bool isValid() {
+		return (transactionAddress_.isValid());
+	}
+
 	NodeAddress clusterAddress_;
 	NodeAddress transactionAddress_;
 	NodeAddress syncAddress_;
@@ -161,6 +168,23 @@ struct AddressInfo {
 	MSGPACK_DEFINE(clusterAddress_, transactionAddress_, syncAddress_, systemAddress_,
 		sqlServiceAddress_, dummy1_, dummy2_, isActive_);
 };
+
+	struct PublicAddressInfoMessage {
+	public:
+		PublicAddressInfoMessage() {}
+		PublicAddressInfoMessage(AddressInfoList &addressInfoList) :
+			addressInfoList_(addressInfoList) {
+		}
+		bool check() {
+			return true;
+		}
+		AddressInfoList &getPublicNodeAddressList() {
+			return addressInfoList_;
+		}
+		MSGPACK_DEFINE(addressInfoList_);
+	private:
+		AddressInfoList addressInfoList_;
+	};
 
 	static const int32_t PT_BACKUP_GAP_FACTOR = 2;
 	static const int32_t PT_OWNER_LOAD_LIMIT = 2;
@@ -325,7 +349,7 @@ struct DropNodeSet {
 	uint16_t port_;
 	int32_t pos_;
 	NodeId nodeId_;
-	std::vector<PartitionId> pIdList_;
+	PartitionIdList pIdList_;
 	std::vector<PartitionRevisionNo> revisionList_;
 };
 
@@ -347,7 +371,7 @@ public:
 			DropNodeSet target;
 			target.setAddress(address);
 			target.append(pId, revision);
-			target.pos_ = dropNodeMap_.size();
+			target.pos_ = static_cast<int32_t>(dropNodeMap_.size());
 			target.nodeId_ = nodeId;
 			dropNodeMap_.push_back(target);
 			tmpDropNodeMap_.insert(std::make_pair(address, target));
@@ -574,11 +598,11 @@ public:
 			isSelfCatchup_ = false;
 		}
 
-		std::vector<NodeId> &getBackups() {
+		NodeIdList &getBackups() {
 			return backups_;
 		}
 
-		std::vector<NodeId> &getCatchups() {
+		NodeIdList &getCatchups() {
 			return catchups_;
 		}
 
@@ -604,7 +628,7 @@ public:
 			return ownerNodeId_;
 		}
 
-		void set(NodeId owner, std::vector<NodeId> &backups, std::vector<NodeId> &catchups) {
+		void set(NodeId owner, NodeIdList &backups, NodeIdList &catchups) {
 			ownerNodeId_ = owner;
 			backups_ = backups;
 			catchups_ = catchups;
@@ -633,7 +657,7 @@ public:
 			if (targetNodeId == 0) {
 				return isSelfBackup_;
 			}
-			std::vector<NodeId>::iterator it;
+			NodeIdList::iterator it;
 			it = std::find(backups_.begin(), backups_.end(), targetNodeId);
 			if (it != backups_.end()) {
 				return true;
@@ -648,7 +672,7 @@ public:
 			if (targetNodeId == 0) {
 				return isSelfCatchup_;
 			}
-			std::vector<NodeId>::iterator it;
+			NodeIdList::iterator it;
 			it = std::find(catchups_.begin(), catchups_.end(), targetNodeId);
 			if (it != catchups_.end()) {
 				return true;
@@ -790,10 +814,10 @@ public:
 		std::vector<NodeAddress> backupAddressList_;
 		TableType type_;
 		NodeId ownerNodeId_;
-		std::vector<NodeId> backups_;
+		NodeIdList backups_;
 		bool isSelfBackup_;
 		std::vector<NodeAddress> catchupAddressList_;
-		std::vector<NodeId> catchups_;
+		NodeIdList catchups_;
 		bool isSelfCatchup_;
 	};
 
@@ -981,6 +1005,21 @@ public:
 		return backups.size();
 	}
 
+
+	bool hasPublicAddress() {
+		return hasPublicAddress_;
+	}
+
+	void setPublicAddress() {
+		hasPublicAddress_ = true;
+	}
+
+	void getPublicNodeAddress(AddressInfoList &addressInfoList) {
+		for (NodeId nodeId = 0; nodeId < getNodeNum(); nodeId++) {
+			addressInfoList.push_back(nodes_[nodeId].publicAddressInfo_);
+		}
+	}
+
 	void resetDownNode(NodeId targetNodeId);
 
 	bool checkConfigurationChange(
@@ -1029,12 +1068,8 @@ public:
 
 	bool setNodeInfo(NodeId nodeId, ServiceType type, NodeAddress &address);
 
-	void setMaxLsnList(std::vector<LogSequentialNumber> &maxLsnList) {
+	void setMaxLsnList(LsnList &maxLsnList) {
 		maxLsnList = maxLsnList_;
-	}
-
-	std::vector<LogSequentialNumber> getMaxLsnList() {
-		return maxLsnList_;
 	}
 
 	void changeClusterStatus(ClusterStatus status,
@@ -1297,25 +1332,10 @@ public:
 	void set(SubPartition &subPartition);
 	bool checkClearRole(PartitionId pId);
 
-	void getNodeAddressInfo(std::vector<AddressInfo> &addressInfoList) {
-		int32_t nodeNum = getNodeNum();
-		for (int32_t nodeId = 0; nodeId < nodeNum; nodeId++) {
-			AddressInfo addressInfo;
-			addressInfo.setNodeAddress(
-				CLUSTER_SERVICE, getNodeInfo(nodeId).getNodeAddress(CLUSTER_SERVICE));
-			addressInfo.setNodeAddress(
-				SYNC_SERVICE, getNodeInfo(nodeId).getNodeAddress(SYNC_SERVICE));
-			addressInfo.setNodeAddress(
-				TRANSACTION_SERVICE, getNodeInfo(nodeId).getNodeAddress(TRANSACTION_SERVICE));
-			if (getHeartbeatTimeout(nodeId) != UNDEF_TTL) {
-				addressInfo.isActive_ = true;
-			}
-			else {
-				addressInfo.isActive_ = false;
-			}
-			addressInfoList.push_back(addressInfo);
-		}
-	}
+	void getNodeAddressInfo(AddressInfoList &addressInfoList,
+			AddressInfoList &publicAddressInfoList);
+
+	void clearCatchupRole(PartitionId pId);
 
 	int32_t getNodeNum() {
 		return nodeNum_;
@@ -1342,6 +1362,15 @@ public:
 		return getNodeInfo(nodeId).getNodeAddress(type);
 	}
 
+	NodeAddress &getPublicNodeAddress(NodeId nodeId, ServiceType type) {
+		if (!getNodeInfo(nodeId).publicAddressInfo_.isValid()) {
+			return getNodeAddress(nodeId, type);
+		}
+		else {
+			return getNodeInfo(nodeId).publicAddressInfo_.getNodeAddress(type);
+		}
+	}
+
 	bool checkSetService(NodeId nodeId, ServiceType type = CLUSTER_SERVICE) {
 		return getNodeInfo(nodeId).check(type);
 	}
@@ -1349,6 +1378,8 @@ public:
 	PartitionRevision &getPartitionRevision() {
 		return revision_;
 	}
+
+	void setPublicAddressInfo(NodeId nodeId, AddressInfo &publicAddressInfo);
 
 	PartitionRevision &incPartitionRevision() {
 		util::LockGuard<util::Mutex> lock(revisionLock_);
@@ -1441,7 +1472,7 @@ public:
 		return ss.str().c_str();
 	}
 
-	std::string dumpNodeAddressInfoList(std::vector<AddressInfo> &nodeList) {
+	std::string dumpNodeAddressInfoList(AddressInfoList &nodeList) {
 		util::NormalOStringStream ss;
 		int32_t listSize = static_cast<int32_t>(nodeList.size());
 		ss << "[";
@@ -1609,6 +1640,7 @@ private:
 		int64_t heartbeatTimeout_;
 		bool isAcked_;
 		util::StackAllocator *globalStackAlloc_;
+		AddressInfo publicAddressInfo_;
 	};
 
 	class BlockQueue {
@@ -1947,7 +1979,6 @@ private:
 	bool checkTargetPartition(PartitionId pId, int32_t backupNum, bool &catchupWait);
 
 	void clearPartitionRole(PartitionId pId);
-	void clearCatchupRole(PartitionId pId);
 
 	bool applyInitialRule(PartitionContext &context);
 	bool applyAddRule(PartitionContext &context);
@@ -2052,6 +2083,7 @@ private:
 	PartitionRevisionNo currentRevisionNo_;
 	PartitionRevisionNo prevDropRevisionNo_;
 	bool isGoalPartition_;
+	bool hasPublicAddress_;
 };
 
 typedef PartitionTable::PartitionStatus PartitionStatus;
@@ -2138,8 +2170,16 @@ public:
 		nodeAddressList_.push_back(addressInfo);
 	}
 
-	std::vector<AddressInfo> &getNodeAddressList() {
+	AddressInfoList &getNodeAddressList() {
 		return nodeAddressList_;
+	}
+
+	void setPublicNodeAddressList(
+			AddressInfoList &publicNodeAddressList) {
+		publicNodeAddressList_ = publicNodeAddressList;
+	}
+	AddressInfoList &getPublicNodeAddressList() {
+		return publicNodeAddressList_;
 	}
 
 	void set(PartitionTable *pt) {
@@ -2189,9 +2229,10 @@ public:
 	}
 
 	std::vector<SubPartition> subPartitionList_;
-	std::vector<AddressInfo> nodeAddressList_;
+	AddressInfoList nodeAddressList_;
 	PartitionRevision revision_;
 	uint32_t partitionNum_;
+	AddressInfoList publicNodeAddressList_;
 };
 
 static inline const std::string dumpPartitionStatus(PartitionStatus status) {
@@ -2241,5 +2282,4 @@ static inline const std::string dumpPartitionRoleStatusEx(
 		return "";
 	}
 }
-
 #endif

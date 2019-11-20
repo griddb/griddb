@@ -445,7 +445,11 @@ protected:
 
 	void addCheckEndEvent(EventContext &ec, PartitionId pId,
 			util::StackAllocator &alloc, SyncMode mode, SyncContext *context,
-			bool isImmediate = false);
+			bool isImmediate);
+
+	void addLongtermSyncCheckEvent(EventContext &ec, PartitionId pId,
+			util::StackAllocator &alloc, SyncContext *context,
+			int32_t longtermSyncType);
 };
 
 /*!

@@ -42,36 +42,37 @@ public class ContainerInfo {
 
 	private ContainerType type;
 
-	private List<ColumnInfo> columnInfoList;
+	private List<ColumnInfo> columnInfoList = Collections.emptyList();
 
-	private List<IndexInfo> indexInfoList;
+	private List<Integer> rowKeyColumnList = Collections.emptyList();
 
-	private boolean rowKeyAssigned;
+	private List<IndexInfo> indexInfoList = Collections.emptyList();
 
 	private TimeSeriesProperties timeSeriesProperties;
 
 	private boolean columnOrderIgnorable;
 
-	private List<TriggerInfo> triggerInfoList;
+	private List<TriggerInfo> triggerInfoList = Collections.emptyList();
 
 	private String dataAffinity;
 
 	/**
 	 * <div lang="ja">
-	 * カラムレイアウトに関する情報などを指定してコンテナ情報を作成します。
+	 * 複合ロウキーを持たない場合に限定し、カラムレイアウトに関する情報を
+	 * 指定してコンテナ情報を作成します。
 	 *
 	 * @param name コンテナ名。{@code null}を指定すると未設定状態となる
 	 * @param type コンテナ種別。{@code null}を指定すると未設定状態となる
 	 * @param columnInfoList カラム情報のリスト。{@code null}は指定できない
-	 * @param rowKeyAssigned ロウキーに対応するカラムの有無。ロウキーを持つ
-	 * 場合は{@code true}、持たない場合は{@code false}
+	 * @param rowKeyAssigned ロウキーに対応するカラムの有無。単一カラム
+	 * からなるロウキーを持つ場合は{@code true}、持たない場合は{@code false}
 	 *
 	 * @throws NullPointerException {@code columnInfoList}に{@code null}が
 	 * 指定された場合
 	 *
 	 * @since 1.5
 	 * </div><div lang="en">
-	 * Container information is created by specifying information on the column layout.
+	 * TODO Container information is created by specifying information on the column layout.
 	 *
 	 * @param name Container name. Not set when {@code null} is specified.
 	 * @param type Container type. Not set when {@code null} is specified.
@@ -85,20 +86,46 @@ public class ContainerInfo {
 
 	 * </div>
 	 */
-	public ContainerInfo(String name, ContainerType type,
+	public ContainerInfo(
+			String name, ContainerType type,
 			List<ColumnInfo> columnInfoList, boolean rowKeyAssigned) {
-		try {
-			this.name = name;
-			this.type = type;
-			this.columnInfoList = new ArrayList<ColumnInfo>(columnInfoList);
-			this.indexInfoList = Collections.emptyList();
-			this.rowKeyAssigned = rowKeyAssigned;
-			this.triggerInfoList = Collections.emptyList();
-		}
-		catch (NullPointerException e) {
-			throw GSErrorCode.checkNullParameter(
-					columnInfoList, "columnInfoList", e);
-		}
+		GSErrorCode.checkNullParameter(columnInfoList, "columnInfoList", null);
+		setName(name);
+		setType(type);
+		setColumnInfoList(columnInfoList);
+		setRowKeyAssigned(rowKeyAssigned);
+	}
+
+	/**
+	 * <div lang="ja">
+	 * 任意のロウキー構成を含む、カラムレイアウトに関する情報を指定して
+	 * コンテナ情報を作成します。
+	 *
+	 * @param name コンテナ名。{@code null}を指定すると未設定状態となる
+	 * @param type コンテナ種別。{@code null}を指定すると未設定状態となる
+	 * @param columnInfoList カラム情報のリスト。{@code null}は指定できない
+	 * @param rowKeyColumnList ロウキーを構成するカラム列についての、{@code 0}
+	 * から始まるカラム番号一覧。長さ{@code 0}のリストまたは{@code null}を
+	 * 指定すると、ロウキーなしとみなされる
+	 *
+	 * @throws NullPointerException {@code columnInfoList}に{@code null}が
+	 * 指定された場合
+	 *
+	 * @since 4.3
+	 * </div><div lang="en">
+	 * TODO
+	 *
+	 * @since 4.3
+	 * </div>
+	 */
+	public ContainerInfo(
+			String name, ContainerType type,
+			List<ColumnInfo> columnInfoList, List<Integer> rowKeyColumnList) {
+		GSErrorCode.checkNullParameter(columnInfoList, "columnInfoList", null);
+		setName(name);
+		setType(type);
+		setColumnInfoList(columnInfoList);
+		setRowKeyColumnList(rowKeyColumnList);
 	}
 
 	/**
@@ -111,9 +138,6 @@ public class ContainerInfo {
 	 * </div>
 	 */
 	public ContainerInfo() {
-		this.columnInfoList = Collections.emptyList();
-		this.indexInfoList = Collections.emptyList();
-		this.triggerInfoList = Collections.emptyList();
 	}
 
 	/**
@@ -136,27 +160,46 @@ public class ContainerInfo {
 	 * </div>
 	 */
 	public ContainerInfo(ContainerInfo containerInfo) {
-		this();
-
-		setName(containerInfo.getName());
-		setType(containerInfo.getType());
-
-		final int columnCount = containerInfo.getColumnCount();
-		if (columnCount > 0) {
-			final List<ColumnInfo> columnInfoList =
-					new ArrayList<ColumnInfo>();
-			for (int i = 0; i < columnCount; i++) {
-				columnInfoList.add(containerInfo.getColumnInfo(i));
-			}
-			setColumnInfoList(columnInfoList);
+		final boolean sameClass;
+		try {
+			sameClass = (containerInfo.getClass() == ContainerInfo.class);
+		}
+		catch (NullPointerException e) {
+			throw GSErrorCode.checkNullParameter(containerInfo, "containerInfo", e);
 		}
 
-		setRowKeyAssigned(containerInfo.isRowKeyAssigned());
-		setIndexInfoList(containerInfo.getIndexInfoList());
-		setTimeSeriesProperties(containerInfo.getTimeSeriesProperties());
-		setTriggerInfoList(containerInfo.getTriggerInfoList());
+		if (sameClass) {
+			this.name = containerInfo.name;
+			this.type = containerInfo.type;
+			this.columnInfoList = containerInfo.columnInfoList;
+			this.indexInfoList = containerInfo.indexInfoList;
+			this.rowKeyColumnList = containerInfo.rowKeyColumnList;
+			setTimeSeriesProperties(containerInfo.timeSeriesProperties);
+			this.columnOrderIgnorable = containerInfo.columnOrderIgnorable;
+			this.triggerInfoList = containerInfo.triggerInfoList;
+			this.dataAffinity = containerInfo.dataAffinity;
+		}
+		else {
+			setName(containerInfo.getName());
+			setType(containerInfo.getType());
 
-		setDataAffinity(containerInfo.getDataAffinity());
+			final int columnCount = containerInfo.getColumnCount();
+			if (columnCount > 0) {
+				final List<ColumnInfo> columnInfoList =
+						new ArrayList<ColumnInfo>();
+				for (int i = 0; i < columnCount; i++) {
+					columnInfoList.add(containerInfo.getColumnInfo(i));
+				}
+				setColumnInfoList(columnInfoList);
+			}
+
+			setRowKeyColumnList(getRowKeyColumnList());
+			setIndexInfoList(containerInfo.getIndexInfoList());
+			setTimeSeriesProperties(containerInfo.getTimeSeriesProperties());
+			setTriggerInfoList(containerInfo.getTriggerInfoList());
+
+			setDataAffinity(containerInfo.getDataAffinity());
+		}
 	}
 
 	/**
@@ -245,13 +288,20 @@ public class ContainerInfo {
 
 	/**
 	 * <div lang="ja">
-	 * ロウキーに対応するカラムの有無を取得します。
+	 * 複合ロウキーが設定されていない場合に限定し、ロウキーに対応するカラムの
+	 * 有無を取得します。
 	 *
-	 * <p>コンテナがロウキーを持つ場合、対応するカラム番号は{@code 0}です。</p>
+	 * <p>このメソッドが{@code true}を返却する場合、ロウキーに対応するカラム
+	 * 番号は{@code 0}です。</p>
+	 *
+	 * <p>任意のロウキー構成を参照するには、{@link #getRowKeyColumnList()}を
+	 * 使用します。</p>
 	 *
 	 * @return ロウキーの有無
+	 *
+	 * @throws IllegalStateException 複合ロウキーが設定されていた場合
 	 * </div><div lang="en">
-	 * Checks if a Column is assigned as a Row key.
+	 * TODO Checks if a Column is assigned as a Row key.
 	 *
 	 * <p>If the Container has a Row key, the number of its corresponding Column is {@code 0}. </p>
 	 *
@@ -259,7 +309,39 @@ public class ContainerInfo {
 	 * </div>
 	 */
 	public boolean isRowKeyAssigned() {
-		return rowKeyAssigned;
+		final int count = rowKeyColumnList.size();
+		if (count > 0) {
+			if (count > 1) {
+				throw new IllegalStateException(
+						"This method cannot be used for composite row key");
+			}
+			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * <div lang="ja">
+	 * ロウキーを構成するカラムの一覧を取得します。
+	 *
+	 * <p>返却された値に対して変更操作を行った場合、
+	 * {@link UnsupportedOperationException}が発生することがあります。
+	 * また、このオブジェクトに対する操作により、返却されたオブジェクトの内容が
+	 * 変化することはありません。</p>
+	 *
+	 * @return ロウキーを構成するカラム列についての、{@code 0}から始まる
+	 * カラム番号一覧。対応するコンテナがロウキーを持たない場合は長さ{@code 0}
+	 * のリスト
+	 *
+	 * @since 4.3
+	 * </div><div lang="en">
+	 * TODO
+	 *
+	 * @since 4.3
+	 * </div>
+	 */
+	public List<Integer> getRowKeyColumnList() {
+		return rowKeyColumnList;
 	}
 
 	/**
@@ -375,12 +457,24 @@ public class ContainerInfo {
 	 * </div>
 	 */
 	public void setColumnInfoList(List<ColumnInfo> columnInfoList) {
-		if (columnInfoList == null) {
-			this.columnInfoList = Collections.emptyList();
-			return;
+		List<ColumnInfo> destList;
+
+		if (columnInfoList == null || columnInfoList.isEmpty()) {
+			destList = Collections.emptyList();
+		}
+		else {
+			destList = new ArrayList<ColumnInfo>(columnInfoList.size());
+
+			for (ColumnInfo columnInfo : columnInfoList) {
+				GSErrorCode.checkNullParameter(
+						columnInfo, "element of columnInfoList", null);
+				destList.add(ColumnInfo.toImmutable(columnInfo));
+			}
+
+			destList = Collections.unmodifiableList(destList);
 		}
 
-		this.columnInfoList = new ArrayList<ColumnInfo>(columnInfoList);
+		this.columnInfoList = destList;
 	}
 
 	/**
@@ -406,7 +500,51 @@ public class ContainerInfo {
 	 * </div>
 	 */
 	public void setRowKeyAssigned(boolean assigned) {
-		this.rowKeyAssigned = assigned;
+		final List<Integer> rowKeyColumnList;
+		if (assigned) {
+			rowKeyColumnList = Collections.singletonList(0);
+		}
+		else {
+			rowKeyColumnList = Collections.emptyList();
+		}
+
+		setRowKeyColumnList(rowKeyColumnList);
+	}
+
+	/**
+	 * <div lang="ja">
+	 * ロウキーを構成するカラムの一覧を設定します。
+	 *
+	 * <p>指定したオブジェクトの内容を呼び出し後に変更したとしても、
+	 * このオブジェクトの内容は変化しません。</p>
+	 *
+	 * @param rowKeyColumnList ロウキーを構成するカラム列についての、{@code 0}
+	 * から始まるカラム番号一覧。長さ{@code 0}のリストまたは{@code null}を
+	 * 指定すると、ロウキーなしとみなされる
+	 *
+	 * @since 4.3
+	 * </div><div lang="en">
+	 * TODO
+	 *
+	 * @since 4.3
+	 * </div>
+	 */
+	public void setRowKeyColumnList(List<Integer> rowKeyColumnList) {
+		final List<Integer> dest;
+		if (rowKeyColumnList == null || rowKeyColumnList.isEmpty()) {
+			dest = Collections.emptyList();
+		}
+		else {
+			dest = Collections.unmodifiableList(
+					new ArrayList<Integer>(rowKeyColumnList));
+		}
+
+		if (dest.indexOf(null) >= 0) {
+			GSErrorCode.checkNullParameter(
+					null, "element of rowKeyColumnList", null);
+		}
+
+		this.rowKeyColumnList = dest;
 	}
 
 	/**
@@ -459,18 +597,22 @@ public class ContainerInfo {
 	 * </div>
 	 */
 	public void setIndexInfoList(List<IndexInfo> indexInfoList) {
+		List<IndexInfo> destList;
+		
 		if (indexInfoList == null || indexInfoList.isEmpty()) {
-			this.indexInfoList = Collections.emptyList();
-			return;
+			destList = Collections.emptyList();
+		}
+		else {
+			destList = new ArrayList<IndexInfo>(indexInfoList.size());
+			for (IndexInfo info : indexInfoList) {
+				GSErrorCode.checkNullParameter(
+						info, "element of indexInfoList", null);
+				destList.add(IndexInfo.toImmutable(info));
+			}
+			destList = Collections.unmodifiableList(destList);
 		}
 
-		final List<IndexInfo> dest =
-				new ArrayList<IndexInfo>(indexInfoList.size());
-		for (IndexInfo info : indexInfoList) {
-			dest.add(info.toUnmodifiable());
-		}
-
-		this.indexInfoList = Collections.unmodifiableList(dest);
+		this.indexInfoList = destList;
 	}
 
 	/**
@@ -530,7 +672,7 @@ public class ContainerInfo {
 			return;
 		}
 
-		timeSeriesProperties = props.clone();
+		timeSeriesProperties = new TimeSeriesProperties(props);
 	}
 
 	/**
@@ -607,13 +749,21 @@ public class ContainerInfo {
 	 * </div>
 	 */
 	public void setTriggerInfoList(List<TriggerInfo> triggerInfoList) {
-		if (triggerInfoList == null) {
-			this.triggerInfoList = Collections.emptyList();
-			return;
+		List<TriggerInfo> dest;
+		if (triggerInfoList == null || triggerInfoList.isEmpty()) {
+			dest = Collections.emptyList();
+		}
+		else {
+			dest = new ArrayList<TriggerInfo>(triggerInfoList.size());
+			for (TriggerInfo info : triggerInfoList) {
+				GSErrorCode.checkNullParameter(
+						info, "element of triggerInfoList", null);
+				dest.add(info);
+			}
+			dest = Collections.unmodifiableList(dest);
 		}
 
-		this.triggerInfoList = Collections.unmodifiableList(
-				new ArrayList<TriggerInfo>(triggerInfoList));
+		this.triggerInfoList = dest;
 	}
 
 	/**
@@ -708,4 +858,5 @@ public class ContainerInfo {
 
 		this.dataAffinity = dataAffinity;
 	}
+
 }

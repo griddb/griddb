@@ -118,7 +118,7 @@ public class FetchAll {
 			Container<?, Row> container = store.putContainer("SampleJava_FetchAll1", containerInfo, false);
 
 			// ロウ登録
-			String[] nameList = {"notebook PC", "desktop PC", "keybord", "mouse", "printer"};
+			String[] nameList = {"notebook PC", "desktop PC", "keyboard", "mouse", "printer"};
 			int[] numberList = {108, 72, 25, 45, 62};
 			List<Row> rowList = new ArrayList<Row>();
 			for ( int i = 0; i < nameList.length; i++ ){
@@ -137,7 +137,7 @@ public class FetchAll {
 			Container<?, Row> container = store.putContainer("SampleJava_FetchAll2", containerInfo, false);
 
 			// ロウ登録
-			String[] nameList = {"notebook PC", "desktop PC", "keybord", "mouse", "printer"};
+			String[] nameList = {"notebook PC", "desktop PC", "keyboard", "mouse", "printer"};
 			int[] numberList = {50, 11, 208, 23, 153};
 			List<Row> rowList = new ArrayList<Row>();
 			for ( int i = 0; i < nameList.length; i++ ){

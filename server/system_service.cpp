@@ -442,7 +442,7 @@ bool SystemService::decreaseCluster(const Event::Source &eventSource,
 			return false;
 		}
 
-		std::vector<NodeId> &leaveNodeList =
+		NodeIdList &leaveNodeList =
 			decreaseClusterInfo.getLeaveNodeList();
 		bool isFound = false;
 		picojson::object decreaseInfo;
@@ -1113,7 +1113,7 @@ void SystemService::getGoalPartitions(util::StackAllocator &alloc,
 				partition["owner"] = picojson::value();
 			}
 			picojson::array &nodeList = setJsonArray(partition["backup"]);
-			std::vector<NodeId> &backups = currentRole.getBackups();
+			NodeIdList &backups = currentRole.getBackups();
 			for (size_t pos = 0; pos < backups.size(); pos++) {
 				picojson::object backup;
 				NodeId backupNodeId = backups[pos];
@@ -1291,10 +1291,13 @@ void SystemService::getMemoryStats(
 		picojson::object &statsObj = setJsonObject(entry[name]);
 		const char8_t *const typeList[] = {
 			"totalSize", "peakTotalSize", "cacheSize", "cacheMissCount",
-			"cacheAdjustCount", "cacheAdjustCount", "hugeAllocationCount",
+			"cacheAdjustCount", "hugeAllocationCount",
 			"allocationCount", "deallocationCount", NULL, "cacheLimit",
 			"stableLimit",
 		};
+		UTIL_STATIC_ASSERT(
+				sizeof(typeList) / sizeof(*typeList) ==
+				util::AllocatorStats::STAT_TYPE_END);
 
 		bool found = false;
 		for (int32_t i = 0; i < util::AllocatorStats::STAT_TYPE_END; i++) {
@@ -1317,6 +1320,7 @@ void SystemService::getMemoryStats(
 		}
 	}
 }
+
 
 
 /*!
@@ -1732,17 +1736,17 @@ void OutputStatsHandler::operator()(EventContext &ec, Event &) {
 		GS_TRACE_INFO(CLUSTER_DETAIL,
 				GS_TRACE_CS_TRACE_STATS,
 				pt_->dumpPartitionsList(ec.getAllocator(), PartitionTable::PT_CURRENT_OB));
-					GS_TRACE_INFO(CLUSTER_DETAIL, GS_TRACE_CS_CLUSTER_STATUS,
-						clsMgr_->dump());
-					{
-						util::StackAllocator &alloc = ec.getAllocator();
-						GS_TRACE_INFO(CLUSTER_DETAIL,
-							GS_TRACE_CS_CLUSTER_STATUS,
-							pt_->dumpPartitions(
-								alloc, PartitionTable::PT_CURRENT_OB));
-					}
-					GS_TRACE_INFO(CLUSTER_DETAIL, GS_TRACE_CS_CLUSTER_STATUS,
-						pt_->dumpDatas(true));
+		GS_TRACE_INFO(CLUSTER_DETAIL, GS_TRACE_CS_CLUSTER_STATUS,
+				clsMgr_->dump());
+		{
+			util::StackAllocator &alloc = ec.getAllocator();
+			GS_TRACE_INFO(CLUSTER_DETAIL,
+				GS_TRACE_CS_CLUSTER_STATUS,
+				pt_->dumpPartitions(
+					alloc, PartitionTable::PT_CURRENT_OB));
+		}
+		GS_TRACE_INFO(CLUSTER_DETAIL, GS_TRACE_CS_CLUSTER_STATUS,
+				pt_->dumpDatas(true));
 	}
 }
 
@@ -2677,7 +2681,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 				response.setMethodError();
 				return;
 			}
-//			int32_t mode;
+			int32_t mode;
 			if (request.parameterMap_.find("enable") !=
 				request.parameterMap_.end()) {
 				if (request.parameterMap_["enable"] == "true") {
@@ -2930,7 +2934,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 			}
 
 			bool isRepair = false;
-//			bool isShuffle = false;
+			bool isShuffle = false;
 
 			clsMgr_->setUpdatePartition();
 
@@ -3078,7 +3082,7 @@ bool SystemService::setGoalPartitions(util::StackAllocator &alloc,
 					JsonUtils::find<picojson::value>(entry, "owner");
 			const picojson::array *backupList =
 					JsonUtils::find<picojson::array>(entry, "backup");
-//			int64_t intVal;
+			int64_t intVal;
 			PartitionId pId = 0;
 			std::string str(pname.data(), pname.size());
 			pId = std::atoi(str.c_str());
