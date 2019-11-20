@@ -1,5 +1,3 @@
-griddb-nosql (4.2.1) unstable; urgency=medium
+griddb-nosql (4.3) unstable; urgency=medium
 
-  * changelog info
-
- -- Katsuhiko Nonomura <contact@griddb.org>  Wed, 17 Apr 2019 14:41:12 +0700
+  * Non-maintainer upload.
