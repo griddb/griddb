@@ -94,6 +94,8 @@ Javaクライアントを使う場合、IndexInfoクラスの以下のメソッ�
 
 サンプルプログラム[CreateIndex.java](https://github.com/griddb/griddb_nosql/blob/master/sample/guide/ja/CreateIndex.java)の(3)をご参照ください。
 
+なお、Cクライアントを使う場合は、サンプルプログラム[CreateIndex.c](https://github.com/griddb/c_client/blob/master/sample/guide/ja/CreateIndex.c)のcompositeInfo部分をご参照ください。
+
 ### 5. 複合ロウキー
 
 コンテナタイプがコレクションの場合、ROWKEY(PRIMARY KEY)は先頭カラムより連続した複数のカラムに設定できます。ロウキーを複数のカラムに設定した場合は、複合ロウキーと呼びます。 
@@ -105,6 +107,8 @@ Javaクライアントを使う場合、ContainerInfoクラスの以下のメソ
     containerInfo.setRowKeyColumnList(Arrays.asList(0, 1));
 
 サンプルプログラム[CompositeKeyMultiGet.java](https://github.com/griddb/griddb_nosql/blob/master/sample/guide/ja/CompositeKeyMultiGet.java)のbuildContainerInfo()部分をご参照ください。
+
+なお、Cクライアントを使う場合は、サンプルプログラム[CompositeKeyMultiGet.c](https://github.com/griddb/c_client/blob/master/sample/guide/ja/CompositeKeyMultiGet.c)のrowKeyColumnList部分をご参照ください。
 
 ### 6. タイムゾーン指定
 

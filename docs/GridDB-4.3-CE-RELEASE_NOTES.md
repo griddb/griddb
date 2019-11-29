@@ -95,6 +95,8 @@ When we use Java Client, we can set and get the list of column names (or column 
 
 Please refer to (3) in [CreateIndex.java](https://github.com/griddb/griddb_nosql/blob/master/sample/guide/ja/CreateIndex.java).
 
+And when we use C Client, please refer to compositeInfo in [CreateIndex.c](https://github.com/griddb/c_client/blob/master/sample/guide/ja/CreateIndex.c).
+
 ### 5. Composite RowKey
 
 Rowkey can be set to multiple consecutive columns from the first column for Collection container.
@@ -106,6 +108,8 @@ Ex.)
     containerInfo.setRowKeyColumnList(Arrays.asList(0, 1));
 
 Please refer to buildContainerInfo() in [CompositeKeyMultiGet.java](https://github.com/griddb/griddb_nosql/blob/master/sample/guide/ja/CompositeKeyMultiGet.java).
+
+And when we use C Client, please refer to rowKeyColumnList in [CompositeKeyMultiGet.c](https://github.com/griddb/c_client/blob/master/sample/guide/ja/CompositeKeyMultiGet.c).
 
 ### 6. TimeZone
 
