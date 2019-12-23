@@ -1,0 +1,103 @@
+import 'package:flutter/material.dart';
+import 'EtanolScreen.dart';
+import 'DeriPetroScreen.dart';
+
+class ConvertScreen extends StatefulWidget {
+  @override
+  _ConvertScreenState createState() => _ConvertScreenState();
+}
+
+final title = 'Conversão de combustivel';
+String item = 'Derivado de Petróleo';
+
+class _ConvertScreenState extends State<ConvertScreen> {
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+        appBar: AppBar(
+          title: Text(title),
+        ),
+        body: ListView(children: <Widget>[
+          Column(
+            children: <Widget>[
+              Stack(
+                children: <Widget>[
+                  Container(
+                    child: DropdownButton<String>(
+                      value: item,
+                      icon: Icon(Icons.arrow_downward),
+                      onChanged: (String newValue) {
+                        setState(() {
+                          item = newValue;
+                        });
+                      },
+                      items: <String>[
+                        'Derivado de Petróleo',
+                        'Etanol',
+                      ].map<DropdownMenuItem<String>>((String value) {
+                        return DropdownMenuItem<String>(
+                          value: value,
+                          child: Text(value),
+                        );
+                      }).toList(),
+                    ),
+                    alignment: Alignment(0.0, -0.8),
+                  ),
+                ],
+              ),
+              Stack(
+                children: <Widget>[
+                  Container(
+                    child: Text('Temperatura(°C)'),
+                    alignment: Alignment(0.0, 0.0),
+                  ),
+                  Container(
+                    child: TextField(),
+                    padding: EdgeInsets.only(left: 30.0, right: 30.0),
+                  )
+                ],
+              ),
+              Stack(
+                children: <Widget>[
+                  Container(
+                    child: Text('Densidade(kg/L)'),
+                    alignment: Alignment(0.0, 0.0),
+                  ),
+                  Container(
+                    child: TextField(),
+                    padding: EdgeInsets.only(left: 30.0, right: 30.0),
+                  )
+                ],
+              ),
+              Stack(
+                children: <Widget>[
+                  Container(
+                    child: Text('Volume(L)'),
+                    alignment: Alignment(0.0, 0.0),
+                  ),
+                  Container(
+                    child: TextField(),
+                    padding: EdgeInsets.only(left: 30.0, right: 30.0),
+                  )
+                ],
+              ),
+              Center(
+                child: Container(
+                  child: RaisedButton(
+                    child: Text('Converter'),
+                    onPressed: (){
+                      if(item == 'Derivado de Petróleo'){
+                        Navigator.push(context, MaterialPageRoute(builder: (context) => DeriPetroScreen()));
+                      }
+                      else{
+                        Navigator.push(context, MaterialPageRoute(builder: (context) => EtanolScreen()));
+                      }
+                    },
+                  ),
+                ),
+              )
+            ],
+          )
+        ]));
+  }
+}
