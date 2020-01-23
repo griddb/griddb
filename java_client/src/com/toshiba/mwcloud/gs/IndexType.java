@@ -111,7 +111,6 @@ public enum IndexType {
 	 * </div><div lang="en">
 	 * Indicates a spatial index.
 	 *
-	 * TODO
 	 * <p>This index type can be applied to only GEOMETRY type of Columns in
 	 * {@link Collection}. It cannot be set on Columns in {@link TimeSeries}.
 	 * </p>

@@ -112,6 +112,8 @@ import com.toshiba.mwcloud.gs.common.LoggingUtils.BaseGridStoreLogger;
  * <li>If a specified property name is made up of only the category name</li></ul>
  * <p>By including only the directory including the properties file, properties
  * of the file are not applied to GridStoreFactory.</p>
+ * </dd>
+ * </dl>
  *
  * </div>
  */
@@ -289,7 +291,7 @@ public abstract class GridStoreFactory implements Closeable {
 	 * @throws NullPointerException {@code properties}に{@code null}が
 	 * 指定された場合
 	 * </div><div lang="en">
-	 * TODO Returns a {@link GridStore} with the specified properties.
+	 * Returns a {@link GridStore} with the specified properties.
 	 *
 	 * <p>When obtaining {@link GridStore}, it just searches for the name of a master node
 	 * (hereafter, a master) administering each {@link Container} as necessary, but
@@ -396,6 +398,15 @@ public abstract class GridStoreFactory implements Closeable {
 	 * applications. If the property is omitted, it is regarded that the name
 	 * is not specified. Empty string cannot be specified.
 	 * This property is supported on version 4.2 or later.</td></tr>
+	 * <tr><td>timeZone</td><td>Time zone information. It is used for
+	 * TIMESTAMP value operations in TQL.
+	 * Specifies an offset value in the "{@code ±hh:mm}" or the "{@code ±hhmm}" format
+	 * (where {@code ±} is {@code +} or {@code -}, {@code hh} is hours, and {@code mm}
+	 * is minutes), "{@code Z}" (equivalent to {@code +00:00}), or "{@code auto}"
+	 * (automatically set according to the execution environment).
+	 * "{@code auto}" can only be used for the time zone that does not observe the
+	 * daylight saving time.
+	 * This property is supported on version 4.3 or later.</td></tr>
 	 * </tbody>
 	 * </table>
 	 *

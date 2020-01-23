@@ -30,7 +30,11 @@ import java.lang.annotation.Target;
  * 設定・取得するためのフィールド・メソッドに対しては、使用できません。</p>
  *
  * </div><div lang="en">
- * TODO Sets options for mapping Row fields of a {@link Container}.
+ * Sets options for mapping Row fields of a {@link Container}.
+ *
+ * <p>Applicable to each Row field that configures a composite Row key,
+ * but not applicable to the field method for setting and getting the entire
+ * composite Row key as one object.</p>
  * </div>
  */
 @Retention(RetentionPolicy.RUNTIME)
@@ -66,12 +70,18 @@ public @interface RowField {
 	 * ロウフィールドに対して番号を設定する場合、複合ロウキーを構成する個々の
 	 * カラムに割り当てられる番号と重複しないようにする必要があります。</p>
 	 * </div><div lang="en">
-	 * TODO Sets a Column number.
+	 * Sets a Column number.
 	 *
-	 * <p>To specify the location of a Column explicitly, specify {@code 0} or more and less than the number of Columns.
-	 * Duplicate Column numbers cannot be specified in a single Container. A Row key must be always assigned to
-	 * the first Column. If the default value {@code -1} is specified, the corresponding Column number is automatically
-	 * determined.</p>
+	 * <p>To specify the location of a Column explicitly, specify {@code 0} or more
+	 * and less than the number of Columns. Duplicate Column numbers cannot be
+	 * specified in a single Container. In the current version, a Row key must be
+	 * always assigned to the first Column. If the default value {@code -1} is
+	 * specified, the corresponding Column number is automatically determined.</p>
+	 *
+	 * <p>For the Row object with a composite Row key when setting a number for
+	 * a Row field other than the Row key, make sure that the number does not
+	 * overlap with the number assigned to each column that configures the
+	 * composite Row key.
 	 * </div>
 	 */
 	int columnNumber() default -1;

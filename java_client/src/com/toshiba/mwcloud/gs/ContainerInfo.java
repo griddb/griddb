@@ -72,13 +72,14 @@ public class ContainerInfo {
 	 *
 	 * @since 1.5
 	 * </div><div lang="en">
-	 * TODO Container information is created by specifying information on the column layout.
+	 * Limited to those with no composite Row key, creates container information
+	 * by specifying information on the column layout.
 	 *
 	 * @param name Container name. Not set when {@code null} is specified.
 	 * @param type Container type. Not set when {@code null} is specified.
 	 * @param columnInfoList List of column information. {@code null} cannot be specified.
-	 * @param rowKeyAssigned Presence or absence of a column corresponding to a row key.
-	 * {@code true} if you have a row key, and {@code false} if you don’t have one.
+	 * @param rowKeyAssigned if a column is assigned or not to the Row key:
+	 * {@code true} if a single column is assigned, {@code false} otherwise
 	 *
 	 * @throws NullPointerException when {@code null} is specified as argument
 	 *
@@ -113,7 +114,17 @@ public class ContainerInfo {
 	 *
 	 * @since 4.3
 	 * </div><div lang="en">
-	 * TODO
+	 * Creates container information by specifying information about column layout,
+	 * including any Row key configuration.
+	 *
+	 * @param name Container name. Not set when {@code null} is specified.
+	 * @param type Container type. Not set when {@code null} is specified.
+	 * @param columnInfoList List of column information. {@code null} cannot be specified.
+	 * @param rowKeyColumnList List of column numbers starting from 0 for the columns
+	 * configuring the Row key. If a list of length {@code 0} or {@code null} is
+	 * specified, it is assumed that there is no Row key.
+	 *
+	 * @throws NullPointerException when {@code null} is specified as argument
 	 *
 	 * @since 4.3
 	 * </div>
@@ -301,11 +312,17 @@ public class ContainerInfo {
 	 *
 	 * @throws IllegalStateException 複合ロウキーが設定されていた場合
 	 * </div><div lang="en">
-	 * TODO Checks if a Column is assigned as a Row key.
+	 * Limited to those with no composite Row key, checks if a Column is assigned
+	 * as a Row key.
 	 *
-	 * <p>If the Container has a Row key, the number of its corresponding Column is {@code 0}. </p>
+	 * <p>If this method returns {@code true}, the column number corresponding to
+	 * the Row key is {@code 0}.</p>
+	 *
+	 * <p>Use {@link #getRowKeyColumnList()} to refer to any Row key configuration.</p>
 	 *
 	 * @return {@code true} If a Row key is assigned, otherwise {@code false}.
+	 *
+	 * @throws IllegalStateException if a composite Row key has been set
 	 * </div>
 	 */
 	public boolean isRowKeyAssigned() {
@@ -335,7 +352,15 @@ public class ContainerInfo {
 	 *
 	 * @since 4.3
 	 * </div><div lang="en">
-	 * TODO
+	 * Returns the list of columns that configures the Row key.
+	 *
+	 * <p>{@link UnsupportedOperationException} may occur if the returned value
+	 * is changed. Also, the operation on this object does not change the contents
+	 * of the returned object. </p>
+	 *
+	 * @return List of column numbers starting from {@code 0} for the columns
+	 * configuring the Row key. A list of length {@code 0} if the corresponding
+	 * container has no Row key
 	 *
 	 * @since 4.3
 	 * </div>
@@ -524,7 +549,14 @@ public class ContainerInfo {
 	 *
 	 * @since 4.3
 	 * </div><div lang="en">
-	 * TODO
+	 * Sets the list of columns that configures the Row key.
+	 *
+	 * <p>Updates of the specified object after this function is specified will
+	 * not change the object.</p>
+	 *
+	 * @param rowKeyColumnList List of column numbers starting from {@code 0} for
+	 * the columns configuring the Row key. If a list of length {@code 0} or
+	 * {@code null} is specified, it is assumed that there is no Row key.
 	 *
 	 * @since 4.3
 	 * </div>
@@ -598,7 +630,7 @@ public class ContainerInfo {
 	 */
 	public void setIndexInfoList(List<IndexInfo> indexInfoList) {
 		List<IndexInfo> destList;
-		
+
 		if (indexInfoList == null || indexInfoList.isEmpty()) {
 			destList = Collections.emptyList();
 		}

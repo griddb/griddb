@@ -40,13 +40,22 @@ import com.toshiba.mwcloud.gs.common.PropertyUtils;
  *
  * <p>実行環境のタイムゾーン、ロケール設定には依存しません。</p>
  * </div><div lang="en">
- * TODO Provides the utilities for manipulating time data.
+ * Provides the utilities for manipulating time data.
+ *
+ * <p>Used to help construct TQL statements and to process TIMESTAMP values with
+ * the same notation as TQL.</p>
+ *
+ * <p>Does not depend on the time zone and locale settings of the execution
+ * environment.</p>
  * </div>
  */
 public class TimestampUtils {
 
 	private static final boolean TRIM_MILLISECONDS = false;
 
+	/**
+	 * @deprecated
+	 */
 	@Deprecated
 	public TimestampUtils() {
 	}
@@ -110,6 +119,8 @@ public class TimestampUtils {
 	 * @param amount value to be added
 	 * @param timeUnit unit of value to be added
 	 *
+	 * @return The added value
+	 *
 	 * @throws NullPointerException when {@code null} is specified for {@code timestamp}, {@code timeUnit}
 	 * </div>
 	 */
@@ -140,7 +151,20 @@ public class TimestampUtils {
 	 *
 	 * @since 4.3
 	 * </div><div lang="en">
-	 * TODO
+	 * Adds a fixed value to the time using the specified time zone setting.
+	 *
+	 * <p>Depending on the unit of time used for calculation, the time zone
+	 * setting may not be affected.</p>
+	 *
+	 * @param timestamp target time
+	 * @param amount value to be added
+	 * @param timeUnit unit of value to be added
+	 * @param zone time zone setting used for calculation
+	 *
+	 * @return The added value
+	 *
+	 * @throws NullPointerException when {@code null} is specified for
+	 * {@code timestamp}, {@code timeUnit}
 	 *
 	 * @since 4.3
 	 * </div>
@@ -227,7 +251,17 @@ public class TimestampUtils {
 	 *
 	 * @since 4.3
 	 * </div><div lang="en">
-	 * TODO
+	 * Using the specified time zone setting, returns the string representing the
+	 * specified time, according to the TIMESTAMP value notation of TQL.
+	 *
+	 * @param timestamp target time
+	 * @param zone time zone setting used for calculation
+	 *
+	 * @return corresponding string representation
+	 *
+	 * @throws NullPointerException when {@code null} is specified as argument
+	 *
+	 * @see #format(Date)
 	 *
 	 * @since 4.3
 	 * </div>
@@ -254,9 +288,11 @@ public class TimestampUtils {
 	 * @throws ParseException 時刻の文字列表記と一致しない文字列が指定された場合
 	 * @throws NullPointerException 引数に{@code null}が指定された場合
 	 * </div><div lang="en">
-	 * TODO Returns a {@link Date} object corresponding to the specified string, according to the TIMESTAMP value notation of TQL.
+	 * Returns a {@link Date} object corresponding to the specified string, according to the TIMESTAMP value notation of TQL.
 	 *
 	 * @param source string representation of target time
+	 *
+	 * @return {@link Date} object corresponding to the specified string
 	 *
 	 * @throws ParseException if the specified string does not match any time representation.
 	 * @throws NullPointerException when {@code null} is specified as argument
@@ -281,7 +317,11 @@ public class TimestampUtils {
 	 *
 	 * <p>年の値が負となる時刻は扱えません。</p>
 	 * </div><div lang="en">
-	 * TODO Returns the date format conforming to the TIMESTAMP value notation of TQL.
+	 * Returns the date format conforming to the TIMESTAMP value notation of TQL.
+	 *
+	 * <p>The current version always uses the UTC timezone.</p>
+	 *
+	 * @return date format
 	 *
 	 * <p>The time representation containing a negative year value is not supported.</p>
 	 * </div>
@@ -303,7 +343,14 @@ public class TimestampUtils {
 	 *
 	 * @since 4.3
 	 * </div><div lang="en">
-	 * TODO
+	 * Using the specified time zone setting, returns the string representing the
+	 * specified time, according to the TIMESTAMP value notation of TQL.
+	 *
+	 * @param zone applicable time zone settings
+	 *
+	 * @return date format
+	 *
+	 * @throws NullPointerException when {@code null} is specified as argument
 	 *
 	 * @since 4.3
 	 * </div>

@@ -609,7 +609,10 @@ public interface TimeSeries<R> extends Container<Date, R> {
 	 *
 	 * @since 4.3
 	 * </div><div lang="en">
-	 * TODO
+	 * Auxiliary class for configuring {@link Container.BindType} which is associated
+	 * with {@link TimeSeries} and its type parameters.
+	 *
+	 * @see Container.BindType
 	 *
 	 * @since 4.3
 	 * </div>
@@ -632,7 +635,14 @@ public interface TimeSeries<R> extends Container<Date, R> {
 		 *
 		 * @since 4.3
 		 * </div><div lang="en">
-		 * TODO
+		 * Returns the specified Row object type and {@link Container.BindType} associated
+		 * with {@link TimeSeries}.
+		 *
+		 * @param <R> the type of a Row object
+		 * @param rowClass Class object corresponding to the type of the Row object
+		 *
+		 * @throws GSException if an inconsistency is detected between the type of Row
+		 * key and the type of Row object
 		 *
 		 * @since 4.3
 		 * </div>

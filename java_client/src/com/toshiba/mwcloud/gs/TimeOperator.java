@@ -23,7 +23,7 @@ package com.toshiba.mwcloud.gs;
  * 特定できます。該当するロウが存在しない場合の扱いは、この列挙型を使用する
  * それぞれの機能により異なります。</p>
  * </div><div lang="en">
- * Represents how to specify a Row based on a key timestamp of {@link TimeSeries}</a>.
+ * Represents how to specify a Row based on a key timestamp of {@link TimeSeries}.
  *
  * <p>It can be used in combination with the timestamp (specified separately) to specify
  * a Row with the nearest timestamp etc. When no relevant Row exists,

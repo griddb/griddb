@@ -1279,11 +1279,15 @@ public interface Row {
 	 *
 	 * @return 作成された{@link Row}
 	 *
-	 * @throws GSException 現バージョンでは発生しない
+	 * @throws GSException 現バージョンでは送出されない
 	 *
 	 * @since 4.3
 	 * </div><div lang="en">
-	 * TODO
+	 * Creates a new {@link Row} instance with the same field values.
+	 *
+	 * @return Created {@link Row}
+	 *
+	 * @throws GSException It will not be thrown in the current version.
 	 *
 	 * @since 4.3
 	 * </div>
@@ -1302,7 +1306,12 @@ public interface Row {
 	 *
 	 * @since 4.3
 	 * </div><div lang="en">
-	 * TODO
+	 * Creates a new {@link Key} instance with only the columns that configure
+	 * the row key and the same field values for those columns.
+	 *
+	 * @return Created {@link Key}
+	 *
+	 * @throws GSException If there is no Row key
 	 *
 	 * @since 4.3
 	 * </div>
@@ -1318,7 +1327,10 @@ public interface Row {
 	 *
 	 * @since 4.3
 	 * </div><div lang="en">
-	 * TODO
+	 * A type of {@link Row} configured only by columns related to the Row key.
+	 *
+	 * <p>The column information included in ContainerInfo returned from
+	 * {@link #getSchema()} is only the column information related to the Row key.</p>
 	 *
 	 * @since 4.3
 	 * </div>
@@ -1339,7 +1351,13 @@ public interface Row {
 	 *
 	 * @since 4.3
 	 * </div><div lang="en">
-	 * TODO
+	 * Indicates that the type of row object used for mapping is always associated
+	 * with the specified Row key type.
+	 *
+	 * <p>If the type of Row object with this interface is specified to obtain
+	 * the type information through {@link Container.BindType#of(Class)}, the
+	 * type of Row key needs not to be specified when generating a
+	 * {@link Container} instance.</p>
 	 *
 	 * @since 4.3
 	 * </div>

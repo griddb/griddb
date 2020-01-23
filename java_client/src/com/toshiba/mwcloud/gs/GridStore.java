@@ -356,7 +356,7 @@ public interface GridStore extends Closeable {
 	 * またはクローズ後に呼び出された場合
 	 * @throws NullPointerException 1つ以上の引数に{@code null}が指定された場合
 	 * </div><div lang="en">
-	 * Newly creates or update a Collection.
+	 * Newly creates or updates a Collection.
 	 *
 	 * <p>If a Container with the specified name does not exist, it newly creates
 	 * a Collection based on the Column layout defined by the specified class.
@@ -448,7 +448,7 @@ public interface GridStore extends Closeable {
 	 * またはクローズ後に呼び出された場合
 	 * @throws NullPointerException 1つ以上の引数に{@code null}が指定された場合
 	 * </div><div lang="en">
-	 * Newly creates or update a Collection with the specified option.
+	 * Newly creates or updates a Collection with the specified option.
 	 *
 	 * <p>If a Container with the specified name does not exist, it newly creates
 	 * a Collection based on the Column layout defined by the specified class.
@@ -493,7 +493,7 @@ public interface GridStore extends Closeable {
 	 * If another operation is performed during column layout change, the prior layout
 	 * will be used. </p>
 	 *
-	* @param name Name of a Collection subject to processing
+	 * @param name Name of a Collection subject to processing
 	 * @param rowType Type of Row object corresponding to the column layout
 	 * of the Collection subject to processing
 	 * @param modifiable Indicates whether the column layout of the existing
@@ -966,7 +966,7 @@ public interface GridStore extends Closeable {
 	 *
 	 * @since 1.5
 	 * </div><div lang="en">
-	 * TODO Specify {@link ContainerInfo} and create a new Container or update a Container.
+	 * Creates a new Container or updates a Container by specifying {@link ContainerInfo}.
 	 *
 	 * <p>Excluding the next point, the behavior will be the same
 	 * as {@link #putCollection(String, Class, boolean)}
@@ -995,24 +995,24 @@ public interface GridStore extends Closeable {
 	 * will be the same as {@link #putCollection(String, Class, boolean)}.
 	 * If {@link ContainerType#TIME_SERIES} is specified, the behavior will be the same as
 	 * {@link #putTimeSeries(String, Class, TimeSeriesProperties, boolean)}. </td></tr>
-	 * <tr><td>column layout</td><td>{@code info}</td>
-	 * <td>Set the {@link ColumnInfo} list and whether there is any Row key
+	 * <tr><td>Column layout</td><td>{@code info}</td>
+	 * <td>Set the {@link ColumnInfo} list and Row key configuration
 	 * so as to conform to the restrictions stipulated in {@link Container}.
 	 * However, in the current version, it is not allowed that the list
 	 * includes one or more {@link ColumnInfo} which returns a value except for
 	 * {@code null} through {@link ColumnInfo#getDefaultValueNull()}.</td></tr>
-	 * <tr><td>ignore column sequence</td><td>{@code info}</td>
+	 * <tr><td>Ignore column sequence</td><td>{@code info}</td>
 	 * <td>If ignored, no verification of the conformance with the column sequence
 	 * of existing Containers with the same name will be carried out. </td></tr>
 	 * <tr><td>TimeSeries composition option</td><td>{@code info}</td>
 	 * <td>A value that is not {@code null} can be specified only
 	 * if the Container type is {@link ContainerType#TIME_SERIES}. </td></tr>
-	 * <tr><td>index setting</td><td>{@code info}</td>
+	 * <tr><td>Index setting</td><td>{@code info}</td>
 	 * <td>Ignored in the current version.
 	 * In future versions, if settings that do not conform to the rules of
 	 * {@link Container#createIndex(String, IndexType)} are included,
 	 * an exception may be sent out. </td></tr>
-	 * <tr><td>trigger setting</td><td>{@code info}</td>
+	 * <tr><td>Trigger setting</td><td>{@code info}</td>
 	 * <td>Ignored in the current version. In future versions, if settings
 	 * that do not conform to the rules of
 	 * {@link Container#createTrigger(TriggerInfo)} are included,
@@ -1149,8 +1149,8 @@ public interface GridStore extends Closeable {
 	 *
 	 * @since 1.5
 	 * </div><div lang="en">
-	 * Specify {@link ContainerInfo} and create a new Collection or update
-	 * a Collection.
+	 * Creates a new Collection or updates a Collection by specifying
+	 * {@link ContainerInfo}.
 	 *
 	 * <p>Except for points where the Container type is limited to
 	 * {@link ContainerType#COLLECTION} and the returned type is {@link Collection},
@@ -1248,7 +1248,8 @@ public interface GridStore extends Closeable {
 	 *
 	 * @since 1.5
 	 * </div><div lang="en">
-	 * Specify {@link ContainerInfo} and create a new or update TimeSeries.
+	 * Creates a new TimeSeries or updates a TimeSeries by specifying
+	 * {@link ContainerInfo}.
 	 *
 	 * <p>Except for points where the Container type is limited
 	 * to {@link ContainerType#TIME_SERIES} and the returned type
@@ -1351,7 +1352,31 @@ public interface GridStore extends Closeable {
 	 *
 	 * @since 4.3
 	 * </div><div lang="en">
-	 * TODO
+	 * Returns a {@link Container} object by specifying {@link Container.BindType}.
+	 *
+	 * <p>The behavior is the same as one of the following methods, depending
+	 * on the specified {@code bindType}:</p>
+	 * <ul>
+	 * <li>{@link #getContainer(String)}</li>
+	 * <li>{@link #getCollection(String, Class)}</li>
+	 * <li>{@link #getTimeSeries(String, Class)}</li>
+	 * </ul>
+	 *
+	 * @param name Name of a Container subject to processing
+	 * @param bindType Type information associated with the container
+	 * subject to processing
+	 *
+	 * @return An instance of the type of the corresponding {@link Container}
+	 * or its subinterfaces
+	 *
+	 * @throws GSException if the contents of the {@code name} and {@code bindType}
+	 * parameters do not conform to the rules
+	 * @throws GSException If the specified type is not suitable as the Row
+	 * object type. Refer to the definition of {@link Container} for details.
+	 * @throws GSException If this process times out, a connection failure
+	 * were to occur, or if it is invoked after being closed
+	 * @throws NullPointerException If {@code null} is specified in the argument
+	 * {@code bindType}
 	 *
 	 * @since 4.3
 	 * </div>
@@ -1387,7 +1412,31 @@ public interface GridStore extends Closeable {
 	 *
 	 * @since 4.3
 	 * </div><div lang="en">
-	 * TODO
+	 * Creates a new container or updates a container by specifying
+	 * {@link Container.BindType}.
+	 *
+	 * <p>The behavior is the same as when
+	 * {@link #putContainer(String, Container.BindType, ContainerInfo, boolean)}
+	 * is called without specifying the container information and not allowing the
+	 * column layout to be updated.</p>
+	 *
+	 * @param name Name of a Container subject to processing
+	 * @param bindType Type information associated with the container
+	 * subject to processing
+	 *
+	 * @return An instance of the type of the corresponding {@link Container}
+	 * or its subinterfaces
+	 *
+	 * @throws GSException If the contents of the {@code name} and {@code bindType}
+	 * parameters do not conform to the rules. If the contents also do not
+	 * conform to the rules of the new Container creation and update method
+	 * for the specified Container type
+	 * @throws GSException If the specified type is not suitable as the Row
+	 * object type. Refer to the definition of {@link Container} for details.
+	 * @throws GSException If this process times out, a connection failure
+	 * were to occur, or if it is invoked after being closed
+	 * @throws NullPointerException If {@code null} is specified in the argument
+	 * {@code bindType}
 	 *
 	 * @since 4.3
 	 * </div>
@@ -1428,7 +1477,37 @@ public interface GridStore extends Closeable {
 	 *
 	 * @since 4.3
 	 * </div><div lang="en">
-	 * TODO
+	 * Creates a new container or updates a container by specifying
+	 * {@link Container.BindType} and {@link ContainerInfo}.
+	 *
+	 * <p>The behavior is the same as one of the following methods, depending
+	 * on the specified {@code bindType}:</p>
+	 * <ul>
+	 * <li>{@link #putContainer(String, ContainerInfo, boolean)}</li>
+	 * <li>{@link #putContainer(String, Class, ContainerInfo, boolean)}</li>
+	 * </ul>
+	 *
+	 * @param name Name of a Container subject to processing
+	 * @param bindType Type information associated with the container
+	 * subject to processing
+	 * @param info Information of a Container subject to processing. Ignored
+	 * if {@code null} is specified
+	 * @param modifiable To permit a change in the column layout of existing
+	 * Container data or not
+	 *
+	 * @return An instance of the type of the corresponding {@link Container}
+	 * or its subinterfaces
+	 *
+	 * @throws GSException If the contents of the {@code name}, {@code bindType},
+	 * and {@code info} arguments do not conform to the rules. If the contents
+	 * also do not conform to the rules of the new Container creation and update
+	 * method for the specified Container type
+	 * @throws GSException If the specified type is not suitable as the Row
+	 * object type. Refer to the definition of {@link Container} for details.
+	 * @throws GSException If this process times out, a connection failure
+	 * were to occur, or if it is invoked after being closed
+	 * @throws NullPointerException If {@code null} is specified in the argument
+	 * {@code bindType}
 	 *
 	 * @since 4.3
 	 * </div>
@@ -1479,7 +1558,8 @@ public interface GridStore extends Closeable {
 	 *
 	 * @param name Name of a Container subject to processing
 	 *
-	 * @throws GSException Name of a Container subject to processing
+	 * @throws GSException If this process times out, a connection failure
+	 * were to occur, or if it is invoked after being closed
 	 * @throws NullPointerException If {@code null} is specified in the argument
 	 *
 	 * @see #dropCollection(String)
@@ -1543,9 +1623,9 @@ public interface GridStore extends Closeable {
 	 *
 	 * @since 1.5
 	 * </div><div lang="en">
-	 * TODO Specify {@link ContainerInfo} and create a new {@link Row}.
+	 * Creates a new {@link Row} by specifying {@link ContainerInfo}.
 	 *
-	 * <p>Include the {@link ColumnInfo} list and whether there is any Row key
+	 * <p>Include the {@link ColumnInfo} list and Row key configuration
 	 * so as to conform to the restrictions stipulated in {@link Container}.
 	 * Specify the column layout in {@link ContainerInfo}.</p>
 	 *
@@ -1623,7 +1703,21 @@ public interface GridStore extends Closeable {
 	 *
 	 * @since 4.3
 	 * </div><div lang="en">
-	 * TODO
+	 * Creates a new {@link Row.Key} by specifying {@link ContainerInfo}.
+	 *
+	 * <p>Information about columns other than the Row key is ignored. Otherwise,
+	 * it behaves the same as {@link #createRow(ContainerInfo)}.</p>
+	 *
+	 * @param info Container information including the column layout. Other contents
+	 * are ignored
+	 *
+	 * @return Created {@link Row.Key}
+
+	 * @throws GSException If container information without Row key is specified
+	 * @throws GSException If the Container type or restrictions of the column layout
+	 * are not conformed to
+	 * @throws GSException If invoked after being closed
+	 * @throws NullPointerException If {@code null} is specified in the argument
 	 *
 	 * @since 4.3
 	 * </div>
@@ -1751,8 +1845,8 @@ public interface GridStore extends Closeable {
 	 *
 	 * @param queryList List of {@link Query} targeted
 	 *
-	 * @throws If a {@link Query} other than a {@link Query} obtained via this
-	 * {@link GridStore} object is included
+	 * @throws GSException If a {@link Query} other than a {@link Query}
+	 * obtained via this {@link GridStore} object is included
 	 * @throws GSException If the system tries to execute a query containing
 	 * a wrong parameter, syntax or command. For example, when a column type
 	 * that is not compatible with the argument of the function is specified
@@ -2147,8 +2241,8 @@ public interface GridStore extends Closeable {
 	 *
 	 * @since 2.1
 	 * </div><div lang="en">
-	 * Specify the Row object type and {@link ContainerInfo} and create a new
-	 * Container or update a Container.
+	 * Creates a new Container or updates a Container by specifying the Row
+	 * object type and {@link ContainerInfo}.
 	 *
 	 * <p>Mainly used when specifying the type of Row object and creating a new
 	 * Container with additional settings.</p>
@@ -2180,8 +2274,8 @@ public interface GridStore extends Closeable {
 	 *
 	 * @throws GSException If this process times out, a connection failure
 	 * were to occur, or if it is invoked after being closed
-	 * @throws NullPointerException If this process times out, a connection
-	 * failure were to occur, or if it is invoked after being closed
+	 * @throws NullPointerException If {@code null} is specified as an argument
+	 * {@code rowType}
 	 *
 	 * @see #putContainer(String, ContainerInfo, boolean)
 	 * @see #putCollection(String, Class, boolean)

@@ -191,16 +191,21 @@ public class RowKeyPredicate<K> {
 	 *
 	 * @see Container
 	 * </div><div lang="en">
-	 * TODO Creates an instance of {@link RowKeyPredicate} with the {@link GSType} corresponding to
+	 * Creates an instance of {@link RowKeyPredicate} with the {@link GSType} corresponding to
 	 * the specified {@link Class} as the {@link RowKey} type.
 	 *
-	 * <p>The target Container must have a {@link RowKey}, and the type of the {@link RowKey} must be
-	 * the specified {@link GSType}</p>
+	 * <p>The container to be evaluated by the search condition must have a Row key
+	 * with a single column, and the type of the Row key must be same as the specified
+	 * {@link GSType}.</p>
 	 *
 	 * <p>The type of {@link RowKey} that can be set is only that allowed
 	 * by either one of the subinterfaces of {@link Container}.
 	 * For the correspondence of {@link Class} to {@link GSType},
 	 * see the definition of {@link Container}.</p>
+	 *
+	 * <p>For a composite Row key, use {@link #create(ContainerInfo)} which allows to
+	 * create a search condition regardless of the number of columns that configure
+	 * a Row key.</p>
 	 *
 	 * @param keyType {@link Class} corresponding to a {@link RowKey} used as a search condition
 	 *
@@ -253,7 +258,22 @@ public class RowKeyPredicate<K> {
 	 *
 	 * @since 4.3
 	 * </div><div lang="en">
-	 * TODO
+	 * Creates an instance of {@link RowKeyPredicate} based on the Row key column
+	 * definition described in the specified {@link ContainerInfo}.
+	 *
+	 * <p>The container to be evaluated by the search condition must have a Row key
+	 * and must correspond to the column definition described in the specified
+	 * {@link ContainerInfo}. Column definitions other than that of the Row key are
+	 * not used for the evaluation.</p>
+	 *
+	 * @param info Container information including the column layout of the Row key
+	 * for which the search condition is determined. Other contents are ignored
+	 *
+	 * @return {@link RowKeyPredicate} newly created
+	 *
+	 * @throws GSException if the specified information does not include the Row key
+	 * or is always not supported as a Row key
+	 * @throws NullPointerException if {@code null} is specified in the argument.
 	 *
 	 * @since 4.3
 	 * </div>
@@ -284,12 +304,13 @@ public class RowKeyPredicate<K> {
 	 * @throws ClassCastException 指定のロウキーの値の型が{@code null}
 	 * ではなく、ロウキーに対応するクラスのインスタンスではない場合
 	 * </div><div lang="en">
-	 * TODO Sets the value of the {@link RowKey} at the starting positionof the range condition.
+	 * Sets the value of the {@link RowKey} at the starting position of the range condition.
 	 *
 	 * <p>A {@link RowKey} with a value smaller than the specified value is deemed as non-conforming.</p>
 	 *
-	 * <p>A type with an undefined magnitude relationship can be set as a condition
-	 * but cannot be used in the actual judgment, e.g. STRING type</p>
+	 * <p>A Row key with no magnitude relation defined, including a Row key of the
+	 * STRING type or one with a composite Row key containing STRING type, are not
+	 * used for the determination even though it can be set as a condition.</p>
 	 *
 	 * @param startKey value of {@link RowKey} at the starting position or {@code null}.
 	 * For {@code null}, the setting is cancelled.
@@ -328,12 +349,13 @@ public class RowKeyPredicate<K> {
 	 * @throws ClassCastException 指定のロウキーの値の型が{@code null}
 	 * ではなく、ロウキーに対応するクラスのインスタンスではない場合
 	 * </div><div lang="en">
-	 * TODO Sets the value of the {@link RowKey} at the last position of the range condition.
+	 * Sets the value of the {@link RowKey} at the last position of the range condition.
 	 *
 	 * <p>A {@link RowKey} with a value larger than the specified value is deemed as non-conforming.</p>
 	 *
-	 * <p>A type with an undefined magnitude relationship can be set as a condition
-	 * but cannot be used in the actual judgment e.g. STRING type</p>
+	 * <p>A Row key with no magnitude relation defined, including a Row key of the
+	 * STRING type or one with a composite Row key containing STRING type, are not
+	 * used for the determination even though it can be set as a condition.</p>
 	 *
 	 * @param finishKey the value of {@link RowKey} at the last position or {@code null}.
 	 * For {@code null}, the setting is cancelled.
@@ -407,16 +429,23 @@ public class RowKeyPredicate<K> {
 	 * とするロウキーの型を取得します。
 	 *
 	 * <p>複合ロウキーを含む任意のロウキーについてのスキーマを取得するには、
-	 * {@link #getKeySchema()}}を使用します。</p>
+	 * {@link #getKeySchema()}を使用します。</p>
 	 *
 	 * @return 合致条件の評価対象とするロウキーの型
 	 *
 	 * @throws IllegalStateException 複合ロウキーについての合致条件である
 	 * 場合に呼び出された場合
 	 * </div><div lang="en">
-	 * TODO Returns the type of {@link RowKey} used as a search condition.
+	 * Returns the type of Row key used as a search condition, except when
+	 * it is a search condition for the composite Row key.
+	 *
+	 * <p>Uses {@link #getKeySchema()} to get the schema for any Row key including
+	 * the composite Row key.</p>
 	 *
 	 * @return the type of {@link RowKey} used as a search condition.
+	 *
+	 * @throws IllegalStateException if called for a search condition for a
+	 * composite Row key.
 	 * </div>
 	 */
 	public GSType getKeyType() {
@@ -445,7 +474,14 @@ public class RowKeyPredicate<K> {
 	 *
 	 * @since 4.3
 	 * </div><div lang="en">
-	 * TODO
+	 * Returns the Row key schema used as a search condition.
+	 *
+	 * <p>The schema information to be returned does not have column information other
+	 * than the Row key and container information other than the schema, even though it
+	 * is in the information used to create the search condition. </p>
+	 *
+	 * @return {@link ContainerInfo} that has only container information related to
+	 * the schema of the Row key
 	 *
 	 * @since 4.3
 	 * </div>
@@ -764,7 +800,7 @@ public class RowKeyPredicate<K> {
 
 		@Override
 		K duplicateKeyNoNull(K src, boolean identical) {
-			return getBindingClass().cast(new Date(((Date) src).getTime())); 
+			return getBindingClass().cast(new Date(((Date) src).getTime()));
 		}
 
 		@Override

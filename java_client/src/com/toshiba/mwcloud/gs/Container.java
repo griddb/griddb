@@ -225,9 +225,6 @@ import com.toshiba.mwcloud.gs.common.RowMapper;
  *
  * <p>The correspondence between the type of a Column and the type of
  * each value in a Row object is as follows:</p>
- * <table><thead><td>
- * Column type
- * </td>
  * <table>
  * <thead><tr><th>Column type</th><th>Type of each value in a Row object</th></tr></thead>
  * <tbody>
@@ -339,7 +336,8 @@ import com.toshiba.mwcloud.gs.common.RowMapper;
  * in the middle of other operation processing on the container. For exceptional
  * items, see the explanation for each individual operation. </p>
  *
- * @param <K> the type of a Row key. If no Row key is used, specify Void.
+ * @param <K> the type of a Row key. If no Row key is used, specify {@link Void}
+ * or {@link Row.Key}.
  * @param <R> the type of a Row object used for mapping
  * </div>
  */
@@ -706,7 +704,7 @@ public interface Container<K, R> extends Closeable {
 	 *
 	 * @param tql TQL statement. {@code null} cannot be specified
 	 *
-	 * @throws GSException not sent in the current version
+	 * @throws GSException It will not be thrown in the current version.
 	 *
 	 * @see #query(String, Class)
 	 * </div>
@@ -1100,12 +1098,12 @@ public interface Container<K, R> extends Closeable {
 	 *
 	 * @since 3.5
 	 * </div><div lang="en">
-	 * TODO Create an index according to the contents set in {@link IndexInfo}.
+	 * Create an index according to the contents set in {@link IndexInfo}.
 	 *
-	 * <p>For the column of the index to be created, at least one of the column
-	 * name and column number must be set, and the actual container must be set
-	 * in the corresponding container. If both column name and column number are
-	 * set, corresponding columns must match each other. </p>
+	 * <p>For the column of the index to be created, at least one of the column name
+	 * sequence and column number sequence must be set, and the actual column must be
+	 * set in the corresponding container. If both are set, corresponding columns and
+	 * its order must match each other. </p>
 	 *
 	 * <p>If the index type is not set or {@link IndexType#DEFAULT} is set,
 	 * the default index type is selected according to the criteria described below. </p>
@@ -1137,9 +1135,10 @@ public interface Container<K, R> extends Closeable {
 	 * except for index names if the following conditions are
 	 * satisfied.</p>
 	 * <ul>
-	 * <li>The columns to be indexed must match. Differences in column specification methods,
-	 * such as column names and column numbers are ignored.</li>
-	 * <li>The columns to be indexed must match. Differences in the specification method of
+	 * <li>The columns to be indexed must match, including its order. Differences in
+	 * column specification methods, such as column name sequence, column number
+	 * sequence and single column are ignored.</li>
+	 * <li>The index types must match. Differences in the specification method of
 	 * index type such as existence of default designation are ignored.</li>
 	 * </ul>
 	 *
@@ -1165,16 +1164,18 @@ public interface Container<K, R> extends Closeable {
 	 * <td>{@link IndexType#TREE} Note:restriction applies</td></tr>
 	 * <tr><td>GEOMETRY</td>
 	 * <td>{@link IndexType#SPATIAL}</td>
-	* <td>(-)</td></tr>
+	 * <td>(-)</td></tr>
 	 * <tr><td>BLOB</td>
-	* <td>(-)</td>
-	* <td>(-)</td></tr>
+	 * <td>(-)</td>
+	 * <td>(-)</td></tr>
 	 * <tr><td>ARRAY</td>
 	 * <td>(-)</td>
 	 * <td>(-)</td></tr>
 	 * </tbody>
 	 * </table>
-	 * <p> An Index cannot be set for Time Series Row Keys (TIMESTAMP type).</p>
+	 * <p> An Index cannot be set for Time Series Row Keys (TIMESTAMP type).
+	 * These index types cannot be selected if the default type differs
+	 * depending on the column type that configures the column.</p>
 	 * <p>If this {@link Container} instance holds an uncommitted transaction,
 	 * commit before create. Container to be processed. If there are other transactions
 	 * being executed at the same time, wait for them to finish before creating.
@@ -1314,30 +1315,31 @@ public interface Container<K, R> extends Closeable {
 	 *
 	 * @since 3.5
 	 * </div><div lang="en">
-	 * TODO Delete all indexes that match the content set in {@link IndexInfo}.
+	 * Delete all indexes that match the content set in {@link IndexInfo}.
 	 *
 	 * <p>The setting information of {@link IndexInfo} are used as a condition
 	 * to narrow down the index to be deleted. Filtering conditions are classified
-	 * into three categories: column, index type, and index name. Setting each
+	 * into three categories: column sequence, index type, and index name. Setting each
 	 * of them is optional. If none of them are set, all created indexes are deleted. </p>
 	 *
-	 * <p>If a column name or column number is set, it must exist in the corresponding
-	 * container. If both column name and column number are set, corresponding columns
-	 * must match each other. If neither the column name nor the column number is set,
-	 * the index for any column that satisfies other refinement conditions
-	 * (index type, index name) will be deleted. </p>
+	 * <p>If a column name sequence or column number sequence is set, it must exist in
+	 * the corresponding container. If both column name sequence and column number
+	 * sequence are set, corresponding columns must match each other. If neither the
+	 * column name sequence nor the column number sequence is set, the index for any
+	 * column sequence that satisfies other refinement conditions (index type, index
+	 * name) will be deleted.</p>
 	 *
 	 * <p>When the index type is set, only the index of the specified type will be
 	 * deleted. If {@link IndexType#DEFAULT} is set, the default type index is
 	 * selected according to the standard of {@link #createIndex(IndexInfo)}.
 	 * Columns that do not support indexes and columns that do not support indexes
 	 * of the specified type are not eligible for deletion. If the index type is not set,
-	 * index that fulfil the conditions (column, index name) will be deleted. </p>
+	 * index that fulfil the conditions (column sequence, index name) will be deleted. </p>
 	 *
 	 * <p>If an index name is set, only the index with the specified name will be deleted.
 	 * The identity of the index name follows the criteria of {@link #createIndex(IndexInfo)}.
 	 * If an index name is not set, an index with an arbitrary name and an unnamed index
-	 * that fulfils the conditions (column, index type) will be deleted. </p>
+	 * that fulfils the conditions (column sequence, index type) will be deleted.</p>
 	 *
 	 * <p>If there is no index to be deleted, the index will not get deleted.</p>
 	 *
@@ -1364,7 +1366,7 @@ public interface Container<K, R> extends Closeable {
 	 *
 	 * <p>このコンテナに変更があると、指定のURLにリクエストが送信されるようになります。
 	 * 作成済みの場合は何も変更しません。</p>
-	 * <p>リクエストの通知条件・内容の詳細は次の通りです。
+	 * <p>リクエストの通知条件・内容の詳細は次の通りです。</p>
 	 * <table>
 	 * <tbody>
 	 * <tr><td>通知条件</td>
@@ -1388,8 +1390,8 @@ public interface Container<K, R> extends Closeable {
 	 *   }
 	 * }</pre>
 	 * </td></tr>
+	 * </tbody>
 	 * </table>
-	 * </p>
 	 * <p>GridDBからの通知の際に、設定されている通知先URLにリクエストに対応する
 	 * HTTPサーバが応答しない場合、タイムアウト時刻までの待機処理が発生します。
 	 * この待機処理は、このコンテナならびに他の一部のコンテナに対するロウの
@@ -1893,7 +1895,20 @@ public interface Container<K, R> extends Closeable {
 	 *
 	 * @since 4.3
 	 * </div><div lang="en">
-	 * TODO
+	 * Returns the type information associated with this object.
+	 *
+	 * <p>The type information obtained is set to be the same as the Row key type
+	 * and Row object type specified when the object was configured.</p>
+	 *
+	 * <p>The type of {@link Container} or its subinterface is not necessarily
+	 * the same as the type specified at the time of configuration; the type obtained
+	 * may be that of the subinterface. Furthermore, a one-to-one correspondence
+	 * with the container type represented by {@link ContainerType} is not
+	 * guaranteed.</p>
+	 *
+	 * @return Type information associated with this object
+	 *
+	 * @throws GSException If invoked after being closed
 	 *
 	 * @since 4.3
 	 * </div>
@@ -1923,7 +1938,24 @@ public interface Container<K, R> extends Closeable {
 	 *
 	 * @since 4.3
 	 * </div><div lang="en">
-	 * TODO
+	 * Represents the type information associated with the {@link Container} and
+	 * its type parameters.
+	 *
+	 * <p>Multiple pieces of type information given when constructing a
+	 * {@link Container} instance can be collectively stored as one object.</p>
+	 *
+	 * <p>The validity of the contents, such as the validity of the correspondence
+	 * between the type of the Row key and the type of the {@link Container}
+	 * instance, is not always checked when the instance of this class is
+	 * generated.</p>
+	 *
+	 * @param <K> Type of Row key. If no Row key is used, specify {@link Void}
+	 * or {@link Row.Key}
+	 * @param <R> The type of a Row object used for mapping
+	 * @param <C> The type of {@link Container} or its subinterfaces that are
+	 * expected to be implemented in the corresponding {@link Container} instance
+	 *
+	 * @see GridStore#getContainer(String, Container.BindType)
 	 *
 	 * @since 4.3
 	 * </div>
@@ -1978,7 +2010,18 @@ public interface Container<K, R> extends Closeable {
 		 *
 		 * @since 4.3
 		 * </div><div lang="en">
-		 * TODO
+		 * Returns the {@link BindType} associated with the Row key type obtained from
+		 * the specified Row object type, the specified Row object type, and
+		 * {@link Container} of any type.
+		 *
+		 * @param <K> Type of Row key
+		 * @param <R> Type of Row object
+		 * @param rowClass Class object corresponding to the type of the Row object
+		 *
+		 * @return corresponding type information
+		 *
+		 * @throws GSException if the Row key type cannot be obtained from the
+		 * specified Row object type
 		 *
 		 * @since 4.3
 		 * </div>
@@ -2008,7 +2051,18 @@ public interface Container<K, R> extends Closeable {
 		 *
 		 * @since 4.3
 		 * </div><div lang="en">
-		 * TODO
+		 * Returns the {@link BindType} associated with the specified Row key type,
+		 * the specified Row object type, and {@link Container} of any type.
+		 *
+		 * @param <K> Type of Row key
+		 * @param <R> Type of Row object
+		 * @param keyClass Class object corresponding to the type of Row key
+		 * @param rowClass Class object corresponding to the type of the Row object
+		 *
+		 * @return corresponding type information
+		 *
+		 * @throws GSException if an inconsistency is detected between the type
+		 * of Row key and the type of Row object
 		 *
 		 * @since 4.3
 		 * </div>
@@ -2035,7 +2089,16 @@ public interface Container<K, R> extends Closeable {
 		 *
 		 * @since 4.3
 		 * </div><div lang="en">
-		 * TODO
+		 * Returns the {@link BindType}, which has no Row key, associated with the
+		 * specified Row object type and {@link Container} of any type.
+		 *
+		 * @param <R> Type of Row object
+		 * @param rowClass Class object corresponding to the type of the Row object
+		 *
+		 * @return corresponding type information
+		 *
+		 * @throws GSException if an inconsistency is detected between the type
+		 * of Row key and the type of Row object
 		 *
 		 * @since 4.3
 		 * </div>
@@ -2054,7 +2117,9 @@ public interface Container<K, R> extends Closeable {
 		 *
 		 * @since 4.3
 		 * </div><div lang="en">
-		 * TODO
+		 * Returns the type of the Row key.
+		 *
+		 * @return Type of Row key
 		 *
 		 * @since 4.3
 		 * </div>
@@ -2071,7 +2136,9 @@ public interface Container<K, R> extends Closeable {
 		 *
 		 * @since 4.3
 		 * </div><div lang="en">
-		 * TODO
+		 * Returns the type of the Row object.
+		 *
+		 * @return Type of Row object
 		 *
 		 * @since 4.3
 		 * </div>
@@ -2089,7 +2156,10 @@ public interface Container<K, R> extends Closeable {
 		 *
 		 * @since 4.3
 		 * </div><div lang="en">
-		 * TODO
+		 * Returns the type of {@link Container} or its subinterface.
+		 *
+		 * @return The type of {@link Container} or its subinterfaces that are expected
+		 * to be implemented in the corresponding {@link Container} instance
 		 *
 		 * @since 4.3
 		 * </div>
@@ -2108,7 +2178,11 @@ public interface Container<K, R> extends Closeable {
 		 *
 		 * @since 4.3
 		 * </div><div lang="en">
-		 * TODO
+		 * Casts to the type of the Row key held by this object.
+		 *
+		 * @param obj The object to cast
+		 *
+		 * @return Casted object
 		 *
 		 * @since 4.3
 		 * </div>
@@ -2127,7 +2201,11 @@ public interface Container<K, R> extends Closeable {
 		 *
 		 * @since 4.3
 		 * </div><div lang="en">
-		 * TODO
+		 * Casts to the type of the Row object held by this object.
+		 *
+		 * @param obj The object to cast
+		 *
+		 * @return Casted object
 		 *
 		 * @since 4.3
 		 * </div>
@@ -2139,7 +2217,7 @@ public interface Container<K, R> extends Closeable {
 		/**
 		 * <div lang="ja">
 		 * このオブジェクトが保持するロウキーの型ならびにロウオブジェクトの型を
-		 * 型パラメータとし持つ、{@link Container}またはそのサブインタフェースの
+		 * 型パラメータとして持つ、{@link Container}またはそのサブインタフェースの
 		 * 型にキャストします。
 		 *
 		 * @param container キャスト対象の{@link Container}インスタンス
@@ -2152,13 +2230,22 @@ public interface Container<K, R> extends Closeable {
 		 *
 		 * @since 4.3
 		 * </div><div lang="en">
-		 * TODO
+		 * Casts to the type of {@link Container} or its subinterface that has the type
+		 * of Row key and the type of Row object held by this object as type parameters.
+		 *
+		 * @param container the {@link Container} instance to be casted
+		 *
+		 * @return Casted object
+		 *
+		 * @throws GSException if the type of Row key and the type of Row object do not
+		 * match between the {@link Container} instance to be casted and the type
+		 * information held by this object
 		 *
 		 * @since 4.3
 		 * </div>
 		 */
 		public C castContainer(Container<?, ?> container) throws GSException {
-			if (container == null) { 
+			if (container == null) {
 				return null;
 			}
 

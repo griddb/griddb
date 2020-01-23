@@ -28,7 +28,11 @@ import java.lang.annotation.Target;
  * 設定・取得するためのフィールド・メソッドに対して使用します。
  * 複合ロウキーを構成する各ロウフィールドに対しては、使用できません。</p>
  * </div><div lang="en">
- * TODO Indicates the correspondence with a key of {@link Container}.
+ * Indicates the correspondence with a key of {@link Container}.
+ *
+ * <p>For a composite Row key, applicable to the field method for setting and
+ * getting the entire composite Row key as one object, not applicable to each
+ * row field that configures a composite Row key.</p>
  * </div>
  */
 @Retention(RetentionPolicy.RUNTIME)

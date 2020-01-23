@@ -40,7 +40,7 @@ import com.toshiba.mwcloud.gs.common.RowMapper;
  *
  * <p>ロック粒度はロウ単位です。</p>
  * </div><div lang="en">
- * TODO A general-purpose Container for managing a set of Rows.
+ * A general-purpose Container for managing a set of Rows.
  *
  * <p>The following types are available as a Row key.</p>
  * <ul>
@@ -48,6 +48,8 @@ import com.toshiba.mwcloud.gs.common.RowMapper;
  * <li>INTEGER type ({@link Integer})</li>
  * <li>LONG type ({@link Long})</li>
  * <li>TIMESTAMP type ({@link java.util.Date})</li>
+ * <li>Row key, or composite Row key ({@link Row.Key}), that has one or more
+ * columns of the above type.</li>
  * </ul>
  * <p>It is not mandatory to set a Row key.</p>
  *
@@ -169,7 +171,10 @@ public interface Collection<K, R> extends Container<K, R> {
 	 *
 	 * @since 4.3
 	 * </div><div lang="en">
-	 * TODO
+	 * Auxiliary class for configuring {@link Container.BindType} which is associated
+	 * with {@link Collection} and its type parameters.
+	 *
+	 * @see Container.BindType
 	 *
 	 * @since 4.3
 	 * </div>
@@ -194,7 +199,16 @@ public interface Collection<K, R> extends Container<K, R> {
 		 *
 		 * @since 4.3
 		 * </div><div lang="en">
-		 * TODO
+		 * Returns the Row key type obtained from the specified Row object type,
+		 * the specified Row object type, and {@link Container.BindType} associated
+		 * with the {@link Collection}.
+		 *
+		 * @param <K> Type of Row key
+		 * @param <R> Type of Row object
+		 * @param rowClass Class object corresponding to the type of the Row object
+		 *
+		 * @throws GSException if the Row key type cannot be obtained from the
+		 * specified Row object type
 		 *
 		 * @since 4.3
 		 * </div>
@@ -222,7 +236,16 @@ public interface Collection<K, R> extends Container<K, R> {
 		 *
 		 * @since 4.3
 		 * </div><div lang="en">
-		 * TODO
+		 * Returns the specified Row key type, the specified Row object type,
+		 * and {@link Container.BindType} associated with the {@link Collection}.
+		 *
+		 * @param <K> Type of Row key
+		 * @param <R> Type of Row object
+		 * @param keyClass Class object corresponding to the type of Row key
+		 * @param rowClass Class object corresponding to the type of the Row object
+		 *
+		 * @throws GSException if an inconsistency is detected between the type of
+		 * Row key and the type of Row object
 		 *
 		 * @since 4.3
 		 * </div>
@@ -248,7 +271,14 @@ public interface Collection<K, R> extends Container<K, R> {
 		 *
 		 * @since 4.3
 		 * </div><div lang="en">
-		 * TODO
+		 * Returns the {@link Container.BindType}, which has no Row key, associated with
+		 * the specified Row object type and the {@link Collection}.
+		 *
+		 * @param <R> Type of Row object
+		 * @param rowClass Class object corresponding to the type of the Row object
+		 *
+		 * @throws GSException if an inconsistency is detected between the type of
+		 * Row key and the type of Row object
 		 *
 		 * @since 4.3
 		 * </div>

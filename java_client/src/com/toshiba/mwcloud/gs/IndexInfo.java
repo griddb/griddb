@@ -135,7 +135,15 @@ public class IndexInfo {
 	 *
 	 * @since 4.3
 	 * </div><div lang="en">
-	 * TODO
+	 * Creates index information by specifying the list of column names and index
+	 * type as needed.
+	 *
+	 * @param columnNames List of column names. Length {@code 0} is allowed, but
+	 * {@code null} cannot be specified
+	 * @param type Index type. If not specified {@code null}
+	 *
+	 * @throws NullPointerException If {@code null} is specified in the argument
+	 * {@code columnNames}
 	 *
 	 * @since 4.3
 	 * </div>
@@ -155,7 +163,7 @@ public class IndexInfo {
 	 * @param name 索引名。指定しない場合は{@code null}
 	 * @param type 索引種別。指定しない場合は{@code null}
 	 * </div><div lang="en">
-	 * Create index information by specifying the index name and index type as necessary.
+	 * Creates index information by specifying the index name and index type as necessary.
 	 *
 	 * @param name Index name. If not specified {@code null}
 	 * @param type Index type. If not specified {@code null}
@@ -175,7 +183,7 @@ public class IndexInfo {
 	 *
 	 * @return 索引種別。未設定の場合は{@code null}
 	 * </div><div lang="en">
-	 * Acquire index type.
+	 * Returns the index type.
 	 *
 	 * @return Index type. If not set {@code null}
 	 * </div>
@@ -190,9 +198,9 @@ public class IndexInfo {
 	 *
 	 * @param type 索引種別。{@code null}の場合は未設定状態になる
 	 * </div><div lang="en">
-	 * Set index type.
+	 * Sets the index type.
 	 *
-	 * @param type Index type. When {@code null} is used, it becomes a not set state.
+	 * @param type Index type. Not set when {@code null} is specified.
 	 * </div>
 	 */
 	public void setType(IndexType type) {
@@ -205,7 +213,7 @@ public class IndexInfo {
 	 *
 	 * @return 索引名。未設定の場合は{@code null}
 	 * </div><div lang="en">
-	 * get index name
+	 * Returns the index name.
 	 *
 	 * @return index name. If not set {@code null}
 	 * </div>
@@ -220,9 +228,9 @@ public class IndexInfo {
 	 *
 	 * @param name 索引名。{@code null}の場合は未設定状態になる
 	 * </div><div lang="en">
-	 * set index nam.
+	 * Sets the index name.
 	 *
-	 * @param name index name. When {@code null} is used, it becomes a not set state.
+	 * @param name index name. Not set when {@code null} is specified.
 	 * </div>
 	 */
 	public void setName(String name) {
@@ -238,9 +246,12 @@ public class IndexInfo {
 	 * @throws IllegalStateException 複合索引に関するカラム番号の列または
 	 * カラム名の列が設定されていた場合
 	 * </div><div lang="en">
-	 * Get the column number of the column corresponding to the index.
+	 * Returns the column number of the single column corresponding to the index.
 	 *
 	 * @return column number. If not set {@code null}
+	 *
+	 * @throws IllegalStateException If a list of column numbers or a list of
+	 * column names is set for the composite index
 	 * </div>
 	 */
 	public Integer getColumn() {
@@ -260,11 +271,12 @@ public class IndexInfo {
 	 * <div lang="ja">
 	 * 索引に対応する、単一のカラムからなるカラム番号列を設定します。
 	 *
-	 * @param column 索引名。{@code null}の場合は未設定状態になる
+	 * @param column カラム番号。{@code null}の場合は未設定状態になる
 	 * </div><div lang="en">
-	 * TODO Set the column number of the column corresponding to the index.
+	 * Sets the list of the column numbers consisting of a single column corresponding to
+	 * the index.
 	 *
-	 * @param column index name. When {@code null} is used, it becomes a not set state.
+	 * @param column Column number. Not set when {@code null} is specified.
 	 * </div>
 	 */
 	public void setColumn(Integer column) {
@@ -285,9 +297,12 @@ public class IndexInfo {
 	 * @throws IllegalStateException 複合索引に関するカラム番号の列または
 	 * カラム名の列が設定されていた場合
 	 * </div><div lang="en">
-	 * Get the column name of the column corresponding to the index.
+	 * Returns the column name of the single column corresponding to the index.
 	 *
 	 * @return column name. If not set {@code null}
+	 *
+	 * @throws IllegalStateException If a list of column numbers or a list of column
+	 * names is set for the composite index
 	 * </div>
 	 */
 	public String getColumnName() {
@@ -309,9 +324,10 @@ public class IndexInfo {
 	 *
 	 * @param columnName カラム名。{@code null}の場合は未設定状態になる
 	 * </div><div lang="en">
-	 * TODO Set the column name of the column corresponding to the index.
+	 * Sets the list of the column names consisting of a single column
+	 * corresponding to the index.
 	 *
-	 * @param columnName column name. When {@code null} is used, it becomes a not set state.
+	 * @param columnName column name. Not set when {@code null} is specified.
 	 * </div>
 	 */
 	public void setColumnName(String columnName) {
@@ -335,7 +351,14 @@ public class IndexInfo {
 	 *
 	 * @since 4.3
 	 * </div><div lang="en">
-	 * TODO
+	 * Sets the list of the column numbers of any number of columns corresponding
+	 * to the index.
+	 *
+	 * @param columns List of column numbers. Length {@code 0} is allowed, but
+	 * {@code null} cannot be specified
+	 *
+	 * @throws NullPointerException If {@code null} is specified in the argument
+	 * {@code columns}
 	 *
 	 * @since 4.3
 	 * </div>
@@ -360,7 +383,10 @@ public class IndexInfo {
 	 *
 	 * @since 4.3
 	 * </div><div lang="en">
-	 * TODO
+	 * Returns the list of the column numbers of any number of columns corresponding
+	 * to the index.
+	 *
+	 * @return List of column numbers. If not set, a list of length {@code 0}
 	 *
 	 * @since 4.3
 	 * </div>
@@ -381,7 +407,14 @@ public class IndexInfo {
 	 *
 	 * @since 4.3
 	 * </div><div lang="en">
-	 * TODO
+	 * Sets the list of the column names of any number of columns
+	 * corresponding to the index.
+	 *
+	 * @param columnNames List of column names. Length {@code 0} is allowed, but
+	 * {@code null} cannot be specified
+	 *
+	 * @throws NullPointerException If {@code null} is specified in the argument
+	 * {@code columnNames}
 	 *
 	 * @since 4.3
 	 * </div>
@@ -406,7 +439,10 @@ public class IndexInfo {
 	 *
 	 * @since 4.3
 	 * </div><div lang="en">
-	 * TODO
+	 * Returns the list of the column names of any number of columns corresponding
+	 * to the index.
+	 *
+	 * @return List of column names. If not set, a list of length 0
 	 *
 	 * @since 4.3
 	 * </div>
