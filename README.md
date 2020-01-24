@@ -18,7 +18,7 @@
   This repository includes server and Java client.
 
   (Additional infomation)  
-  There is [Java client Package (Jar) for v4.2.1 on Maven Central Repository](https://search.maven.org/search?q=g:com.github.griddb) .
+  There is [Java client Package (Jar) for v4.3.0 on Maven Central Repository](https://search.maven.org/search?q=g:com.github.griddb) .
 
 ## Quick start (Using source code)
   We have confirmed the operation on CentOS 7.6 (gcc 4.8.5) and Ubuntu 18.04 (gcc 4.8.5).

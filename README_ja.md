@@ -13,7 +13,7 @@
   本リポジトリにはサーバとJavaクライアントがあります。
 
   (追加情報)  
-  [Maven Central Repository上にv4.2.1のJavaクライアント・パッケージ(Jar)](https://search.maven.org/search?q=g:com.github.griddb)があります。
+  [Maven Central Repository上にv4.3.0のJavaクライアント・パッケージ(Jar)](https://search.maven.org/search?q=g:com.github.griddb)があります。
 
 ## クイックスタート (ソースコードの利用)
 
