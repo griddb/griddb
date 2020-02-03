@@ -94,11 +94,12 @@
 
 ## ドキュメント
   以下のドキュメントがあります。
-  * [クラスタ設計書](https://griddb.github.io/griddb_nosql/manual/GridDBTechnicalDesignDocument_ja.pdf)
+  * [機能リファレンス](https://griddb.github.io/griddb_nosql/manual/ja/GridDB_FeaturesReference.html)
   * [スタートアップガイド](https://griddb.github.io/griddb_nosql/manual/GridDB_QuickStartGuide_ja.html)
   * [APIリファレンス](https://griddb.github.io/griddb_nosql/manual/GridDB_API_Reference_ja.html)
   * [RPMインストールガイド](https://griddb.github.io/griddb_nosql/manual/GridDB_RPM_InstallGuide.html)
   * [DEBインストールガイド](https://griddb.github.io/griddb_nosql/manual/GridDB_DEB_InstallGuide.html)
+  * [クラスタ設計書](https://griddb.github.io/griddb_nosql/manual/GridDBTechnicalDesignDocument_ja.pdf)
   * [V3.0 Release Notes](docs/GridDB-3.0.0-CE-RELEASE_NOTES_ja.md)
   * [V4.0 Release Notes](docs/GridDB-4.0-CE-RELEASE_NOTES_ja.md)
   * [V4.1 Release Notes](docs/GridDB-4.1-CE-RELEASE_NOTES_ja.md)

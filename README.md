@@ -102,11 +102,12 @@ Note:
 
 ## Document
   Refer to the file below for more detailed information.  
-  - [GridDB Technical Design Document](https://griddb.github.io/griddb_nosql/manual/GridDBTechnicalDesignDocument.pdf)
+  - [Features Reference](https://griddb.github.io/griddb_nosql/manual/en/GridDB_FeaturesReference.html)
   - [Quick Start Guide](https://griddb.github.io/griddb_nosql/manual/GridDB_QuickStartGuide.html)
   - [API Reference](https://griddb.github.io/griddb_nosql/manual/GridDB_API_Reference.html)
   - [RPM Installation Guide](https://griddb.github.io/griddb_nosql/manual/GridDB_RPM_InstallGuide.html)
   - [DEB Installation Guide](https://griddb.github.io/griddb_nosql/manual/GridDB_DEB_InstallGuide.html)
+  - [GridDB Technical Design Document](https://griddb.github.io/griddb_nosql/manual/GridDBTechnicalDesignDocument.pdf)
   - [V3.0 Release Notes](docs/GridDB-3.0.0-CE-RELEASE_NOTES.md)
   - [V4.0 Release Notes](docs/GridDB-4.0-CE-RELEASE_NOTES.md)
   - [V4.1 Release Notes](docs/GridDB-4.1-CE-RELEASE_NOTES.md)
