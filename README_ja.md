@@ -17,7 +17,7 @@
 
 ## クイックスタート (ソースコードの利用)
 
-  CentOS 7.6(gcc 4.8.5)、Ubuntu 18.04(gcc 4.8.5)の環境での動作を確認しています。
+  CentOS 7.6(gcc 4.8.5)、Ubuntu 18.04(gcc 4.8.5)、openSUSE Leap 15.1(gcc 4.8.5)の環境での動作を確認しています。
 
 ### サーバ、クライアント(java)のビルド
 
@@ -57,10 +57,11 @@
     $ bin/gs_stopnode -u admin/your_password
 
 ## クイックスタート (RPM/DEBファイルの利用)
-  CentOS 7.6、Ubuntu 18.04の環境での動作を確認しています。
+  CentOS 7.6、Ubuntu 18.04、openSUSE Leap 15.1の環境での動作を確認しています。
 
   ※ このパッケージをインストールすると、OS内にgsadmユーザが作成されます。運用コマンドはgsadmユーザで操作してください。  
   ※ gsadmユーザでログインすると環境変数 GS_HOMEとGS_LOGが自動的に設定されます。
+  ※ Ubuntu用、openSUSE用のパッケージはトリガ機能を含んでいません。
 
 ### インストール
     (CentOS)
@@ -68,6 +69,9 @@
 
     (Ubuntu)
     $ sudo dpkg -i griddb_nosql-X.X.X_amd64.deb
+
+    (openSUSE)
+    $ sudo zypper install griddb_nosql-X.X.X-opensuse.x86_64.rpm
 
     ※ X.X.Xはバージョンを意味します。
 

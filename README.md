@@ -21,7 +21,7 @@
   There is [Java client Package (Jar) for v4.3.0 on Maven Central Repository](https://search.maven.org/search?q=g:com.github.griddb) .
 
 ## Quick start (Using source code)
-  We have confirmed the operation on CentOS 7.6 (gcc 4.8.5) and Ubuntu 18.04 (gcc 4.8.5).
+  We have confirmed the operation on CentOS 7.6 (gcc 4.8.5), Ubuntu 18.04 (gcc 4.8.5) and openSUSE Leap 15.1 (gcc 4.8.5).
 
 ### Build a server and client(Java)
     $ ./bootstrap.sh
@@ -61,12 +61,13 @@
 
 ## Quick start (Using RPM or DEB)
 
-  We have confirmed the operation on CentOS 7.6 and Ubuntu 18.04.
+  We have confirmed the operation on CentOS 7.6, Ubuntu 18.04 and openSUSE Leap 15.1.
 
 Note:
 -  When you install this package, a gsadm OS user are created in the OS.  
   Execute the operating command as the gsadm user.  
 - You don't need to set environment vatiable GS_HOME and GS_LOG.
+- The packages for Ubuntu and openSUSE don't include trigger function.
 
 ### Install
 
@@ -75,6 +76,9 @@ Note:
 
     (Ubuntu)
     $ sudo dpkg -i griddb_nosql-X.X.X_amd64.deb
+
+    (openSUSE)
+    $ sudo zypper install griddb_nosql-X.X.X-opensuse.x86_64.rpm
 
     Note: X.X.X is the GridDB version.
 
