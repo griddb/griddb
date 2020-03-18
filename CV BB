@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <title>Bartosz Bohdziewicz - portfolio</title>
+
+    <style>
+        #welcome
+        {
+            color:#DCDCDC;
+            background-color: #546E7A;
+            padding-top: 40px;
+            font-size: 80px;
+        }
+        #about_myself
+       {
+            color:#DCDCDC;
+            background-color: #546E7A;
+            padding-top: 10px;
+            padding-bottom: 30px;
+            font-size: 20px;
+       }
+        #about_me
+        {
+            color: #CFD8DC;
+            padding: 20px;
+            font-size: 30px;
+            text-align:center;
+        }
+        #school
+        {
+            color: #CFD8DC;
+            width: 575px;
+            float: left;
+            align: left;
+            font-size:25px;
+        }
+        #my_school
+        {
+            padding: 30px;
+            background-color: #C7C7C7;
+            color: #F1F1F1;
+            min-height: 178px;
+        }
+        #about_me2
+        {
+            color: #F1F1F1;
+            width: 700px;
+            float: left;
+            align: center;
+            font-size:25px;
+            background-color: #C7C7C7;
+        }
+        #my_info
+        {
+            padding-top: 10px;
+            padding-right: 30x;
+            width: 700px;
+            background-color: #37474F;
+            float: left;
+            float: top;
+        }
+        #my_info_welcome
+        {
+            width: 700px;
+            background-color: #37474F;
+            float: left;
+            float: top;
+        }
+        #contact
+        {
+            color: #CFD8DC;
+            width: 575px;
+            font-size:25px;
+            float: left;
+            float: top;
+        }
+        #my_contact
+        {
+            width: 500px;
+            padding: 30px;
+            background-color: #C7C7C7;
+            color: #F1F1F1;
+            min-height: 178px;
+        }
+    </style>
+
+</head>
+
+<body bgcolor="#37474F">
+    <div id="container" width="1000">
+        <div id="welcome" align="center">
+            <strong>Welcome at my website!</strong>
+            <br/>
+        </div>
+        <div id="about_myself" align="center">
+            About myself!
+        </div>
+        <div id="about_me">
+            <h2>About me</h2>
+            <em>
+            <div id="school">
+                <strong>About my school</strong>
+                <div id="my_school">
+                    I'm the student of the high school in Warsaw.
+                    <br/>
+                    My school is one of the best IT high schools,
+                    <br/>
+                    in the city.
+                    <br/>
+                    My school is named after Marcin Kasprzak.
+                </div>
+            </div>
+            <div id="about_me2">
+                <strong>About me</strong>
+                <div id="my_info" align="center">
+                    <div id="my_info-welcome">
+                    <strong style="padding-bottom:10px;">Welcome!</strong>
+                    </div>
+                    My full name is Bartek Bohdziewicz.
+                    <br/>
+                    I was born in December 2004.
+                    <br/>
+                    My main hobby is IT (I like programming the most)
+                    <br/>
+                    I started learning programming when I was 13,
+                    <br/>
+                    first programming language I was learning was C++.
+                    <br/>
+                    <strong>
+                    If you want to know more about me,
+                    <br/>
+                    I invite you to study next parts of the site!
+                    </strong>
+                </div>
+            </div>
+            <div id="contact">
+                <strong>Contact with me!</strong>
+            </em>
+                <br/>
+                <div id="my_contact" align="center" valign="center ">
+                    bartekbohdziewicz@gmail.com
+                    <br/><br/>
+                    Bartek Bohdziewicz
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
