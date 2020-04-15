@@ -101,7 +101,7 @@ Note:
     [gsadm]$ gs_stopcluster -u admin/your_password
     [gsadm]$ gs_stopnode -u admin/your_password
 
-If necessary, please refer to [Installation Troubleshooting](doc/TroubleShootingTips.md).
+If necessary, please refer to [Installation Troubleshooting](docs/TroubleShootingTips.md).
 
 ## Document
   Refer to the file below for more detailed information.  
