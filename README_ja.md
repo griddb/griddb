@@ -40,7 +40,6 @@
       #input your_password
     $ vi conf/gs_cluster.json
       #    "clusterName":"your_clustername" #<-- input your_clustername
-    $ export no_proxy=127.0.0.1
     $ bin/gs_startnode
     $ bin/gs_joincluster -c your_clustername -u admin/your_password
 
@@ -60,7 +59,7 @@
   CentOS 7.6、Ubuntu 18.04、openSUSE Leap 15.1の環境での動作を確認しています。
 
   ※ このパッケージをインストールすると、OS内にgsadmユーザが作成されます。運用コマンドはgsadmユーザで操作してください。  
-  ※ gsadmユーザでログインすると環境変数 GS_HOMEとGS_LOGが自動的に設定されます。
+  ※ gsadmユーザでログインすると環境変数 GS_HOMEとGS_LOGが自動的に設定されます。  
   ※ Ubuntu用、openSUSE用のパッケージはトリガ機能を含んでいません。
 
 ### インストール
@@ -80,7 +79,6 @@
       #input your_password
     [gsadm]$ vi conf/gs_cluster.json
       #    "clusterName":"your_clustername" #<-- input your_clustername
-    [gsadm]$ export no_proxy=127.0.0.1
     [gsadm]$ gs_startnode
     [gsadm]$ gs_joincluster -c your_clustername -u admin/your_password
 
@@ -95,6 +93,8 @@
 ### サーバの停止
     [gsadm]$ gs_stopcluster -u admin/your_password
     [gsadm]$ gs_stopnode -u admin/your_password
+
+[インストール時のトラブルシューティング](docs/TroubleShootingTips_ja.md)もご参照ください。
 
 ## ドキュメント
   以下のドキュメントがあります。

@@ -43,7 +43,6 @@
       #input your_password
     $ vi conf/gs_cluster.json
       #    "clusterName":"your_clustername" #<-- input your_clustername
-    $ export no_proxy=127.0.0.1
     $ bin/gs_startnode
     $ bin/gs_joincluster -c your_clustername -u admin/your_password
 
@@ -87,7 +86,6 @@ Note:
       #input your_password
     [gsadm]$ vi conf/gs_cluster.json
       #    "clusterName":"your_clustername" #<-- input your_clustername
-    [gsadm]$ export no_proxy=127.0.0.1
     [gsadm]$ gs_startnode
     [gsadm]$ gs_joincluster -c your_clustername -u admin/your_password
 
@@ -103,6 +101,7 @@ Note:
     [gsadm]$ gs_stopcluster -u admin/your_password
     [gsadm]$ gs_stopnode -u admin/your_password
 
+If necessary, please refer to [Installation Troubleshooting](doc/TroubleShootingTips.md).
 
 ## Document
   Refer to the file below for more detailed information.  
