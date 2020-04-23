@@ -1,26 +1,26 @@
-# �C���X�g�[�����̃g���u���V���[�e�B���O
+# インストール時のトラブルシューティング
 
-## �N���ł��Ȃ��ꍇ
+## 起動できない場合
 
-1. �Ǘ����[�U�i��Fadmin�j�̃p�X���[�h���ݒ肳��Ă��邩�m�F���Ă��������B  
-2. gs_cluster.json�t�@�C���ɃN���X�^�����ݒ肳��Ă��邩�m�F���Ă��������B
-3. �u$ hostname -i�v�ɂăz�X�g������127.0.0.1�ȊO��IP�A�h���X���擾�ł��邩�m�F���Ă��������B  
-    - �擾�ł��Ȃ��ꍇ�́A/etc/hosts�t�@�C���̐ݒ���m�F���Ă��������B  
-4. RPM/DEB�p�b�P�[�W�ŃC���X�g�[����A�^�p�R�}���h�̎��s�Ŋ��ϐ������ݒ�̃G���[�����������ꍇ
-    - OS���[�U gsadm�Ń��O�C�����Ă��Ȃ��\��������܂��Bgsadm�̃p�X���[�h��ݒ肵�����gsadm�Ń��O�C�����Ă��������B���ϐ��������ݒ肳��܂��B
-    - ����su�R�}���h�Ń��O�C������ꍇ�́A�u$ su - gsadm�v �̂悤�Ɂu-�v�������́u-l�v�I�v�V������t���Ă��������B
+1. 管理ユーザ（例：admin）のパスワードが設定されているか確認してください。  
+2. gs_cluster.jsonファイルにクラスタ名が設定されているか確認してください。
+3. 「$ hostname -i」にてホスト名から127.0.0.1以外のIPアドレスが取得できるか確認してください。  
+    - 取得できない場合は、/etc/hostsファイルの設定を確認してください。  
+4. RPM/DEBパッケージでインストール後、運用コマンドの実行で環境変数が未設定のエラーが発生した場合
+    - OSユーザ gsadmでログインしていない可能性があります。gsadmのパスワードを設定した上でgsadmでログインしてください。環境変数が自動設定されます。
+    - もしsuコマンドでログインする場合は、「$ su - gsadm」 のように「-」もしくは「-l」オプションを付けてください。
 
-## �^�p�R�}���h�̑��삪�ł��Ȃ��ꍇ
+## 運用コマンドの操作ができない場合
 
-5. �v���L�V�ϐ�(http_proxy)���ݒ肳��Ă���ꍇ�ɂ́A�v���L�V���ɃA�N�Z�X���Ȃ��悤�ɂ���K�v������܂��B
-    - �u$ export no_proxy=127.0.0.1,10.0.2.15�v�̂悤�ɁA127.0.0.1�Ɓu$ hostname -i�v�ŏo�͂����IP�A�h���X��ݒ肵�Ă��������B  
+5. プロキシ変数(http_proxy)が設定されている場合には、プロキシ側にアクセスしないようにする必要があります。
+    - 「$ export no_proxy=127.0.0.1,10.0.2.15」のように、127.0.0.1と「$ hostname -i」で出力されるIPアドレスを設定してください。  
 
-## (Java�Ȃ�)�N���C�A���g���삪�ł��Ȃ��ꍇ
+## (Javaなど)クライアント操作ができない場合
 
-6. �t�@�C�A�E�H�[����������������܂���B�t�@�C�A�E�H�[���ɒʐM�p�|�[�gNo�������Ă݂Ă��������B
-    - CentOS�̏ꍇ�̗�F $ firewall-cmd --zone=public --add-port=31999/udp
-    - Ubuntu�̏ꍇ�̗�F $ ufw allow 31999/udp
+6. ファイアウォールが原因かもしれません。ファイアウォールに通信用ポートNoを許可してみてください。
+    - CentOSの場合の例： $ firewall-cmd --zone=public --add-port=31999/udp
+    - Ubuntuの場合の例： $ ufw allow 31999/udp
 
-## (AWS�AAzure�̃N���E�h���̂悤��)�}���`�L���X�g�����p�ł��Ȃ����̏ꍇ
+## (AWS、Azureのクラウド環境のように)マルチキャストが利用できない環境の場合
 
-7. �f�t�H���g�̃}���`�L���X�g�����ł͂Ȃ��A�Œ胊�X�g�����������̓v���o�C�_�����̃N���X�^�\�����g���Ă��������B
+7. デフォルトのマルチキャスト方式ではなく、固定リスト方式もしくはプロバイダ方式のクラスタ構成を使ってください。
