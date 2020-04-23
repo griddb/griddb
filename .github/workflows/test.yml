@@ -1,0 +1,53 @@
+name: Build GridDB server and execute java sample
+
+on: [push]
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v1
+    - name: Install dependences
+      run: |
+        sudo apt-get install gcc-4.8
+        sudo apt-get install g++-4.8
+        
+    - name: Build server
+      run: |
+        export CC=gcc-4.8
+        export CC_FOR_BUILD=gcc-4.8
+        export CXX=g++-4.8
+        export CXX_FOR_BUILD=g++-4.8
+        ./bootstrap.sh
+        ./configure
+        make 
+        
+    - name: Start server
+      run: |
+        export GS_HOME=$PWD
+        export GS_LOG=$PWD/log
+        export PATH=$PATH:$GS_HOME/bin
+        gs_passwd admin -p admin
+        sed -i 's/"clusterName":""/"clusterName":"griddbubuntu"/g' conf/gs_cluster.json
+        gs_startnode -u admin/admin -w
+        gs_joincluster -c griddbubuntu -u admin/admin
+        
+    - name: Test java client
+      run: |
+        export GS_HOME=$PWD
+        export GS_LOG=$PWD/log
+        export CLASSPATH=${CLASSPATH}:$GS_HOME/bin/gridstore.jar
+        mkdir gsSample
+        cp $GS_HOME/docs/sample/program/Sample1.java gsSample/.
+        javac gsSample/Sample1.java
+        java gsSample/Sample1 239.0.0.1 31999 griddbubuntu admin admin
+        
+    - name: Stop server
+      run: |
+        export GS_HOME=$PWD
+        export GS_LOG=$PWD/log
+        export PATH=$PATH:$GS_HOME/bin
+        gs_stopcluster -u admin/admin
+        gs_stopnode -u admin/admin
