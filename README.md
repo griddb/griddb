@@ -139,6 +139,8 @@ If necessary, please refer to [Installation Troubleshooting](docs/TroubleShootin
   * [GridDB Plugin for Redash](https://github.com/griddb/griddb-redash)
   * [GridDB Plugin for Fluentd](https://github.com/griddb/fluent-plugin-griddb)
 
+## [Packages](docs/Packages.md)
+
 ## Community
   * Issues  
     Use the GitHub issue function if you have any requests, questions, or bug reports. 
