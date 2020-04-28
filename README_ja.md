@@ -132,6 +132,8 @@
   * [GridDB Plugin for Redash](https://github.com/griddb/griddb-redash)
   * [GridDB Plugin for Fluentd](https://github.com/griddb/fluent-plugin-griddb)
 
+## [パッケージ](docs/Packages.md)
+
 ## コミュニティ
   * Issues  
     質問、不具合報告はissue機能をご利用ください。
