@@ -76,7 +76,7 @@ public class ColumnInfo {
 	 * カラム名、型を指定してカラム情報を作成します。
 	 *
 	 * @param name カラム名。{@code null}を指定すると未設定状態となる
-	 * @param type カラムの型。{@code null}も指定すると未設定状態となる
+	 * @param type カラムの型。{@code null}を指定すると未設定状態となる
 	 *
 	 * @since 1.5
 	 * </div><div lang="en">
