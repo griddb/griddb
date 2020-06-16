@@ -1656,7 +1656,7 @@ inline void SQLValues::ValueWriter::operator()(
 template<typename T>
 void SQLValues::ValueWriter::TypeAt<T>::operator()(
 		const ReadableTuple &src, WritableTuple &dest) const {
-			if (ValueUtils::readNull(src, base_.srcColumn_)) {
+	if (ValueUtils::readNull(src, base_.srcColumn_)) {
 		return ValueUtils::writeValue<TupleTypes::TYPE_ANY>(
 				dest, base_.destColumn_, TupleValue());
 	}
@@ -1680,6 +1680,7 @@ int32_t SQLValues::TupleComparator::compareElement(
 		bool forKeyOnlyArray, const T1 &t1, const T2 &t2) {
 
 	const TupleColumnType type = TypeUtils::toNonNullable(column.getType());
+	int32_t ret;
 	if (type != T::COLUMN_TYPE || util::IsSame<T, Types::Any>::VALUE) {
 		bool null1;
 		bool null2;
@@ -1692,26 +1693,35 @@ int32_t SQLValues::TupleComparator::compareElement(
 				forKeyOnlyArray, null2);
 
 		const ValueComparator comp(column.getType(), sensitive);
-		return comp(v1, v2);
+		ret = comp(v1, v2);
 	}
+	else {
+		bool null1;
+		bool null2;
 
-	bool null1;
-	bool null2;
+		typedef typename T::ValueType ValueType;
+		const ValueType &v1 = getElement<T>(
+				column, ordinal, t1, static_cast<util::TrueType*>(NULL),
+				forKeyOnlyArray, null1);
+		const ValueType &v2 = getElement<T>(
+				column, ordinal, t2, static_cast<util::FalseType*>(NULL),
+				forKeyOnlyArray, null2);
 
-	typedef typename T::ValueType ValueType;
-	const ValueType &v1 = getElement<T>(
-			column, ordinal, t1, static_cast<util::TrueType*>(NULL),
-			forKeyOnlyArray, null1);
-	const ValueType &v2 = getElement<T>(
-			column, ordinal, t2, static_cast<util::FalseType*>(NULL),
-			forKeyOnlyArray, null2);
-
-	if (null1 || null2) {
-		return ValueUtils::compareNull(null1, null2);
+		if (null1 || null2) {
+			ret = ValueUtils::compareNull(null1, null2);
+		}
+		else {
+			ValueBasicComparator comp(sensitive);
+			ret = ValueBasicComparator::TypeAt<T>(comp)(v1, v2);
+		}
 	}
-
-	ValueBasicComparator comp(sensitive);
-	return ValueBasicComparator::TypeAt<T>(comp)(v1, v2);
+	if (ret != 0) {
+		if (!column.isAscending()) {
+			return (ret < 0 ? 1 : -1);
+		}
+		return ret;
+	}
+	return 0;
 }
 
 template<typename T>
