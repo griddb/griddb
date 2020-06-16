@@ -76,14 +76,61 @@
 #define UTIL_POINTER_SIZE 4
 #endif
 
-#if defined(__GXX_EXPERIMENTAL_CXX0X__) || __cplusplus >= 201103L
+#if __cplusplus >= 201103L
+#define UTIL_CXX11_SUPPORTED_EXACT 1
+#else
+#define UTIL_CXX11_SUPPORTED_EXACT 0
+#endif
+
+#if defined(__GXX_EXPERIMENTAL_CXX0X__) || UTIL_CXX11_SUPPORTED_EXACT
 #define UTIL_CXX11_SUPPORTED 1
 #else
 #define UTIL_CXX11_SUPPORTED 0
 #endif
 
+#if __cplusplus >= 201402L
+#define UTIL_CXX14_SUPPORTED 1
+#else
+#define UTIL_CXX14_SUPPORTED 0
+#endif
+
 #if defined(_MSC_VER) && defined(_M_X64) && !defined(_WIN64)
 #error 0
+#endif
+
+#if UTIL_CXX14_SUPPORTED && defined(__has_cpp_attribute)
+#define UTIL_HAS_FEATURE_MACRO 1
+#else
+#define UTIL_HAS_FEATURE_MACRO 0
+#endif
+
+#if UTIL_CXX11_SUPPORTED_EXACT
+#define UTIL_HAS_ATTRIBUTE_NORETURN 1
+#elif defined(__GNUC__) && \
+		(__GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 8))
+#define UTIL_HAS_ATTRIBUTE_NORETURN 1
+#else
+#define UTIL_HAS_ATTRIBUTE_NORETURN 0
+#endif
+
+#if UTIL_HAS_FEATURE_MACRO
+#if __has_cpp_attribute(maybe_unused) >= 201603L
+#define UTIL_HAS_ATTRIBUTE_MAYBE_UNUSED 1
+#else
+#define UTIL_HAS_ATTRIBUTE_MAYBE_UNUSED 0
+#endif
+#else
+#define UTIL_HAS_ATTRIBUTE_MAYBE_UNUSED 0
+#endif
+
+#if UTIL_HAS_FEATURE_MACRO
+#if __has_cpp_attribute(nodiscard) >= 201603L
+#define UTIL_HAS_ATTRIBUTE_NODISCARD 1
+#else
+#define UTIL_HAS_ATTRIBUTE_NODISCARD 0
+#endif
+#else
+#define UTIL_HAS_ATTRIBUTE_NODISCARD 0
 #endif
 
 #ifdef _WIN32
@@ -353,6 +400,18 @@ typedef std::basic_string< char8_t, std::char_traits<char8_t> > NormalString;
 
 } 
 
+
+#if UTIL_CXX11_SUPPORTED
+#define UTIL_NOEXCEPT noexcept
+#else
+#define UTIL_NOEXCEPT throw()
+#endif
+
+#if UTIL_CXX11_SUPPORTED
+#define UTIL_NULLPTR nullptr
+#else
+#define UTIL_NULLPTR NULL
+#endif
 
 #ifdef _MSC_VER
 #define UTIL_FORCEINLINE __forceinline

@@ -44,10 +44,11 @@
     OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 #include "util/time.h"
+#include "util/code.h"
 #include "util/os.h"
 #include <iomanip>
 #include <limits>
-#include <assert.h>
+#include <cassert>
 
 namespace util {
 
@@ -70,18 +71,9 @@ namespace util {
 #endif
 
 
+
 struct CharBufferUtils {
 	static bool write(char8_t *&it, char8_t *end, const char8_t *str);
-};
-
-struct TinyLexicalIntConverter {
-	TinyLexicalIntConverter();
-
-	bool format(char8_t *&it, char8_t *end, uint32_t value) const;
-	bool parse(const char8_t *&it, const char8_t *end, uint32_t &value) const;
-
-	size_t minWidth_;
-	size_t maxWidth_;
 };
 
 bool CharBufferUtils::write(char8_t *&it, char8_t *end, const char8_t *str) {
@@ -92,122 +84,6 @@ bool CharBufferUtils::write(char8_t *&it, char8_t *end, const char8_t *str) {
 		*it = *strIt;
 		++it;
 	}
-	return true;
-}
-
-TinyLexicalIntConverter::TinyLexicalIntConverter() :
-		minWidth_(1),
-		maxWidth_(0) {
-}
-
-bool TinyLexicalIntConverter::format(
-		char8_t *&it, char8_t *end, uint32_t value) const {
-	char8_t buf[std::numeric_limits<uint32_t>::digits10 + 1];
-
-	char8_t *const bufEnd = buf + sizeof(buf);
-	char8_t *bufIt = bufEnd;
-
-	for (uint32_t rest = value; rest > 0; rest /= 10) {
-		if (bufIt == buf) {
-			assert(false);
-			return false;
-		}
-		--bufIt;
-
-		const uint32_t digit = rest % 10;
-		*bufIt = static_cast<char8_t>('0' + digit);
-	}
-
-	const size_t digitWidth = static_cast<size_t>(bufEnd - bufIt);
-	if (minWidth_ > digitWidth) {
-		size_t restWidth = minWidth_ - digitWidth;
-		do {
-			if (it == end) {
-				return false;
-			}
-			*it = '0';
-			++it;
-		}
-		while (--restWidth > 0);
-	}
-
-	for (; bufIt != bufEnd; ++bufIt) {
-		if (it == end) {
-			return false;
-		}
-		*it = *bufIt;
-		++it;
-	}
-
-	return true;
-}
-
-bool TinyLexicalIntConverter::parse(
-		const char8_t *&it, const char8_t *end, uint32_t &value) const {
-	value = 0;
-
-	if (it > end) {
-		assert(false);
-		return false;
-	}
-	const char8_t *const begin = it;
-
-	size_t limitSize = static_cast<size_t>(end - it);
-	if (maxWidth_ > 0 && maxWidth_ < limitSize) {
-		limitSize = maxWidth_;
-	}
-	const char8_t *const limitedEnd = it + limitSize;
-
-	size_t fillSize = static_cast<size_t>(limitedEnd - it);
-	if (minWidth_ < limitSize) {
-		fillSize = minWidth_;
-	}
-	const char8_t *const fillEnd = it + fillSize;
-
-	for (; it != fillEnd; ++it) {
-		if (*it != '0') {
-			break;
-		}
-	}
-	const bool filled = (it != begin);
-
-	const size_t maxDigit =
-			static_cast<size_t>(std::numeric_limits<uint32_t>::digits10 + 1);
-
-	size_t digitSize = static_cast<size_t>(limitedEnd - it);
-	if (maxDigit < limitSize) {
-		digitSize = maxDigit;
-	}
-	const char8_t *const digitEnd = it + digitSize;
-
-	uint64_t ret = 0;
-	if (it == digitEnd) {
-		if (!filled) {
-			return false;
-		}
-	}
-	else {
-		if (*it == '0') {
-			return false;
-		}
-		do {
-			if (*it < '0' || *it > '9') {
-				break;
-			}
-			ret = ret * 10 + static_cast<uint32_t>(*it - '0');
-		}
-		while (++it != digitEnd);
-
-		if (ret > std::numeric_limits<uint32_t>::max()) {
-			return false;
-		}
-	}
-
-	if (static_cast<size_t>(it - begin) < minWidth_) {
-		return false;
-	}
-
-	value = static_cast<uint32_t>(ret);
 	return true;
 }
 
@@ -343,10 +219,13 @@ bool TimeZone::parse(const char8_t *buf, size_t size, bool throwOnError) {
 				break;
 			}
 
-			if (it == end || *it != ':') {
+			if (it != end && *it == ':') {
+				++it;
+			}
+
+			if (it == end) {
 				break;
 			}
-			++it;
 
 			uint32_t minute;
 			if (!converter.parse(it, end, minute) || minute > 59) {
@@ -522,29 +401,38 @@ int64_t DateTime::getField(
 	}
 
 	if (type == FIELD_DAY_OF_WEEK) {
-		fieldData.year_ = 1970;
-		fieldData.month_ = 1;
-		fieldData.monthDay_ = 1;
-
-		DateTime modTime;
-		modTime.setFields(fieldData, option);
-
 		const int64_t timeDays =
-				(unixTimeMillis_ - modTime.unixTimeMillis_) /
-				(24 * 60 * 60 * 1000);
-		return (timeDays + EPOCH_DAY_OF_WEEK - 1) % 7;
+				getUnixTimeDays(fieldData, FIELD_YEAR, option);
+		return unixTimeDaysToWeek(timeDays);
 	}
 	else if (type == FIELD_DAY_OF_YEAR) {
-		fieldData.month_ = 1;
-		fieldData.monthDay_ = 1;
-
-		DateTime modTime;
-		modTime.setFields(fieldData, option);
-
 		const int64_t timeDays =
-				(unixTimeMillis_ - modTime.unixTimeMillis_) /
-				(24 * 60 * 60 * 1000);
+				getUnixTimeDays(fieldData, FIELD_MONTH, option);
 		return timeDays + 1;
+	}
+	else if (type == FIELD_WEEK_OF_YEAR_SUNDAY ||
+			type == FIELD_WEEK_OF_YEAR_MONDAY) {
+		const int64_t timeDays =
+				getUnixTimeDays(fieldData, FIELD_MONTH, option);
+		const int64_t yearDow = unixTimeDaysToWeek(
+				getUnixTimeDays(fieldData, FIELD_YEAR, option) - timeDays);
+
+		int64_t offset = yearDow;
+		if (type == FIELD_WEEK_OF_YEAR_SUNDAY) {
+			if (offset == 0) {
+				offset = 7;
+			}
+		}
+		else {
+			offset = (offset + (7 - 1));
+
+			if (offset > 7) {
+				offset %= 7;
+			}
+		}
+
+		const int64_t modDays = timeDays + offset;
+		return modDays / 7;
 	}
 	else {
 		UTIL_THROW_UTIL_ERROR(CODE_ILLEGAL_ARGUMENT,
@@ -1138,6 +1026,44 @@ DateTime DateTime::max(bool trimMilliseconds) {
 	Option option;
 	option.trimMilliseconds_ = trimMilliseconds;
 	return max(option);
+}
+
+int64_t DateTime::getUnixTimeDays(
+		const FieldData &fieldData, FieldType trimingFieldType,
+		const ZonedOption &option) const {
+	const int64_t dayToMillis = 24 * 60 * 60 * 1000;
+	const int32_t epochYear = 1970;
+
+	FieldData modFieldData = fieldData;
+
+	do {
+		modFieldData.monthDay_ = 1;
+
+		modFieldData.month_ = 1;
+		if (trimingFieldType == FIELD_MONTH) {
+			break;
+		}
+
+		modFieldData.year_ = epochYear;
+		assert(trimingFieldType == FIELD_YEAR);
+	}
+	while (false);
+
+	int64_t offsetMillis = 0;
+	if (modFieldData.year_ == epochYear) {
+		modFieldData.monthDay_++;
+		offsetMillis = dayToMillis;
+	}
+
+	DateTime modTime;
+	modTime.setFields(modFieldData, option);
+	const int64_t modMillis = modTime.unixTimeMillis_ - offsetMillis;
+
+	return (unixTimeMillis_ - modMillis) / dayToMillis;
+}
+
+int64_t DateTime::unixTimeDaysToWeek(int64_t timeDays) {
+	return (timeDays + EPOCH_DAY_OF_WEEK - 1) % 7;
 }
 
 void DateTime::checkFieldBounds(
