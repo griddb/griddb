@@ -31,6 +31,16 @@
 		"servicePort":10001,
 		"connectionLimit":5000
 	},
+	"sql":{
+		"servicePort":20001,
+		"storeSwapFilePath":"swap",
+		"storeSwapSyncSize":"1024MB",
+		"storeMemoryLimit":"1024MB",
+		"workMemoryLimit":"32MB",
+		"workCacheMemory":"128MB",
+		"connectionLimit":5000,
+		"concurrency":4
+	},
 	"trace":{
 		"default":"LEVEL_ERROR",
 		"dataStore":"LEVEL_ERROR",
@@ -51,6 +61,7 @@
 		"sessionTimeout":"LEVEL_WARNING",
 		"replicationTimeout":"LEVEL_WARNING",
 		"recoveryManager":"LEVEL_INFO",
+		"sqlService":"LEVEL_WARNING",
 		"eventEngine":"LEVEL_WARNING",
 		"clusterOperation":"LEVEL_INFO",
 		"ioMonitor":"LEVEL_WARNING"
