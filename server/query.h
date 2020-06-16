@@ -391,7 +391,6 @@ protected:
 	}
 
 	bool isIndexSortAvailable(BaseContainer &container, size_t orListNum) {
-		bool isAvailable = false;
 		if (isSortBeforeSelectClause() && orListNum <= 1 && 
 			pOrderByExpr_) {
 			uint32_t orderColumnId = (*pOrderByExpr_)[0].expr->getColumnId();

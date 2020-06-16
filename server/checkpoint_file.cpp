@@ -103,8 +103,7 @@ CheckpointFile::CheckpointFile(
 			dirList_[0] = dir;
 		}
 	} catch(std::exception &e) {
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_CF_INVALID_DIRECTORY,
-				"Invalid configure found.");
+		GS_RETHROW_SYSTEM_ERROR(e, "Invalid configure found.");
 	}
 }
 
@@ -451,7 +450,7 @@ void CheckpointFile::punchHoleBlock(uint32_t size, uint64_t offset) {
 #endif
 }
 
-void CheckpointFile::zerofillUnusedBlock(const uint64_t blockNum) {
+void CheckpointFile::zerofillUnusedBlock() {
 #ifdef _WIN32
 #else
 
@@ -464,6 +463,7 @@ void CheckpointFile::zerofillUnusedBlock(const uint64_t blockNum) {
 	uint64_t fileNth = 0;
 	uint64_t fileOffset = 0;
 
+	const uint64_t blockNum = usedChunkInfo_.length();
 	const uint64_t startClock = util::Stopwatch::currentClock();
 	try {
 		for (uint64_t i = 1; i < blockNum; ++i) {

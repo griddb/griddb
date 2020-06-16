@@ -40,6 +40,13 @@ public:
 
 	struct Path;
 
+	template<typename V> class BaseInStream;
+	template<typename V> class BaseOutStream;
+	template<typename V> class BaseInScope;
+	template<typename V> class BaseOutScope;
+
+	typedef BaseInStream<const Value*> InStream;
+	typedef BaseOutStream<Value*> OutStream;
 
 	static picojson::value parseAll(const char8_t *begin, const char8_t *end);
 	static u8string parseAll(
@@ -143,6 +150,8 @@ private:
 	template<typename V, typename S>
 	static V* findValue(S &src, const u8string &key, Path *path);
 
+	static u8string attributeToString(
+			const util::ObjectCoder::Attribute &attr);
 
 	template<typename T>
 	static void errorByIntRange(double value, T min, T max, const Path *path);
@@ -180,6 +189,156 @@ private:
 
 std::ostream& operator<<(std::ostream &stream, const JsonUtils::Path *path);
 std::ostream& operator<<(std::ostream &stream, const JsonUtils::Path &path);
+
+
+template<typename V>
+class JsonUtils::BaseInStream {
+public:
+	typedef util::ObjectCoder::Attribute Attribute;
+	typedef util::ObjectCoder::Type Type;
+	typedef util::ObjectCoder::NumericPrecision NumericPrecision;
+
+	typedef BaseInScope<const Object*> ObjectScope;
+	typedef BaseInScope<const Value*> ValueScope;
+	typedef BaseInScope<Array::const_iterator> ListScope;
+
+	class Locator;
+
+	explicit BaseInStream(V base, const Path *path = NULL);
+	explicit BaseInStream(const Value &value, const Path *path = NULL);
+
+	void reserve(size_t size);
+
+	bool peekType(Type &type, const Attribute &attr);
+
+	bool readBool(const Attribute &attr);
+	template<typename T> T readNumeric(
+			const Attribute &attr,
+			NumericPrecision precision = util::ObjectCoder::PRECISION_NORMAL);
+	template<typename T> void readNumericGeneral(
+			T &value, const Attribute &attr, NumericPrecision precision);
+	template<typename T> void readEnum(T &value, const Attribute &attr);
+	template<typename A> void readString(A &action, const Attribute &attr);
+	template<typename A> void readBinary(A &action, const Attribute &attr);
+
+	const Object* readObject(const Attribute &attr);
+	const Value* readValue(Type &type, const Attribute &attr);
+	Array::const_iterator readList(size_t &size, const Attribute &attr);
+
+	Locator locator();
+	const Path& getLastPath() const;
+
+private:
+	const Value& peek(const Attribute &attr, Path &path) const;
+	const Value& read(const Attribute &attr, bool required = true);
+
+	static Type getType(const Value &value, const Path &path);
+
+	template<typename T>
+	static T getNumeric(
+			const Value &value, const Path &path, const util::TrueType&);
+	template<typename T>
+	static T getNumeric(
+			const Value &value, const Path &path, const util::FalseType&);
+
+	static void errorByUnknownEnum(const char8_t *value, const Path &path);
+
+	V base_;
+	const Path *const basePath_;
+	Path path_;
+};
+
+template<typename V>
+class JsonUtils::BaseInStream<V>::Locator {
+public:
+	Locator();
+	explicit Locator(BaseInStream &stream);
+
+	void locate() const;
+
+private:
+	BaseInStream *stream_;
+	V base_;
+};
+
+template<typename V>
+class JsonUtils::BaseOutStream {
+public:
+	typedef util::ObjectCoder::Attribute Attribute;
+	typedef util::ObjectCoder::Type Type;
+	typedef util::ObjectCoder::NumericPrecision NumericPrecision;
+
+	typedef BaseOutScope<Value*> ValueScope;
+	typedef BaseOutScope<Object*> ObjectScope;
+	typedef BaseOutScope<Array*> ListScope;
+
+	explicit BaseOutStream(V base);
+	explicit BaseOutStream(Value &value);
+
+	bool isTyped() const { return true; }
+	void reserve(size_t size);
+
+	void writeBool(bool value, const Attribute &attr);
+	template<typename T> void writeNumeric(
+			const T &value, const Attribute &attr,
+			NumericPrecision precision = util::ObjectCoder::PRECISION_NORMAL);
+	template<typename T> void writeNumericGeneral(
+			const T &value, const Attribute &attr, NumericPrecision precision);
+	template<typename T> void writeEnum(const T &value, const Attribute &attr);
+	void writeString(const char8_t *data, size_t size, const Attribute &attr);
+	void writeBinary(const void *data, size_t size, const Attribute &attr);
+
+	Object* writeObject(const Attribute &attr);
+	Value* writeValue(Type type, const Attribute &attr);
+	Array* writeList(size_t size, const Attribute &attr);
+
+private:
+	void writeDouble(const double &value, const Attribute &attr);
+
+	Value& write(const Attribute &attr);
+
+	V base_;
+};
+
+template<typename V>
+class JsonUtils::BaseInScope {
+public:
+	typedef util::ObjectCoder::Attribute Attribute;
+	typedef util::ObjectCoder::Type Type;
+	typedef BaseInStream<V> Stream;
+
+	template<typename S>
+	BaseInScope(S &base, const Attribute &attr);
+	template<typename S>
+	BaseInScope(S &base, Type &type, const Attribute &attr);
+	template<typename S>
+	BaseInScope(S &base, size_t &size, const Attribute &attr);
+
+	Stream& stream();
+
+private:
+	Stream base_;
+};
+
+template<typename V>
+class JsonUtils::BaseOutScope {
+public:
+	typedef util::ObjectCoder::Attribute Attribute;
+	typedef util::ObjectCoder::Type Type;
+	typedef BaseOutStream<V> Stream;
+
+	template<typename S>
+	BaseOutScope(S &base, const Attribute &attr);
+	template<typename S>
+	BaseOutScope(S &base, Type type, const Attribute &attr);
+	template<typename S>
+	BaseOutScope(S &base, size_t size, const Attribute &attr);
+
+	Stream& stream();
+
+private:
+	Stream base_;
+};
 
 
 template<typename T, typename U>
@@ -419,6 +578,183 @@ T* JsonUtils::applyPath(T *value, const Path &localPath, Path *path) {
 		*path = localPath;
 	}
 	return value;
+}
+
+
+template<typename V>
+template<typename T>
+T JsonUtils::BaseInStream<V>::readNumeric(
+		const Attribute &attr, NumericPrecision precision) {
+	typedef typename util::BoolType<std::numeric_limits<T>::is_integer>::Result
+			IntegerType;
+
+	const Value &value = read(attr);
+	if (precision == util::ObjectCoder::PRECISION_EXACT &&
+			IntegerType::VALUE) {
+		const u8string *str = find<u8string>(value);
+		if (str != NULL) {
+			return util::LexicalConverter<T>()(*str);
+		}
+	}
+
+	return getNumeric<T>(value, path_, IntegerType());
+}
+
+template<typename V>
+template<typename T>
+void JsonUtils::BaseInStream<V>::readNumericGeneral(
+		T &value, const Attribute &attr, NumericPrecision precision) {
+	if (value.isInteger()) {
+		value.accept(readNumeric<int64_t>(attr, precision));
+	}
+	else {
+		value.accept(readNumeric<double>(attr, precision));
+	}
+}
+
+template<typename V>
+template<typename T>
+void JsonUtils::BaseInStream<V>::readEnum(
+		T &value, const Attribute &attr) {
+
+	const Value &src = read(attr);
+	const u8string *str = find<u8string>(src);
+	if (str == NULL) {
+		value.accept(asInt<typename T::IntegerType>(src, &path_));
+	}
+	else {
+		if (!value.accept(str->c_str())) {
+			errorByUnknownEnum(str->c_str(), path_);
+		}
+	}
+}
+
+template<typename V>
+template<typename A>
+void JsonUtils::BaseInStream<V>::readString(
+		A &action, const Attribute &attr) {
+	const u8string &src = as<u8string>(read(attr), &path_);
+	const size_t size = src.size();
+	action(size);
+	action(static_cast<const void*>(src.c_str()), size);
+}
+
+template<typename V>
+template<typename A>
+void JsonUtils::BaseInStream<V>::readBinary(
+		A &action, const Attribute &attr) {
+	util::NormalIStringStream iss(as<u8string>(read(attr), &path_));
+	util::NormalOStringStream oss;
+	util::HexConverter::decode(oss, iss);
+
+	const u8string &src = oss.str();
+	const size_t size = src.size();
+	action(size);
+	action(static_cast<const void*>(src.c_str()), size);
+}
+
+template<typename V>
+template<typename T>
+T JsonUtils::BaseInStream<V>::getNumeric(
+		const Value &value, const Path &path, const util::TrueType&) {
+	return asInt<T>(value, &path);
+}
+
+template<typename V>
+template<typename T>
+T JsonUtils::BaseInStream<V>::getNumeric(
+		const Value &value, const Path &path, const util::FalseType&) {
+	return static_cast<T>(as<double>(value, &path));
+}
+
+template<typename V>
+template<typename T>
+void JsonUtils::BaseOutStream<V>::writeNumeric(
+		const T &value, const Attribute &attr, NumericPrecision precision) {
+	if (precision == util::ObjectCoder::PRECISION_EXACT &&
+			std::numeric_limits<T>::is_integer) {
+		const u8string &str = util::LexicalConverter<u8string>()(value);
+		writeString(str.c_str(), str.size(), attr);
+	}
+	else {
+		writeDouble(static_cast<double>(value), attr);
+	}
+}
+
+template<typename V>
+template<typename T>
+void JsonUtils::BaseOutStream<V>::writeNumericGeneral(
+		const T &value, const Attribute &attr, NumericPrecision precision) {
+	if (value.isInteger()) {
+		writeNumeric(value.getInt64(), attr, precision);
+	}
+	else {
+		writeNumeric(value.getDouble(), attr, precision);
+	}
+}
+
+template<typename V>
+template<typename T>
+void JsonUtils::BaseOutStream<V>::writeEnum(
+		const T &value, const Attribute &attr) {
+	const char8_t *str = value.toString();
+	if (str == NULL) {
+		writeNumeric(value.toInteger(), attr);
+	}
+	else {
+		writeString(str, strlen(str), attr);
+	}
+}
+
+template<typename V>
+template<typename S>
+JsonUtils::BaseInScope<V>::BaseInScope(S &base, const Attribute &attr) :
+		base_(base.readObject(attr), &base.getLastPath()) {
+}
+
+template<typename V>
+template<typename S>
+JsonUtils::BaseInScope<V>::BaseInScope(
+		S &base, Type &type, const Attribute &attr) :
+		base_(base.readValue(type, attr), &base.getLastPath()) {
+}
+
+template<typename V>
+template<typename S>
+JsonUtils::BaseInScope<V>::BaseInScope(
+		S &base, size_t &size, const Attribute &attr) :
+		base_(base.readList(size, attr), &base.getLastPath()) {
+}
+
+template<typename V>
+JsonUtils::BaseInStream<V>& JsonUtils::BaseInScope<V>::stream() {
+	return base_;
+}
+
+template<typename V>
+template<typename S>
+JsonUtils::BaseOutScope<V>::BaseOutScope(
+		S &base, const Attribute &attr) :
+		base_(base.writeObject(attr)) {
+}
+
+template<typename V>
+template<typename S>
+JsonUtils::BaseOutScope<V>::BaseOutScope(
+		S &base, Type type, const Attribute &attr) :
+		base_(base.writeValue(type, attr)) {
+}
+
+template<typename V>
+template<typename S>
+JsonUtils::BaseOutScope<V>::BaseOutScope(
+		S &base, size_t size, const Attribute &attr) :
+		base_(base.writeList(size, attr)) {
+}
+
+template<typename V>
+JsonUtils::BaseOutStream<V>& JsonUtils::BaseOutScope<V>::stream() {
+	return base_;
 }
 
 

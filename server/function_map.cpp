@@ -69,6 +69,7 @@ FunctionMap::FunctionMap(bool forgis) : OpenHash<TqlFunc>() {
 		RegisterFunction<FunctorTimestamp>("TIMESTAMP");
 		RegisterFunction<FunctorTimestampadd>("TIMESTAMPADD");
 		RegisterFunction<FunctorTimestampdiff>("TIMESTAMPDIFF");
+		RegisterFunction<Functor_from_timestamp>("FROM_TIMESTAMP");
 		RegisterFunction<FunctorToTimestampMS>("TO_TIMESTAMP_MS");
 		RegisterFunction<FunctorToEpochMS>("TO_EPOCH_MS");
 

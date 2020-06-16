@@ -152,6 +152,7 @@ void QueryProcessor::get(TransactionContext &txn, BaseContainer &container,
 void QueryProcessor::search(TransactionContext &txn, BaseContainer &container,
 	ResultSize limit, const util::XArray<uint8_t> *startKey,
 	const util::XArray<uint8_t> *endKey, ResultSet &resultSet) {
+	UNUSED_VARIABLE(limit);
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
 	try {
 		util::XArray<OId> &idList = *resultSet.getOIdList();
@@ -283,7 +284,7 @@ void QueryProcessor::search(TransactionContext &txn, TimeSeries &timeSeries,
 			sc.addCondition(cond, true);
 		}
 
-		sc.limit_ = limit;
+		sc.setLimit(limit);
 		timeSeries.searchRowIdIndex(txn, sc, rowIdList, order);
 		resultSet.setResultType(RESULT_ROW_ID_SET, rowIdList.size());
 	}
@@ -564,6 +565,11 @@ void QueryProcessor::fetch(TransactionContext &txn, BaseContainer &container,
 	uint64_t startPos, ResultSize fetchNum, ResultSet *&resultSet,
 	LogSequentialNumber lastUpdateLsn) {
 	try {
+		if (resultSet->isPartialExecuteMode()) {
+			assert(false);
+			GS_THROW_USER_ERROR(GS_ERROR_DS_FETCH_PARAMETER_INVALID,
+				"Partial mode not suppot");
+		}
 		if (fetchNum < 1) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_FETCH_PARAMETER_INVALID,
 				"Fetch Size = " << fetchNum

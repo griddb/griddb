@@ -156,18 +156,18 @@ protected:
 
 	void parseAndValidate(
 		DatabaseId dbId, const char8_t *str, uint32_t length,
-		FullContainerKeyComponents &components, BitArray &upperCaseBit) const;
+		FullContainerKeyComponents &components, ContainerKeyBitArray &upperCaseBit) const;
 
 	void validate(const FullContainerKeyComponents &components) const;
 
 	void setUpperCaseBit(const FullContainerKeyComponents &components,
-		BitArray &upperCaseBit) const;
+		ContainerKeyBitArray &upperCaseBit) const;
 
 	void serialize(util::StackAllocator &alloc,
-		const FullContainerKeyComponents &components, const BitArray &upperCaseBit);
+		const FullContainerKeyComponents &components, const ContainerKeyBitArray &upperCaseBit);
 
 	void deserialize(util::StackAllocator &alloc,
-		FullContainerKeyComponents &components, BitArray &upperCaseBit,
+		FullContainerKeyComponents &components, ContainerKeyBitArray &upperCaseBit,
 		bool unNormalized) const;
 
 	void clear();
@@ -194,7 +194,7 @@ protected:
 
 	void createOriginalString(
 		char8_t const *src, uint32_t size, char8_t *dest,
-		const BitArray &upperCaseBit, uint64_t startPos) const;
+		const ContainerKeyBitArray &upperCaseBit, uint64_t startPos) const;
 
 	void validateDbId(DatabaseId dbId) const;
 	void validateBaseContainerName(
@@ -226,8 +226,8 @@ protected:
 		const char8_t *str2, uint32_t str2Length,
 		bool caseSensitive) const;
 	int32_t compareNormalizedString(
-		const char8_t *str1, uint32_t str1Length, const BitArray &upperCaseBit1, uint64_t startPos1,
-		const char8_t *str2, uint32_t str2Length, const BitArray &upperCaseBit2, uint64_t startPos2,
+		const char8_t *str1, uint32_t str1Length, const ContainerKeyBitArray &upperCaseBit1, uint64_t startPos1,
+		const char8_t *str2, uint32_t str2Length, const ContainerKeyBitArray &upperCaseBit2, uint64_t startPos2,
 		bool caseSensitive) const;
 
 	static void dumpComponent(const FullContainerKeyComponents &component, const char8_t *msg);

@@ -165,27 +165,13 @@ typedef uint8_t ContainerHashMode;
 const ContainerHashMode CONTAINER_HASH_MODE_CRC32 = 0;
 
 typedef uint64_t AffinityGroupId;
+
+typedef int32_t ChunkKey;  
 typedef uint16_t ExpireIntervalCategoryId;  
 typedef uint16_t UpdateIntervalCategoryId;  
 
 typedef RowId DatabaseId;  
 
 #define MAX_COMPOSITE_COLUMN_NUM 16
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 #endif

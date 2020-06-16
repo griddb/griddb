@@ -44,7 +44,8 @@ class SyncService;
 class RecoveryManager;
 class DataStore;
 class LogManager;
-struct ManagerSet;
+class SQLService;
+class ResourceSet;
 
 struct ebb_request_parser;
 struct ebb_request;
@@ -65,7 +66,7 @@ public:
 
 	void operator()(EventContext &ec, std::exception &);
 
-	void initialize(const ManagerSet &mgrSet);
+	void initialize(const ResourceSet &resourceSet);
 
 private:
 	ClusterService *clsSvc_;
@@ -80,7 +81,7 @@ public:
 
 	void operator()(EventContext &ec, Event &ev);
 
-	void initialize(ManagerSet &mgrSet);
+	void initialize(ResourceSet &resourceSet);
 
 private:
 	SystemService *sysSvc_;
@@ -117,7 +118,7 @@ public:
 
 	void waitForShutdown();
 
-	void initialize(ManagerSet &mgrSet);
+	void initialize(ResourceSet &resourceSet);
 
 	SystemConfig &getConfig() {
 		return sysConfig_;
@@ -146,6 +147,7 @@ public:
 	bool decreaseCluster(const Event::Source &eventSource,
 		util::StackAllocator &alloc, picojson::value &result,
 		bool isAutoLeave = false, int32_t leaveNum = 1);
+
 	struct BackupOption {
 		bool logArchive_;
 		bool logDuplicate_;
@@ -179,6 +181,8 @@ public:
 
 	void getStats(picojson::value &result, StatTable &stats);
 
+	void traceStats();
+
 	void getSyncStats(picojson::value &result);
 
 	void getPGStoreMemoryLimitStats(picojson::value &result);
@@ -186,6 +190,7 @@ public:
 	void getMemoryStats(
 			picojson::value &result, const char8_t *namePrefix,
 			const char8_t *selectedType, int64_t minSize);
+
 
 
 	bool getOrSetConfig(
@@ -284,7 +289,7 @@ private:
 	public:
 		WebAPIServerThread();
 
-		void initialize(ManagerSet &mgrSet);
+		void initialize(ResourceSet &resourceSet);
 		virtual void run();
 		void shutdown();
 		void waitForShutdown();
@@ -293,7 +298,7 @@ private:
 		volatile bool runnable_;
 		SystemService *sysSvc_;
 		ClusterService *clsSvc_;
-		ManagerSet *mgrSet_;
+		ResourceSet *resourceSet_;
 	};
 
 	struct WebAPIRequest;
@@ -304,7 +309,7 @@ private:
 	*/
 	class ListenerSocketHandler : public util::IOPollHandler {
 	public:
-		explicit ListenerSocketHandler(ManagerSet &mgrSet);
+		explicit ListenerSocketHandler(ResourceSet &resourceSet);
 
 		virtual void handlePollEvent(
 			util::IOPollBase *io, util::IOPollEvent event);
@@ -330,6 +335,7 @@ private:
 		GlobalFixedSizeAllocator *fixedSizeAlloc_;
 		EventEngine::VariableSizeAllocator varSizeAlloc_;
 		util::StackAllocator alloc_;
+		ResourceSet *resourceSet_;
 	};
 
 	/*!
@@ -459,6 +465,7 @@ private:
 	RecoveryManager *recoveryMgr_;
 	LogManager *logMgr_;
 	SyncManager *syncMgr_;
+	SQLService *sqlSvc_;
 
 	GlobalFixedSizeAllocator *fixedSizeAlloc_;
 	GlobalVariableSizeAllocator *varSizeAlloc_;

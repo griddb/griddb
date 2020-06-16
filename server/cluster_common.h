@@ -38,10 +38,19 @@ typedef int64_t PartitionRevisionNo;
 
 const ClusterVersionId GS_CLUSTER_MESSAGE_CURRENT_VERSION = 33;
 
-static const int32_t SERVICE_MAX = 4;
+static const int32_t SERVICE_MAX = 5;
 
 static const uint32_t IMMEDIATE_PARTITION_ID = 0;
 static const uint32_t SYSTEM_CONTAINER_PARTITION_ID = 0;
+
+/*!
+	@brief cluster notification mode
+*/
+enum ClusterNotificationMode {
+	NOTIFICATION_MULTICAST,
+	NOTIFICATION_FIXEDLIST,
+	NOTIFICATION_RESOLVER
+};
 
 /*!
 	@brief Status of ChangePartition
@@ -75,45 +84,8 @@ enum ServiceType {
 	TRANSACTION_SERVICE = 1,
 	SYNC_SERVICE = 2,
 	SYSTEM_SERVICE = 3,
+	SQL_SERVICE = 4
 };
-
-static const char8_t *TYPE_NAME_CLUSTER="cluster";
-static const char8_t *TYPE_NAME_TRANSACTION="transaction";
-static const char8_t *TYPE_NAME_SYNC="sync";
-static const char8_t *TYPE_NAME_SYSTEM="system";
-static const char8_t *TYPE_NAME_SQL="sql";
-static const char8_t *TYPE_NAME_TRANSACTION_LOCAL="transactionLocal";
-static const char8_t *TYPE_NAME_SQL_LOCAL="sqlLocal";
-
-static const char8_t *const SERVICE_TYPE_NAMES[] = {
-	TYPE_NAME_CLUSTER, TYPE_NAME_TRANSACTION, TYPE_NAME_SYNC, TYPE_NAME_SYSTEM
-};
-
-static const char8_t *const SERVICE_TYPE_NAMES_WITH_PUBLIC [] = {
-	TYPE_NAME_CLUSTER, TYPE_NAME_TRANSACTION,TYPE_NAME_SYNC, TYPE_NAME_SYSTEM
-	,
-	TYPE_NAME_TRANSACTION_LOCAL
-};
-
-static ServiceType SERVICE_TYPE_LIST[] = {
-	CLUSTER_SERVICE, TRANSACTION_SERVICE, SYNC_SERVICE, SYSTEM_SERVICE
-};
-static int32_t SERVICE_TYPE_LIST_MAP[] = {
-	0, 1, 2, 3
-};
-
-static ServiceType SERVICE_TYPE_LIST_WITH_PUBLIC[] = {
-	CLUSTER_SERVICE, TRANSACTION_SERVICE, SYNC_SERVICE, SYSTEM_SERVICE
-	, TRANSACTION_SERVICE
-};
-
-static int32_t SERVICE_TYPE_LIST_MAP_WITH_PUBLIC[] = {
-	0, 4, 2, 3, 1
-};
-
-static const char8_t*dumpServiceType(ServiceType serviceType) {
-	return SERVICE_TYPE_NAMES[static_cast<size_t>(serviceType)];
-}
 
 static void clearStringStream(util::NormalOStringStream &oss) {
 	static std::string emptyStr;

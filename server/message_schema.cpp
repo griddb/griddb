@@ -34,6 +34,7 @@ MessageSchema::MessageSchema(util::StackAllocator &alloc,
 	: dsValueLimitConfig_(dsValueLimitConfig),
 	  containerType_(UNDEF_CONTAINER),
 	  affinityStr_(alloc),
+	  tablePartitioningVersionId_(UNDEF_TABLE_PARTITIONING_VERSIONID),
 	  containerExpirationStartTime_(-1),
 	  keyColumnIds_(alloc),
 	  columnTypeList_(alloc),
@@ -45,6 +46,7 @@ MessageSchema::MessageSchema(util::StackAllocator &alloc,
 	  oldColumnNum_(0),
 	  oldVarColumnNum_(0),
 	  oldRowFixedColumnSize_(0) {
+	UNUSED_VARIABLE(featureVersion);
 	validateColumnSchema(in);
 }
 
@@ -54,6 +56,7 @@ MessageSchema::MessageSchema(util::StackAllocator &alloc,
 	: dsValueLimitConfig_(dsValueLimitConfig),
 	  containerType_(UNDEF_CONTAINER),
 	  affinityStr_(alloc),
+	  tablePartitioningVersionId_(UNDEF_TABLE_PARTITIONING_VERSIONID),
 	  containerExpirationStartTime_(-1),
 	  keyColumnIds_(alloc),
 	  columnTypeList_(alloc),
@@ -127,7 +130,6 @@ void MessageSchema::validateColumnSchema(util::ArrayByteInStream &in) {
 		in >> flagsTmp;
 		flagsList_.push_back(flagsTmp);
 		const bool isArray = getIsArray(i);
-		const bool isNotNull = getIsNotNull(i);
 
 		if (!ValueProcessor::isValidArrayAndType(
 				isArray, columnTypeList_[i])) {
@@ -315,6 +317,7 @@ void MessageSchema::validateContainerExpiration(util::ArrayByteInStream &in) {
 }
 
 void MessageSchema::validateContainerExpiration(const BibInfo::Container &bibInfo) {
+	UNUSED_VARIABLE(bibInfo);
 }
 
 MessageCollectionSchema::MessageCollectionSchema(util::StackAllocator &alloc,
@@ -327,6 +330,9 @@ MessageCollectionSchema::MessageCollectionSchema(util::StackAllocator &alloc,
 	if (featureVersion > 0) {
 		if (in.base().remaining() != 0) {
 			in >> attribute;
+		}
+		if (in.base().remaining() != 0) {
+			in >> tablePartitioningVersionId_;
 		}
 		if (in.base().remaining() != 0) {
 			int32_t tmpValue;
@@ -348,6 +354,9 @@ MessageCollectionSchema::MessageCollectionSchema(util::StackAllocator &alloc,
 	} else {
 		if (in.base().remaining() != 0) {
 			in >> attribute;
+		}
+		if (in.base().remaining() != 0) {
+			in >> tablePartitioningVersionId_;
 		}
 	}
 	setContainerAttribute(static_cast<ContainerAttribute>(attribute));
@@ -371,6 +380,9 @@ MessageTimeSeriesSchema::MessageTimeSeriesSchema(util::StackAllocator &alloc,
 			in >> attribute;
 		}
 		if (in.base().remaining() != 0) {
+			in >> tablePartitioningVersionId_;
+		}
+		if (in.base().remaining() != 0) {
 			int32_t tmpValue;
 			in >> tmpValue;
 			OptionType optionType = static_cast<OptionType>(tmpValue);
@@ -390,6 +402,9 @@ MessageTimeSeriesSchema::MessageTimeSeriesSchema(util::StackAllocator &alloc,
 	} else {
 		if (in.base().remaining() != 0) {
 			in >> attribute;
+		}
+		if (in.base().remaining() != 0) {
+			in >> tablePartitioningVersionId_;
 		}
 	}
 	if (getContainerExpirationInfo().info_.duration_ != INT64_MAX && 

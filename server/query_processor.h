@@ -97,6 +97,9 @@ public:
 	static void get(TransactionContext &txn, TimeSeries &timeSeries,
 		RowId preLast, ResultSize limit, RowId &last, ResultSet &resultSet);
 
+	static void assignDistributedTarget(
+		TransactionContext &txn, BaseContainer &container,
+		const Query &query, ResultSet &resultSet);
 
 
 private:

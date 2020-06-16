@@ -43,8 +43,8 @@ class CheckpointFile {
 
 public:
 	static const int32_t ALLOCATE_BLOCK_SEARCH_LIMIT = 1024;
-	static const int32_t FILE_SPLIT_COUNT_LIMIT = 128;
-	static const int32_t FILE_SPLIT_STRIPE_SIZE_LIMIT = 1024;
+	static const uint32_t FILE_SPLIT_COUNT_LIMIT = 128;
+	static const uint32_t FILE_SPLIT_STRIPE_SIZE_LIMIT = 1024;
 
 	CheckpointFile(
 		uint8_t chunkExpSize, const std::string &dir, PartitionGroupId pgId,
@@ -54,7 +54,7 @@ public:
 
 	void punchHoleBlock(uint32_t size, uint64_t offset);
 
-	void zerofillUnusedBlock(const uint64_t blockNum);
+	void zerofillUnusedBlock();
 
 	int64_t writeBlock(const uint8_t *buffer, uint32_t size, uint64_t blockNo);
 	int64_t readBlock(uint8_t *buffer, uint32_t size, uint64_t blockNo);
@@ -84,10 +84,10 @@ public:
 	void initializeValidBlockInfo();
 
 public:
-	BitArray &getValidBitArray() {
+	ChunkBitArray &getValidBitArray() {
 		return validChunkInfo_;
 	}
-	BitArray &getUsedBitArray() {
+	ChunkBitArray &getUsedBitArray() {
 		return usedChunkInfo_;
 	}
 
@@ -152,8 +152,8 @@ private:
 	const uint64_t BLOCK_EXP_SIZE_;
 	const uint64_t BLOCK_SIZE_;
 
-	BitArray usedChunkInfo_;
-	BitArray validChunkInfo_;
+	ChunkBitArray usedChunkInfo_;
+	ChunkBitArray validChunkInfo_;
 	uint64_t blockNum_;
 	uint64_t freeUseBitNum_;
 	uint64_t freeBlockSearchCursor_;

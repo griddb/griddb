@@ -33,7 +33,8 @@ AuthenticationContext::AuthenticationContext() :
 	pId_(UNDEF_PARTITIONID),
 	stmtId_(0),
 	clientNd_(NodeDescriptor::EMPTY_ND),
-	timeout_(0)
+	timeout_(0),
+	isSQLService_(false)
 {
 }
 AuthenticationContext::AuthenticationContext(const AuthenticationContext &authContext) :
@@ -41,7 +42,8 @@ AuthenticationContext::AuthenticationContext(const AuthenticationContext &authCo
 	pId_(authContext.pId_),
 	stmtId_(authContext.stmtId_),
 	clientNd_(authContext.clientNd_),
-	timeout_(authContext.timeout_)
+	timeout_(authContext.timeout_),
+    isSQLService_(authContext.isSQLService_)
 {
 }
 AuthenticationContext::~AuthenticationContext()
@@ -57,6 +59,7 @@ AuthenticationContext& AuthenticationContext::operator =(const AuthenticationCon
 	stmtId_ = authContext.stmtId_;
 	clientNd_ = authContext.clientNd_;
 	timeout_ = authContext.timeout_;
+	isSQLService_ = authContext.isSQLService_;
 	return *this;
 }
 AuthenticationId AuthenticationContext::getAuthenticationId() const
@@ -86,6 +89,7 @@ void AuthenticationContext::clear()
 	stmtId_ = TXN_MIN_CLIENT_STATEMENTID,
 	clientNd_ = NodeDescriptor::EMPTY_ND;
 	timeout_ = 0;
+	isSQLService_ = false;
 }
 
 
@@ -239,6 +243,7 @@ TransactionManager::AuthenticationContextPartition::putAuth(StatementId stmtId,
 		authContext.stmtId_ = stmtId;  
 		authContext.clientNd_ = ND;
 		authContext.timeout_ = authTimeout;
+		authContext.isSQLService_ = isSQLService;
 		return authContext;
 	}
 	catch (std::exception &e) {
@@ -268,7 +273,7 @@ TransactionManager::AuthenticationContextPartition::getAuth(
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_USER_OR_SYSTEM(e,
-			"Failed to ge authentication context "
+			"Failed to get authentication context "
 			"(pId="
 				<< pId_ << ", authId=" << authId
 				<< ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");

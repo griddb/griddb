@@ -172,7 +172,6 @@ public:
 	void load(OId oId) {
 		rowId_ = oId;
 		rowArray_.load(txn_, rowId_, &timeSeries_, OBJECT_READ_ONLY);
-		util::StackAllocator &alloc = txn_.getDefaultAllocator();
 		memset(pBitmap_, 0,
 			sizeof(uint64_t) * ((timeSeries_.getColumnNum() / 64) + 1));
 		for (uint32_t i = 0; i < varrayCounter_; i++) {

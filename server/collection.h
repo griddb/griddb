@@ -133,6 +133,16 @@ public:
 	void searchRowIdIndex(TransactionContext &txn, uint64_t start,
 		uint64_t limit, util::XArray<RowId> &rowIdList,
 		util::XArray<OId> &resultList, uint64_t &skipped);
+	bool checkRunTime(TransactionContext &txn);
+	void scanRowIdIndex(
+			TransactionContext& txn, BtreeMap::SearchContext &sc,
+			ContainerRowScanner &scanner);
+	void scanRowArray(
+			TransactionContext& txn, const OId *begin, const OId *end,
+			bool onMvcc, ContainerRowScanner &scanner);
+	void scanRow(
+			TransactionContext& txn, const OId *begin, const OId *end,
+			bool onMvcc, ContainerRowScanner &scanner);
 	RowId getMaxRowId(TransactionContext &txn);
 
 	void lockRowList(TransactionContext &txn, util::XArray<RowId> &rowIdList);
@@ -153,7 +163,7 @@ public:
 		else {
 			chunkCategoryId = ALLOCATE_NO_EXPIRE_MAP;
 		}
-		AffinityGroupId groupId = calcAffnityGroupId(getAffinity());
+		AffinityGroupId groupId = calcAffnityGroupId(getAffinityBinary());
 		return AllocateStrategy(chunkCategoryId, groupId, chunkKey, expireCategoryId);
 	}
 	/*!
@@ -172,7 +182,7 @@ public:
 		else {
 			chunkCategoryId = ALLOCATE_NO_EXPIRE_ROW;
 		}
-		AffinityGroupId groupId = calcAffnityGroupId(getAffinity());
+		AffinityGroupId groupId = calcAffnityGroupId(getAffinityBinary());
 		return AllocateStrategy(chunkCategoryId, groupId, chunkKey, expireCategoryId);
 	}
 
@@ -184,15 +194,19 @@ public:
 	}
 
 	uint32_t getRealColumnNum(TransactionContext &txn) {
+		UNUSED_VARIABLE(txn);
 		return getColumnNum();
 	}
 	ColumnInfo* getRealColumnInfoList(TransactionContext &txn) {
+		UNUSED_VARIABLE(txn);
 		return getColumnInfoList();
 	}
 	uint32_t getRealRowSize(TransactionContext &txn) {
+		UNUSED_VARIABLE(txn);
 		return getRowSize();
 	}
 	uint32_t getRealRowFixedDataSize(TransactionContext &txn) {
+		UNUSED_VARIABLE(txn);
 		return getRowFixedDataSize();
 	}
 
@@ -305,6 +319,23 @@ private:
 	void updateIndexData(
 		TransactionContext &txn, const IndexData &indexData);
 
+	template<bool Mvcc> static void scanRowArrayCheckedDirect(
+			TransactionContext& txn, RowArray &rowArray,
+			RowId startRowId, RowId endRowId, util::XArray<OId> &oIdList);
+	template<bool Mvcc> static void scanRowCheckedDirect(
+			TransactionContext& txn, RowArray &rowArray,
+			util::XArray<OId> &oIdList);
+	template<bool Mvcc> static bool filterActiveTransaction(
+			TransactionContext& txn, RowArray::Row &row);
+
+	void scanRowIdIndexPrepare(
+			TransactionContext& txn, BtreeMap::SearchContext &sc,
+			util::XArray<OId> *oIdList);
+	static void searchMvccMapPrepare(
+			TransactionContext& txn, const BtreeMap::SearchContext &sc,
+			BtreeMap::SearchContext &mvccSC,
+			RowId startRowId, RowId lastCheckRowId,
+			std::pair<RowId, RowId> *mvccRowIdRange);
 
 	void getIdList(TransactionContext &txn,
 		util::XArray<uint8_t> &serializedRowList, util::XArray<RowId> &idList);

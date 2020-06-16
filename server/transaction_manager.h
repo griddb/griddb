@@ -29,6 +29,10 @@
 #include "transaction_context.h"
 #include "cluster_event_type.h"
 
+#include "sql_common.h"
+#include "transaction_manager.h"
+#include "container_key.h"
+#include "schema.h"
 
 class BaseContainer;
 
@@ -69,25 +73,35 @@ public:
 
 class EventStart {
 public:
-	EventStart(EventContext &ec, Event &ev, EventMonitor &monitor, bool check = true) :
-			ec_(ec), ev_(ev), monitor_(monitor), check_(check) {
+	
+	EventStart(EventContext &ec, Event &ev, EventMonitor &monitor,
+			bool check = true) :
+					ec_(ec), ev_(ev),
+					monitor_(monitor),
+					check_(check) {
+
 		if (check_) {
 			monitor_.set(*this);
 		}
 	}
+	
 	~EventStart() {
+
 		if (check_) {
 			monitor_.reset(*this);
 		}
 	}
+
 	EventContext &getEventContext() {
 		return ec_;
 	}
+	
 	Event &getEvent() {
 		return ev_;
 	}
 
 private:
+	
 	EventContext &ec_;
 	Event &ev_;
 	EventMonitor &monitor_;
@@ -143,6 +157,9 @@ public:
 
 	EventMonotonicTime getExpireTime() const;
 
+	bool isSQLService() const {
+		return isSQLService_;
+	}
 
 private:
 	AuthenticationId id_;
@@ -154,6 +171,7 @@ private:
 
 	EventMonotonicTime timeout_;
 
+	bool isSQLService_;
 
 	AuthenticationContext(const AuthenticationContext &authContext);
 	void clear();
@@ -202,6 +220,82 @@ public:
 	bool getExistFlag() const;
 	void setExistFlag(bool flag);
 
+	bool isNewSQL() const {
+		return (replyPId_ != UNDEF_PARTITIONID);
+	}
+
+	int32_t getReplyNodeId() const {
+		return static_cast<int32_t>(clientNd_.getId());
+	}
+
+	PartitionId getReplyPId() const {
+		return replyPId_;
+	}
+
+	SessionId getQueryId() const {
+		return queryId_;
+	}
+
+	EventType getReplyEventType() const {
+		return replyEventType_;
+	}
+
+	void copyClientId(ClientId &clientId) const {
+		clientId = clientId_;
+	}
+
+	void copyAckClientId(ClientId &ackClientId) const {
+		ackClientId = ackClientId_;
+	}
+
+	int8_t getExistsIndex() const {
+		return existIndex_;
+	}
+
+	void setSQLResonseInfo(
+			PartitionId replPId, EventType replEventType, SessionId queryId,
+			const ClientId &clientId, bool isSync, StatementId execId,
+			int32_t subContainerId, ClientId &ackClientId,
+			int8_t existsIndex, int64_t syncId, uint8_t jobVersionId) {
+		replyPId_ = replPId;
+		replyEventType_ = replEventType;
+		queryId_ = queryId;
+		clientId_ = clientId;
+		isSync_ = isSync;
+		execId_ = execId;
+		subContainerId_ = subContainerId;
+		ackClientId_ = ackClientId;
+		existIndex_ = existsIndex;
+		syncId_ = syncId;
+		jobVersionId_ = jobVersionId;
+	}
+
+	void setExistsIndex() {
+		existIndex_ = 1;
+	}
+
+	bool getSyncFlag() const {
+		return isSync_;
+	}
+
+	int64_t getSyncId() const {
+		return syncId_;
+	}
+
+	StatementId getExecId() const {
+		return execId_;
+	}
+
+	uint8_t getJobVersionId() const {
+		return jobVersionId_;
+	}
+
+	int32_t getSubContainerId() const {
+		return subContainerId_;
+	};
+
+	void setContainerStatus(LargeContainerStatusType &status, NodeAffinityNumber &affinityNumber, IndexInfo &indexInfo) const;
+
 	/*!
 		@brief Task status
 	*/
@@ -249,6 +343,16 @@ private:
 
 	bool existFlag_;
 
+
+	PartitionId replyPId_;
+	SessionId queryId_;
+	EventType replyEventType_;
+
+	LargeContainerStatusType execStatus_;
+	NodeAffinityNumber affinityNumber_;
+	int8_t existIndex_;
+	int64_t syncId_;
+	uint8_t jobVersionId_;
 
 	bool isSync_;
 	int32_t subContainerId_;

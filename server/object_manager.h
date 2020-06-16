@@ -142,8 +142,10 @@ public:
 
 	bool batchFree(
 			PartitionId pId, ChunkKey chunkKey, uint64_t maxScanNum,
-			uint64_t& scanNum, uint64_t& freeChunkNum,
+			uint64_t& scanNum, util::XArray<OId> &freeList,
 			ChunkKey simulateChunkKey, uint64_t& simulateFreeNum);
+
+
 
 	void purgeDataAffinityInfo(PartitionId pId, Timestamp baseTime);
 
@@ -177,6 +179,14 @@ public:
 		return recommendLimitObjectSize_;
 	}
 
+	void updateStoreObjectUseStats(PartitionId pId);
+
+	ChunkManager::ChunkManagerStats &getChunkManagerStats() {
+		return chunkManager_->getChunkManagerStats();
+	}
+	ChunkCategoryId getChunkCategoryNum() const {
+		return chunkManager_->getConfig().getChunkCategoryNum();
+	}
 	void validateRefCounter(PartitionId pId);
 
 	void dumpRefCounter(PartitionId pId);
@@ -196,7 +206,7 @@ private:
 	uint32_t recommendLimitObjectSize_;
 	bool isZeroFill_; 
 
-	inline static DataAffinityInfo makeDataAffinityInfo(const AllocateStrategy &strategy);
+	inline DataAffinityInfo makeDataAffinityInfo(const AllocateStrategy &strategy);
 
 	uint8_t* allocateObject(
 			MetaChunk& metaChunk, uint8_t powerSize,
@@ -280,6 +290,7 @@ public:
 inline void ObjectManager::dropPartition(PartitionId pId) {
 	try {
 		chunkManager_->dropPartition(pId);
+
 	}
 	catch (std::exception& e) {
 		GS_RETHROW_SYSTEM_ERROR(e, "");
@@ -344,6 +355,10 @@ inline double ObjectManager::getStoreMemoryAgingSwapRate(PartitionId pId) {
 	return chunkManager_->getStoreMemoryAgingSwapRate(pId);
 }
 
+inline void ObjectManager::updateStoreObjectUseStats(PartitionId pId) {
+	chunkManager_->updateStoreObjectUseStats(pId);
+}
+
 /*!
 	@brief Returns an estimated size of the Object for requested size.
 */
@@ -391,12 +406,21 @@ T* ObjectManager::allocateNeighbor(
 	*/
 inline bool ObjectManager::batchFree(
 		PartitionId pId, ChunkKey chunkKey, uint64_t maxScanNum,
-		uint64_t& scanNum, uint64_t& freeChunkNum,
+		uint64_t& scanNum, util::XArray<OId> &freeList,
 		ChunkKey simulateChunkKey, uint64_t& simulateFreeNum) {
 	try {
-		return chunkManager_->batchFreeChunk(
-				pId, chunkKey, maxScanNum, scanNum, freeChunkNum,
-				simulateChunkKey, simulateFreeNum);
+		const Offset_t baseOffset = ObjectAllocator::BLOCK_HEADER_SIZE;
+		util::NormalXArray<ChunkCategoryId> categoryList;
+		util::NormalXArray<ChunkId> chunkList;
+		bool ret = chunkManager_->batchFreeChunk(
+				pId, chunkKey, maxScanNum, scanNum,
+				categoryList, chunkList, simulateChunkKey, simulateFreeNum);
+
+		for (size_t i = 0; i < chunkList.size(); i++) {
+			freeList.push_back(
+					getOId(categoryList[i], chunkList[i], baseOffset));
+		}
+		return ret;
 	}
 	catch (std::exception& e) {
 		GS_RETHROW_SYSTEM_ERROR(e, "");
@@ -423,6 +447,7 @@ UTIL_FORCEINLINE T* ObjectManager::getForUpdate(PartitionId pId, OId oId) {
 				pId, categoryId, cId, UNDEF_CHUNK_KEY, true);
 		uint8_t* objectAddr = metaChunk->getPtr() + offset;
 		validateObject(objectAddr, pId, oId, categoryId, cId, offset);
+
 		return reinterpret_cast<T*>(objectAddr);
 	}
 	catch (std::exception& e) {
@@ -451,6 +476,7 @@ UTIL_FORCEINLINE T* ObjectManager::getForRead(PartitionId pId, OId oId) {
 
 		uint8_t* objectAddr = metaChunk->getPtr() + offset;
 		validateObject(objectAddr, pId, oId, categoryId, cId, offset);
+
 		return reinterpret_cast<T*>(objectAddr);
 	}
 	catch (std::exception& e) {
@@ -579,6 +605,7 @@ inline void ObjectManager::dumpRefCounter(PartitionId pId) {
 }
 
 inline void ObjectManager::dumpObject(PartitionId pId, int32_t level) {
+	UNUSED_VARIABLE(level);
 	if (existPartition(pId)) {
 		try {
 			std::cout << "=====pId, " << pId << std::endl;
@@ -649,12 +676,14 @@ inline void ObjectManager::dumpObjectDigest(PartitionId pId) {
 
 inline ObjectManager::DataAffinityInfo ObjectManager::makeDataAffinityInfo(
 		const AllocateStrategy &strategy) {
+
 	assert(strategy.expireCategoryId_ < ChunkManager::EXPIRE_INTERVAL_CATEGORY_COUNT);
 	DataAffinityInfo affinityInfo;
 	affinityInfo.expireCategory_ =
-			strategy.expireCategoryId_ % ChunkManager::EXPIRE_INTERVAL_CATEGORY_COUNT;
-	affinityInfo.updateCategory_ =
-			strategy.affinityGroupId_ % ChunkManager::UPDATE_INTERVAL_CATEGORY_COUNT;
+		static_cast<ExpireIntervalCategoryId>(
+			strategy.expireCategoryId_ % ChunkManager::EXPIRE_INTERVAL_CATEGORY_COUNT);
+	affinityInfo.dataAffinity_ = strategy.affinityGroupId_;
+
 	return affinityInfo;
 }
 

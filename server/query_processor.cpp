@@ -48,6 +48,9 @@ void QueryProcessor::executeTQL(TransactionContext &txn,
 	const char *query = tqlInfo.query_;
 	try {
 		bool noop = (limit == 0);
+		if (resultSet.getLargeInfo() != NULL) {
+			noop = false;
+		}
 
 		if (noop) {
 			resultSet.setResultType(RESULT_ROWSET, 0);
@@ -57,6 +60,7 @@ void QueryProcessor::executeTQL(TransactionContext &txn,
 		if (strcmp(query, ANALYZE_QUERY) == 0) {
 			Query analyzeQuery(txn, *(container.getObjectManager()), tqlInfo);
 			analyzeQuery.enableExplain(true);
+			assignDistributedTarget(txn, container, analyzeQuery, resultSet);
 			if (container.isInvalid()) {
 				analyzeQuery.addExplain(
 					0, "CONTAINER", "STRING", "INVALID", "");
@@ -73,6 +77,7 @@ void QueryProcessor::executeTQL(TransactionContext &txn,
 			Collection *collection = reinterpret_cast<Collection *>(&container);
 			QueryStopwatchHook *hook = NULL;
 			QueryForCollection queryObj(txn, *collection, tqlInfo, limit, hook);
+			assignDistributedTarget(txn, container, queryObj, resultSet);
 			queryObj.setQueryOption(txn, resultSet);
 			if (queryObj.getLimit() == 0) {
 				ResultType resultType = RESULT_ROWSET;
@@ -100,6 +105,7 @@ void QueryProcessor::executeTQL(TransactionContext &txn,
 			TimeSeries *timeSeries = reinterpret_cast<TimeSeries *>(&container);
 			QueryStopwatchHook *hook = NULL;
 			QueryForTimeSeries queryObj(txn, *timeSeries, tqlInfo, limit, hook);
+			assignDistributedTarget(txn, container, queryObj, resultSet);
 			queryObj.setQueryOption(txn, resultSet);
 
 			if (queryObj.getLimit() == 0) {

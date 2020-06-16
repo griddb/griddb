@@ -589,7 +589,6 @@ public:
 					objectData + ValueProcessor::getEncodedVarSize(varDataSize);
 				uint32_t totalSize = *reinterpret_cast<const uint32_t *>(addr);
 				addr += sizeof(uint32_t);
-				const OId *oId = reinterpret_cast<const OId *>(addr);
 				data_.object_.set(objectData, totalSize, true);
 			}
 			else {
@@ -604,6 +603,7 @@ public:
 
 
 	static const void *getDefaultFixedValue(ColumnType type) {
+		UNUSED_VARIABLE(type);
 		return defalutFixedValue_;
 	}
 	static const void *getDefaultVariableValue(ColumnType type) {
@@ -721,7 +721,7 @@ public:
 		GEOM_OP
 	};
 
-	static const char8_t *getOperationStr(Operation op) {
+	static const char *getOperationStr(Operation op) {
 		switch (op) {
 		case ADD: return "+"; break;
 		case SUB: return "-"; break;

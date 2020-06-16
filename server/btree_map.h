@@ -80,7 +80,7 @@ public:
 		bodySize_ = srcSize;
 	}
 	void initialize(TransactionContext &txn, const FullContainerKey &src, const AllocateStrategy &allocateStrategy) {
-		util::StackAllocator &alloc = txn.getDefaultAllocator();
+		UNUSED_VARIABLE(txn);
 		const void *srcBody;
 		size_t srcSize;
 		src.toBinary(srcBody, srcSize);
@@ -89,7 +89,7 @@ public:
 		uint32_t headerSize = ValueProcessor::getEncodedVarSize(bodySize_);  
 
 		OId oId;
-		uint8_t *binary = allocate<uint8_t>(headerSize + bodySize_, allocateStrategy, 
+		allocate<uint8_t>(headerSize + bodySize_, allocateStrategy, 
 			oId, OBJECT_TYPE_VARIANT);
 
 		uint64_t encodedLength = ValueProcessor::encodeVarSize(bodySize_);
@@ -124,7 +124,6 @@ struct FullContainerKeyObject {
 class ColumnSchema;
 class CompositeInfoObject;
 class BaseIndex;
-//struct BaseIndex::Setting;
 typedef BaseIndex::Setting Setting;
 
 class CompositeInfoObject8 : public CompositeInfoObject{
@@ -409,6 +408,7 @@ public:
 	static int32_t compositeInfoCmp(TransactionContext &txn, ObjectManager &objectManager,
 	   const CompositeInfoObject *e1, const CompositeInfoObject *e2, BaseIndex::Setting &setting);
 
+
 	template <typename S>
 	static inline bool compositeInfoMatch(TransactionContext &txn, ObjectManager &objectManager,
 		const S *e, BaseIndex::Setting &setting);
@@ -607,6 +607,8 @@ private:
 			const S &key1, const U &value1, 
 			const T &key2, const U &value2, 
 			Setting &setting, const ComponentKey & ) {
+			UNUSED_VARIABLE(value1);
+			UNUSED_VARIABLE(value2);
 			return keyCmp(txn, objectManager, key1, key2, setting);
 		}
 		template <typename S, typename T, typename U>
@@ -812,6 +814,7 @@ private:
 
 		inline void allocateVal(
 			TransactionContext &txn, int32_t m, KeyValue<StringObject, OId> &e, Setting &setting) {
+			UNUSED_VARIABLE(setting);
 			BNodeImage<K, V> *image = getImage();
 			StringCursor *stringCursor =
 				reinterpret_cast<StringCursor *>(e.key_.ptr_);
@@ -828,6 +831,8 @@ private:
 
 		inline void allocateVal(
 			TransactionContext &txn, int32_t m, KeyValue<FullContainerKeyObject, OId> &e, Setting &setting) {
+			UNUSED_VARIABLE(txn);
+			UNUSED_VARIABLE(setting);
 			BNodeImage<K, V> *image = getImage();
 			const FullContainerKeyCursor *keyCursor =
 				reinterpret_cast<const FullContainerKeyCursor *>(e.key_.ptr_);
@@ -847,6 +852,8 @@ private:
 		template <typename S>
 		inline void setKey(
 			TransactionContext &txn, S &src, S &dest, Setting &setting) {
+			UNUSED_VARIABLE(txn);
+			UNUSED_VARIABLE(setting);
 			UTIL_STATIC_ASSERT((!util::IsSame<K, StringObject>::VALUE));
 			UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyObject>::VALUE));
 			UTIL_STATIC_ASSERT((!util::IsSame<S, CompositeInfoObject>::VALUE));
@@ -886,7 +893,6 @@ private:
 		inline bool finalize(TransactionContext &txn, ResultSize &removeNum) {
 			BNodeImage<K, V> *image = getImage();
 			int32_t valueNum = image->getHeader().size_;
-			bool isSuspend = false;
 			while (valueNum >= 0) {
 				if (!isLeaf()) {
 					OId childOId = getChild(txn, valueNum);
@@ -2406,7 +2412,6 @@ int32_t BtreeMap::find(TransactionContext &txn, SearchContext &sc,
 	}
 	else if (startCond != NULL) {
 		KeyValue<P, V> startKeyVal(*reinterpret_cast<const P *>(startCond->value_), V()); 
-		bool isValueCmp = sc.getSuspendValue() != NULL;
 		if (C == KEY_VALUE_COMPONENT) {
 			if (outputOrder != ORDER_DESCENDING) {
 				startKeyVal.value_ = *reinterpret_cast<const V *>(sc.getSuspendValue());
@@ -2427,13 +2432,13 @@ int32_t BtreeMap::find(TransactionContext &txn, SearchContext &sc,
 			if (outputOrder != ORDER_DESCENDING) {
 				isSuspend = findRange<P, K, V, R, C>(txn, startKeyVal,
 					startCond->isIncluded(), endKeyVal, endCond->isIncluded(),
-					sc.limit_, idList, suspendLimit,
+					sc.getLimit(), idList, suspendLimit,
 					suspendKeyValue, setting);
 			}
 			else {
 				isSuspend = findRangeByDescending<P, K, V, R, C>(txn, startKeyVal,
 					startCond->isIncluded(), endKeyVal, endCond->isIncluded(),
-					sc.limit_, idList, suspendLimit,
+					sc.getLimit(), idList, suspendLimit,
 					suspendKeyValue, setting);
 			}
 		}
@@ -2446,25 +2451,25 @@ int32_t BtreeMap::find(TransactionContext &txn, SearchContext &sc,
 			if (outputOrder != ORDER_DESCENDING) {
 				isSuspend = findRange<P, K, V, R, C>(txn, startKeyVal,
 					startCond->isIncluded(), endKeyVal, startCond->isIncluded(),
-					sc.limit_, idList, suspendLimit,
+					sc.getLimit(), idList, suspendLimit,
 					suspendKeyValue, setting);
 			}
 			else {
 				isSuspend = findRangeByDescending<P, K, V, R, C>(txn, startKeyVal,
 					startCond->isIncluded(), endKeyVal, startCond->isIncluded(),
-					sc.limit_, idList, suspendLimit,
+					sc.getLimit(), idList, suspendLimit,
 					suspendKeyValue, setting);
 			}
 		} 
 		else {
 			if (outputOrder != ORDER_DESCENDING) {
 				isSuspend = findGreater<P, K, V, R, C>(txn, startKeyVal,
-					startCond->isIncluded(), sc.limit_, idList,
+					startCond->isIncluded(), sc.getLimit(), idList,
 					suspendLimit, suspendKeyValue, setting);
 			}
 			else {
 				isSuspend = findGreaterByDescending<P, K, V, R, C>(txn,
-					startKeyVal, startCond->isIncluded(), sc.limit_,
+					startKeyVal, startCond->isIncluded(), sc.getLimit(),
 					idList, suspendLimit, suspendKeyValue, setting);
 			}
 		}
@@ -2477,23 +2482,23 @@ int32_t BtreeMap::find(TransactionContext &txn, SearchContext &sc,
 		}
 		if (outputOrder != ORDER_DESCENDING) {
 			isSuspend = findLess<P, K, V, R, C>(txn, endKeyVal,
-				endCond->isIncluded(), sc.limit_, idList,
+				endCond->isIncluded(), sc.getLimit(), idList,
 				suspendLimit, suspendKeyValue, setting);
 		}
 		else {
 			isSuspend = findLessByDescending<P, K, V, R, C>(txn, endKeyVal,
-				endCond->isIncluded(), sc.limit_, idList,
+				endCond->isIncluded(), sc.getLimit(), idList,
 				suspendLimit, suspendKeyValue, setting);
 		}
 	}
 	else {
 		if (outputOrder != ORDER_DESCENDING) {
 			isSuspend = getAllByAscending<K, V, R>(
-				txn, sc.limit_, idList, suspendLimit, suspendKeyValue);
+				txn, sc.getLimit(), idList, suspendLimit, suspendKeyValue);
 		}
 		else {
 			isSuspend = getAllByDescending<K, V, R>(
-				txn, sc.limit_, idList, suspendLimit, suspendKeyValue);
+				txn, sc.getLimit(), idList, suspendLimit, suspendKeyValue);
 		}
 	}
 	if (isSuspend) {
@@ -3057,6 +3062,7 @@ int32_t BtreeMap::initialize(TransactionContext &txn, ColumnType columnType,
 	bool isUnique, BtreeMapType btreeMapType, uint32_t elemSize) {
 	UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyCursor>::VALUE));
 	UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyObject>::VALUE));
+	UNUSED_VARIABLE(elemSize);
 	isUnique_ = isUnique;
 	keyType_ = columnType;
 	btreeMapType_ = btreeMapType;
@@ -3243,6 +3249,8 @@ inline int32_t BtreeMap::keyCmp(TransactionContext &txn, ObjectManager &objectMa
 	UTIL_STATIC_ASSERT((!util::IsSame<K, CompositeInfoObject>::VALUE));
 	UTIL_STATIC_ASSERT((!util::IsSame<K, float>::VALUE));
 	UTIL_STATIC_ASSERT((!util::IsSame<K, double>::VALUE));
+	UNUSED_VARIABLE(txn);
+	UNUSED_VARIABLE(objectManager);
 	return e1 < e2 ? -1 : (e1 == e2 ? 0 : 1);
 }
 
@@ -3312,6 +3320,10 @@ inline int32_t BtreeMap::keyCmp(TransactionContext &, ObjectManager &,
 template <typename S>
 inline bool BtreeMap::compositeInfoMatch(TransactionContext &txn, ObjectManager &objectManager,
 	const S *e, BaseIndex::Setting &setting) {
+	UNUSED_VARIABLE(txn);
+	UNUSED_VARIABLE(objectManager);
+	UNUSED_VARIABLE(e);
+	UNUSED_VARIABLE(setting);
 	return true;
 }
 

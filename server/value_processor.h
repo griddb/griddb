@@ -237,14 +237,14 @@ public:
 		@brief get Encode Size
 	*/
 	static inline uint8_t encode1ByteVarSize(uint8_t val) {
-			return ((val << 1) | 0x01);
+		return static_cast<uint8_t>(((val << 1) | 0x01));
 	}
 
 	/*!
 		@brief get Encode Size
 	*/
 	static inline uint32_t encode4ByteVarSize(uint32_t val) {
-			return (val << 2);
+		return (val << 2);
 	}
 
 	/*!
@@ -1169,6 +1169,7 @@ private:
 				arrayNum = maxArrayNum;	
 			}
 		}
+		UNUSED_VARIABLE(lowerArrayPos);
 		return arrayNum;
 	}
 	static bool isDivided(uint32_t depth) {

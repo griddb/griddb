@@ -913,7 +913,7 @@ uint64_t SelectionTimeSampling::apiPassThrough(TransactionContext &txn,
 		return 0;
 	}
 
-	sc.limit_ = limit + offset;
+	sc.setLimit(limit + offset);
 
 	uint64_t resultNum = 0;
 	if (offset == 0) {
@@ -966,6 +966,11 @@ int SelectionTimeWindowAgg::operator()(TransactionContext &txn,
 	bool isSorted, OutputOrder, SortExprList *orderByExpr, uint64_t limit,
 	uint64_t offset, FunctionMap &function_map, ExprList &args,
 	OutputMessageRowStore *messageRowStore, ResultType &resultType) {
+	UNUSED_VARIABLE(isSorted);
+	UNUSED_VARIABLE(limit);
+	UNUSED_VARIABLE(offset);
+	UNUSED_VARIABLE(function_map);
+
 	Timestamp startTime, endTime;
 	util::DateTime::FieldType fType;
 	int32_t duration;
@@ -1089,6 +1094,10 @@ uint64_t SelectionTimeWindowAgg::apiPassThrough(TransactionContext &txn,
 	TimeSeries &timeSeries, BtreeMap::SearchContext &sc, OutputOrder,
 	uint64_t limit, uint64_t offset, ExprList &args,
 	OutputMessageRowStore *messageRowStore, ResultType &resultType) {
+	UNUSED_VARIABLE(sc);
+	UNUSED_VARIABLE(limit);
+	UNUSED_VARIABLE(offset);
+
 	Timestamp startTime, endTime;
 	util::DateTime::FieldType fType;
 	int32_t duration;

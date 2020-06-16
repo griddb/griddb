@@ -84,6 +84,7 @@ public:
 	}
 	void initialize(TransactionContext &txn, uint64_t reserveNum,
 		const AllocateStrategy &allocateStrategy) {
+		UNUSED_VARIABLE(txn);
 		BaseObject::allocate<uint8_t>(getAllocateSize(reserveNum),
 			allocateStrategy, getBaseOId(), OBJECT_TYPE_CONTAINER_ID);
 		setReserveNum(reserveNum);
@@ -756,6 +757,7 @@ public:
 		const CompressionSchema &compressionSchema,
 		uint16_t hiCompressionColumnNum,
 		const AllocateStrategy &allocateStrategy) {
+		UNUSED_VARIABLE(txn);
 		BaseObject::allocate<DSDCVal>(sizeof(DSDCVal) * hiCompressionColumnNum,
 			allocateStrategy, getBaseOId(), OBJECT_TYPE_COMPRESSIONINFO);
 
@@ -1574,8 +1576,6 @@ private:
 		util::String &name) const {
 		uint8_t *namePos = optionCursor + OPTION_NAME_OFFSET;
 		StringCursor strCursor(namePos);
-		char *head = reinterpret_cast<char *>(strCursor.str());
-		uint32_t length = strCursor.stringLength();
 		name.assign(reinterpret_cast<char *>(strCursor.str()), strCursor.stringLength());
 	}
 
@@ -1597,9 +1597,8 @@ private:
 	static const uint32_t OPTION_NAME_OFFSET = OPTION_ROWID_OFFSET + sizeof(RowId);
 
 	static const uint8_t COMPOSITE_FLAG_MASK = 0x80; 
-	//static const uint8_t MAP_TYPE_MASK = ~COMPOSITE_FLAG_MASK; 
-	static const uint8_t MAP_TYPE_MASK = static_cast<uint8_t>(~COMPOSITE_FLAG_MASK); 
-	
+	static const uint8_t MAP_TYPE_MASK = static_cast<const uint8_t>(~COMPOSITE_FLAG_MASK); 
+
 private:
 	AllocateStrategy allocateStrategy_;
 };

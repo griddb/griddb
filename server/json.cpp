@@ -215,6 +215,14 @@ V* JsonUtils::findValue(S &src, const u8string &key, Path *path) {
 }
 
 
+u8string JsonUtils::attributeToString(
+		const util::ObjectCoder::Attribute &attr) {
+	return u8string(
+			util::ObjectCoder::Impl::nameBegin(attr),
+			util::ObjectCoder::Impl::nameEnd(attr));
+}
+
+
 template<typename T>
 void JsonUtils::errorByIntRange(double value, T min, T max, const Path *path) {
 	GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_VALUE_OUT_OF_RANGE,
@@ -334,4 +342,313 @@ std::ostream& operator<<(std::ostream &stream, const JsonUtils::Path &path) {
 
 	return stream;
 }
+
+
+template<typename V>
+JsonUtils::BaseInStream<V>::BaseInStream(V base, const Path *path) :
+		base_(base), basePath_(path) {
+}
+
+template<typename V>
+JsonUtils::BaseInStream<V>::BaseInStream(
+		const Value &value, const Path *path) :
+		base_(V()), basePath_(path) {
+	assert(false);
+	static_cast<void>(value);
+}
+
+template<>
+JsonUtils::BaseInStream<const JsonUtils::Value*>::BaseInStream(
+		const Value &value, const Path *path) :
+		base_(&value), basePath_(path) {
+}
+
+template<typename V>
+void JsonUtils::BaseInStream<V>::reserve(size_t size) {
+	static_cast<void>(size);
+}
+
+template<typename V>
+bool JsonUtils::BaseInStream<V>::peekType(Type &type, const Attribute &attr) {
+	Path path;
+	type = getType(peek(attr, path), path);
+	return true;
+}
+
+template<typename V>
+bool JsonUtils::BaseInStream<V>::readBool(const Attribute &attr) {
+	return as<bool>(read(attr), &path_);
+}
+
+template<typename V>
+const JsonUtils::Object* JsonUtils::BaseInStream<V>::readObject(
+		const Attribute &attr) {
+	return &as<Object>(read(attr), &path_);
+}
+
+template<typename V>
+const JsonUtils::Value* JsonUtils::BaseInStream<V>::readValue(
+		Type &type, const Attribute &attr) {
+	const Value &dest = read(attr, false);
+	type = getType(dest, path_);
+
+	return &dest;
+}
+
+template<typename V>
+JsonUtils::Array::const_iterator JsonUtils::BaseInStream<V>::readList(
+		size_t &size, const Attribute &attr) {
+	const Array &dest = as<Array>(read(attr), &path_);
+	size = dest.size();
+	return dest.begin();
+}
+
+template<typename V>
+typename JsonUtils::BaseInStream<V>::Locator
+JsonUtils::BaseInStream<V>::locator() {
+	return Locator(*this);
+}
+
+template<typename V>
+const JsonUtils::Path& JsonUtils::BaseInStream<V>::getLastPath() const {
+	return path_;
+}
+
+template<>
+const JsonUtils::Value&
+JsonUtils::BaseInStream<const JsonUtils::Object*>::peek(
+		const Attribute &attr, Path &path) const {
+	assert(base_ != NULL);
+	path = (basePath_ == NULL ? Path() : basePath_->child());
+
+	const Value *value = findValue<const Value, const Object>(
+			*base_, attributeToString(attr), &path);
+	return (value == NULL ? Impl::NULL_VALUE : *value);
+}
+
+template<>
+const JsonUtils::Value&
+JsonUtils::BaseInStream<const JsonUtils::Value*>::peek(
+		const Attribute &attr, Path &path) const {
+	assert(base_ != NULL);
+	static_cast<void>(attr);
+
+	path = (basePath_ == NULL ? Path() : basePath_->child());
+	return *base_;
+}
+
+template<>
+const JsonUtils::Value&
+JsonUtils::BaseInStream<JsonUtils::Array::const_iterator>::peek(
+		const Attribute &attr, Path &path) const {
+	static_cast<void>(attr);
+
+	path = path_.indexed(path_.isIndexed(false) ? path_.getIndex() + 1 : 0);
+	return *base_;
+}
+
+template<>
+const JsonUtils::Value&
+JsonUtils::BaseInStream<const JsonUtils::Object*>::read(
+		const Attribute &attr, bool required) {
+	assert(base_ != NULL);
+	path_ = (basePath_ == NULL ? Path() : basePath_->child());
+
+	if (required) {
+		return asValue<const Value, const Object>(
+				*base_, attributeToString(attr), &path_);
+	}
+	else {
+		const Value *value = findValue<const Value, const Object>(
+				*base_, attributeToString(attr), &path_);
+		return (value == NULL ? Impl::NULL_VALUE : *value);
+	}
+}
+
+template<>
+const JsonUtils::Value&
+JsonUtils::BaseInStream<const JsonUtils::Value*>::read(
+		const Attribute &attr, bool required) {
+	assert(base_ != NULL);
+	static_cast<void>(attr);
+	static_cast<void>(required);
+
+	return *base_;
+}
+
+template<>
+const JsonUtils::Value&
+JsonUtils::BaseInStream<JsonUtils::Array::const_iterator>::read(
+		const Attribute &attr, bool required) {
+	static_cast<void>(attr);
+	static_cast<void>(required);
+
+	path_ = path_.indexed(path_.isIndexed(false) ? path_.getIndex() + 1 : 0);
+	return *(base_++);
+}
+
+template<typename V>
+typename JsonUtils::BaseInStream<V>::Type
+JsonUtils::BaseInStream<V>::getType(const Value &value, const Path &path) {
+	if (value.is<picojson::null>()) {
+		return util::ObjectCoder::TYPE_NULL;
+	}
+	else if (value.is<bool>()) {
+		return util::ObjectCoder::TYPE_BOOL;
+	}
+	else if (value.is<double>()) {
+		return util::ObjectCoder::TYPE_NUMERIC;
+	}
+	else if (value.is<std::string>()) {
+		return util::ObjectCoder::TYPE_STRING;
+	}
+	else if (value.is<Array>()) {
+		return util::ObjectCoder::TYPE_LIST;
+	}
+	else if (value.is<Object>()) {
+		return util::ObjectCoder::TYPE_OBJECT;
+	}
+	else {
+		JsonUtils::errorByType("(any)", "(unknown)", &path);
+		return util::ObjectCoder::TYPE_NULL;
+	}
+}
+
+template<typename V>
+JsonUtils::BaseInStream<V>::Locator::Locator() :
+		stream_(NULL), base_(V()) {
+}
+
+template<typename V>
+JsonUtils::BaseInStream<V>::Locator::Locator(BaseInStream &stream) :
+		stream_(&stream), base_(stream.base_) {
+}
+
+template<typename V>
+void JsonUtils::BaseInStream<V>::Locator::locate() const {
+	if (stream_ == NULL) {
+		return;
+	}
+
+	stream_->base_ = base_;
+}
+
+template<typename V>
+void JsonUtils::BaseInStream<V>::errorByUnknownEnum(
+		const char8_t *value, const Path &path) {
+	GS_COMMON_THROW_USER_ERROR(GS_ERROR_JSON_UNEXPECTED_TYPE,
+			"Unknown enum constant (value=" << value <<
+			", path=" << path << ")");
+}
+
+template<typename V>
+JsonUtils::BaseOutStream<V>::BaseOutStream(V base) : base_(base) {
+}
+
+template<typename V>
+JsonUtils::BaseOutStream<V>::BaseOutStream(Value &value) : base_(V()) {
+	assert(false);
+	static_cast<void>(value);
+}
+
+template<>
+JsonUtils::BaseOutStream<JsonUtils::Value*>::BaseOutStream(
+		Value &value) : base_(&value) {
+}
+
+template<typename V>
+void JsonUtils::BaseOutStream<V>::reserve(size_t size) {
+	static_cast<void>(size);
+}
+
+template<typename V>
+void JsonUtils::BaseOutStream<V>::writeBool(
+		bool value, const Attribute &attr) {
+	write(attr) = Value(value);
+}
+
+template<typename V>
+void JsonUtils::BaseOutStream<V>::writeString(
+		const char8_t *data, size_t size, const Attribute &attr) {
+	write(attr) = Value(size > 0 ? u8string(data, size) : u8string());
+}
+
+template<typename V>
+void JsonUtils::BaseOutStream<V>::writeBinary(
+		const void *data, size_t size, const Attribute &attr) {
+	Value &dest = write(attr);
+	if (size == 0) {
+		dest = Value(u8string());
+	}
+	else {
+		util::NormalIStringStream iss(
+				u8string(static_cast<const char8_t*>(data), size));
+		util::NormalOStringStream oss;
+		util::HexConverter::encode(oss, iss);
+
+		dest = Value(oss.str());
+	}
+}
+
+template<typename V>
+JsonUtils::Object* JsonUtils::BaseOutStream<V>::writeObject(
+		const Attribute &attr) {
+	return &(write(attr) = Value(Object())).get<Object>();
+}
+
+template<typename V>
+JsonUtils::Value* JsonUtils::BaseOutStream<V>::writeValue(
+		Type type, const Attribute &attr) {
+	if (type == util::ObjectCoder::TYPE_NULL) {
+		return NULL;
+	}
+
+	return &write(attr);
+}
+
+template<typename V>
+JsonUtils::Array* JsonUtils::BaseOutStream<V>::writeList(
+		size_t size, const Attribute &attr) {
+	JsonUtils::Array &dest = (write(attr) = Value(Array())).get<Array>();
+	dest.reserve(size);
+	return &dest;
+}
+
+template<typename V>
+void JsonUtils::BaseOutStream<V>::writeDouble(
+		const double &value, const Attribute &attr) {
+	write(attr) = Value(value);
+}
+
+template<>
+JsonUtils::Value&
+JsonUtils::BaseOutStream<JsonUtils::Object*>::write(const Attribute &attr) {
+	assert(base_ != NULL);
+	return (*base_)[attributeToString(attr)];
+}
+
+template<>
+JsonUtils::Value&
+JsonUtils::BaseOutStream<JsonUtils::Value*>::write(const Attribute &attr) {
+	assert(base_ != NULL);
+	static_cast<void>(attr);
+	return (*base_);
+}
+
+template<>
+JsonUtils::Value&
+JsonUtils::BaseOutStream<JsonUtils::Array*>::write(const Attribute &attr) {
+	assert(base_ != NULL);
+	static_cast<void>(attr);
+	base_->push_back(Value());
+	return base_->back();
+}
+
+template class JsonUtils::BaseInStream<const JsonUtils::Object*>;
+template class JsonUtils::BaseInStream<const JsonUtils::Value*>;
+template class JsonUtils::BaseInStream<JsonUtils::Array::const_iterator>;
+
+template class JsonUtils::BaseOutStream<JsonUtils::Object*>;
+template class JsonUtils::BaseOutStream<JsonUtils::Value*>;
+template class JsonUtils::BaseOutStream<JsonUtils::Array*>;
 

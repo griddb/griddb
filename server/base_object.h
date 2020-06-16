@@ -96,6 +96,10 @@ public:
 		baseOId_ = oId;
 	}
 
+	inline void loadFast(OId oId) {
+		baseAddr_ =
+			objectManager_->load<uint8_t, OBJECT_READ_ONLY>(pId_, oId, &baseOId_, baseAddr_);
+	}
 
 	inline void loadNeighbor(OId oId, AccessMode mode) {
 		if (mode == OBJECT_READ_ONLY) {
@@ -247,6 +251,7 @@ public:
 	V *getCursor() const {
 		return reinterpret_cast<V *>(cursor_);
 	}
+
 	/*!
 		@brief Move cursor
 	*/

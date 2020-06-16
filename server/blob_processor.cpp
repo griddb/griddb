@@ -41,7 +41,6 @@ void LogDevide::initialize(uint64_t inputSize) {
 		} else {
 			uint32_t sizeOfBuddy = calcSizeOfBuddy(restSize);
 
-//			uint32_t fullSize = (sizeOfBuddy >> 0) - ObjectAllocator::BLOCK_HEADER_SIZE;
 			uint32_t halfSize = (sizeOfBuddy >> 1) - ObjectAllocator::BLOCK_HEADER_SIZE;
 			uint32_t quarterSize = (sizeOfBuddy >> 2) - ObjectAllocator::BLOCK_HEADER_SIZE;
 			uint32_t oneEightSize = (sizeOfBuddy >> 3) - ObjectAllocator::BLOCK_HEADER_SIZE;
@@ -177,7 +176,6 @@ uint32_t BlobCursor::initialize(uint8_t *destAddr, uint64_t totalSize) {
 	memcpy(destAddr + encodeTotalSizeLen, &encodeBlobSize, encodeBlobSizeLen);
 
 
-//	uint32_t encodeElumNum = 0, encodeDepth = 0;
 	if (totalSize != 0) {
 		uint64_t encodeElumNum = ValueProcessor::encodeVarSize(maxElem_);
 		uint64_t encodeDepth = ValueProcessor::encodeVarSize(maxDepth_);
@@ -245,18 +243,19 @@ bool BlobCursor::next(CURSOR_MODE mode) {
 		if (mode == REMOVE) {
 			arrayCursor_->finalize();
 		}
-//		bool isExist = (currentDepth_ > 0);
+		bool isExist = (currentDepth_ > 0);
 		while (currentDepth_ > 0) {
 			currentDepth_--;
 			arrayCursor_ = &(stackCusor_[currentDepth_]);
 			if (arrayCursor_->next()) {
-//				isExist = true;
+				isExist = true;
 				break;
 			} else if (mode == REMOVE) {
 				arrayCursor_->finalize();
 			}
 		}
-//		assert(isExist);
+		UNUSED_VARIABLE(isExist);
+		assert(isExist);
 		down(mode);
 	}
 	return true;

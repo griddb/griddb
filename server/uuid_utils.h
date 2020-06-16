@@ -3,7 +3,9 @@
 
 #include "util/type.h"
 
-typedef uint8_t UUIDValue[16];
+const int32_t UUID_BYTE_SIZE = 16;
+const int32_t UUID_STRING_SIZE = 37;
+typedef uint8_t UUIDValue[UUID_BYTE_SIZE];
 
 struct UUIDUtils {
 	static void generate(UUIDValue &out);

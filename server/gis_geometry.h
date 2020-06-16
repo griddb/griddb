@@ -379,6 +379,7 @@ protected:
 	 *
 	 */
 	Geometry(TransactionContext &txn) {
+		UNUSED_VARIABLE(txn);
 		dimension_ = 0;
 		isEmpty_ = true;
 		isAssigned_ = true;

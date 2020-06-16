@@ -19,12 +19,11 @@
 	@brief Implementation of TransactionService for user/database management
 */
 #include "transaction_service.h"
-
 #include "gs_error.h"
-
 #include "log_manager.h"
 #include "transaction_context.h"
 #include "transaction_manager.h"
+#include "cluster_manager.h"
 
 #include "util/container.h"
 
@@ -38,6 +37,7 @@
 #include "result_set.h"
 #include "message_schema.h"
 
+#include "sql_service.h"
 
 #ifndef _WIN32
 #include <signal.h>  
@@ -2335,6 +2335,7 @@ void LoginHandler::executeAuthentication(
 	AuthenticationContext &authContext =
 		transactionManager_->putAuth(ev.getPartitionId(),
 			authStmtId, clientND, emNow
+			, isNewSQL_
 			);
 	authId = authContext.getAuthenticationId();
 	TEST_PRINT1("authId=%d\n", authId);
@@ -2353,6 +2354,13 @@ void LoginHandler::executeAuthentication(
 	char8_t byteData = userType;
 	out << byteData;
 
+	uint8_t isSQL = 0;
+	PartitionId pId = ev.getPartitionId();
+	if (isNewSQL_) {
+		isSQL = 1;
+	}
+	out << isSQL;
+	out << pId;
 
 	StatementMessage::OptionSet optionalRequest(alloc);
 	optionalRequest.set<StatementMessage::Options::ACCEPTABLE_FEATURE_VERSION>(StatementMessage::FEATURE_V4_3);
@@ -2398,6 +2406,11 @@ void AuthenticationHandler::operator()(EventContext &ec, Event &ev) {
 		in >> byteData;
 		userType = static_cast<UserType>(byteData);
 
+		char8_t isSQL;
+		in >> isSQL;
+
+		PartitionId pIdForNewSQL;
+		in >> pIdForNewSQL;
 		StatementMessage::OptionSet optionalRequest(alloc);
 		optionalRequest.decode(in);
 
@@ -2442,7 +2455,15 @@ void AuthenticationHandler::operator()(EventContext &ec, Event &ev) {
 				dbId = UNDEF_DBID;
 			}
 
-			replyAuthenticationAck(ec, alloc, ev.getSenderND(), request, dbId, role);
+			if (isSQL) {
+				NodeId nodeId = ClusterService::resolveSenderND(ev);
+				const NodeDescriptor &ND = sqlService_->getEE()->getServerND(nodeId);
+				request.pId_ = pIdForNewSQL;
+				replyAuthenticationAck(ec, alloc, ND, request, dbId, role, true);
+			}
+			else {
+				replyAuthenticationAck(ec, alloc, ev.getSenderND(), request, dbId, role);
+			}
 		}
 		TEST_PRINT("<<<AuthenticationHandler>>> END\n");
 	}
@@ -2515,9 +2536,15 @@ void AuthenticationAckHandler::replySuccess(
 		response.connectionOption_ = &(authContext.getConnectionND().getUserData<ConnectionOption>());
 
 		Event ev(ec, LOGIN, authContext.getPartitionId());
-		setSuccessReply(alloc, ev, authContext.getStatementId(), status,
-			response);  
-		ec.getEngine().send(ev, authContext.getConnectionND());
+		setSuccessReply(alloc, ev, authContext.getStatementId(), status, response,
+			request);  
+
+		if (!authContext.isSQLService()) {
+			ec.getEngine().send(ev, authContext.getConnectionND());
+		}
+		else {
+			sqlService_->getEE()->send(ev, authContext.getConnectionND());
+		}
 
 		TEST_PRINT("replySuccess() END\n");
 		GS_TRACE_INFO(REPLICATION, GS_TRACE_TXN_REPLY_CLIENT,
@@ -2575,7 +2602,12 @@ void AuthenticationHandler::replyAuthenticationAck(
 		TEST_PRINT1("role=%d\n", role);
 		TEST_PRINT1("privilege=%s\n", privilege.c_str());
 		
-		ec.getEngine().send(authAckEvent, ND);
+		if (isNewSQL) {
+			sqlService_->getEE()->send(authAckEvent, ND);
+		}
+		else {
+			ec.getEngine().send(authAckEvent, ND);
+		}
 
 		TEST_PRINT("replyAuthenticationAck() END\n");
 		GS_TRACE_INFO(REPLICATION, GS_TRACE_TXN_SEND_ACK,
@@ -2619,7 +2651,12 @@ void AuthenticationAckHandler::authHandleError(
 
 		if (!authContext.getConnectionND().isEmpty()) {
 			TEST_PRINT("send\n");
-			ec.getEngine().send(ev, authContext.getConnectionND());
+			if (!authContext.isSQLService()) {
+				ec.getEngine().send(ev, authContext.getConnectionND());
+			}
+			else {
+				sqlService_->getEE()->send(ev, authContext.getConnectionND());
+			}
 		}
 
 		transactionManager_->removeAuth(ack.pId_, ack.authId_);
@@ -2753,7 +2790,14 @@ void CheckTimeoutHandler::checkAuthenticationTimeout(EventContext &ec) {
 
 					if (!authContext.getConnectionND().isEmpty()) {
 						TEST_PRINT("send\n");
-						ec.getEngine().send(ev, authContext.getConnectionND());
+						if (!authContext.isSQLService()) {
+							ec.getEngine().send(
+								ev, authContext.getConnectionND());
+						}
+						else {
+							sqlService_->getEE()->send(
+								ev, authContext.getConnectionND());
+						}
 					}
 				}
 

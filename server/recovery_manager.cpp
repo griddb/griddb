@@ -36,6 +36,8 @@
 #include "time_series.h"
 #include "transaction_service.h"
 #include "message_schema.h"
+#include "resource_set.h"
+#include "cluster_manager.h"
 
 UTIL_TRACER_DECLARE(RECOVERY_MANAGER);
 UTIL_TRACER_DECLARE(RECOVERY_MANAGER_DETAIL);
@@ -47,8 +49,6 @@ UTIL_TRACER_DECLARE(RECOVERY_MANAGER_DETAIL);
 	GS_THROW_CUSTOM_ERROR(LogRedoException, errorCode, message)
 #define RM_RETHROW_LOG_REDO_ERROR(cause, message) \
 	GS_RETHROW_CUSTOM_ERROR(LogRedoException, GS_ERROR_DEFAULT, cause, message)
-
-
 
 const std::string RecoveryManager::BACKUP_INFO_FILE_NAME("gs_backup_info.json");
 const std::string RecoveryManager::BACKUP_INFO_DIGEST_FILE_NAME(
@@ -86,8 +86,8 @@ std::ostream &operator<<(
 RecoveryManager::RecoveryManager(
 		ConfigTable &configTable, bool releaseUnusedFileBlocks)
 	: pgConfig_(configTable),
-	  CHUNK_EXP_SIZE_(util::nextPowerBitsOf2(
-		  configTable.getUInt32(CONFIG_TABLE_DS_STORE_BLOCK_SIZE))),
+	  CHUNK_EXP_SIZE_(static_cast<uint8_t>(util::nextPowerBitsOf2(
+		  configTable.getUInt32(CONFIG_TABLE_DS_STORE_BLOCK_SIZE)))),
 	  CHUNK_SIZE_(1 << CHUNK_EXP_SIZE_),
 	  recoveryOnlyCheckChunk_(
 		  configTable.get<bool>(CONFIG_TABLE_DEV_RECOVERY_ONLY_CHECK_CHUNK)),
@@ -120,17 +120,17 @@ RecoveryManager::~RecoveryManager() {}
 /*!
 	@brief Initializer of RecoveryManager
 */
-void RecoveryManager::initialize(ManagerSet &mgrSet) {
-	chunkMgr_ = mgrSet.chunkMgr_;
-	logMgr_ = mgrSet.logMgr_;
-	pt_ = mgrSet.pt_;
-	clsSvc_ = mgrSet.clsSvc_;
-	sysSvc_ = mgrSet.sysSvc_;
-	txnMgr_ = mgrSet.txnMgr_;
-	ds_ = mgrSet.ds_;
+void RecoveryManager::initialize(ResourceSet &resourceSet) {
+	chunkMgr_ = resourceSet.chunkMgr_;
+	logMgr_ = resourceSet.logMgr_;
+	pt_ = resourceSet.pt_;
+	clsSvc_ = resourceSet.clsSvc_;
+	sysSvc_ = resourceSet.sysSvc_;
+	txnMgr_ = resourceSet.txnMgr_;
+	ds_ = resourceSet.ds_;
 
-	mgrSet.stats_->addUpdator(&chunkMgr_->getChunkManagerStats());
-	mgrSet.stats_->addUpdator(&statUpdator_);
+	resourceSet.stats_->addUpdator(&chunkMgr_->getChunkManagerStats());
+	resourceSet.stats_->addUpdator(&statUpdator_);
 
 }
 
@@ -504,7 +504,7 @@ void RecoveryManager::checkExistingFiles2(ConfigTable &param,
 					}
 				}
 				else {
-					for (int32_t splitId = 0; static_cast<uint32_t>(splitId) < splitCount; ++splitId) {
+					for (uint32_t splitId = 0; splitId < splitCount; ++splitId) {
 						if (cpFileInfoList[pgId].find(splitId) == cpFileInfoList[pgId].end()) {
 							GS_THROW_SYSTEM_ERROR(
 								GS_ERROR_RM_INCOMPLETE_CP_FILE,
@@ -812,8 +812,26 @@ void RecoveryManager::recovery(util::StackAllocator &alloc, bool existBackup,
 						cursor, pgId, recoveryStartCpId);
 				}
 
+				redoAllChunkMeta(alloc, MODE_RECOVERY, cursor,
+						isIncrementalBackup, forLongArchive);
+			}
+			if (!forLongArchive) {
+				LogCursor cursor;
+				if (recoveryStartCpId == UNDEF_CHECKPOINT_ID) {
+					if (lastCpId > 0) {
+						logMgr_->findCheckpointStartLog(cursor, pgId, 1);
+					}
+				}
+				else {
+					logMgr_->findCheckpointStartLog(
+						cursor, pgId, recoveryStartCpId);
+				}
+
 				redoAll(alloc, MODE_RECOVERY, cursor,
 						isIncrementalBackup, forLongArchive);
+				if (releaseUnusedFileBlocks_) {
+					chunkMgr_->releaseUnusedFileBlocks(pgId);
+				}
 				progressPercent_ = static_cast<uint32_t>(
 					(pgId + 1.0) / partitionGroupNum * 90);
 			}
@@ -930,7 +948,7 @@ void RecoveryManager::redoLogList(util::StackAllocator &alloc, Mode mode,
 				LogSequentialNumber dummy = UNDEF_LSN;
 				const LogSequentialNumber nextLsn = redoLogRecord(alloc, mode,
 					logRecord.partitionId_, redoStartTime, redoStartEmTime,
-					logRecord, dummy, false);
+					logRecord, dummy, false, false);
 
 				logMgr_->putReplicationLog(logRecord.partitionId_,
 					logRecord.lsn_, binaryLogRecordSize,
@@ -968,14 +986,15 @@ void RecoveryManager::redoLogList(util::StackAllocator &alloc, Mode mode,
 		}
 	}
 	catch (LogRedoException &e) {
-		RM_RETHROW_LOG_REDO_ERROR(
-			e, "(mode=" << mode << ", pId=" << pId
-						<< ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+		RM_RETHROW_LOG_REDO_ERROR(e,
+				"(mode=" << static_cast<int32_t>(mode) << ", pId=" << pId
+				<< ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 	catch (std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(e, "Apply replication log failed. (mode="
-									   << mode << ", pId=" << pId << ", reason="
-									   << GS_EXCEPTION_MESSAGE(e) << ")");
+		GS_RETHROW_SYSTEM_ERROR(e,
+				"Apply replication log failed. (mode="
+				<< static_cast<int32_t>(mode) << ", pId=" << pId << ", reason="
+				<< GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
 
@@ -1094,7 +1113,7 @@ void RecoveryManager::dumpCheckpointFile(
 		}
 
 		logMgr_->findCheckpointStartLog(cursor, pgId, recoveryStartCpId);
-		BitArray validBitArray(record.numRow_);
+		ChunkBitArray validBitArray(record.numRow_);
 		reconstructValidBitArray(alloc, MODE_RECOVERY, cursor, validBitArray);
 
 		util::NamedFile dumpFile;
@@ -1146,7 +1165,7 @@ void RecoveryManager::dumpCheckpointFile(
 
 void RecoveryManager::reconstructValidBitArray(
 		util::StackAllocator &alloc, Mode mode,
-		LogCursor &cursor, BitArray &validBitArray) {
+		LogCursor &cursor, ChunkBitArray &validBitArray) {
 
 	util::XArray<uint64_t> numRedoLogRecord(alloc);
 	numRedoLogRecord.assign(pgConfig_.getPartitionCount(), 0);
@@ -1247,6 +1266,139 @@ void RecoveryManager::reconstructValidBitArray(
 	validBitArray = chunkMgr_->getCheckpointBit(pgId);
 }
 
+void RecoveryManager::redoAllChunkMeta(util::StackAllocator &alloc, Mode mode,
+	LogCursor &cursor, bool isIncrementalBackup, bool forLongArchive) {
+
+	util::XArray<uint64_t> numRedoLogRecord(alloc);
+	numRedoLogRecord.assign(pgConfig_.getPartitionCount(), 0);
+
+	util::XArray<LogSequentialNumber> redoStartLsn(alloc);
+	redoStartLsn.assign(pgConfig_.getPartitionCount(), 0);
+
+	util::Set<PartitionId> remainPartitionIdSet(alloc);
+
+	const uint32_t traceIntervalMillis = 15000;
+	util::Stopwatch traceTimer(util::Stopwatch::STATUS_STARTED);
+
+	LogRecord logRecord;
+	util::XArray<uint8_t> binaryLogRecord(alloc);
+
+	const PartitionGroupId pgId = cursor.getProgress().pgId_;
+	const PartitionId beginPId = pgConfig_.getGroupBeginPartitionId(pgId);
+	const PartitionId endPId = pgConfig_.getGroupEndPartitionId(pgId);
+
+	for (PartitionId pId = beginPId; pId < endPId; pId++) {
+		if (recoveryPartitionId_[pId] != 0) {
+			remainPartitionIdSet.insert(pId);
+		}
+	}
+
+	uint64_t startTime = util::Stopwatch::currentClock();
+	GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL, GS_TRACE_RM_REDO_LOG_STATUS,
+			"Redo phase 1 start: pgId," << pgId << ",time," << startTime);
+	for (uint64_t logCount = 0;; logCount++) {
+		binaryLogRecord.clear();
+		bool logFound = cursor.nextLog(logRecord, binaryLogRecord);
+		if (!logFound) {
+			break;
+		}
+		const PartitionId pId = logRecord.partitionId_;
+		if (!(beginPId <= pId && pId < endPId)) {
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_RM_PARTITION_NUM_NOT_MATCH,
+				"Invalid PartitionId: " << pId << ", config partitionNum="
+										<< pgConfig_.getPartitionCount()
+										<< ", pgId=" << pgId << ", beginPId="
+										<< beginPId << ", endPId=" << endPId);
+		}
+
+		if (traceTimer.elapsedMillis() >= traceIntervalMillis) {
+			const LogCursor::Progress progress = cursor.getProgress();
+
+			sysSvc_->traceStats(alloc);
+			GS_TRACE_INFO(RECOVERY_MANAGER, GS_TRACE_RM_REDO_LOG_STATUS,
+				"Log redo phase 1 working ("
+				"pgId="
+					<< progress.pgId_ << ", cpId=" << progress.cpId_
+					<< ", fileOffset=" << progress.offset_ << "/"
+					<< progress.fileSize_ << "("
+					<< (static_cast<double>(progress.offset_) * 100 /
+						   static_cast<double>(progress.fileSize_))
+					<< "%)"
+					<< ", logCount=" << logCount << ")");
+
+			traceTimer.reset();
+			traceTimer.start();
+		}
+
+		if (recoveryPartitionId_[pId] == 0) {
+			continue;
+		}
+		const LogSequentialNumber lsn = logRecord.lsn_;
+
+		const LogSequentialNumber prevLsn =
+			logMgr_->getLSN(logRecord.partitionId_);
+		const bool lsnAssignable =
+			LogManager::isLsnAssignable(static_cast<uint8_t>(logRecord.type_));
+
+		if (remainPartitionIdSet.find(pId) == remainPartitionIdSet.end()) {
+			continue;
+		}
+		else {
+			bool checkCpStart = true;
+			if (checkCpStart &&
+				(logRecord.type_ != LogManager::LOG_TYPE_CHECKPOINT_START)) {
+				continue;
+			}
+			redoStartLsn[pId] = lsn;
+			GS_TRACE_INFO(RECOVERY_MANAGER, GS_TRACE_RM_REDO_LOG_STATUS,
+				"Redo started (phase=1, pId=" << pId << ", lsn=" << lsn << ")");
+		}
+
+		const Timestamp stmtStartTimeOnRecovery = 0;
+
+		try {
+			const LogSequentialNumber nextLsn = logRecord.lsn_;
+
+			if (logRecord.type_ == LogManager::LOG_TYPE_CHECKPOINT_START) {
+				redoCheckpointStartLog(
+					alloc, mode, pId, stmtStartTimeOnRecovery,
+					stmtStartTimeOnRecovery, logRecord, redoStartLsn[pId],
+					isIncrementalBackup, forLongArchive);
+				remainPartitionIdSet.erase(pId);
+			}
+			binaryLogRecord.clear();
+			while((redoStartLsn[pId] != UNDEF_LSN)
+				  && cursor.nextLog(logRecord, binaryLogRecord)) {
+				if (pId == logRecord.partitionId_
+						&& logRecord.type_ == LogManager::LOG_TYPE_CHUNK_META_DATA) {
+					redoChunkMetaDataLog(
+						alloc, mode, pId, stmtStartTimeOnRecovery,
+						stmtStartTimeOnRecovery, logRecord, redoStartLsn[pId],
+						isIncrementalBackup, forLongArchive);
+				}
+				binaryLogRecord.clear();
+			}
+			if (remainPartitionIdSet.empty()) {
+				uint64_t elapsed = util::Stopwatch::currentClock() - startTime;
+
+				GS_TRACE_INFO(RECOVERY_MANAGER, GS_TRACE_RM_REDO_LOG_STATUS,
+							  "Redo phase 1 finished: pgId," << pgId << ",time," << elapsed);
+				return;
+			}
+		}
+		catch (std::exception &e) {
+			RM_RETHROW_LOG_REDO_ERROR(
+				e, "(pId=" << pId << ", lsn=" << logRecord.lsn_
+				<< ", type=" << logRecord.type_
+				<< ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+		}
+	}
+	uint64_t elapsed = util::Stopwatch::currentClock() - startTime;
+
+	GS_TRACE_INFO(RECOVERY_MANAGER, GS_TRACE_RM_REDO_LOG_STATUS,
+			"Redo phase 1 finished: pgId," << pgId << ",time," << elapsed);
+}
+
 /*!
 	@brief Redoes from cursor position of Log to the end of Checkpoint file or
    Log.
@@ -1274,6 +1426,9 @@ void RecoveryManager::redoAll(util::StackAllocator &alloc, Mode mode,
 	const PartitionId endPId = pgConfig_.getGroupEndPartitionId(pgId);
 
 	uint64_t startTime = util::Stopwatch::currentClock();
+	uint64_t adjustTime = startTime;
+	GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL, GS_TRACE_RM_REDO_LOG_STATUS,
+			"Redo phase 2 start: pgId," << pgId << ",time," << startTime);
 	for (uint64_t logCount = 0;; logCount++) {
 		binaryLogRecord.clear();
 		if (!cursor.nextLog(logRecord, binaryLogRecord)) {
@@ -1299,7 +1454,7 @@ void RecoveryManager::redoAll(util::StackAllocator &alloc, Mode mode,
 					<< ", fileOffset=" << progress.offset_ << "/"
 					<< progress.fileSize_ << "("
 					<< (static_cast<double>(progress.offset_) * 100 /
-						   progress.fileSize_)
+						   static_cast<double>(progress.fileSize_))
 					<< "%)"
 					<< ", logCount=" << logCount << ")");
 
@@ -1313,7 +1468,7 @@ void RecoveryManager::redoAll(util::StackAllocator &alloc, Mode mode,
 		const LogSequentialNumber lsn = logRecord.lsn_;
 
 		const LogSequentialNumber prevLsn =
-			logMgr_->getLSN(logRecord.partitionId_);
+			logMgr_->getLSN(pId);
 		const bool lsnAssignable =
 			LogManager::isLsnAssignable(static_cast<uint8_t>(logRecord.type_));
 
@@ -1323,13 +1478,10 @@ void RecoveryManager::redoAll(util::StackAllocator &alloc, Mode mode,
 		}
 
 		if (numRedoLogRecord[pId] == 0) {
-			bool checkCpStart = true;
-
-			if (checkCpStart &&
-				(logRecord.type_ != LogManager::LOG_TYPE_CHECKPOINT_START)) {
+			if (logRecord.type_ != LogManager::LOG_TYPE_CHECKPOINT_START) {
 				GS_TRACE_DEBUG(RECOVERY_MANAGER, GS_TRACE_RM_REDO_LOG_STATUS,
 					"Log before cp/put_container skipped (pId="
-						<< logRecord.partitionId_ << ", prevLsn=" << prevLsn
+						<< pId << ", prevLsn=" << prevLsn
 						<< ", targetLsn=" << lsn
 						<< ", lsnAssignable=" << lsnAssignable
 						<< ", logType=" << LogManager::logTypeToString(
@@ -1340,14 +1492,18 @@ void RecoveryManager::redoAll(util::StackAllocator &alloc, Mode mode,
 			}
 			redoStartLsn[pId] = lsn;
 			GS_TRACE_INFO(RECOVERY_MANAGER, GS_TRACE_RM_REDO_LOG_STATUS,
-				"Redo started (pId=" << pId << ", lsn=" << lsn << ")");
+					"Redo started (phase=2, pId=" << pId << ", lsn=" << lsn << ")");
 		}
-
+		if (!ds_->isRestored(pId) && lsn > 1) {
+			GS_TRACE_DEBUG(RECOVERY_MANAGER, GS_TRACE_RM_REDO_LOG_STATUS,
+					"Redo skipped (not restored) (phase=2, pId=" << pId << ", lsn=" << lsn << ")");
+			continue;
+		}
 		if (!(prevLsn == 0 || (lsnAssignable && lsn == prevLsn + 1) ||
 				(!lsnAssignable && lsn == prevLsn))) {
 			GS_THROW_USER_ERROR(GS_ERROR_RM_REDO_LOG_LSN_INVALID,
 				"Invalid LSN (pId="
-					<< logRecord.partitionId_ << ", prevLsn=" << prevLsn
+					<< pId << ", prevLsn=" << prevLsn
 					<< ", targetLsn=" << lsn
 					<< ", lsnAssignable=" << lsnAssignable << ", logType="
 					<< LogManager::logTypeToString(
@@ -1361,27 +1517,26 @@ void RecoveryManager::redoAll(util::StackAllocator &alloc, Mode mode,
 				"Redo lsn jumped (pId=" << pId << ", lsn=" << lsn
 										<< ", prevLsn=" << prevLsn << ")");
 		}
-
 		const Timestamp stmtStartTimeOnRecovery = 0;
 		const LogSequentialNumber nextLsn =
 			forLongArchive ? 
-				redoLogRecordForDataArchive(alloc, mode, logRecord.partitionId_,
+				redoLogRecordForDataArchive(alloc, mode, pId,
 					stmtStartTimeOnRecovery, stmtStartTimeOnRecovery, logRecord,
 					redoStartLsn[pId], isIncrementalBackup) :
-			redoLogRecord(alloc, mode, logRecord.partitionId_,
+				redoLogRecord(alloc, mode, pId,
 				stmtStartTimeOnRecovery, stmtStartTimeOnRecovery, logRecord,
-				redoStartLsn[pId], isIncrementalBackup);
+					redoStartLsn[pId], isIncrementalBackup, true);
 
-		logMgr_->setLSN(logRecord.partitionId_, nextLsn);
-		pt_->setLSN(logRecord.partitionId_, nextLsn);
+		logMgr_->setLSN(pId, nextLsn);
+		pt_->setLSN(pId, nextLsn);
 
 		if (logRecord.type_ == LogManager::LOG_TYPE_DROP_PARTITION) {
 			numAfterDropLogs[pId]++;
 		}
-		numRedoLogRecord[logRecord.partitionId_]++;
+		numRedoLogRecord[pId]++;
 		const uint64_t currentTime = util::Stopwatch::currentClock();
-		if (currentTime - startTime > ADJUST_MEMORY_TIME_INTERVAL_) {
-			startTime = currentTime;
+		if (currentTime - adjustTime > ADJUST_MEMORY_TIME_INTERVAL_) {
+			adjustTime = currentTime;
 			chunkMgr_->redistributeMemoryLimit(0);
 			for (PartitionGroupId tmpPgId = 0; tmpPgId < pgId; ++tmpPgId) {
 				chunkMgr_->adjustPGStoreMemory(tmpPgId);
@@ -1409,6 +1564,9 @@ void RecoveryManager::redoAll(util::StackAllocator &alloc, Mode mode,
 		GS_TRACE_INFO(RECOVERY_MANAGER, GS_TRACE_RM_REDO_LOG_STATUS,
 			"Redo finished (pId=" << pId << ", lsn=" << lsn << ")");
 	}
+	uint64_t elapsed = util::Stopwatch::currentClock() - startTime;
+	GS_TRACE_INFO(RECOVERY_MANAGER, GS_TRACE_RM_REDO_LOG_STATUS,
+			"Redo phase 2 finished: pgId," << pgId << ",time," << elapsed);
 }
 void RecoveryManager::redoChunkLog(util::StackAllocator &alloc,
 	PartitionGroupId pgId, Mode mode, CheckpointId cpId) {
@@ -1476,7 +1634,7 @@ void RecoveryManager::redoChunkLog(util::StackAllocator &alloc,
 					<< ", fileOffset=" << progress.offset_ << "/"
 					<< progress.fileSize_ << "("
 					<< (static_cast<double>(progress.offset_) * 100 /
-						   progress.fileSize_)
+						   static_cast<double>(progress.fileSize_))
 					<< "%)"
 					<< ", logCount=" << numRedoLogRecord[pId] << ")");
 
@@ -1757,6 +1915,16 @@ void RecoveryManager::recoveryChunkMetaData(
 					logRecord.partitionId_,
 					logRecord.chunkCategoryId_, chunkId, chunkKey,
 					unoccupiedSize, filePos);
+
+			GS_TRACE_DEBUG(RECOVERY_MANAGER_DETAIL,
+						  GS_TRACE_RM_RECOVERY_INFO,
+						  "recoveryChunkMeta,pId," << logRecord.partitionId_
+						  << ",catId," << (uint32_t)logRecord.chunkCategoryId_
+						  << ",chunkId," << chunkId
+						  << ",emptySize," << (uint32_t)unoccupiedSize
+						  << ",filePos," << filePos
+						  << ",chunkKey," << chunkKey
+						  );
 			const uint64_t currentTime = util::Stopwatch::currentClock();
 			if (currentTime - startTime > ADJUST_MEMORY_TIME_INTERVAL_) {
 				startTime = currentTime;
@@ -1830,7 +1998,7 @@ void RecoveryManager::redoChunkMetaDataLog(util::StackAllocator &alloc,
 		LogSequentialNumber &redoStartLsn, bool isIncrementalBackup,
 		bool forLongArchive) {
 			if (mode == MODE_RECOVERY && logRecord.lsn_ == redoStartLsn) {
-				GS_TRACE_INFO(RECOVERY_MANAGER_DETAIL,
+				GS_TRACE_DEBUG(RECOVERY_MANAGER_DETAIL,
 					GS_TRACE_RM_REDO_LOG_STATUS,
 					"LOG_TYPE_CHUNK_META_DATA(pId="
 						<< pId << ", lsn=" << logRecord.lsn_
@@ -1916,7 +2084,7 @@ LogSequentialNumber RecoveryManager::redoLogRecordForDataArchive(util::StackAllo
 LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 	Mode mode, PartitionId pId, const util::DateTime &stmtStartTime,
 	EventMonotonicTime stmtStartEmTime, const LogRecord &logRecord,
-	LogSequentialNumber &redoStartLsn, bool isIncrementalBackup) {
+	LogSequentialNumber &redoStartLsn, bool isIncrementalBackup, bool skipRedoChunkMeta) {
 	try {
 		util::StackAllocator::Scope scope(alloc);
 		LogSequentialNumber nextLsn = logRecord.lsn_;
@@ -1934,17 +2102,21 @@ LogSequentialNumber RecoveryManager::redoLogRecord(util::StackAllocator &alloc,
 		const PartitionGroupId pgId = pgConfig_.getPartitionGroupId(pId);
 		switch (logRecord.type_) {
 		case LogManager::LOG_TYPE_CHECKPOINT_START:
+			if (!skipRedoChunkMeta) {
 			redoCheckpointStartLog(
 					alloc, mode, pId, stmtStartTime,
 					stmtStartEmTime, logRecord, redoStartLsn,
 					isIncrementalBackup, false);
+			}
 			break;
 
 		case LogManager::LOG_TYPE_CHUNK_META_DATA:
+			if (!skipRedoChunkMeta) {
 			redoChunkMetaDataLog(
 					alloc, mode, pId, stmtStartTime,
 					stmtStartEmTime, logRecord, redoStartLsn,
 					isIncrementalBackup, false);
+			}
 			break;
 
 		case LogManager::LOG_TYPE_CHECKPOINT_END:
@@ -2704,7 +2876,7 @@ void RecoveryManager::removeTransaction(Mode mode, TransactionContext &txn) {
 
 	default:
 		GS_THROW_USER_ERROR(
-			GS_ERROR_RM_REDO_MODE_INVALID, "(mode=" << mode << ")");
+			GS_ERROR_RM_REDO_MODE_INVALID, "(mode=" << static_cast<int32_t>(mode) << ")");
 	}
 }
 
@@ -2756,7 +2928,7 @@ void RecoveryManager::dumpLogFile(
 						  << ", fileOffset=" << progress.offset_ << "/"
 						  << progress.fileSize_ << "("
 						  << (static_cast<double>(progress.offset_) * 100 /
-								 progress.fileSize_)
+								 static_cast<double>(progress.fileSize_))
 						  << "%)"
 						  << ", logCount=" << logCount << ")" << std::endl;
 

@@ -1512,12 +1512,12 @@ static inline int32_t compareBinaryBinary(TransactionContext&, uint8_t const* p,
 	}
 }
 
-static inline bool isNullAnyType(TransactionContext& txn, uint8_t const* p,
+static inline bool isNullAnyType(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const*, uint32_t) {
 	return p == NULL;
 }
 
-static inline bool isNotNullAnyType(TransactionContext& txn, uint8_t const* p,
+static inline bool isNotNullAnyType(TransactionContext&, uint8_t const* p,
 	uint32_t, uint8_t const*, uint32_t) {
 	return p != NULL;
 }
@@ -1537,7 +1537,7 @@ public:
 	static const Operator isNotNull_;
 	static const Operator geomOp_;
 
-	static const Operator getOperator(DSExpression::Operation op, 
+	static Operator getOperator(DSExpression::Operation op, 
 		ColumnType type1, ColumnType type2);
 };
 

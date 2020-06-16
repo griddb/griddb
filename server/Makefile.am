@@ -13,6 +13,9 @@ topdir = $(srcdir)/..
 utildir = $(topdir)/utility
 libdir = $(topdir)/3rd_party
 trdir = $(srcdir)/tr-cpp
+newsqlincdir = $(srcdir)/include
+sqlitedir = $(libdir)/sqlite_mod
+sqliteworkdir = $(libdir)/sqlite_mod/build/work
 
 all-local: $(buildenvfile)
 
@@ -46,6 +49,7 @@ $(buildenvfile): $(deploybinfile)
 
 clean-local:
 	rm -fv $(bindir)/$(serverbinname) $(bindir)/$(serverenvname)
+	$(sqlitedir)/build/build.sh --clean
 
 distclean-local:
 	rm -fv Makefile.in
@@ -63,6 +67,127 @@ $(activemqinclude)/ActiveMQCPP.h:
 	tar xfz $(libdir)/activemq-cpp-library/activemq-cpp-library-3.7.1-src.tar.gz -C $(libdir)/activemq-cpp-library
 	mv $(libdir)/activemq-cpp-library/activemq-cpp-library-3.7.1 $(libdir)/activemq-cpp-library/org
 	$(libdir)/activemq-cpp-library/build.sh
+
+if BUILD_SH_DEBUG
+buildshopt=--debug
+sqlitedebugopt=-DSQLITE_DEBUG=1
+else !BUILD_SH_DEBUG
+buildshopt=
+sqlitedebugopt=
+endif !BUILD_SH_DEBUG
+
+sqlitebasicdeps = \
+	$(sqlitedir)/src/parse.y \
+	$(sqlitedir)/src/sqlite.h.in
+
+sqlitedeps = \
+	$(sqlitebasicdeps) \
+	$(sqlitedir)/gs_ext/backend.cpp \
+	$(sqlitedir)/gs_ext/backend.hpp \
+	$(sqlitedir)/gs_ext/maings.c \
+	$(sqlitedir)/gs_ext/memgs.c \
+	$(sqlitedir)/src/alter.c \
+	$(sqlitedir)/src/analyze.c \
+	$(sqlitedir)/src/attach.c \
+	$(sqlitedir)/src/auth.c \
+	$(sqlitedir)/src/backup.c \
+	$(sqlitedir)/src/bitvec.c \
+	$(sqlitedir)/src/btmutex.c \
+	$(sqlitedir)/src/btree.c \
+	$(sqlitedir)/src/btree.h \
+	$(sqlitedir)/src/btreeInt.h \
+	$(sqlitedir)/src/build.c \
+	$(sqlitedir)/src/callback.c \
+	$(sqlitedir)/src/complete.c \
+	$(sqlitedir)/src/ctime.c \
+	$(sqlitedir)/src/date.c \
+	$(sqlitedir)/src/delete.c \
+	$(sqlitedir)/src/expr.c \
+	$(sqlitedir)/src/fault.c \
+	$(sqlitedir)/src/fkey.c \
+	$(sqlitedir)/src/func.c \
+	$(sqlitedir)/src/global.c \
+	$(sqlitedir)/src/hash.c \
+	$(sqlitedir)/src/hash.h \
+	$(sqlitedir)/src/hwtime.h \
+	$(sqlitedir)/src/insert.c \
+	$(sqlitedir)/src/journal.c \
+	$(sqlitedir)/src/legacy.c \
+	$(sqlitedir)/src/lempar.c \
+	$(sqlitedir)/src/loadext.c \
+	$(sqlitedir)/src/main.c \
+	$(sqlitedir)/src/malloc.c \
+	$(sqlitedir)/src/mem0.c \
+	$(sqlitedir)/src/mem1.c \
+	$(sqlitedir)/src/mem2.c \
+	$(sqlitedir)/src/mem3.c \
+	$(sqlitedir)/src/mem5.c \
+	$(sqlitedir)/src/memjournal.c \
+	$(sqlitedir)/src/mutex_noop.c \
+	$(sqlitedir)/src/mutex_unix.c \
+	$(sqlitedir)/src/mutex_w32.c \
+	$(sqlitedir)/src/mutex.c \
+	$(sqlitedir)/src/mutex.h \
+	$(sqlitedir)/src/notify.c \
+	$(sqlitedir)/src/os_common.h \
+	$(sqlitedir)/src/os_setup.h \
+	$(sqlitedir)/src/os_unix.c \
+	$(sqlitedir)/src/os_win.c \
+	$(sqlitedir)/src/os_win.h \
+	$(sqlitedir)/src/os.c \
+	$(sqlitedir)/src/os.h \
+	$(sqlitedir)/src/pager.c \
+	$(sqlitedir)/src/pager.h \
+	$(sqlitedir)/src/pcache.c \
+	$(sqlitedir)/src/pcache.h \
+	$(sqlitedir)/src/pcache1.c \
+	$(sqlitedir)/src/pragma.c \
+	$(sqlitedir)/src/prepare.c \
+	$(sqlitedir)/src/printf.c \
+	$(sqlitedir)/src/random.c \
+	$(sqlitedir)/src/resolve.c \
+	$(sqlitedir)/src/rowset.c \
+	$(sqlitedir)/src/select.c \
+	$(sqlitedir)/src/shell.c \
+	$(sqlitedir)/src/sqlite3ext.h \
+	$(sqlitedir)/src/sqliteInt.h \
+	$(sqlitedir)/src/sqliteLimit.h \
+	$(sqlitedir)/src/status.c \
+	$(sqlitedir)/src/table.c \
+	$(sqlitedir)/src/tclsqlite.c \
+	$(sqlitedir)/src/threads.c \
+	$(sqlitedir)/src/tokenize.c \
+	$(sqlitedir)/src/trigger.c \
+	$(sqlitedir)/src/update.c \
+	$(sqlitedir)/src/utf.c \
+	$(sqlitedir)/src/util.c \
+	$(sqlitedir)/src/vacuum.c \
+	$(sqlitedir)/src/vdbe.c \
+	$(sqlitedir)/src/vdbe.h \
+	$(sqlitedir)/src/vdbeapi.c \
+	$(sqlitedir)/src/vdbeaux.c \
+	$(sqlitedir)/src/vdbeblob.c \
+	$(sqlitedir)/src/vdbeInt.h \
+	$(sqlitedir)/src/vdbemem.c \
+	$(sqlitedir)/src/vdbesort.c \
+	$(sqlitedir)/src/vdbetrace.c \
+	$(sqlitedir)/src/vtab.c \
+	$(sqlitedir)/src/wal.c \
+	$(sqlitedir)/src/wal.h \
+	$(sqlitedir)/src/walker.c \
+	$(sqlitedir)/src/where.c \
+	$(sqlitedir)/src/whereInt.h \
+	$(sqlitedir)/tool/mkkeywordhash.c \
+	$(srcdir)/c_utility_cpp.h \
+	$(srcdir)/c_utility.h \
+	$(srcdir)/newsql_interface.h
+
+$(sqliteworkdir)/libsqlite3.a: $(sqliteworkdir)/sqlite3.h $(sqlitedeps)
+	$(sqlitedir)/build/build.sh $(buildshopt)
+
+$(sqliteworkdir)/sqlite3.h: $(sqlitebasicdeps)
+	rm -rf $(sqliteworkdir)/sqlite3.h
+	$(sqlitedir)/build/build.sh $(buildshopt)
 
 $(trdir)/libtrcpp.a:
 	./configure
@@ -86,7 +211,8 @@ endif !LINK_ACTIVEMQ
 
 BUILT_SOURCES = \
 $(aprheaders) \
-$(activemqheaders)
+$(activemqheaders) \
+$(sqliteworkdir)/sqlite3.h
 
 QP_SOURCES= \
 	$(srcdir)/tql.h \
@@ -117,7 +243,7 @@ QP_SOURCES= \
 QP_INCLUDE=../server/tr-cpp
 QP_LDADD=../server/tr-cpp/libtrcpp.a
 
-NOSQL_SOURCES = \
+NEWSQL_SOURCES = \
 $(QP_SOURCES)\
 $(libdir)/ebb/ebb_request_parser.c \
 $(libdir)/sha2/sha2.c \
@@ -134,9 +260,8 @@ $(libdir)/uuid/uuid/uuid_time.c \
 $(srcdir)/zlib_utils.cpp \
 $(srcdir)/array_processor.cpp \
 $(srcdir)/authentication.cpp \
-$(srcdir)/base_container.cpp \
 $(srcdir)/base_index.cpp \
-$(srcdir)/bit_array.cpp \
+$(srcdir)/base_container.cpp \
 $(srcdir)/blob_processor.cpp \
 $(srcdir)/btree_map.cpp \
 $(srcdir)/checkpoint_file.cpp \
@@ -144,6 +269,7 @@ $(srcdir)/checkpoint_service.cpp \
 $(srcdir)/chunk_manager.cpp \
 $(srcdir)/cluster_event_type.cpp \
 $(srcdir)/cluster_manager.cpp \
+$(srcdir)/cluster_service_base.cpp \
 $(srcdir)/cluster_service.cpp \
 $(srcdir)/collection.cpp \
 $(srcdir)/config_table.cpp \
@@ -176,52 +302,159 @@ $(srcdir)/string_array_processor.cpp \
 $(srcdir)/string_processor.cpp \
 $(srcdir)/sub_time_series.cpp \
 $(srcdir)/sync_manager.cpp \
+$(srcdir)/sync_service_base.cpp \
 $(srcdir)/sync_service.cpp \
 $(srcdir)/system_service.cpp \
 $(srcdir)/time_series.cpp \
 $(srcdir)/transaction_context.cpp \
 $(srcdir)/transaction_manager.cpp \
 $(srcdir)/transaction_manager_authentication.cpp \
+$(srcdir)/transaction_service_base.cpp \
 $(srcdir)/transaction_service.cpp \
-$(srcdir)/trigger_service.cpp \
 $(srcdir)/user_management.cpp \
+$(srcdir)/trigger_service.cpp \
 $(srcdir)/uuid_utils.cpp \
 $(srcdir)/value.cpp \
 $(srcdir)/value_operator.cpp \
 $(srcdir)/value_processor.cpp \
-$(srcdir)/main.cpp
+$(srcdir)/main.cpp \
+$(srcdir)/client_stub.c \
+$(srcdir)/c_utility.cpp \
+$(srcdir)/query_function.cpp \
+$(srcdir)/sql_common.cpp \
+$(srcdir)/sql_compiler.cpp \
+$(srcdir)/sql_execution.cpp \
+$(srcdir)/sql_internal_parser.cpp \
+$(srcdir)/sql_job_manager.cpp \
+$(srcdir)/sql_lexer.cpp \
+$(srcdir)/sql_parser.cpp \
+$(srcdir)/sql_processor.cpp \
+$(srcdir)/sql_processor_ddl.cpp \
+$(srcdir)/sql_processor_dml.cpp \
+$(srcdir)/sql_processor_dql.cpp \
+$(srcdir)/sql_processor_result.cpp \
+$(srcdir)/sql_service.cpp \
+$(srcdir)/sql_result_set.cpp \
+$(srcdir)/sql_temp_store.cpp \
+$(srcdir)/sql_tuple.cpp \
+$(srcdir)/sql_tuple_var.cpp \
+$(srcdir)/sql_type.cpp \
+$(srcdir)/nosql_container.cpp \
+$(srcdir)/nosql_db.cpp \
+$(srcdir)/nosql_request.cpp \
+$(srcdir)/nosql_store.cpp \
+$(srcdir)/nosql_store_command.cpp \
+$(srcdir)/nosql_utils.cpp \
+$(srcdir)/sql_allocator_manager.cpp \
+$(srcdir)/sql_cluster_stat.cpp \
+$(srcdir)/sql_execution_direct_insert.cpp \
+$(srcdir)/sql_execution_manager.cpp \
+$(srcdir)/sql_handler_client.cpp \
+$(srcdir)/sql_handler_get_container.cpp \
+$(srcdir)/sql_handler_job.cpp \
+$(srcdir)/sql_handler_nosql_response.cpp \
+$(srcdir)/sql_handler_recover_container.cpp \
+$(srcdir)/sql_handler_request.cpp \
+$(srcdir)/sql_handler_table_schema.cpp \
+$(srcdir)/sql_handler_update_container.cpp \
+$(srcdir)/sql_job.cpp \
+$(srcdir)/sql_job_common.cpp \
+$(srcdir)/sql_profiler.cpp \
+$(srcdir)/sql_service_handler.cpp \
+$(srcdir)/sql_table_schema.cpp \
+$(srcdir)/sql_task_context.cpp \
+$(srcdir)/sql_query_processor.cpp \
+$(srcdir)/sql_expression.cpp \
+$(srcdir)/sql_expression_aggr.cpp \
+$(srcdir)/sql_expression_core.cpp \
+$(srcdir)/sql_expression_numeric.cpp \
+$(srcdir)/sql_expression_string.cpp \
+$(srcdir)/sql_expression_time.cpp \
+$(srcdir)/sql_expression_utils.cpp \
+$(srcdir)/sql_operator.cpp \
+$(srcdir)/sql_operator_group.cpp \
+$(srcdir)/sql_operator_join.cpp \
+$(srcdir)/sql_operator_scan.cpp \
+$(srcdir)/sql_operator_sort.cpp \
+$(srcdir)/sql_operator_utils.cpp \
+$(srcdir)/sql_utils_algorithm.cpp \
+$(srcdir)/sql_utils_container.cpp \
+$(srcdir)/sql_utils_vdbe.cpp \
+$(srcdir)/sql_value.cpp
 
 BASE_CPPFLAGS = \
 -DGD_ENABLE_UNICAST_NOTIFICATION
 
-NOSQL_CPPFLAGS = \
-$(BASE_CPPFLAGS)
+NEWSQL_CPPFLAGS = \
+$(BASE_CPPFLAGS) \
+$(sqlitedebugopt) \
+-DSQLITE_OMIT_ALTERTABLE \
+-DSQLITE_OMIT_ANALYZE \
+-DSQLITE_OMIT_ATTACH \
+-DSQLITE_OMIT_AUTHORIZATION \
+-DSQLITE_OMIT_AUTOINCREMENT \
+-DSQLITE_OMIT_AUTOVACUUM \
+-DSQLITE_OMIT_BUILTIN_TEST \
+-DSQLITE_OMIT_CHECK \
+-DSQLITE_OMIT_COMPILEOPTION_DIAGS \
+-DSQLITE_OMIT_CTE \
+-DSQLITE_OMIT_DEPRECATED \
+-DSQLITE_OMIT_FOREIGN_KEY \
+-DSQLITE_OMIT_GET_TABLE \
+-DSQLITE_OMIT_INCRBLOB \
+-DSQLITE_OMIT_INTEGRITY_CHECK \
+-DSQLITE_OMIT_LOAD_EXTENSION \
+-DSQLITE_OMIT_LOOKASIDE \
+-DSQLITE_OMIT_PROGRESS_CALLBACK \
+-DSQLITE_OMIT_REINDEX \
+-DSQLITE_OMIT_SCHEMA_PRAGMAS \
+-DSQLITE_OMIT_SCHEMA_VERSION_PRAGMAS \
+-DSQLITE_OMIT_SHARED_CACHE \
+-DSQLITE_OMIT_TCL_VARIABLE \
+-DSQLITE_OMIT_TEMPDB \
+-DSQLITE_OMIT_TRIGGER \
+-DSQLITE_OMIT_UTF16 \
+-DSQLITE_OMIT_VACUUM \
+-DSQLITE_OMIT_VIEW \
+-DSQLITE_OMIT_VIRTUALTABLE \
+-DSQLITE_OMIT_WAL \
+-DSQLITE_ZERO_MALLOC \
+-DSQLITE_OMIT_XFER_OPT \
+-DSQLITE_OMIT_COMPLETE \
+-DSQLITE_DEFAULT_MEMSTATUS=0 \
+-DSQLITE_DISABLE_PAGECACHE_OVERFLOW_STATS \
+-DSQLITE_MAX_MMAP_SIZE=0 \
+-DSQLITE_DEFAULT_CACHE_SIZE=1000000 \
+-DGD_ENABLE_NEWSQL_SERVER
 
-NOSQL_LDADD = \
+NEWSQL_LDADD = \
 $(QP_LDADD) \
 $(utildir)/libutil.a \
 $(libdir)/MessagePack/libmsgpack.a \
 $(activemqldadd) \
 $(aprldadd) \
--lpthread -lrt -ldl -lstdc++ -lz
+-lpthread -lrt -ldl -lstdc++ -lz \
+$(sqliteworkdir)/libsqlite3.a
 
-NOSQL_INCLUDES = \
+NEWSQL_INCLUDES = \
 -I$(srcdir) \
 -I$(utildir) \
 -I$(libdir)/MessagePack/include \
 -I$(libdir)/picojson/include \
 -I$(libdir)/ebb \
 -I$(libdir)/sha2 \
--I$(libdir)/omaha/omaha/base/security \
 -I$(libdir)/uuid \
 -I$(srcdir)/tr-cpp \
 -I$(aprinclude) \
--I$(activemqinclude)
+-I$(activemqinclude) \
+-I$(sqliteworkdir) \
+-I$(sqlitedir)/src \
+-I$(newsqlincdir)
 
-NOSQL_LDFLAG = \
+NEWSQL_LDFLAG = \
 -rdynamic
 
-gsserver_SOURCES = $(NOSQL_SOURCES)
-gsserver_CPPFLAGS = $(NOSQL_CPPFLAGS) $(NOSQL_INCLUDES)
-gsserver_LDADD = $(NOSQL_LDADD)
-gsserver_LDFLAGS = $(NOSQL_LDFLAG)
+gsserver_SOURCES = $(NEWSQL_SOURCES)
+gsserver_CPPFLAGS = $(NEWSQL_CPPFLAGS) $(NEWSQL_INCLUDES)
+gsserver_LDADD = $(NEWSQL_LDADD)
+gsserver_LDFLAGS = $(NEWSQL_LDFLAG)

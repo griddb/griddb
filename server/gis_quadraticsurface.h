@@ -254,7 +254,7 @@ public:
 	 * @attention It returns pointer, thus release must be done by the caller
 	 */
 	Geometry *dup(
-		TransactionContext &txn, ObjectManager &objectManager, srid_t) {
+		TransactionContext &txn, ObjectManager &, srid_t) {
 		if (isEmpty()) {
 			return QP_NEW QuadraticSurface(txn);
 		}
@@ -339,7 +339,7 @@ public:
 	 * @return
 	 */
 	Geometry *assign(TransactionContext &txn, ObjectManager &objectManager,
-		ContainerRowWrapper *amap, FunctionMap *, EvalMode) {
+		ContainerRowWrapper *, FunctionMap *, EvalMode) {
 		return dup(txn, objectManager);
 	}
 

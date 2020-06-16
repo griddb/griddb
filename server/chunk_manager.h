@@ -21,9 +21,6 @@
 #ifndef CHUNK_MANAGER_H_
 #define CHUNK_MANAGER_H_
 
-
-
-
 #define TEST_DIRTY_CHECK_SET(pId, categoryId, cId, chunkPtr)
 #define TEST_DIRTY_CHECK_RESET(pId, categoryId, cId)
 #define TEST_DIRTY_CHECK(pId, categoryId, cId, bufferInfo, isForceCheck)
@@ -40,7 +37,6 @@
 #include <iomanip>
 #include <queue>
 #include <vector>
-
 
 #ifdef WIN32
 static inline uint32_t __builtin_clz(uint32_t x) {
@@ -65,6 +61,8 @@ struct OIdBitUtils {
 };
 
 #define EXEC_FAILURE(errorNo)
+
+static const AffinityGroupId UNDEF_AFFINITY_GROUP_ID = UINT64_MAX;
 
 UTIL_TRACER_DECLARE(CHUNK_MANAGER);  
 UTIL_TRACER_DECLARE(CHUNK_MANAGER_DETAIL);  
@@ -124,19 +122,19 @@ public:
 	*/
 	struct DataAffinityInfo {
 		DataAffinityInfo()
-				: expireCategory_(0), updateCategory_(0) {};
+				: expireCategory_(0), dataAffinity_(0) {};
 
 		explicit DataAffinityInfo(ExpireIntervalCategoryId expireCategory)
-				: expireCategory_(expireCategory), updateCategory_(0) {};
+				: expireCategory_(expireCategory), dataAffinity_(0) {};
 
 		DataAffinityInfo(
 				ExpireIntervalCategoryId expireCategory,
-				UpdateIntervalCategoryId updateCategory)
+				AffinityGroupId dataAffinity)
 				: expireCategory_(expireCategory),
-				  updateCategory_(updateCategory) {};
+				  dataAffinity_(dataAffinity) {};
 
 		ExpireIntervalCategoryId expireCategory_;
-		UpdateIntervalCategoryId updateCategory_;
+		AffinityGroupId dataAffinity_;
 	};
 
 	/*!
@@ -197,11 +195,6 @@ public:
 			return atomicCheckpointPoolLimitNum_;
 		}
 
-		bool setAffinitySize(int32_t affinitySize) {
-			atomicAffinitySize_ = affinitySize;
-			return true;
-		}
-
 		int32_t getAtomicShiftableMemRate() {
 			return atomicShiftableMemRate_;
 		}
@@ -251,7 +244,7 @@ public:
 		const std::vector<std::string> &getCpFileDirList() {
 			return cpFileDirList_;
 		}
-		int32_t getAffinitySize() {
+		uint32_t getAffinitySize() {
 			return atomicAffinitySize_;
 		}
 
@@ -334,6 +327,11 @@ public:
 		uint64_t getBufferHashCollisionCount() const;
 		uint64_t getCheckpointFileSize(PartitionGroupId pgId) const;
 		uint64_t getCheckpointFileAllocateSize(PartitionGroupId pgId) const;
+		uint64_t getPGCheckpointChunkCount(PartitionGroupId pgId) const;
+		uint64_t getPGCheckpointKickCount(PartitionGroupId pgId) const;
+		uint64_t getPGCheckpointKickTime(PartitionGroupId pgId) const;
+		uint64_t getPGCheckpointKickCompressTime(PartitionGroupId pgId) const;
+		uint64_t getPGCheckpointCopyCount(PartitionGroupId pgId) const;
 		uint64_t getStoreUse() const;
 		uint64_t getBatchFree() const;
 		int64_t getStoreAllocateData() const;
@@ -386,7 +384,8 @@ public:
 				PartitionGroupId pgId, ChunkCategoryId categoryId) const;
 		uint64_t getPGCategorySwapWrite(
 				PartitionGroupId pgId, ChunkCategoryId categoryId) const;
-
+		uint64_t getStoreUse(PartitionId pId, ChunkCategoryId categoryId) const;
+		uint64_t getStoreObjectUse(PartitionId pId, ChunkCategoryId categoryId) const;
 		static class StatSetUpHandler : public StatTable::SetUpHandler {
 			virtual void operator()(StatTable& stat);
 		} statSetUpHandler_;
@@ -444,7 +443,6 @@ public:
 	}
 
 	static const size_t EXPIRE_INTERVAL_CATEGORY_COUNT = 6;
-	static const size_t UPDATE_INTERVAL_CATEGORY_COUNT = 7;
 
 	static const size_t CHUNKKEY_BIT_NUM =
 		22;  
@@ -714,7 +712,9 @@ public:
 	}
 	void reconstructAffinityTable(PartitionId pId);
 	bool batchFreeChunk(PartitionId pId, ChunkKey chunkKey,
-			uint64_t scanChunkNum, uint64_t& scanCount, uint64_t& freeChunkNum,
+			uint64_t scanChunkNum, uint64_t& scanCount,
+			util::NormalXArray<ChunkCategoryId> &freeCategoryList,
+			util::NormalXArray<ChunkId> &freeChunkList,
 			ChunkKey simulateChunkKey, uint64_t& simulateFreeNum);
 	void purgeDataAffinityInfo(PartitionId pId, Timestamp ts);
 
@@ -722,6 +722,7 @@ public:
 
 	void isValidFileHeader(PartitionGroupId pgId);
 	void resetCheckpointBit(PartitionGroupId pgId);
+	void releaseUnusedFileBlocks(PartitionGroupId pgId);
 	void recoveryChunk(PartitionId pId, ChunkCategoryId categoryId, ChunkId cId,
 			ChunkKey chunkKey, uint8_t unoccupiedSize, uint64_t filePos);
 
@@ -733,7 +734,7 @@ public:
 	void startCheckpoint(PartitionGroupId pgId, CheckpointId cpId);
 	void endCheckpoint(PartitionGroupId pgId, CheckpointId cpId);
 	void flush(PartitionGroupId pgId);
-	BitArray& getCheckpointBit(PartitionGroupId pgId);
+	ChunkBitArray& getCheckpointBit(PartitionGroupId pgId);
 
 	void startCheckpoint(PartitionId pId);
 	void endCheckpoint(PartitionId pId);
@@ -747,7 +748,7 @@ public:
 			ChunkId& cId, ChunkKey* &chunkKey);
 
 	bool isCopyLeft(PartitionId pId);
-	bool copyChunk(PartitionId pId);
+	bool kickChunk(PartitionId pId);
 	uint64_t writeChunk(PartitionId pId);
 	void cleanCheckpointData(PartitionGroupId pgId);
 	uint64_t startSync(CheckpointId cpId, PartitionId pId);
@@ -775,22 +776,22 @@ public:
 	void getBackupChunk(
 			PartitionGroupId pgId, uint64_t filePos, uint8_t* chunk);
 
-	BitArray& getBackupBitArray(PartitionGroupId pgId);
+	ChunkBitArray& getBackupBitArray(PartitionGroupId pgId);
 
 	int64_t getCheckpointChunkPos(
 			PartitionId pId, std::map<int64_t, int64_t> &oldOffsetMap);
 
 	struct MakeSyncTempCpContext {
-		MakeSyncTempCpContext(util::StackAllocator &alloc)
-				: readBuffer_(alloc), writeBuffer_(alloc) {}
+		MakeSyncTempCpContext(util::NormalXArray<uint8_t>& readBuffer, util::NormalXArray<uint8_t>& writeBuffer)
+				: readBuffer_(readBuffer), writeBuffer_(writeBuffer) {}
 		PartitionGroupId pgId_;
 		PartitionId pId_;
 		CheckpointId cpId_;
 		std::string syncTempPath_;
 		CheckpointFile* syncTempFile_;
 		CheckpointFile* srcCpFile_;
-		util::XArray<uint8_t> readBuffer_;
-		util::XArray<uint8_t> writeBuffer_;
+		util::NormalXArray<uint8_t>& readBuffer_;
+		util::NormalXArray<uint8_t>& writeBuffer_;
 		uint32_t chunkSize_;
 		uint64_t chunkNum_;
 		uint32_t copyNum_;
@@ -825,6 +826,8 @@ public:
 	double getStoreMemoryAgingSwapRate(PartitionId pId);
 
 
+	void checkChunkMeta(PartitionId pId);
+
 
 	Config& getConfig() {
 		return config_;
@@ -832,6 +835,8 @@ public:
 	ChunkManagerStats& getChunkManagerStats() {
 		return chunkManagerStats_;
 	}
+	void updateStoreObjectUseStats(PartitionId pId);
+
 	std::string dump(
 			PartitionId pId, ChunkCategoryId categoryId = UNDEF_CHUNK_CATEGORY_ID);
 	std::string dumpChunkCSVField();
@@ -875,7 +880,8 @@ private:
 				INT64_C(-1) & static_cast<int64_t>(CHECKPOINT_POS_MASK);
 
 		BaseMetaChunk()
-			: data_(UNDEF_CHECKPOINT_POS | UNDEF_UNOCCUPIED_SIZE_) {
+			: data_(UNDEF_CHECKPOINT_POS | UNDEF_UNOCCUPIED_SIZE_),
+			dataAffinity_(UNDEF_AFFINITY_GROUP_ID) {
 			}
 
 		void reuse(uint8_t initialUnoccupiedSize);
@@ -898,9 +904,16 @@ private:
 		bool getDifferentialDirtyFlag() const;
 		void setDifferentialDirtyFlag(bool flag);
 		std::string dump();
+		AffinityGroupId getAffinityId() const {
+			return dataAffinity_;
+		}
+		void setAffinityId(AffinityGroupId id) {
+			dataAffinity_ = id;
+		}
 
 	private:
 		uint64_t data_;
+		AffinityGroupId dataAffinity_;
 	};
 
 	enum BufferInfoState {
@@ -978,11 +991,15 @@ private:
 	*/
 	class PartitionMetaChunk {
 		friend class MetaChunkManager;
+
 	private:
 		struct MetaChunkStats {
 			uint64_t useChunkNum_;
 			uint64_t checkpointChunkNum_;
-			MetaChunkStats() : useChunkNum_(0), checkpointChunkNum_(0) {}
+			uint64_t storeObjectUseSize_;
+			MetaChunkStats() : useChunkNum_(0), checkpointChunkNum_(0), 
+				storeObjectUseSize_(0)
+			{}
 		};
 		const ChunkCategoryId chunkCategoryNum_;
 		std::vector<MetaChunkStats> categoryStats_;
@@ -1059,7 +1076,7 @@ private:
 		BatchFreeChunkInfoTable(
 				PartitionGroupAllocator& allocator, PartitionId pId,
 				ChunkCategoryId chunkCategoryId, uint32_t expireCategoryNum,
-				uint32_t updateCategoryNum, uint64_t affinitySize);
+				uint64_t affinitySize);
 		virtual ~BatchFreeChunkInfoTable();
 
 		uint64_t getAffinitySize() const {
@@ -1092,7 +1109,6 @@ private:
 		const uint32_t pId_;
 		const ChunkCategoryId chunkCategoryId_;
 		const uint32_t expireCategoryNum_;
-		const uint32_t updateCategoryNum_;
 		uint64_t affinitySize_;
 	};
 
@@ -1101,7 +1117,7 @@ private:
 		NormalChunkInfoTable(
 				PartitionGroupAllocator& allocator, PartitionId pId,
 				ChunkCategoryId chunkCategoryId, uint32_t expireCategoryNum,
-				uint32_t updateCategoryNum, uint64_t affinitySize);
+				uint64_t affinitySize);
 		virtual ~NormalChunkInfoTable();
 
 		uint64_t getAffinitySize() const {
@@ -1121,7 +1137,7 @@ private:
 		void clear();
 
 		size_t size() const {
-			return updateCategoryNum_;
+			return affinitySize_;
 		}
 
 	private:
@@ -1136,7 +1152,6 @@ private:
 		const uint32_t pId_;
 		const ChunkCategoryId chunkCategoryId_;
 		const uint32_t expireCategoryNum_;
-		const uint32_t updateCategoryNum_;
 		uint64_t affinitySize_;
 	};
 
@@ -1152,10 +1167,10 @@ private:
 		PartitionAffinityChunkInfoTable(
 				PartitionGroupAllocator& allocator, PartitionId pId,
 				ChunkCategoryId chunkCategoryNum, uint32_t expireCategoryNum,
-				uint32_t updateCategoryNum, uint64_t affinitySize,
+				uint64_t affinitySize,
 				ChunkManager *chunkManager);
 
-		~PartitionAffinityChunkInfoTable();
+		virtual ~PartitionAffinityChunkInfoTable();
 
 		void reconstruct(uint64_t newAffinitySize);
 		uint64_t getAffinitySize(ChunkCategoryId categoryId) const {
@@ -1186,7 +1201,6 @@ private:
 		const uint32_t pId_;
 		const ChunkCategoryId chunkCategoryNum_;
 		const uint32_t expireCategoryNum_;
-		const uint32_t updateCategoryNum_;
 		uint64_t affinitySize_;
 		AffinityChunkInfoTableList infoTableList_;
 	};
@@ -1212,8 +1226,8 @@ private:
 			  partitionInfo_(),
 			  affinityChunkInfoTable_(
 					allocator, pId, config.getChunkCategoryNum(),
-					EXPIRE_INTERVAL_CATEGORY_COUNT, UPDATE_INTERVAL_CATEGORY_COUNT,
-					1, chunkManager)  
+					EXPIRE_INTERVAL_CATEGORY_COUNT,
+					config.getAffinitySize(), chunkManager)
 			  ,
 			  syncCursor_() {}
 	};
@@ -1241,8 +1255,8 @@ private:
 				  objectAllocateSize_(0) {}
 		};
 
-		Config& config_;
 		const int32_t MAX_CHUNK_ID;
+		Config& config_;
 		PartitionGroupId pgId_;
 		PGStats pgStats_;
 		std::vector<PartitionId>& pIdList_;
@@ -1307,6 +1321,9 @@ private:
 		void subtractPGAllocatedObjectSize(int64_t size);
 		uint64_t getPGAllocatedObjectSize() const;
 		uint64_t getTotalListElementNum(PartitionId pId);
+		uint64_t getUseChunkNum(PartitionId pId, ChunkCategoryId categoryId);
+		uint64_t getStoreObjectUseSize(PartitionId pId, ChunkCategoryId categoryId);
+		void setStoreObjectUseSize(PartitionId pId, ChunkCategoryId categoryId, uint64_t size);
 		ChunkCursor& getBatchFreeCursor(PartitionId pId);
 		BaseMetaChunk* begin(
 				PartitionId pId, ChunkCursor& cursor,
@@ -1456,7 +1473,9 @@ private:
 		typedef std::deque<int64_t,
 					util::StdAllocator<int64_t, PartitionGroupAllocator> >
 			CheckpointPosList;
-
+		typedef util::XArray<uint8_t,
+				util::StdAllocator<uint8_t, PartitionGroupAllocator> >
+						PGByteArray;
 		struct PGStats {
 			uint64_t checkpointCount_;
 			uint64_t checkpointWriteCount_;
@@ -1475,6 +1494,10 @@ private:
 			uint64_t chunkSyncReadUncompressTime_;
 			uint64_t recoveryReadUncompressTime_;
 			uint64_t backupReadUncompressTime_;
+			uint64_t checkpointKickCount_;
+			uint64_t checkpointKickTime_;
+			uint64_t checkpointKickCompressTime_;
+			uint64_t checkpointCopyCount_;
 
 			PGStats()
 				: checkpointCount_(0),
@@ -1495,6 +1518,10 @@ private:
 				  , chunkSyncReadUncompressTime_(0)
 				  , recoveryReadUncompressTime_(0)
 				  , backupReadUncompressTime_(0)
+				  , checkpointKickCount_(0)
+				  , checkpointKickTime_(0)
+				  , checkpointKickCompressTime_(0)
+				  , checkpointCopyCount_(0)
 				   {}
 		};
 
@@ -1525,19 +1552,22 @@ private:
 		const PartitionGroupId pgId_;
 		PGStats pgStats_;
 		SinglePool pgPool_;  
-		util::Mutex
-			pgPoolMutext_;  
+		util::Mutex&
+			cpMemPoolMutex_;  
 		CheckpointId pgStartCpId_;
 		CheckpointId pgEndCpId_;
-		BitArray pgCheckpointBitArray_;
-		BitArray pgFreeBitArray_;
-		BitArray pgBackupBitArray_;  
+		ChunkBitArray pgCheckpointBitArray_;
+		ChunkBitArray pgFreeBitArray_;
+		ChunkBitArray pgBackupBitArray_;  
+		uint64_t pgKickCount_;
+		uint64_t pgKickTime_;
 		PartitionId pId_;
 		PartitionInfoList& partitionInfo_;
 		ChunkCategoryId
 			categoryCursor_;  
 		std::vector<CopyList*> ptCopyList_;
 		CPWriter cpWriter_;  
+		PGByteArray directWriteBuffer_;
 		PartitionId syncPId_;
 		CheckpointPosList checkpointPosList_;
 		CheckpointFile& checkpointFile_;  
@@ -1563,18 +1593,20 @@ private:
 				PartitionGroupAllocator& allocator,
 				PartitionGroupAllocator& multiThreadAllocator,
 				PartitionInfoList& partitionInfo, CheckpointFile& checkpointFile,
-				MemoryPool& memoryPool, Config& config);
+				MemoryPool& memoryPool, util::Mutex& poolMutex, Config& config);
 		~CheckpointManager();
 		void setPGCheckpointId(CheckpointId cpId);
 		CheckpointId getPGCompletedCheckpointId() const;
 		void switchPGCheckpointBit(CheckpointId cpId);
-		BitArray& getPGCheckpointBit();
+		ChunkBitArray& getPGCheckpointBit();
 		void initializePGCheckpointBit();
 		void setPGCheckpointBit(const uint64_t pos);
 		void flushPGFile();
 		void clearPG();
-		void releaseUnusedPGFileBlocks(const uint64_t bitNum);
-		BitArray& getPGBackupBit();  
+		uint64_t getPGKickCount();
+		uint64_t getPGKickTime();
+		void releaseUnusedPGFileBlocks();
+		ChunkBitArray& getPGBackupBit();  
 		void clearPGBackupBit();	 
 		void appendNewCheckpointChunkId(PartitionId pId,
 				ChunkCategoryId categoryId, ChunkId cId, int64_t oldPos,
@@ -1583,10 +1615,15 @@ private:
 		bool isCopyLeft(PartitionId pId);
 		bool getCopyChunkId(
 				PartitionId pId, ChunkCategoryId& categoryId, ChunkId& cId);
-		void copyChunk(PartitionId pId, ChunkCategoryId categoryId, ChunkId cId,
-				uint8_t* buffer, uint64_t checkpointPos);
 		bool writeChunk(PartitionId pId);
 		void clearPartition();
+		void directWriteChunk(
+				PartitionId pId, ChunkCategoryId categoryId, ChunkId cId,
+				uint8_t* buffer, CheckpointBuffer &checkpointBuffer);
+		void copyChunk(PartitionId pId, ChunkCategoryId categoryId, ChunkId cId,
+				uint8_t* buffer, CheckpointBuffer &checkpointBuffer);
+		bool kickChunk(PartitionId pId, ChunkCategoryId categoryId, ChunkId cId,
+				uint8_t* buffer, uint64_t checkpointPos);
 
 		void readSyncChunk(int64_t checkpointPos, uint8_t* buffer);
 		bool readRecoveryChunk(uint8_t* buffer);
@@ -1622,6 +1659,10 @@ private:
 		UTIL_FORCEINLINE uint64_t getPGChunkSyncReadUncompressTime() const;
 		UTIL_FORCEINLINE uint64_t getPGRecoveryReadUncompressTime() const;
 		UTIL_FORCEINLINE uint64_t getPGBackupReadUncompressTime() const;
+		UTIL_FORCEINLINE uint64_t getPGCheckpointKickCount() const;
+		UTIL_FORCEINLINE uint64_t getPGCheckpointKickTime() const;
+		UTIL_FORCEINLINE uint64_t getPGCheckpointKickCompressTime() const;
+		UTIL_FORCEINLINE uint64_t getPGCheckpointCopyCount() const;
 		UTIL_FORCEINLINE uint64_t getPGFileNum();
 		UTIL_FORCEINLINE uint64_t getPGFileUseNum();
 		UTIL_FORCEINLINE uint64_t getPGFileSize();
@@ -2091,9 +2132,8 @@ private:
 	private:
 		const uint32_t chunkCategoryNum_;
 		const uint32_t expireCategoryNum_;
-		const uint32_t updateCategoryNum_;
-		const uint64_t
-			maxAffinitySize_;  
+		const uint64_t maxAffinitySize_;  
+		uint32_t affinitySize_;
 		PartitionDataList& partitionData_;
 		PartitionAffinityChunkInfoTable& getAffinityChunkInfoTable(PartitionId pId) const {
 			return partitionData_[pId]->affinityChunkInfoTable_;
@@ -2108,6 +2148,7 @@ private:
 		static const uint64_t MAX_AFFINITY_SIZE;  
 		AffinityManager(
 				int32_t chunkCategoryNum, uint64_t maxAffinitySize,
+				uint64_t userSpecifiedAffinitySize,
 				PartitionDataList& partitionData);
 		~AffinityManager();
 		void drop(PartitionId pId);
@@ -2143,6 +2184,7 @@ private:
 
 		PartitionGroupData(ConfigTable &configTable, Config& config, PartitionGroupId pgId,
 				const std::string& dir, MemoryPool& checkpointMemoryPool,
+				util::Mutex& cpMemPoolMutex,
 				MemoryPool& storeMemoryPool, PartitionDataList& partitionDataList);
 	};
 
@@ -2150,6 +2192,7 @@ private:
 	Config config_;					   
 	MemoryPool storeMemoryPool_;	   
 	MemoryPool checkpointMemoryPool_;  
+	util::Mutex checkpointMemoryPoolMutex_;  
 	util::Atomic<uint32_t>
 		atomicExistPartitionNum_;							 
 	std::vector<ChunkCategoryAttribute> categoryAttribute_;  
@@ -2226,7 +2269,8 @@ private:
 
 	ChunkId searchEmptyChunk(
 			PartitionId pId, ChunkCategoryId categoryId,
-			uint8_t powerSize, ChunkKey chunkKey);
+			uint8_t powerSize, ChunkKey chunkKey,
+			uint64_t maxSearchNum, const DataAffinityInfo &affinityInfo);
 	std::string getTraceInfo(
 			PartitionId pId,
 			ChunkCategoryId categoryId = UNDEF_CHUNK_CATEGORY_ID,
@@ -2279,6 +2323,8 @@ UTIL_FORCEINLINE ChunkManager::MetaChunk* ChunkManager::allocateChunk(
 		BaseMetaChunk* baseMetaChunk =
 				metaChunkManager.allocate(pId, categoryId, cId, metaChunkKey);
 
+		baseMetaChunk->setAffinityId(affinityInfo.dataAffinity_);
+
 		AffinityManager& affinityManager = getAffinityManager(pId);
 		if (!exist(pId)) {
 			initialize(pId);
@@ -2327,7 +2373,7 @@ UTIL_FORCEINLINE ChunkManager::MetaChunk* ChunkManager::allocateChunk(
 		GS_TRACE_INFO(CHUNK_MANAGER_DETAIL, GS_TRACE_CHM_INTERNAL_INFO,
 				getTraceInfo(pId, categoryId, cId).c_str() <<
 				",expireCategory," << affinityInfo.expireCategory_ <<
-				",updateCategory," << affinityInfo.updateCategory_ <<
+				",dataAffinity," << affinityInfo.dataAffinity_ <<
 				",chunkKey," << chunkKey);
 		assert(metaChunkManager.isValid(pId, categoryId));
 		assert(baseMetaChunk->getUnoccupiedSize() ==
@@ -2497,9 +2543,6 @@ public:
 	static ExpireIntervalCategoryId calcExpireIntervalCategoryId(
 			uint64_t expireIntervalMillis);
 
-	static UpdateIntervalCategoryId calcUpdateIntervalCategoryId(
-			uint64_t updateIntervalMillis);
-
 	static uint64_t getExpireTimeRoundingBitNum(
 			ExpireIntervalCategoryId expireCategory);
 
@@ -2541,27 +2584,6 @@ ExpireIntervalCategoryId ChunkManager::DataAffinityUtils::calcExpireIntervalCate
 	}
 	else {
 		assert(false); 
-		return 0;
-	}
-}
-
-UTIL_FORCEINLINE
-UpdateIntervalCategoryId ChunkManager::DataAffinityUtils::calcUpdateIntervalCategoryId(
-		uint64_t updateIntervalMillis) {
-	if (updateIntervalMillis > 0) {
-		uint32_t log2Value = ilog2(updateIntervalMillis);
-		if (log2Value < MIN_UPDATE_INTERVAL_CATEGORY_TERM_BITS) {
-			return 1;
-		}
-		else {
-			return static_cast<UpdateIntervalCategoryId>(
-					(log2Value > MAX_UPDATE_INTERVAL_CATEGORY_TERM_BITS) ?
-							(UPDATE_INTERVAL_CATEGORY_COUNT - 1)
-							: ((log2Value - MIN_UPDATE_INTERVAL_CATEGORY_TERM_BITS) / 6 + 2)
-					);
-		}
-	}
-	else {
 		return 0;
 	}
 }
@@ -3082,6 +3104,22 @@ uint64_t ChunkManager::CheckpointManager::getPGRecoveryReadUncompressTime() cons
 UTIL_FORCEINLINE
 uint64_t ChunkManager::CheckpointManager::getPGBackupReadUncompressTime() const {
 	return pgStats_.backupReadUncompressTime_;
+}
+UTIL_FORCEINLINE
+uint64_t ChunkManager::CheckpointManager::getPGCheckpointKickCount() const {
+	return pgStats_.checkpointKickCount_;
+}
+UTIL_FORCEINLINE
+uint64_t ChunkManager::CheckpointManager::getPGCheckpointKickTime() const {
+	return pgStats_.checkpointKickTime_;
+}
+UTIL_FORCEINLINE
+uint64_t ChunkManager::CheckpointManager::getPGCheckpointKickCompressTime() const {
+	return pgStats_.checkpointKickCompressTime_;
+}
+UTIL_FORCEINLINE
+uint64_t ChunkManager::CheckpointManager::getPGCheckpointCopyCount() const {
+	return pgStats_.checkpointCopyCount_;
 }
 UTIL_FORCEINLINE uint64_t ChunkManager::CheckpointManager::getPGFileNum() {
 	const CheckpointFile& checkpointFile = getCheckpointFile();

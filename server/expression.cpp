@@ -2020,6 +2020,7 @@ const ColumnInfo *Expr::getColumnInfo() {
  */
 TermCondition *Expr::toCondition(TransactionContext &txn, MapType mapType,
 	Query &queryObj, bool notFlag) {
+	UNUSED_VARIABLE(queryObj);
 	TermCondition c;
 	Operation op = op_;  
 	bool isValueCastableToKey =
@@ -2186,6 +2187,7 @@ TermCondition *Expr::toCondition(TransactionContext &txn, MapType mapType,
 			break;
 		}
 
+		UNUSED_VARIABLE(indexExpr);
 		if (isValueCastableToKey) {
 			if (indexValue != NULL) {
 				c.value_ = indexValue;
@@ -2544,7 +2546,6 @@ Expr *Expr::newColumnNode(Token &colName, TransactionContext &txn,
 	unsigned int parseState, Collection *collection, TimeSeries *timeSeries) {
 	char buf[MAX_COLUMN_NAME_LEN];
 	char *cName = buf;
-	int i = 0;
 	Expr *ret;
 
 	if (colName.z[0] == '*') {

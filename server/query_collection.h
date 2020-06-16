@@ -63,6 +63,7 @@ protected:
 
 	Collection
 		*collection_;  
+
 	void doQueryWithoutCondition(
 		TransactionContext &txn, Collection &collection, ResultSet &resultSet);
 	void doQueryWithCondition(
@@ -110,6 +111,7 @@ public:
 			throw;
 		}
 	}
+
 	CollectionRowWrapper(TransactionContext &txn, Collection &collection,
 		uint64_t *pBitmap)
 		: txn_(txn),
@@ -142,6 +144,7 @@ public:
 			throw;
 		}
 	}
+
 	~CollectionRowWrapper() {
 		util::StackAllocator &alloc = txn_.getDefaultAllocator();
 		for (uint32_t i = 0; i < varrayCounter_; i++) {
@@ -151,10 +154,10 @@ public:
 		}
 		ALLOC_DELETE((alloc), varray_);
 	}
+
 	void load(OId oId) {
 		rowId_ = oId;
 		rowArray_.load(txn_, rowId_, &collection_, OBJECT_READ_ONLY);
-//		util::StackAllocator &alloc = txn_.getDefaultAllocator();
 		memset(pBitmap_, 0,
 			sizeof(uint64_t) * ((collection_.getColumnNum() / 64) + 1));
 		for (uint32_t i = 0; i < varrayCounter_; i++) {

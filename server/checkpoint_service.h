@@ -31,12 +31,12 @@
 #include "system_service.h"	
 #include "sync_manager.h"
 
-
 class CheckpointServiceMainHandler;  
 class CheckpointServiceGroupHandler;  
 class CheckpointOperationHandler;   
 class LogFlushPeriodicallyHandler;  
 class ConfigTable;
+class ResourceSet;
 
 /*!
 	@brief Locks a Partition group.
@@ -86,7 +86,6 @@ class RecoveryManager;
 class TransactionManager;
 class TransactionService;
 class CheckpointManager;
-struct ManagerSet;
 
 /*!
 	@brief Operates Checkpoint events.
@@ -96,7 +95,7 @@ public:
 	CheckpointHandler(){};
 	~CheckpointHandler(){};
 
-	void initialize(const ManagerSet &mgrSet);
+	void initialize(const ResourceSet &resourceSet);
 
 	TransactionService *transactionService_;
 	TransactionManager *transactionManager_;
@@ -158,8 +157,10 @@ public:
 			util::XArray<uint8_t> &metaDataFileOffset,
 			util::XArray<uint8_t> &metaDataChunkKey, int32_t validCount);
 
+	void checkFailureWhileWriteChunkMetaLog(int32_t mode);
+
 	void setIncrementalBackupFilePos(
-			PartitionId pId, bool isCumulative, BitArray &bitArray);
+			PartitionId pId, bool isCumulative, ChunkBitArray &bitArray);
 
 	void resetIncrementalBackupFilePos(PartitionId pId);
 };
@@ -313,7 +314,7 @@ public:
 
 	~CheckpointService();
 
-	void initialize(ManagerSet &mgrSet);
+	void initialize(ResourceSet &resourceSet);
 
 
 	void start(const Event::Source &eventSource);
@@ -656,6 +657,9 @@ private:
 
 	std::vector<LogSequentialNumber> lastCpStartLsnList_;
 	std::vector<uint8_t> needGroupCheckpoint_;
+
+	util::NormalXArray<uint8_t> longtermSyncReadBuffer_;
+	util::NormalXArray<uint8_t> longtermSyncWriteBuffer_;
 
 
 	util::Atomic<int32_t> lastMode_;
