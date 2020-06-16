@@ -16,8 +16,6 @@ BINFILES = $(BINDIRS)/gridstore.jar \
 	$(BINDIRS)/gs_stat \
 	$(BINDIRS)/gs_stopcluster \
 	$(BINDIRS)/gs_stopnode \
-	$(BINDIRS)/gs_appendcluster \
-	$(BINDIRS)/gs_increasecluster \
 	$(BINDIRS)/log.py \
 	$(BINDIRS)/util.py
 CONFFILES = $(CONFDIRS)/gs_cluster.json \
@@ -48,7 +46,6 @@ $(BINDIRS)/gridstore.jar:
 
 dist_noinst_DATA = $(BINFILES) $(CONFFILES) $(OSSFILES) \
 	README.md \
-	docs/manual/GridDB_RPM_InstallGuide.html \
 	docs/sample/program/Sample1.java
 
 distclean-local:
