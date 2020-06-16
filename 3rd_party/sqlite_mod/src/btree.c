@@ -15,6 +15,443 @@
 */
 #include "btreeInt.h"
 
+#ifdef GD_ENABLE_NEWSQL_SERVER
+#include "vdbeInt.h"
+#include "backend.hpp"
+#include "newsql_interface.h"
+typedef char bool;
+
+#define XPRINTF
+
+static int sqlite3gsAdapterOpen(GsAdapter **ppGsAdapter) {
+  GsAdapter *p = NULL;
+
+  p = sqlite3MallocZero(sizeof(GsAdapter));
+  if (p == NULL) {
+    return SQLITE_NOMEM;
+  }
+  *ppGsAdapter = p;
+
+  return SQLITE_OK;
+}
+
+static void sqlite3gsAdapterClose(GsAdapter *pGsAdapter) {
+  sqlite3_free(pGsAdapter);
+}
+
+/* Punlish a new table id. */
+static int sqlite3gsAdapterCreateTable(GsAdapter *pGsAdapter, int *piTable) {
+  *piTable = ++pGsAdapter->nTable + 1;
+  return SQLITE_OK;
+}
+
+static int sqlite3gsAdapterDropTable(GsAdapter *pGsAdapter, int iTable) {
+  /* Do nothing */
+  return SQLITE_OK;
+}
+
+/* Open a cursor for TQL result set. */
+static int sqlite3gsAdapterCursor(struct SQLStatement *pSQLStatement, int iTable, GsAdptCursor **pGsAdptCur) {
+  GsAdptCursor *pCur = NULL;
+  SQLCursor *pGsCur = NULL;
+  GSType *pColType = NULL;
+  int nCol = 0;
+  GSResult grc = GS_RESULT_OK;
+  int rc = SQLITE_OK;
+  int i = 0;
+
+  grc = gsCursorCreate(pSQLStatement, iTable, &pGsCur);
+  if (!GS_SUCCEEDED(grc)) {
+    return SQLITE_ERROR;
+  }
+
+  nCol = gsColumnCount(pSQLStatement, iTable);
+  pCur = (GsAdptCursor*)sqlite3MallocZero(sizeof(GsAdptCursor));
+  pColType = (GSType*)sqlite3MallocZero(sizeof(GSType)*nCol);
+  if (pCur == NULL || pColType == NULL) {
+    gsCursorClose(pGsCur);
+    if (pCur != NULL) {sqlite3_free(pColType);}
+    if (pColType != NULL) {sqlite3_free(pColType);}
+    return SQLITE_NOMEM;
+  }
+
+  for (i = 0; i < nCol; i++) {
+    pColType[i] = gsColumnType(pSQLStatement, iTable, i);
+  }
+
+  pCur->pSQLStatement = pSQLStatement;
+  pCur->pGsCur = pGsCur;
+  pCur->pColType = pColType;
+
+  *pGsAdptCur = pCur;
+  return SQLITE_OK;
+}
+
+/* Free memory of a cursor */
+static void sqlite3gsAdapterCloseCursor(GsAdptCursor *pGsAdptCur) {
+  if (pGsAdptCur->pGsCur != NULL) {gsCursorClose(pGsAdptCur->pGsCur);}
+  sqlite3_free(pGsAdptCur->pColType);
+  sqlite3_free(pGsAdptCur);
+}
+
+/* Move to the first */
+static int sqlite3gsAdapterFirst(GsAdptCursor *pGsAdptCur,int *pRes) {
+  return gsCursorFirst(pGsAdptCur->pGsCur, pRes);
+}
+
+/* Move to the next */
+static int sqlite3gsAdapterNext(GsAdptCursor *pGsAdptCur, int *pRes) {
+  return gsCursorNext(pGsAdptCur->pGsCur, pRes);
+}
+
+/* Move to the last */
+static int sqlite3gsAdapterLast(GsAdptCursor *pGsAdptCur, int *pRes) {
+  return gsCursorLast(pGsAdptCur->pGsCur, pRes);
+}
+
+int sqlite3gsData(BtCursor *pCur, int iCol, Mem *pMem) {
+  GSResult grc = GS_RESULT_OK;
+  int rc = SQLITE_OK;
+  GsAdptCursor *pGsAdptCur = (GsAdptCursor*)pCur->pBkendCur;
+  SQLCursor *pGsCur = pGsAdptCur->pGsCur;
+  GSType colType = pGsAdptCur->pColType[iCol];
+  int isNull = 0;
+
+  pMem->db = pCur->pBtree->db;
+  switch (colType) {
+    case GS_TYPE_STRING: {
+      char *value = NULL;
+      size_t size = 0;
+      grc = gsGetValueString(pGsCur, iCol, &value, &size);
+      if (!GS_SUCCEEDED(grc)) {return SQLITE_ERROR;}
+      rc = sqlite3VdbeMemSetStr(pMem, value, (int)size, SQLITE_UTF8, SQLITE_STATIC);
+      break;
+    }
+    case GS_TYPE_BOOL: {
+      bool value = 0;
+      grc = gsGetValueBool(pGsCur, iCol, &value);
+      if (!GS_SUCCEEDED(grc)) {return SQLITE_ERROR;}
+      sqlite3VdbeMemSetInt64(pMem, value);
+      break;
+    }
+    case GS_TYPE_BYTE: {
+      int8_t value = 0;
+      grc = gsGetValueByte(pGsCur, iCol, &value);
+      if (!GS_SUCCEEDED(grc)) {return SQLITE_ERROR;}
+      sqlite3VdbeMemSetInt64(pMem, (i64)value);
+      break;
+    }
+    case GS_TYPE_SHORT: {
+      int16_t value = 0;
+      grc = gsGetValueShort(pGsCur, iCol, &value);
+      if (!GS_SUCCEEDED(grc)) {return SQLITE_ERROR;}
+      sqlite3VdbeMemSetInt64(pMem, (i64)value);
+      break;
+    }
+    case GS_TYPE_INTEGER: {
+      int32_t value = 0;
+      grc = gsGetValueInteger(pGsCur, iCol, &value);
+      if (!GS_SUCCEEDED(grc)) {return SQLITE_ERROR;}
+      sqlite3VdbeMemSetInt64(pMem, (i64)value);
+      break;
+    }
+    case GS_TYPE_LONG: {
+      int64_t value = 0L;
+      grc = gsGetValueLong(pGsCur, iCol, &value);
+      if (!GS_SUCCEEDED(grc)) {return SQLITE_ERROR;}
+      sqlite3VdbeMemSetInt64(pMem, value);
+      break;
+    }
+    case GS_TYPE_FLOAT: {
+      float value = 0.0f;
+      grc = gsGetValueFloat(pGsCur, iCol, &value);
+      if (!GS_SUCCEEDED(grc)) {return SQLITE_ERROR;}
+      sqlite3VdbeMemSetDouble(pMem, (double)value);
+      break;
+    }
+    case GS_TYPE_DOUBLE: {
+      double value = 0.0;
+      grc = gsGetValueDouble(pGsCur, iCol, &value);
+      if (!GS_SUCCEEDED(grc)) {return SQLITE_ERROR;}
+      sqlite3VdbeMemSetDouble(pMem, value);
+      break;
+    }
+    case GS_TYPE_TIMESTAMP: {
+      int64_t value = 0;
+      grc = gsGetValueTimestamp(pGsCur, iCol, &value);
+      if (!GS_SUCCEEDED(grc)) {return SQLITE_ERROR;}
+      sqlite3VdbeMemSetInt64(pMem, (i64)value);
+      break;
+    }
+    case GS_TYPE_BLOB: {
+      GSBlob value = {0};
+      grc = gsGetValueBlob(pGsCur, iCol, &value);
+      if (!GS_SUCCEEDED(grc)) {return SQLITE_ERROR;}
+      rc = sqlite3VdbeMemSetStr(pMem, (const char*)value.data, value.size, 0, SQLITE_STATIC);
+      break;
+    }
+    /* NULL */
+    case GS_TYPE_STRING_NULL: {
+      char *value = NULL;
+      size_t size = 0;
+      grc = gsGetValueStringNull(pGsCur, iCol, &value, &size, &isNull);
+      if (!GS_SUCCEEDED(grc)) {return SQLITE_ERROR;}
+      if (isNull) {
+        sqlite3VdbeMemSetNull(pMem);
+      } else {
+        rc = sqlite3VdbeMemSetStr(pMem, value, (int)size, SQLITE_UTF8, SQLITE_STATIC);
+      }
+      break;
+    }
+    case GS_TYPE_BOOL_NULL: {
+      bool value = 0;
+      grc = gsGetValueBoolNull(pGsCur, iCol, &value, &isNull);
+      if (!GS_SUCCEEDED(grc)) {return SQLITE_ERROR;}
+      if (isNull) {
+        sqlite3VdbeMemSetNull(pMem);
+      } else {
+        sqlite3VdbeMemSetInt64(pMem, value);
+      }
+      break;
+    }
+    case GS_TYPE_BYTE_NULL: {
+      int8_t value = 0;
+      grc = gsGetValueByteNull(pGsCur, iCol, &value, &isNull);
+      if (!GS_SUCCEEDED(grc)) {return SQLITE_ERROR;}
+      if (isNull) {
+        sqlite3VdbeMemSetNull(pMem);
+      } else {
+        sqlite3VdbeMemSetInt64(pMem, (i64)value);
+      }
+      break;
+    }
+    case GS_TYPE_SHORT_NULL: {
+      int16_t value = 0;
+      grc = gsGetValueShortNull(pGsCur, iCol, &value, &isNull);
+      if (!GS_SUCCEEDED(grc)) {return SQLITE_ERROR;}
+      if (isNull) {
+        sqlite3VdbeMemSetNull(pMem);
+      } else {
+        sqlite3VdbeMemSetInt64(pMem, (i64)value);
+      }
+      break;
+    }
+    case GS_TYPE_INTEGER_NULL: {
+      int32_t value = 0;
+      int isNull = 0;
+      grc = gsGetValueIntegerNull(pGsCur, iCol, &value, &isNull);
+      if (!GS_SUCCEEDED(grc)) {return SQLITE_ERROR;}
+      if (isNull) {
+        sqlite3VdbeMemSetNull(pMem);
+      } else {
+        sqlite3VdbeMemSetInt64(pMem, (i64)value);
+      }
+      break;
+    }
+    case GS_TYPE_LONG_NULL: {
+      int64_t value = 0L;
+      int isNull = 0;
+      grc = gsGetValueLongNull(pGsCur, iCol, &value, &isNull);
+      if (!GS_SUCCEEDED(grc)) {return SQLITE_ERROR;}
+      if (isNull) {
+        sqlite3VdbeMemSetNull(pMem);
+      } else {
+        sqlite3VdbeMemSetInt64(pMem, value);
+      }
+      break;
+    }
+    case GS_TYPE_FLOAT_NULL: {
+      float value = 0.0F;
+      grc = gsGetValueFloatNull(pGsCur, iCol, &value, &isNull);
+      if (!GS_SUCCEEDED(grc)) {return SQLITE_ERROR;}
+      if (isNull) {
+        sqlite3VdbeMemSetNull(pMem);
+      } else {
+        sqlite3VdbeMemSetDouble(pMem, (double)value);
+      }
+      break;
+    }
+    case GS_TYPE_DOUBLE_NULL: {
+      double value = 0.0;
+      grc = gsGetValueDoubleNull(pGsCur, iCol, &value, &isNull);
+      if (!GS_SUCCEEDED(grc)) {return SQLITE_ERROR;}
+      if (isNull) {
+        sqlite3VdbeMemSetNull(pMem);
+      } else {
+        sqlite3VdbeMemSetDouble(pMem, value);
+      }
+      break;
+    }
+    case GS_TYPE_TIMESTAMP_NULL: {
+      int64_t value = 0;
+      grc = gsGetValueTimestampNull(pGsCur, iCol, &value, &isNull);
+      if (!GS_SUCCEEDED(grc)) {return SQLITE_ERROR;}
+      if (isNull) {
+        sqlite3VdbeMemSetNull(pMem);
+      } else {
+        sqlite3VdbeMemSetInt64(pMem, (i64)value);
+      }
+      break;
+    }
+    case GS_TYPE_BLOB_NULL: {
+      GSBlob value = {0};
+      grc = gsGetValueBlobNull(pGsCur, iCol, &value, &isNull);
+      if (!GS_SUCCEEDED(grc)) {return SQLITE_ERROR;}
+      if (isNull) {
+        sqlite3VdbeMemSetNull(pMem);
+      } else {
+        rc = sqlite3VdbeMemSetStr(pMem, (const char*)value.data, value.size, 0, SQLITE_STATIC);
+      }
+      break;
+    }
+    default:
+      assert(0);
+      sqlite3VdbeMemSetNull(pMem);
+      rc = SQLITE_ERROR;
+      break;
+  }
+  return rc;
+}
+
+int sqlite3gsIsGsCursor(BtCursor *pCur) {
+  return pCur && pCur->type == TBLTYPE_TQLDB;
+}
+
+int sqlite3gsColumnType(BtCursor *pCur, int iCol) {
+  GsAdptCursor *pGsAdptCur = (GsAdptCursor*)pCur->pBkendCur;
+  int iType = SQLITE_AFF_NONE;
+
+  switch (pGsAdptCur->pColType[iCol]) {
+    case GS_TYPE_STRING:
+      iType = SQLITE_AFF_TEXT;
+      break;
+    case GS_TYPE_BOOL:
+    case GS_TYPE_BYTE:
+    case GS_TYPE_SHORT:
+    case GS_TYPE_INTEGER:
+    case GS_TYPE_LONG:
+      iType = SQLITE_AFF_INTEGER;
+      break;
+    case GS_TYPE_FLOAT:
+    case GS_TYPE_DOUBLE:
+      iType = SQLITE_AFF_REAL;
+      break;
+    case GS_TYPE_TIMESTAMP:
+      iType = SQLITE_AFF_INTEGER;
+      break;
+    case GS_TYPE_BLOB:
+      iType = SQLITE_AFF_NONE;
+      break;
+    /* NULL */
+    case GS_TYPE_STRING_NULL:
+      iType = SQLITE_AFF_TEXT;
+      break;
+    case GS_TYPE_BOOL_NULL:
+    case GS_TYPE_BYTE_NULL:
+    case GS_TYPE_SHORT_NULL:
+    case GS_TYPE_INTEGER_NULL:
+    case GS_TYPE_LONG_NULL:
+      iType = SQLITE_AFF_INTEGER;
+      break;
+    case GS_TYPE_FLOAT_NULL:
+    case GS_TYPE_DOUBLE_NULL:
+      iType = SQLITE_AFF_REAL;
+      break;
+    case GS_TYPE_TIMESTAMP_NULL:
+      iType = SQLITE_AFF_INTEGER;
+      break;
+    case GS_TYPE_BLOB_NULL:
+      iType = SQLITE_AFF_NONE;
+      break;
+    default:
+      assert(0);
+      break;
+  }
+  return iType;
+}
+
+void *sqlite3gsMemGetPointer(Mem *pMem) {
+  if (pMem->flags & MEM_Int) {
+    return &pMem->u.i;
+  } else if (pMem->flags & MEM_Real) {
+    return &pMem->u.r;
+  } else if (pMem->flags & (MEM_Str|MEM_Blob)) {
+    return pMem->z;
+  } else {
+    return NULL;
+  }
+}
+
+int sqlite3gsMemGetPtrSize(Mem *pMem) {
+  /* NULL */
+  if (pMem->flags & MEM_Null) {
+    return 0;
+  }
+  if (pMem->flags & MEM_Int) {
+    return sizeof(pMem->u.i);
+  } else if (pMem->flags & MEM_Real) {
+    return sizeof(pMem->u.r);
+  } else if (pMem->flags & (MEM_Str|MEM_Blob)) {
+    return pMem->n;
+  } else {
+    return 0;
+  }
+}
+
+int sqlite3gsPosition(BtCursor *pCur, i64 *pos) {
+  if (IsGsCursor(pCur)) {
+    GsAdptCursor *pGsAdptCur = (GsAdptCursor*)pCur->pBkendCur;
+    int grc = gsCursorPosition(pGsAdptCur->pGsCur, pos);
+    if (!GS_SUCCEEDED(grc)) {return SQLITE_ERROR;}
+    return SQLITE_OK;
+  } else {
+    int rc = SQLITE_OK;
+    assert(pCur->apPage[0]->intKey);
+    rc = sqlite3BtreeKeySize(pCur, pos);
+    assert(rc==SQLITE_OK);  /* KeySize() cannot fail */
+    return SQLITE_OK;
+  }
+}
+
+int sqlite3gsPosition2(BtCursor *pCur, int *blockNo, i64 *pos) {
+  if (IsGsCursor(pCur)) {
+    GsAdptCursor *pGsAdptCur = (GsAdptCursor*)pCur->pBkendCur;
+    int grc = gsCursorPosition2(pGsAdptCur->pGsCur, blockNo, pos);
+    if (!GS_SUCCEEDED(grc)) {return SQLITE_ERROR;}
+    return SQLITE_OK;
+  } else {
+    int rc = SQLITE_OK;
+    assert(pCur->apPage[0]->intKey);
+    rc = sqlite3BtreeKeySize(pCur, pos);
+    assert(rc==SQLITE_OK);  /* KeySize() cannot fail */
+    return SQLITE_OK;
+  }
+}
+
+static int btreeMoveto(BtCursor *pCur, const void *pKey, i64 nKey, int bias, int *pRes);
+int sqlite3gsMove(BtCursor *pCur, i64 pos, int *pRes) {
+  if (IsGsCursor(pCur)) {
+    GsAdptCursor *pGsAdptCur = (GsAdptCursor*)pCur->pBkendCur;
+    int grc = gsCursorMove(pGsAdptCur->pGsCur, &pos, pRes);
+    if (!GS_SUCCEEDED(grc)) {return SQLITE_ERROR;}
+    return SQLITE_OK;
+  } else {
+    return btreeMoveto(pCur, NULL, pos, 0, pRes);
+  }
+}
+
+int sqlite3gsMove2(BtCursor *pCur, int blockNo, i64 pos, int *pRes) {
+  if (IsGsCursor(pCur)) {
+    GsAdptCursor *pGsAdptCur = (GsAdptCursor*)pCur->pBkendCur;
+    int grc = gsCursorMove2(pGsAdptCur->pGsCur, blockNo, &pos, pRes);
+    if (!GS_SUCCEEDED(grc)) {return SQLITE_ERROR;}
+    return SQLITE_OK;
+  } else {
+    return btreeMoveto(pCur, NULL, pos, 0, pRes);
+  }
+}
+#endif
+
 /*
 ** The header string that appears at the beginning of every
 ** SQLite database.
@@ -687,6 +1124,7 @@ static int SQLITE_NOINLINE saveCursorsOnList(
 ** Clear the current cursor position.
 */
 void sqlite3BtreeClearCursor(BtCursor *pCur){
+XPRINTF("\t%s\n", __FUNCTION__);
   assert( cursorHoldsMutex(pCur) );
   sqlite3_free(pCur->pKey);
   pCur->pKey = 0;
@@ -776,6 +1214,14 @@ static int btreeRestoreCursorPosition(BtCursor *pCur){
 ** back to where it ought to be if this routine returns true.
 */
 int sqlite3BtreeCursorHasMoved(BtCursor *pCur){
+XPRINTF("\t%s\n", __FUNCTION__);
+
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  if (IsGsCursor(pCur)) {
+    GsAdptCursor *pGsAdptCur = (GsAdptCursor*)pCur->pBkendCur;
+    return pGsAdptCur->pGsCur ? 0 : 1;
+  }
+#endif
   return pCur->eState!=CURSOR_VALID;
 }
 
@@ -794,6 +1240,8 @@ int sqlite3BtreeCursorHasMoved(BtCursor *pCur){
 */
 int sqlite3BtreeCursorRestore(BtCursor *pCur, int *pDifferentRow){
   int rc;
+XPRINTF("\t%s\n", __FUNCTION__);
+
 
   assert( pCur!=0 );
   assert( pCur->eState!=CURSOR_VALID );
@@ -1681,6 +2129,8 @@ static Pgno btreePagecount(BtShared *pBt){
   return pBt->nPage;
 }
 u32 sqlite3BtreeLastPage(Btree *p){
+XPRINTF("\t%s\n", __FUNCTION__);
+
   assert( sqlite3BtreeHoldsMutex(p) );
   assert( ((p->pBt->nPage)&0x8000000)==0 );
   return btreePagecount(p->pBt);
@@ -1809,6 +2259,8 @@ int sqlite3BtreeOpen(
   int rc = SQLITE_OK;            /* Result code from this function */
   u8 nReserve;                   /* Byte of unused space on each page */
   unsigned char zDbHeader[100];  /* Database header content */
+  int pageSize;
+  int tmpPageSize;
 
   /* True if opening an ephemeral, temporary database */
   const int isTempDb = zFilename==0 || zFilename[0]==0;
@@ -1823,6 +2275,8 @@ int sqlite3BtreeOpen(
                        || (isTempDb && sqlite3TempInMemory(db))
                        || (vfsFlags & SQLITE_OPEN_MEMORY)!=0;
 #endif
+XPRINTF("\t%s\n", __FUNCTION__);
+
 
   assert( db!=0 );
   assert( pVfs!=0 );
@@ -1850,6 +2304,17 @@ int sqlite3BtreeOpen(
 #ifndef SQLITE_OMIT_SHARED_CACHE
   p->lock.pBtree = p;
   p->lock.iTable = 1;
+#endif
+
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  if (zFilename != NULL && strcmp(zFilename, ":memory:")==0) {
+    /* TQL resultset */
+    p->type = TBLTYPE_TQLDB;
+    rc = sqlite3gsAdapterOpen((GsAdapter**)&p->pBackend);
+    if (rc != SQLITE_OK) {goto btree_open_out;}
+  } else {
+    p->type = TBLTYPE_BTREE;
+  }
 #endif
 
 #if !defined(SQLITE_OMIT_SHARED_CACHE) && !defined(SQLITE_OMIT_DISKIO)
@@ -1936,8 +2401,17 @@ int sqlite3BtreeOpen(
       rc = SQLITE_NOMEM;
       goto btree_open_out;
     }
+		
+	pageSize = SQLITE_DEFAULT_PAGE_SIZE;
+	if(p->db->pSQLStatement != NULL) {
+		tmpPageSize = gsGetConnectionEnv(p->db->pSQLStatement, PRAGMA_PAGE_SIZE);
+		if(tmpPageSize >= 512 && tmpPageSize <= 65536)  {
+			pageSize = tmpPageSize;
+		}
+	}
+
     rc = sqlite3PagerOpen(pVfs, &pBt->pPager, zFilename,
-                          EXTRA_SIZE, flags, vfsFlags, pageReinit);
+                          EXTRA_SIZE, flags, vfsFlags, pageReinit, pageSize);
     if( rc==SQLITE_OK ){
       sqlite3PagerSetMmapLimit(pBt->pPager, db->szMmap);
       rc = sqlite3PagerReadFileheader(pBt->pPager,sizeof(zDbHeader),zDbHeader);
@@ -2154,6 +2628,8 @@ static void freeTempSpace(BtShared *pBt){
 int sqlite3BtreeClose(Btree *p){
   BtShared *pBt = p->pBt;
   BtCursor *pCur;
+XPRINTF("\t%s\n", __FUNCTION__);
+
 
   /* Close all cursors opened via this handle.  */
   assert( sqlite3_mutex_held(p->db->mutex) );
@@ -2173,6 +2649,12 @@ int sqlite3BtreeClose(Btree *p){
   */
   sqlite3BtreeRollback(p, SQLITE_OK, 0);
   sqlite3BtreeLeave(p);
+
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  if (IsGsTable(p)) {
+    sqlite3gsAdapterClose((GsAdapter*)p->pBackend);
+  }
+#endif
 
   /* If there are still other outstanding references to the shared-btree
   ** structure, return now. The remainder of this procedure cleans 
@@ -2223,6 +2705,8 @@ int sqlite3BtreeClose(Btree *p){
 */
 int sqlite3BtreeSetCacheSize(Btree *p, int mxPage){
   BtShared *pBt = p->pBt;
+XPRINTF("\t%s\n", __FUNCTION__);
+
   assert( sqlite3_mutex_held(p->db->mutex) );
   sqlite3BtreeEnter(p);
   sqlite3PagerSetCachesize(pBt->pPager, mxPage);
@@ -2237,6 +2721,8 @@ int sqlite3BtreeSetCacheSize(Btree *p, int mxPage){
 */
 int sqlite3BtreeSetMmapLimit(Btree *p, sqlite3_int64 szMmap){
   BtShared *pBt = p->pBt;
+XPRINTF("\t%s\n", __FUNCTION__);
+
   assert( sqlite3_mutex_held(p->db->mutex) );
   sqlite3BtreeEnter(p);
   sqlite3PagerSetMmapLimit(pBt->pPager, szMmap);
@@ -2259,6 +2745,8 @@ int sqlite3BtreeSetPagerFlags(
   unsigned pgFlags       /* Various PAGER_* flags */
 ){
   BtShared *pBt = p->pBt;
+XPRINTF("\t%s\n", __FUNCTION__);
+
   assert( sqlite3_mutex_held(p->db->mutex) );
   sqlite3BtreeEnter(p);
   sqlite3PagerSetFlags(pBt->pPager, pgFlags);
@@ -2274,6 +2762,8 @@ int sqlite3BtreeSetPagerFlags(
 int sqlite3BtreeSyncDisabled(Btree *p){
   BtShared *pBt = p->pBt;
   int rc;
+XPRINTF("\t%s\n", __FUNCTION__);
+
   assert( sqlite3_mutex_held(p->db->mutex) );  
   sqlite3BtreeEnter(p);
   assert( pBt && pBt->pPager );
@@ -2305,6 +2795,8 @@ int sqlite3BtreeSyncDisabled(Btree *p){
 int sqlite3BtreeSetPageSize(Btree *p, int pageSize, int nReserve, int iFix){
   int rc = SQLITE_OK;
   BtShared *pBt = p->pBt;
+XPRINTF("\t%s\n", __FUNCTION__);
+
   assert( nReserve>=-1 && nReserve<=255 );
   sqlite3BtreeEnter(p);
   if( pBt->btsFlags & BTS_PAGESIZE_FIXED ){
@@ -2333,6 +2825,8 @@ int sqlite3BtreeSetPageSize(Btree *p, int pageSize, int nReserve, int iFix){
 ** Return the currently defined page size
 */
 int sqlite3BtreeGetPageSize(Btree *p){
+XPRINTF("\t%s\n", __FUNCTION__);
+
   return p->pBt->pageSize;
 }
 
@@ -2349,6 +2843,8 @@ int sqlite3BtreeGetPageSize(Btree *p){
 ** database handle that owns *p, causing undefined behavior.
 */
 int sqlite3BtreeGetReserveNoMutex(Btree *p){
+XPRINTF("\t%s\n", __FUNCTION__);
+
   assert( sqlite3_mutex_held(p->pBt->mutex) );
   return p->pBt->pageSize - p->pBt->usableSize;
 }
@@ -2362,6 +2858,8 @@ int sqlite3BtreeGetReserveNoMutex(Btree *p){
 */
 int sqlite3BtreeGetReserve(Btree *p){
   int n;
+XPRINTF("\t%s\n", __FUNCTION__);
+
   sqlite3BtreeEnter(p);
   n = p->pBt->pageSize - p->pBt->usableSize;
   sqlite3BtreeLeave(p);
@@ -2375,6 +2873,8 @@ int sqlite3BtreeGetReserve(Btree *p){
 */
 int sqlite3BtreeMaxPageCount(Btree *p, int mxPage){
   int n;
+XPRINTF("\t%s\n", __FUNCTION__);
+
   sqlite3BtreeEnter(p);
   n = sqlite3PagerMaxPageCount(p->pBt->pPager, mxPage);
   sqlite3BtreeLeave(p);
@@ -2388,6 +2888,8 @@ int sqlite3BtreeMaxPageCount(Btree *p, int mxPage){
 */
 int sqlite3BtreeSecureDelete(Btree *p, int newFlag){
   int b;
+XPRINTF("\t%s\n", __FUNCTION__);
+
   if( p==0 ) return 0;
   sqlite3BtreeEnter(p);
   if( newFlag>=0 ){
@@ -2413,6 +2915,8 @@ int sqlite3BtreeSetAutoVacuum(Btree *p, int autoVacuum){
   BtShared *pBt = p->pBt;
   int rc = SQLITE_OK;
   u8 av = (u8)autoVacuum;
+XPRINTF("\t%s\n", __FUNCTION__);
+
 
   sqlite3BtreeEnter(p);
   if( (pBt->btsFlags & BTS_PAGESIZE_FIXED)!=0 && (av ?1:0)!=pBt->autoVacuum ){
@@ -2435,6 +2939,8 @@ int sqlite3BtreeGetAutoVacuum(Btree *p){
   return BTREE_AUTOVACUUM_NONE;
 #else
   int rc;
+XPRINTF("\t%s\n", __FUNCTION__);
+
   sqlite3BtreeEnter(p);
   rc = (
     (!p->pBt->autoVacuum)?BTREE_AUTOVACUUM_NONE:
@@ -2698,6 +3204,8 @@ static int newDatabase(BtShared *pBt){
 */
 int sqlite3BtreeNewDb(Btree *p){
   int rc;
+XPRINTF("\t%s\n", __FUNCTION__);
+
   sqlite3BtreeEnter(p);
   p->pBt->nPage = 0;
   rc = newDatabase(p->pBt);
@@ -2744,6 +3252,8 @@ int sqlite3BtreeBeginTrans(Btree *p, int wrflag){
   sqlite3 *pBlock = 0;
   BtShared *pBt = p->pBt;
   int rc = SQLITE_OK;
+XPRINTF("\t%s\n", __FUNCTION__);
+
 
   sqlite3BtreeEnter(p);
   btreeIntegrity(p);
@@ -3213,6 +3723,8 @@ static Pgno finalDbSize(BtShared *pBt, Pgno nOrig, Pgno nFree){
 int sqlite3BtreeIncrVacuum(Btree *p){
   int rc;
   BtShared *pBt = p->pBt;
+XPRINTF("\t%s\n", __FUNCTION__);
+
 
   sqlite3BtreeEnter(p);
   assert( pBt->inTransaction==TRANS_WRITE && p->inTrans==TRANS_WRITE );
@@ -3333,6 +3845,8 @@ static int autoVacuumCommit(BtShared *pBt){
 */
 int sqlite3BtreeCommitPhaseOne(Btree *p, const char *zMaster){
   int rc = SQLITE_OK;
+XPRINTF("\t%s\n", __FUNCTION__);
+
   if( p->inTrans==TRANS_WRITE ){
     BtShared *pBt = p->pBt;
     sqlite3BtreeEnter(p);
@@ -3421,6 +3935,8 @@ static void btreeEndTransaction(Btree *p){
 ** are no active cursors, it also releases the read lock.
 */
 int sqlite3BtreeCommitPhaseTwo(Btree *p, int bCleanup){
+XPRINTF("\t%s\n", __FUNCTION__);
+
 
   if( p->inTrans==TRANS_NONE ) return SQLITE_OK;
   sqlite3BtreeEnter(p);
@@ -3453,6 +3969,8 @@ int sqlite3BtreeCommitPhaseTwo(Btree *p, int bCleanup){
 */
 int sqlite3BtreeCommit(Btree *p){
   int rc;
+XPRINTF("\t%s\n", __FUNCTION__);
+
   sqlite3BtreeEnter(p);
   rc = sqlite3BtreeCommitPhaseOne(p, 0);
   if( rc==SQLITE_OK ){
@@ -3491,6 +4009,8 @@ int sqlite3BtreeCommit(Btree *p){
 int sqlite3BtreeTripAllCursors(Btree *pBtree, int errCode, int writeOnly){
   BtCursor *p;
   int rc = SQLITE_OK;
+XPRINTF("\t%s\n", __FUNCTION__);
+
 
   assert( (writeOnly==0 || writeOnly==1) && BTCF_WriteFlag==1 );
   if( pBtree ){
@@ -3535,6 +4055,8 @@ int sqlite3BtreeRollback(Btree *p, int tripCode, int writeOnly){
   int rc;
   BtShared *pBt = p->pBt;
   MemPage *pPage1;
+XPRINTF("\t%s\n", __FUNCTION__);
+
 
   assert( writeOnly==1 || writeOnly==0 );
   assert( tripCode==SQLITE_ABORT_ROLLBACK || tripCode==SQLITE_OK );
@@ -3603,6 +4125,8 @@ int sqlite3BtreeRollback(Btree *p, int tripCode, int writeOnly){
 int sqlite3BtreeBeginStmt(Btree *p, int iStatement){
   int rc;
   BtShared *pBt = p->pBt;
+XPRINTF("\t%s\n", __FUNCTION__);
+
   sqlite3BtreeEnter(p);
   assert( p->inTrans==TRANS_WRITE );
   assert( (pBt->btsFlags & BTS_READ_ONLY)==0 );
@@ -3633,6 +4157,8 @@ int sqlite3BtreeBeginStmt(Btree *p, int iStatement){
 */
 int sqlite3BtreeSavepoint(Btree *p, int op, int iSavepoint){
   int rc = SQLITE_OK;
+XPRINTF("\t%s\n", __FUNCTION__);
+
   if( p && p->inTrans==TRANS_WRITE ){
     BtShared *pBt = p->pBt;
     assert( op==SAVEPOINT_RELEASE || op==SAVEPOINT_ROLLBACK );
@@ -3749,6 +4275,22 @@ int sqlite3BtreeCursor(
   BtCursor *pCur                              /* Write new cursor here */
 ){
   int rc;
+XPRINTF("\t%s\n", __FUNCTION__);
+
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  if (IsGsTable(p)) {
+    if (iTable == 1) {
+      /* sqlite_master */
+      pCur->type = TBLTYPE_BTREE;
+    } else {
+      pCur->type = TBLTYPE_TQLDB;
+      rc = sqlite3gsAdapterCursor(p->db->pSQLStatement, iTable, (GsAdptCursor**)&pCur->pBkendCur);
+      if (rc != SQLITE_OK) {return rc;}
+    }
+  } else {
+    pCur->type = p->type;
+  }
+#endif
   sqlite3BtreeEnter(p);
   rc = btreeCursor(p, iTable, wrFlag, pKeyInfo, pCur);
   sqlite3BtreeLeave(p);
@@ -3764,6 +4306,8 @@ int sqlite3BtreeCursor(
 ** this routine.
 */
 int sqlite3BtreeCursorSize(void){
+XPRINTF("\t%s\n", __FUNCTION__);
+
   return ROUND8(sizeof(BtCursor));
 }
 
@@ -3776,6 +4320,12 @@ int sqlite3BtreeCursorSize(void){
 ** of run-time by skipping the initialization of those elements.
 */
 void sqlite3BtreeCursorZero(BtCursor *p){
+XPRINTF("\t%s\n", __FUNCTION__);
+
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  p->type = 0;
+  p->pBkendCur = NULL;
+#endif
   memset(p, 0, offsetof(BtCursor, iPage));
 }
 
@@ -3785,6 +4335,8 @@ void sqlite3BtreeCursorZero(BtCursor *p){
 */
 int sqlite3BtreeCloseCursor(BtCursor *pCur){
   Btree *pBtree = pCur->pBtree;
+XPRINTF("\t%s\n", __FUNCTION__);
+
   if( pBtree ){
     int i;
     BtShared *pBt = pCur->pBt;
@@ -3804,6 +4356,12 @@ int sqlite3BtreeCloseCursor(BtCursor *pCur){
     unlockBtreeIfUnused(pBt);
     sqlite3DbFree(pBtree->db, pCur->aOverflow);
     /* sqlite3_free(pCur); */
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  if (IsGsCursor(pCur)) {
+    sqlite3gsAdapterCloseCursor((GsAdptCursor*)pCur->pBkendCur);
+    pCur->pBkendCur = NULL;
+  }
+#endif
     sqlite3BtreeLeave(pBtree);
   }
   return SQLITE_OK;
@@ -3865,6 +4423,8 @@ int sqlite3BtreeCloseCursor(BtCursor *pCur){
 ** This is a verification routine is used only within assert() statements.
 */
 int sqlite3BtreeCursorIsValid(BtCursor *pCur){
+XPRINTF("\t%s\n", __FUNCTION__);
+
   return pCur && pCur->eState==CURSOR_VALID;
 }
 #endif /* NDEBUG */
@@ -3882,6 +4442,17 @@ int sqlite3BtreeCursorIsValid(BtCursor *pCur){
 ** This routine cannot fail.  It always returns SQLITE_OK.  
 */
 int sqlite3BtreeKeySize(BtCursor *pCur, i64 *pSize){
+XPRINTF("\t%s\n", __FUNCTION__);
+
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  if (IsGsCursor(pCur)) {
+    i64 size = 0;
+    int rc = sqlite3gsPosition(pCur, &size);
+    if (rc != SQLITE_OK) {return rc;}
+    *pSize = size;
+    return SQLITE_OK;
+  }
+#endif
   assert( cursorHoldsMutex(pCur) );
   assert( pCur->eState==CURSOR_VALID );
   getCellInfo(pCur);
@@ -3902,6 +4473,11 @@ int sqlite3BtreeKeySize(BtCursor *pCur, i64 *pSize){
 ** to return an integer result code for historical reasons.
 */
 int sqlite3BtreeDataSize(BtCursor *pCur, u32 *pSize){
+XPRINTF("\t%s\n", __FUNCTION__);
+
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  assert(!IsGsCursor(pCur));
+#endif
   assert( cursorHoldsMutex(pCur) );
   assert( pCur->eState==CURSOR_VALID );
   assert( pCur->apPage[pCur->iPage]->intKeyLeaf==1 );
@@ -4251,8 +4827,12 @@ static int accessPayload(
 ** the available payload.
 */
 int sqlite3BtreeKey(BtCursor *pCur, u32 offset, u32 amt, void *pBuf){
+XPRINTF("\t%s\n", __FUNCTION__);
   assert( cursorHoldsMutex(pCur) );
   assert( pCur->eState==CURSOR_VALID );
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  assert(!IsGsCursor(pCur));
+#endif
   assert( pCur->iPage>=0 && pCur->apPage[pCur->iPage] );
   assert( pCur->aiIdx[pCur->iPage]<pCur->apPage[pCur->iPage]->nCell );
   return accessPayload(pCur, offset, amt, (unsigned char*)pBuf, 0);
@@ -4269,6 +4849,8 @@ int sqlite3BtreeKey(BtCursor *pCur, u32 offset, u32 amt, void *pBuf){
 */
 int sqlite3BtreeData(BtCursor *pCur, u32 offset, u32 amt, void *pBuf){
   int rc;
+XPRINTF("\t%s\n", __FUNCTION__);
+
 
 #ifndef SQLITE_OMIT_INCRBLOB
   if ( pCur->eState==CURSOR_INVALID ){
@@ -4336,9 +4918,19 @@ static const void *fetchPayload(
 ** in the common case where no overflow pages are used.
 */
 const void *sqlite3BtreeKeyFetch(BtCursor *pCur, u32 *pAmt){
+XPRINTF("\t%s\n", __FUNCTION__);
+
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  assert(!IsGsCursor(pCur));
+#endif
   return fetchPayload(pCur, pAmt);
 }
 const void *sqlite3BtreeDataFetch(BtCursor *pCur, u32 *pAmt){
+XPRINTF("\t%s\n", __FUNCTION__);
+
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  assert(!IsGsCursor(pCur));
+#endif
   return fetchPayload(pCur, pAmt);
 }
 
@@ -4578,6 +5170,15 @@ static int moveToRightmost(BtCursor *pCur){
 */
 int sqlite3BtreeFirst(BtCursor *pCur, int *pRes){
   int rc;
+XPRINTF("\t%s\n", __FUNCTION__);
+
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  if (IsGsCursor(pCur)) {
+    rc = sqlite3gsAdapterFirst((GsAdptCursor*)pCur->pBkendCur, pRes);
+    pCur->eState = (*pRes == 0) ? CURSOR_VALID : CURSOR_INVALID;
+    return rc;
+  }
+#endif
 
   assert( cursorHoldsMutex(pCur) );
   assert( sqlite3_mutex_held(pCur->pBtree->db->mutex) );
@@ -4601,6 +5202,15 @@ int sqlite3BtreeFirst(BtCursor *pCur, int *pRes){
 */
 int sqlite3BtreeLast(BtCursor *pCur, int *pRes){
   int rc;
+XPRINTF("\t%s\n", __FUNCTION__);
+
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  if (IsGsCursor(pCur)) {
+    rc = sqlite3gsAdapterLast((GsAdptCursor*)pCur->pBkendCur, pRes);
+    pCur->eState = (*pRes == 0) ? CURSOR_VALID : CURSOR_INVALID;
+    return rc;
+  }
+#endif
  
   assert( cursorHoldsMutex(pCur) );
   assert( sqlite3_mutex_held(pCur->pBtree->db->mutex) );
@@ -4677,6 +5287,11 @@ int sqlite3BtreeMovetoUnpacked(
 ){
   int rc;
   RecordCompare xRecordCompare;
+XPRINTF("\t%s\n", __FUNCTION__);
+
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  assert(!IsGsCursor(pCur));
+#endif
 
   assert( cursorHoldsMutex(pCur) );
   assert( sqlite3_mutex_held(pCur->pBtree->db->mutex) );
@@ -4883,6 +5498,14 @@ int sqlite3BtreeEof(BtCursor *pCur){
   ** have been deleted? This API will need to change to return an error code
   ** as well as the boolean result value.
   */
+XPRINTF("\t%s\n", __FUNCTION__);
+
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  if (IsGsCursor(pCur)) {
+    assert(0);
+    return 1;
+  }
+#endif
   return (CURSOR_VALID!=pCur->eState);
 }
 
@@ -4976,6 +5599,13 @@ static SQLITE_NOINLINE int btreeNext(BtCursor *pCur, int *pRes){
 }
 int sqlite3BtreeNext(BtCursor *pCur, int *pRes){
   MemPage *pPage;
+XPRINTF("\t%s\n", __FUNCTION__);
+
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  if (IsGsCursor(pCur)) {
+    return sqlite3gsAdapterNext((GsAdptCursor*)pCur->pBkendCur, pRes);
+  }
+#endif
   assert( cursorHoldsMutex(pCur) );
   assert( pRes!=0 );
   assert( *pRes==0 || *pRes==1 );
@@ -5077,6 +5707,11 @@ static SQLITE_NOINLINE int btreePrevious(BtCursor *pCur, int *pRes){
   return rc;
 }
 int sqlite3BtreePrevious(BtCursor *pCur, int *pRes){
+XPRINTF("\t%s\n", __FUNCTION__);
+
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  assert(!IsGsCursor(pCur));
+#endif
   assert( cursorHoldsMutex(pCur) );
   assert( pRes!=0 );
   assert( *pRes==0 || *pRes==1 );
@@ -7133,6 +7768,11 @@ int sqlite3BtreeInsert(
   BtShared *pBt = p->pBt;
   unsigned char *oldCell;
   unsigned char *newCell = 0;
+XPRINTF("\t%s\n", __FUNCTION__);
+
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  assert(!IsGsCursor(pCur));
+#endif
 
   if( pCur->eState==CURSOR_FAULT ){
     assert( pCur->skipNext!=SQLITE_OK );
@@ -7275,7 +7915,11 @@ int sqlite3BtreeDelete(BtCursor *pCur){
   int iCellIdx;                        /* Index of cell to delete */
   int iCellDepth;                      /* Depth of node containing pCell */ 
   u16 szCell;                          /* Size of the cell being deleted */
+XPRINTF("\t%s\n", __FUNCTION__);
 
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  assert(!IsGsCursor(pCur));
+#endif
   assert( cursorHoldsMutex(pCur) );
   assert( pBt->inTransaction==TRANS_WRITE );
   assert( (pBt->btsFlags & BTS_READ_ONLY)==0 );
@@ -7533,6 +8177,13 @@ static int btreeCreateTable(Btree *p, int *piTable, int createTabFlags){
 }
 int sqlite3BtreeCreateTable(Btree *p, int *piTable, int flags){
   int rc;
+XPRINTF("\t%s\n", __FUNCTION__);
+
+#ifdef GD_ENABLE_NEWSQL_SERVER
+if (IsGsTable(p)) {
+    return sqlite3gsAdapterCreateTable((GsAdapter*)p->pBackend, piTable);
+  }
+#endif
   sqlite3BtreeEnter(p);
   rc = btreeCreateTable(p, piTable, flags);
   sqlite3BtreeLeave(p);
@@ -7607,6 +8258,8 @@ cleardatabasepage_out:
 int sqlite3BtreeClearTable(Btree *p, int iTable, int *pnChange){
   int rc;
   BtShared *pBt = p->pBt;
+XPRINTF("\t%s\n", __FUNCTION__);
+
   sqlite3BtreeEnter(p);
   assert( p->inTrans==TRANS_WRITE );
 
@@ -7629,6 +8282,8 @@ int sqlite3BtreeClearTable(Btree *p, int iTable, int *pnChange){
 ** This routine only work for pCur on an ephemeral table.
 */
 int sqlite3BtreeClearTableOfCursor(BtCursor *pCur){
+XPRINTF("\t%s\n", __FUNCTION__);
+
   return sqlite3BtreeClearTable(pCur->pBtree, pCur->pgnoRoot, 0);
 }
 
@@ -7757,6 +8412,13 @@ static int btreeDropTable(Btree *p, Pgno iTable, int *piMoved){
 }
 int sqlite3BtreeDropTable(Btree *p, int iTable, int *piMoved){
   int rc;
+XPRINTF("\t%s\n", __FUNCTION__);
+
+#ifdef GD_ENABLE_NEWSQL_SERVER
+if (IsGsTable(p)) {
+    return sqlite3gsAdapterDropTable((GsAdapter*)p->pBackend, iTable);
+  }
+#endif
   sqlite3BtreeEnter(p);
   rc = btreeDropTable(p, iTable, piMoved);
   sqlite3BtreeLeave(p);
@@ -7779,6 +8441,8 @@ int sqlite3BtreeDropTable(Btree *p, int iTable, int *piMoved){
 */
 void sqlite3BtreeGetMeta(Btree *p, int idx, u32 *pMeta){
   BtShared *pBt = p->pBt;
+XPRINTF("\t%s\n", __FUNCTION__);
+
 
   sqlite3BtreeEnter(p);
   assert( p->inTrans>TRANS_NONE );
@@ -7807,6 +8471,8 @@ int sqlite3BtreeUpdateMeta(Btree *p, int idx, u32 iMeta){
   BtShared *pBt = p->pBt;
   unsigned char *pP1;
   int rc;
+XPRINTF("\t%s\n", __FUNCTION__);
+
   assert( idx>=1 && idx<=15 );
   sqlite3BtreeEnter(p);
   assert( p->inTrans==TRANS_WRITE );
@@ -7839,11 +8505,20 @@ int sqlite3BtreeUpdateMeta(Btree *p, int idx, u32 iMeta){
 int sqlite3BtreeCount(BtCursor *pCur, i64 *pnEntry){
   i64 nEntry = 0;                      /* Value to return in *pnEntry */
   int rc;                              /* Return code */
+XPRINTF("\t%s\n", __FUNCTION__);
+
 
   if( pCur->pgnoRoot==0 ){
     *pnEntry = 0;
     return SQLITE_OK;
   }
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  if (IsGsCursor(pCur)) {
+    sqlite3 *db = pCur->pBtree->db;
+    *pnEntry = gsRowCount(db->pSQLStatement, pCur->pgnoRoot); /* todo error */
+    return SQLITE_OK;
+  }
+#endif
   rc = moveToRoot(pCur);
 
   /* Unless an error occurs, the following loop runs one iteration for each
@@ -7907,6 +8582,8 @@ int sqlite3BtreeCount(BtCursor *pCur, i64 *pnEntry){
 ** testing and debugging only.
 */
 Pager *sqlite3BtreePager(Btree *p){
+XPRINTF("\t%s\n", __FUNCTION__);
+
   return p->pBt->pPager;
 }
 
@@ -8350,6 +9027,8 @@ char *sqlite3BtreeIntegrityCheck(
   IntegrityCk sCheck;
   BtShared *pBt = p->pBt;
   char zErr[100];
+XPRINTF("\t%s\n", __FUNCTION__);
+
 
   sqlite3BtreeEnter(p);
   assert( p->inTrans>TRANS_NONE && pBt->inTransaction>TRANS_NONE );
@@ -8457,6 +9136,8 @@ char *sqlite3BtreeIntegrityCheck(
 ** open so it is safe to access without the BtShared mutex.
 */
 const char *sqlite3BtreeGetFilename(Btree *p){
+XPRINTF("\t%s\n", __FUNCTION__);
+
   assert( p->pBt->pPager!=0 );
   return sqlite3PagerFilename(p->pBt->pPager, 1);
 }
@@ -8470,6 +9151,8 @@ const char *sqlite3BtreeGetFilename(Btree *p){
 ** open so it is safe to access without the BtShared mutex.
 */
 const char *sqlite3BtreeGetJournalname(Btree *p){
+XPRINTF("\t%s\n", __FUNCTION__);
+
   assert( p->pBt->pPager!=0 );
   return sqlite3PagerJournalname(p->pBt->pPager);
 }
@@ -8478,6 +9161,8 @@ const char *sqlite3BtreeGetJournalname(Btree *p){
 ** Return non-zero if a transaction is active.
 */
 int sqlite3BtreeIsInTrans(Btree *p){
+XPRINTF("\t%s\n", __FUNCTION__);
+
   assert( p==0 || sqlite3_mutex_held(p->db->mutex) );
   return (p && (p->inTrans==TRANS_WRITE));
 }
@@ -8493,6 +9178,8 @@ int sqlite3BtreeIsInTrans(Btree *p){
 */
 int sqlite3BtreeCheckpoint(Btree *p, int eMode, int *pnLog, int *pnCkpt){
   int rc = SQLITE_OK;
+XPRINTF("\t%s\n", __FUNCTION__);
+
   if( p ){
     BtShared *pBt = p->pBt;
     sqlite3BtreeEnter(p);
@@ -8511,12 +9198,16 @@ int sqlite3BtreeCheckpoint(Btree *p, int eMode, int *pnLog, int *pnCkpt){
 ** Return non-zero if a read (or write) transaction is active.
 */
 int sqlite3BtreeIsInReadTrans(Btree *p){
+XPRINTF("\t%s\n", __FUNCTION__);
+
   assert( p );
   assert( sqlite3_mutex_held(p->db->mutex) );
   return p->inTrans!=TRANS_NONE;
 }
 
 int sqlite3BtreeIsInBackup(Btree *p){
+XPRINTF("\t%s\n", __FUNCTION__);
+
   assert( p );
   assert( sqlite3_mutex_held(p->db->mutex) );
   return p->nBackup!=0;
@@ -8544,6 +9235,8 @@ int sqlite3BtreeIsInBackup(Btree *p){
 */
 void *sqlite3BtreeSchema(Btree *p, int nBytes, void(*xFree)(void *)){
   BtShared *pBt = p->pBt;
+XPRINTF("\t%s\n", __FUNCTION__);
+
   sqlite3BtreeEnter(p);
   if( !pBt->pSchema && nBytes ){
     pBt->pSchema = sqlite3DbMallocZero(0, nBytes);
@@ -8560,6 +9253,8 @@ void *sqlite3BtreeSchema(Btree *p, int nBytes, void(*xFree)(void *)){
 */
 int sqlite3BtreeSchemaLocked(Btree *p){
   int rc;
+XPRINTF("\t%s\n", __FUNCTION__);
+
   assert( sqlite3_mutex_held(p->db->mutex) );
   sqlite3BtreeEnter(p);
   rc = querySharedCacheTableLock(p, MASTER_ROOT, READ_LOCK);
@@ -8577,6 +9272,8 @@ int sqlite3BtreeSchemaLocked(Btree *p){
 */
 int sqlite3BtreeLockTable(Btree *p, int iTab, u8 isWriteLock){
   int rc = SQLITE_OK;
+XPRINTF("\t%s\n", __FUNCTION__);
+
   assert( p->inTrans!=TRANS_NONE );
   if( p->sharable ){
     u8 lockType = READ_LOCK + isWriteLock;
@@ -8607,6 +9304,8 @@ int sqlite3BtreeLockTable(Btree *p, int iTab, u8 isWriteLock){
 */
 int sqlite3BtreePutData(BtCursor *pCsr, u32 offset, u32 amt, void *z){
   int rc;
+XPRINTF("\t%s\n", __FUNCTION__);
+
   assert( cursorHoldsMutex(pCsr) );
   assert( sqlite3_mutex_held(pCsr->pBtree->db->mutex) );
   assert( pCsr->curFlags & BTCF_Incrblob );
@@ -8654,6 +9353,8 @@ int sqlite3BtreePutData(BtCursor *pCsr, u32 offset, u32 amt, void *z){
 ** Mark this cursor as an incremental blob cursor.
 */
 void sqlite3BtreeIncrblobCursor(BtCursor *pCur){
+XPRINTF("\t%s\n", __FUNCTION__);
+
   pCur->curFlags |= BTCF_Incrblob;
 }
 #endif
@@ -8666,6 +9367,8 @@ void sqlite3BtreeIncrblobCursor(BtCursor *pCur){
 int sqlite3BtreeSetVersion(Btree *pBtree, int iVersion){
   BtShared *pBt = pBtree->pBt;
   int rc;                         /* Return code */
+XPRINTF("\t%s\n", __FUNCTION__);
+
  
   assert( iVersion==1 || iVersion==2 );
 
@@ -8699,6 +9402,8 @@ int sqlite3BtreeSetVersion(Btree *pBtree, int iVersion){
 ** values are 0 and BTREE_BULKLOAD.
 */
 void sqlite3BtreeCursorHints(BtCursor *pCsr, unsigned int mask){
+XPRINTF("\t%s\n", __FUNCTION__);
+
   assert( mask==BTREE_BULKLOAD || mask==0 );
   pCsr->hints = mask;
 }
@@ -8707,5 +9412,7 @@ void sqlite3BtreeCursorHints(BtCursor *pCsr, unsigned int mask){
 ** Return true if the given Btree is read-only.
 */
 int sqlite3BtreeIsReadonly(Btree *p){
+XPRINTF("\t%s\n", __FUNCTION__);
+
   return (p->pBt->btsFlags & BTS_READ_ONLY)!=0;
 }

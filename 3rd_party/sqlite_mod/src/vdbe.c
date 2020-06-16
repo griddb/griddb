@@ -20,6 +20,10 @@
 */
 #include "sqliteInt.h"
 #include "vdbeInt.h"
+#ifdef GD_ENABLE_NEWSQL_SERVER
+#include "backend.hpp"
+#include "newsql_interface.h"
+#endif
 
 /*
 ** Invoke this macro on memory cells just prior to changing the
@@ -679,7 +683,11 @@ int sqlite3VdbeExec(
       memAboutToChange(p, &aMem[pOp->p3]);
     }
 #endif
-  
+#if defined(GD_ENABLE_NEWSQL_SERVER) && defined(SQLITE_DEBUG)
+    if (db->printOp) {
+      printf("OP_%s\t%d\t%d\t%d\n", sqlite3OpcodeName(pOp->opcode), pOp->p1, pOp->p2, pOp->p3);
+    }
+#endif
     switch( pOp->opcode ){
 
 /*****************************************************************************
@@ -1297,6 +1305,7 @@ case OP_ResultRow: {
   ** a side effect.
   */
   pMem = p->pResultSet = &aMem[pOp->p1];
+#ifndef GD_ENABLE_NEWSQL_SERVER /* Skip NulTerminate */
   for(i=0; i<pOp->p2; i++){
     assert( memIsValid(&pMem[i]) );
     Deephemeralize(&pMem[i]);
@@ -1305,6 +1314,7 @@ case OP_ResultRow: {
     sqlite3VdbeMemNulTerminate(&pMem[i]);
     REGISTER_TRACE(pOp->p1+i, &pMem[i]);
   }
+#endif
   if( db->mallocFailed ) goto no_mem;
 
   /* Return SQLITE_ROW
@@ -2284,6 +2294,18 @@ case OP_Column: {
   pCrsr = pC->pCursor;
   assert( pCrsr!=0 || pC->pseudoTableReg>0 ); /* pCrsr NULL on PseudoTables */
   assert( pCrsr!=0 || pC->nullRow );          /* pC->nullRow on PseudoTables */
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  if (sqlite3gsIsGsCursor(pCrsr)) {
+#ifdef GD_ENABLE_NEWSQL_SERVER /* NULL */
+    if( pC->nullRow ){
+      sqlite3VdbeMemSetNull(pDest);
+    } else {
+      rc = sqlite3gsData(pCrsr, p2, pDest);
+    }
+#endif
+    goto op_column_out;
+  }
+#endif
 
   /* If the cursor cache is stale, bring it up-to-date */
   rc = sqlite3VdbeCursorMoveto(pC);
@@ -6357,6 +6379,331 @@ case OP_Init: {          /* jump */
   break;
 }
 
+#ifdef GD_ENABLE_NEWSQL_SERVER /* HASH JOIN */
+/* Opcode: HashOpen P1 P2 P3 P4 *
+**
+** Open hash table of P1 cursor.
+** Open a new cursor P4 and store the hash table on it.
+** P3 is the number of key columns. Type of key columns
+** are stored registers beggining with P2.
+*/
+case OP_HashOpen: {
+  int nCol = pOp->p3;
+  VdbeCursor *pCur = p->apCsr[pOp->p1];
+  BtCursor *pCrsr = pCur->pCursor;   /* The BTree cursor */
+  void **pHashKeys = NULL;
+  int *pHashSizes = NULL;
+  void *pHashTable = NULL;
+  void *pHashCursor = NULL;
+  int *pHashKeyType = NULL;
+  int res = 1;
+  i64 pos = -1;
+  int i = 0;
+  VdbeCursor *pCx = NULL; /* Create hash in this cursor */
+  int hashSize = 0;
+
+  pCx = allocateCursor(p, pOp->p4.i, nCol, -1, 1);
+  if( pCx==0 ) goto no_mem;
+  pCx->isEphemeral = 1;
+  pCx->isTable = 0;
+  pCx->pCurSrc = pCur;
+
+  /* Open a hash table */
+  hashSize = gsGetConnectionEnv(p->db->pSQLStatement, PRAGMA_HASH_SIZE);
+
+  rc = sqlite3gsHashOpen(&pHashTable, hashSize);
+  if (rc != SQLITE_OK) {goto vdbe_error_halt;}
+
+  pHashKeys = sqlite3DbMallocZero(db, sizeof(void*) * nCol);
+  pHashSizes = sqlite3DbMallocZero(db, sizeof(int) * nCol);
+  pHashKeyType = sqlite3DbMallocZero(db, sizeof(void*) * nCol);
+  if (pHashKeys == NULL || pHashSizes == NULL || pHashKeyType == NULL) {
+    sqlite3DbFree(db, pHashKeys);
+    sqlite3DbFree(db, pHashSizes);
+    sqlite3DbFree(db, pHashKeyType);
+    sqlite3gsHashClose(pHashTable);
+    goto no_mem;
+  }
+
+  for (i = 0; i < nCol; i++) {
+    int iCol = pOp->p2 + i;
+    /* Set the key and its size */
+    pHashKeyType[i] = (int)sqlite3VdbeIntValue(&aMem[iCol]);
+  }
+
+  pCx->pHashKeys = pHashKeys;
+  pCx->pHashSizes = pHashSizes;
+  pCx->pHashTable = pHashTable;
+  pCx->pHashCursor = pHashCursor;
+  pCx->pHashKeyType = pHashKeyType;
+
+  break;
+}
+
+/* Opcode: HashInsert P1 P2 P3 * *
+**
+** Insert entry into hash table of P1 cursor.
+** P3 is the number of key columns. Hash keys are stored in registers
+** beginning with P2. The rowid which is used as a hash value is
+** stored in the register after key columns.
+** 
+*/
+case OP_HashInsert: {
+  int nCol = pOp->p3;
+  VdbeCursor *pCur = p->apCsr[pOp->p1];
+  void *pHashTable = NULL;
+  int *pHashKeyType = NULL;
+  int i = 0;
+  void **pHashKeys = NULL;
+  int *pHashSizes = NULL;
+  i64 pos = 0;
+
+  pHashKeys = pCur->pHashKeys;
+  pHashSizes = pCur->pHashSizes;
+  pHashTable = pCur->pHashTable;
+  pHashKeyType = pCur->pHashKeyType;
+
+  /* Get values and size for each column used at hash */
+  for (i = 0; i < nCol; i++) {
+    int iCol = pOp->p2 + i;
+    char aff = (char)pHashKeyType[i];
+    /* Convert data type */
+    if (aff == SQLITE_AFF_REAL && aMem[iCol].flags & MEM_Int ){
+      sqlite3VdbeMemRealify(&aMem[iCol]);
+    } else if ((aff == SQLITE_AFF_NONE || aff == SQLITE_AFF_NUMERIC || aff == SQLITE_AFF_INTEGER) &&
+               aMem[iCol].flags & MEM_Real) {
+      sqlite3VdbeIntegerAffinity(&aMem[iCol]);
+    } else {
+      /* Do nothing */
+    }
+    /* Set the key and its size */
+    pHashKeys[i] = sqlite3gsMemGetPointer(&aMem[iCol]);
+    pHashSizes[i] = sqlite3gsMemGetPtrSize(&aMem[iCol]);
+  }
+
+  /* Get position */
+  pos = sqlite3VdbeIntValue(&aMem[pOp->p2+nCol]);
+
+  /* Set a hash value */
+  rc = sqlite3gsHashSet(pHashTable, pHashKeys, pHashSizes, nCol, pos);
+  if (rc != SQLITE_OK) {goto end_hash_insert;}
+
+end_hash_insert:
+  if (rc != SQLITE_OK) {
+    sqlite3DbFree(db, pHashKeys);
+    sqlite3DbFree(db, pHashSizes);
+    sqlite3DbFree(db, pHashKeyType);
+    sqlite3gsHashClose(pHashTable);
+    pCur->pHashKeys = NULL;
+    pCur->pHashSizes = NULL;
+    pCur->pHashTable = NULL;
+    pCur->pHashKeyType = NULL;
+    goto vdbe_error_halt;
+  }
+  break;
+}
+
+/* Opcode: HashOpenInsert P1 P2 P3 P4 *
+**
+** Create hash table from TQL result set of P1 cursor.
+** Open a new cursor P4 and store the hash table on it.
+** P3 is the number of key columns. Indexes of key columns
+** are stored in registers beginning with P2.
+*/
+case OP_HashOpenInsert: {
+  int nCol = pOp->p3;
+  VdbeCursor *pCur = p->apCsr[pOp->p1];
+  BtCursor *pCrsr = pCur->pCursor;   /* The BTree cursor */
+  void **pHashKeys = NULL;
+  int *pHashSizes = NULL;
+  void *pHashTable = NULL;
+  void *pHashCursor = NULL;
+  int *pHashKeyType = NULL;
+  Mem *pMem = NULL;
+  int res = 1;
+  i64 pos = -1;
+  int i = 0;
+  VdbeCursor *pCx = NULL; /* Create hash in this cursor */
+
+  int hashSize=0;
+  pCx = allocateCursor(p, pOp->p4.i, nCol, -1, 1);
+  if( pCx==0 ) goto no_mem;
+  pCx->isEphemeral = 1;
+  pCx->isTable = 0;
+  pCx->pCurSrc = pCur;
+  /* Open a hash table */
+  hashSize = gsGetConnectionEnv(p->db->pSQLStatement, PRAGMA_HASH_SIZE);
+  rc = sqlite3gsHashOpen(&pHashTable, hashSize);
+  if (rc != SQLITE_OK) {goto vdbe_error_halt;}
+
+  pHashKeys = sqlite3DbMallocZero(db, sizeof(void*) * nCol);
+  pHashSizes = sqlite3DbMallocZero(db, sizeof(int) * nCol);
+  pMem = sqlite3DbMallocZero(db, sizeof(Mem) * nCol);
+  pHashKeyType = sqlite3DbMallocZero(db, sizeof(void*) * nCol);
+  if (pHashKeys == NULL || pHashSizes == NULL || pMem == NULL || pHashKeyType == NULL) {
+    sqlite3DbFree(db, pHashKeys);
+    sqlite3DbFree(db, pHashSizes);
+    sqlite3DbFree(db, pMem);
+    sqlite3DbFree(db, pHashKeyType);
+    sqlite3gsHashClose(pHashTable);
+    goto no_mem;
+  }
+
+  for (i = 0; i < nCol; i++) {
+    int iCol = sqlite3VdbeIntValue(&aMem[pOp->p2 + i]);
+    pHashKeyType[i] = sqlite3gsColumnType(pCrsr, iCol);
+    pMem[i].db = db;
+    MemSetTypeFlag(&pMem[i], MEM_Null);
+  }
+
+  rc = sqlite3BtreeFirst(pCrsr, &res);
+  if (rc != SQLITE_OK) {goto end_hash_open;}
+
+  /* For all result row */
+  while (res == 0) {
+    /* Get values and size for each column used at hash */
+    for (i = 0; i < nCol; i++) {
+      int iCol = sqlite3VdbeIntValue(&aMem[pOp->p2 + i]);
+      /* Get a column value */
+      rc = sqlite3gsData(pCrsr, iCol, &pMem[i]);
+      if (rc != SQLITE_OK) {goto end_hash_open;}
+      
+      /* Set the key and its size */
+      pHashKeys[i] = sqlite3gsMemGetPointer(&pMem[i]);
+      pHashSizes[i] = sqlite3gsMemGetPtrSize(&pMem[i]);
+    }
+
+    /* Get position */
+    rc = sqlite3gsPosition(pCrsr, &pos);
+    if (rc != SQLITE_OK) {goto end_hash_open;}
+
+    /* Set a hash value */
+    rc = sqlite3gsHashSet(pHashTable, pHashKeys, pHashSizes, nCol, pos);
+    if (rc != SQLITE_OK) {goto end_hash_open;}
+
+    /* Move the cursor to the next row */
+    rc = sqlite3BtreeNext(pCrsr, &res);
+    if (rc != SQLITE_OK) {goto end_hash_open;}
+  }
+
+  pCx->pHashKeys = pHashKeys;
+  pCx->pHashSizes = pHashSizes;
+  pCx->pHashTable = pHashTable;
+  pCx->pHashCursor = pHashCursor;
+  pCx->pHashKeyType = pHashKeyType;
+
+end_hash_open:
+  for (i = 0; i < nCol; i++) {
+    sqlite3VdbeMemRelease(&pMem[i]);
+  }
+  sqlite3DbFree(db, pMem);
+  if (rc != SQLITE_OK) {
+    sqlite3DbFree(db, pHashKeys);
+    sqlite3DbFree(db, pHashSizes);
+    sqlite3DbFree(db, pHashKeyType);
+    sqlite3gsHashClose(pHashTable);
+    goto vdbe_error_halt;
+  }
+  break;
+}
+
+case OP_HashSearch: {      /* jump */
+  VdbeCursor *pCur = p->apCsr[pOp->p1];
+  BtCursor *pCrsr = pCur->pCurSrc->pCursor;   /* The BTree cursor */
+  int nCol = pOp->p3;
+  int i = 0;
+  void **pHashKeys = NULL;
+  int *pHashSizes = NULL;
+  i64 pos = -1;
+  int iReg = pOp->p4.i;
+  int res = 1;
+
+  pHashKeys = pCur->pHashKeys;
+  pHashSizes = pCur->pHashSizes;
+
+  for (i = 0; i < nCol; i++) {
+    Mem *pData = &aMem[iReg+i];
+    char aff = (char)pCur->pHashKeyType[i];
+    if ((aff == SQLITE_AFF_INTEGER && pData->flags & MEM_Int) ||
+        (aff == SQLITE_AFF_REAL && pData->flags & MEM_Real) ||
+        (aff == SQLITE_AFF_TEXT && pData->flags & MEM_Str)) {
+      /* Do nothing. Data is already set. */
+    } else {
+      /* Convert data type */
+      applyAffinity(pData, aff, SQLITE_UTF8);
+      if (aff == SQLITE_AFF_REAL && pData->flags & MEM_Int) {
+        sqlite3VdbeMemRealify(pData);
+      } else if (aff == SQLITE_AFF_NONE && pData->flags & MEM_Real) {
+        sqlite3VdbeIntegerAffinity(pData);
+      } else {
+        /* Do nothing */
+      }
+    }
+    pHashKeys[i] = sqlite3gsMemGetPointer(pData);
+    pHashSizes[i] = sqlite3gsMemGetPtrSize(pData);
+  }
+
+  /* Search from the hash table */
+  rc = sqlite3gsHashSearch(pCur->pHashTable, pHashKeys, pHashSizes, nCol, &pCur->pHashCursor, &pos);
+  if (rc != SQLITE_OK) {goto vdbe_error_halt;}
+
+  if (pCur->pHashCursor != NULL) {
+    /* If found */
+    if (sqlite3gsIsGsCursor(pCrsr)) {
+      rc = sqlite3gsMove(pCrsr, pos, &res);
+      if (rc != SQLITE_OK) {goto vdbe_error_halt;}
+    } else {
+      rc = sqlite3BtreeMovetoUnpacked(pCrsr, 0, (u64)pos, 0, &res);
+      if (rc != SQLITE_OK) {goto vdbe_error_halt;}
+      pCur->pCurSrc->deferredMoveto = 0;
+      pCur->pCurSrc->cacheStatus = CACHE_STALE;
+    }
+    assert(res == 0);
+    pCur->pCurSrc->nullRow = 0;
+  } else {
+    /* If not found */
+    pCur->pCurSrc->nullRow = 1;
+    pc = pOp->p2 - 1;
+  }
+
+  break;
+}
+
+case OP_HashNext: {        /* jump */
+  VdbeCursor *pCur = p->apCsr[pOp->p1];
+  BtCursor *pCrsr = pCur->pCurSrc->pCursor;   /* The BTree cursor */
+  i64 iPos = -1;
+  int res = 1;
+
+  if (pCur->pHashCursor == NULL) {
+    rc = SQLITE_OK;
+    break;
+  }
+
+  /* Search the next value */
+  rc = sqlite3gsHashGetNext(&pCur->pHashCursor, &iPos);
+  if (rc != SQLITE_OK) {goto vdbe_error_halt;}
+  if (pCur->pHashCursor != NULL) {
+    /* If found */
+    if (sqlite3gsIsGsCursor(pCrsr)) {
+      rc = sqlite3gsMove(pCrsr, iPos, &res);
+      if (rc != SQLITE_OK) {goto vdbe_error_halt;}
+    } else {
+      rc = sqlite3BtreeMovetoUnpacked(pCrsr, 0, (u64)iPos, 0, &res);
+      if (rc != SQLITE_OK) {goto vdbe_error_halt;}
+      pCur->pCurSrc->deferredMoveto = 0;
+      pCur->pCurSrc->cacheStatus = CACHE_STALE;
+    }
+    assert(res == 0);
+    pCur->pCurSrc->nullRow = 0;
+    pc = pOp->p2 - 1;
+  } else {
+    pCur->pCurSrc->nullRow = 1;
+  }
+
+  break;
+}
+#endif /* GD_ENABLE_NEWSQL_SERVER */
 
 /* Opcode: Noop * * * * *
 **

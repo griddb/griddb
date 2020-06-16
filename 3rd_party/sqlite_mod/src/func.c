@@ -1722,35 +1722,49 @@ void sqlite3RegisterGlobalFunctions(void){
     FUNCTION2(coalesce,         -1, 0, 0, noopFunc,  SQLITE_FUNC_COALESCE),
     FUNCTION(hex,                1, 0, 0, hexFunc          ),
     FUNCTION2(ifnull,            2, 0, 0, noopFunc,  SQLITE_FUNC_COALESCE),
+#ifndef GD_ENABLE_NEWSQL_SERVER
     FUNCTION2(unlikely,          1, 0, 0, noopFunc,  SQLITE_FUNC_UNLIKELY),
     FUNCTION2(likelihood,        2, 0, 0, noopFunc,  SQLITE_FUNC_UNLIKELY),
     FUNCTION2(likely,            1, 0, 0, noopFunc,  SQLITE_FUNC_UNLIKELY),
+#endif
     VFUNCTION(random,            0, 0, 0, randomFunc       ),
     VFUNCTION(randomblob,        1, 0, 0, randomBlob       ),
     FUNCTION(nullif,             2, 0, 1, nullifFunc       ),
+#ifndef GD_ENABLE_NEWSQL_SERVER
     FUNCTION(sqlite_version,     0, 0, 0, versionFunc      ),
     FUNCTION(sqlite_source_id,   0, 0, 0, sourceidFunc     ),
+#endif
     FUNCTION(sqlite_log,         2, 0, 0, errlogFunc       ),
 #if SQLITE_USER_AUTHENTICATION
     FUNCTION(sqlite_crypt,       2, 0, 0, sqlite3CryptFunc ),
 #endif
+#ifndef GD_ENABLE_NEWSQL_SERVER
 #ifndef SQLITE_OMIT_COMPILEOPTION_DIAGS
     FUNCTION(sqlite_compileoption_used,1, 0, 0, compileoptionusedFunc  ),
     FUNCTION(sqlite_compileoption_get, 1, 0, 0, compileoptiongetFunc  ),
 #endif /* SQLITE_OMIT_COMPILEOPTION_DIAGS */
+#endif
     FUNCTION(quote,              1, 0, 0, quoteFunc        ),
+#ifndef GD_ENABLE_NEWSQL_SERVER
     VFUNCTION(last_insert_rowid, 0, 0, 0, last_insert_rowid),
     VFUNCTION(changes,           0, 0, 0, changes          ),
     VFUNCTION(total_changes,     0, 0, 0, total_changes    ),
+#endif
     FUNCTION(replace,            3, 0, 0, replaceFunc      ),
+#ifndef GD_ENABLE_NEWSQL_SERVER
     FUNCTION(zeroblob,           1, 0, 0, zeroblobFunc     ),
+#endif
+#ifndef GD_ENABLE_NEWSQL_SERVER
   #ifdef SQLITE_SOUNDEX
     FUNCTION(soundex,            1, 0, 0, soundexFunc      ),
   #endif
+#endif
+#ifndef GD_ENABLE_NEWSQL_SERVER
   #ifndef SQLITE_OMIT_LOAD_EXTENSION
     FUNCTION(load_extension,     1, 0, 0, loadExt          ),
     FUNCTION(load_extension,     2, 0, 0, loadExt          ),
   #endif
+#endif
     AGGREGATE(sum,               1, 0, 0, sumStep,         sumFinalize    ),
     AGGREGATE(total,             1, 0, 0, sumStep,         totalFinalize    ),
     AGGREGATE(avg,               1, 0, 0, sumStep,         avgFinalize    ),

@@ -420,6 +420,9 @@ int sqlite3_exec(
 #define SQLITE_NOTADB      26   /* File opened that is not a database file */
 #define SQLITE_NOTICE      27   /* Notifications from sqlite3_log() */
 #define SQLITE_WARNING     28   /* Warnings from sqlite3_log() */
+#ifdef GD_ENABLE_NEWSQL_SERVER
+#define SQLITE_NEWSQL_ERROR 99
+#endif
 #define SQLITE_ROW         100  /* sqlite3_step() has another row ready */
 #define SQLITE_DONE        101  /* sqlite3_step() has finished executing */
 /* end-of-error-codes */
@@ -7414,6 +7417,17 @@ int sqlite3_vtab_on_conflict(sqlite3 *);
 */
 #ifdef SQLITE_OMIT_FLOATING_POINT
 # undef double
+#endif
+
+#ifdef GD_ENABLE_NEWSQL_SERVER
+#include "c_utility.h"
+
+struct SQLStatement;
+typedef struct SQLStatement SQLStatement;
+
+int sqlite3gs_initialize(void);
+int sqlite3gs_allocator_set(CUtilException *ex, CUtilVariableSizeAllocator *alc);
+void sqlite3gs_GsSqlStatement_set(sqlite3 *db, SQLStatement *SQLStatement);
 #endif
 
 #ifdef __cplusplus

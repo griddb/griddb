@@ -386,6 +386,14 @@ static int lookupName(
     /*
     ** Perhaps the name is a reference to the ROWID
     */
+#ifdef GD_ENABLE_NEWSQL_SERVER
+    if (pParse->db->pSQLStatement && pMatch && pMatch->zName
+	 && pMatch->zName[0] == '#') {
+      // NewSQL column cannot be ROWID
+      assert(strstr(pMatch->zName, "#table") == pMatch->zName);
+    }
+    else
+#endif
     if( cnt==0 && cntTab==1 && pMatch && sqlite3IsRowid(zCol)
      && HasRowid(pMatch->pTab) ){
       cnt = 1;

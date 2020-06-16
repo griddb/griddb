@@ -2439,6 +2439,9 @@ static int openDatabase(
   char *zOpen = 0;                /* Filename argument to pass to BtreeOpen() */
   char *zErrMsg = 0;              /* Error message from sqlite3ParseUri() */
 
+  SQLStatement *tmpStmt;
+  tmpStmt = (*ppDb)->pSQLStatement;
+
   *ppDb = 0;
 #ifndef SQLITE_OMIT_AUTOINIT
   rc = sqlite3_initialize();
@@ -2519,6 +2522,7 @@ static int openDatabase(
   db->nDb = 2;
   db->magic = SQLITE_MAGIC_BUSY;
   db->aDb = db->aDbStatic;
+  db->pSQLStatement = tmpStmt;
 
   assert( sizeof(db->aLimit)==sizeof(aHardLimit) );
   memcpy(db->aLimit, aHardLimit, sizeof(db->aLimit));

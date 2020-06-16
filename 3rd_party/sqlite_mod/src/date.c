@@ -48,8 +48,11 @@
 #include <assert.h>
 #include <time.h>
 
-#ifndef SQLITE_OMIT_DATETIME_FUNCS
-
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sys/time.h>
+#endif
 
 /*
 ** A structure for holding a single date and time.
@@ -134,28 +137,30 @@ end_getDigits:
 ** A missing specifier is not considered an error.
 */
 static int parseTimezone(const char *zDate, DateTime *p){
-  int sgn = 0;
-  int nHr, nMn;
+//  int sgn = 0;
+//  int nHr, nMn;
   int c;
   while( sqlite3Isspace(*zDate) ){ zDate++; }
   p->tz = 0;
   c = *zDate;
-  if( c=='-' ){
-    sgn = -1;
-  }else if( c=='+' ){
-    sgn = +1;
-  }else if( c=='Z' || c=='z' ){
+//  if( c=='-' ){
+//    sgn = -1;
+//  }else if( c=='+' ){
+//    sgn = +1;
+//  }else if( c=='Z' || c=='z' ){
+  if ( c=='Z' ){
     zDate++;
     goto zulu_time;
   }else{
-    return c!=0;
+    //return c!=0;
+  	return 1;
   }
-  zDate++;
-  if( getDigits(zDate, 2, 0, 14, ':', &nHr, 2, 0, 59, 0, &nMn)!=2 ){
-    return 1;
-  }
-  zDate += 5;
-  p->tz = sgn*(nMn + nHr*60);
+//  zDate++;
+//  if( getDigits(zDate, 2, 0, 14, ':', &nHr, 2, 0, 59, 0, &nMn)!=2 ){
+//    return 1;
+//  }
+//  zDate += 5;
+//  p->tz = sgn*(nMn + nHr*60);
 zulu_time:
   while( sqlite3Isspace(*zDate) ){ zDate++; }
   return *zDate!=0;
@@ -785,325 +790,107 @@ static int isDate(
   return 0;
 }
 
+/*** modified from here ***************************************************/
 
-/*
-** The following routines implement the various date and time functions
-** of SQLite.
-*/
+#define UNIXTIME_FILETIME_EPOC_DIFF ((sqlite3_int64)(10000000) * 60 * 60 * 24 * (365 * 369 + 89))
 
-/*
-**    julianday( TIMESTRING, MOD, MOD, ...)
-**
-** Return the julian day number of the date specified in the arguments
-*/
-static void juliandayFunc(
-  sqlite3_context *context,
-  int argc,
-  sqlite3_value **argv
-){
-  DateTime x;
-  if( isDate(context, argc, argv, &x)==0 ){
-    computeJD(&x);
-    sqlite3_result_double(context, x.iJD/86400000.0);
-  }
+#ifdef _WIN32
+static sqlite3_int64 getUnixTime(FILETIME *fileTime) {
+	ULARGE_INTEGER value;
+	value.LowPart = fileTime->dwLowDateTime;
+	value.HighPart = fileTime->dwHighDateTime;
+	return ((sqlite3_int64)(value.QuadPart) -
+			UNIXTIME_FILETIME_EPOC_DIFF) / 10000;
 }
-
-/*
-**    datetime( TIMESTRING, MOD, MOD, ...)
-**
-** Return YYYY-MM-DD HH:MM:SS
-*/
-static void datetimeFunc(
-  sqlite3_context *context,
-  int argc,
-  sqlite3_value **argv
-){
-  DateTime x;
-  if( isDate(context, argc, argv, &x)==0 ){
-    char zBuf[100];
-    computeYMD_HMS(&x);
-    sqlite3_snprintf(sizeof(zBuf), zBuf, "%04d-%02d-%02d %02d:%02d:%02d",
-                     x.Y, x.M, x.D, x.h, x.m, (int)(x.s));
-    sqlite3_result_text(context, zBuf, -1, SQLITE_TRANSIENT);
-  }
+#else
+static sqlite3_int64 getUnixTime(struct timeval *time) {
+	return (sqlite3_int64)(time->tv_sec) * 1000 +
+			(sqlite3_int64)(time->tv_usec) / 1000;
 }
+#endif
 
-/*
-**    time( TIMESTRING, MOD, MOD, ...)
-**
-** Return HH:MM:SS
-*/
-static void timeFunc(
+
+//-------------------------------------------------------
+
+static void nowFunc(
   sqlite3_context *context,
   int argc,
   sqlite3_value **argv
 ){
-  DateTime x;
-  if( isDate(context, argc, argv, &x)==0 ){
-    char zBuf[100];
-    computeHMS(&x);
-    sqlite3_snprintf(sizeof(zBuf), zBuf, "%02d:%02d:%02d", x.h, x.m, (int)x.s);
-    sqlite3_result_text(context, zBuf, -1, SQLITE_TRANSIENT);
-  }
-}
 
-/*
-**    date( TIMESTRING, MOD, MOD, ...)
-**
-** Return YYYY-MM-DD
-*/
-static void dateFunc(
-  sqlite3_context *context,
-  int argc,
-  sqlite3_value **argv
-){
-  DateTime x;
-  if( isDate(context, argc, argv, &x)==0 ){
-    char zBuf[100];
-    computeYMD(&x);
-    sqlite3_snprintf(sizeof(zBuf), zBuf, "%04d-%02d-%02d", x.Y, x.M, x.D);
-    sqlite3_result_text(context, zBuf, -1, SQLITE_TRANSIENT);
-  }
-}
-
-/*
-**    strftime( FORMAT, TIMESTRING, MOD, MOD, ...)
-**
-** Return a string described by FORMAT.  Conversions as follows:
-**
-**   %d  day of month
-**   %f  ** fractional seconds  SS.SSS
-**   %H  hour 00-24
-**   %j  day of year 000-366
-**   %J  ** Julian day number
-**   %m  month 01-12
-**   %M  minute 00-59
-**   %s  seconds since 1970-01-01
-**   %S  seconds 00-59
-**   %w  day of week 0-6  sunday==0
-**   %W  week of year 00-53
-**   %Y  year 0000-9999
-**   %%  %
-*/
-static void strftimeFunc(
-  sqlite3_context *context,
-  int argc,
-  sqlite3_value **argv
-){
-  DateTime x;
-  u64 n;
-  size_t i,j;
-  char *z;
-  sqlite3 *db;
-  const char *zFmt = (const char*)sqlite3_value_text(argv[0]);
-  char zBuf[100];
-  if( zFmt==0 || isDate(context, argc-1, argv+1, &x) ) return;
-  db = sqlite3_context_db_handle(context);
-  for(i=0, n=1; zFmt[i]; i++, n++){
-    if( zFmt[i]=='%' ){
-      switch( zFmt[i+1] ){
-        case 'd':
-        case 'H':
-        case 'm':
-        case 'M':
-        case 'S':
-        case 'W':
-          n++;
-          /* fall thru */
-        case 'w':
-        case '%':
-          break;
-        case 'f':
-          n += 8;
-          break;
-        case 'j':
-          n += 3;
-          break;
-        case 'Y':
-          n += 8;
-          break;
-        case 's':
-        case 'J':
-          n += 50;
-          break;
-        default:
-          return;  /* ERROR.  return a NULL */
-      }
-      i++;
-    }
-  }
-  testcase( n==sizeof(zBuf)-1 );
-  testcase( n==sizeof(zBuf) );
-  testcase( n==(u64)db->aLimit[SQLITE_LIMIT_LENGTH]+1 );
-  testcase( n==(u64)db->aLimit[SQLITE_LIMIT_LENGTH] );
-  if( n<sizeof(zBuf) ){
-    z = zBuf;
-  }else if( n>(u64)db->aLimit[SQLITE_LIMIT_LENGTH] ){
-    sqlite3_result_error_toobig(context);
+#ifdef _WIN32
+  FILETIME time;
+  sqlite3_int64 unixTime;
+  GetSystemTimeAsFileTime(&time);
+  unixTime = getUnixTime(&time);
+#else
+  struct timeval time;
+  if (gettimeofday(&time, NULL) != 0) {
     return;
-  }else{
-    z = sqlite3DbMallocRaw(db, (int)n);
-    if( z==0 ){
-      sqlite3_result_error_nomem(context);
-      return;
-    }
   }
-  computeJD(&x);
-  computeYMD_HMS(&x);
-  for(i=j=0; zFmt[i]; i++){
-    if( zFmt[i]!='%' ){
-      z[j++] = zFmt[i];
-    }else{
-      i++;
-      switch( zFmt[i] ){
-        case 'd':  sqlite3_snprintf(3, &z[j],"%02d",x.D); j+=2; break;
-        case 'f': {
-          double s = x.s;
-          if( s>59.999 ) s = 59.999;
-          sqlite3_snprintf(7, &z[j],"%06.3f", s);
-          j += sqlite3Strlen30(&z[j]);
-          break;
-        }
-        case 'H':  sqlite3_snprintf(3, &z[j],"%02d",x.h); j+=2; break;
-        case 'W': /* Fall thru */
-        case 'j': {
-          int nDay;             /* Number of days since 1st day of year */
-          DateTime y = x;
-          y.validJD = 0;
-          y.M = 1;
-          y.D = 1;
-          computeJD(&y);
-          nDay = (int)((x.iJD-y.iJD+43200000)/86400000);
-          if( zFmt[i]=='W' ){
-            int wd;   /* 0=Monday, 1=Tuesday, ... 6=Sunday */
-            wd = (int)(((x.iJD+43200000)/86400000)%7);
-            sqlite3_snprintf(3, &z[j],"%02d",(nDay+7-wd)/7);
-            j += 2;
-          }else{
-            sqlite3_snprintf(4, &z[j],"%03d",nDay+1);
-            j += 3;
-          }
-          break;
-        }
-        case 'J': {
-          sqlite3_snprintf(20, &z[j],"%.16g",x.iJD/86400000.0);
-          j+=sqlite3Strlen30(&z[j]);
-          break;
-        }
-        case 'm':  sqlite3_snprintf(3, &z[j],"%02d",x.M); j+=2; break;
-        case 'M':  sqlite3_snprintf(3, &z[j],"%02d",x.m); j+=2; break;
-        case 's': {
-          sqlite3_snprintf(30,&z[j],"%lld",
-                           (i64)(x.iJD/1000 - 21086676*(i64)10000));
-          j += sqlite3Strlen30(&z[j]);
-          break;
-        }
-        case 'S':  sqlite3_snprintf(3,&z[j],"%02d",(int)x.s); j+=2; break;
-        case 'w': {
-          z[j++] = (char)(((x.iJD+129600000)/86400000) % 7) + '0';
-          break;
-        }
-        case 'Y': {
-          sqlite3_snprintf(5,&z[j],"%04d",x.Y); j+=sqlite3Strlen30(&z[j]);
-          break;
-        }
-        default:   z[j++] = '%'; break;
-      }
-    }
+  sqlite3_int64 unixTime = getUnixTime(&time);
+#endif
+  sqlite3_result_int64(context, unixTime);
+}
+
+static void timestampFunc(
+  sqlite3_context *context,
+  int argc,
+  sqlite3_value **argv
+){
+  DateTime d;
+  const unsigned char *z;
+  
+  int eType = sqlite3_value_type(argv[0]);
+  if (eType == SQLITE_TEXT){
+    z = sqlite3_value_text(argv[0]);
+  	if (z){
+	  sqlite3_int64 unixTime;
+
+      memset(&d, 0, sizeof(d));
+      if (parseYyyyMmDd((char*)z, &d) != 0) return;
+      computeJD(&d);
+	  unixTime = (d.iJD - 21086676*(i64)10000000);
+      sqlite3_result_int64(context, unixTime);
+  	}
   }
-  z[j] = 0;
-  sqlite3_result_text(context, z, -1,
-                      z==zBuf ? SQLITE_TRANSIENT : SQLITE_DYNAMIC);
 }
-
-/*
-** current_time()
-**
-** This function returns the same value as time('now').
-*/
-static void ctimeFunc(
-  sqlite3_context *context,
-  int NotUsed,
-  sqlite3_value **NotUsed2
-){
-  UNUSED_PARAMETER2(NotUsed, NotUsed2);
-  timeFunc(context, 0, 0);
-}
-
-/*
-** current_date()
-**
-** This function returns the same value as date('now').
-*/
-static void cdateFunc(
-  sqlite3_context *context,
-  int NotUsed,
-  sqlite3_value **NotUsed2
-){
-  UNUSED_PARAMETER2(NotUsed, NotUsed2);
-  dateFunc(context, 0, 0);
-}
-
-/*
-** current_timestamp()
-**
-** This function returns the same value as datetime('now').
-*/
-static void ctimestampFunc(
-  sqlite3_context *context,
-  int NotUsed,
-  sqlite3_value **NotUsed2
-){
-  UNUSED_PARAMETER2(NotUsed, NotUsed2);
-  datetimeFunc(context, 0, 0);
-}
-#endif /* !defined(SQLITE_OMIT_DATETIME_FUNCS) */
-
-#ifdef SQLITE_OMIT_DATETIME_FUNCS
-/*
-** If the library is compiled to omit the full-scale date and time
-** handling (to get a smaller binary), the following minimal version
-** of the functions current_time(), current_date() and current_timestamp()
-** are included instead. This is to support column declarations that
-** include "DEFAULT CURRENT_TIME" etc.
-**
-** This function uses the C-library functions time(), gmtime()
-** and strftime(). The format string to pass to strftime() is supplied
-** as the user-data for the function.
-*/
-static void currentTimeFunc(
+	
+static void fromTimestampFunc(
   sqlite3_context *context,
   int argc,
   sqlite3_value **argv
 ){
   time_t t;
-  char *zFormat = (char *)sqlite3_user_data(context);
-  sqlite3 *db;
-  sqlite3_int64 iT;
   struct tm *pTm;
   struct tm sNow;
-  char zBuf[20];
+  char zBuf[100];
+  sqlite3_int64 iT;
+  int milli;
 
-  UNUSED_PARAMETER(argc);
-  UNUSED_PARAMETER(argv);
+  int eType = sqlite3_value_type(argv[0]);
+  if (eType == SQLITE_INTEGER){
+    iT = (sqlite3_int64)(sqlite3_value_double(argv[0]));
+  	t = iT/1000;
+  	milli = iT%1000;
 
-  iT = sqlite3StmtCurrentTime(context);
-  if( iT<=0 ) return;
-  t = iT/1000 - 10000*(sqlite3_int64)21086676;
 #ifdef HAVE_GMTIME_R
-  pTm = gmtime_r(&t, &sNow);
+    pTm = gmtime_r(&t, &sNow);
 #else
-  sqlite3_mutex_enter(sqlite3MutexAlloc(SQLITE_MUTEX_STATIC_MASTER));
-  pTm = gmtime(&t);
-  if( pTm ) memcpy(&sNow, pTm, sizeof(sNow));
-  sqlite3_mutex_leave(sqlite3MutexAlloc(SQLITE_MUTEX_STATIC_MASTER));
+    sqlite3_mutex_enter(sqlite3MutexAlloc(SQLITE_MUTEX_STATIC_MASTER));
+    pTm = gmtime(&t);
+    if( pTm ) memcpy(&sNow, pTm, sizeof(sNow));
+    sqlite3_mutex_leave(sqlite3MutexAlloc(SQLITE_MUTEX_STATIC_MASTER));
 #endif
-  if( pTm ){
-    strftime(zBuf, 20, zFormat, &sNow);
-    sqlite3_result_text(context, zBuf, -1, SQLITE_TRANSIENT);
+    if( pTm ){
+      char tmpBuf[100];
+      char zBuf[100] = "";
+      strftime(tmpBuf, 100,  "%Y-%m-%dT%H:%M:%S", &sNow);
+      sprintf(zBuf, "%s.%dZ", tmpBuf, milli);
+      sqlite3_result_text(context, zBuf, -1, SQLITE_TRANSIENT);
+    }
   }
 }
-#endif
 
 /*
 ** This function registered all of the above C functions as SQL
@@ -1112,20 +899,9 @@ static void currentTimeFunc(
 */
 void sqlite3RegisterDateTimeFunctions(void){
   static SQLITE_WSD FuncDef aDateTimeFuncs[] = {
-#ifndef SQLITE_OMIT_DATETIME_FUNCS
-    FUNCTION(julianday,        -1, 0, 0, juliandayFunc ),
-    FUNCTION(date,             -1, 0, 0, dateFunc      ),
-    FUNCTION(time,             -1, 0, 0, timeFunc      ),
-    FUNCTION(datetime,         -1, 0, 0, datetimeFunc  ),
-    FUNCTION(strftime,         -1, 0, 0, strftimeFunc  ),
-    FUNCTION(current_time,      0, 0, 0, ctimeFunc     ),
-    FUNCTION(current_timestamp, 0, 0, 0, ctimestampFunc),
-    FUNCTION(current_date,      0, 0, 0, cdateFunc     ),
-#else
-    STR_FUNCTION(current_time,      0, "%H:%M:%S",          0, currentTimeFunc),
-    STR_FUNCTION(current_date,      0, "%Y-%m-%d",          0, currentTimeFunc),
-    STR_FUNCTION(current_timestamp, 0, "%Y-%m-%d %H:%M:%S", 0, currentTimeFunc),
-#endif
+    FUNCTION(now,            0, 0, 0, nowFunc),
+    FUNCTION(timestamp,      1, 0, 0, timestampFunc),
+    FUNCTION(from_timestamp, 1, 0, 0, fromTimestampFunc),
   };
   int i;
   FuncDefHash *pHash = &GLOBAL(FuncDefHash, sqlite3GlobalFunctions);

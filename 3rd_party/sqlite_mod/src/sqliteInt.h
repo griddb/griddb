@@ -1042,7 +1042,27 @@ void sqlite3CryptFunc(sqlite3_context*,int,sqlite3_value**);
                                const char*);
 #endif
 
+#ifdef GD_ENABLE_NEWSQL_SERVER
+struct SQLCursor;
+typedef struct SQLCursor SQLCursor;
 
+#if defined(_MSC_VER) && !defined(NDEBUG)
+#define _CRTDBG_MAP_ALLOC
+#include <stdlib.h>
+#include <crtdbg.h>
+#endif
+
+void sqlite3gsMemSet(void);
+int sqlite3gsData(BtCursor *pCur, int iCol, Mem *pMem);
+int sqlite3gsIsGsCursor(BtCursor *pCur);
+int sqlite3gsColumnType(BtCursor *pCur, int iCol);
+void *sqlite3gsMemGetPointer(Mem *pMem);
+int sqlite3gsMemGetPtrSize(Mem *pMem);
+int sqlite3gsPosition(BtCursor *pCur, i64 *pos);
+int sqlite3gsPosition2(BtCursor *pCur, int *blockNo, i64 *pos);
+int sqlite3gsMove(BtCursor *pCur, i64 pos, int *pRes);
+int sqlite3gsMove2(BtCursor *pCur, int blockNo, i64 pos, int *pRes);
+#endif
 /*
 ** Each database connection is an instance of the following structure.
 */
@@ -1155,6 +1175,12 @@ struct sqlite3 {
 #endif
 #ifdef SQLITE_USER_AUTHENTICATION
   sqlite3_userauth auth;        /* User authentication information */
+#endif
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  SQLStatement *pSQLStatement;
+#ifdef SQLITE_DEBUG
+  int printOp;
+#endif
 #endif
 };
 

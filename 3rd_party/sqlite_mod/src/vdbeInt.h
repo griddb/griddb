@@ -83,6 +83,14 @@ struct VdbeCursor {
   i64 seqCount;         /* Sequence counter */
   i64 movetoTarget;     /* Argument to the deferred sqlite3BtreeMoveto() */
   VdbeSorter *pSorter;  /* Sorter object for OP_SorterOpen cursors */
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  void **pHashKeys;     /* Temporary store for hash keys */
+  int *pHashSizes;      /* Temporary store for hash sizes */
+  void *pHashTable;     /* Hash table for hash join */
+  void *pHashCursor;    /* Cursor of hash table */
+  int *pHashKeyType;    /* Type of hash key */
+  struct VdbeCursor *pCurSrc;  /* The cursor of the hash source */
+#endif
 
   /* Cached information about the header for the data record that the
   ** cursor is currently pointing to.  Only valid if cacheStatus matches

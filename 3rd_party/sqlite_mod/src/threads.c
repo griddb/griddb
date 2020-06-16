@@ -102,6 +102,9 @@ int sqlite3ThreadJoin(SQLiteThread *p, void **ppOut){
 
 #define SQLITE_THREADS_IMPLEMENTED 1  /* Prevent the single-thread code below */
 #include <process.h>
+#ifdef GD_ENABLE_NEWSQL_SERVER
+#include <windows.h>
+#endif
 
 /* A running thread */
 struct SQLiteThread {

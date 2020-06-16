@@ -215,6 +215,25 @@
 */
 #include "sqliteInt.h"
 
+#ifdef GD_ENABLE_NEWSQL_SERVER
+
+#define TBLTYPE_BTREE  1
+#define TBLTYPE_TQLDB  3
+
+typedef struct GsAdapter_t {
+  int nTable; /* experimental */
+} GsAdapter;
+
+typedef struct GsAdptCursor_t {
+  SQLStatement *pSQLStatement;
+  SQLCursor *pGsCur;
+  GSType *pColType;
+} GsAdptCursor;
+
+#define IsGsTable(X) ((X)->type == TBLTYPE_TQLDB)
+#define IsGsCursor(X) ((X)->type == TBLTYPE_TQLDB)
+
+#endif
 
 /* The following value is the maximum cell size assuming a maximum page
 ** size give above.
@@ -355,6 +374,10 @@ struct Btree {
   Btree *pPrev;      /* Back pointer of the same list */
 #ifndef SQLITE_OMIT_SHARED_CACHE
   BtLock lock;       /* Object used to lock page 1 */
+#endif
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  u8 type;
+  void *pBackend;
 #endif
 };
 
@@ -514,6 +537,10 @@ struct BtCursor {
   i16 iPage;                            /* Index of current page in apPage */
   u16 aiIdx[BTCURSOR_MAX_DEPTH];        /* Current index in apPage[i] */
   MemPage *apPage[BTCURSOR_MAX_DEPTH];  /* Pages from root to current page */
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  u8 type;
+  void *pBkendCur;
+#endif
 };
 
 /*

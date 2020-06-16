@@ -87,6 +87,21 @@ extern FILE *popen(const char*,const char*);
 extern int pclose(FILE*);
 #endif
 
+#ifdef GD_ENABLE_NEWSQL_SERVER
+#include "c_utility.h"
+#if defined(_MSC_VER) && !defined(NDEBUG)
+#define _CRTDBG_MAP_ALLOC
+#include <stdlib.h>
+#include <crtdbg.h>
+#endif
+CUtilVariableSizeAllocator *vsa = NULL;
+CUtilException *excp = NULL;
+GsSqlConnection *pGsSqlConnection = NULL;
+SQLStatement *pSQLStatement = NULL;
+#define GSQC_ALLOCATOR_GROUP_ID 1
+#define GSQC_ALLOCATOR_NAME "sqlWork"
+#endif
+
 #if defined(_WIN32_WCE)
 /* Windows CE (arm-wince-mingw32ce-gcc) does not provide isatty()
  * thus we always assume that we have a console. That can be
@@ -1723,7 +1738,11 @@ static void writefileFunc(
 static void open_db(ShellState *p, int keepAlive){
   if( p->db==0 ){
     sqlite3_initialize();
+#ifdef GD_ENABLE_NEWSQL_SERVER
+    sqlite3_open(":memory:", &p->db);
+#else
     sqlite3_open(p->zDbFilename, &p->db);
+#endif
     db = p->db;
     if( db && sqlite3_errcode(db)==SQLITE_OK ){
       sqlite3_create_function(db, "shellstatic", 0, SQLITE_UTF8, 0,
@@ -1742,6 +1761,33 @@ static void open_db(ShellState *p, int keepAlive){
                             readfileFunc, 0, 0);
     sqlite3_create_function(db, "writefile", 2, SQLITE_UTF8, 0,
                             writefileFunc, 0, 0);
+#ifdef GD_ENABLE_NEWSQL_SERVER
+    /* For test */
+    {
+      GSResult grc = GS_RESULT_OK;
+      grc = GsSqlConnectionCreate(&pGsSqlConnection);
+      if (!GS_SUCCEEDED(grc)) {
+        fprintf(stderr,"Error: unable to create GsSqlConnection");
+        if( keepAlive ) return;
+        exit(1);
+      }
+      grc = setStubDatabaseName(pGsSqlConnection, p->zDbFilename);
+      if (!GS_SUCCEEDED(grc)) {
+        GsSqlConnectionClose(pGsSqlConnection);
+        fprintf(stderr,"Error: unable to set database name");
+        if( keepAlive ) return;
+        exit(1);
+      }
+      grc = SQLStatementCreate(pGsSqlConnection, &pSQLStatement);
+      if (!GS_SUCCEEDED(grc)) {
+        GsSqlConnectionClose(pGsSqlConnection);
+        fprintf(stderr,"Error: unable to create SQLStatement");
+        if( keepAlive ) return;
+        exit(1);
+      }
+      sqlite3gs_GsSqlStatement_set(db, pSQLStatement);
+    }
+#endif
   }
 }
 
@@ -3896,10 +3942,28 @@ static void main_init(ShellState *data) {
   memcpy(data->newline,"\r\n", 3);
   data->showHeader = 0;
   data->shellFlgs = SHFLG_Lookaside;
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  sqlite3gs_initialize();
+  {
+    GSResult grc = GS_RESULT_OK;
+    CUtilVariableSizeAllocatorConfig vsaConfig = CUTIL_VARIABLE_SIZE_ALLOCATOR_CONFIG_INITIALIZER;
+    size_t fixedSizeList[3] = {128, 4096, 1048576};
+    vsaConfig.fixedSizeList = fixedSizeList;
+    vsaConfig.fixedAllocatorCount = 3;
+    excp = malloc(10);
+    grc = cutilCreateVariableSizeAllocator(excp, &vsaConfig, cutilMakeAllocatorInfo(GSQC_ALLOCATOR_GROUP_ID, GSQC_ALLOCATOR_NAME), &vsa);
+    if (!GS_SUCCEEDED(grc)) {printf("cutilCreateVariableSizeAllocator failed\n");exit(1);}
+    sqlite3gs_allocator_set(excp, vsa);
+  }
+#endif
   sqlite3_config(SQLITE_CONFIG_URI, 1);
   sqlite3_config(SQLITE_CONFIG_LOG, shellLog, data);
   sqlite3_config(SQLITE_CONFIG_MULTITHREAD);
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  sqlite3_snprintf(sizeof(mainPrompt), mainPrompt,"newsql> ");
+#else
   sqlite3_snprintf(sizeof(mainPrompt), mainPrompt,"sqlite> ");
+#endif
   sqlite3_snprintf(sizeof(continuePrompt), continuePrompt,"   ...> ");
 }
 
@@ -3944,6 +4008,10 @@ int main(int argc, char **argv){
   int i;
   int rc = 0;
   int warnInmemoryDb = 0;
+
+#if defined(_MSC_VER) && !defined(NDEBUG) && defined (GD_ENABLE_NEWSQL_SERVER)
+  _CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
+#endif
 
 #if USE_SYSTEM_SQLITE+0!=1
   if( strcmp(sqlite3_sourceid(),SQLITE_SOURCE_ID)!=0 ){
@@ -4255,5 +4323,17 @@ int main(int argc, char **argv){
     sqlite3_close(data.db);
   }
   sqlite3_free(data.zFreeOnClose); 
+#ifdef GD_ENABLE_NEWSQL_SERVER /* memory leak */
+  {
+    char *z = find_home_dir();
+    if (z != NULL) {free(z);}
+  }
+#endif
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  GsSqlStatementClose(pGsSqlConnection, pSQLStatement);
+  GsSqlConnectionClose(pGsSqlConnection);
+  cutilDestroyVariableSizeAllocator(vsa);
+  free(excp);
+#endif
   return rc;
 }

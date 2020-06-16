@@ -4519,6 +4519,7 @@ int sqlite3PagerOpen(
   int flags,               /* flags controlling this file */
   int vfsFlags,            /* flags passed through to sqlite3_vfs.xOpen() */
   void (*xReinit)(DbPage*) /* Function to reinitialize pages */
+ , int pageSize
 ){
   u8 *pPtr;
   Pager *pPager = 0;       /* Pager object to allocate and return */
@@ -4531,7 +4532,10 @@ int sqlite3PagerOpen(
   int nPathname = 0;       /* Number of bytes in zPathname */
   int useJournal = (flags & PAGER_OMIT_JOURNAL)==0; /* False to omit journal */
   int pcacheSize = sqlite3PcacheSize();       /* Bytes to allocate for PCache */
-  u32 szPageDflt = SQLITE_DEFAULT_PAGE_SIZE;  /* Default page size */
+
+//  u32 szPageDflt = SQLITE_DEFAULT_PAGE_SIZE;  /* Default page size */
+ u32 szPageDflt = pageSize;
+
   const char *zUri = 0;    /* URI args to copy */
   int nUri = 0;            /* Number of bytes of URI args at *zUri */
 

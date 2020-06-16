@@ -273,7 +273,10 @@ CollSeq *sqlite3BinaryCompareCollSeq(
 /*
 ** Generate code for a comparison operator.
 */
-static int codeCompare(
+#ifndef GD_ENABLE_NEWSQL_SERVER
+static 
+#endif
+int codeCompare(
   Parse *pParse,    /* The parsing (and code generating) context */
   Expr *pLeft,      /* The left operand */
   Expr *pRight,     /* The right operand */

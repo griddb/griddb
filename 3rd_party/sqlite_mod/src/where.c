@@ -19,6 +19,12 @@
 #include "sqliteInt.h"
 #include "whereInt.h"
 
+#ifdef GD_ENABLE_NEWSQL_SERVER
+#include "newsql_interface.h"
+int codeCompare(Parse *pParse, Expr *pLeft, Expr *pRight, int opcode, int in1, int in2, int dest, int jumpIfNull);
+static void codeApplyAffinity(Parse *pParse, int base, int n, char *zAff);
+#endif
+
 /*
 ** Return the estimated number of output rows from a WHERE clause
 */
@@ -1537,7 +1543,7 @@ static void TRACE_IDX_OUTPUTS(sqlite3_index_info *p){
 #define TRACE_IDX_OUTPUTS(A)
 #endif
 
-#ifndef SQLITE_OMIT_AUTOMATIC_INDEX
+#if !defined(SQLITE_OMIT_AUTOMATIC_INDEX) || defined(GD_ENABLE_NEWSQL_SERVER)
 /*
 ** Return TRUE if the WHERE clause term pTerm is of a form where it
 ** could be used with an index to access pSrc, assuming an appropriate
@@ -1559,6 +1565,154 @@ static int termCanDriveIndex(
 }
 #endif
 
+#ifdef GD_ENABLE_NEWSQL_SERVER /* HASH JOIN */
+/*
+** Generate code to construct the Index object for an hash index
+** and to set up the WhereLevel object pLevel so that the code generator
+** makes use of the hash index.
+*/
+static void sqlite3gsConstructHashIndex(
+  Parse *pParse,              /* The parsing context */
+  WhereClause *pWC,           /* The WHERE clause */
+  struct SrcList_item *pSrc,  /* The FROM clause term to get the next index */
+  Bitmask notReady,           /* Mask of cursors that are not available */
+  WhereLevel *pLevel          /* Write new index here */
+){
+  int nKeyCol;                /* Number of columns in the constructed index */
+  WhereTerm *pTerm;           /* A single term of the WHERE clause */
+  WhereTerm *pWCEnd;          /* End of pWC->a[] */
+  Index *pIdx;                /* Object describing the transient index */
+  Vdbe *v;                    /* Prepared statement under construction */
+  int addrInit;               /* Address of the initialization bypass jump */
+  Table *pTable;              /* The table being indexed */
+  int regRecord;              /* Register holding an index record */
+  int n;                      /* Column counter */
+  int i;                      /* Loop counter */
+  CollSeq *pColl;             /* Collating sequence to on a column */
+  WhereLoop *pLoop;           /* The Loop object */
+  char *zNotUsed;             /* Extra space on the end of pIdx */
+  Bitmask idxCols;            /* Bitmap of columns used for indexing */
+  u8 sentWarning = 0;         /* True if a warnning has been issued */
+  int addr;
+
+  /* Generate code to skip over the creation and initialization of the
+  ** transient index on 2nd and subsequent iterations of the loop. */
+  v = pParse->pVdbe;
+  assert( v!=0 );
+  addrInit = sqlite3CodeOnce(pParse); VdbeCoverage(v);
+
+  /* Count the number of columns that will be added to the index
+  ** and used to match WHERE clause constraints */
+  nKeyCol = 0;
+  pTable = pSrc->pTab;
+  pWCEnd = &pWC->a[pWC->nTerm];
+  pLoop = pLevel->pWLoop;
+  idxCols = 0;
+  for(pTerm=pWC->a; pTerm<pWCEnd; pTerm++){
+    if( termCanDriveIndex(pTerm, pSrc, notReady) ){
+      int iCol = pTerm->u.leftColumn;
+      Bitmask cMask = iCol>=BMS ? MASKBIT(BMS-1) : MASKBIT(iCol);
+      testcase( iCol==BMS );
+      testcase( iCol==BMS-1 );
+      if( !sentWarning ){
+        sqlite3_log(SQLITE_WARNING_AUTOINDEX,
+            "hash index on %s(%s)", pTable->zName,
+            pTable->aCol[iCol].zName);
+        sentWarning = 1;
+      }
+      if( (idxCols & cMask)==0 ){
+        if( whereLoopResize(pParse->db, pLoop, nKeyCol+1) ) return;
+        pLoop->aLTerm[nKeyCol++] = pTerm;
+        idxCols |= cMask;
+      }
+    }
+  }
+  assert( nKeyCol>0 );
+  pLoop->u.btree.nEq = pLoop->nLTerm = nKeyCol;
+  pLoop->wsFlags = WHERE_COLUMN_EQ | WHERE_IDX_ONLY | WHERE_INDEXED
+                     | WHERE_AUTO_INDEX | WHERE_HASH_INDEX;
+
+  /* Construct the Index object to describe this index */
+  pIdx = sqlite3AllocateIndexObject(pParse->db, nKeyCol+1, 0, &zNotUsed);
+  if( pIdx==0 ) return;
+  pLoop->u.btree.pIndex = pIdx;
+  pIdx->zName = "hash-index";
+  pIdx->pTable = pTable;
+  n = 0;
+  idxCols = 0;
+  for(pTerm=pWC->a; pTerm<pWCEnd; pTerm++){
+    if( termCanDriveIndex(pTerm, pSrc, notReady) ){
+      int iCol = pTerm->u.leftColumn;
+      Bitmask cMask = iCol>=BMS ? MASKBIT(BMS-1) : MASKBIT(iCol);
+      testcase( iCol==BMS-1 );
+      testcase( iCol==BMS );
+      if( (idxCols & cMask)==0 ){
+        Expr *pX = pTerm->pExpr;
+        idxCols |= cMask;
+        pIdx->aiColumn[n] = pTerm->u.leftColumn;
+        pColl = sqlite3BinaryCompareCollSeq(pParse, pX->pLeft, pX->pRight);
+#ifdef GD_ENABLE_NEWSQL_SERVER /* sqllogictest */
+        pIdx->azColl[n] = pColl ? pColl->zName : "BINARY";
+#else
+        pIdx->azColl[n] = ALWAYS(pColl) ? pColl->zName : "BINARY";
+#endif
+        n++;
+      }
+    }
+  }
+  assert( (u32)n==pLoop->u.btree.nEq );
+
+  pIdx->aiColumn[n] = -1;
+  pIdx->azColl[n] = "BINARY";
+
+  /* Create the hash index */
+  assert( nKeyCol > 0 );
+  assert( pLevel->iIdxCur>=0 );
+  pLevel->iIdxCur = pParse->nTab++;
+  regRecord  = sqlite3GetTempRange(pParse, pIdx->nKeyCol);
+
+  sqlite3IndexAffinityStr(v, pIdx);
+  if ( (pTable->tabFlags & TF_Ephemeral)!=0 ) {
+    /* Create hash table using ephemeral table */
+
+    /* Resolve column affinity for creating a hash table */
+    for (i=0, pTerm=pWC->a; pTerm<pWCEnd; pTerm++){
+      if( termCanDriveIndex(pTerm, pSrc, notReady) ){
+        char aff = sqlite3CompareAffinity(pTerm->pExpr->pRight, pTable->aCol[pTerm->u.leftColumn].affinity);
+        sqlite3VdbeAddOp2(v, OP_Integer, aff, regRecord+i);
+        VdbeComment((v, "%s.%s(HashTable)", pTable->zName, pTable->aCol[pIdx->aiColumn[i]].zName));
+        i++;
+      }
+    }
+
+    /* Create hash table */
+    sqlite3VdbeAddOp4(v, OP_HashOpen, pLevel->iTabCur, regRecord, pIdx->nKeyCol, SQLITE_INT_TO_PTR(pLevel->iIdxCur), P4_INT32);
+    VdbeComment((v, "%s", pTable->zName));
+    addr = sqlite3VdbeAddOp2(v, OP_Rewind, pLevel->iTabCur, addrInit);
+    for (i = 0; i < pIdx->nKeyCol; i++) {
+      sqlite3VdbeAddOp3(v, OP_Column, pLevel->iTabCur, pIdx->aiColumn[i], regRecord+i);
+    }
+    sqlite3VdbeAddOp2(v, OP_Rowid, pLevel->iTabCur, regRecord+pIdx->nKeyCol);
+    sqlite3VdbeAddOp3(v, OP_HashInsert, pLevel->iIdxCur, regRecord, pIdx->nKeyCol);
+    sqlite3VdbeAddOp2(v, OP_Next, pLevel->iTabCur, addr+1);
+  } else {
+    /* Create hash table using TQL result table */
+    /* Resolve column id for creating a hash table */
+    for (i = 0; i < pIdx->nKeyCol; i++) {
+      sqlite3VdbeAddOp2(v, OP_Integer, pIdx->aiColumn[i], regRecord + i);
+      VdbeComment((v, "%s.%s(HashTable)", pTable->zName, pTable->aCol[pIdx->aiColumn[i]].zName));
+    }
+
+    /* Create hash table */
+    sqlite3VdbeAddOp4(v, OP_HashOpenInsert, pLevel->iTabCur, regRecord, pIdx->nKeyCol, SQLITE_INT_TO_PTR(pLevel->iIdxCur), P4_INT32);
+    VdbeComment((v, "%s", pTable->zName));
+  }
+  sqlite3ReleaseTempRange(pParse, regRecord, pIdx->nKeyCol);
+
+  /* Jump here when skipping the initialization */
+  sqlite3VdbeJumpHere(v, addrInit);
+}
+#endif /* GD_ENABLE_NEWSQL_SERVER HASH JOIN */
 
 #ifndef SQLITE_OMIT_AUTOMATIC_INDEX
 /*
@@ -1591,6 +1745,14 @@ static void constructAutomaticIndex(
   Bitmask idxCols;            /* Bitmap of columns used for indexing */
   Bitmask extraCols;          /* Bitmap of additional columns */
   u8 sentWarning = 0;         /* True if a warnning has been issued */
+
+#ifdef GD_ENABLE_NEWSQL_SERVER /* HASH JOIN */
+  if (pSrc->pTab->tnum != 1 && /* Hash index used only TQL result set */
+      gsGetConnectionEnv(pParse->db->pSQLStatement, PRAGMA_USE_HASH)) {
+    sqlite3gsConstructHashIndex(pParse, pWC, pSrc, notReady, pLevel);
+    return;
+  }
+#endif
 
   /* Generate code to skip over the creation and initialization of the
   ** transient index on 2nd and subsequent iterations of the loop. */
@@ -1668,7 +1830,11 @@ static void constructAutomaticIndex(
         idxCols |= cMask;
         pIdx->aiColumn[n] = pTerm->u.leftColumn;
         pColl = sqlite3BinaryCompareCollSeq(pParse, pX->pLeft, pX->pRight);
+#ifdef GD_ENABLE_NEWSQL_SERVER /* sqllogictest */
+        pIdx->azColl[n] = pColl ? pColl->zName : "BINARY";
+#else
         pIdx->azColl[n] = ALWAYS(pColl) ? pColl->zName : "BINARY";
+#endif
         n++;
       }
     }
@@ -3122,6 +3288,48 @@ static Bitmask codeOneLoopStart(
       VdbeCoverageIf(v, testOp==OP_Gt);
       sqlite3VdbeChangeP5(v, SQLITE_AFF_NUMERIC | SQLITE_JUMPIFNULL);
     }
+#ifdef GD_ENABLE_NEWSQL_SERVER /* HASH JOIN */
+  }else if( pLoop->wsFlags & WHERE_HASH_INDEX){
+    Index *pIdx;                 /* The index we will be using */
+    WhereTerm *pWCEnd;          /* End of pWC->a[] */
+    int addr;
+    int i = 0;
+    int iColReg;
+
+    pIdx = pLoop->u.btree.pIndex;
+    pWCEnd = &pWC->a[pWC->nTerm];
+    iReleaseReg = sqlite3GetTempRange(pParse, pIdx->nColumn); /* The probe input */
+
+    /* Resolve values for searching from hash table */
+    for (i = 0; i < pIdx->nKeyCol; i++) {
+      WhereTerm *pTerm = pLoop->aLTerm[i];
+      Expr *pE = pTerm->pExpr;
+      Expr *pExprProbe = NULL;
+      assert(pTerm->leftCursor==pTabItem->iCursor);
+      pExprProbe = pE->pRight;
+      /* Generate VDBE code caluclating non-target expression. */
+      sqlite3ExprCode(pParse, pExprProbe, iReleaseReg + i);
+    }
+    addr = sqlite3VdbeAddOp4(v, OP_HashSearch, pLevel->iIdxCur, addrCont+1, pIdx->nKeyCol, SQLITE_INT_TO_PTR(iReleaseReg), P4_INT32);
+
+    /* Resolve values for searching from hash table */
+    iColReg = sqlite3GetTempRange(pParse, pIdx->nColumn); /* The probe input */
+    for (i = 0; i < pIdx->nKeyCol; i++) {
+      WhereTerm *pTerm = pLoop->aLTerm[i];
+      assert(pTerm->pExpr->pLeft->op == TK_COLUMN);
+      pTerm->leftCursor;
+      sqlite3VdbeAddOp3(v, OP_Column, iCur, pTerm->pExpr->pLeft->iColumn, iColReg+i);
+      codeCompare(pParse, pTerm->pExpr->pLeft, pTerm->pExpr->pRight, OP_Ne, iColReg+i, iReleaseReg+i, addrCont, SQLITE_JUMPIFNULL);
+      disableTerm(pLevel, pTerm);
+    }
+    sqlite3ReleaseTempRange(pParse, iColReg, pIdx->nColumn);
+    sqlite3ReleaseTempRange(pParse, iReleaseReg, pIdx->nColumn);
+
+    /* OP_HashNext is jump to the next of OP_HashSearch */
+    pLevel->p1 = pLevel->iIdxCur;
+    pLevel->p2 = addr + 1;
+    pLevel->op = OP_HashNext;
+#endif
   }else if( pLoop->wsFlags & WHERE_INDEXED ){
     /* Case 4: A scan using an index.
     **
@@ -4696,7 +4904,7 @@ static int whereLoopAddBtree(
   rSize = pTab->nRowLogEst;
   rLogSize = estLog(rSize);
 
-#ifndef SQLITE_OMIT_AUTOMATIC_INDEX
+#if !defined(SQLITE_OMIT_AUTOMATIC_INDEX) || defined(GD_ENABLE_NEWSQL_SERVER)
   /* Automatic indexes */
   if( !pBuilder->pOrSet
    && (pWInfo->pParse->db->flags & SQLITE_AutoIndex)!=0
@@ -5148,9 +5356,12 @@ static int whereLoopAddAll(WhereLoopBuilder *pBuilder){
       mExtra = mPrior;
     }
     priorJoinType = pItem->jointype;
+#if defined(GD_ENABLE_NEWSQL_SERVER) && !defined(SQLITE_OMIT_VIRTUALTABLE)
     if( IsVirtual(pItem->pTab) ){
       rc = whereLoopAddVirtual(pBuilder, mExtra);
-    }else{
+    }else
+#endif
+    {
       rc = whereLoopAddBtree(pBuilder, mExtra);
     }
     if( rc==SQLITE_OK ){
@@ -6580,6 +6791,9 @@ void sqlite3WhereEnd(WhereInfo *pWInfo){
       pOp = sqlite3VdbeGetOp(v, k);
       for(; k<last; k++, pOp++){
         if( pOp->p1!=pLevel->iTabCur ) continue;
+#ifdef GD_ENABLE_NEWSQL_SERVER /* HASH JOIN */
+        if (pLoop->wsFlags & WHERE_HASH_INDEX) continue;
+#endif
         if( pOp->opcode==OP_Column ){
           int x = pOp->p2;
           assert( pIdx->pTable==pTab );

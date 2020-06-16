@@ -14,6 +14,11 @@
 */
 #include "sqliteInt.h"
 #include "vdbeInt.h"
+#ifdef GD_ENABLE_NEWSQL_SERVER
+#include "backend.hpp"
+#include "newsql_interface.h"
+
+#endif
 
 /*
 ** Create a new virtual database engine.
@@ -1744,6 +1749,29 @@ void sqlite3VdbeFreeCursor(Vdbe *p, VdbeCursor *pCx){
   }else if( pCx->pCursor ){
     sqlite3BtreeCloseCursor(pCx->pCursor);
   }
+#ifdef GD_ENABLE_NEWSQL_SERVER /* HASH JOIN */
+  if (pCx->pHashCursor) {
+    sqlite3gsHashCursorClose(pCx->pHashCursor);
+    pCx->pHashCursor = NULL;
+  }
+  if (pCx->pHashKeys) {
+    sqlite3DbFree(p->db, pCx->pHashKeys);
+    pCx->pHashKeys = NULL;
+  }
+  if (pCx->pHashSizes) {
+    sqlite3DbFree(p->db, pCx->pHashSizes);
+    pCx->pHashSizes = NULL;
+  }
+  if (pCx->pHashTable) {
+    sqlite3gsHashClose(pCx->pHashTable);
+    pCx->pHashTable = NULL;
+  }
+  if (pCx->pHashKeyType) {
+    sqlite3DbFree(p->db, pCx->pHashKeyType);
+    pCx->pHashKeyType = NULL;
+  }
+#endif
+
 #ifndef SQLITE_OMIT_VIRTUALTABLE
   else if( pCx->pVtabCursor ){
     sqlite3_vtab_cursor *pVtabCursor = pCx->pVtabCursor;
@@ -3823,6 +3851,222 @@ static int vdbeRecordCompareString(
   );
   return res;
 }
+
+#ifdef GD_ENABLE_NEWSQL_SERVER
+int sqlite3gsRecordCompare(const unsigned char *aKey1, i64 nKey1, const unsigned char *aKey2, i64 nKey2, KeyInfo *pKeyInfo, int nKeyField) {
+  // See vdbeRecordCompareWithSkip()
+  u32 d1, d2;                         /* Offset into aKey[] of next data element */
+  int i;                          /* Index of next field to compare */
+  u32 szHdr1, szHdr2;                     /* Size of record header in bytes */
+  u32 idx1, idx2;                       /* Offset of first type in header */
+  int rc = 0;                     /* Return value */
+  Mem mem1, mem2;
+  u8 errCode;
+  u16 nField = nKeyField > 0 ? nKeyField : pKeyInfo->nField;
+  assert(nField > 0);
+
+  idx1 = getVarint32(aKey1, szHdr1);
+  idx2 = getVarint32(aKey2, szHdr2);
+  d1 = szHdr1;
+  d2 = szHdr2;
+  i = 0;
+
+  do{
+    u32 serial_type1 = aKey1[idx1];
+    u32 serial_type2 = aKey2[idx2];
+
+    /* RHS is an integer */
+    if (0<serial_type2 && serial_type2<12 && serial_type2!=7) {
+      if( serial_type1>=12 ){
+        rc = +1;
+      }else if( serial_type1==0 ){
+        rc = -1;
+      }else if( serial_type1==7 ){
+        double rhs = vdbeRecordDecodeInt(serial_type2, &aKey2[d2]);
+        sqlite3VdbeSerialGet(&aKey1[d1], serial_type1, &mem1);
+        if( mem1.u.r<rhs ){
+          rc = -1;
+        }else if( mem1.u.r>rhs ){
+          rc = +1;
+        }
+      }else{
+        i64 lhs = vdbeRecordDecodeInt(serial_type1, &aKey1[d1]);
+        i64 rhs = vdbeRecordDecodeInt(serial_type2, &aKey2[d2]);
+        if( lhs<rhs ){
+          rc = -1;
+        }else if( lhs>rhs ){
+          rc = +1;
+        }
+      }
+    }
+
+    /* RHS is real */
+    else if( serial_type2==7 ){
+      if( serial_type1>=12 ){
+        rc = +1;
+      }else if( serial_type1==0 ){
+        rc = -1;
+      }else{
+        double lhs;
+        double rhs;
+        sqlite3VdbeSerialGet(&aKey1[d1], serial_type1, &mem1);
+        if( serial_type1==7 ){
+          lhs = mem1.u.r;
+        }else{
+          lhs = (double)mem1.u.i;
+        }
+        sqlite3VdbeSerialGet(&aKey2[d2], serial_type2, &mem2);
+        rhs = mem2.u.r;
+        if( lhs<rhs ){
+          rc = -1;
+        }else if( lhs>rhs ){
+          rc = +1;
+        }
+      }
+    }
+
+    /* RHS is a string */
+    else if( serial_type2 & 0x01 ){
+      if( serial_type1<12 ){
+        rc = -1;
+      }else if( !(serial_type1 & 0x01) ){
+        rc = +1;
+      }else{
+        mem1.n = (serial_type1 - 12) / 2;
+        mem2.n = (serial_type2 - 12) / 2;
+        if( pKeyInfo->aColl[i] ){
+          mem1.enc = pKeyInfo->enc;
+          mem1.db = pKeyInfo->db;
+          mem1.flags = MEM_Str;
+          mem1.z = (char*)&aKey1[d1];
+          mem2.enc = pKeyInfo->enc;
+          mem2.db = pKeyInfo->db;
+          mem2.flags = MEM_Str;
+          mem2.z = (char*)&aKey2[d2];
+          rc = vdbeCompareMemString(
+              &mem1, &mem2, pKeyInfo->aColl[i], &errCode
+          );
+        }else{
+          int nCmp = MIN(mem1.n, mem2.n);
+          rc = memcmp(&aKey1[d1], &aKey2[d2], nCmp);
+          if( rc==0 ) rc = mem1.n - mem2.n; 
+        }
+      }
+    }
+
+    /* RHS is a blob */
+    else if( serial_type2>=12 && !(serial_type2 & 0x01) ){
+      if( serial_type1<12 || (serial_type1 & 0x01) ){
+        rc = -1;
+      }else{
+        int nStr1 = (serial_type1 - 12) / 2;
+        int nStr2 = (serial_type2 - 12) / 2;
+        int nCmp = MIN(nStr1, nStr2);
+        rc = memcmp(&aKey1[d1], &aKey2[d2], nCmp);
+        if( rc==0 ) rc = nStr1 - nStr2;
+      }
+    }
+
+    /* RHS is null */
+    else{
+      serial_type1 = aKey1[idx1];
+      rc = (serial_type1!=0);
+    }
+
+    if( rc!=0 ){
+      if( pKeyInfo->aSortOrder[i] ){
+        rc = -rc;
+      }
+      return rc;
+    }
+
+    i++;
+    d1 += sqlite3VdbeSerialTypeLen(serial_type1);
+    d2 += sqlite3VdbeSerialTypeLen(serial_type2);
+    idx1 += sqlite3VarintLen(serial_type1);
+    idx2 += sqlite3VarintLen(serial_type2);
+  }while( idx1<(unsigned)szHdr1 && i<nField && d1<=(unsigned)nKey1 && d2<=(unsigned)nKey2);
+
+  return 0;
+}
+
+void sqlite3gsFreePackedRecord(void *p) {
+  sqlite3_free(p);
+}
+
+int sqlite3gsPackRecord(UnpackedRecord* pIdxKey, u8 file_format, i64 *nKey, void **pKey) {
+  /* See OP_MakeRecord */
+  u8 *zNewRecord;        /* A buffer to hold the data for the new record */
+  Mem *pRec;             /* The new record */
+  u64 nData;             /* Number of bytes of data space */
+  int nHdr;              /* Number of bytes of header space */
+  i64 nByte;             /* Data space required for this record */
+  int nZero;             /* Number of zero bytes at the end of the record */
+  int nVarint;           /* Number of bytes in a varint */
+  u32 serial_type;       /* Type field */
+  Mem *pData0;           /* First field to be combined into the record */
+  Mem *pLast;            /* Last field of the record */
+  int nField;            /* Number of fields in the record */
+  int i;                 /* Space used in zNewRecord[] header */
+  int j;                 /* Space used in zNewRecord[] content */
+  int len;               /* Length of a field */
+
+  nData = 0;         /* Number of bytes of data space */
+  nHdr = 0;          /* Number of bytes of header space */
+  nZero = 0;         /* Number of zero bytes at the end of the record */
+  pData0 = pIdxKey->aMem;
+  nField = pIdxKey->nField;
+  pLast = &pData0[nField-1];
+
+  pRec = pLast;
+  do{
+    pRec->uTemp = serial_type = sqlite3VdbeSerialType(pRec, file_format);
+    len = sqlite3VdbeSerialTypeLen(serial_type);
+    if( pRec->flags & MEM_Zero ){
+      if( nData ){
+        sqlite3VdbeMemExpandBlob(pRec);
+      }else{
+        nZero += pRec->u.nZero;
+        len -= pRec->u.nZero;
+      }
+    }
+    nData += len;
+    nHdr += serial_type<=127 ? 1 : sqlite3VarintLen(serial_type);
+  }while( (--pRec)>=pData0 );
+
+  /* Add the initial header varint and total the size */
+  if( nHdr<=126 ){
+    /* The common case */
+    nHdr += 1;
+  }else{
+    /* Rare case of a really large header */
+    nVarint = sqlite3VarintLen(nHdr);
+    nHdr += nVarint;
+    if( nVarint<sqlite3VarintLen(nHdr) ) nHdr++;
+  }
+  nByte = nHdr+nData;
+
+  zNewRecord = (u8*)sqlite3MallocZero(nByte);
+  if (zNewRecord == NULL) {
+    return SQLITE_NOMEM;
+  }
+
+  /* Write the record */
+  i = putVarint32(zNewRecord, nHdr);
+  j = nHdr;
+  pRec = pData0;
+  do{
+    serial_type = pRec->uTemp;
+    i += putVarint32(&zNewRecord[i], serial_type);            /* serial type */
+    j += sqlite3VdbeSerialPut(&zNewRecord[j], pRec, serial_type); /* content */
+  }while( (++pRec)<=pLast );
+
+  *nKey = (int)nByte;
+  *pKey = (void*)zNewRecord;
+
+  return SQLITE_OK;
+}
+#endif
 
 /*
 ** Return a pointer to an sqlite3VdbeRecordCompare() compatible function

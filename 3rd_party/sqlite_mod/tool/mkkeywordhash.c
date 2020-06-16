@@ -178,7 +178,7 @@ static Keyword aKeywordTable[] = {
   { "CURRENT_DATE",     "TK_CTIME_KW",     ALWAYS                 },
   { "CURRENT_TIME",     "TK_CTIME_KW",     ALWAYS                 },
   { "CURRENT_TIMESTAMP","TK_CTIME_KW",     ALWAYS                 },
-  { "DATABASE",         "TK_DATABASE",     ATTACH                 },
+  { "DATABASE",         "TK_DATABASE",     ALWAYS                 },
   { "DEFAULT",          "TK_DEFAULT",      ALWAYS                 },
   { "DEFERRED",         "TK_DEFERRED",     ALWAYS                 },
   { "DEFERRABLE",       "TK_DEFERRABLE",   FKEY                   },
@@ -196,7 +196,7 @@ static Keyword aKeywordTable[] = {
   { "EXISTS",           "TK_EXISTS",       ALWAYS                 },
   { "EXPLAIN",          "TK_EXPLAIN",      EXPLAIN                },
   { "FAIL",             "TK_FAIL",         CONFLICT|TRIGGER       },
-  { "FOR",              "TK_FOR",          TRIGGER                },
+/*  { "FOR",              "TK_FOR",          TRIGGER                }, */
   { "FOREIGN",          "TK_FOREIGN",      FKEY                   },
   { "FROM",             "TK_FROM",         ALWAYS                 },
   { "FULL",             "TK_JOIN_KW",      ALWAYS                 },
@@ -272,6 +272,16 @@ static Keyword aKeywordTable[] = {
   { "WITHOUT",          "TK_WITHOUT",      ALWAYS                 },
   { "WHEN",             "TK_WHEN",         ALWAYS                 },
   { "WHERE",            "TK_WHERE",        ALWAYS                 },
+
+  { "PARTITION",        "TK_PARTITION",    ALWAYS                 },
+  { "PARTITIONS",       "TK_PARTITIONS",   ALWAYS                 },
+  { "HASH",             "TK_HASH",         ALWAYS                 },
+  { "USER",             "TK_USER",         ALWAYS                 },
+  { "IDENTIFIED",       "TK_IDENTIFIED",   ALWAYS                 },
+  { "PASSWORD",         "TK_PASSWORD",     ALWAYS                 },
+  { "FOR",              "TK_FOR",          ALWAYS                 },
+  { "GRANT",            "TK_GRANT",        ALWAYS                 },
+  { "REVOKE",           "TK_REVOKE",       ALWAYS                 },
 };
 
 /* Number of keywords */

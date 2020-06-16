@@ -352,6 +352,7 @@ Table *sqlite3LocateTable(
   }
 
   p = sqlite3FindTable(pParse->db, zName, zDbase);
+
   if( p==0 ){
     const char *zMsg = isView ? "no such view" : "no such table";
     if( zDbase ){
@@ -1287,6 +1288,9 @@ void sqlite3AddPrimaryKey(
   int iCol = -1, i;
   int nTerm;
   if( pTab==0 || IN_DECLARE_VTAB ) goto primary_key_exit;
+#ifdef GD_ENABLE_NEWSQL_SERVER /* for test */
+  goto primary_key_exit;
+#endif
   if( pTab->tabFlags & TF_HasPrimaryKey ){
     sqlite3ErrorMsg(pParse, 
       "table \"%s\" has more than one primary key", pTab->zName);

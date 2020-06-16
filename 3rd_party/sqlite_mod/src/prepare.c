@@ -15,6 +15,10 @@
 */
 #include "sqliteInt.h"
 
+#ifdef GD_ENABLE_NEWSQL_SERVER
+#include "newsql_interface.h"
+#endif
+
 /*
 ** Fill the InitData structure with an error message that indicates
 ** that the database is corrupt.
@@ -288,7 +292,14 @@ static int sqlite3InitOne(sqlite3 *db, int iDb, char **pzErrMsg){
     if( size==0 ){ size = SQLITE_DEFAULT_CACHE_SIZE; }
     pDb->pSchema->cache_size = size;
 #else
+
+  int tmpCacheSize = gsGetConnectionEnv(db->pSQLStatement, PRAGMA_CACHE_SIZE);
+  if(tmpCacheSize > 0) {
+    pDb->pSchema->cache_size = tmpCacheSize;
+  }
+  else {
     pDb->pSchema->cache_size = SQLITE_DEFAULT_CACHE_SIZE;
+  }
 #endif
     sqlite3BtreeSetCacheSize(pDb->pBt, pDb->pSchema->cache_size);
   }
@@ -699,6 +710,7 @@ end_prepare:
   assert( (rc&db->errMask)==rc );
   return rc;
 }
+
 static int sqlite3LockAndPrepare(
   sqlite3 *db,              /* Database handle. */
   const char *zSql,         /* UTF-8 encoded SQL statement. */

@@ -12,6 +12,9 @@
 ** This file contains code used to implement the PRAGMA command.
 */
 #include "sqliteInt.h"
+#ifdef GD_ENABLE_NEWSQL_SERVER
+#include "newsql_interface.h"
+#endif
 
 #if !defined(SQLITE_ENABLE_LOCKING_STYLE)
 #  if defined(__APPLE__)
@@ -42,34 +45,37 @@
 #define PragTyp_ENCODING                      11
 #define PragTyp_FOREIGN_KEY_CHECK             12
 #define PragTyp_FOREIGN_KEY_LIST              13
-#define PragTyp_INCREMENTAL_VACUUM            14
-#define PragTyp_INDEX_INFO                    15
-#define PragTyp_INDEX_LIST                    16
-#define PragTyp_INTEGRITY_CHECK               17
-#define PragTyp_JOURNAL_MODE                  18
-#define PragTyp_JOURNAL_SIZE_LIMIT            19
-#define PragTyp_LOCK_PROXY_FILE               20
-#define PragTyp_LOCKING_MODE                  21
-#define PragTyp_PAGE_COUNT                    22
-#define PragTyp_MMAP_SIZE                     23
-#define PragTyp_PAGE_SIZE                     24
-#define PragTyp_SECURE_DELETE                 25
-#define PragTyp_SHRINK_MEMORY                 26
-#define PragTyp_SOFT_HEAP_LIMIT               27
-#define PragTyp_STATS                         28
-#define PragTyp_SYNCHRONOUS                   29
-#define PragTyp_TABLE_INFO                    30
-#define PragTyp_TEMP_STORE                    31
-#define PragTyp_TEMP_STORE_DIRECTORY          32
-#define PragTyp_THREADS                       33
-#define PragTyp_WAL_AUTOCHECKPOINT            34
-#define PragTyp_WAL_CHECKPOINT                35
-#define PragTyp_ACTIVATE_EXTENSIONS           36
-#define PragTyp_HEXKEY                        37
-#define PragTyp_KEY                           38
-#define PragTyp_REKEY                         39
-#define PragTyp_LOCK_STATUS                   40
-#define PragTyp_PARSER_TRACE                  41
+#define PragTyp_HASH_JOIN                     14
+#define PragTyp_INCREMENTAL_VACUUM            15
+#define PragTyp_INDEX_INFO                    16
+#define PragTyp_INDEX_LIST                    17
+#define PragTyp_INTEGRITY_CHECK               18
+#define PragTyp_JOURNAL_MODE                  19
+#define PragTyp_JOURNAL_SIZE_LIMIT            20
+#define PragTyp_LOCK_PROXY_FILE               21
+#define PragTyp_LOCKING_MODE                  22
+#define PragTyp_PAGE_COUNT                    23
+#define PragTyp_MMAP_SIZE                     24
+#define PragTyp_PAGE_SIZE                     25
+#define PragTyp_SECURE_DELETE                 26
+#define PragTyp_SHRINK_MEMORY                 27
+#define PragTyp_SOFT_HEAP_LIMIT               28
+#define PragTyp_STATS                         29
+#define PragTyp_SYNCHRONOUS                   30
+#define PragTyp_TABLE_INFO                    31
+#define PragTyp_TEMP_STORE                    32
+#define PragTyp_TEMP_STORE_DIRECTORY          33
+#define PragTyp_TEMPDB                        34
+#define PragTyp_THREADS                       35
+#define PragTyp_WAL_AUTOCHECKPOINT            36
+#define PragTyp_WAL_CHECKPOINT                37
+#define PragTyp_ACTIVATE_EXTENSIONS           38
+#define PragTyp_HEXKEY                        39
+#define PragTyp_KEY                           40
+#define PragTyp_REKEY                         41
+#define PragTyp_LOCK_STATUS                   42
+#define PragTyp_OPCODE                        43
+#define PragTyp_PARSER_TRACE                  44
 #define PragFlag_NeedSchema           0x01
 static const struct sPragmaNames {
   const char *const zName;  /* Name of pragma */
@@ -221,6 +227,12 @@ static const struct sPragmaNames {
     /* ePragFlag: */ 0,
     /* iArg:      */ SQLITE_FullFSync },
 #endif
+#if defined(GD_ENABLE_NEWSQL_SERVER)
+  { /* zName:     */ "hash_join",
+    /* ePragTyp:  */ PragTyp_HASH_JOIN,
+    /* ePragFlag: */ 0,
+    /* iArg:      */ 0 },
+#endif
 #if defined(SQLITE_HAS_CODEC)
   { /* zName:     */ "hexkey",
     /* ePragTyp:  */ PragTyp_HEXKEY,
@@ -308,6 +320,14 @@ static const struct sPragmaNames {
     /* ePragTyp:  */ PragTyp_MMAP_SIZE,
     /* ePragFlag: */ 0,
     /* iArg:      */ 0 },
+#endif
+#if defined(GD_ENABLE_NEWSQL_SERVER) && defined(SQLITE_DEBUG)
+  { /* zName:     */ "opcode",
+    /* ePragTyp:  */ PragTyp_OPCODE,
+    /* ePragFlag: */ 0,
+    /* iArg:      */ 0 },
+#endif
+#if !defined(SQLITE_OMIT_PAGER_PRAGMAS)
   { /* zName:     */ "page_count",
     /* ePragTyp:  */ PragTyp_PAGE_COUNT,
     /* ePragFlag: */ PragFlag_NeedSchema,
@@ -419,6 +439,12 @@ static const struct sPragmaNames {
     /* ePragFlag: */ 0,
     /* iArg:      */ 0 },
 #endif
+#if defined(GD_ENABLE_NEWSQL_SERVER)
+  { /* zName:     */ "tempdb",
+    /* ePragTyp:  */ PragTyp_TEMPDB,
+    /* ePragFlag: */ 0,
+    /* iArg:      */ 0 },
+#endif
   { /* zName:     */ "threads",
     /* ePragTyp:  */ PragTyp_THREADS,
     /* ePragFlag: */ 0,
@@ -470,7 +496,7 @@ static const struct sPragmaNames {
     /* iArg:      */ SQLITE_WriteSchema|SQLITE_RecoveryMode },
 #endif
 };
-/* Number of pragmas: 57 on by default, 70 total. */
+/* Number of pragmas: 57 on by default, 73 total. */
 /* End of the automatically generated pragma table.
 ***************************************************************************/
 
@@ -2378,6 +2404,36 @@ void sqlite3Pragma(
 #endif
   }
   break;
+#endif
+
+#ifdef GD_ENABLE_NEWSQL_SERVER
+  case PragTyp_TEMPDB:
+    if( zRight==0 ){
+      returnSingleInt(pParse, aPragmaNames[mid].zName,
+                     gsGetConnectionEnv(db->pSQLStatement, PRAGMA_USE_TMPDB) );
+    }else{
+      int flag = sqlite3GetBoolean(zRight, 0);
+      gsSetConnectionEnv(db->pSQLStatement, PRAGMA_USE_TMPDB, flag);
+    }
+    break;
+  case PragTyp_HASH_JOIN:
+    if( zRight==0 ){
+      returnSingleInt(pParse, aPragmaNames[mid].zName,
+                     gsGetConnectionEnv(db->pSQLStatement, PRAGMA_USE_HASH) );
+    }else{
+      int flag = sqlite3GetBoolean(zRight, 0);
+      gsSetConnectionEnv(db->pSQLStatement, PRAGMA_USE_HASH, flag);
+    }
+    break;
+#if defined(SQLITE_DEBUG)
+  case PragTyp_OPCODE:
+    if( zRight==0 ){
+      returnSingleInt(pParse, aPragmaNames[mid].zName, db->printOp);
+    }else{
+      db->printOp = sqlite3GetBoolean(zRight, 0);
+    }
+    break;
+#endif
 #endif
 
   } /* End of the PRAGMA switch */

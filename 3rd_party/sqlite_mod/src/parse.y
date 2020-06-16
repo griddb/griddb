@@ -48,6 +48,7 @@
 //
 %include {
 #include "sqliteInt.h"
+#include "sql_rewrite.h"
 
 /*
 ** Disable all error recovery processing in the parser push-down
@@ -109,6 +110,9 @@ explain ::= EXPLAIN QUERY PLAN.   { sqlite3BeginParse(pParse, 2); }
 %endif  SQLITE_OMIT_EXPLAIN
 cmdx ::= cmd.           { sqlite3FinishCoding(pParse); }
 
+ecmd ::= AS explain cmdx_mod SEMI.
+cmdx_mod ::= cmd_mod.           { sqlite3FinishCoding(pParse); }
+
 ///////////////////// Begin and end transactions. ////////////////////////////
 //
 
@@ -139,6 +143,42 @@ cmd ::= ROLLBACK trans_opt TO savepoint_opt nm(X). {
 
 ///////////////////// The CREATE TABLE statement ////////////////////////////
 //
+%token_class mod_ids  ID|STRING.
+cmd_mod ::= CREATE TABLE ifnotexists(E) nm(Y) dbnm(Z)
+    LP mod_columnlist(L) RP mod_table_options(F). {
+  gssqlCreateTable(pParse, &Y, &Z, L, F, E);
+}
+%type mod_columnlist {RewriterTableColumnList*}
+%destructor mod_columnlist {gssqlDeleteTableColumnList(pParse->db, $$);}
+mod_columnlist(A) ::= mod_column(C). {
+  A = gssqlAppendTableColumn(pParse, 0, C);
+}
+mod_columnlist(A) ::= mod_columnlist(L) COMMA mod_column(C). {
+  A = gssqlAppendTableColumn(pParse, L, C);
+}
+%type mod_column {RewriterTableColumn*}
+%destructor mod_column {gssqlDeleteTableColumn(pParse->db, $$);}
+mod_column(A) ::= nm(X) mod_ids(T) mod_extra_types mod_carglist(L). {
+  A = gssqlCreateTableColumn(pParse, &X, &T, L);
+}
+mod_extra_types ::= mod_extra_types_opt.
+mod_extra_types ::= typename mod_extra_types_opt.
+mod_extra_types_opt ::= .
+mod_extra_types_opt ::= LP signed RP.
+mod_extra_types_opt ::= LP signed COMMA signed RP.
+%type mod_carglist {int}
+mod_carglist(A) ::= . {A = 0;}
+mod_carglist(A) ::= mod_carglist(X) PRIMARY KEY. {
+  A = gssqlUpdateTableColumnOption(pParse, X, 1);
+}
+mod_carglist(A) ::= mod_carglist(X) NOT NULL. {A = X;}
+%type mod_table_options {RewriterTableOption*}
+%destructor mod_table_options {gssqlDeleteTableOption(pParse->db, $$);}
+mod_table_options(A) ::= . {A = 0;}
+mod_table_options(A) ::= PARTITION BY HASH nm(C) PARTITIONS INTEGER(P). {
+  A = gssqlCreateTableOption(pParse, &C, &P);
+}
+
 cmd ::= create_table create_table_args.
 create_table ::= createkw temp(T) TABLE ifnotexists(E) nm(Y) dbnm(Z). {
    sqlite3StartTable(pParse,&Y,&Z,T,0,0,E);
@@ -374,8 +414,50 @@ resolvetype(A) ::= raisetype(X).             {A = X;}
 resolvetype(A) ::= IGNORE.                   {A = OE_Ignore;}
 resolvetype(A) ::= REPLACE.                  {A = OE_Replace;}
 
+////////////////////////// NewSQL commands /////////////////////////////////////
+//
+cmd_mod ::= CREATE DATABASE nm(X). {
+  gssqlCreateDatabase(pParse, &X);
+}
+
+cmd_mod ::= DROP DATABASE nm(X). {
+  gssqlDropDatabase(pParse, &X);
+}
+
+cmd_mod ::= CREATE USER nm(X) IDENTIFIED BY STRING(Y). {
+  gssqlCreateUser(pParse, &X, &Y);
+}
+
+cmd_mod ::= CREATE USER nm(X). {
+  gssqlCreateUser(pParse, &X, NULL);
+}
+
+cmd_mod ::= SET PASSWORD FOR nm(X) EQ STRING(Y). {
+  gssqlSetPassword(pParse, &X, &Y);
+}
+
+cmd_mod ::= SET PASSWORD EQ STRING(Y). {
+  gssqlSetPassword(pParse, NULL, &Y);
+}
+
+cmd_mod ::= DROP USER nm(X). {
+  gssqlDropUser(pParse, &X);
+}
+
+cmd_mod ::= GRANT ALL ON nm(X) TO nm(Y). {
+  gssqlGrant(pParse, &X, &Y);
+}
+
+cmd_mod ::= REVOKE ALL ON nm(X) FROM nm(Y). {
+  gssqlRevoke(pParse, &X, &Y);
+}
+
 ////////////////////////// The DROP TABLE /////////////////////////////////////
 //
+cmd_mod ::= DROP TABLE ifexists(E) fullname(X). {
+  gssqlDropTable(pParse, X, E);
+}
+
 cmd ::= DROP TABLE ifexists(E) fullname(X). {
   sqlite3DropTable(pParse, X, 0, E);
 }
@@ -396,6 +478,11 @@ cmd ::= DROP VIEW ifexists(E) fullname(X). {
 
 //////////////////////// The SELECT statement /////////////////////////////////
 //
+cmd_mod ::= select(X).  {
+  X = gssqlSetUpSelect(pParse, X);
+  gssqlSelect(pParse, X);
+}
+
 cmd ::= select(X).  {
   SelectDest dest = {SRT_Output, 0, 0, 0, 0, 0};
   sqlite3Select(pParse, X, &dest);
@@ -700,6 +787,11 @@ limit_opt(A) ::= LIMIT expr(X) COMMA expr(Y).
 
 /////////////////////////// The DELETE statement /////////////////////////////
 //
+cmd_mod ::= DELETE FROM fullname(X) where_opt(W). {
+  Select *select = gssqlSetUpDelete(pParse, X, W);
+  gssqlSelect(pParse, select);
+}
+
 %ifdef SQLITE_ENABLE_UPDATE_DELETE_LIMIT
 cmd ::= with(C) DELETE FROM fullname(X) indexed_opt(I) where_opt(W) 
         orderby_opt(O) limit_opt(L). {
@@ -725,6 +817,11 @@ where_opt(A) ::= WHERE expr(X).       {A = X.pExpr;}
 
 ////////////////////////// The UPDATE command ////////////////////////////////
 //
+cmd_mod ::= UPDATE orconf(R) fullname(X) SET setlist(Y)
+        where_opt(W).  {
+  Select *select = gssqlSetUpUpdate(pParse, X, Y, W, R);
+  gssqlSelect(pParse, select);
+}
 %ifdef SQLITE_ENABLE_UPDATE_DELETE_LIMIT
 cmd ::= with(C) UPDATE orconf(R) fullname(X) indexed_opt(I) SET setlist(Y)
         where_opt(W) orderby_opt(O) limit_opt(L).  {
@@ -759,6 +856,11 @@ setlist(A) ::= nm(X) EQ expr(Y). {
 
 ////////////////////////// The INSERT command /////////////////////////////////
 //
+cmd_mod ::= insert_cmd(R) INTO fullname(X) inscollist_opt(F) select(S). {
+  Select *select = gssqlSetUpInsert(pParse, X, S, F, R);
+  gssqlSelect(pParse, select);
+}
+
 cmd ::= with(W) insert_cmd(R) INTO fullname(X) inscollist_opt(F) select(S). {
   sqlite3WithPush(pParse, W, 1);
   sqlite3Insert(pParse, X, S, F, R);
@@ -1181,6 +1283,11 @@ nexprlist(A) ::= expr(Y).
 
 ///////////////////////////// The CREATE INDEX command ///////////////////////
 //
+cmd_mod ::= CREATE INDEX ifnotexists(NE) nm(X) ON nm(Y) dbnm(Z)
+    LP idxlist(L) RP. {
+  gssqlCreateIndex(pParse, &X, &Y, &Z, L, NE);
+}
+
 cmd ::= createkw(S) uniqueflag(U) INDEX ifnotexists(NE) nm(X) dbnm(D)
         ON nm(Y) LP idxlist(Z) RP where_opt(W). {
   sqlite3CreateIndex(pParse, &X, &D, 
@@ -1223,6 +1330,10 @@ collate(C) ::= COLLATE ids(X).   {C = X;}
 //
 cmd ::= DROP INDEX ifexists(E) fullname(X).   {sqlite3DropIndex(pParse, X, E);}
 
+cmd_mod ::= DROP INDEX ifexists(E) fullname(X). {
+  gssqlDropIndex(pParse, X, E);
+}
+
 ///////////////////////////// The VACUUM command /////////////////////////////
 //
 %ifndef SQLITE_OMIT_VACUUM
@@ -1235,6 +1346,22 @@ cmd ::= VACUUM nm.             {sqlite3Vacuum(pParse);}
 ///////////////////////////// The PRAGMA command /////////////////////////////
 //
 %ifndef SQLITE_OMIT_PRAGMA
+cmd_mod ::= PRAGMA nm(X) dbnm(Z). {
+  gssqlExecutePragma(pParse, &X ,&Z, 0, 0);
+}
+cmd_mod ::= PRAGMA nm(X) dbnm(Z) EQ nmnum(Y). {
+  gssqlExecutePragma(pParse, &X ,&Z, &Y, 0);
+}
+cmd_mod ::= PRAGMA nm(X) dbnm(Z) LP nmnum(Y) RP. {
+  gssqlExecutePragma(pParse, &X ,&Z, &Y, 0);
+}
+cmd_mod ::= PRAGMA nm(X) dbnm(Z) EQ minus_num(Y). {
+  gssqlExecutePragma(pParse, &X ,&Z, &Y, 1);
+}
+cmd_mod ::= PRAGMA nm(X) dbnm(Z) LP minus_num(Y) RP. {
+  gssqlExecutePragma(pParse, &X ,&Z, &Y, 1);
+}
+
 cmd ::= PRAGMA nm(X) dbnm(Z).                {sqlite3Pragma(pParse,&X,&Z,0,0);}
 cmd ::= PRAGMA nm(X) dbnm(Z) EQ nmnum(Y).    {sqlite3Pragma(pParse,&X,&Z,&Y,0);}
 cmd ::= PRAGMA nm(X) dbnm(Z) LP nmnum(Y) RP. {sqlite3Pragma(pParse,&X,&Z,&Y,0);}

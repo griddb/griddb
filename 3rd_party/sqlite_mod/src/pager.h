@@ -110,7 +110,8 @@ int sqlite3PagerOpen(
   int,
   int,
   int,
-  void(*)(DbPage*)
+  void(*)(DbPage*),
+  int
 );
 int sqlite3PagerClose(Pager *pPager);
 int sqlite3PagerReadFileheader(Pager*, int, unsigned char*);
