@@ -1,5 +1,5 @@
-%define griddb_name griddb_nosql
-%define griddb_ver 4.3.0
+%define griddb_name griddb
+%define griddb_ver 4.5.0
 %define griddb_instdir /usr/griddb-%{griddb_ver}
 %define griddb_homedir /var/lib/gridstore
 # do not strip
@@ -17,7 +17,7 @@ License:        AGPL-3.0 (and Apache-2.0)
 Source:         %{name}-%{version}.zip
 
 %description
-GridDB is a high performance, high scalability and high reliability database for big data.
+GridDB is Database for IoT with both NoSQL interface and SQL Interface.
 
 %prep
 %setup -q
@@ -44,7 +44,6 @@ mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/uuid
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/omaha
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/zigzag_encoding
 mkdir -p %{buildroot}%{griddb_instdir}/docs
-mkdir -p %{buildroot}%{griddb_instdir}/docs/manual
 mkdir -p %{buildroot}%{griddb_instdir}/docs/sample
 mkdir -p %{buildroot}%{griddb_instdir}/docs/sample/program
 mkdir -p %{buildroot}%{griddb_homedir}
@@ -62,8 +61,6 @@ install -c -m 750 bin/gs_startnode         %{buildroot}%{griddb_instdir}/bin
 install -c -m 750 bin/gs_stat              %{buildroot}%{griddb_instdir}/bin
 install -c -m 750 bin/gs_stopcluster       %{buildroot}%{griddb_instdir}/bin
 install -c -m 750 bin/gs_stopnode          %{buildroot}%{griddb_instdir}/bin
-install -c -m 750 bin/gs_appendcluster     %{buildroot}%{griddb_instdir}/bin
-install -c -m 750 bin/gs_increasecluster   %{buildroot}%{griddb_instdir}/bin
 install -c -m 640 bin/log.py               %{buildroot}%{griddb_instdir}/bin
 install -c -m 640 bin/util.py              %{buildroot}%{griddb_instdir}/bin
 
@@ -95,7 +92,6 @@ install -c -m 640 3rd_party/omaha/COPYING                       %{buildroot}%{gr
 install -c -m 640 3rd_party/zigzag_encoding/LICENSE             %{buildroot}%{griddb_instdir}/3rd_party/zigzag_encoding
 
 install -c -m 640 README.md                                     %{buildroot}%{griddb_instdir}
-install -c -m 644 docs/manual/GridDB_RPM_InstallGuide.html      %{buildroot}%{griddb_instdir}/docs/manual
 install -c -m 644 docs/sample/program/Sample1.java              %{buildroot}%{griddb_instdir}/docs/sample/program
 
 # Install symbolic links
@@ -110,8 +106,6 @@ ln -sf %{griddb_instdir}/bin/gs_startnode          %{buildroot}/usr/bin
 ln -sf %{griddb_instdir}/bin/gs_stat               %{buildroot}/usr/bin
 ln -sf %{griddb_instdir}/bin/gs_stopcluster        %{buildroot}/usr/bin
 ln -sf %{griddb_instdir}/bin/gs_stopnode           %{buildroot}/usr/bin
-ln -sf %{griddb_instdir}/bin/gs_appendcluster      %{buildroot}/usr/bin
-ln -sf %{griddb_instdir}/bin/gs_increasecluster    %{buildroot}/usr/bin
 
 ln -sf %{griddb_instdir}/bin/gridstore-%{version}.jar         %{buildroot}/usr/share/java/gridstore.jar
 ln -sf %{griddb_instdir}/bin/gridstore-conf-%{version}.jar    %{buildroot}/usr/share/java/gridstore-conf.jar
@@ -260,7 +254,6 @@ fi
 %dir %{griddb_instdir}/3rd_party/omaha
 %dir %{griddb_instdir}/3rd_party/zigzag_encoding
 %dir %{griddb_instdir}/docs
-%dir %{griddb_instdir}/docs/manual
 %dir %{griddb_instdir}/docs/sample
 %dir %{griddb_instdir}/docs/sample/program
 %dir %{griddb_homedir}
@@ -276,8 +269,6 @@ fi
 %{griddb_instdir}/bin/gs_stat
 %{griddb_instdir}/bin/gs_stopcluster
 %{griddb_instdir}/bin/gs_stopnode
-%{griddb_instdir}/bin/gs_appendcluster
-%{griddb_instdir}/bin/gs_increasecluster
 %{griddb_instdir}/bin/log.py
 %{griddb_instdir}/bin/util.py
 %{griddb_instdir}/bin/gridstore-%{version}.jar
@@ -305,7 +296,6 @@ fi
 %{griddb_instdir}/3rd_party/omaha/COPYING
 %{griddb_instdir}/3rd_party/zigzag_encoding/LICENSE
 %{griddb_instdir}/README.md
-%{griddb_instdir}/docs/manual/GridDB_RPM_InstallGuide.html
 %{griddb_instdir}/docs/sample/program/Sample1.java
 /usr/bin/gsserver
 /usr/bin/gs_adduser
@@ -317,11 +307,9 @@ fi
 /usr/bin/gs_stat
 /usr/bin/gs_stopcluster
 /usr/bin/gs_stopnode
-/usr/bin/gs_appendcluster
-/usr/bin/gs_increasecluster
 /usr/share/java/gridstore.jar
 /usr/share/java/gridstore-conf.jar
 
 %changelog
-* Wed Nov 20 2019 Toshiba Digital Solutions Corporation
-- 4.3.0
+* Wed Jun 17 2020 Toshiba Digital Solutions Corporation
+- 4.5.0
