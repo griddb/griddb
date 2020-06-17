@@ -199,9 +199,6 @@ bool BaseContainer::validateImpl(TransactionContext &txn,
 
 	RowArray rowArray(txn, reinterpret_cast<R *>(this));
 	ContainerId containerId = getContainerId();
-	uint32_t varColumnNum = getVariableColumnNum();
-	uint32_t columnNum = getColumnNum();
-	uint32_t rowFixedColumnSize = getRowFixedColumnSize();
 
 	std::map<RowId, uint64_t> rowNumMap;
 	std::map<RowId, uint64_t>::iterator rowNumMapItr;
@@ -718,6 +715,7 @@ bool BaseContainer::validateImpl(TransactionContext &txn,
 	}
 	return isValid;
 }
+
 
 
 

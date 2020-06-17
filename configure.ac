@@ -1,5 +1,6 @@
 AC_PREREQ(2.61)
 AC_INIT([GridDB_NoSQL], [4.3.0])
+AC_CONFIG_AUX_DIR([.])
 AM_INIT_AUTOMAKE
 
 CF_ORG="$CFLAGS"
@@ -11,10 +12,15 @@ AC_PROG_CXX
 AM_PROG_INSTALL_STRIP
 AC_PROG_RANLIB
 
+AC_ARG_ENABLE(cxx11, [  --enable-cxx11    enable C++11], [], [ enable_cxx11=yes ])
+AS_IF([test "x$enable_cxx11" = xyes],
+[ CX_CXX11=-std=gnu++0x ],
+[ CX_CXX11= ])
+
 CF_COMMON=" -Wall -finput-charset=UTF-8\
- -Wpointer-arith -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-function"
-C_COMMON="$CF_COMMON  -Wmissing-prototypes"
-CX_COMMON="$CF_COMMON -std=gnu++0x"
+ -Wpointer-arith\
+ -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-function -Wno-unused-parameter"
+CX_COMMON="$CF_COMMON $CX_CXX11"
 
 CF_OPTIMIZE=" -O3 -fno-tree-vectorize -DNDEBUG"
 AC_ARG_ENABLE(debug, [  --enable-debug    turn on debugging],
@@ -41,6 +47,12 @@ CX_STRICT="$CF_STRICT -Weffc++ -Wsynth -Wold-style-cast" ])
 
 CFLAGS="$CF_ORG $C_COMMON$CF_OPTIMIZE$CF_STRICT"
 CXXFLAGS="$CX_ORG $CX_COMMON$CX_OPTIMIZE$CX_STRICT"
+
+AC_CHECK_DECL(
+  FALLOC_FL_PUNCH_HOLE,
+  [],
+  [AC_MSG_ERROR([fallocate and FALLOC_FL_PUNCH_HOLE must be supported])],
+  [[#include <linux/falloc.h>]])
 
 AC_CONFIG_FILES([Makefile 3rd_party/MessagePack/Makefile server/tr-cpp/Makefile utility/Makefile server/Makefile])
 AC_OUTPUT

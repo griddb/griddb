@@ -49,6 +49,7 @@ const bool Collection::indexMapTable[][MAP_TYPE_NUM] = {
 	@brief Allocate Collection Object
 */
 void Collection::initialize(TransactionContext& txn) {
+	UNUSED_VARIABLE(txn);
 	baseContainerImage_ =
 		BaseObject::allocate<CollectionImage>(sizeof(CollectionImage),
 			getMetaAllcateStrategy(), getBaseOId(), OBJECT_TYPE_COLLECTION);
@@ -88,6 +89,7 @@ void Collection::set(TransactionContext& txn, const FullContainerKey &containerK
 	ContainerId containerId, OId columnSchemaOId,
 	MessageSchema* containerSchema) {
 	baseContainerImage_->containerId_ = containerId;
+	setTablePartitioningVersionId(containerSchema->getTablePartitioningVersionId());
 	setContainerExpirationStartTime(containerSchema->getContainerExpirationStartTime());
 
 	FullContainerKeyCursor keyCursor(txn.getPartitionId(), *getObjectManager());
@@ -174,6 +176,7 @@ bool Collection::finalize(TransactionContext& txn) {
 
 			for (itr = idList.begin(); itr != idList.end(); itr++) {
 				bool isOldSchema = rowArray.load(txn, *itr, this, OBJECT_FOR_UPDATE);
+				UNUSED_VARIABLE(isOldSchema);
 				assert(isOldSchema || !isOldSchema);
 				RowId rowArrayId = rowArray.getRowId();
 				removeRowIdMap(txn, rowIdMap.get(),
@@ -213,6 +216,7 @@ bool Collection::finalize(TransactionContext& txn) {
 						{
 							bool isOldSchema = rowArray.load(txn, itr->second.snapshotRowOId_,
 								this, OBJECT_FOR_UPDATE);
+							UNUSED_VARIABLE(isOldSchema);
 							assert(isOldSchema || !isOldSchema);
 							rowArray.finalize(txn);
 						}
@@ -479,7 +483,6 @@ void Collection::continueCreateIndex(TransactionContext& txn,
 			return;
 		}
 
-		MvccRowImage beforeImage = indexCursor.getMvccImage();
 		IndexData indexData(txn.getDefaultAllocator());
 		bool isExist = getIndexData(txn, indexCursor, indexData);
 		if (!isExist) {
@@ -880,6 +883,7 @@ void Collection::abortInternal(TransactionContext& txn, TransactionId tId) {
 							util::StackAllocator::Scope scope(txn.getDefaultAllocator());
 							bool isOldSchema = rowArray.load(
 								txn, *rowItr, this, OBJECT_READ_ONLY);
+							UNUSED_VARIABLE(isOldSchema);
 							assert(isOldSchema || !isOldSchema);
 							bool isUndo = false;
 							for (rowArray.begin(); !rowArray.end();
@@ -889,6 +893,7 @@ void Collection::abortInternal(TransactionContext& txn, TransactionId tId) {
 									if (!isUndo) {
 										isUndo = true;
 										bool isOldSchema = rowArray.setDirty(txn);
+										UNUSED_VARIABLE(isOldSchema);
 										assert(isOldSchema || !isOldSchema);
 									}
 									undoCreateRow(txn, rowArray);
@@ -920,6 +925,7 @@ void Collection::abortInternal(TransactionContext& txn, TransactionId tId) {
 						IndexData indexData(txn.getDefaultAllocator());
 						bool isExist = getIndexData(txn, indexCursor,
 							indexData);
+						UNUSED_VARIABLE(isExist);
 						indexSchema_->dropIndexData(txn, *(indexData.columnIds_),
 							indexData.mapType_, this, UNDEF_CONTAINER_POS, true);
 						indexSchema_->dropIndexInfo(
@@ -957,6 +963,7 @@ void Collection::abortInternal(TransactionContext& txn, TransactionId tId) {
 						util::StackAllocator::Scope scope(txn.getDefaultAllocator());
 						bool isOldSchema = rowArray.load(txn, itr->snapshotRowOId_, this,
 							OBJECT_FOR_UPDATE);
+						UNUSED_VARIABLE(isOldSchema);
 						assert(isOldSchema || !isOldSchema);
 						undoUpdateRow(txn, rowArray);
 						removeMvccMap(txn, mvccMap.get(), tId, *itr);
@@ -1030,6 +1037,7 @@ void Collection::commit(TransactionContext& txn) {
 						{
 							bool isOldSchema = rowArray.load(
 								txn, itr->snapshotRowOId_, this, OBJECT_FOR_UPDATE);
+							UNUSED_VARIABLE(isOldSchema);
 							assert(isOldSchema || !isOldSchema);
 							rowArray.finalize(txn);
 							removeMvccMap(txn, mvccMap.get(), tId, *itr);
@@ -1091,6 +1099,10 @@ bool Collection::hasUncommitedTransaction(TransactionContext& txn) {
 	}
 }
 
+bool Collection::checkRunTime(TransactionContext &txn) {
+	checkExclusive(txn);
+	return !isNoRowTransaction();
+}
 
 /*!
 	@brief Search Btree Index of RowId
@@ -1100,29 +1112,29 @@ void Collection::searchRowIdIndex(TransactionContext& txn,
 	OutputOrder outputOrder) {
 
 	util::XArray<OId> mvccList(txn.getDefaultAllocator());
-	ResultSize limitBackup = sc.limit_;
-	sc.limit_ = MAX_RESULT_SIZE;
-	bool isCheckOnly = false;
+	ResultSize limitBackup = sc.getLimit();
+	sc.setLimit(MAX_RESULT_SIZE);
+	bool isCheckOnly = sc.getResumeStatus() != BaseIndex::SearchContext::NOT_RESUME;
 	const bool ignoreTxnCheck = false;
 	searchMvccMap<Collection, BtreeMap::SearchContext>(txn, sc, mvccList, isCheckOnly, ignoreTxnCheck);
 
-	sc.limit_ = limitBackup;
+	sc.setLimit(limitBackup);
 
 	ContainerValue containerValue(txn.getPartitionId(), *getObjectManager());
 	util::XArray<OId> oIdList(txn.getDefaultAllocator());
 	util::XArray<OId>::iterator itr;
 
-	limitBackup = sc.limit_;
+	limitBackup = sc.getLimit();
 	if (sc.getRestConditionNum() > 0 || !isExclusive()) {
-		sc.limit_ = MAX_RESULT_SIZE;
+		sc.setLimit(MAX_RESULT_SIZE);
 	}
-	else if (sc.limit_ < MAX_RESULT_SIZE) {
-		sc.limit_ += 1;
+	else if (sc.getLimit() < MAX_RESULT_SIZE) {
+		sc.setLimit(sc.getLimit() + 1);
 	}
 	StackAllocAutoPtr<BtreeMap> rowIdMap(
 		txn.getDefaultAllocator(), getRowIdMap(txn));
 	rowIdMap.get()->search(txn, sc, oIdList, outputOrder);
-	sc.limit_ = limitBackup;
+	sc.setLimit(limitBackup);
 
 	util::Vector<TermCondition> keyCondList(txn.getDefaultAllocator());
 	sc.getConditionList(keyCondList, BaseIndex::SearchContext::COND_KEY);
@@ -1131,9 +1143,11 @@ void Collection::searchRowIdIndex(TransactionContext& txn,
 	const RowId *startKey = sc.getStartKey<RowId>();
 	const RowId *endKey = sc.getEndKey<RowId>();
 
+	RowId lastCheckRowId = UNDEF_ROWID;
 	RowArray rowArray(txn, this);
 	for (itr = oIdList.begin(); itr != oIdList.end(); itr++) {
 		rowArray.load(txn, *itr, this, OBJECT_READ_ONLY);
+		lastCheckRowId = rowArray.getRowId();
 		if (outputOrder != ORDER_DESCENDING) {
 			if (startKey != NULL && *startKey > rowArray.getRowId()) {
 				rowArray.searchNextRowId(*startKey);
@@ -1142,6 +1156,7 @@ void Collection::searchRowIdIndex(TransactionContext& txn,
 			}
 			for (; !rowArray.end(); rowArray.next()) {
 				RowArray::Row row(rowArray.getRow(), &rowArray);
+				lastCheckRowId = row.getRowId();
 				if (!isExclusive() && txn.getId() != row.getTxnId() &&
 					!row.isFirstUpdate() &&
 					txn.getManager().isActiveTransaction(
@@ -1170,7 +1185,7 @@ void Collection::searchRowIdIndex(TransactionContext& txn,
 				}
 				if (isMatch) {
 					resultList.push_back(rowArray.getOId());
-					if (resultList.size() == sc.limit_) {
+					if (resultList.size() == sc.getLimit()) {
 						break;
 					}
 				}
@@ -1185,6 +1200,7 @@ void Collection::searchRowIdIndex(TransactionContext& txn,
 			}
 			for (; isRend; isRend = rowArray.prev()) {
 				RowArray::Row row(rowArray.getRow(), &rowArray);
+				lastCheckRowId = row.getRowId();
 				if (!isExclusive() && txn.getId() != row.getTxnId() &&
 					!row.isFirstUpdate() &&
 					txn.getManager().isActiveTransaction(
@@ -1213,15 +1229,18 @@ void Collection::searchRowIdIndex(TransactionContext& txn,
 				}
 				if (isMatch) {
 					resultList.push_back(rowArray.getOId());
-					if (resultList.size() == sc.limit_) {
+					if (resultList.size() == sc.getLimit()) {
 						break;
 					}
 				}
 			}
 		}
-		if (resultList.size() >= sc.limit_) {
+		if (resultList.size() >= sc.getLimit()) {
 			break;
 		}
+	}
+	if (sc.isSuspended() && lastCheckRowId != UNDEF_ROWID) {
+		sc.setSuspendPoint(txn, &(++lastCheckRowId), sizeof(RowId), 0);
 	}
 
 	if (!mvccList.empty() && outputOrder != ORDER_UNDEFINED) {
@@ -1297,8 +1316,8 @@ void Collection::searchRowIdIndex(TransactionContext& txn,
 	else {
 		resultList.push_back(mvccList.data(), mvccList.size());
 	}
-	if (resultList.size() > sc.limit_) {
-		resultList.resize(sc.limit_);
+	if (resultList.size() > sc.getLimit()) {
+		resultList.resize(sc.getLimit());
 	}
 }
 
@@ -1455,6 +1474,155 @@ void Collection::searchRowIdIndex(TransactionContext& txn, uint64_t start,
 	}
 }
 
+void Collection::scanRowIdIndex(
+		TransactionContext& txn, BtreeMap::SearchContext &sc,
+		ContainerRowScanner &scanner) {
+
+	RowId startRowId;
+	RowId endRowId;
+	if (!getRowIdRangeCondition(
+		txn.getDefaultAllocator(),
+		sc, getContainerType(), &startRowId, &endRowId)) {
+		return;
+	}
+
+	util::XArray<OId> oIdList(txn.getDefaultAllocator());
+	scanRowIdIndexPrepare(txn, sc, &oIdList);
+
+	util::XArray<OId> checkedOIdList(txn.getDefaultAllocator());
+	RowId lastCheckRowId = UNDEF_ROWID;
+
+	bool limitReached = false;
+	RowArray &rowArray = scanner.getRowArray();
+
+	for (util::XArray<OId>::iterator it = oIdList.begin();
+			it != oIdList.end(); ++it) {
+		rowArray.load(txn, *it, this, OBJECT_READ_ONLY);
+
+		{
+			if (!rowArray.tail()) {
+				continue;
+			}
+
+			lastCheckRowId = rowArray.getCurrentRowId();
+			rowArray.begin();
+		}
+
+		if (isExclusive() &&
+				startRowId <= rowArray.getRowId() &&
+				lastCheckRowId < endRowId) {
+			if (!scanner.scanRowArrayUnchecked(
+					txn, *this, &rowArray, &(*it), &(*it) + 1)) {
+				limitReached = true;
+				break;
+			}
+		}
+		else {
+			const bool onMvcc = false;
+			scanRowArrayCheckedDirect<onMvcc>(
+					txn, rowArray, startRowId, endRowId, checkedOIdList);
+
+			if (!checkedOIdList.empty()) {
+				if (!scanner.scanRowUnchecked(
+						txn, *this, &rowArray,
+						&checkedOIdList.front(),
+						&checkedOIdList.back() + 1)) {
+					limitReached = true;
+					break;
+				}
+				checkedOIdList.clear();
+			}
+		}
+	}
+
+	if (!limitReached && !isExclusive()) {
+		BtreeMap::SearchContext mvccSC (txn.getDefaultAllocator(), UNDEF_COLUMNID);
+		std::pair<RowId, RowId> mvccRowIdRange;
+		searchMvccMapPrepare(
+				txn, sc, mvccSC, startRowId, lastCheckRowId, &mvccRowIdRange);
+
+		searchMvccMap<Collection, BtreeMap::SearchContext>(
+				txn, mvccSC, scanner);
+	}
+
+	if (sc.isSuspended() && lastCheckRowId != UNDEF_ROWID) {
+		++lastCheckRowId;
+
+		sc.setSuspendPoint(txn, &lastCheckRowId, sizeof(RowId), 0);
+	}
+}
+
+void Collection::scanRowArray(
+		TransactionContext& txn, const OId *begin, const OId *end,
+		bool onMvcc, ContainerRowScanner &scanner) {
+
+	resolveExclusiveStatus<Collection>(txn);
+
+	if (isExclusive()) {
+		scanner.scanRowArrayUnchecked(txn, *this, NULL, begin, end);
+	}
+	else {
+		RowArray &rowArray = scanner.getRowArray();
+
+		const RowId startRowId = std::numeric_limits<RowId>::min();
+		const RowId endRowId = UNDEF_ROWID;
+
+		util::XArray<OId> oIdList(txn.getDefaultAllocator());
+
+		for (const OId *it = begin; it != end; ++it) {
+			rowArray.load(txn, *it, this, OBJECT_READ_ONLY);
+			if (onMvcc) {
+				scanRowArrayCheckedDirect<true>(
+						txn, rowArray, startRowId, endRowId, oIdList);
+			}
+			else {
+				scanRowArrayCheckedDirect<false>(
+						txn, rowArray, startRowId, endRowId, oIdList);
+			}
+
+			if (!oIdList.empty()) {
+				if (!scanner.scanRowUnchecked(
+						txn, *this, &rowArray,
+						&oIdList.front(), &oIdList.back() + 1)) {
+					break;
+				}
+				oIdList.clear();
+			}
+		}
+	}
+}
+
+void Collection::scanRow(
+		TransactionContext& txn, const OId *begin, const OId *end,
+		bool onMvcc, ContainerRowScanner &scanner) {
+
+	resolveExclusiveStatus<Collection>(txn);
+
+	if (isExclusive()) {
+		scanner.scanRowUnchecked(txn, *this, NULL, begin, end);
+	}
+	else {
+		RowArray &rowArray = scanner.getRowArray();
+		util::XArray<OId> oIdList(txn.getDefaultAllocator());
+
+		for (const OId *it = begin; it != end; ++it) {
+			rowArray.load(txn, *it, this, OBJECT_READ_ONLY);
+			if (onMvcc) {
+				scanRowCheckedDirect<true>(txn, rowArray, oIdList);
+			}
+			else {
+				scanRowCheckedDirect<false>(txn, rowArray, oIdList);
+			}
+
+			if (!oIdList.empty() && !scanner.scanRowUnchecked(
+					txn, *this, &rowArray,
+					&oIdList.front(), &oIdList.back() + 1)) {
+				break;
+			}
+			oIdList.clear();
+		}
+	}
+}
 
 /*!
 	@brief Get max RowId
@@ -1510,6 +1678,7 @@ void Collection::lockRowList(
 			searchRowIdIndex(txn, sc, oIdList, ORDER_UNDEFINED);
 			if (!oIdList.empty()) {
 				bool isOldSchema = rowArray.load(txn, oIdList[0], this, OBJECT_FOR_UPDATE);
+				UNUSED_VARIABLE(isOldSchema);
 				assert(isOldSchema || !isOldSchema);
 				RowArray::Row row(rowArray.getRow(), &rowArray);
 				row.lock(txn);
@@ -1533,8 +1702,6 @@ void Collection::putRow(TransactionContext& txn,
 	util::StackAllocator::Scope scope(txn.getDefaultAllocator());
 	PutMode mode = UNDEFINED_STATUS;
 
-	const uint8_t* rowKey;
-	uint32_t rowKeySize;
 	util::Vector<ColumnId> keyColumnIdList(txn.getDefaultAllocator());
 	getKeyColumnIdList(keyColumnIdList);
 	util::XArray<KeyData> keyFieldList(txn.getDefaultAllocator());
@@ -1543,9 +1710,12 @@ void Collection::putRow(TransactionContext& txn,
 	RowArray rowArray(txn, this);
 	OId targetOId = UNDEF_OID;
 	if (!definedRowKey() || isUnique(txn, keyColumnIdList, keyFieldList, targetOId)) {
-		StackAllocAutoPtr<BtreeMap> rowIdMap(
-			txn.getDefaultAllocator(), getRowIdMap(txn));
-		OId tailOId = rowIdMap.get()->getTail(txn);
+		OId tailOId = UNDEF_OID;
+		{
+			StackAllocAutoPtr<BtreeMap> rowIdMap(
+				txn.getDefaultAllocator(), getRowIdMap(txn));
+			tailOId = rowIdMap.get()->getTail(txn);
+		}
 		if (tailOId != UNDEF_OID) {
 			bool isOldSchema = rowArray.load(txn, tailOId, this, OBJECT_FOR_UPDATE);
 			assert(isOldSchema || !isOldSchema);
@@ -1593,15 +1763,12 @@ bool Collection::isUnique(TransactionContext& txn,
 	util::XArray<KeyData> &keyFieldList, OId &oId) {
 	bool isFound = false;
 
-	util::StackAllocator &alloc = txn.getDefaultAllocator();
-
 	oId = UNDEF_OID;
 	bool withPartialMatch = false;
 	IndexTypes indexBit = getIndexTypes(txn, keyColumnIdList, withPartialMatch);
 	if (hasIndex(indexBit, MAP_TYPE_HASH)) {
 		assert(keyColumnIdList.size() == 1);
 		assert(keyFieldList.size() == 1);
-		KeyData &keyData = keyFieldList[0];
 
 		IndexData indexData(txn.getDefaultAllocator());
 		getIndexData(txn, keyColumnIdList, MAP_TYPE_HASH, false, indexData, withPartialMatch);
@@ -1736,8 +1903,6 @@ void Collection::updateRowInternal(TransactionContext& txn,
 
 			bool isMatch = true;
 			for (size_t pos = 0; pos < indexList[i].columnIds_->size(); pos++) {
-				ColumnId columnId = (*indexList[i].columnIds_)[pos];
-				ColumnType type = getColumnInfo(columnId).getColumnType();
 				KeyData &input = inputKeyFieldList[pos];
 				KeyData &current = currentKeyFieldList[pos];
 				isMatch = ((input.data_ == NULL && current.data_ == NULL) || 
@@ -1880,6 +2045,7 @@ void Collection::insertRowInternal(
 			if (splitRowId < srcRow.getRowId()) {
 				bool isOldSchema = destRowArray.load(
 					txn, splitRowArray.getOId(), this, OBJECT_FOR_UPDATE);
+				UNUSED_VARIABLE(isOldSchema);
 				assert(!isOldSchema);
 			}
 		}
@@ -2167,9 +2333,11 @@ void Collection::undoUpdateRow(
 			DSExpression::LE, getRowIdColumnId(), &rowId,
 			sizeof(rowId));
 		BtreeMap::SearchContext sc(txn.getDefaultAllocator(), cond, 1);
-		StackAllocAutoPtr<BtreeMap> rowIdMap(
-			txn.getDefaultAllocator(), getRowIdMap(txn));
-		rowIdMap.get()->search(txn, sc, oIdList, ORDER_DESCENDING);
+		{
+			StackAllocAutoPtr<BtreeMap> rowIdMap(
+				txn.getDefaultAllocator(), getRowIdMap(txn));
+			rowIdMap.get()->search(txn, sc, oIdList, ORDER_DESCENDING);
+		}
 		if (!oIdList.empty()) {
 			bool isOldSchema = rowArray.load(txn, oIdList[0], this, OBJECT_FOR_UPDATE);
 			bool isFound = rowArray.searchNextRowId(rowId);
@@ -2287,6 +2455,7 @@ void Collection::lockIdList(TransactionContext& txn, util::XArray<OId>& oIdList,
 		RowArray rowArray(txn, this);
 		for (size_t i = 0; i < oIdList.size(); i++) {
 			bool isOldSchema = rowArray.load(txn, oIdList[i], this, OBJECT_FOR_UPDATE);
+			UNUSED_VARIABLE(isOldSchema);
 			assert(isOldSchema || !isOldSchema);
 			RowArray::Row row(rowArray.getRow(), &rowArray);
 			row.lock(txn);
@@ -2339,7 +2508,7 @@ void Collection::getContainerOptionInfo(
 	return;
 }
 
-util::String Collection::getBibContainerOptionInfo(TransactionContext &txn) {
+util::String Collection::getBibContainerOptionInfo(TransactionContext &) {
 	return "";
 }
 
@@ -2420,6 +2589,107 @@ void Collection::getIndexList(
 	indexSchema_->getIndexList(txn, UNDEF_CONTAINER_POS, withUncommitted, list);
 }
 
+template<bool Mvcc>
+void Collection::scanRowArrayCheckedDirect(
+		TransactionContext& txn, RowArray &rowArray,
+		RowId startRowId, RowId endRowId, util::XArray<OId> &oIdList) {
+
+	if (rowArray.begin()) {
+		do {
+			RowArray::Row row(rowArray.getRow(), &rowArray);
+			const RowId rowId = row.getRowId();
+			if (rowId >= endRowId) {
+				break;
+			}
+			else if (rowId < startRowId ||
+					filterActiveTransaction<Mvcc>(txn, row)) {
+				continue;
+			}
+			oIdList.push_back(rowArray.getOId());
+		}
+		while (rowArray.next());
+	}
+}
+
+template<bool Mvcc>
+void Collection::scanRowCheckedDirect(
+		TransactionContext& txn, RowArray &rowArray,
+		util::XArray<OId> &oIdList) {
+	RowArray::Row row(rowArray.getRow(), &rowArray);
+
+	if (filterActiveTransaction<Mvcc>(txn, row)) {
+		return;
+	}
+
+	oIdList.push_back(rowArray.getOId());
+}
+
+template<>
+bool Collection::filterActiveTransaction<true>(
+		TransactionContext &txn, RowArray::Row &row) {
+	return txn.getId() == row.getTxnId();
+}
+
+template<>
+bool Collection::filterActiveTransaction<false>(
+		TransactionContext &txn, RowArray::Row &row) {
+	return txn.getId() != row.getTxnId() &&
+			!row.isFirstUpdate() &&
+			txn.getManager().isActiveTransaction(
+					txn.getPartitionId(), row.getTxnId());
+}
+
+void Collection::scanRowIdIndexPrepare(
+		TransactionContext &txn, BtreeMap::SearchContext &sc,
+		util::XArray<OId> *oIdList) {
+	const OutputOrder order = ORDER_UNDEFINED;
+
+	resolveExclusiveStatus<Collection>(txn);
+
+	const ResultSize limitBackup = sc.getLimit();
+	if (sc.getRestConditionNum() > 0 || !isExclusive()) {
+		sc.setLimit(MAX_RESULT_SIZE);
+	}
+	else if (sc.getLimit() < MAX_RESULT_SIZE) {
+		sc.setLimit(sc.getLimit() + 1);
+	}
+	StackAllocAutoPtr<BtreeMap> rowIdMap(txn.getDefaultAllocator(), getRowIdMap(txn));
+	rowIdMap.get()->search(txn, sc, *oIdList, order);
+	sc.setLimit(limitBackup);
+}
+
+void Collection::searchMvccMapPrepare(
+		TransactionContext& txn, const BtreeMap::SearchContext &sc,
+		BtreeMap::SearchContext &mvccSC,
+		RowId startRowId, RowId lastCheckRowId,
+		std::pair<RowId, RowId> *mvccRowIdRange) {
+
+	RowId *mvccStartRowId = &mvccRowIdRange->first;
+	RowId *mvccEndRowId = &mvccRowIdRange->second;
+
+	*mvccStartRowId = startRowId;
+
+	if (sc.isSuspended() && lastCheckRowId != UNDEF_ROWID) {
+		*mvccEndRowId = lastCheckRowId + 1;
+	}
+	else {
+		*mvccEndRowId = UNDEF_ROWID;
+	}
+
+	const RowId minRowId = std::numeric_limits<RowId>::min();
+
+	if (*mvccStartRowId != minRowId) {
+		TermCondition newCond(COLUMN_TYPE_LONG, COLUMN_TYPE_LONG, 
+			DSExpression::GE, UNDEF_COLUMNID, &mvccStartRowId, sizeof(mvccStartRowId));
+		mvccSC.updateCondition(txn, newCond);
+	}
+
+	if (*mvccEndRowId != UNDEF_ROWID) {
+		TermCondition newCond(COLUMN_TYPE_LONG, COLUMN_TYPE_LONG, 
+			DSExpression::LT, UNDEF_COLUMNID, &mvccEndRowId, sizeof(mvccEndRowId));
+		mvccSC.updateCondition(txn, newCond);
+	}
+}
 
 void Collection::insertRowIdMap(
 	TransactionContext& txn, BtreeMap* map, const void* constKey, OId oId) {
@@ -2558,6 +2828,7 @@ bool Collection::validate(TransactionContext& txn, std::string& errorMessage) {
 	return validateImpl<Collection>(
 		txn, errorMessage, preRowId, countRowNum, isRowRateCheck);
 }
+
 
 std::string Collection::dump(TransactionContext& txn) {
 	return dumpImpl<Collection>(txn);

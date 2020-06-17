@@ -51,11 +51,18 @@ ReplicationContext::ReplicationContext()
 	  timeout_(0),
 	  taskStatus_(TASK_FINISHED),
 	  originalStmtId_(UNDEF_STATEMENTID),
-	  existFlag_(false)
-	, isSync_(false), subContainerId_(0), execId_(0)
-	, alloc_(NULL)
+	  existFlag_(false),
+	  replyPId_(UNDEF_PARTITIONID),
+	  queryId_(0),
+	  replyEventType_(UNDEF_EVENT_TYPE),
+	  existIndex_(0),
+		isSync_(false),
+		subContainerId_(0),
+		execId_(0),
+		alloc_(NULL)
 {
 }
+
 ReplicationContext::ReplicationContext(const ReplicationContext &replContext)
 	: id_(replContext.id_),
 	  stmtType_(replContext.stmtType_),
@@ -69,15 +76,24 @@ ReplicationContext::ReplicationContext(const ReplicationContext &replContext)
 	  timeout_(replContext.timeout_),
 	  taskStatus_(replContext.taskStatus_),
 	  originalStmtId_(replContext.originalStmtId_),
-	  existFlag_(replContext.existFlag_)
-	, isSync_(false), subContainerId_(0), execId_(0)
-	, alloc_(replContext.alloc_)
+	  existFlag_(replContext.existFlag_),
+	  replyPId_(UNDEF_PARTITIONID),
+	  queryId_(0),
+	  replyEventType_(UNDEF_EVENT_TYPE),
+	  existIndex_(0),
+		isSync_(false),
+		subContainerId_(0),
+		execId_(0),
+		alloc_(replContext.alloc_)
 {
 }
+
 ReplicationContext::~ReplicationContext() {
 	clearBinaryData();
 }
+
 ReplicationContext &ReplicationContext::operator=(
+
 	const ReplicationContext &replContext) {
 	if (this == &replContext) {
 		return *this;
@@ -94,6 +110,14 @@ ReplicationContext &ReplicationContext::operator=(
 	timeout_ = replContext.timeout_;
 	existFlag_ = replContext.existFlag_;
 
+	if (replyPId_ != UNDEF_PARTITIONID) {
+		replyPId_ = replContext.replyPId_;
+		queryId_ = replContext.queryId_;
+		replyEventType_ = replContext.replyEventType_;
+	}
+	execStatus_ = replContext.execStatus_;
+	affinityNumber_ = replContext.affinityNumber_;
+
 	  taskStatus_ = replContext.taskStatus_;
 	  originalStmtId_ = replContext.originalStmtId_;
 
@@ -105,6 +129,14 @@ ReplicationContext &ReplicationContext::operator=(
 	return *this;
 }
 
+void ReplicationContext::setContainerStatus(
+	LargeContainerStatusType &status,
+	NodeAffinityNumber &affinityNumber,
+	IndexInfo &indexInfo) const {
+
+	status = execStatus_;
+	affinityNumber = affinityNumber_;
+}
 
 ReplicationId ReplicationContext::getReplicationId() const {
 	return id_;
@@ -191,6 +223,11 @@ void ReplicationContext::clear() {
 	taskStatus_ = TASK_FINISHED;
 	originalStmtId_ = UNDEF_STATEMENTID;
 
+	replyPId_ = -1;
+	queryId_ = -1;
+	replyEventType_ = -1;
+	execStatus_ = PARTITION_STATUS_NONE;
+	affinityNumber_ = UNDEF_NODE_AFFINITY_NUMBER;
 
 	clearBinaryData();
 }
@@ -259,7 +296,10 @@ const TransactionManager::TransactionMode
 			TransactionManager::NO_AUTO_COMMIT_CONTINUE);
 
 TransactionManager::TransactionManager(ConfigTable &config, bool isSQL)
-: pgConfig_(config),
+: pgConfig_(!isSQL ? config.getUInt32(CONFIG_TABLE_DS_PARTITION_NUM)
+					: DataStore::MAX_PARTITION_NUM,
+							!isSQL ? config.getUInt32(CONFIG_TABLE_DS_CONCURRENCY)
+					: config.get<int32_t>(CONFIG_TABLE_SQL_CONCURRENCY)),
 	  replicationMode_(config.get<int32_t>(CONFIG_TABLE_TXN_REPLICATION_MODE)),
 	  replicationTimeoutInterval_(
 		  config.get<int32_t>(CONFIG_TABLE_TXN_REPLICATION_TIMEOUT_INTERVAL)),

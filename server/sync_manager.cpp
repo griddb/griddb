@@ -20,119 +20,195 @@
 */
 
 #include "sync_manager.h"
-#include "util/trace.h"
-#include "gs_error.h"
-#include "cluster_manager.h"
-#include <iostream>
-#include "checkpoint_service.h"
-#include "sync_service.h"
 #include "transaction_service.h"
-#include "log_manager.h"
-#include "checkpoint_service.h"
+#include "partition_table.h"
+#include "cluster_manager.h"
 
 UTIL_TRACER_DECLARE(CLUSTER_OPERATION);
 UTIL_TRACER_DECLARE(SYNC_SERVICE);
 UTIL_TRACER_DECLARE(SYNC_DETAIL);
-UTIL_TRACER_DECLARE(CLUSTER_DUMP);
 
 #define TRACE_REVISION(rev1, rev2) \
 		"next=" << rev1.toString() << ", current=" << rev2.toString()
 
 #define RM_THROW_LOG_REDO_ERROR(errorCode, message) \
 	GS_THROW_CUSTOM_ERROR(LogRedoException, , errorCode, message)
+
 #define RM_RETHROW_LOG_REDO_ERROR(cause, message) \
 	GS_RETHROW_CUSTOM_ERROR(LogRedoException, GS_ERROR_DEFAULT, cause, message)
-
 
 const int32_t SyncManager::DEFAULT_LOG_SYNC_MESSAGE_MAX_SIZE = 2;
 const int32_t SyncManager::DEFAULT_CHUNK_SYNC_MESSAGE_MAX_SIZE = 2;
 
-SyncManager::SyncManager(const ConfigTable &configTable, PartitionTable *pt)
-	: syncOptStat_(pt->getPartitionNum()),
-	fixedSizeAlloc_(
-			util::AllocatorInfo(ALLOCATOR_GROUP_CS, "syncManagerFixed"), 1 << 18),
-	globalStackAlloc_(
-			util::AllocatorInfo(ALLOCATOR_GROUP_CS, "syncManagerStack"), &fixedSizeAlloc_),
-	varSizeAlloc_(util::AllocatorInfo(ALLOCATOR_GROUP_CS, "syncManagerVar")),
-	syncContextTables_(NULL), pt_(pt), syncConfig_(configTable), extraConfig_(configTable),
-	chunkBufferList_(NULL), 
-	syncSequentialNumber_(0)
-	, logMgr_(NULL), cpSvc_(NULL), ds_(NULL), syncSvc_(NULL), txnSvc_(NULL),
-	txnMgr_(NULL), clsSvc_(NULL), clsMgr_(NULL), recoveryMgr_(NULL) {
+SyncManager::SyncManager(
+		const ConfigTable &configTable,
+		PartitionTable *pt) :
+				syncOptStat_(pt->getPartitionNum()),
+				fixedSizeAlloc_(
+						util::AllocatorInfo(
+								ALLOCATOR_GROUP_CS, "syncManagerFixed"),
+								1 << 18),
+				globalStackAlloc_(
+						util::AllocatorInfo(
+								ALLOCATOR_GROUP_CS, "syncManagerStack"),
+								&fixedSizeAlloc_),
+				varSizeAlloc_(
+						util::AllocatorInfo(
+								ALLOCATOR_GROUP_CS, "syncManagerVar")),
+				syncContextTables_(NULL),
+				pt_(pt),
+				syncConfig_(configTable),
+				extraConfig_(configTable),
+				syncSequentialNumber_(0),
+				logMgr_(NULL),
+				cpSvc_(NULL),
+				ds_(NULL),
+				syncSvc_(NULL),
+				txnSvc_(NULL),
+				txnMgr_(NULL),
+				clsSvc_(NULL),
+				clsMgr_(NULL),
+				recoveryMgr_(NULL) {
+		
+	char *buffer = NULL;
+
 	try {
-		const uint32_t partitionNum = configTable.getUInt32(CONFIG_TABLE_DS_PARTITION_NUM);
-		if (partitionNum <= 0 || partitionNum != pt->getPartitionNum()) {
-			GS_THROW_USER_ERROR(GS_ERROR_SYM_INVALID_PARTITION_INFO, "");
+		const uint32_t partitionNum
+				= configTable.getUInt32(
+						CONFIG_TABLE_DS_PARTITION_NUM);
+		if (partitionNum <= 0
+				|| partitionNum != pt->getPartitionNum()) {
+			GS_THROW_USER_ERROR(
+					GS_ERROR_SYM_INVALID_PARTITION_INFO, "");
 		}
-		syncContextTables_ = ALLOC_NEW(globalStackAlloc_) SyncContextTable * [partitionNum];
-		for (PartitionId pId = 0; pId < partitionNum; pId++) {
-			syncContextTables_[pId] = ALLOC_NEW(globalStackAlloc_) SyncContextTable(
-					globalStackAlloc_, pId, DEFAULT_CONTEXT_SLOT_NUM, &varSizeAlloc_);
+
+		syncContextTables_
+				= ALLOC_NEW(globalStackAlloc_)
+						SyncContextTable * [partitionNum];
+
+		for (PartitionId pId = 0;
+				pId < partitionNum; pId++) {
+
+			syncContextTables_[pId] = ALLOC_NEW(globalStackAlloc_)
+					SyncContextTable(globalStackAlloc_, pId,
+							DEFAULT_CONTEXT_SLOT_NUM, &varSizeAlloc_);
 		}
-		chunkSize_ = configTable.getUInt32(CONFIG_TABLE_DS_STORE_BLOCK_SIZE);
-		chunkBufferList_ = ALLOC_NEW(globalStackAlloc_) uint8_t [
-				chunkSize_ * configTable.getUInt32(CONFIG_TABLE_DS_CONCURRENCY)];
-		ConfigTable *tmpTable = const_cast<ConfigTable*>(&configTable);
+
+		chunkSize_ = configTable.getUInt32(
+				CONFIG_TABLE_DS_STORE_BLOCK_SIZE);
+
+		uint32_t cocurrency
+				= configTable.getUInt32(CONFIG_TABLE_DS_CONCURRENCY);
+
+		for (uint32_t pos = 0; pos < cocurrency; pos++) {
+
+			buffer = static_cast<char8_t*>(
+					varSizeAlloc_.allocate(chunkSize_
+							* getConfig().getSendChunkNum()));
+			chunkBufferList_.push_back(buffer);
+			buffer = NULL;
+		}
+
+		ConfigTable *tmpTable
+				= const_cast<ConfigTable*>(&configTable);
 		config_.setUpConfigHandler(this, *tmpTable);
+
 		undoPartitionList_.assign(partitionNum, 0);
 	}
 	catch (std::exception &e) {
-		ALLOC_DELETE(globalStackAlloc_, chunkBufferList_);
+
+		if (buffer) {
+			varSizeAlloc_.deallocate(buffer);
+		}
+
+		for (size_t pos = 0;
+				pos < chunkBufferList_.size(); pos++) {
+			varSizeAlloc_.deallocate(chunkBufferList_[pos]);
+		}
+
 		GS_RETHROW_USER_OR_SYSTEM(e, "");
 	}
 }
 
 SyncManager::~SyncManager() {
-	ALLOC_DELETE(globalStackAlloc_, chunkBufferList_);
-	for (PartitionId pId = 0; pId < pt_->getPartitionNum(); pId++) {
+
+	for (size_t pos = 0;
+			pos < chunkBufferList_.size(); pos++) {
+		varSizeAlloc_.deallocate(chunkBufferList_[pos]);
+	}
+
+	for (PartitionId pId = 0;
+			pId < pt_->getPartitionNum(); pId++) {
+
 		if (syncContextTables_[pId]) {
-			ALLOC_DELETE(globalStackAlloc_, syncContextTables_[pId]);
+			ALLOC_DELETE(globalStackAlloc_,
+					syncContextTables_[pId]);
 		}
 	}
 }
 
-void SyncManager::initialize(ManagerSet *mgrSet) {
-	cpSvc_ = mgrSet->cpSvc_;
-	ds_ = mgrSet->ds_;
-	logMgr_ = mgrSet->logMgr_;
-	syncSvc_ = mgrSet->syncSvc_;
-	txnSvc_ = mgrSet->txnSvc_;
-	txnMgr_ = mgrSet->txnMgr_;
-	clsMgr_ = mgrSet->clsMgr_;
-	recoveryMgr_ = mgrSet->recoveryMgr_;
-	chunkMgr_ = mgrSet->chunkMgr_;
+void SyncManager::initialize(ResourceSet *resourceSet) {
+
+	cpSvc_ = resourceSet->cpSvc_;
+	ds_ = resourceSet->ds_;
+	logMgr_ = resourceSet->logMgr_;
+	syncSvc_ = resourceSet->syncSvc_;
+	txnSvc_ = resourceSet->txnSvc_;
+	txnMgr_ = resourceSet->txnMgr_;
+	clsMgr_ = resourceSet->clsMgr_;
+	recoveryMgr_ = resourceSet->recoveryMgr_;
+	chunkMgr_ = resourceSet->chunkMgr_;
 }
 
 /*!
 	@brief Creates SyncContext
 */
-SyncContext *SyncManager::createSyncContext(EventContext &ec, PartitionId pId,
-		PartitionRevision &ptRev, SyncMode syncMode, PartitionRoleStatus roleStatus) {
+SyncContext *SyncManager::createSyncContext(
+		EventContext &ec,
+		PartitionId pId,
+		PartitionRevision &ptRev,
+		SyncMode syncMode,
+		PartitionRoleStatus roleStatus) {
+
 	try {
 		if (pId >= pt_->getPartitionNum()) {
-			GS_THROW_USER_ERROR(GS_ERROR_SYNC_INVALID_CONTEXT, "");
+			GS_THROW_USER_ERROR(
+					GS_ERROR_SYNC_INVALID_CONTEXT, "");
 		}
 		util::LockGuard<util::WriteLock> guard(getAllocLock());
 		createPartition(pId);
 		getSyncOptStat()->setContext(pId);
-		SyncContext *context =  syncContextTables_[pId]->createSyncContext(ptRev);
+		SyncContext *context
+				=  syncContextTables_[pId]->createSyncContext(ptRev);
 		context->setSyncMode(syncMode, roleStatus);
 		context->setPartitionTable(pt_);
 
-		int64_t syncSequentialNumber = syncSequentialNumber_;
-		bool isOwner = (roleStatus == PartitionTable::PT_OWNER);
+		bool isOwner = (roleStatus == PT_OWNER);
 		bool longtermSyncCheck 
 				= (syncMode == MODE_LONGTERM_SYNC && isOwner);
+		if (syncMode == MODE_LONGTERM_SYNC) {
+			ClusterManager::SyncStat &stat = clsMgr_->getSyncStat();
+			if (isOwner) {
+				stat.syncChunkNum_ = 0;
+			}
+			else {
+				stat.syncApplyNum_ = 0;
+			}
+		}
 		checkCurrentContext(ec, ptRev);
 		context->setSequentialNumber(syncSequentialNumber_);
 		syncSequentialNumber_++;
 		if (syncMode == MODE_LONGTERM_SYNC) {
 			setCurrentSyncId(pId, context);
 		}
+
 		if (longtermSyncCheck) {		
 			LongtermSyncInfo syncInfo(
-					context->getId(), context->getVersion(), context->getSequentialNumber());
-			cpSvc_->requestStartCheckpointForLongtermSync(ec, pId, &syncInfo);
+					context->getId(),
+					context->getVersion(),
+					context->getSequentialNumber());
+			cpSvc_->requestStartCheckpointForLongtermSync(
+					ec, pId, &syncInfo);
 		}
 		return context;
 	}
@@ -144,7 +220,11 @@ SyncContext *SyncManager::createSyncContext(EventContext &ec, PartitionId pId,
 /*!
 	@brief Gets SyncContext
 */
-SyncContext *SyncManager::getSyncContext(PartitionId pId, SyncId &syncId, bool withLock) {
+SyncContext *SyncManager::getSyncContext(
+		PartitionId pId,
+		SyncId &syncId,
+		bool withLock) {
+
 	if (withLock) {
 		util::LockGuard<util::ReadLock> guard(getAllocLock());
 		return getSyncContextInternal(pId, syncId);
@@ -154,13 +234,16 @@ SyncContext *SyncManager::getSyncContext(PartitionId pId, SyncId &syncId, bool w
 	}
 }
 
-SyncContext *SyncManager::getSyncContextInternal(PartitionId pId, SyncId &syncId) {
+SyncContext *SyncManager::getSyncContextInternal(
+		PartitionId pId, SyncId &syncId) {
+
 	try {
 		if (!syncId.isValid()) {
 			return NULL;
 		}
 		if (pId >= pt_->getPartitionNum()) {
-			GS_THROW_USER_ERROR(GS_ERROR_SYNC_INVALID_CONTEXT, "");
+			GS_THROW_USER_ERROR(
+					GS_ERROR_SYNC_INVALID_CONTEXT, "");
 		}
 		if (syncContextTables_[pId] == NULL || !syncId.isValid()) {
 			return NULL;
@@ -176,14 +259,20 @@ SyncContext *SyncManager::getSyncContextInternal(PartitionId pId, SyncId &syncId
 /*!
 	@brief Removes SyncContext
 */
-void SyncManager::removeSyncContext(EventContext &ec,
-		PartitionId pId, SyncContext *&context, bool isFailed) {
+void SyncManager::removeSyncContext(
+		EventContext &ec,
+		PartitionId pId,
+		SyncContext *&context,
+		bool isFailed) {
+
 	try {
 		if (pId >= pt_->getPartitionNum()) {
-			GS_THROW_USER_ERROR(GS_ERROR_SYNC_INVALID_CONTEXT, "");
+			GS_THROW_USER_ERROR(
+					GS_ERROR_SYNC_INVALID_CONTEXT, "");
 		}
 		if (context == NULL) {
-			GS_THROW_USER_ERROR(GS_ERROR_SYNC_INVALID_CONTEXT, "");
+			GS_THROW_USER_ERROR(
+					GS_ERROR_SYNC_INVALID_CONTEXT, "");
 		}
 		util::LockGuard<util::WriteLock> guard(getAllocLock());
 		if (syncContextTables_[pId] == NULL) {
@@ -192,92 +281,148 @@ void SyncManager::removeSyncContext(EventContext &ec,
 		if (pId != context->getPartitionId()) {
 			return;
 		}
+
+		if (context->getSyncMode() == MODE_LONGTERM_SYNC) {
+			SyncStat &stat = clsMgr_->getSyncStat();
+			if (context->getPartitionRoleStatus() == PT_OWNER) {
+				stat.syncChunkNum_ = 0;
+			}
+			else {
+				stat.syncApplyNum_ = 0;
+			}
+		}
+
 		getSyncOptStat()->freeContext(pId);
-		bool longtermSyncCheck 
+		bool longtermSyncCheck
 				= (context->getSyncMode() == MODE_LONGTERM_SYNC
-					&& context->getPartitionRoleStatus() == PartitionTable::PT_OWNER);
+					&&  context->getPartitionRoleStatus()
+							== PT_OWNER);
+
 		if (longtermSyncCheck) {
 			cpSvc_->requestStopCheckpointForLongtermSync(
-				ec, pId, context->getSequentialNumber());
+					ec, pId, context->getSequentialNumber());
 		}
 		if (context->getSyncMode() == MODE_LONGTERM_SYNC) {
 			resetCurrentSyncId(context);
 		}
 		if (context->getSyncMode() == MODE_SHORTTERM_SYNC
 				&& context->isUseLongSyncLog()) {
+
 			SyncId longSyncId;
 			context->getLongSyncId(longSyncId);
-			SyncContext *longSyncContext = syncContextTables_[pId]->getSyncContext(
-					longSyncId.contextId_, longSyncId.contextVersion_);
+			SyncContext *longSyncContext
+					= syncContextTables_[pId]->getSyncContext(
+							longSyncId.contextId_,
+							longSyncId.contextVersion_);
+
 			if (longSyncContext) {
-				Event syncCheckEndEvent(ec, TXN_SYNC_TIMEOUT, pId);
-				EventByteOutStream out = syncCheckEndEvent.getOutStream();
+				Event syncCheckEndEvent(
+						ec, TXN_SYNC_TIMEOUT, pId);
+				EventByteOutStream out
+						= syncCheckEndEvent.getOutStream();
+				
 				SyncCheckEndInfo syncCheckEndInfo(
 						ec.getAllocator(), 
-						TXN_SYNC_TIMEOUT, this, pId, MODE_LONGTERM_SYNC, longSyncContext);
-				syncSvc_->encode(syncCheckEndEvent, syncCheckEndInfo, out);
-					longSyncContext->setCatchupSync(false);
-				txnSvc_->getEE()->addTimer(syncCheckEndEvent, 0);
+						TXN_SYNC_TIMEOUT,
+						this,
+						pId,
+						MODE_LONGTERM_SYNC,
+						longSyncContext);
+
+				syncSvc_->encode(
+						syncCheckEndEvent, syncCheckEndInfo, out);
+				longSyncContext->setCatchupSync(false);
+				txnSvc_->getEE()->addTimer(
+						syncCheckEndEvent, 0);
 			}
 		}
 		context->endCheck();
 		if (isFailed) {
 			GS_TRACE_WARNING(
-					SYNC_DETAIL, GS_TRACE_SYNC_OPERATION, "SYNC_END, " << context->dump(4));
+					SYNC_DETAIL,
+					GS_TRACE_SYNC_OPERATION,
+					"SYNC_END, " << context->dump(4));
 		}
 		else 
 		if (context->checkTotalTime() || context->isDump()) {
 			GS_TRACE_WARNING(
-					SYNC_DETAIL, GS_TRACE_SYNC_OPERATION, "SYNC_END, " << context->dump(2));
+					SYNC_DETAIL,
+					GS_TRACE_SYNC_OPERATION,
+					"SYNC_END, " << context->dump(2));
 		}
 		else {
 			GS_TRACE_INFO(
-					SYNC_DETAIL, GS_TRACE_SYNC_OPERATION, "SYNC_END, " << context->dump(2));
+					SYNC_DETAIL,
+					GS_TRACE_SYNC_OPERATION,
+					"SYNC_END, " << context->dump(2));
 		}
-		syncContextTables_[pId]->removeSyncContext(varSizeAlloc_, context, getSyncOptStat());
+		syncContextTables_[pId]->removeSyncContext(
+				varSizeAlloc_, context, getSyncOptStat());
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_USER_OR_SYSTEM(e, "");
 	}
 }
 
-void SyncManager::setShortermSyncRequest(SyncContext *context, SyncRequestInfo &syncRequestInfo,
+void SyncManager::setShortermSyncRequest(
+		SyncContext *context,
+		SyncRequestInfo &syncRequestInfo,
 		util::Set<NodeId> &syncTargetNodeSet) {
-	PartitionRole &nextRole = syncRequestInfo.getPartitionRole();
+
+	PartitionRole &nextRole
+			= syncRequestInfo.getPartitionRole();
 	PartitionId pId = context->getPartitionId();
-	util::StackAllocator &alloc = syncRequestInfo.getAllocator();
-	if (!pt_->isOwner(pId, SELF_NODEID) && nextRole.isOwner(SELF_NODEID)) {
+	util::StackAllocator &alloc
+			= syncRequestInfo.getAllocator();
+	
+	if (!pt_->isOwner(pId, SELF_NODEID)
+			&& nextRole.isOwner(SELF_NODEID)) {
 		txnSvc_->checkNoExpireTransaction(alloc, pId);
 	}
 	pt_->setPartitionRole(pId, nextRole);
-	context->setPartitionRoleStatus(pt_->getPartitionRoleStatus(pId));
+	context->setPartitionRoleStatus(
+			pt_->getPartitionRoleStatus(pId));
 	context->setOwnerLsn(pt_->getLSN(pId));
 	SyncId dummySyncId;
-	syncRequestInfo.set(TXN_SHORTTERM_SYNC_START, context,
+
+	syncRequestInfo.set(
+			TXN_SHORTTERM_SYNC_START, context,
 			pt_->getLSN(pId), dummySyncId);
-	nextRole.getShortTermSyncTargetNodeId(syncTargetNodeSet);
+	nextRole.getShortTermSyncTargetNodeId(
+			syncTargetNodeSet);
 }
 
-void SyncManager::setShortermSyncStart(SyncContext *context,
-		SyncRequestInfo &syncRequestInfo, NodeId senderNodeId) {
+void SyncManager::setShortermSyncStart(
+		SyncContext *context,
+		SyncRequestInfo &syncRequestInfo,
+		NodeId senderNodeId) {
+
 	PartitionId pId = context->getPartitionId();
-	util::StackAllocator &alloc = syncRequestInfo.getAllocator();
-	PartitionRole &nextRole = syncRequestInfo.getPartitionRole();
-	if (!pt_->isOwner(pId, SELF_NODEID) && nextRole.isOwner(SELF_NODEID)) {
-			txnSvc_->checkNoExpireTransaction(alloc, pId);
+	util::StackAllocator &alloc
+			= syncRequestInfo.getAllocator();
+	PartitionRole &nextRole
+			= syncRequestInfo.getPartitionRole();
+	if (!pt_->isOwner(pId, SELF_NODEID)
+			&& nextRole.isOwner(SELF_NODEID)) {
+		txnSvc_->checkNoExpireTransaction(alloc, pId);
 	}
-	pt_->setPartitionRole(context->getPartitionId(), nextRole);
-	context->setPartitionRoleStatus(pt_->getPartitionRoleStatus(pId));
+	pt_->setPartitionRole(
+			context->getPartitionId(), nextRole);
+	context->setPartitionRoleStatus(
+			pt_->getPartitionRoleStatus(pId));
 	context->setRecvNodeId(senderNodeId);
 	context->setOwnerLsn(syncRequestInfo.getLsn());
 }
 
-int64_t SyncManager::getTargetSSN(PartitionId pId, SyncContext *context) {
+int64_t SyncManager::getTargetSSN(
+			PartitionId pId, SyncContext *context) {
+
 	int64_t ssn = -1;
 	if (context->isUseLongSyncLog()) {
 		SyncId longSyncId;
 		context->getLongSyncId(longSyncId);
-		SyncContext *longContext = getSyncContext(pId, longSyncId);
+		SyncContext *longContext
+				= getSyncContext(pId, longSyncId);
 		if (longContext) {
 			ssn = longContext->getSequentialNumber();
 		}
@@ -288,111 +433,161 @@ int64_t SyncManager::getTargetSSN(PartitionId pId, SyncContext *context) {
 	return ssn;
 }
 
-void SyncManager::checkShorttermGetSyncLog(SyncContext *context,
-		SyncRequestInfo &syncRequestInfo,
-		SyncResponseInfo &syncResponseInfo) {
+void SyncManager::checkShorttermGetSyncLog(
+		SyncContext *context,
+		SyncRequestInfo &syncRequestInfo) {
+
 	PartitionId pId = context->getPartitionId();
-	util::StackAllocator &alloc = syncRequestInfo.getAllocator();
+	util::StackAllocator &alloc
+			= syncRequestInfo.getAllocator();
 	context->resetCounter();
 	util::XArray<NodeId> backups(alloc);
 	context->getSyncTargetNodeIds(backups);
 	size_t pos = 0;
-	LogSequentialNumber backupLsn = syncResponseInfo.getTargetLsn();
-	LogSequentialNumber ownerLsn = pt_->getLSN(pId);
-	LogSequentialNumber maxLsn = pt_->getMaxLsn(pId);	
+	LogSequentialNumber ownerLsn
+			= pt_->getLSN(pId);
+	LogSequentialNumber maxLsn
+			= pt_->getMaxLsn(pId);	
+
 	for (pos = 0; pos < backups.size(); pos++) {
 		LogSequentialNumber backupLsn = 0;
 		SyncId backupSyncId;
 		NodeId targetNodeId = backups[pos];
 		if (!context->getSyncTargetLsnWithSyncId(
 				targetNodeId, backupLsn, backupSyncId)) {
-			GS_THROW_SYNC_ERROR(GS_ERROR_SYM_INVALID_PARTITION_REVISION, context, 
-					"Target short term sync already removed", ", owner=" << pt_->dumpNodeAddress(0) 
+
+			GS_THROW_SYNC_ERROR(
+					GS_ERROR_SYM_INVALID_PARTITION_REVISION,
+					context, 
+					"Target short term sync already removed", ", owner="
+					<< pt_->dumpNodeAddress(0) 
 					<< ", owner LSN=" << ownerLsn
 					<< ", backupNode=" << pt_->dumpNodeAddress(targetNodeId)
 					<< ", backup LSN=" << backupLsn);
 		}
 		syncRequestInfo.clearSearchCondition();
-		syncRequestInfo.set(SYC_SHORTTERM_SYNC_LOG, context, ownerLsn, backupSyncId);
+		syncRequestInfo.set(
+				SYC_SHORTTERM_SYNC_LOG, context,
+				ownerLsn, backupSyncId);
+
 		if (ownerLsn > backupLsn &&
 				pt_->isOwnerOrBackup(pId, targetNodeId)) {
-			syncRequestInfo.setSearchLsnRange(backupLsn + 1, ownerLsn);
+			syncRequestInfo.setSearchLsnRange(
+					backupLsn + 1, ownerLsn);
+
 			util::Stopwatch logWatch;
 			context->start(logWatch);
 			int64_t ssn = getTargetSSN(pId, context);
 			try {
 				syncRequestInfo.getLogs(pId, ssn,
 						logMgr_, cpSvc_, context->isUseLongSyncLog());
+
 				context->endLog(logWatch);
-				context->setProcessedLsn(syncRequestInfo.getStartLsn(), syncRequestInfo.getEndLsn());
-				context->incProcessedLogNum(syncRequestInfo.getBinaryLogSize());
+				context->setProcessedLsn(
+						syncRequestInfo.getStartLsn(),
+						syncRequestInfo.getEndLsn());
+				context->incProcessedLogNum(
+						syncRequestInfo.getBinaryLogSize());
 			}
 			catch (UserException &) {
 				context->endLog(logWatch);
-				LogSequentialNumber prevStartLSN = pt_->getStartLSN(pId);
+				LogSequentialNumber prevStartLSN
+						= pt_->getStartLSN(pId);
 				pt_->setStartLSN(pId, pt_->getLSN(pId));
-				GS_THROW_SYNC_ERROR(GS_ERROR_SYNC_LOG_GET_FAILED, context, 
-					"Short term log sync failed, log is not found or invalid", ", owner=" << pt_->dumpNodeAddress(0) 
+
+				GS_THROW_SYNC_ERROR(
+						GS_ERROR_SYNC_LOG_GET_FAILED, context, 
+						"Short term log sync failed, log is not found or invalid",
+						", owner=" << pt_->dumpNodeAddress(0) 
 						<< ", owner LSN=" << ownerLsn << ", backup=" 
-						<< pt_->dumpNodeAddress(targetNodeId) << ", backup LSN=" << backupLsn 
-						<< ", maxLSN=" << maxLsn << ", log start LSN=" << prevStartLSN);
+						<< pt_->dumpNodeAddress(targetNodeId) 
+						<< ", backup LSN=" << backupLsn 
+						<< ", maxLSN=" << maxLsn 
+						<< ", log start LSN=" << prevStartLSN);
 			}
 		}
 	}
 }
 
-void SyncManager::setShorttermGetSyncLog(SyncContext *context,
+void SyncManager::setShorttermGetSyncLog(
+		SyncContext *context,
 		SyncRequestInfo &syncRequestInfo,
-		SyncResponseInfo &syncResponseInfo, NodeId targetNodeId) {
+		NodeId targetNodeId) {
+
 	LogSequentialNumber backupLsn = 0;
 	SyncId backupSyncId;
 	PartitionId pId = context->getPartitionId();
 	LogSequentialNumber ownerLsn = pt_->getLSN(pId);
 	LogSequentialNumber maxLsn = pt_->getMaxLsn(pId);	
+
 	if (!context->getSyncTargetLsnWithSyncId(
 			targetNodeId, backupLsn, backupSyncId)) {
-		GS_THROW_SYNC_ERROR(GS_ERROR_SYM_INVALID_PARTITION_REVISION, context, 
-			"Target short term sync already removed", ", owner=" << pt_->dumpNodeAddress(0) 
-				<< ", owner LSN=" << ownerLsn << ", backupNode=" << pt_->dumpNodeAddress(targetNodeId)
-				<< ", backup LSN=" << backupLsn << ", log start LSN=" << pt_->getStartLSN(pId));
+
+		GS_THROW_SYNC_ERROR(
+				GS_ERROR_SYM_INVALID_PARTITION_REVISION, context, 
+				"Target short term sync already removed", ", owner="
+				<< pt_->dumpNodeAddress(0) 
+				<< ", owner LSN=" << ownerLsn
+				<< ", backupNode=" << pt_->dumpNodeAddress(targetNodeId)
+				<< ", backup LSN=" << backupLsn 
+				<< ", log start LSN=" << pt_->getStartLSN(pId));
 	}
+
 	syncRequestInfo.clearSearchCondition();
-	syncRequestInfo.set(SYC_SHORTTERM_SYNC_LOG, context,
+	syncRequestInfo.set(
+			SYC_SHORTTERM_SYNC_LOG, context,
 			ownerLsn, backupSyncId);
-	if (ownerLsn > backupLsn && pt_->isOwnerOrBackup(
-			pId, targetNodeId)) {
-		syncRequestInfo.setSearchLsnRange(backupLsn + 1, ownerLsn);
+	if (ownerLsn > backupLsn &&
+			pt_->isOwnerOrBackup(pId, targetNodeId)) {
+		syncRequestInfo.setSearchLsnRange(
+				backupLsn + 1, ownerLsn);
 		util::Stopwatch logWatch;
 		context->start(logWatch);
 		int64_t ssn = getTargetSSN(pId, context); 
 		try {
 			syncRequestInfo.getLogs(pId, ssn,
 					logMgr_, cpSvc_, context->isUseLongSyncLog());
+
 			context->endLog(logWatch);
-			context->setProcessedLsn(syncRequestInfo.getStartLsn(), syncRequestInfo.getEndLsn());
-			context->incProcessedLogNum(syncRequestInfo.getBinaryLogSize());
-			context->setSyncTargetEndLsn(targetNodeId, syncRequestInfo.getEndLsn());
+			context->setProcessedLsn(
+					syncRequestInfo.getStartLsn(),
+					syncRequestInfo.getEndLsn());
+			context->incProcessedLogNum(
+					syncRequestInfo.getBinaryLogSize());
+			context->setSyncTargetEndLsn(
+					targetNodeId, syncRequestInfo.getEndLsn());
 		}
 		catch (UserException &) {
 			context->endLog(logWatch);
-			LogSequentialNumber prevStartLSN = pt_->getStartLSN(pId);
+			LogSequentialNumber prevStartLSN
+					= pt_->getStartLSN(pId);
 			pt_->setStartLSN(pId, pt_->getLSN(pId));
-			GS_THROW_SYNC_ERROR(GS_ERROR_SYNC_LOG_GET_FAILED, context, 
-				"Short term log sync failed, log is not found or invalid", ", owner=" << pt_->dumpNodeAddress(0) 
+			GS_THROW_SYNC_ERROR(
+					GS_ERROR_SYNC_LOG_GET_FAILED, context, 
+					"Short term log sync failed, log is not found or invalid",
+					", owner=" << pt_->dumpNodeAddress(0) 
 					<< ", owner LSN=" << ownerLsn << ", backup=" 
-					<< pt_->dumpNodeAddress(targetNodeId) << ", backup LSN=" << backupLsn 
-					<< ", maxLSN=" << maxLsn << ", log start LSN=" << prevStartLSN);
+					<< pt_->dumpNodeAddress(targetNodeId)
+					<< ", backup LSN=" << backupLsn 
+					<< ", maxLSN=" << maxLsn
+					<< ", log start LSN=" << prevStartLSN);
 		}
 	}
 	else {
-		syncRequestInfo.setSearchLsnRange(ownerLsn, ownerLsn);
-		context->setSyncTargetEndLsn(targetNodeId, ownerLsn);
+		syncRequestInfo.setSearchLsnRange(
+				ownerLsn, ownerLsn);
+		context->setSyncTargetEndLsn(
+				targetNodeId, ownerLsn);
 	}
 }
 
-void SyncManager::checkRestored(util::StackAllocator &alloc,
-		PartitionId pId, EventType eventType, const util::DateTime &now,
+void SyncManager::checkRestored(
+		util::StackAllocator &alloc,
+		PartitionId pId,
+		EventType eventType,
+		const util::DateTime &now,
 		const EventMonotonicTime emNow) {
+
 	if (!ds_->isRestored(pId)
 			&& ds_->getObjectManager()->existPartition(pId)
 			&& pt_->getLSN(pId) == 0) {
@@ -400,69 +595,91 @@ void SyncManager::checkRestored(util::StackAllocator &alloc,
 	}
 }
 
-void SyncManager::removePartition(util::StackAllocator &alloc,
-		PartitionId pId, EventType eventType, const util::DateTime &now,
+void SyncManager::removePartition(
+		util::StackAllocator &alloc,
+		PartitionId pId,
+		EventType eventType,
+		const util::DateTime &now,
 		const EventMonotonicTime emNow) {
+
 	util::StackAllocator::Scope scope(alloc);
 	const TransactionManager::ContextSource src(eventType);
 	TransactionContext &txn =
-		txnMgr_->put(alloc, pId, TXN_EMPTY_CLIENTID, src, now, emNow);
+		txnMgr_->put(
+				alloc, pId, TXN_EMPTY_CLIENTID, src, now, emNow);
 	DataStore::Latch latch(txn, pId, ds_, clsSvc_);
 	{
 		SyncPartitionLock partitionLock(txnMgr_, pId);
-		LogSequentialNumber prevLsn = pt_->getLSN(pId, 0);
 		recoveryMgr_->dropPartition(txn, alloc, pId, true);
 	}
 	pt_->setLSN(pId, 0);
 }
 
 
-void SyncManager::setShorttermSyncLog(SyncContext *context,
-		SyncRequestInfo &syncRequestInfo, EventType eventType,
+void SyncManager::setShorttermSyncLog(
+		SyncContext *context,
+		SyncRequestInfo &syncRequestInfo,
+		EventType eventType,
 		const util::DateTime &now,
 		const EventMonotonicTime emNow) {
-	util::StackAllocator &alloc = syncRequestInfo.getAllocator();
-	SyncVariableSizeAllocator &varSizeAlloc = getVariableSizeAllocator();
+
+	util::StackAllocator &alloc
+			= syncRequestInfo.getAllocator();
+	SyncVariableSizeAllocator &varSizeAlloc
+			= getVariableSizeAllocator();
 	PartitionId pId = context->getPartitionId();
+
 	uint8_t *logBuffer = NULL;
 	int32_t logBufferSize = 0;
 	context->getLogBuffer(logBuffer, logBufferSize);
+	
 	if (logBuffer != NULL && logBufferSize > 0) {
 		util::Stopwatch logWatch;
 		context->start(logWatch);
 		LogSequentialNumber startLsn = pt_->getLSN(pId);
 		checkRestored(alloc, pId, eventType, now, emNow);
 		try {
-			recoveryMgr_->redoLogList(alloc, RecoveryManager::MODE_SHORT_TERM_SYNC, pId,
-				now, emNow, logBuffer, logBufferSize);
+			recoveryMgr_->redoLogList(
+					alloc, RecoveryManager::MODE_SHORT_TERM_SYNC, pId,
+					now, emNow, logBuffer, logBufferSize);
 		}
 		catch (std::exception &e) {
 			context->endLog(logWatch);
 			LogSequentialNumber endLsn = pt_->getLSN(pId);
-		context->endLog(logWatch);
+			context->endLog(logWatch);
 
-			GS_RETHROW_LOG_REDO_ERROR(e, context, "Short term log redo failed",
-					", current startLsn=" << startLsn << ", current endLsn=" << endLsn 
+			GS_RETHROW_LOG_REDO_ERROR(
+					e, context, "Short term log redo failed",
+					", current startLsn=" << startLsn 
+					<< ", current endLsn=" << endLsn 
 					<< ", log startLsn=" << syncRequestInfo.getStartLsn()
 					<< ", log endLsn=" << syncRequestInfo.getEndLsn());
 		}
 		context->endLog(logWatch);
-		context->setProcessedLsn(startLsn, pt_->getLSN(pId));
+		context->setProcessedLsn(
+				startLsn, pt_->getLSN(pId));
 		context->incProcessedLogNum(logBufferSize);
-		context->freeBuffer(varSizeAlloc, LOG_SYNC, getSyncOptStat());
+		context->freeBuffer(
+				varSizeAlloc, LOG_SYNC, getSyncOptStat());
 	}
 }
 
-void SyncManager::setShorttermSyncLogAck(SyncContext *context,
-		SyncRequestInfo &syncRequestInfo, NodeId targetNodeId) {
+void SyncManager::setShorttermSyncLogAck(
+		SyncContext *context,
+		SyncRequestInfo &syncRequestInfo,
+		NodeId targetNodeId) {
+
 	LogSequentialNumber backupLsn = 0;
 	SyncId backupSyncId;
 	PartitionId pId = context->getPartitionId();
 	LogSequentialNumber ownerLsn = pt_->getLSN(pId);
+
 	if (!context->getSyncTargetLsnWithSyncId(
 			targetNodeId, backupLsn, backupSyncId)) {
-		GS_THROW_SYNC_ERROR(GS_ERROR_SYM_INVALID_PARTITION_REVISION, context, 
-			"Target short term sync already removed", ", owner=" 
+
+		GS_THROW_SYNC_ERROR(
+				GS_ERROR_SYM_INVALID_PARTITION_REVISION, context, 
+				"Target short term sync already removed", ", owner=" 
 				<< pt_->dumpNodeAddress(0) 
 				<< ", owner LSN=" << ownerLsn 
 				<< ", targetNode=" << pt_->dumpNodeAddress(targetNodeId)
@@ -471,52 +688,74 @@ void SyncManager::setShorttermSyncLogAck(SyncContext *context,
 	}
 	syncRequestInfo.clearSearchCondition();
 	syncRequestInfo.set(
-			TXN_SHORTTERM_SYNC_END, context, ownerLsn, backupSyncId);
+			TXN_SHORTTERM_SYNC_END,
+			context, ownerLsn, backupSyncId);
 }
 
-void SyncManager::setShorttermGetSyncNextLog(SyncContext *context,
+void SyncManager::setShorttermGetSyncNextLog(
+		SyncContext *context,
 		SyncRequestInfo &syncRequestInfo,
 		SyncResponseInfo &syncResponseInfo, NodeId targetNodeId) {
+
 	PartitionId pId = context->getPartitionId();
-	LogSequentialNumber ownerLsn = pt_->getLSN(pId);
-	LogSequentialNumber backupLsn = syncResponseInfo.getTargetLsn();
+	LogSequentialNumber ownerLsn
+			= pt_->getLSN(pId);
+	LogSequentialNumber backupLsn
+			= syncResponseInfo.getTargetLsn();
 	LogSequentialNumber maxLsn = pt_->getMaxLsn(pId);
-	syncRequestInfo.setSearchLsnRange(backupLsn + 1, ownerLsn);
+	syncRequestInfo.setSearchLsnRange(
+			backupLsn + 1, ownerLsn);
+	
 	util::Stopwatch logWatch;
 	context->start(logWatch);
 	int64_t ssn = getTargetSSN(pId, context); 
+	
 	try {
 		syncRequestInfo.getLogs(pId, ssn,
 				logMgr_, cpSvc_, context->isUseLongSyncLog());
+		
 		context->endLog(logWatch);
-		context->setProcessedLsn(syncRequestInfo.getStartLsn(), syncRequestInfo.getEndLsn());
-		context->incProcessedLogNum(syncRequestInfo.getBinaryLogSize());
-		context->setSyncTargetEndLsn(targetNodeId, syncRequestInfo.getEndLsn());
+		context->setProcessedLsn(
+				syncRequestInfo.getStartLsn(),
+				syncRequestInfo.getEndLsn());
+		context->incProcessedLogNum(
+				syncRequestInfo.getBinaryLogSize());
+		context->setSyncTargetEndLsn(
+				targetNodeId, syncRequestInfo.getEndLsn());
 	}
 	catch (UserException &) {
 		context->endLog(logWatch);
-		LogSequentialNumber prevStartLSN = pt_->getStartLSN(pId);
+		LogSequentialNumber prevStartLSN
+				= pt_->getStartLSN(pId);
 		pt_->setStartLSN(pId, pt_->getLSN(pId));
-		GS_THROW_SYNC_ERROR(GS_ERROR_SYNC_LOG_GET_FAILED, context, 
-			"Short term log sync failed, log is not found or invalid", ", owner=" << pt_->dumpNodeAddress(0) 
-				<< ", owner LSN=" << ownerLsn << ", backup=" 
-				<< pt_->dumpNodeAddress(targetNodeId) << ", backup LSN=" << backupLsn 
-				<< ", maxLSN=" << maxLsn << ", log start LSN=" << prevStartLSN);
+
+		GS_THROW_SYNC_ERROR(
+				GS_ERROR_SYNC_LOG_GET_FAILED, context,
+				"Short term log sync failed, log is not found or invalid",
+				", owner=" << pt_->dumpNodeAddress(0)
+				<< ", owner LSN=" << ownerLsn << ", backup="
+				<< pt_->dumpNodeAddress(targetNodeId)
+				<< ", backup LSN=" << backupLsn
+				<< ", maxLSN=" << maxLsn
+				<< ", log start LSN=" << prevStartLSN);
 	}
-	syncRequestInfo.set(SYC_SHORTTERM_SYNC_LOG, context,
+	syncRequestInfo.set(
+			SYC_SHORTTERM_SYNC_LOG, context,
 			ownerLsn, syncResponseInfo.getBackupSyncId());
 }
 
 
-PartitionStatus SyncManager::setShorttermSyncEnd(SyncContext *context) {
+PartitionStatus SyncManager::setShorttermSyncEnd(
+		SyncContext *context) {
+
 	PartitionId pId = context->getPartitionId();
 	PartitionStatus nextStatus = PartitionTable::PT_ON;
-	PartitionRoleStatus nextRoleStatus = PartitionTable::PT_NONE;
+	PartitionRoleStatus nextRoleStatus = PT_NONE;
 	if (pt_->isOwner(pId)) {
-		nextRoleStatus = PartitionTable::PT_OWNER;
+		nextRoleStatus = PT_OWNER;
 	}
 	else if (pt_->isBackup(pId)) {
-		nextRoleStatus = PartitionTable::PT_BACKUP;
+		nextRoleStatus = PT_BACKUP;
 	}
 	else {
 		nextStatus = PartitionTable::PT_OFF;
@@ -527,110 +766,154 @@ PartitionStatus SyncManager::setShorttermSyncEnd(SyncContext *context) {
 
 
 void SyncManager::setShorttermSyncEndAck(
-		SyncContext *context, SyncRequestInfo &syncRequestInfo) {
+		SyncContext *context,
+		SyncRequestInfo &syncRequestInfo) {
+
 	PartitionId pId = context->getPartitionId();
-	util::StackAllocator &alloc = syncRequestInfo.getAllocator();
-	NodeId nextOwner = pt_->getOwner(pId);
 	PartitionRole role;
 	pt_->getPartitionRole(pId, role);
 	syncRequestInfo.setPartitionRole(role);
 }
 
-void SyncManager::setLongtermSyncRequest(SyncContext *context, SyncRequestInfo &syncRequestInfo) {
+void SyncManager::setLongtermSyncRequest(
+		SyncContext *context,
+		SyncRequestInfo &syncRequestInfo) {
+
 	PartitionId pId = context->getPartitionId();
 	PartitionRole &nextRole = syncRequestInfo.getPartitionRole();
 	context->startAll();
-	pt_->setPartitionRole(pId, nextRole, PartitionTable::PT_CURRENT_OB);
+	pt_->setPartitionRole(
+			pId, nextRole, PT_CURRENT_OB);
 }
 
-void SyncManager::setLongtermSyncPrepareAck(SyncContext *context, SyncRequestInfo &syncRequestInfo,
-		SyncResponseInfo &syncResponseInfo, util::XArray<NodeId> &catchups) {
+void SyncManager::setLongtermSyncPrepareAck(
+		SyncContext *context,
+		SyncRequestInfo &syncRequestInfo,
+		SyncResponseInfo &syncResponseInfo,
+		util::XArray<NodeId> &catchups) {
+
 	PartitionId pId = context->getPartitionId();
-	pt_->getCatchup(pId, catchups, PartitionTable::PT_CURRENT_OB);
-	syncRequestInfo.set(TXN_LONGTERM_SYNC_START, context,
+	pt_->getCatchup(
+			pId, catchups, PT_CURRENT_OB);
+	syncRequestInfo.set(
+			TXN_LONGTERM_SYNC_START, context,
 			pt_->getLSN(pId), syncResponseInfo.getBackupSyncId());
 	PartitionRole nextRole;
 	pt_->getPartitionRole(pId, nextRole);
 	syncRequestInfo.setPartitionRole(nextRole);
 }
 
-void SyncManager::setLongtermSyncStart(PartitionId pId,
-	SyncRequestInfo &syncRequestInfo) {
-	PartitionRole &nextCatchup = syncRequestInfo.getPartitionRole();
-	pt_->setPartitionRole(pId, nextCatchup, PartitionTable::PT_CURRENT_OB);
+void SyncManager::setLongtermSyncStart(
+		PartitionId pId, SyncRequestInfo &syncRequestInfo) {
+
+	PartitionRole &nextCatchup
+			= syncRequestInfo.getPartitionRole();
+	pt_->setPartitionRole(
+			pId, nextCatchup, PT_CURRENT_OB);
 }
 
-bool SyncManager::checkLongGetSyncLog(SyncContext *context,
-		 SyncRequestInfo &syncRequestInfo, SyncResponseInfo &syncResponseInfo, NodeId targetNodeId) {
+bool SyncManager::checkLongGetSyncLog(
+		SyncContext *context,
+		 SyncRequestInfo &syncRequestInfo,
+		 SyncResponseInfo &syncResponseInfo,
+		 NodeId targetNodeId) {
+
 	PartitionId pId = context->getPartitionId();
 	context->setSyncStartCompleted(true);
-	LogSequentialNumber ownerLsn = pt_->getLSN(pId);
-	LogSequentialNumber catchupLsn = syncResponseInfo.getTargetLsn();
-	context->setSyncTargetLsnWithSyncId(targetNodeId, catchupLsn, syncResponseInfo.getBackupSyncId());
+	LogSequentialNumber ownerLsn
+			= pt_->getLSN(pId);
+	LogSequentialNumber catchupLsn
+			= syncResponseInfo.getTargetLsn();
+	context->setSyncTargetLsnWithSyncId(
+			targetNodeId, catchupLsn,
+			syncResponseInfo.getBackupSyncId());
+
 	syncRequestInfo.clearSearchCondition();
-	syncRequestInfo.set(SYC_LONGTERM_SYNC_LOG, context,
+	syncRequestInfo.set(
+			SYC_LONGTERM_SYNC_LOG, context,
 			pt_->getLSN(pId), syncResponseInfo.getBackupSyncId());
-	syncRequestInfo.setSearchLsnRange(catchupLsn + 1, catchupLsn + 1);
+	syncRequestInfo.setSearchLsnRange(
+			catchupLsn + 1, catchupLsn + 1);
 	bool isSyncLog = false;
-	if ((ownerLsn == 0 && catchupLsn == 0) || ownerLsn == catchupLsn) {
+	if ((ownerLsn == 0 && catchupLsn == 0)
+			|| ownerLsn == catchupLsn) {
 		isSyncLog = true;
 	}
 	else {
 		try {
-			isSyncLog = syncRequestInfo.getLogs(pId, context->getSequentialNumber(),
+			isSyncLog = syncRequestInfo.getLogs(
+					pId, context->getSequentialNumber(),
 					logMgr_, cpSvc_, context->isUseLongSyncLog(), true);
 		}
 		catch (UserException &) {
 		}
 	}
 	if (isSyncLog) {
-		GS_TRACE_WARNING(SYNC_DETAIL, GS_TRACE_SYNC_OPERATION,
-			"[OWNER] Log sync start, pId=" << pId << ", SSN=" << context->getSequentialNumber() 
+
+		GS_TRACE_WARNING(
+				SYNC_DETAIL, GS_TRACE_SYNC_OPERATION,
+				"[OWNER] Log sync start, pId=" << pId 
+				<< ", SSN=" << context->getSequentialNumber() 
 				<< ", revision=" << context->getPartitionRevision().sequentialNumber_
 				<< ", lsn=" << pt_->getLSN(pId));
 
 		context->setSyncCheckpointCompleted();
-		SyncStat &stat = clsMgr_->getSyncStat();
-		stat.syncApplyNum_ = 0;
-		stat.syncChunkNum_ = 0;
+
 		LogSequentialNumber startLsn
-				= (ownerLsn == catchupLsn) ? ownerLsn : catchupLsn + 1;
-		syncRequestInfo.setSearchLsnRange(startLsn, ownerLsn);
-		if ((ownerLsn == 0 && catchupLsn == 0) || (ownerLsn == catchupLsn)) {
+				= (ownerLsn == catchupLsn) ?
+					ownerLsn : catchupLsn + 1;
+		syncRequestInfo.setSearchLsnRange(
+				startLsn, ownerLsn);
+
+		if ((ownerLsn == 0 && catchupLsn == 0)
+				|| (ownerLsn == catchupLsn)) {
 		}
 		else {
 			util::Stopwatch logWatch;
 			context->start(logWatch);
 			try {
-				syncRequestInfo.getLogs(pId, context->getSequentialNumber(),
+
+				syncRequestInfo.getLogs(
+						pId, context->getSequentialNumber(),
 						logMgr_, cpSvc_, context->isUseLongSyncLog());
+
 				context->endLog(logWatch);
-				context->setProcessedLsn(syncRequestInfo.getStartLsn(), syncRequestInfo.getEndLsn());
-				context->incProcessedLogNum(syncRequestInfo.getBinaryLogSize());
+				context->setProcessedLsn(
+						syncRequestInfo.getStartLsn(),
+						syncRequestInfo.getEndLsn());
+				context->incProcessedLogNum(
+						syncRequestInfo.getBinaryLogSize());
 			}
 			catch (UserException &) {
 				context->endLog(logWatch);
-				GS_THROW_SYNC_ERROR(GS_ERROR_SYNC_LOG_GET_FAILED, context, 
-					"Long term log sync failed, log is not found or invalid", ", owner=" << pt_->dumpNodeAddress(0) 
+
+				GS_THROW_SYNC_ERROR(
+						GS_ERROR_SYNC_LOG_GET_FAILED, context, 
+						"Long term log sync failed, log is not found or invalid",
+						", owner=" << pt_->dumpNodeAddress(0) 
 						<< ", owner LSN=" << ownerLsn << ", catchup=" 
-						<< pt_->dumpNodeAddress(targetNodeId) << ", catchup LSN=" << catchupLsn);
+						<< pt_->dumpNodeAddress(targetNodeId)
+						<< ", catchup LSN=" << catchupLsn);
 			}
 		}
 	}
 	return isSyncLog;
 }
 
-void SyncManager::setLongGetSyncChunk(SyncContext *context,
-	 SyncRequestInfo &syncRequestInfo, SyncResponseInfo &syncResponseInfo,
-		EventType eventType, const util::DateTime &now,
-		const EventMonotonicTime emNow, NodeId senderNodeId)
- {
+void SyncManager::setLongGetSyncChunk(
+		SyncContext *context,
+	 SyncRequestInfo &syncRequestInfo,
+		EventType eventType,
+		const util::DateTime &now,
+		const EventMonotonicTime emNow,
+		NodeId senderNodeId) {
+
 	GS_TRACE_SYNC(context, "Long term chunk sync start", "");
 	uint64_t totalCount = 0;
 	PartitionId pId = context->getPartitionId();
-	util::StackAllocator &alloc = syncRequestInfo.getAllocator();
+	util::StackAllocator &alloc
+			= syncRequestInfo.getAllocator();
 	syncRequestInfo.set(SYC_LONGTERM_SYNC_CHUNK);
-	SyncStat &stat = clsMgr_->getSyncStat();
 	int32_t sendChunkNum = getConfig().getSendChunkNum();
 	int32_t sendChunkSize = getChunkSize();
 	syncRequestInfo.setSearchChunkCondition(
@@ -642,10 +925,14 @@ void SyncManager::setLongGetSyncChunk(SyncContext *context,
 	util::Stopwatch chunkWatch;
 	context->start(chunkWatch);
 	try {
-		if (syncRequestInfo.getChunks(alloc, pId, pt_, logMgr_, chunkMgr_, cpSvc_,
+		if (syncRequestInfo.getChunks(
+				pId, pt_, cpSvc_,
 				context->getSequentialNumber(), totalCount)) {
+
 			context->setSyncCheckpointCompleted();
-			GS_TRACE_SYNC(context, "[OWNER] Long term chunk sync completed and log sync start",
+			GS_TRACE_SYNC(
+					context,
+					"[OWNER] Long term chunk sync completed and log sync start",
 					", send chunks=" << context->getProcessedChunkNum());
 		}
 		else {
@@ -653,7 +940,8 @@ void SyncManager::setLongGetSyncChunk(SyncContext *context,
 	}
 	catch (std::exception &e) {
 		context->endChunk(chunkWatch);
-		GS_RETHROW_SYNC_ERROR(e, context, "Long term chunk sync failed, get chunk", "");
+		GS_RETHROW_SYNC_ERROR(
+				e, context, "Long term chunk sync failed, get chunk", "");
 	}
 	if (syncRequestInfo.getChunkList().size() == 0) {
 		return;
@@ -664,59 +952,83 @@ void SyncManager::setLongGetSyncChunk(SyncContext *context,
 			getExtraConfig().getLongtermDumpChunkInterval();
 	bool isFirst = (context->getProcessedChunkNum() == 0);
 
-	context->incProcessedChunkNum(syncRequestInfo.getChunkNum());
+	context->incProcessedChunkNum(
+			syncRequestInfo.getChunkNum());
 	if ((prevCount + sendChunkNum) >= getExtraConfig()
-				.getLongtermDumpChunkInterval() || isFirst || context->isSyncCheckpointCompleted()) {
-		if (context->isSyncCheckpointCompleted()) {
-			GS_TRACE_SYNC(context, "Long term chunk sync completed",
-					", catchup=" << pt_->dumpNodeAddress(senderNodeId)
-							<< ", send chunks=" << context->getProcessedChunkNum() << ", total chunks=" << totalCount);						}
-		else {
-			GS_TRACE_SYNC(context, "Long term chunk sync",
-					", catchup=" << pt_->dumpNodeAddress(senderNodeId)
-							<< ", send chunks=" << context->getProcessedChunkNum() << ", total chunks=" << totalCount);
-		}
-		stat.syncChunkNum_ = context->getProcessedChunkNum();
-	}
+				.getLongtermDumpChunkInterval()
+						|| isFirst
+						|| context->isSyncCheckpointCompleted()) {
 
+		if (context->isSyncCheckpointCompleted()) {
+			GS_TRACE_SYNC(
+					context, "Long term chunk sync completed",
+					", catchup=" << pt_->dumpNodeAddress(senderNodeId)
+							<< ", send chunks="
+							<< context->getProcessedChunkNum()
+							<< ", total chunks=" << totalCount);						}
+		else {
+			GS_TRACE_SYNC(
+					context, "Long term chunk sync",
+					", catchup=" << pt_->dumpNodeAddress(senderNodeId)
+							<< ", send chunks=" << context->getProcessedChunkNum()
+							<< ", total chunks=" << totalCount);
+		}
+	}
 }
 
-void SyncManager::setLongtermSyncChunk(SyncContext *context,
-		SyncRequestInfo &syncRequestInfo, SyncResponseInfo &syncResponseInfo,
-		EventType eventType, const util::DateTime &now, const EventMonotonicTime emNow, NodeId senderNodeId) {
+void SyncManager::setLongtermSyncChunk(
+		SyncContext *context,
+		SyncRequestInfo &syncRequestInfo,
+		EventType eventType,
+		const util::DateTime &now,
+		const EventMonotonicTime emNow,
+		NodeId senderNodeId) {
+
 	PartitionId pId = context->getPartitionId();
-	util::StackAllocator &alloc = syncRequestInfo.getAllocator();
-	SyncVariableSizeAllocator &varSizeAlloc = getVariableSizeAllocator();
+	util::StackAllocator &alloc
+			= syncRequestInfo.getAllocator();
+	SyncVariableSizeAllocator &varSizeAlloc
+			= getVariableSizeAllocator();
 	if (context->getProcessedChunkNum() == 0) {
-		removePartition(alloc, pId, eventType, now, emNow);
+		removePartition(
+				alloc, pId, eventType, now, emNow);
 	}
 	int32_t chunkNum = 0;
 	int32_t chunkSize = 0;
 	context->getChunkInfo(chunkNum, chunkSize);
-	PartitionRevisionNo revisionNo = syncRequestInfo.getPartitionRole().getRevisionNo();
 	util::Stopwatch chunkWatch;
 	context->start(chunkWatch);
-	for (int32_t chunkNo = 0; chunkNo < chunkNum; chunkNo++) {
+	for (int32_t chunkNo = 0;
+			chunkNo < chunkNum; chunkNo++) {
+
 		uint8_t *chunkBuffer = NULL;
 		context->getChunkBuffer(chunkBuffer, chunkNo);
 		if (chunkBuffer != NULL) {
 			try {
-				chunkMgr_->recoveryChunk(pId, chunkBuffer, chunkSize, false);
+				chunkMgr_->recoveryChunk(
+						pId, chunkBuffer, chunkSize, false);
 			}
 			catch (std::exception &e) {
 				context->endChunk(chunkWatch);
-				GS_RETHROW_SYNC_ERROR(e, context, "Long term chunk sync failed, recovery chunk is failed", "");
+				GS_RETHROW_SYNC_ERROR(
+						e, context,
+						"Long term chunk sync failed, recovery chunk is failed", "");
 			}
 			context->incProcessedChunkNum();
 			bool isFirst = (context->getProcessedChunkNum() == 0);
+
 			if (isFirst || (context->getProcessedChunkNum() %
-				getExtraConfig().getLongtermDumpChunkInterval()) == 0) {
-				GS_TRACE_SYNC(context, "Long term chunk sync", ", owner="
-						<< pt_->dumpNodeAddress(senderNodeId) << ", processed chunks="
+					getExtraConfig().getLongtermDumpChunkInterval()) == 0) {
+
+				GS_TRACE_SYNC(
+						context, "Long term chunk sync", ", owner="
+						<< pt_->dumpNodeAddress(senderNodeId)
+						<< ", processed chunks="
 						<< context->getProcessedChunkNum());
 			}
 			SyncStat &stat = clsMgr_->getSyncStat();
-			stat.syncApplyNum_ = context->getProcessedChunkNum();
+			stat.syncApplyNum_
+					= static_cast<int32_t>(context->getProcessedChunkNum());
 		}
 	}
 	context->endChunk(chunkWatch);
@@ -725,23 +1037,25 @@ void SyncManager::setLongtermSyncChunk(SyncContext *context,
 	int32_t logBufferSize = 0;
 	context->getLogBuffer(logBuffer, logBufferSize);
 	if (logBuffer != NULL && logBufferSize > 0) {
-		LogSequentialNumber startLsn
-				= recoveryMgr_->restoreTransaction(pId, logBuffer, emNow);
-		GS_TRACE_SYNC(context, "Long term chunk sync completed", "");;
-		context->freeBuffer(varSizeAlloc, LOG_SYNC, getSyncOptStat());
+		GS_TRACE_SYNC(
+				context, "Long term chunk sync completed", "");;
+		context->freeBuffer(
+				varSizeAlloc, LOG_SYNC, getSyncOptStat());
 		const TransactionManager::ContextSource src(eventType);
 		TransactionContext &txn = txnMgr_->put(
 				alloc, pId, TXN_EMPTY_CLIENTID, src, now, emNow);
 		ds_->restartPartition(txn, clsSvc_);
 	}
 	context->endChunkAll();
-
 }
 
 
-int32_t SyncManager::setLongtermSyncCheckChunk(EventContext &ec, Event &ev, SyncContext *context,
+int32_t SyncManager::setLongtermSyncCheckChunk(
+		EventContext &ec,
+		Event &ev,
+		SyncContext *context,
 		SyncResponseInfo &syncResponseInfo,
-		util::XArray<NodeId> &catchups, EventType eventType,
+		util::XArray<NodeId> &catchups,
 		int32_t &waitTime) {
 
 	PartitionId pId = context->getPartitionId();
@@ -750,8 +1064,8 @@ int32_t SyncManager::setLongtermSyncCheckChunk(EventContext &ec, Event &ev, Sync
 		return -1;
 	}
 	NodeId senderNodeId = catchups[0];
-	LogSequentialNumber ownerLsn = pt_->getLSN(pId);
-	LogSequentialNumber catchupLsn = syncResponseInfo.getTargetLsn();
+	LogSequentialNumber catchupLsn
+			= syncResponseInfo.getTargetLsn();
 	if (!controlSyncLoad(ec, ev, pId, catchupLsn, waitTime)) {
 		return 0;
 	}
@@ -759,52 +1073,80 @@ int32_t SyncManager::setLongtermSyncCheckChunk(EventContext &ec, Event &ev, Sync
 	return 1;
 }
 
-void SyncManager::setLongtermSyncChunkAck(SyncContext *context, SyncRequestInfo &syncRequestInfo,
+void SyncManager::setLongtermSyncChunkAck(
+		SyncContext *context, SyncRequestInfo &syncRequestInfo,
 		SyncResponseInfo &syncResponseInfo) {
+
 	PartitionId pId = context->getPartitionId();
 	context->endChunkAll();
-	syncRequestInfo.set(SYC_LONGTERM_SYNC_LOG, context, pt_->getLSN(pId),
+	syncRequestInfo.set(
+			SYC_LONGTERM_SYNC_LOG, context, pt_->getLSN(pId),
 			syncResponseInfo.getBackupSyncId());
-	LogSequentialNumber ownerLsn = pt_->getLSN(pId);
-	LogSequentialNumber catchupLsn = syncResponseInfo.getTargetLsn();
+
+	LogSequentialNumber ownerLsn
+			= pt_->getLSN(pId);
+	LogSequentialNumber catchupLsn
+			= syncResponseInfo.getTargetLsn();
 
 	if (ownerLsn > catchupLsn) {
-		syncRequestInfo.setSearchLsnRange(catchupLsn + 1, ownerLsn);
+		syncRequestInfo.setSearchLsnRange(
+				catchupLsn + 1, ownerLsn);
 		util::Stopwatch logWatch;
 		context->start(logWatch);
+
 		try {
-			syncRequestInfo.getLogs(pId, context->getSequentialNumber(),
+			syncRequestInfo.getLogs(
+					pId, context->getSequentialNumber(),
 					logMgr_, cpSvc_, context->isUseLongSyncLog());
+
 			context->endLog(logWatch);
-			context->setProcessedLsn(syncRequestInfo.getStartLsn(), syncRequestInfo.getEndLsn());
-			context->incProcessedLogNum(syncRequestInfo.getBinaryLogSize());
-			GS_TRACE_SYNC(context,
-					"[OWNER] Long term chunk sync completed and log sync start", ", send chunks="
+			context->setProcessedLsn(
+					syncRequestInfo.getStartLsn(),
+					syncRequestInfo.getEndLsn());
+			context->incProcessedLogNum(
+					syncRequestInfo.getBinaryLogSize());
+
+			GS_TRACE_SYNC(
+					context,
+					"[OWNER] Long term chunk sync completed and log sync start",
+					", send chunks="
 					<< context->getProcessedChunkNum()
 					<< ", start lsn=" << syncRequestInfo.getStartLsn());
 		}
 		catch (UserException &e) {
 		context->endLog(logWatch);
-			UTIL_TRACE_EXCEPTION(SYNC_SERVICE, e, "reason=" << GS_EXCEPTION_MESSAGE(e));
-			GS_TRACE_SYNC(context, "Long term log sync failed, log is not found or invalid", 
-					", startLsn=" << syncRequestInfo.getStartLsn() << ", endLsn=" << syncRequestInfo.getEndLsn() 
-						<< ", logStartLsn=" << pt_->getStartLSN(pId));
+
+			UTIL_TRACE_EXCEPTION(
+					SYNC_SERVICE, e, "reason=" << GS_EXCEPTION_MESSAGE(e));
+			GS_TRACE_SYNC(
+					context, "Long term log sync failed, log is not found or invalid", 
+					", startLsn=" << syncRequestInfo.getStartLsn()
+					<< ", endLsn=" << syncRequestInfo.getEndLsn() 
+					<< ", logStartLsn=" << pt_->getStartLSN(pId));
 		}
 	}
 	else {
-		syncRequestInfo.setSearchLsnRange(ownerLsn, ownerLsn);
+		syncRequestInfo.setSearchLsnRange(
+				ownerLsn, ownerLsn);
 	}	
 }
 
-void SyncManager::setLongtermSyncGetChunkAck(SyncContext *context, SyncRequestInfo &syncRequestInfo,
-		SyncResponseInfo &syncResponseInfo, EventType eventType, const util::DateTime &now,
-			const EventMonotonicTime emNow, NodeId targetNodeId) {
+void SyncManager::setLongtermSyncGetChunkAck(
+		SyncContext *context,
+		SyncRequestInfo &syncRequestInfo,
+		EventType eventType,
+		const util::DateTime &now,
+		const EventMonotonicTime emNow,
+		NodeId targetNodeId) {
+
 	PartitionId pId = context->getPartitionId();
-	util::StackAllocator &alloc = syncRequestInfo.getAllocator();
+	util::StackAllocator &alloc
+			= syncRequestInfo.getAllocator();
 
 	SyncId catchupSyncId;
 	context->getCatchupSyncId(catchupSyncId);
-	syncRequestInfo.set(SYC_LONGTERM_SYNC_CHUNK, context, pt_->getLSN(pId),
+	syncRequestInfo.set(
+			SYC_LONGTERM_SYNC_CHUNK, context, pt_->getLSN(pId),
 			catchupSyncId);
 	int32_t sendChunkNum = getConfig().getSendChunkNum();
 	int32_t sendChunkSize = getChunkSize();
@@ -817,9 +1159,9 @@ void SyncManager::setLongtermSyncGetChunkAck(SyncContext *context, SyncRequestIn
 	DataStore::Latch latch(txn, pId, ds_, clsSvc_);
 	util::Stopwatch chunkWatch;
 	context->start(chunkWatch);
-	bool isChunkEnd = false;
 	try {
-		if (syncRequestInfo.getChunks(alloc, pId, pt_, logMgr_, chunkMgr_, cpSvc_,
+		if (syncRequestInfo.getChunks(
+				pId, pt_, cpSvc_,
 				context->getSequentialNumber(), totalCount)) {
 			context->setSyncCheckpointCompleted();
 		}
@@ -834,7 +1176,9 @@ void SyncManager::setLongtermSyncGetChunkAck(SyncContext *context, SyncRequestIn
 	}
 	catch (std::exception &e) {
 		context->endLog(chunkWatch);
-		GS_RETHROW_SYNC_ERROR(e, context, "Long term chunk sync failed, get chunk is failed", "");
+		GS_RETHROW_SYNC_ERROR(
+				e, context,
+				"Long term chunk sync failed, get chunk is failed", "");
 	}
 	if (syncRequestInfo.getChunkList().size() == 0) {
 		return;
@@ -842,53 +1186,78 @@ void SyncManager::setLongtermSyncGetChunkAck(SyncContext *context, SyncRequestIn
 	context->setSyncCheckpointPending(true);
 	int64_t prevCount = context->getProcessedChunkNum() %
 			getExtraConfig().getLongtermDumpChunkInterval();
-	bool isFirst = (context->getProcessedChunkNum() == 0);
-	context->incProcessedChunkNum(syncRequestInfo.getChunkNum());
+	bool isFirst
+			= (context->getProcessedChunkNum() == 0);
+	context->incProcessedChunkNum(
+			syncRequestInfo.getChunkNum());
+
 	if ((prevCount + sendChunkNum) >= getExtraConfig()
-				.getLongtermDumpChunkInterval() || isFirst || context->isSyncCheckpointCompleted()) {
+				.getLongtermDumpChunkInterval()
+			|| isFirst
+			|| context->isSyncCheckpointCompleted()) {
+
 		if (context->isSyncCheckpointCompleted()) {
-			GS_TRACE_SYNC(context, "Long term chunk sync completed", ", send chunks="
+			GS_TRACE_SYNC(
+					context, "Long term chunk sync completed",
+					", send chunks="
 					<< context->getProcessedChunkNum());
 		}
 		else {
-			GS_TRACE_SYNC(context, "Long term chunk sync", ", catchup="
-					<< pt_->dumpNodeAddress(targetNodeId) << ", send chunks="
+			GS_TRACE_SYNC(
+					context, "Long term chunk sync",
+					", catchup="
+					<< pt_->dumpNodeAddress(targetNodeId)
+					<< ", send chunks="
 					<< context->getProcessedChunkNum());
 		}
 	}
-	SyncStat &stat = clsMgr_->getSyncStat();
-	stat.syncChunkNum_ = context->getProcessedChunkNum();
 }
 
-void SyncManager::setLongtermSyncLog(SyncContext *context, SyncRequestInfo &syncRequestInfo,
-		 SyncResponseInfo &syncResponseInfo, EventType eventType, const util::DateTime &now,
-			const EventMonotonicTime emNow){
-	util::StackAllocator &alloc = syncRequestInfo.getAllocator();
-	SyncVariableSizeAllocator &varSizeAlloc = getVariableSizeAllocator();
+void SyncManager::setLongtermSyncLog(
+		SyncContext *context,
+		SyncRequestInfo &syncRequestInfo,
+		EventType eventType,
+		const util::DateTime &now,
+		const EventMonotonicTime emNow){
+
+	util::StackAllocator &alloc
+			= syncRequestInfo.getAllocator();
+	SyncVariableSizeAllocator &varSizeAlloc
+			= getVariableSizeAllocator();
+
 	PartitionId pId = context->getPartitionId();
-	if (context->getProcessedChunkNum() == 0 && pt_->getLSN(pId) == 0) {
-		removePartition(alloc, pId, eventType, now, emNow);
+	if (context->getProcessedChunkNum() == 0
+			&& pt_->getLSN(pId) == 0) {
+		removePartition(
+				alloc, pId, eventType, now, emNow);
 	}
 	uint8_t *logBuffer = NULL;
 	int32_t logBufferSize = 0;
-	context->getLogBuffer(logBuffer, logBufferSize);
+	context->getLogBuffer(
+			logBuffer, logBufferSize);
 	if (logBuffer != NULL && logBufferSize > 0) {
 
 		util::Stopwatch logWatch;
 		context->start(logWatch);
 		LogSequentialNumber startLsn = pt_->getLSN(pId);
 		try {
-			recoveryMgr_->redoLogList(alloc, RecoveryManager::MODE_LONG_TERM_SYNC, pId,
+			recoveryMgr_->redoLogList(
+					alloc, RecoveryManager::MODE_LONG_TERM_SYNC, pId,
 				now, emNow, logBuffer, logBufferSize);
+
 			context->endLog(logWatch);
-			context->setProcessedLsn(startLsn, pt_->getLSN(pId));
+			context->setProcessedLsn(
+					startLsn, pt_->getLSN(pId));
 			context->incProcessedLogNum(logBufferSize);
 		}
 		catch (std::exception &e) {
 			context->endLog(logWatch);
 			LogSequentialNumber endLsn = pt_->getLSN(pId);
-			GS_RETHROW_LOG_REDO_ERROR(e, context, "Long term log redo failed",
-					", current startLsn=" << startLsn << ", current endLsn=" << endLsn 
+			GS_RETHROW_LOG_REDO_ERROR(
+					e, context, "Long term log redo failed",
+					", current startLsn="
+					<< startLsn << ", current endLsn="
+					<< endLsn 
 					<< ", log startLsn=" << syncRequestInfo.getStartLsn()
 					<< ", log endLsn=" << syncRequestInfo.getEndLsn());
 		}
@@ -897,63 +1266,88 @@ void SyncManager::setLongtermSyncLog(SyncContext *context, SyncRequestInfo &sync
 	}
 }
 
+void SyncManager::setLongtermSyncLogAck(
+		SyncContext *context,
+		SyncRequestInfo &syncRequestInfo,
+		SyncResponseInfo &syncResponseInfo,
+		NodeId senderNodeId) {
 
-void SyncManager::setLongtermSyncLogAck(SyncContext *context, SyncRequestInfo &syncRequestInfo,
-	SyncResponseInfo &syncResponseInfo, NodeId senderNodeId) {
 	PartitionId pId = context->getPartitionId();
-	LogSequentialNumber ownerLsn = pt_->getLSN(pId);
-	LogSequentialNumber catchupLsn = syncResponseInfo.getTargetLsn();
-	syncRequestInfo.setSearchLsnRange(catchupLsn + 1, ownerLsn);
+	LogSequentialNumber ownerLsn
+			= pt_->getLSN(pId);
+	LogSequentialNumber catchupLsn
+			= syncResponseInfo.getTargetLsn();
+	syncRequestInfo.setSearchLsnRange(
+			catchupLsn + 1, ownerLsn);
 	util::Stopwatch logWatch;
 	context->start(logWatch);
-	LogSequentialNumber startLsn = pt_->getLSN(pId);
+	LogSequentialNumber startLsn
+			= pt_->getLSN(pId);
 	try {
-		syncRequestInfo.getLogs(pId, context->getSequentialNumber(), 
+
+		syncRequestInfo.getLogs(
+				pId, context->getSequentialNumber(), 
 				logMgr_, cpSvc_, context->isUseLongSyncLog());
+
 		context->endLog(logWatch);
-		context->setProcessedLsn(startLsn, pt_->getLSN(pId));
-		context->incProcessedLogNum(syncRequestInfo.getBinaryLogSize());
+		context->setProcessedLsn(
+				startLsn, pt_->getLSN(pId));
+		context->incProcessedLogNum(
+				syncRequestInfo.getBinaryLogSize());
 	}
 	catch (UserException &) {
 		context->endLog(logWatch);
-		GS_THROW_SYNC_ERROR(GS_ERROR_SYNC_LOG_GET_FAILED, context, 
-			"Long term log sync failed, log is not found or invalid", ", owner=" << pt_->dumpNodeAddress(0) 
-				<< ", owner LSN=" << ownerLsn << ", catchup=" 
-				<< pt_->dumpNodeAddress(senderNodeId) << ", catchup LSN=" << catchupLsn);
+		GS_THROW_SYNC_ERROR(
+				GS_ERROR_SYNC_LOG_GET_FAILED, context, 
+			"Long term log sync failed, log is not found or invalid",
+			", owner=" << pt_->dumpNodeAddress(0)
+				<< ", owner LSN="
+				<< ownerLsn << ", catchup="
+				<< pt_->dumpNodeAddress(senderNodeId)
+				<< ", catchup LSN=" << catchupLsn);
 	}
-	syncRequestInfo.set(SYC_LONGTERM_SYNC_LOG, context,
+	syncRequestInfo.set(
+			SYC_LONGTERM_SYNC_LOG, context,
 			ownerLsn, syncResponseInfo.getBackupSyncId());
 }
-
 
 /*!
 	@brief Checks if a specified operation is executable
 */
 void SyncManager::checkExecutable(
-	EventType operation, PartitionId pId, PartitionRole &candNextRole) {
+		EventType operation,
+		PartitionId pId,
+		PartitionRole &candNextRole) {
 
 	try {
 		checkActiveStatus();
 		if (pId >= pt_->getPartitionNum()) {
-			GS_THROW_USER_ERROR(GS_ERROR_SYM_INVALID_PARTITION_INFO,"");
+			GS_THROW_USER_ERROR(
+					GS_ERROR_SYM_INVALID_PARTITION_INFO,"");
 		}
-		if (operation == TXN_SYNC_TIMEOUT ||  operation == TXN_SYNC_CHECK_END) {
+		if (operation == TXN_SYNC_TIMEOUT
+				||  operation == TXN_SYNC_CHECK_END) {
 			return;
 		}
-		PartitionRevisionNo candRevision = candNextRole.getRevisionNo();
+
+		PartitionRevisionNo candRevision
+				= candNextRole.getRevisionNo();
 		PartitionRole currentRole;
-		PartitionRevisionNo currentRevision = currentRole.getRevisionNo();
+		PartitionRevisionNo currentRevision
+				= currentRole.getRevisionNo();
 		if (candRevision < currentRevision) {
-				GS_THROW_USER_ERROR(GS_ERROR_SYM_INVALID_PARTITION_REVISION,
-					"candRevision=" << candRevision << ", currentRevision=" << currentRevision);
+				GS_THROW_USER_ERROR(
+						GS_ERROR_SYM_INVALID_PARTITION_REVISION,
+							"candRevision=" << candRevision
+							<< ", currentRevision=" << currentRevision);
 		}
 	}
 	catch (std::exception &e) {
-		GS_RETHROW_USER_OR_SYSTEM(e, GS_EXCEPTION_MERGE_MESSAGE(
-				e, "Failed to check sync, pId=" << pId));
+		GS_RETHROW_USER_OR_SYSTEM(
+				e, GS_EXCEPTION_MERGE_MESSAGE(
+						e, "Failed to check sync, pId=" << pId));
 	}
 }
-
 
 /*!
 	@brief Creates Partition
@@ -966,23 +1360,36 @@ void SyncManager::createPartition(PartitionId pId) {
 		return;
 	}
 	try {
-		syncContextTables_[pId] = ALLOC_NEW(globalStackAlloc_) SyncContextTable(
-				globalStackAlloc_, pId, DEFAULT_CONTEXT_SLOT_NUM, &varSizeAlloc_);
+		syncContextTables_[pId] = ALLOC_NEW(globalStackAlloc_)
+				SyncContextTable(globalStackAlloc_, pId,
+						DEFAULT_CONTEXT_SLOT_NUM, &varSizeAlloc_);
 	}
 	catch (std::exception &e) {
-		GS_RETHROW_USER_OR_SYSTEM(e, GS_EXCEPTION_MERGE_MESSAGE(
-				e, "Failed to sync: pId=" << pId));
+		GS_RETHROW_USER_OR_SYSTEM(
+				e, GS_EXCEPTION_MERGE_MESSAGE(
+						e, "Failed to sync: pId=" << pId));
 	}
 }
 
 
-SyncManager::SyncContextTable::SyncContextTable(util::StackAllocator &alloc,
-		PartitionId pId, uint32_t numInitialSlot, SyncVariableSizeAllocator *varSizeAlloc)
-	: pId_(pId), numCounter_(0), freeList_(NULL), numUsed_(0), globalStackAlloc_(&alloc),
-			slots_(alloc), varSizeAlloc_(varSizeAlloc) {
+SyncManager::SyncContextTable::SyncContextTable(
+		util::StackAllocator &alloc,
+		PartitionId pId,
+		uint32_t numInitialSlot,
+		SyncVariableSizeAllocator *varSizeAlloc) :
+		pId_(pId),
+		numCounter_(0),
+		freeList_(NULL),
+		numUsed_(0),
+		globalStackAlloc_(&alloc),
+		slots_(alloc),
+		varSizeAlloc_(varSizeAlloc) {
+
 	try {
 		for (uint32_t i = 0; i < numInitialSlot; i++) {
-			SyncContext *slot = ALLOC_NEW(*globalStackAlloc_) SyncContext [SLOT_SIZE];
+
+			SyncContext *slot = ALLOC_NEW(*globalStackAlloc_)
+					SyncContext [SLOT_SIZE];
 			slots_.push_back(slot);
 			for (uint32_t j = 0; j < SLOT_SIZE; j++) {
 				slot[j].setPartitionId(pId_);
@@ -1006,6 +1413,7 @@ SyncManager::SyncContextTable::SyncContextTable(util::StackAllocator &alloc,
 SyncManager::SyncContextTable::~SyncContextTable() {
 	for (size_t i = 0; i < slots_.size(); i++) {
 		for (uint32_t j = 0; j < SLOT_SIZE; j++) {
+
 			slots_[i][j].clear(*varSizeAlloc_, NULL);
 			ALLOC_DELETE(*globalStackAlloc_, &slots_[i][j]);
 		}
@@ -1017,11 +1425,13 @@ SyncManager::SyncContextTable::~SyncContextTable() {
 	@brief Creates SyncContext
 */
 SyncContext *SyncManager::SyncContextTable::createSyncContext(
-	PartitionRevision &ptRev) {
+		PartitionRevision &ptRev) {
+
 	try {
 		SyncContext *context = freeList_;
 		if (context == NULL) {
-			SyncContext *slot = ALLOC_NEW(*globalStackAlloc_) SyncContext [SLOT_SIZE];
+			SyncContext *slot = ALLOC_NEW(*globalStackAlloc_)
+					SyncContext [SLOT_SIZE];
 			slots_.push_back(slot);
 			for (uint32_t j = 0; j < SLOT_SIZE; j++) {
 				slot[j].setPartitionId(pId_);
@@ -1047,7 +1457,10 @@ SyncContext *SyncManager::SyncContextTable::createSyncContext(
 	@brief Removes SyncContext
 */
 void SyncManager::SyncContextTable::removeSyncContext(
-		SyncVariableSizeAllocator &alloc, SyncContext *&context, SyncOptStat *stat) {
+		SyncVariableSizeAllocator &alloc,
+		SyncContext *&context,
+		SyncOptStat *stat) {
+
 	try {
 		if (context == NULL) {
 			return;
@@ -1068,6 +1481,7 @@ void SyncManager::SyncContextTable::removeSyncContext(
 */
 SyncContext *SyncManager::SyncContextTable::getSyncContext(
 		int32_t id, uint64_t version) const {
+
 	if (id < numCounter_) {
 		const uint32_t slotNo = id / SLOT_SIZE;
 		const uint32_t offset = id - SLOT_SIZE * slotNo;
@@ -1079,34 +1493,52 @@ SyncContext *SyncManager::SyncContextTable::getSyncContext(
 	return NULL;
 }
 
-
-SyncContext::SyncContext() : id_(0), pId_(0), version_(0), used_(false),
+SyncContext::SyncContext() :
+		id_(0),
+		pId_(0),
+		version_(0),
+		used_(false),
 		numSendBackup_(0),
 		recvNodeId_(UNDEF_NODEID),
 		isCatchupSync_(false),
-		isSyncCpCompleted_(false), isSyncStartCompleted_(false),
+		isSyncCpCompleted_(false),
+		isSyncStartCompleted_(false),
 		nextEmptyChain_(NULL), 
-		isDump_(false), isSendReady_(false),
+		isDump_(false),
+		isSendReady_(false),
 		processedChunkNum_(0),
-		logBuffer_(NULL), logBufferSize_(0), chunkBuffer_(NULL),
-		chunkBufferSize_(0), chunkBaseSize_(0), chunkNum_(0)
-		, mode_(MODE_SHORTTERM_SYNC), roleStatus_(PartitionTable::PT_OWNER)
-		, processedLogNum_(0), processedLogSize_(0), actualLogTime_(0)
-		, actualChunkTime_(0), chunkLeadTime_(0), totalTime_(0)
-		, startLsn_(0), endLsn_(0), syncSequentialNumber_(0),
+		logBuffer_(NULL),
+		logBufferSize_(0),
+		chunkBuffer_(NULL),
+		chunkBufferSize_(0),
+		chunkBaseSize_(0),
+		chunkNum_(0),
+		mode_(MODE_SHORTTERM_SYNC),
+		roleStatus_(PT_OWNER),
+		processedLogNum_(0),
+		processedLogSize_(0),
+		actualLogTime_(0),
+		actualChunkTime_(0),
+		chunkLeadTime_(0),
+		totalTime_(0),
+		startLsn_(0),
+		endLsn_(0),
+		syncSequentialNumber_(0),
 		longSyncType_(NOT_LONG_TERM_SYNC),
 		invalidCount_(0),
 		prevProcessedChunkNum_(0),
-		prevProcessedLogNum_(0)
-{
+		prevProcessedLogNum_(0) {
 }
+
 SyncContext::~SyncContext() {
 }
 
 /*!
 	@brief Increments counter
 */
-void SyncContext::incrementCounter(NodeId syncTargetNodeId) {
+void SyncContext::incrementCounter(
+		NodeId syncTargetNodeId) {
+
 	try {
 		for (size_t i = 0; i < sendBackups_.size(); i++) {
 			if (sendBackups_[i].nodeId_ == syncTargetNodeId) {
@@ -1128,8 +1560,9 @@ void SyncContext::incrementCounter(NodeId syncTargetNodeId) {
 /*!
 	@brief Decrements counter
 */
-bool SyncContext::decrementCounter(NodeId syncTargetNodeId) {
-	uint32_t before = numSendBackup_;
+bool SyncContext::decrementCounter(
+		NodeId syncTargetNodeId) {
+
 	for (size_t i = 0; i < sendBackups_.size(); i++) {
 		if (sendBackups_[i].nodeId_ == syncTargetNodeId) {
 			sendBackups_[i].isAcked_ = true;
@@ -1144,11 +1577,15 @@ bool SyncContext::decrementCounter(NodeId syncTargetNodeId) {
 	@brief Sets LSN and SyncID of target node id
 */
 void SyncContext::setSyncTargetLsnWithSyncId(
-		NodeId syncTargetNodeId, LogSequentialNumber lsn, SyncId backupSyncId) {
+		NodeId syncTargetNodeId,
+		LogSequentialNumber lsn,
+		SyncId backupSyncId) {
+
 	for (size_t i = 0; i < sendBackups_.size(); i++) {
 		if (sendBackups_[i].nodeId_ == syncTargetNodeId) {
 			if (sendBackups_[i].lsn_ == UNDEF_LSN 
-				|| (sendBackups_[i].lsn_ != UNDEF_LSN && sendBackups_[i].lsn_ < lsn)) {
+				|| (sendBackups_[i].lsn_ != UNDEF_LSN
+						&& sendBackups_[i].lsn_ < lsn)) {
 				sendBackups_[i].lsn_ = lsn;
 				sendBackups_[i].endLsn_ = lsn;
 			}
@@ -1159,11 +1596,13 @@ void SyncContext::setSyncTargetLsnWithSyncId(
 }
 
 void SyncContext::setSyncTargetLsn(
-	NodeId syncTargetNodeId, LogSequentialNumber lsn) {
+		NodeId syncTargetNodeId, LogSequentialNumber lsn) {
+
 	for (size_t i = 0; i < sendBackups_.size(); i++) {
 		if (sendBackups_[i].nodeId_ == syncTargetNodeId) {
 			if (sendBackups_[i].lsn_ == UNDEF_LSN 
-				|| (sendBackups_[i].lsn_ != UNDEF_LSN && sendBackups_[i].lsn_ < lsn)) {
+				|| (sendBackups_[i].lsn_ != UNDEF_LSN
+						&& sendBackups_[i].lsn_ < lsn)) {
 				sendBackups_[i].lsn_ = lsn;
 			}
 			break;
@@ -1172,15 +1611,19 @@ void SyncContext::setSyncTargetLsn(
 }
 
 void SyncContext::SendBackup::dump() {
-	std::cout << "nodeId=" << nodeId_ << ", lsn=" << lsn_ << ", endLsn=" << endLsn_ << std::endl;
+	std::cout << "nodeId=" << nodeId_
+			<< ", lsn=" << lsn_
+			<< ", endLsn=" << endLsn_ << std::endl;
 }
 
 void SyncContext::setSyncTargetEndLsn(
 	NodeId syncTargetNodeId, LogSequentialNumber lsn) {
+
 	for (size_t i = 0; i < sendBackups_.size(); i++) {
 		if (sendBackups_[i].nodeId_ == syncTargetNodeId) {
 			if (sendBackups_[i].lsn_ == UNDEF_LSN 
-				|| (sendBackups_[i].lsn_ != UNDEF_LSN && sendBackups_[i].lsn_ < lsn)) {
+				|| (sendBackups_[i].lsn_ != UNDEF_LSN
+						&& sendBackups_[i].lsn_ < lsn)) {
 				sendBackups_[i].endLsn_ = lsn;
 			}
 			break;
@@ -1193,6 +1636,7 @@ void SyncContext::setSyncTargetEndLsn(
 */
 LogSequentialNumber SyncContext::getSyncTargetLsn(
 		NodeId syncTargetNodeId) const {
+
 	for (size_t i = 0; i < sendBackups_.size(); i++) {
 		if (sendBackups_[i].nodeId_ == syncTargetNodeId) {
 			return sendBackups_[i].lsn_;
@@ -1203,6 +1647,7 @@ LogSequentialNumber SyncContext::getSyncTargetLsn(
 
 LogSequentialNumber SyncContext::getSyncTargetEndLsn(
 		NodeId syncTargetNodeId) const {
+
 	for (size_t i = 0; i < sendBackups_.size(); i++) {
 		if (sendBackups_[i].nodeId_ == syncTargetNodeId) {
 			return sendBackups_[i].endLsn_;
@@ -1215,8 +1660,11 @@ LogSequentialNumber SyncContext::getSyncTargetEndLsn(
 /*!
 	@brief Gets LSN and SyncID of target node id
 */
-bool SyncContext::getSyncTargetLsnWithSyncId(NodeId syncTargetNodeId,
-	LogSequentialNumber &backupLsn, SyncId &backupSyncId) {
+bool SyncContext::getSyncTargetLsnWithSyncId(
+		NodeId syncTargetNodeId,
+		LogSequentialNumber &backupLsn,
+		SyncId &backupSyncId) {
+
 	for (size_t i = 0; i < sendBackups_.size(); i++) {
 		if (sendBackups_[i].nodeId_ == syncTargetNodeId) {
 			backupLsn = sendBackups_[i].lsn_;
@@ -1230,13 +1678,18 @@ bool SyncContext::getSyncTargetLsnWithSyncId(NodeId syncTargetNodeId,
 /*!
 	@brief Copies log buffer
 */
-void SyncContext::copyLogBuffer(SyncVariableSizeAllocator &alloc,
-	const uint8_t *logBuffer, int32_t logBufferSize, SyncOptStat *stat) {
+void SyncContext::copyLogBuffer(
+		SyncVariableSizeAllocator &alloc,
+		const uint8_t *logBuffer,
+		int32_t logBufferSize,
+		SyncOptStat *stat) {
+
 	try {
 		if (logBuffer == NULL || logBufferSize == 0) {
 			return;
 		}
-		logBuffer_ = static_cast<uint8_t *>(alloc.allocate(logBufferSize));
+		logBuffer_ = static_cast<uint8_t *>(
+				alloc.allocate(logBufferSize));
 		if (stat != NULL) {
 			stat->statAllocate(pId_, logBufferSize);
 		}
@@ -1251,15 +1704,21 @@ void SyncContext::copyLogBuffer(SyncVariableSizeAllocator &alloc,
 /*!
 	@brief Copies chunk buffer
 */
-void SyncContext::copyChunkBuffer(SyncVariableSizeAllocator &alloc,
-	const uint8_t *chunkBuffer, int32_t chunkSize, int32_t chunkNum,
-	SyncOptStat *stat) {
+void SyncContext::copyChunkBuffer(
+		SyncVariableSizeAllocator &alloc,
+		const uint8_t *chunkBuffer,
+		int32_t chunkSize,
+		int32_t chunkNum,
+		SyncOptStat *stat) {
+
 	try {
-		if (chunkBuffer == NULL || chunkSize == 0 || chunkNum == 0) {
+		if (chunkBuffer == NULL
+				|| chunkSize == 0 || chunkNum == 0) {
 			return;
 		}
 		int32_t allocSize = chunkSize * chunkNum;
-		chunkBuffer_ = static_cast<uint8_t *>(alloc.allocate(allocSize));
+		chunkBuffer_ = static_cast<uint8_t *>(
+				alloc.allocate(allocSize));
 		if (stat != NULL) {
 			stat->statAllocate(pId_, allocSize);
 		}
@@ -1277,7 +1736,9 @@ void SyncContext::copyChunkBuffer(SyncVariableSizeAllocator &alloc,
 	@brief Deallocate buffer
 */
 void SyncContext::freeBuffer(
-	SyncVariableSizeAllocator &alloc, SyncType syncType, SyncOptStat *stat) {
+		SyncVariableSizeAllocator &alloc,
+		SyncType syncType, SyncOptStat *stat) {
+
 	try {
 		switch (syncType) {
 		case LOG_SYNC: {
@@ -1304,7 +1765,8 @@ void SyncContext::freeBuffer(
 			break;
 		}
 		default:
-			GS_THROW_USER_ERROR(GS_ERROR_SYM_INVALID_SYNC_TYPE, "");
+			GS_THROW_USER_ERROR(
+					GS_ERROR_SYM_INVALID_SYNC_TYPE, "");
 		}
 	}
 	catch (std::exception &e) {
@@ -1315,7 +1777,8 @@ void SyncContext::freeBuffer(
 /*!
 	@brief Gets log buffer
 */
-void SyncContext::getLogBuffer(uint8_t *&logBuffer, int32_t &logBufferSize) {
+void SyncContext::getLogBuffer(
+			uint8_t *&logBuffer, int32_t &logBufferSize) {
 	logBuffer = logBuffer_;
 	logBufferSize = logBufferSize_;
 }
@@ -1323,16 +1786,22 @@ void SyncContext::getLogBuffer(uint8_t *&logBuffer, int32_t &logBufferSize) {
 /*!
 	@brief Gets chunk buffer
 */
-void SyncContext::getChunkBuffer(uint8_t *&chunkBuffer, int32_t chunkNo) {
+void SyncContext::getChunkBuffer(
+		uint8_t *&chunkBuffer, int32_t chunkNo) {
+
 	chunkBuffer = NULL;
-	if (chunkBuffer_ == NULL || chunkNo >= chunkNum_ ||
-		chunkBufferSize_ < chunkBaseSize_ * chunkNo) {
+	if (chunkBuffer_ == NULL
+			|| chunkNo >= chunkNum_
+			|| chunkBufferSize_ < chunkBaseSize_ * chunkNo) {
 		return;
 	}
-	chunkBuffer = static_cast<uint8_t *>(chunkBuffer_ + (chunkBaseSize_ * chunkNo));
+	chunkBuffer = static_cast<uint8_t *>(
+			chunkBuffer_ + (chunkBaseSize_ * chunkNo));
 }
 
-void SyncContext::clear(SyncVariableSizeAllocator &alloc, SyncOptStat *stat) {
+void SyncContext::clear(
+		SyncVariableSizeAllocator &alloc, SyncOptStat *stat) {
+
 	try {
 		sendBackups_.clear();
 		numSendBackup_ = 0;
@@ -1366,7 +1835,7 @@ void SyncContext::clear(SyncVariableSizeAllocator &alloc, SyncOptStat *stat) {
 		setUnuse();
 		updateVersion();
 		mode_ = MODE_SHORTTERM_SYNC;
-		roleStatus_ = PartitionTable::PT_OWNER;
+		roleStatus_ = PT_OWNER;
 		processedLogNum_ = 0;
 		processedLogSize_ = 0;
 		actualLogTime_ = 0;
@@ -1390,8 +1859,10 @@ void SyncContext::clear(SyncVariableSizeAllocator &alloc, SyncOptStat *stat) {
 	@brief Gets number of active contexts
 */
 int32_t SyncManager::getActiveContextNum() {
+
 	int32_t activeCount = 0;
-	for (PartitionId pId = 0; pId < pt_->getPartitionNum(); pId++) {
+	for (PartitionId pId = 0;
+			pId < pt_->getPartitionNum(); pId++) {
 		if (syncContextTables_[pId] != NULL) {
 			activeCount += syncContextTables_[pId]->numUsed_;
 		}
@@ -1400,9 +1871,11 @@ int32_t SyncManager::getActiveContextNum() {
 }
 
 std::string SyncManager::dumpAll() {
+
 	util::NormalOStringStream ss;
 	ss << "{";
-	for (PartitionId pId = 0; pId < pt_->getPartitionNum(); pId++) {
+	for (PartitionId pId = 0;
+			pId < pt_->getPartitionNum(); pId++) {
 		dump(pId);
 	}
 	ss << "}";
@@ -1410,22 +1883,26 @@ std::string SyncManager::dumpAll() {
 }
 
 std::string SyncManager::dump(PartitionId pId) {
+
 	util::NormalOStringStream ss;
 	if (syncContextTables_[pId] != NULL) {
-		for (size_t pos = 0; pos < syncContextTables_[pId]->slots_.size();
-			pos++) {
+		for (size_t pos = 0;
+				pos < syncContextTables_[pId]->slots_.size();
+				pos++) {
 			ss << syncContextTables_[pId]->slots_[pos]->dump();
 		}
 	}
 	return ss.str();
 }
 
-std::string dumpNodeAddressList(PartitionTable *pt,
-		NodeIdList &nodeList) {
+std::string dumpNodeAddressList(
+		PartitionTable *pt, NodeIdList &nodeList) {
+
 	util::NormalOStringStream ss;
 	int32_t listSize = static_cast<int32_t>(nodeList.size());
 	ss << "[";
-	for (int32_t pos = 0; pos < listSize; pos++) {
+	for (int32_t pos = 0;
+			pos < listSize; pos++) {
 		ss << pt->dumpNodeAddress(nodeList[pos]);
 		if (pos != listSize - 1) {
 			ss << ",";
@@ -1435,8 +1912,9 @@ std::string dumpNodeAddressList(PartitionTable *pt,
 	return ss.str().c_str();
 }
 
-std::string dumpNodeAddressListWithLsn(PartitionTable *pt,
-		NodeIdList &nodeList) {
+std::string dumpNodeAddressListWithLsn(
+		PartitionTable *pt, NodeIdList &nodeList) {
+
 	util::NormalOStringStream ss;
 	int32_t listSize = static_cast<int32_t>(nodeList.size());
 	ss << "[";
@@ -1451,6 +1929,7 @@ std::string dumpNodeAddressListWithLsn(PartitionTable *pt,
 }
 
 std::string SyncContext::dump(uint8_t detailMode) {
+
 	util::NormalOStringStream ss;
 	ss << "pId=" << pId_
 			<< ", lsn=" << pt_->getLSN(pId_)
@@ -1459,14 +1938,15 @@ std::string SyncContext::dump(uint8_t detailMode) {
 			<< ", SSN=" << syncSequentialNumber_
 			<< ", revision=" << ptRev_.sequentialNumber_
 			<< ", mode=" << getSyncModeStr()
-			<< ", role=" << dumpPartitionRoleStatus(roleStatus_);
+			<< ", role=" << PartitionTable::dumpPartitionRoleStatus(roleStatus_);
 
 	if (detailMode == 4) {
-		if (roleStatus_ == PartitionTable::PT_OWNER) {
+		if (roleStatus_ == PT_OWNER) {
 			NodeIdList nodeIdList;
 			ss << ", backups=[";
 			for (size_t pos = 0; pos < sendBackups_.size(); pos++) {
-				ss << "(" << pt_->dumpNodeAddress(sendBackups_[pos].nodeId_);
+				ss << "(" << pt_->dumpNodeAddress(
+						sendBackups_[pos].nodeId_);
 				if (sendBackups_[pos].lsn_ != UNDEF_LSN) {
 					ss << ", " <<  sendBackups_[pos].lsn_;
 				}
@@ -1480,15 +1960,17 @@ std::string SyncContext::dump(uint8_t detailMode) {
 		else {
 			NodeIdList nodeIdList;
 			nodeIdList.push_back(recvNodeId_);
-			ss << ", owner=" << pt_->dumpNodeAddressList(nodeIdList);
+			ss << ", owner="
+					<< pt_->dumpNodeAddressList(nodeIdList);
 		}
 	}
 	else {
-		if (roleStatus_ == PartitionTable::PT_OWNER) {
+		if (roleStatus_ == PT_OWNER) {
 			NodeIdList nodeIdList;
 			ss << ", backups=[";
 			for (size_t pos = 0; pos < sendBackups_.size(); pos++) {
-				ss << "(" << pt_->dumpNodeAddress(sendBackups_[pos].nodeId_) << ")";
+				ss << "(" << pt_->dumpNodeAddress(
+						sendBackups_[pos].nodeId_) << ")";
 				if (pos != sendBackups_.size() - 1) {
 					ss << ",";
 				}
@@ -1498,13 +1980,17 @@ std::string SyncContext::dump(uint8_t detailMode) {
 		else {
 			NodeIdList nodeIdList;
 			nodeIdList.push_back(recvNodeId_);
-			ss << ", owner=" << pt_->dumpNodeAddressList(nodeIdList);
+			ss << ", owner="
+					<< pt_->dumpNodeAddressList(nodeIdList);
 		}
 	}
 	switch (detailMode) {
 		case 1: {
-			ss << "no=" << 	id_ << ":" << version_ << ":" << ptRev_.toString() 
-					<< ", isSyncCpCompleted=" << isSyncCpCompleted_ << ", used=" << used_
+			ss << "no=" << 	id_
+					<< ":" << version_
+					<< ":" << ptRev_.toString() 
+					<< ", isSyncCpCompleted=" << isSyncCpCompleted_
+					<< ", used=" << used_
 					<< ", numSendBackup=" << numSendBackup_
 					<< ", processedChunkNum=" << processedChunkNum_
 					<< ", chunkBufferSize=" << chunkBufferSize_
@@ -1516,7 +2002,8 @@ std::string SyncContext::dump(uint8_t detailMode) {
 				ss << ", processedLogCount=" << processedLogNum_;
 			}
 			if (processedLogSize_ != 0) {
-				ss << ", processedLogSize=" << (processedLogSize_ / (1024*1024));
+				ss << ", processedLogSize="
+						<< (processedLogSize_ / (1024*1024));
 			}
 			if (actualLogTime_ != 0) {
 				ss	<< ", actualLogTime=" << actualLogTime_;
@@ -1524,7 +2011,8 @@ std::string SyncContext::dump(uint8_t detailMode) {
 			if (startLsn_ == 0 && endLsn_ == 0) {
 			}
 			else {
-				ss << ", startLSN=" << startLsn_ << ", endLSN=" << endLsn_;
+				ss << ", startLSN=" << startLsn_
+						<< ", endLSN=" << endLsn_;
 			}
 			if (mode_ == MODE_LONGTERM_SYNC) {
 				if (processedChunkNum_ != 0) {
@@ -1551,83 +2039,88 @@ std::string SyncContext::dump(uint8_t detailMode) {
 SyncManager::ConfigSetUpHandler SyncManager::configSetUpHandler_;
 
 void SyncManager::ConfigSetUpHandler::operator()(ConfigTable &config) {
-	CONFIG_TABLE_RESOLVE_GROUP(config, CONFIG_TABLE_SYNC, "sync");
 
-	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SYNC_TIMEOUT_INTERVAL, INT32)
+	CONFIG_TABLE_RESOLVE_GROUP(
+			config, CONFIG_TABLE_SYNC, "sync");
+
+	CONFIG_TABLE_ADD_PARAM(
+			config, CONFIG_TABLE_SYNC_TIMEOUT_INTERVAL, INT32)
 		.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
 		.setMin(1)
 		.setDefault(30);
 
 	CONFIG_TABLE_ADD_PARAM(
-		config, CONFIG_TABLE_SYNC_LONG_SYNC_TIMEOUT_INTERVAL, INT32)
+			config, CONFIG_TABLE_SYNC_LONG_SYNC_TIMEOUT_INTERVAL, INT32)
 		.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
 		.setMin(1)
 		.setDefault(INT32_MAX);
 
 	CONFIG_TABLE_ADD_PARAM(
-		config, CONFIG_TABLE_SYNC_LONG_SYNC_MAX_MESSAGE_SIZE, INT32)
+			config, CONFIG_TABLE_SYNC_LONG_SYNC_MAX_MESSAGE_SIZE, INT32)
 		.setUnit(ConfigTable::VALUE_UNIT_SIZE_B)
 		.setMin(1024)
 		.setMax(static_cast<int32_t>(ConfigTable::megaBytesToBytes(128)))
 		.setDefault(static_cast<int32_t>(ConfigTable::megaBytesToBytes(
-				DEFAULT_LOG_SYNC_MESSAGE_MAX_SIZE)));
+				static_cast<size_t>(DEFAULT_LOG_SYNC_MESSAGE_MAX_SIZE))));
 
 	CONFIG_TABLE_ADD_PARAM(
-		config, CONFIG_TABLE_SYNC_LOG_MAX_MESSAGE_SIZE, INT32)
+			config, CONFIG_TABLE_SYNC_LOG_MAX_MESSAGE_SIZE, INT32)
 		.setUnit(ConfigTable::VALUE_UNIT_SIZE_MB)
 		.setMin(1)
 		.setMax(128)
 		.setDefault(DEFAULT_LOG_SYNC_MESSAGE_MAX_SIZE);
 
 	CONFIG_TABLE_ADD_PARAM(
-		config, CONFIG_TABLE_SYNC_CHUNK_MAX_MESSAGE_SIZE, INT32)
+			config, CONFIG_TABLE_SYNC_CHUNK_MAX_MESSAGE_SIZE, INT32)
 		.setUnit(ConfigTable::VALUE_UNIT_SIZE_MB)
 		.setMin(1)
 		.setMax(128)
 		.setDefault(DEFAULT_CHUNK_SYNC_MESSAGE_MAX_SIZE);
 
 	CONFIG_TABLE_ADD_PARAM(
-		config, CONFIG_TABLE_SYNC_APPROXIMATE_GAP_LSN, INT32)
+			config, CONFIG_TABLE_SYNC_APPROXIMATE_GAP_LSN, INT32)
 		.setMin(0)
 		.setDefault(100);
 
 	CONFIG_TABLE_ADD_PARAM(
-		config, CONFIG_TABLE_SYNC_LOCKCONFLICT_INTERVAL, INT32)
+			config, CONFIG_TABLE_SYNC_LOCKCONFLICT_INTERVAL, INT32)
 		.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
 		.setMin(0)
 		.setDefault(30);
 
 	CONFIG_TABLE_ADD_PARAM(
-		config, CONFIG_TABLE_SYNC_APPROXIMATE_WAIT_INTERVAL, INT32)
+			config, CONFIG_TABLE_SYNC_APPROXIMATE_WAIT_INTERVAL, INT32)
 		.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
 		.setMin(0)
 		.setDefault(10);
 
 	CONFIG_TABLE_ADD_PARAM(
-		config, CONFIG_TABLE_SYNC_LONGTERM_LIMIT_QUEUE_SIZE, INT32)
+			config, CONFIG_TABLE_SYNC_LONGTERM_LIMIT_QUEUE_SIZE, INT32)
 		.setMin(0)
 		.setDefault(40);
 
 	CONFIG_TABLE_ADD_PARAM(
-		config, CONFIG_TABLE_SYNC_LONGTERM_HIGHLOAD_INTERVAL, INT32)
+			config, CONFIG_TABLE_SYNC_LONGTERM_HIGHLOAD_INTERVAL, INT32)
 		.setUnit(ConfigTable::VALUE_UNIT_DURATION_MS)
 		.setMin(0)
 		.setDefault(100);
 
 	CONFIG_TABLE_ADD_PARAM(
-		config, CONFIG_TABLE_SYNC_LONGTERM_DUMP_CHUNK_INTERVAL, INT32)
+			config, CONFIG_TABLE_SYNC_LONGTERM_DUMP_CHUNK_INTERVAL, INT32)
 		.setMin(1)
 		.setDefault(10000);
 
 	CONFIG_TABLE_ADD_PARAM(
-		config, CONFIG_TABLE_SYNC_LONGTERM_CHECK_INTERVAL_COUNT, INT32)
+			config, CONFIG_TABLE_SYNC_LONGTERM_CHECK_INTERVAL_COUNT, INT32)
 		.setDefault(3);
 
-	CONFIG_TABLE_ADD_SERVICE_ADDRESS_PARAMS(config, SYNC, 10020);
+	CONFIG_TABLE_ADD_SERVICE_ADDRESS_PARAMS(
+			config, SYNC, 10020);
 }
 
 void SyncManager::Config::setUpConfigHandler(
 	SyncManager *syncMgr, ConfigTable &configTable) {
+
 	syncMgr_ = syncMgr;
 
 	configTable.setParamHandler(
@@ -1654,12 +2147,15 @@ void SyncManager::Config::setUpConfigHandler(
 
 void SyncManager::Config::operator()(
 		ConfigTable::ParamId id, const ParamValue &value) {
+
 	switch (id) {
 		case CONFIG_TABLE_SYNC_LONG_SYNC_MAX_MESSAGE_SIZE:
-				syncMgr_->getConfig().setMaxMessageSize(value.get<int32_t>());
+				syncMgr_->getConfig().setMaxMessageSize(
+						value.get<int32_t>());
 			break;
 		case CONFIG_TABLE_SYNC_APPROXIMATE_GAP_LSN:
-			syncMgr_->getExtraConfig().setApproximateLsnGap(value.get<int32_t>());
+			syncMgr_->getExtraConfig().setApproximateLsnGap(
+					value.get<int32_t>());
 			break;
 		case CONFIG_TABLE_SYNC_LOCKCONFLICT_INTERVAL:
 			syncMgr_->getExtraConfig().setLockWaitInterval(
@@ -1682,12 +2178,13 @@ void SyncManager::Config::operator()(
 					value.get<int32_t>());
 		case CONFIG_TABLE_SYNC_LOG_MAX_MESSAGE_SIZE:
 				syncMgr_->getConfig().setMaxMessageSize(
-						ConfigTable::megaBytesToBytes(value.get<int32_t>()));
+						ConfigTable::megaBytesToBytes(
+								static_cast<size_t>(value.get<int32_t>())));
 		break;
 		case CONFIG_TABLE_SYNC_CHUNK_MAX_MESSAGE_SIZE:
 				syncMgr_->getConfig().setMaxChunkMessageSize(
 						ConfigTable::megaBytesToBytes(
-						value.get<int32_t>()));
+						static_cast<size_t>(value.get<int32_t>())));
 		case CONFIG_TABLE_SYNC_LONGTERM_CHECK_INTERVAL_COUNT:
 				syncMgr_->getConfig().setLongtermCheckIntervalCount(
 						value.get<int32_t>());
@@ -1696,6 +2193,7 @@ void SyncManager::Config::operator()(
 }
 
 void SyncManager::resetCurrentSyncId(SyncContext *context) {
+
 	if (context->getPartitionRevision().sequentialNumber_
 			>= currentSyncEntry_.ptRev_.sequentialNumber_) {
 		currentSyncEntry_.reset();
@@ -1703,27 +2201,41 @@ void SyncManager::resetCurrentSyncId(SyncContext *context) {
 	}
 }
 
-void SyncManager::checkCurrentContext(EventContext &ec, PartitionRevision &revision) {
+void SyncManager::checkCurrentContext(
+		EventContext &ec, PartitionRevision &revision) {
+
 	PartitionId pId;
 	SyncId syncId;
 	PartitionRevision ptRev;
 	getCurrentSyncId(pId, syncId);
-	if (pId != UNDEF_PARTITIONID && syncContextTables_[pId] != NULL) {
-		SyncContext *targetContext = syncContextTables_[pId]->getSyncContext(
-				syncId.contextId_, syncId.contextVersion_);
+	if (pId != UNDEF_PARTITIONID
+			&& syncContextTables_[pId] != NULL) {
+
+		SyncContext *targetContext
+				= syncContextTables_[pId]->getSyncContext(
+						syncId.contextId_, syncId.contextVersion_);
+
 		if (targetContext != NULL && !targetContext->isCatchupSync()) {
-			if (revision.sequentialNumber_ < targetContext->getPartitionRevision().sequentialNumber_) {
-				GS_THROW_SYNC_ERROR(GS_ERROR_SYM_INVALID_PARTITION_REVISION, targetContext, 
+			if (revision.sequentialNumber_
+					< targetContext->getPartitionRevision().sequentialNumber_) {
+
+				GS_THROW_SYNC_ERROR(
+						GS_ERROR_SYM_INVALID_PARTITION_REVISION,
+						targetContext, 
 						"Target longterm sync is old", "latest revision="
 						<<  targetContext->getPartitionRevision().sequentialNumber_ 
 						<< ", current revision=" << revision.sequentialNumber_);
 			}
 			targetContext->setCatchupSync(false);
-			Event syncCheckEndEvent(ec, TXN_SYNC_TIMEOUT, pId);
+			Event syncCheckEndEvent(
+					ec, TXN_SYNC_TIMEOUT, pId);
 			SyncCheckEndInfo syncCheckEndInfo(
-					ec.getAllocator(), TXN_SYNC_TIMEOUT, this, pId, MODE_LONGTERM_SYNC, targetContext);
+					ec.getAllocator(), TXN_SYNC_TIMEOUT,
+					this, pId, MODE_LONGTERM_SYNC, targetContext);
+
 			EventByteOutStream out = syncCheckEndEvent.getOutStream();
-			syncSvc_->encode(syncCheckEndEvent, syncCheckEndInfo, out);
+			syncSvc_->encode(
+					syncCheckEndEvent, syncCheckEndInfo, out);
 			txnSvc_->getEE()->addTimer(syncCheckEndEvent, 0);
 		}
 	}
@@ -1734,44 +2246,61 @@ void SyncContext::startAll() {
 	watch_.start();
 	if (getSyncMode() == MODE_LONGTERM_SYNC) {
 		GS_TRACE_WARNING(
-				SYNC_DETAIL, GS_TRACE_SYNC_OPERATION, "SYNC_START, " << dump(0));
+				SYNC_DETAIL,
+				GS_TRACE_SYNC_OPERATION,
+				"SYNC_START, "
+				<< dump(0));
 	}
 	else {
 		GS_TRACE_INFO(
-				SYNC_DETAIL, GS_TRACE_SYNC_OPERATION, "SYNC_START, " << dump(0));
+				SYNC_DETAIL,
+				GS_TRACE_SYNC_OPERATION,
+				"SYNC_START, "
+				<< dump(0));
 	}
 }
 
-int32_t SyncManager::getTransactionEEQueueSize(PartitionId pId) {
+int32_t SyncManager::getTransactionEEQueueSize(
+		PartitionId pId) {
+
 	EventEngine::Stats stats;
-	if (txnSvc_->getEE()->getStats(pt_->getPartitionGroupId(pId), stats)) {
+	if (txnSvc_->getEE()->getStats(
+			pt_->getPartitionGroupId(pId), stats)) {
 		return static_cast<int32_t>(
-			stats.get(EventEngine::Stats::EVENT_ACTIVE_QUEUE_SIZE_CURRENT));
+			stats.get(
+					EventEngine::Stats::EVENT_ACTIVE_QUEUE_SIZE_CURRENT));
 	}
 	else {
 		return 0;
 	}
 }
 
-bool SyncManager::controlSyncLoad(EventContext &ec, Event &ev, PartitionId pId,
-			LogSequentialNumber lsn, int32_t &waitTime) {
+bool SyncManager::controlSyncLoad(
+		EventContext &ec,
+		Event &ev,
+		PartitionId pId,
+		LogSequentialNumber lsn,
+		int32_t &waitTime) {
+
 	if (ev.getType() == TXN_LONGTERM_SYNC_LOG_ACK) {
 		if (pt_->getLSN(pId) - lsn <
 			static_cast<LogSequentialNumber>(
-				getExtraConfig().getApproximateGapLsn())) {
+					getExtraConfig().getApproximateGapLsn())) {
 			waitTime = getExtraConfig().getApproximateWaitInterval();
 			return false;
 		}
 	}
 	int64_t exeutableCount = 0;
 	int64_t afterCount = 0;
-	waitTime = txnSvc_->getWaitTime(ec, &ev, 0, exeutableCount, afterCount, SYNC_EXEC);
+	waitTime = txnSvc_->getWaitTime(
+			ec, &ev, 0, exeutableCount, afterCount, SYNC_EXEC);
 	return true;
 }
 
 void SyncManager::checkActiveStatus() {
 	const StatementHandler::ClusterRole clusterRole = 
-		(StatementHandler::CROLE_MASTER | StatementHandler::CROLE_FOLLOWER);
+		(StatementHandler::CROLE_MASTER
+				| StatementHandler::CROLE_FOLLOWER);
 	try {
 		StatementHandler::checkExecutable(clusterRole, pt_);
 	}
@@ -1780,7 +2309,9 @@ void SyncManager::checkActiveStatus() {
 	}
 }
 	
-bool SyncContext::checkLongTermSync(int32_t checkCount) {
+bool SyncContext::checkLongTermSync(
+		int32_t checkCount) {
+
 	if (prevProcessedChunkNum_ == processedChunkNum_
 			&& prevProcessedLogNum_ == processedLogNum_) {
 		if (invalidCount_ < checkCount) {
@@ -1788,7 +2319,8 @@ bool SyncContext::checkLongTermSync(int32_t checkCount) {
 		}
 		else {
 			pt_->clearCatchupRole(pId_);
-			pt_->setErrorStatus(pId_, PT_ERROR_LONG_SYNC_FAIL);
+			pt_->setErrorStatus(
+					pId_, PT_ERROR_LONG_SYNC_FAIL);
 			return false;
 		}
 	}

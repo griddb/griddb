@@ -43,12 +43,14 @@ std::ostream &operator<<(std::ostream &stream, const ClientId &id) {
 }
 
 std::string ClientId::dump(util::StackAllocator &alloc) {
+
 	util::NormalOStringStream strstrm;
-	char tmpBuffer[37];
+	char tmpBuffer[UUID_STRING_SIZE];
 	UUIDUtils::unparse(uuid_, tmpBuffer);
 	util::String tmpUUIDStr(tmpBuffer, 36, alloc);	
 	strstrm << tmpUUIDStr.c_str();
 	strstrm << ":" << sessionId_;
+
 	return strstrm.str().c_str();
 }
 

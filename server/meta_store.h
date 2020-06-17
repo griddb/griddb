@@ -29,6 +29,8 @@ class PartitionTable;
 struct MetaProcessorSource;
 class TransactionService;
 
+class SQLExecutionManager;
+class SQLService;
 
 class MetaProcessor {
 public:
@@ -42,6 +44,7 @@ public:
 	class RowHandler;
 	class Context;
 
+	struct SQLMetaUtils;
 
 	MetaProcessor(
 			TransactionContext &txn, MetaContainerId id, bool forCore);
@@ -71,8 +74,12 @@ private:
 	class ErasableHandler;
 	class EventHandler;
 	class SocketHandler;
+	class ContainerStatsHandler;
+	class ClusterPartitionHandler;
+	class PartitionHandler;
+	class ViewHandler; 
 	class SQLHandler;
-
+	class PartitionStatsHandler;
 	class KeyRefHandler;
 
 	class ContainerRefHandler; 
@@ -161,6 +168,68 @@ private:
 	RowHandler &coreRowHandler_;
 };
 
+struct MetaProcessor::SQLMetaUtils {
+public:
+	static int32_t toSQLColumnType(ColumnType type);
+
+private:
+	enum SQLColumnType {
+		TYPE_BIT = -7,
+		TYPE_TINYINT = -6,
+		TYPE_SMALLINT = 5,
+		TYPE_INTEGER = 4,
+		TYPE_BIGINT = -5,
+		TYPE_FLOAT = 6,
+		TYPE_REAL = 7,
+		TYPE_DOUBLE = 8,
+		TYPE_NUMERIC = 2,
+		TYPE_DECIMAL = 3,
+		TYPE_CHAR = 1,
+		TYPE_VARCHAR = 12,
+		TYPE_LONGVARCHAR = -1,
+		TYPE_DATE = 91,
+		TYPE_TIME = 92,
+		TYPE_TIMESTAMP = 93,
+		TYPE_BINARY = -2,
+		TYPE_VARBINARY = -3,
+		TYPE_LONGVARBINARY = -4,
+		TYPE_JDBC_NULL = 0,
+		TYPE_OTHER = 1111,
+		TYPE_JAVA_OBJECT = 2000,
+		TYPE_DISTINCT = 2001,
+		TYPE_STRUCT = 2002,
+		TYPE_ARRAY = 2003,
+		TYPE_BLOB = 2004,
+		TYPE_CLOB = 2005,
+		TYPE_REF = 2006,
+		TYPE_DATALINK = 70,
+		TYPE_BOOLEAN = 16,
+		TYPE_ROWID = -8,
+		TYPE_NCHAR = -15,
+		TYPE_NVARCHAR = -9,
+		TYPE_LONGNVARCHAR = -16,
+		TYPE_NCLOB = 2011,
+		TYPE_SQLXML = 2009,
+		TYPE_REF_CURSOR = 2012,
+		TYPE_TIME_WITH_TIMEZONE = 2013,
+		TYPE_TIMESTAMP_WITH_TIMEZONE = 2014
+	};
+
+	class ColumnTypeTable {
+	public:
+		typedef std::pair<ColumnType, int32_t> Entry;
+
+		ColumnTypeTable(Entry *entryList, size_t count);
+		int32_t get(ColumnType type) const;
+
+	private:
+		const Entry *entryList_;
+		size_t count_;
+	};
+
+	static ColumnTypeTable::Entry COLUMN_TYPE_TABLE_ENTRIES[];
+	static const ColumnTypeTable COLUMN_TYPE_TABLE;
+};
 
 class MetaProcessor::StoreCoreHandler :
 		public DataStore::ContainerListHandler {
@@ -207,6 +276,7 @@ class MetaProcessor::ContainerHandler :
 		public MetaProcessor::StoreCoreHandler {
 public:
 	static const int8_t META_EXPIRATION_TYPE_ROW;
+	static const int8_t META_EXPIRATION_TYPE_PARTITION;
 
 	explicit ContainerHandler(Context &cxt);
 
@@ -218,6 +288,7 @@ public:
 	static const char8_t* containerTypeToName(ContainerType type);
 	static const char8_t* timeUnitToName(TimeUnit unit);
 	static const char8_t* compressionToName(int8_t type);
+	static const char8_t* partitionTypeToName(uint8_t type);
 	static const char8_t* expirationTypeToName(int8_t type);
 };
 
@@ -279,6 +350,45 @@ private:
 	Timestamp erasableTimeLimit_;
 };
 
+class MetaProcessor::PartitionHandler :
+		public MetaProcessor::StoreCoreHandler {
+public:
+	explicit PartitionHandler(Context &cxt);
+
+	virtual void operator()(
+			TransactionContext &txn, ContainerId id, DatabaseId dbId,
+			ContainerAttribute attribute, BaseContainer &container) const;
+};
+
+class MetaProcessor::ViewHandler :
+		public MetaProcessor::StoreCoreHandler { 
+public:
+	explicit ViewHandler(Context &cxt);
+
+	virtual void operator()(
+			TransactionContext &txn, ContainerId id, DatabaseId dbId,
+			ContainerAttribute attribute, BaseContainer &container) const;
+};
+
+class MetaProcessor::SQLHandler :
+		public MetaProcessor::StoreCoreHandler { 
+public:
+	explicit SQLHandler(Context &cxt);
+
+	virtual void operator()(
+			TransactionContext &txn, ContainerId id, DatabaseId dbId,
+			ContainerAttribute attribute, BaseContainer &container) const;
+};
+
+class MetaProcessor::PartitionStatsHandler :
+		public MetaProcessor::StoreCoreHandler {
+public:
+	explicit PartitionStatsHandler(Context &cxt);
+
+	virtual void operator()(
+			TransactionContext &txn, ContainerId id, DatabaseId dbId,
+			ContainerAttribute attribute, BaseContainer &container) const;
+};
 
 class MetaProcessor::EventHandler :
 		public MetaProcessor::StoreCoreHandler { 
@@ -310,6 +420,31 @@ private:
 			util::StackAllocator &alloc, ValueListBuilder<T> &builder,
 			T addressType, T portType,
 			const util::SocketAddress &address) const;
+};
+
+class MetaProcessor::ContainerStatsHandler :
+		public MetaProcessor::StoreCoreHandler { 
+public:
+	explicit ContainerStatsHandler(Context &cxt);
+
+	virtual void execute(
+			TransactionContext &txn, ContainerId id, DatabaseId dbId,
+			ContainerAttribute attribute, BaseContainer &container,
+			BaseContainer *subContainer) const;
+private:
+	static const char8_t* containerTypeToName(ContainerType type);
+};
+
+class MetaProcessor::ClusterPartitionHandler :
+		public MetaProcessor::StoreCoreHandler { 
+public:
+	explicit ClusterPartitionHandler(Context &cxt);
+
+	virtual void operator()(
+			TransactionContext &txn, ContainerId id, DatabaseId dbId,
+			ContainerAttribute attribute, BaseContainer &container) const;
+private:
+	static const char *chunkCategoryList[];
 };
 
 class MetaProcessor::KeyRefHandler : public MetaProcessor::RefHandler {
@@ -344,6 +479,9 @@ struct MetaProcessorSource {
 	TransactionService *transactionService_;
 	PartitionTable *partitionTable_;
 
+	const ResourceSet *resourceSet_;
+	SQLExecutionManager *sqlExecutionManager_;
+	SQLService *sqlService_;
 };
 
 class MetaContainer : public BaseContainer {

@@ -29,7 +29,6 @@
 #include "hash_map.h"
 #include "rtree_map.h"
 
-
 UTIL_TRACER_DECLARE(BASE_CONTAINER);
 
 class MessageSchema;
@@ -400,6 +399,7 @@ public:
 		@brief Get FullContainerKey
 	*/
 	FullContainerKey getContainerKey(TransactionContext &txn) {
+		UNUSED_VARIABLE(txn);
 		if (containerKeyCursor_ .getBaseOId() == UNDEF_OID) {
 			if (baseContainerImage_->containerNameOId_ != UNDEF_OID) {
 				containerKeyCursor_.load(baseContainerImage_->containerNameOId_);
@@ -572,8 +572,12 @@ public:
 		}
 	}
 
-	const char *getAffinity() const {
-		return commonContainerSchema_->get<char>(META_TYPE_AFFINITY);
+	void getAffinityStr(util::String &affinityStr) {
+		char temporary[AFFINITY_STRING_MAX_LENGTH + 1];
+		memcpy(temporary, getAffinityBinary(), AFFINITY_STRING_MAX_LENGTH);
+		temporary[AFFINITY_STRING_MAX_LENGTH] =
+			'\0';  
+		affinityStr = temporary;
 	}
 
 	bool isInvalid() const {
@@ -613,12 +617,17 @@ public:
 	virtual ColumnId getRowIdColumnId() = 0;
 	virtual ColumnType getRowIdColumnType() = 0;
 
+	virtual bool checkRunTime(TransactionContext &txn) = 0;
 
 	virtual uint32_t getRealColumnNum(TransactionContext &txn) = 0;
 	virtual ColumnInfo* getRealColumnInfoList(TransactionContext &txn) = 0;
 	virtual uint32_t getRealRowSize(TransactionContext &txn) = 0;
 	virtual uint32_t getRealRowFixedDataSize(TransactionContext &txn) = 0;
 
+	TablePartitioningVersionId getTablePartitioningVersionId();
+	void setTablePartitioningVersionId(
+		TablePartitioningVersionId versionId);
+	int64_t setTablePartitioningVersion(TransactionContext &txn, TablePartitioningVersionId versionId);
 
 	static util::String getContainerName(util::StackAllocator &alloc,
 		const FullContainerKey &containerKey) {
@@ -907,6 +916,7 @@ protected:
 	BaseContainer(TransactionContext &txn, DataStore *dataStore, BaseContainerImage *containerImage, ShareValueList *commonContainerSchema);
 
 	void replaceIndexSchema(TransactionContext &txn) {
+		UNUSED_VARIABLE(txn);
 		setDirty();
 		baseContainerImage_->indexSchemaOId_ = indexSchema_->getBaseOId();
 	}
@@ -1018,6 +1028,14 @@ protected:
 	template <class R, class S>
 	void searchMvccMap(TransactionContext &txn,
 		S &sc, util::XArray<OId> &resultList, bool isCheckOnly, bool ignoreTxnCheck);
+	template <typename R, typename S>
+	void searchMvccMap(TransactionContext& txn, S &sc, ContainerRowScanner &scanner);
+	template<typename R>
+	void resolveExclusiveStatus(TransactionContext& txn);
+	static bool getRowIdRangeCondition(
+			util::StackAllocator &alloc,
+			BtreeMap::SearchContext &sc, ContainerType containerType,
+			RowId *startRowId, RowId *endRowId);
 	template <class R, class S>
 	void searchColumnId(TransactionContext &txn, S &sc,
 		util::XArray<OId> &oIdList, util::XArray<OId> &mvccList,
@@ -1040,6 +1058,17 @@ protected:
 	template <typename R>
 	void getRowIdListImpl(TransactionContext &txn, util::XArray<OId> &oIdList,
 		util::XArray<RowId> &rowIdList);
+	void addUpdatedRow(TransactionContext &txn, RowId rowId, OId oId) {
+		rsNotifier_.addUpdatedRow(txn.getPartitionId(), rowId, oId);
+	}
+	void addRemovedRow(TransactionContext &txn, RowId rowId, OId oId) {
+		getDataStore()->addRemovedRow(txn.getPartitionId(), getContainerId(), 
+			rowId, oId);
+	}
+	void addRemovedRowArray(TransactionContext &txn, OId oId) {
+		getDataStore()->addRemovedRowArray(txn.getPartitionId(), 
+			getContainerId(), oId);
+	}
 	virtual void setDummyMvccImage(TransactionContext &txn) = 0;
 
 	virtual void checkExclusive(TransactionContext &txn) = 0;
@@ -1091,9 +1120,9 @@ protected:
 		IndexData &indexData) = 0;
 	virtual void finalizeIndex(TransactionContext &txn) = 0;
 
-	static AffinityGroupId calcAffnityGroupId(const char *affinityStr) {
+	static AffinityGroupId calcAffnityGroupId(const uint8_t *affinityBinary) {
 		uint64_t hash = 0;
-		const char *key = affinityStr;
+		const uint8_t *key = affinityBinary;
 		uint32_t keylen = AFFINITY_STRING_MAX_LENGTH;
 		for (hash = 0; --keylen != UINT32_MAX; hash = hash * 37 + *(key)++)
 			;
@@ -1168,6 +1197,10 @@ protected:
 		else {
 			chunkKey = MAX_CHUNK_KEY;
 		}
+	}
+
+	const uint8_t *getAffinityBinary() const {
+		return commonContainerSchema_->get<uint8_t>(META_TYPE_AFFINITY);
 	}
 
 public:  
@@ -1436,15 +1469,6 @@ public:
 	bool convertSchema(TransactionContext &txn, 
 		util::XArray< std::pair<RowId, OId> > &splitRAList,
 		util::XArray< std::pair<OId, OId> > &moveOIdList);					
-	static size_t getTmpColFixedOffset() {
-		return COL_FIXED_DATA_OFFSET;
-	}
-	static size_t getTmpColRowIdOffset() {
-		return COL_ROWID_OFFSET;
-	}
-	uint32_t getTmpVariableArrayOffset() {
-		return latestParam_.rowDataOffset_;
-	}
 	RowId getCurrentRowId();
 	template<typename Container>
 	static Column getColumn(const ColumnInfo &info);
@@ -1850,5 +1874,249 @@ private:
 
 #include "row.h"
 
+class ContainerRowScanner {
+private:
+	typedef BaseContainer::RowArray RowArray;
+	typedef BaseContainer::RowArrayType RowArrayType;
+
+	typedef bool (*HandlerFunc)(
+			TransactionContext&, BaseContainer&, RowArray&,
+			const OId*, const OId*, void*);
+
+public:
+	struct HandlerEntry {
+	public:
+		HandlerEntry();
+		bool isAvalilable() const;
+
+	private:
+		friend class ContainerRowScanner;
+		template<bool ForRowArray> HandlerFunc getHandler();
+
+		HandlerFunc rowHandler_;
+		HandlerFunc rowArrayHandler_;
+		void *handlerValue_;
+	};
+
+	struct HandlerSet {
+	public:
+		template<RowArrayType T> HandlerEntry& getEntry();
+		HandlerEntry& getEntry(RowArrayType type);
+
+	private:
+		HandlerEntry generalEntry_;
+		HandlerEntry plainEntry_;
+	};
+
+	typedef util::Vector<Value> VirtualValueList;
+
+	ContainerRowScanner(
+			const HandlerSet &handlerSet, RowArray &rowArray,
+			VirtualValueList *virtualValueList);
+
+	bool scanRowUnchecked(
+			TransactionContext &txn, BaseContainer &container,
+			RowArray *loadedRowArray, const OId *begin, const OId *end);
+
+	bool scanRowArrayUnchecked(
+			TransactionContext &txn, BaseContainer &container,
+			RowArray *loadedRowArray, const OId *begin, const OId *end);
+
+	RowArray& getRowArray();
+	Value& getVirtualValue(size_t index);
+
+	template<typename Handler>
+	static HandlerEntry createHandlerEntry(Handler &handler);
+
+private:
+	ContainerRowScanner(const ContainerRowScanner&);
+	ContainerRowScanner& operator=(const ContainerRowScanner&);
+
+	template<bool ForRowArray> bool scanUnchecked(
+			TransactionContext &txn, BaseContainer &container,
+			RowArray *loadedRowArray, const OId *begin, const OId *end);
+
+	template<typename Handler, RowArrayType T>
+	static bool scanRowSpecific(
+			TransactionContext &txn, BaseContainer &container,
+			RowArray &rowArray, const OId *begin, const OId *end,
+			void *handlerValue);
+
+	template<typename Handler, RowArrayType T>
+	static bool scanRowArraySpecific(
+			TransactionContext &txn, BaseContainer &container,
+			RowArray &rowArray, const OId *begin, const OId *end,
+			void *handlerValue);
+
+	HandlerSet handlerSet_;
+	RowArray &rowArray_;
+	VirtualValueList *virtualValueList_;
+};
+
+inline bool ContainerRowScanner::scanRowUnchecked(
+		TransactionContext &txn, BaseContainer &container,
+		RowArray *loadedRowArray, const OId *begin, const OId *end) {
+	const bool forRowArray = false;
+	return scanUnchecked<forRowArray>(
+			txn, container, loadedRowArray, begin, end);
+}
+
+inline bool ContainerRowScanner::scanRowArrayUnchecked(
+		TransactionContext &txn, BaseContainer &container,
+		RowArray *loadedRowArray, const OId *begin, const OId *end) {
+	const bool forRowArray = true;
+	return scanUnchecked<forRowArray>(
+			txn, container, loadedRowArray, begin, end);
+}
+
+template<bool ForRowArray>
+bool ContainerRowScanner::scanUnchecked(
+		TransactionContext &txn, BaseContainer &container,
+		RowArray *loadedRowArray, const OId *begin, const OId *end) {
+	assert(loadedRowArray == NULL || loadedRowArray == &rowArray_);
+
+	if (loadedRowArray == NULL) {
+		for (const OId *it = begin; it != end; ++it) {
+			rowArray_.load(txn, *it, &container, OBJECT_READ_ONLY);
+
+			HandlerEntry &entry =
+					handlerSet_.getEntry(rowArray_.getRowArrayType());
+
+			if (!entry.getHandler<ForRowArray>()(
+					txn, container, rowArray_, it, it + 1,
+					entry.handlerValue_)) {
+				return false;
+			}
+		}
+	}
+	else {
+		HandlerEntry &entry =
+				handlerSet_.getEntry(rowArray_.getRowArrayType());
+		if (begin != end) {
+			rowArray_.load(txn, *begin, &container, OBJECT_READ_ONLY);
+		}
+
+		if (!entry.getHandler<ForRowArray>()(
+				txn, container, rowArray_, begin, end, entry.handlerValue_)) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+inline BaseContainer::RowArray& ContainerRowScanner::getRowArray() {
+	return rowArray_;
+}
+
+inline Value& ContainerRowScanner::getVirtualValue(size_t index) {
+	assert(virtualValueList_ != NULL);
+	return (*virtualValueList_)[index];
+}
+
+template<typename Handler>
+ContainerRowScanner::HandlerEntry ContainerRowScanner::createHandlerEntry(
+		Handler &handler) {
+	const RowArrayType rowArrayType = Handler::ROW_ARRAY_TYPE;
+	HandlerEntry entry;
+	entry.rowHandler_ = &scanRowSpecific<Handler, rowArrayType>;
+	entry.rowArrayHandler_ = &scanRowArraySpecific<Handler, rowArrayType>;
+	entry.handlerValue_ = &handler;
+	return entry;
+}
+
+template<typename Handler, RowArrayType T>
+bool ContainerRowScanner::scanRowSpecific(
+		TransactionContext &txn, BaseContainer &container,
+		RowArray &rowArray, const OId *begin, const OId *end,
+		void *handlerValue) {
+	Handler &handler = *static_cast<Handler*>(handlerValue);
+
+	typename BaseContainer::RowArrayImpl<BaseContainer, T> *impl =
+			rowArray.getImpl<BaseContainer, T>();
+
+	for (const OId *it = begin;;) {
+		assert(impl->getOId() == *it);
+		assert(impl->getRowArrayType() == T ||
+				T == BaseContainer::ROW_ARRAY_GENERAL);
+
+		handler(txn, *impl);
+
+		if (++it == end) {
+			break;
+		}
+		impl->load(txn, *it, &container, OBJECT_READ_ONLY);
+	}
+
+	return handler.update(txn);
+}
+
+template<typename Handler, RowArrayType T>
+bool ContainerRowScanner::scanRowArraySpecific(
+		TransactionContext &txn, BaseContainer &container,
+		RowArray &rowArray, const OId *begin, const OId *end,
+		void *handlerValue) {
+	Handler &handler = *static_cast<Handler*>(handlerValue);
+
+	typename BaseContainer::RowArrayImpl<BaseContainer, T> *impl =
+			rowArray.getImpl<BaseContainer, T>();
+
+	for (const OId *it = begin;;) {
+		assert(impl->getRowArrayType() == T ||
+				T == BaseContainer::ROW_ARRAY_GENERAL);
+
+		do {
+			if (!impl->begin()) {
+				break;
+			}
+
+			do {
+				handler(txn, *impl);
+			}
+			while (impl->next());
+
+			if (!handler.update(txn)) {
+				return false;
+			}
+		}
+		while (false);
+
+		if (++it == end) {
+			break;
+		}
+		impl->load(txn, *it, &container, OBJECT_READ_ONLY);
+	}
+
+	return true;
+}
+
+template<bool ForRowArray>
+inline ContainerRowScanner::HandlerFunc
+ContainerRowScanner::HandlerEntry::getHandler() {
+	return (ForRowArray ? rowArrayHandler_ : rowHandler_);
+}
+
+template<>
+inline ContainerRowScanner::HandlerEntry&
+ContainerRowScanner::HandlerSet::getEntry<BaseContainer::ROW_ARRAY_GENERAL>() {
+	return generalEntry_;
+}
+
+template<>
+inline ContainerRowScanner::HandlerEntry&
+ContainerRowScanner::HandlerSet::getEntry<BaseContainer::ROW_ARRAY_PLAIN>() {
+	return plainEntry_;
+}
+
+inline ContainerRowScanner::HandlerEntry&
+ContainerRowScanner::HandlerSet::getEntry(RowArrayType type) {
+	if (type == BaseContainer::ROW_ARRAY_GENERAL) {
+		return getEntry<BaseContainer::ROW_ARRAY_GENERAL>();
+	}
+	else {
+		assert(type == BaseContainer::ROW_ARRAY_PLAIN);
+		return getEntry<BaseContainer::ROW_ARRAY_PLAIN>();
+	}
+}
 
 #endif

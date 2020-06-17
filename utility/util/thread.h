@@ -1241,10 +1241,11 @@ typedef Atomic<uint32_t> AtomicUInt32;
 /*!
     @brief Detects conflictions.
 */
-class ConflictionDetector {
+template<bool Throwable>
+class ConflictionDetectorBase {
 public:
-	ConflictionDetector();
-	~ConflictionDetector();
+	ConflictionDetectorBase();
+	~ConflictionDetectorBase();
 
 	void enter();
 	void leave();
@@ -1252,11 +1253,17 @@ public:
 private:
 	friend class ConflictionDetectorScope;
 
-	ConflictionDetector(const ConflictionDetector&);
-	ConflictionDetector& operator=(const ConflictionDetector&);
+	ConflictionDetectorBase(const ConflictionDetectorBase&);
+	ConflictionDetectorBase& operator=(const ConflictionDetectorBase&);
+
+	void errorEntering();
+	void errorLeaving();
 
 	Atomic<int32_t> counter_;
 };
+
+typedef ConflictionDetectorBase<true> ConflictionDetector;
+typedef ConflictionDetectorBase<false> NoThrowConflictionDetector;
 
 /*!
     @brief Scope of ConflictionDetector for seting in the clitical section.
@@ -1273,6 +1280,29 @@ private:
 	ConflictionDetector &detector_;
 	bool entering_;
 };
+
+
+template<bool Throwable>
+inline ConflictionDetectorBase<Throwable>::ConflictionDetectorBase() {
+}
+
+template<bool Throwable>
+inline ConflictionDetectorBase<Throwable>::~ConflictionDetectorBase() {
+}
+
+template<bool Throwable>
+inline void ConflictionDetectorBase<Throwable>::enter() {
+	if (++counter_ != 1) {
+		errorEntering();
+	}
+}
+
+template<bool Throwable>
+inline void ConflictionDetectorBase<Throwable>::leave() {
+	if (--counter_ != 0) {
+		errorLeaving();
+	}
+}
 
 } 
 

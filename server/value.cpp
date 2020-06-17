@@ -399,8 +399,6 @@ void Value::archive(TransactionContext &txn, ObjectManager &objectManager, Archi
 				uint32_t elemSize =
 					ValueProcessor::decodeVarSize(blobHeaderData);
 				blobHeaderData += ValueProcessor::getEncodedVarSize(elemSize);
-				uint32_t totalSize =
-					*reinterpret_cast<const uint32_t *>(blobHeaderData);
 				blobHeaderData += sizeof(uint32_t);
 
 				OId headerOId = *reinterpret_cast<const OId *>(blobHeaderData);
@@ -418,6 +416,7 @@ void Value::archive(TransactionContext &txn, ObjectManager &objectManager, Archi
 						handler->appendArray(simpleType, cursor.str(), cursor.stringLength());
 						++count;
 					}
+					UNUSED_VARIABLE(num);
 					assert(num == count);
 				}
 			}

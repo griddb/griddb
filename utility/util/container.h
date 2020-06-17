@@ -33,10 +33,21 @@
 #include <algorithm>
 #include <climits>
 
+#if UTIL_CXX11_SUPPORTED
+#include <unordered_map>
+#include <unordered_set>
+#endif
+
 #define UTIL_DISABLE_CONTAINER_DEFAULT_CONSTRUCTOR 1
 
 #ifndef UTIL_OBJECT_POOL_NO_CACHE
 #define UTIL_OBJECT_POOL_NO_CACHE UTIL_ALLOCATOR_NO_CACHE
+#endif
+
+#if UTIL_DISABLE_CONTAINER_DEFAULT_CONSTRUCTOR
+#define UTIL_CONTAINER_ALLOC_ARG_OPT(type)
+#else
+#define UTIL_CONTAINER_ALLOC_ARG_OPT(type) = type()
 #endif
 
 namespace util {
@@ -266,39 +277,39 @@ template< typename T, typename Alloc = StdAllocator<T, StackAllocator> >
 class Vector : public std::vector<T, Alloc> {
 private:
 	typedef Vector<T, Alloc> ThisType;
-	typedef typename std::vector<T, Alloc> BaseType;
+	typedef std::vector<T, Alloc> BaseType;
 
 public:
-#if UTIL_DISABLE_CONTAINER_DEFAULT_CONSTRUCTOR
-	explicit Vector(const Alloc &alloc) : BaseType(alloc) {
+	explicit Vector(const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(alloc) {
 	}
-#else
-	explicit Vector(const Alloc &alloc = Alloc()) : BaseType(alloc) {
-	}
-#endif
 
-	explicit Vector(size_t size, const T &value = T(), const Alloc &alloc = Alloc()) :
-		BaseType(size, value, alloc)
-	{
+	explicit Vector(
+			size_t size,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(size, T(), alloc) {
+	}
+
+	explicit Vector(
+			size_t size, const T &value,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(size, value, alloc) {
 	}
 
 	template<typename Iter>
-	Vector(Iter first, Iter last, const Alloc &alloc = Alloc()) :
-		BaseType(first, last, alloc)
-	{
+	Vector(
+			Iter first, Iter last,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(first, last, alloc) {
 	}
 
-	Vector(BaseType &another) : BaseType(another) {
+	Vector(const BaseType &another) : BaseType(another) {
 	}
 
-	ThisType& operator=(BaseType &another) {
-		base() = another;
+	ThisType& operator=(const BaseType &another) {
+		BaseType::operator=(another);
 		return *this;
 	}
-
-private:
-	const BaseType& base() const { return *this; };
-	BaseType& base() { return *this; };
 };
 
 template<typename T, typename Alloc>
@@ -342,6 +353,26 @@ inline bool operator>=(
 	typedef typename std::vector<T, Alloc> Base;
 	return static_cast<const Base&>(lhs) >= static_cast<const Base&>(rhs);
 }
+
+template<typename T>
+class AllocVector : public Vector< T, StdAllocator<T, void> > {
+private:
+	typedef StdAllocator<T, void> Alloc;
+	typedef Vector<T, Alloc> BaseType;
+
+public:
+	explicit AllocVector(
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(alloc) {
+	}
+
+	template<typename Iter>
+	AllocVector(
+			Iter first, Iter last,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(first, last, alloc) {
+	}
+};
 
 /*!
 	@brief std::deque, using StackAllocator in default
@@ -350,33 +381,39 @@ template< typename T, typename Alloc = StdAllocator<T, StackAllocator> >
 class Deque : public std::deque<T, Alloc> {
 private:
 	typedef Deque<T, Alloc> ThisType;
-	typedef typename std::deque<T, Alloc> BaseType;
+	typedef std::deque<T, Alloc> BaseType;
 
 public:
-#if UTIL_DISABLE_CONTAINER_DEFAULT_CONSTRUCTOR
-	explicit Deque(const Alloc &alloc) : BaseType(alloc) {
-	}
-#else
-	explicit Deque(const Alloc &alloc = Alloc()) : BaseType(alloc) {
-	}
-#endif
-
-	explicit Deque(size_t size, const T &value = T(), const Alloc &alloc = Alloc()) :
-		BaseType(size, value, alloc)
-	{
+	explicit Deque(const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(alloc) {
 	}
 
-	Deque(BaseType &another) : BaseType(another) {
+	explicit Deque(
+			size_t size,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(size, T(), alloc) {
 	}
 
-	ThisType& operator=(BaseType &another) {
-		base() = another;
+	explicit Deque(
+			size_t size, const T &value,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(size, value, alloc) {
+	}
+
+	template<typename Iter>
+	Deque(
+			Iter first, Iter last,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(first, last, alloc) {
+	}
+
+	Deque(const BaseType &another) : BaseType(another) {
+	}
+
+	ThisType& operator=(const BaseType &another) {
+		BaseType::operator=(another);
 		return *this;
 	}
-
-private:
-	const BaseType& base() const { return *this; };
-	BaseType& base() { return *this; };
 };
 
 template<typename T, typename Alloc>
@@ -420,6 +457,26 @@ inline bool operator>=(
 	typedef typename std::deque<T, Alloc> Base;
 	return static_cast<const Base&>(lhs) >= static_cast<const Base&>(rhs);
 }
+
+template<typename T>
+class AllocDeque : public Deque< T, StdAllocator<T, void> > {
+private:
+	typedef StdAllocator<T, void> Alloc;
+	typedef Deque<T, Alloc> BaseType;
+
+public:
+	explicit AllocDeque(
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(alloc) {
+	}
+
+	template<typename Iter>
+	AllocDeque(
+			Iter first, Iter last,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(first, last, alloc) {
+	}
+};
 
 /*!
 	@brief std::map, using StackAllocator in default
@@ -427,52 +484,45 @@ inline bool operator>=(
 template<
 		typename K, typename V,
 		typename Comp = typename std::map<K, V>::key_compare,
-		typename Alloc = StdAllocator<std::pair<K, V>, StackAllocator> >
+		typename Alloc = StdAllocator<std::pair<const K, V>, StackAllocator> >
 class Map : public std::map<K, V, Comp, Alloc> {
 private:
 	typedef Map<K, V, Comp, Alloc> ThisType;
-	typedef typename std::map<K, V, Comp, Alloc> BaseType;
+	typedef std::map<K, V, Comp, Alloc> BaseType;
 
 public:
-	explicit Map(const Alloc &alloc) : BaseType(Comp(), alloc) {
+	explicit Map(
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(Comp(), alloc) {
 	}
 
-#if UTIL_DISABLE_CONTAINER_DEFAULT_CONSTRUCTOR
-	explicit Map(const Comp &comp, const Alloc &alloc) :
-		BaseType(comp, alloc)
-	{
-	}
-#else
-	explicit Map(const Comp &comp = Comp(), const Alloc &alloc = Alloc()) :
-		BaseType(comp, alloc)
-	{
-	}
-#endif
-
-	template<typename Iter>
-	Map(Iter first, Iter last, const Alloc &alloc) :
-		BaseType(first, last, Comp(), alloc)
-	{
+	Map(
+			const Comp &comp,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(comp, alloc) {
 	}
 
 	template<typename Iter>
-	Map(Iter first, Iter last,
-		const Comp &comp = Comp(), const Alloc &alloc = Alloc()) :
-		BaseType(first, last, comp, alloc)
-	{
+	Map(
+			Iter first, Iter last,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(first, last, Comp(), alloc) {
 	}
 
-	Map(BaseType &another) : BaseType(another) {
+	template<typename Iter>
+	Map(
+			Iter first, Iter last, const Comp &comp,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(first, last, comp, alloc) {
 	}
 
-	ThisType& operator=(BaseType &another) {
-		base() = another;
+	Map(const BaseType &another) : BaseType(another) {
+	}
+
+	ThisType& operator=(const BaseType &another) {
+		BaseType::operator=(another);
 		return *this;
 	}
-
-private:
-	const BaseType& base() const { return *this; };
-	BaseType& base() { return *this; };
 };
 
 template<typename K, typename V, typename Comp, typename Alloc>
@@ -516,6 +566,28 @@ inline bool operator>=(
 	typedef typename std::map<K, V, Comp, Alloc> Base;
 	return static_cast<const Base&>(lhs) >= static_cast<const Base&>(rhs);
 }
+
+template<
+		typename K, typename V,
+		typename Comp = typename Map<K, V>::key_compare>
+class AllocMap :
+		public Map<K, V, Comp, StdAllocator<std::pair<const K, V>, void> > {
+private:
+	typedef StdAllocator<std::pair<const K, V>, void> Alloc;
+	typedef Map<K, V, Comp, Alloc> BaseType;
+
+public:
+	explicit AllocMap(
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(Comp(), alloc) {
+	}
+
+	AllocMap(
+			const Comp &comp,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(comp, alloc) {
+	}
+};
 
 /*!
 	@brief std::multimup, using StackAllocator in default
@@ -523,52 +595,45 @@ inline bool operator>=(
 template<
 		typename K, typename V,
 		typename Comp = typename std::multimap<K, V>::key_compare,
-		typename Alloc = StdAllocator<std::pair<K, V>, StackAllocator> >
+		typename Alloc = StdAllocator<std::pair<const K, V>, StackAllocator> >
 class MultiMap : public std::multimap<K, V, Comp, Alloc> {
 private:
 	typedef MultiMap<K, V, Comp, Alloc> ThisType;
-	typedef typename std::multimap<K, V, Comp, Alloc> BaseType;
+	typedef std::multimap<K, V, Comp, Alloc> BaseType;
 
 public:
-	explicit MultiMap(const Alloc &alloc) : BaseType(Comp(), alloc) {
+	explicit MultiMap(
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(Comp(), alloc) {
 	}
 
-#if UTIL_DISABLE_CONTAINER_DEFAULT_CONSTRUCTOR
-	explicit MultiMap(const Comp &comp, const Alloc &alloc) :
-		BaseType(comp, alloc)
-	{
-	}
-#else
-	explicit MultiMap(const Comp &comp = Comp(), const Alloc &alloc = Alloc()) :
-		BaseType(comp, alloc)
-	{
-	}
-#endif
-
-	template<typename Iter>
-	MultiMap(Iter first, Iter last, const Alloc &alloc) :
-		BaseType(first, last, Comp(), alloc)
-	{
+	MultiMap(
+			const Comp &comp,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(comp, alloc) {
 	}
 
 	template<typename Iter>
-	MultiMap(Iter first, Iter last,
-		const Comp &comp = Comp(), const Alloc &alloc = Alloc()) :
-		BaseType(first, last, comp, alloc)
-	{
+	MultiMap(
+			Iter first, Iter last,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(first, last, Comp(), alloc) {
 	}
 
-	MultiMap(BaseType &another) : BaseType(another) {
+	template<typename Iter>
+	MultiMap(
+			Iter first, Iter last, const Comp &comp,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(first, last, comp, alloc) {
 	}
 
-	ThisType& operator=(BaseType &another) {
-		base() = another;
+	MultiMap(const BaseType &another) : BaseType(another) {
+	}
+
+	ThisType& operator=(const BaseType &another) {
+		BaseType::operator=(another);
 		return *this;
 	}
-
-private:
-	const BaseType& base() const { return *this; };
-	BaseType& base() { return *this; };
 };
 
 template<typename K, typename V, typename Comp, typename Alloc>
@@ -618,6 +683,28 @@ inline bool operator>=(
 	typedef typename std::multimap<K, V, Comp, Alloc> Base;
 	return static_cast<const Base&>(lhs) >= static_cast<const Base&>(rhs);
 }
+
+template<
+		typename K, typename V,
+		typename Comp = typename MultiMap<K, V>::key_compare>
+class AllocMultiMap : public MultiMap<
+		K, V, Comp, StdAllocator<std::pair<const K, V>, void> > {
+private:
+	typedef StdAllocator<std::pair<const K, V>, void> Alloc;
+	typedef MultiMap<K, V, Comp, Alloc> BaseType;
+
+public:
+	explicit AllocMultiMap(
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(Comp(), alloc) {
+	}
+
+	AllocMultiMap(
+			const Comp &comp,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(comp, alloc) {
+	}
+};
 
 /*!
 	@brief std::set, using StackAllocator in default
@@ -628,48 +715,41 @@ template<
 class Set : public std::set<T, Comp, Alloc> {
 private:
 	typedef Set<T, Comp, Alloc> ThisType;
-	typedef typename std::set<T, Comp, Alloc> BaseType;
+	typedef std::set<T, Comp, Alloc> BaseType;
 
 public:
-	explicit Set(const Alloc &alloc) : BaseType(Comp(), alloc) {
+	explicit Set(
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(Comp(), alloc) {
 	}
 
-#if UTIL_DISABLE_CONTAINER_DEFAULT_CONSTRUCTOR
-	explicit Set(const Comp &comp, const Alloc &alloc) :
-		BaseType(comp, alloc)
-	{
-	}
-#else
-	explicit Set(const Comp &comp = Comp(), const Alloc &alloc = Alloc()) :
-		BaseType(comp, alloc)
-	{
-	}
-#endif
-
-	template<typename Iter>
-	Set(Iter first, Iter last, const Alloc &alloc) :
-		BaseType(first, last, Comp(), alloc)
-	{
+	Set(
+			const Comp &comp,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(comp, alloc) {
 	}
 
 	template<typename Iter>
-	Set(Iter first, Iter last,
-		const Comp &comp = Comp(), const Alloc &alloc = Alloc()) :
-		BaseType(first, last, comp, alloc)
-	{
+	Set(
+			Iter first, Iter last,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(first, last, Comp(), alloc) {
 	}
 
-	Set(BaseType &another) : BaseType(another) {
+	template<typename Iter>
+	Set(
+			Iter first, Iter last, const Comp &comp,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(first, last, comp, alloc) {
 	}
 
-	ThisType& operator=(BaseType &another) {
-		base() = another;
+	Set(const BaseType &another) : BaseType(another) {
+	}
+
+	ThisType& operator=(const BaseType &another) {
+		BaseType::operator=(another);
 		return *this;
 	}
-
-private:
-	const BaseType& base() const { return *this; };
-	BaseType& base() { return *this; };
 };
 
 template<typename T, typename Comp, typename Alloc>
@@ -713,6 +793,25 @@ inline bool operator>=(
 	typedef typename std::set<T, Comp, Alloc> Base;
 	return static_cast<const Base&>(lhs) >= static_cast<const Base&>(rhs);
 }
+
+template<typename T, typename Comp = typename Set<T>::key_compare>
+class AllocSet : public Set< T, Comp, StdAllocator<T, void> > {
+private:
+	typedef StdAllocator<T, void> Alloc;
+	typedef Set<T, Comp, Alloc> BaseType;
+
+public:
+	explicit AllocSet(
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(Comp(), alloc) {
+	}
+
+	AllocSet(
+			const Comp &comp,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(comp, alloc) {
+	}
+};
 
 /*!
 	@brief std::multiset, using StackAllocator in default
@@ -723,48 +822,41 @@ template<
 class MultiSet : public std::multiset<T, Comp, Alloc> {
 private:
 	typedef MultiSet<T, Comp, Alloc> ThisType;
-	typedef typename std::multiset<T, Comp, Alloc> BaseType;
+	typedef std::multiset<T, Comp, Alloc> BaseType;
 
 public:
-	explicit MultiSet(const Alloc &alloc) : BaseType(Comp(), alloc) {
+	explicit MultiSet(
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(Comp(), alloc) {
 	}
 
-#if UTIL_DISABLE_CONTAINER_DEFAULT_CONSTRUCTOR
-	explicit MultiSet(const Comp &comp, const Alloc &alloc) :
-		BaseType(comp, alloc)
-	{
-	}
-#else
-	explicit MultiSet(const Comp &comp = Comp(), const Alloc &alloc = Alloc()) :
-		BaseType(comp, alloc)
-	{
-	}
-#endif
-
-	template<typename Iter>
-	MultiSet(Iter first, Iter last, const Alloc &alloc) :
-		BaseType(first, last, Comp(), alloc)
-	{
+	MultiSet(
+			const Comp &comp,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(comp, alloc) {
 	}
 
 	template<typename Iter>
-	MultiSet(Iter first, Iter last,
-		const Comp &comp = Comp(), const Alloc &alloc = Alloc()) :
-		BaseType(first, last, comp, alloc)
-	{
+	MultiSet(
+			Iter first, Iter last,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(first, last, Comp(), alloc) {
 	}
 
-	MultiSet(BaseType &another) : BaseType(another) {
+	template<typename Iter>
+	MultiSet(
+			Iter first, Iter last, const Comp &comp,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(first, last, comp, alloc) {
 	}
 
-	ThisType& operator=(BaseType &another) {
-		base() = another;
+	MultiSet(const BaseType &another) : BaseType(another) {
+	}
+
+	ThisType& operator=(const BaseType &another) {
+		BaseType::operator=(another);
 		return *this;
 	}
-
-private:
-	const BaseType& base() const { return *this; };
-	BaseType& base() { return *this; };
 };
 
 template<typename T, typename Comp, typename Alloc>
@@ -814,6 +906,184 @@ inline bool operator>=(
 	typedef typename std::multiset<T, Comp, Alloc> Base;
 	return static_cast<const Base&>(lhs) >= static_cast<const Base&>(rhs);
 }
+
+template<typename T, typename Comp = typename MultiSet<T>::key_compare>
+class AllocMultiSet : public MultiSet< T, Comp, StdAllocator<T, void> > {
+private:
+	typedef StdAllocator<T, void> Alloc;
+	typedef MultiSet<T, Comp, Alloc> BaseType;
+
+public:
+	explicit AllocMultiSet(
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(Comp(), alloc) {
+	}
+
+	AllocMultiSet(
+			const Comp &comp,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(comp, alloc) {
+	}
+};
+
+namespace detail {
+template<typename C>
+class UnorderedContainer : public C {
+public:
+	template<typename Hash, typename Pred, typename Comp, typename Alloc>
+	UnorderedContainer(
+			size_t n, const Hash &hash, const Pred &pred, const Comp &comp,
+			const Alloc &alloc) :
+#if UTIL_CXX11_SUPPORTED
+			C(n, hash, pred, alloc) {
+		static_cast<void>(comp);
+	}
+#else
+			C(comp, alloc){
+		static_cast<void>(n);
+		static_cast<void>(hash);
+		static_cast<void>(pred);
+	}
+#endif 
+};
+
+template<
+		typename K, typename V,
+		typename Hash, typename Pred, typename Comp, typename Alloc>
+struct UnorderedMapTaits {
+#if UTIL_CXX11_SUPPORTED
+	typedef std::unordered_map<K, V, Hash, Pred, Alloc> BaseType;
+#else
+	typedef std::map<K, V, Comp, Alloc> BaseType;
+#endif
+	typedef UnorderedContainer<BaseType> WrappedType;
+};
+
+template<
+		typename T,
+		typename Hash, typename Pred, typename Comp, typename Alloc>
+struct UnorderedSetTaits {
+#if UTIL_CXX11_SUPPORTED
+	typedef std::unordered_set<T, Hash, Pred, Alloc> BaseType;
+#else
+	typedef std::set<T, Comp, Alloc> BaseType;
+#endif
+	typedef UnorderedContainer<BaseType> WrappedType;
+};
+
+template<typename K> struct UnorderedKeyTaits {
+#if UTIL_CXX11_SUPPORTED
+	typedef typename std::unordered_set<K>::hasher Hash;
+	typedef typename std::unordered_set<K>::key_equal Pred;
+#else
+	typedef FalseType Hash;
+	typedef FalseType Pred;
+#endif
+	typedef typename std::set<K>::key_compare Comp;
+};
+} 
+
+template<
+		typename K, typename V,
+		typename Hash = typename detail::UnorderedKeyTaits<K>::Hash,
+		typename Pred = typename detail::UnorderedKeyTaits<K>::Pred,
+		typename Comp = typename detail::UnorderedKeyTaits<K>::Comp,
+		typename Alloc = StdAllocator<std::pair<const K, V>, StackAllocator> >
+class UnorderedMap : public detail::UnorderedMapTaits<
+		K, V, Hash, Pred, Comp, Alloc>::WrappedType {
+private:
+	typedef typename detail::UnorderedMapTaits<
+			K, V, Hash, Pred, Comp, Alloc>::WrappedType BaseType;
+
+public:
+	explicit UnorderedMap(
+			size_t n,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(n, Hash(), Pred(), Comp(), alloc) {
+	}
+
+	UnorderedMap(
+			size_t n, const Hash &hash, const Pred &pred, const Comp &comp,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(n, hash, pred, comp, alloc) {
+	}
+};
+
+template<
+		typename K, typename V,
+		typename Hash = typename detail::UnorderedKeyTaits<K>::Hash,
+		typename Pred = typename detail::UnorderedKeyTaits<K>::Pred,
+		typename Comp = typename detail::UnorderedKeyTaits<K>::Comp>
+class AllocUnorderedMap : public UnorderedMap<
+		K, V, Hash, Pred, Comp, StdAllocator<std::pair<const K, V>, void> > {
+private:
+	typedef StdAllocator<std::pair<const K, V>, void> Alloc;
+	typedef UnorderedMap<K, V, Hash, Pred, Comp, Alloc> BaseType;
+
+public:
+	explicit AllocUnorderedMap(
+			size_t n,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(n, alloc) {
+	}
+
+	AllocUnorderedMap(
+			size_t n, const Hash &hash, const Pred &pred, const Comp &comp,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(n, hash, pred, comp, alloc) {
+	}
+};
+
+template<
+		typename T,
+		typename Hash = typename detail::UnorderedKeyTaits<T>::Hash,
+		typename Pred = typename detail::UnorderedKeyTaits<T>::Pred,
+		typename Comp = typename detail::UnorderedKeyTaits<T>::Comp,
+		typename Alloc = StdAllocator<T, StackAllocator> >
+class UnorderedSet : public detail::UnorderedSetTaits<
+		T, Hash, Pred, Comp, Alloc>::WrappedType {
+private:
+	typedef typename detail::UnorderedSetTaits<
+			T, Hash, Pred, Comp, Alloc>::WrappedType BaseType;
+
+public:
+	explicit UnorderedSet(
+			size_t n,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(n, Hash(), Pred(), Comp(), alloc) {
+	}
+
+	UnorderedSet(
+			size_t n, const Hash &hash, const Pred &pred, const Comp &comp,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(n, hash, pred, comp, alloc) {
+	}
+};
+
+template<
+		typename T,
+		typename Hash = typename detail::UnorderedKeyTaits<T>::Hash,
+		typename Pred = typename detail::UnorderedKeyTaits<T>::Pred,
+		typename Comp = typename detail::UnorderedKeyTaits<T>::Comp>
+class AllocUnorderedSet : public UnorderedSet<
+		T, Hash, Pred, Comp, StdAllocator<T, void> > {
+private:
+	typedef StdAllocator<T, void> Alloc;
+	typedef UnorderedSet<T, Hash, Pred, Comp, Alloc> BaseType;
+
+public:
+	explicit AllocUnorderedSet(
+			size_t n,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(n, alloc) {
+	}
+
+	AllocUnorderedSet(
+			size_t n, const Hash &hash, const Pred &pred, const Comp &comp,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(n, hash, pred, comp, alloc) {
+	}
+};
 
 template<typename T, typename Alloc> class XArray;
 
@@ -894,11 +1164,7 @@ public:
 	typedef std::reverse_iterator<const_iterator> const_reverse_iterator;
 
 
-#if UTIL_DISABLE_CONTAINER_DEFAULT_CONSTRUCTOR
-	explicit XArray(const Alloc &alloc);
-#else
-	explicit XArray(const Alloc &alloc = Alloc());
-#endif
+	explicit XArray(const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc));
 
 
 	template<typename Iter>
@@ -998,42 +1264,36 @@ private:
 template<typename T>
 class NormalXArray : public XArray< T, std::allocator<T> > {
 private:
-	typedef XArray< T, std::allocator<T> > BaseType;
+	typedef std::allocator<T> Alloc;
+	typedef XArray<T, Alloc> BaseType;
 
 public:
-	typedef typename BaseType::allocator_type allocator_type;
-
-	explicit NormalXArray(
-			const allocator_type& alloc = allocator_type()) : BaseType(alloc) {
+	explicit NormalXArray(const Alloc& alloc = Alloc()) :
+			BaseType(alloc) {
 	}
 
 	template<typename Iter>
-	NormalXArray(
-			Iter first, Iter last, const allocator_type& alloc = allocator_type()) :
+	NormalXArray(Iter first, Iter last, const Alloc& alloc = Alloc()) :
 			BaseType(first, last, alloc) {
 	}
 };
 
-template<
-		typename T,
-		typename Mutex = typename VariableSizeAllocator<>::MutexType,
-		typename Traits = typename VariableSizeAllocator<>::TraitsType>
-class VarXArray : public XArray<
-		T, StdAllocator< T, VariableSizeAllocator<Mutex, Traits> > > {
+template<typename T>
+class AllocXArray : public XArray< T, StdAllocator<T, void> > {
 private:
-	typedef XArray< T,
-			StdAllocator< T, VariableSizeAllocator<Mutex, Traits> > > BaseType;
+	typedef StdAllocator<T, void> Alloc;
+	typedef XArray<T, Alloc> BaseType;
 
 public:
-	typedef typename BaseType::allocator_type allocator_type;
-
-	explicit VarXArray(
-			const allocator_type& alloc = allocator_type()) : BaseType(alloc) {
+	explicit AllocXArray(
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
+			BaseType(alloc) {
 	}
 
 	template<typename Iter>
-	VarXArray(
-			Iter first, Iter last, const allocator_type& alloc = allocator_type()) :
+	AllocXArray(
+			Iter first, Iter last,
+			const Alloc &alloc UTIL_CONTAINER_ALLOC_ARG_OPT(Alloc)) :
 			BaseType(first, last, alloc) {
 	}
 };

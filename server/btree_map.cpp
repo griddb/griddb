@@ -92,7 +92,7 @@ int32_t BtreeMap::compositeInfoCmp(TransactionContext &txn, ObjectManager &objec
 	assert(funcInfo != NULL);
 	ColumnSchema *columnSchema = funcInfo->getColumnSchema();
 	VariableArrayCursor *cursor1 = NULL, *cursor2 = NULL;
-	for (int32_t i = 0; i < setting.getCompareNum(); i++) {
+	for (uint32_t i = 0; i < setting.getCompareNum(); i++) {
 		bool isNull1 = e1->isNull(i);
 		bool isNull2 = e2->isNull(i);
 		if (isNull1 || isNull2) {
@@ -142,7 +142,6 @@ bool BtreeMap::compositeInfoMatch(TransactionContext &txn, ObjectManager &object
 			} else if (cond.opType_ != DSExpression::ISNOT) {
 				ColumnInfo &columnInfo = columnSchema->getColumnInfo(cond.columnId_);
 				uint8_t *val1 = e->getField(txn, objectManager, columnInfo, cursor);
-				const void *val2 = cond.value_;
 				ColumnType columnType = columnInfo.getColumnType();
 				if (columnType == COLUMN_TYPE_STRING) {
 					StringCursor obj1(const_cast<uint8_t *>(val1));
@@ -167,6 +166,9 @@ bool BtreeMap::compositeInfoMatch(TransactionContext &txn, ObjectManager &object
 
 template <typename K, typename V>
 std::string BtreeMap::BNode<K, V>::dump(TransactionContext &txn, TreeFuncInfo *funcInfo) {
+	UNUSED_VARIABLE(txn);
+	UNUSED_VARIABLE(funcInfo);
+
 	util::NormalOStringStream out;
 	out << "(@@Node@@)";
 	for (int32_t i = 0; i < numkeyValues(); ++i) {
@@ -207,6 +209,7 @@ MvccRowImage BtreeMap::getMinValue() {
 template <>
 void BaseIndex::SearchContext::setSuspendPoint(TransactionContext &txn,
 	ObjectManager &objectManager, TreeFuncInfo *funcInfo, const StringKey &suspendKey, const OId &suspendValue) {
+	UNUSED_VARIABLE(funcInfo);
 	StringCursor obj(txn, objectManager, suspendKey.oId_);
 	suspendKey_ = ALLOC_NEW(txn.getDefaultAllocator())
 		uint8_t[obj.stringLength()];
@@ -222,6 +225,7 @@ void BaseIndex::SearchContext::setSuspendPoint(TransactionContext &txn,
 template <>
 void BaseIndex::SearchContext::setSuspendPoint(TransactionContext &txn,
 	ObjectManager &objectManager, TreeFuncInfo *funcInfo, const FullContainerKeyAddr &suspendKey, const OId &suspendValue) {
+	UNUSED_VARIABLE(funcInfo);
 	FullContainerKeyCursor obj(txn, objectManager, suspendKey.oId_);
 	FullContainerKey containerKey = obj.getKey();
 	const void *keyData;
@@ -370,6 +374,7 @@ void BtreeMap::InitializeFunc::execute() {
 template <>
 int32_t BtreeMap::initialize<FullContainerKeyCursor, OId>(TransactionContext &txn, ColumnType columnType,
 													bool isUnique, BtreeMapType btreeMapType, uint32_t elemSize) {
+	UNUSED_VARIABLE(elemSize);
 	return initialize<FullContainerKeyAddr, OId>(txn, columnType, isUnique, btreeMapType);
 }
 
@@ -524,7 +529,7 @@ int32_t BtreeMap::search(TransactionContext &txn, SearchContext &sc,
 	if (isEmpty()) {
 		return GS_FAIL;
 	}
-	if (sc.limit_ == 0) {
+	if (sc.getLimit() == 0) {
 		return GS_SUCCESS;
 	}
 	SearchFunc searchFunc(txn, sc, idList, outputOrder, this);
@@ -824,7 +829,7 @@ int32_t BtreeMap::print(TransactionContext &txn, std::ostream &out, OId nodeId,
 }
 
 uint32_t BtreeMap::SearchContext::getRangeConditionNum() {
-	const size_t UNDEF_POS = -1;
+	const size_t UNDEF_POS = SIZE_MAX;
 	uint32_t rangeConditionNum = 0;
 	for (size_t i = 0; i < columnIdList_.size(); i++) { 
 		size_t eqPos = UNDEF_POS;
@@ -857,5 +862,6 @@ uint32_t BtreeMap::SearchContext::getRangeConditionNum() {
 	}
 	return rangeConditionNum;
 }
+
 
 

@@ -275,10 +275,11 @@ void QueryForTimeSeries::doQueryWithoutCondition(
 			}
 		}
 
+		UNUSED_VARIABLE(searchType);
 		BtreeMap::SearchContext sc (txn.getDefaultAllocator(), searchColumnId);
 		sc.setLimit(nLimit_);
 		if (searchColumnId != ColumnInfo::ROW_KEY_COLUMN_ID) {
-			sc.nullCond_ = BaseIndex::SearchContext::ALL;
+			sc.setNullCond(BaseIndex::SearchContext::ALL);
 		}
 		if (pExpireTs != NULL) {
 			TermCondition condition(COLUMN_TYPE_TIMESTAMP, COLUMN_TYPE_TIMESTAMP,
@@ -335,7 +336,6 @@ void QueryForTimeSeries::doQueryWithCondition(
 	TransactionContext &txn, TimeSeries &timeSeries, ResultSet &resultSet) {
 	util::XArray<OId> &resultOIdList = *resultSet.getOIdList();
 
-	Timestamp *pExpireTs = &expireTs_;
 	util::DateTime dt;
 	if (expireTs_ != MINIMUM_EXPIRED_TIMESTAMP) {
 		dt.setUnixTime(expireTs_);
@@ -578,7 +578,6 @@ void QueryForTimeSeries::doQueryWithCondition(
 	}  
 
 	if (resultOIdList.size() > nLimit_) {
-		ResultSize eraseSize = resultOIdList.size() - nLimit_;
 		resultOIdList.erase(
 			resultOIdList.begin() + static_cast<size_t>(nLimit_),
 			resultOIdList.end());
@@ -703,8 +702,6 @@ void QueryForTimeSeries::doSelection(
 								static_cast<size_t>(nOffset_));
 
 						if (nActualLimit_ < resultOIdList.size()) {
-							ResultSize eraseSize =
-								resultOIdList.size() - nActualLimit_;
 							resultOIdList.erase(
 								resultOIdList.begin() +
 									static_cast<size_t>(nActualLimit_),

@@ -32,7 +32,6 @@ struct LogRecord;
 class LogCursor;
 class TransactionContext;
 class ConfigTable;
-struct ManagerSet;
 class PartitionTable;
 class ClusterService;
 class SystemService;
@@ -41,6 +40,7 @@ class LogManager;
 class ChunkManager;
 class TransactionManager;
 class BaseContainer;
+class ResourceSet;
 
 /*!
 	@brief Throws exception of log redo failure.
@@ -68,7 +68,7 @@ public:
 			ConfigTable &configTable, bool releaseUnusedFileBlocks);
 	~RecoveryManager();
 
-	void initialize(ManagerSet &mgrSet);
+	void initialize(ResourceSet &resourceSet);
 
 	static bool checkBackupInfoFileName(const std::string &name);
 
@@ -243,6 +243,9 @@ public:
 private:
 	void redoAll(util::StackAllocator &alloc, Mode mode, LogCursor &cursor,
 		bool isIncrementalBackup, bool forLongArchive);
+	void redoAllChunkMeta(
+			util::StackAllocator &alloc, Mode mode,
+			LogCursor &cursor, bool isIncrementalBackup, bool forLongArchive);
 
 	void redoChunkLog(util::StackAllocator &alloc, PartitionGroupId pgId,
 			Mode mode, CheckpointId recoveryCpId);
@@ -253,7 +256,7 @@ private:
 	LogSequentialNumber redoLogRecord(util::StackAllocator &alloc, Mode mode,
 		PartitionId pId, const util::DateTime &stmtStartTime,
 		EventMonotonicTime stmtStartEmTime, const LogRecord &logRecord,
-		LogSequentialNumber &redoStartLsn, bool isIncrementalBackup);
+		LogSequentialNumber &redoStartLsn, bool isIncrementalBackup, bool skipRedoChunkMeta);
 
 	LogSequentialNumber redoLogRecordForDataArchive(util::StackAllocator &alloc,
 		Mode mode, PartitionId pId, const util::DateTime &stmtStartTime,
@@ -282,7 +285,7 @@ private:
 
 	void reconstructValidBitArray(
 			util::StackAllocator &alloc, Mode mode,
-			LogCursor &cursor, BitArray &validBitArray);
+			LogCursor &cursor, ChunkBitArray &validBitArray);
 
 	void checkContainerExistence(
 		BaseContainer *container, ContainerId containerId);

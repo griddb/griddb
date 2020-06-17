@@ -182,7 +182,6 @@ public:
 	int64_t getTransactionExpireTime() const;
 
 	int32_t getTransationTimeoutInterval() const;
-	void setTransationTimeoutInterval(int32_t interval);
 
 	int64_t getExpireTime() const;
 
@@ -410,16 +409,6 @@ inline int64_t TransactionContext::getTransactionExpireTime() const {
 */
 inline int32_t TransactionContext::getTransationTimeoutInterval() const {
 	return txnTimeoutInterval_;
-}
-
-inline void TransactionContext::setTransationTimeoutInterval(int32_t interval) {
-	if (!isAutoCommit()) {
-		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
-	}
-	else if (clientId_ != TXN_EMPTY_CLIENTID) {
-		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
-	}
-	txnTimeoutInterval_ = interval;
 }
 
 /*!

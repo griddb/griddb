@@ -757,7 +757,7 @@ void BoolExpr::toSearchContext(TransactionContext &txn,
 			sc->addCondition(*c, isKey);
 		}
 	}
-	sc->limit_ = (0 == restEval) ? limit : MAX_RESULT_SIZE;
+	sc->setLimit((0 == restEval) ? limit : MAX_RESULT_SIZE);
 }
 
 /*!
@@ -779,9 +779,6 @@ void BoolExpr::toSearchContext(TransactionContext &txn,
 	sc->reserveCondition(andList.size());
 	restEval = 0;
 
-	const void *dummyKey = NULL;
-	uint32_t dummySize;
-	int32_t dummyBool;
 	bool conditionDealed = false;
 	const util::Vector<ColumnId> &columnIds = sc->getColumnIds();
 
@@ -808,7 +805,7 @@ void BoolExpr::toSearchContext(TransactionContext &txn,
 			restEval++;
 		}
 	}
-	sc->limit_ = (0 == restEval) ? limit : MAX_RESULT_SIZE;
+	sc->setLimit((0 == restEval) ? limit : MAX_RESULT_SIZE);
 }
 
 /*!
@@ -855,7 +852,7 @@ void BoolExpr::toSearchContext(TransactionContext &txn,
 			restEval++;
 		}
 	}
-	sc->limit_ = (0 == restEval) ? limit : MAX_RESULT_SIZE;
+	sc->setLimit((0 == restEval) ? limit : MAX_RESULT_SIZE);
 }
 
 /*!
@@ -905,7 +902,7 @@ void BoolExpr::toSearchContext(TransactionContext &txn,
 		sc->updateCondition(txn, newCond);
 	}
 
-	sc->limit_ = (0 == restEval) ? limit : MAX_RESULT_SIZE;
+	sc->setLimit((0 == restEval) ? limit : MAX_RESULT_SIZE);
 }
 
 /*!

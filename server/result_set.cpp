@@ -53,16 +53,65 @@ ResultSet::ResultSet()
 	  distributedTarget_(NULL),
 	  distributedTargetUncovered_(false),
 	  distributedTargetReduced_(false)
+	  ,
+	  rsRowIdAlloc_(NULL),
+	  rsSwapAlloc_(NULL),
+	  partialExecState_(NOT_PARTIAL),
+	  partialReturnCount_(0),
+	  partialExecCount_(0),
+	  queryObj_(NULL),
+	  suspendKeyBuffer_(NULL),
+	  suspendValueBuffer_(NULL),
+	  updateRowIdList_(NULL),
+	  swapRowIdList_(NULL),
+	  updateObjectIdList_(NULL),
+	  updateOperationList_(NULL),
+	  updateRowIdHandler_(NULL),
+	  updateRowIdListThreshold_(std::numeric_limits<size_t>::max()),
+	  updateRowIdListInvalid_(false),
+	  isRowIdSorted_(false),
+	  updateIdType_(UPDATE_ID_ROW)
 {
 }
 
 ResultSet::~ResultSet() {
 	if (rsAlloc_) {
-		ALLOC_DELETE((*rsAlloc_), rowIdList_);
 		ALLOC_DELETE((*rsAlloc_), rsSerializedRowList_);
 		ALLOC_DELETE((*rsAlloc_), rsSerializedVarDataList_);
 		ALLOC_DELETE((*rsAlloc_), distributedTarget_);
+		ALLOC_DELETE((*rsAlloc_), suspendKeyBuffer_);
+		ALLOC_DELETE((*rsAlloc_), suspendValueBuffer_);
+		ALLOC_DELETE((*rsAlloc_), updateRowIdList_);
+		ALLOC_DELETE((*rsAlloc_), updateObjectIdList_);
+		ALLOC_DELETE((*rsAlloc_), updateOperationList_);
+		ALLOC_DELETE((*rsAlloc_), partialExecInfo_.columnIds_);
 	}
+	if (rsRowIdAlloc_) {
+		ALLOC_DELETE((*rsRowIdAlloc_), rowIdList_);
+	}
+	if (rsSwapAlloc_) {
+		ALLOC_DELETE((*rsSwapAlloc_), swapRowIdList_);
+	}
+	setUpdateRowIdHandler(NULL, 0);
+}
+
+/*!
+	@brief Clear temporary data for Message
+*/
+void ResultSet::resetMessageBuffer() {
+	if (useRSRowImage_) {
+		if (rsSerializedRowList_) {
+			rsSerializedRowList_->clear();
+			rsSerializedVarDataList_->clear();
+		}
+	}
+	else {
+		resetSerializedData();
+	}
+	fixedStartPos_ = 0;
+	fixedOffsetSize_ = 0;
+	varStartPos_ = 0;
+	varOffsetSize_ = 0;
 }
 
 
@@ -100,10 +149,21 @@ void ResultSet::clear() {
 		txnAlloc_ = NULL;
 	}
 	if (rsAlloc_) {
-		ALLOC_DELETE((*rsAlloc_), rowIdList_);
 		ALLOC_DELETE((*rsAlloc_), rsSerializedRowList_);
 		ALLOC_DELETE((*rsAlloc_), rsSerializedVarDataList_);
 		ALLOC_DELETE((*rsAlloc_), distributedTarget_);
+		ALLOC_DELETE((*rsAlloc_), suspendKeyBuffer_);
+		ALLOC_DELETE((*rsAlloc_), suspendValueBuffer_);
+		ALLOC_DELETE((*rsAlloc_), updateRowIdList_);
+		ALLOC_DELETE((*rsAlloc_), updateObjectIdList_);
+		ALLOC_DELETE((*rsAlloc_), updateOperationList_);
+		ALLOC_DELETE((*rsAlloc_), partialExecInfo_.columnIds_);
+	}
+	if (rsRowIdAlloc_) {
+		ALLOC_DELETE((*rsRowIdAlloc_), rowIdList_);
+	}
+	if (rsSwapAlloc_) {
+		ALLOC_DELETE((*rsSwapAlloc_), swapRowIdList_);
 	}
 	rowIdList_ = NULL;
 	rsSerializedRowList_ = NULL;
@@ -111,6 +171,17 @@ void ResultSet::clear() {
 	distributedTarget_ = NULL;
 	distributedTargetUncovered_ = false;
 	distributedTargetReduced_ = false;
+	suspendKeyBuffer_ = NULL;
+	suspendValueBuffer_ = NULL;
+	updateRowIdList_ = NULL;
+	swapRowIdList_ = NULL;
+	updateObjectIdList_ = NULL;
+	updateOperationList_ = NULL;
+	setUpdateRowIdHandler(NULL, 0);
+	updateRowIdListInvalid_ = false;
+	updateIdType_ = UPDATE_ID_ROW;
+	isRowIdSorted_ = false;
+	partialExecInfo_ = PartialExecInfo();
 
 	rsetId_ = UNDEF_RESULTSETID;
 	txnId_ = UNDEF_TXNID;
@@ -137,6 +208,10 @@ void ResultSet::clear() {
 
 	rsAlloc_->setFreeSizeLimit(rsAlloc_->base().getElementSize());
 	rsAlloc_->trim();
+	rsRowIdAlloc_->setFreeSizeLimit(rsRowIdAlloc_->base().getElementSize());
+	rsRowIdAlloc_->trim();
+	rsSwapAlloc_->setFreeSizeLimit(rsSwapAlloc_->base().getElementSize());
+	rsSwapAlloc_->trim();
 	queryOption_ = ResultSetOption();
 }
 
@@ -206,9 +281,10 @@ const util::XArray<RowId>* ResultSet::getRowIdList() const {
 }
 
 util::XArray<RowId>* ResultSet::getRowIdList() {
-	assert(rsAlloc_);
+	assert(rsRowIdAlloc_);
 	if (rowIdList_ == NULL) {
-		rowIdList_ = ALLOC_NEW(*rsAlloc_) util::XArray<RowId>(*rsAlloc_);
+		rowIdList_ =
+			ALLOC_NEW(*rsRowIdAlloc_) util::XArray<RowId>(*rsRowIdAlloc_);
 	}
 	return rowIdList_;
 }
@@ -243,8 +319,13 @@ util::XArray<uint8_t>* ResultSet::getRSRowDataVarPartBuffer() {
 	@brief Check if data is releasable
 */
 bool ResultSet::isRelease() const {
-	return (resultType_ != RESULT_ROW_ID_SET) &&
-		   (resultType_ != PARTIAL_RESULT_ROWSET);
+	if (isPartialExecuteMode()) {
+		return !isPartialExecuteSuspend();
+	}
+	else {
+		return (resultType_ != RESULT_ROW_ID_SET) &&
+			   (resultType_ != PARTIAL_RESULT_ROWSET);
+	}
 }
 
 const util::Vector<int64_t>* ResultSet::getDistributedTarget() const {
@@ -269,6 +350,218 @@ void ResultSet::getDistributedTargetStatus(
 void ResultSet::setDistributedTargetStatus(bool uncovered, bool reduced) {
 	distributedTargetUncovered_ = uncovered;
 	distributedTargetReduced_ = reduced;
+}
+
+const util::XArray<RowId>* ResultSet::getUpdateRowIdList() const {
+	return updateRowIdList_;
+}
+
+util::XArray<RowId>* ResultSet::getUpdateRowIdList() {
+	assert(rsAlloc_);
+	if (updateRowIdList_ == NULL) {
+		updateRowIdList_ = ALLOC_NEW(*rsAlloc_) util::XArray<RowId>(*rsAlloc_);
+	}
+	return updateRowIdList_;
+}
+
+const util::XArray<RowId>* ResultSet::getSwapRowIdList() const {
+	return swapRowIdList_;
+}
+
+util::XArray<RowId>* ResultSet::getSwapRowIdList() {
+	assert(rsSwapAlloc_);
+	if (swapRowIdList_ != NULL) {
+		rsSwapAlloc_->setFreeSizeLimit(rsSwapAlloc_->base().getElementSize());
+		rsSwapAlloc_->trim();
+	}
+	swapRowIdList_ =
+		ALLOC_NEW(*rsSwapAlloc_) util::XArray<RowId>(*rsSwapAlloc_);
+	return swapRowIdList_;
+}
+
+const util::XArray<uint64_t>* ResultSet::getUpdateObjectIdList() const {
+	return updateObjectIdList_;
+}
+
+util::XArray<uint64_t>* ResultSet::getUpdateObjectIdList() {
+	assert(rsAlloc_);
+	if (updateObjectIdList_ == NULL) {
+		updateObjectIdList_ =
+				ALLOC_NEW(*rsAlloc_) util::XArray<uint64_t>(*rsAlloc_);
+	}
+	return updateObjectIdList_;
+}
+
+const util::XArray<int8_t>* ResultSet::getUpdateOperationList() const {
+	return updateOperationList_;
+}
+
+util::XArray<int8_t>* ResultSet::getUpdateOperationList() {
+	assert(rsAlloc_);
+	if (updateOperationList_ == NULL) {
+		updateOperationList_ =
+				ALLOC_NEW(*rsAlloc_) util::XArray<int8_t>(*rsAlloc_);
+	}
+	return updateOperationList_;
+}
+
+void ResultSet::setLargeInfo(const SQLTableInfo *largeInfo) {
+	queryOption_.setLargeInfo(largeInfo);
+}
+
+const SQLTableInfo* ResultSet::getLargeInfo() const {
+	return queryOption_.getLargeInfo();
+}
+
+void ResultSet::resetPartialContext() {
+	partialExecInfo_.startOrPos_ = 0;
+	if (partialExecInfo_.columnIds_ != NULL) {
+		partialExecInfo_.columnIds_->clear();
+	}
+	partialExecInfo_.indexType_ = MAP_TYPE_BTREE;
+	partialExecInfo_.suspendKey_ = NULL;
+	partialExecInfo_.suspendKeySize_ = 0;
+	partialExecInfo_.suspendValue_ = NULL;
+	partialExecInfo_.suspendValueSize_ = 0;
+	partialExecInfo_.suspendRowId_ = UNDEF_ROWID;
+}
+
+/*!
+	@brief Set the information of suspending
+*/
+void ResultSet::setPartialContext(BtreeMap::SearchContext& sc,
+	ResultSize& currentSuspendLimit, uint32_t orPos, MapType indexType) {
+	resetPartialContext();
+	if (sc.isSuspended()) {
+		partialExecInfo_.startOrPos_ = orPos;
+
+		const util::Vector<ColumnId> &columnIds = sc.getColumnIds();
+		if (partialExecInfo_.columnIds_ == NULL) {
+			partialExecInfo_.columnIds_ =
+					ALLOC_NEW(*rsAlloc_) util::Vector<ColumnId>(*rsAlloc_);
+		} else {
+			partialExecInfo_.columnIds_->clear();
+		}
+		partialExecInfo_.columnIds_->assign(columnIds.begin(), columnIds.end());
+
+		partialExecInfo_.indexType_ = indexType;
+		partialExecInfo_.isNullSuspended_ = sc.isNullSuspended();
+
+		if (suspendKeyBuffer_ == NULL) {
+			suspendKeyBuffer_ =
+					ALLOC_NEW(*rsAlloc_) util::XArray<uint8_t>(*rsAlloc_);
+		}
+		suspendKeyBuffer_->resize(sc.getSuspendKeySize());
+		partialExecInfo_.suspendKey_ = suspendKeyBuffer_->data();
+		memcpy(partialExecInfo_.suspendKey_, sc.getSuspendKey(),
+			sc.getSuspendKeySize());
+		partialExecInfo_.suspendKeySize_ = sc.getSuspendKeySize();
+
+		if (suspendValueBuffer_ == NULL) {
+			suspendValueBuffer_ =
+					ALLOC_NEW(*rsAlloc_) util::XArray<uint8_t>(*rsAlloc_);
+		}
+		suspendValueBuffer_->resize(sc.getSuspendValueSize());
+		partialExecInfo_.suspendValue_ = suspendValueBuffer_->data();
+		memcpy(partialExecInfo_.suspendValue_, sc.getSuspendValue(),
+			sc.getSuspendValueSize());
+		partialExecInfo_.suspendValueSize_ = sc.getSuspendValueSize();
+
+		partialExecInfo_.suspendRowId_ = sc.getSuspendRowId();
+	}
+	else if (isPartialExecuteMode()) {
+		currentSuspendLimit = sc.getSuspendLimit();
+	}
+}
+/*!
+	@brief Set the information of resuming
+*/
+void ResultSet::rewritePartialContext(TransactionContext &txn,
+	BtreeMap::SearchContext& sc,
+	ResultSize currentSuspendLimit, OutputOrder outputOrder, uint32_t orPos,
+	BaseContainer &container, uint16_t unitRowNum, bool isResumeRewrite) {
+	ContainerType containerType = container.getContainerType();
+	if (unitRowNum == 0) {
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, 
+			"Invalid unitRowNum of partial execution : " << unitRowNum);
+	}
+
+	bool isRowIdIndex = sc.getKeyColumnNum() == 1 && 
+		sc.getScColumnId() == container.getRowIdColumnId();
+	assert(!(containerType == TIME_SERIES_CONTAINER && 
+		sc.getKeyColumnNum() == 1 && sc.getScColumnId() == UNDEF_COLUMNID));
+	if (currentSuspendLimit >= unitRowNum * 2 && isRowIdIndex) {
+		currentSuspendLimit = currentSuspendLimit / unitRowNum;
+	}
+	sc.setSuspendLimit(currentSuspendLimit);
+
+	if (getPartialExecuteCount() != 0 &&
+		orPos == partialExecInfo_.startOrPos_ && isResumeRewrite) {
+		if (partialExecInfo_.isNullSuspended_) {
+			sc.setResumeStatus(BaseIndex::SearchContext::NULL_RESUME);
+		} else {
+			sc.setResumeStatus(BaseIndex::SearchContext::NOT_NULL_RESUME);
+		}
+
+		sc.setSuspendKey(partialExecInfo_.suspendKey_);
+		sc.setSuspendKeySize(partialExecInfo_.suspendKeySize_);
+		sc.setSuspendValue(partialExecInfo_.suspendValue_);
+		sc.setSuspendValueSize(partialExecInfo_.suspendValueSize_);
+
+		if (isRowIdIndex) {
+			DSExpression::Operation opType = DSExpression::GE;
+			if (outputOrder == ORDER_DESCENDING) {
+				opType = DSExpression::LE;
+			}
+			TermCondition newCondition(container.getRowIdColumnType(), container.getRowIdColumnType(),
+				opType, container.getRowIdColumnId(),
+				partialExecInfo_.suspendKey_, partialExecInfo_.suspendKeySize_);
+			sc.updateCondition(txn, newCondition);
+		}
+	}
+	if (containerType == TIME_SERIES_CONTAINER) {
+		if (partialExecInfo_.suspendRowId_ != UNDEF_ROWID && !isRowIdIndex) {
+			TermCondition newCondition(container.getRowIdColumnType(), container.getRowIdColumnType(),
+				DSExpression::GE, container.getRowIdColumnId(),
+				&(partialExecInfo_.suspendRowId_), sizeof(partialExecInfo_.suspendRowId_));
+			sc.updateCondition(txn, newCondition);
+			sc.setSuspendRowId(partialExecInfo_.suspendRowId_);
+		}
+		if (partialExecInfo_.lastRowId_ != UNDEF_ROWID) {
+			TermCondition newCondition(COLUMN_TYPE_TIMESTAMP, COLUMN_TYPE_TIMESTAMP,
+				DSExpression::LE, ColumnInfo::ROW_KEY_COLUMN_ID,
+				&(partialExecInfo_.lastRowId_), sizeof(partialExecInfo_.lastRowId_));
+			sc.updateCondition(txn, newCondition);
+		}
+	}
+	else {
+		if (partialExecInfo_.lastRowId_ != UNDEF_ROWID) {
+			TermCondition newCondition(container.getRowIdColumnType(), container.getRowIdColumnType(),
+				DSExpression::LE, container.getRowIdColumnId(),
+				&(partialExecInfo_.lastRowId_), sizeof(partialExecInfo_.lastRowId_));
+			sc.updateCondition(txn, newCondition);
+		}
+	}
+}
+
+void ResultSet::setUpdateRowIdHandler(
+		UpdateRowIdHandler *handler, size_t threshold) {
+	if (handler == updateRowIdHandler_) {
+		return;
+	}
+
+	if (updateRowIdHandler_ != NULL) {
+		updateRowIdHandler_->close();
+	}
+	updateRowIdHandler_ = handler;
+
+	updateRowIdListThreshold_ =
+			(handler == NULL ? std::numeric_limits<size_t>::max() : threshold);
+}
+
+void ResultSet::handleUpdateRowIdError(std::exception &e) {
+	invalidateUpdateRowIdList();
+	UTIL_TRACE_EXCEPTION(DATA_STORE, e, "");
 }
 
 

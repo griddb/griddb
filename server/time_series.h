@@ -230,10 +230,28 @@ public:
 	void searchRowIdIndex(TransactionContext &txn, uint64_t start,
 		uint64_t limit, util::XArray<RowId> &rowIdList,
 		util::XArray<OId> &resultList, uint64_t &skipped);
+	void searchRowIdIndexAsRowArray(
+			TransactionContext& txn, BtreeMap::SearchContext &sc,
+			util::XArray<OId> &oIdList, util::XArray<OId> &mvccOIdList);
+	void scanRowIdIndex(
+			TransactionContext& txn, BtreeMap::SearchContext &sc,
+			OutputOrder order, ContainerRowScanner &scanner);
+	void scanRowArray(
+			TransactionContext& txn, const OId *begin, const OId *end,
+			bool onMvcc, ContainerRowScanner &scanner);
+	void scanRow(
+			TransactionContext& txn, const OId *begin, const OId *end,
+			bool onMvcc, ContainerRowScanner &scanner);
 	RowId getMaxRowId(TransactionContext &txn);
 	void searchColumnIdIndex(TransactionContext &txn,
+		BtreeMap::SearchContext &sc, BtreeMap::SearchContext &orgSc,
+		util::XArray<OId> &resultList, OutputOrder order,
+		bool neverOrdering = false);
+	void searchColumnIdIndex(TransactionContext &txn,
 		BtreeMap::SearchContext &sc, util::XArray<OId> &resultList,
-		OutputOrder order, bool neverOrdering = false);
+		OutputOrder order) {
+		searchColumnIdIndex(txn, sc, sc, resultList, order);
+	}
 	void searchColumnIdIndex(TransactionContext &txn,
 		BtreeMap::SearchContext &sc, BtreeMap::SearchContext &orgSc,
 		util::XArray<OId> &normalRowList, util::XArray<OId> &mvccRowList);
@@ -274,14 +292,14 @@ public:
 		@brief Calculate AllocateStrategy of Map Object
 	*/
 	AllocateStrategy calcMapAllocateStrategy() const {
-		AffinityGroupId groupId = calcAffnityGroupId(getAffinity());
+		AffinityGroupId groupId = calcAffnityGroupId(getAffinityBinary());
 		return AllocateStrategy(ALLOCATE_NO_EXPIRE_MAP, groupId);
 	}
 	/*!
 		@brief Calculate AllocateStrategy of Row Object
 	*/
 	AllocateStrategy calcRowAllocateStrategy() const {
-		AffinityGroupId groupId = calcAffnityGroupId(getAffinity());
+		AffinityGroupId groupId = calcAffnityGroupId(getAffinityBinary());
 		return AllocateStrategy(ALLOCATE_NO_EXPIRE_ROW, groupId);
 	}
 
@@ -298,7 +316,7 @@ public:
 		else {
 			chunkCategoryId = ALLOCATE_NO_EXPIRE_MAP;
 		}
-		AffinityGroupId groupId = calcAffnityGroupId(getAffinity());
+		AffinityGroupId groupId = calcAffnityGroupId(getAffinityBinary());
 		return AllocateStrategy(chunkCategoryId, groupId, chunkKey, expireCategoryId);
 	}
 	/*!
@@ -315,7 +333,7 @@ public:
 		else {
 			chunkCategoryId = ALLOCATE_NO_EXPIRE_ROW;
 		}
-		AffinityGroupId groupId = calcAffnityGroupId(getAffinity());
+		AffinityGroupId groupId = calcAffnityGroupId(getAffinityBinary());
 		return AllocateStrategy(chunkCategoryId, groupId, chunkKey, expireCategoryId);
 	}
 	/*!
@@ -333,15 +351,19 @@ public:
 	}
 
 	uint32_t getRealColumnNum(TransactionContext &txn) {
+		UNUSED_VARIABLE(txn);
 		return getColumnNum();
 	}
 	ColumnInfo* getRealColumnInfoList(TransactionContext &txn) {
+		UNUSED_VARIABLE(txn);
 		return getColumnInfoList();
 	}
 	uint32_t getRealRowSize(TransactionContext &txn) {
+		UNUSED_VARIABLE(txn);
 		return getRowSize();
 	}
 	uint32_t getRealRowFixedDataSize(TransactionContext &txn) {
+		UNUSED_VARIABLE(txn);
 		return getRowFixedDataSize();
 	}
 
@@ -480,6 +502,7 @@ private:
 	}
 
 	void replaceSubTimeSeriesList(TransactionContext &txn) {
+		UNUSED_VARIABLE(txn);
 		setDirty();
 		if (baseContainerImage_->subContainerListOId_ !=
 			subTimeSeriesListHead_->getBaseOId()) {
@@ -509,7 +532,7 @@ private:
 		return indexSchema_->getIndexData(
 			txn, indexCursor, UNDEF_CONTAINER_POS, indexData);
 	}
-	void createNullIndexData(TransactionContext &txn, IndexData &indexData) {
+	void createNullIndexData(TransactionContext &, IndexData &) {
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_UNEXPECTED_ERROR, "");
 	}
 	void getIndexList(TransactionContext &txn,  
@@ -554,6 +577,42 @@ private:
 	void updateIndexData(
 		TransactionContext &txn, const IndexData &indexData);
 
+	bool isRuntime(TransactionContext& txn);
+	bool checkRunTime(TransactionContext &txn) {
+		return isRuntime(txn);
+	}
+
+	template<bool Mvcc> static void scanRowArrayCheckedDirect(
+			TransactionContext& txn, RowArray &rowArray, OutputOrder order,
+			RowId startRowId, RowId endRowId, util::XArray<OId> &oIdList);
+	template<bool Mvcc> static void scanRowCheckedDirect(
+			TransactionContext& txn, RowArray &rowArray,
+			RowId startRowId, RowId endRowId, util::XArray<OId> &oIdList);
+	template<bool Mvcc> static bool filterActiveTransaction(
+			TransactionContext& txn, RowArray::Row &row);
+	static RowId getScanStartRowId(Timestamp expiredTime);
+
+	bool scanRowArrayChecked(
+			TransactionContext& txn, RowArray *rowArray,
+			const BtreeMap::SearchContext &sc, OutputOrder order,
+			RowId startRowId, RowId endRowId, RowId lastCheckRowId,
+			RowId &lastMergedRowId, size_t &restRowOIdCount,
+			util::XArray< std::pair<RowId, OId> > &rowOIdList,
+			util::XArray<OId> &mvccOIdList, util::XArray<OId> &mergedOIdList);
+	void mergeScannedRowArray(
+			TransactionContext& txn, OutputOrder order,
+			util::XArray< std::pair<RowId, OId> > &rowOIdList,
+			util::XArray<OId> &mvccOIdList, util::XArray<OId> &mergedOIdList);
+
+	void scanRowIdIndexPrepare(
+			TransactionContext& txn, BtreeMap::SearchContext &sc,
+			OutputOrder order, util::XArray<OId> *oIdList);
+	static void searchMvccMapPrepare(
+			TransactionContext& txn, const BtreeMap::SearchContext &sc,
+			BtreeMap::SearchContext &mvccSC, OutputOrder order,
+			RowId startRowId, RowId endRowId,
+			RowId lastCheckRowId, RowId lastMergedRowId,
+			std::pair<RowId, RowId> *mvccRowIdRange);
 
 };
 
@@ -630,9 +689,9 @@ public:
 		bool isIndexNameCaseSensitive = false);
 
 
-	void putRow(TransactionContext &txn, uint32_t rowSize,
-		const uint8_t *rowData, RowId &rowId, bool rowIdSpecified, 
-		DataStore::PutStatus &status, PutRowOption putRowOption) {
+	void putRow(TransactionContext &, uint32_t ,
+		const uint8_t *, RowId &, bool , 
+		DataStore::PutStatus &, PutRowOption ) {
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "unsupport operation");
 	}
 
@@ -677,6 +736,14 @@ public:
 		uint64_t limit, util::XArray<RowId> &rowIdList,
 		util::XArray<OId> &resultList, uint64_t &skipped);
 
+	void searchRowIdIndexAsRowArray(
+			TransactionContext& txn, BtreeMap::SearchContext &sc,
+			util::XArray<OId> &oIdList, util::XArray<OId> &mvccOIdList);
+	bool scanRowIdIndex(
+			TransactionContext& txn, BtreeMap::SearchContext &sc,
+			OutputOrder order, ContainerRowScanner &scanner,
+			util::XArray<OId> *(&oIdListRef)[3],
+			util::XArray< std::pair<RowId, OId> > &rowOIdList);
 
 
 
@@ -795,6 +862,10 @@ private:
 	}
 
 	void checkExclusive(TransactionContext &) {}
+	bool checkRunTime(TransactionContext &) {
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_UNEXPECTED_ERROR, "");
+		return true;
+	}
 
 	bool getIndexData(TransactionContext &txn, const util::Vector<ColumnId> &columnIds,
 		MapType mapType, bool withUncommitted, IndexData &indexData,

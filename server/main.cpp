@@ -35,8 +35,13 @@
 #include "transaction_manager.h"
 #include "transaction_service.h"
 #include "trigger_service.h"
+#include "sql_service.h"
+#include "sql_execution_manager.h"
+#include "sql_allocator_manager.h"
+#include "sql_utils.h"
 
 #include "picojson.h"
+#include "resource_set.h"
 
 #ifndef _WIN32
 #define MAIN_CAPTURE_SIGNAL
@@ -51,16 +56,15 @@
 #include <errno.h>
 #endif  
 
-
 #include <fstream>
 
 
 
 const char8_t *const GS_PRODUCT_NAME = "GridDB";
 const int32_t GS_MAJOR_VERSION = 4;
-const int32_t GS_MINOR_VERSION = 3;
+const int32_t GS_MINOR_VERSION = 5;
 const int32_t GS_REVISION = 0;
-const int32_t GS_BUILD_NO = 36424;
+const int32_t GS_BUILD_NO = 37163;
 
 const char8_t *const GS_EDITION_NAME = "Community Edition";
 const char8_t *const GS_EDITION_NAME_SHORT = "CE";
@@ -71,7 +75,6 @@ const char8_t *const SYS_DEVELOPER_FILE_NAME = "gs_developer.json";
 const char8_t *const GS_CLUSTER_PARAMATER_DIFF_FILE_NAME = "gs_diff.json";
 
 const char8_t *const GS_TRACE_SECRET_HEX_KEY = "7B790AB2C82F01B3"; 
-
 
 static void autoJoinCluster(const Event::Source &eventSource,
 	util::StackAllocator &alloc, SystemService &sysSvc, PartitionTable &pt,
@@ -484,17 +487,13 @@ int main(int argc, char **argv) {
 
 		EventEngine::Config eeConfig;
 
-#ifdef GD_ENABLE_UNICAST_NOTIFICATION
 		util::VariableSizeAllocator<> notifyAlloc(
 			(util::AllocatorInfo(ALLOCATOR_GROUP_MAIN, "notifyAlloc")));
 		ClusterService clsSvc(config, eeConfig, source, "CLUSTER_SERVICE",
-			clsMgr, clsVersionId, errorHandler, notifyAlloc);
-#else
-		ClusterService clsSvc(config, eeConfig, source, "CLUSTER_SERVICE",
-			clsMgr, clsVersionId, errorHandler);
-#endif
+			clsMgr, clsVersionId, notifyAlloc);
+
 		SyncService syncSvc(config, eeConfig, source, "SYNC_SERVICE", syncMgr,
-			clsVersionId, errorHandler);
+			clsVersionId);
 
 		u8string diffFile;
 		util::FileSystem::createPath(
@@ -512,26 +511,52 @@ int main(int argc, char **argv) {
 		CheckpointService cpSvc(
 			config, eeConfig, source, "CHECKPOINT_SERVICE", errorHandler);
 
+		SQLVariableSizeGlobalAllocator valloc(
+				util::AllocatorInfo(ALLOCATOR_GROUP_SQL_JOB, "JobGlobalAllocator"));
+		LocalTempStore::LTSVariableSizeAllocator ltsVarAlloc(
+				util::AllocatorInfo(ALLOCATOR_GROUP_SQL_LTS, "ltsVar"));
+
+		LocalTempStore::Config storeConfig(config);
+		LocalTempStore store(storeConfig, ltsVarAlloc, !longArchive);
+		LTSEventBufferManager ltsEventBufferManager(store);
+		source.bufferManager_ = &ltsEventBufferManager;
+
+		SQLAllocatorManager sqlAllocator(
+				config,
+				SQLAllocatorManager::DEFAULT_ALLOCATOR_BLOCK_SIZE_EXP);
+
+		SQLService sqlSvc(sqlAllocator,
+				config, source, "SQL_SERVICE");
 
 		StatTable stats(tableAlloc);
 		stats.initialize();
 
+		u8string address;
+		uint16_t port = 0;
+		sqlSvc.getEE()->getSelfServerND().getAddress().getIP(&address, &port);
 
-		ManagerSet mgrSet(&clsSvc, &syncSvc, &txnSvc, &cpSvc, &sysSvc, &trgSvc,
-			&pt, &dataStore, &logMgr, &clsMgr, &syncMgr, &txnMgr, &chunkMgr,
-			&recoveryMgr, objectMgr, &fixedSizeAlloc, &varSizeAlloc, &config,
-			&stats
+		SQLExecutionManager executionManager(config, sqlAllocator);
+		JobManager jobManager(valloc, store, config);
+
+		ResourceSet resourceSet(
+				&clsSvc, &syncSvc, &txnSvc, &cpSvc, &sysSvc, &trgSvc,
+				&pt, &dataStore, &logMgr, &clsMgr, &syncMgr, &txnMgr, &chunkMgr,
+				&recoveryMgr, objectMgr, &fixedSizeAlloc, &varSizeAlloc, &config,
+				&stats
+			, &sqlSvc, &executionManager, &jobManager, &store
 		);
 
+		recoveryMgr.initialize(resourceSet);
 
-		recoveryMgr.initialize(mgrSet);
-
-		clsSvc.initialize(mgrSet);
-		syncSvc.initialize(mgrSet);
-		txnSvc.initialize(mgrSet);
-		sysSvc.initialize(mgrSet);
-		cpSvc.initialize(mgrSet);
-		dataStore.initialize(mgrSet);
+		clsSvc.initialize(resourceSet);
+		syncSvc.initialize(resourceSet);
+		txnSvc.initialize(resourceSet);
+		sysSvc.initialize(resourceSet);
+		cpSvc.initialize(resourceSet);
+		dataStore.initialize(resourceSet);
+		sqlSvc.initialize(resourceSet);
+		executionManager.initialize(resourceSet);
+		jobManager.initialize(resourceSet);
 
 		if (logDump) {
 			util::StackAllocator alloc(
@@ -570,15 +595,12 @@ int main(int argc, char **argv) {
 		try {
 			if (!longArchive) { 
 				sysSvc.start();
-#ifdef GD_ENABLE_UNICAST_NOTIFICATION
 				clsSvc.start(source);
-#else
-				clsSvc.start();
-#endif
 				syncSvc.start();
 				txnSvc.start();
 				cpSvc.start(source);
 
+				sqlSvc.start();
 			}
 			std::cout << "Running..." << std::endl;
 
@@ -655,7 +677,8 @@ int main(int argc, char **argv) {
 			cpSvc.waitForShutdown();
 			sysSvc.waitForShutdown();
 
-
+			sqlSvc.shutdown();
+			sqlSvc.waitForShutdown();
 
 			systemErrorOccurred = clsSvc.isSystemServiceError();
 
@@ -676,6 +699,8 @@ int main(int argc, char **argv) {
 			try {
 				if (!longArchive) {
 					clsSvc.shutdownAllService();
+					sqlSvc.shutdown();
+					sqlSvc.waitForShutdown();
 					clsSvc.waitForShutdown();
 					syncSvc.waitForShutdown();
 					txnSvc.waitForShutdown();
@@ -739,7 +764,7 @@ void autoJoinCluster(const Event::Source &eventSource,
 			for (pId = 0; pId < pt.getPartitionNum(); pId++) {
 				pt.setPartitionStatus(pId, PartitionTable::PT_ON);
 				PartitionRole role(
-					pId, rev, PartitionTable::PT_CURRENT_OB);
+					pId, rev, PT_CURRENT_OB);
 				pt.setPartitionRole(pId, role);
 			}
 			break;
@@ -822,7 +847,10 @@ static void cleanupOnNormalShutdown(const Event::Source &eventSource,
 }
 
 static void forceShutdown(ClusterService &clsSvc,
-		const std::string &pidFileName, util::PIdFile &pidFile, bool checkOnly) {
+		const std::string &pidFileName,
+		util::PIdFile &pidFile,
+		bool checkOnly) {
+
 	if (!checkOnly) {
 		cleanupPidFile(pidFileName, pidFile);
 	}
@@ -892,16 +920,24 @@ void MainConfigSetUpHandler::operator()(ConfigTable &config) {
 	MAIN_TRACE_DECLARE(config, RECOVERY_MANAGER_DETAIL, ERROR);
 	MAIN_TRACE_DECLARE(config, EVENT_ENGINE, WARNING);
 	MAIN_TRACE_DECLARE(config, TRIGGER_SERVICE, ERROR);
+	MAIN_TRACE_DECLARE(config, SQL_SERVICE, ERROR);
+	MAIN_TRACE_DECLARE(config, SQL_TEMP_STORE, ERROR);
+	MAIN_TRACE_DECLARE(config, TUPLE_LIST, ERROR);
+	MAIN_TRACE_DECLARE(config, DISTRIBUTED_FRAMEWORK, ERROR);
+	MAIN_TRACE_DECLARE(config, DISTRIBUTED_FRAMEWORK_DETAIL, ERROR);
+	MAIN_TRACE_DECLARE(config, SQL_HINT, ERROR);
 	MAIN_TRACE_DECLARE(config, MESSAGE_LOG_TEST, ERROR);
 	MAIN_TRACE_DECLARE(config, CLUSTER_INFO_TRACE, ERROR);
 	MAIN_TRACE_DECLARE(config, SYSTEM, ERROR);
 	MAIN_TRACE_DECLARE(config, BTREE_MAP, ERROR);
 	MAIN_TRACE_DECLARE(config, AUTHENTICATION_TIMEOUT, ERROR);
+
 	MAIN_TRACE_DECLARE(config, DATASTORE_BACKGROUND, ERROR);
 	MAIN_TRACE_DECLARE(config, SYNC_DETAIL, WARNING);
 	MAIN_TRACE_DECLARE(config, CLUSTER_DETAIL, WARNING);
 	MAIN_TRACE_DECLARE(config, CLUSTER_DUMP, WARNING);
 
+	MAIN_TRACE_DECLARE(config, SQL_DETAIL, WARNING);
 	MAIN_TRACE_DECLARE(config, ZLIB_UTILS, ERROR);
 	MAIN_TRACE_DECLARE(config, SIZE_MONITOR, WARNING);
 	MAIN_TRACE_DECLARE(config, LONG_ARCHIVE, WARNING);
@@ -1006,6 +1042,10 @@ void setUpTrace(const ConfigTable *config, bool checkOnly, bool longArchive) {
 		 ++id < CONFIG_TABLE_TRACE_TRACER_ID_END;) {
 		setMinOutputLevel(config, manager, id);
 	}
+	for (ConfigTable::ParamId id = CONFIG_TABLE_TRACE_SQL_TRACER_ID_START;
+		 ++id < CONFIG_TABLE_TRACE_SQL_TRACER_ID_END;) {
+		setMinOutputLevel(config, manager, id);
+	}
 	manager.setMaxRotationFileCount(
 		config->get<int32_t>(CONFIG_TABLE_TRACE_FILE_COUNT));
 
@@ -1035,9 +1075,18 @@ void setUpAllocator() {
 	manager.addGroup(parentId, ALLOCATOR_GROUP_TXN_RESULT, "transactionResult");
 	manager.addGroup(parentId, ALLOCATOR_GROUP_TXN_WORK, "transactionWork");
 
+	manager.addGroup(parentId, ALLOCATOR_GROUP_SQL_MESSAGE, "sqlMessage");
+	manager.addGroup(parentId, ALLOCATOR_GROUP_SQL_WORK, "sqlWork");
+	manager.addGroup(parentId, ALLOCATOR_GROUP_SQL_LTS, "sqlTempStore");
+	manager.addGroup(parentId, ALLOCATOR_GROUP_SQL_JOB, "sqlJob");
 }
 
 void StackMemoryLimitOverErrorHandler::operator()(util::Exception &e) {
 	GS_RETHROW_USER_OR_SYSTEM(e, "");
 }
 
+
+void SQLUtils::getDatabaseVersion(int32_t &major, int32_t &minor) {
+	major = GS_MAJOR_VERSION;
+	minor = GS_MINOR_VERSION;
+}

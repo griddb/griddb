@@ -229,7 +229,7 @@ FullContainerKey::FullContainerKey(util::StackAllocator &alloc,
 	constraint_(constraint), body_(static_cast<const uint8_t*>(body)), size_(size) {
 	try {
 		FullContainerKeyComponents components;
-		BitArray upperCaseBit(DEFAULT_UPPER_CASE_BIT_LENGTH);
+		ContainerKeyBitArray upperCaseBit(DEFAULT_UPPER_CASE_BIT_LENGTH);
 
 		deserialize(alloc, components, upperCaseBit, false);
 		validate(components);
@@ -247,7 +247,7 @@ FullContainerKey::FullContainerKey(util::StackAllocator &alloc,
 	constraint_(constraint), body_(NULL), size_(0) {
 	try {
 		FullContainerKeyComponents components;
-		BitArray upperCaseBit(DEFAULT_UPPER_CASE_BIT_LENGTH);
+		ContainerKeyBitArray upperCaseBit(DEFAULT_UPPER_CASE_BIT_LENGTH);
 
 		parseAndValidate(dbId, str, length, components, upperCaseBit);
 		serialize(alloc, components, upperCaseBit);
@@ -266,7 +266,7 @@ FullContainerKey::FullContainerKey(util::StackAllocator &alloc,
 	try {
 		validate(components);
 
-		BitArray upperCaseBit(components.getStringSize());
+		ContainerKeyBitArray upperCaseBit(components.getStringSize());
 		setUpperCaseBit(components, upperCaseBit);
 
 		serialize(alloc, components, upperCaseBit);
@@ -298,7 +298,7 @@ FullContainerKey& FullContainerKey::operator=(const FullContainerKey &another) {
 FullContainerKeyComponents FullContainerKey::getComponents(util::StackAllocator &alloc,
 														   bool unNormalized) const {
 	FullContainerKeyComponents components;
-	BitArray upperCaseBit(DEFAULT_UPPER_CASE_BIT_LENGTH);
+	ContainerKeyBitArray upperCaseBit(DEFAULT_UPPER_CASE_BIT_LENGTH);
 
 	deserialize(alloc, components, upperCaseBit, unNormalized);
 
@@ -308,7 +308,7 @@ FullContainerKeyComponents FullContainerKey::getComponents(util::StackAllocator 
 void FullContainerKey::toString(util::StackAllocator &alloc, util::String &str) const {
 	try {
 		FullContainerKeyComponents components;
-		BitArray upperCaseBit(DEFAULT_UPPER_CASE_BIT_LENGTH);
+		ContainerKeyBitArray upperCaseBit(DEFAULT_UPPER_CASE_BIT_LENGTH);
 
 		deserialize(alloc, components, upperCaseBit, true);
 
@@ -514,11 +514,11 @@ int32_t FullContainerKey::compareTo(util::StackAllocator &alloc,
 		}
 
 		const FullContainerKeyComponents components1 = getComponents(alloc, caseSensitive);
-		BitArray upperCaseBit1(components1.getStringSize());
+		ContainerKeyBitArray upperCaseBit1(components1.getStringSize());
 		setUpperCaseBit(components1, upperCaseBit1);
 
 		const FullContainerKeyComponents components2 = key.getComponents(alloc, caseSensitive);
-		BitArray upperCaseBit2(components2.getStringSize());
+		ContainerKeyBitArray upperCaseBit2(components2.getStringSize());
 		setUpperCaseBit(components2, upperCaseBit2);
 
 		if (components1.dbId_ > components2.dbId_) {
@@ -647,7 +647,7 @@ const char8_t* FullContainerKey::getExtendedSymbol() {
 
 void FullContainerKey::parseAndValidate(DatabaseId dbId, const char8_t *str, uint32_t length,
 										FullContainerKeyComponents &components,
-										BitArray &upperCaseBit) const {
+										ContainerKeyBitArray &upperCaseBit) const {
 	try {
 		size_t len = length;
 		if (len <= 0) {
@@ -830,7 +830,7 @@ void FullContainerKey::validate(const FullContainerKeyComponents &components) co
 }
 
 void FullContainerKey::setUpperCaseBit(const FullContainerKeyComponents &components,
-									   BitArray &upperCaseBit) const {
+									   ContainerKeyBitArray &upperCaseBit) const {
 	upperCaseBit.clear();
 
 	const char8_t *strList[3] = { components.baseName_, components.affinityString_, components.systemPart_ };
@@ -845,7 +845,7 @@ void FullContainerKey::setUpperCaseBit(const FullContainerKeyComponents &compone
 
 void FullContainerKey::serialize(util::StackAllocator &alloc,
 								 const FullContainerKeyComponents &components,
-								 const BitArray &upperCaseBit) {
+								 const ContainerKeyBitArray &upperCaseBit) {
 	try {
 		util::XArray<char8_t> buf(alloc);
 		buf.resize(static_cast<size_t>(components.getStringSize()), '\0');
@@ -897,7 +897,7 @@ void FullContainerKey::serialize(util::StackAllocator &alloc,
 			encodeString(out, buf.data(), components.systemPartSize_);
 		}
 
-		out.writeAll(upperCaseBit.data(), upperCaseBit.byteLength());
+		upperCaseBit.serialize(out);
 
 		const size_t lastPos = out.base().position();
 		out.base().position(flagPos);
@@ -922,7 +922,7 @@ void FullContainerKey::serialize(util::StackAllocator &alloc,
 
 void FullContainerKey::deserialize(util::StackAllocator &alloc,
 								   FullContainerKeyComponents &components,
-								   BitArray &upperCaseBit,
+								   ContainerKeyBitArray &upperCaseBit,
 								   bool unNormalized) const {
 	try {
 		if (isEmpty()) {
@@ -983,7 +983,7 @@ void FullContainerKey::deserialize(util::StackAllocator &alloc,
 		}
 		else {
 			upperCaseBit.reserve(strLength);
-			upperCaseBit.putAll(body_ + in.base().position(), strLength);
+			upperCaseBit.assign(body_ + in.base().position(), strLength);
 			in.base().position(in.base().position() + in.base().remaining());
 		}
 
@@ -1148,7 +1148,7 @@ bool FullContainerKey::isSymbol(char8_t ch) {
 }
 
 void FullContainerKey::createOriginalString(char8_t const *src, uint32_t size, char8_t *dest,
-											const BitArray &upperCaseBit, uint64_t startPos) const {
+											const ContainerKeyBitArray &upperCaseBit, uint64_t startPos) const {
 	for (uint32_t i = 0; i < size; i++) {
 		const char8_t c = *(src + i);
 		if (upperCaseBit.get(startPos + i)) {
@@ -1416,8 +1416,8 @@ int32_t FullContainerKey::compareOriginalString(
 }
 
 int32_t FullContainerKey::compareNormalizedString(
-		const char8_t *str1, uint32_t str1Length, const BitArray &upperCaseBit1, uint64_t startPos1,
-		const char8_t *str2, uint32_t str2Length, const BitArray &upperCaseBit2, uint64_t startPos2,
+		const char8_t *str1, uint32_t str1Length, const ContainerKeyBitArray &upperCaseBit1, uint64_t startPos1,
+		const char8_t *str2, uint32_t str2Length, const ContainerKeyBitArray &upperCaseBit2, uint64_t startPos2,
 		bool caseSensitive) const {
 
 	const size_t len = std::min(str1Length, str2Length);

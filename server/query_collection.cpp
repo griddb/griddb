@@ -229,7 +229,7 @@ void QueryForCollection::doQueryWithoutCondition(
 	BtreeMap::SearchContext sc (txn.getDefaultAllocator(), searchColumnId);
 	sc.setLimit(nLimit_);
 	if (searchColumnId != UNDEF_COLUMNID) {
-		sc.nullCond_ = BaseIndex::SearchContext::ALL;
+		sc.setNullCond(BaseIndex::SearchContext::ALL);
 	}
 	if (doExecute()) {
 		if (outputOrder != ORDER_UNDEFINED) {
@@ -240,7 +240,6 @@ void QueryForCollection::doQueryWithoutCondition(
 		}
 
 		if (resultOIdList.size() > nLimit_) {
-			ResultSize eraseSize = resultOIdList.size() - nLimit_;
 			resultOIdList.erase(
 				resultOIdList.begin() + static_cast<size_t>(nLimit_),
 				resultOIdList.end());
@@ -566,8 +565,6 @@ void QueryForCollection::doSelection(
 						resultOIdList.begin() + static_cast<size_t>(nOffset_));
 
 					if (nActualLimit_ < resultOIdList.size()) {
-						ResultSize eraseSize =
-							resultOIdList.size() - nActualLimit_;
 						resultOIdList.erase(
 							resultOIdList.begin() +
 								static_cast<size_t>(nActualLimit_),

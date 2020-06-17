@@ -1158,6 +1158,7 @@ EventEngine::Dispatcher::Dispatcher(EventEngine &ee) :
 		ee_(ee),
 		localHandler_(NULL),
 		disconnectHandler_(NULL),
+		scanEventHandler_(NULL),
 		unknownEventHandler_(NULL),
 		threadErrorHandler_(NULL),
 		eventCoder_(NULL),
@@ -1221,11 +1222,17 @@ void EventEngine::Dispatcher::setDisconnectHandler(EventHandler &handler) {
 	disconnectHandler_ = &handler;
 }
 
+void EventEngine::Dispatcher::setScanEventHandler(EventHandler &handler) {
+	scanEventHandler_ = &handler;
+}
 
 void EventEngine::Dispatcher::setEventCoder(EventCoder &coder) {
 	eventCoder_ = &coder;
 }
 
+bool EventEngine::Dispatcher::isScannerAvailable() {
+	return (scanEventHandler_ != NULL);
+}
 
 EventEngine::Dispatcher::DispatchResult EventEngine::Dispatcher::dispatch(
 		EventContext &ec, Event &ev, bool queueingSuspended,
@@ -1368,6 +1375,37 @@ void EventEngine::Dispatcher::requestAndWait(EventContext &ec, Event &ev) {
 	worker.removeWatcher(watcher);
 }
 
+bool EventEngine::Dispatcher::scanOrExecute(
+		EventContext &ec, Event &scannerEv, Event &ev) {
+	if (scanEventHandler_ == NULL) {
+		return false;
+	}
+
+	Manipulator::setScanner(ec, &scannerEv);
+
+	struct Cleaner {
+		explicit Cleaner(EventContext &ec) : ec_(ec) {
+		}
+
+		~Cleaner() {
+			try {
+				Manipulator::setScanner(ec_, NULL);
+			}
+			catch (...) {
+			}
+		}
+
+		EventContext &ec_;
+
+	} cleaner(ec);
+
+	HandlerEntry entry;
+	entry.handler_ = scanEventHandler_;
+
+	handleEvent(ec, ev, entry);
+
+	return ec.isScanningEventAccepted();
+}
 
 void EventEngine::Dispatcher::execute(EventContext &ec, Event &ev) {
 	HandlerEntry *entry = findHandlerEntry(ev.getType(), true);
@@ -1538,7 +1576,7 @@ void EventEngine::Dispatcher::handleEvent(
 	EventProgressWatcher *watcher = ev.getProgressWatcher();
 
 	try {
-		if (watcher != NULL) {
+		if (watcher != NULL && ec.getScannerEvent() == NULL) {
 			EventProgressWatcher::setHandlerStartTime(
 					watcher, ec.getHandlerStartMonotonicTime());
 		}
@@ -1547,7 +1585,16 @@ void EventEngine::Dispatcher::handleEvent(
 
 		(*entry.handler_)(ec, ev);
 
-		EventProgressWatcher::setCompleted(watcher);
+		if (watcher != NULL && (ec.getScannerEvent() == NULL ||
+				ec.isScanningEventAccepted())) {
+
+			if (ec.getScannerEvent() != NULL) {
+				EventProgressWatcher::setHandlerStartTime(
+						watcher, ec.getHandlerStartMonotonicTime());
+			}
+
+			EventProgressWatcher::setCompleted(watcher);
+		}
 
 		Manipulator::getStats(ec).increment(Stats::WORKER_HANDLED_EVENT_COUNT);
 	}
@@ -1776,6 +1823,15 @@ EventEngine::Stats& EventEngine::Manipulator::getStats(
 	return ec.workerStats_;
 }
 
+void EventEngine::Manipulator::setScanner(EventContext &ec, Event *ev) {
+	if (ev != NULL && ec.scannerEvent_ != NULL) {
+		GS_THROW_USER_ERROR(GS_ERROR_EE_OPERATION_NOT_ALLOWED,
+				"Event already scanning");
+	}
+
+	ec.scannerEvent_ = ev;
+	ec.scanningEventAccepted_ = false;
+}
 
 void EventEngine::Manipulator::mergeAllocatorStats(
 		Stats &stats, VariableSizeAllocator &alloc) {
@@ -1828,24 +1884,47 @@ void EventEngine::Manipulator::prepareMulticastSocket(
 }
 
 size_t EventEngine::Manipulator::getHandlingEventCount(
-		const EventContext &ec, const Event *ev, bool includesStarted) {
+		const EventContext &ec, const Event *ev, bool includesStarted,
+		bool oneShotOnly) {
 	const EventList *list = ec.eventList_;
-	if (list == NULL) {
+
+	const EventRefCheckList *periodicList = ec.periodicEventList_;
+
+	if (list == NULL || (oneShotOnly && periodicList == NULL)) {
 		GS_THROW_USER_ERROR(GS_ERROR_EE_OPERATION_NOT_ALLOWED, "");
 	}
 
 	size_t count = list->size();
 
+	EventList::const_iterator it = list->begin();
+
 	if (!includesStarted) {
 		assert(ev != NULL);
 
-		for (EventList::const_iterator it = list->begin();
-				it != list->end(); ++it) {
-			count--;
+		it = std::find(list->begin(), list->end(), ev);
+		if (it != list->end()) {
+			 ++it;
+		}
 
-			if (*it == ev) {
+		count = static_cast<size_t>(list->end() - it);
+	}
+
+	if (oneShotOnly) {
+		EventList::const_iterator tailIt = list->end();
+		for (EventRefList::const_reverse_iterator periodicIt =
+				periodicList->first.rbegin();
+				periodicIt != periodicList->first.rend(); ++periodicIt) {
+			const EventList::const_iterator nextIt =
+					std::find(it, tailIt, *periodicIt);
+			if (nextIt == tailIt) {
 				break;
 			}
+			tailIt = nextIt;
+			if (count <= 0) {
+				assert(false);
+				break;
+			}
+			count--;
 		}
 	}
 
@@ -2770,6 +2849,9 @@ EventEngine::EventWorker::~EventWorker() {
 	if (conditionalQueue_.get() != NULL) {
 		clearEvents(*sharedVarAllocator_, *conditionalQueue_);
 	}
+	if (scannerQueue_.get() != NULL) {
+		clearEvents(*sharedVarAllocator_, *scannerQueue_);
+	}
 }
 
 void EventEngine::EventWorker::initialize(EventEngine &ee, uint32_t id) {
@@ -2790,6 +2872,7 @@ void EventEngine::EventWorker::initialize(EventEngine &ee, uint32_t id) {
 	activeQueue_.reset(UTIL_NEW ActiveQueue(*sharedVarAllocator_));
 	pendingQueue_.reset(UTIL_NEW EventQueue(*sharedVarAllocator_));
 	conditionalQueue_.reset(UTIL_NEW EventQueue(*sharedVarAllocator_));
+	scannerQueue_.reset(UTIL_NEW EventQueue(*sharedVarAllocator_));
 	progressWatcher_.reset(UTIL_NEW EventProgressWatcher);
 	watcherList_.reset(UTIL_NEW WatcherList(*sharedVarAllocator_));
 
@@ -2811,7 +2894,10 @@ void EventEngine::EventWorker::run() {
 	EventList eventList(*localVarAllocator_);
 	util::StackAllocator &allocator(*allocator_);
 	allocator.setFreeSizeLimit(ee_->fixedAllocator_->getElementSize());
-	EventContext ec(createContextSource(allocator, &eventList));
+
+	EventRefCheckList periodicEventList(EventRefList(*localVarAllocator_), 0);
+	EventContext ec(createContextSource(
+			allocator, &eventList, &periodicEventList));
 
 	try {
 		ee_->dispatcher_->handleLocalEvent(ec, LOCAL_EVENT_WORKER_STARTED);
@@ -2821,13 +2907,16 @@ void EventEngine::EventWorker::run() {
 				util::LockGuard<util::Condition> guard(condition_);
 
 				for (;;) {
+					if (!scannerQueue_->empty()) {
+						scanEvents(ec, guard);
+					}
 
 					if (!runnable_) {
 						break;
 					}
 
 					int64_t diff = conditionTimeout;
-					if (popActiveEvents(eventList, diff)) {
+					if (popActiveEvents(eventList, diff, periodicEventList)) {
 						break;
 					}
 
@@ -3024,6 +3113,22 @@ void EventEngine::EventWorker::addPending(
 	stats_.increment(Stats::EVENT_PENDING_ADD_COUNT);
 }
 
+void EventEngine::EventWorker::addScanner(const Event &ev) {
+	if (!ee_->dispatcher_->isScannerAvailable()) {
+		GS_THROW_USER_ERROR(GS_ERROR_EE_OPERATION_NOT_ALLOWED,
+				"Scanner is not available");
+	}
+
+	util::LockGuard<util::Condition> guard(condition_);
+	if (!runnable_) {
+		stats_.increment(Stats::EVENT_CANCELED_ADD_COUNT);
+		return;
+	}
+
+	addEvent(*sharedVarAllocator_, *scannerQueue_, ev);
+
+	condition_.signal();
+}
 
 bool EventEngine::EventWorker::removeWatcher(
 		EventProgressWatcher &watcher) {
@@ -3054,7 +3159,11 @@ bool EventEngine::EventWorker::getLiveStats(
 	switch (type) {
 	case Stats::EVENT_ACTIVE_EXECUTABLE_COUNT:
 		value = static_cast<int64_t>(getExecutableActiveEventCount(
-				now, util::LockGuard<util::Condition>(condition_)));
+				now, false, util::LockGuard<util::Condition>(condition_)));
+		break;
+	case Stats::EVENT_ACTIVE_EXECUTABLE_ONE_SHOT_COUNT:
+		value = static_cast<int64_t>(getExecutableActiveEventCount(
+				now, true, util::LockGuard<util::Condition>(condition_)));
 		break;
 	default:
 		return false;
@@ -3063,7 +3172,10 @@ bool EventEngine::EventWorker::getLiveStats(
 }
 
 EventContext::Source EventEngine::EventWorker::createContextSource(
-		util::StackAllocator &allocator, const EventList *eventList) {
+		util::StackAllocator &allocator, const EventList *eventList
+		,
+		const EventRefCheckList *periodicEventList
+		) {
 	EventContext::Source source(*localVarAllocator_, allocator, stats_);
 
 	source.ee_ = ee_;
@@ -3072,14 +3184,120 @@ EventContext::Source EventEngine::EventWorker::createContextSource(
 	source.progressWatcher_ = progressWatcher_.get();
 	source.workerId_ = id_;
 	source.eventList_ = eventList;
+	source.periodicEventList_ = periodicEventList;
 
 	return source;
 }
 
+void EventEngine::EventWorker::scanEvents(
+		EventContext &ec, util::LockGuard<util::Condition> &guard) {
 
+	EventsCleaner<EventQueue> scannerQueueCleaner(
+			*sharedVarAllocator_, *scannerQueue_);
+
+	EventList scannerList(*localVarAllocator_);
+	EventsCleaner<EventList> scannerListCleaner(
+			*localVarAllocator_, scannerList);
+	scannerList.reserve(scannerQueue_->size());
+
+	for (EventQueue::const_iterator it = scannerQueue_->begin();
+			it != scannerQueue_->end(); ++it) {
+		scannerList.push_back(ALLOC_VAR_SIZE_NEW(*localVarAllocator_)
+				Event(*localVarAllocator_, **it));
+	}
+
+	for (EventList::iterator it = scannerList.begin();
+			it != scannerList.end(); ++it) {
+		scanEvents(ec, **it, guard);
+	}
+}
+
+void EventEngine::EventWorker::scanEvents(EventContext &ec, Event &scannerEv,
+		util::LockGuard<util::Condition> &guard) {
+	(void) guard;
+
+	if (!runnable_) {
+		return;
+	}
+
+	EventList activeList(*localVarAllocator_);
+	EventsCleaner<EventList> activeListCleaner(*localVarAllocator_, activeList);
+
+	EventList activeCheckList(*localVarAllocator_);
+	EventsCleaner<EventList> activeCheckListCleaner(
+			*localVarAllocator_, activeCheckList);
+
+	for (ActiveQueue::iterator it = activeQueue_->begin();
+			it != activeQueue_->end(); ++it) {
+		addEvent(*localVarAllocator_, activeList, *it->ev_);
+		activeCheckList.push_back(it->ev_);
+
+		if (it->periodicInterval_ > 0) {
+			activeCheckList.back() = NULL;
+		}
+	}
+
+	{
+		struct ConditionUnlocker {
+			explicit ConditionUnlocker(util::Condition &condition) :
+					condition_(condition) {
+				condition_.unlock();
+			}
+
+			~ConditionUnlocker() {
+				condition_.lock();
+			}
+
+			util::Condition &condition_;
+		} unlocker(condition_);
+
+		try {
+			for (EventList::iterator it = activeList.begin();
+					it != activeList.end(); ++it) {
+				if (!ee_->dispatcher_->scanOrExecute(ec, scannerEv, **it)) {
+					activeCheckList[it - activeList.begin()] = NULL;
+				}
+			}
+		}
+		catch (std::exception &e) {
+			ee_->dispatcher_->handleThreadError(ec, e, true);
+		}
+		catch (...) {
+			std::exception e;
+			ee_->dispatcher_->handleThreadError(ec, e, true);
+		}
+	}
+
+	{
+		ActiveQueue::iterator it = activeQueue_->begin();
+		EventList::iterator checkIt = activeCheckList.begin();
+		while (it != activeQueue_->end()) {
+			for (; checkIt != activeCheckList.end(); ++checkIt) {
+				if (*checkIt == it->ev_) {
+					updateBufferSize<false>(*it->ev_);
+					ALLOC_VAR_SIZE_DELETE(*sharedVarAllocator_, it->ev_);
+					it = activeQueue_->erase(it);
+					++checkIt;
+					break;
+				}
+				else if (*checkIt != NULL) {
+					++it;
+					break;
+				}
+			}
+			if (checkIt == activeCheckList.end()) {
+				break;
+			}
+		}
+		assert(checkIt == activeCheckList.end());
+	}
+}
 
 bool EventEngine::EventWorker::popActiveEvents(
-		EventList &eventList, int64_t &nextTimeDiff) {
+		EventList &eventList, int64_t &nextTimeDiff
+		,
+		EventRefCheckList &periodicEventList
+		) {
 	const int64_t now = ee_->clockGenerator_->getMonotonicTime();
 
 	bool found = false;
@@ -3104,11 +3322,11 @@ bool EventEngine::EventWorker::popActiveEvents(
 		activeQueue_->pop_front();
 
 		if (periodicInterval > 0) {
-			addDirect(
+			addPeriodicEventsAgain(
 					now + periodicInterval,
-					*eventList.back(),
+					eventList.back(),
 					periodicInterval,
-					NULL);
+					eventList, periodicEventList);
 		}
 	}
 
@@ -3168,6 +3386,21 @@ bool EventEngine::EventWorker::popPendingEvents(
 			-static_cast<int64_t>(curSize));
 
 	return (curSize > 0);
+}
+
+void EventEngine::EventWorker::addPeriodicEventsAgain(
+		int64_t monotonicTime, const Event *ev, int32_t periodicInterval,
+		const EventList &eventList, EventRefCheckList &periodicEventList) {
+
+	const int64_t curCycle = stats_.get(Stats::EVENT_CYCLE_COUNT);
+	if (curCycle != periodicEventList.second ||
+			eventList.size() <= periodicEventList.first.size()) {
+		periodicEventList.first.clear();
+		periodicEventList.second = curCycle;
+	}
+
+	periodicEventList.first.push_back(ev);
+	addDirect(monotonicTime, *ev, periodicInterval, NULL);
 }
 
 inline void EventEngine::EventWorker::addDirect(
@@ -3278,13 +3511,17 @@ void EventEngine::EventWorker::clearEvents(
 }
 
 size_t EventEngine::EventWorker::getExecutableActiveEventCount(
-		EventMonotonicTime now, const util::LockGuard<util::Condition>&) {
+		EventMonotonicTime now, bool oneShotOnly,
+		const util::LockGuard<util::Condition>&) {
 	size_t count = 0;
 	for (ActiveQueue::const_iterator it = activeQueue_->begin();
 			it != activeQueue_->end(); ++it) {
 		const int64_t nextTimeDiff = it->time_ - now;
 		if (nextTimeDiff > 0) {
 			break;
+		}
+		if (oneShotOnly && it->periodicInterval_ > 0) {
+			continue;
 		}
 		count++;
 	}
@@ -3458,8 +3695,8 @@ bool EventEngine::EventSocket::openAsServer(
 }
 
 bool EventEngine::EventSocket::openAsMulticast(
-		const util::SocketAddress &address
-		, const util::SocketAddress *interfaceAddr
+		const util::SocketAddress &address,
+		const util::SocketAddress *interfaceAddr
 ) {
 	assert(base_.isClosed());
 
@@ -5346,8 +5583,10 @@ const char8_t *const EventEngine::Stats::STATS_TYPE_NAMES[] = {
 	"EVENT_PENDING_QUEUE_SIZE_MAX",
 
 	"EVENT_ACTIVE_EXECUTABLE_COUNT",
+	"EVENT_ACTIVE_EXECUTABLE_ONE_SHOT_COUNT",
 	"EVENT_CYCLE_HANDLING_COUNT",
-	"EVENT_CYCLE_HANDLING_AFTER_COUNT"
+	"EVENT_CYCLE_HANDLING_AFTER_COUNT",
+	"EVENT_CYCLE_HANDLING_AFTER_ONE_SHOT_COUNT"
 };
 
 const EventEngine::Stats::Type
@@ -5477,14 +5716,21 @@ bool EventEngine::Tool::getLiveStats(
 			GS_THROW_USER_ERROR(GS_ERROR_EE_PARAMETER_INVALID, "");
 		}
 		value = static_cast<int64_t>(
-				Manipulator::getHandlingEventCount(*ec, NULL, true));
+				Manipulator::getHandlingEventCount(*ec, NULL, true, false));
 		return true;
 	case Stats::EVENT_CYCLE_HANDLING_AFTER_COUNT:
 		if (ec == NULL || ev == NULL) {
 			GS_THROW_USER_ERROR(GS_ERROR_EE_PARAMETER_INVALID, "");
 		}
 		value = static_cast<int64_t>(
-				Manipulator::getHandlingEventCount(*ec, ev, false));
+				Manipulator::getHandlingEventCount(*ec, ev, false, false));
+		return true;
+	case Stats::EVENT_CYCLE_HANDLING_AFTER_ONE_SHOT_COUNT:
+		if (ec == NULL || ev == NULL) {
+			GS_THROW_USER_ERROR(GS_ERROR_EE_PARAMETER_INVALID, "");
+		}
+		value = static_cast<int64_t>(
+				Manipulator::getHandlingEventCount(*ec, ev, false, true));
 		return true;
 	default:
 		break;

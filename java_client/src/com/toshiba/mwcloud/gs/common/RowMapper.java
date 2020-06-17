@@ -1760,7 +1760,7 @@ public class RowMapper {
 						"Multiple keys found");
 			}
 		}
-		
+
 		if (flatten && nested) {
 			throw new GSException(
 					GSErrorCode.ILLEGAL_SCHEMA,
@@ -3997,8 +3997,23 @@ public class RowMapper {
 					}
 				}
 				else {
-					resolveElementType(fieldValue.getClass(), true, true);
-					setAnyValueDirect(column, fieldValue);
+					final Class<?> objectType = fieldValue.getClass();
+					final GSType elemType =
+							resolveElementType(objectType, true, true);
+					if (objectType.isArray() || elemType == GSType.BLOB) {
+						try {
+							entry.elementType = elemType;
+							entry.arrayUsed = objectType.isArray();
+							setValue(column, fieldValue);
+						}
+						finally {
+							entry.elementType = null;
+							entry.arrayUsed = false;
+						}
+					}
+					else {
+						setAnyValueDirect(column, fieldValue);
+					}
 				}
 			}
 			catch (ClassCastException e) {

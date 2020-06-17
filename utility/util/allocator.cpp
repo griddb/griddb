@@ -703,6 +703,8 @@ StackAllocator::~StackAllocator() {
 }
 
 void StackAllocator::trim() {
+	UTIL_ALLOCATOR_DETAIL_LOCK_GUARD_STACK_ALLOCATOR(this);
+
 	bool adjusted = false;
 	for (bool hugeOnly = freeSize_ > base_.getElementSize();;) {
 		if (!hugeOnly && freeSize_ <= freeSizeLimit_) {
@@ -949,10 +951,12 @@ void StackAllocator::handleAllocationError(util::Exception &e) {
 }
 
 void StackAllocator::getStats(AllocatorStats &stats) {
+	UTIL_ALLOCATOR_DETAIL_STAT_GUARD_STACK_ALLOCATOR(this);
 	stats.merge(stats_);
 }
 
 void StackAllocator::setLimit(AllocatorStats::Type type, size_t value) {
+	UTIL_ALLOCATOR_DETAIL_STAT_GUARD_STACK_ALLOCATOR(this);
 	switch (type) {
 #if UTIL_ALLOCATOR_NO_CACHE_STACK_ALLOCATOR
 	default:
@@ -969,6 +973,7 @@ void StackAllocator::setLimit(AllocatorStats::Type type, size_t value) {
 }
 
 void StackAllocator::setLimit(AllocatorStats::Type type, AllocatorLimitter *limitter) {
+	UTIL_ALLOCATOR_DETAIL_STAT_GUARD_STACK_ALLOCATOR(this);
 	switch (type) {
 	case AllocatorStats::STAT_GROUP_TOTAL_LIMIT:
 		limitter_ = AllocatorLimitter::moveSize(limitter, limitter_, hugeSize_);
@@ -980,14 +985,18 @@ void StackAllocator::setLimit(AllocatorStats::Type type, AllocatorLimitter *limi
 
 
 void StackAllocator::Tool::forceReset(StackAllocator &alloc) {
+	UTIL_ALLOCATOR_DETAIL_LOCK_GUARD_STACK_ALLOCATOR(&alloc);
 	alloc.pop(NULL, 0);
 }
 
 size_t StackAllocator::Tool::getRestSize(StackAllocator &alloc) {
+	UTIL_ALLOCATOR_DETAIL_LOCK_GUARD_STACK_ALLOCATOR(&alloc);
 	return alloc.restSize_;
 }
 
 size_t StackAllocator::Tool::getRestSizeAligned(StackAllocator &alloc) {
+	UTIL_ALLOCATOR_DETAIL_LOCK_GUARD_STACK_ALLOCATOR(&alloc);
+
 	const size_t restSize = alloc.restSize_;
 
 	size_t alignedSize = detail::AllocatorUtils::getAlignedSize(restSize);

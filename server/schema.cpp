@@ -451,7 +451,6 @@ void ColumnInfo::set(TransactionContext &txn, ObjectManager &objectManager,
 
 	flags_ = 0;
 
-	int64_t hashVal = messageSchema->getColumnCount();
 	const util::Vector<ColumnId> &keyColumnIds =
 		messageSchema->getRowKeyColumnIdList();
 	util::Vector<ColumnId>::const_iterator itr = 
@@ -640,6 +639,7 @@ void ColumnSchema::set(TransactionContext &txn, ObjectManager &objectManager,
 void ColumnSchema::set(util::StackAllocator &alloc,
 		ColumnSchema *srcSchema,
 		const util::Vector<ColumnId> &columnIds) {
+	UNUSED_VARIABLE(alloc);
 	ColumnInfo *columnInfoList = getColumnInfoList();
 	uint16_t variableColumnIndex = 0;  
 	uint32_t nullsAndVarOffset =
@@ -1003,6 +1003,7 @@ void IndexSchema::updateIndexData(
 }
 
 void IndexSchema::commit(TransactionContext &txn, IndexCursor &indexCursor) {
+	UNUSED_VARIABLE(txn);
 	setDirty();
 	uint16_t nth = getNth(indexCursor.getColumnId(), indexCursor.getMapType(), indexCursor.getOId());
 	uint8_t *indexDataPos = getElemHead() + (getIndexDataSize() * nth);
@@ -1273,7 +1274,6 @@ void IndexSchema::getIndexDataList(TransactionContext &txn, util::Vector<ColumnI
 		if (!withUncommitted && indexData.status_ != DDL_READY) {
 			continue;
 		}
-		bool isMapTypeMatch;
 		if (mapType != indexData.mapType_) {
 			continue;
 		}
@@ -1597,7 +1597,7 @@ template ColumnSchema *ShareValueList::get(CONTAINER_META_TYPE type) const;
 template CompressionSchema *ShareValueList::get(CONTAINER_META_TYPE type) const;
 template BaseContainer::ExpirationInfo *ShareValueList::get(
 	CONTAINER_META_TYPE type) const;
-template char *ShareValueList::get(CONTAINER_META_TYPE type) const;
+template uint8_t *ShareValueList::get(CONTAINER_META_TYPE type) const;
 template TriggerList *ShareValueList::get(CONTAINER_META_TYPE type) const;
 template ContainerAttribute *ShareValueList::get(
 	CONTAINER_META_TYPE type) const;
@@ -1878,6 +1878,7 @@ uint64_t LinkArray<H, V>::getChainNum() const {
 template <typename H, typename V>
 void LinkArray<H, V>::getChainList(
 	TransactionContext &txn, uint64_t chainNo, BaseObject &chain) {
+	UNUSED_VARIABLE(txn);
 	if (chainNo == 0) {
 		chain.copyReference(*reinterpret_cast<BaseObject *>(this));
 		chain.moveCursor(getElementHeaderOffset());
@@ -1896,6 +1897,7 @@ void LinkArray<H, V>::getChainList(
 template <typename H, typename V>
 void LinkArray<H, V>::getChainList(
 	TransactionContext &txn, uint64_t chainNo, UpdateBaseObject &chain) {
+	UNUSED_VARIABLE(txn);
 	if (chainNo == 0) {
 		chain.copyReference(*reinterpret_cast<BaseObject *>(this));
 		chain.moveCursor(getElementHeaderOffset());

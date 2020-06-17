@@ -21,5 +21,10 @@
 		"notificationInterval":"5s",
 		"replicationMode":0,
 		"replicationTimeoutInterval":"10s"
+	},
+	"sql":{
+		"notificationAddress":"239.0.0.1",
+		"notificationPort":41999,
+		"notificationInterval":"5s"
 	}
 }

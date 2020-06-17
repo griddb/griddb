@@ -484,7 +484,7 @@ void Query::setPragma(Token *pName1, Token *pName2, Token *pValue, int) {
 bool Query::getIndexDataInAndList(TransactionContext &txn,
 	BaseContainer &container, util::XArray<BoolExpr *> &andList,
 	IndexData &indexData) {
-	MapType mapType;
+	MapType mapType = MAP_TYPE_DEFAULT;
 	ColumnInfo *indexColumnInfo;
 	uint32_t mapBitmap = 0;
 	indexColumnInfo = NULL;
@@ -506,7 +506,6 @@ bool Query::getIndexDataInAndList(TransactionContext &txn,
 						str = "HASH";
 						break;
 					case 0:
-					default:
 						mapType = MAP_TYPE_BTREE;
 						str = "BTREE";
 						break;
@@ -803,7 +802,6 @@ void Query::doQueryPartial(
 	RowId lastRowId = queryOption.getMinRowId();
 	bool isFetchSizeLimit = false;
 	bool isAllFinished = false;
-	bool enablePartialSuspend = !doExplain();
 
 	util::XArray<OId> scanOIdList(alloc);
 	for (size_t nth = 0; ; nth++) {

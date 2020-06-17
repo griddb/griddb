@@ -182,6 +182,7 @@ private:
 
 	static void allocateArrayObject(TransactionContext& txn, uint32_t size,
 		OId& oId, uint32_t& actualSize, HashArrayObject& hashArrayObject) {
+		UNUSED_VARIABLE(txn);
 		uint32_t objectSize = size2ObjectArraySize(size);
 
 		hashArrayObject.allocate<OId>(objectSize,

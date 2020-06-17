@@ -28,14 +28,13 @@
 
 class ObjectManager;
 
-
 static const uint32_t VAR_SIZE_1BYTE_THRESHOLD = 128;
 static const uint32_t VAR_SIZE_4BYTE_THRESHOLD = UINT32_C(1) << 30;
 static const uint64_t VAR_SIZE_8BYTE_THRESHOLD = UINT64_C(1) << 62;
 
 static const uint32_t NEXT_OBJECT_LINK_INFO_SIZE = 8;  
 static const uint32_t LINK_VARIABLE_COLUMN_DATA_SIZE =
-	sizeof(uint32_t) + sizeof(uint64_t);  
+	static_cast<const uint32_t>(sizeof(uint32_t) + sizeof(uint64_t));  
 static const uint32_t AFFINITY_STRING_MAX_LENGTH =
 	8;  
 static const char *const DEFAULT_AFFINITY_STRING =

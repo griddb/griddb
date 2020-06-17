@@ -27,6 +27,7 @@
 #include "cluster_service.h"
 #include "system_service.h"
 #include "transaction_service.h"
+#include "cluster_manager.h"
 
 #include "chunk_manager.h"  
 #include "data_store.h"
@@ -40,6 +41,15 @@
 
 using util::ValueFormatter;
 
+
+#include "sql_job_manager.h"
+#include "sql_execution_manager.h"
+#include "sql_execution.h"
+#include "sql_service.h"
+#include "sql_processor.h"
+#include "sql_compiler.h"
+
+#include "resource_set.h"
 
 #ifndef _WIN32
 #include <signal.h>  
@@ -59,6 +69,7 @@ typedef ObjectManager OCManager;
 UTIL_TRACER_DECLARE(SYSTEM_SERVICE);
 UTIL_TRACER_DECLARE(SYSTEM_SERVICE_DETAIL);
 UTIL_TRACER_DECLARE(CLUSTER_OPERATION);
+UTIL_TRACER_DECLARE(DISTRIBUTED_FRAMEWORK);
 
 UTIL_TRACER_DECLARE(CLUSTER_DETAIL);
 
@@ -106,6 +117,7 @@ SystemService::SystemService(ConfigTable &config, EventEngine::Config eeConfig,
 	  txnSvc_(NULL),
 	  txnMgr_(NULL),
 	  recoveryMgr_(NULL),
+	  sqlSvc_(NULL),
 	  fixedSizeAlloc_(NULL),
 	  varSizeAlloc_(NULL),
 	  multicastAddress_(
@@ -206,29 +218,30 @@ EventEngine::Config &SystemService::createEEConfig(
 	return eeConfig;
 }
 
-void SystemService::initialize(ManagerSet &mgrSet) {
-	clsSvc_ = mgrSet.clsSvc_;
+void SystemService::initialize(ResourceSet &resourceSet) {
+	clsSvc_ = resourceSet.clsSvc_;
 	clsMgr_ = clsSvc_->getManager();
-	pt_ = mgrSet.pt_;
-	syncSvc_ = mgrSet.syncSvc_;
-	cpSvc_ = mgrSet.cpSvc_;
-	chunkMgr_ = mgrSet.chunkMgr_;
-	dataStore_ = mgrSet.ds_;
-	txnSvc_ = mgrSet.txnSvc_;
-	txnMgr_ = mgrSet.txnMgr_;
-	recoveryMgr_ = mgrSet.recoveryMgr_;
-	fixedSizeAlloc_ = mgrSet.fixedSizeAlloc_;
-	varSizeAlloc_ = mgrSet.varSizeAlloc_;
-	logMgr_ = mgrSet.logMgr_;
-	syncMgr_ = mgrSet.syncMgr_;
+	pt_ = resourceSet.pt_;
+	syncSvc_ = resourceSet.syncSvc_;
+	cpSvc_ = resourceSet.cpSvc_;
+	chunkMgr_ = resourceSet.chunkMgr_;
+	dataStore_ = resourceSet.ds_;
+	txnSvc_ = resourceSet.txnSvc_;
+	txnMgr_ = resourceSet.txnMgr_;
+	recoveryMgr_ = resourceSet.recoveryMgr_;
+	fixedSizeAlloc_ = resourceSet.fixedSizeAlloc_;
+	varSizeAlloc_ = resourceSet.varSizeAlloc_;
+	logMgr_ = resourceSet.logMgr_;
+	syncMgr_ = resourceSet.syncMgr_;
+	sqlSvc_ = resourceSet.sqlSvc_;
 
-	baseStats_ = mgrSet.stats_;
+	baseStats_ = resourceSet.stats_;
 
-	mgrSet.stats_->addUpdator(&statUpdator_);
+	resourceSet.stats_->addUpdator(&statUpdator_);
 
-	webapiServerThread_.initialize(mgrSet);
-	outputStatsHandler_.initialize(mgrSet);
-	serviceThreadErrorHandler_.initialize(mgrSet);
+	webapiServerThread_.initialize(resourceSet);
+	outputStatsHandler_.initialize(resourceSet);
+	serviceThreadErrorHandler_.initialize(resourceSet);
 
 
 	initailized_ = true;
@@ -245,7 +258,7 @@ bool SystemService::joinCluster(const Event::Source &eventSource,
 			"Join cluster called (clusterName="
 				<< clusterName << ", clusterNodeNum=" << minNodeNum << ")");
 
-		ClusterManager::JoinClusterInfo joinClusterInfo(alloc, 0, true);
+		JoinClusterInfo joinClusterInfo(alloc, 0, true);
 		joinClusterInfo.set(clusterName, minNodeNum);
 
 		try {
@@ -326,7 +339,7 @@ bool SystemService::leaveCluster(const Event::Source &eventSource,
 		GS_TRACE_INFO(
 			SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED, "Leave cluster called");
 
-		ClusterManager::LeaveClusterInfo leaveClusterInfo(
+		LeaveClusterInfo leaveClusterInfo(
 			alloc, 0, true, isForce);
 
 		try {
@@ -364,7 +377,7 @@ void SystemService::shutdownNode(const Event::Source &eventSource,
 				"Normal shutdown node called");
 		}
 
-		ClusterManager::ShutdownNodeInfo shutdownNodeInfo(alloc, 0, isForce);
+		ShutdownNodeInfo shutdownNodeInfo(alloc, 0, isForce);
 
 		EventType eventType;
 		if (!isForce) {
@@ -391,7 +404,7 @@ void SystemService::shutdownCluster(
 		GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
 			"Shutdown cluster called");
 
-		ClusterManager::ShutdownClusterInfo shutdownClusterInfo(alloc, 0);
+		ShutdownClusterInfo shutdownClusterInfo(alloc, 0);
 		clsSvc_->request(eventSource, CS_SHUTDOWN_CLUSTER,
 			CS_HANDLER_PARTITION_ID, clsSvc_->getEE(), shutdownClusterInfo);
 	}
@@ -400,6 +413,7 @@ void SystemService::shutdownCluster(
 			e, GS_EXCEPTION_MERGE_MESSAGE(e, "Shutdown node failed"));
 	}
 }
+
 /*!
 	@brief Handles increaseCluster command
 */
@@ -409,7 +423,7 @@ void SystemService::increaseCluster(
 		GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
 			"Increase cluster called");
 
-		ClusterManager::IncreaseClusterInfo increaseClusterInfo(alloc, 0);
+		IncreaseClusterInfo increaseClusterInfo(alloc, 0);
 		clsSvc_->request(eventSource, CS_INCREASE_CLUSTER,
 			CS_HANDLER_PARTITION_ID, clsSvc_->getEE(), increaseClusterInfo);
 	}
@@ -431,7 +445,7 @@ bool SystemService::decreaseCluster(const Event::Source &eventSource,
 			"autoLeave="
 				<< ValueFormatter()(isAutoLeave) << ")");
 
-		ClusterManager::DecreaseClusterInfo decreaseClusterInfo(
+		DecreaseClusterInfo decreaseClusterInfo(
 			alloc, 0, pt_, true, isAutoLeave, leaveNum);
 		try {
 			clsMgr_->setDecreaseClusterInfo(decreaseClusterInfo);
@@ -475,6 +489,7 @@ bool SystemService::decreaseCluster(const Event::Source &eventSource,
 			e, GS_EXCEPTION_MERGE_MESSAGE(e, "Decrease cluster failed"));
 	}
 }
+
 
 /*!
 	@brief Handles backupNode command
@@ -859,10 +874,8 @@ void SystemService::getHosts(picojson::value &result, int32_t addressTypeNum) {
 		}
 		hosts["follower"] = picojson::value(followerarray);
 
-#ifdef GD_ENABLE_UNICAST_NOTIFICATION
 		if (clsSvc_->getNotificationManager().getMode() ==
 			NOTIFICATION_MULTICAST)
-#endif
 		{
 			picojson::object multicast;
 			multicast["address"] = picojson::value(multicastAddress_);
@@ -953,12 +966,24 @@ void SystemService::getPartitions(util::StackAllocator &alloc,
 						partition["owner"] = picojson::value();
 					}
 				}
+				if (sqlOwnerDump)
+				{
+					const NodeId nodeId = pt_->getNewSQLOwner(pId);
+					picojson::value &addressValue = partition["sqlOwner"];
+					if (nodeId != UNDEF_NODEID) {
+						addressValue = picojson::value(picojson::object());
+						getServiceAddress(
+								pt_, nodeId,
+								JsonUtils::as<picojson::object>(addressValue),
+								addressType);
+					}
+				}
 				{
 					picojson::array &nodeList =
 						setJsonArray(partition["backup"]);
 					util::XArray<NodeId> backupList(alloc);
 					pt_->getBackup(
-						pId, backupList, PartitionTable::PT_CURRENT_OB);
+						pId, backupList, PT_CURRENT_OB);
 					if (!backupList.empty()) {
 						for (size_t pos = 0; pos < backupList.size(); pos++) {
 							picojson::object backup;
@@ -991,7 +1016,7 @@ void SystemService::getPartitions(util::StackAllocator &alloc,
 						setJsonArray(partition["catchup"]);
 					util::XArray<NodeId> catchupList(alloc);
 					pt_->getCatchup(
-						pId, catchupList, PartitionTable::PT_CURRENT_OB);
+						pId, catchupList, PT_CURRENT_OB);
 					if (!catchupList.empty()) {
 						for (size_t pos = 0; pos < catchupList.size(); pos++) {
 							picojson::object catchup;
@@ -1048,7 +1073,7 @@ void SystemService::getPartitions(util::StackAllocator &alloc,
 					retStr = "BACKUP";
 				}
 				else if (pt_->isCatchup(
-							 pId, 0, PartitionTable::PT_CURRENT_OB)) {
+							 pId, 0, PT_CURRENT_OB)) {
 					retStr = "CATCHUP";
 				}
 				else {
@@ -1146,6 +1171,30 @@ void SystemService::getStats(picojson::value &result, StatTable &stats) {
 	}
 }
 
+void SystemService::traceStats() {
+	try {
+		StatTable stats(*varSizeAlloc_);
+		stats.initialize(*baseStats_);
+		WebAPIRequest::ParameterMap parameterMap;
+		parameterMap["detail"] = "true";
+		acceptStatsOption(stats, parameterMap);
+		stats.setDisplayOption(STAT_TABLE_DISPLAY_WEB_ONLY, true);
+		stats.setDisplayOption(STAT_TABLE_DISPLAY_SELECT_CS, true);
+		stats.setDisplayOption(STAT_TABLE_DISPLAY_SELECT_CP, true);
+		stats.setDisplayOption(STAT_TABLE_DISPLAY_SELECT_RM, true);
+		stats.setDisplayOption(STAT_TABLE_DISPLAY_SELECT_PERF, true);
+		picojson::value result;
+		getStats(result, stats);
+		std::string data = result.serialize();
+		GS_TRACE_INFO(CLUSTER_OPERATION,
+				GS_TRACE_CS_CLUSTER_STATUS, result.serialize());
+	}
+	catch (std::exception &e) {
+		GS_RETHROW_USER_OR_SYSTEM(
+			e, GS_EXCEPTION_MERGE_MESSAGE(e, "Get stat failed"));
+	}
+}
+
 /*!
 	@brief Gets the statistics about synchronization
 */
@@ -1164,7 +1213,7 @@ void SystemService::getSyncStats(picojson::value &result) {
 		util::XArray<NodeId> catchups(alloc);
 		NodeId owner = pt_->getOwner(currentCatchupPId);
 		pt_->getCatchup(
-			currentCatchupPId, catchups, PartitionTable::PT_CURRENT_OB);
+			currentCatchupPId, catchups, PT_CURRENT_OB);
 		if (owner != UNDEF_NODEID && catchups.size() == 1) {
 				syncStats["pId"] =
 					picojson::value(static_cast<double>(currentCatchupPId));
@@ -1218,6 +1267,16 @@ void SystemService::getPGStoreMemoryLimitStats(picojson::value &result) {
 			picojson::value(static_cast<double>(stats.getPGNormalSwapRead(pgId)));
 		pgInfo["pgColdBufferingSwapRead"] =
 			picojson::value(static_cast<double>(stats.getPGColdBufferingSwapRead(pgId)));
+		pgInfo["pgCpChunkCount"] =
+			picojson::value(static_cast<double>(stats.getPGCheckpointChunkCount(pgId)));
+		pgInfo["pgCpKickCount"] =
+			picojson::value(static_cast<double>(stats.getPGCheckpointKickCount(pgId)));
+		pgInfo["pgCpKickTime"] =
+			picojson::value(static_cast<double>(stats.getPGCheckpointKickTime(pgId)));
+		pgInfo["pgCpKickCompressTime"] =
+			picojson::value(static_cast<double>(stats.getPGCheckpointKickCompressTime(pgId)));
+		pgInfo["pgCpCopyCount"] =
+			picojson::value(static_cast<double>(stats.getPGCheckpointCopyCount(pgId)));
 		picojson::array pgCategoryStoreUseList;
 		picojson::array pgCategoryStoreMemList;
 		picojson::array pgCategorySwapReadList;
@@ -1526,15 +1585,408 @@ void SystemService::testEventLogLevel() {
 }
 
 
+bool SystemService::getSQLProcessorProfile(
+		util::StackAllocator &alloc, EventEngine::VariableSizeAllocator &varSizeAlloc,
+		picojson::value &result, const int64_t *id) {
+	typedef SQLProcessor::ProfilerManager Manager;
+	if (!Manager::isEnabled()) {
+		return false;
+	}
 
+	Manager &manager = Manager::getInstance();
+	if (id == NULL) {
+		util::Vector<Manager::ProfilerId> idList(alloc);
+		manager.listIds(idList);
 
+		JsonUtils::OutStream out(result);
+		util::ObjectCoder().encode(out, idList);
+	}
+	else {
+		SQLProcessor::Profiler profiler(varSizeAlloc);
+		if (!manager.getProfiler(*id, profiler)) {
+			return false;
+		}
+		result = profiler.getResult();
+	}
 
+	return true;
+}
 
+bool SystemService::getSQLProcessorGlobalProfile(picojson::value &result) {
+	typedef SQLProcessor::ProfilerManager Manager;
+	if (!Manager::isEnabled()) {
+		return false;
+	}
 
+	Manager &manager = Manager::getInstance();
+	manager.getGlobalProfile(result);
+	return true;
+}
 
+bool SystemService::setSQLProcessorConfig(
+		const char8_t *key, const char8_t *value, bool forProfiler) {
+	if (forProfiler) {
+		typedef SQLProcessor::ProfilerManager Manager;
+		if (!Manager::isEnabled()) {
+			return false;
+		}
 
+		bool boolValue;
+		if (strlen(value) == 0) {
+			boolValue = false;
+		}
+		else if (!util::LexicalConverter<bool>()(value, boolValue)) {
+			return false;
+		}
 
+		Manager &manager = Manager::getInstance();
+		if (strcmp(key, "sub") == 0) {
+			manager.setActivated(Manager::PROFILE_CORE, boolValue);
+		}
+		else if (strcmp(key, "memory") == 0) {
+			manager.setActivated(Manager::PROFILE_MEMORY, boolValue);
+		}
+		else if (strcmp(key, "index") == 0) {
+			manager.setActivated(Manager::PROFILE_INDEX, boolValue);
+		}
+		else if (strcmp(key, "interruption") == 0) {
+			manager.setActivated(Manager::PROFILE_INTERRUPTION, boolValue);
+		}
+		else if (strcmp(key, "error") == 0) {
+			manager.setActivated(Manager::PROFILE_ERROR, boolValue);
+		}
+		else {
+			return false;
+		}
+	}
+	else {
+		typedef SQLProcessorConfig::Manager Manager;
+		if (!Manager::isEnabled()) {
+			return false;
+		}
 
+		int64_t intValue;
+		if (strlen(value) == 0) {
+			intValue = -1;
+		}
+		else if (!util::LexicalConverter<int64_t>()(value, intValue)) {
+			return false;
+		}
+
+		picojson::value configValue((picojson::object()));
+		configValue.get<picojson::object>()[key] =
+				picojson::value(static_cast<double>(intValue));
+		JsonUtils::InStream in(configValue);
+
+		Manager &manager = Manager::getInstance();
+		SQLProcessorConfig config;
+
+		manager.mergeTo(config);
+		util::ObjectCoder::withoutOptional().decode(in, config);
+
+		manager.apply(config, true);
+	}
+
+	return true;
+}
+
+bool SystemService::getSQLProcessorConfig(
+		bool forProfiler, picojson::value &result) {
+	if (forProfiler) {
+		typedef SQLProcessor::ProfilerManager Manager;
+		if (!Manager::isEnabled()) {
+			return false;
+		}
+
+		result = picojson::value(picojson::object());
+		picojson::object &resultObj = result.get<picojson::object>();
+
+		Manager &manager = Manager::getInstance();
+		resultObj["sub"] = picojson::value(
+				manager.isActivated(Manager::PROFILE_CORE));
+		resultObj["memory"] = picojson::value(
+				manager.isActivated(Manager::PROFILE_MEMORY));
+		resultObj["index"] = picojson::value(
+				manager.isActivated(Manager::PROFILE_INDEX));
+		resultObj["interruption"] = picojson::value(
+				manager.isActivated(Manager::PROFILE_INTERRUPTION));
+		resultObj["error"] = picojson::value(
+				manager.isActivated(Manager::PROFILE_ERROR));
+	}
+	else {
+		typedef SQLProcessorConfig::Manager Manager;
+		if (!Manager::isEnabled()) {
+			return false;
+		}
+
+		SQLProcessorConfig config;
+
+		Manager &manager = Manager::getInstance();
+		manager.mergeTo(config);
+
+		JsonUtils::OutStream out(result);
+		util::ObjectCoder::withDefaults().encode(out, config);
+	}
+
+	return true;
+}
+
+bool SystemService::getSQLProcessorPartialStatus(picojson::value &result) {
+	typedef SQLProcessorConfig::Manager Manager;
+	if (!Manager::isEnabled()) {
+		return false;
+	}
+
+	Manager &manager = Manager::getInstance();
+
+	SQLProcessorConfig::PartialStatus status;
+	if (!manager.getPartialStatus(status)) {
+		result = picojson::value(picojson::object());
+		return true;
+	}
+
+	JsonUtils::OutStream out(result);
+	util::ObjectCoder().encode(out, status);
+
+	return true;
+}
+
+bool SystemService::setSQLProcessorSimulation(
+		util::StackAllocator &alloc, const picojson::value &request) {
+	typedef SQLProcessorConfig::Manager Manager;
+	if (!Manager::isEnabled()) {
+		return false;
+	}
+
+	Manager &manager = Manager::getInstance();
+	if (request.is<picojson::object>() &&
+			request.get<picojson::object>().empty()) {
+		manager.clearSimulation();
+		return true;
+	}
+
+	util::Vector<Manager::SimulationEntry> simulationList(alloc);
+	{
+		const picojson::array &src =
+				JsonUtils::as<picojson::array>(request, "simulationList");
+		for (picojson::array::const_iterator it = src.begin();
+				it != src.end(); ++it) {
+			Manager::SimulationEntry srcEntry;
+			srcEntry.set(*it);
+			simulationList.push_back(srcEntry);
+		}
+	}
+
+	SQLType::Id type;
+	{
+		JsonUtils::InStream in(
+				JsonUtils::as<picojson::value>(request, "type"));
+		util::ObjectCoder().decode(
+				in, util::EnumCoder()(type, SQLType::Coder()).coder());
+	}
+
+	int64_t inputCount;
+	{
+		JsonUtils::InStream in(
+				JsonUtils::as<picojson::value>(request, "inputCount"));
+		util::ObjectCoder().decode(in, inputCount);
+	}
+
+	manager.setSimulation(simulationList, type, inputCount);
+	return true;
+}
+
+bool SystemService::getSQLProcessorSimulation(
+		util::StackAllocator &alloc, picojson::value &result) {
+	typedef SQLProcessorConfig::Manager Manager;
+	if (!Manager::isEnabled()) {
+		return false;
+	}
+
+	Manager &manager = Manager::getInstance();
+
+	typedef util::Vector<Manager::SimulationEntry> SimulationList;
+	SimulationList simulationList(alloc);
+	SQLType::Id type;
+	int64_t inputCount;
+
+	result = picojson::value(picojson::object());
+	picojson::object &resultObj = result.get<picojson::object>();
+
+	if (!manager.getSimulation(simulationList, type, inputCount)) {
+		return true;
+	}
+
+	{
+		picojson::value &destValue = resultObj["simulationList"];
+
+		destValue = picojson::value(picojson::array());
+		picojson::array &dest = destValue.get<picojson::array>();
+
+		for (SimulationList::const_iterator it = simulationList.begin();
+				it != simulationList.end(); ++it) {
+			dest.push_back(picojson::value());
+			it->get(dest.back());
+		}
+	}
+
+	{
+		const SQLType::Id &inType = type;
+		JsonUtils::OutStream out(resultObj["type"]);
+		util::ObjectCoder().encode(
+				out, util::EnumCoder()(inType, SQLType::Coder()).coder());
+	}
+
+	{
+		JsonUtils::OutStream out(resultObj["inputCount"]);
+		util::ObjectCoder().encode(out, inputCount);
+	}
+
+	return true;
+}
+
+bool SystemService::getSQLCompilerProfile(
+		util::StackAllocator &alloc, int32_t index,
+		const util::Set<util::String> &filteringSet, picojson::value &result) {
+	typedef SQLCompiler::ProfilerManager Manager;
+	if (!Manager::isEnabled()) {
+		return false;
+	}
+
+	if (index < 0) {
+		return false;
+	}
+
+	Manager &manager = Manager::getInstance();
+
+	SQLCompiler::Profiler *profiler =
+			manager.getProfiler(alloc, static_cast<uint32_t>(index));
+	if (profiler == NULL) {
+		return false;
+	}
+
+	if (!filteringSet.empty()) {
+		size_t foundCount = 2;
+		if (filteringSet.find(
+				util::String("plan", alloc)) == filteringSet.end()) {
+			profiler->plan_ = SQLPreparedPlan(alloc);
+			profiler->tableInfoList_.clear();
+			foundCount--;
+		}
+		if (filteringSet.find(
+				util::String("optimize", alloc)) == filteringSet.end()) {
+			profiler->optimizationResult_.clear();
+			foundCount--;
+		}
+		if (filteringSet.size() != foundCount) {
+			return false;
+		}
+	}
+
+	JsonUtils::OutStream out(result);
+	TupleValue::coder(util::ObjectCoder(), NULL).encode(out, *profiler);
+
+	return true;
+}
+
+bool SystemService::setSQLCompilerConfig(
+		const char8_t *category, const char8_t *key, const char8_t *value) {
+	typedef SQLCompiler::ProfilerManager Manager;
+	if (!Manager::isEnabled()) {
+		return false;
+	}
+
+	Manager &manager = Manager::getInstance();
+
+	if (strcmp(category, "profile") == 0) {
+		SQLCompiler::Profiler::Target target = manager.getTarget();
+
+		bool boolValue;
+		if (strlen(value) == 0) {
+			boolValue = false;
+		}
+		else if (!util::LexicalConverter<bool>()(value, boolValue)) {
+			return false;
+		}
+
+		picojson::value jsonValue((picojson::object()));
+		jsonValue.get<picojson::object>()[key] = picojson::value(boolValue);
+		JsonUtils::InStream in(jsonValue);
+		util::ObjectCoder().decode(in, target);
+
+		manager.setTarget(target);
+		return true;
+	}
+	else if (strcmp(category, "optimize") == 0) {
+		if (!manager.isEnabled()) {
+			return false;
+		}
+
+		bool forDefault = false;
+		bool boolValue = true;
+		if (strlen(value) == 0) {
+			forDefault = true;
+		}
+		else if (!util::LexicalConverter<bool>()(value, boolValue)) {
+			return false;
+		}
+
+		SQLCompiler::OptimizationUnitType type;
+		if (!SQLCompiler::OptimizationUnit::TYPE_CODER(key, type)) {
+			return false;
+		}
+
+		typedef SQLCompiler::OptimizationFlags Flags;
+		Flags flags = (forDefault ? 0 : manager.getOptimizationFlags());
+		if (boolValue) {
+			flags |= static_cast<Flags>(1 << type);
+		}
+		else {
+			flags &= ~static_cast<Flags>(1 << type);
+		}
+
+		manager.setOptimizationFlags(flags, forDefault);
+		return true;
+	}
+	else {
+		return false;
+	}
+}
+
+bool SystemService::getSQLCompilerConfig(
+		const char8_t *category, picojson::value &result) {
+	typedef SQLCompiler::ProfilerManager Manager;
+	if (!Manager::isEnabled()) {
+		return false;
+	}
+
+	Manager &manager = Manager::getInstance();
+
+	if (strcmp(category, "profile") == 0) {
+		JsonUtils::OutStream out(result);
+		util::ObjectCoder::withDefaults().encode(out, manager.getTarget());
+	}
+	else if (strcmp(category, "optimize") == 0) {
+		result = picojson::value(picojson::object());
+		picojson::object &resultObj = result.get<picojson::object>();
+
+		typedef SQLCompiler::OptimizationFlags Flags;
+		const Flags flags = manager.getOptimizationFlags();
+
+		for (int32_t i = 0; i < SQLCompiler::OPT_END; i++) {
+			const char8_t *name = SQLCompiler::OptimizationUnit::TYPE_CODER(
+					static_cast<SQLCompiler::OptimizationUnitType>(i));
+			const bool value = ((flags & (static_cast<Flags>(1) << i)) != 0);
+
+			resultObj[name] = picojson::value(value);
+		}
+	}
+	else {
+		return false;
+	}
+
+	return true;
+}
 
 /*!
 	@brief Writes statistics periodically to Event Log file
@@ -1622,6 +2074,9 @@ int32_t SystemService::resolveAddressType(
 	else if (typeStr == "system") {
 		return SYSTEM_SERVICE;
 	}
+	else if (typeStr == "sql") {
+		return SQL_SERVICE;
+	}
 	else {
 		return -1;
 	}
@@ -1651,20 +2106,14 @@ bool SystemService::acceptStatsOption(
 		return false;
 	}
 
-#ifdef GD_ENABLE_UNICAST_NOTIFICATION
 	const size_t maxNameListSize = 9;
-#else
-	const size_t maxNameListSize = 8;
-#endif
 
 	const char8_t *const allNameList[][maxNameListSize] = {
 		{"all", "clusterInfo", "recoveryInfo", "cpInfo", "performanceInfo",
 			NULL},
 		{"detail", "clusterDetail", "storeDetail", "transactionDetail",
 			"memoryDetail", "syncDetail", "pgLimitDetail",
-#ifdef GD_ENABLE_UNICAST_NOTIFICATION
 			"notificationMember",
-#endif
 			NULL}};
 
 	const int32_t allOptionList[][maxNameListSize] = {
@@ -1674,9 +2123,7 @@ bool SystemService::acceptStatsOption(
 			STAT_TABLE_DISPLAY_OPTIONAL_TXN, STAT_TABLE_DISPLAY_OPTIONAL_MEM,
 			STAT_TABLE_DISPLAY_OPTIONAL_SYNC,
 			STAT_TABLE_DISPLAY_OPTIONAL_PGLIMIT,
-#ifdef GD_ENABLE_UNICAST_NOTIFICATION
 			STAT_TABLE_DISPLAY_OPTIONAL_NOTIFICATION_MEMBER,
-#endif
 			-1}};
 
 	for (size_t i = 0; i < sizeof(allNameList) / sizeof(*allNameList); i++) {
@@ -1735,7 +2182,7 @@ void OutputStatsHandler::operator()(EventContext &ec, Event &) {
 	if (pt_->isMaster()) {
 		GS_TRACE_INFO(CLUSTER_DETAIL,
 				GS_TRACE_CS_TRACE_STATS,
-				pt_->dumpPartitionsList(ec.getAllocator(), PartitionTable::PT_CURRENT_OB));
+				pt_->dumpPartitionsList(ec.getAllocator(), PT_CURRENT_OB));
 		GS_TRACE_INFO(CLUSTER_DETAIL, GS_TRACE_CS_CLUSTER_STATUS,
 				clsMgr_->dump());
 		{
@@ -1743,7 +2190,7 @@ void OutputStatsHandler::operator()(EventContext &ec, Event &) {
 			GS_TRACE_INFO(CLUSTER_DETAIL,
 				GS_TRACE_CS_CLUSTER_STATUS,
 				pt_->dumpPartitions(
-					alloc, PartitionTable::PT_CURRENT_OB));
+					alloc, PT_CURRENT_OB));
 		}
 		GS_TRACE_INFO(CLUSTER_DETAIL, GS_TRACE_CS_CLUSTER_STATUS,
 				pt_->dumpDatas(true));
@@ -1753,10 +2200,10 @@ void OutputStatsHandler::operator()(EventContext &ec, Event &) {
 
 SystemService::WebAPIServerThread::WebAPIServerThread() : runnable_(true) {}
 
-void SystemService::WebAPIServerThread::initialize(ManagerSet &mgrSet) {
-	sysSvc_ = mgrSet.sysSvc_;
-	clsSvc_ = mgrSet.clsSvc_;
-	mgrSet_ = &mgrSet;
+void SystemService::WebAPIServerThread::initialize(ResourceSet &resourceSet) {
+	sysSvc_ = resourceSet.sysSvc_;
+	clsSvc_ = resourceSet.clsSvc_;
+	resourceSet_ = &resourceSet;
 }
 
 /*!
@@ -1764,7 +2211,7 @@ void SystemService::WebAPIServerThread::initialize(ManagerSet &mgrSet) {
 */
 void SystemService::WebAPIServerThread::run() {
 	try {
-		ListenerSocketHandler socketHandler(*mgrSet_);
+		ListenerSocketHandler socketHandler(*resourceSet_);
 		util::Socket &socket = socketHandler.getFile();
 
 		socket.open(
@@ -1774,9 +2221,9 @@ void SystemService::WebAPIServerThread::run() {
 
 		util::SocketAddress addr;
 		EventEngine::Config tmp;
-		tmp.setServerAddress(mgrSet_->config_->get<const char8_t *>(
+		tmp.setServerAddress(resourceSet_->config_->get<const char8_t *>(
 								 CONFIG_TABLE_SYS_SERVICE_ADDRESS),
-			mgrSet_->config_->getUInt16(CONFIG_TABLE_SYS_SERVICE_PORT));
+			resourceSet_->config_->getUInt16(CONFIG_TABLE_SYS_SERVICE_PORT));
 
 		addr.assign(
 			NULL, tmp.serverAddress_.getPort(), tmp.serverAddress_.getFamily());
@@ -1813,20 +2260,21 @@ void SystemService::WebAPIServerThread::waitForShutdown() {
 	join();
 }
 
-SystemService::ListenerSocketHandler::ListenerSocketHandler(ManagerSet &mgrSet)
-	: clsSvc_(mgrSet.clsSvc_),
-	  syncSvc_(mgrSet.syncSvc_),
-	  sysSvc_(mgrSet.sysSvc_),
-	  txnSvc_(mgrSet.txnSvc_),
-	  pt_(mgrSet.pt_),
-	  syncMgr_(mgrSet.syncSvc_->getManager()),
-	  clsMgr_(mgrSet.clsSvc_->getManager()),
-	  chunkMgr_(mgrSet.chunkMgr_),
-	  cpSvc_(mgrSet.cpSvc_),
-	  fixedSizeAlloc_(mgrSet.fixedSizeAlloc_),
+SystemService::ListenerSocketHandler::ListenerSocketHandler(ResourceSet &resourceSet)
+	: clsSvc_(resourceSet.clsSvc_),
+	  syncSvc_(resourceSet.syncSvc_),
+	  sysSvc_(resourceSet.sysSvc_),
+	  txnSvc_(resourceSet.txnSvc_),
+	  pt_(resourceSet.pt_),
+	  syncMgr_(resourceSet.syncSvc_->getManager()),
+	  clsMgr_(resourceSet.clsSvc_->getManager()),
+	  chunkMgr_(resourceSet.chunkMgr_),
+	  cpSvc_(resourceSet.cpSvc_),
+	  fixedSizeAlloc_(resourceSet.fixedSizeAlloc_),
 	  varSizeAlloc_(util::AllocatorInfo(ALLOCATOR_GROUP_SYS, "webListenerVar")),
 	  alloc_(util::AllocatorInfo(ALLOCATOR_GROUP_SYS, "webListenerStack"),
-		  fixedSizeAlloc_) {
+		  fixedSizeAlloc_),
+	resourceSet_(&resourceSet) {
 	alloc_.setFreeSizeLimit(alloc_.base().getElementSize());
 }
 
@@ -2823,12 +3271,9 @@ void SystemService::ListenerSocketHandler::dispatch(
 			std::cout << clsMgr_->dump();
 			{
 				std::cout << pt_->dumpPartitions(
-					alloc_, PartitionTable::PT_CURRENT_OB);
+					alloc_, PT_CURRENT_OB);
 			}
 			std::cout << pt_->dumpDatas(true);
-
-
-
 			if (request.parameterMap_.find("trace") !=
 				request.parameterMap_.end()) {
 				const std::string resetStr = request.parameterMap_["trace"];
@@ -2839,14 +3284,455 @@ void SystemService::ListenerSocketHandler::dispatch(
 						GS_TRACE_INFO(CLUSTER_OPERATION,
 							GS_TRACE_CS_CLUSTER_STATUS,
 							pt_->dumpPartitions(
-								alloc_, PartitionTable::PT_CURRENT_OB));
+								alloc_, PT_CURRENT_OB));
 					}
 					GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_CLUSTER_STATUS,
 						pt_->dumpDatas(true));
 				}
 			}
 		}
+		else if (request.pathElements_.size() == 2 &&
+				request.pathElements_[1] == "sql") {
+			SQLExecutionManager *executionManager
+					= resourceSet_->getSQLExecutionManager();
+			picojson::value jsonOutValue;
+			SQLProfiler profs(alloc_);
+			executionManager->getProfiler(alloc_, profs);
+			JsonUtils::OutStream out(jsonOutValue);
+			util::ObjectCoder().encode(out, profs);
 
+			if (request.parameterMap_.find("callback") !=
+				request.parameterMap_.end()) {
+				response.setJson(request.parameterMap_["callback"], jsonOutValue);
+			}
+			else {
+				response.setJson(jsonOutValue);
+			}
+		}
+		else if (request.pathElements_.size() == 3 &&
+				request.pathElements_[1] == "sql" && request.pathElements_[2] == "job") {
+			JobManager *jobManager
+					= resourceSet_->getJobManager();
+
+			StatJobIdList infoList(alloc_);
+			picojson::value jsonOutValue;
+			jobManager->getJobIdList(alloc_, infoList);
+			JsonUtils::OutStream out(jsonOutValue);
+			util::ObjectCoder().encode(out, infoList);
+			if (request.parameterMap_.find("callback") !=
+				request.parameterMap_.end()) {
+				response.setJson(request.parameterMap_["callback"], jsonOutValue);
+			}
+			else {
+				response.setJson(jsonOutValue);
+			}
+		}
+		else if (request.pathElements_.size() == 3 &&
+				request.pathElements_[1] == "sql" && request.pathElements_[2] == "cache") {
+			if (request.method_ != EBB_GET) {
+				response.setMethodError();
+				return;
+			}
+			std::string dbName;
+			if (request.parameterMap_.find("dbName") !=
+					request.parameterMap_.end()) {
+				dbName = request.parameterMap_["dbName"];
+				SQLExecutionManager *executionManager
+							= resourceSet_->getSQLExecutionManager();
+				util::NormalOStringStream oss;
+				executionManager->dumpTableCache(oss, dbName.c_str());
+				std::cout << oss.str().c_str() << std::endl;
+
+				if (request.parameterMap_.find("cacheSize") !=
+						request.parameterMap_.end()) {
+					int32_t cacheSize = atoi(request.parameterMap_["cacheSize"].c_str());
+					executionManager->resizeTableCache(dbName.c_str(), cacheSize);
+				}
+			}
+		}
+		else if (request.pathElements_.size() == 4 &&
+				 request.pathElements_[1] == "sql" && request.pathElements_[2] == "job" 
+						&& request.pathElements_[3] == "profs") {
+			if (request.method_ != EBB_GET) {
+				response.setMethodError();
+				return;
+			}
+			int32_t mode = 0;
+			if (request.parameterMap_.find("mode") !=
+				request.parameterMap_.end()) {
+				if (request.parameterMap_["mode"] == "1") {
+					mode = 1;
+				}
+			}
+			JobManager *jobManager =
+					resourceSet_->getJobManager();
+			StatJobProfiler profs(alloc_);
+			profs.currentTime_ = getTimeStr(util::DateTime::now(false).getUnixTime()).c_str();
+			jobManager->getProfiler(alloc_, profs, mode);
+			picojson::value jsonOutValue;
+			JsonUtils::OutStream out(jsonOutValue);
+			util::ObjectCoder().encode(out, profs);
+
+			if (request.parameterMap_.find("callback") !=
+				request.parameterMap_.end()) {
+				response.setJson(request.parameterMap_["callback"], jsonOutValue);
+			}
+			else {
+				response.setJson(jsonOutValue);
+			}
+		}
+		else if (request.pathElements_.size() == 4 &&
+				 request.pathElements_[1] == "sql" && request.pathElements_[2] == "job" 
+						&& request.pathElements_[3] == "cancel") {
+			if (request.method_ != EBB_POST) {
+				response.setMethodError();
+				return;
+			}
+			util::String jobIdString(alloc_);
+			bool isError = false;
+			if (request.parameterMap_.find("jobId") !=
+				request.parameterMap_.end()) {
+				jobIdString = request.parameterMap_["jobId"].c_str();
+			}
+
+			util::String startTimeString(alloc_);
+			if (request.parameterMap_.find("startTime") !=
+				request.parameterMap_.end()) {
+				startTimeString = request.parameterMap_["startTime"].c_str();
+			}
+			CancelOption option(startTimeString);
+
+			JobManager *jobManager
+					= resourceSet_->getJobManager();
+			util::Vector<JobId> jobIdList(alloc_);
+			if (!jobIdString.empty()) {
+				JobId jobId;
+				try {
+					jobId.parse(alloc_, jobIdString);
+					jobIdList.push_back(jobId);
+				}
+				catch (std::exception &e) {
+					isError = true;
+				}
+			}
+			if (!isError) {
+				jobManager->cancelAll(
+						eventSource, jobIdList, option);
+			}
+		}
+		else if (request.pathElements_.size() == 3 &&
+				 request.pathElements_[1] == "sql" && request.pathElements_[2] == "cancel") {
+			if (request.method_ != EBB_POST) {
+				response.setMethodError();
+				return;
+			}
+			util::String clientIdString(alloc_);
+			bool isError = false;
+			bool isAll = true;
+			if (request.parameterMap_.find("clientId") !=
+				request.parameterMap_.end()) {
+				clientIdString = request.parameterMap_["clientId"].c_str();
+				isAll = false;
+			}
+
+			util::String startTimeString(alloc_);
+			if (request.parameterMap_.find("startTime") !=
+				request.parameterMap_.end()) {
+				startTimeString = request.parameterMap_["startTime"].c_str();
+			}
+			CancelOption option(startTimeString);
+
+			SQLExecutionManager *executionManager
+					= resourceSet_->getSQLExecutionManager();
+			util::Vector<ClientId> clientIdList(alloc_);
+			if (!clientIdString.empty()) {
+				JobId jobId;
+				try {
+					clientIdString.append(":0:0");
+					jobId.parse(alloc_, clientIdString);
+					clientIdList.push_back(jobId.clientId_);
+				}
+				catch (std::exception &e) {
+					isError = true;
+				}
+			}
+			if (!isError) {
+				executionManager->cancelAll(
+						eventSource, clientIdList, option);
+			}
+		}
+
+
+		else if (request.pathElements_.size() > 3 &&
+				request.pathElements_[1] == "sql" &&
+				request.pathElements_[2] == "processor") {
+			if (request.pathElements_.size() > 4 &&
+					request.pathElements_[3] == "profile") {
+				if (request.method_ != EBB_GET) {
+					response.setMethodError();
+					return;
+				}
+
+				picojson::value result;
+				int64_t id;
+				do {
+					if (request.pathElements_[4] == "list") {
+						if (sysSvc_->getSQLProcessorProfile(
+								alloc_, varSizeAlloc_, result, NULL)) {
+							break;
+						}
+					}
+					if (request.pathElements_[4] == "global") {
+						if (sysSvc_->getSQLProcessorGlobalProfile(result)) {
+							break;
+						}
+					}
+					else if (util::LexicalConverter<int64_t>()(
+							request.pathElements_[4].c_str(), id)) {
+						if (sysSvc_->getSQLProcessorProfile(
+								alloc_, varSizeAlloc_, result, &id)) {
+							break;
+						}
+					}
+					response.setBadRequestError();
+					return;
+				}
+				while (false);
+
+				response.setJson(result);
+			}
+			else if (request.pathElements_.size() > 4 &&
+					request.pathElements_[3] == "config") {
+
+				bool forProfiler;
+				if (request.pathElements_[4] == "global") {
+					forProfiler = false;
+				}
+				else if (request.pathElements_[4] == "profile") {
+					forProfiler = true;
+				}
+				else {
+					response.setBadRequestError();
+					return;
+				}
+
+				typedef WebAPIRequest::ParameterMap::const_iterator ParamIt;
+				const WebAPIRequest::ParameterMap &map =
+						request.parameterMap_;
+
+				if (request.method_ == EBB_POST) {
+					for (ParamIt it = map.begin(); it != map.end(); ++it) {
+						if (!sysSvc_->setSQLProcessorConfig(
+								it->first.c_str(), it->second.c_str(), forProfiler)) {
+							response.setBadRequestError();
+							return;
+						}
+					}
+				}
+				else if (request.method_ == EBB_GET) {
+					picojson::value result;
+					if (!sysSvc_->getSQLProcessorConfig(forProfiler, result)) {
+						response.setBadRequestError();
+						return;
+					}
+					response.setJson(result);
+				}
+				else {
+					response.setMethodError();
+					return;
+				}
+			}
+			else if (request.pathElements_.size() >= 4 &&
+					request.pathElements_[3] == "partial") {
+				typedef WebAPIRequest::ParameterMap::const_iterator ParamIt;
+				const WebAPIRequest::ParameterMap &map =
+						request.parameterMap_;
+
+				if (request.method_ == EBB_POST) {
+					SQLProcessorConfig::PartialOption option;
+					{
+						const ParamIt it = map.find("followingCount");
+						if (it == map.end() || !util::LexicalConverter<int32_t>()(
+								it->second, option.followingCount_)) {
+							response.setBadRequestError();
+							return;
+						}
+					}
+
+					{
+						const ParamIt it = map.find("submissionCode");
+						if (it == map.end() || !util::LexicalConverter<int64_t>()(
+								it->second, option.submissionCode_)) {
+							response.setBadRequestError();
+							return;
+						}
+					}
+
+					{
+						const ParamIt it = map.find("activated");
+						if (it == map.end() || !util::LexicalConverter<bool>()(
+								it->second, option.activated_)) {
+							response.setBadRequestError();
+							return;
+						}
+					}
+
+					{
+						const ParamIt it = map.find("trialCount");
+						if (it != map.end() && !util::LexicalConverter<int32_t>()(
+								it->second, option.trialCount_)) {
+							response.setBadRequestError();
+							return;
+						}
+					}
+
+					typedef SQLProcessorConfig::Manager Manager;
+					if (!Manager::isEnabled()) {
+						response.setBadRequestError();
+						return;
+					}
+
+					if (!Manager::getInstance().monitorPartial(option)) {
+						response.setBadRequestError();
+						return;
+					}
+				}
+				else if (request.method_ == EBB_GET) {
+					picojson::value result;
+					if (!sysSvc_->getSQLProcessorPartialStatus(result)) {
+						response.setBadRequestError();
+						return;
+					}
+					response.setJson(result);
+				}
+				else {
+					response.setMethodError();
+					return;
+				}
+			}
+			else if (request.pathElements_.size() >= 4 &&
+					request.pathElements_[3] == "simulation") {
+				typedef WebAPIRequest::ParameterMap::const_iterator ParamIt;
+				const WebAPIRequest::ParameterMap &map =
+						request.parameterMap_;
+
+				if (request.method_ == EBB_POST) {
+					picojson::value valueStorage;
+					const picojson::value *value;
+					if (request.jsonValue_.get() != NULL) {
+						value = request.jsonValue_.get();
+					}
+					else {
+						ParamIt it = map.find("value");
+						if (it == map.end()) {
+							response.setBadRequestError();
+							return;
+						}
+
+						const std::string &valueStr = it->second;
+						const std::string &err = JsonUtils::parseAll(
+								valueStorage,
+								valueStr.c_str(),
+								valueStr.c_str() + valueStr.size());
+						if (!err.empty()) {
+							response.setBadRequestError();
+							return;
+						}
+
+						value = &valueStorage;
+					}
+
+					if (!sysSvc_->setSQLProcessorSimulation(alloc_, *value)) {
+						response.setBadRequestError();
+						return;
+					}
+				}
+				else if (request.method_ == EBB_GET) {
+					picojson::value result;
+					if (!sysSvc_->getSQLProcessorSimulation(alloc_, result)) {
+						response.setBadRequestError();
+						return;
+					}
+					response.setJson(result);
+				}
+				else {
+					response.setMethodError();
+					return;
+				}
+			}
+			else {
+				response.setBadRequestError();
+				return;
+			}
+		}
+		else if (request.pathElements_.size() > 3 &&
+				request.pathElements_[1] == "sql" &&
+				request.pathElements_[2] == "compiler") {
+			if (request.pathElements_.size() > 4 &&
+					request.pathElements_[3] == "profile") {
+				if (request.method_ != EBB_GET) {
+					response.setMethodError();
+					return;
+				}
+
+				int32_t index;
+				if (!util::LexicalConverter<int32_t>()(
+						request.pathElements_[4], index)) {
+					response.setBadRequestError();
+					return;
+				}
+
+				typedef WebAPIRequest::ParameterMap::const_iterator ParamIt;
+				const WebAPIRequest::ParameterMap &map =
+						request.parameterMap_;
+				util::Set<util::String> filteringSet(alloc_);
+				for (ParamIt it = map.begin(); it != map.end(); ++it) {
+					filteringSet.insert(util::String(it->first.c_str(), alloc_));
+				}
+
+				picojson::value result;
+				if (!sysSvc_->getSQLCompilerProfile(
+						alloc_, index, filteringSet, result)) {
+					response.setBadRequestError();
+					return;
+				}
+				response.setJson(result);
+			}
+			else if (request.pathElements_.size() > 4 &&
+					request.pathElements_[3] == "config") {
+				typedef WebAPIRequest::ParameterMap::const_iterator ParamIt;
+				const WebAPIRequest::ParameterMap &map =
+						request.parameterMap_;
+
+				const char8_t *category = request.pathElements_[4].c_str();
+
+				if (request.method_ == EBB_POST) {
+					for (ParamIt it = map.begin(); it != map.end(); ++it) {
+						if (!sysSvc_->setSQLCompilerConfig(
+								category, it->first.c_str(), it->second.c_str())) {
+							response.setBadRequestError();
+							return;
+						}
+					}
+				}
+				else if (request.method_ == EBB_GET) {
+					picojson::value result;
+					if (!sysSvc_->getSQLCompilerConfig(category, result)) {
+						response.setBadRequestError();
+						return;
+					}
+					response.setJson(result);
+				}
+				else {
+					response.setMethodError();
+					return;
+				}
+			}
+			else {
+				response.setBadRequestError();
+				return;
+			}
+		}
 		else {
 			response.setBadRequestError();
 			return;
@@ -3084,15 +3970,22 @@ bool SystemService::setGoalPartitions(util::StackAllocator &alloc,
 					JsonUtils::find<picojson::array>(entry, "backup");
 			int64_t intVal;
 			PartitionId pId = 0;
-			std::string str(pname.data(), pname.size());
-			pId = std::atoi(str.c_str());
-			if (pId < 0 || pId >= pt_->getPartitionNum()) {
+			if (pname.size() > 0 && SQLProcessor::ValueUtils::toLong(pname.data(), pname.size(), intVal)) {
+				pId = static_cast<int32_t>(intVal);
+			}
+			else {
+				GS_THROW_USER_ERROR(GS_ERROR_SC_GOAL_INVALID_FORMAT, 
+						"Invalid format, pId=" << pname);
+			}
+			if (pId == UNDEF_PARTITIONID || pId >= pt_->getPartitionNum()) {
 				GS_THROW_USER_ERROR(
-						GS_ERROR_SC_GOAL_INVALID_FORMAT, "Invalid format range, pId=" << pId);
+						GS_ERROR_SC_GOAL_INVALID_FORMAT,
+						"Invalid format range, pId=" << pId);
 			}
 			if (owner == NULL) {
 				GS_THROW_USER_ERROR(
-						GS_ERROR_SC_GOAL_NOT_OWNER, "Invalid format, not owner, pId=" << pId);
+						GS_ERROR_SC_GOAL_NOT_OWNER,
+						"Invalid format, not owner, pId=" << pId);
 			}
 			util::Set<PartitionId>::iterator it = pIdSet.find(pId);
 			if (it != pIdSet.end()) {
@@ -3163,7 +4056,7 @@ bool SystemService::setGoalPartitions(util::StackAllocator &alloc,
 			pt_->updateGoal(role);
 		}
 		if (pt_->isMaster()) {
-			GS_TRACE_CLUSTER_INFO(pt_->dumpPartitionsNew(alloc, PartitionTable::PT_CURRENT_GOAL));
+			GS_TRACE_CLUSTER_INFO(pt_->dumpPartitionsNew(alloc, PT_CURRENT_GOAL));
 		}
 		return true;
 	}
@@ -3534,6 +4427,7 @@ void SystemService::StatSetUpHandler::operator()(StatTable &stat) {
 	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_TXN_EE_CLUSTER);
 	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_TXN_EE_SYNC);
 	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_TXN_EE_TRANSACTION);
+	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_TXN_EE_SQL);
 
 	parentId = STAT_TABLE_PERF_MEM;
 	STAT_ADD_SUB(STAT_TABLE_PERF_MEM_ALL_TOTAL);
@@ -3565,6 +4459,14 @@ void SystemService::StatSetUpHandler::operator()(StatTable &stat) {
 	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_MEM_WORK_TRANSACTION_RESULT_CACHED);
 	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_MEM_WORK_TRANSACTION_WORK_TOTAL);
 	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_MEM_WORK_TRANSACTION_WORK_CACHED);
+	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_MEM_WORK_SQL_MESSAGE_TOTAL);
+	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_MEM_WORK_SQL_MESSAGE_CACHED);
+	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_MEM_WORK_SQL_WORK_TOTAL);
+	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_MEM_WORK_SQL_WORK_CACHED);
+	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_MEM_WORK_SQL_STORE_TOTAL);
+	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_MEM_WORK_SQL_STORE_CACHED);
+	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_MEM_WORK_SQL_JOB_TOTAL);
+	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_MEM_WORK_SQL_JOB_CACHED);
 }
 
 bool SystemService::StatUpdator::operator()(StatTable &stat) {
@@ -3601,11 +4503,13 @@ bool SystemService::StatUpdator::operator()(StatTable &stat) {
 			svc.clsSvc_->getEE(),
 			svc.syncSvc_->getEE(),
 			svc.txnSvc_->getEE()
+			, svc.sqlSvc_->getEE()
 		};
 		const StatTableParamId paramList[] = {
 			STAT_TABLE_PERF_TXN_EE_CLUSTER,
 			STAT_TABLE_PERF_TXN_EE_SYNC,
 			STAT_TABLE_PERF_TXN_EE_TRANSACTION
+			, STAT_TABLE_PERF_TXN_EE_SQL
 		};
 		for (size_t i = 0; i < sizeof(eeList) / sizeof(*eeList); i++) {
 			const uint32_t concurrency =
@@ -3716,6 +4620,7 @@ bool SystemService::StatUpdator::operator()(StatTable &stat) {
 
 		stat.set(STAT_TABLE_PERF_PEAK_PROCESS_MEMORY, peakProcessMemory);
 
+		svc.sqlSvc_->getResourceSet()->getSQLExecutionManager()->updateStat(stat);
 		if (!stat.getDisplayOption(STAT_TABLE_DISPLAY_WEB_ONLY) ||
 			!stat.getDisplayOption(STAT_TABLE_DISPLAY_OPTIONAL_MEM)) {
 			break;
@@ -3733,6 +4638,10 @@ bool SystemService::StatUpdator::operator()(StatTable &stat) {
 			STAT_TABLE_PERF_MEM_WORK_TRANSACTION_MESSAGE_TOTAL,
 			STAT_TABLE_PERF_MEM_WORK_TRANSACTION_RESULT_TOTAL,
 			STAT_TABLE_PERF_MEM_WORK_TRANSACTION_WORK_TOTAL,
+			STAT_TABLE_PERF_MEM_WORK_SQL_MESSAGE_TOTAL,
+			STAT_TABLE_PERF_MEM_WORK_SQL_WORK_TOTAL,
+			STAT_TABLE_PERF_MEM_WORK_SQL_STORE_TOTAL,
+			STAT_TABLE_PERF_MEM_WORK_SQL_JOB_TOTAL
 		};
 		static const size_t listSize = sizeof(statIdList) / sizeof(*statIdList);
 		static const util::AllocatorGroupId allocIdList[listSize] = {
@@ -3747,6 +4656,10 @@ bool SystemService::StatUpdator::operator()(StatTable &stat) {
 			ALLOCATOR_GROUP_TXN_MESSAGE,
 			ALLOCATOR_GROUP_TXN_RESULT,
 			ALLOCATOR_GROUP_TXN_WORK,
+			ALLOCATOR_GROUP_SQL_MESSAGE,
+			ALLOCATOR_GROUP_SQL_WORK,
+			ALLOCATOR_GROUP_SQL_LTS,
+			ALLOCATOR_GROUP_SQL_JOB
 		};
 
 		util::AllocatorManager &allocMgr =
@@ -3799,22 +4712,25 @@ bool SystemService::StatUpdator::operator()(StatTable &stat) {
 		stat.set(STAT_TABLE_ROOT_PG_STORE_MEMORY_LIMIT, result);
 	}
 
+	if (stat.getDisplayOption(STAT_TABLE_DISPLAY_OPTIONAL_MEM)) {
+		service_->sqlSvc_->getResourceSet()->getSQLExecutionManager()->updateStat(stat);
+	}
 
 	return true;
 }
 
 void ServiceThreadErrorHandler::operator()(
 	EventContext &ec, std::exception &e) {
-	clsSvc_->setError(ec, &e);
+	clsSvc_->setSystemError(&e);
 }
 
-void ServiceThreadErrorHandler::initialize(const ManagerSet &mgrSet) {
-	clsSvc_ = mgrSet.clsSvc_;
+void ServiceThreadErrorHandler::initialize(const ResourceSet &resourceSet) {
+	clsSvc_ = resourceSet.clsSvc_;
 }
 
-void OutputStatsHandler::initialize(ManagerSet &mgrSet) {
-	sysSvc_ = mgrSet.sysSvc_;
-	pt_ = mgrSet.pt_;
-	clsMgr_ = mgrSet.clsMgr_;
+void OutputStatsHandler::initialize(ResourceSet &resourceSet) {
+	sysSvc_ = resourceSet.sysSvc_;
+	pt_ = resourceSet.pt_;
+	clsMgr_ = resourceSet.clsMgr_;
 }
 

@@ -4,24 +4,14 @@
 ![GitHub All Releases](https://img.shields.io/github/downloads/griddb/griddb_nosql/total.svg) 
 ![GitHub release](https://img.shields.io/github/release/griddb/griddb_nosql.svg)
 ## Overview
-  GridDB has a KVS (Key-Value Store)-type data model that is suitable for sensor data stored in a timeseries. It is a database that can be easily scaled-out according to the number of sensors.
+  GridDB is Database for IoT with both NoSQL interface and SQL Interface.
 
-  * High Reliability  
-    It is equipped with a structure to spread out the replication of key value data among fellow nodes so that in the event of a node failure, automatic failover can be carried out in a matter of seconds by using the replication function of other nodes.
+  Please refer to [GridDB Features Reference](https://github.com/griddb/docs-en/blob/master/manuals/GridDB_FeaturesReference.md) for functionality.
 
-  * High Performance (in-memory)  
-   Even if the memory is increased to handle big data in a RDB, it is known that CPU power cannot be fully exploited and only around 10% of CPU resources are allocated to actual data processing due to the large overhead in buffer management, etc. Given the increase in memory size, GridDB minimizes the amount of overheads required previously by lightening the buffer process and recovery process, and by making it lock-free during data processing.
-
-  * Advanced data model and operation model  
-    In a traditional distributed KVS, data is handled using operations such as Put/Get/Remove. GridDB expands these functions greatly to support the definition function for organizational data, SQL-like query function, transaction function and Java API (Application Programming Interface) so that RDB users are able to introduce the system smoothly. The key value represents the data in a set of records known as a key container. This is similar to the relationship between a RDB table name and table. It is also equipped with an application function for sensor data management.
-
-  This repository includes server and Java client.
-
-  (Additional information)  
-  There is [Java client Package (Jar) for v4.3.0 on Maven Central Repository](https://search.maven.org/search?q=g:com.github.griddb) .
+  This repository includes server and Java client. And [jdbc repository](https://github.com/griddb/jdbc) includes JDBC Driver.
 
 ## Quick start (Using source code)
-  We have confirmed the operation on CentOS 7.6 (gcc 4.8.5), Ubuntu 18.04 (gcc 4.8.5) and openSUSE Leap 15.1 (gcc 4.8.5).
+  We have confirmed the operation on CentOS 7.6 (gcc 4.8.5).
 
 ### Build a server and client(Java)
     $ ./bootstrap.sh
@@ -38,11 +28,13 @@
 ### Start a server
     $ export GS_HOME=$PWD
     $ export GS_LOG=$PWD/log
+    $ export PATH=${PATH}:$GS_HOME/bin
 
     $ bin/gs_passwd admin
       #input your_password
     $ vi conf/gs_cluster.json
       #    "clusterName":"your_clustername" #<-- input your_clustername
+
     $ bin/gs_startnode
     $ bin/gs_joincluster -c your_clustername -u admin/your_password
 
@@ -58,64 +50,21 @@
     $ bin/gs_stopcluster -u admin/your_password
     $ bin/gs_stopnode -u admin/your_password
 
-## Quick start (Using RPM or DEB)
-
-  We have confirmed the operation on CentOS 7.6, Ubuntu 18.04 and openSUSE Leap 15.1.
-
-Note:
--  When you install this package, a gsadm OS user are created in the OS.  
-  Execute the operating command as the gsadm user.  
-- You don't need to set environment vatiable GS_HOME and GS_LOG.
-- The packages for Ubuntu and openSUSE don't include trigger function.
-
-### Install
-
-    (CentOS)
-    $ sudo rpm -ivh griddb_nosql-X.X.X-linux.x86_64.rpm
-
-    (Ubuntu)
-    $ sudo dpkg -i griddb_nosql-X.X.X_amd64.deb
-
-    (openSUSE)
-    $ sudo zypper install griddb_nosql-X.X.X-opensuse.x86_64.rpm
-
-    Note: X.X.X is the GridDB version.
-
-### Start a server
-    [gsadm]$ gs_passwd admin
-      #input your_password
-    [gsadm]$ vi conf/gs_cluster.json
-      #    "clusterName":"your_clustername" #<-- input your_clustername
-    [gsadm]$ gs_startnode
-    [gsadm]$ gs_joincluster -c your_clustername -u admin/your_password
-
-### Execute a sample program
-    $ export CLASSPATH=${CLASSPATH}:/usr/share/java/gridstore.jar
-    $ mkdir gsSample
-    $ cp /usr/griddb-X.X.X/docs/sample/program/Sample1.java gsSample/.
-    $ javac gsSample/Sample1.java
-    $ java gsSample/Sample1 239.0.0.1 31999 your_clustername admin your_password
-      --> Person:  name=name02 status=false count=2 lob=[65, 66, 67, 68, 69, 70, 71, 72, 73, 74]
-
-### Stop a server
-    [gsadm]$ gs_stopcluster -u admin/your_password
-    [gsadm]$ gs_stopnode -u admin/your_password
-
-If necessary, please refer to [Installation Troubleshooting](docs/TroubleShootingTips.md).
-
 ## Document
   Refer to the file below for more detailed information.  
-  - [Features Reference](https://griddb.github.io/griddb_nosql/manual/en/GridDB_FeaturesReference.html)
-  - [Quick Start Guide](https://griddb.github.io/griddb_nosql/manual/GridDB_QuickStartGuide.html)
-  - [API Reference](https://griddb.github.io/griddb_nosql/manual/GridDB_API_Reference.html)
-  - [RPM Installation Guide](https://griddb.github.io/griddb_nosql/manual/GridDB_RPM_InstallGuide.html)
-  - [DEB Installation Guide](https://griddb.github.io/griddb_nosql/manual/GridDB_DEB_InstallGuide.html)
-  - [GridDB Technical Design Document](https://griddb.github.io/griddb_nosql/manual/GridDBTechnicalDesignDocument.pdf)
+  - [Features Reference](https://github.com/griddb/docs-en/blob/master/manuals/GridDB_FeaturesReference.md)
+  - [Quick Start Guide](https://github.com/griddb/docs-en/blob/master/manuals/GridDB_QuickStartGuide.md)
+  - [Java API Reference](http://griddb.github.io/docs-en/manuals/GridDB_Java_API_Reference.html)
+  - [C API Reference](http://griddb.github.io/docs-en/manuals/GridDB_C_API_Reference.html)
+  - [TQL Reference](https://github.com/griddb/docs-en/blob/master/manuals/GridDB_TQL_Reference.md)
+  - [JDBC Driver UserGuide](https://github.com/griddb/docs-en/blob/master/manuals/GridDB_JDBC_Driver_UserGuide.md)
+  - [SQL Reference](https://github.com/griddb/docs-en/blob/master/manuals/GridDB_SQL_Reference.md)
   - [V3.0 Release Notes](docs/GridDB-3.0.0-CE-RELEASE_NOTES.md)
   - [V4.0 Release Notes](docs/GridDB-4.0-CE-RELEASE_NOTES.md)
   - [V4.1 Release Notes](docs/GridDB-4.1-CE-RELEASE_NOTES.md)
   - [V4.2 Release Notes](docs/GridDB-4.2-CE-RELEASE_NOTES.md)
   - [V4.3 Release Notes](docs/GridDB-4.3-CE-RELEASE_NOTES.md)
+  - [V4.5 Release Notes](docs/GridDB-4.5-CE-RELEASE_NOTES.md)
 
 ## Client and Connector
   There are other clients and API for GridDB.
@@ -127,7 +76,8 @@ If necessary, please refer to [Installation Troubleshooting](docs/TroubleShootin
   * [GridDB PHP Client](https://github.com/griddb/php_client)
   * [GridDB Perl Client](https://github.com/griddb/perl_client)
   * [GridDB WebAPI](https://github.com/griddb/webapi)
-
+  * [GridDB JDBC Driver](https://github.com/griddb/jdbc)
+  
   There are some connectors for other OSS.
   * [GridDB connector for Apache Hadoop MapReduce](https://github.com/griddb/griddb_hadoop_mapreduce)
   * [GridDB connector for YCSB (https://github.com/brianfrankcooper/YCSB/tree/master/griddb)](https://github.com/brianfrankcooper/YCSB/tree/master/griddb)
@@ -138,8 +88,6 @@ If necessary, please refer to [Installation Troubleshooting](docs/TroubleShootin
   * [GridDB Data Source for Grafana](https://github.com/griddb/griddb-datasource)
   * [GridDB Plugin for Redash](https://github.com/griddb/griddb-redash)
   * [GridDB Plugin for Fluentd](https://github.com/griddb/fluent-plugin-griddb)
-
-## [Packages](docs/Packages.md)
 
 ## Community
   * Issues  

@@ -63,6 +63,123 @@
 namespace util {
 
 
+TinyLexicalIntConverter::TinyLexicalIntConverter() :
+		minWidth_(1),
+		maxWidth_(0) {
+}
+
+bool TinyLexicalIntConverter::format(
+		char8_t *&it, char8_t *end, uint32_t value) const {
+	char8_t buf[std::numeric_limits<uint32_t>::digits10 + 1];
+
+	char8_t *const bufEnd = buf + sizeof(buf);
+	char8_t *bufIt = bufEnd;
+
+	for (uint32_t rest = value; rest > 0; rest /= 10) {
+		if (bufIt == buf) {
+			assert(false);
+			return false;
+		}
+		--bufIt;
+
+		const uint32_t digit = rest % 10;
+		*bufIt = static_cast<char8_t>('0' + digit);
+	}
+
+	const size_t digitWidth = static_cast<size_t>(bufEnd - bufIt);
+	if (minWidth_ > digitWidth) {
+		size_t restWidth = minWidth_ - digitWidth;
+		do {
+			if (it == end) {
+				return false;
+			}
+			*it = '0';
+			++it;
+		}
+		while (--restWidth > 0);
+	}
+
+	for (; bufIt != bufEnd; ++bufIt) {
+		if (it == end) {
+			return false;
+		}
+		*it = *bufIt;
+		++it;
+	}
+
+	return true;
+}
+
+bool TinyLexicalIntConverter::parse(
+		const char8_t *&it, const char8_t *end, uint32_t &value) const {
+	value = 0;
+
+	if (it > end) {
+		assert(false);
+		return false;
+	}
+	const char8_t *const begin = it;
+
+	size_t limitSize = static_cast<size_t>(end - it);
+	if (maxWidth_ > 0 && maxWidth_ < limitSize) {
+		limitSize = maxWidth_;
+	}
+	const char8_t *const limitedEnd = it + limitSize;
+
+	size_t fillSize = static_cast<size_t>(limitedEnd - it);
+	if (minWidth_ < limitSize) {
+		fillSize = minWidth_;
+	}
+	const char8_t *const fillEnd = it + fillSize;
+
+	for (; it != fillEnd; ++it) {
+		if (*it != '0') {
+			break;
+		}
+	}
+	const bool filled = (it != begin);
+
+	const size_t maxDigit =
+			static_cast<size_t>(std::numeric_limits<uint32_t>::digits10 + 1);
+
+	size_t digitSize = static_cast<size_t>(limitedEnd - it);
+	if (maxDigit < limitSize) {
+		digitSize = maxDigit;
+	}
+	const char8_t *const digitEnd = it + digitSize;
+
+	uint64_t ret = 0;
+	if (it == digitEnd) {
+		if (!filled) {
+			return false;
+		}
+	}
+	else {
+		if (*it == '0') {
+			return false;
+		}
+		do {
+			if (*it < '0' || *it > '9') {
+				break;
+			}
+			ret = ret * 10 + static_cast<uint32_t>(*it - '0');
+		}
+		while (++it != digitEnd);
+
+		if (ret > std::numeric_limits<uint32_t>::max()) {
+			return false;
+		}
+	}
+
+	if (static_cast<size_t>(it - begin) < minWidth_) {
+		return false;
+	}
+
+	value = static_cast<uint32_t>(ret);
+	return true;
+}
+
+
 namespace detail {
 
 template<typename T>
@@ -1029,11 +1146,21 @@ void NameCoderImpl::initialize(
 const char8_t* NameCoderImpl::findName(
 		const char8_t *const *nameList, size_t count, int32_t id,
 		const char8_t *defaultName) {
-	if (id < 0 || static_cast<size_t>(id) >= count) {
-		return defaultName;
-	}
+	do {
+		if (id < 0 || static_cast<size_t>(id) >= count) {
+			break;
+		}
 
-	return nameList[id];
+		const char8_t *name = nameList[id];
+		if (name == NULL) {
+			break;
+		}
+
+		return name;
+	}
+	while (false);
+
+	return defaultName;
 }
 
 const NameCoderImpl::Entry* NameCoderImpl::findEntry(
@@ -1090,6 +1217,379 @@ const char8_t* GeneralNameCoder::emptyCoderFunc(
 		id = -1;
 	}
 	return NULL;
+}
+
+
+
+
+ObjectCoder::Allocator ObjectCoder::defaultAlloc_;
+
+
+const char8_t* ObjectCoder::Impl::nameBegin(const Attribute &attr) {
+	return attr.name_;
+}
+
+const char8_t* ObjectCoder::Impl::nameEnd(const Attribute &attr) {
+	const char8_t *begin = nameBegin(attr);
+
+	if (begin == NULL) {
+		return NULL;
+	}
+
+	const char8_t *end = begin + strlen(begin);
+	if (end != begin && *(end - 1) == '_') {
+		end--;
+	}
+
+	return end;
+}
+
+void ObjectCoder::Impl::errorOutOfRange() {
+	UTIL_THROW_UTIL_ERROR(CODE_DECODE_FAILED,
+			"Decode failed (detail=size out of range)");
+}
+
+void ObjectCoder::Impl::errorUnexpectedType() {
+	UTIL_THROW_UTIL_ERROR(CODE_DECODE_FAILED,
+			"Decode failed (detail=unexpected value type)");
+}
+
+
+ObjectCoder ObjectFormatter::defaultCoder_;
+
+
+ObjectTextOutStream::ObjectTextOutStream(std::ostream &base) :
+		base_(base),
+		nestLevel_(0),
+		index_(0),
+		indentSize_(2),
+		lastAttr_(NULL),
+		listing_(false),
+		singleLine_(false),
+		nullVisible_(false) {
+}
+
+void ObjectTextOutStream::setSingleLine(bool singleLine) {
+	singleLine_ = singleLine;
+}
+
+void ObjectTextOutStream::setNullVisible(bool nullVisible) {
+	nullVisible_ = nullVisible;
+}
+
+void ObjectTextOutStream::reserve(size_t size) {
+	static_cast<void>(size);
+}
+
+void ObjectTextOutStream::writeBool(bool value, const Attribute &attr) {
+	writeHead(attr, true);
+	base_ << (value ? "true" : "false");
+	writeTail();
+}
+
+void ObjectTextOutStream::writeString(
+		const char8_t *data, size_t size, const Attribute &attr) {
+	writeHead(attr, true);
+	base_.put('"');
+	base_.write(data, static_cast<std::streamsize>(size));
+	base_.put('"');
+	writeTail();
+}
+
+void ObjectTextOutStream::writeBinary(
+		const void *data, size_t size, const Attribute &attr) {
+	writeHead(attr, true);
+
+	if (size > 0) {
+		util::NormalIStringStream iss(
+				u8string(static_cast<const char8_t*>(data), size));
+		util::HexConverter::encode(base_, iss);
+	}
+
+	writeTail();
+}
+
+void ObjectTextOutStream::writeType(Type value, const Attribute &attr) {
+	if (value == ObjectCoder::TYPE_NULL &&
+			(nullVisible_ || listing_ || nestLevel_ == 0)) {
+		writeHead(attr, true);
+		base_ << "null";
+		writeTail();
+	}
+}
+
+void ObjectTextOutStream::writeHead(
+		const Attribute &attr, bool withSeparator) {
+	if (singleLine_) {
+		if (index_ > 0) {
+			base_ << ", ";
+		}
+	}
+	else {
+		const size_t count = indentSize_ * nestLevel_;
+		for (size_t i = 0; i < count; i++) {
+			base_.put(' ');
+		}
+	}
+
+	bool nameWrote = false;
+	if (listing_) {
+		if (!singleLine_) {
+			base_.put('[');
+			base_ << index_;
+			base_.put(']');
+		}
+	}
+	else {
+		const char8_t *begin = ObjectCoder::Impl::nameBegin(attr);
+		const char8_t *end = ObjectCoder::Impl::nameEnd(attr);
+		if (begin != end) {
+			base_.write(begin, static_cast<std::streamsize>(end - begin));
+			nameWrote = true;
+		}
+	}
+
+	if (singleLine_) {
+		if (nameWrote) {
+			base_.put('=');
+		}
+	}
+	else {
+		base_.put(':');
+
+		if (withSeparator) {
+			base_.put(' ');
+		}
+	}
+
+	index_++;
+}
+
+void ObjectTextOutStream::writeTail() {
+	if (!singleLine_) {
+		base_ << std::endl;
+	}
+}
+
+void ObjectTextOutStream::push(const Attribute &attr, bool listing) {
+	const Attribute &curAttr = (attr.name_ == NULL ? lastAttr_ : attr);
+	if (curAttr.name_ != NULL) {
+		writeHead(curAttr, false);
+	}
+
+	if (singleLine_) {
+		base_.put(listing ? '[' : '{');
+	}
+
+	if (curAttr.name_ != NULL) {
+		writeTail();
+		nestLevel_++;
+	}
+
+	index_ = 0;
+	listing_ = listing;
+}
+
+void ObjectTextOutStream::pop() {
+	if (singleLine_) {
+		base_.put(listing_ ? ']' : '}');
+	}
+}
+
+
+ObjectTextOutStream::Scope::Scope(Stream &base, const Attribute &attr) :
+		base_(base) {
+	stream().push(attr, false);
+	base.index_++;
+}
+
+ObjectTextOutStream::Scope::Scope(
+		Stream &base, size_t, const Attribute &attr) :
+		base_(base) {
+	stream().push(attr, true);
+	base.index_++;
+}
+
+ObjectTextOutStream::Scope::~Scope() {
+	try {
+		stream().pop();
+	}
+	catch (...) {
+	}
+}
+
+ObjectTextOutStream& ObjectTextOutStream::Scope::stream() {
+	return base_;
+}
+
+
+ObjectTextOutStream::ValueScope::ValueScope(
+		ObjectTextOutStream &base, Type type, const Attribute &attr) :
+		BaseType(base, attr),
+		orgAttr_(base.lastAttr_) {
+	stream().lastAttr_ = attr;
+	stream().writeType(type, attr);
+}
+
+ObjectTextOutStream::ValueScope::~ValueScope() {
+	stream().lastAttr_ = orgAttr_;
+}
+
+
+AbstractNumericEncoder::~AbstractNumericEncoder() {
+}
+
+
+AbstractNumericDecoder::~AbstractNumericDecoder() {
+}
+
+
+AbstractEnumEncoder::~AbstractEnumEncoder() {
+}
+
+
+AbstractEnumDecoder::~AbstractEnumDecoder() {
+}
+
+
+void* AbstractObjectStream::getRawAddress(void *ptr) {
+	return ptr;
+}
+
+const void* AbstractObjectStream::getRawAddress(const void *ptr) {
+	return ptr;
+}
+
+
+template<typename Stream>
+AbstractObjectStream::Scope<Stream>::Scope(
+		Stream &base, const Attribute &attr) {
+	base.pushObject(storage_, attr);
+}
+
+template<typename Stream>
+AbstractObjectStream::Scope<Stream>::Scope(
+		Stream &base, TypeArg type, const Attribute &attr) {
+	base.pushValue(storage_, type, attr);
+}
+
+template<typename Stream>
+AbstractObjectStream::Scope<Stream>::Scope(
+		Stream &base, SizeArg size, const Attribute &attr) {
+	base.pushList(storage_, size, attr);
+}
+
+template<typename Stream>
+AbstractObjectStream::Scope<Stream>::~Scope() {
+	stream().~Stream();
+}
+
+template<typename Stream>
+AbstractObjectStream::Scope<Stream>::Scope(const Scope &another) {
+	another.stream().duplicate(storage_);
+}
+
+template<typename Stream>
+AbstractObjectStream::Scope<Stream>&
+AbstractObjectStream::Scope<Stream>::operator=(const Scope &another) {
+	stream().~Stream();
+	another.stream().duplicate(storage_);
+	return *this;
+}
+
+template<typename Stream>
+Stream& AbstractObjectStream::Scope<Stream>::stream() {
+	return *static_cast<Stream*>(getRawAddress(&storage_));
+}
+
+template<typename Stream>
+const Stream& AbstractObjectStream::Scope<Stream>::stream() const {
+	return *static_cast<const Stream*>(getRawAddress(&storage_));
+}
+
+template class AbstractObjectStream::Scope<AbstractObjectInStream>;
+template class AbstractObjectStream::Scope<AbstractObjectOutStream>;
+
+
+AbstractObjectInStream::~AbstractObjectInStream() {
+}
+
+AbstractObjectInStream::Locator AbstractObjectInStream::locator() {
+	return Locator(*this);
+}
+
+
+AbstractObjectInStream::Action::~Action() {
+}
+
+
+AbstractObjectInStream::Locator::Locator() : base_(NULL) {
+}
+
+AbstractObjectInStream::Locator::~Locator() {
+	try {
+		clear();
+	}
+	catch (...) {
+	}
+}
+
+AbstractObjectInStream::Locator::Locator(AbstractObjectInStream &stream) :
+		base_(NULL) {
+	base_ = stream.createLocator(storage_);
+}
+
+AbstractObjectInStream::Locator::Locator(const Locator &another) :
+		base_(NULL) {
+	*this = another;
+}
+
+AbstractObjectInStream::Locator& AbstractObjectInStream::Locator::operator=(
+		const Locator &another) {
+	do {
+		if (this == &another) {
+			break;
+		}
+
+		clear();
+
+		if (another.base_ == NULL) {
+			break;
+		}
+
+		base_ = another.base_->duplicate(storage_);
+	}
+	while (false);
+
+	return *this;
+}
+
+void AbstractObjectInStream::Locator::locate() const {
+	if (base_ == NULL) {
+		return;
+	}
+
+	base_->locate();
+}
+
+AbstractObjectInStream::Locator::Locator(BaseLocator *base) : base_(base) {
+}
+
+void AbstractObjectInStream::Locator::clear() {
+	if (base_ == NULL) {
+		return;
+	}
+
+	base_->~BaseLocator();
+	base_ = NULL;
+}
+
+
+AbstractObjectInStream::BaseLocator::~BaseLocator() {
+}
+
+
+AbstractObjectOutStream::~AbstractObjectOutStream() {
 }
 
 

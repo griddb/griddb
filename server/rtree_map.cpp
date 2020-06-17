@@ -241,20 +241,21 @@ int32_t RtreeMap::search(
  */
 void RtreeMap::search(TransactionContext &txn, RtreeMap::SearchContext &sc,
 	util::XArray<OId> &oidList, OutputOrder outputOrder) {
+	UNUSED_VARIABLE(outputOrder);
 
 	TermCondition *cond = sc.getKeyCondition();
 	SearchContext::GeomeryCondition *geomCond = 
 		static_cast<SearchContext::GeomeryCondition *>(
 			const_cast<void *>(cond->value_));
 	if (geomCond->valid_) {
-		getAll(txn, sc.limit_, oidList);
+		getAll(txn, sc.getLimit(), oidList);
 	}
 	else {
 		switch (geomCond->relation_) {
 		case GEOMETRY_INTERSECT: {
 			HitIntersectCallbackArg arg;
 			arg.rect = &(geomCond->rect_[0]);
-			arg.limit = static_cast<ResultSize>(sc.limit_);
+			arg.limit = static_cast<ResultSize>(sc.getLimit());
 			arg.oidList = &oidList;
 			arg.size = 0;
 			TrIndex_search(txn, *getObjectManager(), rtreeMapImage_->oId_,
@@ -264,7 +265,7 @@ void RtreeMap::search(TransactionContext &txn, RtreeMap::SearchContext &sc,
 		case GEOMETRY_INCLUDE: {
 			HitIncludeCallbackArg arg;
 			arg.rect = &(geomCond->rect_[0]);
-			arg.limit = static_cast<ResultSize>(sc.limit_);
+			arg.limit = static_cast<ResultSize>(sc.getLimit());
 			arg.oidList = &oidList;
 			arg.size = 0;
 			TrIndex_search(txn, *getObjectManager(), rtreeMapImage_->oId_,
@@ -275,7 +276,7 @@ void RtreeMap::search(TransactionContext &txn, RtreeMap::SearchContext &sc,
 			HitDifferentialCallbackArg arg;
 			arg.rect1 = &(geomCond->rect_[0]);
 			arg.rect2 = &(geomCond->rect_[1]);
-			arg.limit = static_cast<ResultSize>(sc.limit_);
+			arg.limit = static_cast<ResultSize>(sc.getLimit());
 			arg.oidList = &oidList;
 			arg.size = 0;
 			TrIndex_search(txn, *getObjectManager(), rtreeMapImage_->oId_,
@@ -285,7 +286,7 @@ void RtreeMap::search(TransactionContext &txn, RtreeMap::SearchContext &sc,
 		case GEOMETRY_QSF_INTERSECT: {
 			HitQsfIntersectCallbackArg arg;
 			arg.pkey = &(geomCond->pkey_);
-			arg.limit = static_cast<ResultSize>(sc.limit_);
+			arg.limit = static_cast<ResultSize>(sc.getLimit());
 			arg.oidList = &oidList;
 			arg.size = 0;
 			TrIndex_search_quad(txn, *getObjectManager(), rtreeMapImage_->oId_,
@@ -482,6 +483,7 @@ int32_t RtreeMap::oIdCmpCallback(
 
 bool geomOperation(TransactionContext& txn, uint8_t const* p,
 				   uint32_t size1, uint8_t const* q, uint32_t size2) {
+	UNUSED_VARIABLE(size2);
 	Geometry *geom = Geometry::deserialize(txn, p, size1);
 	const RtreeMap::SearchContext::GeomeryCondition *geomCond = 
 		reinterpret_cast<const RtreeMap::SearchContext::GeomeryCondition *>(q);

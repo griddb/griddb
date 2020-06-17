@@ -30,6 +30,9 @@
 #include <fstream>
 #include "zlib_utils.h"
 
+#include "resource_set.h"
+
+
 #ifndef _WIN32
 #include <signal.h>  
 #endif
@@ -138,6 +141,10 @@ CheckpointService::CheckpointService(
 		ssnList_.assign(pgConfig_.getPartitionCount(), UNDEF_SYNC_SEQ_NUMBER);
 		lastCpStartLsnList_.assign(pgConfig_.getPartitionCount(), UNDEF_LSN);
 		needGroupCheckpoint_.assign(pgConfig_.getPartitionGroupCount(), 1); 
+
+		uint8_t temp = 0;
+		longtermSyncReadBuffer_.assign(ChunkManager::MakeSyncTempCpContext::IO_SIZE, temp);
+		longtermSyncWriteBuffer_.assign(ChunkManager::MakeSyncTempCpContext::IO_SIZE, temp);
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_SYSTEM_ERROR(
@@ -169,27 +176,27 @@ CheckpointService::~CheckpointService() {}
 /*!
 	@brief Initializer of CheckpointService
 */
-void CheckpointService::initialize(ManagerSet &mgrSet) {
+void CheckpointService::initialize(ResourceSet &resourceSet) {
 	try {
-		clusterService_ = mgrSet.clsSvc_;
+		clusterService_ = resourceSet.clsSvc_;
 		clsEE_ = clusterService_->getEE();
-		transactionService_ = mgrSet.txnSvc_;
+		transactionService_ = resourceSet.txnSvc_;
 		txnEE_ = transactionService_->getEE();
-		transactionManager_ = mgrSet.txnMgr_;
-		systemService_ = mgrSet.sysSvc_;
-		partitionTable_ = mgrSet.pt_;
-		logManager_ = mgrSet.logMgr_;
-		dataStore_ = mgrSet.ds_;
-		chunkManager_ = mgrSet.chunkMgr_;
-		fixedSizeAlloc_ = mgrSet.fixedSizeAlloc_;
+		transactionManager_ = resourceSet.txnMgr_;
+		systemService_ = resourceSet.sysSvc_;
+		partitionTable_ = resourceSet.pt_;
+		logManager_ = resourceSet.logMgr_;
+		dataStore_ = resourceSet.ds_;
+		chunkManager_ = resourceSet.chunkMgr_;
+		fixedSizeAlloc_ = resourceSet.fixedSizeAlloc_;
 
-		mgrSet.stats_->addUpdator(&statUpdator_);
+		resourceSet.stats_->addUpdator(&statUpdator_);
 
-		checkpointServiceMainHandler_.initialize(mgrSet);
-		checkpointServiceGroupHandler_.initialize(mgrSet);
-		flushLogPeriodicallyHandler_.initialize(mgrSet);
-		syncService_ = mgrSet.syncSvc_;
-		serviceThreadErrorHandler_.initialize(mgrSet);
+		checkpointServiceMainHandler_.initialize(resourceSet);
+		checkpointServiceGroupHandler_.initialize(resourceSet);
+		flushLogPeriodicallyHandler_.initialize(resourceSet);
+		syncService_ = resourceSet.syncSvc_;
+		serviceThreadErrorHandler_.initialize(resourceSet);
 		initailized_ = true;
 		newestLogVersion_ = logManager_->getLogVersion(0);
 	}
@@ -282,7 +289,7 @@ void CheckpointService::start(const Event::Source &eventSource) {
 		}
 	}
 	catch (std::exception &e) {
-		clusterService_->setError(eventSource, &e);
+		clusterService_->setSystemError(&e);
 		GS_RETHROW_SYSTEM_ERROR(
 				e, "Start failed. (reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
 	}
@@ -672,7 +679,7 @@ bool CheckpointService::requestOnlineBackup(
 		return true;
 	}
 	catch (std::exception &e) {
-		clusterService_->setError(eventSource, &e);
+		clusterService_->setSystemError(&e);
 		GS_RETHROW_SYSTEM_ERROR(
 				e, "Request online backup failed.  (reason=" <<
 				GS_EXCEPTION_MESSAGE(e) << ")");
@@ -877,7 +884,7 @@ bool CheckpointService::requestPrepareLongArchive(
 		return true;
 	}
 	catch (std::exception &e) {
-		clusterService_->setError(eventSource, &e);
+		clusterService_->setSystemError(&e);
 		GS_RETHROW_SYSTEM_ERROR(
 				e, "Request prepare long archive failed.  (reason=" <<
 				GS_EXCEPTION_MESSAGE(e) << ")");
@@ -919,7 +926,7 @@ void CheckpointService::requestNormalCheckpoint(
 		ee_.add(requestEvent);
 	}
 	catch (std::exception &e) {
-		clusterService_->setError(eventSource, &e);
+		clusterService_->setSystemError(&e);
 		GS_RETHROW_SYSTEM_ERROR(
 				e, "Request normal checkpoint failed. (reason=" <<
 				GS_EXCEPTION_MESSAGE(e) << ")");
@@ -957,7 +964,7 @@ void CheckpointService::requestShutdownCheckpoint(
 		}
 	}
 	catch (std::exception &e) {
-		clusterService_->setError(eventSource, &e);
+		clusterService_->setSystemError(&e);
 		GS_RETHROW_SYSTEM_ERROR(
 				e, "Request shutdowncheckpoint failed. (reason=" <<
 				GS_EXCEPTION_MESSAGE(e) << ")");
@@ -991,7 +998,7 @@ void CheckpointService::executeRecoveryCheckpoint(
 		ee_.add(requestEvent);
 	}
 	catch (std::exception &e) {
-		clusterService_->setError(eventSource, &e);
+		clusterService_->setSystemError(&e);
 		GS_RETHROW_SYSTEM_ERROR(
 				e, "Recovery checkpoint failed. (reason=" <<
 				GS_EXCEPTION_MESSAGE(e) << ")");
@@ -1001,17 +1008,17 @@ void CheckpointService::executeRecoveryCheckpoint(
 /*!
 	@brief Initializes CheckpointHandler.
 */
-void CheckpointHandler::initialize(const ManagerSet &mgrSet) {
+void CheckpointHandler::initialize(const ResourceSet &resourceSet) {
 	try {
-		checkpointService_ = mgrSet.cpSvc_;
-		clusterService_ = mgrSet.clsSvc_;
-		transactionService_ = mgrSet.txnSvc_;
-		transactionManager_ = mgrSet.txnMgr_;
-		logManager_ = mgrSet.logMgr_;
-		dataStore_ = mgrSet.ds_;
-		chunkManager_ = mgrSet.chunkMgr_;
-		fixedSizeAlloc_ = mgrSet.fixedSizeAlloc_;
-		config_ = mgrSet.config_;
+		checkpointService_ = resourceSet.cpSvc_;
+		clusterService_ = resourceSet.clsSvc_;
+		transactionService_ = resourceSet.txnSvc_;
+		transactionManager_ = resourceSet.txnMgr_;
+		logManager_ = resourceSet.logMgr_;
+		dataStore_ = resourceSet.ds_;
+		chunkManager_ = resourceSet.chunkMgr_;
+		fixedSizeAlloc_ = resourceSet.fixedSizeAlloc_;
+		config_ = resourceSet.config_;
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_SYSTEM_ERROR(
@@ -1065,7 +1072,7 @@ void CheckpointServiceMainHandler::operator()(EventContext &ec, Event &ev) {
 	catch (UserException &e) {
 		checkpointService_->errorOccured_ = true;
 		if (critical) {
-			clusterService_->setError(ec, &e);
+			clusterService_->setSystemError(&e);
 			GS_RETHROW_SYSTEM_ERROR(e, "");
 		}
 		else {
@@ -1078,7 +1085,7 @@ void CheckpointServiceMainHandler::operator()(EventContext &ec, Event &ev) {
 	}
 	catch (std::exception &e) {
 		checkpointService_->errorOccured_ = true;
-		clusterService_->setError(ec, &e);
+		clusterService_->setSystemError(&e);
 		GS_RETHROW_SYSTEM_ERROR(e, "");
 	}
 }
@@ -1114,7 +1121,7 @@ void CheckpointServiceGroupHandler::operator()(EventContext &ec, Event &ev) {
 	catch (UserException &e) {
 		checkpointService_->errorOccured_ = true;
 		if (critical) {
-			clusterService_->setError(ec, &e);
+			clusterService_->setSystemError(&e);
 			GS_RETHROW_SYSTEM_ERROR(e, "");
 		}
 		else {
@@ -1128,7 +1135,7 @@ void CheckpointServiceGroupHandler::operator()(EventContext &ec, Event &ev) {
 	}
 	catch (std::exception &e) {
 		checkpointService_->errorOccured_ = true;
-		clusterService_->setError(ec, &e);
+		clusterService_->setSystemError(&e);
 		GS_RETHROW_SYSTEM_ERROR(
 				e, "(workerId=" << ec.getWorkerId() <<
 				", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
@@ -1720,7 +1727,7 @@ void CheckpointService::runCheckpoint(
 			if (info != NULL) { 
 				info->errorOccured_ = true;
 				syncService_->notifyCheckpointLongSyncReady(
-						ec, info->targetPId_, &info->longtermSyncInfo_, true);
+						ec, info->targetPId_, &info->longtermSyncInfo_);
 			}
 		}
 		return;
@@ -1756,7 +1763,7 @@ void CheckpointService::runCheckpoint(
 		CpLongtermSyncInfo *info = getCpLongtermSyncInfo(ssn);
 		if (info != NULL) { 
 			syncService_->notifyCheckpointLongSyncReady(
-					ec, info->targetPId_, &info->longtermSyncInfo_, false);
+					ec, info->targetPId_, &info->longtermSyncInfo_);
 		}
 	}
 }
@@ -2104,7 +2111,7 @@ void CheckpointService::runGroupCheckpoint(
 			uint64_t writeCount = 0;
 			uint64_t prevDestFilePos = 0;
 
-			ChunkManager::MakeSyncTempCpContext context(alloc);
+			ChunkManager::MakeSyncTempCpContext context(longtermSyncReadBuffer_, longtermSyncWriteBuffer_);
 			chunkManager_->prepareMakeSyncTempCpFile(
 					pgId, info->targetPId_, cpId, info->dir_.c_str(),
 					*info->syncCpFile_, context);
@@ -2141,7 +2148,7 @@ void CheckpointService::runGroupCheckpoint(
 				if (prevDestFilePos != destFilePos) {
 					assert(prevDestFilePos < destFilePos);
 					syncService_->notifyCheckpointLongSyncReady(
-							ec, info->targetPId_, &info->longtermSyncInfo_, false);
+							ec, info->targetPId_, &info->longtermSyncInfo_);
 					++notifyCount;
 					prevDestFilePos = destFilePos;
 					GS_TRACE_INFO(
@@ -2153,7 +2160,7 @@ void CheckpointService::runGroupCheckpoint(
 				}
 			}
 			syncService_->notifyCheckpointLongSyncReady(
-					ec, info->targetPId_, &info->longtermSyncInfo_, false);
+					ec, info->targetPId_, &info->longtermSyncInfo_);
 			++notifyCount;
 			fileSize = destFilePos * chunkManager_->getConfig().getChunkSize();
 			GS_TRACE_INFO(
@@ -2198,7 +2205,7 @@ void CheckpointService::runGroupCheckpoint(
 		LogManager destLogManager(destLogManagerConfig);
 		destLogManager.create(pgId, cpId, INCREMENTAL_BACKUP_FILE_SUFFIX);
 
-		BitArray &chunkDiffBitArray = chunkManager_->getBackupBitArray(pgId);
+		ChunkBitArray &chunkDiffBitArray = chunkManager_->getBackupBitArray(pgId);
 
 		const PartitionId pId = startPId;
 
@@ -2464,6 +2471,7 @@ void CheckpointOperationHandler::operator()(EventContext &ec, Event &ev) {
 				checkpointService_->setCurrentCpPId(pId);
 				bool checkpointReady =
 						dataStore_->isRestored(pId) && chunkManager_->existPartition(pId);
+				bool isRestored = dataStore_->isRestored(pId) && chunkManager_->existPartition(pId);
 				checkpointService_->setCheckpointReady(pId, checkpointReady);
 				if (checkpointReady) {
 					chunkManager_->startCheckpoint(pId);
@@ -2472,7 +2480,7 @@ void CheckpointOperationHandler::operator()(EventContext &ec, Event &ev) {
 					}
 					else if (CP_INCREMENTAL_BACKUP_LEVEL_1_CUMULATIVE == mode ||
 							 CP_INCREMENTAL_BACKUP_LEVEL_1_DIFFERENTIAL == mode) {
-						BitArray &chunkDiffBitArray =
+						ChunkBitArray &chunkDiffBitArray =
 								chunkManager_->getBackupBitArray(pgId);
 
 						bool isCumulative =
@@ -2484,14 +2492,14 @@ void CheckpointOperationHandler::operator()(EventContext &ec, Event &ev) {
 				LogSequentialNumber lsn = writeCheckpointStartLog(
 						alloc, mode, pgId, pId, cpId);
 				writeChunkMetaDataLog(
-						alloc, mode, pgId, pId, cpId, checkpointReady);
+						alloc, mode, pgId, pId, cpId, isRestored);
 				checkpointService_->setLastCpStartLsn(pId, lsn);
 			}
 			break;
 
 		case COPY_CHUNK:
 			if (checkpointService_->isCheckpointReady(pId)) {
-				chunkManager_->copyChunk(pId);
+				chunkManager_->kickChunk(pId);
 			}
 			break;
 
@@ -2575,7 +2583,7 @@ void CheckpointOperationHandler::operator()(EventContext &ec, Event &ev) {
 		WATCHER_END_DETAIL(getEventTypeName(ev.getType()), pId, pgId);
 	}
 	catch (std::exception &e) {
-		clusterService_->setError(ec, &e);
+		clusterService_->setSystemError(&e);
 		GS_RETHROW_SYSTEM_ERROR(
 				e, "Group checkpoint failed. (reason=" <<
 				GS_EXCEPTION_MESSAGE(e) << ")");
@@ -2583,7 +2591,7 @@ void CheckpointOperationHandler::operator()(EventContext &ec, Event &ev) {
 }
 
 void CheckpointOperationHandler::setIncrementalBackupFilePos(
-	PartitionId pId, bool isCumulative, BitArray &bitArray) {
+	PartitionId pId, bool isCumulative, ChunkBitArray &bitArray) {
 	try {
 		const PartitionGroupId pgId =
 				checkpointService_->getPGConfig().getPartitionGroupId(pId);
@@ -2757,6 +2765,9 @@ void CheckpointOperationHandler::compressChunkMetaDataLog(
 					",validChunkNum," << validCount );
 }
 
+void CheckpointOperationHandler::checkFailureWhileWriteChunkMetaLog(int32_t mode) {
+}
+
 /*!
 	@brief Outputs a log of metadata of Chunk.
 */
@@ -2909,7 +2920,7 @@ void FlushLogPeriodicallyHandler::operator()(EventContext &ec, Event &ev) {
 		}
 	}
 	catch (std::exception &e) {
-		clusterService_->setError(ec, &e);
+		clusterService_->setSystemError(&e);
 		GS_RETHROW_SYSTEM_ERROR(
 				e, "Flush log file failed. (reason=" <<
 				GS_EXCEPTION_MESSAGE(e) << ")");
@@ -3325,7 +3336,7 @@ void CheckpointService::requestStartCheckpointForLongtermSync(
 	}
 	catch (std::exception &e) {
 		info->errorOccured_ = true;
-		clusterService_->setError(eventSource, &e);
+		clusterService_->setSystemError(&e);
 		GS_RETHROW_SYSTEM_ERROR(
 				e, "Request prepare long sync failed.  (reason=" <<
 				GS_EXCEPTION_MESSAGE(e) << ")");
@@ -3359,7 +3370,7 @@ void CheckpointService::requestStopCheckpointForLongtermSync(
 			ee_.add(requestEvent);
 		}
 		catch (std::exception &e) {
-			clusterService_->setError(eventSource, &e);
+			clusterService_->setSystemError(&e);
 			GS_RETHROW_SYSTEM_ERROR(
 					e, "Request stop long sync failed.  (reason=" <<
 					GS_EXCEPTION_MESSAGE(e) << ")");

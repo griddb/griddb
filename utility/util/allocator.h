@@ -32,6 +32,7 @@
 #include <cassert>
 #include <algorithm> 
 
+
 #ifndef UTIL_ALLOCATOR_EMPTY_ALLOCATOR_CONSTRUCTOR_ALLOWED
 #if defined(_GLIBCXX_FULLY_DYNAMIC_STRING) && _GLIBCXX_FULLY_DYNAMIC_STRING
 #define UTIL_ALLOCATOR_EMPTY_ALLOCATOR_CONSTRUCTOR_ALLOWED 0
@@ -123,14 +124,46 @@ extern int64_t g_limitSizeCount;
 #define UTIL_ALLOCATOR_CHECK_CONFLICTION 0
 #endif
 
-#if UTIL_ALLOCATOR_CHECK_CONFLICTION
+#ifndef UTIL_ALLOCATOR_CHECK_ALLOCATOR_CONFLICTION
+#define UTIL_ALLOCATOR_CHECK_ALLOCATOR_CONFLICTION \
+	UTIL_ALLOCATOR_CHECK_CONFLICTION
+#endif
+
+#ifndef UTIL_ALLOCATOR_CHECK_STAT_CONFLICTION
+#define UTIL_ALLOCATOR_CHECK_STAT_CONFLICTION \
+	UTIL_ALLOCATOR_CHECK_CONFLICTION
+#endif
+
+
+#if UTIL_ALLOCATOR_CHECK_STAT_CONFLICTION || \
+	UTIL_ALLOCATOR_CHECK_ALLOCATOR_CONFLICTION
+#define UTIL_ALLOCATOR_DETAIL_CONFLICTION_DETECTOR_ENABLED 1
+#else
+#define UTIL_ALLOCATOR_DETAIL_CONFLICTION_DETECTOR_ENABLED 0
+#endif
+
+#if UTIL_ALLOCATOR_CHECK_ALLOCATOR_CONFLICTION
+#define UTIL_ALLOCATOR_DETAIL_LOCK_GUARD_STACK_ALLOCATOR(alloc) \
+	LockGuard<MutexType> guard((alloc)->mutex_)
+#else
+#define UTIL_ALLOCATOR_DETAIL_LOCK_GUARD_STACK_ALLOCATOR(alloc)
+#endif
+
+#if UTIL_ALLOCATOR_CHECK_STAT_CONFLICTION
 #define UTIL_ALLOCATOR_DETAIL_STAT_GUARD(guard, mutex) \
 	LockGuard<Mutex> &guard(*static_cast<LockGuard<Mutex>*>(NULL)); \
-	static_cast<void>(mutex) \
+	static_cast<void>(mutex); \
 	static_cast<void>(guard)
+#define UTIL_ALLOCATOR_DETAIL_STAT_GUARD_STACK_ALLOCATOR(alloc) \
+	UTIL_ALLOCATOR_DETAIL_STAT_GUARD(guard, (alloc)->mutex_)
 #else
 #define UTIL_ALLOCATOR_DETAIL_STAT_GUARD(guard, mutex) \
 	LockGuard<Mutex> guard(mutex)
+#define UTIL_ALLOCATOR_DETAIL_STAT_GUARD_STACK_ALLOCATOR(alloc)
+#endif 
+
+#ifndef UTIL_ALLOC_CXX_MOVE_ENABLED
+#define UTIL_ALLOC_CXX_MOVE_ENABLED 0
 #endif
 
 namespace util {
@@ -146,15 +179,15 @@ public:
 	inline bool tryLock(void) { lock(); return true; }
 	inline bool tryLock(uint32_t) { lock(); return true; }
 
-#if UTIL_ALLOCATOR_CHECK_CONFLICTION
+#if UTIL_ALLOCATOR_DETAIL_CONFLICTION_DETECTOR_ENABLED
 
 public:
 	inline void lock(void) { detector_.enter(); }
 	inline void unlock(void) { detector_.leave(); }
 private:
-	ConflictionDetector detector_;
+	NoThrowConflictionDetector detector_;
 
-#else 
+#else
 
 public:
 	inline void lock(void) {}
@@ -459,7 +492,7 @@ public:
 	void* allocate(size_t size);
 	void deallocate(void *element);
 
-	template<typename T> void destroy(T *object);
+	template<typename T> void deleteObject(T *object);
 
 
 	void setErrorHandler(AllocationErrorHandler *errorHandler);
@@ -538,7 +571,7 @@ struct VariableSizeAllocatorUtils {
 
 #define ALLOC_VAR_SIZE_DELETE(allocator, object) \
 		util::detail::VariableSizeAllocatorUtils::checkType( \
-				allocator).destroy(object)
+				allocator).deleteObject(object)
 
 template<typename Mutex, typename Traits>
 inline void* operator new(
@@ -583,7 +616,7 @@ public:
 
 	void deallocate(void *ptr);
 
-	template<typename T> void destroy(T *object);
+	template<typename T> void deleteObject(T *object);
 
 	void setErrorHandler(AllocationErrorHandler *errorHandler);
 
@@ -681,6 +714,11 @@ private:
 #if UTIL_ALLOCATOR_DIFF_REPORTER_TRACE_ENABLED
 	AllocatorDiffReporter::ActivationSaver activationSaver_;
 #endif
+
+#if UTIL_ALLOCATOR_DETAIL_CONFLICTION_DETECTOR_ENABLED
+	typedef NoopMutex MutexType;
+	MutexType mutex_;
+#endif
 };
 
 class StackAllocator::Scope {
@@ -716,12 +754,6 @@ private:
 	size_t freeSizeLimit_;
 };
 }	
-
-#define ALLOC_NEW(allocator) \
-		new (static_cast<util::StackAllocator&>(allocator))
-
-#define ALLOC_DELETE(allocator, object) \
-		static_cast<util::StackAllocator&>(allocator).destroy(object)
 
 inline void* operator new(size_t size, util::StackAllocator &allocator) {
 	return allocator.allocate(size);
@@ -840,6 +872,15 @@ public:
 
 	inline BaseAllocator* base() const throw() { return base_; }
 
+	struct EmptyConstructor {
+		StdAllocator operator()() const throw() {
+			return StdAllocator(static_cast<BaseAllocator*>(NULL));
+		}
+		bool operator()(const StdAllocator &alloc) const throw() {
+			return alloc.base() == NULL;
+		}
+	};
+
 private:
 	BaseAllocator *base_;
 };
@@ -881,6 +922,15 @@ public:
 	struct rebind { typedef StdAllocator<U, BaseAllocator> other; };
 
 	inline BaseAllocator* base() const throw() { return base_; }
+
+	struct EmptyConstructor {
+		StdAllocator operator()() const throw() {
+			return StdAllocator(static_cast<BaseAllocator*>(NULL));
+		}
+		bool operator()(const StdAllocator &alloc) const throw() {
+			return alloc.base() == NULL;
+		}
+	};
 
 private:
 	BaseAllocator *base_;
@@ -995,6 +1045,15 @@ public:
 		return wrapSame(base, base);
 	}
 
+	struct EmptyConstructor {
+		StdAllocator operator()() const throw() {
+			return StdAllocator(util::FalseType());
+		}
+		bool operator()(const StdAllocator &alloc) const throw() {
+			return alloc.base() == NULL;
+		}
+	};
+
 private:
 
 	template<typename BaseAllocator>
@@ -1026,6 +1085,10 @@ private:
 	};
 
 	struct Placeholder {};
+
+	explicit StdAllocator(const FalseType&) throw() :
+			base_(NULL), wrapper_(NULL) {
+	}
 
 	template<typename U, typename BaseAllocator>
 	inline static WrapperResult wrapSame(
@@ -1132,7 +1195,27 @@ public:
 
 	inline WrapperFunc* wrapper() const throw() { return wrapper_; }
 
+	template<typename U>
+	void deleteObject(U *object) {
+		util::StdAllocator<U, void> typed(*this);
+		typed.destroy(object, 1);
+		typed.deallocate(object, 1);
+	}
+
+	struct EmptyConstructor {
+		StdAllocator operator()() const throw() {
+			return StdAllocator(util::FalseType());
+		}
+		bool operator()(const StdAllocator &alloc) const throw() {
+			return alloc.base() == NULL;
+		}
+	};
+
 private:
+	explicit StdAllocator(const FalseType&) throw() :
+			base_(NULL), wrapper_(NULL) {
+	}
+
 	void *base_;
 	WrapperFunc *wrapper_;
 };
@@ -1152,41 +1235,431 @@ inline bool operator!=(
 
 	return op1.base() != op2.base();
 }
+} 
+
+inline void* operator new(
+		size_t size, util::StdAllocator<void, void> &allocator) {
+	util::StdAllocator<uint8_t, void> bytesAlloc(allocator);
+	return bytesAlloc.allocate(size);
+}
+
+inline void operator delete(
+		void *p, util::StdAllocator<void, void> &allocator) throw() {
+	util::StdAllocator<uint8_t, void> bytesAlloc(allocator);
+	bytesAlloc.deallocate(static_cast<uint8_t*>(p), 0);
+}
+
+namespace util {
+
+namespace detail {
+struct AllocNewChecker {
+	static StackAllocator& check(StackAllocator &allocator) throw() {
+		return allocator;
+	}
+
+	static StdAllocator<void, void>& check(
+			StdAllocator<void, void> &allocator) throw() {
+		return allocator;
+	}
+
+	template<typename Mutex, typename Traits>
+	static VariableSizeAllocator<Mutex, Traits>& check(
+			VariableSizeAllocator<Mutex, Traits> &allocator) throw() {
+		return allocator;
+	}
+};
+} 
+} 
+
+#define ALLOC_NEW(allocator) \
+		new (util::detail::AllocNewChecker::check(allocator))
+
+#define ALLOC_DELETE(allocator, object) \
+		util::detail::AllocNewChecker::check(allocator).deleteObject(object)
+
+namespace util {
+
+namespace detail {
+#if !UTIL_ALLOC_CXX_MOVE_ENABLED
+template<typename T>
+class Movable {
+public:
+	Movable(T &value) throw();
+	~Movable();
+
+	Movable(const Movable &another) throw();
+	Movable& operator=(const Movable &another) throw();
+
+	void release(T &value) const throw();
+
+private:
+	struct Chain {
+		Chain();
+
+		bool isTop() const throw();
+		Chain& top() throw();
+
+		void add(Chain &chain) throw();
+		void remove() throw();
+
+		void clearValue() throw();
+
+		Chain *next_;
+		Chain *prev_;
+		T value_;
+	};
+	Chain localChain_;
+	Chain &chain_;
+};
+#endif 
+
+template<typename T>
+struct MovableTraits {
+#if UTIL_ALLOC_CXX_MOVE_ENABLED
+	typedef T ReturnType;
+	typedef T &&RefType;
+#else
+	typedef Movable<T> ReturnType;
+	typedef const Movable<T> &RefType;
+#endif 
+};
+
+template<typename T>
+class InitializableValue {
+public:
+	explicit InitializableValue(const T &value = T()) throw() :
+			value_(value) {
+	}
+
+	T& get() throw() { return value_; }
+	const T& get() const throw() { return value_; }
+
+private:
+	T value_;
+};
+
+template<size_t BaseSize>
+class ApproxAlignedStorage {
+public:
+	ApproxAlignedStorage() throw() {
+		UTIL_STATIC_ASSERT((sizeof(void*) <= sizeof(uint64_t)));
+	}
+
+	void* address() throw() { return data_; }
+	const void* address() const throw() { return data_; }
+
+private:
+	typedef
+			typename Conditional<(BaseSize <= 1), uint8_t,
+			typename Conditional<(BaseSize <= 2), uint16_t,
+			typename Conditional<(BaseSize <= 4), uint32_t,
+					uint64_t>::Type>::Type>::Type UnitType;
+
+	enum {
+		UNIT_SIZE = sizeof(UnitType),
+		UNIT_COUNT = (BaseSize <= UNIT_SIZE ?
+				1 : (BaseSize + (UNIT_SIZE - 1)) / UNIT_SIZE)
+	};
+
+	UnitType data_[UNIT_COUNT];
+};
+
+template<typename T>
+struct EmptyObjectTraits {
+public:
+	static T create() throw() {
+		return create<T>(static_cast<const TrueType*>(NULL));
+	}
+
+	static bool isEmpty(const T &obj) throw() {
+		return isEmpty<T>(&obj);
+	}
+
+private:
+	template<typename U>
+	static U create(
+			const typename BoolType<!IsSame<
+					typename U::EmptyConstructor,
+					void>::VALUE>::Result*) throw() {
+		return typename U::EmptyConstructor()();
+	}
+
+	template<typename U>
+	static U create(const void*) throw() {
+		return U();
+	}
+
+	template<typename U>
+	static bool isEmpty(
+			const typename Conditional<
+					(sizeof(typename U::EmptyConstructor) > 0),
+					U, U>::Type *obj) throw() {
+		return typename U::EmptyConstructor()(*obj);
+	}
+
+	template<typename U>
+	static bool isEmpty(const void*) throw() {
+		return false;
+	}
+};
+} 
 
 template< typename T, typename Alloc = StdAllocator<T, void> >
 class AllocDefaultDelete {
 public:
-	AllocDefaultDelete(const Alloc &alloc) throw();
+	explicit AllocDefaultDelete(const Alloc &alloc) throw();
+
+	template<typename U, typename OtherAlloc>
+	AllocDefaultDelete(
+			const AllocDefaultDelete<U, OtherAlloc> &other) throw();
+
+	template<typename U, typename OtherAlloc>
+	void copyTo(AllocDefaultDelete<U, OtherAlloc> &other) const throw();
+
 	void operator()(T *ptr);
+
+	struct EmptyConstructor {
+		AllocDefaultDelete operator()() const throw();
+		bool operator()(const AllocDefaultDelete &obj) const throw();
+	};
 
 private:
 	Alloc alloc_;
 };
 
+namespace detail {
+template<typename D>
+class InitializableDeleter {
+public:
+	InitializableDeleter() throw() : deleter_(EmptyObjectTraits<D>::create()) {
+	}
+
+	template<typename B>
+	explicit InitializableDeleter(B &deleterBase, void* = NULL) throw() :
+			deleter_(deleterBase) {
+	}
+
+	D& base() throw() { return deleter_; }
+	const D& base() const throw() { return deleter_; }
+
+	template<typename> bool detectNonDeletable() const throw() {
+		return false;
+	}
+
+	template<typename T> void operator()(T *ptr) {
+		deleter_(ptr);
+	}
+
+private:
+	D deleter_;
+};
+
+template<typename D>
+class AnyDeleter {
+public:
+	AnyDeleter() throw() {
+	}
+
+	template<typename E, typename T>
+	AnyDeleter(const E &typedDeleter, T*) throw() :
+			deleter_(typedDeleter),
+			typedDeleter_(&deleteAt<E, T>) {
+	}
+
+	D& base() throw() { return deleter_; }
+	const D& base() const throw() { return deleter_; }
+
+	template<typename T> bool detectNonDeletable() const throw() {
+		const TypeIdFunc type1 = typedDeleter_.get()(NULL, NULL);
+		const TypeIdFunc type2 = &typeId<T>;
+		return (type1 != type2);
+	}
+
+	void operator()(void *ptr) {
+		if (ptr != NULL) {
+			typedDeleter_.get()(&deleter_.base(), ptr);
+		}
+	}
+
+private:
+	typedef void (*TypeIdFunc)();
+	typedef TypeIdFunc (*TypedDeleterFunc)(D*, void*);
+
+	template<typename E, typename T>
+	static TypeIdFunc deleteAt(D *deleter, void *ptr) {
+		if (ptr == NULL) {
+			return &typeId<T>;
+		}
+		E typed(*deleter);
+		typed(static_cast<T*>(ptr));
+		return NULL;
+	}
+
+	template<typename T> static void typeId() {}
+
+	InitializableDeleter<D> deleter_;
+	InitializableValue<TypedDeleterFunc> typedDeleter_;
+};
+} 
+
+
 template< typename T, typename D = AllocDefaultDelete<T> >
 class AllocUniquePtr {
+private:
+	enum {
+		FOR_ANY = IsSame<T, void>::VALUE
+	};
+	struct Inaccessible {};
+	typedef typename Conditional<
+			FOR_ANY, Inaccessible, T>::Type DerefValueType;
+	typedef typename Conditional<
+			FOR_ANY, Inaccessible, DerefValueType&>::Type DerefValueRefType;
+
 public:
 	typedef T element_type;
 	typedef D deleter_type;
 	typedef element_type *pointer;
 
-	template<typename B> AllocUniquePtr(pointer ptr, B &deleterBase);
+	typedef typename detail::MovableTraits<
+			AllocUniquePtr>::ReturnType ReturnType;
+	typedef typename detail::MovableTraits<
+			AllocUniquePtr>::RefType MovableRefType;
+
+	AllocUniquePtr() throw() {}
 	~AllocUniquePtr();
 
-	pointer get() const throw();
+	template<typename B>
+	AllocUniquePtr(pointer ptr, B &deleterBase) throw();
+	template<typename B>
+	static ReturnType of(pointer ptr, B &deleterBase) throw();
+
+	AllocUniquePtr(MovableRefType another) throw();
+	AllocUniquePtr& operator=(MovableRefType another) throw();
+
+#if UTIL_ALLOC_CXX_MOVE_ENABLED
+	template<typename U, typename E>
+	AllocUniquePtr(AllocUniquePtr<U, E> &&other) throw();
+	template<typename U, typename E>
+	AllocUniquePtr& operator=(AllocUniquePtr<U, E> &&other) throw();
+#else
+	template<typename U, typename E>
+	AllocUniquePtr(
+			const detail::Movable< AllocUniquePtr<U, E> > &other) throw();
+	template<typename U, typename E>
+	AllocUniquePtr& operator=(
+			const detail::Movable< AllocUniquePtr<U, E> > &other) throw();
+#endif 
+
+	deleter_type get_deleter() const throw() { return deleter_.base(); }
+
+	pointer get() const throw() { return ptr_.get(); }
+	DerefValueRefType operator*() const { return deref(get()); }
+	pointer operator->() const throw() { return &deref(get()); }
+	bool isEmpty() const throw() { return get() == pointer(); }
+
+	template<typename U> U* getAs() const throw();
+	template<typename U> U& resolveAs() const;
+
+	pointer release() throw();
+	void reset() throw();
+	void reset(pointer ptr) throw(); 
+
+	void swap(AllocUniquePtr &another) throw();
+
+private:
+	typedef typename Conditional<
+			FOR_ANY, detail::AnyDeleter<deleter_type>,
+			detail::InitializableDeleter<deleter_type> >::Type WrappedDeleter;
+
+	AllocUniquePtr(const AllocUniquePtr&);
+	AllocUniquePtr& operator=(const AllocUniquePtr&);
+
+	static deleter_type createEmptyDeleter() throw();
+
+	template<typename U> static U& deref(U *ptr) throw() {
+		assert(ptr != NULL);
+		return *ptr;
+	}
+	static Inaccessible deref(void*) throw() { return Inaccessible(); }
+
+	detail::InitializableValue<pointer> ptr_;
+	WrappedDeleter deleter_;
+};
+} 
+
+#define ALLOC_UNIQUE(alloc, type, ...) \
+		util::AllocUniquePtr<type>::of( \
+				ALLOC_NEW(alloc) type(__VA_ARGS__), alloc)
+
+
+namespace util {
+template<typename T> class LocalUniquePtr;
+namespace detail {
+class LocalUniquePtrBuilder {
+public:
+	LocalUniquePtrBuilder(void *storage, size_t size, bool constructed);
+
+	void* getStorage(size_t size) const;
+	void* get() const throw();
+
+	template<typename T>
+	static LocalUniquePtr<T>& check(LocalUniquePtr<T> &src) { return src; }
+
+private:
+	void *storage_;
+	size_t size_;
+	bool constructed_;
+};
+} 
+
+template<typename T>
+class LocalUniquePtr {
+public:
+	class Builder;
+
+	typedef T element_type;
+	typedef element_type *pointer;
+
+	LocalUniquePtr() throw() {}
+	~LocalUniquePtr();
+
+	pointer get() const throw() { return ptr_.get(); }
 	element_type& operator*() const;
 	pointer operator->() const throw();
 
 	pointer release() throw();
-	void reset(pointer ptr = pointer()) throw();
+	void reset() throw();
+
+	LocalUniquePtr& operator=(const detail::LocalUniquePtrBuilder &builder);
+
+	detail::LocalUniquePtrBuilder toBuilder(T *ptr);
 
 private:
-	AllocUniquePtr(const AllocUniquePtr&);
-	AllocUniquePtr& operator=(const AllocUniquePtr&);
+	LocalUniquePtr(const LocalUniquePtr&);
+	LocalUniquePtr& operator=(const LocalUniquePtr&);
 
-	pointer ptr_;
-	deleter_type deleter_;
+	detail::InitializableValue<pointer> ptr_;
+	detail::ApproxAlignedStorage<sizeof(T)> storage_;
 };
+} 
+
+#define UTIL_MAKE_LOCAL_UNIQUE(localUniqPtr, type, ...) \
+		util::detail::LocalUniquePtrBuilder::check(localUniqPtr).toBuilder( \
+				new (util::detail::LocalUniquePtrBuilder::check( \
+						localUniqPtr).toBuilder(NULL).getStorage( \
+								sizeof(type))) \
+						type(__VA_ARGS__))
+
+inline void* operator new(
+		size_t size, const util::detail::LocalUniquePtrBuilder &builder) {
+	return builder.getStorage(size);
+}
+
+inline void operator delete(
+		void*, const util::detail::LocalUniquePtrBuilder&) throw() {
+}
+
+namespace util {
 
 class AllocatorManager {
 public:
@@ -2318,7 +2791,7 @@ inline void VariableSizeAllocator<Mutex, Traits>::deallocate(void *element) {
 
 template<typename Mutex, typename Traits>
 template<typename T>
-inline void VariableSizeAllocator<Mutex, Traits>::destroy(T *object) {
+inline void VariableSizeAllocator<Mutex, Traits>::deleteObject(T *object) {
 	if (object != NULL) {
 		object->~T();
 		deallocate(object);
@@ -2459,6 +2932,8 @@ inline void VariableSizeAllocator<Mutex, Traits>::clear() {
 
 
 inline void* StackAllocator::allocate(size_t size) {
+	UTIL_ALLOCATOR_DETAIL_LOCK_GUARD_STACK_ALLOCATOR(this);
+
 #if UTIL_FAILURE_SIMULATION_ENABLED
 	AllocationFailureSimulator::checkOperation(
 			AllocationFailureSimulator::TARGET_STACK_ALLOCATION, size);
@@ -2490,10 +2965,11 @@ inline void* StackAllocator::allocate(size_t size) {
 }
 
 inline void StackAllocator::deallocate(void *ptr) {
+	UTIL_ALLOCATOR_DETAIL_LOCK_GUARD_STACK_ALLOCATOR(this);
 	(void) ptr;
 }
 
-template<typename T> void StackAllocator::destroy(T *object) {
+template<typename T> void StackAllocator::deleteObject(T *object) {
 	if (object != NULL) {
 		object->~T();
 		deallocate(object);
@@ -2502,6 +2978,7 @@ template<typename T> void StackAllocator::destroy(T *object) {
 
 inline void StackAllocator::setErrorHandler(
 		AllocationErrorHandler *errorHandler) {
+	UTIL_ALLOCATOR_DETAIL_LOCK_GUARD_STACK_ALLOCATOR(this);
 	errorHandler_ = errorHandler;
 }
 
@@ -2511,10 +2988,13 @@ inline void StackAllocator::setDefaultErrorHandler(
 }
 
 inline void StackAllocator::setTotalSizeLimit(size_t limit) {
+	UTIL_ALLOCATOR_DETAIL_STAT_GUARD_STACK_ALLOCATOR(this);
 	totalSizeLimit_ = limit;
 }
 
 inline void StackAllocator::setFreeSizeLimit(size_t limit) {
+	UTIL_ALLOCATOR_DETAIL_STAT_GUARD_STACK_ALLOCATOR(this);
+
 #if UTIL_ALLOCATOR_NO_CACHE_STACK_ALLOCATOR
 	static_cast<void>(limit);
 #else
@@ -2523,26 +3003,32 @@ inline void StackAllocator::setFreeSizeLimit(size_t limit) {
 }
 
 inline size_t StackAllocator::getTotalSizeLimit() {
+	UTIL_ALLOCATOR_DETAIL_STAT_GUARD_STACK_ALLOCATOR(this);
 	return totalSizeLimit_;
 }
 
 inline size_t StackAllocator::getFreeSizeLimit() {
+	UTIL_ALLOCATOR_DETAIL_STAT_GUARD_STACK_ALLOCATOR(this);
 	return freeSizeLimit_;
 }
 
 inline size_t StackAllocator::getTotalSize() {
+	UTIL_ALLOCATOR_DETAIL_STAT_GUARD_STACK_ALLOCATOR(this);
 	return totalSize_;
 }
 
 inline size_t StackAllocator::getFreeSize() {
+	UTIL_ALLOCATOR_DETAIL_STAT_GUARD_STACK_ALLOCATOR(this);
 	return freeSize_;
 }
 
 inline size_t StackAllocator::getHugeCount() {
+	UTIL_ALLOCATOR_DETAIL_STAT_GUARD_STACK_ALLOCATOR(this);
 	return hugeCount_;
 }
 
 inline size_t StackAllocator::getHugeSize() {
+	UTIL_ALLOCATOR_DETAIL_STAT_GUARD_STACK_ALLOCATOR(this);
 	return hugeSize_;
 }
 
@@ -2572,10 +3058,12 @@ inline size_t StackAllocator::BlockHead::bodySize() {
 
 inline StackAllocator::Scope::Scope(StackAllocator &allocator) :
 		allocator_(allocator) {
+	UTIL_ALLOCATOR_DETAIL_LOCK_GUARD_STACK_ALLOCATOR(&allocator);
 	allocator_.push(lastBlock_, lastRestSize_);
 }
 
 inline StackAllocator::Scope::~Scope() {
+	UTIL_ALLOCATOR_DETAIL_LOCK_GUARD_STACK_ALLOCATOR(&allocator_);
 	allocator_.pop(lastBlock_, lastRestSize_);
 }
 
@@ -2600,6 +3088,104 @@ inline void StackAllocator::ConfigScope::reset() {
 	allocator_ = NULL;
 }
 
+#if !UTIL_ALLOC_CXX_MOVE_ENABLED
+
+namespace detail {
+
+template<typename T>
+Movable<T>::Movable(T &value) throw() : chain_(localChain_) {
+	value.swap(chain_.value_);
+}
+
+template<typename T>
+Movable<T>::~Movable() {
+	chain_.remove();
+}
+
+template<typename T>
+Movable<T>::Movable(const Movable &another) throw() : chain_(localChain_) {
+	*this = another;
+}
+
+template<typename T>
+Movable<T>& Movable<T>::operator=(const Movable &another) throw() {
+	if (this != &another) {
+		another.chain_.add(chain_);
+	}
+	return *this;
+}
+
+template<typename T>
+void Movable<T>::release(T &value) const throw() {
+	Chain &top = chain_.top();
+
+	top.value_.swap(value);
+	top.clearValue();
+
+	chain_.remove();
+}
+
+template<typename T>
+Movable<T>::Chain::Chain() :
+		next_(NULL),
+		prev_(NULL) {
+}
+
+template<typename T>
+bool Movable<T>::Chain::isTop() const throw() {
+	return (prev_ == NULL);
+}
+
+template<typename T>
+typename Movable<T>::Chain& Movable<T>::Chain::top() throw() {
+	Chain *chain = this;
+	for (; !chain->isTop(); chain = chain->prev_) {
+	}
+	return *chain;
+}
+
+template<typename T>
+void Movable<T>::Chain::add(Chain &chain) throw() {
+	chain.remove();
+	chain.clearValue();
+
+	if (next_ != NULL) {
+		chain.next_ = next_;
+		next_->prev_ = &chain;
+	}
+
+	if (prev_ != NULL) {
+		chain.prev_ = prev_;
+		prev_->next_ = &chain;
+	}
+}
+
+template<typename T>
+void Movable<T>::Chain::remove() throw() {
+	if (next_ != NULL) {
+		if (isTop()) {
+			next_->value_.swap(value_);
+		}
+		next_->prev_ = prev_;
+		next_ = NULL;
+	}
+
+	if (prev_ != NULL) {
+		prev_->next_ = next_;
+		prev_ = NULL;
+	}
+}
+
+template<typename T>
+void Movable<T>::Chain::clearValue() throw() {
+	T emptyValue;
+	value_.swap(emptyValue);
+}
+
+} 
+
+#endif 
+
 
 template<typename T, typename Alloc>
 inline AllocDefaultDelete<T, Alloc>::AllocDefaultDelete(
@@ -2607,20 +3193,46 @@ inline AllocDefaultDelete<T, Alloc>::AllocDefaultDelete(
 }
 
 template<typename T, typename Alloc>
+template<typename U, typename OtherAlloc>
+inline AllocDefaultDelete<T, Alloc>::AllocDefaultDelete(
+		const AllocDefaultDelete<U, OtherAlloc> &other) throw() :
+		alloc_(detail::EmptyObjectTraits<Alloc>::create()) {
+	other.copyTo(*this);
+}
+
+template<typename T, typename Alloc>
+template<typename U, typename OtherAlloc>
+inline void AllocDefaultDelete<T, Alloc>::copyTo(
+		AllocDefaultDelete<U, OtherAlloc> &other) const throw() {
+	const OtherAlloc &otherAlloc = alloc_;
+	other = AllocDefaultDelete<U, OtherAlloc>(otherAlloc);
+}
+
+template<typename T, typename Alloc>
 inline void AllocDefaultDelete<T, Alloc>::operator()(T *ptr) {
 	if (ptr != NULL) {
+		if (detail::EmptyObjectTraits<Alloc>::isEmpty(alloc_)) {
+			assert(false);
+			return;
+		}
 		alloc_.destroy(ptr);
 		alloc_.deallocate(ptr, 1);
 	}
 }
 
-
-template<typename T, typename D>
-template<typename B>
-inline AllocUniquePtr<T, D>::AllocUniquePtr(pointer ptr, B &deleterBase) :
-		ptr_(ptr),
-		deleter_(deleterBase) {
+template<typename T, typename Alloc>
+inline AllocDefaultDelete<T, Alloc>
+AllocDefaultDelete<T, Alloc>::EmptyConstructor::operator()() const throw() {
+	return AllocDefaultDelete(
+			detail::EmptyObjectTraits<Alloc>::create());
 }
+
+template<typename T, typename Alloc>
+inline bool AllocDefaultDelete<T, Alloc>::EmptyConstructor::operator()(
+		const AllocDefaultDelete &obj) const throw() {
+	return detail::EmptyObjectTraits<Alloc>::isEmpty(obj);
+}
+
 
 template<typename T, typename D>
 inline AllocUniquePtr<T, D>::~AllocUniquePtr() {
@@ -2628,36 +3240,190 @@ inline AllocUniquePtr<T, D>::~AllocUniquePtr() {
 }
 
 template<typename T, typename D>
-inline typename AllocUniquePtr<T, D>::pointer
-AllocUniquePtr<T, D>::get() const throw() {
-	return ptr_;
+template<typename B>
+inline AllocUniquePtr<T, D>::AllocUniquePtr(
+		pointer ptr, B &deleterBase) throw() :
+		ptr_(ptr),
+		deleter_(deleterBase) {
 }
 
 template<typename T, typename D>
-inline typename AllocUniquePtr<T, D>::element_type&
-AllocUniquePtr<T, D>::operator*() const {
-	assert(ptr_ != pointer());
-	return *ptr_;
+template<typename B>
+inline typename AllocUniquePtr<T, D>::ReturnType AllocUniquePtr<T, D>::of(
+		pointer ptr, B &deleterBase) throw() {
+	AllocUniquePtr uniquePtr(ptr, deleterBase);
+	return uniquePtr;
 }
 
 template<typename T, typename D>
-inline typename AllocUniquePtr<T, D>::pointer
-AllocUniquePtr<T, D>::operator->() const throw() {
-	return &(**this);
+AllocUniquePtr<T, D>::AllocUniquePtr(MovableRefType another) throw() {
+	*this = another;
+}
+
+template<typename T, typename D>
+AllocUniquePtr<T, D>& AllocUniquePtr<T, D>::operator=(
+		MovableRefType another) throw() {
+	another.release(*this);
+	return *this;
+}
+
+template<typename T, typename D>
+template<typename U, typename E>
+AllocUniquePtr<T, D>::AllocUniquePtr(
+		const detail::Movable< AllocUniquePtr<U, E> > &other) throw() {
+	*this = other;
+}
+
+template<typename T, typename D>
+template<typename U, typename E>
+AllocUniquePtr<T, D>& AllocUniquePtr<T, D>::operator=(
+		const detail::Movable< AllocUniquePtr<U, E> > &other) throw() {
+	UTIL_STATIC_ASSERT(FOR_ANY);
+
+	AllocUniquePtr<U, E> tmp;
+	other.release(tmp);
+
+	deleter_ = WrappedDeleter(tmp.get_deleter(), tmp.get());
+	ptr_.get() = tmp.release();
+
+	return *this;
+}
+
+template<typename T, typename D>
+template<typename U>
+U* AllocUniquePtr<T, D>::getAs() const throw() {
+	UTIL_STATIC_ASSERT((IsSame<T, U>::VALUE || FOR_ANY));
+	if (!IsSame<T, U>::VALUE && deleter_.template detectNonDeletable<U>()) {
+		return NULL;
+	}
+	return static_cast<U*>(ptr_.get());
+}
+
+template<typename T, typename D>
+template<typename U>
+U& AllocUniquePtr<T, D>::resolveAs() const {
+	U *ptr = getAs<U>();
+	assert(ptr != NULL);
+	return *ptr;
 }
 
 template<typename T, typename D>
 inline typename AllocUniquePtr<T, D>::pointer
 AllocUniquePtr<T, D>::release() throw() {
-	pointer ptr = ptr_;
-	ptr_ = pointer();
+	pointer ptr = ptr_.get();
+	ptr_.get() = pointer();
 	return ptr;
 }
 
 template<typename T, typename D>
+inline void AllocUniquePtr<T, D>::reset() throw() {
+	try {
+		deleter_(ptr_.get());
+	}
+	catch (...) {
+		assert(false);
+	}
+	ptr_.get() = pointer();
+}
+
+template<typename T, typename D>
 inline void AllocUniquePtr<T, D>::reset(pointer ptr) throw() {
-	deleter_(ptr_);
-	ptr_ = ptr;
+	reset();
+	ptr_.get() = ptr;
+}
+
+template<typename T, typename D>
+inline void AllocUniquePtr<T, D>::swap(AllocUniquePtr &another) throw() {
+	std::swap(deleter_, another.deleter_);
+	std::swap(ptr_, another.ptr_);
+}
+
+
+namespace detail {
+inline LocalUniquePtrBuilder::LocalUniquePtrBuilder(
+		void *storage, size_t size, bool constructed) :
+		storage_(storage),
+		size_(size),
+		constructed_(constructed) {
+}
+
+inline void* LocalUniquePtrBuilder::getStorage(size_t size) const {
+	if (constructed_ || size != size_) {
+		assert(false);
+		return NULL;
+	}
+	return storage_;
+}
+
+inline void* LocalUniquePtrBuilder::get() const throw() {
+	if (!constructed_) {
+		return NULL;
+	}
+	return storage_;
+}
+
+} 
+
+template<typename T>
+inline LocalUniquePtr<T>::~LocalUniquePtr() {
+	reset();
+}
+
+template<typename T>
+inline typename LocalUniquePtr<T>::element_type&
+LocalUniquePtr<T>::operator*() const {
+	assert(ptr_.get() != pointer());
+	return *ptr_.get();
+}
+
+template<typename T>
+inline typename LocalUniquePtr<T>::pointer
+LocalUniquePtr<T>::operator->() const throw() {
+	assert(ptr_.get() != pointer());
+	return ptr_.get();
+}
+
+template<typename T>
+inline typename LocalUniquePtr<T>::pointer
+LocalUniquePtr<T>::release() throw() {
+	pointer ptr = ptr_.get();
+	ptr_.get() = pointer();
+	return ptr;
+}
+
+template<typename T>
+inline void LocalUniquePtr<T>::reset() throw() {
+	pointer ptr = release();
+	if (ptr != pointer()) {
+		ptr->~T();
+	}
+}
+
+template<typename T>
+inline LocalUniquePtr<T>& LocalUniquePtr<T>::operator=(
+		const detail::LocalUniquePtrBuilder &builder) {
+	if (ptr_.get() != NULL || storage_.address() != builder.get()) {
+		assert(false);
+		return *this;
+	}
+
+	ptr_.get() = static_cast<T*>(storage_.address());
+	return *this;
+}
+
+template<typename T>
+inline detail::LocalUniquePtrBuilder LocalUniquePtr<T>::toBuilder(T *ptr) {
+	reset();
+
+	void *storage = storage_.address();
+	const bool constructed = (ptr != NULL);
+
+	if (constructed && storage != ptr) {
+		assert(false);
+		storage = NULL;
+	}
+
+	return detail::LocalUniquePtrBuilder(storage, sizeof(T), constructed);
 }
 
 

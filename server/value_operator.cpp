@@ -249,7 +249,7 @@ bool geomOperation(TransactionContext& txn, uint8_t const* p,
 
 const Operator ComparatorTable::geomOp_ = &geomOperation;
 
-const Operator ComparatorTable::getOperator(
+Operator ComparatorTable::getOperator(
 	DSExpression::Operation opType, ColumnType type1, ColumnType type2) {
 	Operator op = NULL;
 	switch (opType) {

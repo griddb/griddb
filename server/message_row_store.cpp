@@ -164,7 +164,7 @@ void MessageRowStore::getArrayElement(ColumnId columnId,
 /*!
 	@brief Check if value is null
 */
-bool MessageRowStore::isNullValue(ColumnId columnId) const {
+bool MessageRowStore::isNullValue(ColumnId) const {
 	GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "Unsupported operation");
 }
 /*!
@@ -177,7 +177,7 @@ const uint8_t *MessageRowStore::getNullsAddr() const {
 /*!
 	@brief set null
 */
-void MessageRowStore::setNull(ColumnId columnId) {
+void MessageRowStore::setNull(ColumnId) {
 	GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "Unsupported operation");
 }
 
@@ -695,7 +695,6 @@ void InputMessageRowStore::validate() {
 		if (nextRowPosition_ > 0) {
 			fixedDataIn_.base().position(
 					fixedDataIn_.base().position() + rowImageSize_);
-//			uint64_t pos = fixedDataIn_.base().position();
 			if (rowIdIncluded_) {
 				RowId rowId;
 				fixedDataIn_ >> rowId;

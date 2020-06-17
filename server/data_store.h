@@ -50,11 +50,11 @@ class CheckpointBuffer;
 class CheckpointFile;
 class TransactionContext;
 class BtreeMap;
-struct ManagerSet;
 class MessageSchema;
 class ObjectManager;
 class ChunkManager;
 class ClusterService;
+class ResourceSet;
 
 /*!
 	@brief Exception for lock conflict
@@ -212,6 +212,7 @@ public:
 		SAME_SCHEMA,
 		PROPERY_DIFFERENCE,
 		COLUMNS_DIFFERENCE,
+		ONLY_TABLE_PARTITIONING_VERSION_DIFFERENCE,
 		COLUMNS_ADD,
 	};
 
@@ -373,7 +374,7 @@ public:
 	DataStore(ConfigTable &configTable, ChunkManager *chunkManager);
 	~DataStore();
 
-	void initialize(ManagerSet &mgrSet);
+	void initialize(ResourceSet &resourceSet);
 
 	bool isRestored(PartitionId pId) const;
 
@@ -499,24 +500,22 @@ public:
 
 	ResultSet *getResultSet(TransactionContext &txn, ResultSetId resultSetId);
 
+	ResultSet* updateResultSetTimeout(
+			TransactionContext &txn, ResultSetId rsId, int64_t emNow);
 
 
 	void closeResultSet(PartitionId pId, ResultSetId resultSetId);
 
 	void closeOrClearResultSet(PartitionId pId, ResultSetId resultSetId);
 
+	void addUpdatedRow(PartitionId pId, ContainerId containerId, RowId rowId, OId oId, bool isMvccRow);
+	void addRemovedRow(PartitionId pId, ContainerId containerId, RowId rowId, OId oId);
+	void addRemovedRowArray(PartitionId pId, ContainerId containerId, OId oId);
+	void addRemovedChunk(PartitionId pId, OId oId);
 	void checkTimeoutResultSet(PartitionGroupId pgId, int64_t checkTime);
 
 	void handleUpdateError(std::exception &e, ErrorCode errorCode);
 	void handleSearchError(std::exception &e, ErrorCode errorCode);
-
-	static ChunkKey convertTimestamp2ChunkKey(Timestamp time, bool isRoundUp) {
-		ChunkKey chunkKey = static_cast<ChunkKey>(time >> CHUNKKEY_BIT_NUM);
-		if (isRoundUp && ((time & CHUNKKEY_BITS) != 0)) {
-			chunkKey++;
-		}
-		return chunkKey;
-	}
 
 	static Timestamp convertChunkKey2Timestamp(ChunkKey chunkKey) {
 		Timestamp time;
@@ -532,8 +531,8 @@ public:
 		return time;
 	}
 
-	bool executeBatchFree(PartitionId pId, Timestamp timestamp,
-		uint64_t maxScanNum, uint64_t &scanNum);
+	bool executeBatchFree(util::StackAllocator &alloc, PartitionId pId, 
+		Timestamp timestamp, uint64_t maxScanNum, uint64_t &scanNum);
 	Timestamp getLatestExpirationCheckTime(PartitionId pId) {
 		return expirationStat_[pId].expiredTime_;
 	}
@@ -915,6 +914,10 @@ private:
 	std::vector<ResultSetId> resultSetIdList_;
 	util::FixedSizeAllocator<util::Mutex> resultSetPool_;
 	util::StackAllocator **resultSetAllocator_;  
+	util::StackAllocator *
+		*resultSetRowIdAllocator_;  
+	util::StackAllocator *
+		*resultSetSwapAllocator_;  
 	util::ExpirableMap<ResultSetId, ResultSet, int64_t,
 		ResultSetIdHash>::Manager **resultSetMapManager_;
 	util::ExpirableMap<ResultSetId, ResultSet, int64_t, ResultSetIdHash> *
@@ -931,7 +934,6 @@ private:
 	ContainerIdTable *containerIdTable_;
 	ObjectManager *objectManager_;
 	ClusterService *clusterService_;
-
 
 
 private:  
@@ -962,6 +964,8 @@ private:
 		BaseContainer *&container, MessageSchema *messageSchema,
 		util::XArray<uint32_t> &copyColumnMap);
 	void changeContainerProperty(TransactionContext &txn, PartitionId pId,
+		BaseContainer *&container, MessageSchema *messageSchema);
+	void changeTablePartitioningVersion(TransactionContext &txn, PartitionId pId,
 		BaseContainer *&container, MessageSchema *messageSchema);
 	void addContainerSchema(TransactionContext &txn, PartitionId pId,
 		BaseContainer *&container, MessageSchema *messageSchema);

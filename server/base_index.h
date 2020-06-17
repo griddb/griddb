@@ -199,28 +199,15 @@ public:
 			COND_OTHER,	
 			COND_ALL	
 		};
-		util::Vector<TermCondition> conditionList_;  
-		util::Vector<size_t> keyList_;  
-		ResultSize limit_;				
-		NullCondition nullCond_;		 
-
-		bool isSuspended_;		   
-		ResultSize suspendLimit_;  
-		uint8_t *suspendKey_;  
-		uint32_t suspendKeySize_;  
-		uint8_t *suspendValue_;  
-		uint32_t suspendValueSize_;  
-		bool isNullSuspended_;
-		RowId suspendRowId_;
 
 		SearchContext(util::StackAllocator &alloc, ColumnId columnId)
 			: conditionList_(alloc),
 			  keyList_(alloc),
 			  limit_(MAX_RESULT_SIZE)
 			  ,
+			  isResume_(NOT_RESUME)
+			  ,
 			  nullCond_(NOT_IS_NULL),
-//			  columnIdList_(alloc),
-
 			  isSuspended_(false),
 			  suspendLimit_(MAX_RESULT_SIZE),
 			  suspendKey_(NULL),
@@ -238,9 +225,9 @@ public:
 			  keyList_(alloc),
 			  limit_(MAX_RESULT_SIZE)
 			  ,
+			  isResume_(NOT_RESUME)
+			  ,
 			  nullCond_(NOT_IS_NULL),
-//			  columnIdList_(alloc),
-
 			  isSuspended_(false),
 			  suspendLimit_(MAX_RESULT_SIZE),
 			  suspendKey_(NULL),
@@ -258,9 +245,9 @@ public:
 			  keyList_(alloc),
 			  limit_(limit)
 			  ,
+			  isResume_(NOT_RESUME)
+			  ,
 			  nullCond_(NOT_IS_NULL),
-//			  columnIdList_(alloc),
-
 			  isSuspended_(false),
 			  suspendLimit_(MAX_RESULT_SIZE),
 			  suspendKey_(NULL),
@@ -281,9 +268,9 @@ public:
 			  keyList_(alloc),
 			  limit_(limit)
 			  ,
+			  isResume_(NOT_RESUME)
+			  ,
 			  nullCond_(NOT_IS_NULL),
-//			  columnIdList_(alloc),
-
 			  isSuspended_(false),
 			  suspendLimit_(MAX_RESULT_SIZE),
 			  suspendKey_(NULL),
@@ -312,7 +299,7 @@ public:
 		}
 		void addCondition(TermCondition &term, bool isKey = false) {
 			if (isKey) {
-				keyList_.push_back(conditionList_.size());
+				keyList_.push_back(static_cast<ColumnId>(conditionList_.size()));
 			}
 			conditionList_.push_back(term);
 		}
@@ -361,9 +348,10 @@ public:
 		}
 		template <typename K, typename V>
 		void setSuspendPoint(
-			TransactionContext &txn, ObjectManager &, TreeFuncInfo *funcInfo, const K &suspendKey, const V &suspendValue) {
-			 UTIL_STATIC_ASSERT((!util::IsSame<K, StringKey>::VALUE));
-			 UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyAddr>::VALUE));
+			TransactionContext &txn, ObjectManager &, TreeFuncInfo *, const K &suspendKey, const V &suspendValue) {
+			UTIL_STATIC_ASSERT((!util::IsSame<K, StringKey>::VALUE));
+			UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyAddr>::VALUE));
+
 			uint32_t keySize = sizeof(K);
 			suspendKey_ =
 				ALLOC_NEW(txn.getDefaultAllocator()) uint8_t[keySize];
@@ -427,9 +415,32 @@ public:
 		void setSuspendValueSize(uint32_t size) {
 			suspendValueSize_ = size;
 		}
+		ResumeStatus getResumeStatus() const {
+			return isResume_;
+		}
+		void setResumeStatus(ResumeStatus status) {
+			isResume_ = status;
+		}
+		const util::Vector<size_t> &getKeyList() const {
+			return keyList_;
+		}
 
 		virtual std::string dump();
 	protected:
+		util::Vector<TermCondition> conditionList_;  
+		util::Vector<size_t> keyList_;  
+		ResultSize limit_;				
+		ResumeStatus isResume_;
+		NullCondition nullCond_;		 
+
+		bool isSuspended_;		   
+		ResultSize suspendLimit_;  
+		uint8_t *suspendKey_;  
+		uint32_t suspendKeySize_;  
+		uint8_t *suspendValue_;  
+		uint32_t suspendValueSize_;  
+		bool isNullSuspended_;
+		RowId suspendRowId_;
 		util::Vector<ColumnId> columnIdList_; 
 	};
 	TreeFuncInfo *getFuncInfo() {
@@ -451,16 +462,16 @@ public:
 		bool isCaseSensitive() const {
 			return isCaseSenstive_;
 		}
-		void setCompareNum(int32_t compareNum) {
+		void setCompareNum(uint32_t compareNum) {
 			compareNum_ = compareNum;
 		}
-		int32_t getCompareNum() const {
+		uint32_t getCompareNum() const {
 			return compareNum_;
 		}
-		int32_t getGreaterCompareNum() const {
+		uint32_t getGreaterCompareNum() const {
 			return greaterCompareNum_;
 		}
-		int32_t getLessCompareNum() const {
+		uint32_t getLessCompareNum() const {
 			return lessCompareNum_;
 		}
 		TreeFuncInfo *getFuncInfo() const {
@@ -476,9 +487,9 @@ public:
 		bool isCaseSenstive_;
 		bool isStartIncluded_;
 		bool isEndIncluded_;
-		int32_t compareNum_;
-		int32_t greaterCompareNum_;
-		int32_t lessCompareNum_;
+		uint32_t compareNum_;
+		uint32_t greaterCompareNum_;
+		uint32_t lessCompareNum_;
 		TreeFuncInfo *funcInfo_;
 		TermCondition *startCondition_;
 		TermCondition *endCondition_;
@@ -521,6 +532,7 @@ public:
 	void dump(TreeFuncInfo &funcInfo, util::NormalOStringStream &output) const;
 
 	friend std::ostream &operator<<(std::ostream &out, const CompositeInfoObject &foo) {
+		UNUSED_VARIABLE(foo);
 		out << "no impl";
 		return out;
 	}

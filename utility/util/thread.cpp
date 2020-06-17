@@ -1377,26 +1377,31 @@ void ThreadAttribute::getStackSize(size_t &size) const {
 #endif
 }
 
-ConflictionDetector::ConflictionDetector() {
+
+template<>
+void ConflictionDetectorBase<true>::errorEntering() {
+	assert(false);
+	UTIL_THROW_UTIL_ERROR(CODE_ILLEGAL_OPERATION,
+			"Internal error by critical section confliction");
 }
 
-ConflictionDetector::~ConflictionDetector() {
+template<>
+void ConflictionDetectorBase<false>::errorEntering() {
+	assert(false);
+	abort();
 }
 
-void ConflictionDetector::enter() {
-	if (++counter_ != 1) {
-		assert(false);
-		UTIL_THROW_UTIL_ERROR(CODE_ILLEGAL_OPERATION,
-				"Internal error by critical section confliction");
-	}
+template<>
+void ConflictionDetectorBase<true>::errorLeaving() {
+	assert(false);
+	UTIL_THROW_UTIL_ERROR(CODE_ILLEGAL_OPERATION,
+			"Internal error by wrong confliction detector usage");
 }
 
-void ConflictionDetector::leave() {
-	if (--counter_ != 0) {
-		assert(false);
-		UTIL_THROW_UTIL_ERROR(CODE_ILLEGAL_OPERATION,
-				"Internal error by wrong confliction detector usage");
-	}
+template<>
+void ConflictionDetectorBase<false>::errorLeaving() {
+	assert(false);
+	abort();
 }
 
 

@@ -66,6 +66,9 @@ public:
 		return containerType_;
 	}
 
+	TablePartitioningVersionId getTablePartitioningVersionId() {
+		return tablePartitioningVersionId_;
+	}
 
 	uint32_t getColumnCount() const {
 		return columnNum_;
@@ -177,6 +180,10 @@ protected:
 	util::StackAllocator &getAllocator() {
 		return alloc_;
 	}
+	void setTablePartitionVersionId(
+		TablePartitioningVersionId versionId) {
+		tablePartitioningVersionId_ = versionId;
+	}
 	void setColumnCount(uint32_t count);
 
 	void setRowKeyColumnId(ColumnId columnId);
@@ -193,6 +200,7 @@ protected:
 	const DataStoreValueLimitConfig &dsValueLimitConfig_;
 	ContainerType containerType_;
 	util::String affinityStr_;  
+	TablePartitioningVersionId tablePartitioningVersionId_;
 	Timestamp containerExpirationStartTime_;  
 	BaseContainer::ContainerExpirationInfo containerExpirationInfo_;  
 

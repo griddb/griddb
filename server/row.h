@@ -199,6 +199,7 @@ inline BaseContainer::RowArrayImpl<BaseContainer, BaseContainer::ROW_ARRAY_GENER
 
 inline BaseContainer::RowArray::Row::Row(uint8_t *rowImage, RowArray *rowArrayCursor)
 	: rowArrayCursor_(rowArrayCursor) {
+	UNUSED_VARIABLE(rowImage);
 }
 
 /*!
@@ -523,6 +524,7 @@ const void *BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getFields
 template<typename Container, RowArrayType rowArrayType>
 void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getFields(TransactionContext& txn, util::Vector<ColumnId> &columnIds,
 	util::XArray<KeyData> &fieldList) {
+	UNUSED_VARIABLE(txn);
 	for (size_t i = 0; i < columnIds.size(); i++) {
 		ColumnInfo& columnInfo = rowArrayCursor_->getContainer().getColumnInfo(columnIds[i]);
 		if (!isNullValue(columnInfo)) {
@@ -1100,7 +1102,7 @@ const void * BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getVaria
 		}
 
 		rowArrayCursor_->rowCache_.lastCachedField_ = 0;
-		frontObject.loadNeighbor(baseOId, OBJECT_READ_ONLY);
+		frontObject.loadFast(baseOId);
 	}
 	while (false);
 
@@ -1141,9 +1143,8 @@ const void * BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getVaria
 
 				val1byte = *reinterpret_cast<const uint8_t *>(addr);
 				if (ValueProcessor::varSizeIs8Byte(val1byte)) {
-					uint64_t val8byte = *reinterpret_cast<const uint64_t *>(addr);
-					it->baseObject_.loadNeighbor(
-							ValueProcessor::decodeVarSize64(addr), OBJECT_READ_ONLY);
+					it->baseObject_.loadFast(
+							ValueProcessor::decodeVarSize64(addr));
 					addr = it->baseObject_.getBaseAddr();
 				}
 
@@ -1540,6 +1541,7 @@ BaseContainer::RowArrayImpl<Container, rowArrayType>::RowArrayImpl(
 	  latestParam_(latestParam),
 	  currentParam_(latestParam),
 	  elemCursor_(0) {
+	UNUSED_VARIABLE(txn);
 }
 
 template<typename Container, RowArrayType rowArrayType>
@@ -1578,6 +1580,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::initializeParam() {
 				}
 			}
 			uint32_t oldRrowFixedColumnSize_ = oldRowSize_ - currentParam_.nullsOffset_ - currentParam_.nullbitsSize_;
+			UNUSED_VARIABLE(oldRrowFixedColumnSize_);
 			assert(oldRrowFixedColumnSize_ == currentParam_.rowFixedColumnSize_);
 			assert(oldRowSize_ == currentParam_.rowSize_);
 		}
@@ -1599,7 +1602,7 @@ inline bool BaseContainer::RowArrayImpl<Container, rowArrayType>::load(Transacti
 		rowArrayStorage_.load(oId, getOption);
 	}
 	else {
-		rowArrayStorage_.loadNeighbor(oId, OBJECT_READ_ONLY);
+		rowArrayStorage_.loadFast(oId);
 		rowArrayStorage_.resetCursor();
 	}
 
@@ -1634,8 +1637,10 @@ template<typename Container, RowArrayType rowArrayType>
 void BaseContainer::RowArrayImpl<Container, rowArrayType>::finalize(TransactionContext &txn) {
 	setDirty(txn);
 	for (begin(); !end(); next()) {
+		container_->addRemovedRow(txn, row_.getRowId(), getOId());
 		row_.finalize(txn);
 	}
+	container_->addRemovedRowArray(txn, getBaseOId());
 	rowArrayStorage_.finalize();
 }
 
@@ -1652,6 +1657,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::append(
 	setRowNum(getRowNum() + 1);
 	updateNullsStats(row.getNullsAddr());
 	container_->updateNullsStats(row.getNullsAddr());
+	container_->addUpdatedRow(txn, row.getRowId(), getOId());
 }
 
 template<typename Container, RowArrayType rowArrayType>
@@ -1931,6 +1937,7 @@ inline RowArrayType BaseContainer::RowArrayImpl<Container, rowArrayType>::getRow
 
 template<typename Container, RowArrayType rowArrayType>
 bool BaseContainer::RowArrayImpl<Container, rowArrayType>::setDirty(TransactionContext &txn) {
+	UNUSED_VARIABLE(txn);
 	rowArrayStorage_.setDirty();
 	return !isLatestSchema();
 }
@@ -2132,6 +2139,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::insert(
 	}
 	updateNullsStats(row_.getNullsAddr());
 	container_->updateNullsStats(row_.getNullsAddr());
+	container_->addUpdatedRow(txn, row_.getRowId(), getOId());
 }
 
 /*!
@@ -2143,6 +2151,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::update(
 	row_.updateFields(txn, messageRowStore);
 	updateNullsStats(messageRowStore->getNullsAddr());
 	container_->updateNullsStats(messageRowStore->getNullsAddr());
+	container_->addUpdatedRow(txn, row_.getRowId(), getOId());
 }
 
 /*!
@@ -2150,6 +2159,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::update(
 */
 template<typename Container, RowArrayType rowArrayType>
 void BaseContainer::RowArrayImpl<Container, rowArrayType>::remove(TransactionContext &txn) {
+	container_->addRemovedRow(txn, row_.getRowId(), getOId());
 	row_.remove(txn);
 	if (elemCursor_ == getRowNum() - 1) {
 		setRowNum(elemCursor_);
@@ -2163,7 +2173,10 @@ template<typename Container, RowArrayType rowArrayType>
 void BaseContainer::RowArrayImpl<Container, rowArrayType>::move(TransactionContext &txn, RowArrayImpl &dest) {
 	Row row(getRow(), this);
 	Row destRow(dest.getRow(), &dest);
+	RowId rowId = row.getRowId();
+	container_->addRemovedRow(txn, rowId, getOId());
 	row.move(txn, destRow);
+	container_->addUpdatedRow(txn, rowId, dest.getOId());
 	updateCursor();
 	dest.updateCursor();
 	dest.updateNullsStats(destRow.getNullsAddr());
@@ -2173,7 +2186,10 @@ template<typename Container, RowArrayType rowArrayType>
 void BaseContainer::RowArrayImpl<Container, rowArrayType>::convert(TransactionContext &txn, RowArrayImpl &dest) {
 	Row row(getRow(), this);
 	Row destRow(dest.getRow(), &dest);
+	RowId rowId = row.getRowId();
+	container_->addRemovedRow(txn, rowId, getOId());
 	row.convert(txn, destRow);
+	container_->addUpdatedRow(txn, rowId, dest.getOId());
 	updateCursor();
 	dest.updateCursor();
 	dest.updateNullsStats(destRow.getNullsAddr());
@@ -2187,6 +2203,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::copy(TransactionConte
 	Row row(getRow(), this);
 	Row destRow(dest.getRow(), &dest);
 	row.copy(txn, destRow);
+	container_->addUpdatedRow(txn, destRow.getRowId(), dest.getOId());
 	updateCursor();
 	dest.updateCursor();
 	dest.updateNullsStats(destRow.getNullsAddr());
@@ -2214,6 +2231,11 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::copyRowArray(
 	}
 	else {
 		memcpy(dest.getAddr(), getAddr(), getBinarySize(getMaxRowNum()));
+		for (begin(); !end(); next()) {
+			Row destRow(dest.getRow(), &dest);
+			container_->addUpdatedRow(txn, destRow.getRowId(), dest.getOId());
+			dest.next();
+		}
 	}
 	moveCursor(currentCursor);
 }
@@ -2221,6 +2243,10 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::copyRowArray(
 template<typename Container, RowArrayType rowArrayType>
 void BaseContainer::RowArrayImpl<Container, rowArrayType>::moveRowArray(TransactionContext &txn) {
 	uint16_t currentCursor = elemCursor_;
+	for (begin(); !end(); next()) {
+		container_->addUpdatedRow(txn, row_.getRowId(), getOId());
+	}
+	container_->addRemovedRowArray(txn, getBaseOId());
 	moveCursor(currentCursor);
 }
 
@@ -2399,7 +2425,10 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::shift(TransactionCont
 			moveCursor(i);
 			Row destRow(getRow(), this);
 			OId newOId = getOId();
+			RowId rowId = row.getRowId();
+			container_->addRemovedRow(txn, rowId, oldOId);
 			row.move(txn, destRow);
+			container_->addUpdatedRow(txn, rowId, newOId);
 			if (destRow.isRemoved()) {
 				break;
 			}
@@ -2426,7 +2455,10 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::shift(TransactionCont
 				moveCursor(i - 1);
 				Row destRow(getRow(), this);
 				OId newOId = getOId();
+				RowId rowId = row.getRowId();
+				container_->addRemovedRow(txn, rowId, oldOId);
 				row.move(txn, destRow);
+				container_->addUpdatedRow(txn, rowId, newOId);
 				moveList.push_back(std::make_pair(oldOId, newOId));
 			}
 		}
@@ -2460,7 +2492,10 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::split(TransactionCont
 			moveCursor(i);
 			Row destRow(getRow(), this);
 			OId newOId = getOId();
+			RowId rowId = row.getRowId();
+			container_->addRemovedRow(txn, rowId, oldOId);
 			row.move(txn, destRow);
+			container_->addUpdatedRow(txn, rowId, newOId);
 			moveList.push_back(std::make_pair(oldOId, newOId));
 		}
 		moveCursor(insertPos);
@@ -2503,7 +2538,10 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::merge(TransactionCont
 				moveCursor(pos);
 				Row destRow(getRow(), this);
 				OId newOId = getOId();
+				RowId rowId = row.getRowId();
+				container_->addRemovedRow(txn, rowId, oldOId);
 				row.move(txn, destRow);
+				container_->addUpdatedRow(txn, rowId, newOId);
 				moveList.push_back(std::make_pair(oldOId, newOId));
 			}
 			pos++;
@@ -2532,7 +2570,6 @@ bool BaseContainer::RowArrayImpl<Container, rowArrayType>::convertSchema(Transac
 
 	bool isRelease = false;
 		
-	int64_t maxRowNum = getMaxRowNum();
 	int64_t activeRowNum = getActiveRowNum();
 	ObjectManager &objectManager =
 		*(getContainer().getObjectManager());
@@ -2546,7 +2583,6 @@ bool BaseContainer::RowArrayImpl<Container, rowArrayType>::convertSchema(Transac
 		thisRowArrayRowNum = activeRowNum;
 	}
 	int64_t currentMaxRowNum = getContainer().getNormalRowArrayNum();
-	uint16_t currentCursor = elemCursor_;
 	OId currentOId = getOId();
 	OId newCurrentOId = UNDEF_OID;
 
@@ -2668,6 +2704,7 @@ inline OId BaseContainer::RowArrayImpl<Container, rowArrayType>::calcOId(uint16_
 template<typename Container, RowArrayType rowArrayType>
 void BaseContainer::RowArrayImpl<Container, rowArrayType>::reset(
 	TransactionContext &txn, RowId baseRowId, uint16_t maxRowNum) {
+	UNUSED_VARIABLE(txn);
 	currentParam_ = latestParam_;
 	memset(rowArrayStorage_.getBaseAddr(), 0, getHeaderSize());
 	setMaxRowNum(maxRowNum);

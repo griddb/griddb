@@ -47,6 +47,12 @@ public:
 
 	bool parse(const char8_t *buf, size_t size, bool throwOnError);
 
+	template<typename W>
+	void writeTo(W &writer, bool resolving = true) const;
+
+	template<typename R, typename H>
+	static TimeZone readFrom(R &reader, const H &errorHandler);
+
 private:
 
 	struct Constants {
@@ -76,8 +82,14 @@ public:
 		FIELD_SECOND,
 		FIELD_MILLISECOND,
 
+		END_PRIMITIVE_FIELD,
+
 		FIELD_DAY_OF_WEEK,
-		FIELD_DAY_OF_YEAR
+		FIELD_DAY_OF_YEAR,
+		FIELD_WEEK_OF_YEAR_SUNDAY, 
+		FIELD_WEEK_OF_YEAR_MONDAY, 
+		FIELD_WEEK_OF_YEAR_ISO, 
+		FIELD_YEAR_ISO 
 	};
 
 	struct FieldData;
@@ -161,6 +173,10 @@ public:
 	static bool parse(
 			const char8_t *str, DateTime &dateTime, bool trimMilliseconds);
 
+	template<typename W, typename H>
+	void writeTo(
+			W &writer, const ZonedOption &option, const H& errorHandler) const;
+
 	static DateTime now(const Option &option);
 	static DateTime now(bool trimMilliseconds);
 
@@ -176,6 +192,11 @@ public:
 
 private:
 	static const int32_t EPOCH_DAY_OF_WEEK;
+
+	int64_t getUnixTimeDays(
+			const FieldData &fieldData, FieldType trimingFieldType,
+			const ZonedOption &option) const;
+	static int64_t unixTimeDaysToWeek(int64_t timeDays);
 
 	static void checkFieldBounds(
 			const FieldData &fields, const ZonedOption &option);
@@ -271,10 +292,43 @@ private:
 };
 
 
-inline std::ostream& operator<<(std::ostream &s, const util::TimeZone &zone) {
+
+template<typename W>
+void TimeZone::writeTo(W &writer, bool resolving) const {
+	TimeZone resolvedZone = *this;
+	if (resolvedZone.isEmpty() && resolving) {
+		resolvedZone = getUTCTimeZone();
+	}
+
+	char8_t buf[MAX_FORMAT_SIZE];
+	const size_t size = resolvedZone.format(buf, sizeof(buf));
+	writer.append(buf, size);
+}
+
+template<typename R, typename H>
+TimeZone TimeZone::readFrom(R &reader, const H &errorHandler) {
+	const size_t size = reader.getNext();
+	const char8_t *buf = (size > 0 ? &reader.get() : NULL);
+
+	TimeZone zone;
+	try {
+		const bool throwOnError = true;
+		zone.parse(buf, size, throwOnError);
+	}
+	catch (UtilityException &e) {
+		if (e.getErrorCode() != UtilityException::CODE_INVALID_PARAMETER) {
+			throw;
+		}
+		errorHandler.errorTimeParse(e);
+	}
+	return zone;
+}
+
+inline std::ostream& operator<<(std::ostream &s, const TimeZone &zone) {
 	zone.format(s);
 	return s;
 }
+
 
 inline DateTime::DateTime() : unixTimeMillis_(INITIAL_UNIX_TIME) {
 }
@@ -298,6 +352,21 @@ inline int64_t DateTime::getUnixTime() const {
 
 inline void DateTime::setUnixTime(int64_t unixTimeMillis) {
 	unixTimeMillis_ = unixTimeMillis;
+}
+
+template<typename W, typename H>
+void DateTime::writeTo(
+		W &writer, const ZonedOption &option, const H& errorHandler) const {
+	char8_t buf[MAX_FORMAT_SIZE];
+	size_t size;
+	try {
+		size = format(buf, sizeof(buf), option);
+	}
+	catch (std::exception &e) {
+		errorHandler.errorTimeFormat(e);
+		return;
+	}
+	writer.append(buf, size);
 }
 
 inline bool DateTime::operator==(const DateTime &another) const {
@@ -324,11 +393,11 @@ inline bool DateTime::operator<=(const DateTime &another) const {
 	return (unixTimeMillis_ <= another.unixTimeMillis_);
 }
 
-inline std::ostream& operator<<(
-		std::ostream &s, const util::DateTime &dateTime) {
+inline std::ostream& operator<<(std::ostream &s, const DateTime &dateTime) {
 	dateTime.format(s, false);
 	return s;
 }
+
 
 template<DateTime::FieldType T> int32_t DateTime::FieldData::getValue() const {
 	UTIL_STATIC_ASSERT(sizeof(T) < 0);

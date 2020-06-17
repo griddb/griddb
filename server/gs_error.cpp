@@ -134,6 +134,10 @@ GSExceptionRegenerator::GSExceptionRegenerator(
 			? message
 			: (strPtr == NULL || strlen(strPtr) > 0 ? strPtr : NULL);
 
+	if (baseMessage != NULL && !namedErrorCode.isEmpty()) {
+		extraMessage = NULL;
+	}
+
 	StrStream messageStream;
 	if (extraMessage == NULL) {
 		if (baseMessage != NULL) {

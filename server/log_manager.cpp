@@ -1875,7 +1875,7 @@ bool LogManager::getAutoCleanupLogFlag() {
     @brief Converts LogType to a string.
 */
 const char* LogManager::logTypeToString(LogType type) {
-	switch (type) {
+	switch (type & LOG_TYPE_CLEAR_FLAGS) {
 	case LOG_TYPE_CHECKPOINT_START:
 		return "CHECKPOINT_START";
 		break;

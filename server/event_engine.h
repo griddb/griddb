@@ -116,6 +116,7 @@ public:
 	void setLocalHandler(EventHandler &handler);
 	void setCloseEventHandler(EventType type, EventHandler &handler);
 	void setDisconnectHandler(EventHandler &handler);
+	void setScanEventHandler(EventHandler &handler);
 	void setEventCoder(EventCoder &coder);
 
 	 bool send(Event &ev, const NodeDescriptor &nd,
@@ -132,6 +133,7 @@ public:
 	void addTimer(const Event &ev, int32_t timeoutMillis);
 	void addPeriodicTimer(const Event &ev, int32_t intervalMillis);
 	void addPending(const Event &ev, PendingResumeCondition condition);
+	void addScanner(const Event &ev);
 	void executeAndWait(EventContext &ec, Event &ev);
 
 	void getStats(Stats &stats);
@@ -168,6 +170,10 @@ private:
 
 	typedef std::vector< Event*, util::StdAllocator<
 			Event*, VariableSizeAllocator> > EventList;
+
+	typedef std::vector< const Event*, util::StdAllocator<
+			const Event*, VariableSizeAllocator> > EventRefList;
+	typedef std::pair<EventRefList, int64_t> EventRefCheckList;
 
 	EventEngine(const EventEngine&);
 	EventEngine& operator=(const EventEngine&);
@@ -584,6 +590,9 @@ public:
 	bool isOnIOWorker() const;
 	bool isOnSecondaryIOWorker() const;
 
+	bool isScanningEventAccepted() const;
+	void acceptScanningEvent();
+	Event* getScannerEvent() const;
 
 	int64_t getLastEventCycle() const;
 
@@ -614,7 +623,10 @@ private:
 	bool onSecondaryIOWorker_;
 
 	const EventList *eventList_;
+	const EventRefCheckList *periodicEventList_;
 
+	bool scanningEventAccepted_;
+	Event *scannerEvent_;
 };
 
 /*!
@@ -636,6 +648,7 @@ struct EventEngine::EventContext::Source {
 	bool onIOWorker_;
 	bool onSecondaryIOWorker_;
 	const EventList *eventList_;
+	const EventRefCheckList *periodicEventList_;
 };
 
 /*!
@@ -766,8 +779,10 @@ public:
 
 		EVENT_ACTIVE_EXECUTABLE_COUNT =
 				STATS_LIVE_TYPE_START, 
+		EVENT_ACTIVE_EXECUTABLE_ONE_SHOT_COUNT, 
 		EVENT_CYCLE_HANDLING_COUNT, 
 		EVENT_CYCLE_HANDLING_AFTER_COUNT, 
+		EVENT_CYCLE_HANDLING_AFTER_ONE_SHOT_COUNT, 
 
 		STATS_TYPE_MAX
 	};
@@ -1100,14 +1115,17 @@ public:
 	void setLocalHandler(EventHandler &handler);
 	void setCloseEventHandler(EventType type, EventHandler &handler);
 	void setDisconnectHandler(EventHandler &handler);
+	void setScanEventHandler(EventHandler &handler);
 	void setEventCoder(EventCoder &coder);
 
+	bool isScannerAvailable();
 
 	DispatchResult dispatch(
 			EventContext &ec, Event &ev, bool queueingSuspended,
 			const EventRequestOption &option);
 
 	void requestAndWait(EventContext &ec, Event &ev);
+	bool scanOrExecute(EventContext &ec, Event &scannerEv, Event &ev);
 
 	void execute(EventContext &ec, Event &ev);
 
@@ -1156,6 +1174,7 @@ private:
 	HandlerTable handlerTable_;
 	EventHandler *localHandler_;
 	EventHandler *disconnectHandler_;
+	EventHandler *scanEventHandler_;
 	EventHandler *unknownEventHandler_;
 	ThreadErrorHandler *threadErrorHandler_;
 
@@ -1200,6 +1219,7 @@ struct EventEngine::Manipulator {
 	static bool isListenerEnabled(const Config &config);
 	static uint32_t getIOConcurrency(const Config &config, bool withSecondary);
 	static Stats& getStats(const EventContext &ec);
+	static void setScanner(EventContext &ec, Event *ev);
 
 	static void mergeAllocatorStats(Stats &stats, VariableSizeAllocator &alloc);
 	static void mergeAllocatorStats(Stats &stats, util::StackAllocator &alloc);
@@ -1208,7 +1228,8 @@ struct EventEngine::Manipulator {
 			const Config &config, NDPool &ndPool, SocketPool &socketPool);
 
 	static size_t getHandlingEventCount(
-			const EventContext &ec, const Event *ev, bool includesStarted);
+			const EventContext &ec, const Event *ev, bool includesStarted,
+			bool oneShotOnly);
 };
 
 class EventEngine::ClockGenerator : public util::ThreadRunner {
@@ -1395,6 +1416,7 @@ public:
 
 	void add(const Event &ev, int32_t timeoutMillis, int32_t periodicInterval);
 	void addPending(const Event &ev, PendingResumeCondition resumeCondition);
+	void addScanner(const Event &ev);
 
 	bool removeWatcher(EventProgressWatcher &watcher);
 
@@ -1419,6 +1441,23 @@ private:
 				const ActiveEntry &left, const ActiveEntry &right) const;
 	};
 
+	template<typename Events>
+	struct EventsCleaner {
+		EventsCleaner(VariableSizeAllocator &varAllocator, Events &events) :
+				varAllocator_(varAllocator), events_(events) {
+		}
+
+		~EventsCleaner() {
+			try {
+				clearEvents(varAllocator_, events_);
+			}
+			catch (...) {
+			}
+		}
+
+		VariableSizeAllocator &varAllocator_;
+		Events &events_;
+	};
 
 	typedef std::deque<
 			ActiveEntry, util::StdAllocator<
@@ -1439,12 +1478,26 @@ private:
 	EventWorker& operator=(const EventWorker&);
 
 	EventContext::Source createContextSource(
-			util::StackAllocator &allocator, const EventList *eventList);
+			util::StackAllocator &allocator, const EventList *eventList
+			,
+			const EventRefCheckList *periodicEventList
+			);
 
+	void scanEvents(EventContext &ec, util::LockGuard<util::Condition> &guard);
+	void scanEvents(EventContext &ec, Event &scannerEv,
+			util::LockGuard<util::Condition> &guard);
 
-	bool popActiveEvents(EventList &eventList, int64_t &nextTimeDiff);
+	bool popActiveEvents(
+			EventList &eventList, int64_t &nextTimeDiff
+			,
+			EventRefCheckList &periodicEventList
+			);
 	bool popPendingEvents(EventContext &ec, EventList &eventList,
 			size_t &lastSize, bool checkFirst);
+
+	void addPeriodicEventsAgain(
+			int64_t monotonicTime, const Event *ev, int32_t periodicInterval,
+			const EventList &eventList, EventRefCheckList &periodicEventList);
 
 	void addDirect(
 			int64_t monotonicTime, const Event &ev, int32_t periodicInterval,
@@ -1464,7 +1517,8 @@ private:
 			VariableSizeAllocator &allocator, ActiveQueue &activeQueue);
 
 	size_t getExecutableActiveEventCount(
-			EventMonotonicTime now, const util::LockGuard<util::Condition>&);
+			EventMonotonicTime now, bool oneShotOnly,
+			const util::LockGuard<util::Condition>&);
 
 	EventEngine *ee_;
 	uint32_t id_;
@@ -1481,6 +1535,7 @@ private:
 	UTIL_UNIQUE_PTR<ActiveQueue> activeQueue_;
 	UTIL_UNIQUE_PTR<EventQueue> pendingQueue_;
 	UTIL_UNIQUE_PTR<EventQueue> conditionalQueue_;
+	UTIL_UNIQUE_PTR<EventQueue> scannerQueue_;
 	UTIL_UNIQUE_PTR<EventProgressWatcher> progressWatcher_;
 	UTIL_UNIQUE_PTR<WatcherList> watcherList_;
 
@@ -1791,6 +1846,9 @@ inline void EventEngine::setDisconnectHandler(EventHandler &handler) {
 	dispatcher_->setDisconnectHandler(handler);
 }
 
+inline void EventEngine::setScanEventHandler(EventHandler &handler) {
+	dispatcher_->setScanEventHandler(handler);
+}
 
 inline void EventEngine::setEventCoder(EventCoder &coder) {
 	dispatcher_->setEventCoder(coder);
@@ -1852,6 +1910,10 @@ inline void EventEngine::addPending(
 	dispatcher_->selectWorker(ev, NULL).addPending(ev, condition);
 }
 
+inline void EventEngine::addScanner(const Event &ev) {
+	const EventHandlingMode mode = HANDLING_PARTITION_SERIALIZED;
+	dispatcher_->selectWorker(ev, &mode).addScanner(ev);
+}
 
 inline void EventEngine::executeAndWait(EventContext &ec, Event &ev) {
 	dispatcher_->requestAndWait(ec, ev);
@@ -2521,6 +2583,11 @@ inline EventEngine::EventContext::EventContext(const Source &source) :
 		onIOWorker_(source.onIOWorker_),
 		onSecondaryIOWorker_(source.onSecondaryIOWorker_),
 		eventList_(source.eventList_)
+		,
+		periodicEventList_(source.periodicEventList_)
+		,
+		scanningEventAccepted_(false),
+		scannerEvent_(NULL)
 {
 
 	if (source.varAllocator_ == NULL || source.allocator_ == NULL ||
@@ -2616,6 +2683,22 @@ inline bool EventEngine::EventContext::isOnSecondaryIOWorker() const {
 	return onSecondaryIOWorker_;
 }
 
+inline bool EventEngine::EventContext::isScanningEventAccepted() const {
+	return scanningEventAccepted_;
+}
+
+inline void EventEngine::EventContext::acceptScanningEvent() {
+	if (scannerEvent_ == NULL) {
+		GS_THROW_USER_ERROR(GS_ERROR_EE_OPERATION_NOT_ALLOWED,
+				"Event not scanning");
+	}
+
+	scanningEventAccepted_ = true;
+}
+
+inline Event* EventEngine::EventContext::getScannerEvent() const {
+	return scannerEvent_;
+}
 
 inline int64_t EventEngine::EventContext::getLastEventCycle() const {
 	return workerStats_.get(Stats::EVENT_CYCLE_COUNT);
@@ -2660,7 +2743,10 @@ inline EventEngine::EventContext::Source::Source(
 		workerId_(0),
 		onIOWorker_(false),
 		onSecondaryIOWorker_(false),
-		eventList_(NULL) {
+		eventList_(NULL)
+		,
+		periodicEventList_(NULL)
+{
 }
 
 

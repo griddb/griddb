@@ -341,7 +341,8 @@ int32_t HashMap::search(
 */
 int32_t HashMap::search(TransactionContext &txn, SearchContext &sc,
 	util::XArray<OId> &idList, OutputOrder outputOrder) {
-	ResultSize limit = sc.limit_;
+	UNUSED_VARIABLE(outputOrder);
+	ResultSize limit = sc.getLimit();
 	if (limit == 0) {
 		return GS_SUCCESS;
 	}

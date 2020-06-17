@@ -111,6 +111,31 @@ public:
 	virtual ~FunctorToTimestamp() {}
 };
 
+/*!
+ * @brief FROM_TIMESTAMP(timestamp)
+ *
+ * @return create string from timestamp
+ */
+class Functor_from_timestamp : public TqlFunc {
+public:
+	using TqlFunc::operator();
+	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManager &) {
+		if (args.empty() || args.size() != 1) {
+			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
+				"Invalid argument count");
+		}
+		else if (args[0]->isNullValue()) {
+			return Expr::newNullValue(txn);
+		}
+		else if (!args[0]->isTimestamp()) {
+			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
+				"Argument 1 is not a timestamp value");
+		}
+		const char *s = args[0]->getValueAsString(txn);
+		return Expr::newStringValue(s, txn);
+	}
+	virtual ~Functor_from_timestamp() {}
+};
 
 /*!
  * @brief TO_TIMESTAMP_MS(long)

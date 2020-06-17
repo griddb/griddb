@@ -24,6 +24,10 @@
 #include "data_store.h"  
 #include "data_type.h"
 
+class Query;
+#include "btree_map.h"
+class ColumnInfo;
+struct SQLTableInfo;
 
 class BaseContainer;
 class ContainerRowScanner;
@@ -39,6 +43,7 @@ public:
 private:
 	bool isPartial_;
 	bool isDistribute_;
+	const SQLTableInfo *largeInfo_;
 	RowId minRowId_;		
 	RowId maxRowId_;		
 	int64_t filteredNum_;
@@ -48,6 +53,7 @@ private:
 	int32_t fetchByteSize_;
 public:
 	ResultSetOption() : isPartial_(false), isDistribute_(false),
+		largeInfo_(NULL),
 		minRowId_(INITIAL_ROWID), maxRowId_(MAX_ROWID), 
 		filteredNum_(0),
 		swapOutNum_(0),
@@ -156,6 +162,12 @@ public:
 	bool isPartial() const {
 		return isPartial_ ;
 	}
+	void setLargeInfo(const SQLTableInfo *largeInfo) {
+		largeInfo_ = largeInfo;
+	}
+	const SQLTableInfo* getLargeInfo() const {
+		return largeInfo_;
+	}
 	void encodePartialQueryOption(util::StackAllocator &alloc, PartialQueryOption &partialQueryOption) const {
 		RowId minRowId = getMinRowId();
 		RowId maxRowId = getMaxRowId();
@@ -206,6 +218,8 @@ public:
 	ResultSet();  
 	~ResultSet();
 
+	void
+	resetMessageBuffer();  
 	void resetSerializedData();
 	void clear();  
 
@@ -228,6 +242,12 @@ public:
 	inline void setRSAllocator(util::StackAllocator *alloc) {
 		rsAlloc_ = alloc;
 	}
+	inline void setRSRowIdAllocator(util::StackAllocator *alloc) {
+		rsRowIdAlloc_ = alloc;
+	}
+	inline void setRSSwapAllocator(util::StackAllocator *alloc) {
+		rsSwapAlloc_ = alloc;
+	}
 	inline void setTxnAllocator(util::StackAllocator *alloc) {
 		txnAlloc_ = alloc;
 	}
@@ -238,6 +258,9 @@ public:
 		skipCount_ = count;
 	}
 
+	inline void setRowScanner(ContainerRowScanner *scanner) {
+		rowScanner_ = scanner;
+	}
 
 	inline void setFetchNum(ResultSize fetchNum) {
 		fetchNum_ = fetchNum;
@@ -310,6 +333,9 @@ public:
 		return skipCount_;
 	}
 
+	inline ContainerRowScanner* getRowScanner() const {
+		return rowScanner_;
+	}
 
 	inline bool getRowExist() const {
 		return resultNum_ > 0;
@@ -393,6 +419,12 @@ public:
 	inline util::StackAllocator *getRSAllocator() {
 		return rsAlloc_;
 	}
+	inline util::StackAllocator *getRSRowIdAllocator() {
+		return rsRowIdAlloc_;
+	}
+	inline util::StackAllocator *getRSSwapAllocator() {
+		return rsSwapAlloc_;
+	}
 	inline util::StackAllocator *getTxnAllocator() {
 		return txnAlloc_;
 	}
@@ -416,6 +448,206 @@ public:
 
 	void getDistributedTargetStatus(bool &uncovered, bool &reduced) const;
 	void setDistributedTargetStatus(bool uncovered, bool reduced);
+
+	void incrementReturnCount() {
+		partialReturnCount_++;
+	}
+	int64_t getPartialReturnCount() const {
+		return partialReturnCount_;
+	}
+	void resetExecCount() {
+		partialExecCount_ = 0;
+	}
+	void incrementExecCount() {
+		partialExecCount_++;
+	}
+	int64_t getPartialExecuteCount() {
+		return partialExecCount_;
+	}
+	bool isPartialExecuteSuspend() const {
+		return getPartialExecStatus() == PARTIAL_SUSPENDED;
+	}
+	const util::XArray<RowId> *getUpdateRowIdList() const;
+	util::XArray<RowId> *getUpdateRowIdList();
+
+	const util::XArray<RowId> *getSwapRowIdList() const;
+	util::XArray<RowId> *getSwapRowIdList();
+
+	const util::XArray<uint64_t> *getUpdateObjectIdList() const;
+	util::XArray<uint64_t> *getUpdateObjectIdList();
+
+	const util::XArray<int8_t> *getUpdateOperationList() const;
+	util::XArray<int8_t> *getUpdateOperationList();
+
+	void setQueryObj(Query *queryObj) {
+		queryObj_ = queryObj;
+	}
+	Query *getQueryObj() {
+		return queryObj_;
+	}
+
+	void setLargeInfo(const SQLTableInfo *largeInfo);
+	const SQLTableInfo* getLargeInfo() const;
+
+	/*!
+		@brief Represents the status of partial execute
+	*/
+	enum PartialExecState {
+		NOT_PARTIAL,
+		PARTIAL_START,		
+		PARTIAL_SUSPENDED,  
+		PARTIAL_FINISH,		
+	};
+	/*!
+		@brief For partial execution
+	*/
+	struct PartialExecInfo {
+		ResultSize suspendLimit_;  
+		Query *query_;			   
+		uint32_t startOrPos_;  
+		util::Vector<ColumnId> *columnIds_;  
+		MapType indexType_;  
+
+		uint8_t *suspendKey_;  
+		uint32_t suspendKeySize_;  
+		uint8_t *suspendValue_;  
+		uint32_t suspendValueSize_;  
+		RowId suspendRowId_;  
+		RowId lastRowId_;	 
+		bool isNullSuspended_;
+	public:
+		PartialExecInfo() {
+			suspendLimit_ = INT64_MAX;
+			query_ = NULL;
+			startOrPos_ = 0;
+			columnIds_ = NULL;
+			indexType_ = MAP_TYPE_BTREE;
+			suspendKey_ = NULL;
+			suspendKeySize_ = 0;
+			suspendValue_ = NULL;
+			suspendValueSize_ = 0;
+			suspendRowId_ = UNDEF_ROWID;
+			lastRowId_ = UNDEF_ROWID;
+			isNullSuspended_ = false;
+		}
+	};
+
+	enum UpdateIdType {
+		UPDATE_ID_NONE,
+		UPDATE_ID_ROW,
+		UPDATE_ID_OBJECT
+	};
+
+	enum UpdateOperation {
+		UPDATE_OP_UPDATE_NORMAL_ROW,
+		UPDATE_OP_UPDATE_MVCC_ROW,
+		UPDATE_OP_REMOVE_ROW,
+		UPDATE_OP_REMOVE_ROW_ARRAY,
+		UPDATE_OP_REMOVE_CHUNK
+	};
+
+	uint32_t getCurrentOrPosition() const {
+		return partialExecInfo_.startOrPos_;
+	}
+
+	void setPartialContext(BtreeMap::SearchContext &sc,
+		ResultSize &currentSuspendLimit, uint32_t orPos, MapType indexType
+		);  
+
+	void rewritePartialContext(TransactionContext &txn, 
+		BtreeMap::SearchContext &sc,
+		ResultSize currentSuspendLimit, OutputOrder outputOrder, uint32_t orPos,
+		BaseContainer &container,
+		uint16_t unitRowNum,
+		bool isResumeRewrite =
+			true);  
+
+	void setPartialExecuteSize(ResultSize size) {
+		if (size < BtreeMap::MINIMUM_SUSPEND_SIZE) {
+			size = BtreeMap::MINIMUM_SUSPEND_SIZE;
+		}
+		partialExecInfo_.suspendLimit_ = size;
+	}
+	ResultSize getPartialExecuteSize() const {
+		return partialExecInfo_.suspendLimit_;
+	}
+	void setPartialExecStatus(PartialExecState state) {
+		partialExecState_ = state;
+	}
+	PartialExecState getPartialExecStatus() const {
+		return partialExecState_;
+	}
+
+	bool isPartialExecuteMode() const {
+		return partialExecState_ != NOT_PARTIAL;
+	}
+	void setPartialMode(bool isPartial) {
+		if (isPartial) {
+			partialExecState_ = PARTIAL_START;
+		}
+		else {
+			partialExecState_ = NOT_PARTIAL;
+			partialExecInfo_.suspendLimit_ = INT64_MAX;
+		}
+	}
+	void resetPartialContext();
+	bool isRowIdListSorted() const {
+		return isRowIdSorted_;
+	}
+	void setRowIdListSorted() {
+		isRowIdSorted_ = true;
+	}
+	void replaceRowIdList() {
+		util::XArray<RowId> *tmpList = swapRowIdList_;
+		util::StackAllocator *tmpAlloc = rsSwapAlloc_;
+
+		swapRowIdList_ = rowIdList_;
+		rsSwapAlloc_ = rsRowIdAlloc_;
+
+		rowIdList_ = tmpList;
+		rsRowIdAlloc_ = tmpAlloc;
+	}
+	void setLastRowId(RowId rowId) {
+		partialExecInfo_.lastRowId_ = rowId;
+	}
+
+	UpdateIdType getUpdateIdType() const {
+		return updateIdType_;
+	}
+
+	void setUpdateIdType(UpdateIdType type) {
+		updateIdType_ = type;
+	}
+
+	void setUpdateRowIdHandler(UpdateRowIdHandler *handler, size_t threshold);
+
+	UpdateRowIdHandler* getUpdateRowIdHandler() {
+		return updateRowIdHandler_;
+	}
+
+	bool isUpdateRowIdListValid() const {
+		return !updateRowIdListInvalid_;
+	}
+
+	void invalidateUpdateRowIdList() {
+		updateRowIdListInvalid_ = true;
+	}
+
+	void addUpdateRowId(RowId rowId);
+
+	void addUpdatedRow(RowId rowId, OId oId);
+	void addUpdatedMvccRow(RowId rowId, OId oId);
+	void addRemovedRow(RowId rowId, OId oId);
+	void addRemovedRowArray(OId oId);
+	void addRemovedChunk(OId oId); 
+
+	void addUpdatedId(RowId rowId, uint64_t id, UpdateOperation op);
+
+	void handleUpdateRowIdError(std::exception &e);
+
+	RowId getLastRowId() const {
+		return partialExecInfo_.lastRowId_;
+	}
 
 
 	bool isRelease() const;
@@ -487,6 +719,7 @@ private:
 	uint64_t
 		skipCount_;  
 
+	ContainerRowScanner *rowScanner_;
 
 	ResultType resultType_;
 
@@ -499,8 +732,34 @@ private:
 	bool distributedTargetUncovered_;
 	bool distributedTargetReduced_;
 
+	util::StackAllocator *
+		rsRowIdAlloc_;  
+	util::StackAllocator *
+		rsSwapAlloc_;						
+	PartialExecInfo partialExecInfo_;		
+	PartialExecState partialExecState_;		
+	int64_t partialReturnCount_;			
+	int64_t partialExecCount_;				
+	Query *queryObj_;						
+	util::XArray<uint8_t> *suspendKeyBuffer_;  
+	util::XArray<uint8_t> *suspendValueBuffer_;  
+	util::XArray<RowId> *updateRowIdList_;  
+	util::XArray<RowId> *swapRowIdList_;	
+	util::XArray<uint64_t> *updateObjectIdList_;  
+	util::XArray<int8_t> *updateOperationList_;  
+	UpdateRowIdHandler *updateRowIdHandler_;
+	size_t updateRowIdListThreshold_;
+	bool updateRowIdListInvalid_;
+	bool isRowIdSorted_;					
+	UpdateIdType updateIdType_;
+
 };
 
+class ResultSet::UpdateRowIdHandler {
+public:
+	virtual void close() = 0;
+	virtual void operator()(RowId rowId, uint64_t id, UpdateOperation op) = 0;
+};
 
 /*!
 	@brief Pre/postprocess before/after ResultSet Operation
@@ -605,6 +864,75 @@ private:
 	ResultSetId rsId_;
 };
 
+inline void ResultSet::addUpdateRowId(RowId rowId) {
+	addUpdatedRow(rowId, UNDEF_OID);
+}
+
+inline void ResultSet::addUpdatedRow(RowId rowId, OId oId) {
+	addUpdatedId(rowId, oId, UPDATE_OP_UPDATE_NORMAL_ROW);
+}
+
+inline void ResultSet::addUpdatedMvccRow(RowId rowId, OId oId) {
+	addUpdatedId(rowId, oId, UPDATE_OP_UPDATE_MVCC_ROW);
+}
+
+inline void ResultSet::addRemovedRow(RowId rowId, OId oId) {
+	addUpdatedId(rowId, oId, UPDATE_OP_REMOVE_ROW);
+}
+
+inline void ResultSet::addRemovedRowArray(OId oId) {
+	addUpdatedId(UNDEF_ROWID, oId, UPDATE_OP_REMOVE_ROW_ARRAY);
+}
+
+inline void ResultSet::addRemovedChunk(OId oId) {
+	addUpdatedId(UNDEF_ROWID, oId, UPDATE_OP_REMOVE_CHUNK);
+}
+
+inline void ResultSet::addUpdatedId(
+		RowId rowId, uint64_t id, UpdateOperation op) {
+	try {
+		if (updateIdType_ == UPDATE_ID_ROW) {
+			if (op != UPDATE_OP_UPDATE_NORMAL_ROW &&
+				op != UPDATE_OP_UPDATE_MVCC_ROW &&
+					op != UPDATE_OP_REMOVE_ROW) {
+				return;
+			}
+			assert(rowId != UNDEF_ROWID);
+
+			util::XArray<RowId> &idList = (updateRowIdList_ == NULL ?
+					*getUpdateRowIdList() : *updateRowIdList_);
+
+			if (idList.size() >= updateRowIdListThreshold_ &&
+					updateRowIdHandler_ != NULL) {
+				(*updateRowIdHandler_)(rowId, id, op);
+			}
+			else {
+				idList.push_back(rowId);
+			}
+		}
+		else if (updateIdType_ == UPDATE_ID_OBJECT) {
+			assert(id != UNDEF_OID && id != UNDEF_CHUNKID);
+
+			util::XArray<uint64_t> &idList = (updateObjectIdList_ == NULL ?
+					*getUpdateObjectIdList() : *updateObjectIdList_);
+			util::XArray<int8_t> &opList = (updateOperationList_ == NULL ?
+					*getUpdateOperationList() : *updateOperationList_);
+
+			if (idList.size() >= updateRowIdListThreshold_ &&
+					updateRowIdHandler_ != NULL) {
+				(*updateRowIdHandler_)(rowId, id, op);
+			}
+			else {
+				idList.push_back(id);
+				opList.push_back(static_cast<int8_t>(op));
+			}
+		}
+	}
+	catch (...) {
+		std::exception e;
+		handleUpdateRowIdError(e);
+	}
+}
 
 inline ResultSetGuard::ResultSetGuard(TransactionContext &txn, DataStore &dataStore, ResultSet &rs)
 	: dataStore_(dataStore),
