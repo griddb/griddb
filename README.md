@@ -50,6 +50,44 @@
     $ bin/gs_stopcluster -u admin/your_password
     $ bin/gs_stopnode -u admin/your_password
 
+## Quick start (Using RPM)
+
+  We have confirmed the operation on CentOS 7.6.
+
+Note:
+-  When you install this package, a gsadm OS user are created in the OS.  
+  Execute the operating command as the gsadm user.  
+- You don't need to set environment vatiable GS_HOME and GS_LOG.
+- There is Java client library (gridstore.jar) on /usr/share/java and a sample on /usr/gridb-XXX/docs/sample/programs.
+
+### Install
+
+    (CentOS)
+    $ sudo rpm -ivh griddb-X.X.X-linux.x86_64.rpm
+
+    Note: X.X.X is the GridDB version.
+
+### Start a server
+    [gsadm]$ gs_passwd admin
+      #input your_password
+    [gsadm]$ vi conf/gs_cluster.json
+      #    "clusterName":"your_clustername" #<-- input your_clustername
+    [gsadm]$ gs_startnode
+    [gsadm]$ gs_joincluster -c your_clustername -u admin/your_password
+
+### Execute a sample program
+    $ export CLASSPATH=${CLASSPATH}:/usr/share/java/gridstore.jar
+    $ mkdir gsSample
+    $ cp /usr/griddb-X.X.X/docs/sample/program/Sample1.java gsSample/.
+    $ javac gsSample/Sample1.java
+    $ java gsSample/Sample1 239.0.0.1 31999 your_clustername admin your_password
+      --> Person:  name=name02 status=false count=2 lob=[65, 66, 67, 68, 69, 70, 71, 72, 73, 74]
+
+### Stop a server
+    [gsadm]$ gs_stopcluster -u admin/your_password
+    [gsadm]$ gs_stopnode -u admin/your_password
+
+
 ## Document
   Refer to the file below for more detailed information.  
   - [Features Reference](https://github.com/griddb/docs-en/blob/master/manuals/GridDB_FeaturesReference.md)

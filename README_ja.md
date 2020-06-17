@@ -48,6 +48,39 @@ GridDBが提供する機能は『[GridDB 機能リファレンス](https://githu
     $ gs_stopcluster -u admin/your_password
     $ gs_stopnode -u admin/your_password
 
+## クイックスタート (RPMファイルの利用)
+  CentOS 7.6の環境での動作を確認しています。
+
+  ※ このパッケージをインストールすると、OS内にgsadmユーザが作成されます。運用コマンドはgsadmユーザで操作してください。  
+  ※ gsadmユーザでログインすると環境変数 GS_HOMEとGS_LOGが自動的に設定されます。また、運用コマンドの場所が環境変数 PATHに設定されます。
+  ※ Javaクライアントのライブラリ(gridstore.jar)は/usr/share/java上に、サンプルは/usr/griddb-XXX/docs/sample/program上に配置されます。
+
+### インストール
+    (CentOS)
+    $ sudo rpm -ivh griddb-X.X.X-linux.x86_64.rpm
+
+    ※ X.X.Xはバージョンを意味します。
+
+### サーバの起動
+    [gsadm]$ gs_passwd admin
+      #input your_password
+    [gsadm]$ vi conf/gs_cluster.json
+      #    "clusterName":"your_clustername" #<-- input your_clustername
+    [gsadm]$ gs_startnode
+    [gsadm]$ gs_joincluster -c your_clustername -u admin/your_password
+
+### サンプルプログラムの実行
+    $ export CLASSPATH=${CLASSPATH}:/usr/share/java/gridstore.jar:.
+    $ mkdir gsSample
+    $ cp /usr/griddb-X.X.X/docs/sample/program/Sample1.java gsSample/.
+    $ javac gsSample/Sample1.java
+    $ java gsSample/Sample1 239.0.0.1 31999 your_clustername admin your_password
+      --> Person:  name=name02 status=false count=2 lob=[65, 66, 67, 68, 69, 70, 71, 72, 73, 74]
+
+### サーバの停止
+    [gsadm]$ gs_stopcluster -u admin/your_password
+    [gsadm]$ gs_stopnode -u admin/your_password
+
 ## ドキュメント
   以下のドキュメントがあります。
   * [機能リファレンス](https://github.com/griddb/docs-ja/blob/master/manuals/GridDB_FeaturesReference/toc.md)
