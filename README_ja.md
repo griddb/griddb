@@ -10,6 +10,8 @@ GridDBが提供する機能は『[GridDB 機能リファレンス](https://githu
 
   CentOS 7.6(gcc 4.8.5)の環境での動作を確認しています。
 
+  ※事前にtclをインストールしてください。例) yum install tcl.x86_64
+
 ### サーバ、クライアント(java)のビルド
 
     $ ./bootstrap.sh

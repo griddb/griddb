@@ -13,6 +13,8 @@
 ## Quick start (Using source code)
   We have confirmed the operation on CentOS 7.6 (gcc 4.8.5).
 
+  Note: Please install tcl like "yum install tcl.x86_64" in advance.
+
 ### Build a server and client(Java)
     $ ./bootstrap.sh
     $ ./configure
