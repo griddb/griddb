@@ -1,0 +1,14 @@
+usr/griddb-4.5/bin/gsserver              usr/bin/gsserver
+
+usr/griddb-4.5/bin/gs_adduser            usr/bin/gs_adduser
+usr/griddb-4.5/bin/gs_deluser            usr/bin/gs_deluser
+usr/griddb-4.5/bin/gs_passwd             usr/bin/gs_passwd
+usr/griddb-4.5/bin/gs_joincluster        usr/bin/gs_joincluster
+usr/griddb-4.5/bin/gs_leavecluster       usr/bin/gs_leavecluster
+usr/griddb-4.5/bin/gs_startnode          usr/bin/gs_startnode
+usr/griddb-4.5/bin/gs_stat               usr/bin/gs_stat
+usr/griddb-4.5/bin/gs_stopcluster        usr/bin/gs_stopcluster
+usr/griddb-4.5/bin/gs_stopnode           usr/bin/gs_stopnode
+
+usr/griddb-4.5/bin/gridstore.jar         usr/share/java/gridstore.jar
+usr/griddb-4.5/bin/gridstore-conf.jar    usr/share/java/gridstore-conf.jar
