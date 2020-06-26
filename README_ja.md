@@ -50,16 +50,23 @@ GridDBが提供する機能は『[GridDB 機能リファレンス](https://githu
     $ gs_stopcluster -u admin/your_password
     $ gs_stopnode -u admin/your_password
 
-## クイックスタート (RPMファイルの利用)
-  CentOS 7.6の環境での動作を確認しています。
+## クイックスタート (RPM/DEBファイルの利用)
+  CentOS 7.6、Ubuntu 18.04、openSUSE Leap 15.1の環境での動作を確認しています。
 
   ※ このパッケージをインストールすると、OS内にgsadmユーザが作成されます。運用コマンドはgsadmユーザで操作してください。  
   ※ gsadmユーザでログインすると環境変数 GS_HOMEとGS_LOGが自動的に設定されます。また、運用コマンドの場所が環境変数 PATHに設定されます。
   ※ Javaクライアントのライブラリ(gridstore.jar)は/usr/share/java上に、サンプルは/usr/griddb-XXX/docs/sample/program上に配置されます。
+  ※ Ubuntu用、openSUSE用のパッケージはトリガ機能を含んでいません。
 
 ### インストール
     (CentOS)
     $ sudo rpm -ivh griddb-X.X.X-linux.x86_64.rpm
+
+    (Ubuntu)
+    $ sudo dpkg -i griddb_X.X.X_amd64.deb
+
+    (openSUSE)
+    $ sudo rpm -ivh griddb-X.X.X-opensuse.x86_64.rpm
 
     ※ X.X.Xはバージョンを意味します。
 

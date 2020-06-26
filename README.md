@@ -52,20 +52,27 @@
     $ bin/gs_stopcluster -u admin/your_password
     $ bin/gs_stopnode -u admin/your_password
 
-## Quick start (Using RPM)
+## Quick start (Using RPM or DEB)
 
-  We have confirmed the operation on CentOS 7.6.
+  We have confirmed the operation on CentOS 7.6, Ubuntu 18.04 and openSUSE Leap 15.1.
 
 Note:
--  When you install this package, a gsadm OS user are created in the OS.  
+- When you install this package, a gsadm OS user are created in the OS.  
   Execute the operating command as the gsadm user.  
 - You don't need to set environment vatiable GS_HOME and GS_LOG.
 - There is Java client library (gridstore.jar) on /usr/share/java and a sample on /usr/gridb-XXX/docs/sample/programs.
+- The packages for Ubuntu and openSUSE don't include trigger function.
 
 ### Install
 
     (CentOS)
     $ sudo rpm -ivh griddb-X.X.X-linux.x86_64.rpm
+
+    (Ubuntu)
+    $ sudo dpkg -i griddb_X.X.X_amd64.deb
+
+    (openSUSE)
+    $ sudo rpm -ivh griddb-X.X.X-opensuse.x86_64.rpm
 
     Note: X.X.X is the GridDB version.
 
