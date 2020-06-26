@@ -1,4 +1,4 @@
-<img src="http://griddb.org/Image/GridDB_logo.png" align="center" height="48" alt="GridDB"/>
+<img src="https://griddb.org/brand-resources/griddb-logo/png/color.png" align="center" height="48" alt="GridDB"/>
 
 [![Visit Website](https://img.shields.io/badge/website-visit-orange.svg)](https://griddb.net) 
 ![GitHub All Releases](https://img.shields.io/github/downloads/griddb/griddb_nosql/total.svg) 
