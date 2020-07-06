@@ -1,7 +1,7 @@
-<img src="https://griddb.org/brand-resources/griddb-logo/png/color.png" align="center" height="48" alt="GridDB"/>
+<img src="https://griddb.org/brand-resources/griddb-logo/png/color.png" align="center" height="240" alt="GridDB"/>
 
-[![Visit Website](https://img.shields.io/badge/website-visit-orange.svg)](https://griddb.net) 
-![GitHub All Releases](https://img.shields.io/github/downloads/griddb/griddb_nosql/total.svg) 
+[![Visit Website](https://img.shields.io/badge/website-visit-orange.svg)](https://griddb.net)
+![GitHub All Releases](https://img.shields.io/github/downloads/griddb/griddb_nosql/total.svg)
 ![GitHub release](https://img.shields.io/github/release/griddb/griddb_nosql.svg)
 ## Overview
   GridDB is Database for IoT with both NoSQL interface and SQL Interface.
@@ -18,8 +18,8 @@
 ### Build a server and client(Java)
     $ ./bootstrap.sh
     $ ./configure
-    $ make 
-    
+    $ make
+
   Note: When you use maven build for Java client, please run the following command. Then gridstore-X.X.X.jar file is created on target/.  
 
     $ cd java_client
@@ -124,7 +124,7 @@ Note:
   * [GridDB Perl Client](https://github.com/griddb/perl_client)
   * [GridDB WebAPI](https://github.com/griddb/webapi)
   * [GridDB JDBC Driver](https://github.com/griddb/jdbc)
-  
+
   There are some connectors for other OSS.
   * [GridDB connector for Apache Hadoop MapReduce](https://github.com/griddb/griddb_hadoop_mapreduce)
   * [GridDB connector for YCSB (https://github.com/brianfrankcooper/YCSB/tree/master/griddb)](https://github.com/brianfrankcooper/YCSB/tree/master/griddb)
@@ -138,14 +138,13 @@ Note:
 
 ## Community
   * Issues  
-    Use the GitHub issue function if you have any requests, questions, or bug reports. 
+    Use the GitHub issue function if you have any requests, questions, or bug reports.
   * PullRequest  
     Use the GitHub pull request function if you want to contribute code.
     You'll need to agree GridDB Contributor License Agreement(CLA_rev1.1.pdf).
     By using the GitHub pull request function, you shall be deemed to have agreed to GridDB Contributor License Agreement.
 
 ## License
-  The server source license is GNU Affero General Public License (AGPL), 
+  The server source license is GNU Affero General Public License (AGPL),
   while the Java client library license and the operational commands is Apache License, version 2.0.
   See 3rd_party/3rd_party.md for the source and license of the third party.
-
