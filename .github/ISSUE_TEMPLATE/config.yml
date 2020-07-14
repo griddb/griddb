@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question
+    url:  https://stackoverflow.com/questions/ask?tags=griddb
+    about: Please ask and answer your questions here
+  - name: お問い合わせ
+    url:  https://ja.stackoverflow.com/search?q=griddb
+    about: お問い合わせはこちらで申請してください
