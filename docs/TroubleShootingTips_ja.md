@@ -31,8 +31,14 @@
 ## (Javaなど)クライアント操作ができない場合
 
 6. ファイアウォールが原因かもしれません。ファイアウォールに通信用ポートNoを許可してみてください。
-    - CentOSの場合の例： $ firewall-cmd --zone=public --add-port=31999/udp
+
+    (NoSQL Interface)
+    - CentOS, openSUSEの場合の例： $ firewall-cmd --zone=public --add-port=31999/udp
     - Ubuntuの場合の例： $ ufw allow 31999/udp
+    
+    (SQL Interface)
+    - CentOS, openSUSEの場合の例： $ firewall-cmd --zone=public --add-port=41999/udp
+    - Ubuntuの場合の例： $ ufw allow 41999/udp
 
     http://griddb.org/griddb_nosql/manual/GridDB_QuickStartGuide_ja.html#sec-5-1-2 の"/transaction/notificationPort"を参照してください。
 
