@@ -30,11 +30,13 @@
 
 ## Unable to run client library like Java
 
-6. The firewall might be the cause. Open the required port number to allow connections through the firewall.
-    (NoSQL Interface)
+6. The firewall might be the cause. Open the required port number to allow connections through the firewall.  
+
+    (NoSQL Interface)  
     - Example for CentOS: $ firewall-cmd --zone=public --add-port=31999/udp
-    - Example for Ubuntu: $ ufw allow 31999/udp
-    (SQL Interface)
+    - Example for Ubuntu: $ ufw allow 31999/udp  
+    
+    (SQL Interface)  
     - Example for CentOS: $ firewall-cmd --zone=public --add-port=41999/udp
     - Example for Ubuntu: $ ufw allow 41999/udp
     
