@@ -115,6 +115,8 @@ GridDBが提供する機能は『[GridDB 機能リファレンス](https://githu
 
 ## クライアントとコネクタ
   Java以外のクライアント、APIもあります。
+  
+  (NoSQL Interface)
   * [GridDB C Client](https://github.com/griddb/c_client/blob/master/README_ja.md)
   * [GridDB Python Client](https://github.com/griddb/python_client)
   * [GridDB Ruby Client](https://github.com/griddb/ruby_client)
@@ -123,6 +125,8 @@ GridDBが提供する機能は『[GridDB 機能リファレンス](https://githu
   * [GridDB PHP Client](https://github.com/griddb/php_client)
   * [GridDB Perl Client](https://github.com/griddb/perl_client)
   * [GridDB WebAPI](https://github.com/griddb/webapi)
+  
+  (SQL Interface)
   * [GridDB JDBC Driver](https://github.com/griddb/jdbc)
   
   他のOSSと接続するためのコネクタもあります。
