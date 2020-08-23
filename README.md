@@ -116,6 +116,8 @@ If necessary, please refer to [Installation Troubleshooting](docs/TroubleShootin
 
 ## Client and Connector
   There are other clients and API for GridDB.
+  
+  (NoSQL Interface)
   * [GridDB C Client](https://github.com/griddb/c_client)
   * [GridDB Python Client](https://github.com/griddb/python_client)
   * [GridDB Ruby Client](https://github.com/griddb/ruby_client)
@@ -124,6 +126,8 @@ If necessary, please refer to [Installation Troubleshooting](docs/TroubleShootin
   * [GridDB PHP Client](https://github.com/griddb/php_client)
   * [GridDB Perl Client](https://github.com/griddb/perl_client)
   * [GridDB WebAPI](https://github.com/griddb/webapi)
+  
+  (SQL Interface)
   * [GridDB JDBC Driver](https://github.com/griddb/jdbc)
 
   There are some connectors for other OSS.
