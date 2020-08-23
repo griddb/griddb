@@ -95,6 +95,8 @@ GridDBが提供する機能は『[GridDB 機能リファレンス](https://githu
     [gsadm]$ gs_stopcluster -u admin/your_password
     [gsadm]$ gs_stopnode -u admin/your_password
 
+[インストール時のトラブルシューティング](docs/TroubleShootingTips_ja.md)もご参照ください。
+
 ## ドキュメント
   以下のドキュメントがあります。
   * [機能リファレンス](https://github.com/griddb/docs-ja/blob/master/manuals/GridDB_FeaturesReference/toc.md)
@@ -133,6 +135,8 @@ GridDBが提供する機能は『[GridDB 機能リファレンス](https://githu
   * [GridDB Data Source for Grafana](https://github.com/griddb/griddb-datasource)
   * [GridDB Plugin for Redash](https://github.com/griddb/griddb-redash)
   * [GridDB Plugin for Fluentd](https://github.com/griddb/fluent-plugin-griddb)
+
+## [パッケージ](docs/Packages.md)
 
 ## コミュニティ
   * Issues  
