@@ -96,6 +96,7 @@ Note:
     [gsadm]$ gs_stopcluster -u admin/your_password
     [gsadm]$ gs_stopnode -u admin/your_password
 
+If necessary, please refer to [Installation Troubleshooting](docs/TroubleShootingTips.md).
 
 ## Document
   Refer to the file below for more detailed information.  
@@ -135,6 +136,8 @@ Note:
   * [GridDB Data Source for Grafana](https://github.com/griddb/griddb-datasource)
   * [GridDB Plugin for Redash](https://github.com/griddb/griddb-redash)
   * [GridDB Plugin for Fluentd](https://github.com/griddb/fluent-plugin-griddb)
+
+## [Packages](docs/Packages.md)
 
 ## Community
   * Issues  
