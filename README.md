@@ -125,10 +125,12 @@ If necessary, please refer to [Installation Troubleshooting](docs/TroubleShootin
   * [GridDB Node.JS Client](https://github.com/griddb/nodejs_client)
   * [GridDB PHP Client](https://github.com/griddb/php_client)
   * [GridDB Perl Client](https://github.com/griddb/perl_client)
-  * [GridDB WebAPI](https://github.com/griddb/webapi)
   
   (SQL Interface)
   * [GridDB JDBC Driver](https://github.com/griddb/jdbc)
+  
+  (NoSQL & SQL Interface)
+  * [GridDB WebAPI](https://github.com/griddb/webapi)
 
   There are some connectors for other OSS.
   * [GridDB connector for Apache Hadoop MapReduce](https://github.com/griddb/griddb_hadoop_mapreduce)
