@@ -124,10 +124,12 @@ GridDBが提供する機能は『[GridDB 機能リファレンス](https://githu
   * [GridDB Node.JS Client](https://github.com/griddb/nodejs_client)
   * [GridDB PHP Client](https://github.com/griddb/php_client)
   * [GridDB Perl Client](https://github.com/griddb/perl_client)
-  * [GridDB WebAPI](https://github.com/griddb/webapi)
   
   (SQL Interface)
   * [GridDB JDBC Driver](https://github.com/griddb/jdbc)
+  
+  (NoSQL & SQL Interface)
+  * [GridDB WebAPI](https://github.com/griddb/webapi)
   
   他のOSSと接続するためのコネクタもあります。
   * [GridDB connector for Apache Hadoop MapReduce](https://github.com/griddb/griddb_hadoop_mapreduce/blob/master/README_ja.md)
