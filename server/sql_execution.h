@@ -173,6 +173,27 @@ public:
 
 	~SQLExecution();
 
+	bool isBatch() {
+		return isBatch_;
+	}
+	void setBatch() {
+		isBatch_ = true;
+	}
+	
+	void setBatchCount(int64_t count) {
+		batchCountList_.push_back(count);
+		batchCurrentPos_++;
+	}
+
+	bool isBatch_;
+	std::vector<int64_t> batchCountList_;
+	int64_t batchCount_;
+	int64_t batchCurrentPos_;
+	BindParamSet bindParamSet_;
+	bool isBatchComplete() {
+		return (batchCount_ == batchCurrentPos_);
+	}
+
 	void execute(
 			EventContext &ec,
 			RequestInfo &request,
@@ -466,7 +487,7 @@ public:
 				typeList_(NULL),
 				versionId_(0),
 				responseJobId_(NULL),
-				replyType_(SQL_REPLY_UNDEF) {}
+				replyType_(SQL_REPLY_UNDEF), countList_(NULL) {}
 
 		void setExplainAnalyze(
 				EventContext *ec,
@@ -485,6 +506,13 @@ public:
 		void setExplain(EventContext *ec) {
 			assert(ec);
 			ec_ = ec;
+			replyType_ = SQL_REPLY_SUCCESS_EXPLAIN;
+		}
+
+		void setBatch(EventContext *ec, util::Vector<int64_t> *countList) {
+			assert(ec);
+			ec_ = ec;
+			countList_ = countList;
 			replyType_ = SQL_REPLY_SUCCESS_EXPLAIN;
 		}
 
@@ -507,6 +535,7 @@ public:
 		uint8_t versionId_;
 		JobId *responseJobId_;
 		int32_t replyType_;
+		util::Vector<int64_t> *countList_;
 	};
 
 	bool replyClient(SQLReplyContext &cxt);
@@ -651,6 +680,7 @@ private:
 	static const int32_t SQL_REPLY_SUCCESS = 0;
 	static const int32_t SQL_REPLY_SUCCESS_EXPLAIN = 1;
 	static const int32_t SQL_REPLY_SUCCESS_EXPLAIN_ANALYZE = 2;
+	static const int32_t SQL_REPLY_SUCCESS_BATCH = 3;
 
 	void setAnyTypeData(
 			util::StackAllocator &alloc, const TupleValue &value);
@@ -798,6 +828,9 @@ private:
 	void generateJobId(JobId &jobId, ExecId execId);
 
 	void setPreparedOption(RequestInfo &info);
+
+	bool fetchBatch(
+		EventContext &ec, std::vector<int64_t> *countList);
 
 	bool fetchNotSelect(
 			EventContext &ec,

@@ -394,31 +394,39 @@ void SQLRequestHandler::decodeBindInfo(
 						= ValueProcessor::calcNullsByteSize(columnCount);
 				int32_t columnDataSize
 						= sizeof(uint8_t)/* type */ + sizeof(uint64_t); 
-
 				InStream fixedPartIn(
 						util::ArrayInStream(fixedPartData, fixedPartDataSize));
-				size_t baseVarOffset;
-				fixedPartIn >> baseVarOffset;
 
-				size_t headerSize = sizeof(uint64_t)
-						+ static_cast<size_t>(nullsBytes) + sizeof(uint64_t);
-				fixedPartIn.base().position(headerSize);
+				uint64_t headerPos;
+				fixedPartIn >> headerPos;
 
-				size_t varPos = headerSize + columnDataSize * columnCount;
+				size_t varPos = 8 + (8 + nullsBytes + columnDataSize * columnCount) * rowCount;
 				InStream varPartIn(
-						util::ArrayInStream(reinterpret_cast<const char *>(
-								(fixedPartData) + varPos),
-						fixedPartDataSize));
+						util::ArrayInStream(fixedPartData, fixedPartDataSize));
 
-				ValueProcessor::getVarSize(varPartIn);
+				request.bindParamSet_.prepare(columnCount, rowCount);
 
-				for (int32_t columnNo = 0;
-						columnNo < columnCount; columnNo++) {
+				for (int32_t i = 0; i < rowCount; i++) {
 
-					decodeBindColumnInfo(
-							request,
-							fixedPartIn,
-							varPartIn);
+					uint64_t baseVarOffset;
+					fixedPartIn >> baseVarOffset;
+
+					fixedPartIn.base().position(
+							fixedPartIn.base().position() + nullsBytes);
+
+					varPartIn.base().position(varPos + baseVarOffset);
+
+					ValueProcessor::getVarSize(varPartIn);
+
+					for (int32_t columnNo = 0;
+							columnNo < columnCount; columnNo++) {
+
+						decodeBindColumnInfo(
+								request,
+								fixedPartIn,
+								varPartIn);
+					}
+					request.bindParamSet_.next();
 				}
 			}
 
@@ -625,7 +633,7 @@ void SQLRequestHandler::decodeBindColumnInfo(
 					<< static_cast<int32_t>(type));
 		}
 
-		request.preparedParamList_.push_back(param);
+		request.bindParamSet_.getParamList().push_back(param);
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_USER_OR_SYSTEM(e, "");
