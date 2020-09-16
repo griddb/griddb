@@ -12,7 +12,7 @@
 ||[MSI(Windows 10)](https://github.com/griddb/c_client/releases/tag/v4.5.0)|
 |[Python Client](https://github.com/griddb/python_client)|[WHL(CentOS 7, Ubuntu 18)](https://pypi.org/project/griddb-python/)|
 |[Node.JS Client](https://github.com/griddb/nodejs_client)|[npm(CentOS 7, Ubuntu 18)](https://www.npmjs.com/package/griddb_node)|
-|[PHP Client (0.5)](https://github.com/griddb/php_client)|[Packagist(CentOS 7)](https://packagist.org/packages/griddb/php-client)|
+|[PHP Client](https://github.com/griddb/php_client)|[Packagist(CentOS 7)](https://packagist.org/packages/griddb/php-client)|
 |[WebAPI](https://github.com/griddb/webapi)|[Jar](https://github.com/griddb/webapi/releases/tag/2.2.0)|
 
 ## Docker Images(CentOS 7)
