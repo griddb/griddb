@@ -72,6 +72,63 @@ struct TargetContainerInfo {
 	size_t pos_;
 };
 
+template<typename Alloc>
+struct TablePartitioningOptionInfo {
+
+	typedef util::BasicString<
+			char8_t, std::char_traits<char8_t>,
+			util::StdAllocator<char8_t, Alloc> > PString;
+
+	typedef std::vector<int64_t, util::StdAllocator<
+		int64_t, Alloc> > PartitionColumnNameList;
+
+	typedef std::vector<ColumnId, util::StdAllocator<
+		ColumnId, Alloc> > PartitionColumnIdList;
+
+	typedef std::vector<int32_t, util::StdAllocator<
+		int32_t, Alloc> > PartitionColumnTypeList;
+
+	typedef std::vector<int32_t, util::StdAllocator<
+		int32_t, Alloc> > OptionKeyNameIdList;
+
+	typedef std::vector<PString, util::StdAllocator<
+		PString, Alloc> > OptionKeyValueList;
+
+	typedef std::vector<int32_t, util::StdAllocator<
+		int32_t, Alloc> > OptionKeyPositionList;
+
+	TablePartitioningOptionInfo(Alloc &alloc) :
+			alloc_(alloc),
+			partitionColumnNameList_(alloc),
+			partitionColumnIdList_(alloc),
+			subPartitionColumnNameList_(alloc),
+			subPartitionColumnIdList_(alloc),
+			keyNameIdList_(alloc), keyValueList_(alloc), keyPositionList_(alloc),
+			primaryColumnIdList_(alloc), primaryColumnNameList_(alloc),
+			primaryColumnTypeList_(alloc) {}	
+	
+	Alloc &alloc_;
+	PartitionColumnNameList partitionColumnNameList_;
+	PartitionColumnIdList partitionColumnIdList_;
+	PartitionColumnNameList subPartitionColumnNameList_;
+	PartitionColumnIdList subPartitionColumnIdList_;
+
+	OptionKeyNameIdList keyNameIdList_;
+	OptionKeyValueList keyValueList_;
+	OptionKeyPositionList keyPositionList_;
+	PartitionColumnNameList primaryColumnNameList_;
+	PartitionColumnIdList primaryColumnIdList_;
+	PartitionColumnTypeList primaryColumnTypeList_;
+
+	UTIL_OBJECT_CODER_ALLOC_CONSTRUCTOR;
+	UTIL_OBJECT_CODER_MEMBERS(partitionColumnNameList_,
+			partitionColumnIdList_, subPartitionColumnNameList_,
+			subPartitionColumnIdList_, keyNameIdList_, keyValueList_,
+			keyPositionList_, primaryColumnNameList_,
+			primaryColumnIdList_, primaryColumnTypeList_);
+};
+
+
 struct TableContainerInfo {
 
 	TableContainerInfo(
@@ -426,6 +483,7 @@ struct TablePartitioningInfo {
 	uint8_t partitionType_;
 	uint8_t containerType_;
 	PartitionId partitioningNum_;
+	int32_t primaryColumnId_;
 	PString partitionColumnName_;
 	ColumnId partitioningColumnId_;
 	uint16_t partitionColumnType_;
@@ -446,7 +504,7 @@ struct TablePartitioningInfo {
 	PartitionAssignValueList assignValueList_;
 	PartitionAssignNumberMapList
 			assignNumberMapList_;
-	size_t activeContainerCount_;
+	int64_t activeContainerCount_;
 	int8_t tableStatus_;
 
 	TablePartitioningVersionId partitioningVersionId_;
@@ -465,8 +523,11 @@ struct TablePartitioningInfo {
 	PartitionAssignValueList disAvailableCountList_;
 	int64_t currentIntervalValue_;
 	TimeSeriesProperty timeSeriesProperty_;
+	TablePartitioningOptionInfo<Alloc> *opt_;
+
 
 	UTIL_OBJECT_CODER_ALLOC_CONSTRUCTOR;
+	
 	UTIL_OBJECT_CODER_MEMBERS(
 			partitionType_,
 			partitionColumnName_,
@@ -485,6 +546,7 @@ struct TablePartitioningInfo {
 			assignCountMax_,
 			tableStatus_,
 			partitioningVersionId_, 
+			primaryColumnId_,
 			containerType_,
 			currentStatus_,
 			currentAffinityNumber_,
@@ -497,7 +559,10 @@ struct TablePartitioningInfo {
 			currentIndexCaseSensitive_,
 			anyNameMatches_,
 			anyTypeMatches_,
-			timeSeriesProperty_);
+			timeSeriesProperty_,
+			opt_
+		);
+		
 };
 
 struct TablePartitioningIndexInfoEntry {
