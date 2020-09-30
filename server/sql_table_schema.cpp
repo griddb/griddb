@@ -1173,6 +1173,7 @@ TablePartitioningInfo<Alloc>::TablePartitioningInfo(Alloc &alloc) :
 		containerType_(COLLECTION_CONTAINER),
 		partitioningNum_(0),
 		partitionColumnName_(alloc),
+		primaryColumnId_(-1),
 		partitioningColumnId_(UNDEF_COLUMNID),
 		partitionColumnType_(0),
 		subPartitioningColumnName_(alloc),
@@ -1206,7 +1207,8 @@ TablePartitioningInfo<Alloc>::TablePartitioningInfo(Alloc &alloc) :
 		availableCountList_(alloc),
 		disAvailableList_(alloc),
 		disAvailableCountList_(alloc),
-		currentIntervalValue_(-1) {
+		currentIntervalValue_(-1),
+		opt_(NULL) {
 
 		if (partitionType_ != SyntaxTree::TABLE_PARTITION_TYPE_HASH) {
 			for (size_t i = 0;
