@@ -23,7 +23,7 @@ import com.toshiba.mwcloud.gs.GridStoreFactory;
 public abstract class GridStoreFactoryProvider {
 
 	private static final String BUILTIN_CLASS_NAME =
-			"com.toshiba.mwcloud.gs.subnet.SubnetGridStoreFactoryProvider";
+			"com.toshiba.mwcloud.gs.partitioned.PartFactoryProvider";
 
 	public abstract GridStoreFactory getFactory();
 

@@ -33,6 +33,7 @@ import com.toshiba.mwcloud.gs.RowSet;
 import com.toshiba.mwcloud.gs.common.ContainerKeyConverter.ContainerKey;
 import com.toshiba.mwcloud.gs.common.Statement.GeneralStatement;
 import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequestSource;
+import com.toshiba.mwcloud.gs.subnet.SubnetGridStoreFactory.ConfigurableFactory;
 
 public class Extensibles {
 
@@ -62,6 +63,13 @@ public class Extensibles {
 							chainProviderClasses);
 
 			return provider.getExtensibleFactory(
+					chainProviderClasses, visitedProviderClasses);
+		}
+
+		public static GridStoreFactory newConfigurableInstance(
+				Set<Class<?>> chainProviderClasses,
+				Set<Class<?>> visitedProviderClasses) {
+			return new ConfigurableFactory(
 					chainProviderClasses, visitedProviderClasses);
 		}
 
@@ -250,6 +258,9 @@ public class Extensibles {
 
 		String getQueryString();
 
+	}
+
+	public interface ConfigProvidable {
 	}
 
 	public static AsStore get(GridStore store) {

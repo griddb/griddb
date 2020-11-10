@@ -321,6 +321,12 @@ public class PropertyUtils {
 			return names;
 		}
 
+		public void addVisitedNames(Set<String> nameSet, boolean deprecated) {
+			for (String name : nameSet) {
+				visited.put(name, deprecated);
+			}
+		}
+
 	}
 
 }
