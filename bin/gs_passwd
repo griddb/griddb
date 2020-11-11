@@ -1,4 +1,4 @@
-#!/usr/bin/python -B
+#!/usr/bin/python2 -B
 # coding=UTF-8
 
 import sys
