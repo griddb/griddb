@@ -76,7 +76,7 @@ public class SubnetGridStoreFactory extends GridStoreFactory {
 	private static boolean isConfigurableProviderChained(
 			Set<Class<?>> chainProviderClasses) {
 		for (Class<?> c : chainProviderClasses) {
-			if (ConfigProvidable.class.isAssignableFrom(c)) {
+			if (Extensibles.ConfigProvidable.class.isAssignableFrom(c)) {
 				return true;
 			}
 		}
@@ -243,7 +243,7 @@ public class SubnetGridStoreFactory extends GridStoreFactory {
 
 	}
 
-	public interface ConfigProvidable {
+	public interface ConfigProvidable extends Extensibles.ConfigProvidable {
 	}
 
 	public static class ConfigurableFactory extends GridStoreFactory {
