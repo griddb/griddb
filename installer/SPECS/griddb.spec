@@ -1,5 +1,5 @@
 %define griddb_name griddb
-%define griddb_ver 4.5.1
+%define griddb_ver 4.5.2
 %define griddb_instdir /usr/griddb-%{griddb_ver}
 %define griddb_homedir /var/lib/gridstore
 # do not strip
@@ -10,7 +10,7 @@
 Name:           %{griddb_name}
 Summary:        GridDB Community Edition
 Version:        %{griddb_ver}
-Release:        1.linux
+Release:        linux
 Group:          Applications/Databases
 Vendor:         Toshiba Digital Solutions Corporation
 License:        AGPL-3.0 (and Apache-2.0)
@@ -311,5 +311,5 @@ fi
 /usr/share/java/gridstore-conf.jar
 
 %changelog
-* Wed Sep 30 2020 Toshiba Digital Solutions Corporation
-- 4.5.1
+* Thu Nov 12 2020 Toshiba Digital Solutions Corporation
+- 4.5.2
