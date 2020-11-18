@@ -61,7 +61,7 @@ Note:
   Execute the operating command as the gsadm user.  
 - You don't need to set environment vatiable GS_HOME and GS_LOG.
 - There is Java client library (gridstore.jar) on /usr/share/java and a sample on /usr/gridb-XXX/docs/sample/programs.
-- The packages for Ubuntu and openSUSE don't include trigger function.
+- The packages don't include trigger function.
 - Please install Python2 in advance except CentOS7.
 
 ### Install
