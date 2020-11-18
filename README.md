@@ -54,7 +54,7 @@
 
 ## Quick start (Using RPM or DEB)
 
-  We have confirmed the operation on CentOS 7.6, Ubuntu 18.04 and openSUSE Leap 15.1.
+  We have confirmed the operation on CentOS 7.8/8.1, Ubuntu 18.04 and openSUSE Leap 15.1.
 
 Note:
 - When you install this package, a gsadm OS user are created in the OS.  
@@ -62,6 +62,7 @@ Note:
 - You don't need to set environment vatiable GS_HOME and GS_LOG.
 - There is Java client library (gridstore.jar) on /usr/share/java and a sample on /usr/gridb-XXX/docs/sample/programs.
 - The packages for Ubuntu and openSUSE don't include trigger function.
+- Please install Python2 in advance except CentOS7.
 
 ### Install
 
