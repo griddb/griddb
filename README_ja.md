@@ -142,6 +142,7 @@ GridDBが提供する機能は『[GridDB 機能リファレンス](https://githu
   * [GridDB Data Source for Grafana](https://github.com/griddb/griddb-datasource)
   * [GridDB Plugin for Redash](https://github.com/griddb/griddb-redash)
   * [GridDB Plugin for Fluentd](https://github.com/griddb/fluent-plugin-griddb)
+  * [GridDB Plugin for Tableau](https://github.com/griddb/tableau-plugin-griddb)
 
 ## [パッケージ](docs/Packages.md)
 
