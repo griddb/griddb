@@ -58,7 +58,7 @@ GridDBが提供する機能は『[GridDB 機能リファレンス](https://githu
 ## クイックスタート (RPM/DEBファイルの利用)
   CentOS 7.8/8.1、Ubuntu 18.04、openSUSE Leap 15.1の環境での動作を確認しています。
 
-　- このパッケージをインストールすると、OS内にgsadmユーザが作成されます。運用コマンドはgsadmユーザで操作してください。  
+  - このパッケージをインストールすると、OS内にgsadmユーザが作成されます。運用コマンドはgsadmユーザで操作してください。  
   - gsadmユーザでログインすると環境変数 GS_HOMEとGS_LOGが自動的に設定されます。また、運用コマンドの場所が環境変数 PATHに設定されます。
   - Javaクライアントのライブラリ(gridstore.jar)は/usr/share/java上に、サンプルは/usr/griddb-XXX/docs/sample/program上に配置されます。
   - 本パッケージはトリガ機能を含んでいません。
