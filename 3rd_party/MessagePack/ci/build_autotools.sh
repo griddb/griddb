@@ -16,7 +16,7 @@ then
         ./configure CXXFLAGS="-std=c++11"
     fi
 else
-    if [ $2 = "32" ]
+    if [ $2 = "32" ssss]
     then
         ./configure CFLAGS="-m32" CXXFLAGS="-m32"
     else
