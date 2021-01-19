@@ -1,0 +1,26 @@
+name: Build GridDB server and execute java sample
+
+on: [push]
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+    env:
+      CENTOS_VERSION: 7
+      OPENSUSE_VERSION: 15.1
+      GRIDDB_NOTIFICATION_ADDRESS: "239.0.0.1"
+      GRIDDB_NOTIFICATION_PORT: "31999"
+      GRIDDB_CLUSTER_NAME: "griddbDocker"
+      GRIDDB_USERNAME: "admin"
+      GRIDDB_PASSWORD: "admin"
+      DOCKER_CONTAINER_NAME_CENTOS: "griddbCentosDocker"
+      DOCKER_CONTAINER_NAME_OPENSUSE: "griddbOpensuseDocker"
+    steps:
+    - uses: actions/checkout@v1
+    - name: Build, start server and run sample in centos docker
+      run: |
+        ./.github/workflows/setup_centos_docker.sh
+    - name: Build, start server and run sample in opensuse docker
+      run: |
+        ./.github/workflows/setup_opensuse_docker.sh
