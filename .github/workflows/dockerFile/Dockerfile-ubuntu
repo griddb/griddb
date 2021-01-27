@@ -1,0 +1,21 @@
+FROM ubuntu:18.04
+
+# Enviroment
+ENV DEBIAN_FRONTEND noninteractive
+
+# Install dependency
+RUN set -eux \
+    && apt-get update -y \
+    && apt-get install -y gcc-4.8 \
+    && apt-get install -y g++-4.8 \
+    && apt-get install -y debhelper libz-dev libsqlite3-dev default-jdk \
+                          default-jre ant tcl python2.7 \
+    && apt-get clean all
+
+# Create softlink gcc g++
+RUn set -eux \
+    && ln -sf /usr/bin/g++-4.8 /usr/bin/g++ \
+    && ln -sf /usr/bin/gcc-4.8 /usr/bin/gcc \
+    && ln -sf /usr/bin/python2.7 /usr/bin/python2
+
+

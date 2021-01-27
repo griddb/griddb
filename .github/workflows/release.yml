@@ -1,0 +1,83 @@
+name: Create package on release
+
+on: create
+
+env:
+  GRIDDB_SERVER_NAME: "griddb"
+  GRIDDB_NOTIFICATION_ADDRESS: "239.0.0.1"
+  GRIDDB_NOTIFICATION_PORT: "31999"
+  GRIDDB_USERNAME: "admin"
+  GRIDDB_PASSWORD: "admin"
+  GRIDDB_PACKAGE_NAME: "griddb"
+
+jobs:
+  release_package:
+    name: Create and release ${{ matrix.file_type }} file for ${{ matrix.os }}
+    runs-on: ubuntu-18.04
+
+    strategy:
+      matrix:
+        include:
+          - os: Ubuntu
+            file_type: deb
+            package_path: ../griddb_*_amd64.deb
+            docker_file: .github/workflows/dockerFile/Dockerfile-ubuntu
+            docker_image: ubuntu
+            container_name: ubuntu_container
+            upload_path: ../griddb_*_amd64.deb
+          - os: Centos
+            file_type: rpm
+            package_path: ./griddb/installer/RPMS/x86_64/griddb-*-linux.x86_64.rpm
+            docker_file: .github/workflows/dockerFile/Dockerfile-centos
+            docker_image: centos
+            container_name: centos_container
+            upload_path:  installer/RPMS/x86_64/griddb-*-linux.x86_64.rpm
+          - os: Opensuse
+            file_type: rpm
+            package_path: ./griddb/installer/RPMS/x86_64/griddb-*-opensuse.x86_64.rpm
+            docker_file: .github/workflows/dockerFile/Dockerfile-opensuse
+            docker_image: opensuse
+            container_name: opensuse_container
+            upload_path:  installer/RPMS/x86_64/griddb-*-opensuse.x86_64.rpm
+
+    steps:
+      - uses: actions/checkout@v1
+      - name: Build Docker Image
+        run: docker build -t ${{ matrix.docker_image }} -f ${{ matrix.docker_file }} .
+      - name: Run Docker Image
+        run: docker run --name ${{ matrix.container_name }} -ti -d -v `pwd`:/griddb --env GS_LOG=/griddb/log --env GS_HOME=/griddb ${{ matrix.docker_image }}
+      - name: Build Griddb server
+        run: docker exec ${{ matrix.container_name }} /bin/bash -xec ". griddb/.github/workflows/script/function.sh && build_griddb ${{ matrix.os }}"
+      - name: Create ${{ matrix.file_type }} for ${{ matrix.os }}
+        run: docker exec ${{ matrix.container_name }} /bin/bash -xec ". griddb/.github/workflows/script/function.sh && build_package ${{ matrix.os }}"
+      - name: Check package information
+        run: docker exec ${{ matrix.container_name }} /bin/bash -xec ". griddb/.github/workflows/script/function.sh \
+             && check_package ${{ matrix.package_path }} ${{ matrix.os }}"
+      - name: Install package
+        run: docker exec ${{ matrix.container_name }} /bin/bash -xec ". griddb/.github/workflows/script/function.sh && install_griddb ${{ matrix.package_path }} ${{ matrix.os }}"
+      - name: Config GridDB server
+        run: docker exec ${{ matrix.container_name }} /bin/bash -xec ". griddb/.github/workflows/script/function.sh \
+             && config_griddb ${GRIDDB_USERNAME} ${GRIDDB_PASSWORD} ${GRIDDB_SERVER_NAME}"
+      - name: Start server
+        run: docker exec ${{ matrix.container_name }} /bin/bash -xec ". griddb/.github/workflows/script/function.sh \
+             && start_griddb ${GRIDDB_USERNAME} ${GRIDDB_PASSWORD} ${GRIDDB_SERVER_NAME}"
+      - name: Run sample
+        run: docker exec ${{ matrix.container_name }} /bin/bash -xec ". griddb/.github/workflows/script/function.sh \
+             && run_sample ${GRIDDB_NOTIFICATION_ADDRESS} ${GRIDDB_NOTIFICATION_PORT} ${GRIDDB_SERVER_NAME} ${GRIDDB_USERNAME} ${GRIDDB_PASSWORD}"
+      - name: Stop server
+        run: docker exec ${{ matrix.container_name }} /bin/bash -xec ". griddb/.github/workflows/script/function.sh \
+             && stop_griddb ${GRIDDB_USERNAME} ${GRIDDB_PASSWORD}"
+      - name: Uninstall package
+        run: docker exec ${{ matrix.container_name }} /bin/bash -xec ". griddb/.github/workflows/script/function.sh \
+             && uninstall_package ${GRIDDB_PACKAGE_NAME} ${{ matrix.os }}"
+      - name: Copy ${{ matrix.file_type }} to host
+        run: . .github/workflows/script/function.sh && copy_package_to_host ${{ matrix.container_name }} ${{ matrix.os }}
+
+      - name: Upload ${{ matrix.file_type }} file
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: ${{ matrix.upload_path }}
+          tag: ${{ github.ref }}
+          overwrite: true
+          file_glob: true

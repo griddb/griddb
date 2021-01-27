@@ -1,0 +1,21 @@
+FROM opensuse/leap:15.1
+
+# Install dependency gcc-4.8.5 g++-4.8.5
+RUN set -eux \
+    && zypper addrepo https://download.opensuse.org/repositories/devel:gcc/openSUSE_Leap_15.1/devel:gcc.repo \
+    && zypper --non-interactive --no-gpg-checks --quiet ref \
+    && zypper --non-interactive --no-gpg-checks --quiet install --auto-agree-with-licenses gcc48 \
+    && zypper --non-interactive --no-gpg-checks --quiet install --auto-agree-with-licenses gcc48-c++
+
+# Install dependency other
+RUN set -eux \
+    && zypper install -y make automake autoconf libpng16-devel java-11-openjdk  \
+                         ant zlib-devel tcl net-tools python2 zip unzip rpm-build rsync \
+    && zypper clean all
+
+# Create softlink gcc g++
+RUn set -eux \
+    && ln -sf /usr/bin/g++-4.8 /usr/bin/g++ \
+    && ln -sf /usr/bin/gcc-4.8 /usr/bin/gcc
+
+
