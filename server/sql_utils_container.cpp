@@ -298,7 +298,7 @@ bool SQLContainerImpl::CursorImpl::scanIndex(
 			else {
 				BtreeSearchContext orgSc(
 						txn.getDefaultAllocator(), indexColumnList);
-				setUpSearchContext(cxt, condList, orgSc, container);
+				setUpSearchContext(cxt, txn, condList, orgSc, container);
 				timeSeries.searchColumnIdIndex(
 						txn, sc, orgSc, result.oIdList_, result.mvccOIdList_);
 			}
@@ -710,7 +710,7 @@ void SQLContainerImpl::CursorImpl::preparePartialSearch(
 		resultSet.setUpdateIdType(ResultSet::UPDATE_ID_NONE);
 	}
 	else {
-		setUpSearchContext(cxt, *targetCondList, sc, container);
+		setUpSearchContext(cxt, txn, *targetCondList, sc, container);
 		if (!lastSuspended) {
 			resultSet.setPartialMode(true);
 		}
@@ -770,7 +770,7 @@ bool SQLContainerImpl::CursorImpl::finishPartialSearch(
 }
 
 void SQLContainerImpl::CursorImpl::setUpSearchContext(
-		OpContext &cxt, const SQLExprs::IndexConditionList &targetCondList,
+		OpContext &cxt, TransactionContext &txn, const SQLExprs::IndexConditionList &targetCondList,
 		BtreeSearchContext &sc, const BaseContainer &container) {
 	const bool forKey = true;
 	for (SQLExprs::IndexConditionList::const_iterator it =
@@ -804,7 +804,7 @@ void SQLContainerImpl::CursorImpl::setUpSearchContext(
 			TermCondition c(
 					columnType, columnType,
 					opType, cond.column_, value->data(), value->size());
-			sc.addCondition(c, forKey);
+			sc.addCondition(txn, c, forKey);
 		}
 
 		if (!SQLValues::TypeUtils::isNull(cond.valuePair_.second.getType())) {
@@ -823,7 +823,7 @@ void SQLContainerImpl::CursorImpl::setUpSearchContext(
 			TermCondition c(
 					columnType, columnType,
 					opType, cond.column_, value->data(), value->size());
-			sc.addCondition(c, forKey);
+			sc.addCondition(txn, c, forKey);
 		}
 	}
 }

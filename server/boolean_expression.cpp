@@ -749,12 +749,17 @@ void BoolExpr::toSearchContext(TransactionContext &txn,
 				columnIds.end(), c->columnId_);
 			bool isKey = false;
 			if (columnIdItr != columnIds.end()) {
-				isKey = true;
-				if (c->opType_ == DSExpression::IS && sc->getKeyColumnNum() == 1) {
-					sc->setNullCond(BaseIndex::SearchContext::IS_NULL);
+				if (sc->getKeyColumnNum() == 1) {
+					if (sc->getNullCond() != BaseIndex::SearchContext::IS_NULL && c->isRangeCondition()) {
+						isKey = true;
+					} else if (c->opType_ == DSExpression::IS) {
+						sc->setNullCond(BaseIndex::SearchContext::IS_NULL);
+					}
+				} else {
+					isKey = true;
 				}
 			}
-			sc->addCondition(*c, isKey);
+			sc->addCondition(txn, *c, isKey);
 		}
 	}
 	sc->setLimit((0 == restEval) ? limit : MAX_RESULT_SIZE);
@@ -794,12 +799,13 @@ void BoolExpr::toSearchContext(TransactionContext &txn,
 				columnIds.end(), c->columnId_);
 			bool isKey = false;
 			if (columnIdItr != columnIds.end()) {
-				isKey = true;
-				if (c->opType_ == DSExpression::IS && sc->getKeyColumnNum() == 1) {
+				if (sc->getNullCond() != BaseIndex::SearchContext::IS_NULL && c->opType_ == DSExpression::EQ) {
+					isKey = true;
+				} else if (c->opType_ == DSExpression::IS) {
 					sc->setNullCond(BaseIndex::SearchContext::IS_NULL);
 				}
 			}
-			sc->addCondition(*c, isKey);
+			sc->addCondition(txn, *c, isKey);
 		}
 		else {
 			restEval++;
@@ -841,12 +847,14 @@ void BoolExpr::toSearchContext(TransactionContext &txn,
 				columnIds.end(), c->columnId_);
 			bool isKey = false;
 			if (columnIdItr != columnIds.end()) {
-				isKey = true;
-				if (c->opType_ == DSExpression::IS && sc->getKeyColumnNum() == 1) {
+				if (sc->getNullCond() != BaseIndex::SearchContext::IS_NULL) {
+					isKey = true;
+				}
+				if (c->opType_ == DSExpression::IS) {
 					sc->setNullCond(BaseIndex::SearchContext::IS_NULL);
 				}
 			}
-			sc->addCondition(*c, isKey);
+			sc->addCondition(txn, *c, isKey);
 		}
 		else {
 			restEval++;
@@ -887,12 +895,17 @@ void BoolExpr::toSearchContext(TransactionContext &txn,
 				columnIds.end(), c->columnId_);
 			bool isKey = false;
 			if (columnIdItr != columnIds.end()) {
-				isKey = true;
-				if (c->opType_ == DSExpression::IS && sc->getKeyColumnNum() == 1) {
-					sc->setNullCond(BaseIndex::SearchContext::IS_NULL);
+				if (sc->getKeyColumnNum() == 1) {
+					if (sc->getNullCond() != BaseIndex::SearchContext::IS_NULL && c->isRangeCondition()) {
+						isKey = true;
+					} else if (c->opType_ == DSExpression::IS) {
+						sc->setNullCond(BaseIndex::SearchContext::IS_NULL);
+					}
+				} else {
+					isKey = true;
 				}
 			}
-			sc->addCondition(*c, isKey);
+			sc->addCondition(txn, *c, isKey);
 		}
 	}
 

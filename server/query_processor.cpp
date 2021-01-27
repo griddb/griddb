@@ -233,7 +233,7 @@ void QueryProcessor::searchGeometryRelated(TransactionContext &txn,
 				columnInfo->getColumnId(),
 				&geomCond, sizeof(RtreeMap::SearchContext::GeomeryCondition));
 			RtreeMap::SearchContext sc (txn.getDefaultAllocator(), columnInfo->getColumnId());
-			sc.addCondition(cond, true);
+			sc.addCondition(txn, cond, true);
 			sc.setLimit(limit);
 			collection.searchColumnIdIndex(txn, sc, oIdList);
 		}
@@ -306,7 +306,7 @@ void QueryProcessor::searchGeometry(TransactionContext &txn,
 				columnInfo->getColumnId(),
 				&geomCond, sizeof(RtreeMap::SearchContext::GeomeryCondition));
 			RtreeMap::SearchContext sc (txn.getDefaultAllocator(), columnInfo->getColumnId());
-			sc.addCondition(cond, true);
+			sc.addCondition(txn, cond, true);
 			sc.setLimit(limit);
 
 			collection.searchColumnIdIndex(txn, sc, oIdList);

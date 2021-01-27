@@ -44,55 +44,30 @@ void BaseIndex::SearchContext::getConditionList(
 
 bool BaseIndex::SearchContext::updateCondition(TransactionContext &txn, 
 	TermCondition &newCond) {
-	bool isReplaceOrSkip = false;
-	bool isInvalid = false;
+	ConditionStatus status = ConditionStatus::NO_CONTRADICTION;
 	util::Vector<TermCondition>::iterator itr;
 	for (itr = conditionList_.begin(); itr != conditionList_.end(); itr++) {
-		if (itr->columnId_ == newCond.columnId_ && itr->valueType_ == newCond.valueType_ &&
-			itr->isRangeCondition() && newCond.isRangeCondition()) {
-			if (itr->opType_ == DSExpression::EQ) {
-				if (newCond.operator_(txn, static_cast<const uint8_t *>(itr->value_), itr->valueSize_, 
-					static_cast<const uint8_t *>(newCond.value_), newCond.valueSize_)) {
-					isReplaceOrSkip = true;
-				} else {
-					isInvalid = true;
-				}
-			} else if (newCond.opType_ == DSExpression::EQ) {
-				if (itr->operator_(txn, static_cast<const uint8_t *>(newCond.value_), newCond.valueSize_, 
-					static_cast<const uint8_t *>(itr->value_), itr->valueSize_)) {
-					*itr = newCond;
-					isReplaceOrSkip = true;
-				} else {
-					isInvalid = true;
-				}
-			} else if ((newCond.isStartCondition() && itr->isStartCondition()) ||
-				(newCond.isEndCondition() && itr->isEndCondition())) { 
-				if (itr->operator_(txn, static_cast<const uint8_t *>(newCond.value_), newCond.valueSize_, 
-					static_cast<const uint8_t *>(itr->value_), itr->valueSize_)) {
-					*itr = newCond;
-				}
-				isReplaceOrSkip = true;
-			} else {
-				if (!itr->operator_(txn, static_cast<const uint8_t *>(newCond.value_), newCond.valueSize_, 
-					static_cast<const uint8_t *>(itr->value_), itr->valueSize_) ||
-					!newCond.operator_(txn, static_cast<const uint8_t *>(itr->value_), itr->valueSize_, 
-					static_cast<const uint8_t *>(newCond.value_), newCond.valueSize_)) {
-					isInvalid = true;
-				}
-			}
-		}
-		if (isReplaceOrSkip) {
+		TermCondition &current = *itr;
+		status = checkCondition(txn, current, newCond);
+		if (status == ConditionStatus::REPLACEMENT) {
+			current = newCond;
+		} else if (status == ConditionStatus::CONTRADICTION) {
+			conditionList_.push_back(newCond);
+			break;
+		} else if (status == ConditionStatus::IGNORANCE) {
 			break;
 		}
 	}
 
-	if (!isReplaceOrSkip) {
+	if (status == ConditionStatus::NO_CONTRADICTION) {
 		util::Vector<ColumnId>::iterator columnIdItr;
 		columnIdItr = std::find(columnIdList_.begin(), columnIdList_.end(), newCond.columnId_);
-		bool isKey = (columnIdItr != columnIdList_.end()) ? true : false;
-		addCondition(newCond, isKey);
+		if (columnIdItr != columnIdList_.end()) {
+			keyList_.push_back(static_cast<ColumnId>(conditionList_.size()));
+		}
+		conditionList_.push_back(newCond);
 	}
-	return !isInvalid;
+	return status == ConditionStatus::REPLACEMENT;
 }
 
 void BaseIndex::SearchContext::copy(util::StackAllocator &alloc, SearchContext &dest) {
@@ -217,6 +192,7 @@ void BaseIndex::Setting::initialize(util::StackAllocator &alloc, SearchContext &
 				isEndIncluded_ = DSExpression::isIncluded(endCondition_->opType_);
 			} else
 			{
+				assert(false);
 			}
 		}
 		if (sc.getSuspendKey() != NULL) {

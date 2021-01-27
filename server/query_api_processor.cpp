@@ -71,7 +71,7 @@ void QueryProcessor::get(TransactionContext &txn, BaseContainer &container,
 					ColumnInfo &columnInfo = container.getColumnInfo(i);
 					TermCondition cond(columnInfo.getColumnType(), columnInfo.getColumnType(), 
 						DSExpression::EQ, i, keyFields[i].data_, keyFields[i].size_);
-					sc.addCondition(cond, true);
+					sc.addCondition(txn, cond, true);
 				}
 				container.searchColumnIdIndex(txn, sc, idList, ORDER_UNDEFINED);
 			}
@@ -82,7 +82,7 @@ void QueryProcessor::get(TransactionContext &txn, BaseContainer &container,
 					ColumnInfo &columnInfo = container.getColumnInfo(i);
 					TermCondition cond(columnInfo.getColumnType(), columnInfo.getColumnType(), 
 						DSExpression::EQ, i, keyFields[i].data_, keyFields[i].size_);
-					sc.addCondition(cond, false);
+					sc.addCondition(txn, cond, false);
 				}
 				container.searchRowIdIndex(txn, sc, idList, ORDER_UNDEFINED);
 			}
@@ -205,13 +205,13 @@ void QueryProcessor::search(TransactionContext &txn, BaseContainer &container,
 			ColumnInfo &columnInfo = container.getColumnInfo(i);
 			TermCondition cond(columnInfo.getColumnType(), columnInfo.getColumnType(), 
 				DSExpression::GE, i, startKeyFileds[i].data_, startKeyFileds[i].size_);
-			sc.addCondition(cond, isKeyCondition);
+			sc.addCondition(txn, cond, isKeyCondition);
 		}
 		for (ColumnId i = 0; i < static_cast<uint32_t>(endKeyFileds.size()); i++) {
 			ColumnInfo &columnInfo = container.getColumnInfo(i);
 			TermCondition cond(columnInfo.getColumnType(), columnInfo.getColumnType(), 
 				DSExpression::LE, i, endKeyFileds[i].data_, endKeyFileds[i].size_);
-			sc.addCondition(cond, isKeyCondition);
+			sc.addCondition(txn, cond, isKeyCondition);
 		}
 		OutputOrder order = (keyColumnIdList.size() > 1) ? ORDER_UNDEFINED : ORDER_ASCENDING;
 		if (isUseValueIndex) {
@@ -275,13 +275,13 @@ void QueryProcessor::search(TransactionContext &txn, TimeSeries &timeSeries,
 			TermCondition cond(timeSeries.getRowIdColumnType(), timeSeries.getRowIdColumnType(),
 				startOpType, timeSeries.getRowIdColumnId(),
 				reinterpret_cast<uint8_t *>(&rewriteStartTime), sizeof(rewriteStartTime));
-			sc.addCondition(cond, true);
+			sc.addCondition(txn, cond, true);
 		}
 		if (end != UNDEF_TIMESTAMP) {
 			TermCondition cond(timeSeries.getRowIdColumnType(), timeSeries.getRowIdColumnType(),
 				DSExpression::LE, timeSeries.getRowIdColumnId(),
 				reinterpret_cast<uint8_t *>(&end), sizeof(end));
-			sc.addCondition(cond, true);
+			sc.addCondition(txn, cond, true);
 		}
 
 		sc.setLimit(limit);
@@ -402,11 +402,11 @@ void QueryProcessor::aggregate(TransactionContext &txn, TimeSeries &timeSeries,
 		TermCondition startCond(timeSeries.getRowIdColumnType(), timeSeries.getRowIdColumnType(),
 			opType, timeSeries.getRowIdColumnId(),
 			rewriteStartTime, sizeof(*rewriteStartTime));
-		sc.addCondition(startCond, true);
+		sc.addCondition(txn, startCond, true);
 		TermCondition endCond(timeSeries.getRowIdColumnType(), timeSeries.getRowIdColumnType(),
 			DSExpression::LE, timeSeries.getRowIdColumnId(),
 			&end, sizeof(end));
-		sc.addCondition(endCond, true);
+		sc.addCondition(txn, endCond, true);
 
 		Value value;
 		timeSeries.aggregate(

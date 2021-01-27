@@ -157,7 +157,8 @@ public:
 	bool finishPartialSearch(OpContext &cxt, BtreeSearchContext &sc);
 
 	static void setUpSearchContext(
-			OpContext &cxt, const SQLExprs::IndexConditionList &targetCondList,
+			OpContext &cxt, TransactionContext &txn, 
+			const SQLExprs::IndexConditionList &targetCondList,
 			BtreeSearchContext &sc, const BaseContainer &container);
 
 	IndexType acceptIndexCond(
