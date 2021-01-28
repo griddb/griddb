@@ -1,5 +1,5 @@
 %define griddb_name griddb
-%define griddb_ver 4.5.2
+%define griddb_ver 4.5.3
 %define griddb_instdir /usr/griddb-%{griddb_ver}
 %define griddb_homedir /var/lib/gridstore
 # do not strip
@@ -311,5 +311,5 @@ fi
 /usr/share/java/gridstore-conf.jar
 
 %changelog
-* Thu Nov 12 2020 Toshiba Digital Solutions Corporation
-- 4.5.2
+* Thu Jan 28 2021 Toshiba Digital Solutions Corporation
+- 4.5.3
