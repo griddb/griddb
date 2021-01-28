@@ -2126,7 +2126,7 @@ bool Collection::searchRowKeyWithRowIdMap(TransactionContext& txn,
 		ColumnInfo &columnInfo = getColumnInfo(keyColumnIdList[i]);
 		TermCondition cond(columnInfo.getColumnType(), columnInfo.getColumnType(), 
 			DSExpression::EQ, i, keyFieldList[i].data_, keyFieldList[i].size_);
-		sc.addCondition(cond, true);
+		sc.addCondition(txn, cond, true);
 	}
 
 	util::Vector<TermCondition> condList(txn.getDefaultAllocator());
@@ -2245,7 +2245,7 @@ bool Collection::searchRowKeyWithMvccMap(TransactionContext& txn,
 		ColumnInfo &columnInfo = getColumnInfo(i);
 		TermCondition cond(columnInfo.getColumnType(), columnInfo.getColumnType(), 
 			DSExpression::EQ, keyColumnIdList[i], keyFieldList[i].data_, keyFieldList[i].size_);
-		sc.addCondition(cond, true);
+		sc.addCondition(txn, cond, true);
 	}
 
 	util::Vector<TermCondition> condList(txn.getDefaultAllocator());

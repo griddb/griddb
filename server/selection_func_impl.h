@@ -868,7 +868,7 @@ uint64_t SelectionTimeSampling::apiPassThrough(TransactionContext &txn,
 			COLUMN_TYPE_TIMESTAMP, COLUMN_TYPE_TIMESTAMP,
 			DSExpression::GE,
 			ColumnInfo::ROW_KEY_COLUMN_ID, reinterpret_cast<uint8_t *>(&startTs), sizeof(startTs));
-		sc.addCondition(startCond, true);
+		sc.addCondition(txn, startCond, true);
 	}
 	else {
 		bool isReplace = false;
@@ -897,7 +897,7 @@ uint64_t SelectionTimeSampling::apiPassThrough(TransactionContext &txn,
 			COLUMN_TYPE_TIMESTAMP, COLUMN_TYPE_TIMESTAMP,
 			DSExpression::LE,
 			ColumnInfo::ROW_KEY_COLUMN_ID, reinterpret_cast<uint8_t *>(&endTs), sizeof(endTs));
-		sc.addCondition(endCond, true);
+		sc.addCondition(txn, endCond, true);
 	}
 	else {
 		Timestamp endTs2 =

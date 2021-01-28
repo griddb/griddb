@@ -405,7 +405,7 @@ public:
 		const K &e1, const K &e2, BaseIndex::Setting &);
 
 
-	static int32_t compositeInfoCmp(TransactionContext &txn, ObjectManager &objectManager,
+	static inline int32_t compositeInfoCmp(TransactionContext &txn, ObjectManager &objectManager,
 	   const CompositeInfoObject *e1, const CompositeInfoObject *e2, BaseIndex::Setting &setting);
 
 
@@ -1666,10 +1666,10 @@ private:
 	int32_t find(TransactionContext &txn, SearchContext &sc,
 		util::XArray<R> &idList, OutputOrder outputOrder);
 
-	template <typename K, typename V, typename R>
+	template <typename P, typename K, typename V, typename R>
 	bool getAllByAscending(TransactionContext &txn, ResultSize limit,
 		util::XArray<R> &result, ResultSize suspendLimit, 
-		KeyValue<K, V> &suspendKeyValue) {
+		KeyValue<K, V> &suspendKeyValue, Setting &setting) {
 		bool isSuspend = false;
 		if (isEmpty()) {
 			return isSuspend;
@@ -1679,7 +1679,8 @@ private:
 		int32_t loc = 0;
 		while (true) {
 			KeyValue<K, V> currentVal = node.getKeyValue(loc);
-			pushResultList<K, V, R>(currentVal, result);
+			if (!isComposite<P>() || isMatch(txn, *getObjectManager(), currentVal, setting))
+				pushResultList<K, V, R>(currentVal, result);
 			if (!nextPos(txn, node, loc) || result.size() >= limit) {
 				break;
 			}
@@ -1692,17 +1693,17 @@ private:
 		return isSuspend;
 	}
 
-	template <typename K, typename V, typename R>
+	template <typename P, typename K, typename V, typename R>
 	int32_t getAllByAscending(
 		TransactionContext &txn, ResultSize limit, util::XArray<R> &result);
 	template <typename K, typename V, typename R>
 	int32_t getAllByAscending(TransactionContext &txn, ResultSize limit,
 		util::XArray<R> &result, BtreeMap::BtreeCursor &cursor);
 
-	template <typename K, typename V, typename R>
+	template <typename P, typename K, typename V, typename R>
 	bool getAllByDescending(TransactionContext &txn, ResultSize limit,
 		util::XArray<R> &result, ResultSize suspendLimit, 
-		KeyValue<K, V> &suspendKeyValue) {
+				KeyValue<K, V> &suspendKeyValue, Setting &setting) {
 		bool isSuspend = false;
 		if (isEmpty()) {
 			return isSuspend;
@@ -1712,7 +1713,8 @@ private:
 		int32_t loc = node.numkeyValues() - 1;
 		while (true) {
 			KeyValue<K, V> currentVal = node.getKeyValue(loc);
-			pushResultList<K, V, R>(currentVal, result);
+			if (!isComposite<P>() || isMatch(txn, *getObjectManager(), currentVal, setting))
+				pushResultList<K, V, R>(currentVal, result);
 			if (!prevPos(txn, node, loc) || result.size() >= limit) {
 				break;
 			}
@@ -2493,12 +2495,12 @@ int32_t BtreeMap::find(TransactionContext &txn, SearchContext &sc,
 	}
 	else {
 		if (outputOrder != ORDER_DESCENDING) {
-			isSuspend = getAllByAscending<K, V, R>(
-				txn, sc.getLimit(), idList, suspendLimit, suspendKeyValue);
+			isSuspend = getAllByAscending<P, K, V, R>(
+				txn, sc.getLimit(), idList, suspendLimit, suspendKeyValue, setting);
 		}
 		else {
-			isSuspend = getAllByDescending<K, V, R>(
-				txn, sc.getLimit(), idList, suspendLimit, suspendKeyValue);
+			isSuspend = getAllByDescending<P, K, V, R>(
+				txn, sc.getLimit(), idList, suspendLimit, suspendKeyValue, setting);
 		}
 	}
 	if (isSuspend) {

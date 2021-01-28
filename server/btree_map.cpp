@@ -599,15 +599,16 @@ int32_t BtreeMap::getAll(
 
 template <typename P, typename K, typename V, typename R>
 void BtreeMap::GetAllFunc::execute() {
-	ret_ = tree_->getAllByAscending<K, V, R>(txn_, limit_, idList_);
+	ret_ = tree_->getAllByAscending<P, K, V, R>(txn_, limit_, idList_);
 }
 
-template <typename K, typename V, typename R>
+template <typename P, typename K, typename V, typename R>
 int32_t BtreeMap::getAllByAscending(
 	TransactionContext &txn, ResultSize limit, util::XArray<R> &result) {
 	KeyValue<K, V> suspendKeyValue;
-	getAllByAscending<K, V, R>(
-		txn, limit, result, MAX_RESULT_SIZE, suspendKeyValue);
+	Setting setting(getKeyType(), false, NULL);
+	getAllByAscending<P, K, V, R>(
+		txn, limit, result, MAX_RESULT_SIZE, suspendKeyValue, setting);
 	return GS_SUCCESS;
 }
 

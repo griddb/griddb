@@ -231,7 +231,7 @@ void QueryForTimeSeries::doQueryWithoutCondition(
 			TermCondition cond(timeSeries_->getRowIdColumnType(), timeSeries_->getRowIdColumnType(),
 				DSExpression::GE, timeSeries_->getRowIdColumnId(), pExpireTs,
 				sizeof(*pExpireTs));
-			sc.addCondition(cond, true);
+			sc.addCondition(txn, cond, true);
 		}
 		sc.setLimit(nLimit_);
 		if (doExplain()) {
@@ -285,7 +285,7 @@ void QueryForTimeSeries::doQueryWithoutCondition(
 			TermCondition condition(COLUMN_TYPE_TIMESTAMP, COLUMN_TYPE_TIMESTAMP,
 				DSExpression::GT, ColumnInfo::ROW_KEY_COLUMN_ID, pExpireTs,  sizeof(*pExpireTs));
 			bool isKey = searchColumnId == ColumnInfo::ROW_KEY_COLUMN_ID;
-			sc.addCondition(condition, isKey);
+			sc.addCondition(txn, condition, isKey);
 		}
 		if (searchColumnId != ColumnInfo::ROW_KEY_COLUMN_ID || outputOrder == ORDER_DESCENDING) {
 			isRowKeySearched_ = false;

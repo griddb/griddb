@@ -259,7 +259,8 @@ public:
 			  columnIdList_(alloc)
 		{
 			columnIdList_.push_back(cond.columnId_);
-			addCondition(cond, true);
+			keyList_.push_back(0);
+			conditionList_.push_back(cond);
 		}
 
 		SearchContext(util::StackAllocator &alloc, TermCondition &startCond,
@@ -283,8 +284,10 @@ public:
 		{
 			assert(startCond.columnId_ == endCond.columnId_);
 			columnIdList_.push_back(startCond.columnId_);
-			addCondition(startCond, true);
-			addCondition(endCond, true);
+			keyList_.push_back(0);
+			keyList_.push_back(1);
+			conditionList_.push_back(startCond);
+			conditionList_.push_back(endCond);
 		}
 
 		uint32_t getConditionNum() const {
@@ -297,12 +300,7 @@ public:
 			assert(no < getConditionNum());
 			return conditionList_[no];
 		}
-		void addCondition(TermCondition &term, bool isKey = false) {
-			if (isKey) {
-				keyList_.push_back(static_cast<ColumnId>(conditionList_.size()));
-			}
-			conditionList_.push_back(term);
-		}
+		void addCondition(TransactionContext &txn, TermCondition &term, bool isKey = false);
 		void copy(util::StackAllocator &alloc, SearchContext &dest);
 		uint32_t getKeyColumnNum() const {
 			return columnIdList_.size();
@@ -314,6 +312,7 @@ public:
 			return nullCond_;
 		}
 		void setNullCond(NullCondition cond) {
+			keyList_.clear();
 			nullCond_ = cond;
 		}
 		ResultSize getLimit() {
@@ -427,6 +426,14 @@ public:
 
 		virtual std::string dump();
 	protected:
+		enum ConditionStatus {
+			NO_CONTRADICTION,
+			CONTRADICTION,
+			REPLACEMENT,
+			IGNORANCE
+		};
+		ConditionStatus checkCondition(TransactionContext &txn, TermCondition &orgCond, TermCondition &newCond);
+
 		util::Vector<TermCondition> conditionList_;  
 		util::Vector<size_t> keyList_;  
 		ResultSize limit_;				
@@ -559,4 +566,64 @@ void BaseIndex::SearchContext::setSuspendPoint(TransactionContext &txn,
 template <>
 void BaseIndex::SearchContext::setSuspendPoint(TransactionContext &txn,
 	ObjectManager &objectManager, TreeFuncInfo *funcInfo, const FullContainerKeyAddr &suspendKey, const OId &suspendValue);
+
+inline BaseIndex::SearchContext::ConditionStatus BaseIndex::SearchContext::checkCondition(TransactionContext &txn, 
+   TermCondition &orgCond, TermCondition &newCond) {
+	ConditionStatus status = NO_CONTRADICTION;
+	if (orgCond.columnId_ == newCond.columnId_ && orgCond.valueType_ == newCond.valueType_ &&
+		orgCond.isRangeCondition() && newCond.isRangeCondition()) {
+		if (orgCond.opType_ == DSExpression::EQ) {
+			if (newCond.operator_(txn, static_cast<const uint8_t *>(orgCond.value_), orgCond.valueSize_, 
+				static_cast<const uint8_t *>(newCond.value_), newCond.valueSize_)) {
+				status = IGNORANCE;
+			} else {
+				status = CONTRADICTION;
+			}
+		} else if (newCond.opType_ == DSExpression::EQ) {
+			if (orgCond.operator_(txn, static_cast<const uint8_t *>(newCond.value_), newCond.valueSize_, 
+				static_cast<const uint8_t *>(orgCond.value_), orgCond.valueSize_)) {
+				status = REPLACEMENT;
+			} else {
+				status = CONTRADICTION;
+			}
+		} else if ((newCond.isStartCondition() && orgCond.isStartCondition()) ||
+			(newCond.isEndCondition() && orgCond.isEndCondition())) { 
+			if (orgCond.operator_(txn, static_cast<const uint8_t *>(newCond.value_), newCond.valueSize_, 
+				static_cast<const uint8_t *>(orgCond.value_), orgCond.valueSize_)) {
+				status = REPLACEMENT;
+			} else {
+				status = IGNORANCE;
+			}
+		}
+	}
+	return status;
+}
+
+
+inline void BaseIndex::SearchContext::addCondition(TransactionContext &txn, TermCondition &term, bool isKey) {
+	if (isKey) {
+		ConditionStatus status = NO_CONTRADICTION;
+		util::Vector<size_t>::iterator itr;
+		for (itr = keyList_.begin(); itr != keyList_.end(); itr++) {
+			TermCondition &current = getCondition(*itr);
+			status = checkCondition(txn, current, term);
+			if (status == REPLACEMENT) {
+				current = term;
+			} else if (status == CONTRADICTION) {
+				conditionList_.push_back(term);
+				break;
+			} else if (status == IGNORANCE) {
+				break;
+			}
+		}
+		if (status == NO_CONTRADICTION) {
+			keyList_.push_back(static_cast<ColumnId>(conditionList_.size()));
+			conditionList_.push_back(term);
+		}
+	} else {
+		conditionList_.push_back(term);
+	}
+}
+
+
 #endif  
