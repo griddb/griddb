@@ -311,5 +311,5 @@ fi
 /usr/share/java/gridstore-conf.jar
 
 %changelog
-* Thu Jan 28 2021 Toshiba Digital Solutions Corporation
+* Fri Jan 29 2021 Toshiba Digital Solutions Corporation
 - 4.5.3
