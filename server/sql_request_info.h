@@ -47,6 +47,7 @@ enum SQLRequestType {
 	UNDEF_REQUEST_TYPE
 };
 
+
 struct BindParam {
 	BindParam(util::StackAllocator &alloc, ColumnType type) :
 			alloc_(alloc), type_(type) {}
@@ -65,6 +66,88 @@ struct BindParam {
 
 	TupleValue value_;
 };
+
+class BindParamSet {
+public:
+	BindParamSet(util::StackAllocator &alloc) :
+			alloc_(alloc),
+			bindParamList_(alloc),
+			currentPos_(0),
+			columnSize_(0),
+			rowCount_(0) {}
+
+			void prepare(int32_t columnNum, int64_t rowCount) {
+				columnSize_ = columnNum;
+				rowCount_ = rowCount;
+				for (size_t pos = 0; pos < rowCount; pos++) {
+					util::Vector<BindParam*> bindParamList(alloc_);
+					bindParamList_.push_back(bindParamList);
+				}
+			}
+
+			void append(BindParam *bindParam) {
+				if (bindParamList_[currentPos_].size() >= columnSize_) {
+					GS_THROW_USER_ERROR(0, "");
+				}
+				bindParamList_[currentPos_].push_back(bindParam);
+			}
+
+			util::Vector<BindParam*> &getParamList(size_t pos) {
+				if (bindParamList_.size() == 0) {
+					util::Vector<BindParam*> bindParamList(alloc_);
+					bindParamList_.push_back(bindParamList);
+				}
+				if (pos >= bindParamList_.size()) {
+					GS_THROW_USER_ERROR(0, "");
+				}
+				return bindParamList_[pos];
+			}
+
+			util::Vector<BindParam*> &getParamList() {
+				if (bindParamList_.size() == 0) {
+					util::Vector<BindParam*> bindParamList(alloc_);
+					bindParamList_.push_back(bindParamList);
+				}
+				return bindParamList_[currentPos_];
+			}
+
+			void reset() {
+				currentPos_ = 0;
+			}
+
+			bool next() {
+				if (currentPos_ == rowCount_) {
+					return false;
+				}
+				currentPos_++;
+				return true;
+			}
+
+	void clear() {
+		for (size_t pos1 = 0; pos1 < bindParamList_.size(); pos1++) {
+			for (size_t pos2 = 0; pos2 < bindParamList_[pos1].size(); pos2++) {
+				ALLOC_DELETE(alloc_, bindParamList_[pos1][pos2]);
+				bindParamList_[pos1].clear();
+			}
+		}
+		bindParamList_.clear();
+		currentPos_ = 0;
+		columnSize_ = 0;
+		rowCount_ = 0;
+	}
+
+	int64_t getRowCount() {
+		return rowCount_;
+	}
+
+private:
+	util::StackAllocator &alloc_;
+	util::Vector<util::Vector<BindParam*>> bindParamList_;
+	size_t currentPos_;
+	int32_t columnSize_;
+	int64_t rowCount_;
+};
+
 
 struct RequestInfo {
 public:
@@ -92,6 +175,7 @@ public:
 					sessionMode_(SQL_CREATE),
 					eventType_(UNDEF_EVENT_TYPE),
 					preparedParamList_(alloc),
+					bindParamSet_(alloc),
 					serializedBindInfo_(alloc),
 					serialized_(true) {
 	}
@@ -120,6 +204,7 @@ public:
 					sessionMode_(SQL_CREATE),
 					eventType_(UNDEF_EVENT_TYPE),
 					preparedParamList_(alloc),
+					bindParamSet_(alloc),
 					serializedBindInfo_(alloc),
 					serialized_(serialized) {
 	}
@@ -173,7 +258,7 @@ public:
 	EventType eventType_;
 
 	util::Vector<BindParam*> preparedParamList_;
-
+	BindParamSet bindParamSet_;
 	util::XArray<uint8_t> serializedBindInfo_;
 	bool serialized_;
 };

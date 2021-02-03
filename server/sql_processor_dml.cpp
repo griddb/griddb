@@ -557,6 +557,11 @@ bool DMLProcessor::processInternal(Context &cxt, bool isPipe) {
 			}
 		}
 
+		if (finished && execution->isBatch()) {
+			execution->setBatchCount(
+					bulkManager_->getExecCount());
+		}
+
 		ALLOC_DELETE(alloc, tableLatch);
 		return finished;
 	}
