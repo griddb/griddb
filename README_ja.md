@@ -131,7 +131,8 @@ GridDBが提供する機能は『[GridDB 機能リファレンス](https://githu
   
   (NoSQL & SQL Interface)
   * [GridDB WebAPI](https://github.com/griddb/webapi)
-  
+  * [GridDB CLI](https://github.com/griddb/cli)
+
   他のOSSと接続するためのコネクタもあります。
   * [GridDB connector for Apache Hadoop MapReduce](https://github.com/griddb/griddb_hadoop_mapreduce/blob/master/README_ja.md)
   * [GridDB connector for YCSB (https://github.com/brianfrankcooper/YCSB/tree/master/griddb)](https://github.com/brianfrankcooper/YCSB/tree/master/griddb)
