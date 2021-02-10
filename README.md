@@ -132,6 +132,7 @@ If necessary, please refer to [Installation Troubleshooting](docs/TroubleShootin
   
   (NoSQL & SQL Interface)
   * [GridDB WebAPI](https://github.com/griddb/webapi)
+  * [GridDB CLI](https://github.com/griddb/cli)
 
   There are some connectors for other OSS.
   * [GridDB connector for Apache Hadoop MapReduce](https://github.com/griddb/griddb_hadoop_mapreduce)
