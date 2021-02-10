@@ -5,7 +5,7 @@
 |Software|Packages|
 |-|-|
 |Server|[RPM(CentOS 7), DEB(Ubuntu 18), RPM(openSUSE Leap 15)](https://github.com/griddb/griddb/releases/tag/v4.5.0)|
-|JDBC Driver|[Maven](https://mvnrepository.com/artifact/com.github.griddb/gridstore-jdbc/4.5.0.1)|
+|[JDBC Driver](https://github.com/griddb/jdbc)|[Maven](https://mvnrepository.com/artifact/com.github.griddb/gridstore-jdbc/4.5.0.1)|
 |Java Client|[Maven](https://mvnrepository.com/artifact/com.github.griddb/gridstore/4.5.0)|
 |[C Client](https://github.com/griddb/c_client)|[RPM(CentOS 7), DEB(Ubuntu 18)](https://software.opensuse.org/download/package?project=home:knonomura&package=griddb-c-client)|
 ||[RPM(openSUSE Leap 15)](https://software.opensuse.org/download/package?project=home:knonomura&package=griddb-c-client-devel)|
