@@ -473,6 +473,10 @@ int main(int argc, char **argv) {
 				chunkCategoryAttributeList[i].freeMode_ =
 					ChunkManager::BATCH_FREE_MODE;
 			}
+			if (DS_CHUNK_CATEGORY_SMALL_SIZE_SEARCH[i]) {
+				chunkCategoryAttributeList[i].searchMode_ =
+					ChunkManager::SMALL_SIZE_SEARCH_MODE;
+			}
 		}
 		ChunkManager chunkMgr(config, DS_CHUNK_CATEGORY_SIZE,
 			chunkCategoryAttributeList, checkOnly,
