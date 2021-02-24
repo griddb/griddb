@@ -94,6 +94,12 @@
 #define UTIL_CXX14_SUPPORTED 0
 #endif
 
+#if __cplusplus >= 201703L
+#define UTIL_CXX17_SUPPORTED 1
+#else
+#define UTIL_CXX17_SUPPORTED 0
+#endif
+
 #if defined(_MSC_VER) && defined(_M_X64) && !defined(_WIN64)
 #error 0
 #endif
@@ -347,6 +353,10 @@
 #include <stddef.h>
 #endif
 
+#if UTIL_CXX11_SUPPORTED_EXACT
+#include <type_traits>
+#endif
+
 #ifndef UTIL_HAVE_INTPTR_T
 #	if ( UTIL_HAVE_POINTER_T == 4 )
 typedef int32_t intptr_t;
@@ -412,6 +422,7 @@ typedef std::basic_string< char8_t, std::char_traits<char8_t> > NormalString;
 #else
 #define UTIL_NULLPTR NULL
 #endif
+
 
 #ifdef _MSC_VER
 #define UTIL_FORCEINLINE __forceinline
@@ -1042,6 +1053,22 @@ template<typename E>
 struct IsPointer<E*> {
 	typedef TrueType Type;
 	enum Value { VALUE = Type::VALUE };
+};
+
+template<typename F>
+struct BinaryFunctionResultOf {
+#if UTIL_CXX17_SUPPORTED
+	typedef typename std::invoke_result<F(int, int)>::type Type;
+#elif UTIL_CXX11_SUPPORTED_EXACT
+	typedef typename std::result_of<F(
+			typename F::first_argument_type,
+			typename F::second_argument_type)>::type Type;
+#else
+	typedef typename Conditional<
+			(sizeof(typename F::first_argument_type) > 0 &&
+			sizeof(typename F::second_argument_type) > 0),
+			F, void>::Type::result_type Type;
+#endif
 };
 
 }
