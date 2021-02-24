@@ -74,5 +74,38 @@ void FunctionUtils::TimeErrorHandler::errorTimeFormat(std::exception &e) const {
 }
 
 
+bool FunctionUtils::NumberArithmetic::middleOfOrderedValues(
+		int64_t value1, int64_t value2, int64_t &result) {
+	if (value1 <= 0 && value2 >= 0) {
+		result = ((value1 + value2) / 2);
+		return true;
+	}
+	const int64_t delta = value2 - value1;
+	if (!(delta < 0)) {
+		int64_t halfDelta = delta / 2;
+		if (value1 < 0 && delta % 2 != 0) {
+			halfDelta++;
+		}
+		result = (value1 + halfDelta);
+		return true;
+	}
+	return false;
+}
+
+bool FunctionUtils::NumberArithmetic::middleOfOrderedValues(
+		double value1, double value2, double &result) {
+	if (value1 <= 0 && value2 >= 0) {
+		result = ((value1 + value2) / 2);
+		return true;
+	}
+	const double delta = value2 - value1;
+	if (!(delta < 0)) {
+		result = (value1 + delta / 2);
+		return true;
+	}
+	return false;
+}
+
+
 const TimeFunctions::Strftime::Formatter *const
 TimeFunctions::Strftime::Formatter::FORMATTER_LIST = createFormatterList();

@@ -22,7 +22,6 @@
 UTIL_TRACER_DECLARE(TUPLE_LIST);
 const LocalTempStore::BlockId TupleList::UNDEF_BLOCKID = LocalTempStore::UNDEF_BLOCKID;
 const LocalTempStore::BlockId TupleList::Reader::UNDEF_BLOCKID = LocalTempStore::UNDEF_BLOCKID;
-const uint32_t TupleList::Writer::CONTIGUOUS_BLOCK_THRESHOLD = 10;
 const size_t TupleList::Info::COLUMN_COUNT_LIMIT = 65000;
 
 
@@ -1950,7 +1949,80 @@ TupleValue TupleList::Reader::createMultiVarValue(
 	return TupleValue(topVarData, type);
 }
 
+bool TupleList::Reader::existsDetail() {
+#ifndef NDEBUG
+	if (!tupleList_) {
+		GS_THROW_USER_ERROR(GS_ERROR_LTS_TUPLELIST_IS_NOT_EXIST,
+			"TupleList is not exist(or already closed).");
+	}
+#endif
+	assert(!isDetached_);
+	if (isDetached_) {
+		return false;
+	}
+	if (!fixedAddr_) {
+		if (tupleList_->getBlockCount() > 0) {
+			if (!latchHeadBlock()) {
+				return false;
+			}
+		}
+		else {
+			return false;
+		}
+	}
+	assert(fixedAddr_);
+	assert(getCurrentBlockAddr());
+	if (fixedAddr_ < fixedEndAddr_) {
+		return true;
+	}
+	else {
+		const uint8_t* blockAddr = getCurrentBlockAddr();
+		fixedEndAddr_ = blockAddr + TupleList::BLOCK_HEADER_SIZE
+				+ TupleList::tupleCount(blockAddr) * fixedPartSize_;
 
+		if (fixedAddr_ < fixedEndAddr_) {
+			return true;
+		}
+		const int32_t contiguousBlockCount = TupleList::contiguousBlockCount(blockAddr);
+		assert(contiguousBlockCount >= 0);
+		if (currentBlockNth_ + contiguousBlockCount + 1 < tupleList_->getBlockCount()) {
+			nextBlock(contiguousBlockCount);
+			return (fixedAddr_ < fixedEndAddr_);
+		}
+		else {
+			return false;
+		}
+	}
+}
+
+bool TupleList::Reader::nextDetail() {
+	{
+		{
+			if (!exists()) { 
+				return false;
+			}
+			assert(fixedAddr_);
+		}
+		if ((fixedAddr_ + fixedPartSize_) < fixedEndAddr_) {
+			fixedAddr_ += fixedPartSize_;
+			return false;
+		}
+		else {
+			fixedAddr_ += fixedPartSize_;
+			const int32_t contiguousBlockCount = TupleList::contiguousBlockCount(
+					getCurrentBlockAddr());
+			assert(contiguousBlockCount >= 0);
+			if (currentBlockNth_ + contiguousBlockCount + 1 < tupleList_->getBlockCount()) {
+				nextBlock(contiguousBlockCount);
+				return false;
+			}
+			else {
+				return false;
+			}
+		}
+	}
+	return true;
+}
 
 TupleList::Writer::Writer()
 : tupleList_(NULL), fixedAddr_(NULL), varTopAddr_(NULL), varTailAddr_(NULL)
@@ -2132,6 +2204,20 @@ void TupleList::Writer::setBlockHandler(WriterHandler &handler) {
 	tupleList_->writerHandler_ = &handler;
 }
 
+void TupleList::Writer::nextDetail() {
+	{
+		if (!fixedAddr_ && tupleList_->getAllocatedBlockCount() > 0) {
+			setupFirstAppend();
+			if ((fixedAddr_ + fixedPartSize_ >= varTopAddr_)
+				|| (contiguousBlockCount_ > CONTIGUOUS_BLOCK_THRESHOLD)) {
+				nextBlock();
+			}
+		}
+		else {
+			nextBlock();
+		}
+	}
+}
 
 void TupleList::Writer::setVarContext(TupleValue::VarContext &context) {
 	cxt_ = &context;
@@ -2201,6 +2287,7 @@ uint64_t TupleList::Writer::appendPartDataArea(
 
 	assert(!block_.isSwapped());
 	if (!splittable && (requestSize > maxAvailableSize_)) { 
+		abort();
 		GS_THROW_USER_ERROR(GS_ERROR_LTS_NOT_IMPLEMENTED,
 				"The size of data is too large. blockSize=" << blockSize_ <<
 				", requestSize=" << requestSize);

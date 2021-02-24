@@ -27,22 +27,6 @@
 #include "sql_temp_store.h"
 #include "sql_common.h"
 
-#ifndef GD_ENABLE_SQL_READABLE_TUPLE_TYPE_SPECIFIED_GET
-#define GD_ENABLE_SQL_READABLE_TUPLE_TYPE_SPECIFIED_GET 1
-#endif
-
-#ifndef GD_ENABLE_SQL_READER_TYPE_SPECIFIED_GET
-#define GD_ENABLE_SQL_READER_TYPE_SPECIFIED_GET 1
-#endif
-
-#ifndef GD_ENABLE_SQL_READER_USE_DIRECT_ADDR
-#define GD_ENABLE_SQL_READER_USE_DIRECT_ADDR 1
-#endif
-
-#ifndef GD_ENABLE_SQL_WRITABLE_TUPLE_TYPE_SPECIFIED_SET
-#define GD_ENABLE_SQL_WRITABLE_TUPLE_TYPE_SPECIFIED_SET 1
-#endif
-
 class LocalTempStore;
 class ResourceGroup;
 class TupleList {
@@ -341,7 +325,7 @@ private:
 		void *rawData_; 
 	} data_;
 
-	TupleList::TupleColumnType type_;
+	int32_t type_;
 };
 
 
@@ -964,7 +948,7 @@ public:
 	class Image;
 	friend class Image;
 
-	static const uint32_t CONTIGUOUS_BLOCK_THRESHOLD;
+	static const uint32_t CONTIGUOUS_BLOCK_THRESHOLD = 10;
 
 	Writer();
 
@@ -980,6 +964,7 @@ public:
 	void setBlockHandler(WriterHandler &handler);
 
 	inline void next();
+	void nextDetail();
 
 	WritableTuple get(); 
 
@@ -1090,16 +1075,15 @@ public:
 
 class TupleList::ReadableTuple {
 public:
+	explicit ReadableTuple(const util::FalseType&);
 	explicit ReadableTuple(Reader &reader);
 	TupleValue get(const Column &column) const;
 
-#if GD_ENABLE_SQL_READABLE_TUPLE_TYPE_SPECIFIED_GET
 	template<typename T> T getAs(const Column &column) const;
-#endif
 	bool checkIsNull(uint16_t colNumber) const;
 
 	Reader *reader_;
-#if defined(NDEBUG) && defined(GD_ENABLE_SQL_READER_USE_DIRECT_ADDR)
+#if defined(NDEBUG)
 	const uint8_t *addr_;
 	uint64_t blockNth_;
 #else
@@ -1110,16 +1094,17 @@ public:
 
 class TupleList::WritableTuple {
 public:
+	explicit WritableTuple(const util::FalseType&);
 	explicit WritableTuple(Writer &writer);
 
 	void set(const Column &column, const TupleValue &value);
 
-#if GD_ENABLE_SQL_WRITABLE_TUPLE_TYPE_SPECIFIED_SET
 	void setBy(const Column &column, const TupleValue &value);
 	void setBy(const Column &column, const TupleString &value);
 	void setBy(const Column &column, const int32_t &value);
 	void setBy(const Column &column, const int64_t &value);
-#endif
+	void setBy(const Column &column, const float &value);
+	void setBy(const Column &column, const double &value);
 
 	void setIsNull(uint16_t colNumber, bool nullValue = true);
 
@@ -1162,6 +1147,9 @@ public:
 
 	void next();
 
+	bool existsDetail();
+	bool nextDetail();
+
 	ReadableTuple get();
 
 	void assign(const Reader &reader);
@@ -1173,11 +1161,9 @@ public:
 	uint64_t getFollowingBlockCount() const;
 	uint64_t getReferencingBlockCount() const;
 
-#if GD_ENABLE_SQL_READER_TYPE_SPECIFIED_GET
 	template<typename T> T getAs(const Column &column);
 
 	bool checkIsNull(uint16_t colNumber);
-#endif
 	void countLatchedBlock(
 			uint64_t &latchedBlockCount, uint64_t &keepTop, uint64_t &keepMax) const;
 
@@ -1378,13 +1364,23 @@ struct TupleBlockOperation {
 	static void updateLobPartInfo();
 };
 
+inline TupleList::ReadableTuple::ReadableTuple(const util::FalseType&) {
+	reader_ = NULL;
+#if defined(NDEBUG)
+	addr_ = NULL;
+	blockNth_ = 0;
+#else
+	pos_ = 0;
+#endif
+}
+
 inline TupleList::ReadableTuple::ReadableTuple(Reader &reader) {
 	assert(reader.existsDirect());
 	if (TupleList::Reader::ORDER_RANDOM == reader.accessOrder_) {
 		reader.updateKeepInfo();
 	}
 	reader_ = &reader;
-#if defined(NDEBUG) && defined(GD_ENABLE_SQL_READER_USE_DIRECT_ADDR)
+#if defined(NDEBUG)
 	addr_ = reader_->fixedAddr_;
 	blockNth_ = reader_->currentBlockNth_;
 #else
@@ -1405,7 +1401,7 @@ TupleValue TupleList::ReadableTuple::get(const Column &column) const{
 			"Reader is not exist(or already closed).");
 	}
 #endif
-#if defined(NDEBUG) && defined(GD_ENABLE_SQL_READER_USE_DIRECT_ADDR)
+#if defined(NDEBUG)
 	const uint8_t* addr = addr_ + column.offset_;
 #else
 	const uint8_t* blockTopAddr = reader_->getBlockTopAddr(pos_);
@@ -1429,7 +1425,7 @@ TupleValue TupleList::ReadableTuple::get(const Column &column) const{
 		}
 	}
 	assert(!TupleColumnTypeUtils::isAny(type));
-#if defined(NDEBUG) && defined(GD_ENABLE_SQL_READER_USE_DIRECT_ADDR)
+#if defined(NDEBUG)
 	const uint64_t baseBlockNth = blockNth_;
 	const uint8_t* blockTopAddr = reader_->getBlockTopAddrDirect(blockNth_);
 #else
@@ -1453,7 +1449,6 @@ TupleValue TupleList::ReadableTuple::get(const Column &column) const{
 	}
 }
 
-#if GD_ENABLE_SQL_READABLE_TUPLE_TYPE_SPECIFIED_GET
 template<>
 inline TupleValue TupleList::ReadableTuple::getAs(const Column &column) const {
 	return get(column);
@@ -1470,7 +1465,7 @@ inline TupleString TupleList::ReadableTuple::getAs(const Column &column) const {
 	assert(TupleList::TYPE_STRING ==
 			(column.type_ & ~TupleList::TYPE_MASK_NULLABLE));
 #endif
-#if defined(NDEBUG) && defined(GD_ENABLE_SQL_READER_USE_DIRECT_ADDR)
+#if defined(NDEBUG)
 	const uint8_t* blockTopAddr = reader_->getBlockTopAddrDirect(blockNth_);
 	const uint8_t* addr = addr_ + column.offset_;
 #else
@@ -1487,7 +1482,7 @@ inline TupleString TupleList::ReadableTuple::getAs(const Column &column) const {
 		return TupleString(varTop);
 	}
 	else {
-#if defined(NDEBUG) && defined(GD_ENABLE_SQL_READER_USE_DIRECT_ADDR)
+#if defined(NDEBUG)
 		const uint64_t baseBlockNth = blockNth_;
 #else
 		const uint64_t baseBlockNth = reader_->calcBlockNth(pos_);
@@ -1508,7 +1503,7 @@ inline int32_t TupleList::ReadableTuple::getAs(const Column &column) const {
 	assert(TupleList::TYPE_INTEGER ==
 			(column.type_ & ~TupleList::TYPE_MASK_NULLABLE));
 #endif
-#if defined(NDEBUG) && defined(GD_ENABLE_SQL_READER_USE_DIRECT_ADDR)
+#if defined(NDEBUG)
 	const uint8_t* addr = addr_ + column.offset_;
 #else
 	const uint8_t* blockTopAddr = reader_->getBlockTopAddr(pos_);
@@ -1530,7 +1525,7 @@ inline int64_t TupleList::ReadableTuple::getAs(const Column &column) const {
 			TupleList::TYPE_TIMESTAMP ==
 			(column.type_ & ~TupleList::TYPE_MASK_NULLABLE));
 #endif
-#if defined(NDEBUG) && defined(GD_ENABLE_SQL_READER_USE_DIRECT_ADDR)
+#if defined(NDEBUG)
 	const uint8_t* addr = addr_ + column.offset_;
 #else
 	const uint8_t* blockTopAddr = reader_->getBlockTopAddr(pos_);
@@ -1538,12 +1533,50 @@ inline int64_t TupleList::ReadableTuple::getAs(const Column &column) const {
 #endif
 	return *reinterpret_cast<const int64_t*>(addr);
 }
-#endif
 
+template<>
+inline float TupleList::ReadableTuple::getAs(const Column &column) const {
+#ifndef NDEBUG
+	if (!reader_) {
+		GS_THROW_USER_ERROR(GS_ERROR_LTS_TUPLELIST_IS_NOT_EXIST,
+			"Reader is not exist(or already closed).");
+	}
+	assert(!checkIsNull(column.pos_));
+	assert(TupleList::TYPE_FLOAT ==
+			(column.type_ & ~TupleList::TYPE_MASK_NULLABLE));
+#endif
+#if defined(NDEBUG)
+	const uint8_t* addr = addr_ + column.offset_;
+#else
+	const uint8_t* blockTopAddr = reader_->getBlockTopAddr(pos_);
+	const uint8_t* addr = blockTopAddr + reader_->calcBlockOffset(pos_) + column.offset_;
+#endif
+	return *reinterpret_cast<const float*>(addr);
+}
+
+template<>
+inline double TupleList::ReadableTuple::getAs(const Column &column) const {
+#ifndef NDEBUG
+	if (!reader_) {
+		GS_THROW_USER_ERROR(GS_ERROR_LTS_TUPLELIST_IS_NOT_EXIST,
+			"Reader is not exist(or already closed).");
+	}
+	assert(!checkIsNull(column.pos_));
+	assert(TupleList::TYPE_DOUBLE ==
+			(column.type_ & ~TupleList::TYPE_MASK_NULLABLE));
+#endif
+#if defined(NDEBUG)
+	const uint8_t* addr = addr_ + column.offset_;
+#else
+	const uint8_t* blockTopAddr = reader_->getBlockTopAddr(pos_);
+	const uint8_t* addr = blockTopAddr + reader_->calcBlockOffset(pos_) + column.offset_;
+#endif
+	return *reinterpret_cast<const double*>(addr);
+}
 
 inline bool TupleList::ReadableTuple::checkIsNull(uint16_t colNumber) const {
 	assert(reader_->tupleList_);
-#if defined(NDEBUG) && defined(GD_ENABLE_SQL_READER_USE_DIRECT_ADDR)
+#if defined(NDEBUG)
 	const uint8_t* fixedAddr = addr_;
 #else
 	const uint8_t* fixedAddr = reader_->getBlockTopAddr(pos_)
@@ -1613,7 +1646,6 @@ inline TupleList::ReadableTuple TupleList::Reader::get() {
 	return ReadableTuple(*this);
 }
 
-#if GD_ENABLE_SQL_READER_TYPE_SPECIFIED_GET
 inline bool TupleList::Reader::checkIsNull(uint16_t colNumber) {
 	assert(tupleList_);
 	assert(existsDirect());
@@ -1744,90 +1776,56 @@ template<> inline int64_t TupleList::Reader::getAs(const Column &column) {
 	const uint8_t* addr = fixedAddr_ + column.offset_;
 	return *reinterpret_cast<const int64_t*>(addr);
 }
-#endif
-inline bool TupleList::Reader::exists() {
+
+template<> inline float TupleList::Reader::getAs(const Column &column) {
 #ifndef NDEBUG
 	if (!tupleList_) {
 		GS_THROW_USER_ERROR(GS_ERROR_LTS_TUPLELIST_IS_NOT_EXIST,
 			"TupleList is not exist(or already closed).");
 	}
+	if (!existsDirect()) {
+		GS_THROW_USER_ERROR(GS_ERROR_LTS_READER_NOT_SUPPORTED,
+			"Tuple is not exist.");
+	}
 #endif
-	assert(!isDetached_);
-	if (isDetached_) {
-		return false;
-	}
-	if (!fixedAddr_) {
-		if (tupleList_->getBlockCount() > 0) {
-			if (!latchHeadBlock()) {
-				return false;
-			}
-		}
-		else {
-			return false;
-		}
-	}
-	assert(fixedAddr_);
-	assert(getCurrentBlockAddr());
-	if (fixedAddr_ < fixedEndAddr_) {
-		return true;
-	}
-	else {
-		const uint8_t* blockAddr = getCurrentBlockAddr();
-		fixedEndAddr_ = blockAddr + TupleList::BLOCK_HEADER_SIZE
-				+ TupleList::tupleCount(blockAddr) * fixedPartSize_;
+	assert(!checkIsNull(column.pos_));
+	assert(TupleList::TYPE_FLOAT ==
+			(column.type_ & ~TupleList::TYPE_MASK_NULLABLE));
+	const uint8_t* addr = fixedAddr_ + column.offset_;
+	return *reinterpret_cast<const float*>(addr);
+}
 
-		if (fixedAddr_ < fixedEndAddr_) {
-			return true;
-		}
-		const int32_t contiguousBlockCount = TupleList::contiguousBlockCount(blockAddr);
-		assert(contiguousBlockCount >= 0);
-		if (currentBlockNth_ + contiguousBlockCount + 1 < tupleList_->getBlockCount()) {
-			nextBlock(contiguousBlockCount);
-			return (fixedAddr_ < fixedEndAddr_);
-		}
-		else {
-			return false;
-		}
+template<> inline double TupleList::Reader::getAs(const Column &column) {
+#ifndef NDEBUG
+	if (!tupleList_) {
+		GS_THROW_USER_ERROR(GS_ERROR_LTS_TUPLELIST_IS_NOT_EXIST,
+			"TupleList is not exist(or already closed).");
 	}
+	if (!existsDirect()) {
+		GS_THROW_USER_ERROR(GS_ERROR_LTS_READER_NOT_SUPPORTED,
+			"Tuple is not exist.");
+	}
+#endif
+	assert(!checkIsNull(column.pos_));
+	assert(TupleList::TYPE_DOUBLE ==
+			(column.type_ & ~TupleList::TYPE_MASK_NULLABLE));
+	const uint8_t* addr = fixedAddr_ + column.offset_;
+	return *reinterpret_cast<const double*>(addr);
+}
+inline bool TupleList::Reader::exists() {
+	if (fixedAddr_ >= fixedEndAddr_) {
+		return existsDetail();
+	}
+	return true;
 }
 
 inline void TupleList::Reader::next() {
-#ifndef NDEBUG
-	if (!tupleList_) {
-		GS_THROW_USER_ERROR(GS_ERROR_LTS_TUPLELIST_IS_NOT_EXIST,
-			"TupleList is not exist(or already closed).");
-	}
-#endif
-	assert(!isDetached_);
-	assert(fixedAddr_);
 	if ((fixedAddr_ + fixedPartSize_) >= fixedEndAddr_) {
-		{
-			if (!exists()) { 
-				return;
-			}
-			assert(fixedAddr_);
-		}
-		if ((fixedAddr_ + fixedPartSize_) < fixedEndAddr_) {
-			fixedAddr_ += fixedPartSize_;
+		if (!nextDetail()) {
 			return;
-		}
-		else {
-			fixedAddr_ += fixedPartSize_;
-			const int32_t contiguousBlockCount = TupleList::contiguousBlockCount(
-					getCurrentBlockAddr());
-			assert(contiguousBlockCount >= 0);
-			if (currentBlockNth_ + contiguousBlockCount + 1 < tupleList_->getBlockCount()) {
-				nextBlock(contiguousBlockCount);
-				return;
-			}
-			else {
-				return;
-			}
 		}
 	}
 	fixedAddr_ += fixedPartSize_;
-	assert(fixedAddr_ <= fixedEndAddr_);
-	return;
 }
 
 
@@ -1847,17 +1845,9 @@ inline void TupleList::Writer::next() {
 	assert(!isDetached_);
 
 	if ((fixedAddr_ + fixedPartSize_ * 2 >= varTopAddr_)
-		|| (contiguousBlockCount_ > CONTIGUOUS_BLOCK_THRESHOLD)) {
-		if (!fixedAddr_ && tupleList_->getAllocatedBlockCount() > 0) {
-			setupFirstAppend();
-			if ((fixedAddr_ + fixedPartSize_ >= varTopAddr_)
-				|| (contiguousBlockCount_ > CONTIGUOUS_BLOCK_THRESHOLD)) {
-				nextBlock();
-			}
-		}
-		else {
-			nextBlock();
-		}
+		|| (contiguousBlockCount_ > CONTIGUOUS_BLOCK_THRESHOLD)
+		){
+		nextDetail();
 	}
 	else {
 		fixedAddr_ += fixedPartSize_;
@@ -1877,6 +1867,14 @@ inline TupleList::WritableTuple TupleList::Writer::get() {
 	return WritableTuple(*this);
 }
 
+inline TupleList::WritableTuple::WritableTuple(const util::FalseType&) {
+	writer_ = NULL;
+#ifdef NDEBUG
+	addr_ = NULL;
+#else
+	pos_ = 0;
+#endif
+}
 
 inline TupleList::WritableTuple::WritableTuple(Writer &writer) {
 	writer_ = &writer;
@@ -1940,7 +1938,6 @@ inline void TupleList::WritableTuple::set(const Column &column, const TupleValue
 	assert(!writer_->block_.isSwapped());
 }
 
-#if GD_ENABLE_SQL_WRITABLE_TUPLE_TYPE_SPECIFIED_SET
 inline void TupleList::WritableTuple::setBy(const Column &column, const TupleValue &value) {
 	set(column, value);
 }
@@ -1985,6 +1982,30 @@ inline void TupleList::WritableTuple::setBy(const Column &column, const int64_t 
 		assert(writer_->isNullable_);
 		setIsNull(column.pos_, false);
 	}
+#if defined(NDEBUG)
+	*((int64_t*)((uint8_t*)addr_ + column.offset_)) = value;
+#else
+#ifdef NDEBUG
+	uint8_t* fixedAddr = addr_;
+#else
+	uint8_t* fixedAddr = writer_->getFixedAddr(pos_);
+#endif
+	assert(fixedAddr);
+	{
+		void* addr = fixedAddr + column.offset_;
+		memcpy(addr, &value, sizeof(value));
+	}
+	assert(!writer_->block_.isSwapped());
+#endif
+}
+
+inline void TupleList::WritableTuple::setBy(const Column &column, const float &value) {
+	assert(TupleList::TYPE_FLOAT ==
+			(column.type_ & ~TupleList::TYPE_MASK_NULLABLE));
+	if (TupleColumnTypeUtils::isNullable(column.type_)) {
+		assert(writer_->isNullable_);
+		setIsNull(column.pos_, false);
+	}
 #ifdef NDEBUG
 	uint8_t* fixedAddr = addr_;
 #else
@@ -1997,7 +2018,27 @@ inline void TupleList::WritableTuple::setBy(const Column &column, const int64_t 
 	}
 	assert(!writer_->block_.isSwapped());
 }
-#endif 
+
+inline void TupleList::WritableTuple::setBy(const Column &column, const double &value) {
+	assert(TupleList::TYPE_DOUBLE ==
+			(column.type_ & ~TupleList::TYPE_MASK_NULLABLE));
+	if (TupleColumnTypeUtils::isNullable(column.type_)) {
+		assert(writer_->isNullable_);
+		setIsNull(column.pos_, false);
+	}
+#ifdef NDEBUG
+	uint8_t* fixedAddr = addr_;
+#else
+	uint8_t* fixedAddr = writer_->getFixedAddr(pos_);
+#endif
+	assert(fixedAddr);
+	{
+		void* addr = fixedAddr + column.offset_;
+		memcpy(addr, &value, sizeof(value));
+	}
+	assert(!writer_->block_.isSwapped());
+}
+
 
 inline void TupleList::WritableTuple::setIsNull(uint16_t colNumber, bool nullValue) {
 #ifdef NDEBUG
@@ -2148,12 +2189,14 @@ inline TupleValue::TupleValue(const void *rawData, TupleList::TupleColumnType ty
 		case TupleList::TYPE_ANY:
 			{
 				const uint8_t* addr = static_cast<const uint8_t*>(rawData);
-				memcpy(&type_, rawData, sizeof(type));
-				addr += sizeof(type_);
-				if (TupleColumnTypeUtils::isFixed(type_)) {
-					memcpy(data_.fixedData_, addr, TupleColumnTypeUtils::getFixedSize(type_));
+				TupleList::TupleColumnType destType;
+				memcpy(&destType, rawData, sizeof(destType));
+				type_ = destType;
+				addr += sizeof(destType);
+				if (TupleColumnTypeUtils::isFixed(getType())) {
+					memcpy(data_.fixedData_, addr, TupleColumnTypeUtils::getFixedSize(getType()));
 				}
-				else if (TupleList::TYPE_STRING == type_) {
+				else if (TupleList::TYPE_STRING == getType()) {
 					data_.varData_ = addr;
 				}
 				else {
@@ -2179,8 +2222,7 @@ inline TupleValue::TupleValue(const void *rawData, TupleList::TupleColumnType ty
 
 template<> inline TupleValue::TupleValue(const bool &b)
 : data_(), type_(TupleList::TYPE_BOOL) {
-	int8_t val = b ? 1 : 0;
-	memcpy(data_.fixedData_, &val, sizeof(int8_t));
+	data_.longValue_ = static_cast<int64_t>(b);
 }
 
 template<> inline TupleValue::TupleValue(const int8_t &b)
@@ -2232,7 +2274,8 @@ template<> inline double TupleValue::get() const {
 }
 
 template<> inline int64_t TupleValue::get() const {
-	assert(TupleList::TYPE_LONG == type_ || TupleList::TYPE_TIMESTAMP == type_);
+	assert(TupleList::TYPE_LONG == type_ || TupleList::TYPE_TIMESTAMP == type_ ||
+			TupleList::TYPE_BOOL == type_);
 	return data_.longValue_;
 }
 
@@ -2246,7 +2289,7 @@ inline bool TupleValue::testEquals(const TupleValue &another) const {
 }
 
 inline TupleList::TupleColumnType TupleValue::getType() const {
-	return type_;
+	return static_cast<TupleList::TupleColumnType>(type_);
 }
 
 inline const void* TupleValue::fixedData() const {

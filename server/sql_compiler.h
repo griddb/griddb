@@ -224,7 +224,6 @@ private:
 };
 
 
-
 class SQLHint::Coder {
 public:
 	const char8_t* operator()(Id id) const;
@@ -438,11 +437,8 @@ public:
 	typedef util::Map<StatisticalHintKey, util::Vector<SQLHintValue> > StatisticalHintMap;
 	typedef util::Vector<PlanNodeId> PlanNodeIdList;
 	typedef util::Vector<HintTableId> HintTableIdList;
-	typedef util::Map<util::String, HintTableId> HintTableIdMap;
 
 	typedef SQLTableInfo::Id TableInfoId; 
-	typedef util::Map<util::String, TableInfoId> TableInfoIdMap;
-
 
 	static const HintTableId START_HINT_TABLEID;
 	static const HintTableId UNDEF_HINT_TABLEID;
@@ -453,6 +449,22 @@ public:
 		REPORT_WARNING,
 		REPORT_INFO
 	};
+
+	struct HintTableIdMapValue {
+		HintTableIdMapValue(HintTableId id, const util::String &origName);
+
+		const util::String origName_;
+		const HintTableId id_;
+	};
+	typedef util::Map<util::String, HintTableIdMapValue> HintTableIdMap;
+
+	struct TableInfoIdMapValue {
+		TableInfoIdMapValue(TableInfoId id, const util::String &origName);
+
+		const util::String origName_;
+		const TableInfoId id_;
+	};
+	typedef util::Map<util::String, TableInfoIdMapValue> TableInfoIdMap;
 
 	struct HintTableIdListKey {
 		explicit HintTableIdListKey(util::StackAllocator &alloc);
@@ -721,6 +733,7 @@ public:
 
 private:
 	typedef TupleList::TupleColumnType ColumnType;
+	typedef TupleColumnTypeUtils ColumnTypeUtils;
 
 	typedef SQLType::AggregationPhase AggregationPhase;
 
@@ -785,6 +798,13 @@ private:
 		JOIN_RIGHT_INPUT = 1
 	};
 
+	enum {
+		FUNCTION_SCALAR = 0,
+		FUNCTION_AGGR,
+		FUNCTION_WINDOW,
+		FUNCTION_PSEUDO_WINDOW
+	};
+
 	typedef PlanNode::IdList JoinNodeIdList[JOIN_INPUT_COUNT];
 	typedef util::Vector<uint32_t> JoinUnifyingUnitList[JOIN_INPUT_COUNT];
 	typedef bool JoinBoolList[JOIN_INPUT_COUNT];
@@ -835,7 +855,7 @@ private:
 	bool findWindowExpr(const ExprList &exprList, bool resolved, const Expr* &foundExpr);
 	bool findWindowExpr(const Expr &expr, bool resolved, const Expr* &foundExpr);
 
-	bool isWindowExprType(Type type, bool &windowOnly, bool &pseudoWindow);
+	uint32_t calcFunctionCategory(const Expr &expr, bool resolved);
 
 	static bool isWindowNode(const PlanNode &node);
 
@@ -845,10 +865,6 @@ private:
 			size_t &aggrCount);
 
 	void checkNestedAggrWindowExpr(const ExprList &exprList, bool resolved);
-
-	void genSelectAggrProjection(
-			ExprList *&aggrExprList, PlanExprList &selectList, 
-			PlanNodeId &productedNodeId, Plan &plan);
 	void genFrom(const Select &select, const Expr* &whereExpr, Plan &plan);
 
 	void genWhere(GenRAContext &cxt, Plan &plan);
@@ -909,7 +925,10 @@ private:
 	void genAggrFunc(GenRAContext &cxt, Plan &plan);
 	void genLastOutput(GenRAContext &cxt, Plan &plan);
 	void appendUniqueExpr(const PlanExprList &appendlist, PlanExprList &outList);
+
 	void dumpPlanNode(Plan &plan);
+	void dumpExprList(const PlanExprList &node);
+
 	void trimExprList(size_t len, PlanExprList &list);
 	void hideSelectListName(GenRAContext &cxt, SQLPreparedPlan::Node &inputNode, Plan &plan);
 	void restoreSelectListName(GenRAContext &cxt, PlanExprList &restoreList, Plan &plan);
@@ -1029,8 +1048,11 @@ private:
 
 	Expr genSubqueryRef(const Expr &inExpr, Mode mode);
 	Expr genConstExpr(
-		const Plan &plan, const TupleValue &value, Mode mode,
-		const char* name = NULL);
+			const Plan &plan, const TupleValue &value, Mode mode,
+			const char8_t *name = NULL);
+	Expr genConstExprBase(
+			const Plan *plan, const TupleValue &value, Mode mode,
+			const char8_t *name = NULL);
 	Expr genTupleIdExpr(const Plan &plan, uint32_t inputId, Mode mode);
 	Expr genCastExpr(
 			const Plan &plan, ColumnType columnType, Expr *inExpr,
@@ -1093,8 +1115,15 @@ private:
 			PlanExprList &outExprList2, AggregationPhase &outPhase2,
 			const PlanExprList *groupExprList, PlanExprList *groupExprList2);
 	bool splitExprListSub(
-			const Expr &inExpr, PlanExprList &outExprList, Expr *&outExpr,
-			uint32_t parentLevel, size_t groupCount, bool aggregating);
+			const Expr &inExpr, PlanExprList &outExprList,
+			const Expr *&outExpr, uint32_t parentLevel, size_t groupCount,
+			bool aggregating, bool lastTop,
+			util::Vector<uint32_t> *inputOffsetList);
+
+	static void makeSplittingInputOffsetList(
+			const PlanExprList &exprList, util::Vector<uint32_t> &offsetList);
+	static void makeSplittingInputSizeList(
+			const Expr &expr, util::Vector<uint32_t> &sizeList);
 	void setSplittedExprListType(
 			PlanExprList &exprList, AggregationPhase &phase);
 
@@ -1245,6 +1274,9 @@ private:
 			const Plan &plan, const PlanNode &node, const Expr &expr,
 			const util::Map<PlanNodeId, JoinNodeId> &nodeIdMap,
 			PlanNodeId &resultNodeId, ColumnId *resultColumnId);
+	static const PlanNode* findJoinPredNode(
+			const Plan &plan, PlanNodeId joinNodeId,
+			util::Vector<PlanNodeId> &predIdList);
 
 	void applyJoinOrder(
 			Plan &plan, const util::Vector<PlanNodeId> &nodeIdList,

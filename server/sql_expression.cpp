@@ -82,6 +82,14 @@ void SQLExprs::ExprCode::setValue(
 	value_ = dest;
 }
 
+uint32_t SQLExprs::ExprCode::getOutput() const {
+	return output_;
+}
+
+void SQLExprs::ExprCode::setOutput(uint32_t output) {
+	output_ = output;
+}
+
 void SQLExprs::ExprCode::importFromSyntax(
 		SQLValues::ValueContext &cxt, const SyntaxExpr &src) {
 	setType(src.op_);
@@ -151,16 +159,6 @@ void SQLExprs::Expression::initialize(
 	else {
 		code_ = planningCode_;
 	}
-}
-
-const SQLExprs::Expression& SQLExprs::Expression::child() const {
-	assert(child_ != NULL);
-	return *child_;
-}
-
-const SQLExprs::Expression& SQLExprs::Expression::next() const {
-	assert(next_ != NULL);
-	return *next_;
 }
 
 const SQLExprs::Expression* SQLExprs::Expression::findChild() const {
@@ -499,24 +497,6 @@ void SQLExprs::Expression::OutOption::setStream(
 }
 
 
-SQLExprs::Expression::Iterator::Iterator(const Expression &expr) :
-		cur_(expr.child_) {
-}
-
-const SQLExprs::Expression& SQLExprs::Expression::Iterator::get() const {
-	assert(exists());
-	return *cur_;
-}
-
-bool SQLExprs::Expression::Iterator::exists() const {
-	return (cur_ != NULL);
-}
-
-void SQLExprs::Expression::Iterator::next() {
-	cur_ = cur_->next_;
-}
-
-
 SQLExprs::Expression::ModIterator::ModIterator(Expression &expr) :
 		parent_(&expr),
 		prev_(NULL),
@@ -581,23 +561,11 @@ bool SQLExprs::FunctionValueUtils::isSpaceChar(util::CodePoint c) const {
 }
 
 
-SQLExprs::NormalFunctionContext::NormalFunctionContext(
-		SQLValues::ValueContext &valueCxt) :
-		base_(NULL),
-		valueCxt_(valueCxt) {
+SQLExprs::WindowState::WindowState() :
+		partitionTupleCount_(-1),
+		partitionValueCount_(-1) {
 }
 
-SQLExprs::ExprContext&
-SQLExprs::NormalFunctionContext::getBase() {
-	if (base_ == NULL) {
-		handleBaseNotFound();
-	}
-	return *base_;
-}
-
-void SQLExprs::NormalFunctionContext::setBase(ExprContext *base) {
-	base_ = base;
-}
 
 util::FalseType SQLExprs::NormalFunctionContext::initializeResultWriter(
 		uint64_t initialCapacity) {
@@ -640,20 +608,10 @@ SQLExprs::ExprContext::ExprContext(
 		funcCxt_(valueCxt_),
 		entryList_(valueCxt_.getAllocator()),
 		activeInput_(std::numeric_limits<uint32_t>::max()),
-		aggrTuple_(NULL) {
-}
-
-SQLExprs::ExprContext::operator SQLValues::ValueContext&() {
-	return valueCxt_;
-}
-
-SQLValues::ValueContext& SQLExprs::ExprContext::getValueContext() {
-	return valueCxt_;
-}
-
-SQLExprs::NormalFunctionContext&
-SQLExprs::ExprContext::getFunctionContext() {
-	return funcCxt_;
+		aggrTupleSet_(NULL),
+		aggrTuple_(NULL),
+		activeReaderRef_(NULL),
+		windowState_(NULL) {
 }
 
 util::StackAllocator& SQLExprs::ExprContext::getAllocator() {
@@ -675,8 +633,14 @@ SQLExprs::TupleListReader& SQLExprs::ExprContext::getReader(uint32_t index) {
 
 SQLExprs::ReadableTuple SQLExprs::ExprContext::getReadableTuple(
 		uint32_t index) {
+	if (activeReaderRef_ != NULL && *activeReaderRef_ != NULL) {
+		assert(index == 0);
+		return (**activeReaderRef_).get();
+	}
+
 	Entry &entry = entryList_[index];
-	if (entry.readableTuple_ == NULL) {
+	if (entry.readableTuple_ == NULL ||
+			entry.readableTuple_->reader_ == NULL) {
 		assert(entry.reader_ != NULL);
 		return entry.reader_->get();
 	}
@@ -686,7 +650,7 @@ SQLExprs::ReadableTuple SQLExprs::ExprContext::getReadableTuple(
 }
 
 void SQLExprs::ExprContext::setReader(
-		uint32_t index, TupleListReader &reader,
+		uint32_t index, TupleListReader *reader,
 		const TupleColumnList *columnList) {
 	Entry &entry = prepareEntry(index);
 
@@ -694,22 +658,11 @@ void SQLExprs::ExprContext::setReader(
 		entry.columnList_ = columnList;
 	}
 
-	entry.reader_ = &reader;
-	entry.readableTuple_ = NULL;
-}
+	entry.reader_ = reader;
 
-void SQLExprs::ExprContext::setReadableTuple(
-		uint32_t index, const ReadableTuple &tuple) {
-	Entry &entry = prepareEntry(index);
-
-	if (entry.readableTuple_ == NULL) {
-		if (entry.readableTupleStorage_ == NULL) {
-			entry.readableTupleStorage_ =
-					ALLOC_NEW(getAllocator()) ReadableTuple(tuple);
-		}
-		entry.readableTuple_ = entry.readableTupleStorage_;
+	if (entry.readableTuple_ != NULL) {
+		*entry.readableTuple_ = ReadableTuple(util::FalseType());
 	}
-	*entry.readableTuple_ = tuple;
 }
 
 SQLValues::ArrayTuple* SQLExprs::ExprContext::getArrayTuple(uint32_t index) {
@@ -732,6 +685,10 @@ void SQLExprs::ExprContext::setActiveInput(uint32_t index) {
 	activeInput_ = index;
 }
 
+void SQLExprs::ExprContext::setActiveReaderRef(TupleListReader **readerRef) {
+	activeReaderRef_ = readerRef;
+}
+
 int64_t SQLExprs::ExprContext::updateTupleId(uint32_t index) {
 	Entry &entry = entryList_[index];
 	return ++entry.lastTupleId_;
@@ -747,26 +704,58 @@ void SQLExprs::ExprContext::setLastTupleId(uint32_t index, int64_t id) {
 	entry.lastTupleId_ = id;
 }
 
-void SQLExprs::ExprContext::setAggregationTuple(
-		SQLValues::ArrayTuple &aggrTuple) {
-	aggrTuple_ = &aggrTuple;
+SQLExprs::ReadableTuple* SQLExprs::ExprContext::getReadableTupleRef(
+		uint32_t index) {
+	Entry &entry = entryList_[index];
+	return entry.readableTuple_;
 }
 
-TupleValue SQLExprs::ExprContext::getAggregationValue(uint32_t index) {
-	if (aggrTuple_ == NULL) {
-		assert(false);
-		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
-	}
-	return aggrTuple_->get(index);
+void SQLExprs::ExprContext::setReadableTupleRef(
+		uint32_t index, ReadableTuple *tupleRef) {
+	Entry &entry = prepareEntry(index);
+	entry.readableTuple_ = tupleRef;
 }
 
-void SQLExprs::ExprContext::setAggregationValue(
-		uint32_t index, const TupleValue &value) {
-	if (aggrTuple_ == NULL) {
-		assert(false);
-		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
-	}
-	return aggrTuple_->set(index, valueCxt_, value);
+SQLExprs::SummaryTuple* SQLExprs::ExprContext::getSummaryTupleRef(
+		uint32_t index) {
+	Entry &entry = entryList_[index];
+	return entry.summaryTuple_;
+}
+
+void SQLExprs::ExprContext::setSummaryTupleRef(
+		uint32_t index, SummaryTuple *tupleRef) {
+	Entry &entry = prepareEntry(index);
+	entry.summaryTuple_ = tupleRef;
+}
+
+const SQLExprs::SummaryColumnList*
+SQLExprs::ExprContext::getSummaryColumnListRef(uint32_t index) {
+	Entry &entry = entryList_[index];
+	return entry.summaryColumnList_;
+}
+
+void SQLExprs::ExprContext::setSummaryColumnListRef(
+		uint32_t index, const SummaryColumnList *listRef) {
+	Entry &entry = prepareEntry(index);
+	entry.summaryColumnList_ = listRef;
+}
+
+void SQLExprs::ExprContext::setAggregationTupleRef(
+		SummaryTupleSet *aggrTupleSet, SummaryTuple *aggrTuple) {
+	aggrTupleSet_ = aggrTupleSet;
+	aggrTuple_ = aggrTuple;
+}
+
+SQLExprs::ExprContext::InputSourceType
+SQLExprs::ExprContext::getInputSourceType(uint32_t index) {
+	Entry &entry = entryList_[index];
+	return entry.inputSourceType_;
+}
+
+void SQLExprs::ExprContext::setInputSourceType(
+		uint32_t index, InputSourceType type) {
+	Entry &entry = prepareEntry(index);
+	entry.inputSourceType_ = type;
 }
 
 SQLExprs::ExprContext::Entry&
@@ -782,9 +771,11 @@ SQLExprs::ExprContext::Entry::Entry() :
 		reader_(NULL),
 		columnList_(NULL),
 		readableTuple_(NULL),
-		readableTupleStorage_(NULL),
+		summaryTuple_(NULL),
+		summaryColumnList_(NULL),
 		arrayTuple_(NULL),
-		lastTupleId_(0) {
+		lastTupleId_(0),
+		inputSourceType_(ExprCode::END_INPUT) {
 }
 
 
@@ -796,6 +787,16 @@ SQLExprs::ExprSpec::ExprSpec() :
 
 bool SQLExprs::ExprSpec::isAggregation() const {
 	return !SQLValues::TypeUtils::isNull(aggrList_[0].typeList_[0]);
+}
+
+SQLExprs::ExprSpec SQLExprs::ExprSpec::toDistinct(ExprType srcType) const {
+	assert(distinctExprType_ != SQLType::START_EXPR &&
+			distinctExprType_ != srcType);
+
+	ExprSpec dest = *this;
+	dest.flags_ |= FLAG_DISTINCT;
+	dest.distinctExprType_ = srcType;
+	return dest;
 }
 
 
@@ -828,9 +829,23 @@ SQLExprs::ExprFactoryContext::ExprFactoryContext(util::StackAllocator &alloc) :
 		scopedEntry_(&topScopedEntry_),
 		inputList_(alloc),
 		inputColumnList_(alloc),
+		inputSourceTypeList_(alloc),
 		nullableList_(alloc),
 		aggrTypeList_(alloc),
-		nextAggrIndex_(0) {
+		nextAggrIndex_(0),
+		allReaderRefList_(alloc),
+		inputSourceRefList_(alloc),
+		activeReaderRef_(NULL),
+		readableTupleRefList_(alloc),
+		summaryTupleRefList_(alloc),
+		summaryColumnsRefList_(alloc) {
+}
+
+SQLExprs::ExprFactoryContext::~ExprFactoryContext() {
+	while (!inputSourceRefList_.empty()) {
+		ALLOC_DELETE(alloc_, inputSourceRefList_.back());
+		inputSourceRefList_.pop_back();
+	}
 }
 
 util::StackAllocator& SQLExprs::ExprFactoryContext::getAllocator() {
@@ -862,6 +877,15 @@ TupleColumnType SQLExprs::ExprFactoryContext::getInputType(
 	const TypeList &typeList = inputList_[index];
 
 	if (pos >= typeList.size()) {
+		SummaryTupleSet *tupleSet = scopedEntry_->aggrTupleSet_;
+		if (getInputSourceType(index) ==
+				SQLExprs::ExprCode::INPUT_SUMMARY_TUPLE &&
+				tupleSet != NULL && tupleSet->isColumnsCompleted()) {
+			const uint32_t extPos = static_cast<uint32_t>(pos - typeList.size());
+			if (extPos < tupleSet->getModifiableColumnList().size()) {
+				return getAggregationColumnType(extPos);
+			}
+		}
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL_INVALID_INPUT, "");
 	}
 	return typeList[pos];
@@ -932,6 +956,24 @@ TupleList::Column SQLExprs::ExprFactoryContext::getInputColumn(
 	return list[pos];
 }
 
+SQLExprs::ExprFactoryContext::InputSourceType
+SQLExprs::ExprFactoryContext::getInputSourceType(uint32_t index) {
+	if (index >= inputSourceTypeList_.size()) {
+		return ExprCode::END_INPUT;
+	}
+
+	return inputSourceTypeList_[index];
+}
+
+void SQLExprs::ExprFactoryContext::setInputSourceType(
+		uint32_t index, InputSourceType type) {
+	while (index >= inputSourceTypeList_.size()) {
+		inputSourceTypeList_.push_back(ExprCode::END_INPUT);
+	}
+
+	inputSourceTypeList_[index] = type;
+}
+
 uint32_t SQLExprs::ExprFactoryContext::getInputCount() {
 	return static_cast<uint32_t>(inputList_.size());
 }
@@ -998,6 +1040,118 @@ void SQLExprs::ExprFactoryContext::clearAggregationColumns() {
 	nextAggrIndex_ = 0;
 }
 
+void SQLExprs::ExprFactoryContext::initializeReaderRefList(
+		uint32_t index, ReaderRefList *list) {
+	while (index >= allReaderRefList_.size()) {
+		allReaderRefList_.push_back(NULL);
+	}
+
+	ReaderRefList *&destList = allReaderRefList_[index];
+	if (destList != NULL) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	destList = list;
+}
+
+void SQLExprs::ExprFactoryContext::addReaderRef(
+		uint32_t index, TupleListReader **readerRef) {
+	if (index >= allReaderRefList_.size()) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	allReaderRefList_[index]->push_back(readerRef);
+}
+
+util::AllocUniquePtr<void>& SQLExprs::ExprFactoryContext::getInputSourceRef(
+		uint32_t index) {
+	while (index >= inputSourceRefList_.size()) {
+		inputSourceRefList_.push_back(NULL);
+	}
+
+	util::AllocUniquePtr<void> *&ref = inputSourceRefList_[index];
+	if (ref == NULL) {
+		ref = ALLOC_NEW(alloc_) util::AllocUniquePtr<void>();
+	}
+
+	return *ref;
+}
+
+SQLExprs::TupleListReader**
+SQLExprs::ExprFactoryContext::getActiveReaderRef() {
+	return activeReaderRef_;
+}
+
+void SQLExprs::ExprFactoryContext::setActiveReaderRef(
+		TupleListReader **readerRef) {
+	activeReaderRef_ = readerRef;
+}
+
+SQLExprs::ReadableTuple* SQLExprs::ExprFactoryContext::getReadableTupleRef(
+		uint32_t index) {
+	if (index >= readableTupleRefList_.size()) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	return readableTupleRefList_[index];
+}
+
+void SQLExprs::ExprFactoryContext::setReadableTupleRef(
+		uint32_t index, ReadableTuple *tupleRef) {
+	while (index >= readableTupleRefList_.size()) {
+		readableTupleRefList_.push_back(NULL);
+	}
+
+	readableTupleRefList_[index] = tupleRef;
+}
+
+SQLExprs::SummaryTuple* SQLExprs::ExprFactoryContext::getSummaryTupleRef(
+		uint32_t index) {
+	if (index >= summaryTupleRefList_.size()) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	return summaryTupleRefList_[index];
+}
+
+void SQLExprs::ExprFactoryContext::setSummaryTupleRef(
+		uint32_t index, SummaryTuple *tupleRef) {
+	while (index >= summaryTupleRefList_.size()) {
+		summaryTupleRefList_.push_back(NULL);
+	}
+
+	summaryTupleRefList_[index] = tupleRef;
+}
+
+SQLExprs::SummaryColumnList*
+SQLExprs::ExprFactoryContext::getSummaryColumnListRef(uint32_t index) {
+	if (index >= summaryColumnsRefList_.size()) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	return summaryColumnsRefList_[index];
+}
+
+void SQLExprs::ExprFactoryContext::setSummaryColumnListRef(
+		uint32_t index, SummaryColumnList *listRef) {
+	while (index >= summaryColumnsRefList_.size()) {
+		summaryColumnsRefList_.push_back(NULL);
+	}
+
+	summaryColumnsRefList_[index] = listRef;
+}
+
+const SQLExprs::SummaryColumn&
+SQLExprs::ExprFactoryContext::getArrangedAggregationColumn(uint32_t index) {
+	assert(scopedEntry_->aggrTupleSet_ != NULL);
+	return scopedEntry_->aggrTupleSet_->getModifiableColumnList()[index];
+}
+
 bool SQLExprs::ExprFactoryContext::isPlanning() {
 	return scopedEntry_->planning_;
 }
@@ -1022,6 +1176,44 @@ void SQLExprs::ExprFactoryContext::setAggregationTypeListRef(
 	scopedEntry_->aggrTypeListRef_ = typeListRef;
 }
 
+SQLExprs::SummaryTuple*
+SQLExprs::ExprFactoryContext::getAggregationTupleRef() {
+	return scopedEntry_->aggrTupleRef_;
+}
+
+void SQLExprs::ExprFactoryContext::setAggregationTupleRef(
+		SummaryTuple *tupleRef) {
+	scopedEntry_->aggrTupleRef_ = tupleRef;
+}
+
+SQLExprs::SummaryTupleSet*
+SQLExprs::ExprFactoryContext::getAggregationTupleSet() {
+	return scopedEntry_->aggrTupleSet_;
+}
+
+void SQLExprs::ExprFactoryContext::setAggregationTupleSet(
+		SummaryTupleSet *tupleSet) {
+	scopedEntry_->aggrTupleSet_ = tupleSet;
+}
+
+const SQLValues::CompColumnList*
+SQLExprs::ExprFactoryContext::getArrangedKeyList() {
+	return scopedEntry_->arrangedKeyList_;
+}
+
+void SQLExprs::ExprFactoryContext::setArrangedKeyList(
+		const SQLValues::CompColumnList *keyList) {
+	scopedEntry_->arrangedKeyList_ = keyList;
+}
+
+bool SQLExprs::ExprFactoryContext::isSummaryColumnsArranging() {
+	return scopedEntry_->summaryColumnsArranging_;
+}
+
+void SQLExprs::ExprFactoryContext::setSummaryColumnsArranging(bool arranging) {
+	scopedEntry_->summaryColumnsArranging_ = arranging;
+}
+
 const SQLExprs::Expression* SQLExprs::ExprFactoryContext::getBaseExpression() {
 	return scopedEntry_->baseExpr_;
 }
@@ -1032,9 +1224,13 @@ void SQLExprs::ExprFactoryContext::setBaseExpression(const Expression *expr) {
 
 SQLExprs::ExprFactoryContext::ScopedEntry::ScopedEntry() :
 		planning_(true),
+		summaryColumnsArranging_(true),
 		srcAggrPhase_(SQLType::END_AGG_PHASE),
 		destAggrPhase_(SQLType::END_AGG_PHASE),
 		aggrTypeListRef_(NULL),
+		aggrTupleRef_(NULL),
+		aggrTupleSet_(NULL),
+		arrangedKeyList_(NULL),
 		baseExpr_(NULL) {
 }
 

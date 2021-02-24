@@ -39,15 +39,6 @@ private:
 	static const SQLExprs::ExprRegistrar REGISTRAR_INSTANCE;
 };
 
-class SQLAggrExprs::UnsupportedRegistrar :
-		public SQLExprs::CustomExprRegistrar<SQLAggrExprs::Specs> {
-public:
-	virtual void operator()() const;
-
-private:
-	static const SQLExprs::ExprRegistrar REGISTRAR_INSTANCE;
-};
-
 struct SQLAggrExprs::Specs {
 	typedef SQLExprs::ExprSpec ExprSpec;
 	typedef SQLExprs::ExprSpecBase Base;
@@ -63,22 +54,26 @@ struct SQLAggrExprs::Specs {
 	template<int C> struct Spec<SQLType::AGG_AVG, C> {
 		typedef Base::Type<TupleTypes::TYPE_DOUBLE, Base::InList<
 				Base::In<TupleTypes::TYPE_DOUBLE> >,
-				0, Base::InList<
+				ExprSpec::FLAG_WINDOW, Base::InList<
 				Base::In<TupleTypes::TYPE_DOUBLE>,
-				Base::In<TupleTypes::TYPE_LONG> > > Type;
+				Base::In<TupleTypes::TYPE_LONG> >,
+				SQLType::AGG_DISTINCT_AVG> Type;
 	};
 
 	template<int C> struct Spec<SQLType::AGG_COUNT_ALL, C> {
 		typedef Base::Type<TupleTypes::TYPE_LONG, Base::InList<>,
-				ExprSpec::FLAG_NON_NULLABLE, Base::InList<
+				ExprSpec::FLAG_NON_NULLABLE |
+				ExprSpec::FLAG_WINDOW, Base::InList<
 				Base::In<TupleTypes::TYPE_LONG> > > Type;
 	};
 
 	template<int C> struct Spec<SQLType::AGG_COUNT_COLUMN, C> {
 		typedef Base::Type<TupleTypes::TYPE_LONG, Base::InList<
 				Base::In<TupleTypes::TYPE_ANY> >,
-				ExprSpec::FLAG_NON_NULLABLE, Base::InList<
-				Base::In<TupleTypes::TYPE_LONG> > > Type;
+				ExprSpec::FLAG_NON_NULLABLE |
+				ExprSpec::FLAG_WINDOW, Base::InList<
+				Base::In<TupleTypes::TYPE_LONG> >,
+				SQLType::AGG_DISTINCT_COUNT_COLUMN> Type;
 	};
 
 	template<int C> struct Spec<SQLType::AGG_GROUP_CONCAT, C> {
@@ -88,18 +83,19 @@ struct SQLAggrExprs::Specs {
 				0, Base::InList<
 				Base::In<TupleTypes::TYPE_STRING, ExprSpec::FLAG_NULLABLE>,
 				Base::In<TupleTypes::TYPE_BLOB, ExprSpec::FLAG_NULLABLE>,
-				Base::In<TupleTypes::TYPE_STRING, ExprSpec::FLAG_NULLABLE>
-				> > Type;
+				Base::In<TupleTypes::TYPE_STRING, ExprSpec::FLAG_NULLABLE> >,
+				SQLType::AGG_DISTINCT_GROUP_CONCAT> Type;
 	};
 
 	template<int C> struct Spec<SQLType::AGG_LAG, C> {
 		typedef Base::Type<TupleTypes::TYPE_NULL, Base::InList<
 				typename Base::PromotableAnyIn,
-				Base::In<TupleTypes::TYPE_LONG, ExprSpec::FLAG_OPTIONAL>,
+				Base::In<TupleTypes::TYPE_LONG,
+						ExprSpec::FLAG_WINDOW_POS_BEFORE |
+						ExprSpec::FLAG_OPTIONAL>,
 				Base::In<TupleTypes::TYPE_ANY,
 						ExprSpec::FLAG_PROMOTABLE | ExprSpec::FLAG_OPTIONAL> >,
 				ExprSpec::FLAG_INHERIT1 | ExprSpec::FLAG_NULLABLE |
-				ExprSpec::FLAG_EXPERIMENTAL |
 				ExprSpec::FLAG_WINDOW_ONLY |
 				ExprSpec::FLAG_WINDOW_COLUMN, Base::InList<
 				Base::In<TupleTypes::TYPE_ANY> > > Type;
@@ -108,11 +104,12 @@ struct SQLAggrExprs::Specs {
 	template<int C> struct Spec<SQLType::AGG_LEAD, C> {
 		typedef Base::Type<TupleTypes::TYPE_NULL, Base::InList<
 				typename Base::PromotableAnyIn,
-				Base::In<TupleTypes::TYPE_LONG, ExprSpec::FLAG_OPTIONAL>,
+				Base::In<TupleTypes::TYPE_LONG,
+						ExprSpec::FLAG_WINDOW_POS_AFTER |
+						ExprSpec::FLAG_OPTIONAL>,
 				Base::In<TupleTypes::TYPE_ANY,
 						ExprSpec::FLAG_PROMOTABLE | ExprSpec::FLAG_OPTIONAL> >,
 				ExprSpec::FLAG_INHERIT1 | ExprSpec::FLAG_NULLABLE |
-				ExprSpec::FLAG_EXPERIMENTAL |
 				ExprSpec::FLAG_WINDOW_ONLY |
 				ExprSpec::FLAG_WINDOW_COLUMN, Base::InList<
 				Base::In<TupleTypes::TYPE_ANY> > > Type;
@@ -121,32 +118,35 @@ struct SQLAggrExprs::Specs {
 	template<int C> struct Spec<SQLType::AGG_MAX, C> {
 		typedef Base::Type<TupleTypes::TYPE_NULL, Base::InList<
 				Base::In<TupleTypes::TYPE_ANY> >,
-				ExprSpec::FLAG_INHERIT1, Base::InList<
-				Base::In<TupleTypes::TYPE_ANY> > > Type;
+				ExprSpec::FLAG_INHERIT1 |
+				ExprSpec::FLAG_WINDOW, Base::InList<
+				Base::In<TupleTypes::TYPE_ANY> >,
+				SQLType::AGG_MAX> Type;
 	};
 
 	template<int C> struct Spec<SQLType::AGG_MEDIAN, C> {
 		typedef Base::Type<TupleTypes::TYPE_NULL, Base::InList<
 				Base::In<TupleTypes::TYPE_NUMERIC> >,
 				ExprSpec::FLAG_INHERIT1 |
-				ExprSpec::FLAG_EXPERIMENTAL |
 				ExprSpec::FLAG_PSEUDO_WINDOW |
-				ExprSpec::FLAG_WINDOW_COLUMN, Base::InList<
-				Base::In<TupleTypes::TYPE_NUMERIC, ExprSpec::FLAG_NULLABLE>,
+				ExprSpec::FLAG_WINDOW_COLUMN |
+				ExprSpec::FLAG_WINDOW_VALUE_COUNTING, Base::InList<
+				Base::In<TupleTypes::TYPE_NUMERIC>,
 				Base::In<TupleTypes::TYPE_LONG> > > Type;
 	};
 
 	template<int C> struct Spec<SQLType::AGG_MIN, C> {
 		typedef Base::Type<TupleTypes::TYPE_NULL, Base::InList<
 				Base::In<TupleTypes::TYPE_ANY> >,
-				ExprSpec::FLAG_INHERIT1, Base::InList<
-				Base::In<TupleTypes::TYPE_ANY> > > Type;
+				ExprSpec::FLAG_INHERIT1 |
+				ExprSpec::FLAG_WINDOW, Base::InList<
+				Base::In<TupleTypes::TYPE_ANY> >,
+				SQLType::AGG_MIN> Type;
 	};
 
 	template<int C> struct Spec<SQLType::AGG_ROW_NUMBER, C> {
 		typedef Base::Type<TupleTypes::TYPE_LONG, Base::InList<>,
 				ExprSpec::FLAG_NON_NULLABLE |
-				ExprSpec::FLAG_EXPERIMENTAL |
 				ExprSpec::FLAG_WINDOW_ONLY, Base::InList<
 				Base::In<TupleTypes::TYPE_LONG> > > Type;
 	};
@@ -154,52 +154,63 @@ struct SQLAggrExprs::Specs {
 	template<int C> struct Spec<SQLType::AGG_STDDEV0, C> {
 		typedef Base::Type<TupleTypes::TYPE_DOUBLE, Base::InList<
 				Base::In<TupleTypes::TYPE_DOUBLE> >,
-				0, StddevBaseAggrList> Type;
+				ExprSpec::FLAG_WINDOW, StddevBaseAggrList,
+				SQLType::AGG_DISTINCT_STDDEV0> Type;
 	};
 
 	template<int C> struct Spec<SQLType::AGG_STDDEV_POP, C> {
 		typedef Base::Type<TupleTypes::TYPE_DOUBLE, Base::InList<
 				Base::In<TupleTypes::TYPE_DOUBLE> >,
-				0, StddevBaseAggrList> Type;
+				ExprSpec::FLAG_WINDOW, StddevBaseAggrList,
+				SQLType::AGG_DISTINCT_STDDEV_POP> Type;
 	};
 
 	template<int C> struct Spec<SQLType::AGG_STDDEV_SAMP, C> {
 		typedef Base::Type<TupleTypes::TYPE_DOUBLE, Base::InList<
 				Base::In<TupleTypes::TYPE_DOUBLE> >,
-				ExprSpec::FLAG_NULLABLE, StddevBaseAggrList> Type;
+				ExprSpec::FLAG_NULLABLE |
+				ExprSpec::FLAG_WINDOW, StddevBaseAggrList,
+				SQLType::AGG_DISTINCT_STDDEV_SAMP> Type;
 	};
 
 	template<int C> struct Spec<SQLType::AGG_SUM, C> {
 		typedef Base::Type<TupleTypes::TYPE_NULL, Base::InList<
 				typename Base::PromotableNumIn>,
-				ExprSpec::FLAG_INHERIT1, Base::InList<
-				Base::In<TupleTypes::TYPE_NUMERIC, ExprSpec::FLAG_NULLABLE>
-				> > Type;
+				ExprSpec::FLAG_INHERIT1 |
+				ExprSpec::FLAG_WINDOW, Base::InList<
+				Base::In<TupleTypes::TYPE_NUMERIC, ExprSpec::FLAG_NULLABLE> >,
+				SQLType::AGG_DISTINCT_SUM> Type;
 	};
 
 	template<int C> struct Spec<SQLType::AGG_TOTAL, C> {
 		typedef Base::Type<TupleTypes::TYPE_DOUBLE, Base::InList<
 				Base::In<TupleTypes::TYPE_DOUBLE> >,
-				ExprSpec::FLAG_NON_NULLABLE, Base::InList<
-				Base::In<TupleTypes::TYPE_DOUBLE> > > Type;
+				ExprSpec::FLAG_NON_NULLABLE |
+				ExprSpec::FLAG_WINDOW, Base::InList<
+				Base::In<TupleTypes::TYPE_DOUBLE> >,
+				SQLType::AGG_DISTINCT_TOTAL> Type;
 	};
 
 	template<int C> struct Spec<SQLType::AGG_VAR_POP, C> {
 		typedef Base::Type<TupleTypes::TYPE_DOUBLE, Base::InList<
 				Base::In<TupleTypes::TYPE_DOUBLE> >,
-				0, StddevBaseAggrList> Type;
+				ExprSpec::FLAG_WINDOW, StddevBaseAggrList,
+				SQLType::AGG_DISTINCT_VAR_POP> Type;
 	};
 
 	template<int C> struct Spec<SQLType::AGG_VAR_SAMP, C> {
 		typedef Base::Type<TupleTypes::TYPE_DOUBLE, Base::InList<
 				Base::In<TupleTypes::TYPE_DOUBLE> >,
-				ExprSpec::FLAG_NULLABLE, StddevBaseAggrList> Type;
+				ExprSpec::FLAG_NULLABLE |
+				ExprSpec::FLAG_WINDOW, StddevBaseAggrList,
+				SQLType::AGG_DISTINCT_VAR_SAMP> Type;
 	};
 
 	template<int C> struct Spec<SQLType::AGG_VARIANCE0, C> {
 		typedef Base::Type<TupleTypes::TYPE_DOUBLE, Base::InList<
 				Base::In<TupleTypes::TYPE_DOUBLE> >,
-				0, StddevBaseAggrList> Type;
+				ExprSpec::FLAG_WINDOW, StddevBaseAggrList,
+				SQLType::AGG_DISTINCT_VARIANCE0> Type;
 	};
 
 	template<int C> struct Spec<SQLType::AGG_FIRST, C> {
@@ -264,8 +275,7 @@ struct SQLAggrExprs::Functions {
 	struct CountAll;
 	struct CountColumn;
 	struct GroupConcat;
-	struct Lag;
-	struct Lead;
+	struct LagLead;
 	struct Max;
 	struct Median;
 	struct Min;
@@ -365,10 +375,20 @@ struct SQLAggrExprs::Functions::GroupConcat {
 	};
 };
 
-struct SQLAggrExprs::Functions::Lag {
-};
+struct SQLAggrExprs::Functions::LagLead {
+	typedef FunctionUtils::AggregationValues<TupleValue> Aggr;
 
-struct SQLAggrExprs::Functions::Lead {
+	struct Advance {
+		typedef DefaultPolicy::AsPartiallyFinishable Policy;
+
+		template<typename C>
+		void operator()(C &cxt, const Aggr &aggr, const TupleValue &v);
+		template<typename C>
+		void operator()(C &cxt, const Aggr &aggr, const int64_t &v);
+	};
+
+	typedef void Merge;
+	typedef void Finish;
 };
 
 struct SQLAggrExprs::Functions::Max {
@@ -382,6 +402,29 @@ struct SQLAggrExprs::Functions::Max {
 };
 
 struct SQLAggrExprs::Functions::Median {
+	typedef FunctionUtils::AggregationValues<
+			std::pair<int64_t, bool>, int64_t> LongAggr;
+	typedef FunctionUtils::AggregationValues<
+			std::pair<double, bool>, int64_t> DoubleAggr;
+
+	enum MedianAction {
+		ACTION_NONE,
+		ACTION_SET,
+		ACTION_MERGE
+	};
+
+	struct Advance {
+		template<typename C, typename Aggr, typename V>
+		void operator()(C &cxt, const Aggr &aggr, const V &v);
+
+		template<typename C, typename Aggr>
+		static MedianAction nextAction(C &cxt, const Aggr &aggr);
+		template<typename C>
+		static void errorUnordered(C &cxt);
+	};
+
+	typedef void Merge;
+	typedef void Finish;
 };
 
 struct SQLAggrExprs::Functions::Min {
@@ -395,6 +438,9 @@ struct SQLAggrExprs::Functions::Min {
 };
 
 struct SQLAggrExprs::Functions::RowNumber {
+	typedef CountAll::Advance Advance;
+	typedef void Merge;
+	typedef void Finish;
 };
 
 struct SQLAggrExprs::Functions::StddevBase {
@@ -519,6 +565,13 @@ struct SQLAggrExprs::Functions::First {
 };
 
 struct SQLAggrExprs::Functions::Last {
+	typedef FunctionUtils::AggregationValues<TupleValue> Aggr;
+	struct Advance {
+		template<typename C>
+		void operator()(C &cxt, const Aggr &aggr, const TupleValue &v);
+	};
+	typedef Advance Merge;
+	typedef void Finish;
 };
 
 struct SQLAggrExprs::Functions::FoldExists {

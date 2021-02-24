@@ -22,22 +22,31 @@
 
 class SQLExprs::ExprRewriter {
 public:
+	typedef SQLValues::SummaryColumn SummaryColumn;
+
 	class Scope;
 
 	explicit ExprRewriter(util::StackAllocator &alloc);
 
 	void activateColumnMapping(ExprFactoryContext &cxt);
 
+	void clearInputUsage();
+	void addInputUsage(uint32_t input);
+
 	void clearColumnUsage();
 	void addColumnUsage(const Expression *expr, bool withId);
 	void addColumnUsage(const Expression &expr, bool withId);
 	void addColumnUsage(uint32_t input, uint32_t column);
+	void addKeyColumnUsage(
+			uint32_t input, const SQLValues::CompColumnList &keyList, bool front);
+	void addInputColumnUsage(uint32_t input);
 
 	void setIdOfInput(uint32_t input, bool enabled);
 	void setInputNull(uint32_t input, bool enabled);
 	void setMappedInput(uint32_t src, uint32_t dest);
 
 	void setInputProjected(bool enabled);
+	void setInputNullProjected(bool enabled);
 	void setIdProjected(bool enabled);
 
 	uint32_t getMappedInput(uint32_t input, uint32_t column) const;
@@ -50,6 +59,15 @@ public:
 			ExprFactoryContext &cxt, uint32_t input, bool unified) const;
 	util::Vector<TupleColumn> createColumnList(
 			ExprFactoryContext &cxt, uint32_t input, bool unified) const;
+	util::Vector<SummaryColumn> createSummaryColumnList(
+			ExprFactoryContext &cxt, uint32_t input, bool unified, bool first,
+			const SQLValues::CompColumnList *compColumnList) const;
+
+	void setCodeSetUpAlways(bool enabled);
+
+	void setMultiStageGrouping(bool enabled);
+	void setInputMiddle(bool enabled);
+	void setOutputMiddle(bool enabled);
 
 	Expression& rewrite(
 			ExprFactoryContext &cxt, const Expression &src,
@@ -57,15 +75,24 @@ public:
 	Expression& rewritePredicate(
 			ExprFactoryContext &cxt, const Expression *src) const;
 	SQLValues::CompColumnList& rewriteCompColumnList(
-			ExprFactoryContext &cxt,
-			const SQLValues::CompColumnList &src, bool unified) const;
+			ExprFactoryContext &cxt, const SQLValues::CompColumnList &src,
+			bool unified, const uint32_t *inputRef = NULL) const;
+
+	void popLastDistinctAggregationOutput(
+			ExprFactoryContext &cxt, Expression &destTop) const;
 
 	void remapColumn(ExprFactoryContext &cxt, Expression &expr) const;
-	void remapCompColumnList(SQLValues::CompColumnList &list) const;
+
+	SQLValues::CompColumnList& remapCompColumnList(
+			ExprFactoryContext &cxt, const SQLValues::CompColumnList &src,
+			uint32_t input, bool front) const;
 
 	static void createIdenticalProjection(
 			ExprFactoryContext &cxt, bool inputUnified, uint32_t input,
 			Expression &dest);
+	static void createEmptyRefProjection(
+			ExprFactoryContext &cxt, bool inputUnified, uint32_t input,
+			uint32_t startColumn, Expression &dest);
 	void createProjectionByUsage(
 			ExprFactoryContext &cxt, bool inputUnified,
 			Expression &dest) const;
@@ -75,6 +102,25 @@ public:
 			TupleColumnType type = TupleTypes::TYPE_NULL);
 	static Expression& createColumnExpr(
 			ExprFactoryContext &cxt, uint32_t input, uint32_t column);
+
+	static Expression& createTypedColumnExpr(
+			ExprFactoryContext &cxt, bool inputUnified, uint32_t input,
+			uint32_t column);
+	static Expression& createTypedIdExpr(
+			ExprFactoryContext &cxt, uint32_t input);
+
+	static Expression& createEmptyRefConstExpr(
+			ExprFactoryContext &cxt, bool inputUnified, uint32_t input,
+			uint32_t column);
+	static Expression& createEmptyConstExpr(
+			ExprFactoryContext &cxt, TupleColumnType type);
+	static Expression& createIdRefColumnExpr(
+			ExprFactoryContext &cxt, uint32_t input, uint32_t column);
+
+	static TupleColumnType getRefColumnType(
+			ExprFactoryContext &cxt, bool inputUnified, uint32_t input,
+			uint32_t column);
+	static TupleColumnType getIdColumnType(const ExprFactory &factory);
 
 	static const Expression* findPredicateBySelection(
 			const Expression &selectExpr);
@@ -106,9 +152,37 @@ public:
 	static bool checkArgCount(
 			const ExprFactory &factory, ExprType exprType, size_t argCount,
 			AggregationPhase phase, bool throwOnError);
+
 	static uint32_t getResultCount(
 			const ExprFactory &factory, ExprType exprType,
 			AggregationPhase phase);
+	static uint32_t getResultCount(
+			const ExprSpec &spec, AggregationPhase phase);
+
+	static void removeUnificationAttributes(Expression &expr);
+
+	static bool findDistinctAggregation(
+			const ExprFactory &factory, const Expression &expr);
+	static bool isDistinctAggregation(
+			const ExprFactory &factory, const ExprType type);
+	static bool isDistinctAggregation(
+			const ExprSpec &spec, const ExprType type);
+	static bool isWindowExpr(const ExprSpec &spec, bool withSpecialArgs);
+
+	static void getDistinctExprList(
+			const ExprFactory &factory, const Expression &expr,
+			util::Vector<const Expression*> &exprList);
+	static Expression& toNonDistinctExpr(
+			ExprFactoryContext &cxt, const Expression &src, uint32_t input,
+			uint32_t *refCoulmnPos);
+	static void addDistinctRefColumnExprs(
+			ExprFactoryContext &cxt, const Expression &src, bool forAdvance,
+			bool refEmpty, uint32_t input, uint32_t *refCoulmnPos,
+			Expression::ModIterator &destIt);
+	static void replaceDistinctExprsToRef(
+			ExprFactoryContext &cxt, Expression &expr, bool forAdvance,
+			int32_t emptySide, uint32_t *restDistinctCount,
+			uint32_t *refCoulmnPos);
 
 	static bool predicateToExtContainerName(
 			SQLValues::ValueContext &cxt, const ExprFactory &factory,
@@ -128,12 +202,15 @@ private:
 	typedef util::Vector<ColumnMapElem> ColumnMapEntry;
 	typedef util::Vector<ColumnMapEntry> ColumnMap;
 	typedef util::Vector<int32_t> InputMap;
+	typedef util::Vector<int32_t> KeyMap;
+	typedef util::Vector<Expression*> ExprRefList;
 
 	struct ScopedEntry {
 		explicit ScopedEntry(util::StackAllocator &alloc);
 
 		bool columnMapping_;
 		bool inputProjected_;
+		bool inputNullProjected_;
 		bool idProjected_;
 
 		bool columnMapUpdated_;
@@ -142,9 +219,25 @@ private:
 
 		InputMap inputMap_;
 
+		Usage inputUsage_;
 		UsageList columnUsage_;
 		Usage idUsage_;
 		Usage inputNullList_;
+
+		bool codeSetUpAlways_;
+
+		bool multiStageGrouping_;
+		bool inputMiddle_;
+		bool outputMiddle_;
+		bool multiStageKeyWithDigest_;
+		KeyMap multiStageKeyMap_;
+		uint32_t multiStageKeyCount_;
+
+		ExprRefList distinctAggrMainList_;
+		ExprRefList distinctAggrSubList_;
+		Expression *distinctAggrsExpr_;
+		uint32_t distinctAggrColumnCount_;
+		bool distinctAggrFound_;
 	};
 
 	static Expression& duplicate(
@@ -192,28 +285,58 @@ private:
 			const size_t *projDepth, uint32_t topAttributes,
 			bool insideAggrFunc) const;
 
+	static TypeResolverResult resolveBasicExprColumnTypes(
+			const Expression &expr, const ExprSpec &spec,
+			AggregationPhase aggrPhase, bool grouping, bool checking);
+	static TypeResolverResult resolveNonDistinctExprColumnTypes(
+			const ExprFactory &factory, const Expression &src,
+			ExprType *destExprType);
+
 	bool isAggregationSetUpRequired(
 			ExprFactoryContext &cxt, const Expression &src,
 			bool forProjection) const;
 	void setUpAggregation(ExprFactoryContext &cxt, Expression &expr) const;
+	static bool isFinishAggregationArranging(ExprFactoryContext &cxt);
 
 	void setUpAdvanceAggregation(
-			ExprFactoryContext &cxt, Expression &expr) const;
+			ExprFactoryContext &cxt, Expression &expr,
+			const ExprCode &topCode) const;
 	void setUpMergeAggregation(
-			ExprFactoryContext &cxt, Expression &expr) const;
+			ExprFactoryContext &cxt, Expression &expr,
+			const ExprCode &topCode) const;
 	void setUpAggregationColumnsAt(
-			ExprFactoryContext &cxt, Expression &expr) const;
+			ExprFactoryContext &cxt, Expression &expr,
+			const ExprCode &topCode) const;
 
 	void setUpPipeAggregation(
 			ExprFactoryContext &cxt, Expression &expr,
 			Expression::ModIterator *destIt) const;
 	void setUpFinishAggregation(
 			ExprFactoryContext &cxt, Expression &expr,
-			const bool *grouping) const;
+			const ExprCode &topCode) const;
+
+	void setUpDistinctPipeAggregation(
+			ExprFactoryContext &cxt, const Expression &expr) const;
+	void setUpDistinctFinishAggregation(
+			ExprFactoryContext &cxt, Expression &expr) const;
+	static Expression& createDistinctAggregationIdExpr(
+			ExprFactoryContext &cxt);
+
+	void prepareMultiStageGrouping(ExprFactoryContext &cxt) const;
+	void setUpMiddleFinishAggregation(
+			ExprFactoryContext &cxt, Expression &expr) const;
+	void remapMultiStageGroupColumns(
+			ExprFactoryContext &cxt, Expression &expr, bool forFinish) const;
+	bool matchMultiStageGroupKey(
+			const Expression &expr, bool *acceptable) const;
+
+	void prepareDistinctAggreagation() const;
 
 	void replaceChildToAggrFirst(
 			ExprFactoryContext &cxt, Expression::ModIterator &it) const;
 	void replaceChildToAdvanceOutput(
+			ExprFactoryContext &cxt, Expression::ModIterator &it) const;
+	void replaceChildToDistinctFinishOutput(
 			ExprFactoryContext &cxt, Expression::ModIterator &it) const;
 	void replaceChildToNull(
 			ExprFactoryContext &cxt, Expression::ModIterator &it) const;
@@ -272,10 +395,7 @@ public:
 		RET_TYPE_LIST_SIZE = ExprSpec::AGGR_LIST_SIZE
 	};
 
-	struct ResultInfo {
-		ResultInfo();
-		TupleColumnType typeList_[RET_TYPE_LIST_SIZE];
-	};
+	typedef TypeResolverResult ResultInfo;
 
 	TypeResolver(
 			const ExprSpec &spec, AggregationPhase aggrPhase, bool grouping);
@@ -313,6 +433,8 @@ private:
 	bool isAdvanceAggregation() const;
 	bool isMergeAggregation() const;
 
+	bool isDistinctAggregation() const;
+
 	const ExprSpec &spec_;
 	const AggregationPhase aggrPhase_;
 	const bool grouping_;
@@ -325,6 +447,11 @@ private:
 	bool inNullable_;
 	int32_t conversionError_;
 	int32_t promotionError_;
+};
+
+struct SQLExprs::TypeResolverResult {
+	TypeResolverResult();
+	TupleColumnType typeList_[TypeResolver::RET_TYPE_LIST_SIZE];
 };
 
 struct SQLExprs::IndexSpec {

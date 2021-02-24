@@ -19,14 +19,21 @@
 #define SQL_OPERATOR_SCAN_H_
 
 #include "sql_operator.h"
+#include "sql_operator_utils.h"
 #include "sql_utils_container.h"
 
 struct SQLScanOps {
 	typedef SQLOps::TupleListReader TupleListReader;
 	typedef SQLOps::TupleListWriter TupleListWriter;
 
+	typedef SQLOps::SummaryTuple SummaryTuple;
 	typedef SQLOps::ReadableTuple ReadableTuple;
 	typedef SQLOps::WritableTuple WritableTuple;
+
+	typedef SQLOps::ColumnTypeList ColumnTypeList;
+
+	typedef SQLOps::DigestTupleListReader DigestTupleListReader;
+	typedef SQLOps::DigestReadableTuple DigestReadableTuple;
 
 	typedef SQLOps::OpCode OpCode;
 	typedef SQLOps::OpNode OpNode;
@@ -59,6 +66,7 @@ struct SQLScanOps {
 
 	class AggrPipeProjection;
 	class AggrOutputProjection;
+	class MultiOutputProjection;
 
 	class FilterProjection;
 
@@ -118,6 +126,7 @@ public:
 class SQLScanOps::ScanContainerMeta :
 		public SQLScanOps::BaseScanContainerOperator {
 public:
+	virtual void compile(OpContext &cxt) const;
 	virtual void execute(OpContext &cxt) const;
 };
 
@@ -144,31 +153,35 @@ public:
 	OutputProjection(
 			ProjectionFactoryContext &cxt, const ProjectionCode &code);
 
+	virtual void initializeProjectionAt(OpContext &cxt) const;
+	virtual void updateProjectionContextAt(OpContext &cxt) const;
+
 	virtual void project(OpContext &cxt) const;
 
 	virtual void projectBy(
 			OpContext &cxt, const ReadableTuple &tuple) const;
 	virtual void projectBy(
+			OpContext &cxt, const DigestTupleListReader &reader) const;
+	virtual void projectBy(
+			OpContext &cxt, const SummaryTuple &tuple) const;
+	virtual void projectBy(
 			OpContext &cxt, TupleListReader &reader, size_t index) const;
 
 private:
-	void projectInternal(OpContext &cxt, const ReadableTuple *srcTuple) const;
-
-	util::Vector<SQLValues::ValueWriter*> writerList_;
-	bool columExprOnly_;
+	SQLOpUtils::ExpressionListWriter writer_;
 };
 
 class SQLScanOps::AggrPipeProjection : public SQLOps::Projection {
 public:
-	static SQLValues::ArrayTuple& getTuple(OpContext &cxt);
-
-	virtual void initializeProjectionAt(OpContext &cxt) const;
-	virtual void clearProjection(OpContext &cxt) const;
-
 	virtual void project(OpContext &cxt) const;
 };
 
 class SQLScanOps::AggrOutputProjection : public SQLOps::Projection {
+public:
+	virtual void project(OpContext &cxt) const;
+};
+
+class SQLScanOps::MultiOutputProjection : public SQLOps::Projection {
 public:
 	virtual void project(OpContext &cxt) const;
 };
@@ -208,8 +221,15 @@ public:
 
 class SQLScanOps::SubLimitContext {
 public:
+	typedef SQLValues::TupleComparator::WithAccessor<
+			std::equal_to<SQLValues::ValueComparator::PredArgType>,
+			false, false, false, false,
+			SQLValues::ValueAccessor::ByReadableTuple,
+			SQLValues::ValueAccessor::ByKeyArrayTuple> TupleEq;
+
 	SubLimitContext(
-			util::StackAllocator &alloc, int64_t limit, int64_t offset);
+			util::StackAllocator &alloc, int64_t limit, int64_t offset,
+			const TupleEq &pred);
 
 	bool accept();
 
@@ -217,10 +237,14 @@ public:
 
 	SQLValues::ArrayTuple& getKey();
 
+	const TupleEq& getPredicate() const;
+
 private:
+
 	const LimitContext initial_;
 	LimitContext cur_;
 	SQLValues::ArrayTuple key_;
+	TupleEq pred_;
 };
 
 #endif

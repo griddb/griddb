@@ -37,6 +37,7 @@ void SQLExprs::ExprRewriter::activateColumnMapping(ExprFactoryContext &cxt) {
 	entry_->columnMapUpdated_ = false;
 
 	entry_->inputMap_.assign(inCount, -1);
+	entry_->inputUsage_.assign(inCount, true);
 
 	UsageList &columnUsage = entry_->columnUsage_;
 	columnUsage.resize(inCount, Usage(alloc_));
@@ -47,6 +48,33 @@ void SQLExprs::ExprRewriter::activateColumnMapping(ExprFactoryContext &cxt) {
 
 	entry_->idUsage_.assign(inCount, false);
 	entry_->inputNullList_.assign(inCount, false);
+}
+
+void SQLExprs::ExprRewriter::clearInputUsage() {
+	clearColumnUsage();
+
+	ScopedEntry &entry = getColumnMappingEntry();
+
+	{
+		Usage &usage = entry.idUsage_;
+		usage.assign(usage.size(), false);
+	}
+
+	{
+		Usage &usage = entry.inputUsage_;
+		usage.assign(usage.size(), false);
+	}
+}
+
+void SQLExprs::ExprRewriter::addInputUsage(uint32_t input) {
+	Usage &usage = getColumnMappingEntry().inputUsage_;
+
+	if (input >= usage.size()) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	usage[input] = true;
 }
 
 void SQLExprs::ExprRewriter::clearColumnUsage() {
@@ -83,20 +111,50 @@ void SQLExprs::ExprRewriter::addColumnUsage(
 }
 
 void SQLExprs::ExprRewriter::addColumnUsage(uint32_t input, uint32_t column) {
-	UsageList &usageList = getColumnMappingEntry().columnUsage_;
+	ScopedEntry &entry = getColumnMappingEntry();
 
-	if (input >= usageList.size() || column >= usageList[input].size()) {
+	const Usage &inputUsage = entry.inputUsage_;
+	UsageList &columnUsage = entry.columnUsage_;
+
+	if (input >= columnUsage.size() || column >= columnUsage[input].size() ||
+			!inputUsage[input]) {
 		assert(false);
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
 	}
 
-	usageList[input][column] = true;
+	columnUsage[input][column] = true;
+}
+
+void SQLExprs::ExprRewriter::addKeyColumnUsage(
+		uint32_t input, const SQLValues::CompColumnList &keyList, bool front) {
+	for (SQLValues::CompColumnList::const_iterator it = keyList.begin();
+			it != keyList.end(); ++it) {
+		addColumnUsage(input, it->getColumnPos(front));
+	}
+}
+
+void SQLExprs::ExprRewriter::addInputColumnUsage(uint32_t input) {
+	ScopedEntry &entry = getColumnMappingEntry();
+
+	const Usage &inputUsage = entry.inputUsage_;
+	UsageList &columnUsage = entry.columnUsage_;
+
+	if (input >= columnUsage.size() || !inputUsage[input]) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	const size_t columnCount = columnUsage[input].size();
+	columnUsage[input].assign(columnCount, true);
 }
 
 void SQLExprs::ExprRewriter::setIdOfInput(uint32_t input, bool enabled) {
-	Usage &usage = getColumnMappingEntry().idUsage_;
+	ScopedEntry &entry = getColumnMappingEntry();
 
-	if (input >= usage.size()) {
+	const Usage &inputUsage = entry.inputUsage_;
+	Usage &usage = entry.idUsage_;
+
+	if (input >= usage.size() || !inputUsage[input]) {
 		assert(false);
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
 	}
@@ -105,9 +163,12 @@ void SQLExprs::ExprRewriter::setIdOfInput(uint32_t input, bool enabled) {
 }
 
 void SQLExprs::ExprRewriter::setInputNull(uint32_t input, bool enabled) {
-	Usage &usage = getColumnMappingEntry().inputNullList_;
+	ScopedEntry &entry = getColumnMappingEntry();
 
-	if (input >= usage.size()) {
+	const Usage &inputUsage = entry.inputUsage_;
+	Usage &usage = entry.inputNullList_;
+
+	if (input >= usage.size() || !inputUsage[input]) {
 		assert(false);
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
 	}
@@ -128,6 +189,10 @@ void SQLExprs::ExprRewriter::setMappedInput(uint32_t src, uint32_t dest) {
 
 void SQLExprs::ExprRewriter::setInputProjected(bool enabled) {
 	getColumnMappingEntry().inputProjected_ = enabled;
+}
+
+void SQLExprs::ExprRewriter::setInputNullProjected(bool enabled) {
+	getColumnMappingEntry().inputNullProjected_ = enabled;
 }
 
 void SQLExprs::ExprRewriter::setIdProjected(bool enabled) {
@@ -180,6 +245,45 @@ util::Vector<SQLExprs::TupleColumn> SQLExprs::ExprRewriter::createColumnList(
 	info.getColumns(&columnList[0], columnList.size());
 
 	return columnList;
+}
+
+util::Vector<SQLValues::SummaryColumn>
+SQLExprs::ExprRewriter::createSummaryColumnList(
+		ExprFactoryContext &cxt, uint32_t input, bool unified, bool first,
+		const SQLValues::CompColumnList *compColumnList) const {
+	const util::Vector<TupleColumnType> typeList =
+			createColumnTypeList(cxt, input, unified);
+
+	SQLValues::ValueContext valueCxt(
+			SQLValues::ValueContext::ofAllocator(cxt.getAllocator()));
+	SQLValues::SummaryTupleSet tupleSet(valueCxt, NULL);
+
+	tupleSet.addReaderColumnList(typeList);
+
+	if (compColumnList != NULL) {
+		tupleSet.addKeyList(*compColumnList, first);
+	}
+
+	tupleSet.completeColumns();
+	return tupleSet.getReaderColumnList();
+}
+
+void SQLExprs::ExprRewriter::setCodeSetUpAlways(bool enabled) {
+	entry_->codeSetUpAlways_ = enabled;
+}
+
+void SQLExprs::ExprRewriter::setMultiStageGrouping(bool enabled) {
+	entry_->multiStageGrouping_ = enabled;
+}
+
+void SQLExprs::ExprRewriter::setInputMiddle(bool enabled) {
+	assert(entry_->multiStageGrouping_ || !enabled);
+	entry_->inputMiddle_ = enabled;
+}
+
+void SQLExprs::ExprRewriter::setOutputMiddle(bool enabled) {
+	assert(entry_->multiStageGrouping_ || !enabled);
+	entry_->outputMiddle_ = enabled;
 }
 
 SQLExprs::Expression& SQLExprs::ExprRewriter::rewrite(
@@ -239,12 +343,15 @@ SQLExprs::Expression& SQLExprs::ExprRewriter::rewritePredicate(
 
 SQLValues::CompColumnList& SQLExprs::ExprRewriter::rewriteCompColumnList(
 		ExprFactoryContext &cxt, const SQLValues::CompColumnList &src,
-		bool unified) const {
-	const uint32_t secondInput = (unified || cxt.getInputCount() <= 1 ? 0 : 1);
+		bool unified, const uint32_t *inputRef) const {
+	const uint32_t firstInput = (inputRef == NULL ? 0 : *inputRef);
+	const uint32_t secondInput = (inputRef == NULL ?
+		(unified || cxt.getInputCount() <= 1 ? 0 : 1) : *inputRef);
 
-	util::Vector<TupleColumn> columnList1 = createColumnList(cxt, 0, unified);
-	util::Vector<TupleColumn> columnList2 =
-			createColumnList(cxt, secondInput, unified);
+	util::Vector<SummaryColumn> columnList1 = createSummaryColumnList(
+			cxt, firstInput, unified, true, &src);
+	util::Vector<SummaryColumn> columnList2 = createSummaryColumnList(
+			cxt, secondInput, unified, false, &src);
 
 	util::StackAllocator &alloc = cxt.getAllocator();
 	SQLValues::CompColumnList &dest =
@@ -258,15 +365,14 @@ SQLValues::CompColumnList& SQLExprs::ExprRewriter::rewriteCompColumnList(
 		const uint32_t basePos1 = column.getColumnPos(true);
 		const uint32_t basePos2 = column.getColumnPos(!second);
 
-		column.setTupleColumn1(columnList1[basePos1]);
-		column.setTupleColumn2(columnList2[basePos2]);
+		column.setSummaryColumn(columnList1[basePos1], true);
+		column.setSummaryColumn(columnList2[basePos2], false);
 
 		const bool anyAsNull = true;
 		TupleColumnType type = SQLValues::TypeUtils::findPromotionType(
 				column.getTupleColumn1().getType(),
 				column.getTupleColumn2().getType(),
 				anyAsNull);
-		type = SQLValues::TypeUtils::toNonNullable(type);
 		if (SQLValues::TypeUtils::isNull(type)) {
 			GS_THROW_USER_ERROR(
 					GS_ERROR_SQL_PROC_INTERNAL_INVALID_EXPRESSION,"");
@@ -276,7 +382,7 @@ SQLValues::CompColumnList& SQLExprs::ExprRewriter::rewriteCompColumnList(
 		uint32_t pos1;
 		uint32_t pos2;
 		if (entry_->columnMapping_) {
-			pos1 = getMappedColumn(0, basePos1);
+			pos1 = getMappedColumn(firstInput, basePos1);
 			pos2 = getMappedColumn(secondInput, basePos2);
 		}
 		else {
@@ -292,6 +398,34 @@ SQLValues::CompColumnList& SQLExprs::ExprRewriter::rewriteCompColumnList(
 	return dest;
 }
 
+void SQLExprs::ExprRewriter::popLastDistinctAggregationOutput(
+		ExprFactoryContext &cxt, Expression &destTop) const {
+	Expression *&srcExpr = entry_->distinctAggrsExpr_;
+	if (srcExpr == NULL) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	Expression::ModIterator destIt(destTop);
+	assert(!destIt.exists());
+
+	Expression::ModIterator srcIt(*srcExpr);
+	while (srcIt.exists()) {
+		Expression &subExpr = srcIt.get();
+		srcIt.remove();
+		destIt.append(subExpr);
+	}
+
+	destTop.getPlanningCode().setAttributes(
+			destTop.getPlanningCode().getAttributes() |
+			srcExpr->getCode().getAttributes());
+	srcExpr = NULL;
+
+	if (!isFinishAggregationArranging(cxt)) {
+		remapColumn(cxt, destTop);
+	}
+}
+
 void SQLExprs::ExprRewriter::remapColumn(
 		ExprFactoryContext &cxt, Expression &expr) const {
 	if (!isColumnMappingRequired()) {
@@ -305,6 +439,32 @@ void SQLExprs::ExprRewriter::remapColumn(
 	remapColumnSub(cxt, expr);
 }
 
+SQLValues::CompColumnList& SQLExprs::ExprRewriter::remapCompColumnList(
+		ExprFactoryContext &cxt, const SQLValues::CompColumnList &src,
+		uint32_t input, bool front) const {
+	util::StackAllocator &alloc = cxt.getAllocator();
+	SQLValues::CompColumnList &dest =
+			*(ALLOC_NEW(alloc) SQLValues::CompColumnList(alloc));
+
+	if (isIdUsed(input)) {
+		SQLValues::CompColumn key;
+		key.setColumnPos(getMappedIdColumn(input), front);
+		key.setOrdering(true);
+		dest.push_back(key);
+	}
+
+	for (SQLValues::CompColumnList::const_iterator it = src.begin();
+			it != src.end(); ++it) {
+		SQLValues::CompColumn key;
+		key.setColumnPos(
+				getMappedColumn(input, it->getColumnPos(front)), front);
+		key.setOrdering(it->isOrdering());
+		dest.push_back(key);
+	}
+
+	return dest;
+}
+
 void SQLExprs::ExprRewriter::createIdenticalProjection(
 		ExprFactoryContext &cxt, bool inputUnified, uint32_t input,
 		Expression &dest) {
@@ -312,14 +472,20 @@ void SQLExprs::ExprRewriter::createIdenticalProjection(
 
 	const uint32_t count = cxt.getInputColumnCount(input);
 	for (uint32_t pos = 0; pos < count; pos++) {
-		Expression &expr = createColumnExpr(cxt, input, pos);
-		ExprCode &code = expr.getPlanningCode();
-		if (inputUnified) {
-			code.setAttributes(ExprCode::ATTR_COLUMN_UNIFIED);
-		}
-		code.setColumnType((inputUnified ?
-				cxt.getUnifiedInputType(pos) : cxt.getInputType(input, pos)));
-		it.append(expr);
+		it.append(createTypedColumnExpr(cxt, inputUnified, input, pos));
+	}
+}
+
+void SQLExprs::ExprRewriter::createEmptyRefProjection(
+		ExprFactoryContext &cxt, bool inputUnified, uint32_t input,
+		uint32_t startColumn, Expression &dest) {
+	Expression::ModIterator it(dest);
+
+	const uint32_t count = cxt.getInputColumnCount(input);
+	for (uint32_t pos = 0; pos < count; pos++) {
+		it.append((pos < startColumn ?
+				createTypedColumnExpr(cxt, inputUnified, input, pos) :
+				createEmptyRefConstExpr(cxt, inputUnified, input, pos)));
 	}
 }
 
@@ -380,6 +546,78 @@ SQLExprs::Expression& SQLExprs::ExprRewriter::createColumnExpr(
 	code.setColumnPos(column);
 
 	return cxt.getFactory().create(cxt, code);
+}
+
+SQLExprs::Expression& SQLExprs::ExprRewriter::createTypedColumnExpr(
+		ExprFactoryContext &cxt, bool inputUnified, uint32_t input,
+		uint32_t column) {
+	Expression &expr = createColumnExpr(cxt, input, column);
+	ExprCode &code = expr.getPlanningCode();
+	if (inputUnified) {
+		code.setAttributes(ExprCode::ATTR_COLUMN_UNIFIED);
+	}
+	code.setColumnType(getRefColumnType(cxt, inputUnified, input, column));
+	return expr;
+}
+
+SQLExprs::Expression& SQLExprs::ExprRewriter::createTypedIdExpr(
+		ExprFactoryContext &cxt, uint32_t input) {
+	Expression &expr = cxt.getFactory().create(cxt, SQLType::EXPR_ID);
+
+	ExprCode &code = expr.getPlanningCode();
+	code.setInput(input);
+	code.setColumnType(getIdColumnType(cxt.getFactory()));
+	code.setAttributes(ExprCode::ATTR_ASSIGNED);
+
+	return expr;
+}
+
+SQLExprs::Expression& SQLExprs::ExprRewriter::createEmptyRefConstExpr(
+		ExprFactoryContext &cxt, bool inputUnified, uint32_t input,
+		uint32_t column) {
+	const TupleColumnType type =
+			getRefColumnType(cxt, inputUnified, input, column);
+	return createEmptyConstExpr(cxt, type);
+}
+
+SQLExprs::Expression& SQLExprs::ExprRewriter::createEmptyConstExpr(
+		ExprFactoryContext &cxt, TupleColumnType type) {
+	assert(!SQLValues::TypeUtils::isNull(type));
+
+	SQLValues::ValueContext valueCxt(
+			SQLValues::ValueContext::ofAllocator(cxt.getAllocator()));
+	const TupleValue &value =
+			SQLValues::ValueUtils::createEmptyValue(valueCxt, type);
+
+	return createConstExpr(cxt, value, type);
+}
+
+SQLExprs::Expression& SQLExprs::ExprRewriter::createIdRefColumnExpr(
+		ExprFactoryContext &cxt, uint32_t input, uint32_t column) {
+	ExprFactoryContext::Scope scope(cxt);
+	cxt.setPlanning(true);
+
+	ExprCode code;
+	code.setType(SQLType::EXPR_COLUMN);
+	code.setInput(input);
+	code.setColumnPos(column);
+	code.setColumnType(getIdColumnType(cxt.getFactory()));
+
+	return cxt.getFactory().create(cxt, code);
+}
+
+TupleColumnType SQLExprs::ExprRewriter::getRefColumnType(
+		ExprFactoryContext &cxt, bool inputUnified, uint32_t input,
+		uint32_t column) {
+	return (inputUnified ?
+			cxt.getUnifiedInputType(column) : cxt.getInputType(input, column));
+}
+
+TupleColumnType SQLExprs::ExprRewriter::getIdColumnType(
+		const ExprFactory &factory) {
+	const TupleColumnType type = factory.getSpec(SQLType::EXPR_ID).outType_;
+	assert(!SQLValues::TypeUtils::isNull(type));
+	return type;
 }
 
 const SQLExprs::Expression* SQLExprs::ExprRewriter::findPredicateBySelection(
@@ -588,9 +826,222 @@ bool SQLExprs::ExprRewriter::checkArgCount(
 uint32_t SQLExprs::ExprRewriter::getResultCount(
 		const ExprFactory &factory, ExprType exprType,
 		AggregationPhase phase) {
-	const ExprSpec &spec = factory.getSpec(exprType);
+	return getResultCount(factory.getSpec(exprType), phase);
+}
+
+uint32_t SQLExprs::ExprRewriter::getResultCount(
+		const ExprSpec &spec, AggregationPhase phase) {
 	TypeResolver resolver(spec, phase, false);
 	return resolver.getResultCount();
+}
+
+void SQLExprs::ExprRewriter::removeUnificationAttributes(Expression &expr) {
+	ExprCode &code = expr.getPlanningCode();
+	code.setAttributes(
+			code.getAttributes() &
+			~static_cast<uint32_t>(ExprCode::ATTR_COLUMN_UNIFIED));
+
+	for (Expression::ModIterator it(expr); it.exists(); it.next()) {
+		removeUnificationAttributes(it.get());
+	}
+}
+
+bool SQLExprs::ExprRewriter::findDistinctAggregation(
+		const ExprFactory &factory, const Expression &expr) {
+	if (isDistinctAggregation(factory, expr.getCode().getType())) {
+		return true;
+	}
+
+	for (Expression::Iterator it(expr); it.exists(); it.next()) {
+		if (findDistinctAggregation(factory, it.get())) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool SQLExprs::ExprRewriter::isDistinctAggregation(
+		const ExprFactory &factory, ExprType type) {
+	return isDistinctAggregation(factory.getSpec(type), type);
+}
+
+bool SQLExprs::ExprRewriter::isDistinctAggregation(
+		const ExprSpec &spec, const ExprType type) {
+	return (ExprTypeUtils::isAggregation(type) &&
+			(spec.flags_ & ExprSpec::FLAG_DISTINCT) != 0);
+}
+
+bool SQLExprs::ExprRewriter::isWindowExpr(
+		const ExprSpec &spec, bool withSpecialArgs) {
+	if ((spec.flags_ & (
+			ExprSpec::FLAG_WINDOW |
+			ExprSpec::FLAG_WINDOW_ONLY |
+			ExprSpec::FLAG_PSEUDO_WINDOW)) == 0) {
+		return false;
+	}
+
+	if (!withSpecialArgs) {
+		return true;
+	}
+
+	if ((spec.flags_ & ExprSpec::FLAG_WINDOW_VALUE_COUNTING) != 0) {
+		return true;
+	}
+
+	for (size_t i = 0; i < ExprSpec::IN_LIST_SIZE; i++) {
+		const ExprSpec::In &in = spec.inList_[i];
+		if (SQLValues::TypeUtils::isNull(in.typeList_[0])) {
+			break;
+		}
+
+		if ((in.flags_ & (
+				ExprSpec::FLAG_WINDOW_POS_BEFORE |
+				ExprSpec::FLAG_WINDOW_POS_AFTER)) != 0) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void SQLExprs::ExprRewriter::getDistinctExprList(
+		const ExprFactory &factory, const Expression &expr,
+		util::Vector<const Expression*> &exprList) {
+
+	if (isDistinctAggregation(factory, expr.getCode().getType())) {
+		exprList.push_back(&expr);
+		return;
+	}
+
+	for (Expression::Iterator it(expr); it.exists(); it.next()) {
+		getDistinctExprList(factory, it.get(), exprList);
+	}
+}
+
+SQLExprs::Expression& SQLExprs::ExprRewriter::toNonDistinctExpr(
+		ExprFactoryContext &cxt, const Expression &src, uint32_t input,
+		uint32_t *refCoulmnPos) {
+	assert(refCoulmnPos != NULL);
+
+	ExprType destExprType;
+	const TypeResolverResult &retInfo = resolveNonDistinctExprColumnTypes(
+			cxt.getFactory(), src, &destExprType);
+
+	assert(cxt.isPlanning());
+	ExprRewriter rewriter(cxt.getAllocator());
+	Expression &dest = rewriter.rewrite(cxt, src, NULL);
+
+	dest.getPlanningCode().setType(destExprType);
+	dest.getPlanningCode().setColumnType(retInfo.typeList_[0]);
+
+	for (Expression::ModIterator it(dest); it.exists(); it.next()) {
+		const Expression &subSrc = it.get();
+
+		Expression &subDest = createColumnExpr(cxt, input, *refCoulmnPos);
+		subDest.getPlanningCode().setColumnType(
+				subSrc.getCode().getColumnType());
+		it.remove();
+		it.insert(subDest);
+
+		(*refCoulmnPos)++;
+	}
+
+	return dest;
+}
+
+void SQLExprs::ExprRewriter::addDistinctRefColumnExprs(
+		ExprFactoryContext &cxt, const Expression &src, bool forAdvance,
+		bool refEmpty, uint32_t input, uint32_t *refCoulmnPos,
+		Expression::ModIterator &destIt) {
+	if (forAdvance) {
+		for (Expression::Iterator it(src); it.exists(); it.next()) {
+			addDistinctRefColumnExprs(
+					cxt, it.get(), false, refEmpty, input, refCoulmnPos,
+					destIt);
+		}
+	}
+	else {
+		const ExprCode &srcCode = src.getCode();
+		const uint32_t pos = (refCoulmnPos == NULL ?
+				srcCode.getColumnPos() : *refCoulmnPos);
+
+		assert(refCoulmnPos != NULL ||
+				srcCode.getType() == SQLType::EXPR_COLUMN);
+
+		const TupleColumnType type = srcCode.getColumnType();
+		Expression *refExpr;
+		if (refEmpty) {
+			refExpr = &createEmptyConstExpr(cxt, type);
+		}
+		else {
+			refExpr = &createColumnExpr(cxt, input, pos);
+			refExpr->getPlanningCode().setColumnType(type);
+		}
+		destIt.append(*refExpr);
+
+		if (refCoulmnPos != NULL) {
+			(*refCoulmnPos)++;
+		}
+	}
+}
+
+void SQLExprs::ExprRewriter::replaceDistinctExprsToRef(
+		ExprFactoryContext &cxt, Expression &expr, bool forAdvance,
+		int32_t emptySide, uint32_t *restDistinctCount,
+		uint32_t *refCoulmnPos) {
+
+	if (restDistinctCount == NULL || refCoulmnPos == NULL) {
+		util::Vector<const Expression*> exprList(cxt.getAllocator());
+		getDistinctExprList(cxt.getFactory(), expr, exprList);
+		uint32_t restDistinctCountBase = static_cast<uint32_t>(exprList.size());
+
+		uint32_t refCoulmnPosBase = cxt.getInputColumnCount(0);
+		replaceDistinctExprsToRef(
+				cxt, expr, forAdvance, emptySide,
+				&restDistinctCountBase, &refCoulmnPosBase);
+
+		assert(restDistinctCountBase == 0);
+		return;
+	}
+
+	assert(!isDistinctAggregation(cxt.getFactory(), expr.getCode().getType()));
+
+	for (Expression::ModIterator it(expr); it.exists();) {
+		Expression &subExpr = it.get();
+		const ExprType subType = subExpr.getCode().getType();
+		if (isDistinctAggregation(cxt.getFactory(), subType)) {
+			it.remove();
+
+			assert(*restDistinctCount > 0);
+			const bool merged = (*restDistinctCount > 1);
+			const bool refEmpty = (emptySide >= 0 ?
+					(emptySide == 0 ? merged : !merged) : false);
+
+			const uint32_t input = (merged ? 0 : 1);
+			const uint32_t refCoulmnPosBase = (merged ? *refCoulmnPos : 1);
+			uint32_t refCoulmnPosSub = refCoulmnPosBase;
+			addDistinctRefColumnExprs(
+					cxt, subExpr, forAdvance, refEmpty, input,
+					&refCoulmnPosSub, it);
+
+			(*refCoulmnPos) += (refCoulmnPosSub - refCoulmnPosBase);
+			(*restDistinctCount)--;
+		}
+		else if (subType == SQLType::EXPR_AGG_FOLLOWING) {
+			it.remove();
+		}
+		else if (subType == SQLType::EXPR_COLUMN && emptySide == 0) {
+			it.remove();
+			it.append(createEmptyConstExpr(
+					cxt, subExpr.getCode().getColumnType()));
+		}
+		else {
+			replaceDistinctExprsToRef(
+					cxt, subExpr, forAdvance, emptySide, restDistinctCount,
+					refCoulmnPos);
+			it.next();
+		}
+	}
 }
 
 bool SQLExprs::ExprRewriter::predicateToExtContainerName(
@@ -810,7 +1261,8 @@ void SQLExprs::ExprRewriter::remapColumnSub(
 	if (code.getType() == SQLType::EXPR_COLUMN) {
 		forId = false;
 	}
-	else if (code.getType() == SQLType::EXPR_ID) {
+	else if (code.getType() == SQLType::EXPR_ID &&
+			(code.getAttributes() & ExprCode::ATTR_GROUPING) == 0) {
 		forId = true;
 	}
 	else {
@@ -878,12 +1330,15 @@ bool SQLExprs::ExprRewriter::assignRemappedCode(
 		TupleColumnType type = orgCode.getColumnType();
 		if (SQLValues::TypeUtils::isNull(type)) {
 			type = (forId ?
-					static_cast<TupleColumnType>(TupleTypes::TYPE_LONG) :
+					getIdColumnType(cxt.getFactory()) :
 					cxt.getInputType(input, column));
 			if (inputNull || cxt.isInputNullable(input)) {
 				type = SQLValues::TypeUtils::toNullable(type);
 			}
 		}
+		assert(code.getType() != SQLType::EXPR_CONSTANT ||
+				SQLValues::TypeUtils::isNullable(type) ||
+				SQLValues::TypeUtils::isAny(type));
 		code.setColumnType(type);
 	}
 
@@ -938,7 +1393,12 @@ SQLExprs::ExprRewriter::getColumnMap(bool forId) const {
 	}
 
 	const bool inputProjected = entry_->inputProjected_;
+	const bool inputOrNullProjected =
+			(inputProjected || entry_->inputNullProjected_);
+
 	const bool idProjected = entry_->idProjected_;
+	const bool someProjected = (inputOrNullProjected || idProjected);
+
 	const InputMap &inputMap = entry_->inputMap_;
 
 	const UsageList &columnUsage = entry_->columnUsage_;
@@ -958,8 +1418,8 @@ SQLExprs::ExprRewriter::getColumnMap(bool forId) const {
 		ColumnMapEntry &destEntry = columnMap[srcInput];
 		ColumnMapEntry &destIdEntry = idColumnMap[srcInput];
 
-		destEntry.resize(usage.size(), emptyElem);
-		destIdEntry.resize(1, emptyElem);
+		destEntry.assign(usage.size(), emptyElem);
+		destIdEntry.assign(1, emptyElem);
 
 		int32_t destInput;
 		const int32_t mappedInput = inputMap[srcInput];
@@ -990,12 +1450,12 @@ SQLExprs::ExprRewriter::getColumnMap(bool forId) const {
 			ColumnMapElem &dest = destEntry[static_cast<size_t>(ordinal)];
 			dest = ColumnMapElem(
 					(inputProjected ? 0 : destInput),
-					(idProjected ? totalColumn : ordinal));
-			if (idProjected) {
+					(someProjected ? totalColumn : ordinal));
+			if (someProjected) {
 				totalColumn++;
 			}
 		}
-		if (!idProjected) {
+		if (!inputOrNullProjected) {
 			totalColumn = 0;
 		}
 	}
@@ -1023,6 +1483,11 @@ bool SQLExprs::ExprRewriter::isIdUsed(uint32_t input) const {
 	if (!entry_->columnMapping_) {
 		assert(false);
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	const Usage &inputUsage = entry_->inputUsage_;
+	if (!inputUsage[input]) {
+		return false;
 	}
 
 	const Usage &idUsage = entry_->idUsage_;
@@ -1063,6 +1528,10 @@ SQLExprs::ExprRewriter::getColumnMappingEntry() const {
 
 bool SQLExprs::ExprRewriter::isCodeSetUpRequired(
 		const Expression &src) const {
+	if (entry_->codeSetUpAlways_) {
+		return true;
+	}
+
 	const ExprCode &code = src.getCode();
 	if (SQLValues::TypeUtils::isNull(code.getColumnType()) &&
 			!ExprTypeUtils::isNoColumnTyped(code.getType())) {
@@ -1123,7 +1592,7 @@ void SQLExprs::ExprRewriter::setUpCodesAt(
 	code.setColumnType(resolveColumnTypeAt(
 			cxt, expr, projDepth, topAttributes, insideAggrFunc));
 
-	assert(!isCodeSetUpRequired(expr));
+	assert(entry_->codeSetUpAlways_ || !isCodeSetUpRequired(expr));
 }
 
 uint32_t SQLExprs::ExprRewriter::resolveAttributesAt(
@@ -1208,15 +1677,19 @@ TupleColumnType SQLExprs::ExprRewriter::resolveColumnTypeAt(
 			exprType == SQLType::EXPR_AGG_FOLLOWING) {
 		return baseType;
 	}
+	else if (entry_->codeSetUpAlways_ &&
+			SQLExprs::ExprTypeUtils::isAggregation(exprType) &&
+			cxt.getAggregationPhase(true) == SQLType::END_AGG_PHASE) {
+		type = baseType;
+	}
 	else {
+		const ExprSpec &spec = cxt.getFactory().getSpec(exprType);
+		const SQLType::AggregationPhase aggrPhase = (entry_->codeSetUpAlways_ ?
+				SQLType::AGG_PHASE_ALL_PIPE : cxt.getAggregationPhase(true));
 		const bool grouping = ((topAttributes & ExprCode::ATTR_GROUPING) != 0);
-		SQLExprs::TypeResolver resolver(
-				cxt.getFactory().getSpec(exprType),
-				cxt.getAggregationPhase(true), grouping);
-		for (Expression::Iterator it(expr); it.exists(); it.next()) {
-			resolver.next(it.get().getCode().getColumnType());
-		}
-		const TypeResolver::ResultInfo &retInfo = resolver.complete(false);
+
+		const TypeResolverResult &retInfo = resolveBasicExprColumnTypes(
+				expr, spec, aggrPhase, grouping, false);
 		type = retInfo.typeList_[0];
 	}
 
@@ -1239,10 +1712,24 @@ TupleColumnType SQLExprs::ExprRewriter::resolveColumnTypeAt(
 
 	if (SQLValues::TypeUtils::toNonNullable(type) ==
 			SQLValues::TypeUtils::toNonNullable(baseType)) {
+		if (type != baseType &&
+				!SQLExprs::ExprTypeUtils::isAggregation(exprType) &&
+				((SQLValues::TypeUtils::isNullable(baseType) &&
+						(projDepth == NULL || *projDepth > 1)) ||
+				entry_->codeSetUpAlways_)) {
+			return type;
+		}
 		return baseType;
 	}
 	else if (SQLValues::TypeUtils::isAny(type) && !SQLValues::TypeUtils::isNull(
 			SQLValues::TypeUtils::findPromotionType(type, baseType, true))) {
+		return baseType;
+	}
+	else if (exprType == SQLType::EXPR_COLUMN &&
+			SQLValues::TypeUtils::toNonNullable(baseType) ==
+			SQLValues::TypeUtils::toNonNullable(
+					SQLValues::TypeUtils::findPromotionType(
+							type, baseType, true))) {
 		return baseType;
 	}
 
@@ -1251,6 +1738,38 @@ TupleColumnType SQLExprs::ExprRewriter::resolveColumnTypeAt(
 			SQLValues::TypeUtils::toString(type) <<
 			", expected=" <<
 			SQLValues::TypeUtils::toString(baseType) << ")");
+}
+
+SQLExprs::TypeResolverResult
+SQLExprs::ExprRewriter::resolveBasicExprColumnTypes(
+		const Expression &expr, const ExprSpec &spec,
+		AggregationPhase aggrPhase, bool grouping, bool checking) {
+
+	SQLExprs::TypeResolver resolver(spec, aggrPhase, grouping);
+	for (Expression::Iterator it(expr); it.exists(); it.next()) {
+		resolver.next(it.get().getCode().getColumnType());
+	}
+	return resolver.complete(checking);
+}
+
+SQLExprs::TypeResolverResult
+SQLExprs::ExprRewriter::resolveNonDistinctExprColumnTypes(
+		const ExprFactory &factory, const Expression &src,
+		ExprType *destExprType) {
+
+	const ExprType srcExprType = src.getCode().getType();
+	const ExprSpec &srcSpec = factory.getSpec(srcExprType);
+	assert(isDistinctAggregation(srcSpec, srcExprType));
+
+	const ExprType destExprTypeBase = srcSpec.distinctExprType_;
+	const ExprSpec &destSpec = factory.getSpec(destExprTypeBase);
+
+	if (destExprType != NULL) {
+		*destExprType = destExprTypeBase;
+	}
+	const bool grouping = true;
+	return resolveBasicExprColumnTypes(
+			src, destSpec, SQLType::AGG_PHASE_ALL_PIPE, grouping, true);
 }
 
 bool SQLExprs::ExprRewriter::isAggregationSetUpRequired(
@@ -1281,33 +1800,53 @@ void SQLExprs::ExprRewriter::setUpAggregation(
 	assert((code.getAttributes() & ExprCode::ATTR_ASSIGNED) != 0);
 	assert((code.getAttributes() &
 			(ExprCode::ATTR_AGGREGATED | ExprCode::ATTR_GROUPING)) != 0);
+	assert(!(entry_->multiStageGrouping_ &&
+			findDistinctAggregation(cxt.getFactory(), expr)));
+
+	prepareMultiStageGrouping(cxt);
+	prepareDistinctAggreagation();
 
 	{
 		cxt.clearAggregationColumns();
 		if (cxt.getAggregationPhase(true) ==
 				SQLType::AGG_PHASE_ADVANCE_PIPE) {
-			setUpAdvanceAggregation(cxt, expr);
+			setUpAdvanceAggregation(cxt, expr, expr.getCode());
 		}
 		else {
-			setUpMergeAggregation(cxt, expr);
+			setUpMergeAggregation(cxt, expr, expr.getCode());
 		}
 		setAggregationArranged(expr);
 	}
 
-	const AggregationPhase destPhase = cxt.getAggregationPhase(false);
-	if (destPhase == SQLType::AGG_PHASE_MERGE_FINISH ||
-			destPhase == SQLType::AGG_PHASE_ADVANCE_FINISH) {
-		setUpFinishAggregation(cxt, expr, NULL);
+	if (isFinishAggregationArranging(cxt)) {
+		if (entry_->outputMiddle_) {
+			setUpMiddleFinishAggregation(cxt, expr);
+		}
+		else {
+			setUpFinishAggregation(cxt, expr, expr.getCode());
+			setUpDistinctFinishAggregation(cxt, expr);
+			remapMultiStageGroupColumns(cxt, expr, true);
+		}
 	}
 	else {
 		setUpPipeAggregation(cxt, expr, NULL);
+		setUpDistinctPipeAggregation(cxt, expr);
+		remapMultiStageGroupColumns(cxt, expr, false);
 	}
 
 	assert(!isAggregationSetUpRequired(cxt, expr, true));
 }
 
+bool SQLExprs::ExprRewriter::isFinishAggregationArranging(
+		ExprFactoryContext &cxt) {
+	const AggregationPhase destPhase = cxt.getAggregationPhase(false);
+	return (destPhase == SQLType::AGG_PHASE_MERGE_FINISH ||
+			destPhase == SQLType::AGG_PHASE_ADVANCE_FINISH);
+}
+
 void SQLExprs::ExprRewriter::setUpAdvanceAggregation(
-		ExprFactoryContext &cxt, Expression &expr) const {
+		ExprFactoryContext &cxt, Expression &expr,
+		const ExprCode &topCode) const {
 	for (Expression::ModIterator it(expr); it.exists();) {
 		const ExprType type = it.get().getCode().getType();
 		const TupleColumnType columnType = it.get().getCode().getColumnType();
@@ -1318,12 +1857,27 @@ void SQLExprs::ExprRewriter::setUpAdvanceAggregation(
 			continue;
 		}
 		else if (ExprTypeUtils::isAggregation(type)) {
+			if (isDistinctAggregation(cxt.getFactory(), type)) {
+				it.next();
+				while (it.exists() && (it.get().getCode().getType() ==
+						SQLType::EXPR_AGG_FOLLOWING)) {
+					it.remove();
+				}
+				entry_->distinctAggrFound_ = true;
+				continue;
+			}
+
 			const uint32_t aggrIndex = cxt.addAggregationColumn(columnType);
 			it.get().getPlanningCode().setAggregationIndex(aggrIndex);
 		}
+		else if (type == SQLType::EXPR_CONSTANT ||
+				matchMultiStageGroupKey(it.get(), NULL)) {
+			it.next();
+			continue;
+		}
 		else {
 			replaceChildToAggrFirst(cxt, it);
-			setUpAggregationColumnsAt(cxt, it.get());
+			setUpAggregationColumnsAt(cxt, it.get(), topCode);
 		}
 
 		assert((it.get().getCode().getAttributes() &
@@ -1334,34 +1888,49 @@ void SQLExprs::ExprRewriter::setUpAdvanceAggregation(
 }
 
 void SQLExprs::ExprRewriter::setUpMergeAggregation(
-		ExprFactoryContext &cxt, Expression &expr) const {
+		ExprFactoryContext &cxt, Expression &expr,
+		const ExprCode &topCode) const {
 	const ExprType exprType = expr.getCode().getType();
 	if (ExprTypeUtils::isAggregation(exprType)) {
-		setUpAggregationColumnsAt(cxt, expr);
+		setUpAggregationColumnsAt(cxt, expr, topCode);
 		setAggregationArranged(expr);
 		return;
 	}
 
-	assert((expr.getCode().getAttributes() & ExprCode::ATTR_AGGREGATED) != 0);
+	assert((expr.getCode().getAttributes() & ExprCode::ATTR_AGGREGATED) != 0 ||
+			(topCode.getAttributes() & ExprCode::ATTR_WINDOWING) != 0);
 
 	for (Expression::ModIterator it(expr); it.exists(); it.next()) {
 		const ExprCode &code = it.get().getCode();
 		if (!ExprTypeUtils::isAggregation(code.getType())) {
 			if ((code.getAttributes() & ExprCode::ATTR_AGGREGATED) != 0) {
-				setUpMergeAggregation(cxt, it.get());
+				setUpMergeAggregation(cxt, it.get(), topCode);
 				continue;
 			}
-			else if (code.getType() == SQLType::EXPR_TYPE) {
+			else if (code.getType() == SQLType::EXPR_TYPE ||
+					code.getType() == SQLType::EXPR_CONSTANT ||
+					matchMultiStageGroupKey(it.get(), NULL)) {
 				continue;
 			}
-			replaceChildToAggrFirst(cxt, it);
+
+			if ((topCode.getAttributes() & ExprCode::ATTR_WINDOWING) == 0) {
+				replaceChildToAggrFirst(cxt, it);
+			}
 		}
-		setUpMergeAggregation(cxt, it.get());
+		setUpMergeAggregation(cxt, it.get(), topCode);
 	}
 }
 
 void SQLExprs::ExprRewriter::setUpAggregationColumnsAt(
-		ExprFactoryContext &cxt, Expression &expr) const {
+		ExprFactoryContext &cxt, Expression &expr,
+		const ExprCode &topCode) const {
+	const ExprType type = expr.getCode().getType();
+	const ExprSpec &spec = cxt.getFactory().getSpec(type);
+	if (isDistinctAggregation(spec, type)) {
+		entry_->distinctAggrFound_ = true;
+		return;
+	}
+
 	if (cxt.getAggregationPhase(true) == SQLType::AGG_PHASE_MERGE_PIPE) {
 		bool first = true;
 		for (Expression::Iterator it(expr); it.exists(); it.next()) {
@@ -1374,14 +1943,11 @@ void SQLExprs::ExprRewriter::setUpAggregationColumnsAt(
 		}
 	}
 	else {
-		SQLExprs::TypeResolver resolver(
-				cxt.getFactory().getSpec(expr.getCode().getType()),
-				SQLType::AGG_PHASE_ADVANCE_PIPE, false);
-		for (Expression::Iterator it(expr); it.exists(); it.next()) {
-			resolver.next(it.get().getCode().getColumnType());
-		}
+		const bool grouping =
+				((topCode.getAttributes() & ExprCode::ATTR_GROUPING) != 0);
+		const TypeResolverResult &retInfo = resolveBasicExprColumnTypes(
+				expr, spec, SQLType::AGG_PHASE_ADVANCE_PIPE, grouping, true);
 
-		const TypeResolver::ResultInfo &retInfo = resolver.complete(true);
 		for (size_t i = 0; i < TypeResolver::RET_TYPE_LIST_SIZE; i++) {
 			const TupleColumnType type = retInfo.typeList_[i];
 			if (SQLValues::TypeUtils::isNull(type)) {
@@ -1409,9 +1975,16 @@ void SQLExprs::ExprRewriter::setUpPipeAggregation(
 	for (Expression::ModIterator it(expr); it.exists();) {
 		Expression &sub = it.get();
 
-		if (ExprTypeUtils::isAggregation(sub.getCode().getType())) {
+		const ExprType subType = sub.getCode().getType();
+		if (ExprTypeUtils::isAggregation(subType)) {
 			it.remove();
-			destIt->append(sub);
+
+			if (isDistinctAggregation(cxt.getFactory(), subType)) {
+				entry_->distinctAggrSubList_.push_back(&sub);
+			}
+			else {
+				destIt->append(sub);
+			}
 			continue;
 		}
 
@@ -1422,17 +1995,12 @@ void SQLExprs::ExprRewriter::setUpPipeAggregation(
 
 void SQLExprs::ExprRewriter::setUpFinishAggregation(
 		ExprFactoryContext &cxt, Expression &expr,
-		const bool *grouping) const {
-	if (grouping == NULL) {
-		const bool localGrouping = ((expr.getCode().getAttributes() &
-				ExprCode::ATTR_GROUPING) != 0);
-		setUpFinishAggregation(cxt, expr, &localGrouping);
-		return;
-	}
+		const ExprCode &topCode) const {
 
 	const ExprType exprType = expr.getCode().getType();
 	const bool childrenUnused = ExprTypeUtils::isAggregation(exprType) &&
-			(exprType != SQLType::AGG_FIRST || *grouping);
+			(exprType != SQLType::AGG_FIRST ||
+			(topCode.getAttributes() & ExprCode::ATTR_GROUPING) != 0);
 	const bool forAdvance =
 			(cxt.getAggregationPhase(false) ==
 			SQLType::AGG_PHASE_ADVANCE_FINISH);
@@ -1446,24 +2014,327 @@ void SQLExprs::ExprRewriter::setUpFinishAggregation(
 			continue;
 		}
 
+		if (matchMultiStageGroupKey(it.get(), NULL)) {
+			it.next();
+			continue;
+		}
+
 		if (forAdvance && subType != SQLType::AGG_FIRST &&
 				ExprTypeUtils::isAggregation(subType)) {
 			replaceChildToAdvanceOutput(cxt, it);
 		}
+		else if (isDistinctAggregation(cxt.getFactory(), subType)) {
+			replaceChildToDistinctFinishOutput(cxt, it);
+		}
 		else if (subType == SQLType::EXPR_COLUMN) {
-			assert((subCode.getAttributes() &
-					ExprCode::ATTR_AGGREGATED) == 0);
-			replaceChildToNull(cxt, it);
+			if ((topCode.getAttributes() & ExprCode::ATTR_WINDOWING) == 0) {
+				assert((subCode.getAttributes() &
+						ExprCode::ATTR_AGGREGATED) == 0);
+				replaceChildToNull(cxt, it);
+			}
 		}
 		else if (subType == SQLType::EXPR_ID) {
 			GS_THROW_USER_ERROR(
 					GS_ERROR_SQL_PROC_INTERNAL_INVALID_EXPRESSION,"");
 		}
 		else {
-			setUpFinishAggregation(cxt, it.get(), grouping);
+			setUpFinishAggregation(cxt, it.get(), topCode);
+
+			if (!forAdvance && subType != SQLType::AGG_FIRST &&
+					ExprTypeUtils::isAggregation(subType)) {
+				if ((cxt.getFactory().getSpec(subType).flags_ &
+						ExprSpec::FLAG_AGGR_FINISH_DEFAULT) != 0) {
+					it.get().getPlanningCode().setType(SQLType::AGG_FIRST);
+				}
+			}
+
+			if (entry_->distinctAggrFound_ &&
+					ExprTypeUtils::isAggregation(subType)) {
+				replaceChildToDistinctFinishOutput(cxt, it);
+			}
 		}
 		it.next();
 	}
+}
+
+void SQLExprs::ExprRewriter::setUpDistinctPipeAggregation(
+		ExprFactoryContext &cxt, const Expression &expr) const {
+	if (!entry_->distinctAggrFound_) {
+		return;
+	}
+
+	assert(!entry_->distinctAggrSubList_.empty());
+
+	Expression &outExpr = cxt.getFactory().create(cxt, SQLType::EXPR_PROJECTION);
+	Expression::ModIterator outIt(outExpr);
+
+	outIt.append(createDistinctAggregationIdExpr(cxt));
+
+	for (ExprRefList::const_iterator it = entry_->distinctAggrSubList_.begin();
+			it != entry_->distinctAggrSubList_.end(); ++it) {
+		for (Expression::ModIterator subIt(**it); subIt.exists();) {
+			Expression &subArgExpr = subIt.get();
+			subIt.remove();
+			outIt.append(subArgExpr);
+		}
+	}
+
+	outExpr.getPlanningCode().setAttributes(expr.getCode().getAttributes());
+
+	entry_->distinctAggrSubList_.clear();
+	entry_->distinctAggrsExpr_ = &outExpr;
+}
+
+void SQLExprs::ExprRewriter::setUpDistinctFinishAggregation(
+		ExprFactoryContext &cxt, Expression &expr) const {
+	if (!entry_->distinctAggrFound_) {
+		return;
+	}
+
+	assert(expr.findChild() != NULL);
+
+	Expression::ModIterator srcIt(expr);
+
+	Expression &outExpr = cxt.getFactory().create(cxt, SQLType::EXPR_PROJECTION);
+	Expression::ModIterator outIt(outExpr);
+
+	while (srcIt.exists()) {
+		Expression &subExpr = srcIt.get();
+		srcIt.remove();
+
+		outIt.append(subExpr);
+	}
+
+	srcIt.append(createDistinctAggregationIdExpr(cxt));
+
+	for (ExprRefList::const_iterator it = entry_->distinctAggrMainList_.begin();
+			it != entry_->distinctAggrMainList_.end(); ++it) {
+		srcIt.append(**it);
+	}
+
+	outExpr.getPlanningCode().setAttributes(expr.getCode().getAttributes());
+
+	entry_->distinctAggrMainList_.clear();
+	entry_->distinctAggrsExpr_ = &outExpr;
+}
+
+SQLExprs::Expression& SQLExprs::ExprRewriter::createDistinctAggregationIdExpr(
+		ExprFactoryContext &cxt) {
+	const uint32_t input = 0;
+	Expression &expr = createTypedIdExpr(cxt, input);
+
+	ExprCode &code = expr.getPlanningCode();
+	code.setAttributes(code.getAttributes() | ExprCode::ATTR_GROUPING);
+
+	return expr;
+}
+
+void SQLExprs::ExprRewriter::prepareMultiStageGrouping(
+		ExprFactoryContext &cxt) const {
+	if (!entry_->multiStageGrouping_) {
+		return;
+	}
+
+
+	KeyMap &keyMap = entry_->multiStageKeyMap_;
+	keyMap.clear();
+
+	bool &withDigest = entry_->multiStageKeyWithDigest_;
+	withDigest = false;
+
+	uint32_t &keyCount = entry_->multiStageKeyCount_;
+	keyCount = 0;
+
+	const SQLValues::CompColumnList *keyList = cxt.getArrangedKeyList();
+	if (keyList == NULL) {
+		return;
+	}
+
+	withDigest =
+			!SQLValues::TupleDigester::isOrderingAvailable(*keyList, false);
+	const int32_t offset = (withDigest ? 1 : 0);
+
+	for (SQLValues::CompColumnList::const_iterator it = keyList->begin();
+			it != keyList->end(); ++it) {
+		const uint32_t pos = it->getColumnPos(true);
+		if (pos >= keyMap.size()) {
+			keyMap.resize(pos + 1, -1);
+		}
+		keyMap[pos] = (entry_->inputMiddle_ ?
+				static_cast<int32_t>(offset + (it - keyList->begin())) :
+				static_cast<int32_t>(pos));
+	}
+	keyCount = static_cast<uint32_t>(
+			keyMap.size() - std::count(keyMap.begin(), keyMap.end(), -1));
+}
+
+void SQLExprs::ExprRewriter::setUpMiddleFinishAggregation(
+		ExprFactoryContext &cxt, Expression &expr) const {
+	assert(entry_->multiStageGrouping_ && entry_->outputMiddle_);
+
+	Expression::ModIterator exprIt(expr);
+	while (exprIt.exists()) {
+		exprIt.remove();
+	}
+
+	const uint32_t input = 0;
+
+	if (entry_->multiStageKeyWithDigest_) {
+		exprIt.append(createTypedIdExpr(cxt, input));
+	}
+
+	const SQLValues::CompColumnList *keyList = cxt.getArrangedKeyList();
+	if (keyList != NULL) {
+		const KeyMap &keyMap = entry_->multiStageKeyMap_;
+		Usage usage(alloc_);
+		usage.resize(keyMap.size(), false);
+
+		for (SQLValues::CompColumnList::const_iterator it = keyList->begin();
+				it != keyList->end(); ++it) {
+			const uint32_t srcPos = it->getColumnPos(true);
+			if (usage[srcPos]) {
+				continue;
+			}
+
+			usage[srcPos] = true;
+			const int32_t destPos = (entry_->inputMiddle_ ?
+					keyMap[srcPos] : static_cast<int32_t>(srcPos));
+			assert(destPos >= 0);
+
+			Expression &outExpr =
+					createColumnExpr(cxt, input, static_cast<uint32_t>(destPos));
+
+			ExprCode &code = outExpr.getPlanningCode();
+			code.setColumnType(it->getType());
+			code.setAttributes(ExprCode::ATTR_ASSIGNED);
+
+			exprIt.append(outExpr);
+		}
+	}
+
+	const uint32_t aggrCount = cxt.getAggregationColumnCount();
+	for (uint32_t i = 0; i < aggrCount; i++) {
+		Expression &outExpr = cxt.getFactory().create(cxt, SQLType::AGG_FIRST);
+
+		ExprCode &code = outExpr.getPlanningCode();
+		code.setColumnType(cxt.getAggregationColumnType(i));
+		code.setAggregationIndex(i);
+		code.setAttributes(
+				ExprCode::ATTR_ASSIGNED | ExprCode::ATTR_AGGREGATED);
+
+		exprIt.append(outExpr);
+	}
+}
+
+void SQLExprs::ExprRewriter::remapMultiStageGroupColumns(
+		ExprFactoryContext &cxt, Expression &expr, bool forFinish) const {
+	if (!entry_->multiStageGrouping_) {
+		return;
+	}
+
+	ExprCode &code = expr.getPlanningCode();
+	if (code.getType() == SQLType::EXPR_COLUMN) {
+		if (entry_->inputMiddle_) {
+			const KeyMap &keyMap = entry_->multiStageKeyMap_;
+			const uint32_t srcPos = code.getColumnPos();
+			const int32_t destPos =
+					(srcPos < keyMap.size() ? keyMap[srcPos] : -1);
+			if (destPos < 0) {
+				assert(false);
+				GS_THROW_USER_ERROR(
+						GS_ERROR_SQL_PROC_INTERNAL_INVALID_EXPRESSION, "");
+			}
+			code.setColumnPos(destPos);
+		}
+	}
+	else if (ExprTypeUtils::isAggregation(code.getType())) {
+		if (!forFinish && (entry_->inputMiddle_ || !entry_->outputMiddle_)) {
+			const uint32_t input = 0;
+
+			const uint32_t aggrIndex = code.getAggregationIndex();
+			const uint32_t aggrCount = getResultCount(
+					cxt.getFactory(), code.getType(),
+					SQLType::AGG_PHASE_ADVANCE_PIPE);
+
+			const uint32_t digestOffset = (entry_->inputMiddle_ &&
+					entry_->multiStageKeyWithDigest_ ? 1 : 0);
+			const uint32_t inCount = (entry_->inputMiddle_ ?
+					entry_->multiStageKeyCount_ :
+					cxt.getInputColumnCount(input));
+			const uint32_t destPos = digestOffset + inCount + aggrIndex;
+
+			Expression::ModIterator it(expr);
+			while (it.exists()) {
+				it.remove();
+			}
+
+			for (uint32_t i = 0; i < aggrCount; i++) {
+				Expression &outExpr =
+						createColumnExpr(cxt, input, destPos + i);
+
+				ExprCode &outCode = outExpr.getPlanningCode();
+				outCode.setColumnType(
+						cxt.getAggregationColumnType(aggrIndex + i));
+				outCode.setAttributes(ExprCode::ATTR_ASSIGNED);
+
+				it.append(outExpr);
+			}
+		}
+	}
+	else {
+		for (Expression::ModIterator it(expr); it.exists(); it.next()) {
+			remapMultiStageGroupColumns(cxt, it.get(), forFinish);
+		}
+	}
+}
+
+bool SQLExprs::ExprRewriter::matchMultiStageGroupKey(
+		const Expression &expr, bool *acceptable) const {
+	if (acceptable != NULL) {
+		*acceptable = false;
+	}
+
+	if (!entry_->multiStageGrouping_) {
+		return false;
+	}
+
+	const ExprCode &code = expr.getCode();
+	const ExprType type = code.getType();
+
+	if (ExprTypeUtils::isAggregation(type) ||
+			(code.getAttributes() & ExprCode::ATTR_AGGREGATED) != 0) {
+		return false;
+	}
+
+	if (type == SQLType::EXPR_COLUMN) {
+		const KeyMap &keyMap = entry_->multiStageKeyMap_;
+		const uint32_t pos = code.getColumnPos();
+		return (pos < keyMap.size() && keyMap[pos] >= 0);
+	}
+
+	bool matched = false;
+	for (Expression::Iterator it(expr); it.exists(); it.next()) {
+		bool subAcceptable = false;
+		if (matchMultiStageGroupKey(it.get(), &subAcceptable)) {
+			matched = true;
+		}
+		else if (!subAcceptable) {
+			return false;
+		}
+	}
+
+	if (acceptable != NULL) {
+		*acceptable = true;
+	}
+	return matched;
+}
+
+void SQLExprs::ExprRewriter::prepareDistinctAggreagation() const {
+	entry_->distinctAggrMainList_.clear();
+	entry_->distinctAggrSubList_.clear();
+	entry_->distinctAggrsExpr_ = NULL;
+	entry_->distinctAggrColumnCount_ = 0;
+	entry_->distinctAggrFound_ = false;
 }
 
 void SQLExprs::ExprRewriter::replaceChildToAggrFirst(
@@ -1486,29 +2357,144 @@ void SQLExprs::ExprRewriter::replaceChildToAggrFirst(
 
 void SQLExprs::ExprRewriter::replaceChildToAdvanceOutput(
 		ExprFactoryContext &cxt, Expression::ModIterator &it) const {
-	const ExprCode &code = it.get().getCode();
-	assert(ExprTypeUtils::isAggregation(code.getType()));
+	Expression &expr = it.get();
+	const ExprCode &srcCode = expr.getCode();
+	assert(ExprTypeUtils::isAggregation(srcCode.getType()));
+
+	const ExprSpec &spec = cxt.getFactory().getSpec(srcCode.getType());
+	if (isDistinctAggregation(spec, srcCode.getType())) {
+		bool following = false;
+		for (Expression::ModIterator subIt(expr); subIt.exists(); subIt.next()) {
+			const uint32_t input = 1;
+			const uint32_t column = entry_->distinctAggrColumnCount_ + 1;
+			const TupleColumnType type = SQLValues::TypeUtils::toNullable(
+					subIt.get().getCode().getColumnType());
+
+			{
+				Expression &outExpr = createColumnExpr(cxt, input, column);
+
+				ExprCode &outCode = outExpr.getPlanningCode();
+				outCode.setColumnType(type);
+				outCode.setAttributes(ExprCode::ATTR_ASSIGNED);
+
+				subIt.remove();
+				subIt.insert(outExpr);
+			}
+
+			if (following) {
+				ExprCode outCode;
+				outCode.setType(SQLType::EXPR_AGG_FOLLOWING);
+				outCode.setColumnType(type);
+				outCode.setAttributes(ExprCode::ATTR_ASSIGNED);
+				Expression &outExpr = cxt.getFactory().create(cxt, outCode);
+
+				it.next();
+				it.insert(outExpr);
+			}
+			following = true;
+
+			entry_->distinctAggrColumnCount_++;
+		}
+		return;
+	}
+
 	it.remove();
+	const uint32_t aggrIndex = srcCode.getAggregationIndex();
 
-	const uint32_t aggrIndex = code.getAggregationIndex();
-
-	const uint32_t count = getResultCount(
-			cxt.getFactory(), code.getType(), SQLType::AGG_PHASE_ADVANCE_PIPE);
+	const uint32_t count =
+			getResultCount(spec, SQLType::AGG_PHASE_ADVANCE_PIPE);
+	const uint32_t baseColumn =
+			static_cast<uint32_t>(entry_->distinctAggrMainList_.size()) + 1;
 	for (uint32_t i = 0; i < count; i++) {
 		if (i > 0) {
 			it.next();
 		}
 
-		Expression &outExpr = cxt.getFactory().create(cxt, SQLType::AGG_FIRST);
+		for (uint32_t j = 0; j < 2; j++) {
+			if (j > 0 && !entry_->distinctAggrFound_) {
+				break;
+			}
+
+			Expression *outExpr;
+			if (j > 0) {
+				const uint32_t input = 0;
+				const uint32_t column = baseColumn + i;
+
+				assert(aggrIndex + i + 1 == column);
+				outExpr = &createColumnExpr(cxt, input, column);
+			}
+			else {
+				outExpr = &cxt.getFactory().create(cxt, SQLType::AGG_FIRST);
+			}
+
+			ExprCode &outCode = outExpr->getPlanningCode();
+			outCode.setColumnType(
+					cxt.getAggregationColumnType(aggrIndex + i));
+
+			if (j > 0) {
+				outCode.setAttributes(ExprCode::ATTR_ASSIGNED);
+			}
+			else {
+				outCode.setAggregationIndex(aggrIndex + i);
+				outCode.setAttributes(
+						ExprCode::ATTR_ASSIGNED | ExprCode::ATTR_AGGREGATED);
+			}
+
+			if (j == 0 && entry_->distinctAggrFound_) {
+				entry_->distinctAggrMainList_.push_back(outExpr);
+			}
+			else {
+				it.insert(*outExpr);
+			}
+		}
+	}
+}
+
+void SQLExprs::ExprRewriter::replaceChildToDistinctFinishOutput(
+		ExprFactoryContext &cxt, Expression::ModIterator &it) const {
+	assert(entry_->distinctAggrFound_);
+
+	Expression &expr = it.get();
+	const ExprCode &code = expr.getCode();
+	assert(ExprTypeUtils::isAggregation(code.getType()));
+
+	const bool distinct =
+			isDistinctAggregation(cxt.getFactory(), code.getType());
+
+	if (distinct) {
+		for (Expression::ModIterator subIt(expr); subIt.exists(); subIt.next()) {
+			const uint32_t input =  1;
+			const uint32_t column = entry_->distinctAggrColumnCount_ + 1;
+			const TupleColumnType type = SQLValues::TypeUtils::toNullable(
+					subIt.get().getCode().getColumnType());
+
+			Expression &outExpr = createColumnExpr(cxt, input, column);
+
+			ExprCode &outCode = outExpr.getPlanningCode();
+			outCode.setColumnType(type);
+			outCode.setAttributes(ExprCode::ATTR_ASSIGNED);
+
+			subIt.remove();
+			subIt.insert(outExpr);
+
+			entry_->distinctAggrColumnCount_++;
+		}
+	}
+	else {
+		it.remove();
+
+		const uint32_t input = 0;
+		const uint32_t column = static_cast<uint32_t>(
+				entry_->distinctAggrMainList_.size()) + 1;
+
+		Expression &outExpr = createColumnExpr(cxt, input, column);
 
 		ExprCode &outCode = outExpr.getPlanningCode();
-		outCode.setColumnType(
-				cxt.getAggregationColumnType(aggrIndex + i));
-		outCode.setAggregationIndex(aggrIndex + i);
-		outCode.setAttributes(
-				ExprCode::ATTR_ASSIGNED | ExprCode::ATTR_AGGREGATED);
+		outCode.setColumnType(code.getColumnType());
+		outCode.setAttributes(ExprCode::ATTR_ASSIGNED);
 
 		it.insert(outExpr);
+		entry_->distinctAggrMainList_.push_back(&expr);
 	}
 }
 
@@ -1564,14 +2550,28 @@ SQLExprs::ExprRewriter::Scope::~Scope() {
 SQLExprs::ExprRewriter::ScopedEntry::ScopedEntry(util::StackAllocator &alloc) :
 		columnMapping_(false),
 		inputProjected_(false),
+		inputNullProjected_(false),
 		idProjected_(false),
 		columnMapUpdated_(false),
 		columnMap_(alloc),
 		idColumnMap_(alloc),
 		inputMap_(alloc),
+		inputUsage_(alloc),
 		columnUsage_(alloc),
 		idUsage_(alloc),
-		inputNullList_(alloc) {
+		inputNullList_(alloc),
+		codeSetUpAlways_(false),
+		multiStageGrouping_(),
+		inputMiddle_(false),
+		outputMiddle_(false),
+		multiStageKeyWithDigest_(false),
+		multiStageKeyMap_(alloc),
+		multiStageKeyCount_(0),
+		distinctAggrMainList_(alloc),
+		distinctAggrSubList_(alloc),
+		distinctAggrsExpr_(NULL),
+		distinctAggrColumnCount_(0),
+		distinctAggrFound_(false) {
 }
 
 
@@ -1880,8 +2880,10 @@ SQLExprs::TypeResolver::complete(bool checking) {
 			nullable1 = inNullable_;
 		}
 
+		const bool advDistinct = (isAdvanceAggregation() && isDistinctAggregation());
+
 		TupleColumnType alterType = TupleTypes::TYPE_NULL;
-		if (hasInheritableResult()) {
+		if (!advDistinct && hasInheritableResult()) {
 			for (size_t i = 0;; i++) {
 				const ExprSpec::In *in =
 						(i < INHERITANCE_LIST_SIZE ? findIn(i, false) : NULL);
@@ -1897,7 +2899,12 @@ SQLExprs::TypeResolver::complete(bool checking) {
 					break;
 				}
 			}
-			alterType = TypeUtils::setNullable(alterType, true);
+
+			if ((spec_.flags_ & (
+					ExprSpec::FLAG_WINDOW_ONLY |
+					ExprSpec::FLAG_PSEUDO_WINDOW)) == 0) {
+				alterType = TypeUtils::toNullable(alterType);
+			}
 		}
 
 		ResultInfo retInfo;
@@ -1912,7 +2919,14 @@ SQLExprs::TypeResolver::complete(bool checking) {
 				break;
 			}
 
-			if (TypeUtils::isAny(srcType) || (!TypeUtils::isNull(srcType) &&
+			if (advDistinct) {
+				if (index >= INHERITANCE_LIST_SIZE) {
+					retInfo = ResultInfo();
+					break;
+				}
+				*retIt = TypeUtils::toNullable(inheritanceList_[index]);
+			}
+			else if (TypeUtils::isAny(srcType) || (!TypeUtils::isNull(srcType) &&
 					!TypeUtils::isDeclarable(srcType))) {
 				*retIt = alterType;
 			}
@@ -2102,14 +3116,17 @@ void SQLExprs::TypeResolver::acceptLast(bool tail) {
 				break;
 			}
 		}
-		if (!TypeUtils::isNull(converted)) {
-			break;
-		}
 
-		conversionError_ = static_cast<int32_t>(index);
-		return;
+		if (TypeUtils::isNull(converted)) {
+			conversionError_ = static_cast<int32_t>(index);
+			return;
+		}
 	}
 	while (false);
+
+	if (isAdvanceAggregation() && isDistinctAggregation()) {
+		converted = TypeUtils::toNullable(type);
+	}
 
 	if (index < INHERITANCE_LIST_SIZE) {
 		inheritanceList_[index] =
@@ -2188,8 +3205,18 @@ const SQLExprs::ExprSpec::In* SQLExprs::TypeResolver::getInList(
 
 TupleColumnType SQLExprs::TypeResolver::findResult(size_t index) const {
 	if (isAdvanceAggregation()) {
-		if (index < ExprSpec::AGGR_LIST_SIZE) {
-			return spec_.aggrList_[index].typeList_[0];
+		const ExprSpec::In *inList;
+		size_t size;
+		if (isDistinctAggregation()) {
+			inList = spec_.inList_;
+			size = ExprSpec::IN_LIST_SIZE;
+		}
+		else {
+			inList = spec_.aggrList_;
+			size = ExprSpec::AGGR_LIST_SIZE;
+		}
+		if (index < size) {
+			return inList[index].typeList_[0];
 		}
 	}
 	else {
@@ -2201,8 +3228,7 @@ TupleColumnType SQLExprs::TypeResolver::findResult(size_t index) const {
 }
 
 bool SQLExprs::TypeResolver::isResultNonNullable(size_t index) const {
-	return (isAdvanceAggregation() &&
-			(flags_ & ExprSpec::FLAG_DISTINCT) == 0 &&
+	return (isAdvanceAggregation() && !isDistinctAggregation() &&
 			index < ExprSpec::AGGR_LIST_SIZE &&
 			(spec_.aggrList_[index].flags_ & ExprSpec::FLAG_EXACT) != 0);
 }
@@ -2234,11 +3260,17 @@ bool SQLExprs::TypeResolver::isAdvanceAggregation() const {
 }
 
 bool SQLExprs::TypeResolver::isMergeAggregation() const {
-	return (spec_.isAggregation() &&
+	return (spec_.isAggregation() && !isDistinctAggregation() &&
 			aggrPhase_ == SQLType::AGG_PHASE_MERGE_PIPE);
 }
 
-SQLExprs::TypeResolver::ResultInfo::ResultInfo() {
+bool SQLExprs::TypeResolver::isDistinctAggregation() const {
+	return (spec_.isAggregation() &&
+			(spec_.flags_ & ExprSpec::FLAG_DISTINCT) != 0);
+}
+
+
+SQLExprs::TypeResolverResult::TypeResolverResult() {
 	std::fill(
 			typeList_, typeList_ + sizeof(typeList_) / sizeof(*typeList_),
 			static_cast<TupleColumnType>(TupleTypes::TYPE_NULL));
@@ -4119,9 +5151,8 @@ SQLExprs::IndexSelector::getPairElement(size_t ordinal, Pair &src) {
 int32_t SQLExprs::IndexSelector::compareValue(
 		const TupleValue &value1, const TupleValue &value2) {
 	const bool sensitive = true;
-	return SQLValues::ValueComparator(
-			SQLValues::ValueUtils::toCompType(value1, value2), sensitive)(
-			value1, value2);
+	return SQLValues::ValueComparator::ofValues(
+			value1, value2, sensitive, true)(value1, value2);
 }
 
 
@@ -4262,6 +5293,10 @@ SQLValues::CompColumn SQLExprs::ExprTypeUtils::toCompColumn(
 
 	column.setColumnPos(pos1, true);
 	column.setColumnPos(pos2, false);
+
+	if (type == SQLType::OP_EQ) {
+		column.setOrdering(false);
+	}
 
 	if (!last) {
 		return column;
@@ -4506,7 +5541,7 @@ bool SQLExprs::DataPartitionUtils::reducePartitionedTarget(
 						GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
 					}
 					rawInterval = SQLValues::ValueFnv1aHasher(
-							condValue.getType())(condValue) %
+							SQLValues::ValueAccessor(condValue.getType()))(condValue) %
 							partitioning->partitioningCount_;
 				}
 				else {
@@ -5037,6 +6072,12 @@ void SQLExprs::DefaultExprFactory::add(
 	entry.type_ = type;
 	entry.spec_ = spec;
 	entry.func_ = func;
+
+	const ExprType distinctType = spec.distinctExprType_;
+	if (distinctType != SQLType::START_EXPR && distinctType != type &&
+			!SQLExprs::ExprRewriter::isDistinctAggregation(spec, type)) {
+		add(distinctType, spec.toDistinct(type), NULL);
+	}
 }
 
 SQLExprs::DefaultExprFactory::DefaultExprFactory(
@@ -5281,16 +6322,23 @@ TupleValue SQLExprs::PlanningExpression::eval(ExprContext &cxt) const {
 }
 
 
-SQLExprs::AggregationExpressionBase::AggregationExpressionBase() :
-		aggrIndex_(std::numeric_limits<uint32_t>::max()) {
+SQLExprs::AggregationExpressionBase::AggregationExpressionBase() {
 }
 
 void SQLExprs::AggregationExpressionBase::initializeCustom(
 		ExprFactoryContext &cxt, const ExprCode &code) {
-	static_cast<void>(cxt);
-	aggrIndex_ = code.getAggregationIndex();
-}
+	const ExprSpec &spec = cxt.getFactory().getSpec(code.getType());
 
-uint32_t SQLExprs::AggregationExpressionBase::getAggregationIndex() const {
-	return aggrIndex_;
+	uint32_t count = 0;
+	for (uint32_t i = 0; i < ExprSpec::AGGR_LIST_SIZE; i++) {
+		if (!SQLValues::TypeUtils::isNull(spec.aggrList_[i].typeList_[0])) {
+			count = i + 1;
+		}
+	}
+	assert(count > 0);
+
+	const uint32_t aggrIndex = code.getAggregationIndex();
+	for (uint32_t i = 0; i < count; i++) {
+		aggrColumns_[i] = cxt.getArrangedAggregationColumn(aggrIndex + i);
+	}
 }

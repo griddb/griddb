@@ -114,6 +114,9 @@ public:
 	template<typename T> static T divide(const T &value1, const T &value2);
 	template<typename T> static T remainder(const T &value1, const T &value2);
 
+	static bool middleOfOrderedValues(int64_t value1, int64_t value2, int64_t &result);
+	static bool middleOfOrderedValues(double value1, double value2, double &result);
+
 private:
 	struct ErrorHandler;
 
