@@ -114,6 +114,7 @@ If necessary, please refer to [Installation Troubleshooting](docs/TroubleShootin
   - [V4.2 Release Notes](docs/GridDB-4.2-CE-RELEASE_NOTES.md)
   - [V4.3 Release Notes](docs/GridDB-4.3-CE-RELEASE_NOTES.md)
   - [V4.5 Release Notes](docs/GridDB-4.5-CE-RELEASE_NOTES.md)
+  - [V4.6 Release Notes](docs/GridDB-4.6-CE-RELEASE_NOTES.md)
 
 ## Client and Connector
   There are other clients and API for GridDB.

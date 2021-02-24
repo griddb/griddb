@@ -113,6 +113,7 @@ GridDBが提供する機能は『[GridDB 機能リファレンス](https://githu
   * [V4.2 Release Notes](docs/GridDB-4.2-CE-RELEASE_NOTES_ja.md)
   * [V4.3 Release Notes](docs/GridDB-4.3-CE-RELEASE_NOTES_ja.md)
   * [V4.5 Release Notes](docs/GridDB-4.5-CE-RELEASE_NOTES_ja.md)
+  * [V4.6 Release Notes](docs/GridDB-4.6-CE-RELEASE_NOTES_ja.md)
 
 ## クライアントとコネクタ
   Java以外のクライアント、APIもあります。
