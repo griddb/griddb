@@ -3,10 +3,10 @@
 	<modelVersion>4.0.0</modelVersion>
 	<groupId>com.github.griddb</groupId>
 	<artifactId>gridstore</artifactId>
-	<version>4.3.0</version>
+	<version>4.6.0</version>
 	<packaging>jar</packaging>
 	<name>com.github.griddb:java_client</name>
-	<description>Java Client for GridDB V4.3 CE</description>
+	<description>Java Client for GridDB</description>
 	<url>https://github.com/griddb/griddb_nosql/java_client</url>
     <licenses>
     	<license>
