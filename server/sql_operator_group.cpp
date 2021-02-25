@@ -16,7 +16,6 @@
 */
 
 #include "sql_operator_group.h"
-#include "sql_operator_utils.h"
 
 
 const SQLOps::OpProjectionRegistrar
@@ -24,15 +23,17 @@ SQLGroupOps::Registrar::REGISTRAR_INSTANCE((Registrar()));
 
 void SQLGroupOps::Registrar::operator()() const {
 	add<SQLOpTypes::OP_GROUP, Group>();
+	add<SQLOpTypes::OP_GROUP_DISTINCT, GroupDistinct>();
+	add<SQLOpTypes::OP_GROUP_DISTINCT_MERGE, GroupDistinctMerge>();
+	add<SQLOpTypes::OP_GROUP_BUCKET_HASH, GroupBucketHash>();
+
 	add<SQLOpTypes::OP_UNION, Union>();
 	add<SQLOpTypes::OP_UNION_ALL, UnionAll>();
-	add<SQLOpTypes::OP_UNION_SORTED, UnionSorted>();
 
-	addProjection<SQLOpTypes::PROJ_GROUP, GroupProjection>();
-	addProjection<SQLOpTypes::PROJ_DISTINCT, UnionDistinctProjection>();
-	addProjection<SQLOpTypes::PROJ_INTERSECT, UnionIntersectProjection>();
-	addProjection<SQLOpTypes::PROJ_EXCEPT, UnionExceptProjection>();
-	addProjection<SQLOpTypes::PROJ_COMPENSATE, UnionCompensateProjection>();
+	add<SQLOpTypes::OP_UNION_DISTINCT_MERGE, UnionDistinct>();
+	add<SQLOpTypes::OP_UNION_INTERSECT_MERGE, UnionIntersect>();
+	add<SQLOpTypes::OP_UNION_EXCEPT_MERGE, UnionExcept>();
+	add<SQLOpTypes::OP_UNION_COMPENSATE_MERGE, UnionCompensate>();
 }
 
 
@@ -42,52 +43,439 @@ void SQLGroupOps::Group::compile(OpContext &cxt) const {
 	OpNode &node = plan.createNode(SQLOpTypes::OP_SORT);
 
 	node.addInput(plan.getParentInput(0));
-	plan.getParentOutput(0).addInput(node);
 
 	OpCode code = getCode();
 	OpCodeBuilder builder(OpCodeBuilder::ofContext(cxt));
 
-	std::pair<Projection*, Projection*> projections =
-			builder.arrangeProjections(code, false, true);
-	setUpGroupProjections(builder, projections);
-	code.setPipeProjection(projections.first);
-	code.setFinishProjection(projections.second);
+	SQLExprs::ExprRewriter &rewriter = builder.getExprRewriter();
+	SQLExprs::ExprFactoryContext &factoryCxt = builder.getExprFactoryContext();
 
+	const Projection *srcProj = code.getPipeProjection();
+	const bool distinct = builder.findDistinctAggregation(*srcProj);
+
+	{
+		const SQLValues::CompColumnList &srcKeyList =
+				rewriter.rewriteCompColumnList(
+						factoryCxt, code.getKeyColumnList(), false);
+		setUpGroupKeys(builder, code, srcKeyList, distinct);
+	}
+
+	Projection *distinctProj = NULL;
+	{
+		assert(srcProj != NULL);
+		assert(code.getFinishProjection() == NULL);
+		if (distinct) {
+			setUpDistinctGroupProjections(
+					builder, code, code.getMiddleKeyColumnList(),
+					&distinctProj);
+		}
+		else {
+			setUpGroupProjections(
+					builder, code, *srcProj,
+					code.getKeyColumnList(), code.getMiddleKeyColumnList());
+		}
+	}
 	node.setCode(code);
+
+	OpCodeBuilder::setUpOutputNodes(
+			plan, NULL, node, distinctProj, getCode().getAggregationPhase());
+}
+
+void SQLGroupOps::Group::setUpGroupKeys(
+		OpCodeBuilder &builder, OpCode &code,
+		const SQLValues::CompColumnList &keyList, bool distinct) {
+
+	const bool withDigest =
+			!SQLValues::TupleDigester::isOrderingAvailable(keyList, false);
+
+	code.setMiddleKeyColumnList(&keyList);
+
+	SQLExprs::ExprRewriter &rewriter = builder.getExprRewriter();
+	SQLExprs::ExprFactoryContext &factoryCxt = builder.getExprFactoryContext();
+
+	SQLExprs::ExprRewriter::Scope scope(rewriter);
+	rewriter.activateColumnMapping(factoryCxt);
+
+	const uint32_t input = 0;
+
+	if (!distinct) {
+		rewriter.clearColumnUsage();
+		rewriter.addKeyColumnUsage(input, keyList, true);
+	}
+
+	if (withDigest) {
+		rewriter.setIdOfInput(input, true);
+		rewriter.setIdProjected(true);
+	}
+
+	rewriter.setInputProjected(true);
+
+	code.setKeyColumnList(
+			&rewriter.remapCompColumnList(factoryCxt, keyList, input, true));
 }
 
 void SQLGroupOps::Group::setUpGroupProjections(
-		OpCodeBuilder &builder,
-		std::pair<Projection*, Projection*> &projections) const {
-	assert(projections.second != NULL);
+		OpCodeBuilder &builder, OpCode &code, const Projection &src,
+		const SQLValues::CompColumnList &keyList,
+		const SQLValues::CompColumnList &midKeyList) {
+	SQLExprs::ExprFactoryContext &factoryCxt = builder.getExprFactoryContext();
+	SQLExprs::ExprFactoryContext::Scope scope(factoryCxt);
 
-	Projection &finishProj = builder.createProjection(SQLOpTypes::PROJ_GROUP);
-	{
-		finishProj.addChain(builder.rewriteProjection(*projections.second));
-	}
+	const SQLType::AggregationPhase srcPhase = code.getAggregationPhase();
+	factoryCxt.setAggregationPhase(true, srcPhase);
 
-	Projection &pipeProj = builder.createProjection(SQLOpTypes::PROJ_GROUP);
-	{
-		pipeProj.getProjectionCode().setKeyList(
-				&getCode().getKeyColumnList());
-		pipeProj.addChain(*projections.second);
-		pipeProj.addChain(*projections.first);
-	}
+	factoryCxt.setArrangedKeyList(&midKeyList);
 
-	projections.first = &pipeProj;
-	projections.second = &finishProj;
+	code.setMiddleProjection(&builder.createPipeFinishProjection(
+			builder.createMultiStageProjection(
+					builder.createMultiStageAggregation(src, -1, false, NULL),
+					builder.createMultiStageAggregation(src, 0, false, NULL)),
+			builder.createMultiStageAggregation(src, 0, true, &midKeyList)));
+
+	Projection &mid = builder.createPipeFinishProjection(
+			builder.createMultiStageAggregation(src, 1, false, NULL),
+			builder.createMultiStageAggregation(src, 1, true, &keyList));
+
+	Projection &pipe = builder.createPipeFinishProjection(
+			builder.createMultiStageAggregation(src, 2, false, NULL),
+			builder.createLimitedProjection(
+					builder.createMultiStageAggregation(src, 2, true, NULL), code));
+
+	code.setPipeProjection(&builder.createMultiStageProjection(pipe, mid));
 }
 
+void SQLGroupOps::Group::setUpDistinctGroupProjections(
+		OpCodeBuilder &builder, OpCode &code,
+		const SQLValues::CompColumnList &midKeyList,
+		Projection **distinctProj) {
+
+	const bool withDigest =
+			!SQLValues::TupleDigester::isOrderingAvailable(midKeyList, false);
+
+	SQLExprs::ExprRewriter &rewriter = builder.getExprRewriter();
+	SQLExprs::ExprFactoryContext &factoryCxt = builder.getExprFactoryContext();
+
+	SQLExprs::ExprRewriter::Scope scope(rewriter);
+	rewriter.activateColumnMapping(factoryCxt);
+
+	if (withDigest) {
+		const uint32_t input = 0;
+		rewriter.setIdOfInput(input, true);
+	}
+
+	{
+		Projection &proj = builder.createProjectionByUsage(false);
+		assert(proj.getProjectionCode().getType() == SQLOpTypes::PROJ_OUTPUT);
+
+		proj.getProjectionCode().setKeyList(&midKeyList);
+		code.setMiddleProjection(&proj);
+	}
+
+	if (withDigest) {
+		rewriter.setIdProjected(true);
+	}
+	rewriter.setInputProjected(true);
+
+	Projection &mid = builder.createProjectionByUsage(false);
+
+	std::pair<Projection*, Projection*> projections =
+			builder.arrangeProjections(code, false, true, distinctProj);
+	assert(projections.second != NULL && *distinctProj != NULL);
+
+	Projection &pipe = builder.createPipeFinishProjection(
+			*projections.first, *projections.second);
+
+	code.setPipeProjection(&builder.createMultiStageProjection(pipe, mid));
+	code.setFinishProjection(NULL);
+}
+
+
+void SQLGroupOps::GroupDistinct::compile(OpContext &cxt) const {
+	OpPlan &plan = cxt.getPlan();
+
+	OpCodeBuilder builder(OpCodeBuilder::ofContext(cxt));
+
+	const Projection *proj = getCode().getPipeProjection();
+
+	SQLOpUtils::ExprRefList distinctList = builder.getDistinctExprList(*proj);
+	const SQLType::AggregationPhase aggrPhase = getCode().getAggregationPhase();
+
+	const OpNode *baseNode = &plan.getParentInput(0);
+	for (SQLOpUtils::ExprRefList::const_iterator it = distinctList.begin();
+			it != distinctList.end(); ++it) {
+		const size_t index = it - distinctList.begin();
+
+		OpNode &uniqNode = plan.createNode(SQLOpTypes::OP_GROUP);
+		{
+			OpCode code = getCode();
+			code.setKeyColumnList(&builder.createDistinctGroupKeyList(
+					distinctList, index, false));
+			code.setPipeProjection(&builder.createDistinctGroupProjection(
+					distinctList, index, false, aggrPhase));
+			uniqNode.setCode(code);
+		}
+		uniqNode.addInput(plan.getParentInput(1));
+
+		OpNode *groupNode;
+		if (aggrPhase == SQLType::AGG_PHASE_ADVANCE_PIPE) {
+			groupNode = &uniqNode;
+		}
+		else {
+			groupNode = &plan.createNode(SQLOpTypes::OP_GROUP);
+			{
+				OpCode code = getCode();
+				code.setKeyColumnList(&builder.createDistinctGroupKeyList(
+						distinctList, index, true));
+				code.setPipeProjection(&builder.createDistinctGroupProjection(
+						distinctList, index, true, aggrPhase));
+				code.setAggregationPhase(SQLType::AGG_PHASE_ALL_PIPE);
+				groupNode->setCode(code);
+			}
+			groupNode->addInput(uniqNode);
+		}
+
+		OpNode &mergeNode =
+				plan.createNode(SQLOpTypes::OP_GROUP_DISTINCT_MERGE);
+		{
+			OpCode code = getCode();
+			code.setKeyColumnList(&builder.createDistinctMergeKeyList());
+			code.setPipeProjection(&builder.createDistinctMergeProjection(
+					distinctList, index, *proj, aggrPhase));
+			mergeNode.setCode(code);
+		}
+		mergeNode.addInput(*baseNode);
+		mergeNode.addInput(*groupNode);
+
+		baseNode = &mergeNode;
+	}
+	plan.linkToAllParentOutput(*baseNode);
+}
+
+
+void SQLGroupOps::GroupDistinctMerge::execute(OpContext &cxt) const {
+	typedef SQLValues::ValueUtils ValueUtils;
+	typedef SQLValues::Types::Long IdType;
+
+	TupleListReader &reader1 = cxt.getReader(0);
+	TupleListReader &reader2 = cxt.getReader(1);
+	TupleListReader &nextIdReader = cxt.getReader(0, 1);
+
+	const SQLValues::CompColumn &idKeyColumn = getIdKeyColumn();
+	const TupleColumn &column1 = idKeyColumn.getTupleColumn1();
+	const TupleColumn &column2 = idKeyColumn.getTupleColumn2();
+
+	SQLOpUtils::ProjectionRefPair emptyProjs;
+	const SQLOps::Projection &proj = getProjections(emptyProjs);
+
+	if (!reader1.exists()) {
+		return;
+	}
+
+	MergeContext &mergeCxt = prepareMergeContext(cxt);
+
+	int64_t id1 = ValueUtils::readCurrentValue<IdType>(reader1, column1);
+
+	int64_t id2 = -1;
+	if (reader2.exists()) {
+		id2 = ValueUtils::readCurrentValue<IdType>(reader2, column2);
+	}
+
+	int64_t nextId = -1;
+	do {
+		if (!nextIdReader.exists()) {
+			break;
+		}
+		else if (!mergeCxt.nextReaderStarted_) {
+			nextIdReader.next();
+			mergeCxt.nextReaderStarted_ = true;
+			if (!nextIdReader.exists()) {
+				break;
+			}
+		}
+		nextId = ValueUtils::readCurrentValue<IdType>(nextIdReader, column1);
+	}
+	while (false);
+
+	for (;;) {
+		if (cxt.checkSuspended()) {
+			return;
+		}
+
+		if (id2 < 0) {
+			emptyProjs.first->project(cxt);
+		}
+		else {
+			assert(id1 == id2);
+			if (mergeCxt.merged_) {
+				emptyProjs.second->project(cxt);
+			}
+			else {
+				proj.project(cxt);
+				mergeCxt.merged_ = true;
+			}
+		}
+
+		bool stepping;
+		{
+			if (id2 >= 0) {
+				reader2.next();
+			}
+
+			int64_t id;
+			if (reader2.exists()) {
+				id = ValueUtils::readCurrentValue<IdType>(reader2, column2);
+				assert(id >= 0);
+				stepping = (id != id2);
+			}
+			else {
+				id = -1;
+				stepping = true;
+			}
+			id2 = id;
+		}
+
+		if (!stepping && id1 != nextId) {
+			continue;
+		}
+
+		reader1.next();
+		if (!reader1.exists()) {
+			assert(nextId < 0);
+			break;
+		}
+		mergeCxt.merged_ = false;
+
+		if (nextIdReader.exists()) {
+			assert(nextId >= 0);
+			nextIdReader.next();
+		}
+		else {
+			assert(false);
+		}
+
+		id1 = nextId;
+		if (!nextIdReader.exists()) {
+			nextId = -1;
+			continue;
+		}
+
+		nextId = ValueUtils::readCurrentValue<IdType>(nextIdReader, column1);
+		assert(nextId >= 0);
+	}
+}
+
+const SQLValues::CompColumn&
+SQLGroupOps::GroupDistinctMerge::getIdKeyColumn() const {
+	return getCode().getKeyColumnList().front();
+}
+
+const SQLOps::Projection& SQLGroupOps::GroupDistinctMerge::getProjections(
+		SQLOpUtils::ProjectionRefPair &emptyProjs) const {
+	const Projection *totalProj = getCode().getPipeProjection();
+	assert(totalProj->getProjectionCode().getType() ==
+			SQLOpTypes::PROJ_MULTI_STAGE);
+
+	const Projection &mainProj = totalProj->chainAt(0);
+	const Projection &totalEmptyProj = totalProj->chainAt(1);
+	assert(totalEmptyProj.getProjectionCode().getType() ==
+			SQLOpTypes::PROJ_MULTI_STAGE);
+
+	emptyProjs.first = &totalEmptyProj.chainAt(0);
+	emptyProjs.second = &totalEmptyProj.chainAt(1);
+
+	return mainProj;
+}
+
+SQLGroupOps::GroupDistinctMerge::MergeContext&
+SQLGroupOps::GroupDistinctMerge::prepareMergeContext(OpContext &cxt) const {
+	if (cxt.getResource(0).isEmpty()) {
+		cxt.getResource(0) = ALLOC_UNIQUE(cxt.getAllocator(), MergeContext);
+	}
+	return cxt.getResource(0).resolveAs<MergeContext>();
+}
+
+
+SQLGroupOps::GroupDistinctMerge::MergeContext::MergeContext() :
+		merged_(false),
+		nextReaderStarted_(false) {
+}
+
+
+void SQLGroupOps::GroupBucketHash::execute(OpContext &cxt) const {
+	BucketContext &bucketCxt = prepareContext(cxt);
+	cxt.setUpExprContext();
+
+	const uint32_t outCount = cxt.getOutputCount();
+	TupleListReader &reader = cxt.getReader(0);
+	SQLValues::TupleListReaderSource readerSrc(reader);
+
+	for (; reader.exists(); reader.next()) {
+		if (cxt.checkSuspended()) {
+			return;
+		}
+
+		const int64_t digest = bucketCxt.digester_(readerSrc);
+		const uint64_t outIndex = static_cast<uint64_t>(digest) % outCount;
+
+		bucketCxt.getOutput(outIndex).project(cxt);
+	}
+}
+
+SQLGroupOps::GroupBucketHash::BucketContext&
+SQLGroupOps::GroupBucketHash::prepareContext(OpContext &cxt) const {
+	util::AllocUniquePtr<void> &resource = cxt.getResource(0);
+	if (!resource.isEmpty()) {
+		return resource.resolveAs<BucketContext>();
+	}
+
+	util::StackAllocator &alloc = cxt.getAllocator();
+	resource = ALLOC_UNIQUE(
+			alloc, BucketContext, alloc, getCode().getKeyColumnList());
+
+	BucketContext &bucketCxt = resource.resolveAs<BucketContext>();
+
+	SQLOpUtils::ExpressionListWriter::Source writerSrc(
+			cxt, *getCode().getPipeProjection(), false, NULL, false, NULL,
+			SQLExprs::ExprCode::INPUT_READER);
+
+	const uint32_t outCount = cxt.getOutputCount();
+	for (uint32_t i = 0; i < outCount; i++) {
+		writerSrc.setOutput(i);
+		bucketCxt.writerList_.push_back(
+				ALLOC_NEW(alloc) SQLOpUtils::ExpressionListWriter(writerSrc));
+	}
+
+	return bucketCxt;
+}
+
+
+SQLGroupOps::GroupBucketHash::BucketContext::BucketContext(
+		util::StackAllocator &alloc, const SQLValues::CompColumnList &keyList) :
+		writerList_(alloc),
+		digester_(alloc, SQLValues::TupleDigester(keyList)) {
+}
+
+inline SQLOpUtils::ExpressionListWriter::ByGeneral
+SQLGroupOps::GroupBucketHash::BucketContext::getOutput(uint64_t index) {
+	return SQLOpUtils::ExpressionListWriter::ByGeneral(
+			*writerList_[static_cast<size_t>(index)]);
+}
 
 
 void SQLGroupOps::Union::compile(OpContext &cxt) const {
 	OpPlan &plan = cxt.getPlan();
 	OpCode code = getCode();
 
+	const uint32_t inCount = cxt.getInputCount();
 	const SQLType::UnionType unionType = code.getUnionType();
+
 	const bool sorted = (unionType != SQLType::UNION_ALL);
-	OpNode &node = plan.createNode(
-			sorted ? SQLOpTypes::OP_UNION_SORTED : SQLOpTypes::OP_UNION_ALL);
+	const bool unique = (sorted && unionType != SQLType::END_UNION);
+	const bool singleDistinct =
+			(inCount == 1 && unionType == SQLType::UNION_DISTINCT);
+	OpNode &node = (singleDistinct ?
+			plan.getParentOutput(0) :
+			plan.createNode(toOperatorType(unionType)));
 
 	OpCodeBuilder builder(OpCodeBuilder::ofContext(cxt));
 
@@ -98,12 +486,21 @@ void SQLGroupOps::Union::compile(OpContext &cxt) const {
 		for (uint32_t i = 0; i < columnCount; i++) {
 			SQLValues::CompColumn column;
 			column.setColumnPos(i, true);
+			column.setOrdering(false);
 			list.push_back(column);
 		}
 		code.setKeyColumnList(&list);
 	}
 
-	const uint32_t inCount = cxt.getInputCount();
+	std::pair<Projection*, Projection*> projections =
+			builder.arrangeProjections(code, false, true, NULL);
+	if (sorted) {
+		OpCodeBuilder::removeUnificationAttributes(*projections.first);
+		if (projections.second != NULL) {
+			OpCodeBuilder::removeUnificationAttributes(*projections.second);
+		}
+	}
+
 	for (uint32_t i = 0; i < inCount; i++) {
 		if (sorted) {
 			OpNode &subNode = plan.createNode(SQLOpTypes::OP_SORT);
@@ -115,8 +512,22 @@ void SQLGroupOps::Union::compile(OpContext &cxt) const {
 			rewriter.setMappedInput(i, 0);
 
 			subCode.setKeyColumnList(&code.getKeyColumnList());
-			subCode.setPipeProjection(
-					&builder.createIdenticalProjection(false, i));
+
+			std::pair<Projection*, Projection*> subProjections;
+			if (singleDistinct) {
+				subProjections = projections;
+			}
+			else {
+				Projection &proj = builder.createIdenticalProjection(true, i);
+				OpCodeBuilder::removeUnificationAttributes(proj);
+				subProjections.first = &proj;
+			}
+			subCode.setPipeProjection(subProjections.first);
+			subCode.setFinishProjection(subProjections.second);
+
+			if (unique) {
+				subCode.setSubLimit(1);
+			}
 
 			subNode.setCode(subCode);
 			subNode.addInput(plan.getParentInput(i));
@@ -128,61 +539,37 @@ void SQLGroupOps::Union::compile(OpContext &cxt) const {
 		}
 	}
 
-	std::pair<Projection*, Projection*> projections =
-			builder.arrangeProjections(code, false, true);
+	if (!singleDistinct) {
+		code.setPipeProjection(projections.first);
+		code.setFinishProjection(projections.second);
 
-	setUpUnionProjections(
-			builder, unionType, code.findKeyColumnList(), projections);
-
-	code.setPipeProjection(projections.first);
-	code.setFinishProjection(projections.second);
-
-	node.setCode(code);
-	plan.getParentOutput(0).addInput(node);
+		node.setCode(code);
+		plan.linkToAllParentOutput(node);
+	}
 }
 
-void SQLGroupOps::Union::setUpUnionProjections(
-		OpCodeBuilder &builder, SQLType::UnionType unionType,
-		const SQLValues::CompColumnList *keyColumnList,
-		std::pair<Projection*, Projection*> &projections) const {
-	SQLOpTypes::ProjectionType projType;
+SQLOpTypes::Type SQLGroupOps::Union::toOperatorType(
+		SQLType::UnionType unionType) {
 	switch (unionType) {
 	case SQLType::UNION_ALL:
-		return;
+		return SQLOpTypes::OP_UNION_ALL;
 	case SQLType::UNION_DISTINCT:
-		projType = SQLOpTypes::PROJ_DISTINCT;
-		break;
+		return SQLOpTypes::OP_UNION_DISTINCT_MERGE;
 	case SQLType::UNION_INTERSECT:
-		projType = SQLOpTypes::PROJ_INTERSECT;
-		break;
+		return SQLOpTypes::OP_UNION_INTERSECT_MERGE;
 	case SQLType::UNION_EXCEPT:
-		projType = SQLOpTypes::PROJ_EXCEPT;
-		break;
+		return SQLOpTypes::OP_UNION_EXCEPT_MERGE;
 	default:
-		projType = SQLOpTypes::PROJ_COMPENSATE;
 		assert(unionType == SQLType::END_UNION);
-		break;
+		return SQLOpTypes::OP_UNION_COMPENSATE_MERGE;
 	}
+}
 
-	assert(keyColumnList != NULL);
 
-	Projection &pipeProj = builder.createProjection(projType);
-	{
-		pipeProj.getProjectionCode().setKeyList(keyColumnList);
-		pipeProj.addChain(builder.rewriteProjection(*projections.first));
-	}
+void SQLGroupOps::UnionAll::compile(OpContext &cxt) const {
+	cxt.setAllInputSourceType(SQLExprs::ExprCode::INPUT_ARRAY_TUPLE);
 
-	Projection &finishProj = builder.createProjection(projType);
-	{
-		finishProj.addChain(*projections.first);
-
-		if (projections.second != NULL) {
-			finishProj.addChain(*projections.second);
-		}
-	}
-
-	projections.first = &pipeProj;
-	projections.second = &finishProj;
+	Operator::compile(cxt);
 }
 
 void SQLGroupOps::UnionAll::execute(OpContext &cxt) const {
@@ -191,12 +578,22 @@ void SQLGroupOps::UnionAll::execute(OpContext &cxt) const {
 	SQLValues::ArrayTuple tuple(cxt.getAllocator());
 	cxt.getExprContext().setArrayTuple(0, &tuple);
 
+	cxt.setUpExprContext();
+
+	SQLValues::CompColumnList outColumnList(cxt.getAllocator());
+	const TupleList::Info &info = cxt.getWriter(0).getTupleList().getInfo();
+	for (uint32_t i = 0; i < info.columnCount_; i++) {
+		SQLValues::CompColumn column;
+		column.setType(info.columnTypeList_[i]);
+		outColumnList.push_back(column);
+	}
+
 	const uint32_t count = cxt.getInputCount();
 	for (uint32_t i = 0; i < count; i++) {
 		for (TupleListReader &reader = cxt.getReader(i); reader.exists();) {
 			ReadableTuple readerTuple = reader.get();
 			tuple.assign(
-					cxt.getValueContext(), readerTuple,
+					cxt.getValueContext(), readerTuple, outColumnList,
 					cxt.getInputColumnList(i));
 			getCode().getPipeProjection()->projectBy(cxt, reader, i);
 			reader.next();
@@ -208,58 +605,29 @@ void SQLGroupOps::UnionAll::execute(OpContext &cxt) const {
 	}
 }
 
-void SQLGroupOps::UnionSorted::execute(OpContext &cxt) const {
-	SQLValues::VarContext::Scope varScope(cxt.getVarContext());
 
-	UnionHeapQueue baseQueue(
-			cxt.getAllocator(), getCode().getGreaterPredicate());
-	TupleHeapQueue &queue = baseQueue.build(cxt);
-
-	while (!queue.isEmpty()) {
-		const TupleHeapQueue::Element &elem = queue.pop();
-		const uint32_t index = static_cast<uint32_t>(elem.getOrdinal());
-
-		TupleListReader &reader = cxt.getReader(index);
-
-		SQLValues::ArrayTuple &tuple = elem.getValue().getTuple();
-		cxt.getExprContext().setArrayTuple(0, &tuple);
-
-		getCode().getPipeProjection()->projectBy(cxt, reader, index);
-
-		reader.next();
-		if (cxt.checkSuspended()) {
-			return;
-		}
-		if (!reader.exists()) {
-			continue;
-		}
-
-		ReadableTuple readerTuple = reader.get();
-		tuple.assign(
-				cxt.getValueContext(), readerTuple,
-				cxt.getInputColumnList(index));
-
-		queue.push(elem);
-	}
+SQLGroupOps::UnionMergeContext::UnionMergeContext(int64_t initialState) :
+		state_(initialState),
+		initialState_(initialState),
+		topElemChecked_(false) {
 }
 
+SQLGroupOps::TupleHeapQueue
+SQLGroupOps::UnionMergeContext::createHeapQueue(
+		OpContext &cxt,
+		const SQLValues::CompColumnList &keyColumnList,
+		util::LocalUniquePtr<TupleHeapQueue::Element> *topElem) {
+	util::StackAllocator &alloc = cxt.getAllocator();
 
-SQLGroupOps::UnionSorted::UnionHeapQueue::UnionHeapQueue(
-		util::StackAllocator &alloc, const SQLValues::TupleGreater &pred) :
-		alloc_(alloc),
-		queue_(setUpPredicate(pred), alloc),
-		list_(alloc) {
-}
+	TupleGreater pred(
+			alloc,
+			SQLValues::TupleComparator(keyColumnList, false, true));
+	TupleDigester digester(
+			alloc, SQLValues::TupleDigester(keyColumnList, NULL));
 
-SQLGroupOps::UnionSorted::UnionHeapQueue::~UnionHeapQueue() {
-	while (!list_.empty()) {
-		util::AllocUniquePtr<SQLValues::ArrayTuple> tuple(list_.back(), alloc_);
-		list_.pop_back();
-	}
-}
+	TupleHeapQueue queue(pred, alloc);
+	queue.setPredicateEmpty(pred.getBase().isEmpty(0));
 
-SQLGroupOps::TupleHeapQueue& SQLGroupOps::UnionSorted::UnionHeapQueue::build(
-		OpContext &cxt) {
 	const uint32_t count = cxt.getInputCount();
 	for (uint32_t i = 0; i < count; i++) {
 		TupleListReader &reader = cxt.getReader(i);
@@ -267,286 +635,222 @@ SQLGroupOps::TupleHeapQueue& SQLGroupOps::UnionSorted::UnionHeapQueue::build(
 			continue;
 		}
 
-		util::AllocUniquePtr<SQLValues::ArrayTuple> tuple(
-				ALLOC_UNIQUE(alloc_, SQLValues::ArrayTuple, alloc_));
-		list_.push_back(tuple.get());
-
-		ReadableTuple readerTuple = reader.get();
-		tuple->assign(
-				cxt.getValueContext(), readerTuple,
-				cxt.getInputColumnList(i));
-
-		queue_.push(TupleHeapQueue::Element(
-				SQLValues::ArrayTupleRef(*tuple.release()), i));
+		queue.push(TupleHeapQueue::Element(
+				ReadableTupleRef(alloc, reader, digester), i));
 	}
 
-	return queue_;
-}
-
-SQLValues::TupleGreater
-SQLGroupOps::UnionSorted::UnionHeapQueue::setUpPredicate(
-		const SQLValues::TupleGreater &pred) {
-	SQLValues::TupleGreater destPred = pred;
-	destPred.getComparator().setForKeyOnlyArray(false);
-	return destPred;
-}
-
-
-void SQLGroupOps::GroupProjection::initializeProjectionAt(
-		OpContext &cxt) const {
-	if (isFinishOnly()) {
-		return;
-	}
-
-	util::StackAllocator &alloc = cxt.getAllocator();
-	cxt.getResource(0, SQLOpTypes::PROJ_GROUP) =
-			ALLOC_UNIQUE(alloc, SQLValues::ArrayTuple, alloc);
-}
-
-void SQLGroupOps::GroupProjection::project(OpContext &cxt) const {
-	SQLValues::VarContext::Scope varScope(cxt.getVarContext());
-
-	SQLValues::ArrayTuple &key = cxt.getResource(
-			0, SQLOpTypes::PROJ_GROUP).resolveAs<SQLValues::ArrayTuple>();
-
-	if (isFinishOnly()) {
-		if (!key.isEmpty()) {
-			chainAt(CHAIN_FINISH).project(cxt);
+	do {
+		if (topElem == NULL) {
+			break;
 		}
-		return;
-	}
 
-	const SQLValues::CompColumnList *keyColumnList =
-			getProjectionCode().getKeyList();
-	assert(keyColumnList != NULL);
-
-	ReadableTuple curTuple = cxt.getExprContext().getReadableTuple(0);
-	if (key.isEmpty() || !SQLValues::TupleEq(*keyColumnList)(curTuple, key)) {
-		if (!key.isEmpty()) {
-			chainAt(CHAIN_FINISH).project(cxt);
+		TupleListReader &reader = cxt.getReader(0, 1);
+		if (!reader.exists()) {
+			break;
 		}
-		chainAt(CHAIN_PIPE).clearProjection(cxt);
-		key.assign(cxt.getValueContext(), curTuple, *keyColumnList);
+
+		if (!topElemChecked_) {
+			reader.next();
+			if (!reader.exists()) {
+				break;
+			}
+			topElemChecked_ = true;
+		}
+
+		*topElem = UTIL_MAKE_LOCAL_UNIQUE(
+				*topElem, TupleHeapQueue::Element,
+				ReadableTupleRef(alloc, reader, digester), 0);
 	}
-	chainAt(CHAIN_PIPE).project(cxt);
+	while (false);
+
+	return queue;
 }
 
-bool SQLGroupOps::GroupProjection::isFinishOnly() const {
-	return (getProjectionCode().getKeyList() == NULL);
+
+template<typename Op>
+void SQLGroupOps::UnionMergeBase<Op>::compile(OpContext &cxt) const {
+	cxt.setAllInputSourceType(SQLExprs::ExprCode::INPUT_READER_MULTI);
+
+	Operator::compile(cxt);
 }
 
+template<typename Op>
+void SQLGroupOps::UnionMergeBase<Op>::execute(OpContext &cxt) const {
+	const SQLValues::CompColumnList &keyColumnList =
+			getCode().getKeyColumnList();
 
-bool SQLGroupOps::UnionActionBase::onDifferent(
-		UnionFlags &flags) const {
-	static_cast<void>(flags);
+	util::AllocUniquePtr<void> &resource = cxt.getResource(0);
+	if (resource.isEmpty()) {
+		resource = ALLOC_UNIQUE(
+				cxt.getAllocator(), UnionMergeContext, Op::toInitial(cxt, getCode()));
+	}
+	UnionMergeContext &unionCxt = resource.resolveAs<UnionMergeContext>();
+
+	util::LocalUniquePtr<TupleHeapQueue::Element> topElem;
+	util::LocalUniquePtr<TupleHeapQueue::Element> *topElemRef =
+			(Op::InputUnique::VALUE ? NULL : &topElem);
+	TupleHeapQueue queue =
+			unionCxt.createHeapQueue(cxt, keyColumnList, topElemRef);
+
+	const SQLOps::Projection *projection = getCode().getPipeProjection();
+	TupleHeapQueue::Element *topElemPtr = topElem.get();
+	MergeAction action(cxt, unionCxt, projection, &topElemPtr);
+
+	queue.mergeUnique(action);
+}
+
+template<typename Op>
+inline bool SQLGroupOps::UnionMergeBase<Op>::onTuple(
+		int64_t &state, size_t ordinal) {
+	static_cast<void>(state);
+	static_cast<void>(ordinal);
 	return false;
 }
 
-bool SQLGroupOps::UnionActionBase::onFinish(
-		UnionFlags &flags) const {
-	static_cast<void>(flags);
-	return false;
+template<typename Op>
+inline bool SQLGroupOps::UnionMergeBase<Op>::onFinish(
+		int64_t &state, int64_t initialState) {
+	static_cast<void>(state);
+	static_cast<void>(initialState);
+	return true;
 }
 
-bool SQLGroupOps::UnionActionBase::onNonMatch(
-		UnionFlags &flags, const UnionFlags &initialFlags) const {
-	static_cast<void>(flags);
-	static_cast<void>(initialFlags);
-	return false;
+template<typename Op>
+inline bool SQLGroupOps::UnionMergeBase<Op>::onSingle(
+		size_t ordinal, int64_t initialState) {
+	static_cast<void>(ordinal);
+	static_cast<void>(initialState);
+	return true;
 }
 
-bool SQLGroupOps::UnionActionBase::onTuple(
-		UnionFlags &flags, uint32_t index) const {
-	static_cast<void>(flags);
-	static_cast<void>(index);
-	return false;
-}
-
-SQLGroupOps::UnionFlags SQLGroupOps::UnionActionBase::getInitialFlags(
-		uint32_t inputCount) const {
-	static_cast<void>(inputCount);
-	return UnionFlags();
+template<typename Op>
+int64_t SQLGroupOps::UnionMergeBase<Op>::toInitial(
+		OpContext &cxt, const OpCode &code) {
+	static_cast<void>(cxt);
+	static_cast<void>(code);
+	return 0;
 }
 
 
-bool SQLGroupOps::UnionDistinctAction::onNonMatch(
-		UnionFlags &flags, const UnionFlags &initialFlags) const {
-	static_cast<void>(flags);
-	static_cast<void>(initialFlags);
+template<typename Op>
+SQLGroupOps::UnionMergeBase<Op>::MergeAction::MergeAction(
+		OpContext &cxt, UnionMergeContext &unionCxt,
+		const SQLOps::Projection *projection,
+		TupleHeapQueue::Element **topElemPtr) :
+		cxt_(cxt),
+		unionCxt_(unionCxt),
+		projection_(projection),
+		topElemPtr_(topElemPtr) {
+}
+
+template<typename Op>
+inline bool SQLGroupOps::UnionMergeBase<Op>::MergeAction::operator()(
+		const TupleHeapQueue::Element &elem, const util::FalseType&) {
+	if (Op::onTuple(unionCxt_.state_, elem.getOrdinal())) {
+		projection_->projectBy(cxt_, elem.getValue());
+	}
+
+
+	return true;
+}
+
+template<typename Op>
+inline void SQLGroupOps::UnionMergeBase<Op>::MergeAction::operator()(
+		const TupleHeapQueue::Element &elem, const util::TrueType&) {
+	if (Op::onFinish(unionCxt_.state_, unionCxt_.initialState_)) {
+		projection_->projectBy(cxt_, elem.getValue());
+	}
+}
+
+template<typename Op>
+inline bool SQLGroupOps::UnionMergeBase<Op>::MergeAction::operator()(
+		const TupleHeapQueue::Element &elem, const util::TrueType&,
+		const util::TrueType&) {
+	return Op::onSingle(elem.getOrdinal(), unionCxt_.initialState_);
+}
+
+template<typename Op>
+template<typename Pred>
+inline bool SQLGroupOps::UnionMergeBase<Op>::MergeAction::operator()(
+		const TupleHeapQueue::Element &elem, const util::TrueType&,
+		const Pred &pred) {
+	if (!Op::InputUnique::VALUE) {
+		if (elem.getOrdinal() == 0 && *topElemPtr_ != NULL) {
+			const bool subFinishable = pred(**topElemPtr_, elem);
+			if (!(*topElemPtr_)->next()) {
+				(*topElemPtr_) = NULL;
+			}
+			return subFinishable;
+		}
+	}
+
 	return true;
 }
 
 
-bool SQLGroupOps::UnionIntersectAction::onNonMatch(
-		UnionFlags &flags, const UnionFlags &initialFlags) const {
-	flags = initialFlags;
+inline bool SQLGroupOps::UnionIntersect::onTuple(int64_t &state, size_t ordinal) {
+	static_cast<void>(ordinal);
+	--state;
 	return false;
 }
 
-bool SQLGroupOps::UnionIntersectAction::onTuple(
-		UnionFlags &flags, uint32_t index) const {
-	flags &= ~(static_cast<UnionFlags>(1) << index);
-
-	if (flags == 0) {
-		flags = ~static_cast<UnionFlags>(0);
-		return true;
-	}
-
-	return false;
+inline bool SQLGroupOps::UnionIntersect::onFinish(
+		int64_t &state, int64_t initialState) {
+	const bool matched = (state == 0);
+	state = initialState;
+	return matched;
 }
 
-SQLGroupOps::UnionFlags SQLGroupOps::UnionIntersectAction::getInitialFlags(
-		uint32_t inputCount) const {
-	return (~static_cast<UnionFlags>(
-			(~static_cast<UnionFlags>(0)) << inputCount));
+inline bool SQLGroupOps::UnionIntersect::onSingle(
+		size_t ordinal, int64_t initialState) {
+	static_cast<void>(ordinal);
+	return (initialState <= 1);
 }
 
-
-bool SQLGroupOps::UnionExceptAction::onDifferent(
-		UnionFlags &flags) const {
-	return (flags == 0);
-}
-
-bool SQLGroupOps::UnionExceptAction::onFinish(
-		UnionFlags &flags) const {
-	return (flags == 0);
-}
-
-bool SQLGroupOps::UnionExceptAction::onNonMatch(
-		UnionFlags &flags, const UnionFlags &initialFlags) const {
-	static_cast<void>(initialFlags);
-	flags = 0;
-	return false;
-}
-
-bool SQLGroupOps::UnionExceptAction::onTuple(
-		UnionFlags &flags, uint32_t index) const {
-	if (index != 0) {
-		flags = 1;
-	}
-
-	return false;
+inline int64_t SQLGroupOps::UnionIntersect::toInitial(
+		OpContext &cxt, const OpCode &code) {
+	static_cast<void>(code);
+	return static_cast<int64_t>(cxt.getInputCount());
 }
 
 
-bool SQLGroupOps::UnionCompensateAction::onDifferent(
-		UnionFlags &flags) const {
-	return (flags == 0);
-}
-
-bool SQLGroupOps::UnionCompensateAction::onFinish(
-		UnionFlags &flags) const {
-	return (flags == 0);
-}
-
-bool SQLGroupOps::UnionCompensateAction::onNonMatch(
-		UnionFlags &flags, const UnionFlags &initialFlags) const {
-	static_cast<void>(initialFlags);
-	flags = 0;
-	return false;
-}
-
-bool SQLGroupOps::UnionCompensateAction::onTuple(
-		UnionFlags &flags, uint32_t index) const {
-	if (index == 0) {
-		flags = 1;
-		return true;
+inline bool SQLGroupOps::UnionExcept::onTuple(int64_t &state, size_t ordinal) {
+	if (ordinal != 0) {
+		state = 1;
 	}
 	return false;
 }
 
+inline bool SQLGroupOps::UnionExcept::onFinish(
+		int64_t &state, int64_t initialState) {
+	static_cast<void>(initialState);
 
-template<typename Action>
-void SQLGroupOps::SortedUnionProjection<Action>::initializeProjectionAt(
-		OpContext &cxt) const {
-	if (isFinishOnly()) {
-		return;
+	const bool matched = (state == 0);
+	state = 0;
+	return matched;
+}
+
+inline bool SQLGroupOps::UnionExcept::onSingle(
+		size_t ordinal, int64_t initialState) {
+	static_cast<void>(initialState);
+	return (ordinal == 0);
+}
+
+
+inline bool SQLGroupOps::UnionCompensate::onTuple(
+		int64_t &state, size_t ordinal) {
+	if (ordinal != 0) {
+		return false;
 	}
-
-	util::StackAllocator &alloc = cxt.getAllocator();
-	cxt.getResource(0, SQLOpTypes::PROJ_DISTINCT) = ALLOC_UNIQUE(
-			alloc, SortedUnionContext, alloc,
-			action_.getInitialFlags(cxt.getInputCount()));
+	state = 1;
+	return true;
 }
 
-template<typename Action>
-void SQLGroupOps::SortedUnionProjection<Action>::project(
-		OpContext &cxt) const {
-	SQLValues::VarContext::Scope varScope(cxt.getVarContext());
+inline bool SQLGroupOps::UnionCompensate::onFinish(
+		int64_t &state, int64_t initialState) {
+	static_cast<void>(initialState);
 
-	SortedUnionContext &unionCxt = cxt.getResource(
-			0, SQLOpTypes::PROJ_DISTINCT).resolveAs<SortedUnionContext>();
-
-	if (isFinishOnly()) {
-		if (!unionCxt.getLastTuple().isEmpty() &&
-				action_.onFinish(unionCxt.getFlags())) {
-			cxt.getExprContext().setArrayTuple(0, &unionCxt.getLastTuple());
-			for (ChainIterator it(*this); it.exists(); it.next()) {
-				it.get().project(cxt);
-			}
-		}
-		return;
-	}
-
-	const SQLValues::CompColumnList *keyColumnList =
-			getProjectionCode().getKeyList();
-	assert(keyColumnList != NULL);
-
-	SQLValues::ArrayTuple *lastTuple = cxt.getExprContext().getArrayTuple(0);
-	assert(lastTuple != NULL);
-
-	SQLValues::ArrayTuple lastKey(cxt.getAllocator());
-	lastKey.assign(cxt.getValueContext(), *lastTuple, *keyColumnList);
-
-	SQLValues::ArrayTuple &key = unionCxt.getKey();
-	if (key.isEmpty() || !SQLValues::TupleEq(*keyColumnList)(lastKey, key)) {
-		if (!key.isEmpty() && action_.onDifferent(unionCxt.getFlags())) {
-			cxt.getExprContext().setArrayTuple(0, &unionCxt.getLastTuple());
-			chainAt(0).project(cxt);
-		}
-
-		key.swap(lastKey);
-		if (action_.onNonMatch(unionCxt.getFlags(), unionCxt.getInitialFlags())) {
-			cxt.getExprContext().setArrayTuple(0, lastTuple);
-			chainAt(0).project(cxt);
-		}
-	}
-
-	const uint32_t index = cxt.getExprContext().getActiveInput();
-	if (action_.onTuple(unionCxt.getFlags(), index)) {
-		cxt.getExprContext().setArrayTuple(0, lastTuple);
-		chainAt(0).project(cxt);
-	}
-
-	unionCxt.getLastTuple().assign(cxt.getValueContext(), *lastTuple);
-}
-
-template<typename Action>
-bool SQLGroupOps::SortedUnionProjection<Action>::isFinishOnly() const {
-	return (getProjectionCode().getKeyList() == NULL);
-}
-
-
-SQLGroupOps::SortedUnionContext::SortedUnionContext(
-		util::StackAllocator &alloc, UnionFlags initialFlags) :
-		key_(alloc),
-		lastTuple_(alloc),
-		initialFlags_(initialFlags),
-		flags_(initialFlags) {
-}
-
-SQLGroupOps::UnionFlags SQLGroupOps::SortedUnionContext::getInitialFlags() {
-	return initialFlags_;
-}
-
-SQLGroupOps::UnionFlags& SQLGroupOps::SortedUnionContext::getFlags() {
-	return flags_;
-}
-
-SQLValues::ArrayTuple& SQLGroupOps::SortedUnionContext::getKey() {
-	return key_;
-}
-
-SQLValues::ArrayTuple& SQLGroupOps::SortedUnionContext::getLastTuple() {
-	return lastTuple_;
+	const bool matched = (state == 0);
+	state = 0;
+	return matched;
 }

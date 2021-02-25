@@ -19,7 +19,6 @@
 #include "util/numeric.h"
 
 #include "c_utility_cpp.h"
-#include "sql_common.h"
 
 #include "sql_rewrite.h"
 #include "newsql_interface.h"

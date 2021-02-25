@@ -29,6 +29,8 @@
 #include "result_set.h"
 #include "meta_store.h"
 
+#include "sql_expression_core.h"
+
 class BoolExpr;
 class Expr;
 
@@ -69,8 +71,31 @@ struct SQLContainerImpl {
 
 	struct Constants;
 
+	struct ColumnCode;
+	template<RowArrayType RAType, typename T, typename S, bool Nullable>
+	class ColumnEvaluator;
+
+	class ColumnExpression;
+	class IdExpression;
+	class ComparisonExpressionBase;
+	template<typename Func> class ComparisonExpression;
+
+	class GeneralCondEvaluator;
+	template<typename Func, size_t V> class ComparisonEvaluator;
+	class EmptyCondEvaluator;
+
+	class GeneralProjector;
+	class CountProjector;
+
+	class CursorRef;
+
 	template<RowArrayType RAType>
 	struct ScannerHandler;
+	class ScannerHandlerBase;
+	class ScannerHandlerFactory;
+
+	class BaseRegistrar;
+	class DefaultRegistrar;
 
 	struct SearchResult;
 	class CursorScope;
@@ -79,6 +104,9 @@ struct SQLContainerImpl {
 
 	struct ContainerValueUtils;
 	struct TQLTool;
+
+	typedef void (*UpdatorFunc)(OpContext&, void*);
+	typedef std::pair<UpdatorFunc, void*> UpdatorEntry;
 };
 
 class SQLContainerImpl::CursorImpl : public SQLContainerUtils::ScanCursor {
@@ -123,6 +151,8 @@ public:
 			typename BaseContainer::RowArrayImpl<
 					BaseContainer, RAType> &rowArrayImpl);
 
+	bool isValueNull(const ContainerColumn &column);
+
 	template<RowArrayType RAType, typename Ret, TupleColumnType T>
 	Ret getValueDirect(
 			SQLValues::ValueContext &cxt, const ContainerColumn &column);
@@ -139,7 +169,9 @@ public:
 			const typename SQLValues::TypeUtils::Traits<T>::ValueType &value);
 
 	ContainerRowScanner* tryCreateScanner(
-			OpContext &cxt, const Projection &proj);
+			OpContext &cxt, const Projection &proj,
+			const BaseContainer &container);
+	void updateScanner(OpContext &cxt, bool finished);
 
 	void clearResultSetPreserving(ResultSet &resultSet);
 	void activateResultSetPreserving(ResultSet &resultSet);
@@ -150,6 +182,7 @@ public:
 			const ColumnInfo &columnInfo, bool used, bool withStats);
 	static ContainerColumn resolveColumn(
 			BaseContainer &container, bool forId, uint32_t pos);
+	bool isColumnNonNullable(uint32_t pos);
 
 	void preparePartialSearch(
 			OpContext &cxt, BtreeSearchContext &sc,
@@ -157,7 +190,7 @@ public:
 	bool finishPartialSearch(OpContext &cxt, BtreeSearchContext &sc);
 
 	static void setUpSearchContext(
-			OpContext &cxt, TransactionContext &txn, 
+			OpContext &cxt, TransactionContext &txn,
 			const SQLExprs::IndexConditionList &targetCondList,
 			BtreeSearchContext &sc, const BaseContainer &container);
 
@@ -169,6 +202,11 @@ public:
 			OpContext &cxt, const SearchResult &result,
 			const SQLExprs::IndexConditionList *targetCondList,
 			ContainerRowScanner &scanner);
+
+	static void acceptIndexInfo(
+			OpContext &cxt, TransactionContext &txn, BaseContainer &container,
+			const SQLExprs::IndexConditionList &targetCondList,
+			const IndexInfo &info);
 
 	void setIndexLost(OpContext &cxt);
 
@@ -214,9 +252,11 @@ private:
 	typedef BaseContainer::RowArrayImpl<
 			BaseContainer, BaseContainer::ROW_ARRAY_PLAIN> PlainRowArray;
 
+	typedef util::Vector<UpdatorEntry> UpdatorList;
+
 	template<
 			TupleColumnType T,
-			bool FixedSize = SQLValues::TypeUtils::Traits<T>::SIZE_FIXED>
+			bool VarSize = SQLValues::TypeUtils::Traits<T>::SIZE_VAR>
 	struct DirectValueAccessor;
 
 	CursorImpl(const CursorImpl&);
@@ -253,6 +293,14 @@ private:
 
 	static bool isColumnSchemaNullable(const ColumnInfo &info);
 
+	bool updateNullsStats(const BaseContainer &container);
+	static void getNullsStats(
+			const BaseContainer &container, util::XArray<uint8_t> &nullsStats);
+
+	static void initializeBits(util::XArray<uint8_t> &bits, size_t bitCount);
+	static void setBit(util::XArray<uint8_t> &bits, size_t index, bool value);
+	static bool getBit(const util::XArray<uint8_t> &bits, size_t index);
+
 	ContainerLocation location_;
 	uint32_t outIndex_;
 
@@ -261,6 +309,8 @@ private:
 	bool containerExpired_;
 	bool indexLost_;
 	bool resultSetLost_;
+	bool nullsStatsChanged_;
+
 	ResultSetId resultSetId_;
 	ResultSetHolder resultSetHolder_;
 
@@ -281,6 +331,14 @@ private:
 	util::AllocUniquePtr<CursorScope> scope_;
 	LatchTarget latchTarget_;
 	util::AllocUniquePtr<TupleUpdateRowIdHandler> updateRowIdHandler_;
+
+	ContainerRowScanner *scanner_;
+	util::XArray<uint8_t> initialNullsStats_;
+	util::XArray<uint8_t> lastNullsStats_;
+	int64_t indexLimit_;
+	int64_t totalSearchCount_;
+public:
+	util::LocalUniquePtr<UpdatorList> updatorList_;
 };
 
 template<TupleColumnType T, bool VarSize>
@@ -293,6 +351,484 @@ struct SQLContainerImpl::CursorImpl::DirectValueAccessor {
 
 struct SQLContainerImpl::Constants {
 	static const uint16_t SCHEMA_INVALID_COLUMN_ID;
+	static const uint32_t ESTIMATED_ROW_ARRAY_ROW_COUNT;
+};
+
+struct SQLContainerImpl::ColumnCode {
+	typedef SQLExprs::ExprFactoryContext ExprFactoryContext;
+
+	ColumnCode();
+
+	void initialize(
+			ExprFactoryContext &cxt, const Expression *expr,
+			const size_t *argIndex);
+
+	CursorImpl *cursor_;
+	ContainerColumn column_;
+};
+
+template<RowArrayType RAType, typename T, typename S, bool Nullable>
+class SQLContainerImpl::ColumnEvaluator {
+private:
+	typedef SQLValues::ValueUtils ValueUtils;
+	typedef SQLExprs::ExprContext ExprContext;
+
+	typedef typename T::ValueType ValueType;
+	typedef typename S::ValueType SourceType;
+
+public:
+	typedef ColumnEvaluator EvaluatorType;
+	typedef ColumnCode CodeType;
+	typedef std::pair<ValueType, bool> ResultType;
+
+	static ColumnEvaluator evaluator(const CodeType &code) {
+		return ColumnEvaluator(code);
+	}
+
+	static bool check(const ResultType &value) {
+		return !Nullable || !value.second;
+	}
+
+	static const ValueType& get(const ResultType &value) {
+		return value.first;
+	}
+
+	ResultType eval(ExprContext &cxt) const;
+
+private:
+	explicit ColumnEvaluator(const CodeType &code) : code_(code) {
+	}
+
+	const CodeType &code_;
+};
+
+class SQLContainerImpl::ColumnExpression {
+private:
+	typedef SQLExprs::ExprCode ExprCode;
+	typedef SQLExprs::ExprFactoryContext ExprFactoryContext;
+
+	typedef SQLCoreExprs::ColumnExpression CoreExpr;
+	typedef SQLCoreExprs::VariantTypes VariantTypes;
+
+	enum {
+		COUNT_FULL_TYPE = CoreExpr::COUNT_FULL_TYPE,
+		COUNT_NULLABLE = CoreExpr::COUNT_NULLABLE,
+		COUNT_CONTAINER_SOURCE = CoreExpr::COUNT_CONTAINER_SOURCE,
+
+		OFFSET_CONTAINER = CoreExpr::OFFSET_CONTAINER,
+		OFFSET_END = CoreExpr::OFFSET_END
+	};
+
+public:
+	template<size_t I>
+	struct RowArrayTypeOf {
+		static const BaseContainer::RowArrayType RA_TYPE = (I == 0 ?
+				BaseContainer::ROW_ARRAY_GENERAL :
+				BaseContainer::ROW_ARRAY_PLAIN);
+	};
+
+	struct VariantTraits {
+		enum {
+			TOTAL_VARIANT_COUNT = OFFSET_END,
+
+			VARIANT_BEGIN = OFFSET_CONTAINER,
+			VARIANT_END = OFFSET_END
+		};
+
+		static size_t resolveVariant(
+				ExprFactoryContext &cxt, const ExprCode &code) {
+			return CoreExpr::VariantTraits::resolveVariant(cxt, code);
+		}
+	};
+
+	template<size_t V, bool = (V <= OFFSET_CONTAINER)>
+	struct VariantTraitsBase {
+		typedef SQLValues::Types::Any ValueTypeTag;
+		typedef ValueTypeTag ResultTypeTag;
+
+		typedef SQLCoreExprs::ConstEvaluator<ValueTypeTag> Evaluator;
+		typedef typename Evaluator::CodeType Code;
+		typedef util::TrueType Checking;
+	};
+
+	template<size_t V>
+	struct VariantTraitsBase<V, false> {
+		enum {
+			SUB_OFFSET = (V - OFFSET_CONTAINER - 1),
+			SUB_SOURCE =
+					(SUB_OFFSET / (COUNT_NULLABLE * COUNT_FULL_TYPE)),
+			SUB_NULLABLE =
+					(((SUB_OFFSET / COUNT_FULL_TYPE) % COUNT_NULLABLE) != 0),
+			SUB_TYPE = (SUB_OFFSET % COUNT_FULL_TYPE)
+		};
+
+		static const BaseContainer::RowArrayType SUB_RA_TYPE =
+				RowArrayTypeOf<SUB_SOURCE>::RA_TYPE;
+
+		typedef typename VariantTypes::ColumnTypeByFull<
+				SUB_TYPE>::ValueTypeTag ValueTypeTag;
+		typedef ValueTypeTag ResultTypeTag;
+
+		typedef ColumnEvaluator<
+				SUB_RA_TYPE, ResultTypeTag, ValueTypeTag,
+				SUB_NULLABLE> Evaluator;
+		typedef typename Evaluator::CodeType Code;
+		typedef util::FalseType Checking;
+	};
+
+	template<size_t V>
+	struct VariantAt {
+		typedef CoreExpr::VariantBaseAt<V, ColumnExpression> VariantType;
+	};
+};
+
+class SQLContainerImpl::IdExpression {
+private:
+	typedef SQLExprs::ExprCode ExprCode;
+	typedef SQLExprs::ExprContext ExprContext;
+	typedef SQLExprs::ExprFactoryContext ExprFactoryContext;
+
+	typedef SQLCoreExprs::IdExpression CoreExpr;
+	typedef SQLCoreExprs::VariantTypes VariantTypes;
+
+public:
+	struct VariantTraits {
+		enum {
+			TOTAL_VARIANT_COUNT = CoreExpr::OFFSET_END,
+
+			VARIANT_BEGIN = CoreExpr::OFFSET_CONTAINER,
+			VARIANT_END = CoreExpr::OFFSET_END
+		};
+
+		static size_t resolveVariant(
+				ExprFactoryContext &cxt, const ExprCode &code) {
+			return CoreExpr::VariantTraits::resolveVariant(cxt, code);
+		}
+	};
+
+	class VariantBase : public SQLExprs::Expression {
+	public:
+		virtual ~VariantBase() = 0;
+		void initializeCustom(ExprFactoryContext &cxt, const ExprCode &code);
+
+	protected:
+		ColumnCode columnCode_;
+	};
+
+	template<size_t V>
+	class VariantAt : public VariantBase {
+	public:
+		typedef VariantAt VariantType;
+
+		virtual TupleValue eval(ExprContext &cxt) const;
+
+	private:
+		enum {
+			SUB_OFFSET = (V - CoreExpr::OFFSET_CONTAINER),
+			SUB_SOURCE = SUB_OFFSET,
+			SUB_NULLABLE = 0
+		};
+
+		static const BaseContainer::RowArrayType SUB_RA_TYPE =
+				ColumnExpression::template RowArrayTypeOf<
+						SUB_SOURCE>::RA_TYPE;
+
+		typedef SQLValues::Types::Long ValueTypeTag;
+		typedef ValueTypeTag ResultTypeTag;
+
+		typedef ColumnEvaluator<
+				SUB_RA_TYPE, ResultTypeTag, ValueTypeTag,
+				SUB_NULLABLE> Evaluator;
+	};
+};
+
+class SQLContainerImpl::ComparisonExpressionBase {
+private:
+	typedef SQLExprs::ExprCode ExprCode;
+	typedef SQLExprs::ExprFactoryContext ExprFactoryContext;
+
+	typedef SQLCoreExprs::ComparisonExpressionBase CoreExpr;
+	typedef SQLCoreExprs::VariantTypes VariantTypes;
+
+	enum {
+		COUNT_NULLABLE = CoreExpr::COUNT_NULLABLE,
+		COUNT_CONTAINER_SOURCE = CoreExpr::COUNT_CONTAINER_SOURCE,
+		COUNT_BASIC_TYPE = CoreExpr::COUNT_BASIC_TYPE,
+
+		OFFSET_CONTAINER = CoreExpr::OFFSET_CONTAINER,
+		OFFSET_END = CoreExpr::OFFSET_END
+	};
+
+public:
+	struct VariantTraits {
+		enum {
+			TOTAL_VARIANT_COUNT = OFFSET_END,
+
+			VARIANT_BEGIN = OFFSET_CONTAINER,
+			VARIANT_END = OFFSET_END
+		};
+
+		static size_t resolveVariant(
+				ExprFactoryContext &cxt, const ExprCode &code) {
+			return CoreExpr::VariantTraits::resolveVariant(cxt, code);
+		}
+	};
+
+	template<size_t V>
+	struct VariantTraitsBase {
+		enum {
+			SUB_OFFSET = V - OFFSET_CONTAINER,
+			SUB_SOURCE =
+					(SUB_OFFSET / (COUNT_NULLABLE * COUNT_BASIC_TYPE)),
+			SUB_NULLABLE =
+					(((SUB_OFFSET / COUNT_BASIC_TYPE) % COUNT_NULLABLE) != 0),
+			SUB_TYPE = (SUB_OFFSET % COUNT_BASIC_TYPE)
+		};
+
+		static const BaseContainer::RowArrayType SUB_RA_TYPE =
+				ColumnExpression::RowArrayTypeOf<SUB_SOURCE>::RA_TYPE;
+
+		typedef typename VariantTypes::ColumnTypeByBasic<
+				SUB_TYPE>::ValueTypeTag SourceType;
+		typedef typename VariantTypes::ColumnTypeByBasic<
+				SUB_TYPE>::CompTypeTag CompTypeTag;
+
+		typedef ColumnEvaluator<
+				SUB_RA_TYPE, CompTypeTag, SourceType, SUB_NULLABLE> Arg1;
+		typedef SQLCoreExprs::ConstEvaluator<CompTypeTag> Arg2;
+
+		typedef typename Arg1::CodeType Code1;
+		typedef typename Arg2::CodeType Code2;
+
+		typedef typename SQLValues::ValueBasicComparator::TypeAt<
+				CompTypeTag> TypedComparator;
+
+		typedef util::FalseType Checking;
+	};
+};
+
+template<typename Func>
+class SQLContainerImpl::ComparisonExpression {
+	typedef ComparisonExpressionBase Base;
+	typedef SQLCoreExprs::ComparisonExpressionBase CoreExpr;
+public:
+	typedef Base::VariantTraits VariantTraits;
+
+	template<size_t V>
+	struct VariantAt {
+		typedef CoreExpr::VariantBaseAt<Func, V, Base> VariantType;
+	};
+};
+
+class SQLContainerImpl::GeneralCondEvaluator {
+private:
+	typedef SQLExprs::Expression Expression;
+	typedef SQLExprs::ExprFactoryContext ExprFactoryContext;
+
+public:
+	typedef const Expression &EvaluatorType;
+	typedef GeneralCondEvaluator CodeType;
+	typedef TupleValue ResultType;
+
+	static EvaluatorType evaluator(const CodeType &code) {
+		return *code.expr_;
+	}
+
+	static bool check(const ResultType &value) {
+		return !ValueUtils::isNull(value);
+	}
+
+	static bool get(const ResultType &value) {
+		return ValueUtils::getValue<bool>(value);
+	}
+
+	void initialize(
+			ExprFactoryContext &cxt, const Expression *expr,
+			const size_t *argIndex);
+
+private:
+	const Expression *expr_;
+};
+
+template<typename Func, size_t V>
+class SQLContainerImpl::ComparisonEvaluator {
+private:
+	typedef SQLExprs::Expression Expression;
+	typedef SQLExprs::ExprContext ExprContext;
+	typedef SQLExprs::ExprFactoryContext ExprFactoryContext;
+
+	enum {
+		RESULT_NULLABLE =
+				ComparisonExpressionBase::VariantTraitsBase<V>::SUB_NULLABLE
+	};
+
+public:
+	typedef const ComparisonEvaluator &EvaluatorType;
+	typedef ComparisonEvaluator CodeType;
+	typedef typename util::BoolType<RESULT_NULLABLE>::Result NullableType;
+	typedef typename util::Conditional<
+			RESULT_NULLABLE, TupleValue, bool>::Type ResultType;
+
+	static EvaluatorType evaluator(const CodeType &code) {
+		return code;
+	}
+
+	static bool check(const bool&) {
+		return true;
+	}
+	static bool check(const TupleValue &value) {
+		return !ValueUtils::isNull(value);
+	}
+
+	static bool get(const bool &value) {
+		return value;
+	}
+	static bool get(const TupleValue &value) {
+		return ValueUtils::getValue<bool>(value);
+	}
+
+	ResultType eval(ExprContext &cxt) const {
+		return toResult(expr_.evalAsBool(cxt), NullableType());
+	}
+
+	void initialize(
+			ExprFactoryContext &cxt, const Expression *expr,
+			const size_t *argIndex);
+
+private:
+	static TupleValue toResult(const TupleValue &src, const util::TrueType&) {
+		return src;
+	}
+	static bool toResult(const TupleValue &src, const util::FalseType&) {
+		return ValueUtils::getValue<bool>(src);
+	}
+
+	static TupleValue toResult(const bool &src, const util::TrueType&) {
+		return TupleValue(src);
+	}
+	static bool toResult(const bool &src, const util::FalseType&) {
+		return src;
+	}
+
+	typedef ComparisonExpression<Func> CompExprType;
+	typedef typename CompExprType::template VariantAt<
+			V>::VariantType CompExprVariantType;
+
+	CompExprVariantType expr_;
+};
+
+class SQLContainerImpl::EmptyCondEvaluator {
+private:
+	typedef SQLExprs::Expression Expression;
+	typedef SQLExprs::ExprContext ExprContext;
+	typedef SQLExprs::ExprFactoryContext ExprFactoryContext;
+
+public:
+	typedef const EmptyCondEvaluator &EvaluatorType;
+	typedef EmptyCondEvaluator CodeType;
+	typedef bool ResultType;
+
+	static EvaluatorType evaluator(const CodeType &code) {
+		return code;
+	}
+
+	static bool check(const ResultType &value) {
+		return true;
+	}
+
+	static bool get(const ResultType &value) {
+		static_cast<void>(value);
+		return true;
+	}
+
+	ResultType eval(ExprContext &cxt) const {
+		static_cast<void>(cxt);
+		return true;
+	}
+
+	void initialize(
+			ExprFactoryContext &cxt, const Expression *expr,
+			const size_t *argIndex);
+};
+
+class SQLContainerImpl::GeneralProjector {
+private:
+	typedef SQLOps::ProjectionFactoryContext ProjectionFactoryContext;
+
+public:
+	GeneralProjector() : proj_(NULL) {
+	}
+
+	void project(OpContext &cxt) {
+		proj_->project(cxt);
+	}
+
+	UpdatorEntry getUpdator() {
+		return UpdatorEntry(&updateFunc, this);
+	}
+
+	static void updateFunc(OpContext &cxt, void *src) {
+		static_cast<GeneralProjector*>(src)->update(cxt);
+	}
+
+	bool update(OpContext &cxt);
+	void initialize(ProjectionFactoryContext &cxt, const Projection *proj);
+
+private:
+	const Projection *proj_;
+};
+
+class SQLContainerImpl::CountProjector {
+private:
+	typedef SQLOps::ProjectionFactoryContext ProjectionFactoryContext;
+
+public:
+	CountProjector() : counter_(0) {
+	}
+
+	void project(OpContext &cxt) {
+		++counter_;
+	}
+
+	UpdatorEntry getUpdator() {
+		return UpdatorEntry(&updateFunc, this);
+	}
+
+	static void updateFunc(OpContext &cxt, void *src) {
+		static_cast<CountProjector*>(src)->update(cxt);
+	}
+
+	bool update(OpContext &cxt);
+	void initialize(ProjectionFactoryContext &cxt, const Projection *proj);
+
+private:
+	int64_t counter_;
+	SQLValues::SummaryColumn column_;
+};
+
+class SQLContainerImpl::CursorRef {
+private:
+	typedef SQLExprs::ExprContext ExprContext;
+
+public:
+	explicit CursorRef(util::StackAllocator &alloc);
+
+	CursorImpl& resolveCursor();
+	void setCursor(CursorImpl *cursor);
+
+	void addContextRef(OpContext **ref);
+	void addContextRef(ExprContext **ref);
+
+	void updateAll(OpContext &cxt);
+
+private:
+	typedef util::Vector<OpContext**> ContextRefList;
+	typedef util::Vector<ExprContext**> ExprContextRefList;
+
+	CursorImpl *cursor_;
+
+	ContextRefList cxtRefList_;
+	ExprContextRefList exprCxtRefList_;
 };
 
 template<BaseContainer::RowArrayType RAType>
@@ -312,6 +848,232 @@ struct SQLContainerImpl::ScannerHandler {
 	OpContext &cxt_;
 	CursorImpl &cursor_;
 	const Projection &proj_;
+};
+
+class SQLContainerImpl::ScannerHandlerBase {
+private:
+	typedef SQLExprs::ExprType ExprType;
+	typedef SQLExprs::ExprContext ExprContext;
+
+	typedef SQLCoreExprs::ComparisonExpressionBase CoreCompExpr;
+
+	typedef SQLOps::ProjectionFactoryContext ProjectionFactoryContext;
+
+	enum {
+		COUNT_NULLABLE = CoreCompExpr::COUNT_NULLABLE,
+		COUNT_BASIC_TYPE = CoreCompExpr::COUNT_BASIC_TYPE,
+		COUNT_CONTAINER_SOURCE = CoreCompExpr::COUNT_CONTAINER_SOURCE,
+		COUNT_COMP_BASE = COUNT_NULLABLE * COUNT_BASIC_TYPE,
+
+		OFFSET_COMP_CONTAINER = CoreCompExpr::OFFSET_CONTAINER,
+
+		EMPTY_FILTER_NUM = 1,
+		COUNT_NO_COMP_FILTER = 2,
+
+		COUNT_FUNC = 6,
+		COUNT_FILTER = COUNT_NO_COMP_FILTER + COUNT_FUNC * COUNT_COMP_BASE,
+		COUNT_PROJECTION = 2
+	};
+
+public:
+	typedef std::pair<
+				ProjectionFactoryContext*,
+				ContainerRowScanner::HandlerSet*> FactoryContext;
+
+	struct HandlerVariantUtils;
+
+	template<size_t I> struct CompFuncOf;
+	template<size_t V> struct VariantTraitsBase;
+
+	struct VariantTraits;
+	template<size_t V> struct VariantAt;
+};
+
+struct SQLContainerImpl::ScannerHandlerBase::HandlerVariantUtils {
+private:
+	typedef SQLExprs::ExprCode ExprCode;
+	typedef ExprCode::InputSourceType InputSourceType;
+
+public:
+	static size_t toInputSourceNumber(InputSourceType type);
+	static size_t toCompFuncNumber(ExprType type);
+
+	static void setUpContextRef(
+			ProjectionFactoryContext &cxt,
+			OpContext **ref, ExprContext **exprRef);
+	static void addUpdator(
+			ProjectionFactoryContext &cxt, const UpdatorEntry &updator);
+
+	static std::pair<const Expression*, const Projection*>
+	getFilterProjectionElements(const Projection &src);
+};
+
+template<size_t I>
+struct SQLContainerImpl::ScannerHandlerBase::CompFuncOf {
+	typedef SQLCoreExprs::Functions Functions;
+
+	typedef
+			typename util::Conditional<(I == 0), Functions::Lt,
+			typename util::Conditional<(I == 1), Functions::Gt,
+			typename util::Conditional<(I == 2), Functions::Le,
+			typename util::Conditional<(I == 3), Functions::Ge,
+			typename util::Conditional<(I == 4), Functions::Eq,
+			typename util::Conditional<(I == 5), Functions::Ne,
+			void>::Type>::Type>::Type>::Type>::Type>::Type FuncType;
+};
+
+template<size_t V>
+struct SQLContainerImpl::ScannerHandlerBase::VariantTraitsBase {
+	enum {
+		SUB_SOURCE = (V / (COUNT_PROJECTION * COUNT_FILTER)),
+		SUB_PROJECTION = ((V / COUNT_FILTER) % COUNT_PROJECTION),
+		SUB_FILTER = (V % COUNT_FILTER),
+
+		SUB_EMPTY_FILTERING = (SUB_FILTER == EMPTY_FILTER_NUM),
+		SUB_COMP_FILTERING = (SUB_FILTER >= COUNT_NO_COMP_FILTER),
+
+		SUB_COMP = (SUB_COMP_FILTERING ?
+				SUB_FILTER - COUNT_NO_COMP_FILTER : 0),
+		SUB_COMP_VARIANT = (OFFSET_COMP_CONTAINER +
+				SUB_SOURCE * COUNT_COMP_BASE +
+				SUB_COMP % COUNT_COMP_BASE),
+		SUB_COMP_FUNC = (SUB_COMP / COUNT_COMP_BASE)
+	};
+
+	typedef typename CompFuncOf<SUB_COMP_FUNC>::FuncType CompFuncType;
+
+	typedef ComparisonEvaluator<
+			CompFuncType, SUB_COMP_VARIANT> CompEvaluatorType;
+
+	typedef
+			typename util::Conditional<
+					SUB_EMPTY_FILTERING, EmptyCondEvaluator,
+			typename util::Conditional<
+					SUB_COMP_FILTERING, CompEvaluatorType,
+					GeneralCondEvaluator>::Type>::Type EvaluatorType;
+
+	typedef typename util::Conditional<
+			(SUB_PROJECTION == 0),
+			GeneralProjector, CountProjector>::Type ProjectorType;
+};
+
+struct SQLContainerImpl::ScannerHandlerBase::VariantTraits {
+	enum {
+		TOTAL_VARIANT_COUNT =
+				COUNT_CONTAINER_SOURCE * COUNT_PROJECTION * COUNT_FILTER,
+
+		VARIANT_BEGIN = 0,
+		VARIANT_END = TOTAL_VARIANT_COUNT
+	};
+
+	static size_t resolveVariant(FactoryContext &cxt, const Projection &proj);
+};
+
+template<size_t V>
+struct SQLContainerImpl::ScannerHandlerBase::VariantAt {
+private:
+	typedef VariantTraitsBase<V> TraitsBase;
+
+public:
+	typedef VariantAt VariantType;
+
+	static const BaseContainer::RowArrayType ROW_ARRAY_TYPE =
+			ColumnExpression::RowArrayTypeOf<TraitsBase::SUB_SOURCE>::RA_TYPE;
+
+	VariantAt(ProjectionFactoryContext &cxt, const Projection &proj);
+
+	template<BaseContainer::RowArrayType InRAType>
+	void operator()(
+			TransactionContext&,
+			typename BaseContainer::RowArrayImpl<
+					BaseContainer, InRAType>&);
+
+	bool update(TransactionContext&);
+
+private:
+	typedef typename TraitsBase::EvaluatorType Evaluator;
+	typedef typename TraitsBase::ProjectorType Projector;
+
+	typedef typename Evaluator::CodeType EvaluatorCode;
+	typedef typename Evaluator::ResultType ResultType;
+
+	OpContext *cxt_;
+	ExprContext *exprCxt_;
+
+	EvaluatorCode condCode_;
+	Projector projector_;
+};
+
+class SQLContainerImpl::ScannerHandlerFactory {
+public:
+	typedef ScannerHandlerBase::FactoryContext FactoryContext;
+
+	typedef ContainerRowScanner::HandlerSet& (*FactoryFunc)(
+				FactoryContext&, const Projection&);
+
+	static const ScannerHandlerFactory& getInstance();
+	static ScannerHandlerFactory& getInstanceForRegistrar();
+
+	ContainerRowScanner& create(
+			OpContext &cxt, CursorImpl &cursor, RowArray &rowArray,
+			const Projection &proj) const;
+
+	ContainerRowScanner::HandlerSet& create(
+				FactoryContext &cxt, const Projection &proj) const;
+
+	void setFactoryFunc(FactoryFunc func);
+
+private:
+	ScannerHandlerFactory();
+
+	ScannerHandlerFactory(const ScannerHandlerFactory&);
+	ScannerHandlerFactory& operator=(const ScannerHandlerFactory&);
+
+	static const ScannerHandlerFactory &FACTORY_INSTANCE;
+
+	FactoryFunc factoryFunc_;
+};
+
+class SQLContainerImpl::BaseRegistrar {
+public:
+	typedef SQLExprs::ExprRegistrar::VariantTraits ExprVariantTraits;
+	struct ScannerVariantTraits;
+
+	explicit BaseRegistrar(const BaseRegistrar &subRegistrar) throw();
+
+	virtual void operator()() const;
+
+protected:
+	BaseRegistrar() throw();
+
+	template<SQLExprs::ExprType T, typename E>
+	void addExprVariants() const;
+
+	template<typename S>
+	void addScannerVariants() const;
+	template<typename S, size_t Begin, size_t End>
+	void addScannerVariants() const;
+
+private:
+	ScannerHandlerFactory *factory_;
+};
+
+struct SQLContainerImpl::BaseRegistrar::ScannerVariantTraits {
+	typedef ScannerHandlerFactory::FactoryContext ContextType;
+	typedef Projection CodeType;
+	typedef ContainerRowScanner::HandlerSet ObjectType;
+
+	template<typename V>
+	static ObjectType& create(ContextType &cxt, const CodeType &code);
+};
+
+class SQLContainerImpl::DefaultRegistrar :
+		public SQLContainerImpl::BaseRegistrar {
+public:
+	virtual void operator()() const;
+
+private:
+	static const BaseRegistrar REGISTRAR_INSTANCE;
 };
 
 struct SQLContainerImpl::SearchResult {

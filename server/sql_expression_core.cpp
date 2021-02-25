@@ -18,7 +18,6 @@
 #include "sql_expression_core.h"
 #include "query_function.h"
 
-
 const SQLExprs::ExprRegistrar
 SQLCoreExprs::CustomRegistrar::REGISTRAR_INSTANCE((CustomRegistrar()));
 
@@ -26,9 +25,15 @@ void SQLCoreExprs::CustomRegistrar::operator()() const {
 	addNonEvaluable<SQLType::EXPR_SELECTION>();
 	addNonEvaluable<SQLType::EXPR_PRODUCTION>();
 	addNonEvaluable<SQLType::EXPR_PROJECTION>();
-	add<SQLType::EXPR_ID, IdExpression>();
+	addVariants<SQLType::EXPR_ID, IdExpression>();
 	add<SQLType::EXPR_CONSTANT, ConstantExpression>();
-	add<SQLType::EXPR_COLUMN, TupleColumnExpression>();
+	addVariants<SQLType::EXPR_COLUMN, ColumnExpression>();
+	addVariants< SQLType::OP_LT, ComparisonExpression<Functions::Lt> >();
+	addVariants< SQLType::OP_LE, ComparisonExpression<Functions::Le> >();
+	addVariants< SQLType::OP_GT, ComparisonExpression<Functions::Gt> >();
+	addVariants< SQLType::OP_GE, ComparisonExpression<Functions::Ge> >();
+	addVariants< SQLType::OP_EQ, ComparisonExpression<Functions::Eq> >();
+	addVariants< SQLType::OP_NE, ComparisonExpression<Functions::Ne> >();
 	add<SQLType::EXPR_TYPE, SQLExprs::PlanningExpression>();
 	addNoArgs<SQLType::EXPR_AND, AndExpression>();
 	addNoArgs<SQLType::EXPR_OR, OrExpression>();
@@ -62,12 +67,6 @@ void SQLCoreExprs::BasicRegistrar::operator()() const {
 	add<SQLType::OP_SHIFT_RIGHT, Functions::ShiftRight>();
 	add<SQLType::OP_BIT_AND, Functions::BitAnd>();
 	add<SQLType::OP_BIT_OR, Functions::BitOr>();
-	add<SQLType::OP_LT, Functions::Lt>();
-	add<SQLType::OP_LE, Functions::Le>();
-	add<SQLType::OP_GT, Functions::Gt>();
-	add<SQLType::OP_GE, Functions::Ge>();
-	add<SQLType::OP_EQ, Functions::Eq>();
-	add<SQLType::OP_NE, Functions::Ne>();
 	add<SQLType::OP_IS, Functions::Is>();
 	add<SQLType::OP_IS_NOT, Functions::IsNot>();
 	add<SQLType::OP_IS_NULL, Functions::IsNull>();
@@ -77,14 +76,264 @@ void SQLCoreExprs::BasicRegistrar::operator()() const {
 }
 
 
-SQLCoreExprs::IdExpression::IdExpression(
-		ExprFactoryContext &cxt, const ExprCode &code) {
-	static_cast<void>(cxt);
-	static_cast<void>(code);
+size_t SQLCoreExprs::VariantUtils::toCompTypeNumber(TupleColumnType src) {
+	typedef SQLValues::TypeUtils TypeUtils;
+	const TupleColumnType nonNullType = TypeUtils::toNonNullable(src);
+	if (TypeUtils::isIntegral(nonNullType) ||
+			nonNullType == TupleTypes::TYPE_TIMESTAMP ||
+			nonNullType == TupleTypes::TYPE_BOOL) {
+		return 0;
+	}
+	else if (TypeUtils::isFloating(nonNullType)) {
+		return 1;
+	}
+
+	switch (TypeUtils::toNonNullable(src)) {
+	case TupleTypes::TYPE_STRING:
+		return 2;
+	case TupleTypes::TYPE_BLOB:
+		return 3;
+	default:
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
 }
 
-TupleValue SQLCoreExprs::IdExpression::eval(ExprContext &cxt) const {
-	return TupleValue(cxt.updateTupleId(getCode().getInput()));
+size_t SQLCoreExprs::VariantUtils::toBasicTypeNumber(TupleColumnType src) {
+	typedef SQLValues::TypeUtils TypeUtils;
+	switch (TypeUtils::toNonNullable(src)) {
+	case TupleTypes::TYPE_BYTE:
+		return 0;
+	case TupleTypes::TYPE_SHORT:
+		return 1;
+	case TupleTypes::TYPE_INTEGER:
+		return 2;
+	case TupleTypes::TYPE_LONG:
+		return 3;
+	case TupleTypes::TYPE_FLOAT:
+		return 4;
+	case TupleTypes::TYPE_DOUBLE:
+		return 5;
+
+	case TupleTypes::TYPE_TIMESTAMP:
+		return toBasicTypeNumber(TupleTypes::TYPE_LONG);
+
+	case TupleTypes::TYPE_BOOL:
+		return 6;
+	case TupleTypes::TYPE_STRING:
+		return 7;
+	case TupleTypes::TYPE_BLOB:
+		return 8;
+	default:
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+}
+
+size_t SQLCoreExprs::VariantUtils::toFullTypeNumber(TupleColumnType src) {
+	typedef SQLValues::TypeUtils TypeUtils;
+
+	const size_t offset = VariantTypes::COUNT_BASIC_TYPE;
+	switch (TypeUtils::toNonNullable(src)) {
+	case TupleTypes::TYPE_TIMESTAMP:
+		return offset + 0;
+	default:
+		return toBasicTypeNumber(src);
+	}
+}
+
+size_t SQLCoreExprs::VariantUtils::getCombiCount(size_t n) {
+	return (n + 1) * n / 2;
+}
+
+const SQLExprs::Expression& SQLCoreExprs::VariantUtils::getBaseExpression(
+		ExprFactoryContext &cxt, const size_t *argIndex) {
+	const Expression *top = cxt.getBaseExpression();
+
+	const Expression *base = NULL;
+	if (argIndex == NULL) {
+		base = top;
+	}
+	else if (*argIndex == 0) {
+		base = &top->child();
+	}
+	else if (*argIndex == 1) {
+		base = &top->child().next();
+	}
+
+	if (base == NULL) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	return *base;
+}
+
+
+SQLCoreExprs::ArgExprCode::ArgExprCode() :
+		expr_(NULL) {
+}
+
+void SQLCoreExprs::ArgExprCode::initialize(
+		ExprFactoryContext &cxt, const Expression *expr,
+		const size_t *argIndex) {
+	static_cast<void>(cxt);
+	static_cast<void>(argIndex);
+
+	expr_ = expr;
+}
+
+
+SQLCoreExprs::GeneralColumnCode::GeneralColumnCode() :
+		unified_(false) {
+}
+
+void SQLCoreExprs::GeneralColumnCode::initialize(
+		ExprFactoryContext &cxt, const Expression *expr,
+		const size_t *argIndex) {
+	static_cast<void>(expr);
+
+	const ExprCode &base =
+			VariantUtils::getBaseExpression(cxt, argIndex).getCode();
+
+	base_ = base;
+	unified_ = ((base.getAttributes() & ExprCode::ATTR_COLUMN_UNIFIED) != 0);
+}
+
+
+SQLCoreExprs::ReaderColumnCode::ReaderColumnCode() :
+		reader_(NULL),
+		activeReaderRef_(NULL) {
+}
+
+void SQLCoreExprs::ReaderColumnCode::initialize(
+		ExprFactoryContext &cxt, const Expression *expr,
+		const size_t *argIndex) {
+	static_cast<void>(expr);
+
+	const ExprCode &base =
+			VariantUtils::getBaseExpression(cxt, argIndex).getCode();
+
+	cxt.addReaderRef(base.getInput(), &reader_);
+	activeReaderRef_ = cxt.getActiveReaderRef();
+	column_ = cxt.getInputColumn(base.getInput(), base.getColumnPos());
+}
+
+
+SQLCoreExprs::ReadableTupleColumnCode::ReadableTupleColumnCode() :
+		tuple_(NULL) {
+}
+
+void SQLCoreExprs::ReadableTupleColumnCode::initialize(
+		ExprFactoryContext &cxt, const Expression *expr,
+		const size_t *argIndex) {
+	static_cast<void>(expr);
+
+	const ExprCode &base =
+			VariantUtils::getBaseExpression(cxt, argIndex).getCode();
+
+	tuple_ = cxt.getReadableTupleRef(base.getInput());
+	column_ = cxt.getInputColumn(base.getInput(), base.getColumnPos());
+}
+
+
+SQLCoreExprs::SummaryColumnCode::SummaryColumnCode() :
+		tuple_(NULL),
+		column_(NULL) {
+}
+
+void SQLCoreExprs::SummaryColumnCode::initialize(
+		ExprFactoryContext &cxt, const Expression *expr,
+		const size_t *argIndex) {
+	static_cast<void>(expr);
+
+	const ExprCode &base =
+			VariantUtils::getBaseExpression(cxt, argIndex).getCode();
+
+	tuple_ = cxt.getSummaryTupleRef(base.getInput());
+	column_ = &(*cxt.getSummaryColumnListRef(
+			base.getInput()))[base.getColumnPos()];
+}
+
+
+SQLCoreExprs::ConstCode::ConstCode() {
+}
+
+void SQLCoreExprs::ConstCode::initialize(
+		ExprFactoryContext &cxt, const Expression *expr,
+		const size_t *argIndex) {
+	static_cast<void>(expr);
+
+	const ExprCode &base =
+			VariantUtils::getBaseExpression(cxt, argIndex).getCode();
+
+	value_ = base.getValue();
+}
+
+
+SQLCoreExprs::GeneralColumnEvaluator::ResultType
+SQLCoreExprs::GeneralColumnEvaluator::eval(ExprContext &cxt) const {
+	const ExprCode &code = code_.base_;
+
+	const uint32_t input = code.getInput();
+	const uint32_t pos = code.getColumnPos();
+
+	switch (cxt.getInputSourceType(input)) {
+	case SQLExprs::ExprCode::INPUT_ARRAY_TUPLE:
+		return SQLValues::ValueUtils::duplicateValue(
+				cxt, cxt.getArrayTuple(0)->get(pos));
+	case SQLExprs::ExprCode::INPUT_SUMMARY_TUPLE:
+		return cxt.getSummaryTupleRef(input)->getValue(
+				(*cxt.getSummaryColumnListRef(input))[pos]);
+	default:
+		return cxt.getReadableTuple(input).get(
+				cxt.getReaderColumn(input, pos));
+	}
+}
+
+
+size_t SQLCoreExprs::IdExpression::VariantTraits::resolveVariant(
+		ExprFactoryContext &cxt, const ExprCode &code) {
+	static_cast<void>(cxt);
+
+	const ExprCode::InputSourceType sourceType =
+			cxt.getInputSourceType(code.getInput());
+	if (ExprCode::INPUT_CONTAINER < sourceType &&
+			sourceType - ExprCode::INPUT_CONTAINER <=
+			COUNT_CONTAINER_SOURCE) {
+		const size_t sourceNum =
+				(sourceType - ExprCode::INPUT_CONTAINER - 1);
+		assert(sourceNum < COUNT_CONTAINER_SOURCE);
+		return OFFSET_CONTAINER + sourceNum;
+	}
+	else {
+		const bool grouping =
+				((code.getAttributes() & ExprCode::ATTR_GROUPING) != 0);
+		return OFFSET_NON_CONTAINER + (grouping ? 1 : 0);
+	}
+}
+
+void SQLCoreExprs::IdExpression::VariantBase::initializeCustom(
+		ExprFactoryContext &cxt, const ExprCode &code) {
+	static_cast<void>(cxt);
+	input_ = code.getInput();
+}
+
+SQLCoreExprs::IdExpression::VariantBase::VariantBase() :
+		input_(ExprCode().getInput()) {
+}
+
+SQLCoreExprs::IdExpression::VariantBase::~VariantBase() {
+}
+
+template<size_t V>
+TupleValue SQLCoreExprs::IdExpression::VariantAt<V>::eval(ExprContext &cxt) const {
+	if (Grouping::VALUE) {
+		return TupleValue(cxt.getLastTupleId(input_));
+	}
+	else {
+		return TupleValue(cxt.updateTupleId(input_));
+	}
 }
 
 
@@ -100,31 +349,186 @@ TupleValue SQLCoreExprs::ConstantExpression::eval(ExprContext &cxt) const {
 }
 
 
-SQLCoreExprs::TupleColumnExpression::TupleColumnExpression(
-		ExprFactoryContext &cxt, const ExprCode &code) :
-		unified_((code.getAttributes() & ExprCode::ATTR_COLUMN_UNIFIED) != 0) {
-	static_cast<void>(cxt);
-}
+size_t SQLCoreExprs::ColumnExpression::VariantTraits::resolveVariant(
+		ExprFactoryContext &cxt, const ExprCode &code) {
+	typedef SQLValues::TypeUtils TypeUtils;
 
-TupleValue SQLCoreExprs::TupleColumnExpression::eval(ExprContext &cxt) const {
-	const ExprCode &code = getCode();
+	const ExprCode::InputSourceType sourceType =
+			cxt.getInputSourceType(code.getInput());
 
-	SQLValues::ArrayTuple *tuple = cxt.getArrayTuple(0);
-	if (tuple != NULL) {
-		return asColumnValue(SQLValues::ValueUtils::duplicateValue(
-				cxt, tuple->get(code.getColumnPos())));
+	const TupleColumnType inColumnType =
+			cxt.getInputType(code.getInput(), code.getColumnPos());
+
+	const bool nullable = TypeUtils::isNullable(inColumnType);
+	const bool any = TypeUtils::isAny(inColumnType);
+
+	const size_t baseNum = COUNT_FULL_TYPE * (nullable ? 1 : 0);
+	const size_t fullNum =
+			(any ? 0 : VariantUtils::toFullTypeNumber(inColumnType));
+
+	if ((code.getAttributes() &
+			SQLExprs::ExprCode::ATTR_COLUMN_UNIFIED) != 0) {
+		return OFFSET_NON_CONTAINER;
 	}
-
-	uint32_t input;
-	if (unified_) {
-		input = cxt.getActiveInput();
+	else if (ExprCode::INPUT_CONTAINER < sourceType &&
+			sourceType - ExprCode::INPUT_CONTAINER <=
+			COUNT_CONTAINER_SOURCE) {
+		const size_t offset = OFFSET_CONTAINER;
+		if (any) {
+			return offset;
+		}
+		const size_t containerBaseNum =
+				COUNT_BASE * (sourceType - ExprCode::INPUT_CONTAINER - 1);
+		return (offset + 1) + containerBaseNum + baseNum + fullNum;
 	}
 	else {
-		input = code.getInput();
+		const size_t offset = OFFSET_NON_CONTAINER;
+
+		if (any) {
+			return offset;
+		}
+
+		const TupleColumnType outColumnType = code.getColumnType();
+		if (SQLValues::TypeUtils::toNonNullable(inColumnType) !=
+				SQLValues::TypeUtils::toNonNullable(outColumnType)) {
+			return offset;
+		}
+
+		size_t srcNum;
+		if (sourceType == ExprCode::INPUT_READER) {
+			srcNum = 0;
+		}
+		else if (sourceType == ExprCode::INPUT_READER_MULTI) {
+			srcNum = 1;
+		}
+		else if (sourceType == ExprCode::INPUT_SUMMARY_TUPLE) {
+			srcNum = 2;
+		}
+		else {
+			return offset;
+		}
+
+		return (offset + 1) + COUNT_BASE * srcNum + baseNum + fullNum;
+	}
+}
+
+
+size_t SQLCoreExprs::ComparisonExpressionBase::VariantTraits::resolveVariant(
+		ExprFactoryContext &cxt, const ExprCode &code) {
+	typedef SQLValues::TypeUtils TypeUtils;
+	typedef SQLExprs::Expression Expression;
+
+	const size_t fullGeneral = OFFSET_EXPR;
+
+	const Expression *baseExpr = cxt.getBaseExpression();
+	assert(baseExpr != NULL);
+
+	const Expression &arg1 = baseExpr->child();
+	const Expression &arg2 = arg1.next();
+
+	const ExprCode &code1 = arg1.getCode();
+	const ExprCode &code2 = arg2.getCode();
+
+	const TupleColumnType columnType1 = code1.getColumnType();
+	const TupleColumnType columnType2 = code2.getColumnType();
+
+	const bool any1 = TypeUtils::isAny(columnType1);
+	const bool any2 = TypeUtils::isAny(columnType2);
+	if (any1 && any2) {
+		return fullGeneral;
+	}
+	const bool someAny = (any1 || any2);
+
+	const bool anyAsNull = true;
+	const TupleColumnType promoType =
+			TypeUtils::findPromotionType(columnType1, columnType2, anyAsNull);
+	if (TypeUtils::isNull(promoType)) {
+		return fullGeneral;
 	}
 
-	return asColumnValue(cxt.getReadableTuple(input).get(
-			cxt.getReaderColumn(input, code.getColumnPos())));
+	const bool nullable1 = TypeUtils::isNullable(columnType1);
+	const bool nullable2 = TypeUtils::isNullable(columnType2);
+	const bool someNullable = (nullable1 || nullable2);
+
+	const TupleColumnType outType = code.getColumnType();
+	if (someNullable && !TypeUtils::isNullable(outType)) {
+		return fullGeneral;
+	}
+
+	const TupleColumnType longType = TupleTypes::TYPE_LONG;
+	const TupleColumnType doubleType = TupleTypes::TYPE_DOUBLE;
+	const TupleColumnType compType =
+			TypeUtils::isIntegral(promoType) ? longType :
+			TypeUtils::isFloating(promoType) ? doubleType :
+			promoType;
+
+	const size_t basicNum1 =
+			(any1 ? 0 : VariantUtils::toBasicTypeNumber(columnType1));
+	const size_t basicNum2 =
+			(any2 ? 0 : VariantUtils::toBasicTypeNumber(columnType2));
+
+	const size_t compNum = VariantUtils::toCompTypeNumber(compType);
+
+	const bool promoted1 = (TypeUtils::toNonNullable(columnType1) ==
+			TypeUtils::toNonNullable(compType));
+	const bool promoted2 = (TypeUtils::toNonNullable(columnType2) ==
+			TypeUtils::toNonNullable(compType));
+
+	const bool column1 = (code1.getType() == SQLType::EXPR_COLUMN);
+	const bool column2 = (code2.getType() == SQLType::EXPR_COLUMN);
+
+	const ExprCode::InputSourceType sourceType1 = (column1 ?
+			cxt.getInputSourceType(code1.getInput()) : ExprCode::END_INPUT);
+	const ExprCode::InputSourceType sourceType2 = (column2 ?
+			cxt.getInputSourceType(code2.getInput()) : ExprCode::END_INPUT);
+
+	const bool readerColumn1 = (sourceType1 == ExprCode::INPUT_READER);
+	const bool readerColumn2 = (sourceType2 == ExprCode::INPUT_READER);
+
+	const bool containerColumn1 = (ExprCode::INPUT_CONTAINER < sourceType1 &&
+			sourceType1 - ExprCode::INPUT_CONTAINER <=
+			COUNT_CONTAINER_SOURCE);
+
+	const bool const2 = (code2.getType() == SQLType::EXPR_CONSTANT);
+
+	if (!someAny && (const2 && promoted1 && promoted2 && !nullable2)) {
+		if (readerColumn1) {
+			const size_t offset = OFFSET_CONST +
+					COUNT_BASIC_TYPE * (nullable1 ? 1 : 0);
+			return offset + basicNum1;
+		}
+		else if (containerColumn1) {
+			const size_t offset = OFFSET_CONTAINER +
+					COUNT_CONST *
+							(sourceType1 - ExprCode::INPUT_CONTAINER - 1) +
+					COUNT_BASIC_TYPE * (nullable1 ? 1 : 0);
+			return offset + basicNum1;
+		}
+	}
+	else if (!someAny && (readerColumn1 && readerColumn2)) {
+		const size_t offset = OFFSET_COLUMN +
+				COUNT_BASIC_COMBI * (someNullable ? 1 : 0);
+		if (basicNum1 < COUNT_NUMERIC) {
+			if (basicNum1 >= basicNum2) {
+				return offset + VariantUtils::getCombiCount(basicNum1) + basicNum2;
+			}
+		}
+		else {
+			if (basicNum1 == basicNum2) {
+				return offset + COUNT_NUMERIC_COMBI +
+						(basicNum1 - COUNT_NUMERIC);
+			}
+		}
+	}
+
+	{
+		const size_t offset = OFFSET_EXPR + 1 +
+				COUNT_COMP_TYPE * ((someNullable || someAny) ? 1 : 0);
+		if (promoted1 && promoted2) {
+			return offset + compNum;
+		}
+	}
+	return fullGeneral;
 }
 
 
@@ -242,9 +646,7 @@ inline TupleValue SQLCoreExprs::Functions::Max::operator()(
 		result_ = TupleValue();
 		cxt.finishFunction();
 	}
-	else if (SQLValues::ValueGreater(
-			SQLValues::ValueUtils::toCompType(value, result_))(
-			value, result_)) {
+	else if (SQLValues::ValueGreater()(value, result_)) {
 		result_ = value;
 	}
 	return TupleValue();
@@ -271,9 +673,7 @@ inline TupleValue SQLCoreExprs::Functions::Min::operator()(
 		result_ = TupleValue();
 		cxt.finishFunction();
 	}
-	else if (SQLValues::ValueLess(
-			SQLValues::ValueUtils::toCompType(value, result_))(
-			value, result_)) {
+	else if (SQLValues::ValueLess()(value, result_)) {
 		result_ = value;
 	}
 	return TupleValue();
@@ -291,9 +691,7 @@ template<typename C>
 inline TupleValue SQLCoreExprs::Functions::NullIf::operator()(
 		C &cxt, const TupleValue &value1, const TupleValue &value2) {
 	static_cast<void>(cxt);
-	if (SQLValues::ValueEq(
-			SQLValues::ValueUtils::toCompType(value1, value2))(
-			value1, value2)) {
+	if (SQLValues::ValueEq()(value1, value2)) {
 		return TupleValue();
 	}
 	else {
@@ -450,82 +848,18 @@ int64_t SQLCoreExprs::Functions::BitOr::operator()(
 
 
 template<typename C>
-bool SQLCoreExprs::Functions::Lt::operator()(
-		C &cxt, const TupleValue &value1, const TupleValue &value2) {
-	static_cast<void>(cxt);
-	const bool sensitive = false;
-	return SQLValues::ValueComparator(
-			SQLValues::ValueUtils::toCompType(value1, value2), sensitive)(
-			value1, value2) < 0;
-}
-
-
-template<typename C>
-bool SQLCoreExprs::Functions::Le::operator()(
-		C &cxt, const TupleValue &value1, const TupleValue &value2) {
-	static_cast<void>(cxt);
-	const bool sensitive = false;
-	return SQLValues::ValueComparator(
-			SQLValues::ValueUtils::toCompType(value1, value2), sensitive)(
-			value1, value2) <= 0;
-}
-
-
-template<typename C>
-bool SQLCoreExprs::Functions::Gt::operator()(
-		C &cxt, const TupleValue &value1, const TupleValue &value2) {
-	static_cast<void>(cxt);
-	const bool sensitive = false;
-	return SQLValues::ValueComparator(
-			SQLValues::ValueUtils::toCompType(value1, value2), sensitive)(
-			value1, value2) > 0;
-}
-
-
-template<typename C>
-bool SQLCoreExprs::Functions::Ge::operator()(
-		C &cxt, const TupleValue &value1, const TupleValue &value2) {
-	static_cast<void>(cxt);
-	const bool sensitive = false;
-	return SQLValues::ValueComparator(
-			SQLValues::ValueUtils::toCompType(value1, value2), sensitive)(
-			value1, value2) >= 0;
-}
-
-
-template<typename C>
-bool SQLCoreExprs::Functions::Eq::operator()(
-		C &cxt, const TupleValue &value1, const TupleValue &value2) {
-	static_cast<void>(cxt);
-	const bool sensitive = false;
-	return SQLValues::ValueComparator(
-			SQLValues::ValueUtils::toCompType(value1, value2), sensitive)(
-			value1, value2) == 0;
-}
-
-
-template<typename C>
-bool SQLCoreExprs::Functions::Ne::operator()(
-		C &cxt, const TupleValue &value1, const TupleValue &value2) {
-	static_cast<void>(cxt);
-	const bool sensitive = false;
-	return SQLValues::ValueComparator(
-			SQLValues::ValueUtils::toCompType(value1, value2), sensitive)(
-			value1, value2) != 0;
-}
-
-
-template<typename C>
 bool SQLCoreExprs::Functions::Is::operator()(
 		C &cxt, const TupleValue &value1, const TupleValue &value2) {
-	return Eq()(cxt, value1, value2);
+	static_cast<void>(cxt);
+	return SQLValues::ValueEq()(value1, value2);
 }
 
 
 template<typename C>
 bool SQLCoreExprs::Functions::IsNot::operator()(
 		C &cxt, const TupleValue &value1, const TupleValue &value2) {
-	return Ne()(cxt, value1, value2);
+	static_cast<void>(cxt);
+	return !SQLValues::ValueEq()(value1, value2);
 }
 
 

@@ -30,6 +30,7 @@ struct SQLExprs {
 
 	typedef TupleList::Column TupleColumn;
 	typedef util::Vector<TupleColumn> TupleColumnList;
+	typedef util::Vector<TupleListReader**> ReaderRefList;
 
 	typedef SyntaxTree::Expr SyntaxExpr;
 	typedef SyntaxTree::ExprList SyntaxExprRefList;
@@ -38,12 +39,18 @@ struct SQLExprs {
 	typedef SQLType::Id ExprType;
 	typedef SQLType::AggregationPhase AggregationPhase;
 
+	typedef SQLValues::SummaryColumn SummaryColumn;
+	typedef SQLValues::SummaryTuple SummaryTuple;
+	typedef SQLValues::SummaryTupleSet SummaryTupleSet;
+	typedef util::Vector<SummaryColumn> SummaryColumnList;
+
 
 	class ExprCode;
 
 	class Expression;
 
 	struct FunctionValueUtils;
+	struct WindowState;
 	class NormalFunctionContext;
 	class ExprContext;
 
@@ -56,6 +63,7 @@ struct SQLExprs {
 	class ExprRewriter;
 	class SyntaxExprRewriter;
 	class TypeResolver;
+	struct TypeResolverResult;
 
 	struct IndexSpec;
 	struct IndexCondition;
@@ -71,6 +79,7 @@ struct SQLExprs {
 
 	class DefaultExprFactory;
 	class ExprRegistrar;
+	template<typename R> class VariantsRegistrarBase;
 
 	struct ExprSpecBase;
 	struct ExprUtils;
@@ -93,7 +102,24 @@ public:
 		ATTR_AGGR_ARRANGED = 1 << 1,
 		ATTR_AGGREGATED = 1 << 2,
 		ATTR_GROUPING = 1 << 3,
-		ATTR_COLUMN_UNIFIED = 1 << 4
+		ATTR_WINDOWING = 1 << 4,
+		ATTR_COLUMN_UNIFIED = 1 << 5
+	};
+
+	enum InputSourceType {
+		INPUT_READER,
+		INPUT_READER_MULTI,
+		INPUT_READER_TUPLE,
+		INPUT_ARRAY_TUPLE,
+		INPUT_SUMMARY_TUPLE,
+		INPUT_SUMMARY_TUPLE_BODY,
+		INPUT_MULTI_STAGE,
+
+		INPUT_CONTAINER,
+		INPUT_CONTAINER_GENERAL,
+		INPUT_CONTAINER_PLAIN,
+
+		END_INPUT
 	};
 
 	struct TableEntry;
@@ -115,6 +141,9 @@ public:
 
 	const TupleValue& getValue() const;
 	void setValue(SQLValues::ValueContext &cxt, const TupleValue &value);
+
+	uint32_t getOutput() const;
+	void setOutput(uint32_t output);
 
 	void importFromSyntax(SQLValues::ValueContext &cxt, const SyntaxExpr &src);
 	void exportToSyntax(SyntaxExpr &dest) const;
@@ -372,6 +401,13 @@ struct SQLExprs::FunctionValueUtils {
 	bool isSpaceChar(util::CodePoint c) const;
 };
 
+struct SQLExprs::WindowState {
+	WindowState();
+
+	int64_t partitionTupleCount_;
+	int64_t partitionValueCount_;
+};
+
 class SQLExprs::NormalFunctionContext {
 public:
 	typedef util::FalseType AllocatorType;
@@ -408,6 +444,8 @@ private:
 
 class SQLExprs::ExprContext {
 public:
+	typedef ExprCode::InputSourceType InputSourceType;
+
 	explicit ExprContext(const SQLValues::ValueContext::Source &source);
 
 
@@ -420,13 +458,15 @@ public:
 
 
 	const TupleColumn& getReaderColumn(uint32_t index, uint32_t pos);
+
 	TupleListReader& getReader(uint32_t index);
 	ReadableTuple getReadableTuple(uint32_t index);
 
 	void setReader(
-			uint32_t index, TupleListReader &reader,
+			uint32_t index, TupleListReader *reader,
 			const TupleColumnList *columnList);
 	void setReadableTuple(uint32_t index, const ReadableTuple &tuple);
+	void setSummaryTuple(uint32_t index, const SummaryTuple &tuple);
 
 	SQLValues::ArrayTuple* getArrayTuple(uint32_t index);
 	void setArrayTuple(uint32_t index, SQLValues::ArrayTuple *tuple);
@@ -434,15 +474,50 @@ public:
 	uint32_t getActiveInput();
 	void setActiveInput(uint32_t index);
 
+	TupleListReader** getActiveReaderRef();
+	void setActiveReaderRef(TupleListReader **readerRef);
+
 	int64_t updateTupleId(uint32_t index);
 	int64_t getLastTupleId(uint32_t index);
 	void setLastTupleId(uint32_t index, int64_t id);
 
+	ReadableTuple* getReadableTupleRef(uint32_t index);
+	void setReadableTupleRef(uint32_t index, ReadableTuple *tupleRef);
 
-	void setAggregationTuple(SQLValues::ArrayTuple &aggrTuple);
+	SummaryTuple* getSummaryTupleRef(uint32_t index);
+	void setSummaryTupleRef(uint32_t index, SummaryTuple *tupleRef);
 
-	TupleValue getAggregationValue(uint32_t index);
-	void setAggregationValue(uint32_t index, const TupleValue &value);
+	const SummaryColumnList* getSummaryColumnListRef(uint32_t index);
+	void setSummaryColumnListRef(
+			uint32_t index, const SummaryColumnList *listRef);
+
+	InputSourceType getInputSourceType(uint32_t index);
+	void setInputSourceType(uint32_t index, InputSourceType type);
+
+
+	void setAggregationTupleRef(
+			SummaryTupleSet *aggrTupleSet, SummaryTuple *aggrTuple);
+
+	bool isAggregationNull(const SummaryColumn &column);
+
+	TupleValue getAggregationValue(const SummaryColumn &column);
+	void setAggregationValue(
+			const SummaryColumn &column, const TupleValue &value);
+
+	template<typename T>
+	typename T::ValueType getAggregationValueAs(
+			const SummaryColumn &column);
+	template<typename T>
+	void setAggregationValueBy(
+			const SummaryColumn &column, const typename T::ValueType &value);
+
+	template<typename T>
+	void incrementAggregationValueBy(const SummaryColumn &column);
+
+	void initializeAggregationValues();
+
+	const WindowState* getWindowState();
+	void setWindowState(const WindowState *state);
 
 private:
 	struct Entry {
@@ -452,10 +527,13 @@ private:
 		const TupleColumnList *columnList_;
 
 		ReadableTuple *readableTuple_;
-		ReadableTuple *readableTupleStorage_;
+		SummaryTuple *summaryTuple_;
+		const SummaryColumnList *summaryColumnList_;
 
 		SQLValues::ArrayTuple *arrayTuple_;
 		int64_t lastTupleId_;
+
+		InputSourceType inputSourceType_;
 	};
 
 	typedef util::Vector<Entry> EntryList;
@@ -468,7 +546,10 @@ private:
 	EntryList entryList_;
 
 	uint32_t activeInput_;
-	SQLValues::ArrayTuple *aggrTuple_;
+	SummaryTupleSet *aggrTupleSet_;
+	SummaryTuple *aggrTuple_;
+	TupleListReader **activeReaderRef_;
+	const WindowState *windowState_;
 };
 
 struct SQLExprs::ExprSpec {
@@ -511,12 +592,19 @@ struct SQLExprs::ExprSpec {
 		FLAG_PSEUDO_WINDOW = 1 << 18,
 		FLAG_DISTINCT = 1 << 19,
 
-		FLAG_ARGS_LISTING = 1 << 20
+		FLAG_ARGS_LISTING = 1 << 20,
+		FLAG_AGGR_FINISH_DEFAULT = 1 << 21,
+
+		FLAG_WINDOW_POS_BEFORE = 1 << 22,
+		FLAG_WINDOW_POS_AFTER = 1 << 23,
+		FLAG_WINDOW_VALUE_COUNTING = 1 << 24
 	};
 
 	ExprSpec();
 
 	bool isAggregation() const;
+
+	ExprSpec toDistinct(ExprType srcType) const;
 
 	In inList_[IN_LIST_SIZE];
 	In aggrList_[AGGR_LIST_SIZE];
@@ -548,9 +636,12 @@ private:
 
 class SQLExprs::ExprFactoryContext {
 public:
+	typedef ExprCode::InputSourceType InputSourceType;
+
 	class Scope;
 
 	explicit ExprFactoryContext(util::StackAllocator &alloc);
+	~ExprFactoryContext();
 
 	util::StackAllocator& getAllocator();
 
@@ -565,6 +656,9 @@ public:
 
 	TupleColumn getInputColumn(uint32_t index, uint32_t pos);
 
+	InputSourceType getInputSourceType(uint32_t index);
+	void setInputSourceType(uint32_t index, InputSourceType type);
+
 	uint32_t getInputCount();
 	uint32_t getInputColumnCount(uint32_t index);
 
@@ -576,6 +670,25 @@ public:
 	uint32_t addAggregationColumn(TupleColumnType type);
 	void clearAggregationColumns();
 
+	void initializeReaderRefList(uint32_t index, ReaderRefList *list);
+	void addReaderRef(uint32_t index, TupleListReader **readerRef);
+	util::AllocUniquePtr<void>& getInputSourceRef(uint32_t index);
+
+	TupleListReader** getActiveReaderRef();
+	void setActiveReaderRef(TupleListReader **readerRef);
+
+	ReadableTuple* getReadableTupleRef(uint32_t index);
+	void setReadableTupleRef(uint32_t index, ReadableTuple *tupleRef);
+
+	SummaryTuple* getSummaryTupleRef(uint32_t index);
+	void setSummaryTupleRef(uint32_t index, SummaryTuple *tupleRef);
+
+	SummaryColumnList* getSummaryColumnListRef(uint32_t index);
+	void setSummaryColumnListRef(
+			uint32_t index, SummaryColumnList *listRef);
+
+	const SummaryColumn& getArrangedAggregationColumn(uint32_t index);
+
 
 	bool isPlanning();
 	void setPlanning(bool planning);
@@ -586,20 +699,41 @@ public:
 	void setAggregationTypeListRef(
 			const util::Vector<TupleColumnType> *typeListRef);
 
+	SummaryTuple* getAggregationTupleRef();
+	void setAggregationTupleRef(SummaryTuple *tupleRef);
+
+	SummaryTupleSet* getAggregationTupleSet();
+	void setAggregationTupleSet(SummaryTupleSet *tupleSet);
+
+	const SQLValues::CompColumnList* getArrangedKeyList();
+	void setArrangedKeyList(const SQLValues::CompColumnList *keyList);
+
+	bool isSummaryColumnsArranging();
+	void setSummaryColumnsArranging(bool arranging);
+
 	const Expression* getBaseExpression();
 	void setBaseExpression(const Expression *expr);
 
 private:
 	typedef util::Vector<TupleColumnType> TypeList;
 	typedef util::Vector<TypeList> InputList;
+	typedef util::Vector<ReaderRefList*> AllReaderRefList;
+	typedef util::Vector<util::AllocUniquePtr<void>*> InputSourceRefList;
 
 	struct ScopedEntry {
 		ScopedEntry();
 
 		bool planning_;
+		bool summaryColumnsArranging_;
+
 		AggregationPhase srcAggrPhase_;
 		AggregationPhase destAggrPhase_;
+
 		const TypeList *aggrTypeListRef_;
+		SummaryTuple *aggrTupleRef_;
+		SummaryTupleSet *aggrTupleSet_;
+		const SQLValues::CompColumnList *arrangedKeyList_;
+
 		const Expression *baseExpr_;
 	};
 
@@ -614,9 +748,19 @@ private:
 
 	InputList inputList_;
 	util::Vector<TupleColumnList> inputColumnList_;
+	util::Vector<InputSourceType> inputSourceTypeList_;
 	util::Vector<bool> nullableList_;
+
 	TypeList aggrTypeList_;
 	uint32_t nextAggrIndex_;
+
+	AllReaderRefList allReaderRefList_;
+	InputSourceRefList inputSourceRefList_;
+
+	TupleListReader **activeReaderRef_;
+	util::Vector<ReadableTuple*> readableTupleRefList_;
+	util::Vector<SummaryTuple*> summaryTupleRefList_;
+	util::Vector<SummaryColumnList*> summaryColumnsRefList_;
 };
 
 class SQLExprs::ExprFactoryContext::Scope {
@@ -631,6 +775,16 @@ private:
 };
 
 
+
+inline const SQLExprs::Expression& SQLExprs::Expression::child() const {
+	assert(child_ != NULL);
+	return *child_;
+}
+
+inline const SQLExprs::Expression& SQLExprs::Expression::next() const {
+	assert(next_ != NULL);
+	return *next_;
+}
 
 template<typename Base>
 SQLExprs::Expression::Coder<Base> SQLExprs::Expression::makeCoder(
@@ -684,6 +838,132 @@ void SQLExprs::Expression::Coder<Base>::decodeBy(
 		option.setStream(valueScope.stream());
 		value = &importFrom(*factoryCxt_, option);
 	}
+}
+
+
+inline SQLExprs::Expression::Iterator::Iterator(const Expression &expr) :
+		cur_(expr.child_) {
+}
+
+inline const SQLExprs::Expression& SQLExprs::Expression::Iterator::get() const {
+	assert(exists());
+	return *cur_;
+}
+
+inline bool SQLExprs::Expression::Iterator::exists() const {
+	return (cur_ != NULL);
+}
+
+inline void SQLExprs::Expression::Iterator::next() {
+	cur_ = cur_->next_;
+}
+
+
+inline SQLExprs::ExprContext::operator SQLValues::ValueContext&() {
+	return valueCxt_;
+}
+
+inline SQLValues::ValueContext& SQLExprs::ExprContext::getValueContext() {
+	return valueCxt_;
+}
+
+inline SQLExprs::NormalFunctionContext&
+SQLExprs::ExprContext::getFunctionContext() {
+	return funcCxt_;
+}
+
+inline SQLExprs::TupleListReader**
+SQLExprs::ExprContext::getActiveReaderRef() {
+	return activeReaderRef_;
+}
+
+inline void SQLExprs::ExprContext::setReadableTuple(
+		uint32_t index, const ReadableTuple &tuple) {
+	Entry &entry = entryList_[index];
+	assert(entry.readableTuple_ != NULL);
+
+	*entry.readableTuple_ = tuple;
+}
+
+inline void SQLExprs::ExprContext::setSummaryTuple(
+		uint32_t index, const SummaryTuple &tuple) {
+	Entry &entry = entryList_[index];
+	assert(entry.readableTuple_ != NULL);
+
+	*entry.summaryTuple_ = tuple;
+}
+
+inline bool SQLExprs::ExprContext::isAggregationNull(
+		const SummaryColumn &column) {
+	assert(aggrTuple_ != NULL);
+	return aggrTuple_->isNull(column);
+}
+
+inline TupleValue SQLExprs::ExprContext::getAggregationValue(
+		const SummaryColumn &column) {
+	assert(aggrTuple_ != NULL);
+	return aggrTuple_->getValue(*aggrTupleSet_, column);
+}
+
+inline void SQLExprs::ExprContext::setAggregationValue(
+		const SummaryColumn &column, const TupleValue &value) {
+	assert(aggrTuple_ != NULL);
+	return aggrTuple_->setValue(*aggrTupleSet_, column, value);
+}
+
+template<typename T>
+inline typename T::ValueType SQLExprs::ExprContext::getAggregationValueAs(
+		const SummaryColumn &column) {
+	assert(aggrTuple_ != NULL);
+	return aggrTuple_->getValueAs<T>(column);
+}
+
+template<typename T>
+inline void SQLExprs::ExprContext::setAggregationValueBy(
+		const SummaryColumn &column, const typename T::ValueType &value) {
+	assert(aggrTuple_ != NULL);
+	aggrTuple_->setValueBy<T>(*aggrTupleSet_, column, value);
+}
+
+template<typename T>
+inline void SQLExprs::ExprContext::incrementAggregationValueBy(
+		const SummaryColumn &column) {
+	assert(aggrTuple_ != NULL);
+	aggrTuple_->incrementValueBy<T>(column);
+}
+
+inline void SQLExprs::ExprContext::initializeAggregationValues() {
+	assert(aggrTuple_ != NULL);
+	aggrTuple_->initializeValues(*aggrTupleSet_);
+}
+
+inline const SQLExprs::WindowState* SQLExprs::ExprContext::getWindowState() {
+	return windowState_;
+}
+
+inline void SQLExprs::ExprContext::setWindowState(const WindowState *state) {
+	windowState_ = state;
+}
+
+
+inline SQLExprs::NormalFunctionContext::NormalFunctionContext(
+		SQLValues::ValueContext &valueCxt) :
+		base_(NULL),
+		valueCxt_(valueCxt) {
+}
+
+inline SQLExprs::ExprContext& SQLExprs::NormalFunctionContext::getBase() {
+#ifndef NDEBUG
+	if (base_ == NULL) {
+		handleBaseNotFound();
+	}
+#endif
+	assert(base_ != NULL);
+	return *base_;
+}
+
+inline void SQLExprs::NormalFunctionContext::setBase(ExprContext *base) {
+	base_ = base;
 }
 
 #endif

@@ -21,6 +21,8 @@
 #include "util/container.h"
 
 struct SQLAlgorithmUtils {
+	struct SortConfig;
+
 	template<typename It> class CombSorter;
 
 	template<
@@ -34,11 +36,38 @@ struct SQLAlgorithmUtils {
 					util::StdAllocator<T, util::StackAllocator> > class HeapQueue;
 
 	template<
-			typename K, typename V, typename Hasher, typename Pred,
-			typename Alloc> class HashMap;
+			typename K, typename T, typename Hash, typename Pred,
+			typename Alloc = util::StdAllocator<
+					std::pair<const K, T>, util::StackAllocator> > class OrderingHashMap;
 	template<
-			typename K, typename V, typename Hasher, typename Pred,
-			typename Alloc> class HashSet;
+			typename K, typename T, typename Hash, typename Pred,
+			typename Alloc = util::StdAllocator<
+					std::pair<const K, T>, util::StackAllocator> > class OrderingHashMultiMap;
+
+	template<
+			typename K, typename T, typename Hash, typename Pred,
+			typename Alloc = util::StdAllocator<
+					std::pair<const K, T>, util::StackAllocator> > class HashMap;
+	template<
+			typename K, typename T, typename Hash, typename Pred,
+			typename Alloc = util::StdAllocator<
+					std::pair<const K, T>, util::StackAllocator> > class HashMultiMap;
+
+	template<
+			typename T = uint64_t, typename Alloc =
+					util::StdAllocator<T, util::StackAllocator> > class DigestHashSet;
+};
+
+struct SQLAlgorithmUtils::SortConfig {
+	SortConfig() :
+			interval_(std::numeric_limits<ptrdiff_t>::max()),
+			limit_(-1),
+			unique_(false) {
+	}
+
+	ptrdiff_t interval_;
+	int64_t limit_;
+	bool unique_;
 };
 
 template<typename It>
@@ -46,13 +75,59 @@ class SQLAlgorithmUtils::CombSorter {
 public:
 	CombSorter(It begin, It end);
 
-	void setInterval(ptrdiff_t interval);
-	void setConfig(const CombSorter &src);
+	void setConfig(const SortConfig &config);
+	const SortConfig& getConfig() const;
 
 	bool isSorted() const;
 
 	template<typename Pred>
 	bool run(const Pred &pred);
+
+	template<typename Pred>
+	bool runMain(const Pred &pred, It tmp, bool tmpAllowed, bool *resultOnTmp);
+
+	template<typename Pred>
+	ptrdiff_t runMainUnique(
+			const Pred &pred, It tmp, bool tmpAllowed, bool *resultOnTmp);
+
+	template<typename Pred, typename Action>
+	ptrdiff_t runMainGroup(
+			const Pred &pred, const Action &action,
+			It tmp, bool tmpAllowed, bool *resultOnTmp);
+
+	template<typename Pred>
+	static void runSubSort(const Pred &pred, It begin, It end);
+
+	template<typename Pred>
+	static void runSubSortUnique(
+			const Pred &pred, It begin, It end, uint32_t *dup);
+
+	template<typename Pred>
+	static void runSubMerge(
+			const Pred &pred, It begin1, It end1, It begin2, It end2, It out);
+
+	template<typename Pred>
+	static It runSubMergeTopUnique(
+			const Pred &pred, It begin1, It end1, It begin2, It end2,
+			const uint32_t *dup1, const uint32_t *dup2, It out);
+
+	template<typename Pred, typename Action>
+	static It runSubMergeTopGroup(
+			const Pred &pred, const Action &action,
+			It begin1, It end1, It begin2, It end2,
+			const uint32_t *dup1, const uint32_t *dup2, It out);
+
+	template<typename Pred>
+	static It runSubMergeMidUnique(
+			const Pred &pred, It begin1, It end1, It begin2, It end2, It out);
+
+	template<typename Pred, typename Action>
+	static It runSubMergeMidGroup(
+			const Pred &pred, const Action &action,
+			It begin1, It end1, It begin2, It end2, It out);
+
+	template<typename Pred>
+	bool runLimited(const Pred &pred, int64_t &reduced);
 
 private:
 	enum Constants {
@@ -66,57 +141,178 @@ private:
 	ptrdiff_t gap_;
 	bool sorted_;
 
-	ptrdiff_t interval_;
 	It middle_;
+	SortConfig config_;
 };
 
 template<typename T, typename Pred, typename Alloc>
 class SQLAlgorithmUtils::Sorter {
 public:
-	typedef bool RetType;
-
-	template<typename U> class TypeAt {
+	class Sort {
 	public:
-		explicit TypeAt(Sorter &base) : base_(base) {}
+		typedef bool RetType;
 
-		bool operator()() const {
-			return base_.template sortAt<U>();
-		}
+		template<typename U> class TypeAt {
+		public:
+			explicit TypeAt(const Sort &base) : base_(base) {}
+
+			bool operator()() const {
+				return base_.base_.template sortAt<U>();
+			}
+
+		private:
+			const Sort &base_;
+		};
+
+		explicit Sort(Sorter &base) : base_(base) {}
 
 	private:
 		Sorter &base_;
 	};
 
+	class SortUnique {
+	public:
+		typedef bool RetType;
+
+		template<typename U> class TypeAt {
+		public:
+			explicit TypeAt(const SortUnique &base) : base_(base) {}
+
+			bool operator()() const {
+				return base_.base_.template sortUniqueAt<U>();
+			}
+
+		private:
+			const SortUnique &base_;
+		};
+
+		explicit SortUnique(Sorter &base) : base_(base) {}
+
+	private:
+		Sorter &base_;
+	};
+
+	class SortLimited {
+	public:
+		typedef bool RetType;
+
+		template<typename U> class TypeAt {
+		public:
+			explicit TypeAt(const SortLimited &base) : base_(base) {}
+
+			bool operator()() const {
+				return base_.base_.template sortLimitedAt<U>();
+			}
+
+		private:
+			const SortLimited &base_;
+		};
+
+		explicit SortLimited(Sorter &base) : base_(base) {}
+
+	private:
+		Sorter &base_;
+	};
+
+	template<typename Action>
+	class SortGroup {
+	public:
+		typedef bool RetType;
+
+		template<typename U> class TypeAt {
+		public:
+			explicit TypeAt(const SortGroup &base) : base_(base) {}
+
+			bool operator()() const {
+				return base_.base_.template sortGroupAt<U, Action>(base_.action_);
+			}
+
+		private:
+			const SortGroup &base_;
+		};
+
+		SortGroup(Sorter &base, const Action &action) :
+				base_(base), action_(action) {
+		}
+
+	private:
+		Sorter &base_;
+		const Action &action_;
+	};
+
 	typedef const T* Iterator;
 
-	Sorter(size_t capacity, const Pred &pred, const Alloc &alloc);
+	Sorter(
+			size_t capacity, const Pred &pred1, const Pred &pred2,
+			const Alloc &alloc);
 
-	void setInterval(ptrdiff_t interval);
+	void setConfig(const SortConfig &config);
+	void setSecondaryPredicate(const Pred &pred);
+	void setPredicateEmpty(bool primary, bool empty);
 
 	void add(const T &elem);
+	void addSecondary(const T &elem);
+
 	void clear();
 
 	bool isEmpty() const;
+	bool isEmptyAt(bool primary) const;
+	bool isEmptyPredicateAt(bool primary) const;
+
 	bool isFilled() const;
 	bool isSorted() const;
 
 	Iterator begin() const;
 	Iterator end() const;
 
+	Iterator beginAt(bool primary) const;
+	Iterator endAt(bool primary) const;
+
 	bool sort();
+	template<typename U> bool sortOptional(const U&);
+	template<typename Action> bool sortGroup(const Action &action);
+
+	bool isOptional() const;
+
 private:
 	typedef CombSorter<T*> BaseSorter;
+	typedef util::XArray<T, Alloc> ElemList;
 
 	template<typename U> bool sortAt();
+	template<typename U> bool sortUniqueAt();
+	template<typename U> bool sortLimitedAt();
+
+	template<typename U, typename Action>
+	bool sortGroupAt(const Action &action);
+
+	template<typename Action>
+	bool preapareBaseSorter(bool primary, const Action &action);
+	bool acceptResult(bool sorted);
+
+	void flip(bool primary);
+	T* toFlippedAddress(T *src) const;
+
+	template<typename Action>
+	void groupAll(bool primary, const Action &action);
+	void groupAll(bool primary, const util::FalseType&);
+
+	union Elem {
+		uint64_t value_;
+		uint8_t data_[sizeof(T)];
+	};
 
 	BaseSorter base_;
-	Pred pred_;
+	std::pair<Pred, Pred> predPair_;
+	std::pair<bool, bool> predEmpty_;
 
-	util::XArray<T, Alloc> elemList_;
 	T *begin_;
 	T *tail_;
 	T *end_;
-	T *sortingTail_;
+	T *secondaryBegin_;
+	std::pair<T*, T*> sortingBounds_;
+	std::pair<int64_t, int64_t> reducedSizes_;
+
+	T *tmp_;
 };
 
 template<typename T>
@@ -126,6 +322,11 @@ public:
 
 	const T& getValue() const;
 	size_t getOrdinal() const;
+
+	bool next() const;
+
+	template<typename U>
+	bool nextAt() const;
 
 private:
 	T value_;
@@ -196,21 +397,386 @@ public:
 	private:
 		HeapQueue &base_;
 	};
+
+	template<typename A>
+	class Merge {
+	public:
+		typedef bool RetType;
+		typedef typename A::OptionsType OptionsType;
+
+		template<typename U> class TypeAt {
+		public:
+			explicit TypeAt(const Merge &base) : base_(base) {}
+
+			bool operator()() const {
+				return base_.base_.mergeAt<U, A>(base_.action_);
+			}
+
+		private:
+			const Merge &base_;
+		};
+
+		Merge(HeapQueue &base, A &action) :
+				base_(base),
+				action_(action) {
+		}
+
+	private:
+		HeapQueue &base_;
+		A &action_;
+	};
+
+	template<typename A>
+	class MergeUnique {
+	public:
+		typedef bool RetType;
+		typedef typename A::OptionsType OptionsType;
+
+		template<typename U> class TypeAt {
+		public:
+			explicit TypeAt(const MergeUnique &base) : base_(base) {}
+
+			bool operator()() const {
+				return base_.base_.mergeUniqueAt<U, A>(base_.action_);
+			}
+
+		private:
+			const MergeUnique &base_;
+		};
+
+		MergeUnique(HeapQueue &base, A &action) :
+				base_(base),
+				action_(action) {
+		}
+
+	private:
+		HeapQueue &base_;
+		A &action_;
+	};
+
+	template<typename A>
+	class MergeLimited {
+	public:
+		typedef bool RetType;
+		typedef typename A::OptionsType OptionsType;
+
+		template<typename U> class TypeAt {
+		public:
+			explicit TypeAt(const MergeLimited &base) : base_(base) {}
+
+			bool operator()() const {
+				return base_.base_.mergeLimitedAt<U, A>(base_.action_);
+			}
+
+		private:
+			const MergeLimited &base_;
+		};
+
+		MergeLimited(HeapQueue &base, A &action) :
+				base_(base),
+				action_(action) {
+		}
+
+	private:
+		HeapQueue &base_;
+		A &action_;
+	};
+
 	HeapQueue(const Pred &basePred, const Alloc &alloc);
 
 	bool isEmpty() const;
+
+	bool isPredicateEmpty() const;
+	void setPredicateEmpty(bool empty);
 
 	Element newElement(const T &value);
 
 	void push(const Element &elem);
 	Element pop();
 
+	template<typename A>
+	bool merge(A &action);
+
+	template<typename A>
+	bool mergeUnique(A &action);
+
+	template<typename A>
+	bool mergeLimited(A &action);
+
+	template<typename A>
+	bool mergeUnchecked(A &action);
+
+	template<typename A>
+	bool mergeUncheckedUnique(A &action);
+
 private:
 	template<typename U> void pushAt(const Element &elem);
 	template<typename U> Element popAt();
 
-	util::Vector<Element> elemList_;
+	template<typename P> void pushAtTmp(const P &typedPred);
+	template<typename P> const Element& popAtTmp(const P &typedPred);
+
+	template<typename U, typename A> bool mergeAt(A &action);
+	template<typename U, typename A> bool mergeUniqueAt(A &action);
+	template<typename U, typename A> bool mergeLimitedAt(A &action);
+
+	typedef util::Vector<Element> ElementList;
+	ElementList elemList_;
 	HeapPredicate<T, Pred> pred_;
+	bool predEmpty_;
+};
+
+template<
+		typename K, typename T, typename Hash, typename Pred,
+		typename Alloc>
+class SQLAlgorithmUtils::OrderingHashMap {
+private:
+	typedef uint64_t BaseKeyType;
+	typedef std::pair<K, T> BaseMappedType;
+	typedef std::pair<BaseKeyType, BaseMappedType> BaseValueType;
+	typedef typename std::map<
+			BaseKeyType, BaseMappedType>::key_compare BaseKeyComp;
+	typedef util::MultiMap<
+			BaseKeyType, BaseMappedType, BaseKeyComp, Alloc> BaseType;
+
+	typedef typename BaseType::iterator BaseIterator;
+
+	class Iterator;
+
+public:
+	typedef Iterator iterator;
+
+	OrderingHashMap(
+			size_t, const Hash &hash, const Pred &pred, const Alloc &alloc) :
+			base_(alloc) {
+	}
+
+	std::pair<iterator, bool> insert(const std::pair<K, T> &value) {
+		const BaseKeyType &baseKey = hash_(value.first);
+		const std::pair<BaseIterator, BaseIterator> &range =
+				base_.equal_range(baseKey);
+
+		BaseIterator it = range.first;
+		for (; it != range.second; ++it) {
+			if (pred_(it->second.first, value.first)) {
+				return std::make_pair(iterator(it, false));
+			}
+		}
+
+		return std::make_pair(iterator(base_.insert(
+				it, BaseValueType(baseKey, value)), true));
+	}
+
+	iterator find(const K &key) {
+		const BaseKeyType &baseKey = hash_(key);
+		const std::pair<BaseIterator, BaseIterator> &range =
+				base_.equal_range(baseKey);
+
+		for (BaseIterator it = range.first; it != range.second; ++it) {
+			if (pred_(it->second.first, key)) {
+				return iterator(it);
+			}
+		}
+
+		return end();
+	}
+
+	iterator end() {
+		return iterator(base_.end());
+	}
+
+private:
+	BaseType base_;
+	Hash hash_;
+	Pred pred_;
+};
+
+template<
+		typename K, typename T, typename Hash, typename Pred,
+		typename Alloc>
+class SQLAlgorithmUtils::OrderingHashMap<K, T, Hash, Pred, Alloc>::Iterator {
+public:
+	explicit Iterator(const BaseIterator &baseIt) : baseIt_(baseIt) {
+	}
+
+	std::pair<K, T>& operator*() const {
+		return baseIt_->second;
+	}
+
+	std::pair<K, T>* operator->() const {
+		return &baseIt_->second;
+	}
+
+	bool operator==(const Iterator &another) const {
+		return baseIt_ == another.baseIt_;
+	}
+
+	bool operator!=(const Iterator &another) const {
+		return baseIt_ != another.baseIt_;
+	}
+
+	Iterator& operator++() {
+		++baseIt_;
+		return *this;
+	}
+
+	Iterator operator++(int) {
+		const Iterator last = *this;
+		++baseIt_;
+		return last;
+	}
+
+private:
+	BaseIterator baseIt_;
+};
+
+template<
+		typename K, typename T, typename Hash, typename Pred,
+		typename Alloc>
+class SQLAlgorithmUtils::OrderingHashMultiMap {
+private:
+	typedef uint64_t BaseKeyType;
+	typedef std::pair<K, T> BaseMappedType;
+	typedef std::pair<BaseKeyType, BaseMappedType> BaseValueType;
+	typedef typename std::map<
+			BaseKeyType, BaseMappedType>::key_compare BaseKeyComp;
+	typedef util::MultiMap<
+			BaseKeyType, BaseMappedType, BaseKeyComp, Alloc> BaseType;
+
+	typedef typename BaseType::iterator BaseIterator;
+
+public:
+	typedef typename OrderingHashMap<K, T, Hash, Pred, Alloc>::iterator iterator;
+
+	OrderingHashMultiMap(
+			size_t, const Hash &hash, const Pred &pred, const Alloc &alloc) :
+			base_(alloc) {
+	}
+
+	iterator insert(const std::pair<K, T> &value) {
+		const BaseKeyType &baseKey = hash_(value.first);
+		const std::pair<BaseIterator, BaseIterator> &range =
+				base_.equal_range(baseKey);
+
+		BaseIterator it = range.first;
+		for (; it != range.second; ++it) {
+			if (pred_(it->second.first, value.first)) {
+				return iterator(base_.insert(it, BaseValueType(baseKey, value)));
+			}
+		}
+
+		return iterator(base_.insert(it, BaseValueType(baseKey, value)));
+	}
+
+	iterator insert(iterator, const std::pair<K, T> &value) {
+		return insert(value);
+	}
+
+	iterator find(const K &key) {
+		const BaseKeyType &baseKey = hash_(key);
+		const std::pair<BaseIterator, BaseIterator> &range =
+				base_.equal_range(baseKey);
+
+		for (BaseIterator it = range.first; it != range.second; ++it) {
+			if (pred_(it->second.first, key)) {
+				return iterator(it);
+			}
+		}
+
+		return end();
+	}
+
+	std::pair<iterator, iterator> equal_range(const K &key) {
+		const BaseKeyType &baseKey = hash_(key);
+		std::pair<BaseIterator, BaseIterator> range =
+				base_.equal_range(baseKey);
+
+		for (BaseIterator it = range.first;; ++it) {
+			if (it == range.second) {
+				return std::make_pair(end(), end());
+			}
+
+			if (pred_(it->second.first, key)) {
+				range.first = it;
+				while (++it != range.second && pred_(it->second.first, key)) {
+				}
+				range.second = it;
+				break;
+			}
+		}
+
+		return std::make_pair(iterator(range.first), iterator(range.second));
+	}
+
+	iterator end() {
+		return iterator(base_.end());
+	}
+
+private:
+	BaseType base_;
+	Hash hash_;
+	Pred pred_;
+};
+
+template<
+		typename K, typename T, typename Hash, typename Pred,
+		typename Alloc>
+class SQLAlgorithmUtils::HashMap : public
+#if UTIL_CXX11_SUPPORTED
+		std::unordered_map<K, T, Hash, Pred, Alloc>
+#else
+		SQLAlgorithmUtils::OrderingHashMap<K, T, Hash, Pred, Alloc>
+#endif
+{
+public:
+	HashMap(
+			size_t capacity, const Hash &hash, const Pred &pred,
+			const Alloc &alloc) :
+#if UTIL_CXX11_SUPPORTED
+			std::unordered_map<K, T, Hash, Pred, Alloc>
+#else
+			SQLAlgorithmUtils::OrderingHashMap<K, T, Hash, Pred, Alloc>
+#endif
+			(capacity, hash, pred, alloc) {
+	}
+};
+
+template<
+		typename K, typename T, typename Hash, typename Pred,
+		typename Alloc>
+class SQLAlgorithmUtils::HashMultiMap : public
+#if UTIL_CXX11_SUPPORTED
+		std::unordered_multimap<K, T, Hash, Pred, Alloc>
+#else
+		SQLAlgorithmUtils::OrderingHashMultiMap<K, T, Hash, Pred, Alloc>
+#endif
+{
+public:
+	HashMultiMap(
+			size_t capacity, const Hash &hash, const Pred &pred,
+			const Alloc &alloc) :
+#if UTIL_CXX11_SUPPORTED
+			std::unordered_multimap<K, T, Hash, Pred, Alloc>
+#else
+			SQLAlgorithmUtils::OrderingHashMultiMap<K, T, Hash, Pred, Alloc>
+#endif
+			(capacity, hash, pred, alloc) {
+	}
+};
+
+template<typename T, typename Alloc>
+class SQLAlgorithmUtils::DigestHashSet {
+public:
+	DigestHashSet(size_t size, const Alloc &alloc);
+
+	void add(const T &value);
+	bool find(const T &value) const;
+
+private:
+	size_t toIndex(const T &value) const;
+
+	util::Vector<bool, Alloc> base_;
+	size_t size_;
 };
 
 
@@ -221,25 +787,24 @@ SQLAlgorithmUtils::CombSorter<It>::CombSorter(It begin, It end) :
 		end_(end),
 		gap_(end - begin),
 		sorted_(false),
-		interval_(std::numeric_limits<ptrdiff_t>::max()),
 		middle_(end) {
 	assert(gap_ >= 0);
 }
 
 template<typename It>
-void SQLAlgorithmUtils::CombSorter<It>::setInterval(ptrdiff_t interval) {
-	assert(interval > 0);
-	interval_ = interval;
+void SQLAlgorithmUtils::CombSorter<It>::setConfig(const SortConfig &config) {
+	config_ = config;
 }
 
 template<typename It>
-void SQLAlgorithmUtils::CombSorter<It>::setConfig(const CombSorter &src) {
-	setInterval(src.interval_);
+const SQLAlgorithmUtils::SortConfig&
+SQLAlgorithmUtils::CombSorter<It>::getConfig() const {
+	return config_;
 }
 
 template<typename It>
 bool SQLAlgorithmUtils::CombSorter<It>::isSorted() const {
-	return sorted_;
+	return (begin_ == end_ || sorted_);
 }
 
 template<typename It>
@@ -260,8 +825,10 @@ bool SQLAlgorithmUtils::CombSorter<It>::run(const Pred &pred) {
 
 		It it = begin_;
 		It gapIt = it + gap_;
+
+		assert(config_.interval_ > 0);
 		middle_ = gapIt + static_cast<ptrdiff_t>(
-				std::min<int64_t>(interval_, (end_ - gapIt)));
+				std::min<int64_t>(config_.interval_, (end_ - gapIt)));
 		while (gapIt != middle_) {
 			if (pred(*gapIt, *it)) {
 				std::swap(*it, *gapIt);
@@ -277,88 +844,1030 @@ bool SQLAlgorithmUtils::CombSorter<It>::run(const Pred &pred) {
 	return sorted_;
 }
 
+template<typename It>
+template<typename Pred>
+bool SQLAlgorithmUtils::CombSorter<It>::runMain(
+		const Pred &pred, It tmp, bool tmpAllowed, bool *resultOnTmp) {
+	ptrdiff_t baseUnit = 128;
+
+	typedef std::pair<It, It> Range;
+	const size_t listCapacity= 32;
+	Range list[listCapacity];
+	Range *listIt = list;
+	Range *listTail = listIt;
+	Range prev(begin_, begin_);
+	bool tailReached = false;
+	for (;;) {
+		const bool fromTmp = ((listIt - list) % 2 != 0);
+		if (prev.first == prev.second) {
+			if (listIt == list) {
+				if (prev.first == NULL) {
+					prev = Range(listIt->second, listIt->second);
+				}
+				ptrdiff_t unit = end_ - prev.second;
+				if (unit > baseUnit) {
+					unit = baseUnit;
+				}
+				else {
+					tailReached = true;
+				}
+				prev.second += unit;
+			}
+			else if (tailReached) {
+				if (listIt >= listTail && (!fromTmp || tmpAllowed)) {
+					assert(resultOnTmp != NULL);
+					*resultOnTmp = fromTmp;
+					assert((end_ - begin_) == (listIt->second - listIt->first));
+					return true;
+				}
+			}
+			else {
+				if (listIt > listTail) {
+					listTail = listIt;
+				}
+				listIt = list;
+				continue;
+			}
+		}
+
+		if (listIt->first == listIt->second) {
+			*listIt = prev;
+			prev = Range();
+			continue;
+		}
+
+		Range next((listIt + 1)->second, It());
+		if (next.first == NULL) {
+			next.first = (fromTmp ? begin_ : tmp);
+		}
+
+		if (listIt == list) {
+			for (size_t i = 0; i < 2; i++) {
+				runSubSort(
+						pred,
+						(i == 0 ? listIt->first : prev.first),
+						(i == 0 ? listIt->second : prev.second));
+			}
+		}
+		runSubMerge(
+				pred,
+				listIt->first, listIt->second,
+				prev.first, prev.second,
+				next.first);
+		next.second = next.first +
+				(listIt->second - listIt->first) +
+				(prev.second - prev.first);
+
+		*listIt = Range(prev.second, prev.second);
+		prev = next;
+		++listIt;
+		assert(listIt - list < static_cast<ptrdiff_t>(listCapacity));
+	}
+}
+
+template<typename It>
+template<typename Pred>
+ptrdiff_t SQLAlgorithmUtils::CombSorter<It>::runMainUnique(
+		const Pred &pred, It tmp, bool tmpAllowed, bool *resultOnTmp) {
+	const ptrdiff_t baseUnit = 32;
+
+	typedef std::pair<It, It> Range;
+	const size_t listCapacity= 32;
+	Range list[listCapacity];
+	Range *listIt = list;
+	Range *listTail = listIt;
+	Range prev(begin_, begin_);
+	bool tailReached = false;
+	for (;;) {
+		const bool fromTmp = ((listIt - list) % 2 != 0);
+		if (prev.first == prev.second) {
+			if (listIt == list) {
+				if (prev.first == NULL) {
+					prev = Range(listIt->second, listIt->second);
+				}
+				ptrdiff_t unit = end_ - prev.second;
+				if (unit > baseUnit) {
+					unit = baseUnit;
+				}
+				else {
+					tailReached = true;
+				}
+				prev.second += unit;
+			}
+			else if (tailReached) {
+				if (listIt >= listTail && (!fromTmp || tmpAllowed)) {
+					assert(resultOnTmp != NULL);
+					*resultOnTmp = fromTmp;
+					return (end_ - begin_) - (listIt->second - listIt->first);
+				}
+			}
+			else {
+				if (listIt > listTail) {
+					listTail = listIt;
+				}
+				listIt = list;
+				continue;
+			}
+		}
+
+		if (listIt->first == listIt->second) {
+			*listIt = prev;
+			prev = Range();
+			continue;
+		}
+
+		Range next((listIt + 1)->second, It());
+		if (next.first == NULL) {
+			next.first = (fromTmp ? begin_ : tmp);
+		}
+
+		if (listIt == list) {
+			uint32_t dup1[baseUnit];
+			uint32_t dup2[baseUnit];
+			for (size_t i = 0; i < 2; i++) {
+				runSubSortUnique(
+						pred,
+						(i == 0 ? listIt->first : prev.first),
+						(i == 0 ? listIt->second : prev.second),
+						(i == 0 ? dup1 : dup2));
+			}
+			next.second = runSubMergeTopUnique(
+					pred,
+					listIt->first, listIt->second,
+					prev.first, prev.second,
+					dup1, dup2, next.first);
+		}
+		else {
+			next.second = runSubMergeMidUnique(
+					pred,
+					listIt->first, listIt->second,
+					prev.first, prev.second,
+					next.first);
+		}
+		*listIt = Range(prev.second, prev.second);
+		prev = next;
+		++listIt;
+		assert(listIt - list < static_cast<ptrdiff_t>(listCapacity));
+	}
+}
+
+template<typename It>
+template<typename Pred, typename Action>
+ptrdiff_t SQLAlgorithmUtils::CombSorter<It>::runMainGroup(
+		const Pred &pred, const Action &action,
+		It tmp, bool tmpAllowed, bool *resultOnTmp) {
+	const ptrdiff_t baseUnit = 32;
+
+	typedef std::pair<It, It> Range;
+	const size_t listCapacity= 32;
+	Range list[listCapacity];
+	Range *listIt = list;
+	Range *listTail = listIt;
+	Range prev(begin_, begin_);
+	bool tailReached = false;
+	for (;;) {
+		const bool fromTmp = ((listIt - list) % 2 != 0);
+		if (prev.first == prev.second) {
+			if (listIt == list) {
+				if (prev.first == NULL) {
+					prev = Range(listIt->second, listIt->second);
+				}
+				ptrdiff_t unit = end_ - prev.second;
+				if (unit > baseUnit) {
+					unit = baseUnit;
+				}
+				else {
+					tailReached = true;
+				}
+				prev.second += unit;
+			}
+			else if (tailReached) {
+				if (listIt >= listTail && (!fromTmp || tmpAllowed)) {
+					assert(resultOnTmp != NULL);
+					*resultOnTmp = fromTmp;
+					return (end_ - begin_) - (listIt->second - listIt->first);
+				}
+			}
+			else {
+				if (listIt > listTail) {
+					listTail = listIt;
+				}
+				listIt = list;
+				continue;
+			}
+		}
+
+		if (listIt->first == listIt->second) {
+			*listIt = prev;
+			prev = Range();
+			continue;
+		}
+
+		Range next((listIt + 1)->second, It());
+		if (next.first == NULL) {
+			next.first = (fromTmp ? begin_ : tmp);
+		}
+
+		if (listIt == list) {
+			uint32_t dup1[baseUnit];
+			uint32_t dup2[baseUnit];
+			for (size_t i = 0; i < 2; i++) {
+				runSubSortUnique(
+						pred,
+						(i == 0 ? listIt->first : prev.first),
+						(i == 0 ? listIt->second : prev.second),
+						(i == 0 ? dup1 : dup2));
+			}
+			next.second = runSubMergeTopGroup(
+					pred, action,
+					listIt->first, listIt->second,
+					prev.first, prev.second,
+					dup1, dup2, next.first);
+		}
+		else {
+			next.second = runSubMergeMidGroup(
+					pred, action,
+					listIt->first, listIt->second,
+					prev.first, prev.second,
+					next.first);
+		}
+		*listIt = Range(prev.second, prev.second);
+		prev = next;
+		++listIt;
+		assert(listIt - list < static_cast<ptrdiff_t>(listCapacity));
+	}
+}
+
+template<typename It>
+template<typename Pred>
+void SQLAlgorithmUtils::CombSorter<It>::runSubSort(
+		const Pred &pred, It begin, It end) {
+	bool sorted = false;
+	ptrdiff_t gap = end - begin;
+	while (!sorted) {
+		gap = gap * SORT_SHRINK_BASE / SORT_SHRINK_RATE;
+		if (gap <= 1) {
+			gap = 1;
+			sorted = true;
+		}
+		if (gap >= (end - begin)) {
+			gap = 0;
+			sorted = true;
+		}
+
+		It it = begin;
+		It gapIt = it + gap;
+		while (gapIt != end) {
+			if (pred(*gapIt, *it)) {
+				std::swap(*it, *gapIt);
+				sorted = false;
+			}
+			++it;
+			++gapIt;
+		}
+	}
+}
+
+template<typename It>
+template<typename Pred>
+void SQLAlgorithmUtils::CombSorter<It>::runSubSortUnique(
+		const Pred &pred, It begin, It end, uint32_t *dup) {
+	bool sorted = false;
+	ptrdiff_t gap = end - begin;
+	while (!sorted) {
+		gap = gap * SORT_SHRINK_BASE / SORT_SHRINK_RATE;
+		if (gap <= 1) {
+			gap = 1;
+			sorted = true;
+		}
+		if (gap >= (end - begin)) {
+			gap = 0;
+			sorted = true;
+		}
+
+		It it = begin;
+		It gapIt = it + gap;
+		if (gap <= 1) {
+			uint32_t *dupIt = dup;
+			*dupIt = (gap < 1 ? 0 : 1);
+			while (gapIt != end) {
+				const int32_t ret = pred.toThreeWay()(*it, *gapIt);
+				if (ret > 0) {
+					std::swap(*it, *gapIt);
+					sorted = false;
+				}
+				else if (ret < 0) {
+					*(++dupIt) = 1;
+				}
+				else {
+					++(*dupIt);
+				}
+				++it;
+				++gapIt;
+			}
+		}
+		else {
+			while (gapIt != end) {
+				if (pred(*gapIt, *it)) {
+					std::swap(*it, *gapIt);
+					sorted = false;
+				}
+				++it;
+				++gapIt;
+			}
+		}
+	}
+}
+
+template<typename It>
+template<typename Pred>
+void SQLAlgorithmUtils::CombSorter<It>::runSubMerge(
+		const Pred &pred, It begin1, It end1, It begin2, It end2, It out) {
+	It in1 = begin1;
+	It in2 = begin2;
+
+	if (in1 != end1 && in2 != end2) {
+		for (;;) {
+			if (pred(*in2, *in1)) {
+				*out = *in2;
+				++out;
+				if (++in2 == end2) {
+					break;
+				}
+			}
+			else {
+				*out = *in1;
+				++out;
+				if (++in1 == end1) {
+					break;
+				}
+			}
+		}
+	}
+
+	for (; in1 != end1; ++in1) {
+		*out = *in1;
+		++out;
+	}
+
+	for (; in2 != end2; ++in2) {
+		*out = *in2;
+		++out;
+	}
+}
+
+template<typename It>
+template<typename Pred>
+It SQLAlgorithmUtils::CombSorter<It>::runSubMergeTopUnique(
+		const Pred &pred, It begin1, It end1, It begin2, It end2,
+		const uint32_t *dup1, const uint32_t *dup2, It out) {
+	It in1 = begin1;
+	It in2 = begin2;
+
+	if (in1 != end1 && in2 != end2) {
+		for (;;) {
+			const int32_t ret = pred.toThreeWay()(*in1, *in2);
+			if (ret > 0) {
+				*out = *in2;
+				++out;
+				if ((in2 += *(dup2++)) == end2) {
+					break;
+				}
+			}
+			else {
+				*out = *in1;
+				++out;
+				if (ret < 0) {
+					if ((in1 += *(dup1++)) == end1) {
+						break;
+					}
+				}
+				else {
+					in1 += *(dup1++);
+					in2 += *(dup2++);
+					if (in1 == end1 || in2 == end2) {
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	for (; in1 != end1; in1 += *(dup1++)) {
+		*out = *in1;
+		++out;
+	}
+
+	for (; in2 != end2; in2 += *(dup2++)) {
+		*out = *in2;
+		++out;
+	}
+
+	return out;
+}
+
+template<typename It>
+template<typename Pred, typename Action>
+It SQLAlgorithmUtils::CombSorter<It>::runSubMergeTopGroup(
+		const Pred &pred, const Action &action,
+		It begin1, It end1, It begin2, It end2,
+		const uint32_t *dup1, const uint32_t *dup2, It out) {
+	It in1 = begin1;
+	It in2 = begin2;
+
+	if (in1 != end1 && in2 != end2) {
+		for (;;) {
+			const int32_t ret = pred.toThreeWay()(*in1, *in2);
+			if (ret > 0) {
+				*out = *in2;
+				action(*out);
+				for (uint32_t dup = *(dup2++); --dup > 0;) {
+					action(*out, *(++in2));
+				}
+				++out;
+				if (++in2 == end2) {
+					break;
+				}
+			}
+			else {
+				*out = *in1;
+				action(*out);
+				for (uint32_t dup = *(dup1++); --dup > 0;) {
+					action(*out, *(++in1));
+				}
+				++in1;
+				if (ret < 0) {
+					++out;
+					if (in1 == end1) {
+						break;
+					}
+				}
+				else {
+					{
+						uint32_t dup = *(dup2++);
+						do {
+							action(*out, *(in2++));
+						}
+						while (--dup > 0);
+					}
+					++out;
+					if (in1 == end1 || in2 == end2) {
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	for (; in1 != end1; ++in1) {
+		*out = *in1;
+		action(*out);
+		for (uint32_t dup = *(dup1++); --dup > 0;) {
+			action(*out, *(++in1));
+		}
+		++out;
+	}
+
+	for (; in2 != end2; ++in2) {
+		*out = *in2;
+		action(*out);
+		for (uint32_t dup = *(dup2++); --dup > 0;) {
+			action(*out, *(++in2));
+		}
+		++out;
+	}
+
+	return out;
+}
+
+template<typename It>
+template<typename Pred>
+It SQLAlgorithmUtils::CombSorter<It>::runSubMergeMidUnique(
+		const Pred &pred, It begin1, It end1, It begin2, It end2, It out) {
+	It in1 = begin1;
+	It in2 = begin2;
+
+	if (in1 != end1 && in2 != end2) {
+		for (;;) {
+			const int32_t ret = pred.toThreeWay()(*in1, *in2);
+			if (ret > 0) {
+				*out = *in2;
+				++out;
+				if (++in2 == end2) {
+					break;
+				}
+			}
+			else {
+				*out = *in1;
+				++out;
+				if (ret < 0) {
+					if (++in1 == end1) {
+						break;
+					}
+				}
+				else {
+					++in1;
+					++in2;
+					if (in1 == end1 || in2 == end2) {
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	for (; in1 != end1; ++in1) {
+		*out = *in1;
+		++out;
+	}
+
+	for (; in2 != end2; ++in2) {
+		*out = *in2;
+		++out;
+	}
+
+	return out;
+}
+
+template<typename It>
+template<typename Pred, typename Action>
+It SQLAlgorithmUtils::CombSorter<It>::runSubMergeMidGroup(
+		const Pred &pred, const Action &action,
+		It begin1, It end1, It begin2, It end2, It out) {
+	It in1 = begin1;
+	It in2 = begin2;
+
+	if (in1 != end1 && in2 != end2) {
+		for (;;) {
+			const int32_t ret = pred.toThreeWay()(*in1, *in2);
+			if (ret > 0) {
+				*out = *in2;
+				++out;
+				if (++in2 == end2) {
+					break;
+				}
+			}
+			else {
+				*out = *in1;
+				if (ret < 0) {
+					++out;
+					if (++in1 == end1) {
+						break;
+					}
+				}
+				else {
+					action(*out, *in2, util::FalseType());
+					++out;
+					++in1;
+					++in2;
+					if (in1 == end1 || in2 == end2) {
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	for (; in1 != end1; ++in1) {
+		*out = *in1;
+		++out;
+	}
+
+	for (; in2 != end2; ++in2) {
+		*out = *in2;
+		++out;
+	}
+
+	return out;
+}
+
+template<typename It>
+template<typename Pred>
+bool SQLAlgorithmUtils::CombSorter<It>::runLimited(
+		const Pred &pred, int64_t &reduced) {
+	It tail = begin_ + static_cast<ptrdiff_t>(std::min<int64_t>(
+			end_ - begin_, std::max<int64_t>(config_.limit_, 0)));
+	reduced = (end_ - tail);
+
+	for (It it = begin_; it != tail;) {
+		std::push_heap(begin_, ++it, pred);
+	}
+	for (It it = tail; it != end_; ++it) {
+		if (pred(*it, *begin_)) {
+			*tail = *it;
+			std::push_heap(begin_, tail + 1, pred);
+			std::pop_heap(begin_, tail + 1, pred);
+		}
+	}
+	for (It it = tail; it != begin_; --it) {
+		std::pop_heap(begin_, it, pred);
+	}
+	return true;
+}
+
 
 template<typename T, typename Pred, typename Alloc>
 SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::Sorter(
-		size_t capacity, const Pred &pred, const Alloc &alloc) :
+		size_t capacity, const Pred &pred1, const Pred &pred2,
+		const Alloc &alloc) :
 		base_(NULL, NULL),
-		pred_(pred),
-		elemList_(alloc),
+		predPair_(pred1, pred2),
 		begin_(NULL),
 		tail_(NULL),
 		end_(NULL),
-		sortingTail_(NULL) {
-	elemList_.resize(capacity);
-	begin_ = elemList_.data();
+		secondaryBegin_(NULL),
+		tmp_(NULL) {
+	begin_ = reinterpret_cast<T*>(ALLOC_NEW(*alloc.base()) Elem[capacity]);
 	tail_ = begin_;
-	end_ = tail_ + elemList_.size();
+	end_ = tail_ + capacity;
+	secondaryBegin_ = end_;
+	tmp_ = reinterpret_cast<T*>(ALLOC_NEW(*alloc.base()) Elem[capacity]);
 }
 
 template<typename T, typename Pred, typename Alloc>
-void SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::setInterval(
-		ptrdiff_t interval) {
-	base_.setInterval(interval);
+void SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::setConfig(
+		const SortConfig &config) {
+	base_.setConfig(config);
+}
+
+template<typename T, typename Pred, typename Alloc>
+void SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::setPredicateEmpty(
+		bool primary, bool empty) {
+	bool &dest = (primary ? predEmpty_.first : predEmpty_.second);
+	dest = empty;
 }
 
 template<typename T, typename Pred, typename Alloc>
 void SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::clear() {
+	const SortConfig config = base_.getConfig();
 	base_ = BaseSorter(NULL, NULL);
+	base_.setConfig(config);
 	tail_ = begin_;
-	sortingTail_ = NULL;
+	secondaryBegin_ = end_;
+	sortingBounds_ = std::pair<T*, T*>();
+	reducedSizes_ = std::pair<int64_t, int64_t>();
 }
 
 template<typename T, typename Pred, typename Alloc>
-void SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::add(const T &elem) {
-	assert(tail_ != end_);
+inline void SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::add(const T &elem) {
+	assert(tail_ != secondaryBegin_);
 	new (tail_) T(elem);
 	++tail_;
 }
 
 template<typename T, typename Pred, typename Alloc>
+inline void SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::addSecondary(
+		const T &elem) {
+	assert(secondaryBegin_ != tail_);
+	new (--secondaryBegin_) T(elem);
+}
+
+template<typename T, typename Pred, typename Alloc>
 bool SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::isEmpty() const {
-	return (begin_ == tail_);
+	return (isEmptyAt(true) && isEmptyAt(false));
+}
+
+template<typename T, typename Pred, typename Alloc>
+bool SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::isEmptyAt(bool primary) const {
+	if (primary) {
+		return (tail_ - begin_ == 0);
+	}
+	else {
+		return (end_ - secondaryBegin_ == 0);
+	}
+}
+
+template<typename T, typename Pred, typename Alloc>
+bool SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::isEmptyPredicateAt(
+		bool primary) const {
+	return (primary ? predEmpty_.first : predEmpty_.second);
 }
 
 template<typename T, typename Pred, typename Alloc>
 bool SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::isFilled() const {
-	return (tail_ == end_);
+	return (tail_ == secondaryBegin_);
 }
 
 template<typename T, typename Pred, typename Alloc>
 bool SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::isSorted() const {
-	return (tail_ == sortingTail_ && base_.isSorted());
+	return (sortingBounds_.first == tail_ &&
+			sortingBounds_.second == secondaryBegin_ &&
+			base_.isSorted());
 }
 
 template<typename T, typename Pred, typename Alloc>
-typename SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::Iterator
+inline typename SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::Iterator
 SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::begin() const {
-	return begin_;
+	return beginAt(true);
 }
 
 template<typename T, typename Pred, typename Alloc>
-typename SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::Iterator
+inline typename SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::Iterator
 SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::end() const {
-	return tail_;
+	return endAt(true);
+}
+
+template<typename T, typename Pred, typename Alloc>
+inline typename SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::Iterator
+SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::beginAt(bool primary) const {
+	return (primary ? begin_ : secondaryBegin_);
+}
+
+template<typename T, typename Pred, typename Alloc>
+inline typename SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::Iterator
+SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::endAt(bool primary) const {
+	return (primary ? tail_ : end_) - static_cast<ptrdiff_t>(
+			primary ? reducedSizes_.first : reducedSizes_.second);
 }
 
 template<typename T, typename Pred, typename Alloc>
 bool SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::sort() {
-	return pred_.getTypeSwitcher()(*this);
+	for (size_t i = 0; i < 2; i++) {
+		const bool primary = (i == 0);
+		if (!preapareBaseSorter(primary, util::FalseType())) {
+			continue;
+		}
+
+		const Pred &pred = (primary ? predPair_.first : predPair_.second);
+		Sort op(*this);
+		if (!acceptResult(
+				pred.getTypeSwitcher().template get<Sort>()(op))) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+template<typename T, typename Pred, typename Alloc>
+template<typename U>
+bool SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::sortOptional(const U&) {
+	for (size_t i = 0; i < 2; i++) {
+		const bool primary = (i == 0);
+		if (!preapareBaseSorter(primary, util::FalseType())) {
+			continue;
+		}
+
+		const SortConfig &config = base_.getConfig();
+		const Pred &pred = (primary ? predPair_.first : predPair_.second);
+
+		bool sorted;
+		if (config.unique_) {
+			SortUnique op(*this);
+			sorted = pred.getTypeSwitcher().toUnordered().template get<
+					SortUnique>()(op);
+		}
+		else {
+			SortLimited op(*this);
+			sorted = pred.getTypeSwitcher().template get<SortLimited>()(op);
+		}
+
+		if (!acceptResult(sorted)) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+template<typename T, typename Pred, typename Alloc>
+template<typename Action>
+bool SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::sortGroup(
+		const Action &action) {
+	for (size_t i = 0; i < 2; i++) {
+		const bool primary = (i == 0);
+		action(primary);
+
+		if (!preapareBaseSorter(primary, action)) {
+			continue;
+		}
+
+		const Pred &pred = (primary ? predPair_.first : predPair_.second);
+
+		const SortConfig &config = base_.getConfig();
+		assert(config.unique_);
+		static_cast<void>(config);
+
+		typedef SortGroup<Action> Op;
+		Op op(*this, action);
+		const bool sorted =
+				pred.getTypeSwitcher().toUnordered().template get<Op>()(op);
+
+		if (!acceptResult(sorted)) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+template<typename T, typename Pred, typename Alloc>
+bool SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::isOptional() const {
+	const SortConfig &config = base_.getConfig();
+	if (config.unique_) {
+		return true;
+	}
+	else if (config.limit_ >= 0 &&
+			(config.limit_ < endAt(true) - beginAt(true) ||
+			config.limit_ < endAt(false) - beginAt(false))) {
+		return true;
+	}
+
+	return false;
 }
 
 template<typename T, typename Pred, typename Alloc>
 template<typename U>
 bool SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::sortAt() {
-	typedef typename Pred::template TypeAt<U> TypedPred;
-	if (tail_ != sortingTail_) {
-		sortingTail_ = tail_;
+	typedef typename Pred::template TypeAt<U>::TypedOp TypedPred;
+	const bool primary = (sortingBounds_.second == NULL);
+	const Pred &pred = (primary ? predPair_.first : predPair_.second);
+	bool resultOnTmp;
+	if (base_.runMain(TypedPred(pred), tmp_, primary, &resultOnTmp)) {
+		if (resultOnTmp) {
+			flip(primary);
+		}
+		return true;
+	}
+	return false;
+}
 
-		const BaseSorter org = base_;
-		base_ = BaseSorter(begin_, tail_);
-		base_.setConfig(org);
+template<typename T, typename Pred, typename Alloc>
+template<typename U>
+bool SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::sortUniqueAt() {
+	typedef typename Pred::template TypeAt<U>::TypedOp TypedPred;
+	const bool primary = (sortingBounds_.second == NULL);
+	const Pred &pred = (primary ? predPair_.first : predPair_.second);
+
+	bool resultOnTmp;
+	(primary ? reducedSizes_.first : reducedSizes_.second) =
+			base_.runMainUnique(TypedPred(pred), tmp_, primary, &resultOnTmp);
+	if (resultOnTmp) {
+		flip(primary);
+	}
+	return true;
+}
+
+template<typename T, typename Pred, typename Alloc>
+template<typename U>
+bool SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::sortLimitedAt() {
+	typedef typename Pred::template TypeAt<U>::TypedOp TypedPred;
+	const bool primary = (sortingBounds_.second == NULL);
+	const Pred &pred = (primary ? predPair_.first : predPair_.second);
+
+	int64_t &reduced = (primary ? reducedSizes_.first : reducedSizes_.second);
+	return base_.runLimited(TypedPred(pred), reduced);
+}
+
+template<typename T, typename Pred, typename Alloc>
+template<typename U, typename Action>
+bool SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::sortGroupAt(
+		const Action &action) {
+	typedef typename Pred::template TypeAt<U>::TypedOp TypedPred;
+	const bool primary = (sortingBounds_.second == NULL);
+	const Pred &pred = (primary ? predPair_.first : predPair_.second);
+
+	bool resultOnTmp;
+	(primary ? reducedSizes_.first : reducedSizes_.second) =
+			base_.runMainGroup(TypedPred(pred), action, tmp_, primary, &resultOnTmp);
+	if (resultOnTmp) {
+		flip(primary);
+	}
+	return true;
+}
+
+template<typename T, typename Pred, typename Alloc>
+template<typename Action>
+bool SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::preapareBaseSorter(
+		bool primary, const Action &action) {
+	do {
+		BaseSorter nextBase(NULL, NULL);
+		const SortConfig config = base_.getConfig();
+
+		if (primary) {
+			if (sortingBounds_.first == tail_) {
+				if (sortingBounds_.second != NULL) {
+					return false;
+				}
+				break;
+			}
+
+			sortingBounds_.first = tail_;
+			sortingBounds_.second = NULL;
+
+			if (!predEmpty_.first) {
+				nextBase = BaseSorter(begin_, tail_);
+			}
+		}
+		else {
+			if (sortingBounds_.second == secondaryBegin_) {
+				assert(sortingBounds_.first == tail_);
+				break;
+			}
+
+			sortingBounds_.second = secondaryBegin_;
+			if (!predEmpty_.second) {
+				nextBase = BaseSorter(secondaryBegin_, end_);
+			}
+		}
+
+		if (nextBase.isSorted() && (config.unique_ || config.limit_ >= 0)) {
+			int64_t &reduced =
+					(primary ? reducedSizes_.first : reducedSizes_.second);
+			reduced = 0;
+
+			const int64_t limit = (config.unique_ ? 1 : config.limit_);
+			const int64_t size = endAt(primary) - beginAt(primary);
+
+			if (config.unique_) {
+				groupAll(primary, action);
+			}
+
+			reduced = size - std::min(size, limit);
+		}
+
+		base_ = nextBase;
+		base_.setConfig(config);
+	}
+	while (false);
+
+	return !base_.isSorted();
+}
+
+template<typename T, typename Pred, typename Alloc>
+bool SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::acceptResult(bool sorted) {
+	if (sorted) {
+		BaseSorter nextBase(NULL, NULL);
+		nextBase.setConfig(base_.getConfig());
+
+		base_ = nextBase;
+	}
+	return sorted;
+}
+
+template<typename T, typename Pred, typename Alloc>
+void SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::flip(bool primary) {
+	const T *anotherSrcBegin = (primary ? secondaryBegin_ : begin_);
+	const T *anotherSrcEnd = (primary ? end_ : tail_);
+	T *anotherDestBegin;
+	{
+		T *tmpTail = toFlippedAddress(tail_);
+		T *tmpEnd = toFlippedAddress(end_);
+		T *tmpSecondaryBegin = toFlippedAddress(secondaryBegin_);
+
+		std::pair<T*, T*> tmpSortingBounds(
+				toFlippedAddress(sortingBounds_.first),
+				toFlippedAddress(sortingBounds_.second));
+
+		anotherDestBegin = (primary ? tmpSecondaryBegin : tmp_);
+
+		std::swap(tmp_, begin_);
+		std::swap(tmpTail, tail_);
+		std::swap(tmpEnd, end_);
+		std::swap(tmpSecondaryBegin, secondaryBegin_);
+		std::swap(tmpSortingBounds, sortingBounds_);
 	}
 
-	return base_.run(TypedPred(pred_));
+	{
+		const T *srcIt = anotherSrcBegin;
+		T *destIt = anotherDestBegin;
+		for (; srcIt != anotherSrcEnd; ++srcIt, ++destIt) {
+			*destIt = *srcIt;
+		}
+	}
+}
+
+template<typename T, typename Pred, typename Alloc>
+T* SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::toFlippedAddress(T *src) const {
+	if (src == NULL) {
+		return NULL;
+	}
+	return tmp_ + (src - begin_);
+}
+
+template<typename T, typename Pred, typename Alloc>
+template<typename Action>
+void SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::groupAll(
+		bool primary, const Action &action) {
+	const T *it = beginAt(primary);
+	const T *endIt = endAt(primary);
+	if (it == endIt) {
+		return;
+	}
+
+	T value = *it;
+	action(value);
+
+	while (++it != endIt) {
+		T subValue = *it;
+		action(value, subValue);
+	}
+}
+
+template<typename T, typename Pred, typename Alloc>
+void SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::groupAll(
+		bool primary, const util::FalseType&) {
+	static_cast<void>(primary);
 }
 
 
@@ -370,13 +1879,24 @@ SQLAlgorithmUtils::HeapElement<T>::HeapElement(
 }
 
 template<typename T>
-const T& SQLAlgorithmUtils::HeapElement<T>::getValue() const {
+inline const T& SQLAlgorithmUtils::HeapElement<T>::getValue() const {
 	return value_;
 }
 
 template<typename T>
-size_t SQLAlgorithmUtils::HeapElement<T>::getOrdinal() const {
+inline size_t SQLAlgorithmUtils::HeapElement<T>::getOrdinal() const {
 	return ordinal_;
+}
+
+template<typename T>
+inline bool SQLAlgorithmUtils::HeapElement<T>::next() const {
+	return value_.next();
+}
+
+template<typename T>
+template<typename U>
+inline bool SQLAlgorithmUtils::HeapElement<T>::nextAt() const {
+	return value_.nextAt<U>();
 }
 
 
@@ -386,7 +1906,7 @@ SQLAlgorithmUtils::HeapPredicate<T, Pred>::HeapPredicate(const Pred &base) :
 }
 
 template<typename T, typename Pred>
-bool SQLAlgorithmUtils::HeapPredicate<T, Pred>::operator()(
+inline bool SQLAlgorithmUtils::HeapPredicate<T, Pred>::operator()(
 		const HeapElement<T> &e1, const HeapElement<T> &e2) const {
 	return base_(e1.getValue(), e2.getValue());
 }
@@ -396,12 +1916,24 @@ template<typename T, typename Pred, typename Alloc>
 SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::HeapQueue(
 		const Pred &basePred, const Alloc &alloc) :
 		elemList_(alloc),
-		pred_(basePred) {
+		pred_(basePred),
+		predEmpty_(false) {
 }
 
 template<typename T, typename Pred, typename Alloc>
 bool SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::isEmpty() const {
 	return elemList_.empty();
+}
+
+template<typename T, typename Pred, typename Alloc>
+bool SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::isPredicateEmpty() const {
+	return predEmpty_;
+}
+
+template<typename T, typename Pred, typename Alloc>
+void SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::setPredicateEmpty(
+		bool empty) {
+	predEmpty_ = empty;
 }
 
 template<typename T, typename Pred, typename Alloc>
@@ -412,15 +1944,98 @@ SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::newElement(const T &value) {
 
 template<typename T, typename Pred, typename Alloc>
 void SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::push(const Element &elem) {
-	Push op(*this, elem);
-	pred_.getBase().getTypeSwitcher()(op);
+	elemList_.push_back(elem);
+	std::push_heap(elemList_.begin(), elemList_.end(), pred_);
 }
 
 template<typename T, typename Pred, typename Alloc>
 typename SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::Element
 SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::pop() {
-	Pop op(*this);
-	return pred_.getBase().getTypeSwitcher()(op);
+	std::pop_heap(elemList_.begin(), elemList_.end(), pred_);
+	const Element elem = elemList_.back();
+	elemList_.pop_back();
+	return elem;
+}
+
+template<typename T, typename Pred, typename Alloc>
+template<typename A>
+bool SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::merge(A &action) {
+	if (isEmpty()) {
+		return true;
+	}
+	typedef Merge<A> Op;
+	Op op(*this, action);
+	return pred_.getBase().getTypeSwitcher().template getWithOptions<Op>()(op);
+}
+
+template<typename T, typename Pred, typename Alloc>
+template<typename A>
+bool SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::mergeUnique(A &action) {
+	if (isEmpty()) {
+		return true;
+	}
+	typedef MergeUnique<A> Op;
+	Op op(*this, action);
+	return pred_.getBase().getTypeSwitcher().toUnordered(
+			).template getWithOptions<Op>()(op);
+}
+
+template<typename T, typename Pred, typename Alloc>
+template<typename A>
+bool SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::mergeLimited(A &action) {
+	if (isEmpty()) {
+		return true;
+	}
+	typedef MergeLimited<A> Op;
+	Op op(*this, action);
+	return pred_.getBase().getTypeSwitcher().template getWithOptions<Op>()(op);
+}
+
+template<typename T, typename Pred, typename Alloc>
+template<typename A>
+bool SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::mergeUnchecked(A &action) {
+	assert(elemList_.size() == 1 || isPredicateEmpty());
+	while (!elemList_.empty()) {
+		const Element &elem = elemList_.back();
+		for (;;) {
+			const bool continuable = action(elem);
+			const bool exists = elem.next();
+
+			if (!continuable) {
+				return false;
+			}
+
+			if (!exists) {
+				break;
+			}
+		}
+		elemList_.pop_back();
+	}
+	return true;
+}
+
+template<typename T, typename Pred, typename Alloc>
+template<typename A>
+bool SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::mergeUncheckedUnique(A &action) {
+	assert(isPredicateEmpty());
+	while (!elemList_.empty()) {
+		const Element &elem = elemList_.back();
+
+		if (elemList_.size() > 1) {
+			action(elem, util::FalseType());
+		}
+		else {
+			action(elem, util::TrueType());
+		}
+
+		if (!elem.next()) {
+			elemList_.pop_back();
+		}
+		else {
+			assert(false);
+		}
+	}
+	return true;
 }
 
 template<typename T, typename Pred, typename Alloc>
@@ -443,6 +2058,157 @@ SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::popAt() {
 	const Element elem = elemList_.back();
 	elemList_.pop_back();
 	return elem;
+}
+
+template<typename T, typename Pred, typename Alloc>
+template<typename P>
+inline void SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::pushAtTmp(
+		const P &typedPred) {
+	std::push_heap(elemList_.begin(), elemList_.end(), typedPred);
+}
+
+template<typename T, typename Pred, typename Alloc>
+template<typename P>
+inline const typename SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::Element&
+SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::popAtTmp(const P &typedPred) {
+	std::pop_heap(elemList_.begin(), elemList_.end(), typedPred);
+	return elemList_.back();
+}
+
+template<typename T, typename Pred, typename Alloc>
+template<typename U, typename A>
+bool SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::mergeAt(A &action) {
+	assert(!isEmpty());
+
+	typedef typename Pred::template TypeAt<U>::TypedOp TypedPred;
+	typedef typename A::template TypeAt<U>::TypedOp TypedAction;
+
+	const HeapPredicate<T, TypedPred> typedPred(TypedPred(pred_.getBase()));
+
+	typename ElementList::iterator it = elemList_.end();
+	for (;;) {
+		std::pop_heap(elemList_.begin(), it, typedPred);
+
+		(TypedAction(action))(*(--it));
+		const bool exists = it->next();
+
+
+		if (!exists) {
+			if (it == elemList_.begin()) {
+				break;
+			}
+			continue;
+		}
+		std::push_heap(elemList_.begin(), ++it, typedPred);
+	}
+	return true;
+}
+
+template<typename T, typename Pred, typename Alloc>
+template<typename U, typename A>
+bool SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::mergeUniqueAt(A &action) {
+	assert(!isEmpty());
+
+	typedef typename Pred::template TypeAt<U>::TypedOp TypedPred;
+	typedef typename A::template TypeAt<U>::TypedOp TypedAction;
+
+	const HeapPredicate<T, TypedPred> typedPred(TypedPred(pred_.getBase()));
+
+	typename ElementList::iterator it = elemList_.end();
+	if (it - elemList_.begin() > 1) {
+		for (;;) {
+			std::pop_heap(elemList_.begin(), it, typedPred);
+
+			(TypedAction(action))(*(--it), util::FalseType());
+
+			if ((TypedAction(action))(*it, util::TrueType(), typedPred) &&
+					typedPred(*elemList_.begin(), *it)) {
+				(TypedAction(action))(*it, util::TrueType());
+			}
+
+			if (!it->next()) {
+				if (it - elemList_.begin() <= 1) {
+					break;
+				}
+				continue;
+			}
+
+			std::push_heap(elemList_.begin(), ++it, typedPred);
+		}
+	}
+
+	assert(it - elemList_.begin() == 1);
+	{
+		const bool single =
+				(TypedAction(action))(*(--it), util::TrueType(), util::TrueType());
+		do {
+			(TypedAction(action))(*it, util::FalseType());
+
+			if ((TypedAction(action))(*it, util::TrueType(), typedPred)) {
+				(TypedAction(action))(*it, util::TrueType());
+			}
+		}
+		while (it->next() && single);
+	}
+
+	return true;
+}
+
+template<typename T, typename Pred, typename Alloc>
+template<typename U, typename A>
+bool SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::mergeLimitedAt(A &action) {
+	assert(!isEmpty());
+
+	typedef typename Pred::template TypeAt<U>::TypedOp TypedPred;
+	typedef typename A::template TypeAt<U>::TypedOp TypedAction;
+
+	const HeapPredicate<T, TypedPred> typedPred(TypedPred(pred_.getBase()));
+
+	typename ElementList::iterator it = elemList_.end();
+	for (;;) {
+		std::pop_heap(elemList_.begin(), it, typedPred);
+
+		const bool continuable = (TypedAction(action))(*(--it));
+
+		const bool exists = it->next();
+
+		if (!continuable) {
+			return false;
+		}
+
+		if (!exists) {
+			if (it == elemList_.begin()) {
+				break;
+			}
+			continue;
+		}
+		std::push_heap(elemList_.begin(), ++it, typedPred);
+	}
+	return true;
+}
+
+
+template<typename T, typename Alloc>
+SQLAlgorithmUtils::DigestHashSet<T, Alloc>::DigestHashSet(
+		size_t size, const Alloc &alloc) :
+		base_(size, false, alloc) {
+}
+
+template<typename T, typename Alloc>
+inline void SQLAlgorithmUtils::DigestHashSet<T, Alloc>::add(const T &value) {
+	base_[toIndex(value)] = true;
+}
+
+template<typename T, typename Alloc>
+inline bool SQLAlgorithmUtils::DigestHashSet<T, Alloc>::find(
+		const T &value) const {
+	return base_[toIndex(value)];
+}
+
+template<typename T, typename Alloc>
+inline size_t SQLAlgorithmUtils::DigestHashSet<T, Alloc>::toIndex(
+		const T &value) const {
+	return static_cast<size_t>(static_cast<T>(digester(value)) % size_);
 }
 
 #endif

@@ -62,9 +62,9 @@
 
 const char8_t *const GS_PRODUCT_NAME = "GridDB";
 const int32_t GS_MAJOR_VERSION = 4;
-const int32_t GS_MINOR_VERSION = 5;
-const int32_t GS_REVISION = 3;
-const int32_t GS_BUILD_NO = 37163;
+const int32_t GS_MINOR_VERSION = 6;
+const int32_t GS_REVISION = 0;
+const int32_t GS_BUILD_NO = 37895;
 
 const char8_t *const GS_EDITION_NAME = "Community Edition";
 const char8_t *const GS_EDITION_NAME_SHORT = "CE";
@@ -472,6 +472,10 @@ int main(int argc, char **argv) {
 			if (DS_CHUNK_CATEGORY_RANGE_BATCH_FREE[i]) {
 				chunkCategoryAttributeList[i].freeMode_ =
 					ChunkManager::BATCH_FREE_MODE;
+			}
+			if (DS_CHUNK_CATEGORY_SMALL_SIZE_SEARCH[i]) {
+				chunkCategoryAttributeList[i].searchMode_ =
+					ChunkManager::SMALL_SIZE_SEARCH_MODE;
 			}
 		}
 		ChunkManager chunkMgr(config, DS_CHUNK_CATEGORY_SIZE,

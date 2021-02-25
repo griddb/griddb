@@ -41,6 +41,7 @@ struct DQLProcs {
 	class ProcRegistrar;
 	class ProcRegistrarTable;
 
+	class ProcResourceSet;
 	class ExtProcContext;
 
 	class OptionInput;
@@ -84,6 +85,13 @@ public:
 
 	virtual void exportTo(Context &cxt, const OutOption &option) const;
 
+	static void transcodeProfilerSpecific(
+			util::StackAllocator &alloc, const TypeInfo &typeInfo,
+			util::AbstractObjectInStream &in,
+			util::AbstractObjectOutStream &out);
+
+	static bool isDQL(SQLType::Id type);
+
 	static const DQLProcs::ProcRegistrarTable& getRegistrarTable();
 
 private:
@@ -121,6 +129,9 @@ private:
 			const TupleInfoList &inputInfo);
 	static void getOutputInfo(
 			const SQLOps::OpCode &code, TupleInfo &outputInfo);
+
+	static bool isProfilerRequested(const Profiler &profiler);
+	static bool matchProfilerResultType(const Profiler &profiler, bool asStream);
 
 	util::StdAllocator<void, void> alloc_;
 	util::LocalUniquePtr<TupleList::Group> storeGroup_;
@@ -165,6 +176,10 @@ private:
 	size_t size_;
 };
 
+class DQLProcs::ProcResourceSet {
+public:
+};
+
 class DQLProcs::ExtProcContext : public SQLOps::ExtOpContext {
 public:
 	ExtProcContext();
@@ -189,10 +204,13 @@ public:
 	virtual double getStoreMemoryAgingSwapRate();
 	virtual void getConfig(SQLOps::OpConfig &config);
 
+	virtual uint32_t getTotalWorkerId();
+
 private:
 	SQLContext& getBase();
 
 	SQLContext *baseCxt_;
+	ProcResourceSet resourceSet_;
 };
 
 class DQLProcs::OptionInput {

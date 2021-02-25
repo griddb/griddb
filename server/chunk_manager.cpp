@@ -437,7 +437,9 @@ ChunkManager::MetaChunk* ChunkManager::searchChunk(
 				pId, chunkCategoryId, affinityInfo, chunkKey);
 
 		MetaChunkManager& metaChunkManager = getMetaChunkManager(pId);
+		bool hasAffinity = false;
 		if (cId != UNDEF_CHUNKID) {
+			hasAffinity = true;
 			ChunkKey *metaChunkKey;
 			baseMetaChunk = metaChunkManager.getMetaChunk(
 					pId, chunkCategoryId, cId, metaChunkKey);
@@ -472,7 +474,7 @@ ChunkManager::MetaChunk* ChunkManager::searchChunk(
 					powerSize = BATCH_FREE_MODE_EMPTY_CHUNK_THRESHOLD;
 				}
 			}
-			{
+			if (hasAffinity && isSmallSizeSearchSkip(chunkCategoryId)) {
 				const uint8_t SPACE_SIZE_MODE_EMPTY_CHUNK_THRESHOLD = 10;
 				if (powerSize < SPACE_SIZE_MODE_EMPTY_CHUNK_THRESHOLD) {
 					searchNum = 0;

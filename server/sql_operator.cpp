@@ -16,7 +16,6 @@
 */
 
 #include "sql_operator_utils.h"
-#include "sql_common.h"
 
 
 SQLOps::OpConfig::OpConfig() {
@@ -66,8 +65,11 @@ SQLOps::OpCode::OpCode(SQLOpTypes::Type type) :
 		config_(NULL),
 		inputCount_(0),
 		outputCount_(0),
+		drivingInput_(-1),
 		containerLocation_(NULL),
 		keyColumnList_(NULL),
+		middleKeyColumnList_(NULL),
+		sideKeyColumnList_(NULL),
 		joinPredicate_(NULL),
 		filterPredicate_(NULL),
 		indexConditionList_(NULL),
@@ -99,6 +101,10 @@ uint32_t SQLOps::OpCode::getOutputCount() const {
 	return outputCount_;
 }
 
+int32_t SQLOps::OpCode::getDrivingInput() const {
+	return drivingInput_;
+}
+
 const SQLOps::ContainerLocation&
 SQLOps::OpCode::getContainerLocation() const {
 	assert(containerLocation_ != NULL);
@@ -110,34 +116,51 @@ SQLOps::OpCode::findContainerLocation() const {
 	return containerLocation_;
 }
 
+const SQLValues::CompColumnList& SQLOps::OpCode::getKeyColumnList(
+		SQLOpTypes::OpCodeKey key) const {
+	const SQLValues::CompColumnList *list = findKeyColumnList(key);
+	assert(list != NULL);
+	return *list;
+}
+
 const SQLValues::CompColumnList& SQLOps::OpCode::getKeyColumnList() const {
-	assert(keyColumnList_ != NULL);
-	return *keyColumnList_;
+	const SQLValues::CompColumnList *list = findKeyColumnList();
+	assert(list != NULL);
+	return *list;
+}
+
+const SQLValues::CompColumnList&
+SQLOps::OpCode::getMiddleKeyColumnList() const {
+	const SQLValues::CompColumnList *list = findMiddleKeyColumnList();
+	assert(list != NULL);
+	return *list;
+}
+
+const SQLValues::CompColumnList* SQLOps::OpCode::findKeyColumnList(
+		SQLOpTypes::OpCodeKey key) const {
+	switch (key) {
+	case SQLOpTypes::CODE_KEY_COLUMNS:
+		return findKeyColumnList();
+	case SQLOpTypes::CODE_MIDDLE_KEY_COLUMNS:
+		return findMiddleKeyColumnList();
+	default:
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
 }
 
 const SQLValues::CompColumnList* SQLOps::OpCode::findKeyColumnList() const {
 	return keyColumnList_;
 }
 
-SQLValues::TupleEq SQLOps::OpCode::getEqPredicate() const {
-	return SQLValues::TupleEq(getKeyColumnList());
+const SQLValues::CompColumnList*
+SQLOps::OpCode::findMiddleKeyColumnList() const {
+	return middleKeyColumnList_;
 }
 
-SQLValues::TupleLess SQLOps::OpCode::getLessPredicate() const {
-	return SQLValues::TupleLess(getKeyColumnList());
-}
-
-SQLValues::TupleGreater SQLOps::OpCode::getGreaterPredicate() const {
-	return SQLValues::TupleGreater(getKeyColumnList());
-}
-
-SQLValues::TupleComparator SQLOps::OpCode::getCompPredicate(
-		bool sensitive) const {
-	return SQLValues::TupleComparator(getKeyColumnList(), sensitive);
-}
-
-SQLValues::TupleRangeComparator SQLOps::OpCode::getJoinRangePredicate() const {
-	return SQLValues::TupleRangeComparator(getKeyColumnList());
+const SQLOps::CompColumnListPair*
+SQLOps::OpCode::findSideKeyColumnList() const {
+	return sideKeyColumnList_;
 }
 
 const SQLOps::Expression* SQLOps::OpCode::getJoinPredicate() const {
@@ -157,6 +180,21 @@ SQLOps::OpCode::getIndexConditionList() const {
 const SQLExprs::IndexConditionList*
 SQLOps::OpCode::findIndexConditionList() const {
 	return indexConditionList_;
+}
+
+const SQLOps::Projection* SQLOps::OpCode::getProjection(
+		SQLOpTypes::OpCodeKey key) const {
+	switch (key) {
+	case SQLOpTypes::CODE_PIPE_PROJECTION:
+		return getPipeProjection();
+	case SQLOpTypes::CODE_MIDDLE_PROJECTION:
+		return getMiddleProjection();
+	case SQLOpTypes::CODE_FINISH_PROJECTION:
+		return getFinishProjection();
+	default:
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
 }
 
 const SQLOps::Projection* SQLOps::OpCode::getPipeProjection() const {
@@ -215,12 +253,25 @@ void SQLOps::OpCode::setOutputCount(uint32_t count) {
 	outputCount_ = count;
 }
 
+void SQLOps::OpCode::setDrivingInput(int32_t input) {
+	drivingInput_ = input;
+}
+
 void SQLOps::OpCode::setContainerLocation(const ContainerLocation *location) {
 	containerLocation_ = location;
 }
 
 void SQLOps::OpCode::setKeyColumnList(const SQLValues::CompColumnList *list) {
 	keyColumnList_ = list;
+}
+
+void SQLOps::OpCode::setMiddleKeyColumnList(
+		const SQLValues::CompColumnList *list) {
+	middleKeyColumnList_ = list;
+}
+
+void SQLOps::OpCode::setSideKeyColumnList(const CompColumnListPair *list) {
+	sideKeyColumnList_ = list;
 }
 
 void SQLOps::OpCode::setJoinPredicate(const Expression *expr) {
@@ -275,6 +326,51 @@ void SQLOps::OpCode::setSubLimit(int64_t limit) {
 
 void SQLOps::OpCode::setSubOffset(int64_t offset) {
 	subOffset_ = offset;
+}
+
+
+const SQLOpTypes::OpCodeKey SQLOps::OpCode::ProjectionIterator::KEY_LIST[] = {
+	SQLOpTypes::CODE_PIPE_PROJECTION,
+	SQLOpTypes::CODE_MIDDLE_PROJECTION,
+	SQLOpTypes::CODE_FINISH_PROJECTION
+};
+
+const SQLOpTypes::OpCodeKey *const
+SQLOps::OpCode::ProjectionIterator::KEY_LIST_END =
+		(KEY_LIST + sizeof(KEY_LIST) / sizeof(*KEY_LIST));
+
+SQLOps::OpCode::ProjectionIterator::ProjectionIterator(const OpCode *code) :
+		keyIt_(KEY_LIST),
+		code_(code),
+		proj_(NULL) {
+	next();
+}
+
+const SQLOps::Projection& SQLOps::OpCode::ProjectionIterator::get() const {
+	assert(exists());
+	return *proj_;
+}
+
+bool SQLOps::OpCode::ProjectionIterator::exists() const {
+	return (proj_ != NULL);
+}
+
+void SQLOps::OpCode::ProjectionIterator::next() {
+	if (code_ == NULL || keyIt_ == NULL) {
+		assert(false);
+		return;
+	}
+
+	const Projection *proj = NULL;
+	for (; proj == NULL; ++keyIt_) {
+		if (keyIt_ == KEY_LIST_END) {
+			keyIt_ = NULL;
+			break;
+		}
+
+		proj = code_->getProjection(*keyIt_);
+	}
+	proj_ = proj;
 }
 
 
@@ -400,25 +496,31 @@ const SQLOps::OpNodeId& SQLOps::OpNode::getId() const {
 
 const SQLOps::OpNode& SQLOps::OpNode::getInput(uint32_t index) const {
 	assert(index < inputIdList_.size());
-	return plan_.getNode(inputIdList_[index]);
+	return plan_.getNode(inputIdList_[index].first);
 }
 
 SQLOps::OpNode& SQLOps::OpNode::getInput(uint32_t index) {
 	assert(index < inputIdList_.size());
-	return plan_.getNode(inputIdList_[index]);
+	return plan_.getNode(inputIdList_[index].first);
 }
 
-void SQLOps::OpNode::setInput(uint32_t index, const OpNode &node) {
+uint32_t SQLOps::OpNode::getInputPos(uint32_t index) const {
+	assert(index < inputIdList_.size());
+	return inputIdList_[index].second;
+}
+
+void SQLOps::OpNode::setInput(
+		uint32_t index, const OpNode &node, uint32_t pos) {
 	plan_.prepareModification();
 	if (index >= inputIdList_.size()) {
-		inputIdList_.resize(index + 1, OpNodeId());
+		inputIdList_.resize(index + 1, IdRefEntry());
 	}
-	inputIdList_[index] = node.id_;
+	inputIdList_[index] = IdRefEntry(node.id_, pos);
 }
 
-void SQLOps::OpNode::addInput(const OpNode &node) {
+void SQLOps::OpNode::addInput(const OpNode &node, uint32_t pos) {
 	plan_.prepareModification();
-	inputIdList_.push_back(node.id_);
+	inputIdList_.push_back(IdRefEntry(node.id_, pos));
 }
 
 uint32_t SQLOps::OpNode::getInputCount() const {
@@ -521,6 +623,13 @@ uint32_t SQLOps::OpPlan::getParentOutputCount() const {
 	return static_cast<uint32_t>(parentOutList_.size());
 }
 
+void SQLOps::OpPlan::linkToAllParentOutput(const OpNode &node) {
+	const uint32_t count = getParentOutputCount();
+	for (uint32_t i = 0; i < count; i++) {
+		getParentOutput(i).addInput(node, i);
+	}
+}
+
 uint32_t SQLOps::OpPlan::findNextNodeIndex(const OpNodeId &id) const {
 	if (id.isEmpty()) {
 		return 0;
@@ -535,6 +644,22 @@ uint32_t SQLOps::OpPlan::findNextNodeIndex(const OpNodeId &id) const {
 	return static_cast<uint32_t>(it - normalNodeList_.begin() + 1);
 }
 
+const SQLOps::OpNode* SQLOps::OpPlan::findParentOutput(
+		const OpNodeId &id, uint32_t pos) const {
+	const uint32_t parentCount = getParentOutputCount();
+	for (uint32_t i = 0; i < parentCount; i++) {
+		const OpNode &parentNode = getParentOutput(i);
+		const uint32_t inCount = parentNode.getInputCount();
+		for (uint32_t j = 0; j < inCount; j++) {
+			if (parentNode.getInput(j).getId() == id &&
+					parentNode.getInputPos(j) == pos) {
+				return &parentNode;
+			}
+		}
+	}
+	return NULL;
+}
+
 const SQLOps::OpNode* SQLOps::OpPlan::findNextNode(uint32_t startIndex) const {
 	for (uint32_t i = startIndex; i < normalNodeList_.size(); i++) {
 		const OpNodeId &id = normalNodeList_[i];
@@ -546,24 +671,28 @@ const SQLOps::OpNode* SQLOps::OpPlan::findNextNode(uint32_t startIndex) const {
 	return NULL;
 }
 
-bool SQLOps::OpPlan::isMultiReferenced(const OpNodeId &id) const {
-	if (refCountList_->empty()) {
-		refCountList_->assign(nodeList_.size(), 0);
+uint32_t SQLOps::OpPlan::getNodeOutputCount(const OpNodeId &id) const {
+	const OpNode &node = getNode(id);
 
-		for (NodeList::const_iterator it = nodeList_.begin();
-				it != nodeList_.end(); ++it) {
-			if (*it == NULL) {
-				continue;
-			}
-			const uint32_t count = (*it)->getInputCount();
-			for (uint32_t i = 0; i < count; i++) {
-				const OpNodeId &inId = (*it)->getInput(i).getId();
-				(*refCountList_)[inId.id_.getIndex(idManager_)]++;
-			}
+	const uint64_t byNodes =
+			resolveReferenceCounts()[id.id_.getIndex(idManager_)].size();
+	const uint64_t byCode =
+			OpCodeBuilder::resolveOutputCount(node.getCode());
+	return static_cast<uint32_t>(std::max(byNodes, byCode));
+}
+
+bool SQLOps::OpPlan::isMultiReferenced(
+		const OpNodeId &id, uint32_t pos) const {
+	const RefCountEntry &entry =
+			resolveReferenceCounts()[id.id_.getIndex(idManager_)];
+	if (pos >= entry.size()) {
+		if (!completed_) {
+			return false;
 		}
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
 	}
-
-	return (*refCountList_)[id.id_.getIndex(idManager_)] > 1;
+	return entry[pos] > 1;
 }
 
 void SQLOps::OpPlan::prepareModification() {
@@ -595,7 +724,7 @@ void SQLOps::OpPlan::setCompleted() {
 		for (uint32_t i = 0; i < inCount; i++) {
 			OpNode& inNode = node->getInput(i);
 			OpCode code = inNode.getCode();
-			code.setOutputCount(1); 
+			code.setOutputCount(getNodeOutputCount(inNode.getId()));
 			inNode.setCode(code);
 		}
 	}
@@ -628,6 +757,34 @@ SQLOps::OpNode* SQLOps::OpPlan::newNode(
 	return node;
 }
 
+const SQLOps::OpPlan::RefCountList&
+SQLOps::OpPlan::resolveReferenceCounts() const {
+	if (refCountList_->empty()) {
+		refCountList_->assign(nodeList_.size(), RefCountEntry(alloc_));
+
+		for (NodeList::const_iterator it = nodeList_.begin();
+				it != nodeList_.end(); ++it) {
+			if (*it == NULL) {
+				continue;
+			}
+			const uint32_t count = (*it)->getInputCount();
+			for (uint32_t i = 0; i < count; i++) {
+				const OpNodeId &inId = (*it)->getInput(i).getId();
+				const uint32_t inPos = (*it)->getInputPos(i);
+
+				RefCountEntry &entry =
+						(*refCountList_)[inId.id_.getIndex(idManager_)];
+				if (inPos >= entry.size()) {
+					entry.resize(inPos + 1, 0);
+				}
+				entry[inPos]++;
+			}
+		}
+	}
+
+	return *refCountList_;
+}
+
 
 bool SQLOps::OpStoreId::isEmpty() const {
 	return id_.isEmpty();
@@ -643,6 +800,8 @@ SQLOps::OpCursor::OpCursor(const Source &source) :
 		state_(store_.getEntry(storeId_).getCursorState()),
 		plan_(store_.getEntry(storeId_).getPlan()),
 		executableCode_(NULL),
+		executableProfiler_(NULL),
+		planPendingCount_(0),
 		completedNodeFound_(false),
 		executing_(false),
 		compiling_(false),
@@ -731,6 +890,8 @@ void SQLOps::OpCursor::clearOp() throw() {
 	}
 	executableCxt_.reset();
 
+	executableProfiler_ = NULL;
+
 	state_.currentWorkingNode_ = OpNodeId();
 }
 
@@ -773,6 +934,7 @@ void SQLOps::OpCursor::prepareOp() {
 		executableOp_.swap(op);
 		executableCxt_.swap(cxt);
 		executableCode_ = code;
+		executableProfiler_ = subEntry.getProfiler();
 
 		if (initial) {
 			initializeOp();
@@ -789,15 +951,8 @@ void SQLOps::OpCursor::initializeOp() {
 
 	OpContext &cxt = *executableCxt_;
 
-	for (size_t i = 0; i < 3; i++) {
-		const Projection *proj = (
-				i == 0 ? code->getMiddleProjection() :
-				i == 1 ? code->getPipeProjection() :
-				code->getFinishProjection());
-
-		if (proj != NULL) {
-			proj->initializeProjection(cxt);
-		}
+	for (OpCode::ProjectionIterator it(code); it.exists(); it.next()) {
+		it.get().initializeProjection(cxt);
 	}
 }
 
@@ -807,6 +962,7 @@ void SQLOps::OpCursor::finishOp() {
 		if (executableCode_ != NULL) {
 			const Projection *proj = executableCode_->getFinishProjection();
 			if (proj != NULL) {
+				cxt.setUpExprContext();
 				proj->project(cxt);
 			}
 		}
@@ -819,6 +975,14 @@ void SQLOps::OpCursor::finishOp() {
 			state_.entryMap_.find(state_.currentWorkingNode_)->second);
 	entry.closeAllInputReader();
 	entry.closeAllWriter(false);
+
+	if (executableProfiler_ != NULL) {
+		OpProfiler *profiler = store_.getProfiler();
+		assert(profiler != NULL);
+
+		profiler->addOperatorProfile(
+				executableProfiler_->getId(), executableProfiler_->get());
+	}
 
 	state_.workingNodeSet_.erase(state_.currentWorkingNode_);
 	completedNodeFound_ = true;
@@ -869,6 +1033,9 @@ const SQLOps::OpNode* SQLOps::OpCursor::findNextNode() {
 				break;
 			}
 		}
+		if (planPendingCount_ >= state_.workingNodeSet_.size()) {
+			nodeId = OpNodeId();
+		}
 		if (!nodeId.isEmpty()) {
 			break;
 		}
@@ -883,6 +1050,7 @@ const SQLOps::OpNode* SQLOps::OpCursor::findNextNode() {
 			state_.lastPlannedNode_ = node->getId();
 			state_.workingNodeSet_.insert(node->getId());
 			newNodeFound = true;
+			planPendingCount_ = 0;
 		}
 		if (state_.workingNodeSet_.empty()) {
 			if (plan_.isCompleted()) {
@@ -968,41 +1136,54 @@ void SQLOps::OpCursor::setUpSubStore(
 		const uint32_t parentIndex = inNode.getParentIndex();
 
 		const OpStoreId *inStoreId;
+		uint32_t inPos;
 		if (parentIndex != std::numeric_limits<uint32_t>::max()) {
 			inStoreId = &topEntry.getLink(parentIndex, true);
+			inPos = topEntry.getLinkPos(parentIndex, true);
 		}
 		else {
 			State::EntryMap &entryMap = state_.entryMap_;
 			State::EntryMap::iterator mapIt = entryMap.find(inNode.getId());
 			assert(mapIt != entryMap.end());
 			inStoreId = &mapIt->second;
+			inPos = node.getInputPos(i);
 		}
-		subEntry.setLink(i, true, *inStoreId);
+		subEntry.setLink(i, true, *inStoreId, inPos);
 	}
 
-	do {
-		if (plan_.getParentOutputCount() > 0) {
-			const OpNode &parentNode = plan_.getParentOutput(0);
-			if (parentNode.getInputCount() > 0 &&
-					parentNode.getInput(0).getId() == node.getId()) {
-				const OpStoreId *outStoreId = &topEntry.getLink(0, false);
-				if (outStoreId->isEmpty()) {
-					outStoreId = &storeId_;
-				}
-				subEntry.setLink(0, false, *outStoreId);
-				break;
+	const uint32_t outCount = plan_.getNodeOutputCount(node.getId());
+	for (uint32_t i = 0; i < outCount; i++) {
+		const OpNode *parentNode = plan_.findParentOutput(node.getId(), i);
+		if (parentNode != NULL) {
+			const uint32_t parentIndex = parentNode->getParentIndex();
+			const OpStoreId *outStoreId = &topEntry.getLink(parentIndex, false);
+			if (outStoreId->isEmpty()) {
+				outStoreId = &storeId_;
 			}
+			subEntry.setLink(i, false, *outStoreId, parentIndex);
+			continue;
 		}
 
 		ColumnTypeList typeList(subEntry.getStackAllocator());
-		SQLOps::OpCodeBuilder::resolveColumnTypeList(node.getCode(), typeList);
-		subEntry.setColumnTypeList(0, typeList, false, false);
-		subEntry.createTupleList(0);
-	}
-	while (false);
+		SQLOps::OpCodeBuilder::resolveColumnTypeList(
+				node.getCode(), typeList, &i);
+		subEntry.setColumnTypeList(i, typeList, false, false);
+		subEntry.createTupleList(i);
 
-	if (plan_.isMultiReferenced(node.getId())) {
-		subEntry.setMultiReferenced(0);
+		if (plan_.isMultiReferenced(node.getId(), i)) {
+			subEntry.setMultiReferenced(i);
+		}
+	}
+
+	OpProfiler *profiler = store_.getProfiler();
+	if (profiler != NULL) {
+		OpProfilerEntry *topProfilerEntry = topEntry.getProfiler();
+		const OpProfilerId *baseId =
+				(topProfilerEntry == NULL ? NULL : &topProfilerEntry->getId());
+
+		const OpProfilerId &subId =
+				profiler->getSubId(baseId, node.getCode().getType());
+		subEntry.activateProfiler(subId);
 	}
 }
 
@@ -1020,9 +1201,14 @@ bool SQLOps::OpCursor::finishSubPlan(
 			store_.getEntry(state_.entryMap_.find(node.getId())->second);
 	OpPlan &subPlan = subEntry.getPlan();
 
+	const size_t lastPendingCount = planPendingCount_;
+	planPendingCount_ = 0;
+
 	if (subPlan.isCompleted()) {
 		if (subPlan.isEmpty()) {
 			OpCodeBuilder builder(OpCodeBuilder::ofContext(cxt));
+			subEntry.setUpProjectionFactoryContext(
+					builder.getProjectionFactoryContext());
 			code = &subEntry.setExecutableCode(
 					builder.toExecutable(node.getCode()));
 		}
@@ -1031,6 +1217,17 @@ bool SQLOps::OpCursor::finishSubPlan(
 
 	if (subPlan.getParentOutput(0).getInputCount() > 0) {
 		subPlan.setCompleted();
+
+		const uint32_t inCount = subPlan.getParentInputCount();
+		for (uint32_t i = 0; i < inCount; i++) {
+			if (!subPlan.isMultiReferenced(
+					subPlan.getParentInput(i).getId(), 0)) {
+				continue;
+			}
+			const OpStoreId &inStoreId = subEntry.getLink(i, true);
+			const uint32_t inPos = subEntry.getLinkPos(i, true);
+			store_.getEntry(inStoreId).setMultiReferenced(inPos);
+		}
 		return true;
 	}
 
@@ -1040,32 +1237,43 @@ bool SQLOps::OpCursor::finishSubPlan(
 	}
 
 	if (subPlan.isEmpty()) {
+		state_.currentWorkingNode_ = OpNodeId();
+		planPendingCount_ = lastPendingCount + 1;
 		return false;
 	}
 
-	const uint32_t inCount = node.getInputCount();
-	for (uint32_t i = 0; i < inCount; i++) {
-		const OpStoreId &inStoreId = subEntry.getLink(i, true);
-		store_.getEntry(inStoreId).setMultiReferenced(0);
+	{
+		const uint32_t inCount = node.getInputCount();
+		for (uint32_t i = 0; i < inCount; i++) {
+			const OpStoreId &inStoreId = subEntry.getLink(i, true);
+			const uint32_t pos = subEntry.getLinkPos(i, true);
+			store_.getEntry(inStoreId).setMultiReferenced(pos);
+		}
 	}
 
 	return true;
 }
 
 void SQLOps::OpCursor::startExec() {
-	if (executing_) {
-		assert(false);
-		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
-	}
+	updateContext(true);
 	executing_ = true;
+
+	if (executableProfiler_ != NULL) {
+		executableProfiler_->startExec();
+	}
 }
 
 void SQLOps::OpCursor::finishExec() {
+	if (executableProfiler_ != NULL) {
+		executableProfiler_->finishExec();
+	}
+
 	if (!executing_ || executableCxt_.get() == NULL) {
 		assert(false);
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
 	}
 	executing_ = false;
+	updateContext(false);
 
 	if (executableCxt_->isInvalidated()) {
 		invalidateTotalOps();
@@ -1084,6 +1292,21 @@ void SQLOps::OpCursor::finishExec() {
 	}
 
 	clearOp();
+}
+
+void SQLOps::OpCursor::updateContext(bool starting) {
+	OpContext *cxt = executableCxt_.get();
+	const OpCode *code = executableCode_;
+
+	if (cxt != NULL && code != NULL) {
+		for (OpCode::ProjectionIterator it(code); it.exists(); it.next()) {
+			it.get().updateProjectionContext(*cxt);
+		}
+
+		if (starting && cxt->isExprContextAutoSetUp()) {
+			cxt->setUpExprContext();
+		}
+	}
 }
 
 bool SQLOps::OpCursor::isRootOp() {
@@ -1243,6 +1466,16 @@ void SQLOps::OpStore::setStackAllocatorBase(
 const SQLOps::OpFactory& SQLOps::OpStore::getOpFactory() {
 	assert(opFactory_ != NULL);
 	return *opFactory_;
+}
+
+SQLOps::OpProfiler* SQLOps::OpStore::getProfiler() {
+	return profiler_.get();
+}
+
+void SQLOps::OpStore::activateProfiler() {
+	if (profiler_.get() == NULL) {
+		profiler_ = ALLOC_UNIQUE(alloc_, OpProfiler, alloc_);
+	}
 }
 
 
@@ -1411,6 +1644,44 @@ const SQLOps::OpCode& SQLOps::OpStore::Entry::setExecutableCode(
 	return *executableCode_;
 }
 
+void SQLOps::OpStore::Entry::setUpProjectionFactoryContext(
+		ProjectionFactoryContext &cxt) {
+	{
+		const uint32_t count = getInputCount();
+		for (uint32_t i = 0; i < count; i++) {
+			EntryElement &elem = getElement(i, false);
+			cxt.initializeReaderRefList(i, &elem.readerRefList_);
+
+			InputSourceType type = elem.inputSourceType_;
+			if (type == SQLExprs::ExprCode::END_INPUT) {
+				type = SQLExprs::ExprCode::INPUT_READER;
+			}
+
+			cxt.getExprFactoryContext().setInputSourceType(i, type);
+			cxt.getExprFactoryContext().setReadableTupleRef(
+					i, &elem.readableTuple_);
+			cxt.getExprFactoryContext().setSummaryTupleRef(
+					i, &elem.summaryTuple_);
+			cxt.getExprFactoryContext().setSummaryColumnListRef(
+					i, &elem.summaryColumnList_);
+		}
+	}
+
+	{
+		const uint32_t count = getOutputCount();
+		for (uint32_t i = 0; i < count; i++) {
+			EntryElement &elem = getElement(i, false);
+			cxt.initializeWriterRefList(i, &elem.writerRefList_);
+		}
+	}
+
+	cxt.getExprFactoryContext().setActiveReaderRef(getActiveReaderRef());
+	cxt.getExprFactoryContext().setAggregationTupleRef(
+			getAggregationTupleRef());
+	cxt.getExprFactoryContext().setAggregationTupleSet(
+			getAggregationTupleSet());
+}
+
 const SQLOps::OpStoreId& SQLOps::OpStore::Entry::getLink(
 		uint32_t index, bool fromInput) {
 	EntryElement &elem = getElement(index, false);
@@ -1423,7 +1694,8 @@ const SQLOps::OpStoreId& SQLOps::OpStore::Entry::getLink(
 }
 
 void SQLOps::OpStore::Entry::setLink(
-		uint32_t index, bool fromInput, const OpStoreId &targetId) {
+		uint32_t index, bool fromInput, const OpStoreId &targetId,
+		uint32_t targetPos) {
 	const bool forLocal = false;
 	EntryElement &elem = prepareElement(index, fromInput, forLocal);
 
@@ -1437,11 +1709,19 @@ void SQLOps::OpStore::Entry::setLink(
 	}
 	refId = targetId;
 
+	uint32_t &refPos = (fromInput ? elem.inPos_ : elem.outPos_);
+	refPos = targetPos;
+
 	Entry &target = store_.getEntry(targetId);
-	EntryElement &targetElem = target.getElement(0, false);
+	EntryElement &targetElem = target.getElement(targetPos, false);
 
 	const ColumnTypeList &columnTypeList = targetElem.columnTypeList_;
 	setColumnTypeList(index, columnTypeList, fromInput, forLocal);
+}
+
+uint32_t SQLOps::OpStore::Entry::getLinkPos(uint32_t index, bool fromInput) {
+	EntryElement &elem = getElement(index, false);
+	return (fromInput ? elem.inPos_ : elem.outPos_);
 }
 
 void SQLOps::OpStore::Entry::setMultiReferenced(uint32_t index) {
@@ -1460,9 +1740,10 @@ uint32_t SQLOps::OpStore::Entry::createLocal(const ColumnTypeList *list) {
 	const bool fromInput = false;
 	const bool forLocal = true;
 
-	Entry &target = getInput(0);
-	const ColumnTypeList &columnTypeList =
-			(list == NULL ? target.getElement(0, false).columnTypeList_ : *list);
+	const EntryRef &target = getInput(0);
+	const ColumnTypeList &columnTypeList = (list == NULL ?
+			target.first->getElement(target.second, false).columnTypeList_ :
+			*list);
 	setColumnTypeList(index, columnTypeList, fromInput, forLocal);
 
 	++localCount_;
@@ -1475,6 +1756,8 @@ void SQLOps::OpStore::Entry::setLocalLink(
 	getElement(destIndex, false);
 
 	src.localRef_ = destIndex;
+
+	updateWriterRefList();
 }
 
 uint32_t SQLOps::OpStore::Entry::getInputCount() {
@@ -1518,13 +1801,30 @@ void SQLOps::OpStore::Entry::setColumnTypeList(
 const SQLOps::TupleColumnList& SQLOps::OpStore::Entry::getInputColumnList(
 		uint32_t index) {
 	EntryElement &elem = getElement(index, false);
-	return store_.getEntry(elem.inId_).getColumnList(0, false);
+	return store_.getEntry(elem.inId_).getColumnList(elem.inPos_, false);
 }
 
 const SQLOps::TupleColumnList& SQLOps::OpStore::Entry::getColumnList(
 		uint32_t index, bool withLocalRef) {
 	EntryElement &elem = getElement(index, withLocalRef);
 	return elem.columnList_;
+}
+
+SQLExprs::ExprCode::InputSourceType
+SQLOps::OpStore::Entry::getInputSourceType(uint32_t index) {
+	EntryElement &elem = getElement(index, false);
+	return elem.inputSourceType_;
+}
+
+void SQLOps::OpStore::Entry::setInputSourceType(
+		uint32_t index, InputSourceType type) {
+	if (getPlan().isCompleted()) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	EntryElement &elem = getElement(index, false);
+	elem.inputSourceType_ = type;
 }
 
 TupleList& SQLOps::OpStore::Entry::createTupleList(uint32_t index) {
@@ -1551,7 +1851,8 @@ TupleList& SQLOps::OpStore::Entry::getTupleList(
 
 	EntryElement &elem = getElement(index, withLocalRef);
 	if (!elem.outId_.isEmpty()) {
-		return getOutput(index).getTupleList(0, false, false);
+		const EntryRef &ref = getOutput(index);
+		return ref.first->getTupleList(ref.second, false, false);
 	}
 
 	TupleList *tupleList = elem.tupleList_.get();
@@ -1574,10 +1875,13 @@ TupleList& SQLOps::OpStore::Entry::getInputTupleList(uint32_t index) {
 		return *elem.inTupleList_;
 	}
 
-	Entry &inEntry = getInput(index);
-	TupleList *srcTupleList = &inEntry.getTupleList(0, false, withLocalRef);
+	const EntryRef &inRef = getInput(index);
+	Entry &inEntry = *inRef.first;
+	const uint32_t inPos = inRef.second;
+	TupleList *srcTupleList =
+			&inEntry.getTupleList(inPos, false, withLocalRef);
 
-	EntryElement &inElem = inEntry.getElement(0, withLocalRef);
+	EntryElement &inElem = inEntry.getElement(inPos, withLocalRef);
 	if (!inElem.multiRef_) {
 		return *srcTupleList;
 	}
@@ -1594,8 +1898,8 @@ TupleList& SQLOps::OpStore::Entry::getInputTupleList(uint32_t index) {
 		reader.close();
 	}
 
-	inEntry.closeTupleList(0);
-	srcTupleList = &inEntry.createTupleList(0);
+	inEntry.closeTupleList(inPos);
+	srcTupleList = &inEntry.createTupleList(inPos);
 
 	elem.inTupleList_ = UTIL_MAKE_LOCAL_UNIQUE(
 			elem.inTupleList_, TupleList, group, info);
@@ -1666,6 +1970,8 @@ SQLOps::TupleListReader& SQLOps::OpStore::Entry::getReader(
 		}
 
 		reader->setVarContext(getVarContext());
+
+		updateReaderRefList();
 	}
 
 	assert(reader->getAccessOrder() == order);
@@ -1681,6 +1987,8 @@ void SQLOps::OpStore::Entry::closeReader(uint32_t index, uint32_t sub) {
 
 	elem->readerImageList_[sub]->reset();
 	elem->readerList_[sub]->reset();
+
+	updateReaderRefList();
 }
 
 SQLOps::TupleListWriter& SQLOps::OpStore::Entry::getWriter(
@@ -1702,12 +2010,14 @@ SQLOps::TupleListWriter& SQLOps::OpStore::Entry::getWriter(
 		writer->setVarContext(getVarContext());
 
 		EntryElement &handlerElem = (elem.outId_.isEmpty() ?
-				elem : getOutput(index).getElement(0, false));
+				elem : getOutputElement(index, false));
 
 		BlockHandler *blockHandler = handlerElem.blockHandler_.get();
 		if (blockHandler != NULL) {
 			blockHandler->bindWriter(*writer);
 		}
+
+		updateWriterRefList();
 	}
 	return *writer;
 }
@@ -1731,7 +2041,7 @@ void SQLOps::OpStore::Entry::closeWriter(uint32_t index, bool force) {
 		elem->writer_->close();
 
 		EntryElement &handlerElem = (elem->outId_.isEmpty() ?
-				*elem : getOutput(index).getElement(0, false));
+				*elem : getOutputElement(index, false));
 
 		BlockHandler *blockHandler = handlerElem.blockHandler_.get();
 		if (blockHandler != NULL) {
@@ -1742,6 +2052,88 @@ void SQLOps::OpStore::Entry::closeWriter(uint32_t index, bool force) {
 	elem->blockHandler_.reset();
 	elem->writerImage_.reset();
 	elem->writer_.reset();
+
+	updateWriterRefList();
+}
+
+void SQLOps::OpStore::Entry::updateCursorRefList() {
+	updateReaderRefList();
+	updateWriterRefList();
+}
+
+SQLOps::TupleListReader**
+SQLOps::OpStore::Entry::getActiveReaderRef() {
+	EntryElement *elem = findElement(0, false);
+	if (elem == NULL) {
+		return NULL;
+	}
+
+	return &elem->activeReaderRef_;
+}
+
+SQLOps::ReadableTuple*
+SQLOps::OpStore::Entry::getReadableTupleRef(uint32_t index) {
+	EntryElement *elem = findElement(index, false);
+	if (elem == NULL) {
+		return NULL;
+	}
+
+	return &elem->readableTuple_;
+}
+
+SQLOps::SummaryTuple*
+SQLOps::OpStore::Entry::getSummaryTupleRef(uint32_t index) {
+	EntryElement *elem = findElement(index, false);
+	if (elem == NULL) {
+		return NULL;
+	}
+
+	return &elem->summaryTuple_;
+}
+
+SQLOps::SummaryColumnList*
+SQLOps::OpStore::Entry::getSummaryColumnListRef(uint32_t index) {
+	EntryElement *elem = findElement(index, false);
+	if (elem == NULL) {
+		return NULL;
+	}
+
+	return &elem->summaryColumnList_;
+}
+
+bool SQLOps::OpStore::Entry::setUpAggregationTuple() {
+	EntryElement &elem = getElement(0, false);
+	util::LocalUniquePtr<SummaryTuple> &tuple = elem.defaultAggrTuple_;
+
+	if (tuple.get() == NULL) {
+		SummaryTupleSet *tupleSet = elem.aggrTupleSet_.get();
+
+		if (tupleSet == NULL || !tupleSet->isColumnsCompleted()) {
+			return false;
+		}
+
+		tuple = UTIL_MAKE_LOCAL_UNIQUE(
+				tuple, SummaryTuple, SummaryTuple::create(*tupleSet));
+	}
+	elem.aggrTuple_ = *tuple;
+	return true;
+}
+
+SQLOps::SummaryTuple* SQLOps::OpStore::Entry::getAggregationTupleRef() {
+	EntryElement &elem = getElement(0, false);
+	return &elem.aggrTuple_;
+}
+
+SQLOps::SummaryTupleSet* SQLOps::OpStore::Entry::getAggregationTupleSet() {
+	EntryElement &elem = getElement(0, false);
+	util::AllocUniquePtr<SummaryTupleSet> &tupleSet = elem.aggrTupleSet_;
+
+	if (tupleSet.get() == NULL) {
+		SQLValues::ValueContext cxt(getValueContextSource(NULL));
+		tupleSet = ALLOC_UNIQUE(alloc_, SummaryTupleSet, cxt, NULL);
+	}
+
+	return tupleSet.get();
 }
 
 void SQLOps::OpStore::Entry::activateTransfer(ExtOpContext *cxt) {
@@ -1758,8 +2150,9 @@ void SQLOps::OpStore::Entry::activateTransfer(ExtOpContext *cxt) {
 SQLOps::OpStore::BlockHandler& SQLOps::OpStore::Entry::getBlockHandler(
 		uint32_t index) {
 	const bool withLocalRef = false;
-	Entry &entry = getOutput(index);
-	EntryElement &elem = entry.getElement(0, withLocalRef);
+	const EntryRef &ref = getOutput(index);
+	Entry &entry = *ref.first;
+	EntryElement &elem = entry.getElement(ref.second, withLocalRef);
 	if (elem.blockHandler_.get() == NULL) {
 		elem.blockHandler_ = ALLOC_UNIQUE(entry.alloc_, BlockHandler, index);
 	}
@@ -1793,7 +2186,7 @@ void SQLOps::OpStore::Entry::releaseWriterLatch(uint32_t index) {
 
 util::AllocUniquePtr<void>&
 SQLOps::OpStore::Entry::getInputResource(uint32_t index) {
-	return getInput(index).getResource(index, SQLOpTypes::END_PROJ);
+	return getInput(index).first->getResource(index, SQLOpTypes::END_PROJ);
 }
 
 util::AllocUniquePtr<void>& 
@@ -1831,6 +2224,19 @@ void SQLOps::OpStore::Entry::setLastTupleId(uint32_t index, int64_t id) {
 	elem.lastTupleId_ = id;
 }
 
+SQLOps::OpProfilerEntry* SQLOps::OpStore::Entry::getProfiler() {
+	return profiler_.get();
+}
+
+void SQLOps::OpStore::Entry::activateProfiler(const OpProfilerId &id) {
+	if (profiler_.get() != NULL) {
+		return;
+	}
+
+	profiler_ =
+			ALLOC_UNIQUE(store_.alloc_, OpProfilerEntry, store_.alloc_, id);
+}
+
 TupleList::Info SQLOps::OpStore::Entry::getTupleInfo(
 		const EntryElement &elem) {
 	assert(!elem.columnTypeList_.empty());
@@ -1864,6 +2270,8 @@ void SQLOps::OpStore::Entry::detachReaders(EntryElement &elem) {
 		reader->detach(*image);
 		reader.reset();
 	}
+
+	updateReaderRefList();
 }
 
 void SQLOps::OpStore::Entry::detachWriter(EntryElement &elem) {
@@ -1877,6 +2285,47 @@ void SQLOps::OpStore::Entry::detachWriter(EntryElement &elem) {
 			image, TupleListWriter::Image, getStackAllocator());
 	writer->detach(*image);
 	writer.reset();
+
+	updateWriterRefList();
+}
+
+void SQLOps::OpStore::Entry::updateReaderRefList() {
+	const bool withLocalRef = false;
+	const uint32_t count = getInputCount();
+	for (uint32_t i = 0; i < count; i++) {
+		EntryElement::ReaderList &readerList =
+				getElement(i, withLocalRef).readerList_;
+		TupleListReader *reader =
+				(readerList.empty() || readerList.front() == NULL ?
+						NULL : readerList.front()->get());
+
+		EntryElement &elem = getElement(i, false);
+
+		for (ReaderRefList::iterator it = elem.readerRefList_.begin();
+				it != elem.readerRefList_.end(); ++it) {
+			**it = reader;
+		}
+	}
+}
+
+void SQLOps::OpStore::Entry::updateWriterRefList() {
+	const bool withLocalRef = true;
+	const uint32_t count = getOutputCount();
+	for (uint32_t i = 0; i < count; i++) {
+		TupleListWriter *writer = getElement(i, withLocalRef).writer_.get();
+		EntryElement &elem = getElement(i, false);
+
+		for (WriterRefList::iterator it = elem.writerRefList_.begin();
+				it != elem.writerRefList_.end(); ++it) {
+			**it = writer;
+		}
+	}
+}
+
+SQLOps::OpStore::EntryElement& SQLOps::OpStore::Entry::getOutputElement(
+		uint32_t index, bool withLocalRef) {
+	const EntryRef &ref = getOutput(index);
+	return ref.first->getElement(ref.second, withLocalRef);
 }
 
 SQLOps::OpStore::EntryElement& SQLOps::OpStore::Entry::prepareElement(
@@ -1931,17 +2380,19 @@ SQLOps::OpStore::EntryElement* SQLOps::OpStore::Entry::findElement(
 	return elem;
 }
 
-SQLOps::OpStore::Entry& SQLOps::OpStore::Entry::getInput(uint32_t index) {
+SQLOps::OpStore::Entry::EntryRef SQLOps::OpStore::Entry::getInput(
+		uint32_t index) {
 	EntryElement &elem = getElement(index, false);
 	if (elem.inId_.isEmpty()) {
 		assert(false);
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
 	}
 
-	return store_.getEntry(elem.inId_);
+	return EntryRef(&store_.getEntry(elem.inId_), elem.inPos_);
 }
 
-SQLOps::OpStore::Entry& SQLOps::OpStore::Entry::getOutput(uint32_t index) {
+SQLOps::OpStore::Entry::EntryRef SQLOps::OpStore::Entry::getOutput(
+		uint32_t index) {
 	EntryElement *elem = &getElement(index, false);
 	if (elem->outId_.isEmpty()) {
 		assert(false);
@@ -1950,9 +2401,9 @@ SQLOps::OpStore::Entry& SQLOps::OpStore::Entry::getOutput(uint32_t index) {
 
 	for (;;) {
 		Entry &entry = store_.getEntry(elem->outId_);
-		EntryElement &nextElem = entry.getElement(0, false);
+		EntryElement &nextElem = entry.getElement(elem->outPos_, false);
 		if (nextElem.outId_.isEmpty()) {
-			return entry;
+			return EntryRef(&entry, elem->outPos_);
 		}
 		elem = &nextElem;
 	}
@@ -1960,16 +2411,24 @@ SQLOps::OpStore::Entry& SQLOps::OpStore::Entry::getOutput(uint32_t index) {
 
 
 SQLOps::OpStore::EntryElement::EntryElement(util::StackAllocator &alloc) :
+		inPos_(std::numeric_limits<uint32_t>::max()),
+		outPos_(std::numeric_limits<uint32_t>::max()),
 		localRef_(std::numeric_limits<uint32_t>::max()),
 		multiRef_(false),
 		readerList_(alloc),
+		activeReaderRef_(NULL),
+		readableTuple_(util::FalseType()),
+		summaryColumnList_(alloc),
 		columnTypeList_(alloc),
 		columnList_(alloc),
 		projResourceList_(alloc),
 		lastTupleId_(0),
 		readerImageList_(alloc),
 		readerRandomAccessing_(false),
-		readerLatchKeeping_(false) {
+		readerLatchKeeping_(false),
+		readerRefList_(alloc),
+		writerRefList_(alloc),
+		inputSourceType_(SQLExprs::ExprCode::END_INPUT) {
 }
 
 
@@ -2070,21 +2529,6 @@ void SQLOps::OpContext::release() {
 	}
 }
 
-SQLExprs::ExprContext& SQLOps::OpContext::getExprContext() {
-	if (!exprCxtAvailable_) {
-		setUpExprContext();
-	}
-	return exprCxt_;
-}
-
-SQLValues::ValueContext& SQLOps::OpContext::getValueContext() {
-	return exprCxt_.getValueContext();
-}
-
-SQLValues::VarContext& SQLOps::OpContext::getVarContext() {
-	return getValueContext().getVarContext();
-}
-
 SQLOps::ExtOpContext& SQLOps::OpContext::getExtContext() {
 	if (extCxt_ == NULL) {
 		assert(false);
@@ -2099,6 +2543,55 @@ SQLOps::ExtOpContext* SQLOps::OpContext::findExtContext() {
 
 util::StackAllocator& SQLOps::OpContext::getAllocator() {
 	return storeEntry_.getStackAllocator();
+}
+
+bool SQLOps::OpContext::isExprContextAutoSetUp() {
+	const uint32_t inCount = storeEntry_.getInputCount();
+	for (uint32_t i = 0; i < inCount; i++) {
+		if (storeEntry_.getInputSourceType(i) ==
+				SQLExprs::ExprCode::INPUT_MULTI_STAGE) {
+			return false;
+		}
+	}
+	return true;
+}
+
+void SQLOps::OpContext::setUpExprContext() {
+	const uint32_t inCount = storeEntry_.getInputCount();
+	for (uint32_t i = 0; i < inCount; i++) {
+		exprCxt_.setReader(
+				i, &getReader(i), &storeEntry_.getInputColumnList(i));
+
+		exprCxt_.setReadableTupleRef(i, storeEntry_.getReadableTupleRef(i));
+		exprCxt_.setReadableTuple(i, ReadableTuple(util::FalseType()));
+
+		exprCxt_.setSummaryTupleRef(i, storeEntry_.getSummaryTupleRef(i));
+		exprCxt_.setSummaryTuple(i, SummaryTuple());
+
+		exprCxt_.setSummaryColumnListRef(
+				i, storeEntry_.getSummaryColumnListRef(i));
+		exprCxt_.setInputSourceType(
+				i, storeEntry_.getInputSourceType(i));
+	}
+
+	const uint32_t outCount = storeEntry_.getOutputCount();
+	for (uint32_t i = 0; i < outCount; i++) {
+		getWriter(i);
+	}
+
+	exprCxt_.setActiveReaderRef(storeEntry_.getActiveReaderRef());
+	*exprCxt_.getActiveReaderRef() = NULL;
+
+	if (storeEntry_.setUpAggregationTuple()) {
+		exprCxt_.setAggregationTupleRef(
+				storeEntry_.getAggregationTupleSet(),
+				storeEntry_.getAggregationTupleRef());
+	}
+	
+	storeEntry_.updateCursorRefList();
+
+	loadTupleId();
+	exprCxtAvailable_ = true;
 }
 
 bool SQLOps::OpContext::isCompleted() {
@@ -2123,18 +2616,6 @@ void SQLOps::OpContext::invalidate() {
 
 bool SQLOps::OpContext::isInvalidated() {
 	return invalidated_;
-}
-
-bool SQLOps::OpContext::checkSuspended() {
-	assert(interruptionCheckRemaining_ > 0);
-	if (--interruptionCheckRemaining_ <= 0) {
-		if (extCxt_ != NULL) {
-			extCxt_->checkCancelRequest();
-		}
-		setSuspended();
-		return true;
-	}
-	return false;
 }
 
 bool SQLOps::OpContext::checkSuspendedAlways() {
@@ -2177,8 +2658,20 @@ SQLValues::LatchHolder& SQLOps::OpContext::getLatchHolder() {
 	return latchHolder_;
 }
 
+SQLOps::OpProfilerIndexEntry* SQLOps::OpContext::getIndexProfiler() {
+	OpProfilerEntry *profilerEntry = storeEntry_.getProfiler();
+	if (profilerEntry == NULL) {
+		return NULL;
+	}
+	return &profilerEntry->getIndexEntry();
+}
+
 uint32_t SQLOps::OpContext::getInputCount() {
 	return storeEntry_.getInputCount();
+}
+
+uint32_t SQLOps::OpContext::getOutputCount() {
+	return storeEntry_.getOutputCount();
 }
 
 uint32_t SQLOps::OpContext::getColumnCount(uint32_t index) {
@@ -2200,6 +2693,14 @@ SQLOps::OpContext::getWriterColumn(uint32_t index, uint32_t pos) {
 	return storeEntry_.getColumnList(index, withLocalRef)[pos];
 }
 
+uint64_t SQLOps::OpContext::getInputSize(uint32_t index) {
+	const bool fromInput = true;
+	const bool withLocalRef = false;
+	TupleList &tupleList =
+			storeEntry_.getTupleList(index, fromInput, withLocalRef);
+	return tupleList.getBlockSize() * tupleList.getBlockCount();
+}
+
 SQLOps::TupleListReader& SQLOps::OpContext::getReader(
 		uint32_t index, uint32_t sub) {
 	const bool fromInput = true;
@@ -2215,6 +2716,31 @@ SQLOps::TupleListReader& SQLOps::OpContext::getLocalReader(
 SQLOps::TupleListWriter& SQLOps::OpContext::getWriter(uint32_t index) {
 	const bool withLocalRef = true;
 	return storeEntry_.getWriter(index, withLocalRef);
+}
+
+SQLOps::TupleListReader** SQLOps::OpContext::getActiveReaderRef() {
+	return storeEntry_.getActiveReaderRef();
+}
+
+SQLOps::ReadableTuple* SQLOps::OpContext::getReadableTupleRef(uint32_t index) {
+	return storeEntry_.getReadableTupleRef(index);
+}
+
+SQLOps::SummaryTuple* SQLOps::OpContext::getSummaryTupleRef(uint32_t index) {
+	return storeEntry_.getSummaryTupleRef(index);
+}
+
+SQLOps::SummaryColumnList* SQLOps::OpContext::getSummaryColumnListRef(
+		uint32_t index) {
+	return storeEntry_.getSummaryColumnListRef(index);
+}
+
+SQLOps::SummaryTuple* SQLOps::OpContext::getDefaultAggregationTupleRef() {
+	return storeEntry_.getAggregationTupleRef();
+}
+
+SQLOps::SummaryTupleSet* SQLOps::OpContext::getDefaultAggregationTupleSet() {
+	return storeEntry_.getAggregationTupleSet();
 }
 
 void SQLOps::OpContext::setReaderRandomAccess(uint32_t index) {
@@ -2278,6 +2804,23 @@ void SQLOps::OpContext::setPlanPending() {
 	planPending_ = true;
 }
 
+void SQLOps::OpContext::setInputSourceType(
+		uint32_t index, InputSourceType type) {
+	storeEntry_.setInputSourceType(index, type);
+}
+
+void SQLOps::OpContext::setAllInputSourceType(InputSourceType type) {
+	const uint32_t inputCount = getInputCount();
+	for (uint32_t i = 0; i < inputCount; i++) {
+		storeEntry_.setInputSourceType(i, type);
+	}
+}
+
+void SQLOps::OpContext::setUpProjectionFactoryContext(
+		ProjectionFactoryContext &cxt) {
+	storeEntry_.setUpProjectionFactoryContext(cxt);
+}
+
 int64_t SQLOps::OpContext::getInitialInterruptionCheckCount(
 		ExtOpContext *extCxt) {
 	int64_t count = 10000;
@@ -2292,14 +2835,13 @@ int64_t SQLOps::OpContext::getInitialInterruptionCheckCount(
 	return count;
 }
 
-void SQLOps::OpContext::setUpExprContext() {
-	const uint32_t count = storeEntry_.getInputCount();
-	for (uint32_t i = 0; i < count; i++) {
-		exprCxt_.setReader(
-				i, getReader(i), &storeEntry_.getInputColumnList(i));
+bool SQLOps::OpContext::checkSuspendedDetail() {
+	assert(interruptionCheckRemaining_ <= 0);
+	if (extCxt_ != NULL) {
+		extCxt_->checkCancelRequest();
 	}
-	loadTupleId();
-	exprCxtAvailable_ = true;
+	setSuspended();
+	return true;
 }
 
 void SQLOps::OpContext::loadTupleId() {
@@ -2315,7 +2857,6 @@ void SQLOps::OpContext::saveTupleId() {
 		storeEntry_.setLastTupleId(i, exprCxt_.getLastTupleId(i));
 	}
 }
-
 
 
 SQLOps::OpContext::Source::Source(
@@ -2391,7 +2932,18 @@ void SQLOps::Projection::initializeProjection(OpContext &cxt) const {
 	}
 }
 
+void SQLOps::Projection::updateProjectionContext(OpContext &cxt) const {
+	updateProjectionContextAt(cxt);
+	for (ChainIterator it(*this); it.exists(); it.next()) {
+		it.get().updateProjectionContext(cxt);
+	}
+}
+
 void SQLOps::Projection::initializeProjectionAt(OpContext &cxt) const {
+	static_cast<void>(cxt);
+}
+
+void SQLOps::Projection::updateProjectionContextAt(OpContext &cxt) const {
 	static_cast<void>(cxt);
 }
 
@@ -2406,9 +2958,21 @@ void SQLOps::Projection::projectBy(
 }
 
 void SQLOps::Projection::projectBy(
+		OpContext &cxt, const DigestTupleListReader &reader) const {
+	*cxt.getExprContext().getActiveReaderRef() = reader.getReader();
+	project(cxt);
+}
+
+void SQLOps::Projection::projectBy(
+		OpContext &cxt, const SummaryTuple &tuple) const {
+	cxt.getExprContext().setSummaryTuple(0, tuple);
+	project(cxt);
+}
+
+void SQLOps::Projection::projectBy(
 		OpContext &cxt, TupleListReader &reader, size_t index) const {
 	cxt.getExprContext().setActiveInput(static_cast<uint32_t>(index));
-	cxt.getExprContext().setReader(0, reader, NULL);
+	cxt.getExprContext().setReader(0, &reader, NULL);
 	project(cxt);
 }
 
@@ -2416,16 +2980,6 @@ size_t SQLOps::Projection::getChainCount() const {
 	return std::find(
 			chainList_, chainList_ + MAX_CHAIN_COUNT,
 			static_cast<Projection*>(NULL)) - chainList_;
-}
-
-const SQLOps::Projection& SQLOps::Projection::chainAt(uint32_t index) const {
-	assert(index < getChainCount());
-	return *chainList_[index];
-}
-
-SQLOps::Projection& SQLOps::Projection::chainAt(uint32_t index) {
-	assert(index < getChainCount());
-	return *chainList_[index];
 }
 
 void SQLOps::Projection::addChain(Projection &projection) {
@@ -2466,6 +3020,30 @@ bool SQLOps::Projection::ChainIterator::exists() const {
 }
 
 void SQLOps::Projection::ChainIterator::next() {
+	if (exists()) {
+		++index_;
+	}
+	else {
+		assert(false);
+	}
+}
+
+
+SQLOps::Projection::ChainModIterator::ChainModIterator(Projection &proj) :
+		proj_(proj),
+		index_(0) {
+}
+
+SQLOps::Projection& SQLOps::Projection::ChainModIterator::get() const {
+	assert(exists());
+	return *proj_.chainList_[index_];
+}
+
+bool SQLOps::Projection::ChainModIterator::exists() const {
+	return index_ < MAX_CHAIN_COUNT && proj_.chainList_[index_] != NULL;
+}
+
+void SQLOps::Projection::ChainModIterator::next() {
 	if (exists()) {
 		++index_;
 	}
@@ -2546,7 +3124,8 @@ SQLOps::ProjectionFactory::ProjectionFactory(
 
 SQLOps::ProjectionFactoryContext::ProjectionFactoryContext(util::StackAllocator &alloc) :
 		factory_(&ProjectionFactory::getDefaultFactory()),
-		exprCxt_(alloc) {
+		exprCxt_(alloc),
+		allWriterRefList_(alloc) {
 }
 
 util::StackAllocator& SQLOps::ProjectionFactoryContext::getAllocator() {
@@ -2566,6 +3145,41 @@ const SQLExprs::ExprFactory& SQLOps::ProjectionFactoryContext::getExprFactory() 
 	return exprCxt_.getFactory();
 }
 
+void SQLOps::ProjectionFactoryContext::initializeReaderRefList(
+		uint32_t index, ReaderRefList *list) {
+	exprCxt_.initializeReaderRefList(index, list);
+}
+
+void SQLOps::ProjectionFactoryContext::initializeWriterRefList(
+		uint32_t index, WriterRefList *list) {
+	while (index >= allWriterRefList_.size()) {
+		allWriterRefList_.push_back(NULL);
+	}
+
+	WriterRefList *&destList = allWriterRefList_[index];
+	if (destList != NULL) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	destList = list;
+}
+
+void SQLOps::ProjectionFactoryContext::addReaderRef(
+		uint32_t index, TupleListReader **readerRef) {
+	exprCxt_.addReaderRef(index, readerRef);
+}
+
+void SQLOps::ProjectionFactoryContext::addWriterRef(
+		uint32_t index, TupleListWriter **writerRef) {
+	if (index >= allWriterRefList_.size()) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	allWriterRefList_[index]->push_back(writerRef);
+}
+
 
 SQLOps::OpProjectionRegistrar::OpProjectionRegistrar() throw() :
 		factory_(&ProjectionFactory::getFactoryForRegistrar()) {
@@ -2579,4 +3193,11 @@ SQLOps::OpProjectionRegistrar::OpProjectionRegistrar(
 
 void SQLOps::OpProjectionRegistrar::operator()() const {
 	assert(false);
+}
+
+void SQLOps::OpProjectionRegistrar::addProjectionDirect(
+		SQLOpTypes::ProjectionType type,
+		ProjectionFactory::FactoryFunc func) const {
+	assert(factory_ != NULL);
+	factory_->addDefaultEntry(type, func);
 }

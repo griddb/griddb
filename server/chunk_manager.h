@@ -100,12 +100,17 @@ public:
 		BATCH_FREE_MODE = 1  
 	};
 
+	enum SearchMode {
+		SMALL_SIZE_SKIP_SEARCH_MODE = 0,  
+		SMALL_SIZE_SEARCH_MODE = 1,  
+	};
 	/*!
 		@brief Attribute of Chunk Category
 	*/
 	struct ChunkCategoryAttribute {
-		ChunkCategoryAttribute() : freeMode_(SELF_FREE_MODE) {}
+		ChunkCategoryAttribute() : freeMode_(SELF_FREE_MODE), searchMode_(SMALL_SIZE_SKIP_SEARCH_MODE){}
 		FreeMode freeMode_;
+		SearchMode searchMode_;
 	};
 
 	/*!
@@ -678,6 +683,11 @@ public:
 		bool isBatchFree = (getChunkCategoryAttribute(categoryId).freeMode_ ==
 							BATCH_FREE_MODE);
 		return isBatchFree;
+	}
+	bool isSmallSizeSearchSkip(ChunkCategoryId categoryId) {
+		bool isSkip= (getChunkCategoryAttribute(categoryId).searchMode_==
+							SMALL_SIZE_SKIP_SEARCH_MODE);
+		return isSkip;
 	}
 
 

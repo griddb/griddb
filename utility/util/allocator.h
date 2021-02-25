@@ -1198,7 +1198,7 @@ public:
 	template<typename U>
 	void deleteObject(U *object) {
 		util::StdAllocator<U, void> typed(*this);
-		typed.destroy(object, 1);
+		typed.destroy(object);
 		typed.deallocate(object, 1);
 	}
 
@@ -1470,6 +1470,9 @@ public:
 	const D& base() const throw() { return deleter_; }
 
 	template<typename T> bool detectNonDeletable() const throw() {
+		if (typedDeleter_.get() == NULL) {
+			return true;
+		}
 		const TypeIdFunc type1 = typedDeleter_.get()(NULL, NULL);
 		const TypeIdFunc type2 = &typeId<T>;
 		return (type1 != type2);
@@ -2171,6 +2174,11 @@ typedef BasicString<
 		char8_t,
 		std::char_traits<char8_t>,
 		StdAllocator<char8_t, StackAllocator> > String;
+
+typedef BasicString<
+		char8_t,
+		std::char_traits<char8_t>,
+		StdAllocator<char8_t, void> > AllocString;
 
 
 

@@ -26,8 +26,12 @@ void SQLAggrExprs::Registrar::operator()() const {
 	add<SQLType::AGG_COUNT_ALL, Functions::CountAll>();
 	add<SQLType::AGG_COUNT_COLUMN, Functions::CountColumn>();
 	add<SQLType::AGG_GROUP_CONCAT, Functions::GroupConcat>();
+	add<SQLType::AGG_LAG, Functions::LagLead>();
+	add<SQLType::AGG_LEAD, Functions::LagLead>();
 	add<SQLType::AGG_MAX, Functions::Max>();
+	add<SQLType::AGG_MEDIAN, Functions::Median>();
 	add<SQLType::AGG_MIN, Functions::Min>();
+	add<SQLType::AGG_ROW_NUMBER, Functions::RowNumber>();
 	add<SQLType::AGG_STDDEV0, Functions::Stddev0>();
 	add<SQLType::AGG_STDDEV_POP, Functions::StddevPop>();
 	add<SQLType::AGG_STDDEV_SAMP, Functions::StddevSamp>();
@@ -38,6 +42,7 @@ void SQLAggrExprs::Registrar::operator()() const {
 	add<SQLType::AGG_VARIANCE0, Functions::Variance0>();
 
 	add<SQLType::AGG_FIRST, Functions::First>();
+	add<SQLType::AGG_LAST, Functions::Last>();
 	add<SQLType::AGG_FOLD_EXISTS, Functions::FoldExists>();
 	add<SQLType::AGG_FOLD_NOT_EXISTS, Functions::FoldNotExists>();
 	add<SQLType::AGG_FOLD_IN, Functions::FoldIn>();
@@ -46,34 +51,22 @@ void SQLAggrExprs::Registrar::operator()() const {
 }
 
 
-const SQLExprs::ExprRegistrar
-SQLAggrExprs::UnsupportedRegistrar::REGISTRAR_INSTANCE((UnsupportedRegistrar()));
-
-void SQLAggrExprs::UnsupportedRegistrar::operator()() const {
-	addNonEvaluable<SQLType::AGG_LAG>();
-	addNonEvaluable<SQLType::AGG_LEAD>();
-	addNonEvaluable<SQLType::AGG_MEDIAN>();
-	addNonEvaluable<SQLType::AGG_ROW_NUMBER>();
-	addNonEvaluable<SQLType::AGG_LAST>();
-}
-
-
 template<typename C>
-void SQLAggrExprs::Functions::Avg::Advance::operator()(
+inline void SQLAggrExprs::Functions::Avg::Advance::operator()(
 		C &cxt, const Aggr &aggr, double v) {
 	aggr.addUnchecked<0>()(cxt, v);
 	aggr.increment<1>()(cxt);
 }
 
 template<typename C>
-void SQLAggrExprs::Functions::Avg::Merge::operator()(
+inline void SQLAggrExprs::Functions::Avg::Merge::operator()(
 		C &cxt, const Aggr &aggr, double v1, int64_t v2) {
 	aggr.addUnchecked<0>()(cxt, v1);
 	aggr.add<1>()(cxt, v2);
 }
 
 template<typename C>
-std::pair<double, bool> SQLAggrExprs::Functions::Avg::Finish::operator()(
+inline std::pair<double, bool> SQLAggrExprs::Functions::Avg::Finish::operator()(
 		C &cxt, const Aggr &aggr) {
 	const int64_t count = aggr.get<1>()(cxt);
 	if (count == 0) {
@@ -86,21 +79,21 @@ std::pair<double, bool> SQLAggrExprs::Functions::Avg::Finish::operator()(
 
 
 template<typename C>
-void SQLAggrExprs::Functions::CountBase::Merge::operator()(
+inline void SQLAggrExprs::Functions::CountBase::Merge::operator()(
 		C &cxt, const Aggr &aggr, int64_t v) {
 	aggr.add<0>()(cxt, v);
 }
 
 
 template<typename C>
-void SQLAggrExprs::Functions::CountAll::Advance::operator()(
+inline void SQLAggrExprs::Functions::CountAll::Advance::operator()(
 		C &cxt, const Aggr &aggr) {
 	aggr.increment<0>()(cxt);
 }
 
 
 template<typename C>
-void SQLAggrExprs::Functions::CountColumn::Advance::operator()(
+inline void SQLAggrExprs::Functions::CountColumn::Advance::operator()(
 		C &cxt, const Aggr &aggr, const TupleValue &v) {
 	static_cast<void>(v);
 	aggr.increment<0>()(cxt);
@@ -229,27 +222,106 @@ SQLAggrExprs::Functions::GroupConcat::Finish::operator()(
 
 
 template<typename C>
-void SQLAggrExprs::Functions::Max::Advance::operator()(
+inline void SQLAggrExprs::Functions::LagLead::Advance::operator()(
+		C &cxt, const Aggr &aggr, const TupleValue &v) {
+	aggr.set<0>()(cxt, v);
+}
+
+template<typename C>
+inline void SQLAggrExprs::Functions::LagLead::Advance::operator()(
+		C &cxt, const Aggr &aggr, const int64_t &v) {
+	if (v >= 0) {
+		cxt.finishFunction();
+	}
+}
+
+
+template<typename C>
+inline void SQLAggrExprs::Functions::Max::Advance::operator()(
 		C &cxt, const Aggr &aggr, const TupleValue &v) {
 	if (aggr.isNull<0>()(cxt) ||
-			SQLValues::ValueGreater(v.getType())(v, aggr.get<0>()(cxt))) {
+			SQLValues::ValueGreater()(v, aggr.get<0>()(cxt))) {
+		aggr.set<0>()(cxt, v);
+	}
+}
+
+
+template<typename C, typename Aggr, typename V>
+inline void SQLAggrExprs::Functions::Median::Advance::operator()(
+		C &cxt, const Aggr &aggr, const V &v) {
+	switch (nextAction(cxt, aggr)) {
+	case ACTION_SET:
+		aggr.template set<0>()(cxt, v);
+		break;
+	case ACTION_MERGE:
+		{
+			V merged;
+			if (!FunctionUtils::NumberArithmetic::middleOfOrderedValues(
+					aggr.template get<0>()(cxt), v, merged)) {
+				errorUnordered(cxt);
+			}
+			aggr.template set<0>()(cxt, merged);
+		}
+		break;
+	default:
+		break;
+	}
+}
+
+template<typename C, typename Aggr>
+inline SQLAggrExprs::Functions::Median::MedianAction
+SQLAggrExprs::Functions::Median::Advance::nextAction(
+		C &cxt, const Aggr &aggr) {
+
+	int64_t count = aggr.template get<1>()(cxt);
+	MedianAction action = ACTION_NONE;
+	do {
+		if (count <= 0) {
+			if (count < 0) {
+				if (count < -1) {
+					action = ACTION_MERGE;
+					count = -1;
+				}
+				break;
+			}
+			count = cxt.getWindowValueCount();
+		}
+
+		count -= 2;
+		if (count <= 0) {
+			action = ACTION_SET;
+			if (count == 0) {
+				count -= 2;
+			}
+			break;
+		}
+	}
+	while (false);
+
+	aggr.template set<1>()(cxt, count);
+	return action;
+}
+
+template<typename C>
+void SQLAggrExprs::Functions::Median::Advance::errorUnordered(C &cxt) {
+	static_cast<void>(cxt);
+	GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL_INVALID_INPUT,
+			"Unordered MEDIAN values");
+}
+
+
+template<typename C>
+inline void SQLAggrExprs::Functions::Min::Advance::operator()(
+		C &cxt, const Aggr &aggr, const TupleValue &v) {
+	if (aggr.isNull<0>()(cxt) ||
+			SQLValues::ValueLess()(v, aggr.get<0>()(cxt))) {
 		aggr.set<0>()(cxt, v);
 	}
 }
 
 
 template<typename C>
-void SQLAggrExprs::Functions::Min::Advance::operator()(
-		C &cxt, const Aggr &aggr, const TupleValue &v) {
-	if (aggr.isNull<0>()(cxt) ||
-			SQLValues::ValueLess(v.getType())(v, aggr.get<0>()(cxt))) {
-		aggr.set<0>()(cxt, v);
-	}
-}
-
-
-template<typename C>
-void SQLAggrExprs::Functions::StddevBase::Advance::operator()(
+inline void SQLAggrExprs::Functions::StddevBase::Advance::operator()(
 		C &cxt, const Aggr &aggr, double v) {
 	aggr.addUnchecked<0>()(cxt, v);
 	aggr.addUnchecked<1>()(cxt, v * v);
@@ -257,7 +329,7 @@ void SQLAggrExprs::Functions::StddevBase::Advance::operator()(
 }
 
 template<typename C>
-void SQLAggrExprs::Functions::StddevBase::Merge::operator()(
+inline void SQLAggrExprs::Functions::StddevBase::Merge::operator()(
 		C &cxt, const Aggr &aggr, double v1, double v2, int64_t v3) {
 	aggr.addUnchecked<0>()(cxt, v1);
 	aggr.addUnchecked<1>()(cxt, v2);
@@ -266,7 +338,8 @@ void SQLAggrExprs::Functions::StddevBase::Merge::operator()(
 
 
 template<typename C>
-std::pair<double, bool> SQLAggrExprs::Functions::Stddev0::Finish::operator()(
+inline std::pair<double, bool>
+SQLAggrExprs::Functions::Stddev0::Finish::operator()(
 		C &cxt, const Aggr &aggr) {
 	Variance0::Finish varFunc;
 	const std::pair<double, bool> &var = varFunc(cxt, aggr);
@@ -275,7 +348,8 @@ std::pair<double, bool> SQLAggrExprs::Functions::Stddev0::Finish::operator()(
 
 
 template<typename C>
-std::pair<double, bool> SQLAggrExprs::Functions::StddevPop::Finish::operator()(
+inline std::pair<double, bool>
+SQLAggrExprs::Functions::StddevPop::Finish::operator()(
 		C &cxt, const Aggr &aggr) {
 	VarPop::Finish varFunc;
 	const std::pair<double, bool> &var = varFunc(cxt, aggr);
@@ -284,7 +358,7 @@ std::pair<double, bool> SQLAggrExprs::Functions::StddevPop::Finish::operator()(
 
 
 template<typename C>
-std::pair<double, bool>
+inline std::pair<double, bool>
 SQLAggrExprs::Functions::StddevSamp::Finish::operator()(
 		C &cxt, const Aggr &aggr) {
 	VarSamp::Finish varFunc;
@@ -294,7 +368,7 @@ SQLAggrExprs::Functions::StddevSamp::Finish::operator()(
 
 
 template<typename C>
-void SQLAggrExprs::Functions::Sum::Advance::operator()(
+inline void SQLAggrExprs::Functions::Sum::Advance::operator()(
 		C &cxt, const LongAggr &aggr, int64_t v) {
 	if (aggr.isNull<0>()(cxt)) {
 		aggr.set<0>()(cxt, v);
@@ -305,7 +379,7 @@ void SQLAggrExprs::Functions::Sum::Advance::operator()(
 }
 
 template<typename C>
-void SQLAggrExprs::Functions::Sum::Advance::operator()(
+inline void SQLAggrExprs::Functions::Sum::Advance::operator()(
 		C &cxt, const DoubleAggr &aggr, double v) {
 	if (aggr.isNull<0>()(cxt)) {
 		aggr.set<0>()(cxt, v);
@@ -317,14 +391,15 @@ void SQLAggrExprs::Functions::Sum::Advance::operator()(
 
 
 template<typename C>
-void SQLAggrExprs::Functions::Total::Advance::operator()(
+inline void SQLAggrExprs::Functions::Total::Advance::operator()(
 		C &cxt, const Aggr &aggr, double v) {
 	aggr.addUnchecked<0>()(cxt, v);
 }
 
 
 template<typename C>
-std::pair<double, bool> SQLAggrExprs::Functions::VarPop::Finish::operator()(
+inline std::pair<double, bool>
+SQLAggrExprs::Functions::VarPop::Finish::operator()(
 		C &cxt, const Aggr &aggr) {
 	const int64_t count = aggr.get<2>()(cxt);
 	if (count <= 0) {
@@ -340,7 +415,8 @@ std::pair<double, bool> SQLAggrExprs::Functions::VarPop::Finish::operator()(
 
 
 template<typename C>
-std::pair<double, bool> SQLAggrExprs::Functions::VarSamp::Finish::operator()(
+inline std::pair<double, bool>
+SQLAggrExprs::Functions::VarSamp::Finish::operator()(
 		C &cxt, const Aggr &aggr) {
 	const int64_t count = aggr.get<2>()(cxt);
 	if (count <= 1) {
@@ -357,7 +433,8 @@ std::pair<double, bool> SQLAggrExprs::Functions::VarSamp::Finish::operator()(
 
 
 template<typename C>
-std::pair<double, bool> SQLAggrExprs::Functions::Variance0::Finish::operator()(
+inline std::pair<double, bool>
+SQLAggrExprs::Functions::Variance0::Finish::operator()(
 		C &cxt, const Aggr &aggr) {
 	const int64_t count = aggr.get<2>()(cxt);
 	if (count <= 1) {
@@ -377,7 +454,7 @@ std::pair<double, bool> SQLAggrExprs::Functions::Variance0::Finish::operator()(
 
 
 template<typename C>
-void SQLAggrExprs::Functions::First::Advance::operator()(
+inline void SQLAggrExprs::Functions::First::Advance::operator()(
 		C &cxt, const Aggr &aggr) {
 	if (!aggr.isNull<0>()(cxt)) {
 		cxt.finishFunction();
@@ -385,19 +462,19 @@ void SQLAggrExprs::Functions::First::Advance::operator()(
 }
 
 template<typename C>
-void SQLAggrExprs::Functions::First::Advance::operator()(
+inline void SQLAggrExprs::Functions::First::Advance::operator()(
 		C &cxt, const Aggr &aggr, const TupleValue &v) {
 	aggr.set<0>()(cxt, v);
 }
 
 template<typename C>
-TupleValue SQLAggrExprs::Functions::First::Finish::operator()(
+inline TupleValue SQLAggrExprs::Functions::First::Finish::operator()(
 		C &cxt, const Aggr &aggr) {
 	return aggr.get<0>()(cxt);
 }
 
 template<typename C>
-void SQLAggrExprs::Functions::First::Finish::operator()(
+inline void SQLAggrExprs::Functions::First::Finish::operator()(
 		C &cxt, const Aggr &aggr, const TupleValue &v) {
 	if (!aggr.isNull<0>()(cxt)) {
 		cxt.finishFunction();
@@ -408,14 +485,21 @@ void SQLAggrExprs::Functions::First::Finish::operator()(
 
 
 template<typename C>
-void SQLAggrExprs::Functions::FoldExists::Advance::operator()(
+inline void SQLAggrExprs::Functions::Last::Advance::operator()(
+		C &cxt, const Aggr &aggr, const TupleValue &v) {
+	aggr.set<0>()(cxt, v);
+}
+
+
+template<typename C>
+inline void SQLAggrExprs::Functions::FoldExists::Advance::operator()(
 		C &cxt, const Aggr &aggr, int64_t v) {
 	static_cast<void>(v);
 	aggr.set<0>()(cxt, 1);
 }
 
 template<typename C>
-void SQLAggrExprs::Functions::FoldExists::Merge::operator()(
+inline void SQLAggrExprs::Functions::FoldExists::Merge::operator()(
 		C &cxt, const Aggr &aggr, int64_t v) {
 	if (v != 0) {
 		aggr.set<0>()(cxt, 1);
@@ -423,7 +507,7 @@ void SQLAggrExprs::Functions::FoldExists::Merge::operator()(
 }
 
 template<typename C>
-bool SQLAggrExprs::Functions::FoldExists::Finish::operator()(
+inline bool SQLAggrExprs::Functions::FoldExists::Finish::operator()(
 		C &cxt, const Aggr &aggr) {
 	return (aggr.get<0>()(cxt) != 0);
 }
@@ -438,7 +522,7 @@ bool SQLAggrExprs::Functions::FoldNotExists::Finish::operator()(
 
 
 template<typename C>
-void SQLAggrExprs::Functions::FoldIn::Advance::operator()(
+inline void SQLAggrExprs::Functions::FoldIn::Advance::operator()(
 		C &cxt, const Aggr &aggr, int64_t v) {
 	static_cast<void>(v);
 	if ((aggr.get<0>()(cxt) & FOLD_IN_MATCHED) != 0) {
@@ -447,7 +531,7 @@ void SQLAggrExprs::Functions::FoldIn::Advance::operator()(
 }
 
 template<typename C>
-void SQLAggrExprs::Functions::FoldIn::Advance::operator()(
+inline void SQLAggrExprs::Functions::FoldIn::Advance::operator()(
 		C &cxt, const Aggr &aggr, const TupleValue &v) {
 	int64_t flags = aggr.get<0>()(cxt);
 	do {
@@ -467,7 +551,7 @@ void SQLAggrExprs::Functions::FoldIn::Advance::operator()(
 			break;
 		}
 
-		if (SQLValues::ValueEq(v.getType())(leftValue_.first, v)) {
+		if (SQLValues::ValueEq()(leftValue_.first, v)) {
 			flags |= FOLD_IN_MATCHED;
 		}
 	}
@@ -478,14 +562,14 @@ void SQLAggrExprs::Functions::FoldIn::Advance::operator()(
 }
 
 template<typename C>
-void SQLAggrExprs::Functions::FoldIn::Merge::operator()(
+inline void SQLAggrExprs::Functions::FoldIn::Merge::operator()(
 		C &cxt, const Aggr &aggr, int64_t v) {
 	aggr.set<0>()(cxt, aggr.get<0>()(cxt) | v);
 }
 
 template<typename C>
-std::pair<bool, bool> SQLAggrExprs::Functions::FoldIn::Finish::operator()(
-		C &cxt, const Aggr &aggr) {
+inline std::pair<bool, bool>
+SQLAggrExprs::Functions::FoldIn::Finish::operator()(C &cxt, const Aggr &aggr) {
 	const int64_t flags = aggr.get<0>()(cxt);
 	if ((flags & FOLD_IN_MATCHED) != 0) {
 		return std::make_pair(true, true);
@@ -501,7 +585,8 @@ std::pair<bool, bool> SQLAggrExprs::Functions::FoldIn::Finish::operator()(
 
 
 template<typename C>
-std::pair<bool, bool> SQLAggrExprs::Functions::FoldNotIn::Finish::operator()(
+inline std::pair<bool, bool>
+SQLAggrExprs::Functions::FoldNotIn::Finish::operator()(
 		C &cxt, const Aggr &aggr) {
 	FoldIn::Finish baseFunc;
 	const std::pair<bool, bool> &base = baseFunc(cxt, aggr);
@@ -510,7 +595,7 @@ std::pair<bool, bool> SQLAggrExprs::Functions::FoldNotIn::Finish::operator()(
 
 
 template<typename C>
-void SQLAggrExprs::Functions::FoldUptoOne::Advance::operator()(
+inline void SQLAggrExprs::Functions::FoldUptoOne::Advance::operator()(
 		C &cxt, const Aggr &aggr, int64_t v) {
 	static_cast<void>(v);
 	if (aggr.get<0>()(cxt) != 0) {
@@ -521,13 +606,13 @@ void SQLAggrExprs::Functions::FoldUptoOne::Advance::operator()(
 }
 
 template<typename C>
-void SQLAggrExprs::Functions::FoldUptoOne::Advance::operator()(
+inline void SQLAggrExprs::Functions::FoldUptoOne::Advance::operator()(
 		C &cxt, const Aggr &aggr, const TupleValue &v) {
 	aggr.set<1>()(cxt, v);
 }
 
 template<typename C>
-void SQLAggrExprs::Functions::FoldUptoOne::Merge::operator()(
+inline void SQLAggrExprs::Functions::FoldUptoOne::Merge::operator()(
 		C &cxt, const Aggr &aggr, int64_t v1, const TupleValue &v2) {
 	if (v1 == 0) {
 		return;
@@ -538,7 +623,7 @@ void SQLAggrExprs::Functions::FoldUptoOne::Merge::operator()(
 }
 
 template<typename C>
-TupleValue SQLAggrExprs::Functions::FoldUptoOne::Finish::operator()(
+inline TupleValue SQLAggrExprs::Functions::FoldUptoOne::Finish::operator()(
 		C &cxt, const Aggr &aggr) {
 	return aggr.get<1>()(cxt);
 }

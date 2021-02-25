@@ -49,6 +49,8 @@ const ChunkCategoryId DS_CHUNK_CATEGORY_SIZE =
 	5;  
 const bool DS_CHUNK_CATEGORY_RANGE_BATCH_FREE[] = {
 	false, false, false, true, true};
+const bool DS_CHUNK_CATEGORY_SMALL_SIZE_SEARCH[] = {
+	true, false, false, false, false};
 const int16_t DS_ADDITIONAL_CHUNK_CATEGORY_NUM =
 	17;  
 

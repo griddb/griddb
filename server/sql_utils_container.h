@@ -72,6 +72,7 @@ struct SQLContainerUtils::ScanCursor::Source {
 	util::StackAllocator &alloc_;
 	SQLOps::ContainerLocation location_;
 	const ColumnTypeList *columnTypeList_;
+	int64_t indexLimit_;
 };
 
 class SQLContainerUtils::ScanCursor::LatchTarget :

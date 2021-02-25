@@ -27,6 +27,8 @@
 #include "nosql_utils.h"
 
 
+
+
 util::AllocUniquePtr<SQLContainerUtils::ScanCursor>::ReturnType
 SQLContainerUtils::ScanCursor::create(
 		util::StdAllocator<void, void> &alloc, const Source &source) {
@@ -45,7 +47,8 @@ SQLContainerUtils::ScanCursor::Source::Source(
 		const ColumnTypeList *columnTypeList) :
 		alloc_(alloc),
 		location_(location),
-		columnTypeList_(columnTypeList) {
+		columnTypeList_(columnTypeList),
+		indexLimit_(-1) {
 }
 
 
@@ -173,6 +176,7 @@ SQLContainerImpl::CursorImpl::CursorImpl(const Source &source) :
 		containerExpired_(false),
 		indexLost_(false),
 		resultSetLost_(false),
+		nullsStatsChanged_(false),
 		resultSetId_(UNDEF_RESULTSETID),
 		lastPartitionId_(UNDEF_PARTITIONID),
 		lastDataStore_(NULL),
@@ -183,7 +187,12 @@ SQLContainerImpl::CursorImpl::CursorImpl(const Source &source) :
 		maxRowId_(UNDEF_ROWID),
 		generalRowArray_(NULL),
 		plainRowArray_(NULL),
-		row_(NULL) {
+		row_(NULL),
+		scanner_(NULL),
+		initialNullsStats_(source.alloc_),
+		lastNullsStats_(source.alloc_),
+		indexLimit_(source.indexLimit_),
+		totalSearchCount_(0) {
 }
 
 SQLContainerImpl::CursorImpl::~CursorImpl() {
@@ -228,37 +237,41 @@ bool SQLContainerImpl::CursorImpl::scanFull(
 		OpContext &cxt, const Projection &proj) {
 	startScope(cxt);
 
-	cxt.closeLocalTupleList(outIndex_);
-	cxt.createLocalTupleList(outIndex_);
-
 	if (getContainer() == NULL) {
 		return true;
 	}
 
-	ContainerRowScanner *scanner = tryCreateScanner(cxt, proj);
-	TransactionContext &txn = resolveTransactionContext();
 	BaseContainer &container = resolveContainer();
+	ContainerRowScanner *scanner = tryCreateScanner(cxt, proj, container);
+	TransactionContext &txn = resolveTransactionContext();
 
-	BtreeSearchContext sc(cxt.getAllocator(), container.getRowIdColumnId());
-	preparePartialSearch(cxt, sc, NULL);
-	const OutputOrder outputOrder = ORDER_UNDEFINED;
+	for (;;) {
+		BtreeSearchContext sc(cxt.getAllocator(), container.getRowIdColumnId());
+		preparePartialSearch(cxt, sc, NULL);
+		const OutputOrder outputOrder = ORDER_UNDEFINED;
 
-	switch (container.getContainerType()) {
-	case COLLECTION_CONTAINER:
-		static_cast<Collection&>(container).scanRowIdIndex(txn, sc, *scanner);
-		break;
-	case TIME_SERIES_CONTAINER:
-		static_cast<TimeSeries&>(container).scanRowIdIndex(
-				txn, sc, outputOrder, *scanner);
-		break;
-	default:
-		assert(false);
-		break;
+		switch (container.getContainerType()) {
+		case COLLECTION_CONTAINER:
+			static_cast<Collection&>(container).scanRowIdIndex(txn, sc, *scanner);
+			break;
+		case TIME_SERIES_CONTAINER:
+			static_cast<TimeSeries&>(container).scanRowIdIndex(
+					txn, sc, outputOrder, *scanner);
+			break;
+		default:
+			assert(false);
+			break;
+		}
+
+		const bool finished = finishPartialSearch(cxt, sc);
+		if (!finished) {
+			return finished;
+		}
+
+		updateScanner(cxt, finished);
+		return finished;
 	}
-
-	const bool finished = finishPartialSearch(cxt, sc);
-	cxt.closeLocalWriter(outIndex_);
-	return finished;
+	while (false);
 }
 
 bool SQLContainerImpl::CursorImpl::scanIndex(
@@ -266,20 +279,18 @@ bool SQLContainerImpl::CursorImpl::scanIndex(
 		const SQLExprs::IndexConditionList &condList) {
 	startScope(cxt);
 
-	cxt.closeLocalTupleList(outIndex_);
-	cxt.createLocalTupleList(outIndex_);
-
 	if (getContainer() == NULL) {
 		return true;
 	}
 
-	ContainerRowScanner *scanner = tryCreateScanner(cxt, proj);
-	TransactionContext &txn = resolveTransactionContext();
 	BaseContainer &container = resolveContainer();
+	ContainerRowScanner *scanner = tryCreateScanner(cxt, proj, container);
+	TransactionContext &txn = resolveTransactionContext();
 
 	util::Vector<uint32_t> indexColumnList(cxt.getAllocator());
 	const IndexType indexType =
 			acceptIndexCond(cxt, condList, indexColumnList);
+	SQLOps::OpProfilerIndexEntry *profilerEntry = cxt.getIndexProfiler();
 
 	bool finished = true;
 	SearchResult result(cxt.getAllocator());
@@ -287,6 +298,9 @@ bool SQLContainerImpl::CursorImpl::scanIndex(
 			indexType == SQLType::INDEX_TREE_EQ) {
 		BtreeSearchContext sc(txn.getDefaultAllocator(), indexColumnList);
 		preparePartialSearch(cxt, sc, &condList);
+		if (profilerEntry != NULL) {
+			profilerEntry->startSearch();
+		}
 
 		if (container.getContainerType() == TIME_SERIES_CONTAINER) {
 			TimeSeries &timeSeries = static_cast<TimeSeries&>(container);
@@ -308,12 +322,15 @@ bool SQLContainerImpl::CursorImpl::scanIndex(
 					txn, sc, result.oIdList_, result.mvccOIdList_);
 		}
 
+		if (profilerEntry != NULL) {
+			profilerEntry->finishSearch();
+		}
 		finished = finishPartialSearch(cxt, sc);
 	}
 
 	acceptSearchResult(cxt, result, &condList, *scanner);
 
-	cxt.closeLocalWriter(outIndex_);
+	updateScanner(cxt, finished);
 	return finished;
 }
 
@@ -321,16 +338,13 @@ bool SQLContainerImpl::CursorImpl::scanUpdates(
 		OpContext &cxt, const Projection &proj) {
 	startScope(cxt);
 
-	cxt.closeLocalTupleList(outIndex_);
-	cxt.createLocalTupleList(outIndex_);
-
 	if (getContainer() == NULL || updateRowIdHandler_.get() == NULL) {
 		return true;
 	}
 
-	ContainerRowScanner *scanner = tryCreateScanner(cxt, proj);
-	TransactionContext &txn = resolveTransactionContext();
 	BaseContainer &container = resolveContainer();
+	ContainerRowScanner *scanner = tryCreateScanner(cxt, proj, container);
+	TransactionContext &txn = resolveTransactionContext();
 
 	ResultSet &resultSet = resolveResultSet();
 	clearResultSetPreserving(resultSet);
@@ -354,7 +368,6 @@ bool SQLContainerImpl::CursorImpl::scanUpdates(
 		activateResultSetPreserving(resultSet);
 	}
 
-	cxt.closeLocalWriter(outIndex_);
 	return finished;
 }
 
@@ -486,6 +499,11 @@ void SQLContainerImpl::CursorImpl::setRow(
 	row_ = rowArrayImpl.getRow();
 }
 
+bool SQLContainerImpl::CursorImpl::isValueNull(const ContainerColumn &column) {
+	RowArray::Row row(row_, getRowArray());
+	return row.isNullValue(column.getColumnInfo());
+}
+
 template<RowArrayType RAType, typename Ret, TupleColumnType T>
 Ret SQLContainerImpl::CursorImpl::getValueDirect(
 		SQLValues::ValueContext &cxt, const ContainerColumn &column) {
@@ -513,8 +531,8 @@ void SQLContainerImpl::CursorImpl::writeValue(
 						cxt, srcColumn));
 		break;
 	case COLUMN_TYPE_BOOL:
-		writeValueAs<TupleTypes::TYPE_BOOL>(writer, destColumn, !!getValueDirect<
-				RAType, int8_t, TupleTypes::TYPE_BOOL>(
+		writeValueAs<TupleTypes::TYPE_BOOL>(writer, destColumn, getValueDirect<
+				RAType, bool, TupleTypes::TYPE_BOOL>(
 						cxt, srcColumn));
 		break;
 	case COLUMN_TYPE_BYTE:
@@ -582,16 +600,36 @@ void SQLContainerImpl::CursorImpl::writeValueAs(
 }
 
 ContainerRowScanner* SQLContainerImpl::CursorImpl::tryCreateScanner(
-		OpContext &cxt, const Projection &proj) {
+		OpContext &cxt, const Projection &proj,
+		const BaseContainer &container) {
 
-	ContainerRowScanner::HandlerSet handlerSet;
-	setUpScannerHandler<
-			BaseContainer::ROW_ARRAY_GENERAL>(cxt, proj, handlerSet);
-	setUpScannerHandler<
-			BaseContainer::ROW_ARRAY_PLAIN>(cxt, proj, handlerSet);
+	if (!updateNullsStats(container)) {
+		scanner_ = NULL;
+	}
 
-	return ALLOC_NEW(cxt.getAllocator()) ContainerRowScanner(
-			handlerSet, *getRowArray(), NULL);
+	if (scanner_ == NULL) {
+		if (updatorList_.get() == NULL) {
+			updatorList_ =
+					UTIL_MAKE_LOCAL_UNIQUE(updatorList_, UpdatorList, cxt.getAllocator());
+		}
+		scanner_ = &ScannerHandlerFactory::getInstance().create(
+				cxt, *this, *getRowArray(), proj);
+		cxt.setUpExprContext();
+	}
+	updateScanner(cxt, false);
+	return scanner_;
+}
+
+void SQLContainerImpl::CursorImpl::updateScanner(
+		OpContext &cxt, bool finished) {
+	for (UpdatorList::iterator it = updatorList_->begin();
+			it != updatorList_->end(); ++it) {
+		it->first(cxt, it->second);
+	}
+
+	if (finished) {
+		scanner_ = NULL;
+	}
 }
 
 void SQLContainerImpl::CursorImpl::clearResultSetPreserving(
@@ -661,6 +699,14 @@ TupleColumnType SQLContainerImpl::CursorImpl::resolveColumnType(
 			columnInfo.getColumnType(), nullable);
 }
 
+bool SQLContainerImpl::CursorImpl::isColumnNonNullable(uint32_t pos) {
+	if (nullsStatsChanged_) {
+		return false;
+	}
+
+	return !getBit(lastNullsStats_, pos);
+}
+
 SQLContainerImpl::ContainerColumn
 SQLContainerImpl::CursorImpl::resolveColumn(
 		BaseContainer &container, bool forId, uint32_t pos) {
@@ -697,8 +743,9 @@ void SQLContainerImpl::CursorImpl::preparePartialSearch(
 	ResultSet &resultSet = resolveResultSet();
 	TransactionContext &txn = resolveTransactionContext();
 
+	const uint32_t scale = Constants::ESTIMATED_ROW_ARRAY_ROW_COUNT;
 	resultSet.setPartialExecuteSize(
-			std::max<uint64_t>(cxt.getNextCountForSuspend(), 1));
+			std::max<uint64_t>(cxt.getNextCountForSuspend() * scale, 1));
 
 	const bool lastSuspended = resultSet.isPartialExecuteSuspend();
 	const ResultSize suspendLimit = resultSet.getPartialExecuteSize();
@@ -770,8 +817,10 @@ bool SQLContainerImpl::CursorImpl::finishPartialSearch(
 }
 
 void SQLContainerImpl::CursorImpl::setUpSearchContext(
-		OpContext &cxt, TransactionContext &txn, const SQLExprs::IndexConditionList &targetCondList,
+		OpContext &cxt, TransactionContext &txn,
+		const SQLExprs::IndexConditionList &targetCondList,
 		BtreeSearchContext &sc, const BaseContainer &container) {
+
 	const bool forKey = true;
 	for (SQLExprs::IndexConditionList::const_iterator it =
 			targetCondList.begin(); it != targetCondList.end(); ++it) {
@@ -870,6 +919,7 @@ SQLType::IndexType SQLContainerImpl::CursorImpl::acceptIndexCond(
 		}
 		else if (it->mapType == MAP_TYPE_BTREE &&
 				it->columnIds_ == indexColumnList) {
+			acceptIndexInfo(cxt, txn, container, targetCondList, *it);
 			return SQLType::INDEX_TREE_RANGE;
 		}
 	}
@@ -886,6 +936,16 @@ void SQLContainerImpl::CursorImpl::acceptSearchResult(
 		return;
 	}
 
+	if (indexLimit_ > 0) {
+		totalSearchCount_ += result.oIdList_.empty();
+		totalSearchCount_ += result.mvccOIdList_.empty();
+		if (resolveResultSet().isPartialExecuteSuspend() &&
+				totalSearchCount_ > static_cast<uint64_t>(indexLimit_)) {
+			setIndexLost(cxt);
+			return;
+		}
+	}
+
 	TransactionContext &txn = resolveTransactionContext();
 	BaseContainer &container = resolveContainer();
 
@@ -899,6 +959,37 @@ void SQLContainerImpl::CursorImpl::acceptSearchResult(
 	else {
 		assert(false);
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+}
+
+void SQLContainerImpl::CursorImpl::acceptIndexInfo(
+		OpContext &cxt, TransactionContext &txn, BaseContainer &container,
+		const SQLExprs::IndexConditionList &targetCondList,
+		const IndexInfo &info) {
+	SQLOps::OpProfilerIndexEntry *profilerEntry = cxt.getIndexProfiler();
+	if (profilerEntry == NULL || !profilerEntry->isEmpty()) {
+		return;
+	}
+
+	ObjectManager *objectManager = container.getObjectManager();
+
+	if (profilerEntry->findIndexName() == NULL) {
+		profilerEntry->setIndexName(info.indexName_.c_str());
+	}
+
+	for (util::Vector<uint32_t>::const_iterator it = info.columnIds_.begin();
+			it != info.columnIds_.end(); ++it) {
+		if (profilerEntry->findColumnName(*it) == NULL) {
+			ColumnInfo &columnInfo = container.getColumnInfo(*it);
+			profilerEntry->setColumnName(
+					*it, columnInfo.getColumnName(txn, *objectManager));
+		}
+		profilerEntry->addIndexColumn(*it);
+	}
+
+	for (SQLExprs::IndexConditionList::const_iterator it =
+			targetCondList.begin(); it != targetCondList.end(); ++it) {
+		profilerEntry->addCondition(*it);
 	}
 }
 
@@ -1227,7 +1318,7 @@ const void* SQLContainerImpl::CursorImpl::getFixedValueAddr(
 }
 
 template<RowArrayType RAType>
-const void* SQLContainerImpl::CursorImpl::getVariableArray(
+inline const void* SQLContainerImpl::CursorImpl::getVariableArray(
 		const ContainerColumn &column) {
 	return getRowArrayImpl<RAType>(true)->getRowCursor().getVariableField(
 			column);
@@ -1285,7 +1376,7 @@ void SQLContainerImpl::CursorImpl::setUpScannerHandler(
 	HandlerType *handler =
 			ALLOC_NEW(cxt.getAllocator()) HandlerType(cxt, *this, proj);
 
-	handlerSet.getEntry<RAType>() = 
+	handlerSet.getEntry<RAType>() =
 			ContainerRowScanner::createHandlerEntry(*handler);
 }
 
@@ -1317,16 +1408,87 @@ bool SQLContainerImpl::CursorImpl::isColumnSchemaNullable(
 	return !info.isNotNull();
 }
 
+bool SQLContainerImpl::CursorImpl::updateNullsStats(
+		const BaseContainer &container) {
+	if (nullsStatsChanged_) {
+		return true;
+	}
 
-template<TupleColumnType T, bool FixedSize>
+	getNullsStats(container, lastNullsStats_);
+
+	if (initialNullsStats_.empty()) {
+		initialNullsStats_.assign(
+				lastNullsStats_.begin(), lastNullsStats_.end());
+		return true;
+	}
+
+	const size_t size = initialNullsStats_.size();
+	return (lastNullsStats_.size() == size && memcmp(
+			initialNullsStats_.data(), lastNullsStats_.data(), size) == 0);
+}
+
+void SQLContainerImpl::CursorImpl::getNullsStats(
+		const BaseContainer &container, util::XArray<uint8_t> &nullsStats) {
+	const uint32_t columnCount = container.getColumnNum();
+	initializeBits(nullsStats, columnCount);
+	const size_t bitsSize =  nullsStats.size();
+
+	nullsStats.clear();
+	container.getNullsStats(nullsStats);
+
+	if (nullsStats.size() != bitsSize) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+}
+
+void SQLContainerImpl::CursorImpl::initializeBits(
+		util::XArray<uint8_t> &bits, size_t bitCount) {
+	const uint8_t unitBits = 0;
+	bits.assign((bitCount + CHAR_BIT - 1) / CHAR_BIT, unitBits);
+}
+
+void SQLContainerImpl::CursorImpl::setBit(
+		util::XArray<uint8_t> &bits, size_t index, bool value) {
+	uint8_t &unitBits = bits[index / CHAR_BIT];
+	const uint8_t targetBit = static_cast<uint8_t>(1 << (index % CHAR_BIT));
+
+	if (value) {
+		unitBits |= targetBit;
+	}
+	else {
+		unitBits &= targetBit;
+	}
+}
+
+bool SQLContainerImpl::CursorImpl::getBit(
+		const util::XArray<uint8_t> &bits, size_t index) {
+	const uint8_t &unitBits = bits[index / CHAR_BIT];
+	const uint8_t targetBit = static_cast<uint8_t>(1 << (index % CHAR_BIT));
+
+	return ((unitBits & targetBit) != 0);
+}
+
+
+template<TupleColumnType T, bool VarSize>
 template<BaseContainer::RowArrayType RAType, typename Ret>
 inline Ret SQLContainerImpl::CursorImpl::DirectValueAccessor<
-		T, FixedSize>::access(
+		T, VarSize>::access(
 		SQLValues::ValueContext &cxt, CursorImpl &cursor,
 		const ContainerColumn &column) const {
 	static_cast<void>(cxt);
-	UTIL_STATIC_ASSERT(FixedSize);
+	UTIL_STATIC_ASSERT(!VarSize);
 	return cursor.getFixedValue<RAType, Ret>(column);
+}
+
+template<>
+template<BaseContainer::RowArrayType RAType, typename Ret>
+inline Ret SQLContainerImpl::CursorImpl::DirectValueAccessor<
+		TupleTypes::TYPE_BOOL, false>::access(
+		SQLValues::ValueContext &cxt, CursorImpl &cursor,
+		const ContainerColumn &column) const {
+	static_cast<void>(cxt);
+	return !!cursor.getFixedValue<RAType, int8_t>(column);
 }
 
 template<>
@@ -1356,7 +1518,182 @@ inline Ret SQLContainerImpl::CursorImpl::DirectValueAccessor<
 
 const uint16_t SQLContainerImpl::Constants::SCHEMA_INVALID_COLUMN_ID =
 		std::numeric_limits<uint16_t>::max();
+const uint32_t SQLContainerImpl::Constants::ESTIMATED_ROW_ARRAY_ROW_COUNT =
+		50;
 
+
+SQLContainerImpl::ColumnCode::ColumnCode() :
+		cursor_(NULL) {
+}
+
+void SQLContainerImpl::ColumnCode::initialize(
+		ExprFactoryContext &cxt, const Expression *expr,
+		const size_t *argIndex) {
+	static_cast<void>(expr);
+
+	typedef SQLExprs::ExprCode ExprCode;
+	typedef SQLCoreExprs::VariantUtils VariantUtils;
+
+	CursorRef &ref = cxt.getInputSourceRef(0).resolveAs<CursorRef>();
+
+	CursorImpl &cursor = ref.resolveCursor();
+	BaseContainer &container = cursor.resolveContainer();
+
+	const ExprCode &code = VariantUtils::getBaseExpression(cxt, argIndex).getCode();
+
+	const bool forId = (code.getType() == SQLType::EXPR_ID);
+	column_ = CursorImpl::resolveColumn(container, forId, code.getColumnPos());
+	cursor_ = &cursor;
+}
+
+
+template<RowArrayType RAType, typename T, typename S, bool Nullable>
+inline typename
+SQLContainerImpl::ColumnEvaluator<RAType, T, S, Nullable>::ResultType
+SQLContainerImpl::ColumnEvaluator<RAType, T, S, Nullable>::eval(
+		ExprContext &cxt) const {
+	if (Nullable && code_.cursor_->isValueNull(code_.column_)) {
+		return ResultType(ValueType(), true);
+	}
+	return ResultType(
+			static_cast<ValueType>(code_.cursor_->getValueDirect<
+					RAType, SourceType, S::COLUMN_TYPE>(
+							cxt.getValueContext(), code_.column_)),
+			false);
+}
+
+
+SQLContainerImpl::IdExpression::VariantBase::~VariantBase() {
+}
+
+void SQLContainerImpl::IdExpression::VariantBase::initializeCustom(
+		ExprFactoryContext &cxt, const ExprCode &code) {
+	columnCode_.initialize(cxt, this, NULL);
+}
+
+template<size_t V>
+TupleValue SQLContainerImpl::IdExpression::VariantAt<V>::eval(
+		ExprContext &cxt) const {
+	const int64_t value =
+			Evaluator::get(Evaluator::evaluator(columnCode_).eval(cxt));
+	return TupleValue(value);
+}
+
+
+void SQLContainerImpl::GeneralCondEvaluator::initialize(
+		ExprFactoryContext &cxt, const Expression *expr,
+		const size_t *argIndex) {
+	static_cast<void>(cxt);
+	static_cast<void>(argIndex);
+
+	expr_ = expr;
+}
+
+
+template<typename Func, size_t V>
+void SQLContainerImpl::ComparisonEvaluator<Func, V>::initialize(
+		ExprFactoryContext &cxt, const Expression *expr,
+		const size_t *argIndex) {
+	static_cast<void>(expr);
+
+	typedef SQLExprs::ExprCode ExprCode;
+	typedef SQLCoreExprs::VariantUtils VariantUtils;
+
+	const ExprCode &code = VariantUtils::getBaseExpression(cxt, argIndex).getCode();
+
+	expr_.initializeCustom(cxt, code);
+}
+
+
+void SQLContainerImpl::EmptyCondEvaluator::initialize(
+		ExprFactoryContext &cxt, const Expression *expr,
+		const size_t *argIndex) {
+	static_cast<void>(cxt);
+	static_cast<void>(expr);
+	static_cast<void>(argIndex);
+}
+
+
+void SQLContainerImpl::GeneralProjector::initialize(
+		ProjectionFactoryContext &cxt, const Projection *proj) {
+	static_cast<void>(cxt);
+
+	proj_ = proj;
+}
+
+bool SQLContainerImpl::GeneralProjector::update(OpContext &cxt) {
+	proj_->updateProjectionContext(cxt);
+	return true;
+}
+
+
+bool SQLContainerImpl::CountProjector::update(OpContext &cxt) {
+	SQLValues::VarContext::Scope varScope(cxt.getVarContext());
+
+	SQLExprs::ExprContext &exprCxt = cxt.getExprContext();
+
+	const int64_t totalCount =
+			exprCxt.getAggregationValueAs<SQLValues::Types::Long>(column_) +
+			counter_;
+
+	exprCxt.setAggregationValueBy<SQLValues::Types::Long>(column_, totalCount);
+	counter_ = 0;
+
+	return true;
+}
+
+void SQLContainerImpl::CountProjector::initialize(
+		ProjectionFactoryContext &cxt, const Projection *proj) {
+	const SQLExprs::Expression &countExpr = proj->child();
+	assert(countExpr.getCode().getType() == SQLType::AGG_COUNT_ALL);
+
+	const uint32_t aggrIndex = countExpr.getCode().getAggregationIndex();
+	assert(aggrIndex != std::numeric_limits<uint32_t>::max());
+
+	SQLValues::SummaryTupleSet *tupleSet =
+			cxt.getExprFactoryContext().getAggregationTupleSet();
+	assert(tupleSet != NULL);
+
+	column_ = tupleSet->getModifiableColumnList()[aggrIndex];
+}
+
+
+SQLContainerImpl::CursorRef::CursorRef(util::StackAllocator &alloc) :
+		cursor_(NULL),
+		cxtRefList_(alloc),
+		exprCxtRefList_(alloc) {
+}
+
+SQLContainerImpl::CursorImpl& SQLContainerImpl::CursorRef::resolveCursor() {
+	if (cursor_ == NULL) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+	return *cursor_;
+}
+
+void SQLContainerImpl::CursorRef::setCursor(CursorImpl *cursor) {
+	cursor_ = cursor;
+}
+
+void SQLContainerImpl::CursorRef::addContextRef(OpContext **ref) {
+	cxtRefList_.push_back(ref);
+}
+
+void SQLContainerImpl::CursorRef::addContextRef(ExprContext **ref) {
+	exprCxtRefList_.push_back(ref);
+}
+
+void SQLContainerImpl::CursorRef::updateAll(OpContext &cxt) {
+	for (ContextRefList::const_iterator it = cxtRefList_.begin();
+			it != cxtRefList_.end(); ++it) {
+		**it = &cxt;
+	}
+	for (ExprContextRefList::const_iterator it = exprCxtRefList_.begin();
+			it != exprCxtRefList_.end(); ++it) {
+		**it = &cxt.getExprContext();
+	}
+}
 
 
 template<BaseContainer::RowArrayType RAType>
@@ -1400,6 +1737,380 @@ bool SQLContainerImpl::ScannerHandler<RAType>::update(
 		TransactionContext &txn) {
 	static_cast<void>(txn);
 	return true;
+}
+
+
+size_t
+SQLContainerImpl::ScannerHandlerBase::HandlerVariantUtils::toInputSourceNumber(
+		InputSourceType type) {
+	switch (type) {
+	case ExprCode::INPUT_CONTAINER_GENERAL:
+		return 0;
+	case ExprCode::INPUT_CONTAINER_PLAIN:
+		return 1;
+	default:
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+}
+
+size_t
+SQLContainerImpl::ScannerHandlerBase::HandlerVariantUtils::toCompFuncNumber(
+		ExprType type) {
+	switch (type) {
+	case SQLType::OP_LT:
+		return 0;
+	case SQLType::OP_GT:
+		return 1;
+	case SQLType::OP_LE:
+		return 2;
+	case SQLType::OP_GE:
+		return 3;
+	case SQLType::OP_EQ:
+		return 4;
+	case SQLType::OP_NE:
+		return 5;
+	default:
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+}
+
+void SQLContainerImpl::ScannerHandlerBase::HandlerVariantUtils::setUpContextRef(
+		ProjectionFactoryContext &cxt, OpContext **ref, ExprContext **exprRef) {
+	typedef SQLExprs::ExprFactoryContext ExprFactoryContext;
+
+	ExprFactoryContext &exprCxt = cxt.getExprFactoryContext();
+	CursorRef &cursorRef = exprCxt.getInputSourceRef(0).resolveAs<CursorRef>();
+
+	cursorRef.addContextRef(ref);
+	cursorRef.addContextRef(exprRef);
+}
+
+void SQLContainerImpl::ScannerHandlerBase::HandlerVariantUtils::addUpdator(
+		ProjectionFactoryContext &cxt, const UpdatorEntry &updator) {
+	typedef SQLExprs::ExprFactoryContext ExprFactoryContext;
+
+	ExprFactoryContext &exprCxt = cxt.getExprFactoryContext();
+	CursorRef &cursorRef = exprCxt.getInputSourceRef(0).resolveAs<CursorRef>();
+
+	if (updator.first != NULL) {
+		cursorRef.resolveCursor().updatorList_->push_back(updator);
+	}
+}
+
+std::pair<const SQLExprs::Expression*, const SQLOps::Projection*>
+SQLContainerImpl::ScannerHandlerBase::HandlerVariantUtils::
+getFilterProjectionElements(const Projection &src) {
+	const SQLExprs::Expression *filterExpr = NULL;
+	const SQLOps::Projection *chainProj = NULL;
+	do {
+		if (src.getProjectionCode().getType() != SQLOpTypes::PROJ_FILTER) {
+			break;
+		}
+
+		filterExpr = src.findChild();
+		chainProj = &src.chainAt(0);
+	}
+	while (false);
+
+	if (chainProj == NULL) {
+		filterExpr = NULL;
+		chainProj = &src;
+	}
+
+	return std::make_pair(filterExpr, chainProj);
+}
+
+
+size_t SQLContainerImpl::ScannerHandlerBase::VariantTraits::resolveVariant(
+		FactoryContext &cxt, const Projection &proj) {
+	typedef SQLExprs::ExprCode ExprCode;
+	typedef SQLExprs::ExprFactoryContext ExprFactoryContext;
+	typedef SQLExprs::ExprTypeUtils ExprTypeUtils;
+
+	ExprFactoryContext &exprCxt = cxt.first->getExprFactoryContext();
+	const size_t sourceNum = HandlerVariantUtils::toInputSourceNumber(
+			exprCxt.getInputSourceType(0));
+
+	const std::pair<const Expression*, const Projection*> &elems =
+			HandlerVariantUtils::getFilterProjectionElements(proj);
+	const Expression *condExpr = elems.first;
+	const Projection *chainProj = elems.second;
+
+	size_t condNum;
+	do {
+		if (condExpr == NULL) {
+			condNum = EMPTY_FILTER_NUM;
+			break;
+		}
+
+		const TupleColumnType condColumnType =
+				SQLValues::TypeUtils::findConversionType(
+						condExpr->getCode().getColumnType(),
+						SQLValues::TypeUtils::toNullable(TupleTypes::TYPE_BOOL),
+						true, true);
+		if (SQLValues::TypeUtils::isNull(condColumnType)) {
+			condNum = EMPTY_FILTER_NUM;
+			break;
+		}
+
+		const ExprCode &condCode = condExpr->getCode();
+		if (condCode.getType() == SQLType::EXPR_CONSTANT &&
+				SQLValues::ValueUtils::isTrue(condCode.getValue())) {
+			condNum = EMPTY_FILTER_NUM;
+			break;
+		}
+
+		const bool withNe = true;
+		if (!ExprTypeUtils::isCompOp(condCode.getType(), withNe)) {
+			condNum = 0;
+			break;
+		}
+		ExprFactoryContext::Scope scope(exprCxt);
+		exprCxt.setBaseExpression(condExpr);
+
+		const size_t baseNum =
+				CoreCompExpr::VariantTraits::resolveVariant(exprCxt, condCode);
+		if (baseNum < OFFSET_COMP_CONTAINER) {
+			condNum = 0;
+			break;
+		}
+
+		const size_t compFuncNum =
+				HandlerVariantUtils::toCompFuncNumber(condCode.getType());
+		condNum = COUNT_NO_COMP_FILTER +
+				compFuncNum * COUNT_COMP_BASE +
+				((baseNum - OFFSET_COMP_CONTAINER) % COUNT_COMP_BASE);
+	}
+	while (false);
+
+	size_t projNum = 0;
+	do {
+		if (chainProj->getProjectionCode().getType() != SQLOpTypes::PROJ_AGGR_PIPE ||
+				chainProj->getProjectionCode().getAggregationPhase() !=
+						SQLType::AGG_PHASE_ADVANCE_PIPE ||
+				chainProj->findChild() == NULL) {
+			break;
+		}
+
+		const SQLExprs::Expression &child = chainProj->child();
+		if (child.findNext() != NULL ||
+				child.getCode().getType() != SQLType::AGG_COUNT_ALL) {
+			break;
+		}
+
+		projNum = 1;
+	}
+	while (false);
+
+	return
+			sourceNum * (COUNT_PROJECTION * COUNT_FILTER) +
+			projNum * COUNT_FILTER +
+			condNum;
+}
+
+
+template<size_t V>
+SQLContainerImpl::ScannerHandlerBase::VariantAt<V>::VariantAt(
+		ProjectionFactoryContext &cxt, const Projection &proj) :
+		cxt_(NULL),
+		exprCxt_(NULL) {
+	typedef SQLExprs::ExprFactoryContext ExprFactoryContext;
+
+	HandlerVariantUtils::setUpContextRef(cxt, &cxt_, &exprCxt_);
+
+	const std::pair<const Expression*, const Projection*> &elems =
+			HandlerVariantUtils::getFilterProjectionElements(proj);
+
+	ExprFactoryContext &exprCxt = cxt.getExprFactoryContext();
+	exprCxt.setBaseExpression(elems.first);
+	condCode_.initialize(exprCxt, elems.first, NULL);
+
+	projector_.initialize(cxt, elems.second);
+
+	HandlerVariantUtils::addUpdator(cxt, projector_.getUpdator());
+}
+
+template<size_t V>
+template<BaseContainer::RowArrayType InRAType>
+inline void SQLContainerImpl::ScannerHandlerBase::VariantAt<V>::operator()(
+		TransactionContext&,
+		typename BaseContainer::RowArrayImpl<
+				BaseContainer, InRAType>&) {
+	const ResultType &matched =
+			Evaluator::evaluator(condCode_).eval(*exprCxt_);
+
+	if (!Evaluator::check(matched) || !Evaluator::get(matched)) {
+		return;
+	}
+
+	projector_.project(*cxt_);
+}
+
+template<size_t V>
+inline bool SQLContainerImpl::ScannerHandlerBase::VariantAt<V>::update(
+		TransactionContext&) {
+	return true;
+}
+
+
+const SQLContainerImpl::ScannerHandlerFactory
+&SQLContainerImpl::ScannerHandlerFactory::FACTORY_INSTANCE =
+		getInstanceForRegistrar();
+
+const SQLContainerImpl::ScannerHandlerFactory&
+SQLContainerImpl::ScannerHandlerFactory::getInstance() {
+	return FACTORY_INSTANCE;
+}
+
+SQLContainerImpl::ScannerHandlerFactory&
+SQLContainerImpl::ScannerHandlerFactory::getInstanceForRegistrar() {
+	static ScannerHandlerFactory instance;
+	return instance;
+}
+
+ContainerRowScanner& SQLContainerImpl::ScannerHandlerFactory::create(
+		OpContext &cxt, CursorImpl &cursor, RowArray &rowArray,
+		const Projection &proj) const {
+	typedef SQLExprs::ExprCode ExprCode;
+	typedef SQLExprs::ExprFactoryContext ExprFactoryContext;
+
+	typedef SQLOps::ProjectionFactoryContext ProjectionFactoryContext;
+	typedef SQLOps::OpCodeBuilder OpCodeBuilder;
+
+	typedef ExprCode::InputSourceType InputSourceType;
+
+	OpCodeBuilder builder(OpCodeBuilder::ofContext(cxt));
+
+	ProjectionFactoryContext &projCxt = builder.getProjectionFactoryContext();
+	cxt.setUpProjectionFactoryContext(projCxt);
+
+	ContainerRowScanner::HandlerSet handlerSet;
+	FactoryContext factoryCxt(&projCxt, &handlerSet);
+
+	ExprFactoryContext &exprCxt = projCxt.getExprFactoryContext();
+	exprCxt.setPlanning(false);
+	exprCxt.getInputSourceRef(0) =
+			ALLOC_UNIQUE(cxt.getAllocator(), CursorRef, cxt.getAllocator());
+	exprCxt.getInputSourceRef(0).resolveAs<CursorRef>().setCursor(&cursor);
+
+	const size_t columnCount = exprCxt.getInputColumnCount(0);
+	for (size_t i = 0; i < columnCount; i++) {
+		if (cursor.isColumnNonNullable(i)) {
+			exprCxt.setInputType(0, i, SQLValues::TypeUtils::toNonNullable(
+					exprCxt.getInputType(0, i)));
+		}
+	}
+
+	const InputSourceType typeList[] = {
+		ExprCode::INPUT_CONTAINER_GENERAL,
+		ExprCode::INPUT_CONTAINER_PLAIN,
+		ExprCode::END_INPUT
+	};
+
+	for (const InputSourceType *it = typeList; *it != ExprCode::END_INPUT; ++it) {
+		ExprFactoryContext::Scope scope(exprCxt);
+		exprCxt.setInputSourceType(0, *it);
+		builder.getExprRewriter().setCodeSetUpAlways(true);
+
+		Projection &destProj = builder.rewriteProjection(proj);
+		destProj.initializeProjection(cxt);
+		create(factoryCxt, destProj);
+	}
+
+	exprCxt.getInputSourceRef(0).resolveAs<CursorRef>().updateAll(cxt);
+
+	return *(ALLOC_NEW(cxt.getAllocator()) ContainerRowScanner(
+			handlerSet, rowArray, NULL));
+}
+
+ContainerRowScanner::HandlerSet&
+SQLContainerImpl::ScannerHandlerFactory::create(
+			FactoryContext &cxt, const Projection &proj) const {
+	if (factoryFunc_ == NULL) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+	return factoryFunc_(cxt, proj);
+}
+
+void SQLContainerImpl::ScannerHandlerFactory::setFactoryFunc(FactoryFunc func) {
+	if (factoryFunc_ != NULL) {
+	}
+	factoryFunc_ = func;
+}
+
+SQLContainerImpl::ScannerHandlerFactory::ScannerHandlerFactory() :
+		factoryFunc_(NULL) {
+}
+
+
+SQLContainerImpl::BaseRegistrar::BaseRegistrar(
+		const BaseRegistrar &subRegistrar) throw() :
+		factory_(NULL) {
+	try {
+		subRegistrar();
+	}
+	catch (...) {
+		assert(false);
+	}
+}
+
+void SQLContainerImpl::BaseRegistrar::operator()() const {
+	assert(false);
+}
+
+SQLContainerImpl::BaseRegistrar::BaseRegistrar() throw() :
+		factory_(&ScannerHandlerFactory::getInstanceForRegistrar()) {
+}
+
+template<SQLExprs::ExprType T, typename E>
+void SQLContainerImpl::BaseRegistrar::addExprVariants() const {
+	SQLExprs::VariantsRegistrarBase<ExprVariantTraits>::add<T, E>();
+}
+
+template<typename S>
+void SQLContainerImpl::BaseRegistrar::addScannerVariants() const {
+	ScannerHandlerFactory::getInstanceForRegistrar().setFactoryFunc(
+			SQLExprs::VariantsRegistrarBase<ScannerVariantTraits>::add<0, S>());
+}
+
+template<typename S, size_t Begin, size_t End>
+void SQLContainerImpl::BaseRegistrar::addScannerVariants() const {
+	ScannerHandlerFactory::getInstanceForRegistrar().setFactoryFunc(
+			SQLExprs::VariantsRegistrarBase<ScannerVariantTraits>::add<0, S, Begin, End>());
+}
+
+
+template<typename V>
+SQLContainerImpl::BaseRegistrar::ScannerVariantTraits::ObjectType&
+SQLContainerImpl::BaseRegistrar::ScannerVariantTraits::create(
+		ContextType &cxt, const CodeType &code) {
+	V *handler = ALLOC_NEW(cxt.first->getAllocator()) V(*cxt.first, code);
+	cxt.second->getEntry<V::ROW_ARRAY_TYPE>() =
+			ContainerRowScanner::createHandlerEntry(*handler);
+	return *cxt.second;
+}
+
+
+const SQLContainerImpl::BaseRegistrar
+SQLContainerImpl::DefaultRegistrar::REGISTRAR_INSTANCE((DefaultRegistrar()));
+
+void SQLContainerImpl::DefaultRegistrar::operator()() const {
+	typedef SQLCoreExprs::Functions Functions;
+
+	addExprVariants<SQLType::EXPR_ID, IdExpression>();
+	addExprVariants<SQLType::EXPR_COLUMN, ColumnExpression>();
+
+	addExprVariants< SQLType::OP_LT, ComparisonExpression<Functions::Lt> >();
+	addExprVariants< SQLType::OP_LE, ComparisonExpression<Functions::Le> >();
+	addExprVariants< SQLType::OP_GT, ComparisonExpression<Functions::Gt> >();
+	addExprVariants< SQLType::OP_GE, ComparisonExpression<Functions::Ge> >();
+	addExprVariants< SQLType::OP_EQ, ComparisonExpression<Functions::Eq> >();
+	addExprVariants< SQLType::OP_NE, ComparisonExpression<Functions::Ne> >();
+
+	addScannerVariants<ScannerHandlerBase>();
 }
 
 
