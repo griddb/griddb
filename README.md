@@ -124,7 +124,8 @@ If necessary, please refer to [Installation Troubleshooting](docs/TroubleShootin
   * [GridDB Python Client](https://github.com/griddb/python_client)
   * [GridDB Ruby Client](https://github.com/griddb/ruby_client)
   * [GridDB Go Client](https://github.com/griddb/go_client)
-  * [GridDB Node.JS Client](https://github.com/griddb/nodejs_client)
+  * [GridDB Node.JS Client (SWIG based)](https://github.com/griddb/nodejs_client)
+  * [GridDB Node API (node-addon-api based)](https://github.com/griddb/node-api)
   * [GridDB PHP Client](https://github.com/griddb/php_client)
   * [GridDB Perl Client](https://github.com/griddb/perl_client)
   
