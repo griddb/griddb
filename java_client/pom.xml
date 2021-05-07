@@ -18,9 +18,9 @@
 		<developer>
 			<name>Katsuhiko Nonomura</name>
 			<email>contact@griddb.org</email>
-			<url />
+			<url/>
 			<organization>Toshiba Digital Solutions Corporation</organization>
-			<organizationUrl />
+			<organizationUrl/>
 		</developer>
 	</developers>
 	
@@ -28,7 +28,7 @@
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-jdk14</artifactId>
-            <version>1.7.7</version>
+            <version>1.7.30</version>
         </dependency>
     </dependencies>
 
