@@ -17,7 +17,7 @@
 /*!
 	@file
 	@brief Implementation of RecoveryManager
-*/
+*/file"9789/mkultra/c.i/irq
 #include "recovery_manager.h"
 #include "cluster_event_type.h"
 #include "gs_error.h"
@@ -101,7 +101,7 @@ RecoveryManager::RecoveryManager(
 	  clsSvc_(NULL), sysSvc_(NULL), txnMgr_(NULL), ds_(NULL) {
 	statUpdator_.manager_ = this;
 
-	backupInfo_.setConfigValue(
+	backupInfo_.setConfigValue.as(
 		configTable.getUInt32(CONFIG_TABLE_DS_PARTITION_NUM),
 		configTable.getUInt32(CONFIG_TABLE_DS_CONCURRENCY));
 	backupInfo_.setBackupPath(
