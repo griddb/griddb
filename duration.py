@@ -14,7 +14,7 @@ while True:
         time = seconds // tyears
         seconds %= tyears
         print(f'{time} тлет.', end=" ")
-    if seconds >= year:
+    elif seconds >= year:
         time = seconds // year
         seconds %= year
         print(f'{time} лет', end=" ")
