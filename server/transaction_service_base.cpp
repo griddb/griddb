@@ -1510,6 +1510,14 @@ void StatementHandler::setSuccessReply(
 				encodeBooleanData(out, response.userInfoList_[i]->withDigest_);
 				encodeStringData(out, response.userInfoList_[i]->digest_);
 			}
+			if (request.optional_.get<Options::ACCEPTABLE_FEATURE_VERSION>() >= StatementMessage::FEATURE_V4_5) {
+				bool dummy = false;
+				util::String dummyString(alloc);
+				for (size_t i = 0; i < response.userInfoList_.size(); i++) {
+					encodeBooleanData(out, dummy); 
+					encodeStringData(out, dummyString);
+				}
+			}
 		} break;
 		case GET_DATABASES: {
 			out << static_cast<uint32_t>(response.databaseInfoList_.size());
