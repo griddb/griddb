@@ -16,27 +16,57 @@
 package com.toshiba.mwcloud.gs.experimental;
 
 public class PrivilegeInfo {
-	
+
 	public enum RoleType {
 		ALL,
 		READ
 	}
-	
+
 	RoleType role = RoleType.READ;
+
+	public enum PrivilegeType {
+		ALL,
+		READ
+	}
+	
+	PrivilegeType priv = PrivilegeType.READ;
 	
 	public PrivilegeInfo() {
 	}
 
 	public PrivilegeInfo(RoleType role) {
-		this.role = role;
+		if (role == RoleType.READ) {
+			this.priv = PrivilegeType.READ;
+		} else {
+			this.priv = PrivilegeType.ALL;
+		}
 	}
-	
+
+	public PrivilegeInfo(PrivilegeType priv) {
+		this.priv = priv;
+	}
+
 	public RoleType getRole() {
-		return role;
+		if (priv == PrivilegeType.READ) {
+			return RoleType.READ;
+		} else {
+			return RoleType.ALL;
+		}
 	}
 
 	public void setRole(RoleType role) {
-		this.role = role;
+		if (role == RoleType.READ) {
+			this.priv = PrivilegeType.READ;
+		} else {
+			this.priv = PrivilegeType.ALL;
+		}
 	}
-	
+
+	public PrivilegeType get() {
+		return priv;
+	}
+
+	public void set(PrivilegeType priv) {
+		this.priv = priv;
+	}
 }

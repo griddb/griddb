@@ -22,6 +22,9 @@ public class UserInfo {
 	private String password = null;
 	private String hashPassword = null;
 	private boolean isSuperUser = false;
+	private boolean isRole = false;
+	private boolean isGroupMapping = false;
+	private String roleName = null;
 
 	public UserInfo() {
 	}
@@ -31,6 +34,17 @@ public class UserInfo {
 		this.password = null;
 		this.hashPassword = hashPassword;
 		this.isSuperUser = isSuperUser;
+	}
+	public UserInfo(String name, String hashPassword, boolean isSuperUser, boolean isGroupMapping, String roleName) {
+		this.name = name;
+		this.password = null;
+		this.hashPassword = hashPassword;
+		this.isSuperUser = isSuperUser;
+		this.isGroupMapping = isGroupMapping;
+		this.roleName = roleName;
+		if (roleName.length() > 0) {
+			isRole = true;
+		}
 	}
 
 	public String getName() {
@@ -59,5 +73,17 @@ public class UserInfo {
 
 	public boolean isSuperUser() {
 		return isSuperUser;
+	}
+	
+	public boolean isRole() {
+		return isRole;
+	}
+
+	public boolean isGroupMapping() {
+		return isGroupMapping;
+	}
+
+	public String getRoleName() {
+		return roleName;
 	}
 }
