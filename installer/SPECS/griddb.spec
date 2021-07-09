@@ -71,6 +71,9 @@ install -c -m 640 conf/gs_cluster.json     %{buildroot}%{griddb_instdir}/conf
 install -c -m 640 conf/gs_node.json        %{buildroot}%{griddb_instdir}/conf
 install -c -m 640 conf/password            %{buildroot}%{griddb_instdir}/conf
 
+install -c -m 750 conf/changeCluster.sh    %{buildroot}%{griddb_instdir}/conf
+install -c -m 640 conf/json_pretty.sh      %{buildroot}%{griddb_instdir}/conf
+
 install -c -m 640 3rd_party/3rd_party.md                        %{buildroot}%{griddb_instdir}/3rd_party
 install -c -m 640 3rd_party/Apache_License-2.0.txt              %{buildroot}%{griddb_instdir}/3rd_party
 install -c -m 640 3rd_party/BSD_License.txt                     %{buildroot}%{griddb_instdir}/3rd_party
@@ -195,6 +198,7 @@ if [ ! -e %{griddb_homedir}/conf ]; then
 fi
 
 # Copy definition files when not exists
+%{griddb_instdir}/conf/changeCluster.sh %{griddb_instdir}
 if [ ! -e %{griddb_homedir}/conf/gs_cluster.json ]; then
   cp %{griddb_instdir}/conf/gs_cluster.json %{griddb_homedir}/conf
   chown gsadm:gridstore %{griddb_homedir}/conf/gs_cluster.json
@@ -297,6 +301,8 @@ fi
 %{griddb_instdir}/3rd_party/zigzag_encoding/LICENSE
 %{griddb_instdir}/README.md
 %{griddb_instdir}/docs/sample/program/Sample1.java
+%{griddb_instdir}/conf/changeCluster.sh
+%{griddb_instdir}/conf/json_pretty.sh
 /usr/bin/gsserver
 /usr/bin/gs_adduser
 /usr/bin/gs_deluser

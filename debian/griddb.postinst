@@ -84,10 +84,6 @@ if [ ! -e /var/lib/gridstore/conf ]; then
 fi
 
 # Copy definition files when not exists
-if [ ! -e /var/lib/gridstore/conf/gs_cluster.json ]; then
-  cp /usr/griddb-$DEB_VERSION/conf/gs_cluster.json /var/lib/gridstore/conf
-  chown gsadm:gridstore /var/lib/gridstore/conf/gs_cluster.json
-fi
 if [ ! -e /var/lib/gridstore/conf/gs_node.json ]; then
   cp /usr/griddb-$DEB_VERSION/conf/gs_node.json /var/lib/gridstore/conf
   chown gsadm:gridstore /var/lib/gridstore/conf/gs_node.json
@@ -120,4 +116,73 @@ fi
 
 " >  /var/lib/gridstore/.bash_profile
  chown gsadm:gridstore /var/lib/gridstore/.bash_profile
+fi
+
+#Function update gs_cluster.json file for initial set update
+if [ ! -e /var/lib/gridstore/conf/gs_cluster.json ]; then
+  json_file=./usr/griddb-$DEB_VERSION/conf/gs_cluster.json
+  temp_file=/var/lib/gridstore/conf/temp.json
+  temp_file_2=/var/lib/gridstore/conf/temp2.json
+  touch $temp_file
+  touch $temp_file_2
+
+  #check GDB_CLUSTER_NAME
+  cluster=""
+  if [[ ${GDB_CLUSTER_NAME} ]]; then
+     cluster=${GDB_CLUSTER_NAME}
+  else
+     cluster=myCluster
+  fi
+
+  #check GDB_FIXED_IPADDR, if it is set, add fixed list property with default port to gs_cluster.json
+  property=""
+  notificationMember=""
+  if [[ ${GDB_FIXED_IPADDR} ]]; then
+    property=${GDB_FIXED_IPADDR}
+    ipList=(${property//,/ })
+    len=${#ipList[@]}
+    if [[ $len > 0 ]]; then
+     notificationMember+="\"notificationMember\":["
+     for i in "${ipList[@]}"
+        do
+           temp="{\"cluster\":{\"address\":\"$i\",\"port\":10010},
+              \"sync\":{\"address\":\"$i\",\"port\":10020},
+              \"system\":{\"address\":\"$i\",\"port\":10040},
+              \"transaction\":{\"address\":\"$i\",\"port\":10001},
+              \"sql\":{\"address\":\"$i\",\"port\":20001}
+               }"
+           if [[ $i != ${ipList[-1]} ]]; then
+             notificationMember+="$temp, "
+          else
+             notificationMember+="$temp"
+          fi
+        done
+     notificationMember+="],"
+  fi
+fi
+
+ #change gs_cluster.json file
+ temp=""
+ while IFS= read -r line; do
+  if [[ $line == *"clusterName"* ]]; then
+    temp="\"clusterName\":\"${cluster}\","
+  elif [[ $line == *'replicationNum'* ]] && [[ $notificationMember != "" ]]; then
+    temp=$notificationMember
+  elif [[ $line == *'notification'* ]]; then
+     if [[ $notificationMember != "" ]]; then
+        temp=""
+     else
+        temp=$line
+     fi
+   else
+     temp=$line
+   fi
+  echo $temp >> $temp_file
+ done < $json_file
+ chmod u+x ./usr/griddb-$DEB_VERSION/conf/json_pretty.sh
+ chmod u+x $temp_file_2
+  cat $temp_file | ./usr/griddb-$DEB_VERSION/conf/json_pretty.sh >> $temp_file_2
+  mv $temp_file_2 /var/lib/gridstore/conf/gs_cluster.json
+  chown gsadm:gridstore /var/lib/gridstore/conf/gs_cluster.json
+rm $temp_file
 fi
