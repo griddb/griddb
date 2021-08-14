@@ -1,0 +1,85 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "virtualMachines_wewvm01_name": {
+            "defaultValue": "wewvm01",
+            "type": "String"
+        },
+        "disks_wewvm01_OsDisk_1_af9d59cbfb3440cebdcd0ffbc2074bc6_externalid": {
+            "defaultValue": "/subscriptions/16837bb8-81e4-4a5e-9d28-3f0e7a6efb02/resourceGroups/weresrsg/providers/Microsoft.Compute/disks/wewvm01_OsDisk_1_af9d59cbfb3440cebdcd0ffbc2074bc6",
+            "type": "String"
+        },
+        "networkInterfaces_wewvm01862_externalid": {
+            "defaultValue": "/subscriptions/16837bb8-81e4-4a5e-9d28-3f0e7a6efb02/resourceGroups/weresrsg/providers/Microsoft.Network/networkInterfaces/wewvm01862",
+            "type": "String"
+        }
+    },
+    "variables": {},
+    "resources": [
+        {
+            "type": "Microsoft.Compute/virtualMachines",
+            "apiVersion": "2021-03-01",
+            "name": "[parameters('virtualMachines_wewvm01_name')]",
+            "location": "westeurope",
+            "identity": {
+                "principalId": "b87cf578-e916-41d2-8635-9ca0d7a386ee",
+                "tenantId": "fcc29687-d8c8-4f5e-afab-6d4d72455b09",
+                "type": "SystemAssigned"
+            },
+            "properties": {
+                "hardwareProfile": {
+                    "vmSize": "Standard_D2s_v3"
+                },
+                "storageProfile": {
+                    "imageReference": {
+                        "publisher": "MicrosoftWindowsServer",
+                        "offer": "WindowsServer",
+                        "sku": "2019-datacenter-gensecond",
+                        "version": "latest"
+                    },
+                    "osDisk": {
+                        "osType": "Windows",
+                        "name": "[concat(parameters('virtualMachines_wewvm01_name'), '_OsDisk_1_af9d59cbfb3440cebdcd0ffbc2074bc6')]",
+                        "createOption": "FromImage",
+                        "caching": "ReadWrite",
+                        "managedDisk": {
+                            "storageAccountType": "Standard_LRS",
+                            "id": "[parameters('disks_wewvm01_OsDisk_1_af9d59cbfb3440cebdcd0ffbc2074bc6_externalid')]"
+                        },
+                        "diskSizeGB": 127
+                    },
+                    "dataDisks": []
+                },
+                "osProfile": {
+                    "computerName": "[parameters('virtualMachines_wewvm01_name')]",
+                    "adminUsername": "azadmin",
+                    "windowsConfiguration": {
+                        "provisionVMAgent": true,
+                        "enableAutomaticUpdates": true,
+                        "patchSettings": {
+                            "patchMode": "AutomaticByOS",
+                            "assessmentMode": "ImageDefault",
+                            "enableHotpatching": false
+                        }
+                    },
+                    "secrets": [],
+                    "allowExtensionOperations": true,
+                    "requireGuestProvisionSignal": true
+                },
+                "networkProfile": {
+                    "networkInterfaces": [
+                        {
+                            "id": "[parameters('networkInterfaces_wewvm01862_externalid')]"
+                        }
+                    ]
+                },
+                "diagnosticsProfile": {
+                    "bootDiagnostics": {
+                        "enabled": true
+                    }
+                }
+            }
+        }
+    ]
+}
