@@ -31,6 +31,7 @@ install:
 
 	dh_install conf/gs_cluster.json                          usr/griddb-$(GRIDDB_VER)/conf
 	dh_install conf/gs_node.json                             usr/griddb-$(GRIDDB_VER)/conf
+	dh_install conf/json_pretty.sh                           usr/griddb-$(GRIDDB_VER)/conf
 	dh_install conf/password                                 usr/griddb-$(GRIDDB_VER)/conf
 
 	dh_install 3rd_party/3rd_party.md                        usr/griddb-$(GRIDDB_VER)/3rd_party
