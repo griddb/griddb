@@ -186,10 +186,12 @@ struct FileLib {
 
 #ifdef _WIN32
 	static int64_t getUnixTime(const FILETIME &fileTime);
-	static FILETIME getFileTime(SYSTEMTIME &systemTime, bool asLocalTimeZone);
+	static FILETIME getFileTime(
+			SYSTEMTIME &systemTime, bool asLocalTimeZone, bool dstIgnored);
 	static FILETIME getFileTime(int64_t unixTime);
 	static SYSTEMTIME getSystemTime(
-			const FILETIME &fileTime, bool asLocalTimeZone);
+			const FILETIME &fileTime, bool asLocalTimeZone, bool dstIgnored);
+	static TIME_ZONE_INFORMATION getTimeZoneInformation(bool dstIgnored);
 #else
 	static int64_t getUnixTime(
 			tm &time, int32_t milliSecond, bool asLocalTimeZone);

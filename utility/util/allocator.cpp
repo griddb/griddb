@@ -18,6 +18,7 @@
 #include "util/allocator.h"
 
 #include <algorithm>
+#include <map>
 
 #if UTIL_ALLOCATOR_REPORTER_ENABLED
 #include <iostream>
@@ -25,7 +26,6 @@
 
 #if UTIL_ALLOCATOR_DIFF_REPORTER_ENABLED
 #include <vector>
-#include <map>
 #include <iostream>
 #include <cstring>
 #endif
@@ -42,6 +42,43 @@
 #endif
 
 namespace util {
+
+struct AllocatorManager::AllocatorMap {
+	typedef std::map<void*, AllocatorEntry> BaseMap;
+	typedef BaseMap::iterator Iterator;
+
+	Iterator begin() { return base_.begin(); }
+	Iterator end() { return base_.end(); }
+
+	void add(const AllocatorEntry &entry) {
+		base_.insert(std::make_pair(entry.allocator_, entry));
+	}
+
+	void remove(const AllocatorEntry &entry) {
+		base_.erase(entry.allocator_);
+	}
+
+	AllocatorEntry* find(void *alloc) {
+		Iterator it = base_.find(alloc);
+		if (it == base_.end()) {
+			return NULL;
+		}
+		return &it->second;
+	}
+
+	BaseMap base_;
+};
+
+struct AllocatorManager::GroupEntry {
+	GroupEntry();
+	~GroupEntry();
+
+	GroupId parentId_;
+	const char8_t *nameLiteral_;
+	AllocatorMap allocatorMap_;
+	AllocatorLimitter *totalLimitter_;
+	size_t limitList_[LIMIT_TYPE_END];
+};
 
 #if UTIL_ALLOCATOR_DIFF_REPORTER_ENABLED
 struct AllocatorDiffReporter::Body {
@@ -613,6 +650,78 @@ void AllocatorDiffReporter::ActivationState::compare(
 #endif 
 
 
+void AllocatorCleanUpHandler::bind(
+		AllocatorCleanUpHandler *&another, NoopMutex*) {
+	Mutex *mutex = NULL;
+	bind(another, mutex);
+}
+
+void AllocatorCleanUpHandler::bind(
+		AllocatorCleanUpHandler *&another, Mutex *mutex) {
+	if (prev_ != NULL || next_ != NULL || mutex_ != NULL) {
+		assert(false);
+		return;
+	}
+
+	if (another != NULL) {
+		assert(another->prev_ == &another);
+		another->prev_ = &next_;
+		next_ = another;
+	}
+
+	prev_ = &another;
+	another = this;
+
+	mutex_ = mutex;
+}
+
+void AllocatorCleanUpHandler::unbind() throw() {
+	if (prev_ == NULL) {
+		assert(next_ == NULL);
+		return;
+	}
+
+	try {
+		util::DynamicLockGuard<Mutex> guard(mutex_);
+		if (next_ != NULL) {
+			assert(next_->prev_ == &next_);
+			next_->prev_ = prev_;
+		}
+
+		*prev_ = next_;
+
+		prev_ = NULL;
+		next_ = NULL;
+		mutex_ = NULL;
+	}
+	catch (...) {
+		assert(false);
+	}
+}
+
+void AllocatorCleanUpHandler::cleanUpAll(
+		AllocatorCleanUpHandler *&handler) throw() {
+	for (AllocatorCleanUpHandler *it = handler; it != NULL;) {
+		AllocatorCleanUpHandler *next = it->next_;
+
+		(*it)();
+		it->unbind();
+
+		it = next;
+	}
+}
+
+AllocatorCleanUpHandler::AllocatorCleanUpHandler() :
+		prev_(NULL),
+		next_(NULL),
+		mutex_(NULL) {
+}
+
+AllocatorCleanUpHandler::~AllocatorCleanUpHandler() {
+	unbind();
+}
+
+
 AllocationErrorHandler *StackAllocator::defaultErrorHandler_ = NULL;
 
 #if !UTIL_ALLOCATOR_FORCE_ALLOCATOR_INFO
@@ -641,7 +750,8 @@ StackAllocator::StackAllocator(BaseAllocator &base) :
 }
 #endif
 
-StackAllocator::StackAllocator(const AllocatorInfo &info, BaseAllocator *base) :
+StackAllocator::StackAllocator(
+		const AllocatorInfo &info, BaseAllocator *base, const Option *option) :
 		restSize_(0),
 		end_(NULL),
 		base_(*base),
@@ -658,6 +768,8 @@ StackAllocator::StackAllocator(const AllocatorInfo &info, BaseAllocator *base) :
 		hugeCount_(0),
 		hugeSize_(0),
 		errorHandler_(NULL),
+		option_(resolveOption(base, option)),
+		smallCount_(0),
 		stats_(info),
 		limitter_(NULL) {
 	assert(base != NULL);
@@ -679,7 +791,14 @@ StackAllocator::~StackAllocator() {
 		for (BlockHead *&block = **cur; block != NULL;) {
 			BlockHead *prev = block->prev_;
 
-			if (block->blockSize_ == base_.getElementSize()) {
+			if (block->blockSize_ == option_.smallBlockSize_) {
+				StdAllocator<uint8_t, void> alloc(*option_.smallAlloc_);
+				void *addr = block;
+				alloc.deallocate(static_cast<uint8_t*>(addr), block->blockSize_);
+				assert(smallCount_ > 0);
+				smallCount_--;
+			}
+			else if (block->blockSize_ == base_.getElementSize()) {
 				base_.deallocate(block);
 			}
 			else {
@@ -715,7 +834,8 @@ void StackAllocator::trim() {
 			BlockHead *block = *cur;
 
 			if ((!hugeOnly && freeSize_ > freeSizeLimit_) ||
-					block->blockSize_ != base_.getElementSize()) {
+					(block->blockSize_ != option_.smallBlockSize_ &&
+					block->blockSize_ != base_.getElementSize())) {
 				adjusted = true;
 
 				assert(freeSize_ >= block->blockSize_);
@@ -726,7 +846,14 @@ void StackAllocator::trim() {
 
 				BlockHead *prev = block->prev_;
 
-				if (block->blockSize_ == base_.getElementSize()) {
+				if (block->blockSize_ == option_.smallBlockSize_) {
+					StdAllocator<uint8_t, void> alloc(*option_.smallAlloc_);
+					void *addr = block;
+					alloc.deallocate(static_cast<uint8_t*>(addr), block->blockSize_);
+					assert(smallCount_ > 0);
+					smallCount_--;
+				}
+				else if (block->blockSize_ == base_.getElementSize()) {
 					base_.deallocate(block);
 				}
 				else {
@@ -808,7 +935,8 @@ void* StackAllocator::allocateOverBlock(size_t size) {
 			assert(freeSize_ >= block->blockSize_);
 			freeSize_ -= block->blockSize_;
 
-			if (block->blockSize_ != base_.getElementSize()) {
+			if (block->blockSize_ != option_.smallBlockSize_ &&
+					block->blockSize_ != base_.getElementSize()) {
 				stats_.values_[AllocatorStats::STAT_CACHE_SIZE] -=
 						AllocatorStats::asStatValue(block->blockSize_);
 			}
@@ -838,7 +966,19 @@ void* StackAllocator::allocateOverBlock(size_t size) {
 					", freeSize=" << freeSize_ << ")");
 		}
 
-		if (minSize <= baseSize) {
+		const size_t smallSize = option_.smallBlockSize_;
+		if (minSize <= smallSize &&
+				smallCount_ < option_.smallBlockLimit_ &&
+				smallCount_ * smallSize == totalSize_) {
+			StdAllocator<uint8_t, void> alloc(*option_.smallAlloc_);
+			void *addr = alloc.allocate(smallSize);
+
+			newBlock = static_cast<BlockHead*>(addr);
+			newBlock->blockSize_ = smallSize;
+
+			smallCount_++;
+		}
+		else if (minSize <= baseSize) {
 			newBlock = static_cast<BlockHead*>(base_.allocate());
 			newBlock->blockSize_ = baseSize;
 		}
@@ -919,7 +1059,8 @@ void StackAllocator::pop(BlockHead *lastBlock, size_t lastRestSize) {
 		freeSize_ += topBlock_->blockSize_;
 		assert(freeSize_ <= totalSize_);
 
-		if (topBlock_->blockSize_ != base_.getElementSize()) {
+		if (topBlock_->blockSize_ != option_.smallBlockSize_ &&
+				topBlock_->blockSize_ != base_.getElementSize()) {
 			stats_.values_[AllocatorStats::STAT_CACHE_SIZE] +=
 					AllocatorStats::asStatValue(topBlock_->blockSize_);
 		}
@@ -981,6 +1122,38 @@ void StackAllocator::setLimit(AllocatorStats::Type type, AllocatorLimitter *limi
 	default:
 		break;
 	}
+}
+
+StackAllocator::Option StackAllocator::resolveOption(
+		BaseAllocator *base, const Option *option) {
+	do {
+		if (option == NULL ||
+				(option->smallAlloc_ == NULL &&
+				option->smallBlockSize_ == 0 &&
+				option->smallBlockLimit_ == 0)) {
+			break;
+		}
+
+		if (option->smallBlockSize_ < detail::AlignedSizeOf<BlockHead>::VALUE ||
+				option->smallBlockSize_ >= base->getElementSize() ||
+				option->smallBlockLimit_ <= 0 ||
+				option->smallAlloc_ == NULL) {
+			assert(false);
+			break;
+		}
+
+		return *option;
+	}
+	while (false);
+
+	return Option();
+}
+
+
+StackAllocator::Option::Option() :
+		smallAlloc_(NULL),
+		smallBlockSize_(0),
+		smallBlockLimit_(0) {
 }
 
 
@@ -1081,12 +1254,14 @@ void AllocatorManager::getGroupStats(
 			groupIt != groupList_.end_; ++groupIt) {
 		AllocatorStats groupStats;
 
-		for (AllocatorEntry *it = groupIt->allocatorList_.begin_;
-				it != groupIt->allocatorList_.end_; ++it) {
+		for (AllocatorMap::Iterator it = groupIt->allocatorMap_.begin();
+				it != groupIt->allocatorMap_.end(); ++it) {
 			AllocatorStats stats;
 			AccessorParams params;
 			params.stats_ = &stats;
-			(*it->accessor_)(it->allocator_, COMMAND_GET_STAT, params);
+
+			const AllocatorEntry &entry = it->second;
+			(entry.accessor_)(entry.allocator_, COMMAND_GET_STAT, params);
 
 			groupStats.merge(stats);
 		}
@@ -1148,9 +1323,9 @@ void AllocatorManager::setLimit(
 			continue;
 		}
 
-		TinyList<AllocatorEntry> &list = groupIt->allocatorList_;
-		for (AllocatorEntry *it = list.begin_; it != list.end_; ++it) {
-			applyAllocatorLimit(*it, limitType, *groupIt);
+		for (AllocatorMap::Iterator it = groupIt->allocatorMap_.begin();
+				it != groupIt->allocatorMap_.end(); ++it) {
+			applyAllocatorLimit(it->second, limitType, *groupIt);
 		}
 	}
 }
@@ -1218,6 +1393,88 @@ void AllocatorManager::applyAllocatorLimit(
 	(*entry.accessor_)(entry.allocator_, command, params);
 }
 
+bool AllocatorManager::addAllocatorDetail(
+		GroupId id, const AllocatorEntry &allocEntry) {
+	util::LockGuard<util::Mutex> guard(mutex_);
+
+	while (id >= groupList_.end_ - groupList_.begin_) {
+		groupList_.add(GroupEntry());
+	}
+
+	GroupEntry &groupEntry = groupList_.begin_[id];
+	if (findAllocatorEntry(groupEntry, allocEntry.allocator_) != NULL) {
+		assert(false);
+		return false;
+	}
+
+	addAllocatorEntry(groupEntry, allocEntry);
+	assert(findAllocatorEntry(groupEntry, allocEntry.allocator_) != NULL);
+
+	return true;
+}
+
+bool AllocatorManager::removeAllocatorDetail(GroupId id, void *alloc) throw() {
+	util::LockGuard<util::Mutex> guard(mutex_);
+
+	if (id >= groupList_.end_ - groupList_.begin_) {
+		assert(false);
+		return false;
+	}
+
+	GroupEntry &groupEntry = groupList_.begin_[id];
+	AllocatorEntry *entry = findAllocatorEntry(groupEntry, alloc);
+	if (entry == NULL) {
+		assert(false);
+		return false;
+	}
+
+	removeAllocatorEntry(groupEntry, *entry);
+	return true;
+}
+
+void AllocatorManager::listSubGroupDetail(
+		GroupId id, void *insertIt, GroupIdInsertFunc insertFunc,
+		bool recursive) {
+	util::LockGuard<util::Mutex> guard(mutex_);
+
+	for (GroupEntry *groupIt = groupList_.begin_;
+			groupIt != groupList_.end_; ++groupIt) {
+
+		const GroupId subId =
+				static_cast<GroupId>(groupIt - groupList_.begin_);
+		if (subId == id || !isDescendantOrSelf(id, subId)) {
+			continue;
+		}
+		else if (!recursive && groupList_.begin_[subId].parentId_ != id) {
+			continue;
+		}
+
+		insertFunc(insertIt, subId);
+	}
+}
+
+void AllocatorManager::getAllocatorStatsDetail(
+		const GroupId *idList, size_t idCount, void *insertIt,
+		StatsInsertFunc insertFunc) {
+	util::LockGuard<util::Mutex> guard(mutex_);
+
+	for (size_t i = 0; i < idCount; i++) {
+		GroupEntry &groupEntry = groupList_.begin_[idList[i]];
+
+		for (AllocatorMap::Iterator it = groupEntry.allocatorMap_.begin();
+				it != groupEntry.allocatorMap_.end(); ++it) {
+			AllocatorStats stats;
+			AccessorParams params;
+			params.stats_ = &stats;
+
+			const AllocatorEntry &entry = it->second;
+			(entry.accessor_)(entry.allocator_, COMMAND_GET_STAT, params);
+
+			insertFunc(insertIt, stats);
+		}
+	}
+}
+
 AllocatorManager::GroupEntry* AllocatorManager::getParentEntry(GroupId &id) {
 	if (id == GROUP_ID_ROOT) {
 		return NULL;
@@ -1239,15 +1496,18 @@ bool AllocatorManager::isDescendantOrSelf(GroupId id, GroupId subId) {
 }
 
 AllocatorManager::AllocatorEntry* AllocatorManager::findAllocatorEntry(
-		void *alloc, GroupEntry &groupEntry) {
-	for (AllocatorEntry *it = groupEntry.allocatorList_.begin_;
-			it != groupEntry.allocatorList_.end_; ++it) {
-		if (it->allocator_ == alloc) {
-			return it;
-		}
-	}
+		GroupEntry &groupEntry, void *alloc) {
+	return groupEntry.allocatorMap_.find(alloc);
+}
 
-	return NULL;
+void AllocatorManager::addAllocatorEntry(
+		GroupEntry &groupEntry, const AllocatorEntry &allocEntry) {
+	groupEntry.allocatorMap_.add(allocEntry);
+}
+
+void AllocatorManager::removeAllocatorEntry(
+		GroupEntry &groupEntry, const AllocatorEntry &allocEntry) {
+	groupEntry.allocatorMap_.remove(allocEntry);
 }
 
 #if UTIL_ALLOCATOR_DIFF_REPORTER_TRACE_ENABLED
@@ -1259,16 +1519,17 @@ void AllocatorManager::operateReporterSnapshots(
 	util::LockGuard<util::Mutex> guard(mutex_);
 
 	for (size_t i = 0; i < idCount; i++) {
-		const GroupEntry &entry = groupList_.begin_[idList[i]];
+		GroupEntry &groupEntry = groupList_.begin_[idList[i]];
 
-		for (AllocatorEntry *entryIt = entry.allocatorList_.begin_;
-				entryIt != entry.allocatorList_.end_; ++entryIt) {
+		for (AllocatorMap::Iterator it = groupEntry.allocatorMap_.begin();
+				it != groupEntry.allocatorMap_.end(); ++it) {
+			const AllocatorEntry &entry = it->second;
+
 			AllocatorStats stats;
 			{
 				AccessorParams params;
 				params.stats_ = &stats;
-				(*entryIt->accessor_)(
-						entryIt->allocator_, COMMAND_GET_STAT, params);
+				(entry.accessor_)(entry.allocator_, COMMAND_GET_STAT, params);
 			}
 
 			const char8_t *name = stats.info_.getName();
@@ -1281,7 +1542,7 @@ void AllocatorManager::operateReporterSnapshots(
 				params.size_ = snapshotId;
 				params.stats_ = &stats;
 				params.out_ = out;
-				(*entryIt->accessor_)(entryIt->allocator_, command, params);
+				(entry.accessor_)(entry.allocator_, command, params);
 			}
 		}
 	}

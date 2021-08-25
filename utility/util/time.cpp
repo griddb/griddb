@@ -93,21 +93,10 @@ TimeZone::TimeZone() :
 }
 
 TimeZone TimeZone::getLocalTimeZone(int64_t unixTimeMillis) {
-	DateTime modTime(unixTimeMillis);
-
-	DateTime::ZonedOption option;
-	DateTime::FieldData fieldData;
-
-	option.asLocalTimeZone_ = true;
-	modTime.getFields(fieldData, option);
-
-	option.asLocalTimeZone_ = false;
-	modTime.setFields(fieldData, option);
-
-	const int64_t modMillis = modTime.getUnixTime();
+	static_cast<void>(unixTimeMillis);
 
 	TimeZone zone;
-	zone.setOffsetMillis(modMillis - unixTimeMillis);
+	zone.setOffsetMillis(getLocalOffsetMillis());
 	return zone;
 }
 
@@ -257,6 +246,49 @@ bool TimeZone::parse(const char8_t *buf, size_t size, bool throwOnError) {
 	return false;
 }
 
+TimeZone::Offset TimeZone::getLocalOffsetMillis() {
+	static uint32_t absOffset = 0;
+	const int32_t diff = 24 * 60 * 60 * 1000;
+
+	if (absOffset == 0) {
+		const Offset base = detectLocalOffsetMillis();
+		assert(-diff < base && base < diff);
+		absOffset = static_cast<uint32_t>(base + diff);
+	}
+
+	return static_cast<Offset>(absOffset) - diff;
+}
+
+TimeZone::Offset TimeZone::detectLocalOffsetMillis() {
+	const int64_t localTimeMillis = 24 * 60 * 60 * 1000; 
+	const bool asLocalTimeZone = true;
+#ifdef _WIN32
+	const bool dstIgnored = true;
+	SYSTEMTIME time = FileLib::getSystemTime(
+			FileLib::getFileTime(localTimeMillis), false, dstIgnored);
+	const int64_t timeMillis = FileLib::getUnixTime(
+			FileLib::getFileTime(time, asLocalTimeZone, dstIgnored));
+#else
+	tm time = FileLib::getTM(localTimeMillis, false);
+	assert(time.tm_isdst == 0);
+	time.tm_yday = 0;
+	time.tm_wday = 0;
+	time.tm_isdst = 0;
+	const int32_t milliSecond = 0;
+	const int64_t timeMillis =
+			FileLib::getUnixTime(time, milliSecond, asLocalTimeZone);
+#endif
+
+	const Offset offset = localTimeMillis - timeMillis;
+	const Offset range = Constants::offsetMillisRange();
+	if (offset <= -range || range <= offset) {
+		UTIL_THROW_UTIL_ERROR(
+				CODE_INVALID_STATUS, "Unexpected time zone offset");
+	}
+
+	return offset;
+}
+
 
 inline TimeZone::Offset TimeZone::Constants::emptyOffsetMillis() {
 	return std::numeric_limits<Offset>::max();
@@ -301,13 +333,15 @@ void DateTime::getFields(
 		FieldData &fieldData, const ZonedOption &option) const {
 	checkUnixTimeBounds(unixTimeMillis_, option.baseOption_);
 
-	const bool asLocalTimeZone =
-			option.zone_.isEmpty() ? option.asLocalTimeZone_ : false;
+	const bool asLocalTimeZone = false;
 
 	int64_t offsetMillis = 0;
 	if (!option.zone_.isEmpty()) {
 		option.zone_.checkRange(true);
 		offsetMillis = option.zone_.getOffsetMillis();
+	}
+	else if (option.asLocalTimeZone_) {
+		offsetMillis = getLocalOffsetMillis();
 	}
 
 	bool biased = false;
@@ -321,8 +355,9 @@ void DateTime::getFields(
 	}
 
 #ifdef _WIN32
+	const bool dstIgnored = true;
 	SYSTEMTIME time = FileLib::getSystemTime(
-			FileLib::getFileTime(modTimeMillis), asLocalTimeZone);
+			FileLib::getFileTime(modTimeMillis), asLocalTimeZone, dstIgnored);
 	fieldData.year_ = static_cast<int32_t>(time.wYear);
 	fieldData.month_ = static_cast<int32_t>(time.wMonth);
 	fieldData.monthDay_ = static_cast<int32_t>(time.wDay);
@@ -463,12 +498,12 @@ void DateTime::setFields(
 		}
 	}
 
-	const bool asLocalTimeZone =
-			option.zone_.isEmpty() ? option.asLocalTimeZone_ : false;
+	const bool asLocalTimeZone = false;
 	const int32_t modMilliSecond =
 			option.baseOption_.trimMilliseconds_ ? 0 : fieldData.milliSecond_;
 
 #ifdef _WIN32
+	const bool dstIgnored = true;
 	SYSTEMTIME time;
 	time.wYear = static_cast<WORD>(year);
 	time.wMonth = static_cast<WORD>(month);
@@ -478,8 +513,8 @@ void DateTime::setFields(
 	time.wMinute = static_cast<WORD>(fieldData.minute_);
 	time.wSecond = static_cast<WORD>(fieldData.second_);
 	time.wMilliseconds = static_cast<WORD>(modMilliSecond);
-	const int64_t modTimeMillis =
-			FileLib::getUnixTime(FileLib::getFileTime(time, asLocalTimeZone));
+	const int64_t modTimeMillis = FileLib::getUnixTime(
+			FileLib::getFileTime(time, asLocalTimeZone, dstIgnored));
 #else
 	tm time;
 	time.tm_year = year - 1900;
@@ -498,6 +533,9 @@ void DateTime::setFields(
 	if (!option.zone_.isEmpty()) {
 		option.zone_.checkRange(true);
 		offsetMillis -= option.zone_.getOffsetMillis();
+	}
+	else if (option.asLocalTimeZone_) {
+		offsetMillis -= getLocalOffsetMillis();
 	}
 
 	const int64_t retMillis = modTimeMillis + offsetMillis;
@@ -1026,6 +1064,10 @@ DateTime DateTime::max(bool trimMilliseconds) {
 	Option option;
 	option.trimMilliseconds_ = trimMilliseconds;
 	return max(option);
+}
+
+TimeZone::Offset DateTime::getLocalOffsetMillis() {
+	return TimeZone::getLocalTimeZone(0).getOffsetMillis();
 }
 
 int64_t DateTime::getUnixTimeDays(

@@ -356,6 +356,31 @@ private:
 	ActivationState *state_;
 };
 
+class AllocatorCleanUpHandler {
+public:
+	void bind(AllocatorCleanUpHandler *&another, NoopMutex*);
+	void bind(AllocatorCleanUpHandler *&another, Mutex *mutex);
+
+	void unbind() throw();
+
+	static void cleanUpAll(AllocatorCleanUpHandler *&handler) throw();
+
+protected:
+	AllocatorCleanUpHandler();
+	virtual ~AllocatorCleanUpHandler() = 0;
+
+	virtual void operator()() throw() = 0;
+
+private:
+	AllocatorCleanUpHandler(const AllocatorCleanUpHandler&);
+	AllocatorCleanUpHandler& operator=(const AllocatorCleanUpHandler&);
+
+	AllocatorCleanUpHandler **prev_;
+	AllocatorCleanUpHandler *next_;
+
+	Mutex *mutex_;
+};
+
 /*!
 	@brief Allocates fixed size memory.
 */
@@ -381,6 +406,7 @@ public:
 	void setFreeElementLimit(size_t limit);
 
 	void setErrorHandler(AllocationErrorHandler *errorHandler);
+	void addCleanUpHandler(AllocatorCleanUpHandler &cleanUpHandler);
 
 	Mutex& getLock();
 
@@ -449,6 +475,8 @@ private:
 #if UTIL_ALLOCATOR_DIFF_REPORTER_TRACE_ENABLED
 	AllocatorDiffReporter::ActivationSaver activationSaver_;
 #endif
+
+	AllocatorCleanUpHandler *cleanUpHandler_;
 
 	AllocatorStats stats_;
 	AllocatorLimitter *limitter_;
@@ -591,6 +619,9 @@ inline void operator delete(void *p,
 
 namespace util {
 
+template<typename T, typename BaseAllocator>
+class StdAllocator;
+
 /*!
 	@brief Allocates memory, which can be freed at once according to the scop.
 */
@@ -601,6 +632,7 @@ class StackAllocator {
 public:
 	class Scope;
 	class ConfigScope;
+	struct Option;
 
 	typedef FixedSizeAllocator<Mutex> BaseAllocator;
 
@@ -608,7 +640,9 @@ public:
 	explicit StackAllocator(BaseAllocator &base);
 #endif
 
-	StackAllocator(const AllocatorInfo &info, BaseAllocator *base);
+	StackAllocator(
+			const AllocatorInfo &info, BaseAllocator *base,
+			const Option *option = NULL);
 
 	~StackAllocator();
 
@@ -644,6 +678,14 @@ public:
 	void setLimit(AllocatorStats::Type type, AllocatorLimitter *limitter);
 
 	BaseAllocator& base();
+
+	struct Option {
+		Option();
+
+		StdAllocator<void, void> *smallAlloc_;
+		size_t smallBlockSize_;
+		size_t smallBlockLimit_;
+	};
 
 	struct Tool {
 		static void forceReset(StackAllocator &alloc);
@@ -685,6 +727,7 @@ private:
 	void pop(BlockHead *lastBlock, size_t lastRestSize);
 
 	static void handleAllocationError(util::Exception &e);
+	static Option resolveOption(BaseAllocator *base, const Option *option);
 
 	static AllocationErrorHandler *defaultErrorHandler_;
 
@@ -707,6 +750,9 @@ private:
 
 	AllocationErrorHandler *errorHandler_;
 	UTIL_DETAIL_ALLOCATOR_DECLARE_REPORTER;
+
+	Option option_;
+	size_t smallCount_;
 
 	AllocatorStats stats_;
 	AllocatorLimitter *limitter_;
@@ -1197,9 +1243,11 @@ public:
 
 	template<typename U>
 	void deleteObject(U *object) {
-		util::StdAllocator<U, void> typed(*this);
-		typed.destroy(object);
-		typed.deallocate(object, 1);
+		if (object != NULL) {
+			util::StdAllocator<U, void> typed(*this);
+			typed.destroy(object);
+			typed.deallocate(object, 1);
+		}
 	}
 
 	struct EmptyConstructor {
@@ -1737,9 +1785,12 @@ private:
 	template<typename Alloc> struct Accessor;
 	struct AccessorParams;
 	struct AllocatorEntry;
+	struct AllocatorMap;
 	struct GroupEntry;
 
 	typedef void (AccessorFunc)(void*, Command, const AccessorParams&);
+	typedef void (GroupIdInsertFunc)(void*, const GroupId&);
+	typedef void (StatsInsertFunc)(void*, const AllocatorStats&);
 
 	template<typename T> struct TinyList {
 	public:
@@ -1764,10 +1815,29 @@ private:
 			AllocatorEntry &entry, LimitType limitType,
 			GroupEntry &groupEntry);
 
+	bool addAllocatorDetail(GroupId id, const AllocatorEntry &allocEntry);
+	bool removeAllocatorDetail(GroupId id, void *alloc) throw();
+	void listSubGroupDetail(
+			GroupId id, void *insertIt, GroupIdInsertFunc insertFunc,
+			bool recursive);
+	void getAllocatorStatsDetail(
+			const GroupId *idList, size_t idCount, void *insertIt,
+			StatsInsertFunc insertFunc);
+
 	GroupEntry* getParentEntry(GroupId &id);
 	bool isDescendantOrSelf(GroupId id, GroupId subId);
 
-	AllocatorEntry *findAllocatorEntry(void *alloc, GroupEntry &groupEntry);
+	static AllocatorEntry* findAllocatorEntry(
+			GroupEntry &groupEntry, void *alloc);
+	static void addAllocatorEntry(
+			GroupEntry &groupEntry, const AllocatorEntry &allocEntry);
+	static void removeAllocatorEntry(
+			GroupEntry &groupEntry, const AllocatorEntry &allocEntry);
+
+	template<typename InsertIterator>
+	static void insertGroupId(void *insertIt, const GroupId &id);
+	template<typename InsertIterator>
+	static void insertStats(void *insertIt, const AllocatorStats &stats);
 
 #if UTIL_ALLOCATOR_DIFF_REPORTER_TRACE_ENABLED
 	void operateReporterSnapshots(
@@ -1811,17 +1881,6 @@ struct AllocatorManager::AllocatorEntry {
 
 	void *allocator_;
 	AccessorFunc *accessor_;
-};
-
-struct AllocatorManager::GroupEntry {
-	GroupEntry();
-	~GroupEntry();
-
-	GroupId parentId_;
-	const char8_t *nameLiteral_;
-	TinyList<AllocatorEntry> allocatorList_;
-	AllocatorLimitter *totalLimitter_;
-	size_t limitList_[LIMIT_TYPE_END];
 };
 
 namespace detail {
@@ -2222,6 +2281,7 @@ inline FixedSizeAllocator<Mutex>::FixedSizeAllocator(
 		freeLink_(NULL),
 		totalElementCount_(0),
 		freeElementCount_(0),
+		cleanUpHandler_(NULL),
 		stats_(AllocatorInfo()),
 		limitter_(NULL) {
 	assert(elementSize > 0);
@@ -2246,6 +2306,7 @@ inline FixedSizeAllocator<Mutex>::FixedSizeAllocator(
 		freeLink_(NULL),
 		totalElementCount_(0),
 		freeElementCount_(0),
+		cleanUpHandler_(NULL),
 		stats_(info),
 		limitter_(NULL) {
 	assert(elementSize > 0);
@@ -2255,6 +2316,8 @@ inline FixedSizeAllocator<Mutex>::FixedSizeAllocator(
 
 template<typename Mutex>
 inline FixedSizeAllocator<Mutex>::~FixedSizeAllocator() {
+	AllocatorCleanUpHandler::cleanUpAll(cleanUpHandler_);
+
 #if UTIL_ALLOCATOR_REPORTER_ENABLED2
 	std::map<void*, std::string>::iterator it = stackTraceMap_.begin();
 	for (;it != stackTraceMap_.end(); it++) {
@@ -2370,6 +2433,13 @@ template<typename Mutex>
 inline void FixedSizeAllocator<Mutex>::setErrorHandler(
 		AllocationErrorHandler *errorHandler) {
 	errorHandler_ = &errorHandler;
+}
+
+template<typename Mutex>
+void FixedSizeAllocator<Mutex>::addCleanUpHandler(
+		AllocatorCleanUpHandler &cleanUpHandler) {
+	LockGuard<Mutex> guard(mutex_);
+	cleanUpHandler.bind(cleanUpHandler_, &mutex_);
 }
 
 template<typename Mutex>
@@ -3437,26 +3507,10 @@ inline detail::LocalUniquePtrBuilder LocalUniquePtr<T>::toBuilder(T *ptr) {
 
 template<typename Alloc>
 inline bool AllocatorManager::addAllocator(GroupId id, Alloc &alloc) {
-	util::LockGuard<util::Mutex> guard(mutex_);
-
-	while (id >= groupList_.end_ - groupList_.begin_) {
-		groupList_.add(GroupEntry());
-	}
-
-	GroupEntry &groupEntry = groupList_.begin_[id];
-	if (findAllocatorEntry(&alloc, groupEntry) != NULL) {
-		assert(false);
-		return false;
-	}
-
 	AllocatorEntry entry;
 	entry.allocator_ = &alloc;
 	entry.accessor_ = &Accessor<Alloc>::access;
-	groupEntry.allocatorList_.add(entry);
-
-	assert(findAllocatorEntry(&alloc, groupEntry) != NULL);
-
-	return true;
+	return addAllocatorDetail(id, entry);
 }
 
 template<typename Alloc>
@@ -3468,22 +3522,7 @@ inline bool AllocatorManager::addAllocator(
 template<typename Alloc>
 inline bool AllocatorManager::removeAllocator(
 		GroupId id, Alloc &alloc) throw() {
-	util::LockGuard<util::Mutex> guard(mutex_);
-
-	if (id >= groupList_.end_ - groupList_.begin_) {
-		assert(false);
-		return false;
-	}
-
-	GroupEntry &groupEntry = groupList_.begin_[id];
-	AllocatorEntry *entry = findAllocatorEntry(&alloc, groupEntry);
-	if (entry == NULL) {
-		assert(false);
-		return false;
-	}
-
-	groupEntry.allocatorList_.remove(entry);
-	return true;
+	return removeAllocatorDetail(id, &alloc);
 }
 
 template<typename Alloc>
@@ -3495,42 +3534,25 @@ inline bool AllocatorManager::removeAllocator(
 template<typename InsertIterator>
 inline void AllocatorManager::listSubGroup(
 		GroupId id, InsertIterator it, bool recursive) {
-	util::LockGuard<util::Mutex> guard(mutex_);
-
-	for (GroupEntry *groupIt = groupList_.begin_;
-			groupIt != groupList_.end_; ++groupIt) {
-
-		const GroupId subId =
-				static_cast<GroupId>(groupIt - groupList_.begin_);
-		if (subId == id || !isDescendantOrSelf(id, subId)) {
-			continue;
-		}
-		else if (!recursive && groupList_.begin_[subId].parentId_ != id) {
-			continue;
-		}
-
-		*it++ = subId;
-	}
+	listSubGroupDetail(id, &it, &insertGroupId<InsertIterator>, recursive);
 }
 
 template<typename InsertIterator>
-void AllocatorManager::getAllocatorStats(
+inline void AllocatorManager::getAllocatorStats(
 		const GroupId *idList, size_t idCount, InsertIterator it) {
-	util::LockGuard<util::Mutex> guard(mutex_);
+	getAllocatorStatsDetail(
+			idList, idCount, &it, &insertStats<InsertIterator>);
+}
 
-	for (size_t i = 0; i < idCount; i++) {
-		const GroupEntry &entry = groupList_.begin_[idList[i]];
+template<typename InsertIterator>
+void AllocatorManager::insertGroupId(void *insertIt, const GroupId &id) {
+	*(*static_cast<InsertIterator*>(insertIt))++ = id;
+}
 
-		for (AllocatorEntry *entryIt = entry.allocatorList_.begin_;
-				entryIt != entry.allocatorList_.end_; ++entryIt) {
-			AllocatorStats stats;
-			AccessorParams params;
-			params.stats_ = &stats;
-			(*entryIt->accessor_)(
-					entryIt->allocator_, COMMAND_GET_STAT, params);
-			*it++ = stats;
-		}
-	}
+template<typename InsertIterator>
+void AllocatorManager::insertStats(
+		void *insertIt, const AllocatorStats &stats) {
+	*(*static_cast<InsertIterator*>(insertIt))++ = stats;
 }
 
 template<typename Alloc>
