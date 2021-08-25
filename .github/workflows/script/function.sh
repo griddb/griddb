@@ -135,7 +135,7 @@ config_griddb() {
     local password=$2
     local cluster_name=$3
     su -l gsadm -c "gs_passwd $username -p $password"
-    su -l gsadm -c "sed -i 's/\"clusterName\":\"\"/\"clusterName\":\"$cluster_name\"/g' /var/lib/gridstore/conf/gs_cluster.json"
+    su -l gsadm -c "sed -i 's/\"clusterName\":\"myCluster\"/\"clusterName\":\"$cluster_name\"/g' /var/lib/gridstore/conf/gs_cluster.json"
 }
 
 # Start and run griddb server
