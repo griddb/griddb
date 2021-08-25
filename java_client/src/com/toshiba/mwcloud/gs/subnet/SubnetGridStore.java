@@ -3829,21 +3829,30 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 			return map;
 		}
 
-		
+		List<UserInfo> list = new LinkedList<UserInfo>();
 		for (int i = 0; i < userInfoCount; i++) {
 
 			String userName = resp.getString();		
 			Byte property = resp.base().get();		
 			Boolean passwordExist = resp.getBoolean();	
+			String tmp = resp.getString();
 			String hashPassword = "";
 
 			if (passwordExist) {
-				hashPassword = resp.getString();
+				hashPassword = tmp;
 			}
-
-			map.put(userName, new UserInfo(userName, hashPassword, (Boolean)(property != 0)));
+			list.add(new UserInfo(userName, hashPassword, (Boolean)(property != 0), false, ""));
 		}
-
+		for (int i = 0; i < userInfoCount; i++) {
+			Boolean isGroupMapping = resp.getBoolean();
+			String roleName = resp.getString();
+			
+			if (list.get(i).getName().length() > 0) {
+				map.put(list.get(i).getName(), new UserInfo(list.get(i).getName(), list.get(i).getHashPassword(), list.get(i).isSuperUser(), isGroupMapping, roleName));
+			} else {
+				map.put(roleName, new UserInfo(list.get(i).getName(), list.get(i).getHashPassword(), list.get(i).isSuperUser(), isGroupMapping, roleName));
+			}
+		}
 		return map;
 	}
 
@@ -3925,7 +3934,9 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 
 		channel.setupRequestBuffer(req);
 
-		NodeConnection.tryPutEmptyOptionalRequest(req);
+		OptionalRequest opt = new OptionalRequest();
+		opt.putAcceptableFeatureVersion(FeatureVersion.V4_5);
+		opt.format(req);
 
 		final int partitionId = SYSTEM_USER_PARTITION_ID;
 
@@ -3947,7 +3958,9 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 
 		channel.setupRequestBuffer(req);
 
-		NodeConnection.tryPutEmptyOptionalRequest(req);
+		OptionalRequest opt = new OptionalRequest();
+		opt.putAcceptableFeatureVersion(FeatureVersion.V4_5);
+		opt.format(req);
 
 		final int partitionId = SYSTEM_USER_PARTITION_ID;
 
@@ -4162,7 +4175,7 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		channel.setupRequestBuffer(req);
 
 		OptionalRequest opt = new OptionalRequest();
-		opt.putAcceptableFeatureVersion(FeatureVersion.V4_3);
+		opt.putAcceptableFeatureVersion(FeatureVersion.V4_5);
 		opt.format(req);
 
 		final int partitionId = SYSTEM_USER_PARTITION_ID;
@@ -4187,7 +4200,7 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		channel.setupRequestBuffer(req);
 
 		OptionalRequest opt = new OptionalRequest();
-		opt.putAcceptableFeatureVersion(FeatureVersion.V4_3);
+		opt.putAcceptableFeatureVersion(FeatureVersion.V4_5);
 		opt.format(req);
 
 		final int partitionId = SYSTEM_USER_PARTITION_ID;
