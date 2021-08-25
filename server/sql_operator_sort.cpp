@@ -18,6 +18,8 @@
 #include "sql_operator_sort.h"
 #include "sql_operator_utils.h"
 
+
+
 const SQLOps::OpRegistrar
 SQLSortOps::Registrar::REGISTRAR_INSTANCE((Registrar()));
 
@@ -48,6 +50,12 @@ void SQLSortOps::Sort::compile(OpContext &cxt) const {
 	if (code.findMiddleKeyColumnList() == NULL) {
 		code.setMiddleKeyColumnList(&code.getKeyColumnList());
 	}
+
+	code.setKeyColumnList(&SQLExprs::ExprRewriter::reduceDuplicateCompColumns(
+			cxt.getAllocator(), code.getKeyColumnList()));
+	code.setMiddleKeyColumnList(
+			&SQLExprs::ExprRewriter::reduceDuplicateCompColumns(
+					cxt.getAllocator(), code.getMiddleKeyColumnList()));
 
 	int64_t localLimit = -1;
 	do {
@@ -120,6 +128,12 @@ SQLOps::Projection& SQLSortOps::Sort::createSubLimitedProjection(
 	if (limit == 1) {
 		const bool unique = (offset < 0);
 		const bool singleKeyUnique = (offset <= 0 && keyList.size() <= 1);
+		if (singleKeyUnique) {
+			code.setMiddleKeyColumnList(&toSubLimitedKeyList(
+					builder, code.getMiddleKeyColumnList()));
+			code.setKeyColumnList(&toSubLimitedKeyList(
+					builder, code.getKeyColumnList()));
+		}
 		if (unique || singleKeyUnique) {
 			return src;
 		}
@@ -146,9 +160,27 @@ SQLOps::Projection& SQLSortOps::Sort::createSubLimitedProjection(
 	return dest;
 }
 
+const SQLValues::CompColumnList& SQLSortOps::Sort::toSubLimitedKeyList(
+		SQLOps::OpCodeBuilder &builder, const SQLValues::CompColumnList &src) {
+	if (src.empty() || !src.front().isOrdering()) {
+		return src;
+	}
+
+	SQLValues::CompColumnList &dest = builder.createCompColumnList();
+	for (SQLValues::CompColumnList::const_iterator it = src.begin();
+			it != src.end(); ++it) {
+		SQLValues::CompColumn column = *it;
+		column.setOrdering(false);
+		dest.push_back(column);
+	}
+
+	return dest;
+}
+
 
 void SQLSortOps::SortNway::compile(OpContext &cxt) const {
 	cxt.setAllInputSourceType(SQLExprs::ExprCode::INPUT_MULTI_STAGE);
+	cxt.setReaderRandomAccess(0);
 
 	Operator::compile(cxt);
 }
@@ -169,31 +201,41 @@ void SQLSortOps::SortNway::execute(OpContext &cxt) const {
 }
 
 bool SQLSortOps::SortNway::partialSort(SortContext &cxt) const {
+	const uint32_t inIndex = 0;
+	if (!checkSorterBuilding(cxt, inIndex)) {
+		return false;
+	}
+
 	const SQLValues::CompColumnList &keyColumnList =
 			getCode().getMiddleKeyColumnList();
 
-	TupleSorter &sorter = prepareSorter(cxt, keyColumnList);
-	if (!cxt.sorterFilled_) {
-		TupleListReader &reader = cxt.getBase().getReader(0);
-		if (!checkSorterBuilding(cxt, sorter, reader)) {
-			return false;
+	TupleListReader &reader = cxt.getBase().getReader(inIndex);
+	TupleSorter &sorter = prepareSorter(cxt, keyColumnList, reader);
+	if (!cxt.sorterEntry_->filled_) {
+		if (!isKeyEmpty(sorter)) {
+			cxt.getBase().keepReaderLatch(0);
+			if (reader.exists()) {
+				SQLValues::ValueUtils::updateKeepInfo(reader);
+			}
+		}
+
+		ProjectionRefPair projectionPair;
+		if (isGrouping(false, false)) {
+			prepareSortProjection(cxt, true);
+			projectionPair = findProjection(false, false);
 		}
 
 		SorterBuilder builder(
-				cxt, sorter, reader, keyColumnList, isKeyFiltering());
-		while (!builder.build()) {
-			if (!builder.isInterruptible()) {
-				if (!cxt.getBase().isAllInputCompleted()) {
-					return false;
-				}
-				break;
-			}
-			cxt.getBase().checkSuspendedAlways();
-			if (!checkMemoryLimitReached(cxt, reader)) {
+				cxt, sorter, reader, keyColumnList, isKeyFiltering(),
+				projectionPair.first, projectionPair.second);
+		while (!builder.build(cxt)) {
+			cxt.getBase().checkSuspendedAlways(false);
+			cxt.getBase().resetNextCountForSuspend();
+			if (checkMemoryLimitReached(cxt, reader)) {
 				break;
 			}
 		}
-		cxt.sorterFilled_ = true;
+		cxt.sorterEntry_->filled_ = true;
 	}
 
 	while (!sorter.isSorted()) {
@@ -210,25 +252,19 @@ bool SQLSortOps::SortNway::partialSort(SortContext &cxt) const {
 
 	for (size_t i = 0; i < 2; i++) {
 		const bool primary = isPrimaryWorking(i, keyColumnList);
-		if (sorter.isEmptyAt(primary)) {
-			continue;
-		}
 
 		const ProjectionRefPair &projectionPair =
 				prepareSortProjection(cxt, primary);
 
+		const bool unique = (isUnique() || isGrouping(false, false));
 		SorterWriter writer(
-				cxt.getBase(), sorter, *projectionPair.first, keyColumnList,
-				primary);
+				cxt, sorter, *projectionPair.first, keyColumnList,
+				primary, unique);
 		writer.write();
 	}
 
-	sorter.clear();
-
-	cxt.tupleSet1_.clearAll();
-	cxt.tupleSet2_.clearAll();
-	cxt.totalTupleSet_.clearAll();
-	cxt.sorterFilled_ = false;
+	cxt.getBase().releaseReaderLatch(0);
+	cxt.sorterEntry_.reset();
 	return true;
 }
 
@@ -264,7 +300,7 @@ bool SQLSortOps::SortNway::sortMerge(SortContext &cxt) const {
 				continuable = sortMergeDetail(cxt, queue, writer);
 			}
 			else {
-				MergeAction<true, false> action(cxt, writer);
+				MergeAction<true, false, false> action(cxt, writer);
 				continuable = queue.merge(action);
 			}
 		}
@@ -287,19 +323,14 @@ bool SQLSortOps::SortNway::sortMerge(SortContext &cxt) const {
 }
 
 bool SQLSortOps::SortNway::nextStage(SortContext &cxt) const {
-	cxt.getBase().setReaderRandomAccess(0);
-
 	const bool topCompleted =
-			(cxt.getBase().isAllInputCompleted() &&
+			(cxt.readerAccessible_ &&
+			cxt.getBase().isAllInputCompleted() &&
 			!cxt.getBase().getReader(0).exists() &&
-			cxt.sorter_ != NULL &&
-			(cxt.sorter_->isSorted() || cxt.sorter_->isEmpty()));
+			cxt.sorterEntry_.get() == NULL);
 
-	if (topCompleted) {
-		cxt.getBase().releaseReaderLatch(0);
-	}
-
-	if (isSorting(cxt) && !cxt.sorter_->isEmpty()) {
+	if (isSorting(cxt) && cxt.sorterEntry_.get() != NULL &&
+			!cxt.sorterEntry_->sorter_->isEmpty()) {
 		return true;
 	}
 
@@ -345,38 +376,63 @@ bool SQLSortOps::SortNway::nextStage(SortContext &cxt) const {
 	if (cxt.stageList_.empty()) {
 		cxt.stageList_.push_back(SortStage(cxt.baseCxt_->getAllocator()));
 	}
-	cxt.stageList_[0].push_back(SortStageElement());
 	cxt.workingDepth_ = std::numeric_limits<uint32_t>::max();
 
-	cxt.getBase().keepReaderLatch(0);
 	cxt.workingRestLimit_ = -1;
 	return true;
 }
 
 SQLSortOps::TupleSorter& SQLSortOps::SortNway::prepareSorter(
-		SortContext &cxt,
-		const SQLValues::CompColumnList &keyColumnList) const {
+		SortContext &cxt, const SQLValues::CompColumnList &keyColumnList,
+		TupleListReader &reader) const {
 	do {
 		if (isSorting(cxt)) {
 			break;
 		}
 		cxt.workingDepth_ = 0;
+		cxt.stageList_[0].push_back(SortStageElement());
 
-		if (cxt.sorter_ != NULL) {
+		if (cxt.sorterEntry_.get() != NULL) {
 			break;
 		}
 
 		util::StackAllocator &alloc = cxt.getAllocator();
+		SQLValues::VarContext &varCxt = cxt.getBase().getVarContext();
+		SQLValues::ValueProfile *profile = cxt.getBase().getValueProfile();
+
+		const bool unique = (isUnique() || isGrouping(false, false));
+		const int64_t hashSizeBase = cxt.initialTupleCout_;
+		cxt.sorterEntry_ = UTIL_MAKE_LOCAL_UNIQUE(
+				cxt.sorterEntry_, SorterEntry,
+				cxt.getBase(), getSorterCapacity(alloc),
+				isHashAvailable(keyColumnList, unique),
+				hashSizeBase, reader);
 
 		const Projection *aggrProj = OpCodeBuilder::findAggregationProjection(
 				*getCode().getMiddleProjection());
 
+		cxt.nullChecker_ = UTIL_MAKE_LOCAL_UNIQUE(
+				cxt.nullChecker_, TupleNullChecker,
+				createSorterNullChecker(
+						alloc, keyColumnList, cxt.nullCheckerKeys_));
+
 		for (size_t i = 0; i < 2; i++) {
 			const bool primary = (i == 0);
-			SummaryTupleSet &tupleSet = cxt.getSummaryTupleSet(primary);
+
+			util::LocalUniquePtr<TupleDigester> &digester =
+					cxt.getDigester(primary);
+			digester = UTIL_MAKE_LOCAL_UNIQUE(
+					digester, TupleDigester,
+					createSorterDigester(
+							alloc, varCxt, keyColumnList, *cxt.nullChecker_,
+							unique, primary, profile));
+
+			SummaryTupleSet &tupleSet =
+					cxt.sorterEntry_->getSummaryTupleSet(primary);
 
 			tupleSet.addReaderColumnList(cxt.getBase().getInputColumnList(0));
-			tupleSet.addKeyList(keyColumnList, true);
+			tupleSet.addKeyList(
+					keyColumnList, true, digester->getBase().isRotating());
 			if (aggrProj != NULL) {
 				OpCodeBuilder::applyAggregationColumns(*aggrProj, tupleSet);
 			}
@@ -393,36 +449,31 @@ SQLSortOps::TupleSorter& SQLSortOps::SortNway::prepareSorter(
 			tupleSet.applyKeyList(subKeyColumnList, NULL);
 		}
 
-		std::pair<TupleLess, TupleLess> predPair(
+		const std::pair<TupleLess, TupleLess> predPair(
 				TupleLess(alloc, SQLValues::TupleComparator(
-						cxt.keyColumnList1_, true, true, true)),
+						cxt.keyColumnList1_, &varCxt, true, true, true), profile),
 				TupleLess(alloc, SQLValues::TupleComparator(
-						cxt.keyColumnList2_, true, true, false)));
+						cxt.keyColumnList2_, &varCxt, true, true, false), profile));
 
-		TupleSorter *sorter = ALLOC_NEW(alloc) TupleSorter(
-				getSorterCapacity(alloc),
-				predPair.first, predPair.second, alloc);
-		sorter->setPredicateEmpty(true, predPair.first.getBase().isEmpty(0));
-		sorter->setPredicateEmpty(false, predPair.second.getBase().isEmpty(1));
+		TupleSorter &sorter = cxt.sorterEntry_->resolveSorter(predPair);
+		sorter.setPredicateEmpty(true, isPredicateEmpty(
+				cxt, predPair.first.getBase(), keyColumnList, true));
+		sorter.setPredicateEmpty(false, isPredicateEmpty(
+				cxt, predPair.first.getBase(), keyColumnList, false));
 
 		SQLAlgorithmUtils::SortConfig config;
 
 		assert(getCode().getOffset() <= 0);
 		config.limit_ = getCode().getLimit();
+		config.unique_ = unique;
 
-		if (isUnique() || isGrouping(false, false)) {
-			config.unique_ = true;
-		}
-
-		sorter->setConfig(config);
-
-		cxt.sorter_ = sorter;
+		sorter.setConfig(config);
 	}
 	while (false);
 
 	assert(isSorting(cxt));
-	assert(cxt.sorter_ != NULL);
-	return *cxt.sorter_;
+	assert(cxt.sorterEntry_.get() != NULL);
+	return *cxt.sorterEntry_->sorter_;
 }
 
 SQLSortOps::TupleHeapQueue SQLSortOps::SortNway::createHeapQueue(
@@ -437,12 +488,22 @@ SQLSortOps::TupleHeapQueue SQLSortOps::SortNway::createHeapQueue(
 	const bool nullIgnorable = primary;
 	TupleGreater pred(
 			alloc,
-			SQLValues::TupleComparator(keyColumnList, true, true, nullIgnorable));
-	TupleHeapQueue queue(pred, alloc);
-	queue.setPredicateEmpty(pred.getBase().isEmpty((primary ? 0 : 1)));
+			SQLValues::TupleComparator(
+					keyColumnList, &cxt.getBase().getVarContext(),
+					true, true, nullIgnorable),
+			cxt.getBase().getValueProfile());
 
+	TupleHeapQueue queue(pred, alloc);
+	queue.setPredicateEmpty(
+			isPredicateEmpty(cxt, pred.getBase(), keyColumnList, primary));
+
+	const bool rotating = (isUnique() || isGrouping(false, false));
 	TupleDigester digester(
-			alloc, SQLValues::TupleDigester(keyColumnList, NULL, nullIgnorable));
+			alloc,
+			SQLValues::TupleDigester(
+					keyColumnList, &cxt.getBase().getVarContext(),
+					NULL, rotating, nullIgnorable, false),
+			cxt.getBase().getValueProfile());
 
 	const bool finalStage = isFinalStage(cxt);
 	const bool duplicateGroupMerging =
@@ -488,6 +549,62 @@ SQLSortOps::TupleHeapQueue SQLSortOps::SortNway::createHeapQueue(
 	return queue;
 }
 
+SQLSortOps::TupleNullChecker
+SQLSortOps::SortNway::createSorterNullChecker(
+		util::StackAllocator &alloc,
+		const SQLValues::CompColumnList &totalKeys,
+		SQLValues::CompColumnList &nullCheckerKeys) {
+	nullCheckerKeys = totalKeys;
+
+	if (SQLValues::TupleDigester::isOrderingAvailable(
+			nullCheckerKeys, false) && nullCheckerKeys.size() > 1) {
+		nullCheckerKeys.erase(
+				nullCheckerKeys.begin() + 1, nullCheckerKeys.end());
+	}
+
+	return TupleNullChecker(
+			alloc, SQLValues::TupleNullChecker(nullCheckerKeys));
+}
+
+SQLSortOps::TupleDigester SQLSortOps::SortNway::createSorterDigester(
+		util::StackAllocator &alloc, SQLValues::VarContext &varCxt,
+		const SQLValues::CompColumnList &keyColumnList,
+		const TupleNullChecker &nullChecker, bool unique, bool primary,
+		SQLValues::ValueProfile *profile) {
+	const bool rotationAllowed = unique;
+	const bool nullableAlways = (primary && !nullChecker.getBase().isEmpty());
+	TupleDigester digester(
+			alloc,
+			SQLValues::TupleDigester(
+					keyColumnList, &varCxt,
+					NULL, rotationAllowed, primary, nullableAlways),
+			profile);
+	return digester;
+}
+
+bool SQLSortOps::SortNway::isHashAvailable(
+		const SQLValues::CompColumnList &keyColumnList, bool unique) {
+	if (!unique) {
+		return false;
+	}
+
+	const bool rotationAllowed = unique;
+	const SQLValues::TupleDigester digester(
+			keyColumnList, NULL, NULL, rotationAllowed, false, false);
+	return (!digester.isOrdering() || digester.isRotating());
+}
+
+bool SQLSortOps::SortNway::isPredicateEmpty(
+		SortContext &cxt, const SQLValues::TupleComparator &basePred,
+		const SQLValues::CompColumnList &keyColumnList, bool primary) {
+	size_t startIndex = 0;
+	if (!primary && (cxt.getDigester(primary)->getBase().isOrdering() ||
+			keyColumnList.size() <= 1)) {
+		startIndex = 1;
+	}
+	return basePred.isEmpty(startIndex);
+}
+
 bool SQLSortOps::SortNway::isMergeCompleted(SortContext &cxt) const {
 	assert(isMerging(cxt));
 	SortStage &stage = cxt.stageList_[cxt.workingDepth_ - 1];
@@ -529,7 +646,8 @@ SQLOpUtils::ProjectionRefPair SQLSortOps::SortNway::prepareSortProjection(
 	exprCxt.setInputSourceType(0, SQLExprs::ExprCode::INPUT_SUMMARY_TUPLE);
 
 	exprCxt.setAggregationTupleRef(
-			&cxt.getSummaryTupleSet(primary), exprCxt.getSummaryTupleRef(0));
+			&cxt.sorterEntry_->getSummaryTupleSet(primary),
+			exprCxt.getSummaryTupleRef(0));
 
 	return projectionPair;
 }
@@ -631,6 +749,15 @@ bool SQLSortOps::SortNway::isUnique() const {
 bool SQLSortOps::SortNway::isKeyFiltering() const {
 	const SQLOps::Projection *proj = getCode().getMiddleProjection();
 	return (proj->getProjectionCode().getType() == SQLOpTypes::PROJ_KEY_FILTER);
+}
+
+bool SQLSortOps::SortNway::isKeyEmpty(TupleSorter &sorter) const {
+	return isKeyEmpty(sorter, isKeyFiltering());
+}
+
+bool SQLSortOps::SortNway::isKeyEmpty(
+		TupleSorter &sorter, bool keyFiltering) {
+	return (keyFiltering && sorter.isEmptyPredicateAt(true));
 }
 
 void SQLSortOps::SortNway::updateProjections(
@@ -771,31 +898,46 @@ SQLSortOps::SortContext& SQLSortOps::SortNway::getSortContext(
 }
 
 bool SQLSortOps::SortNway::checkSorterBuilding(
-		SortContext &cxt, TupleSorter &sorter,
-		TupleListReader &reader) const {
+		SortContext &cxt, uint32_t inIndex) const {
 	do {
-		if (!sorter.isEmpty() || cxt.getBase().isAllInputCompleted()) {
+		if (cxt.sorterEntry_.get() != NULL || cxt.getBase().isAllInputCompleted()) {
 			break;
+		}
+
+		TupleListReader *reader = NULL;
+		if (cxt.readerAccessible_) {
+			reader = &cxt.getBase().getReader(inIndex);
+			if (!reader->exists() && !cxt.getBase().isAllInputCompleted()) {
+				return false;
+			}
 		}
 
 		const int64_t memLimit = OpConfig::resolve(
 				SQLOpTypes::CONF_WORK_MEMORY_LIMIT, getCode().getConfig());
 
+		const uint64_t readableBlockCount = (reader == NULL ?
+				cxt.getBase().getInputBlockCount(inIndex) :
+				reader->getFollowingBlockCount());
 		const uint64_t readableSize =
-				reader.getTupleList().getInfo().blockSize_ *
-				reader.getFollowingBlockCount();
+				cxt.getBase().getInputBlockSize(inIndex) * readableBlockCount;
 
 		if (memLimit < 0 || readableSize >= static_cast<uint64_t>(memLimit)) {
 			break;
 		}
 
-		cxt.getBase().releaseReaderLatch(0);
 		return false;
 	}
 	while (false);
 
+	if (!cxt.readerAccessible_) {
+		const bool unique = (isUnique() || isGrouping(false, false));
+		if (unique && cxt.getBase().isAllInputCompleted()) {
+			cxt.initialTupleCout_ = static_cast<int64_t>(
+					cxt.getBase().getInputTupleCount(inIndex));
+		}
+		cxt.readerAccessible_ = true;
+	}
 
-	cxt.getBase().keepReaderLatch(0);
 	return true;
 }
 
@@ -804,53 +946,65 @@ bool SQLSortOps::SortNway::checkMemoryLimitReached(
 	const int64_t memLimit = OpConfig::resolve(
 			SQLOpTypes::CONF_WORK_MEMORY_LIMIT, getCode().getConfig());
 
+	const uint64_t prevRefBlocks =
+			cxt.sorterEntry_->initialReferencingBlockCount_;
+	const uint64_t curRefBlocks = reader.getReferencingBlockCount();
+	assert(curRefBlocks >= prevRefBlocks);
+
 	const uint64_t latchSize =
 			reader.getTupleList().getInfo().blockSize_ *
-			reader.getReferencingBlockCount();
+			(curRefBlocks - prevRefBlocks) * 2;
 
-	static_cast<void>(cxt);
-	const uint64_t workUsage = 0;
+	const uint64_t workUsage = cxt.sorterEntry_->getAllocatedSize();
 
 	if (memLimit >= 0 &&
-			latchSize + workUsage > static_cast<uint64_t>(memLimit)) {
-		return false;
+			(latchSize > static_cast<uint64_t>(memLimit) ||
+			workUsage > static_cast<uint64_t>(memLimit))) {
+		return true;
 	}
 
-	return true;
+	return false;
 }
 
 size_t SQLSortOps::SortNway::getSorterCapacity(
 		util::StackAllocator &alloc) const {
-	const int64_t confValue = OpConfig::resolve(
-			SQLOpTypes::CONF_SORT_PARTIAL_UNIT, getCode().getConfig());
+	static_cast<void>(alloc);
 
-	if (confValue >= 0) {
+	const OpConfig *config = getCode().getConfig();
+
+	do {
+		const int64_t confValue = OpConfig::resolve(
+				SQLOpTypes::CONF_SORT_PARTIAL_UNIT, config);
+		if (confValue < 0) {
+			break;
+		}
+
 		const uint64_t maxValue =
 				static_cast<uint64_t>(std::numeric_limits<size_t>::max());
 		return static_cast<size_t>(std::max<uint64_t>(std::min(
 				static_cast<uint64_t>(confValue), maxValue), 1));
 	}
+	while (false);
 
-	const int64_t memLimit = 32 * 1024 * 1024 / 2;
+	const int64_t memLimit = OpConfig::resolve(
+			SQLOpTypes::CONF_WORK_MEMORY_LIMIT, config);
 
-	size_t blockSize = alloc.base().getElementSize();
-	if (memLimit >= 0) {
-		blockSize = static_cast<size_t>(memLimit);
-	}
-
-	const size_t headSize = 32; 
-	assert(blockSize > headSize);
-
-	const size_t capacity = (blockSize - headSize) / sizeof(SummaryTuple);
-	assert(capacity > 0);
+	const size_t capacity = static_cast<size_t>(
+			std::min(
+					static_cast<uint64_t>(memLimit),
+					static_cast<uint64_t>(
+							std::numeric_limits<uint32_t>::max())) /
+			2 / sizeof(SummaryTuple) + 1);
 
 	return capacity;
 }
 
 size_t SQLSortOps::SortNway::getMergeWidth() const {
+	const OpConfig *config = getCode().getConfig();
+
 	const int64_t defaultValue = 32;
 	const int64_t confValue = OpConfig::resolve(
-			SQLOpTypes::CONF_SORT_MERGE_UNIT, getCode().getConfig());
+			SQLOpTypes::CONF_SORT_MERGE_UNIT, config);
 
 	if (confValue < 0) {
 		return defaultValue;
@@ -875,7 +1029,7 @@ bool SQLSortOps::SortNway::sortMergeDetail(
 		const ProjectionRefPair &projectionPair,
 		TupleHeapRefList &refList) const {
 	if (cxt.workingRestLimit_ >= 0) {
-		MergeAction<false, true> action(cxt, *projectionPair.first);
+		MergeAction<false, true, false> action(cxt, *projectionPair.first);
 		if (queue.isPredicateEmpty()) {
 			return queue.mergeUnchecked(action);
 		}
@@ -905,7 +1059,7 @@ bool SQLSortOps::SortNway::sortMergeDetail(
 		}
 	}
 	else {
-		MergeAction<false, false> action(cxt, *projectionPair.first);
+		MergeAction<false, false, false> action(cxt, *projectionPair.first);
 		const bool unique = isUnique();
 		if (queue.isPredicateEmpty()) {
 			if (unique) {
@@ -933,11 +1087,11 @@ bool SQLSortOps::SortNway::sortMergeDetail(
 	assert(isUnique() || cxt.workingRestLimit_ >= 0);
 
 	if (isUnique()) {
-		MergeAction<true, false> action(cxt, writer);
+		MergeAction<true, false, true> action(cxt, writer);
 		return queue.mergeUnique(action);
 	}
 	else {
-		MergeAction<true, true> action(cxt, writer);
+		MergeAction<true, true, false> action(cxt, writer);
 		return queue.mergeLimited(action);
 	}
 }
@@ -946,13 +1100,18 @@ bool SQLSortOps::SortNway::sortOptional(
 		SortContext &cxt, TupleSorter &sorter) const {
 	if (isGrouping(false, false)) {
 		prepareSortProjection(cxt, true);
+
 		const ProjectionRefPair &projectionPair = findProjection(false, false);
+		const GroupSortAction::ColumListPair columnListPair(
+				&cxt.getSummaryColumnList(true),
+				&cxt.getSummaryColumnList(false));
 		const GroupSortAction::TupleSetPair tupleSetPair(
-				&cxt.getSummaryTupleSet(true),
-				&cxt.getSummaryTupleSet(false));
+				&cxt.sorterEntry_->getSummaryTupleSet(true),
+				&cxt.sorterEntry_->getSummaryTupleSet(false));
+
 		const GroupSortAction action(
 				cxt.getBase(), projectionPair.first, projectionPair.second,
-				&cxt.groupTuple_, tupleSetPair);
+				&cxt.groupTuple_, columnListPair, tupleSetPair);
 		return sorter.sortGroup(action);
 	}
 	else {
@@ -963,36 +1122,95 @@ bool SQLSortOps::SortNway::sortOptional(
 
 SQLSortOps::SortNway::SorterBuilder::SorterBuilder(
 		SortContext &cxt, TupleSorter &sorter, TupleListReader &reader,
-		const SQLValues::CompColumnList &keyColumnList, bool keyFiltering) :
+		const SQLValues::CompColumnList &keyColumnList, bool keyFiltering,
+		const Projection *pipeProj, const Projection *mergeProj) :
+		cxt_(cxt.getBase()),
 		sorter_(sorter),
 		reader_(reader),
-		nullChecker_(cxt.getAllocator(), SQLValues::TupleNullChecker(keyColumnList)),
-		digester_(cxt.getAllocator(), SQLValues::TupleDigester(
-				keyColumnList, NULL, true, !nullChecker_.getBase().isEmpty())),
-		digester2_(cxt.getAllocator(), SQLValues::TupleDigester(
-				keyColumnList, NULL, false)),
+		nullChecker_(*cxt.nullChecker_),
+		digester1_(*cxt.getDigester(true)),
+		digester2_(*cxt.getDigester(false)),
 		keyFiltering_(keyFiltering),
-		tupleSet1_(cxt.tupleSet1_),
-		tupleSet2_(cxt.tupleSet2_),
-		nextInterruption_(cxt.getBase().getNextCountForSuspend()) {
+		withAny_(false),
+		tupleSet1_(cxt.sorterEntry_->getSummaryTupleSet(true)),
+		tupleSet2_(cxt.sorterEntry_->getSummaryTupleSet(false)),
+		nextInterruption_(0),
+		tupleEq_(cxt.getAllocator(), SQLValues::TupleComparator(
+				cxt.keyColumnList1_, &cxt.getBase().getVarContext(),
+				false, true, true)),
+		hashSize_(cxt.sorterEntry_->hashSize_),
+		hashUnit_(SorterEntry::toHashUnit(hashSize_, digester1_)),
+		hashTable_(((hashSize_ <= 0) ?
+				NULL : cxt.sorterEntry_->getBuffer(true, true))),
+		hashConflictionLimit_(cxt.sorterEntry_->getHashConflictionLimit()),
+		inTupleRef_((hashTable_ == NULL || pipeProj == NULL ?
+				NULL : cxt_.getExprContext().getSummaryTupleRef(0))),
+		outTupleRef_(&cxt.groupTuple_),
+		pipeProj_(pipeProj),
+		mergeProj_(mergeProj),
+		normalFunc_((hashTable_ == NULL ?
+				digester1_.getTypeSwitcher().get<const Normal>() : NULL)),
+		uniqueFunc_((hashTable_ != NULL && pipeProj == NULL ?
+				digester1_.getTypeSwitcher().get<const Unique>() : NULL)),
+		groupFunc_((hashTable_ != NULL && pipeProj != NULL ?
+				digester1_.getTypeSwitcher().get<const Grouping>() : NULL)) {
+	if (hashTable_ != NULL && pipeProj != NULL) {
+		*cxt_.getSummaryColumnListRef(0) = cxt.getSummaryColumnList(true);
+		cxt_.getExprContext().setAggregationTupleRef(&tupleSet1_, outTupleRef_);
+	}
+	for (SQLValues::CompColumnList::const_iterator it = keyColumnList.begin();
+			it != keyColumnList.end(); ++it) {
+		if (SQLValues::TypeUtils::isAny(it->getType())) {
+			withAny_ = true;
+			break;
+		}
+	}
 }
 
-bool SQLSortOps::SortNway::SorterBuilder::isInterruptible() {
-	return (nextInterruption_ <= 0);
+SQLSortOps::SortNway::SorterBuilder::~SorterBuilder() {
+	if (pipeProj_ != NULL) {
+		cxt_.getExprContext().setAggregationTupleRef(NULL, NULL);
+	}
 }
 
-bool SQLSortOps::SortNway::SorterBuilder::build() {
+bool SQLSortOps::SortNway::SorterBuilder::build(SortContext &cxt) {
 	if (checkEmpty()) {
-		return false;
+		return true;
 	}
-	if (nextInterruption_ <= 1) {
-		nextInterruption_ = 2;
+
+	const uint64_t baseNextInterruption =
+			std::max<uint64_t>(cxt.getBase().getNextCountForSuspend(), 2);
+	if (normalFunc_ != NULL) {
+		nextInterruption_ = std::min<uint64_t>(
+				sorter_.getRemaining() + 1, baseNextInterruption);
+		normalFunc_(Normal(*this));
 	}
-	return digester_.getTypeSwitcher().get<SorterBuilder>()(*this);
+	else {
+		nextInterruption_ = baseNextInterruption;
+		if (uniqueFunc_ != NULL) {
+			uniqueFunc_(Unique(*this));
+		}
+		else {
+			assert(groupFunc_ != NULL);
+			groupFunc_(Grouping(*this));
+		}
+
+		if (nextInterruption_ > 0 &&
+				sorter_.beginAt(true) + hashConflictionLimit_ >=
+				sorter_.endAt(true)) {
+			return true;
+		}
+	}
+
+	if (sorter_.isFilled() || !reader_.exists()) {
+		return true;
+	}
+
+	return false;
 }
 
 template<typename T>
-bool SQLSortOps::SortNway::SorterBuilder::buildAt() {
+void SQLSortOps::SortNway::SorterBuilder::buildAt() {
 	assert(nextInterruption_ > 0);
 
 	typedef typename TupleDigester::template TypeAt<
@@ -1000,10 +1218,10 @@ bool SQLSortOps::SortNway::SorterBuilder::buildAt() {
 
 	for (;; reader_.next()) {
 		if (sorter_.isFilled()) {
-			return true;
+			break;
 		}
 		else if (!reader_.exists()) {
-			return false;
+			break;
 		}
 
 		assert(!!T::NullableType::VALUE == !nullChecker_.getBase().isEmpty());
@@ -1018,12 +1236,158 @@ bool SQLSortOps::SortNway::SorterBuilder::buildAt() {
 		}
 
 		sorter_.add(SummaryTuple::createBy<T, TypedDigester>(
-				tupleSet1_, reader_, TypedDigester(digester_)));
+				tupleSet1_, reader_, TypedDigester(digester1_)));
+	}
+}
+
+template<typename T>
+void SQLSortOps::SortNway::SorterBuilder::uniqueBuildAt() {
+	assert(nextInterruption_ > 0);
+	assert(!keyFiltering_);
+
+	typedef typename TupleDigester::template TypeAt<
+			typename T::NonNullableTraitsType>::TypedOp TypedDigester;
+
+	typedef typename T::VariantTraitsType DigesterVariantTraitsType;
+	const bool digestOrdering = DigesterVariantTraitsType::VARIANT_ORDERED;
+
+	typedef typename SQLValues::TupleComparator::template VariantTraits<
+			(digestOrdering ? 0 : -1),
+			std::equal_to<SQLValues::ValueComparator::PredArgType>, false,
+			SQLValues::ValueAccessor::BySummaryTuple,
+			SQLValues::ValueAccessor::BySummaryTuple> EqVariantTraitsType;
+	typedef typename T::NonNullableTraitsType::template VariantRebind<
+			EqVariantTraitsType>::Type EqTraitsType;
+	typedef typename SQLValues::TupleComparator::template BaseTypeAt<
+			EqTraitsType> TypedEq;
+
+	TupleSorter::Iterator primaryTail = std::min(
+			sorter_.beginAt(true) + hashConflictionLimit_,
+			sorter_.beginAt(false));
+
+	for (;; reader_.next()) {
+		if (sorter_.isFilled()) {
+			break;
+		}
+		else if (!reader_.exists()) {
+			break;
+		}
+
+		assert(!!T::NullableType::VALUE == !nullChecker_.getBase().isEmpty());
+		if ((T::NullableType::VALUE && nullChecker_(
+				SQLValues::TupleListReaderSource(reader_))) ||
+				(!digestOrdering && withAny_)) {
+			if (sorter_.beginAt(false) <= primaryTail) {
+				if (sorter_.baseEndAt(true) >= primaryTail) {
+					break;
+				}
+				--primaryTail;
+			}
+			sorter_.addSecondary(SummaryTuple::createBy<T, TupleDigester>(
+					tupleSet2_, reader_, digester2_));
+			continue;
+		}
+
+		SummaryTuple inTuple = SummaryTuple::createBy<T, TypedDigester>(
+				tupleSet1_, reader_, TypedDigester(digester1_));
+		const size_t hashIndex = static_cast<size_t>(
+				static_cast<uint64_t>(inTuple.getDigest()) / hashUnit_);
+		assert(hashIndex < hashSize_);
+		SummaryTuple &outTuple = hashTable_[hashIndex];
+
+		if (!SummaryTuple::checkEmpty(outTuple)) {
+			if (!TypedEq(tupleEq_)(inTuple, outTuple)) {
+				if (sorter_.baseEndAt(true) >= primaryTail) {
+					break;
+				}
+				sorter_.add(inTuple);
+			}
+			continue;
+		}
+
+		outTuple = inTuple;
+	}
+}
+
+template<typename T>
+void SQLSortOps::SortNway::SorterBuilder::groupBuildAt() {
+	assert(nextInterruption_ > 0);
+	assert(!keyFiltering_);
+
+	typedef typename TupleDigester::template TypeAt<
+			typename T::NonNullableTraitsType>::TypedOp TypedDigester;
+
+	typedef typename T::VariantTraitsType DigesterVariantTraitsType;
+	const bool digestOrdering = DigesterVariantTraitsType::VARIANT_ORDERED;
+
+	typedef typename SQLValues::TupleComparator::template VariantTraits<
+			(digestOrdering ? 0 : -1),
+			std::equal_to<SQLValues::ValueComparator::PredArgType>, false,
+			SQLValues::ValueAccessor::BySummaryTuple,
+			SQLValues::ValueAccessor::BySummaryTuple> EqVariantTraitsType;
+	typedef typename T::NonNullableTraitsType::template VariantRebind<
+			EqVariantTraitsType>::Type EqTraitsType;
+	typedef typename SQLValues::TupleComparator::template BaseTypeAt<
+			EqTraitsType> TypedEq;
+
+	TupleSorter::Iterator primaryTail = std::min(
+			sorter_.beginAt(true) + hashConflictionLimit_,
+			sorter_.beginAt(false));
+
+	for (;; reader_.next()) {
+		if (sorter_.isFilled()) {
+			break;
+		}
+		else if (!reader_.exists()) {
+			break;
+		}
+
+		assert(!!T::NullableType::VALUE == !nullChecker_.getBase().isEmpty());
+		if ((T::NullableType::VALUE && nullChecker_(
+				SQLValues::TupleListReaderSource(reader_))) ||
+				(!digestOrdering && withAny_)) {
+			if (sorter_.beginAt(false) <= primaryTail) {
+				if (sorter_.baseEndAt(true) >= primaryTail) {
+					break;
+				}
+				--primaryTail;
+			}
+			sorter_.addSecondary(SummaryTuple::createBy<T, TupleDigester>(
+					tupleSet2_, reader_, digester2_));
+			continue;
+		}
+
+		SummaryTuple inTuple = SummaryTuple::createBy<T, TypedDigester>(
+				tupleSet1_, reader_, TypedDigester(digester1_));
+		const size_t hashIndex = static_cast<size_t>(
+				static_cast<uint64_t>(inTuple.getDigest()) / hashUnit_);
+		assert(hashIndex < hashSize_);
+		SummaryTuple &outTuple = hashTable_[hashIndex];
+
+		if (!SummaryTuple::checkEmpty(outTuple)) {
+			if (!TypedEq(tupleEq_)(inTuple, outTuple)) {
+				if (sorter_.baseEndAt(true) >= primaryTail) {
+					break;
+				}
+				sorter_.add(inTuple);
+				continue;
+			}
+
+			*inTupleRef_ = inTuple;
+			*outTupleRef_ = outTuple;
+			pipeProj_->project(cxt_);
+			continue;
+		}
+
+		outTuple = inTuple;
+		*inTupleRef_ = inTuple;
+		*outTupleRef_ = inTuple;
+		pipeProj_->project(cxt_);
 	}
 }
 
 bool SQLSortOps::SortNway::SorterBuilder::checkEmpty() {
-	if (keyFiltering_ && sorter_.isEmptyPredicateAt(true)) {
+	if (isKeyEmpty(sorter_, keyFiltering_)) {
 		for (; reader_.exists(); reader_.next()) {
 		}
 		return true;
@@ -1034,28 +1398,45 @@ bool SQLSortOps::SortNway::SorterBuilder::checkEmpty() {
 
 
 SQLSortOps::SortNway::SorterWriter::SorterWriter(
-		OpContext &cxt, TupleSorter &sorter, const Projection &proj,
-		const SQLValues::CompColumnList &keyColumnList, bool primary) :
-		cxt_(cxt),
+		SortContext &cxt, TupleSorter &sorter, const Projection &proj,
+		const SQLValues::CompColumnList &keyColumnList, bool primary,
+		bool unique) :
+		cxt_(cxt.getBase()),
 		sorter_(sorter),
 		proj_(resolveOutputProjection(proj)),
 		writer_(SQLOpUtils::ExpressionListWriter::Source(
-				cxt, proj_, true, &keyColumnList, primary, NULL,
+				cxt.getBase(), proj_, true, &keyColumnList, primary, NULL,
 				SQLExprs::ExprCode::INPUT_MULTI_STAGE)),
-		primary_(primary) {
+		primary_(primary),
+		unique_(unique),
+		digester_(*cxt.getDigester(true)),
+		pred_(cxt.getAllocator(), SQLValues::TupleComparator(
+				cxt.keyColumnList1_, &cxt.getBase().getVarContext(),
+				false, false, true)),
+		hashTable_((primary && cxt.sorterEntry_->hashSize_ > 0) ?
+				cxt.sorterEntry_->getBuffer(true, true) : NULL),
+		hashBufferRef_((hashTable_ == NULL ?
+				NULL : &cxt.sorterEntry_->getBufferRef(true, true))),
+		hashSize_((hashTable_ == NULL ? 0 : cxt.sorterEntry_->hashSize_)) {
 }
 
 void SQLSortOps::SortNway::SorterWriter::write() {
-	if (writer_.isDigestColumnAssigned()) {
+	if (unique_) {
+		pred_.getTypeSwitcher().get<const Unique>()(Unique(*this));
+		if (hashBufferRef_ != NULL) {
+			hashBufferRef_->setFilled();
+		}
+	}
+	else if (writer_.isDigestColumnAssigned()) {
 		TupleColumnType type = writer_.getDigestColumnType();
 		if (primary_) {
 			type = SQLValues::TypeUtils::toNonNullable(type);
 		}
 		if (writer_.isDigestColumnAscending()) {
-			getTypedFunction<false>(type)(*this);
+			getTypedFunction<false>(type)(Normal(*this));
 		}
 		else {
-			getTypedFunction<true>(type)(*this);
+			getTypedFunction<true>(type)(Normal(*this));
 		}
 	}
 	else if (writer_.isAvailable()) {
@@ -1063,6 +1444,43 @@ void SQLSortOps::SortNway::SorterWriter::write() {
 	}
 	else {
 		writeBy(proj_);
+	}
+}
+
+template<typename T>
+void SQLSortOps::SortNway::SorterWriter::writeUnique() {
+	if (writer_.isDigestColumnAssigned()) {
+		if (SQLValues::TypeUtils::toNonNullable(
+				writer_.getDigestColumnType()) == TupleTypes::TYPE_LONG) {
+			typedef SQLValues::TypeSwitcher::TypeTraits<
+					SQLValues::Types::Long, void, void,
+					typename T::VariantTraitsType> TraitsType;
+			writeUniqueByDigestTuple<TraitsType>();
+		}
+		else {
+			writeUniqueByDigestTuple<T>();
+		}
+	}
+	else if (writer_.isAvailable()) {
+		typedef SQLOpUtils::ExpressionListWriter::ByGeneral Projector;
+		writeUniqueBy<Projector, T>(Projector(writer_));
+	}
+	else {
+		writeUniqueBy<Projection, T>(proj_);
+	}
+}
+
+template<typename T>
+void SQLSortOps::SortNway::SorterWriter::writeUniqueByDigestTuple() {
+	if (digester_.getBase().isRotating()) {
+		typedef typename SQLOpUtils::ExpressionListWriter::ByDigestTuple<
+				true>::template TypeAt<T> Projector;
+		writeUniqueBy<Projector, T>(Projector(writer_));
+	}
+	else {
+		typedef typename SQLOpUtils::ExpressionListWriter::ByDigestTuple<
+				false>::template TypeAt<T> Projector;
+		writeUniqueBy<Projector, T>(Projector(writer_));
 	}
 }
 
@@ -1076,35 +1494,118 @@ void SQLSortOps::SortNway::SorterWriter::writeBy(const P &projector) {
 	}
 }
 
+template<typename P, typename T>
+void SQLSortOps::SortNway::SorterWriter::writeUniqueBy(const P &projector) {
+	typedef typename util::BoolType<
+			T::VariantTraitsType::DIGEST_ONLY>::Result DigestOnly;
+	typedef typename TupleSorter::Iterator Iterator;
+
+	const Iterator sorterBegin = sorter_.beginAt(primary_);
+	const Iterator sorterEnd = sorter_.endAt(primary_);
+	SummaryTuple *const hashBegin = hashTable_;
+	SummaryTuple *const hashEnd = hashBegin + hashSize_;
+
+	const bool ordering = digester_.getBase().isOrdering();
+	SummaryTuple *hashMid = getHashMiddle(ordering);
+
+	Iterator sorterIt = sorterBegin;
+	for (size_t i = 0; i < 2; i++) {
+		SummaryTuple *hashSubBegin = (i == 0 ? hashMid : hashBegin);
+		SummaryTuple *hashSubEnd = (i == 0 ? hashEnd : hashMid);
+
+		for (SummaryTuple *it = hashSubBegin; it != hashSubEnd; ++it) {
+			if (SummaryTuple::checkEmpty(*it)) {
+				continue;
+			}
+
+			if (!((i == 0) == (it->getDigest() < 0))) {
+				abort();
+			}
+			assert((i == 0) == (it->getDigest() < 0));
+
+			while (sorterIt != sorterEnd && pred_(*sorterIt, *it, DigestOnly())) {
+				projector.projectBy(cxt_, *sorterIt);
+				++sorterIt;
+			}
+
+			projector.projectBy(cxt_, *it);
+			SummaryTuple::fillEmpty(it);
+		}
+	}
+
+	for (; sorterIt != sorterEnd; ++sorterIt) {
+		projector.projectBy(cxt_, *sorterIt);
+	}
+}
+
 template<bool Rev>
 SQLSortOps::SortNway::SorterWriter::TypedFunc
 SQLSortOps::SortNway::SorterWriter::getTypedFunction(TupleColumnType type) {
 	typedef SQLValues::ValueComparator::VariantTraits<
 			void, Rev, void, void> VariantType;
 	typedef SQLValues::TypeSwitcher::OpTraitsOptions<
-			VariantType, 1, false, false, 1, true, false> OptionsType;
+			VariantType, 1, false, false, 1, true> OptionsType;
 	typedef SQLValues::TypeSwitcher::OpTraits<
 			void, OptionsType> TraitsType;
 
-	return SQLValues::TypeSwitcher(type).getWith<SorterWriter, TraitsType>();
+	return SQLValues::TypeSwitcher(type).getWith<const Normal, TraitsType>();
+}
+
+SQLValues::SummaryTuple*
+SQLSortOps::SortNway::SorterWriter::getHashMiddle(bool ordering) const {
+	SummaryTuple *const hashBegin = hashTable_;
+	SummaryTuple *const hashEnd = hashBegin + hashSize_;
+
+	if (!ordering) {
+		return hashEnd;
+	}
+
+	SummaryTuple *midBase = hashBegin + hashSize_ / 2;
+	std::pair<SummaryTuple*, SummaryTuple*> midRange(midBase, midBase);
+	if (midRange.first != hashBegin) {
+		--midRange.first;
+	}
+	if (midRange.second != hashEnd) {
+		++midRange.second;
+	}
+
+	{
+		SummaryTuple *it = midRange.first;
+		for (; it != midRange.second; ++it) {
+			if (!SummaryTuple::checkEmpty(*it) && it->getDigest() < 0) {
+				break;
+			}
+		}
+		return it;
+	}
 }
 
 
 SQLSortOps::SortNway::GroupSortAction::GroupSortAction(
 		OpContext &cxt,
 		const Projection *pipeProj, const Projection *mergeProj,
-		SummaryTuple *outTupleRef, const TupleSetPair &tupleSetPair) :
+		SummaryTuple *outTupleRef, const ColumListPair &columnListPair,
+		const TupleSetPair &tupleSetPair) :
 		cxt_(cxt),
 		pipeProj_(pipeProj),
 		mergeProj_(mergeProj),
 		inTupleRef_(cxt.getExprContext().getSummaryTupleRef(0)),
 		outTupleRef_(outTupleRef),
+		columListPair_(columnListPair),
 		tupleSetPair_(tupleSetPair) {
 }
 
+SQLSortOps::SortNway::GroupSortAction::~GroupSortAction() {
+	cxt_.getExprContext().setAggregationTupleRef(NULL, NULL);
+}
+
 void SQLSortOps::SortNway::GroupSortAction::operator()(bool primary) const {
+	const SQLOps::SummaryColumnList *columnList =
+			(primary ? columListPair_.first : columListPair_.second);
 	SummaryTupleSet *tupleSet =
 			(primary ? tupleSetPair_.first : tupleSetPair_.second);
+
+	*cxt_.getSummaryColumnListRef(0) = *columnList;
 	cxt_.getExprContext().setAggregationTupleRef(tupleSet, outTupleRef_);
 }
 
@@ -1142,22 +1643,145 @@ uint32_t SQLSortOps::SortStageElement::get(bool primary) const {
 }
 
 
+SQLSortOps::SorterEntry::SorterEntry(
+		OpContext &cxt, size_t capacity, bool hashAvailable, int64_t hashSizeBase,
+		TupleListReader &reader) :
+		allocManager_(cxt.getAllocatorManager()),
+		allocRef_(allocManager_, cxt.getAllocator().base()),
+		valueCxt_(SQLValues::ValueContext::ofVarContext(
+				cxt.getVarContext(), &allocRef_.get())),
+		totalTupleSet_(valueCxt_, NULL),
+		tupleSet1_(valueCxt_, &totalTupleSet_),
+		tupleSet2_(valueCxt_, &totalTupleSet_),
+		capacity_(capacity),
+		hashSize_(toHashSize(capacity, hashAvailable, hashSizeBase)),
+		buffer1_(allocManager_, toBufferBytes(capacity), false),
+		buffer2_(allocManager_, toBufferBytes(capacity), false),
+		initialReferencingBlockCount_(reader.getReferencingBlockCount()),
+		filled_(false) {
+	if (hashSize_ > 0) {
+		initializeHashTable();
+	}
+}
+
+SQLSortOps::SummaryTupleSet& SQLSortOps::SorterEntry::getSummaryTupleSet(
+		bool pimary) {
+	return (pimary ? tupleSet1_ : tupleSet2_);
+}
+
+SQLSortOps::TupleSorter& SQLSortOps::SorterEntry::resolveSorter(
+		const std::pair<TupleLess, TupleLess> &predPair) {
+	if (sorter_.get() == NULL) {
+		const bool forHash = false;
+		sorter_ = UTIL_MAKE_LOCAL_UNIQUE(
+				sorter_, TupleSorter,
+				capacity_, predPair.first, predPair.second,
+				std::make_pair(
+						getBuffer(forHash, true), getBuffer(forHash, false)));
+	}
+	return *sorter_;
+}
+
+void SQLSortOps::SorterEntry::initializeHashTable() {
+	hashBuffer_ = UTIL_MAKE_LOCAL_UNIQUE(
+			hashBuffer_, BufferRef,
+			allocManager_, toBufferBytes(capacity_), toBufferBytes(hashSize_));
+}
+
+SQLSortOps::SorterEntry::SorterElementType* SQLSortOps::SorterEntry::getBuffer(
+		bool forHash, bool primary) {
+	return static_cast<SorterElementType*>(
+			getBufferRef(forHash, primary).get().addr_);
+}
+
+SQLOps::OpAllocatorManager::BufferRef& SQLSortOps::SorterEntry::getBufferRef(
+		bool forHash, bool pimary) {
+	assert(!forHash || pimary);
+	return (forHash ? *hashBuffer_ : (pimary ? buffer1_ : buffer2_));
+}
+
+size_t SQLSortOps::SorterEntry::getAllocatedSize() {
+	return allocRef_.get().getTotalSize() +
+			totalTupleSet_.getPoolCapacity();
+}
+
+size_t SQLSortOps::SorterEntry::getHashConflictionLimit() const {
+	return toHashConflictionLimit(capacity_, hashSize_);
+}
+
+size_t SQLSortOps::SorterEntry::toBufferBytes(size_t capacity) {
+	return sizeof(SorterElementType) * capacity;
+}
+
+size_t SQLSortOps::SorterEntry::toHashSize(
+		size_t capacity, bool hashAvailable, int64_t hashSizeBase) {
+	if (!hashAvailable || capacity <= 2) {
+		return 0;
+	}
+
+	uint64_t baseCapacity = capacity - 2;
+	if (hashSizeBase >= 0 && static_cast<uint64_t>(hashSizeBase) <
+			std::min<uint64_t>(
+					baseCapacity, std::numeric_limits<uint32_t>::max()) / 2) {
+		const uint32_t smallCapacity = std::max(
+				1U << ((sizeof(uint32_t) * CHAR_BIT) -
+						util::nlz(static_cast<uint32_t>(hashSizeBase - 1))),
+				32U) * 2;
+		if (smallCapacity < baseCapacity) {
+			baseCapacity = smallCapacity;
+		}
+	}
+	const uint64_t size =
+			SQLValues::ValueUtils::findLargestPrimeNumber(baseCapacity);
+	return static_cast<size_t>(size) + 1;
+}
+
+uint64_t SQLSortOps::SorterEntry::toHashUnit(
+		size_t hashSize, const TupleDigester &digester) {
+	if (hashSize < 2) {
+		assert(hashSize == 0);
+		return 0;
+	}
+
+	if (digester.getBase().isOrdering()) {
+		const uint64_t maxDigest = std::numeric_limits<uint64_t>::max();
+		return maxDigest / (hashSize - 1);
+	}
+	else {
+		const uint64_t maxDigest = std::numeric_limits<uint32_t>::max();
+		return maxDigest / (hashSize - 1) + 1;
+	}
+}
+
+size_t SQLSortOps::SorterEntry::toHashConflictionLimit(
+		size_t capacity, size_t hashSize) {
+	if (hashSize <= 0) {
+		return 0;
+	}
+
+	const size_t conflictionRate = 10;
+	const size_t minCapacity = 1024;
+
+	const uint64_t base =
+			std::max<uint64_t>(hashSize * conflictionRate / 100, minCapacity);
+	return static_cast<size_t>(std::min<uint64_t>(base, capacity));
+}
+
+
 SQLSortOps::SortContext::SortContext(SQLValues::ValueContext &cxt) :
 		baseCxt_(NULL),
 		workingDepth_(std::numeric_limits<uint32_t>::max()),
-		sorter_(NULL),
-		sorterFilled_(false),
+		readerAccessible_(false),
+		initialTupleCout_(-1),
 		stageList_(cxt.getAllocator()),
 		freeStoreList_(cxt.getAllocator()),
 		workingRestLimit_(-1),
 		middleColumnList_(cxt.getAllocator()),
 		summaryColumnList1_(cxt.getAllocator()),
 		summaryColumnList2_(cxt.getAllocator()),
-		totalTupleSet_(cxt, NULL),
-		tupleSet1_(cxt, &totalTupleSet_),
-		tupleSet2_(cxt, &totalTupleSet_),
 		keyColumnList1_(cxt.getAllocator()),
-		keyColumnList2_(cxt.getAllocator()) {
+		keyColumnList2_(cxt.getAllocator()),
+		nullCheckerKeys_(cxt.getAllocator()) {
 }
 
 SQLOps::OpContext& SQLSortOps::SortContext::getBase() {
@@ -1174,11 +1798,6 @@ SQLOps::SummaryColumnList& SQLSortOps::SortContext::getSummaryColumnList(
 	return (pimary ? summaryColumnList1_ : summaryColumnList2_);
 }
 
-SQLSortOps::SummaryTupleSet& SQLSortOps::SortContext::getSummaryTupleSet(
-		bool pimary) {
-	return (pimary ? tupleSet1_ : tupleSet2_);
-}
-
 SQLValues::CompColumnList& SQLSortOps::SortContext::getKeyColumnList(
 		bool pimary) {
 	return (pimary ? keyColumnList1_ : keyColumnList2_);
@@ -1188,10 +1807,16 @@ bool& SQLSortOps::SortContext::getFinalStageStarted(bool pimary) {
 	return (pimary ? finalStageStarted_.first : finalStageStarted_.second);
 }
 
+util::LocalUniquePtr<SQLSortOps::TupleDigester>&
+SQLSortOps::SortContext::getDigester(bool pimary) {
+	return (pimary ? digester1_ : digester2_);
+}
+
 
 void SQLSortOps::Window::compile(OpContext &cxt) const {
 	OpPlan &plan = cxt.getPlan();
 
+	util::StackAllocator &alloc = cxt.getAllocator();
 	OpCodeBuilder builder(OpCodeBuilder::ofContext(cxt));
 
 	OpCode srcCode = getCode();
@@ -1203,38 +1828,47 @@ void SQLSortOps::Window::compile(OpContext &cxt) const {
 	SQLExprs::Expression *valueExpr;
 	SQLExprs::Expression *posExpr;
 	bool valueCounting;
-	SQLExprs::Expression *windowExpr = splitWindowExpr(
-			builder, *projections.first, valueExpr, posExpr, valueCounting);
+	ExprRefList windowExprList(alloc);
+	splitWindowExpr(
+			builder, *projections.first, valueExpr, posExpr, valueCounting,
+			windowExprList);
 
 	const bool positioning = (posExpr != NULL);
+	const bool nonConstPositioning = (positioning &&
+			posExpr->getCode().getType() != SQLType::EXPR_CONSTANT);
 
 	if (valueCounting || positioning) {
 		const OpNode &inNode = plan.getParentInput(0);
+		TupleColumnType valueColumnType = TupleTypes::TYPE_NULL;
+		if (valueExpr != NULL) {
+			valueColumnType = valueExpr->getCode().getColumnType();
+		}
 
 		OpNode &partNode = plan.createNode(SQLOpTypes::OP_WINDOW_PARTITION);
 		{
 			OpNode &node = partNode;
 			node.setCode(createPartitionCode(
 					builder, keyList, valueExpr, posExpr, *projections.first,
-					windowExpr));
+					windowExprList));
 			node.addInput(inNode);
 		}
 
 		OpNode *posNode = NULL;
-		if (posExpr != NULL &&
-				posExpr->getCode().getType() != SQLType::EXPR_CONSTANT) {
+		if (nonConstPositioning) {
 			OpNode &posJoinNode = plan.createNode(SQLOpTypes::OP_JOIN);
 			{
 				OpNode &node = posJoinNode;
-				node.setCode(createPositioningJoinCode(builder));
-				node.addInput(inNode);
-				node.addInput(inNode);
+				node.setCode(
+						createPositioningJoinCode(builder, valueColumnType));
+				node.addInput(partNode, 1);
+				node.addInput(partNode, 1);
 			}
 
 			posNode = &plan.createNode(SQLOpTypes::OP_SORT);
 			{
 				OpNode &node = *posNode;
-				node.setCode(createPositioningSortCode(builder));
+				node.setCode(
+						createPositioningSortCode(builder, valueColumnType));
 				node.addInput(posJoinNode);
 			}
 		}
@@ -1243,11 +1877,14 @@ void SQLSortOps::Window::compile(OpContext &cxt) const {
 		{
 			OpNode &node = mergeNode;
 			node.setCode(createMergeCode(
-					builder, projections, windowExpr, positioning));
+					builder, projections, windowExprList, positioning));
 			node.addInput(inNode);
 			node.addInput(partNode);
-			if (posNode != NULL) {
+			if (nonConstPositioning) {
 				node.addInput(*posNode);
+			}
+			else {
+				node.addInput(inNode);
 			}
 		}
 
@@ -1257,7 +1894,7 @@ void SQLSortOps::Window::compile(OpContext &cxt) const {
 		OpNode &node = plan.createNode(SQLOpTypes::OP_WINDOW_PARTITION);
 		{
 			node.setCode(createSingleCode(
-					builder, keyList, projections, windowExpr));
+					builder, keyList, projections, windowExprList));
 			node.addInput(plan.getParentInput(0));
 		}
 
@@ -1268,8 +1905,9 @@ void SQLSortOps::Window::compile(OpContext &cxt) const {
 SQLOps::OpCode SQLSortOps::Window::createPartitionCode(
 		OpCodeBuilder &builder, const SQLValues::CompColumnList *keyList,
 		SQLExprs::Expression *&valueExpr, SQLExprs::Expression *&posExpr,
-		const Projection &pipeProj, const SQLExprs::Expression *windowExpr) {
+		const Projection &pipeProj, const ExprRefList &windowExprList) {
 	SQLExprs::ExprFactoryContext &factoryCxt = builder.getExprFactoryContext();
+	util::StackAllocator &alloc = factoryCxt.getAllocator();
 	const uint32_t input = 0;
 
 	OpCode code;
@@ -1298,15 +1936,15 @@ SQLOps::OpCode SQLSortOps::Window::createPartitionCode(
 			valueExpr = NULL;
 		}
 
-		SQLExprs::Expression *dupWindowExpr =
-				&builder.getExprRewriter().rewrite(
-						factoryCxt, *windowExpr, NULL);
+		ExprRefList dupWindowExprList(alloc);
+		duplicateExprList(builder, windowExprList, dupWindowExprList);
 		countProj = &createProjectionWithWindow(
-				builder, pipeProj, baseProj, dupWindowExpr);
+				builder, pipeProj, baseProj, dupWindowExprList);
 	}
 
 	Projection *posProj = NULL;
-	if (posExpr != NULL) {
+	if (posExpr != NULL &&
+			posExpr->getCode().getType() != SQLType::EXPR_CONSTANT) {
 		posProj = &builder.createProjection(SQLOpTypes::PROJ_OUTPUT);
 		posProj->getPlanningCode().setAttributes(
 				SQLExprs::ExprCode::ATTR_ASSIGNED);
@@ -1333,7 +1971,7 @@ SQLOps::OpCode SQLSortOps::Window::createPartitionCode(
 }
 
 SQLOps::OpCode SQLSortOps::Window::createPositioningJoinCode(
-		OpCodeBuilder &builder) {
+		OpCodeBuilder &builder, TupleColumnType valueColumnType) {
 	OpCode code;
 
 	code.setJoinType(SQLType::JOIN_LEFT_OUTER);
@@ -1355,9 +1993,14 @@ SQLOps::OpCode SQLSortOps::Window::createPositioningJoinCode(
 				builder.getExprFactoryContext();
 
 		SQLExprs::Expression::ModIterator it(proj);
-		it.append(SQLExprs::ExprRewriter::createColumnExpr(factoryCxt, 0, 0));
-		it.append(SQLExprs::ExprRewriter::createColumnExpr(factoryCxt, 1, 1));
-		it.append(SQLExprs::ExprRewriter::createColumnExpr(factoryCxt, 1, 2));
+		it.append(SQLExprs::ExprRewriter::createTypedColumnExprBy(
+				factoryCxt, 0, 0, TupleTypes::TYPE_LONG));
+		it.append(SQLExprs::ExprRewriter::createTypedColumnExprBy(
+				factoryCxt, 1, 0,
+				SQLValues::TypeUtils::toNullable(TupleTypes::TYPE_LONG)));
+		it.append(SQLExprs::ExprRewriter::createTypedColumnExprBy(
+				factoryCxt, 1, 2,
+				SQLValues::TypeUtils::toNullable(valueColumnType)));
 
 		code.setPipeProjection(&proj);
 	}
@@ -1366,7 +2009,7 @@ SQLOps::OpCode SQLSortOps::Window::createPositioningJoinCode(
 }
 
 SQLOps::OpCode SQLSortOps::Window::createPositioningSortCode(
-		OpCodeBuilder &builder) {
+		OpCodeBuilder &builder, TupleColumnType valueColumnType) {
 	OpCode code;
 
 	{
@@ -1385,8 +2028,12 @@ SQLOps::OpCode SQLSortOps::Window::createPositioningSortCode(
 				builder.getExprFactoryContext();
 
 		SQLExprs::Expression::ModIterator it(proj);
-		it.append(SQLExprs::ExprRewriter::createColumnExpr(factoryCxt, 0, 1));
-		it.append(SQLExprs::ExprRewriter::createColumnExpr(factoryCxt, 0, 2));
+		it.append(SQLExprs::ExprRewriter::createTypedColumnExprBy(
+				factoryCxt, 0, 1,
+				SQLValues::TypeUtils::toNullable(TupleTypes::TYPE_LONG)));
+		it.append(SQLExprs::ExprRewriter::createTypedColumnExprBy(
+				factoryCxt, 0, 2,
+				SQLValues::TypeUtils::toNullable(valueColumnType)));
 
 		code.setPipeProjection(&proj);
 	}
@@ -1396,7 +2043,7 @@ SQLOps::OpCode SQLSortOps::Window::createPositioningSortCode(
 
 SQLOps::OpCode SQLSortOps::Window::createMergeCode(
 		OpCodeBuilder &builder, SQLOpUtils::ProjectionPair &projections,
-		SQLExprs::Expression *&windowExpr, bool positioning) {
+		ExprRefList &windowExprList, bool positioning) {
 	Projection *pipeProj;
 	if (positioning) {
 		pipeProj = &builder.createMultiStageProjection(
@@ -1409,7 +2056,7 @@ SQLOps::OpCode SQLSortOps::Window::createMergeCode(
 
 	assert(projections.second != NULL);
 	Projection &finishProj = createProjectionWithWindow(
-			builder, *projections.first, *projections.second, windowExpr);
+			builder, *projections.first, *projections.second, windowExprList);
 
 	OpCode code;
 	code.setPipeProjection(
@@ -1420,7 +2067,7 @@ SQLOps::OpCode SQLSortOps::Window::createMergeCode(
 SQLOps::OpCode SQLSortOps::Window::createSingleCode(
 		OpCodeBuilder &builder, const SQLValues::CompColumnList *keyList,
 		SQLOpUtils::ProjectionPair &projections,
-		SQLExprs::Expression *&windowExpr) {
+		ExprRefList &windowExprList) {
 	OpCode code;
 	code.setKeyColumnList(keyList);
 
@@ -1431,91 +2078,194 @@ SQLOps::OpCode SQLSortOps::Window::createSingleCode(
 	projections = SQLOpUtils::ProjectionPair();
 
 	code.setPipeProjection(&createProjectionWithWindow(
-			builder, pipeProj, pipeFinProj, windowExpr));
+			builder, pipeProj, pipeFinProj, windowExprList));
 
 	return code;
 }
 
-SQLExprs::Expression* SQLSortOps::Window::splitWindowExpr(
+void SQLSortOps::Window::splitWindowExpr(
 		OpCodeBuilder &builder, Projection &src,
 		SQLExprs::Expression *&valueExpr, SQLExprs::Expression *&posExpr,
-		bool &valueCounting) {
+		bool &valueCounting, ExprRefList &windowExprList) {
 	valueExpr = NULL;
 	posExpr = NULL;
 	valueCounting = false;
 
 	SQLExprs::ExprFactoryContext &factoryCxt =
 			builder.getExprFactoryContext();
+	util::StackAllocator &alloc = factoryCxt.getAllocator();
 
 	const SQLExprs::ExprSpec *spec = NULL;
-	SQLExprs::Expression *windowExprRef = NULL;
+	ExprRefList windowExprRefList(alloc);
 
 	for (SQLExprs::Expression::ModIterator it(src); it.exists(); it.next()) {
 		SQLExprs::Expression &subExpr = it.get();
 		const SQLExprs::ExprSpec &subSpec =
 				factoryCxt.getFactory().getSpec(subExpr.getCode().getType());
 		if (SQLExprs::ExprRewriter::isWindowExpr(subSpec, true)) {
-			if (windowExprRef != NULL) {
+			if (spec != NULL && &subSpec != spec) {
 				assert(false);
 				GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
 			}
-			windowExprRef = &subExpr;
+			windowExprRefList.push_back(&subExpr);
 			spec = &subSpec;
 		}
 	}
 
 	SQLExprs::Expression *windowExpr = NULL;
-	if (windowExprRef != NULL) {
+	for (ExprRefList::iterator exprIt = windowExprRefList.begin();
+			exprIt != windowExprRefList.end(); ++exprIt) {
+		SQLExprs::Expression *windowExprRef = *exprIt;
+
 		windowExpr = &builder.getExprRewriter().rewrite(
 				factoryCxt, *windowExprRef, NULL);
 
-		size_t index = 0;
-		for (SQLExprs::Expression::ModIterator it(*windowExprRef);
-				it.exists(); it.next()) {
-			const uint32_t &flags = spec->inList_[index].flags_;
-			if ((flags & (
-					SQLExprs::ExprSpec::FLAG_WINDOW_POS_BEFORE |
-					SQLExprs::ExprSpec::FLAG_WINDOW_POS_AFTER)) != 0) {
-				posExpr = &builder.getExprRewriter().rewrite(
-						factoryCxt, it.get(), NULL);
-				if (posExpr->getCode().getType() != SQLType::EXPR_CONSTANT) {
-					it.remove();
-					it.insert(SQLExprs::ExprRewriter::createColumnExpr(
-							factoryCxt, 1, 0));
+		uint32_t index;
+		if (SQLExprs::ExprRewriter::findWindowPosArgIndex(*spec, &index)) {
+			SQLExprs::Expression::ModIterator baseIt(*windowExpr);
+			SQLExprs::Expression::ModIterator it(*windowExprRef);
+			const SQLExprs::Expression *subPosExpr = NULL;
+			for (uint32_t i = index; it.exists(); it.next(), i--) {
+				if (i <= 0) {
+					subPosExpr = &it.get();
+					break;
 				}
-				break;
+				if (baseIt.exists()) {
+					baseIt.next();
+				}
+			}
+
+			const bool forConstant = (subPosExpr == NULL ||
+					subPosExpr->getCode().getType() == SQLType::EXPR_CONSTANT);
+			if (posExpr == NULL) {
+				if (forConstant) {
+					TupleValue posValue;
+					bool posValueNullable = true;
+					if (subPosExpr == NULL) {
+						const int64_t basePosValue = 1;
+						posValue = TupleValue(basePosValue);
+						posValueNullable = false;
+					}
+					else {
+						const TupleValue basePosValue =
+								subPosExpr->getCode().getValue();
+						if (!SQLValues::ValueUtils::isNull(basePosValue)) {
+							posValue = TupleValue(SQLValues::ValueUtils::promoteValue<
+									TupleTypes::TYPE_LONG>(basePosValue));
+							posValueNullable = false;
+						}
+					}
+					posExpr = &builder.getExprRewriter().createConstExpr(
+							factoryCxt, posValue,
+							SQLValues::TypeUtils::setNullable(
+									TupleTypes::TYPE_LONG, posValueNullable));
+				}
+				else if (SQLValues::TypeUtils::toNonNullable(
+						subPosExpr->getCode().getColumnType()) ==
+						TupleTypes::TYPE_LONG) {
+					posExpr = &builder.getExprRewriter().rewrite(
+							factoryCxt, *subPosExpr, NULL);
+				}
+				else {
+					posExpr = &SQLExprs::ExprRewriter::createCastExpr(
+							factoryCxt,
+							builder.getExprRewriter().rewrite(
+									factoryCxt, *subPosExpr, NULL),
+							SQLValues::TypeUtils::toNullable(
+									TupleTypes::TYPE_LONG));
+				}
+				posExpr->getPlanningCode().setAttributes(
+						posExpr->getCode().getAttributes() |
+						SQLExprs::ExprCode::ATTR_ASSIGNED);
+			}
+			else if ((posExpr->getCode().getType() ==
+					SQLType::EXPR_CONSTANT) != forConstant) {
+				assert(false);
+				GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+			}
+
+			if (forConstant) {
+				if (it.exists()) {
+					it.remove();
+					it.insert(builder.getExprRewriter().rewrite(
+							factoryCxt, *posExpr, NULL));
+				}
+			}
+			else {
+				it.remove();
+				it.insert(SQLExprs::ExprRewriter::createTypedColumnExprBy(
+						factoryCxt, WindowMerge::IN_POSITIONING, 0,
+						TupleTypes::TYPE_LONG));
+			}
+
+			if (baseIt.exists()) {
+				baseIt.remove();
+				baseIt.insert(builder.getExprRewriter().rewrite(
+						factoryCxt, *posExpr, NULL));
 			}
 		}
 
 		valueCounting = ((spec->flags_ &
 				SQLExprs::ExprSpec::FLAG_WINDOW_VALUE_COUNTING) != 0);
 
-		if (posExpr != NULL || valueCounting) {
-			for (SQLExprs::Expression::ModIterator it(*windowExprRef);
-					it.exists();) {
-				valueExpr = &builder.getExprRewriter().rewrite(
-						factoryCxt, it.get(), NULL);
-				if (posExpr != NULL &&
-						posExpr->getCode().getType() != SQLType::EXPR_CONSTANT) {
-					it.remove();
-					it.insert(SQLExprs::ExprRewriter::createColumnExpr(
-							factoryCxt, 1, 1));
-				}
+		do {
+			if (!valueCounting && posExpr == NULL) {
 				break;
 			}
-		}
 
-		if (posExpr == NULL && valueExpr == NULL) {
-			windowExpr = NULL;
+			SQLExprs::Expression::ModIterator it(*windowExprRef);
+			if (!it.exists()) {
+				break;
+			}
+
+			if (valueExpr == NULL) {
+				valueExpr = &builder.getExprRewriter().rewrite(
+						factoryCxt, it.get(), NULL);
+			}
+
+			if (posExpr != NULL) {
+				SQLExprs::Expression &posValueExpr =
+						createPositioningValueExpr(builder, it.get(), *posExpr);
+
+				it.remove();
+				it.insert(posValueExpr);
+			}
+		}
+		while (false);
+
+		if (posExpr != NULL || valueExpr != NULL) {
+			windowExprList.push_back(windowExpr);
 		}
 	}
+}
 
-	return windowExpr;
+SQLExprs::Expression& SQLSortOps::Window::createPositioningValueExpr(
+		OpCodeBuilder &builder, const SQLExprs::Expression &src,
+		const SQLExprs::Expression &posExpr) {
+
+	SQLExprs::ExprFactoryContext &factoryCxt = builder.getExprFactoryContext();
+	const uint32_t destInput = WindowMerge::IN_POSITIONING;
+
+	if (posExpr.getCode().getType() == SQLType::EXPR_CONSTANT) {
+		SQLExprs::ExprFactoryContext::Scope scope(factoryCxt);
+
+		SQLExprs::ExprRewriter &rewriter = builder.getExprRewriter();
+		SQLExprs::ExprRewriter::Scope rewriterScope(rewriter);
+		rewriter.activateColumnMapping(factoryCxt);
+		rewriter.setMappedInput(0, destInput);
+		return rewriter.rewrite(factoryCxt, src, NULL);
+	}
+	else {
+		SQLExprs::Expression &dest = SQLExprs::ExprRewriter::createColumnExpr(
+				factoryCxt, destInput, 1);
+		dest.getPlanningCode().setColumnType(src.getCode().getColumnType());
+		return dest;
+	}
 }
 
 SQLOps::Projection& SQLSortOps::Window::createProjectionWithWindow(
 		OpCodeBuilder &builder, const Projection &pipeProj, Projection &src,
-		SQLExprs::Expression *&windowExpr) {
+		ExprRefList &windowExprList) {
 	Projection &windowProj = builder.createProjection(
 			SQLOpTypes::PROJ_AGGR_PIPE, pipeProj.getProjectionCode());
 
@@ -1523,10 +2273,13 @@ SQLOps::Projection& SQLSortOps::Window::createProjectionWithWindow(
 			SQLExprs::ExprCode::ATTR_ASSIGNED |
 			SQLExprs::ExprCode::ATTR_AGGR_ARRANGED);
 
-	if (windowExpr != NULL) {
+	{
 		SQLExprs::Expression::ModIterator it(windowProj);
-		it.append(*windowExpr);
-		windowExpr = NULL;
+		for (ExprRefList::iterator exprIt = windowExprList.begin();
+				exprIt != windowExprList.end(); ++exprIt) {
+			it.append(**exprIt);
+		}
+		windowExprList.clear();
 	}
 
 	SQLOps::Projection &dest =
@@ -1543,45 +2296,50 @@ SQLOps::Projection& SQLSortOps::Window::createUnmatchWindowPipeProjection(
 	SQLExprs::ExprFactoryContext &factoryCxt =
 			builder.getExprFactoryContext();
 
-	const SQLExprs::ExprSpec *spec = NULL;
-	SQLExprs::Expression *windowExpr = NULL;
+	for (SQLExprs::Expression::ModIterator projIt(dest);
+			projIt.exists(); projIt.next()) {
+		SQLExprs::Expression &subExpr = projIt.get();
 
-	for (SQLExprs::Expression::ModIterator it(dest); it.exists(); it.next()) {
-		SQLExprs::Expression &subExpr = it.get();
-		const SQLExprs::ExprSpec &subSpec =
+		const SQLExprs::ExprSpec &spec =
 				factoryCxt.getFactory().getSpec(subExpr.getCode().getType());
-		if (SQLExprs::ExprRewriter::isWindowExpr(subSpec, true)) {
-			if (windowExpr != NULL) {
-				assert(false);
-				GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
-			}
-			windowExpr = &subExpr;
-			spec = &subSpec;
+		uint32_t index = 0;
+		if (!SQLExprs::ExprRewriter::findWindowPosArgIndex(spec, &index)) {
+			continue;
 		}
-	}
 
-	if (windowExpr != NULL) {
-		assert(false);
-		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
-	}
+		SQLExprs::Expression::ModIterator it(subExpr);
 
-	size_t index = 0;
-	for (SQLExprs::Expression::ModIterator it(*windowExpr);
-			it.exists(); it.next(), index++) {
-		const uint32_t &flags = spec->inList_[index].flags_;
-		if ((flags & (
-				SQLExprs::ExprSpec::FLAG_WINDOW_POS_BEFORE |
-				SQLExprs::ExprSpec::FLAG_WINDOW_POS_AFTER)) != 0) {
-			const int64_t unmatchValue = -1;
+		TupleColumnType valueType = TupleTypes::TYPE_ANY;
+		if (it.exists()) {
+			valueType = it.get().getCode().getColumnType();
 			it.remove();
-			it.insert(SQLExprs::ExprRewriter::createConstExpr(
-					factoryCxt, TupleValue(unmatchValue),
-					TupleTypes::TYPE_LONG));
-			break;
 		}
+		it.insert(SQLExprs::ExprRewriter::createEmptyConstExpr(
+				factoryCxt, valueType));
+
+		for (uint32_t i = index; it.exists() && i > 0; it.next(), i--) {
+		}
+
+		const int64_t unmatchValue = -1;
+		if (it.exists()) {
+			it.remove();
+		}
+		it.insert(SQLExprs::ExprRewriter::createConstExpr(
+				factoryCxt, TupleValue(unmatchValue),
+				TupleTypes::TYPE_LONG));
 	}
 
 	return dest;
+}
+
+void SQLSortOps::Window::duplicateExprList(
+		OpCodeBuilder &builder, const ExprRefList &src, ExprRefList &dest) {
+	SQLExprs::ExprFactoryContext &factoryCxt = builder.getExprFactoryContext();
+
+	for (ExprRefList::const_iterator it = src.begin(); it != src.end(); ++it) {
+		dest.push_back(
+				&builder.getExprRewriter().rewrite(factoryCxt, **it, NULL));
+	}
 }
 
 
@@ -1613,6 +2371,8 @@ void SQLSortOps::WindowPartition::execute(OpContext &cxt) const {
 			pipeProj->project(cxt);
 			subFinishProj->project(cxt);
 		}
+
+		SQLValues::VarContext::Scope varScope(cxt.getVarContext());
 
 		if (partCxt.posExpr_ != NULL) {
 			const TupleValue &posValue = partCxt.posExpr_->eval(exprCxt);
@@ -1728,27 +2488,37 @@ void SQLSortOps::WindowPartition::findWindowExpr(
 			builder.getExprFactoryContext().getFactory().getSpec(type);
 	assert(SQLExprs::ExprRewriter::isWindowExpr(spec, true));
 
-	if ((spec.flags_ & SQLExprs::ExprSpec::FLAG_WINDOW_VALUE_COUNTING) != 0) {
-		valueExpr = &expr->child();
+	bool withPos = false;
+	do {
+		uint32_t index;
+		if (!SQLExprs::ExprRewriter::findWindowPosArgIndex(spec, &index)) {
+			break;
+		}
+
+		withPos = true;
+		following = ((spec.inList_[index].flags_ &
+				SQLExprs::ExprSpec::FLAG_WINDOW_POS_AFTER) != 0);
+
+		SQLExprs::Expression::Iterator it(*expr);
+		for (uint32_t i = index; it.exists() && i > 0; it.next(), i--) {
+		}
+
+		if (!it.exists()) {
+			break;
+		}
+
+		const SQLExprs::Expression &posExprBase = it.get();
+		if (posExprBase.getCode().getType() == SQLType::EXPR_CONSTANT) {
+			break;
+		}
+
+		posExpr = &posExprBase;
 	}
+	while (false);
 
-	size_t index = 0;
-	for (SQLExprs::Expression::Iterator it(*expr); it.exists(); it.next(), index++) {
-		const SQLExprs::Expression *posExprBase = &it.get();
-		if (posExprBase->getCode().getType() == SQLType::EXPR_CONSTANT) {
-			continue;
-		}
-
-		const uint32_t &flags = spec.inList_[index].flags_;
-		if ((flags & SQLExprs::ExprSpec::FLAG_WINDOW_POS_BEFORE) != 0) {
-			posExpr = posExprBase;
-			break;
-		}
-		else if ((flags & SQLExprs::ExprSpec::FLAG_WINDOW_POS_AFTER) != 0) {
-			following = true;
-			posExpr = posExprBase;
-			break;
-		}
+	if ((spec.flags_ & SQLExprs::ExprSpec::FLAG_WINDOW_VALUE_COUNTING) != 0 ||
+			withPos) {
+		valueExpr = &expr->child();
 	}
 }
 
@@ -1766,7 +2536,8 @@ SQLSortOps::WindowPartition::preparePartitionContext(
 	if (keyList != NULL && !keyList->empty()) {
 		partCxt.keyEqBase_ = UTIL_MAKE_LOCAL_UNIQUE(
 				partCxt.keyEqBase_, TupleEq, cxt.getAllocator(),
-				SQLValues::TupleComparator(*keyList, false));
+				SQLValues::TupleComparator(
+						*keyList, &cxt.getVarContext(), false));
 		partCxt.keyEq_ = partCxt.keyEqBase_.get();
 	}
 
@@ -1977,8 +2748,11 @@ void SQLSortOps::WindowMerge::getProjections(
 
 const SQLExprs::Expression*
 SQLSortOps::WindowMerge::findPositioningExpr(
-		OpContext &cxt, bool &following) const {
+		OpContext &cxt, bool &following, bool &withDirection,
+		int64_t &amount) const {
 	following = false;
+	withDirection = false;
+	amount = 0;
 
 	const Projection *totalProj = getCode().getPipeProjection();
 	assert(totalProj->getProjectionCode().getType() ==
@@ -2000,21 +2774,36 @@ SQLSortOps::WindowMerge::findPositioningExpr(
 			builder.getExprFactoryContext().getFactory().getSpec(type);
 	assert(SQLExprs::ExprRewriter::isWindowExpr(spec, true));
 
-	size_t index = 0;
-	for (SQLExprs::Expression::Iterator it(expr); it.exists(); it.next(), index++) {
-		const SQLExprs::Expression &posExpr = it.get();
-		const uint32_t &flags = spec.inList_[index].flags_;
-		if ((flags & SQLExprs::ExprSpec::FLAG_WINDOW_POS_BEFORE) != 0) {
-			following = false;
-			return &posExpr;
+	const SQLExprs::Expression *posExpr = NULL;
+	uint32_t index;
+	if (SQLExprs::ExprRewriter::findWindowPosArgIndex(spec, &index)) {
+		following = ((spec.inList_[index].flags_ &
+				SQLExprs::ExprSpec::FLAG_WINDOW_POS_AFTER) != 0);
+
+		SQLExprs::Expression::Iterator it(expr);
+		for (uint32_t i = index; it.exists() && i > 0; it.next(), i--) {
 		}
-		else if ((flags & SQLExprs::ExprSpec::FLAG_WINDOW_POS_AFTER) != 0) {
-			following = true;
-			return &posExpr;
+
+		if (it.exists()) {
+			posExpr = &it.get();
+			if (posExpr->getCode().getType() == SQLType::EXPR_CONSTANT) {
+				withDirection = true;
+				const TupleValue posValue = posExpr->getCode().getValue();
+				if (SQLValues::ValueUtils::isNull(posValue)) {
+					amount = std::numeric_limits<int64_t>::max();
+				}
+				else {
+					amount = SQLValues::ValueUtils::getValue<int64_t>(posValue);
+				}
+			}
+		}
+		else {
+			withDirection = true;
+			amount = 1;
 		}
 	}
 
-	return NULL;
+	return posExpr;
 }
 
 SQLSortOps::WindowMerge::MergeContext&
@@ -2027,29 +2816,26 @@ SQLSortOps::WindowMerge::prepareMergeContext(OpContext &cxt) const {
 	MergeContext &mergeCxt = cxt.getResource(0).resolveAs<MergeContext>();
 
 	bool following;
-	const SQLExprs::Expression *expr = findPositioningExpr(cxt, following);
-	if (expr == NULL) {
+	bool withDirection;
+	int64_t amount;
+	const SQLExprs::Expression *expr =
+			findPositioningExpr(cxt, following, withDirection, amount);
+	if (expr == NULL && !withDirection) {
 		mergeCxt.positioningReaderProgress_ = -1;
 		mergeCxt.relativePositionDirection_ = -1;
 	}
 	else {
 		mergeCxt.positioningReaderProgress_ = 0;
 
-		if (expr->getCode().getType() == SQLType::EXPR_CONSTANT) {
+		if (withDirection) {
 			mergeCxt.relativePositionDirection_ = (following ? 1 : 0);
-			mergeCxt.relativePositionAmount_ =
-					SQLValues::ValueUtils::getValue<int64_t>(
-							expr->getCode().getValue());
+			mergeCxt.relativePositionAmount_ = amount;
 		}
 		else {
 			mergeCxt.relativePositionDirection_ = -1;
+			mergeCxt.positionColumn_ =
+					cxt.getReaderColumn(IN_POSITIONING, 0);
 		}
-
-		const SQLExprs::ExprCode &code = expr->getCode();
-		assert(code.getInput() == IN_MAIN);
-
-		mergeCxt.positionColumn_ =
-				cxt.getReaderColumn(code.getInput(), code.getColumnPos());
 	}
 
 	SQLExprs::WindowState &windowState = mergeCxt.windowState_;
@@ -2073,12 +2859,7 @@ SQLOps::TupleListReader* SQLSortOps::WindowMerge::preparePositioningReader(
 		return NULL;
 	}
 
-	if (mergeCxt.relativePositionDirection_ < 0) {
-		return &cxt.getReader(IN_POSITIONING);
-	}
-	else {
-		return &cxt.getReader(IN_MAIN, 1);
-	}
+	return &cxt.getReader(IN_POSITIONING);
 }
 
 void SQLSortOps::WindowMerge::readNextPartitionCounts(

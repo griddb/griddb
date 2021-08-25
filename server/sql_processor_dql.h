@@ -101,44 +101,70 @@ private:
 	typedef SQLOps::OpStoreId OpStoreId;
 	typedef SQLOps::OpCursor OpCursor;
 	typedef SQLOps::OpStore OpStore;
+	typedef SQLOps::OpCode OpCode;
+	typedef SQLOps::OpAllocatorManager OpAllocatorManager;
+
+	typedef util::AllocVector<TupleList::TupleColumnType> AllocTupleInfo;
+	typedef util::AllocVector<AllocTupleInfo> AllocTupleInfoList;
+	typedef util::AllocXArray<uint8_t> OptionImage;
+
+	struct InfoEntry {
+		InfoEntry(const util::StdAllocator<void, void> &alloc);
+
+		util::LocalUniquePtr<TupleList::Group> storeGroup_;
+		OptionImage optionImage_;
+		AllocTupleInfoList inputInfo_;
+		AllocTupleInfo outputInfo_;
+	};
 
 	static const ProcRegistrar REGISTRAR_LIST[];
 	static const ProcRegistrarTable REGISTRAR_TABLE;
 
-	OpStore::Entry& getInputEntry(InputId inputId);
-	OpStore::Entry* findInputEntry(InputId inputId);
-
-	static void appendBlock(OpStore::Entry &entry, const Block &block);
+	OpStore::Entry& getInputEntry(Context &cxt, InputId inputId);
+	OpStore::Entry* findInputEntry(Context &cxt, InputId inputId);
 
 	OpCursor::Source getCursorSource(Context &cxt);
+	OpStore& prepareStore(Context &cxt);
+	SQLOps::ExtOpContext& getExtOpContext(Context &cxt);
+
+	void loadOption(
+			SQLValues::ValueContext &valueCxt, const OptionImage &image,
+			DQLProcs::Option &option) const;
+
+	static SQLValues::ValueContext::Source getValueContextSource(
+			util::StackAllocator &alloc, SQLValues::VarAllocator &varAlloc,
+			TupleList::Group &storeGroup,
+			util::LocalUniquePtr<SQLValues::VarContext> &varCxt);
 
 	const OpStoreId& getStoreRootId() const;
 
 	static const SQLOps::OpCode& getRootCode(
 			OpStore &store, const OpStoreId &rootId);
 
+	static void setUpConfig(
+			OpStore &store, const SQLProcessorConfig *config, bool merged);
 	static void setUpRoot(
 			OpStore &store, OpStore::Entry &rootEntry,
-			const DQLProcs::Option &option, const TupleInfoList &inputInfo);
+			const DQLProcs::Option &option,
+			const AllocTupleInfoList &inputInfo);
 	static void setUpInput(
 			const SQLOps::OpCode &code, size_t inputCount,
 			InputId &inputIdOffset);
 
 	static SQLOps::OpCode createOpCode(
 			util::StackAllocator &alloc, const DQLProcs::Option &option,
-			const TupleInfoList &inputInfo);
+			const AllocTupleInfoList &inputInfo);
 	static void getOutputInfo(
 			const SQLOps::OpCode &code, TupleInfo &outputInfo);
 
 	static bool isProfilerRequested(const Profiler &profiler);
 	static bool matchProfilerResultType(const Profiler &profiler, bool asStream);
 
-	util::StdAllocator<void, void> alloc_;
-	util::LocalUniquePtr<TupleList::Group> storeGroup_;
-	OpStore store_;
+	util::AllocUniquePtr<InfoEntry> infoEntry_;
+	util::LocalUniquePtr<OpAllocatorManager> allocManager_;
+	util::LocalUniquePtr<OpStore> store_;
 	OpStoreId storeRootId_;
 	InputId inputIdOffset_;
-	util::AllocUniquePtr<DQLProcs::Option> option_;
 	util::AllocUniquePtr<DQLProcs::ExtProcContext> extCxt_;
 	Profiler profiler_;
 };
@@ -202,7 +228,6 @@ public:
 
 	virtual bool isOnTransactionService();
 	virtual double getStoreMemoryAgingSwapRate();
-	virtual void getConfig(SQLOps::OpConfig &config);
 
 	virtual uint32_t getTotalWorkerId();
 

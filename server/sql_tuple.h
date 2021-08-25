@@ -27,6 +27,13 @@
 #include "sql_temp_store.h"
 #include "sql_common.h"
 
+
+
+
+
+
+
+
 class LocalTempStore;
 class ResourceGroup;
 class TupleList {
@@ -948,7 +955,7 @@ public:
 	class Image;
 	friend class Image;
 
-	static const uint32_t CONTIGUOUS_BLOCK_THRESHOLD = 10;
+	static const uint32_t CONTIGUOUS_BLOCK_THRESHOLD = 1;
 
 	Writer();
 
@@ -2293,12 +2300,12 @@ inline TupleList::TupleColumnType TupleValue::getType() const {
 }
 
 inline const void* TupleValue::fixedData() const {
-	assert(TupleColumnTypeUtils::isFixed(type_));
+	assert(TupleColumnTypeUtils::isFixed(getType()));
 	return data_.fixedData_;
 }
 
 inline size_t TupleValue::varSize() const {
-	assert(!TupleColumnTypeUtils::isFixed(type_));
+	assert(!TupleColumnTypeUtils::isFixed(getType()));
 	if (data_.varData_) {
 		uint32_t len;
 		TupleValueUtils::decodeInt32(data_.varData_, len);
@@ -2310,7 +2317,7 @@ inline size_t TupleValue::varSize() const {
 }
 
 inline const void* TupleValue::varData(size_t &headerSize, size_t &dataSize) const {
-	assert(TupleColumnTypeUtils::isSingleVar(type_));
+	assert(TupleColumnTypeUtils::isSingleVar(getType()));
 	if (data_.varData_) {
 		uint32_t value = 0;
 		headerSize = TupleValueUtils::decodeInt32(data_.varData_, value);
@@ -2325,7 +2332,7 @@ inline const void* TupleValue::varData(size_t &headerSize, size_t &dataSize) con
 }
 
 inline const void* TupleValue::varData() const {
-	assert(TupleColumnTypeUtils::isSingleVar(type_));
+	assert(TupleColumnTypeUtils::isSingleVar(getType()));
 	if (data_.varData_) {
 		uint32_t value;
 		size_t headerSize = TupleValueUtils::decodeInt32(data_.varData_, value);

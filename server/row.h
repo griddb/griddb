@@ -2243,10 +2243,10 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::copyRowArray(
 template<typename Container, RowArrayType rowArrayType>
 void BaseContainer::RowArrayImpl<Container, rowArrayType>::moveRowArray(TransactionContext &txn) {
 	uint16_t currentCursor = elemCursor_;
+	container_->addRemovedRowArray(txn, getBaseOId());
 	for (begin(); !end(); next()) {
 		container_->addUpdatedRow(txn, row_.getRowId(), getOId());
 	}
-	container_->addRemovedRowArray(txn, getBaseOId());
 	moveCursor(currentCursor);
 }
 

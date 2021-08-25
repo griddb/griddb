@@ -18,6 +18,8 @@
 #include "sql_operator_join.h"
 #include "sql_operator_utils.h"
 
+
+
 const SQLOps::OpRegistrar
 SQLJoinOps::Registrar::REGISTRAR_INSTANCE((Registrar()));
 
@@ -28,9 +30,10 @@ void SQLJoinOps::Registrar::operator()() const {
 	add<SQLOpTypes::OP_JOIN_SORTED, JoinSorted>();
 	add<SQLOpTypes::OP_JOIN_NESTED, JoinNested>();
 	add<SQLOpTypes::OP_JOIN_COMP_MERGE, JoinCompMerge>();
+	add<SQLOpTypes::OP_JOIN_HASH, JoinInnerHash>();
 	add<SQLOpTypes::OP_JOIN_OUTER_NESTED, JoinOuterNested>();
 	add<SQLOpTypes::OP_JOIN_OUTER_COMP_MERGE, JoinOuterCompMerge>();
-	add<SQLOpTypes::OP_JOIN_HASH, JoinHash>();
+	add<SQLOpTypes::OP_JOIN_OUTER_HASH, JoinOuterHash>();
 }
 
 
@@ -38,7 +41,7 @@ void SQLJoinOps::Join::compile(OpContext &cxt) const {
 	OpPlan &plan = cxt.getPlan();
 	const OpCode &code = getCode();
 
-	const uint32_t inCount = getCode().getInputCount();
+	const uint32_t inCount = code.getInputCount();
 
 	const SQLType::JoinType joinType = code.getJoinType();
 
@@ -63,16 +66,28 @@ void SQLJoinOps::Join::compile(OpContext &cxt) const {
 	bool withKey = (keyColumnList != NULL);
 	const bool eqOnly = isOnlyEqKeyFound(keyColumnList);
 
+	const bool outEmpty = (code.getLimit() == 0);
+
 	bool empty;
 	bool small;
-	const int32_t baseDrivingInput =
-			detectDrivingInput(cxt, getCode(), &small, &empty);
+	int32_t baseDrivingInput;
+	if (outEmpty) {
+		empty = true;
+		small = true;
+		baseDrivingInput = 0;
+	}
+	else {
+		baseDrivingInput = detectDrivingInput(cxt, code, &small, &empty);
+	}
+
 	if (baseDrivingInput < 0) {
 		cxt.setPlanPending();
 		return;
 	}
 
-	const int64_t graceHashLimit = 1;
+
+	const int64_t graceHashLimit = SQLOps::OpConfig::resolve(
+			SQLOpTypes::CONF_GRACE_HASH_LIMIT, getCode().getConfig());
 
 	const bool graceHashAlways = false;
 
@@ -84,8 +99,8 @@ void SQLJoinOps::Join::compile(OpContext &cxt) const {
 	OpCodeBuilder builder(OpCodeBuilder::ofContext(cxt));
 	if (withKey && SQLValues::TupleComparator(
 			builder.getExprRewriter().rewriteCompColumnList(
-					builder.getExprFactoryContext(),
-					*keyColumnList, false), false).isEitherSideEmpty(0) &&
+					builder.getExprFactoryContext(), *keyColumnList, false),
+			NULL, false).isEitherSideEmpty(0) &&
 			!graceHashAlways) {
 		withKey = false;
 		empty = true;
@@ -96,14 +111,13 @@ void SQLJoinOps::Join::compile(OpContext &cxt) const {
 		withKey = false;
 		sorting = false;
 	}
-	else if (eqOnly && (
-			(small && !outer) ||
-			(!small && graceHashLimit <= 0))) {
+	else if (eqOnly && (small || (!small && graceHashLimit <= 0))) {
 		sorting = false;
 	}
 
 	int32_t drivingInput = -1;
-	if (!outer || baseDrivingInput == outerDrivingInput) {
+	if (!outer || (withKey && !sorting) ||
+			baseDrivingInput == outerDrivingInput) {
 		drivingInput = baseDrivingInput;
 	}
 	else {
@@ -113,7 +127,9 @@ void SQLJoinOps::Join::compile(OpContext &cxt) const {
 	OpNode &joinNode = plan.createNode(
 			sorting ? SQLOpTypes::OP_JOIN_SORTED :
 			withKey ? (small ?
-					SQLOpTypes::OP_JOIN_HASH :
+					(outer ?
+							SQLOpTypes::OP_JOIN_OUTER_HASH :
+							SQLOpTypes::OP_JOIN_HASH) :
 					SQLOpTypes::OP_JOIN_GRACE_HASH) :
 			(outer ?
 					SQLOpTypes::OP_JOIN_OUTER_NESTED :
@@ -121,10 +137,11 @@ void SQLJoinOps::Join::compile(OpContext &cxt) const {
 
 	for (uint32_t i = 0; i < inCount; i++) {
 		const SQLOps::OpNode *inNode = &plan.getParentInput(i);
-		if (empty && static_cast<int32_t>(i) != outerDrivingInput) {
+		if (empty &&
+				(outEmpty || static_cast<int32_t>(i) != outerDrivingInput)) {
 			OpCode emptyCode;
 			emptyCode.setPipeProjection(
-					&builder.createEmptyRefProjection(false, i, 0));
+					&builder.createEmptyRefProjection(false, i, 0, NULL));
 			emptyCode.setLimit(0);
 
 			SQLOps::OpNode &emptyNode = plan.createNode(SQLOpTypes::OP_SELECT);
@@ -139,6 +156,9 @@ void SQLJoinOps::Join::compile(OpContext &cxt) const {
 
 	Projection *distinctProj = NULL;
 	{
+		SQLExprs::ExprRewriter &rewriter = builder.getExprRewriter();
+		SQLExprs::ExprFactoryContext &factoryCxt = builder.getExprFactoryContext();
+
 		OpCode joinCode = code;
 
 		if (withKey) {
@@ -149,8 +169,17 @@ void SQLJoinOps::Join::compile(OpContext &cxt) const {
 					subKeyColumnList.end(),
 					keyColumnList->begin(), keyColumnList->end());
 
-			exrtactJoinKeyColumns(code.getJoinPredicate(), subKeyColumnList);
-			exrtactJoinKeyColumns(code.getFilterPredicate(), subKeyColumnList);
+			if (!sorting) {
+				SQLOpUtils::CompPosSet posSet(factoryCxt.getAllocator());
+
+				joinCode.setJoinPredicate(builder.extractJoinKeyColumns(
+						joinCode.getJoinPredicate(), NULL,
+						subKeyColumnList, posSet, NULL));
+
+				joinCode.setFilterPredicate(builder.extractJoinKeyColumns(
+						joinCode.getFilterPredicate(), &joinType,
+						subKeyColumnList, posSet, NULL));
+			}
 
 			joinCode.setKeyColumnList(&subKeyColumnList);
 			joinCode.setSideKeyColumnList(
@@ -161,27 +190,29 @@ void SQLJoinOps::Join::compile(OpContext &cxt) const {
 		}
 
 		std::pair<Projection*, Projection*> projections;
-		if (!(!sorting && withKey && !small)) {
+		if (sorting || !withKey || small) {
 			joinCode.setDrivingInput(drivingInput);
 			projections = builder.arrangeProjections(
 					joinCode, true, true, &distinctProj);
 		}
 
+		if (outer && sorting) {
+			const bool first = (drivingInput == 0);
+			joinCode.setJoinPredicate(rewriter.compColumnListToKeyFilterPredicate(
+					factoryCxt, *keyColumnList, first, joinCode.getJoinPredicate()));
+		}
 
 		const Projection *pipeProj;
-		if (!withKey && outer) {
-			SQLExprs::ExprRewriter &rewriter = builder.getExprRewriter();
-			SQLExprs::ExprFactoryContext &factoryCxt = builder.getExprFactoryContext();
-
+		if (outer && !sorting && projections.first != NULL) {
 			SQLExprs::ExprRewriter::Scope scope(rewriter);
 			rewriter.activateColumnMapping(factoryCxt);
 
-			Projection &plainPipe = builder.rewriteProjection(*projections.first);
+			Projection &plainProj = builder.rewriteProjection(*projections.first);
 			builder.applyJoinType(joinType);
 			rewriter.setInputNull(1, true);
 			rewriter.setCodeSetUpAlways(true);
-			Projection &nullPipe = builder.rewriteProjection(*projections.first);
-			pipeProj = &builder.createMultiStageProjection(plainPipe, nullPipe);
+			Projection &nullProj = builder.rewriteProjection(*projections.first);
+			pipeProj = &builder.createMultiStageProjection(plainProj, nullProj);
 		}
 		else {
 			pipeProj = projections.first;
@@ -218,28 +249,50 @@ bool SQLJoinOps::Join::isOnlyEqKeyFound(
 
 int32_t SQLJoinOps::Join::detectDrivingInput(
 		OpContext &cxt, const OpCode &code, bool *small, bool *empty) {
+	const int32_t baseDrivingInput =
+			detectDrivingInputDetail(cxt, code, small, empty, false);
+
+	if (baseDrivingInput >= 0 && *small && !(*empty)) {
+		return detectDrivingInputDetail(cxt, code, small, empty, true);
+	}
+
+	return baseDrivingInput;
+}
+
+int32_t SQLJoinOps::Join::detectDrivingInputDetail(
+		OpContext &cxt, const OpCode &code, bool *small, bool *empty,
+		bool exact) {
+	const SQLValues::CompColumnList *keyList = code.findKeyColumnList();
+
 	const int64_t memLimit = SQLOps::OpConfig::resolve(
 			SQLOpTypes::CONF_WORK_MEMORY_LIMIT, code.getConfig());
+	const uint64_t baseThreshold = 32 * 1024 * 1024;
+	const uint64_t rawThreshold =
+			(memLimit < 0 ? baseThreshold : static_cast<uint64_t>(memLimit));
 	const uint64_t threshold =
-			static_cast<uint64_t>(memLimit < 0 ? 16 * 1024 * 1024 : memLimit / 2);
+			std::max(rawThreshold, std::min(rawThreshold * 2, baseThreshold));
 
 	bool eitherEmpty = false;
 	bool eitherSmall = false;
 	bool eitherLarge = false;
+	bool bothLarge = true;
 
 	int32_t smallSide = -1;
 	uint64_t sizeList[2];
-	for (uint32_t i = 0; i < 2; i++) {
-		sizeList[i] = cxt.getInputSize(i);
+	for (uint32_t i = 2; i > 0;) {
+		uint64_t *size = &sizeList[--i];
+		*size = cxt.getInputSize(i);
 
-		if (sizeList[i] <= threshold) {
+		if (*size <= threshold && (!exact ||
+				estimateHashMapSize(cxt, keyList, i) <= threshold)) {
 			if (!eitherSmall && cxt.isInputCompleted(i)) {
-				if (sizeList[i] <= 0) {
+				if (*size <= 0) {
 					eitherEmpty = true;
 				}
 				eitherSmall = true;
 				smallSide = static_cast<int32_t>(i);
 			}
+			bothLarge = false;
 		}
 		else {
 			eitherLarge = true;
@@ -256,12 +309,39 @@ int32_t SQLJoinOps::Join::detectDrivingInput(
 	else if (cxt.isAllInputCompleted()) {
 		return (sizeList[0] >= sizeList[1] ? 0 : 1);
 	}
-	else if (eitherSmall && eitherLarge) {
+	else if (eitherSmall) {
 		return (smallSide != 0 ? 0 : 1);
+	}
+	else if (bothLarge) {
+		return 0;
 	}
 	else {
 		return -1;
 	}
+}
+
+uint64_t SQLJoinOps::Join::estimateHashMapSize(
+		OpContext &cxt, const SQLValues::CompColumnList *keyList,
+		uint32_t input) {
+	assert(input < 2);
+	const SQLOps::TupleColumnList &columnList = cxt.getInputColumnList(input);
+	const uint64_t tupleCount = cxt.getInputTupleCount(input);
+
+	util::StackAllocator &alloc = cxt.getAllocator();
+	SQLValues::ValueContext valueCxt(SQLValues::ValueContext::ofAllocator(alloc));
+
+	SummaryTupleSet tupleSet(valueCxt, NULL);
+	tupleSet.addReaderColumnList(columnList);
+	if (keyList != NULL) {
+		tupleSet.addKeyList(*keyList, (input == 0), false);
+	}
+	tupleSet.setNullKeyIgnorable(true);
+	tupleSet.completeColumns();
+
+	const size_t hashHeadSize = sizeof(uint64_t) * 2;
+	const size_t hashValueSize = tupleSet.estimateTupleSize();
+
+	return tupleCount * (hashHeadSize + hashValueSize);
 }
 
 SQLJoinOps::JoinInputOrdinals SQLJoinOps::Join::getOrdinals(
@@ -277,6 +357,34 @@ SQLJoinOps::JoinInputOrdinals SQLJoinOps::Join::getOrdinals(
 bool SQLJoinOps::Join::checkJoinReady(
 		OpContext &cxt, const JoinInputOrdinals &ordinals) {
 	return cxt.isInputCompleted(ordinals.inner());
+}
+
+const SQLOps::Projection* SQLJoinOps::Join::expandProjection(
+		const SQLOps::Projection *&proj, bool outer) {
+	assert(proj != NULL);
+	assert(!!outer == (proj->getProjectionCode().getType() ==
+			SQLOpTypes::PROJ_MULTI_STAGE));
+
+	if (!outer) {
+		return NULL;
+	}
+
+	const SQLOps::Projection *plainProj = &proj->chainAt(0);
+	const SQLOps::Projection *nullProj = &proj->chainAt(1);
+
+	proj = plainProj;
+	return nullProj;
+}
+
+inline bool SQLJoinOps::Join::matchCondition(
+		OpContext &cxt, const SQLExprs::Expression *condExpr) {
+	if (condExpr != NULL) {
+		SQLValues::VarContext::Scope varScope(cxt.getVarContext());
+		return SQLValues::ValueUtils::isTrue(
+				condExpr->eval(cxt.getExprContext()));
+	}
+
+	return true;
 }
 
 SQLValues::CompColumnList SQLJoinOps::Join::resolveKeyList(
@@ -330,41 +438,6 @@ SQLValues::CompColumnList SQLJoinOps::Join::toSingleSideKeyList(
 	}
 
 	return dest;
-}
-
-void SQLJoinOps::Join::exrtactJoinKeyColumns(
-		const SQLExprs::Expression *expr, SQLValues::CompColumnList &dest) {
-	if (expr == NULL) {
-		return;
-	}
-
-	const SQLExprs::ExprType type = expr->getCode().getType();
-	if (type == SQLType::EXPR_AND) {
-		const SQLExprs::Expression &left = expr->child();
-		const SQLExprs::Expression &right = left.next();
-		exrtactJoinKeyColumns(&left, dest);
-		exrtactJoinKeyColumns(&right, dest);
-	}
-	else if (type == SQLType::OP_EQ) {
-		const SQLExprs::Expression *left = &expr->child();
-		const SQLExprs::Expression *right = &left->next();
-		if (left->getCode().getType() != SQLType::EXPR_COLUMN ||
-				right->getCode().getType() != SQLType::EXPR_COLUMN) {
-			return;
-		}
-		if (left->getCode().getInput() != 0) {
-			std::swap(left, right);
-		}
-		if (left->getCode().getInput() != 0 ||
-				right->getCode().getInput() != 1) {
-			return;
-		}
-		dest.push_back(SQLExprs::ExprTypeUtils::toCompColumn(
-				type,
-				left->getCode().getColumnPos(),
-				right->getCode().getColumnPos(),
-				false));
-	}
 }
 
 
@@ -499,12 +572,21 @@ void SQLJoinOps::JoinGraceHash::compile(OpContext &cxt) const {
 
 	OpCodeBuilder builder(OpCodeBuilder::ofContext(cxt));
 
+	const bool orderingAvailable = JoinHash::isOrderingAvailable(
+			builder.getExprRewriter().rewriteCompColumnList(
+					builder.getExprFactoryContext(),
+					getCode().getKeyColumnList(), false));
+
 	SQLOps::OpConfig &config = builder.createConfig();
 	const SQLOps::OpConfig *srcConfig = getCode().getConfig();
 	if (srcConfig != NULL) {
 		config = *srcConfig;
 	}
 	config.set(SQLOpTypes::CONF_GRACE_HASH_LIMIT, 1);
+
+	if (getCode().getLimit() >= 0) {
+		config.set(SQLOpTypes::CONF_LIMIT_INHERITANCE, 1);
+	}
 
 	const uint32_t bucketCount = getBucketCount(cxt);
 	const uint32_t inCount = 2;
@@ -517,6 +599,9 @@ void SQLJoinOps::JoinGraceHash::compile(OpContext &cxt) const {
 		SQLValues::CompColumnList &bucketKeyList =
 				builder.createCompColumnList();
 		bucketKeyList = *(first ? sideKeyList->first : sideKeyList->second);
+		if (!bucketKeyList.empty()) {
+			bucketKeyList.front().setOrdering(orderingAvailable);
+		}
 
 		OpCode code;
 		code.setKeyColumnList(&bucketKeyList);
@@ -538,7 +623,10 @@ void SQLJoinOps::JoinGraceHash::compile(OpContext &cxt) const {
 	const ProjectionRefPair &joinProjections =
 			createJoinProjections(builder, srcProjections, aggrMode);
 
-	OpNode &unionNode = plan.createNode(SQLOpTypes::OP_UNION);
+	OpNode *unionNode = NULL;
+	if (aggrMode != 0) {
+		unionNode = &plan.createNode(SQLOpTypes::OP_UNION);
+	}
 
 	for (uint32_t i = 0; i < bucketCount; i++) {
 		OpNode &node = plan.createNode(SQLOpTypes::OP_JOIN);
@@ -547,7 +635,6 @@ void SQLJoinOps::JoinGraceHash::compile(OpContext &cxt) const {
 			code.setConfig(&config);
 			code.setPipeProjection(joinProjections.first);
 			code.setFinishProjection(joinProjections.second);
-			code.setLimit(-1);
 			node.setCode(code);
 		}
 
@@ -555,19 +642,28 @@ void SQLJoinOps::JoinGraceHash::compile(OpContext &cxt) const {
 			node.addInput(*bucketNodeList[j], i);
 		}
 
-		unionNode.addInput(node);
+		if (unionNode != NULL) {
+			unionNode->addInput(node);
+		}
+		else {
+			plan.getParentOutput(0).addInput(node);
+		}
+	}
+
+	if (unionNode == NULL) {
+		return;
 	}
 
 	{
 		OpCode code;
 		code.setPipeProjection(&createUnionProjection(cxt, joinProjections));
 		code.setUnionType(SQLType::UNION_ALL);
-		unionNode.setCode(code);
+		unionNode->setCode(code);
 	}
 
 	OpNode *resultNode;
 	if (aggrMode == 0) {
-		resultNode = &unionNode;
+		resultNode = unionNode;
 	}
 	else {
 		const ProjectionRefPair &mergeProjections =
@@ -581,7 +677,7 @@ void SQLJoinOps::JoinGraceHash::compile(OpContext &cxt) const {
 			code.setFinishProjection(mergeProjections.second);
 			selectNode.setCode(code);
 		}
-		selectNode.addInput(unionNode);
+		selectNode.addInput(*unionNode);
 		resultNode = &selectNode;
 	}
 
@@ -600,8 +696,10 @@ uint32_t SQLJoinOps::JoinGraceHash::getBucketCount(OpContext &cxt) const {
 			SQLOpTypes::CONF_WORK_MEMORY_LIMIT, getCode().getConfig());
 	const uint64_t resolvedLimit =
 			static_cast<uint64_t>(memLimit < 0 ? 32 * 1024 * 1024 : memLimit);
-	return static_cast<uint32_t>(
-			std::max<uint64_t>(resolvedLimit / (1024 * 512) / 4, 1U));
+
+	const uint64_t count = SQLValues::ValueUtils::getApproxPrimeNumber(
+			std::max<uint64_t>(resolvedLimit / cxt.getInputBlockSize(0) / 4, 1U));
+	return static_cast<uint32_t>(count);
 }
 
 SQLOps::Projection& SQLJoinOps::JoinGraceHash::createBucketProjection(
@@ -761,8 +859,8 @@ void SQLJoinOps::JoinSorted::compile(OpContext &cxt) const {
 		}
 		rewriter.setInputProjected(true);
 
-		SQLValues::CompColumnList &outList =
-				rewriter.remapCompColumnList(factoryCxt, midList, i, true);
+		SQLValues::CompColumnList &outList = rewriter.remapCompColumnList(
+				factoryCxt, midList, i, true, false, NULL);
 		subCode.setKeyColumnList(&outList);
 
 		Projection *pipeProj = &builder.createMultiStageProjection(
@@ -885,23 +983,27 @@ void SQLJoinOps::JoinCompMerge::execute(OpContext &cxt) const {
 	TupleListReader &reader2 = cxt.getReader(ordinals.inner());
 	TupleListReader &reader2Lower = cxt.getReader(ordinals.inner(), 1); 
 
+	if (cxt.getResource(0).isEmpty()) {
+		cxt.getResource(0) = ALLOC_UNIQUE(cxt.getAllocator(), JoinMergeContext);
+	}
+	JoinMergeContext &mergeCxt = cxt.getResource(0).resolveAs<JoinMergeContext>();
+
 	const Comparator comp(
 			cxt.getAllocator(),
-			TupleRangeComparator(getCode().getKeyColumnList()));
+			TupleRangeComparator(
+					getCode().getKeyColumnList(), &cxt.getVarContext()),
+			cxt.getValueProfile());
 
 	if (!reader2.exists()) {
 		return;
 	}
-	reader2Lower.exists(); 
 
 	const SQLOps::Projection *proj = getCode().getPipeProjection();
-	bool lowerAssignable = false;
 	for (; reader1.exists(); reader1.next()) {
 		if (cxt.checkSuspended()) { 
 			return;
 		}
 
-		bool lowerReached = false;
 		for (; reader2.exists(); reader2.next()) {
 			if (cxt.checkSuspended()) { 
 				return;
@@ -910,14 +1012,12 @@ void SQLJoinOps::JoinCompMerge::execute(OpContext &cxt) const {
 			const int32_t ret =
 					comp(ReaderSourceType(reader1), ReaderSourceType(reader2));
 
-			if (!lowerReached) {
+			if (!mergeCxt.lowerReached_) {
 				if (ret > 0) {
 					continue; 
 				}
-				if (lowerAssignable) {
-					reader2Lower.assign(reader2);
-				}
-				lowerReached = true;
+				reader2Lower.assign(reader2);
+				mergeCxt.lowerReached_ = true;
 			}
 
 			if (ret < 0) {
@@ -927,8 +1027,10 @@ void SQLJoinOps::JoinCompMerge::execute(OpContext &cxt) const {
 			proj->project(cxt);
 		}
 
-		reader2.assign(reader2Lower);
-		lowerAssignable = true;
+		if (mergeCxt.lowerReached_) {
+			reader2.assign(reader2Lower);
+			mergeCxt.lowerReached_ = false;
+		}
 	}
 }
 
@@ -956,8 +1058,8 @@ void SQLJoinOps::JoinOuterNested::execute(OpContext &cxt) const {
 	}
 	const bool reader2Exists = reader2Top.exists();
 
-	const SQLOps::Projection &proj = getCode().getPipeProjection()->chainAt(0);
-	const SQLOps::Projection &nullProj = getCode().getPipeProjection()->chainAt(1);
+	const SQLOps::Projection *proj = getCode().getPipeProjection();
+	const SQLOps::Projection *nullProj = Join::expandProjection(proj, true);
 	const SQLExprs::Expression *joinPred = getCode().getJoinPredicate();
 	for (; reader1.exists(); reader1.next()) {
 		if (cxt.checkSuspended()) { 
@@ -968,12 +1070,11 @@ void SQLJoinOps::JoinOuterNested::execute(OpContext &cxt) const {
 				return;
 			}
 
-			if (joinPred != NULL && !SQLValues::ValueUtils::isTrue(
-					joinPred->eval(cxt.getExprContext()))) {
+			if (!Join::matchCondition(cxt, joinPred)) {
 				continue;
 			}
 
-			proj.project(cxt);
+			proj->project(cxt);
 			outerCxt.matched_ = true;
 		}
 
@@ -981,7 +1082,7 @@ void SQLJoinOps::JoinOuterNested::execute(OpContext &cxt) const {
 			outerCxt.matched_ = false;
 		}
 		else {
-			nullProj.project(cxt);
+			nullProj->project(cxt);
 		}
 
 		if (reader2Exists) {
@@ -1005,24 +1106,24 @@ void SQLJoinOps::JoinOuterCompMerge::execute(OpContext &cxt) const {
 	TupleListReader &reader2Lower = cxt.getReader(ordinals.inner(), 1); 
 
 	if (cxt.getResource(0).isEmpty()) {
-		cxt.getResource(0) = ALLOC_UNIQUE(cxt.getAllocator(), JoinOuterContext);
+		cxt.getResource(0) = ALLOC_UNIQUE(cxt.getAllocator(), JoinMergeContext);
 	}
-	JoinOuterContext &outerCxt = cxt.getResource(0).resolveAs<JoinOuterContext>();
+	JoinMergeContext &mergeCxt = cxt.getResource(0).resolveAs<JoinMergeContext>();
 
 	const Comparator comp(
 			cxt.getAllocator(),
-			TupleRangeComparator(getCode().getKeyColumnList()));
+			TupleRangeComparator(
+					getCode().getKeyColumnList(), &cxt.getVarContext()),
+			cxt.getValueProfile());
 
-	const SQLOps::Projection &proj = getCode().getPipeProjection()->chainAt(0);
-	const SQLOps::Projection &nullProj = getCode().getPipeProjection()->chainAt(1);
+	const SQLOps::Projection *proj = getCode().getPipeProjection();
+	const SQLOps::Projection *nullProj = Join::expandProjection(proj, true);
 	const SQLExprs::Expression *joinPred = getCode().getJoinPredicate();
-	bool lowerAssignable = false;
 	for (; reader1.exists(); reader1.next()) {
 		if (cxt.checkSuspended()) { 
 			return;
 		}
 
-		bool lowerReached = false;
 		for (; reader2.exists(); reader2.next()) {
 			if (cxt.checkSuspended()) { 
 				return;
@@ -1031,39 +1132,36 @@ void SQLJoinOps::JoinOuterCompMerge::execute(OpContext &cxt) const {
 			const int32_t ret =
 					comp(ReaderSourceType(reader1), ReaderSourceType(reader2));
 
-			if (!lowerReached) {
+			if (!mergeCxt.lowerReached_) {
 				if (ret > 0) {
 					continue; 
 				}
-				if (lowerAssignable) {
-					reader2Lower.assign(reader2);
-				}
-				lowerReached = true;
+				reader2Lower.assign(reader2);
+				mergeCxt.lowerReached_ = true;
 			}
 
 			if (ret < 0) {
 				break; 
 			}
 
-			if (joinPred != NULL && !SQLValues::ValueUtils::isTrue(
-					joinPred->eval(cxt.getExprContext()))) {
+			if (!Join::matchCondition(cxt, joinPred)) {
 				continue;
 			}
 
-			proj.project(cxt);
-			outerCxt.matched_ = true;
+			proj->project(cxt);
+			mergeCxt.matched_ = true;
 		}
 
-		if (outerCxt.matched_) {
-			outerCxt.matched_ = false;
+		if (mergeCxt.matched_) {
+			mergeCxt.matched_ = false;
 		}
 		else {
-			nullProj.project(cxt);
+			nullProj->project(cxt);
 		}
 
-		if (reader2Lower.exists()) { 
+		if (mergeCxt.lowerReached_) {
 			reader2.assign(reader2Lower);
-			lowerAssignable = true;
+			mergeCxt.lowerReached_ = false;
 		}
 	}
 }
@@ -1078,13 +1176,17 @@ void SQLJoinOps::JoinHash::compile(OpContext &cxt) const {
 	Operator::compile(cxt);
 }
 
-void SQLJoinOps::JoinHash::execute(OpContext &cxt) const {
+template<bool Outer, bool InnerMatching>
+void SQLJoinOps::JoinHash::executeAt(OpContext &cxt) const {
+	typedef JoinHashContext<InnerMatching> HashContext;
+	typedef TupleChain<InnerMatching> Chain;
+
 	const JoinInputOrdinals &ordinals = Join::getOrdinals(getCode());
 	TupleListReader &reader1 = cxt.getReader(ordinals.driving());
 	TupleListReader &reader2 = cxt.getReader(ordinals.inner());
 	cxt.keepReaderLatch(ordinals.inner());
 
-	JoinHashContext &hashCxt = prepareHashContext(
+	HashContext &hashCxt = prepareHashContext<InnerMatching>(
 			cxt, Join::resolveKeyList(cxt.getAllocator(), getCode()),
 			Join::resolveSideKeyList(getCode()), reader2,
 			cxt.getInputColumnList(ordinals.inner()));
@@ -1096,8 +1198,10 @@ void SQLJoinOps::JoinHash::execute(OpContext &cxt) const {
 			hashCxt.tupleSet_->getReaderColumnList();
 
 	const SQLOps::Projection *proj = getCode().getPipeProjection();
+	const SQLOps::Projection *nullProj = Join::expandProjection(proj, Outer);
+	const SQLExprs::Expression *joinPred = getCode().getJoinPredicate();
 
-	TupleChain *chain = hashCxt.nextChain_;
+	Chain *chain = hashCxt.nextChain_;
 	hashCxt.nextChain_ = NULL;
 
 	SummaryTuple *tupleRef =
@@ -1108,52 +1212,131 @@ void SQLJoinOps::JoinHash::execute(OpContext &cxt) const {
 			return;
 		}
 
-		if (chain == NULL) {
-			chain = find(hashCxt, reader1);
-			if (chain == NULL) {
-				continue;
-			}
-		}
-
 		do {
-			if (cxt.checkSuspended()) { 
-				hashCxt.nextChain_ = chain;
-				return;
+			if (chain == NULL) {
+				chain = find(hashCxt, reader1);
+				if (chain == NULL) {
+					break;
+				}
 			}
 
-			*tupleRef = chain->tuple_;
-			proj->project(cxt);
+			do {
+				if (cxt.checkSuspended()) { 
+					hashCxt.nextChain_ = chain;
+					return;
+				}
+
+				*tupleRef = chain->tuple_;
+				if (!Outer || Join::matchCondition(cxt, joinPred)) {
+					proj->project(cxt);
+
+					if (Outer) {
+						if (InnerMatching) {
+							chain->match_.set();
+						}
+						else {
+							hashCxt.matched_ = true;
+						}
+					}
+				}
+			}
+			while ((chain = chain->next_) != NULL);
 		}
-		while ((chain = chain->next_) != NULL);
+		while (false);
+
+		if (Outer && !InnerMatching) {
+			if (hashCxt.matched_) {
+				hashCxt.matched_ = false;
+			}
+			else {
+				nullProj->project(cxt);
+			}
+		}
+	}
+
+	if (Outer && InnerMatching && cxt.isAllInputCompleted()) {
+		typedef typename MapOf<InnerMatching>::Type Map;
+		Map &map = hashCxt.map_;
+		bool nullChainChecked = false;
+		for (typename Map::iterator it = map.begin();;) {
+			if (it == map.end()) {
+				chain = hashCxt.nullChain_;
+				if (nullChainChecked || chain == NULL) {
+					break;
+				}
+				nullChainChecked = true;
+				*cxt.getSummaryColumnListRef(ordinals.inner()) =
+						hashCxt.nullTupleSet_->getReaderColumnList();
+			}
+			else {
+				chain = &it->second;
+				++it;
+			}
+			do {
+				if (!chain->match_.get()) {
+					*tupleRef = chain->tuple_;
+					nullProj->project(cxt);
+				}
+			}
+			while ((chain = chain->next_) != NULL);
+		}
 	}
 }
 
 SQLJoinOps::JoinHash::TupleDigester SQLJoinOps::JoinHash::createDigester(
-		util::StackAllocator &alloc,
+		util::StackAllocator &alloc, SQLValues::VarContext &varCxt,
 		const SQLValues::CompColumnList *bothKeyList,
-		const SQLValues::CompColumnList *sideKeyList) {
-	const bool ordering = SQLValues::TupleDigester::isOrderingAvailable(
-			*bothKeyList, true);
+		const SQLValues::CompColumnList *sideKeyList,
+		bool nullIgnorable, SQLValues::ValueProfile *valueProfile) {
+	const bool ordering = isOrderingAvailable(*bothKeyList);
 	return TupleDigester(
-			alloc, SQLValues::TupleDigester(*sideKeyList, &ordering, true));
+			alloc,
+			SQLValues::TupleDigester(
+					*sideKeyList, &varCxt, &ordering, false, nullIgnorable, false),
+			valueProfile);
 }
 
-SQLJoinOps::JoinHashContext& SQLJoinOps::JoinHash::prepareHashContext(
+bool SQLJoinOps::JoinHash::isOrderingAvailable(
+		const SQLValues::CompColumnList &bothKeyList) {
+	return SQLValues::TupleDigester::isOrderingAvailable(bothKeyList, true);
+}
+
+template<bool Matching>
+SQLJoinOps::JoinHashContext<Matching>&
+SQLJoinOps::JoinHash::prepareHashContext(
 		OpContext &cxt, const SQLValues::CompColumnList &keyList,
 		const SQLOps::CompColumnListPair &sideKeyList,
 		TupleListReader &reader,
 		const util::Vector<TupleColumn> &innerColumnList) {
+	typedef JoinHashContext<Matching> HashContext;
+	typedef TupleChain<Matching> Chain;
+
+	typedef typename MapOf<Matching>::Type Map;
+	typedef typename Map::iterator MapIterator;
+
 	util::StackAllocator &alloc = cxt.getAllocator();
 	const bool drivingSideFirst = true;
+	const bool orderingAvailable = isOrderingAvailable(keyList);
 
 	if (cxt.getResource(0).isEmpty()) {
 		const bool innerSideFirst = !drivingSideFirst;
 
+		util::AllocUniquePtr<SummaryTupleSet> nullTupleSet;
+		if (Matching) {
+			nullTupleSet = ALLOC_UNIQUE(
+					alloc, SummaryTupleSet, cxt.getValueContext(), NULL);
+			nullTupleSet->addReaderColumnList(innerColumnList);
+			nullTupleSet->addKeyList(keyList, innerSideFirst, false);
+			nullTupleSet->setOrderedDigestRestricted(!orderingAvailable);
+			nullTupleSet->completeColumns();
+		}
+
 		util::AllocUniquePtr<SummaryTupleSet> tupleSet(ALLOC_UNIQUE(
 				alloc, SummaryTupleSet, cxt.getValueContext(), NULL));
 		tupleSet->addReaderColumnList(innerColumnList);
-		tupleSet->addKeyList(keyList, innerSideFirst);
+		tupleSet->addKeyList(keyList, innerSideFirst, false);
 		tupleSet->setNullKeyIgnorable(true);
+		tupleSet->setOrderedDigestRestricted(!orderingAvailable);
 		tupleSet->completeColumns();
 
 		SQLValues::CompColumnList bothKeyList(cxt.getAllocator());
@@ -1161,13 +1344,26 @@ SQLJoinOps::JoinHashContext& SQLJoinOps::JoinHash::prepareHashContext(
 		tupleSet->applyKeyList(bothKeyList, &innerSideFirst);
 
 		cxt.getResource(0) = ALLOC_UNIQUE(
-				alloc, JoinHashContext, alloc, bothKeyList, *sideKeyList.first,
-				tupleSet);
+				alloc, HashContext, alloc, cxt.getVarContext(),
+				bothKeyList, *sideKeyList.first, tupleSet, nullTupleSet,
+				cxt.getValueProfile());
 	}
-	JoinHashContext &hashCxt = cxt.getResource(0).resolveAs<JoinHashContext>();
+	HashContext &hashCxt = cxt.getResource(0).resolveAs<HashContext>();
 
 	if (!reader.exists()) {
 		return hashCxt;
+	}
+
+	SQLValues::CompColumnList nullInnerKeyList(alloc);
+	util::LocalUniquePtr<TupleDigester> nullDigester;
+	if (Matching) {
+		nullInnerKeyList = *sideKeyList.second;
+		hashCxt.nullTupleSet_->applyKeyList(nullInnerKeyList, NULL);
+		nullDigester = UTIL_MAKE_LOCAL_UNIQUE(
+				nullDigester, TupleDigester,
+				createDigester(
+						alloc, cxt.getVarContext(), &keyList, &nullInnerKeyList,
+						false, cxt.getValueProfile()));
 	}
 
 	SQLValues::CompColumnList innerKeyList(alloc);
@@ -1175,38 +1371,55 @@ SQLJoinOps::JoinHashContext& SQLJoinOps::JoinHash::prepareHashContext(
 	hashCxt.tupleSet_->applyKeyList(innerKeyList, NULL);
 
 	SelfTupleEq tupleEq(
-			alloc, SQLValues::TupleComparator(innerKeyList, false, true, true));
+			alloc,
+			SQLValues::TupleComparator(
+					innerKeyList, &cxt.getVarContext(), false, true, true,
+					!orderingAvailable),
+			cxt.getValueProfile());
 	if (tupleEq.getBase().isEmpty(0)) {
 		return hashCxt;
 	}
 
 	NullChecker nullChecker(alloc, SQLValues::TupleNullChecker(innerKeyList));
-	TupleDigester digester(createDigester(alloc, &keyList, &innerKeyList));
+	TupleDigester digester(createDigester(
+			alloc, cxt.getVarContext(), &keyList, &innerKeyList,
+			true, cxt.getValueProfile()));
 
-	JoinHash::Map &map = hashCxt.map_;
+	Map &map = hashCxt.map_;
+
+	if (reader.exists()) {
+		SQLValues::ValueUtils::updateKeepInfo(reader);
+	}
 
 	for (; reader.exists(); reader.next()) {
 		if (nullChecker(ReaderSourceType(reader))) {
+			if (Matching) {
+				const int64_t digest = (*nullDigester)(ReaderSourceType(reader));
+				const SummaryTuple tuple =
+						SummaryTuple::create(*hashCxt.nullTupleSet_, reader, digest);
+				hashCxt.nullChain_ =
+						ALLOC_NEW(alloc) Chain(tuple, hashCxt.nullChain_);
+			}
 			continue;
 		}
 
 		const int64_t digest = digester(ReaderSourceType(reader));
 		const SummaryTuple tuple =
 				SummaryTuple::create(*hashCxt.tupleSet_, reader, digest);
-		const std::pair<Map::iterator, Map::iterator> &range =
+		const std::pair<MapIterator, MapIterator> &range =
 				map.equal_range(digest);
-		for (Map::iterator it = range.first;; ++it) {
+		for (MapIterator it = range.first;; ++it) {
 			if (it == range.second) {
 				map.insert(
 						range.second,
-						std::make_pair(digest, TupleChain(tuple, NULL)));
+						std::make_pair(digest, Chain(tuple, NULL)));
 				break;
 			}
 
 			if (tupleEq(
 					ReaderSourceType(reader),
 					SummaryTuple::Wrapper(it->second.tuple_))) {
-				it->second = TupleChain(tuple, ALLOC_NEW(alloc) TupleChain(it->second));
+				it->second = Chain(tuple, ALLOC_NEW(alloc) Chain(it->second));
 				break;
 			}
 		}
@@ -1215,15 +1428,19 @@ SQLJoinOps::JoinHashContext& SQLJoinOps::JoinHash::prepareHashContext(
 	return hashCxt;
 }
 
-inline SQLJoinOps::JoinHash::TupleChain* SQLJoinOps::JoinHash::find(
-		JoinHashContext &hashCxt, TupleListReader &reader) {
+template<bool Matching>
+inline SQLJoinOps::JoinHash::TupleChain<Matching>* SQLJoinOps::JoinHash::find(
+		JoinHashContext<Matching> &hashCxt, TupleListReader &reader) {
+	typedef typename MapOf<Matching>::Type Map;
+	typedef typename Map::iterator MapIterator;
+
 	if (hashCxt.nullChecker_(ReaderSourceType(reader))) {
 		return NULL;
 	}
 
-	const std::pair<Map::iterator, Map::iterator> &range =
+	const std::pair<MapIterator, MapIterator> &range =
 			hashCxt.map_.equal_range(hashCxt.digester_(ReaderSourceType(reader)));
-	for (Map::iterator it = range.first; it != range.second; ++it) {
+	for (MapIterator it = range.first; it != range.second; ++it) {
 		if (hashCxt.tupleEq_(
 				ReaderSourceType(reader),
 				SummaryTuple::Wrapper(it->second.tuple_))) {
@@ -1234,26 +1451,70 @@ inline SQLJoinOps::JoinHash::TupleChain* SQLJoinOps::JoinHash::find(
 	return NULL;
 }
 
-SQLJoinOps::JoinHash::TupleChain::TupleChain(
+template<bool Matching>
+SQLJoinOps::JoinHash::TupleChain<Matching>::TupleChain(
 		const SummaryTuple &tuple, TupleChain *next) :
 		tuple_(tuple),
 		next_(next) {
 }
 
 
-SQLJoinOps::JoinHashContext::JoinHashContext(
-		util::StackAllocator &alloc,
+void SQLJoinOps::JoinInnerHash::execute(OpContext &cxt) const {
+	const bool outer = false;
+	const bool innerMatching = false;
+	executeAt<outer, innerMatching>(cxt);
+}
+
+
+void SQLJoinOps::JoinOuterHash::execute(OpContext &cxt) const {
+	const bool outer = true;
+
+	if (Join::getOrdinals(getCode()).driving() == 0) {
+		const bool innerMatching = false;
+		executeAt<outer, innerMatching>(cxt);
+	}
+	else {
+		const bool innerMatching = true;
+		executeAt<outer, innerMatching>(cxt);
+	}
+}
+
+
+SQLJoinOps::JoinOuterContext::JoinOuterContext() :
+		matched_(false) {
+}
+
+
+SQLJoinOps::JoinMergeContext::JoinMergeContext() :
+		matched_(false),
+		lowerReached_(false) {
+}
+
+
+template<bool Matching>
+SQLJoinOps::JoinHashContext<Matching>::JoinHashContext(
+		util::StackAllocator &alloc, SQLValues::VarContext &varCxt,
 		const SQLValues::CompColumnList &bothKeyList,
 		const SQLValues::CompColumnList &drivingKeyList,
-		util::AllocUniquePtr<SummaryTupleSet> &tupleSet) :
+		util::AllocUniquePtr<SummaryTupleSet> &tupleSet,
+		util::AllocUniquePtr<SummaryTupleSet> &nullTupleSet,
+		SQLValues::ValueProfile *valueProfile) :
 		bothKeyList_(bothKeyList.begin(), bothKeyList.end(), alloc),
 		drivingKeyList_(drivingKeyList.begin(), drivingKeyList.end(), alloc),
 		map_(0, JoinHash::MapHasher(), JoinHash::MapPred(), alloc),
 		nextChain_(NULL),
+		nullChain_(NULL),
 		nullChecker_(alloc, SQLValues::TupleNullChecker(drivingKeyList_)),
-		digester_(
-				JoinHash::createDigester(alloc, &bothKeyList_, &drivingKeyList_)),
-		tupleEq_(alloc, SQLValues::TupleComparator(
-				bothKeyList_, false, true, true)) {
+		digester_(JoinHash::createDigester(
+				alloc, varCxt, &bothKeyList_, &drivingKeyList_, true,
+				valueProfile)),
+		tupleEq_(
+				alloc,
+				SQLValues::TupleComparator(
+						bothKeyList_, &varCxt, false, true, true,
+						!JoinHash::isOrderingAvailable(bothKeyList)),
+				valueProfile),
+		matched_(false) {
 	tupleSet_.swap(tupleSet);
+	nullTupleSet_.swap(nullTupleSet);
 }

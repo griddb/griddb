@@ -21,6 +21,8 @@
 #include "sql_tuple.h"
 #include "util/container.h"
 
+
+
 typedef TupleList::TupleColumnType TupleColumnType;
 
 struct TupleTypes {
@@ -66,6 +68,8 @@ struct SQLValues {
 	typedef TupleList::WritableTuple WritableTuple;
 
 	typedef TupleList::Column TupleColumn;
+	typedef util::Vector<TupleColumn> TupleColumnList;
+	typedef util::Vector<TupleColumnType> ColumnTypeList;
 
 	struct Types;
 
@@ -74,6 +78,12 @@ struct SQLValues {
 
 	class ValueContext;
 	class ExtValueContext;
+
+	class RefVarContextScope;
+	template<bool Checked> class EmptyVarContextScope;
+
+	struct ProfileElement;
+	struct ValueProfile;
 
 	class SummaryColumn;
 	class CompColumn;
@@ -228,6 +238,9 @@ public:
 
 	static size_t getFixedSize(TupleColumnType type);
 
+	static TupleColumnType toComparisonType(TupleColumnType type);
+	static TupleColumnType findComparisonType(
+			TupleColumnType type1, TupleColumnType type2, bool anyAsNull);
 	static TupleColumnType findPromotionType(
 			TupleColumnType type1, TupleColumnType type2, bool anyAsNull);
 
@@ -244,6 +257,7 @@ public:
 	static TupleColumnType filterColumnType(TupleColumnType type);
 
 	static TypeCategory getStaticTypeCategory(TupleColumnType type);
+	static bool isNumerical(TupleColumnType type);
 
 	static void setUpTupleInfo(
 			TupleList::Info &info, const TupleColumnType *list, size_t count);
@@ -297,6 +311,13 @@ public:
 			typename util::Conditional<
 					T == TupleTypes::TYPE_BLOB, LobReaderRef,
 					void>::Type>::Type LocalReaderRefType;
+
+	typedef
+			typename util::Conditional<
+					T == TupleTypes::TYPE_STRING, ValueContext,
+			typename util::Conditional<
+					T == TupleTypes::TYPE_BLOB, VarContext,
+					void>::Type>::Type WriterContextType;
 
 	static const bool FOR_INTEGRAL_EXPLICIT = (
 			T == TupleTypes::TYPE_BYTE ||
@@ -425,44 +446,94 @@ struct SQLValues::TypeUtils::PairTraits {
 
 template<typename T>
 struct SQLValues::TypeUtils::ValueTraits {
+private:
+	enum {
+		UNMATCH_COLUMN_TYPE = TupleTypes::TYPE_NULL
+	};
+
+	struct EmptyTypeMatcher {
+		enum {
+			TYPE_MATCHED = false,
+			COLUMN_TYPE = UNMATCH_COLUMN_TYPE
+		};
+		typedef EmptyTypeMatcher Type;
+	};
+
+	template<typename U, typename Other, int32_t Mode>
+	struct TypeMatcherBase {
+	private:
+		typedef typename util::Conditional<
+				util::IsSame<Other, void>::VALUE,
+				EmptyTypeMatcher, Other>::Type MaskedOther;
+
+		typedef typename util::Conditional<
+					(Mode == 1),
+					typename Traits<U::COLUMN_TYPE>::ReadableType,
+					typename U::ValueType>::Type MatchingType;
+
+		enum {
+			TYPE_MATCHED_SELF = util::IsSame<T, MatchingType>::VALUE
+		};
+
+	public:
+		typedef typename util::Conditional<
+				TYPE_MATCHED_SELF,
+				U, typename MaskedOther::Type>::Type Type;
+
+		enum {
+			TYPE_MATCHED = (TYPE_MATCHED_SELF || MaskedOther::TYPE_MATCHED),
+			COLUMN_TYPE = Type::COLUMN_TYPE
+		};
+	};
+
+	template<typename U, typename Other>
+	struct TypeMatcher {
+		typedef TypeMatcherBase<U, Other, 0> BaseType;
+		typedef typename BaseType::Type Type;
+		enum {
+			TYPE_MATCHED = BaseType::TYPE_MATCHED,
+			COLUMN_TYPE = BaseType::COLUMN_TYPE
+		};
+	};
+
+	template<typename U, typename Other>
+	struct ReaderMatcher {
+		typedef TypeMatcherBase<U, Other, 1> BaseType;
+		typedef typename BaseType::Type Type;
+		enum {
+			TYPE_MATCHED = BaseType::TYPE_MATCHED,
+			COLUMN_TYPE = BaseType::COLUMN_TYPE
+		};
+	};
+
+	static const TupleColumnType COLUMN_TYPE_AS_OTHER =
+			TypeMatcher<Types::Bool, void>::COLUMN_TYPE;
+
+public:
 	static const TupleColumnType COLUMN_TYPE_AS_NUMERIC =
-			util::IsSame<T,
-					Types::Byte::ValueType>::VALUE ? static_cast<TupleColumnType>(
-					Types::Byte::COLUMN_TYPE) :
-			util::IsSame<T,
-					Types::Short::ValueType>::VALUE ? static_cast<TupleColumnType>(
-					Types::Short::COLUMN_TYPE) :
-			util::IsSame<T,
-					Types::Integer::ValueType>::VALUE ? static_cast<TupleColumnType>(
-					Types::Integer::COLUMN_TYPE) :
-			util::IsSame<T,
-					Types::Long::ValueType>::VALUE ? static_cast<TupleColumnType>(
-					Types::Long::COLUMN_TYPE) :
-			util::IsSame<T,
-					Types::Float::ValueType>::VALUE ? static_cast<TupleColumnType>(
-					Types::Float::COLUMN_TYPE) :
-			util::IsSame<T,
-					Types::Double::ValueType>::VALUE ? static_cast<TupleColumnType>(
-					Types::Double::COLUMN_TYPE) :
-			static_cast<TupleColumnType>(TupleTypes::TYPE_NULL);
+			TypeMatcher<Types::Byte,
+			TypeMatcher<Types::Short,
+			TypeMatcher<Types::Integer,
+			TypeMatcher<Types::Long,
+			TypeMatcher<Types::Float,
+			TypeMatcher<Types::Double, void> > > > > >::COLUMN_TYPE;
 
 	static const TupleColumnType COLUMN_TYPE_AS_SEQUENCE =
-			util::IsSame<T,
-					Types::String::ValueType>::VALUE ? static_cast<TupleColumnType>(
-					Types::String::COLUMN_TYPE) :
-			util::IsSame<T,
-					Types::Blob::ValueType>::VALUE ? static_cast<TupleColumnType>(
-					Types::Blob::COLUMN_TYPE) :
-			static_cast<TupleColumnType>(TupleTypes::TYPE_NULL);
+			TypeMatcher<Types::String,
+			TypeMatcher<Types::Blob, void> >::COLUMN_TYPE;
+
+	static const TupleColumnType COLUMN_TYPE_AS_READER =
+			ReaderMatcher<Types::String,
+			ReaderMatcher<Types::Blob, void> >::COLUMN_TYPE;
 
 	static const TupleColumnType COLUMN_TYPE_AS_VALUE =
-			COLUMN_TYPE_AS_NUMERIC != TupleTypes::TYPE_NULL ?
+			COLUMN_TYPE_AS_NUMERIC != UNMATCH_COLUMN_TYPE ?
 					COLUMN_TYPE_AS_NUMERIC :
-			COLUMN_TYPE_AS_SEQUENCE != TupleTypes::TYPE_NULL ?
+			COLUMN_TYPE_AS_SEQUENCE != UNMATCH_COLUMN_TYPE ?
 					COLUMN_TYPE_AS_SEQUENCE :
-			util::IsSame<T, Types::Bool::ValueType>::VALUE ?
-					static_cast<TupleColumnType>(Types::Bool::COLUMN_TYPE) :
-			static_cast<TupleColumnType>(TupleTypes::TYPE_NULL);
+			COLUMN_TYPE_AS_OTHER != UNMATCH_COLUMN_TYPE ?
+					COLUMN_TYPE_AS_OTHER :
+			static_cast<TupleColumnType>(UNMATCH_COLUMN_TYPE);
 };
 
 class SQLValues::TypeSwitcher {
@@ -511,45 +582,50 @@ public:
 		static const TupleColumnType COLUMN_TYPE = Type::COLUMN_TYPE;
 	};
 
+	enum TypeTarget {
+		TYPE_TARGET_ALL,
+		TYPE_TARGET_FIXED,
+		TYPE_TARGET_SINGLE_VAR
+	};
+
 	template<
 			typename V = void, size_t TypeCount = 1, bool OpDelegated = false,
-			bool TypePromotable = false, int32_t NullableSpecific = 1,
-			bool TypeSpecific = true, bool FixedTypeOnly = false>
+			bool Promotable = false, int32_t NullableSpecific = 1,
+			bool Specific = true, TypeTarget Target = TYPE_TARGET_ALL>
 	struct OpTraitsOptions {
 		enum {
 			TYPE_COUNT = TypeCount,
 			OP_DELEGATED = OpDelegated,
-			TYPE_PROMOTABLE = TypePromotable,
+			TYPE_PROMOTABLE = Promotable,
 			NULLABLE_SPECIFIC = NullableSpecific,
-			TYPE_SPECIFIC = TypeSpecific,
-			FIXED_TYPE_ONLY = FixedTypeOnly
+			TYPE_SPECIFIC = Specific
 		};
+		static const TypeTarget TYPE_TARGET = Target;
+
 		typedef V VariantTraitsType;
 
 		template<typename U>
 		struct VariantRebind {
 			typedef OpTraitsOptions<
 					U, TypeCount, OpDelegated,
-					TypePromotable, NullableSpecific, TypeSpecific,
-					FixedTypeOnly> Type;
+					Promotable, NullableSpecific, Specific, Target> Type;
 		};
 
 		template<bool D = false>
 		struct DelegationRebind {
 			typedef OpTraitsOptions<
 					V, TypeCount, D,
-					TypePromotable, NullableSpecific, TypeSpecific,
-					FixedTypeOnly> Type;
+					Promotable, NullableSpecific, Specific, Target> Type;
 		};
 
 		template<
-				bool TypePromotableSub = false, bool NullableSpecificSub = 1,
-				bool TypeSpecificSub = true, bool FixedTypeOnlySub = false>
+				bool PromotableSub = false, int32_t NullableSpecificSub = 1,
+				bool SpecificSub = true, TypeTarget TargetSub = TYPE_TARGET_ALL>
 		struct TypesRebind {
 			typedef OpTraitsOptions<
 					V, TypeCount, OpDelegated,
-					TypePromotableSub, NullableSpecificSub, TypeSpecificSub,
-					FixedTypeOnlySub> Type;
+					PromotableSub, NullableSpecificSub, SpecificSub,
+					TargetSub> Type;
 		};
 	};
 
@@ -629,14 +705,18 @@ public:
 private:
 	template<
 			size_t TypeCount, bool Promotable, int32_t NullableSpecific,
-			bool TypeSpecific, bool FixedTypeOnly>
+			bool Specific, TypeTarget Target>
 	struct TypeFilter {
 		template<typename T1>
 		struct First {
+			typedef typename TypeUtils::template Traits<
+					T1::COLUMN_TYPE> FirstTraitsType;
 			enum {
-				SIZE_VAR = TypeUtils::template Traits<T1::COLUMN_TYPE>::SIZE_VAR,
-				FIRST_ALLOWED =
-						(TypeSpecific && !(FixedTypeOnly && SIZE_VAR))
+				SIZE_VAR = FirstTraitsType::SIZE_VAR,
+				SINGLE_VAR = FirstTraitsType::FOR_SINGLE_VAR,
+				FIRST_ALLOWED = (Specific &&
+						!(Target == TYPE_TARGET_FIXED && SIZE_VAR) &&
+						!(Target == TYPE_TARGET_SINGLE_VAR && !SINGLE_VAR))
 			};
 			typedef typename util::Conditional<
 					FIRST_ALLOWED, T1, Types::Any>::Type Type;
@@ -716,14 +796,14 @@ private:
 			TYPE_PROMOTABLE = OptionsType::TYPE_PROMOTABLE,
 			NULLABLE_SPECIFIC = OptionsType::NULLABLE_SPECIFIC,
 			TYPE_SPECIFIC = OptionsType::TYPE_SPECIFIC,
-			FIXED_TYPE_ONLY = OptionsType::FIXED_TYPE_ONLY,
 			VARIANTS_SPECIFIED = TraitsType::VARIANTS_SPECIFIED,
 			FIRST_TYPE_ONLY = (!NULLABLE_SPECIFIC && !VARIANTS_SPECIFIED)
 		};
+		static const TypeTarget TYPE_TARGET = OptionsType::TYPE_TARGET;
 
 		typedef TypeFilter<
 				TYPE_COUNT, TYPE_PROMOTABLE, NULLABLE_SPECIFIC,
-				TYPE_SPECIFIC, FIXED_TYPE_ONLY> FilterType;
+				TYPE_SPECIFIC, TYPE_TARGET> FilterType;
 
 		template<size_t N>
 		struct Arg {
@@ -769,6 +849,8 @@ public:
 			TupleColumnType type1,
 			TupleColumnType type2 = TupleTypes::TYPE_NULL,
 			bool nullableAlways = false);
+
+	TypeSwitcher withProfile(ValueProfile *profile) const;
 
 	TypeSwitcher toNonNullable() const;
 	TypeSwitcher toNullableAlways() const;
@@ -960,9 +1042,12 @@ private:
 	bool isNullable() const;
 	bool isNullableAlways() const;
 
+	bool checkNullable(bool nullableSwitching) const;
+
 	TupleColumnType type1_;
 	TupleColumnType type2_;
 	bool nullableAlways_;
+	ValueProfile *profile_;
 };
 
 class SQLValues::ValueContext {
@@ -993,9 +1078,13 @@ private:
 		static const size_t DEFAULT_MAX_STRING_LENGTH;
 	};
 
+	size_t resolveMaxStringLength();
+
 	util::StackAllocator *alloc_;
 	VarContext *varCxt_;
 	ExtValueContext *extCxt_;
+
+	size_t maxStringLength_;
 
 	util::TimeZone timeZone_;
 	bool timeZoneAssigned_;
@@ -1022,6 +1111,28 @@ public:
 	virtual size_t findMaxStringLength() = 0;
 	virtual int64_t getCurrentTimeMillis() = 0;
 	virtual util::TimeZone getTimeZone() = 0;
+};
+
+class SQLValues::RefVarContextScope {
+public:
+	explicit RefVarContextScope(VarContext *varCxt) : base_(resolve(varCxt)) {}
+
+private:
+	static VarContext& resolve(VarContext *varCxt) {
+		assert(varCxt != NULL);
+		return *varCxt;
+	}
+
+	VarContext::Scope base_;
+};
+
+template<bool Checked>
+class SQLValues::EmptyVarContextScope {
+public:
+	explicit EmptyVarContextScope(VarContext *varCxt) {
+		assert(!Checked || varCxt != NULL);
+		static_cast<void>(varCxt);
+	}
 };
 
 class SQLValues::SummaryColumn {
@@ -1058,7 +1169,7 @@ public:
 	uint32_t getSummaryPosition() const;
 	bool isOnBody() const;
 	bool isOrdering() const;
-	bool isAscending() const;
+	bool isRotating() const;
 
 private:
 	TupleColumn tupleColumn_;
@@ -1069,6 +1180,20 @@ private:
 
 	int32_t pos_;
 	int32_t ordering_;
+};
+
+struct SQLValues::ProfileElement {
+	ProfileElement();
+
+	void merge(const ProfileElement &src);
+
+	int64_t candidate_;
+	int64_t target_;
+};
+
+struct SQLValues::ValueProfile {
+	ProfileElement noNull_;
+	ProfileElement noSwitch_;
 };
 
 class SQLValues::CompColumn {
@@ -1151,8 +1276,7 @@ public:
 	bool isEmpty() const;
 	void clear();
 
-	void assign(
-			ValueContext &cxt, const util::Vector<TupleColumnType> &typeList);
+	void assign(ValueContext &cxt, const ColumnTypeList &typeList);
 
 	void assign(ValueContext &cxt, const ArrayTuple &tuple);
 	void assign(
@@ -1164,7 +1288,7 @@ public:
 	void assign(
 			ValueContext &cxt, const ReadableTuple &tuple,
 			const CompColumnList &columnList,
-			const util::Vector<TupleColumn> &inColumnList);
+			const TupleColumnList &inColumnList);
 
 	void swap(ArrayTuple &another);
 
@@ -1288,7 +1412,7 @@ class SQLValues::ArrayTuple::Assigner {
 public:
 	Assigner(
 			util::StackAllocator &alloc, const CompColumnList &columnList,
-			const util::Vector<TupleColumn> *inColumnList);
+			const TupleColumnList *inColumnList);
 
 	void operator()(
 			ValueContext &cxt, const ReadableTuple &src,
@@ -1301,24 +1425,39 @@ public:
 
 private:
 	const CompColumnList &columnList_;
-	const util::Vector<TupleColumn> *inColumnList_;
+	const TupleColumnList *inColumnList_;
 };
 
 class SQLValues::ArrayTuple::EmptyAssigner {
 public:
-	EmptyAssigner(
-			ValueContext &cxt, const util::Vector<TupleColumnType> &typeList);
+	EmptyAssigner(ValueContext &cxt, const ColumnTypeList &typeList);
 
 	void operator()(ValueContext &cxt, ArrayTuple &dest) const;
 
 private:
-	const util::Vector<TupleColumnType> &typeList_;
+	const ColumnTypeList &typeList_;
 	util::LocalUniquePtr<ArrayTuple> emptyTuple_;
 };
 
 class SQLValues::SummaryTuple {
+private:
+	template<typename T>
+	struct TypeTraits {
+		enum {
+			COLUMN_TYPE = T::COLUMN_TYPE
+		};
+		typedef typename SQLValues::TypeUtils::template Traits<
+				COLUMN_TYPE>::ReadableRefType ReadableRefType;
+	};
+
 public:
 	typedef util::Vector<SummaryColumn> ColumnList;
+
+	template<typename Shallow, typename HeadNullable>
+	struct FieldReaderVariantTraits {
+		typedef Shallow ShallowType;
+		typedef HeadNullable HeadNullableType;
+	};
 
 	class FieldReader;
 	class FieldGetter;
@@ -1333,6 +1472,9 @@ public:
 	static SummaryTuple create(
 			SummaryTupleSet &tupleSet, TupleListReader &reader,
 			int64_t digest);
+	static SummaryTuple create(
+			SummaryTupleSet &tupleSet, TupleListReader &reader,
+			int64_t digest, uint32_t subIndex);
 
 	template<typename T, typename D>
 	static SummaryTuple createBy(
@@ -1342,6 +1484,9 @@ public:
 	void initializeValues(SummaryTupleSet &tupleSet);
 
 	void release(SummaryTupleSet &tupleSet);
+
+	static void fillEmpty(SummaryTuple *tupleArrayElem);
+	static bool checkEmpty(const SummaryTuple &tuple);
 
 	int64_t getDigest() const;
 	Wrapper getTuple() const;
@@ -1356,7 +1501,7 @@ public:
 	template<typename T>
 	typename T::ValueType getValueAs(const SummaryColumn &column) const;
 
-	template<typename T, typename Asc>
+	template<typename T, typename Rot>
 	typename T::ValueType getHeadValueAs(const SummaryColumn &column) const;
 
 	template<typename T>
@@ -1373,6 +1518,11 @@ public:
 
 	template<typename T>
 	void incrementValueBy(const SummaryColumn &column);
+
+	template<typename T>
+	void appendValueBy(
+			SummaryTupleSet &tupleSet, const SummaryColumn &column,
+			typename TypeTraits<T>::ReadableRefType value);
 
 private:
 	typedef SummaryColumn::NullsUnitType NullsUnitType;
@@ -1392,13 +1542,13 @@ private:
 			SummaryTupleSet &tupleSet, const SummaryColumn &column,
 			TupleListReader &reader);
 
-	template<typename T, typename Asc>
+	template<typename T, typename Rot>
 	typename T::ValueType getHeadValueDetailAs(
-			const SummaryColumn &column, const T&, const Asc&) const;
-	template<typename Asc>
+			const SummaryColumn &column, const T&, const Rot&) const;
+	template<typename Rot>
 	TupleString getHeadValueDetailAs(
 			const SummaryColumn &column, const Types::String&,
-			const Asc&) const;
+			const Rot&) const;
 
 	template<typename T>
 	typename T::ValueType getBodyValueDetailAs(
@@ -1410,22 +1560,33 @@ private:
 	TupleValue getBodyValueDetailAs(
 			const SummaryColumn &column, const Types::Any&) const;
 
-	template<typename T, typename Shallow>
+	template<typename T, typename Shallow, typename Initializing>
 	void setValueDetailBy(
 			SummaryTupleSet &tupleSet, const SummaryColumn &column,
-			const typename T::ValueType &value, const T&, const Shallow&);
-	template<typename Shallow>
+			const typename T::ValueType &value, const T&, const Shallow&,
+			const Initializing&);
+	template<typename Shallow, typename Initializing>
 	void setValueDetailBy(
 			SummaryTupleSet &tupleSet, const SummaryColumn &column,
-			const TupleString &value, const Types::String&, const Shallow&);
-	template<typename Shallow>
+			const TupleString &value, const Types::String&, const Shallow&,
+			const Initializing&);
+	template<typename Shallow, typename Initializing>
 	void setValueDetailBy(
 			SummaryTupleSet &tupleSet, const SummaryColumn &column,
-			const TupleValue &value, const Types::Blob&, const Shallow&);
-	template<typename Shallow>
+			const TupleValue &value, const Types::Blob&, const Shallow&,
+			const Initializing&);
+	template<typename Shallow, typename Initializing>
 	void setValueDetailBy(
 			SummaryTupleSet &tupleSet, const SummaryColumn &column,
-			const TupleValue &value, const Types::Any&, const Shallow&);
+			const TupleValue &value, const Types::Any&, const Shallow&,
+			const Initializing&);
+
+	void appendValueDetailBy(
+			SummaryTupleSet &tupleSet, const SummaryColumn &column,
+			StringReader &value, const Types::String&);
+	void appendValueDetailBy(
+			SummaryTupleSet &tupleSet, const SummaryColumn &column,
+			LobReader &value, const Types::Blob&);
 
 	void setNullDetail(const SummaryColumn &column, bool nullValue);
 
@@ -1442,6 +1603,8 @@ private:
 
 	const void* getField(int32_t offset) const;
 	void* getField(int32_t offset);
+
+	void* getRawField(int32_t offset) const;
 
 	Head head_;
 	void *body_;
@@ -1559,13 +1722,20 @@ public:
 	~SummaryTupleSet();
 
 	void addColumn(TupleColumnType type, const uint32_t *readerColumnPos);
-	void addKey(uint32_t readerColumnPos, bool ordering, bool ascending);
-	void setNullKeyIgnorable(bool ignorable);
+	void addKey(uint32_t readerColumnPos, bool ordering, bool rotating);
 
-	void addReaderColumnList(const util::Vector<TupleColumnType> &typeList);
-	void addReaderColumnList(const util::Vector<TupleColumn> &columnList);
+	void setNullKeyIgnorable(bool ignorable);
+	void setOrderedDigestRestricted(bool restricted);
+	void setReaderColumnsDeep(bool deep);
+	void setHeadNullAccesible(bool accesible);
+	static bool isDeepReaderColumnSupported(TupleColumnType type);
+
+	void addReaderColumnList(const ColumnTypeList &typeList);
+	void addReaderColumnList(const TupleColumnList &columnList);
 	void addColumnList(const SummaryTupleSet &src);
-	void addKeyList(const CompColumnList &keyList, bool first);
+	void addKeyList(const CompColumnList &keyList, bool first, bool rotating);
+	void addSubReaderColumnList(
+			uint32_t index, const TupleColumnList &columnList);
 
 	void completeColumns();
 	bool isColumnsCompleted();
@@ -1580,6 +1750,7 @@ public:
 	static int32_t getDefaultReadableTupleOffset();
 
 	const FieldReaderList& getFieldReaderList() const;
+	const FieldReaderList& getSubFieldReaderList(uint32_t index) const;
 	FieldGetterFunc getFieldGetterFunc(uint32_t pos) const;
 	FieldSetterFunc getFieldSetterFunc(uint32_t pos) const;
 
@@ -1593,44 +1764,104 @@ public:
 
 	void* duplicateVarData(const void *data);
 	void deallocateVarData(void *data);
+	void appendVarData(void *&data, StringReader &reader);
 
 	void* duplicateLob(const TupleValue &value);
 	void deallocateLob(void *data);
+	void appendLob(void *data, LobReader &reader);
 
-	static TupleValue getLobValue(const void *data);
+	static TupleValue getLobValue(void *data);
 
+	size_t getPoolCapacity();
 	void clearAll();
 
 private:
 	typedef SummaryColumn::NullsUnitType NullsUnitType;
 
+	typedef util::Vector<ColumnTypeList> TupleInfoList;
+
 	typedef util::Vector<SummaryColumn::Source> ColumnSourceList;
 
+	typedef util::Vector<FieldReaderList> AllFieldReaderList;
 	typedef util::Vector<FieldGetterFunc> FieldGetterFuncList;
 	typedef util::Vector<FieldSetterFunc> FieldSetterFuncList;
 
-	typedef util::Vector<void*> Pool;
+	typedef util::AllocVector<void*> Pool;
 
 	struct PoolData {
 		void *next_;
 	};
+
 	struct LobLink {
 		LobLink *next_;
 		LobLink **prev_;
-		const void *lob_;
+		void *lob_;
+		SummaryTupleSet *tupleSet_;
+
 		TupleColumnType type_;
+		bool small_;
+	};
+
+	class LocalLobBuilder {
+	public:
+		LocalLobBuilder(SummaryTupleSet &tupleSet, TupleColumnType type);
+		~LocalLobBuilder();
+
+		void assignSmall(void *lob);
+
+		void* release(bool &small);
+
+		void append(LobReader &src);
+		void appendSmall(void *lob);
+
+	private:
+		void clear();
+		void prepare(size_t size, bool force);
+
+		SummaryTupleSet &tupleSet_;
+		TupleColumnType type_;
+		util::LocalUniquePtr<LobBuilder> base_;
+		void *smallLob_;
 	};
 
 	enum {
 		MIN_POOL_DATA_BITS = 3,
 		MAX_POOL_DATA_BITS = 19,
-		INITIAL_POOL_DATA_BITS = 10
+		INITIAL_POOL_DATA_BITS = 10,
+		SMALL_LOB_DATA_BITS = 16
 	};
 
 	SummaryTupleSet(const SummaryTupleSet&);
 	SummaryTupleSet& operator=(const SummaryTupleSet&);
 
+	static FieldReaderFunc resolveFieldReaderFunc(
+			TupleColumnType destType, TupleColumnType srcType,
+			bool shallow, bool headNullable);
+	template<bool Shallow, bool HeadNullable>
+	static FieldReaderFunc resolveFieldReaderFuncBy(
+			TupleColumnType destType, TupleColumnType srcType);
+
+	void initializePool(ValueContext &cxt);
+	void deallocateAll();
+
 	void reserveBody();
+
+	void* appendVarDataDetail(
+			const void *src, uint32_t size, void *dest, bool limited);
+
+	static bool checkLobSmall(const TupleValue &value);
+	static TupleValue toValueBySmallLob(
+			VarContext &varCxt, const void *lob, TupleColumnType type);
+
+	static void* duplicateNormalLob(
+			VarContext &varCxt, const TupleValue &value);
+	static void deallocateNormalLob(
+			VarContext &varCxt, void *lob, TupleColumnType type);
+	static TupleValue toValueByNormalLob(void *lob, TupleColumnType type);
+	static void* toNormalLobByBuilder(VarContext &varCxt, LobBuilder &builder);
+
+	void deallocateSmallLob(void *lob);
+	static uint32_t getMaxSmallLobBodySize();
 
 	void* allocateDetail(size_t size, size_t *availableSize);
 	void deallocateDetail(void *data, size_t size);
@@ -1640,16 +1871,19 @@ private:
 
 	util::StackAllocator &alloc_;
 	VarContext &varCxt_;
+	VarAllocator *poolAlloc_;
 	SummaryTupleSet *parent_;
 
 	ColumnSourceList columnSourceList_;
 	ColumnSourceList keySourceList_;
+	TupleInfoList subInputInfoList_;
 
 	ColumnList totalColumnList_;
 	ColumnList readerColumnList_;
 	ColumnList modifiableColumnList_;
 
 	FieldReaderList fieldReaderList_;
+	AllFieldReaderList subFieldReaderList_;
 	FieldGetterFuncList getterFuncList_;
 	FieldSetterFuncList setterFuncList_;
 
@@ -1657,6 +1891,9 @@ private:
 
 	bool readableTupleRequired_;
 	bool keyNullIgnorable_;
+	bool orderedDigestRestricted_;
+	bool readerColumnsDeep_;
+	bool headNullAccesible_;
 
 	bool columnsCompleted_;
 
@@ -1669,10 +1906,12 @@ private:
 	size_t restBodySize_;
 
 	LobLink *lobLink_;
-	Pool varDataPool_;
+	util::LocalUniquePtr<Pool> varDataPool_;
+	size_t varDataLimit_;
 
 	std::pair<void*, bool> initialDataPool_;
-	Pool fixedDataPool_;
+	util::LocalUniquePtr<Pool> fixedDataPool_;
+	util::LocalUniquePtr<Pool> largeDataPool_;
 };
 
 struct SQLValues::TupleListReaderSource {
@@ -1742,9 +1981,13 @@ public:
 class SQLValues::ValueAccessor {
 public:
 	template<
-			typename Base, typename HeadAsc = Base, typename HeadDesc = Base,
+			typename Base, bool VarGenerative = false,
+			typename HeadOrd = Base, typename HeadRot = Base,
 			typename Body = Base, bool FullDigest = true>
 	struct TraitsBase;
+
+	template<typename T, typename A1, typename A2>
+	struct VarScopeTraits;
 
 	class ByValue;
 	class ByReader;
@@ -1752,7 +1995,7 @@ public:
 	class ByArrayTuple;
 	class ByKeyArrayTuple;
 	class BySummaryTuple;
-	template<typename Asc> class BySummaryTupleHead;
+	template<typename Rot> class BySummaryTupleHead;
 	class BySummaryTupleBody;
 
 	explicit ValueAccessor(TupleColumnType type);
@@ -1785,14 +2028,14 @@ private:
 };
 
 template<
-	typename Base, typename HeadAsc, typename HeadDesc,
-	typename Body, bool FullDigest>
+		typename Base, bool VarGenerative, typename HeadOrd, typename HeadRot,
+		typename Body, bool FullDigest>
 struct SQLValues::ValueAccessor::TraitsBase {
 	typedef Base BaseType;
 
-	template<typename Asc> struct HeadOf {
+	template<typename Rot> struct HeadOf {
 		typedef typename util::Conditional<
-				Asc::VALUE, HeadAsc, HeadDesc>::Type Type;
+				Rot::VALUE, HeadRot, HeadOrd>::Type Type;
 	};
 
 	typedef Body BodyType;
@@ -1800,9 +2043,10 @@ struct SQLValues::ValueAccessor::TraitsBase {
 	enum {
 		FULL_DIGEST = FullDigest,
 		HEAD_SEPARATED =
-				(!util::IsSame<Base, HeadAsc>::VALUE ||
-				!util::IsSame<Base, HeadDesc>::VALUE ||
-				!util::IsSame<Base, Body>::VALUE)
+				(!util::IsSame<Base, HeadOrd>::VALUE ||
+				!util::IsSame<Base, HeadRot>::VALUE ||
+				!util::IsSame<Base, Body>::VALUE),
+		VAR_GENERATIVE = VarGenerative
 	};
 
 	template<typename T>
@@ -1818,6 +2062,38 @@ struct SQLValues::ValueAccessor::TraitsBase {
 				(HEAD_SEPARATED && TypeUtils::Traits<
 						T::COLUMN_TYPE>::FOR_MULTI_VAR)>::Result Type;
 	};
+
+	template<typename T>
+	struct VarGenerativeBy {
+		typedef typename util::BoolType<
+				(VAR_GENERATIVE && TypeUtils::Traits<
+						T::COLUMN_TYPE>::FOR_MULTI_VAR)>::Result Type;
+	};
+};
+
+template<typename T, typename A1, typename A2>
+struct SQLValues::ValueAccessor::VarScopeTraits {
+private:
+	typedef A1 AccessorType1;
+	typedef typename util::Conditional<
+			util::IsSame<A2, void>::VALUE, A1, A2>::Type AccessorType2;
+
+	enum {
+		POTENTIALLY_VAR_GENERATIVE =
+				(AccessorType1::TraitsType::VAR_GENERATIVE ||
+				AccessorType2::TraitsType::VAR_GENERATIVE),
+		VAR_GENERATIVE =
+				(AccessorType1::TraitsType::template VarGenerativeBy<
+						T>::Type::VALUE ||
+				AccessorType2::TraitsType::template VarGenerativeBy<
+						T>::Type::VALUE)
+	};
+
+public:
+	typedef typename util::Conditional<
+			VAR_GENERATIVE,
+			RefVarContextScope,
+			EmptyVarContextScope<POTENTIALLY_VAR_GENERATIVE> >::Type Type;
 };
 
 class SQLValues::ValueAccessor::ByValue {
@@ -1842,7 +2118,7 @@ public:
 
 class SQLValues::ValueAccessor::ByReader {
 public:
-	typedef TraitsBase<ByReader> TraitsType;
+	typedef TraitsBase<ByReader, true> TraitsType;
 	typedef TupleListReaderSource SourceType;
 	typedef DigestTupleListReader DigestSourceType;
 	typedef SourceType SubSourceType;
@@ -1863,7 +2139,7 @@ public:
 
 class SQLValues::ValueAccessor::ByReadableTuple {
 public:
-	typedef TraitsBase<ByReadableTuple> TraitsType;
+	typedef TraitsBase<ByReadableTuple, true> TraitsType;
 	typedef ReadableTuple SourceType;
 	typedef DigestReadableTuple DigestSourceType;
 	typedef SourceType SubSourceType;
@@ -1927,9 +2203,9 @@ public:
 class SQLValues::ValueAccessor::BySummaryTuple {
 public:
 	typedef TraitsBase<
-			BySummaryTuple,
-			BySummaryTupleHead<util::TrueType>,
+			BySummaryTuple, true,
 			BySummaryTupleHead<util::FalseType>,
+			BySummaryTupleHead<util::TrueType>,
 			BySummaryTupleBody, false> TraitsType;
 
 	typedef SummaryTuple SourceType;
@@ -1950,7 +2226,7 @@ public:
 	};
 };
 
-template<typename Asc>
+template<typename Rot>
 class SQLValues::ValueAccessor::BySummaryTupleHead {
 public:
 	typedef BySummaryTuple::TraitsType TraitsType;
@@ -1991,10 +2267,6 @@ public:
 	public:
 		explicit TypeAt(const ValueBasicComparator &base) : base_(base) {}
 
-		RetType operator()(
-				const typename T::ValueType &v1,
-				const typename T::ValueType &v2) const;
-
 		template<typename Pred>
 		bool operator()(
 				const typename T::ValueType &v1,
@@ -2010,51 +2282,6 @@ public:
 private:
 	bool sensitive_;
 };
-
-template<>
-int32_t SQLValues::ValueBasicComparator::TypeAt<
-		SQLValues::Types::Byte>::operator()(
-		const int8_t &v1, const int8_t &v2) const;
-template<>
-int32_t SQLValues::ValueBasicComparator::TypeAt<
-		SQLValues::Types::Short>::operator()(
-		const int16_t &v1, const int16_t &v2) const;
-template<>
-int32_t SQLValues::ValueBasicComparator::TypeAt<
-		SQLValues::Types::Integer>::operator()(
-		const int32_t &v1, const int32_t &v2) const;
-template<>
-int32_t SQLValues::ValueBasicComparator::TypeAt<
-		SQLValues::Types::Long>::operator()(
-		const int64_t &v1, const int64_t &v2) const;
-template<>
-int32_t SQLValues::ValueBasicComparator::TypeAt<
-		SQLValues::Types::Float>::operator()(
-		const float &v1, const float &v2) const;
-template<>
-int32_t SQLValues::ValueBasicComparator::TypeAt<
-		SQLValues::Types::Double>::operator()(
-		const double &v1, const double &v2) const;
-template<>
-int32_t SQLValues::ValueBasicComparator::TypeAt<
-		SQLValues::Types::Timestamp>::operator()(
-		const int64_t &v1, const int64_t &v2) const;
-template<>
-int32_t SQLValues::ValueBasicComparator::TypeAt<
-		SQLValues::Types::Bool>::operator()(
-		const bool &v1, const bool &v2) const;
-template<>
-int32_t SQLValues::ValueBasicComparator::TypeAt<
-		SQLValues::Types::String>::operator()(
-		const TupleString &v1, const TupleString &v2) const;
-template<>
-int32_t SQLValues::ValueBasicComparator::TypeAt<
-		SQLValues::Types::Blob>::operator()(
-		const TupleValue &v1, const TupleValue &v2) const;
-template<>
-int32_t SQLValues::ValueBasicComparator::TypeAt<
-		SQLValues::Types::Any>::operator()(
-		const TupleValue &v1, const TupleValue &v2) const;
 
 template<>
 template<typename Pred>
@@ -2144,9 +2371,20 @@ public:
 	template<typename T>
 	class TypeAt;
 
+	struct ThreeWay {
+		typedef DefaultResultType result_type;
+		typedef PredArgType first_argument_type;
+		typedef PredArgType second_argument_type;
+
+		result_type operator()(
+				first_argument_type v1, second_argument_type v2) const;
+	};
+
+	class Arranged;
+
 	ValueComparator(
 			const ValueAccessor &accessor1, const ValueAccessor &accessor2,
-			bool sensitive, bool ascending);
+			VarContext *varCxt, bool sensitive, bool ascending);
 
 	static ValueComparator ofValues(
 			const TupleValue &v1, const TupleValue &v2,
@@ -2168,19 +2406,14 @@ public:
 			bool anotherNullIgnorable) const;
 
 private:
-	struct ThreeWay {
-		typedef DefaultResultType result_type;
-		typedef PredArgType first_argument_type;
-		typedef PredArgType second_argument_type;
-
-		result_type operator()(
-				first_argument_type v1, second_argument_type v2) const;
-	};
-
 	typedef ThreeWay DefaultPredType;
 
+	typedef SwitcherOf<
+			void, false, true, false,
+			ValueAccessor::ByValue>::Type DefaultSwitcherByValues;
+
 	TypeSwitcher getColumnTypeSwitcher(
-			bool promotable, bool nullIgnorable) const;
+			bool promotable, bool nullIgnorable, ValueProfile *profile) const;
 
 	template<typename Pred>
 	static typename util::BinaryFunctionResultOf<Pred>::Type compare(
@@ -2208,6 +2441,7 @@ private:
 
 	ValueAccessor accessor1_;
 	ValueAccessor accessor2_;
+	VarContext *varCxt_;
 	bool sensitive_;
 	bool ascending_;
 };
@@ -2260,6 +2494,11 @@ struct SQLValues::ValueComparator::VariantTraits {
 	typedef typename util::Conditional<
 			util::IsSame<A2, void>::VALUE,
 			AccessorType1, A2>::Type AccessorType2;
+
+	template<typename PredSub, bool RevSub>
+	struct PredRebind {
+		typedef VariantTraits<PredSub, RevSub, A1, A2> Type;
+	};
 };
 
 template<
@@ -2295,7 +2534,14 @@ public:
 
 	Switcher(const ValueComparator &base, bool nullIgnorable) :
 			base_(base),
-			nullIgnorable_(nullIgnorable) {
+			nullIgnorable_(nullIgnorable),
+			profile_(NULL) {
+	}
+
+	Switcher withProfile(ValueProfile *profile) const {
+		Switcher dest = *this;
+		dest.profile_ = profile;
+		return dest;
 	}
 
 	template<typename Op>
@@ -2342,6 +2588,7 @@ private:
 
 	ValueComparator base_;
 	bool nullIgnorable_;
+	ValueProfile *profile_;
 };
 
 template<typename T>
@@ -2353,6 +2600,8 @@ public:
 	typedef typename VariantTraitsType::RetType RetType;
 	typedef typename VariantTraitsType::AccessorType1 AccessorType1;
 	typedef typename VariantTraitsType::AccessorType2 AccessorType2;
+	typedef typename ValueAccessor::VarScopeTraits<
+			typename T::Type, AccessorType1, AccessorType2>::Type VarScopeType;
 
 	explicit TypeAt(const ValueComparator &base) : base_(base) {}
 
@@ -2362,6 +2611,21 @@ public:
 
 private:
 	const ValueComparator &base_;
+};
+
+class SQLValues::ValueComparator::Arranged {
+public:
+	explicit Arranged(const ValueComparator &base);
+
+	DefaultResultType operator()(
+			const TupleValue &v1, const TupleValue &v2) const {
+		return func_(base_, v1, v2);
+	}
+
+private:
+	typedef DefaultSwitcherByValues SwitcherType;
+	ValueComparator base_;
+	SwitcherType::DefaultFuncType func_;
 };
 
 class SQLValues::ValueEq {
@@ -2387,6 +2651,8 @@ public:
 	public:
 		typedef typename T::VariantTraitsType::OfValueDigester VariantTraitsType;
 		typedef typename VariantTraitsType::AccessorType AccessorType;
+		typedef typename ValueAccessor::VarScopeTraits<
+				typename T::Type, AccessorType, void>::Type VarScopeType;
 
 		explicit TypeAt(const ValueFnv1aHasher &base) : base_(base) {}
 		int64_t operator()(const typename AccessorType::SourceType &src) const;
@@ -2395,14 +2661,21 @@ public:
 		const ValueFnv1aHasher &base_;
 	};
 
-	explicit ValueFnv1aHasher(const ValueAccessor &accessor);
-	ValueFnv1aHasher(const ValueAccessor &accessor, int64_t seed);
+	ValueFnv1aHasher(const ValueAccessor &accessor, VarContext *varCxt);
+	ValueFnv1aHasher(
+			const ValueAccessor &accessor, VarContext *varCxt, int64_t seed);
 
+	static ValueFnv1aHasher ofValue(const TupleValue &value);
 	static ValueFnv1aHasher ofValue(const TupleValue &value, int64_t seed);
 
 	uint32_t operator()(const TupleValue &value) const;
 
+	static int64_t maskNull(int64_t src);
+	static int64_t unmaskNull(int64_t src);
+
 private:
+	static const int64_t NULL_MASK_VALUE = -static_cast<int64_t>(UINT32_MAX);
+
 	static int64_t digest(
 			uint32_t seed, const int64_t &value, const Types::Integral&);
 	static int64_t digest(
@@ -2414,6 +2687,7 @@ private:
 			uint32_t seed, const TupleValue &value, const Types::Any&);
 
 	ValueAccessor accessor_;
+	VarContext *varCxt_;
 	uint32_t seed_;
 };
 
@@ -2426,10 +2700,14 @@ struct SQLValues::ValueFnv1aHasher::Constants {
 
 class SQLValues::ValueOrderedDigester {
 public:
+	struct Constants;
+
 	template<typename T> class TypeAt {
 	public:
 		typedef typename T::VariantTraitsType::OfValueDigester VariantTraitsType;
 		typedef typename VariantTraitsType::AccessorType AccessorType;
+		typedef typename ValueAccessor::VarScopeTraits<
+				typename T::Type, AccessorType, void>::Type VarScopeType;
 
 		explicit TypeAt(const ValueOrderedDigester &base) : base_(base) {}
 		int64_t operator()(const typename AccessorType::SourceType &src) const;
@@ -2438,27 +2716,31 @@ public:
 		const ValueOrderedDigester &base_;
 	};
 
-	ValueOrderedDigester(const ValueAccessor &accessor, bool ascending);
+	ValueOrderedDigester(
+			const ValueAccessor &accessor, VarContext *varCxt, bool rotating);
 
 private:
-	template<typename Asc>
-	static int64_t digest(
-			const int64_t &value, const Types::Integral&, const Asc&);
+	typedef util::TrueType Ascending;
 
-	template<typename Asc>
-	static int64_t digest(
-			const double &value, const Types::Floating&, const Asc&);
-
-	template<typename Asc, typename T>
-	static int64_t digest(
-			const T &value, const Types::Sequential&, const Asc&);
-
-	template<typename Asc>
-	static int64_t digest(
-			const TupleValue &value, const Types::Any&, const Asc&);
+	static int64_t digest(const int64_t &value, const Types::Integral&);
+	static int64_t digest(const double &value, const Types::Floating&);
+	template<typename T>
+	static int64_t digest(const T &value, const Types::Sequential&);
+	static int64_t digest(const TupleValue &value, const Types::Any&);
 
 	ValueAccessor accessor_;
-	bool ascending_;
+	VarContext *varCxt_;
+	bool rotating_;
+};
+
+struct SQLValues::ValueOrderedDigester::Constants {
+private:
+	static const uint64_t ROT_MAX = ~static_cast<uint64_t>(0);
+
+public:
+	static const uint64_t ROT_PRIME = 1048573U;
+	static const uint64_t ROT_BASE = ROT_MAX / ROT_PRIME;
+	static const uint64_t ROT_THRESHOLD = ROT_PRIME * ROT_BASE;
 };
 
 class SQLValues::ValueDigester {
@@ -2467,30 +2749,30 @@ private:
 	typedef ValueOrderedDigester OrderedType;
 
 public:
-	template<typename Ordering, typename Accessor>
+	template<bool Ordering, bool Rotating, typename Accessor>
 	struct VariantTraits;
 
-	template<typename Accessor, int32_t NullableSpecific>
+	template<typename Accessor, int32_t NullableSpecific, bool RotationSpecific>
 	class Switcher;
 
-	template<typename Accessor, int32_t NullableSpecific>
+	template<typename Accessor, int32_t NullableSpecific, bool RotationSpecific>
 	struct SwitcherOf {
-		typedef Switcher<Accessor, NullableSpecific> Type;
+		typedef Switcher<Accessor, NullableSpecific, RotationSpecific> Type;
 	};
 
 	template<typename T>
 	class TypeAt;
 
 	ValueDigester(
-			const ValueAccessor &accessor, bool ordering, bool ascending,
-			int64_t seed);
+			const ValueAccessor &accessor, VarContext *varCxt, bool ordering,
+			bool rotating, int64_t seed);
 
 	operator UnorderedType() const {
-		return UnorderedType(accessor_, seed_);
+		return UnorderedType(accessor_, varCxt_, seed_);
 	}
 
 	operator OrderedType() const {
-		return OrderedType(accessor_, ascending_);
+		return OrderedType(accessor_, varCxt_, rotating_);
 	}
 
 	bool isEmpty() const;
@@ -2501,19 +2783,21 @@ public:
 
 private:
 	TypeSwitcher getColumnTypeSwitcher(
-			bool nullIgnorable, bool nullableAlways) const;
+			bool nullIgnorable, bool nullableAlways,
+			ValueProfile *profile) const;
 
 	ValueAccessor accessor_;
+	VarContext *varCxt_;
 	bool ordering_;
-	bool ascending_;
+	bool rotating_;
 	int64_t seed_;
 };
 
-template<typename Ordering, typename Accessor>
+template<bool Ordering, bool Rotating, typename Accessor>
 struct SQLValues::ValueDigester::VariantTraits {
 public:
 	enum {
-		VARIANT_ORDERED = !util::IsSame<Ordering, void>::VALUE
+		VARIANT_ORDERED = Ordering
 	};
 
 	typedef VariantTraits OfValueDigester;
@@ -2521,11 +2805,11 @@ public:
 	typedef typename util::Conditional<
 			VARIANT_ORDERED, OrderedType, UnorderedType>::Type VariantBase;
 
-	typedef Ordering OrderingType;
+	typedef typename util::BoolType<Rotating>::Result RotatingType;
 	typedef Accessor AccessorType;
 };
 
-template<typename Accessor, int32_t NullableSpecific>
+template<typename Accessor, int32_t NullableSpecific, bool RotationSpecific>
 class SQLValues::ValueDigester::Switcher {
 public:
 	typedef typename Accessor::SourceType SourceType;
@@ -2554,7 +2838,14 @@ public:
 			bool nullableAlways) :
 			base_(base),
 			nullIgnorable_(nullIgnorable),
-			nullableAlways_(nullableAlways) {
+			nullableAlways_(nullableAlways),
+			profile_(NULL) {
+	}
+
+	Switcher withProfile(ValueProfile *profile) const {
+		Switcher dest = *this;
+		dest.profile_ = profile;
+		return dest;
 	}
 
 	template<typename Op>
@@ -2571,21 +2862,22 @@ private:
 		typedef V Type;
 	};
 
-	template<typename Base, typename Ordering>
+	template<typename Base, bool Ordering, bool Rotating>
 	struct OpTraitsAt {
-		typedef VariantTraits<Ordering, Accessor> SubTraitsType;
+		typedef VariantTraits<Ordering, Rotating, Accessor> SubTraitsType;
 		typedef typename Base::VariantTraitsType::template ValueDigesterRebind<
 				SubTraitsType>::Type VariantTraitsType;
 		typedef typename Base::template VariantRebind<
 				VariantTraitsType>::Type Type;
 	};
 
-	template<typename Op, typename Traits, typename Ordering>
+	template<typename Op, typename Traits, bool Ordering, bool Rotating>
 	typename Traits::template Func<Op>::Type getSubWith() const;
 
 	ValueDigester base_;
 	bool nullIgnorable_;
 	bool nullableAlways_;
+	ValueProfile *profile_;
 };
 
 template<typename T>
@@ -2678,11 +2970,12 @@ public:
 	template<typename T> class BaseTypeAt;
 
 	TupleComparator(
-			const CompColumnList &columnList, bool sensitive,
-			bool withDigest = false, bool nullIgnorable = false);
+			const CompColumnList &columnList, VarContext *varCxt,
+			bool sensitive, bool withDigest = false, bool nullIgnorable = false,
+			bool orderedDigestRestricted = false);
 
 	ValueComparator initialComparatorAt(
-			CompColumnList::const_iterator it, bool reversed) const;
+			CompColumnList::const_iterator it) const;
 
 	ValueComparator comparatorAt(CompColumnList::const_iterator it) const;
 
@@ -2691,15 +2984,21 @@ public:
 
 	bool isDigestOnly(bool promotable) const;
 	bool isDigestOrdered() const;
+	bool isSingleVarHeadOnly(bool ordering) const;
+
+	template<typename L>
+	static void updateProfile(const L &subFuncList, ValueProfile *profile);
 
 private:
-	template<bool DigestOnly, bool DigestAccessible>
+	template<bool DigestOnly, bool DigestAccessible, bool HeadOnly>
 	struct TuplePred;
 
 	const CompColumnList &columnList_;
+	VarContext *varCxt_;
 	bool sensitive_;
 	bool withDigest_;
 	bool nullIgnorable_;
+	bool orderedDigestRestricted_;
 };
 
 template<typename Ret, typename A1, typename A2>
@@ -2724,11 +3023,14 @@ struct SQLValues::TupleComparator::BaseWithAccessor {
 
 	typedef util::Vector<SubFuncType> SubFuncList;
 
-	BaseWithAccessor(util::StackAllocator &alloc, const TupleComparator &base);
+	BaseWithAccessor(
+			util::StackAllocator &alloc, const TupleComparator &base,
+			ValueProfile *profile);
 
 	TupleComparator base_;
 	SubFuncList subFuncList_;
 	FuncType func_;
+	ValueProfile *profile_;
 };
 
 template<
@@ -2753,7 +3055,8 @@ struct SQLValues::TupleComparator::VariantTraits {
 			DigestOnly, void, Rev, A1, A2> ThreeWayTraitsType;
 
 	enum {
-		DIGEST_ONLY = (DigestOnly > 0),
+		HEAD_ONLY = (DigestOnly == 2 || DigestOnly == -2),
+		DIGEST_ONLY = (DigestOnly == 1),
 		DIGEST_UNORDERED = (DigestOnly < 0)
 	};
 };
@@ -2764,9 +3067,13 @@ template<
 class SQLValues::TupleComparator::Switcher {
 private:
 	typedef typename ValueComparator::SwitcherOf<
-			Pred, Rev, Promo, Ordering,
+			Pred, false, Promo, Ordering,
 			typename A1::TraitsType::BaseType,
 			typename A2::TraitsType::BaseType>::Type SubSwitcherType;
+	typedef typename ValueComparator::SwitcherOf<
+			Pred, Rev, Promo, Ordering,
+			typename A1::TraitsType::BaseType,
+			typename A2::TraitsType::BaseType>::Type MainSwitcherType;
 
 	template<typename Base>
 	struct TraitsTypeOf {
@@ -2787,7 +3094,15 @@ public:
 	typedef typename TraitsTypeOf<
 			typename SubSwitcherType::DefaultTraitsType>::Type DefaultTraitsType;
 
-	explicit Switcher(const TupleComparator &base) : base_(base) {
+	explicit Switcher(const TupleComparator &base) :
+			base_(base),
+			profile_(NULL) {
+	}
+
+	Switcher withProfile(ValueProfile *profile) const {
+		Switcher dest = *this;
+		dest.profile_ = profile;
+		return dest;
 	}
 
 	template<typename Op>
@@ -2797,7 +3112,13 @@ public:
 
 	template<typename Op, typename Traits>
 	typename Traits::template Func<Op>::Type getWith() const {
-		if (base_.isDigestOnly(false)) {
+		if (base_.isSingleVarHeadOnly(true)) {
+			return getSubWith<Op, Traits, 2, false>();
+		}
+		else if (base_.isSingleVarHeadOnly(false)) {
+			return getSubWith<Op, Traits, -2, false>();
+		}
+		else if (base_.isDigestOnly(false)) {
 			return getSubWith<Op, Traits, 1, false>();
 		}
 		else if (base_.isDigestOrdered()) {
@@ -2813,7 +3134,13 @@ public:
 		typedef typename PlainOpBase<Op>::TraitsType TraitsType;
 		typedef typename Op::OptionsType OptionsType;
 		const bool fixedDigest = OptionsType::FixedDigest::VALUE;
-		if (base_.isDigestOnly(false)) {
+		if (base_.isSingleVarHeadOnly(true)) {
+			return getSubWith<Op, TraitsType, 2, false>();
+		}
+		else if (base_.isSingleVarHeadOnly(false)) {
+			return getSubWith<Op, TraitsType, -2, false>();
+		}
+		else if (base_.isDigestOnly(false)) {
 			return getSubWith<Op, TraitsType, 1, fixedDigest>();
 		}
 		else if (base_.isDigestOrdered()) {
@@ -2840,12 +3167,23 @@ private:
 			HEAD_SEPARATED =
 					(A1::TraitsType::HEAD_SEPARATED ||
 					A2::TraitsType::HEAD_SEPARATED),
-			DIGEST_ONLY = (DigestOnly > 0),
-			DIGEST_ONLY_DETAIL = (HEAD_SEPARATED ? DigestOnly : DIGEST_ONLY),
+			HEAD_ONLY = (DigestOnly == 2 || DigestOnly == -2),
+			DIGEST_ONLY = (DigestOnly == 1),
+			DIGEST_ONLY_DETAIL = ((HEAD_SEPARATED || HEAD_ONLY) ?
+				DigestOnly : (DIGEST_ONLY ? 1 : 0)),
+
+			NULLABLE_SPECIFIC_ON_SINGLE = (HEAD_ONLY ? 1 : 0),
+			TYPE_SPECIFIC_ON_SINGLE = (HEAD_ONLY || FixedDigest),
+			FOR_SINGLE =
+					(HEAD_ONLY || (DIGEST_ONLY && (!Typed || FixedDigest)))
 		};
+		static const TypeSwitcher::TypeTarget TYPE_TARGET =
+					(FixedDigest ? TypeSwitcher::TYPE_TARGET_FIXED :
+					(HEAD_ONLY ? TypeSwitcher::TYPE_TARGET_SINGLE_VAR :
+								TypeSwitcher::TYPE_TARGET_ALL));
 
 		typedef VariantTraits<
-				DIGEST_ONLY_DETAIL, void, false, void, void> SubTraitsType;
+				DIGEST_ONLY_DETAIL, void, Rev, void, void> SubTraitsType;
 		typedef typename Base::VariantTraitsType::
 				template TupleComparatorRebind<
 						SubTraitsType>::Type VariantTraitsType;
@@ -2853,25 +3191,26 @@ private:
 				VariantTraitsType>::Type BaseType;
 
 		typedef typename BaseType::OptionsType::template TypesRebind<
-				false, false, FixedDigest, FixedDigest>::Type SingleOptions;
+				false, NULLABLE_SPECIFIC_ON_SINGLE, TYPE_SPECIFIC_ON_SINGLE,
+				TYPE_TARGET>::Type SingleOptions;
 		typedef typename BaseType::template OptionsRebind<
 				SingleOptions>::Type SingleType;
 
 		typedef typename util::Conditional<
-				(DIGEST_ONLY && (!Typed || FixedDigest)),
-				SingleType, BaseType>::Type Type;
+				FOR_SINGLE, SingleType, BaseType>::Type Type;
 	};
 
 	template<typename Op, typename Traits, int32_t DigestOnly, bool FixedDigest>
 	typename Traits::template Func<Op>::Type getSubWith() const {
-		const SubSwitcherType switcher(
-				base_.initialComparatorAt(base_.columnList_.begin(), false),
-				base_.nullIgnorable_);
+		const MainSwitcherType switcher = MainSwitcherType(
+				base_.initialComparatorAt(base_.columnList_.begin()),
+				base_.nullIgnorable_).withProfile(profile_);
 		return switcher.getWith<
 				Op, typename OpTraitsAt<Traits, DigestOnly, FixedDigest>::Type>();
 	}
 
 	TupleComparator base_;
+	ValueProfile *profile_;
 };
 
 template<
@@ -2890,14 +3229,17 @@ public:
 	typedef typename ValueComparator::template Switcher<
 			void, false, Promo, Ordering, A1, A2> SubSwitcherType;
 
-	typedef ValueComparator::VariantTraits<
-			Pred, Rev, A1, A2> VariantTraitsType;
-	typedef typename VariantTraitsType::PredType PredType;
-	typedef typename VariantTraitsType::RetType RetType;
+	typedef typename ValueComparator::VariantTraits<
+			Pred, Rev, A1, A2>::RetType RetType;
 
 	typedef BaseWithAccessor<RetType, A1, A2> BaseType;
 
-	WithAccessor(util::StackAllocator &alloc, const TupleComparator &base);
+	typedef typename ValueComparator::template PredTypeOf<
+			Pred, Rev>::Type PredType;
+
+	WithAccessor(
+			util::StackAllocator &alloc, const TupleComparator &base,
+			ValueProfile *profile = NULL);
 
 	operator const BaseType&() const {
 		return base_;
@@ -2908,7 +3250,7 @@ public:
 	}
 
 	SwitcherType getTypeSwitcher() const {
-		return SwitcherType(base_.base_);
+		return SwitcherType(base_.base_).withProfile(base_.profile_);
 	}
 
 	RetType operator()(
@@ -2926,7 +3268,7 @@ public:
 			const typename A1::DigestSourceType &src1,
 			const typename A2::DigestSourceType &src2,
 			const DigestOnly&) const {
-		return TuplePred<DigestOnly::VALUE, true>()(*this, src1, src2);
+		return TuplePred<DigestOnly::VALUE, true, false>()(*this, src1, src2);
 	}
 
 private:
@@ -2941,6 +3283,7 @@ public:
 	typedef typename T::VariantTraitsType::OfTupleComparator
 			TupleVariantTraitsType;
 
+	typedef typename VariantTraitsType::OrgPredType OrgPredType;
 	typedef typename VariantTraitsType::RetType RetType;
 	typedef typename VariantTraitsType::PredType PredType;
 
@@ -2968,6 +3311,11 @@ public:
 			const typename AccessorType2::SubSourceType &src2) const;
 
 	RetType operator()(
+			const typename AccessorType1::SubSourceType &src1,
+			const typename AccessorType2::SubSourceType &src2,
+			const util::FalseType&) const;
+
+	RetType operator()(
 			const typename AccessorType1::DigestSourceType &src1,
 			const typename AccessorType2::DigestSourceType &src2) const;
 
@@ -2977,6 +3325,7 @@ public:
 
 private:
 	enum {
+		HEAD_ONLY = TupleVariantTraitsType::HEAD_ONLY,
 		DIGEST_ONLY = TupleVariantTraitsType::DIGEST_ONLY,
 		DIGEST_UNORDERED = TupleVariantTraitsType::DIGEST_UNORDERED,
 		DIGEST_ACCESSIBLE = (DIGEST_UNORDERED || (
@@ -2989,20 +3338,19 @@ private:
 						typename T::Type>::Type::VALUE &&
 				AccessorType2::TraitsType::template BodyOnly<
 						typename T::Type>::Type::VALUE),
-		ORDERING_REVERSED = VariantTraitsType::ORDERING_REVERSED
+		ORDERING_REVERSED = VariantTraitsType::ORDERING_REVERSED,
 	};
 
 	typedef typename util::BoolType<!ORDERING_REVERSED>::Result SubAscending;
 
 	typedef typename ValueComparator::template VariantTraits<
-			void, ORDERING_REVERSED,
+			void, false,
 			typename AccessorType1::TraitsType::template HeadOf<
-					SubAscending>::Type,
+					util::FalseType>::Type,
 			typename AccessorType2::TraitsType::template HeadOf<
-					SubAscending>::Type> HeadSubVariantTraitsType;
-
+					util::FalseType>::Type> HeadSubVariantTraitsType;
 	typedef typename ValueComparator::template VariantTraits<
-			void, ORDERING_REVERSED,
+			void, false,
 			typename AccessorType1::TraitsType::BodyType,
 			typename AccessorType2::TraitsType::BodyType
 	> BodySubVariantTraitsType;
@@ -3017,10 +3365,25 @@ private:
 			(DIGEST_UNORDERED || BODY_ONLY),
 			BodySubType, BaseHeadSubType>::Type HeadSubType;
 
+	typedef typename HeadSubVariantTraitsType::template PredRebind<
+			OrgPredType, ORDERING_REVERSED>::Type HeadOnlyVariantTraitsType;
+	typedef typename BodySubVariantTraitsType::template PredRebind<
+			OrgPredType, ORDERING_REVERSED>::Type BodyOnlyVariantTraitsType;
+
+	typedef typename ValueComparator::template TypeAt<
+			typename T::template VariantRebind<
+					HeadOnlyVariantTraitsType>::Type>::TypedOp BaseHeadOnlyType;
+	typedef typename ValueComparator::template TypeAt<
+			typename T::template VariantRebind<
+					BodyOnlyVariantTraitsType>::Type>::TypedOp BaseBodyOnlyType;
+	typedef typename util::Conditional<
+			DIGEST_UNORDERED,
+			BaseBodyOnlyType, BaseHeadOnlyType>::Type HeadOnlyType;
+
 	const BaseType &base_;
 };
 
-template<bool DigestOnly, bool DigestAccessible>
+template<bool DigestOnly, bool DigestAccessible, bool HeadOnly>
 struct SQLValues::TupleComparator::TuplePred {
 	template<typename Comp, typename S1, typename S2>
 	typename Comp::RetType operator()(
@@ -3030,7 +3393,7 @@ struct SQLValues::TupleComparator::TuplePred {
 };
 
 template<bool DigestAccessible>
-struct SQLValues::TupleComparator::TuplePred<false, DigestAccessible> {
+struct SQLValues::TupleComparator::TuplePred<false, DigestAccessible, false> {
 	template<typename Comp, typename S1, typename S2>
 	typename Comp::RetType operator()(
 			const Comp &comp, const S1 &src1, const S2 &src2) const {
@@ -3042,7 +3405,28 @@ struct SQLValues::TupleComparator::TuplePred<false, DigestAccessible> {
 };
 
 template<>
-struct SQLValues::TupleComparator::TuplePred<false, false> {
+struct SQLValues::TupleComparator::TuplePred<false, true, true> {
+	template<typename Comp, typename S1, typename S2>
+	typename Comp::RetType operator()(
+			const Comp &comp, const S1 &src1, const S2 &src2) const {
+		if (src1.getDigest() == src2.getDigest()) {
+			return comp(src1.getTuple(), src2.getTuple(), util::FalseType());
+		}
+		return typename Comp::PredType()(src1.getDigest(), src2.getDigest());
+	}
+};
+
+template<>
+struct SQLValues::TupleComparator::TuplePred<false, false, true> {
+	template<typename Comp, typename S1, typename S2>
+	typename Comp::RetType operator()(
+			const Comp &comp, const S1 &src1, const S2 &src2) const {
+		return comp(src1.getTuple(), src2.getTuple(), util::FalseType());
+	}
+};
+
+template<>
+struct SQLValues::TupleComparator::TuplePred<false, false, false> {
 	template<typename Comp, typename S1, typename S2>
 	typename Comp::RetType operator()(
 			const Comp &comp, const S1 &src1, const S2 &src2) const {
@@ -3080,17 +3464,19 @@ public:
 
 		BaseWithAccessor(
 				util::StackAllocator &alloc, const TupleComparator &base,
-				const CompColumnList &columnList) :
+				const CompColumnList &columnList, ValueProfile *profile) :
 				base_(base),
 				columnList_(columnList),
 				subFuncList_(alloc),
-				func_(NULL) {
+				func_(NULL),
+				profile_(profile) {
 		}
 
 		TupleComparator base_;
 		const CompColumnList &columnList_;
 		SubFuncList subFuncList_;
 		FuncType func_;
+		ValueProfile *profile_;
 	};
 
 	template<bool Promo, typename A1, typename A2 = A1>
@@ -3118,7 +3504,8 @@ public:
 		typedef BaseWithAccessor<A1, A2> BaseType;
 
 		WithAccessor(
-				util::StackAllocator &alloc, const TupleRangeComparator &base);
+				util::StackAllocator &alloc, const TupleRangeComparator &base,
+				ValueProfile *profile = NULL);
 
 		operator const BaseType&() const {
 			return base_;
@@ -3127,8 +3514,8 @@ public:
 		SwitcherType getTypeSwitcher() const {
 			return SwitcherType(
 					base_.base_.initialComparatorAt(
-							base_.base_.columnList_.begin(), false),
-					base_.base_.nullIgnorable_);
+							base_.base_.columnList_.begin()),
+					base_.base_.nullIgnorable_).withProfile(base_.profile_);
 		}
 
 		RetType operator()(
@@ -3165,8 +3552,9 @@ public:
 		const BaseType &base_;
 	};
 
-	explicit TupleRangeComparator(
-			const CompColumnList &columnList, bool nullIgnorable = false);
+	TupleRangeComparator(
+			const CompColumnList &columnList, VarContext *varCxt,
+			bool nullIgnorable = false);
 
 private:
 	static int32_t toResultWithBounds(const CompColumn &column, int32_t ret);
@@ -3174,6 +3562,7 @@ private:
 
 	const TupleComparator base_;
 	const CompColumnList &columnList_;
+	VarContext *varCxt_;
 	bool nullIgnorable_;
 };
 
@@ -3181,21 +3570,25 @@ class SQLValues::TupleDigester {
 public:
 	template<typename T> class BaseTypeAt;
 
-	template<typename Accessor, int32_t NullableSpecific>
+	template<typename Accessor, int32_t NullableSpecific, bool RotationSpecific>
 	struct SwitcherOf {
-		typedef ValueDigester::Switcher<Accessor, NullableSpecific> Type;
+		typedef ValueDigester::Switcher<
+				Accessor, NullableSpecific, RotationSpecific> Type;
 	};
 
 	template<typename Accessor> class BaseWithAccessor;
-	template<typename Accessor, int32_t NullableSpecific = 1> class WithAccessor;
+	template<typename Accessor, int32_t NullableSpecific, bool RotationSpecific>
+	class WithAccessor;
 
 	template<typename T> class BaseTypeAt;
 
 	TupleDigester(
-			const CompColumnList &columnList, const bool *ordering = NULL,
-			bool nullIgnorable = false, bool nullableAlways = false);
+			const CompColumnList &columnList, VarContext *varCxt,
+			const bool *ordering, bool rotationAllowed, bool nullIgnorable,
+			bool nullableAlways);
 
 	bool isOrdering() const;
+	bool isRotating() const;
 
 	static bool isOrderingAvailable(
 			const CompColumnList &columnList, bool promotable);
@@ -3205,13 +3598,21 @@ public:
 	}
 
 private:
+	static bool isRotationAvailable(
+			const CompColumnList &columnList, bool ordering,
+			bool rotationAllowed);
+
 	ValueDigester digesterAt(
 			CompColumnList::const_iterator it, int64_t seed) const;
 
 	ValueDigester initialDigesterAt(CompColumnList::const_iterator it) const;
 
 	const CompColumnList &columnList_;
+	VarContext *varCxt_;
+
 	bool ordering_;
+	bool rotating_;
+
 	bool nullIgnorable_;
 	bool nullableAlways_;
 };
@@ -3227,10 +3628,12 @@ public:
 	typedef int64_t (*FuncType)(const BaseWithAccessor&, const SourceType&);
 
 	typedef typename ValueDigester::template Switcher<
-			Accessor, 0>::DefaultFuncType SubFuncType;
+			Accessor, 0, false>::DefaultFuncType SubFuncType;
 	typedef util::Vector<SubFuncType> SubFuncList;
 
-	BaseWithAccessor(util::StackAllocator &alloc, const TupleDigester &base);
+	BaseWithAccessor(
+			util::StackAllocator &alloc, const TupleDigester &base,
+			ValueProfile *profile);
 
 	const TupleDigester& getBase() const {
 		return base_;
@@ -3252,13 +3655,18 @@ public:
 		return subFuncList_;
 	}
 
+	ValueProfile* getProfile() const {
+		return profile_;
+	}
+
 private:
 	TupleDigester base_;
 	SubFuncList subFuncList_;
 	FuncType func_;
+	ValueProfile *profile_;
 };
 
-template<typename Accessor, int32_t NullableSpecific>
+template<typename Accessor, int32_t NullableSpecific, bool RotationSpecific>
 class SQLValues::TupleDigester::WithAccessor {
 public:
 	typedef BaseWithAccessor<Accessor> AccessorBase;
@@ -3268,16 +3676,19 @@ public:
 		typedef typename AccessorBase::template TypeAt<T>::TypedOp TypedOp;
 	};
 
-	typedef typename SwitcherOf<Accessor, NullableSpecific>::Type SwitcherType;
+	typedef typename SwitcherOf<
+			Accessor, NullableSpecific, RotationSpecific>::Type SwitcherType;
 
-	WithAccessor(util::StackAllocator &alloc, const TupleDigester &base);
+	WithAccessor(
+			util::StackAllocator &alloc, const TupleDigester &base,
+			ValueProfile *profile = NULL);
 
 	SwitcherType getTypeSwitcher() const {
 		return SwitcherType(
 				base_.getBase().initialDigesterAt(
 						base_.getBase().columnList_.begin()),
 				base_.getBase().nullIgnorable_,
-				base_.getBase().nullableAlways_);
+				base_.getBase().nullableAlways_).withProfile(base_.getProfile());
 	}
 
 	const TupleDigester& getBase() const {
@@ -3315,12 +3726,11 @@ private:
 	};
 
 	typedef ValueDigester::VariantTraits<
-			void, void>::VariantBase UnorderedDigester;
+			false, false, void>::VariantBase UnorderedDigester;
 
 	static const int64_t INITIAL_SEED = static_cast<int64_t>(VARIANT_ORDERED ?
 			0 : UnorderedDigester::Constants::INITIAL_SEED);
 
-	typedef typename VariantTraitsType::OrderingType OrderingType;
 	typedef typename ValueDigester::template TypeAt<T>::TypedOp SubType;
 
 	const BaseType &base_;
@@ -3356,9 +3766,12 @@ private:
 class SQLValues::StringBuilder {
 public:
 	explicit StringBuilder(ValueContext &cxt, size_t capacity = 0);
+	explicit StringBuilder(
+			ValueContext &cxt, TupleColumnType, size_t capacity);
 	explicit StringBuilder(const util::StdAllocator<void, void> &alloc);
 
 	void setLimit(size_t limit);
+	static void checkLimit(uint64_t size, size_t limit);
 
 	void appendCode(util::CodePoint c);
 	void append(const char8_t *data, size_t size);
@@ -3375,6 +3788,14 @@ public:
 
 private:
 	static util::StdAllocator<void, void> resolveAllocator(ValueContext &cxt);
+
+	void reserve(size_t newCapacity, size_t actualSize);
+
+	void expandCapacity(size_t actualSize);
+	void initializeDynamicBuffer(size_t newCapacity, size_t actualSize);
+
+	static void errorLimit(uint64_t size, size_t limit);
+	static void errorMaxSize(size_t current, size_t appending);
 
 	char8_t *data_;
 	util::XArray< char8_t, util::StdAllocator<char8_t, void> > dynamicBuffer_;
@@ -3496,9 +3917,17 @@ struct SQLValues::ValueUtils {
 	template<typename Pred>
 	static typename util::BinaryFunctionResultOf<Pred>::Type compareString(
 			const TupleString &v1, const TupleString &v2, const Pred &pred);
+	template<typename Pred, typename Ret>
+	static Ret compareString(
+			const TupleString &v1, const TupleString &v2, const Pred &pred);
 	template<typename Pred, typename R>
 	static typename util::BinaryFunctionResultOf<Pred>::Type compareSequence(
 			R &v1, R &v2, const Pred &pred);
+
+	template<typename Pred, typename Ret>
+	static Ret compareBuffer(
+			const uint8_t *it1, const uint8_t *it2, ptrdiff_t rest, ptrdiff_t sizeDiff,
+			const Pred &pred);
 
 	template<typename T>
 	static int32_t compareRawValue(const T &v1, const T &v2);
@@ -3531,6 +3960,12 @@ struct SQLValues::ValueUtils {
 			int64_t digest, const Asc&, const Types::Integral&);
 	template<typename Asc> static double toValueByOrdredDigest(
 			int64_t digest, const Asc&, const Types::Floating&);
+
+	static int64_t rotateDigest(int64_t digest, const util::TrueType&);
+	static int64_t rotateDigest(int64_t digest, const util::FalseType&);
+
+	static int64_t digestByRotation(int64_t rotated, const util::TrueType&);
+	static int64_t digestByRotation(int64_t rotated, const util::FalseType&);
 
 
 	template<TupleColumnType T>
@@ -3636,6 +4071,14 @@ struct SQLValues::ValueUtils {
 	static LobBuilder& initializeWriter(
 			ValueContext &cxt, util::LocalUniquePtr<LobBuilder> &writerPtr,
 			uint64_t initialCapacity);
+
+	template<typename T>
+	static typename TypeUtils::template Traits<
+			T::COLUMN_TYPE>::WriterContextType& toWriterContext(
+			ValueContext &cxt);
+
+	template<typename T>
+	static size_t toWriterCapacity(uint64_t base);
 
 
 	static bool isNull(const TupleValue &value);
@@ -3780,6 +4223,11 @@ struct SQLValues::ValueUtils {
 			ValueContext &cxt, TupleValue &value,
 			size_t currentDepth, size_t targetDepth);
 
+	static size_t estimateTupleSize(const TupleColumnList &list);
+
+	static uint64_t getApproxPrimeNumber(uint64_t base);
+	static uint64_t findLargestPrimeNumber(uint64_t base);
+
 
 	template<typename T> static typename T::ValueType readCurrentValue(
 			TupleListReader &reader, const TupleColumn &column);
@@ -3802,6 +4250,8 @@ struct SQLValues::ValueUtils {
 			WritableTuple &tuple, const TupleColumn &column,
 			const TupleValue &value);
 	static void writeNull(WritableTuple &tuple, const TupleColumn &column);
+
+	static void updateKeepInfo(TupleListReader &reader);
 
 private:
 	struct Constants;
@@ -3874,6 +4324,9 @@ struct SQLValues::ValueUtils::Constants {
 
 	static const util::DateTime::FieldData TIMESTAMP_MAX_FIELDS;
 	static const int64_t TIMESTAMP_MAX_UNIX_TIME;
+
+	static const uint32_t LARGEST_PRIME_OF_BITS[];
+	static const size_t LARGEST_PRIME_OF_BITS_COUNT;
 };
 
 struct SQLValues::ValueUtils::TimeErrorHandler {
@@ -3980,6 +4433,13 @@ struct SQLValues::ValueUtils::TupleWrapper {
 };
 
 class SQLValues::ReadableTupleRef {
+private:
+	enum {
+		DIGESTER_ORDERING = true,
+		DIGESTER_ROTATING = true,
+		DIGESTER_NON_ROTATING = false,
+	};
+
 public:
 	typedef DigestTupleListReader DigestTuple;
 
@@ -4014,32 +4474,30 @@ public:
 
 			DigestTuple digestTuple_;
 			D digester_;
-			bool digesterAscending_;
+			bool digesterRotating_;
 		};
 
 		template<typename T>
 		struct DigesterOf {
+
 			typedef typename T::VariantTraitsType::OfValueComparator
 					ComparatorVariantTraits;
 			typedef typename ComparatorVariantTraits::AccessorType1
 					AccessorType;
 
-			typedef util::TrueType OrderingType;
-			typedef util::FalseType RevOrderingType;
-
 			typedef ValueDigester::VariantTraits<
-					OrderingType, AccessorType> DigesterVariantTraits;
+					DIGESTER_ORDERING, true, AccessorType> DigesterVariantTraits;
 			typedef ValueDigester::VariantTraits<
-					RevOrderingType, AccessorType> RevDigesterVariantTraits;
+					DIGESTER_ORDERING, false, AccessorType> RotDigesterVariantTraits;
 
 			typedef TypeSwitcher::TypeTraits<
 					typename T::Type, void, typename T::NullableType,
 					DigesterVariantTraits> TraitsType;
 			typedef typename TraitsType::template VariantRebind<
-					RevDigesterVariantTraits>::Type RevTraitsType;
+					RotDigesterVariantTraits>::Type RotTraitsType;
 
 			typedef typename D::template TypeAt<TraitsType>::TypedOp Type;
-			typedef typename D::template TypeAt<RevTraitsType>::TypedOp RevType;
+			typedef typename D::template TypeAt<RotTraitsType>::TypedOp RotType;
 		};
 
 		RefBase *base_;
@@ -4143,6 +4601,8 @@ public:
 private:
 	void assign(SharedIdManager *manager, size_t orgIndex, uint64_t orgId);
 
+	static size_t errorIndex();
+
 	size_t index_;
 	uint64_t id_;
 	SharedIdManager *manager_;
@@ -4169,13 +4629,20 @@ private:
 	SharedIdManager(const SharedIdManager&);
 	SharedIdManager& operator=(const SharedIdManager&);
 
-	size_t allocate(size_t orgIndex, uint64_t orgId, void *key);
+	size_t allocate(
+			size_t orgIndex, uint64_t orgId, void *key, uint64_t *nextId);
 	void release(size_t index, uint64_t id, void *key);
 
 	void checkKey(bool allocating, uint64_t id, void *key);
 
-	uint64_t getId(size_t index);
+
 	Entry& getEntry(size_t index, uint64_t id);
+
+	Entry& createEntry(size_t *nextIndex);
+	void removeEntry(Entry &entry, size_t index);
+
+	static void errorRefCount();
+	static Entry& errorEntry();
 
 	EntryList entryList_;
 	IndexList freeList_;
@@ -4305,13 +4772,15 @@ typename SubOp::RetType SQLValues::TypeSwitcher::operate(
 		const SubOp &op) const {
 	assert(!isNullableAlways() || SubOp::TraitsType::NULLABLE_SPECIFIC == 2);
 	typedef typename SubOp::FilterType Filter;
-	if (isNullable()) {
-		return operate<SubOp, T1, T2, typename Filter::template Nullable<
-				T1, T2, true>::Type>(op);
+
+	typedef typename Filter::template Nullable<T1, T2, true>::Type Nullable;
+	typedef typename Filter::template Nullable<T1, T2, false>::Type NonNullable;
+
+	if (checkNullable(!util::IsSame<NonNullable, void>::VALUE)) {
+		return operate<SubOp, T1, T2, Nullable>(op);
 	}
 	else {
-		return operate<SubOp, T1, T2, typename Filter::template Nullable<
-				T1, T2, false>::Type>(op);
+		return operate<SubOp, T1, T2, NonNullable>(op);
 	}
 }
 
@@ -4326,6 +4795,14 @@ typename SubOp::RetType SQLValues::TypeSwitcher::operate(
 inline SQLValues::VarContext& SQLValues::ValueContext::getVarContext() {
 	assert(varCxt_ != NULL);
 	return *varCxt_;
+}
+
+inline size_t SQLValues::ValueContext::getMaxStringLength() {
+	const size_t len = maxStringLength_;
+	if (len == 0) {
+		return resolveMaxStringLength();
+	}
+	return len;
 }
 
 
@@ -4364,8 +4841,8 @@ inline bool SQLValues::SummaryColumn::isOrdering() const {
 	return (ordering_ >= 0);
 }
 
-inline bool SQLValues::SummaryColumn::isAscending() const {
-	return (ordering_ <= 0);
+inline bool SQLValues::SummaryColumn::isRotating() const {
+	return (ordering_ > 0);
 }
 
 
@@ -4654,6 +5131,27 @@ inline SQLValues::SummaryTuple SQLValues::SummaryTuple::create(
 	return tuple;
 }
 
+inline SQLValues::SummaryTuple SQLValues::SummaryTuple::create(
+		SummaryTupleSet &tupleSet, TupleListReader &reader,
+		int64_t digest, uint32_t subIndex) {
+	SummaryTuple tuple(digestToHead(digest), tupleSet.createBody());
+
+	if (tuple.body_ != NULL) {
+		if (tupleSet.isDetailInitializationRequired()) {
+			tuple.initializeBodyDetail(tupleSet, &reader);
+		}
+
+		typedef SummaryTupleSet::FieldReaderList ReaderList;
+		const ReaderList &readerList = tupleSet.getSubFieldReaderList(subIndex);
+		for (ReaderList::const_iterator it = readerList.begin();
+				it != readerList.end(); ++it) {
+			it->second(FieldReader(tuple, tupleSet, it->first, reader));
+		}
+	}
+
+	return tuple;
+}
+
 template<typename T, typename D>
 inline SQLValues::SummaryTuple SQLValues::SummaryTuple::createBy(
 		SummaryTupleSet &tupleSet, TupleListReader &reader,
@@ -4686,6 +5184,17 @@ inline void SQLValues::SummaryTuple::initializeValues(SummaryTupleSet &tupleSet)
 
 inline void SQLValues::SummaryTuple::release(SummaryTupleSet &tupleSet) {
 	tupleSet.releaseBody(body_);
+}
+
+inline void SQLValues::SummaryTuple::fillEmpty(SummaryTuple *tupleArrayElem) {
+	UTIL_STATIC_ASSERT(sizeof(SummaryTuple[1]) == sizeof(uint64_t) * 2);
+	void *addr = tupleArrayElem;
+	static_cast<uint64_t*>(addr)[0] = 0;
+	static_cast<uint64_t*>(addr)[1] = 0;
+}
+
+inline bool SQLValues::SummaryTuple::checkEmpty(const SummaryTuple &tuple) {
+	return (tuple.body_ == NULL);
 }
 
 inline int64_t SQLValues::SummaryTuple::getDigest() const {
@@ -4723,22 +5232,23 @@ inline typename T::ValueType SQLValues::SummaryTuple::getValueAs(
 					TupleTypes::TYPE_BLOB &&
 			!column.isOnBody());
 	return (onHead ?
-			(column.isAscending() ?
+			(column.isRotating() ?
 					getHeadValueAs<T, util::TrueType>(column) :
 					getHeadValueAs<T, util::FalseType>(column)) :
 			getBodyValueAs<T>(column));
 }
 
-template<typename T, typename Asc>
+template<typename T, typename Rot>
 inline typename T::ValueType SQLValues::SummaryTuple::getHeadValueAs(
 		const SummaryColumn &column) const {
 	assert(!isNull(column));
+	assert(!column.isOnBody());
 	assert(TypeUtils::toNonNullable(column.getTupleColumn().getType()) ==
 			T::COLUMN_TYPE ||
 			(column.isEmpty() && (static_cast<TupleColumnType>(T::COLUMN_TYPE) ==
 					TupleTypes::TYPE_LONG)));
 
-	return getHeadValueDetailAs(column, T(), Asc());
+	return getHeadValueDetailAs(column, T(), Rot());
 }
 
 template<typename T>
@@ -4764,7 +5274,8 @@ inline void SQLValues::SummaryTuple::setValueBy(
 		const SummaryColumn &column, const typename T::ValueType &value) {
 	assert(tupleSet.getFieldSetterFunc(column.getSummaryPosition()) != NULL);
 
-	setValueDetailBy(tupleSet, column, value, T(), util::FalseType());
+	setValueDetailBy(
+			tupleSet, column, value, T(), util::FalseType(), util::FalseType());
 	setNullDetail(column, false);
 }
 
@@ -4779,6 +5290,14 @@ inline void SQLValues::SummaryTuple::incrementValueBy(
 	++(*static_cast<Storable*>(getField(column.getOffset())));
 }
 
+template<typename T>
+inline void SQLValues::SummaryTuple::appendValueBy(
+		SummaryTupleSet &tupleSet, const SummaryColumn &column,
+		typename TypeTraits<T>::ReadableRefType value) {
+	assert(tupleSet.getFieldSetterFunc(column.getSummaryPosition()) != NULL);
+	appendValueDetailBy(tupleSet, column, value, T());
+}
+
 inline SQLValues::SummaryTuple::SummaryTuple(const Head &head, void *body) :
 		head_(head),
 		body_(body) {
@@ -4788,43 +5307,53 @@ template<typename T>
 inline void SQLValues::SummaryTuple::readValue(
 		SummaryTupleSet &tupleSet, const SummaryColumn &column,
 		TupleListReader &reader) {
-	if (T::NullableType::VALUE) {
+	typedef typename T::VariantTraitsType::HeadNullableType HeadNullableType;
+	if (T::NullableType::VALUE || HeadNullableType::VALUE) {
 		if (ValueUtils::readCurrentNull(reader, column.getTupleColumn())) {
-			setNull(column);
+			assert(isNull(column));
 			return;
 		}
 		setNullDetail(column, false);
+		if (HeadNullableType::VALUE) {
+			return;
+		}
 	}
 
-	if (TypeUtils::Traits<T::COLUMN_TYPE>::FOR_MULTI_VAR) {
+	if (TypeUtils::template Traits<T::COLUMN_TYPE>::FOR_MULTI_VAR) {
 		if (!T::NullableType::VALUE) {
 			setNullDetail(column, false);
 		}
 		return;
 	}
 
-	typedef typename T::Type TypeTag;
+	typedef typename T::Type1 DestTypeTag;
+	typedef typename T::Type2 SrcTypeTag;
+	typedef typename T::VariantTraitsType::ShallowType ShallowType;
 	setValueDetailBy(
 			tupleSet, column,
-			ValueUtils::readCurrentValue<TypeTag>(reader, column.getTupleColumn()),
-			TypeTag(), util::TrueType());
+			ValueUtils::getPromoted<DestTypeTag, SrcTypeTag>(
+					ValueUtils::readCurrentValue<SrcTypeTag>(
+							reader, column.getTupleColumn())),
+			DestTypeTag(), ShallowType(), util::TrueType());
 }
 
-template<typename T, typename Asc>
+template<typename T, typename Rot>
 inline typename T::ValueType SQLValues::SummaryTuple::getHeadValueDetailAs(
-		const SummaryColumn &column, const T&, const Asc&) const {
+		const SummaryColumn &column, const T&, const Rot&) const {
 	static_cast<void>(column);
 	const bool available = (!TypeUtils::Traits<T::COLUMN_TYPE>::SIZE_VAR ||
 			TypeUtils::Traits<T::COLUMN_TYPE>::FOR_ANY);
 	typedef typename util::Conditional<
 			available, T, SQLValues::Types::Any>::Type FixedTypeTag;
+	typedef util::TrueType Ascending;
 	assert(available);
-	return ValueUtils::toValueByOrdredDigest<FixedTypeTag, Asc>(head_.digest_);
+	return ValueUtils::toValueByOrdredDigest<FixedTypeTag, Ascending>(
+			ValueUtils::digestByRotation(head_.digest_, Rot()));
 }
 
-template<typename Asc>
+template<typename Rot>
 inline TupleString SQLValues::SummaryTuple::getHeadValueDetailAs(
-		const SummaryColumn &column, const Types::String&, const Asc&) const {
+		const SummaryColumn &column, const Types::String&, const Rot&) const {
 	static_cast<void>(column);
 	assert(head_.varData_ != NULL);
 	return TupleString(head_.varData_);
@@ -4855,7 +5384,7 @@ inline TupleValue SQLValues::SummaryTuple::getBodyValueDetailAs(
 	}
 	else {
 		const TupleValue &value = SummaryTupleSet::getLobValue(
-				*static_cast<void *const*>(getField(column.getOffset())));
+				*static_cast<void**>(getRawField(column.getOffset())));
 		assert(value.getType() == Types::Blob::COLUMN_TYPE);
 		return value;
 	}
@@ -4867,20 +5396,22 @@ inline TupleValue SQLValues::SummaryTuple::getBodyValueDetailAs(
 	return TupleValue();
 }
 
-template<typename T, typename Shallow>
+template<typename T, typename Shallow, typename Initializing>
 inline void SQLValues::SummaryTuple::setValueDetailBy(
 		SummaryTupleSet &tupleSet, const SummaryColumn &column,
-		const typename T::ValueType &value, const T&, const Shallow&) {
+		const typename T::ValueType &value, const T&, const Shallow&,
+		const Initializing&) {
 	static_cast<void>(tupleSet);
 	typedef typename TypeUtils::Traits<T::COLUMN_TYPE>::StorableValueType Storable;
 	*static_cast<Storable*>(getField(column.getOffset())) =
 			static_cast<Storable>(value);
 }
 
-template<typename Shallow>
+template<typename Shallow, typename Initializing>
 inline void SQLValues::SummaryTuple::setValueDetailBy(
 		SummaryTupleSet &tupleSet, const SummaryColumn &column,
-		const TupleString &value, const Types::String&, const Shallow&) {
+		const TupleString &value, const Types::String&, const Shallow&,
+		const Initializing&) {
 	const void *src = value.data();
 	void *field = getField(column.getOffset());
 
@@ -4891,16 +5422,20 @@ inline void SQLValues::SummaryTuple::setValueDetailBy(
 		void *dup = tupleSet.duplicateVarData(src);
 		void *&dest = *static_cast<void**>(field);
 
-		tupleSet.deallocateVarData(dest);
+		if (!Initializing::VALUE) {
+			tupleSet.deallocateVarData(dest);
+		}
 		dest = dup;
 	}
 }
 
-template<typename Shallow>
+template<typename Shallow, typename Initializing>
 inline void SQLValues::SummaryTuple::setValueDetailBy(
 		SummaryTupleSet &tupleSet, const SummaryColumn &column,
-		const TupleValue &value, const Types::Blob&, const Shallow&) {
+		const TupleValue &value, const Types::Blob&, const Shallow&,
+		const Initializing&) {
 	assert(!Shallow::VALUE);
+	UTIL_STATIC_ASSERT((Shallow::VALUE || !Initializing::VALUE));
 
 	void *src = tupleSet.duplicateLob(value);
 	void *&dest = *static_cast<void**>(getField(column.getOffset()));
@@ -4909,10 +5444,11 @@ inline void SQLValues::SummaryTuple::setValueDetailBy(
 	dest = src;
 }
 
-template<typename Shallow>
+template<typename Shallow, typename Initializing>
 inline void SQLValues::SummaryTuple::setValueDetailBy(
 		SummaryTupleSet &tupleSet, const SummaryColumn &column,
-		const TupleValue &value, const Types::Any&, const Shallow&) {
+		const TupleValue &value, const Types::Any&, const Shallow&,
+		const Initializing&) {
 	static_cast<void>(tupleSet);
 	static_cast<void>(column);
 	static_cast<void>(value);
@@ -4931,6 +5467,20 @@ inline void SQLValues::SummaryTuple::setNullDetail(
 			*unit &= ~mask;
 		}
 	}
+}
+
+inline void SQLValues::SummaryTuple::appendValueDetailBy(
+		SummaryTupleSet &tupleSet, const SummaryColumn &column,
+		StringReader &value, const Types::String&) {
+	void *&field = *static_cast<void**>(getField(column.getOffset()));
+	tupleSet.appendVarData(field, value);
+}
+
+inline void SQLValues::SummaryTuple::appendValueDetailBy(
+		SummaryTupleSet &tupleSet, const SummaryColumn &column,
+		LobReader &value, const Types::Blob&) {
+	void *field = *static_cast<void**>(getField(column.getOffset()));
+	tupleSet.appendLob(field, value);
 }
 
 template<typename T, typename Nullable, typename D>
@@ -4973,11 +5523,14 @@ inline SQLValues::SummaryTuple::Head SQLValues::SummaryTuple::digestToHead(
 }
 
 inline const void* SQLValues::SummaryTuple::getField(int32_t offset) const {
-	assert(offset >= 0 && body_ != NULL);
-	return static_cast<const uint8_t*>(body_) + offset;
+	return getRawField(offset);
 }
 
 inline void* SQLValues::SummaryTuple::getField(int32_t offset) {
+	return getRawField(offset);
+}
+
+inline void* SQLValues::SummaryTuple::getRawField(int32_t offset) const {
 	assert(offset >= 0 && body_ != NULL);
 	return static_cast<uint8_t*>(body_) + offset;
 }
@@ -5011,6 +5564,11 @@ SQLValues::SummaryTupleSet::getFieldReaderList() const {
 	return fieldReaderList_;
 }
 
+inline const SQLValues::SummaryTupleSet::FieldReaderList&
+SQLValues::SummaryTupleSet::getSubFieldReaderList(uint32_t index) const {
+	return subFieldReaderList_[index];
+}
+
 inline SQLValues::SummaryTupleSet::FieldGetterFunc
 SQLValues::SummaryTupleSet::getFieldGetterFunc(uint32_t pos) const {
 	return getterFuncList_[pos];
@@ -5032,7 +5590,7 @@ inline bool SQLValues::SummaryTupleSet::isDetailInitializationRequired() const {
 
 inline void* SQLValues::SummaryTupleSet::createBody() {
 	if (bodySize_ == 0) {
-		return NULL;
+		return reinterpret_cast<void*>(static_cast<uintptr_t>(-1));
 	}
 	if (restBodySize_ < bodySize_) {
 		reserveBody();
@@ -5206,13 +5764,13 @@ inline bool SQLValues::ValueAccessor::BySummaryTuple::NullChecker::operator()(
 }
 
 
-template<typename Asc>
+template<typename Rot>
 template<typename T>
 template<typename P>
 inline typename T::ValueType
-SQLValues::ValueAccessor::BySummaryTupleHead<Asc>::TypeAt<T>::operator()(
+SQLValues::ValueAccessor::BySummaryTupleHead<Rot>::TypeAt<T>::operator()(
 		const SourceType &src, const P&) {
-	return src.getHeadValueAs<T, Asc>(get().columnIt_->getSummaryColumn(P()));
+	return src.getHeadValueAs<T, Rot>(get().columnIt_->getSummaryColumn(P()));
 }
 
 
@@ -5226,108 +5784,13 @@ SQLValues::ValueAccessor::BySummaryTupleBody::TypeAt<T>::operator()(
 
 
 template<>
-inline int32_t SQLValues::ValueBasicComparator::TypeAt<
-		SQLValues::Types::Byte>::operator()(
-		const int8_t &v1, const int8_t &v2) const {
-	return ValueUtils::compareIntegral(v1, v2);
-}
-
-template<>
-inline int32_t SQLValues::ValueBasicComparator::TypeAt<
-		SQLValues::Types::Short>::operator()(
-		const int16_t &v1, const int16_t &v2) const {
-	return ValueUtils::compareIntegral(v1, v2);
-}
-
-template<>
-inline int32_t SQLValues::ValueBasicComparator::TypeAt<
-		SQLValues::Types::Integer>::operator()(
-		const int32_t &v1, const int32_t &v2) const {
-	return ValueUtils::compareIntegral(v1, v2);
-}
-
-template<>
-inline int32_t SQLValues::ValueBasicComparator::TypeAt<
-		SQLValues::Types::Long>::operator()(
-		const int64_t &v1, const int64_t &v2) const {
-	return ValueUtils::compareIntegral(v1, v2);
-}
-
-template<>
-inline int32_t SQLValues::ValueBasicComparator::TypeAt<
-		SQLValues::Types::Float>::operator()(
-		const float &v1, const float &v2) const {
-	return ValueUtils::compareFloating(v1, v2, base_.sensitive_);
-}
-
-template<>
-inline int32_t SQLValues::ValueBasicComparator::TypeAt<
-		SQLValues::Types::Double>::operator()(
-		const double &v1, const double &v2) const {
-	return ValueUtils::compareFloating(v1, v2, base_.sensitive_);
-}
-
-template<>
-inline int32_t SQLValues::ValueBasicComparator::TypeAt<
-		SQLValues::Types::Timestamp>::operator()(
-		const int64_t &v1, const int64_t &v2) const {
-	return ValueUtils::compareIntegral(v1, v2);
-}
-
-template<>
-inline int32_t SQLValues::ValueBasicComparator::TypeAt<
-		SQLValues::Types::Bool>::operator()(
-		const bool &v1, const bool &v2) const {
-	return ValueUtils::compareIntegral((v1 ? 1 : 0), (v2 ? 1 : 0));
-}
-
-template<>
-inline int32_t SQLValues::ValueBasicComparator::TypeAt<
-		SQLValues::Types::String>::operator()(
-		const TupleString &v1, const TupleString &v2) const {
-	const uint8_t *it1 = (const uint8_t*) v1.data();
-	const uint8_t *it2 = (const uint8_t*) v2.data();
-	if ((*it1 & 0x01) == 0 || (*it2 & 0x01) == 0) {
-		return ValueUtils::compareString(v1, v2);
-	}
-
-	const uint8_t *end1 = it1 + (*it1 >> 1);
-	const uint8_t *end2 = it2 + (*it2 >> 1);
-	while (it1 != end1 && it2 != end2) {
-		if (*(++it1) != *(++it2)) {
-			return *it1 - *it2;
-		}
-	}
-	return *((const uint8_t*) v1.data()) - *((const uint8_t*) v2.data());
-
-}
-
-template<>
-inline int32_t SQLValues::ValueBasicComparator::TypeAt<
-		SQLValues::Types::Blob>::operator()(
-		const TupleValue &v1, const TupleValue &v2) const {
-	return ValueUtils::compareSequence(
-			*ValueUtils::toLobReader(v1), *ValueUtils::toLobReader(v2));
-}
-
-template<>
-inline int32_t SQLValues::ValueBasicComparator::TypeAt<
-		SQLValues::Types::Any>::operator()(
-		const TupleValue &v1, const TupleValue &v2) const {
-	assert(ValueUtils::isNull(v1));
-	assert(ValueUtils::isNull(v2));
-	static_cast<void>(v1);
-	static_cast<void>(v2);
-	return 0;
-}
-
-template<>
 template<typename Pred>
 inline bool SQLValues::ValueBasicComparator::TypeAt<
 		SQLValues::Types::Byte>::operator()(
 		const int8_t &v1, const int8_t &v2, const Pred &pred) const {
 	return pred(v1, v2);
 }
+
 template<>
 template<typename Pred>
 inline bool SQLValues::ValueBasicComparator::TypeAt<
@@ -5335,6 +5798,7 @@ inline bool SQLValues::ValueBasicComparator::TypeAt<
 		const int16_t &v1, const int16_t &v2, const Pred &pred) const {
 	return pred(v1, v2);
 }
+
 template<>
 template<typename Pred>
 inline bool SQLValues::ValueBasicComparator::TypeAt<
@@ -5342,6 +5806,7 @@ inline bool SQLValues::ValueBasicComparator::TypeAt<
 		const int32_t &v1, const int32_t &v2, const Pred &pred) const {
 	return pred(v1, v2);
 }
+
 template<>
 template<typename Pred>
 inline bool SQLValues::ValueBasicComparator::TypeAt<
@@ -5349,20 +5814,23 @@ inline bool SQLValues::ValueBasicComparator::TypeAt<
 		const int64_t &v1, const int64_t &v2, const Pred &pred) const {
 	return pred(v1, v2);
 }
+
 template<>
 template<typename Pred>
 inline bool SQLValues::ValueBasicComparator::TypeAt<
 		SQLValues::Types::Float>::operator()(
 		const float &v1, const float &v2, const Pred &pred) const {
-	return pred((*this)(v1, v2), 0);
+	return pred(ValueUtils::compareFloating(v1, v2, base_.sensitive_), 0);
 }
+
 template<>
 template<typename Pred>
 inline bool SQLValues::ValueBasicComparator::TypeAt<
 		SQLValues::Types::Double>::operator()(
 		const double &v1, const double &v2, const Pred &pred) const {
-	return pred((*this)(v1, v2), 0);
+	return pred(ValueUtils::compareFloating(v1, v2, base_.sensitive_), 0);
 }
+
 template<>
 template<typename Pred>
 inline bool SQLValues::ValueBasicComparator::TypeAt<
@@ -5370,6 +5838,7 @@ inline bool SQLValues::ValueBasicComparator::TypeAt<
 		const int64_t &v1, const int64_t &v2, const Pred &pred) const {
 	return pred(v1, v2);
 }
+
 template<>
 template<typename Pred>
 inline bool SQLValues::ValueBasicComparator::TypeAt<
@@ -5377,58 +5846,43 @@ inline bool SQLValues::ValueBasicComparator::TypeAt<
 		const bool &v1, const bool &v2, const Pred &pred) const {
 	return pred(v1, v2);
 }
+
 template<>
 template<typename Pred>
 inline bool SQLValues::ValueBasicComparator::TypeAt<
 		SQLValues::Types::String>::operator()(
 		const TupleString &v1, const TupleString &v2, const Pred &pred) const {
-	const uint8_t *it1 = static_cast<const uint8_t*>(v1.data());
-	const uint8_t *it2 = static_cast<const uint8_t*>(v2.data());
-
-	const int32_t sizeDiff =
-			static_cast<int32_t>(*it1) - static_cast<int32_t>(*it2);
-
-	if (sizeDiff != 0) {
-		const bool commutative = (pred(1, 0) == pred(0, 1));
-		if (commutative) {
-			const bool negative = pred(1, 0);
-			return negative;
-		}
-	}
-
-	if ((*it1 & 0x01) == 0 || (*it2 & 0x01) == 0) {
-		return pred(ValueUtils::compareString(v1, v2), 0);
-	}
-
-	for (uint32_t rest = ((sizeDiff <= 0 ? *it1 : *it2) >> 1); rest > 0; --rest) {
-		if (*(++it1) != *(++it2)) {
-			return pred(*it1, *it2);
-		}
-	}
-
-	return pred(sizeDiff, 0);
+	return ValueUtils::compareString<Pred, bool>(v1, v2, pred);
 }
+
 template<>
 template<typename Pred>
 inline bool SQLValues::ValueBasicComparator::TypeAt<
 		SQLValues::Types::Blob>::operator()(
 		const TupleValue &v1, const TupleValue &v2, const Pred &pred) const {
-	return pred((*this)(v1, v2), 0);
+	return pred(ValueUtils::compareSequence(
+			*ValueUtils::toLobReader(v1), *ValueUtils::toLobReader(v2)), 0);
 }
+
 template<>
 template<typename Pred>
 inline bool SQLValues::ValueBasicComparator::TypeAt<
 		SQLValues::Types::Any>::operator()(
 		const TupleValue &v1, const TupleValue &v2, const Pred &pred) const {
-	return pred((*this)(v1, v2), 0);
+	assert(ValueUtils::isNull(v1));
+	assert(ValueUtils::isNull(v2));
+	static_cast<void>(v1);
+	static_cast<void>(v2);
+	return pred(0, 0);
 }
 
 
 inline SQLValues::ValueComparator::ValueComparator(
 		const ValueAccessor &accessor1, const ValueAccessor &accessor2,
-		bool sensitive, bool ascending) :
+		VarContext *varCxt, bool sensitive, bool ascending) :
 		accessor1_(accessor1),
 		accessor2_(accessor2),
+		varCxt_(varCxt),
 		sensitive_(sensitive),
 		ascending_(ascending) {
 }
@@ -5509,6 +5963,7 @@ SQLValues::ValueComparator::TypeAt<T>::operator()(
 	typedef typename AccessorType1::template TypeAt<typename T::Type1> Op1;
 	typedef typename AccessorType2::template TypeAt<typename T::Type2> Op2;
 
+	VarScopeType varScope(base_.varCxt_);
 	return compare(
 			static_cast<ValueType>(Op1(base_.accessor1_)(src1, Pos1())),
 			static_cast<ValueType>(Op2(base_.accessor2_)(src2, Pos2())),
@@ -5545,22 +6000,43 @@ template<typename Op, typename Traits, bool Ascending>
 typename Traits::template Func<Op>::Type
 SQLValues::ValueComparator::Switcher<
 		Pred, Rev, Promo, Ordering, A1, A2>::getSubWith() const {
-	return base_.getColumnTypeSwitcher(Promo, nullIgnorable_).getWith<
-			Op, typename OpTraitsAt<Traits, Ascending>::Type>();
+	return base_.getColumnTypeSwitcher(
+			Promo, nullIgnorable_, profile_).getWith<
+					Op, typename OpTraitsAt<Traits, Ascending>::Type>();
 }
 
 
 inline SQLValues::ValueFnv1aHasher::ValueFnv1aHasher(
-		const ValueAccessor &accessor) :
+		const ValueAccessor &accessor, VarContext *varCxt) :
 		accessor_(accessor),
+		varCxt_(varCxt),
 		seed_(ValueUtils::fnv1aHashInit()) {
 }
 
 inline SQLValues::ValueFnv1aHasher::ValueFnv1aHasher(
-		const ValueAccessor &accessor, int64_t seed) :
+		const ValueAccessor &accessor, VarContext *varCxt, int64_t seed) :
 		accessor_(accessor),
+		varCxt_(varCxt),
 		seed_(static_cast<uint32_t>(seed)) {
 	assert(seed >= 0);
+}
+
+inline int64_t SQLValues::ValueFnv1aHasher::maskNull(int64_t src) {
+	assert(src >= 0);
+	int64_t dest = -src;
+	if (dest >= 0) {
+		dest = NULL_MASK_VALUE;
+	}
+	return dest;
+}
+
+inline int64_t SQLValues::ValueFnv1aHasher::unmaskNull(int64_t src) {
+	assert(src < 0);
+	int64_t dest = src;
+	if (dest == NULL_MASK_VALUE) {
+		dest = 0;
+	}
+	return -dest;
 }
 
 inline int64_t SQLValues::ValueFnv1aHasher::digest(
@@ -5596,9 +6072,10 @@ inline int64_t SQLValues::ValueFnv1aHasher::TypeAt<T>::operator()(
 	typedef typename AccessorType::NullChecker NullChecker;
 
 	if (T::NullableType::VALUE && NullChecker(base_.accessor_)(src, Pos())) {
-		return -static_cast<int64_t>(base_.seed_);
+		return maskNull(base_.seed_);
 	}
 
+	VarScopeType varScope(base_.varCxt_);
 	typedef typename AccessorType::template TypeAt<
 			typename T::Type> TypedAccessor;
 	return digest(
@@ -5609,94 +6086,105 @@ inline int64_t SQLValues::ValueFnv1aHasher::TypeAt<T>::operator()(
 
 
 inline SQLValues::ValueOrderedDigester::ValueOrderedDigester(
-		const ValueAccessor &accessor, bool ascending) :
+		const ValueAccessor &accessor, VarContext *varCxt, bool rotating) :
 		accessor_(accessor),
-		ascending_(ascending) {
+		varCxt_(varCxt),
+		rotating_(rotating) {
 }
 
-template<typename Asc>
 inline int64_t SQLValues::ValueOrderedDigester::digest(
-		const int64_t &value, const Types::Integral&, const Asc&) {
-	return ValueUtils::digestOrderedIntegral(value, Asc());
+		const int64_t &value, const Types::Integral&) {
+	return ValueUtils::digestOrderedIntegral(value, Ascending());
 }
 
-template<typename Asc>
 inline int64_t SQLValues::ValueOrderedDigester::digest(
-		const double &value, const Types::Floating&, const Asc&) {
-	return ValueUtils::digestOrderedFloating(value, Asc());
+		const double &value, const Types::Floating&) {
+	return ValueUtils::digestOrderedFloating(value, Ascending());
 }
 
-template<typename Asc, typename T>
+template<typename T>
 inline int64_t SQLValues::ValueOrderedDigester::digest(
-		const T &value, const Types::Sequential&, const Asc&) {
+		const T &value, const Types::Sequential&) {
 	typedef typename TypeUtils::template ValueTraits<T> ValueTraits;
 	const TupleColumnType type = ValueTraits::COLUMN_TYPE_AS_SEQUENCE;
 	return ValueUtils::digestOrderedSequence(
-			*ValueUtils::toReader<type>(value), Asc());
+			*ValueUtils::toReader<type>(value), Ascending());
 }
 
-template<typename Asc>
 inline int64_t SQLValues::ValueOrderedDigester::digest(
-		const TupleValue &value, const Types::Any&, const Asc&) {
+		const TupleValue &value, const Types::Any&) {
 	static_cast<void>(value);
-	return ValueUtils::digestOrderedNull(Asc());
+	return ValueUtils::digestOrderedNull(Ascending());
 }
 
 template<typename T>
 inline int64_t SQLValues::ValueOrderedDigester::TypeAt<T>::operator()(
 		const typename AccessorType::SourceType &src) const {
 	typedef typename TypeUtils::template Traits<T::COLUMN_TYPE> TypeTraits;
-	typedef typename VariantTraitsType::OrderingType OrderingType;
+	typedef typename VariantTraitsType::RotatingType RotatingType;
 	typedef typename util::TrueType Pos;
 	typedef typename AccessorType::NullChecker NullChecker;
 
+	int64_t base;
 	if (T::NullableType::VALUE && NullChecker(base_.accessor_)(src, Pos())) {
-		return digest(TupleValue(), Types::Any(), OrderingType());
+		base = digest(TupleValue(), Types::Any());
 	}
-
-	typedef typename AccessorType::template TypeAt<
-			typename T::Type> TypedAccessor;
-	return digest(
-			TypedAccessor(base_.accessor_)(src, Pos()),
-			typename TypeTraits::BasicComparableTag(), OrderingType());
+	else {
+		VarScopeType varScope(base_.varCxt_);
+		typedef typename AccessorType::template TypeAt<
+				typename T::Type> TypedAccessor;
+		base = digest(
+				TypedAccessor(base_.accessor_)(src, Pos()),
+				typename TypeTraits::BasicComparableTag());
+	}
+	return ValueUtils::rotateDigest(base, RotatingType());
 }
 
 
 inline SQLValues::ValueDigester::ValueDigester(
-		const ValueAccessor &accessor, bool ordering, bool ascending,
-		int64_t seed) :
+		const ValueAccessor &accessor, VarContext *varCxt, bool ordering,
+		bool rotating, int64_t seed) :
 		accessor_(accessor),
+		varCxt_(varCxt),
 		ordering_(ordering),
-		ascending_(ascending),
+		rotating_(rotating),
 		seed_(seed) {
 }
 
-template<typename Accessor, int32_t NullableSpecific>
+template<typename Accessor, int32_t NullableSpecific, bool RotationSpecific>
 template<typename Op, typename Traits>
 typename Traits::template Func<Op>::Type
-SQLValues::ValueDigester::Switcher<Accessor, NullableSpecific>::getWith() const {
+SQLValues::ValueDigester::Switcher<
+		Accessor, NullableSpecific, RotationSpecific>::getWith() const {
 	if (base_.ordering_) {
-		if (base_.ascending_) {
-			return getSubWith<Op, Traits, util::TrueType>();
+		const bool orderingSub = true;
+		if (base_.rotating_) {
+			const bool rotatingSub =
+					util::BoolType<RotationSpecific>::Result::VALUE;
+			assert(rotatingSub);
+			return getSubWith<Op, Traits, orderingSub, rotatingSub>();
 		}
 		else {
-			return getSubWith<Op, Traits, util::FalseType>();
+			const bool rotatingSub = false;
+			return getSubWith<Op, Traits, orderingSub, rotatingSub>();
 		}
 	}
 	else {
-		return getSubWith<Op, Traits, void>();
+		const bool orderingSub = false;
+		const bool rotatingSub = false;
+		return getSubWith<Op, Traits, orderingSub, rotatingSub>();
 	}
 }
 
-template<typename Accessor, int32_t NullableSpecific>
-template<typename Op, typename Traits, typename Ordering>
+template<typename Accessor, int32_t NullableSpecific, bool RotationSpecific>
+template<typename Op, typename Traits, bool Ordering, bool Rotating>
 typename Traits::template Func<Op>::Type
 SQLValues::ValueDigester::Switcher<
-		Accessor, NullableSpecific>::getSubWith() const {
+		Accessor, NullableSpecific, RotationSpecific>::getSubWith() const {
 	assert(!nullableAlways_ || NullableSpecific == 2);
 	return base_.getColumnTypeSwitcher(
-			nullIgnorable_, nullableAlways_).getWith<
-					Op, typename OpTraitsAt<Traits, Ordering>::Type>();
+			nullIgnorable_, nullableAlways_, profile_).getWith<
+					Op, typename OpTraitsAt<Traits, Ordering, Rotating>::Type>();
 }
 
 
@@ -5737,16 +6225,39 @@ SQLValues::TupleComparator::comparatorAt(
 		CompColumnList::const_iterator it) const {
 	return ValueComparator(
 			ValueAccessor(it, columnList_), ValueAccessor(it, columnList_),
-			sensitive_, it->isAscending());
+			varCxt_, sensitive_, it->isAscending());
+}
+
+template<typename L>
+void SQLValues::TupleComparator::updateProfile(
+		const L &subFuncList, ValueProfile *profile) {
+	if (profile == NULL) {
+		return;
+	}
+
+	ProfileElement &elem = profile->noSwitch_;
+	for (typename L::const_iterator it = subFuncList.begin();
+			it != subFuncList.end(); ++it) {
+		if (it == subFuncList.begin()) {
+			continue;
+		}
+
+		elem.candidate_++;
+		if (*it == NULL) {
+			elem.target_++;
+		}
+	}
 }
 
 
 template<typename Ret, typename A1, typename A2>
 SQLValues::TupleComparator::BaseWithAccessor<Ret, A1, A2>::BaseWithAccessor(
-		util::StackAllocator &alloc, const TupleComparator &base) :
+		util::StackAllocator &alloc, const TupleComparator &base,
+		ValueProfile *profile) :
 		base_(base),
 		subFuncList_(alloc),
-		func_(NULL) {
+		func_(NULL),
+		profile_(profile) {
 }
 
 
@@ -5755,31 +6266,37 @@ template<
 		typename A1, typename A2>
 SQLValues::TupleComparator::WithAccessor<
 		Pred, Rev, Promo, Typed, Ordering, A1, A2>::WithAccessor(
-		util::StackAllocator &alloc, const TupleComparator &base) :
-		base_(alloc, base) {
+		util::StackAllocator &alloc, const TupleComparator &base,
+		ValueProfile *profile) :
+		base_(alloc, base, profile) {
 	const CompColumnList &columnList = base.columnList_;
 	const bool nullIgnorable = base.nullIgnorable_;
 
 	typename CompColumnList::const_iterator it = columnList.begin();
-	const ValueComparator front = base.initialComparatorAt(it, Rev);
+	const ValueComparator front = base.initialComparatorAt(it);
 	do {
 		typename BaseType::SubFuncType subFunc = NULL;
 		const bool subNullIgnorable = (nullIgnorable && !it->isOrdering());
 		if (it != columnList.begin()) {
-			const ValueComparator sub = base.initialComparatorAt(it, Rev);
+			const ValueComparator sub = base.initialComparatorAt(it);
 			if (!sub.isSameVariant(front, subNullIgnorable, nullIgnorable)) {
-				subFunc = SubSwitcherType(sub, subNullIgnorable).template getWith<
-						const ValueComparator,
-						typename SubSwitcherType::DefaultTraitsType>();
+				subFunc = SubSwitcherType(sub, subNullIgnorable).withProfile(
+						profile).template getWith<
+								const ValueComparator,
+								typename SubSwitcherType::DefaultTraitsType>();
 			}
 		}
 		base_.subFuncList_.push_back(subFunc);
 	}
 	while (++it != columnList.end());
 
-	const TupleComparator noDigestBase(columnList, false, false, nullIgnorable);
-	base_.func_ = SwitcherType(noDigestBase).template getWith<
-			const BaseType, typename SwitcherType::DefaultTraitsType>();
+	const TupleComparator noDigestBase(
+			columnList, NULL, false, false, nullIgnorable,
+			base.orderedDigestRestricted_);
+	base_.func_ = SwitcherType(noDigestBase).withProfile(
+			profile).template getWith<
+					const BaseType, typename SwitcherType::DefaultTraitsType>();
+	updateProfile(base_.subFuncList_, profile);
 }
 
 template<
@@ -5791,9 +6308,6 @@ SQLValues::TupleComparator::WithAccessor<
 		Pred, Rev, Promo, Typed, Ordering, A1, A2>::operator()(
 		const typename A1::DigestSourceType &src1,
 		const typename A2::DigestSourceType &src2) const {
-	typedef typename ValueComparator::template PredTypeOf<
-			Pred, Rev>::Type PredType;
-
 	if (src1.getDigest() == src2.getDigest()) {
 		return (*this)(src1.getTuple(), src2.getTuple());
 	}
@@ -5830,8 +6344,18 @@ SQLValues::TupleComparator::BaseTypeAt<T>::operator()(
 		while (++it != columnList.end());
 	}
 
-	typedef typename VariantTraitsType::BasePredType BasePredType;
-	return BasePredType()(ret, 0);
+	return PredType()(ret, 0);
+}
+
+template<typename T>
+inline typename SQLValues::TupleComparator::BaseTypeAt<T>::RetType
+SQLValues::TupleComparator::BaseTypeAt<T>::operator()(
+		const typename AccessorType1::SubSourceType &src1,
+		const typename AccessorType2::SubSourceType &src2,
+		const util::FalseType&) const {
+	const TupleComparator &base = base_.base_;
+	const CompColumnList &columnList = base.columnList_;
+	return HeadOnlyType(base.comparatorAt(columnList.begin()))(src1, src2);
 }
 
 template<typename T>
@@ -5839,7 +6363,8 @@ inline typename SQLValues::TupleComparator::BaseTypeAt<T>::RetType
 SQLValues::TupleComparator::BaseTypeAt<T>::operator()(
 		const typename AccessorType1::DigestSourceType &src1,
 		const typename AccessorType2::DigestSourceType &src2) const {
-	return TuplePred<DIGEST_ONLY, DIGEST_ACCESSIBLE>()(*this, src1, src2);
+	return TuplePred<
+			DIGEST_ONLY, DIGEST_ACCESSIBLE, HEAD_ONLY>()(*this, src1, src2);
 }
 
 
@@ -5877,34 +6402,37 @@ inline int32_t SQLValues::TupleRangeComparator::toResultForExclusive(
 
 template<bool Promo, typename A1, typename A2>
 SQLValues::TupleRangeComparator::WithAccessor<Promo, A1, A2>::WithAccessor(
-		util::StackAllocator &alloc, const TupleRangeComparator &base) :
-		base_(alloc, base.base_, base.columnList_) {
+		util::StackAllocator &alloc, const TupleRangeComparator &base,
+		ValueProfile *profile) :
+		base_(alloc, base.base_, base.columnList_, profile) {
 	const TupleComparator &compBase = base.base_;
 	const CompColumnList &columnList = base.columnList_;
 
 	const bool nullIgnorable = base.nullIgnorable_;
-	const bool reversed = false;
 
 	typename CompColumnList::const_iterator it = columnList.begin();
-	const ValueComparator front = compBase.initialComparatorAt(it, reversed);
+	const ValueComparator front = compBase.initialComparatorAt(it);
 	do {
 		typename BaseType::SubFuncType subFunc = NULL;
 		const bool subNullIgnorable = (nullIgnorable && !it->isOrdering());
 		if (it != columnList.begin()) {
 			const ValueComparator sub =
-					compBase.initialComparatorAt(it, reversed);
+					compBase.initialComparatorAt(it);
 			if (!sub.isSameVariant(front, subNullIgnorable, nullIgnorable)) {
-				subFunc = SubSwitcherType(sub, subNullIgnorable).template getWith<
-						const ValueComparator,
-						typename SubSwitcherType::DefaultTraitsType>();
+				subFunc = SubSwitcherType(sub, subNullIgnorable).withProfile(
+						profile).template getWith<
+								const ValueComparator,
+								typename SubSwitcherType::DefaultTraitsType>();
 			}
 		}
 		base_.subFuncList_.push_back(subFunc);
 	}
 	while (++it != columnList.end());
 
-	base_.func_ = SwitcherType(front, nullIgnorable).template getWith<
-			const BaseType, typename SwitcherType::DefaultTraitsType>();
+	base_.func_ = SwitcherType(front, nullIgnorable).withProfile(
+			profile).template getWith<
+					const BaseType, typename SwitcherType::DefaultTraitsType>();
+	TupleComparator::updateProfile(base_.subFuncList_, profile);
 }
 
 
@@ -5950,30 +6478,35 @@ SQLValues::TupleRangeComparator::BaseTypeAt<T>::operator()(
 
 inline SQLValues::ValueDigester SQLValues::TupleDigester::digesterAt(
 		CompColumnList::const_iterator it, int64_t seed) const {
-	return ValueDigester(ValueAccessor(it, columnList_), false, false, seed);
+	return ValueDigester(
+			ValueAccessor(it, columnList_), varCxt_, false, false, seed);
 }
 
 
 template<typename Accessor>
 SQLValues::TupleDigester::BaseWithAccessor<Accessor>::BaseWithAccessor(
-		util::StackAllocator &alloc, const TupleDigester &base) :
+		util::StackAllocator &alloc, const TupleDigester &base,
+		ValueProfile *profile) :
 		base_(base),
 		subFuncList_(alloc),
-		func_(NULL) {
+		func_(NULL),
+		profile_(profile) {
 }
 
 
-template<typename Accessor, int32_t NullableSpecific>
+template<typename Accessor, int32_t NullableSpecific, bool RotationSpecific>
 SQLValues::TupleDigester::WithAccessor<
-		Accessor, NullableSpecific>::WithAccessor(
-		util::StackAllocator &alloc, const TupleDigester &base) :
-		base_(alloc, base) {
+		Accessor, NullableSpecific, RotationSpecific>::WithAccessor(
+		util::StackAllocator &alloc, const TupleDigester &base,
+		ValueProfile *profile) :
+		base_(alloc, base, profile) {
+	assert(RotationSpecific || !base.rotating_);
 	const CompColumnList &columnList = base.columnList_;
 
 	const bool nullIgnorable = base.nullIgnorable_;
 
 	typename CompColumnList::const_iterator it = columnList.begin();
-	const ValueDigester front = base.initialDigesterAt(it);
+	const ValueDigester &front = base.initialDigesterAt(it);
 
 	do {
 		if (base.ordering_) {
@@ -5982,19 +6515,23 @@ SQLValues::TupleDigester::WithAccessor<
 		typename AccessorBase::SubFuncType subFunc = NULL;
 		const bool subNullIgnorable = nullIgnorable;
 		if (it != columnList.begin()) {
-			const ValueDigester sub = base.initialDigesterAt(it);
+			const ValueDigester &sub = base.initialDigesterAt(it);
 			if (!sub.isSameVariant(front, subNullIgnorable, nullIgnorable)) {
-				subFunc = SwitcherType(sub, subNullIgnorable, false).template getWith<
-						const ValueDigester,
-						typename SubSwitcherType::DefaultTraitsType>();
+				subFunc = SwitcherType(sub, subNullIgnorable, false).withProfile(
+						profile).template getWith<
+								const ValueDigester,
+								typename SubSwitcherType::DefaultTraitsType>();
 			}
 		}
 		base_.getSubFuncList().push_back(subFunc);
 	}
 	while (++it != columnList.end());
 
-	base_.setFunc(SwitcherType(front, nullIgnorable, false).template getWith<
-			const AccessorBase, typename SubSwitcherType::DefaultTraitsType>());
+	base_.setFunc(SwitcherType(front, nullIgnorable, false).withProfile(
+			profile).template getWith<
+					const AccessorBase,
+					typename SubSwitcherType::DefaultTraitsType>());
+	TupleComparator::updateProfile(base_.getSubFuncList(), profile);
 }
 
 
@@ -6013,7 +6550,7 @@ inline int64_t SQLValues::TupleDigester::BaseTypeAt<T>::operator()(
 		bool nullFound = false;
 		do {
 			if (digest < 0) {
-				digest = -digest;
+				digest = ValueFnv1aHasher::unmaskNull(digest);
 				nullFound = true;
 			}
 			if (*(++funcIt) != NULL) {
@@ -6025,11 +6562,145 @@ inline int64_t SQLValues::TupleDigester::BaseTypeAt<T>::operator()(
 		}
 		while (++it != columnList.end());
 		if (nullFound && digest >= 0) {
-			digest = -digest;
+			digest = ValueFnv1aHasher::maskNull(digest);
 		}
 	}
 
 	return digest;
+}
+
+
+inline SQLValues::StringBuilder::StringBuilder(ValueContext &cxt, size_t capacity) :
+		data_(NULL),
+		dynamicBuffer_(resolveAllocator(cxt)),
+		size_(0),
+		limit_(cxt.getMaxStringLength()) {
+	data_ = localBuffer_;
+
+	if (capacity > 0) {
+		reserve(std::min(capacity, limit_), 0);
+	}
+}
+
+inline SQLValues::StringBuilder::StringBuilder(
+		ValueContext &cxt, TupleColumnType, size_t capacity) :
+		data_(NULL),
+		dynamicBuffer_(resolveAllocator(cxt)),
+		size_(0),
+		limit_(cxt.getMaxStringLength()) {
+	data_ = localBuffer_;
+
+	if (capacity > 0) {
+		reserve(std::min(capacity, limit_), 0);
+	}
+}
+
+inline SQLValues::StringBuilder::StringBuilder(
+		const util::StdAllocator<void, void> &alloc) :
+		data_(NULL),
+		dynamicBuffer_(alloc),
+		size_(0),
+		limit_(std::numeric_limits<size_t>::max()) {
+	data_ = localBuffer_;
+}
+
+inline void SQLValues::StringBuilder::setLimit(size_t limit) {
+	checkLimit(size_, limit);
+	limit_ = limit;
+}
+
+inline void SQLValues::StringBuilder::checkLimit(uint64_t size, size_t limit) {
+	if (size > limit) {
+		errorLimit(size, limit);
+	}
+}
+
+inline void SQLValues::StringBuilder::appendCode(util::CodePoint c) {
+	char8_t *it = data_ + size_;
+
+	while (!util::UTF8Utils::encodeRaw(&it, data_ + capacity(), c)) {
+		const size_t pos = static_cast<size_t>(it - data_);
+		expandCapacity(pos);
+		it = data_ + pos;
+	}
+
+	resize(it - data_);
+}
+
+inline void SQLValues::StringBuilder::append(const char8_t *data, size_t size) {
+	if (std::numeric_limits<size_t>::max() - size < size_) {
+		errorMaxSize(size_, size);
+	}
+
+	resize(size_ + size);
+	memcpy(data_ + size_ - size, data, size);
+}
+
+inline void SQLValues::StringBuilder::appendAll(const char8_t *str) {
+	appendAll(*util::SequenceUtils::toReader(str));
+}
+
+template<typename R>
+inline void SQLValues::StringBuilder::appendAll(R &reader) {
+	for (size_t next; (next = reader.getNext()) > 0; reader.step(next)) {
+		append(&reader.get(), next);
+	}
+}
+
+inline TupleValue SQLValues::StringBuilder::build(ValueContext &cxt) {
+	TupleValue::SingleVarBuilder builder(
+			cxt.getVarContext(), TupleTypes::TYPE_STRING, size_);
+	builder.append(data_, size_);
+	return builder.build();
+}
+
+inline size_t SQLValues::StringBuilder::size() const {
+	return size_;
+}
+
+inline size_t SQLValues::StringBuilder::capacity() const {
+	if (data_ == localBuffer_) {
+		return sizeof(localBuffer_);
+	}
+	else {
+		return dynamicBuffer_.capacity();
+	}
+}
+
+inline void SQLValues::StringBuilder::resize(size_t size) {
+	checkLimit(size, limit_);
+
+	reserve(size, size_);
+	size_ = size;
+}
+
+inline char8_t* SQLValues::StringBuilder::data() {
+	return data_;
+}
+
+inline util::StdAllocator<void, void> SQLValues::StringBuilder::resolveAllocator(
+		ValueContext &cxt) {
+	SQLVarSizeAllocator *varAlloc = cxt.getVarContext().getVarAllocator();
+	if (varAlloc != NULL) {
+		return *varAlloc;
+	}
+	else {
+		return cxt.getAllocator();
+	}
+}
+
+inline void SQLValues::StringBuilder::reserve(
+		size_t newCapacity, size_t actualSize) {
+
+	if (data_ == localBuffer_) {
+		if (newCapacity > sizeof(localBuffer_)) {
+			initializeDynamicBuffer(newCapacity, actualSize);
+		}
+	}
+	else {
+		dynamicBuffer_.resize(newCapacity);
+		data_ = dynamicBuffer_.data();
+	}
 }
 
 
@@ -6090,11 +6761,6 @@ inline void SQLValues::BufferBuilder<T>::append(
 }
 
 
-inline bool SQLValues::ValueUtils::isNull(const TupleValue &value) {
-	return value.getType() == TupleTypes::TYPE_NULL;
-}
-
-
 inline int32_t SQLValues::ValueUtils::compareIntegral(int64_t v1, int64_t v2) {
 	return compareRawValue(v1, v2);
 }
@@ -6135,22 +6801,59 @@ SQLValues::ValueUtils::compareFloating(
 	return pred(compareFloating(v1, v2, sensitive), 0);
 }
 
+inline uint64_t bufToUInt64(const uint8_t *buf) {
+	const uint64_t shift =
+			std::numeric_limits<uint64_t>::digits / sizeof(uint64_t);
+	return
+			(static_cast<uint64_t>(buf[0]) << (shift * 7)) |
+			(static_cast<uint64_t>(buf[1]) << (shift * 6)) |
+			(static_cast<uint64_t>(buf[2]) << (shift * 5)) |
+			(static_cast<uint64_t>(buf[3]) << (shift * 4)) |
+			(static_cast<uint64_t>(buf[4]) << (shift * 3)) |
+			(static_cast<uint64_t>(buf[5]) << (shift * 2)) |
+			(static_cast<uint64_t>(buf[6]) << (shift * 1)) |
+			(static_cast<uint64_t>(buf[7]) << (shift * 0));
+}
+
+inline uint64_t bufToUInt32(const uint8_t *buf) {
+	const uint32_t shift =
+			std::numeric_limits<uint32_t>::digits / sizeof(uint32_t);
+	return
+			(static_cast<uint64_t>(buf[0]) << (shift * 3)) |
+			(static_cast<uint64_t>(buf[1]) << (shift * 2)) |
+			(static_cast<uint64_t>(buf[2]) << (shift * 1)) |
+			(static_cast<uint64_t>(buf[3]) << (shift * 0));
+}
+
+inline uint64_t bufToUInt16(const uint8_t *buf) {
+	const uint16_t shift =
+			std::numeric_limits<uint16_t>::digits / sizeof(uint16_t);
+	return
+			(static_cast<uint64_t>(buf[0]) << (shift * 1)) |
+			(static_cast<uint64_t>(buf[1]) << (shift * 0));
+}
+
 template<typename Pred>
 inline typename util::BinaryFunctionResultOf<Pred>::Type
 SQLValues::ValueUtils::compareString(
 		const TupleString &v1, const TupleString &v2, const Pred &pred) {
 	typedef typename util::BinaryFunctionResultOf<Pred>::Type RetType;
+	return compareString<Pred, RetType>(v1, v2, pred);
+}
 
+template<typename Pred, typename Ret>
+inline Ret SQLValues::ValueUtils::compareString(
+		const TupleString &v1, const TupleString &v2, const Pred &pred) {
 	const uint8_t *it1 = static_cast<const uint8_t*>(v1.data());
 	const uint8_t *it2 = static_cast<const uint8_t*>(v2.data());
 
-	const int32_t sizeDiff =
+	int32_t sizeDiff =
 			static_cast<int32_t>(*it1) - static_cast<int32_t>(*it2);
 
 	if (sizeDiff != 0) {
 		const bool commutative = (pred(1, 0) == pred(0, 1));
 		if (commutative) {
-			const RetType negative = pred(1, 0);
+			const Ret negative = pred(1, 0);
 			return negative;
 		}
 	}
@@ -6159,19 +6862,58 @@ SQLValues::ValueUtils::compareString(
 		return pred(ValueUtils::compareString(v1, v2), 0);
 	}
 
-	for (uint32_t rest = ((sizeDiff <= 0 ? *it1 : *it2) >> 1); rest > 0; --rest) {
-		if (*(++it1) != *(++it2)) {
-			return pred(*it1, *it2);
-		}
-	}
-
-	return pred(sizeDiff, 0);
+	const int32_t rest =
+			static_cast<int32_t>((sizeDiff <= 0 ? *it1 : *it2) >> 1);
+	return compareBuffer<Pred, Ret>(++it1, ++it2, rest, sizeDiff, pred);
 }
 
 template<typename Pred, typename R>
 typename util::BinaryFunctionResultOf<Pred>::Type
 SQLValues::ValueUtils::compareSequence(R &v1, R &v2, const Pred &pred) {
 	return pred(compareSequence(v1, v2), 0);
+}
+
+template<typename Pred, typename Ret>
+inline Ret SQLValues::ValueUtils::compareBuffer(
+		const uint8_t *it1, const uint8_t *it2, ptrdiff_t rest, ptrdiff_t sizeDiff,
+		const Pred &pred) {
+
+	if ((rest -= 8) > 0) {
+		for (;;) {
+			if (*((const int64_t*) it1) != *((const int64_t*) it2)) {
+				break;
+			}
+			it1 += 8;
+			it2 += 8;
+			if ((rest -= 8) < 0) {
+				break;
+			}
+		}
+	}
+
+	if (rest >= -4 && *((const int32_t*) it1) == *((const int32_t*) it2)) {
+		it1 += 4;
+		it2 += 4;
+		rest -= 4;
+	}
+
+	if (rest >= -6 && *((const int16_t*) it1) == *((const int16_t*) it2)) {
+		it1 += 2;
+		it2 += 2;
+		rest -= 2;
+	}
+
+	if (rest > -8 && *it1 == *it2) {
+		++it1;
+		++it2;
+		--rest;
+	}
+
+	if (rest > -8 && *it1 != *it2) {
+		return pred(*it1, *it2);
+	}
+
+	return pred(sizeDiff, static_cast<ptrdiff_t>(0));
 }
 
 template<typename T>
@@ -6328,6 +7070,55 @@ inline double SQLValues::ValueUtils::toValueByOrdredDigest(
 	}
 
 	return data.asDouble_;
+}
+
+inline int64_t SQLValues::ValueUtils::rotateDigest(
+		int64_t digest, const util::TrueType&) {
+	uint64_t src;
+	if (digest < 0) {
+		src = ~(static_cast<uint64_t>(digest) << 1U);
+	}
+	else {
+		src = static_cast<uint64_t>(digest) << 1U;
+	}
+	if (static_cast<int64_t>(src) < 0 &&
+			src >= ValueOrderedDigester::Constants::ROT_THRESHOLD) {
+		return src;
+	}
+	const uint64_t pime = ValueOrderedDigester::Constants::ROT_PRIME;
+	const uint64_t base = ValueOrderedDigester::Constants::ROT_BASE;
+	return static_cast<int64_t>((src % pime) * base + src / pime);
+}
+
+inline int64_t SQLValues::ValueUtils::rotateDigest(
+		int64_t digest, const util::FalseType&) {
+	return digest;
+}
+
+inline int64_t SQLValues::ValueUtils::digestByRotation(
+		int64_t rotated, const util::TrueType&) {
+	const uint64_t src = static_cast<uint64_t>(rotated);
+	uint64_t masked;
+	if (rotated < 0 &&
+			src >= ValueOrderedDigester::Constants::ROT_THRESHOLD) {
+		masked = src;
+	}
+	else {
+		const uint64_t pime = ValueOrderedDigester::Constants::ROT_PRIME;
+		const uint64_t base = ValueOrderedDigester::Constants::ROT_BASE;
+		masked = (src % base) * pime + src / base;
+	}
+	if ((masked & 0x1) != 0) {
+		return static_cast<int64_t>(~(masked >> 1U));
+	}
+	else {
+		return static_cast<int64_t>(masked >> 1U);
+	}
+}
+
+inline int64_t SQLValues::ValueUtils::digestByRotation(
+		int64_t rotated, const util::FalseType&) {
+	return rotated;
 }
 
 
@@ -6596,6 +7387,36 @@ inline SQLValues::StringReaderRef SQLValues::ValueUtils::toStringReader(
 inline SQLValues::StringReaderRef SQLValues::ValueUtils::toStringReader(
 		const TupleString::BufferInfo &src) {
 	return util::SequenceUtils::toReader(src.first, src.first + src.second);
+}
+
+template<>
+inline SQLValues::ValueContext& SQLValues::ValueUtils::toWriterContext<
+		SQLValues::Types::String>(ValueContext &cxt) {
+	return cxt;
+}
+
+template<>
+inline SQLValues::VarContext& SQLValues::ValueUtils::toWriterContext<
+		SQLValues::Types::Blob>(ValueContext &cxt) {
+	return cxt.getVarContext();
+}
+
+template<>
+inline size_t SQLValues::ValueUtils::toWriterCapacity<
+		SQLValues::Types::String>(uint64_t base) {
+	return static_cast<size_t>(
+			std::min<uint64_t>(std::numeric_limits<size_t>::max(), base));
+}
+
+template<>
+inline size_t SQLValues::ValueUtils::toWriterCapacity<
+		SQLValues::Types::Blob>(uint64_t base) {
+	return toLobCapacity(base);
+}
+
+
+inline bool SQLValues::ValueUtils::isNull(const TupleValue &value) {
+	return value.getType() == TupleTypes::TYPE_NULL;
 }
 
 
@@ -7528,9 +8349,9 @@ inline bool SQLValues::ReadableTupleRef::WithDigester<D>::nextAt() const {
 	}
 
 	assert(base_->digester_.isOrdering());
-	if (!base_->digesterAscending_) {
+	if (base_->digesterRotating_) {
 		base_->digestTuple_ = DigestTuple(
-				reader, typename DigesterOf<T>::RevType(base_->digester_));
+				reader, typename DigesterOf<T>::RotType(base_->digester_));
 	}
 	else {
 		base_->digestTuple_ = DigestTuple(
@@ -7545,7 +8366,7 @@ SQLValues::ReadableTupleRef::WithDigester<D>::RefBase::RefBase(
 		TupleListReader &reader, const D &digester) :
 		digestTuple_(reader, digester),
 		digester_(digester),
-		digesterAscending_(digester.getBase().getColumnList().front().isAscending()) {
+		digesterRotating_(digester.getBase().isRotating()) {
 }
 
 
@@ -7613,6 +8434,163 @@ SQLValues::ArrayTupleRef::RefList<D>::add(
 	baseList_.push_back(base.get());
 
 	return RefType(*base.release());
+}
+
+
+inline SQLValues::SharedId::SharedId() :
+		index_(0),
+		id_(0),
+		manager_(NULL) {
+}
+
+inline SQLValues::SharedId::SharedId(const SharedId &another) :
+		index_(0),
+		id_(0),
+		manager_(NULL) {
+	*this = another;
+}
+
+inline SQLValues::SharedId& SQLValues::SharedId::operator=(
+		const SharedId &another) {
+	assign(another.manager_, another.index_, another.id_);
+	return *this;
+}
+
+inline SQLValues::SharedId::~SharedId() {
+	try {
+		clear();
+	}
+	catch (...) {
+		assert(false);
+	}
+}
+
+inline void SQLValues::SharedId::clear() {
+	SharedIdManager *orgManager = manager_;
+	if (orgManager == NULL) {
+		return;
+	}
+
+	const size_t orgIndex = index_;
+	const uint64_t orgId = id_;
+
+	index_ = 0;
+	id_ = 0;
+	manager_ = NULL;
+
+	orgManager->release(orgIndex, orgId, this);
+}
+
+inline bool SQLValues::SharedId::isEmpty() const {
+	return (manager_ == NULL);
+}
+
+inline bool SQLValues::SharedId::operator==(const SharedId &another) const {
+	if (manager_ != another.manager_) {
+		assert(false);
+		return false;
+	}
+	return (index_ == another.index_);
+}
+
+inline bool SQLValues::SharedId::operator<(const SharedId &another) const {
+	if (manager_ != another.manager_) {
+		assert(false);
+		return false;
+	}
+	return (index_ < another.index_);
+}
+
+inline size_t SQLValues::SharedId::getIndex(
+		const SharedIdManager &manager) const {
+	if (manager_ != &manager) {
+		return errorIndex();
+	}
+	return index_;
+}
+
+inline void SQLValues::SharedId::assign(
+		SharedIdManager *manager, size_t orgIndex, uint64_t orgId) {
+	clear();
+
+	if (manager == NULL) {
+		return;
+	}
+
+	uint64_t nextId;
+	const size_t nextIndex = manager->allocate(orgIndex, orgId, this, &nextId);
+
+	index_ = nextIndex;
+	id_ = nextId;
+	manager_ = manager;
+}
+
+
+inline size_t SQLValues::SharedIdManager::allocate(
+		size_t orgIndex, uint64_t orgId, void *key, uint64_t *nextId) {
+	size_t index;
+	Entry *entry;
+	if (orgId == 0) {
+		entry = &createEntry(&index);
+	}
+	else {
+		index = orgIndex;
+		entry = &getEntry(index, orgId);
+	}
+
+	checkKey(true, entry->id_, key);
+	++entry->refCount_;
+	*nextId = entry->id_;
+	return index;
+}
+
+inline void SQLValues::SharedIdManager::release(
+		size_t index, uint64_t id, void *key) {
+	do {
+		Entry &entry = getEntry(index, id);
+		if (entry.refCount_ <= 0) {
+			break;
+		}
+		--entry.refCount_;
+		checkKey(false, id, key);
+
+		if (entry.refCount_ <= 0) {
+			removeEntry(entry, index);
+		}
+		return;
+	}
+	while (false);
+	errorRefCount();
+}
+
+inline void SQLValues::SharedIdManager::checkKey(
+		bool allocating, uint64_t id, void *key) {
+	static_cast<void>(allocating);
+	static_cast<void>(id);
+	static_cast<void>(key);
+}
+
+inline SQLValues::SharedIdManager::Entry& SQLValues::SharedIdManager::getEntry(
+		size_t index, uint64_t id) {
+	do {
+		if (index >= entryList_.size()) {
+			break;
+		}
+		Entry &entry = entryList_[index];
+
+		if (id != 0 && entry.id_ != id) {
+			break;
+		}
+
+		return entry;
+	}
+	while (false);
+	return errorEntry();
+}
+
+inline SQLValues::SharedIdManager::Entry::Entry() :
+		id_(0),
+		refCount_(0) {
 }
 
 #endif

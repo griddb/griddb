@@ -31,6 +31,7 @@ struct SQLScanOps {
 	typedef SQLOps::WritableTuple WritableTuple;
 
 	typedef SQLOps::ColumnTypeList ColumnTypeList;
+	typedef SQLValues::TupleColumnList TupleColumnList;
 
 	typedef SQLOps::DigestTupleListReader DigestTupleListReader;
 	typedef SQLOps::DigestReadableTuple DigestReadableTuple;
@@ -55,8 +56,8 @@ struct SQLScanOps {
 
 	class Scan;
 	class ScanContainerFull;
+	class ScanContainerRange;
 	class ScanContainerIndex;
-	class ScanContainerUpdates;
 	class ScanContainerMeta;
 	class Select;
 	class SelectPipe;
@@ -100,7 +101,9 @@ public:
 	virtual void compile(OpContext &cxt) const;
 
 private:
-	bool genScanIndex(OpContext &cxt) const;
+	bool tryCompileIndexJoin(OpContext &cxt, OpPlan &plan) const;
+	bool tryCompileEmpty(OpContext &cxt, OpPlan &plan) const;
+
 	TupleList::Info getInputInfo(
 			OpContext &cxt, SQLOps::ColumnTypeList &typeList) const;
 };
@@ -111,16 +114,22 @@ public:
 	virtual void execute(OpContext &cxt) const;
 };
 
-class SQLScanOps::ScanContainerIndex :
+class SQLScanOps::ScanContainerRange :
 		public SQLScanOps::BaseScanContainerOperator {
 public:
 	virtual void execute(OpContext &cxt) const;
 };
 
-class SQLScanOps::ScanContainerUpdates :
+class SQLScanOps::ScanContainerIndex :
 		public SQLScanOps::BaseScanContainerOperator {
 public:
 	virtual void execute(OpContext &cxt) const;
+
+private:
+	static void bindIndexCondition(
+			TupleListReader &reader, const TupleColumnList &columnList,
+			const SQLExprs::IndexSelector &selector,
+			SQLExprs::IndexConditionList &condList);
 };
 
 class SQLScanOps::ScanContainerMeta :
@@ -194,6 +203,7 @@ public:
 class SQLScanOps::LimitProjection : public SQLOps::Projection {
 public:
 	virtual void initializeProjectionAt(OpContext &cxt) const;
+	virtual void updateProjectionContextAt(OpContext &cxt) const;
 
 	virtual void project(OpContext &cxt) const;
 
@@ -203,13 +213,24 @@ public:
 
 class SQLScanOps::LimitContext {
 public:
+	enum Acceptance {
+		ACCEPTABLE_CURRENT_AND_AFTER,
+		ACCEPTABLE_CURRENT_ONLY,
+		ACCEPTABLE_AFTER_ONLY,
+		ACCEPTABLE_NONE
+	};
+
 	LimitContext(int64_t limit, int64_t offset);
 
-	bool accept(bool &limited);
+	bool isAcceptable() const;
+	Acceptance accept();
+	int64_t update();
 
 private:
 	int64_t restLimit_;
 	int64_t restOffset_;
+
+	int64_t prevRest_;
 };
 
 class SQLScanOps::SubLimitProjection : public SQLOps::Projection {

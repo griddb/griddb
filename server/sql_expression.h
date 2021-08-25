@@ -58,6 +58,7 @@ struct SQLExprs {
 
 	class ExprFactory;
 	class ExprFactoryContext;
+	struct ExprProfile;
 
 
 	class ExprRewriter;
@@ -85,6 +86,7 @@ struct SQLExprs {
 	struct ExprUtils;
 
 	class PlanningExpression;
+	class ComparableExpressionBase;
 	class AggregationExpressionBase;
 	template<typename F, typename T> class BasicExpressionBase;
 	template<typename F, int32_t C, typename T> class BasicExpression;
@@ -514,6 +516,12 @@ public:
 	template<typename T>
 	void incrementAggregationValueBy(const SummaryColumn &column);
 
+	template<typename T>
+	void appendAggregationValueBy(
+			const SummaryColumn &column,
+			typename SQLValues::TypeUtils::template Traits<
+					T::COLUMN_TYPE>::ReadableRefType value);
+
 	void initializeAggregationValues();
 
 	const WindowState* getWindowState();
@@ -536,7 +544,7 @@ private:
 		InputSourceType inputSourceType_;
 	};
 
-	typedef util::Vector<Entry> EntryList;
+	typedef util::AllocVector<Entry> EntryList;
 
 	Entry& prepareEntry(uint32_t index);
 
@@ -597,7 +605,9 @@ struct SQLExprs::ExprSpec {
 
 		FLAG_WINDOW_POS_BEFORE = 1 << 22,
 		FLAG_WINDOW_POS_AFTER = 1 << 23,
-		FLAG_WINDOW_VALUE_COUNTING = 1 << 24
+		FLAG_WINDOW_VALUE_COUNTING = 1 << 24,
+
+		FLAG_COMP_SENSITIVE = 1 << 25
 	};
 
 	ExprSpec();
@@ -705,14 +715,23 @@ public:
 	SummaryTupleSet* getAggregationTupleSet();
 	void setAggregationTupleSet(SummaryTupleSet *tupleSet);
 
-	const SQLValues::CompColumnList* getArrangedKeyList();
-	void setArrangedKeyList(const SQLValues::CompColumnList *keyList);
+	const SQLValues::CompColumnList* getArrangedKeyList(
+			bool &orderingRestricted);
+	void setArrangedKeyList(
+			const SQLValues::CompColumnList *keyList, bool orderingRestricted);
 
 	bool isSummaryColumnsArranging();
 	void setSummaryColumnsArranging(bool arranging);
 
 	const Expression* getBaseExpression();
 	void setBaseExpression(const Expression *expr);
+
+	void setProfile(ExprProfile *profile);
+	ExprProfile* getProfile();
+
+
+	static TupleColumnType unifyInputType(
+			TupleColumnType lastUnified, TupleColumnType elemType, bool first);
 
 private:
 	typedef util::Vector<TupleColumnType> TypeList;
@@ -733,8 +752,11 @@ private:
 		SummaryTuple *aggrTupleRef_;
 		SummaryTupleSet *aggrTupleSet_;
 		const SQLValues::CompColumnList *arrangedKeyList_;
+		bool arrangedKeyOrderingRestricted_;
 
 		const Expression *baseExpr_;
+
+		ExprProfile *profile_;
 	};
 
 	ExprFactoryContext(const ExprFactoryContext&);
@@ -774,6 +796,16 @@ private:
 	ScopedEntry *prevScopedEntry_;
 };
 
+struct SQLExprs::ExprProfile {
+	static SQLValues::ValueProfile* getValueProfile(ExprProfile *profile);
+
+	SQLValues::ValueProfile valueProfile_;
+	SQLValues::ProfileElement compConst_;
+	SQLValues::ProfileElement compColumns_;
+	SQLValues::ProfileElement condInList_;
+	SQLValues::ProfileElement outNoNull_;
+};
+
 
 
 inline const SQLExprs::Expression& SQLExprs::Expression::child() const {
@@ -784,6 +816,14 @@ inline const SQLExprs::Expression& SQLExprs::Expression::child() const {
 inline const SQLExprs::Expression& SQLExprs::Expression::next() const {
 	assert(next_ != NULL);
 	return *next_;
+}
+
+inline const SQLExprs::Expression* SQLExprs::Expression::findChild() const {
+	return child_;
+}
+
+inline const SQLExprs::Expression* SQLExprs::Expression::findNext() const {
+	return next_;
 }
 
 template<typename Base>
@@ -930,6 +970,15 @@ inline void SQLExprs::ExprContext::incrementAggregationValueBy(
 		const SummaryColumn &column) {
 	assert(aggrTuple_ != NULL);
 	aggrTuple_->incrementValueBy<T>(column);
+}
+
+template<typename T>
+inline void SQLExprs::ExprContext::appendAggregationValueBy(
+		const SummaryColumn &column,
+		typename SQLValues::TypeUtils::template Traits<
+				T::COLUMN_TYPE>::ReadableRefType value) {
+	assert(aggrTuple_ != NULL);
+	aggrTuple_->template appendValueBy<T>(*aggrTupleSet_, column, value);
 }
 
 inline void SQLExprs::ExprContext::initializeAggregationValues() {

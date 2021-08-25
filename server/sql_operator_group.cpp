@@ -18,6 +18,7 @@
 #include "sql_operator_group.h"
 
 
+
 const SQLOps::OpProjectionRegistrar
 SQLGroupOps::Registrar::REGISTRAR_INSTANCE((Registrar()));
 
@@ -34,6 +35,10 @@ void SQLGroupOps::Registrar::operator()() const {
 	add<SQLOpTypes::OP_UNION_INTERSECT_MERGE, UnionIntersect>();
 	add<SQLOpTypes::OP_UNION_EXCEPT_MERGE, UnionExcept>();
 	add<SQLOpTypes::OP_UNION_COMPENSATE_MERGE, UnionCompensate>();
+
+	add<SQLOpTypes::OP_UNION_DISTINCT_HASH, UnionDistinctHash>();
+	add<SQLOpTypes::OP_UNION_INTERSECT_HASH, UnionIntersectHash>();
+	add<SQLOpTypes::OP_UNION_EXCEPT_HASH, UnionExceptHash>();
 }
 
 
@@ -47,17 +52,12 @@ void SQLGroupOps::Group::compile(OpContext &cxt) const {
 	OpCode code = getCode();
 	OpCodeBuilder builder(OpCodeBuilder::ofContext(cxt));
 
-	SQLExprs::ExprRewriter &rewriter = builder.getExprRewriter();
-	SQLExprs::ExprFactoryContext &factoryCxt = builder.getExprFactoryContext();
-
 	const Projection *srcProj = code.getPipeProjection();
 	const bool distinct = builder.findDistinctAggregation(*srcProj);
 
 	{
-		const SQLValues::CompColumnList &srcKeyList =
-				rewriter.rewriteCompColumnList(
-						factoryCxt, code.getKeyColumnList(), false);
-		setUpGroupKeys(builder, code, srcKeyList, distinct);
+		const SQLValues::CompColumnList &keyList = code.getKeyColumnList();
+		setUpGroupKeys(builder, code, keyList, distinct);
 	}
 
 	Projection *distinctProj = NULL;
@@ -77,21 +77,33 @@ void SQLGroupOps::Group::compile(OpContext &cxt) const {
 	}
 	node.setCode(code);
 
+	const SQLType::AggregationPhase aggrPhase =
+			getCode().getAggregationPhase();
+	SQLValues::CompColumnList *distinctKeyList = createDistinctGroupKeys(
+			cxt, distinct, aggrPhase,
+			code.getPipeProjection(), code.getKeyColumnList());
+
 	OpCodeBuilder::setUpOutputNodes(
-			plan, NULL, node, distinctProj, getCode().getAggregationPhase());
+			plan, NULL, node, distinctProj, aggrPhase, distinctKeyList);
 }
 
 void SQLGroupOps::Group::setUpGroupKeys(
 		OpCodeBuilder &builder, OpCode &code,
 		const SQLValues::CompColumnList &keyList, bool distinct) {
 
-	const bool withDigest =
-			!SQLValues::TupleDigester::isOrderingAvailable(keyList, false);
-
-	code.setMiddleKeyColumnList(&keyList);
-
 	SQLExprs::ExprRewriter &rewriter = builder.getExprRewriter();
 	SQLExprs::ExprFactoryContext &factoryCxt = builder.getExprFactoryContext();
+
+	util::Set<uint32_t> keyPosSet(factoryCxt.getAllocator());
+
+	SQLValues::CompColumnList &midKeyList = builder.createCompColumnList();
+	midKeyList = rewriter.rewriteCompColumnList(factoryCxt, keyList, false);
+	SQLExprs::ExprRewriter::normalizeCompColumnList(midKeyList, keyPosSet);
+
+	const bool withDigest =
+			!SQLValues::TupleDigester::isOrderingAvailable(midKeyList, false);
+
+	code.setMiddleKeyColumnList(&midKeyList);
 
 	SQLExprs::ExprRewriter::Scope scope(rewriter);
 	rewriter.activateColumnMapping(factoryCxt);
@@ -100,7 +112,7 @@ void SQLGroupOps::Group::setUpGroupKeys(
 
 	if (!distinct) {
 		rewriter.clearColumnUsage();
-		rewriter.addKeyColumnUsage(input, keyList, true);
+		rewriter.addKeyColumnUsage(input, midKeyList, true);
 	}
 
 	if (withDigest) {
@@ -110,8 +122,77 @@ void SQLGroupOps::Group::setUpGroupKeys(
 
 	rewriter.setInputProjected(true);
 
-	code.setKeyColumnList(
-			&rewriter.remapCompColumnList(factoryCxt, keyList, input, true));
+	const bool keyOnly = !distinct;
+	code.setKeyColumnList(&rewriter.remapCompColumnList(
+			factoryCxt, midKeyList, input, true, keyOnly, &keyPosSet));
+}
+
+SQLValues::CompColumnList* SQLGroupOps::Group::createDistinctGroupKeys(
+		OpContext &cxt, bool distinct, SQLType::AggregationPhase aggrPhase,
+		const Projection *srcProj, const SQLValues::CompColumnList &srcList) {
+	if (!distinct || aggrPhase != SQLType::AGG_PHASE_ADVANCE_PIPE) {
+		return NULL;
+	}
+
+	const bool forPipe = true;
+	const Projection *pipeProj = SQLOps::OpCodeBuilder::findAggregationProjection(
+			*srcProj, &forPipe);
+
+	assert(srcProj != NULL);
+	const uint32_t outIndex = 0;
+	const Projection *outProj =
+			SQLOps::OpCodeBuilder::findOutputProjection(*srcProj, &outIndex);
+
+	if (pipeProj == NULL || outProj == NULL) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	util::StackAllocator &alloc = cxt.getAllocator();
+
+	util::Set<uint32_t> aggrSet(alloc);
+	{
+		const util::Set<uint32_t> &keySet =
+				SQLExprs::ExprRewriter::compColumnListToSet(alloc, srcList);
+		for (SQLExprs::Expression::Iterator it(*pipeProj);
+				it.exists(); it.next()) {
+			const SQLExprs::Expression &expr = it.get();
+			if (expr.getCode().getType() != SQLType::AGG_FIRST) {
+				continue;
+			}
+
+			const SQLExprs::Expression *subExpr = expr.findChild();
+			if (subExpr == NULL ||
+					subExpr->getCode().getType() != SQLType::EXPR_COLUMN ||
+					keySet.find(subExpr->getCode().getColumnPos()) ==
+							keySet.end()) {
+				continue;
+			}
+
+			aggrSet.insert(expr.getCode().getAggregationIndex());
+		}
+	}
+
+	OpCodeBuilder builder(OpCodeBuilder::ofContext(cxt));
+	SQLValues::CompColumnList &destList = builder.createCompColumnList();
+
+	uint32_t destPos = 0;
+	for (SQLExprs::Expression::Iterator it(*outProj); it.exists(); it.next()) {
+		const SQLExprs::Expression &expr = it.get();
+
+		if (expr.getCode().getType() == SQLType::AGG_FIRST &&
+				aggrSet.find(expr.getCode().getAggregationIndex()) !=
+						aggrSet.end()) {
+			SQLValues::CompColumn column;
+			column.setColumnPos(destPos, true);
+			column.setOrdering(false);
+			destList.push_back(column);
+		}
+
+		destPos++;
+	}
+
+	return &destList;
 }
 
 void SQLGroupOps::Group::setUpGroupProjections(
@@ -124,7 +205,7 @@ void SQLGroupOps::Group::setUpGroupProjections(
 	const SQLType::AggregationPhase srcPhase = code.getAggregationPhase();
 	factoryCxt.setAggregationPhase(true, srcPhase);
 
-	factoryCxt.setArrangedKeyList(&midKeyList);
+	factoryCxt.setArrangedKeyList(&midKeyList, false);
 
 	code.setMiddleProjection(&builder.createPipeFinishProjection(
 			builder.createMultiStageProjection(
@@ -200,6 +281,18 @@ void SQLGroupOps::GroupDistinct::compile(OpContext &cxt) const {
 	SQLOpUtils::ExprRefList distinctList = builder.getDistinctExprList(*proj);
 	const SQLType::AggregationPhase aggrPhase = getCode().getAggregationPhase();
 
+	const SQLValues::CompColumnList *keyList = getCode().findKeyColumnList();
+	const util::Set<uint32_t> *keySet = NULL;
+	if (keyList != NULL) {
+		keySet = &SQLExprs::ExprRewriter::compColumnListToSet(
+			cxt.getAllocator(), *keyList);
+	}
+
+	const uint32_t outAttributes = OpCodeBuilder::resolveOutputProjection(
+			*proj, NULL).getCode().getAttributes();
+	const bool idSingle =
+			((outAttributes & SQLExprs::ExprCode::ATTR_GROUPING) == 0);
+
 	const OpNode *baseNode = &plan.getParentInput(0);
 	for (SQLOpUtils::ExprRefList::const_iterator it = distinctList.begin();
 			it != distinctList.end(); ++it) {
@@ -209,7 +302,7 @@ void SQLGroupOps::GroupDistinct::compile(OpContext &cxt) const {
 		{
 			OpCode code = getCode();
 			code.setKeyColumnList(&builder.createDistinctGroupKeyList(
-					distinctList, index, false));
+					distinctList, index, false, idSingle));
 			code.setPipeProjection(&builder.createDistinctGroupProjection(
 					distinctList, index, false, aggrPhase));
 			uniqNode.setCode(code);
@@ -225,7 +318,7 @@ void SQLGroupOps::GroupDistinct::compile(OpContext &cxt) const {
 			{
 				OpCode code = getCode();
 				code.setKeyColumnList(&builder.createDistinctGroupKeyList(
-						distinctList, index, true));
+						distinctList, index, true, idSingle));
 				code.setPipeProjection(&builder.createDistinctGroupProjection(
 						distinctList, index, true, aggrPhase));
 				code.setAggregationPhase(SQLType::AGG_PHASE_ALL_PIPE);
@@ -240,7 +333,7 @@ void SQLGroupOps::GroupDistinct::compile(OpContext &cxt) const {
 			OpCode code = getCode();
 			code.setKeyColumnList(&builder.createDistinctMergeKeyList());
 			code.setPipeProjection(&builder.createDistinctMergeProjection(
-					distinctList, index, *proj, aggrPhase));
+					distinctList, index, *proj, aggrPhase, keySet));
 			mergeNode.setCode(code);
 		}
 		mergeNode.addInput(*baseNode);
@@ -430,7 +523,8 @@ SQLGroupOps::GroupBucketHash::prepareContext(OpContext &cxt) const {
 
 	util::StackAllocator &alloc = cxt.getAllocator();
 	resource = ALLOC_UNIQUE(
-			alloc, BucketContext, alloc, getCode().getKeyColumnList());
+			alloc, BucketContext,
+			alloc, cxt.getVarContext(), getCode().getKeyColumnList());
 
 	BucketContext &bucketCxt = resource.resolveAs<BucketContext>();
 
@@ -450,9 +544,10 @@ SQLGroupOps::GroupBucketHash::prepareContext(OpContext &cxt) const {
 
 
 SQLGroupOps::GroupBucketHash::BucketContext::BucketContext(
-		util::StackAllocator &alloc, const SQLValues::CompColumnList &keyList) :
+		util::StackAllocator &alloc, SQLValues::VarContext &varCxt,
+		const SQLValues::CompColumnList &keyList) :
 		writerList_(alloc),
-		digester_(alloc, SQLValues::TupleDigester(keyList)) {
+		digester_(alloc, createBaseDigester(varCxt, keyList)) {
 }
 
 inline SQLOpUtils::ExpressionListWriter::ByGeneral
@@ -461,8 +556,25 @@ SQLGroupOps::GroupBucketHash::BucketContext::getOutput(uint64_t index) {
 			*writerList_[static_cast<size_t>(index)]);
 }
 
+SQLValues::TupleDigester
+SQLGroupOps::GroupBucketHash::BucketContext::createBaseDigester(
+		SQLValues::VarContext &varCxt,
+		const SQLValues::CompColumnList &keyList) {
+	const bool orderingAvailable =
+			(keyList.empty() ? false : keyList.front().isOrdering());
+	return SQLValues::TupleDigester(
+			keyList, &varCxt, &orderingAvailable, false, false, false);
+}
+
 
 void SQLGroupOps::Union::compile(OpContext &cxt) const {
+	if (tryCompileHashPlan(cxt)) {
+		return;
+	}
+	else if (tryCompileEmptyPlan(cxt)) {
+		return;
+	}
+
 	OpPlan &plan = cxt.getPlan();
 	OpCode code = getCode();
 
@@ -479,17 +591,9 @@ void SQLGroupOps::Union::compile(OpContext &cxt) const {
 
 	OpCodeBuilder builder(OpCodeBuilder::ofContext(cxt));
 
-	if (sorted && code.findKeyColumnList() == NULL) {
-		SQLValues::CompColumnList &list = builder.createCompColumnList();
-
-		const uint32_t columnCount = cxt.getColumnCount(0);
-		for (uint32_t i = 0; i < columnCount; i++) {
-			SQLValues::CompColumn column;
-			column.setColumnPos(i, true);
-			column.setOrdering(false);
-			list.push_back(column);
-		}
-		code.setKeyColumnList(&list);
+	if (sorted) {
+		code.setKeyColumnList(&resolveKeyColumnList(
+				cxt, builder, code.findKeyColumnList(), false));
 	}
 
 	std::pair<Projection*, Projection*> projections =
@@ -548,6 +652,165 @@ void SQLGroupOps::Union::compile(OpContext &cxt) const {
 	}
 }
 
+bool SQLGroupOps::Union::tryCompileHashPlan(OpContext &cxt) const {
+	OpPlan &plan = cxt.getPlan();
+
+	OpCodeBuilder builder(OpCodeBuilder::ofContext(cxt));
+
+	SQLOpTypes::Type hashOpType;
+	const SQLValues::CompColumnList *keyList;
+	if (!checkHashPlanAcceptable(
+			cxt, builder, getCode(), &hashOpType, &keyList)) {
+		return false;
+	}
+
+	OpNode &hashNode = plan.createNode(hashOpType);
+	{
+		OpCode code = getCode();
+		OpNode &node = hashNode;
+
+		code.setKeyColumnList(keyList);
+
+		const uint32_t inCount = cxt.getInputCount();
+		for (uint32_t i = 0; i < inCount; i++) {
+			node.addInput(plan.getParentInput(i));
+		}
+		std::pair<Projection*, Projection*> projections =
+				builder.arrangeProjections(code, false, true, NULL);
+		assert(projections.second == NULL);
+
+		util::Vector<Projection*> subProjList(cxt.getAllocator());
+		for (uint32_t i = 0; i < inCount; i++) {
+			Projection &subProj = builder.createIdenticalProjection(false, i);
+			subProj.getPlanningCode().setOutput(i + 1);
+			subProjList.push_back(&subProj);
+		}
+
+		SQLOps::Projection &proj = builder.createMultiOutputProjection(
+				*projections.first, *subProjList.front());
+		for (uint32_t i = 1; i < inCount; i++) {
+			proj.addChain(*subProjList[i]);
+		}
+		code.setPipeProjection(&proj);
+
+		node.setCode(code);
+
+		plan.linkToAllParentOutput(node);
+	}
+
+	OpNode &nonHashNode = plan.createNode(SQLOpTypes::OP_UNION);
+	{
+		OpCode code = getCode();
+		OpNode &node = nonHashNode;
+
+		SQLOps::OpConfig &config = builder.createConfig();
+		const SQLOps::OpConfig *srcConfig = getCode().getConfig();
+		if (srcConfig != NULL) {
+			config = *srcConfig;
+		}
+		config.set(SQLOpTypes::CONF_UNION_HASH_LIMIT, 1);
+		if (code.getLimit() >= 0) {
+			config.set(SQLOpTypes::CONF_LIMIT_INHERITANCE, 1);
+		}
+		code.setConfig(&config);
+
+		const uint32_t inCount = cxt.getInputCount();
+		for (uint32_t i = 0; i < inCount; i++) {
+			node.addInput(hashNode, i + 1);
+		}
+		node.setCode(code);
+
+		plan.linkToAllParentOutput(node);
+	}
+
+	return true;
+}
+
+bool SQLGroupOps::Union::tryCompileEmptyPlan(OpContext &cxt) const {
+	const uint32_t inCount = cxt.getInputCount();
+	if (inCount > 2 || !cxt.isAllInputCompleted()) {
+		return false;
+	}
+
+	for (uint32_t i = 0; i < inCount; i++) {
+		if (cxt.getInputBlockCount(i) > 0) {
+			return false;
+		}
+	}
+
+	OpPlan &plan = cxt.getPlan();
+
+	ColumnTypeList outTypeList(cxt.getAllocator());
+	OpCodeBuilder::getColumnTypeListByColumns(
+			cxt.getOutputColumnList(0), outTypeList);
+
+	OpCodeBuilder builder(OpCodeBuilder::ofContext(cxt));
+	builder.setUpNoopNodes(plan, outTypeList);
+
+	return true;
+}
+
+bool SQLGroupOps::Union::checkHashPlanAcceptable(
+		OpContext &cxt, OpCodeBuilder &builder, const OpCode &code,
+		SQLOpTypes::Type *hashOpType,
+		const SQLValues::CompColumnList **keyList) {
+	*hashOpType = SQLOpTypes::END_OP;
+	*keyList = NULL;
+
+	if (code.getLimit() < 0) {
+		return false;
+	}
+
+	if (SQLOps::OpConfig::resolve(
+			SQLOpTypes::CONF_UNION_HASH_LIMIT, code.getConfig()) > 0) {
+		return false;
+	}
+
+	const uint32_t inCount = cxt.getInputCount();
+	if (inCount > 2) {
+		return false;
+	}
+
+	const SQLOpTypes::Type foundOpType =
+			findHashOperatorType(code.getUnionType(), inCount);
+	if (foundOpType == SQLOpTypes::END_OP) {
+		return false;
+	}
+
+	if (code.getOffset() > 0) {
+		return false;
+	}
+
+	const SQLValues::CompColumnList &resolvedKeyList = resolveKeyColumnList(
+			cxt, builder, code.findKeyColumnList(), true);
+	if (!checkKeySimple(resolvedKeyList)) {
+		return false;
+	}
+
+	for (uint32_t i = 0; i < inCount; i++) {
+		if (!checkInputSimple(cxt.getInputColumnList(i), resolvedKeyList)) {
+			return false;
+		}
+	}
+
+	if (!checkOutputSimple(
+			code.getPipeProjection(), code.getFinishProjection())) {
+		return false;
+	}
+
+	const int64_t memLimit = SQLOps::OpConfig::resolve(
+			SQLOpTypes::CONF_WORK_MEMORY_LIMIT, code.getConfig());
+	const uint64_t threshold =
+			static_cast<uint64_t>(memLimit < 0 ? 32 * 1024 * 1024 : memLimit) / 2;
+	if (estimateHashMapSize(cxt, resolvedKeyList, code.getLimit()) > threshold) {
+		return false;
+	}
+
+	*hashOpType = foundOpType;
+	*keyList = &resolvedKeyList;
+	return true;
+}
+
 SQLOpTypes::Type SQLGroupOps::Union::toOperatorType(
 		SQLType::UnionType unionType) {
 	switch (unionType) {
@@ -565,44 +828,272 @@ SQLOpTypes::Type SQLGroupOps::Union::toOperatorType(
 	}
 }
 
+SQLOpTypes::Type SQLGroupOps::Union::findHashOperatorType(
+		SQLType::UnionType unionType, uint32_t inCount) {
+	switch (unionType) {
+	case SQLType::UNION_ALL:
+		break;
+	case SQLType::UNION_DISTINCT:
+		return SQLOpTypes::OP_UNION_DISTINCT_HASH;
+	case SQLType::UNION_INTERSECT:
+		if (inCount != 2) {
+			break;
+		}
+		return SQLOpTypes::OP_UNION_INTERSECT_HASH;
+	case SQLType::UNION_EXCEPT:
+		return SQLOpTypes::OP_UNION_EXCEPT_HASH;
+	default:
+		assert(unionType == SQLType::END_UNION);
+		break;
+	}
+	return SQLOpTypes::END_OP;
+}
+
+const SQLValues::CompColumnList& SQLGroupOps::Union::resolveKeyColumnList(
+		OpContext &cxt, OpCodeBuilder &builder,
+		const SQLValues::CompColumnList *src, bool withAttributes) {
+	if (!withAttributes && src != NULL) {
+		return *src;
+	}
+
+	SQLValues::CompColumnList &dest = builder.createCompColumnList();
+
+	if (src == NULL) {
+		const uint32_t input = 0;
+		const uint32_t columnCount = cxt.getColumnCount(input);
+		for (uint32_t i = 0; i < columnCount; i++) {
+			SQLValues::CompColumn column;
+			column.setColumnPos(i, true);
+			column.setOrdering(false);
+			dest.push_back(column);
+		}
+	}
+	else {
+		dest = *src;
+	}
+
+	if (!withAttributes) {
+		return dest;
+	}
+
+	return builder.getExprRewriter().rewriteCompColumnList(
+			builder.getExprFactoryContext(), dest, true, NULL);
+}
+
+bool SQLGroupOps::Union::checkKeySimple(
+		const SQLValues::CompColumnList &keyList) {
+	for (SQLValues::CompColumnList::const_iterator it = keyList.begin();
+			it != keyList.end(); ++it) {
+		if (!SQLValues::SummaryTupleSet::isDeepReaderColumnSupported(
+				it->getType())) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool SQLGroupOps::Union::checkInputSimple(
+		const TupleColumnList &columnList,
+		const SQLValues::CompColumnList &keyList) {
+	for (SQLValues::CompColumnList::const_iterator it = keyList.begin();
+			it != keyList.end(); ++it) {
+		const TupleColumnType inType =
+				columnList[it->getColumnPos(util::TrueType())].getType();
+		if (SQLValues::TypeUtils::isAny(inType) &&
+				!SQLValues::TypeUtils::isAny(it->getType())) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool SQLGroupOps::Union::checkOutputSimple(
+		const Projection *pipeProj, const Projection *finishProj) {
+	if (finishProj != NULL) {
+		return false;
+	}
+
+	if (OpCodeBuilder::isAggregationArrangementRequired(
+			pipeProj, finishProj)) {
+		return false;
+	}
+
+	if (pipeProj->getProjectionCode().getType() != SQLOpTypes::PROJ_OUTPUT) {
+		return false;
+	}
+
+	return true;
+}
+
+uint64_t SQLGroupOps::Union::estimateHashMapSize(
+		OpContext &cxt, const SQLValues::CompColumnList &keyList,
+		int64_t tupleCount) {
+	if (tupleCount <= 0) {
+		return 0;
+	}
+
+	const uint32_t input = 0;
+	const SQLOps::TupleColumnList &columnList = cxt.getInputColumnList(input);
+
+	util::StackAllocator &alloc = cxt.getAllocator();
+	SQLValues::ValueContext valueCxt(
+			SQLValues::ValueContext::ofAllocator(alloc));
+
+	SQLValues::SummaryTupleSet tupleSet(valueCxt, NULL);
+	tupleSet.addReaderColumnList(columnList);
+	tupleSet.addKeyList(keyList, (input == 0), false);
+	tupleSet.setReaderColumnsDeep(true);
+	tupleSet.setHeadNullAccesible(true);
+	tupleSet.completeColumns();
+
+	const size_t hashHeadSize = sizeof(uint64_t) * 2;
+	const size_t hashValueSize = tupleSet.estimateTupleSize();
+
+	return static_cast<uint64_t>(tupleCount) * (hashHeadSize + hashValueSize);
+}
+
 
 void SQLGroupOps::UnionAll::compile(OpContext &cxt) const {
-	cxt.setAllInputSourceType(SQLExprs::ExprCode::INPUT_ARRAY_TUPLE);
+	const uint32_t count = cxt.getInputCount();
+	for (uint32_t i = 0; i < count; i++) {
+		cxt.setReaderLatchDelayed(i);
+	}
 
 	Operator::compile(cxt);
 }
 
 void SQLGroupOps::UnionAll::execute(OpContext &cxt) const {
-	SQLValues::VarContext::Scope varScope(cxt.getVarContext());
+	for (;;) {
+		uint32_t index;
+		if (!cxt.findRemainingInput(&index)) {
+			break;
+		}
 
-	SQLValues::ArrayTuple tuple(cxt.getAllocator());
-	cxt.getExprContext().setArrayTuple(0, &tuple);
+		TupleListReader &reader = cxt.getReader(index);
 
-	cxt.setUpExprContext();
+		if (reader.exists()) {
+			WriterEntry &writer = prepareWriter(cxt, index);
+			*cxt.getActiveReaderRef() = &reader;
+			if (writer.first != NULL) {
+				writer.first->applyContext(cxt);
+				do {
+					writer.first->write();
+					reader.next();
 
-	SQLValues::CompColumnList outColumnList(cxt.getAllocator());
-	const TupleList::Info &info = cxt.getWriter(0).getTupleList().getInfo();
-	for (uint32_t i = 0; i < info.columnCount_; i++) {
-		SQLValues::CompColumn column;
-		column.setType(info.columnTypeList_[i]);
-		outColumnList.push_back(column);
-	}
+					if (cxt.checkSuspended()) {
+						return;
+					}
+				}
+				while (reader.exists());
+			}
+			else {
+				writer.second->updateProjectionContext(cxt);
+				do {
+					writer.second->project(cxt);
+					reader.next();
 
-	const uint32_t count = cxt.getInputCount();
-	for (uint32_t i = 0; i < count; i++) {
-		for (TupleListReader &reader = cxt.getReader(i); reader.exists();) {
-			ReadableTuple readerTuple = reader.get();
-			tuple.assign(
-					cxt.getValueContext(), readerTuple, outColumnList,
-					cxt.getInputColumnList(i));
-			getCode().getPipeProjection()->projectBy(cxt, reader, i);
-			reader.next();
-
-			if (cxt.checkSuspended()) {
-				return;
+					if (cxt.checkSuspended()) {
+						return;
+					}
+				}
+				while (reader.exists());
 			}
 		}
+
+		cxt.popRemainingInput();
+		cxt.releaseReaderLatch(index);
 	}
+}
+
+SQLGroupOps::UnionAll::WriterEntry&
+SQLGroupOps::UnionAll::prepareWriter(OpContext &cxt, uint32_t index) const {
+	util::StackAllocator &alloc = cxt.getAllocator();
+
+	util::AllocUniquePtr<void> &resource = cxt.getResource(0);
+	if (resource.isEmpty()) {
+		resource = ALLOC_UNIQUE(
+				alloc, UnionAllContext, alloc, cxt.getInputCount());
+	}
+	UnionAllContext &unionCxt = resource.resolveAs<UnionAllContext>();
+
+	WriterEntry *&writer = unionCxt.writerList_[index];
+	do {
+		if (writer != NULL) {
+			break;
+		}
+
+		std::pair<ColumnTypeList, WriterEntry*> mapEntry(
+				ColumnTypeList(alloc), static_cast<WriterEntry*>(NULL));
+		ColumnTypeList &typeList = mapEntry.first;
+		getInputColumnTypeList(cxt, index, typeList);
+
+		WriterMap::iterator mapIt = unionCxt.writerMap_.find(typeList);
+		if (mapIt != unionCxt.writerMap_.end()) {
+			writer = mapIt->second;
+			break;
+		}
+
+		const SQLExprs::ExprCode::InputSourceType srcType =
+				SQLExprs::ExprCode::INPUT_READER_MULTI;
+		OpCodeBuilder::Source builderSrc = OpCodeBuilder::ofContext(cxt);
+		builderSrc.mappedInput_ = index;
+
+		OpCodeBuilder builder(builderSrc);
+		cxt.setUpProjectionFactoryContext(
+				builder.getProjectionFactoryContext(), &index);
+
+		SQLExprs::ExprFactoryContext &exprCxt =
+				builder.getExprFactoryContext();
+		exprCxt.setInputSourceType(0, srcType);
+		
+		Projection *planningProj;
+		{
+			SQLExprs::ExprRewriter &rewriter = builder.getExprRewriter();
+			SQLExprs::ExprRewriter::Scope scope(rewriter);
+			planningProj = &builder.rewriteProjection(
+					*getCode().getPipeProjection(), NULL);
+			OpCodeBuilder::removeUnificationAttributes(*planningProj);
+		}
+
+		exprCxt.setPlanning(false);
+		Projection *proj = &builder.rewriteProjection(*planningProj, NULL);
+
+		SQLOpUtils::ExpressionListWriter::Source writerSrc(
+				cxt, *proj, false, NULL, false, NULL, srcType, &index);
+
+		SQLOpUtils::ExpressionListWriter *writerBase =
+				ALLOC_NEW(alloc) SQLOpUtils::ExpressionListWriter(writerSrc);
+		if (!writerBase->isAvailable()) {
+			writerBase = NULL;
+			proj = &builder.rewriteProjection(*proj, NULL);
+		}
+		writer = ALLOC_NEW(alloc) WriterEntry(writerBase, proj);
+		mapEntry.second = writer;
+		unionCxt.writerMap_.insert(mapEntry);
+
+		cxt.setUpExprContext();
+	}
+	while (false);
+
+	cxt.getExprContext().setReader(
+			0, &cxt.getReader(index), &cxt.getInputColumnList(index));
+
+	return *writer;
+}
+
+void SQLGroupOps::UnionAll::getInputColumnTypeList(
+		OpContext &cxt, uint32_t index, ColumnTypeList &typeList) {
+	const TupleColumnList &columnList = cxt.getInputColumnList(index);
+	for (TupleColumnList::const_iterator it = columnList.begin();
+			it != columnList.end(); ++it) {
+		typeList.push_back(it->getType());
+	}
+}
+
+SQLGroupOps::UnionAll::UnionAllContext::UnionAllContext(
+		util::StackAllocator &alloc, uint32_t inCount) :
+		writerList_(inCount, NULL, alloc),
+		writerMap_(alloc) {
 }
 
 
@@ -621,9 +1112,15 @@ SQLGroupOps::UnionMergeContext::createHeapQueue(
 
 	TupleGreater pred(
 			alloc,
-			SQLValues::TupleComparator(keyColumnList, false, true));
-	TupleDigester digester(
-			alloc, SQLValues::TupleDigester(keyColumnList, NULL));
+			SQLValues::TupleComparator(
+					keyColumnList, &cxt.getVarContext(), false, true),
+			cxt.getValueProfile());
+	UniqTupleDigester digester(
+			alloc,
+			SQLValues::TupleDigester(
+					keyColumnList, &cxt.getVarContext(),
+					NULL, true, false, false),
+			cxt.getValueProfile());
 
 	TupleHeapQueue queue(pred, alloc);
 	queue.setPredicateEmpty(pred.getBase().isEmpty(0));
@@ -853,4 +1350,424 @@ inline bool SQLGroupOps::UnionCompensate::onFinish(
 	const bool matched = (state == 0);
 	state = 0;
 	return matched;
+}
+
+
+SQLGroupOps::UnionHashContext& SQLGroupOps::UnionHashContext::resolve(
+		OpContext &cxt, const SQLValues::CompColumnList &keyList,
+		const Projection &baseProj, const SQLOps::OpConfig *config) {
+
+	util::AllocUniquePtr<void> &resource = cxt.getResource(0);
+	if (resource.isEmpty()) {
+		resource = ALLOC_UNIQUE(
+				cxt.getAllocator(), UnionHashContext,
+				cxt, keyList, baseProj, config);
+	}
+
+	return resource.resolveAs<UnionHashContext>();
+}
+
+SQLGroupOps::UnionHashContext::UnionHashContext(
+		OpContext &cxt, const SQLValues::CompColumnList &keyList,
+		const Projection &baseProj, const SQLOps::OpConfig *config) :
+		alloc_(cxt.getAllocator()),
+		memoryLimit_(resolveMemoryLimit(config)),
+		memoryLimitReached_(false),
+		topInputPending_(false),
+		followingInputCompleted_(false),
+		map_(0, MapHasher(), MapPred(), alloc_),
+		inputEntryList_(alloc_),
+		proj_(NULL),
+		projTupleRef_(NULL) {
+	const bool digestOrdering = checkDigestOrdering(cxt, keyList);
+
+	initializeTupleSet(cxt, keyList, tupleSet_, digestOrdering);
+	setUpInputEntryList(cxt, keyList, baseProj, inputEntryList_, digestOrdering);
+
+	cxt.setUpExprInputContext(0);
+	proj_ = &createProjection(cxt, baseProj, keyList, digestOrdering);
+	projTupleRef_ = cxt.getExprContext().getSummaryTupleRef(0);
+	assert(projTupleRef_ != NULL);
+}
+
+template<typename Op>
+const SQLOps::Projection* SQLGroupOps::UnionHashContext::accept(
+		TupleListReader &reader, const uint32_t index, InputEntry &entry) {
+	const int64_t digest = entry.digester_(ReaderSourceType(reader));
+	const std::pair<Map::iterator, Map::iterator> &range =
+			map_.equal_range(digest);
+	for (Map::iterator it = range.first;; ++it) {
+		if (it == range.second) {
+			if (memoryLimitReached_) {
+				return &entry.subProj_;
+			}
+			MapEntry entry(
+					SummaryTuple::create(*tupleSet_, reader, digest, index), 0);
+			const bool acceptable = Op::onTuple(entry.second, index);
+			*projTupleRef_ = map_.insert(
+					range.second, std::make_pair(digest, entry))->second.first;
+			if (!acceptable) {
+				return NULL;
+			}
+			break;
+		}
+
+		if (entry.tupleEq_(
+				ReaderSourceType(reader),
+				SummaryTuple::Wrapper(it->second.first))) {
+			if (!Op::onTuple(it->second.second, index)) {
+				return NULL;
+			}
+			*projTupleRef_ = it->second.first;
+			break;
+		}
+	}
+
+	return proj_;
+}
+
+void SQLGroupOps::UnionHashContext::checkMemoryLimit() {
+	if (memoryLimitReached_) {
+		return;
+	}
+	memoryLimitReached_ = (alloc_.getTotalSize() >= memoryLimit_);
+}
+
+SQLGroupOps::UnionHashContext::InputEntry&
+SQLGroupOps::UnionHashContext::prepareInput(
+		OpContext &cxt, const uint32_t index) {
+	InputEntry *entry = inputEntryList_[index];
+
+	entry->subProj_.updateProjectionContext(cxt);
+	proj_->updateProjectionContext(cxt);
+
+	return *entry;
+}
+
+bool SQLGroupOps::UnionHashContext::isTopInputPending() {
+	return topInputPending_;
+}
+
+void SQLGroupOps::UnionHashContext::setTopInputPending(bool pending) {
+	topInputPending_ = pending;
+}
+
+bool SQLGroupOps::UnionHashContext::isFollowingInputCompleted(OpContext &cxt) {
+	do {
+		if (followingInputCompleted_) {
+			break;
+		}
+
+		const uint32_t inCount = cxt.getInputCount();
+		for (uint32_t i = 1; i < inCount; i++) {
+			if (!cxt.isInputCompleted(i)) {
+				return false;
+			}
+		}
+
+		followingInputCompleted_ = true;
+	}
+	while (false);
+	return followingInputCompleted_;
+}
+
+uint64_t SQLGroupOps::UnionHashContext::resolveMemoryLimit(
+		const SQLOps::OpConfig *config) {
+	const int64_t base = SQLOps::OpConfig::resolve(
+			SQLOpTypes::CONF_WORK_MEMORY_LIMIT, config);
+	return static_cast<uint64_t>(base < 0 ? 32 * 1024 * 1024 : base);
+}
+
+const SQLOps::Projection& SQLGroupOps::UnionHashContext::createProjection(
+		OpContext &cxt, const Projection &baseProj,
+		const SQLValues::CompColumnList &keyList, bool digestOrdering) {
+	const uint32_t index = 0;
+
+	const SQLExprs::ExprCode::InputSourceType srcType =
+			SQLExprs::ExprCode::INPUT_SUMMARY_TUPLE;
+	OpCodeBuilder::Source builderSrc = OpCodeBuilder::ofContext(cxt);
+	builderSrc.mappedInput_ = index;
+	builderSrc.inputUnified_ = true;
+
+	OpCodeBuilder builder(builderSrc);
+	cxt.setUpProjectionFactoryContext(
+			builder.getProjectionFactoryContext(), &index);
+
+	SQLExprs::ExprFactoryContext &exprCxt =
+			builder.getExprFactoryContext();
+	exprCxt.setInputSourceType(0, srcType);
+
+	Projection *planningProj;
+	{
+		SQLExprs::ExprRewriter &rewriter = builder.getExprRewriter();
+		SQLExprs::ExprRewriter::Scope scope(rewriter);
+		planningProj = &builder.rewriteProjection(baseProj.chainAt(0), NULL);
+		OpCodeBuilder::removeUnificationAttributes(*planningProj);
+	}
+
+	exprCxt.setPlanning(false);
+	exprCxt.setArrangedKeyList(&keyList, !digestOrdering);
+	Projection *proj = &builder.rewriteProjection(*planningProj, NULL);
+	proj = &builder.rewriteProjection(*proj, NULL);
+
+	cxt.setUpExprContext();
+	return *proj;
+}
+
+void SQLGroupOps::UnionHashContext::initializeTupleSet(
+		OpContext &cxt, const SQLValues::CompColumnList &keyList,
+		util::LocalUniquePtr<SummaryTupleSet> &tupleSet,
+		bool digestOrdering) {
+	const uint32_t input = 0;
+
+	tupleSet = UTIL_MAKE_LOCAL_UNIQUE(
+			tupleSet, SummaryTupleSet, cxt.getValueContext(), NULL);
+
+	{
+		ColumnTypeList typeList(cxt.getAllocator());
+		{
+			const uint32_t count = cxt.getColumnCount(input);
+			for (uint32_t i = 0; i < count; i++) {
+				typeList.push_back(OpCodeBuilder::resolveUnifiedInputType(cxt, i));
+			}
+		}
+		tupleSet->addReaderColumnList(typeList);
+		tupleSet->addKeyList(keyList, (input == 0), false);
+	}
+
+	{
+		const uint32_t count = cxt.getInputCount();
+		for (uint32_t i = 0; i < count; i++) {
+			tupleSet->addSubReaderColumnList(i, cxt.getInputColumnList(i));
+		}
+	}
+
+	tupleSet->setReaderColumnsDeep(true);
+	tupleSet->setHeadNullAccesible(true);
+	tupleSet->setOrderedDigestRestricted(!digestOrdering);
+
+	tupleSet->completeColumns();
+
+	*cxt.getSummaryColumnListRef(input) = tupleSet->getReaderColumnList();
+}
+
+void SQLGroupOps::UnionHashContext::setUpInputEntryList(
+		OpContext &cxt, const SQLValues::CompColumnList &keyList,
+		const Projection &baseProj, InputEntryList &entryList,
+		bool digestOrdering) {
+	util::StackAllocator &alloc = cxt.getAllocator();
+
+	SQLExprs::ExprFactoryContext factoryCxt(alloc);
+	SQLExprs::ExprRewriter rewriter(alloc);
+
+	const uint32_t digesterInput = 0;
+
+	{
+		const uint32_t count = cxt.getColumnCount(0);
+		for (uint32_t i = 0; i < count; i++) {
+			const TupleColumnType type =
+					OpCodeBuilder::resolveUnifiedInputType(cxt, i);
+			factoryCxt.setInputType(0, i, type);
+			factoryCxt.setInputType(1, i, type);
+		}
+	}
+
+	const uint32_t inCount = cxt.getInputCount();
+	assert(inCount <= 2);
+	for (uint32_t i = 0; i < inCount; i++) {
+		{
+			const uint32_t count = cxt.getColumnCount(0);
+			for (uint32_t j = 0; j < count; j++) {
+				factoryCxt.setInputType(
+						0, j, cxt.getReaderColumn(i, j).getType());
+
+				assert(SQLValues::TypeUtils::findPromotionType(
+						factoryCxt.getInputType(0, j),
+						factoryCxt.getInputType(1, j), true) ==
+								factoryCxt.getInputType(1, j));
+				assert(!SQLValues::TypeUtils::isAny(factoryCxt.getInputType(0, j)) ==
+					!SQLValues::TypeUtils::isAny(factoryCxt.getInputType(1, j)));
+			}
+		}
+
+		const SQLValues::CompColumnList &digesterKeyList =
+				rewriter.rewriteCompColumnList(
+						factoryCxt, keyList, false, &digesterInput, !digestOrdering);
+		const SQLValues::CompColumnList &eqKeyList =
+				rewriter.rewriteCompColumnList(
+						factoryCxt, keyList, false, NULL, !digestOrdering);
+
+		const Projection &subProj = baseProj.chainAt(i + 1);
+		entryList.push_back(ALLOC_NEW(alloc) InputEntry(
+				cxt, digesterKeyList, digestOrdering, eqKeyList, subProj));
+	}
+}
+
+bool SQLGroupOps::UnionHashContext::checkDigestOrdering(
+		OpContext &cxt, const SQLValues::CompColumnList &keyList) {
+	if (!SQLValues::TupleDigester::isOrderingAvailable(keyList, true)) {
+		return false;
+	}
+
+	const uint32_t inCount = cxt.getInputCount();
+	for (uint32_t i = 0; i < inCount; i++) {
+		for (SQLValues::CompColumnList::const_iterator it = keyList.begin();
+				it != keyList.end(); ++it) {
+			const TupleColumnType type = cxt.getReaderColumn(
+					i, it->getColumnPos(util::TrueType())).getType();
+			if (type != it->getType()) {
+				return false;
+			}
+		}
+	}
+
+	return true;
+}
+
+
+SQLGroupOps::UnionHashContext::InputEntry::InputEntry(
+		OpContext &cxt, const SQLValues::CompColumnList &digesterKeyList,
+		bool digestOrdering, const SQLValues::CompColumnList &eqKeyList,
+		const Projection &subProj) :
+		digester_(
+				cxt.getAllocator(),
+				SQLValues::TupleDigester(
+						digesterKeyList, &cxt.getVarContext(), &digestOrdering,
+						false, false, false),
+				cxt.getValueProfile()),
+		tupleEq_(
+				cxt.getAllocator(),
+				SQLValues::TupleComparator(
+						eqKeyList, &cxt.getVarContext(),
+						false, true, false, !digestOrdering),
+				cxt.getValueProfile()),
+		subProj_(subProj) {
+}
+
+
+template<typename Op>
+void SQLGroupOps::UnionHashBase<Op>::compile(OpContext &cxt) const {
+	const uint32_t count = cxt.getInputCount();
+	for (uint32_t i = 0; i < count; i++) {
+		cxt.setReaderLatchDelayed(i);
+	}
+
+	Operator::compile(cxt);
+}
+
+template<typename Op>
+void SQLGroupOps::UnionHashBase<Op>::execute(OpContext &cxt) const {
+	UnionHashContext &hashCxt = UnionHashContext::resolve(
+			cxt, getCode().getKeyColumnList(), *getCode().getPipeProjection(),
+			getCode().getConfig());
+	const bool topInputCascading = Op::TopInputCascading::VALUE;
+	for (;;) {
+		uint32_t index;
+		bool onPending = false;
+		if (!cxt.findRemainingInput(&index)) {
+			if (!topInputCascading || !hashCxt.isTopInputPending()) {
+				break;
+			}
+			index = 0;
+			onPending = true;
+		}
+
+		bool pendingNext = false;
+		do {
+			if (topInputCascading && index == 0 && !(onPending &&
+					hashCxt.isFollowingInputCompleted(cxt))) {
+				pendingNext = true;
+				break;
+			}
+
+			TupleListReader &reader = cxt.getReader(index);
+			if (!reader.exists()) {
+				break;
+			}
+
+			hashCxt.checkMemoryLimit();
+			UnionHashContext::InputEntry &entry =
+					hashCxt.prepareInput(cxt, index);
+			do {
+				const Projection *proj =
+						hashCxt.accept<Op>(reader, index, entry);
+				if (proj != NULL) {
+					proj->project(cxt);
+				}
+				reader.next();
+
+				if (cxt.checkSuspended()) {
+					return;
+				}
+			}
+			while (reader.exists());
+		}
+		while (false);
+
+		cxt.popRemainingInput();
+		cxt.releaseReaderLatch(index);
+
+		if (topInputCascading && index == 0) {
+			hashCxt.setTopInputPending(pendingNext);
+		}
+
+		if (onPending) {
+			break;
+		}
+	}
+}
+
+template<typename Op>
+bool SQLGroupOps::UnionHashBase<Op>::onTuple(int64_t &state, size_t ordinal) {
+	static_cast<void>(state);
+	static_cast<void>(ordinal);
+	assert(false);
+	return false;
+}
+
+
+inline bool SQLGroupOps::UnionDistinctHash::onTuple(
+		int64_t &state, size_t ordinal) {
+	static_cast<void>(ordinal);
+
+	if (state != 0) {
+		return false;
+	}
+
+	state = -1;
+	return true;
+}
+
+
+inline bool SQLGroupOps::UnionIntersectHash::onTuple(
+		int64_t &state, size_t ordinal) {
+
+	if (state <= 0) {
+		if (state == 0) {
+			state = static_cast<int64_t>(ordinal) + 1;
+		}
+		return false;
+	}
+	else if (state == static_cast<int64_t>(ordinal) + 1) {
+		return false;
+	}
+
+	state = -1;
+	return true;
+}
+
+
+inline bool SQLGroupOps::UnionExceptHash::onTuple(
+		int64_t &state, size_t ordinal) {
+
+	if (ordinal > 0) {
+		state = -1;
+		return false;
+	}
+	else if (state != 0) {
+		return false;
+	}
+
+	state = -1;
+	return true;
 }

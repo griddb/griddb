@@ -20,6 +20,7 @@
 
 #include "util/container.h"
 
+
 struct SQLAlgorithmUtils {
 	struct SortConfig;
 
@@ -36,14 +37,22 @@ struct SQLAlgorithmUtils {
 					util::StdAllocator<T, util::StackAllocator> > class HeapQueue;
 
 	template<
-			typename K, typename T, typename Hash, typename Pred,
+			typename K, typename Hash, typename Pred,
 			typename Alloc = util::StdAllocator<
-					std::pair<const K, T>, util::StackAllocator> > class OrderingHashMap;
+					K, util::StackAllocator> > class TreeHashSet;
 	template<
 			typename K, typename T, typename Hash, typename Pred,
 			typename Alloc = util::StdAllocator<
-					std::pair<const K, T>, util::StackAllocator> > class OrderingHashMultiMap;
+					std::pair<const K, T>, util::StackAllocator> > class TreeHashMap;
+	template<
+			typename K, typename T, typename Hash, typename Pred,
+			typename Alloc = util::StdAllocator<
+					std::pair<const K, T>, util::StackAllocator> > class TreeHashMultiMap;
 
+	template<
+			typename K, typename Hash, typename Pred,
+			typename Alloc = util::StdAllocator<
+					K, util::StackAllocator> > class HashSet;
 	template<
 			typename K, typename T, typename Hash, typename Pred,
 			typename Alloc = util::StdAllocator<
@@ -53,9 +62,8 @@ struct SQLAlgorithmUtils {
 			typename Alloc = util::StdAllocator<
 					std::pair<const K, T>, util::StackAllocator> > class HashMultiMap;
 
-	template<
-			typename T = uint64_t, typename Alloc =
-					util::StdAllocator<T, util::StackAllocator> > class DigestHashSet;
+	template< typename Alloc = util::StdAllocator<int64_t, util::StackAllocator> >
+	class DenseBitSet;
 };
 
 struct SQLAlgorithmUtils::SortConfig {
@@ -244,7 +252,7 @@ public:
 
 	Sorter(
 			size_t capacity, const Pred &pred1, const Pred &pred2,
-			const Alloc &alloc);
+			const std::pair<T*, T*> &buffer);
 
 	void setConfig(const SortConfig &config);
 	void setSecondaryPredicate(const Pred &pred);
@@ -262,11 +270,14 @@ public:
 	bool isFilled() const;
 	bool isSorted() const;
 
+	size_t getRemaining() const;
+
 	Iterator begin() const;
 	Iterator end() const;
 
 	Iterator beginAt(bool primary) const;
 	Iterator endAt(bool primary) const;
+	Iterator baseEndAt(bool primary) const;
 
 	bool sort();
 	template<typename U> bool sortOptional(const U&);
@@ -526,10 +537,123 @@ private:
 	bool predEmpty_;
 };
 
+template<typename K, typename Hash, typename Pred, typename Alloc>
+class SQLAlgorithmUtils::TreeHashSet {
+private:
+	typedef uint64_t BaseKeyType;
+	typedef K BaseMappedType;
+	typedef std::pair<BaseKeyType, BaseMappedType> BaseValueType;
+	typedef typename std::map<
+			BaseKeyType, BaseMappedType>::key_compare BaseKeyComp;
+	typedef util::MultiMap<
+			BaseKeyType, BaseMappedType, BaseKeyComp, Alloc> BaseType;
+
+	typedef typename BaseType::iterator BaseIterator;
+
+	class Iterator;
+
+public:
+	typedef Iterator iterator;
+
+	TreeHashSet(
+			size_t, const Hash &hash, const Pred &pred, const Alloc &alloc) :
+			base_(alloc) {
+	}
+
+	bool empty() const {
+		return base_.empty();
+	}
+
+	std::pair<iterator, bool> insert(const K &key) {
+		const BaseKeyType &baseKey = hash_(key);
+		const std::pair<BaseIterator, BaseIterator> &range =
+				base_.equal_range(baseKey);
+
+		BaseIterator it = range.first;
+		for (; it != range.second; ++it) {
+			if (pred_(it->second, key)) {
+				return std::make_pair(iterator(it), false);
+			}
+		}
+
+		return std::make_pair(iterator(base_.insert(
+				it, BaseValueType(baseKey, key))), true);
+	}
+
+	iterator find(const K &key) {
+		const BaseKeyType &baseKey = hash_(key);
+		const std::pair<BaseIterator, BaseIterator> &range =
+				base_.equal_range(baseKey);
+
+		for (BaseIterator it = range.first; it != range.second; ++it) {
+			if (pred_(it->second, key)) {
+				return iterator(it);
+			}
+		}
+
+		return end();
+	}
+
+	void erase(iterator it) {
+		base_.erase(it.baseIt_);
+	}
+
+	iterator begin() {
+		return iterator(base_.begin());
+	}
+
+	iterator end() {
+		return iterator(base_.end());
+	}
+
+private:
+	BaseType base_;
+	Hash hash_;
+	Pred pred_;
+};
+
+template<typename K, typename Hash, typename Pred, typename Alloc>
+class SQLAlgorithmUtils::TreeHashSet<K, Hash, Pred, Alloc>::Iterator {
+public:
+	explicit Iterator(const BaseIterator &baseIt) : baseIt_(baseIt) {
+	}
+
+	K& operator*() const {
+		return baseIt_->second;
+	}
+
+	K* operator->() const {
+		return &baseIt_->second;
+	}
+
+	bool operator==(const Iterator &another) const {
+		return baseIt_ == another.baseIt_;
+	}
+
+	bool operator!=(const Iterator &another) const {
+		return baseIt_ != another.baseIt_;
+	}
+
+	Iterator& operator++() {
+		++baseIt_;
+		return *this;
+	}
+
+	Iterator operator++(int) {
+		const Iterator last = *this;
+		++baseIt_;
+		return last;
+	}
+
+private:
+	friend class TreeHashSet;
+	BaseIterator baseIt_;
+};
+
 template<
 		typename K, typename T, typename Hash, typename Pred,
 		typename Alloc>
-class SQLAlgorithmUtils::OrderingHashMap {
+class SQLAlgorithmUtils::TreeHashMap {
 private:
 	typedef uint64_t BaseKeyType;
 	typedef std::pair<K, T> BaseMappedType;
@@ -546,9 +670,13 @@ private:
 public:
 	typedef Iterator iterator;
 
-	OrderingHashMap(
+	TreeHashMap(
 			size_t, const Hash &hash, const Pred &pred, const Alloc &alloc) :
 			base_(alloc) {
+	}
+
+	bool empty() const {
+		return base_.empty();
 	}
 
 	std::pair<iterator, bool> insert(const std::pair<K, T> &value) {
@@ -559,12 +687,12 @@ public:
 		BaseIterator it = range.first;
 		for (; it != range.second; ++it) {
 			if (pred_(it->second.first, value.first)) {
-				return std::make_pair(iterator(it, false));
+				return std::make_pair(iterator(it), false);
 			}
 		}
 
 		return std::make_pair(iterator(base_.insert(
-				it, BaseValueType(baseKey, value)), true));
+				it, BaseValueType(baseKey, value))), true);
 	}
 
 	iterator find(const K &key) {
@@ -581,6 +709,18 @@ public:
 		return end();
 	}
 
+	T& operator[](const K &key) {
+		return insert(std::pair<K, T>(key, T())).first->second;
+	}
+
+	void erase(iterator it) {
+		base_.erase(it.baseIt_);
+	}
+
+	iterator begin() {
+		return iterator(base_.begin());
+	}
+
 	iterator end() {
 		return iterator(base_.end());
 	}
@@ -594,7 +734,7 @@ private:
 template<
 		typename K, typename T, typename Hash, typename Pred,
 		typename Alloc>
-class SQLAlgorithmUtils::OrderingHashMap<K, T, Hash, Pred, Alloc>::Iterator {
+class SQLAlgorithmUtils::TreeHashMap<K, T, Hash, Pred, Alloc>::Iterator {
 public:
 	explicit Iterator(const BaseIterator &baseIt) : baseIt_(baseIt) {
 	}
@@ -627,13 +767,14 @@ public:
 	}
 
 private:
+	friend class TreeHashMap;
 	BaseIterator baseIt_;
 };
 
 template<
 		typename K, typename T, typename Hash, typename Pred,
 		typename Alloc>
-class SQLAlgorithmUtils::OrderingHashMultiMap {
+class SQLAlgorithmUtils::TreeHashMultiMap {
 private:
 	typedef uint64_t BaseKeyType;
 	typedef std::pair<K, T> BaseMappedType;
@@ -646,11 +787,15 @@ private:
 	typedef typename BaseType::iterator BaseIterator;
 
 public:
-	typedef typename OrderingHashMap<K, T, Hash, Pred, Alloc>::iterator iterator;
+	typedef typename TreeHashMap<K, T, Hash, Pred, Alloc>::iterator iterator;
 
-	OrderingHashMultiMap(
+	TreeHashMultiMap(
 			size_t, const Hash &hash, const Pred &pred, const Alloc &alloc) :
 			base_(alloc) {
+	}
+
+	bool empty() const {
+		return base_.empty();
 	}
 
 	iterator insert(const std::pair<K, T> &value) {
@@ -708,6 +853,14 @@ public:
 		return std::make_pair(iterator(range.first), iterator(range.second));
 	}
 
+	void erase(iterator it) {
+		base_.erase(it.baseIt_);
+	}
+
+	iterator begin() {
+		return iterator(base_.begin());
+	}
+
 	iterator end() {
 		return iterator(base_.end());
 	}
@@ -718,6 +871,27 @@ private:
 	Pred pred_;
 };
 
+template<typename K, typename Hash, typename Pred, typename Alloc>
+class SQLAlgorithmUtils::HashSet : public
+#if UTIL_CXX11_SUPPORTED
+		std::unordered_set<K, Hash, Pred, Alloc>
+#else
+		SQLAlgorithmUtils::TreeHashSet<K, Hash, Pred, Alloc>
+#endif
+{
+public:
+	HashSet(
+			size_t capacity, const Hash &hash, const Pred &pred,
+			const Alloc &alloc) :
+#if UTIL_CXX11_SUPPORTED
+			std::unordered_set<K, Hash, Pred, Alloc>
+#else
+			SQLAlgorithmUtils::TreeHashSet<K, Hash, Pred, Alloc>
+#endif
+			(capacity, hash, pred, alloc) {
+	}
+};
+
 template<
 		typename K, typename T, typename Hash, typename Pred,
 		typename Alloc>
@@ -725,7 +899,7 @@ class SQLAlgorithmUtils::HashMap : public
 #if UTIL_CXX11_SUPPORTED
 		std::unordered_map<K, T, Hash, Pred, Alloc>
 #else
-		SQLAlgorithmUtils::OrderingHashMap<K, T, Hash, Pred, Alloc>
+		SQLAlgorithmUtils::TreeHashMap<K, T, Hash, Pred, Alloc>
 #endif
 {
 public:
@@ -735,7 +909,7 @@ public:
 #if UTIL_CXX11_SUPPORTED
 			std::unordered_map<K, T, Hash, Pred, Alloc>
 #else
-			SQLAlgorithmUtils::OrderingHashMap<K, T, Hash, Pred, Alloc>
+			SQLAlgorithmUtils::TreeHashMap<K, T, Hash, Pred, Alloc>
 #endif
 			(capacity, hash, pred, alloc) {
 	}
@@ -748,7 +922,7 @@ class SQLAlgorithmUtils::HashMultiMap : public
 #if UTIL_CXX11_SUPPORTED
 		std::unordered_multimap<K, T, Hash, Pred, Alloc>
 #else
-		SQLAlgorithmUtils::OrderingHashMultiMap<K, T, Hash, Pred, Alloc>
+		SQLAlgorithmUtils::TreeHashMultiMap<K, T, Hash, Pred, Alloc>
 #endif
 {
 public:
@@ -758,25 +932,93 @@ public:
 #if UTIL_CXX11_SUPPORTED
 			std::unordered_multimap<K, T, Hash, Pred, Alloc>
 #else
-			SQLAlgorithmUtils::OrderingHashMultiMap<K, T, Hash, Pred, Alloc>
+			SQLAlgorithmUtils::TreeHashMultiMap<K, T, Hash, Pred, Alloc>
 #endif
 			(capacity, hash, pred, alloc) {
 	}
 };
 
-template<typename T, typename Alloc>
-class SQLAlgorithmUtils::DigestHashSet {
+template<typename Alloc>
+class SQLAlgorithmUtils::DenseBitSet {
 public:
-	DigestHashSet(size_t size, const Alloc &alloc);
+	typedef std::pair<int64_t, int64_t> CodedEntry;
 
-	void add(const T &value);
-	bool find(const T &value) const;
+	class Iterator;
+	class InputCursor;
+	class OutputCursor;
+
+	typedef Alloc allocator_type;
+	typedef typename Alloc::value_type key_type;
+	typedef typename Alloc::value_type value_type;
+	typedef Iterator iterator;
+
+	explicit DenseBitSet(const allocator_type &alloc);
+
+	std::pair<iterator, bool> insert(const value_type &val);
+	iterator find(const key_type &k);
+	iterator end();
+
+	size_t capacity() const;
 
 private:
-	size_t toIndex(const T &value) const;
+	typedef value_type BaseKey;
+	typedef uint64_t BitsType;
+	struct BaseHasher {
+		size_t operator()(BaseKey key) const { return static_cast<size_t>(key); }
+	};
+	typedef std::equal_to<BaseKey> BasePred;
+	typedef HashMap<BaseKey, BitsType, BaseHasher, BasePred> Base;
 
-	util::Vector<bool, Alloc> base_;
-	size_t size_;
+	template<size_t, int> struct Nlz;
+	template<int C> struct Nlz<sizeof(uint64_t) * CHAR_BIT, C> {
+		static const BitsType VALUE = (sizeof(uint64_t) * CHAR_BIT) - 6;
+	};
+
+	struct Constants {
+		static const BitsType SET_BITS_SIZE = sizeof(BitsType) * CHAR_BIT;
+		static const BitsType SET_BITS_BASE = 1U;
+		static const BitsType SET_BITS_MASK = (SET_BITS_BASE <<
+				(SET_BITS_SIZE - Nlz<SET_BITS_SIZE, 0>::VALUE)) - 1U;
+
+		static const BaseKey SET_KEY_MASK =
+				static_cast<BaseKey>(~SET_BITS_MASK);
+	};
+
+	Base base_;
+};
+
+template<typename Alloc>
+class SQLAlgorithmUtils::DenseBitSet<Alloc>::Iterator {
+public:
+	explicit Iterator(bool found = false);
+	bool operator!=(const Iterator &another) const;
+	bool operator==(const Iterator &another) const;
+
+private:
+	bool found_;
+};
+
+template<typename Alloc>
+class SQLAlgorithmUtils::DenseBitSet<Alloc>::InputCursor {
+public:
+	explicit InputCursor(DenseBitSet &bitSet);
+	bool next(CodedEntry &entry);
+
+private:
+	typedef typename Base::iterator BaseIterator;
+
+	DenseBitSet &bitSet_;
+	BaseIterator baseIt_;
+};
+
+template<typename Alloc>
+class SQLAlgorithmUtils::DenseBitSet<Alloc>::OutputCursor {
+public:
+	explicit OutputCursor(DenseBitSet &bitSet);
+	void next(const CodedEntry &entry);
+
+private:
+	DenseBitSet &bitSet_;
 };
 
 
@@ -1469,7 +1711,7 @@ bool SQLAlgorithmUtils::CombSorter<It>::runLimited(
 template<typename T, typename Pred, typename Alloc>
 SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::Sorter(
 		size_t capacity, const Pred &pred1, const Pred &pred2,
-		const Alloc &alloc) :
+		const std::pair<T*, T*> &buffer) :
 		base_(NULL, NULL),
 		predPair_(pred1, pred2),
 		begin_(NULL),
@@ -1477,11 +1719,11 @@ SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::Sorter(
 		end_(NULL),
 		secondaryBegin_(NULL),
 		tmp_(NULL) {
-	begin_ = reinterpret_cast<T*>(ALLOC_NEW(*alloc.base()) Elem[capacity]);
+	begin_ = buffer.first;
 	tail_ = begin_;
 	end_ = tail_ + capacity;
 	secondaryBegin_ = end_;
-	tmp_ = reinterpret_cast<T*>(ALLOC_NEW(*alloc.base()) Elem[capacity]);
+	tmp_ = buffer.second;
 }
 
 template<typename T, typename Pred, typename Alloc>
@@ -1556,6 +1798,12 @@ bool SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::isSorted() const {
 }
 
 template<typename T, typename Pred, typename Alloc>
+size_t SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::getRemaining() const {
+	assert(secondaryBegin_ >= tail_);
+	return (secondaryBegin_ - tail_);
+}
+
+template<typename T, typename Pred, typename Alloc>
 inline typename SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::Iterator
 SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::begin() const {
 	return beginAt(true);
@@ -1578,6 +1826,12 @@ inline typename SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::Iterator
 SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::endAt(bool primary) const {
 	return (primary ? tail_ : end_) - static_cast<ptrdiff_t>(
 			primary ? reducedSizes_.first : reducedSizes_.second);
+}
+
+template<typename T, typename Pred, typename Alloc>
+inline typename SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::Iterator
+SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::baseEndAt(bool primary) const {
+	return (primary ? tail_ : end_);
 }
 
 template<typename T, typename Pred, typename Alloc>
@@ -1944,8 +2198,9 @@ SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::newElement(const T &value) {
 
 template<typename T, typename Pred, typename Alloc>
 void SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::push(const Element &elem) {
-	elemList_.push_back(elem);
-	std::push_heap(elemList_.begin(), elemList_.end(), pred_);
+
+	Push op(*this, elem);
+	pred_.getBase().getTypeSwitcher().template get<const Push>()(op);
 }
 
 template<typename T, typename Pred, typename Alloc>
@@ -2025,6 +2280,7 @@ bool SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::mergeUncheckedUnique(A &actio
 			action(elem, util::FalseType());
 		}
 		else {
+			action(elem, util::FalseType());
 			action(elem, util::TrueType());
 		}
 
@@ -2042,7 +2298,7 @@ template<typename T, typename Pred, typename Alloc>
 template<typename U>
 void SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::pushAt(
 		const Element &elem) {
-	typedef typename Pred::template TypeAt<U> TypedPred;
+	typedef typename Pred::template TypeAt<U>::TypedOp TypedPred;
 	HeapPredicate<T, TypedPred> pred(TypedPred(pred_.getBase()));
 	elemList_.push_back(elem);
 	std::push_heap(elemList_.begin(), elemList_.end(), pred);
@@ -2052,7 +2308,7 @@ template<typename T, typename Pred, typename Alloc>
 template<typename U>
 typename SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::Element
 SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::popAt() {
-	typedef typename Pred::template TypeAt<U> TypedPred;
+	typedef typename Pred::template TypeAt<U>::TypedOp TypedPred;
 	HeapPredicate<T, TypedPred> pred(TypedPred(pred_.getBase()));
 	std::pop_heap(elemList_.begin(), elemList_.end(), pred);
 	const Element elem = elemList_.back();
@@ -2089,9 +2345,10 @@ bool SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::mergeAt(A &action) {
 	for (;;) {
 		std::pop_heap(elemList_.begin(), it, typedPred);
 
-		(TypedAction(action))(*(--it));
+		const bool continuable = (TypedAction(action))(*(--it));
 		const bool exists = it->next();
 
+		static_cast<void>(continuable);
 
 		if (!exists) {
 			if (it == elemList_.begin()) {
@@ -2188,27 +2445,107 @@ bool SQLAlgorithmUtils::HeapQueue<T, Pred, Alloc>::mergeLimitedAt(A &action) {
 }
 
 
-template<typename T, typename Alloc>
-SQLAlgorithmUtils::DigestHashSet<T, Alloc>::DigestHashSet(
-		size_t size, const Alloc &alloc) :
-		base_(size, false, alloc) {
+template<typename Alloc>
+SQLAlgorithmUtils::DenseBitSet<Alloc>::DenseBitSet(const allocator_type &alloc) :
+		base_(0, BaseHasher(), BasePred(), alloc) {
 }
 
-template<typename T, typename Alloc>
-inline void SQLAlgorithmUtils::DigestHashSet<T, Alloc>::add(const T &value) {
-	base_[toIndex(value)] = true;
+template<typename Alloc>
+inline std::pair<typename SQLAlgorithmUtils::DenseBitSet<Alloc>::Iterator, bool>
+SQLAlgorithmUtils::DenseBitSet<Alloc>::insert(const value_type &val) {
+	BitsType &bits = base_[val & Constants::SET_KEY_MASK];
+	const BitsType valueBit =
+			(Constants::SET_BITS_BASE << (val & Constants::SET_BITS_MASK));
+
+	if ((bits & valueBit) != 0) {
+		return std::pair<Iterator, bool>(Iterator(true), false);
+	}
+
+	bits |= valueBit;
+	return std::pair<Iterator, bool>(Iterator(true), true);
 }
 
-template<typename T, typename Alloc>
-inline bool SQLAlgorithmUtils::DigestHashSet<T, Alloc>::find(
-		const T &value) const {
-	return base_[toIndex(value)];
+template<typename Alloc>
+inline typename SQLAlgorithmUtils::DenseBitSet<Alloc>::Iterator
+SQLAlgorithmUtils::DenseBitSet<Alloc>::find(const key_type &k) {
+	typename Base::iterator it = base_.find(k & Constants::SET_KEY_MASK);
+
+	if (it == base_.end()) {
+		return Iterator(false);
+	}
+
+	const BitsType &bits = it->second;
+	const BitsType valueBit =
+			(Constants::SET_BITS_BASE << (k & Constants::SET_BITS_MASK));
+
+	return Iterator((bits & valueBit) != 0);
 }
 
-template<typename T, typename Alloc>
-inline size_t SQLAlgorithmUtils::DigestHashSet<T, Alloc>::toIndex(
-		const T &value) const {
-	return static_cast<size_t>(static_cast<T>(digester(value)) % size_);
+template<typename Alloc>
+inline typename SQLAlgorithmUtils::DenseBitSet<Alloc>::Iterator
+SQLAlgorithmUtils::DenseBitSet<Alloc>::end() {
+	return Iterator();
+}
+
+template<typename Alloc>
+size_t SQLAlgorithmUtils::DenseBitSet<Alloc>::capacity() const {
+	return base_.size();
+}
+
+
+template<typename Alloc>
+inline SQLAlgorithmUtils::DenseBitSet<Alloc>::Iterator::Iterator(bool found) :
+		found_(found) {
+}
+
+template<typename Alloc>
+inline bool SQLAlgorithmUtils::DenseBitSet<Alloc>::Iterator::operator!=(
+		const Iterator &another) const {
+	return (!found_ != !another.found_);
+}
+
+template<typename Alloc>
+inline bool SQLAlgorithmUtils::DenseBitSet<Alloc>::Iterator::operator==(
+		const Iterator &another) const {
+	return (!found_ == !another.found_);
+}
+
+
+template<typename Alloc>
+SQLAlgorithmUtils::DenseBitSet<Alloc>::InputCursor::InputCursor(
+		DenseBitSet &bitSet) :
+		bitSet_(bitSet),
+		baseIt_(bitSet_.base_.begin()) {
+}
+
+template<typename Alloc>
+inline bool SQLAlgorithmUtils::DenseBitSet<Alloc>::InputCursor::next(
+		CodedEntry &entry) {
+	if (baseIt_ == bitSet_.base_.end()) {
+		return false;
+	}
+
+	entry = CodedEntry(
+			static_cast<CodedEntry::first_type>(baseIt_->first),
+			static_cast<CodedEntry::second_type>(baseIt_->second));
+	++baseIt_;
+
+	return true;
+}
+
+
+template<typename Alloc>
+SQLAlgorithmUtils::DenseBitSet<Alloc>::OutputCursor::OutputCursor(
+		DenseBitSet &bitSet) :
+		bitSet_(bitSet) {
+}
+
+template<typename Alloc>
+inline void SQLAlgorithmUtils::DenseBitSet<Alloc>::OutputCursor::next(
+		const CodedEntry &entry) {
+	bitSet_.base_.insert(std::make_pair(
+			static_cast<BaseKey>(entry.first),
+			static_cast<BitsType>(entry.second)));
 }
 
 #endif

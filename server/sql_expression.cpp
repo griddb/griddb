@@ -161,14 +161,6 @@ void SQLExprs::Expression::initialize(
 	}
 }
 
-const SQLExprs::Expression* SQLExprs::Expression::findChild() const {
-	return child_;
-}
-
-const SQLExprs::Expression* SQLExprs::Expression::findNext() const {
-	return next_;
-}
-
 size_t SQLExprs::Expression::getChildCount() const {
 	return getChildCount(*this);
 }
@@ -385,7 +377,7 @@ void SQLExprs::Expression::exportToStream(
 			stream, util::ObjectCoder::Attribute());
 	S &subStream = objectScope.stream();
 
-	TupleValue::coder(util::ObjectCoder(), NULL).encode(subStream, code_);
+	TupleValue::coder(util::ObjectCoder(), NULL).encode(subStream, getCode());
 
 	const size_t count = getChildCount();
 	typename S::ListScope listScope(
@@ -606,7 +598,7 @@ SQLExprs::ExprContext::ExprContext(
 		const SQLValues::ValueContext::Source &source) :
 		valueCxt_(source),
 		funcCxt_(valueCxt_),
-		entryList_(valueCxt_.getAllocator()),
+		entryList_(valueCxt_.getVarAllocator()),
 		activeInput_(std::numeric_limits<uint32_t>::max()),
 		aggrTupleSet_(NULL),
 		aggrTuple_(NULL),
@@ -913,20 +905,12 @@ TupleColumnType SQLExprs::ExprFactoryContext::getUnifiedInputType(
 		uint32_t pos) {
 	TupleColumnType type = TupleTypes::TYPE_NULL;
 
+	bool first = true;
 	for (InputList::iterator it = inputList_.begin();
 			it != inputList_.end(); ++it) {
 		const TupleColumnType elemType = (*it)[pos];
-		if (it == inputList_.begin()) {
-			type = elemType;
-		}
-		else {
-			type = SQLValues::TypeUtils::findPromotionType(
-					type, elemType, true);
-		}
-
-		if (SQLValues::TypeUtils::isNull(type)) {
-			break;
-		}
+		type = unifyInputType(type, elemType, first);
+		first = false;
 	}
 
 	assert(!SQLValues::TypeUtils::isNull(type));
@@ -1197,13 +1181,15 @@ void SQLExprs::ExprFactoryContext::setAggregationTupleSet(
 }
 
 const SQLValues::CompColumnList*
-SQLExprs::ExprFactoryContext::getArrangedKeyList() {
+SQLExprs::ExprFactoryContext::getArrangedKeyList(bool &orderingRestricted) {
+	orderingRestricted = scopedEntry_->arrangedKeyOrderingRestricted_;
 	return scopedEntry_->arrangedKeyList_;
 }
 
 void SQLExprs::ExprFactoryContext::setArrangedKeyList(
-		const SQLValues::CompColumnList *keyList) {
+		const SQLValues::CompColumnList *keyList, bool orderingRestricted) {
 	scopedEntry_->arrangedKeyList_ = keyList;
+	scopedEntry_->arrangedKeyOrderingRestricted_ = orderingRestricted;
 }
 
 bool SQLExprs::ExprFactoryContext::isSummaryColumnsArranging() {
@@ -1222,6 +1208,30 @@ void SQLExprs::ExprFactoryContext::setBaseExpression(const Expression *expr) {
 	scopedEntry_->baseExpr_ = expr;
 }
 
+void SQLExprs::ExprFactoryContext::setProfile(ExprProfile *profile) {
+	scopedEntry_->profile_ = profile;
+}
+
+SQLExprs::ExprProfile* SQLExprs::ExprFactoryContext::getProfile() {
+	return scopedEntry_->profile_;
+}
+
+TupleColumnType SQLExprs::ExprFactoryContext::unifyInputType(
+		TupleColumnType lastUnified, TupleColumnType elemType, bool first) {
+	TupleColumnType unified;
+
+	if (first) {
+		unified = elemType;
+	}
+	else {
+		unified = SQLValues::TypeUtils::findPromotionType(
+				lastUnified, elemType, true);
+	}
+
+	assert(!SQLValues::TypeUtils::isNull(unified));
+	return unified;
+}
+
 SQLExprs::ExprFactoryContext::ScopedEntry::ScopedEntry() :
 		planning_(true),
 		summaryColumnsArranging_(true),
@@ -1231,7 +1241,9 @@ SQLExprs::ExprFactoryContext::ScopedEntry::ScopedEntry() :
 		aggrTupleRef_(NULL),
 		aggrTupleSet_(NULL),
 		arrangedKeyList_(NULL),
-		baseExpr_(NULL) {
+		arrangedKeyOrderingRestricted_(false),
+		baseExpr_(NULL),
+		profile_(NULL) {
 }
 
 SQLExprs::ExprFactoryContext::Scope::Scope(ExprFactoryContext &cxt) :
@@ -1243,4 +1255,13 @@ SQLExprs::ExprFactoryContext::Scope::Scope(ExprFactoryContext &cxt) :
 
 SQLExprs::ExprFactoryContext::Scope::~Scope() {
 	cxt_.scopedEntry_ = prevScopedEntry_;
+}
+
+
+SQLValues::ValueProfile* SQLExprs::ExprProfile::getValueProfile(
+		ExprProfile *profile) {
+	if (profile == NULL) {
+		return NULL;
+	}
+	return &profile->valueProfile_;
 }

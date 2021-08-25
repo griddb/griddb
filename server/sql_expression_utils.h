@@ -32,6 +32,7 @@ public:
 
 	void clearInputUsage();
 	void addInputUsage(uint32_t input);
+	void setInputUsage(uint32_t input, bool enabled);
 
 	void clearColumnUsage();
 	void addColumnUsage(const Expression *expr, bool withId);
@@ -40,6 +41,7 @@ public:
 	void addKeyColumnUsage(
 			uint32_t input, const SQLValues::CompColumnList &keyList, bool front);
 	void addInputColumnUsage(uint32_t input);
+	void setInputColumnUsage(uint32_t input, bool enabled);
 
 	void setIdOfInput(uint32_t input, bool enabled);
 	void setInputNull(uint32_t input, bool enabled);
@@ -61,7 +63,8 @@ public:
 			ExprFactoryContext &cxt, uint32_t input, bool unified) const;
 	util::Vector<SummaryColumn> createSummaryColumnList(
 			ExprFactoryContext &cxt, uint32_t input, bool unified, bool first,
-			const SQLValues::CompColumnList *compColumnList) const;
+			const SQLValues::CompColumnList *compColumnList,
+			bool orderingRestricted) const;
 
 	void setCodeSetUpAlways(bool enabled);
 
@@ -76,23 +79,28 @@ public:
 			ExprFactoryContext &cxt, const Expression *src) const;
 	SQLValues::CompColumnList& rewriteCompColumnList(
 			ExprFactoryContext &cxt, const SQLValues::CompColumnList &src,
-			bool unified, const uint32_t *inputRef = NULL) const;
+			bool unified, const uint32_t *inputRef = NULL,
+			bool orderingRestricted = false) const;
 
 	void popLastDistinctAggregationOutput(
 			ExprFactoryContext &cxt, Expression &destTop) const;
 
 	void remapColumn(ExprFactoryContext &cxt, Expression &expr) const;
 
+	static void normalizeCompColumnList(
+			SQLValues::CompColumnList &list, util::Set<uint32_t> &posSet);
 	SQLValues::CompColumnList& remapCompColumnList(
 			ExprFactoryContext &cxt, const SQLValues::CompColumnList &src,
-			uint32_t input, bool front) const;
+			uint32_t input, bool front, bool keyOnly,
+			const util::Set<uint32_t> *keyPosSet) const;
 
 	static void createIdenticalProjection(
 			ExprFactoryContext &cxt, bool inputUnified, uint32_t input,
 			Expression &dest);
 	static void createEmptyRefProjection(
 			ExprFactoryContext &cxt, bool inputUnified, uint32_t input,
-			uint32_t startColumn, Expression &dest);
+			uint32_t startColumn, const util::Set<uint32_t> *keySet,
+			Expression &dest);
 	void createProjectionByUsage(
 			ExprFactoryContext &cxt, bool inputUnified,
 			Expression &dest) const;
@@ -100,12 +108,18 @@ public:
 	static Expression& createConstExpr(
 			ExprFactoryContext &cxt, const TupleValue &value,
 			TupleColumnType type = TupleTypes::TYPE_NULL);
+	static Expression& createCastExpr(
+			ExprFactoryContext &cxt, Expression &baseExpr,
+			TupleColumnType type);
 	static Expression& createColumnExpr(
 			ExprFactoryContext &cxt, uint32_t input, uint32_t column);
 
 	static Expression& createTypedColumnExpr(
 			ExprFactoryContext &cxt, bool inputUnified, uint32_t input,
 			uint32_t column);
+	static Expression& createTypedColumnExprBy(
+			ExprFactoryContext &cxt, uint32_t input, uint32_t column,
+			TupleColumnType type);
 	static Expression& createTypedIdExpr(
 			ExprFactoryContext &cxt, uint32_t input);
 
@@ -131,6 +145,18 @@ public:
 			ExprFactoryContext &cxt,
 			const SQLValues::CompColumnList &src);
 
+	Expression* compColumnListToKeyFilterPredicate(
+			ExprFactoryContext &cxt, const SQLValues::CompColumnList &src,
+			bool first, const Expression *otherPred);
+	static Expression* compColumnListToKeyFilterPredicate(
+			ExprFactoryContext &cxt, const SQLValues::CompColumnList &src,
+			bool first);
+
+	static Expression& retainSingleInputPredicate(
+			ExprFactoryContext &cxt, Expression &expr, uint32_t input,
+			bool negative);
+	static bool checkSingleInput(const Expression &expr, uint32_t input);
+
 	static Expression* createExprTree(
 			ExprFactoryContext &cxt, ExprType type,
 			util::Vector<Expression*> &list);
@@ -152,6 +178,9 @@ public:
 	static bool checkArgCount(
 			const ExprFactory &factory, ExprType exprType, size_t argCount,
 			AggregationPhase phase, bool throwOnError);
+	static bool checkArgCount(
+			const ExprSpec &spec, ExprType exprType, size_t argCount,
+			AggregationPhase phase, bool throwOnError);
 
 	static uint32_t getResultCount(
 			const ExprFactory &factory, ExprType exprType,
@@ -168,6 +197,7 @@ public:
 	static bool isDistinctAggregation(
 			const ExprSpec &spec, const ExprType type);
 	static bool isWindowExpr(const ExprSpec &spec, bool withSpecialArgs);
+	static bool findWindowPosArgIndex(const ExprSpec &spec, uint32_t *index);
 
 	static void getDistinctExprList(
 			const ExprFactory &factory, const Expression &expr,
@@ -181,8 +211,17 @@ public:
 			Expression::ModIterator &destIt);
 	static void replaceDistinctExprsToRef(
 			ExprFactoryContext &cxt, Expression &expr, bool forAdvance,
-			int32_t emptySide, uint32_t *restDistinctCount,
-			uint32_t *refCoulmnPos);
+			int32_t emptySide, const util::Set<uint32_t> *keySet,
+			uint32_t *restDistinctCount, uint32_t *refCoulmnPos);
+
+	static bool findVarGenerativeExpr(const Expression &expr);
+
+	static SQLValues::CompColumnList& reduceDuplicateCompColumns(
+			util::StackAllocator &alloc,
+			const SQLValues::CompColumnList &srcList);
+	static util::Set<uint32_t>& compColumnListToSet(
+			util::StackAllocator &alloc,
+			const SQLValues::CompColumnList &srcList);
 
 	static bool predicateToExtContainerName(
 			SQLValues::ValueContext &cxt, const ExprFactory &factory,
@@ -291,6 +330,19 @@ private:
 	static TypeResolverResult resolveNonDistinctExprColumnTypes(
 			const ExprFactory &factory, const Expression &src,
 			ExprType *destExprType);
+
+	static void optimizeExpr(ExprFactoryContext &cxt, Expression &expr);
+	static void optimizeCompExpr(ExprFactoryContext &cxt, Expression &expr);
+	static void optimizeOrExpr(ExprFactoryContext &cxt, Expression &expr);
+
+	static void swapExprArgs(Expression &expr);
+	static bool isSameExpr(
+			const ExprFactory &factory, const Expression &expr1,
+			const Expression &expr2, bool excludesDymanic);
+	static bool isSameExprCode(
+			const ExprCode &code1, const ExprCode &code2);
+	template<typename T> static bool checkNumericBounds(
+			const TupleValue &value);
 
 	bool isAggregationSetUpRequired(
 			ExprFactoryContext &cxt, const Expression &src,
@@ -574,18 +626,13 @@ private:
 	struct IndexFlagsEntry;
 	struct IndexMatch;
 
-	typedef util::Vector<
-			IndexSpec, util::StdAllocator<IndexSpec, void> > SpecList;
+	typedef util::AllocVector<IndexSpec> SpecList;
 
 	typedef std::pair<uint32_t, IndexSpecId> ColumnSpecId;
-	typedef util::Vector<
-			ColumnSpecId,
-			util::StdAllocator<ColumnSpecId, void> > ColumnSpecIdList;
+	typedef util::AllocVector<ColumnSpecId> ColumnSpecIdList;
 
 	typedef util::Vector<IndexMatch> IndexMatchList;
 	typedef util::Vector<uint64_t> ConditionOrdinalList;
-
-	typedef util::Vector<TupleColumnType> TupleInfo;
 
 	template<typename T>
 	struct PairFirst { typedef typename T::first_type Type; };
@@ -609,6 +656,9 @@ private:
 			return *it;
 		}
 	};
+
+	IndexSelector(const IndexSelector&);
+	IndexSelector& operator=(const IndexSelector&);
 
 	void selectSub(const Expression &expr, bool negative, bool inAndCond);
 	void selectSubAnd(
@@ -704,7 +754,7 @@ private:
 	ExprType columnExprType_;
 	util::Vector<IndexFlagsEntry> indexList_;
 	util::AllocVector<util::AllocVector<uint32_t>*> allColumnsList_;
-	TupleInfo tupleInfo_;
+	SQLValues::ColumnTypeList tupleInfo_;
 	ConditionList condList_;
 
 	IndexMatchList indexMatchList_;
@@ -769,6 +819,8 @@ struct SQLExprs::ExprTypeUtils {
 	static SQLValues::CompColumn toCompColumn(
 			ExprType type, uint32_t pos1, uint32_t pos2, bool last);
 	static ExprType getCompColumnOp(const SQLValues::CompColumn &column);
+
+	static bool isVarNonGenerative(ExprType type, bool forLob);
 };
 
 struct SQLExprs::PlanPartitioningInfo {

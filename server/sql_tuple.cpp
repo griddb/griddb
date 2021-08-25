@@ -19,6 +19,7 @@
 #include "util/container.h" 
 #include <iostream>
 
+
 UTIL_TRACER_DECLARE(TUPLE_LIST);
 const LocalTempStore::BlockId TupleList::UNDEF_BLOCKID = LocalTempStore::UNDEF_BLOCKID;
 const LocalTempStore::BlockId TupleList::Reader::UNDEF_BLOCKID = LocalTempStore::UNDEF_BLOCKID;
@@ -2287,7 +2288,6 @@ uint64_t TupleList::Writer::appendPartDataArea(
 
 	assert(!block_.isSwapped());
 	if (!splittable && (requestSize > maxAvailableSize_)) { 
-		abort();
 		GS_THROW_USER_ERROR(GS_ERROR_LTS_NOT_IMPLEMENTED,
 				"The size of data is too large. blockSize=" << blockSize_ <<
 				", requestSize=" << requestSize);
@@ -3020,7 +3020,7 @@ uint32_t TupleValue::SingleVarBuilder::append(uint32_t maxSize) {
 
 
 TupleValue TupleValue::SingleVarBuilder::build() {
-	return TupleValue(lastData_, TupleList::TYPE_STRING);
+	return TupleValue(TupleString(lastData_));
 }
 
 
@@ -3061,7 +3061,7 @@ uint32_t TupleValue::StackAllocSingleVarBuilder::append(uint32_t maxSize) {
 
 
 TupleValue TupleValue::StackAllocSingleVarBuilder::build() {
-	return TupleValue(lastData_, TupleList::TYPE_STRING);
+	return TupleValue(TupleString(lastData_));
 }
 
 
@@ -3672,9 +3672,6 @@ uint64_t TupleValueTempStoreVarUtils::TempStoreLobReader::getPartCount() {
 	}
 }
 
-TupleString::operator TupleValue() const {
-	return TupleValue(data_, TupleList::TYPE_STRING);
-}
 
 
 
@@ -4013,7 +4010,7 @@ void TupleList::Body::AccessorManager::setReaderTopNth(size_t id, uint64_t block
 		}
 		if (accessTopMin_ < min) {
 			tupleListBody_->setActiveTopBlockNth(min);
-			tupleListBody_->invalidateBlockId(accessTopMin_, min - 1);
+			tupleListBody_->invalidateBlockId(accessTopMin_, min);
 			accessTopMin_ = min;
 		}
 	}
