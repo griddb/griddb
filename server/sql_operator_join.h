@@ -50,10 +50,14 @@ struct SQLJoinOps {
 	class JoinCompMerge;
 	class JoinOuterNested;
 	class JoinOuterCompMerge;
+
 	class JoinHash;
+	class JoinInnerHash;
+	class JoinOuterHash;
 
 	struct JoinOuterContext;
-	struct JoinHashContext;
+	struct JoinMergeContext;
+	template<bool Matching> struct JoinHashContext;
 
 	struct JoinInputOrdinals;
 };
@@ -71,11 +75,25 @@ public:
 	virtual void compile(OpContext &cxt) const;
 
 	static bool isOnlyEqKeyFound(const SQLValues::CompColumnList *keyList);
+
 	static int32_t detectDrivingInput(
 			OpContext &cxt, const OpCode &code, bool *small, bool *empty);
+	static int32_t detectDrivingInputDetail(
+			OpContext &cxt, const OpCode &code, bool *small, bool *empty,
+			bool exact);
+
+	static uint64_t estimateHashMapSize(
+			OpContext &cxt, const SQLValues::CompColumnList *keyList,
+			uint32_t input);
 
 	static JoinInputOrdinals getOrdinals(const OpCode &code);
 	static bool checkJoinReady(OpContext &cxt, const JoinInputOrdinals &ordinals);
+
+	static const SQLOps::Projection* expandProjection(
+			const SQLOps::Projection *&proj, bool outer);
+
+	static bool matchCondition(
+			OpContext &cxt, const SQLExprs::Expression *condExpr);
 
 	static SQLValues::CompColumnList resolveKeyList(
 			util::StackAllocator &alloc, const OpCode &code);
@@ -86,9 +104,6 @@ public:
 	static SQLValues::CompColumnList toSingleSideKeyList(
 			util::StackAllocator &alloc, const SQLValues::CompColumnList &src,
 			bool first);
-
-	static void exrtactJoinKeyColumns(
-			const SQLExprs::Expression *expr, SQLValues::CompColumnList &dest);
 };
 
 class SQLJoinOps::JoinOuter : public SQLOps::Operator {
@@ -166,19 +181,16 @@ private:
 
 class SQLJoinOps::JoinHash : public SQLOps::Operator {
 public:
-	struct TupleChain {
-		TupleChain(const SummaryTuple &tuple, TupleChain *next);
-
-		SummaryTuple tuple_;
-		TupleChain *next_;
-	};
+	struct TupleChainMatch;
+	struct TupleChainEmptyMatch;
+	template<bool Matching> struct TupleChain;
 
 	typedef SQLValues::TupleListReaderSource ReaderSourceType;
 
 	typedef SQLValues::TupleNullChecker::WithAccessor<
 			SQLValues::ValueAccessor::ByReader> NullChecker;
 	typedef SQLValues::TupleDigester::WithAccessor<
-			SQLValues::ValueAccessor::ByReader> TupleDigester;
+			SQLValues::ValueAccessor::ByReader, 1, false> TupleDigester;
 
 	typedef SQLValues::TupleComparator::WithAccessor<
 			std::equal_to<SQLValues::ValueComparator::PredArgType>,
@@ -193,51 +205,118 @@ public:
 
 	typedef SQLValues::DigestHasher MapHasher;
 	typedef std::equal_to<int64_t> MapPred;
-	typedef SQLAlgorithmUtils::HashMultiMap<
-			int64_t, JoinHash::TupleChain, MapHasher, MapPred> Map;
+	template<bool Matching> struct MapOf {
+		typedef SQLAlgorithmUtils::HashMultiMap<
+				int64_t, JoinHash::TupleChain<Matching>,
+				MapHasher, MapPred> Type;
+	};
 
 	virtual void compile(OpContext &cxt) const;
-	virtual void execute(OpContext &cxt) const;
+	virtual void execute(OpContext &cxt) const = 0;
+
+	template<bool Outer, bool InnerMatching>
+	void executeAt(OpContext &cxt) const;
 
 	static TupleDigester createDigester(
-			util::StackAllocator &alloc,
+			util::StackAllocator &alloc, SQLValues::VarContext &varCxt,
 			const SQLValues::CompColumnList *bothKeyList,
-			const SQLValues::CompColumnList *sideKeyList);
+			const SQLValues::CompColumnList *sideKeyList,
+			bool nullIgnorable, SQLValues::ValueProfile *valueProfile);
+
+	static bool isOrderingAvailable(
+			const SQLValues::CompColumnList &bothKeyList);
 
 private:
-	static JoinHashContext& prepareHashContext(
+	template<bool Matching>
+	static JoinHashContext<Matching>& prepareHashContext(
 			OpContext &cxt, const SQLValues::CompColumnList &keyList,
 			const SQLOps::CompColumnListPair &sideKeyList,
 			TupleListReader &reader,
 			const util::Vector<TupleColumn> &innerColumnList);
 
-	static TupleChain* find(
-			JoinHashContext &hashCxt, TupleListReader &reader);
+	template<bool Matching>
+	static TupleChain<Matching>* find(
+			JoinHashContext<Matching> &hashCxt, TupleListReader &reader);
+};
+
+struct SQLJoinOps::JoinHash::TupleChainMatch {
+public:
+	TupleChainMatch() : value_(false) {}
+
+	bool get() const { return value_; }
+	void set() { value_ = true; }
+
+private:
+	bool value_;
+};
+
+struct SQLJoinOps::JoinHash::TupleChainEmptyMatch {
+	bool get() const { return false; }
+	void set() {}
+};
+
+template<bool Matching>
+struct SQLJoinOps::JoinHash::TupleChain {
+	typedef typename util::Conditional<
+			Matching, TupleChainMatch, TupleChainEmptyMatch>::Type MatchType;
+
+	TupleChain(const SummaryTuple &tuple, TupleChain *next);
+
+	bool isMatched() const;
+	void setMatched();
+
+	SummaryTuple tuple_;
+	TupleChain *next_;
+	MatchType match_;
+};
+
+class SQLJoinOps::JoinInnerHash : public SQLJoinOps::JoinHash {
+public:
+	virtual void execute(OpContext &cxt) const;
+};
+
+class SQLJoinOps::JoinOuterHash : public SQLJoinOps::JoinHash {
+public:
+	virtual void execute(OpContext &cxt) const;
 };
 
 struct SQLJoinOps::JoinOuterContext {
-	JoinOuterContext() : matched_(false) {}
+	JoinOuterContext();
+
 	bool matched_;
 };
 
+struct SQLJoinOps::JoinMergeContext {
+	JoinMergeContext();
+
+	bool matched_;
+	bool lowerReached_;
+};
+
+template<bool Matching>
 struct SQLJoinOps::JoinHashContext {
 	JoinHashContext(
-			util::StackAllocator &alloc,
+			util::StackAllocator &alloc, SQLValues::VarContext &varCxt,
 			const SQLValues::CompColumnList &bothKeyList,
 			const SQLValues::CompColumnList &drivingKeyList,
-			util::AllocUniquePtr<SummaryTupleSet> &tupleSet);
+			util::AllocUniquePtr<SummaryTupleSet> &tupleSet,
+			util::AllocUniquePtr<SummaryTupleSet> &nullTupleSet,
+			SQLValues::ValueProfile *valueProfile);
 
 	SQLValues::CompColumnList bothKeyList_;
 	SQLValues::CompColumnList drivingKeyList_;
 
-	JoinHash::Map map_;
-	JoinHash::TupleChain *nextChain_;
+	typename JoinHash::MapOf<Matching>::Type map_;
+	JoinHash::TupleChain<Matching> *nextChain_;
+	JoinHash::TupleChain<Matching> *nullChain_;
 
 	JoinHash::NullChecker nullChecker_;
 	JoinHash::TupleDigester digester_;
 	JoinHash::PromoTupleEq tupleEq_;
 
 	util::AllocUniquePtr<SummaryTupleSet> tupleSet_;
+	util::AllocUniquePtr<SummaryTupleSet> nullTupleSet_;
+	bool matched_;
 };
 
 struct SQLJoinOps::JoinInputOrdinals {

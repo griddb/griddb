@@ -32,6 +32,7 @@ struct SQLGroupOps {
 	typedef SQLOps::WritableTuple WritableTuple;
 	typedef SQLOps::TupleColumn TupleColumn;
 
+	typedef SQLOps::ColumnTypeList ColumnTypeList;
 	typedef SQLOps::TupleColumnList TupleColumnList;
 
 	typedef SQLOps::DigestTupleListReader DigestTupleListReader;
@@ -52,9 +53,9 @@ struct SQLGroupOps {
 	typedef SQLOpUtils::ProjectionPair ProjectionPair;
 
 	typedef SQLValues::TupleDigester::WithAccessor<
-			SQLValues::ValueAccessor::ByReader> TupleDigester;
+			SQLValues::ValueAccessor::ByReader, 1, true> UniqTupleDigester;
 	typedef SQLValues::ReadableTupleRef::WithDigester<
-			TupleDigester> ReadableTupleRef;
+			UniqTupleDigester> ReadableTupleRef;
 	typedef SQLValues::TupleComparator::WithAccessor<
 			std::less<SQLValues::ValueComparator::PredArgType>,
 			true, false, false, false,
@@ -78,6 +79,12 @@ struct SQLGroupOps {
 	class UnionIntersect;
 	class UnionExcept;
 	class UnionCompensate;
+
+	class UnionHashContext;
+	template<typename Op> class UnionHashBase;
+	class UnionDistinctHash;
+	class UnionIntersectHash;
+	class UnionExceptHash;
 };
 
 class SQLGroupOps::Registrar : public SQLOps::OpProjectionRegistrar {
@@ -97,6 +104,11 @@ private:
 	static void setUpGroupKeys(
 			OpCodeBuilder &builder, OpCode &code,
 			const SQLValues::CompColumnList &keyList, bool distinct);
+
+	static SQLValues::CompColumnList* createDistinctGroupKeys(
+			OpContext &cxt, bool distinct, SQLType::AggregationPhase aggrPhase,
+			const Projection *srcProj,
+			const SQLValues::CompColumnList &srcList);
 
 	static void setUpGroupProjections(
 			OpCodeBuilder &builder, OpCode &code, const Projection &src,
@@ -139,18 +151,23 @@ public:
 
 private:
 	typedef SQLValues::TupleDigester::WithAccessor<
-			SQLValues::ValueAccessor::ByReader> TupleDigester;
+			SQLValues::ValueAccessor::ByReader, 1, false> BucketTupleDigester;
 
 	typedef util::Vector<SQLOpUtils::ExpressionListWriter*> WriterList;
 
 	struct BucketContext {
 		BucketContext(
-				util::StackAllocator &alloc, const SQLValues::CompColumnList &keyList);
+				util::StackAllocator &alloc, SQLValues::VarContext &varCxt,
+				const SQLValues::CompColumnList &keyList);
 
 		SQLOpUtils::ExpressionListWriter::ByGeneral getOutput(uint64_t index);
 
+		static SQLValues::TupleDigester createBaseDigester(
+				SQLValues::VarContext &varCxt,
+				const SQLValues::CompColumnList &keyList);
+
 		WriterList writerList_;
-		TupleDigester digester_;
+		BucketTupleDigester digester_;
 	};
 
 	BucketContext& prepareContext(OpContext &cxt) const;
@@ -161,13 +178,56 @@ public:
 	virtual void compile(OpContext &cxt) const;
 
 private:
+	bool tryCompileHashPlan(OpContext &cxt) const;
+	bool tryCompileEmptyPlan(OpContext &cxt) const;
+
+	static bool checkHashPlanAcceptable(
+			OpContext &cxt, OpCodeBuilder &builder, const OpCode &code,
+			SQLOpTypes::Type *hashOpType,
+			const SQLValues::CompColumnList **keyList);
+
 	static SQLOpTypes::Type toOperatorType(SQLType::UnionType unionType);
+	static SQLOpTypes::Type findHashOperatorType(
+			SQLType::UnionType unionType, uint32_t inCount);
+
+	static const SQLValues::CompColumnList& resolveKeyColumnList(
+			OpContext &cxt, OpCodeBuilder &builder,
+			const SQLValues::CompColumnList *src, bool withAttributes);
+
+	static bool checkKeySimple(const SQLValues::CompColumnList &keyList);
+	static bool checkInputSimple(
+			const TupleColumnList &columnList,
+			const SQLValues::CompColumnList &keyList);
+	static bool checkOutputSimple(
+		const Projection *pipeProj, const Projection *finishProj);
+
+	static uint64_t estimateHashMapSize(
+			OpContext &cxt, const SQLValues::CompColumnList &keyList,
+			int64_t tupleCount);
 };
 
 class SQLGroupOps::UnionAll : public SQLOps::Operator {
 public:
 	virtual void compile(OpContext &cxt) const;
 	virtual void execute(OpContext &cxt) const;
+
+private:
+	typedef std::pair<
+			SQLOpUtils::ExpressionListWriter*, const Projection*> WriterEntry;
+
+	typedef util::Vector<WriterEntry*> WriterList;
+	typedef util::Map<ColumnTypeList, WriterEntry*> WriterMap;
+
+	struct UnionAllContext {
+		UnionAllContext(util::StackAllocator &alloc, uint32_t inCount);
+		WriterList writerList_;
+		WriterMap writerMap_;
+	};
+
+	WriterEntry& prepareWriter(OpContext &cxt, uint32_t index) const;
+
+	static void getInputColumnTypeList(
+			OpContext &cxt, uint32_t index, ColumnTypeList &typeList);
 };
 
 struct SQLGroupOps::UnionMergeContext {
@@ -266,6 +326,125 @@ public:
 	typedef util::FalseType InputUnique;
 	static bool onTuple(int64_t &state, size_t ordinal);
 	static bool onFinish(int64_t &state, int64_t initialState);
+};
+
+class SQLGroupOps::UnionHashContext {
+public:
+	struct InputEntry;
+
+	static UnionHashContext& resolve(
+			OpContext &cxt, const SQLValues::CompColumnList &keyList,
+			const Projection &baseProj, const SQLOps::OpConfig *config);
+
+	UnionHashContext(
+			OpContext &cxt, const SQLValues::CompColumnList &keyList,
+			const Projection &baseProj, const SQLOps::OpConfig *config);
+
+	template<typename Op>
+	const Projection* accept(
+			TupleListReader &reader, const uint32_t index, InputEntry &entry);
+
+	void checkMemoryLimit();
+	InputEntry& prepareInput(OpContext &cxt, const uint32_t index);
+
+	bool isTopInputPending();
+	void setTopInputPending(bool pending);
+
+	bool isFollowingInputCompleted(OpContext &cxt);
+
+private:
+	typedef SQLValues::TupleListReaderSource ReaderSourceType;
+	typedef SQLValues::SummaryTupleSet SummaryTupleSet;
+
+	typedef SQLValues::TupleDigester::WithAccessor<
+			SQLValues::ValueAccessor::ByReader, 1, false> TupleDigester;
+	typedef SQLValues::TupleComparator::WithAccessor<
+			std::equal_to<SQLValues::ValueComparator::PredArgType>,
+			false, true, false, false,
+			SQLValues::ValueAccessor::ByReader,
+			SQLValues::ValueAccessor::BySummaryTuple> TupleEq;
+
+	typedef SQLValues::DigestHasher MapHasher;
+	typedef std::equal_to<int64_t> MapPred;
+	typedef std::pair<SummaryTuple, int64_t> MapEntry;
+	typedef SQLAlgorithmUtils::HashMultiMap<
+			int64_t, MapEntry, MapHasher, MapPred> Map;
+
+	typedef util::Vector<InputEntry*> InputEntryList;
+
+	static uint64_t resolveMemoryLimit(const SQLOps::OpConfig *config);
+	static const Projection& createProjection(
+			OpContext &cxt, const Projection &baseProj,
+			const SQLValues::CompColumnList &keyList, bool digestOrdering);
+	static void initializeTupleSet(
+			OpContext &cxt, const SQLValues::CompColumnList &keyList,
+			util::LocalUniquePtr<SummaryTupleSet> &tupleSet,
+			bool digestOrdering);
+
+	static void setUpInputEntryList(
+			OpContext &cxt, const SQLValues::CompColumnList &keyList,
+			const Projection &baseProj, InputEntryList &entryList,
+			bool digestOrdering);
+	static bool checkDigestOrdering(
+			OpContext &cxt, const SQLValues::CompColumnList &keyList);
+
+	util::StackAllocator &alloc_;
+
+	uint64_t memoryLimit_;
+	bool memoryLimitReached_;
+
+	bool topInputPending_;
+	bool followingInputCompleted_;
+
+	util::LocalUniquePtr<SummaryTupleSet> tupleSet_;
+
+	Map map_;
+	InputEntryList inputEntryList_;
+
+	const Projection *proj_;
+	SummaryTuple *projTupleRef_;
+};
+
+struct SQLGroupOps::UnionHashContext::InputEntry {
+public:
+	InputEntry(
+			OpContext &cxt, const SQLValues::CompColumnList &digesterKeyList,
+			bool digestOrdering, const SQLValues::CompColumnList &eqKeyList,
+			const Projection &subProj);
+
+	TupleDigester digester_;
+	TupleEq tupleEq_;
+	const Projection &subProj_;
+};
+
+template<typename Op>
+class SQLGroupOps::UnionHashBase : public SQLOps::Operator {
+public:
+	virtual void compile(OpContext &cxt) const;
+	virtual void execute(OpContext &cxt) const;
+
+protected:
+	typedef util::FalseType TopInputCascading;
+	static bool onTuple(int64_t &state, size_t ordinal);
+};
+
+class SQLGroupOps::UnionDistinctHash :
+		public SQLGroupOps::UnionHashBase<UnionDistinctHash> {
+public:
+	static bool onTuple(int64_t &state, size_t ordinal);
+};
+
+class SQLGroupOps::UnionIntersectHash :
+		public SQLGroupOps::UnionHashBase<UnionIntersectHash> {
+public:
+	static bool onTuple(int64_t &state, size_t ordinal);
+};
+
+class SQLGroupOps::UnionExceptHash :
+		public SQLGroupOps::UnionHashBase<UnionExceptHash> {
+public:
+	typedef util::TrueType TopInputCascading;
+	static bool onTuple(int64_t &state, size_t ordinal);
 };
 
 #endif

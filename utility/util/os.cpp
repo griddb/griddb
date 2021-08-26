@@ -131,15 +131,13 @@ int64_t FileLib::getUnixTime(const FILETIME &fileTime) {
 			UNIXTIME_FILETIME_EPOC_DIFF) / 10000;
 }
 
-FILETIME FileLib::getFileTime(SYSTEMTIME &systemTime, bool asLocalTimeZone) {
+FILETIME FileLib::getFileTime(
+		SYSTEMTIME &systemTime, bool asLocalTimeZone, bool dstIgnored) {
 	FILETIME fileTime;
 
 	if (asLocalTimeZone) {
-		TIME_ZONE_INFORMATION tzInfo;
-		const DWORD tzType = GetTimeZoneInformation(&tzInfo);
-		if (tzType == TIME_ZONE_ID_INVALID) {
-			UTIL_THROW_PLATFORM_ERROR(NULL);
-		}
+		TIME_ZONE_INFORMATION tzInfo = getTimeZoneInformation(dstIgnored);
+
 		SYSTEMTIME utcSystemTime;
 		if (!TzSpecificLocalTimeToSystemTime(
 				&tzInfo, &systemTime, &utcSystemTime)) {
@@ -148,7 +146,8 @@ FILETIME FileLib::getFileTime(SYSTEMTIME &systemTime, bool asLocalTimeZone) {
 		if (!SystemTimeToFileTime(&utcSystemTime, &fileTime)) {
 			UTIL_THROW_PLATFORM_ERROR(NULL);
 		}
-	} else {
+	}
+	else {
 		if (!SystemTimeToFileTime(&systemTime, &fileTime)) {
 			UTIL_THROW_PLATFORM_ERROR(NULL);
 		}
@@ -170,18 +169,15 @@ FILETIME FileLib::getFileTime(int64_t unixTime) {
 }
 
 SYSTEMTIME FileLib::getSystemTime(
-		const FILETIME &fileTime, bool asLocalTimeZone) {
+		const FILETIME &fileTime, bool asLocalTimeZone, bool dstIgnored) {
 	SYSTEMTIME utcSystemTime;
 	if (!FileTimeToSystemTime(&fileTime, &utcSystemTime)) {
 		UTIL_THROW_PLATFORM_ERROR(NULL);
 	}
 
 	if (asLocalTimeZone) {
-		TIME_ZONE_INFORMATION tzInfo;
-		const DWORD tzType = GetTimeZoneInformation(&tzInfo);
-		if (tzType == TIME_ZONE_ID_INVALID) {
-			UTIL_THROW_PLATFORM_ERROR(NULL);
-		}
+		TIME_ZONE_INFORMATION tzInfo = getTimeZoneInformation(dstIgnored);
+
 		SYSTEMTIME localSystemTime;
 		if (!SystemTimeToTzSpecificLocalTime(
 				&tzInfo, &utcSystemTime, &localSystemTime)) {
@@ -191,6 +187,26 @@ SYSTEMTIME FileLib::getSystemTime(
 	}
 	else {
 		return utcSystemTime;
+	}
+}
+
+TIME_ZONE_INFORMATION FileLib::getTimeZoneInformation(bool dstIgnored) {
+	TIME_ZONE_INFORMATION rawTzInfo;
+	const DWORD tzType = GetTimeZoneInformation(&rawTzInfo);
+	if (tzType == TIME_ZONE_ID_INVALID) {
+		UTIL_THROW_PLATFORM_ERROR(NULL);
+	}
+
+	if (dstIgnored) {
+		TIME_ZONE_INFORMATION tzInfo;
+		ZeroMemory(&tzInfo, sizeof(tzInfo));
+		tzInfo.Bias = rawTzInfo.Bias;
+		tzInfo.StandardBias = rawTzInfo.StandardBias;
+		tzInfo.DaylightBias = rawTzInfo.DaylightBias;
+		return tzInfo;
+	}
+	else {
+		return rawTzInfo;
 	}
 }
 #else

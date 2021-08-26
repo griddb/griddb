@@ -32,8 +32,8 @@ struct SQLOps {
 	typedef TupleList::WritableTuple WritableTuple;
 	typedef TupleList::Column TupleColumn;
 
-	typedef util::Vector<TupleColumnType> ColumnTypeList;
-	typedef util::Vector<TupleColumn> TupleColumnList;
+	typedef SQLValues::ColumnTypeList ColumnTypeList;
+	typedef SQLValues::TupleColumnList TupleColumnList;
 
 	typedef SQLValues::SummaryColumn SummaryColumn;
 	typedef SQLValues::SummaryTuple SummaryTuple;
@@ -80,12 +80,14 @@ struct SQLOps {
 	class ExtOpContext;
 	class OpCodeBuilder;
 
+	class OpAllocatorManager;
 	class OpLatchKeeperManager;
 	class OpLatchKeeper;
 
 	class OpProfilerId;
 	class OpProfiler;
 	class OpProfilerEntry;
+	class OpProfilerOptimizationEntry;
 	class OpProfilerIndexEntry;
 };
 
@@ -99,12 +101,19 @@ public:
 	Value get(Type type) const;
 	void set(Type type, Value value);
 
+	bool isSame(const OpConfig &another) const;
+
+	OpConfig resolveAll(const OpConfig *base) const;
 	static Value resolve(Type type, const OpConfig *base);
 
 private:
+	enum {
+		VALUE_COUNT = SQLOpTypes::END_CONF
+	};
+
 	size_t getIndex(Type type) const;
 
-	Value valueList_[SQLOpTypes::END_CONF];
+	Value valueList_[VALUE_COUNT];
 };
 
 struct SQLOps::ContainerLocation {
@@ -443,6 +452,7 @@ private:
 	OpPlan& operator=(const OpPlan&);
 
 	OpNode* newNode(SQLOpTypes::Type opType, uint32_t parentIndex);
+	const RefCountEntry& getAllNodeOutputCounts();
 	const RefCountList& resolveReferenceCounts() const;
 
 	util::StackAllocator &alloc_;
@@ -455,6 +465,7 @@ private:
 
 	RefCountList refCountListBase_;
 	RefCountList *refCountList_;
+	RefCountEntry outCountsCache_;
 
 	SQLValues::SharedIdManager idManager_;
 
@@ -510,8 +521,10 @@ private:
 	OpStoreId prepareSubStore(const OpNode &node);
 	bool checkSubStoreReady(const OpNodeId &nodeId);
 	void setUpSubStore(const OpNode &node, const OpStoreId &subStoreId);
+	void cleanUpSubStore();
 
 	bool checkSubPlanReady(const OpStoreId &subStoreId);
+	static bool trySetUpDefaultSubPlan(OpContext &cxt, const OpCode &code);
 	bool finishSubPlan(
 			const OpNode &node, OpContext &cxt, const OpCode *&code);
 
@@ -528,7 +541,7 @@ private:
 	OpContext *parentCxt_;
 	ExtOpContext *extCxt_;
 
-	util::StackAllocator &alloc_;
+	util::StdAllocator<void, void> alloc_;
 
 	State &state_;
 	const OpPlan &plan_;
@@ -564,13 +577,13 @@ private:
 
 struct SQLOps::OpCursor::State {
 public:
-	explicit State(util::StackAllocator &alloc);
+	explicit State(const util::StdAllocator<void, void> &alloc);
 
 private:
 	friend class OpCursor;
 
-	typedef util::Map<OpNodeId, OpStoreId> EntryMap;
-	typedef util::Set<OpNodeId> NodeIdSet;
+	typedef util::AllocMap<OpNodeId, OpStoreId> EntryMap;
+	typedef util::AllocSet<OpNodeId> NodeIdSet;
 
 	EntryMap entryMap_;
 	NodeIdSet workingNodeSet_;
@@ -586,31 +599,52 @@ private:
 
 class SQLOps::OpStore {
 public:
+	class AllocatorRef;
+	class TotalStats;
 	class Entry;
+	typedef std::pair<uint64_t, SQLOpTypes::Type> TotalStatsElement;
 
-	explicit OpStore(const util::StdAllocator<void, void> &alloc);
+	explicit OpStore(OpAllocatorManager &allocManager);
 	~OpStore();
+
+	void close();
 
 	OpStoreId allocateEntry();
 	void releaseEntry(const OpStoreId &id);
 
 	Entry& getEntry(const OpStoreId &id);
+	Entry* findEntry(const OpStoreId &id);
 
 	void detach();
+	void closeAllLatchHolders() throw();
+	void closeAllLatchResources() throw();
 
 	TupleList::Group& getTempStoreGroup();
 	void setTempStoreGroup(TupleList::Group &group);
 
 	SQLValues::VarAllocator& getVarAllocator();
-	void setVarAllocator(SQLValues::VarAllocator *varAlloc);
 
 	util::StackAllocator::BaseAllocator& getStackAllocatorBase();
 	void setStackAllocatorBase(util::StackAllocator::BaseAllocator *allocBase);
 
 	const OpFactory& getOpFactory();
 
+	const OpConfig& getConfig();
+	void setConfig(const OpConfig &config);
+
+	OpAllocatorManager& getAllocatorManager();
+	OpLatchKeeperManager& getLatchKeeperManager(ExtOpContext &cxt);
+
 	OpProfiler* getProfiler();
 	void activateProfiler();
+
+	void dumpTotalTempStoreUsage(
+			std::ostream &out, TotalStats &stats, const OpStoreId &id,
+			bool asLine);
+	void clearTotalTempStoreUsage(TotalStats &stats);
+
+	TotalStatsElement profileTotalTempStoreUsage(
+			const OpStoreId &id, TotalStatsElement &last);
 
 private:
 	typedef SQLExprs::ExprCode::InputSourceType InputSourceType;
@@ -625,6 +659,9 @@ private:
 	typedef std::pair<OpStoreId, Entry*> IdEntry;
 	typedef util::AllocVector<IdEntry> IdEntryList;
 
+	typedef std::pair<OpStoreId, uint32_t> ElementRef;
+	typedef util::AllocVector<ElementRef> ElementRefList;
+
 	OpStore(const OpStore&);
 	OpStore& operator=(const OpStore&);
 
@@ -633,23 +670,70 @@ private:
 	IdEntryList entryList_;
 	SQLValues::SharedIdManager idManager_;
 
+	ElementRefList attachedReaderList_;
+	ElementRefList attachedWriterList_;
+	ElementRefList usedLatchHolderList_;
+
 	TupleList::Group *tempStoreGroup_;
-	SQLValues::VarAllocator *varAlloc_;
+	SQLValues::VarAllocator &varAlloc_;
 	util::StackAllocator::BaseAllocator *allocBase_;
 	const OpFactory *opFactory_;
+
+	OpConfig config_;
+	OpAllocatorManager &allocManager_;
+	OpLatchKeeperManager *latchKeeperManager_;
 	util::AllocUniquePtr<OpProfiler> profiler_;
+	TotalStatsElement lastTempStoreUsage_;
+};
+
+class SQLOps::OpStore::AllocatorRef {
+public:
+	AllocatorRef(
+			OpAllocatorManager &manager,
+			util::StackAllocator::BaseAllocator &base);
+	~AllocatorRef();
+
+	util::StackAllocator& get();
+
+private:
+	util::StackAllocator &alloc_;
+	OpAllocatorManager &manager_;
+};
+
+class SQLOps::OpStore::TotalStats {
+public:
+	static TotalStats& getInstance();
+
+	uint64_t getTotalValue();
+
+	uint64_t getValue(SQLOpTypes::Type opType);
+	void updateValue(SQLOpTypes::Type opType, uint64_t last, uint64_t cur);
+
+private:
+	enum {
+		OP_COUNT = SQLOpTypes::END_OP + 1
+	};
+
+	static TotalStats instance_;
+
+	util::Atomic<uint64_t> totalValue_;
+	util::Atomic<uint64_t> values_[OP_COUNT];
 };
 
 class SQLOps::OpStore::Entry {
 public:
-	Entry(const util::StdAllocator<void, void> &alloc, OpStore &store);
+	Entry(OpStore &store, const OpStoreId &id);
 	~Entry();
 
-	void close(bool cursorOnly);
+	void close(bool cursorOnly, bool withLatchHolder);
 	void closeAllInputReader();
 	void closeAllWriter(bool force);
 
-	void detach();
+	static void detachReaders(Entry *entry, uint32_t index);
+	static void detachWriter(Entry *entry, uint32_t index);
+
+	void resetLatchHolder();
+	void closeLatchHolder();
 
 	util::StackAllocator& getStackAllocator();
 	SQLValues::VarContext& getVarContext();
@@ -660,6 +744,9 @@ public:
 	bool isCompleted();
 	void setCompleted();
 
+	bool isSubPlanInvalidated();
+	void setSubPlanInvalidated();
+
 	bool isPipelined();
 	void setPipelined();
 
@@ -667,11 +754,15 @@ public:
 	bool isAllInputCompleted();
 
 	OpPlan& getPlan();
+	SQLOpTypes::Type findFirstOpType();
 	OpCursor::State& getCursorState();
 
+	const OpCode& resolvePlannedCode(
+			const OpCode &src, const OpStoreId &parentId);
 	const OpCode* findExecutableCode();
 	const OpCode& setExecutableCode(const OpCode &code);
-	void setUpProjectionFactoryContext(ProjectionFactoryContext &cxt);
+	void setUpProjectionFactoryContext(
+			ProjectionFactoryContext &cxt, const uint32_t *mappedInput);
 
 	const OpStoreId& getLink(uint32_t index, bool fromInput);
 	void setLink(
@@ -681,6 +772,11 @@ public:
 	uint32_t getLinkPos(uint32_t index, bool fromInput);
 
 	void setMultiReferenced(uint32_t index);
+
+	bool findUnifiedOutput(uint32_t index);
+	void setUnifiedOutput(
+			uint32_t index, const OpStoreId &targetId,
+			uint32_t targetPos);
 
 	uint32_t prepareLocal(uint32_t localOrdinal);
 	uint32_t createLocal(const ColumnTypeList *list);
@@ -695,12 +791,16 @@ public:
 	void setColumnTypeList(
 			uint32_t index, const ColumnTypeList &list, bool fromInput,
 			bool forLocal);
+	void setColumnTypeList(
+			uint32_t index, const TupleColumnType *list, size_t columnCount,
+			bool fromInput, bool forLocal);
 
 	const TupleColumnList& getInputColumnList(uint32_t index);
 	const TupleColumnList& getColumnList(uint32_t index, bool withLocalRef);
 
 	InputSourceType getInputSourceType(uint32_t index);
 	void setInputSourceType(uint32_t index, InputSourceType type);
+	bool isExprContextAutoSetUp();
 
 	TupleList& createTupleList(uint32_t index);
 	TupleList& getTupleList(
@@ -708,13 +808,23 @@ public:
 	TupleList& getInputTupleList(uint32_t index);
 	void closeTupleList(uint32_t index);
 
+	uint64_t getInputTupleCount(uint32_t index);
+
 	TupleListReader& getReader(uint32_t index, uint32_t sub, bool fromInput);
 	void closeReader(uint32_t index, uint32_t sub);
 
 	TupleListWriter& getWriter(uint32_t index, bool withLocalRef);
 	void closeWriter(uint32_t index, bool force);
 
-	void updateCursorRefList();
+	int64_t getOutputTupleCount(uint32_t index, bool withLocalRef);
+	void addOutputTupleCount(
+			uint32_t index, bool withLocalRef, int64_t count);
+
+	void updateAllWriterRefList();
+
+	void updateReaderRefList(uint32_t index);
+	void updateWriterRefList(uint32_t index);
+
 	TupleListReader** getActiveReaderRef();
 	ReadableTuple* getReadableTupleRef(uint32_t index);
 	SummaryTuple* getSummaryTupleRef(uint32_t index);
@@ -726,11 +836,20 @@ public:
 
 	void activateTransfer(ExtOpContext *cxt);
 	BlockHandler& getBlockHandler(uint32_t index);
+	void appendBlock(uint32_t index, const TupleList::Block &block);
+
+	bool findRemainingInput(uint32_t *index);
+	void pushRemainingInput(uint32_t index, const TupleList::Block *block);
+	void popRemainingInput();
 
 	void setReaderRandomAccess(uint32_t index);
 	void keepReaderLatch(uint32_t index);
 	void releaseReaderLatch(uint32_t index);
 	void releaseWriterLatch(uint32_t index);
+
+	bool isAllReaderLatchDelayed();
+	bool isReaderLatchDelayed(uint32_t index);
+	void setReaderLatchDelayed(uint32_t index);
 
 	util::AllocUniquePtr<void>& getInputResource(uint32_t index);
 	util::AllocUniquePtr<void>& getResource(
@@ -739,8 +858,17 @@ public:
 	int64_t getLastTupleId(uint32_t index);
 	void setLastTupleId(uint32_t index, int64_t id);
 
+	OpAllocatorManager& getAllocatorManager();
+
+	SQLValues::LatchHolder& getLatchHolder();
+
+	bool tryLatch(ExtOpContext &cxt, uint64_t maxSize, bool hot);
+	void adjustLatch(uint64_t size);
+
 	OpProfilerEntry* getProfiler();
 	void activateProfiler(const OpProfilerId &id);
+
+	uint64_t profileTempStoreUsage();
 
 private:
 	typedef std::pair<Entry*, uint32_t> EntryRef;
@@ -751,23 +879,43 @@ private:
 
 	static TupleList::Info getTupleInfo(const EntryElement &elem);
 
-	void detachReaders(EntryElement &elem);
-	void detachWriter(EntryElement &elem);
+	void setUpCode(OpCode &code, const OpStoreId &parentId, bool planning);
+	int64_t inheritLimit(
+			const OpCode &code, const OpStoreId &parentId, uint32_t index);
 
-	void updateReaderRefList();
-	void updateWriterRefList();
+	void setReaderAttached(
+			EntryElement &elem, uint32_t index, bool withLocalRef);
+	void setWriterAttached(
+			EntryElement &elem, uint32_t index, bool withLocalRef);
+
+	void detachReadersDetail(EntryElement &elem);
+	void detachWriterDetail(EntryElement &elem, uint32_t index);
+
+	void updateReaderRefListDetail(EntryElement &elem);
+	void updateWriterRefListDetail(EntryElement &elem, uint32_t index);
+
+	TupleListWriter* findWriter(uint32_t index, bool withLocalRef);
 
 	EntryElement& getOutputElement(uint32_t index, bool withLocalRef);
+
+	EntryRef getUnifiedOutputElement(EntryElement &elem, uint32_t index);
+	EntryRef findUnifiedOutputElement(EntryElement &elem, uint32_t index);
 
 	EntryElement& prepareElement(
 			uint32_t index, bool fromInput, bool forLocal);
 	EntryElement& getElement(uint32_t index, bool withLocalRef);
 	EntryElement* findElement(uint32_t index, bool withLocalRef);
 
+	uint32_t getElementIndex(uint32_t index, bool withLocalRef);
+	static bool isLocalRefAssigned(const EntryElement *elem);
+
 	EntryRef getInput(uint32_t index);
 	EntryRef getOutput(uint32_t index);
 
-	util::StackAllocator alloc_;
+	OpStoreId id_;
+
+	AllocatorRef allocRef_;
+	util::StackAllocator &alloc_;
 
 	util::LocalUniquePtr<SQLValues::VarContext> varCxt_;
 
@@ -777,6 +925,7 @@ private:
 
 	util::AllocUniquePtr<OpPlan> plan_;
 	util::AllocUniquePtr<OpCursor::State> cursorState_;
+	util::AllocUniquePtr<OpCode> plannedCode_;
 	util::AllocUniquePtr<OpCode> executableCode_;
 
 	uint32_t inCount_;
@@ -784,8 +933,18 @@ private:
 	uint32_t localCount_;
 
 	bool completed_;
+	bool subPlanInvalidated_;
 	bool pipelined_;
+	bool latchHolderUsed_;
 
+	uint32_t completedInCount_;
+	uint32_t multiStageInCount_;
+	uint32_t readerLatchDelayCount_;
+
+	util::Vector<uint32_t> remainingInList_;
+
+	SQLValues::LatchHolder latchHolder_;
+	util::AllocUniquePtr<OpLatchKeeper> latchKeeper_;
 	util::AllocUniquePtr<OpProfilerEntry> profiler_;
 };
 
@@ -794,6 +953,9 @@ public:
 	typedef util::Vector<util::LocalUniquePtr<TupleListReader>*> ReaderList;
 	typedef util::Vector<util::LocalUniquePtr<
 			TupleListReader::Image>*> ReaderImageList;
+
+	typedef std::pair<OpStoreId, uint32_t> ReferredIdEntry;
+	typedef util::Vector<ReferredIdEntry> ReferredIdList;
 
 	explicit EntryElement(util::StackAllocator &alloc);
 
@@ -804,6 +966,10 @@ public:
 	uint32_t outPos_;
 
 	uint32_t localRef_;
+
+	OpStoreId unifiedOutId_;
+	uint32_t unifiedOutPos_;
+
 	bool multiRef_;
 
 	util::LocalUniquePtr<TupleList> tupleList_;
@@ -833,12 +999,23 @@ public:
 	ReaderImageList readerImageList_;
 	util::LocalUniquePtr<TupleListWriter::Image> writerImage_;
 
+	uint64_t inputConsumedBlockCount_;
+	uint64_t blockTupleCount_;
+	int64_t outputTupleCount_;
+
 	bool readerRandomAccessing_;
 	bool readerLatchKeeping_;
+	bool readerLatchDelayed_;
+	bool inputRemaining_;
+
+	bool readerAttached_;
+	bool writerAttached_;
 
 	ReaderRefList readerRefList_;
 	WriterRefList writerRefList_;
 	InputSourceType inputSourceType_;
+
+	ReferredIdList referredIdList_;
 
 private:
 	EntryElement(const EntryElement&);
@@ -878,7 +1055,6 @@ public:
 
 	explicit OpContext(const Source &source);
 
-	void close();
 	void release();
 
 	SQLExprs::ExprContext& getExprContext();
@@ -892,6 +1068,7 @@ public:
 
 	bool isExprContextAutoSetUp();
 	void setUpExprContext();
+	void setUpExprInputContext(uint32_t index);
 
 
 	bool isCompleted();
@@ -902,38 +1079,56 @@ public:
 
 	void invalidate();
 	bool isInvalidated();
+	bool isSubPlanInvalidated();
 
 	bool checkSuspended();
-	bool checkSuspendedAlways();
+	bool checkSuspendedAlways(bool suspendable = true);
 	void setSuspended();
 	bool isSuspended();
 
 	uint64_t getNextCountForSuspend();
 	void setNextCountForSuspend(uint64_t count);
+	void resetNextCountForSuspend();
 
 	OpPlan& getPlan();
 	Source getSource();
 	OpCursor::Source getCursorSource();
 
+	OpAllocatorManager& getAllocatorManager();
+
+	bool tryLatch(uint64_t maxSize, bool hot);
+	void adjustLatch(uint64_t size);
+
 	SQLValues::LatchHolder& getLatchHolder();
 
+	SQLValues::ValueProfile* getValueProfile();
+	SQLExprs::ExprProfile* getExprProfile();
+
+	OpProfilerOptimizationEntry* getOptimizationProfiler();
 	OpProfilerIndexEntry* getIndexProfiler();
 
 
 	uint32_t getInputCount();
 	uint32_t getOutputCount();
 	uint32_t getColumnCount(uint32_t index);
+
 	const TupleColumnList& getInputColumnList(uint32_t index);
+	const TupleColumnList& getOutputColumnList(uint32_t index);
 
 	const TupleColumn& getReaderColumn(uint32_t index, uint32_t pos);
 	const TupleColumn& getWriterColumn(uint32_t index, uint32_t pos);
 
 	uint64_t getInputSize(uint32_t index);
+	uint64_t getInputTupleCount(uint32_t index);
+	uint64_t getInputBlockCount(uint32_t index);
+	uint32_t getInputBlockSize(uint32_t index);
 
 	TupleListReader& getReader(uint32_t index, uint32_t sub = 0);
 	TupleListReader& getLocalReader(uint32_t index, uint32_t sub = 0);
 
 	TupleListWriter& getWriter(uint32_t index);
+
+	void addOutputTupleCount(uint32_t index, int64_t count);
 
 	TupleListReader** getActiveReaderRef();
 	ReadableTuple* getReadableTupleRef(uint32_t index);
@@ -943,10 +1138,15 @@ public:
 	SummaryTuple* getDefaultAggregationTupleRef();
 	SummaryTupleSet* getDefaultAggregationTupleSet();
 
+	bool findRemainingInput(uint32_t *index);
+	void popRemainingInput();
+
 	void setReaderRandomAccess(uint32_t index);
 	void keepReaderLatch(uint32_t index);
 	void releaseReaderLatch(uint32_t index);
 	void releaseWriterLatch(uint32_t index);
+
+	void setReaderLatchDelayed(uint32_t index);
 
 	util::AllocUniquePtr<void>& getInputResource(uint32_t index);
 	util::AllocUniquePtr<void>& getResource(
@@ -968,13 +1168,14 @@ public:
 	void setInputSourceType(uint32_t index, InputSourceType type);
 	void setAllInputSourceType(InputSourceType type);
 
-	void setUpProjectionFactoryContext(ProjectionFactoryContext &cxt);
+	void setUpProjectionFactoryContext(
+			ProjectionFactoryContext &cxt, const uint32_t *mappedInput);
 
 private:
 	OpContext(const OpContext&);
 	OpContext& operator=(const OpContext&);
 
-	static int64_t getInitialInterruptionCheckCount(ExtOpContext *extCxt);
+	static int64_t getInitialInterruptionCheckCount(OpStore &store);
 
 	bool checkSuspendedDetail();
 
@@ -994,8 +1195,6 @@ private:
 	bool suspended_;
 	bool planPending_;
 	bool exprCxtAvailable_;
-
-	SQLValues::LatchHolder latchHolder_;
 };
 
 class SQLOps::OpContext::Source {
@@ -1169,6 +1368,9 @@ public:
 	void addReaderRef(uint32_t index, TupleListReader **readerRef);
 	void addWriterRef(uint32_t index, TupleListWriter **writerRef);
 
+	OpProfilerOptimizationEntry* getProfiler();
+	void setProfiler(OpProfilerOptimizationEntry *optProfiler);
+
 private:
 	typedef util::Vector<WriterRefList*> AllWriterRefList;
 
@@ -1176,6 +1378,7 @@ private:
 	SQLExprs::ExprFactoryContext exprCxt_;
 
 	AllWriterRefList allWriterRefList_;
+	OpProfilerOptimizationEntry *optProfiler_;
 };
 
 class SQLOps::OpProjectionRegistrar : public SQLOps::OpRegistrar {

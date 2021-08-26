@@ -17,10 +17,12 @@
 
 #include "sql_operator_utils.h"
 
+
+
 SQLOps::OpCodeBuilder::OpCodeBuilder(const Source &source) :
 		factoryCxt_(source.alloc_),
 		rewriter_(source.alloc_) {
-	setUpExprFactoryContext(source.cxt_);
+	setUpExprFactoryContext(source);
 }
 
 SQLOps::OpCodeBuilder::Source SQLOps::OpCodeBuilder::ofAllocator(
@@ -181,12 +183,38 @@ SQLOps::Projection& SQLOps::OpCodeBuilder::createIdenticalProjection(
 }
 
 SQLOps::Projection& SQLOps::OpCodeBuilder::createEmptyRefProjection(
-		bool unified, uint32_t index, uint32_t startColumn) {
+		bool unified, uint32_t index, uint32_t startColumn,
+		const util::Set<uint32_t> *keySet) {
 	Projection &proj = createProjection(SQLOpTypes::PROJ_OUTPUT);
 
 	SQLExprs::ExprRewriter::createEmptyRefProjection(
-			getExprFactoryContext(), unified, index, startColumn, proj);
+			getExprFactoryContext(), unified, index, startColumn, keySet,
+			proj);
 	rewriter_.remapColumn(getExprFactoryContext(), proj);
+
+	return proj;
+}
+
+SQLOps::Projection& SQLOps::OpCodeBuilder::createEmptyConstProjection(
+		const ColumnTypeList &typeList, bool withEmptyLimit) {
+	Projection &proj = createProjection(SQLOpTypes::PROJ_OUTPUT);
+
+	SQLExprs::Expression::ModIterator projIt(proj);
+	for (ColumnTypeList::const_iterator it = typeList.begin();
+			it != typeList.end(); ++it) {
+		projIt.append(SQLExprs::ExprRewriter::createEmptyConstExpr(
+				getExprFactoryContext(), *it));
+	}
+
+	SQLExprs::ExprCode &exprCode = proj.getProjectionCode().getExprCode();
+	exprCode.setAttributes(
+			exprCode.getAttributes() | SQLExprs::ExprCode::ATTR_ASSIGNED);
+
+	if (withEmptyLimit) {
+		OpCode code;
+		code.setLimit(0);
+		return createLimitedProjection(proj, code);
+	}
 
 	return proj;
 }
@@ -595,37 +623,215 @@ SQLExprs::Expression& SQLOps::OpCodeBuilder::arrangePredicate(
 	return rewriter_.rewrite(factoryCxt, src, NULL);
 }
 
-void SQLOps::OpCodeBuilder::setUpOutputNodes(
-		OpPlan &plan, OpNode *outNode, OpNode &inNode,
-		const Projection *distinctProj, SQLType::AggregationPhase aggrPhase) {
-	if (distinctProj == NULL) {
-		if (outNode == NULL) {
-			plan.linkToAllParentOutput(inNode);
-		}
-		else {
-			outNode->addInput(inNode);
-		}
-		return;
+const SQLExprs::Expression* SQLOps::OpCodeBuilder::extractJoinKeyColumns(
+		const SQLExprs::Expression *srcExpr,
+		const SQLType::JoinType *joinTypeOfFilter,
+		SQLValues::CompColumnList &destKeyList, CompPosSet &posSet,
+		SQLExprs::Expression **destExpr) {
+	if (srcExpr == NULL) {
+		return NULL;
 	}
 
-	if (outNode == NULL) {
-		assert(plan.getParentOutputCount() == 1);
-		setUpOutputNodes(
-				plan, &plan.getParentOutput(0), inNode, distinctProj,
-				aggrPhase);
-		return;
+	if (destExpr == NULL) {
+		if (!destKeyList.empty() && posSet.empty()) {
+			for (SQLValues::CompColumnList::const_iterator it =
+					destKeyList.begin(); it != destKeyList.end(); ++it) {
+				assert(!it->isEitherUnbounded());
+				posSet.insert(CompPos(
+						it->getColumnPos(true),
+						it->getColumnPos(false)));
+			}
+		}
+
+		SQLExprs::Expression *destExprBase = NULL;
+		const size_t orgCount = destKeyList.size();
+		extractJoinKeyColumns(
+				srcExpr, joinTypeOfFilter, destKeyList, posSet,
+				&destExprBase);
+
+		if (destKeyList.size() == orgCount ||
+				(joinTypeOfFilter != NULL &&
+				*joinTypeOfFilter != SQLType::JOIN_INNER)) {
+			return srcExpr;
+		}
+
+		{
+			SQLExprs::ExprRewriter &rewriter = getExprRewriter();
+			SQLExprs::ExprFactoryContext &factoryCxt = getExprFactoryContext();
+
+			SQLExprs::ExprFactoryContext::Scope scope(factoryCxt);
+			factoryCxt.setAggregationPhase(true, SQLType::AGG_PHASE_ALL_PIPE);
+
+			destExprBase = &rewriter.rewrite(factoryCxt, *srcExpr, NULL);
+		}
+
+		return extractJoinKeyColumns(
+				destExprBase, joinTypeOfFilter, destKeyList, posSet,
+				&destExprBase);
+	}
+
+	assert(*destExpr == NULL || srcExpr == *destExpr);
+
+	const SQLExprs::ExprType type = srcExpr->getCode().getType();
+	if (type == SQLType::EXPR_AND) {
+		if (*destExpr == NULL) {
+			for (SQLExprs::Expression::Iterator it(*srcExpr); it.exists(); it.next()) {
+				extractJoinKeyColumns(
+						&it.get(), joinTypeOfFilter, destKeyList, posSet, destExpr);
+			}
+			return srcExpr;
+		}
+
+		SQLExprs::Expression *destSubLast = NULL;
+		bool eitherEmpty = false;
+		for (SQLExprs::Expression::ModIterator it(**destExpr);
+				it.exists(); it.next()) {
+			SQLExprs::Expression *destSub = &it.get();
+			extractJoinKeyColumns(
+					&it.get(), joinTypeOfFilter, destKeyList, posSet, &destSub);
+			if (destSub == NULL) {
+				eitherEmpty = true;
+			}
+			else {
+				if (&it.get() != destSub) {
+					it.remove();
+					it.insert(*destSub);
+				}
+				destSubLast = &it.get();
+			}
+		}
+		if (eitherEmpty) {
+			*destExpr = destSubLast;
+		}
+		return *destExpr;
+	}
+
+	do {
+		if (type != SQLType::OP_EQ) {
+			break;
+		}
+
+		const SQLExprs::Expression *left = &srcExpr->child();
+		const SQLExprs::Expression *right = &left->next();
+		if (left->getCode().getType() != SQLType::EXPR_COLUMN ||
+				right->getCode().getType() != SQLType::EXPR_COLUMN) {
+			break;
+		}
+		if (left->getCode().getInput() != 0) {
+			std::swap(left, right);
+		}
+		if (left->getCode().getInput() != 0 ||
+				right->getCode().getInput() != 1) {
+			break;
+		}
+
+		const CompPos pos(
+				left->getCode().getColumnPos(),
+				right->getCode().getColumnPos());
+		if (!posSet.insert(pos).second) {
+			break;
+		}
+
+		destKeyList.push_back(SQLExprs::ExprTypeUtils::toCompColumn(
+				type, pos.first, pos.second, false));
+
+		*destExpr = NULL;
+		return *destExpr;
+	}
+	while (false);
+
+	return srcExpr;
+}
+
+void SQLOps::OpCodeBuilder::setUpOutputNodes(
+		OpPlan &plan, OpNode *outNode, OpNode &inNode,
+		const Projection *distinctProj, SQLType::AggregationPhase aggrPhase,
+		const SQLValues::CompColumnList *distinctKeyList) {
+	setUpOutputNodesDetail(
+			plan, outNode, false, &inNode, SQLOpTypes::END_OP, distinctProj,
+			aggrPhase, distinctKeyList);
+}
+
+SQLOps::OpNode& SQLOps::OpCodeBuilder::setUpOutputNodesDetail(
+		OpPlan &plan, OpNode *outNode, bool outNodePending,
+		OpNode *inNode, SQLOpTypes::Type inNodeType,
+		const Projection *distinctProj, SQLType::AggregationPhase aggrPhase,
+		const SQLValues::CompColumnList *distinctKeyList) {
+	OpNode *resolvedInNode = inNode;
+
+	if (distinctProj == NULL) {
+		if (resolvedInNode == NULL) {
+			assert(inNodeType != SQLOpTypes::END_OP);
+			resolvedInNode = &plan.createNode(inNodeType);
+		}
+
+		if (!outNodePending) {
+			if (outNode == NULL) {
+				plan.linkToAllParentOutput(*resolvedInNode);
+			}
+			else {
+				outNode->addInput(*resolvedInNode);
+			}
+		}
+
+		return *resolvedInNode;
 	}
 
 	OpNode &distinctNode = plan.createNode(SQLOpTypes::OP_GROUP_DISTINCT);
-	distinctNode.addInput(inNode, 0);
-	distinctNode.addInput(inNode, 1);
+
+	if (resolvedInNode == NULL) {
+		assert(inNodeType != SQLOpTypes::END_OP);
+		resolvedInNode = &plan.createNode(inNodeType);
+	}
+	distinctNode.addInput(*resolvedInNode, 0);
+	distinctNode.addInput(*resolvedInNode, 1);
 
 	OpCode code;
 	code.setPipeProjection(distinctProj);
 	code.setAggregationPhase(aggrPhase);
+	code.setKeyColumnList(distinctKeyList);
 	distinctNode.setCode(code);
 
-	outNode->addInput(distinctNode);
+	if (!outNodePending) {
+		OpNode &resolvedOutNode =
+				(outNode == NULL ? plan.getParentOutput(0) : *outNode);
+		resolvedOutNode.addInput(distinctNode);
+	}
+
+	return *resolvedInNode;
+}
+
+void SQLOps::OpCodeBuilder::setUpNoopNodes(
+		OpPlan &plan, const ColumnTypeList &outTypeList) {
+	const OpCode &code = createOutputEmptyCode(outTypeList);
+	OpNode &node = plan.createNode(code.getType());
+	node.setCode(code);
+	{
+		const uint32_t count = plan.getParentInputCount();
+		for (uint32_t i = 0; i < count; i++) {
+			node.addInput(plan.getParentInput(i));
+		}
+	}
+	{
+		const uint32_t count = plan.getParentOutputCount();
+		for (uint32_t i = 0; i < count; i++) {
+			plan.getParentOutput(i).addInput(node);
+		}
+	}
+}
+
+SQLOps::OpCode SQLOps::OpCodeBuilder::createOutputEmptyCode(
+		const ColumnTypeList &outTypeList) {
+	OpCode code;
+	code.setType(SQLOpTypes::OP_SELECT_PIPE);
+	code.setPipeProjection(&createEmptyConstProjection(outTypeList, true));
+	return code;
+}
+
+bool SQLOps::OpCodeBuilder::isNoopAlways(const OpCode &code) {
+	return (code.getLimit() == 0 &&
+			code.findContainerLocation() == NULL &&
+			code.getType() != SQLOpTypes::OP_SELECT_PIPE);
 }
 
 SQLOps::OpCode SQLOps::OpCodeBuilder::toExecutable(const OpCode &src) {
@@ -669,7 +875,7 @@ SQLOps::OpCode SQLOps::OpCodeBuilder::rewriteCode(
 			{
 				SQLExprs::ExprFactoryContext::Scope midScope(factoryCxt);
 
-				factoryCxt.setArrangedKeyList(dest.findMiddleKeyColumnList());
+				factoryCxt.setArrangedKeyList(dest.findMiddleKeyColumnList(), false);
 				factoryCxt.setAggregationTupleSet(&midAggrTupleSet);
 
 				destProj = &rewriteProjection(*srcProj);
@@ -691,7 +897,7 @@ SQLOps::OpCode SQLOps::OpCodeBuilder::rewriteCode(
 					factoryCxt, *list, isInputUnified(dest)));
 		}
 	}
-	factoryCxt.setArrangedKeyList(dest.findKeyColumnList());
+	factoryCxt.setArrangedKeyList(dest.findKeyColumnList(), false);
 
 	{
 		const SQLOps::CompColumnListPair *list = src.findSideKeyColumnList();
@@ -763,7 +969,9 @@ void SQLOps::OpCodeBuilder::applySummaryAggregationColumns(
 	assert(aggrTupleSet != NULL);
 
 	const Projection *aggrProj = findAggregationProjection(proj);
-	const SQLValues::CompColumnList *keyList = factoryCxt.getArrangedKeyList();
+	bool orderingRestricted;
+	const SQLValues::CompColumnList *keyList =
+			factoryCxt.getArrangedKeyList(orderingRestricted);
 
 	if (aggrProj != NULL && !aggrTupleSet->isColumnsCompleted()) {
 		const uint32_t input = 0;
@@ -776,7 +984,7 @@ void SQLOps::OpCodeBuilder::applySummaryAggregationColumns(
 				aggrTupleSet->addColumn(
 						factoryCxt.getInputType(input, i), &i);
 			}
-			aggrTupleSet->addKeyList(*keyList, true);
+			aggrTupleSet->addKeyList(*keyList, true, false);
 		}
 
 		applyAggregationColumns(*aggrProj, *aggrTupleSet);
@@ -801,7 +1009,8 @@ void SQLOps::OpCodeBuilder::applySummaryAggregationColumns(
 		}
 		else {
 			*summaryColumns = rewriter_.createSummaryColumnList(
-					factoryCxt, i, false, (i == 0), keyList);
+					factoryCxt, i, false, (i == 0), keyList,
+					orderingRestricted);
 		}
 		assert(lastCount == 0 || summaryColumns->size() == lastCount);
 		static_cast<void>(lastCount);
@@ -867,6 +1076,24 @@ const SQLExprs::Expression* SQLOps::OpCodeBuilder::findFilterPredicate(
 	}
 
 	return NULL;
+}
+
+const SQLOps::Projection& SQLOps::OpCodeBuilder::resolveOutputProjection(
+		const OpCode &code, const uint32_t *outIndex) {
+	const Projection *proj = findOutputProjection(code, outIndex);
+	if (proj == NULL) {
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL_INVALID_INPUT, "");
+	}
+	return *proj;
+}
+
+const SQLOps::Projection& SQLOps::OpCodeBuilder::resolveOutputProjection(
+		const Projection &src, const uint32_t *outIndex) {
+	const Projection *proj = findOutputProjection(src, outIndex);
+	if (proj == NULL) {
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL_INVALID_INPUT, "");
+	}
+	return *proj;
 }
 
 const SQLOps::Projection* SQLOps::OpCodeBuilder::findOutputProjection(
@@ -950,15 +1177,18 @@ uint32_t SQLOps::OpCodeBuilder::resolveOutputIndex(
 }
 
 const SQLOps::Projection* SQLOps::OpCodeBuilder::findAggregationProjection(
-		const Projection &src) {
+		const Projection &src, const bool *forPipe) {
 	const SQLOpTypes::ProjectionType type = src.getProjectionCode().getType();
-	if (type == SQLOpTypes::PROJ_AGGR_PIPE ||
-			type == SQLOpTypes::PROJ_AGGR_OUTPUT) {
+	if (((forPipe == NULL || *forPipe) &&
+			type == SQLOpTypes::PROJ_AGGR_PIPE) ||
+			((forPipe == NULL || !*forPipe) &&
+					type == SQLOpTypes::PROJ_AGGR_OUTPUT)) {
 		return &src;
 	}
 
 	for (Projection::ChainIterator it(src); it.exists(); it.next()) {
-		const SQLOps::Projection *foundProj = findAggregationProjection(it.get());
+		const SQLOps::Projection *foundProj =
+				findAggregationProjection(it.get(), forPipe);
 		if (foundProj != NULL) {
 			return foundProj;
 		}
@@ -1020,11 +1250,8 @@ void SQLOps::OpCodeBuilder::resolveColumnTypeList(
 		const Projection &proj, ColumnTypeList &typeList,
 		const uint32_t *outIndex) {
 	assert(typeList.empty());
-	const Projection *outProj = findOutputProjection(proj, outIndex);
-	if (outProj == NULL) {
-		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL_INVALID_INPUT, "");
-	}
-	for (SQLExprs::Expression::Iterator it(*outProj); it.exists(); it.next()) {
+	const Projection &outProj = resolveOutputProjection(proj, outIndex);
+	for (SQLExprs::Expression::Iterator it(outProj); it.exists(); it.next()) {
 		const TupleColumnType type = it.get().getCode().getColumnType();
 		typeList.push_back(type);
 		if (SQLValues::TypeUtils::isNull(type)) {
@@ -1034,6 +1261,31 @@ void SQLOps::OpCodeBuilder::resolveColumnTypeList(
 	if (typeList.empty()) {
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL_INVALID_INPUT, "");
 	}
+}
+
+void SQLOps::OpCodeBuilder::getColumnTypeListByColumns(
+		const TupleColumnList &columnList, ColumnTypeList &typeList) {
+	for (TupleColumnList::const_iterator it = columnList.begin();
+			it != columnList.end(); ++it) {
+		typeList.push_back(it->getType());
+	}
+}
+
+TupleColumnType SQLOps::OpCodeBuilder::resolveUnifiedInputType(
+		OpContext &cxt, uint32_t pos) {
+	const uint32_t count = cxt.getInputCount();
+	TupleColumnType type = TupleTypes::TYPE_NULL;
+
+	bool first = true;
+	for (uint32_t i = 0; i < count; i++) {
+		const TupleColumnType elemType = cxt.getReaderColumn(i, pos).getType();
+		type = SQLExprs::ExprFactoryContext::unifyInputType(
+				type, elemType, first);
+		first = false;
+	}
+
+	assert(!SQLValues::TypeUtils::isNull(type));
+	return type;
 }
 
 uint32_t SQLOps::OpCodeBuilder::resolveOutputCount(const OpCode &code) {
@@ -1088,12 +1340,16 @@ SQLOpUtils::ExprRefList SQLOps::OpCodeBuilder::getDistinctExprList(
 }
 
 SQLValues::CompColumnList& SQLOps::OpCodeBuilder::createDistinctGroupKeyList(
-		const ExprRefList &distinctList, size_t index, bool idGrouping) {
+		const ExprRefList &distinctList, size_t index, bool idGrouping,
+		bool idSingle) {
 	SQLValues::CompColumnList &keyList = createCompColumnList();
 
-	{
+	if (idGrouping || !idSingle) {
 		SQLValues::CompColumn key;
 		key.setColumnPos(0, true);
+		if (idSingle) {
+			key.setOrdering(false);
+		}
 		keyList.push_back(key);
 	}
 
@@ -1101,6 +1357,9 @@ SQLValues::CompColumnList& SQLOps::OpCodeBuilder::createDistinctGroupKeyList(
 		SQLValues::CompColumn key;
 		const SQLExprs::Expression *expr = distinctList[index];
 		key.setColumnPos(expr->child().getCode().getColumnPos(), true);
+		if (idSingle) {
+			key.setOrdering(false);
+		}
 		keyList.push_back(key);
 	}
 
@@ -1155,26 +1414,28 @@ SQLOps::OpCodeBuilder::createDistinctMergeKeyList() {
 
 SQLOps::Projection& SQLOps::OpCodeBuilder::createDistinctMergeProjection(
 		const ExprRefList &distinctList, size_t index, const Projection &proj,
-		SQLType::AggregationPhase aggrPhase) {
+		SQLType::AggregationPhase aggrPhase,
+		const util::Set<uint32_t> *keySet) {
 	SQLOps::Projection &mainProj = createDistinctMergeProjectionAt(
-			distinctList, index, proj, aggrPhase, -1);
+			distinctList, index, proj, aggrPhase, -1, keySet);
 	SQLOps::Projection &emptyProj = createMultiStageProjection(
 			createDistinctMergeProjectionAt(
-					distinctList, index, proj, aggrPhase, 1),
+					distinctList, index, proj, aggrPhase, 1, keySet),
 			createDistinctMergeProjectionAt(
-					distinctList, index, proj, aggrPhase, 0));
+					distinctList, index, proj, aggrPhase, 0, keySet));
 	return createMultiStageProjection(mainProj, emptyProj);
 }
 
 SQLOps::Projection& SQLOps::OpCodeBuilder::createDistinctMergeProjectionAt(
 		const ExprRefList &distinctList, size_t index, const Projection &proj,
-		SQLType::AggregationPhase aggrPhase, int32_t emptySide) {
+		SQLType::AggregationPhase aggrPhase, int32_t emptySide,
+		const util::Set<uint32_t> *keySet) {
 	const bool forAdvance = (aggrPhase == SQLType::AGG_PHASE_ADVANCE_PIPE);
 
 	SQLExprs::ExprFactoryContext &factoryCxt = getExprFactoryContext();
 	if (index + 1 < distinctList.size()) {
 		Projection &destProj = (emptySide == 0 ?
-				createEmptyRefProjection(false, 0, 1) :
+				createEmptyRefProjection(false, 0, 1, keySet) :
 				createIdenticalProjection(false, 0));
 
 		SQLExprs::Expression::ModIterator projIt(destProj);
@@ -1187,7 +1448,7 @@ SQLOps::Projection& SQLOps::OpCodeBuilder::createDistinctMergeProjectionAt(
 			const bool merged = (i < index);
 			const bool emptyRef = (emptySide >= 0 ?
 					(emptySide == 0 ? merged : !merged) : false);
-			const Expression *expr = distinctList[index];
+			const Expression *expr = distinctList[i];
 
 			const uint32_t input = (merged ? 0 : 1);
 			const uint32_t refPosBase = (merged ? lastCount : 1);
@@ -1207,30 +1468,43 @@ SQLOps::Projection& SQLOps::OpCodeBuilder::createDistinctMergeProjectionAt(
 		if (outProj != NULL) {
 			SQLExprs::ExprRewriter::replaceDistinctExprsToRef(
 					factoryCxt, *outProj, forAdvance, emptySide,
-					NULL, NULL);
+					keySet, NULL, NULL);
 		}
 		return destProj;
 	}
 }
 
-void SQLOps::OpCodeBuilder::setUpExprFactoryContext(OpContext *cxt) {
+void SQLOps::OpCodeBuilder::setUpExprFactoryContext(const Source &source) {
+	OpContext *cxt = source.cxt_;
 	if (cxt == NULL) {
 		return;
 	}
 
+	const bool inputMapping =
+			(source.mappedInput_ != std::numeric_limits<uint32_t>::max());
+
 	SQLExprs::ExprFactoryContext &factoryCxt = getExprFactoryContext();
-	const uint32_t inCount = cxt->getInputCount();
+	const uint32_t inCount = (inputMapping ? 1 : cxt->getInputCount());
 	for (uint32_t index = 0; index < inCount; index++) {
-		const uint32_t columnCount = cxt->getColumnCount(index);
+		const uint32_t srcIndex = (inputMapping ? source.mappedInput_ : index);
+		const uint32_t columnCount = cxt->getColumnCount(srcIndex);
 		for (uint32_t pos = 0; pos < columnCount; pos++) {
-			factoryCxt.setInputType(
-					index, pos, cxt->getReaderColumn(index, pos).getType());
-			factoryCxt.setInputNullable(index, false);
+			TupleColumnType inType;
+			if (source.inputUnified_) {
+				inType = resolveUnifiedInputType(*cxt, pos);
+			}
+			else {
+				inType = cxt->getReaderColumn(srcIndex, pos).getType();
+			}
+			factoryCxt.setInputType(index, pos, inType);
 		}
-		factoryCxt.setReadableTupleRef(index, cxt->getReadableTupleRef(index));
-		factoryCxt.setSummaryTupleRef(index, cxt->getSummaryTupleRef(index));
+		factoryCxt.setInputNullable(index, false);
+		factoryCxt.setReadableTupleRef(
+				index, cxt->getReadableTupleRef(srcIndex));
+		factoryCxt.setSummaryTupleRef(
+				index, cxt->getSummaryTupleRef(srcIndex));
 		factoryCxt.setSummaryColumnListRef(
-				index, cxt->getSummaryColumnListRef(index));
+				index, cxt->getSummaryColumnListRef(srcIndex));
 	}
 
 	factoryCxt.setActiveReaderRef(cxt->getActiveReaderRef());
@@ -1238,6 +1512,9 @@ void SQLOps::OpCodeBuilder::setUpExprFactoryContext(OpContext *cxt) {
 			cxt->getDefaultAggregationTupleRef());
 	factoryCxt.setAggregationTupleSet(
 			cxt->getDefaultAggregationTupleSet());
+
+	getProjectionFactoryContext().setProfiler(cxt->getOptimizationProfiler());
+	factoryCxt.setProfile(cxt->getExprProfile());
 }
 
 util::StackAllocator& SQLOps::OpCodeBuilder::getAllocator() {
@@ -1255,9 +1532,380 @@ const SQLExprs::ExprFactory& SQLOps::OpCodeBuilder::getExprFactory() {
 
 SQLOps::OpCodeBuilder::Source::Source(util::StackAllocator &alloc) :
 		alloc_(alloc),
-		cxt_(NULL) {
+		cxt_(NULL),
+		mappedInput_(std::numeric_limits<uint32_t>::max()),
+		inputUnified_(false) {
 }
 
+
+SQLOps::OpAllocatorManager*
+SQLOps::OpAllocatorManager::DEFAULT_INSTANCE = initializeDefault();
+
+SQLOps::OpAllocatorManager::OpAllocatorManager(
+		const util::StdAllocator<void, void> &alloc, bool composite,
+		OpAllocatorManager *sharedManager,
+		SQLValues::VarAllocator *localVarAllocRef) :
+		alloc_(alloc),
+		composite_(composite),
+		subList_(alloc),
+		sharedManager_(sharedManager),
+		localVarAllocRef_(localVarAllocRef),
+		cachedBuffer_(NULL),
+		baseAlloc_(NULL) {
+	assert(!composite || localVarAllocRef == NULL);
+
+	if (sharedManager == NULL) {
+		assert(localVarAllocRef == NULL);
+		mutex_ = UTIL_MAKE_LOCAL_UNIQUE(mutex_, util::Mutex);
+	}
+
+	if (!composite) {
+		prepareAllocators();
+	}
+}
+
+SQLOps::OpAllocatorManager::~OpAllocatorManager() {
+	while (!subList_.empty()) {
+		ALLOC_DELETE(alloc_, subList_.back());
+		subList_.pop_back();
+	}
+
+	cleanUpAllocators();
+}
+
+SQLOps::OpAllocatorManager& SQLOps::OpAllocatorManager::getDefault() {
+	if (DEFAULT_INSTANCE == NULL) {
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+	return *DEFAULT_INSTANCE;
+}
+
+SQLOps::OpAllocatorManager& SQLOps::OpAllocatorManager::getSubManager(
+		ExtOpContext &cxt) {
+	assert(composite_);
+
+	const uint32_t workerId = cxt.getTotalWorkerId();
+
+	util::LockGuard<util::Mutex> guard(*mutex_);
+	if (workerId >= subList_.size()) {
+		subList_.resize(workerId + 1);
+	}
+
+	OpAllocatorManager *&sub = subList_[workerId];
+	if (sub == NULL) {
+		sub = ALLOC_NEW(alloc_) OpAllocatorManager(alloc_, false, NULL, NULL);
+	}
+	else {
+		sub->prepareAllocators();
+	}
+
+	return *sub;
+}
+
+util::StackAllocator& SQLOps::OpAllocatorManager::create(
+		util::StackAllocator::BaseAllocator &base) {
+	assert(sharedManager_ != NULL && localVarAllocRef_ != NULL);
+	checkAllocators();
+
+	if (baseAlloc_ == NULL) {
+		assert(cachedAllocList_->empty());
+		cleanUpHandler_ = UTIL_MAKE_LOCAL_UNIQUE(
+				cleanUpHandler_, CleanUpHandler, this);
+		base.addCleanUpHandler(*cleanUpHandler_);
+		baseAlloc_ = &base;
+	}
+	else if (baseAlloc_ != &base) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	if (cachedAllocList_->empty()) {
+		const size_t headSize = util::detail::AlignedSizeOf<size_t>::VALUE;
+		const size_t blockSizeBase =
+				SQLValues::VarAllocator::TraitsType::getFixedSize(1);
+		assert(headSize < blockSizeBase);
+		
+		util::StackAllocator::Option option;
+		option.smallAlloc_ = localAlloc_.get();
+		option.smallBlockSize_ = blockSizeBase - headSize;
+		option.smallBlockLimit_ =
+				SQLValues::VarAllocator::TraitsType::getFixedSize(2) /
+				blockSizeBase;
+
+		return *(ALLOC_NEW(*localAlloc_) util::StackAllocator(
+				util::AllocatorInfo(ALLOCATOR_GROUP_SQL_WORK, "sqlOp"),
+				&base, &option));
+	}
+	else {
+		util::StackAllocator *alloc = cachedAllocList_->back();
+		assert(alloc != NULL);
+
+		cachedAllocList_->pop_back();
+		return *alloc;
+	}
+}
+
+void SQLOps::OpAllocatorManager::release(util::StackAllocator *alloc) {
+	assert(sharedManager_ != NULL && localVarAllocRef_ != NULL);
+	checkAllocators();
+
+	if (alloc == NULL) {
+		return;
+	}
+
+	util::StackAllocator::Tool::forceReset(*alloc);
+	alloc->setFreeSizeLimit(0);
+	alloc->trim();
+
+	util::AllocUniquePtr<util::StackAllocator> ptr(alloc, *localAlloc_);
+	cachedAllocList_->push_back(ptr.get());
+	ptr.release();
+}
+
+SQLOps::OpAllocatorManager::Buffer SQLOps::OpAllocatorManager::createBuffer(
+		size_t size, size_t filledRange) {
+	if (sharedManager_ != NULL) {
+		return sharedManager_->createBuffer(size, filledRange);
+	}
+
+	assert(size >= filledRange);
+
+	Buffer buf;
+	{
+		util::LockGuard<util::Mutex> guard(*mutex_);
+		checkAllocators();
+
+		Buffer **target = NULL;
+		for (bool filtering = true;; filtering = false) {
+			for (target = &cachedBuffer_; *target != NULL;) {
+				Buffer *cur = (*target);
+
+				Buffer **nextRef = reinterpret_cast<Buffer**>(&cur->addr_);
+				Buffer *next = *nextRef;
+
+				if (size > cur->size_) {
+					getLocalVarAllocatorDirect().deallocate(cur);
+					*target = next;
+				}
+				else if ((filledRange > 0) != (cur->filledRange_ > 0)) {
+					target = nextRef;
+				}
+				else {
+					break;
+				}
+			}
+			if (*target != NULL || cachedBuffer_ == NULL || !filtering) {
+				break;
+			}
+		}
+
+		if (*target != NULL) {
+			Buffer &cur = (**target);
+			Buffer *next = static_cast<Buffer*>(cur.addr_);
+
+			*target = next;
+			buf = Buffer(&cur, cur.size_, cur.filledRange_);
+		}
+		else {
+			const size_t allocSize =
+					static_cast<size_t>(std::max<uint64_t>(size, sizeof(Buffer)));
+			buf = Buffer(
+					getLocalVarAllocatorDirect().allocate(allocSize), allocSize, 0);
+		}
+	}
+
+	if (filledRange > 0) {
+		const size_t range =
+				(filledRange <= buf.filledRange_ ? sizeof(Buffer) : filledRange);
+
+		Buffer::fill(buf.addr_, range);
+		assert(Buffer::checkFilled(buf.addr_, filledRange));
+	}
+	buf.filledRange_ = filledRange;
+
+	return buf;
+}
+
+void SQLOps::OpAllocatorManager::releaseBuffer(Buffer &buf) {
+	if (sharedManager_ != NULL) {
+		sharedManager_->releaseBuffer(buf);
+		return;
+	}
+
+	void *cur = buf.addr_;
+	if (cur == NULL) {
+		return;
+	}
+
+	const size_t size = buf.size_;
+	const size_t filledRange = buf.filledRange_;
+	assert(size >= sizeof(Buffer));
+	assert(Buffer::checkFilled(cur, filledRange));
+
+	util::LockGuard<util::Mutex> guard(*mutex_);
+	checkAllocators();
+
+	void *next = cachedBuffer_;
+	cachedBuffer_ = static_cast<Buffer*>(cur);
+
+	cachedBuffer_->addr_ = next;
+	cachedBuffer_->size_ = size;
+	cachedBuffer_->filledRange_ = filledRange;
+}
+
+SQLValues::VarAllocator& SQLOps::OpAllocatorManager::getLocalVarAllocator() {
+	assert(sharedManager_ != NULL && localVarAllocRef_ != NULL);
+	checkAllocators();
+	return getLocalVarAllocatorDirect();
+}
+
+util::StdAllocator<void, void>&
+SQLOps::OpAllocatorManager::getLocalAllocator() {
+	assert(sharedManager_ != NULL && localVarAllocRef_ != NULL);
+	checkAllocators();
+	return *localAlloc_;
+}
+
+SQLOps::OpAllocatorManager*
+SQLOps::OpAllocatorManager::initializeDefault() throw() {
+	static std::allocator<uint8_t> alloc;
+	static util::LocalUniquePtr<OpAllocatorManager> instance;
+	assert(instance.get() == NULL);
+	try {
+		instance = UTIL_MAKE_LOCAL_UNIQUE(
+				instance, OpAllocatorManager, alloc, true, NULL, NULL);
+	}
+	catch (...) {
+	}
+	return instance.get();
+}
+
+void SQLOps::OpAllocatorManager::checkAllocators() {
+	if (composite_ || cachedAllocList_.get() == NULL) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+}
+
+void SQLOps::OpAllocatorManager::prepareAllocators() {
+	assert(!composite_);
+
+	if (cachedAllocList_.get() != NULL) {
+		return;
+	}
+
+	typedef util::StdAllocator<void, void> Alloc;
+
+	if (localVarAllocRef_ == NULL) {
+		localVarAlloc_ = UTIL_MAKE_LOCAL_UNIQUE(
+				localVarAlloc_, SQLValues::VarAllocator,
+				util::AllocatorInfo(
+						ALLOCATOR_GROUP_SQL_WORK, "sqlOpLocalVar"));
+	}
+
+	localAlloc_ = UTIL_MAKE_LOCAL_UNIQUE(
+			localAlloc_, Alloc, getLocalVarAllocatorDirect());
+	cachedAllocList_ = UTIL_MAKE_LOCAL_UNIQUE(
+			cachedAllocList_, StackAllocatorList, *localAlloc_);
+}
+
+void SQLOps::OpAllocatorManager::cleanUpAllocators() {
+	if (cachedAllocList_.get() != NULL) {
+		while (!cachedAllocList_->empty()) {
+			ALLOC_DELETE(*localAlloc_, cachedAllocList_->back());
+			cachedAllocList_->pop_back();
+		}
+	}
+	baseAlloc_ = NULL;
+
+	while (cachedBuffer_ != NULL) {
+		void *cur = cachedBuffer_;
+		void *next = cachedBuffer_->addr_;
+
+		cachedBuffer_ = static_cast<Buffer*>(next);
+		getLocalVarAllocatorDirect().deallocate(cur);
+	}
+
+	cachedAllocList_.reset();
+	localAlloc_.reset();
+	localVarAlloc_.reset();
+}
+
+SQLValues::VarAllocator&
+SQLOps::OpAllocatorManager::getLocalVarAllocatorDirect() {
+	if (localVarAllocRef_ != NULL) {
+		return *localVarAllocRef_;
+	}
+	assert(localVarAlloc_.get() != NULL);
+	return *localVarAlloc_;
+}
+
+
+SQLOps::OpAllocatorManager::Buffer::Buffer() :
+		addr_(NULL),
+		size_(0),
+		filledRange_(0) {
+}
+
+SQLOps::OpAllocatorManager::Buffer::Buffer(
+		void *addr, size_t size, size_t filledRange) :
+		addr_(addr),
+		size_(size),
+		filledRange_(filledRange) {
+}
+
+void SQLOps::OpAllocatorManager::Buffer::fill(void *addr, size_t size) {
+	memset(addr, 0, size);
+}
+
+bool SQLOps::OpAllocatorManager::Buffer::checkFilled(
+		const void *addr, size_t size) {
+	const uint8_t *it = static_cast<const uint8_t*>(addr);
+	return (std::count(it, it + size, 0) == size);
+}
+
+
+SQLOps::OpAllocatorManager::BufferRef::BufferRef(
+		OpAllocatorManager &manager, size_t size, size_t filledRange) :
+		buffer_(manager.createBuffer(size, filledRange)),
+		manager_(manager),
+		filled_(true) {
+}
+
+SQLOps::OpAllocatorManager::BufferRef::~BufferRef() {
+	if (!filled_) {
+		buffer_.filledRange_ = 0;
+	}
+	manager_.releaseBuffer(buffer_);
+}
+
+const SQLOps::OpAllocatorManager::Buffer&
+SQLOps::OpAllocatorManager::BufferRef::get() {
+	filled_ = false;
+	return buffer_;
+}
+
+void SQLOps::OpAllocatorManager::BufferRef::setFilled() {
+	assert(Buffer::checkFilled(buffer_.addr_, buffer_.filledRange_));
+	filled_ = true;
+}
+
+
+SQLOps::OpAllocatorManager::CleanUpHandler::CleanUpHandler(
+		OpAllocatorManager *manager) :
+		manager_(manager) {
+}
+
+void SQLOps::OpAllocatorManager::CleanUpHandler::operator()() throw() {
+	if (manager_ != NULL) {
+		manager_->cleanUpAllocators();
+		manager_ = NULL;
+	}
+}
+
+
+SQLOps::OpLatchKeeperManager*
+SQLOps::OpLatchKeeperManager::DEFAULT_INSTANCE = initializeDefault();
 
 SQLOps::OpLatchKeeperManager::OpLatchKeeperManager(
 		const util::StdAllocator<void, void> &alloc, bool composite) :
@@ -1282,11 +1930,19 @@ SQLOps::OpLatchKeeperManager::~OpLatchKeeperManager() {
 	entryList_.clear();
 }
 
+SQLOps::OpLatchKeeperManager& SQLOps::OpLatchKeeperManager::getDefault() {
+	if (DEFAULT_INSTANCE == NULL) {
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+	return *DEFAULT_INSTANCE;
+}
+
 SQLOps::OpLatchKeeperManager&
-SQLOps::OpLatchKeeperManager::getSubManager(OpContext &cxt) {
+SQLOps::OpLatchKeeperManager::getSubManager(
+		ExtOpContext &cxt, util::StdAllocator<void, void> &subAlloc) {
 	assert(composite_);
 
-	const uint32_t workerId = cxt.getExtContext().getTotalWorkerId();
+	const uint32_t workerId = cxt.getTotalWorkerId();
 
 	util::LockGuard<util::Mutex> guard(*mutex_);
 	if (workerId >= subList_.size()) {
@@ -1295,8 +1951,6 @@ SQLOps::OpLatchKeeperManager::getSubManager(OpContext &cxt) {
 
 	OpLatchKeeperManager *&sub = subList_[workerId];
 	if (sub == NULL) {
-		util::StdAllocator<void, void> subAlloc =
-				cxt.getValueContext().getVarAllocator();
 		sub = ALLOC_NEW(alloc_) OpLatchKeeperManager(subAlloc, false);
 	}
 
@@ -1408,6 +2062,20 @@ void SQLOps::OpLatchKeeperManager::adjust(const KeeperId &id, uint64_t size) {
 	}
 }
 
+SQLOps::OpLatchKeeperManager*
+SQLOps::OpLatchKeeperManager::initializeDefault() throw() {
+	static std::allocator<uint8_t> alloc;
+	static util::LocalUniquePtr<OpLatchKeeperManager> instance;
+	assert(instance.get() == NULL);
+	try {
+		instance = UTIL_MAKE_LOCAL_UNIQUE(
+				instance, OpLatchKeeperManager, alloc, true);
+	}
+	catch (...) {
+	}
+	return instance.get();
+}
+
 
 SQLOps::OpLatchKeeperManager::Entry::Entry() :
 		hot_(false),
@@ -1490,11 +2158,36 @@ void SQLOps::OpProfiler::addOperatorProfile(
 	ref.executionCount_ += info.executionCount_;
 	ref.actualNanoTime_ += info.actualNanoTime_;
 
+	addOptimizationProfile(info.optimization_, dest.optimization_);
+
 	if (info.index_ != NULL) {
 		for (util::AllocVector<AnalysisIndexInfo>::iterator it =
 				info.index_->begin(); it != info.index_->end(); ++it) {
 			addIndexProfile(id, *it);
 		}
+	}
+}
+
+void SQLOps::OpProfiler::addOptimizationProfile(
+		const OptimizationList *src, LocalOptimizationInfoList &dest) {
+	if (src == NULL || src->empty()) {
+		return;
+	}
+
+	if (dest.empty()) {
+		dest.push_back(LocalOptimizationInfo());
+	}
+	LocalOptimizationInfo &destInfo = dest.front();
+
+	for (OptimizationList::const_iterator it = src->begin();	
+			it != src->end(); ++it) {
+		SQLValues::ProfileElement &destElem = destInfo.get(it->type_);
+
+		SQLValues::ProfileElement srcElem;
+		srcElem.candidate_ = it->candidate_;
+		srcElem.target_ = it->target_;
+
+		destElem.merge(srcElem);
 	}
 }
 
@@ -1556,6 +2249,8 @@ SQLOpUtils::AnalysisInfo SQLOps::OpProfiler::getAnalysisInfo(
 		OpProfiler *profiler, LocalInfo &src) {
 	AnalysisInfo &ref = src.ref_.front();
 
+	ref.optimization_ = getOptimizations(src);
+
 	ref.index_ = NULL;
 	LocalIndexInfoList &indexList = src.index_;
 	if (!indexList.empty()) {
@@ -1567,7 +2262,7 @@ SQLOpUtils::AnalysisInfo SQLOps::OpProfiler::getAnalysisInfo(
 		ref.index_ = &src.indexRef_;
 	}
 
-	ref.sub_ = NULL;
+	ref.op_ = NULL;
 	SubMap &subMap = src.sub_;
 	if (!subMap.empty()) {
 		assert(profiler != NULL);
@@ -1575,13 +2270,46 @@ SQLOpUtils::AnalysisInfo SQLOps::OpProfiler::getAnalysisInfo(
 		for (SubMap::iterator it = subMap.begin(); it != subMap.end(); ++it) {
 			src.subRef_.push_back(profiler->getAnalysisInfo(&it->second));
 		}
-		ref.sub_ = &src.subRef_;
+		ref.op_ = &src.subRef_;
 	}
 
 	ref.actualTime_ =
 			static_cast<int64_t>(nanoTimeToMillis(ref.actualNanoTime_));
 
 	return ref;
+}
+
+SQLOps::OpProfiler::OptimizationList* SQLOps::OpProfiler::getOptimizations(
+		LocalInfo &src) {
+	OptimizationList &destList = src.optRef_;
+	destList.clear();
+
+	if (src.optimization_.empty()) {
+		return NULL;
+	}
+	const LocalOptimizationInfo &srcInfo = src.optimization_.front();
+
+	for (size_t i = 0; i < SQLOpTypes::END_OPT; i++) {
+		const SQLOpTypes::Optimization type =
+				static_cast<SQLOpTypes::Optimization>(i);
+
+		const SQLValues::ProfileElement &elem = srcInfo.get(type);
+		if (elem.candidate_ <= 0) {
+			continue;
+		}
+
+		AnalysisOptimizationInfo destInfo;
+		destInfo.type_ = type;
+		destInfo.candidate_ = elem.candidate_;
+		destInfo.target_ = elem.target_;
+		destList.push_back(destInfo);
+	}
+
+	if (destList.empty()) {
+		return NULL;
+	}
+
+	return &destList;
 }
 
 SQLOpUtils::AnalysisIndexInfo SQLOps::OpProfiler::getAnalysisIndexInfo(
@@ -1646,11 +2374,62 @@ SQLOps::OpProfiler::LocalInfo& SQLOps::OpProfiler::createInfo(
 
 SQLOps::OpProfiler::LocalInfo::LocalInfo(
 		const util::StdAllocator<void, void> &alloc) :
+		optimization_(alloc),
 		index_(alloc),
 		sub_(alloc),
+		optRef_(alloc),
 		indexRef_(alloc),
 		subRef_(alloc),
 		ref_(alloc) {
+}
+
+
+SQLValues::ProfileElement& SQLOps::OpProfiler::LocalOptimizationInfo::get(
+		SQLOpTypes::Optimization type) {
+	void *addr = this;
+	void *elemAddr = static_cast<uint8_t*>(addr) + getOffset(type);
+	return *static_cast<SQLValues::ProfileElement*>(elemAddr);
+}
+
+const SQLValues::ProfileElement& SQLOps::OpProfiler::LocalOptimizationInfo::get(
+		SQLOpTypes::Optimization type) const {
+	const void *addr = this;
+	const void *elemAddr = static_cast<const uint8_t*>(addr) + getOffset(type);
+	return *static_cast<const SQLValues::ProfileElement*>(elemAddr);
+}
+
+size_t SQLOps::OpProfiler::LocalOptimizationInfo::getOffset(
+		SQLOpTypes::Optimization type) {
+	typedef SQLExprs::ExprProfile ExprProfile;
+	typedef SQLValues::ValueProfile ValueProfile;
+	switch (type) {
+	case SQLOpTypes::OPT_VALUE_COMP_NO_NULL:
+		return getValueOffset() + offsetof(ValueProfile, noNull_);
+	case SQLOpTypes::OPT_VALUE_COMP_NO_SWITCH:
+		return getValueOffset() + offsetof(ValueProfile, noSwitch_);
+	case SQLOpTypes::OPT_EXPR_COMP_CONST:
+		return getExprOffset() + offsetof(ExprProfile, compConst_);
+	case SQLOpTypes::OPT_EXPR_COMP_COLUMNS:
+		return getExprOffset() + offsetof(ExprProfile, compColumns_);
+	case SQLOpTypes::OPT_EXPR_COND_IN_LIST:
+		return getExprOffset() + offsetof(ExprProfile, condInList_);
+	case SQLOpTypes::OPT_EXPR_OUT_NO_NULL:
+		return getExprOffset() + offsetof(ExprProfile, outNoNull_);
+	case SQLOpTypes::OPT_OP_COMP_CONST:
+		return offsetof(LocalOptimizationInfo, compConst_);
+	default:
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+}
+
+size_t SQLOps::OpProfiler::LocalOptimizationInfo::getExprOffset() {
+	return offsetof(LocalOptimizationInfo, exprProfile_);
+}
+
+size_t SQLOps::OpProfiler::LocalOptimizationInfo::getValueOffset() {
+	typedef SQLExprs::ExprProfile ExprProfile;
+	return getExprOffset() + offsetof(ExprProfile, valueProfile_);
 }
 
 
@@ -1698,6 +2477,19 @@ SQLOpUtils::AnalysisInfo SQLOps::OpProfilerEntry::get() {
 	return OpProfiler::getAnalysisInfo(NULL, localInfo_);
 }
 
+SQLOps::OpProfilerOptimizationEntry&
+SQLOps::OpProfilerEntry::getOptimizationEntry() {
+	if (optimization_.get() == NULL) {
+		if (localInfo_.optimization_.empty()) {
+			localInfo_.optimization_.push_back(LocalOptimizationInfo());
+		}
+		optimization_ = ALLOC_UNIQUE(
+				alloc_, OpProfilerOptimizationEntry,
+				localInfo_.optimization_.front());
+	}
+	return *optimization_;
+}
+
 SQLOps::OpProfilerIndexEntry& SQLOps::OpProfilerEntry::getIndexEntry() {
 	if (index_.get() == NULL) {
 		if (localInfo_.index_.empty()) {
@@ -1708,6 +2500,30 @@ SQLOps::OpProfilerIndexEntry& SQLOps::OpProfilerEntry::getIndexEntry() {
 				alloc_, OpProfilerIndexEntry, alloc_, localIndexInfo);
 	}
 	return *index_;
+}
+
+
+SQLOps::OpProfilerOptimizationEntry::OpProfilerOptimizationEntry(
+		LocalOptimizationInfo &localInfo) :
+		localInfo_(localInfo) {
+}
+
+SQLExprs::ExprProfile* SQLOps::OpProfilerOptimizationEntry::getExprProfile(
+		OpProfilerOptimizationEntry *entry) {
+	if (entry == NULL) {
+		return NULL;
+	}
+	return &entry->localInfo_.exprProfile_;
+}
+
+SQLValues::ProfileElement& SQLOps::OpProfilerOptimizationEntry::get(
+		SQLOpTypes::Optimization type) {
+	return localInfo_.get(type);
+}
+
+const SQLValues::ProfileElement& SQLOps::OpProfilerOptimizationEntry::get(
+		SQLOpTypes::Optimization type) const {
+	return localInfo_.get(type);
 }
 
 
@@ -1815,8 +2631,8 @@ const util::NameCoderEntry<SQLOpTypes::Type>
 		SQLOpUtils::AnalysisInfo::OP_TYPE_LIST[] = {
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SCAN),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SCAN_CONTAINER_FULL),
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SCAN_CONTAINER_RANGE),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SCAN_CONTAINER_INDEX),
-	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SCAN_CONTAINER_UPDATES),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SCAN_CONTAINER_META),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SELECT),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SELECT_PIPE),
@@ -1835,9 +2651,10 @@ const util::NameCoderEntry<SQLOpTypes::Type>
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_JOIN_SORTED),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_JOIN_NESTED),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_JOIN_COMP_MERGE),
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_JOIN_HASH),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_JOIN_OUTER_NESTED),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_JOIN_OUTER_COMP_MERGE),
-	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_JOIN_HASH),
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_JOIN_OUTER_HASH),
 
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_GROUP),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_GROUP_DISTINCT),
@@ -1847,8 +2664,11 @@ const util::NameCoderEntry<SQLOpTypes::Type>
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_UNION_ALL),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_UNION_SORTED),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_UNION_DISTINCT_MERGE),
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_UNION_DISTINCT_HASH),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_UNION_INTERSECT_MERGE),
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_UNION_INTERSECT_HASH),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_UNION_EXCEPT_MERGE),
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_UNION_EXCEPT_HASH),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_UNION_COMPENSATE_MERGE),
 
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_PARENT_INPUT),
@@ -1863,20 +2683,43 @@ SQLOpUtils::AnalysisInfo::AnalysisInfo() :
 		opCount_(-1),
 		executionCount_(0),
 		actualTime_(0),
+		optimization_(NULL),
 		index_(NULL),
-		sub_(NULL),
+		op_(NULL),
 		actualNanoTime_(0) {
 }
 
 SQLOpUtils::AnalysisRootInfo SQLOpUtils::AnalysisInfo::toRoot() const {
 	AnalysisRootInfo dest;
-	dest.sub_ = sub_;
+	dest.op_ = op_;
 	return dest;
 }
 
 
 SQLOpUtils::AnalysisRootInfo::AnalysisRootInfo() :
-		sub_(NULL) {
+		op_(NULL) {
+}
+
+
+const util::NameCoderEntry<SQLOpTypes::Optimization>
+		SQLOpUtils::AnalysisOptimizationInfo::OPT_TYPE_LIST[] = {
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OPT_VALUE_COMP_NO_NULL),
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OPT_VALUE_COMP_NO_SWITCH),
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OPT_EXPR_COMP_CONST),
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OPT_EXPR_COMP_COLUMNS),
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OPT_EXPR_COND_IN_LIST),
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OPT_EXPR_OUT_NO_NULL),
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OPT_OP_COMP_CONST)
+};
+
+const util::NameCoder<
+		SQLOpTypes::Optimization, SQLOpTypes::END_OPT>
+		SQLOpUtils::AnalysisOptimizationInfo::OPT_TYPE_CODER(OPT_TYPE_LIST, 1);
+
+SQLOpUtils::AnalysisOptimizationInfo::AnalysisOptimizationInfo() :
+		type_(SQLOpTypes::END_OPT),
+		candidate_(0),
+		target_(0) {
 }
 
 
@@ -1931,7 +2774,8 @@ SQLOpUtils::ExpressionWriter::ExpressionWriter() :
 void SQLOpUtils::ExpressionWriter::initialize(
 		ExprFactoryContext &cxt, const Expression &expr,
 		const TupleColumn &outColumn, ContextRef *cxtRef,
-		TupleListReader **readerRef, WritableTuple *outTuple) {
+		TupleListReader **readerRef, WritableTuple *outTuple,
+		bool inputMapping) {
 	typedef SQLExprs::ExprCode ExprCode;
 
 	readerRef_ = readerRef;
@@ -1945,28 +2789,41 @@ void SQLOpUtils::ExpressionWriter::initialize(
 	const ExprCode &code = expr.getCode();
 
 	const uint32_t input =
-			(code.getType() == SQLType::AGG_FIRST ? 0 : code.getInput());
+			(inputMapping || code.getType() == SQLType::AGG_FIRST ?
+					0 : code.getInput());
 	const uint32_t column = code.getColumnPos();
+
+	const TupleColumnType baseInColumnType = (
+			code.getType() == SQLType::EXPR_COLUMN ?
+					cxt.getInputType(input, column) :
+					code.getColumnType());
+
+	const bool inColumnUnified = ((code.getAttributes() &
+					SQLExprs::ExprCode::ATTR_COLUMN_UNIFIED) != 0);
+	const bool inColumnPromoting = inColumnUnified || (
+			SQLValues::TypeUtils::toNonNullable(outColumn.getType()) !=
+			SQLValues::TypeUtils::toNonNullable(baseInColumnType));
 
 	const SQLExprs::ExprCode::InputSourceType srcType =
 			cxt.getInputSourceType(input);
-	const bool forColumn = (
-			code.getType() == SQLType::EXPR_COLUMN &&
-			(code.getAttributes() &
-					SQLExprs::ExprCode::ATTR_COLUMN_UNIFIED) == 0 &&
+	const bool sourceSpecific =
 			(srcType == SQLExprs::ExprCode::INPUT_READER ||
-					srcType == SQLExprs::ExprCode::INPUT_SUMMARY_TUPLE ||
-					srcType == SQLExprs::ExprCode::INPUT_READER_MULTI) &&
-			SQLValues::TypeUtils::toNonNullable(outColumn.getType()) ==
-					SQLValues::TypeUtils::toNonNullable(
-							cxt.getInputType(input, column)));
+			srcType == SQLExprs::ExprCode::INPUT_SUMMARY_TUPLE ||
+			srcType == SQLExprs::ExprCode::INPUT_READER_MULTI);
+
+	const bool varGenerative =
+			SQLExprs::ExprRewriter::findVarGenerativeExpr(expr) ||
+			(srcType == SQLExprs::ExprCode::INPUT_SUMMARY_TUPLE &&
+					SQLValues::TypeUtils::isLob(baseInColumnType));
+	const bool forColumn = (
+			!varGenerative &&
+			code.getType() == SQLType::EXPR_COLUMN &&
+			sourceSpecific && !inColumnPromoting);
 	const bool forSimpleAggr = (
-			!forColumn &&
+			!varGenerative && !forColumn &&
 			code.getType() == SQLType::AGG_FIRST &&
 			expr.findChild() == NULL &&
-			(srcType == SQLExprs::ExprCode::INPUT_READER ||
-					srcType == SQLExprs::ExprCode::INPUT_SUMMARY_TUPLE ||
-					srcType == SQLExprs::ExprCode::INPUT_READER_MULTI));
+			sourceSpecific);
 
 	if (forColumn) {
 		inColumn_ = cxt.getInputColumn(input, column);
@@ -2023,7 +2880,24 @@ void SQLOpUtils::ExpressionWriter::initialize(
 		}
 	}
 
-	func_ = resolveFunc<const ExpressionWriter>();
+	TupleColumnType inColumnType = outColumn.getType();
+	if ((inSummaryColumn_ != NULL &&
+			inSummaryColumn_->getNullsOffset() < 0) ||
+			(code.getType() == SQLType::EXPR_COLUMN &&
+					inSummaryColumn_ == NULL && !inColumnPromoting &&
+					!SQLValues::TypeUtils::isNullable(baseInColumnType))) {
+		inColumnType = SQLValues::TypeUtils::toNonNullable(inColumnType);
+	}
+
+	if (inSummaryColumn_ != NULL &&
+			SQLValues::TypeUtils::isNullable(
+					inSummaryColumn_->getTupleColumn().getType()) &&
+			!SQLValues::TypeUtils::isNullable(inColumnType)) {
+		inColumnType = SQLValues::TypeUtils::toNullable(inColumnType);
+	}
+
+	func_ = resolveFunc<const ExpressionWriter>(
+			cxt, inColumnType, varGenerative);
 }
 
 void SQLOpUtils::ExpressionWriter::setExpression(const Expression &expr) {
@@ -2067,8 +2941,22 @@ SQLOpUtils::ExpressionWriter::getInSummaryColumn() const {
 
 template<typename Op>
 SQLOpUtils::ExpressionWriter::Switcher::DefaultFuncType
-SQLOpUtils::ExpressionWriter::resolveFunc() const {
-	return Switcher(*this).getWith<Op, Switcher::DefaultTraitsType>();
+SQLOpUtils::ExpressionWriter::resolveFunc(
+		ExprFactoryContext &cxt, TupleColumnType inColumnType,
+		bool varGenerative) const {
+	SQLValues::ValueProfile valueProfile;
+
+	Switcher switcher(*this, inColumnType, varGenerative);
+	switcher.profile_ = &valueProfile;
+	const Switcher::DefaultFuncType func = switcher.getWith<
+			Op, Switcher::DefaultTraitsType>();
+
+	SQLExprs::ExprProfile *profile = cxt.getProfile();
+	if (profile != NULL) {
+		profile->outNoNull_.merge(valueProfile.noNull_);
+	}
+
+	return func;
 }
 
 
@@ -2161,11 +3049,14 @@ inline void SQLOpUtils::ExpressionWriter::BySummaryTupleBody<T>::operator()() co
 }
 
 
-template<typename T>
-inline void SQLOpUtils::ExpressionWriter::ByGeneral<T>::operator()() const {
+template<typename T, bool G>
+inline void SQLOpUtils::ExpressionWriter::ByGeneral<T, G>::operator()() const {
 	typedef SQLValues::ValueUtils ValueUtils;
 	typedef typename T::Type TypeTag;
 	typedef typename T::ValueType ValueType;
+
+	assert(base_.cxtRef_->cxt_ != NULL);
+	ConditionalVarContextScope<G> varScope(*base_.cxtRef_->cxt_);
 
 	const TupleValue &value =
 			base_.expr_->eval(base_.cxtRef_->cxt_->getExprContext());
@@ -2186,34 +3077,48 @@ SQLOpUtils::ExpressionWriter::ContextRef::ContextRef() :
 }
 
 
+SQLOpUtils::ExpressionWriter::Switcher::Switcher(
+		const ExpressionWriter &base, TupleColumnType inColumnType,
+		bool varGenerative) :
+		base_(base),
+		inColumnType_(inColumnType),
+		varGenerative_(varGenerative),
+		profile_(NULL) {
+}
+
 template<typename Op, typename Traits>
 typename Traits::template Func<Op>::Type
 SQLOpUtils::ExpressionWriter::Switcher::getWith() const {
 	switch (base_.srcType_) {
 	case SQLExprs::ExprCode::INPUT_READER:
-		return getSubWith<Op, Traits, SQLExprs::ExprCode::INPUT_READER>();
+		return getSubWith<Op, Traits, SQLExprs::ExprCode::INPUT_READER, false>();
 	case SQLExprs::ExprCode::INPUT_READER_MULTI:
-		return getSubWith<Op, Traits, SQLExprs::ExprCode::INPUT_READER_MULTI>();
+		return getSubWith<
+				Op, Traits, SQLExprs::ExprCode::INPUT_READER_MULTI, false>();
 	case SQLExprs::ExprCode::INPUT_SUMMARY_TUPLE:
-		return getSubWith<Op, Traits, SQLExprs::ExprCode::INPUT_SUMMARY_TUPLE>();
+		return getSubWith<
+				Op, Traits, SQLExprs::ExprCode::INPUT_SUMMARY_TUPLE, false>();
 	case SQLExprs::ExprCode::INPUT_SUMMARY_TUPLE_BODY:
-		return getSubWith<Op, Traits, SQLExprs::ExprCode::INPUT_SUMMARY_TUPLE_BODY>();
+		return getSubWith<
+				Op, Traits, SQLExprs::ExprCode::INPUT_SUMMARY_TUPLE_BODY, false>();
 	default:
 		assert(!base_.isForColumn());
-		return getSubWith<Op, Traits, SQLExprs::ExprCode::END_INPUT>();
+		if (varGenerative_) {
+			return getSubWith<Op, Traits, SQLExprs::ExprCode::END_INPUT, true>();
+		}
+		else {
+			return getSubWith<Op, Traits, SQLExprs::ExprCode::END_INPUT, false>();
+		}
 	}
 }
 
-template<typename Op, typename Traits, SQLExprs::ExprCode::InputSourceType S>
+template<
+		typename Op, typename Traits, SQLExprs::ExprCode::InputSourceType S,
+		bool G>
 typename Traits::template Func<Op>::Type
 SQLOpUtils::ExpressionWriter::Switcher::getSubWith() const {
-	TupleColumnType type = base_.expr_->getCode().getColumnType();
-	if (base_.inSummaryColumn_ != NULL &&
-			base_.inSummaryColumn_->getNullsOffset() < 0) {
-		type = SQLValues::TypeUtils::toNonNullable(type);
-	}
-	return TypeSwitcher(type).getWith<
-			Op, typename OpTraitsAt<Traits, S>::Type>();
+	return TypeSwitcher(inColumnType_).withProfile(profile_).getWith<
+			Op, typename OpTraitsAt<Traits, S, G>::Type>();
 }
 
 
@@ -2262,7 +3167,8 @@ SQLOpUtils::ExpressionListWriter::ExpressionListWriter(const Source &source) :
 	for (SQLExprs::Expression::Iterator it(*base); it.exists(); it.next()) {
 		writerList_[colIt - destColumnList.begin()].initialize(
 				exprCxt, it.get(), *colIt,
-				&cxtRef_, activeReaderRef_, &outTuple_);
+				&cxtRef_, activeReaderRef_, &outTuple_,
+				source.isInputMapping());
 		columExprFound_ |= writerList_.back().isForColumn();
 		++colIt;
 	}
@@ -2305,8 +3211,12 @@ void SQLOpUtils::ExpressionListWriter::setKeyColumnList(
 			break;
 		}
 
+		if (!keyColumn.isOrdering() && keyColumnList.size() == 1 && longKeyOnly) {
+			break;
+		}
+
 		const SQLValues::TupleComparator comp(
-				keyColumnList, false, true, nullIgnorable);
+				keyColumnList, NULL, false, true, nullIgnorable);
 		if (!comp.isDigestOnly(false)) {
 			if (forSummary) {
 				if (SQLValues::TypeUtils::isLob(type) ||
@@ -2397,7 +3307,8 @@ SQLOpUtils::ExpressionListWriter::Source::Source(
 		OpContext &cxt, const Projection &proj, bool forMiddle,
 		const SQLValues::CompColumnList *keyColumnList,
 		bool nullIgnorable, const Projection *inMiddleProj,
-		SQLExprs::ExprCode::InputSourceType srcType) {
+		SQLExprs::ExprCode::InputSourceType srcType,
+		const uint32_t *mappedInput) {
 	entry_.code_ = &proj.getProjectionCode();
 
 	entry_.cxt_ = &cxt;
@@ -2406,8 +3317,14 @@ SQLOpUtils::ExpressionListWriter::Source::Source(
 	entry_.nullIgnorable_ = nullIgnorable;
 	entry_.keyColumnList_ = keyColumnList;
 
-	builder_ = UTIL_MAKE_LOCAL_UNIQUE(
-			builder_, OpCodeBuilder, OpCodeBuilder::ofContext(cxt));
+	OpCodeBuilder::Source builderSrc = OpCodeBuilder::ofContext(cxt);
+	if (mappedInput != NULL) {
+		assert(*mappedInput != std::numeric_limits<uint32_t>::max());
+		builderSrc.mappedInput_ = *mappedInput;
+		entry_.inputMapping_ = true;
+	}
+
+	builder_ = UTIL_MAKE_LOCAL_UNIQUE(builder_, OpCodeBuilder, builderSrc);
 	entry_.factoryCxt_ = &builder_->getProjectionFactoryContext();
 
 	SQLExprs::ExprCode::InputSourceType resolvedSrcType = srcType;
@@ -2421,7 +3338,7 @@ SQLOpUtils::ExpressionListWriter::Source::Source(
 				SQLExprs::ExprCode::INPUT_READER_MULTI);
 	}
 	else {
-		cxt.setUpProjectionFactoryContext(*entry_.factoryCxt_);
+		cxt.setUpProjectionFactoryContext(*entry_.factoryCxt_, mappedInput);
 	}
 
 	SQLExprs::ExprFactoryContext &exprCxt =
@@ -2445,6 +3362,10 @@ const SQLOps::ProjectionCode&
 SQLOpUtils::ExpressionListWriter::Source::getCode() const {
 	assert(entry_.code_ != NULL);
 	return *entry_.code_;
+}
+
+bool SQLOpUtils::ExpressionListWriter::Source::isInputMapping() const {
+	return entry_.inputMapping_;
 }
 
 void SQLOpUtils::ExpressionListWriter::Source::setUp(
@@ -2488,6 +3409,7 @@ SQLOpUtils::ExpressionListWriter::Source::Entry::Entry():
 		forMiddle_(false),
 		longKeyOnly_(false),
 		nullIgnorable_(false),
+		inputMapping_(false),
 		keyColumnList_(NULL),
 		outIndex_(std::numeric_limits<uint32_t>::max()) {
 }

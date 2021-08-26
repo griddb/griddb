@@ -63,7 +63,7 @@
 const char8_t *const GS_PRODUCT_NAME = "GridDB";
 const int32_t GS_MAJOR_VERSION = 4;
 const int32_t GS_MINOR_VERSION = 6;
-const int32_t GS_REVISION = 0;
+const int32_t GS_REVISION = 1;
 const int32_t GS_BUILD_NO = 37895;
 
 const char8_t *const GS_EDITION_NAME = "Community Edition";

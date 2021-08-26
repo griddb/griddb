@@ -119,7 +119,8 @@ struct SQLAggrExprs::Specs {
 		typedef Base::Type<TupleTypes::TYPE_NULL, Base::InList<
 				Base::In<TupleTypes::TYPE_ANY> >,
 				ExprSpec::FLAG_INHERIT1 |
-				ExprSpec::FLAG_WINDOW, Base::InList<
+				ExprSpec::FLAG_WINDOW |
+				ExprSpec::FLAG_COMP_SENSITIVE, Base::InList<
 				Base::In<TupleTypes::TYPE_ANY> >,
 				SQLType::AGG_MAX> Type;
 	};
@@ -139,7 +140,8 @@ struct SQLAggrExprs::Specs {
 		typedef Base::Type<TupleTypes::TYPE_NULL, Base::InList<
 				Base::In<TupleTypes::TYPE_ANY> >,
 				ExprSpec::FLAG_INHERIT1 |
-				ExprSpec::FLAG_WINDOW, Base::InList<
+				ExprSpec::FLAG_WINDOW |
+				ExprSpec::FLAG_COMP_SENSITIVE, Base::InList<
 				Base::In<TupleTypes::TYPE_ANY> >,
 				SQLType::AGG_MIN> Type;
 	};
@@ -379,12 +381,17 @@ struct SQLAggrExprs::Functions::LagLead {
 	typedef FunctionUtils::AggregationValues<TupleValue> Aggr;
 
 	struct Advance {
-		typedef DefaultPolicy::AsPartiallyFinishable Policy;
+		typedef DefaultPolicy::AsPartiallyFinishable::
+				AsArgsDelayedEvaluable Policy;
+
+		Advance();
 
 		template<typename C>
 		void operator()(C &cxt, const Aggr &aggr, const TupleValue &v);
 		template<typename C>
-		void operator()(C &cxt, const Aggr &aggr, const int64_t &v);
+		void operator()(C &cxt, const Aggr &aggr);
+
+		bool positioning_;
 	};
 
 	typedef void Merge;

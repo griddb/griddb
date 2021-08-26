@@ -25,8 +25,8 @@ SQLScanOps::Registrar::REGISTRAR_INSTANCE((Registrar()));
 void SQLScanOps::Registrar::operator()() const {
 	add<SQLOpTypes::OP_SCAN, Scan>();
 	add<SQLOpTypes::OP_SCAN_CONTAINER_FULL, ScanContainerFull>();
+	add<SQLOpTypes::OP_SCAN_CONTAINER_RANGE, ScanContainerRange>();
 	add<SQLOpTypes::OP_SCAN_CONTAINER_INDEX, ScanContainerIndex>();
-	add<SQLOpTypes::OP_SCAN_CONTAINER_UPDATES, ScanContainerUpdates>();
 	add<SQLOpTypes::OP_SCAN_CONTAINER_META, ScanContainerMeta>();
 	add<SQLOpTypes::OP_SELECT, Select>();
 	add<SQLOpTypes::OP_SELECT_PIPE, SelectPipe>();
@@ -49,16 +49,25 @@ SQLScanOps::BaseScanContainerOperator::getScanCursor(
 
 	if (cxt.getInputResource(inIndex).isEmpty()) {
 		ScanCursor::Source source(
-				cxt.getAllocator(), getCode().getContainerLocation(), NULL);
+				cxt.getAllocator(), cxt.getLatchHolder(),
+				getCode().getContainerLocation(), NULL, cxt.getSource());
 
-		int64_t confValue = SQLOps::OpConfig::resolve(
-				SQLOpTypes::CONF_INDEX_LIMIT, getCode().getConfig());
-		if (confValue < 0) {
-			confValue = 100 * 1000;
-		}
-		source.indexLimit_ = confValue;
+		const SQLOps::OpConfig *config = getCode().getConfig();
 
-		util::StdAllocator<void, void> cursorAlloc = cxt.getAllocator(); 
+		source.indexLimit_ = SQLOps::OpConfig::resolve(
+				SQLOpTypes::CONF_INDEX_LIMIT, config);
+		source.memLimit_ = SQLOps::OpConfig::resolve(
+				SQLOpTypes::CONF_WORK_MEMORY_LIMIT, config);
+
+		const SQLOps::OpConfig::Value scanCount = SQLOps::OpConfig::resolve(
+				SQLOpTypes::CONF_INTERRUPTION_SCAN_COUNT, config);
+		source.partialExecSizeRange_.first =
+				static_cast<uint64_t>(std::max<int64_t>(scanCount, 0));
+		source.partialExecSizeRange_.second =
+				static_cast<uint64_t>(std::max<int64_t>(
+						cxt.getNextCountForSuspend(), 0));
+
+		util::StdAllocator<void, void> cursorAlloc = cxt.getValueContext().getVarAllocator();
 		cxt.getInputResource(inIndex) =
 				SQLContainerUtils::ScanCursor::create(cursorAlloc, source);
 	}
@@ -88,14 +97,6 @@ SQLScanOps::BaseScanContainerOperator::getScanCursor(
 			cxt.getExprContext().setReader(
 					inIndex, &cxt.getExprContext().getReader(inIndex), columnList);
 		}
-
-		SQLOps::OpConfig config;
-		cxt.getExtContext().getConfig(config);
-		const SQLOps::OpConfig::Value count =
-				config.get(SQLOpTypes::CONF_INTERRUPTION_SCAN_COUNT);
-		if (count >= 0) {
-			cxt.setNextCountForSuspend(static_cast<uint64_t>(count));
-		}
 	}
 
 	return cxt.getInputResource(inIndex).resolveAs<ScanCursor>();
@@ -110,7 +111,15 @@ void SQLScanOps::BaseScanContainerOperator::unbindScanCursor(
 
 void SQLScanOps::Scan::compile(OpContext &cxt) const {
 	OpPlan &plan = cxt.getPlan();
+	if (tryCompileIndexJoin(cxt, plan)) {
+		return;
+	}
+	else if (tryCompileEmpty(cxt, plan)) {
+		return;
+	}
 
+
+	util::StackAllocator &alloc = cxt.getAllocator();
 
 	const SQLOps::ContainerLocation &location =
 			getCode().getContainerLocation();
@@ -119,13 +128,16 @@ void SQLScanOps::Scan::compile(OpContext &cxt) const {
 	bool indexPlanned = !plan.isEmpty();
 	SQLExprs::IndexSelector *selector = NULL;
 	do {
-		const SQLExprs::Expression *expr = getCode().getFilterPredicate();
+		const SQLExprs::Expression *expr = getCode().getJoinPredicate();
+		if (expr == NULL) {
+			expr = getCode().getFilterPredicate();
+		}
 		if (forMeta || expr == NULL || !location.indexActivated_) {
 			break;
 		}
 
 		ScanCursor &cursor = getScanCursor(cxt, true);
-		if (indexPlanned) {
+		if (indexPlanned || getCode().getLimit() == 0 || cursor.isIndexLost()) {
 			if (cursor.isIndexLost()) {
 				unbindScanCursor(NULL, cursor);
 				indexPlanned = false;
@@ -133,12 +145,11 @@ void SQLScanOps::Scan::compile(OpContext &cxt) const {
 			break;
 		}
 
-		util::StackAllocator &alloc = cxt.getAllocator();
-		SQLOps::ColumnTypeList typeList(alloc);
+		ColumnTypeList inputTypeList(alloc);
+		TupleList::Info inputInfo = getInputInfo(cxt, inputTypeList);
 
 		selector = ALLOC_NEW(alloc) SQLExprs::IndexSelector(
-				alloc, alloc, SQLType::EXPR_COLUMN,
-				getInputInfo(cxt, typeList));
+				alloc, alloc, SQLType::EXPR_COLUMN, inputInfo);
 		if (location.multiIndexActivated_) {
 			selector->setMultiAndConditionEnabled(true);
 		}
@@ -168,7 +179,13 @@ void SQLScanOps::Scan::compile(OpContext &cxt) const {
 	OpCode baseCode = getCode();
 	Projection *distinctProj = NULL;
 	std::pair<Projection*, Projection*> projections;
-	if (!forMeta && !indexPlanned && selector == NULL) {
+	if (indexPlanned && selector == NULL) {
+		builder.assignInputTypesByProjection(
+				OpCodeBuilder::resolveOutputProjection(baseCode, NULL), NULL);
+		projections.first = &builder.createIdenticalProjection(false, 0);
+		baseCode = OpCode();
+	}
+	else if (!forMeta) {
 		projections = builder.arrangeProjections(
 				baseCode, true, true, &distinctProj);
 		assert(projections.first != NULL);
@@ -182,10 +199,12 @@ void SQLScanOps::Scan::compile(OpContext &cxt) const {
 		rewriter.clearColumnUsage();
 
 		const bool withId = true;
-		builder.addColumnUsage(getCode(), withId);
 
 		if (indexPlanned || selector != NULL) {
 			rewriter.setIdOfInput(0, true);
+		}
+		else {
+			builder.addColumnUsage(getCode(), withId);
 		}
 	}
 
@@ -195,6 +214,8 @@ void SQLScanOps::Scan::compile(OpContext &cxt) const {
 	rewriter.setInputProjected(true);
 
 	if (selector != NULL) {
+		const bool parentPending = (projections.second != NULL);
+
 		const SQLExprs::IndexConditionList &condList =
 				selector->getConditionList();
 
@@ -208,15 +229,36 @@ void SQLScanOps::Scan::compile(OpContext &cxt) const {
 
 		Projection *midUnionProj = &builder.createProjectionByUsage(true);
 
-		OpNode &topNode = plan.createNode(SQLOpTypes::OP_UNION);
+		OpNode &rangeNode = OpCodeBuilder::setUpOutputNodesDetail(
+				plan, NULL, parentPending, NULL,
+				SQLOpTypes::OP_SCAN_CONTAINER_RANGE,
+				distinctProj, baseCode.getAggregationPhase(), NULL);
 		{
+			OpNode &node = rangeNode;
 			OpCode code;
-			code.setUnionType(SQLType::UNION_DISTINCT);
-			code.setKeyColumnList(&keyColumnList);
-			code.setPipeProjection(midUnionProj);
-			topNode.setCode(code);
+			code.setPipeProjection(projections.first);
+			code.setFinishProjection(projections.second);
+			node.setCode(code);
+
+			node.addInput(plan.getParentInput(0));
 		}
 
+		OpNode *orNode = NULL;
+		if (SQLExprs::IndexSelector::getOrConditionCount(
+				condList.begin(), condList.end()) > 1) {
+			OpNode &node = plan.createNode(SQLOpTypes::OP_UNION_DISTINCT_MERGE);
+			OpCode code;
+			code.setKeyColumnList(&keyColumnList);
+			code.setPipeProjection(midUnionProj);
+			node.setCode(code);
+
+			orNode = &node;
+			rangeNode.addInput(*orNode);
+		}
+
+		OpNode &topNode = (orNode == NULL ? rangeNode : *orNode);
+
+		bool andNodeFound = false;
 		OpNode *followingNode = NULL;
 		for (SQLExprs::IndexConditionList::const_iterator it = condList.begin();
 				it != condList.end();) {
@@ -224,15 +266,16 @@ void SQLScanOps::Scan::compile(OpContext &cxt) const {
 					SQLExprs::IndexSelector::nextCompositeConditionDistance(
 							it, condList.end());
 			if (it->andOrdinal_ == 0 && count < it->andCount_) {
-				OpNode &node = plan.createNode(SQLOpTypes::OP_UNION);
+				OpNode &node =
+						plan.createNode(SQLOpTypes::OP_UNION_INTERSECT_MERGE);
 				OpCode code;
-				code.setUnionType(SQLType::UNION_INTERSECT);
 				code.setKeyColumnList(&keyColumnList);
 				code.setPipeProjection(midUnionProj);
 				node.setCode(code);
 
 				topNode.addInput(node);
 				followingNode = &node;
+				andNodeFound = true;
 			}
 			else if (it->andOrdinal_ == 0) {
 				followingNode = &topNode;
@@ -252,6 +295,9 @@ void SQLScanOps::Scan::compile(OpContext &cxt) const {
 				node.setCode(code);
 
 				node.addInput(plan.getParentInput(0));
+				if (baseCode.getInputCount() > 1) {
+					node.addInput(plan.getParentInput(1));
+				}
 
 				assert(followingNode != NULL);
 				followingNode->addInput(node);
@@ -259,18 +305,41 @@ void SQLScanOps::Scan::compile(OpContext &cxt) const {
 			it += count;
 		}
 
-		{
-			OpNode &node =
-					plan.createNode(SQLOpTypes::OP_SCAN_CONTAINER_UPDATES);
-			OpCode code;
-			code.setPipeProjection(midInProj);
+		typedef SQLContainerUtils::ScanMergeMode MergeMode;
+		const MergeMode::Type mergeMode =
+				(andNodeFound && orNode != NULL ? MergeMode::MODE_ROW_ARRAY :
+				!andNodeFound && orNode == NULL ? MergeMode::MODE_MIXED :
+				MergeMode::MODE_MIXED_MERGING);
+
+		ScanCursor &cursor = getScanCursor(cxt, true);
+		cursor.setMergeMode(mergeMode);
+		cursor.setIndexSelection(*selector);
+
+		if (parentPending) {
+			cxt.setPlanPending();
+		}
+		else {
+			cursor.setRowIdFiltering();
+
+			OpCode code = getCode();
+			code.setJoinPredicate(NULL);
+
+			SQLOps::OpConfig &config = builder.createConfig();
+			const SQLOps::OpConfig *srcConfig = getCode().getConfig();
+			if (srcConfig != NULL) {
+				config = *srcConfig;
+			}
+			if (code.getLimit() >= 0) {
+				config.set(SQLOpTypes::CONF_LIMIT_INHERITANCE, 1);
+			}
+			code.setConfig(&config);
+
+			OpNode &node = plan.createNode(SQLOpTypes::OP_SCAN);
 			node.setCode(code);
 
 			node.addInput(plan.getParentInput(0));
-			topNode.addInput(node);
+			plan.linkToAllParentOutput(node);
 		}
-
-		cxt.setPlanPending();
 		return;
 	}
 
@@ -320,6 +389,140 @@ void SQLScanOps::Scan::compile(OpContext &cxt) const {
 	}
 }
 
+bool SQLScanOps::Scan::tryCompileIndexJoin(
+		OpContext &cxt, OpPlan &plan) const {
+	if (!plan.isEmpty()) {
+		return false;
+	}
+
+	const OpCode &baseCode = getCode();
+	if (baseCode.getInputCount() <= 1) {
+		return false;
+	}
+
+	{
+		const SQLOps::OpConfig *config = baseCode.getConfig();
+		const int64_t semi = SQLOps::OpConfig::resolve(
+				SQLOpTypes::CONF_JOIN_SEMI, config);
+		if (semi > 0) {
+			return false;
+		}
+	}
+
+	const uint32_t scanIn = 0;
+	const uint32_t drivingIn = 1;
+
+	OpCodeBuilder builder(OpCodeBuilder::ofContext(cxt));
+
+	SQLOps::OpConfig &scanConfig = builder.createConfig();
+	{
+		SQLOps::OpConfig &config = scanConfig;
+		const SQLOps::OpConfig *srcConfig = baseCode.getConfig();
+		if (srcConfig != NULL) {
+			config = *srcConfig;
+		}
+		config.set(SQLOpTypes::CONF_JOIN_SEMI, 1);
+	}
+
+	const SQLExprs::Expression *semiPred = baseCode.getFilterPredicate();
+
+	SQLValues::CompColumnList *keyColumnList =
+			&builder.createCompColumnList();
+	{
+		SQLOpUtils::CompPosSet posSet(cxt.getAllocator());
+		builder.extractJoinKeyColumns(
+				semiPred, NULL, *keyColumnList, posSet, NULL);
+		if (keyColumnList->empty()) {
+			keyColumnList = NULL;
+		}
+	}
+
+	SQLExprs::ExprRewriter &rewriter = builder.getExprRewriter();
+	SQLExprs::ExprFactoryContext &factoryCxt = builder.getExprFactoryContext();
+
+	const SQLExprs::Expression *scanFilterPred = NULL;
+	if (semiPred != NULL) {
+		SQLExprs::ExprFactoryContext::Scope scope(factoryCxt);
+		factoryCxt.setAggregationPhase(true, baseCode.getAggregationPhase());
+
+		SQLExprs::Expression &srcExpr =
+				rewriter.rewrite(factoryCxt, *semiPred, NULL);
+		scanFilterPred = &SQLExprs::ExprRewriter::retainSingleInputPredicate(
+				factoryCxt, srcExpr, scanIn, false);
+	}
+
+	rewriter.activateColumnMapping(factoryCxt);
+	{
+		rewriter.clearColumnUsage();
+
+		const bool withId = true;
+		builder.addColumnUsage(baseCode, withId);
+		rewriter.addInputColumnUsage(drivingIn);
+
+		rewriter.setIdOfInput(drivingIn, false);
+	}
+
+	OpNode &scanNode = plan.createNode(SQLOpTypes::OP_SCAN);
+	{
+		OpCode code;
+		code.setConfig(&scanConfig);
+
+		code.setJoinPredicate(semiPred);
+		code.setFilterPredicate(scanFilterPred);
+		code.setContainerLocation(&baseCode.getContainerLocation());
+
+		{
+			SQLExprs::ExprRewriter::Scope rewriterScope(rewriter);
+			rewriter.setInputUsage(drivingIn, false);
+			code.setPipeProjection(&builder.createProjectionByUsage(false));
+		}
+
+		OpNode &node = scanNode;
+		node.addInput(plan.getParentInput(scanIn));
+		node.addInput(plan.getParentInput(drivingIn));
+		node.setCode(code);
+	}
+
+	rewriter.setIdProjected(true);
+
+	OpNode &joinNode = plan.createNode(SQLOpTypes::OP_JOIN);
+	{
+		OpNode &node = joinNode;
+
+		OpCode code = baseCode;
+		code.setKeyColumnList(keyColumnList);
+		code.setContainerLocation(NULL);
+		code.setJoinType(SQLType::JOIN_INNER);
+
+		node.addInput(scanNode);
+		node.addInput(plan.getParentInput(drivingIn));
+		node.setCode(builder.rewriteCode(code, false));
+	}
+
+	plan.linkToAllParentOutput(joinNode);
+	return true;
+}
+
+bool SQLScanOps::Scan::tryCompileEmpty(OpContext &cxt, OpPlan &plan) const {
+	ScanCursor &cursor = getScanCursor(cxt, true);
+	if (!cursor.isRowIdFiltering()) {
+		return false;
+	}
+
+	if (cursor.isIndexLost()) {
+		return false;
+	}
+
+	ColumnTypeList outTypeList(cxt.getAllocator());
+	OpCodeBuilder::getColumnTypeListByColumns(
+			cxt.getOutputColumnList(0), outTypeList);
+
+	OpCodeBuilder builder(OpCodeBuilder::ofContext(cxt));
+	builder.setUpNoopNodes(plan, outTypeList);
+
+	return true;
+}
+
 TupleList::Info SQLScanOps::Scan::getInputInfo(
 		OpContext &cxt, SQLOps::ColumnTypeList &typeList) const {
 	const SQLOps::TupleColumnList &columnList = cxt.getInputColumnList(0);
@@ -343,10 +546,28 @@ void SQLScanOps::ScanContainerFull::execute(OpContext &cxt) const {
 		const bool done =
 				cursor.scanFull(cxt, *getCode().getPipeProjection());
 
-		if (done || cxt.checkSuspendedAlways()) {
+		if (done || cxt.checkSuspended()) {
 			break;
 		}
 	}
+}
+
+
+void SQLScanOps::ScanContainerRange::execute(OpContext &cxt) const {
+	ScanCursor &cursor = getScanCursor(cxt);
+
+	for (;;) {
+		const bool done = cursor.scanRange(
+				cxt, *getCode().getPipeProjection());
+
+		if (done) {
+			break;
+		}
+		else if (cxt.checkSuspended()) {
+			return;
+		}
+	}
+	unbindScanCursor(&cxt, cursor);
 }
 
 
@@ -354,20 +575,28 @@ void SQLScanOps::ScanContainerIndex::execute(OpContext &cxt) const {
 	ScanCursor &cursor = getScanCursor(cxt);
 
 	TupleListReader *inReader = NULL;
+	const TupleColumnList *inColumnList = NULL;
+
 	if (getCode().getInputCount() > 1) {
-		inReader = &cxt.getReader(0);
+		const uint32_t index = 1;
+		inReader = &cxt.getReader(index);
+		inColumnList = &cxt.getInputColumnList(index);
 	}
 
 	SQLExprs::IndexConditionList condList(cxt.getAllocator());
-	condList.assign(
-			getCode().getIndexConditionList().begin(),
-			getCode().getIndexConditionList().end());
 
 	for (;;) {
-		if (inReader != NULL && !inReader->exists()) {
-			break;
+		condList.assign(
+				getCode().getIndexConditionList().begin(),
+				getCode().getIndexConditionList().end());
+		if (inReader != NULL) {
+			if (!inReader->exists()) {
+				break;
+			}
+			bindIndexCondition(
+					*inReader, *inColumnList, cursor.getIndexSelection(),
+					condList);
 		}
-
 
 		for (;;) {
 			const bool done = cursor.scanIndex(
@@ -376,7 +605,7 @@ void SQLScanOps::ScanContainerIndex::execute(OpContext &cxt) const {
 			if (done) {
 				break;
 			}
-			else if (cxt.checkSuspendedAlways()) {
+			else if (cxt.checkSuspended()) {
 				return;
 			}
 		}
@@ -386,25 +615,36 @@ void SQLScanOps::ScanContainerIndex::execute(OpContext &cxt) const {
 		}
 		inReader->next();
 	}
+	if (cxt.isAllInputCompleted()) {
+		cursor.finishIndexScan(cxt);
+	}
 	unbindScanCursor(&cxt, cursor);
 }
 
+void SQLScanOps::ScanContainerIndex::bindIndexCondition(
+		TupleListReader &reader, const TupleColumnList &columnList,
+		const SQLExprs::IndexSelector &selector,
+		SQLExprs::IndexConditionList &condList) {
+	const uint32_t emptyColumn = SQLExprs::IndexCondition::EMPTY_IN_COLUMN;
 
-void SQLScanOps::ScanContainerUpdates::execute(OpContext &cxt) const {
-	ScanCursor &cursor = getScanCursor(cxt);
+	for (SQLExprs::IndexConditionList::iterator it = condList.begin();
+			it != condList.end(); ++it) {
+		const std::pair<uint32_t, uint32_t> &pair = it->inColumnPair_;
 
-	for (;;) {
-		const bool done = cursor.scanUpdates(
-				cxt, *getCode().getPipeProjection());
-
-		if (done) {
-			break;
+		TupleValue value1;
+		if (pair.first != emptyColumn) {
+			value1 = SQLValues::ValueUtils::readCurrentAny(
+					reader, columnList[pair.first]);
 		}
-		else if (cxt.checkSuspendedAlways()) {
-			return;
+
+		TupleValue value2;
+		if (pair.second != emptyColumn) {
+			value2 = SQLValues::ValueUtils::readCurrentAny(
+					reader, columnList[pair.second]);
 		}
+
+		selector.bindCondition(*it, value1, value2);
 	}
-	unbindScanCursor(&cxt, cursor);
 }
 
 
@@ -468,6 +708,10 @@ void SQLScanOps::SelectPipe::execute(OpContext &cxt) const {
 	}
 
 	for (;;) {
+		if (cxt.checkSuspended()) {
+			break;
+		}
+
 		if (reader != NULL && !reader->exists()) {
 			break;
 		}
@@ -590,16 +834,36 @@ void SQLScanOps::LimitProjection::initializeProjectionAt(OpContext &cxt) const {
 			ALLOC_UNIQUE(alloc, LimitContext, limits.first, limits.second);
 }
 
+void SQLScanOps::LimitProjection::updateProjectionContextAt(
+		OpContext &cxt) const {
+	LimitContext &limitCxt = cxt.getResource(
+			0, SQLOpTypes::PROJ_LIMIT).resolveAs<LimitContext>();
+
+	const int64_t count = limitCxt.update();
+	if (count > 0) {
+		cxt.addOutputTupleCount(0, count);
+	}
+
+	if (!limitCxt.isAcceptable()) {
+		cxt.setCompleted();
+	}
+}
+
 void SQLScanOps::LimitProjection::project(OpContext &cxt) const {
 	LimitContext &limitCxt = cxt.getResource(
 			0, SQLOpTypes::PROJ_LIMIT).resolveAs<LimitContext>();
 
-	bool limited;
-	if (!limitCxt.accept(limited)) {
-		if (limited) {
-			cxt.setCompleted();
+	const LimitContext::Acceptance acceptance = limitCxt.accept();
+	if (acceptance != LimitContext::ACCEPTABLE_CURRENT_AND_AFTER) {
+		if (acceptance == LimitContext::ACCEPTABLE_CURRENT_ONLY) {
+			cxt.setNextCountForSuspend(0);
 		}
-		return;
+		else {
+			if (acceptance == LimitContext::ACCEPTABLE_NONE) {
+				cxt.setCompleted();
+			}
+			return;
+		}
 	}
 
 	chainAt(0).project(cxt);
@@ -619,27 +883,39 @@ std::pair<int64_t, int64_t> SQLScanOps::LimitProjection::getLimits(
 
 SQLScanOps::LimitContext::LimitContext(int64_t limit, int64_t offset) :
 		restLimit_(limit),
-		restOffset_(offset) {
+		restOffset_(offset),
+		prevRest_(restLimit_) {
 }
 
-bool SQLScanOps::LimitContext::accept(bool &limited) {
-	limited = false;
+bool SQLScanOps::LimitContext::isAcceptable() const {
+	return (restLimit_ != 0);
+}
 
+SQLScanOps::LimitContext::Acceptance SQLScanOps::LimitContext::accept() {
 	if (restLimit_ <= 0) {
 		if (restLimit_ < 0) {
-			return true;
+			return ACCEPTABLE_CURRENT_AND_AFTER;
 		}
-		limited = true;
-		return false;
+		return ACCEPTABLE_NONE;
 	}
 
 	if (restOffset_ > 0) {
 		--restOffset_;
-		return false;
+		return ACCEPTABLE_AFTER_ONLY;
 	}
 
-	--restLimit_;
-	return true;
+	if (--restLimit_ <= 0) {
+		return ACCEPTABLE_CURRENT_ONLY;
+	}
+	return ACCEPTABLE_CURRENT_AND_AFTER;
+}
+
+int64_t SQLScanOps::LimitContext::update() {
+	const int64_t count = (prevRest_ - restLimit_);
+	assert(count >= 0);
+
+	prevRest_ = restLimit_;
+	return count;
 }
 
 
@@ -649,7 +925,8 @@ void SQLScanOps::SubLimitProjection::initializeProjectionAt(
 
 	util::StackAllocator &alloc = cxt.getAllocator();
 	SubLimitContext::TupleEq pred(alloc, SQLValues::TupleComparator(
-			*getProjectionCode().getKeyList(), false, false));
+			*getProjectionCode().getKeyList(), &cxt.getVarContext(),
+			false, false));
 	cxt.getResource(0, SQLOpTypes::PROJ_SUB_LIMIT) = ALLOC_UNIQUE(
 			alloc, SubLimitContext, alloc, limits.first, limits.second, pred);
 }
@@ -689,8 +966,9 @@ SQLScanOps::SubLimitContext::SubLimitContext(
 }
 
 bool SQLScanOps::SubLimitContext::accept() {
-	bool limited;
-	return cur_.accept(limited);
+	const LimitContext::Acceptance acceptance = cur_.accept();
+	return (acceptance == LimitContext::ACCEPTABLE_CURRENT_AND_AFTER ||
+			acceptance == LimitContext::ACCEPTABLE_CURRENT_ONLY);
 }
 
 void SQLScanOps::SubLimitContext::clear() {

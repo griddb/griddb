@@ -221,18 +221,33 @@ SQLAggrExprs::Functions::GroupConcat::Finish::operator()(
 }
 
 
-template<typename C>
-inline void SQLAggrExprs::Functions::LagLead::Advance::operator()(
-		C &cxt, const Aggr &aggr, const TupleValue &v) {
-	aggr.set<0>()(cxt, v);
+inline SQLAggrExprs::Functions::LagLead::Advance::Advance() :
+		positioning_(false) {
 }
 
 template<typename C>
 inline void SQLAggrExprs::Functions::LagLead::Advance::operator()(
-		C &cxt, const Aggr &aggr, const int64_t &v) {
-	if (v >= 0) {
-		cxt.finishFunction();
+		C &cxt, const Aggr &aggr, const TupleValue &v) {
+	if (positioning_) {
+		positioning_ = false;
+		if (!SQLValues::ValueUtils::isNull(v) && v.get<int64_t>() >= 0) {
+			cxt.finishFunction();
+		}
+		else {
+			aggr.set<0>()(cxt, TupleValue());
+		}
 	}
+	else {
+		positioning_ = true;
+		aggr.set<0>()(cxt, cxt.template promoteAggrValue<0>(v));
+	}
+}
+
+template<typename C>
+inline void SQLAggrExprs::Functions::LagLead::Advance::operator()(
+		C &cxt, const Aggr &aggr) {
+	static_cast<void>(cxt);
+	static_cast<void>(aggr);
 }
 
 
@@ -240,7 +255,7 @@ template<typename C>
 inline void SQLAggrExprs::Functions::Max::Advance::operator()(
 		C &cxt, const Aggr &aggr, const TupleValue &v) {
 	if (aggr.isNull<0>()(cxt) ||
-			SQLValues::ValueGreater()(v, aggr.get<0>()(cxt))) {
+			cxt.getComparator()(v, aggr.get<0>()(cxt)) > 0) {
 		aggr.set<0>()(cxt, v);
 	}
 }
@@ -314,7 +329,7 @@ template<typename C>
 inline void SQLAggrExprs::Functions::Min::Advance::operator()(
 		C &cxt, const Aggr &aggr, const TupleValue &v) {
 	if (aggr.isNull<0>()(cxt) ||
-			SQLValues::ValueLess()(v, aggr.get<0>()(cxt))) {
+			cxt.getComparator()(v, aggr.get<0>()(cxt)) < 0) {
 		aggr.set<0>()(cxt, v);
 	}
 }

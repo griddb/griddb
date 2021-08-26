@@ -60,9 +60,8 @@ private:
 		static Offset offsetMillisRange();
 	};
 
-
-	static const Offset EMPTY_OFFSET_MILLIS;
-	static const Offset OFFSET_MILLIS_RANGE;
+	static Offset getLocalOffsetMillis();
+	static Offset detectLocalOffsetMillis();
 
 	Offset offsetMillis_;
 };
@@ -192,6 +191,8 @@ public:
 
 private:
 	static const int32_t EPOCH_DAY_OF_WEEK;
+
+	static TimeZone::Offset getLocalOffsetMillis();
 
 	int64_t getUnixTimeDays(
 			const FieldData &fieldData, FieldType trimingFieldType,

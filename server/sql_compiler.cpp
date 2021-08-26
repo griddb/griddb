@@ -42,6 +42,9 @@ UTIL_TRACER_DECLARE(SQL_HINT);
 	} \
 	while (false)
 
+
+
+
 SQLTableInfo::SQLTableInfo(util::StackAllocator &alloc) :
 		dbName_(alloc),
 		tableName_(alloc),
@@ -8254,6 +8257,12 @@ void SQLCompiler::optimize(Plan &plan) {
 	}
 	while (false);
 
+	{
+		OptimizationUnit unit(cxt, OPT_MAKE_INDEX_JOIN);
+		if (unit(unit() && makeIndexJoin(plan))) {
+			plan.removeEmptyNodes();
+		}
+	}
 
 	do {
 		{

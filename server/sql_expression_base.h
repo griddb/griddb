@@ -243,11 +243,14 @@ struct SQLExprs::ExprSpecBase {
 		enum {
 			VALUE_EMPTY = (TypeAt<0>::TYPE_EMPTY),
 			MULTI_COLUMN_TYPE = (!TypeAt<1>::EXPANDED_TYPE_EMPTY),
+			TYPE_ANY = (TypeAt<0>::COLUMN_TYPE == TupleTypes::TYPE_ANY),
 			TYPE_NULLABLE_ANY =
-					(TypeAt<0>::COLUMN_TYPE == TupleTypes::TYPE_ANY &&
+					(TYPE_ANY &&
 					(Flags & ExprSpec::FLAG_NON_NULLABLE) == 0),
 			TYPE_NULLABLE =
-					(!TYPE_NULLABLE_ANY && (Flags & ExprSpec::FLAG_EXACT) == 0)
+					(!TYPE_NULLABLE_ANY && (Flags & ExprSpec::FLAG_EXACT) == 0),
+			ANY_PROMOTABLE =
+					(TYPE_ANY && (Flags & ExprSpec::FLAG_PROMOTABLE) != 0)
 		};
 		static ExprSpec::In create() {
 			ExprSpec::In in;
@@ -314,6 +317,14 @@ struct SQLExprs::ExprSpecBase {
 						(M::template Type< At<6> >::VALUE) ? 6 : 7
 			};
 		};
+		template<typename M>
+		struct MatchWith {
+			enum {
+				VALUE =
+						(IndexOf<M>::VALUE <
+						static_cast<size_t>(ExprSpec::IN_TYPE_COUNT))
+			};
+		};
 		struct NullableInvMod {
 			template<typename I> struct BaseType {
 				typedef typename I::NullableInv Type;
@@ -348,16 +359,20 @@ struct SQLExprs::ExprSpecBase {
 				};
 			};
 		};
+		struct AnyPromotableMatch {
+			template<typename I> struct Type {
+				enum {
+					VALUE = I::ANY_PROMOTABLE
+				};
+			};
+		};
 		typedef typename ModOf<NullableInvMod>::Type NullableInv;
 		enum {
 			MIN_COUNT = IndexOf<EmptyOrOptionalMatch>::VALUE,
 			MAX_COUNT = IndexOf<EmptyMatch>::VALUE,
-			MULTI_COLUMN_TYPE =
-					(IndexOf<MultiMatch>::VALUE <
-					static_cast<size_t>(ExprSpec::IN_TYPE_COUNT)),
-			IN_NULLABLE_ANY =
-					(IndexOf<NullableAnyTypeMatch>::VALUE <
-					static_cast<size_t>(ExprSpec::IN_TYPE_COUNT))
+			MULTI_COLUMN_TYPE = MatchWith<MultiMatch>::VALUE,
+			IN_NULLABLE_ANY = MatchWith<NullableAnyTypeMatch>::VALUE,
+			IN_ANY_PROMOTABLE = MatchWith<AnyPromotableMatch>::VALUE,
 		};
 	};
 
@@ -389,6 +404,7 @@ struct SQLExprs::ExprSpecBase {
 					ExprSpec::FLAG_NON_NULLABLE |
 					ExprSpec::FLAG_INHERIT_NULLABLE1)) != 0),
 			IN_NULLABLE_ANY = InListType::IN_NULLABLE_ANY,
+			IN_ANY_PROMOTABLE = InListType::IN_ANY_PROMOTABLE,
 			RESULT_NON_NULLABLE = ((TYPE_FLAGS &
 					ExprSpec::FLAG_NON_NULLABLE) != 0),
 			RESULT_NULLABLE =
@@ -430,11 +446,16 @@ struct SQLExprs::ExprSpecBase {
 struct SQLExprs::ExprUtils {
 	typedef SQLValues::ValueContext ValueContext;
 
-	template<TupleColumnType T> struct ResultWriter;
+	template<typename T, bool Initializable> struct ResultWriter;
 	template<typename T> struct AggregationManipulator;
 
-	template<typename Alloc, typename W> class CustomFunctionContext;
-	template<typename Alloc, typename W> class AggregationFunctionContext;
+	class BasicComparatorRef;
+	class EmptyComparatorRef;
+
+	template<typename Alloc, typename W, typename C>
+	class CustomFunctionContext;
+	template<typename Alloc, typename W, typename C>
+	class AggregationFunctionContext;
 
 	template<typename Enabled> class BaseAllocatorScope;
 	template<TupleColumnType T, typename Nullable> struct ArgHolder;
@@ -453,60 +474,79 @@ struct SQLExprs::ExprUtils {
 	template<typename F, typename Traits> class BasicEvaluator;
 };
 
-template<TupleColumnType T>
+template<typename T, bool Initializable>
 struct SQLExprs::ExprUtils::ResultWriter {
-private:
-	typedef SQLValues::TypeUtils::Traits<T> Traits;
-	typedef typename Traits::WriterType BaseWriterType;
-	static const bool WRITER_AVAILABLE = Traits::WRITER_AVAILABLE;
-
 public:
-	typedef typename util::Conditional<
-			WRITER_AVAILABLE, BaseWriterType, util::FalseType>::Type WriterType;
-	typedef typename util::Conditional<
-			WRITER_AVAILABLE, WriterType&, util::FalseType>::Type WriterRef;
+	typedef typename SQLValues::TypeUtils::template Traits<
+			T::COLUMN_TYPE>::WriterType WriterType;
+	typedef WriterType& WriterRef;
+
+	ResultWriter(ExprContext&, uint64_t) {}
 
 	WriterRef initialize(ExprContext &cxt, uint64_t initialCapacity) {
-		return initializeWriter(cxt, writer_, initialCapacity);
+		writer_ = UTIL_MAKE_LOCAL_UNIQUE(
+				writer_, WriterType,
+				ValueUtils::toWriterContext<T>(cxt.getValueContext()),
+				T::COLUMN_TYPE,
+				ValueUtils::toWriterCapacity<T>(initialCapacity));
+		return *writer_;
 	}
 
 	WriterRef resolve() {
-		return resolveWriter(writer_);
+		return *writer_;
 	}
 
 private:
-	typedef typename util::Conditional<
-			WRITER_AVAILABLE,
-			util::LocalUniquePtr<WriterType>,
-			util::FalseType>::Type WriterHolder;
+	typedef SQLValues::ValueUtils ValueUtils;
+	util::LocalUniquePtr<WriterType> writer_;
+};
 
-	template<typename W>
-	static WriterRef initializeWriter(
-			ExprContext &cxt, util::LocalUniquePtr<W> &writer,
-			uint64_t initialCapacity) {
-		return SQLValues::ValueUtils::initializeWriter(cxt, writer, initialCapacity);
+template<typename T>
+struct SQLExprs::ExprUtils::ResultWriter<T, false> {
+public:
+	typedef typename SQLValues::TypeUtils::template Traits<
+			T::COLUMN_TYPE>::WriterType WriterType;
+	typedef WriterType& WriterRef;
+
+	inline ResultWriter(ExprContext &cxt, uint64_t initialCapacity) :
+			writer_(
+					ValueUtils::toWriterContext<T>(cxt.getValueContext()),
+					T::COLUMN_TYPE,
+					ValueUtils::toWriterCapacity<T>(initialCapacity)) {
 	}
+	inline ~ResultWriter() {}
 
-	static util::FalseType& initializeWriter(
-			ExprContext&, util::FalseType &writer, uint64_t) {
-		return writer;
-	}
-
-	template<typename W>
-	static W& resolveWriter(util::LocalUniquePtr<W> &writer) {
-		if (writer.get() == NULL) {
-			assert(false);
-			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
-		}
-		return *writer;
-	}
-
-	static util::FalseType resolveWriter(util::FalseType &writer) {
+	inline WriterRef initialize(ExprContext&, uint64_t) {
 		assert(false);
-		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+		return writer_;
 	}
 
-	WriterHolder writer_;
+	inline WriterRef resolve() {
+		return writer_;
+	}
+
+private:
+	typedef SQLValues::ValueUtils ValueUtils;
+	WriterType writer_;
+};
+
+template<>
+struct SQLExprs::ExprUtils::ResultWriter<void, false> {
+public:
+	typedef util::FalseType WriterType;
+	typedef WriterType WriterRef;
+
+	ResultWriter(ExprContext&, uint64_t) {
+	}
+
+	WriterRef initialize(ExprContext&, uint64_t) {
+		return resolve();
+	}
+
+	WriterRef resolve() {
+		assert(false);
+		return WriterType();
+	}
 };
 
 template<>
@@ -594,7 +634,34 @@ struct SQLExprs::ExprUtils::AggregationManipulator<SQLValues::LobReader> {
 	}
 };
 
-template<typename Alloc, typename W>
+class SQLExprs::ExprUtils::BasicComparatorRef {
+public:
+	typedef SQLValues::ValueComparator::Arranged BaseType;
+
+	template<typename Expr>
+	explicit BasicComparatorRef(const Expr *expr) :
+			base_(expr->getComparator()) {
+	}
+
+	const BaseType& get() const {
+		assert(base_ != NULL);
+		return *base_;
+	}
+
+private:
+	const BaseType *base_;
+};
+
+class SQLExprs::ExprUtils::EmptyComparatorRef {
+public:
+	typedef util::FalseType BaseType;
+
+	explicit EmptyComparatorRef(const Expression*) {}
+
+	const BaseType& get() const;
+};
+
+template<typename Alloc, typename W, typename C>
 class SQLExprs::ExprUtils::CustomFunctionContext :
 		public SQLExprs::NormalFunctionContext {
 private:
@@ -611,7 +678,9 @@ public:
 			util::StdAllocator<void, void>, util::FalseType>::Type AllocatorType;
 	typedef typename BaseWriterType::WriterType WriterType;
 
-	explicit CustomFunctionContext(ExprContext &baseCxt);
+	template<typename Expr>
+	explicit CustomFunctionContext(
+			const std::pair<ExprContext*, const Expr*> &src);
 
 	CustomFunctionContext& getFunctionContext() {
 		return *this;
@@ -621,6 +690,8 @@ public:
 
 	WriterRef initializeResultWriter(uint64_t initialCapacity);
 	WriterRef getResultWriter();
+
+	const typename C::BaseType& getComparator();
 
 	void finishFunction();
 	bool isFunctionFinished();
@@ -637,12 +708,30 @@ private:
 
 	BaseAllocatorRef alloc_;
 	BaseWriterType resultWriter_;
+	C comparator_;
 	bool functionFinished_;
 };
 
-template<typename Alloc, typename W>
+template<typename Alloc, typename W, typename C>
 class SQLExprs::ExprUtils::AggregationFunctionContext :
-		public SQLExprs::ExprUtils::CustomFunctionContext<Alloc, W> {
+		public SQLExprs::ExprUtils::CustomFunctionContext<Alloc, W, C> {
+private:
+	template<typename T>
+	struct TypeTagOf {
+		static const TupleColumnType COLUMN_TYPE =
+				SQLValues::TypeUtils::template ValueTraits<
+						T>::COLUMN_TYPE_AS_VALUE;
+		static const TupleColumnType READER_COLUMN_TYPE =
+				SQLValues::TypeUtils::template ValueTraits<
+						T>::COLUMN_TYPE_AS_READER;
+
+		typedef typename util::IsSame<T, TupleValue>::Type ForAny;
+		typedef typename SQLValues::Types::template Of<COLUMN_TYPE>::Type Type;
+
+		typedef typename SQLValues::Types::template Of<
+				READER_COLUMN_TYPE>::Type TypeByReader;
+	};
+
 public:
 	explicit AggregationFunctionContext(
 			const std::pair<
@@ -679,11 +768,10 @@ public:
 	}
 
 	template<size_t N, typename T, typename Checked> void addAggrValue(
-			T &value) {
-		typedef typename AggregationManipulator<T>::RetType RetType;
-		const RetType &retValue = AggregationManipulator<T>::add(
-				this, getAggrValue<N, RetType>(), value, Checked());
-		setAggrValue<N, RetType>(retValue);
+			T &value,
+			typename TypeTagOf<T>::TypeByReader (*)[1] = NULL) {
+		NormalFunctionContext::getBase().template appendAggregationValueBy<
+				typename TypeTagOf<T>::TypeByReader>(aggrColumns_[N], value);
 	}
 
 	template<size_t N, typename T> void incrementAggrValue() {
@@ -695,6 +783,17 @@ public:
 		return isAggregationNull(aggrColumns_[N]);
 	}
 
+	template<size_t N> TupleValue promoteAggrValue(const TupleValue &src) {
+		if (!SQLValues::ValueUtils::isNull(src)) {
+			const TupleColumnType type = SQLValues::TypeUtils::toNonNullable(
+					aggrColumns_[N].getTupleColumn().getType());
+			if (type != src.getType()) {
+				return SQLValues::ValuePromoter(type)(src);
+			}
+		}
+		return src;
+	}
+
 	int64_t getWindowValueCount() {
 		const WindowState *state =
 				NormalFunctionContext::getBase().getWindowState();
@@ -703,15 +802,6 @@ public:
 	}
 
 private:
-	template<typename T>
-	struct TypeTagOf {
-		static const TupleColumnType COLUMN_TYPE =
-				SQLValues::TypeUtils::template ValueTraits<
-						T>::COLUMN_TYPE_AS_VALUE;
-		typedef typename util::IsSame<T, TupleValue>::Type ForAny;
-		typedef typename SQLValues::Types::template Of<COLUMN_TYPE>::Type Type;
-	};
-
 	template<typename T>
 	T build(const T &value, const util::TrueType&) {
 		return value;
@@ -1173,6 +1263,9 @@ struct SQLExprs::ExprUtils::FunctorTraits {
 
 	enum {
 		FOR_AGGR = (SpecType::AggrListType::MIN_COUNT > 0),
+		FOR_COMP = (FOR_AGGR ?
+				!!SpecType::IN_NULLABLE_ANY :
+				(SpecType::IN_ANY_PROMOTABLE && SpecType::IN_MIN_COUNT > 1)),
 		FOR_MERGE =
 				(VariantType::AGGR_PHASE == SQLType::AGG_PHASE_MERGE_PIPE),
 		FOR_FINISH =
@@ -1281,6 +1374,15 @@ struct SQLExprs::ExprUtils::FunctorTraits {
 
 	typedef typename util::Conditional<
 			RESULT_NULLABLE, BaseNullableRetType, BaseRetType>::Type RetType;
+
+	typedef typename util::Conditional<
+			FOR_COMP,
+			ComparableExpressionBase,
+			Expression>::Type NonAggrSourceExpressionType;
+	typedef typename util::Conditional<
+			FOR_AGGR,
+			AggregationExpressionBase,
+			NonAggrSourceExpressionType>::Type SourceExpressionType;
 };
 
 template<typename F, typename Traits>
@@ -1289,19 +1391,21 @@ private:
 	typedef typename FunctorPolicy::PolicyDetector<F>::Result PolicyType;
 
 	enum {
-		WRITER_INITIALIZABLE = PolicyType::WriterInitializable::VALUE,
+		WRITER_AVAILABLE = SQLValues::TypeUtils::Traits<
+				Traits::RESULT_TYPE>::WRITER_AVAILABLE,
+		WRITER_INITIALIZABLE =
+				(WRITER_AVAILABLE && PolicyType::WriterInitializable::VALUE),
 		CONTEXT_CUSTOMIZED =
 				PolicyType::Allocatable::VALUE ||
 				PolicyType::PartiallyFinishable::VALUE ||
 				Traits::RESULT_WRITER_AVAILABLE ||
-				Traits::FOR_AGGR,
+				Traits::FOR_AGGR ||
+				Traits::FOR_COMP,
 		ARGS_DELAYED = PolicyType::ArgsDelayedEvaluable::VALUE,
 		VAR_ARGS_ACCEPTABLE = ARGS_DELAYED || Traits::IN_REPEATABLE
 	};
 
-	typedef typename util::Conditional<
-			Traits::FOR_AGGR,
-			AggregationExpressionBase, Expression>::Type SourceExpression;
+	typedef typename Traits::SourceExpressionType SourceExpressionType;
 
 	typedef typename util::BoolType<
 			!Traits::FOR_AGGR && VAR_ARGS_ACCEPTABLE
@@ -1313,12 +1417,22 @@ private:
 	typedef typename util::Conditional<
 			PolicyType::Allocatable::VALUE,
 			util::StackAllocator, util::FalseType>::Type AllocatorType;
-	typedef ResultWriter<Traits::RESULT_TYPE> RetWriterType;
+	typedef ResultWriter<
+			typename util::Conditional<
+					WRITER_AVAILABLE,
+					typename SQLValues::TypeUtils::template Traits<
+							Traits::RESULT_TYPE>::TypeTag, void>::Type,
+			WRITER_INITIALIZABLE> RetWriterType;
+
+	typedef typename util::Conditional<
+			Traits::FOR_COMP,
+			BasicComparatorRef, EmptyComparatorRef>::Type ComparatorType;
 
 	typedef typename util::Conditional<
 			Traits::FOR_AGGR,
-			AggregationFunctionContext<AllocatorType, RetWriterType>,
-			CustomFunctionContext<AllocatorType, RetWriterType>
+			AggregationFunctionContext<
+					AllocatorType, RetWriterType, ComparatorType>,
+			CustomFunctionContext<AllocatorType, RetWriterType, ComparatorType>
 			>::Type BaseFunctionContext;
 	typedef typename util::Conditional<
 			CONTEXT_CUSTOMIZED,
@@ -1326,6 +1440,8 @@ private:
 	typedef typename util::Conditional<
 			CONTEXT_CUSTOMIZED,
 			FunctionContext, ExprContext&>::Type LocalFunctionContext;
+	typedef typename util::BoolType<
+			CONTEXT_CUSTOMIZED>::Result ContextCustomized;
 
 	typedef typename Traits::AggrValuesType AggrValuesType;
 	typedef typename Traits::RetType RetType;
@@ -1340,7 +1456,7 @@ private:
 	typedef F FunctorType;
 
 public:
-	BasicEvaluator(ExprContext &baseCxt, const SourceExpression &expr);
+	BasicEvaluator(ExprContext &baseCxt, const SourceExpressionType &expr);
 
 	const Expression& top();
 	const Expression& next();
@@ -1368,14 +1484,15 @@ private:
 			Traits::RESULT_TYPE,
 			typename PolicyType::ResultPromotable> ResultValue;
 
-	static std::pair<
-			ExprContext*, const AggregationExpressionBase*> toContextSource(
-			ExprContext &baseCxt, const AggregationExpressionBase &expr) {
+
+	template<typename Expr>
+	static std::pair<ExprContext*, const Expr*> toContextSource(
+			ExprContext &baseCxt, const Expr &expr, const util::TrueType&) {
 		return std::make_pair(&baseCxt, &expr);
 	}
 
 	static ExprContext& toContextSource(
-			ExprContext &baseCxt, const Expression&) {
+			ExprContext &baseCxt, const Expression&, const util::FalseType&) {
 		return baseCxt;
 	}
 
@@ -1416,23 +1533,47 @@ private:
 	ExprCode code_;
 };
 
+class SQLExprs::ComparableExpressionBase : public SQLExprs::Expression {
+public:
+	ComparableExpressionBase();
+
+	void initializeCustom(ExprFactoryContext &cxt, const ExprCode &code);
+
+	const SQLValues::ValueComparator::Arranged* getComparator() const {
+		return comparator_;
+	}
+
+	static const SQLValues::ValueComparator::Arranged* arrangeComparator(
+			ExprFactoryContext &cxt, const ExprSpec &spec);
+
+private:
+	const SQLValues::ValueComparator::Arranged *comparator_;
+};
+
 class SQLExprs::AggregationExpressionBase : public SQLExprs::Expression {
 public:
 	AggregationExpressionBase();
 
 	void initializeCustom(ExprFactoryContext &cxt, const ExprCode &code);
 
+	const SQLValues::ValueComparator::Arranged* getComparator() const {
+		return comparator_;
+	}
+
 	const SummaryColumn* getAggregationColumns() const;
 
 private:
 	SummaryColumn aggrColumns_[ExprSpec::AGGR_LIST_SIZE];
+	const SQLValues::ValueComparator::Arranged *comparator_;
 };
 
 template<typename F, typename Traits>
 class SQLExprs::BasicExpressionBase :
-		public util::Conditional<Traits::FOR_AGGR,
-				SQLExprs::AggregationExpressionBase,
-				SQLExprs::Expression>::Type {
+		public util::Conditional<
+						Traits::FOR_AGGR, SQLExprs::AggregationExpressionBase,
+				typename util::Conditional<
+						Traits::FOR_COMP, SQLExprs::ComparableExpressionBase,
+				SQLExprs::Expression>::Type>::Type {
 protected:
 	typedef ExprUtils::BasicEvaluator<F, Traits> Evaluator;
 	typedef typename Traits::template ArgTraits<0>::Type A0;
@@ -1752,6 +1893,17 @@ private:
 		typedef typename ExprUtils::FunctorTraits<
 				T, S, VariantTraitsType> Traits;
 		typedef BasicExpression<F, argCount, Traits> Expr;
+		typedef typename util::BoolType<Traits::FOR_COMP>::Result ForComp;
+		return createFactoryFuncDirect<Expr>(ForComp());
+	}
+
+	template<typename Expr>
+	static FactoryFunc createFactoryFuncDirect(const util::TrueType&) {
+		return &createDirectCustom<Expr>;
+	}
+
+	template<typename Expr>
+	static FactoryFunc createFactoryFuncDirect(const util::FalseType&) {
 		return &createDirectNoArgs<Expr>;
 	}
 };
@@ -2023,84 +2175,89 @@ size_t SQLExprs::VariantsRegistrarBase<R>::checkTableEntry(
 }
 
 
-template<typename Alloc, typename W>
+template<typename Alloc, typename W, typename C>
+template<typename Expr>
 inline SQLExprs::ExprUtils::CustomFunctionContext<
-		Alloc, W>::CustomFunctionContext(ExprContext &baseCxt) :
-		NormalFunctionContext(baseCxt),
-		alloc_(resolveAllocator(baseCxt, AllocatorEnabled())),
+		Alloc, W, C>::CustomFunctionContext(
+		const std::pair<ExprContext*, const Expr*> &src) :
+		NormalFunctionContext(*src.first),
+		alloc_(resolveAllocator(*src.first, AllocatorEnabled())),
+		resultWriter_(*src.first, 0),
+		comparator_(src.second),
 		functionFinished_(false) {
-	setBase(&baseCxt);
+	setBase(src.first);
 }
 
-template<typename Alloc, typename W>
+template<typename Alloc, typename W, typename C>
 inline typename SQLExprs::ExprUtils::CustomFunctionContext<
-		Alloc, W>::AllocatorType
-SQLExprs::ExprUtils::CustomFunctionContext<
-		Alloc, W>::getAllocator() {
+		Alloc, W, C>::AllocatorType
+SQLExprs::ExprUtils::CustomFunctionContext<Alloc, W, C>::getAllocator() {
 	return alloc_;
 }
 
-template<typename Alloc, typename W>
-inline typename SQLExprs::ExprUtils::CustomFunctionContext<Alloc, W>::WriterRef
+template<typename Alloc, typename W, typename C>
+inline typename SQLExprs::ExprUtils::CustomFunctionContext<Alloc, W, C>::WriterRef
 SQLExprs::ExprUtils::CustomFunctionContext<
-		Alloc, W>::initializeResultWriter(uint64_t initialCapacity) {
+		Alloc, W, C>::initializeResultWriter(uint64_t initialCapacity) {
 	return resultWriter_.initialize(getBase(), initialCapacity);
 }
 
-template<typename Alloc, typename W>
+template<typename Alloc, typename W, typename C>
 inline typename SQLExprs::ExprUtils::CustomFunctionContext<
-		Alloc, W>::WriterRef
-SQLExprs::ExprUtils::CustomFunctionContext<
-		Alloc, W>::getResultWriter() {
+		Alloc, W, C>::WriterRef
+SQLExprs::ExprUtils::CustomFunctionContext<Alloc, W, C>::getResultWriter() {
 	return resultWriter_.resolve();
 }
 
-template<typename Alloc, typename W>
+template<typename Alloc, typename W, typename C>
+inline const typename C::BaseType&
+SQLExprs::ExprUtils::CustomFunctionContext<Alloc, W, C>::getComparator() {
+	return comparator_.get();
+}
+
+template<typename Alloc, typename W, typename C>
 inline void SQLExprs::ExprUtils::CustomFunctionContext<
-		Alloc, W>::finishFunction() {
+		Alloc, W, C>::finishFunction() {
 	functionFinished_ = true;
 }
 
-template<typename Alloc, typename W>
+template<typename Alloc, typename W, typename C>
 inline bool SQLExprs::ExprUtils::CustomFunctionContext<
-		Alloc, W>::isFunctionFinished() {
+		Alloc, W, C>::isFunctionFinished() {
 	return functionFinished_;
 }
 
-template<typename Alloc, typename W>
+template<typename Alloc, typename W, typename C>
 inline util::StackAllocator& SQLExprs::ExprUtils::CustomFunctionContext<
-		Alloc, W>::resolveAllocator(
+		Alloc, W, C>::resolveAllocator(
 		ExprContext &baseCxt, const util::TrueType&) {
 	return baseCxt.getAllocator();
 }
 
-template<typename Alloc, typename W>
+template<typename Alloc, typename W, typename C>
 inline util::FalseType SQLExprs::ExprUtils::CustomFunctionContext<
-		Alloc, W>::resolveAllocator(ExprContext&, const util::FalseType&) {
+		Alloc, W, C>::resolveAllocator(ExprContext&, const util::FalseType&) {
 	return util::FalseType();
 }
 
 
-template<typename Alloc, typename W>
+template<typename Alloc, typename W, typename C>
 inline SQLExprs::ExprUtils::AggregationFunctionContext<
-		Alloc, W>::AggregationFunctionContext(
+		Alloc, W, C>::AggregationFunctionContext(
 		const std::pair<ExprContext*, const AggregationExpressionBase*> &src) :
-		CustomFunctionContext<Alloc, W>(*src.first),
+		CustomFunctionContext<Alloc, W, C>(src),
 		aggrColumns_(src.second->getAggregationColumns()) {
 }
 
 
 template<typename F, typename Traits>
 inline SQLExprs::ExprUtils::BasicEvaluator<F, Traits>::BasicEvaluator(
-		ExprContext &baseCxt, const SourceExpression &expr) :
+		ExprContext &baseCxt, const SourceExpressionType &expr) :
 		expr_(expr),
 		argExpr_(NULL),
-		localFuncCxt_(toContextSource(baseCxt, expr)),
+		localFuncCxt_(toContextSource(baseCxt, expr, ContextCustomized())),
 		baseCxt_(baseCxt),
 		allocScope_(baseCxt) {
-	if (!WRITER_INITIALIZABLE) {
-		context().initializeResultWriter(0);
-	}
 }
 
 template<typename F, typename Traits>

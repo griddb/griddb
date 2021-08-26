@@ -23,6 +23,8 @@
 
 #include "transaction_manager.h"
 
+
+
 const DQLProcessor::ProcRegistrar DQLProcessor::REGISTRAR_LIST[] = {
 	ProcRegistrar::of<DQLProcs::GroupOption>(SQLType::EXEC_GROUP),
 	ProcRegistrar::of<DQLProcs::JoinOption>(SQLType::EXEC_JOIN),
@@ -38,20 +40,20 @@ const DQLProcessor::ProcRegistrarTable DQLProcessor::REGISTRAR_TABLE(
 
 DQLProcessor::DQLProcessor(Context &cxt, const TypeInfo &typeInfo) :
 		SQLProcessor(cxt, typeInfo),
-		alloc_(cxt.getVarAllocator()),
-		store_(alloc_),
 		inputIdOffset_(0),
-		profiler_(alloc_) {
-	store_.setStackAllocatorBase(&cxt.getAllocator().base());
+		profiler_(cxt.getVarAllocator()) {
 }
 
 DQLProcessor::~DQLProcessor() {
+	if (store_.get() != NULL) {
+		store_->closeAllLatchResources();
+	}
 }
 
 bool DQLProcessor::pipe(Context &cxt, InputId inputId, const Block &block) {
-	OpStore::Entry *entry = findInputEntry(inputId);
+	OpStore::Entry *entry = findInputEntry(cxt, inputId);
 	if (entry != NULL) {
-		appendBlock(*entry, block);
+		entry->appendBlock(0, block);
 	}
 
 	OpCursor c(getCursorSource(cxt));
@@ -62,7 +64,7 @@ bool DQLProcessor::pipe(Context &cxt, InputId inputId, const Block &block) {
 }
 
 bool DQLProcessor::finish(Context &cxt, InputId inputId) {
-	getInputEntry(inputId).setCompleted();
+	getInputEntry(cxt, inputId).setCompleted();
 
 	OpCursor c(getCursorSource(cxt));
 	for (; c.exists(); c.next()) {
@@ -82,43 +84,75 @@ bool DQLProcessor::next(Context &cxt) {
 bool DQLProcessor::applyInfo(
 		Context &cxt, const Option &option,
 		const TupleInfoList &inputInfo, TupleInfo &outputInfo) {
-	if (option_.get() == NULL) {
-		if (!storeRootId_.isEmpty()) {
-			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL_INVALID_INPUT, "");
+	if (infoEntry_.get() == NULL) {
+		SQLValues::VarAllocator &varAlloc = cxt.getVarAllocator();
+
+		util::AllocUniquePtr<InfoEntry> infoEntry;
+		infoEntry = ALLOC_UNIQUE(varAlloc, InfoEntry, varAlloc);
+
+		infoEntry->storeGroup_ = UTIL_MAKE_LOCAL_UNIQUE(
+				infoEntry->storeGroup_, TupleList::Group, cxt.getStore());
+
+		util::LocalUniquePtr<SQLValues::VarContext> varCxt;
+		SQLValues::ValueContext valueCxt(getValueContextSource(
+				cxt.getAllocator(), varAlloc, *infoEntry->storeGroup_, varCxt));
+
+		DQLProcs::Option opOption;
+		{
+			DQLProcs::OptionInput in(
+					valueCxt, getRegistrarTable(), getType(), &option);
+			opOption.importFrom(in);
+
+			typedef util::XArrayOutStream<
+					util::StdAllocator<uint8_t, void> > ByteOutStream;
+			typedef util::ObjectOutStream<ByteOutStream> OutStream;
+
+			ByteOutStream byteOutStream(infoEntry->optionImage_);
+			OutStream outStream(byteOutStream);
+			util::AbstractObjectOutStream::Wrapper<
+					OutStream> wrappedStream(outStream);
+
+			DQLProcs::ProcOutOption procOutOption;
+			procOutOption.outStream_ = &wrappedStream;
+			DQLProcs::OptionOutput out(&procOutOption, getType());
+			opOption.exportTo(out);
 		}
 
-		const OpStoreId &id = store_.allocateEntry();
-		OpStore::Entry &entry = store_.getEntry(id);
+		{
+			AllocTupleInfoList &dest = infoEntry->inputInfo_;
+			for (TupleInfoList::const_iterator it = inputInfo.begin();
+					it != inputInfo.end(); ++it) {
+				dest.push_back(AllocTupleInfo(varAlloc));
+				dest.back().assign(it->begin(), it->end());
+			}
+		}
 
-		storeGroup_ = UTIL_MAKE_LOCAL_UNIQUE(
-				storeGroup_, TupleList::Group, cxt.getStore());
-		store_.setTempStoreGroup(*storeGroup_);
-		store_.setVarAllocator(&cxt.getVarAllocator());
+		{
+			const SQLOps::OpCode &code = createOpCode(
+					cxt.getAllocator(), opOption, infoEntry->inputInfo_);
+			TupleInfo dest(cxt.getAllocator());
+			getOutputInfo(code, dest);
+			infoEntry->outputInfo_.assign(dest.begin(), dest.end());
+		}
 
-		SQLValues::ValueContext valueCxt(entry.getValueContextSource(NULL));
-		DQLProcs::OptionInput in(
-				valueCxt, getRegistrarTable(), getType(), &option);
-		util::AllocUniquePtr<DQLProcs::Option> opOption(
-				ALLOC_UNIQUE(alloc_, DQLProcs::Option));
-		opOption->importFrom(in);
-
-		setUpRoot(store_, entry, *opOption, inputInfo);
-		setUpInput(getRootCode(store_, id), inputInfo.size(), inputIdOffset_);
-
-		option_.swap(opOption);
-		storeRootId_ = id;
+		infoEntry_.swap(infoEntry);
 	}
 
-	getOutputInfo(getRootCode(store_, getStoreRootId()), outputInfo);
+	outputInfo.assign(
+			infoEntry_->outputInfo_.begin(), infoEntry_->outputInfo_.end());
 	return true;
 }
 
 const SQLProcessor::Profiler& DQLProcessor::getProfiler() {
+	if (store_.get() == NULL) {
+		return profiler_;
+	}
+
 	TypeInfo typeInfo;
 	typeInfo.type_ = getType();
 
 	SQLOpUtils::AnalysisInfo mainInfo;
-	SQLOps::OpProfiler *opProfiler = store_.getProfiler();
+	SQLOps::OpProfiler *opProfiler = store_->getProfiler();
 	if (opProfiler != NULL) {
 		mainInfo = opProfiler->getAnalysisInfo(NULL);
 	}
@@ -142,20 +176,30 @@ void DQLProcessor::setProfiler(const Profiler &profiler) {
 	profiler_.getOption() = profiler.getOption();
 	profiler_.setForAnalysis(profiler.isForAnalysis());
 
+	if (store_.get() == NULL) {
+		return;
+	}
+
 	if (isProfilerRequested(profiler_)) {
-		store_.activateProfiler();
+		store_->activateProfiler();
 	}
 }
 
 void DQLProcessor::exportTo(Context &cxt, const OutOption &option) const {
-	static_cast<void>(cxt);
-
-	if (option_.get() == NULL) {
+	if (infoEntry_.get() == NULL) {
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL_INVALID_INPUT, "");
 	}
 
+	util::LocalUniquePtr<SQLValues::VarContext> varCxt;
+	SQLValues::ValueContext valueCxt(getValueContextSource(
+			cxt.getAllocator(), cxt.getVarAllocator(),
+			*infoEntry_->storeGroup_, varCxt));
+
+	DQLProcs::Option opOption;
+	loadOption(valueCxt, infoEntry_->optionImage_, opOption);
+
 	DQLProcs::OptionOutput out(&option, getType());
-	option_->exportTo(out);
+	opOption.exportTo(out);
 }
 
 void DQLProcessor::transcodeProfilerSpecific(
@@ -180,8 +224,9 @@ const DQLProcs::ProcRegistrarTable& DQLProcessor::getRegistrarTable() {
 	return REGISTRAR_TABLE;
 }
 
-SQLOps::OpStore::Entry& DQLProcessor::getInputEntry(InputId inputId) {
-	OpStore::Entry *entry = findInputEntry(inputId);
+SQLOps::OpStore::Entry& DQLProcessor::getInputEntry(
+		Context &cxt, InputId inputId) {
+	OpStore::Entry *entry = findInputEntry(cxt, inputId);
 	if (entry == NULL) {
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL_INVALID_INPUT,
 				"Ignorable ID specified");
@@ -189,8 +234,10 @@ SQLOps::OpStore::Entry& DQLProcessor::getInputEntry(InputId inputId) {
 	return *entry;
 }
 
-SQLOps::OpStore::Entry* DQLProcessor::findInputEntry(InputId inputId) {
-	OpStore::Entry &rootEntry = store_.getEntry(getStoreRootId());
+SQLOps::OpStore::Entry* DQLProcessor::findInputEntry(
+		Context &cxt, InputId inputId) {
+	OpStore &store = prepareStore(cxt);
+	OpStore::Entry &rootEntry = store.getEntry(getStoreRootId());
 	const uint32_t inCount = rootEntry.getInputCount();
 
 	const bool ignorable = (inputIdOffset_ != 0 && inCount <= 1);
@@ -211,7 +258,7 @@ SQLOps::OpStore::Entry* DQLProcessor::findInputEntry(InputId inputId) {
 
 	const uint32_t inIndex = static_cast<uint32_t>(inputIdOffset_ + inputId);
 	const OpStoreId &storeInId = rootEntry.getLink(inIndex, true);
-	OpStore::Entry &inEntry = store_.getEntry(storeInId);
+	OpStore::Entry &inEntry = store.getEntry(storeInId);
 	if (inEntry.isCompleted()) {
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL_INVALID_INPUT,
 				"Input already completed");
@@ -220,20 +267,89 @@ SQLOps::OpStore::Entry* DQLProcessor::findInputEntry(InputId inputId) {
 	return &inEntry;
 }
 
-void DQLProcessor::appendBlock(OpStore::Entry &entry, const Block &block) {
-	entry.getTupleList(0, false, false).append(block);
-}
-
 SQLOps::OpCursor::Source DQLProcessor::getCursorSource(Context &cxt) {
-	OpCursor::Source source(getStoreRootId(), store_, NULL);
-
-	if (extCxt_.get() == NULL) {
-		extCxt_ = ALLOC_UNIQUE(alloc_, DQLProcs::ExtProcContext);
-		extCxt_->setBase(cxt);
-	}
-	source.setExtContext(extCxt_.get());
+	OpStore &store = prepareStore(cxt);
+	OpCursor::Source source(getStoreRootId(), store, NULL);
+	source.setExtContext(&getExtOpContext(cxt));
 
 	return source;
+}
+
+SQLOps::OpStore& DQLProcessor::prepareStore(Context &cxt) {
+	if (store_.get() == NULL) {
+		if (infoEntry_.get() == NULL || !storeRootId_.isEmpty()) {
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL_INVALID_INPUT, "");
+		}
+
+		SQLOps::ExtOpContext &extCxt = getExtOpContext(cxt);
+		allocManager_ = UTIL_MAKE_LOCAL_UNIQUE(
+				allocManager_, OpAllocatorManager,
+				cxt.getVarAllocator(), false,
+				&OpAllocatorManager::getDefault().getSubManager(extCxt),
+				&cxt.getVarAllocator());
+		store_ = UTIL_MAKE_LOCAL_UNIQUE(store_, OpStore, *allocManager_);
+
+		store_->setStackAllocatorBase(&cxt.getAllocator().base());
+
+		const OpStoreId &id = store_->allocateEntry();
+		OpStore::Entry &entry = store_->getEntry(id);
+
+		store_->setTempStoreGroup(*infoEntry_->storeGroup_);
+
+		SQLValues::ValueContext valueCxt(entry.getValueContextSource(NULL));
+		DQLProcs::Option option;
+		loadOption(valueCxt, infoEntry_->optionImage_, option);
+
+		const AllocTupleInfoList &inputInfo = infoEntry_->inputInfo_;
+		setUpConfig(*store_, cxt.getConfig(), false);
+		setUpRoot(*store_, entry, option, inputInfo);
+		setUpInput(getRootCode(*store_, id), inputInfo.size(), inputIdOffset_);
+
+		if (isProfilerRequested(profiler_)) {
+			store_->activateProfiler();
+		}
+
+		storeRootId_ = id;
+	}
+
+	return *store_;
+}
+
+SQLOps::ExtOpContext& DQLProcessor::getExtOpContext(Context &cxt) {
+	if (extCxt_.get() == NULL) {
+		extCxt_ =
+				ALLOC_UNIQUE(cxt.getVarAllocator(), DQLProcs::ExtProcContext);
+		extCxt_->setBase(cxt);
+	}
+	return *extCxt_;
+}
+
+void DQLProcessor::loadOption(
+		SQLValues::ValueContext &valueCxt, const OptionImage &image,
+		DQLProcs::Option &option) const {
+
+	util::ArrayByteInStream byteInStream(
+			(util::ArrayInStream(image.data(), image.size())));
+	util::ObjectInStream<util::ArrayByteInStream> inStream(byteInStream);
+
+	DQLProcs::ProcInOption procInOption(valueCxt.getAllocator());
+	procInOption.byteInStream_ = &inStream;
+
+	DQLProcs::OptionInput in(
+			valueCxt, getRegistrarTable(), getType(), &procInOption);
+	option.importFrom(in);
+}
+
+SQLValues::ValueContext::Source DQLProcessor::getValueContextSource(
+		util::StackAllocator &alloc, SQLValues::VarAllocator &varAlloc,
+		TupleList::Group &storeGroup,
+		util::LocalUniquePtr<SQLValues::VarContext> &varCxt) {
+	if (varCxt.get()  == NULL) {
+		varCxt = UTIL_MAKE_LOCAL_UNIQUE(varCxt, SQLValues::VarContext);
+		varCxt->setVarAllocator(&varAlloc);
+		varCxt->setGroup(&storeGroup);
+	}
+	return SQLValues::ValueContext::Source(&alloc, varCxt.get(), NULL);
 }
 
 const SQLOps::OpStoreId& DQLProcessor::getStoreRootId() const {
@@ -250,19 +366,54 @@ const SQLOps::OpCode& DQLProcessor::getRootCode(
 	return plan.getParentOutput(0).getInput(0).getCode();
 }
 
+void DQLProcessor::setUpConfig(
+		OpStore &store, const SQLProcessorConfig *config, bool merged) {
+	if (!merged) {
+		SQLProcessorConfig localConfig;
+		localConfig.merge(config, true);
+		setUpConfig(store, &localConfig, true);
+		return;
+	}
+
+	SQLOps::OpConfig dest;
+	{
+		int64_t limitBytes = config->workMemoryLimitBytes_;
+		if (limitBytes < 0) {
+			limitBytes = SQLProcessorConfig().getDefault().workMemoryLimitBytes_;
+		}
+
+		if (limitBytes < 0) {
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL_INVALID_INPUT, "");
+		}
+
+		dest.set(SQLOpTypes::CONF_WORK_MEMORY_LIMIT, limitBytes);
+	}
+
+	dest.set(
+			SQLOpTypes::CONF_INTERRUPTION_PROJECTION_COUNT,
+			config->interruptionProjectionCount_);
+	dest.set(
+			SQLOpTypes::CONF_INTERRUPTION_SCAN_COUNT,
+			config->interruptionScanCount_);
+	store.setConfig(dest);
+}
+
 void DQLProcessor::setUpRoot(
 		OpStore &store, OpStore::Entry &rootEntry,
-		const DQLProcs::Option &option, const TupleInfoList &inputInfo) {
+		const DQLProcs::Option &option, const AllocTupleInfoList &inputInfo) {
 	util::StackAllocator &alloc = rootEntry.getStackAllocator();
 	const SQLOps::OpCode &code = createOpCode(alloc, option, inputInfo);
 	const bool inputIgnorable = (code.findContainerLocation() != NULL);
 
-	for (TupleInfoList::const_iterator inIt = inputInfo.begin();
+	for (AllocTupleInfoList::const_iterator inIt = inputInfo.begin();
 			inIt != inputInfo.end(); ++inIt) {
 		const SQLOps::OpStoreId &id = store.allocateEntry();
 
+		const TupleList::TupleColumnType *list =
+				(inIt->empty() ? NULL : &(*inIt)[0]);
+
 		OpStore::Entry &entry = store.getEntry(id);
-		entry.setColumnTypeList(0, *inIt, false, false);
+		entry.setColumnTypeList(0, list, inIt->size(), false, false);
 		entry.createTupleList(0);
 		entry.setPipelined();
 
@@ -292,7 +443,7 @@ void DQLProcessor::setUpRoot(
 	SQLOps::OpNode &node = plan.createNode(code.getType());
 	node.setCode(code);
 
-	for (TupleInfoList::const_iterator inIt = inputInfo.begin();
+	for (AllocTupleInfoList::const_iterator inIt = inputInfo.begin();
 			inIt != inputInfo.end(); ++inIt) {
 		const uint32_t index = static_cast<uint32_t>(inIt - inputInfo.begin());
 		node.addInput(plan.getParentInput(index));
@@ -325,15 +476,15 @@ void DQLProcessor::setUpInput(
 
 SQLOps::OpCode DQLProcessor::createOpCode(
 		util::StackAllocator &alloc, const DQLProcs::Option &option,
-		const TupleInfoList &inputInfo) {
+		const AllocTupleInfoList &inputInfo) {
 	SQLOps::OpCodeBuilder builder(SQLOps::OpCodeBuilder::ofAllocator(alloc));
 
 	SQLExprs::ExprFactoryContext &cxt = builder.getExprFactoryContext();
 
-	for (TupleInfoList::const_iterator inIt = inputInfo.begin();
+	for (AllocTupleInfoList::const_iterator inIt = inputInfo.begin();
 			inIt != inputInfo.end(); ++inIt) {
 		const uint32_t index = static_cast<uint32_t>(inIt - inputInfo.begin());
-		for (TupleInfo::const_iterator it = inIt->begin();
+		for (AllocTupleInfo::const_iterator it = inIt->begin();
 				it != inIt->end(); ++it) {
 			const uint32_t pos = static_cast<uint32_t>(it - inIt->begin());
 			cxt.setInputType(index, pos, *it);
@@ -361,10 +512,19 @@ bool DQLProcessor::matchProfilerResultType(
 		return profiler.isForAnalysis();
 	}
 	else {
-		const bool *enabled =
-				JsonUtils::find<bool>(profiler.getOption(), "sub");
+		const picojson::value &option = profiler.getOption();
+		const bool *enabled = (option.is<picojson::object>() ?
+				JsonUtils::find<bool>(option, "op") : NULL);
 		return (enabled != NULL && *enabled);
 	}
+}
+
+
+DQLProcessor::InfoEntry::InfoEntry(
+		const util::StdAllocator<void, void> &alloc) :
+		optionImage_(alloc),
+		inputInfo_(alloc),
+		outputInfo_(alloc) {
 }
 
 
@@ -484,18 +644,6 @@ bool DQLProcs::ExtProcContext::isOnTransactionService() {
 
 double DQLProcs::ExtProcContext::getStoreMemoryAgingSwapRate() {
 	return getBase().getStoreMemoryAgingSwapRate();
-}
-
-void DQLProcs::ExtProcContext::getConfig(SQLOps::OpConfig &config) {
-	SQLProcessorConfig procConfig;
-	procConfig.merge(getBase().getConfig(), true);
-
-	config.set(
-			SQLOpTypes::CONF_INTERRUPTION_PROJECTION_COUNT,
-			procConfig.interruptionProjectionCount_);
-	config.set(
-			SQLOpTypes::CONF_INTERRUPTION_SCAN_COUNT,
-			procConfig.interruptionScanCount_);
 }
 
 uint32_t DQLProcs::ExtProcContext::getTotalWorkerId() {
@@ -1048,7 +1196,8 @@ DQLProcs::SelectOption::SelectOption(util::StackAllocator&) :
 }
 
 void DQLProcs::SelectOption::fromPlanNode(OptionInput &in) {
-	const ProcPlan::Node &node = in.resolvePlanNode();	SQLExprs::SyntaxExprRewriter rewriter = in.createPlanRewriter();
+	const ProcPlan::Node &node = in.resolvePlanNode();
+	SQLExprs::SyntaxExprRewriter rewriter = in.createPlanRewriter();
 
 	output_ = &rewriter.toSelection(
 			node.outputList_,

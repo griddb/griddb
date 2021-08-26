@@ -327,6 +327,8 @@ struct SQLStringExprs::Functions {
 	};
 
 	struct ZeroBlob {
+		typedef DefaultPolicy::AsWriterInitializable Policy;
+
 		template<typename C>
 		typename C::WriterType& operator()(C &cxt, const int64_t *value);
 	};

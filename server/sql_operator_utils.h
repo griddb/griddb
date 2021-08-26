@@ -53,12 +53,17 @@ struct SQLOpUtils {
 
 	typedef util::Vector<const SQLExprs::Expression*> ExprRefList;
 
+	typedef std::pair<uint32_t, uint32_t> CompPos;
+	typedef util::Set<CompPos> CompPosSet;
+
 	struct AnalysisInfo;
 	struct AnalysisRootInfo;
+	struct AnalysisOptimizationInfo;
 	struct AnalysisIndexCondition;
 	struct AnalysisIndexInfo;
 
 	class CustomOpProjectionRegistrar;
+	template<bool Enabled> class ConditionalVarContextScope;
 	class ExpressionWriter;
 	class ExpressionListWriter;
 
@@ -79,7 +84,6 @@ public:
 
 	virtual bool isOnTransactionService() = 0;
 	virtual double getStoreMemoryAgingSwapRate() = 0;
-	virtual void getConfig(OpConfig &config) = 0;
 
 	virtual uint32_t getTotalWorkerId() = 0;
 };
@@ -87,6 +91,9 @@ public:
 class SQLOps::OpCodeBuilder {
 public:
 	typedef SQLOpUtils::ExprRefList ExprRefList;
+
+	typedef SQLOpUtils::CompPos CompPos;
+	typedef SQLOpUtils::CompPosSet CompPosSet;
 
 	struct Source;
 
@@ -128,7 +135,10 @@ public:
 
 	Projection& createIdenticalProjection(bool unified, uint32_t index);
 	Projection& createEmptyRefProjection(
-			bool unified, uint32_t index, uint32_t startColumn);
+			bool unified, uint32_t index, uint32_t startColumn,
+			const util::Set<uint32_t> *keySet);
+	Projection& createEmptyConstProjection(
+			const ColumnTypeList &typeList, bool withEmptyLimit);
 	Projection& createProjectionByUsage(bool unified);
 
 	Projection& rewriteProjection(
@@ -156,10 +166,28 @@ public:
 			Projection **distinctProj);
 	SQLExprs::Expression& arrangePredicate(const SQLExprs::Expression &src);
 
+	const SQLExprs::Expression* extractJoinKeyColumns(
+			const SQLExprs::Expression *srcExpr,
+			const SQLType::JoinType *joinTypeOfFilter,
+			SQLValues::CompColumnList &destKeyList, CompPosSet &posSet,
+			SQLExprs::Expression **destExpr);
+
 	static void setUpOutputNodes(
 			OpPlan &plan, OpNode *outNode, OpNode &inNode,
 			const Projection *distinctProj,
-			SQLType::AggregationPhase aggrPhase);
+			SQLType::AggregationPhase aggrPhase,
+			const SQLValues::CompColumnList *distinctKeyList = NULL);
+	static OpNode& setUpOutputNodesDetail(
+			OpPlan &plan, OpNode *outNode, bool outNodePending,
+			OpNode *inNode, SQLOpTypes::Type inNodeType,
+			const Projection *distinctProj,
+			SQLType::AggregationPhase aggrPhase,
+			const SQLValues::CompColumnList *distinctKeyList);
+
+	void setUpNoopNodes(
+			OpPlan &plan, const ColumnTypeList &outTypeList);
+	OpCode createOutputEmptyCode(const ColumnTypeList &outTypeList);
+	static bool isNoopAlways(const OpCode &code);
 
 	OpCode toExecutable(const OpCode &src);
 	OpCode rewriteCode(const OpCode &src, bool projectionArranging);
@@ -177,6 +205,11 @@ public:
 
 	static const Expression* findFilterPredicate(const Projection &src);
 
+	static const Projection& resolveOutputProjection(
+			const OpCode &code, const uint32_t *outIndex);
+	static const Projection& resolveOutputProjection(
+			const Projection &src, const uint32_t *outIndex);
+
 	static const Projection* findOutputProjection(
 			const OpCode &code, const uint32_t *outIndex);
 	static const Projection* findOutputProjection(
@@ -190,7 +223,8 @@ public:
 	static uint32_t resolveOutputIndex(const Projection &proj);
 	static uint32_t resolveOutputIndex(const SQLExprs::ExprCode &code);
 
-	static const Projection* findAggregationProjection(const Projection &src);
+	static const Projection* findAggregationProjection(
+			const Projection &src, const bool *forPipe = NULL);
 
 	bool findDistinctAggregation(const Projection &src);
 	static bool findDistinctAggregation(
@@ -205,6 +239,11 @@ public:
 	static void resolveColumnTypeList(
 			const Projection &proj, ColumnTypeList &typeList,
 			const uint32_t *outIndex);
+	static void getColumnTypeListByColumns(
+			const TupleColumnList &columnList, ColumnTypeList &typeList);
+
+	static TupleColumnType resolveUnifiedInputType(
+			OpContext &cxt, uint32_t pos);
 
 	static uint32_t resolveOutputCount(const OpCode &code);
 	static uint32_t resolveOutputCount(const Projection &proj);
@@ -214,7 +253,8 @@ public:
 	ExprRefList getDistinctExprList(const Projection &proj);
 
 	SQLValues::CompColumnList& createDistinctGroupKeyList(
-			const ExprRefList &distinctList, size_t index, bool idGrouping);
+			const ExprRefList &distinctList, size_t index, bool idGrouping,
+			bool idSingle);
 	Projection& createDistinctGroupProjection(
 			const ExprRefList &distinctList, size_t index, bool idGrouping,
 			SQLType::AggregationPhase aggrPhase);
@@ -222,17 +262,18 @@ public:
 	SQLValues::CompColumnList& createDistinctMergeKeyList();
 	Projection& createDistinctMergeProjection(
 			const ExprRefList &distinctList, size_t index,
-			const Projection &proj, SQLType::AggregationPhase aggrPhase);
+			const Projection &proj, SQLType::AggregationPhase aggrPhase,
+			const util::Set<uint32_t> *keySet);
 	Projection& createDistinctMergeProjectionAt(
 			const ExprRefList &distinctList, size_t index,
 			const Projection &proj, SQLType::AggregationPhase aggrPhase,
-			int32_t emptySide);
+			int32_t emptySide, const util::Set<uint32_t> *keySet);
 
 private:
 	typedef SQLOpUtils::ProjectionPair ProjectionPair;
 	typedef SQLOpUtils::ProjectionRefPair ProjectionRefPair;
 
-	void setUpExprFactoryContext(OpContext *cxt);
+	void setUpExprFactoryContext(const Source &source);
 
 	util::StackAllocator& getAllocator();
 
@@ -248,6 +289,99 @@ struct SQLOps::OpCodeBuilder::Source {
 
 	util::StackAllocator &alloc_;
 	OpContext *cxt_;
+	uint32_t mappedInput_;
+	bool inputUnified_;
+};
+
+class SQLOps::OpAllocatorManager {
+public:
+	struct Buffer;
+	class BufferRef;
+
+	OpAllocatorManager(
+			const util::StdAllocator<void, void> &alloc, bool composite,
+			OpAllocatorManager *sharedManager,
+			SQLValues::VarAllocator *localVarAllocRef);
+	~OpAllocatorManager();
+
+	static OpAllocatorManager& getDefault();
+	OpAllocatorManager& getSubManager(ExtOpContext &cxt);
+
+	util::StackAllocator& create(util::StackAllocator::BaseAllocator &base);
+	void release(util::StackAllocator *alloc);
+
+	Buffer createBuffer(size_t size, size_t filledRange);
+	void releaseBuffer(Buffer &buf);
+
+	SQLValues::VarAllocator& getLocalVarAllocator();
+	util::StdAllocator<void, void>& getLocalAllocator();
+
+private:
+	class CleanUpHandler : public util::AllocatorCleanUpHandler {
+	public:
+		explicit CleanUpHandler(OpAllocatorManager *manager);
+
+	private:
+		virtual void operator()() throw();
+
+		OpAllocatorManager *manager_;
+	};
+
+	typedef util::AllocVector<OpAllocatorManager*> ManagerList;
+	typedef util::AllocVector<util::StackAllocator*> StackAllocatorList;
+
+	static OpAllocatorManager* initializeDefault() throw();
+	static OpAllocatorManager* DEFAULT_INSTANCE;
+
+	void checkAllocators();
+	void prepareAllocators();
+	void cleanUpAllocators();
+
+	SQLValues::VarAllocator& getLocalVarAllocatorDirect();
+
+	util::StdAllocator<void, void> alloc_;
+	bool composite_;
+	ManagerList subList_;
+
+	OpAllocatorManager *sharedManager_;
+	SQLValues::VarAllocator *localVarAllocRef_;
+	util::LocalUniquePtr<SQLValues::VarAllocator> localVarAlloc_;
+	util::LocalUniquePtr< util::StdAllocator<void, void> > localAlloc_;
+
+	util::LocalUniquePtr<StackAllocatorList> cachedAllocList_;
+	Buffer *cachedBuffer_;
+
+	util::StackAllocator::BaseAllocator *baseAlloc_;
+	util::LocalUniquePtr<CleanUpHandler> cleanUpHandler_;
+
+	util::LocalUniquePtr<util::Mutex> mutex_;
+};
+
+struct SQLOps::OpAllocatorManager::Buffer {
+public:
+	Buffer();
+	Buffer(void *addr, size_t size, size_t filledRange);
+
+	static void fill(void *addr, size_t size);
+	static bool checkFilled(const void *addr, size_t size);
+
+	void *addr_;
+	size_t size_;
+	size_t filledRange_;
+};
+
+class SQLOps::OpAllocatorManager::BufferRef {
+public:
+	BufferRef(OpAllocatorManager &manager, size_t size, size_t filledRange);
+	~BufferRef();
+
+	const Buffer& get();
+	void setFilled();
+
+private:
+	Buffer buffer_;
+	OpAllocatorManager &manager_;
+	bool filled_;
 };
 
 class SQLOps::OpLatchKeeperManager {
@@ -262,7 +396,9 @@ public:
 			const util::StdAllocator<void, void> &alloc, bool composite);
 	~OpLatchKeeperManager();
 
-	OpLatchKeeperManager& getSubManager(OpContext &cxt);
+	static OpLatchKeeperManager& getDefault();
+	OpLatchKeeperManager& getSubManager(
+			ExtOpContext &cxt, util::StdAllocator<void, void> &subAlloc);
 
 	KeeperId create(uint64_t maxSize, bool hot);
 	void release(const KeeperId &id);
@@ -290,6 +426,9 @@ private:
 	typedef util::AllocVector<OpLatchKeeperManager*> ManagerList;
 	typedef util::AllocVector<Entry> EntryList;
 	typedef util::AllocDeque<SQLValues::SharedId> IdQueue;
+
+	static OpLatchKeeperManager* initializeDefault() throw();
+	static OpLatchKeeperManager* DEFAULT_INSTANCE;
 
 	util::StdAllocator<void, void> alloc_;
 	bool composite_;
@@ -332,19 +471,23 @@ private:
 
 class SQLOps::OpProfiler {
 	typedef SQLOpUtils::AnalysisInfo AnalysisInfo;
+	typedef SQLOpUtils::AnalysisOptimizationInfo AnalysisOptimizationInfo;
 	typedef SQLOpUtils::AnalysisIndexCondition AnalysisIndexCondition;
 	typedef SQLOpUtils::AnalysisIndexInfo AnalysisIndexInfo;
 public:
 	struct LocalInfo;
+	struct LocalOptimizationInfo;
 	struct LocalIndexInfo;
 
 	typedef util::AllocMap<SQLOpTypes::Type, OpProfilerId> SubMap;
 
+	typedef util::AllocVector<LocalOptimizationInfo> LocalOptimizationInfoList;
 	typedef util::AllocVector<LocalIndexInfo> LocalIndexInfoList;
 	typedef util::AllocVector<LocalInfo> LocalInfoList;
 
 	typedef util::AllocVector<util::AllocString> NameList;
 	typedef util::AllocVector<util::AllocString*> NameRefList;
+	typedef util::AllocVector<AnalysisOptimizationInfo> OptimizationList;
 	typedef util::AllocVector<AnalysisIndexInfo> IndexList;
 	typedef util::AllocVector<AnalysisIndexCondition> IndexCondList;
 
@@ -353,12 +496,15 @@ public:
 	OpProfilerId getSubId(const OpProfilerId *id, SQLOpTypes::Type type);
 
 	void addOperatorProfile(const OpProfilerId &id, const AnalysisInfo &info);
+	void addOptimizationProfile(
+			const OptimizationList *src, LocalOptimizationInfoList &dest);
 	void addIndexProfile(
 			const OpProfilerId &id, const AnalysisIndexInfo &info);
 
 	AnalysisInfo getAnalysisInfo(const OpProfilerId *id);
 
 	static AnalysisInfo getAnalysisInfo(OpProfiler *profiler, LocalInfo &src);
+	static OptimizationList* getOptimizations(LocalInfo &src);
 	static AnalysisIndexInfo getAnalysisIndexInfo(LocalIndexInfo &src);
 
 	static uint64_t nanoTimeToMillis(uint64_t nanoTime);
@@ -376,12 +522,26 @@ struct SQLOps::OpProfiler::LocalInfo {
 
 	OpProfilerId id_;
 
+	LocalOptimizationInfoList optimization_;
 	LocalIndexInfoList index_;
 	SubMap sub_;
 
+	OptimizationList optRef_;
 	IndexList indexRef_;
 	util::AllocVector<AnalysisInfo> subRef_;
 	util::AllocVector<AnalysisInfo> ref_;
+};
+
+struct SQLOps::OpProfiler::LocalOptimizationInfo {
+	SQLValues::ProfileElement& get(SQLOpTypes::Optimization type);
+	const SQLValues::ProfileElement& get(SQLOpTypes::Optimization type) const;
+
+	static size_t getOffset(SQLOpTypes::Optimization type);
+	static size_t getExprOffset();
+	static size_t getValueOffset();
+
+	SQLExprs::ExprProfile exprProfile_;
+	SQLValues::ProfileElement compConst_;
 };
 
 struct SQLOps::OpProfiler::LocalIndexInfo {
@@ -398,6 +558,7 @@ struct SQLOps::OpProfiler::LocalIndexInfo {
 
 class SQLOps::OpProfilerEntry {
 	typedef OpProfiler::LocalInfo LocalInfo;
+	typedef OpProfiler::LocalOptimizationInfo LocalOptimizationInfo;
 	typedef OpProfiler::LocalIndexInfo LocalIndexInfo;
 	typedef SQLOpUtils::AnalysisInfo AnalysisInfo;
 public:
@@ -410,6 +571,7 @@ public:
 	const OpProfilerId& getId();
 	AnalysisInfo get();
 
+	OpProfilerOptimizationEntry& getOptimizationEntry();
 	OpProfilerIndexEntry& getIndexEntry();
 
 private:
@@ -419,7 +581,23 @@ private:
 	util::StdAllocator<void, void> alloc_;
 	OpProfiler::LocalInfo localInfo_;
 
+	util::AllocUniquePtr<OpProfilerOptimizationEntry> optimization_;
 	util::AllocUniquePtr<OpProfilerIndexEntry> index_;
+};
+
+class SQLOps::OpProfilerOptimizationEntry {
+	typedef OpProfiler::LocalOptimizationInfo LocalOptimizationInfo;
+public:
+	explicit OpProfilerOptimizationEntry(LocalOptimizationInfo &localInfo);
+
+	static SQLExprs::ExprProfile* getExprProfile(
+			OpProfilerOptimizationEntry *entry);
+
+	SQLValues::ProfileElement& get(SQLOpTypes::Optimization type);
+	const SQLValues::ProfileElement& get(SQLOpTypes::Optimization type) const;
+
+private:
+	LocalOptimizationInfo &localInfo_;
 };
 
 class SQLOps::OpProfilerIndexEntry {
@@ -472,8 +650,9 @@ struct SQLOpUtils::AnalysisInfo {
 			UTIL_OBJECT_CODER_OPTIONAL(opCount_, -1),
 			executionCount_,
 			actualTime_,
+			optimization_,
 			index_,
-			sub_);
+			op_);
 
 	static const util::NameCoderEntry<SQLOpTypes::Type> OP_TYPE_LIST[];
 	static const util::NameCoder<
@@ -484,8 +663,9 @@ struct SQLOpUtils::AnalysisInfo {
 	int64_t executionCount_;
 	int64_t actualTime_;
 
+	util::AllocVector<AnalysisOptimizationInfo> *optimization_;
 	util::AllocVector<AnalysisIndexInfo> *index_;
-	util::AllocVector<AnalysisInfo> *sub_;
+	util::AllocVector<AnalysisInfo> *op_;
 
 	uint64_t actualNanoTime_;
 };
@@ -495,9 +675,27 @@ struct SQLOpUtils::AnalysisRootInfo {
 
 	AnalysisRootInfo();
 
-	UTIL_OBJECT_CODER_MEMBERS(sub_);
+	UTIL_OBJECT_CODER_MEMBERS(op_);
 
-	util::AllocVector<AnalysisInfo> *sub_;
+	util::AllocVector<AnalysisInfo> *op_;
+};
+
+struct SQLOpUtils::AnalysisOptimizationInfo {
+	AnalysisOptimizationInfo();
+
+	UTIL_OBJECT_CODER_MEMBERS(
+			UTIL_OBJECT_CODER_ENUM(type_, OPT_TYPE_CODER),
+			candidate_,
+			UTIL_OBJECT_CODER_OPTIONAL(target_, 0));
+
+	static const util::NameCoderEntry<
+			SQLOpTypes::Optimization> OPT_TYPE_LIST[];
+	static const util::NameCoder<
+			SQLOpTypes::Optimization, SQLOpTypes::END_OPT> OPT_TYPE_CODER;
+
+	SQLOpTypes::Optimization type_;
+	int64_t candidate_;
+	int64_t target_;
 };
 
 struct SQLOpUtils::AnalysisIndexCondition {
@@ -565,6 +763,21 @@ struct SQLOpUtils::CustomOpProjectionRegistrar::VariantTraits  {
 	}
 };
 
+template<bool Enabled>
+class SQLOpUtils::ConditionalVarContextScope {
+public:
+	explicit ConditionalVarContextScope(OpContext &cxt);
+
+private:
+	SQLValues::VarContext::Scope base_;
+};
+
+template<>
+class SQLOpUtils::ConditionalVarContextScope<false> {
+public:
+	explicit ConditionalVarContextScope(OpContext&) {}
+};
+
 class SQLOpUtils::ExpressionWriter {
 private:
 	typedef SQLValues::TypeSwitcher TypeSwitcher;
@@ -629,7 +842,7 @@ private:
 		const ExpressionWriter &base_;
 	};
 
-	template<typename T>
+	template<typename T, bool G>
 	class ByGeneral {
 	public:
 		explicit ByGeneral(const ExpressionWriter &base) : base_(base) {
@@ -657,7 +870,8 @@ public:
 	void initialize(
 			ExprFactoryContext &cxt, const Expression &expr,
 			const TupleColumn &outColumn, ContextRef *cxtRef,
-			TupleListReader **readerRef, WritableTuple *outTuple);
+			TupleListReader **readerRef, WritableTuple *outTuple,
+			bool inputMapping);
 
 	void setExpression(const Expression &expr);
 
@@ -674,7 +888,7 @@ public:
 	const SummaryColumn* getInSummaryColumn() const;
 
 private:
-	template<SQLExprs::ExprCode::InputSourceType S>
+	template<SQLExprs::ExprCode::InputSourceType S, bool G>
 	struct VariantTraits {
 		typedef VariantTraits OfExpressionWriter;
 
@@ -701,7 +915,7 @@ private:
 							BySummaryTupleBody<T>,
 					typename util::Conditional<
 							!FOR_COLUMN,
-							ByGeneral<T>, void>::Type>::Type>::Type>::Type>::Type Type;
+							ByGeneral<T, G>, void>::Type>::Type>::Type>::Type>::Type Type;
 		};
 	};
 
@@ -721,9 +935,9 @@ private:
 			typedef V Type;
 		};
 
-		template<typename Base, SQLExprs::ExprCode::InputSourceType S>
+		template<typename Base, SQLExprs::ExprCode::InputSourceType S, bool G>
 		struct OpTraitsAt {
-			typedef VariantTraits<S> SubTraitsType;
+			typedef VariantTraits<S, G> SubTraitsType;
 			typedef typename Base::VariantTraitsType::
 					template ExpressionWriterRebind<
 							SubTraitsType>::Type VariantTraitsType;
@@ -731,22 +945,31 @@ private:
 					VariantTraitsType>::Type Type;
 		};
 
-		explicit Switcher(const ExpressionWriter &base) : base_(base) {}
+		Switcher(
+				const ExpressionWriter &base, TupleColumnType inColumnType,
+				bool varGenerative);
 
 		template<typename Op, typename Traits>
 		typename Traits::template Func<Op>::Type getWith() const;
 
-		template<typename Op, typename Traits, SQLExprs::ExprCode::InputSourceType S>
+		template<
+				typename Op, typename Traits,
+				SQLExprs::ExprCode::InputSourceType S, bool G>
 		typename Traits::template Func<Op>::Type getSubWith() const;
 
 		const ExpressionWriter &base_;
+		TupleColumnType inColumnType_;
+		bool varGenerative_;
+		SQLValues::ValueProfile *profile_;
 	};
 
 	template<typename T>
 	void writeAt() const;
 
 	template<typename Op>
-	Switcher::DefaultFuncType resolveFunc() const;
+	Switcher::DefaultFuncType resolveFunc(
+			ExprFactoryContext &cxt, TupleColumnType inColumnType,
+			bool varGenerative) const;
 
 	Switcher::DefaultFuncType func_;
 
@@ -777,7 +1000,7 @@ public:
 
 	class ByProjection;
 	class ByGeneral;
-	class ByDigestTuple;
+	template<bool Rotating> class ByDigestTuple;
 
 	explicit ExpressionListWriter(const Source &source);
 
@@ -842,12 +1065,14 @@ public:
 			OpContext &cxt, const Projection &proj, bool forMiddle,
 			const SQLValues::CompColumnList *keyColumnList,
 			bool nullIgnorable, const Projection *inMiddleProj,
-			SQLExprs::ExprCode::InputSourceType srcType);
+			SQLExprs::ExprCode::InputSourceType srcType,
+			const uint32_t *mappedInput = NULL);
 
 	void setOutput(uint32_t index);
 
 	ProjectionFactoryContext& getFactoryContext() const;
 	const ProjectionCode& getCode() const;
+	bool isInputMapping() const;
 
 	void setUp(ExpressionListWriter &writer) const;
 
@@ -865,6 +1090,7 @@ private:
 		bool forMiddle_;
 		bool longKeyOnly_;
 		bool nullIgnorable_;
+		bool inputMapping_;
 		const SQLValues::CompColumnList *keyColumnList_;
 		uint32_t outIndex_;
 	};
@@ -909,6 +1135,7 @@ private:
 	const BaseType &base_;
 };
 
+template<bool Rotating>
 class SQLOpUtils::ExpressionListWriter::ByDigestTuple {
 public:
 	typedef ExpressionListWriter BaseType;
@@ -922,6 +1149,8 @@ public:
 		void projectBy(OpContext &cxt, const SummaryTuple &tuple) const;
 
 	private:
+		typedef typename T::Type TypeTag;
+
 		const BaseType &base_;
 	};
 
@@ -934,6 +1163,9 @@ public:
 	}
 
 private:
+	typedef util::TrueType AscendingType;
+	typedef typename util::BoolType<Rotating>::Result RotatingType;
+
 	const BaseType &base_;
 };
 
@@ -951,6 +1183,14 @@ void SQLOpUtils::CustomOpProjectionRegistrar::addProjectionVariants() const {
 	typedef typename SQLOps::ProjectionFactory::FactoryFunc FactoryFunc;
 	FactoryFunc func = Base::template add<T, P>();
 	addProjectionDirect(T, func);
+}
+
+
+template<bool Enabled>
+inline SQLOpUtils::ConditionalVarContextScope<
+		Enabled>::ConditionalVarContextScope(OpContext &cxt) :
+		base_(cxt.getVarContext()) {
+	UTIL_STATIC_ASSERT(Enabled);
 }
 
 
@@ -1043,17 +1283,13 @@ inline void SQLOpUtils::ExpressionListWriter::ByGeneral::projectBy(
 }
 
 
-template<typename T> inline
-void SQLOpUtils::ExpressionListWriter::ByDigestTuple::TypeAt<T>::projectBy(
+template<bool Rotating>
+template<typename T>
+inline void SQLOpUtils::ExpressionListWriter::ByDigestTuple<
+		Rotating>::TypeAt<T>::projectBy(
 		OpContext &cxt, const DigestTupleListReader &reader) const {
 	static_cast<void>(cxt);
-
 	typedef SQLValues::ValueUtils ValueUtils;
-	typedef typename T::Type TypeTag;
-
-	const bool reversed =
-			T::VariantTraitsType::OfValueComparator::ORDERING_REVERSED;
-	typedef typename util::BoolType<!reversed>::Result Ascending;
 
 	assert(base_.writer_ != NULL);
 	base_.writer_->next();
@@ -1070,8 +1306,8 @@ void SQLOpUtils::ExpressionListWriter::ByDigestTuple::TypeAt<T>::projectBy(
 				digestWritable, TypeTag, SQLValues::Types::Any>::Type FixedTypeTag;
 		ValueUtils::writeValue<FixedTypeTag>(
 				outTuple, base_.digestColumn_,
-				ValueUtils::toValueByOrdredDigest<FixedTypeTag, Ascending>(
-						reader.getDigest()));
+				ValueUtils::toValueByOrdredDigest<FixedTypeTag, AscendingType>(
+						ValueUtils::digestByRotation(reader.getDigest(), RotatingType())));
 	}
 	else {
 		assert(!base_.isDigestColumnAssigned());
@@ -1088,17 +1324,13 @@ void SQLOpUtils::ExpressionListWriter::ByDigestTuple::TypeAt<T>::projectBy(
 	}
 }
 
-template<typename T> inline
-void SQLOpUtils::ExpressionListWriter::ByDigestTuple::TypeAt<T>::projectBy(
+template<bool Rotating>
+template<typename T>
+inline void SQLOpUtils::ExpressionListWriter::ByDigestTuple<
+		Rotating>::TypeAt<T>::projectBy(
 		OpContext &cxt, const SummaryTuple &tuple) const {
 	static_cast<void>(cxt);
-
 	typedef SQLValues::ValueUtils ValueUtils;
-	typedef typename T::Type TypeTag;
-
-	const bool reversed =
-			T::VariantTraitsType::OfValueComparator::ORDERING_REVERSED;
-	typedef typename util::BoolType<!reversed>::Result Ascending;
 
 	assert(base_.writer_ != NULL);
 	base_.writer_->next();
@@ -1118,7 +1350,7 @@ void SQLOpUtils::ExpressionListWriter::ByDigestTuple::TypeAt<T>::projectBy(
 		else {
 			ValueUtils::writeValue<TypeTag>(
 					outTuple, base_.digestColumn_,
-					tuple.getHeadValueAs<TypeTag, Ascending>(
+					tuple.getHeadValueAs<TypeTag, RotatingType>(
 							base_.headSummaryColumn_));
 		}
 	}

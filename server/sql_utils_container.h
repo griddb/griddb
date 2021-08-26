@@ -30,9 +30,20 @@ struct SQLContainerUtils {
 	typedef SQLOps::OpContext OpContext;
 	typedef SQLOps::Projection Projection;
 
+	struct ScanMergeMode;
 	class ScanCursor;
 
 	struct ContainerUtils;
+};
+
+struct SQLContainerUtils::ScanMergeMode {
+	enum Type {
+		MODE_ROW_ARRAY,
+		MODE_MIXED,
+		MODE_MIXED_MERGING,
+
+		END_MODE
+	};
 };
 
 class SQLContainerUtils::ScanCursor {
@@ -48,31 +59,45 @@ public:
 	virtual void close() throw() = 0;
 
 	virtual bool scanFull(OpContext &cxt, const Projection &proj) = 0;
+	virtual bool scanRange(OpContext &cxt, const Projection &proj) = 0;
 	virtual bool scanIndex(
 			OpContext &cxt, const Projection &proj,
 			const SQLExprs::IndexConditionList &condList) = 0;
-	virtual bool scanUpdates(OpContext &cxt, const Projection &proj) = 0;
 	virtual bool scanMeta(
 			OpContext &cxt, const Projection &proj, const Expression *pred) = 0;
+
+	virtual void finishIndexScan(OpContext &cxt) = 0;
 
 	virtual void getIndexSpec(
 			OpContext &cxt, SQLExprs::IndexSelector &selector) = 0;
 	virtual bool isIndexLost() = 0;
 
+	virtual void setIndexSelection(const SQLExprs::IndexSelector &selector) = 0;
+	virtual const SQLExprs::IndexSelector& getIndexSelection() = 0;
+
+	virtual void setRowIdFiltering() = 0;
+	virtual bool isRowIdFiltering() = 0;
+
 	virtual uint32_t getOutputIndex() = 0;
 	virtual void setOutputIndex(uint32_t index) = 0;
+	virtual void setMergeMode(ScanMergeMode::Type mode) = 0;
 };
 
 struct SQLContainerUtils::ScanCursor::Source {
 	Source(
-			util::StackAllocator &alloc,
+			util::StackAllocator &alloc, SQLValues::LatchHolder &latchHolder,
 			const SQLOps::ContainerLocation &location,
-			const ColumnTypeList *columnTypeList);
+			const ColumnTypeList *columnTypeList,
+			const OpContext::Source &cxtSrc);
 
 	util::StackAllocator &alloc_;
+	SQLValues::LatchHolder &latchHolder_;
 	SQLOps::ContainerLocation location_;
 	const ColumnTypeList *columnTypeList_;
 	int64_t indexLimit_;
+	int64_t memLimit_;
+	std::pair<uint64_t, uint64_t> partialExecSizeRange_;
+	OpContext::Source cxtSrc_;
 };
 
 class SQLContainerUtils::ScanCursor::LatchTarget :

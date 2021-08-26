@@ -23,6 +23,7 @@
 #include "sql_operator_utils.h"
 #include "sql_utils_algorithm.h"
 
+
 struct SQLSortOps {
 	typedef SQLOps::TupleListReader TupleListReader;
 	typedef SQLOps::TupleListWriter TupleListWriter;
@@ -36,8 +37,11 @@ struct SQLSortOps {
 	typedef SQLOps::OpContext OpContext;
 	typedef SQLOps::OpConfig OpConfig;
 
+	typedef SQLValues::TupleNullChecker::WithAccessor<
+			SQLValues::ValueAccessor::ByReader> TupleNullChecker;
+
 	typedef SQLValues::TupleDigester::WithAccessor<
-			SQLValues::ValueAccessor::ByReader, 2> TupleDigester;
+			SQLValues::ValueAccessor::ByReader, 2, true> TupleDigester;
 
 	typedef SQLValues::SummaryTuple SummaryTuple;
 	typedef SQLValues::SummaryTupleSet SummaryTupleSet;
@@ -78,6 +82,7 @@ struct SQLSortOps {
 	typedef util::Vector<SortStageElement> SortStage;
 	typedef util::Vector<SortStage> SortStageList;
 
+	struct SorterEntry;
 	struct SortContext;
 
 	class Window;
@@ -100,6 +105,9 @@ public:
 private:
 	static Projection& createSubLimitedProjection(
 			SQLOps::OpCodeBuilder &builder, Projection &src, OpCode &code);
+	static const SQLValues::CompColumnList& toSubLimitedKeyList(
+			SQLOps::OpCodeBuilder &builder,
+			const SQLValues::CompColumnList &src);
 };
 
 class SQLSortOps::SortNway : public SQLOps::Operator {
@@ -110,7 +118,7 @@ public:
 private:
 	class SorterBuilder;
 	class SorterWriter;
-	template<bool Fixed, bool Limited> struct MergeAction;
+	template<bool Fixed, bool Limited, bool Rotating> struct MergeAction;
 
 	struct GroupSortAction;
 	template<typename InputUnique> struct GroupMergeAction;
@@ -120,12 +128,27 @@ private:
 	bool nextStage(SortContext &cxt) const;
 
 	TupleSorter& prepareSorter(
-			SortContext &cxt,
-			const SQLValues::CompColumnList &keyColumnList) const;
+			SortContext &cxt, const SQLValues::CompColumnList &keyColumnList,
+			TupleListReader &reader) const;
 	TupleHeapQueue createHeapQueue(
 			SortContext &cxt, bool primary,
 			const SQLValues::CompColumnList &keyColumnList,
 			TupleHeapRefList &refList) const;
+
+	static TupleNullChecker createSorterNullChecker(
+			util::StackAllocator &alloc,
+			const SQLValues::CompColumnList &totalKeys,
+			SQLValues::CompColumnList &nullCheckerKeys);
+	static TupleDigester createSorterDigester(
+			util::StackAllocator &alloc, SQLValues::VarContext &varCxt,
+			const SQLValues::CompColumnList &keyColumnList,
+			const TupleNullChecker &nullChecker, bool unique, bool primary,
+			SQLValues::ValueProfile *profile);
+	static bool isHashAvailable(
+			const SQLValues::CompColumnList &keyColumnList, bool unique);
+	static bool isPredicateEmpty(
+			SortContext &cxt, const SQLValues::TupleComparator &basePred,
+			const SQLValues::CompColumnList &keyColumnList, bool primary);
 
 	bool isMergeCompleted(SortContext &cxt) const;
 
@@ -140,6 +163,10 @@ private:
 	bool isDuplicateGroupMerging() const;
 	bool isUnique() const;
 	bool isKeyFiltering() const;
+
+	bool isKeyEmpty(TupleSorter &sorter) const;
+	static bool isKeyEmpty(TupleSorter &sorter, bool keyFiltering);
+
 	void updateProjections(
 			SortContext &cxt, const ProjectionRefPair &projectionPair) const;
 	void prepareProjectionOutput(SortContext &cxt, bool primary) const;
@@ -163,9 +190,7 @@ private:
 
 	SortContext& getSortContext(OpContext &cxt) const;
 
-	bool checkSorterBuilding(
-			SortContext &cxt, TupleSorter &sorter,
-			TupleListReader &reader) const;
+	bool checkSorterBuilding(SortContext &cxt, uint32_t inIndex) const;
 	bool checkMemoryLimitReached(
 			SortContext &cxt, TupleListReader &reader) const;
 
@@ -187,15 +212,67 @@ private:
 
 class SQLSortOps::SortNway::SorterBuilder {
 public:
-	typedef bool RetType;
-
-	template<typename T> class TypeAt {
+	class Normal {
 	public:
-		explicit TypeAt(SorterBuilder &base) : base_(base) {}
+		typedef void RetType;
 
-		bool operator()() {
-			return base_.buildAt<T>();
-		}
+		template<typename T> class TypeAt {
+		public:
+			explicit TypeAt(const Normal &base) : base_(base.base_) {}
+
+			void operator()() {
+				base_.buildAt<T>();
+			}
+
+		private:
+			SorterBuilder &base_;
+		};
+
+		explicit Normal(SorterBuilder &base) : base_(base) {}
+
+	private:
+		SorterBuilder &base_;
+	};
+
+	class Unique {
+	public:
+		typedef void RetType;
+
+		template<typename T> class TypeAt {
+		public:
+			explicit TypeAt(const Unique &base) : base_(base.base_) {}
+
+			void operator()() {
+				base_.uniqueBuildAt<T>();
+			}
+
+		private:
+			SorterBuilder &base_;
+		};
+
+		explicit Unique(SorterBuilder &base) : base_(base) {}
+
+	private:
+		SorterBuilder &base_;
+	};
+
+	class Grouping {
+	public:
+		typedef void RetType;
+
+		template<typename T> class TypeAt {
+		public:
+			explicit TypeAt(const Grouping &base) : base_(base.base_) {}
+
+			void operator()() {
+				base_.groupBuildAt<T>();
+			}
+
+		private:
+			SorterBuilder &base_;
+		};
+
+		explicit Grouping(SorterBuilder &base) : base_(base) {}
 
 	private:
 		SorterBuilder &base_;
@@ -203,68 +280,145 @@ public:
 
 	SorterBuilder(
 			SortContext &cxt, TupleSorter &sorter, TupleListReader &reader,
-			const SQLValues::CompColumnList &keyColumnList, bool keyFiltering);
+			const SQLValues::CompColumnList &keyColumnList, bool keyFiltering,
+			const Projection *pipeProj, const Projection *mergeProj);
+	~SorterBuilder();
 
-	bool isInterruptible();
-
-	bool build();
+	bool build(SortContext &cxt);
 
 private:
-	template<typename T> bool buildAt();
+	typedef SQLValues::TupleComparator::WithAccessor<
+			std::equal_to<SQLValues::ValueComparator::PredArgType>,
+			false, false, false, false,
+			SQLValues::ValueAccessor::BySummaryTuple> TupleEq;
+
+	template<typename T> void buildAt();
+	template<typename T> void uniqueBuildAt();
+	template<typename T> void groupBuildAt();
 
 	bool checkEmpty();
 
+	OpContext &cxt_;
+
 	TupleSorter &sorter_;
 	TupleListReader &reader_;
-	SQLValues::TupleNullChecker::WithAccessor<
-			SQLValues::ValueAccessor::ByReader> nullChecker_;
-	TupleDigester digester_;
-	TupleDigester digester2_;
+	TupleNullChecker &nullChecker_;
+	const TupleDigester &digester1_;
+	const TupleDigester &digester2_;
 	bool keyFiltering_;
+	bool withAny_;
 	SummaryTupleSet &tupleSet1_;
 	SummaryTupleSet &tupleSet2_;
 	uint64_t nextInterruption_;
+
+	TupleEq tupleEq_;
+	size_t hashSize_;
+	uint64_t hashUnit_;
+	SummaryTuple *hashTable_;
+	size_t hashConflictionLimit_;
+
+	SummaryTuple *inTupleRef_;
+	SummaryTuple *outTupleRef_;
+	const Projection *pipeProj_;
+	const Projection *mergeProj_;
+
+	TupleDigester::SwitcherType::PlainOpBase<
+			const Normal>::FuncType normalFunc_;
+	TupleDigester::SwitcherType::PlainOpBase<
+			const Unique>::FuncType uniqueFunc_;
+	TupleDigester::SwitcherType::PlainOpBase<
+			const Grouping>::FuncType groupFunc_;
 };
 
 class SQLSortOps::SortNway::SorterWriter {
 public:
-	template<typename T>
-	class TypeAt {
+	class Normal {
 	public:
-		explicit TypeAt(SorterWriter &base) : base_(base) {}
+		template<typename T>
+		class TypeAt {
+		public:
+			explicit TypeAt(const Normal &base) : base_(base.base_) {}
 
-		void operator()() const {
-			typedef typename SQLOpUtils::ExpressionListWriter::ByDigestTuple::
-					template TypeAt<T> Projector;
-			base_.writeBy(Projector(base_.writer_));
-		}
+			void operator()() const {
+				typedef typename SQLOpUtils::ExpressionListWriter::ByDigestTuple<
+						false>::template TypeAt<T> Projector;
+				base_.writeBy(Projector(base_.writer_));
+			}
+
+		private:
+			SorterWriter &base_;
+		};
+
+		explicit Normal(SorterWriter &base) : base_(base) {}
+
+	private:
+		SorterWriter &base_;
+	};
+
+	class Unique {
+	public:
+		typedef void RetType;
+
+		template<typename T>
+		class TypeAt {
+		public:
+			explicit TypeAt(const Unique &base) : base_(base.base_) {}
+
+			void operator()() const {
+				base_.writeUnique<T>();
+			}
+
+		private:
+			SorterWriter &base_;
+		};
+
+		explicit Unique(SorterWriter &base) : base_(base) {}
 
 	private:
 		SorterWriter &base_;
 	};
 
 	SorterWriter(
-			OpContext &cxt, TupleSorter &sorter, const Projection &proj,
-			const SQLValues::CompColumnList &keyColumnList, bool primary);
+			SortContext &cxt, TupleSorter &sorter, const Projection &proj,
+			const SQLValues::CompColumnList &keyColumnList, bool primary,
+			bool unique);
 
 	void write();
 
 private:
-	typedef void (*TypedFunc)(SorterWriter&);
+	typedef SQLValues::TupleComparator::WithAccessor<
+			std::less<SQLValues::ValueComparator::PredArgType>,
+			false, false, false, false,
+			SQLValues::ValueAccessor::BySummaryTuple> WriterTupleLess;
+
+	typedef void (*TypedFunc)(const Normal&);
+
+	template<typename T> void writeUnique();
+	template<typename T> void writeUniqueByDigestTuple();
 
 	template<typename P> void writeBy(const P &projector);
+	template<typename P, typename T> void writeUniqueBy(const P &projector);
 
 	template<bool Rev>
 	static TypedFunc getTypedFunction(TupleColumnType type);
+
+	SummaryTuple* getHashMiddle(bool ordering) const;
 
 	OpContext &cxt_;
 	TupleSorter &sorter_;
 	const Projection &proj_;
 	SQLOpUtils::ExpressionListWriter writer_;
 	bool primary_;
+	bool unique_;
+
+	const TupleDigester &digester_;
+	WriterTupleLess pred_;
+	SummaryTuple *hashTable_;
+	SQLOps::OpAllocatorManager::BufferRef *hashBufferRef_;
+	size_t hashSize_;
 };
 
-template<bool Fixed, bool Limited>
+template<bool Fixed, bool Limited, bool Rotating>
 struct SQLSortOps::SortNway::MergeAction {
 	struct Options {
 		typedef typename util::BoolType<Fixed>::Result FixedDigest;
@@ -273,7 +427,7 @@ struct SQLSortOps::SortNway::MergeAction {
 
 	typedef typename util::Conditional<
 			Fixed,
-			SQLOpUtils::ExpressionListWriter::ByDigestTuple,
+			SQLOpUtils::ExpressionListWriter::ByDigestTuple<Rotating>,
 			SQLOpUtils::ExpressionListWriter::ByProjection>::Type ProjectorType;
 	typedef typename ProjectorType::BaseType BaseType;
 
@@ -329,12 +483,17 @@ struct SQLSortOps::SortNway::MergeAction {
 };
 
 struct SQLSortOps::SortNway::GroupSortAction {
+	typedef std::pair<
+			const SQLOps::SummaryColumnList*,
+			const SQLOps::SummaryColumnList*> ColumListPair;
 	typedef std::pair<SummaryTupleSet*, SummaryTupleSet*> TupleSetPair;
 
 	GroupSortAction(
 			OpContext &cxt,
 			const Projection *pipeProj, const Projection *mergeProj,
-			SummaryTuple *outTupleRef, const TupleSetPair &tupleSetPair);
+			SummaryTuple *outTupleRef, const ColumListPair &columnListPair,
+			const TupleSetPair &tupleSetPair);
+	~GroupSortAction();
 
 	void operator()(bool primary) const;
 
@@ -364,6 +523,7 @@ struct SQLSortOps::SortNway::GroupSortAction {
 
 	SummaryTuple *inTupleRef_;
 	SummaryTuple *outTupleRef_;
+	ColumListPair columListPair_;
 	TupleSetPair tupleSetPair_;
 };
 
@@ -468,23 +628,70 @@ private:
 	uint32_t storeIndex2_;
 };
 
+struct SQLSortOps::SorterEntry {
+	typedef SummaryTuple SorterElementType;
+	typedef SQLOps::OpAllocatorManager::BufferRef BufferRef;
+
+	SorterEntry(
+			OpContext &cxt, size_t capacity, bool hashAvailable,
+			int64_t hashSizeBase, TupleListReader &reader);
+
+	SummaryTupleSet& getSummaryTupleSet(bool pimary);
+	TupleSorter& resolveSorter(
+			const std::pair<TupleLess, TupleLess> &predPair);
+
+	size_t getAllocatedSize();
+	size_t getHashConflictionLimit() const;
+
+	void initializeHashTable();
+	SorterElementType* getBuffer(bool forHash, bool pimary);
+	BufferRef& getBufferRef(bool forHash, bool pimary);
+
+	static size_t toBufferBytes(size_t capacity);
+	static size_t toHashSize(
+			size_t capacity, bool hashAvailable, int64_t hashSizeBase);
+	static uint64_t toHashUnit(size_t hashSize, const TupleDigester &digester);
+	static size_t toHashConflictionLimit(size_t capacity, size_t hashSize);
+
+	SQLOps::OpAllocatorManager &allocManager_;
+	SQLOps::OpStore::AllocatorRef allocRef_;
+
+	SQLValues::ValueContext valueCxt_;
+
+	SummaryTupleSet totalTupleSet_;
+	SummaryTupleSet tupleSet1_;
+	SummaryTupleSet tupleSet2_;
+
+	size_t capacity_;
+	size_t hashSize_;
+
+	BufferRef buffer1_;
+	BufferRef buffer2_;
+	util::LocalUniquePtr<BufferRef> hashBuffer_;
+
+	util::LocalUniquePtr<TupleSorter> sorter_;
+	uint64_t initialReferencingBlockCount_;
+	bool filled_;
+};
+
 struct SQLSortOps::SortContext {
-	SortContext(SQLValues::ValueContext &cxt);
+	explicit SortContext(SQLValues::ValueContext &cxt);
 
 	OpContext& getBase();
 	util::StackAllocator& getAllocator();
 
 	SQLOps::SummaryColumnList& getSummaryColumnList(bool pimary);
-	SummaryTupleSet& getSummaryTupleSet(bool pimary);
 	SQLValues::CompColumnList& getKeyColumnList(bool pimary);
 	bool& getFinalStageStarted(bool pimary);
+	util::LocalUniquePtr<TupleDigester>& getDigester(bool pimary);
 
 	OpContext *baseCxt_;
 
 	uint32_t workingDepth_;
-	TupleSorter *sorter_;
-	bool sorterFilled_;
+	util::LocalUniquePtr<SorterEntry> sorterEntry_;
 	std::pair<bool, bool> finalStageStarted_;
+	bool readerAccessible_;
+	int64_t initialTupleCout_;
 	SortStageList stageList_;
 
 	util::Vector<uint32_t> freeStoreList_;
@@ -495,14 +702,16 @@ struct SQLSortOps::SortContext {
 	SQLOps::SummaryColumnList summaryColumnList1_;
 	SQLOps::SummaryColumnList summaryColumnList2_;
 
-	SummaryTupleSet totalTupleSet_;
-	SummaryTupleSet tupleSet1_;
-	SummaryTupleSet tupleSet2_;
-
 	SQLValues::CompColumnList keyColumnList1_;
 	SQLValues::CompColumnList keyColumnList2_;
 
 	SummaryTuple groupTuple_;
+
+	SQLValues::CompColumnList nullCheckerKeys_;
+	util::LocalUniquePtr<TupleNullChecker> nullChecker_;
+
+	util::LocalUniquePtr<TupleDigester> digester1_;
+	util::LocalUniquePtr<TupleDigester> digester2_;
 };
 
 class SQLSortOps::Window : public SQLOps::Operator {
@@ -510,33 +719,42 @@ public:
 	virtual void compile(OpContext &cxt) const;
 
 private:
+	typedef util::Vector<SQLExprs::Expression*> ExprRefList;
+
 	static OpCode createPartitionCode(
 			OpCodeBuilder &builder, const SQLValues::CompColumnList *keyList,
 			SQLExprs::Expression *&valueExpr, SQLExprs::Expression *&posExpr,
-			const Projection &pipeProj, const SQLExprs::Expression *windowExpr);
+			const Projection &pipeProj, const ExprRefList &windowExprList);
 
-	static OpCode createPositioningJoinCode(OpCodeBuilder &builder);
-	static OpCode createPositioningSortCode(OpCodeBuilder &builder);
+	static OpCode createPositioningJoinCode(
+			OpCodeBuilder &builder, TupleColumnType valueColumnType);
+	static OpCode createPositioningSortCode(
+			OpCodeBuilder &builder, TupleColumnType valueColumnType);
 
 	static OpCode createMergeCode(
 			OpCodeBuilder &builder, SQLOpUtils::ProjectionPair &projections,
-			SQLExprs::Expression *&windowExpr, bool positioning);
+			ExprRefList &windowExprList, bool positioning);
 
 	static OpCode createSingleCode(
 			OpCodeBuilder &builder, const SQLValues::CompColumnList *keyList,
 			SQLOpUtils::ProjectionPair &projections,
-			SQLExprs::Expression *&windowExpr);
+			ExprRefList &windowExprList);
 
-	static SQLExprs::Expression* splitWindowExpr(
+	static void splitWindowExpr(
 			OpCodeBuilder &builder, Projection &src,
 			SQLExprs::Expression *&valueExpr, SQLExprs::Expression *&posExpr,
-			bool &valueCounting);
+			bool &valueCounting, ExprRefList &windowExprList);
+	static SQLExprs::Expression& createPositioningValueExpr(
+			OpCodeBuilder &builder, const SQLExprs::Expression &src,
+			const SQLExprs::Expression &posExpr);
 
 	static Projection& createProjectionWithWindow(
 			OpCodeBuilder &builder, const Projection &pipeProj,
-			Projection &src, SQLExprs::Expression *&windowExpr);
+			Projection &src, ExprRefList &windowExprList);
 	static Projection& createUnmatchWindowPipeProjection(
 			OpCodeBuilder &builder, const Projection &src);
+	static void duplicateExprList(
+			OpCodeBuilder &builder, const ExprRefList &src, ExprRefList &dest);
 };
 
 class SQLSortOps::WindowPartition : public SQLOps::Operator {
@@ -611,15 +829,15 @@ private:
 
 class SQLSortOps::WindowMerge : public SQLOps::Operator {
 public:
-	virtual void execute(OpContext &cxt) const;
-
-private:
 	enum {
 		IN_MAIN = 0,
 		IN_COUNTING = 1,
 		IN_POSITIONING = 2
 	};
 
+	virtual void execute(OpContext &cxt) const;
+
+private:
 	typedef SQLOps::TupleColumn TupleColumn;
 
 	struct MergeContext {
@@ -646,7 +864,8 @@ private:
 			const Projection *&unmatchedPipeProj,
 			const Projection *&subFinishProj) const;
 	const SQLExprs::Expression* findPositioningExpr(
-			OpContext &cxt, bool &following) const;
+			OpContext &cxt, bool &following, bool &withDirection,
+			int64_t &amount) const;
 
 	MergeContext& prepareMergeContext(OpContext &cxt) const;
 	TupleListReader* preparePositioningReader(
@@ -663,16 +882,17 @@ private:
 
 
 
-template<bool Fixed, bool Limited>
-SQLSortOps::SortNway::MergeAction<Fixed, Limited>::MergeAction(
+template<bool Fixed, bool Limited, bool Rotating>
+SQLSortOps::SortNway::MergeAction<Fixed, Limited, Rotating>::MergeAction(
 		SortContext &cxt, const BaseType &projectorBase) :
 		cxt_(cxt.getBase()),
 		projector_(projectorBase),
 		workingRestLimit_(cxt.workingRestLimit_) {
 }
 
-template<bool Fixed, bool Limited>
-inline bool SQLSortOps::SortNway::MergeAction<Fixed, Limited>::operator()(
+template<bool Fixed, bool Limited, bool Rotating>
+inline bool SQLSortOps::SortNway::MergeAction<
+		Fixed, Limited, Rotating>::operator()(
 		const TupleHeapQueue::Element &elem) const {
 	projector_.template projectorAt<void>().projectBy(cxt_, elem.getValue());
 
@@ -687,9 +907,10 @@ inline bool SQLSortOps::SortNway::MergeAction<Fixed, Limited>::operator()(
 	return true;
 }
 
-template<bool Fixed, bool Limited>
+template<bool Fixed, bool Limited, bool Rotating>
 template<typename T>
-inline bool SQLSortOps::SortNway::MergeAction<Fixed, Limited>::TypeAt<T>::operator()(
+inline bool SQLSortOps::SortNway::MergeAction<
+		Fixed, Limited, Rotating>::TypeAt<T>::operator()(
 		const TupleHeapQueue::Element &elem) const {
 	const bool reversed =
 			T::VariantTraitsType::OfValueComparator::ORDERING_REVERSED;
