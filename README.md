@@ -162,3 +162,4 @@ If necessary, please refer to [Installation Troubleshooting](docs/TroubleShootin
   The server source license is GNU Affero General Public License (AGPL),
   while the Java client library license and the operational commands is Apache License, version 2.0.
   See 3rd_party/3rd_party.md for the source and license of the third party.
+Support for file.
