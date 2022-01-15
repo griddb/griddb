@@ -1,0 +1,1417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <link rel="stylesheet" href="../css/Drita Beqiri.css">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    
+    <title>Handmade Jewelry DB</title>
+
+    <link rel="stylesheet" href="https://unpkg.com/swiper/swiper-bundle.min.css" />
+
+    <!-- font awesome cdn link  -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/all.min.css">
+
+    <!-- custom css file link  -->
+    <link rel="stylesheet" href="css/style.css">
+
+</head>
+<body style="background-color : rgb(180, 175, 175);">
+    
+<!-- header section starts  -->
+
+<header>
+
+    <div class="header-1">
+       
+
+        <div class="share">
+            <span style="color: wheat;"> follow us : </span>
+            <a href="" class="fab fa-facebook-f"></a>
+            <a href="#" class="fab fa-twitter"></a>
+            <a href="https://www.instagram.com/handmadejewelrydb/" class="fab fa-instagram"></a>
+            <a href="#" class="fab fa-linkedin"></a>
+        </div>
+
+        <div class="call">
+            <span style="color: wheat;"> call us : </span>
+            <a href="#" style="color: wheat">+383-45-316-190</a>
+        </div>
+
+    </div>
+
+    <div class="header-2">
+
+        <!-- <a href="" class="logo" style="color: wheat;">  <i class="fas fa-mosque" style="font-family: sans-serif;"> </i> HandMadeJewelry DB</a> -->
+
+
+
+
+        <p style="font-size: 46px; color: wheat; ">DB</p>
+
+
+
+
+        <p style="font-size: 26px; color: wheat; margin-right: 650px;">Hand Made Jewelry</p>
+        <form action="" class="search-bar-container">
+            <input type="search" id="search-bar" placeholder="search here...">
+            <label for="search-bar" class="fas fa-search"></label>
+        </form>
+
+    </div>
+
+    <div class="header-3" >
+
+        <div  id="menu-bar" class="fas fa-bars"></div>
+
+        <nav class="navbar" >
+            <a href="#home">home</a>
+            <a href="#category">category</a>
+            <a href="#product">product</a>
+            <a href="#contact">contact</a>
+        </nav>
+
+        <div class="icons">
+            <a href="#" class="fas fa-shopping-cart"></a>
+            <a href="#" class="fas fa-heart"></a>
+            <a href="#" class="fas fa-user-circle"></a>
+        </div>
+
+    </div>
+
+</header>
+
+<!-- header section ends -->
+
+<!-- home section starts  -->
+
+<section class="home" id="home">
+
+    <div class="swiper-container home-slider">
+
+        <div class="swiper-wrapper">
+
+            <div class="swiper-slide">
+                <div class="box" style=" background: url(../images/theone.png) ">
+                    <div class="content">
+                        <span></span>
+                        <h3 style="font-family: 'Courier New', Courier, monospace;">Jewelry DB </h3>
+                        <a href="#" class="btn">shop now</a>
+                    </div>
+                </div>
+            </div>
+            <!-- <div class="swiper-slide">
+                <div class="box" style="background: url(images/slider2.jpg);">
+                    <div class="content">
+                        <span>upto 45% off</span>
+                        <h3>plant make people happy</h3>
+                        <a href="#" class="btn">shop now</a>
+                    </div>
+                </div>
+            </div>
+            <div class="swiper-slide">
+                <div class="box" style="background: url(images/slider3.jpg);">
+                    <div class="content">
+                        <span>upto 65% off</span>
+                        <h3>decorate your home now</h3>
+                        <a href="#" class="btn">shop now</a>
+                    </div>
+                </div>
+            </div> -->
+
+        </div>
+
+        <div class="swiper-pagination"></div>
+
+    </div>
+
+</section>
+
+<!-- home section ends -->
+
+<!-- banner section starts  -->
+
+<section class="banner-container">
+
+    <div class="banner">
+        <img src="../images/christmas.png" alt="">
+        <div class="content">
+            <span>new arrivals</span>
+            <h3 style="font-family: 'Trebuchet MS', 'Lucida Sans Unicode', 'Lucida Grande', 'Lucida Sans', Arial, sans-serif;">Christmas</h3>
+            <a href="#" class="btn">shop now</a>
+        </div>
+    </div>
+    <div class="banner">
+        <img src="../images/take100.jpg.png" alt="">
+        <div class="content">
+            <span>new arrivals</span>
+            <h3 style="font-family: 'Lucida Sans', 'Lucida Sans Regular', 'Lucida Grande', 'Lucida Sans Unicode', Geneva, Verdana, sans-serif;">Holidays</h3>
+            <a href="#" class="btn">shop now</a>
+        </div>
+    </div>
+
+</section>
+
+<!-- banner section ends -->
+
+<!-- category section starts  -->
+
+<section class="category" id="category">
+
+<h1 class="heading"> Necklaces </h1>
+
+<div class="box-container">
+
+    <div class="box">
+        <img src="../images/leanne.png" alt="">
+        <div class="content">
+            <h3 style="font-family: Georgia, 'Times New Roman', Times, serif;">Leanne</h3>
+            <a href="#" class="btn">shop now</a>
+        </div>
+    </div>
+    <div class="box">
+        <img src="../images/marcella.png" alt="">
+        <div class="content">
+            <h3 style="font-family: Georgia, 'Times New Roman', Times, serif;">Marcella</h3>
+            <a href="#" class="btn">shop now</a>
+        </div>
+    </div>
+    <div class="box">
+        <img src="../images/alcea.png" alt="">
+        <div class="content">
+            <h3 style="font-family: Georgia, 'Times New Roman', Times, serif;">Alcea</h3>
+            <a href="#" class="btn">shop now</a>
+        </div>
+    </div>
+    <div class="box">
+        <img src="../images/Nayla.png" alt="">
+        <div class="content">
+            <h3 style="font-family: Georgia, 'Times New Roman', Times, serif;">Nayla</h3>
+            <a href="#" class="btn">shop now</a>
+        </div>
+    </div>
+
+</div>
+
+</section>
+
+<!-- category section ends -->
+
+<!-- product section starts  -->
+
+<section class="product" id="product">
+
+<h1 class="heading"> new arrivals </h1>
+
+<div class="box-container">
+
+    <div class="box">
+        <!-- <span class="discount">-10%</span> -->
+        <div class="icons">
+            <a href="#" class="fas fa-heart"></a>
+            <a href="#" class="fas fa-share"></a>
+            <a href="#" class="fas fa-eye"></a>
+        </div>
+        <img src="../images/nina.png" alt="">
+        <h3>Our 'Nina' Necklace</h3>
+        <div class="stars">
+            <!-- <i class="fas fa-star"></i>
+            <i class="fas fa-star"></i>
+            <i class="fas fa-star"></i>
+            <i class="fas fa-star"></i>
+            <i class="far fa-star"></i> -->
+        </div>
+        <!-- <div class="quantity">
+            <span> quantity : </span>
+            <input type="number" min="1" max="100" value="1">
+        </div> -->
+        <div class="price">$?? <span>$??</span></div>
+        <a href="#" class="btn">add to cart</a>
+    </div>
+
+    <div class="box">
+        <!-- <span class="discount">-25%</span> -->
+        <div class="icons">
+            <a href="#" class="fas fa-heart"></a>
+            <a href="#" class="fas fa-share"></a>
+            <a href="#" class="fas fa-eye"></a>
+        </div>
+        <img src="../images/Mimi.png" alt="">
+        <h3>Add our 'Mimi' set</h3>
+        <div class="stars">
+            <!-- <i class="fas fa-star"></i>
+            <i class="fas fa-star"></i>
+            <i class="fas fa-star"></i>
+            <i class="fas fa-star"></i>
+            <i class="far fa-star"></i> -->
+        </div>
+        <!-- <div class="quantity">
+            <span> quantity : </span>
+            <input type="number" min="1" max="100" value="1">
+        </div> -->
+        <div class="price">$?? <span>$??</span></div>
+        <a href="#" class="btn">add to cart</a>
+    </div>
+
+    <div class="box">
+        <!-- <span class="discount">-7%</span> -->
+        <div class="icons">
+            <a href="#" class="fas fa-heart"></a>
+            <a href="#" class="fas fa-share"></a>
+            <a href="#" class="fas fa-eye"></a>
+        </div>
+        <img src="../images/Seona.png" alt="">
+        <h3>Seona</h3>
+        <div class="stars">
+            <!-- <i class="fas fa-star"></i>
+            <i class="fas fa-star"></i>
+            <i class="fas fa-star"></i>
+            <i class="fas fa-star"></i>
+            <i class="far fa-star"></i> -->
+        </div>
+        <!-- <div class="quantity">
+            <span> quantity : </span>
+            <input type="number" min="1" max="100" value="1">
+        </div> -->
+        <div class="price">$?? <span>$??</span></div>
+        <a href="#" class="btn">add to cart</a>
+    </div>
+
+    <div class="box">
+        <!-- <span class="discount">-4%</span> -->
+        <div class="icons">
+            <a href="#" class="fas fa-heart"></a>
+            <a href="#" class="fas fa-share"></a>
+            <a href="#" class="fas fa-eye"></a>
+        </div>
+        <img src="../images/Agnes.png" alt="">
+        <h3>Agnes</h3>
+        <div class="stars">
+            <!-- <i class="fas fa-star"></i>
+            <i class="fas fa-star"></i>
+            <i class="fas fa-star"></i>
+            <i class="fas fa-star"></i>
+            <i class="far fa-star"></i> -->
+        </div>
+        <!-- <div class="quantity">
+            <span> quantity : </span>
+            <input type="number" min="1" max="100" value="1">
+        </div> -->
+        <div class="price">$?? <span>$??</span></div>
+        <a href="#" class="btn">add to cart</a>
+    </div>
+
+    <div class="box">
+        
+        <div class="icons">
+            <a href="#" class="fas fa-heart"></a>
+            <a href="#" class="fas fa-share"></a>
+            <a href="#" class="fas fa-eye"></a>
+        </div>
+        <img src="images/product5.jpg" alt="">
+        <h3>Se di hala</h3>
+        <div class="stars">
+            <!-- <i class="fas fa-star"></i>
+            <i class="fas fa-star"></i>
+            <i class="fas fa-star"></i>
+            <i class="fas fa-star"></i>
+            <i class="far fa-star"></i> -->
+        </div>
+        <!-- <div class="quantity">
+            <span> quantity : </span>
+            <input type="number" min="1" max="100" value="1">
+        </div> -->
+        <!-- <div class="price">$14.70 <span>$18.20</span></div> -->
+        <a href="#" class="btn">add to cart</a>
+    </div>
+
+    <div class="box">
+     
+        <div class="icons">
+            <a href="#" class="fas fa-heart"></a>
+            <a href="#" class="fas fa-share"></a>
+            <a href="#" class="fas fa-eye"></a>
+        </div>
+        <img src="images/product6.jpg" alt="">
+        <h3>Se di hala</h3>
+        <div class="stars">
+            <!-- <i class="fas fa-star"></i>
+            <i class="fas fa-star"></i>
+            <i class="fas fa-star"></i>
+            <i class="fas fa-star"></i>
+            <i class="far fa-star"></i> -->
+        </div>
+        <!-- <div class="quantity">
+            <span> quantity : </span>
+            <input type="number" min="1" max="100" value="1">
+        </div> -->
+        <!-- <div class="price">$14.70 <span>$18.20</span></div> -->
+        <a href="#" class="btn">add to cart</a>
+    </div>
+
+</div>
+
+</section>
+
+<!-- product section ends -->
+
+<!-- .icons section starts  -->
+
+<section class="icons-container">
+
+    <div class="icon">
+        <img src="images/icon1.png" alt="">
+        <div class="content">
+            <h3>free shipping</h3>
+            <p>Free shipping on order</p>
+        </div>
+    </div>
+    <div class="icon">
+        <img src="images/icon2.png" alt="">
+        <div class="content">
+            <h3>100% Money Back</h3>
+            <p>You’ve 30 days to Return</p>
+        </div>
+    </div>
+    <div class="icon">
+        <img src="images/icon3.png" alt="">
+        <div class="content">
+            <h3>Payment Secure</h3>
+            <p>100% secure payment</p>
+        </div>
+    </div>
+    <div class="icon">
+        <img src="images/icon4.png" alt="">
+        <div class="content">
+            <h3>Support 24/7</h3>
+            <p>Contact us anytime</p>
+        </div>
+    </div>
+
+</section>
+
+<!-- .icons section ends -->
+
+<!-- deal section starts  -->
+
+<!-- <section class="deal" id="deal">
+
+    <h1 class="heading"> deal of the day </h1>
+
+    <div class="row">
+
+        <div class="content">
+            <h3 class="title">don't miss the deal</h3>
+            <p>Lorem, ipsum dolor sit amet consectetur adipisicing elit. Recusandae rem eligendi repudiandae pariatur. Aut, esse molestias laborum sunt reprehenderit repellat officiis aspernatur consequatur nemo! Veritatis, ex architecto! Eligendi, iste nulla.</p>
+            <div class="count-down">
+                <div class="box">
+                    <h3 id="day">00</h3>
+                    <span>day</span>
+                </div>
+                <div class="box">
+                    <h3 id="hour">00</h3>
+                    <span>hour</span>
+                </div>
+                <div class="box">
+                    <h3 id="minute">00</h3>
+                    <span>minute</span>
+                </div>
+                <div class="box">
+                    <h3 id="second">00</h3>
+                    <span>second</span>
+                </div>
+            </div>
+            <a href="#" class="btn">check out deal</a>
+        </div>
+
+        <div class="image">
+            <img src="images/deal-img.jpg" alt="">
+        </div>
+
+    </div>
+
+</section> -->
+
+<!-- deal section ends -->
+
+<!-- contact section starts  -->
+
+<section class="contact" id="contact">
+
+<h1 class="heading">get in touch</h1>
+
+<div class="row">
+
+    <iframe class="map" src="https://www.google.com/maps/embed?pb=!1m18!1m12!1m3!1d2933.7628342223134!2d21.15653611533256!3d42.666380979167506!2m3!1f0!2f0!3f0!3m2!1i1024!2i768!4f13.1!3m3!1m2!1s0x13549f4e26b11e7b%3A0x2e4267c77feaec93!2sPristina!5e0!3m2!1sen!2s!4v1637181364357!5m2!1sen!2s" width="600" height="450" style="border:0;" allowfullscreen="" loading="lazy" ></iframe>
+
+    <form action="">
+
+        <div class="inputBox">
+            <input type="text" required>
+            <label>name</label>
+        </div>
+        <div class="inputBox">
+            <input type="email" required>
+            <label>email</label>
+        </div>
+        <div class="inputBox">
+            <input type="number" required>
+            <label>number</label>
+        </div>
+        <div class="inputBox">
+            <textarea required name="" id="" cols="30" rows="10"></textarea>
+            <label>message</label>
+        </div>
+
+        <input type="submit" value="send message" class="btn">
+
+    </form>
+
+</div>
+
+</section>
+
+<!-- contact section ends -->
+
+<!-- footer section starts  -->
+
+<section class="footer">
+
+    <div class="box-container">
+
+        <div class="box">
+            <h3>about us</h3>
+            <p>We are muslims! <br> Lorem ipsum dolor sit amet consectetur adipisicing elit. Ratione ut culpa praesentium asperiores reprehenderit maxime?</p>
+        </div>
+        <div class="box">
+            <h3>branch locations</h3>
+            <a href="#">kosovo</a>
+            <a href="#">USA</a>
+            <a href="#">dubai</a>
+            <a href="#">saudi arabia</a>
+        </div>
+        <div class="box">
+            <h3>quick links</h3>
+            <a href="#">home</a>
+            <a href="#">category</a>
+            <a href="#">product</a>
+            <a href="#">deal</a>
+            <a href="#">contact</a>
+        </div>
+        <div class="box">
+            <h3>follow us</h3>
+            <a href="#">facebook</a>
+            <a href="#">twitter</a>
+            <a href="#">instagram</a>
+            <a href="#">linked</a>
+        </div>
+
+    </div>
+
+    <h1 class="credit"> created by <span> RubbySun 404 </span> | &copy; all rights reserved! </h1>
+    
+</section>
+
+<!-- footer section ends -->
+
+<!-- scroll top button  -->
+<a href="#home" class="scroll-top fas fa-angle-up"></a>
+
+
+
+
+
+@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@100;300;400;500;700&display=swap');
+
+
+*{
+  font-family: 'Roboto', sans-serif;
+  margin:0; padding:0;
+  box-sizing: border-box;
+  text-transform: capitalize;
+  outline: none; border:none;
+  text-decoration: none;
+  transition: all .2s linear;
+}
+
+*::selection{
+  background:var(--light-blue);
+  color: #fff;
+}
+
+html{
+  font-size: 62.5%;
+  overflow-x: hidden;
+  scroll-behavior: smooth;
+  scroll-padding-top: 7rem;
+}
+
+section{
+  padding:1.5rem 9%;
+}
+
+.heading{
+  font-size: 3rem;
+  color:#444;
+  padding-left: 1rem;
+  border-left: .4rem solid var(--light-blue);
+  margin-top: 1rem;
+  margin-bottom: 3rem;
+}
+
+.btn{
+  display: inline-block;
+  margin-top: 1rem;
+  padding:.8rem 3rem;
+  background:var(--light-blue);
+  color:#fff;
+  font-size: 1.7rem;
+  cursor: pointer;
+}
+
+.btn:hover{
+  background:rgb(147, 207, 247);
+}
+
+.header-1,
+.header-2,
+.header-3{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding:2rem 9%;
+  background:var(--light-blue);
+}
+
+/* .header-1{
+  /* border-bottom: .1rem solid #BF604B; */
+
+
+.header-3{
+  background:#fff;
+  box-shadow: 0 .5rem 1rem rgba(0,0,0,.1);
+  position: relative;
+  z-index: 10000;
+}
+
+.header-1 span{
+  font-weight: lighter;
+  color:#fff;
+  font-size: 1.7rem;
+}
+
+.header-1 a{
+  padding:0 .7rem;
+  color:#fff;
+  font-size: 2rem;
+}
+
+.header-1 a:hover{
+  color:black;
+}
+
+.header-2 .logo{
+  font-weight: bolder;
+  font-size: 3rem;
+  color:#fff;
+}
+
+.header-2 .logo i{
+  color: white;
+}
+
+.header-2 .search-bar-container{
+  display: flex;
+  align-items: center;
+  width: 50rem;
+  padding:1.5rem;
+  background:rgba(255,255,255,.2);
+  border-radius: .5rem;
+}
+
+.header-2 .search-bar-container #search-bar{
+  width: 100%;
+  background:none;
+  text-transform: none;
+  color:#fff;
+  font-size: 1.7rem;
+}
+
+.header-2 .search-bar-container #search-bar::placeholder{
+  text-transform: capitalize;
+  color:#ddd;
+}
+
+.header-2 .search-bar-container label{
+  color:#fff;
+  cursor: pointer;
+  font-size: 2rem;
+  padding:0 .5rem;
+}
+
+.header-2 .search-bar-container label:hover{
+  color:lightblue;
+}
+
+.header-3 .navbar a{
+  color: wheat !important;
+  font-size: 2rem;
+  margin-right: 2rem;
+}
+
+.header-3 .icons a{
+  color: wheat;
+  font-size: 2.5rem;
+  margin-left: 2rem;
+}
+.header-3 a:hover{
+    color:var(--light-blue);
+  }
+  
+  #menu-bar{
+    font-size: 3rem;
+    color:rgb(255, 255, 255) !important;
+    border:.1rem solid #666;
+    border-radius: .5rem;
+    padding:.5rem 1.5rem;
+    cursor: pointer;
+    display: none;
+  }
+  
+  .header-3.active{
+    position: fixed;
+    top:0; left: 0; right: 0;
+  }
+  @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@100;300;400;500;700&display=swap');
+
+:root{
+  --light-blue: #1C1C1E;
+}
+
+*{
+  font-family: 'Roboto', sans-serif;
+  margin:0;
+  padding:0;
+  box-sizing: border-box;
+  text-transform: capitalize;
+  outline: none; border:none;
+  text-decoration: none;
+  transition: all .2s linear;
+}
+
+*::selection{
+  background:var(--light-blue);
+  color:#fff;
+}
+
+html{
+  font-size: 62.5%;
+  overflow-x: hidden;
+  scroll-behavior: smooth;
+  scroll-padding-top: 7rem;
+}
+
+section{
+  padding:1.5rem 9%;
+}
+
+.heading{
+  font-size: 3rem;
+  color:#444;
+  padding-left: 1rem;
+  border-left: .4rem solid var(--light-blue);
+  margin-top: 1rem;
+  margin-bottom: 3rem;
+}
+
+.btn{
+  display: inline-block;
+  margin-top: 1rem;
+  padding:.8rem 3rem;
+  background:var(--light-blue);
+  color:#fff;
+  font-size: 1.7rem;
+  cursor: pointer;
+}
+
+.btn:hover{
+  background:#333;
+}
+
+.header-1,
+.header-2,
+.header-3{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding:2rem 9%;
+  background:var(--light-blue);
+}
+
+/* .header-1{
+  border-bottom: .1rem solid rgba(255,255,255,.2);
+} */
+
+.header-3{
+  background:  #141416;
+  box-shadow: 0 .5rem 1rem rgba(0,0,0,.1);
+  position: relative;
+  z-index: 10000;
+}
+
+.header-1 span{
+  font-weight: lighter;
+  color:#fff;
+  font-size: 1.7rem;
+}
+
+.header-1 a{
+  padding:0 .7rem;
+  color:#fff;
+  font-size: 2rem;
+}
+
+.header-1 a:hover{
+  color:black;
+}
+
+.header-2 .logo{
+  font-weight: bolder;
+  font-size: 3rem;
+  color:#fff;
+}
+
+.header-2 .logo i{
+  color: white;
+}
+
+.header-2 .search-bar-container{
+  display: flex;
+  align-items: center;
+  width: 50rem;
+  padding:1.5rem;
+  background:rgba(255,255,255,.2);
+  border-radius: .5rem;
+}
+
+.header-2 .search-bar-container #search-bar{
+  width: 100%;
+  background:none;
+  text-transform: none;
+  color:#fff;
+  font-size: 1.7rem;
+}
+
+.header-2 .search-bar-container #search-bar::placeholder{
+  text-transform: capitalize;
+  color:#ddd;
+}
+
+.header-2 .search-bar-container label{
+  color:#fff;
+  cursor: pointer;
+  font-size: 2rem;
+  padding:0 .5rem;
+}
+
+.header-2 .search-bar-container label:hover{
+  color:lightblue;
+}
+
+.header-3 .navbar a{
+  color:#666;
+  font-size: 2rem;
+  margin-right: 2rem;
+}
+
+.header-3 a:hover{
+  color:var(--light-blue);
+}
+
+#menu-bar{
+  font-size: 3rem;
+  color:#666;
+  border:.1rem solid #666;
+  border-radius: .5rem;
+  padding:.5rem 1.5rem;
+  cursor: pointer;
+  display: none;
+}
+
+.header-3.active{
+  position: fixed;
+  top:0; left: 0; right: 0;
+}
+
+.home{
+  padding-top: 0;
+}
+
+.home .home-slider{
+  box-shadow: 0 .5rem 1rem rgba(0,0,0,.1);
+  border:.1rem solid rgba(0,0,0,.3);
+  border-top: 0;
+}
+
+.home .home-slider .box{
+  background-size: cover !important;
+  background-position: center !important;
+  min-height: 55rem;
+  position: relative;
+}
+
+.home .home-slider .box .content{
+  position: absolute;
+  top:50%; left: 5%;
+  transform: translateY(-50%);
+  max-width: 50rem;
+}
+
+.home .home-slider .box .content span{
+  font-size: 3rem;
+  color:#444;
+}
+
+.home .home-slider .box .content h3{
+  font-size: 6rem;
+  color:#333;
+  padding:.5rem 0;
+}
+
+.banner-container{
+  display: flex;
+  flex-wrap: wrap;
+  gap:1.5rem;
+}
+
+.banner-container .banner{
+  flex:1 1 40rem;
+  height:25rem;
+  border:.1rem solid rgba(0,0,0,.3);
+  box-shadow: 0 .5rem 1rem rgba(0,0,0,.1);
+  overflow: hidden;
+  position: relative;
+}
+
+.banner-container .banner .content{
+  position: absolute;
+  top:50%; left: 4%;
+  transform: translateY(-50%);
+}
+
+.banner-container .banner img{
+  height: 100%;
+  width:100%;
+  object-fit: cover;
+}
+
+.banner-container .banner .content span{
+  color:#666;
+  font-size:1.7rem;
+}
+
+.banner-container .banner .content h3{
+  color:#333;
+  font-size:3rem;
+}
+
+.banner-container .banner:hover img{
+  transform: scale(1.2);
+}
+
+.category .box-container{
+  display: flex;
+  flex-wrap: wrap;
+  gap:1.5rem;
+}
+
+.category .box-container .box{
+  position: relative;
+  flex:1 1 23rem;
+  height: 35rem;
+  overflow: hidden;
+  border:.1rem solid rgba(0,0,0,.3);
+  box-shadow: 0 .5rem 1rem rgba(0,0,0,.1);
+}
+
+.category .box-container .box img{
+  height: 100%;
+  width:100%;
+  object-fit: cover;
+}
+
+.category .box-container .box .content{
+  position: absolute;
+  bottom: -5.5rem;
+  background: #fff;
+  border-top:.1rem solid rgba(0,0,0,.3);
+  text-align: center;
+  padding:.5rem 0;
+  width:100%;
+}
+
+.category .box-container .box:hover .content{
+  bottom:0;
+}
+
+.category .box-container .box .content h3{
+  color:#333;
+  font-size: 2.5rem;
+  padding:.5rem 0;
+}
+
+.category .box-container .box .content .btn{
+  margin-bottom: 1.3rem;
+}
+
+.product .box-container{
+  display: flex;
+  flex-wrap: wrap;
+  gap:2rem;
+}
+
+.product .box-container .box{
+  flex:1 1 30rem;
+  border:.1rem solid rgba(0,0,0,.3);
+  box-shadow: 0 .5rem 1rem rgba(0,0,0,.1);
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+
+.product .box-container .box img{
+  height: 30rem;
+  width:100%;
+  border-bottom:.1rem solid rgba(0,0,0,.3);
+  object-fit: cover;
+}
+
+.product .box-container .box .discount{
+  position: absolute;
+  top:1rem; left:1rem;
+  background:rgba(6, 67, 71, 0.938);
+  color:var(--light-blue);
+  font-size: 2rem;
+  padding:.5rem 1rem;
+}
+
+.product .box-container .box .icons{
+  position: absolute;
+  top:1rem; right:-8rem;
+  display: flex;
+  flex-flow: column;
+  background:#fff;
+  border-radius: 5rem;
+  padding:.5rem;
+  box-shadow: 0 .5rem 1rem rgba(0,0,0,.1);
+}
+
+.product .box-container .box:hover .icons{
+  right:1rem;
+}
+
+.product .box-container .box .icons a{
+  height: 4rem;
+  width:4rem;
+  line-height: 4rem;
+  font-size: 1.5rem;
+  color:#333;
+  border-radius: 5rem;
+  margin:.1rem;
+}
+
+.product .box-container .box .icons a:hover{
+  color:#fff;
+  background:var(--light-blue);
+}
+
+.product .box-container .box h3{
+  color:#333;
+  font-size: 2.5rem;
+  padding:1rem 0;
+}
+
+.product .box-container .box .stars i{
+  color:gold;
+  font-size: 2rem;
+}
+
+/* .product .box-container .box .quantity{
+  padding:1rem 0;
+}
+
+.product .box-container .box .quantity span{
+  font-size: 2rem;
+}
+
+.product .box-container .box .quantity input{
+  font-size: 2rem;
+  padding:.5rem;
+  text-align: center;
+  background:rgba(0,0,0,.1);
+} */
+
+.product .box-container .box .price{
+  font-weight: bolder;
+  color:var(--light-blue);
+  font-size: 2rem;
+}
+
+.product .box-container .box .price span{
+  text-decoration: line-through;
+  color:#999;
+  font-size: 1.5rem;
+}
+
+.product .box-container .box .btn{
+  display: block;
+  margin:2rem;
+}
+
+.icons-container{
+  display: flex;
+  flex-wrap: wrap;
+  gap:2rem;
+}
+
+.icons-container .icon{
+  padding:2rem 0;
+  display: flex;
+  align-items: center;
+  flex:1 1 25rem;
+}
+
+.icons-container .icon .content{
+  padding-left: 2rem;
+}
+
+.icons-container .icon .content h3{
+ font-size: 2rem;
+ color:var(--light-blue);
+}
+
+.icons-container .icon .content p{
+  font-size: 1.5rem;
+  color:#666;
+}
+
+.deal .row{
+  display: flex;
+  flex-wrap: wrap;
+  gap:1.5rem;
+  align-items: center;
+}
+
+.deal .row .image{
+  flex:1 1 40rem;
+}
+
+.deal .row .image img{
+  width:100%;
+}
+
+.deal .row .content{
+  flex:1 1 40rem;
+}
+
+.deal .row .content .title{
+  font-size: 3.5rem;
+  color:#333;
+}
+
+.deal .row .content p{
+  font-size: 1.5rem;
+  color:#666;
+  padding:1rem 0;
+}
+
+.deal .row .content .count-down{
+  display: flex;
+  padding:1rem 0;
+  gap:1.5rem;
+}
+
+.deal .row .content .count-down .box{
+  width:9rem;
+  text-align: center;
+  border:.1rem solid rgba(0,0,0,.3);
+}
+
+.deal .row .content .count-down .box h3{
+  font-size: 5rem;
+  color:#333;
+}
+
+.deal .row .content .count-down .box span{
+  font-size: 1.7rem;
+  color:#fff;
+  display: block;
+  background:#666;
+  padding:.5rem;
+}
+
+.contact .row{
+  display: flex;
+  flex-wrap: wrap;
+  border:.1rem solid rgba(0,0,0,.3);
+}
+
+.contact .row .map{
+  width:100%;
+  flex:1 1 40rem;
+}
+
+.contact .row form{
+  padding:2rem;
+  flex:1 1 40rem;
+}
+
+.contact .row form .inputBox{
+  position: relative;
+}
+
+.contact .row form .inputBox input, .contact .row form .inputBox textarea{
+  width:100%;
+  border-bottom: .1rem solid rgba(0,0,0,.3);
+  padding:1rem 0;
+  margin:1.5rem 0;
+  font-size: 1.7rem;
+  text-transform: none;
+  color:#333;
+}
+
+.contact .row form .inputBox textarea{
+  resize: none;
+  height:15rem;
+}
+
+.contact .row form .inputBox input:focus,
+.contact .row form .inputBox textarea:focus{
+  border-color: var(--light-blue);
+}
+
+.contact .row form .inputBox label{
+  position: absolute;
+  top:2.3rem; left:0;
+  font-size: 1.7rem;
+}
+
+.contact .row form .inputBox input:focus ~ label,
+.contact .row form .inputBox textarea:focus ~ label,
+.contact .row form .inputBox input:valid ~ label,
+.contact .row form .inputBox textarea:valid ~ label{
+  top:-.1rem;
+  font-size: 1.5rem;
+  color:#666;
+}
+
+.footer .box-container{
+  display: flex;
+  flex-wrap: wrap;
+  gap:1.5rem;
+}
+
+.footer .box-container .box{
+  flex:1 1 25rem;
+}
+
+.footer .box-container .box h3{
+  color:#333;
+  font-size: 2.5rem;
+  padding:1rem 0;
+}
+
+.footer .box-container .box p{
+  color:#666;
+  font-size: 1.5rem;
+  padding:1rem 0;
+}
+
+.footer .box-container .box a{
+  display: block;
+  color:#666;
+  font-size: 1.5rem;
+  padding:1rem 0;
+}
+
+.footer .box-container .box a:hover{
+  text-decoration: underline;
+  color:var(--light-blue);
+}
+
+.footer .credit{
+  font-size: 2rem;
+  padding:2rem 1rem;
+  margin-top: 2rem;
+  border-top: .1rem solid rgba(0,0,0,.1);
+  text-align: center;
+  font-weight: normal;
+}
+
+.footer .credit span{
+  color:var(--light-blue);
+}
+
+.scroll-top{
+  position: fixed;
+  bottom: 7.5rem; right:2rem;
+  z-index: 1000;
+  font-size: 3.5rem;
+  background:rgba(6, 67, 71, 0.938);
+  color:var(--light-blue);
+  border-radius: .5rem;
+  border:.1rem solid rgba(0,0,0,.1);
+  padding:.5rem 1.5rem;
+  display: none;
+}
+
+.scroll-top:hover{
+  background: var(--light-blue); 
+  color:#fff;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/* media queries  */
+
+@media (max-width:1200px){
+
+  html{
+    font-size: 55%;
+  }
+
+}
+
+@media (max-width:991px){
+
+  .header-1,
+  .header-2,
+  .header-3{
+    padding:2rem;
+  }
+
+  section{
+    padding:1.5rem;
+  }
+
+}
+
+@media (max-width:768px){
+
+  #menu-bar{
+    display: initial;
+  }
+
+  .header-3 .navbar{
+    position: absolute;
+    top:100%; left: 0; right: 0;
+    background:#eee;
+    padding:1rem 2rem;
+    border-top: .1rem solid rgba(0,0,0,.3);
+    clip-path: polygon(0 0, 100% 0, 100% 0, 0 0);
+  }
+
+  .header-3 .navbar.active{
+    clip-path: polygon(0 0, 100% 0, 100% 100%, 0% 100%);
+  }
+
+  .header-3 .navbar a{
+    display: block;
+    margin:1.5rem 0;
+    padding:1.5rem;
+    border-radius: .5rem;
+    border:.1rem solid rgba(0,0,0,.3);
+    background:#fff;
+    text-align: center;
+  }
+
+  .header-2{
+    flex-flow: column;
+  }
+
+  .header-2 .search-bar-container{
+    width: 100%;
+    margin-top: 2rem;
+  }
+
+  .home .home-slider .box{
+    background-position: right !important;
+    z-index: 0;
+  }
+
+  .home .home-slider .box::before{
+    content: '';
+    position: absolute;
+    top:0; left: 0;
+    height: 100%;
+    width:100%;
+    z-index: -1;
+    background: rgba(255,255,255,.7);
+  }
+
+  .home .home-slider .box .content h3{
+    font-size: 4.5rem;
+  }
+
+}
+
+@media (max-width:450px){
+
+  html{
+    font-size: 50%;
+  }
+
+  .header-1{
+    display: none;
+  }
+
+  .deal .row .content .count-down .box{
+    width:7rem;
+  }
+
+  .deal .row .content .count-down .box h3{
+    font-size: 3rem;
+    padding:.5rem 0;
+  }
+
+  .deal .row .content .count-down .box span{
+    font-size: 1.5rem;
+  }
+
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<script src="https://unpkg.com/swiper/swiper-bundle.min.js"></script>
+
+<!-- custom js file link  -->
+<script src="js/script.js"></script>
+
+</body>
+</html>
