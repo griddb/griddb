@@ -1,76 +1,79 @@
 #!/usr/bin/make -f
 
-#%:
-#	dh $@
-GRIDDB_VER = $(shell dpkg-parsechangelog | egrep '^Version:' | cut -f 2 -d ' ')
-
-configure: clean
-	./bootstrap.sh
-	./configure
-
-build: configure
-	make
+GRIDDB_VER=$(shell dpkg-parsechangelog | egrep '^Version:' | cut -f 2 -d ' ')
+SOURCE_DIR=griddb-${GRIDDB_VER}
 
 install:
-	dh_install bin/gsserver                                  usr/griddb-$(GRIDDB_VER)/bin
+	rm -rf griddb-${GRIDDB_VER}/
+	unzip SOURCES/griddb-${GRIDDB_VER}.zip 
+	dh_install ${SOURCE_DIR}/bin/gsserver                                  usr/griddb-${GRIDDB_VER}/bin
 
-	dh_install bin/gs_adduser                                usr/griddb-$(GRIDDB_VER)/bin
-	dh_install bin/gs_deluser                                usr/griddb-$(GRIDDB_VER)/bin
-	dh_install bin/gs_passwd                                 usr/griddb-$(GRIDDB_VER)/bin
-	dh_install bin/gs_joincluster                            usr/griddb-$(GRIDDB_VER)/bin
-	dh_install bin/gs_leavecluster                           usr/griddb-$(GRIDDB_VER)/bin
-	dh_install bin/gs_startnode                              usr/griddb-$(GRIDDB_VER)/bin
-	dh_install bin/gs_stat                                   usr/griddb-$(GRIDDB_VER)/bin
-	dh_install bin/gs_stopcluster                            usr/griddb-$(GRIDDB_VER)/bin
-	dh_install bin/gs_stopnode                               usr/griddb-$(GRIDDB_VER)/bin
-	dh_install bin/log.py                                    usr/griddb-$(GRIDDB_VER)/bin
-	dh_install bin/util.py                                   usr/griddb-$(GRIDDB_VER)/bin
+	dh_install ${SOURCE_DIR}/bin/gs_adduser                                usr/griddb-${GRIDDB_VER}/bin
+	dh_install ${SOURCE_DIR}/bin/gs_deluser                                usr/griddb-${GRIDDB_VER}/bin
+	dh_install ${SOURCE_DIR}/bin/gs_passwd                                 usr/griddb-${GRIDDB_VER}/bin
+	dh_install ${SOURCE_DIR}/bin/gs_joincluster                            usr/griddb-${GRIDDB_VER}/bin
+	dh_install ${SOURCE_DIR}/bin/gs_leavecluster                           usr/griddb-${GRIDDB_VER}/bin
+	dh_install ${SOURCE_DIR}/bin/gs_startnode                              usr/griddb-${GRIDDB_VER}/bin
+	dh_install ${SOURCE_DIR}/bin/gs_stat                                   usr/griddb-${GRIDDB_VER}/bin
+	dh_install ${SOURCE_DIR}/bin/gs_stopcluster                            usr/griddb-${GRIDDB_VER}/bin
+	dh_install ${SOURCE_DIR}/bin/gs_stopnode                               usr/griddb-${GRIDDB_VER}/bin
+	dh_install ${SOURCE_DIR}/bin/log.py                                    usr/griddb-${GRIDDB_VER}/bin
+	dh_install ${SOURCE_DIR}/bin/util.py                                   usr/griddb-${GRIDDB_VER}/bin
 
-	dh_install bin/gridstore.jar                             usr/griddb-$(GRIDDB_VER)/bin
-	dh_install bin/gridstore-conf.jar                        usr/griddb-$(GRIDDB_VER)/bin
+	dh_install ${SOURCE_DIR}/bin/gridstore.jar                             usr/griddb-${GRIDDB_VER}/bin/gridstore-${GRIDDB_VER}.jar
+	dh_install ${SOURCE_DIR}/bin/gridstore-conf.jar                        usr/griddb-${GRIDDB_VER}/bin/gridstore-conf-${GRIDDB_VER}.jar
 
-	dh_install conf/gs_cluster.json                          usr/griddb-$(GRIDDB_VER)/conf
-	dh_install conf/gs_node.json                             usr/griddb-$(GRIDDB_VER)/conf
-	dh_install conf/json_pretty.sh                           usr/griddb-$(GRIDDB_VER)/conf
-	dh_install conf/password                                 usr/griddb-$(GRIDDB_VER)/conf
+	dh_install ${SOURCE_DIR}/conf/gs_cluster.json                          usr/griddb-${GRIDDB_VER}/conf_multicast
+	dh_install ${SOURCE_DIR}/conf/gs_node.json                             usr/griddb-${GRIDDB_VER}/conf_multicast
+	dh_install ${SOURCE_DIR}/conf/password                                 usr/griddb-${GRIDDB_VER}/conf_multicast
 
-	dh_install 3rd_party/3rd_party.md                        usr/griddb-$(GRIDDB_VER)/3rd_party
-	dh_install 3rd_party/Apache_License-2.0.txt              usr/griddb-$(GRIDDB_VER)/3rd_party
-	dh_install 3rd_party/BSD_License.txt                     usr/griddb-$(GRIDDB_VER)/3rd_party
-	dh_install 3rd_party/MIT_License.txt                     usr/griddb-$(GRIDDB_VER)/3rd_party
-	dh_install 3rd_party/MessagePack/COPYING                 usr/griddb-$(GRIDDB_VER)/3rd_party/MessagePack
-	dh_install 3rd_party/activemq-cpp-library/org/NOTICE.txt usr/griddb-$(GRIDDB_VER)/3rd_party/activemq-cpp-library
-	dh_install 3rd_party/apr/org/NOTICE                      usr/griddb-$(GRIDDB_VER)/3rd_party/apr
-	dh_install 3rd_party/ebb/LICENSE                         usr/griddb-$(GRIDDB_VER)/3rd_party/ebb
-	dh_install 3rd_party/picojson/org/include/README.mkdn    usr/griddb-$(GRIDDB_VER)/3rd_party/picojson
-	dh_install 3rd_party/purewell/purewell.txt               usr/griddb-$(GRIDDB_VER)/3rd_party/purewell
-	dh_install 3rd_party/sha2/README                         usr/griddb-$(GRIDDB_VER)/3rd_party/sha2
-	dh_install 3rd_party/slf4j/LICENSE.txt                   usr/griddb-$(GRIDDB_VER)/3rd_party/slf4j
-	dh_install 3rd_party/slf4j/slf4j-api-1.7.7.jar           usr/griddb-$(GRIDDB_VER)/3rd_party/slf4j
-	dh_install 3rd_party/slf4j/slf4j-jdk14-1.7.7.jar         usr/griddb-$(GRIDDB_VER)/3rd_party/slf4j
-	dh_install 3rd_party/yield/yield.txt                     usr/griddb-$(GRIDDB_VER)/3rd_party/yield
-	dh_install 3rd_party/json-simple/fangyidong/LICENSE.txt  usr/griddb-$(GRIDDB_VER)/3rd_party/json-simple
-	dh_install 3rd_party/uuid/uuid/COPYING                   usr/griddb-$(GRIDDB_VER)/3rd_party/uuid
-	dh_install 3rd_party/omaha/COPYING                       usr/griddb-$(GRIDDB_VER)/3rd_party/omaha
-	dh_install 3rd_party/zigzag_encoding/LICENSE             usr/griddb-$(GRIDDB_VER)/3rd_party/zigzag_encoding
+	dh_install ${SOURCE_DIR}/installer/conf/gs_cluster.json                usr/griddb-${GRIDDB_VER}/conf
+	dh_install ${SOURCE_DIR}/installer/conf/gs_node.json                   usr/griddb-${GRIDDB_VER}/conf
+	dh_install ${SOURCE_DIR}/installer/conf/password                       usr/griddb-${GRIDDB_VER}/conf
+	dh_install ${SOURCE_DIR}/installer/conf/initGsh                        usr/griddb-${GRIDDB_VER}/conf
 
-	dh_install README.md                                     usr/griddb-$(GRIDDB_VER)/docs/
-	dh_install docs/sample/program/Sample1.java              usr/griddb-$(GRIDDB_VER)/docs/sample/program
+	dh_install ${SOURCE_DIR}/service/conf/gridstore.conf                   usr/griddb-${GRIDDB_VER}/conf
+	dh_install ${SOURCE_DIR}/service/bin/gridstore                         usr/griddb-${GRIDDB_VER}/bin
+	dh_install ${SOURCE_DIR}/service/lib/systemd/system/gridstore.service  usr/lib/systemd/system/
+	
+	dh_install ${SOURCE_DIR}/3rd_party/3rd_party.md                        usr/griddb-${GRIDDB_VER}/3rd_party
+	dh_install ${SOURCE_DIR}/3rd_party/Apache_License-2.0.txt              usr/griddb-${GRIDDB_VER}/3rd_party
+	dh_install ${SOURCE_DIR}/3rd_party/BSD_License.txt                     usr/griddb-${GRIDDB_VER}/3rd_party
+	dh_install ${SOURCE_DIR}/3rd_party/MIT_License.txt                     usr/griddb-${GRIDDB_VER}/3rd_party
+	dh_install ${SOURCE_DIR}/3rd_party/MessagePack/COPYING                 usr/griddb-${GRIDDB_VER}/3rd_party/MessagePack
+	dh_install ${SOURCE_DIR}/3rd_party/activemq-cpp-library/org/NOTICE.txt usr/griddb-${GRIDDB_VER}/3rd_party/activemq-cpp-library
+	dh_install ${SOURCE_DIR}/3rd_party/apr/org/NOTICE                      usr/griddb-${GRIDDB_VER}/3rd_party/apr
+	dh_install ${SOURCE_DIR}/3rd_party/ebb/LICENSE                         usr/griddb-${GRIDDB_VER}/3rd_party/ebb
+	dh_install ${SOURCE_DIR}/3rd_party/picojson/org/include/README.mkdn    usr/griddb-${GRIDDB_VER}/3rd_party/picojson
+	dh_install ${SOURCE_DIR}/3rd_party/purewell/purewell.txt               usr/griddb-${GRIDDB_VER}/3rd_party/purewell
+	dh_install ${SOURCE_DIR}/3rd_party/sha2/README                         usr/griddb-${GRIDDB_VER}/3rd_party/sha2
+	dh_install ${SOURCE_DIR}/3rd_party/slf4j/LICENSE.txt                   usr/griddb-${GRIDDB_VER}/3rd_party/slf4j
+	dh_install ${SOURCE_DIR}/3rd_party/slf4j/slf4j-api-1.7.7.jar           usr/griddb-${GRIDDB_VER}/3rd_party/slf4j
+	dh_install ${SOURCE_DIR}/3rd_party/slf4j/slf4j-jdk14-1.7.7.jar         usr/griddb-${GRIDDB_VER}/3rd_party/slf4j
+	dh_install ${SOURCE_DIR}/3rd_party/yield/yield.txt                     usr/griddb-${GRIDDB_VER}/3rd_party/yield
+	dh_install ${SOURCE_DIR}/3rd_party/json-simple/fangyidong/LICENSE.txt  usr/griddb-${GRIDDB_VER}/3rd_party/json-simple
+	dh_install ${SOURCE_DIR}/3rd_party/uuid/uuid/COPYING                   usr/griddb-${GRIDDB_VER}/3rd_party/uuid
+	dh_install ${SOURCE_DIR}/3rd_party/omaha/COPYING                       usr/griddb-${GRIDDB_VER}/3rd_party/omaha
+	dh_install ${SOURCE_DIR}/3rd_party/zigzag_encoding/LICENSE             usr/griddb-${GRIDDB_VER}/3rd_party/zigzag_encoding
 
-	dh_link usr/griddb-$(GRIDDB_VER)/bin/gsserver            usr/bin/gsserver
+	dh_install ${SOURCE_DIR}/README.md                                     usr/griddb-${GRIDDB_VER}/docs/
+	dh_install ${SOURCE_DIR}/docs/sample/program/Sample1.java              usr/griddb-${GRIDDB_VER}/docs/sample/program
 
-	dh_link usr/griddb-$(GRIDDB_VER)/bin/gs_adduser          usr/bin/gs_adduser
-	dh_link usr/griddb-$(GRIDDB_VER)/bin/gs_deluser          usr/bin/gs_deluser
-	dh_link usr/griddb-$(GRIDDB_VER)/bin/gs_passwd           usr/bin/gs_passwd
-	dh_link usr/griddb-$(GRIDDB_VER)/bin/gs_joincluster      usr/bin/gs_joincluster
-	dh_link usr/griddb-$(GRIDDB_VER)/bin/gs_leavecluster     usr/bin/gs_leavecluster
-	dh_link usr/griddb-$(GRIDDB_VER)/bin/gs_startnode        usr/bin/gs_startnode
-	dh_link usr/griddb-$(GRIDDB_VER)/bin/gs_stat             usr/bin/gs_stat
-	dh_link usr/griddb-$(GRIDDB_VER)/bin/gs_stopcluster      usr/bin/gs_stopcluster
-	dh_link usr/griddb-$(GRIDDB_VER)/bin/gs_stopnode         usr/bin/gs_stopnode
+	dh_link usr/griddb-${GRIDDB_VER}/bin/gsserver            usr/bin/gsserver
 
-	dh_link usr/griddb-$(GRIDDB_VER)/bin/gridstore.jar       usr/share/java/gridstore.jar
-	dh_link usr/griddb-$(GRIDDB_VER)/bin/gridstore-conf.jar  usr/share/java/gridstore-conf.jar
+	dh_link usr/griddb-${GRIDDB_VER}/bin/gs_adduser          usr/bin/gs_adduser
+	dh_link usr/griddb-${GRIDDB_VER}/bin/gs_deluser          usr/bin/gs_deluser
+	dh_link usr/griddb-${GRIDDB_VER}/bin/gs_passwd           usr/bin/gs_passwd
+	dh_link usr/griddb-${GRIDDB_VER}/bin/gs_joincluster      usr/bin/gs_joincluster
+	dh_link usr/griddb-${GRIDDB_VER}/bin/gs_leavecluster     usr/bin/gs_leavecluster
+	dh_link usr/griddb-${GRIDDB_VER}/bin/gs_startnode        usr/bin/gs_startnode
+	dh_link usr/griddb-${GRIDDB_VER}/bin/gs_stat             usr/bin/gs_stat
+	dh_link usr/griddb-${GRIDDB_VER}/bin/gs_stopcluster      usr/bin/gs_stopcluster
+	dh_link usr/griddb-${GRIDDB_VER}/bin/gs_stopnode         usr/bin/gs_stopnode
+	dh_link usr/griddb-${GRIDDB_VER}/bin/gridstore           usr/griddb/bin/gridstore
+
+	dh_link usr/griddb-${GRIDDB_VER}/bin/gridstore-${GRIDDB_VER}.jar       usr/share/java/gridstore.jar
+	dh_link usr/griddb-${GRIDDB_VER}/bin/gridstore-conf-${GRIDDB_VER}.jar  usr/share/java/gridstore-conf.jar
 
 binary: install
 	dh_installdeb

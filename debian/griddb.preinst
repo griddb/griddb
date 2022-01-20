@@ -1,8 +1,11 @@
 #!/bin/bash
 
 # Installation error if gsserver process exists
+
+GRIDDB_VERSION=$(dpkg-query --show --showformat='${Version}' $PACKAGE_NAME)
+
 if [ "$1" = "2" ]; then
-  PROC=`/usr/bin/pgrep gsserver `
+  PROC=`/usr/bin/pgrep gsserver`
   if [ x"${PROC}" != x"" ]; then
     echo ""
     echo "------------------------------------------------------------"
@@ -50,9 +53,9 @@ else
     echo ""
     exit 1
   else
-    groupadd -g 124 -o -r gridstore >/dev/null 2>&1 || :
+    groupadd -g 1224 -o -r gridstore >/dev/null 2>&1 || :
     useradd -M -N -g gridstore -o -r -d /var/lib/gridstore -s /bin/bash \
-		-c "GridDB" -u 124 gsadm >/dev/null 2>&1 || :
+		-c "GridDB" -u 1224 gsadm >/dev/null 2>&1 || :
     echo ""
     echo "------------------------------------------------------------"
     echo "Information:"

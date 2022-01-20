@@ -10,7 +10,7 @@
 Name:           %{griddb_name}
 Summary:        GridDB Community Edition
 Version:        %{griddb_ver}
-Release:        linux
+Release:        opensuse
 Group:          Applications/Databases
 Vendor:         Toshiba Digital Solutions Corporation
 License:        AGPL-3.0 (and Apache-2.0)

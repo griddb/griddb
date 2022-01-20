@@ -1,0 +1,90 @@
+#!/usr/bin/python3 -B
+# coding=UTF-8
+
+import json
+import socket
+
+class ClusterConfig:
+    """Cluster configuration class"""
+    def __init__(self, name,port):
+        self.name = name
+        self.ntf_addr = None
+        self.ntf_mode = None
+        self.port = port
+        self.ntf_port = None
+        self.ntf_provider = None
+        self.ntf_fixedlist = None
+        self.member_transaction = None
+        self.member_sql = None
+        self.jdbc_addr = None
+        self.jdbc_port = None
+
+GS_HOME = "/var/lib/gridstore"
+GS_CLUSTER = GS_HOME + "/conf/gs_cluster.json"
+GS_NODE = GS_HOME + "/conf/gs_node.json"
+init_gsh = GS_HOME + "/.gsshrc"
+GS_USER = "admin"
+GS_PASSWORD = "admin"
+addressNodeLocal = "127.0.0.1"
+
+def create_member(fixedlist,module):
+    member_string = ""
+    is_not_first = False
+    for member in fixedlist:
+        if is_not_first:
+           member_string += ","
+        address = member.get(module).get("address")
+        port = member.get(module).get("port")
+        member_string = member_string + address + ":" + str(port)
+        is_not_first = True
+    return member_string
+
+
+def create_init_gsh(conf):
+    with open(init_gsh, "w") as src:
+        src.write("#Created when installed griddb ce\n")
+        node_def = ""
+        cluster_def = "cluster0"
+        src.write("setnode node0" + " " + addressNodeLocal + " " + str(conf.port) + " " + "22\n")
+        node_def = node_def + " $node0" 
+        if conf.ntf_mode == "MULTICAST":
+            src.write("setcluster " + cluster_def + " " + conf.name + " " + conf.ntf_addr + " " + str(conf.ntf_port) + "\n")
+            if conf.jdbc_addr:
+                src.write("setclustersql " + cluster_def + " " + conf.name + " " + conf.jdbc_addr + " " + str(conf.jdbc_port) + "\n")
+        elif conf.ntf_mode == "FIXED_LIST":
+            src.write("setcluster " + cluster_def + " " + conf.name + " " + conf.ntf_mode + " " + conf.member_transaction + node_def + "\n")
+            src.write("setclustersql " + cluster_def + " " + conf.name + " " + conf.ntf_mode + " " + conf.member_sql + "\n")
+        elif conf.ntf_mode == "PROVIDER":
+            src.write("setcluster " + cluster_def + " " + conf.name + " " + conf.ntf_mode + " " + conf.ntf_provider + node_def + "\n")
+            src.write("setclustersql " + cluster_def + " " + conf.name + " " + conf.ntf_mode + " " + conf.ntf_provider + "\n")
+        src.write("setuser " + GS_USER + " " + GS_PASSWORD + "\n")
+        src.write("connect $cluster0\n")
+
+with open(GS_CLUSTER) as jsonFile:
+    clusterConfig = json.load(jsonFile)
+    jsonFile.close()
+
+with open(GS_NODE) as jsonFile:
+    nodeConfig = json.load(jsonFile)
+    jsonFile.close()
+
+cluster_name = clusterConfig.get("cluster").get("clusterName")
+port = nodeConfig.get("system").get("servicePort")
+conf = ClusterConfig(cluster_name,port) 
+
+if clusterConfig.get("cluster").get("notificationAddress"):
+    conf.ntf_mode = "MULTICAST"
+    conf.ntf_addr = clusterConfig.get("transaction").get("notificationAddress")
+    conf.ntf_port = clusterConfig.get("transaction").get("notificationPort")
+    conf.jdbc_addr = clusterConfig.get("sql").get("notificationAddress")
+    conf.jdbc_port = clusterConfig.get("sql").get("notificationPort")
+elif clusterConfig.get("cluster").get("notificationMember"):
+    conf.ntf_mode = "FIXED_LIST"
+    conf.ntf_fixedlist = clusterConfig.get("cluster").get("notificationMember")
+    conf.member_transaction = create_member(conf.ntf_fixedlist,"transaction")
+    conf.member_sql = create_member(conf.ntf_fixedlist,"sql")
+elif clusterConfig.get("cluster").get("notificationProvider"):
+    conf.ntf_mode = "PROVIDER"
+    conf.ntf_provider = clusterConfig.get("cluster").get("notificationProvider").get("url")
+
+create_init_gsh(conf)
