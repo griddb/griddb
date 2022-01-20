@@ -1,4 +1,4 @@
-#!/usr/bin/python2 -B
+#!/usr/bin/python3 -B
 # coding=UTF-8
 
 import sys
@@ -8,6 +8,7 @@ import json
 import time
 import copy
 from optparse import OptionParser
+from typing import Optional
 
 import util
 util.install_sigint_handler()
@@ -15,32 +16,32 @@ util.install_sigint_handler()
 
 parser = OptionParser(usage="%prog [-c NAME] [-n NUM] [-w [WAIT_TIME]]"
                       + util.CLIENT_OPTIONS_USAGE,
-                      description=u"Join the started node to a cluster.",
-			version="[V2.8.00]")
+                      description="Join the started node to a cluster.",
+            version="[V2.8.00]")
 util.add_client_options(parser)
 parser.add_option("-c", "--clusterName", dest="clusterName",
                   default="defaultCluster",
-                  help=u"cluster name (default is defaultCluster)")
+                  help="cluster name (default is defaultCluster)")
 parser.add_option("-n", "--nodeNum", dest="minNodeNum",
                   type="int", default=1,
-                  help=u"the number of nodes constituting a cluster (default is 1)")
+                  help="the number of nodes constituting a cluster (default is 1)")
 parser.add_option("-w", "--wait", action='callback', callback=\
-					util.optional_arg(0), dest="wait_time",default=None,
-                  help=u"wait for completion of joining to a cluster")
+                    util.optional_arg(0), dest="wait_time",default=None,
+                  help="wait for completion of joining to a cluster")
 (options, args) = parser.parse_args()
 
 if options.username is None:
-	print u"A70001: Specify a user name and a password. (-u USER/PASS)"
-	sys.exit(2)
+    print("A70001: Specify a user name and a password. (-u USER/PASS)")
+    sys.exit(2)
 if options.wait_time is not None:
-	try:
-		wait_time = int(options.wait_time)
-	except ValueError:
-		print u"A70002: Specify the correct number of seconds to wait. (-w "+options.wait_time+")"
-		sys.exit(2)
+    try:
+        wait_time = int(options.wait_time)
+    except ValueError:
+        print("A70002: Specify the correct number of seconds to wait. (-w "+options.wait_time+")")
+        sys.exit(2)
 if options.minNodeNum == 0:
-	print u"A70003: Specify the number of nodes more than 0. (-n "+str(options.minNodeNum)+")"
-	sys.exit(2)
+    print("A70003: Specify the number of nodes more than 0. (-n "+str(options.minNodeNum)+")")
+    sys.exit(2)
 
 log = log.logger(__file__, log.DEBUG)
 log.info("%s start." % (__file__))
@@ -49,18 +50,18 @@ tmpoptions.password = "***"
 log.info(tmpoptions)
 
 e = 0
-nodestat = util.get_nodestat(options, log)
+nodestat: Optional[str] = util.get_nodestat(options, log)
 if nodestat != "INACTIVE":
-	e = 1
-	if nodestat is not None:
-		if nodestat == "ACTIVE":
-			print u"A70101: Node is already joined."
-			log.error("A70101: Node is already joined.")
-			e = 3
-		else:
-			print u"A70102: Confirm node status."
-			log.error("A70102: Confirm node status. (status="+nodestat+")")
-	sys.exit(e)
+    e = 1
+    if nodestat is not None:
+        if nodestat == "ACTIVE":
+            print("A70101: Node is already joined.")
+            log.error("A70101: Node is already joined.")
+            e = 3
+        else:
+            print("A70102: Confirm node status.")
+            log.error("A70102: Confirm node status. (status="+nodestat+")")
+    sys.exit(e)
 
 method = "POST"
 path = "/node/join"
@@ -68,35 +69,35 @@ data = { "clusterName": options.clusterName,
          "minNodeNum": options.minNodeNum }
 (res, code) = util.request_rest(method, path, data, options, log)
 #if code == 400:
-#	res_json = json.loads(res)
-#	err_status = res_json.get("errorStatus")
-#	err_reason = res_json.get("reason")
-#	if err_status == 100:
-#		print u"A70103: Specified cluster name is wrong."
-#		print err_reason
-#	sys.exit(1)
+#    res_json = json.loads(res)
+#    err_status = res_json.get("errorStatus")
+#    err_reason = res_json.get("reason")
+#    if err_status == 100:
+#        print u"A70103: Specified cluster name is wrong."
+#        print err_reason
+#    sys.exit(1)
 if code != 200:
-	sys.exit(1)
+    sys.exit(1)
 
 clustered = util.is_active_cluster(options, log)
 if options.wait_time is not None:
-	sleep_time = 0
-	while not clustered:
-		util.wait_one_sec()
-		sleep_time += 1
-		clustered = util.is_active_cluster(options, log)
-		if clustered is None:
-			e = 1
-			break
-		if sleep_time == wait_time:
-			e = 2
-			break
-	util.wait_error_case(e,log,u"\nJoined node")
-	log.debug("%s end." % (__file__))
-	sys.exit(e)
+    sleep_time = 0
+    while not clustered:
+        util.wait_one_sec()
+        sleep_time += 1
+        clustered = util.is_active_cluster(options, log)
+        if clustered is None:
+            e = 1
+            break
+        if sleep_time == wait_time:
+            e = 2
+            break
+    util.wait_error_case(e,log,"\nJoined node")
+    log.debug("%s end." % (__file__))
+    sys.exit(e)
 
 if code != 200:
-	sys.exit(1)
+    sys.exit(1)
 
 log.info("%s end." % (__file__))
 

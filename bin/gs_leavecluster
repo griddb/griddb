@@ -1,4 +1,4 @@
-#!/usr/bin/python2 -B
+#!/usr/bin/python3 -B
 # coding=UTF-8
 
 import sys
@@ -6,32 +6,33 @@ import log
 import os
 import copy
 from optparse import OptionParser
+from typing import Optional
 
 import util
 util.install_sigint_handler()
 (homedir,logdir) = util.get_required_env()
 
 parser = OptionParser(usage="%prog [-f] [-w [WAIT_TIME]]" + util.CLIENT_OPTIONS_USAGE,
-                      description=u"Leave a node from a cluster.",
-			version="%prog [V2.8.00]")
+                      description="Leave a node from a cluster.",
+            version="%prog [V2.8.00]")
 util.add_client_options(parser)
 parser.add_option("-f", "--force", dest="force",
                   action="store_true", default=False,
-                  help=u"Force a node to leave")
+                  help="Force a node to leave")
 parser.add_option("-w", "--wait", action='callback', callback=\
-					util.optional_arg(0), dest="wait_time",default=None,
-                  help=u"wait for completion of leaving a node")
+                    util.optional_arg(0), dest="wait_time",default=None,
+                  help="wait for completion of leaving a node")
 (options, args) = parser.parse_args()
 
 if options.username is None:
-	print u"A80001: Specify a user name and a password. (-u USER/PASS)"
-	sys.exit(2)
+    print("A80001: Specify a user name and a password. (-u USER/PASS)")
+    sys.exit(2)
 if options.wait_time is not None:
-	try:
-		wait_time = int(options.wait_time)
-	except ValueError:
-		print u"A80002: Specify the correct number of seconds to wait. (-w "+options.write_time+")"
-		sys.exit(2)
+    try:
+        wait_time = int(options.wait_time)
+    except ValueError:
+        print("A80002: Specify the correct number of seconds to wait. (-w "+options.wait_time+")")
+        sys.exit(2)
 
 log = log.logger(__file__, log.DEBUG)
 log.info("%s start." % (__file__))
@@ -40,29 +41,29 @@ tmpoptions.password = "***"
 log.info(tmpoptions)
 
 e = 0
-nodestat = util.get_nodestat(options, log)
+nodestat: Optional[str] = util.get_nodestat(options, log)
 if nodestat != "ACTIVE":
-	e = 1
-	if nodestat is not None:
-		if nodestat == "INACTIVE":
-			print u"A80101: Node is not joined."
-			log.error("A80101: Node is not joined. (status="+nodestat+")")
-			e = 3
-		else:
-			print u"A80102: Confirm node status."
-			log.error("A80102: Node is the wrong status to leave. (status="+nodestat+")")
-	else:
-		log.error("A80104: Unable to retreive the node status.")
-	sys.exit(e)
+    e = 1
+    if nodestat is not None:
+        if nodestat == "INACTIVE":
+            print("A80101: Node is not joined.")
+            log.error("A80101: Node is not joined. (status="+nodestat+")")
+            e = 3
+        else:
+            print("A80102: Confirm node status.")
+            log.error("A80102: Node is the wrong status to leave. (status="+nodestat+")")
+    else:
+        log.error("A80104: Unable to retreive the node status.")
+    sys.exit(e)
 
 if not options.force:
-	c = util.is_critical_node(options, log)
-	if c is not None:
-		if c == 1:
-			print u"A80103: If you leave this node, data loss may occur."
-			print u"If you want to force a node to leave, specify f-option."
-			log.error("A80103: If you leave this node, data loss may occur.")
-			sys.exit(3)
+    c = util.is_critical_node(options, log)
+    if c is not None:
+        if c == 1:
+            print("A80103: If you leave this node, data loss may occur.")
+            print("If you want to force a node to leave, specify f-option.")
+            log.error("A80103: If you leave this node, data loss may occur.")
+            sys.exit(3)
 
 method = "POST"
 path = "/node/leave"
@@ -70,24 +71,24 @@ data = {}
 (res, code) = util.request_rest(method, path, data, options, log)
 
 if options.wait_time is not None:
-	sleep_time = 0
-	while nodestat != "INACTIVE":
-		util.wait_one_sec()
-		sleep_time += 1
-		nodestat = util.get_nodestat(options, log)
-		if nodestat is None:
-			e = 1
-			break
-		if sleep_time == wait_time:
-			e = 2
-			break
-	util.wait_error_case(e,log,u"\nLeaved node")
-	log.info("%s end." % (__file__))
-	sys.exit(e)
+    sleep_time = 0
+    while nodestat != "INACTIVE":
+        util.wait_one_sec()
+        sleep_time += 1
+        nodestat = util.get_nodestat(options, log)
+        if nodestat is None:
+            e = 1
+            break
+        if sleep_time == wait_time:
+            e = 2
+            break
+    util.wait_error_case(e,log,"\nLeaved node")
+    log.info("%s end." % (__file__))
+    sys.exit(e)
 
 if code != 200:
-	log.error("A80105: Failed to leave")
-	sys.exit(1)
+    log.error("A80105: Failed to leave")
+    sys.exit(1)
 
 log.info("%s end." % (__file__))
 
