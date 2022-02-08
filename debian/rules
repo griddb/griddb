@@ -5,7 +5,7 @@ SOURCE_DIR=griddb-${GRIDDB_VER}
 
 install:
 	rm -rf griddb-${GRIDDB_VER}/
-	unzip SOURCES/griddb-${GRIDDB_VER}.zip 
+	unzip SOURCES/griddb-${GRIDDB_VER}.zip
 	dh_install ${SOURCE_DIR}/bin/gsserver                                  usr/griddb-${GRIDDB_VER}/bin
 
 	dh_install ${SOURCE_DIR}/bin/gs_adduser                                usr/griddb-${GRIDDB_VER}/bin
@@ -20,8 +20,8 @@ install:
 	dh_install ${SOURCE_DIR}/bin/log.py                                    usr/griddb-${GRIDDB_VER}/bin
 	dh_install ${SOURCE_DIR}/bin/util.py                                   usr/griddb-${GRIDDB_VER}/bin
 
-	dh_install ${SOURCE_DIR}/bin/gridstore.jar                             usr/griddb-${GRIDDB_VER}/bin/gridstore-${GRIDDB_VER}.jar
-	dh_install ${SOURCE_DIR}/bin/gridstore-conf.jar                        usr/griddb-${GRIDDB_VER}/bin/gridstore-conf-${GRIDDB_VER}.jar
+	dh_install ${SOURCE_DIR}/bin/gridstore.jar                             usr/griddb-${GRIDDB_VER}/bin
+	dh_install ${SOURCE_DIR}/bin/gridstore-conf.jar                        usr/griddb-${GRIDDB_VER}/bin
 
 	dh_install ${SOURCE_DIR}/conf/gs_cluster.json                          usr/griddb-${GRIDDB_VER}/conf_multicast
 	dh_install ${SOURCE_DIR}/conf/gs_node.json                             usr/griddb-${GRIDDB_VER}/conf_multicast
@@ -35,7 +35,7 @@ install:
 	dh_install ${SOURCE_DIR}/service/conf/gridstore.conf                   usr/griddb-${GRIDDB_VER}/conf
 	dh_install ${SOURCE_DIR}/service/bin/gridstore                         usr/griddb-${GRIDDB_VER}/bin
 	dh_install ${SOURCE_DIR}/service/lib/systemd/system/gridstore.service  usr/lib/systemd/system/
-	
+
 	dh_install ${SOURCE_DIR}/3rd_party/3rd_party.md                        usr/griddb-${GRIDDB_VER}/3rd_party
 	dh_install ${SOURCE_DIR}/3rd_party/Apache_License-2.0.txt              usr/griddb-${GRIDDB_VER}/3rd_party
 	dh_install ${SOURCE_DIR}/3rd_party/BSD_License.txt                     usr/griddb-${GRIDDB_VER}/3rd_party
@@ -72,6 +72,8 @@ install:
 	dh_link usr/griddb-${GRIDDB_VER}/bin/gs_stopnode         usr/bin/gs_stopnode
 	dh_link usr/griddb-${GRIDDB_VER}/bin/gridstore           usr/griddb/bin/gridstore
 
+	dh_link usr/griddb-${GRIDDB_VER}/bin/gridstore.jar       usr/griddb-${GRIDDB_VER}/bin/gridstore-${GRIDDB_VER}.jar
+	dh_link usr/griddb-${GRIDDB_VER}/bin/gridstore-conf.jar  usr/griddb-${GRIDDB_VER}/bin/gridstore-conf-${GRIDDB_VER}.jar
 	dh_link usr/griddb-${GRIDDB_VER}/bin/gridstore-${GRIDDB_VER}.jar       usr/share/java/gridstore.jar
 	dh_link usr/griddb-${GRIDDB_VER}/bin/gridstore-conf-${GRIDDB_VER}.jar  usr/share/java/gridstore-conf.jar
 
