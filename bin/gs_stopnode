@@ -1,4 +1,4 @@
-#!/usr/bin/python2 -B
+#!/usr/bin/python3 -B
 # coding=UTF-8
 
 import sys
@@ -10,6 +10,7 @@ import signal
 import copy
 from optparse import OptionParser
 from optparse import SUPPRESS_HELP
+from typing import Optional
 
 import util
 util.install_sigint_handler()
@@ -19,43 +20,43 @@ confdir = os.path.join(homedir, "conf")
 pidfile = os.path.join(confdir, "gridstore.pid")
 
 parser = OptionParser(usage="%prog [-f] [-w [WAIT_TIME]] " + util.CLIENT_OPTIONS_USAGE+"\n       %prog -k [-w [WAIT_TIME]]",
-                      description=u"Stops a node.",
-			version="%prog [V2.8.00]")
+                      description="Stops a node.",
+            version="%prog [V2.8.00]")
 util.add_client_options(parser)
 parser.add_option("-f", "--force", dest="force",
                   action="store_true", default=False,
-                  help=u"Force a node to stop")
+                  help="Force a node to stop")
 parser.add_option("-w", "--wait", action='callback', callback=\
-					util.optional_arg(0), dest="wait_time",default=None,
-                  help=u"wait for completion of stopping a node")
+                    util.optional_arg(0), dest="wait_time",default=None,
+                  help="wait for completion of stopping a node")
 parser.add_option("--rc", dest="rc",
                   action="store_true", default=False,
                   help=SUPPRESS_HELP)
 parser.add_option("-k", "--kill", dest="kill",
                   action="store_true", default=False,
-                  help=u"Force a process to be killed on the local machine")
+                  help="Force a process to be killed on the local machine")
 (options, args) = parser.parse_args()
 
 if options.username is None and not options.rc and not options.kill:
-	print u"B00001: Specify a user name and a password. (-u USER/PASS)"
-	sys.exit(2)
+    print("B00001: Specify a user name and a password. (-u USER/PASS)")
+    sys.exit(2)
 if options.wait_time is not None:
-	try:
-		wait_time = int(options.wait_time)
-	except ValueError:
-		print u"B00002: Specify the correct number of seconds to wait. (-w WAIT_TIME)"
-		sys.exit(2)
+    try:
+        wait_time = int(options.wait_time)
+    except ValueError:
+        print("B00002: Specify the correct number of seconds to wait. (-w WAIT_TIME)")
+        sys.exit(2)
 
 if options.kill:
-	if options.force:
-		print u"B00112: You can't specify both kill-option and force-option"
-		sys.exit(2)
-	if "-s" in sys.argv or "--server" in sys.argv or "-p" in sys.argv or "--port" in sys.argv:
-		print u"B00110: You can't specify both kill-option and server-option (or port-option)."
-		sys.exit(2)
-	if options.username is not None:
-		print u"B00111: You can't specify both kill-option and user-option."
-		sys.exit(2)
+    if options.force:
+        print("B00112: You can't specify both kill-option and force-option")
+        sys.exit(2)
+    if "-s" in sys.argv or "--server" in sys.argv or "-p" in sys.argv or "--port" in sys.argv:
+        print("B00110: You can't specify both kill-option and server-option (or port-option).")
+        sys.exit(2)
+    if options.username is not None:
+        print("B00111: You can't specify both kill-option and user-option.")
+        sys.exit(2)
 
 log = log.logger(__file__, log.DEBUG)
 log.info("%s start." % (__file__))
@@ -64,103 +65,103 @@ tmpoptions.password = "***"
 log.info(tmpoptions)
 
 if options.rc or options.kill:
-        pid = util.getpid(pidfile)
-        if pid is None:
-                print u"B00101: Failed to get PID."
-                print u"Confirm node is started"
-                log.error("B00101: Getting PID failed. (path="+pidfile+")")
-                sys.exit(1)
+    pid = util.getpid(pidfile)
+    if pid is None:
+        print("B00101: Failed to get PID.")
+        print("Confirm node is started")
+        log.error("B00101: Getting PID failed. (path="+pidfile+")")
+        sys.exit(1)
 
-	if util.psexists(pid, "gsserver") == 0:
-		print u"B00103: Node is not started"
-		log.error("B00103: Node is not started. (pid="+str(pid)+")")
-		sys.exit(3)
-		
-	print u"Killing process"
-	log.info("killing process (pid="+str(pid)+")")
-	if options.kill:
-		os.kill(int(pid), signal.SIGKILL)
-	else:
-		os.kill(int(pid), signal.SIGTERM)
-	code = 200
-	if options.wait_time is not None:
-		if wait_time == 0:
-			while util.psexists(pid, "gsserver"):
-				util.wait_one_sec()
-			print u"\nKilled process"
-		else:
-			i = 0
-			while i < wait_time:
-				util.wait_one_sec()
-				m = util.psexists(pid, "gsserver")
-				if not m:
-					print u"\nKilled process"
-					break;
-				i += 1
-			if m:
-				print u"\nB00104: Timeout occurred. Confirm node status."
-				log.warning("B00104: Timeout")
-				sys.exit(2)
-	log.info("%s end." % (__file__))
-	sys.exit(0)
+    if util.psexists(pid, "gsserver") == 0:
+        print("B00103: Node is not started")
+        log.error("B00103: Node is not started. (pid="+str(pid)+")")
+        sys.exit(3)
+        
+    print("Killing process")
+    log.info("killing process (pid="+str(pid)+")")
+    if options.kill:
+        os.kill(int(pid), signal.SIGKILL)
+    else:
+        os.kill(int(pid), signal.SIGTERM)
+    code = 200
+    if options.wait_time is not None:
+        if wait_time == 0:
+            while util.psexists(pid, "gsserver"):
+                util.wait_one_sec()
+            print("\nKilled process")
+        else:
+            i = 0
+            while i < wait_time:
+                util.wait_one_sec()
+                m = util.psexists(pid, "gsserver")
+                if not m:
+                    print("\nKilled process")
+                    break;
+                i += 1
+            if m:
+                print("\nB00104: Timeout occurred. Confirm node status.")
+                log.warning("B00104: Timeout")
+                sys.exit(2)
+    log.info("%s end." % (__file__))
+    sys.exit(0)
 
 else:
-	# REST
-	if not options.force:
-		nodestat = util.get_nodestat(options, log)
-		if nodestat != "INACTIVE":
-			e = 1
-			if nodestat is not None:
-				if nodestat == "ACTIVE":
-					print u"B00105: You can't stop node, because node is joined."
-					log.error("B00105: Node is joined. (status="+nodestat+")")
-					e = 3
-				elif nodestat == "NORMAL_SHUTDOWN":
-					print u"B00106: Node is stopping."
-					log.error("B00106: Node is stopping. (status="+nodestat+")")
-					e = 3
-				else:
-					print u"B00107: Confirm node status."
-					log.error("B00107: Confirm node status (status="+nodestat+")")
-			else:
-				log.error("B00108: Failed to get the node status.")
-			sys.exit(e)
+    # REST
+    if not options.force:
+        nodestat: Optional[str] = util.get_nodestat(options, log)
+        if nodestat != "INACTIVE":
+            e = 1
+            if nodestat is not None:
+                if nodestat == "ACTIVE":
+                    print("B00105: You can't stop node, because node is joined.")
+                    log.error("B00105: Node is joined. (status="+nodestat+")")
+                    e = 3
+                elif nodestat == "NORMAL_SHUTDOWN":
+                    print("B00106: Node is stopping.")
+                    log.error("B00106: Node is stopping. (status="+nodestat+")")
+                    e = 3
+                else:
+                    print("B00107: Confirm node status.")
+                    log.error("B00107: Confirm node status (status="+nodestat+")")
+            else:
+                log.error("B00108: Failed to get the node status.")
+            sys.exit(e)
 
-		print u"Stopping node"
-	else:
-		print u"Force stopping node"
-	
+        print("Stopping node")
+    else:
+        print("Force stopping node")
+    
 
-	method = "POST"
-	path = "/node/shutdown"
-	data = { "force": str(options.force).lower() }
-	(res, code) = util.request_rest(method, path, data, options, log)
+    method = "POST"
+    path = "/node/shutdown"
+    data = { "force": str(options.force).lower() }
+    (res, code) = util.request_rest(method, path, data, options, log)
 
-	if options.wait_time is not None:
-		method = "GET"
-		path = "/node/stat"
-		data = None
-		res = 1
-		options.silent = 1
-		e = 0
-		sleep_time = 0
-		while res is not None:
-			util.wait_one_sec()
-			sleep_time += 1
-			(res, code) = util.request_rest(method, path, data, options, log)
-			if code == 401:
-				e = 1
-				break
-			if sleep_time == wait_time:
-				e = 2
-				break
-		util.wait_error_case(e,log,u"\nStopped node")
-		log.info("%s end." % (__file__))
-		sys.exit(e)
-	
-	if code != 200:
-		log.error("B00109: Failed to stop node.")
-		sys.exit(1)
+    if code != 200:
+        log.error("B00109: Failed to stop node.")
+        sys.exit(1)
 
-	log.info("%s end." % (__file__))
+    if options.wait_time is not None:
+        method = "GET"
+        path = "/node/stat"
+        data = None
+        res = 1
+        options.silent = 1
+        e = 0
+        sleep_time = 0
+        while res is not None:
+            util.wait_one_sec()
+            sleep_time += 1
+            (res, code) = util.request_rest(method, path, data, options, log)
+            if code == 401:
+                e = 1
+                break
+            if sleep_time == wait_time:
+                e = 2
+                break
+        util.wait_error_case(e,log,"\nStopped node")
+        log.info("%s end." % (__file__))
+        sys.exit(e)
+
+    log.info("%s end." % (__file__))
 

@@ -1,0 +1,360 @@
+#!/bin/bash
+#
+# gridstore	This is the init script for starting up the GridDB server.
+#
+# chkconfig: 345 64 36
+# description: GridDB database server.
+# processname: gsserver
+# pidfile: /var/lib/gridstore/conf/gridstore.pid
+
+
+# Source function library.
+###############################################
+## replacement for /etc/rc.d/init.d/functions on system running systemd
+echo_success()
+{
+	echo "[ OK ]"
+	return 0
+}
+
+echo_failure()
+{
+	echo "[ FAILED ]"
+	return 1
+}
+###############################################
+
+# Find the name of the script
+NAME=`basename $0`
+if [ ${NAME:0:1} = "S" -o ${NAME:0:1} = "K" ]
+then
+	NAME=${NAME:3}
+fi
+
+if [ $(id -u -n) = gsadm ]
+then
+	NOT_USE_SU="yes"
+	# /var/lib/gridstore/.bash_profile
+	source ~/.bash_profile
+fi
+
+# For SELinux we need to use 'runuser' not 'su'
+if [ -x /sbin/runuser ]
+then
+	SU=runuser
+else
+	SU=su
+fi
+
+# Set defaults for configuration variables
+if [ x${NOT_USE_SU} = xyes ]
+then
+	GS_HOME=`echo $GS_HOME`
+else
+	GS_HOME=`$SU -l gsadm -c 'echo $GS_HOME'`
+fi
+
+GS_USER=admin
+GS_PASSWORD=admin
+CLUSTER_MODE=yes
+GS_STARTNODE=/usr/bin/gs_startnode
+GS_JOINCLUSTER=/usr/bin/gs_joincluster
+GS_LEAVECLUSTER=/usr/bin/gs_leavecluster
+START_TIMEOUT=1200
+STOP_TIMEOUT=20
+LEAVECLUSTER_TIMEOUT=10
+CLUSTER_NAME=myCluster
+MIN_NODE_NUM=1
+
+# Global variables
+SYSTEM_ADDR=""
+AUTH_PAIR=""
+
+if [ x${NOT_USE_SU} = xyes ]
+then
+	# /etc/sysconfig/gridstore/gridstore
+	lockfile="/etc/sysconfig/gridstore/${NAME}"
+else
+	# /var/lock/subsys/gridstore
+	lockfile="/var/lock/subsys/${NAME}"
+fi
+
+svrpidfile="${GS_HOME}/conf/gridstore.pid"
+pidfile="$svrpidfile"
+nodejsonfile="${GS_HOME}/conf/gs_node.json"
+
+start(){
+	echo $"Starting ${NAME} service: "
+	
+	if [ x${NOT_USE_SU} = xyes ]
+	then
+		$GS_STARTNODE_CMD
+	else
+		$SU -l gsadm -c "$GS_STARTNODE_CMD"
+	fi
+
+	check_cmd_retval "Startnode" $?
+	
+	touch "$lockfile"
+	
+	if [ x"$CLUSTER_MODE" = xyes ]; then
+		join $CLUSTER_NAME $MIN_NODE_NUM
+	fi
+	
+	echo_success
+	echo
+}
+
+stop(){
+	echo $"Stopping ${NAME} service: "
+
+	if [ -e "$lockfile" ] || [ x"$1" != x ]
+	then
+		if [ x"$CLUSTER_MODE" = xyes ]; then
+			leave
+		fi
+		
+		## exists gridstore.pid
+		if [ -e "$svrpidfile" ]; then
+
+			pid=$(head -n 1 "$svrpidfile" 2>/dev/null)
+
+			## if $pid is running
+			if [ x"$pid" != x ]; then
+				if [ x${NOT_USE_SU} = xyes ]
+				then
+					kill -TERM $pid > /dev/null 2>&1 < /dev/null
+				else
+					$SU -l gsadm -c "kill -TERM $pid" > /dev/null 2>&1 < /dev/null
+				fi
+
+				TIMEOUT="$STOP_TIMEOUT"
+				count=1
+				while [ $TIMEOUT -ne $count ]; do
+					sleep 1
+					if [ x${NOT_USE_SU} = xyes ]
+					then
+						kill -0 $pid >/dev/null 2>&1 || break
+					else
+						$SU -l gsadm -c "kill -0 $pid" >/dev/null 2>&1 || break
+					fi
+
+					let count=${count}+1
+				done
+				if [ x"$1" = x ] && [ $TIMEOUT -eq $count ]; then
+					exit_with_error "F01001: Stop service timed out" 150
+				fi
+			fi
+		fi
+		rm -f "$lockfile"
+		echo $"Stopped."
+		if [ x"$1" = x ]; then
+			echo_success
+		fi
+	else
+		# not running; per LSB standards this is "ok"
+		if [ x"$1" = x ]; then
+			echo_success
+		fi
+	fi
+	if [ x"$1" = x ]; then
+		echo
+	fi
+}
+
+restart(){
+	check_variables
+	stop
+	start
+}
+
+condrestart(){
+	[ -e "$lockfile" ] && restart || :
+}
+
+join(){
+	if [ x${NOT_USE_SU} = xyes ]
+	then
+		$GS_JOINCLUSTER_CMD -c $1 -n $2
+	else
+		$SU -l gsadm -c "$GS_JOINCLUSTER_CMD -c $1 -n $2"
+	fi
+
+	check_cmd_retval "Joincluster" $?
+}
+
+leave(){
+	if [ x${NOT_USE_SU} = xyes ]
+	then
+		$GS_LEAVECLUSTER_CMD -f
+	else
+		$SU -l gsadm -c "$GS_LEAVECLUSTER_CMD -f"
+	fi
+
+	leave_ret=$?
+	if [ $leave_ret -eq 1 ] || [ $leave_ret -eq 2 ]; then
+		echo "F01006: Leavecluster error"
+	fi
+}
+
+set_system_addr(){
+	# Get /system/serviceAddress and /system/servicePort from gs_node.json.
+	sys_addr=$(python3 -c 'import json,sys; \
+				obj=json.load(open(sys.argv[1],"r")); \
+				print (obj.get("system").get("serviceAddress"));' \
+				$nodejsonfile 2>/dev/null)
+
+	if [ x"$sys_addr" = x ] || [ x"$sys_addr" = xNone ]; then
+		sys_addr=$(python3 -c 'import json,sys; \
+					obj=json.load(open(sys.argv[1],"r")); \
+					print (obj.get("serviceAddress"));' \
+					$nodejsonfile 2>/dev/null)
+	fi
+
+	if [ x${NOT_USE_SU} = xyes ]
+	then
+		GS_SSL_MODE=`echo $GS_SSL_MODE`
+	else
+		GS_SSL_MODE=`$SU -l gsadm -c 'echo $GS_SSL_MODE'`
+	fi
+
+	if [ x${GS_SSL_MODE} = xREQUIRED ] || [ x${GS_SSL_MODE} = xVERIFY ]
+	then
+		sys_port=$(python3 -c 'import json,sys; \
+					obj=json.load(open(sys.argv[1],"r")); \
+					print (obj.get("system").get("serviceSslPort"));' \
+					$nodejsonfile 2>/dev/null)
+	else
+		sys_port=$(python3 -c 'import json,sys; \
+					obj=json.load(open(sys.argv[1],"r")); \
+					print (obj.get("system").get("servicePort"));' \
+					$nodejsonfile 2>/dev/null)
+	fi
+
+	# If parse failed, json load error occurs.
+	if [ $? -eq 1 ]; then
+		exit_with_error "F00003: Json load error" 1
+	fi
+
+	# If values do not exist in json, set default values.
+	if [ x"$sys_addr" = x ] || [ x"$sys_addr" = xNone ]; then
+		sys_addr="127.0.0.1"
+	fi
+	if [ x"$sys_port" = x ] || [ x"$sys_port" = xNone ]; then
+		if [ x${GS_SSL_MODE} = xREQUIRED ] || [ x${GS_SSL_MODE} = xVERIFY ]; then
+			sys_port="10045"
+		else
+			sys_port="10040"
+		fi
+	fi
+
+	# Set value to variable given as argument.
+	eval $1="$sys_addr:$sys_port" #>/dev/null 2>&1
+}
+
+check_variables(){
+	# Override defaults from /etc/sysconfig/gridstore/gridstore.conf 
+	# if file is present
+	[ -f /etc/sysconfig/gridstore/gridstore.conf ] && . /etc/sysconfig/gridstore/gridstore.conf
+
+	if [ -d "$GS_HOME" ] && [ -f "$nodejsonfile" ] && [ -x "$GS_STARTNODE" ]; then
+		GS_STARTNODE_CMD=$GS_STARTNODE
+	else
+		echo_failure
+		echo
+		exit 5
+	fi
+
+	expr $STOP_TIMEOUT + 1 > /dev/null 2>&1
+	ret=$?
+	[ $ret -lt 2 ] || STOP_TIMEOUT=20
+
+	# For cluster mode
+	if [ x"$CLUSTER_MODE" = xyes ]; then
+		if [ -x "$GS_JOINCLUSTER" ] && [ -x "$GS_LEAVECLUSTER" ]; then
+			set_cluster_mode
+		else
+			echo_failure
+			echo
+			exit 5
+		fi
+	fi
+}
+
+set_cluster_mode(){
+	# Set global variables
+	AUTH_PAIR=$GS_USER"/"$GS_PASSWORD
+	set_system_addr SYSTEM_ADDR
+
+	# Set command options
+	GS_STARTNODE_CMD=$GS_STARTNODE" -u $AUTH_PAIR -w $START_TIMEOUT"
+	GS_JOINCLUSTER_CMD=$GS_JOINCLUSTER" -u $AUTH_PAIR -s $SYSTEM_ADDR"
+	if [ x"$JOINCLUSTER_TIMEOUT" != x ]; then
+		GS_JOINCLUSTER_CMD=$GS_JOINCLUSTER_CMD" -w $JOINCLUSTER_TIMEOUT"
+	fi
+	GS_LEAVECLUSTER_CMD=$GS_LEAVECLUSTER" -u $AUTH_PAIR -s $SYSTEM_ADDR \
+							-w $LEAVECLUSTER_TIMEOUT"
+}
+
+check_cmd_retval() {
+	case "$2" in
+		1)
+			case "$1" in
+				"Startnode")
+					err_msg="F01002: Startnode error"
+					stop "force" ;;
+				"Joincluster")
+					err_msg="F01004: Joincluster error"
+					stop "force" ;;
+				*) err_msg="F02001: Command execution error" ;;
+			esac
+			exit_with_error "$err_msg" 1
+			;;
+		2)
+			case "$1" in
+				"Startnode")
+					err_msg="F01003: Startnode timed out"
+					stop "force" ;;
+				"Joincluster")
+					err_msg="F01005: Joincluster timed out"
+					stop "force" ;;
+				*) err_msg="F02002: Command execution timed out" ;;
+			esac
+			exit_with_error "$err_msg" 150
+			;;
+	esac
+}
+
+exit_with_error() {
+	echo $1
+	echo_failure
+	echo
+	exit $2
+}
+
+# See how we were called.
+case "$1" in
+	start)
+		check_variables
+		start
+		;;
+	stop)
+		check_variables
+		stop
+		;;
+	status)
+		status -p "$pidfile" gridstore
+		exit $?
+		;;
+	restart)
+		restart
+		;;
+	condrestart|try-restart)
+		condrestart
+		;;
+	*)
+		echo $"Usage: $0 {start|stop|status|restart|condrestart|try-restart}"
+		exit 2
+esac
+
+exit 0

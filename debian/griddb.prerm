@@ -1,0 +1,19 @@
+#!/bin/bash
+
+PACKAGE_NAME=griddb
+GRIDDB_VERSION=$(dpkg-query --show --showformat='${Version}' $PACKAGE_NAME)
+
+# Uninstallation
+# If gsserver process exists
+SVR_PROC=`/usr/bin/pgrep gsserver`
+if [ x"${SVR_PROC}" != x"" ]; then
+  echo ""
+  echo "------------------------------------------------------------"
+  echo "Uninstallation Error:"
+  echo "  GridDB server is running. Please stop GridDB server."
+  echo "------------------------------------------------------------"
+  echo ""
+  exit 1
+fi
+/bin/systemctl disable gridstore
+

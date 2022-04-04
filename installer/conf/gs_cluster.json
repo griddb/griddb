@@ -1,0 +1,31 @@
+{
+    "dataStore":{
+        "partitionNum":128,
+        "storeBlockSize":"64KB"
+    },
+    "cluster": {
+        "clusterName": "myCluster",
+        "replicationNum": 2,
+        "heartbeatInterval": "5s",
+        "loadbalanceCheckInterval": "180s",
+        "notificationMember":
+        [
+            {
+                "cluster":     {"address": "127.0.0.1", "port": 10010},
+                "sync":        {"address": "127.0.0.1", "port": 10020},
+                "system":      {"address": "127.0.0.1", "port": 10040},
+                "transaction": {"address": "127.0.0.1", "port": 10001},
+                "sql":         {"address": "127.0.0.1", "port": 20001}
+            }
+        ]
+    },
+    "sync":{
+        "timeoutInterval":"30s"
+    },
+    "transaction":{
+        "replicationMode":0,
+        "replicationTimeoutInterval":"10s"
+    },
+    "sql":{
+    }
+}

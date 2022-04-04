@@ -1,10 +1,10 @@
-#!/usr/bin/python2 -B
+#!/usr/bin/python3 -B
 # coding=UTF-8
 
 import sys
 import locale
-reload(sys)
-sys.setdefaultencoding(locale.getpreferredencoding())
+#reload(sys)
+#sys.setdefaultencoding(locale.getpreferredencoding())
 
 import os
 import csv
@@ -19,61 +19,61 @@ util.install_sigint_handler()
 (homedir,logdir) = util.get_required_env()
 
 parser = OptionParser(usage="%prog USERNAME [-p PASSWORD]",
-                      description=u"Change an administrator's password.",
-			version="%prog [V2.8.00]")
+                      description="Change an administrator's password.",
+            version="%prog [V2.8.00]")
 parser.add_option("-p", "--password", dest="password",
-                  help=u'specify password. not display prompt')
+                  help='specify password. not display prompt')
 (options, args) = parser.parse_args()
 
 if len(args) < 1:
-	parser.error("AB0001: Specify USERNAME.")
+    parser.error("AB0001: Specify USERNAME.")
 username = args[0]
 
 filename = os.path.join(homedir, "conf/password")
-with open(filename, 'r+b') as file:
-	try:
-		fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-	except(IOError):
-		print "AB0101: Failed to lock file '" + filename + "'."
-		sys.exit(1)
+with open(filename, 'r+') as file:
+    try:
+        fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except(IOError):
+        print("AB0101: Failed to lock file '" + filename + "'.")
+        sys.exit(1)
 
-	csvReader = csv.reader(file)
-	allPassword = {}
-	for row in csvReader:
-		allPassword[row[0]] = row[1]
+    csvReader = csv.reader(file)
+    allPassword = {}
+    for row in csvReader:
+        allPassword[row[0]] = row[1]
 
-	if username not in allPassword:
-		print "AB0102: USERNAME '" + username + "' does not exist."
-		sys.exit(1)
+    if username not in allPassword:
+        print("AB0102: USERNAME '" + username + "' does not exist.")
+        sys.exit(1)
 
-	if options.password is not None:
-		password = options.password
-	else:
-		try:
-			password = getpass.getpass()
-			password2 = getpass.getpass("Retype password: ")
-		except KeyboardInterrupt:
-			print ""
-			sys.exit(0)
-		if password != password2:
-			print "AB0103: Password mismatch."
-			sys.exit(1)
+    if options.password is not None:
+        password = options.password
+    else:
+        try:
+            password = getpass.getpass()
+            password2 = getpass.getpass("Retype password: ")
+        except KeyboardInterrupt:
+            print("")
+            sys.exit(0)
+        if password != password2:
+            print("AB0103: Password mismatch.")
+            sys.exit(1)
 
-	if password == "":
-		print "AB0104: Password cannnot include space"
-		sys.exit(1)
-	digest = hashlib.sha256(password).hexdigest()
-	allPassword[username] = digest
+    if password == "":
+        print("AB0104: Password cannnot include space")
+        sys.exit(1)
+    digest = hashlib.sha256(util.strToBytes(password)).hexdigest()
+    allPassword[username] = digest
 
-	os.umask(0)
-	tmpfilename = filename + ".tmp"
-	with open(tmpfilename, 'w+b') as tmpfile:
-		csvWriter = csv.writer(tmpfile)
-		for row in allPassword.items():
-			csvWriter.writerow(row);
+    os.umask(0)
+    tmpfilename = filename + ".tmp"
+    with open(tmpfilename, 'w+') as tmpfile:
+        csvWriter = csv.writer(tmpfile)
+        for row in list(allPassword.items()):
+            csvWriter.writerow(row);
 
-	statinfo = os.stat(filename)
-	os.chown(tmpfilename, statinfo[stat.ST_UID], statinfo[stat.ST_GID])
-	os.chmod(tmpfilename, statinfo[stat.ST_MODE])
+    statinfo = os.stat(filename)
+    os.chown(tmpfilename, statinfo[stat.ST_UID], statinfo[stat.ST_GID])
+    os.chmod(tmpfilename, statinfo[stat.ST_MODE])
 
-	os.rename(tmpfilename, filename)
+    os.rename(tmpfilename, filename)

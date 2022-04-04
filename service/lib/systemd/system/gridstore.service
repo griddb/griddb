@@ -1,0 +1,23 @@
+[Unit]
+Description=GridDB database server.
+Before=multi-user.target
+Before=graphical.target
+After=network-online.target
+
+[Service]
+Type=forking
+Restart=no
+TimeoutSec=0
+IgnoreSIGPIPE=no
+KillMode=process
+GuessMainPID=no
+RemainAfterExit=no
+PIDFile=/var/lib/gridstore/conf/gridstore.pid
+User=gsadm
+Group=gridstore
+LimitNOFILE=65536
+ExecStart=/usr/griddb/bin/gridstore start
+ExecStop=/usr/griddb/bin/gridstore stop
+
+[Install]
+WantedBy=multi-user.target
