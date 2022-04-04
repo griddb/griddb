@@ -23,87 +23,84 @@ get_version() {
     echo $griddb_version
 }
 
-# Build GridDB server for CentOS, openSUSE
+# Build GridDB server for CentOS, openSUSE, Ubuntu
 build_griddb() {
     local os=$1
     cd griddb/
     case $os in
-        $CENTOS | $OPENSUSE)
+        $CENTOS | $OPENSUSE | $UBUNTU)
             # Build GridDB server
             ./bootstrap.sh
             ./configure
             make
-            ;;
-        $UBUNTU)
-            # No need to build before create Ubuntu package
-            # GridDB server will auto build in step build package
-            ;;
+        ;;
         *)
             echo "Unknown OS"
-            ;;
-
+        ;;
     esac
-
 }
 
 # Create rpm for CentOS, openSUSE and deb package for Ubuntu
 build_package() {
     local os=$1
-    case $os in
-        $CENTOS | $OPENSUSE)
-            # Get griddb version and set source code zip file name,
-            #   ex "4.5.2" and "griddb-4.5.2.zip"
-            cd griddb/
-            local griddb_version=$(get_version)
-            cd ..
-            local griddb_folder_name="griddb-${griddb_version}"
-            local griddb_zip_file="${griddb_folder_name}.zip"
+    # Get griddb version and set source code zip file name,
+    #   ex "4.5.2" and "griddb-4.5.2.zip"
+    cd griddb/
+    local griddb_version=$(get_version)
+    cd ..
+    local griddb_folder_name="griddb-${griddb_version}"
+    local griddb_zip_file="${griddb_folder_name}.zip"
+    rsync -a --exclude=.git griddb/ $griddb_folder_name
+    zip -r $griddb_zip_file $griddb_folder_name
 
-            # Create rpm file
-            rsync -a --exclude=.git griddb/ $griddb_folder_name
-            zip -r $griddb_zip_file $griddb_folder_name
+    case $os in
+        $CENTOS)
             cp $griddb_zip_file griddb/installer/SOURCES/
             rm -rf $griddb_folder_name
             cd griddb/installer
             check_file_exist "SPECS/griddb.spec"
+            # Create rpm file
             rpmbuild --define="_topdir /griddb/installer" -bb --clean SPECS/griddb.spec
             cd ..
-            ;;
-
+        ;;
+        $OPENSUSE)
+            cp $griddb_zip_file griddb/installer/SOURCES/
+            rm -rf $griddb_folder_name
+            cd griddb/installer
+            check_file_exist "SPECS/openSUSE/griddb.spec"
+            # Create rpm file
+            rpmbuild --define="_topdir /griddb/installer" -bb --clean SPECS/openSUSE/griddb.spec
+            cd ..
+        ;;
         $UBUNTU)
+            mkdir griddb/SOURCES
+            cp $griddb_zip_file griddb/SOURCES/
+            rm -rf $griddb_folder_name
             cd griddb
             dpkg-buildpackage -b
-            ;;
-
+        ;;
         *)
             echo "Unknown OS"
-            ;;
-
+        ;;
     esac
-    # Change package name of OPENSUSE version to distinguish with CENTOS version
-    if [ $os == $OPENSUSE ]; then
-        mv "installer/RPMS/x86_64/griddb-$griddb_version-linux.x86_64.rpm" \
-        "installer/RPMS/x86_64/griddb-$griddb_version-opensuse.x86_64.rpm"
-    fi
 }
 
 # Check information rpm and deb package
 check_package() {
     local package_path=$1
     check_file_exist "$package_path"
-
     local os=$2
+
     case $os in
         $CENTOS | $OPENSUSE)
             rpm -qip $package_path
-            ;;
+        ;;
         $UBUNTU)
             dpkg-deb -I $package_path
-            ;;
+        ;;
         *)
             echo "Unknown OS"
-            ;;
-
+        ;;
     esac
 }
 
@@ -111,22 +108,20 @@ check_package() {
 install_griddb() {
     local package_path=$1
     check_file_exist "$package_path"
-
     local os=$2
+
     # Install package
     case $os in
         $CENTOS | $OPENSUSE)
             rpm -ivh $package_path
-            ;;
+        ;;
         $UBUNTU)
             dpkg -i $package_path
-            ;;
+        ;;
         *)
             echo "Unknown OS"
-            ;;
-
+        ;;
     esac
-
 }
 
 # Config password and clustername for griddb server
@@ -134,8 +129,14 @@ config_griddb() {
     local username=$1
     local password=$2
     local cluster_name=$3
+    cd griddb/
+    local griddb_version=$(get_version)
+    # Use config Multicast method of GridDB server
+    cp -r /usr/griddb-$griddb_version/conf_multicast/. /var/lib/gridstore/conf/.
+    # Config new password and clustername
     su -l gsadm -c "gs_passwd $username -p $password"
-    su -l gsadm -c "sed -i 's/\"clusterName\":\"myCluster\"/\"clusterName\":\"$cluster_name\"/g' /var/lib/gridstore/conf/gs_cluster.json"
+    su -l gsadm -c "sed -i 's/\(\"clusterName\":\)\"\"/\1\"$cluster_name\"/g' /var/lib/gridstore/conf/gs_cluster.json"
+    cd ..
 }
 
 # Start and run griddb server
@@ -143,7 +144,7 @@ start_griddb() {
     local username=$1
     local password=$2
     local cluster_name=$3
-    su -l gsadm -c "gs_startnode -w -u $username/$password"
+    su -l gsadm -c "gs_startnode -u $username/$password -w"
     su -l gsadm -c "gs_joincluster -c $cluster_name -u $username/$password -w"
 }
 
@@ -169,8 +170,8 @@ run_sample() {
 stop_griddb() {
     local username=$1
     local password=$2
-    su -l gsadm -c "gs_stopcluster -u  $username/$password -w"
-    su -l gsadm -c "gs_stopnode -u  $username/$password -w"
+    su -l gsadm -c "gs_stopcluster -u $username/$password -w"
+    su -l gsadm -c "gs_stopnode -u $username/$password -w"
 }
 
 # Uninstall GridDB package
@@ -180,39 +181,36 @@ uninstall_package() {
     case $os in
         $CENTOS | $OPENSUSE)
             rpm -e $package_name
-            ;;
+        ;;
         $UBUNTU)
             dpkg -r $package_name
-            ;;
+        ;;
         *)
             echo "Unknown OS"
-            ;;
+        ;;
     esac
 }
 
 # Copy rpm and deb package from docker container to host
 copy_package_to_host() {
-
     local os=$2
     local container_name=$1
-
     local griddb_version=$(get_version)
 
     case $os in
         $CENTOS)
             mkdir -p installer/RPMS/x86_64/
             docker cp $container_name:/griddb/installer/RPMS/x86_64/griddb-${griddb_version}-linux.x86_64.rpm installer/RPMS/x86_64/
-            ;;
+        ;;
         $OPENSUSE)
             mkdir -p installer/RPMS/x86_64/
             docker cp $container_name:/griddb/installer/RPMS/x86_64/griddb-${griddb_version}-opensuse.x86_64.rpm installer/RPMS/x86_64/
-            ;;
+        ;;
         $UBUNTU)
             docker cp $container_name:./griddb_${griddb_version}_amd64.deb ../
-            ;;
+        ;;
         *)
             echo "Unknown OS"
-            ;;
+        ;;
     esac
 }
-
