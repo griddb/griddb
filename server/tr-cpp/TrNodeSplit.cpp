@@ -20,7 +20,7 @@
 */
 
 #include "internal.h"
-#include "object_manager.h"
+#include "object_manager_v4.h"
 #include "schema.h"
 #include "transaction_context.h"
 #include <stdlib.h>
@@ -63,14 +63,14 @@ static void TrSplit_initialize(TrSplit s, TrNode n, TrChild b) {
 
 /* split end */
 static void TrSplit_finalize(TransactionContext &txn,
-	ObjectManager &objectManager, TrSplit s, OId n1OId, OId n2OId) {
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, TrSplit s, OId n1OId, OId n2OId) {
 	int32_t i;
 
 	/* load buffered children to a node according to partition result */
 	for (i = 0; i < TOTAL; i++) {
 		OId nodeOId = s->partition[i] == group1 ? n1OId : n2OId;
 		if (nodeOId != UNDEF_OID) {
-			TrNode_add_child(txn, objectManager, nodeOId, &s->nodes[i], NULL);
+			TrNode_add_child(txn, objectManager, strategy, nodeOId, &s->nodes[i], NULL);
 		}
 	}
 }
@@ -179,13 +179,13 @@ static void TrCategorize(TrSplit s) {
 }
 
 /* the overview of node split */
-void TrNode_split(TransactionContext &txn, ObjectManager &objectManager,
+void TrNode_split(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 	OId nOId, TrChild b, OId *nnOId) {
 	UNDEF_OID_CHECK(nOId);
 	NULL_PTR_CHECK(b);
 	NULL_PTR_CHECK(nnOId);
 
-	UpdateBaseObject baseObj(txn.getPartitionId(), objectManager, nOId);
+	UpdateBaseObject baseObj(objectManager, strategy, nOId);
 	TrNode n = baseObj.getBaseAddr<TrNode>();
 	int32_t level = n->level;
 	TrSplitTag s;
@@ -197,10 +197,10 @@ void TrNode_split(TransactionContext &txn, ObjectManager &objectManager,
 	/* distribute all nodes */
 	TrCategorize(&s);
 
-	*nnOId = TrNode_new(txn, objectManager);
-	UpdateBaseObject nnBaseObj(txn.getPartitionId(), objectManager, *nnOId);
+	*nnOId = TrNode_new(txn, objectManager, strategy);
+	UpdateBaseObject nnBaseObj(objectManager, strategy, *nnOId);
 	TrNode nn = nnBaseObj.getBaseAddr<TrNode>();
 	nn->level = n->level = level;
 
-	TrSplit_finalize(txn, objectManager, &s, nOId, *nnOId);
+	TrSplit_finalize(txn, objectManager, strategy, &s, nOId, *nnOId);
 }

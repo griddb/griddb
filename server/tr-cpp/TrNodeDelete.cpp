@@ -20,7 +20,7 @@
 */
 
 #include "util/allocator.h"
-#include "data_store.h"
+#include "data_store_v4.h"
 #include "internal.h"
 #include "transaction_context.h"
 #include <stdlib.h>
@@ -50,13 +50,13 @@ static TrNodeList TrList_add(TransactionContext &txn, TrNodeList l, OId nOId) {
 
 /* the core part of deletion */
 static int32_t TrNode_delete1(TransactionContext &txn,
-	ObjectManager &objectManager, OId nOId, TrRect r, TrNodeList *l,
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId nOId, TrRect r, TrNodeList *l,
 	TrDataCmpCallback dccb, void *dccbarg, int &num) {
 	int ret = 0;
 	if (nOId == UNDEF_OID) {
 		return 0;
 	}
-	UpdateBaseObject baseObj(txn.getPartitionId(), objectManager, nOId);
+	UpdateBaseObject baseObj(objectManager, strategy, nOId);
 	TrNode n = baseObj.getBaseAddr<TrNode>();
 	if (n == NULL) {
 		return 0;
@@ -80,10 +80,10 @@ static int32_t TrNode_delete1(TransactionContext &txn,
 		for (i = 0; i < TR_CHILD_COUNT_MAX; i++) {
 			if (n->children[i].nodeOId != UNDEF_OID &&
 				TrRect_overlap_p(r, &n->children[i].rect)) {
-				if (!TrNode_delete1(txn, objectManager, n->children[i].nodeOId,
+				if (!TrNode_delete1(txn, objectManager, strategy, n->children[i].nodeOId,
 						r, l, dccb, dccbarg, num)) {
-					BaseObject baseObj(txn.getPartitionId(), objectManager,
-						n->children[i].nodeOId);
+					BaseObject baseObj(objectManager,
+						strategy, n->children[i].nodeOId);
 					const TrNode cNode = baseObj.getBaseAddr<const TrNode>();
 					if (cNode == NULL) {
 						continue;
@@ -99,7 +99,7 @@ static int32_t TrNode_delete1(TransactionContext &txn,
 					else {
 						/* the node has enough children; just fix the rect */
 						n->children[i].rect = TrNode_surround(
-							txn, objectManager, n->children[i].nodeOId);
+							txn, objectManager, strategy, n->children[i].nodeOId);
 					}
 					ret = 1;
 				}
@@ -110,7 +110,7 @@ static int32_t TrNode_delete1(TransactionContext &txn,
 	for (i = 0; i < TR_CHILD_COUNT_MAX; i++) {
 		if (n->children[i].nodeOId != UNDEF_OID) {
 			n->children[currPos] = n->children[i];
-			if (i != currPos) {
+			if (i != currPos) {  
 				n->children[i].nodeOId = UNDEF_OID;
 			}
 			currPos++;
@@ -121,7 +121,7 @@ static int32_t TrNode_delete1(TransactionContext &txn,
 
 /* reinsert lost children */
 static void TrNode_reinsert(TransactionContext &txn,
-	ObjectManager &objectManager, OId *rootOId, TrNodeList l, int &num) {
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId *rootOId, TrNodeList l, int &num) {
 	int32_t i;
 	TrNodeList list;
 	OId nodeOId = UNDEF_OID;
@@ -131,7 +131,7 @@ static void TrNode_reinsert(TransactionContext &txn,
 		list = l;
 		nodeOId = l->nodeOId;
 
-		UpdateBaseObject baseObj(txn.getPartitionId(), objectManager, nodeOId);
+		UpdateBaseObject baseObj(objectManager, strategy, nodeOId);
 		const TrNode node = baseObj.getBaseAddr<const TrNode>();
 
 		l = l->next;
@@ -141,7 +141,7 @@ static void TrNode_reinsert(TransactionContext &txn,
 		for (i = 0; i < TR_CHILD_COUNT_MAX; i++) {
 			TrChild c = &node->children[i];
 			if (c->nodeOId != UNDEF_OID) {
-				TrNode_insert0(txn, objectManager, rootOId, &c->rect,
+				TrNode_insert0(txn, objectManager, strategy, rootOId, &c->rect,
 					c->nodeOId, node->level);
 			}
 		}
@@ -151,22 +151,22 @@ static void TrNode_reinsert(TransactionContext &txn,
 
 /* the overview of deletion */
 static int32_t TrNode_delete0(TransactionContext &txn,
-	ObjectManager &objectManager, OId *rootOId, TrRect r,
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId *rootOId, TrRect r,
 	TrDataCmpCallback dccb, void *dccbarg, int &num) {
 	NULL_PTR_CHECK(rootOId);
 	UNDEF_OID_CHECK(*rootOId);
 
-	UpdateBaseObject baseObj(txn.getPartitionId(), objectManager, *rootOId);
+	UpdateBaseObject baseObj(objectManager, strategy, *rootOId);
 	TrNode root = baseObj.getBaseAddr<TrNode>();
 	TrNodeList list = NULL;
-	TrNode_delete1(txn, objectManager, *rootOId, r, &list, dccb, dccbarg, num);
+	TrNode_delete1(txn, objectManager, strategy, *rootOId, r, &list, dccb, dccbarg, num);
 	if (num >= 1) {
 		/* the child was found and deleted */
 		int32_t i;
 		OId nodeOId = UNDEF_OID;
 
 		/* process reinsertion list */
-		TrNode_reinsert(txn, objectManager, rootOId, list, num);
+		TrNode_reinsert(txn, objectManager, strategy, rootOId, list, num);
 
 		assert(num >= 0);
 
@@ -186,14 +186,14 @@ static int32_t TrNode_delete0(TransactionContext &txn,
 
 /* delete an entry that overlaps the given rect */
 /* with comparison function for data value */
-int32_t TrNode_delete_cmp(TransactionContext &txn, ObjectManager &objectManager,
-	OId *rootOId, TrRect r, TrDataCmpCallback dccb, void *dccbarg) {
+int32_t TrNode_delete_cmp(TransactionContext &txn, ObjectManagerV4 &objectManager,
+	AllocateStrategy &strategy, OId *rootOId, TrRect r, TrDataCmpCallback dccb, void *dccbarg) {
 	int num = 0;
 	NULL_PTR_CHECK(rootOId);
 	UNDEF_OID_CHECK(*rootOId);
 	NULL_PTR_CHECK(r);
 	NULL_PTR_CHECK(dccb);
-	TrNode_delete0(txn, objectManager, rootOId, r, dccb, dccbarg, num);
+	TrNode_delete0(txn, objectManager, strategy, rootOId, r, dccb, dccbarg, num);
 	return num;
 }
 
@@ -203,11 +203,11 @@ static int32_t tr_cmp(TransactionContext &, TrRect, OId data1, void *data2) {
 }
 
 /* delete an entry that overlaps the given rect */
-int32_t TrNode_delete(TransactionContext &txn, ObjectManager &objectManager,
-	OId *rootOId, TrRect r, void *data) {
+int32_t TrNode_delete(TransactionContext &txn, ObjectManagerV4 &objectManager,
+	AllocateStrategy &strategy, OId *rootOId, TrRect r, void *data) {
 	NULL_PTR_CHECK(rootOId);
 	UNDEF_OID_CHECK(*rootOId);
 	NULL_PTR_CHECK(r);
 	NULL_PTR_CHECK(data);
-	return TrNode_delete_cmp(txn, objectManager, rootOId, r, tr_cmp, data);
+	return TrNode_delete_cmp(txn, objectManager, strategy, rootOId, r, tr_cmp, data);
 }

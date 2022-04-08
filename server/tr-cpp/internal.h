@@ -76,51 +76,51 @@ int32_t TrRect_contained_p(TrRect r1, TrRect r2);
 void TrRect_print(TrRect r, int32_t indent);
 
 /* node.c */
-OId TrNode_new(TransactionContext &txn, ObjectManager &objectManager);
+OId TrNode_new(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy& strategy);
 void TrNode_destroy(
-	TransactionContext &txn, ObjectManager &objectManager, OId nodeOId,
+	TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId nodeOId,
 	uint64_t &removeNum);
 void TrNode_init(TrNode n);
 void TrNode_free(
-	TransactionContext &txn, ObjectManager &objectManager, OId nOId);
+	TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId nOId);
 TrRectTag TrNode_surround(
-	TransactionContext &txn, ObjectManager &objectManager, OId nOId);
-int32_t TrNode_add_child(TransactionContext &txn, ObjectManager &objectManager,
+	TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId nOId);
+int32_t TrNode_add_child(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 	OId nOId, TrChild b, OId *nnOId);
 void TrNode_delete_child(TrNode n, int32_t i);
 
 /* node-split.c */
-void TrNode_split(TransactionContext &txn, ObjectManager &objectManager,
-	OId nOId, TrChild c, OId *newNodeOId);
-void TrNode_print(TransactionContext &txn, ObjectManager &objectManager,
-	OId nodeOId, int32_t indent);
+void TrNode_split(TransactionContext &txn, ObjectManagerV4 &objectManager,
+	AllocateStrategy &strategy, OId nOId, TrChild c, OId *newNodeOId);
+void TrNode_print(TransactionContext &txn, ObjectManagerV4 &objectManager,
+	AllocateStrategy &strategy, OId nodeOId, int32_t indent);
 
 /* node-search.c */
-void TrNode_all(TransactionContext &txn, ObjectManager &objectManager,
-	OId nodeOId, TrHitCallback cb, void *cbarg);
-void TrNode_search(TransactionContext &txn, ObjectManager &objectManager,
-	OId nodeOId, TrCheckCallback ccb, void *ccbarg, TrHitCallback hcb,
+void TrNode_all(TransactionContext &txn, ObjectManagerV4 &objectManager,
+	AllocateStrategy &strategy, OId nodeOId, TrHitCallback cb, void *cbarg);
+void TrNode_search(TransactionContext &txn, ObjectManagerV4 &objectManager,
+	AllocateStrategy &strategy, OId nodeOId, TrCheckCallback ccb, void *ccbarg, TrHitCallback hcb,
 	void *hcbarg);
-void TrNode_search_rect(TransactionContext &txn, ObjectManager &objectManager,
-	OId nodeOId, TrRect r, TrHitCallback cb, void *cbarg);
-void TrNode_search_quad(TransactionContext &txn, ObjectManager &objectManager,
-	OId nodeOId, TrPv3Key *qkey, TrHitCallback hcb, void *hcbarg);
+void TrNode_search_rect(TransactionContext &txn, ObjectManagerV4 &objectManager,
+	AllocateStrategy &strategy, OId nodeOId, TrRect r, TrHitCallback cb, void *cbarg);
+void TrNode_search_quad(TransactionContext &txn, ObjectManagerV4 &objectManager,
+	AllocateStrategy &strategy, OId nodeOId, TrPv3Key *qkey, TrHitCallback hcb, void *hcbarg);
 void TrNode_all_dump(
-	TransactionContext &txn, ObjectManager &objectManager, OId nOId);
-void TrNode_dump(TransactionContext &txn, ObjectManager &objectManager,
+	TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId nOId);
+void TrNode_dump(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 	OId nodeOId, int32_t depth);
 
 /* node-insert.c */
-int32_t TrNode_insert(TransactionContext &txn, ObjectManager &objectManager,
-	OId *nodeOId, TrRect r, OId dataOId);
-int32_t TrNode_insert0(TransactionContext &txn, ObjectManager &objectManager,
-	OId *nodeOId, TrRect r, OId childOId, int32_t level);
+int32_t TrNode_insert(TransactionContext &txn, ObjectManagerV4 &objectManager,
+	AllocateStrategy &strategy, OId *nodeOId, TrRect r, OId dataOId);
+int32_t TrNode_insert0(TransactionContext &txn, ObjectManagerV4 &objectManager,
+	AllocateStrategy &strategy, OId *nodeOId, TrRect r, OId childOId, int32_t level);
 
 /* node-delete.c */
-int32_t TrNode_delete(TransactionContext &txn, ObjectManager &objectManager,
-	OId *n, TrRect r, void *data);
-int32_t TrNode_delete_cmp(TransactionContext &txn, ObjectManager &objectManager,
-	OId *root, TrRect r, TrDataCmpCallback dccb, void *arg);
+int32_t TrNode_delete(TransactionContext &txn, ObjectManagerV4 &objectManager,
+	AllocateStrategy &strategy, OId *n, TrRect r, void *data);
+int32_t TrNode_delete_cmp(TransactionContext &txn, ObjectManagerV4 &objectManager,
+	AllocateStrategy &strategy, OId *root, TrRect r, TrDataCmpCallback dccb, void *arg);
 
 #define TrUtil_print_indent(indent)                \
 	do {                                           \

@@ -20,23 +20,24 @@
 */
 
 #include "util/type.h"
-#include "data_store.h"
+#include "data_store_v4.h"
 #include "internal.h"
-#include "object_manager.h"
+#include "object_manager_v4.h"
 #include "transaction_context.h"
 #include <stdlib.h>
 
+
 /* create an index */
-OId TrIndex_new(TransactionContext &txn, ObjectManager &objectManager) {
+OId TrIndex_new(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) {
 	OId oId;
 
-	BaseObject allocBaseObj(txn.getPartitionId(), objectManager);
+	BaseObject allocBaseObj(objectManager, strategy);
 	TrIndex idx = allocBaseObj.allocate<TrIndexTag>(sizeof(TrIndexTag),
-		AllocateStrategy(ALLOCATE_NO_EXPIRE_MAP), oId, OBJECT_TYPE_RTREE_MAP);
+		oId, OBJECT_TYPE_RTREE_MAP);
 
-	idx->rootNodeOId = TrNode_new(txn, objectManager);
+	idx->rootNodeOId = TrNode_new(txn, objectManager, strategy);
 	UpdateBaseObject baseObj(
-		txn.getPartitionId(), objectManager, idx->rootNodeOId);
+		objectManager, strategy, idx->rootNodeOId);
 	TrNode n = baseObj.getBaseAddr<TrNode>();
 
 	n->level = 0;
@@ -46,19 +47,19 @@ OId TrIndex_new(TransactionContext &txn, ObjectManager &objectManager) {
 
 /* destroy an index */
 void TrIndex_destroy(
-	TransactionContext &txn, ObjectManager &objectManager, OId idxOId, uint64_t &removeNum) {
+	TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId idxOId, uint64_t &removeNum) {
 	if (idxOId == UNDEF_OID) {
 		GS_THROW_USER_ERROR(
 			GS_ERROR_TQ_INTERNAL_LIBRARY_MISUSE, "idxOId is undefined.");
 	}
-	UpdateBaseObject baseObj(txn.getPartitionId(), objectManager, idxOId);
+	UpdateBaseObject baseObj(objectManager, strategy, idxOId);
 	const TrIndex idx = baseObj.getBaseAddr<const TrIndex>();
 	if (idx == NULL) {
 		GS_THROW_USER_ERROR(
 			GS_ERROR_TQ_INTERNAL_DATA_ERROR, "Cannot obtain index data.");
 	}
 	if (idx->rootNodeOId != UNDEF_OID) {
-		TrNode_destroy(txn, objectManager, idx->rootNodeOId, removeNum);
+		TrNode_destroy(txn, objectManager, strategy, idx->rootNodeOId, removeNum);
 	}
 	if (removeNum > 0) {
 		baseObj.finalize();
@@ -67,12 +68,12 @@ void TrIndex_destroy(
 
 /* return the entry size of an index */
 int32_t TrIndex_size(
-	TransactionContext &txn, ObjectManager &objectManager, OId idxOId) {
+	TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId idxOId) {
 	if (idxOId == UNDEF_OID) {
 		GS_THROW_USER_ERROR(
 			GS_ERROR_TQ_INTERNAL_LIBRARY_MISUSE, "idxOId is undefined.");
 	}
-	BaseObject baseObj(txn.getPartitionId(), objectManager, idxOId);
+	BaseObject baseObj(objectManager, strategy, idxOId);
 	const TrIndex idx = baseObj.getBaseAddr<const TrIndex>();
 	if (idx == NULL) {
 		GS_THROW_USER_ERROR(
@@ -82,7 +83,7 @@ int32_t TrIndex_size(
 }
 
 /* enumerate all entries */
-void TrIndex_all(TransactionContext &txn, ObjectManager &objectManager,
+void TrIndex_all(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 	OId idxOId, TrHitCallback cb, void *cbarg) {
 	if (idxOId == UNDEF_OID) {
 		GS_THROW_USER_ERROR(
@@ -93,32 +94,32 @@ void TrIndex_all(TransactionContext &txn, ObjectManager &objectManager,
 			"HitCallback or arg is undefined.");
 	}
 
-	BaseObject baseObj(txn.getPartitionId(), objectManager, idxOId);
+	BaseObject baseObj(objectManager, strategy, idxOId);
 	const TrIndex idx = baseObj.getBaseAddr<const TrIndex>();
 	if (idx == NULL) {
 		GS_THROW_USER_ERROR(
 			GS_ERROR_TQ_INTERNAL_DATA_ERROR, "Cannot obtain index data.");
 	}
-	TrNode_all(txn, objectManager, idx->rootNodeOId, cb, cbarg);
+	TrNode_all(txn, objectManager, strategy, idx->rootNodeOId, cb, cbarg);
 }
 void TrIndex_dump(
-	TransactionContext &txn, ObjectManager &objectManager, OId idxOId) {
+	TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId idxOId) {
 	if (idxOId == UNDEF_OID) {
 		GS_THROW_USER_ERROR(
 			GS_ERROR_TQ_INTERNAL_LIBRARY_MISUSE, "idxOId is undefined.");
 	}
 
-	BaseObject baseObj(txn.getPartitionId(), objectManager, idxOId);
+	BaseObject baseObj(objectManager, strategy, idxOId);
 	const TrIndex idx = baseObj.getBaseAddr<const TrIndex>();
 	if (idx == NULL) {
 		GS_THROW_USER_ERROR(
 			GS_ERROR_TQ_INTERNAL_DATA_ERROR, "Cannot obtain index data.");
 	}
-	TrNode_all_dump(txn, objectManager, idx->rootNodeOId);
+	TrNode_all_dump(txn, objectManager, strategy, idx->rootNodeOId);
 }
 
 /* serach an entry by using user-defined collision detection */
-void TrIndex_search(TransactionContext &txn, ObjectManager &objectManager,
+void TrIndex_search(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 	OId idxOId, TrCheckCallback ccb, void *ccbarg, TrHitCallback hcb,
 	void *hcbarg) {
 	if (idxOId == UNDEF_OID) {
@@ -134,7 +135,7 @@ void TrIndex_search(TransactionContext &txn, ObjectManager &objectManager,
 			"HitCallback or arg is undefined.");
 	}
 
-	BaseObject baseObj(txn.getPartitionId(), objectManager, idxOId);
+	BaseObject baseObj(objectManager, strategy, idxOId);
 	const TrIndex idx = baseObj.getBaseAddr<const TrIndex>();
 	if (idx == NULL) {
 		GS_THROW_USER_ERROR(
@@ -142,12 +143,12 @@ void TrIndex_search(TransactionContext &txn, ObjectManager &objectManager,
 	}
 
 	TrNode_search(
-		txn, objectManager, idx->rootNodeOId, ccb, ccbarg, hcb, hcbarg);
+		txn, objectManager, strategy, idx->rootNodeOId, ccb, ccbarg, hcb, hcbarg);
 }
 
 /* search all entries that overlap with the given rect */
-void TrIndex_search_rect(TransactionContext &txn, ObjectManager &objectManager,
-	OId idxOId, TrRect r, TrHitCallback cb, void *cbarg) {
+void TrIndex_search_rect(TransactionContext &txn, ObjectManagerV4 &objectManager,
+	AllocateStrategy &strategy, OId idxOId, TrRect r, TrHitCallback cb, void *cbarg) {
 	if (idxOId == UNDEF_OID) {
 		GS_THROW_USER_ERROR(
 			GS_ERROR_TQ_INTERNAL_LIBRARY_MISUSE, "idxOId is undefined.");
@@ -162,16 +163,16 @@ void TrIndex_search_rect(TransactionContext &txn, ObjectManager &objectManager,
 			GS_ERROR_TQ_INTERNAL_LIBRARY_MISUSE, "Invalid rect is specified");
 	}
 
-	BaseObject baseObj(txn.getPartitionId(), objectManager, idxOId);
+	BaseObject baseObj(objectManager, strategy, idxOId);
 	const TrIndex idx = baseObj.getBaseAddr<const TrIndex>();
 	if (idx == NULL) {
 		GS_THROW_USER_ERROR(
 			GS_ERROR_TQ_INTERNAL_DATA_ERROR, "Cannot obtain index data.");
 	}
-	TrNode_search_rect(txn, objectManager, idx->rootNodeOId, r, cb, cbarg);
+	TrNode_search_rect(txn, objectManager, strategy, idx->rootNodeOId, r, cb, cbarg);
 }
 
-void TrIndex_search_quad(TransactionContext &txn, ObjectManager &objectManager,
+void TrIndex_search_quad(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 	OId idxOId, TrPv3Key *qkey, TrHitCallback cb, void *cbarg) {
 	if (idxOId == UNDEF_OID) {
 		GS_THROW_USER_ERROR(
@@ -181,18 +182,18 @@ void TrIndex_search_quad(TransactionContext &txn, ObjectManager &objectManager,
 		GS_THROW_USER_ERROR(GS_ERROR_TQ_INTERNAL_LIBRARY_MISUSE,
 			"HitCallback or arg is undefined.");
 	}
-	BaseObject baseObj(txn.getPartitionId(), objectManager, idxOId);
+	BaseObject baseObj(objectManager, strategy, idxOId);
 	const TrIndex idx = baseObj.getBaseAddr<const TrIndex>();
 	if (idx == NULL) {
 		GS_THROW_USER_ERROR(
 			GS_ERROR_TQ_INTERNAL_DATA_ERROR, "Cannot obtain index data.");
 	}
-	TrNode_search_quad(txn, objectManager, idx->rootNodeOId, qkey, cb, cbarg);
+	TrNode_search_quad(txn, objectManager, strategy, idx->rootNodeOId, qkey, cb, cbarg);
 }
 
 /* insert a new entry to an index */
-int32_t TrIndex_insert(TransactionContext &txn, ObjectManager &objectManager,
-	OId idxOId, TrRect r, OId dataOId) {
+int32_t TrIndex_insert(TransactionContext &txn, ObjectManagerV4 &objectManager,
+	AllocateStrategy &strategy, OId idxOId, TrRect r, OId dataOId) {
 	int32_t ret;
 	if (idxOId == UNDEF_OID) {
 		GS_THROW_USER_ERROR(
@@ -208,19 +209,19 @@ int32_t TrIndex_insert(TransactionContext &txn, ObjectManager &objectManager,
 			"Invalid dataOId is specified");
 	}
 
-	UpdateBaseObject baseObj(txn.getPartitionId(), objectManager, idxOId);
+	UpdateBaseObject baseObj(objectManager, strategy, idxOId);
 	TrIndex idx = baseObj.getBaseAddr<TrIndex>();
 	if (idx == NULL) {
 		GS_THROW_USER_ERROR(
 			GS_ERROR_TQ_INTERNAL_DATA_ERROR, "Cannot obtain index data.");
 	}
-	ret = TrNode_insert(txn, objectManager, &idx->rootNodeOId, r, dataOId);
+	ret = TrNode_insert(txn, objectManager, strategy, &idx->rootNodeOId, r, dataOId);
 	idx->count++;
 	return ret;
 }
 
 /* delete an entry from an index */
-int32_t TrIndex_delete(TransactionContext &txn, ObjectManager &objectManager,
+int32_t TrIndex_delete(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 	OId idxOId, TrRect r, void *data) {
 	int32_t ret;
 	if (idxOId == UNDEF_OID) {
@@ -237,14 +238,14 @@ int32_t TrIndex_delete(TransactionContext &txn, ObjectManager &objectManager,
 			GS_ERROR_TQ_INTERNAL_LIBRARY_MISUSE, "Invalid data");
 	}
 
-	UpdateBaseObject baseObj(txn.getPartitionId(), objectManager, idxOId);
+	UpdateBaseObject baseObj(objectManager, strategy, idxOId);
 	TrIndex idx = baseObj.getBaseAddr<TrIndex>();
 	if (idx == NULL) {
 		GS_THROW_USER_ERROR(
 			GS_ERROR_TQ_INTERNAL_DATA_ERROR, "Cannot obtain index data.");
 	}
 
-	ret = TrNode_delete(txn, objectManager, &idx->rootNodeOId, r, data);
+	ret = TrNode_delete(txn, objectManager, strategy, &idx->rootNodeOId, r, data);
 	if (ret) {
 		--idx->count;
 	}
@@ -252,7 +253,7 @@ int32_t TrIndex_delete(TransactionContext &txn, ObjectManager &objectManager,
 }
 
 int32_t TrIndex_delete_cmp(TransactionContext &txn,
-	ObjectManager &objectManager, OId idxOId, TrRect r, TrDataCmpCallback dccb,
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId idxOId, TrRect r, TrDataCmpCallback dccb,
 	void *dccbarg) {
 	int32_t ret;
 	if (idxOId == UNDEF_OID) {
@@ -269,7 +270,7 @@ int32_t TrIndex_delete_cmp(TransactionContext &txn,
 			"DeleteCallback or arg is undefined.");
 	}
 
-	UpdateBaseObject baseObj(txn.getPartitionId(), objectManager, idxOId);
+	UpdateBaseObject baseObj(objectManager, strategy, idxOId);
 	TrIndex idx = baseObj.getBaseAddr<TrIndex>();
 	if (idx == NULL) {
 		GS_THROW_USER_ERROR(
@@ -277,7 +278,7 @@ int32_t TrIndex_delete_cmp(TransactionContext &txn,
 	}
 
 	ret = TrNode_delete_cmp(
-		txn, objectManager, &idx->rootNodeOId, r, dccb, dccbarg);
+		txn, objectManager, strategy, &idx->rootNodeOId, r, dccb, dccbarg);
 	if (ret) --idx->count;
 	return ret;
 }
