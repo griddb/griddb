@@ -1,5 +1,5 @@
 AC_PREREQ(2.61)
-AC_INIT([GridDB], [4.6.1])
+AC_INIT([GridDB], [5.0.0])
 AC_CONFIG_AUX_DIR([.])
 AM_INIT_AUTOMAKE
 
@@ -17,9 +17,7 @@ AS_IF([test "x$enable_cxx11" = xyes],
 [ CX_CXX11=-std=gnu++0x ],
 [ CX_CXX11= ])
 
-CF_COMMON=" -Wall -finput-charset=UTF-8\
- -Wpointer-arith\
- -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-function -Wno-unused-parameter"
+CF_COMMON=" -finput-charset=UTF-8"
 CX_COMMON="$CF_COMMON $CX_CXX11"
 
 CF_OPTIMIZE=" -O3 -fno-tree-vectorize -DNDEBUG"
@@ -27,15 +25,12 @@ AC_ARG_ENABLE(debug, [  --enable-debug    turn on debugging],
 [ test "${enableval}" = "yes" && CF_OPTIMIZE=" -gstabs+ -O0" ])
 CX_OPTIMIZE="$CF_OPTIMIZE"
 
+AC_DEFINE(UTIL_DYNAMIC_LOAD_ENABLED,1)
+AC_DEFINE(UTIL_EXT_LIBRARY_ENABLED,1)
+
 AS_IF([test "x$enable_debug" = xyes],
 [ AM_CONDITIONAL(BUILD_SH_DEBUG, true) ],
 [ AM_CONDITIONAL(BUILD_SH_DEBUG, false) ])
-
-AC_ARG_ENABLE(activemq, [  --enable-activemq    link activemq], [], [ enable_activemq=no ])
-AS_IF([test "x$enable_activemq" = xyes],
-[ AM_CONDITIONAL(LINK_ACTIVEMQ, true)
-AC_DEFINE(TRIGGER_CONNECT_ACTIVEMQ,1) ],
-[ AM_CONDITIONAL(LINK_ACTIVEMQ, false) ])
 
 CF_STRICT=""
 CX_STRICT=""
