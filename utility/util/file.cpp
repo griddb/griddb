@@ -553,6 +553,39 @@ off_t File::tell() {
 #endif
 }
 
+void File::seek(int64_t offset) {
+#ifdef _WIN32
+	LARGE_INTEGER fp;
+	LONG fpHigh = 0;
+	if (offset >= 0) { 
+		fp.QuadPart = offset;
+		LONG result = SetFilePointer(fd_, fp.LowPart, &fp.HighPart, FILE_BEGIN);
+		if (result == INVALID_SET_FILE_POINTER) {
+			UTIL_THROW_PLATFORM_ERROR(NULL);
+		}
+	}
+	else { 
+		fp.LowPart = SetFilePointer(fd_, 0, &fpHigh, FILE_END);
+		if (fp.LowPart == INVALID_SET_FILE_POINTER) {
+			UTIL_THROW_PLATFORM_ERROR(NULL);
+		}
+	}
+#else
+	if (offset >= 0) { 
+		const off_t result = lseek64(fd_, offset, SEEK_SET);
+		if (result == static_cast<off_t>(-1)) {
+			UTIL_THROW_PLATFORM_ERROR(NULL);
+		}
+	}
+	else { 
+		const off_t result = lseek64(fd_, 0, SEEK_END);
+		if (result == static_cast<off_t>(-1)) {
+			UTIL_THROW_PLATFORM_ERROR(NULL);
+		}
+	}
+#endif
+}
+
 void File::sync() {
 #ifdef _WIN32
 	if (!FlushFileBuffers(fd_)) {
@@ -1964,6 +1997,13 @@ bool FileSystem::setFDLimit(int32_t cur, int32_t max) {
 	(void) cur;
 	(void) max;
 	return false;
+#endif
+}
+
+void FileSystem::syncAll() {
+#ifdef _WIN32
+#else
+	::sync();
 #endif
 }
 

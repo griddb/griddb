@@ -586,10 +586,36 @@ private:
 };
 
 namespace detail {
+struct StdAllocatorHolder;
+typedef VariableSizeAllocator<> DefaultVariableSizeAllocator;
+typedef VariableSizeAllocator<Mutex> LockedVariableSizeAllocator;
 struct VariableSizeAllocatorUtils {
+#if UTIL_HAS_TEMPLATE_PLACEMENT_NEW
+	template<typename Mutex, typename Traits>
+	struct CheckResultOf {
+		typedef VariableSizeAllocator<Mutex, Traits>& Type;
+	};
 	template<typename Mutex, typename Traits>
 	static VariableSizeAllocator<Mutex, Traits>& checkType(
 			VariableSizeAllocator<Mutex, Traits> &allocator) { return allocator; }
+#else
+	template<typename Mutex, typename Traits>
+	struct CheckResultOf {
+		typedef StdAllocatorHolder Type;
+	};
+	template<typename Mutex>
+	struct CheckResultOf< Mutex, VariableSizeAllocatorTraits<> > {
+		typedef VariableSizeAllocator<
+				Mutex, VariableSizeAllocatorTraits<> >& Type;
+	};
+	static DefaultVariableSizeAllocator& checkType(
+			DefaultVariableSizeAllocator &allocator) { return allocator; }
+	static LockedVariableSizeAllocator& checkType(
+			LockedVariableSizeAllocator &allocator) { return allocator; }
+	template<typename Mutex, typename Traits>
+	static StdAllocatorHolder checkType(
+			VariableSizeAllocator<Mutex, Traits> &allocator);
+#endif 
 };
 }
 }	
@@ -601,6 +627,7 @@ struct VariableSizeAllocatorUtils {
 		util::detail::VariableSizeAllocatorUtils::checkType( \
 				allocator).deleteObject(object)
 
+#if UTIL_HAS_TEMPLATE_PLACEMENT_NEW
 template<typename Mutex, typename Traits>
 inline void* operator new(
 		size_t size, util::VariableSizeAllocator<Mutex, Traits> &allocator) {
@@ -616,6 +643,36 @@ inline void operator delete(void *p,
 	catch (...) {
 	}
 }
+#else
+inline void* operator new(
+		size_t size, util::detail::DefaultVariableSizeAllocator &allocator) {
+	return allocator.allocate(size);
+}
+inline void operator delete(
+		void *p,
+		util::detail::DefaultVariableSizeAllocator &allocator) throw() {
+	try {
+		allocator.deallocate(p);
+	}
+	catch (...) {
+	}
+}
+
+inline void* operator new(
+		size_t size, util::detail::LockedVariableSizeAllocator &allocator) {
+	return allocator.allocate(size);
+}
+
+inline void operator delete(
+		void *p,
+		util::detail::LockedVariableSizeAllocator &allocator) throw() {
+	try {
+		allocator.deallocate(p);
+	}
+	catch (...) {
+	}
+}
+#endif 
 
 namespace util {
 
@@ -1268,6 +1325,29 @@ private:
 	WrapperFunc *wrapper_;
 };
 
+#if !UTIL_HAS_TEMPLATE_PLACEMENT_NEW
+namespace detail {
+struct StdAllocatorHolder {
+public:
+	explicit StdAllocatorHolder(const StdAllocator<void, void> &alloc) :
+			alloc_(alloc) {
+	}
+
+	StdAllocator<void, void> operator()() const {
+		return alloc_;
+	}
+
+private:
+	StdAllocator<void, void> alloc_;
+};
+template<typename Mutex, typename Traits>
+inline StdAllocatorHolder VariableSizeAllocatorUtils::checkType(
+		VariableSizeAllocator<Mutex, Traits> &allocator) {
+	return StdAllocatorHolder(StdAllocator<void, void>());
+}
+} 
+#endif 
+
 template<typename T, typename U, typename BaseAllocator>
 inline bool operator==(
 		const StdAllocator<T, BaseAllocator> &op1,
@@ -1297,6 +1377,20 @@ inline void operator delete(
 	bytesAlloc.deallocate(static_cast<uint8_t*>(p), 0);
 }
 
+#if !UTIL_HAS_TEMPLATE_PLACEMENT_NEW
+inline void* operator new(
+		size_t size, const util::detail::StdAllocatorHolder &holder) {
+	util::StdAllocator<uint8_t, void> bytesAlloc(holder());
+	return bytesAlloc.allocate(size);
+}
+
+inline void operator delete(
+		void *p, const util::detail::StdAllocatorHolder &holder) throw() {
+	util::StdAllocator<uint8_t, void> bytesAlloc(holder());
+	bytesAlloc.deallocate(static_cast<uint8_t*>(p), 0);
+}
+#endif 
+
 namespace util {
 
 namespace detail {
@@ -1311,9 +1405,10 @@ struct AllocNewChecker {
 	}
 
 	template<typename Mutex, typename Traits>
-	static VariableSizeAllocator<Mutex, Traits>& check(
+	static typename VariableSizeAllocatorUtils::
+	template CheckResultOf<Mutex, Traits>::Type check(
 			VariableSizeAllocator<Mutex, Traits> &allocator) throw() {
-		return allocator;
+		return VariableSizeAllocatorUtils::checkType(allocator);
 	}
 };
 } 

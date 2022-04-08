@@ -44,12 +44,16 @@
     OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 #include "util/system.h"
+#include "util/code.h"
 #include "util/os.h"
 #ifdef _WIN32
 #include <psapi.h>
 #endif
+#include <cassert>
+#include <vector>
 
 namespace util {
+
 
 MemoryStatus MemoryStatus::getStatus() {
 	return MemoryStatus();
@@ -165,6 +169,7 @@ MemoryStatus::MemoryStatus() : peakUsage_(0), lastUsage_(0) {
 #endif
 }
 
+
 uint64_t ProcessUtils::getCurrentProcessId() {
 #ifdef _WIN32
 	return GetCurrentProcessId();
@@ -173,5 +178,432 @@ uint64_t ProcessUtils::getCurrentProcessId() {
 #endif
 }
 
+
+#if UTIL_DYNAMIC_LOAD_ENABLED
+SharedObject::SharedObject() : data_(NULL) {
+}
+
+SharedObject::~SharedObject() {
+	try {
+		close();
+	}
+	catch (...) {
+	}
+}
+
+void SharedObject::open(
+		const char8_t *soPath, const char8_t *dllPath, int type) {
+#ifdef _WIN32
+	static_cast<void>(soPath);
+	open(dllPath, type);
+#else
+	static_cast<void>(dllPath);
+	open(soPath, type);
+#endif
+}
+
+void SharedObject::open(const char8_t *path, int type) {
+	close();
+
+#ifdef _WIN32
+	std::wstring encodedPath;
+	CodeConverter(Code::UTF8, Code::WCHAR_T)(path, encodedPath);
+	HANDLE handle = LoadLibraryW(encodedPath.c_str());
+	if (handle == NULL) {
+		UTIL_THROW_PLATFORM_ERROR(path);
+	}
+	data_ = handle;
+#else
+	if (type < 0) {
+		open(path, RTLD_NOW | RTLD_LOCAL);
+		return;
+	}
+	std::string pathStr;
+	CodeConverter(Code::UTF8, Code::CHAR)(path, pathStr);
+	void *handle = dlopen(pathStr.c_str(), type);
+	if (!handle) {
+		UTIL_THROW_PLATFORM_ERROR(NULL);
+	}
+	data_ = handle;
+#endif
+}
+
+void SharedObject::close(void) {
+#ifdef _WIN32
+	if (data_) {
+		FreeLibrary(static_cast<HMODULE>(data_));
+		data_ = NULL;
+	}
+#else
+	if (data_) {
+		dlclose(data_);
+		data_ = NULL;
+	}
+#endif
+}
+
+void* SharedObject::getSymbol(const char8_t *symbol) {
+#ifdef _WIN32
+	return GetProcAddress(static_cast<HMODULE>(data_), symbol);
+#else
+	std::string symbolStr;
+	CodeConverter(Code::UTF8, Code::CHAR)(symbol, symbolStr);
+	return dlsym(data_, symbolStr.c_str());
+#endif
+}
+#endif 
+
+
+
+#if UTIL_DYNAMIC_LOAD_ENABLED
+void LibraryFunctions::getEntryProviderFunctions(
+		const char8_t *name, SharedObject &so,
+		const char8_t *entryFuncName, int32_t reqVersion,
+		const void *const *&funcList, size_t &funcCount) {
+	funcList = NULL;
+	funcCount = 0;
+
+	void *entryFunc = so.getSymbol(entryFuncName);
+	if (entryFunc == NULL) {
+		errorEntryFunctionNotFound(name, entryFuncName);
+		return;
+	}
+
+	const void *const *list;
+	size_t count;
+	int32_t libVersion;
+
+	const int32_t code = reinterpret_cast<EntryProviderFunc>(
+			entryFunc)(&list, &count, reqVersion, &libVersion);
+	checkProviderResult(name, code, &reqVersion, &libVersion);
+
+	funcList = list;
+	funcCount = count;
+}
+#endif 
+
+void LibraryFunctions::getProviderFunctions(
+		const char8_t *name, ProviderFunc provider,
+		const void *const *&funcList, size_t &funcCount) {
+	if (provider == NULL) {
+		UTIL_THROW_UTIL_ERROR(CODE_ILLEGAL_ARGUMENT, "");
+	}
+
+	const void *const *list;
+	size_t count;
+
+	const int32_t code = provider(&list, &count);
+	checkProviderResult(name, code, NULL, NULL);
+
+	funcList = list;
+	funcCount = count;
+}
+
+int32_t LibraryFunctions::checkVersion(
+		const void *const **funcList, size_t *funcCount,
+		int32_t reqVersion, int32_t *libVersionOut, int32_t libVersion,
+		int32_t minVersion) throw() {
+	trySet(libVersionOut, libVersion);
+
+	if (minVersion >= 0 && reqVersion < minVersion) {
+		trySetEmpty(funcList);
+		trySetEmpty(funcCount);
+		return UtilityException::CODE_LIBRARY_UNMATCH;
+	}
+
+	return succeed(NULL);
+}
+
+int32_t LibraryFunctions::succeed(UtilExceptionTag **ex) throw() {
+	 trySetEmpty(ex);
+	 return 0;
+}
+
+void LibraryFunctions::checkProviderResult(
+		const char8_t *name, int32_t code, const int32_t *reqVersion,
+		const int32_t *libVersion) {
+	if (code == 0) {
+		return;
+	}
+
+	if (code == UtilityException::CODE_LIBRARY_UNMATCH &&
+			reqVersion != NULL && libVersion != NULL) {
+		UTIL_THROW_UTIL_ERROR(
+				CODE_LIBRARY_UNMATCH,
+				"Library unmatched (name=" << filterName(name) <<
+				", requestedVersion=" << *reqVersion <<
+				", actualVersion=" << *libVersion << ")");
+	}
+	else {
+		UTIL_THROW_UTIL_ERROR(
+				CODE_INVALID_STATUS,
+				"Unknown library error (name=" << filterName(name) <<
+				", code=" << code << ")");
+	}
+}
+
+void LibraryFunctions::errorNullArgument() {
+	UTIL_THROW_UTIL_ERROR(CODE_ILLEGAL_ARGUMENT, "Illegal null argument");
+}
+
+void LibraryFunctions::errorEntryFunctionNotFound(
+		const char8_t *name, const char8_t *entryFuncName) {
+	UTIL_THROW_UTIL_ERROR(
+			CODE_LIBRARY_UNMATCH,
+			"Library entry function not found ("
+			"name=" << filterName(name) <<
+			", entryFuncion=" << filterName(entryFuncName) << ")");
+}
+
+void LibraryFunctions::errorFunctionNotFound(
+		const char8_t *name, size_t funcOrdinal) {
+	UTIL_THROW_UTIL_ERROR(
+			CODE_LIBRARY_UNMATCH,
+			"Library function not found ("
+			"name=" << filterName(name) <<
+			", functionOrdinal=" << funcOrdinal << ")");
+}
+
+const char8_t* LibraryFunctions::filterName(const char8_t *name) throw() {
+	if (name == NULL) {
+		return "";
+	}
+	return name;
+}
+
+
+LibraryException::LibraryException() throw() :
+		funcTable_("LibraryException"),
+		obj_(NULL),
+		errorCode_(0) {
+}
+
+LibraryException::~LibraryException() {
+	clear();
+}
+
+void LibraryException::clear() throw() {
+	if (obj_ != NULL) {
+		try {
+			funcTable_.resolve<Functions::FUNC_CLOSE>()(obj_);
+		}
+		catch (...) {
+			assert(false);
+		}
+		obj_ = NULL;
+		errorCode_ = 0;
+	}
+}
+
+UtilExceptionTag* LibraryException::release() throw() {
+	UtilExceptionTag *obj = obj_;
+	obj_ = NULL;
+	errorCode_ = 0;
+	return obj;
+}
+
+void LibraryException::assign(
+		LibraryFunctions::ProviderFunc provider,
+		UtilExceptionTag *ex) throw() {
+	clear();
+
+	if (provider == NULL) {
+		return;
+	}
+
+	try {
+		funcTable_.assign(provider);
+		obj_ = ex;
+		errorCode_ = funcTable_.resolve<Functions::FUNC_GET_INTEGER_FIELD>()(
+				obj_, Exception::FIELD_ERROR_CODE, 0);
+	}
+	catch (...) {
+	}
+}
+
+void LibraryException::assign(const util::Exception &src) throw() {
+	clear();
+
+	try {
+		funcTable_.assign(getDefaultProvider());
+		DefaultException *dest = UTIL_NEW DefaultException();
+		dest->base_ = src;
+		obj_ = dest;
+		errorCode_ = src.getErrorCode();
+	}
+	catch (...) {
+	}
+}
+
+int32_t LibraryException::getCode() throw() {
+	return errorCode_;
+}
+
+void LibraryException::get(Exception &dest) throw() {
+	dest = Exception();
+	if (obj_ == NULL) {
+		return;
+	}
+
+	try {
+		const size_t depth =
+				funcTable_.resolve<Functions::FUNC_GET_DEPTH>()(obj_);
+		for (size_t i = 0; i <= depth; i++) {
+			const int32_t errorCode = (i == 0 ?
+					errorCode_ :
+					getIntegerField(Exception::FIELD_ERROR_CODE, i));
+
+			dest.append(Exception(
+					Exception::NamedErrorCode(
+							errorCode, getStringField(
+							Exception::FIELD_ERROR_CODE_NAME, i).c_str()),
+					getStringField(Exception::FIELD_MESSAGE, i).c_str(),
+					getStringField(Exception::FIELD_FILE_NAME, i).c_str(),
+					getStringField(Exception::FIELD_FUNCTION_NAME, i).c_str(),
+					getIntegerField(Exception::FIELD_LINE_NUMBER, i),
+					NULL,
+					getStringField(Exception::FIELD_TYPE_NAME, i).c_str(),
+					Exception::STACK_TRACE_TOP,
+					Exception::LITERAL_ALL_DUPLICATED));
+		}
+	}
+	catch (...) {
+		dest.append(Exception(
+				Exception::NamedErrorCode(
+						errorCode_)));
+	}
+}
+
+LibraryFunctions::ProviderFunc LibraryException::getDefaultProvider() throw() {
+	return DefaultProvider::provideFunctions;
+}
+
+int32_t LibraryException::getIntegerField(
+		Exception::FieldType field, size_t depth) {
+	return funcTable_.resolve<Functions::FUNC_GET_INTEGER_FIELD>()(
+			obj_, field, depth);
+}
+
+std::string LibraryException::getStringField(
+		Exception::FieldType field, size_t depth) {
+	const size_t size = funcTable_.resolve<Functions::FUNC_GET_STRING_FIELD>()(
+			obj_, field, depth, NULL, 0);
+	std::vector<char8_t> buf(size + 1);
+
+	if (!buf.empty()) {
+		funcTable_.resolve<Functions::FUNC_GET_STRING_FIELD>()(
+				obj_, field, depth, &buf[0], buf.size());
+	}
+
+	return std::string(&buf[0], size);
+}
+
+
+LibraryException::DefaultProvider::FuncTable
+LibraryException::DefaultProvider::FUNC_TABLE;
+
+LibraryException::DefaultProvider::Initializer
+LibraryException::DefaultProvider::FUNC_TABLE_INITIALIZER(FUNC_TABLE);
+
+int32_t LibraryException::DefaultProvider::provideFunctions(
+		const void *const **funcList, size_t *funcCount) throw() {
+	return FUNC_TABLE.getFunctionList(funcList, funcCount);
+}
+
+void LibraryException::DefaultProvider::close(UtilExceptionTag *ex) throw() {
+	delete as(ex);
+}
+
+size_t LibraryException::DefaultProvider::getDepth(UtilExceptionTag *ex) throw() {
+	if (ex == NULL) {
+		return 0;
+	}
+
+	return as(ex)->base_.getMaxDepth();
+}
+
+int32_t LibraryException::DefaultProvider::getIntegerField(
+		UtilExceptionTag *ex, int32_t fieldType, size_t depth) throw() {
+	if (ex == NULL) {
+		return 0;
+	}
+
+	switch (fieldType) {
+	case Exception::FIELD_ERROR_CODE:
+		return as(ex)->base_.getErrorCode(depth);
+	case Exception::FIELD_LINE_NUMBER:
+		return as(ex)->base_.getLineNumber(depth);
+	default:
+		return 0;
+	}
+}
+
+size_t LibraryException::DefaultProvider::getStringField(
+		UtilExceptionTag *ex, int32_t fieldType, size_t depth,
+		char8_t *buf, size_t size) throw() {
+	if (ex == NULL) {
+		return 0;
+	}
+
+	util::NormalOStringStream oss;
+	oss << as(ex)->base_.getField(
+			static_cast<Exception::FieldType>(fieldType), depth);
+	const std::string &str = oss.str();
+	if (size > 0) {
+		const size_t copySize =
+				static_cast<size_t>(std::min<uint64_t>(size - 1, str.size()));
+		memcpy(buf, str.c_str(), copySize);
+		buf[copySize] = '\0';
+	}
+
+	return str.size();
+}
+
+LibraryException::DefaultException* LibraryException::DefaultProvider::as(
+		UtilExceptionTag *ex) throw() {
+	return static_cast<DefaultException*>(ex);
+}
+
+
+LibraryException::DefaultProvider::Initializer::Initializer(FuncTable &table) {
+	table.set<Functions::FUNC_CLOSE>(&close);
+	table.set<Functions::FUNC_GET_DEPTH>(&getDepth);
+	table.set<Functions::FUNC_GET_INTEGER_FIELD>(&getIntegerField);
+	table.set<Functions::FUNC_GET_STRING_FIELD>(&getStringField);
+}
+
+
+bool LibraryTool::findError(int32_t code, UtilExceptionTag *ex) throw() {
+	return (code != 0 || ex != NULL);
+}
+
+void LibraryTool::fromLibraryException(
+		int32_t code, ProviderFunc provider, UtilExceptionTag *&src,
+		Exception &dest) throw() {
+	if (src == NULL) {
+		dest = UTIL_EXCEPTION_CREATE_DETAIL_TRACE(
+				util::UtilityException,
+				UTIL_EXCEPTION_UTIL_NAMED_CODE(CODE_INVALID_STATUS), NULL,
+				"Library error occurred but detail lost (code=" <<code << ")");
+	}
+	else {
+		LibraryException ex;
+		ex.assign(provider, src);
+		src = NULL;
+		ex.get(dest);
+	}
+}
+
+int32_t LibraryTool::toLibraryException(
+		const Exception &src, UtilExceptionTag **dest) throw() {
+	LibraryException ex;
+	ex.assign(src);
+
+	const int32_t code = ex.getCode();
+	if (dest != NULL) {
+		*dest = ex.release();
+	}
+	return code;
+}
 
 } 

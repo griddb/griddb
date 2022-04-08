@@ -338,6 +338,8 @@ public:
 
 	virtual off_t tell();
 
+	virtual void seek(int64_t offset);
+
 	virtual void sync();
 
 	File& getFile() { return *this; }
@@ -696,6 +698,8 @@ public:
 	static bool getFDLimit(int32_t *cur, int32_t *max);
 
 	static bool setFDLimit(int32_t cur, int32_t max);
+
+	static void syncAll();
 
 private:
 	FileSystem();
