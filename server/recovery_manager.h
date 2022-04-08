@@ -27,30 +27,19 @@
 #include "event_engine.h"
 #include "sha2.h"
 #include "container_key.h"
+#include "partition.h"
 
-struct LogRecord;
-class LogCursor;
 class TransactionContext;
 class ConfigTable;
 class PartitionTable;
 class ClusterService;
 class SystemService;
-class DataStore;
-class LogManager;
-class ChunkManager;
 class TransactionManager;
 class BaseContainer;
-class ResourceSet;
-
-/*!
-	@brief Throws exception of log redo failure.
-*/
-class LogRedoException : public util::Exception {
-public:
-	explicit LogRedoException(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw() :
-			Exception(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_SET) {}
-	virtual ~LogRedoException() throw() {}
-};
+struct ManagerSet;
+class NoLocker;
+template <class L> class LogManager;
+class PartitionList;
 
 /*!
 	@brief Recovers database.
@@ -68,88 +57,79 @@ public:
 			ConfigTable &configTable, bool releaseUnusedFileBlocks);
 	~RecoveryManager();
 
-	void initialize(ResourceSet &resourceSet);
+	/*!
+		@brief 初期化
+	*/
+	void initialize(ManagerSet &resourceSet);
 
+	/*
+		@brief 与えられたファイル名がバックアップ情報ファイルかどうかを判定する
+		@param [in] name 判定したいファイル名
+	*/
 	static bool checkBackupInfoFileName(const std::string &name);
 
+	/*!
+		@brief 与えられたファイル名がバックアップ情報ダイジェストファイルかどうかを判定する
+		@param [in] name 判定したいファイル名
+	*/
 	static bool checkBackupInfoDigestFileName(const std::string &name);
 
+	/*!
+		@brief 起動時の既存ファイルチェック処理の実行
+		@param [in] configTable
+		@param [out] createFrag 新規作成ならtrue
+		@note 各種Manager初期化前にmain関数からコールされる
+		@note 条件を満たさなければ、起動失敗させる
+	*/
 	static void checkExistingFiles1(ConfigTable &configTable, bool &createFrag,
 		bool &existBackupFile, bool forceRecoveryFromExistingFiles);
-
-	static void checkExistingDbDir(
-			const char8_t *const, uint32_t splitCount,
-			ConfigTable &param, bool &createFlag, bool &createNew);
-
+	
 	static void scanExistingFiles(
-			ConfigTable &param, bool &createFlag,
-			bool &existBackupInfoFile, bool forceRecoveryFromExistingFiles,
-			std::vector<std::vector<CheckpointId> > &logFileInfoList,
-			std::vector< std::set<int32_t> > &cpFileInfoList,
+			ConfigTable &param,
 			bool &existBackupInfoFile1, bool &existBackupInfoFile2);
 
-	static void checkExistingFiles2(ConfigTable &configTable,
-		LogManager &logMgr, bool &createFrag, bool existBackupFile,
-		bool forceRecoveryFromExistingFiles);
-
+	/*!
+		@brief データベースディレクトリに存在するバックアップ情報ファイルを読み込みパースする
+		@param [out] isIncrementalBackup 増分バックアップからの起動ならtrue
+		@note バックアップからのリカバリ+CP完了後に呼び出される
+	*/
 	bool readBackupInfoFile();
 	bool readBackupInfoFile(const std::string &path);
 
+	/*!
+		@brief データベースディレクトリに存在するバックアップ情報ファイルを削除する
+		@note バックアップからのリカバリ+CP完了後に呼び出される
+	*/
 	void removeBackupInfoFile();
 
-
-
-
+	/*!
+		@brief 起動時のリカバリ処理の実行
+		@note main関数からコールされる
+		@note 一つでもパーティション状態がシステムエラーになれば、起動失敗させる
+	*/
 	void recovery(util::StackAllocator &alloc, bool existBackup,
 		bool forceRecoveryFromExistingFiles,
 		const std::string &recoveryTargetPartition, bool forLongArchive);
 
-	size_t undo(util::StackAllocator &alloc, PartitionId pId);
-
 	/*!
-		@brief Loggin modes of replication and synchronization and recovery.
-	*/
-	enum Mode {
-		MODE_REPLICATION,	  
-		MODE_SHORT_TERM_SYNC,  
-		MODE_LONG_TERM_SYNC,   
-		MODE_RECOVERY,		   
-		MODE_RECOVERY_CHUNK	
-	};
-
-	void redoLogList(util::StackAllocator &alloc, Mode mode, PartitionId pId,
-		const util::DateTime &redoStartTime, EventMonotonicTime redoStartEmTime,
-		const uint8_t *binaryLogRecords, size_t size);
-
-	LogSequentialNumber restoreTransaction(
-		PartitionId pId, const uint8_t *buffer, EventMonotonicTime emNow);
-
-	void dropPartition(TransactionContext &txn, util::StackAllocator &alloc,
-		PartitionId pId, bool putLog = true);
-	void dumpCheckpointFile(
-		util::StackAllocator &alloc, const char8_t *dirPath);
-
-	void dumpLogFile(
-		util::StackAllocator &alloc, PartitionGroupId pgId, CheckpointId cpId);
-
-	void dumpFileVersion(util::StackAllocator &alloc, const char8_t *dbPath);
-
-	/*!
-		@brief Returns recovery progress ratio.
+		@brief リカバリ進捗率取得
+		@note 内部は0-100(%)。返すのはdouble(0.00 - 1.00)
 	*/
 	static double getProgressRate() {
 		return (progressPercent_ / 100.0);
 	}
 
 	/*!
-		@brief Sets progress ratio.
+		@brief リカバリ進捗率設定
+		@note 0-100(%)
 	*/
 	static void setProgressPercent(uint32_t percent) {
 		progressPercent_ = percent;
 	}
 
 	/*!
-		@brief Manages information for backup.
+		@brief バックアップ情報ファイル
+		@note 出力時はチェックポイントサービススレッドでのみアクセスを想定(排他無し)
 	*/
 	class BackupInfo {
 	public:
@@ -165,7 +145,7 @@ public:
 
 		void setConfigValue(uint32_t partitionNum, uint32_t partitionGroupNum);
 
-		void startBackup(const std::string &backupPath);  
+		void startBackup(const std::string &backupPath, bool skipBaseLineFlag);  
 		void startIncrementalBackup(const std::string &backupPath,
 			const std::string &lastBackupPath, int32_t mode);  
 
@@ -174,32 +154,32 @@ public:
 
 		void errorBackup();  
 
-		void startCpFileCopy(PartitionGroupId pgId, CheckpointId cpId);
-		void endCpFileCopy(PartitionGroupId pgId, uint64_t fileSize);
-		void startIncrementalBlockCopy(PartitionGroupId pgId, int32_t mode);
-		void endIncrementalBlockCopy(PartitionGroupId pgId, CheckpointId cpId);
+		void startCpFileCopy(PartitionId pId, CheckpointId cpId);
+		void endCpFileCopy(PartitionId pId, uint64_t fileSize);
+		void startIncrementalBlockCopy(PartitionId pId, int32_t mode);
+		void endIncrementalBlockCopy(PartitionId pId, CheckpointId cpId);
 		void startLogFileCopy();
-		void endLogFileCopy(PartitionGroupId pgId, uint64_t fileSize);
+		void endLogFileCopy(PartitionId pId, uint64_t fileSize);
 
 		void readBackupInfoFile();
 		void readBackupInfoFile(const std::string &path);
 
-		void removeBackupInfoFile(LogManager &logManager);
-		void removeUnnecessaryLogFiles(std::vector<CheckpointId> &lastCpIdList);
+		void removeBackupInfoFile(PartitionList &ptList);
 
 		void setBackupPath(const std::string &backupPath);  
 		void setDataStorePath(const std::string &dataStorePath);  
 		void setGSVersion(const std::string &gsVersion);  
 
-		CheckpointId getBackupCheckpointId(PartitionGroupId pgId);
-		uint64_t getBackupCheckpointFileSize(PartitionGroupId pgId);
-		uint64_t getBackupLogFileSize(PartitionGroupId pgId);
+		CheckpointId getBackupCheckpointId(PartitionId pId);
+		uint64_t getBackupCheckpointFileSize(PartitionId pId);
+		uint64_t getBackupLogFileSize(PartitionId pId);
+		const std::string& getDataStorePath();
 
 		IncrementalBackupMode getIncrementalBackupMode();
 		void setIncrementalBackupMode(IncrementalBackupMode mode);
 		bool isIncrementalBackup();
 		std::vector<CheckpointId> &getIncrementalBackupCpIdList(
-			PartitionGroupId pgId);
+			PartitionId pId);
 		bool getCheckCpFileSizeFlag();
 		void setCheckCpFileSizeFlag(bool flag);
 
@@ -211,7 +191,7 @@ public:
 		uint32_t partitionNum_;
 		uint32_t partitionGroupNum_;
 
-		uint32_t currentPartitionGroupId_;
+		uint32_t currentPartitionId_;
 
 		std::string backupPath_;
 		std::string dataStorePath_;
@@ -236,66 +216,16 @@ public:
 		std::vector<std::vector<CheckpointId> > incrementalBackupCpIdList_;
 		IncrementalBackupMode incrementalBackupMode_;
 		bool checkCpFileSizeFlag_;
+		bool skipBaselineFlag_;
 
 		char digestData_[SHA256_DIGEST_STRING_LENGTH + 1];
 	};
 
 private:
-	void redoAll(util::StackAllocator &alloc, Mode mode, LogCursor &cursor,
-		bool isIncrementalBackup, bool forLongArchive);
-	void redoAllChunkMeta(
-			util::StackAllocator &alloc, Mode mode,
-			LogCursor &cursor, bool isIncrementalBackup, bool forLongArchive);
-
-	void redoChunkLog(util::StackAllocator &alloc, PartitionGroupId pgId,
-			Mode mode, CheckpointId recoveryCpId);
-
-	void recoveryChunkMetaData(
-			util::StackAllocator &alloc, const LogRecord &logRecord);
-
-	LogSequentialNumber redoLogRecord(util::StackAllocator &alloc, Mode mode,
-		PartitionId pId, const util::DateTime &stmtStartTime,
-		EventMonotonicTime stmtStartEmTime, const LogRecord &logRecord,
-		LogSequentialNumber &redoStartLsn, bool isIncrementalBackup, bool skipRedoChunkMeta);
-
-	LogSequentialNumber redoLogRecordForDataArchive(util::StackAllocator &alloc,
-		Mode mode, PartitionId pId, const util::DateTime &stmtStartTime,
-		EventMonotonicTime stmtStartEmTime, const LogRecord &logRecord,
-		LogSequentialNumber &redoStartLsn, bool isIncrementalBackup);
-
-	void redoCheckpointStartLog(util::StackAllocator &alloc,
-		Mode mode, PartitionId pId, const util::DateTime &stmtStartTime,
-		EventMonotonicTime stmtStartEmTime, const LogRecord &logRecord,
-		LogSequentialNumber &redoStartLsn, bool isIncrementalBackup,
-		bool forLongArchive);
-
-	void redoChunkMetaDataLog(util::StackAllocator &alloc,
-		Mode mode, PartitionId pId, const util::DateTime &stmtStartTime,
-		EventMonotonicTime stmtStartEmTime, const LogRecord &logRecord,
-		LogSequentialNumber &redoStartLsn, bool isIncrementalBackup,
-		bool forLongArchive);
-
-	bool redoChunkLogRecord(util::StackAllocator &alloc, Mode mode,
-		PartitionId pId, const LogRecord &logRecord,
-		LogSequentialNumber &redoStartLsn);
-
-	void removeTransaction(Mode mode, TransactionContext &txn);
-
-	void parseRecoveryTargetPartition(const std::string &str);
-
-	void reconstructValidBitArray(
-			util::StackAllocator &alloc, Mode mode,
-			LogCursor &cursor, ChunkBitArray &validBitArray);
-
-	void checkContainerExistence(
-		BaseContainer *container, ContainerId containerId);
-	void checkContainerExistence(
-		BaseContainer *container, const util::String &containerName);
-
-	static void logRecordToString(
-		util::StackAllocator &alloc, const KeyConstraint &containerKeyConstraint,
-		PartitionId pId, const LogRecord &logRecord,
-		std::string &dumpString, LogSequentialNumber &lsn);
+	/*!
+		@brief Check restore files.
+	*/
+	void checkRestoreFile();
 
 	/*!
 		@brief Handler to set up Stat.
@@ -337,13 +267,11 @@ private:
 	std::vector<int64_t> syncChunkNum_;
 	std::vector<int64_t> syncChunkCount_;
 
-	ChunkManager *chunkMgr_;
-	LogManager *logMgr_;
 	PartitionTable *pt_;
 	ClusterService *clsSvc_;
 	SystemService *sysSvc_;
 	TransactionManager *txnMgr_;
-	DataStore *ds_;
+	PartitionList *partitionList_;
 };
 
-#endif
+#endif 

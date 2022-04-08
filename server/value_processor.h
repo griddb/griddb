@@ -26,7 +26,7 @@
 #include "data_store_common.h"
 #include "data_type.h"
 #include "gs_error.h"
-#include "object_manager.h"
+#include "object_manager_v4.h"
 #include <math.h>
 #include <vector>
 
@@ -45,19 +45,19 @@ class BaseObject;
 class ValueProcessor {
 public:
 	static int32_t compare(TransactionContext &txn,
-		ObjectManager &objectManager, ColumnId columnId,
+		ObjectManagerV4 &objectManager, AllocateStrategy &strategy, ColumnId columnId,
 		MessageRowStore *messageRowStore, uint8_t *objectRowField);
 
 	static int32_t compare(TransactionContext &txn,
-		ObjectManager &objectManager, ColumnType type,
+		ObjectManagerV4 &objectManager, AllocateStrategy &strategy, ColumnType type,
 		uint8_t *srcObjectRowField, uint8_t *targetObjectRowField);
 
-	static void getField(TransactionContext &txn, ObjectManager &objectManager,
-		ColumnId columnId, const Value *objectValue,
+	static void getField(TransactionContext &txn, ObjectManagerV4 &objectManager,
+		AllocateStrategy& strategy, ColumnId columnId, const Value *objectValue,
 		MessageRowStore *outputMessageRowStore);
 
-	static void getField(TransactionContext &txn, ObjectManager &objectManager,
-		ColumnId columnId, uint32_t recordNth, Value *objectValue,
+	static void getField(TransactionContext &txn, ObjectManagerV4 &objectManager,
+		AllocateStrategy& strategy, ColumnId columnId, uint32_t recordNth, Value *objectValue,
 		MessageRowStore *outputMessageRowStore);  
 
 	/*
@@ -599,7 +599,6 @@ public:
 
 	static void dumpSimpleValue(util::NormalOStringStream &stream, 
 		ColumnType columnType, const void *data, uint32_t size, bool withType = false);
-
 	static const Timestamp
 		SUPPORT_MAX_TIMESTAMP;  
 
@@ -634,8 +633,8 @@ class VariableArrayCursor : public BaseObject {
 public:  
 public:  
 public:  
-	VariableArrayCursor(TransactionContext &txn, ObjectManager &objectManager,
-		OId oId, AccessMode accessMode);
+	VariableArrayCursor(ObjectManagerV4 &objectManager,
+		AllocateStrategy &strategy, OId oId, AccessMode accessMode);
 	VariableArrayCursor(uint8_t *addr);
 
 	void finalize();
@@ -655,7 +654,7 @@ public:
 	*/
 	void reset() {
 		if (getBaseOId() != rootOId_) {
-			curObject_.load(rootOId_);
+			curObject_.load(rootOId_, false);
 		}
 		else {
 			resetCursor();
@@ -665,7 +664,7 @@ public:
 		elemCursor_ = UNDEF_CURSOR_POS;
 	}
 
-	OId clone(TransactionContext &txn, const AllocateStrategy &allocateStrategy,
+	OId clone(AllocateStrategy &allocateStrategy,
 		OId neighborOId);
 
 	/*!
@@ -685,7 +684,7 @@ public:
 	}
 
 	static void checkVarDataSize(TransactionContext &txn,
-		ObjectManager &objectManager,
+		ObjectManagerV4 &objectManager,
 		const util::XArray< std::pair<uint8_t *, uint32_t> > &varList,
 		const util::XArray<ColumnType> &columnTypeList,
 		bool isConvertSpecialType,
@@ -693,8 +692,8 @@ public:
 		util::XArray<uint32_t> &varDataObjectPosList);
 
 	static OId createVariableArrayCursor(TransactionContext &txn,
-		ObjectManager &objectManager,
-		const AllocateStrategy &allocateStrategy,
+		ObjectManagerV4 &objectManager,
+		AllocateStrategy &allocateStrategy,
 		const util::XArray< std::pair<uint8_t *, uint32_t> > &varList,
 		const util::XArray<ColumnType> &columnTypeList,
 		bool isConvertSpecialType,
@@ -715,7 +714,6 @@ private:
 	BaseObject &curObject_;
 	OId rootOId_;
 	uint32_t elemNum_;
-	uint32_t currentSize_;
 	uint32_t
 		elemCursor_;  
 	AccessMode accessMode_;
@@ -733,14 +731,14 @@ public:
 public:  
 public:  
 	StringCursor(
-		TransactionContext &txn, ObjectManager &objectManager, OId oId);
+		ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId oId);
 
 	StringCursor(uint8_t *binary);
 
-	StringCursor(TransactionContext &txn, const uint8_t *str,
+	StringCursor(util::StackAllocator& alloc, const uint8_t *str,
 		uint32_t strLength);  
 
-	StringCursor(TransactionContext &txn, const char *str);
+	StringCursor(util::StackAllocator& alloc, const char *str);
 
 	/*!
 		@brief Free StringCursor Object
@@ -788,10 +786,10 @@ private:
 */
 class BinaryObject : public BaseObject {
 public:
-	BinaryObject(PartitionId pId, ObjectManager &objectManager)
-		: BaseObject(pId, objectManager) {}
-	BinaryObject(PartitionId pId, ObjectManager &objectManager, OId oId)
-		: BaseObject(pId, objectManager, oId) {}
+	BinaryObject(ObjectManagerV4 &objectManager, AllocateStrategy &strategy)
+		: BaseObject(objectManager, strategy) {}
+	BinaryObject(ObjectManagerV4 &objectManager, AllocateStrategy& strategy, OId oId)
+		: BaseObject(objectManager, strategy, oId) {}
 	BinaryObject(uint8_t *addr) : BaseObject(addr) {}
 
 	/*!
@@ -837,10 +835,10 @@ public:
 */
 class ArrayObject : public BaseObject {
 public:
-	ArrayObject(PartitionId pId, ObjectManager &objectManager)
-		: BaseObject(pId, objectManager) {}
-	ArrayObject(PartitionId pId, ObjectManager &objectManager, OId oId)
-		: BaseObject(pId, objectManager, oId) {}
+	ArrayObject(ObjectManagerV4 &objectManager, AllocateStrategy& strategy)
+		: BaseObject(objectManager, strategy) {}
+	ArrayObject(ObjectManagerV4 &objectManager, AllocateStrategy& strategy, OId oId)
+		: BaseObject(objectManager, strategy, oId) {}
 	ArrayObject(uint8_t *addr) : BaseObject(addr) {}
 
 	/*!
@@ -1026,8 +1024,9 @@ private:
 class LogDevide {
 public:
 	static const int32_t MAX_DIVIDED_NUM = 3;
-	LogDevide(ObjectManager &objectManager) 
+	LogDevide(ObjectManagerV4 &objectManager) 
 		: objectManager_(objectManager), constElemNum_(0), dividedElemNum_(0),
+		sizeList_{ 0, 0, 0 },
 		blobSubBlockUnitSize_(objectManager.getRecommendtLimitObjectSize()) {
 	}
 	void initialize(uint64_t inputSize);
@@ -1045,9 +1044,9 @@ public:
 
 private:
 	static const double EFFICENCY_THRESHOLD;
-	static const uint32_t	DIVIED_SIZE_LIMIT = ((1 << 7) - ObjectAllocator::BLOCK_HEADER_SIZE); 
+	static const uint32_t	DIVIED_SIZE_LIMIT = ((1 << 7) - ObjectManagerV4::OBJECT_HEADER_SIZE); 
 
-	ObjectManager &objectManager_;
+	ObjectManagerV4 &objectManager_;
 	uint32_t constElemNum_;
 	uint32_t dividedElemNum_;
 	uint32_t sizeList_[MAX_DIVIDED_NUM];
@@ -1055,8 +1054,9 @@ private:
 
 	uint32_t calcSizeOfBuddy(uint32_t size) {
 		uint32_t buddySize = objectManager_.estimateAllocateSize(size);
-		return buddySize + ObjectAllocator::BLOCK_HEADER_SIZE;
+		return buddySize + ObjectManagerV4::OBJECT_HEADER_SIZE;
 	}
+	void initializeDevide(uint32_t restSize);
 };
 
 class BlobCursor {
@@ -1067,10 +1067,10 @@ public:
 		CREATE
 	};
 	static uint64_t getTotalSize(const uint8_t *addr);
-	static uint32_t getPrefixDataSize(ObjectManager &objectManager, uint64_t totalSize);
+	static uint32_t getPrefixDataSize(ObjectManagerV4 &objectManager, uint64_t totalSize);
 public:
-	BlobCursor(PartitionId pId, ObjectManager &objectManager, const uint8_t * const ptr);
-	BlobCursor(PartitionId pId, ObjectManager &objectManager, const AllocateStrategy &allocateStrategy, const uint8_t *ptr, OId neighborOId);
+	BlobCursor(ObjectManagerV4 &objectManager, AllocateStrategy &allocateStrategy, const uint8_t * const ptr);
+	BlobCursor(ObjectManagerV4 &objectManager, AllocateStrategy &allocateStrategy, const uint8_t *ptr, OId neighborOId);
 	~BlobCursor() {}
 	uint32_t initialize(uint8_t *destAddr,  uint64_t totalSize);
 	void finalize();
@@ -1095,7 +1095,7 @@ private:
 		BlobArrayObject() : ArrayObject(NULL), curPos_(-1) {
 		}
 		void load(OId oId) {
-			BaseObject::load(oId);
+			BaseObject::load(oId, false);
 			resetArrayCursor();
 		}
 		inline void loadNeighbor(OId oId, AccessMode mode) {
@@ -1103,18 +1103,18 @@ private:
 			resetArrayCursor();
 		}
 		template <class T>
-		T *allocate(Size_t requestSize, const AllocateStrategy &allocateStrategy,
+		T *allocate(DSObjectSize requestSize,
 			OId &oId, ObjectType objectType) {
-			T *addr = BaseObject::allocate<T>(requestSize, allocateStrategy,
+			T *addr = BaseObject::allocate<T>(requestSize,
 					oId, objectType);
 			resetArrayCursor();
 			return addr;
 		}
 		template <class T>
-		T *allocateNeighbor(Size_t requestSize,
-			const AllocateStrategy &allocateStrategy, OId &oId, OId neighborOId,
+		T *allocateNeighbor(DSObjectSize requestSize,
+			OId &oId, OId neighborOId,
 			ObjectType objectType) {
-			T *addr = BaseObject::allocateNeighbor<T>(requestSize, allocateStrategy,
+			T *addr = BaseObject::allocateNeighbor<T>(requestSize,
 					oId, neighborOId, objectType);
 			resetArrayCursor();
 			return addr;
@@ -1178,15 +1178,15 @@ private:
 	bool isDivided() {
 		return isDivided(maxDepth_);
 	}
-	static uint32_t calcDepth(ObjectManager &objectManager, uint64_t totalSize, uint32_t elemNum, uint32_t &topArrayNum);
-	static uint32_t getMaxArrayNum(ObjectManager &objectManager);
+	static uint32_t calcDepth(ObjectManagerV4 &objectManager, uint64_t totalSize, uint32_t elemNum, uint32_t &topArrayNum);
+	static uint32_t getMaxArrayNum(ObjectManagerV4 &objectManager);
+	void nextBlock(CURSOR_MODE mode);
 	void down(CURSOR_MODE mode);
 private:
 	static const uint32_t MAX_DEPTH = 4;  
 	static const uint32_t MIN_DIVIDED_SIZE = 119;
-	PartitionId pId_;
-	ObjectManager &objectManager_;
-	AllocateStrategy allocateStrategy_;
+	ObjectManagerV4 &objectManager_;
+	AllocateStrategy &allocateStrategy_;
 	const uint8_t *baseAddr_;
 	const uint8_t *topArrayAddr_;
 	BaseObject curObj_;
@@ -1199,5 +1199,6 @@ private:
 	LogDevide logDevide_;
 	OId neighborOId_;
 };
+
 
 #endif

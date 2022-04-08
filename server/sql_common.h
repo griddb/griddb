@@ -1,6 +1,6 @@
 ﻿/*
 	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
-
+	
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
 	published by the Free Software Foundation, either version 3 of the
@@ -22,6 +22,9 @@
 #define SQL_COMMON_H_
 #include "config_table.h"
 
+
+
+
 const int32_t TABLE_PARTITIONING_MAX_HASH_PARTITIONING_NUM = 1024;
 const int32_t TABLE_PARTITIONING_MIN_INTERVAL_VALUE = 1000;
 const int32_t TABLE_PARTITIONING_MAX_ASSIGN_NUM = 10000;
@@ -41,31 +44,28 @@ const LargeContainerStatusType TABLE_STATUS_DROP_START = 8;
 const LargeContainerStatusType PARTITION_STATUS_NONE = -1;
 
 typedef int8_t ContainerCategory;
-const LargeContainerStatusType LARGE_CONTAINER_STATUS =  0;
-const LargeContainerStatusType TABLE_PARTITIONING_VERSION =  1;
-const LargeContainerStatusType TABLE_PARTITIONING_RECOVERY =  2;
+const LargeContainerStatusType LARGE_CONTAINER_STATUS = 0;
+const LargeContainerStatusType TABLE_PARTITIONING_VERSION = 1;
+const LargeContainerStatusType TABLE_PARTITIONING_RECOVERY = 2;
 const LargeContainerStatusType TABLE_PARTITIONING_CHECK_EXPIRED = 3;
 const LargeContainerStatusType UNDEF_LARGE_CONTAINER_CATEGORY = -1;
 
-static const int32_t DEFAULT_NOSQL_FAILOVER_WAIT_TIME = 3 *1000;
+static const int32_t DEFAULT_NOSQL_FAILOVER_WAIT_TIME = 3 * 1000;
 
 typedef util::VariableSizeAllocator<> SQLVariableSizeLocalAllocator;
-
-typedef util::VariableSizeAllocatorTraits<>
-		SQLVariableSizeGlobalAllocatorTraits;
-
+typedef util::VariableSizeAllocatorTraits<> SQLVariableSizeGlobalAllocatorTraits;
 typedef util::VariableSizeAllocator<
-		util::Mutex, SQLVariableSizeGlobalAllocatorTraits>
-				SQLVariableSizeGlobalAllocator;
+	util::Mutex, SQLVariableSizeGlobalAllocatorTraits> SQLVariableSizeGlobalAllocator;
 
 typedef util::BasicString<
-		char8_t, std::char_traits<char8_t>,
-		util::StdAllocator<char8_t, SQLVariableSizeGlobalAllocator> >
-				SQLString;
+	char8_t, std::char_traits<char8_t>,
+	util::StdAllocator<char8_t, SQLVariableSizeGlobalAllocator> > SQLString;
+
+typedef int64_t NoSQLSyncId;
+const int64_t UNDEF_NOSQL_SYNCID = -1;
 
 typedef int64_t NoSQLRequestId;
 const int64_t UNDEF_NOSQL_REQUESTID = -1;
-typedef StatementId JobExecutionId;
 
 enum ExpirationType {
 	EXPIRATION_TYPE_ROW = 2,
@@ -160,6 +160,7 @@ enum SQLErrorCode {
 	GS_ERROR_SQL_COMPILE_INVALID_INSERT_COLUMN,
 	GS_ERROR_SQL_COMPILE_PARTITIONING_KEY_NOT_UPDATABLE,
 	GS_ERROR_SQL_COMPILE_LIMIT_EXCEEDED,
+	GS_ERROR_SQL_COMPILE_PRIMARY_KEY_NOT_UPDATABLE,
 
 	GS_ERROR_SQL_EXECUTION_INTERNAL = 250000,
 	GS_ERROR_SQL_EXECUTION_INTERNAL_NOT_FOUND,
@@ -204,7 +205,7 @@ enum SQLErrorCode {
 	GS_ERROR_SQL_DML_EXPIRED_SUB_CONTAINER_VERSION,
 	GS_ERROR_SQL_NODE_FAILURE,
 	GS_ERROR_SQL_DML_INSERT_INVALID_NULL_CONSTRAINT,
-	
+
 	GS_ERROR_SQL_DDL_INTERNAL = 280000,
 	GS_ERROR_SQL_DDL_INVALID_USER,
 	GS_ERROR_SQL_DDL_UNSUPPORTED_COMMAND_TYPE,
@@ -306,11 +307,12 @@ enum SQLTraceCode {
 	GS_TRACE_SQL_CANCEL,
 	GS_TRACE_SQL_NOSQL_OPERATION_ALREADY_CANCEL,
 	GS_TRACE_SQL_FAILOVER_WORKING,
-	GS_TRACE_SQL_EXECUTION_INFO, 
-	GS_TRACE_SQL_DDL_TABLE_PARTITIONING_PRIMARY_KEY, 
-	GS_TRACE_SQL_RECOVER_CONTAINER, 
-	GS_TRACE_SQL_INVALID_NOSQL_RESPONSE, 
+	GS_TRACE_SQL_EXECUTION_INFO,
+	GS_TRACE_SQL_DDL_TABLE_PARTITIONING_PRIMARY_KEY,
+	GS_TRACE_SQL_RECOVER_CONTAINER,
+	GS_TRACE_SQL_INVALID_NOSQL_RESPONSE,
 	GS_TRACE_SQL_LONG_QUERY,
+	GS_TRACE_SQL_LONG_UPDATING_CACHE_TABLE,
 	GS_TRACE_SQL_HINT_INTERNAL = 240900,
 	GS_TRACE_SQL_HINT_WARNING,
 	GS_TRACE_SQL_HINT_INFO
@@ -344,19 +346,19 @@ public:
 	};
 
 	static util::Exception::NamedErrorCode sqlErrorToCode(
-			int32_t sqliteErrorCode) throw();
+		int32_t sqliteErrorCode) throw();
 
 	static util::Exception::NamedErrorCode sqlStateToCode(
-			uint32_t sqlState) throw();
+		uint32_t sqlState) throw();
 
 private:
 	struct StateInfo {
 		uint32_t code_;
-		const char8_t *name_;
+		const char8_t* name_;
 	};
 
 	static util::Exception::NamedErrorCode stateInfoToCode(
-			const StateInfo &info) throw();
+		const StateInfo& info) throw();
 
 	static const uint32_t EXCEPTION_CODE_STATE_BITS;
 
@@ -384,8 +386,8 @@ private:
 struct SQLErrorUtils {
 public:
 	static void decodeException(
-			util::StackAllocator &alloc, util::ArrayByteInStream &in,
-			util::Exception &dest) throw();
+		util::StackAllocator& alloc, util::ArrayByteInStream& in,
+		util::Exception& dest) throw();
 };
 
 #define GS_THROW_SQL_ERROR_BY_STREAM(alloc, in) \
@@ -430,11 +432,14 @@ enum SQLConfigTableParamId {
 	CONFIG_TABLE_SQL_TRANSACTION_MESSAGE_SIZE_LIMIT,
 	CONFIG_TABLE_SQL_STORE_SWAP_FILE_PATH,
 	CONFIG_TABLE_SQL_SUB_CONTAINER_ASSIGN_TYPE,
-
 	CONFIG_TABLE_SQL_SCAN_RESULTSET_TIMEOUT_INTERVAL,
-
 	CONFIG_TABLE_SQL_TRACE_LIMIT_EXECUTION_TIME,
 	CONFIG_TABLE_SQL_TRACE_LIMIT_QUERY_SIZE,
+	CONFIG_TABLE_SQL_SEND_PENDING_INTERVAL,
+	CONFIG_TABLE_SQL_SEND_PENDING_TASK_LIMIT,
+	CONFIG_TABLE_SQL_SEND_PENDING_JOB_LIMIT,
+	CONFIG_TABLE_SQL_SEND_PENDING_TASK_CONCURRENCY,
+	CONFIG_TABLE_SQL_JOB_TOTAL_MEMORY_LIMIT,
 
 	CONFIG_TABLE_SQL_NOSQL_FAILOVER_TIMEOUT,
 
@@ -442,6 +447,13 @@ enum SQLConfigTableParamId {
 	CONFIG_TABLE_SQL_PARTITIONING_ROWKEY_CONSTRAINT,
 	CONFIG_TABLE_SQL_LOCAL_SERVICE_ADDRESS,
 	CONFIG_TABLE_SQL_NOTIFICATION_INTERFACE_ADDRESS,
+
+	CONFIG_TABLE_SQL_TABLE_CACHE_EXPIRED_TIME,
+	CONFIG_TABLE_SQL_TABLE_CACHE_SIZE,
+
+	CONFIG_TABLE_SQL_ENABLE_PROFILER,
+	CONFIG_TABLE_SQL_ENABLE_JOB_MEMORY_CHECK_INTERVAL_COUNT,
+	CONFIG_TABLE_SQL_TABLE_CACHE_LOAD_DUMP_LIMIT_TIME,
 
 	CONFIG_TABLE_TRACE_SQL_TRACER_ID_START,
 
@@ -451,6 +463,8 @@ enum SQLConfigTableParamId {
 	CONFIG_TABLE_TRACE_DISTRIBUTED_FRAMEWORK,
 	CONFIG_TABLE_TRACE_DISTRIBUTED_FRAMEWORK_DETAIL,
 	CONFIG_TABLE_TRACE_SQL_HINT,
+
+	CONFIG_TABLE_TRACE_SQL_INTERNAL,
 
 	CONFIG_TABLE_TRACE_SQL_TRACER_ID_END,
 
@@ -472,6 +486,15 @@ enum SQLStatTableParamId {
 	STAT_TABLE_PERF_SQL_TOTAL_READ_OPERATION,
 	STAT_TABLE_PERF_SQL_TOTAL_WRITE_OPERATION,
 	STAT_TABLE_PERF_SQL_NUM_CONNECTION,
+	STAT_TABLE_PERF_SQL_SEND_PENDING_COUNT,
+	STAT_TABLE_PERF_SQL_JOB_COUNT,
+	STAT_TABLE_PERF_SQL_SQL_COUNT,
+	STAT_TABLE_PERF_SQL_QUEUE_MAX,
+	STAT_TABLE_PERF_SQL_TABLE_CACHE_RATIO,
+	STAT_TABLE_PERF_SQL_TABLE_CACHE_SEARCH_COUNT,
+	STAT_TABLE_PERF_SQL_TABLE_CACHE_SKIP_COUNT,
+	STAT_TABLE_PERF_SQL_TABLE_CACHE_LOAD_TIME,
+
 	STAT_TABLE_PERF_SQL_STORE_SWAP_READ,
 	STAT_TABLE_PERF_SQL_STORE_SWAP_READ_SIZE,
 	STAT_TABLE_PERF_SQL_STORE_SWAP_READ_TIME,
@@ -492,6 +515,29 @@ enum SQLAllocatorGroupId {
 	ALLOCATOR_GROUP_SQL_ID_END
 };
 
+struct NoSQLCommonUtils {
+	static bool isAccessibleContainer(uint8_t attribute, bool& isWritable);
+	static bool isWritableContainer(uint8_t attribute, uint8_t type);
+
+	static void splitContainerName(
+		const std::pair<const char8_t*, const char8_t*>& src,
+		std::pair<const char8_t*, const char8_t*>* base,
+		std::pair<const char8_t*, const char8_t*>* sub,
+		std::pair<const char8_t*, const char8_t*>* affinity,
+		std::pair<const char8_t*, const char8_t*>* type);
+
+	/*!
+		@brief コンテナ名よりサブコンテナ名を生成する
+	*/
+	static void makeSubContainerName(
+		const char8_t* name, PartitionId partitionId, int32_t subContainerId,
+		int32_t tablePartitioningCount, util::String& subName);
+
+	static int32_t mapTypeToSQLIndexFlags(
+		int8_t mapType, uint8_t nosqlColumnType);
+
+	static void getDatabasaeVersion(int32_t& major, int32_t& minor);
+};
 
 struct SQLPragma {
 	static const char8_t VALUE_TRUE[];
@@ -516,99 +562,74 @@ struct SQLPragma {
 
 		PRAGMA_EXPERIMENTAL_SHOW_SYSTEM,
 		PRAGMA_EXPERIMENTAL_SCAN_MULTI_INDEX,
+
 		PRAGMA_RESULTSET_TIMEOUT_INTERVAL,
 		PRAGMA_TYPE_MAX
 	};
 
-	static const char *getPragmaTypeName(PragmaType type) {
-
+	static const char* getPragmaTypeName(PragmaType type) {
 		switch (type) {
-			case PRAGMA_NONE: return "none";
-			case PRAGMA_INTERNAL_COMPILER_EXECUTE_AS_META_DATA_QUERY:
-					return "internal.compiler.execute_as_meta_data_query";
-			case PRAGMA_INTERNAL_COMPILER_SCAN_INDEX:
-					return "internal.compiler.scan_index";
-			case PRAGMA_INTERNAL_COMPILER_META_TABLE_VISIBLE:
-					return "internal.compiler.meta_table_visible";
-			case PRAGMA_INTERNAL_COMPILER_INTERNAL_META_TABLE_VISIBLE:
-					return "internal.compiler.internal_meta_table_visible";
-			case PRAGMA_INTERNAL_COMPILER_DRIVER_META_TABLE_VISIBLE:
-					return "internal.compiler.driver_meta_table_visible";
-			case PRAGMA_INTERNAL_COMPILER_SUBSTR_COMPATIBLE:
-					return "internal.compiler.substr_compatible";
-			case PRAGMA_INTERNAL_COMPILER_VARIANCE_COMPATIBLE:
-					return "internal.compiler.variance_compatible";
-			case PRAGMA_INTERNAL_COMPILER_EXPERIMENTAL_FUNCTIONS:
-					return "internal.compiler.experimental_functions";
-			case PRAGMA_INTERNAL_PARSER_TOKEN_COUNT_LIMIT:
-					return "internal.parser.token_count_limit";
-			case PRAGMA_INTERNAL_PARSER_EXPR_TREE_DEPTH_LIMIT:
-					return "internal.parser.expr_tree_depth_limit";
-			case PRAGMA_PLAN_DISTRIBUTED_STRATEGY:
-					return "plan.distributed.strategy";
-			case PRAGMA_EXPERIMENTAL_SHOW_SYSTEM:
-					return "experimental.show.system";
-			case PRAGMA_EXPERIMENTAL_SCAN_MULTI_INDEX:
-					return "experimental.scan.multi_index";
-			case PRAGMA_RESULTSET_TIMEOUT_INTERVAL:
-					return "internal.resultset.timeout";
-			default: return "undefined";
+		case PRAGMA_NONE: return "none";
+		case PRAGMA_INTERNAL_COMPILER_EXECUTE_AS_META_DATA_QUERY: return "internal.compiler.execute_as_meta_data_query";
+		case PRAGMA_INTERNAL_COMPILER_SCAN_INDEX: return "internal.compiler.scan_index";
+		case PRAGMA_INTERNAL_COMPILER_META_TABLE_VISIBLE:return "internal.compiler.meta_table_visible";
+		case PRAGMA_INTERNAL_COMPILER_INTERNAL_META_TABLE_VISIBLE:return "internal.compiler.internal_meta_table_visible";
+		case PRAGMA_INTERNAL_COMPILER_DRIVER_META_TABLE_VISIBLE:return "internal.compiler.driver_meta_table_visible";
+		case PRAGMA_INTERNAL_COMPILER_SUBSTR_COMPATIBLE:return "internal.compiler.substr_compatible";
+		case PRAGMA_INTERNAL_COMPILER_VARIANCE_COMPATIBLE:return "internal.compiler.variance_compatible";
+		case PRAGMA_INTERNAL_COMPILER_EXPERIMENTAL_FUNCTIONS:return "internal.compiler.experimental_functions";
+		case PRAGMA_INTERNAL_PARSER_TOKEN_COUNT_LIMIT: return "internal.parser.token_count_limit";
+		case PRAGMA_INTERNAL_PARSER_EXPR_TREE_DEPTH_LIMIT: return "internal.parser.expr_tree_depth_limit";
+		case PRAGMA_PLAN_DISTRIBUTED_STRATEGY: return "plan.distributed.strategy";
+		case PRAGMA_EXPERIMENTAL_SHOW_SYSTEM: return "experimental.show.system";
+		case PRAGMA_EXPERIMENTAL_SCAN_MULTI_INDEX: return "experimental.scan.multi_index";
+		case PRAGMA_RESULTSET_TIMEOUT_INTERVAL: return "internal.resultset.timeout";
+		default: return "undefined";
 		}
 	}
 
-	static PragmaType getPragmaType(const char *pragmaName) {
-
-		if (!strcmp(pragmaName, getPragmaTypeName(
-				PRAGMA_INTERNAL_COMPILER_EXECUTE_AS_META_DATA_QUERY))) {
+	static PragmaType getPragmaType(const char* pragmaName) {
+		if (!strcmp(pragmaName, "internal.compiler.execute_as_meta_data_query")) {
 			return PRAGMA_INTERNAL_COMPILER_EXECUTE_AS_META_DATA_QUERY;
 		}
-		else if (!strcmp(pragmaName, getPragmaTypeName(
-				PRAGMA_INTERNAL_COMPILER_SCAN_INDEX))) {
+		else if (!strcmp(pragmaName, "internal.compiler.scan_index")) {
 			return PRAGMA_INTERNAL_COMPILER_SCAN_INDEX;
 		}
-		else if (!strcmp(pragmaName, getPragmaTypeName(
-				PRAGMA_INTERNAL_COMPILER_META_TABLE_VISIBLE))) {
+		else if (!strcmp(pragmaName, "internal.compiler.meta_table_visible")) {
 			return PRAGMA_INTERNAL_COMPILER_META_TABLE_VISIBLE;
 		}
-		else if (!strcmp(pragmaName, getPragmaTypeName(
-				PRAGMA_INTERNAL_COMPILER_INTERNAL_META_TABLE_VISIBLE))) {
+		else if (!strcmp(pragmaName, "internal.compiler.internal_meta_table_visible")) {
 			return PRAGMA_INTERNAL_COMPILER_INTERNAL_META_TABLE_VISIBLE;
 		}
-		else if (!strcmp(pragmaName, getPragmaTypeName(
-				PRAGMA_INTERNAL_COMPILER_DRIVER_META_TABLE_VISIBLE))) {
+		else if (!strcmp(pragmaName, "internal.compiler.driver_meta_table_visible")) {
 			return PRAGMA_INTERNAL_COMPILER_DRIVER_META_TABLE_VISIBLE;
 		}
-		else if (!strcmp(pragmaName, getPragmaTypeName(
-				PRAGMA_INTERNAL_COMPILER_SUBSTR_COMPATIBLE))) {	
+		else if (!strcmp(pragmaName, "internal.compiler.substr_compatible")) {
 			return PRAGMA_INTERNAL_COMPILER_SUBSTR_COMPATIBLE;
 		}
-		else if (!strcmp(pragmaName, getPragmaTypeName(
-				PRAGMA_INTERNAL_COMPILER_VARIANCE_COMPATIBLE))) {
+		else if (!strcmp(pragmaName, "internal.compiler.variance_compatible")) {
 			return PRAGMA_INTERNAL_COMPILER_VARIANCE_COMPATIBLE;
 		}
-		else if (!strcmp(pragmaName, getPragmaTypeName(
-				PRAGMA_INTERNAL_COMPILER_EXPERIMENTAL_FUNCTIONS))) {
+		else if (!strcmp(pragmaName, "internal.compiler.experimental_functions")) {
 			return PRAGMA_INTERNAL_COMPILER_EXPERIMENTAL_FUNCTIONS;
 		}
-		else if (!strcmp(pragmaName, getPragmaTypeName(
-				PRAGMA_INTERNAL_PARSER_TOKEN_COUNT_LIMIT))) {
+		else if (!strcmp(pragmaName, "internal.parser.token_count_limit")) {
 			return PRAGMA_INTERNAL_PARSER_TOKEN_COUNT_LIMIT;
 		}
-		else if (!strcmp(pragmaName, getPragmaTypeName(
-				PRAGMA_INTERNAL_PARSER_EXPR_TREE_DEPTH_LIMIT))) {
+		else if (!strcmp(pragmaName, "internal.parser.expr_tree_depth_limit")) {
 			return PRAGMA_INTERNAL_PARSER_EXPR_TREE_DEPTH_LIMIT;
 		}
-		else if (!strcmp(pragmaName, getPragmaTypeName(
-				PRAGMA_PLAN_DISTRIBUTED_STRATEGY))) {
+		else if (!strcmp(pragmaName, "plan.distributed.strategy")) {
 			return PRAGMA_PLAN_DISTRIBUTED_STRATEGY;
 		}
-		else if (!strcmp(pragmaName, getPragmaTypeName(
-				PRAGMA_EXPERIMENTAL_SHOW_SYSTEM))) {
+		else if (!strcmp(pragmaName, "experimental.show.system")) {
 			return PRAGMA_EXPERIMENTAL_SHOW_SYSTEM;
 		}
-		else if (!strcmp(pragmaName, getPragmaTypeName(
-				PRAGMA_EXPERIMENTAL_SCAN_MULTI_INDEX))) {
+		else if (!strcmp(pragmaName, "experimental.scan.multi_index")) {
 			return PRAGMA_EXPERIMENTAL_SCAN_MULTI_INDEX;
+		}
+		else if (!strcmp(pragmaName, "internal.resultset.timeout")) {
+			return PRAGMA_RESULTSET_TIMEOUT_INTERVAL;
 		}
 		else {
 			return PRAGMA_NONE;
@@ -617,13 +638,10 @@ struct SQLPragma {
 };
 
 struct NameWithCaseSensitivity {
-	NameWithCaseSensitivity(
-			const char8_t *name,
-			bool isCaseSensitive = false) :
-					name_(name),
-					isCaseSensitive_(isCaseSensitive) {}
+	NameWithCaseSensitivity(const char8_t* name, bool isCaseSensitive = false) :
+		name_(name), isCaseSensitive_(isCaseSensitive) {}
 
-	const char8_t *name_;
+	const char8_t* name_;
 	bool isCaseSensitive_;
 };
 
@@ -631,54 +649,23 @@ struct TaskProfiler {
 
 	TaskProfiler();
 
-	void copy(
-			util::StackAllocator &alloc, const TaskProfiler &target);
+	void copy(util::StackAllocator& alloc, const TaskProfiler& target);
 
 	UTIL_OBJECT_CODER_MEMBERS(
-			leadTime_, actualTime_, executionCount_,
-			worker_, rows_, address_, customData_);
+		leadTime_, actualTime_, executionCount_,
+		worker_, rows_, address_, customData_);
 
 	int64_t leadTime_;
 	int64_t actualTime_;
 	int64_t executionCount_;
 	int32_t worker_;
-	util::Vector<int64_t> *rows_;
-	util::String *address_;
-	util::XArray<uint8_t> *customData_;
+	util::Vector<int64_t>* rows_;
+	util::String* address_;
+	util::XArray<uint8_t>* customData_;
 };
 
-typedef StatementId ExecId;
+template<typename T>
+std::string dumpObject(util::StackAllocator& alloc, T& object);
 
-#include "transaction_context.h"
-
-class ClientInfo {
-
-friend class SQLExecution;
-friend class SQLExecutionContext;
-
-public:
-	
-	ClientInfo(
-			util::StackAllocator &alloc,
-			SQLVariableSizeGlobalAllocator &globalVarAlloc,
-			const NodeDescriptor &clientNd,
-			ClientId &clientId);
-
-	void init(util::StackAllocator &alloc);
-
-private:
-	
-	SQLString userName_;
-	SQLString dbName_;
-	DatabaseId dbId_;
-	SQLString normalizedUserName_;
-	SQLString normalizedDbName_;
-	SQLString applicationName_;
-	bool isAdministrator_;
-	ClientId &clientId_;
-	const NodeDescriptor clientNd_;
-	double storeMemoryAgingSwapRate_;
-	util::TimeZone timezone_;
-};
 
 #endif

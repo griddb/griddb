@@ -31,26 +31,29 @@ class MessageRowStore;
 class StringArrayProcessor {
 public:
 	static int32_t compare(TransactionContext &txn,
-		ObjectManager &objectManager, ColumnId columnId,
+		ObjectManagerV4 &objectManager, AllocateStrategy &strategy, ColumnId columnId,
 		MessageRowStore *messageRowStore, uint8_t *objectRowField);
 
 	static int32_t compare(TransactionContext &txn,
-		ObjectManager &objectManager, ColumnType type,
+		ObjectManagerV4 &objectManager, AllocateStrategy &strategy, ColumnType type,
 		uint8_t *srcObjectRowField, uint8_t *targetObjectRowField);
 
-	static void getField(TransactionContext &txn, ObjectManager &objectManager,
-		ColumnId columnId, const Value *objectValue,
+	static void getField(TransactionContext &txn, ObjectManagerV4 &objectManager,
+		AllocateStrategy &strategy, ColumnId columnId, const Value *objectValue,
 		MessageRowStore *outputMessageRowStore);
 
-	static void clone(TransactionContext &txn, ObjectManager &objectManager,
+	static void clone(TransactionContext &txn, ObjectManagerV4 &objectManager,
 		ColumnType type, const void *srcObjectField, void *destObjectField,
-		const AllocateStrategy &allocateStrategy, OId neighborOId);
+		AllocateStrategy &allocateStrategy, OId neighborOId);
 
-	static void remove(TransactionContext &txn, ObjectManager &objectManager,
+	static void remove(TransactionContext &txn, ObjectManagerV4&objectManager, AllocateStrategy &strategy,
 		ColumnType type, uint8_t *objectField);
 	static OId putToObject(TransactionContext &txn,
-		ObjectManager &objectManager, const uint8_t *srcAddr, uint32_t size,
-		const AllocateStrategy &allocateStrategy, OId neighborOId);
+		ObjectManagerV4&objectManager, const uint8_t *srcAddr, uint32_t size,
+		AllocateStrategy &allocateStrategy, OId neighborOId);
+private:
+	static int32_t compareElements(TransactionContext& txn,
+		VariableArrayCursor& srcArrayCursor, VariableArrayCursor& targetArrayCursor);
 };
 
 #endif

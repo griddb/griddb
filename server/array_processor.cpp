@@ -28,7 +28,7 @@
 /*!
 	@brief Compare message field value with object field value
 */
-int32_t ArrayProcessor::compare(TransactionContext &txn, ObjectManager &,
+int32_t ArrayProcessor::compare(TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &,
 	ColumnId columnId, MessageRowStore *messageRowStore,
 	uint8_t *objectRowField) {
 	const uint8_t *inputField;
@@ -49,7 +49,7 @@ int32_t ArrayProcessor::compare(TransactionContext &txn, ObjectManager &,
 /*!
 	@brief Compare object field values
 */
-int32_t ArrayProcessor::compare(TransactionContext &txn, ObjectManager &,
+int32_t ArrayProcessor::compare(TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &,
 	ColumnType, uint8_t *srcObjectRowField, uint8_t *targetObjectRowField) {
 	int32_t result;
 	uint32_t srcObjectRowFieldSize = 0;
@@ -76,7 +76,7 @@ int32_t ArrayProcessor::compare(TransactionContext &txn, ObjectManager &,
 /*!
 	@brief Set field value to message
 */
-void ArrayProcessor::getField(TransactionContext &, ObjectManager &,
+void ArrayProcessor::getField(TransactionContext &, ObjectManagerV4 &, AllocateStrategy &,
 	ColumnId columnId, const Value *objectValue, MessageRowStore *messageRowStore) {
 	messageRowStore->setArrayField(columnId);
 	if (objectValue->data() != NULL) {

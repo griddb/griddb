@@ -46,14 +46,14 @@ ResultSet::ResultSet()
 	  varStartPos_(0),
 	  varOffsetSize_(0),
 	  skipCount_(0),
+	  rowScanner_(NULL),
 	  resultType_(RESULT_NONE),
 	  isId_(false),
 	  isRowIdInclude_(false),
 	  useRSRowImage_(false),
 	  distributedTarget_(NULL),
 	  distributedTargetUncovered_(false),
-	  distributedTargetReduced_(false)
-	  ,
+	  distributedTargetReduced_(false),
 	  rsRowIdAlloc_(NULL),
 	  rsSwapAlloc_(NULL),
 	  partialExecState_(NOT_PARTIAL),
@@ -113,7 +113,6 @@ void ResultSet::resetMessageBuffer() {
 	varStartPos_ = 0;
 	varOffsetSize_ = 0;
 }
-
 
 /*!
 	@brief Reset transaction allocator memory
@@ -565,6 +564,278 @@ void ResultSet::handleUpdateRowIdError(std::exception &e) {
 }
 
 
+
+ResultSetManager::ResultSetManager(util::StackAllocator* stAlloc,
+	util::FixedSizeAllocator<util::Mutex>* memoryPool,
+	ObjectManagerV4* objectManager, uint32_t rsCacheSize) :
+	objectManager_(objectManager),
+	resultSetPool_(memoryPool),
+	resultSetId_(1),
+	resultSetAllocator_(NULL),
+	resultSetRowIdAllocator_(NULL),
+	resultSetSwapAllocator_(NULL),
+	resultSetMapManager_(NULL),
+	resultSetMap_(NULL)
+{
+	try {
+		if (rsCacheSize > 0) {
+			resultSetPool_->setLimit(
+				util::AllocatorStats::STAT_STABLE_LIMIT,
+				ConfigTable::megaBytesToBytes(rsCacheSize));
+		}
+		else {
+			resultSetPool_->setFreeElementLimit(0);
+		}
+
+		resultSetAllocator_ = UTIL_NEW util::StackAllocator(
+			util::AllocatorInfo(ALLOCATOR_GROUP_TXN_RESULT, "resultSet"),
+			resultSetPool_);
+		resultSetRowIdAllocator_ = UTIL_NEW util::StackAllocator(
+			util::AllocatorInfo(
+				ALLOCATOR_GROUP_TXN_RESULT, "resultSetRowId"),
+			resultSetPool_);
+		resultSetSwapAllocator_ = UTIL_NEW util::StackAllocator(
+			util::AllocatorInfo(
+				ALLOCATOR_GROUP_TXN_RESULT, "resultSetSwap"),
+			resultSetPool_);
+		resultSetMapManager_ = UTIL_NEW util::ExpirableMap<ResultSetId,
+			ResultSet, int64_t, ResultSetIdHash>::
+			Manager(util::AllocatorInfo(
+				ALLOCATOR_GROUP_TXN_RESULT, "resultSetMapManager"));
+		resultSetMapManager_->setFreeElementLimit(
+			RESULTSET_FREE_ELEMENT_LIMIT);
+		resultSetMap_ =
+			resultSetMapManager_->create(RESULTSET_MAP_HASH_SIZE,
+				DS_MAX_RESULTSET_TIMEOUT_INTERVAL * 1000, 1000);
+	}
+	catch (std::exception& e) {
+		resultSetMapManager_->remove(resultSetMap_);
+		delete resultSetMapManager_;
+		delete resultSetAllocator_;
+		delete resultSetRowIdAllocator_;
+		delete resultSetSwapAllocator_;
+
+		GS_RETHROW_SYSTEM_ERROR(e, "");
+	}
+}
+
+ResultSetManager::~ResultSetManager() {
+	forceCloseAll();
+
+	resultSetMapManager_->remove(resultSetMap_);
+	delete resultSetMapManager_;
+	delete resultSetAllocator_;
+	delete resultSetRowIdAllocator_;
+	delete resultSetSwapAllocator_;
+}
+
+/*!
+	@brief Create ResultSet
+*/
+
+ResultSet* ResultSetManager::create(TransactionContext& txn,
+	ContainerId containerId, SchemaVersionId schemaVersionId, int64_t emNow,
+	ResultSetOption* queryOption, bool noExpire) {
+	ResultSetId rsId = ++resultSetId_;
+	int32_t rsTimeout = txn.getTransationTimeoutInterval();
+	const int64_t timeout = emNow + static_cast<int64_t>(rsTimeout) * 1000;
+	ResultSet& rs = (noExpire ?
+		resultSetMap_->createNoExpire(rsId) :
+		resultSetMap_->create(rsId, timeout));
+	rs.setTxnAllocator(&txn.getDefaultAllocator());
+	if (resultSetAllocator_) {
+		rs.setRSAllocator(resultSetAllocator_);
+		resultSetAllocator_ = NULL;
+	}
+	else {
+		util::StackAllocator* allocator = UTIL_NEW util::StackAllocator(
+			util::AllocatorInfo(ALLOCATOR_GROUP_TXN_RESULT, "resultSet"),
+			resultSetPool_);
+		rs.setRSAllocator(allocator);
+	}
+	if (resultSetRowIdAllocator_) {
+		rs.setRSRowIdAllocator(resultSetRowIdAllocator_);
+		resultSetRowIdAllocator_ = NULL;
+	}
+	else {
+		util::StackAllocator* allocatorRowId = UTIL_NEW util::StackAllocator(
+			util::AllocatorInfo(ALLOCATOR_GROUP_TXN_RESULT, "resultSetRowId"),
+			resultSetPool_);
+		rs.setRSRowIdAllocator(allocatorRowId);
+	}
+	if (resultSetSwapAllocator_) {
+		rs.setRSSwapAllocator(resultSetSwapAllocator_);
+		resultSetSwapAllocator_ = NULL;
+	}
+	else {
+		util::StackAllocator* allocatorSwap = UTIL_NEW util::StackAllocator(
+			util::AllocatorInfo(ALLOCATOR_GROUP_TXN_RESULT, "resultSetSwap"),
+			resultSetPool_);
+		rs.setRSSwapAllocator(allocatorSwap);
+	}
+	rs.getRSAllocator()->setTotalSizeLimit(rs.getTxnAllocator()->getTotalSizeLimit());
+	rs.setMemoryLimit(rs.getTxnAllocator()->getTotalSizeLimit());
+	rs.setContainerId(containerId);
+	rs.setSchemaVersionId(schemaVersionId);
+	rs.setId(rsId);
+	rs.setStartLsn(0);
+	rs.setTimeoutTime(rsTimeout);
+	rs.setPartitionId(txn.getPartitionId());
+	rs.setQueryOption(queryOption);
+	return &rs;
+}
+
+/*!
+	@brief Get ResultSet
+*/
+ResultSet* ResultSetManager::get(TransactionContext& txn, ResultSetId rsId) {
+	ResultSet* rs = resultSetMap_->get(rsId);
+	if (rs) {
+		rs->setTxnAllocator(&txn.getDefaultAllocator());
+		ResultSetOption& queryOption = rs->getQueryOption();
+		objectManager_->setSwapOutCounter(queryOption.getSwapOutNum());
+	}
+	return rs;
+}
+
+/*!
+	@brief Close ResultSet
+*/
+void ResultSetManager::close(ResultSetId rsId) {
+	if (rsId == UNDEF_RESULTSETID) {
+		return;
+	}
+	ResultSet* rs = resultSetMap_->get(rsId);
+	if (rs) {
+		closeInternal(*rs);
+	}
+}
+
+/*!
+	@brief If ResultSet is no need, then clse , othewise clear temporary memory
+*/
+void ResultSetManager::closeOrClear(ResultSetId rsId) {
+	if (rsId == UNDEF_RESULTSETID) {
+		return;
+	}
+	ResultSet* rs = resultSetMap_->get(rsId);
+	if (rs) {
+		rs->releaseTxnAllocator();
+		ResultSetOption& queryOption = rs->getQueryOption();
+		queryOption.setSwapOutNum(objectManager_->getSwapOutCounter());
+	}
+	if (rs && (rs->isRelease())) {
+		closeInternal(*rs);
+	}
+}
+
+void ResultSetManager::closeInternal(ResultSet & rs) {
+	ResultSetId removeRSId = rs.getId();
+	util::StackAllocator* allocator = rs.getRSAllocator();
+	util::StackAllocator* allocatorRowId = rs.getRSRowIdAllocator();
+	util::StackAllocator* allocatorSwap = rs.getRSSwapAllocator();
+	rs.clear();				  
+	rs.setRSAllocator(NULL);  
+	rs.setRSRowIdAllocator(NULL);  
+	rs.setRSSwapAllocator(NULL);   
+
+	util::StackAllocator::Tool::forceReset(*allocator);
+	util::StackAllocator::Tool::forceReset(*allocatorRowId);
+	util::StackAllocator::Tool::forceReset(*allocatorSwap);
+	allocator->setFreeSizeLimit(allocator->base().getElementSize());
+	allocatorRowId->setFreeSizeLimit(allocatorRowId->base().getElementSize());
+	allocatorSwap->setFreeSizeLimit(allocatorSwap->base().getElementSize());
+	allocator->trim();
+	allocatorRowId->trim();
+	allocatorSwap->trim();
+
+	delete resultSetAllocator_;
+	resultSetAllocator_ = allocator;
+	delete resultSetRowIdAllocator_;
+	resultSetRowIdAllocator_ = allocatorRowId;
+	delete resultSetSwapAllocator_;
+	resultSetSwapAllocator_ = allocatorSwap;
+
+	resultSetMap_->remove(removeRSId);
+}
+
+/*!
+	@brief Check if ResultSet is timeout
+*/
+void ResultSetManager::checkTimeout(
+	int64_t checkTime) {
+	ResultSetId rsId = UNDEF_RESULTSETID;
+	ResultSetId* rsIdPtr = &rsId;
+	ResultSet* rs = resultSetMap_->refresh(checkTime, rsIdPtr);
+	while (rs) {
+		closeInternal(*rs);
+		rs = resultSetMap_->refresh(checkTime, rsIdPtr);
+	}
+}
+
+void ResultSetManager::addUpdatedRow(ContainerId containerId, RowId rowId, OId oId, bool isMvccRow) {
+	if (resultSetMap_->size() == 0) {
+		return;
+	}
+
+	util::ExpirableMap<ResultSetId, ResultSet, int64_t, ResultSetIdHash>::Cursor
+		rsCursor = resultSetMap_->getCursor();
+	ResultSet* rs = rsCursor.next();
+	while (rs) {
+		if (rs->getContainerId() == containerId && rs->isPartialExecuteMode()) {
+			if (isMvccRow) {
+				rs->addUpdatedMvccRow(rowId, oId);
+			}
+			else {
+				rs->addUpdatedRow(rowId, oId);
+			}
+		}
+		rs = rsCursor.next();
+	}
+}
+void ResultSetManager::addRemovedRow(ContainerId containerId, RowId rowId, OId oId) {
+	if (resultSetMap_->size() == 0) {
+		return;
+	}
+
+	util::ExpirableMap<ResultSetId, ResultSet, int64_t, ResultSetIdHash>::Cursor
+		rsCursor = resultSetMap_->getCursor();
+	ResultSet* rs = rsCursor.next();
+	while (rs) {
+		if (rs->getContainerId() == containerId && rs->isPartialExecuteMode()) {
+			rs->addRemovedRow(rowId, oId);
+		}
+		rs = rsCursor.next();
+	}
+}
+void ResultSetManager::addRemovedRowArray(ContainerId containerId, OId oId) {
+	if (resultSetMap_->size() == 0) {
+		return;
+	}
+
+	util::ExpirableMap<ResultSetId, ResultSet, int64_t, ResultSetIdHash>::Cursor
+		rsCursor = resultSetMap_->getCursor();
+	ResultSet* rs = rsCursor.next();
+	while (rs) {
+		if (rs->getContainerId() == containerId && rs->isPartialExecuteMode()) {
+			rs->addRemovedRowArray(oId);
+		}
+		rs = rsCursor.next();
+	}
+}
+
+
+void ResultSetManager::forceCloseAll() {
+	util::ExpirableMap<ResultSetId, ResultSet, int64_t, ResultSetIdHash>::Cursor
+		rsCursor = resultSetMap_->getCursor();
+	ResultSet* rs = rsCursor.next();
+	while (rs) {
+		closeInternal(*rs);
+		rs = rsCursor.next();
+	}
+}
+
+
 ResultSetHolderManager::ResultSetHolderManager() :
 		alloc_(util::AllocatorInfo(
 				ALLOCATOR_GROUP_TXN_RESULT, "resultSetHolder")),
@@ -598,22 +869,26 @@ void ResultSetHolderManager::initialize(const PartitionGroupConfig &config) {
 }
 
 void ResultSetHolderManager::closeAll(
-		TransactionContext &txn, DataStore &dataStore) {
+		TransactionContext &txn, PartitionList &partitionList) {
 	closeAll(
 			txn.getDefaultAllocator(),
 			getPartitionGroupId(txn.getPartitionId()),
-			dataStore);
+			partitionList);
 }
 
 void ResultSetHolderManager::closeAll(
 		util::StackAllocator &alloc, PartitionGroupId pgId,
-		DataStore &dataStore) {
+		PartitionList &partitionList) {
 	util::Vector<EntryKey> rsIdList(alloc);
 	pullCloseable(pgId, rsIdList);
 
 	for (util::Vector<EntryKey>::iterator it = rsIdList.begin();
 			it != rsIdList.end(); ++it) {
-		dataStore.closeResultSet(it->first, it->second);
+		Partition& partition = partitionList.partition(it->first);
+		if (!partition.isActive()) {
+			continue;
+		}
+		static_cast<DataStoreV4&>(partition.dataStore()).getResultSetManager()->close(it->second);
 	}
 }
 

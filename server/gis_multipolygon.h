@@ -53,7 +53,7 @@ public:
 	~MultiPolygon() {}
 
 	MultiPolygon(srid_t id, const QP_XArray<Polygon *> &parray,
-		TransactionContext &txn, ObjectManager &objectManager)
+		TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy)
 		: Geometry(txn), polygonArray_(txn.getDefaultAllocator()) {
 		isSimple_ = true;
 		isEmpty_ = false;
@@ -62,7 +62,7 @@ public:
 		dimension_ = -1;
 		for (QP_XArray<Polygon *>::const_iterator it = parray.begin();
 			 it != parray.end(); ++it) {
-			polygonArray_.push_back((*it)->dup(txn, objectManager));
+			polygonArray_.push_back((*it)->dup(txn, objectManager, strategy));
 			isAssigned_ &= (*it)->isAssigned();
 			int d = (*it)->getDimension();
 			if (dimension_ != -1 && d != dimension_) {
@@ -90,20 +90,20 @@ public:
 	}
 
 	MultiPolygon *dup(
-		TransactionContext &txn, ObjectManager &objectManager, srid_t id) {
+		TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, srid_t id) {
 		if (isEmpty()) {
 			return QP_NEW MultiPolygon(txn);
 		}
 		else {
 			MultiPolygon *mp =
-				QP_NEW MultiPolygon(id, polygonArray_, txn, objectManager);
+				QP_NEW MultiPolygon(id, polygonArray_, txn, objectManager, strategy);
 			mp->isAssigned_ = isAssigned_;
 			mp->isEmpty_ = isEmpty_;
 			return mp;
 		}
 	}
-	MultiPolygon *dup(TransactionContext &txn, ObjectManager &objectManager) {
-		return dup(txn, objectManager, srId_);
+	MultiPolygon *dup(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) {
+		return dup(txn, objectManager, strategy, srId_);
 	}
 
 	virtual const char *getString(TransactionContext &txn) const {
@@ -136,10 +136,10 @@ public:
 	}
 
 	virtual MultiPolygon *assign(TransactionContext &txn,
-		ObjectManager &objectManager, ContainerRowWrapper *amap,
+		ObjectManagerV4 &objectManager, AllocateStrategy &strategy, ContainerRowWrapper *amap,
 		FunctionMap *fmap, EvalMode mode = EVAL_MODE_NORMAL) {
 		if (isAssigned_ || isEmpty_) {
-			return dup(txn, objectManager);
+			return dup(txn, objectManager, strategy);
 		}
 
 		QP_XArray<Polygon *> newPolygonArray(txn.getDefaultAllocator());
@@ -147,12 +147,12 @@ public:
 			for (size_t k = 0; k < polygonArray_.size(); k++) {
 				newPolygonArray.push_back(
 					static_cast<Polygon *>(polygonArray_[k]->assign(
-						txn, objectManager, amap, fmap, mode)));
+						txn, objectManager, strategy, amap, fmap, mode)));
 			}
 		}
 
 		MultiPolygon *p =
-			QP_NEW MultiPolygon(srId_, newPolygonArray, txn, objectManager);
+			QP_NEW MultiPolygon(srId_, newPolygonArray, txn, objectManager, strategy);
 
 		while (!newPolygonArray.empty()) {
 			QP_DELETE(newPolygonArray.back());

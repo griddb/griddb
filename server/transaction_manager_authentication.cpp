@@ -92,6 +92,85 @@ void AuthenticationContext::clear()
 	isSQLService_ = false;
 }
 
+int32_t TransactionManager::getUserCacheSize() const
+{
+	return userCacheSize_;
+}
+
+int32_t TransactionManager::getUserCacheUpdateInterval() const
+{
+	return userCacheUpdateInterval_;
+}
+
+bool TransactionManager::isLDAPAuthentication() const
+{
+	return isLDAPAuthentication_;
+}
+
+bool TransactionManager::isRoleMappingByGroup() const
+{
+	return isRoleMappingByGroup_;
+}
+
+bool TransactionManager::isLDAPSimpleMode() const
+{
+	return isLDAPSimpleMode_;
+}
+
+const char* TransactionManager::getLDAPUrl() const
+{
+	return ldapUrl_.c_str();
+}
+
+const char* TransactionManager::getLDAPUserDNPrefix() const
+{
+	return ldapUserDNPrefix_.c_str();
+}
+
+const char* TransactionManager::getLDAPUserDNSuffix() const
+{
+	return ldapUserDNSuffix_.c_str();
+}
+
+const char* TransactionManager::getLDAPBindDN() const
+{
+	return ldapBindDN_.c_str();
+}
+
+const char* TransactionManager::getLDAPBindPassword() const
+{
+	return ldapBindPassword_.c_str();
+}
+
+const char* TransactionManager::getLDAPBaseDN() const
+{
+	return ldapBaseDN_.c_str();
+}
+
+const char* TransactionManager::getLDAPSearchAttribute() const
+{
+	return ldapSearchAttribute_.c_str();
+}
+
+const char* TransactionManager::getLDAPMemberOfAttribute() const
+{
+	return ldapMemberOfAttribute_.c_str();
+}
+
+int32_t TransactionManager::getLDAPWaitTime() const
+{
+	return ldapWaitTime_;
+}
+
+int32_t TransactionManager::getLoginWaitTime() const
+{
+	return loginWaitTime_;
+}
+
+int32_t TransactionManager::getLoginRepetitionNum() const
+{
+	return loginRepetitionNum_;
+}
 
 int32_t TransactionManager::getAuthenticationTimeoutInterval() const
 {

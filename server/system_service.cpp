@@ -27,14 +27,14 @@
 #include "cluster_service.h"
 #include "system_service.h"
 #include "transaction_service.h"
-#include "cluster_manager.h"
 
 #include "chunk_manager.h"  
-#include "data_store.h"
+#include "chunk_buffer.h"  
+#include "data_store_v4.h"
+#include "interchangeable.h"
 #include "ebb_request_parser.h"
 #include "json.h"
 #include "log_manager.h"
-#include "object_manager.h"
 #include "picojson.h"
 #include "sync_manager.h"
 #include <strstream> 
@@ -43,13 +43,10 @@ using util::ValueFormatter;
 
 
 #include "sql_job_manager.h"
-#include "sql_execution_manager.h"
 #include "sql_execution.h"
 #include "sql_service.h"
 #include "sql_processor.h"
 #include "sql_compiler.h"
-
-#include "resource_set.h"
 
 #ifndef _WIN32
 #include <signal.h>  
@@ -64,7 +61,7 @@ using util::ValueFormatter;
 
 
 
-typedef ObjectManager OCManager;
+typedef ObjectManagerV4 OCManager;
 
 UTIL_TRACER_DECLARE(SYSTEM_SERVICE);
 UTIL_TRACER_DECLARE(SYSTEM_SERVICE_DETAIL);
@@ -76,11 +73,14 @@ UTIL_TRACER_DECLARE(CLUSTER_DETAIL);
 
 
 
-static void getServiceAddress(PartitionTable *pt, NodeId nodeId,
-	picojson::object &result, ServiceType addressType) {
+static void getServiceAddress(
+		PartitionTable *pt, NodeId nodeId, picojson::object &result,
+		const SystemService::ServiceTypeInfo &addressType) {
 	try {
 		picojson::value resultValue;
-		pt->getServiceAddress(nodeId, resultValue, addressType);
+		pt->getServiceAddress(
+				nodeId, resultValue, static_cast<ServiceType>(addressType.first),
+				addressType.second);
 		const picojson::object &resultObj = resultValue.get<picojson::object>();
 		result.insert(resultObj.begin(), resultObj.end());
 	}
@@ -101,33 +101,38 @@ static picojson::array &setJsonArray(picojson::value &value) {
 
 
 
-SystemService::SystemService(ConfigTable &config, EventEngine::Config eeConfig,
-	EventEngine::Source source, const char8_t *name,
-	const char8_t *diffFilePath,
-	ServiceThreadErrorHandler &serviceThreadErrorHandler)
-	: ee_(createEEConfig(config, eeConfig), source, name),
-	  gsVersion_(config.get<const char8_t *>(CONFIG_TABLE_DEV_SIMPLE_VERSION)),
-	  serviceThreadErrorHandler_(serviceThreadErrorHandler),
-	  clsSvc_(NULL),
-	  clsMgr_(NULL),
-	  syncSvc_(NULL),
-	  pt_(NULL),
-	  cpSvc_(NULL),
-	  chunkMgr_(NULL),
-	  txnSvc_(NULL),
-	  txnMgr_(NULL),
-	  recoveryMgr_(NULL),
-	  sqlSvc_(NULL),
-	  fixedSizeAlloc_(NULL),
-	  varSizeAlloc_(NULL),
-	  multicastAddress_(
-		  config.get<const char8_t *>(CONFIG_TABLE_TXN_NOTIFICATION_ADDRESS)),
-	  multicastPort_(config.getUInt16(CONFIG_TABLE_TXN_NOTIFICATION_PORT)),
-	  outputDiffFileName_(diffFilePath),
-	  sysConfig_(config),
-	  initailized_(false),
-	  config_(config),
-	  baseStats_(NULL)
+SystemService::SystemService(
+		ConfigTable &config, const EventEngine::Config &eeConfig,
+		EventEngine::Source source, const char8_t *name,
+		const char8_t *diffFilePath,
+		ServiceThreadErrorHandler &serviceThreadErrorHandler) :
+		ee_(createEEConfig(config, eeConfig), source, name),
+		gsVersion_(config.get<const char8_t*>(CONFIG_TABLE_DEV_SIMPLE_VERSION)),
+		serviceThreadErrorHandler_(serviceThreadErrorHandler),
+		clsSvc_(NULL),
+		clsMgr_(NULL),
+		syncSvc_(NULL),
+		pt_(NULL),
+		cpSvc_(NULL),
+		partitionList_(NULL),
+		txnSvc_(NULL),
+		txnMgr_(NULL),
+		recoveryMgr_(NULL),
+		sqlSvc_(NULL),
+		fixedSizeAlloc_(NULL),
+		varSizeAlloc_(NULL),
+		multicastAddress_(
+		config.get<const char8_t *>(CONFIG_TABLE_TXN_NOTIFICATION_ADDRESS)),
+		multicastPort_(config.getUInt16(CONFIG_TABLE_TXN_NOTIFICATION_PORT)),
+		outputDiffFileName_(diffFilePath),
+		webapiServerThread_(eeConfig.plainIOMode_.serverAcceptable_, false),
+		secureWebapiServerThread_(eeConfig.secureIOMode_.serverAcceptable_, true),
+		sysConfig_(config),
+		initailized_(false),
+		config_(config),
+		baseStats_(NULL),
+		socketFactory_(source.socketFactory_),
+		secureSocketFactories_(source.secureSocketFactories_)
 {
 	statUpdator_.service_ = this;
 	try {
@@ -169,7 +174,8 @@ void SystemService::start() {
 		}
 		ee_.start();
 
-		webapiServerThread_.start();
+		webapiServerThread_.tryStart();
+		secureWebapiServerThread_.tryStart();
 
 		GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_SERVICE_STARTED,
 			"System service started");
@@ -187,6 +193,7 @@ void SystemService::shutdown() {
 	ee_.shutdown();
 
 	webapiServerThread_.shutdown();
+	secureWebapiServerThread_.shutdown();
 }
 
 /*!
@@ -196,15 +203,15 @@ void SystemService::waitForShutdown() {
 	ee_.waitForShutdown();
 
 	webapiServerThread_.waitForShutdown();
+	secureWebapiServerThread_.waitForShutdown();
 }
 
 /*!
 	@brief Sets EventEngine config
 */
-EventEngine::Config &SystemService::createEEConfig(
-	const ConfigTable &config, EventEngine::Config &eeConfig) {
-	EventEngine::Config tmpConfig;
-	eeConfig = tmpConfig;
+EventEngine::Config SystemService::createEEConfig(
+		const ConfigTable &config, const EventEngine::Config &src) {
+	EventEngine::Config eeConfig = src;
 
 
 
@@ -218,33 +225,90 @@ EventEngine::Config &SystemService::createEEConfig(
 	return eeConfig;
 }
 
-void SystemService::initialize(ResourceSet &resourceSet) {
-	clsSvc_ = resourceSet.clsSvc_;
+void SystemService::initialize(ManagerSet &mgrSet) {
+	clsSvc_ = mgrSet.clsSvc_;
 	clsMgr_ = clsSvc_->getManager();
-	pt_ = resourceSet.pt_;
-	syncSvc_ = resourceSet.syncSvc_;
-	cpSvc_ = resourceSet.cpSvc_;
-	chunkMgr_ = resourceSet.chunkMgr_;
-	dataStore_ = resourceSet.ds_;
-	txnSvc_ = resourceSet.txnSvc_;
-	txnMgr_ = resourceSet.txnMgr_;
-	recoveryMgr_ = resourceSet.recoveryMgr_;
-	fixedSizeAlloc_ = resourceSet.fixedSizeAlloc_;
-	varSizeAlloc_ = resourceSet.varSizeAlloc_;
-	logMgr_ = resourceSet.logMgr_;
-	syncMgr_ = resourceSet.syncMgr_;
-	sqlSvc_ = resourceSet.sqlSvc_;
+	pt_ = mgrSet.pt_;
+	syncSvc_ = mgrSet.syncSvc_;
+	cpSvc_ = mgrSet.cpSvc_;
+	partitionList_ = mgrSet.partitionList_;
+	txnSvc_ = mgrSet.txnSvc_;
+	txnMgr_ = mgrSet.txnMgr_;
+	recoveryMgr_ = mgrSet.recoveryMgr_;
+	fixedSizeAlloc_ = mgrSet.fixedSizeAlloc_;
+	varSizeAlloc_ = mgrSet.varSizeAlloc_;
+	syncMgr_ = mgrSet.syncMgr_;
+	sqlSvc_ = mgrSet.sqlSvc_;
 
-	baseStats_ = resourceSet.stats_;
+	baseStats_ = mgrSet.stats_;
 
-	resourceSet.stats_->addUpdator(&statUpdator_);
+	mgrSet.stats_->addUpdator(&statUpdator_);
 
-	webapiServerThread_.initialize(resourceSet);
-	outputStatsHandler_.initialize(resourceSet);
-	serviceThreadErrorHandler_.initialize(resourceSet);
+	webapiServerThread_.initialize(mgrSet);
+	secureWebapiServerThread_.initialize(mgrSet);
+
+	outputStatsHandler_.initialize(mgrSet);
+	serviceThreadErrorHandler_.initialize(mgrSet);
+
+	if (secureWebapiServerThread_.isEnabled()) {
+		const uint16_t sslPort = mgrSet.config_->getUInt16(
+				CONFIG_TABLE_SYS_SERVICE_SSL_PORT);
+		pt_->setSSLPortNo(SELF_NODEID, static_cast<int32_t>(sslPort));
+	}
 
 
 	initailized_ = true;
+}
+
+/*!
+	@brief Handles clearUserCache command
+*/
+bool SystemService::clearUserCache(const std::string &name,
+	bool isDatabase, picojson::value &result) {
+	try {
+		GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
+			"Clear user cache called (Name="
+				<< name << ", isDatabase=" << isDatabase << ")");
+
+			UserCache *uc = txnSvc_->userCache_;
+			if (uc == NULL) {
+				return true;
+			}
+			GlobalVariableSizeAllocator& varAlloc = uc->getAllocator();
+
+		try {
+			UserString nameUS(varAlloc);
+			nameUS.append(name.c_str());
+			
+			txnSvc_->userCache_->clear(nameUS, isDatabase);
+		}
+		catch (UserException &e) {
+			picojson::object errorInfo;
+			int32_t errorNo = 0;
+			std::string reason;
+
+			reason = "other reason, see event log";
+			errorNo = WEBAPI_CS_OTHER_REASON;
+
+			errorInfo["errorStatus"] =
+				picojson::value(static_cast<double>(errorNo));
+			errorInfo["reason"] = picojson::value(reason);
+
+			result = picojson::value(errorInfo);
+
+			UTIL_TRACE_EXCEPTION_INFO(SYSTEM_SERVICE, e,
+				"Join cluster failed (reason="
+					<< reason << ", detail=" << GS_EXCEPTION_MESSAGE(e) << ")");
+
+			return false;
+		}
+
+		return true;
+	}
+	catch (std::exception &e) {
+		GS_RETHROW_USER_OR_SYSTEM(
+			e, GS_EXCEPTION_MERGE_MESSAGE(e, "Clear user cache failed"));
+	}
 }
 
 /*!
@@ -258,7 +322,7 @@ bool SystemService::joinCluster(const Event::Source &eventSource,
 			"Join cluster called (clusterName="
 				<< clusterName << ", clusterNodeNum=" << minNodeNum << ")");
 
-		JoinClusterInfo joinClusterInfo(alloc, 0, true);
+		ClusterManager::JoinClusterInfo joinClusterInfo(alloc, 0, true);
 		joinClusterInfo.set(clusterName, minNodeNum);
 
 		try {
@@ -339,7 +403,7 @@ bool SystemService::leaveCluster(const Event::Source &eventSource,
 		GS_TRACE_INFO(
 			SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED, "Leave cluster called");
 
-		LeaveClusterInfo leaveClusterInfo(
+		ClusterManager::LeaveClusterInfo leaveClusterInfo(
 			alloc, 0, true, isForce);
 
 		try {
@@ -377,7 +441,7 @@ void SystemService::shutdownNode(const Event::Source &eventSource,
 				"Normal shutdown node called");
 		}
 
-		ShutdownNodeInfo shutdownNodeInfo(alloc, 0, isForce);
+		ClusterManager::ShutdownNodeInfo shutdownNodeInfo(alloc, 0, isForce);
 
 		EventType eventType;
 		if (!isForce) {
@@ -404,7 +468,7 @@ void SystemService::shutdownCluster(
 		GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
 			"Shutdown cluster called");
 
-		ShutdownClusterInfo shutdownClusterInfo(alloc, 0);
+		ClusterManager::ShutdownClusterInfo shutdownClusterInfo(alloc, 0);
 		clsSvc_->request(eventSource, CS_SHUTDOWN_CLUSTER,
 			CS_HANDLER_PARTITION_ID, clsSvc_->getEE(), shutdownClusterInfo);
 	}
@@ -413,7 +477,6 @@ void SystemService::shutdownCluster(
 			e, GS_EXCEPTION_MERGE_MESSAGE(e, "Shutdown node failed"));
 	}
 }
-
 /*!
 	@brief Handles increaseCluster command
 */
@@ -423,7 +486,7 @@ void SystemService::increaseCluster(
 		GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
 			"Increase cluster called");
 
-		IncreaseClusterInfo increaseClusterInfo(alloc, 0);
+		ClusterManager::IncreaseClusterInfo increaseClusterInfo(alloc, 0);
 		clsSvc_->request(eventSource, CS_INCREASE_CLUSTER,
 			CS_HANDLER_PARTITION_ID, clsSvc_->getEE(), increaseClusterInfo);
 	}
@@ -445,7 +508,7 @@ bool SystemService::decreaseCluster(const Event::Source &eventSource,
 			"autoLeave="
 				<< ValueFormatter()(isAutoLeave) << ")");
 
-		DecreaseClusterInfo decreaseClusterInfo(
+		ClusterManager::DecreaseClusterInfo decreaseClusterInfo(
 			alloc, 0, pt_, true, isAutoLeave, leaveNum);
 		try {
 			clsMgr_->setDecreaseClusterInfo(decreaseClusterInfo);
@@ -490,7 +553,6 @@ bool SystemService::decreaseCluster(const Event::Source &eventSource,
 	}
 }
 
-
 /*!
 	@brief Handles backupNode command
 */
@@ -504,7 +566,7 @@ bool SystemService::backupNode(const Event::Source &eventSource,
 			<< ", mode=" << CheckpointService::checkpointModeToString(mode)
 			<< ", logArchive=" << ValueFormatter()(option.logArchive_)
 			<< ", logDuplicate=" << ValueFormatter()(option.logDuplicate_)
-			<< ", stopOnDuplicateError=" << ValueFormatter()(option.logDuplicate_)
+			<< ", stopOnDuplicateError=" << ValueFormatter()(option.stopOnDuplicateError_)
 			<< ", isIncrementalBackup:" << (option.isIncrementalBackup_ ? 1 : 0)
 			<< ", incrementalBackupLevel:" << option.incrementalBackupLevel_
 			<< ", isCumulativeBackup:" << (option.isCumulativeBackup_ ? 1 : 0) << ")");
@@ -540,28 +602,6 @@ bool SystemService::backupNode(const Event::Source &eventSource,
 	try {
 		if (cpSvc_->requestOnlineBackup(eventSource, backupName, mode,
 				option, result)) {
-			if (option.logArchive_) {
-				logMgr_->setAutoCleanupLogFlag(false);
-				logMgr_->setArchiveLogMode(LogManager::ARCHIVE_LOG_ENABLE);
-				cpSvc_->setArchiveLogMode(CheckpointService::ARCHIVE_LOG_ON);
-				GS_TRACE_INFO(SYSTEM_SERVICE,
-					GS_TRACE_SC_ARCHIVE_LOG_MODE_ENABLED,
-					"Archive log mode enabled on backup");
-			}
-			else {
-				logMgr_->setArchiveLogMode(LogManager::ARCHIVE_LOG_DISABLE);
-				logMgr_->setAutoCleanupLogFlag(true);
-				cpSvc_->setArchiveLogMode(CheckpointService::ARCHIVE_LOG_OFF);
-			}
-			if (option.logDuplicate_) {
-				LogManager::setDuplicateLogMode(
-					LogManager::DUPLICATE_LOG_ENABLE);
-			}
-			else {
-				LogManager::setDuplicateLogMode(
-					LogManager::DUPLICATE_LOG_DISABLE);
-			}
-			logMgr_->setStopOnDuplicateErrorFlag(option.stopOnDuplicateError_);
 			return true;
 		}
 		else {
@@ -596,205 +636,8 @@ bool SystemService::archiveLog(const Event::Source &eventSource,
 		"Archive log called (backupName="
 			<< backupName << ", mode="
 			<< CheckpointService::checkpointModeToString(mode) << ")");
-
-	picojson::object errorInfo;
-	int32_t errorNo = 0;
-	std::string reason;
-	try {
-		clsMgr_->checkNodeStatus();
-	}
-	catch (UserException &e) {
-		UTIL_TRACE_EXCEPTION_WARNING(SYSTEM_SERVICE, e,
-			"Rejected by unacceptable condition (status="
-				<< clsMgr_->statusInfo_.getSystemStatus()
-				<< ", detail=" << GS_EXCEPTION_MESSAGE(e) << ")");
-
-		util::NormalOStringStream oss;
-		oss << "Rejected by unacceptable condition (status="
-			<< clsMgr_->statusInfo_.getSystemStatus() << ")";
-		reason = oss.str();
-		errorNo = WEBAPI_CP_OTHER_REASON;
-		errorInfo["errorStatus"] =
-			picojson::value(static_cast<double>(errorNo));
-		errorInfo["reason"] = picojson::value(reason);
-		result = picojson::value(errorInfo);
-		return false;
-	}
-
-	try {
-		CheckpointService::BackupStatus lastBackupStatus =
-			cpSvc_->getLastQueuedBackupStatus();
-		if (!lastBackupStatus.archiveLogMode_) {
-			reason = "last backup is not archiveLog mode";
-			errorNo = WEBAPI_CP_BACKUP_MODE_IS_NOT_ARCHIVELOG_MODE;
-			errorInfo["errorStatus"] =
-				picojson::value(static_cast<double>(errorNo));
-			errorInfo["reason"] = picojson::value(reason);
-			result = picojson::value(errorInfo);
-			return false;
-		}
-		if (lastBackupStatus.name_.compare(backupName) != 0) {
-			util::NormalOStringStream oss;
-			oss << "BackupName is not match. (lastBackupName:"
-				<< lastBackupStatus.name_.c_str()
-				<< ", specified:" << backupName << ")";
-			reason = oss.str();
-			errorNo = WEBAPI_CP_BACKUPNAME_UNMATCH;
-			errorInfo["errorStatus"] =
-				picojson::value(static_cast<double>(errorNo));
-			errorInfo["reason"] = picojson::value(reason);
-			result = picojson::value(errorInfo);
-			return false;
-		}
-
-		switch (mode) {
-		case CP_ARCHIVE_LOG_START:
-			if (logMgr_->getArchiveLogMode() ==
-				LogManager::ARCHIVE_LOG_RUNNING) {
-				reason = "ArchiveLog has already started";
-				errorNo = WEBAPI_CP_ARCHIVELOG_MODE_IS_INVALID;
-				errorInfo["errorStatus"] =
-					picojson::value(static_cast<double>(errorNo));
-				errorInfo["reason"] = picojson::value(reason);
-				result = picojson::value(errorInfo);
-				return false;
-			}
-			else if (logMgr_->getArchiveLogMode() ==
-					 LogManager::ARCHIVE_LOG_ERROR) {
-				reason = "Partition status is changed";
-				errorNo = WEBAPI_CP_PARTITION_STATUS_IS_CHANGED;
-				errorInfo["errorStatus"] =
-					picojson::value(static_cast<double>(errorNo));
-				errorInfo["reason"] = picojson::value(reason);
-				result = picojson::value(errorInfo);
-				return false;
-			}
-			assert(
-				logMgr_->getArchiveLogMode() == LogManager::ARCHIVE_LOG_ENABLE);
-			logMgr_->setArchiveLogMode(LogManager::ARCHIVE_LOG_RUNNING);
-			cpSvc_->setArchiveLogMode(CheckpointService::ARCHIVE_LOG_RUNNING);
-			cpSvc_->updateLastArchivedCpIdList();
-			GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_ARCHIVE_LOG_START, "");
-			break;
-		case CP_ARCHIVE_LOG_END:
-			if (logMgr_->getArchiveLogMode() ==
-					LogManager::ARCHIVE_LOG_DISABLE ||
-				logMgr_->getArchiveLogMode() ==
-					LogManager::ARCHIVE_LOG_ENABLE) {
-				reason = "ArchiveLog has not started";
-				errorNo = WEBAPI_CP_ARCHIVELOG_MODE_IS_INVALID;
-				errorInfo["errorStatus"] =
-					picojson::value(static_cast<double>(errorNo));
-				errorInfo["reason"] = picojson::value(reason);
-				result = picojson::value(errorInfo);
-				return false;
-			}
-			cpSvc_->requestCleanupLogFiles(eventSource);  
-			if (logMgr_->getArchiveLogMode() != LogManager::ARCHIVE_LOG_ERROR) {
-				logMgr_->setArchiveLogMode(LogManager::ARCHIVE_LOG_ENABLE);
-			}
-			cpSvc_->setArchiveLogMode(CheckpointService::ARCHIVE_LOG_ON);
-			GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_ARCHIVE_LOG_END, "");
-			break;
-		default:
-			GS_TRACE_ERROR(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_FAILED,
-				"Archive log unknown mode (name=" << backupName
-												  << ", mode=" << mode << ")");
-			util::NormalOStringStream oss;
-			oss << "unknown mode (name=" << backupName << ", mode=" << mode
-				<< ")";
-			reason = oss.str();
-			errorNo = WEBAPI_CP_OTHER_REASON;
-			errorInfo["errorStatus"] =
-				picojson::value(static_cast<double>(errorNo));
-			errorInfo["reason"] = picojson::value(reason);
-			result = picojson::value(errorInfo);
-			return false;
-		}
-		return true;
-	}
-	catch (UserException &e) {
-		UTIL_TRACE_EXCEPTION_ERROR(SYSTEM_SERVICE, e,
-			"Archive log failed (name=" << backupName << ", mode=" << mode
-										<< ", detail="
-										<< GS_EXCEPTION_MESSAGE(e) << ")");
-		reason = "archiveLog failed";
-		errorNo = WEBAPI_CP_OTHER_REASON;
-		errorInfo["errorStatus"] =
-			picojson::value(static_cast<double>(errorNo));
-		errorInfo["reason"] = picojson::value(reason);
-		result = picojson::value(errorInfo);
-		return false;
-	}
-	catch (std::exception &e) {
-		GS_RETHROW_USER_OR_SYSTEM(
-			e, GS_EXCEPTION_MERGE_MESSAGE(e, "Archive log failed"));
-	}
-}
-/*!
-	@brief Handles prepareLongArchive command
-*/
-bool SystemService::prepareLongArchive(const Event::Source &eventSource,
-	const char8_t *longArchiveName,
-	picojson::value &result) {
-	GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
-			"Prepare long archive called (longArchiveName="
-			<< longArchiveName << ")");
-
-	picojson::object errorInfo;
-	int32_t errorNo = 0;
-	std::string reason;
-	try {
-		clsMgr_->checkNodeStatus();
-	}
-	catch (UserException &e) {
-		UTIL_TRACE_EXCEPTION_WARNING(SYSTEM_SERVICE, e,
-			"Rejected by unacceptable condition (status="
-				<< clsMgr_->statusInfo_.getSystemStatus()
-				<< ", detail=" << GS_EXCEPTION_MESSAGE(e) << ")");
-
-		util::NormalOStringStream oss;
-		oss << "unacceptable condition (status="
-			<< clsMgr_->statusInfo_.getSystemStatus() << ")";
-		reason = oss.str();
-		errorNo = WEBAPI_CP_OTHER_REASON;
-		errorInfo["errorStatus"] =
-			picojson::value(static_cast<double>(errorNo));
-		errorInfo["reason"] = picojson::value(reason);
-		result = picojson::value(errorInfo);
-		return false;
-	}
-	catch (std::exception &e) {
-		GS_RETHROW_USER_OR_SYSTEM(
-			e, GS_EXCEPTION_MERGE_MESSAGE(e, "Backup node failed"));
-	}
-
-	try {
-		if (cpSvc_->requestPrepareLongArchive(
-				eventSource, longArchiveName, result)) {
-			return true;
-		}
-		else {
-			return false;
-		}
-	}
-	catch (UserException &e) {
-		UTIL_TRACE_EXCEPTION_ERROR(SYSTEM_SERVICE, e,
-			"Prepare long archive failed (name=" << longArchiveName <<
-			", detail=" << GS_EXCEPTION_MESSAGE(e) << ")");
-
-		reason = "prepare long archive failed";
-		errorNo = WEBAPI_CP_OTHER_REASON;
-		errorInfo["errorStatus"] =
-			picojson::value(static_cast<double>(errorNo));
-		errorInfo["reason"] = picojson::value(reason);
-		result = picojson::value(errorInfo);
-		return false;
-	}
-	catch (std::exception &e) {
-		GS_RETHROW_USER_OR_SYSTEM(
-			e, GS_EXCEPTION_MERGE_MESSAGE(e, "Prepare long archive failed"));
-	}
+	assert(false);
+	return false; 
 }
 
 /*!
@@ -832,13 +675,11 @@ void SystemService::setPeriodicCheckpointFlag(bool flag) {
 /*!
 	@brief Handles getHosts command
 */
-void SystemService::getHosts(picojson::value &result, int32_t addressTypeNum) {
+void SystemService::getHosts(
+		picojson::value &result, const ServiceTypeInfo &addressType) {
 	try {
 		GS_TRACE_DEBUG(
 			SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED, "Get hosts called");
-
-		const ServiceType addressType =
-			static_cast<ServiceType>(addressTypeNum);
 
 		picojson::object hosts;
 		NodeId selfNodeId = 0;
@@ -895,17 +736,15 @@ void SystemService::getHosts(picojson::value &result, int32_t addressTypeNum) {
 /*!
 	@brief Handles getPartitions command
 */
-void SystemService::getPartitions(util::StackAllocator &alloc,
+void SystemService::getPartitions(
+		util::StackAllocator &alloc,
 		picojson::value &result, int32_t partitionNo,
-		int32_t addressTypeNum, bool lossOnly, bool force, bool isSelf,
+		const ServiceTypeInfo &addressType, bool lossOnly, bool force, bool isSelf,
 		bool lsnDump, bool notDumpRole, uint32_t partitionGroupNo,
 		bool sqlOwnerDump) {
 	try {
 		GS_TRACE_DEBUG(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
 			"Get partitions called");
-
-		const ServiceType addressType =
-			static_cast<ServiceType>(addressTypeNum);
 
 		picojson::array &partitionList = setJsonArray(result);
 		util::NormalOStringStream oss;
@@ -983,7 +822,7 @@ void SystemService::getPartitions(util::StackAllocator &alloc,
 						setJsonArray(partition["backup"]);
 					util::XArray<NodeId> backupList(alloc);
 					pt_->getBackup(
-						pId, backupList, PT_CURRENT_OB);
+						pId, backupList, PartitionTable::PT_CURRENT_OB);
 					if (!backupList.empty()) {
 						for (size_t pos = 0; pos < backupList.size(); pos++) {
 							picojson::object backup;
@@ -1016,7 +855,7 @@ void SystemService::getPartitions(util::StackAllocator &alloc,
 						setJsonArray(partition["catchup"]);
 					util::XArray<NodeId> catchupList(alloc);
 					pt_->getCatchup(
-						pId, catchupList, PT_CURRENT_OB);
+						pId, catchupList, PartitionTable::PT_CURRENT_OB);
 					if (!catchupList.empty()) {
 						for (size_t pos = 0; pos < catchupList.size(); pos++) {
 							picojson::object catchup;
@@ -1073,7 +912,7 @@ void SystemService::getPartitions(util::StackAllocator &alloc,
 					retStr = "BACKUP";
 				}
 				else if (pt_->isCatchup(
-							 pId, 0, PT_CURRENT_OB)) {
+							 pId, 0, PartitionTable::PT_CURRENT_OB)) {
 					retStr = "CATCHUP";
 				}
 				else {
@@ -1087,6 +926,7 @@ void SystemService::getPartitions(util::StackAllocator &alloc,
 			partition["pId"] = picojson::value(makeString(oss, pId));
 			partition["maxLsn"] =
 				picojson::value(static_cast<double>(pt_->getMaxLsn(pId)));
+
 			if (lsnDump) {
 				partition["lsn"] =
 					picojson::value(static_cast<double>(pt_->getLSN(pId)));
@@ -1112,15 +952,14 @@ void SystemService::getPartitions(util::StackAllocator &alloc,
 	}
 }
 
-void SystemService::getGoalPartitions(util::StackAllocator &alloc,
-		int32_t addressType, picojson::value &result) {
+void SystemService::getGoalPartitions(
+		util::StackAllocator &alloc, const ServiceTypeInfo &addressType,
+		picojson::value &result) {
 	try {
 		GS_TRACE_DEBUG(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
 			"Get goal partitions called");
 		util::Vector<PartitionRole> goalList(alloc);
 		pt_->copyGoal(goalList);
-		const ServiceType currentAddressType =
-			static_cast<ServiceType>(addressType);
 		picojson::array &partitionList = setJsonArray(result);
 		for (uint32_t pId = 0; pId < goalList.size(); pId++) {
 			picojson::object partition;
@@ -1130,7 +969,7 @@ void SystemService::getGoalPartitions(util::StackAllocator &alloc,
 			PartitionRole &currentRole = goalList[pId];
 			NodeId ownerNodeId = currentRole.getOwner();
 			picojson::object master;
-			getServiceAddress(pt_, ownerNodeId, master, currentAddressType);
+			getServiceAddress(pt_, ownerNodeId, master, addressType);
 			if (ownerNodeId != UNDEF_NODEID) {
 				partition["owner"] = picojson::value(master);
 			}
@@ -1143,7 +982,7 @@ void SystemService::getGoalPartitions(util::StackAllocator &alloc,
 				picojson::object backup;
 				NodeId backupNodeId = backups[pos];
 				getServiceAddress(
-					pt_, backupNodeId, backup, currentAddressType);
+					pt_, backupNodeId, backup, addressType);
 				nodeList.push_back(picojson::value(backup));
 			}
 			partitionList.push_back(picojson::value(partition));
@@ -1177,7 +1016,7 @@ void SystemService::traceStats() {
 		stats.initialize(*baseStats_);
 		WebAPIRequest::ParameterMap parameterMap;
 		parameterMap["detail"] = "true";
-		acceptStatsOption(stats, parameterMap);
+		acceptStatsOption(stats, parameterMap, NULL);
 		stats.setDisplayOption(STAT_TABLE_DISPLAY_WEB_ONLY, true);
 		stats.setDisplayOption(STAT_TABLE_DISPLAY_SELECT_CS, true);
 		stats.setDisplayOption(STAT_TABLE_DISPLAY_SELECT_CP, true);
@@ -1198,7 +1037,8 @@ void SystemService::traceStats() {
 /*!
 	@brief Gets the statistics about synchronization
 */
-void SystemService::getSyncStats(picojson::value &result) {
+void SystemService::getSyncStats(
+		picojson::value &result, const ServiceTypeInfo &addressType) {
 	picojson::object &syncStats = setJsonObject(result);
 
 	syncStats["contextCount"] = picojson::value(
@@ -1213,7 +1053,7 @@ void SystemService::getSyncStats(picojson::value &result) {
 		util::XArray<NodeId> catchups(alloc);
 		NodeId owner = pt_->getOwner(currentCatchupPId);
 		pt_->getCatchup(
-			currentCatchupPId, catchups, PT_CURRENT_OB);
+			currentCatchupPId, catchups, PartitionTable::PT_CURRENT_OB);
 		if (owner != UNDEF_NODEID && catchups.size() == 1) {
 				syncStats["pId"] =
 					picojson::value(static_cast<double>(currentCatchupPId));
@@ -1225,14 +1065,13 @@ void SystemService::getSyncStats(picojson::value &result) {
 					static_cast<double>(pt_->getLSN(currentCatchupPId, owner)));
 				ownerInfo["chunkNum"] =
 					picojson::value(static_cast<double>(stat.syncChunkNum_));
-				getServiceAddress(pt_, owner, ownerInfo, SYSTEM_SERVICE);
+				getServiceAddress(pt_, owner, ownerInfo, addressType);
 				syncStats["owner"] = picojson::value(ownerInfo);
-
 				catchupInfo["lsn"] = picojson::value(static_cast<double>(
 					pt_->getLSN(currentCatchupPId, catchup)));
 				catchupInfo["chunkNum"] =
 					picojson::value(static_cast<double>(stat.syncApplyNum_));
-				getServiceAddress(pt_, catchup, catchupInfo, SYSTEM_SERVICE);
+				getServiceAddress(pt_, catchup, catchupInfo, addressType);
 				syncStats["catchup"] = picojson::value(catchupInfo);
 			}
 	}
@@ -1245,66 +1084,66 @@ void SystemService::getSyncStats(picojson::value &result) {
 void SystemService::getPGStoreMemoryLimitStats(picojson::value &result) {
 	picojson::array &limitStats = setJsonArray(result);
 
-	PartitionGroupId partitionGroupNum =
-		chunkMgr_->getConfig().getPartitionGroupNum();
-	size_t chunkCategoryNum =
-		chunkMgr_->getConfig().getChunkCategoryNum();
-	for (PartitionGroupId pgId = 0; pgId < partitionGroupNum; pgId++) {
-		picojson::object pgInfo;
+	typedef std::pair<const char8_t*, ChunkBufferStats::Param> NamedParam;
+	const NamedParam pgParamList[] = {
+		NamedParam("pgStoreUse", ChunkBufferStats::BUF_STAT_USE_STORE_SIZE),
+		NamedParam("pgLimit", ChunkBufferStats::BUF_STAT_USE_BUFFER_SIZE),
+		NamedParam("pgMemory", ChunkBufferStats::BUF_STAT_BUFFER_LIMIT_SIZE),
+		NamedParam("pgSwapRead", ChunkBufferStats::BUF_STAT_SWAP_READ_COUNT),
+		NamedParam(
+				"pgNormalSwapRead",
+				ChunkBufferStats::BUF_STAT_SWAP_NORMAL_READ_COUNT),
+		NamedParam(
+				"pgColdBufferingSwapRead",
+				ChunkBufferStats::BUF_STAT_SWAP_COLD_READ_COUNT)
+	};
 
-		ChunkManager::ChunkManagerStats &stats =
-			chunkMgr_->getChunkManagerStats();
+	const NamedParam pgCategoryParamList[] = {
+		NamedParam("pgCategoryStoreUse", ChunkBufferStats::BUF_STAT_USE_STORE_SIZE),
+		NamedParam("pgCategoryStoreMemory", ChunkBufferStats::BUF_STAT_USE_BUFFER_SIZE),
+		NamedParam("pgCategorySwapRead", ChunkBufferStats::BUF_STAT_SWAP_READ_COUNT),
+		NamedParam("pgCategorySwapWrite", ChunkBufferStats::BUF_STAT_SWAP_WRITE_COUNT),
+	};
 
-		pgInfo["pgStoreUse"] = picojson::value(
-			static_cast<double>(stats.getPGStoreUse(pgId)));
-		pgInfo["pgLimit"] = picojson::value(
-			static_cast<double>(stats.getPGStoreMemoryLimit(pgId)));
-		pgInfo["pgMemory"] =
-			picojson::value(static_cast<double>(stats.getPGStoreMemory(pgId)));
-		pgInfo["pgSwapRead"] =
-			picojson::value(static_cast<double>(stats.getPGSwapRead(pgId)));
-		pgInfo["pgNormalSwapRead"] =
-			picojson::value(static_cast<double>(stats.getPGNormalSwapRead(pgId)));
-		pgInfo["pgColdBufferingSwapRead"] =
-			picojson::value(static_cast<double>(stats.getPGColdBufferingSwapRead(pgId)));
-		pgInfo["pgCpChunkCount"] =
-			picojson::value(static_cast<double>(stats.getPGCheckpointChunkCount(pgId)));
-		pgInfo["pgCpKickCount"] =
-			picojson::value(static_cast<double>(stats.getPGCheckpointKickCount(pgId)));
-		pgInfo["pgCpKickTime"] =
-			picojson::value(static_cast<double>(stats.getPGCheckpointKickTime(pgId)));
-		pgInfo["pgCpKickCompressTime"] =
-			picojson::value(static_cast<double>(stats.getPGCheckpointKickCompressTime(pgId)));
-		pgInfo["pgCpCopyCount"] =
-			picojson::value(static_cast<double>(stats.getPGCheckpointCopyCount(pgId)));
-		picojson::array pgCategoryStoreUseList;
-		picojson::array pgCategoryStoreMemList;
-		picojson::array pgCategorySwapReadList;
-		picojson::array pgCategorySwapWriteList;
-		for (size_t chunkCategoryId = 0; chunkCategoryId < chunkCategoryNum;
-				++chunkCategoryId) {
-			pgCategoryStoreUseList.push_back(
-				picojson::value(
-					static_cast<double>(
-						stats.getPGCategoryStoreUse(pgId, chunkCategoryId))));
-			pgCategoryStoreMemList.push_back(
-				picojson::value(
-					static_cast<double>(
-						stats.getPGCategoryStoreMemory(pgId, chunkCategoryId))));
-			pgCategorySwapReadList.push_back(
-				picojson::value(
-					static_cast<double>(
-						stats.getPGCategorySwapRead(pgId, chunkCategoryId))));
-			pgCategorySwapWriteList.push_back(
-				picojson::value(
-					static_cast<double>(
-						stats.getPGCategorySwapWrite(pgId, chunkCategoryId))));
+	const PartitionListStats &plStats = partitionList_->getStats();
+	const PartitionGroupConfig &pgConfig =
+			txnMgr_->getPartitionGroupConfig();
+	const uint32_t pgCount = pgConfig.getPartitionGroupCount();
+	const size_t categoryCount = DS_CHUNK_CATEGORY_SIZE;
+	for (PartitionGroupId pgId = 0; pgId < pgCount; pgId++) {
+		limitStats.push_back(picojson::value(picojson::object()));
+		picojson::object &ptInfo = limitStats.back().get<picojson::object>();
+
+		{
+			ChunkBufferStats bufStats(NULL);
+			plStats.getPGChunkBufferStats(pgId, bufStats);
+
+			const size_t count = sizeof(pgParamList) / sizeof(*pgParamList);
+			for (size_t i = 0; i < count; i++) {
+				const NamedParam &param = pgParamList[i];
+				ptInfo[param.first] = picojson::value(static_cast<double>(
+						bufStats.table_(param.second).get()));
+			}
 		}
-		pgInfo["pgCategoryStoreUse"] = picojson::value(pgCategoryStoreUseList);
-		pgInfo["pgCategoryStoreMemory"] = picojson::value(pgCategoryStoreMemList);
-		pgInfo["pgCategorySwapRead"] = picojson::value(pgCategorySwapReadList);
-		pgInfo["pgCategorySwapWrite"] = picojson::value(pgCategorySwapWriteList);
-		limitStats.push_back(picojson::value(pgInfo));
+
+		for (size_t categoryId = 0;
+				categoryId < categoryCount; categoryId++) {
+			ChunkBufferStats stats(NULL);
+			plStats.getPGCategoryChunkBufferStats(pgId, categoryId, stats);
+
+			const size_t count =
+					sizeof(pgCategoryParamList) / sizeof(*pgCategoryParamList);
+			for (size_t i = 0; i < count; i++) {
+				const NamedParam &param = pgCategoryParamList[i];
+				picojson::value &list = ptInfo[param.first];
+				if (categoryId == 0) {
+					list = picojson::value(picojson::array());
+				}
+				const picojson::value value(static_cast<double>(
+						stats.table_(param.second).get()));
+				list.get<picojson::array>().push_back(value);
+			}
+		}
 	}
 }
 
@@ -1380,6 +1219,48 @@ void SystemService::getMemoryStats(
 	}
 }
 
+/*!
+	@brief Gets the statistics about synchronization
+*/
+void SystemService::getSqlTempStoreStats(picojson::value &result) {
+	picojson::object &resultObj = setJsonObject(result);
+	picojson::array &ltsStats = setJsonArray(resultObj["sqlTempStoreGroupStats"]);
+
+	LocalTempStore &store =
+			clsSvc_->getSQLService()->getExecutionManager()->getJobManager()->getStore();
+
+	util::Mutex &statsMutex = store.getGroupStatsMapMutex();
+	{
+		util::LockGuard<util::Mutex> guard(statsMutex);
+		LocalTempStore::GroupStatsMap groupStatsMap = store.getGroupStatsMap();
+		LocalTempStore::GroupStatsMap::const_iterator itr = groupStatsMap.begin();
+		for (; itr != groupStatsMap.end(); ++itr) {
+			picojson::object groupInfo;
+			LocalTempStore::GroupStats stats = (itr->second);
+			groupInfo["groupId"] = picojson::value(
+					static_cast<double>(itr->first));
+			groupInfo["inputBlockCount"] = picojson::value(
+					static_cast<double>(itr->second.appendBlockCount_));
+			groupInfo["outputBlockCount"] = picojson::value(
+					static_cast<double>(itr->second.readBlockCount_));
+			groupInfo["swapInBlockCount"] = picojson::value(
+					static_cast<double>(itr->second.swapInCount_));
+			groupInfo["swapOutBlockCount"] = picojson::value(
+					static_cast<double>(itr->second.swapOutCount_));
+			groupInfo["activeBlockCount"] = picojson::value(
+					static_cast<double>(itr->second.activeBlockCount_));
+			groupInfo["maxActiveBlockCount"] = picojson::value(
+					static_cast<double>(itr->second.maxActiveBlockCount_));
+			groupInfo["blockUsedSize"] = picojson::value(
+					static_cast<double>(itr->second.blockUsedSize_));
+			groupInfo["latchBlockCount"] = picojson::value(
+					static_cast<double>(itr->second.latchBlockCount_));
+			groupInfo["maxLatchBlockCount"] = picojson::value(
+					static_cast<double>(itr->second.maxLatchBlockCount_));
+			ltsStats.push_back(picojson::value(groupInfo));
+		}
+	}
+}
 
 
 /*!
@@ -2052,45 +1933,88 @@ void SystemService::traceStats(const util::StdAllocator<void, void> &alloc) {
 /*!
 	@brief Gets address type
 */
-int32_t SystemService::resolveAddressType(
-	const WebAPIRequest::ParameterMap &parameterMap, ServiceType defaultType) {
-	std::map<std::string, std::string>::const_iterator it =
-		parameterMap.find("addressType");
+SystemService::ServiceTypeInfo SystemService::resolveAddressType(
+		const WebAPIRequest::ParameterMap &parameterMap,
+		const ServiceTypeInfo &defaultType) {
+	ServiceType type;
+	do {
+		std::map<std::string, std::string>::const_iterator it =
+				parameterMap.find("addressType");
 
-	if (it == parameterMap.end()) {
-		return defaultType;
-	}
-	const std::string &typeStr = it->second;
+		if (it == parameterMap.end()) {
+			type = static_cast<ServiceType>(defaultType.first);
+			break;
+		}
 
-	if (typeStr == "cluster") {
-		return CLUSTER_SERVICE;
+		const std::string &typeStr = it->second;
+		if (typeStr == "cluster") {
+			type = CLUSTER_SERVICE;
+		}
+		else if (typeStr == "transaction") {
+			type = TRANSACTION_SERVICE;
+		}
+		else if (typeStr == "sync") {
+			type = SYNC_SERVICE;
+		}
+		else if (typeStr == "system") {
+			type = SYSTEM_SERVICE;
+		}
+		else if (typeStr == "sql") {
+			type = SQL_SERVICE;
+		}
+		else {
+			return ServiceTypeInfo(-1, false);
+		}
 	}
-	else if (typeStr == "transaction") {
-		return TRANSACTION_SERVICE;
+	while (false);
+
+	bool secure;
+	do {
+		std::map<std::string, std::string>::const_iterator it =
+				parameterMap.find("addressSsl");
+		if (it == parameterMap.end()) {
+			secure = defaultType.second;
+			break;
+		}
+
+		const std::string &typeStr = it->second;
+		if (typeStr == "true") {
+			secure = true;
+		}
+		else if (typeStr == "false") {
+			secure = false;
+		}
+		else {
+			return ServiceTypeInfo(-1, false);
+		}
 	}
-	else if (typeStr == "sync") {
-		return SYNC_SERVICE;
+	while (false);
+
+	if (type != SYSTEM_SERVICE) {
+		secure = false;
 	}
-	else if (typeStr == "system") {
-		return SYSTEM_SERVICE;
-	}
-	else if (typeStr == "sql") {
-		return SQL_SERVICE;
-	}
-	else {
-		return -1;
-	}
+
+	return ServiceTypeInfo(type, secure);
 }
 
 /*!
 	@brief Sets display options
 */
 bool SystemService::acceptStatsOption(
-	StatTable &stats, const WebAPIRequest::ParameterMap &parameterMap) {
+		StatTable &stats, const WebAPIRequest::ParameterMap &parameterMap,
+		const ServiceTypeInfo *defaultType) {
+	if (defaultType == NULL) {
+		const ServiceTypeInfo localType(
+				ServiceTypeInfo::first_type(DEFAULT_ADDRESS_TYPE), false);
+		return acceptStatsOption(stats, parameterMap, &localType);
+	}
+
 	stats.setDisplayOption(STAT_TABLE_DISPLAY_WEB_OR_DETAIL_TRACE, true);
 	stats.setDisplayOption(STAT_TABLE_DISPLAY_WEB_ONLY, true);
 
-	switch (resolveAddressType(parameterMap, DEFAULT_ADDRESS_TYPE)) {
+	const ServiceTypeInfo &addressType =
+			resolveAddressType(parameterMap, *defaultType);
+	switch (addressType.first) {
 	case CLUSTER_SERVICE:
 		stats.setDisplayOption(STAT_TABLE_DISPLAY_ADDRESS_CLUSTER, true);
 		break;
@@ -2100,10 +2024,17 @@ bool SystemService::acceptStatsOption(
 	case SYNC_SERVICE:
 		stats.setDisplayOption(STAT_TABLE_DISPLAY_ADDRESS_SYNC, true);
 		break;
+	case SQL_SERVICE:
+		stats.setDisplayOption(STAT_TABLE_DISPLAY_ADDRESS_SQL, true);
+		break;
 	case SYSTEM_SERVICE:
 		break;
 	default:
 		return false;
+	}
+
+	if (addressType.second) {
+		stats.setDisplayOption(STAT_TABLE_DISPLAY_ADDRESS_SECURE, true);
 	}
 
 	const size_t maxNameListSize = 9;
@@ -2112,9 +2043,7 @@ bool SystemService::acceptStatsOption(
 		{"all", "clusterInfo", "recoveryInfo", "cpInfo", "performanceInfo",
 			NULL},
 		{"detail", "clusterDetail", "storeDetail", "transactionDetail",
-			"memoryDetail", "syncDetail", "pgLimitDetail",
-			"notificationMember",
-			NULL}};
+			"memoryDetail", "syncDetail", "pgLimitDetail", "notificationMember", NULL}};
 
 	const int32_t allOptionList[][maxNameListSize] = {
 		{-1, STAT_TABLE_DISPLAY_SELECT_CS, STAT_TABLE_DISPLAY_SELECT_CP,
@@ -2174,6 +2103,13 @@ bool SystemService::acceptStatsOption(
 	return true;
 }
 
+SystemService::ServiceTypeInfo SystemService::statOptionToAddressType(
+		const StatTable &stat) {
+	const std::pair<ServiceType, bool> &base =
+			ClusterManager::statOptionToAddressType(stat);
+	return ServiceTypeInfo(base.first, base.second);
+}
+
 /*!
 	@brief Handler Operator
 */
@@ -2182,7 +2118,7 @@ void OutputStatsHandler::operator()(EventContext &ec, Event &) {
 	if (pt_->isMaster()) {
 		GS_TRACE_INFO(CLUSTER_DETAIL,
 				GS_TRACE_CS_TRACE_STATS,
-				pt_->dumpPartitionsList(ec.getAllocator(), PT_CURRENT_OB));
+				pt_->dumpPartitionsList(ec.getAllocator(), PartitionTable::PT_CURRENT_OB));
 		GS_TRACE_INFO(CLUSTER_DETAIL, GS_TRACE_CS_CLUSTER_STATUS,
 				clsMgr_->dump());
 		{
@@ -2190,7 +2126,7 @@ void OutputStatsHandler::operator()(EventContext &ec, Event &) {
 			GS_TRACE_INFO(CLUSTER_DETAIL,
 				GS_TRACE_CS_CLUSTER_STATUS,
 				pt_->dumpPartitions(
-					alloc, PT_CURRENT_OB));
+					alloc, PartitionTable::PT_CURRENT_OB));
 		}
 		GS_TRACE_INFO(CLUSTER_DETAIL, GS_TRACE_CS_CLUSTER_STATUS,
 				pt_->dumpDatas(true));
@@ -2198,12 +2134,28 @@ void OutputStatsHandler::operator()(EventContext &ec, Event &) {
 }
 
 
-SystemService::WebAPIServerThread::WebAPIServerThread() : runnable_(true) {}
+SystemService::WebAPIServerThread::WebAPIServerThread(
+		bool enabled, bool secure) :
+		runnable_(enabled),
+		enabled_(enabled),
+		secure_(secure) {
+}
 
-void SystemService::WebAPIServerThread::initialize(ResourceSet &resourceSet) {
-	sysSvc_ = resourceSet.sysSvc_;
-	clsSvc_ = resourceSet.clsSvc_;
-	resourceSet_ = &resourceSet;
+bool SystemService::WebAPIServerThread::isEnabled() const {
+	return enabled_;
+}
+
+void SystemService::WebAPIServerThread::initialize(ManagerSet &mgrSet) {
+	sysSvc_ = mgrSet.sysSvc_;
+	clsSvc_ = mgrSet.clsSvc_;
+	mgrSet_ = &mgrSet;
+}
+
+void SystemService::WebAPIServerThread::tryStart() {
+	if (!enabled_) {
+		return;
+	}
+	start();
 }
 
 /*!
@@ -2211,7 +2163,7 @@ void SystemService::WebAPIServerThread::initialize(ResourceSet &resourceSet) {
 */
 void SystemService::WebAPIServerThread::run() {
 	try {
-		ListenerSocketHandler socketHandler(*resourceSet_);
+		ListenerSocketHandler socketHandler(*mgrSet_, secure_);
 		util::Socket &socket = socketHandler.getFile();
 
 		socket.open(
@@ -2221,9 +2173,12 @@ void SystemService::WebAPIServerThread::run() {
 
 		util::SocketAddress addr;
 		EventEngine::Config tmp;
-		tmp.setServerAddress(resourceSet_->config_->get<const char8_t *>(
-								 CONFIG_TABLE_SYS_SERVICE_ADDRESS),
-			resourceSet_->config_->getUInt16(CONFIG_TABLE_SYS_SERVICE_PORT));
+		tmp.setServerAddress(
+				mgrSet_->config_->get<const char8_t *>(
+						CONFIG_TABLE_SYS_SERVICE_ADDRESS),
+				mgrSet_->config_->getUInt16(secure_ ?
+						CONFIG_TABLE_SYS_SERVICE_SSL_PORT :
+						CONFIG_TABLE_SYS_SERVICE_PORT));
 
 		addr.assign(
 			NULL, tmp.serverAddress_.getPort(), tmp.serverAddress_.getFamily());
@@ -2260,21 +2215,27 @@ void SystemService::WebAPIServerThread::waitForShutdown() {
 	join();
 }
 
-SystemService::ListenerSocketHandler::ListenerSocketHandler(ResourceSet &resourceSet)
-	: clsSvc_(resourceSet.clsSvc_),
-	  syncSvc_(resourceSet.syncSvc_),
-	  sysSvc_(resourceSet.sysSvc_),
-	  txnSvc_(resourceSet.txnSvc_),
-	  pt_(resourceSet.pt_),
-	  syncMgr_(resourceSet.syncSvc_->getManager()),
-	  clsMgr_(resourceSet.clsSvc_->getManager()),
-	  chunkMgr_(resourceSet.chunkMgr_),
-	  cpSvc_(resourceSet.cpSvc_),
-	  fixedSizeAlloc_(resourceSet.fixedSizeAlloc_),
-	  varSizeAlloc_(util::AllocatorInfo(ALLOCATOR_GROUP_SYS, "webListenerVar")),
-	  alloc_(util::AllocatorInfo(ALLOCATOR_GROUP_SYS, "webListenerStack"),
-		  fixedSizeAlloc_),
-	resourceSet_(&resourceSet) {
+void SystemService::WebAPIServerThread::start() {
+	util::Thread::start();
+}
+
+SystemService::ListenerSocketHandler::ListenerSocketHandler(
+		ManagerSet &mgrSet, bool secure) :
+		clsSvc_(mgrSet.clsSvc_),
+		syncSvc_(mgrSet.syncSvc_),
+		sysSvc_(mgrSet.sysSvc_),
+		txnSvc_(mgrSet.txnSvc_),
+		pt_(mgrSet.pt_),
+		syncMgr_(mgrSet.syncSvc_->getManager()),
+		clsMgr_(mgrSet.clsSvc_->getManager()),
+	  	partitionList_(mgrSet.partitionList_),
+		cpSvc_(mgrSet.cpSvc_),
+		fixedSizeAlloc_(mgrSet.fixedSizeAlloc_),
+		varSizeAlloc_(util::AllocatorInfo(ALLOCATOR_GROUP_SYS, "webListenerVar")),
+		alloc_(util::AllocatorInfo(ALLOCATOR_GROUP_SYS, "webListenerStack"),
+				fixedSizeAlloc_),
+		socketFactory_(resolveSocketFactory(sysSvc_, secure)),
+		secure_(secure) {
 	alloc_.setFreeSizeLimit(alloc_.base().getElementSize());
 }
 
@@ -2288,7 +2249,8 @@ void SystemService::ListenerSocketHandler::handlePollEvent(
 	}
 
 	try {
-		util::Socket socket;
+		AbstractSocket socket;
+		socketFactory_.create(socket);
 		listenerSocket_.accept(&socket);
 
 		socket.setBlockingMode(true);
@@ -2410,6 +2372,128 @@ void SystemService::ListenerSocketHandler::dispatch(
 			}
 		}
 		else if (request.pathElements_.size() == 2 &&
+				 request.pathElements_[1] == "clearUserCache") {
+			if (request.method_ != EBB_POST) {
+				response.setMethodError();
+				return;
+			}
+
+			const ServiceTypeInfo &addressType =
+					getDefaultAddressType(request.parameterMap_);
+			if (addressType.first < 0) {
+				response.setBadRequestError();
+				return;
+			}
+
+			if (request.parameterMap_.find("name") ==
+				request.parameterMap_.end()) {
+				response.setBadRequestError();
+				return;
+			}
+
+			const std::string name =
+				request.parameterMap_["name"];
+			if (name.empty()) {
+				response.setBadRequestError();
+				return;
+			}
+			bool isDatabase = false;
+
+			if (request.parameterMap_.find("isDatabase") !=
+				request.parameterMap_.end()) {
+				if (request.parameterMap_["isDatabase"] == "true") {
+					isDatabase = true;
+				}
+				else if (request.parameterMap_["isDatabase"] == "false") {
+					isDatabase = false;
+				}
+				else {
+					picojson::object errorInfo;
+					int32_t errorNo = 0;
+					std::string reason;
+					
+					errorNo = WEBAPI_CP_OTHER_REASON;
+					reason = "unknown parameter value: " + request.parameterMap_["isDatabase"];
+					errorInfo["errorStatus"] =
+						picojson::value(static_cast<double>(errorNo));
+					errorInfo["reason"] = picojson::value(reason);
+					response.setJson(picojson::value(errorInfo));
+					response.setBadRequestError();
+					return;
+				}
+			}
+
+			picojson::value result;
+			if (!sysSvc_->clearUserCache(name, isDatabase, result)) {
+				response.setJson(result);
+				response.setBadRequestError();
+			}
+		}
+		else if (request.pathElements_.size() == 2 &&
+				 request.pathElements_[1] == "userCache") {
+			if (request.method_ != EBB_GET) {
+				response.setMethodError();
+				return;
+			}
+
+			const ServiceTypeInfo &addressType =
+					getDefaultAddressType(request.parameterMap_);
+			if (addressType.first < 0) {
+				response.setBadRequestError();
+				return;
+			}
+
+			picojson::value result;
+
+			UserCache *uc = txnSvc_->userCache_;
+			if (uc == NULL) {
+				response.setJson(result);
+				return;
+			}
+
+			if (request.parameterMap_.find("name") !=
+				request.parameterMap_.end()) {
+				bool isDatabase = false;
+
+				GlobalVariableSizeAllocator& varAlloc = uc->getAllocator();
+
+				const std::string name =
+					request.parameterMap_["name"];
+				if (request.parameterMap_.find("isDatabase") !=
+					request.parameterMap_.end()) {
+					if (request.parameterMap_["isDatabase"] == "true") {
+						isDatabase = true;
+					}
+					else if (request.parameterMap_["isDatabase"] == "false") {
+						isDatabase = false;
+					}
+					else {
+						picojson::object errorInfo;
+						int32_t errorNo = 0;
+						std::string reason;
+						
+						errorNo = WEBAPI_CP_OTHER_REASON;
+						reason = "unknown parameter value: " + request.parameterMap_["isDatabase"];
+						errorInfo["errorStatus"] =
+							picojson::value(static_cast<double>(errorNo));
+						errorInfo["reason"] = picojson::value(reason);
+						response.setJson(picojson::value(errorInfo));
+						response.setBadRequestError();
+						return;
+					}
+				}
+
+				UserString nameUS(varAlloc);
+				nameUS.append(name.c_str());
+				uc->scan(&nameUS, isDatabase, result);
+
+			} else {
+				uc->scan(NULL, false, result);
+			}
+
+			response.setJson(result);
+		}
+		else if (request.pathElements_.size() == 2 &&
 				 request.pathElements_[1] == "leave") {
 			if (request.method_ != EBB_POST) {
 				response.setMethodError();
@@ -2460,9 +2544,9 @@ void SystemService::ListenerSocketHandler::dispatch(
 				return;
 			}
 
-			const int32_t addressType =
-				resolveAddressType(request.parameterMap_, DEFAULT_ADDRESS_TYPE);
-			if (addressType < 0) {
+			const ServiceTypeInfo &addressType =
+					getDefaultAddressType(request.parameterMap_);
+			if (addressType.first < 0) {
 				response.setBadRequestError();
 				return;
 			}
@@ -2481,7 +2565,15 @@ void SystemService::ListenerSocketHandler::dispatch(
 			StatTable stats(varSizeAlloc_);
 			stats.initialize(*sysSvc_->baseStats_);
 
-			if (!acceptStatsOption(stats, request.parameterMap_)) {
+			const ServiceTypeInfo &addressType =
+					getDefaultAddressType(request.parameterMap_);
+			if (addressType.first < 0) {
+				response.setBadRequestError();
+				return;
+			}
+
+			if (!acceptStatsOption(
+					stats, request.parameterMap_, &addressType)) {
 				response.setBadRequestError();
 				return;
 			}
@@ -2519,9 +2611,9 @@ void SystemService::ListenerSocketHandler::dispatch(
 					return;
 				}
 
-				const int32_t addressTypeNum = resolveAddressType(
-					request.parameterMap_, DEFAULT_ADDRESS_TYPE);
-				if (addressTypeNum < 0) {
+				const ServiceTypeInfo &addressType =
+						getDefaultAddressType(request.parameterMap_);
+				if (addressType.first < 0) {
 					response.setBadRequestError();
 					return;
 				}
@@ -2602,7 +2694,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 				}
 
 				picojson::value result;
-				sysSvc_->getPartitions(alloc_, result, partitionNo, addressTypeNum,
+				sysSvc_->getPartitions(alloc_, result, partitionNo, addressType,
 					isLossOnly, isForce, isSelf, lsnDump, notRoleDump,
 					partitionGroupNo, sqlOwnerDump);
 
@@ -3198,6 +3290,39 @@ void SystemService::ListenerSocketHandler::dispatch(
 				response.setJson(result);
 			}
 		}
+		else if (request.pathElements_.size() >= 2 &&
+				 request.pathElements_[1] == "sqlTempStore") {
+
+			if (request.method_ != EBB_GET) {
+				response.setMethodError();
+				return;
+			}
+
+			bool withReset = false;
+			if (request.parameterMap_.find("withReset") !=
+					request.parameterMap_.end()) {
+				if (request.parameterMap_["withReset"] == "1"
+						|| request.parameterMap_["withReset"] == "true") {
+					withReset = true;
+				}
+			}
+			picojson::value result;
+			sysSvc_->getSqlTempStoreStats(result);
+
+			if (withReset) {
+				LocalTempStore &store =
+						clsSvc_->getSQLService()->getExecutionManager()->getJobManager()->getStore();
+				store.clearAllGroupStats();
+			}
+
+			if (request.parameterMap_.find("callback") !=
+				request.parameterMap_.end()) {
+				response.setJson(request.parameterMap_["callback"], result);
+			}
+			else {
+				response.setJson(result);
+			}
+		}
 		else if (request.pathElements_.size() == 2 &&
 				 request.pathElements_[1] == "event") {
 			if (request.method_ != EBB_GET) {
@@ -3271,7 +3396,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 			std::cout << clsMgr_->dump();
 			{
 				std::cout << pt_->dumpPartitions(
-					alloc_, PT_CURRENT_OB);
+					alloc_, PartitionTable::PT_CURRENT_OB);
 			}
 			std::cout << pt_->dumpDatas(true);
 			if (request.parameterMap_.find("trace") !=
@@ -3284,7 +3409,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 						GS_TRACE_INFO(CLUSTER_OPERATION,
 							GS_TRACE_CS_CLUSTER_STATUS,
 							pt_->dumpPartitions(
-								alloc_, PT_CURRENT_OB));
+								alloc_, PartitionTable::PT_CURRENT_OB));
 					}
 					GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_CLUSTER_STATUS,
 						pt_->dumpDatas(true));
@@ -3294,7 +3419,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 		else if (request.pathElements_.size() == 2 &&
 				request.pathElements_[1] == "sql") {
 			SQLExecutionManager *executionManager
-					= resourceSet_->getSQLExecutionManager();
+					= clsSvc_->getSQLService()->getExecutionManager();
 			picojson::value jsonOutValue;
 			SQLProfiler profs(alloc_);
 			executionManager->getProfiler(alloc_, profs);
@@ -3311,9 +3436,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 		}
 		else if (request.pathElements_.size() == 3 &&
 				request.pathElements_[1] == "sql" && request.pathElements_[2] == "job") {
-			JobManager *jobManager
-					= resourceSet_->getJobManager();
-
+			JobManager *jobManager = clsSvc_->getSQLService()->getExecutionManager()->getJobManager();
 			StatJobIdList infoList(alloc_);
 			picojson::value jsonOutValue;
 			jobManager->getJobIdList(alloc_, infoList);
@@ -3327,6 +3450,35 @@ void SystemService::ListenerSocketHandler::dispatch(
 				response.setJson(jsonOutValue);
 			}
 		}
+		else if (request.pathElements_.size() == 4 &&
+				request.pathElements_[1] == "sql"
+				&& request.pathElements_[2] == "cache"
+				&& request.pathElements_[3] == "refresh") {
+
+			if (request.method_ != EBB_POST) {
+				response.setMethodError();
+				return;
+			}
+			
+			SQLExecutionManager *executionManager
+							= clsSvc_->getSQLService()->getExecutionManager();
+			executionManager->refreshSchemaCache();
+
+		}
+		else if (request.pathElements_.size() == 4 &&
+				request.pathElements_[1] == "sql"
+				&& request.pathElements_[2] == "job"
+				&& request.pathElements_[3] == "reset") {
+
+			if (request.method_ != EBB_POST) {
+				response.setMethodError();
+				return;
+			}
+
+			JobManager *jobManager = clsSvc_->getSQLService()
+					->getExecutionManager()->getJobManager();
+			jobManager->resetSendCounter(alloc_);
+		}
 		else if (request.pathElements_.size() == 3 &&
 				request.pathElements_[1] == "sql" && request.pathElements_[2] == "cache") {
 			if (request.method_ != EBB_GET) {
@@ -3338,7 +3490,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 					request.parameterMap_.end()) {
 				dbName = request.parameterMap_["dbName"];
 				SQLExecutionManager *executionManager
-							= resourceSet_->getSQLExecutionManager();
+							= clsSvc_->getSQLService()->getExecutionManager();
 				util::NormalOStringStream oss;
 				executionManager->dumpTableCache(oss, dbName.c_str());
 				std::cout << oss.str().c_str() << std::endl;
@@ -3364,11 +3516,29 @@ void SystemService::ListenerSocketHandler::dispatch(
 					mode = 1;
 				}
 			}
-			JobManager *jobManager =
-					resourceSet_->getJobManager();
+
+			util::String jobIdString(alloc_);
+			if (request.parameterMap_.find("jobId") !=
+				request.parameterMap_.end()) {
+				jobIdString = request.parameterMap_["jobId"].c_str();
+			}
+			JobId jobId;
+			JobId *currentJobId = NULL;
+
+			if (!jobIdString.empty()) {
+				try {
+					jobId.parse(alloc_, jobIdString);
+					currentJobId = &jobId;
+				}
+				catch (std::exception &e) {
+					currentJobId = NULL;
+				}
+			}
+
+			JobManager *jobManager = clsSvc_->getSQLService()->getExecutionManager()->getJobManager();
 			StatJobProfiler profs(alloc_);
 			profs.currentTime_ = getTimeStr(util::DateTime::now(false).getUnixTime()).c_str();
-			jobManager->getProfiler(alloc_, profs, mode);
+			jobManager->getProfiler(alloc_, profs, mode, currentJobId);
 			picojson::value jsonOutValue;
 			JsonUtils::OutStream out(jsonOutValue);
 			util::ObjectCoder().encode(out, profs);
@@ -3401,9 +3571,26 @@ void SystemService::ListenerSocketHandler::dispatch(
 				startTimeString = request.parameterMap_["startTime"].c_str();
 			}
 			CancelOption option(startTimeString);
+			if (request.parameterMap_.find("forced") !=
+					request.parameterMap_.end()) {
 
-			JobManager *jobManager
-					= resourceSet_->getJobManager();
+				const std::string retStr = request.parameterMap_["forced"];
+				if (retStr == "true") {
+					option.forced_ = true;
+				}
+			}
+
+			if (request.parameterMap_.find("varTotalSize") !=
+					request.parameterMap_.end()) {
+				int64_t varTotalSize = atoi(request.parameterMap_["varTotalSize"].c_str());
+
+				if (varTotalSize > 0) {
+					option.allocateMemory_ = varTotalSize;
+				}
+			}
+
+			JobManager *jobManager = clsSvc_->getSQLService()->getExecutionManager()->getJobManager();
+			Event::Source eventSource(varSizeAlloc_);
 			util::Vector<JobId> jobIdList(alloc_);
 			if (!jobIdString.empty()) {
 				JobId jobId;
@@ -3416,8 +3603,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 				}
 			}
 			if (!isError) {
-				jobManager->cancelAll(
-						eventSource, jobIdList, option);
+				jobManager->cancelAll(eventSource, alloc_, jobIdList, option);
 			}
 		}
 		else if (request.pathElements_.size() == 3 &&
@@ -3442,14 +3628,14 @@ void SystemService::ListenerSocketHandler::dispatch(
 			}
 			CancelOption option(startTimeString);
 
-			SQLExecutionManager *executionManager
-					= resourceSet_->getSQLExecutionManager();
+			SQLExecutionManager *executionManager = clsSvc_->getSQLService()->getExecutionManager();
+			Event::Source eventSource(varSizeAlloc_);
 			util::Vector<ClientId> clientIdList(alloc_);
 			if (!clientIdString.empty()) {
 				JobId jobId;
 				try {
 					clientIdString.append(":0:0");
-					jobId.parse(alloc_, clientIdString);
+					jobId.parse(alloc_, clientIdString, false);
 					clientIdList.push_back(jobId.clientId_);
 				}
 				catch (std::exception &e) {
@@ -3457,8 +3643,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 				}
 			}
 			if (!isError) {
-				executionManager->cancelAll(
-						eventSource, clientIdList, option);
+				executionManager->cancelAll(eventSource, alloc_, clientIdList, option);
 			}
 		}
 
@@ -3748,6 +3933,13 @@ void SystemService::ListenerSocketHandler::dispatch(
 		bool isLoadBalance = (request.pathElements_.size() == 2 &&
 							  request.pathElements_[1] == "loadBalance");
 		if (masterNodeId != 0 && !isLoadBalance) {
+			const ServiceTypeInfo &addressType =
+					getDefaultAddressType(request.parameterMap_);
+			if (addressType.first < 0) {
+				response.setBadRequestError();
+				return;
+			}
+
 			picojson::object master;
 			std::string commands = "[WEB API] ";
 			for (size_t pos = 0; pos < request.pathElements_.size(); pos++) {
@@ -3755,7 +3947,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 				commands += request.pathElements_[pos];
 			}
 			if (masterNodeId > 0) {
-				getServiceAddress(pt_, masterNodeId, master, SYSTEM_SERVICE);
+				getServiceAddress(pt_, masterNodeId, master, addressType);
 				tmp["master"] = picojson::value(master);
 				GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_BAD_STATUS,
 					commands << " is master only command, "
@@ -3843,9 +4035,9 @@ void SystemService::ListenerSocketHandler::dispatch(
 		else if (request.pathElements_.size() == 2 &&
 				 request.pathElements_[1] == "loadBalance") {
 			if (request.method_ == EBB_GET) {
-				const int32_t addressType = resolveAddressType(
-					request.parameterMap_, DEFAULT_ADDRESS_TYPE);
-				if (addressType < 0) {
+				const ServiceTypeInfo &addressType =
+						getDefaultAddressType(request.parameterMap_);
+				if (addressType.first < 0) {
 					response.setBadRequestError();
 					return;
 				}
@@ -3977,15 +4169,13 @@ bool SystemService::setGoalPartitions(util::StackAllocator &alloc,
 				GS_THROW_USER_ERROR(GS_ERROR_SC_GOAL_INVALID_FORMAT, 
 						"Invalid format, pId=" << pname);
 			}
-			if (pId == UNDEF_PARTITIONID || pId >= pt_->getPartitionNum()) {
+			if (pId < 0 || pId >= pt_->getPartitionNum()) {
 				GS_THROW_USER_ERROR(
-						GS_ERROR_SC_GOAL_INVALID_FORMAT,
-						"Invalid format range, pId=" << pId);
+						GS_ERROR_SC_GOAL_INVALID_FORMAT, "Invalid format range, pId=" << pId);
 			}
 			if (owner == NULL) {
 				GS_THROW_USER_ERROR(
-						GS_ERROR_SC_GOAL_NOT_OWNER,
-						"Invalid format, not owner, pId=" << pId);
+						GS_ERROR_SC_GOAL_NOT_OWNER, "Invalid format, not owner, pId=" << pId);
 			}
 			util::Set<PartitionId>::iterator it = pIdSet.find(pId);
 			if (it != pIdSet.end()) {
@@ -4056,7 +4246,7 @@ bool SystemService::setGoalPartitions(util::StackAllocator &alloc,
 			pt_->updateGoal(role);
 		}
 		if (pt_->isMaster()) {
-			GS_TRACE_CLUSTER_INFO(pt_->dumpPartitionsNew(alloc, PT_CURRENT_GOAL));
+			GS_TRACE_CLUSTER_INFO(pt_->dumpPartitionsNew(alloc, PartitionTable::PT_CURRENT_GOAL));
 		}
 		return true;
 	}
@@ -4109,11 +4299,19 @@ bool SystemService::setGoalPartitions(util::StackAllocator &alloc,
 	return true;
 }
 
+SystemService::ServiceTypeInfo
+SystemService::ListenerSocketHandler::getDefaultAddressType(
+		const std::map<std::string, std::string> &parameterMap) const {
+	const ServiceTypeInfo info(
+			ServiceTypeInfo::first_type(DEFAULT_ADDRESS_TYPE), secure_);
+	return resolveAddressType(parameterMap, info);
+}
+
 /*!
 	@brief Reads socket
 */
 bool SystemService::ListenerSocketHandler::readOnce(
-	util::Socket &socket, util::NormalXArray<char8_t> &buffer) {
+		AbstractSocket &socket, util::NormalXArray<char8_t> &buffer) {
 	const size_t unitSize = 1024;
 
 	if (buffer.size() + unitSize > MAX_REQUEST_SIZE) {
@@ -4128,6 +4326,19 @@ bool SystemService::ListenerSocketHandler::readOnce(
 	}
 	buffer.resize(buffer.size() - unitSize + static_cast<size_t>(readSize));
 	return true;
+}
+
+SocketFactory& SystemService::ListenerSocketHandler::resolveSocketFactory(
+		SystemService *sysSvc, bool secure) {
+	SocketFactory *factory = secure ?
+			sysSvc->secureSocketFactories_.second :
+			sysSvc->socketFactory_;
+	if (factory == NULL) {
+		GS_THROW_SYSTEM_ERROR(
+				GS_ERROR_SC_SERVICE_CONSTRUCT_FAILED,
+				"Socket factory not available (secure=" << secure << ")");
+	}
+	return *factory;
 }
 
 SystemService::WebAPIRequest::WebAPIRequest() : method_(0), minorVersion_(0) {}
@@ -4384,8 +4595,15 @@ void SystemService::ConfigSetUpHandler::operator()(ConfigTable &config) {
 
 	CONFIG_TABLE_ADD_SERVICE_ADDRESS_PARAMS(config, SYS, 10040);
 
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SYS_SERVICE_SSL_PORT, INT32)
+		.setMin(0)
+		.setMax(65535)
+		.setDefault(10045);
+
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SYS_EVENT_LOG_PATH, STRING)
 		.setDefault("log");
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SYS_SECURITY_PATH, STRING)
+		.setDefault("security");
 
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SYS_TRACE_MODE, INT32)
 		.setExtendedType(ConfigTable::EXTENDED_TYPE_ENUM)
@@ -4394,6 +4612,29 @@ void SystemService::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.addEnum(TRACE_MODE_FULL, "FULL")
 		.deprecate()
 		.setDefault(TRACE_MODE_SIMPLE_DETAIL);
+
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SYS_SERVER_SSL_MODE, INT32)
+		.setExtendedType(ConfigTable::EXTENDED_TYPE_ENUM)
+		.addEnum(SSL_MODE_DISABLED, "DISABLED")
+		.addEnum(SSL_MODE_PREFERRED, "PREFERRED")
+		.addEnum(SSL_MODE_REQUIRED, "REQUIRED")
+		.setDefault(SSL_MODE_DEFAULT);
+
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SYS_CLUSTER_SSL_MODE, INT32)
+		.setExtendedType(ConfigTable::EXTENDED_TYPE_ENUM)
+		.addEnum(SSL_MODE_DISABLED, "DISABLED")
+		.addEnum(SSL_MODE_REQUIRED, "REQUIRED")
+		.addEnum(SSL_MODE_VERIFY, "VERIFY") 
+		.setDefault(SSL_MODE_DEFAULT);
+
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SYS_SSL_PROTOCOL_MAX_VERSION, INT32)
+		.setExtendedType(ConfigTable::EXTENDED_TYPE_ENUM)
+		.addEnum(SslConfig::SSL_VER_NONE, "NONE")
+		.addEnum(SslConfig::SSL_VER_TLS1_0, "TLSv1.0")
+		.addEnum(SslConfig::SSL_VER_TLS1_1, "TLSv1.1")
+		.addEnum(SslConfig::SSL_VER_TLS1_2, "TLSv1.2")
+		.addEnum(SslConfig::SSL_VER_TLS1_3, "TLSv1.3")
+		.setDefault(SslConfig::SSL_VER_TLS1_2);
 }
 
 SystemService::StatSetUpHandler SystemService::statSetUpHandler_;
@@ -4459,6 +4700,8 @@ void SystemService::StatSetUpHandler::operator()(StatTable &stat) {
 	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_MEM_WORK_TRANSACTION_RESULT_CACHED);
 	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_MEM_WORK_TRANSACTION_WORK_TOTAL);
 	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_MEM_WORK_TRANSACTION_WORK_CACHED);
+	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_MEM_WORK_TRANSACTION_STATE_TOTAL);
+	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_MEM_WORK_TRANSACTION_STATE_CACHED);
 	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_MEM_WORK_SQL_MESSAGE_TOTAL);
 	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_MEM_WORK_SQL_MESSAGE_CACHED);
 	STAT_ADD_SUB_SUB(STAT_TABLE_PERF_MEM_WORK_SQL_WORK_TOTAL);
@@ -4620,7 +4863,7 @@ bool SystemService::StatUpdator::operator()(StatTable &stat) {
 
 		stat.set(STAT_TABLE_PERF_PEAK_PROCESS_MEMORY, peakProcessMemory);
 
-		svc.sqlSvc_->getResourceSet()->getSQLExecutionManager()->updateStat(stat);
+		svc.sqlSvc_->getExecutionManager()->updateStat(stat);
 		if (!stat.getDisplayOption(STAT_TABLE_DISPLAY_WEB_ONLY) ||
 			!stat.getDisplayOption(STAT_TABLE_DISPLAY_OPTIONAL_MEM)) {
 			break;
@@ -4638,6 +4881,7 @@ bool SystemService::StatUpdator::operator()(StatTable &stat) {
 			STAT_TABLE_PERF_MEM_WORK_TRANSACTION_MESSAGE_TOTAL,
 			STAT_TABLE_PERF_MEM_WORK_TRANSACTION_RESULT_TOTAL,
 			STAT_TABLE_PERF_MEM_WORK_TRANSACTION_WORK_TOTAL,
+			STAT_TABLE_PERF_MEM_WORK_TRANSACTION_STATE_TOTAL,
 			STAT_TABLE_PERF_MEM_WORK_SQL_MESSAGE_TOTAL,
 			STAT_TABLE_PERF_MEM_WORK_SQL_WORK_TOTAL,
 			STAT_TABLE_PERF_MEM_WORK_SQL_STORE_TOTAL,
@@ -4656,6 +4900,7 @@ bool SystemService::StatUpdator::operator()(StatTable &stat) {
 			ALLOCATOR_GROUP_TXN_MESSAGE,
 			ALLOCATOR_GROUP_TXN_RESULT,
 			ALLOCATOR_GROUP_TXN_WORK,
+			ALLOCATOR_GROUP_TXN_STATE,
 			ALLOCATOR_GROUP_SQL_MESSAGE,
 			ALLOCATOR_GROUP_SQL_WORK,
 			ALLOCATOR_GROUP_SQL_LTS,
@@ -4702,7 +4947,7 @@ bool SystemService::StatUpdator::operator()(StatTable &stat) {
 
 	if (stat.getDisplayOption(STAT_TABLE_DISPLAY_OPTIONAL_SYNC)) {
 		picojson::value result;
-		svc.getSyncStats(result);
+		svc.getSyncStats(result, statOptionToAddressType(stat));
 		stat.set(STAT_TABLE_ROOT_SYNC, result);
 	}
 
@@ -4713,7 +4958,7 @@ bool SystemService::StatUpdator::operator()(StatTable &stat) {
 	}
 
 	if (stat.getDisplayOption(STAT_TABLE_DISPLAY_OPTIONAL_MEM)) {
-		service_->sqlSvc_->getResourceSet()->getSQLExecutionManager()->updateStat(stat);
+		service_->sqlSvc_->getExecutionManager()->updateStat(stat);
 	}
 
 	return true;
@@ -4721,16 +4966,16 @@ bool SystemService::StatUpdator::operator()(StatTable &stat) {
 
 void ServiceThreadErrorHandler::operator()(
 	EventContext &ec, std::exception &e) {
-	clsSvc_->setSystemError(&e);
+	clsSvc_->setError(ec, &e);
 }
 
-void ServiceThreadErrorHandler::initialize(const ResourceSet &resourceSet) {
-	clsSvc_ = resourceSet.clsSvc_;
+void ServiceThreadErrorHandler::initialize(const ManagerSet &mgrSet) {
+	clsSvc_ = mgrSet.clsSvc_;
 }
 
-void OutputStatsHandler::initialize(ResourceSet &resourceSet) {
-	sysSvc_ = resourceSet.sysSvc_;
-	pt_ = resourceSet.pt_;
-	clsMgr_ = resourceSet.clsMgr_;
+void OutputStatsHandler::initialize(ManagerSet &mgrSet) {
+	sysSvc_ = mgrSet.sysSvc_;
+	pt_ = mgrSet.pt_;
+	clsMgr_ = mgrSet.clsMgr_;
 }
 

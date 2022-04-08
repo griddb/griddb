@@ -42,15 +42,18 @@ void SQLScanOps::Registrar::operator()() const {
 }
 
 
-SQLScanOps::ScanCursor&
-SQLScanOps::BaseScanContainerOperator::getScanCursor(
-		OpContext &cxt, bool forCompiling) const {
+SQLScanOps::ScanCursorAccessor&
+SQLScanOps::BaseScanContainerOperator::getScanCursorAccessor(
+		OpContext &cxt) const {
 	const uint32_t inIndex = 0;
+	const bool forLatch = true;
 
-	if (cxt.getInputResource(inIndex).isEmpty()) {
-		ScanCursor::Source source(
-				cxt.getAllocator(), cxt.getLatchHolder(),
-				getCode().getContainerLocation(), NULL, cxt.getSource());
+	if (cxt.getResourceRef(inIndex, forLatch).get() == NULL) {
+		SQLValues::VarAllocator &varAlloc =
+				cxt.getValueContext().getVarAllocator();
+		ScanCursorAccessor::Source source(
+				varAlloc, getCode().getContainerLocation(), NULL,
+				cxt.getSource());
 
 		const SQLOps::OpConfig *config = getCode().getConfig();
 
@@ -67,22 +70,42 @@ SQLScanOps::BaseScanContainerOperator::getScanCursor(
 				static_cast<uint64_t>(std::max<int64_t>(
 						cxt.getNextCountForSuspend(), 0));
 
-		util::StdAllocator<void, void> cursorAlloc = cxt.getValueContext().getVarAllocator();
-		cxt.getInputResource(inIndex) =
-				SQLContainerUtils::ScanCursor::create(cursorAlloc, source);
+		util::AllocUniquePtr<ScanCursorAccessor> accessor(
+				ScanCursorAccessor::create(source));
+		cxt.setLatchResource(inIndex, accessor);
 	}
 
-	ScanCursor &cursor = cxt.getInputResource(inIndex).resolveAs<ScanCursor>();
+	return cxt.getResourceRef(
+			inIndex, forLatch).resolve().resolveAs<ScanCursorAccessor>();
+}
 
-	if (!forCompiling) {
-		if (getCode().getMiddleProjection() != NULL) {
+util::AllocUniquePtr<SQLScanOps::ScanCursor>::ReturnType
+SQLScanOps::BaseScanContainerOperator::getScanCursor(OpContext &cxt) const {
+	const uint32_t inIndex = 0;
+	const bool forLatch = true;
+	const SQLOps::OpStore::ResourceRef &accessorRef =
+			cxt.getResourceRef(inIndex, forLatch);
+
+	const uint32_t cursorIndex = 0;
+	util::AllocUniquePtr<void> &resource = cxt.getResource(cursorIndex);
+	if (resource.isEmpty()) {
+		ScanCursorAccessor &accessor =
+				accessorRef.resolve().resolveAs<ScanCursorAccessor>();
+		resource = accessor.createCursor(accessorRef);
+	}
+
+	util::AllocUniquePtr<ScanCursor> cursor(
+			resource.resolveAs<ScanCursor::Holder>().attach());
+	{
+		const Projection *midProj = getCode().getMiddleProjection();
+		if (midProj != NULL) {
 			SQLOps::ColumnTypeList typeList(cxt.getAllocator());
-			OpCodeBuilder::resolveColumnTypeList(
-					*getCode().getMiddleProjection(), typeList, NULL);
+			OpCodeBuilder::resolveColumnTypeList(*midProj, typeList, NULL);
 
-			if (cursor.getOutputIndex() == std::numeric_limits<uint32_t>::max()) {
+			if (cursor->getOutputIndex() ==
+					std::numeric_limits<uint32_t>::max()) {
 				const uint32_t outIndex = cxt.createLocal(&typeList);
-				cursor.setOutputIndex(outIndex);
+				cursor->setOutputIndex(outIndex);
 			}
 
 			SQLExprs::TupleColumnList *columnList =
@@ -99,7 +122,7 @@ SQLScanOps::BaseScanContainerOperator::getScanCursor(
 		}
 	}
 
-	return cxt.getInputResource(inIndex).resolveAs<ScanCursor>();
+	return cursor;
 }
 
 void SQLScanOps::BaseScanContainerOperator::unbindScanCursor(
@@ -108,6 +131,7 @@ void SQLScanOps::BaseScanContainerOperator::unbindScanCursor(
 		cursor.setOutputIndex(std::numeric_limits<uint32_t>::max());
 	}
 }
+
 
 void SQLScanOps::Scan::compile(OpContext &cxt) const {
 	OpPlan &plan = cxt.getPlan();
@@ -136,10 +160,9 @@ void SQLScanOps::Scan::compile(OpContext &cxt) const {
 			break;
 		}
 
-		ScanCursor &cursor = getScanCursor(cxt, true);
-		if (indexPlanned || getCode().getLimit() == 0 || cursor.isIndexLost()) {
-			if (cursor.isIndexLost()) {
-				unbindScanCursor(NULL, cursor);
+		ScanCursorAccessor &accessor = getScanCursorAccessor(cxt);
+		if (indexPlanned || getCode().getLimit() == 0 || accessor.isIndexLost()) {
+			if (accessor.isIndexLost()) {
 				indexPlanned = false;
 			}
 			break;
@@ -154,7 +177,8 @@ void SQLScanOps::Scan::compile(OpContext &cxt) const {
 			selector->setMultiAndConditionEnabled(true);
 		}
 
-		cursor.getIndexSpec(cxt, *selector);
+		accessor.getIndexSpec(
+				cxt.getExtContext(), cxt.getInputColumnList(0), *selector);
 		selector->select(*expr);
 		if (selector->isSelected()) {
 			break;
@@ -311,15 +335,15 @@ void SQLScanOps::Scan::compile(OpContext &cxt) const {
 				!andNodeFound && orNode == NULL ? MergeMode::MODE_MIXED :
 				MergeMode::MODE_MIXED_MERGING);
 
-		ScanCursor &cursor = getScanCursor(cxt, true);
-		cursor.setMergeMode(mergeMode);
-		cursor.setIndexSelection(*selector);
+		ScanCursorAccessor &accessor = getScanCursorAccessor(cxt);
+		accessor.setMergeMode(mergeMode);
+		accessor.setIndexSelection(*selector);
 
 		if (parentPending) {
 			cxt.setPlanPending();
 		}
 		else {
-			cursor.setRowIdFiltering();
+			accessor.setRowIdFiltering();
 
 			OpCode code = getCode();
 			code.setJoinPredicate(NULL);
@@ -504,12 +528,12 @@ bool SQLScanOps::Scan::tryCompileIndexJoin(
 }
 
 bool SQLScanOps::Scan::tryCompileEmpty(OpContext &cxt, OpPlan &plan) const {
-	ScanCursor &cursor = getScanCursor(cxt, true);
-	if (!cursor.isRowIdFiltering()) {
+	ScanCursorAccessor &accessor = getScanCursorAccessor(cxt);
+	if (!accessor.isRowIdFiltering()) {
 		return false;
 	}
 
-	if (cursor.isIndexLost()) {
+	if (accessor.isIndexLost()) {
 		return false;
 	}
 
@@ -540,11 +564,11 @@ TupleList::Info SQLScanOps::Scan::getInputInfo(
 
 
 void SQLScanOps::ScanContainerFull::execute(OpContext &cxt) const {
-	ScanCursor &cursor = getScanCursor(cxt);
+	util::AllocUniquePtr<ScanCursor> cursor(getScanCursor(cxt));
 
 	for (;;) {
 		const bool done =
-				cursor.scanFull(cxt, *getCode().getPipeProjection());
+				cursor->scanFull(cxt, *getCode().getPipeProjection());
 
 		if (done || cxt.checkSuspended()) {
 			break;
@@ -554,10 +578,10 @@ void SQLScanOps::ScanContainerFull::execute(OpContext &cxt) const {
 
 
 void SQLScanOps::ScanContainerRange::execute(OpContext &cxt) const {
-	ScanCursor &cursor = getScanCursor(cxt);
+	util::AllocUniquePtr<ScanCursor> cursor(getScanCursor(cxt));
 
 	for (;;) {
-		const bool done = cursor.scanRange(
+		const bool done = cursor->scanRange(
 				cxt, *getCode().getPipeProjection());
 
 		if (done) {
@@ -567,12 +591,12 @@ void SQLScanOps::ScanContainerRange::execute(OpContext &cxt) const {
 			return;
 		}
 	}
-	unbindScanCursor(&cxt, cursor);
+	unbindScanCursor(&cxt, *cursor);
 }
 
 
 void SQLScanOps::ScanContainerIndex::execute(OpContext &cxt) const {
-	ScanCursor &cursor = getScanCursor(cxt);
+	util::AllocUniquePtr<ScanCursor> cursor(getScanCursor(cxt));
 
 	TupleListReader *inReader = NULL;
 	const TupleColumnList *inColumnList = NULL;
@@ -583,6 +607,8 @@ void SQLScanOps::ScanContainerIndex::execute(OpContext &cxt) const {
 		inColumnList = &cxt.getInputColumnList(index);
 	}
 
+	const SQLExprs::IndexSelector &selector =
+			cursor->getAccessor().getIndexSelection();
 	SQLExprs::IndexConditionList condList(cxt.getAllocator());
 
 	for (;;) {
@@ -593,14 +619,11 @@ void SQLScanOps::ScanContainerIndex::execute(OpContext &cxt) const {
 			if (!inReader->exists()) {
 				break;
 			}
-			bindIndexCondition(
-					*inReader, *inColumnList, cursor.getIndexSelection(),
-					condList);
+			bindIndexCondition(*inReader, *inColumnList, selector, condList);
 		}
 
 		for (;;) {
-			const bool done = cursor.scanIndex(
-					cxt, *getCode().getPipeProjection(), condList);
+			const bool done = cursor->scanIndex(cxt, condList);
 
 			if (done) {
 				break;
@@ -616,9 +639,9 @@ void SQLScanOps::ScanContainerIndex::execute(OpContext &cxt) const {
 		inReader->next();
 	}
 	if (cxt.isAllInputCompleted()) {
-		cursor.finishIndexScan(cxt);
+		cursor->finishIndexScan(cxt);
 	}
-	unbindScanCursor(&cxt, cursor);
+	unbindScanCursor(&cxt, *cursor);
 }
 
 void SQLScanOps::ScanContainerIndex::bindIndexCondition(
@@ -654,11 +677,11 @@ void SQLScanOps::ScanContainerMeta::compile(OpContext &cxt) const {
 }
 
 void SQLScanOps::ScanContainerMeta::execute(OpContext &cxt) const {
-	ScanCursor &cursor = getScanCursor(cxt);
+	util::AllocUniquePtr<ScanCursor> cursor(getScanCursor(cxt));
 
 	for (;;) {
-		const uint32_t outIndex = cursor.getOutputIndex();
-		const bool done = cursor.scanMeta(
+		const uint32_t outIndex = cursor->getOutputIndex();
+		const bool done = cursor->scanMeta(
 				cxt, *getCode().getMiddleProjection(),
 				OpCodeBuilder::findFilterPredicate(
 						*getCode().getPipeProjection()));

@@ -31,6 +31,11 @@ const float64 FLOAT64_MIN = -1.7976931348623158e+308;
 
 #define MAX_STRING_LENGTH 0x7fffffffU
 
+enum PrivilegeType {
+	ALL,
+	READ
+};
+
 
 
 typedef uint64_t OId; /*!< Object ID */
@@ -52,6 +57,9 @@ typedef uint32_t SchemaVersionId; /*!< ContainerSchema version ID (unique
 typedef uint64_t LogSequentialNumber; /*!< Log sequential Number (unique witihin
 										 a partition) */
 
+const LogSequentialNumber UNDEF_LSN = UINT64_MAX;
+const LogSequentialNumber MAX_LSN = UNDEF_LSN - 1;
+
 typedef uint64_t
 	TransactionId;			/*!< Transaction ID (unique witihin a partition) */
 
@@ -70,8 +78,8 @@ typedef uint64_t ResultSize;
 
 typedef uint64_t BackgroundId; /*! Background Id (unique witihin a partition) */
 
-typedef uint32_t Size_t;
-typedef int32_t Offset_t;
+typedef uint32_t DSObjectSize;
+typedef int32_t DSObjectOffset;
 
 typedef OId PointRowId;  
 
@@ -100,8 +108,6 @@ const ColumnId MAX_COLUMNID = UNDEF_COLUMNID - 1;
 const SchemaVersionId UNDEF_SCHEMAVERSIONID = UINT32_MAX;
 const SchemaVersionId MAX_SCHEMAVERSIONID = UNDEF_SCHEMAVERSIONID - 1;
 
-const LogSequentialNumber UNDEF_LSN = UINT64_MAX;
-const LogSequentialNumber MAX_LSN = UNDEF_LSN - 1;
 
 const TransactionId UNDEF_TXNID = 0;
 const TransactionId MAX_TXNID = UINT64_MAX;
@@ -173,5 +179,12 @@ typedef uint16_t UpdateIntervalCategoryId;
 typedef RowId DatabaseId;  
 
 #define MAX_COMPOSITE_COLUMN_NUM 16
+
+typedef int64_t DSGroupId;
+const DSGroupId UNDEF_DS_GROUPID = INT64_MIN;
+const DSGroupId DUMMY_DS_GROUPID = UNDEF_DS_GROUPID;
+
+
+
 
 #endif

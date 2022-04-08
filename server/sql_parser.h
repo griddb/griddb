@@ -14,6 +14,10 @@
 	You should have received a copy of the GNU Affero General Public License
 	along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
+/*!
+ * @file sql_parser.h
+ * @brief SQLパーサ関連クラスの定義
+ */
 
 #ifndef SQL_PARSER_H_
 #define SQL_PARSER_H_
@@ -34,7 +38,7 @@ typedef util::VariableSizeAllocator<> SQLVarSizeAllocator;
 
 class SQLExecution;
 struct SQLExpandViewContext;
-class SQLConnectionEnvironment ;
+class SQLConnectionControl;
 class SQLParserContext;
 struct OptionParam;
 
@@ -155,6 +159,9 @@ public:
 	static TableColumn* makeCreateTableColumn(
 		SQLAllocator &alloc, SQLToken *name, SQLToken *type,
 		SyntaxTree::ColumnInfo *colInfo);
+	static TableColumn* makeCreateTableColumn(
+		SQLAllocator &alloc, SQLToken *name,
+		SyntaxTree::ColumnInfo *colInfo);
 
 	static TupleList::TupleColumnType toColumnType(const char8_t *name);
 	static TupleList::TupleColumnType determineType(const char *zIn);
@@ -201,10 +208,12 @@ public:
 		CMD_DROP_INDEX,
 		CMD_ALTER_TABLE_DROP_PARTITION,   
 		CMD_ALTER_TABLE_ADD_COLUMN,       
+		CMD_ALTER_TABLE_RENAME_COLUMN,    
 		CMD_CREATE_VIEW,  
 		CMD_DROP_VIEW,    
 
 		CMD_CREATE_USER,
+		CMD_CREATE_ROLE, 
 		CMD_DROP_USER,
 		CMD_SET_PASSWORD,
 		CMD_GRANT,
@@ -614,11 +623,23 @@ public:
 namespace lemon_SQLParser{ class SQLParser; };
 
 
+/*!
+	@brief 解析情報
+*/
 struct SQLParsedInfo {
 	typedef SyntaxTree::Expr Expr;
 
+	/*!
+		@brief バインド情報
+		@note prepare時に生成、bind時にBindInfoSetと対応してpPlanをiPlanに変更する
+	*/
 	struct BindInfo {
 
+	/*!
+		@brief コンストラクタ
+		@param [in] varName 変数名
+		@param [in] Expr エクスプレッション
+	*/
 		BindInfo(util::String &varName, Expr *bindExpr) :
 				varName_(varName), bindExpr_(bindExpr) {}
 
@@ -626,6 +647,10 @@ struct SQLParsedInfo {
 		Expr *bindExpr_;
 	};
 
+	/*!
+		@brief コンストラクタ
+		@param [in] alloc アロケータ
+	*/
 	SQLParsedInfo(util::StackAllocator &alloc) : alloc_(alloc),
 			syntaxTreeList_(alloc), tableList_(alloc), bindList_(alloc),
 			inputSql_(NULL),
@@ -633,8 +658,14 @@ struct SQLParsedInfo {
 			pragmaType_(SQLPragma::PRAGMA_NONE), pragmaValue_(NULL),
 			createForceView_(false)
 			{}
+	/*!
+		@brief デストラクタ
+	*/
 	~SQLParsedInfo() {}
 
+	/*!
+		@brief 解析済みコマンド数の取得
+	*/
 	int32_t getCommandNum() {
 		return static_cast<int32_t>(syntaxTreeList_.size());
 	}
@@ -663,6 +694,9 @@ struct SQLParsedInfo {
 };
 
 
+/*!
+ * @brief SQLParserContext object
+ */
 struct SQLTableInfo;
 class SQLTableInfoList;
 class SQLParserContext {

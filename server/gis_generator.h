@@ -50,7 +50,7 @@ public:
 	 * @return Generated expression
 	 */
 	Expr *operator()(
-		ExprList &args, TransactionContext &txn, ObjectManager &objectManager) {
+		ExprList &args, TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) {
 		if (args.empty()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 				"Cannot evaluate function with empty argument.");
@@ -79,7 +79,7 @@ public:
 					if (mp->numPoints() == 1) {
 						Point &p = (mp->getPoint(0));
 						return Expr::newGeometryValue(
-							p.dup(txn, objectManager,
+							p.dup(txn, objectManager, strategy,
 								static_cast<Geometry::srid_t>(int(*e2))),
 							txn);
 					}
@@ -106,7 +106,7 @@ public:
 	 * @return Generated expression
 	 */
 	Expr *operator()(
-		ExprList &args, TransactionContext &txn, ObjectManager &objectManager) {
+		ExprList &args, TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) {
 		if (args.empty()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 				"Cannot evaluate function with empty argument.");
@@ -129,7 +129,7 @@ public:
 				Geometry::GeometryType t = geom->getType();
 				if (t == Geometry::MULTIPOINT) {
 					MultiPoint *m = static_cast<MultiPoint *>(geom)->dup(txn,
-						objectManager, static_cast<Geometry::srid_t>(int(*e2)));
+						objectManager, strategy, static_cast<Geometry::srid_t>(int(*e2)));
 					return Expr::newGeometryValue(m, txn);
 				}
 			}
@@ -154,7 +154,7 @@ public:
 	 * @return Generated expression
 	 */
 	Expr *operator()(
-		ExprList &args, TransactionContext &txn, ObjectManager &objectManager) {
+		ExprList &args, TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) {
 		if (args.empty()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 				"Cannot evaluate function with empty argument.");
@@ -184,7 +184,7 @@ public:
 						}
 						return Expr::newGeometryValue(
 							QP_NEW_BY_TXN(txn)
-								LineString(id, parray, txn, objectManager),
+								LineString(id, parray, txn, objectManager, strategy),
 							txn);
 					}
 				}
@@ -210,7 +210,7 @@ public:
 	 * @return Generated expression
 	 */
 	Expr *operator()(
-		ExprList &args, TransactionContext &txn, ObjectManager &objectManager) {
+		ExprList &args, TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) {
 		if (args.empty()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 				"Cannot evaluate function with empty argument.");
@@ -241,7 +241,7 @@ public:
 						}
 						return Expr::newGeometryValue(
 							QP_NEW_BY_TXN(txn)
-								LinearRing(id, parray, txn, objectManager),
+								LinearRing(id, parray, txn, objectManager, strategy),
 							txn);
 					}
 				}
@@ -267,7 +267,7 @@ public:
 	 * @return Generated expression
 	 */
 	Expr *operator()(
-		ExprList &args, TransactionContext &txn, ObjectManager &objectManager) {
+		ExprList &args, TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) {
 		if (args.empty()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 				"Cannot evaluate function with empty argument.");
@@ -289,7 +289,7 @@ public:
 				Geometry::srid_t id = static_cast<Geometry::srid_t>(int(*e2));
 				Polygon *p = static_cast<Polygon *>(geom);
 				return Expr::newGeometryValue(
-					p->dup(txn, objectManager, id), txn);
+					p->dup(txn, objectManager, strategy, id), txn);
 			}
 		}
 		GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
@@ -312,7 +312,7 @@ public:
 	 * @return Generated expression
 	 */
 	Expr *operator()(
-		ExprList &args, TransactionContext &txn, ObjectManager &objectManager) {
+		ExprList &args, TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) {
 		if (args.empty()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 				"Cannot evaluate function with empty argument.");
@@ -335,7 +335,7 @@ public:
 				Geometry::srid_t id = static_cast<Geometry::srid_t>(int(*e2));
 				return Expr::newGeometryValue(
 					QP_NEW_BY_TXN(txn) PolyhedralSurface(id,
-						*static_cast<MultiPolygon *>(geom), txn, objectManager),
+						*static_cast<MultiPolygon *>(geom), txn, objectManager, strategy),
 					txn);
 			}
 		}
@@ -357,7 +357,7 @@ public:
 	 * @return Generated expression
 	 */
 	Expr *operator()(
-		ExprList &args, TransactionContext &txn, ObjectManager &objectManager) {
+		ExprList &args, TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) {
 		if (args.empty()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 				"Cannot evaluate function with empty argument.");
@@ -380,7 +380,7 @@ public:
 				geom->getType() == Geometry::QUADRATICSURFACE) {
 				Geometry::srid_t id = static_cast<Geometry::srid_t>(int(*e2));
 				return Expr::newGeometryValue(
-					geom->dup(txn, objectManager, id), txn);
+					geom->dup(txn, objectManager, strategy, id), txn);
 			}
 		}
 		GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,

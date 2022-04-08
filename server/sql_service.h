@@ -1,6 +1,6 @@
 ﻿/*
 	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
-
+	
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
 	published by the Free Software Foundation, either version 3 of the
@@ -22,21 +22,193 @@
 #ifndef SQL_SERVICE_H_
 #define SQL_SERVICE_H_
 
+#include "transaction_service.h"
 #include "sql_common.h"
-#include "sql_service_handler.h"
+#include "sql_execution.h"
 
 class SQLExecutionManager;
 struct SQLTableInfo;
-class ResourceSet;
-class SQLAllocatorManager;
 
-class SQLService {
+/*!
+	@brief SQLサービスハンドラ共通
+*/
+class SQLServiceHandler : public StatementHandler {
+public:
+	/*!
+		@brief コンストラクタ
+	*/
+	SQLServiceHandler() : StatementHandler(), globalVarAlloc_(NULL),
+		localAlloc_(NULL), sqlSvc_(NULL),
+		clsSvc_(NULL), txnSvc_(NULL), sysSvc_(NULL),
+		pt_(NULL), executionManager_(NULL) {}
 
-	struct Context;
-	struct Config;
+	/*!
+		@brief デストラクタ
+	*/
+	~SQLServiceHandler() {}
+
+	/*!
+		@brief 初期化
+	*/
+	void initialize(const ManagerSet& mgrSet);
+
+	void replyError(
+		EventType eventType,
+		PartitionId pId, EventContext& ec,
+		const NodeDescriptor& nd, StatementId stmtId, const std::exception& e);
+
+protected:
+
+	SQLVariableSizeGlobalAllocator* globalVarAlloc_;
+
+	SQLVariableSizeLocalAllocator** localAlloc_;
+
+	SQLService* sqlSvc_;
+
+	ClusterService* clsSvc_;
+
+	TransactionService* txnSvc_;
+
+	SystemService* sysSvc_;
+
+	PartitionTable* pt_;
+
+	JobManager* jobManager_;
+
+	SQLExecutionManager* executionManager_;
+};
+
+class UpdateTableCacheHandler : public SQLServiceHandler {
+public:
+	void operator()(EventContext& ec, Event& ev);
+private:
+};
+
+class SQLRequestNoSQLClientHandler : public SQLServiceHandler {
+public:
+	void operator()(EventContext& ec, Event& ev);
+private:
+	void executeRepair(EventContext& ec, SQLExecution* execution,
+		util::String& containerName, ContainerId largeContainerId,
+		SchemaVersionId versionId, NodeAffinityNumber affinity);
+};
+
+/*!
+	@brief マスタ通知SQL接続先決定ハンドラ
+*/
+class SQLGetConnectionAddressHandler : public SQLServiceHandler {
+public:
+	void operator()(EventContext& ec, Event& ev);
+};
+
+/*!
+	@brief バインド情報
+*/
+struct BindParam {
+	/*!
+		@brief コンストラクタ
+	*/
+	BindParam(util::StackAllocator& alloc, ColumnType type) : alloc_(alloc), type_(type) {}
+
+	BindParam(util::StackAllocator& alloc, ColumnType type, TupleValue& value) :
+		alloc_(alloc), type_(type), value_(value) {}
+
+	/*!
+		@brief デストラクタ
+	*/
+	~BindParam() {}
+
+	void dump(util::StackAllocator& alloc);
+
+	util::StackAllocator& alloc_;
+
+	ColumnType type_;
+
+	TupleValue value_;
+};
+
+/*!
+	@brief SQLリクエスト処理ハンドラ
+*/
+class SQLRequestHandler : public SQLServiceHandler {
+
+	static const char8_t* const querySeparator;
+
+
+	template <typename T1, typename T2>
+	void setValue(util::StackAllocator& alloc, T2 value,
+		int32_t& size, char*& data) {
+		size = sizeof(T1);
+		data = reinterpret_cast<char*>(ALLOC_NEW(alloc) T1);
+		*reinterpret_cast<T1*>(data) = static_cast<T1>(value);
+	}
 
 public:
+	/*!
+		@brief ステートメント種別
+	*/
 
+
+	typedef util::Vector<TupleList::TupleColumnType> ValueTypeList;
+	typedef util::ByteStream< util::ArrayInStream > InStream;
+
+	void operator()(EventContext& ec, Event& ev);
+
+	static void encodeEnvList(
+		EventByteOutStream& out, util::StackAllocator& alloc,
+		SQLExecutionManager& executionManager,
+		ConnectionOption& connOption);
+
+	static void decodeBindInfo(util::ByteStream<util::ArrayInStream>& in,
+		RequestInfo& requestInfo);
+
+	static void decodeBindColumnInfo(util::ByteStream<util::ArrayInStream>& in,
+		RequestInfo& requestInfo, InStream& fixedPartIn, InStream& varPartIn);
+
+private:
+
+	/*!
+		@brief オプションをセットする
+	*/
+	void setDefaultOptionValue(OptionSet& optionSet);
+
+	/*!
+		@brief クライアントリクエストデコード
+	*/
+	void decode(util::ByteStream<util::ArrayInStream>& in,
+		RequestInfo& requestInfo);
+	void replySuccess(Event& ev, NodeDescriptor& nd);
+};
+
+/*!
+	@brief SQLキャンセルハンドラ
+*/
+class SQLCancelHandler : public SQLServiceHandler {
+public:
+	void operator()(EventContext& ec, Event& ev);
+};
+
+/*!
+	@brief ソケット切断ハンドラ
+*/
+class SQLSocketDisconnectHandler : public SQLServiceHandler {
+public:
+	void operator()(EventContext& ec, Event& ev);
+};
+
+/*!
+	@brief NoSQL同期処理を行うハンドラ
+*/
+class NoSQLSyncReceiveHandler : public SQLServiceHandler {
+public:
+	void operator()(EventContext& ec, Event& ev);
+};
+
+/*!
+	@brief コンストラクタ
+*/
+class SQLService {
+public:
 	static const int32_t SQL_V1_1_X_CLIENT_VERSION;
 	static const int32_t SQL_V1_5_X_CLIENT_VERSION;
 	static const int32_t SQL_V2_9_X_CLIENT_VERSION;
@@ -53,178 +225,379 @@ public:
 	static const int32_t SQL_V4_1_0_MSG_VERSION;
 	static const int32_t SQL_MSG_VERSION;
 
+	/*!
+		@brief コンストラクタ
+	*/
 	SQLService(
-			SQLAllocatorManager &allocatorManager,
-			ConfigTable &config,
-			EventEngine::Source &eeSource,
-			const char *name);
+		ConfigTable& config, const EventEngine::Config& eeConfig,
+		EventEngine::Source& eeSource, const char* name, PartitionTable* pt);
 
+	/*!
+		@brief デストラクタ
+	*/
 	~SQLService();
 
 	static void checkVersion(int32_t versionId);
 
+	/*!
+		@brief コンフィグセットアップ
+	*/
 	static class ConfigSetUpHandler : public ConfigTable::SetUpHandler {
+		virtual void operator()(ConfigTable& config);
+	} configSetUpHandler_;
 
-		virtual void operator()(ConfigTable &config);
-	}
-	configSetUpHandler_;
+	/*!
+		@brief 初期化
+	*/
+	void initialize(const ManagerSet& mgrSet);
 
-	void initialize(ResourceSet &resourceSet);
-
+	/*!
+		@brief サービス開始
+	*/
 	void start();
 
+	/*!
+		@brief サービス停止
+	*/
 	void shutdown();
 
+	/*!
+		@brief サービス待ち合わせ
+	*/
 	void waitForShutdown();
 
-	EventEngine *getEE() {
-		return ee_;
+	/*!
+		@brief EventEngine取得
+	*/
+	EventEngine* getEE() {
+		return &ee_;
 	}
 
-	uint32_t getTargetPosition(
-			Event &ev, util::XArray<NodeId> &liveNodeList);
+	struct Config : public ConfigTable::ParamHandler {
+		Config() : sqlSvc_(NULL) {};
+		void setUpConfigHandler(SQLService* sqlSvc, ConfigTable& configTable);
+		virtual void operator()(
+			ConfigTable::ParamId id, const ParamValue& value);
+		SQLService* sqlSvc_;
+	};
 
-	Context &getContext() {
-		return cxt_;
+	void setTraceLimitTime(int32_t traceLimitTime) {
+		if (traceLimitTime * 1000 > INT32_MAX) {
+			traceLimitTime_ = INT32_MAX;
+		}
+		else {
+			traceLimitTime_ = traceLimitTime * 1000;
+		}
+	};
+
+	void setTraceLimitQuerySize(int32_t querySize) {
+		traceLimitQuerySize_ = querySize;
+	};
+
+	int32_t getTraceLimitTime() {
+		return traceLimitTime_;
+	};
+
+	int32_t getTraceLimitQuerySize() {
+		return traceLimitQuerySize_;
+	};
+
+	void setSendPendingInterval(int32_t interval) {
+		sendPendingInterval_ = interval;
 	}
 
+	int32_t getSendPendingInterval() {
+		return sendPendingInterval_;
+	}
 
+	void setSendPendingTaskLimit(int32_t limit) {
+		sendPendingTaskLimit_ = limit;
+	}
+
+	int32_t getSendPendingTaskLimit() {
+		return sendPendingTaskLimit_;
+	}
+
+	void setSendPendingJobLimit(int32_t limit) {
+		sendPendingJobLimit_ = limit;
+	}
+
+	int32_t getSendPendingJobLimit() {
+		return sendPendingJobLimit_;
+	}
+
+	void setSendPendingTaskConcurrency(int32_t limit) {
+		sendPendingTaskConcurrency_ = limit;
+	}
+
+	int32_t getSendPendingTaskConcurrency() {
+		return sendPendingTaskConcurrency_;
+	}
+
+	void setJobMemoryLimit(int64_t limit) {
+		jobMemoryLimit_ = limit;
+	}
+
+	int64_t getJobMemoryLimit() {
+		return jobMemoryLimit_;
+	}
+
+	void enableProfiler(bool isProfiler) {
+		isProfiler_ = isProfiler_;
+	}
+
+	bool isEnableProfiler() {
+		return isProfiler_;
+	}
+
+	int32_t getMemoryCheckCount() {
+		return checkCounter_;
+	}
+
+	void setMemoryCheckCount(int32_t count) {
+		checkCounter_ = count;
+	}
+
+	void setNoSQLFailoverTimeout(int32_t interval) {
+		if (interval * 1000 > INT32_MAX) {
+			nosqlFailoverTimeout_ = INT32_MAX;
+		}
+		else {
+			nosqlFailoverTimeout_ = interval * 1000;
+		}
+	}
+
+	int32_t getNoSQLFailoverTimeout() {
+		return nosqlFailoverTimeout_;
+	}
+
+	void setTableSchemaExpiredTime(int32_t interval) {
+		if (interval * 1000 > INT32_MAX) {
+			tableSchemaExpiredTime_ = INT32_MAX;
+		}
+		else {
+			tableSchemaExpiredTime_ = interval * 1000;
+		}
+	}
+
+	int32_t getTableSchemaExpiredTime() {
+		return tableSchemaExpiredTime_;
+	}
+
+	/*!
+		@brief パーティショングループ番号の取得
+	*/
+	PartitionGroupId getPartitionGroupId(PartitionId pId) {
+		return pgIdList_[pId];
+	}
+
+	PartitionId getBeginPId(PartitionGroupId pgId) {
+		return startPIdList_[pgId];
+	}
+
+	PartitionTable* getPartitionTable() {
+		return pt_;
+	}
+	/*!
+		@brief コンカレンシを取得
+	*/
 	int32_t getConcurrency() {
-		assert(config_.pgConfig_);
-		return config_.pgConfig_->getPartitionGroupCount();
-	}
-	
-	int32_t getPartitionGroupId(PartitionId pId) {
-		assert(config_.pgConfig_);
-		return config_.pgConfig_->getPartitionGroupId(pId);
+		return pgConfig_.getPartitionGroupCount();
 	}
 
-	SQLVariableSizeGlobalAllocator *getAllocator() {
+	/*!
+		@brief グローバルアロケータの取得
+	*/
+	SQLVariableSizeGlobalAllocator* getAllocator() {
 		return globalVarAlloc_;
 	}
 
-	TransactionManager *getTransactionManager() {
+	/*!
+		@brief ローカルアロケータの取得
+	*/
+	SQLVariableSizeLocalAllocator** getLocalAllocator() {
+		return localAlloc_;
+	}
+
+	/*!
+		@brief ローカルアロケータの取得
+	*/
+	SQLVariableSizeLocalAllocator* getLocalAllocator(int32_t nth) {
+		assert(localAlloc_ != NULL && nth < getConcurrency());
+		return localAlloc_[nth];
+	}
+
+	TransactionManager* getTransactionManager() {
 		return &txnMgr_;
 	}
 
-	void requestCancel(EventContext &ec);
-	void sendCancel(EventContext &ec, NodeId nodeId);
+	SQLExecutionManager* getExecutionManager() {
+		return executionManager_;
+	}
 
-	template <class T> void encode(Event &ev, T &t);
-	template <class T> void decode(Event &ev, T &t);
+	ClusterService* getClusterService() {
+		return clsSvc_;
+	}
+
+	void requestCancel(EventContext& ec);
+	void sendCancel(EventContext& ec, NodeId nodeId);
+
+	/*!
+		@brief エンコード
+	*/
+	template <class T> void encode(Event& ev, T& t);
+	template <class T> void decode(Event& ev, T& t);
+
+	static SQLTableInfo* decodeTableInfo(
+		util::StackAllocator& alloc, util::ArrayByteInStream& in);
+	static void applyClusterPartitionCount(
+		SQLTableInfo& tableInfo, uint32_t clusterPartitionCount);
 
 	uint64_t incClientSequenceNo() {
-		return cxt_.incClientSequenceNo();
+		return ++clientSequenceNo_;
+	}
+
+	PartitionGroupConfig& getConfig() {
+		return pgConfig_;
 	}
 
 	uint64_t getClientSequenceNo() {
-		return cxt_.getClientSequenceNo();
+		return clientSequenceNo_;
 	}
 
-	PartitionGroupConfig &getConfig() {
-		return *config_.pgConfig_;
+	void checkNodeStatus() {
+		try {
+			getClusterService()->getManager()->checkNodeStatus();
+		}
+		catch (std::exception& e) {
+			GS_THROW_USER_ERROR(GS_ERROR_TXN_CLUSTER_ROLE_UNMATCH,
+				GS_EXCEPTION_MERGE_MESSAGE(e, ""));
+		}
 	}
-
-	void checkNodeStatus();
 
 	void checkActiveStatus();
 
-	SQLAllocatorManager *getAllocatorManager();
-
-	const ResourceSet *getResourceSet() {
-		return resourceSet_;
+	int32_t getTableSchemaCacheSize() {
+		return tableSchemaCacheSize_;
 	}
 
 private:
 
-	void setupEE(const ConfigTable &config,
-			EventEngine::Source &eeSource,
-			const char *name);
+	EventEngine ee_;
+	const EventEngine::Source eeSource_;
 
-	template<class T>
-	void setHandler(GSEventType eventType,
-			EventEngine::EventHandlingMode mode
-					= EventEngine::HANDLING_PARTITION_SERIALIZED);
-
-	template<class T>
-	void setHandlerList(std::vector<GSEventType> &eventTypeList,
-			EventEngine::EventHandlingMode mode
-					= EventEngine::HANDLING_PARTITION_SERIALIZED);
-
-	void setConnectHandler();
-
-	template<class T>
-	void entryHandler(T *handler,
-			GSEventType eventType,
-			EventEngine::EventHandlingMode mode);
-
-	void setCommonHandler();
-
-	SQLVariableSizeGlobalAllocator *globalVarAlloc_;
-	
-	const ResourceSet *resourceSet_;
-
-	EventEngine *ee_;
-	SQLAllocatorManager *allocatorManager_;
-
-	std::vector<ResourceSetReceiver*> handlerList_;
-	std::vector<StatementHandler*> connectHandlerList_;
-	ServiceThreadErrorHandler serviceThreadErrorHandler_;
-
+	SQLVariableSizeGlobalAllocator* globalVarAlloc_;
+	SQLVariableSizeLocalAllocator** localAlloc_;
+	PartitionGroupConfig pgConfig_;
+	int32_t notifyClientInterval_;
+	SQLExecutionManager* executionManager_;
+	TransactionService* txnSvc_;
+	ClusterService* clsSvc_;
 	TransactionManager txnMgr_;
 
+	std::vector<uint8_t> statusList_;
+
+	util::Atomic <int64_t> nosqlSyncId_;
+
+	PartitionIdList startPIdList_;
+	PartitionIdList pgIdList_;
+
+	util::Atomic <uint64_t> clientSequenceNo_;
 	/*!
-		@brief Configuration of SQL service
+		@brief EventEngine config設定
 	*/
-	struct Config : public ConfigTable::ParamHandler {
+	EventEngine::Config createEEConfig(
+		const ConfigTable& config, const EventEngine::Config& src);
 
-		Config(ConfigTable &configTable);
+	ServiceThreadErrorHandler serviceThreadErrorHandler_;
 
-		~Config();
+	ConnectHandler connectHandler_;
 
-		void setUpConfigHandler(
-				ConfigTable &configTable, SQLService *sqlService);
-		
-		virtual void operator()(
-				ConfigTable::ParamId id, const ParamValue &value);
+	LoginHandler loginHandler_;
 
-		PartitionGroupConfig *pgConfig_;
-		
-		SQLService *sqlService_;
-	};
+	DisconnectHandler disconnectHandler_;
+
+	SQLGetConnectionAddressHandler getConnectionAddressHandler_;
+
+	SQLTimerNotifyClientHandler timerNotifyClientHandler_;
+
+	SQLRequestHandler requestHandler_;
+
+	SQLCancelHandler cancelHandler_;
+
+	NoSQLSyncReceiveHandler nosqlSyncReceiveHandler_;
+
+	SQLSocketDisconnectHandler socketDisconnectHandler_;
+
+	UnknownStatementHandler unknownStatementHandler_;
+
+	IgnorableStatementHandler ignorableStatementHandler_;
+
+	UpdateTableCacheHandler updateTableCacheHandler_;
+	SQLRequestNoSQLClientHandler requestNoSQLClientHandler_;
+	AuthenticationAckHandler authenticationAckHandler_;
+	CheckTimeoutHandler checkTimeoutHandler_;
+
+	ExecuteJobHandler executeHandler_;
+	ControlJobHandler controlHandler_;
+	SQLResourceCheckHandler resourceCheckHandler_;
+
+	DispatchJobHandler dispatchJobHandler_;
+
+	SendEventHandler sendEventHandler_;
+
+	PartitionTable* pt_;
+
+	int32_t traceLimitTime_;
+	int32_t traceLimitQuerySize_;
+	int32_t nosqlFailoverTimeout_;
+	int32_t tableSchemaExpiredTime_;
+	int32_t tableSchemaCacheSize_;
+	int32_t sendPendingInterval_;
+	int32_t sendPendingTaskLimit_;
+	int32_t sendPendingJobLimit_;
+	int32_t sendPendingTaskConcurrency_;
+
+	int64_t jobMemoryLimit_;
+	int32_t checkCounter_;
+	bool isProfiler_;
+
 	Config config_;
 
-	/*!
-		@brief Context of SQL service
-	*/
-	struct Context {
-		Context() : clientSequenceNo_(0) {}
-
-		uint64_t incClientSequenceNo() {
-			return ++clientSequenceNo_;
-		}
-
-		uint64_t getClientSequenceNo() {
-			return clientSequenceNo_;
-		}
-
-		util::Atomic <uint64_t> clientSequenceNo_;
-	};
-
-	Context cxt_;
-
 	static class StatSetUpHandler : public StatTable::SetUpHandler {
-		virtual void operator()(StatTable &stat);
+		virtual void operator()(StatTable& stat);
 	} statSetUpHandler_;
 
 	class StatUpdator : public StatTable::StatUpdator {
-		virtual bool operator()(StatTable &stat);
+		virtual bool operator()(StatTable& stat);
 
 	public:
 		StatUpdator();
-		SQLService *service_;
+		SQLService* service_;
 	} statUpdator_;
-
 };
+
+
+
+
+#define RAISE_RETURN(targetType)
+#define RAISE_EXCEPTION(targetType)
+#define RAISE_EXCEPTION2(targetType)
+#define RAISE_SLEEP(targetType)
+#define RAISE_SLEEP2(targetType)
+#define RAISE_RETURN_BOOL(targetType)
+#define RAISE_OPERATION(targetType)
+#define RAISE_OPERATION_BOOL(targetType)
+#define RAISE_OPERATION_TASK(targetType, task)
+#define RAISE_OPERATION_CHANGE_VALUE(targetType, value1, value2)
+#define RAISE_CHANGE_VALUE(targetType, value1, value2)
+#define RAISE_OPERATION_NULL(targetType)
+#define RAISE_RETURN_TASK(targetType, task)
+#define RAISE_EXCEPTION_TASK(targetType, task)
+#define RAISE_SLEEP_TASK(targetType, task)
+#define RAISE_CONTINUE(targetType, pos1, pos2)
+
+
+
 
 #endif

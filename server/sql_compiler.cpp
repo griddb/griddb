@@ -1,6 +1,6 @@
 ﻿/*
 	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
-
+	
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
 	published by the Free Software Foundation, either version 3 of the
@@ -16,8 +16,7 @@
 */
 #include "sql_compiler.h"
 #include "sql_processor.h" 
-#include "resource_set.h"
-#include "sql_execution_manager.h" 
+#include "sql_execution.h" 
 #include "meta_type.h"
 
 #include "json.h"
@@ -43,22 +42,20 @@ UTIL_TRACER_DECLARE(SQL_HINT);
 	while (false)
 
 
-
-
 SQLTableInfo::SQLTableInfo(util::StackAllocator &alloc) :
 		dbName_(alloc),
 		tableName_(alloc),
 		hasRowKey_(false),
 		writable_(false),
 		isView_(false),
+		isExpirable_(false),
 		columnInfoList_(alloc),
 		partitioning_(NULL),
 		indexInfoList_(alloc),
-		compositeIndexInfoList_(alloc),
 		nosqlColumnInfoList_(alloc),
 		nosqlColumnOptionList_(alloc),
+		compositeIndexInfoList_(alloc),
 		sqlString_(alloc),  
-		isExpirable_(false),
 		approxSize_(0),
 		cardinalityList_(alloc),
 		nullsStats_(alloc) {
@@ -102,8 +99,8 @@ SQLTableInfo::SubInfo::SubInfo() :
 SQLTableInfo::PartitioningInfo::PartitioningInfo(util::StackAllocator &alloc) :
 		alloc_(alloc),
 		partitioningType_(0),
-		partitioningColumnId_(UNDEF_COLUMNID),
-		subPartitioningColumnId_(UNDEF_COLUMNID),
+		partitioningColumnId_(-1),
+		subPartitioningColumnId_(-1),
 		subInfoList_(alloc_),
 		tableName_(alloc),
 		isCaseSensitive_(false),
@@ -1210,7 +1207,7 @@ void SQLCompiler::setMultiIndexScanEnabled(bool enabled) {
 	multiIndexScanEnabled_ = enabled;
 }
 
-void SQLCompiler::compile(const Select &in, Plan &plan, SQLConnectionEnvironment  *control) {
+void SQLCompiler::compile(const Select &in, Plan &plan, SQLConnectionControl *control) {
 	{
 		std::string value;
 
@@ -1228,7 +1225,7 @@ void SQLCompiler::compile(const Select &in, Plan &plan, SQLConnectionEnvironment
 			setMultiIndexScanEnabled((value == SQLPragma::VALUE_TRUE));
 		}
 		else {
-			setMultiIndexScanEnabled(control->getExecutionManager()->isMultiIndexScan());
+			setMultiIndexScanEnabled(control->getConfig().isMultiIndexScan());
 		}
 
 		if (control->getEnv(
@@ -1269,7 +1266,9 @@ void SQLCompiler::compile(const Select &in, Plan &plan, SQLConnectionEnvironment
 	case SyntaxTree::CMD_DROP_INDEX:
 	case SyntaxTree::CMD_ALTER_TABLE_DROP_PARTITION:  
 	case SyntaxTree::CMD_ALTER_TABLE_ADD_COLUMN:      
+	case SyntaxTree::CMD_ALTER_TABLE_RENAME_COLUMN:   
 	case SyntaxTree::CMD_CREATE_USER:
+	case SyntaxTree::CMD_CREATE_ROLE:
 	case SyntaxTree::CMD_DROP_USER:
 	case SyntaxTree::CMD_SET_PASSWORD:
 	case SyntaxTree::CMD_GRANT:
@@ -1938,7 +1937,7 @@ void SQLCompiler::genUpdate(const Select &select, Plan &plan) {
 	for (columnId = 0; columnId < tableInfo.columnInfoList_.size(); columnId++) {
 		util::String tmpKey(static_cast<const char*>(
 				tableInfo.columnInfoList_[columnId].second.c_str()), alloc_);
-		const util::String &key = SQLUtils::normalizeName(alloc_, tmpKey.c_str());
+		const util::String &key = normalizeName(alloc_, tmpKey.c_str());
 		realColumnSet.insert(key);
 	}
 
@@ -1957,7 +1956,7 @@ void SQLCompiler::genUpdate(const Select &select, Plan &plan) {
 		assert(columnExpr->qName_->name_);
 		const char *orgColumnName = columnExpr->qName_->name_->c_str();
 		util::String tmpKey(orgColumnName, alloc_);
-		const util::String &key = SQLUtils::normalizeName(alloc_, tmpKey.c_str());
+		const util::String &key = normalizeName(alloc_, tmpKey.c_str());
 		retVal = updateColumnMap.insert(std::make_pair(key, targetExpr));
 		if (!retVal.second) {
 			GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR,
@@ -1973,7 +1972,7 @@ void SQLCompiler::genUpdate(const Select &select, Plan &plan) {
 	for (size_t columnId = 0; columnId < tableInfo.columnInfoList_.size(); columnId++) {
 		const char *orgColumnName = tableInfo.columnInfoList_[columnId].second.c_str();
 		util::String tmpKey(orgColumnName, alloc_);
-		const util::String &key = SQLUtils::normalizeName(alloc_, tmpKey.c_str());
+		const util::String &key = normalizeName(alloc_, tmpKey.c_str());
 		util::Map<util::String, Expr *>::iterator it = updateColumnMap.find(key);
 		if (it != updateColumnMap.end()) {
 			Expr *targetExpr = (*it).second;
@@ -1989,6 +1988,8 @@ void SQLCompiler::genUpdate(const Select &select, Plan &plan) {
 						"Virtual column='" << tableInfo.columnInfoList_[columnId].second.c_str()
 						<< "' must not be specifed in set statement");
 			}
+
+	
 			const SQLTableInfo::PartitioningInfo *partitioning =
 					tableInfo.partitioning_;
 			if (partitioning != NULL && columnId == partitioning->partitioningColumnId_) {
@@ -2110,11 +2111,16 @@ void SQLCompiler::validateCreateTableOption(SyntaxTree::CreateTableOption &optio
 	if (option.columnInfoList_) {
 		SyntaxTree::ColumnInfoList::iterator itr = option.columnInfoList_->begin();
 		for (; itr != option.columnInfoList_->end(); ++itr) {
+			if ((*itr)->isVirtual()) {
+				SQL_COMPILER_THROW_ERROR(
+					GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, NULL,
+					"Virtual column is allowed for virtual table");
+			}
 			if (!checkAcceptableTupleType((*itr)->type_)) {
 				SQL_COMPILER_THROW_ERROR(
 						GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, NULL,
 						"Target column type='" << ValueProcessor::getTypeName(
-						SQLUtils::convertTupleTypeToNoSQLType((*itr)->type_))
+						convertTupleTypeToNoSQLType((*itr)->type_))
 						<< "' is not specified in current version");
 			}
 		}
@@ -2126,29 +2132,22 @@ void SQLCompiler::validateCreateTableOption(SyntaxTree::CreateTableOption &optio
 	}
 }
 
-bool SQLCompiler::checkAcceptableTupleType(
-		TupleList::TupleColumnType type) {
-
-	switch (type & ~TupleList::TYPE_MASK_NULLABLE) {
-		
-		case TupleList::TYPE_BOOL :
-		case TupleList::TYPE_BYTE :
-		case TupleList::TYPE_SHORT:
-		case TupleList::TYPE_INTEGER :
-		case TupleList::TYPE_LONG :
-		case TupleList::TYPE_FLOAT :
-		case TupleList::TYPE_NUMERIC :
-		case TupleList::TYPE_DOUBLE :
-		case TupleList::TYPE_TIMESTAMP :
-		case TupleList::TYPE_NULL :
-		case TupleList::TYPE_STRING :
-		case TupleList::TYPE_BLOB :
-		case TupleList::TYPE_ANY: 
-			return true;
-		
-		default:
-			return false;
-	}	
+void SQLCompiler::validateScanOptionForVirtual(const PlanExprList &scanOptionList, bool isVirtual) {
+	PlanExprList::const_iterator itr = scanOptionList.begin();
+	if (!isVirtual && scanOptionList.size() > 0) {
+		SQL_COMPILER_THROW_ERROR(
+			GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, NULL,
+			"Scan option is allowd for virtual table");
+	}
+	for (; itr != scanOptionList.end(); ++itr) {
+		if (itr->op_ != SQLType::EXPR_CONSTANT
+			&& itr->op_ != SQLType::EXPR_PLACEHOLDER
+			&& itr->op_ != SQLType::EXPR_COLUMN) {
+			SQL_COMPILER_THROW_ERROR(
+					GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, &(*itr),
+					"Invalid argument");
+		}
+	}
 }
 
 void SQLCompiler::validateCreateIndexOptionForVirtual(
@@ -2241,6 +2240,9 @@ void SQLCompiler::genDDL(const Select &select, Plan &plan) {
 	case SyntaxTree::CMD_ALTER_TABLE_ADD_COLUMN: 
 		node.qName_ = select.targetName_;
 		break;
+	case SyntaxTree::CMD_ALTER_TABLE_RENAME_COLUMN: 
+		node.qName_ = select.targetName_;
+		break;
 	default:
 		break;
 	}
@@ -2266,7 +2268,7 @@ int32_t SQLCompiler::makeInsertColumnMap(const SQLTableInfo &tableInfo,
 			static_cast<int32_t>(tableInfo.columnInfoList_.size()); columnId++) {
 		util::String key(static_cast<const char*>(
 				tableInfo.columnInfoList_[columnId].second.c_str()), alloc_);
-		const util::String &normalizedKey = SQLUtils::normalizeName(alloc_, key.c_str());
+		const util::String &normalizedKey = normalizeName(alloc_, key.c_str());
 		realColumnMap.insert(std::make_pair(normalizedKey, columnId));
 		realSensitiveColumnMap.insert(std::make_pair(key, columnId));
 		if (tableInfo.nosqlColumnOptionList_[columnId] != SyntaxTree::COLUMN_OPT_VIRTUAL) {
@@ -2294,7 +2296,7 @@ int32_t SQLCompiler::makeInsertColumnMap(const SQLTableInfo &tableInfo,
 			foundColumnId = (*it).second;
 		}
 		else {
-			const util::String &normalizedKey = SQLUtils::normalizeName(alloc_, key.c_str());
+			const util::String &normalizedKey = normalizeName(alloc_, key.c_str());
 			util::Map<util::String, int32_t>::iterator it = realColumnMap.find(normalizedKey);
 			if (it == realColumnMap.end()) {
 				GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR,
@@ -2333,7 +2335,7 @@ void SQLCompiler::setTargetTableInfo(const char *tableName, bool isCaseSensitive
 		const SQLTableInfo &tableInfo, SQLPreparedPlan::Node &node) {
 
 	for (size_t pos = 0; pos < tableInfo.nosqlColumnInfoList_.size(); pos++) {
-		if (!SQLUtils::checkNoSQLTypeToTupleType(tableInfo.nosqlColumnInfoList_[pos])) {
+		if (!checkNoSQLTypeToTupleType(tableInfo.nosqlColumnInfoList_[pos])) {
 			SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_UNSUPPORTED, NULL,
 					"Target column type='" << ValueProcessor::getTypeName(
 					tableInfo.nosqlColumnInfoList_[pos])
@@ -8111,7 +8113,7 @@ void SQLCompiler::applyJoinOption(
 				&& inputNode.qName_->nsId_ == SyntaxTree::QualifiedName::TOP_NS_ID) {
 			const SyntaxTree::QualifiedName &qName = *inputNode.qName_;
 			util::String *normName = ALLOC_NEW(alloc_) util::String(
-					SQLUtils::normalizeName(alloc_, qName.table_->c_str()));
+					normalizeName(alloc_, qName.table_->c_str()));
 			nodeNameList.push_back(normName);
 		}
 		else if (inputNode.type_ == SQLType::EXEC_SCAN) {
@@ -8121,7 +8123,7 @@ void SQLCompiler::applyJoinOption(
 			}
 			const SQLTableInfo& tableInfo = getTableInfoList().resolve(inputNode.tableIdInfo_.id_);
 			util::String *normName = ALLOC_NEW(alloc_) util::String(
-					SQLUtils::normalizeName(alloc_, tableInfo.tableName_.c_str()));
+					normalizeName(alloc_, tableInfo.tableName_.c_str()));
 			nodeNameList.push_back(normName);
 		}
 		else {
@@ -9658,7 +9660,7 @@ void SQLCompiler::makeNodeNameList(
 
 			const SyntaxTree::QualifiedName &qName = *node.qName_;
 			util::String *normName = ALLOC_NEW(alloc_) util::String(
-					SQLUtils::normalizeName(alloc_, qName.table_->c_str()));
+					normalizeName(alloc_, qName.table_->c_str()));
 			nodeNameList.push_back(normName);
 
 		}
@@ -9669,7 +9671,7 @@ void SQLCompiler::makeNodeNameList(
 			}
 			const SQLTableInfo& tableInfo = getTableInfoList().resolve(node.tableIdInfo_.id_);
 			util::String *normName = ALLOC_NEW(alloc_) util::String(
-					SQLUtils::normalizeName(alloc_, tableInfo.tableName_.c_str()));
+					normalizeName(alloc_, tableInfo.tableName_.c_str()));
 			nodeNameList.push_back(normName);
 
 		}
@@ -18318,7 +18320,7 @@ void SQLCompiler::Meta::genDriverClusterInfo(
 	{
 		int32_t major;
 		int32_t minor;
-		SQLUtils::getDatabaseVersion(major, minor);
+		NoSQLCommonUtils::getDatabasaeVersion(major, minor);
 		node.outputList_.push_back(genConstColumn(
 				plan, TupleValue(major), STR_DATABASE_MAJOR_VERSION));
 		node.outputList_.push_back(genConstColumn(
@@ -20140,12 +20142,12 @@ void SQLCompiler::TableNarrowingList::put(const TableInfo &tableInfo) {
 	const TableInfo::PartitioningInfo *partitioning = tableInfo.partitioning_;
 	assert(partitioning != NULL);
 
-	if (partitioning->partitioningColumnId_ != UNDEF_COLUMNID) {
+	if (partitioning->partitioningColumnId_ >= 0) {
 		entry.columnId_ = partitioning->partitioningColumnId_;
 		assert(entry.keyList_.size() == partitioning->subInfoList_.size());
 	}
 
-	if (partitioning->subPartitioningColumnId_ != UNDEF_COLUMNID) {
+	if (partitioning->subPartitioningColumnId_ >= 0) {
 		entry.subColumnId_ = partitioning->subPartitioningColumnId_;
 		assert(entry.subKeyList_.size() == partitioning->subInfoList_.size());
 	}
@@ -21581,11 +21583,11 @@ void SQLHintInfo::parseStatisticalHint(SQLHint::Id hintId, const Expr &hintExpr)
 		const util::String* nameStr = hintArg0.qName_->name_;
 		assert(nameStr != NULL);
 		if (tableStr == NULL) {
-			key.first = SQLUtils::normalizeName(alloc_, nameStr->c_str());
+			key.first = normalizeName(alloc_, nameStr->c_str());
 		}
 		else {
-			key.first = SQLUtils::normalizeName(alloc_, tableStr->c_str());
-			key.second = SQLUtils::normalizeName(alloc_, nameStr->c_str());
+			key.first = normalizeName(alloc_, tableStr->c_str());
+			key.second = normalizeName(alloc_, nameStr->c_str());
 		}
 	}
 	else {
@@ -21849,7 +21851,7 @@ void SQLCompiler::makeJoinHintMap(const SQLPreparedPlan &plan) {
 }
 
 SQLHintInfo::HintTableId SQLHintInfo::getHintTableId(const util::String& name) const {
-	const util::String &normName = SQLUtils::normalizeName(alloc_, name.c_str());
+	const util::String &normName = normalizeName(alloc_, name.c_str());
 	HintTableIdMap::const_iterator hintTableIdMapItr = hintTableIdMap_.find(normName);
 
 	if (hintTableIdMapItr == hintTableIdMap_.end()) {
@@ -21863,7 +21865,7 @@ SQLHintInfo::HintTableId SQLHintInfo::getHintTableId(const util::String& name) c
 SQLHintInfo::HintTableId SQLHintInfo::getHintTableId(const Expr &hintArgExpr) const {
 	assert(hintArgExpr.qName_ && hintArgExpr.qName_->name_);
 	const SyntaxTree::QualifiedName &qName = *hintArgExpr.qName_;
-	const util::String &normName = SQLUtils::normalizeName(alloc_, qName.name_->c_str());
+	const util::String &normName = normalizeName(alloc_, qName.name_->c_str());
 	HintTableIdMap::const_iterator hintTableIdMapItr = hintTableIdMap_.find(normName);
 
 
@@ -21883,7 +21885,7 @@ SQLHintInfo::HintTableId SQLHintInfo::getHintTableId(const Expr &hintArgExpr) co
 SQLHintInfo::HintTableId SQLHintInfo::getTableInfoId(const Expr &hintArgExpr) const {
 	assert(hintArgExpr.qName_ && hintArgExpr.qName_->name_);
 	const SyntaxTree::QualifiedName &qName = *hintArgExpr.qName_;
-	const util::String &normName = SQLUtils::normalizeName(alloc_, qName.name_->c_str());
+	const util::String &normName = normalizeName(alloc_, qName.name_->c_str());
 
 	TableInfoIdMap::const_iterator tableInfoIdMapItr = tableInfoIdMap_.find(normName);
 
@@ -22088,14 +22090,14 @@ void SQLHintInfo::setJoinMethodHintMap(
 
 void SQLHintInfo::insertHintTableIdMap(
 		const util::String& origName, HintTableId id) {
-	const util::String &normName = SQLUtils::normalizeName(alloc_, origName.c_str());
+	const util::String &normName = normalizeName(alloc_, origName.c_str());
 	HintTableIdMapValue val(id, origName);
 	hintTableIdMap_.insert(std::make_pair(normName, val));
 }
 
 void SQLHintInfo::insertTableInfoIdMap(
 		const util::String& origName, TableInfoId id) {
-	const util::String &normName = SQLUtils::normalizeName(alloc_, origName.c_str());
+	const util::String &normName = normalizeName(alloc_, origName.c_str());
 	TableInfoIdMapValue val(id, origName);
 	tableInfoIdMap_.insert(std::make_pair(normName, val));
 }
@@ -22899,11 +22901,5 @@ void SQLCompiler::dumpExprList(const PlanExprList &list) {
 		std::cout << "),";
 	}
 	std::cout << std::endl;
-}
-
-void SQLTableInfo::setPartitionCount(uint32_t partitionCount) {
-	if (partitioning_) {
-		partitioning_->clusterPartitionCount_ = partitionCount;
-	}
 }
 

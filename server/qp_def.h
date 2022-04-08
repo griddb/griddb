@@ -30,10 +30,6 @@
 #define QP_ALLOCATOR (txn.getDefaultAllocator())
 #define QP_ALLOCATOR_ (txn_.getDefaultAllocator())
 
-#ifdef CONSERVATIVE_STACK_ALLOCATOR_MODE
-#define QP_ALLOC_DELETE(alloc, x) ALLOC_DELETE((alloc), x)
-#define QP_DELETE(x) ALLOC_DELETE((*(alloc_.get())), x)
-#else
 #define QP_ALLOC_DELETE(alloc, x) callDestructor(x)
 #define QP_DELETE(x) callDestructor(x)
 
@@ -41,7 +37,6 @@ template <typename T>
 inline void callDestructor(T *obj) {
 	obj->~T();
 }
-#endif
 
 #define QP_XArray util::XArray
 #define QP_DEREF_ALLOCATOR(alloc) (*alloc)

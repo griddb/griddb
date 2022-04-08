@@ -206,8 +206,7 @@ void BitArray<BLOCK_BITS>::reserve(uint64_t capacity) {
 
 template <uint32_t BLOCK_BITS>
 void BitArray<BLOCK_BITS>::reset() {
-	blocks_.clear();
-	bitCount_ = 0;
+	clear();
 }
 
 template <uint32_t BLOCK_BITS>
@@ -217,6 +216,7 @@ void BitArray<BLOCK_BITS>::clear(){
 		uint8_t* blockTop = *it;
 		memset(blockTop, 0, BLOCK_BYTES);
 	}
+	bitCount_ = 0;
 }
 
 

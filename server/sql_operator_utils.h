@@ -22,9 +22,26 @@
 #include "sql_expression_utils.h"
 #include "sql_expression_base.h"
 
+class DataStoreV4;
+
 class SQLExecutionManager;
 
-class ResourceSet;
+class SQLService;
+class TransactionManager;
+class TransactionService;
+class ClusterService;
+class PartitionTable;
+class PartitionList;
+class ResourceSet {
+public:
+	virtual SQLService* getSQLService() const = 0;
+	virtual TransactionManager* getTransactionManager() const = 0;
+	virtual TransactionService* getTransactionService() const = 0;
+	virtual ClusterService* getClusterService() const = 0;
+	virtual PartitionTable* getPartitionTable() const = 0;
+	virtual DataStoreV4* getDataStore() const = 0;
+	virtual PartitionList* getPartitionList() const = 0;
+};
 
 struct SQLOpUtils {
 	typedef SQLOps::TupleListReader TupleListReader;

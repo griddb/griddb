@@ -227,16 +227,23 @@ public:
 			const SQLValues::CompColumnList &bothKeyList);
 
 private:
+	struct Constants {
+		static const uint64_t HASH_MAP_CAPACITY_PCT;
+	};
+
 	template<bool Matching>
 	static JoinHashContext<Matching>& prepareHashContext(
 			OpContext &cxt, const SQLValues::CompColumnList &keyList,
 			const SQLOps::CompColumnListPair &sideKeyList,
-			TupleListReader &reader,
-			const util::Vector<TupleColumn> &innerColumnList);
+			const util::Vector<TupleColumn> &innerColumnList,
+			const JoinInputOrdinals &ordinals);
 
 	template<bool Matching>
 	static TupleChain<Matching>* find(
 			JoinHashContext<Matching> &hashCxt, TupleListReader &reader);
+
+	static size_t resolveHashCapacity(
+			OpContext &cxt, const JoinInputOrdinals &ordinals);
 };
 
 struct SQLJoinOps::JoinHash::TupleChainMatch {
@@ -301,7 +308,7 @@ struct SQLJoinOps::JoinHashContext {
 			const SQLValues::CompColumnList &drivingKeyList,
 			util::AllocUniquePtr<SummaryTupleSet> &tupleSet,
 			util::AllocUniquePtr<SummaryTupleSet> &nullTupleSet,
-			SQLValues::ValueProfile *valueProfile);
+			size_t capacity, SQLValues::ValueProfile *valueProfile);
 
 	SQLValues::CompColumnList bothKeyList_;
 	SQLValues::CompColumnList drivingKeyList_;

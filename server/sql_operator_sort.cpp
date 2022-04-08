@@ -19,7 +19,6 @@
 #include "sql_operator_utils.h"
 
 
-
 const SQLOps::OpRegistrar
 SQLSortOps::Registrar::REGISTRAR_INSTANCE((Registrar()));
 
@@ -1217,7 +1216,7 @@ void SQLSortOps::SortNway::SorterBuilder::buildAt() {
 			typename T::NonNullableTraitsType>::TypedOp TypedDigester;
 
 	for (;; reader_.next()) {
-		if (sorter_.isFilled()) {
+		if (--nextInterruption_ <= 0) {
 			break;
 		}
 		else if (!reader_.exists()) {
@@ -1266,7 +1265,7 @@ void SQLSortOps::SortNway::SorterBuilder::uniqueBuildAt() {
 			sorter_.beginAt(false));
 
 	for (;; reader_.next()) {
-		if (sorter_.isFilled()) {
+		if (--nextInterruption_ <= 0) {
 			break;
 		}
 		else if (!reader_.exists()) {
@@ -1335,7 +1334,7 @@ void SQLSortOps::SortNway::SorterBuilder::groupBuildAt() {
 			sorter_.beginAt(false));
 
 	for (;; reader_.next()) {
-		if (sorter_.isFilled()) {
+		if (--nextInterruption_ <= 0) {
 			break;
 		}
 		else if (!reader_.exists()) {

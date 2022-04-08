@@ -30,9 +30,9 @@
 #include "cluster_event_type.h"
 
 #include "sql_common.h"
-#include "transaction_manager.h"
 #include "container_key.h"
 #include "schema.h"
+
 
 class BaseContainer;
 
@@ -189,6 +189,7 @@ class ReplicationContext {
 
 public:
 	typedef util::XArray<uint8_t, util::StdAllocator<uint8_t, void> > BinaryData;
+	typedef util::XArray<uint8_t, util::StdAllocator<uint8_t, VariableSizeAllocator> > BinaryData2;
 
 	ReplicationContext();
 	~ReplicationContext();
@@ -248,15 +249,11 @@ public:
 		ackClientId = ackClientId_;
 	}
 
-	int8_t getExistsIndex() const {
-		return existIndex_;
-	}
-
 	void setSQLResonseInfo(
 			PartitionId replPId, EventType replEventType, SessionId queryId,
 			const ClientId &clientId, bool isSync, StatementId execId,
 			int32_t subContainerId, ClientId &ackClientId,
-			int8_t existsIndex, int64_t syncId, uint8_t jobVersionId) {
+			int64_t syncId, uint8_t jobVersionId) {
 		replyPId_ = replPId;
 		replyEventType_ = replEventType;
 		queryId_ = queryId;
@@ -265,13 +262,8 @@ public:
 		execId_ = execId;
 		subContainerId_ = subContainerId;
 		ackClientId_ = ackClientId;
-		existIndex_ = existsIndex;
 		syncId_ = syncId;
 		jobVersionId_ = jobVersionId;
-	}
-
-	void setExistsIndex() {
-		existIndex_ = 1;
 	}
 
 	bool getSyncFlag() const {
@@ -317,8 +309,11 @@ public:
 		return originalStmtId_;
 	}
 
-	void setBinaryData(const void *data, size_t size);
-	const std::vector<BinaryData*>& getBinaryDatas() const;
+	void addExtraMessage(const void *data, size_t size);
+	const std::vector<BinaryData*>& getExtraMessages() const;
+	void setMessage(const void* data, size_t size);
+	void setMessage(Serializable *mes);
+	const BinaryData2* getMessage() const;
 
 private:
 	ReplicationId id_;
@@ -350,7 +345,6 @@ private:
 
 	LargeContainerStatusType execStatus_;
 	NodeAffinityNumber affinityNumber_;
-	int8_t existIndex_;
 	int64_t syncId_;
 	uint8_t jobVersionId_;
 
@@ -359,11 +353,13 @@ private:
 	StatementId execId_;
 
 	util::VariableSizeAllocator<> *alloc_;
-	std::vector<BinaryData*> binaryDatas_;
+	std::vector<BinaryData*> extraMessages_;
+	BinaryData2* binaryMes_;
 	
 	ReplicationContext(const ReplicationContext &replContext);
 	void clear();
-	void clearBinaryData();
+	void clearExtraMessage();
+	void clearMessage();
 };
 
 /*!
@@ -395,6 +391,22 @@ public:
 	int32_t getAuthenticationTimeoutInterval() const;
 
 	int32_t getReauthenticationInterval() const;
+	int32_t getUserCacheSize() const;
+	int32_t getUserCacheUpdateInterval() const;
+	bool isLDAPAuthentication() const;
+	bool isRoleMappingByGroup() const;
+	bool isLDAPSimpleMode() const;
+	const char* getLDAPUrl() const;
+	const char* getLDAPUserDNPrefix() const;
+	const char* getLDAPUserDNSuffix() const;
+	const char* getLDAPBindDN() const;
+	const char* getLDAPBindPassword() const;
+	const char* getLDAPBaseDN() const;
+	const char* getLDAPSearchAttribute() const;
+	const char* getLDAPMemberOfAttribute() const;
+	int32_t getLDAPWaitTime() const;
+	int32_t getLoginWaitTime() const;
+	int32_t getLoginRepetitionNum() const;
 
 	typedef uint8_t GetMode;
 	static const GetMode AUTO;  
@@ -558,8 +570,7 @@ public:
 	}
 
 private:
-	static const TransactionId INITIAL_TXNID =
-		TransactionContext::AUTO_COMMIT_TXNID;
+	static const TransactionId INITIAL_TXNID;
 	static const ReplicationId INITIAL_REPLICATIONID = 1;
 	static const AuthenticationId INITIAL_AUTHENTICATIONID = 1;
 
@@ -809,6 +820,22 @@ private:
 	const int32_t replicationTimeoutInterval_;
 	const int32_t authenticationTimeoutInterval_;
 	Config reauthConfig_;
+	const int32_t userCacheSize_;
+	const int32_t userCacheUpdateInterval_;
+	bool isLDAPAuthentication_;
+	bool isRoleMappingByGroup_;
+	bool isLDAPSimpleMode_;
+	const std::string ldapUrl_;
+	const std::string ldapUserDNPrefix_;
+	const std::string ldapUserDNSuffix_;
+	const std::string ldapBindDN_;
+	const std::string ldapBindPassword_;
+	const std::string ldapBaseDN_;
+	const std::string ldapSearchAttribute_;
+	const std::string ldapMemberOfAttribute_;
+	const int32_t ldapWaitTime_;
+	const int32_t loginWaitTime_;
+	const int32_t loginRepetitionNum_;
 	const int32_t txnTimeoutLimit_;
 	EventMonitor eventMonitor_;
 

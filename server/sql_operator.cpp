@@ -19,7 +19,6 @@
 
 
 
-
 SQLOps::OpConfig::OpConfig() {
 	std::fill(valueList_, valueList_ + VALUE_COUNT, -1);
 }
@@ -1044,7 +1043,7 @@ void SQLOps::OpCursor::finishOp() {
 void SQLOps::OpCursor::finishTotalOps() {
 	OpStore::Entry &topEntry = store_.getEntry(storeId_);
 	topEntry.setCompleted();
-	topEntry.closeLatchHolder();
+	topEntry.closeLatchResource();
 
 	if (isRootOp() && extCxt_ != NULL) {
 		extCxt_->finishRootOp();
@@ -1452,6 +1451,7 @@ SQLOps::OpStore::OpStore(OpAllocatorManager &allocManager) :
 		alloc_(allocManager.getLocalAllocator()),
 		entryList_(alloc_),
 		idManager_(alloc_),
+		resourceIdManager_(alloc_),
 		attachedReaderList_(alloc_),
 		attachedWriterList_(alloc_),
 		usedLatchHolderList_(alloc_),
@@ -1622,7 +1622,7 @@ void SQLOps::OpStore::closeAllLatchResources() throw() {
 		try {
 			Entry *entry = findEntry(it->first);
 			if (entry != NULL) {
-				entry->getInputResource(0).reset();
+				entry->closeLatchResource();
 			}
 		}
 		catch (...) {
@@ -1780,6 +1780,13 @@ SQLOps::OpStore::TotalStatsElement SQLOps::OpStore::profileTotalTempStoreUsage(
 }
 
 
+SQLOps::OpStore::ResourceRefData::ResourceRefData() :
+		store_(NULL),
+		index_(std::numeric_limits<uint32_t>::max()),
+		forLatch_(false) {
+}
+
+
 SQLOps::OpStore::AllocatorRef::AllocatorRef(
 		OpAllocatorManager &manager,
 		util::StackAllocator::BaseAllocator &base) :
@@ -1828,6 +1835,31 @@ void SQLOps::OpStore::TotalStats::updateValue(
 }
 
 
+SQLOps::OpStore::ResourceRef::ResourceRef(const ResourceRefData &data) :
+		data_(data) {
+}
+
+const util::AllocUniquePtr<void>&
+SQLOps::OpStore::ResourceRef::resolve() const {
+	const util::AllocUniquePtr<void> *ptr = get();
+	if (ptr == NULL) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+	return *ptr;
+}
+
+const util::AllocUniquePtr<void>* SQLOps::OpStore::ResourceRef::get() const {
+	if (data_.store_ == NULL) {
+		return NULL;
+	}
+
+	Entry &entry = data_.store_->getEntry(data_.id_);
+	return entry.findRefResource(
+			data_.index_, data_.forLatch_, data_.resourceId_);
+}
+
+
 SQLOps::OpStore::Entry::Entry(OpStore &store, const OpStoreId &id) :
 		id_(id),
 		allocRef_(store.getAllocatorManager(), store.getStackAllocatorBase()),
@@ -1840,7 +1872,6 @@ SQLOps::OpStore::Entry::Entry(OpStore &store, const OpStoreId &id) :
 		completed_(false),
 		subPlanInvalidated_(false),
 		pipelined_(false),
-		latchHolderUsed_(false),
 		completedInCount_(0),
 		multiStageInCount_(0),
 		readerLatchDelayCount_(0),
@@ -1877,17 +1908,17 @@ void SQLOps::OpStore::Entry::close(bool cursorOnly, bool withLatchHolder) {
 
 		elem->resource_.reset();
 
-		for (ProjectionResourceList::iterator it =
-				elem->projResourceList_.begin();
-				it != elem->projResourceList_.end(); ++it) {
-			ALLOC_DELETE(alloc_, it->second);
+		for (ProjectionResourceList &list = elem->projResourceList_;
+				!list.empty();) {
+			ALLOC_DELETE(alloc_, list.back().second);
+			list.pop_back();
 		}
 
 		elem->referredIdList_.clear();
 	}
 
 	if (withLatchHolder) {
-		latchHolder_.close();
+		closeLatchHolder();
 	}
 }
 
@@ -1948,11 +1979,30 @@ void SQLOps::OpStore::Entry::detachWriter(Entry *entry, uint32_t index) {
 }
 
 void SQLOps::OpStore::Entry::resetLatchHolder() {
-	latchHolder_.reset();
+	if (latchHolderIndex_.get() == NULL) {
+		return;
+	}
+
+	EntryElement &elem =
+			getInput(*latchHolderIndex_).first->getElement(0, false);
+
+	SQLValues::LatchHolder holder;
+	holder.reset(static_cast<SQLValues::BaseLatchTarget*>(
+			elem.latchResource_.get()));
 }
 
 void SQLOps::OpStore::Entry::closeLatchHolder() {
-	latchHolder_.close();
+	if (latchHolderIndex_.get() == NULL) {
+		return;
+	}
+
+	EntryElement &elem =
+			getInput(*latchHolderIndex_).first->getElement(0, false);
+
+	SQLValues::LatchHolder holder;
+	holder.reset(static_cast<SQLValues::BaseLatchTarget*>(
+			elem.latchResource_.get()));
+	holder.close();
 }
 
 util::StackAllocator& SQLOps::OpStore::Entry::getStackAllocator() {
@@ -2435,6 +2485,8 @@ uint64_t SQLOps::OpStore::Entry::getInputTupleCount(uint32_t index) {
 	const bool fromInput = true;
 	const bool withLocalRef = false;
 
+	assert(getElement(index, withLocalRef).readerList_.empty());
+
 	const EntryRef &ref = getInput(index);
 	EntryElement &elem = ref.first->getElement(ref.second, withLocalRef);
 	if (elem.blockTupleCount_ > 0 || ref.first->pipelined_) {
@@ -2854,13 +2906,48 @@ void SQLOps::OpStore::Entry::setReaderLatchDelayed(uint32_t index) {
 	enabled = true;
 }
 
-util::AllocUniquePtr<void>&
-SQLOps::OpStore::Entry::getInputResource(uint32_t index) {
-	return getInput(index).first->getResource(index, SQLOpTypes::END_PROJ);
+SQLOps::OpStore::ResourceRef SQLOps::OpStore::Entry::getResourceRef(
+		uint32_t index, bool forLatch) {
+	ResourceRefData data;
+	data.store_ = &store_;
+	data.id_ = id_;
+	if (forLatch) {
+		EntryElement &elem = getInput(index).first->getElement(0, false);
+		data.resourceId_ = elem.latchResourceId_;
+		data.index_ = index;
+	}
+	else {
+		data.resourceId_ = SQLValues::SharedId();
+		data.index_ = index;
+	}
+	data.forLatch_ = forLatch;
+	return ResourceRef(data);
 }
 
-util::AllocUniquePtr<void>& 
-SQLOps::OpStore::Entry::getResource(
+const util::AllocUniquePtr<void>* SQLOps::OpStore::Entry::findRefResource(
+		uint32_t index, bool forLatch, const SQLValues::SharedId &resourceId) {
+	const util::AllocUniquePtr<void> *ptr;
+
+	if (forLatch) {
+		EntryElement &elem = getInput(index).first->getElement(0, false);
+		if (!(elem.latchResourceId_ == resourceId)) {
+			return NULL;
+		}
+		ptr = &elem.latchResource_;
+	}
+	else {
+		EntryElement &elem = getElement(index, false);
+		ptr = &elem.resource_;
+	}
+
+	if (ptr->get() == NULL) {
+		return NULL;
+	}
+
+	return ptr;
+}
+
+util::AllocUniquePtr<void>& SQLOps::OpStore::Entry::getResource(
 		uint32_t index, SQLOpTypes::ProjectionType projType) {
 	EntryElement &elem = getElement(index, false);
 
@@ -2882,6 +2969,40 @@ SQLOps::OpStore::Entry::getResource(
 	}
 }
 
+void SQLOps::OpStore::Entry::setLatchResource(
+		uint32_t index, util::AllocUniquePtr<void> &resource,
+		SQLValues::BaseLatchTarget &latchTarget) {
+	if (resource.get() != &latchTarget || latchHolderIndex_.get() != NULL) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	EntryElement &elem = getInput(index).first->getElement(0, false);
+
+	store_.usedLatchHolderList_.push_back(ElementRef(id_, index));
+
+	latchHolderIndex_ = UTIL_MAKE_LOCAL_UNIQUE(
+			latchHolderIndex_, uint32_t, index);
+	elem.latchResource_.reset();
+
+	if (resource.get() != NULL) {
+		elem.latchResource_.swap(resource);
+		elem.latchResourceId_.assign(store_.resourceIdManager_);
+	}
+}
+
+void SQLOps::OpStore::Entry::closeLatchResource() {
+	if (latchHolderIndex_.get() == NULL) {
+		return;
+	}
+
+	EntryElement &elem =
+			getInput(*latchHolderIndex_).first->getElement(0, false);
+
+	elem.latchResource_.reset();
+	latchHolderIndex_.reset();
+}
+
 int64_t SQLOps::OpStore::Entry::getLastTupleId(uint32_t index) {
 	const bool withLocalRef = false;
 	EntryElement &elem = getElement(index, withLocalRef);
@@ -2896,14 +3017,6 @@ void SQLOps::OpStore::Entry::setLastTupleId(uint32_t index, int64_t id) {
 
 SQLOps::OpAllocatorManager& SQLOps::OpStore::Entry::getAllocatorManager() {
 	return store_.getAllocatorManager();
-}
-
-SQLValues::LatchHolder& SQLOps::OpStore::Entry::getLatchHolder() {
-	if (!latchHolderUsed_) {
-		store_.usedLatchHolderList_.push_back(ElementRef(id_, 0));
-		latchHolderUsed_ = true;
-	}
-	return latchHolder_;
 }
 
 bool SQLOps::OpStore::Entry::tryLatch(
@@ -3522,10 +3635,6 @@ void SQLOps::OpContext::adjustLatch(uint64_t size) {
 	return storeEntry_.adjustLatch(size);
 }
 
-SQLValues::LatchHolder& SQLOps::OpContext::getLatchHolder() {
-	return storeEntry_.getLatchHolder();
-}
-
 SQLValues::ValueProfile* SQLOps::OpContext::getValueProfile() {
 	return SQLExprs::ExprProfile::getValueProfile(getExprProfile());
 }
@@ -3688,9 +3797,9 @@ void SQLOps::OpContext::setReaderLatchDelayed(uint32_t index) {
 	storeEntry_.setReaderLatchDelayed(index);
 }
 
-util::AllocUniquePtr<void>& SQLOps::OpContext::getInputResource(
-		uint32_t index) {
-	return storeEntry_.getInputResource(index);
+SQLOps::OpStore::ResourceRef SQLOps::OpContext::getResourceRef(
+		uint32_t index, bool forLatch) {
+	return storeEntry_.getResourceRef(index, forLatch);
 }
 
 util::AllocUniquePtr<void>& SQLOps::OpContext::getResource(

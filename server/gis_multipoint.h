@@ -47,8 +47,8 @@ public:
 	~MultiPoint() {}
 
 	MultiPoint(srid_t id, const QP_XArray<Point *> &parray,
-		TransactionContext &txn, ObjectManager &objectManager)
-		: PointGeom(id, parray, txn, objectManager) {
+		TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy)
+		: PointGeom(id, parray, txn, objectManager, strategy) {
 		if (!parray.empty() && isAssigned_) {
 			calcBoundingRectAndSimplicity();
 		}
@@ -66,19 +66,19 @@ public:
 	}
 
 	MultiPoint *dup(
-		TransactionContext &txn, ObjectManager &objectManager, srid_t id) {
+		TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, srid_t id) {
 		if (isEmpty()) {
 			return QP_NEW MultiPoint(txn);
 		}
 		else {
-			MultiPoint *mp = QP_NEW MultiPoint(id, p_, txn, objectManager);
+			MultiPoint *mp = QP_NEW MultiPoint(id, p_, txn, objectManager, strategy);
 			mp->isAssigned_ = isAssigned_;
 			mp->isEmpty_ = isEmpty_;
 			return mp;
 		}
 	}
-	MultiPoint *dup(TransactionContext &txn, ObjectManager &objectManager) {
-		return dup(txn, objectManager, srId_);
+	MultiPoint *dup(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) {
+		return dup(txn, objectManager, strategy, srId_);
 	}
 
 	const char *getString(TransactionContext &txn) const {

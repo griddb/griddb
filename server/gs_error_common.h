@@ -26,7 +26,7 @@
 #endif
 
 #if GS_ERROR_COMMON_ONLY
-#include "util/type.h"
+#include "util/code.h"
 #else
 #include "gs_error.h"
 #endif
@@ -51,7 +51,11 @@ enum GSCommonErrorCode {
 
 	GS_ERROR_AUTH_INTERNAL_ILLEGAL_OPERATION = 124000,
 	GS_ERROR_AUTH_INTERNAL_ILLEGAL_MESSAGE,
-	GS_ERROR_AUTH_INVALID_CREDENTIALS
+	GS_ERROR_AUTH_INVALID_CREDENTIALS,
+
+	GS_ERROR_SSL_INTERNAL_ILLEGAL_OPERATION = 125000,
+	GS_ERROR_SSL_ILLEGAL_CONFIG,
+	GS_ERROR_SSL_OPERATION_FAILED
 };
 
 class GSCommonException : public util::Exception {
@@ -532,6 +536,33 @@ void GSExceptionCoder::decodeInternal(
 		GS_RETHROW_USER_ERROR(cause, message)
 #define GS_COMMON_EXCEPTION_MESSAGE(cause) \
 		GS_EXCEPTION_MESSAGE(cause)
+#endif 
+
+#if GS_ERROR_COMMON_ONLY
+#define GS_COMMON_LIBRARY_EXCEPTION_CONVERT(cause, dest, message) \
+		util::LibraryTool::toLibraryException( \
+				GS_COMMON_EXCEPTION_CONVERT(cause, message), dest)
+#define GS_COMMON_CHECK_LIBRARY_ERROR(call, providerSrc, cause, message) \
+		do { \
+			try { \
+				const int32_t code = (call); \
+				if (util::LibraryTool::findError(code, cause)) { \
+					throw util::LibraryTool::fromLibraryException< \
+							GSCommonException>( \
+							code, providerSrc.findExceptionProvider(), cause); \
+				} \
+			} \
+			catch (...) { \
+				std::exception e; \
+				GS_COMMON_RETHROW_USER_ERROR(e, message); \
+			} \
+		} \
+		while (false)
+#else
+#define GS_COMMON_LIBRARY_EXCEPTION_CONVERT(cause, dest, message) \
+		GS_LIBRARY_EXCEPTION_CONVERT(cause, dest, message)
+#define GS_COMMON_CHECK_LIBRARY_ERROR(code, providerSrc, cause, message) \
+		GS_CHECK_LIBRARY_ERROR(code, providerSrc, cause, message)
 #endif 
 
 #endif

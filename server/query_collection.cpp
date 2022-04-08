@@ -32,6 +32,7 @@
 
 #include "boolean_expression.h"
 #include "result_set.h"
+#include "key_data_store.h"
 
 #include "meta_store.h"
 
@@ -40,7 +41,7 @@ class QueryForMetaContainer::MessageRowHandler :
 public:
 	MessageRowHandler(
 			OutputMessageRowStore &out, BoolExpr *expr,
-			ObjectManager &objectManager, FunctionMap *functionMap);
+			ObjectManagerV4 &objectManager, AllocateStrategy &strategy, FunctionMap *functionMap);
 
 	virtual void operator()(
 			TransactionContext &txn,
@@ -49,7 +50,8 @@ public:
 private:
 	OutputMessageRowStore &out_;
 	BoolExpr *expr_;
-	ObjectManager &objectManager_;
+	ObjectManagerV4 &objectManager_;
+	AllocateStrategy &strategy_;
 	FunctionMap *functionMap_;
 };
 
@@ -66,7 +68,7 @@ private:
 QueryForCollection::QueryForCollection(TransactionContext &txn,
 	Collection &collection, const TQLInfo &tqlInfo, 
 	uint64_t limit, QueryHookClass *hook)
-	: Query(txn, *(collection.getObjectManager()), tqlInfo, limit, hook),
+	: Query(txn, *(collection.getObjectManager()), collection.getRowAllcateStrategy(), tqlInfo, limit, hook),
 	  collection_(&collection) {
 	if (hook_) {
 		hook_->qpBuildBeginHook(*this);	
@@ -152,7 +154,7 @@ QueryForCollection::QueryForCollection(TransactionContext &txn,
 
 	BoolExpr *tmp = pWhereExpr_;
 	if (tmp != NULL) {
-		pWhereExpr_ = tmp->makeDNF(txn, objectManager_);
+		pWhereExpr_ = tmp->makeDNF(txn, objectManager_, strategy_);
 		QP_DELETE(tmp);  
 	}
 
@@ -379,7 +381,7 @@ void QueryForCollection::doQueryWithCondition(
 										isFirstColumn = false;
 									}
 									ColumnInfo &columnInfo = collection.getColumnInfo(condList[i].columnId_);
-									os << columnInfo.getColumnName(txn, objectManager_);
+									os << columnInfo.getColumnName(txn, objectManager_, collection.getMetaAllcateStrategy());
 								}
 							}
 							addExplain(
@@ -392,7 +394,7 @@ void QueryForCollection::doQueryWithCondition(
 									os << " ";
 								}
 								ColumnInfo &columnInfo = collection.getColumnInfo((*(indexData.columnIds_))[0]);
-								os << columnInfo.getColumnName(txn, objectManager_);
+								os << columnInfo.getColumnName(txn, objectManager_, collection.getMetaAllcateStrategy());
 							}
 
 							addExplain(2, "SEARCH_MAP", "STRING", os.str().c_str(), "");
@@ -401,22 +403,6 @@ void QueryForCollection::doQueryWithCondition(
 					operatorOutOIdArray.clear();
 					collection.searchColumnIdIndex(
 						txn, *sc, operatorOutOIdArray, outputOrder);
-				}
-			} break;
-			case MAP_TYPE_HASH: {
-				HashMap::SearchContext *sc = NULL;
-				BoolExpr::toSearchContext(txn, andList, &indexData, *this,
-					sc, restConditions, nLimit_);
-				if (doExecute()) {
-					if (doExplain()) {
-						addExplain(1, "SEARCH_EXECUTE", "MAP_TYPE", "HASH", "");
-						const char *columnName =
-							indexColumnInfo->getColumnName(txn, objectManager_);
-						addExplain(2, "SEARCH_MAP", "STRING", columnName, "");
-					}
-					operatorOutOIdArray.clear();
-					collection.searchColumnIdIndex(
-						txn, *sc, operatorOutOIdArray);
 				}
 			} break;
 			case MAP_TYPE_SPATIAL: {
@@ -428,7 +414,7 @@ void QueryForCollection::doQueryWithCondition(
 						addExplain(
 							1, "SEARCH_EXECUTE", "MAP_TYPE", "SPATIAL", "");
 						const char *columnName =
-							indexColumnInfo->getColumnName(txn, objectManager_);
+							indexColumnInfo->getColumnName(txn, objectManager_, collection.getMetaAllcateStrategy());
 						addExplain(2, "SEARCH_MAP", "STRING", columnName, "");
 					}
 					operatorOutOIdArray.clear();
@@ -465,7 +451,7 @@ void QueryForCollection::doQueryWithCondition(
 					for (uint32_t q = 0; q < andList.size(); q++) {
 						util::StackAllocator::Scope scope(alloc);
 						TrivalentLogicType evalResult = andList[q]->eval(
-							txn, objectManager_, &row, getFunctionMap(), TRI_TRUE);
+							txn, objectManager_, strategy_, &row, getFunctionMap(), TRI_TRUE);
 						if (evalResult != TRI_TRUE) {
 							conditionFlag = false;
 							break;
@@ -579,7 +565,7 @@ void QueryForCollection::doSelection(
 			}
 			else if (selectionExpr->isSelection()) {
 				OutputMessageRowStore outputMessageRowStore(
-					collection.getDataStore()->getValueLimitConfig(),
+					collection.getDataStore()->getConfig(),
 					collection.getColumnInfoList(), collection.getColumnNum(),
 					serializedRowList, serializedVarDataList, true);
 				type = RESULT_ROWSET;
@@ -632,7 +618,7 @@ void QueryForCollection::doSelection(
 }
 
 QueryForCollection *QueryForCollection::dup(
-	TransactionContext &txn, ObjectManager &objectManager) {
+	TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) {
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
 	char *dbName = NULL;
 	char *queryStr = NULL;
@@ -671,14 +657,14 @@ QueryForCollection *QueryForCollection::dup(
 		for (ExprList::iterator itr = pSelectionExprList_->begin();
 			 itr != pSelectionExprList_->end(); itr++) {
 			query->pSelectionExprList_->push_back(
-				(*itr)->dup(txn, objectManager));
+				(*itr)->dup(txn, objectManager, strategy));
 		}
 	}
 	else {
 		query->pSelectionExprList_ = NULL;
 	}
 	if (pWhereExpr_ != NULL) {
-		query->pWhereExpr_ = pWhereExpr_->dup(txn, objectManager);
+		query->pWhereExpr_ = pWhereExpr_->dup(txn, objectManager, strategy);
 	}
 	else {
 		query->pWhereExpr_ = NULL;
@@ -715,7 +701,7 @@ QueryForCollection *QueryForCollection::dup(
 	query->nLimit_ = nLimit_;
 	query->nOffset_ = nOffset_;
 	if (pLimitExpr_ != NULL) {
-		query->pLimitExpr_ = pLimitExpr_->dup(txn, objectManager);
+		query->pLimitExpr_ = pLimitExpr_->dup(txn, objectManager, strategy);
 	}
 	else {
 		query->pLimitExpr_ = NULL;
@@ -724,14 +710,14 @@ QueryForCollection *QueryForCollection::dup(
 		query->pGroupByExpr_ = QP_ALLOC_NEW(alloc) ExprList(alloc);
 		for (ExprList::iterator itr = pGroupByExpr_->begin();
 			 itr != pGroupByExpr_->end(); itr++) {
-			query->pGroupByExpr_->push_back((*itr)->dup(txn, objectManager));
+			query->pGroupByExpr_->push_back((*itr)->dup(txn, objectManager, strategy));
 		}
 	}
 	else {
 		query->pGroupByExpr_ = NULL;
 	}
 	if (pHavingExpr_ != NULL) {
-		query->pHavingExpr_ = pHavingExpr_->dup(txn, objectManager);
+		query->pHavingExpr_ = pHavingExpr_->dup(txn, objectManager, strategy);
 	}
 	else {
 		query->pHavingExpr_ = NULL;
@@ -740,7 +726,7 @@ QueryForCollection *QueryForCollection::dup(
 		query->pOrderByExpr_ = QP_ALLOC_NEW(alloc) SortExprList(alloc);
 		for (SortExprList::iterator itr = pOrderByExpr_->begin();
 			 itr != pOrderByExpr_->end(); itr++) {
-			query->pOrderByExpr_->push_back(*((*itr).dup(txn, objectManager)));
+			query->pOrderByExpr_->push_back(*((*itr).dup(txn, objectManager, strategy)));
 		}
 	}
 	else {
@@ -757,7 +743,7 @@ QueryForCollection *QueryForCollection::dup(
 QueryForMetaContainer::QueryForMetaContainer(
 		TransactionContext &txn, MetaContainer &container,
 		const TQLInfo &tqlInfo, uint64_t limit, QueryHookClass *hook) :
-		Query(txn, *(container.getObjectManager()), tqlInfo, limit, hook),
+		Query(txn, *(container.getObjectManager()), container.getRowAllcateStrategy(), tqlInfo, limit, hook),
 		container_(container) {
 
 	if (hook_) {
@@ -844,7 +830,7 @@ QueryForMetaContainer::QueryForMetaContainer(
 
 	BoolExpr *tmp = pWhereExpr_;
 	if (tmp != NULL) {
-		pWhereExpr_ = tmp->makeDNF(txn, objectManager_);
+		pWhereExpr_ = tmp->makeDNF(txn, objectManager_, strategy_);
 		QP_DELETE(tmp);  
 	}
 
@@ -861,21 +847,21 @@ void QueryForMetaContainer::doQuery(
 	check(txn);
 
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
-	DataStore *dataStore = container_.getDataStore();
+	DataStoreV4 *dataStore = container_.getDataStore();
 
 	util::XArray<ColumnInfo> columnInfoList(alloc);
 	container_.getColumnInfoList(columnInfoList);
 
 	const uint32_t columnCount = container_.getColumnNum();
 	OutputMessageRowStore out(
-			dataStore->getValueLimitConfig(),
+			dataStore->getConfig(),
 			columnInfoList.data(), columnCount,
 			*rs.getRSRowDataFixedPartBuffer(),
 			*rs.getRSRowDataVarPartBuffer(), true);
 
 	const MetaContainerInfo &info = container_.getMetaContainerInfo();
 	MessageRowHandler handler(
-			out, pWhereExpr_, *container_.getObjectManager(),
+			out, pWhereExpr_, *container_.getObjectManager(), container_.getRowAllcateStrategy(),
 			getFunctionMap());
 	MetaProcessor proc(txn, info.id_, info.forCore_);
 
@@ -973,7 +959,7 @@ void QueryForMetaContainer::check(TransactionContext &txn) {
 }
 
 FullContainerKey* QueryForMetaContainer::predicateToContainerKey(
-		TransactionContext &txn, DataStore &dataStore, DatabaseId dbId,
+		TransactionContext &txn, DataStoreV4 &dataStore, DatabaseId dbId,
 		const BoolExpr *expr, const MetaContainerInfo &metaInfo,
 		const MetaContainerInfo *coreMetaInfo, PartitionId partitionCount,
 		bool &reduced, PartitionId &reducedPartitionId) {
@@ -1031,14 +1017,10 @@ FullContainerKey* QueryForMetaContainer::predicateToContainerKey(
 			}
 			return NULL;
 		}
-
 		try {
-			StackAllocAutoPtr<BaseContainer> containerAutoPtr(
-					alloc, dataStore.getContainer(
-							txn, txn.getPartitionId(),
-							static_cast<ContainerId>(containerId),
-							ANY_CONTAINER));
-			BaseContainer *container = containerAutoPtr.get();
+			KeyDataStoreValue keyStoreValue = dataStore.getKeyDataStore()->get(alloc, static_cast<ContainerId>(containerId));
+			ContainerAutoPtr containerAutoPtr(txn, &dataStore, keyStoreValue.oId_, ANY_CONTAINER, false);
+			BaseContainer *container = containerAutoPtr.getBaseContainer();
 
 			if (container == NULL) {
 				return NULL;
@@ -1054,7 +1036,7 @@ FullContainerKey* QueryForMetaContainer::predicateToContainerKey(
 	if (reduced) {
 		const ContainerHashMode hashMode = CONTAINER_HASH_MODE_CRC32;
 
-		reducedPartitionId = DataStore::resolvePartitionId(
+		reducedPartitionId = KeyDataStore::resolvePartitionId(
 				alloc, *containerKey, partitionCount, hashMode);
 	}
 
@@ -1250,10 +1232,11 @@ bool QueryForMetaContainer::findEqCond(
 
 QueryForMetaContainer::MessageRowHandler::MessageRowHandler(
 		OutputMessageRowStore &out, BoolExpr *expr,
-		ObjectManager &objectManager, FunctionMap *functionMap) :
+		ObjectManagerV4 &objectManager, AllocateStrategy &strategy, FunctionMap *functionMap) :
 		out_(out),
 		expr_(expr),
 		objectManager_(objectManager),
+		strategy_(strategy),
 		functionMap_(functionMap) {
 }
 
@@ -1264,7 +1247,7 @@ void QueryForMetaContainer::MessageRowHandler::operator()(
 	if (expr_ != NULL) {
 		MetaContainerRowWrapper row(valueList);
 		const TrivalentLogicType evalResult = expr_->eval(
-				txn, objectManager_, &row, functionMap_, TRI_TRUE);
+				txn, objectManager_, strategy_, &row, functionMap_, TRI_TRUE);
 		if (evalResult != TRI_TRUE) {
 			return;
 		}

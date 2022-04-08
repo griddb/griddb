@@ -19,7 +19,6 @@
 #include "util/container.h" 
 #include <iostream>
 
-
 UTIL_TRACER_DECLARE(TUPLE_LIST);
 const LocalTempStore::BlockId TupleList::UNDEF_BLOCKID = LocalTempStore::UNDEF_BLOCKID;
 const LocalTempStore::BlockId TupleList::Reader::UNDEF_BLOCKID = LocalTempStore::UNDEF_BLOCKID;
@@ -393,6 +392,11 @@ void TupleList::Body::append(const LocalTempStore::Block &block) {
 	store_->getBufferManager().addAssignment(block.getBlockId()); 
 
 	appendBlockId(block.getBlockId());
+	LocalTempStore::Block *blockPtr = const_cast<LocalTempStore::Block *>(&block);
+	blockPtr->setGroupId(groupId_);
+	uint64_t activeCount = (tupleBlockIdList_.size() > activeTopBlockNth_) ?
+			tupleBlockIdList_.size() - activeTopBlockNth_ : 0;
+	store_->setActiveBlockCount(groupId_, activeCount);
 }
 
 
@@ -779,6 +783,7 @@ void TupleList::append(const LocalTempStore::Block &block) {
 	body_->append(block);
 	addAllocatedBlockCount();
 	setValidBlockCount(getAllocatedBlockCount());
+	getStore().incrementAppendBlockCount(getGroupId());
 }
 
 LocalTempStore::BlockId TupleList::getBlockId(uint64_t pos) {
@@ -1166,6 +1171,7 @@ bool TupleList::BlockReader::next(Block &tupleBlock) {
 			}
 			tupleBlock = nextBlock;
 			++currentBlockNth_;
+			tupleList_->getStore().incrementReadBlockCount(tupleList_->getGroupId());
 		}
 	}
 	return true;
@@ -1522,6 +1528,7 @@ bool TupleList::Reader::latchHeadBlock() {
 		fixedEndAddr_ = fixedAddr_ 
 				+ TupleList::tupleCount(blockAddr) * fixedPartSize_;
 
+		tupleList_->getStore().incrementReadBlockCount(tupleList_->getGroupId());
 		return true;
 	}
 	else {
@@ -1597,6 +1604,7 @@ void TupleList::Reader::positionWithLatch(BlockId newBlockNth) {
 
 	currentBlockNth_ = newBlockNth;
 	assert(newBlock.getBlockId() == tupleList_->getBlockId(newBlockNth));
+	tupleList_->getStore().incrementReadBlockCount(tupleList_->getGroupId());
 	fixedEndAddr_ = static_cast<const uint8_t*>(newBlock.data())
 			+ TupleList::BLOCK_HEADER_SIZE
 			+ TupleList::tupleCount(newBlock) * fixedPartSize_;
@@ -1700,6 +1708,7 @@ void TupleList::Reader::nextBlock(int32_t contiguousBlockCount) {
 		}
 		blockInfoArray_[nextBaseOffset].block_ = nextTopBlock;
 		blockInfoArray_[nextBaseOffset].addr_ = nextTopBlock.data();
+		tupleList_->getStore().incrementReadBlockCount(tupleList_->getGroupId());
 	}
 	else {
 		nextContiguousBlockCount = TupleList::contiguousBlockCount(nextTopAddr);
@@ -1879,6 +1888,7 @@ const uint8_t* TupleList::Reader::createSingleVarValue(uint64_t baseBlockNth, ui
 		blockInfoArray_[baseOffset + blockCount].addr_ = targetBlock.data();
 
 		varTop = static_cast<const uint8_t*>(targetBlock.data()) + offset;
+		tupleList_->getStore().incrementReadBlockCount(tupleList_->getGroupId());
 	}
 	else {
 		varTop = addr + offset;
@@ -1927,6 +1937,7 @@ TupleValue TupleList::Reader::createMultiVarValue(
 			blockInfoArray_[baseOffset + blockCount].addr_ = targetBlock.data();
 
 			varTop = static_cast<const uint8_t*>(targetBlock.data()) + offset;
+			tupleList_->getStore().incrementReadBlockCount(tupleList_->getGroupId());
 		}
 		else {
 			varTop = addr + offset;

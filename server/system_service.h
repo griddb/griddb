@@ -22,7 +22,7 @@
 #ifndef SYSTEM_SERVICE_H_
 #define SYSTEM_SERVICE_H_
 
-#include "util/net.h"
+#include "socket_wrapper.h"
 #include "cluster_common.h"
 #include "config_table.h"
 #include "data_type.h"
@@ -42,10 +42,12 @@ class TransactionManager;
 class SyncManager;
 class SyncService;
 class RecoveryManager;
-class DataStore;
-class LogManager;
+class DataStoreV4;
+class NoLocker;
+template <class L> class LogManager;
+class PartitionList;
 class SQLService;
-class ResourceSet;
+struct ManagerSet;
 
 struct ebb_request_parser;
 struct ebb_request;
@@ -66,7 +68,7 @@ public:
 
 	void operator()(EventContext &ec, std::exception &);
 
-	void initialize(const ResourceSet &resourceSet);
+	void initialize(const ManagerSet &mgrSet);
 
 private:
 	ClusterService *clsSvc_;
@@ -81,7 +83,7 @@ public:
 
 	void operator()(EventContext &ec, Event &ev);
 
-	void initialize(ResourceSet &resourceSet);
+	void initialize(ManagerSet &mgrSet);
 
 private:
 	SystemService *sysSvc_;
@@ -105,10 +107,13 @@ public:
 		TRACE_MODE_FULL
 	};
 
-	SystemService(ConfigTable &config, EventEngine::Config eeConfig,
-		EventEngine::Source source, const char8_t *name,
-		const char8_t *diffFilePath,
-		ServiceThreadErrorHandler &serviceThreadErrorHandler);
+	typedef std::pair<int32_t, bool> ServiceTypeInfo;
+
+	SystemService(
+			ConfigTable &config, const EventEngine::Config &eeConfig,
+			EventEngine::Source source, const char8_t *name,
+			const char8_t *diffFilePath,
+			ServiceThreadErrorHandler &serviceThreadErrorHandler);
 
 	~SystemService();
 
@@ -118,13 +123,16 @@ public:
 
 	void waitForShutdown();
 
-	void initialize(ResourceSet &resourceSet);
+	void initialize(ManagerSet &mgrSet);
 
 	SystemConfig &getConfig() {
 		return sysConfig_;
 	};
 
 
+	bool clearUserCache(const std::string &name,
+		bool isDatabase, picojson::value &result);
+	
 	bool joinCluster(const Event::Source &eventSource,
 		util::StackAllocator &alloc, const std::string &clusterName,
 		uint32_t minNodeNum, picojson::value &result);
@@ -147,7 +155,6 @@ public:
 	bool decreaseCluster(const Event::Source &eventSource,
 		util::StackAllocator &alloc, picojson::value &result,
 		bool isAutoLeave = false, int32_t leaveNum = 1);
-
 	struct BackupOption {
 		bool logArchive_;
 		bool logDuplicate_;
@@ -177,13 +184,13 @@ public:
 
 	void setPeriodicCheckpointFlag(bool flag);  
 
-	void getHosts(picojson::value &result, int32_t addressTypeNum);
+	void getHosts(picojson::value &result, const ServiceTypeInfo &addressType);
 
 	void getStats(picojson::value &result, StatTable &stats);
-
 	void traceStats();
 
-	void getSyncStats(picojson::value &result);
+	void getSyncStats(
+			picojson::value &result, const ServiceTypeInfo &addressType);
 
 	void getPGStoreMemoryLimitStats(picojson::value &result);
 
@@ -191,6 +198,7 @@ public:
 			picojson::value &result, const char8_t *namePrefix,
 			const char8_t *selectedType, int64_t minSize);
 
+	void getSqlTempStoreStats(picojson::value &result);
 
 
 	bool getOrSetConfig(
@@ -201,16 +209,16 @@ public:
 	void getPartitions(
 			util::StackAllocator &alloc,
 			picojson::value &result, int32_t partitionNo,
-			int32_t addressTypeNum, bool lossOnly = false,
+			const ServiceTypeInfo &addressType, bool lossOnly = false,
 			bool force = false, bool isSelf = false, bool lsnDump = false,
 			bool notDumpRole = false, uint32_t partitionGroupNo = UINT32_MAX, bool sqlOwnerDump=false);
 
 	bool setGoalPartitions(util::StackAllocator &alloc,
 		const picojson::value *request, picojson::value &result);
 
-	void getGoalPartitions(util::StackAllocator &alloc, 
-		int32_t addressTypeNum,
-		picojson::value &result);
+	void getGoalPartitions(
+			util::StackAllocator &alloc, const ServiceTypeInfo &addressType,
+			picojson::value &result);
 
 	void getLogs(
 			picojson::value &result, std::string &searchStr,
@@ -269,6 +277,14 @@ public:
 		return varSizeAlloc_;
 	}
 
+	enum SslMode {
+		SSL_MODE_DEFAULT,
+		SSL_MODE_DISABLED,
+		SSL_MODE_PREFERRED,
+		SSL_MODE_REQUIRED,
+		SSL_MODE_VERIFY 
+	};
+
 	struct Tester;
 	struct FailureSimulator;
 
@@ -287,18 +303,27 @@ private:
 	*/
 	class WebAPIServerThread : public util::Thread {
 	public:
-		WebAPIServerThread();
+		WebAPIServerThread(bool enabled, bool secure);
 
-		void initialize(ResourceSet &resourceSet);
+		bool isEnabled() const;
+		void initialize(ManagerSet &mgrSet);
+
+		void tryStart();
 		virtual void run();
+
 		void shutdown();
 		void waitForShutdown();
 
 	private:
+		void start();
+
 		volatile bool runnable_;
+		const bool enabled_;
+		const bool secure_;
+
 		SystemService *sysSvc_;
 		ClusterService *clsSvc_;
-		ResourceSet *resourceSet_;
+		ManagerSet *mgrSet_;
 	};
 
 	struct WebAPIRequest;
@@ -309,17 +334,23 @@ private:
 	*/
 	class ListenerSocketHandler : public util::IOPollHandler {
 	public:
-		explicit ListenerSocketHandler(ResourceSet &resourceSet);
+		ListenerSocketHandler(ManagerSet &mgrSet, bool secure);
 
 		virtual void handlePollEvent(
-			util::IOPollBase *io, util::IOPollEvent event);
+				util::IOPollBase *io, util::IOPollEvent event);
 		virtual util::Socket &getFile();
 
 	private:
 		void dispatch(WebAPIRequest &request, WebAPIResponse &response);
 
+		ServiceTypeInfo getDefaultAddressType(
+				const std::map<std::string, std::string> &parameterMap) const;
+
 		static bool readOnce(
-			util::Socket &socket, util::NormalXArray<char8_t> &buffer);
+				AbstractSocket &socket, util::NormalXArray<char8_t> &buffer);
+		static SocketFactory& resolveSocketFactory(
+				SystemService *sysSvc, bool secure);
+
 		util::Socket listenerSocket_;
 
 		ClusterService *clsSvc_;
@@ -329,13 +360,13 @@ private:
 		PartitionTable *pt_;
 		SyncManager *syncMgr_;
 		ClusterManager *clsMgr_;
-		ChunkManager *chunkMgr_;
+		PartitionList* partitionList_;
 		CheckpointService *cpSvc_;
-		DataStore *dataStore_;
 		GlobalFixedSizeAllocator *fixedSizeAlloc_;
 		EventEngine::VariableSizeAllocator varSizeAlloc_;
 		util::StackAllocator alloc_;
-		ResourceSet *resourceSet_;
+		SocketFactory &socketFactory_;
+		const bool secure_;
 	};
 
 	/*!
@@ -419,15 +450,18 @@ private:
 	};
 
 
-	EventEngine::Config &createEEConfig(
-		const ConfigTable &config, EventEngine::Config &eeConfig);
+	EventEngine::Config createEEConfig(
+			const ConfigTable &config, const EventEngine::Config &src);
 
-	static int32_t resolveAddressType(
-		const WebAPIRequest::ParameterMap &parameterMap,
-		ServiceType defaultType);
+	static ServiceTypeInfo resolveAddressType(
+			const WebAPIRequest::ParameterMap &parameterMap,
+			const ServiceTypeInfo &defaultType);
 
 	static bool acceptStatsOption(
-		StatTable &stats, const WebAPIRequest::ParameterMap &parameterMap);
+			StatTable &stats, const WebAPIRequest::ParameterMap &parameterMap,
+			const ServiceTypeInfo *defaultType);
+
+	static ServiceTypeInfo statOptionToAddressType(const StatTable &stat);
 
 
 	static class ConfigSetUpHandler : public ConfigTable::SetUpHandler {
@@ -458,12 +492,10 @@ private:
 	SyncService *syncSvc_;
 	PartitionTable *pt_;
 	CheckpointService *cpSvc_;
-	ChunkManager *chunkMgr_;
-	DataStore *dataStore_;
+	PartitionList* partitionList_;
 	TransactionService *txnSvc_;
 	TransactionManager *txnMgr_;
 	RecoveryManager *recoveryMgr_;
-	LogManager *logMgr_;
 	SyncManager *syncMgr_;
 	SQLService *sqlSvc_;
 
@@ -475,6 +507,7 @@ private:
 	const std::string outputDiffFileName_;
 
 	WebAPIServerThread webapiServerThread_;
+	WebAPIServerThread secureWebapiServerThread_;
 
 	SystemConfig sysConfig_;
 
@@ -486,6 +519,9 @@ private:
 	StatTable *baseStats_;
 
 	std::set<std::string> moduleList_;
+
+	SocketFactory *socketFactory_;
+	std::pair<SocketFactory*, SocketFactory*> secureSocketFactories_;
 
 
 };

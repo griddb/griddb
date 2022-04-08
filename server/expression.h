@@ -76,7 +76,7 @@ typedef struct SortExpr {
 	Expr *expr;
 	bool nullsLast;
 	SortExpr() : order(ASC), expr(NULL), nullsLast(true) {}
-	SortExpr *dup(TransactionContext &txn, ObjectManager &objectManager);
+	SortExpr *dup(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy);
 } SortItem;
 
 /*!
@@ -198,12 +198,12 @@ public:
 	Geometry *getGeometry();
 	const ExprList &getArgList();
 	Expr *getArrayElement(
-		TransactionContext &txn, ObjectManager &objectManager, size_t idx);
+		TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, size_t idx);
 	size_t getArrayLength(
-		TransactionContext &txn, ObjectManager &objectManager) const;
+		TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) const;
 	Timestamp getTimeStamp();
 
-	virtual Expr *dup(TransactionContext &txn, ObjectManager &objectManager);
+	virtual Expr *dup(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy);
 
 	/*!
 	 * @param Generate expression with null value
@@ -351,8 +351,8 @@ public:
 	 *
 	 * @return generated expression
 	 */
-	static Expr *newExprArray(ExprList &v, TransactionContext &txn, ObjectManager &objectManager) {
-		return QP_NEW_BY_TXN(txn) Expr(&v, txn, objectManager);
+	static Expr *newExprArray(ExprList &v, TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) {
+		return QP_NEW_BY_TXN(txn) Expr(&v, txn, objectManager, strategy);
 	}
 
 	static Expr *newFunctionNode(Token &fnName, ExprList *args,
@@ -477,7 +477,7 @@ public:
 	 */
 	bool castNumericValue();
 
-	virtual Expr *eval(TransactionContext &txn, ObjectManager &objectManager,
+	virtual Expr *eval(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 		ContainerRowWrapper *column_values, FunctionMap *function_map,
 		EvalMode mode);
 
@@ -606,26 +606,26 @@ protected:
 		value_ = QP_NEW Value();
 	}
 
-	Expr *evalSubBinOp(TransactionContext &txn, ObjectManager &objectManager,
+	Expr *evalSubBinOp(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 		const Operator op[][11], ContainerRowWrapper *column_values,
 		FunctionMap *function_map, const char *mark, EvalMode mode);
 	typedef void (*Calculator)(TransactionContext &txn, uint8_t const *p,
 		uint32_t size1, uint8_t const *q, uint32_t size2, Value &value);
-	Expr *evalSubBinOp(TransactionContext &txn, ObjectManager &objectManager,
+	Expr *evalSubBinOp(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 		const Calculator op[][11], ContainerRowWrapper *column_values,
 		FunctionMap *function_map, const char *mark, EvalMode mode);
-	Expr *evalSubBinOp(TransactionContext &txn, ObjectManager &objectManager,
+	Expr *evalSubBinOp(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 		const Operation opType, ContainerRowWrapper *column_values,
 		FunctionMap *function_map, const char *mark, EvalMode mode);
 
 	Expr *evalSubUnaryOpBaseZero(TransactionContext &txn,
-		ObjectManager &objectManager, const Calculator op[][11],
+		ObjectManagerV4 &objectManager, AllocateStrategy &strategy, const Calculator op[][11],
 		ContainerRowWrapper *column_values, FunctionMap *function_map,
 		const char *mark, EvalMode mode);
 
 	bool isIncludedBy(Expr *outerExpr);
 	bool isAntinomy(Expr *testExpr);
-	Expr *transposeExpr(TransactionContext &txn, ObjectManager &objectManager);
+	Expr *transposeExpr(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy);
 
 	void Init();
 
@@ -647,7 +647,7 @@ protected:
 
 	Expr(Value *array, TransactionContext &txn);
 
-	Expr(ExprList *args, TransactionContext &txn, ObjectManager &objectManager);
+	Expr(ExprList *args, TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy);
 
 	Expr(Operation op, Expr *arg1, Expr *arg2, TransactionContext &txn);
 	Expr(Operation op, ExprList &args, TransactionContext &txn);

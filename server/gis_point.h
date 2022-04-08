@@ -106,7 +106,7 @@ public:
 	 *
 	 */
 	Point(srid_t id, Expr *x, Expr *y, Expr *z, TransactionContext &txn,
-		ObjectManager &objectManager)
+		ObjectManagerV4 &objectManager, AllocateStrategy &strategy)
 		: Geometry(txn) {
 		isEmpty_ = (x == NULL) && (y == NULL) && (z == NULL);
 		srId_ = id;
@@ -118,7 +118,7 @@ public:
 		}
 		else if (x != NULL) {
 			x_ = std::numeric_limits<double>::quiet_NaN();
-			xExpr_ = x->dup(txn, objectManager);
+			xExpr_ = x->dup(txn, objectManager, strategy);
 			isAssigned_ = false;
 		}
 		else {
@@ -132,7 +132,7 @@ public:
 		}
 		else if (y != NULL) {
 			y_ = std::numeric_limits<double>::quiet_NaN();
-			yExpr_ = y->dup(txn, objectManager);
+			yExpr_ = y->dup(txn, objectManager, strategy);
 			isAssigned_ = false;
 		}
 		else {
@@ -149,7 +149,7 @@ public:
 		else {
 			z_ = std::numeric_limits<double>::quiet_NaN();
 			if (z != NULL) {
-				zExpr_ = z->dup(txn, objectManager);
+				zExpr_ = z->dup(txn, objectManager, strategy);
 				dimension_ = 3;
 			}
 			isAssigned_ = (z == NULL);
@@ -187,25 +187,25 @@ public:
 	 *
 	 * @return newly generated point object
 	 */
-	virtual Point *assign(TransactionContext &txn, ObjectManager &objectManager,
+	virtual Point *assign(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 		ContainerRowWrapper *amap, FunctionMap *fmap, EvalMode mode) {
 		if (isEmpty_ || isAssigned_) {
-			return dup(txn, objectManager);
+			return dup(txn, objectManager, strategy);
 		}
 
 		Expr *e1 = NULL, *e2 = NULL, *e3 = NULL;
 		e1 = (xExpr_ != NULL)
-				 ? (xExpr_->eval(txn, objectManager, amap, fmap, mode))
+				 ? (xExpr_->eval(txn, objectManager, strategy, amap, fmap, mode))
 				 : (Expr::newNumericValue(x_, txn));
 		e2 = (yExpr_ != NULL)
-				 ? (yExpr_->eval(txn, objectManager, amap, fmap, mode))
+				 ? (yExpr_->eval(txn, objectManager, strategy, amap, fmap, mode))
 				 : (Expr::newNumericValue(y_, txn));
 		if (dimension_ >= 3) {
 			e3 = (zExpr_ != NULL)
-					 ? (zExpr_->eval(txn, objectManager, amap, fmap, mode))
+					 ? (zExpr_->eval(txn, objectManager, strategy, amap, fmap, mode))
 					 : (Expr::newNumericValue(z_, txn));
 		}
-		return QP_NEW Point(srId_, e1, e2, e3, txn, objectManager);
+		return QP_NEW Point(srId_, e1, e2, e3, txn, objectManager, strategy);
 	}
 
 	/*!
@@ -249,20 +249,20 @@ public:
 	 * @return duplicated object, caller must release.
 	 */
 	Point *dup(
-		TransactionContext &txn, ObjectManager &objectManager, srid_t id) {
+		TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, srid_t id) {
 		if (isEmpty()) {
 			return QP_NEW Point(txn);
 		}
 		else {
 			Point *p = QP_NEW Point(id, x_, y_, z_, txn);
 			if (xExpr_ != NULL) {
-				p->xExpr_ = xExpr_->dup(txn, objectManager);
+				p->xExpr_ = xExpr_->dup(txn, objectManager, strategy);
 			}
 			if (yExpr_ != NULL) {
-				p->yExpr_ = yExpr_->dup(txn, objectManager);
+				p->yExpr_ = yExpr_->dup(txn, objectManager, strategy);
 			}
 			if (zExpr_ != NULL) {
-				p->zExpr_ = zExpr_->dup(txn, objectManager);
+				p->zExpr_ = zExpr_->dup(txn, objectManager, strategy);
 			}
 			p->isAssigned_ = isAssigned_;
 			p->isEmpty_ = isEmpty_;
@@ -276,8 +276,8 @@ public:
 	 *
 	 * @return duplicated object, caller must release
 	 */
-	Point *dup(TransactionContext &txn, ObjectManager &objectManager) {
-		return dup(txn, objectManager, srId_);
+	Point *dup(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) {
+		return dup(txn, objectManager, strategy, srId_);
 	}
 
 	/*!

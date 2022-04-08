@@ -45,7 +45,7 @@ class FunctorGeomFromText : public TqlFunc {
 public:
 	using TqlFunc::operator();
 	Expr *operator()(
-		ExprList &args, TransactionContext &txn, ObjectManager &objectManager) {
+		ExprList &args, TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) {
 		if (args.size() != 1) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
@@ -74,6 +74,7 @@ public:
 		arg.ev = &e;
 		arg.txn = &txn;
 		arg.objectManager = &objectManager;
+		arg.strategy = &strategy;
 		arg.fmap = wktFunctionMap;
 		arg.err = 0;
 

@@ -437,19 +437,17 @@ void TupleValueVarUtils::ContainerVarArrayReader::initialize(
 	end_ = varArray.body_;
 	length_ = 0;
 
-	const PartitionId partitionId = fieldObject_->getPartitionId();
-	ObjectManager &objectManager = *(fieldObject_->getObjectManager());
+	ObjectManagerV4 &objectManager = *(fieldObject_->getObjectManager());
 
 	util::StackAllocator *&alloc = getBlobCursorAllocator();
 	alloc = ContainerVarArrayAllocPool::getInstance().allocate();
 	try {
-		StubTransactionContext txn(*alloc, partitionId);
-
 		const void *addr = varArray.body_;
 		BlobCursor *cursor = getBlobCursor();
 
+		AllocateStrategy strategy(fieldObject_->getAllocateStrategy().getGroupId(), &objectManager);
 		new (cursor) BlobCursor(
-				partitionId, objectManager, static_cast<const uint8_t*>(addr));
+				objectManager, strategy, static_cast<const uint8_t*>(addr));
 	}
 	catch (...) {
 		ContainerVarArrayAllocPool::getInstance().release(alloc);
@@ -494,8 +492,6 @@ bool TupleValueVarUtils::ContainerVarArrayReader::next(
 		return false;
 	}
 
-	const PartitionId partitionId = fieldObject_->getPartitionId();
-	StubTransactionContext txn(*getBlobCursorAllocator(), partitionId);
 
 	const uint8_t *cursorData;
 	uint32_t cursorSize;
@@ -520,17 +516,22 @@ BaseObject* TupleValueVarUtils::ContainerVarArrayReader::getBaseObject(
 
 util::StackAllocator*&
 TupleValueVarUtils::ContainerVarArrayReader::getBlobCursorAllocator() {
-	typedef std::pair<util::StackAllocator*, BlobCursor> BlobCursorStorage;
-	UTIL_STATIC_ASSERT(sizeof(BlobCursorStorage) <= sizeof(cursorStorage_));
-	void *src = &cursorStorage_;
-	void *addr = static_cast<uint8_t*>(src) + StubTransactionContext::zero();
-	return static_cast<BlobCursorStorage*>(addr)->first;
+	return getCursorStorage().first;
 }
 
 BlobCursor* TupleValueVarUtils::ContainerVarArrayReader::getBlobCursor() {
-	typedef std::pair<util::StackAllocator*, BlobCursor> BlobCursorStorage;
-	UTIL_STATIC_ASSERT(sizeof(BlobCursorStorage) <= sizeof(cursorStorage_));
+	return &getCursorStorage().second;
+}
+
+TupleValueVarUtils::ContainerVarArrayReader::BlobCursorStorage&
+TupleValueVarUtils::ContainerVarArrayReader::getCursorStorage() {
+	checkStorageCapacity<sizeof(BlobCursorStorage), sizeof(cursorStorage_)>();
 	void *src = &cursorStorage_;
 	void *addr = static_cast<uint8_t*>(src) + StubTransactionContext::zero();
-	return &static_cast<BlobCursorStorage*>(addr)->second;
+	return *static_cast<BlobCursorStorage*>(addr);
+}
+
+template<size_t Required, size_t Capacity>
+void TupleValueVarUtils::ContainerVarArrayReader::checkStorageCapacity() {
+	UTIL_STATIC_ASSERT(Required <= Capacity);
 }

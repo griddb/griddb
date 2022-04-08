@@ -31,15 +31,15 @@ class MessageRowStore;
 class GeometryProcessor {
 public:
 	static int32_t compare(TransactionContext &txn,
-		ObjectManager &objectManager, ColumnId columnId,
+		ObjectManagerV4 &objectManager, AllocateStrategy &strategy, ColumnId columnId,
 		MessageRowStore *messageRowStore, uint8_t *objectRowField);
 
 	static int32_t compare(TransactionContext &txn,
-		ObjectManager &objectManager, ColumnType type,
+		ObjectManagerV4 &objectManager, AllocateStrategy &strategy, ColumnType type,
 		uint8_t *srcObjectRowField, uint8_t *targetObjectRowField);
 
-	static void getField(TransactionContext &txn, ObjectManager &objectManager,
-		ColumnId columnId, const Value *objectValue,
+	static void getField(TransactionContext &txn, ObjectManagerV4 &objectManager,
+		AllocateStrategy &strategy, ColumnId columnId, const Value *objectValue,
 		MessageRowStore *outputMessageRowStore);
 };
 

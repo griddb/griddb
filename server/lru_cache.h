@@ -17,7 +17,11 @@
 #ifndef LRU_CACHE_H_
 #define LRU_CACHE_H_
 
-#include "sql_common.h"
+#include "data_type.h"
+#include "gs_error.h"
+#include "util/type.h"
+#include "util/container.h"
+#include <iostream>
 
 
 /*!
@@ -38,7 +42,8 @@ struct CacheNodeBase {
 	/*!
 		@brief Constructor(No argument)
 	*/
-	CacheNodeBase() :
+	CacheNodeBase(Allocator& alloc) : 
+			key_(alloc),
 			prev_(NULL),
 			next_(NULL) {}
 
@@ -75,7 +80,7 @@ public:
 			capacity_(capacity),
 			keymap_(typename TableMap::key_compare(), alloc),
 			hitCount_(0),
-			missHitCount_(0) {
+			missHitCount_(0), swapOutCount_(0), swapInCount_(0) {
 
 		head_ = allocateNode();
 		tail_ = allocateNode();
@@ -101,6 +106,7 @@ public:
 		@brief Allocate node, use default allocator new
 	*/
 	virtual Node *allocateNode() {
+		swapInCount_++;
 		return ALLOC_VAR_SIZE_NEW(alloc_) Node(alloc_);
 	}
 
@@ -108,6 +114,7 @@ public:
 		@brief Allocate node with argument, use default allocator new
 	*/
 	virtual Node *allocateNode(Key &key, Value &value) {
+		swapOutCount_++;
 		return ALLOC_VAR_SIZE_NEW(alloc_) Node(key, value, alloc_);
 	}
 
@@ -116,6 +123,7 @@ public:
 	*/
 	virtual void deallocateNode(Node *node) {
 		ALLOC_VAR_SIZE_DELETE(alloc_, node);
+		swapOutCount_++;
 	}
 
 	/*!
@@ -180,6 +188,17 @@ public:
 		}
 	}
 
+	void dump() {
+		std::cout << "swapIn:" << this->swapInCount_
+				<< ", swapOut:" << this->swapOutCount_ << std::endl;
+	}
+
+	void getStat(int64_t &swapIn, int64_t &swapOut) {
+		swapIn = this->swapInCount_;
+		swapOut = this->swapOutCount_;
+	}
+
+
 	/*!
 		@brief Dump
 	*/
@@ -213,6 +232,9 @@ public:
 		oss << ", hitRate:" << hitRate << std::endl;
 	}
 
+	Allocator &getAllocator() {
+		return alloc_;
+	}
 protected:
 	
 	typedef std::pair<Key, Value> MapEntry;
@@ -228,6 +250,8 @@ protected:
 	Node* tail_;
 	int64_t hitCount_;
 	int64_t missHitCount_;
+	int64_t swapOutCount_;
+	int64_t swapInCount_;
 
 	/*!
 		@brief move to head linked chain
@@ -268,7 +292,7 @@ struct CacheNode : public CacheNodeBase<Key, Value, Allocator> {
 		@brief Constructor
 	*/
 	CacheNode(Allocator &alloc) :
-			CacheNodeBase<Key,Value,Allocator>(),
+			CacheNodeBase<Key,Value,Allocator>(alloc),
 			alloc_(alloc),
 			refCount_(0),
 			removed_(false) {}
@@ -312,6 +336,11 @@ struct CacheNode : public CacheNodeBase<Key, Value, Allocator> {
 		oss << "key:" << this->key_.c_str()
 				<<", refCont:" << refCount_ 
 				<< ", removing:" << static_cast<int32_t>(removed_);
+	}
+
+
+	Value getValue() {
+		return this->value_;
 	}
 
 	Allocator &alloc_;
@@ -391,6 +420,9 @@ public:
 				node->setRemoved();
 			}
 			else {
+				if (node->refCount_ < 0) {
+					return false;
+				}
 				node->deallocateValue(this->alloc_);
 				deallocateNode(node);
 				return true;
@@ -444,6 +476,17 @@ public:
 		}
 	}
 
+	bool setDiffLoad(Key &key) {
+		util::LockGuard<util::Mutex> guard(lock_);
+		typename TableMap::iterator it = this->keymap_.find(key);
+		if (it != this->keymap_.end()) {
+			Node* node = (*it).second;
+			node->value_->setDiffLoad();
+			return true;
+		}
+		return false;
+	}
+
 	/*!
 		@brief release key-value entry, shoud be used RAII(get/release)
 	*/
@@ -453,10 +496,22 @@ public:
 			return;
 		}
 		node->refCount_--;
+		if (node->refCount_ < 0) {
+			return;
+		}
 		if (node->isRemoved()) {
 			if (releaseNode(node)) {
 				node = NULL;
 			}
+		}
+	}
+
+	void refresh() {
+		util::LockGuard<util::Mutex> guard(lock_);
+		for (typename TableMap::iterator it = this->keymap_.begin();
+				it != this->keymap_.end(); it++) {
+			Node* node = (*it).second;			
+			node->value_->disableCache_ = true;
 		}
 	}
 
@@ -496,10 +551,154 @@ public:
 				<< ", pendingCount:" << pendingCount_ << std::endl;
 	}
 
-private:
+	void dump() {
+		LruCacheBase<Node,Key,Value,Allocator>::dump();
+	}
+
+	void getStat(int64_t &swapIn, int64_t &swapOut) {
+		LruCacheBase<Node,Key,Value,Allocator>::getStat(swapIn, swapOut);
+	}
+
+protected:
 	util::Mutex lock_;
+private:
 	int64_t pendingCount_;
 	int64_t allocateCount_;
+};
+
+#include "picojson.h"
+
+#define TEST_PRINT(s)
+#define TEST_PRINT1(s, d)
+
+template <class Node, class Key, class Value, class Allocator>
+class LruCacheWithMonitor :
+		public LruCacheCocurrency<Node, Key, Value, Allocator> {
+public:
+	typedef std::pair<Key, Value> MapEntry;
+	typedef std::map<Key, Node*, std::less<Key>,
+			util::StdAllocator<MapEntry, Allocator> > TableMap;
+
+	LruCacheWithMonitor(int32_t capacity, Allocator &alloc, int32_t updateInterval) :
+			LruCacheCocurrency<Node,Key,Value,Allocator>(capacity, alloc),
+			updateInterval_(updateInterval) {}
+
+	Node* put(Key &key, Value &value, bool withGet = false) {
+		util::LockGuard<util::Mutex> guard(this->lock_);
+		typename TableMap::iterator it = this->keymap_.find(key);
+		Node* node = NULL;
+		if (it == this->keymap_.end()) {
+			if (this->size_ != this->capacity_) { 
+				node = LruCacheBase<Node,Key,Value,Allocator>::allocateNode(key, value);
+				LruCacheBase<Node,Key,Value,Allocator>::attach(node);
+				this->keymap_.insert(std::make_pair(key, node));
+				this->size_++;
+			} 
+			else {
+				Node* temp = static_cast<Node*>(this->tail_->prev_);
+				this->keymap_.erase(temp->key_);
+				LruCacheBase<Node,Key,Value,Allocator>::detach(temp);
+				temp->deallocateValue(this->alloc_);
+				LruCacheBase<Node,Key,Value,Allocator>::releaseNode(temp);
+				node = LruCacheBase<Node,Key,Value,Allocator>::allocateNode(key, value);
+				LruCacheBase<Node,Key,Value,Allocator>::attach(node);
+				this->keymap_.insert(std::make_pair(key, node));
+			}
+		} 
+		else {
+			node = this->keymap_[key];
+			int refCount = node->refCount_;
+			LruCacheBase<Node,Key,Value,Allocator>::detach(node);
+			node->deallocateValue(this->alloc_);
+			LruCacheBase<Node,Key,Value,Allocator>::releaseNode(node);
+			node = LruCacheBase<Node,Key,Value,Allocator>::allocateNode(key, value);
+			node->refCount_ = refCount; 
+			this->keymap_[key] = node;
+			LruCacheBase<Node,Key,Value,Allocator>::attach(node);
+		}
+
+		if (withGet) {
+			TEST_PRINT("LruCacheWithMonitor put() increment\n");
+			node->refCount_++;
+		}
+		return node;
+	};
+
+	int checkAndGet(Key &key, Value &value) {
+		util::LockGuard<util::Mutex> guard(this->lock_);
+		Node *node = static_cast<Node*>(
+				LruCacheBase<Node,Key,Value,Allocator>::get(key));
+		if (node) {
+			int ret = node->value_->checkAndGet(value, updateInterval_);
+			if (ret != 0) {
+				if (node->isRemoved()) {
+					if (LruCacheCocurrency<Node,Key,Value,Allocator>::releaseNode(node)) {
+						node = NULL;
+					}
+				}
+			} else {
+				TEST_PRINT("checkAndGet() increment\n");
+				node->refCount_++;
+			}
+			return ret;
+		}
+		else {
+			return 2;
+		}
+	}
+
+	void release(Node*& node) {
+		LruCacheCocurrency<Node,Key,Value,Allocator>::release(node);
+	}
+
+	void release(Key &key) {
+		util::LockGuard<util::Mutex> guard(this->lock_);
+		Node *node = static_cast<Node*>(
+				LruCacheBase<Node,Key,Value,Allocator>::get(key));
+		if (node) {
+			TEST_PRINT("LruCacheWithMonitor;;release() decrement\n");
+			node->refCount_--;
+			if (node->isRemoved()) {
+				if (LruCacheCocurrency<Node,Key,Value,Allocator>::releaseNode(node)) {
+					node = NULL;
+				}
+			}
+		}
+	}
+	
+	void clear(Key &name, bool isDatabase) {
+		util::LockGuard<util::Mutex> guard(this->lock_);
+		Node *temp = static_cast<Node*>(this->head_->next_);
+		while (temp != this->tail_) {
+			temp->value_->clear(name, isDatabase);
+			temp = static_cast<Node*>(temp->next_);
+		}
+	}
+
+	void scan(Key *name, bool isDatabase, picojson::value &result) {
+		TEST_PRINT("Cache scan() S\n");
+		TEST_PRINT1("size=%d\n", this->size_);
+		util::LockGuard<util::Mutex> guard(this->lock_);
+		Node *temp = static_cast<Node*>(this->head_->next_);
+
+		picojson::object root;
+		picojson::array dataList;
+		while (temp != this->tail_) {
+			picojson::object cacheInfo;
+			if (temp->value_->scan(name, isDatabase, cacheInfo)) {
+				cacheInfo["count"] = picojson::value(static_cast<double>(temp->refCount_));
+				dataList.push_back(picojson::value(cacheInfo));
+			}
+			temp = static_cast<Node*>(temp->next_);
+		}
+
+		root.insert(std::make_pair("usercache", picojson::value(dataList)));
+		result = picojson::value(root);
+
+	}
+
+private:
+	int32_t updateInterval_;
 };
 
 #endif

@@ -18,221 +18,335 @@
 	@file
 	@brief Implementation of ObjectManager
 */
-#include "object_manager.h"
-#include "util/trace.h"
 #include "gs_error.h"
-#include <algorithm>
-#include <cassert>
-#include <iostream>
-#include <math.h>
+#include "object_manager_v4.h"
+#include "chunk_manager.h"
 
+void ObjectManagerV4::checkDirtyFlag() {}
+/*!
+	@brief コンストラクタ
+*/
+ObjectManagerV4::ObjectManagerV4(
+		const ConfigTable& configTable, ChunkManager* chunkManager,
+		ObjectManagerStats &stats) :
+		configTable_(configTable), chunkManager_(chunkManager),
+		OBJECT_MAX_CHUNK_ID_(calcMaxChunkId(
+				configTable.getUInt32(CONFIG_TABLE_DS_STORE_BLOCK_SIZE))),
+		PARTITION_NUM_(configTable.getUInt32(CONFIG_TABLE_DS_PARTITION_NUM)),
+		CHUNK_EXP_SIZE_(util::nextPowerBitsOf2(
+				configTable.getUInt32(CONFIG_TABLE_DS_STORE_BLOCK_SIZE))),
+		maxObjectSize_(
+				(1 << (CHUNK_EXP_SIZE_ - 1)) - OBJECT_HEADER_SIZE),
+		halfOfMaxObjectSize_(
+				(1 << (CHUNK_EXP_SIZE_ - 2)) - OBJECT_HEADER_SIZE),
+		recommendLimitObjectSize_(
+				(1 << (CHUNK_EXP_SIZE_ - 4)) - OBJECT_HEADER_SIZE),
+		LARGE_CHUNK_MODE_(OIdBitUtils::isLargeChunkMode(CHUNK_EXP_SIZE_)),
+		UNIT_CHUNK_SHIFT_BIT(calcUnitChunkShiftBit(LARGE_CHUNK_MODE_)),
+		MAX_UNIT_OFFSET_BIT(calcMaxUnitOffsetBit(LARGE_CHUNK_MODE_)),
+		MASK_UNIT_OFFSET(
+				(((static_cast<uint64_t>(1) << MAX_UNIT_OFFSET_BIT) - 1) <<
+						UNIT_OFFSET_SHIFT_BIT) | MASK_MAGIC | MASK_USER),
+		chunkHeaderSize_(ChunkBuddy::CHUNK_HEADER_FULL_SIZE),
+		minPower_(util::nextPowerBitsOf2(sizeof(HeaderBlock))),
+		maxPower_(util::nextPowerBitsOf2(1 << CHUNK_EXP_SIZE_)),
+		tableSize_(sizeof(uint32_t) * (maxPower_ + 1)),
+		freeListOffset_(ChunkBuddy::CHUNK_HEADER_FULL_SIZE - tableSize_),
+		maxV4GroupId_(3),
+		swapOutCounter_(0),
+		stats_(stats) {
+	assert(chunkManager_);
+	ChunkBuddy::resetParameters(1 << CHUNK_EXP_SIZE_);
+	v5StartChunkIdList_.assign(maxV4GroupId_ + 1, 0);
+}
 
-#ifdef _MSC_VER
-#pragma warning(disable : 4996)
-#endif
+ObjectManagerV4::~ObjectManagerV4() {
+}
 
 /*!
-	@brief Constructor of ObjectManager
+	@brief 指定groupId, OIdのObjectを解放する
+	@note 例外発生時は一度catchすること
 */
-ObjectManager::ObjectManager(
-	const ConfigTable &configTable, ChunkManager *chunkManager)
-	: OBJECT_MAX_CHUNK_ID_(ChunkManager::calcMaxChunkId(
-			configTable.getUInt32(CONFIG_TABLE_DS_STORE_BLOCK_SIZE))),
-	  PARTITION_NUM_(configTable.getUInt32(CONFIG_TABLE_DS_PARTITION_NUM)),
-	  CHUNK_EXP_SIZE_(util::nextPowerBitsOf2(
-		  configTable.getUInt32(CONFIG_TABLE_DS_STORE_BLOCK_SIZE))),
-	  chunkManager_(chunkManager),
-	  objectAllocator_(NULL),
-	  maxObjectSize_(
-		  (1 << (CHUNK_EXP_SIZE_ - 1)) - ObjectAllocator::BLOCK_HEADER_SIZE),
-	  halfOfMaxObjectSize_(
-		  (1 << (CHUNK_EXP_SIZE_ - 2)) - ObjectAllocator::BLOCK_HEADER_SIZE),
-	  recommendLimitObjectSize_(
-		  (1 << (CHUNK_EXP_SIZE_ - 4)) - ObjectAllocator::BLOCK_HEADER_SIZE)
-	  ,
-	  isZeroFill_(configTable.get<int32_t>(CONFIG_TABLE_DS_STORE_COMPRESSION_MODE) == 
-				  0 ? false: true)
-	  , LARGE_CHUNK_MODE_(OIdBitUtils::isLargeChunkMode(CHUNK_EXP_SIZE_))
-	  , UNIT_CHUNK_SHIFT_BIT(calcUnitChunkShiftBit(LARGE_CHUNK_MODE_))
-	  , MAX_UNIT_OFFSET_BIT(calcMaxUnitOffsetBit(LARGE_CHUNK_MODE_))
-	  , MASK_UNIT_OFFSET(
-			(((static_cast<uint64_t>(1) << MAX_UNIT_OFFSET_BIT) - 1) <<
-					UNIT_OFFSET_SHIFT_BIT) | MASK_MAGIC | MASK_USER)
+void ObjectManagerV4::free(ChunkAccessor &chunkaccessor, DSGroupId groupId, OId oId) {
+	try {
+		int64_t chunkId = getChunkId(oId);
+		if (isV4OId(oId)) {
+			chunkId = getV5ChunkId(groupId, chunkId);
+		}
+		MeshedChunkTable::Group& group = *chunkManager_->putGroup(groupId);
+		chunkManager_->getChunk(group, chunkId, chunkaccessor);
+		chunkManager_->update(group, chunkaccessor);
+		ChunkBuddy* chunk = reinterpret_cast<ChunkBuddy*>(chunkaccessor.getChunk());
+
+		int32_t offset = getOffset(oId);
+
+		uint32_t objectSize = chunk->getObjectSize(offset, OBJECT_HEADER_SIZE);
+		chunk->removeObject(offset);
+
+		chunkaccessor.setVacancy(chunk->getMaxFreeExpSize());
+		chunkaccessor.unpin(true);
+		stats_.table_(ObjectManagerStats::OBJECT_STAT_ALLOCATE_SIZE)
+				.subtract(objectSize);
+		if (chunk->getOccupiedSize() == 0) {
+			chunkManager_->removeChunk(group, chunkId);
+		}
+	}
+	catch (std::exception &e) {
+		GS_RETHROW_SYSTEM_ERROR(
+			e, "groupId," << groupId << ",oId," << oId <<
+					  GS_EXCEPTION_MESSAGE(e));
+
+	}
+}
+
+/*!
+	@brief オブジェクト不正発生時の例外出力
+*/
+void ObjectManagerV4::errorOId(OId oId, DSGroupId groupId) const {
+	const ChunkId chunkId = getChunkId(oId);
+	const DSObjectOffset offset = getOffset(oId);
+	GS_THROW_SYSTEM_ERROR(GS_ERROR_OM_INVALID_OBJECT,
+			"object is Invalid. " << ",oId," << oId <<
+			",groupId," << groupId << ",chunkId," << chunkId <<
+			",offset," << offset << ", " << util::StackTraceUtils::getStackTrace);
+}
+
+/*!
+	@brief Validates RefCounter of fixing and unfixing.
+*/
+void ObjectManagerV4::validateRefCounter() {
+	MeshedChunkTable::CsectionChunkCursor cursor =
+			chunkManager_->createCsectionChunkCursor();
+	RawChunkInfo chunkInfo;
+	while (cursor.hasNext()) {
+		cursor.next(chunkInfo);
+		if (chunkInfo.getVacancy() < 0) {
+			continue;
+		}
+		if (chunkInfo.getGroupId() != -1) {
+			int64_t refCount = chunkManager_->getRefCount(chunkInfo.getGroupId(), chunkInfo.getChunkId());
+			assert(refCount == 0);
+			if (refCount != 0) {
+				GS_THROW_SYSTEM_ERROR(GS_ERROR_OM_INVALID_OID,
+						"refCount_ is not zero. "
+						<< "groupId," << chunkInfo.getGroupId()
+						<< ",chunkId," << chunkInfo.getChunkId()
+						<< ", ref = " << refCount);
+			}
+		}
+	}
+}
+
+/*!
+	@brief パーティションのdrop
+*/
+void ObjectManagerV4::drop() {
+	MeshedChunkTable::CsectionChunkCursor cursor =
+			chunkManager_->createCsectionChunkCursor();
+	MeshedChunkTable::Group* group = NULL;
+	RawChunkInfo chunkInfo;
+	while (cursor.hasNext()) {
+		cursor.next(chunkInfo);
+		if (chunkInfo.getGroupId() != -1) {
+			if (!group || group->getId() != chunkInfo.getGroupId()) {
+				group = chunkManager_->putGroup(chunkInfo.getGroupId());
+			}
+			chunkManager_->removeChunk(*group, chunkInfo.getChunkId());
+		}
+	}
+	chunkManager_->fin();
+	chunkManager_->reinit();
+}
+
+/*!
+	@brief V4ChunkIDをV5ChunkIDに変換するテーブルの初期化
+	@attention 
+*/
+void ObjectManagerV4::initializeV5StartChunkIdList(
+		int64_t maxV4GroupId, const std::deque<int64_t>& chunkIdList) {
+	if (chunkIdList.size() > 0) {
+		assert(chunkIdList.size() == maxV4GroupId + 1);
+		v5StartChunkIdList_.assign(chunkIdList.begin(), chunkIdList.end());
+	}
+}
+
+/*!
+	@brief 指定されたサイズ以上の空きを持つチャンクを検索する
+	@return 指定されたサイズ以上の空きを持つチャンクのメタチャンク
+	@retval 非NULL 指定されたサイズの空きをもつチャンクがあった場合
+	@retval NULL 指定されたサイズの空きをもつチャンクがなかった場合
+	@attention BATCH_FREE_MODEチャンクの場合は一定以上の空きがある場合にかぎる
+*/
+int64_t ObjectManagerV4::searchChunk(
+		MeshedChunkTable::Group& group, uint8_t powerSize, ChunkAccessor &chunkAccessor) {
+
+
+
+	const DSGroupId groupId = group.getId();
+	auto result = free_.find(groupId);
+	if (result == free_.end()) {
+		free_[groupId] = UTIL_NEW MeshedChunkTable::Group::StableGroupChunkCursor(group);
+	}
+	int32_t neededSize = powerSize;
+	int64_t chunkId = -1;
 	{
-	if (CHUNK_EXP_SIZE_ <= 0 || MAX_CHUNK_EXP_SIZE < CHUNK_EXP_SIZE_) {
-		GS_THROW_SYSTEM_ERROR(GS_ERROR_OM_INVALID_CHUNK_EXP_SIZE, "");
-	}
-	if (!chunkManager_) {
-		GS_THROW_SYSTEM_ERROR(
-			GS_ERROR_OM_CONSTRUCTOR_FAILED, "invalid chunkManager");
-	}
-
-	try {
-		objectAllocator_ =
-			UTIL_NEW ObjectAllocator(CHUNK_EXP_SIZE_, CHUNK_HEADER_BLOCK_SIZE, isZeroFill_);
-	}
-	catch (std::exception &e) {
-		delete objectAllocator_;
-		objectAllocator_ = NULL;
-		GS_RETHROW_SYSTEM_ERROR(e, "");
-	}
-}
-
-ObjectManager::ObjectManager()
-	: OBJECT_MAX_CHUNK_ID_(ChunkManager::calcMaxChunkId(1 << MAX_CHUNK_EXP_SIZE)),
-	  PARTITION_NUM_(1),
-	  CHUNK_EXP_SIZE_(MAX_CHUNK_EXP_SIZE),
-	  chunkManager_(NULL),
-	  objectAllocator_(NULL),
-	  maxObjectSize_(
-		  (1 << (CHUNK_EXP_SIZE_ - 1)) - ObjectAllocator::BLOCK_HEADER_SIZE),
-	  halfOfMaxObjectSize_(
-		  (1 << (CHUNK_EXP_SIZE_ - 2)) - ObjectAllocator::BLOCK_HEADER_SIZE)
-	  , isZeroFill_(false)
-	  , LARGE_CHUNK_MODE_(CHUNK_EXP_SIZE_ > 20 ? true : false)
-	  , UNIT_CHUNK_SHIFT_BIT(LARGE_CHUNK_MODE_ ? 38 : 32)
-	  , MAX_UNIT_OFFSET_BIT(LARGE_CHUNK_MODE_ ? 22 : 16)
-	  , MASK_UNIT_OFFSET(
-			(((static_cast<uint64_t>(1) << MAX_UNIT_OFFSET_BIT) - 1) <<
-					UNIT_OFFSET_SHIFT_BIT) | MASK_MAGIC | MASK_USER)
-{}
-
-/*!
-	@brief Destructor of ObjectManager
-*/
-ObjectManager::~ObjectManager() {
-	delete objectAllocator_;
-}
-
-uint8_t *ObjectManager::allocateObject(PartitionId pId, Size_t requestSize,
-	const AllocateStrategy &allocateStrategy, OId &oId, ObjectType objectType) {
-	const ChunkCategoryId categoryId = allocateStrategy.categoryId_;
-	const DataAffinityInfo affinityInfo = makeDataAffinityInfo(allocateStrategy);
-	try {
-		const uint8_t powerSize =
-			objectAllocator_->getObjectExpSize(requestSize);
-
-		ChunkId cId;
-		MetaChunk *metaChunk = chunkManager_->searchChunk(pId, categoryId,
-				affinityInfo, allocateStrategy.chunkKey_, powerSize, cId);
-		assert(cId != UNDEF_CHUNKID);
-
-		if (metaChunk == NULL) {
-			metaChunk = chunkManager_->allocateChunk(pId, categoryId,
-					affinityInfo, allocateStrategy.chunkKey_, cId);
-			assert(cId <= OBJECT_MAX_CHUNK_ID_);  
-			uint8_t maxFreeExpSize;
-			objectAllocator_->initializeChunk(
-				metaChunk->getPtr(), maxFreeExpSize);
-			metaChunk->setUnoccupiedSize(maxFreeExpSize);
+		MeshedChunkTable::Group::StableGroupChunkCursor* cursor = free_[groupId];
+		RawChunkInfo chunkInfo;
+		bool exist = cursor->current(chunkInfo);
+		int32_t trial;
+		bool nullp = false;
+		for (trial = 0; trial < RANGE; trial++) {
+			if (!exist) {
+				if (nullp) {
+					break;
+				}
+				delete free_[groupId];
+				free_[groupId] = UTIL_NEW MeshedChunkTable::Group::StableGroupChunkCursor(group);
+				cursor = free_[groupId];
+				exist = cursor->current(chunkInfo);
+				nullp = true;
+				continue;
+			}
+			int32_t availablespace = chunkInfo.getVacancy();
+			if (availablespace >= neededSize) {
+				chunkId = chunkInfo.getChunkId();
+				chunkManager_->getChunk(group, chunkId, chunkAccessor);
+				chunkManager_->update(group, chunkAccessor);
+				break;
+			}
+			exist = cursor->advance(chunkInfo);
 		}
+		if (chunkId < 0) {
+			chunkManager_->allocateChunk(group, chunkAccessor);
+			ChunkBuddy* chunk = reinterpret_cast<ChunkBuddy*>(chunkAccessor.getChunk());
 
-		assert(metaChunk != NULL);
-		assert(cId != UNDEF_CHUNKID);
-
-		uint32_t offset;
-		Size_t size;
-		uint8_t *addr =
-			allocateObject(*metaChunk, powerSize, objectType, offset, size);
-
-		oId = getOId(categoryId, cId, offset);
-		assert(isValidOId(oId));
-		return addr;
-	}
-	catch (std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(
-			e, "PID=" << pId << ",requestSize=" << requestSize
-					  << ",categoryId=" << (int32_t)categoryId
-					  << ",chunkKey=" << allocateStrategy.chunkKey_
-					  << ",objectType=" << (int32_t)objectType
-					  << GS_EXCEPTION_MESSAGE(e));
-	}
-	return NULL;
-}
-uint8_t *ObjectManager::allocateNeighborObject(PartitionId pId,
-	Size_t requestSize, const AllocateStrategy &allocateStrategy, OId &oId,
-	OId neighborOId, ObjectType objectType) {
-
-	validateOId(pId, neighborOId);
-	ChunkCategoryId categoryId = getChunkCategoryId(neighborOId);
-	ChunkId cId = getChunkId(neighborOId);
-
-	try {
-		uint8_t powerSize = objectAllocator_->getObjectExpSize(requestSize);
-
-		MetaChunk *metaChunk = chunkManager_->searchChunk(
-			pId, categoryId, cId, allocateStrategy.chunkKey_, powerSize);
-
-		if (metaChunk && !metaChunk->isFree()) {
-			uint32_t offset;
-			Size_t size;
-			uint8_t *addr =
-				allocateObject(*metaChunk, powerSize, objectType, offset, size);
-
-			oId = getOId(categoryId, cId, offset);
-			assert(isValidOId(oId));
-			return addr;
-		}
-		else {
-			return allocateObject(
-				pId, requestSize, allocateStrategy, oId, objectType);
+			chunk->init();
+			chunkId = chunkAccessor.getChunkId();
+			initV4ChunkHeader(*chunk, groupId, chunkId);
+			cursor->set(chunkId);
 		}
 	}
-	catch (std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(
-			e, "PID=" << pId << ",requestSize=" << requestSize
-					  << ",categoryId=" << (int32_t)categoryId
-					  << ",chunkKey=" << allocateStrategy.chunkKey_
-					  << ",objectType=" << (int32_t)objectType << ",OID="
-					  << neighborOId << ",CID=" << getChunkId(neighborOId)
-					  << ",offset=" << getOffset(neighborOId)
-					  << GS_EXCEPTION_MESSAGE(e));
-	}
+	return chunkId;
+}
+
+void ObjectManagerV4::resetRefCounter() {
+}
+
+void ObjectManagerV4::freeLastLatchPhaseMemory() {
 }
 
 /*!
-	@brief Frees the Object.
+	@brief テーブルスキャン用バッファ制御
+	@note 判定に使用するSwapOutのカウンターを設定(通常0、SQL等で部分実行する際は前回のカウンター値を設定)
 */
-void ObjectManager::free(PartitionId pId, OId oId) {
-	validateOId(pId, oId);
-	ChunkCategoryId categoryId = getChunkCategoryId(oId);
-	ChunkId cId = getChunkId(oId);
-	uint32_t offset = getOffset(oId);
+void ObjectManagerV4::setSwapOutCounter(int64_t counter) {
+	chunkManager_->setSwapOutCounter(static_cast<uint64_t>(counter));
+	swapOutCounter_ = counter;
+}
 
+int64_t ObjectManagerV4::getSwapOutCounter() {
+	return chunkManager_->getSwapOutCounter();
+}
+
+void ObjectManagerV4::setStoreMemoryAgingSwapRate(double ratio) {
+	chunkManager_->setStoreMemoryAgingSwapRate(ratio);
+}
+double ObjectManagerV4::getStoreMemoryAgingSwapRate() {
+	return chunkManager_->getStoreMemoryAgingSwapRate();
+}
+
+
+/*!
+	@brief 新規オブジェクト割り当て
+*/
+OId GroupObjectAccessor::allocate(DSObjectSize requestSize, ObjectType objectType) {
+
+	uint32_t powerSize = objMgr_->getObjectExpSize(requestSize);
+	int64_t chunkId = objMgr_->searchChunk(*group_, powerSize, chunkAccessor_);
+
+	ChunkBuddy* chunk = reinterpret_cast<ChunkBuddy*>(chunkAccessor_.getChunk());
+	int32_t offset = chunk->allocateObject(nullptr, powerSize, objectType);
+
+	chunkAccessor_.setVacancy(chunk->getMaxFreeExpSize());
+	chunkAccessor_.unpin(true);
+	objMgr_->stats_.table_(ObjectManagerStats::OBJECT_STAT_ALLOCATE_SIZE).add(
+			(UINT32_C(1) << powerSize) - ObjectManagerV4::OBJECT_HEADER_SIZE);
+
+	OId oId = objMgr_->getOId(group_->getId(), chunkId, offset);
+	return oId;
+}
+
+/*!
+	@brief 可能な限り指定オブジェクトと同一チャンクに新規オブジェクト割り当て
+*/
+OId GroupObjectAccessor::allocateNeighbor(
+		DSObjectSize requestSize, OId neighborOId, ObjectType objectType) {
+
+	uint32_t powerSize = objMgr_->getObjectExpSize(requestSize);
+	int64_t chunkId = objMgr_->getChunkId(neighborOId);
+	if (objMgr_->isV4OId(neighborOId)) {
+		chunkId = objMgr_->getV5ChunkId(group_->getId(), chunkId);
+	}
+	int32_t availablespace = group_->getVacancy(chunkId);
+	if (availablespace < powerSize) {
+		return allocate(requestSize, objectType);
+	}
+	objMgr_->chunkManager_->getChunk(*group_, chunkId, chunkAccessor_);
+	objMgr_->chunkManager_->update(*group_, chunkAccessor_);
+	ChunkBuddy* chunk = reinterpret_cast<ChunkBuddy*>(chunkAccessor_.getChunk());
+	int32_t offset = chunk->allocateObject(nullptr, powerSize, objectType);
+
+	chunkAccessor_.setVacancy(chunk->getMaxFreeExpSize());
+	chunkAccessor_.unpin(true);
+	objMgr_->stats_.table_(ObjectManagerStats::OBJECT_STAT_ALLOCATE_SIZE).add(
+			(UINT32_C(1) << powerSize) - ObjectManagerV4::OBJECT_HEADER_SIZE);
+
+	OId oId = objMgr_->getOId(group_->getId(), chunkId, offset);
+	return oId;
+}
+
+/*!
+	@brief 指定groupId, OIdのObjectを解放する
+	@note 例外発生時は一度catchすること
+*/
+void GroupObjectAccessor::free(OId oId) {
 	try {
-		MetaChunk *metaChunk = chunkManager_->getChunkForUpdate(
-			pId, categoryId, cId, UNDEF_CHUNK_KEY, false);
-		freeObject(*metaChunk, offset);
+		int64_t chunkId = objMgr_->getChunkId(oId);
+		if (objMgr_->isV4OId(oId)) {
+			chunkId = objMgr_->getV5ChunkId(group_->getId(), chunkId);
+		}
+		objMgr_->chunkManager_->getChunk(*group_, chunkId, chunkAccessor_);
+		objMgr_->chunkManager_->update(*group_, chunkAccessor_);
+		ChunkBuddy* chunk = reinterpret_cast<ChunkBuddy*>(chunkAccessor_.getChunk());
 
-		if (metaChunk->getOccupiedSize() == 0) {
-			chunkManager_->freeChunk(pId, categoryId, cId);
+		int32_t offset = objMgr_->getOffset(oId);
+
+		uint32_t objectSize = chunk->getObjectSize(offset, ObjectManagerV4::OBJECT_HEADER_SIZE);
+		chunk->removeObject(offset);
+
+		chunkAccessor_.setVacancy(chunk->getMaxFreeExpSize());
+		chunkAccessor_.unpin(true);
+		objMgr_->stats_.table_(ObjectManagerStats::OBJECT_STAT_ALLOCATE_SIZE)
+				.subtract(objectSize);
+		if (chunk->getOccupiedSize() == 0) {
+			objMgr_->chunkManager_->removeChunk(*group_, chunkId);
 		}
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_SYSTEM_ERROR(
-			e, "pId," << pId << ",oId," << oId << ",categoryId,"
-					  << (int32_t)categoryId << ",cId," << cId << ",offset,"
-					  << offset << GS_EXCEPTION_MESSAGE(e));
+			e, "groupId," << group_->getId() << ",oId," << oId <<
+					  GS_EXCEPTION_MESSAGE(e));
+
 	}
 }
 
-void* ObjectManager::reload(PartitionId pId, OId oId, OId *lastOId, const ObjectReadType&)
-{
-	if (*lastOId != UNDEF_OID) {
-		unfix(pId, *lastOId);
-		*lastOId = UNDEF_OID;
-	}
-
-	return getForRead<uint8_t>(pId, oId);
+ObjectManagerStats::ObjectManagerStats(const Mapper *mapper) :
+		table_(mapper) {
 }
 
-void* ObjectManager::reload(PartitionId pId, OId oId, OId *lastOId, const ObjectWriteType&)
-{
-	if (*lastOId != UNDEF_OID) {
-		unfix(pId, *lastOId);
-		*lastOId = UNDEF_OID;
-	}
+void ObjectManagerStats::setUpMapper(Mapper &mapper) {
+	mapper.addFilter(STAT_TABLE_DISPLAY_SELECT_PERF);
+	mapper.addFilter(STAT_TABLE_DISPLAY_OPTIONAL_DS);
 
-	return getForUpdate<uint8_t>(pId, oId);
+	mapper.bind(OBJECT_STAT_ALLOCATE_SIZE, STAT_TABLE_PERF_DS_ALLOCATE_DATA);
 }
-

@@ -43,7 +43,7 @@ class FunctorMakerect : public TqlFunc {
 public:
 	using TqlFunc::operator();
 	Expr *operator()(
-		ExprList &args, TransactionContext &txn, ObjectManager &objectManager) {
+		ExprList &args, TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) {
 		double x1, x2, y1, y2;
 
 		if (args.size() == 2) {
@@ -134,8 +134,8 @@ public:
 		pls.push_back(&p3);
 		pls.push_back(&p4);
 		pls.push_back(&p1);
-		LinearRing ls(-1, pls, txn, objectManager);
-		Polygon *polygon = QP_NEW Polygon(-1, &ls, NULL, txn, objectManager);
+		LinearRing ls(-1, pls, txn, objectManager, strategy);
+		Polygon *polygon = QP_NEW Polygon(-1, &ls, NULL, txn, objectManager, strategy);
 
 		return Expr::newGeometryValue(polygon, txn);
 	}
@@ -152,7 +152,7 @@ class FunctorMakebox : public TqlFunc {
 public:
 	using TqlFunc::operator();
 	Expr *operator()(
-		ExprList &args, TransactionContext &txn, ObjectManager &objectManager) {
+		ExprList &args, TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) {
 		double x1, y1, z1, x2, y2, z2;
 		if (args.size() == 2) {
 			if (args[0]->isNullValue() || args[1]->isNullValue()) {
@@ -290,24 +290,24 @@ public:
 		mp6.push_back(&p5);
 
 		util::XArray<MultiPoint *> pmp1(txn.getDefaultAllocator());
-		pmp1.push_back(QP_NEW MultiPoint(-1, mp1, txn, objectManager));
+		pmp1.push_back(QP_NEW MultiPoint(-1, mp1, txn, objectManager, strategy));
 		util::XArray<MultiPoint *> pmp2(txn.getDefaultAllocator());
-		pmp2.push_back(QP_NEW MultiPoint(-1, mp2, txn, objectManager));
+		pmp2.push_back(QP_NEW MultiPoint(-1, mp2, txn, objectManager, strategy));
 		util::XArray<MultiPoint *> pmp3(txn.getDefaultAllocator());
-		pmp3.push_back(QP_NEW MultiPoint(-1, mp3, txn, objectManager));
+		pmp3.push_back(QP_NEW MultiPoint(-1, mp3, txn, objectManager, strategy));
 		util::XArray<MultiPoint *> pmp4(txn.getDefaultAllocator());
-		pmp4.push_back(QP_NEW MultiPoint(-1, mp4, txn, objectManager));
+		pmp4.push_back(QP_NEW MultiPoint(-1, mp4, txn, objectManager, strategy));
 		util::XArray<MultiPoint *> pmp5(txn.getDefaultAllocator());
-		pmp5.push_back(QP_NEW MultiPoint(-1, mp5, txn, objectManager));
+		pmp5.push_back(QP_NEW MultiPoint(-1, mp5, txn, objectManager, strategy));
 		util::XArray<MultiPoint *> pmp6(txn.getDefaultAllocator());
-		pmp6.push_back(QP_NEW MultiPoint(-1, mp6, txn, objectManager));
+		pmp6.push_back(QP_NEW MultiPoint(-1, mp6, txn, objectManager, strategy));
 
-		Polygon poly1(-1, &pmp1, txn, objectManager);
-		Polygon poly2(-1, &pmp2, txn, objectManager);
-		Polygon poly3(-1, &pmp3, txn, objectManager);
-		Polygon poly4(-1, &pmp4, txn, objectManager);
-		Polygon poly5(-1, &pmp5, txn, objectManager);
-		Polygon poly6(-1, &pmp6, txn, objectManager);
+		Polygon poly1(-1, &pmp1, txn, objectManager, strategy);
+		Polygon poly2(-1, &pmp2, txn, objectManager, strategy);
+		Polygon poly3(-1, &pmp3, txn, objectManager, strategy);
+		Polygon poly4(-1, &pmp4, txn, objectManager, strategy);
+		Polygon poly5(-1, &pmp5, txn, objectManager, strategy);
+		Polygon poly6(-1, &pmp6, txn, objectManager, strategy);
 
 		util::XArray<Polygon *> mpoly(txn.getDefaultAllocator());
 		mpoly.push_back(&poly1);
@@ -317,7 +317,7 @@ public:
 		mpoly.push_back(&poly5);
 		mpoly.push_back(&poly6);
 		PolyhedralSurface *ps =
-			QP_NEW PolyhedralSurface(-1, mpoly, txn, objectManager);
+			QP_NEW PolyhedralSurface(-1, mpoly, txn, objectManager, strategy);
 		return Expr::newGeometryValue(ps, txn);
 	}
 
@@ -332,7 +332,7 @@ public:
 class FunctorMakeqsf : public TqlFunc {
 public:
 	using TqlFunc::operator();
-	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManager &) {
+	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &) {
 		if (args.size() != 13) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
@@ -369,7 +369,7 @@ public:
 class FunctorMakecone : public TqlFunc {
 public:
 	using TqlFunc::operator();
-	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManager &) {
+	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &) {
 		if (args.size() != 7) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
@@ -408,7 +408,7 @@ public:
 class FunctorMakesphere : public TqlFunc {
 public:
 	using TqlFunc::operator();
-	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManager &) {
+	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &) {
 		if (args.size() != 4) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
@@ -448,7 +448,7 @@ public:
 class FunctorMakeplane : public TqlFunc {
 public:
 	using TqlFunc::operator();
-	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManager &) {
+	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &) {
 		if (args.size() != 6) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
@@ -489,7 +489,7 @@ public:
 class FunctorMakecylinder : public TqlFunc {
 public:
 	using TqlFunc::operator();
-	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManager &) {
+	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &) {
 		if (args.size() != 7) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
@@ -530,7 +530,7 @@ class FunctorMbrIntersects : public TqlGisFunc {
 public:
 	using TqlGisFunc::operator();
 	Expr *operator()(
-		QP_XArray<Expr *> &args, TransactionContext &txn, ObjectManager &) {
+		QP_XArray<Expr *> &args, TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &) {
 		if (args.size() != 2) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
@@ -619,7 +619,7 @@ class FunctorQsfmbrIntersects : public TqlGisFunc {
 public:
 	using TqlGisFunc::operator();
 	Expr *operator()(
-		QP_XArray<Expr *> &args, TransactionContext &txn, ObjectManager &) {
+		QP_XArray<Expr *> &args, TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &) {
 		if (args.size() != 2) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
@@ -737,7 +737,7 @@ public:
 class FunctorGetsrid : public TqlFunc {
 public:
 	using TqlFunc::operator();
-	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManager &) {
+	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &) {
 		if (args.size() != 1) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");

@@ -38,6 +38,8 @@
 	GS_THROW_CUSTOM_ERROR(StatementAlreadyExecutedException, \
 		GS_ERROR_TM_STATEMENT_ALREADY_EXECUTED, message)
 
+const TransactionId TransactionManager::INITIAL_TXNID = TransactionContext::AUTO_COMMIT_TXNID;
+
 ReplicationContext::ReplicationContext()
 	: id_(TXN_UNDEF_REPLICATIONID),
 	  stmtType_(0),
@@ -55,11 +57,11 @@ ReplicationContext::ReplicationContext()
 	  replyPId_(UNDEF_PARTITIONID),
 	  queryId_(0),
 	  replyEventType_(UNDEF_EVENT_TYPE),
-	  existIndex_(0),
 		isSync_(false),
 		subContainerId_(0),
 		execId_(0),
-		alloc_(NULL)
+		alloc_(NULL),
+		binaryMes_(NULL)
 {
 }
 
@@ -80,16 +82,17 @@ ReplicationContext::ReplicationContext(const ReplicationContext &replContext)
 	  replyPId_(UNDEF_PARTITIONID),
 	  queryId_(0),
 	  replyEventType_(UNDEF_EVENT_TYPE),
-	  existIndex_(0),
 		isSync_(false),
 		subContainerId_(0),
 		execId_(0),
-		alloc_(replContext.alloc_)
+		alloc_(replContext.alloc_),
+		binaryMes_(NULL)
 {
 }
 
 ReplicationContext::~ReplicationContext() {
-	clearBinaryData();
+	clearExtraMessage();
+	clearMessage();
 }
 
 ReplicationContext &ReplicationContext::operator=(
@@ -121,10 +124,12 @@ ReplicationContext &ReplicationContext::operator=(
 	  taskStatus_ = replContext.taskStatus_;
 	  originalStmtId_ = replContext.originalStmtId_;
 
-	clearBinaryData();
-	for (size_t i = 0; i < replContext.binaryDatas_.size(); i++) {
-		setBinaryData(replContext.binaryDatas_[i]->data(), replContext.binaryDatas_[i]->size());
+	  clearExtraMessage();
+	for (size_t i = 0; i < replContext.extraMessages_.size(); i++) {
+		addExtraMessage(replContext.extraMessages_[i]->data(), replContext.extraMessages_[i]->size());
 	}
+	clearMessage();
+	setMessage(replContext.binaryMes_->data(), replContext.binaryMes_->size());
 
 	return *this;
 }
@@ -190,13 +195,13 @@ void ReplicationContext::setExistFlag(bool flag) {
 	existFlag_ = flag;
 }
 
-void ReplicationContext::setBinaryData(const void *data, size_t size) {
+void ReplicationContext::addExtraMessage(const void *data, size_t size) {
 	BinaryData *newData = NULL;
 
 	try {
 		newData = ALLOC_VAR_SIZE_NEW(*alloc_) BinaryData(*alloc_);
 		newData->push_back(static_cast<const uint8_t*>(data), size);
-		binaryDatas_.push_back(newData);
+		extraMessages_.push_back(newData);
 
 	} catch (...) {
 		ALLOC_VAR_SIZE_DELETE(*alloc_, newData);
@@ -204,9 +209,44 @@ void ReplicationContext::setBinaryData(const void *data, size_t size) {
 	}
 }
 
-const std::vector<ReplicationContext::BinaryData*>& ReplicationContext::getBinaryDatas() const {
-	return binaryDatas_;
+const std::vector<ReplicationContext::BinaryData*>& ReplicationContext::getExtraMessages() const {
+	return extraMessages_;
 }
+
+void ReplicationContext::setMessage(const void* data, size_t size) {
+	binaryMes_ = NULL;
+	try {
+		binaryMes_ = ALLOC_VAR_SIZE_NEW(*alloc_) BinaryData2(*alloc_);
+		binaryMes_->push_back(static_cast<const uint8_t*>(data), size);
+	}
+	catch (...) {
+		ALLOC_VAR_SIZE_DELETE(*alloc_, binaryMes_);
+		throw;
+	}
+}
+
+void ReplicationContext::setMessage(Serializable* mes) {
+	binaryMes_ = NULL;
+	try {
+		binaryMes_ = ALLOC_VAR_SIZE_NEW(*alloc_) BinaryData2(*alloc_);
+		typedef util::XArrayOutStream< util::StdAllocator<
+			uint8_t, VariableSizeAllocator> > EventOutStream;
+		typedef util::ByteStream<EventOutStream> EventByteOutStream;
+		EventOutStream arrayOut(*binaryMes_);
+		EventByteOutStream out(arrayOut);
+		mes->encode(out);
+	}
+	catch (...) {
+		ALLOC_VAR_SIZE_DELETE(*alloc_, binaryMes_);
+		throw;
+	}
+}
+
+
+const ReplicationContext::BinaryData2* ReplicationContext::getMessage() const {
+	return binaryMes_;
+}
+
 
 void ReplicationContext::clear() {
 	id_ = TXN_UNDEF_REPLICATIONID;
@@ -228,17 +268,24 @@ void ReplicationContext::clear() {
 	replyEventType_ = -1;
 	execStatus_ = PARTITION_STATUS_NONE;
 	affinityNumber_ = UNDEF_NODE_AFFINITY_NUMBER;
-
-	clearBinaryData();
+	clearExtraMessage();
+	clearMessage();
 }
 
-void ReplicationContext::clearBinaryData() {
+void ReplicationContext::clearExtraMessage() {
 	if (alloc_ != NULL) {
-		for (size_t i = 0; i < binaryDatas_.size(); i++) {
-			ALLOC_VAR_SIZE_DELETE(*alloc_, binaryDatas_[i]);
+		for (size_t i = 0; i < extraMessages_.size(); i++) {
+			ALLOC_VAR_SIZE_DELETE(*alloc_, extraMessages_[i]);
 		}
 	}
-	binaryDatas_.clear();
+	extraMessages_.clear();
+}
+
+void ReplicationContext::clearMessage() {
+	if (alloc_ != NULL) {
+		ALLOC_VAR_SIZE_DELETE(*alloc_, binaryMes_);
+	}
+	binaryMes_ = NULL;
 }
 
 TransactionManager::ContextSource::ContextSource() :
@@ -297,7 +344,7 @@ const TransactionManager::TransactionMode
 
 TransactionManager::TransactionManager(ConfigTable &config, bool isSQL)
 : pgConfig_(!isSQL ? config.getUInt32(CONFIG_TABLE_DS_PARTITION_NUM)
-					: DataStore::MAX_PARTITION_NUM,
+					: KeyDataStore::MAX_PARTITION_NUM,
 							!isSQL ? config.getUInt32(CONFIG_TABLE_DS_CONCURRENCY)
 					: config.get<int32_t>(CONFIG_TABLE_SQL_CONCURRENCY)),
 	  replicationMode_(config.get<int32_t>(CONFIG_TABLE_TXN_REPLICATION_MODE)),
@@ -307,6 +354,20 @@ TransactionManager::TransactionManager(ConfigTable &config, bool isSQL)
 		  CONFIG_TABLE_TXN_AUTHENTICATION_TIMEOUT_INTERVAL)),
 	  reauthConfig_(
 		  config.get<int32_t>(CONFIG_TABLE_TXN_REAUTHENTICATION_INTERVAL)),
+
+	  userCacheSize_(config.get<int32_t>(CONFIG_TABLE_SEC_USER_CACHE_SIZE)),
+	  userCacheUpdateInterval_(config.get<int32_t>(CONFIG_TABLE_SEC_USER_CACHE_UPDATE_INTERVAL)),
+	  ldapUrl_(config.get<const char8_t *>(CONFIG_TABLE_SEC_LDAP_URL)),
+	  ldapUserDNPrefix_(config.get<const char8_t *>(CONFIG_TABLE_SEC_LDAP_USER_DN_PREFIX)),
+	  ldapUserDNSuffix_(config.get<const char8_t *>(CONFIG_TABLE_SEC_LDAP_USER_DN_SUFFIX)),
+	  ldapBindDN_(config.get<const char8_t *>(CONFIG_TABLE_SEC_LDAP_BIND_DN)),
+	  ldapBindPassword_(config.get<const char8_t *>(CONFIG_TABLE_SEC_LDAP_BIND_PASSWORD)),
+	  ldapBaseDN_(config.get<const char8_t *>(CONFIG_TABLE_SEC_LDAP_BASE_DN)),
+	  ldapSearchAttribute_(config.get<const char8_t *>(CONFIG_TABLE_SEC_LDAP_SEARCH_ATTRIBUTE)),
+	  ldapMemberOfAttribute_(config.get<const char8_t *>(CONFIG_TABLE_SEC_LDAP_MEMBER_OF_ATTRIBUTE)),
+	  ldapWaitTime_(config.get<int32_t>(CONFIG_TABLE_SEC_LDAP_WAIT_TIME)),
+	  loginWaitTime_(config.get<int32_t>(CONFIG_TABLE_SEC_LOGIN_WAIT_TIME)),
+	  loginRepetitionNum_(config.get<int32_t>(CONFIG_TABLE_SEC_LOGIN_REPETITION_NUM)),
 	  txnTimeoutLimit_(
 		  config.get<int32_t>(CONFIG_TABLE_TXN_TRANSACTION_TIMEOUT_LIMIT)),
 	  eventMonitor_(pgConfig_.getPartitionGroupCount()),
@@ -331,7 +392,7 @@ TransactionManager::TransactionManager(ConfigTable &config, bool isSQL)
 			 pgId < pgConfig_.getPartitionGroupCount(); pgId++) {
 			txnContextMapManager_[pgId] =
 				UTIL_NEW TransactionContextMap::Manager(util::AllocatorInfo(
-					ALLOCATOR_GROUP_TXN_WORK, "sessionMap"));
+					ALLOCATOR_GROUP_TXN_STATE, "sessionMap"));
 			txnContextMapManager_[pgId]->setFreeElementLimit(
 				DEFAULT_FREE_ELEMENT_LIMIT);
 			txnContextMap_[pgId] = txnContextMapManager_[pgId]->create(
@@ -342,7 +403,7 @@ TransactionManager::TransactionManager(ConfigTable &config, bool isSQL)
 
 			activeTxnMapManager_[pgId] =
 				UTIL_NEW ActiveTransactionMap::Manager(util::AllocatorInfo(
-					ALLOCATOR_GROUP_TXN_WORK, "transactionMap"));
+					ALLOCATOR_GROUP_TXN_STATE, "transactionMap"));
 			activeTxnMapManager_[pgId]->setFreeElementLimit(
 				DEFAULT_FREE_ELEMENT_LIMIT);
 			activeTxnMap_[pgId] =
@@ -350,7 +411,7 @@ TransactionManager::TransactionManager(ConfigTable &config, bool isSQL)
 
 			replContextMapManager_[pgId] =
 				UTIL_NEW ReplicationContextMap::Manager(util::AllocatorInfo(
-					ALLOCATOR_GROUP_TXN_WORK, "replicationMap"));
+					ALLOCATOR_GROUP_TXN_STATE, "replicationMap"));
 			replContextMapManager_[pgId]->setFreeElementLimit(
 				DEFAULT_FREE_ELEMENT_LIMIT);
 			replContextMap_[pgId] = replContextMapManager_[pgId]->create(
@@ -360,7 +421,7 @@ TransactionManager::TransactionManager(ConfigTable &config, bool isSQL)
 				TIMER_INTERVAL_MILLISEC);
 			authContextMapManager_[pgId] =
 				UTIL_NEW AuthenticationContextMap::Manager(util::AllocatorInfo(
-					ALLOCATOR_GROUP_TXN_WORK, "authenticationMap"));
+					ALLOCATOR_GROUP_TXN_STATE, "authenticationMap"));
 			authContextMapManager_[pgId]->setFreeElementLimit(
 				DEFAULT_FREE_ELEMENT_LIMIT);
 			authContextMap_[pgId] = authContextMapManager_[pgId]->create(
@@ -371,9 +432,56 @@ TransactionManager::TransactionManager(ConfigTable &config, bool isSQL)
 
 			replAllocator_[pgId] =
 				UTIL_NEW util::VariableSizeAllocator<>(util::AllocatorInfo(
-					ALLOCATOR_GROUP_REPLICATION, "replicationVar"));
+					ALLOCATOR_GROUP_TXN_STATE, "replicationVar"));
 		}
 		reauthConfig_.setUpConfigHandler(config);
+
+		const char8_t* s1 = config.get<const char8_t *>(CONFIG_TABLE_SEC_AUTHENTICATION);
+
+		if (strcmp(s1, "LDAP") == 0) {
+			isLDAPAuthentication_ = true;
+		} else if (strcmp(s1, "INTERNAL") == 0) {
+			isLDAPAuthentication_ = false;
+		} else {
+			GS_THROW_USER_ERROR(
+				GS_ERROR_CS_CONFIG_ERROR, "security/authentication in gs_cluster.json invallid");
+		}
+
+		const char8_t* s2 = config.get<const char8_t *>(CONFIG_TABLE_SEC_LDAP_ROLE_MANAGEMENT);
+
+		if (strcmp(s2, "GROUP") == 0) {
+			isRoleMappingByGroup_ = true;
+		} else if (strcmp(s2, "USER") == 0) {
+			isRoleMappingByGroup_ = false;
+		} else {
+			GS_THROW_USER_ERROR(GS_ERROR_CS_CONFIG_ERROR, "security/ldapRoleManagement in gs_cluser.json invallid");
+		}
+
+		const char8_t* s3 = config.get<const char8_t *>(CONFIG_TABLE_SEC_LDAP_URL);
+		const char8_t* s4 = config.get<const char8_t *>(CONFIG_TABLE_SEC_LDAP_USER_DN_PREFIX);
+		const char8_t* s5 = config.get<const char8_t *>(CONFIG_TABLE_SEC_LDAP_USER_DN_SUFFIX);
+		const char8_t* s6 = config.get<const char8_t *>(CONFIG_TABLE_SEC_LDAP_BIND_DN);
+		const char8_t* s7 = config.get<const char8_t *>(CONFIG_TABLE_SEC_LDAP_BIND_PASSWORD);
+		const char8_t* s8 = config.get<const char8_t *>(CONFIG_TABLE_SEC_LDAP_BASE_DN);
+		const char8_t* s9 = config.get<const char8_t *>(CONFIG_TABLE_SEC_LDAP_SEARCH_ATTRIBUTE);
+		const char8_t* s10 = config.get<const char8_t *>(CONFIG_TABLE_SEC_LDAP_MEMBER_OF_ATTRIBUTE);
+		
+		if (isLDAPAuthentication_) {
+			if ((strcmp(s4, "") != 0) || (strcmp(s5, "") != 0)) {
+				isLDAPSimpleMode_ = true;
+				if ((strcmp(s8, "") != 0) || (strcmp(s9, "") != 0)) {
+					GS_THROW_USER_ERROR(GS_ERROR_CS_CONFIG_ERROR, "Simple mode and search mode are mixed for LDAP settings");
+				}
+			} else {
+				isLDAPSimpleMode_ = false;
+				if ((strcmp(s6, "") == 0) || (strcmp(s7, "") == 0) || (strcmp(s8, "") == 0) || (strcmp(s9, "") == 0)) {
+					GS_THROW_USER_ERROR(GS_ERROR_CS_CONFIG_ERROR, "The setting for LDAP is insufficient");
+				}
+			}
+		}
+
+
+
 	}
 	catch (std::exception &e) {
 		finalize();
@@ -626,6 +734,7 @@ bool TransactionManager::isActiveTransaction(
 	return partition_[pId]->isActiveTransaction(txnId);
 }
 
+
 /*!
 	@brief Gets list of all context ID (ClientID) in a specified partition
 */
@@ -845,6 +954,8 @@ void TransactionManager::backupTransactionActiveContext(PartitionId pId,
 	partition_[pId]->backupTransactionActiveContext(maxTxnId, clientIds,
 		activeTxnIds, refContainerIds, lastStmtIds, txnTimeoutIntervalSec);
 }
+
+
 
 /*!
 	@brief Restores context information having active transaction in a specified
@@ -1837,4 +1948,48 @@ void TransactionManager::ConfigSetUpHandler::operator()(ConfigTable &config) {
 	CONFIG_TABLE_ADD_PARAM(config,
 			CONFIG_TABLE_TXN_NOTIFICATION_INTERFACE_ADDRESS, STRING)
 		.setDefault("");
+	
+	CONFIG_TABLE_RESOLVE_GROUP(config, CONFIG_TABLE_SEC, "security");
+
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SEC_USER_CACHE_SIZE, INT32)
+		.setMin(0)
+		.setMax(65536)
+		.setDefault(1000);
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SEC_USER_CACHE_UPDATE_INTERVAL, INT32)
+		.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
+		.setMin(0)
+		.setDefault(60);
+
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SEC_AUTHENTICATION, STRING)
+		.setDefault("INTERNAL");
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SEC_LDAP_ROLE_MANAGEMENT, STRING)
+		.setDefault("USER");
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SEC_LDAP_URL, STRING)
+		.setDefault("");
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SEC_LDAP_USER_DN_PREFIX, STRING)
+		.setDefault("");
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SEC_LDAP_USER_DN_SUFFIX, STRING)
+		.setDefault("");
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SEC_LDAP_BIND_DN, STRING)
+		.setDefault("");
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SEC_LDAP_BIND_PASSWORD, STRING)
+		.setDefault("");
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SEC_LDAP_BASE_DN, STRING)
+		.setDefault("");
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SEC_LDAP_SEARCH_ATTRIBUTE, STRING)
+		.setDefault("uid");
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SEC_LDAP_MEMBER_OF_ATTRIBUTE, STRING)
+		.setDefault("memberOf");
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SEC_LDAP_WAIT_TIME, INT32)
+		.setUnit(ConfigTable::VALUE_UNIT_DURATION_MS)
+		.setMin(0)
+		.setDefault(1);
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SEC_LOGIN_WAIT_TIME, INT32)
+		.setUnit(ConfigTable::VALUE_UNIT_DURATION_MS)
+		.setMin(0)
+		.setDefault(10);
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SEC_LOGIN_REPETITION_NUM, INT32)
+		.setMin(0)
+		.setMax(256)
+		.setDefault(1);
 }

@@ -1,6 +1,6 @@
 ﻿/*
 	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
-
+	
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
 	published by the Free Software Foundation, either version 3 of the
@@ -14,8 +14,13 @@
 	You should have received a copy of the GNU Affero General Public License
 	along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
+/*!
+	@file
+	@brief LocalTempStoreクラスの実装
+*/
 
 #include "gs_error.h"
+#include "sql_common.h" 
 #include "sql_temp_store.h"
 #include <iostream>
 #include <iomanip> 
@@ -71,6 +76,11 @@ const LocalTempStore::ResourceId LocalTempStore::UNDEF_RESOURCEID = UINT64_MAX;
 const LocalTempStore::BlockId LocalTempStore::UNDEF_BLOCKID = UINT64_MAX;
 const uint64_t LocalTempStore::UNDEF_FILEBLOCKID = UINT64_MAX;
 
+/*!
+	@brief コンストラクタ
+	@param [in] config
+	@return なし
+*/
 LocalTempStore::LocalTempStore(
 		const Config &config, LTSVariableSizeAllocator &varAllocator,
 		bool autoUseDefault)
@@ -78,6 +88,7 @@ LocalTempStore::LocalTempStore(
 varAlloc_(&varAllocator)
 , bufferManager_(NULL), resourceInfoManager_(NULL)
 , swapFilesTopDir_(config.swapFilesTopDir_)
+, groupStatsMap_(GroupStatsMap::key_compare(), varAllocator)
 , defaultBlockExpSize_(util::ilog2(util::nextPowerOf2(config.blockSize_))) {
 	static_cast<void>(autoUseDefault);
 	Config bufferManagerConfig = config;
@@ -135,6 +146,10 @@ varAlloc_(&varAllocator)
 	bufferManager_ = ALLOC_VAR_SIZE_NEW(*varAlloc_) BufferManager(*varAlloc_, config, *this);
 }
 
+/*!
+	@brief デストラクタ
+	@return なし
+*/
 LocalTempStore::~LocalTempStore() try {
 	ALLOC_VAR_SIZE_DELETE(*varAlloc_, bufferManager_);
 	ALLOC_VAR_SIZE_DELETE(*varAlloc_, resourceInfoManager_);
@@ -142,40 +157,84 @@ LocalTempStore::~LocalTempStore() try {
 catch (...) {
 }
 
+/*!
+	@brief 使用するブロックサイズの登録
+	@param [in] blockSize 使用するブロックサイズ
+	@return なし
+*/
 void LocalTempStore::useBlockSize(uint32_t blockSize) {
 	static_cast<void>(blockSize);
 }
 
-
+/*!
+	@brief 使用メモリ上限の設定
+	@param [in] size 使用メモリ上限
+	@return なし
+*/
 void LocalTempStore::setSwapFileSizeLimit(uint64_t size) {
 	bufferManager_->setSwapFileSizeLimit(size);
 }
 
+/*!
+	@brief 常時確保メモリ上限の設定
+	@param [in] size 常時確保メモリ上限
+	@return なし
+	@note この値までは必要に応じてメモリを確保する。使用中メモリがこの値を超えた時は、メモリ解放時にこの値までメモリを解放する。
+*/
 void LocalTempStore::setStableMemoryLimit(uint64_t size) {
 	bufferManager_->setStableMemoryLimit(size);
 }
 
 
+/*!
+	@brief リソースグループIDの割当
+	@return 割り当てたリソースグループID
+	@note 同一リソースグループは同一ファイルにスワップアウトされる。また小ブロックの場合は同一大ブロックからメモリ確保される。
+*/
 LocalTempStore::GroupId LocalTempStore::allocateGroup() {
 	return resourceInfoManager_->allocateGroup();
 }
 
+/*!
+	@brief リソースグループIDの割当解除
+	@param [in] groupId 解除するリソースグループID
+	@return なし
+	@note これを呼び出した後、指定したgroupIdでallocateResourceするとエラーになる。リソース自体は破棄されない。(リソースが破棄されるのはリソースの参照カウンタが0になった時)
+*/
 void LocalTempStore::deallocateGroup(LocalTempStore::GroupId groupId) {
 	resourceInfoManager_->freeGroup(groupId);
 }
 
+/*!
+	@brief IDで紐づけられたリソースを割り当て
+	@param [in] type リソース種別: TUPLE_LISTかJSON_LIST
+	@param [in] groupId リソースグループID: TUPLE_LISTでは必要。JSON_LISTでは不要(省略可)
+	@return 割り当てたリソースID
+*/
 LocalTempStore::ResourceId LocalTempStore::allocateResource(
 	LocalTempStore::ResourceType type, LocalTempStore::GroupId groupId) {
 
 	return resourceInfoManager_->allocateResource(type, groupId);
 }
 
+/*!
+	@brief IDとリソースとの紐づけを解消
+	@param [in] resourceId 割当を解除するリソースID
+	@return なし
+	@note 以後指定IDによるリソースへのアクセスはできなくなるが、
+		リソースの実体がすべて破棄されるのは関連するインスタンス
+		(TupleListの場合はTupleListオブジェクト)が破棄された時点となる
+*/
 void LocalTempStore::deallocateResource(LocalTempStore::ResourceId resourceId) {
 	return resourceInfoManager_->freeResource(resourceId);
 }
 
 
 
+/*!
+	@brief コンストラクタ
+	@return なし
+*/
 LocalTempStore::BufferManager::BufferManager(
 	LocalTempStore::LTSVariableSizeAllocator &varAlloc,
 	const LocalTempStore::Config &config,
@@ -201,6 +260,13 @@ activeBlockCount_(0)
 }
 
 
+/*!
+	@brief デストラクタ
+	@param [in] groupId リソースグループID
+	@param [in] resourceId リソースID
+	@param [in] resourceBlockSize ブロックサイズ
+	@return なし
+*/
 LocalTempStore::BufferManager::~BufferManager() {
 	if (file_) {
 		file_->close();
@@ -209,6 +275,11 @@ LocalTempStore::BufferManager::~BufferManager() {
 	}
 }
 
+/*!
+	@brief スワップファイルサイズ合計の上限の設定
+	@param [in] size スワップファイルサイズ合計の上限
+	@return なし
+*/
 void LocalTempStore::BufferManager::setSwapFileSizeLimit(uint64_t size) {
 	util::LockGuard<util::Mutex> guard(mutex_);
 	swapFileSizeLimit_ = size;
@@ -264,8 +335,13 @@ bool LocalTempStore::BufferManager::allocateMemory(BlockId id, BlockInfo* &block
 	return needSwap;
 }
 
+/*!
+	@brief ブロック割り当て
+	@return なし
+*/
 void LocalTempStore::BufferManager::allocate(
 		BlockInfo* &blockInfo, uint64_t affinity, bool force) {
+	bool swapped = false;
 	static_cast<void>(affinity);
 	BlockId id = UNDEF_BLOCKID;
 	try {
@@ -309,6 +385,11 @@ void LocalTempStore::BufferManager::allocate(
 	}
 }
 
+/*!
+	@brief ブロック取得
+	@param [in] block
+	@return なし
+*/
 void LocalTempStore::BufferManager::get(BlockId id, BlockInfo* &blockInfo) {
 	try {
 		LockGuardVariant<util::Mutex> guard(mutex_);
@@ -374,6 +455,15 @@ void LocalTempStore::BufferManager::get(BlockId id, BlockInfo* &blockInfo) {
 	}
 }
 
+/*!
+	@brief ブロック解放
+	@param [in] groupId リソースグループID
+	@param [in] resourceId リソースID
+	@param [in] resourceBlockSize ブロックサイズ
+	@return なし
+	@note 使用中メモリを解放し、blockIdを再利用可能にする
+	A=0かつR=0になった場合に、removeReferenceまたはremoveAssignmentから呼ばれる
+*/
 void LocalTempStore::BufferManager::release(BlockInfo &blockInfo, uint64_t affinity) {
 	static_cast<void>(affinity);
 	blockInfoTable_.fixedAlloc_->deallocate(blockInfo.data_);
@@ -406,6 +496,11 @@ void LocalTempStore::BufferManager::decrementActiveBlockCount() {
 	}
 }
 
+/*!
+	@brief 目標メモリ量設定
+	@param [in] size 目標メモリ量
+	@return なし
+*/
 void LocalTempStore::BufferManager::setStableMemoryLimit(uint64_t size) {
 	util::LockGuard<util::Mutex> guard(mutex_);
 	stableMemoryLimit_ = size;
@@ -414,14 +509,24 @@ void LocalTempStore::BufferManager::setStableMemoryLimit(uint64_t size) {
 }
 
 
+/*!
+	@brief 使用中メモリサイズの取得
+*/
 size_t LocalTempStore::BufferManager::getAllocatedMemory() {
 	return blockInfoTable_.fixedAlloc_->getElementSize()
 	  * (blockInfoTable_.fixedAlloc_->getTotalElementCount()
 		 - blockInfoTable_.fixedAlloc_->getFreeElementCount());
 }
 
+/*!
+	@brief 指定したブロックをスワップインする
+	@param [in/out] blockInfo
+	@return なし
+*/
 void LocalTempStore::BufferManager::swapIn(BlockId blockId, BlockInfo &blockInfo) {
 	BlockId blockNth = LocalTempStore::getBlockNth(blockId);
+	assert(blockInfo.baseBlockInfo_);
+	store_.incrementSwapInCount(blockInfo.baseBlockInfo_->groupId_);
 	try {
 		file_->readBlock(blockNth, 1, blockInfo.data());
 	}
@@ -434,11 +539,17 @@ void LocalTempStore::BufferManager::swapIn(BlockId blockId, BlockInfo &blockInfo
 	LocalTempStore::Block::Header::validateHeader(blockInfo.data_, blockExpSize_, false);
 }
 
+/*!
+	@brief 指定したブロックをスワップアウトする
+	@param [in] blockInfo
+	@return なし
+*/
 void LocalTempStore::BufferManager::swapOut(BlockInfo &blockInfo) {
 	assert(blockInfo.baseBlockInfo_);
 	bool isSwapped =
 			((MASK_ALREADY_SWAPPED & blockInfo.baseBlockInfo_->assignmentCount_) != 0);
 	if (!isSwapped && blockInfo.baseBlockInfo_->assignmentCount_ > 0) {
+		store_.incrementSwapOutCount(blockInfo.baseBlockInfo_->groupId_);
 		BlockId blockNth = LocalTempStore::getBlockNth(blockInfo.getBlockId());
 		if (blockInfo.data() == NULL) {
 			GS_THROW_USER_ERROR(GS_ERROR_LTS_SWAP_OUT_BLOCK_FAILED,
@@ -457,14 +568,27 @@ void LocalTempStore::BufferManager::swapOut(BlockInfo &blockInfo) {
 	}
 }
 
+/*!
+	@brief 空きブロックのBlockNthをダンプする
+	@param [in] ostr
+	@return なし
+*/
 void LocalTempStore::BufferManager::dumpActiveBlockId(std::ostream &ostr) {
 	blockInfoTable_.dumpActiveBlockId(ostr, blockExpSize_);
 }
 
+/*!
+	@brief スワップファイルサイズ取得
+	@return スワップファイルサイズ
+*/
 uint64_t LocalTempStore::BufferManager::getSwapFileSize() {
 	return file_->getFileSize();
 }
 
+/*!
+	@brief 書き込みブロック総数の取得
+	@return 書き込みブロック数
+*/
 uint64_t LocalTempStore::BufferManager::getWriteBlockCount() {
 	return file_->getWriteBlockCount();
 }
@@ -481,6 +605,10 @@ uint64_t LocalTempStore::BufferManager::getWriteTime() {
 	return file_->getWriteTime();
 }
 
+/*!
+	@brief 読み込みブロック総数の取得
+	@return 読み込みブロック数
+*/
 uint64_t LocalTempStore::BufferManager::getReadBlockCount() {
 	return file_->getReadBlockCount();
 }
@@ -498,6 +626,10 @@ uint64_t LocalTempStore::BufferManager::getReadTime() {
 }
 
 
+/*!
+	@brief コンストラクタ
+	@return なし
+*/
 LocalTempStore::BlockInfoTable::BlockInfoTable(
 		LTSVariableSizeAllocator &varAlloc, LocalTempStore &store,
 		uint32_t blockExpSize, uint64_t stableMemoryLimit
@@ -525,6 +657,10 @@ blockExpSize_(blockExpSize), stableMemoryLimit_(stableMemoryLimit)
 	blockIdMaxLimit_ = swapFileSizeLimit / static_cast<uint64_t>(1UL << blockExpSize_) + 1;
 }
 
+/*!
+	@brief デストラクタ
+	@return なし
+*/
 LocalTempStore::BlockInfoTable::~BlockInfoTable() {
 	BlockInfoMap::iterator itr = blockInfoMap_.begin();
 	for (; itr != blockInfoMap_.end(); ++itr) {
@@ -543,6 +679,13 @@ LocalTempStore::BlockInfoTable::~BlockInfoTable() {
 }
 
 
+/*!
+	@brief コンストラクタ
+	@param [in] groupId リソースグループID
+	@param [in] resourceId リソースID
+	@param [in] resourceBlockSize ブロックサイズ
+	@return なし
+*/
 LocalTempStore::BufferManager::File::File(
 	LTSVariableSizeAllocator &varAlloc, LocalTempStore &store,
 	const LocalTempStore::Config &config,
@@ -572,6 +715,10 @@ LocalTempStore::BufferManager::File::File(
 			", swapSyncSize_=" << swapSyncSize_);
 }
 
+/*!
+	@brief デストラクタ
+	@return なし
+*/
 LocalTempStore::BufferManager::File::~File() try {
 	if (file_) {
 		UTIL_TRACE_DEBUG(SQL_TEMP_STORE, "~File(): fileName=" << fileName_.c_str()
@@ -584,6 +731,10 @@ LocalTempStore::BufferManager::File::~File() try {
 catch (...) {
 }
 
+/*!
+	@brief 書き込みブロック総数の取得
+	@return 書き込みブロック数
+*/
 uint64_t LocalTempStore::BufferManager::File::getWriteBlockCount() {
 	return writeBlockCount_;
 }
@@ -600,6 +751,10 @@ uint64_t LocalTempStore::BufferManager::File::getWriteTime() {
 	return writeTime_;
 }
 
+/*!
+	@brief 読み込みブロック総数の取得
+	@return 読み込みブロック数
+*/
 uint64_t LocalTempStore::BufferManager::File::getReadBlockCount() {
 	return readBlockCount_;
 }
@@ -616,10 +771,18 @@ uint64_t LocalTempStore::BufferManager::File::getReadTime() {
 	return readTime_;
 }
 
+/*!
+	@brief 書き込みブロック総数のリセット
+	@return なし
+*/
 void LocalTempStore::BufferManager::File::resetWriteBlockCount() {
 	writeBlockCount_ = 0;
 }
 
+/*!
+	@brief 書き込みブロック総数のリセット
+	@return なし
+*/
 void LocalTempStore::BufferManager::File::resetReadBlockCount() {
 	readBlockCount_ = 0;
 }
@@ -650,6 +813,13 @@ void LocalTempStore::BlockInfoTable::dumpActiveBlockId(
 	}
 }
 
+/*!
+	@brief 物理ファイルからのブロック読み込み
+	@param [in] buffer 読み込みブロックメモリアドレス
+	@param [in] count 読み込みブロック数
+	@param [in] blockNo 読み込みファイルブロック番号
+	@return 読み込みブロック数
+*/
 size_t LocalTempStore::BufferManager::File::readBlock(
 		FileBlockId fileBlockId, size_t count, void *buffer) {
 	try {
@@ -697,6 +867,13 @@ size_t LocalTempStore::BufferManager::File::readBlock(
 }
 
 
+/*!
+	@brief ファイルへのブロック書き込み
+	@param [in] buffer 書き込むバッファのアドレス
+	@param [in] count 書き込むブロック数
+	@param [in] blockNo ファイル書き込み先のブロック番号
+	@return 書き込みブロック数
+*/
 size_t LocalTempStore::BufferManager::File::writeBlock(
 		FileBlockId fileBlockId, size_t count, void* buffer) {
 	LocalTempStore::Block::Header::updateHeaderCheckSum(buffer);
@@ -745,6 +922,11 @@ size_t LocalTempStore::BufferManager::File::writeBlock(
 }
 
 
+/*!
+	@brief 物理ファイルをオープンする
+	@return 成功ならtrue
+	@note 起動時に1回だけ呼び出される前提。ファイルが既存の場合、truncateする
+*/
 bool LocalTempStore::BufferManager::File::open() {
 	try {
 		if (!swapFilesTopDir_.empty()) {
@@ -791,6 +973,11 @@ bool LocalTempStore::BufferManager::File::open() {
 	}
 }
 
+/*!
+	@brief 物理ファイルをクローズする
+	@return なし
+	@note 終了時にのみ呼び出される
+*/
 void LocalTempStore::BufferManager::File::close() {
 	if (file_) {
 		file_->unlock();
@@ -812,6 +999,10 @@ void LocalTempStore::BufferManager::File::close() {
 	file_ = NULL;
 }
 
+/*!
+	@brief 物理ファイルをフラッシュする
+	@return なし
+*/
 void LocalTempStore::BufferManager::File::flush() {
 	if (file_) {
 		const uint64_t startClock = util::Stopwatch::currentClock(); 
@@ -825,12 +1016,20 @@ void LocalTempStore::BufferManager::File::flush() {
 	}
 }
 
+/*!
+	@brief 物理ファイルをトリミングする
+	@return なし
+*/
 void LocalTempStore::BufferManager::File::trim(uint64_t size) {
 	if (file_) {
 		file_->setSize(size);
 	}
 }
 
+/*!
+	@brief ファイルのアクセスパターン宣言
+	@return なし
+*/
 void LocalTempStore::BufferManager::File::advise(int32_t advise) {
 #ifndef WIN32
 	if (!file_->isClosed()) {
@@ -848,6 +1047,10 @@ void LocalTempStore::BufferManager::File::advise(int32_t advise) {
 #endif
 }
 
+/*!
+	@brief 物理ファイルのファイルサイズを取得する
+	@return ファイルサイズ
+*/
 uint64_t LocalTempStore::BufferManager::File::getFileSize() {
 	uint64_t fileSize = 0;
 	try {
@@ -868,6 +1071,13 @@ uint64_t LocalTempStore::BufferManager::File::getFileSize() {
 LocalTempStore::Block::Block() : blockInfo_(NULL) {
 }
 
+/*!
+	@brief コンストラクタ
+	@param [in] store LocalTempStore
+	@param [in] resourceId 対象のリソースID
+	@param [in] resourceBlockId 対象のリソースブロックID
+	@note このインスタンスが存在する限り、対応するブロックはオンメモリで維持される
+*/
 
 LocalTempStore::Block::Block(LocalTempStore &store, LocalTempStore::BlockId blockId)
 : blockInfo_(NULL) {
@@ -905,10 +1115,25 @@ LocalTempStore::Block::Block(LocalTempStore::BlockInfo &blockInfo)
 
 }
 
+void LocalTempStore::Block::setGroupId(LocalTempStore::GroupId groupId) {
+	assert(blockInfo_);
+	assert(blockInfo_->baseBlockInfo_);
+	if (blockInfo_->baseBlockInfo_->groupId_ != groupId) {
+		assert(blockInfo_->store_);
+		blockInfo_->store_->decrementLatchBlockCount(blockInfo_->baseBlockInfo_->groupId_);
+		blockInfo_->store_->incrementLatchBlockCount(groupId);
+	}
+	blockInfo_->baseBlockInfo_->groupId_ = groupId;
+}
+
+LocalTempStore::GroupId LocalTempStore::Block::getGroupId() {
+	assert(blockInfo_);
+	assert(blockInfo_->baseBlockInfo_);
+	return blockInfo_->baseBlockInfo_->groupId_;
+}
 
 void LocalTempStore::Block::dumpContents(std::ostream &ostr) const {
 	assert(blockInfo_);
-	blockInfo_->dumpContents(ostr);
 	ostr << std::endl;
 }
 
@@ -970,7 +1195,6 @@ LocalTempStore::BlockInfo::BlockInfo(LocalTempStore &store, BlockId blockId)
 }
 
 void LocalTempStore::BlockInfo::initialize(LocalTempStore &store, BlockId id) {
-
 	store_ = &store;
 	blockId_ = id;
 	refCount_ = 0;
@@ -1012,6 +1236,15 @@ void LocalTempStore::BlockInfo::setup(LocalTempStore &store, BlockId id, bool is
 #endif
 }
 
+void LocalTempStore::BlockInfo::setGroupId(LocalTempStore::GroupId groupId) {
+	assert(baseBlockInfo_);
+	if (baseBlockInfo_->groupId_ != groupId) {
+		assert(store_);
+		store_->decrementLatchBlockCount(baseBlockInfo_->groupId_);
+		store_->incrementLatchBlockCount(groupId);
+	}
+	baseBlockInfo_->groupId_ = groupId;
+}
 
 void LocalTempStore::Block::assign(const void *data, size_t size, bool isPartial) {
 	assert(blockInfo_);
@@ -1071,20 +1304,40 @@ LocalTempStore::Config::Config()
 }
 
 
+/*!
+	@brief コンストラクタ
+	@param [in] store LocalTempStore
+	@return なし
+	@note 内部でallocateGroupを行う(RAIIでグループID管理を行う場合に使用する)
+*/
 LocalTempStore::Group::Group(LocalTempStore &store): store_(store), groupId_(UNDEF_GROUPID) {
 	groupId_ = store_.allocateGroup();
 }
 
+/*!
+	@brief デストラクタ
+	@return なし
+	@note 内部でdeallocateGroupを行う(RAIIでグループID管理を行う場合に使用する)
+*/
 LocalTempStore::Group::~Group() try {
 	store_.deallocateGroup(groupId_);
+	store_.clearGroupStats(groupId_);
 }
 catch (...) {
 }
 
+/*!
+	@brief LocalTempStoreの取得
+	@return LocalTempStore
+*/
 LocalTempStore& LocalTempStore::Group::getStore() const {
 	return store_;
 }
 
+/*!
+	@brief GroupIdの取得
+	@return 割り当てられたgroupId
+*/
 LocalTempStore::GroupId LocalTempStore::Group::getId() const {
 	return groupId_;
 }
@@ -1106,13 +1359,28 @@ int64_t LocalTempStore::getGroupResourceCount(GroupId groupId) {
 }
 
 
+/*!
+	@brief 使用中メモリサイズの取得
+*/
 size_t LocalTempStore::getVariableAllocatorStat(
 	size_t &totalSize, size_t &freeSize, size_t &hugeCount, size_t &hugeSize) {
 	totalSize = varAlloc_->getTotalElementSize();
 	freeSize = varAlloc_->getFreeElementSize();
-	hugeCount = varAlloc_->getHugeElementSize();
+	hugeCount = varAlloc_->getHugeElementCount();
 	hugeSize = varAlloc_->getHugeElementSize();
 	return (totalSize - freeSize) + hugeSize;
+}
+
+std::string LocalTempStore::getVariableAllocatorStat2() {
+	util::NormalOStringStream oss;
+	util::AllocatorStats stats;
+	varAlloc_->getStats(stats);
+	oss << "{";
+	for (size_t pos = 0; pos < util::AllocatorStats::STAT_TYPE_END; ++pos) {
+		oss << stats.values_[pos] << ",";
+	}
+	oss << "}";
+	return oss.str();
 }
 
 void LocalTempStore::countBlockInfo(
@@ -1139,6 +1407,15 @@ void LocalTempStore::dumpBlockInfoContents() {
 	bufferManager_->dumpBlockInfoContents();
 }
 
+/*!
+	@brief ブロック数の情報を取得する
+	@param [out] freeCount
+	@param [out] latchedCount
+	@param [out] unlatchedCount
+	@param [out] noneCount
+	@return なし
+	@note テストでの確認用
+*/
 void LocalTempStore::BufferManager::countBlockInfo(
 	uint64_t &freeCount, uint64_t &latchedCount,
 	uint64_t &unlatchedCount, uint64_t &noneCount) {
@@ -1223,7 +1500,6 @@ void LocalTempStore::dumpBackTrace() {
 	nptrs = backtrace(buffer, FRAME_DEPTH);
 	backtrace_symbols_fd(buffer, nptrs, STDOUT_FILENO);
 #endif
-	abort();
 }
 
 
@@ -1526,11 +1802,11 @@ LTSEventBufferManager::~LTSEventBufferManager() {
 }
 
 size_t LTSEventBufferManager::getUnitSize() {
-	assert(LocalTempStore::DEFAULT_BLOCK_SIZE >
-			LocalTempStore::Block::Header::BLOCK_HEADER_SIZE);
+	const size_t blockSize = store_.getDefaultBlockSize();
 
-	return LocalTempStore::DEFAULT_BLOCK_SIZE -
-			LocalTempStore::Block::Header::BLOCK_HEADER_SIZE;
+	assert(blockSize > LocalTempStore::Block::Header::BLOCK_HEADER_SIZE);
+
+	return blockSize - LocalTempStore::Block::Header::BLOCK_HEADER_SIZE;
 }
 
 std::pair<LTSEventBufferManager::BufferId, void*>
@@ -1540,6 +1816,9 @@ LTSEventBufferManager::allocate() {
 	store_.getBufferManager().allocate(blockInfo, group_.getId(), true);
 	store_.getBufferManager().addAssignment(blockInfo->getBlockId());
 
+	assert(blockInfo);
+	blockInfo->setGroupId(group_.getId());
+	store_.incrementActiveBlockCount(group_.getId());
 
 	return std::make_pair(
 			BufferId(blockInfo->getBlockId(), 0), getBlockBody(*blockInfo));
@@ -1547,6 +1826,7 @@ LTSEventBufferManager::allocate() {
 
 void LTSEventBufferManager::deallocate(const BufferId &id) {
 	store_.getBufferManager().removeAssignment(id.first);
+	store_.decrementActiveBlockCount(group_.getId());
 }
 
 void* LTSEventBufferManager::latch(const BufferId &id) {

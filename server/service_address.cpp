@@ -291,7 +291,7 @@ struct ServiceAddressResolver::ProviderContext : public util::IOPollHandler {
 	HttpRequest request_;
 	HttpResponse response_;
 	util::SocketAddress address_;
-	util::Socket socket_;
+	AbstractSocket socket_;
 	util::IOPollEvent ioPollEvent_;
 	bool connected_;
 };
@@ -310,6 +310,8 @@ ServiceAddressResolver::ProviderContext::contextCheckers_[10];
 const char8_t ServiceAddressResolver::JSON_KEY_ADDRESS[] = "address";
 const char8_t ServiceAddressResolver::JSON_KEY_PORT[] = "port";
 
+SocketFactory ServiceAddressResolver::DEFAULT_SOCKET_FACTORY;
+
 ServiceAddressResolver::ServiceAddressResolver(
 		const Allocator &alloc, const Config &config) :
 		alloc_((initializeRaw(), alloc)),
@@ -322,9 +324,10 @@ ServiceAddressResolver::ServiceAddressResolver(
 		initialized_(false),
 		changed_(false),
 		normalized_(false),
+		secure_(false),
 		providerCxt_(NULL) {
 
-	checkConfig(alloc, config);
+	checkConfig(alloc, config, secure_);
 
 	if (config_.providerURL_ != NULL) {
 		providerURL_ = config_.providerURL_;
@@ -365,7 +368,8 @@ ServiceAddressResolver::getConfig() const {
 }
 
 void ServiceAddressResolver::checkConfig(
-		const Allocator &alloc, const Config &config) {
+		const Allocator &alloc, const Config &config, bool &secure) {
+	secure = false;
 	if (config.providerURL_ == NULL) {
 		return;
 	}
@@ -373,13 +377,30 @@ void ServiceAddressResolver::checkConfig(
 	HttpRequest request(alloc);
 	request.acceptURL(config.providerURL_);
 
-	if (HttpMessage::FieldParser::compareToken(
-			request.getScheme(), "http") != 0) {
-		GS_COMMON_THROW_USER_ERROR(
-				GS_ERROR_SA_INVALID_CONFIG,
-				"Only HTTP is supported for provider URL"
-				" (url=" << config.providerURL_ << ")");
+	do {
+		if (HttpMessage::FieldParser::compareToken(
+				request.getScheme(), "http") == 0) {
+			break;
+		}
+
+		if (HttpMessage::FieldParser::compareToken(
+				request.getScheme(), "https") != 0) {
+			GS_COMMON_THROW_USER_ERROR(
+					GS_ERROR_SA_INVALID_CONFIG,
+					"Only HTTP(S) is supported for provider URL "
+					"(url=" << config.providerURL_ << ")");
+		}
+
+		if (config.secureSocketFactory_ == NULL) {
+			GS_COMMON_THROW_USER_ERROR(
+					GS_ERROR_SA_INVALID_CONFIG,
+					"HTTPS Provider not available because of "
+					"lack of extra library "
+					"(url=" << config.providerURL_ << ")");
+		}
+		secure = true;
 	}
+	while (false);
 
 	if (strlen(request.getHost()) == 0) {
 		GS_COMMON_THROW_USER_ERROR(
@@ -473,7 +494,7 @@ bool ServiceAddressResolver::update() try {
 	HttpRequest &request = providerCxt_->request_;
 	HttpResponse &response = providerCxt_->response_;
 	util::SocketAddress &address = providerCxt_->address_;
-	util::Socket &socket = providerCxt_->socket_;
+	AbstractSocket &socket = providerCxt_->socket_;
 	util::IOPollEvent &ioPollEvent = providerCxt_->ioPollEvent_;
 	bool &connected = providerCxt_->connected_;
 
@@ -491,6 +512,7 @@ bool ServiceAddressResolver::update() try {
 
 	address.assign(request.getHost(), request.getPort());
 
+	createSocket(socket);
 	socket.open(address.getFamily(), util::Socket::TYPE_STREAM);
 	socket.setBlockingMode(false);
 	connected = socket.connect(address);
@@ -533,7 +555,7 @@ bool ServiceAddressResolver::checkUpdated(size_t *readSize) try {
 
 	HttpRequest &request = providerCxt_->request_;
 	HttpResponse &response = providerCxt_->response_;
-	util::Socket &socket = providerCxt_->socket_;
+	AbstractSocket &socket = providerCxt_->socket_;
 	util::IOPollEvent &ioPollEvent = providerCxt_->ioPollEvent_;
 	const bool &connected = providerCxt_->connected_;
 
@@ -556,12 +578,14 @@ bool ServiceAddressResolver::checkUpdated(size_t *readSize) try {
 
 	if (!request.getMessage().isWrote() &&
 			!request.getMessage().writeTo(socket)) {
+		ioPollEvent = resolvePollEvent(socket, ioPollEvent);
 		return false;
 	}
 
 	ioPollEvent = util::IOPollEvent::TYPE_READ;
 
 	const bool eof = response.getMessage().readFrom(socket, readSize);
+	ioPollEvent = resolvePollEvent(socket, ioPollEvent);
 	if (!response.parse(eof)) {
 		return false;
 	}
@@ -660,6 +684,11 @@ void ServiceAddressResolver::setAddress(
 			if (it == storedIt) {
 				return;
 			}
+			GS_COMMON_THROW_USER_ERROR(
+					GS_ERROR_SA_ADDRESS_CONFLICTED,
+					"Address conflicted (index=" << index <<
+					", type=" << getTypeName(type) <<
+					", address=" << addr << ")");
 		}
 
 		const int family = config_.addressFamily_;
@@ -966,9 +995,33 @@ void ServiceAddressResolver::normalizeEntries(EntryList *entryList) {
 	std::sort(entryList->begin(), entryList->end(), EntryLess());
 }
 
+void ServiceAddressResolver::createSocket(AbstractSocket &socket) const {
+	SocketFactory *factory = (secure_ ?
+			config_.secureSocketFactory_ : config_.plainSocketFactory_);
+	if (factory == NULL) {
+		GS_COMMON_THROW_USER_ERROR(
+				GS_ERROR_SA_INTERNAL_ILLEGAL_OPERATION, "");
+	}
+	factory->create(socket);
+}
+
+util::IOPollEvent ServiceAddressResolver::resolvePollEvent(
+		AbstractSocket &socket, util::IOPollEvent base) {
+	switch (socket.getNextAction()) {
+	case AbstractSocket::ACTION_READ:
+		return util::IOPollEvent::TYPE_READ;
+	case AbstractSocket::ACTION_WRITE:
+		return util::IOPollEvent::TYPE_WRITE;
+	default:
+		return base;
+	}
+}
+
 ServiceAddressResolver::Config::Config() :
 		providerURL_(NULL),
-		addressFamily_(util::SocketAddress::FAMILY_INET) {
+		addressFamily_(util::SocketAddress::FAMILY_INET),
+		plainSocketFactory_(&DEFAULT_SOCKET_FACTORY),
+		secureSocketFactory_(NULL) {
 }
 
 ServiceAddressResolver::Entry::Entry(const Allocator &alloc, size_t typeCount) :

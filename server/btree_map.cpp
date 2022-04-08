@@ -85,7 +85,7 @@ struct BtreeMap::MapKeyTraits<CompositeInfoObject136> {
 	typedef CompositeInfoObject TYPE;
 };
 
-int32_t BtreeMap::compositeInfoCmp(TransactionContext &txn, ObjectManager &objectManager,
+int32_t BtreeMap::compositeInfoCmp(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 						 const CompositeInfoObject *e1, const CompositeInfoObject *e2, BaseIndex::Setting &setting) {
 	int32_t ret = 0;
 	TreeFuncInfo *funcInfo = setting.getFuncInfo();
@@ -105,9 +105,9 @@ int32_t BtreeMap::compositeInfoCmp(TransactionContext &txn, ObjectManager &objec
 			}
 		} else {
 			ColumnInfo &columnInfo = columnSchema->getColumnInfo(i);
-			uint8_t *val1 = e1->getField(txn, objectManager, columnInfo, cursor1);
-			uint8_t *val2 = e2->getField(txn, objectManager, columnInfo, cursor2);
-			ret = ValueProcessor::compare(txn, objectManager, columnInfo.getColumnType(), val1, val2);
+			uint8_t *val1 = e1->getField(txn, objectManager, strategy, columnInfo, cursor1);
+			uint8_t *val2 = e2->getField(txn, objectManager, strategy, columnInfo, cursor2);
+			ret = ValueProcessor::compare(txn, objectManager, strategy, columnInfo.getColumnType(), val1, val2);
 		}
 		if (ret != 0) {
 			break;
@@ -123,7 +123,7 @@ int32_t BtreeMap::compositeInfoCmp(TransactionContext &txn, ObjectManager &objec
 }
 
 template <>
-bool BtreeMap::compositeInfoMatch(TransactionContext &txn, ObjectManager &objectManager,
+bool BtreeMap::compositeInfoMatch(TransactionContext &txn, ObjectManagerV4 &objectManager,
 						 const CompositeInfoObject *e, BaseIndex::Setting &setting) {
 	bool isMatch = true;
 	TreeFuncInfo *funcInfo = setting.getFuncInfo();
@@ -141,7 +141,7 @@ bool BtreeMap::compositeInfoMatch(TransactionContext &txn, ObjectManager &object
 				}
 			} else if (cond.opType_ != DSExpression::ISNOT) {
 				ColumnInfo &columnInfo = columnSchema->getColumnInfo(cond.columnId_);
-				uint8_t *val1 = e->getField(txn, objectManager, columnInfo, cursor);
+				uint8_t *val1 = e->getField(txn, objectManager, allocateStrategy_, columnInfo, cursor);
 				ColumnType columnType = columnInfo.getColumnType();
 				if (columnType == COLUMN_TYPE_STRING) {
 					StringCursor obj1(const_cast<uint8_t *>(val1));
@@ -184,7 +184,7 @@ std::string BtreeMap::BNode<CompositeInfoObject24, OId>::dump(TransactionContext
 	out << "(@@Node@@)";
 	for (int32_t i = 0; i < numkeyValues(); ++i) {
 		out << "(";
-		getKeyValue(i).key_.dump(txn, *getObjectManager(), *funcInfo, out);
+		getKeyValue(i).key_.dump(txn, *getObjectManager(), allocateStrategy_, *funcInfo, out);
 		out << "," << getKeyValue(i).value_ << "), ";
 	}
 	return out.str();
@@ -208,9 +208,9 @@ MvccRowImage BtreeMap::getMinValue() {
 
 template <>
 void BaseIndex::SearchContext::setSuspendPoint(TransactionContext &txn,
-	ObjectManager &objectManager, TreeFuncInfo *funcInfo, const StringKey &suspendKey, const OId &suspendValue) {
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, TreeFuncInfo *funcInfo, const StringKey &suspendKey, const OId &suspendValue) {
 	UNUSED_VARIABLE(funcInfo);
-	StringCursor obj(txn, objectManager, suspendKey.oId_);
+	StringCursor obj(objectManager, strategy, suspendKey.oId_);
 	suspendKey_ = ALLOC_NEW(txn.getDefaultAllocator())
 		uint8_t[obj.stringLength()];
 	memcpy(suspendKey_, obj.str(), obj.stringLength());
@@ -224,9 +224,9 @@ void BaseIndex::SearchContext::setSuspendPoint(TransactionContext &txn,
 
 template <>
 void BaseIndex::SearchContext::setSuspendPoint(TransactionContext &txn,
-	ObjectManager &objectManager, TreeFuncInfo *funcInfo, const FullContainerKeyAddr &suspendKey, const OId &suspendValue) {
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, TreeFuncInfo *funcInfo, const FullContainerKeyAddr &suspendKey, const OId &suspendValue) {
 	UNUSED_VARIABLE(funcInfo);
-	FullContainerKeyCursor obj(txn, objectManager, suspendKey.oId_);
+	FullContainerKeyCursor obj(objectManager, strategy, suspendKey.oId_);
 	FullContainerKey containerKey = obj.getKey();
 	const void *keyData;
 	size_t keySize;
@@ -244,11 +244,32 @@ void BaseIndex::SearchContext::setSuspendPoint(TransactionContext &txn,
 }
 
 template <>
+void BaseIndex::SearchContext::setSuspendPoint(TransactionContext& txn,
+	ObjectManagerV4& objectManager, AllocateStrategy& strategy, TreeFuncInfo* funcInfo, const FullContainerKeyAddr& suspendKey, const KeyDataStoreValue& suspendValue) {
+	UNUSED_VARIABLE(funcInfo);
+	FullContainerKeyCursor obj(objectManager, strategy, suspendKey.oId_);
+	FullContainerKey containerKey = obj.getKey();
+	const void* keyData;
+	size_t keySize;
+	containerKey.toBinary(keyData, keySize);
+
+	suspendKey_ = ALLOC_NEW(txn.getDefaultAllocator())
+		uint8_t[keySize];
+	memcpy(suspendKey_, keyData, keySize);
+	suspendKeySize_ = keySize;
+
+	uint32_t valueSize = sizeof(KeyDataStoreValue);
+	suspendValue_ = ALLOC_NEW(txn.getDefaultAllocator()) uint8_t[valueSize];
+	memcpy(suspendValue_, &suspendValue, valueSize);
+	suspendValueSize_ = valueSize;
+}
+
+template <>
 void BaseIndex::SearchContext::setSuspendPoint(TransactionContext &txn,
-	ObjectManager &objectManager, TreeFuncInfo *funcInfo, const CompositeInfoObject &suspendKey, const OId &suspendValue) {
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, TreeFuncInfo *funcInfo, const CompositeInfoObject &suspendKey, const OId &suspendValue) {
 
 	assert(funcInfo != NULL);
-	suspendKey.serialize(txn, objectManager, *funcInfo, suspendKey_, suspendKeySize_);
+	suspendKey.serialize(txn, objectManager, strategy, *funcInfo, suspendKey_, suspendKeySize_);
 
 	uint32_t valueSize = sizeof(OId);
 	suspendValue_ = ALLOC_NEW(txn.getDefaultAllocator()) uint8_t[valueSize];
@@ -379,6 +400,13 @@ int32_t BtreeMap::initialize<FullContainerKeyCursor, OId>(TransactionContext &tx
 }
 
 template <>
+int32_t BtreeMap::initialize<FullContainerKeyCursor, KeyDataStoreValue>(TransactionContext& txn, ColumnType columnType,
+	bool isUnique, BtreeMapType btreeMapType, uint32_t elemSize) {
+	UNUSED_VARIABLE(elemSize);
+	return initialize<FullContainerKeyAddr, KeyDataStoreValue>(txn, columnType, isUnique, btreeMapType);
+}
+
+template <>
 int32_t BtreeMap::initialize<CompositeInfoObject, OId>(TransactionContext &txn, ColumnType columnType,
 													   bool isUnique, BtreeMapType btreeMapType, uint32_t elemSize) {
 	assert(elemSize != 0);
@@ -391,7 +419,7 @@ int32_t BtreeMap::initialize<CompositeInfoObject, OId>(TransactionContext &txn, 
 	btreeMapType_ = btreeMapType;
 
 	BaseObject::allocate<BNodeImage<CompositeInfoObject, OId> >(getInitialNodeSize<CompositeInfoObject, OId>(elemSize_),
-		allocateStrategy_, getBaseOId(), OBJECT_TYPE_BTREE_MAP);
+		getBaseOId(), OBJECT_TYPE_BTREE_MAP);
 	BNode<CompositeInfoObject, OId> rootNode(this, allocateStrategy_);
 	rootNode.initialize(txn, getBaseOId(), true,
 		getInitialItemSizeThreshold<CompositeInfoObject, OId>(), elemSize_);
@@ -546,7 +574,7 @@ void BtreeMap::SearchFunc::execute<StringObject, StringKey, OId, OId>() {
 	const void *orgEndKey = NULL;
 	if (startCond != NULL) {
 		StringCursor *startStringCusor = ALLOC_NEW(alloc) 
-			StringCursor(txn_, static_cast<const uint8_t *>(startCond->value_), startCond->valueSize_);
+			StringCursor(alloc, static_cast<const uint8_t *>(startCond->value_), startCond->valueSize_);
 		StringObject *startConvertKey = ALLOC_NEW(alloc) 
 			StringObject(reinterpret_cast<uint8_t *>(startStringCusor));
 		orgStartKey = startCond->value_;
@@ -554,7 +582,7 @@ void BtreeMap::SearchFunc::execute<StringObject, StringKey, OId, OId>() {
 	}
 	if (endCond != NULL) {
 		StringCursor *endStringCusor = ALLOC_NEW(alloc) 
-			StringCursor(txn_, static_cast<const uint8_t *>(endCond->value_), endCond->valueSize_);
+			StringCursor(alloc, static_cast<const uint8_t *>(endCond->value_), endCond->valueSize_);
 		StringObject *endConvertKey = ALLOC_NEW(alloc)
 			StringObject(reinterpret_cast<uint8_t *>(endStringCusor));
 		orgEndKey = endCond->value_;
@@ -643,7 +671,7 @@ int32_t BtreeMap::getAllByAscending(TransactionContext &txn, ResultSize limit,
 		loc = 0;
 	}
 	else {
-		node.load(cursor.nodeId_);
+		node.load(cursor.nodeId_, false);
 		loc = cursor.loc_;
 	}
 	bool hasNext = false;
@@ -684,7 +712,7 @@ std::string BtreeMap::validateInternal(TransactionContext &txn) {
 	}
 	BNode<K, V> node(txn, *getObjectManager(), allocateStrategy_);
 	for (OId nodeId = getRootOId(); nodeId != UNDEF_OID;) {
-		node.load(nodeId);
+		node.load(nodeId, false);
 		if (node.isLeaf()) {
 			break;
 		}
@@ -703,7 +731,7 @@ std::string BtreeMap::validateInternal(TransactionContext &txn) {
 		}
 		nextVal = node.getKeyValue(loc);
 
-		if (cmp(txn, *getObjectManager(), currentVal, nextVal, setting) > 0) {
+		if (cmp(txn, *getObjectManager(), allocateStrategy_, currentVal, nextVal, setting) > 0) {
 			GS_THROW_USER_ERROR(
 				GS_ERROR_DS_COLUMN_ID_INVALID, "invalid prevKey > nextKey");
 		}
@@ -755,6 +783,14 @@ std::string BtreeMap::dump(TransactionContext &txn, uint8_t mode) {
 	}
 	return strstrm.str();
 }
+
+template <typename K, typename V>
+std::string BtreeMap::dump(TransactionContext& txn) {
+	util::NormalOStringStream out;
+	print<K, V>(txn, out, getRootOId());
+	return out.str();
+}
+
 
 template <typename P, typename K, typename V, typename R>
 void BtreeMap::DumpSummaryFunc::execute() {
@@ -863,6 +899,4 @@ uint32_t BtreeMap::SearchContext::getRangeConditionNum() {
 	}
 	return rangeConditionNum;
 }
-
-
 

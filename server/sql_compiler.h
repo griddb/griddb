@@ -1,6 +1,6 @@
 ﻿/*
 	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
-
+	
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
 	published by the Free Software Foundation, either version 3 of the
@@ -24,6 +24,7 @@ struct OptionParam;
 struct BindParm;
 class SQLHintInfo;
 class Query;
+
 
 struct SQLHint {
 	class Coder;
@@ -88,7 +89,6 @@ struct SQLTableInfo {
 	typedef util::Vector<SubInfo> SubInfoList;
 	typedef util::Vector<int32_t> IndexInfoList;
 	typedef util::Vector<uint8_t> NullStatisticsList;
-
 	typedef util::Vector< util::Vector<ColumnId> > CompositeIndexInfoList;
 
 	typedef std::pair<TupleList::TupleColumnType, util::String> SQLColumnInfo;
@@ -106,21 +106,18 @@ struct SQLTableInfo {
 	bool hasRowKey_;
 	bool writable_;
 	bool isView_;
+	bool isExpirable_;
 
 	IdInfo idInfo_;
 	SQLColumnInfoList columnInfoList_;
 	PartitioningInfo *partitioning_;
 	IndexInfoList indexInfoList_;
 
-	CompositeIndexInfoList compositeIndexInfoList_;
-	void setPartitionCount(uint32_t partitionCount);
-
 	NoSQLColumnInfoList nosqlColumnInfoList_;
 	NoSQLColumnOptionList nosqlColumnOptionList_;
-
+	CompositeIndexInfoList compositeIndexInfoList_;
 	util::String sqlString_;
 
-	bool isExpirable_;
 	uint64_t approxSize_;
 	util::Vector<uint64_t> cardinalityList_;
 	util::Vector<uint8_t> nullsStats_;
@@ -148,11 +145,6 @@ struct SQLTableInfo::PartitioningInfo {
 
 	void copy(PartitioningInfo &partitioningInfo);
 
-	SyntaxTree::TablePartitionType getPartitioningType() {
-		return static_cast<SyntaxTree::TablePartitionType>(
-				partitioningType_);
-	}
-
 	UTIL_OBJECT_CODER_ALLOC_CONSTRUCTOR;
 	UTIL_OBJECT_CODER_MEMBERS(
 			partitioningType_,
@@ -165,8 +157,8 @@ struct SQLTableInfo::PartitioningInfo {
 	util::StackAllocator &alloc_;
 
 	uint8_t partitioningType_;
-	ColumnId partitioningColumnId_;
-	ColumnId subPartitioningColumnId_;
+	int32_t partitioningColumnId_;
+	int32_t subPartitioningColumnId_;
 	SubInfoList subInfoList_;
 	util::String tableName_;
 	bool isCaseSensitive_;
@@ -387,10 +379,26 @@ public:
 	Type type_;
 	QualifiedName *qName_;
 
+	/**
+		@note SCANは常に入力なし、SELECTは0-2入力、その他は1入力以上
+	 */
 	IdList inputList_;
 
+	/**
+		@note
+			- AGGREGATE: (グルーピング対象カラムの列)
+			- SORT: (ソート対象カラムの列(ソート順序指定あり))
+			- JOIN: (メインのON条件: EQ|LT|GT|LE|GE), (WHERE条件)[, (他のON条件)]
+			- SELECT: [(WHERE条件)[, (他のON条件)]]
+			- SCAN: (WHERE条件)
+	 */
 	ExprList predList_;
 
+	/**
+		@note
+			- SQLProcessorで使用されるのはAGGREGATE、JOIN、SCAN、SELECTのみ
+			- 上記以外に、SORT、UNIONにおいても使用
+	 */
 	ExprList outputList_;
 
 	SQLTableInfo::IdInfo tableIdInfo_;
@@ -403,6 +411,9 @@ public:
 
 	AggregationPhase aggPhase_;
 
+	/**
+		@note JOIN、SELECTでのみ有効
+	 */
 	JoinType joinType_;
 
 	UnionType unionType_;
@@ -410,11 +421,21 @@ public:
 
 	ExprList *updateSetList_;
 
+	/**
+		@note DDLの場合、セット
+		@note DMLの場合、パーティショニングカラム等を特定するためにセット。プロセッサ内で内部解析
+	 */
 	SyntaxTree::CreateTableOption *createTableOpt_;
 	SyntaxTree::CreateIndexOption *createIndexOpt_;
 	util::String *tqlPred_;
 
+	/**
+		@note DMLの対象がラージの場合のサブコンテナ情報
+	 */
 	PartitioningInfo *partitioningInfo_;
+	/**
+		@note コマンド種別. DDL特定
+	 */
 	CommandType commandType_;
 	SyntaxTree::ExprList *cmdOptionList_;
 	InsertColumnMap *insertColumnMap_;
@@ -534,8 +555,8 @@ public:
 
 	void makeJoinHintMap(const SQLPreparedPlan &plan);
 
-	void insertHintTableIdMap(const util::String& name, HintTableId id);
-	void insertTableInfoIdMap(const util::String& name, TableInfoId id);
+	void insertHintTableIdMap(const util::String& origName, HintTableId id);
+	void insertTableInfoIdMap(const util::String& origName, TableInfoId id);
 
 	HintTableId getHintTableId(const util::String& name) const;
 
@@ -710,7 +731,7 @@ public:
 	void setIndexScanEnabled(bool enabled);
 	void setMultiIndexScanEnabled(bool enabled);
 
-	void compile(const Select &in, Plan &out, SQLConnectionEnvironment  *control = NULL);
+	void compile(const Select &in, Plan &out, SQLConnectionControl *control = NULL);
 
 	bool isRecompileOnBindRequired() const;
 	void bindParameterTypes(Plan &plan);
@@ -839,6 +860,7 @@ private:
 	void checkLimit(Plan &plan);
 
 	void validateCreateTableOption(SyntaxTree::CreateTableOption &option);
+	void validateScanOptionForVirtual(const PlanExprList &scanOptionList, bool isVirtual);
 	void validateCreateIndexOptionForVirtual(
 			SyntaxTree::QualifiedName &indexName,
 			SyntaxTree::CreateIndexOption &option, Plan::ValueTypeList *typeList);
@@ -865,6 +887,7 @@ private:
 			size_t &aggrCount);
 
 	void checkNestedAggrWindowExpr(const ExprList &exprList, bool resolved);
+
 	void genFrom(const Select &select, const Expr* &whereExpr, Plan &plan);
 
 	void genWhere(GenRAContext &cxt, Plan &plan);
@@ -932,6 +955,7 @@ private:
 	void trimExprList(size_t len, PlanExprList &list);
 	void hideSelectListName(GenRAContext &cxt, SQLPreparedPlan::Node &inputNode, Plan &plan);
 	void restoreSelectListName(GenRAContext &cxt, PlanExprList &restoreList, Plan &plan);
+
 	void genOrderBy(GenRAContext &cxt, ExprRef &innerTopExprRef, Plan &plan);
 	void genLimitOffset(
 			const Expr *limitExpr, const Expr *offsetExpr, Plan &plan);
@@ -1086,6 +1110,7 @@ private:
 	void betweenToAndTree(const Plan &plan, Expr &expr, Mode mode);
 
 	void splitAggrWindowExprList(GenRAContext &cxt, const ExprList &inExprList, const Plan &plan);
+
 	Expr genReplacedAggrExpr(const Plan &plan, const Expr *inExpr);
 
 	bool splitSubqueryCond(
@@ -1760,9 +1785,6 @@ private:
 
 	static util::StackAllocator& varContextToAllocator(
 			TupleValue::VarContext &varCxt);
-
-	static bool checkAcceptableTupleType(
-			TupleList::TupleColumnType type);	
 
 	util::StackAllocator &alloc_;
 
@@ -2688,6 +2710,10 @@ private:
 	util::TimeZone timeZone_;
 };
 
+/**
+	@brief SQLProcessorの機能に依存するユーティリティ
+	@note SQLProcessorにおいて実装
+ */
 class SQLCompiler::ProcessorUtils {
 public:
 	static bool predicateToMetaTarget(
@@ -2725,8 +2751,10 @@ public:
 	static bool isConstEvaluable(Type exprType);
 	static bool isInternalFunction(Type exprType);
 	static bool isExperimentalFunction(Type exprType);
+
 	static bool isWindowExprType(
 			Type type, bool &windowOnly, bool &pseudoWindow);
+
 
 	static ColumnType getResultType(
 			Type exprType, size_t index, AggregationPhase phase,

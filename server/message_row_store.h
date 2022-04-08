@@ -25,14 +25,15 @@
 
 
 class ColumnInfo;
-class DataStoreValueLimitConfig;
+class DataStoreConfig;
+
 /*!
     @brief RowStore for message format
 */
 class MessageRowStore {
 protected:
 
-	MessageRowStore(const DataStoreValueLimitConfig &dsValueLimitConfig, const ColumnInfo *columnInfoList, uint32_t columnCount);
+	MessageRowStore(const DataStoreConfig &dsConfig, const ColumnInfo *columnInfoList, uint32_t columnCount);
 
 public:
 
@@ -153,7 +154,7 @@ protected:
 	};
 
 protected:
-	const DataStoreValueLimitConfig &dsValueLimitConfig_;
+	const DataStoreConfig &dsConfig_;
 	uint32_t rowImageSize_;        
 	uint32_t rowFixedColumnSize_;  
 	uint32_t nullsOffset_;         
@@ -172,11 +173,11 @@ private:
 class InputMessageRowStore : public MessageRowStore {
 public:
 
-	InputMessageRowStore(const DataStoreValueLimitConfig &dsValueLimitConfig,
+	InputMessageRowStore(const DataStoreConfig &dsConfig,
 		const ColumnInfo *columnInfoList, uint32_t columnCount,
 		void *data, uint32_t size, uint64_t rowCount, uint32_t fixedRowSize,
 		bool validateOnConstruct = true);
-	InputMessageRowStore(const DataStoreValueLimitConfig &dsValueLimitConfig,
+	InputMessageRowStore(const DataStoreConfig &dsConfig,
 		const ColumnInfo *columnInfoList, uint32_t columnCount,
 		void *fixedData, uint32_t fixedDataSize, 
 		void *varData, uint32_t varDataSize, 
@@ -289,6 +290,9 @@ public:
 
 private:
 	void validate();
+	uint64_t validateColumnSet();
+	uint64_t validateArrayColumn(ColumnId id, const ColumnInfo& columnInfo);
+	uint64_t validateSimpleColumn(ColumnId id, const ColumnInfo& columnInfo);
 
 	static util::ByteStream<util::ArrayInStream> getVarDataInput(
 			void *data, uint32_t size, uint64_t rowCount, size_t fixedRowPartSize);
@@ -342,7 +346,7 @@ private:
 */
 class OutputMessageRowStore : public MessageRowStore {
 public:
-	OutputMessageRowStore(const DataStoreValueLimitConfig &dsValueLimitConfig,
+	OutputMessageRowStore(const DataStoreConfig &dsConfig,
 		const ColumnInfo *columnInfoList, uint32_t columnCount,
 		util::XArray<uint8_t> &fixedData, util::XArray<uint8_t> &variableData,
 		bool rowIdIncluded);

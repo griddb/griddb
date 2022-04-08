@@ -137,6 +137,7 @@ struct ClientIdHash {
 class TransactionContext {
 	friend class TransactionManager;
 	friend class TransactionHandlerTest;
+	friend class StoreV5Impl;	
 
 public:
 	TransactionContext();
@@ -194,6 +195,7 @@ public:
 	bool isStoreMemoryAgingSwapRateEnabled() const;
 	static bool isStoreMemoryAgingSwapRateSpecified(double storeMemoryAgingSwapRate);
 	const util::TimeZone &getTimeZone() const;
+
 
 private:
 	typedef int32_t State;  
@@ -480,6 +482,4 @@ inline void TransactionContext::clear() {
 				GS_ERROR_TXN_CANCELLED, "Transaction operation cancelled"); \
 		}                                                                   \
 	} while (false)
-
-
 #endif

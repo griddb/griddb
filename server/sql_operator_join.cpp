@@ -19,7 +19,6 @@
 #include "sql_operator_utils.h"
 
 
-
 const SQLOps::OpRegistrar
 SQLJoinOps::Registrar::REGISTRAR_INSTANCE((Registrar()));
 
@@ -1173,6 +1172,9 @@ void SQLJoinOps::JoinHash::compile(OpContext &cxt) const {
 	cxt.setInputSourceType(
 			ordinals.inner(), SQLExprs::ExprCode::INPUT_SUMMARY_TUPLE);
 
+	cxt.setReaderLatchDelayed(ordinals.inner());
+	cxt.keepReaderLatch(ordinals.inner());
+
 	Operator::compile(cxt);
 }
 
@@ -1183,17 +1185,17 @@ void SQLJoinOps::JoinHash::executeAt(OpContext &cxt) const {
 
 	const JoinInputOrdinals &ordinals = Join::getOrdinals(getCode());
 	TupleListReader &reader1 = cxt.getReader(ordinals.driving());
-	TupleListReader &reader2 = cxt.getReader(ordinals.inner());
 	cxt.keepReaderLatch(ordinals.inner());
 
 	HashContext &hashCxt = prepareHashContext<InnerMatching>(
 			cxt, Join::resolveKeyList(cxt.getAllocator(), getCode()),
-			Join::resolveSideKeyList(getCode()), reader2,
-			cxt.getInputColumnList(ordinals.inner()));
+			Join::resolveSideKeyList(getCode()),
+			cxt.getInputColumnList(ordinals.inner()), ordinals);
 	if (!Join::checkJoinReady(cxt, ordinals)) {
 		return;
 	}
 
+	cxt.setUpExprInputContext(ordinals.inner());
 	*cxt.getSummaryColumnListRef(ordinals.inner()) =
 			hashCxt.tupleSet_->getReaderColumnList();
 
@@ -1306,8 +1308,8 @@ SQLJoinOps::JoinHashContext<Matching>&
 SQLJoinOps::JoinHash::prepareHashContext(
 		OpContext &cxt, const SQLValues::CompColumnList &keyList,
 		const SQLOps::CompColumnListPair &sideKeyList,
-		TupleListReader &reader,
-		const util::Vector<TupleColumn> &innerColumnList) {
+		const util::Vector<TupleColumn> &innerColumnList,
+		const JoinInputOrdinals &ordinals) {
 	typedef JoinHashContext<Matching> HashContext;
 	typedef TupleChain<Matching> Chain;
 
@@ -1343,13 +1345,15 @@ SQLJoinOps::JoinHash::prepareHashContext(
 		bothKeyList = keyList;
 		tupleSet->applyKeyList(bothKeyList, &innerSideFirst);
 
+		const size_t capacity = resolveHashCapacity(cxt, ordinals);
 		cxt.getResource(0) = ALLOC_UNIQUE(
 				alloc, HashContext, alloc, cxt.getVarContext(),
 				bothKeyList, *sideKeyList.first, tupleSet, nullTupleSet,
-				cxt.getValueProfile());
+				capacity, cxt.getValueProfile());
 	}
 	HashContext &hashCxt = cxt.getResource(0).resolveAs<HashContext>();
 
+	TupleListReader &reader = cxt.getReader(ordinals.inner());
 	if (!reader.exists()) {
 		return hashCxt;
 	}
@@ -1451,12 +1455,22 @@ inline SQLJoinOps::JoinHash::TupleChain<Matching>* SQLJoinOps::JoinHash::find(
 	return NULL;
 }
 
+size_t SQLJoinOps::JoinHash::resolveHashCapacity(
+		OpContext &cxt, const JoinInputOrdinals &ordinals) {
+	const uint64_t tupleCount = cxt.getInputTupleCount(ordinals.inner());
+	const uint64_t capacity = SQLValues::ValueUtils::findLargestPrimeNumber(
+			tupleCount * Constants::HASH_MAP_CAPACITY_PCT / 100);
+	return capacity;
+}
+
 template<bool Matching>
 SQLJoinOps::JoinHash::TupleChain<Matching>::TupleChain(
 		const SummaryTuple &tuple, TupleChain *next) :
 		tuple_(tuple),
 		next_(next) {
 }
+
+const uint64_t SQLJoinOps::JoinHash::Constants::HASH_MAP_CAPACITY_PCT = 250;
 
 
 void SQLJoinOps::JoinInnerHash::execute(OpContext &cxt) const {
@@ -1498,10 +1512,10 @@ SQLJoinOps::JoinHashContext<Matching>::JoinHashContext(
 		const SQLValues::CompColumnList &drivingKeyList,
 		util::AllocUniquePtr<SummaryTupleSet> &tupleSet,
 		util::AllocUniquePtr<SummaryTupleSet> &nullTupleSet,
-		SQLValues::ValueProfile *valueProfile) :
+		size_t capacity, SQLValues::ValueProfile *valueProfile) :
 		bothKeyList_(bothKeyList.begin(), bothKeyList.end(), alloc),
 		drivingKeyList_(drivingKeyList.begin(), drivingKeyList.end(), alloc),
-		map_(0, JoinHash::MapHasher(), JoinHash::MapPred(), alloc),
+		map_(capacity, JoinHash::MapHasher(), JoinHash::MapPred(), alloc),
 		nextChain_(NULL),
 		nullChain_(NULL),
 		nullChecker_(alloc, SQLValues::TupleNullChecker(drivingKeyList_)),

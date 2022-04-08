@@ -111,13 +111,13 @@ FunctionMap::FunctionMap(bool forgis) : OpenHash<TqlFunc>() {
  */
 Expr *TqlFunc::operator()(ExprList &args, ContainerRowWrapper *column_values,
 	FunctionMap *function_map, EvalMode mode, TransactionContext &txn,
-	ObjectManager &objectManager, ExprList &argsAfterEval) {
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, ExprList &argsAfterEval) {
 	for (ExprList::const_iterator it = args.begin(); it != args.end(); it++) {
 		argsAfterEval.insert(argsAfterEval.end(),
-			(*it)->eval(txn, objectManager, column_values, function_map, mode));
+			(*it)->eval(txn, objectManager, strategy, column_values, function_map, mode));
 	}
 
-	Expr *ret = (*this)(argsAfterEval, txn, objectManager);
+	Expr *ret = (*this)(argsAfterEval, txn, objectManager, strategy);
 
 	for (ExprList::const_iterator it = argsAfterEval.begin();
 		 it != argsAfterEval.end(); it++) {

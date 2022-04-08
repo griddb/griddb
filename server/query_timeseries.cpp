@@ -46,7 +46,8 @@
 QueryForTimeSeries::QueryForTimeSeries(TransactionContext &txn,
 	TimeSeries &timeSeries, const TQLInfo &tqlInfo, uint64_t limit,
 	QueryHookClass *hook)
-	: Query(txn, *(timeSeries.getObjectManager()), tqlInfo, limit, hook),
+	: Query(txn, *(timeSeries.getObjectManager()), timeSeries.getRowAllcateStrategy(), tqlInfo, limit, hook),
+
 	timeSeries_(&timeSeries), scPass_(txn.getDefaultAllocator(), ColumnInfo::ROW_KEY_COLUMN_ID) {
 	if (hook_) {
 		hook_->qpBuildBeginHook(*this);	
@@ -132,7 +133,7 @@ QueryForTimeSeries::QueryForTimeSeries(TransactionContext &txn,
 
 	BoolExpr *tmp = pWhereExpr_;
 	if (tmp != NULL) {
-		pWhereExpr_ = tmp->makeDNF(txn, objectManager_);  
+		pWhereExpr_ = tmp->makeDNF(txn, objectManager_, strategy_);  
 		QP_DELETE(tmp);  
 	}
 
@@ -140,8 +141,6 @@ QueryForTimeSeries::QueryForTimeSeries(TransactionContext &txn,
 		hook_->qpBuildTmpHook(*this, 5);	
 	}
 	contractCondition();
-
-	expireTs_ = timeSeries.getCurrentExpiredTime(txn);
 
 	if (hook_) {
 		hook_->qpBuildFinishHook(*this);	
@@ -205,34 +204,8 @@ void QueryForTimeSeries::doQueryWithoutCondition(
 	OutputOrder outputOrder = ORDER_UNDEFINED;  
 	isRowKeySearched_ = true;
 
-	Timestamp *pExpireTs = &expireTs_;
-	util::DateTime dt;
-
-	if (expireTs_ != MINIMUM_EXPIRED_TIMESTAMP) {
-		dt.setUnixTime(expireTs_);
-	}
-	else {
-		dt.setUnixTime(0);
-	}
-	if (doExplain()) {
-		util::NormalOStringStream os;
-		util::DateTime::ZonedOption zonedOption = util::DateTime::ZonedOption::create(true, txn.getTimeZone());
-		zonedOption.asLocalTimeZone_ = USE_LOCAL_TIMEZONE;
-		dt.format(os, zonedOption);
-		addExplain(1, "TIMESERIES_EXPIRE", "TIMESTAMP", os.str().c_str(), "");
-	}
-	if (expireTs_ == MINIMUM_EXPIRED_TIMESTAMP) {  
-		pExpireTs = NULL;
-	}
-
 	if (nPassSelectRequested_ != QP_PASSMODE_NO_PASS && pOrderByExpr_ == NULL) {
 		BtreeMap::SearchContext sc(txn.getDefaultAllocator(), timeSeries_->getRowIdColumnId());
-		if (pExpireTs != NULL) {
-			TermCondition cond(timeSeries_->getRowIdColumnType(), timeSeries_->getRowIdColumnType(),
-				DSExpression::GE, timeSeries_->getRowIdColumnId(), pExpireTs,
-				sizeof(*pExpireTs));
-			sc.addCondition(txn, cond, true);
-		}
 		sc.setLimit(nLimit_);
 		if (doExplain()) {
 			addExplain(1, "API_PASSTHROUGH", "BOOLEAN", "TRUE", "NO ORDERBY");
@@ -280,12 +253,6 @@ void QueryForTimeSeries::doQueryWithoutCondition(
 		sc.setLimit(nLimit_);
 		if (searchColumnId != ColumnInfo::ROW_KEY_COLUMN_ID) {
 			sc.setNullCond(BaseIndex::SearchContext::ALL);
-		}
-		if (pExpireTs != NULL) {
-			TermCondition condition(COLUMN_TYPE_TIMESTAMP, COLUMN_TYPE_TIMESTAMP,
-				DSExpression::GT, ColumnInfo::ROW_KEY_COLUMN_ID, pExpireTs,  sizeof(*pExpireTs));
-			bool isKey = searchColumnId == ColumnInfo::ROW_KEY_COLUMN_ID;
-			sc.addCondition(txn, condition, isKey);
 		}
 		if (searchColumnId != ColumnInfo::ROW_KEY_COLUMN_ID || outputOrder == ORDER_DESCENDING) {
 			isRowKeySearched_ = false;
@@ -336,20 +303,6 @@ void QueryForTimeSeries::doQueryWithCondition(
 	TransactionContext &txn, TimeSeries &timeSeries, ResultSet &resultSet) {
 	util::XArray<OId> &resultOIdList = *resultSet.getOIdList();
 
-	util::DateTime dt;
-	if (expireTs_ != MINIMUM_EXPIRED_TIMESTAMP) {
-		dt.setUnixTime(expireTs_);
-	}
-	else {
-		dt.setUnixTime(0);
-	}
-	if (doExplain()) {
-		util::NormalOStringStream os;
-		util::DateTime::ZonedOption zonedOption = util::DateTime::ZonedOption::create(true, txn.getTimeZone());
-		zonedOption.asLocalTimeZone_ = USE_LOCAL_TIMEZONE;
-		dt.format(os, zonedOption);
-		addExplain(1, "TIMESERIES_EXPIRE", "TIMESTAMP", os.str().c_str(), "");
-	}
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
 	util::XArray<BoolExpr *> orList(alloc),		
 		andList(alloc);							
@@ -384,7 +337,7 @@ void QueryForTimeSeries::doQueryWithCondition(
 
 		if (!indexFound) {
 			BtreeMap::SearchContext *sc = NULL;
-			BoolExpr::toSearchContext(txn, andList, expireTs_, NULL, *this, sc,
+			BoolExpr::toSearchContext(txn, andList, NULL, *this, sc,
 				restConditions, nLimit_);
 
 			if (orList.size() == 1 &&
@@ -419,7 +372,7 @@ void QueryForTimeSeries::doQueryWithCondition(
 										  ? ORDER_ASCENDING
 										  : ORDER_DESCENDING;  
 						setLimitByIndexSort();
-						BoolExpr::toSearchContext(txn, andList, expireTs_, NULL, *this, sc,
+						BoolExpr::toSearchContext(txn, andList, NULL, *this, sc,
 							restConditions, nLimit_);
 					}
 				}
@@ -440,7 +393,7 @@ void QueryForTimeSeries::doQueryWithCondition(
 			case MAP_TYPE_BTREE: {
 				assert(indexColumnInfo != NULL);
 				BtreeMap::SearchContext *sc = NULL;
-				BoolExpr::toSearchContext(txn, andList, expireTs_,
+				BoolExpr::toSearchContext(txn, andList,
 					&indexData, *this, sc, restConditions, nLimit_);
 
 				nPassSelectRequested_ = QP_PASSMODE_NO_PASS;
@@ -463,7 +416,7 @@ void QueryForTimeSeries::doQueryWithCondition(
 										  ? ORDER_ASCENDING
 										  : ORDER_DESCENDING;  
 						setLimitByIndexSort();
-						BoolExpr::toSearchContext(txn, andList, expireTs_,
+						BoolExpr::toSearchContext(txn, andList,
 							&indexData, *this, sc, restConditions, nLimit_);
 
 					}
@@ -486,7 +439,7 @@ void QueryForTimeSeries::doQueryWithCondition(
 									isFirstColumn = false;
 								}
 								ColumnInfo &columnInfo = timeSeries.getColumnInfo(condList[i].columnId_);
-								os << columnInfo.getColumnName(txn, objectManager_);
+								os << columnInfo.getColumnName(txn, objectManager_, timeSeries.getMetaAllcateStrategy());
 							}
 						}
 						addExplain(
@@ -499,7 +452,7 @@ void QueryForTimeSeries::doQueryWithCondition(
 								os << " ";
 							}
 							ColumnInfo &columnInfo = timeSeries.getColumnInfo((*(indexData.columnIds_))[i]);
-							os << columnInfo.getColumnName(txn, objectManager_);
+							os << columnInfo.getColumnName(txn, objectManager_, timeSeries.getMetaAllcateStrategy());
 						}
 
 						addExplain(2, "SEARCH_MAP", "STRING", os.str().c_str(), "");
@@ -536,7 +489,7 @@ void QueryForTimeSeries::doQueryWithCondition(
 					row.load(pointRowId);
 					for (uint32_t q = 0; q < andList.size(); q++) {
 						TrivalentLogicType evalResult = andList[q]->eval(
-							txn, objectManager_, &row, getFunctionMap(), TRI_TRUE);
+							txn, objectManager_, strategy_, &row, getFunctionMap(), TRI_TRUE);
 						if (evalResult != TRI_TRUE) {
 							conditionFlag = false;
 							break;
@@ -627,7 +580,7 @@ void QueryForTimeSeries::doSelectionByAPI(TransactionContext &txn,
 		*resultSet.getRowDataVarPartBuffer();
 
 	OutputMessageRowStore outputMessageRowStore(
-		timeSeries.getDataStore()->getValueLimitConfig(),
+		timeSeries.getDataStore()->getConfig(),
 		timeSeries.getColumnInfoList(), timeSeries.getColumnNum(),
 		serializedRowList, serializedVarDataList, false);
 	if (selectionExpr->isAggregation()) {
@@ -716,7 +669,7 @@ void QueryForTimeSeries::doSelection(
 				}
 				else if (selectionExpr->isSelection()) {
 					OutputMessageRowStore outputMessageRowStore(
-						timeSeries.getDataStore()->getValueLimitConfig(),
+						timeSeries.getDataStore()->getConfig(),
 						timeSeries.getColumnInfoList(),
 						timeSeries.getColumnNum(), serializedRowList,
 						serializedVarDataList, false);
@@ -901,7 +854,7 @@ void QueryForTimeSeries::tsResultMerge(TransactionContext &txn,
 }
 
 QueryForTimeSeries *QueryForTimeSeries::dup(
-	TransactionContext &txn, ObjectManager &objectManager_) {
+	TransactionContext &txn, ObjectManagerV4 &objectManager_, AllocateStrategy &strategy) {
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
 	char *dbName = NULL;
 	char *queryStr = NULL;
@@ -940,14 +893,14 @@ QueryForTimeSeries *QueryForTimeSeries::dup(
 		for (ExprList::iterator itr = pSelectionExprList_->begin();
 			 itr != pSelectionExprList_->end(); itr++) {
 			query->pSelectionExprList_->push_back(
-				(*itr)->dup(txn, objectManager_));
+				(*itr)->dup(txn, objectManager_, strategy));
 		}
 	}
 	else {
 		query->pSelectionExprList_ = NULL;
 	}
 	if (pWhereExpr_ != NULL) {
-		query->pWhereExpr_ = pWhereExpr_->dup(txn, objectManager_);
+		query->pWhereExpr_ = pWhereExpr_->dup(txn, objectManager_, strategy);
 	}
 	else {
 		query->pWhereExpr_ = NULL;
@@ -984,7 +937,7 @@ QueryForTimeSeries *QueryForTimeSeries::dup(
 	query->nLimit_ = nLimit_;
 	query->nOffset_ = nOffset_;
 	if (pLimitExpr_ != NULL) {
-		query->pLimitExpr_ = pLimitExpr_->dup(txn, objectManager_);
+		query->pLimitExpr_ = pLimitExpr_->dup(txn, objectManager_, strategy);
 	}
 	else {
 		query->pLimitExpr_ = NULL;
@@ -993,14 +946,14 @@ QueryForTimeSeries *QueryForTimeSeries::dup(
 		query->pGroupByExpr_ = QP_ALLOC_NEW(alloc) ExprList(alloc);
 		for (ExprList::iterator itr = pGroupByExpr_->begin();
 			 itr != pGroupByExpr_->end(); itr++) {
-			query->pGroupByExpr_->push_back((*itr)->dup(txn, objectManager_));
+			query->pGroupByExpr_->push_back((*itr)->dup(txn, objectManager_, strategy));
 		}
 	}
 	else {
 		query->pGroupByExpr_ = NULL;
 	}
 	if (pHavingExpr_ != NULL) {
-		query->pHavingExpr_ = pHavingExpr_->dup(txn, objectManager_);
+		query->pHavingExpr_ = pHavingExpr_->dup(txn, objectManager_, strategy);
 	}
 	else {
 		query->pHavingExpr_ = NULL;
@@ -1009,7 +962,7 @@ QueryForTimeSeries *QueryForTimeSeries::dup(
 		query->pOrderByExpr_ = QP_ALLOC_NEW(alloc) SortExprList(alloc);
 		for (SortExprList::iterator itr = pOrderByExpr_->begin();
 			 itr != pOrderByExpr_->end(); itr++) {
-			query->pOrderByExpr_->push_back(*((*itr).dup(txn, objectManager_)));
+			query->pOrderByExpr_->push_back(*((*itr).dup(txn, objectManager_, strategy)));
 		}
 	}
 	else {
@@ -1021,7 +974,6 @@ QueryForTimeSeries *QueryForTimeSeries::dup(
 	query->selectionMap_ = selectionMap_;
 	query->specialIdMap_ = specialIdMap_;
 
-	query->expireTs_ = expireTs_;
 	query->scPass_ =
 		scPass_;  
 	{

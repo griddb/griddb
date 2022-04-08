@@ -21,8 +21,8 @@
 #include "sql_utils_vdbe.h" 
 #include "sql_utils_container.h" 
 
+#include "sql_execution.h"
 #include "transaction_manager.h"
-
 
 
 const DQLProcessor::ProcRegistrar DQLProcessor::REGISTRAR_LIST[] = {
@@ -294,6 +294,7 @@ SQLOps::OpStore& DQLProcessor::prepareStore(Context &cxt) {
 		const OpStoreId &id = store_->allocateEntry();
 		OpStore::Entry &entry = store_->getEntry(id);
 
+		cxt.setProcessorGroup(infoEntry_->storeGroup_.get());
 		store_->setTempStoreGroup(*infoEntry_->storeGroup_);
 
 		SQLValues::ValueContext valueCxt(entry.getValueContextSource(NULL));
@@ -584,6 +585,42 @@ const DQLProcs::ProcRegistrar* DQLProcs::ProcRegistrarTable::find(
 }
 
 
+DQLProcs::ProcResourceSet::ProcResourceSet() :
+		baseCxt_(NULL) {
+}
+
+void DQLProcs::ProcResourceSet::setBase(SQLContext &baseCxt) {
+	baseCxt_ = &baseCxt;
+}
+
+SQLService* DQLProcs::ProcResourceSet::getSQLService() const {
+	return baseCxt_->getExecutionManager()->getSQLService();
+}
+
+TransactionManager* DQLProcs::ProcResourceSet::getTransactionManager() const {
+	return baseCxt_->getTransactionManager();
+}
+
+TransactionService* DQLProcs::ProcResourceSet::getTransactionService() const {
+	return baseCxt_->getTransactionService();
+}
+
+ClusterService* DQLProcs::ProcResourceSet::getClusterService() const {
+	return baseCxt_->getClusterService();
+}
+
+PartitionTable* DQLProcs::ProcResourceSet::getPartitionTable() const {
+	return baseCxt_->getPartitionTable();
+}
+
+DataStoreV4* DQLProcs::ProcResourceSet::getDataStore() const {
+	return baseCxt_->getDataStore();
+}
+
+PartitionList* DQLProcs::ProcResourceSet::getPartitionList() const {
+	return baseCxt_->getPartitionList();
+}
+
 
 DQLProcs::ExtProcContext::ExtProcContext() :
 		baseCxt_(NULL) {
@@ -591,6 +628,7 @@ DQLProcs::ExtProcContext::ExtProcContext() :
 
 void DQLProcs::ExtProcContext::setBase(SQLContext &baseCxt) {
 	baseCxt_ = &baseCxt;
+	resourceSet_.setBase(baseCxt);
 }
 
 size_t DQLProcs::ExtProcContext::findMaxStringLength() {
@@ -635,7 +673,7 @@ SQLExecutionManager* DQLProcs::ExtProcContext::getExecutionManager() {
 }
 
 const ResourceSet* DQLProcs::ExtProcContext::getResourceSet() {
-	return getBase().getResourceSet();
+	return &resourceSet_;
 }
 
 bool DQLProcs::ExtProcContext::isOnTransactionService() {

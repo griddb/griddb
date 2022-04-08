@@ -116,9 +116,9 @@ protected:
 	*/
 	Surface(srid_t id, LinearRing *exteriorBorder,
 		QP_XArray<LinearRing *> *interiorBorders, TransactionContext &txn,
-		ObjectManager &objectManager)
+		ObjectManagerV4 &objectManager, AllocateStrategy &strategy)
 		: Geometry(txn) {
-		setBorders(txn, objectManager, exteriorBorder, interiorBorders);
+		setBorders(txn, objectManager, strategy, exteriorBorder, interiorBorders);
 		srId_ = id;
 		isSimple_ = true;
 		isClosed_ = false;
@@ -135,10 +135,10 @@ protected:
 	* @param exteriorBorder exterior border LinearRing to duplicate
 	* @param interiorBorders interior border vector of LinearRing to duplicate
 	*/
-	void setBorders(TransactionContext &txn, ObjectManager &objectManager,
+	void setBorders(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 		LinearRing *exteriorBorder, QP_XArray<LinearRing *> *interiorBorders) {
 		if (exteriorBorder != NULL) {
-			exteriorBorder_ = exteriorBorder->dup(txn, objectManager);
+			exteriorBorder_ = exteriorBorder->dup(txn, objectManager, strategy);
 		}
 		else {
 			exteriorBorder_ = NULL;
@@ -149,7 +149,7 @@ protected:
 			QP_XArray<LinearRing *>::const_iterator it =
 				interiorBorders->begin();
 			while (it != interiorBorders->end()) {
-				interiorBorders_->push_back((*it)->dup(txn, objectManager));
+				interiorBorders_->push_back((*it)->dup(txn, objectManager, strategy));
 				++it;
 			}
 		}

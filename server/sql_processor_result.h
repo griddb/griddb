@@ -1,6 +1,6 @@
 ﻿/*
 	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
-
+	
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
 	published by the Free Software Foundation, either version 3 of the
@@ -22,7 +22,42 @@
 #define SQL_PROCESSOR_RESULT_H_
 
 #include "sql_processor.h"
-#include "sql_profiler.h"
+
+struct SQLDetailProfs {
+
+	SQLDetailProfs(
+			SQLVariableSizeGlobalAllocator &globalVarAlloc,
+			int32_t limitInterval, int32_t queryLimitSize);
+	~SQLDetailProfs();
+
+	void set(
+			const char *dbName,
+			const char *applicationName, 
+			const char *query);
+
+	void complete(int32_t executionTime = INT32_MAX);
+
+	std::string dump();
+	std::string dumpQuery();
+
+	SQLVariableSizeGlobalAllocator &globalVarAlloc_;
+	uint64_t startTime_;
+	SQLString startTimeStr_;
+	SQLString dbName_;
+	SQLString applicationName_;
+	SQLString query_;
+	bool isOmmited_;
+	bool isTrace_;
+
+	util::Stopwatch watch_;
+	int32_t execTime_;
+	int32_t traceLimitInterval_;
+	int32_t queryLimitSize_;
+
+	UTIL_OBJECT_CODER_ALLOC_CONSTRUCTOR;
+	UTIL_OBJECT_CODER_MEMBERS(startTimeStr_,
+			dbName_, applicationName_, query_);
+};
 
 class ResultProcessor : public SQLProcessor {
 
@@ -31,30 +66,19 @@ class ResultProcessor : public SQLProcessor {
 
 public:
 
-	ResultProcessor(
-			Context &cxt,
-			const TypeInfo &typeInfo);
+	ResultProcessor(Context &cxt, const TypeInfo &typeInfo);
 
 	virtual ~ResultProcessor();
 
-	virtual bool pipe(
-			Context &cxt,
-			InputId inputId,
-			const Block &block);
+	virtual bool pipe(Context &cxt, InputId inputId, const Block &block);
 
-	virtual bool finish(
-			Context &cxt,
-			InputId inputId);
+	virtual bool finish(Context &cxt, InputId inputId);
 
 	virtual bool applyInfo(
-			Context &cxt,
-			const Option &option,
-			const TupleInfoList &inputInfo,
-			TupleInfo &outputInfo);
+			Context &cxt, const Option &option,
+			const TupleInfoList &inputInfo, TupleInfo &outputInfo);
 
-	void exportTo(
-			Context &cxt,
-			const OutOption &option) const;
+	void exportTo(Context &cxt, const OutOption &option) const;
 
 	TupleList::Reader *getReader() {
 		return reader_;
@@ -80,12 +104,14 @@ public:
 		return isFirst_;
 	}
 
-private:
+	SQLDetailProfs &getProfs() {
+		return profs_;
+	}
 
+private:
 	typedef Factory::Registrar<ResultProcessor> Registrar;
 
 	SQLVariableSizeGlobalAllocator &globalVarAlloc_;
-
 	ClientId clientId_;
 	LocalTempStore::Group *destGroup_;
 	TupleList::Info info_;

@@ -1,18 +1,18 @@
 ﻿/*
-    Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
-    
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU Affero General Public License as
-    published by the Free Software Foundation, either version 3 of the
-    License, or (at your option) any later version.
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU Affero General Public License for more details.
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU Affero General Public License as
+	published by the Free Software Foundation, either version 3 of the
+	License, or (at your option) any later version.
 
-    You should have received a copy of the GNU Affero General Public License
-    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU Affero General Public License for more details.
+
+	You should have received a copy of the GNU Affero General Public License
+	along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 /*!
 	@file
@@ -22,7 +22,6 @@
 
 #include "config_table.h"
 #include "util/trace.h"
-#include <iostream>
 
 UTIL_TRACER_DECLARE(EVENT_ENGINE);
 UTIL_TRACER_DECLARE(IO_MONITOR);
@@ -41,12 +40,13 @@ EventEngine::EventEngine(
 		source.resolveVariableSizeAllocator();
 
 		config_.reset(UTIL_NEW Config(config));
+
 		pgConfig_.reset(UTIL_NEW PartitionGroupConfig(
 				config.partitionCount_, config.concurrency_));
 		stats_.reset(UTIL_NEW Stats());
 
 		ndPool_.reset(UTIL_NEW NDPool(*this));
-		socketPool_.reset(UTIL_NEW SocketPool(*this));
+		socketPool_.reset(UTIL_NEW SocketPool(*this, source));
 		dispatcher_.reset(UTIL_NEW Dispatcher(*this));
 		limitter_.reset(UTIL_NEW Limitter(*this));
 
@@ -360,6 +360,9 @@ EventEngine::Config::Config() :
 		serverAddress_(),
 		ioConcurrencyRate_(1.0),
 		secondaryIOEnabled_(false),
+		ioNegotiationMinimum_(false),
+		plainIOMode_(true, true),
+		secureIOMode_(false, false),
 		keepaliveEnabled_(),
 		keepaliveIdle_(600),
 		keepaliveInterval_(60),
@@ -501,6 +504,9 @@ EventEngine::Config& EventEngine::Config::setAllAllocatorGroup(
 	workAllocatorGroupId_= id;
 	return *this;
 }
+
+
+SocketFactory EventEngine::Source::Dafaults::defaultSocketFactory_;
 
 
 EventEngine::BufferManager::~BufferManager() {
@@ -1055,7 +1061,7 @@ EventEngine::NDPool::NDMapValue::NDMapValue() : address_(NULL) {
 }
 
 
-EventEngine::SocketPool::SocketPool(EventEngine &ee) :
+EventEngine::SocketPool::SocketPool(EventEngine &ee, const Source &eeSource) :
 		ee_(ee),
 		ioConcurrency_(Manipulator::getIOConcurrency(*ee.config_, true)),
 		primaryIOConcurrency_(
@@ -1066,7 +1072,9 @@ EventEngine::SocketPool::SocketPool(EventEngine &ee) :
 		secondaryWorkerSeed_(0),
 		varAlloc_(util::AllocatorInfo(
 				ee.config_->allocatorGroupId_, "eeSocketVar")),
-		socketSet_(SocketSet::key_compare(), varAlloc_) {
+		socketSet_(SocketSet::key_compare(), varAlloc_),
+		factory_(eeSource.socketFactory_),
+		secureFactories_(eeSource.secureSocketFactories_) {
 	assert(primaryIOConcurrency_ <= ioConcurrency_);
 }
 
@@ -1151,6 +1159,35 @@ void EventEngine::SocketPool::getSocketStats(
 		statsList.push_back(SocketStatsWithInfo(
 				socket->getInfo(), socket->getStats()));
 	}
+}
+
+SocketFactory& EventEngine::SocketPool::getFactory(
+		bool secure, bool clientMode) {
+	SocketFactory *factory;
+	if (secure) {
+		if (clientMode) {
+			factory = secureFactories_.first;
+		}
+		else {
+			factory = secureFactories_.second;
+		}
+
+		if (factory == NULL) {
+			GS_THROW_USER_ERROR(
+					GS_ERROR_EE_OPERATION_NOT_ALLOWED,
+					"Secure socket not available");
+		}
+	}
+	else {
+		factory = factory_;
+
+		if (factory == NULL) {
+			GS_THROW_USER_ERROR(
+					GS_ERROR_EE_OPERATION_NOT_ALLOWED,
+					"Socket not available");
+		}
+	}
+	return *factory;
 }
 
 
@@ -2284,6 +2321,12 @@ void EventEngine::IOWorker::initialize(
 		EventEngine &ee, uint32_t id, bool secondary) {
 	assert(ee_ == NULL);
 
+	if (ee.config_->ioNegotiationMinimum_ &&
+		ee.config_->secureIOMode_.isSomeAcceptable()) {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_EE_PARAMETER_INVALID, "Illegal negotiation config");
+	}
+
 	sharedVarAllocator_.reset(UTIL_NEW VariableSizeAllocator(
 			util::AllocatorInfo(ee.config_->allocatorGroupId_, "ioSharedVar")));
 	localVarAllocator_.reset(UTIL_NEW VariableSizeAllocator(
@@ -2540,7 +2583,7 @@ EventEngine::IOWorker::getVariableSizeAllocator() {
 }
 
 EventEngine::Buffer& EventEngine::IOWorker::pushBufferQueue(
-		BufferQueue *&queue, size_t size) {
+		BufferQueue *&queue, size_t size, bool toFront) {
 	LockGuard guard(mutex_);
 
 	if (queue == NULL) {
@@ -2548,9 +2591,11 @@ EventEngine::Buffer& EventEngine::IOWorker::pushBufferQueue(
 				BufferQueue(*sharedVarAllocator_);
 	}
 
-	queue->push_back(Buffer(*sharedVarAllocator_));
+	queue->insert(
+			(toFront ? queue->begin() : queue->end()),
+			Buffer(*sharedVarAllocator_));
 
-	Buffer &buffer = queue->back();
+	Buffer &buffer = (toFront ? queue->front() : queue->back());
 	buffer.getWritableXArray().reserve(size);
 
 	return buffer;
@@ -2567,6 +2612,208 @@ void EventEngine::IOWorker::releaseBufferQueue(BufferQueue *&queue) {
 
 	UTIL_OBJECT_POOL_DELETE(*bufferQueuePool_, queue);
 	queue = NULL;
+}
+
+void EventEngine::IOWorker::pushIOEventQueue(
+		IOEventQueue *&queue, BufferQueue *&bufQueue, const Event *ev,
+		bool toFront) {
+	if (ev == NULL && (queue == NULL || queue->empty())) {
+		return;
+	}
+
+	if (bufQueue == NULL || bufQueue->empty()) {
+		pushBufferQueue(bufQueue, 0);
+	}
+
+	const size_t queueSize = bufQueue->size();
+
+	const Buffer &buf = bufQueue->back();
+	const ExternalBuffer *extBuf = buf.getExternal();
+
+	LockGuard guard(mutex_);
+	VariableSizeAllocator &alloc = *sharedVarAllocator_;
+
+	if (queue == NULL) {
+		queue = ALLOC_VAR_SIZE_NEW(alloc) IOEventQueue(alloc);
+	}
+
+	if (toFront) {
+		queue->push_front(NULL);
+	}
+	else {
+		while (queue->size() < queueSize) {
+			queue->push_back(NULL);
+		}
+	}
+
+	IOEventSubQueue *&subQueue = (toFront ? queue->front() : queue->back());
+	if (subQueue == NULL) {
+		subQueue = ALLOC_VAR_SIZE_NEW(alloc) IOEventSubQueue(alloc);
+	}
+
+	if (ev == NULL) {
+		return;
+	}
+
+	subQueue->push_back(IOEventEntry());
+	IOEventEntry &entry = subQueue->back();
+
+	entry.second.first = buf.getOffset() + buf.getSize();
+	entry.second.second = (extBuf == NULL ? 0 : extBuf->getSize());
+	entry.first = ALLOC_VAR_SIZE_NEW(alloc) Event(alloc, *ev);
+}
+
+void EventEngine::IOWorker::transferIOEventQueue(
+		const IOEventQueue &src, IOEventQueue *&dest) {
+	LockGuard guard(mutex_);
+	VariableSizeAllocator &alloc = *sharedVarAllocator_;
+
+	if (dest == NULL) {
+		dest = ALLOC_VAR_SIZE_NEW(alloc) IOEventQueue(alloc);
+	}
+
+	for (IOEventQueue::const_iterator it = src.begin();
+			it != src.end(); ++it) {
+		dest->push_back(NULL);
+		if ((*it) == NULL || (*it)->empty()) {
+			continue;
+		}
+
+		IOEventSubQueue *&destSub = dest->back();
+		destSub = ALLOC_VAR_SIZE_NEW(alloc) IOEventSubQueue(alloc);
+
+		for (IOEventSubQueue::const_iterator subIt = (*it)->begin();
+				subIt != (*it)->end(); ++subIt) {
+			if (subIt->first == NULL) {
+				continue;
+			}
+			destSub->push_back(IOEventEntry());
+			destSub->back() = IOEventEntry(
+					ALLOC_VAR_SIZE_NEW(alloc) Event(alloc, *subIt->first),
+					subIt->second);
+		}
+	}
+}
+
+void EventEngine::IOWorker::popIOEventQueue(
+		IOEventQueue &queue, const BufferQueue &bufQueue,
+		IOEventSubQueue *&subQueue) {
+
+	while (queue.size() > bufQueue.size()) {
+		IOEventSubQueue *srcSubQueue = queue.front();
+
+		if (subQueue != NULL) {
+			popIOEventSubQueue(queue, NULL, subQueue);
+		}
+
+		LockGuard guard(mutex_);
+		VariableSizeAllocator &alloc = *sharedVarAllocator_;
+
+		queue.pop_front();
+		ALLOC_VAR_SIZE_DELETE(alloc, srcSubQueue);
+	}
+}
+
+void EventEngine::IOWorker::releaseIOEventQueue(IOEventQueue *&queue) {
+	if (queue == NULL) {
+		return;
+	}
+
+	LockGuard guard(mutex_);
+	VariableSizeAllocator &alloc = *sharedVarAllocator_;
+
+	while (!queue->empty()) {
+		IOEventSubQueue *subQueue = queue->front();
+
+		if (subQueue != NULL) {
+			for (IOEventSubQueue::iterator subIt = subQueue->begin();
+						subIt != subQueue->end(); ++subIt) {
+				Event *&ev = subIt->first;
+				ALLOC_VAR_SIZE_DELETE(alloc, ev);
+				ev = NULL;
+			}
+		}
+
+		queue->pop_front();
+		ALLOC_VAR_SIZE_DELETE(alloc, subQueue);
+	}
+
+	ALLOC_VAR_SIZE_DELETE(alloc, queue);
+	queue = NULL;
+}
+
+void EventEngine::IOWorker::popIOEventSubQueue(
+		IOEventQueue &queue, const Buffer *buf,
+		IOEventSubQueue *&subQueue) {
+	IOEventSubQueue *src;
+	if (queue.empty() || (src = queue.front()) == NULL) {
+		return;
+	}
+
+	size_t popCount = 0;
+	{
+		VariableSizeAllocator &alloc = *localVarAllocator_;
+
+		const size_t offset = (buf == NULL ? 0 : buf->getOffset());
+		const size_t extOffset = (buf == NULL ? 0 : buf->getExternalOffset());
+
+		if (subQueue == NULL) {
+			subQueue = ALLOC_VAR_SIZE_NEW(alloc) IOEventSubQueue(alloc);
+		}
+
+		for (IOEventSubQueue::const_iterator subIt = src->begin();
+				subIt != src->end(); ++subIt) {
+			if (buf != NULL &&
+					(subIt->second.first > offset ||
+					subIt->second.second > extOffset)) {
+				break;
+			}
+			++popCount;
+
+			if (subIt->first == NULL) {
+				continue;
+			}
+			subQueue->push_back(IOEventEntry());
+			subQueue->back() = IOEventEntry(
+					ALLOC_VAR_SIZE_NEW(alloc) Event(alloc, *subIt->first),
+					subIt->second);
+		}
+	}
+
+	{
+		LockGuard guard(mutex_);
+		VariableSizeAllocator &alloc = *sharedVarAllocator_;
+
+		for (IOEventSubQueue::iterator subIt = src->begin();
+				subIt != src->end();) {
+			if (popCount <= 0) {
+				break;
+			}
+			--popCount;
+
+			ALLOC_VAR_SIZE_DELETE(alloc, subIt->first);
+			subIt = src->erase(subIt);
+		}
+	}
+}
+
+void EventEngine::IOWorker::releaseIOEventSubQueue(
+		IOEventSubQueue *&subQueue) {
+	if (subQueue == NULL) {
+		return;
+	}
+
+	VariableSizeAllocator &alloc = *localVarAllocator_;
+
+	for (IOEventSubQueue::iterator subIt = subQueue->begin();
+			subIt != subQueue->end(); ++subIt) {
+		Event *&ev = subIt->first;
+		ALLOC_VAR_SIZE_DELETE(alloc, ev);
+		ev = NULL;
+	}
+
+	ALLOC_VAR_SIZE_DELETE(alloc, subQueue);
+	subQueue = NULL;
 }
 
 bool EventEngine::IOWorker::reconnectSocket(
@@ -2689,8 +2936,7 @@ void EventEngine::IOWorker::suspendSocket(
 	}
 
 	if (entry.first == SOCKET_OPERATION_REMOVE ||
-			entry.first == SOCKET_OPERATION_MOVE ||
-			entry.first == SOCKET_OPERATION_MODIFY) {
+			entry.first == SOCKET_OPERATION_MOVE) {
 		stats_.increment(Stats::IO_REQUEST_CANCEL_COUNT);
 		return;
 	}
@@ -2787,25 +3033,28 @@ void EventEngine::IOWorker::discardAllSockets() {
 
 	}
 
-	for (OperationMap::iterator it = operationMap_->begin();
-			it != operationMap_->end(); ++it) {
-		EventSocket *socket = it->first;
-		const SocketOperation operation = it->second.first;
-		if (socketMap_->find(socket) == socketMap_->end() &&
-				(operation == SOCKET_OPERATION_RECONNECT ||
-				operation == SOCKET_OPERATION_ADD)) {
-			discardSocket(socket, false);
+	if (operationMap_.get() != NULL) {
+		for (OperationMap::iterator it = operationMap_->begin();
+				it != operationMap_->end(); ++it) {
+			EventSocket *socket = it->first;
+			const SocketOperation operation = it->second.first;
+			if (socketMap_->find(socket) == socketMap_->end() &&
+					(operation == SOCKET_OPERATION_RECONNECT ||
+					operation == SOCKET_OPERATION_ADD)) {
+				discardSocket(socket, false);
+			}
 		}
-	}
-	operationMap_->clear();
-
-	for (SocketMap::iterator it = socketMap_->begin();
-			it != socketMap_->end(); ++it) {
-		EventEngine::EventSocket *socket = it->first;
-		discardSocket(socket, it->second);
+		operationMap_->clear();
 	}
 
-	socketMap_->clear();
+	if (socketMap_.get() != NULL) {
+		for (SocketMap::iterator it = socketMap_->begin();
+				it != socketMap_->end(); ++it) {
+			EventEngine::EventSocket *socket = it->first;
+			discardSocket(socket, it->second);
+		}
+		socketMap_->clear();
+	}
 
 	stats_.set(Stats::IO_MANAGED_SOCKET_COUNT, 0);
 }
@@ -3553,19 +3802,31 @@ EventEngine::EventSocket::EventSocket(
 		eventSource_(parentWorker.getLocalEventContext()),
 		eventCoder_(ee_.dispatcher_->getEventCoder()),
 		multicast_(false),
+		openedAsClient_(false),
 		onSecondary_(
 				parentWorker.getLocalEventContext().isOnSecondaryIOWorker()),
 		firstEventSent_(false),
 		firstEventReceived_(false),
-		negotiationEventDone_(!ee_.config_->secondaryIOEnabled_),
+		negotiationEventDone_(
+				!ee_.config_->secondaryIOEnabled_ &&
+				!ee_.config_->secureIOMode_.isSomeAcceptable()),
+		negotiationRejected_(false),
+		methodNegotiated_(negotiationEventDone_),
+		methodChanging_(false),
+		extraGuardRequired_(false),
+		lastPendingAction_(AbstractSocket::ACTION_NONE),
 		receiveBuffer_(NULL),
 		receiveBufferQueue_(NULL),
 		sendBufferQueue_(NULL),
+		eventQueueOnSent_(NULL),
 		nextReceiveSize_(0),
 		pendingReceiveSize_(0),
+		firstEventQueueSize_(0),
 		connectStartTime_(-1),
 		lastConnectTime_(-1),
 		ndSocketPendingType_(NodeDescriptor::Body::ND_SOCKET_MAX) {
+	const bool secure = false;
+	getParentPool().getFactory(secure, false).create(base_);
 }
 
 EventEngine::EventSocket::~EventSocket() try {
@@ -3581,21 +3842,29 @@ void EventEngine::EventSocket::handlePollEvent(
 	assert(!base_.isClosed());
 
 	try {
-		if (ev & util::IOPollEvent::TYPE_READ) {
+		const util::IOPollEvent filteredEv = filterPollEvent(ev);
+		if (filteredEv & util::IOPollEvent::TYPE_READ) {
+			const bool lastActionPending =
+					(lastPendingAction_ != AbstractSocket::ACTION_NONE);
+			ReceiveState state;
 			for (;;) {
-				EventRequestOption option;
-				if (receiveLocal(receiveEvent_, option)) {
-					dispatchEvent(receiveEvent_, option);
+				if (receiveLocal(receiveEvent_, state)) {
+					dispatchEvent(receiveEvent_, state.option_);
 
-					if (pendingReceiveSize_ > 0) {
+					if (pendingReceiveSize_ > 0 && !lastActionPending) {
 						continue;
 					}
 				}
 				break;
 			}
+			finishLocalReceive(state);
 		}
-		else if (ev & util::IOPollEvent::TYPE_WRITE) {
-			sendLocal();
+		else if (filteredEv & util::IOPollEvent::TYPE_WRITE) {
+			IOEventSubQueue *queue = NULL;
+			sendLocal(queue);
+			if (queue != NULL) {
+				dispatchEventsOnSent(queue);
+			}
 		}
 	}
 	catch (...) {
@@ -3606,6 +3875,7 @@ void EventEngine::EventSocket::handlePollEvent(
 			if (e.getErrorCode() == GS_ERROR_EE_OPERATION_NOT_ALLOWED) {
 				UTIL_TRACE_EXCEPTION_INFO(EVENT_ENGINE, e,
 						"Failed to handle socket IO (engine=" << ee_.getName() <<
+						", nd=" << nd_ <<
 						", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
 				return;
 			}
@@ -3616,6 +3886,7 @@ void EventEngine::EventSocket::handlePollEvent(
 		std::exception e;
 		UTIL_TRACE_EXCEPTION_WARNING(EVENT_ENGINE, e,
 				"Failed to handle socket IO (engine=" << ee_.getName() <<
+				", nd=" << nd_ <<
 				", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
@@ -3639,9 +3910,10 @@ bool EventEngine::EventSocket::openAsClient(
 	(void) ndGuard;
 
 	try {
+		openedAsClient_ = true;
+
 		if (onSecondary_) {
 			address_ = address;
-			base_.getSocketName(localAddress_);
 			negotiationEventDone_ = true;
 			firstEventSent_ = true;
 			connectStartTime_ = ee_.clockGenerator_->getMonotonicTime();
@@ -3713,6 +3985,8 @@ bool EventEngine::EventSocket::openAsMulticast(
 		base_.setMulticastLoopback(true);
 
 		address_ = address;
+		negotiationEventDone_ = true;
+		methodNegotiated_ = true;
 
 		multicast_ = true;
 
@@ -3747,7 +4021,8 @@ void EventEngine::EventSocket::sendNegotiationEvent(
 	}
 
 	Event ev(eventSource, type, 0);
-	ev.getMessageBuffer();
+	EventByteOutStream out = ev.getOutStream();
+	exportControlInfo(ndGuard, out);
 	send(ndGuard, ev, NULL);
 }
 
@@ -3770,7 +4045,8 @@ void EventEngine::EventSocket::send(
 		size_t nextPos = 0;
 
 		const bool ready = (connectStartTime_ < 0);
-		if (ready &&
+		if (ready && methodNegotiated_ &&
+				!methodChanging_ && !extraGuardRequired_ &&
 				(sendBufferQueue_ == NULL || sendBufferQueue_->empty())) {
 			for (;; index++) {
 				const void *ptr;
@@ -3796,6 +4072,7 @@ void EventEngine::EventSocket::send(
 			}
 		}
 
+		bool ioWorkerRequired = false;
 		if (index >= 0) {
 			int32_t remaining;
 			do {
@@ -3818,11 +4095,19 @@ void EventEngine::EventSocket::send(
 				nextPos = 0;
 			}
 			while (remaining > 0);
+			ioWorkerRequired = true;
+		}
 
-			if (ready) {
-				parentWorker_.modifySocket(
-						this, util::IOPollEvent::TYPE_READ_WRITE);
-			}
+		if (option != NULL && option->eventOnSent_ != NULL) {
+			parentWorker_.pushIOEventQueue(
+					eventQueueOnSent_, sendBufferQueue_,
+					option->eventOnSent_);
+			ioWorkerRequired = true;
+		}
+
+		if (ioWorkerRequired && ready) {
+			parentWorker_.modifySocket(
+					this, util::IOPollEvent::TYPE_READ_WRITE);
 		}
 
 		if (!firstEventSent_ && !multicast_) {
@@ -4064,7 +4349,7 @@ bool EventEngine::EventSocket::addLocal() {
 
 void EventEngine::EventSocket::moveLocal() {
 	try {
-		if (onSecondary_ || multicast_) {
+		if (onSecondary_ || multicast_ || extraGuardRequired_) {
 			assert(false);
 			GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 			return;
@@ -4095,10 +4380,17 @@ void EventEngine::EventSocket::moveLocal() {
 		socket->base_.attach(base_.detach());
 		socket->address_ = address_;
 		socket->localAddress_ = localAddress_;
+		socket->openedAsClient_ = openedAsClient_;
 
 		socket->firstEventSent_ = firstEventSent_;
 		socket->firstEventReceived_ = firstEventReceived_;
 		socket->negotiationEventDone_ = negotiationEventDone_;
+		socket->negotiationRejected_ = negotiationRejected_;
+
+		socket->methodNegotiated_ = methodNegotiated_;
+		socket->methodChanging_ = methodChanging_;
+		socket->extraGuardRequired_ = extraGuardRequired_;
+		socket->lastPendingAction_ = lastPendingAction_;
 
 		if (receiveBuffer_ != NULL) {
 			const size_t orgSize = receiveBuffer_->getXArray().size();
@@ -4116,10 +4408,12 @@ void EventEngine::EventSocket::moveLocal() {
 			receiveBuffer_->getWritableXArray().resize(orgSize);
 		}
 		transferSendBuffer(*socket);
+		transferIOEventQueue(*socket);
 		requestShutdown();
 
 		socket->nextReceiveSize_ = nextReceiveSize_;
 		socket->pendingReceiveSize_ = pendingReceiveSize_;
+		socket->firstEventQueueSize_ = firstEventQueueSize_;
 		socket->connectStartTime_ = connectStartTime_;
 		socket->lastConnectTime_ = lastConnectTime_;
 
@@ -4196,8 +4490,13 @@ void EventEngine::EventSocket::closeLocal(
 
 			parentWorker_.releaseBufferQueue(sendBufferQueue_);
 		}
+
+		if (eventQueueOnSent_ != NULL) {
+			parentWorker_.releaseIOEventQueue(eventQueueOnSent_);
+		}
 	}
 
+	pendingEvent_ = Event();
 	receiveEvent_ = Event();
 	receiveBuffer_ = NULL;
 
@@ -4221,13 +4520,119 @@ EventEngine::SocketStats EventEngine::EventSocket::getStats() const {
 	return stats_;
 }
 
-bool EventEngine::EventSocket::acceptInitialEvent(
-		EventType type, const NodeDescriptor &nd) {
+void EventEngine::EventSocket::acceptControlInfo(
+		LockGuard &ndGuard, const NodeDescriptor &nd, EventByteInStream &in) {
+	(void) ndGuard;
 	assert(!nd.isEmpty());
-	assert(!firstEventReceived_);
-	assert(ndSocketPendingType_ == NodeDescriptor::Body::ND_SOCKET_MAX);
+	try {
+		size_t endPos = in.base().position();
+		uint32_t bodySize = 0;
+		uint8_t plainAcceptable = 1;
+		uint8_t secureAcceptable = 0;
 
+		if (in.base().remaining() > 0) {
+			in >> bodySize;
+			endPos += static_cast<size_t>(
+					std::min<uint64_t>(in.base().remaining(), bodySize));
+
+			in >> plainAcceptable;
+			in >> secureAcceptable;
+		}
+		in.base().position(endPos);
+
+		const bool secureLocal = isAcceptableIOType(*ee_.config_, nd, true);
+		const bool plainLocal = isAcceptableIOType(*ee_.config_, nd, false);
+
+		const bool secured = (methodChanging_ || extraGuardRequired_);
+		if (!!secureAcceptable && secureLocal) {
+			if (methodNegotiated_ && !secured) {
+				GS_THROW_USER_ERROR(GS_ERROR_EE_MESSAGE_INVALID,
+						"Unexpected secure IO requested");
+			}
+			else if (!methodNegotiated_) {
+				methodChanging_ = true;
+			}
+		}
+		else if (!!plainAcceptable && plainLocal) {
+			if (methodNegotiated_ && secured) {
+				GS_THROW_USER_ERROR(GS_ERROR_EE_MESSAGE_INVALID,
+						"Unexpected plain IO requested");
+			}
+		}
+		else {
+			GS_THROW_USER_ERROR(GS_ERROR_EE_OPERATION_NOT_ALLOWED,
+					"Unacceptable security option requested ("
+					"requested={plain:" << !!plainAcceptable <<
+					", secure:" << !!secureAcceptable << "}, "
+					"allowed={plain:" <<  !!plainLocal <<
+					", secure:" << !!secureLocal << "})");
+		}
+		methodNegotiated_ = true;
+	}
+	catch (...) {
+		negotiationRejected_ = true;
+		throw;
+	}
+}
+
+void EventEngine::EventSocket::exportControlInfo(
+		LockGuard &ndGuard, EventByteOutStream &out) {
+	(void) ndGuard;
+
+	uint32_t bodySize = 0;
+	uint8_t plainAcceptable = 0;
+	uint8_t secureAcceptable = 0;
+
+	const bool secured = (methodChanging_ || extraGuardRequired_);
+	if (methodNegotiated_ ?
+			!secured : isAcceptableIOType(*ee_.config_, nd_, false)) {
+		plainAcceptable = 1;
+	}
+	if (methodNegotiated_ ?
+			secured : isAcceptableIOType(*ee_.config_, nd_, true)) {
+		secureAcceptable = 1;
+	}
+
+	const size_t headPos = out.base().position();
+	out << bodySize;
+
+	const size_t bodyPos = out.base().position();
+	out << plainAcceptable;
+	out << secureAcceptable;
+
+	const size_t endPos = out.base().position();
+	out.base().position(headPos);
+	bodySize = static_cast<uint32_t>(endPos - bodyPos);
+	out << bodySize;
+	out.base().position(endPos);
+}
+
+bool EventEngine::EventSocket::isAcceptableIOType(
+		const Config &config, const NodeDescriptor &nd, bool secure) {
+	const Config::IOMode &mode =
+			(secure ? config.secureIOMode_ : config.plainIOMode_);
+	if (nd.isEmpty()) {
+		if (secure) {
+			return false;
+		}
+		return true;
+	}
+
+	if (nd.getType() == NodeDescriptor::ND_TYPE_SERVER) {
+		return mode.clusterAcceptable_;
+	}
+	else {
+		return mode.serverAcceptable_;
+	}
+}
+
+bool EventEngine::EventSocket::acceptInitialEvent(const Event &ev) {
+	assert(!firstEventReceived_);
 	firstEventReceived_ = true;
+
+	const NodeDescriptor &nd = ev.getSenderND();
+	assert (!nd.isEmpty());
+	assert(ndSocketPendingType_ == NodeDescriptor::Body::ND_SOCKET_MAX);
 
 	if (multicast_) {
 		return true;
@@ -4239,12 +4644,17 @@ bool EventEngine::EventSocket::acceptInitialEvent(
 	bool connecting = false;
 	bool moving = false;
 
+	const EventType type = ev.getType();
 	if (nd.getType() == NodeDescriptor::ND_TYPE_CLIENT || nd.isSelf()) {
 		assert(!onSecondary_);
+		if (nd.isSelf() && type < 0 && type > Dispatcher::CONTROL_TYPE_END) {
+			negotiating = true;
+		}
 	}
 	else if (!ee_.config_->secondaryIOEnabled_) {
 		assert(!onSecondary_);
-		if (type < 0 && !ee_.config_->ioNegotiationMinimum_) {
+		if (type < 0 && (isAcceptableIOType(*ee_.config_, nd_, true) ||
+				!ee_.config_->ioNegotiationMinimum_)) {
 			negotiating = true;
 		}
 	}
@@ -4279,6 +4689,11 @@ bool EventEngine::EventSocket::acceptInitialEvent(
 	NodeDescriptor::Body &ndBody = Manipulator::getNDBody(nd, onSecondary_);
 	LockGuard guard(ndBody.getLock());
 
+	if (type < 0 && type > Dispatcher::CONTROL_TYPE_END) {
+		EventByteInStream in = ev.getInStream();
+		acceptControlInfo(guard, nd, in);
+	}
+
 	if (nd_.isEmpty()) {
 		const NodeDescriptor::Body::SocketType socketType =
 				NodeDescriptor::Body::ND_SOCKET_RECEIVER;
@@ -4291,7 +4706,10 @@ bool EventEngine::EventSocket::acceptInitialEvent(
 		}
 	}
 
-	if (mode != NodeDescriptor::Body::SOCKET_MODE_SINGLE) {
+	if (mode == NodeDescriptor::Body::SOCKET_MODE_SINGLE) {
+		negotiationEventDone_ = true;
+	}
+	else {
 		ndBody.setSocketMode(guard, mode);
 
 		if (mode == NodeDescriptor::Body::SOCKET_MODE_MIXED) {
@@ -4337,6 +4755,7 @@ bool EventEngine::EventSocket::acceptInitialEvent(
 		return false;
 	}
 
+	parentWorker_.modifySocket(this, util::IOPollEvent::TYPE_READ_WRITE);
 	return true;
 }
 
@@ -4378,6 +4797,43 @@ void EventEngine::EventSocket::dispatchEvent(
 		break;
 	default:
 		assert(false);
+	}
+
+	if (!methodNegotiated_) {
+		methodNegotiated_ = true;
+	}
+}
+
+void EventEngine::EventSocket::dispatchEventsOnSent(IOEventSubQueue *&queue) {
+	try {
+		assert(queue != NULL);
+
+		EventContext &ec = parentWorker_.getLocalEventContext();
+		const bool suspended = false;
+		const EventRequestOption option;
+
+		for (IOEventSubQueue::iterator it = queue->begin();
+				it != queue->end(); ++it) {
+			Event *ev = it->first;
+			if (ev == NULL) {
+				continue;
+			}
+
+			assert(!Dispatcher::isSpecialEventType(ev->getType()));
+			stats_.dispatchingEventCount_++;
+
+			const Dispatcher::DispatchResult ret =
+					ee_.dispatcher_->dispatch(ec, *ev, suspended, option);
+
+			assert(ret == Dispatcher::DISPATCH_RESULT_DONE);
+			static_cast<void>(ret);
+		}
+
+		parentWorker_.releaseIOEventSubQueue(queue);
+	}
+	catch (...) {
+		parentWorker_.releaseIOEventSubQueue(queue);
+		throw;
 	}
 }
 
@@ -4425,6 +4881,7 @@ bool EventEngine::EventSocket::connect(
 	assert(!address_.isEmpty());
 
 	base_.close();
+	getParentPool().getFactory(false, false).create(base_);
 	base_.open(address_.getFamily(), util::Socket::TYPE_STREAM);
 
 	try {
@@ -4436,8 +4893,7 @@ bool EventEngine::EventSocket::connect(
 					this, util::IOPollEvent::TYPE_READ_WRITE);
 		}
 
-		connectStartTime_ = -1;
-		lastConnectTime_ = -1;
+		setConnected(false);
 
 		return parentWorker_.addSocket(this,
 				(sendBufferQueue_ == NULL || sendBufferQueue_->empty()) ?
@@ -4458,8 +4914,18 @@ bool EventEngine::EventSocket::connect(
 	}
 }
 
-bool EventEngine::EventSocket::receiveLocal(
-		Event &ev, EventRequestOption &option) {
+void EventEngine::EventSocket::setConnected(bool pending) {
+	if (localAddress_.isEmpty()) {
+		base_.getSocketName(localAddress_);
+	}
+
+	if (!pending) {
+		connectStartTime_ = -1;
+		lastConnectTime_ = -1;
+	}
+}
+
+bool EventEngine::EventSocket::receiveLocal(Event &ev, ReceiveState &state) {
 	bool unexpectedShutdown = false;
 	try {
 		if (!pendingEvent_.isEmpty()) {
@@ -4467,7 +4933,27 @@ bool EventEngine::EventSocket::receiveLocal(
 			return false;
 		}
 
+		if (negotiationRejected_) {
+			GS_THROW_USER_ERROR(GS_ERROR_EE_MESSAGE_INVALID,
+					"Unexpected message after negotiation failure");
+		}
+		else if (!isAcceptableIOType(*ee_.config_, nd_, false) &&
+				!extraGuardRequired_ && firstEventReceived_) {
+			GS_THROW_USER_ERROR(GS_ERROR_EE_MESSAGE_INVALID,
+					"Unexpected message before negotiation");
+		}
+
+		if (methodNegotiated_ && methodChanging_) {
+			parentWorker_.modifySocket(this, util::IOPollEvent::TYPE_WRITE);
+			return false;
+		}
+
+		const bool lastActionPending =
+				(lastPendingAction_ != AbstractSocket::ACTION_NONE);
+
 		if (receiveBuffer_ == NULL) {
+			setConnected(true);
+
 			ev = Event(eventSource_, 0, 0);
 			receiveBuffer_ = &ev.getMessageBuffer();
 			receiveBuffer_->getWritableXArray().reserve(
@@ -4501,8 +4987,12 @@ bool EventEngine::EventSocket::receiveLocal(
 		}
 
 		Buffer::XArray &storage = receiveBuffer_->getWritableXArray();
+		size_t pendingOffset;
 		size_t bufferSize;
 		if (pendingReceiveSize_ == 0) {
+			lastPendingAction_ = AbstractSocket::ACTION_NONE;
+
+			assert(state.pendingOffset_ == 0);
 			const size_t orgSize = (nextReceiveSize_ == 0 ? 0 : storage.size());
 			storage.reserve(orgSize + nextReceiveSize_);
 			nextReceiveSize_ = storage.capacity() - orgSize;
@@ -4511,6 +5001,12 @@ bool EventEngine::EventSocket::receiveLocal(
 					base_.receive(storage.data() + orgSize, nextReceiveSize_);
 			if (receivedSize < 0) {
 				storage.resize(orgSize);
+				if (extraGuardRequired_) {
+					setNextPollEvent(NULL, lastActionPending, true);
+					if (base_.getNextAction() != AbstractSocket::ACTION_NONE) {
+						lastPendingAction_ = AbstractSocket::ACTION_READ;
+					}
+				}
 				return false;
 			}
 			else if (receivedSize > 0) {
@@ -4521,27 +5017,50 @@ bool EventEngine::EventSocket::receiveLocal(
 				GS_THROW_USER_ERROR(GS_ERROR_EE_IO_READ_FAILED,
 						"Unexpected shutdown occurred");
 			}
+			pendingOffset = 0;
+			storage.resize(bufferSize);
 		}
 		else {
-			assert(pendingReceiveSize_ <= storage.capacity() - storage.size());
-			uint8_t *data = storage.data();
-			memmove(data, data + storage.size(), pendingReceiveSize_);
-			bufferSize = pendingReceiveSize_;
+			assert(state.pendingOffset_ + pendingReceiveSize_ <=
+					storage.capacity() - storage.size());
+
+			pendingOffset = storage.size() + state.pendingOffset_;
+			bufferSize = pendingOffset + pendingReceiveSize_;
+
+			storage.resize(bufferSize);
+			receiveBuffer_->setOffset(pendingOffset);
 		}
-		storage.resize(bufferSize);
 
 		nextReceiveSize_ = eventCoder_.decode(
-				ee_, *receiveBuffer_, ev, nd_, address_, option);
-		pendingReceiveSize_ = bufferSize - storage.size();
+				ee_, *receiveBuffer_, ev, nd_, address_, state.option_);
 
-		if (!firstEventReceived_ && !ev.getSenderND().isEmpty()) {
-			if (!acceptInitialEvent(ev.getType(), ev.getSenderND())) {
-				return false;
-			}
+		if (extraGuardRequired_) {
+			setNextPollEvent(NULL, lastActionPending, true);
 		}
 
 		if (nextReceiveSize_ == 0) {
+			assert(storage.size() + pendingOffset <= bufferSize);
+
+			pendingReceiveSize_ = bufferSize - (storage.size() + pendingOffset);
+			state.pendingOffset_ = (pendingReceiveSize_ > 0 ? pendingOffset : 0);
+
+			if (!firstEventReceived_ && !acceptInitialEvent(ev)) {
+				return false;
+			}
 			return true;
+		}
+		else {
+			if (pendingOffset > 0) {
+				const size_t nextSize = bufferSize - pendingOffset;
+				uint8_t *data = storage.data();
+				memmove(data, data + pendingOffset, nextSize);
+
+				receiveBuffer_->setOffset(0);
+				storage.resize(nextSize);
+			}
+
+			state.pendingOffset_ = 0;
+			pendingReceiveSize_ = 0;
 		}
 	}
 	catch (std::exception &e) {
@@ -4595,7 +5114,17 @@ bool EventEngine::EventSocket::receiveLocal(
 	return false;
 }
 
-void EventEngine::EventSocket::sendLocal() {
+void EventEngine::EventSocket::finishLocalReceive(ReceiveState &state) {
+	assert(receiveBuffer_ == NULL || shutdownRequested_ ||
+			receiveBuffer_->getWritableXArray().size() +
+					pendingReceiveSize_ + state.pendingOffset_ <=
+					receiveBuffer_->getWritableXArray().capacity());
+
+	pendingReceiveSize_ += state.pendingOffset_;
+	state.pendingOffset_ = 0;
+}
+
+void EventEngine::EventSocket::sendLocal(IOEventSubQueue *&queue) {
 	try {
 		if (nd_.isEmpty()) {
 			GS_THROW_USER_ERROR(GS_ERROR_EE_IO_WRITE_FAILED,
@@ -4605,48 +5134,63 @@ void EventEngine::EventSocket::sendLocal() {
 		LockGuard guard(
 				Manipulator::getNDBody(nd_, onSecondary_).getLock());
 
+		const bool lastActionPending =
+				(lastPendingAction_ != AbstractSocket::ACTION_NONE);
+		lastPendingAction_ = AbstractSocket::ACTION_NONE;
+
 		if (connectStartTime_ >= 0) {
-			connectStartTime_ = -1;
-			lastConnectTime_ = -1;
+			setConnected(false);
 			parentWorker_.modifySocket(
 					this, util::IOPollEvent::TYPE_READ_WRITE);
 		}
 
 		for (;;) {
-			if (sendBufferQueue_ == NULL || sendBufferQueue_->empty()) {
+			if (methodChanging_ && firstEventSent_ &&
+					firstEventQueueSize_ <= 0) {
+				changeTransportMethod(guard);
+			}
+
+			if (sendBufferQueue_ == NULL || sendBufferQueue_->empty() ||
+					(!methodNegotiated_ &&
+							(!openedAsClient_ || firstEventQueueSize_ <= 0))) {
+				if (extraGuardRequired_) {
+					setNextPollEvent(&guard, lastActionPending, false);
+					break;
+				}
 				parentWorker_.modifySocket(this, util::IOPollEvent::TYPE_READ);
 				break;
 			}
 
-			Buffer &buffer = sendBufferQueue_->front();
+			Buffer *buffer = &sendBufferQueue_->front();
 
 			bool pending = false;
-			for (size_t i = 0; i < 2; i++) {
+			for (bool forExternal = false;; forExternal = true) {
 				size_t offset;
 				size_t size;
 				int64_t sentSize;
-				if (i == 0) {
-					offset = buffer.getOffset();
-					size = buffer.getSize();
+				if (!forExternal || adjustExternalSendBuffer(guard, buffer)) {
+					forExternal = false;
+					offset = buffer->getOffset();
+					size = buffer->getSize();
 					if (size == 0) {
 						continue;
 					}
 
-					const void *data = buffer.getXArray().data() + offset;
+					const void *data = buffer->getXArray().data() + offset;
 					sentSize = multicast_ ?
 							base_.sendTo(data, size, address_) :
 							base_.send(data, size);
 				}
 				else {
-					const ExternalBuffer *ext = buffer.getExternal();
+					const ExternalBuffer *ext = buffer->getExternal();
 					if (ext == NULL) {
-						continue;
+						break;
 					}
 
-					offset = buffer.getExternalOffset();
+					offset = buffer->getExternalOffset();
 					size = ext->getSize();
 					if (offset >= size) {
-						continue;
+						break;
 					}
 					size -= offset;
 
@@ -4673,33 +5217,68 @@ void EventEngine::EventSocket::sendLocal() {
 					nextOffset += size;
 				}
 
-				if (i == 0) {
-					buffer.setOffset(nextOffset);
+				if (!forExternal) {
+					buffer->setOffset(nextOffset);
 
 					if (pending) {
 						break;
 					}
 				}
 				else {
+					buffer->setExternalOffset(nextOffset);
+
 					if (pending) {
-						buffer.setExternalOffset(nextOffset);
 						break;
 					}
-					else {
-						buffer.prepareExternal(NULL).clear();
-					}
+					buffer->prepareExternal(NULL).clear();
+					break;
 				}
 			}
 
+			if (eventQueueOnSent_ != NULL) {
+				parentWorker_.popIOEventSubQueue(
+						*eventQueueOnSent_, buffer, queue);
+			}
+
 			if (pending) {
+				if (extraGuardRequired_) {
+					setNextPollEvent(&guard, lastActionPending, false);
+					if (base_.getNextAction() != AbstractSocket::ACTION_NONE) {
+						lastPendingAction_ = AbstractSocket::ACTION_WRITE;
+						if (sendBufferQueue_->size() <= 1) {
+							const size_t threshold = getSendBufferThreshold();
+							Buffer &destBuffer = parentWorker_.pushBufferQueue(
+									sendBufferQueue_, threshold);
+							parentWorker_.updateSendBufferSize(destBuffer, true);
+						}
+					}
+				}
 				break;
 			}
 
-			parentWorker_.updateSendBufferSize(buffer, false);
+			parentWorker_.updateSendBufferSize(*buffer, false);
 			parentWorker_.popBufferQueue(*sendBufferQueue_);
+			if (firstEventQueueSize_ > 0) {
+				--firstEventQueueSize_;
+			}
+
+			if (eventQueueOnSent_ != NULL) {
+				parentWorker_.popIOEventQueue(
+						*eventQueueOnSent_, *sendBufferQueue_, queue);
+			}
+
+			if (extraGuardRequired_) {
+				if (lastActionPending) {
+					setNextPollEvent(&guard, lastActionPending, false);
+					break;
+				}
+			}
 		}
 	}
-	catch (std::exception &e) {
+	catch (...) {
+		parentWorker_.releaseIOEventSubQueue(queue);
+
+		std::exception e;
 		if (handleIOError(e)) {
 			return;
 		}
@@ -4771,6 +5350,74 @@ bool EventEngine::EventSocket::handleIOError(std::exception&) throw() {
 	return false;
 }
 
+util::IOPollEvent EventEngine::EventSocket::filterPollEvent(util::IOPollEvent ev) {
+	switch (lastPendingAction_) {
+	case AbstractSocket::ACTION_READ:
+		return util::IOPollEvent::TYPE_READ;
+	case AbstractSocket::ACTION_WRITE:
+		return util::IOPollEvent::TYPE_WRITE;
+	default:
+		if (base_.isPending() || pendingReceiveSize_ > 0) {
+			return util::IOPollEvent::TYPE_READ;
+		}
+		return ev;
+	}
+}
+
+void EventEngine::EventSocket::setNextPollEvent(
+		LockGuard *ndGuard, bool lastActionPending, bool forRead) {
+	assert(extraGuardRequired_);
+	switch (base_.getNextAction()) {
+	case AbstractSocket::ACTION_READ:
+		parentWorker_.modifySocket(this, util::IOPollEvent::TYPE_READ);
+		break;
+	case AbstractSocket::ACTION_WRITE:
+		parentWorker_.modifySocket(this, util::IOPollEvent::TYPE_WRITE);
+		break;
+	default:
+		if (base_.isPending()) {
+			parentWorker_.modifySocket(
+					this, util::IOPollEvent::TYPE_READ_WRITE);
+		}
+		else if (lastActionPending && forRead) {
+			parentWorker_.modifySocket(this, util::IOPollEvent::TYPE_WRITE);
+		}
+		else {
+			if (ndGuard == NULL ||
+					(sendBufferQueue_ != NULL && !sendBufferQueue_->empty())) {
+				parentWorker_.modifySocket(
+						this, util::IOPollEvent::TYPE_READ_WRITE);
+			}
+			else {
+				parentWorker_.modifySocket(
+						this, util::IOPollEvent::TYPE_READ);
+			}
+		}
+		break;
+	}
+}
+
+void EventEngine::EventSocket::changeTransportMethod(LockGuard &ndGuard) {
+	(void) ndGuard;
+	assert(methodChanging_);
+
+	if (nextReceiveSize_ > 0 || pendingReceiveSize_ > 0) {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_EE_MESSAGE_INVALID,
+				"Unexpected message after negotiation");
+	}
+
+	util::Socket localSocket;
+	localSocket.attach(base_.detach());
+
+	const bool secure = true;
+	getParentPool().getFactory(secure, openedAsClient_).create(base_);
+	base_.attach(localSocket.detach());
+
+	extraGuardRequired_ = true;
+	methodChanging_ = false;
+}
+
 void EventEngine::EventSocket::transferSendBuffer(EventSocket &dest) const {
 	if (sendBufferQueue_ == NULL) {
 		return;
@@ -4793,6 +5440,15 @@ void EventEngine::EventSocket::transferSendBuffer(EventSocket &dest) const {
 	}
 }
 
+void EventEngine::EventSocket::transferIOEventQueue(EventSocket &dest) const {
+	if (eventQueueOnSent_ == NULL) {
+		return;
+	}
+
+	dest.parentWorker_.transferIOEventQueue(
+			*eventQueueOnSent_, dest.eventQueueOnSent_);
+}
+
 void EventEngine::EventSocket::appendToSendBuffer(
 		const void *data, size_t size, size_t offset) {
 	bool extEnabled = (ee_.bufferManager_ != NULL);
@@ -4801,10 +5457,7 @@ void EventEngine::EventSocket::appendToSendBuffer(
 		extEnabled = false;
 	}
 
-	typedef VariableSizeAllocator::TraitsType Traits;
-	const size_t threshold =
-			Traits::getFixedSize(Traits::FIXED_ALLOCATOR_COUNT - 1) / 2;
-
+	const size_t threshold = getSendBufferThreshold();
 	size_t nextOffset = offset;
 
 	bool forExternal = false;
@@ -4820,12 +5473,18 @@ void EventEngine::EventSocket::appendToSendBuffer(
 				break;
 			}
 
+			if (!firstEventSent_ ||
+					firstEventQueueSize_ >= sendBufferQueue_->size()) {
+				break;
+			}
+
 			buffer = &sendBufferQueue_->back();
 
 			if (buffer->getExternal() == NULL &&
-					(buffer->getXArray().size() < threshold ||
-					buffer->getCapacity() > buffer->getXArray().size())) {
-				if (!(extEnabled && sendBufferQueue_->size() > 1)) {
+					!(extEnabled && sendBufferQueue_->size() > 1)) {
+				const Buffer::XArray &xarray = buffer->getXArray();
+				if ((!xarray.empty() && xarray.size() < threshold) ||
+						xarray.capacity() > xarray.size()) {
 					break;
 				}
 			}
@@ -4874,6 +5533,66 @@ void EventEngine::EventSocket::appendToSendBuffer(
 			nextOffset += writeSize;
 		}
 	}
+
+	if (!firstEventSent_) {
+		firstEventQueueSize_ = sendBufferQueue_->size();
+	}
+}
+
+bool EventEngine::EventSocket::adjustExternalSendBuffer(
+		LockGuard &ndGuard, Buffer *&buffer) {
+	(void) ndGuard;
+
+	if (buffer->getSize() > 0) {
+		assert(false);
+		return false;
+	}
+
+	const ExternalBuffer *ext = buffer->getExternal();
+	if (ext == NULL) {
+		return false;
+	}
+
+	size_t offset = buffer->getExternalOffset();
+	size_t size = ext->getSize();
+	if (offset >= size) {
+		return false;
+	}
+	size -= offset;
+
+	const size_t threshold = getSendBufferThreshold();
+	if (size > threshold) {
+		size = threshold;
+	}
+
+	Buffer &destBuffer = parentWorker_.pushBufferQueue(
+			sendBufferQueue_, size, true);
+	parentWorker_.updateSendBufferSize(destBuffer, true);
+	parentWorker_.pushIOEventQueue(
+			eventQueueOnSent_, sendBufferQueue_, NULL, true);
+	{
+		ExternalBuffer::Reader reader(*ext);
+		const void *src = static_cast<const uint8_t*>(reader.data()) + offset;
+		destBuffer.getOutStream().writeAll(src, size);
+	}
+	buffer->setExternalOffset(offset + size);
+
+	if (firstEventQueueSize_ > 0) {
+		++firstEventQueueSize_;
+	}
+
+	buffer = &destBuffer;
+	return true;
+}
+
+size_t EventEngine::EventSocket::getSendBufferThreshold() {
+	typedef VariableSizeAllocator::TraitsType Traits;
+	return Traits::getFixedSize(Traits::FIXED_ALLOCATOR_COUNT - 1) / 2;
+}
+
+
+EventEngine::EventSocket::ReceiveState::ReceiveState() :
+		pendingOffset_(0) {
 }
 
 
@@ -5060,8 +5779,6 @@ size_t EventEngine::DefaultEventCoder::decode(
 		const util::SocketAddress &socketAddress,
 		EventRequestOption &option) {
 
-	assert(buffer.getOffset() == 0);
-
 	EventByteInStream in = buffer.getInStream();
 	const size_t bufferSize = in.base().remaining();
 
@@ -5101,14 +5818,33 @@ size_t EventEngine::DefaultEventCoder::decode(
 		return requiredSize - bufferSize;
 	}
 
-	const size_t remaining = bufferSize - requiredSize;
-	if (remaining > 0) {
-		buffer.getWritableXArray().resize(requiredSize);
+	do {
+		const size_t bufferOffset = buffer.getOffset();
+		if (bufferOffset > 0) {
+			Buffer::XArray &baseBuffer = buffer.getWritableXArray();
+			assert(bufferOffset + requiredSize <= baseBuffer.size());
 
-		const size_t orgPos = in.base().position();
-		in = buffer.getInStream();
-		in.base().position(orgPos);
+			uint8_t *data = baseBuffer.data();
+			memmove(data, data + bufferOffset, requiredSize);
+			baseBuffer.resize(requiredSize);
+
+			const size_t orgPos = in.base().position();
+			in = EventByteInStream(util::ArrayInStream(data, requiredSize));
+			in.base().position(orgPos);
+			break;
+		}
+
+		const size_t remaining = bufferSize - requiredSize;
+		if (remaining > 0) {
+			buffer.getWritableXArray().resize(requiredSize);
+
+			const size_t orgPos = in.base().position();
+			in = buffer.getInStream();
+			in.base().position(orgPos);
+			break;
+		}
 	}
+	while (false);
 
 	buffer.setOffset(commonPartSize);
 
@@ -5120,6 +5856,7 @@ size_t EventEngine::DefaultEventCoder::decode(
 
 	ev.resetAttributes(eventType, partitionId, senderND);
 
+	option = EventRequestOption();
 	if (headerType != CODER_NODE_TYPE_SERVER &&
 			headerType != CODER_NODE_TYPE_CLIENT) {
 		size_t optionSize;
@@ -5442,7 +6179,7 @@ void EventEngine::DefaultEventCoder::encodeRequestOption(
 			EventRequestOption lastOption;
 			size_t optionSize = 0;
 			decodeRequestOption(in, headerType, lastOption, optionSize);
-			if (option != NULL && lastOption == *option) {
+			if (option != NULL && lastOption.isSameEncodingOption(*option)) {
 				return;
 			}
 

@@ -19,16 +19,14 @@
 	@brief Implementation of Container base class
 */
 #include "collection.h"
-#include "hash_map.h"
 #include "time_series.h"
 #include "gis_geometry.h"
 #include "rtree_map.h"
 #include "util/trace.h"
 #include "btree_map.h"
-#include "data_store.h"
+#include "data_store_v4.h"
 #include "data_store_common.h"
 #include "transaction_context.h"
-#include "transaction_manager.h"
 #include "gs_error.h"
 #include "message_schema.h"
 #include "result_set.h"
@@ -38,21 +36,45 @@
 
 #include "value.h"
 
+void BaseContainer::getErasableList(TransactionContext &txn, Timestamp erasableTimeUpperLimit, util::XArray<ArchiveInfo> &list) {
+	Timestamp erasableTimeLowerLimit = getDataStore()->stats().getBatchFreeTime();
+	if (erasableTimeLowerLimit < dataStore_->getConfig().getErasableExpiredTime()) {
+		erasableTimeLowerLimit = dataStore_->getConfig().getErasableExpiredTime();
+	}
+	ExpireType type = getExpireType();
+	if (type == TABLE_EXPIRE && baseContainerImage_->rowIdMapOId_ != UNDEF_OID
+		&& baseContainerImage_->mvccMapOId_ != UNDEF_OID) {
+		ArchiveInfo info;
+		info.rowIdMapOId_ = baseContainerImage_->rowIdMapOId_;
+		info.mvccMapOId_ = baseContainerImage_->mvccMapOId_;
+		info.start_ = getContainerExpirationStartTime();
+		info.end_ = getContainerExpirationEndTime();
+		info.expired_ = getContainerExpirationTime();
+		info.erasable_ = DataStoreV4::DataAffinityUtils::convertChunkKey2Timestamp(
+			calcChunkKey(getContainerExpirationEndTime(), getContainerExpirationDutation()));
+		if (erasableTimeLowerLimit >= info.erasable_ || info.erasable_ > erasableTimeUpperLimit) {
+			return;
+		}
+		list.push_back(info);
+	}
+}
+
+
+
 
 std::string BaseContainer::dump(TransactionContext &txn) {
-	util::NormalOStringStream strstrm;
 	switch (getContainerType()) {
 	case COLLECTION_CONTAINER:
-		strstrm << dumpImpl<Collection>(txn);
+		return dumpImpl<Collection>(txn);
 		break;
 	case TIME_SERIES_CONTAINER:
-		strstrm << dumpImpl<TimeSeries>(txn);
+		return dumpImpl<TimeSeries>(txn);
 		break;
 	default:
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
 		break;
 	}
-	return strstrm.str();
+	return "";
 }
 
 template <typename R>
@@ -161,7 +183,6 @@ std::string BaseContainer::dump(
 	}
 	return strstrm.str();
 }
-
 
 /*!
 	@brief Validates Rows and Indexes
@@ -454,7 +475,6 @@ bool BaseContainer::validateImpl(TransactionContext &txn,
 			uint64_t valIndexRowNum2 = 0;
 			{
 			BtreeMap::BtreeCursor btreeCursor;
-			HashMap::HashCursor hashCursor;
 			RtreeMap::RtreeCursor rtreeCursor;
 			while (1) {
 				util::StackAllocator::Scope scope(txn.getDefaultAllocator());
@@ -480,11 +500,6 @@ bool BaseContainer::validateImpl(TransactionContext &txn,
 						getAllStatus =
 							reinterpret_cast<BtreeMap *>(map.get())->getAll(
 								txn, PARTIAL_RESULT_SIZE, oIdList, btreeCursor);
-						break;
-					case MAP_TYPE_HASH:
-						getAllStatus =
-							reinterpret_cast<HashMap *>(map.get())->getAll(
-								txn, PARTIAL_RESULT_SIZE, oIdList, hashCursor);
 						break;
 					case MAP_TYPE_SPATIAL:
 						getAllStatus =
@@ -556,7 +571,6 @@ bool BaseContainer::validateImpl(TransactionContext &txn,
 			}
 			{
 			BtreeMap::BtreeCursor btreeCursor;
-			HashMap::HashCursor hashCursor;
 			RtreeMap::RtreeCursor rtreeCursor;
 			while (1) {
 				util::StackAllocator::Scope scope(txn.getDefaultAllocator());
@@ -574,11 +588,6 @@ bool BaseContainer::validateImpl(TransactionContext &txn,
 						getAllStatus =
 							reinterpret_cast<BtreeMap *>(map.get())->getAll(
 								txn, PARTIAL_RESULT_SIZE, oIdList, btreeCursor);
-						break;
-					case MAP_TYPE_HASH:
-						getAllStatus =
-							reinterpret_cast<HashMap *>(map.get())->getAll(
-								txn, PARTIAL_RESULT_SIZE, oIdList, hashCursor);
 						break;
 					case MAP_TYPE_SPATIAL:
 						getAllStatus =
@@ -719,149 +728,4 @@ bool BaseContainer::validateImpl(TransactionContext &txn,
 
 
 
-BaseContainer::BaseContainer(TransactionContext &txn, DataStore *dataStore, BaseContainerImage *containerImage, ShareValueList *commonContainerSchema)
-	: BaseObject(txn.getPartitionId(), *(dataStore->getObjectManager())),
-	  baseContainerImage_(containerImage),
-	  commonContainerSchema_(commonContainerSchema),
-	  exclusiveStatus_(UNKNOWN),
-	  alloc_(txn.getDefaultAllocator()),
-	  dataStore_(dataStore),
-	  rsNotifier_(*dataStore),
-	  containerKeyCursor_(txn.getPartitionId(), *(dataStore->getObjectManager())),
-	  isCompressionErrorMode_(false), rowArrayCache_(NULL)
-		  ,
-	  rowIdFuncInfo_(NULL), mvccFuncInfo_(NULL)
-{
-	columnSchema_ =
-		commonContainerSchema_->get<ColumnSchema>(META_TYPE_COLUMN_SCHEMA);
-	indexSchema_ = 
-		ALLOC_NEW(txn.getDefaultAllocator()) IndexSchema(txn, *(dataStore->getObjectManager()), AllocateStrategy());
-	bool onMemory = true;
-	indexSchema_->initialize(txn, 0, 0, columnSchema_->getColumnNum(), onMemory);
-}
-
-BaseContainer::BaseContainerImage *BaseContainer::makeBaseContainerImage(TransactionContext &txn, const BibInfo::Container &bibInfo) {
-	util::StackAllocator &alloc = txn.getDefaultAllocator();
-
-	BaseContainer::BaseContainerImage *baseContainerImage = ALLOC_NEW(alloc) BaseContainer::BaseContainerImage;
-	memset(baseContainerImage, 0, sizeof(BaseContainer::BaseContainerImage));
-
-	std::string containerTypeStr = bibInfo.containerType_;
-	baseContainerImage->containerType_ = BibInfoUtil::getContainerType(containerTypeStr.c_str());
-	if (baseContainerImage->containerType_ == UNDEF_CONTAINER) {
-		GS_THROW_USER_ERROR(GS_ERROR_DS_DS_CONTAINER_TYPE_INVALID, containerTypeStr);
-	}
-
-	baseContainerImage->status_ = 0;  
-	baseContainerImage->normalRowArrayNum_ = 0;
-	baseContainerImage->containerId_ = static_cast<ContainerId>(bibInfo.containerId_);
-	baseContainerImage->containerNameOId_ = UNDEF_OID;
-	baseContainerImage->rowIdMapOId_ = static_cast<OId>(bibInfo.rowIndexOId_);
-	baseContainerImage->mvccMapOId_ =static_cast<OId>(bibInfo.mvccIndexOId_);
-	baseContainerImage->columnSchemaOId_ = UNDEF_OID;
-	baseContainerImage->indexSchemaOId_ = UNDEF_OID;
-	baseContainerImage->triggerListOId_ = UNDEF_OID;
-	baseContainerImage->lastLsn_ = UNDEF_LSN;
-	baseContainerImage->rowNum_ = 0;
-	baseContainerImage->versionId_ = static_cast<uint32_t>(bibInfo.schemaVersion_);
-	baseContainerImage->tablePartitioningVersionId_ = UNDEF_TABLE_PARTITIONING_VERSIONID;
-	baseContainerImage->startTime_ = 0;
-	return baseContainerImage;
-}
-
-
-
-
-
-void BaseContainer::getActiveTxnListImpl(
-	TransactionContext &txn, util::Set<TransactionId> &txnList) {
-	if (baseContainerImage_->mvccMapOId_ == UNDEF_OID) {
-		return;
-	}
-	StackAllocAutoPtr<BtreeMap> mvccMap(
-		txn.getDefaultAllocator(), getMvccMap(txn));
-	if (mvccMap.get()->isEmpty()) {
-		return;
-	}
-	util::XArray<std::pair<TransactionId, MvccRowImage> > idList(
-		txn.getDefaultAllocator());
-	util::XArray<std::pair<TransactionId, MvccRowImage> >::iterator itr;
-	mvccMap.get()->getAll<TransactionId, MvccRowImage>(
-		txn, MAX_RESULT_SIZE, idList);
-	for (itr = idList.begin(); itr != idList.end(); itr++) {
-		if (txn.getId() != itr->first) {
-			txnList.insert(itr->first);
-		}
-	}
-}
-
-void BaseContainer::archive(TransactionContext &txn, ArchiveHandler *handler, ResultSize preReadNum) {
-	util::StackAllocator &alloc = txn.getDefaultAllocator();
-	ObjectManager &objectManager = *getObjectManager();
-
-	handler->initialize();
-	{
-		uint32_t columnNum = getColumnNum();
-
-		handler->initializeSchema();
-		for (uint32_t i = 0; i < columnNum; i++) {
-			ColumnInfo columnInfo = getColumnInfo(i);
-			ColumnType columnType = columnInfo.getColumnType();
-			const char *columnName = columnInfo.getColumnName(txn, objectManager, true);
-			bool isNotNull = columnInfo.isNotNull();
-			handler->setColumnSchema(i, columnName, columnType, isNotNull);
-		}
-		handler->finalizeSchema();
-	}
-
-	RowId minRowId = 0;
-	RowId maxRowId = MAX_ROWID;
-	ResultSize suspendLimit = preReadNum;
-	GS_TRACE_INFO(
-		LONG_ARCHIVE, GS_ERROR_DS_DS_ARCHIVE_INFO, "Long Archive : preReadNum size = " << preReadNum);
-
-	RowArray rowArray(txn, this);
-	while (1) {
-		util::StackAllocator::Scope scope(alloc);
-		util::XArray<OId> scanOIdList(alloc);
-		TermCondition startCond(getRowIdColumnType(), getRowIdColumnType(), 
-			DSExpression::GE, getRowIdColumnId(), &minRowId, sizeof(minRowId));
-		TermCondition endCond(getRowIdColumnType(), getRowIdColumnType(), 
-			DSExpression::LE, getRowIdColumnId(), &maxRowId, sizeof(maxRowId));
-		BtreeMap::SearchContext sc(txn.getDefaultAllocator(), startCond, endCond, MAX_RESULT_SIZE);
-		sc.setSuspendLimit(suspendLimit);
-		searchRowIdIndex(txn, sc, scanOIdList, ORDER_ASCENDING);
-
-		{
-			BaseObject object(txn.getPartitionId(), *getObjectManager());
-			util::Set<ChunkId> scanChunkSet(alloc);
-			for (size_t i = 0; i < scanOIdList.size(); i++) {
-				util::StackAllocator::Scope scope(alloc);
-				OId oId = scanOIdList[i];
-				ChunkId cId = objectManager.getChunkId(oId);
-				util::Set<ChunkId>::iterator itr = scanChunkSet.find(cId);
-				if (itr != scanChunkSet.end()) {
-					object.load(oId);
-					scanChunkSet.insert(cId);
-				}
-			}
-		}
-
-		RowId lastRowId = 0;
-		for (size_t i = 0; i < scanOIdList.size(); i++) {
-			util::StackAllocator::Scope scope(alloc);
-			OId oId = scanOIdList[i];
-			rowArray.load(txn, oId, this, OBJECT_READ_ONLY);
-			RowArray::Row row(rowArray.getRow(), &rowArray);
-			row.archive(txn, handler);
-			lastRowId = row.getRowId();
-		}
-		minRowId = lastRowId + 1;
-
-		if (!sc.isSuspended()) {
-			break;
-		}
-	}
-	handler->finalize();
-}
 
