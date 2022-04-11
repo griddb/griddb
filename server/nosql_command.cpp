@@ -2248,12 +2248,12 @@ void NoSQLUtils::makeLargeContainerSchema(
 	binarySchema.push_back(
 		reinterpret_cast<uint8_t*>(&columnNum), sizeof(int32_t));
 	{
-		char* columnName = "key";
+		const char* columnName = "key";
 		int32_t columnNameLen = static_cast<int32_t>(strlen(columnName));
 		binarySchema.push_back(
 			reinterpret_cast<uint8_t*>(&columnNameLen), sizeof(int32_t));
 		binarySchema.push_back(
-			reinterpret_cast<uint8_t*>(columnName), columnNameLen);
+			reinterpret_cast<uint8_t*>(const_cast<char*>(columnName)), columnNameLen);
 		int8_t columnType = COLUMN_TYPE_STRING;
 		binarySchema.push_back(
 			reinterpret_cast<uint8_t*>(&columnType), sizeof(int8_t));
@@ -2262,12 +2262,12 @@ void NoSQLUtils::makeLargeContainerSchema(
 		binarySchema.push_back(
 			reinterpret_cast<uint8_t*>(&opt), sizeof(uint8_t));
 	}
-	char* columnName = "value";
+	const char* columnName = "value";
 	int32_t columnNameLen = static_cast<int32_t>(strlen(columnName));
 	binarySchema.push_back(
 		reinterpret_cast<uint8_t*>(&columnNameLen), sizeof(int32_t));
 	binarySchema.push_back(
-		reinterpret_cast<uint8_t*>(columnName), columnNameLen);
+		reinterpret_cast<uint8_t*>(const_cast<char*>(columnName)), columnNameLen);
 	int8_t columnType = COLUMN_TYPE_BLOB;
 	binarySchema.push_back(
 		reinterpret_cast<uint8_t*>(&columnType), sizeof(int8_t));
@@ -3954,7 +3954,6 @@ void TableSchemaInfo::copy(TableSchemaInfo & info) {
 	columnSize_ = info.columnSize_;
 	nosqlColumnInfoList_ = static_cast<ColumnInfo*>(
 		globalVarAlloc_.allocate(sizeof(ColumnInfo) * columnSize_));
-	memset(nosqlColumnInfoList_, sizeof(ColumnInfo) * columnSize_, 0);
 	memcpy((char*)nosqlColumnInfoList_, (char*)info.nosqlColumnInfoList_,
 		sizeof(ColumnInfo) * columnSize_);
 	indexInfoList_ = info.indexInfoList_;

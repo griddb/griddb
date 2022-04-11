@@ -351,7 +351,7 @@ public:
 		const K &e1, const K &e2, BaseIndex::Setting &);
 
 
-	static inline int32_t compositeInfoCmp(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
+	static int32_t compositeInfoCmp(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 	   const CompositeInfoObject *e1, const CompositeInfoObject *e2, BaseIndex::Setting &setting);
 
 
