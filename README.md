@@ -11,9 +11,11 @@
   This repository includes server and Java client. And [jdbc repository](https://github.com/griddb/jdbc) includes JDBC Driver.
 
 ## Quick start (Using source code)
-  We have confirmed the operation on CentOS 7.6 (gcc 4.8.5), Ubuntu 18.04 (gcc 4.8.5) and openSUSE Leap 15.1 (gcc 4.8.5).
+  We have confirmed the operation on CentOS 7.9 (gcc 4.8.5), Ubuntu 18.04 (gcc 4.8.5) and openSUSE Leap 15.1 (gcc 4.8.5).
 
-  Note: Please install tcl like "yum install tcl.x86_64" in advance.
+Note:
+- Please install Python3 in advance.
+- Please install tcl like "yum install tcl.x86_64" in advance.
 
 ### Build a server and client(Java)
     $ ./bootstrap.sh
@@ -52,51 +54,6 @@
     $ bin/gs_stopcluster -u admin/your_password
     $ bin/gs_stopnode -u admin/your_password
 
-## Quick start (Using RPM or DEB)
-
-  We have confirmed the operation on CentOS 7.8/8.1, Ubuntu 18.04 and openSUSE Leap 15.1.
-
-Note:
-- When you install this package, a gsadm OS user are created in the OS.  
-  Execute the operating command as the gsadm user.  
-- You don't need to set environment vatiable GS_HOME and GS_LOG.
-- There is Java client library (gridstore.jar) on /usr/share/java and a sample on /usr/gridb-XXX/docs/sample/programs.
-- The packages don't include trigger function.
-- Please install Python2 in advance except CentOS7.
-
-### Install
-
-    (CentOS)
-    $ sudo rpm -ivh griddb-X.X.X-linux.x86_64.rpm
-
-    (Ubuntu)
-    $ sudo dpkg -i griddb_X.X.X_amd64.deb
-
-    (openSUSE)
-    $ sudo rpm -ivh griddb-X.X.X-opensuse.x86_64.rpm
-
-    Note: X.X.X is the GridDB version.
-
-### Start a server
-    [gsadm]$ gs_passwd admin
-      #input your_password
-    [gsadm]$ vi conf/gs_cluster.json
-      #    "clusterName":"your_clustername" #<-- input your_clustername
-    [gsadm]$ gs_startnode
-    [gsadm]$ gs_joincluster -c your_clustername -u admin/your_password
-
-### Execute a sample program
-    $ export CLASSPATH=${CLASSPATH}:/usr/share/java/gridstore.jar
-    $ mkdir gsSample
-    $ cp /usr/griddb-X.X.X/docs/sample/program/Sample1.java gsSample/.
-    $ javac gsSample/Sample1.java
-    $ java gsSample/Sample1 239.0.0.1 31999 your_clustername admin your_password
-      --> Person:  name=name02 status=false count=2 lob=[65, 66, 67, 68, 69, 70, 71, 72, 73, 74]
-
-### Stop a server
-    [gsadm]$ gs_stopcluster -u admin/your_password
-    [gsadm]$ gs_stopnode -u admin/your_password
-
 If necessary, please refer to [Installation Troubleshooting](docs/TroubleShootingTips.md).
 
 ## Document
@@ -115,6 +72,7 @@ If necessary, please refer to [Installation Troubleshooting](docs/TroubleShootin
   - [V4.3 Release Notes](docs/GridDB-4.3-CE-RELEASE_NOTES.md)
   - [V4.5 Release Notes](docs/GridDB-4.5-CE-RELEASE_NOTES.md)
   - [V4.6 Release Notes](docs/GridDB-4.6-CE-RELEASE_NOTES.md)
+  - [V5.0 Release Notes](docs/GridDB-5.0-CE-RELEASE_NOTES.md)
 
 ## Client and Connector
   There are other clients and API for GridDB.
