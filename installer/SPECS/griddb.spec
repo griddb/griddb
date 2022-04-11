@@ -1,5 +1,5 @@
 %define griddb_name griddb
-%define griddb_ver 4.6.1
+%define griddb_ver 5.0.0
 %define griddb_instdir /usr/griddb-%{griddb_ver}
 %define griddb_homedir /var/lib/gridstore
 # do not strip
@@ -44,6 +44,7 @@ mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/json-simple
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/uuid
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/omaha
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/zigzag_encoding
+mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/fletcher32_simd
 mkdir -p %{buildroot}%{griddb_instdir}/docs
 mkdir -p %{buildroot}%{griddb_instdir}/docs/sample
 mkdir -p %{buildroot}%{griddb_instdir}/docs/sample/program
@@ -99,6 +100,7 @@ install -c -m 640 3rd_party/apr/org/NOTICE                          %{buildroot}
 install -c -m 640 3rd_party/picojson/org/include/README.mkdn                %{buildroot}%{griddb_instdir}/3rd_party/picojson
 install -c -m 640 3rd_party/json-simple/fangyidong/LICENSE.txt              %{buildroot}%{griddb_instdir}/3rd_party/json-simple
 install -c -m 640 3rd_party/uuid/uuid/COPYING                               %{buildroot}%{griddb_instdir}/3rd_party/uuid
+install -c -m 640 3rd_party/fletcher32_simd/fletcher32_simd/LICENSE         %{buildroot}%{griddb_instdir}/3rd_party/fletcher32_simd
 
 
 
@@ -315,6 +317,7 @@ fi
 %dir %{griddb_instdir}/3rd_party/uuid
 %dir %{griddb_instdir}/3rd_party/omaha
 %dir %{griddb_instdir}/3rd_party/zigzag_encoding
+%dir %{griddb_instdir}/3rd_party/fletcher32_simd
 %dir %{griddb_instdir}/docs
 %dir %{griddb_instdir}/docs/sample
 %dir %{griddb_instdir}/docs/sample/program
@@ -361,6 +364,8 @@ fi
 %{griddb_instdir}/3rd_party/uuid/COPYING
 %{griddb_instdir}/3rd_party/omaha/COPYING
 %{griddb_instdir}/3rd_party/zigzag_encoding/LICENSE
+%{griddb_instdir}/3rd_party/fletcher32_simd/LICENSE
+
 %{griddb_instdir}/README.md
 %{griddb_instdir}/docs/sample/program/Sample1.java
 %{griddb_instdir}/docs/sample/program/Sample2.java
@@ -386,5 +391,7 @@ fi
 /usr/griddb/bin/gridstore
 
 %changelog
+* Tue Aug 26 2021 Toshiba Digital Solutions Corporation
+- 4.6.1
 * Thu Feb 25 2021 Toshiba Digital Solutions Corporation
 - 4.6.0
