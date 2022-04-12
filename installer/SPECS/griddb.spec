@@ -32,8 +32,6 @@ mkdir -p %{buildroot}%{griddb_instdir}/bin
 mkdir -p %{buildroot}%{griddb_instdir}/conf
 mkdir -p %{buildroot}%{griddb_instdir}/conf_multicast
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/MessagePack
-mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/activemq-cpp-library
-mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/apr
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/ebb
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/picojson
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/purewell
@@ -95,8 +93,6 @@ install -c -m 640 3rd_party/slf4j/slf4j-jdk14-1.7.7.jar         %{buildroot}%{gr
 install -c -m 640 3rd_party/yield/yield.txt                     %{buildroot}%{griddb_instdir}/3rd_party/yield
 install -c -m 640 3rd_party/omaha/COPYING                       %{buildroot}%{griddb_instdir}/3rd_party/omaha
 install -c -m 640 3rd_party/zigzag_encoding/LICENSE             %{buildroot}%{griddb_instdir}/3rd_party/zigzag_encoding
-install -c -m 640 3rd_party/activemq-cpp-library/org/NOTICE.txt     %{buildroot}%{griddb_instdir}/3rd_party/activemq-cpp-library
-install -c -m 640 3rd_party/apr/org/NOTICE                          %{buildroot}%{griddb_instdir}/3rd_party/apr
 install -c -m 640 3rd_party/picojson/org/include/README.mkdn                %{buildroot}%{griddb_instdir}/3rd_party/picojson
 install -c -m 640 3rd_party/json-simple/fangyidong/LICENSE.txt              %{buildroot}%{griddb_instdir}/3rd_party/json-simple
 install -c -m 640 3rd_party/uuid/uuid/COPYING                               %{buildroot}%{griddb_instdir}/3rd_party/uuid
@@ -305,8 +301,6 @@ fi
 %dir %{griddb_instdir}/conf
 %dir %{griddb_instdir}/3rd_party
 %dir %{griddb_instdir}/3rd_party/MessagePack
-%dir %{griddb_instdir}/3rd_party/activemq-cpp-library
-%dir %{griddb_instdir}/3rd_party/apr
 %dir %{griddb_instdir}/3rd_party/ebb
 %dir %{griddb_instdir}/3rd_party/picojson
 %dir %{griddb_instdir}/3rd_party/purewell
@@ -350,8 +344,6 @@ fi
 %{griddb_instdir}/3rd_party/BSD_License.txt
 %{griddb_instdir}/3rd_party/MIT_License.txt
 %{griddb_instdir}/3rd_party/MessagePack/COPYING
-%{griddb_instdir}/3rd_party/activemq-cpp-library/NOTICE.txt
-%{griddb_instdir}/3rd_party/apr/NOTICE
 %{griddb_instdir}/3rd_party/ebb/LICENSE
 %{griddb_instdir}/3rd_party/picojson/README.mkdn
 %{griddb_instdir}/3rd_party/purewell/purewell.txt

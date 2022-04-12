@@ -41,8 +41,6 @@ install:
 	dh_install ${SOURCE_DIR}/3rd_party/BSD_License.txt                     usr/griddb-${GRIDDB_VER}/3rd_party
 	dh_install ${SOURCE_DIR}/3rd_party/MIT_License.txt                     usr/griddb-${GRIDDB_VER}/3rd_party
 	dh_install ${SOURCE_DIR}/3rd_party/MessagePack/COPYING                 usr/griddb-${GRIDDB_VER}/3rd_party/MessagePack
-	dh_install ${SOURCE_DIR}/3rd_party/activemq-cpp-library/org/NOTICE.txt usr/griddb-${GRIDDB_VER}/3rd_party/activemq-cpp-library
-	dh_install ${SOURCE_DIR}/3rd_party/apr/org/NOTICE                      usr/griddb-${GRIDDB_VER}/3rd_party/apr
 	dh_install ${SOURCE_DIR}/3rd_party/ebb/LICENSE                         usr/griddb-${GRIDDB_VER}/3rd_party/ebb
 	dh_install ${SOURCE_DIR}/3rd_party/picojson/org/include/README.mkdn    usr/griddb-${GRIDDB_VER}/3rd_party/picojson
 	dh_install ${SOURCE_DIR}/3rd_party/purewell/purewell.txt               usr/griddb-${GRIDDB_VER}/3rd_party/purewell
