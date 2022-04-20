@@ -24,9 +24,10 @@
 
 #include "data_type.h"
 #include "gs_error.h"
+#include "utility_v5.h"
 
 
-class ObjectManager;
+class ObjectManagerV4;
 
 static const uint32_t VAR_SIZE_1BYTE_THRESHOLD = 128;
 static const uint32_t VAR_SIZE_4BYTE_THRESHOLD = UINT32_C(1) << 30;
@@ -69,40 +70,13 @@ static const AffinityGroupId DEFAULT_AFFINITY_GROUP_ID = 0;
 
 static const ExpireIntervalCategoryId DEFAULT_EXPIRE_CATEGORY_ID = 0;
 
-/*!
-	@brief Strategy for allocating object
-*/
-struct AllocateStrategy {
-	ChunkKey chunkKey_;
-	ChunkCategoryId categoryId_;
-	ExpireIntervalCategoryId expireCategoryId_; 
-	AffinityGroupId affinityGroupId_;
-	AllocateStrategy()
-		: chunkKey_(UNDEF_CHUNK_KEY),
-		  categoryId_(ALLOCATE_META_CHUNK),
-		  expireCategoryId_(DEFAULT_EXPIRE_CATEGORY_ID),
-		  affinityGroupId_(DEFAULT_AFFINITY_GROUP_ID) {}
-	AllocateStrategy(ChunkCategoryId categoryId)
-		: chunkKey_(UNDEF_CHUNK_KEY),
-		  categoryId_(categoryId),
-		  expireCategoryId_(DEFAULT_EXPIRE_CATEGORY_ID),
-		  affinityGroupId_(DEFAULT_AFFINITY_GROUP_ID) {}
-	AllocateStrategy(ChunkCategoryId categoryId, AffinityGroupId groupId)
-		: chunkKey_(UNDEF_CHUNK_KEY),
-		  categoryId_(categoryId),
-		  expireCategoryId_(DEFAULT_EXPIRE_CATEGORY_ID),
-		  affinityGroupId_(groupId) {}
-	AllocateStrategy(ChunkCategoryId categoryId, AffinityGroupId groupId, 
-		ChunkKey chunkKey, ExpireIntervalCategoryId expireCategoryId)
-		: chunkKey_(chunkKey),
-		  categoryId_(categoryId),
-		  expireCategoryId_(expireCategoryId),
-		  affinityGroupId_(groupId) {}
+enum StoreType {
+	V4_COMPATIBLE = 0,
+	KEY_STORE = 1,
+	SAMPLE_STORE,
+	UNDEF_STORE
 };
 
-static const uint32_t LIMIT_EXPIRATION_DIVIDE_NUM = 160;  
-static const uint32_t LIMIT_HICOMPRESSION_COLUMN_NUM =
-	100;  
 static const uint32_t LIMIT_COLUMN_NAME_SIZE = 256;  
 
 const ResultSize PARTIAL_RESULT_SIZE =
@@ -119,7 +93,7 @@ const ObjectType OBJECT_TYPE_TIME_SERIES_ROW = 6;
 const ObjectType OBJECT_TYPE_ROW_ARRAY = 7;
 const ObjectType OBJECT_TYPE_BTREE_MAP = 8;
 const ObjectType OBJECT_TYPE_HASH_MAP = 9;
-const ObjectType OBJECT_TYPE_COMPRESSIONINFO = 10;
+const ObjectType OBJECT_TYPE_RESERVED = 10;
 const ObjectType OBJECT_TYPE_EVENTLIST = 11;
 const ObjectType OBJECT_TYPE_VARIANT = 12;
 const ObjectType OBJECT_TYPE_CONTAINER_ID = 13;
@@ -137,7 +111,7 @@ enum AccessMode { OBJECT_READ_ONLY = 0, OBJECT_FOR_UPDATE = 1 };
 	@brief Represents the mode of checkpoint
 */
 enum CheckpointMode {
-	CP_UNDEF,
+	CP_UNKNOWN,
 	CP_NORMAL,
 	CP_REQUESTED,
 	CP_BACKUP,
@@ -154,7 +128,10 @@ enum CheckpointMode {
 	CP_INCREMENTAL_BACKUP_LEVEL_1_DIFFERENTIAL,
 	CP_PREPARE_LONG_ARCHIVE,	
 	CP_PREPARE_LONGTERM_SYNC,	
-	CP_STOP_LONGTERM_SYNC		
+	CP_STOP_LONGTERM_SYNC,		
+	CP_AFTER_LONGTERM_SYNC,		
+
+	CP_MODE_END
 };
 
 typedef uint8_t ColumnType;
@@ -241,6 +218,8 @@ static const DatabaseId DBID_RESERVED_RANGE = 100;
 static const DatabaseId GS_PUBLIC_DB_ID = 0;
 static const DatabaseId GS_SYSTEM_DB_ID = 1;
 
+static const char* UNIQUE_GROUP_ID_KEY = "#unique";
+
 /*!
 	@brief Represents the attribute of container
 */
@@ -305,8 +284,6 @@ inline const char8_t* getMapTypeStr(MapType type) {
 	switch (type) {
 	case MAP_TYPE_BTREE:
 		return "TREE";
-	case MAP_TYPE_HASH:
-		return "HASH";
 	case MAP_TYPE_SPATIAL:
 		return "SPATIAL";
 	case MAP_TYPE_DEFAULT:
@@ -327,7 +304,6 @@ static const TimeUnit TIME_UNIT_MILLISECOND = 6;
 
 enum ExpireType {
 	NO_EXPIRE,
-	ROW_EXPIRE,
 	TABLE_EXPIRE,
 	UNDEF_EXPIRE
 };
@@ -676,8 +652,560 @@ struct KeyData {
 	uint32_t size_;
 };
 
+struct ChunkCompressionTypes {
+	/*!
+		@brief Chunk compression mode
+	*/
+	enum Mode {
+		NO_BLOCK_COMPRESSION, 
+		BLOCK_COMPRESSION, 
+
+		MODE_END
+	};
+};
+
+struct LRUFrame;
+class ChunkBuffer;
+class ChunkBufferFrameRef {
+public:
+	ChunkBufferFrameRef() :
+			base_(nullptr), pos_(-1) {
+	}
+
+private:
+	friend class ChunkBuffer;
+
+	ChunkBufferFrameRef(LRUFrame *base, int32_t pos) :
+			base_(base), pos_(pos) {
+	}
+
+	LRUFrame* get() const { return base_; }
+	int32_t getPosition() const { return pos_; }
+
+	LRUFrame *base_;
+	int32_t pos_;
+};
 
 
 
+
+
+
+enum class PutStatus {
+	NOT_EXECUTED,
+	CREATE,
+	UPDATE,
+	CHANGE_PROPERY,
+};
+
+enum DSOperationType {
+	DS_CONTAINER_COUNT,
+	DS_CONTAINER_NAME_LIST,
+	DS_GET_CONTAINR,
+	DS_GET_CONTAINR_BY_ID,
+	DS_PUT_CONTAINER,
+	DS_UPDATE_TABLE_PARTITIONING_ID,
+	DS_DROP_CONTAINER,
+
+	DS_PUT_ROW,
+	DS_UPDATE_ROW_BY_ID,
+	DS_REMOVE_ROW,
+	DS_REMOVE_ROW_BY_ID,
+	DS_CONTINUE_CREATE_INDEX,
+	DS_CONTINUE_ALTER_CONTAINER,
+	DS_CREATE_INDEX,
+	DS_DROP_INDEX,
+	DS_COMMIT,
+	DS_ABORT,
+	DS_LOCK,
+	DS_APPEND_ROW,
+	DS_GET_ROW,
+	DS_GET_ROW_SET,
+	DS_GET_TIME_RELATED,
+	DS_GET_INTERPOLATE,
+	DS_QUERY_TQL,
+	DS_QUERY_SAMPLE,
+	DS_QUERY_AGGREGATE,
+	DS_QUERY_TIME_RANGE,
+	DS_QUERY_FETCH_RESULT_SET,
+	DS_QUERY_CLOSE_RESULT_SET,
+	DS_QUERY_GEOMETRY_RELATED,
+	DS_QUERY_GEOMETRY_WITH_EXCLUSION,
+	DS_GET_CONTAINR_OBJECT,
+	DS_SCAN_CHUNK_GROUP,
+	DS_SEARCH_BACKGROUND_TASK,
+	DS_EXECUTE_BACKGROUND_TASK,
+	DS_CHECK_TIMEOUT_RESULT_SET,
+	DS_UNDEF,
+
+};
+
+const DSGroupId META_GROUP_ID = 0; 
+
+struct Serializable;
+
+struct KeyDataStoreValue : public Serializable {
+	KeyDataStoreValue() : Serializable(NULL), containerId_(UNDEF_CONTAINERID),
+		oId_(UNDEF_OID),
+		storeType_(UNDEF_STORE),
+		attribute_(CONTAINER_ATTR_ANY) {}
+	KeyDataStoreValue(
+		ContainerId containerId, OId oId, StoreType storeType, ContainerAttribute attribute)
+		: Serializable(NULL), containerId_(containerId),
+		oId_(oId),
+		storeType_(storeType),
+		attribute_(attribute) {}
+	KeyDataStoreValue(const KeyDataStoreValue& src) :
+		Serializable(NULL), containerId_(src.containerId_), oId_(src.oId_),
+		storeType_(src.storeType_), attribute_(src.attribute_) {}
+
+	bool operator==(const KeyDataStoreValue& b) const {
+		bool isEqual = (this->containerId_ == b.containerId_) &&
+			(this->oId_ == b.oId_) &&
+			(this->storeType_ == b.storeType_) &&
+			(this->attribute_ == b.attribute_);
+		if (isEqual) {
+			return true;
+		}
+		else {
+			return false;
+		}
+	}
+	bool operator<(const KeyDataStoreValue& b) const {
+		if (this->containerId_ < b.containerId_) {
+			return true;
+		}
+		else if (this->containerId_ > b.containerId_) {
+			return false;
+		}
+		else if (this->oId_ < b.oId_) {
+			return true;
+		}
+		else if (this->oId_ > b.oId_) {
+			return false;
+		}
+		else if (this->storeType_ < b.storeType_) {
+			return true;
+		}
+		else if (this->storeType_ > b.storeType_) {
+			return false;
+		}
+		else {
+			return this->attribute_ < b.attribute_;
+		}
+	}
+	friend std::ostream& operator<<(std::ostream& output, const KeyDataStoreValue& val) {
+		output << "(";
+		output << val.containerId_ << ",";
+		output << val.oId_ << ",";
+		output << val.storeType_ << ",";
+		output << val.attribute_ << ")";
+		return output;
+	}
+
+	void encode(EventByteOutStream& out) {
+		encode<EventByteOutStream>(out);
+	}
+	void decode(EventByteInStream& in) {
+		decode<EventByteInStream>(in);
+	}
+	void encode(OutStream& out) {
+		encode<OutStream>(out);
+	}
+
+	template <typename S>
+	void encode(S& out) {
+		out << containerId_;
+		out << oId_;
+		out << static_cast<int32_t>(storeType_);
+		out << static_cast<int32_t>(attribute_);
+	}
+	template <typename S>
+	void decode(S& in) {
+		in >> containerId_;
+		in >> oId_;
+		int32_t tmpStoreType;
+		in >> tmpStoreType;
+		storeType_ = static_cast<StoreType>(tmpStoreType);
+		int32_t tmpAttr;
+		in >> tmpAttr;
+		attribute_ = static_cast<ContainerAttribute>(tmpAttr);
+	}
+	ContainerId containerId_;
+	OId oId_;
+	StoreType storeType_;
+	ContainerAttribute attribute_;
+};
+
+class DataStoreBase;
+class Log;
+
+/*!
+	@brief Exception for lock conflict
+*/
+class LockConflictException : public util::Exception {
+public:
+	explicit LockConflictException(
+		UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw() :
+		Exception(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_SET) {}
+	virtual ~LockConflictException() throw() {}
+};
+#define DS_RETHROW_LOCK_CONFLICT_ERROR(cause, message) \
+	GS_RETHROW_CUSTOM_ERROR(                           \
+		LockConflictException, GS_ERROR_DEFAULT, cause, message)
+
+#define DS_THROW_LOCK_CONFLICT_EXCEPTION(errorCode, message) \
+	GS_THROW_CUSTOM_ERROR(LockConflictException, errorCode, message)
+
+class DSEncodeDecodeException : public util::Exception {
+public:
+	explicit DSEncodeDecodeException(
+		UTIL_EXCEPTION_CONSTRUCTOR_ARGS_DECL) throw() :
+		Exception(UTIL_EXCEPTION_CONSTRUCTOR_ARGS_SET) {}
+	virtual ~DSEncodeDecodeException() throw() {}
+};
+
+#define DS_RETHROW_DECODE_ERROR(cause, message) \
+	GS_RETHROW_CUSTOM_ERROR(                     \
+		DSEncodeDecodeException, GS_ERROR_DEFAULT, cause, message)
+
+#define DS_RETHROW_ENCODE_ERROR(cause, message) \
+	GS_RETHROW_CUSTOM_ERROR(                     \
+		DSEncodeDecodeException, GS_ERROR_DEFAULT, cause, message)
+
+class DataStoreUtil {
+public:
+	/*
+	 * VarSize format
+	 * first 1byte
+	 * xxxxxx00 4byte(to 2^30=1G-1)
+	 * xxxxxx10 8byte(OID)
+	 * xxxxxxx1 1byte(to 127)
+	*/
+
+	/*!
+		@brief Checks if variable size is 1 byte
+	*/
+	static inline bool varSizeIs1Byte(uint8_t val) {
+		return ((val & 0x01) == 0x01);
+	}
+	/*!
+		@brief Checks if variable size is 4 bytes
+	*/
+	static inline bool varSizeIs4Byte(uint8_t val) {
+		return ((val & 0x03) == 0x00);
+	}
+	/*!
+		@brief Checks if variable size is 8 bytes
+	*/
+	static inline bool varSizeIs8Byte(uint8_t val) {
+		return ((val & 0x03) == 0x02);
+	}
+
+	/*!
+		@brief Decodes variable size (1 byte)
+	*/
+	static inline uint32_t decode1ByteVarSize(uint8_t val) {
+		assert(val != 0);
+		return val >> 1;
+	}
+	/*!
+		@brief Decodes variable size (4 bytes)
+	*/
+	static inline uint32_t decode4ByteVarSize(uint32_t val) {
+		assert(val != 0);
+		return val >> 2;
+	}
+	/*!
+		@brief Decodes variable size (8 bytes)
+	*/
+	static inline uint64_t decode8ByteVarSize(uint64_t val) {
+		assert(val != 0);
+		return val >> 2;
+	}
+
+	/*!
+		@brief Decodes variable size (1 or 4 or 8 bytes (0 to 2^31-1))
+	*/
+	static inline uint32_t decodeVarSize(const void* ptr) {
+		const uint8_t val1byte = *static_cast<const uint8_t*>(ptr);
+		if (varSizeIs1Byte(val1byte)) {
+			return decode1ByteVarSize(val1byte);
+		}
+		else if (varSizeIs4Byte(val1byte)) {
+			const uint32_t val4byte = *static_cast<const uint32_t*>(ptr);
+			return decode4ByteVarSize(val4byte);
+		}
+		else {
+			assert(varSizeIs8Byte(val1byte));
+			const uint64_t decodedVal =
+					decode8ByteVarSize(*static_cast<const uint64_t*>(ptr));
+			if (decodedVal > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
+				UTIL_THROW_ERROR(
+						GS_ERROR_DS_OUT_OF_RANGE,
+						"Decoded size = " << decodedVal);
+			}
+			return static_cast<uint32_t>(decodedVal);
+		}
+	}
+
+	/*!
+		@brief Decodes variable size (1 or 4 or 8 bytes (0 to 2^62-1))
+	*/
+	static inline uint64_t decodeVarSize64(const void* ptr) {
+		bool isOId;
+		return decodeVarSizeOrOId(ptr, isOId);
+	}
+
+	/*!
+		@brief Decodes variable size or OId (1 or 4 or 8 bytes (0 to 2^62-1))
+		@attention 関数名にOIdとあるが、一部ビットが欠損するためOIdには使えない
+	*/
+	static inline uint64_t decodeVarSizeOrOId(const void* ptr, bool& isOId) {
+		isOId = false;
+		const uint8_t val1byte = *static_cast<const uint8_t*>(ptr);
+		if (varSizeIs1Byte(val1byte)) {
+			return decode1ByteVarSize(val1byte);
+		}
+		else if (varSizeIs4Byte(val1byte)) {
+			const uint32_t val4byte = *static_cast<const uint32_t*>(ptr);
+			return decode4ByteVarSize(val4byte);
+		}
+		else {
+			assert(varSizeIs8Byte(val1byte));
+			const uint64_t val8byte = *static_cast<const uint64_t*>(ptr);
+			isOId = true;
+			return decode8ByteVarSize(val8byte);
+		}
+	}
+
+	/*!
+		@brief Reads variable size from byte stream (1 or 4 or 8 bytes (0 to 2^31-1))
+		@note 読み出し後、入力ストリームは可変長バイトの次を指す
+	*/
+	static inline uint32_t getVarSize(util::ByteStream<util::ArrayInStream>& in) {
+		const size_t currentPos = in.base().position();
+		uint8_t byteData;
+		in >> byteData;
+		if (varSizeIs1Byte(byteData)) {
+			return decode1ByteVarSize(byteData);
+		}
+		else if (varSizeIs4Byte(byteData)) {
+			in.base().position(currentPos);
+			uint32_t rawData;
+			in >> rawData;
+			return decode4ByteVarSize(rawData);
+		}
+		else {
+			in.base().position(currentPos);
+			uint64_t rawData;
+			in >> rawData;
+			const uint64_t decodedVal = decode8ByteVarSize(rawData);
+			if (decodedVal >
+					static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
+				GS_THROW_USER_ERROR(
+						GS_ERROR_DS_OUT_OF_RANGE,
+						"Decoded size = " << decodedVal);
+			}
+			return static_cast<uint32_t>(decodedVal);
+		}
+	}
+
+	/*!
+		@brief Returns encoded size (1 or 4 or 8 bytes)
+	*/
+	static inline uint32_t getEncodedVarSize(const void* ptr) {
+		const uint8_t val = *static_cast<const uint8_t*>(ptr);
+		if (varSizeIs1Byte(val)) {
+			return 1;
+		}
+		else if (varSizeIs4Byte(val)) {
+			return 4;
+		}
+		else {
+			assert(varSizeIs8Byte(val));
+			return 8;
+		}
+	}
+
+	/*!
+		@brief Returns encoded size (1 or 4 or 8 bytes)
+	*/
+	static inline uint32_t getEncodedVarSize(uint64_t val) {
+		if (val < VAR_SIZE_1BYTE_THRESHOLD) {
+			return 1;
+		}
+		else if (val < VAR_SIZE_4BYTE_THRESHOLD) {
+			return 4;
+		}
+		else {
+			return 8;
+		}
+	}
+
+	/*!
+		@brief Encodes variable size (0 to 2^62-1)
+	*/
+	static inline uint64_t encodeVarSize(uint64_t val) {
+		assert(val < UINT64_C(0x4000000000000000));
+		if (val < VAR_SIZE_1BYTE_THRESHOLD) {
+			return encode1ByteVarSize(static_cast<uint8_t>(val));
+		}
+		else if (val < VAR_SIZE_4BYTE_THRESHOLD) {
+			return encode4ByteVarSize(static_cast<uint32_t>(val));
+		}
+		else {
+			return encode8ByteVarSize(val);
+		}
+	}
+
+	/*!
+		@brief Encodes variable size (1 byte)
+		@note 上位1ビットは捨てられる
+	*/
+	static inline uint8_t encode1ByteVarSize(uint8_t val) {
+		return static_cast<uint8_t>(((val << 1) | 0x01));
+	}
+
+	/*!
+		@brief Encodes variable size (4 bytes)
+		@note 上位2ビットは捨てられる
+	*/
+	static inline uint32_t encode4ByteVarSize(uint32_t val) {
+		return (val << 2);
+	}
+
+	/*!
+		@brief Encodes variable size (8 bytes)
+		@note 上位2ビットは捨てられる
+	*/
+	static inline uint64_t encode8ByteVarSize(uint64_t val) {
+		return (val << 2) | 0x02;
+	}
+
+	/*!
+		@brief Encodes variable size (8 bytes)
+		@attention 関数名にOIdとあるが、一部ビットが欠損するためOIdには使えない
+	*/
+	static inline uint64_t encodeVarSizeOId(uint64_t val) {
+		return encode8ByteVarSize(val);
+	}
+
+	template <typename S>
+	static void encodeVarSizeBinaryData(
+			S& out, const uint8_t* data, size_t size) {
+		try {
+			switch (getEncodedVarSize(size)) {
+			case 1:
+				out << encode1ByteVarSize(static_cast<uint8_t>(size));
+				break;
+			case 4:
+				out << encode4ByteVarSize(static_cast<uint32_t>(size));
+				break;
+			default:
+				if (size > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
+					GS_THROW_USER_ERROR(
+							GS_ERROR_DS_OUT_OF_RANGE,
+							"Binary data size out of range");
+				}
+				out << encode8ByteVarSize(size);
+				break;
+			}
+			out << std::pair<const uint8_t*, size_t>(data, size);
+		}
+		catch (std::exception& e) {
+			DS_RETHROW_ENCODE_ERROR(e, "");
+		}
+	}
+
+	template <typename S>
+	static void decodeVarSizeBinaryData(
+			S& in, util::StackAllocator& alloc, uint8_t*& data, size_t& dataSize) {
+		try {
+			dataSize = getVarSize(in);
+			data = ALLOC_NEW(alloc) uint8_t[dataSize];
+			in >> std::make_pair(data, dataSize);
+		}
+		catch (std::exception& e) {
+			DS_RETHROW_DECODE_ERROR(e, "");
+		}
+	}
+
+	template <typename S>
+	static void decodeVarSizeBinaryData(S& in, util::XArray<uint8_t>& binaryData) {
+		try {
+			const uint32_t size = getVarSize(in);
+			binaryData.resize(size);
+			in >> std::make_pair(binaryData.data(), size);
+		}
+		catch (std::exception& e) {
+			DS_RETHROW_DECODE_ERROR(e, "");
+		}
+	}
+
+	template <typename S>
+	static void encodeBinaryData(S& out, const uint8_t* data, size_t size) {
+		try {
+			out << std::pair<const uint8_t*, size_t>(data, size);
+		}
+		catch (std::exception& e) {
+			DS_RETHROW_ENCODE_ERROR(e, "");
+		}
+	}
+
+	template <typename S>
+	static void decodeBinaryData(
+			S& in, util::XArray<uint8_t>& binaryData, bool readAll) {
+		try {
+			size_t size;
+			if (readAll) {
+				size = in.base().remaining();
+			}
+			else {
+				uint32_t baseSize;
+				in >> baseSize;
+				size = baseSize;
+			}
+			binaryData.resize(size);
+			in >> std::make_pair(binaryData.data(), size);
+		}
+		catch (std::exception& e) {
+			DS_RETHROW_DECODE_ERROR(e, "");
+		}
+	}
+
+	template<typename S>
+	static void encodeBooleanData(S& out, bool boolData) {
+		try {
+			const uint8_t tmp = boolData ? 1 : 0;
+			out << tmp;
+		}
+		catch (std::exception& e) {
+			DS_RETHROW_ENCODE_ERROR(e, "");
+		}
+	}
+	template <typename S, typename EnumType>
+	static void decodeEnumData(S& in, EnumType& enumData) {
+		try {
+			int32_t tmp;
+			in >> tmp;
+			enumData = static_cast<EnumType>(tmp);
+		}
+		catch (std::exception& e) {
+			DS_RETHROW_DECODE_ERROR(e, "");
+		}
+	}
+	template <typename S, typename EnumType>
+	static void encodeEnumData(S& out, EnumType enumData) {
+		try {
+			const int32_t tmp = static_cast<int32_t>(enumData);
+			out << tmp;
+		}
+		catch (std::exception& e) {
+			DS_RETHROW_ENCODE_ERROR(e, "");
+		}
+	}
+
+};
 
 #endif

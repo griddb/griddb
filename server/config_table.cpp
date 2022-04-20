@@ -38,6 +38,100 @@ UTIL_TRACER_DECLARE(SYSTEM);
 		GS_EXCEPTION_NAMED_CODE(code), \
 		UTIL_EXCEPTION_CREATE_MESSAGE_CHARS(message))
 
+
+class BasicLocalStatMapper::Cursor {
+public:
+	Cursor(
+			const BasicLocalStatMapper *mapper, const StatTable *statTable,
+			size_t paramCount);
+
+	bool nextParam(ParamId &id);
+
+private:
+	size_t groupIndex_;
+	size_t ordinal_;
+	size_t paramCount_;
+	IdSet::const_iterator idIt_;
+	const BasicLocalStatMapper *mapper_;
+	const StatTable *statTable_;
+};
+
+struct BasicLocalStatMapper::Entry {
+	Entry();
+
+	void assignOptions(
+			const Entry &another, util::StdAllocator<void, void> &alloc);
+
+	size_t groupIndex_;
+
+	ParamId targetId_;
+	ParamId denomId_;
+
+	MergeMode mergeMode_;
+
+	ParamValue::Type valueType_;
+	bool forDateTime_;
+	bool defaultValueAssigned_;
+	uint64_t defaultSrcValue_;
+	ParamValue defaultValue_;
+
+	uint64_t unit_;
+	bool dividing_;
+	util::GeneralNameCoder nameCoder_;
+};
+
+struct BasicLocalStatMapper::Group {
+	typedef util::AllocVector<DisplayOption> DisplayOptionList;
+
+	explicit Group(const util::StdAllocator<void, void> &alloc);
+
+	void assignOptions(
+			const Group &another, util::StdAllocator<void, void> &alloc);
+	bool isVisible(const StatTable &statTable) const;
+
+	IdSet idSet_;
+	DisplayOptionList displayOptions_;
+	Entry defaultEntry_;
+};
+
+class BasicLocalStatMapper::OptionResolver {
+public:
+	explicit OptionResolver(const EntryPair &entries);
+
+	MergeMode getMergeMode() const;
+	const ParamValue* findDefaultValue(uint64_t &srcValue) const;
+	bool findFloatingType() const;
+	bool findDateTimeType() const;
+	bool findFraction(ParamId &denomId) const;
+	const uint64_t* findConversionUnit(bool &dividing) const;
+	const util::GeneralNameCoder* findNameCoder() const;
+
+private:
+	const Entry* nextEntry(size_t &ordinal) const;
+
+	EntryPair entries_;
+};
+
+class BasicLocalStatMapper::ValueProducer {
+public:
+	ValueProducer(StatTable &dest, ParamId targetId);
+
+	void applyNamedValue(
+			const util::GeneralNameCoder &coder, const LocalStatValue &src,
+			const ParamValue *defaultValue);
+	void applyUnitValue(
+			const LocalStatValue &src, uint64_t unit, bool dividing,
+			bool floating);
+	void applyDateTimeValue(const LocalStatValue &src);
+	void applyNormalValue(const LocalStatValue &src, bool floating);
+	void applyGeneralValue(const ParamValue &value);
+
+private:
+	StatTable &dest_;
+	ParamId targetId_;
+};
+
+
 ParamValue::ParamValue(const Null&) : type_(PARAM_TYPE_NULL) {
 }
 
@@ -447,11 +541,11 @@ void UserTable::removeUser(const char8_t *name) {
 
 void UserTable::replaceAll(
 			std::string &str, const std::string &from, const std::string &to) {
-    std::string::size_type pos = 0;
-    while (pos = str.find(from, pos), pos != std::string::npos) {
-        str.replace(pos, from.size(), to);
-        pos += to.size();
-    }
+	std::string::size_type pos = 0;
+	while (pos = str.find(from, pos), pos != std::string::npos) {
+		str.replace(pos, from.size(), to);
+		pos += to.size();
+	}
 }
 
 /*!
@@ -788,15 +882,15 @@ ParamTable::AnnotatedValue ParamTable::getAnnotatedValue(
 		ParamId id, bool valueExpected, bool annotationExpected) const {
 	EntryMap::const_iterator it = entryMap_.find(id);
 	if (it == entryMap_.end()) {
-		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "not found id=" << id);
 	}
 
 	if (valueExpected && it->second.value_ == NULL) {
-		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "value is null id=" << id);
 	}
 
 	if (annotationExpected && it->second.annotation_ == NULL) {
-		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "annotation is null id=" << id);
 	}
 
 	return AnnotatedValue(it->second.value_, it->second.annotation_);
@@ -875,7 +969,7 @@ void ParamTable::set(ParamId id, const ParamValue &value,
 
 	EntryMap::iterator it = entryMap_.find(id);
 	if (it == entryMap_.end()) {
-		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "not found id=" << id);
 	}
 
 	Entry &entry = it->second;
@@ -1792,8 +1886,7 @@ ConfigTable::Constraint& ConfigTable::Constraint::add(
 	util::AllocUniquePtr<ParamValue> paramValue(
 			UTIL_OBJECT_POOL_NEW(valuePool_) ParamValue(*filtered, alloc_),
 			valuePool_);
-	CandidateInfo info = { String(), paramValue.get(), srcUnit };
-
+	CandidateInfo info = { String("", alloc_), paramValue.get(), srcUnit };
 	candidateList_.push_back(info);
 	paramValue.release();
 
@@ -3052,7 +3145,7 @@ std::ostream& operator<<(
 
 
 StatTable::StatTable(const Allocator &alloc) :
-		ParamTable(alloc,  &UTIL_TRACER_RESOLVE(SYSTEM)),
+		ParamTable(alloc, &UTIL_TRACER_RESOLVE(SYSTEM)),
 		updatorList_(alloc),
 		optionList_(alloc) {
 }
@@ -3299,4 +3392,814 @@ const char8_t* ConfigTableUtils::getGroupSymbol(
 ConfigTableUtils::SymbolTable& ConfigTableUtils::getGroupSymbolTable() {
 	static SymbolTable symbolTable;
 	return symbolTable;
+}
+
+
+LocalStatValue::Range LocalStatValue::toRange(
+		LocalStatValue *it, size_t count) {
+	return Range(it, it + count);
+}
+
+LocalStatValue::RangeRef LocalStatValue::toRangeRef(
+		const LocalStatValue *it, size_t count) {
+	return RangeRef(it, it + count);
+}
+
+LocalStatValue::RangeRef LocalStatValue::toRangeRef(const Range &src) {
+	assert(src.first <= src.second);
+	return RangeRef(src.first, src.second);
+}
+
+size_t LocalStatValue::countOf(const RangeRef &range) {
+	assert(range.first <= range.second);
+	return static_cast<size_t>(range.second - range.first);
+}
+
+LocalStatValue& LocalStatValue::at(const Range &range, ParamId id) {
+	if (id < 0 || id >= range.second - range.first) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
+	return range.first[id];
+}
+
+const LocalStatValue& LocalStatValue::at(const RangeRef &range, ParamId id) {
+	if (id < 0 || id >= range.second - range.first) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
+	return range.first[id];
+}
+
+
+BasicLocalStatMapper::BasicLocalStatMapper(
+		const util::StdAllocator<void, void> &alloc, size_t paramCount) :
+		alloc_(alloc),
+		entryList_(alloc),
+		groupList_(alloc),
+		paramCount_(paramCount) {
+}
+
+BasicLocalStatMapper::~BasicLocalStatMapper() {
+	clearList(entryList_);
+	clearList(groupList_);
+}
+
+BasicLocalStatMapper::Source BasicLocalStatMapper::getSource() {
+	return Source(alloc_, paramCount_);
+}
+
+void BasicLocalStatMapper::addSub(const BasicLocalStatMapper &sub) {
+	checkParamCount(sub.paramCount_);
+
+	preapareDefaultGroup();
+	const size_t groupOffset = groupList_.size();
+
+	const GroupList &subGroupList = sub.groupList_;
+	for (GroupList::const_iterator it = subGroupList.begin();
+			it != subGroupList.end(); ++it) {
+		size_t groupIndex;
+		Group &destGroup = addGroup(groupIndex);
+		destGroup.assignOptions(**it, alloc_);
+	}
+
+	const EntryList &subEntryList = sub.entryList_;
+	for (EntryList::const_iterator it = subEntryList.begin();
+			it != subEntryList.end(); ++it) {
+		if (*it == NULL) {
+			continue;
+		}
+
+		const ParamId id = static_cast<ParamId>(it - subEntryList.begin());
+		Entry &entry = newEntry(id);
+		entry.assignOptions(**it, alloc_);
+
+		const bool nextGroupIndex = groupOffset + (*it)->groupIndex_;
+		Group &prevGroup = getGroup(entry.groupIndex_);
+		Group &nextGroup = getGroup(nextGroupIndex);
+
+		nextGroup.idSet_.insert(id);
+		prevGroup.idSet_.erase(id);
+		entry.groupIndex_ = nextGroupIndex;
+	}
+}
+
+void BasicLocalStatMapper::addFilter(DisplayOption option) {
+	Group &group = preapareDefaultGroup();
+	Group::DisplayOptionList &list = group.displayOptions_;
+
+	assert(std::find(list.begin(), list.end(), option) == list.end());
+	list.push_back(option);
+}
+
+BasicLocalStatMapper::Options BasicLocalStatMapper::defaultOptions() {
+	Group &group = preapareDefaultGroup();
+	return Options(alloc_, group.defaultEntry_);
+}
+
+BasicLocalStatMapper::Options BasicLocalStatMapper::bind(
+		ParamId id, ParamId targetId) {
+	checkParamIdBasic(targetId);
+
+	Entry &entry = newEntry(id);
+	entry.targetId_ = targetId;
+
+	return Options(alloc_, entry);
+}
+
+void BasicLocalStatMapper::setFraction(ParamId id, ParamId denomId) {
+	checkParamId(denomId);
+
+	Entry &entry = resolveEntry(id);
+	entry.denomId_ = denomId;
+}
+
+void BasicLocalStatMapper::applyValue(
+		ParamId id, const LocalStatValue &src1, const LocalStatValue &src2,
+		StatTable &dest) const {
+	const EntryPair entries = getEntries(id);
+	ValueProducer producer(dest, entries.first->targetId_);
+
+	OptionResolver resolver(entries);
+	uint64_t defaultSrcValue;
+	const ParamValue *defaultValue =
+			resolver.findDefaultValue(defaultSrcValue);
+
+	{
+		const util::GeneralNameCoder *coder;
+		if ((coder = resolver.findNameCoder()) != NULL) {
+			producer.applyNamedValue(*coder, src1, defaultValue);
+			return;
+		}
+	}
+
+	ParamId denomId;
+	const bool fractionFound = resolver.findFraction(denomId);
+
+	if (defaultValue != NULL && (
+			(src1.get() == defaultSrcValue) ||
+			(fractionFound && src2.get() == 0))) {
+		producer.applyGeneralValue(*defaultValue);
+		return;
+	}
+
+	const bool floating = resolver.findFloatingType();
+	{
+		if (fractionFound) {
+			const bool dividing = true;
+			producer.applyUnitValue(src1, src2.get(), dividing, floating);
+			return;
+		}
+	}
+
+	{
+		const uint64_t *unit;
+		bool dividing;
+		if ((unit = resolver.findConversionUnit(dividing)) != NULL) {
+			producer.applyUnitValue(src1, *unit, dividing, floating);
+			return;
+		}
+	}
+
+	if (resolver.findDateTimeType()) {
+		producer.applyDateTimeValue(src1);
+		return;
+	}
+
+	producer.applyNormalValue(src1, floating);
+}
+
+void BasicLocalStatMapper::mergeValue(
+		const BasicLocalStatMapper *mapper, ParamId id,
+		const LocalStatValue &src, LocalStatValue &dest) {
+	EntryPair entries;
+	if (mapper != NULL && mapper->isEntryAssigned(id)) {
+		entries = mapper->getEntries(id);
+	}
+
+	OptionResolver resolver(entries);
+
+	uint64_t defaultSrcValue;
+	const ParamValue *defaultValue =
+			resolver.findDefaultValue(defaultSrcValue);
+	if (defaultValue != NULL && src.get() == defaultSrcValue) {
+		return;
+	}
+
+	uint64_t value;
+	switch (resolver.getMergeMode()) {
+	case LocalStatTypes::MERGE_SUM:
+		value = src.get() + dest.get();
+		break;
+	case LocalStatTypes::MERGE_MIN:
+		value = std::min(src.get(), dest.get());
+		break;
+	case LocalStatTypes::MERGE_MAX:
+		value = std::max(src.get(), dest.get());
+		break;
+	default:
+		assert(false);
+		return;
+	}
+	dest.set(value);
+}
+
+bool BasicLocalStatMapper::findRelatedParam(
+		ParamId id, ParamId &relatedId) const {
+	relatedId = getEntries(id).first->denomId_;
+	return (relatedId >= 0);
+}
+
+void BasicLocalStatMapper::setAllValues(
+		const ValueRangeRef &src, const ValueRange &dest) {
+	const size_t count = LocalStatValue::countOf(src);
+	checkParamCount(
+			count, LocalStatValue::countOf(LocalStatValue::toRangeRef(dest)));
+
+	LocalStatValue *destIt = dest.first;
+	for (const LocalStatValue *srcIt = src.first;
+			srcIt != src.second; ++srcIt) {
+		destIt->assign(*srcIt);
+		++destIt;
+	}
+}
+
+void BasicLocalStatMapper::applyAllValues(
+		const BasicLocalStatMapper *mapper, const ValueRangeRef &src,
+		StatTable &dest) {
+	if (mapper == NULL) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
+
+	const size_t paramCount = LocalStatValue::countOf(src);
+	ParamId id;
+	for (Cursor cursor(mapper, &dest, paramCount); cursor.nextParam(id);) {
+		ParamId relatedId;
+		LocalStatValue relatedValue;
+		if (mapper->findRelatedParam(id, relatedId)) {
+			relatedValue.assign(LocalStatValue::at(src, relatedId));
+		}
+		mapper->applyValue(
+				id, LocalStatValue::at(src, id), relatedValue, dest);
+	}
+}
+
+void BasicLocalStatMapper::mergeAllValues(
+		const BasicLocalStatMapper *mapper, const ValueRangeRef &src,
+		const ValueRange &dest) {
+	const size_t paramCount = LocalStatValue::countOf(src);
+	ParamId id;
+	for (Cursor cursor(NULL, NULL, paramCount); cursor.nextParam(id);) {
+		mergeValue(
+				mapper, id,
+				LocalStatValue::at(src, id), LocalStatValue::at(dest, id));
+	}
+}
+
+BasicLocalStatMapper::Entry& BasicLocalStatMapper::resolveEntry(ParamId id) {
+	Entry *entry = entryList_[resolveEntryIndex(id)];
+	assert(entry != NULL);
+	return *entry;
+}
+
+BasicLocalStatMapper::Entry& BasicLocalStatMapper::newEntry(ParamId id) {
+	checkParamId(id);
+
+	while (static_cast<size_t>(id) >= entryList_.size()) {
+		entryList_.push_back(NULL);
+	}
+
+	Entry *&entry = entryList_[id];
+	if (entry != NULL) {
+		assert(false);
+		GS_THROW_USER_ERROR(
+				GS_ERROR_CM_INTERNAL_ERROR,
+				"Entry already exists (id=" << id <<")");
+	}
+
+	Group &group = preapareDefaultGroup();
+	entry = ALLOC_NEW(alloc_) Entry();
+	group.idSet_.insert(id);
+
+	return *entry;
+}
+
+BasicLocalStatMapper::Group& BasicLocalStatMapper::preapareDefaultGroup() {
+	if (groupList_.empty()) {
+		size_t groupIndex;
+		addGroup(groupIndex);
+		assert(groupIndex == 0);
+	}
+
+	return getGroup(0);
+}
+
+BasicLocalStatMapper::Group& BasicLocalStatMapper::addGroup(
+		size_t &groupIndex) {
+	{
+		util::AllocUniquePtr<Group> groupPtr(
+				ALLOC_UNIQUE(alloc_, Group, alloc_));
+		groupList_.push_back(groupPtr.get());
+		groupPtr.release();
+	}
+
+	groupIndex = groupList_.size() - 1;
+	return getGroup(groupIndex);
+}
+
+BasicLocalStatMapper::EntryPair BasicLocalStatMapper::getEntries(
+		ParamId id) const {
+	const Entry *entry = entryList_[resolveEntryIndex(id)];
+	assert(entry != NULL);
+
+	const Group &group = getGroup(entry->groupIndex_);
+	return EntryPair(entry, &group.defaultEntry_);
+}
+
+BasicLocalStatMapper::Group& BasicLocalStatMapper::getGroup(
+		size_t groupIndex) {
+	return *groupList_[checkGroupIndex(groupIndex)];
+}
+
+const BasicLocalStatMapper::Group& BasicLocalStatMapper::getGroup(
+		size_t groupIndex) const {
+	return *groupList_[checkGroupIndex(groupIndex)];
+}
+
+size_t BasicLocalStatMapper::checkGroupIndex(size_t groupIndex) const {
+	if (groupIndex >= groupList_.size() || groupList_[groupIndex] == NULL) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
+	return groupIndex;
+}
+
+template<typename E>
+void BasicLocalStatMapper::clearList(util::AllocVector<E*> &list) {
+	while (!list.empty()) {
+		util::AllocUniquePtr<E> ptr(list.back(), alloc_);
+		list.pop_back();
+	}
+}
+
+size_t BasicLocalStatMapper::resolveEntryIndex(ParamId id) const {
+	if (!isEntryAssigned(id)) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
+
+	return static_cast<size_t>(id);
+}
+
+bool BasicLocalStatMapper::isEntryAssigned(ParamId id) const {
+	checkParamId(id);
+
+	if (static_cast<size_t>(id) < entryList_.size()) {
+		const Entry *entry = entryList_[static_cast<size_t>(id)];
+		if (entry != NULL) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void BasicLocalStatMapper::checkParamId(ParamId id) const {
+	checkParamIdBasic(id);
+
+	if (static_cast<size_t>(id) >= paramCount_) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
+}
+
+void BasicLocalStatMapper::checkParamIdBasic(ParamId id) {
+	if (id < 0) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
+}
+
+void BasicLocalStatMapper::checkParamCount(size_t count) const {
+	checkParamCount(count, paramCount_);
+}
+
+void BasicLocalStatMapper::checkParamCount(size_t count1, size_t count2) {
+	if (count1 != count2) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
+}
+
+
+BasicLocalStatMapper::Source::Source(
+		const util::StdAllocator<void, void> &alloc, size_t paramCount) :
+		alloc_(alloc),
+		paramCount_(paramCount) {
+}
+
+
+BasicLocalStatMapper::Options::Options(
+		util::StdAllocator<void, void> &alloc, Entry &entry) :
+		alloc_(alloc),
+		entry_(entry) {
+}
+
+const BasicLocalStatMapper::Options&
+BasicLocalStatMapper::Options::setMergeMode(MergeMode mode) const {
+	entry_.mergeMode_ = mode;
+	return *this;
+}
+
+const BasicLocalStatMapper::Options&
+BasicLocalStatMapper::Options::setValueType(ParamValue::Type type) const {
+	switch (type) {
+	case ParamValue::PARAM_TYPE_DOUBLE:
+		break;
+	default:
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
+	entry_.valueType_ = type;
+	return *this;
+}
+
+const BasicLocalStatMapper::Options&
+BasicLocalStatMapper::Options::setDateTimeType(bool withDefaults) const {
+	entry_.forDateTime_ = true;
+
+	if (withDefaults) {
+		const uint64_t defaultSrcValue = 0;
+		setDefaultValue(ParamValue(""), &defaultSrcValue);
+	}
+
+	return *this;
+}
+
+const BasicLocalStatMapper::Options&
+BasicLocalStatMapper::Options::setDefaultValue(
+		const ParamValue &value, const uint64_t *srcValue) const {
+	entry_.defaultValue_.assign(value, alloc_);
+	if (srcValue != NULL) {
+		entry_.defaultSrcValue_ = *srcValue;
+	}
+	entry_.defaultValueAssigned_ = true;
+	return *this;
+}
+
+const BasicLocalStatMapper::Options&
+BasicLocalStatMapper::Options::setTimeUnit(ValueUnit unit) const {
+	uint64_t amount;
+	switch (unit) {
+	case ConfigTable::VALUE_UNIT_NONE:
+		amount = 1;
+		break;
+	case ConfigTable::VALUE_UNIT_DURATION_MS:
+		amount = 1000;
+		break;
+	case ConfigTable::VALUE_UNIT_DURATION_S:
+		amount = 1000 * 1000;
+		break;
+	default:
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
+	}
+	const bool dividing = true;
+	return setConversionUnit(amount, dividing);
+}
+
+const BasicLocalStatMapper::Options&
+BasicLocalStatMapper::Options::setConversionUnit(
+		uint64_t unit, bool dividing) const {
+	entry_.unit_ = unit;
+	entry_.dividing_ = dividing;
+	return *this;
+}
+
+const BasicLocalStatMapper::Options&
+BasicLocalStatMapper::Options::setNameCoder(
+		const util::GeneralNameCoder &coder) const {
+	entry_.nameCoder_ = coder;
+	return *this;
+}
+
+
+BasicLocalStatMapper::Cursor::Cursor(
+		const BasicLocalStatMapper *mapper, const StatTable *statTable,
+		size_t paramCount) :
+		groupIndex_(0),
+		ordinal_(0),
+		paramCount_(paramCount),
+		mapper_(NULL),
+		statTable_(statTable) {
+	if (mapper != NULL) {
+		mapper->checkParamCount(paramCount);
+	}
+
+	if (mapper != NULL && !mapper->groupList_.empty()) {
+		idIt_ = mapper->getGroup(groupIndex_).idSet_.begin();
+		mapper_ = mapper;
+	}
+}
+
+bool BasicLocalStatMapper::Cursor::nextParam(ParamId &id) {
+	id = -1;
+
+	if (mapper_ == NULL) {
+		if (ordinal_ >= paramCount_) {
+			return false;
+		}
+
+		id = static_cast<ParamId>(ordinal_);
+		++ordinal_;
+		return true;
+	}
+
+	const GroupList &groupList = mapper_->groupList_;
+	for (;;) {
+		const Group &group = mapper_->getGroup(groupIndex_);
+		if (idIt_ == group.idSet_.end() ||
+				(statTable_ != NULL && !group.isVisible(*statTable_))) {
+			if (groupIndex_ + 1 >= groupList.size()) {
+				return false;
+			}
+			++groupIndex_;
+			idIt_ = mapper_->getGroup(groupIndex_).idSet_.begin();
+			continue;
+		}
+
+		id = *idIt_;
+		++idIt_;
+		return true;
+	}
+}
+
+
+BasicLocalStatMapper::Entry::Entry() :
+		groupIndex_(0),
+		targetId_(-1),
+		denomId_(-1),
+		mergeMode_(LocalStatTypes::MERGE_DEFAULT),
+		valueType_(ParamValue::PARAM_TYPE_NULL),
+		forDateTime_(false),
+		defaultValueAssigned_(false),
+		defaultSrcValue_(static_cast<uint64_t>(-1)),
+		unit_(0),
+		dividing_(false) {
+}
+
+void BasicLocalStatMapper::Entry::assignOptions(
+		const Entry &another, util::StdAllocator<void, void> &alloc) {
+	targetId_ = another.targetId_;
+	denomId_ = another.denomId_;
+
+	mergeMode_ = another.mergeMode_;
+
+	valueType_ = another.valueType_;
+	forDateTime_ = another.forDateTime_;
+	defaultValueAssigned_ = another.defaultValueAssigned_;
+	defaultSrcValue_ = another.defaultSrcValue_;
+	defaultValue_.assign(another.defaultValue_, alloc);
+
+	unit_ = another.unit_;
+	dividing_ = another.dividing_;
+	nameCoder_ = another.nameCoder_;
+}
+
+
+BasicLocalStatMapper::Group::Group(
+		const util::StdAllocator<void, void> &alloc) :
+		idSet_(alloc),
+		displayOptions_(alloc) {
+}
+
+void BasicLocalStatMapper::Group::assignOptions(
+		const Group &another, util::StdAllocator<void, void> &alloc) {
+	displayOptions_ = another.displayOptions_;
+	defaultEntry_.assignOptions(another.defaultEntry_, alloc);
+}
+
+bool BasicLocalStatMapper::Group::isVisible(const StatTable &statTable) const {
+	if (displayOptions_.empty()) {
+		return true;
+	}
+	for (DisplayOptionList::const_iterator it = displayOptions_.begin();
+			it != displayOptions_.end(); ++it) {
+		if (!statTable.getDisplayOption(*it)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+
+BasicLocalStatMapper::OptionResolver::OptionResolver(
+		const EntryPair &entries) :
+		entries_(entries) {
+}
+
+LocalStatTypes::MergeMode
+BasicLocalStatMapper::OptionResolver::getMergeMode() const {
+	const Entry *entry;
+	for (size_t i = 0; (entry = nextEntry(i)) != NULL;) {
+		const MergeMode mode = entry->mergeMode_;
+		if (mode != LocalStatTypes::MERGE_DEFAULT) {
+			return mode;
+		}
+	}
+
+	if (findDateTimeType()) {
+		return LocalStatTypes::MERGE_MIN;
+	}
+	return LocalStatTypes::MERGE_SUM;
+}
+
+const ParamValue*
+BasicLocalStatMapper::OptionResolver::findDefaultValue(
+		uint64_t &srcValue) const {
+	srcValue = static_cast<uint64_t>(-1);
+	const Entry *entry;
+	for (size_t i = 0; (entry = nextEntry(i)) != NULL;) {
+		if (entry->defaultValueAssigned_) {
+			srcValue = entry->defaultSrcValue_;
+			return &entry->defaultValue_;
+		}
+	}
+	return NULL;
+}
+
+bool BasicLocalStatMapper::OptionResolver::findFloatingType() const {
+	const Entry *entry;
+	for (size_t i = 0; (entry = nextEntry(i)) != NULL;) {
+		if (entry->valueType_ == ParamValue::PARAM_TYPE_DOUBLE) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool BasicLocalStatMapper::OptionResolver::findDateTimeType() const {
+	const Entry *entry;
+	for (size_t i = 0; (entry = nextEntry(i)) != NULL;) {
+		if (entry->forDateTime_) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool BasicLocalStatMapper::OptionResolver::findFraction(
+		ParamId &denomId) const {
+	denomId = -1;
+	const Entry *entry;
+	for (size_t i = 0; (entry = nextEntry(i)) != NULL;) {
+		denomId = entry->denomId_;
+		if (denomId >= 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+const uint64_t* BasicLocalStatMapper::OptionResolver::findConversionUnit(
+		bool &dividing) const {
+	dividing = false;
+	const Entry *entry;
+	for (size_t i = 0; (entry = nextEntry(i)) != NULL;) {
+		const uint64_t &unit = entry->unit_;
+		if (unit > 0) {
+			dividing = entry->dividing_;
+			return &unit;
+		}
+	}
+	return NULL;
+}
+
+const util::GeneralNameCoder*
+BasicLocalStatMapper::OptionResolver::findNameCoder() const {
+	const Entry *entry;
+	for (size_t i = 0; (entry = nextEntry(i)) != NULL;) {
+		const util::GeneralNameCoder &coder = entry->nameCoder_;
+		if (coder.getSize() > 0) {
+			return &coder;
+		}
+	}
+	return NULL;
+}
+
+const BasicLocalStatMapper::Entry*
+BasicLocalStatMapper::OptionResolver::nextEntry(size_t &ordinal) const {
+	while (ordinal < 2) {
+		const Entry *entry = (ordinal == 0 ? entries_.first : entries_.second);
+		ordinal++;
+
+		if (entry != NULL) {
+			return entry;
+		}
+	}
+	return NULL;
+}
+
+
+BasicLocalStatMapper::ValueProducer::ValueProducer(
+		StatTable &dest, ParamId targetId) :
+		dest_(dest),
+		targetId_(targetId) {
+	checkParamIdBasic(targetId);
+}
+
+void BasicLocalStatMapper::ValueProducer::applyNamedValue(
+		const util::GeneralNameCoder &coder, const LocalStatValue &src,
+		const ParamValue *defaultValue) {
+	typedef util::GeneralNameCoder::Id CoderId;
+	if (src.get() < static_cast<uint64_t>(
+			std::numeric_limits<CoderId>::max())) {
+		const char8_t *name = coder(static_cast<CoderId>(src.get()));
+		if (name != NULL) {
+			applyGeneralValue(ParamValue(name));
+			return;
+		}
+	}
+
+	if (defaultValue == NULL) {
+		applyGeneralValue(ParamValue(static_cast<int64_t>(src.get())));
+	}
+	else {
+		applyGeneralValue(*defaultValue);
+	}
+}
+
+void BasicLocalStatMapper::ValueProducer::applyUnitValue(
+		const LocalStatValue &src, uint64_t unit, bool dividing,
+		bool floating) {
+	do {
+		if (floating) {
+			break;
+		}
+
+		uint64_t value = src.get();
+		if (dividing) {
+			if (unit == 0) {
+				break;
+			}
+			value /= unit;
+		}
+		else {
+			value *= unit;
+		}
+		LocalStatValue statValue;
+		statValue.set(value);
+		applyNormalValue(statValue, floating);
+		return;
+	}
+	while (false);
+
+	{
+		const double doubleUnit = static_cast<double>(unit);
+		double value = static_cast<double>(src.get());
+		if (dividing) {
+			value /= doubleUnit;
+		}
+		else {
+			value *= doubleUnit;
+		}
+		applyGeneralValue(ParamValue(value));
+	}
+}
+
+void BasicLocalStatMapper::ValueProducer::applyDateTimeValue(
+		const LocalStatValue &src) {
+	util::NormalOStringStream oss;
+	util::DateTime dateTime(static_cast<int64_t>(src.get()));
+
+	util::DateTime::ZonedOption option;
+	option.baseOption_.trimMilliseconds_ = false;
+	option.asLocalTimeZone_ = true;
+
+	char8_t buf[util::DateTime::MAX_FORMAT_SIZE + 1] = { 0 };
+	try {
+		dateTime.format(buf, sizeof(buf) - 1, option);
+	}
+	catch (...) {
+		applyNormalValue(src, false);
+		return;
+	}
+	applyGeneralValue(ParamValue(buf));
+}
+
+void BasicLocalStatMapper::ValueProducer::applyNormalValue(
+		const LocalStatValue &src, bool floating) {
+	if (floating || src.get() >
+			static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+		applyGeneralValue(ParamValue(static_cast<double>(src.get())));
+	}
+	else {
+		applyGeneralValue(ParamValue(static_cast<int64_t>(src.get())));
+	}
+}
+
+void BasicLocalStatMapper::ValueProducer::applyGeneralValue(
+		const ParamValue &value) {
+	dest_.set(targetId_, value);
 }

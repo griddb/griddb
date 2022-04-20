@@ -28,7 +28,6 @@ class TransactionManager;
 class PartitionTable;
 struct MetaProcessorSource;
 class TransactionService;
-
 class SQLExecutionManager;
 class SQLService;
 
@@ -43,7 +42,6 @@ public:
 
 	class RowHandler;
 	class Context;
-
 	struct SQLMetaUtils;
 
 	MetaProcessor(
@@ -232,7 +230,7 @@ private:
 };
 
 class MetaProcessor::StoreCoreHandler :
-		public DataStore::ContainerListHandler {
+		public DataStoreV4::ContainerListHandler {
 public:
 	explicit StoreCoreHandler(Context &cxt);
 
@@ -287,7 +285,6 @@ public:
 
 	static const char8_t* containerTypeToName(ContainerType type);
 	static const char8_t* timeUnitToName(TimeUnit unit);
-	static const char8_t* compressionToName(int8_t type);
 	static const char8_t* partitionTypeToName(uint8_t type);
 	static const char8_t* expirationTypeToName(int8_t type);
 };
@@ -473,13 +470,11 @@ struct MetaProcessorSource {
 	DatabaseId dbId_;
 	const char8_t *dbName_;
 
-	DataStore *dataStore_;
+	DataStoreV4 *dataStore_;
 	EventContext *eventContext_;
 	TransactionManager *transactionManager_;
 	TransactionService *transactionService_;
 	PartitionTable *partitionTable_;
-
-	const ResourceSet *resourceSet_;
 	SQLExecutionManager *sqlExecutionManager_;
 	SQLService *sqlService_;
 };
@@ -489,7 +484,7 @@ public:
 	typedef MetaType::NamingType NamingType;
 
 	MetaContainer(
-			TransactionContext &txn, DataStore *dataStore, DatabaseId dbId,
+			TransactionContext &txn, DataStoreV4 *dataStore, DatabaseId dbId,
 			MetaContainerId id, NamingType containerNamingType,
 			NamingType columnNamingType);
 
@@ -512,11 +507,11 @@ public:
 			util::XArray<uint8_t> &containerSchema);
 	void getColumnSchema(
 			TransactionContext &txn, uint32_t columnId,
-			ObjectManager &objectManager, util::XArray<uint8_t> &schema);
+			ObjectManagerV4 &objectManager, util::XArray<uint8_t> &schema);
 
 	const char8_t* getColumnName(
 			TransactionContext &txn, uint32_t columnId,
-			ObjectManager &objectManager) const;
+			ObjectManagerV4 &objectManager) const;
 	ColumnType getSimpleColumnType(uint32_t columnId) const;
 	bool isArrayColumn(uint32_t columnId) const;
 	bool isVirtualColumn(uint32_t columnId) const;
@@ -529,7 +524,7 @@ public:
 
 	void getColumnInfoList(util::XArray<ColumnInfo> &columnInfoList) const;
 	void getColumnInfo(
-			TransactionContext &txn, ObjectManager &objectManager,
+			TransactionContext &txn, ObjectManagerV4 &objectManager,
 			const char8_t *name, uint32_t &columnId, ColumnInfo *&columnInfo,
 			bool isCaseSensitive) const;
 	ColumnInfo& getColumnInfo(uint32_t columnId) const;
@@ -538,25 +533,29 @@ public:
 		static_cast<void>(txn);
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}
-	virtual bool finalize(TransactionContext &txn) {
+	virtual bool finalize(TransactionContext &txn, bool isRemoveGroup) {
 		static_cast<void>(txn);
+		static_cast<void>(isRemoveGroup);
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}
 
-	virtual void set(TransactionContext &txn, const FullContainerKey &containerKey,
-			ContainerId containerId, OId columnSchemaOId,
-			MessageSchema *containerSchema) {
+	virtual void set(TransactionContext& txn, const FullContainerKey& containerKey,
+		ContainerId containerId, OId columnSchemaOId,
+		MessageSchema* containerSchema, DSGroupId groupId) {
 		static_cast<void>(txn);
 		static_cast<void>(containerKey);
 		static_cast<void>(containerId);
 		static_cast<void>(columnSchemaOId);
 		static_cast<void>(containerSchema);
+		static_cast<void>(groupId);
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}
 
 	virtual void createIndex(TransactionContext &txn, const IndexInfo &indexInfo,
 			IndexCursor& indexCursor,
-			bool isIndexNameCaseSensitive = false) {
+			bool isIndexNameCaseSensitive = false, 
+		    CreateDropIndexMode mode = INDEX_MODE_NOSQL,
+			bool *skippedByMode = NULL) {
 		static_cast<void>(txn);
 		static_cast<void>(indexInfo);
 		static_cast<void>(indexCursor);
@@ -571,27 +570,12 @@ public:
 	}
 
 	virtual void dropIndex(TransactionContext &txn, IndexInfo &indexInfo,
-			bool isIndexNameCaseSensitive = false) {
+			bool isIndexNameCaseSensitive = false,
+			CreateDropIndexMode mode = INDEX_MODE_NOSQL,
+			bool *skippedByMode = NULL) {
 		static_cast<void>(txn);
 		static_cast<void>(indexInfo);
 		static_cast<void>(isIndexNameCaseSensitive);
-		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
-	}
-
-	virtual util::String getBibInfo(TransactionContext &txn, const char* dbName) {
-		static_cast<void>(txn);
-		static_cast<void>(dbName);
-		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
-	}
-	virtual void getErasableList(
-			TransactionContext &txn, Timestamp erasableTimeLimit,
-			util::XArray<ArchiveInfo> &list) {
-		static_cast<void>(txn);
-		static_cast<void>(erasableTimeLimit);
-		static_cast<void>(list);
-		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
-	}
-	virtual ExpireType getExpireType() const {
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}
 
@@ -612,7 +596,7 @@ public:
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}
 	virtual void updateRow(TransactionContext &txn, uint32_t rowSize,
-			const uint8_t *rowData, RowId rowId, DataStore::PutStatus &status) {
+			const uint8_t *rowData, RowId rowId, PutStatus &status) {
 		static_cast<void>(txn);
 		static_cast<void>(rowSize);
 		static_cast<void>(rowData);
@@ -670,10 +654,10 @@ public:
 		static_cast<void>(txn);
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}
-	virtual AllocateStrategy calcMapAllocateStrategy() const {
+	virtual void resetMapAllocateStrategy() const {
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}
-	virtual AllocateStrategy calcRowAllocateStrategy() const {
+	virtual void resetRowAllocateStrategy() const {
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}
 	virtual bool checkRunTime(TransactionContext &txn) {
@@ -686,37 +670,15 @@ public:
 	virtual ColumnType getRowIdColumnType() {
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}
-	virtual uint32_t getRealColumnNum(TransactionContext &txn) {
-		static_cast<void>(txn);
-		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
-	}
-	virtual ColumnInfo* getRealColumnInfoList(TransactionContext &txn) {
-		static_cast<void>(txn);
-		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
-	}
-	virtual uint32_t getRealRowSize(TransactionContext &txn) {
-		static_cast<void>(txn);
-		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
-	}
-	virtual uint32_t getRealRowFixedDataSize(TransactionContext &txn) {
-		static_cast<void>(txn);
-		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
-	}
 	virtual util::String getBibContainerOptionInfo(TransactionContext &txn) {
 		static_cast<void>(txn);
-		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
-	}
-	virtual void getActiveTxnList(
-			TransactionContext &txn, util::Set<TransactionId> &txnList) {
-		static_cast<void>(txn);
-		static_cast<void>(txnList);
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}
 
 protected:
 	virtual void putRow(TransactionContext &txn, uint32_t rowSize,
 		const uint8_t *rowData, RowId &rowId, bool rowIdSpecified,
-		DataStore::PutStatus &status, PutRowOption putRowOption) {
+		PutStatus &status, PutRowOption putRowOption) {
 		static_cast<void>(txn);
 		static_cast<void>(rowSize);
 		static_cast<void>(rowData);
@@ -727,10 +689,10 @@ protected:
 		static_cast<void>(rowIdSpecified);
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}
-	virtual void putRow(TransactionContext &txn,
+	virtual void putRowInternal(TransactionContext &txn,
 			InputMessageRowStore *inputMessageRowStore, RowId &rowId,
 			bool rowIdSpecified,
-			DataStore::PutStatus &status, PutRowOption putRowOption) {
+			PutStatus &status, PutRowOption putRowOption) {
 		static_cast<void>(txn);
 		static_cast<void>(inputMessageRowStore);
 		static_cast<void>(rowId);
@@ -772,12 +734,6 @@ protected:
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}
 
-	virtual void continueChangeSchema(TransactionContext &txn,
-			ContainerCursor &containerCursor) {
-		static_cast<void>(txn);
-		static_cast<void>(containerCursor);
-		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
-	}
 	virtual void setDummyMvccImage(TransactionContext &txn) {
 		static_cast<void>(txn);
 		GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
@@ -926,7 +882,7 @@ protected:
 
 class MetaStore {
 public:
-	explicit MetaStore(DataStore &dataStore);
+	explicit MetaStore(DataStoreV4 &dataStore);
 
 	MetaContainer* getContainer(
 			TransactionContext &txn, const FullContainerKey &key,
@@ -937,7 +893,7 @@ public:
 			MetaType::NamingType columnNamingType);
 
 private:
-	DataStore &dataStore_;
+	DataStoreV4 &dataStore_;
 };
 
 #endif

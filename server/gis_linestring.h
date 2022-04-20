@@ -62,8 +62,8 @@ public:
 	 *
 	 */
 	LineString(srid_t id, const QP_XArray<Point *> &parray,
-		TransactionContext &txn, ObjectManager &objectManager)
-		: PointGeom(id, parray, txn, objectManager) {
+		TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy)
+		: PointGeom(id, parray, txn, objectManager, strategy) {
 		if (parray.size() < 2) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_GIS_CANNOT_MAKE_OBJECT,
 				"Cannot create linestring from one point.");
@@ -86,11 +86,11 @@ public:
 	 *
 	 */
 	LineString(srid_t id, Point &p1, Point &p2, TransactionContext &txn,
-		ObjectManager &objectManager)
+		ObjectManagerV4 &objectManager, AllocateStrategy &strategy)
 		: PointGeom(txn) {
 		srId_ = id;
-		p_.push_back(p1.dup(txn, objectManager));
-		p_.push_back(p2.dup(txn, objectManager));
+		p_.push_back(p1.dup(txn, objectManager, strategy));
+		p_.push_back(p2.dup(txn, objectManager, strategy));
 		isClosed_ = false;
 		isEmpty_ = false;
 		isAssigned_ = (p1.isAssigned_ && p2.isAssigned_);
@@ -143,12 +143,12 @@ public:
 	 * @return newly allocated LineString
 	 */
 	LineString *dup(
-		TransactionContext &txn, ObjectManager &objectManager, srid_t id) {
+		TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, srid_t id) {
 		if (isEmpty()) {
 			return QP_NEW LineString(txn);
 		}
 		else {
-			LineString *ls = QP_NEW LineString(id, p_, txn, objectManager);
+			LineString *ls = QP_NEW LineString(id, p_, txn, objectManager, strategy);
 			ls->isAssigned_ = isAssigned_;
 			ls->isEmpty_ = isEmpty_;
 			return ls;
@@ -162,8 +162,8 @@ public:
 	 * @param txn Object manager
 	 * @return Duplicated LineString
 	 */
-	LineString *dup(TransactionContext &txn, ObjectManager &objectManager) {
-		return dup(txn, objectManager, srId_);
+	LineString *dup(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) {
+		return dup(txn, objectManager, strategy, srId_);
 	}
 
 	/*!
@@ -312,14 +312,14 @@ protected:
 	 * @param p point (to be duplicated)
 	 * @param n index
 	 */
-	void insert(TransactionContext &txn, ObjectManager &objectManager, Point &p,
+	void insert(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, Point &p,
 		int n) {
 		if (static_cast<size_t>(n) >= p_.size() || n < 0) {
 			isClosed_ = (p == *p_[0]);
-			p_.push_back(p.dup(txn, objectManager));
+			p_.push_back(p.dup(txn, objectManager, strategy));
 		}
 		else {
-			p_.insert(p_.begin() + n, p.dup(txn, objectManager));
+			p_.insert(p_.begin() + n, p.dup(txn, objectManager, strategy));
 		}
 		if (isAssigned() && p.isAssigned()) {
 			calcBoundingRectAndSimplicity();

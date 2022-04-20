@@ -202,8 +202,22 @@ private:
 	size_t size_;
 };
 
-class DQLProcs::ProcResourceSet {
+class DQLProcs::ProcResourceSet : public ResourceSet {
 public:
+	ProcResourceSet();
+
+	void setBase(SQLContext &baseCxt);
+
+	virtual SQLService* getSQLService() const;
+	virtual TransactionManager* getTransactionManager() const;
+	virtual TransactionService* getTransactionService() const;
+	virtual ClusterService* getClusterService() const;
+	virtual PartitionTable* getPartitionTable() const;
+	virtual DataStoreV4* getDataStore() const;
+	virtual PartitionList* getPartitionList() const;
+
+private:
+	SQLContext *baseCxt_;
 };
 
 class DQLProcs::ExtProcContext : public SQLOps::ExtOpContext {

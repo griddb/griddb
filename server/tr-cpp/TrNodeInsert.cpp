@@ -19,7 +19,7 @@
 	@brief TR: R-Tree implementation
 */
 
-#include "data_store.h"
+#include "data_store_v4.h"
 #include "internal.h"
 #include "transaction_context.h"
 
@@ -48,13 +48,13 @@ static int32_t TrNode_pick_child(TrNode n, TrRect r) {
 
 /* the core part of insertion */
 static int32_t TrNode_insert1(TransactionContext &txn,
-	ObjectManager &objectManager, OId nOId, TrRect r, OId childOId, OId *nnOId,
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId nOId, TrRect r, OId childOId, OId *nnOId,
 	int32_t level) {
 	TrChildTag c;
 	if (nOId == UNDEF_OID) {
 		return 0;
 	}
-	UpdateBaseObject baseObj(txn.getPartitionId(), objectManager, nOId);
+	UpdateBaseObject baseObj(objectManager, strategy, nOId);
 	TrNode n = baseObj.getBaseAddr<TrNode>();
 
 	if (n->level > level) {
@@ -64,14 +64,14 @@ static int32_t TrNode_insert1(TransactionContext &txn,
 
 		i = TrNode_pick_child(n, r);
 
-		if (TrNode_insert1(txn, objectManager, n->children[i].nodeOId, r,
+		if (TrNode_insert1(txn, objectManager, strategy, n->children[i].nodeOId, r,
 				childOId, &n2OId, level)) {
 			/* the child node was split; add a new child created by split */
 			n->children[i].rect =
-				TrNode_surround(txn, objectManager, n->children[i].nodeOId);
+				TrNode_surround(txn, objectManager, strategy, n->children[i].nodeOId);
 			c.nodeOId = n2OId;
-			c.rect = TrNode_surround(txn, objectManager, n2OId);
-			return TrNode_add_child(txn, objectManager, nOId, &c, nnOId);
+			c.rect = TrNode_surround(txn, objectManager, strategy, n2OId);
+			return TrNode_add_child(txn, objectManager, strategy, nOId, &c, nnOId);
 		}
 		else {
 			/* the child node was not split; just fix the rect */
@@ -83,28 +83,28 @@ static int32_t TrNode_insert1(TransactionContext &txn,
 		/* the target level is reached; add a new child */
 		c.rect = *r;
 		c.nodeOId = childOId;
-		return TrNode_add_child(txn, objectManager, nOId, &c, nnOId);
+		return TrNode_add_child(txn, objectManager, strategy, nOId, &c, nnOId);
 	}
 }
 
 /* the overview of insertion */
-int32_t TrNode_insert0(TransactionContext &txn, ObjectManager &objectManager,
+int32_t TrNode_insert0(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 	OId *root, TrRect r, OId childOId, int32_t level) {
 	OId nnOId;
 	NULL_PTR_CHECK(root);
 	NULL_PTR_CHECK(r);
 	UNDEF_OID_CHECK(childOId);
 
-	if (TrNode_insert1(txn, objectManager, *root, r, childOId, &nnOId, level)) {
+	if (TrNode_insert1(txn, objectManager, strategy, *root, r, childOId, &nnOId, level)) {
 		/* the root was split;
 		 * create a new root that includes the old root and the new node
 		 */
-		OId old_rootOId = *root, new_rootOId = TrNode_new(txn, objectManager);
-		BaseObject oldBaseObj(txn.getPartitionId(), objectManager, old_rootOId);
+		OId old_rootOId = *root, new_rootOId = TrNode_new(txn, objectManager, strategy);
+		BaseObject oldBaseObj(objectManager, strategy, old_rootOId);
 		const TrNode old_root = oldBaseObj.getBaseAddr<const TrNode>();
 
 		UpdateBaseObject baseObj(
-			txn.getPartitionId(), objectManager, new_rootOId);
+			objectManager, strategy, new_rootOId);
 		TrNode new_root = baseObj.getBaseAddr<TrNode>();
 
 		TrChildTag c;
@@ -112,14 +112,14 @@ int32_t TrNode_insert0(TransactionContext &txn, ObjectManager &objectManager,
 		new_root->level = old_root->level + 1;
 
 		/* the old root is the first child of the new root */
-		c.rect = TrNode_surround(txn, objectManager, old_rootOId);
+		c.rect = TrNode_surround(txn, objectManager, strategy, old_rootOId);
 		c.nodeOId = old_rootOId;
-		TrNode_add_child(txn, objectManager, new_rootOId, &c, NULL);
+		TrNode_add_child(txn, objectManager, strategy, new_rootOId, &c, NULL);
 
 		/* the node created by split is the second child of the new root */
-		c.rect = TrNode_surround(txn, objectManager, nnOId);
+		c.rect = TrNode_surround(txn, objectManager, strategy, nnOId);
 		c.nodeOId = nnOId;
-		TrNode_add_child(txn, objectManager, new_rootOId, &c, NULL);
+		TrNode_add_child(txn, objectManager, strategy, new_rootOId, &c, NULL);
 
 		*root = new_rootOId;
 		return 1;
@@ -128,8 +128,8 @@ int32_t TrNode_insert0(TransactionContext &txn, ObjectManager &objectManager,
 }
 
 /* insert a new data to node */
-int32_t TrNode_insert(TransactionContext &txn, ObjectManager &objectManager,
-	OId *nodeOId, TrRect r, OId dataOId) {
+int32_t TrNode_insert(TransactionContext &txn, ObjectManagerV4 &objectManager,
+	AllocateStrategy &strategy, OId *nodeOId, TrRect r, OId dataOId) {
 	if (dataOId == UNDEF_OID) return 0;
-	return TrNode_insert0(txn, objectManager, nodeOId, r, dataOId, 0);
+	return TrNode_insert0(txn, objectManager, strategy, nodeOId, r, dataOId, 0);
 }

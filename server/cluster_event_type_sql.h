@@ -1,6 +1,6 @@
 ﻿/*
 	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
-
+	
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
 	published by the Free Software Foundation, either version 3 of the
@@ -13,6 +13,10 @@
 
 	You should have received a copy of the GNU Affero General Public License
 	along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+/*!
+	@file
+	@brief SQLサービスで使用するイベント種別の定義
 */
 #ifndef CLUSTER_EVENT_TYPE_SQL_H_
 #define CLUSTER_EVENT_TYPE_SQL_H_

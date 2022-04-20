@@ -598,8 +598,12 @@ private:
 };
 
 class SQLOps::OpStore {
+private:
+	struct ResourceRefData;
+
 public:
 	class AllocatorRef;
+	class ResourceRef;
 	class TotalStats;
 	class Entry;
 	typedef std::pair<uint64_t, SQLOpTypes::Type> TotalStatsElement;
@@ -669,6 +673,7 @@ private:
 
 	IdEntryList entryList_;
 	SQLValues::SharedIdManager idManager_;
+	SQLValues::SharedIdManager resourceIdManager_;
 
 	ElementRefList attachedReaderList_;
 	ElementRefList attachedWriterList_;
@@ -686,6 +691,16 @@ private:
 	TotalStatsElement lastTempStoreUsage_;
 };
 
+struct SQLOps::OpStore::ResourceRefData {
+	ResourceRefData();
+
+	OpStore *store_;
+	OpStoreId id_;
+	SQLValues::SharedId resourceId_;
+	uint32_t index_;
+	bool forLatch_;
+};
+
 class SQLOps::OpStore::AllocatorRef {
 public:
 	AllocatorRef(
@@ -698,6 +713,17 @@ public:
 private:
 	util::StackAllocator &alloc_;
 	OpAllocatorManager &manager_;
+};
+
+class SQLOps::OpStore::ResourceRef {
+public:
+	explicit ResourceRef(const ResourceRefData &data);
+
+	const util::AllocUniquePtr<void>& resolve() const;
+	const util::AllocUniquePtr<void>* get() const;
+
+private:
+	ResourceRefData data_;
 };
 
 class SQLOps::OpStore::TotalStats {
@@ -851,16 +877,22 @@ public:
 	bool isReaderLatchDelayed(uint32_t index);
 	void setReaderLatchDelayed(uint32_t index);
 
-	util::AllocUniquePtr<void>& getInputResource(uint32_t index);
+	ResourceRef getResourceRef(uint32_t index, bool forLatch);
+	const util::AllocUniquePtr<void>* findRefResource(
+			uint32_t index, bool forLatch,
+			const SQLValues::SharedId &resourceId);
 	util::AllocUniquePtr<void>& getResource(
 			uint32_t index, SQLOpTypes::ProjectionType projType);
+
+	void setLatchResource(
+			uint32_t index, util::AllocUniquePtr<void> &resource,
+			SQLValues::BaseLatchTarget &latchTarget);
+	void closeLatchResource();
 
 	int64_t getLastTupleId(uint32_t index);
 	void setLastTupleId(uint32_t index, int64_t id);
 
 	OpAllocatorManager& getAllocatorManager();
-
-	SQLValues::LatchHolder& getLatchHolder();
 
 	bool tryLatch(ExtOpContext &cxt, uint64_t maxSize, bool hot);
 	void adjustLatch(uint64_t size);
@@ -935,7 +967,6 @@ private:
 	bool completed_;
 	bool subPlanInvalidated_;
 	bool pipelined_;
-	bool latchHolderUsed_;
 
 	uint32_t completedInCount_;
 	uint32_t multiStageInCount_;
@@ -943,7 +974,7 @@ private:
 
 	util::Vector<uint32_t> remainingInList_;
 
-	SQLValues::LatchHolder latchHolder_;
+	util::LocalUniquePtr<uint32_t> latchHolderIndex_;
 	util::AllocUniquePtr<OpLatchKeeper> latchKeeper_;
 	util::AllocUniquePtr<OpProfilerEntry> profiler_;
 };
@@ -992,6 +1023,8 @@ public:
 	TupleColumnList columnList_;
 
 	util::AllocUniquePtr<void> resource_;
+	util::AllocUniquePtr<void> latchResource_;
+	SQLValues::SharedId latchResourceId_;
 	ProjectionResourceList projResourceList_;
 
 	int64_t lastTupleId_;
@@ -1099,8 +1132,6 @@ public:
 	bool tryLatch(uint64_t maxSize, bool hot);
 	void adjustLatch(uint64_t size);
 
-	SQLValues::LatchHolder& getLatchHolder();
-
 	SQLValues::ValueProfile* getValueProfile();
 	SQLExprs::ExprProfile* getExprProfile();
 
@@ -1148,10 +1179,13 @@ public:
 
 	void setReaderLatchDelayed(uint32_t index);
 
-	util::AllocUniquePtr<void>& getInputResource(uint32_t index);
+	OpStore::ResourceRef getResourceRef(uint32_t index, bool forLatch);
 	util::AllocUniquePtr<void>& getResource(
 			uint32_t index,
 			SQLOpTypes::ProjectionType projType = SQLOpTypes::END_PROJ);
+	template<typename T>
+	void setLatchResource(
+			uint32_t index, util::AllocUniquePtr<T> &resource);
 
 	uint32_t prepareLocal(uint32_t localOrdinal);
 	uint32_t createLocal(const ColumnTypeList *list = NULL);
@@ -1444,6 +1478,16 @@ inline bool SQLOps::OpContext::checkSuspended() {
 		return checkSuspendedDetail();
 	}
 	return false;
+}
+
+template<typename T>
+void SQLOps::OpContext::setLatchResource(
+		uint32_t index, util::AllocUniquePtr<T> &resource) {
+	SQLValues::BaseLatchTarget &latchTarget = *resource;
+
+	util::AllocUniquePtr<void> ptr(
+			(typename util::AllocUniquePtr<T>::ReturnType(resource)));
+	storeEntry_.setLatchResource(index, ptr, latchTarget);
 }
 
 

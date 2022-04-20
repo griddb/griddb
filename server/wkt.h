@@ -62,7 +62,8 @@ namespace lemon_wktParser {
 struct wktParserArg {
 	Expr **ev;
 	TransactionContext *txn;
-	ObjectManager *objectManager;
+	ObjectManagerV4*objectManager;
+	AllocateStrategy *strategy;
 	FunctionMap *fmap;
 	int err;
 };
@@ -714,7 +715,7 @@ private:
 		{
 			Expr *e = Expr::newFunctionNode(yymsp[-3].minor.yy0,
 				yymsp[-1].minor.yy29, *(arg->txn), *(arg->fmap));
-			*arg->ev = e->eval(*(arg->txn), *(arg->objectManager), NULL,
+			*arg->ev = e->eval(*(arg->txn), *(arg->objectManager), *(arg->strategy), NULL,
 				arg->fmap, EVAL_MODE_NORMAL);
 			WKTPARSER_DELETE(e);
 			if (yymsp[-1].minor.yy29) {
@@ -728,7 +729,7 @@ private:
 			emptyArg.push_back(emptyArg1);
 			Expr *e = Expr::newFunctionNode(
 				yymsp[-3].minor.yy0, &emptyArg, *(arg->txn), *(arg->fmap));
-			*arg->ev = e->eval(*(arg->txn), *(arg->objectManager), NULL,
+			*arg->ev = e->eval(*(arg->txn), *(arg->objectManager), *(arg->strategy), NULL,
 				arg->fmap, EVAL_MODE_NORMAL);
 			WKTPARSER_DELETE(e);
 			WKTPARSER_DELETE(emptyArg1);
@@ -797,7 +798,7 @@ private:
 		case 12: /* gispolygon2d ::= LP gisnpointlist2d RP */
 		{
 			yygotominor.yy35 = WKTPARSER_NEW Polygon(static_cast<int64_t>(-1),
-				yymsp[-1].minor.yy59, *(arg->txn), *(arg->objectManager));
+				yymsp[-1].minor.yy59, *(arg->txn), *(arg->objectManager), *(arg->strategy));
 			while (!yymsp[-1].minor.yy59->empty()) {
 				WKTPARSER_DELETE(yymsp[-1].minor.yy59->back());
 				yymsp[-1].minor.yy59->pop_back();
@@ -807,7 +808,7 @@ private:
 		case 13: /* gispolygon2d ::= gisnpointlist2d */
 		{
 			yygotominor.yy35 = WKTPARSER_NEW Polygon(
-				-1, yymsp[0].minor.yy59, *(arg->txn), *(arg->objectManager));
+				-1, yymsp[0].minor.yy59, *(arg->txn), *(arg->objectManager), *(arg->strategy));
 			while (!yymsp[0].minor.yy59->empty()) {
 				WKTPARSER_DELETE(yymsp[0].minor.yy59->back());
 				yymsp[0].minor.yy59->pop_back();
@@ -836,7 +837,7 @@ private:
 		case 16: /* gismultipoint2d ::= gispointlist2d */
 		{
 			yygotominor.yy28 = WKTPARSER_NEW MultiPoint(
-				-1, *yymsp[0].minor.yy30, *(arg->txn), *(arg->objectManager));
+				-1, *yymsp[0].minor.yy30, *(arg->txn), *(arg->objectManager), *(arg->strategy));
 			while (!yymsp[0].minor.yy30->empty()) {
 				WKTPARSER_DELETE(yymsp[0].minor.yy30->back());
 				yymsp[0].minor.yy30->pop_back();
@@ -876,7 +877,7 @@ private:
 		{
 			yygotominor.yy22 =
 				WKTPARSER_NEW MultiPolygon(static_cast<int64_t>(-1),
-					*yymsp[0].minor.yy47, *(arg->txn), *(arg->objectManager));
+					*yymsp[0].minor.yy47, *(arg->txn), *(arg->objectManager), *(arg->strategy));
 			while (!yymsp[0].minor.yy47->empty()) {
 				WKTPARSER_DELETE(yymsp[0].minor.yy47->back());
 				yymsp[0].minor.yy47->pop_back();
@@ -898,7 +899,7 @@ private:
 		case 23: /* gispolygon3d ::= gisnpointlist3d */
 		{
 			yygotominor.yy35 = WKTPARSER_NEW Polygon(
-				-1, yymsp[0].minor.yy59, *(arg->txn), *(arg->objectManager));
+				-1, yymsp[0].minor.yy59, *(arg->txn), *(arg->objectManager), *(arg->strategy));
 			while (!yymsp[0].minor.yy59->empty()) {
 				WKTPARSER_DELETE(yymsp[0].minor.yy59->back());
 				yymsp[0].minor.yy59->pop_back();
@@ -908,7 +909,7 @@ private:
 		case 26: /* gismultipoint3d ::= gispointlist3d */
 		{
 			yygotominor.yy28 = WKTPARSER_NEW MultiPoint(
-				-1, *yymsp[0].minor.yy30, *(arg->txn), *(arg->objectManager));
+				-1, *yymsp[0].minor.yy30, *(arg->txn), *(arg->objectManager), *(arg->strategy));
 			while (!yymsp[0].minor.yy30->empty()) {
 				WKTPARSER_DELETE(yymsp[0].minor.yy30->back());
 				yymsp[0].minor.yy30->pop_back();

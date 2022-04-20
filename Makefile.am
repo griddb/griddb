@@ -26,8 +26,6 @@ OSSFILES = $(OSSDIRS)/3rd_party.md \
 	$(OSSDIRS)/BSD_License.txt \
 	$(OSSDIRS)/MIT_License.txt \
 	$(OSSDIRS)/MessagePack/COPYING \
-	$(OSSDIRS)/activemq-cpp-library/org/NOTICE.txt \
-	$(OSSDIRS)/apr/org/NOTICE \
 	$(OSSDIRS)/ebb/LICENSE \
 	$(OSSDIRS)/picojson/org/include/README.mkdn \
 	$(OSSDIRS)/purewell/purewell.txt \
@@ -39,7 +37,8 @@ OSSFILES = $(OSSDIRS)/3rd_party.md \
 	$(OSSDIRS)/json-simple/fangyidong/LICENSE.txt \
 	$(OSSDIRS)/uuid/uuid/COPYING \
 	$(OSSDIRS)/omaha/COPYING \
-	$(OSSDIRS)/zigzag_encoding/LICENSE 
+	$(OSSDIRS)/zigzag_encoding/LICENSE \
+	$(OSSDIRS)/fletcher32_simd/fletcher32_simd/LICENSE 
 
 $(BINDIRS)/gridstore.jar:
 	cd java_client;ant

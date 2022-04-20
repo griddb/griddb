@@ -37,7 +37,7 @@
 class FunctorNow : public TqlFunc {
 public:
 	using TqlFunc::operator();
-	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManager &) {
+	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &) {
 		if (!args.empty()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Argument count is invalid");
@@ -55,7 +55,7 @@ public:
 class FunctorTimestamp : public TqlFunc {
 public:
 	using TqlFunc::operator();
-	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManager &) {
+	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &) {
 		if (args.empty() || args.size() != 1) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
@@ -87,7 +87,7 @@ public:
 class FunctorToTimestamp : public TqlFunc {
 public:
 	using TqlFunc::operator();
-	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManager &) {
+	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &) {
 		if (args.empty() || args.size() != 1) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
@@ -119,7 +119,7 @@ public:
 class Functor_from_timestamp : public TqlFunc {
 public:
 	using TqlFunc::operator();
-	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManager &) {
+	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &) {
 		if (args.empty() || args.size() != 1) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
@@ -145,7 +145,7 @@ public:
 class FunctorToTimestampMS : public TqlFunc {
 public:
 	using TqlFunc::operator();
-	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManager &) {
+	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &) {
 		if (args.empty() || args.size() != 1) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
@@ -176,7 +176,7 @@ public:
 class FunctorToEpoch : public TqlFunc {
 public:
 	using TqlFunc::operator();
-	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManager &) {
+	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &) {
 		if (args.empty() || args.size() != 1) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
@@ -202,7 +202,7 @@ public:
 class FunctorToEpochMS : public TqlFunc {
 public:
 	using TqlFunc::operator();
-	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManager &) {
+	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &) {
 		if (args.empty() || args.size() != 1) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
@@ -228,7 +228,7 @@ public:
  */
 class FunctorTimestampadd : public TqlFunc {
 public:
-	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManager &) {
+	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &) {
 		if (args.size() != 3) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
@@ -295,25 +295,25 @@ public:
 
 	Expr *operator()(ExprList &args, ContainerRowWrapper *column_values,
 		FunctionMap *function_map, EvalMode mode, TransactionContext &txn,
-		ObjectManager &objectManager, ExprList &argsAfterEval) {
+		ObjectManagerV4 &objectManager, AllocateStrategy &strategy, ExprList &argsAfterEval) {
 		if (args[0]->isColumn()) {
 			argsAfterEval.insert(argsAfterEval.end(),
 				Expr::newStringValue(args[0]->getValueAsString(txn), txn));
 			for (size_t i = 1; i < args.size(); i++) {
 				argsAfterEval.insert(argsAfterEval.end(),
 					args[i]->eval(
-						txn, objectManager, column_values, function_map, mode));
+						txn, objectManager, strategy, column_values, function_map, mode));
 			}
 		}
 		else {
 			for (size_t i = 0; i < args.size(); i++) {
 				argsAfterEval.insert(argsAfterEval.end(),
 					args[i]->eval(
-						txn, objectManager, column_values, function_map, mode));
+						txn, objectManager, strategy, column_values, function_map, mode));
 			}
 		}
 
-		Expr *ret = (*this)(argsAfterEval, txn, objectManager);
+		Expr *ret = (*this)(argsAfterEval, txn, objectManager, strategy);
 
 		for (ExprList::const_iterator it = argsAfterEval.begin();
 			 it != argsAfterEval.end(); it++) {
@@ -334,7 +334,7 @@ public:
  */
 class FunctorTimestampdiff : public TqlFunc {
 public:
-	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManager &) {
+	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &strategy) {
 		if (args.size() != 3) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
@@ -400,25 +400,25 @@ public:
 
 	Expr *operator()(ExprList &args, ContainerRowWrapper *column_values,
 		FunctionMap *function_map, EvalMode mode, TransactionContext &txn,
-		ObjectManager &objectManager, ExprList &argsAfterEval) {
+		ObjectManagerV4 &objectManager, AllocateStrategy &strategy, ExprList &argsAfterEval) {
 		if (args[0]->isColumn()) {
 			argsAfterEval.insert(argsAfterEval.end(),
 				Expr::newStringValue(args[0]->getValueAsString(txn), txn));
 			for (size_t i = 1; i < args.size(); i++) {
 				argsAfterEval.insert(argsAfterEval.end(),
 					args[i]->eval(
-						txn, objectManager, column_values, function_map, mode));
+						txn, objectManager, strategy, column_values, function_map, mode));
 			}
 		}
 		else {
 			for (size_t i = 0; i < args.size(); i++) {
 				argsAfterEval.insert(argsAfterEval.end(),
 					args[i]->eval(
-						txn, objectManager, column_values, function_map, mode));
+						txn, objectManager, strategy, column_values, function_map, mode));
 			}
 		}
 
-		Expr *ret = (*this)(argsAfterEval, txn, objectManager);
+		Expr *ret = (*this)(argsAfterEval, txn, objectManager, strategy);
 
 		for (ExprList::const_iterator it = argsAfterEval.begin();
 			 it != argsAfterEval.end(); it++) {

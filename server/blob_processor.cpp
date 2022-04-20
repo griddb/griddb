@@ -39,47 +39,55 @@ void LogDevide::initialize(uint64_t inputSize) {
 		if (restSize <= DIVIED_SIZE_LIMIT) {
 			sizeList_[dividedElemNum_++] = restSize;
 		} else {
-			uint32_t sizeOfBuddy = calcSizeOfBuddy(restSize);
-
-			uint32_t halfSize = (sizeOfBuddy >> 1) - ObjectAllocator::BLOCK_HEADER_SIZE;
-			uint32_t quarterSize = (sizeOfBuddy >> 2) - ObjectAllocator::BLOCK_HEADER_SIZE;
-			uint32_t oneEightSize = (sizeOfBuddy >> 3) - ObjectAllocator::BLOCK_HEADER_SIZE;
-			uint32_t oneSixteenSize = (sizeOfBuddy >> 4) - ObjectAllocator::BLOCK_HEADER_SIZE;
-			if (restSize > halfSize + quarterSize) {
-				if (restSize > halfSize + quarterSize + oneEightSize) {
-					sizeList_[dividedElemNum_++] = restSize;
-				} else {
-					sizeList_[dividedElemNum_++] = halfSize;
-					sizeList_[dividedElemNum_++] = quarterSize;
-					sizeList_[dividedElemNum_++] = restSize - halfSize - quarterSize;
-				}
-			} else if (restSize > halfSize + oneEightSize) {
-				if (restSize > halfSize + oneEightSize + oneSixteenSize) {
-					sizeList_[dividedElemNum_++] = halfSize;
-					sizeList_[dividedElemNum_++] = restSize - halfSize;
-				} else {
-					sizeList_[dividedElemNum_++] = halfSize;
-					sizeList_[dividedElemNum_++] = oneEightSize;
-					sizeList_[dividedElemNum_++] = restSize - halfSize - oneEightSize;
-				}
-			} else {
-				sizeList_[dividedElemNum_++] = halfSize;
-				sizeList_[dividedElemNum_++] = restSize - halfSize;
-			}
+			initializeDevide(restSize);
 		}
 	}
 }
 
-BlobCursor::BlobCursor(PartitionId pId, ObjectManager &objectManager,
+void LogDevide::initializeDevide(uint32_t restSize) {
+	uint32_t sizeOfBuddy = calcSizeOfBuddy(restSize);
+
+	uint32_t halfSize = (sizeOfBuddy >> 1) - ObjectManagerV4::OBJECT_HEADER_SIZE;
+	uint32_t quarterSize = (sizeOfBuddy >> 2) - ObjectManagerV4::OBJECT_HEADER_SIZE;
+	uint32_t oneEightSize = (sizeOfBuddy >> 3) - ObjectManagerV4::OBJECT_HEADER_SIZE;
+	uint32_t oneSixteenSize = (sizeOfBuddy >> 4) - ObjectManagerV4::OBJECT_HEADER_SIZE;
+	if (restSize > halfSize + quarterSize) {
+		if (restSize > halfSize + quarterSize + oneEightSize) {
+			sizeList_[dividedElemNum_++] = restSize;
+		}
+		else {
+			sizeList_[dividedElemNum_++] = halfSize;
+			sizeList_[dividedElemNum_++] = quarterSize;
+			sizeList_[dividedElemNum_++] = restSize - halfSize - quarterSize;
+		}
+	}
+	else if (restSize > halfSize + oneEightSize) {
+		if (restSize > halfSize + oneEightSize + oneSixteenSize) {
+			sizeList_[dividedElemNum_++] = halfSize;
+			sizeList_[dividedElemNum_++] = restSize - halfSize;
+		}
+		else {
+			sizeList_[dividedElemNum_++] = halfSize;
+			sizeList_[dividedElemNum_++] = oneEightSize;
+			sizeList_[dividedElemNum_++] = restSize - halfSize - oneEightSize;
+		}
+	}
+	else {
+		sizeList_[dividedElemNum_++] = halfSize;
+		sizeList_[dividedElemNum_++] = restSize - halfSize;
+	}
+}
+
+BlobCursor::BlobCursor(ObjectManagerV4 &objectManager, AllocateStrategy &allocateStrategy,
 					   const uint8_t * const ptr)
-					   : pId_(pId), objectManager_(objectManager),
-					   allocateStrategy_(AllocateStrategy()),
+					   : objectManager_(objectManager),
+					   allocateStrategy_(allocateStrategy),
 					   baseAddr_(ptr), topArrayAddr_(NULL),
-					   curObj_(pId, objectManager), arrayCursor_(NULL),
+					   curObj_(objectManager, allocateStrategy_), arrayCursor_(NULL),
 					   currentElem_(-1), maxElem_(0), currentDepth_(0),
 					   maxDepth_(0),  logDevide_(objectManager), neighborOId_(UNDEF_OID) {
 	for (uint32_t i = 0; i < MAX_DEPTH; i++) {
-		stackCusor_[i].reset(pId, objectManager);
+		stackCusor_[i].reset(objectManager, allocateStrategy_);
 	}
 	uint32_t headerLen = ValueProcessor::getEncodedVarSize(baseAddr_);  
 	uint64_t size = ValueProcessor::decodeVarSize64(baseAddr_ + headerLen);  
@@ -93,22 +101,22 @@ BlobCursor::BlobCursor(PartitionId pId, ObjectManager &objectManager,
 	}
 }
 
-BlobCursor::BlobCursor(PartitionId pId, ObjectManager &objectManager,
-					   const AllocateStrategy &allocateStrategy,
+BlobCursor::BlobCursor(ObjectManagerV4 &objectManager,
+					   AllocateStrategy &allocateStrategy,
 					   const uint8_t *ptr, OId neighborOId)
-					   : pId_(pId), objectManager_(objectManager),
+					   : objectManager_(objectManager),
 					   allocateStrategy_(allocateStrategy),
 					   baseAddr_(ptr), topArrayAddr_(NULL),
-					   curObj_(pId, objectManager), arrayCursor_(NULL),
+					   curObj_(objectManager, allocateStrategy_), arrayCursor_(NULL),
 					   currentElem_(-1), maxElem_(0), currentDepth_(0),
 					   maxDepth_(0), logDevide_(objectManager), neighborOId_(neighborOId) {
 	for (uint32_t i = 0; i < MAX_DEPTH; i++) {
-		stackCusor_[i].reset(pId, objectManager);
+		stackCusor_[i].reset(objectManager, allocateStrategy_);
 	}
 }
 
 
-uint32_t BlobCursor::getPrefixDataSize(ObjectManager &objectManager, uint64_t totalSize) {
+uint32_t BlobCursor::getPrefixDataSize(ObjectManagerV4 &objectManager, uint64_t totalSize) {
 	LogDevide logDevide(objectManager);
 	logDevide.initialize(totalSize);
 	uint32_t elemNum = logDevide.getElemNum();
@@ -129,13 +137,13 @@ uint32_t BlobCursor::getPrefixDataSize(ObjectManager &objectManager, uint64_t to
 	return encodeBlobSizeLen + encodeElemNumSizeLen + encodeDepthLen + topArraySize;
 }
 
-uint32_t BlobCursor::getMaxArrayNum(ObjectManager &objectManager) {
+uint32_t BlobCursor::getMaxArrayNum(ObjectManagerV4 &objectManager) {
 	uint32_t headerSize = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint64_t);
 	uint32_t allocateSize = objectManager.getRecommendtLimitObjectSize() - headerSize;
 	return allocateSize / sizeof(BlobArrayElement);
 }
 
-uint32_t BlobCursor::calcDepth(ObjectManager &objectManager, uint64_t totalSize, uint32_t elemNum, uint32_t &topArrayNum) {
+uint32_t BlobCursor::calcDepth(ObjectManagerV4 &objectManager, uint64_t totalSize, uint32_t elemNum, uint32_t &topArrayNum) {
 	uint32_t depth = 0;
 	if (totalSize >= MIN_DIVIDED_SIZE) {
 		depth++;
@@ -190,9 +198,10 @@ uint32_t BlobCursor::initialize(uint8_t *destAddr, uint64_t totalSize) {
 void BlobCursor::finalize() {
 	reset();
 	if (isDivided()) {
+		ChunkAccessor ca;
 		while (next(REMOVE)) {
 			const BlobArrayElement *element = arrayCursor_->getCurrentElement();
-			objectManager_.free(pId_, element->oId_);
+			objectManager_.free(ca, allocateStrategy_.getGroupId(), element->oId_);
 		}
 	}
 }
@@ -240,26 +249,32 @@ bool BlobCursor::next(CURSOR_MODE mode) {
 		}
 	} else if (arrayCursor_->next()) {
 	} else {
-		if (mode == REMOVE) {
-			arrayCursor_->finalize();
-		}
-		bool isExist = (currentDepth_ > 0);
-		while (currentDepth_ > 0) {
-			currentDepth_--;
-			arrayCursor_ = &(stackCusor_[currentDepth_]);
-			if (arrayCursor_->next()) {
-				isExist = true;
-				break;
-			} else if (mode == REMOVE) {
-				arrayCursor_->finalize();
-			}
-		}
-		UNUSED_VARIABLE(isExist);
-		assert(isExist);
-		down(mode);
+		nextBlock(mode);
 	}
 	return true;
 }
+
+void BlobCursor::nextBlock(CURSOR_MODE mode) {
+	if (mode == REMOVE) {
+		arrayCursor_->finalize();
+	}
+	bool isExist = (currentDepth_ > 0);
+	while (currentDepth_ > 0) {
+		currentDepth_--;
+		arrayCursor_ = &(stackCusor_[currentDepth_]);
+		if (arrayCursor_->next()) {
+			isExist = true;
+			break;
+		}
+		else if (mode == REMOVE) {
+			arrayCursor_->finalize();
+		}
+	}
+	UNUSED_VARIABLE(isExist);
+	assert(isExist);
+	down(mode);
+}
+
 
 void BlobCursor::down(CURSOR_MODE mode) {
 	while (currentDepth_ + 1 < maxDepth_) {
@@ -270,12 +285,12 @@ void BlobCursor::down(CURSOR_MODE mode) {
 			if (neighborOId_ == UNDEF_OID) {
 				stackCusor_[currentDepth_].allocate<BlobArrayObject>(
 					BlobArrayObject::getObjectSize(arrayNum),
-					allocateStrategy_, newOId, OBJECT_TYPE_VARIANT);
+					newOId, OBJECT_TYPE_VARIANT);
 			}
 			else {
 				stackCusor_[currentDepth_].allocateNeighbor<BlobArrayObject>(
 					BlobArrayObject::getObjectSize(arrayNum),
-					allocateStrategy_, newOId, neighborOId_,
+					newOId, neighborOId_,
 					OBJECT_TYPE_VARIANT);
 			}
 			neighborOId_ = newOId;
@@ -317,7 +332,7 @@ void BlobCursor::getCurrentBinary(const uint8_t *&ptr, uint32_t &size) {
 		if (curObj_.getBaseOId() != UNDEF_OID) {
 			curObj_.loadNeighbor(oId, OBJECT_READ_ONLY);
 		} else {
-			curObj_.load(oId);
+			curObj_.load(oId, false);
 		}
 		size = static_cast<uint32_t>(element->size_);
 		ptr = curObj_.getBaseAddr();
@@ -346,11 +361,11 @@ void BlobCursor::addBinary(const uint8_t *addr, uint32_t size) {
 		OId oId;
 		if (neighborOId_ == UNDEF_OID) {
 			curObj_.allocate<BaseObject>(
-				size, allocateStrategy_, oId, OBJECT_TYPE_VARIANT);
+				size, oId, OBJECT_TYPE_VARIANT);
 		}
 		else {
 			curObj_.allocateNeighbor<BaseObject>(
-				size, allocateStrategy_, oId, neighborOId_,	OBJECT_TYPE_VARIANT);
+				size, oId, neighborOId_, OBJECT_TYPE_VARIANT);
 		}
 		neighborOId_ = oId;
 		BlobArrayElement newElement(size, oId);
@@ -387,6 +402,7 @@ void BlobCursor::dump(util::NormalOStringStream &ss, bool forExport) {
 }
 
 
+
 uint8_t *BlobCursor::getBinary(util::StackAllocator &alloc) {
 	uint64_t blobSize = getTotalSize();
 	uint8_t *destAddr = static_cast<uint8_t *>(alloc.allocate(blobSize));
@@ -406,7 +422,7 @@ uint8_t *BlobCursor::getBinary(util::StackAllocator &alloc) {
 	@brief Compare message field value with object field value
 */
 int32_t BlobProcessor::compare(TransactionContext &txn,
-	ObjectManager &objectManager, ColumnId columnId,
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, ColumnId columnId,
 	MessageRowStore *messageRowStore, uint8_t *objectRowField) {
 	const uint8_t *inputField;
 	uint32_t inputFieldSize;
@@ -414,7 +430,7 @@ int32_t BlobProcessor::compare(TransactionContext &txn,
 	inputField +=
 		ValueProcessor::getEncodedVarSize(inputFieldSize);  
 
-	BlobCursor blobCursor(txn.getPartitionId(), objectManager, objectRowField);
+	BlobCursor blobCursor(objectManager, strategy, objectRowField);
 	while (blobCursor.next()) {
 		uint32_t targetDataSize = 0;
 		const uint8_t *targetData = NULL;
@@ -442,11 +458,11 @@ int32_t BlobProcessor::compare(TransactionContext &txn,
 	@brief Compare object field values
 */
 int32_t BlobProcessor::compare(TransactionContext &txn,
-	ObjectManager &objectManager, ColumnType, uint8_t *srcObjectRowField,
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, ColumnType, uint8_t *srcObjectRowField,
 	uint8_t *targetObjectRowField) {
 
-	BlobCursor srcBlobCursor(txn.getPartitionId(), objectManager, srcObjectRowField);
-	BlobCursor targetBlobCursor(txn.getPartitionId(), objectManager, targetObjectRowField);
+	BlobCursor srcBlobCursor(objectManager, strategy, srcObjectRowField);
+	BlobCursor targetBlobCursor(objectManager, strategy, targetObjectRowField);
 	uint64_t restSrcTotalSize = srcBlobCursor.getTotalSize();
 	uint64_t restTargetTotalSize = targetBlobCursor.getTotalSize();
 
@@ -493,7 +509,7 @@ int32_t BlobProcessor::compare(TransactionContext &txn,
 	@brief Set field value to message
 */
 void BlobProcessor::getField(TransactionContext &txn,
-	ObjectManager &objectManager, ColumnId columnId, const Value *objectValue,
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, ColumnId columnId, const Value *objectValue,
 	MessageRowStore *messageRowStore) {
 
 	if (objectValue->data() == NULL) {
@@ -501,7 +517,7 @@ void BlobProcessor::getField(TransactionContext &txn,
 		return;
 	}
 
-	BlobCursor blobCursor(txn.getPartitionId(), objectManager, const_cast<uint8_t *>(objectValue->data()));
+	BlobCursor blobCursor(objectManager, strategy, const_cast<uint8_t *>(objectValue->data()));
 	uint64_t blobSize = blobCursor.getTotalSize();
 	messageRowStore->setVarDataHeaderField(columnId, static_cast<uint32_t>(blobSize));
 
@@ -520,12 +536,12 @@ void BlobProcessor::getField(TransactionContext &txn,
 /*!
 	@brief Clone field value
 */
-void BlobProcessor::clone(TransactionContext &txn, ObjectManager &objectManager,
+void BlobProcessor::clone(TransactionContext &txn, ObjectManagerV4 &objectManager,
 	ColumnType, const uint8_t *srcObjectField, uint8_t *destObjectField,
-	const AllocateStrategy &allocateStrategy, OId neighborOId) {
+	AllocateStrategy &allocateStrategy, OId neighborOId) {
 
-	BlobCursor srcBlobCursor(txn.getPartitionId(), objectManager, const_cast<uint8_t *>(srcObjectField));
-	BlobCursor destBlobCursor(txn.getPartitionId(), objectManager, allocateStrategy, destObjectField, neighborOId);
+	BlobCursor srcBlobCursor(objectManager, allocateStrategy, const_cast<uint8_t *>(srcObjectField));
+	BlobCursor destBlobCursor(objectManager, allocateStrategy, destObjectField, neighborOId);
 
 	destBlobCursor.initialize(destObjectField, srcBlobCursor.getTotalSize());
 	while (srcBlobCursor.next()) {
@@ -543,8 +559,8 @@ void BlobProcessor::clone(TransactionContext &txn, ObjectManager &objectManager,
 	@brief Remove field value
 */
 void BlobProcessor::remove(TransactionContext &txn,
-	ObjectManager &objectManager, ColumnType, uint8_t *objectField) {
-	BlobCursor blobCursor(txn.getPartitionId(), objectManager, objectField);
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, ColumnType, uint8_t *objectField) {
+	BlobCursor blobCursor(objectManager, strategy, objectField);
 	blobCursor.finalize();
 }
 
@@ -552,15 +568,14 @@ void BlobProcessor::remove(TransactionContext &txn,
 	@brief Set field value
 */
 void BlobProcessor::setField(TransactionContext &txn,
-	ObjectManager &objectManager, const uint8_t *srcAddr, uint32_t srcSize,
+	ObjectManagerV4 &objectManager, const uint8_t *srcAddr, uint32_t srcSize,
 	uint8_t *destAddr, uint32_t &destSize,
-	const AllocateStrategy &allocateStrategy, OId neighborOId) {
+	AllocateStrategy &allocateStrategy, OId neighborOId) {
 
 	const uint8_t *currentAddr = srcAddr + 
 		ValueProcessor::getEncodedVarSize(srcSize);  
-	BlobCursor blobCursor(txn.getPartitionId(), objectManager, allocateStrategy, destAddr, neighborOId);
+	BlobCursor blobCursor(objectManager, allocateStrategy, destAddr, neighborOId);
 	destSize = blobCursor.initialize(destAddr, srcSize);
 	blobCursor.setBinary(currentAddr, srcSize);
 }
-
 

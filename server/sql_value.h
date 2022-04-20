@@ -22,7 +22,6 @@
 #include "util/container.h"
 
 
-
 typedef TupleList::TupleColumnType TupleColumnType;
 
 struct TupleTypes {
@@ -4664,10 +4663,17 @@ private:
 
 class SQLValues::BaseLatchTarget {
 public:
+	virtual ~BaseLatchTarget();
+
 	virtual void unlatch() throw() = 0;
 	virtual void close() throw() = 0;
 
+protected:
+	BaseLatchTarget();
+
 private:
+	BaseLatchTarget(const BaseLatchTarget&);
+	BaseLatchTarget& operator=(const BaseLatchTarget&);
 };
 
 

@@ -19,14 +19,14 @@
 	@brief TR: R-Tree implementation
 */
 
-#include "data_store.h"
+#include "data_store_v4.h"
 #include "internal.h"
-#include "object_manager.h"
+#include "object_manager_v4.h"
 #include "transaction_context.h"
 
 /* serach an entry by using user-defined collision detection */
-void TrNode_search(TransactionContext &txn, ObjectManager &objectManager,
-	OId nodeOId, TrCheckCallback ccb, void *ccbarg, TrHitCallback hcb,
+void TrNode_search(TransactionContext &txn, ObjectManagerV4 &objectManager,
+	AllocateStrategy &strategy, OId nodeOId, TrCheckCallback ccb, void *ccbarg, TrHitCallback hcb,
 	void *hcbarg)
 #if 1
 {
@@ -34,7 +34,7 @@ void TrNode_search(TransactionContext &txn, ObjectManager &objectManager,
 	NULL_PTR_CHECK(ccb);
 	NULL_PTR_CHECK(hcb);
 
-	BaseObject baseObj(txn.getPartitionId(), objectManager, nodeOId);
+	BaseObject baseObj(objectManager, strategy, nodeOId);
 	const TrNode n = baseObj.getBaseAddr<const TrNode>();
 
 	int32_t i, j;
@@ -57,13 +57,13 @@ void TrNode_search(TransactionContext &txn, ObjectManager &objectManager,
 		for (i = 0; i < j; i++) {
 			TrChild b = &children[i];
 			TrNode_search(
-				txn, objectManager, b->nodeOId, ccb, ccbarg, hcb, hcbarg);
+				txn, objectManager, strategy, b->nodeOId, ccb, ccbarg, hcb, hcbarg);
 		}
 	}
 }
 #else
 {
-	BaseObject baseObj(txn.getPartitionId(), txn.getObjectManager(), nodeOId);
+	BaseObject baseObj(objectManager, strategy, nodeOId);
 	const TrNode n = baseObj.getBaseAddr<const TrNode>();
 	int32_t i, j;
 	TrChildTag children[TR_CHILD_COUNT_MAX];
@@ -85,17 +85,17 @@ void TrNode_search(TransactionContext &txn, ObjectManager &objectManager,
 		for (i = 0; i < j; i++) {
 			TrChild b = &children[i];
 			TrNode_search(
-				txn, objectManager, b->nodeOId, ccb, ccbarg, hcb, hcbarg);
+				txn, objectManager, strategy, b->nodeOId, ccb, ccbarg, hcb, hcbarg);
 		}
 	}
 }
 #endif
 
-void TrNode_dump(TransactionContext &txn, ObjectManager &objectManager,
-	OId nodeOId, int32_t depth) {
+void TrNode_dump(TransactionContext &txn, ObjectManagerV4 &objectManager,
+	AllocateStrategy &strategy, OId nodeOId, int32_t depth) {
 	UNDEF_OID_CHECK(nodeOId);
 
-	BaseObject baseObj(txn.getPartitionId(), objectManager, nodeOId);
+	BaseObject baseObj(objectManager, strategy, nodeOId);
 	const TrNode n = baseObj.getBaseAddr<const TrNode>();
 
 	int32_t i, j;
@@ -136,7 +136,7 @@ void TrNode_dump(TransactionContext &txn, ObjectManager &objectManager,
 	if (!TrNode_leaf_p(n)) {
 		for (i = 0; i < j; i++) {
 			TrChild b = &children[i];
-			TrNode_dump(txn, objectManager, b->nodeOId, depth + 1);
+			TrNode_dump(txn, objectManager, strategy, b->nodeOId, depth + 1);
 		}
 	}
 }
@@ -149,14 +149,14 @@ static int32_t each_check_cb(TransactionContext &txn, TrRect r, void *ccbarg) {
 }
 
 /* enumerate all entries */
-void TrNode_all(TransactionContext &txn, ObjectManager &objectManager, OId nOId,
+void TrNode_all(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId nOId,
 	TrHitCallback hcb, void *hcbarg) {
-	TrNode_search(txn, objectManager, nOId, each_check_cb, 0, hcb, hcbarg);
+	TrNode_search(txn, objectManager, strategy, nOId, each_check_cb, 0, hcb, hcbarg);
 }
 void TrNode_all_dump(
-	TransactionContext &txn, ObjectManager &objectManager, OId nOId) {
+	TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId nOId) {
 	std::cout << "=========Rtree dump start========" << std::endl;
-	TrNode_dump(txn, objectManager, nOId, 0);
+	TrNode_dump(txn, objectManager, strategy, nOId, 0);
 	std::cout << "=========Rtree dump end========" << std::endl;
 }
 
@@ -166,13 +166,13 @@ int32_t TrRect_overlap_p_cb(TransactionContext &, TrRect r, void *ccbarg) {
 }
 
 /* search all entries that overlap with the given rect */
-void TrNode_search_rect(TransactionContext &txn, ObjectManager &objectManager,
-	OId nOId, TrRect r, TrHitCallback hcb, void *hcbarg) {
+void TrNode_search_rect(TransactionContext &txn, ObjectManagerV4 &objectManager,
+	AllocateStrategy &strategy, OId nOId, TrRect r, TrHitCallback hcb, void *hcbarg) {
 	NULL_PTR_CHECK(r);
 	if (r->xmin > r->xmax) {
 		return;
 	}
-	TrNode_search(txn, objectManager, nOId,
+	TrNode_search(txn, objectManager, strategy, nOId,
 		(TrCheckCallback)TrRect_overlap_p_cb, r, hcb, hcbarg);
 }
 
@@ -191,8 +191,8 @@ static int32_t qkey_check_cb(TransactionContext &txn, TrRect r, void *ccbarg) {
 	return TrPv3Test2(&box, qkey);
 }
 
-void TrNode_search_quad(TransactionContext &txn, ObjectManager &objectManager,
-	OId nOId, TrPv3Key *qkey, TrHitCallback hcb, void *hcbarg) {
+void TrNode_search_quad(TransactionContext &txn, ObjectManagerV4 &objectManager,
+	AllocateStrategy &strategy, OId nOId, TrPv3Key *qkey, TrHitCallback hcb, void *hcbarg) {
 	NULL_PTR_CHECK(qkey);
-	TrNode_search(txn, objectManager, nOId, qkey_check_cb, qkey, hcb, hcbarg);
+	TrNode_search(txn, objectManager, strategy, nOId, qkey_check_cb, qkey, hcb, hcbarg);
 }

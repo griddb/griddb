@@ -41,7 +41,7 @@ const Timestamp ValueProcessor::SUPPORT_MAX_TIMESTAMP =
 	@brief Compare message field value with object field value
 */
 int32_t ValueProcessor::compare(TransactionContext &txn,
-	ObjectManager &objectManager, ColumnId columnId,
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, ColumnId columnId,
 	MessageRowStore *messageRowStore, uint8_t *objectRowField) {
 	const uint8_t *inputField;
 	uint32_t inputFieldSize;
@@ -66,19 +66,19 @@ int32_t ValueProcessor::compare(TransactionContext &txn,
 	} break;
 	case COLUMN_TYPE_STRING:
 		result = StringProcessor::compare(
-			txn, objectManager, columnId, messageRowStore, objectRowField);
+			txn, objectManager, strategy, columnId, messageRowStore, objectRowField);
 		break;
 	case COLUMN_TYPE_GEOMETRY:
 		result = GeometryProcessor::compare(
-			txn, objectManager, columnId, messageRowStore, objectRowField);
+			txn, objectManager, strategy, columnId, messageRowStore, objectRowField);
 		break;
 	case COLUMN_TYPE_BLOB:
 		result = BlobProcessor::compare(
-			txn, objectManager, columnId, messageRowStore, objectRowField);
+			txn, objectManager, strategy, columnId, messageRowStore, objectRowField);
 		break;
 	case COLUMN_TYPE_STRING_ARRAY:
 		result = StringArrayProcessor::compare(
-			txn, objectManager, columnId, messageRowStore, objectRowField);
+			txn, objectManager, strategy, columnId, messageRowStore, objectRowField);
 		break;
 	case COLUMN_TYPE_BOOL_ARRAY:
 	case COLUMN_TYPE_BYTE_ARRAY:
@@ -89,7 +89,7 @@ int32_t ValueProcessor::compare(TransactionContext &txn,
 	case COLUMN_TYPE_DOUBLE_ARRAY:
 	case COLUMN_TYPE_TIMESTAMP_ARRAY:
 		result = ArrayProcessor::compare(
-			txn, objectManager, columnId, messageRowStore, objectRowField);
+			txn, objectManager, strategy, columnId, messageRowStore, objectRowField);
 		break;
 	default:
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
@@ -101,7 +101,7 @@ int32_t ValueProcessor::compare(TransactionContext &txn,
 	@brief Compare object field values
 */
 int32_t ValueProcessor::compare(TransactionContext &txn,
-	ObjectManager &objectManager, ColumnType type, uint8_t *srcObjectRowField,
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, ColumnType type, uint8_t *srcObjectRowField,
 	uint8_t *targetObjectRowField) {
 	int32_t result;
 	switch (type) {
@@ -121,19 +121,19 @@ int32_t ValueProcessor::compare(TransactionContext &txn,
 	} break;
 	case COLUMN_TYPE_STRING:
 		result = StringProcessor::compare(
-			txn, objectManager, type, srcObjectRowField, targetObjectRowField);
+			txn, objectManager, strategy, type, srcObjectRowField, targetObjectRowField);
 		break;
 	case COLUMN_TYPE_GEOMETRY:
 		result = GeometryProcessor::compare(
-			txn, objectManager, type, srcObjectRowField, targetObjectRowField);
+			txn, objectManager, strategy, type, srcObjectRowField, targetObjectRowField);
 		break;
 	case COLUMN_TYPE_BLOB:
 		result = BlobProcessor::compare(
-			txn, objectManager, type, srcObjectRowField, targetObjectRowField);
+			txn, objectManager, strategy, type, srcObjectRowField, targetObjectRowField);
 		break;
 	case COLUMN_TYPE_STRING_ARRAY:
 		result = StringArrayProcessor::compare(
-			txn, objectManager, type, srcObjectRowField, targetObjectRowField);
+			txn, objectManager, strategy, type, srcObjectRowField, targetObjectRowField);
 		break;
 	case COLUMN_TYPE_BOOL_ARRAY:
 	case COLUMN_TYPE_BYTE_ARRAY:
@@ -144,7 +144,7 @@ int32_t ValueProcessor::compare(TransactionContext &txn,
 	case COLUMN_TYPE_DOUBLE_ARRAY:
 	case COLUMN_TYPE_TIMESTAMP_ARRAY:
 		result = ArrayProcessor::compare(
-			txn, objectManager, type, srcObjectRowField, targetObjectRowField);
+			txn, objectManager, strategy, type, srcObjectRowField, targetObjectRowField);
 		break;
 	default:
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
@@ -156,7 +156,7 @@ int32_t ValueProcessor::compare(TransactionContext &txn,
 	@brief Set field value to message
 */
 void ValueProcessor::getField(TransactionContext &txn,
-	ObjectManager &objectManager, ColumnId columnId, const Value *objectValue,
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, ColumnId columnId, const Value *objectValue,
 	MessageRowStore *messageRowStore) {
 
 	if (objectValue->isNullValue()) {
@@ -181,19 +181,19 @@ void ValueProcessor::getField(TransactionContext &txn,
 		break;
 	case COLUMN_TYPE_STRING:
 		StringProcessor::getField(
-			txn, objectManager, columnId, objectValue, messageRowStore);
+			txn, objectManager, strategy, columnId, objectValue, messageRowStore);
 		break;
 	case COLUMN_TYPE_GEOMETRY:
 		GeometryProcessor::getField(
-			txn, objectManager, columnId, objectValue, messageRowStore);
+			txn, objectManager, strategy, columnId, objectValue, messageRowStore);
 		break;
 	case COLUMN_TYPE_BLOB:
 		BlobProcessor::getField(
-			txn, objectManager, columnId, objectValue, messageRowStore);
+			txn, objectManager, strategy, columnId, objectValue, messageRowStore);
 		break;
 	case COLUMN_TYPE_STRING_ARRAY:
 		StringArrayProcessor::getField(
-			txn, objectManager, columnId, objectValue, messageRowStore);
+			txn, objectManager, strategy, columnId, objectValue, messageRowStore);
 		break;
 	case COLUMN_TYPE_BOOL_ARRAY:
 	case COLUMN_TYPE_BYTE_ARRAY:
@@ -204,7 +204,7 @@ void ValueProcessor::getField(TransactionContext &txn,
 	case COLUMN_TYPE_DOUBLE_ARRAY:
 	case COLUMN_TYPE_TIMESTAMP_ARRAY:
 		ArrayProcessor::getField(
-			txn, objectManager, columnId, objectValue, messageRowStore);
+			txn, objectManager, strategy, columnId, objectValue, messageRowStore);
 		break;
 	default:
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
@@ -228,9 +228,9 @@ std::string ValueProcessor::dumpMemory(
 	return ss.str();
 }
 
-VariableArrayCursor::VariableArrayCursor(TransactionContext &txn,
-	ObjectManager &objectManager, OId oId, AccessMode accessMode)
-	: BaseObject(txn.getPartitionId(), objectManager),
+VariableArrayCursor::VariableArrayCursor(
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId oId, AccessMode accessMode)
+	: BaseObject(objectManager, strategy),
 	  curObject_(*this),
 	  elemCursor_(UNDEF_CURSOR_POS),
 	  accessMode_(accessMode) {
@@ -242,7 +242,8 @@ VariableArrayCursor::VariableArrayCursor(TransactionContext &txn,
 }
 
 VariableArrayCursor::VariableArrayCursor(uint8_t *addr)
-	: BaseObject(addr), curObject_(*this), elemCursor_(UNDEF_CURSOR_POS) {
+	: BaseObject(addr), curObject_(*this), elemCursor_(UNDEF_CURSOR_POS), 
+	  accessMode_(OBJECT_READ_ONLY) {
 	rootOId_ = getBaseOId();
 	elemNum_ = ValueProcessor::decodeVarSize(curObject_.getBaseAddr());
 	curObject_.moveCursor(
@@ -325,8 +326,8 @@ bool VariableArrayCursor::moveElement(uint32_t pos) {
 /*!
 	@brief Clone
 */
-OId VariableArrayCursor::clone(TransactionContext &txn,
-	const AllocateStrategy &allocateStrategy, OId neighborOId) {
+OId VariableArrayCursor::clone(
+	AllocateStrategy &allocateStrategy, OId neighborOId) {
 	if (UNDEF_OID == getBaseOId()) {
 		return UNDEF_OID;
 	}
@@ -336,16 +337,16 @@ OId VariableArrayCursor::clone(TransactionContext &txn,
 	uint32_t srcDataLength = getArrayLength();
 	if (srcDataLength == 0) {
 		uint8_t *srcObj = getBaseAddr();
-		Size_t srcObjSize = getObjectManager()->getSize(srcObj);
-		BaseObject destObject(txn.getPartitionId(), *getObjectManager());
+		DSObjectSize srcObjSize = getSize();
+		BaseObject destObject(*getObjectManager(), allocateStrategy);
 		OId destOId = UNDEF_OID;
 		if (currentNeighborOId != UNDEF_OID) {
-			destObject.allocateNeighbor<uint8_t>(srcObjSize, allocateStrategy,
+			destObject.allocateNeighbor<uint8_t>(srcObjSize,
 				destOId, currentNeighborOId, OBJECT_TYPE_VARIANT);
 		}
 		else {
 			destObject.allocate<uint8_t>(
-				srcObjSize, allocateStrategy, destOId, OBJECT_TYPE_VARIANT);
+				srcObjSize, destOId, OBJECT_TYPE_VARIANT);
 		}
 		memcpy(destObject.getBaseAddr(), srcObj, srcObjSize);
 		linkOId = destOId;
@@ -355,7 +356,7 @@ OId VariableArrayCursor::clone(TransactionContext &txn,
 		OId destOId = UNDEF_OID;
 		OId prevOId = UNDEF_OID;
 		uint8_t *srcObj = NULL;
-		BaseObject destObject(txn.getPartitionId(), *getObjectManager());
+		BaseObject destObject(*getObjectManager(), allocateStrategy);
 
 		uint8_t *srcElem;
 		uint32_t srcElemSize;
@@ -367,14 +368,14 @@ OId VariableArrayCursor::clone(TransactionContext &txn,
 			srcOId = getElementOId();
 			srcElem = getElement(srcElemSize, srcCount);
 			if (srcOId != prevOId) {
-				Size_t srcObjSize = getObjectManager()->getSize(srcObj);
+				DSObjectSize srcObjSize = getSize();
 				if (currentNeighborOId != UNDEF_OID) {
 					destObject.allocateNeighbor<uint8_t>(srcObjSize,
-						allocateStrategy, destOId, currentNeighborOId,
+						destOId, currentNeighborOId,
 						OBJECT_TYPE_VARIANT);
 				}
 				else {
-					destObject.allocate<uint8_t>(srcObjSize, allocateStrategy,
+					destObject.allocate<uint8_t>(srcObjSize,
 						destOId, OBJECT_TYPE_VARIANT);
 				}
 				currentNeighborOId =
@@ -460,7 +461,7 @@ void VariableArrayCursor::finalize() {
 }
 
 void VariableArrayCursor::checkVarDataSize(TransactionContext &txn,
-	ObjectManager &objectManager,
+	ObjectManagerV4 &objectManager,
 	const util::XArray< std::pair<uint8_t *, uint32_t> > &varList,
 	const util::XArray<ColumnType> &columnTypeList,
 	bool isConvertSpecialType,
@@ -491,7 +492,7 @@ void VariableArrayCursor::checkVarDataSize(TransactionContext &txn,
 			checkCount++) {
 			uint32_t dividedObjectSize = currentObjectSize;
 			uint32_t dividedElemNth = elemNth - 1;
-			Size_t estimateAllocateSize =
+			DSObjectSize estimateAllocateSize =
 				objectManager.estimateAllocateSize(currentObjectSize) + NEXT_OBJECT_LINK_INFO_SIZE;
 			if (checkCount == 0 && VariableArrayCursor::divisionThreshold(currentObjectSize) < estimateAllocateSize) {
 				for (size_t i = 0; i < accumulateSizeList.size(); i++) {
@@ -499,12 +500,12 @@ void VariableArrayCursor::checkVarDataSize(TransactionContext &txn,
 					if (accumulateSize == currentObjectSize) {
 						continue;
 					}
-					Size_t estimateAllocateSizeFront =
-						objectManager.estimateAllocateSize(accumulateSize + NEXT_OBJECT_LINK_INFO_SIZE) + ObjectAllocator::BLOCK_HEADER_SIZE;
-					Size_t estimateAllocateSizeBack =
+					DSObjectSize estimateAllocateSizeFront =
+						objectManager.estimateAllocateSize(accumulateSize + NEXT_OBJECT_LINK_INFO_SIZE) + ObjectManagerV4::OBJECT_HEADER_SIZE;
+					DSObjectSize estimateAllocateSizeBack =
 						objectManager.estimateAllocateSize(currentObjectSize - accumulateSize);
 					if (estimateAllocateSizeFront + estimateAllocateSizeBack < estimateAllocateSize && 
-						(VariableArrayCursor::divisionThreshold(accumulateSize + ObjectAllocator::BLOCK_HEADER_SIZE) >= estimateAllocateSizeFront)) {
+						(VariableArrayCursor::divisionThreshold(accumulateSize + ObjectManagerV4::OBJECT_HEADER_SIZE) >= estimateAllocateSizeFront)) {
 						dividedObjectSize = accumulateSize;
 						dividedElemNth -= static_cast<uint32_t>(i);
 						break;
@@ -523,7 +524,7 @@ void VariableArrayCursor::checkVarDataSize(TransactionContext &txn,
 		accumulateSizeList.push_back(currentObjectSize);
 	}
 
-	Size_t estimateAllocateSize =
+	DSObjectSize estimateAllocateSize =
 		objectManager.estimateAllocateSize(currentObjectSize);
 	if (VariableArrayCursor::divisionThreshold(currentObjectSize) < estimateAllocateSize) {
 		uint32_t dividedObjectSize = currentObjectSize;
@@ -533,12 +534,12 @@ void VariableArrayCursor::checkVarDataSize(TransactionContext &txn,
 			if (accumulateSize == currentObjectSize) {
 				continue;
 			}
-			Size_t estimateAllocateSizeFront =
-				objectManager.estimateAllocateSize(accumulateSize + NEXT_OBJECT_LINK_INFO_SIZE) + ObjectAllocator::BLOCK_HEADER_SIZE;
-			Size_t estimateAllocateSizeBack =
+			DSObjectSize estimateAllocateSizeFront =
+				objectManager.estimateAllocateSize(accumulateSize + NEXT_OBJECT_LINK_INFO_SIZE) + ObjectManagerV4::OBJECT_HEADER_SIZE;
+			DSObjectSize estimateAllocateSizeBack =
 				objectManager.estimateAllocateSize(currentObjectSize - accumulateSize);
 			if (estimateAllocateSizeFront + estimateAllocateSizeBack < estimateAllocateSize && 
-				(VariableArrayCursor::divisionThreshold(accumulateSize + ObjectAllocator::BLOCK_HEADER_SIZE) >= estimateAllocateSizeFront)) {
+				(VariableArrayCursor::divisionThreshold(accumulateSize + ObjectManagerV4::OBJECT_HEADER_SIZE) >= estimateAllocateSizeFront)) {
 				dividedObjectSize = accumulateSize;
 				dividedElemNth -= static_cast<uint32_t>(i);
 				break;
@@ -558,8 +559,8 @@ void VariableArrayCursor::checkVarDataSize(TransactionContext &txn,
 }
 
 OId VariableArrayCursor::createVariableArrayCursor(TransactionContext &txn,
-	ObjectManager &objectManager,
-	const AllocateStrategy &allocateStrategy,
+	ObjectManagerV4 &objectManager,
+	AllocateStrategy &allocateStrategy,
 	const util::XArray< std::pair<uint8_t *, uint32_t> > &varList,
 	const util::XArray<ColumnType> &columnTypeList,
 	bool isConvertSpecialType,
@@ -575,15 +576,16 @@ OId VariableArrayCursor::createVariableArrayCursor(TransactionContext &txn,
 	uint8_t *destAddr = NULL;
 	OId variableOId = UNDEF_OID;
 	OId oldVarDataOId = UNDEF_OID;
-	BaseObject oldVarObj(txn.getPartitionId(), objectManager);
-	Size_t oldVarObjSize = 0;
+	BaseObject oldVarObj(objectManager, allocateStrategy);
+	DSObjectSize oldVarObjSize = 0;
 	uint8_t *nextLinkAddr = NULL;
+	BaseObject refVarObj(objectManager, allocateStrategy);
 	for (size_t i = 0; i < varDataObjectSizeList.size(); ++i) {
 		if (i < oldVarDataOIdList.size()) {
 			oldVarDataOId = oldVarDataOIdList[i];
 			oldVarObj.load(oldVarDataOId, OBJECT_FOR_UPDATE);
 			oldVarObjSize =
-				objectManager.getSize(oldVarObj.getBaseAddr());
+				oldVarObj.getSize();
 		}
 		else {
 			oldVarDataOId = UNDEF_OID;
@@ -598,7 +600,7 @@ OId VariableArrayCursor::createVariableArrayCursor(TransactionContext &txn,
 				oldVarObj.finalize();
 			}
 			destAddr = oldVarObj.allocateNeighbor<uint8_t>(
-				varDataObjectSizeList[i], allocateStrategy, variableOId,
+				varDataObjectSizeList[i], variableOId,
 				neighborOId,
 				OBJECT_TYPE_ROW);  
 			neighborOId = variableOId;
@@ -621,6 +623,7 @@ OId VariableArrayCursor::createVariableArrayCursor(TransactionContext &txn,
 			memcpy(nextLinkAddr, &encodedOId, sizeof(uint64_t));
 			nextLinkAddr = NULL;
 		}
+		refVarObj.copyReference(oldVarObj);
 		for (; elemNth < varList.size(); elemNth++) {
 			uint32_t elemSize = varList[elemNth].second;
 			uint8_t *data = varList[elemNth].first;
@@ -666,20 +669,21 @@ OId VariableArrayCursor::createVariableArrayCursor(TransactionContext &txn,
 			}
 		}
 	}
+	ChunkAccessor ca;
 	for (size_t i = varDataObjectSizeList.size();
 		 i < oldVarDataOIdList.size(); ++i) {
 		assert(UNDEF_OID != oldVarDataOIdList[i]);
 		if (UNDEF_OID != oldVarDataOIdList[i]) {
-			objectManager.free(txn.getPartitionId(), oldVarDataOIdList[i]);
+			objectManager.free(ca, allocateStrategy.getGroupId(), oldVarDataOIdList[i]);
 		}
 	}
+
 	return topOId;
 }
 
-
 StringCursor::StringCursor(
-	TransactionContext &txn, ObjectManager &objectManager, OId oId)
-	: BaseObject(txn.getPartitionId(), objectManager, oId),
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId oId)
+	: BaseObject(objectManager, strategy, oId),
 	  zeroLengthStr_(ZERO_LENGTH_STR_BINARY_) {
 	length_ = ValueProcessor::decodeVarSize(getBaseAddr());
 	moveCursor(ValueProcessor::getEncodedVarSize(length_));  
@@ -700,7 +704,7 @@ StringCursor::StringCursor(uint8_t *binary)
 }
 
 StringCursor::StringCursor(
-	TransactionContext &txn, const uint8_t *str, uint32_t strLength)
+	util::StackAllocator& alloc, const uint8_t *str, uint32_t strLength)
 	: BaseObject(NULL), zeroLengthStr_(ZERO_LENGTH_STR_BINARY_) {
 	setBaseOId(UNDEF_OID);
 	if (str == NULL) {
@@ -711,7 +715,7 @@ StringCursor::StringCursor(
 		length_ = strLength;
 		size_t offset = ValueProcessor::getEncodedVarSize(length_);  
 		setBaseAddr(
-			ALLOC_NEW(txn.getDefaultAllocator()) uint8_t[offset + length_]);
+			ALLOC_NEW(alloc) uint8_t[offset + length_]);
 
 		uint64_t encodedLength = ValueProcessor::encodeVarSize(length_);
 		memcpy(getBaseAddr(), &encodedLength, offset);
@@ -720,7 +724,7 @@ StringCursor::StringCursor(
 	}
 }
 
-StringCursor::StringCursor(TransactionContext &txn, const char *str)
+StringCursor::StringCursor(util::StackAllocator &alloc, const char *str)
 	: BaseObject(NULL), zeroLengthStr_(ZERO_LENGTH_STR_BINARY_) {
 	setBaseOId(UNDEF_OID);
 	if (str == NULL) {
@@ -731,7 +735,7 @@ StringCursor::StringCursor(TransactionContext &txn, const char *str)
 		length_ = static_cast<uint32_t>(strlen(str));
 		size_t offset = ValueProcessor::getEncodedVarSize(length_);  
 		setBaseAddr(
-			ALLOC_NEW(txn.getDefaultAllocator()) uint8_t[offset + length_]);
+			ALLOC_NEW(alloc) uint8_t[offset + length_]);
 
 		uint64_t encodedLength = ValueProcessor::encodeVarSize(length_);
 		memcpy(getBaseAddr(), &encodedLength, offset);

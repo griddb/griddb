@@ -23,7 +23,7 @@
 
 #include "data_type.h"
 #include <float.h>
-#include "object_manager.h"  
+#include "object_manager_v4.h"  
 
 class TransactionContext;
 
@@ -57,25 +57,40 @@ private:
 */
 class BaseObject {
 public:
-	BaseObject(PartitionId pId, ObjectManager &objectManager)
-		: forUpdate_(false),
-		  baseOId_(UNDEF_OID),
-		  baseAddr_(NULL),
-		  cursor_(NULL),
-		  pId_(pId),
-		  objectManager_(&objectManager) {}
-
-	BaseObject(PartitionId pId, ObjectManager &objectManager, OId oId)
-		: forUpdate_(false), baseOId_(oId), pId_(pId),
-		  objectManager_(&objectManager) {
-		baseAddr_ = cursor_ =
-			objectManager_->getForRead<uint8_t>(pId_, baseOId_);
+	explicit BaseObject(ObjectManagerV4 &objectManager) :
+			isDirty_(false),
+			baseOId_(UNDEF_OID),
+			baseAddr_(NULL),
+			cursor_(NULL),
+			objectManager_(&objectManager),
+			strategy_(UNDEF_DS_GROUPID, &objectManager) {
 	}
 
+	BaseObject(
+			ObjectManagerV4 &objectManager, const AllocateStrategy &strategy) :
+			isDirty_(false),
+			baseOId_(UNDEF_OID),
+			baseAddr_(NULL),
+			cursor_(NULL),
+			objectManager_(&objectManager),
+			strategy_(strategy.getInfo()) {
+	}
+
+	BaseObject(
+			ObjectManagerV4 &objectManager, const AllocateStrategy &strategy,
+			OId oId) :
+			isDirty_(false),
+			baseOId_(oId),
+			objectManager_(&objectManager),
+			strategy_(strategy.getInfo()) {
+		assert(baseOId_ != UNDEF_OID);
+		baseAddr_ = cursor_ =
+				strategy_.accessor_.get<uint8_t>(baseOId_);
+	}
 
 	~BaseObject() {
 		if (baseOId_ != UNDEF_OID) {
-			objectManager_->unfix(pId_, baseOId_);
+			strategy_.accessor_.unpin(baseOId_, isDirty_);
 			baseOId_ = UNDEF_OID;
 		}
 	}
@@ -83,50 +98,49 @@ public:
 	/*!
 		@brief Get Object from Chunk for reading
 	*/
-	void load(OId oId) {
-		if (pId_ == UNDEF_PARTITIONID) {
-			GS_THROW_SYSTEM_ERROR(
-				GS_ERROR_CM_INTERNAL_ERROR, "invalid implementation");
-		}
+	void load(OId oId, uint8_t isDirty) {
 		if (baseOId_ != UNDEF_OID) {
-			objectManager_->unfix(pId_, baseOId_);
+			strategy_.accessor_.unpin(baseOId_, isDirty_);
 			baseOId_ = UNDEF_OID;
 		}
-		baseAddr_ = cursor_ = objectManager_->getForRead<uint8_t>(pId_, oId);
+		assert(oId != UNDEF_OID);
+		baseAddr_ = cursor_ =
+			strategy_.accessor_.get<uint8_t>(oId, isDirty);
 		baseOId_ = oId;
+		isDirty_ = isDirty;
+		if (isDirty) {
+			strategy_.accessor_.update(oId);
+		}
 	}
 
 	inline void loadFast(OId oId) {
+		assert(oId != UNDEF_OID);
 		baseAddr_ =
-			objectManager_->load<uint8_t, OBJECT_READ_ONLY>(pId_, oId, &baseOId_, baseAddr_);
+			strategy_.accessor_.get<uint8_t>(oId, &baseOId_, baseAddr_, isDirty_);
 	}
 
 	inline void loadNeighbor(OId oId, AccessMode mode) {
-		if (mode == OBJECT_READ_ONLY) {
-			baseAddr_ = cursor_ = objectManager_->load<uint8_t, OBJECT_READ_ONLY>(pId_, oId, &baseOId_, baseAddr_);
-		} else {
-			baseAddr_ = cursor_ = objectManager_->load<uint8_t, OBJECT_FOR_UPDATE>(pId_, oId, &baseOId_, baseAddr_);
-			forUpdate_ = true;
+		assert(oId != UNDEF_OID);
+		baseAddr_ = cursor_ = strategy_.accessor_.get<uint8_t>(oId, &baseOId_, baseAddr_, isDirty_);
+		if (mode == OBJECT_FOR_UPDATE) {
+			isDirty_ = true;
+			strategy_.accessor_.update(oId);
 		}
 	}
 	/*!
 		@brief Allocate Object from Chunk
 	*/
 	template <class T>
-	T *allocate(Size_t requestSize, const AllocateStrategy &allocateStrategy,
+	T *allocate(DSObjectSize requestSize,
 		OId &oId, ObjectType objectType) {
-		if (pId_ == UNDEF_PARTITIONID) {
-			GS_THROW_SYSTEM_ERROR(
-				GS_ERROR_CM_INTERNAL_ERROR, "invalid implementation");
-		}
 		if (baseOId_ != UNDEF_OID) {
-			objectManager_->unfix(pId_, baseOId_);
+			strategy_.accessor_.unpin(baseOId_, isDirty_);
 			baseOId_ = UNDEF_OID;
 		}
-		baseAddr_ = cursor_ = objectManager_->allocate<uint8_t>(
-			pId_, requestSize, allocateStrategy, baseOId_, objectType);
+		baseOId_ = strategy_.accessor_.allocate(requestSize, objectType);
+		baseAddr_ = cursor_ = strategy_.accessor_.get<uint8_t>(baseOId_, true);
 		oId = getBaseOId();
-		forUpdate_ = true;
+		isDirty_ = true;
 		return reinterpret_cast<T *>(getBaseAddr());
 	}
 
@@ -135,48 +149,44 @@ public:
 	   Object.
 	*/
 	template <class T>
-	T *allocateNeighbor(Size_t requestSize,
-		const AllocateStrategy &allocateStrategy, OId &oId, OId neighborOId,
+	T *allocateNeighbor(DSObjectSize requestSize,
+		OId &oId, OId neighborOId,
 		ObjectType objectType) {
-		if (pId_ == UNDEF_PARTITIONID) {
-			GS_THROW_SYSTEM_ERROR(
-				GS_ERROR_CM_INTERNAL_ERROR, "invalid implementation");
-		}
 		if (baseOId_ != UNDEF_OID) {
-			objectManager_->unfix(pId_, baseOId_);
+			strategy_.accessor_.unpin(baseOId_, isDirty_);
 			baseOId_ = UNDEF_OID;
 		}
-		baseAddr_ = cursor_ = objectManager_->allocateNeighbor<uint8_t>(pId_,
-			requestSize, allocateStrategy, baseOId_, neighborOId, objectType);
+		baseOId_ = strategy_.accessor_.allocateNeighbor(requestSize, neighborOId, objectType);
+		baseAddr_ = cursor_ = strategy_.accessor_.get<uint8_t>(baseOId_, true);
 		oId = getBaseOId();
-		forUpdate_ = true;
+		isDirty_ = true;
 		return reinterpret_cast<T *>(getBaseAddr());
 	}
+
 	/*!
 		@brief Refer to Object
 	*/
 	void copyReference(OId oId, uint8_t *addr) {
-		if (baseOId_ != UNDEF_OID && pId_ != UNDEF_PARTITIONID) {
-			objectManager_->unfix(pId_, baseOId_);
+		if (baseOId_ != UNDEF_OID) {
+			strategy_.accessor_.unpin(baseOId_, isDirty_);
 			baseOId_ = UNDEF_OID;
 		}
-		if (oId != UNDEF_OID && pId_ != UNDEF_PARTITIONID) {
-			objectManager_->fix(pId_, oId);
+		if (oId != UNDEF_OID) {
+			strategy_.accessor_.pin(oId);
 		}
 		baseOId_ = oId;
 		baseAddr_ = cursor_ = addr;
+		isDirty_ = false;
 	}
 
 	/*!
 		@brief Get Object from Chunk for reading
 	*/
 	void setDirty() {
-		if (pId_ == UNDEF_PARTITIONID) {
-			GS_THROW_SYSTEM_ERROR(
-				GS_ERROR_CM_INTERNAL_ERROR, "invalid implementation");
+		if (!isDirty_ && baseOId_ != UNDEF_OID) {
+			strategy_.accessor_.update(baseOId_);
 		}
-		objectManager_->setDirty(pId_, baseOId_);
-		forUpdate_ = true;
+		isDirty_ = true;
 	}
 
 	/*!
@@ -184,37 +194,38 @@ public:
 	*/
 	void copyReference(const BaseObject &srcBaseObject) {
 		copyReference(srcBaseObject.getBaseOId(), srcBaseObject.getBaseAddr());
-		forUpdate_ = srcBaseObject.forUpdate();
+		isDirty_ = srcBaseObject.isDirty();
 	}
 
 	/*!
 		@brief Release the reference to Object
 	*/
 	void reset() {
-		if (baseOId_ != UNDEF_OID && pId_ != UNDEF_PARTITIONID) {
-			objectManager_->unfix(pId_, baseOId_);
+		if (baseOId_ != UNDEF_OID) {
+			strategy_.accessor_.unpin(baseOId_, isDirty_);
 			baseOId_ = UNDEF_OID;
 			baseAddr_ = cursor_ = NULL;
-			forUpdate_ = false;
+			isDirty_ = false;
 		}
 	}
 
-	void reset(PartitionId pId, ObjectManager &objectManager) {
+	void reset(
+			ObjectManagerV4 &objectManager, const AllocateStrategy &strategy) {
 		reset();
 		objectManager_ = &objectManager;
-		pId_ = pId;
+		strategy_.set(strategy.getInfo());
 	}
 
 	/*!
 		@brief Free Object
 	*/
 	void finalize() {
-		if (baseOId_ != UNDEF_OID && pId_ != UNDEF_PARTITIONID) {
+		if (baseOId_ != UNDEF_OID) {
 			OId oId = baseOId_;
 			baseOId_ = UNDEF_OID;
 			baseAddr_ = cursor_ = NULL;
-			objectManager_->unfix(pId_, oId);
-			objectManager_->free(pId_, oId);
+			strategy_.accessor_.unpin(oId, isDirty_);
+			strategy_.accessor_.free(oId);
 		}
 	}
 
@@ -264,6 +275,7 @@ public:
 	void resetCursor() {
 		cursor_ = baseAddr_;
 	}
+
 	/*!
 		@brief Set OId of Object
 	*/
@@ -279,57 +291,40 @@ public:
 	/*!
 		@brief Get ObjectManager
 	*/
-	ObjectManager *getObjectManager() const {
+	ObjectManagerV4 *getObjectManager() const {
 		return objectManager_;
 	}
-	/*!
-		@brief Get Object from Chunk
-	*/
-	void load(OId oId, uint8_t forUpdate) {
-		if (pId_ == UNDEF_PARTITIONID) {
-			GS_THROW_SYSTEM_ERROR(
-				GS_ERROR_CM_INTERNAL_ERROR, "invalid implementation");
-		}
-		if (baseOId_ != UNDEF_OID) {
-			objectManager_->unfix(pId_, baseOId_);
-			baseOId_ = UNDEF_OID;
-		}
-		if (forUpdate == OBJECT_READ_ONLY) {
-			baseAddr_ = cursor_ =
-				objectManager_->getForRead<uint8_t>(pId_, oId);
-		}
-		else {
-			baseAddr_ = cursor_ =
-				objectManager_->getForUpdate<uint8_t>(pId_, oId);
-			forUpdate_ = true;
-		}
-		setBaseOId(oId);
+	const AllocateStrategy& getAllocateStrategy() const {
+		return strategy_;
 	}
-	PartitionId getPartitionId() const {
-		return pId_;
+	bool isDirty() const {
+		return isDirty_;
 	}
-	bool forUpdate() const {
-		return forUpdate_;
+	DSObjectSize getSize() {
+		return objectManager_->getSize(baseAddr_);
 	}
+
 private:
-	bool forUpdate_;
+	bool isDirty_;
 	OId baseOId_;
 	uint8_t *baseAddr_;
 	uint8_t *cursor_;
-	PartitionId pId_;
 
 protected:
-	BaseObject(uint8_t *addr)
-		: baseOId_(UNDEF_OID),
-		  baseAddr_(addr),
-		  cursor_(addr),
-		  pId_(UNDEF_PARTITIONID),
-		  objectManager_(NULL) {}
-	ObjectManager *objectManager_;
+	explicit BaseObject(uint8_t *addr) :
+			isDirty_(false),
+			baseOId_(UNDEF_OID),
+			baseAddr_(addr),
+			cursor_(addr),
+			objectManager_(NULL) {
+	}
+
+	ObjectManagerV4 *objectManager_;
+	AllocateStrategy strategy_;
 
 private:
-	BaseObject(const BaseObject &);  
-	BaseObject &operator=(const BaseObject &);  
+	BaseObject(const BaseObject&);  
+	BaseObject& operator=(const BaseObject&);  
 };
 
 /*!
@@ -337,12 +332,13 @@ private:
 */
 class UpdateBaseObject : public BaseObject {
 public:
-	UpdateBaseObject(PartitionId pId, ObjectManager &objectManager)
-		: BaseObject(pId, objectManager) {}
-	UpdateBaseObject(PartitionId pId, ObjectManager &objectManager, OId oId)
-		: BaseObject(pId, objectManager) {
+	UpdateBaseObject(ObjectManagerV4 &objectManager, AllocateStrategy& strategy)
+		: BaseObject(objectManager, strategy) {}
+	UpdateBaseObject(ObjectManagerV4 &objectManager, AllocateStrategy& strategy, OId oId)
+		: BaseObject(objectManager, strategy) {
+		assert(oId != UNDEF_OID);
 		uint8_t *baseAddr =
-			objectManager_->getForUpdate<uint8_t>(getPartitionId(), oId);
+			strategy_.accessor_.get<uint8_t>(oId, true); 
 		setBaseOId(oId);
 		setBaseAddr(baseAddr);
 	}
@@ -351,18 +347,18 @@ public:
 		@brief Get Object from Chunk for updating
 	*/
 	void load(OId oId) {
-		if (getPartitionId() == UNDEF_PARTITIONID) {
-			GS_THROW_SYSTEM_ERROR(
-				GS_ERROR_CM_INTERNAL_ERROR, "invalid implementation");
-		}
 		if (getBaseOId() != UNDEF_OID) {
-			objectManager_->unfix(getPartitionId(), getBaseOId());
+			strategy_.accessor_.unpin(getBaseOId(), isDirty());
 			setBaseOId(UNDEF_OID);
 		}
-		uint8_t *baseAddr = objectManager_->getForUpdate<uint8_t>(getPartitionId(), oId);
+		assert(oId != UNDEF_OID);
+		uint8_t* baseAddr =
+			strategy_.accessor_.get<uint8_t>(oId, true); 
 		setBaseOId(oId);
 		setBaseAddr(baseAddr);
 	}
+private:
+	void load(DSGroupId groupId, OId oId, uint8_t isDirty);
 };
 
 #endif

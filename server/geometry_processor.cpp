@@ -30,7 +30,7 @@
 /*!
 	@brief Compare message field value with object field value
 */
-int32_t GeometryProcessor::compare(TransactionContext &txn, ObjectManager &,
+int32_t GeometryProcessor::compare(TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &,
 	ColumnId columnId, MessageRowStore *messageRowStore,
 	uint8_t *objectRowField) {
 	const uint8_t *inputField;
@@ -52,7 +52,7 @@ int32_t GeometryProcessor::compare(TransactionContext &txn, ObjectManager &,
 /*!
 	@brief Compare object field values
 */
-int32_t GeometryProcessor::compare(TransactionContext &txn, ObjectManager &,
+int32_t GeometryProcessor::compare(TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &,
 	ColumnType, uint8_t *srcObjectRowField, uint8_t *targetObjectRowField) {
 	int32_t result;
 
@@ -85,7 +85,7 @@ int32_t GeometryProcessor::compare(TransactionContext &txn, ObjectManager &,
 /*!
 	@brief Set field value to message
 */
-void GeometryProcessor::getField(TransactionContext &txn, ObjectManager &,
+void GeometryProcessor::getField(TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &strategy,
 	ColumnId columnId, const Value *objectValue, MessageRowStore *messageRowStore) {
 	const uint8_t *image = objectValue->getImage();  
 	if (image != NULL) {

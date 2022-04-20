@@ -23,8 +23,10 @@
 
 #include "data_type.h"
 #include "gs_error.h"
-#include "util/net.h"
+#include "socket_wrapper.h"
 #include "util/container.h"
+
+
 
 
 class PartitionGroupConfig;
@@ -123,6 +125,10 @@ public:
 			const EventRequestOption *option = NULL);
 
 	void resetConnection(const NodeDescriptor &nd);
+	void acceptConnectionControlInfo(
+			const NodeDescriptor &nd, EventByteInStream &in);
+	void exportConnectionControlInfo(
+			const NodeDescriptor &nd, EventByteOutStream &out);
 
 	void setHandler(EventType type, EventHandler &handler);
 	void setHandlingMode(EventType type, EventHandlingMode mode);
@@ -266,6 +272,27 @@ std::ostream& operator<<(std::ostream &stream, const NodeDescriptor &nd);
 */
 struct EventEngine::Config {
 public:
+	struct IOMode {
+		explicit IOMode(bool serverAcceptable = false, bool clusterAcceptable = false) :
+			serverAcceptable_(serverAcceptable), clusterAcceptable_(clusterAcceptable) {
+		}
+
+		void set(bool serverAcceptable, bool clusterAcceptable) {
+			serverAcceptable_ = serverAcceptable;
+			clusterAcceptable_ = clusterAcceptable;
+		}
+		bool isSomeAcceptable() const {
+			if (serverAcceptable_ || clusterAcceptable_) {
+				return true;
+			} else {
+				return false;
+			}
+		}
+
+		bool serverAcceptable_;
+		bool clusterAcceptable_;
+	};
+
 	Config();
 
 	Config& setClientNDEnabled(bool enabled);
@@ -290,6 +317,8 @@ public:
 	double ioConcurrencyRate_;
 	bool secondaryIOEnabled_;
 	bool ioNegotiationMinimum_;
+	IOMode plainIOMode_;
+	IOMode secureIOMode_;
 
 	bool keepaliveEnabled_;
 	int32_t keepaliveIdle_;
@@ -330,9 +359,19 @@ struct EventEngine::Source {
 	VariableSizeAllocator& resolveVariableSizeAllocator() const;
 	FixedSizeAllocator& resolveFixedSizeAllocator() const;
 
+	static SocketFactory& getDefaultSocketFactory();
+
 	VariableSizeAllocator *varAllocator_;
 	FixedSizeAllocator *fixedAllocator_;
 	BufferManager *bufferManager_;
+
+	SocketFactory *socketFactory_;
+	std::pair<SocketFactory*, SocketFactory*> secureSocketFactories_;
+
+private:
+	struct Dafaults {
+		static SocketFactory defaultSocketFactory_;
+	};
 };
 
 /*!
@@ -340,10 +379,13 @@ struct EventEngine::Source {
 */
 struct EventEngine::EventRequestOption {
 	EventRequestOption();
-	bool operator==(const EventRequestOption &option) const;
+
+	bool isSameEncodingOption(const EventRequestOption &option) const;
 
 	int32_t timeoutMillis_;
 	bool onSecondary_;
+
+	Event *eventOnSent_;
 };
 
 class EventEngine::BufferManager {
@@ -1054,13 +1096,15 @@ private:
 
 class EventEngine::SocketPool {
 public:
-	explicit SocketPool(EventEngine &ee);
+	SocketPool(EventEngine &ee, const Source &eeSource);
 	~SocketPool();
 
 	EventSocket* allocate(bool onSecondary);
 	void deallocate(EventSocket *socket, bool workerAlive, LockGuard *ndGuard);
 
 	void getSocketStats(util::Vector<SocketStatsWithInfo> &statsList);
+
+	SocketFactory& getFactory(bool secure, bool clientMode);
 
 private:
 	typedef std::set<
@@ -1083,6 +1127,9 @@ private:
 
 	VariableSizeAllocator varAlloc_;
 	SocketSet socketSet_;
+
+	SocketFactory *factory_;
+	std::pair<SocketFactory*, SocketFactory*> secureFactories_;
 
 };
 
@@ -1294,6 +1341,13 @@ public:
 	typedef std::deque< Buffer,
 			util::StdAllocator<Buffer, VariableSizeAllocator> > BufferQueue;
 
+	typedef std::pair< Event*, std::pair<uint64_t, uint64_t> > IOEventEntry;
+
+	typedef std::deque< IOEventEntry, util::StdAllocator<
+			IOEventEntry, VariableSizeAllocator> > IOEventSubQueue;
+	typedef std::deque< IOEventSubQueue*, util::StdAllocator<
+			IOEventSubQueue*, VariableSizeAllocator> > IOEventQueue;
+
 	IOWorker();
 	virtual ~IOWorker();
 	void initialize(EventEngine &ee, uint32_t id, bool secondary);
@@ -1310,9 +1364,25 @@ public:
 	EventContext& getLocalEventContext();
 	VariableSizeAllocator& getVariableSizeAllocator();
 
-	Buffer& pushBufferQueue(BufferQueue *&queue, size_t size);
+	Buffer& pushBufferQueue(
+			BufferQueue *&queue, size_t size, bool toFront = false);
 	void popBufferQueue(BufferQueue &queue);
 	void releaseBufferQueue(BufferQueue *&queue);
+
+	void pushIOEventQueue(
+			IOEventQueue *&queue, BufferQueue *&bufQueue,
+			const Event *ev, bool toFront = false);
+	void transferIOEventQueue(
+			const IOEventQueue &src, IOEventQueue *&dest);
+	void popIOEventQueue(
+			IOEventQueue &queue, const BufferQueue &bufQueue,
+			IOEventSubQueue *&subQueue);
+	void releaseIOEventQueue(IOEventQueue *&queue);
+
+	void popIOEventSubQueue(
+			IOEventQueue &queue, const Buffer *buf,
+			IOEventSubQueue *&subQueue);
+	void releaseIOEventSubQueue(IOEventSubQueue *&subQueue);
 
 	bool reconnectSocket(EventSocket *socket, util::IOPollEvent pollEvent);
 	bool addSocket(EventSocket *socket, util::IOPollEvent pollEvent);
@@ -1592,8 +1662,23 @@ public:
 
 	static Event::Source eventToSource(Event &ev);
 
+	void acceptControlInfo(
+			LockGuard &ndGuard, const NodeDescriptor &nd,
+			EventByteInStream &in);
+	void exportControlInfo(LockGuard &ndGuard, EventByteOutStream &out);
+
 private:
+	struct ReceiveState {
+		ReceiveState();
+
+		EventRequestOption option_;
+		size_t pendingOffset_;
+	};
+
 	typedef IOWorker::BufferQueue BufferQueue;
+
+	typedef IOWorker::IOEventSubQueue IOEventSubQueue;
+	typedef IOWorker::IOEventQueue IOEventQueue;
 
 	static const size_t MULTICAST_MAX_PACKET_SIZE;
 	static const size_t INITIAL_RECEIVE_BUFFER_SIZE;
@@ -1601,21 +1686,35 @@ private:
 	EventSocket(const EventSocket&);
 	EventSocket& operator=(const EventSocket&);
 
-	bool acceptInitialEvent(EventType type, const NodeDescriptor &nd);
+	static bool isAcceptableIOType(
+			const Config &config, const NodeDescriptor &nd, bool secure);
+
+	bool acceptInitialEvent(const Event &ev);
 	void initializeND(LockGuard &ndGuard, const NodeDescriptor &nd);
 	void dispatchEvent(Event &ev, const EventRequestOption &option);
+	void dispatchEventsOnSent(IOEventSubQueue *&queue);
 
 	bool connect(const util::SocketAddress *address, bool polling);
-	bool receiveLocal(Event &ev, EventRequestOption &option);
-	void sendLocal();
+	void setConnected(bool pending);
+	bool receiveLocal(Event &ev, ReceiveState &state);
+	void finishLocalReceive(ReceiveState &state);
+	void sendLocal(IOEventSubQueue *&queue);
 	void suspendLocal(bool enabled, util::IOPollEvent extraPollEvent);
 	void requestShutdown();
 
 	bool handleIOError(std::exception &e) throw();
 
+	util::IOPollEvent filterPollEvent(util::IOPollEvent ev);
+	void setNextPollEvent(
+			LockGuard *ndGuard, bool lastActionPending, bool forRead);
+
+	void changeTransportMethod(LockGuard &ndGuard);
 	void transferSendBuffer(EventSocket &dest) const;
+	void transferIOEventQueue(EventSocket &dest) const;
 	void appendToSendBuffer(
 			const void *data, size_t size, size_t offset);
+	bool adjustExternalSendBuffer(LockGuard &ndGuard, Buffer *&buffer);
+	static size_t getSendBufferThreshold();
 
 
 	EventEngine &ee_;
@@ -1623,21 +1722,31 @@ private:
 	Event::Source eventSource_;
 	EventCoder &eventCoder_;
 
-	util::Socket base_;
+	AbstractSocket base_;
 	util::SocketAddress address_;
 	bool multicast_;
+	bool openedAsClient_;
 	const bool onSecondary_;
 
 	bool firstEventSent_;
 	bool firstEventReceived_;
 	bool negotiationEventDone_;
+	bool negotiationRejected_;
+
+	bool methodNegotiated_;
+	bool methodChanging_;
+	bool extraGuardRequired_;
+	AbstractSocket::SocketAction lastPendingAction_;
+
 	Event receiveEvent_;
 	Buffer *receiveBuffer_;
 	BufferQueue *receiveBufferQueue_;
 	BufferQueue *sendBufferQueue_;
+	IOEventQueue *eventQueueOnSent_;
 
 	size_t nextReceiveSize_;
 	size_t pendingReceiveSize_;
+	size_t firstEventQueueSize_;
 	int64_t connectStartTime_;
 	int64_t lastConnectTime_;
 	util::Atomic<bool> shutdownRequested_;
@@ -1869,6 +1978,40 @@ inline void EventEngine::resetConnection(const NodeDescriptor &nd) {
 	}
 }
 
+inline void EventEngine::acceptConnectionControlInfo(
+		const NodeDescriptor &nd, EventByteInStream &in) {
+	if (nd.getType() != NodeDescriptor::ND_TYPE_CLIENT) {
+		assert(false);
+		return;
+	}
+
+	const bool onSecondary = false;
+	NodeDescriptor::Body *body = Manipulator::findNDBody(nd, onSecondary);
+	LockGuard guard(body->getLock());
+
+	EventSocket *socket = body->getSocket(guard);
+	if (socket != NULL) {
+		socket->acceptControlInfo(guard, nd, in);
+	}
+}
+
+inline void EventEngine::exportConnectionControlInfo(
+		const NodeDescriptor &nd, EventByteOutStream &out) {
+	if (nd.getType() != NodeDescriptor::ND_TYPE_CLIENT) {
+		assert(false);
+		return;
+	}
+
+	const bool onSecondary = false;
+	NodeDescriptor::Body *body = Manipulator::findNDBody(nd, onSecondary);
+	LockGuard guard(body->getLock());
+
+	EventSocket *socket = body->getSocket(guard);
+	if (socket != NULL) {
+		socket->exportControlInfo(guard, out);
+	}
+}
+
 inline void EventEngine::setHandler(EventType type, EventHandler &handler) {
 	dispatcher_->setHandler(type, handler);
 }
@@ -2039,7 +2182,9 @@ inline EventEngine::Source::Source(
 		FixedSizeAllocator &fixedAllocator) :
 		varAllocator_(&varAllocator),
 		fixedAllocator_(&fixedAllocator),
-		bufferManager_(NULL) {
+		bufferManager_(NULL),
+		socketFactory_(&getDefaultSocketFactory()),
+		secureSocketFactories_() {
 }
 
 inline EventEngine::VariableSizeAllocator&
@@ -2062,16 +2207,20 @@ EventEngine::Source::resolveFixedSizeAllocator() const {
 	return *fixedAllocator_;
 }
 
+inline SocketFactory& EventEngine::Source::getDefaultSocketFactory() {
+	return Dafaults::defaultSocketFactory_;
+}
+
 
 inline EventEngine::EventRequestOption::EventRequestOption() :
 		timeoutMillis_(0),
-		onSecondary_(false) {
+		onSecondary_(false),
+		eventOnSent_(NULL) {
 }
 
-inline bool EventEngine::EventRequestOption::operator==(
+inline bool EventEngine::EventRequestOption::isSameEncodingOption(
 		const EventRequestOption &option) const {
-	return (timeoutMillis_ == option.timeoutMillis_ &&
-			onSecondary_ == option.onSecondary_);
+	return (timeoutMillis_ == option.timeoutMillis_);
 }
 
 

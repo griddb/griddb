@@ -25,7 +25,6 @@
 #include "util/container.h"
 #include "btree_map.h"
 #include "expression.h"
-#include "hash_map.h"
 #include "qp_def.h"
 #include "rtree_map.h"
 
@@ -56,7 +55,7 @@ public:
 
 	virtual ~BoolExpr();
 
-	TrivalentLogicType eval(TransactionContext &txn, ObjectManager &objectManager,
+	TrivalentLogicType eval(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 		ContainerRowWrapper *column_values, FunctionMap *function_map,
 		TrivalentLogicType default_return);
 
@@ -90,14 +89,14 @@ public:
 		return !(*this == e);
 	}
 
-	Expr *eval(TransactionContext &txn, ObjectManager &objectManager,
+	Expr *eval(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 		ContainerRowWrapper *column_values, FunctionMap *function_map,
 		EvalMode mode);
-	BoolExpr *dup(TransactionContext &txn, ObjectManager &objectManager);
+	BoolExpr *dup(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy);
 
-	BoolExpr *makeDNF(TransactionContext &txn, ObjectManager &objectManager);
+	BoolExpr *makeDNF(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy);
 	BoolExpr *makeOptimizedExpr(TransactionContext &txn,
-		ObjectManager &objectManager, ContainerRowWrapper *column_values,
+		ObjectManagerV4 &objectManager, AllocateStrategy &strategy, ContainerRowWrapper *column_values,
 		FunctionMap *function_map);
 
 	void toOrList(util::XArray<BoolExpr *> &orList);
@@ -109,15 +108,11 @@ public:
 		uint32_t &restEval, ResultSize limit = MAX_RESULT_SIZE);
 	static void toSearchContext(TransactionContext &txn,
 		util::XArray<BoolExpr *> &andList, IndexData *indexData,
-		QueryForCollection &queryObj, HashMap::SearchContext *&sc,
-		uint32_t &restEval, ResultSize limit = MAX_RESULT_SIZE);
-	static void toSearchContext(TransactionContext &txn,
-		util::XArray<BoolExpr *> &andList, IndexData *indexData,
 		QueryForCollection &queryObj, RtreeMap::SearchContext *&sc,
 		uint32_t &restEval, ResultSize limit = MAX_RESULT_SIZE);
 
 	static void toSearchContext(TransactionContext &txn,
-		util::XArray<BoolExpr *> &andList, Timestamp &expireTs,
+		util::XArray<BoolExpr *> &andList,
 		IndexData *indexData, QueryForTimeSeries &queryObj,
 		BtreeMap::SearchContext *&sc, uint32_t &restEval,
 		ResultSize limit = MAX_RESULT_SIZE);
@@ -142,9 +137,9 @@ public:
 		BaseContainer &baseContainer, Query &queryObj, uint32_t &mapBitmap,
 		ColumnInfo *&indexColumnInfo);
 
-	void dumpTree(TransactionContext &txn, ObjectManager &objectManager,
+	void dumpTree(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 		std::ostream &os);
-	void dumpTree(TransactionContext &txn, ObjectManager &objectManager,
+	void dumpTree(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 		std::ostream &os, ContainerRowWrapper *column_values,
 		FunctionMap *function_map);
 
@@ -256,7 +251,7 @@ protected:
 		return false;
 	}
 
-	void dumpTreeSub(TransactionContext &txn, ObjectManager &objectManager,
+	void dumpTreeSub(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 		std::ostream &os, int level, const char *head,
 		ContainerRowWrapper *column_values, FunctionMap *function_map);
 
@@ -268,7 +263,7 @@ protected:
 	 * @param t terms to add
 	 */
 	void addOperands(
-		TransactionContext &txn, ObjectManager &objectManager, BoolTerms &t) {
+		TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, BoolTerms &t) {
 		if (opeType_ == UNARY) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CRITICAL_LOGIC_ERROR,
 				"Internal logic error: cannot add operands in unary "
@@ -276,7 +271,7 @@ protected:
 		}
 		BoolTerms::iterator it;
 		for (it = t.begin(); it != t.end(); it++) {
-			operands_.push_back((*it)->dup(txn, objectManager));
+			operands_.push_back((*it)->dup(txn, objectManager, strategy));
 		}
 	}
 
@@ -287,7 +282,7 @@ protected:
 	 * @param t terms to add
 	 */
 	void addOperandsDNF(
-		TransactionContext &txn, ObjectManager &objectManager, BoolTerms &t) {
+		TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, BoolTerms &t) {
 		if (opeType_ == UNARY) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CRITICAL_LOGIC_ERROR,
 				"Internal logic error: cannot add operands in unary "
@@ -295,7 +290,7 @@ protected:
 		}
 		BoolTerms::iterator it;
 		for (it = t.begin(); it != t.end(); it++) {
-			operands_.push_back((*it)->makeDNF(txn, objectManager));
+			operands_.push_back((*it)->makeDNF(txn, objectManager, strategy));
 		}
 	}
 
@@ -307,8 +302,8 @@ protected:
 	 * @param t expression to add
 	 */
 	void addOperand(
-		TransactionContext &txn, ObjectManager &objectManager, BoolExpr *t) {
-		operands_.push_back(t->dup(txn, objectManager));
+		TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, BoolExpr *t) {
+		operands_.push_back(t->dup(txn, objectManager, strategy));
 	}
 
 	/*!

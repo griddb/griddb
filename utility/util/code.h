@@ -51,8 +51,19 @@
 #include <set>
 #include <limits>
 #include <algorithm> 
-#include <stdlib.h>
-#include <string.h>
+#include <cassert>
+#include <cstdlib>
+#include <cstring>
+
+#if UTIL_EXT_LIBRARY_ENABLED && UTIL_CPU_BUILD_AVX2
+#define UTIL_BUILD_FLETCHER32_SIMD 1
+#else
+#define UTIL_BUILD_FLETCHER32_SIMD 0
+#endif
+
+#if UTIL_BUILD_FLETCHER32_SIMD
+#include "fletcher32_simd/avx2.h"
+#endif
 
 
 namespace util {
@@ -423,6 +434,11 @@ private:
 	CRC16();
 	~CRC16();
 };
+
+namespace detail {
+uint32_t fletcher32Avx2(const void *buf, size_t len);
+uint32_t fletcher32Reference(const void *buf, size_t len);
+} 
 
 uint32_t fletcher32(const void *buf, size_t len);
 
@@ -3267,26 +3283,16 @@ inline uint16_t CRC16::calculate(const void *buf, size_t length) {
 }
 
 inline uint32_t fletcher32(const void *buf, size_t len) {
-	len /= 2; 
-	const uint16_t *data = static_cast<const uint16_t *>(buf);
-    uint32_t sum1 = 0xffff, sum2 = 0xffff;
 
-    while (len) {
-            size_t tlen = len > 360 ? 360 : len;
-            len -= tlen;
-            do {
-                    sum1 += *data++;
-                    sum2 += sum1;
-            } while (--tlen);
-            sum1 = (sum1 & 0xffff) + (sum1 >> 16);
-            sum2 = (sum2 & 0xffff) + (sum2 >> 16);
-    }
-    /* Second reduction step to reduce sums to 16 bits */
-    sum1 = (sum1 & 0xffff) + (sum1 >> 16);
-    sum2 = (sum2 & 0xffff) + (sum2 >> 16);
-    return sum2 << 16 | sum1;
+
+#if UTIL_BUILD_FLETCHER32_SIMD
+	if (UTIL_CPU_SUPPORTS_AVX2()) {
+		return detail::fletcher32Avx2(buf, len);
+	}
+#endif
+
+    return detail::fletcher32Reference(buf, len);
 }
-
 
 inline uint32_t countNumOfBits(uint32_t bits) {
 	bits = (bits & 0x55555555) + (bits >> 1 & 0x55555555);
@@ -4128,7 +4134,7 @@ const char8_t* GeneralNameCoder::coderFunc(
 
 	const C &typedCoder = *static_cast<const C*>(coder);
 	if (nameResolving) {
-		return typedCoder(id, name);
+		return typedCoder(static_cast<typename C::Entry::Id>(id), name);
 	}
 	else {
 		typename C::Entry::Id baseId;

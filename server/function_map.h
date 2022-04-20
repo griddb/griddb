@@ -45,7 +45,7 @@ public:
 	 * @return Result as expression
 	 */
 	virtual Expr *operator()(
-		ExprList &args, TransactionContext &txn, ObjectManager &) = 0;
+		ExprList &args, TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &) = 0;
 
 	/*!
 	 * @brief Custom function call operator with priori argument evaluation
@@ -61,7 +61,7 @@ public:
 	 */
 	virtual Expr *operator()(ExprList &args, ContainerRowWrapper *column_values,
 		FunctionMap *function_map, EvalMode mode, TransactionContext &txn,
-		ObjectManager &objectManager, ExprList &argsAfterEval);
+		ObjectManagerV4&objectManager, AllocateStrategy &strategy, ExprList &argsAfterEval);
 
 	/*!
 	 * @brief Check if the function can use an index.

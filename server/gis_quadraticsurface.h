@@ -254,7 +254,7 @@ public:
 	 * @attention It returns pointer, thus release must be done by the caller
 	 */
 	Geometry *dup(
-		TransactionContext &txn, ObjectManager &, srid_t) {
+		TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &, srid_t) {
 		if (isEmpty()) {
 			return QP_NEW QuadraticSurface(txn);
 		}
@@ -276,8 +276,8 @@ public:
 	 *
 	 * @return duplicated geometry
 	 */
-	Geometry *dup(TransactionContext &txn, ObjectManager &objectManager) {
-		return dup(txn, objectManager, srId_);
+	Geometry *dup(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) {
+		return dup(txn, objectManager, strategy, srId_);
 	}
 
 	/*!
@@ -338,9 +338,9 @@ public:
 	 *
 	 * @return
 	 */
-	Geometry *assign(TransactionContext &txn, ObjectManager &objectManager,
+	Geometry *assign(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 		ContainerRowWrapper *, FunctionMap *, EvalMode) {
-		return dup(txn, objectManager);
+		return dup(txn, objectManager, strategy);
 	}
 
 #ifdef _WIN32

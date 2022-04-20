@@ -22,7 +22,7 @@
 #define SERVICE_ADDRESS_H_
 
 #include "util/container.h"
-#include "util/net.h"
+#include "socket_wrapper.h"
 
 namespace picojson {
 class value;
@@ -35,6 +35,8 @@ public:
 
 		const char8_t *providerURL_;
 		int addressFamily_;
+		SocketFactory *plainSocketFactory_;
+		SocketFactory *secureSocketFactory_;
 	};
 
 	typedef util::StdAllocator<void, void> Allocator;
@@ -45,7 +47,8 @@ public:
 
 	const Config& getConfig() const;
 
-	static void checkConfig(const Allocator &alloc, const Config &config);
+	static void checkConfig(
+			const Allocator &alloc, const Config &config, bool &secure);
 
 	void initializeType(const ServiceAddressResolver &another);
 
@@ -102,6 +105,7 @@ private:
 	typedef std::multiset<
 			util::SocketAddress, std::set<util::SocketAddress>::key_compare,
 			util::StdAllocator<util::SocketAddress, void> > AddressSet;
+
 	typedef std::vector<Entry, util::StdAllocator<Entry, void> > EntryList;
 
 	friend std::ostream& operator<<(
@@ -109,6 +113,8 @@ private:
 
 	static const char8_t JSON_KEY_ADDRESS[];
 	static const char8_t JSON_KEY_PORT[];
+
+	static SocketFactory DEFAULT_SOCKET_FACTORY;
 
 	ServiceAddressResolver(const ServiceAddressResolver&);
 	ServiceAddressResolver& operator=(const ServiceAddressResolver&);
@@ -127,6 +133,10 @@ private:
 
 	static void normalizeEntries(EntryList *entryList);
 
+	void createSocket(AbstractSocket &socket) const;
+	static util::IOPollEvent resolvePollEvent(
+			AbstractSocket &socket, util::IOPollEvent base);
+
 	Allocator alloc_;
 	Config config_;
 
@@ -142,6 +152,7 @@ private:
 	std::pair<bool, bool> updated_;
 	bool changed_;
 	bool normalized_;
+	bool secure_;
 
 	ProviderContext *providerCxt_;
 };

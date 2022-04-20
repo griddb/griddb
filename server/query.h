@@ -126,7 +126,7 @@ public:
 	struct ExprAccessor;
 	struct BoolExprAccessor;
 
-	Query(TransactionContext &txn, ObjectManager &objectManager,
+	Query(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 		const TQLInfo &tqlInfo, uint64_t limit = MAX_RESULT_SIZE,
 		QueryHookClass *hook = NULL);
 	virtual ~Query();
@@ -198,8 +198,8 @@ protected:
 		return txn_;
 	}
 
-	Query(TransactionContext &txn, ObjectManager &objectManager)
-		: tqlInfo_(TQLInfo()), txn_(txn), objectManager_(objectManager) {
+	Query(TransactionContext &txn, ObjectManagerV4&objectManager, AllocateStrategy &strategy)
+		: tqlInfo_(TQLInfo()), txn_(txn), objectManager_(objectManager), strategy_(strategy) {
 		isSetError_ = false;
 		isExplainExecute_ = true;
 		explainAllocNum_ = 0;
@@ -247,7 +247,7 @@ protected:
 			return NULL;
 		}
 	}
-	virtual Query *dup(TransactionContext &, ObjectManager &) {
+	virtual Query *dup(TransactionContext &, ObjectManagerV4 &, AllocateStrategy &) {
 		return NULL;
 	}
 	virtual void finishQuery(TransactionContext &txn, ResultSet &resultSet,
@@ -281,7 +281,7 @@ protected:
 
 		uint64_t limit = MAX_RESULT_SIZE;
 		if (pLimitExpr_ != NULL) {
-			int64_t tmp = pLimitExpr_->eval(txn_, objectManager_, NULL,
+			int64_t tmp = pLimitExpr_->eval(txn_, objectManager_, strategy_, NULL,
 							functionMap_, EVAL_MODE_NORMAL)
 							->getValueAsInt64();
 			if (tmp < 0) {
@@ -305,7 +305,7 @@ protected:
 		}
 		nOffset_ = 0;
 		if (e2 != NULL) {
-			int64_t tmp = e2->eval(txn_, objectManager_, NULL,
+			int64_t tmp = e2->eval(txn_, objectManager_, strategy_, NULL,
 							functionMap_, EVAL_MODE_NORMAL)
 							->getValueAsInt64();
 			if (tmp < 0) {
@@ -524,8 +524,9 @@ protected:
 	const char *
 		pFromCollectionName_;  
 	TransactionContext &txn_;  
-	ObjectManager
+	ObjectManagerV4
 		&objectManager_;  
+	AllocateStrategy &strategy_;
 	ParseState parseState_;  
 	static bool sIsTrace_;
 	int nResultSorted_;  

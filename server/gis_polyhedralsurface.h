@@ -61,8 +61,8 @@ public:
 	 * @param txn Object manager
 	 */
 	PolyhedralSurface(srid_t id, const QP_XArray<Polygon *> &parray,
-		TransactionContext &txn, ObjectManager &objectManager)
-		: MultiPolygon(id, parray, txn, objectManager) {}
+		TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy)
+		: MultiPolygon(id, parray, txn, objectManager, strategy) {}
 	virtual GeometryType getType() const {
 		return POLYHEDRALSURFACE;
 	}
@@ -85,8 +85,8 @@ public:
 	 * @param txn Object manager
 	 */
 	PolyhedralSurface(srid_t id, MultiPolygon &base, TransactionContext &txn,
-		ObjectManager &objectManager)
-		: MultiPolygon(id, base.polygonArray_, txn, objectManager) {}
+		ObjectManagerV4 &objectManager, AllocateStrategy &strategy)
+		: MultiPolygon(id, base.polygonArray_, txn, objectManager, strategy) {}
 
 	/*!
 	 * @brief Duplication
@@ -98,13 +98,13 @@ public:
 	 * @return Generated geometry object
 	 */
 	PolyhedralSurface *dup(
-		TransactionContext &txn, ObjectManager &objectManager, srid_t id) {
+		TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, srid_t id) {
 		if (isEmpty()) {
 			return QP_NEW PolyhedralSurface(txn);
 		}
 		else {
 			PolyhedralSurface *ps =
-				QP_NEW PolyhedralSurface(id, polygonArray_, txn, objectManager);
+				QP_NEW PolyhedralSurface(id, polygonArray_, txn, objectManager, strategy);
 			ps->isAssigned_ = isAssigned_;
 			ps->isEmpty_ = isEmpty_;
 			return ps;
@@ -120,8 +120,8 @@ public:
 	 * @return Generated geometry object
 	 */
 	PolyhedralSurface *dup(
-		TransactionContext &txn, ObjectManager &objectManager) {
-		return dup(txn, objectManager, srId_);
+		TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) {
+		return dup(txn, objectManager, strategy, srId_);
 	}
 
 	/*!

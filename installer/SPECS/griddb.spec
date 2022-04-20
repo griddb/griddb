@@ -1,5 +1,5 @@
 %define griddb_name griddb
-%define griddb_ver 4.6.1
+%define griddb_ver 5.0.0
 %define griddb_instdir /usr/griddb-%{griddb_ver}
 %define griddb_homedir /var/lib/gridstore
 # do not strip
@@ -32,8 +32,6 @@ mkdir -p %{buildroot}%{griddb_instdir}/bin
 mkdir -p %{buildroot}%{griddb_instdir}/conf
 mkdir -p %{buildroot}%{griddb_instdir}/conf_multicast
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/MessagePack
-mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/activemq-cpp-library
-mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/apr
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/ebb
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/picojson
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/purewell
@@ -44,6 +42,7 @@ mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/json-simple
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/uuid
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/omaha
 mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/zigzag_encoding
+mkdir -p %{buildroot}%{griddb_instdir}/3rd_party/fletcher32_simd
 mkdir -p %{buildroot}%{griddb_instdir}/docs
 mkdir -p %{buildroot}%{griddb_instdir}/docs/sample
 mkdir -p %{buildroot}%{griddb_instdir}/docs/sample/program
@@ -94,11 +93,10 @@ install -c -m 640 3rd_party/slf4j/slf4j-jdk14-1.7.7.jar         %{buildroot}%{gr
 install -c -m 640 3rd_party/yield/yield.txt                     %{buildroot}%{griddb_instdir}/3rd_party/yield
 install -c -m 640 3rd_party/omaha/COPYING                       %{buildroot}%{griddb_instdir}/3rd_party/omaha
 install -c -m 640 3rd_party/zigzag_encoding/LICENSE             %{buildroot}%{griddb_instdir}/3rd_party/zigzag_encoding
-install -c -m 640 3rd_party/activemq-cpp-library/org/NOTICE.txt     %{buildroot}%{griddb_instdir}/3rd_party/activemq-cpp-library
-install -c -m 640 3rd_party/apr/org/NOTICE                          %{buildroot}%{griddb_instdir}/3rd_party/apr
 install -c -m 640 3rd_party/picojson/org/include/README.mkdn                %{buildroot}%{griddb_instdir}/3rd_party/picojson
 install -c -m 640 3rd_party/json-simple/fangyidong/LICENSE.txt              %{buildroot}%{griddb_instdir}/3rd_party/json-simple
 install -c -m 640 3rd_party/uuid/uuid/COPYING                               %{buildroot}%{griddb_instdir}/3rd_party/uuid
+install -c -m 640 3rd_party/fletcher32_simd/fletcher32_simd/LICENSE         %{buildroot}%{griddb_instdir}/3rd_party/fletcher32_simd
 
 
 
@@ -303,8 +301,6 @@ fi
 %dir %{griddb_instdir}/conf
 %dir %{griddb_instdir}/3rd_party
 %dir %{griddb_instdir}/3rd_party/MessagePack
-%dir %{griddb_instdir}/3rd_party/activemq-cpp-library
-%dir %{griddb_instdir}/3rd_party/apr
 %dir %{griddb_instdir}/3rd_party/ebb
 %dir %{griddb_instdir}/3rd_party/picojson
 %dir %{griddb_instdir}/3rd_party/purewell
@@ -315,6 +311,7 @@ fi
 %dir %{griddb_instdir}/3rd_party/uuid
 %dir %{griddb_instdir}/3rd_party/omaha
 %dir %{griddb_instdir}/3rd_party/zigzag_encoding
+%dir %{griddb_instdir}/3rd_party/fletcher32_simd
 %dir %{griddb_instdir}/docs
 %dir %{griddb_instdir}/docs/sample
 %dir %{griddb_instdir}/docs/sample/program
@@ -347,8 +344,6 @@ fi
 %{griddb_instdir}/3rd_party/BSD_License.txt
 %{griddb_instdir}/3rd_party/MIT_License.txt
 %{griddb_instdir}/3rd_party/MessagePack/COPYING
-%{griddb_instdir}/3rd_party/activemq-cpp-library/NOTICE.txt
-%{griddb_instdir}/3rd_party/apr/NOTICE
 %{griddb_instdir}/3rd_party/ebb/LICENSE
 %{griddb_instdir}/3rd_party/picojson/README.mkdn
 %{griddb_instdir}/3rd_party/purewell/purewell.txt
@@ -361,6 +356,8 @@ fi
 %{griddb_instdir}/3rd_party/uuid/COPYING
 %{griddb_instdir}/3rd_party/omaha/COPYING
 %{griddb_instdir}/3rd_party/zigzag_encoding/LICENSE
+%{griddb_instdir}/3rd_party/fletcher32_simd/LICENSE
+
 %{griddb_instdir}/README.md
 %{griddb_instdir}/docs/sample/program/Sample1.java
 %{griddb_instdir}/docs/sample/program/Sample2.java
@@ -386,5 +383,7 @@ fi
 /usr/griddb/bin/gridstore
 
 %changelog
+* Tue Aug 26 2021 Toshiba Digital Solutions Corporation
+- 4.6.1
 * Thu Feb 25 2021 Toshiba Digital Solutions Corporation
 - 4.6.0

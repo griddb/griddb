@@ -321,11 +321,12 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::finalize(Transac
 	if (rowArrayCursor_->hasVariableColumn()) {
 		if (getVariableArray() != UNDEF_OID) {
 			rowArrayCursor_->rowCache_.reset();
-
-			ObjectManager &objectManager =
+			ObjectManagerV4 &objectManager =
 				*(rowArrayCursor_->getContainer().getObjectManager());
+			AllocateStrategy& allocateStrategy =
+				rowArrayCursor_->getContainer().getRowAllcateStrategy();
 			VariableArrayCursor cursor(
-				txn, objectManager, getVariableArray(), OBJECT_FOR_UPDATE);
+				objectManager, allocateStrategy, getVariableArray(), OBJECT_FOR_UPDATE);
 			for (uint32_t columnId = 0;
 				 columnId < rowArrayCursor_->getColumnNum();
 				 columnId++) {
@@ -344,11 +345,11 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::finalize(Transac
 							elemSize, elemCount);  
 						switch (columnInfo.getColumnType()) {
 						case COLUMN_TYPE_STRING_ARRAY:
-							StringArrayProcessor::remove(txn, objectManager,
+							StringArrayProcessor::remove(txn, objectManager, allocateStrategy,
 								columnInfo.getColumnType(), elemData);
 							break;
 						case COLUMN_TYPE_BLOB:
-							BlobProcessor::remove(txn, objectManager,
+							BlobProcessor::remove(txn, objectManager, allocateStrategy,
 								columnInfo.getColumnType(), elemData);
 							break;
 						}
@@ -544,6 +545,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getFields(Transa
 	}
 }
 
+
 template<typename Container, RowArrayType rowArrayType>
 inline RowHeader *BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getRowHeaderAddr() const {
 	return getAddr() + rowArrayCursor_->currentParam_.rowHeaderOffset_;
@@ -605,7 +607,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::checkVarDataSize
 	bool isConvertSpecialType,
 	util::XArray<uint32_t> &varDataObjectSizeList,
 	util::XArray<uint32_t> &varDataObjectPosList) {
-	ObjectManager &objectManager =
+	ObjectManagerV4 &objectManager =
 		*(rowArrayCursor_->getContainer().getObjectManager());
 	uint32_t variableColumnNum = varList.size();
 
@@ -633,7 +635,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::checkVarDataSize
 			checkCount++) {
 			uint32_t dividedObjectSize = currentObjectSize;
 			uint32_t dividedElemNth = elemNth - 1;
-			Size_t estimateAllocateSize =
+			DSObjectSize estimateAllocateSize =
 				objectManager.estimateAllocateSize(currentObjectSize) + NEXT_OBJECT_LINK_INFO_SIZE;
 			if (checkCount == 0 && VariableArrayCursor::divisionThreshold(currentObjectSize) < estimateAllocateSize) {
 				for (size_t i = 0; i < accumulateSizeList.size(); i++) {
@@ -641,12 +643,12 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::checkVarDataSize
 					if (accumulateSize == currentObjectSize) {
 						continue;
 					}
-					Size_t estimateAllocateSizeFront =
-						objectManager.estimateAllocateSize(accumulateSize + NEXT_OBJECT_LINK_INFO_SIZE) + ObjectAllocator::BLOCK_HEADER_SIZE;
-					Size_t estimateAllocateSizeBack =
+					DSObjectSize estimateAllocateSizeFront =
+						objectManager.estimateAllocateSize(accumulateSize + NEXT_OBJECT_LINK_INFO_SIZE) + ObjectManagerV4::OBJECT_HEADER_SIZE;
+					DSObjectSize estimateAllocateSizeBack =
 						objectManager.estimateAllocateSize(currentObjectSize - accumulateSize);
 					if (estimateAllocateSizeFront + estimateAllocateSizeBack < estimateAllocateSize && 
-						(VariableArrayCursor::divisionThreshold(accumulateSize + ObjectAllocator::BLOCK_HEADER_SIZE) >= estimateAllocateSizeFront)) {
+						(VariableArrayCursor::divisionThreshold(accumulateSize + ObjectManagerV4::OBJECT_HEADER_SIZE) >= estimateAllocateSizeFront)) {
 						dividedObjectSize = accumulateSize;
 						dividedElemNth -= static_cast<uint32_t>(i);
 						break;
@@ -665,7 +667,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::checkVarDataSize
 		accumulateSizeList.push_back(currentObjectSize);
 	}
 
-	Size_t estimateAllocateSize =
+	DSObjectSize estimateAllocateSize =
 		objectManager.estimateAllocateSize(currentObjectSize);
 	if (VariableArrayCursor::divisionThreshold(currentObjectSize) < estimateAllocateSize) {
 		uint32_t dividedObjectSize = currentObjectSize;
@@ -675,12 +677,12 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::checkVarDataSize
 			if (accumulateSize == currentObjectSize) {
 				continue;
 			}
-			Size_t estimateAllocateSizeFront =
-				objectManager.estimateAllocateSize(accumulateSize + NEXT_OBJECT_LINK_INFO_SIZE) + ObjectAllocator::BLOCK_HEADER_SIZE;
-			Size_t estimateAllocateSizeBack =
+			DSObjectSize estimateAllocateSizeFront =
+				objectManager.estimateAllocateSize(accumulateSize + NEXT_OBJECT_LINK_INFO_SIZE) + ObjectManagerV4::OBJECT_HEADER_SIZE;
+			DSObjectSize estimateAllocateSizeBack =
 				objectManager.estimateAllocateSize(currentObjectSize - accumulateSize);
 			if (estimateAllocateSizeFront + estimateAllocateSizeBack < estimateAllocateSize && 
-				(VariableArrayCursor::divisionThreshold(accumulateSize + ObjectAllocator::BLOCK_HEADER_SIZE) >= estimateAllocateSizeFront)) {
+				(VariableArrayCursor::divisionThreshold(accumulateSize + ObjectManagerV4::OBJECT_HEADER_SIZE) >= estimateAllocateSizeFront)) {
 				dividedObjectSize = accumulateSize;
 				dividedElemNth -= static_cast<uint32_t>(i);
 				break;
@@ -708,9 +710,9 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::setVariableField
 	const util::XArray<uint32_t> &varDataObjectPosList,
 	const util::XArray<OId> &oldVarDataOIdList) {
 
-	ObjectManager &objectManager =
+	ObjectManagerV4 &objectManager =
 		*(rowArrayCursor_->getContainer().getObjectManager());
-	const AllocateStrategy allocateStrategy =
+	AllocateStrategy &allocateStrategy =
 		rowArrayCursor_->getContainer().getRowAllcateStrategy();
 	const uint32_t variableColumnNum =
 		rowArrayCursor_->getContainer().getVariableColumnNum();
@@ -719,8 +721,8 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::setVariableField
 	uint8_t *destAddr = NULL;
 	OId variableOId = UNDEF_OID;
 	OId oldVarDataOId = UNDEF_OID;
-	BaseObject oldVarObj(txn.getPartitionId(), objectManager);
-	Size_t oldVarObjSize = 0;
+	BaseObject oldVarObj(objectManager, rowArrayCursor_->getContainer().getRowAllcateStrategy());
+	DSObjectSize oldVarObjSize = 0;
 	uint8_t *nextLinkAddr = NULL;
 	OId neighborOId = rowArrayCursor_->getBaseOId();
 	for (size_t i = 0; i < varDataObjectSizeList.size(); ++i) {
@@ -743,7 +745,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::setVariableField
 				oldVarObj.finalize();
 			}
 			destAddr = oldVarObj.allocateNeighbor<uint8_t>(
-				varDataObjectSizeList[i], allocateStrategy, variableOId,
+				varDataObjectSizeList[i], variableOId,
 				neighborOId,
 				OBJECT_TYPE_ROW);  
 			neighborOId = variableOId;
@@ -813,11 +815,12 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::setVariableField
 			}
 		}
 	}
+	ChunkAccessor ca;
 	for (size_t i = varDataObjectSizeList.size();
 		 i < oldVarDataOIdList.size(); ++i) {
 		assert(UNDEF_OID != oldVarDataOIdList[i]);
 		if (UNDEF_OID != oldVarDataOIdList[i]) {
-			objectManager.free(txn.getPartitionId(), oldVarDataOIdList[i]);
+			objectManager.free(ca, allocateStrategy.getGroupId(), oldVarDataOIdList[i]);
 		}
 	}
 }
@@ -828,7 +831,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::setVariableField
 template<typename Container, RowArrayType rowArrayType>
 void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::setFields(
 	TransactionContext &txn, MessageRowStore *messageRowStore) {
-	ObjectManager &objectManager =
+	ObjectManagerV4 &objectManager =
 		*(rowArrayCursor_->getContainer().getObjectManager());
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
 	const void *source;
@@ -842,7 +845,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::setFields(
 	const uint32_t variableColumnNum =
 		rowArrayCursor_->getContainer().getVariableColumnNum();
 	if (variableColumnNum > 0) {
-		const AllocateStrategy allocateStrategy =
+		AllocateStrategy &allocateStrategy =
 			rowArrayCursor_->getContainer().getRowAllcateStrategy();
 		setVariableArray(UNDEF_OID);
 		util::XArray<ColumnType> varTypeList(alloc);
@@ -882,7 +885,6 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::setFields(
 			varDataObjectPosList, oldVarDataOIdList,
 			neighborOId);
 		setVariableArray(variableOId);
-
 	}
 }
 
@@ -892,8 +894,10 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::setFields(
 template<typename Container, RowArrayType rowArrayType>
 void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::updateFields(
 	TransactionContext &txn, MessageRowStore *messageRowStore) {
-	ObjectManager &objectManager =
+	ObjectManagerV4 &objectManager =
 		*(rowArrayCursor_->getContainer().getObjectManager());
+	AllocateStrategy& allocateStrategy =
+		rowArrayCursor_->getContainer().getRowAllcateStrategy();
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
 	const uint8_t *source;
 	uint32_t size;
@@ -910,13 +914,13 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::updateFields(
 	const uint32_t variableColumnNum =
 		rowArrayCursor_->getContainer().getVariableColumnNum();
 	if (variableColumnNum > 0) {
-		const AllocateStrategy allocateStrategy =
+		AllocateStrategy &allocateStrategy =
 			rowArrayCursor_->getContainer().getRowAllcateStrategy();
 		util::XArray<OId> oldVarDataOIdList(alloc);
 		{
 			assert(oldVarDataOId != UNDEF_OID);
 			VariableArrayCursor srcArrayCursor(
-				txn, objectManager, oldVarDataOId, OBJECT_FOR_UPDATE);
+				objectManager, allocateStrategy, oldVarDataOId, OBJECT_FOR_UPDATE);
 			OId prevOId = UNDEF_OID;
 			for (uint32_t columnId = 0;
 				 columnId < rowArrayCursor_->getContainer().getColumnNum();
@@ -939,11 +943,11 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::updateFields(
 							srcArrayCursor.getElement(elemSize, elemNth);
 						switch (columnInfo.getColumnType()) {
 						case COLUMN_TYPE_STRING_ARRAY:
-							StringArrayProcessor::remove(txn, objectManager,
+							StringArrayProcessor::remove(txn, objectManager, allocateStrategy,
 								columnInfo.getColumnType(), data);
 							break;
 						case COLUMN_TYPE_BLOB:
-							BlobProcessor::remove(txn, objectManager,
+							BlobProcessor::remove(txn, objectManager, allocateStrategy,
 								columnInfo.getColumnType(), data);
 							break;
 						default:
@@ -995,7 +999,6 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::updateFields(
 			varDataObjectPosList, oldVarDataOIdList,
 			neighborOId);
 		setVariableArray(variableOId);
-
 	}
 }
 
@@ -1008,10 +1011,13 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getField(Transac
 	assert(!isNullValue(columnInfo));
 	if (ValueProcessor::isSimple(columnInfo.getColumnType())) {
 		if (rowArrayCursor_->isNotExistColumn(columnInfo)) {
-			void *valueAddr = const_cast<void *>(Value::getDefaultFixedValue(columnInfo.getColumnType()));
-			baseObject.setBaseAddr(reinterpret_cast<uint8_t *>(valueAddr));
+			void* valueAddr = const_cast<void*>(Value::getDefaultFixedValue(columnInfo.getColumnType()));
+			baseObject.setBaseAddr(reinterpret_cast<uint8_t*>(valueAddr));
+
+		} else if (baseObject.getBaseOId() != UNDEF_OID && baseObject.getBaseOId() == rowArrayCursor_->getBaseOId()) {
+			baseObject.setBaseAddr(this->getFixedAddr() - rowArrayCursor_->currentParam_.columnOffsetDiff_ + columnInfo.getColumnOffset());
 		} else {
-			baseObject.copyReference(this->rowArrayCursor_->getBaseOId(),
+			baseObject.copyReference(rowArrayCursor_->getBaseOId(),
 				this->getFixedAddr() - rowArrayCursor_->currentParam_.columnOffsetDiff_ + columnInfo.getColumnOffset());
 		}
 	}
@@ -1021,10 +1027,12 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getField(Transac
 			void *valueAddr = const_cast<void *>(Value::getDefaultVariableValue(columnInfo.getColumnType()));
 			baseObject.setBaseAddr(reinterpret_cast<uint8_t *>(valueAddr));
 		} else {
-			ObjectManager &objectManager =
+			ObjectManagerV4 &objectManager =
 				*(rowArrayCursor_->getContainer().getObjectManager());
+			AllocateStrategy& allocateStrategy =
+				rowArrayCursor_->getContainer().getRowAllcateStrategy();
 			VariableArrayCursor variableArrayCursor(
-				txn, objectManager, variableOId, OBJECT_READ_ONLY);
+				objectManager, allocateStrategy, variableOId, OBJECT_READ_ONLY);
 			if (columnInfo.getColumnOffset() < variableArrayCursor.getArrayLength()) {
 				variableArrayCursor.getField(columnInfo, baseObject);
 			} else {
@@ -1070,7 +1078,6 @@ const void *BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getFixedF
 	if (util::IsSame<RowArrayAccessType<rowArrayType>, RowArrayGeneralType>::VALUE) {
 		const ColumnInfo &columnInfo = column.getColumnInfo();
 		if (columnInfo.getColumnId() == std::numeric_limits<uint16_t>::max()) {
-			assert(getRowId() == *getRowIdAddr());
 			return reinterpret_cast<const void *>(getRowIdAddr());
 		}
 		if (rowArrayCursor_->isNotExistColumn(columnInfo)) {
@@ -1090,6 +1097,8 @@ const void * BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getVaria
 	const ColumnInfo &columnInfo = column.getColumnInfo();
 	const OId baseOId = getVariableArray();
 	uint32_t varHeaderSize = rowArrayCursor_->currentParam_.varHeaderSize_;
+	AllocateStrategy& allocateStrategy =
+		rowArrayCursor_->getContainer().getRowAllcateStrategy();
 	if (util::IsSame<RowArrayAccessType<rowArrayType>, RowArrayGeneralType>::VALUE) {
 		if (rowArrayCursor_->isNotExistColumn(columnInfo) || baseOId == UNDEF_OID) {
 			return Value::getDefaultVariableValue(columnInfo.getColumnType());
@@ -1211,8 +1220,10 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::convert(
 		rowArrayCursor_->currentParam_.rowFixedColumnSize_);
 	if (dest.rowArrayCursor_->hasVariableColumn()) {
 		if (rowArrayCursor_->getVarColumnNum() < rowArrayCursor_->latestParam_.varColumnNum_) {
-			ObjectManager &objectManager =
+			ObjectManagerV4 &objectManager =
 				*(rowArrayCursor_->getContainer().getObjectManager());
+			AllocateStrategy& allocateStrategy =
+				rowArrayCursor_->getContainer().getRowAllcateStrategy();
 			util::StackAllocator &alloc = txn.getDefaultAllocator();
 			util::StackAllocator::Scope scope(alloc);
 
@@ -1234,7 +1245,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::convert(
 			}
 			if (dummyVarOId != UNDEF_OID) {
 				OId prevOId = UNDEF_OID;
-				VariableArrayCursor variableArrayCursor(txn, objectManager, dummyVarOId, OBJECT_FOR_UPDATE);
+				VariableArrayCursor variableArrayCursor(objectManager, allocateStrategy, dummyVarOId, OBJECT_FOR_UPDATE);
 				while (variableArrayCursor.nextElement()) {
 					uint32_t elemSize;
 					uint32_t elemNth;
@@ -1288,18 +1299,18 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::copy(
 	assert(dest.rowArrayCursor_->isLatestSchema());
 	memcpy(dest.getAddr(), getAddr(), rowArrayCursor_->latestParam_.rowSize_);
 	if (rowArrayCursor_->hasVariableColumn() && getVariableArray() != UNDEF_OID) {
-		ObjectManager &objectManager =
+		ObjectManagerV4 &objectManager =
 			*(rowArrayCursor_->getContainer().getObjectManager());
-		const AllocateStrategy &allocateStrategy =
+		AllocateStrategy &allocateStrategy =
 			rowArrayCursor_->getContainer().getRowAllcateStrategy();
 		OId srcTopOId = getVariableArray();
 
-		VariableArrayCursor srcCursor(txn, objectManager, srcTopOId, OBJECT_READ_ONLY);
-		OId destTopOId = srcCursor.clone(txn, allocateStrategy,
+		VariableArrayCursor srcCursor(objectManager, allocateStrategy, srcTopOId, OBJECT_READ_ONLY);
+		OId destTopOId = srcCursor.clone(allocateStrategy,
 			dest.rowArrayCursor_->getBaseOId());  
 		dest.setVariableArray(destTopOId);
 
-		VariableArrayCursor destCursor(txn, objectManager, destTopOId, OBJECT_FOR_UPDATE);
+		VariableArrayCursor destCursor(objectManager, allocateStrategy, destTopOId, OBJECT_FOR_UPDATE);
 		srcCursor.reset();
 		for (uint32_t columnId = 0;
 			 columnId < rowArrayCursor_->getContainer().getColumnNum();
@@ -1354,7 +1365,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::lock(Transaction
 		}
 		else if (txn.getManager().isActiveTransaction(
 					 txn.getPartitionId(), getTxnId())) {
-			DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_COL_LOCK_CONFLICT,
+			DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_CON_LOCK_CONFLICT,
 				"(pId=" << txn.getPartitionId() << ", rowTxnId=" << getTxnId()
 						<< ", txnId=" << txn.getId() << ")");
 		}
@@ -1370,8 +1381,10 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::lock(Transaction
 template<typename Container, RowArrayType rowArrayType>
 void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getImage(TransactionContext &txn,
 	MessageRowStore *messageRowStore, bool isWithRowId) {
-	ObjectManager &objectManager =
+	ObjectManagerV4 &objectManager =
 		*(rowArrayCursor_->getContainer().getObjectManager());
+	AllocateStrategy& allocateStrategy =
+		rowArrayCursor_->getContainer().getRowAllcateStrategy();
 	if (isWithRowId) {
 		messageRowStore->setRowId(getRowId());
 	}
@@ -1424,7 +1437,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getImage(Transac
 				}
 			}
 		} else {
-			VariableArrayCursor cursor(txn, objectManager, variablePartOId, OBJECT_READ_ONLY);
+			VariableArrayCursor cursor(objectManager, allocateStrategy, variablePartOId, OBJECT_READ_ONLY);
 			for (uint32_t columnId = 0;
 				 columnId < rowArrayCursor_->getContainer().getColumnNum();
 				 columnId++) {
@@ -1463,7 +1476,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getImage(Transac
 							messageRowStore->setVarDataHeaderField(
 								columnId, totalSize);
 							VariableArrayCursor arrayCursor(
-								txn, objectManager, linkOId, OBJECT_READ_ONLY);
+								objectManager, allocateStrategy, linkOId, OBJECT_READ_ONLY);
 							messageRowStore->setVarSize(
 								arrayCursor.getArrayLength());  
 							while (arrayCursor.nextElement()) {
@@ -1484,7 +1497,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getImage(Transac
 					case COLUMN_TYPE_BLOB: {
 						Value value;
 						value.set(elemData, COLUMN_TYPE_BLOB);
-						BlobProcessor::getField(txn, objectManager, columnId,
+						BlobProcessor::getField(txn, objectManager, allocateStrategy, columnId,
 						&value, messageRowStore);
 					} break;
 					default:
@@ -1503,28 +1516,14 @@ template<typename Container, RowArrayType rowArrayType>
 void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::getFieldImage(TransactionContext &txn,
 	ColumnInfo &columnInfo, uint32_t newColumnId,
 	MessageRowStore *messageRowStore) {
-	ObjectManager &objectManager =
+	ObjectManagerV4 &objectManager =
 		*(rowArrayCursor_->getContainer().getObjectManager());
-	ContainerValue containerValue(txn.getPartitionId(), objectManager);
+	AllocateStrategy& allocateStrategy =
+		rowArrayCursor_->getContainer().getRowAllcateStrategy();
+	ContainerValue containerValue(objectManager, allocateStrategy);
 	getField(txn, columnInfo, containerValue);
 	ValueProcessor::getField(
-		txn, objectManager, newColumnId, &containerValue.getValue(), messageRowStore);
-}
-
-template<typename Container, RowArrayType rowArrayType>
-void BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::archive(TransactionContext &txn, ArchiveHandler *handler) {
-	BaseContainer &container = rowArrayCursor_->getContainer();
-	ObjectManager &objectManager = *(container.getObjectManager());
-	handler->initializeRow();
-	ContainerValue containerValue(txn.getPartitionId(), objectManager);
-	for (uint32_t i = 0; i < container.getColumnNum(); i++) {
-		handler->initializeField(i);
-		getField(txn, container.getColumnInfo(i),
-			containerValue);
-		containerValue.getValue().archive(txn, objectManager, handler);
-		handler->finalizeField();
-	}
-	handler->finalizeRow();
+		txn, objectManager, allocateStrategy, newColumnId, &containerValue.getValue(), messageRowStore);
 }
 
 
@@ -1598,14 +1597,13 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::initializeParam() {
 template<typename Container, RowArrayType rowArrayType>
 inline bool BaseContainer::RowArrayImpl<Container, rowArrayType>::load(TransactionContext &txn, OId oId,
 	BaseContainer *container, uint8_t getOption) {
-	if (getOption != OBJECT_READ_ONLY || rowArrayStorage_.getPartitionId() != txn.getPartitionId()) {
+	if (getOption != OBJECT_READ_ONLY) {
 		rowArrayStorage_.load(oId, getOption);
 	}
 	else {
 		rowArrayStorage_.loadFast(oId);
 		rowArrayStorage_.resetCursor();
 	}
-
 
 	container_ = container;
 	if (!container->isFirstColumnAdd() && 
@@ -1626,7 +1624,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::initialize(
 	OId oId;
 	currentParam_ = latestParam_;
 	rowArrayStorage_.allocate<uint8_t>(getBinarySize(maxRowNum),
-		container_->getRowAllcateStrategy(), oId, OBJECT_TYPE_ROW_ARRAY);
+		oId, OBJECT_TYPE_ROW_ARRAY);
 	reset(txn, baseRowId, maxRowNum);
 }
 
@@ -1832,7 +1830,7 @@ bool BaseContainer::RowArrayImpl<Container, rowArrayType>::isTailPos() const {
 */
 template<typename Container, RowArrayType rowArrayType>
 inline OId BaseContainer::RowArrayImpl<Container, rowArrayType>::getOId() const {
-	return ObjectManager::setUserArea(getBaseOId(), static_cast<OId>(elemCursor_));
+	return ObjectManagerV4::setUserArea(getBaseOId(), static_cast<OId>(elemCursor_));
 }
 
 /*!
@@ -2077,7 +2075,7 @@ inline uint8_t *BaseContainer::RowArrayImpl<Container, rowArrayType>::getAddr() 
 }
 template<typename Container, RowArrayType rowArrayType>
 inline uint16_t BaseContainer::RowArrayImpl<Container, rowArrayType>::getElemCursor(OId oId) const {
-	return static_cast<uint16_t>(ObjectManager::getUserArea(oId));
+	return static_cast<uint16_t>(ObjectManagerV4::getUserArea(oId));
 }
 template<typename Container, RowArrayType rowArrayType>
 void BaseContainer::RowArrayImpl<Container, rowArrayType>::updateCursor() {
@@ -2095,7 +2093,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::updateCursor() {
 }
 template<typename Container, RowArrayType rowArrayType>
 OId BaseContainer::RowArrayImpl<Container, rowArrayType>::getBaseOId(OId oId) const {
-	return ObjectManager::getBaseArea(oId);
+	return ObjectManagerV4::getBaseArea(oId);
 }
 template<typename Container, RowArrayType rowArrayType>
 uint32_t BaseContainer::RowArrayImpl<Container, rowArrayType>::getBinarySize(uint16_t maxRowNum) const {
@@ -2388,7 +2386,7 @@ void BaseContainer::RowArrayImpl<Container, rowArrayType>::lock(TransactionConte
 	}
 	else if (txn.getManager().isActiveTransaction(
 				 txn.getPartitionId(), getTxnId())) {
-		DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_COL_LOCK_CONFLICT,
+		DS_THROW_LOCK_CONFLICT_EXCEPTION(GS_ERROR_DS_CON_LOCK_CONFLICT,
 			"(pId=" << txn.getPartitionId() << ", rowTxnId=" << getTxnId()
 					<< ", txnId=" << txn.getId() << ")");
 	}
@@ -2571,7 +2569,7 @@ bool BaseContainer::RowArrayImpl<Container, rowArrayType>::convertSchema(Transac
 	bool isRelease = false;
 		
 	int64_t activeRowNum = getActiveRowNum();
-	ObjectManager &objectManager =
+	ObjectManagerV4 &objectManager =
 		*(getContainer().getObjectManager());
 	uint32_t binarySize = objectManager.getSize(rowArrayStorage_.getBaseAddr());
 	int64_t thisRowArrayMaxRowNum = getContainer().calcRowArrayNumBySize(binarySize, getContainer().getNullbitsSize());
@@ -2639,7 +2637,7 @@ bool BaseContainer::RowArrayImpl<Container, rowArrayType>::convertSchema(Transac
 		for (size_t i = 0; i < static_cast<size_t>(thisRowArrayRowNum); i++) {
 			OId oldOId = getOId();
 			convert(txn, *(splitRowArray.getDefaultImpl()));	
-			OId newOId = ObjectManager::setUserArea(getBaseOId(), static_cast<OId>(i));
+			OId newOId = ObjectManagerV4::setUserArea(getBaseOId(), static_cast<OId>(i));
 			moveOIdList.push_back(std::make_pair(oldOId, newOId));
 			if (currentOId == oldOId) {
 				newCurrentOId = newOId;
@@ -2697,7 +2695,7 @@ inline bool BaseContainer::RowArrayImpl<Container, rowArrayType>::hasVariableCol
 
 template<typename Container, RowArrayType rowArrayType>
 inline OId BaseContainer::RowArrayImpl<Container, rowArrayType>::calcOId(uint16_t cursor) const {
-	return ObjectManager::setUserArea(getBaseOId(), static_cast<OId>(cursor));
+	return ObjectManagerV4::setUserArea(getBaseOId(), static_cast<OId>(cursor));
 }
 
 
@@ -2770,7 +2768,7 @@ std::string BaseContainer::RowArrayImpl<Container, rowArrayType>::dump(Transacti
 	}
 	strstrm << std::endl;
 	strstrm << "ChunkId,Offset,ElemNum" << std::endl;
-	ObjectManager &objMgr = *getContainer().getObjectManager();
+	ObjectManagerV4 &objMgr = *getContainer().getObjectManager();
 	for (begin(); !end(); next()) {
 		Row row(getRow(), this);
 		OId oId = getOId();
@@ -2784,7 +2782,6 @@ std::string BaseContainer::RowArrayImpl<Container, rowArrayType>::dump(Transacti
 	return strstrm.str();
 }
 
-
 template<typename Container, RowArrayType rowArrayType>
 bool BaseContainer::RowArrayImpl<Container, rowArrayType>::validate() {
 	return true;
@@ -2792,14 +2789,16 @@ bool BaseContainer::RowArrayImpl<Container, rowArrayType>::validate() {
 
 template<typename Container, RowArrayType rowArrayType>
 std::string BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::dump(TransactionContext &txn) {
-	ObjectManager &objectManager =
+	ObjectManagerV4 &objectManager =
 		*(rowArrayCursor_->getContainer().getObjectManager());
+	AllocateStrategy& allocateStrategy =
+		rowArrayCursor_->getContainer().getRowAllcateStrategy();
 	util::NormalOStringStream strstrm;
 	strstrm << "(";
 	if (rowArrayCursor_->getContainer().getContainerType() == COLLECTION_CONTAINER) {
 		strstrm << ", RowId=" << getRowId() << ", TxnId=" << getTxnId() << ", ";
 	}
-	ContainerValue containerValue(txn.getPartitionId(), objectManager);
+	ContainerValue containerValue(objectManager, allocateStrategy);
 	for (uint32_t i = 0; i < rowArrayCursor_->getContainer().getColumnNum();
 		 i++) {
 		if (i != 0) {
@@ -2807,11 +2806,12 @@ std::string BaseContainer::RowArrayImpl<Container, rowArrayType>::Row::dump(Tran
 		}
 		getField(txn, rowArrayCursor_->getContainer().getColumnInfo(i),
 			containerValue);
-		containerValue.getValue().dump(txn, objectManager, strstrm);
+		containerValue.getValue().dump(txn, objectManager, allocateStrategy, strstrm);
 	}
 	strstrm << ")";
 	return strstrm.str();
 }
+
 
 
 #endif

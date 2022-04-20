@@ -116,7 +116,7 @@ static void TrPv3Key_conv(TrPv3Key *key, TrPv3Box *box, TrPv3Key *out) {
 			out->c += box->p0[i] * key->A[i][j] * box->p0[j];
 		}
 		if (box->p1[i] < EPSI) {
-			out->p[i] = 0;  // should be inf?
+			out->p[i] = 0;  
 		}
 		else {
 			out->p[i] = (key->p[i] - box->p0[i]) / box->p1[i];

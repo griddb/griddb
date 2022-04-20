@@ -59,8 +59,8 @@ public:
 	*/
 	Polygon(srid_t id, LinearRing *exteriorBorder,
 		QP_XArray<LinearRing *> *interiorBorders, TransactionContext &txn,
-		ObjectManager &objectManager)
-		: Surface(id, exteriorBorder, interiorBorders, txn, objectManager) {
+		ObjectManagerV4 &objectManager, AllocateStrategy &strategy)
+		: Surface(id, exteriorBorder, interiorBorders, txn, objectManager, strategy) {
 		/*
 		  for(int i=0; i<interiorBorders->size();i++){
 		  if(!exteriorBorder->crossGeometry(interiorBorders[i])){
@@ -104,14 +104,14 @@ public:
 	* @param txn Object manager
 	*/
 	Polygon(srid_t id, QP_XArray<MultiPoint *> *mp, TransactionContext &txn,
-		ObjectManager &objectManager)
+		ObjectManagerV4 &objectManager, AllocateStrategy &strategy)
 		: Surface(txn) {
 		QP_XArray<LinearRing *> *v = NULL;
 		LinearRing *p;
 		QP_XArray<MultiPoint *>::const_iterator it = mp->begin();
 		if (it != mp->end()) {
 			p = QP_NEW LinearRing(
-				(*it)->getSrId(), (*it)->getPoints(), txn, objectManager);
+				(*it)->getSrId(), (*it)->getPoints(), txn, objectManager, strategy);
 		}
 		else {
 			p = NULL;
@@ -121,9 +121,9 @@ public:
 				v = QP_NEW QP_XArray<LinearRing *>(txn.getDefaultAllocator());
 			}
 			v->push_back(QP_NEW LinearRing(
-				(*it)->getSrId(), (*it)->getPoints(), txn, objectManager));
+				(*it)->getSrId(), (*it)->getPoints(), txn, objectManager, strategy));
 		}
-		setBorders(txn, objectManager, p, v);
+		setBorders(txn, objectManager, strategy, p, v);
 
 		srId_ = id;
 		isSimple_ = true;
@@ -183,13 +183,13 @@ public:
 	* @return duplicated object
 	*/
 	Polygon *dup(
-		TransactionContext &txn, ObjectManager &objectManager, srid_t id) {
+		TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, srid_t id) {
 		if (isEmpty()) {
 			return QP_NEW Polygon(txn);
 		}
 		else {
 			Polygon *p = QP_NEW Polygon(
-				id, exteriorBorder_, interiorBorders_, txn, objectManager);
+				id, exteriorBorder_, interiorBorders_, txn, objectManager, strategy);
 			p->isAssigned_ = isAssigned_;
 			p->isEmpty_ = isEmpty_;
 			return p;
@@ -200,8 +200,8 @@ public:
 	* @param txn The transaction context
 	* @param txn Object manager
 	*/
-	Polygon *dup(TransactionContext &txn, ObjectManager &objectManager) {
-		return dup(txn, objectManager, srId_);
+	Polygon *dup(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) {
+		return dup(txn, objectManager, strategy, srId_);
 	}
 
 	/*!
@@ -217,14 +217,14 @@ public:
 	* @return newly generated polygon object
 	*/
 	virtual Polygon *assign(TransactionContext &txn,
-		ObjectManager &objectManager, ContainerRowWrapper *amap,
+		ObjectManagerV4 &objectManager, AllocateStrategy &strategy, ContainerRowWrapper *amap,
 		FunctionMap *fmap, EvalMode mode = EVAL_MODE_NORMAL) {
 		if (isAssigned_ || isEmpty_) {
-			return static_cast<Polygon *>(dup(txn, objectManager));
+			return static_cast<Polygon *>(dup(txn, objectManager, strategy));
 		}
 
 		LinearRing *exterior = static_cast<LinearRing *>(
-			exteriorBorder_->assign(txn, objectManager, amap, fmap, mode));
+			exteriorBorder_->assign(txn, objectManager, strategy, amap, fmap, mode));
 		QP_XArray<LinearRing *> *interior;
 		if (interiorBorders_ != NULL) {
 			interior =
@@ -232,14 +232,14 @@ public:
 			for (size_t k = 0; k < interiorBorders_->size(); k++) {
 				interior->push_back(
 					static_cast<LinearRing *>((*interiorBorders_)[k]->assign(
-						txn, objectManager, amap, fmap, mode)));
+						txn, objectManager, strategy, amap, fmap, mode)));
 			}
 		}
 		else {
 			interior = NULL;
 		}
 		Polygon *p =
-			QP_NEW Polygon(srId_, exterior, interior, txn, objectManager);
+			QP_NEW Polygon(srId_, exterior, interior, txn, objectManager, strategy);
 
 		QP_SAFE_DELETE(exterior);
 		if (interior != NULL) {

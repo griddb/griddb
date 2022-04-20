@@ -73,12 +73,12 @@ public:
 	}
 
 	virtual PointGeom *assign(TransactionContext &txn,
-		ObjectManager &objectManager, ContainerRowWrapper *amap,
+		ObjectManagerV4 &objectManager, AllocateStrategy &strategy, ContainerRowWrapper *amap,
 		FunctionMap *fmap, EvalMode mode = EVAL_MODE_NORMAL) {
 		if (isAssigned_ || isEmpty_) {
-			return static_cast<PointGeom *>(dup(txn, objectManager));
+			return static_cast<PointGeom *>(dup(txn, objectManager, strategy));
 		}
-		PointGeom *x = static_cast<PointGeom *>(this->dup(txn, objectManager));
+		PointGeom *x = static_cast<PointGeom *>(this->dup(txn, objectManager, strategy));
 		for (QP_XArray<Point *>::const_iterator it = x->p_.begin();
 			 it != x->p_.end(); ++it) {
 			QP_DELETE(*it);
@@ -87,7 +87,7 @@ public:
 		x->p_.clear();
 		for (QP_XArray<Point *>::const_iterator it = p_.begin(); it != p_.end();
 			 ++it) {
-			Point *p = (*it)->assign(txn, objectManager, amap, fmap, mode);
+			Point *p = (*it)->assign(txn, objectManager, strategy, amap, fmap, mode);
 			x->p_.push_back(p);
 		}
 		if (!x->p_.empty() && x->isAssigned_) {
@@ -129,7 +129,7 @@ protected:
 	}
 
 	PointGeom(srid_t id, const QP_XArray<Point *> &parray,
-		TransactionContext &txn, ObjectManager &objectManager)
+		TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy)
 		: Geometry(txn), p_(txn.getDefaultAllocator()) {
 		isSimple_ = true;
 		isEmpty_ = false;
@@ -139,7 +139,7 @@ protected:
 		dimension_ = -1;
 		for (QP_XArray<Point *>::const_iterator it = parray.begin();
 			 it != parray.end(); ++it) {
-			p_.push_back((*it)->dup(txn, objectManager));
+			p_.push_back((*it)->dup(txn, objectManager, strategy));
 			isAssigned_ &= (*it)->isAssigned();
 			int d = (*it)->getDimension();
 			if (dimension_ != -1 && d != dimension_) {

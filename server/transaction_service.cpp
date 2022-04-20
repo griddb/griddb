@@ -1,4 +1,4 @@
-﻿/*
+/*
 	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
@@ -32,21 +32,21 @@ void ReplicationAckHandler::operator()(EventContext &ec, Event &ev) {
 }
 
 bool StatementHandler::executeReplication(
-	const Request &request,
-	EventContext &ec, util::StackAllocator &alloc,
-	const NodeDescriptor &clientND, TransactionContext &txn,
+	const Request& request,
+	EventContext& ec, util::StackAllocator& alloc,
+	const NodeDescriptor& clientND, TransactionContext& txn,
 	EventType replStmtType, StatementId replStmtId, int32_t replMode,
 	ReplicationContext::TaskStatus taskStatus,
-	const ClientId *closedResourceIds, size_t closedResourceIdCount,
-	const util::XArray<uint8_t> **logRecordList, size_t logRecordCount,
+	const ClientId* closedResourceIds, size_t closedResourceIdCount,
+	const util::XArray<uint8_t>** logRecordList, size_t logRecordCount,
 	StatementId originalStmtId, int32_t delayTime,
-	const Response &response) {
+	SimpleOutputMessage* mes) {
 	return false;
 }
 
 void StatementHandler::replyReplicationAck(
-		EventContext &ec,
-		util::StackAllocator &alloc, const NodeDescriptor &ND,
-		const ReplicationAck &ack, bool optionalFormat) {
+	EventContext& ec,
+	util::StackAllocator& alloc, const NodeDescriptor& ND,
+	const ReplicationAck& ack) {
 }
 

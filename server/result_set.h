@@ -21,7 +21,7 @@
 #ifndef RESULT_SET_H_
 #define RESULT_SET_H_
 
-#include "data_store.h"  
+#include "data_store_v4.h"  
 #include "data_type.h"
 
 class Query;
@@ -31,7 +31,6 @@ struct SQLTableInfo;
 
 class BaseContainer;
 class ContainerRowScanner;
-
 
 class ResultSetOption {
 public:
@@ -218,8 +217,7 @@ public:
 	ResultSet();  
 	~ResultSet();
 
-	void
-	resetMessageBuffer();  
+	void resetMessageBuffer();  
 	void resetSerializedData();
 	void clear();  
 
@@ -639,7 +637,6 @@ public:
 	void addUpdatedMvccRow(RowId rowId, OId oId);
 	void addRemovedRow(RowId rowId, OId oId);
 	void addRemovedRowArray(OId oId);
-	void addRemovedChunk(OId oId); 
 
 	void addUpdatedId(RowId rowId, uint64_t id, UpdateOperation op);
 
@@ -666,7 +663,6 @@ public:
 			queryOption_ = *option;
 		}
 	}
-
 
 	int32_t getSerializedSize() {
 		if (getResultNum() > 0 && serializedRowList_ != NULL && serializedVarDataList_ != NULL) {
@@ -752,7 +748,6 @@ private:
 	bool updateRowIdListInvalid_;
 	bool isRowIdSorted_;					
 	UpdateIdType updateIdType_;
-
 };
 
 class ResultSet::UpdateRowIdHandler {
@@ -761,16 +756,67 @@ public:
 	virtual void operator()(RowId rowId, uint64_t id, UpdateOperation op) = 0;
 };
 
+class ResultSetManager {
+public:
+	ResultSetManager(util::StackAllocator* stAlloc,
+		util::FixedSizeAllocator<util::Mutex>* memoryPool,
+		ObjectManagerV4* objectManager, uint32_t rsCacheSize);
+	~ResultSetManager();
+	ResultSet* create(TransactionContext& txn, ContainerId containerId,
+		SchemaVersionId versionId, int64_t emNow,
+		ResultSetOption* rsOption, bool noExpire = false);
+
+	ResultSet* get(TransactionContext& txn, ResultSetId resultSetId);
+	void close(ResultSetId resultSetId);
+	void closeOrClear(ResultSetId resultSetId);
+	void checkTimeout(int64_t checkTime);
+
+	void addUpdatedRow(ContainerId containerId, RowId rowId, OId oId, bool isMvccRow);
+	void addRemovedRow(ContainerId containerId, RowId rowId, OId oId);
+	void addRemovedRowArray(ContainerId containerId, OId oId);
+private:
+	/*!
+		@brief Compare method for ResultSetMap
+	*/
+	struct ResultSetIdHash {
+		ResultSetId operator()(const ResultSetId& key) {
+			return key;
+		}
+	};
+
+	ObjectManagerV4* objectManager_;
+	ResultSetId resultSetId_;
+	util::FixedSizeAllocator<util::Mutex>* resultSetPool_;
+	util::StackAllocator* resultSetAllocator_;
+	util::StackAllocator*
+		resultSetRowIdAllocator_;
+	util::StackAllocator*
+		resultSetSwapAllocator_;
+	util::ExpirableMap<ResultSetId, ResultSet, int64_t,
+		ResultSetIdHash>::Manager* resultSetMapManager_;
+	util::ExpirableMap<ResultSetId, ResultSet, int64_t, ResultSetIdHash>*
+		resultSetMap_;
+
+	static const int32_t RESULTSET_MAP_HASH_SIZE = 100;
+	static const size_t RESULTSET_FREE_ELEMENT_LIMIT =
+		10 * RESULTSET_MAP_HASH_SIZE;
+	static const int32_t DS_MAX_RESULTSET_TIMEOUT_INTERVAL = 60;
+private: 
+	void forceCloseAll();
+	void closeInternal(ResultSet& rs);
+};
+
+
 /*!
 	@brief Pre/postprocess before/after ResultSet Operation
 */
 class ResultSetGuard {
 public:
-	ResultSetGuard(TransactionContext &txn, DataStore &dataStore, ResultSet &rs);
+	ResultSetGuard(TransactionContext &txn, DataStoreV4 &dataStore, ResultSet &rs);
 	~ResultSetGuard();
 
 private:
-	DataStore &dataStore_;
+	DataStoreV4 &dataStore_;
 	const ResultSetId rsId_;
 	const PartitionId pId_;
 
@@ -785,10 +831,10 @@ public:
 
 	void initialize(const PartitionGroupConfig &config);
 
-	void closeAll(TransactionContext &txn, DataStore &dataStore);
+	void closeAll(TransactionContext &txn, PartitionList &partitionList);
 	void closeAll(
 			util::StackAllocator &alloc, PartitionGroupId pgId,
-			DataStore &dataStore);
+			PartitionList &partitionList);
 
 	void add(PartitionId pId, ResultSetId rsId);
 	void setCloseable(PartitionId pId, ResultSetId rsId);
@@ -884,10 +930,6 @@ inline void ResultSet::addRemovedRowArray(OId oId) {
 	addUpdatedId(UNDEF_ROWID, oId, UPDATE_OP_REMOVE_ROW_ARRAY);
 }
 
-inline void ResultSet::addRemovedChunk(OId oId) {
-	addUpdatedId(UNDEF_ROWID, oId, UPDATE_OP_REMOVE_CHUNK);
-}
-
 inline void ResultSet::addUpdatedId(
 		RowId rowId, uint64_t id, UpdateOperation op) {
 	try {
@@ -934,28 +976,26 @@ inline void ResultSet::addUpdatedId(
 	}
 }
 
-inline ResultSetGuard::ResultSetGuard(TransactionContext &txn, DataStore &dataStore, ResultSet &rs)
+inline ResultSetGuard::ResultSetGuard(TransactionContext &txn, DataStoreV4 &dataStore, ResultSet &rs)
 	: dataStore_(dataStore),
 	  rsId_(rs.getId()),
 	  pId_(rs.getPartitionId()),
 	  txnAlloc_(*rs.getTxnAllocator()),
 	  txnMemoryLimit_(txnAlloc_.getTotalSizeLimit()) {
-	txnAlloc_.setTotalSizeLimit(rs.getMemoryLimit());
-	ObjectManager &objectManager = *(dataStore_.getObjectManager());
-	if (objectManager.existPartition(pId_)) {
+	ObjectManagerV4 &objectManager = *(dataStore_.getObjectManager());
+	if (objectManager.isActive()) {
 		if (txn.isStoreMemoryAgingSwapRateEnabled()) {
-			objectManager.setStoreMemoryAgingSwapRate(pId_, txn.getStoreMemoryAgingSwapRate());
+			objectManager.setStoreMemoryAgingSwapRate(txn.getStoreMemoryAgingSwapRate());
 		} else {
-			objectManager.setStoreMemoryAgingSwapRate(pId_, dataStore_.getConfig().getStoreMemoryAgingSwapRate());
+			objectManager.setStoreMemoryAgingSwapRate(dataStore_.getConfig().getStoreMemoryAgingSwapRate());
 		}
 	}
 }
 
 inline ResultSetGuard::~ResultSetGuard() {
 	if (pId_ != UNDEF_PARTITIONID) {
-		dataStore_.closeOrClearResultSet(pId_, rsId_);
+		dataStore_.getResultSetManager()->closeOrClear(rsId_);
 	}
-	txnAlloc_.setTotalSizeLimit(txnMemoryLimit_);
 }
 
 inline ResultSetHolder::ResultSetHolder() :

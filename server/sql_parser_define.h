@@ -48,6 +48,7 @@ inline void sqlParserCallDestructor(T *obj) {
 #define SQL_PARSER_ALLOC_SAFE_DELETE(alloc, x) if ((x)!=NULL) { SQL_PARSER_ALLOC_DELETE(alloc, x); (x)=NULL; }
 
 
+/* 制限値など */
 #define SQL_MAX_COLUMN_VALUE_NUM 256
 #define SQL_MAX_COLUMN_NAME_LEN 256
 

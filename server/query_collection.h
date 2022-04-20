@@ -43,15 +43,15 @@ public:
 	QueryForCollection(TransactionContext &txn, Collection &collection,
 		const TQLInfo &tqlInfo, uint64_t limit = MAX_RESULT_SIZE,
 		QueryHookClass *hook = NULL);
-	QueryForCollection(TransactionContext &txn, Collection &collection)
-		: Query(txn, *(collection.getObjectManager())),
+	QueryForCollection(TransactionContext &txn, Collection &collection, AllocateStrategy& strategy)
+		: Query(txn, *(collection.getObjectManager()), strategy),
 		  collection_(&collection) {}
 	virtual ~QueryForCollection() {}
 
 	void doQuery(
 		TransactionContext &txn, Collection &collection, ResultSet &resultSet);
 	QueryForCollection *dup(
-		TransactionContext &txn, ObjectManager &objectManager);
+		TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy);
 
 protected:
 	virtual Collection *getCollection() {
@@ -93,9 +93,9 @@ public:
 		try {
 			for (uint32_t i = 0; i < collection_.getColumnNum(); i++) {
 				new (&(varray_[i])) ContainerValue(
-					txn.getPartitionId(),
 					*(collection
-							.getObjectManager()));  
+						.getObjectManager()),
+					collection_.getRowAllcateStrategy());  
 				varrayCounter_++;
 			}
 			memset(pBitmap, 0,
@@ -126,9 +126,9 @@ public:
 		try {
 			for (uint32_t i = 0; i < collection_.getColumnNum(); i++) {
 				new (&(varray_[i])) ContainerValue(
-					txn.getPartitionId(),
 					*(collection_
-							.getObjectManager()));  
+						.getObjectManager()),
+					collection_.getRowAllcateStrategy());  
 				varrayCounter_++;
 			}
 			memset(pBitmap, 0,
@@ -229,9 +229,9 @@ public:
 		CollectionRowWrapper row2(txn_, collection_, y, pBitmap2_);
 		for (size_t i = 0; i < orderByExprList_.size(); i++) {
 			Expr *e = orderByExprList_[i].expr;
-			Expr *e1 = e->eval(txn_, *(collection_.getObjectManager()), &row1,
+			Expr *e1 = e->eval(txn_, *(collection_.getObjectManager()), collection_.getRowAllcateStrategy(), &row1,
 				&fmap_, EVAL_MODE_NORMAL);
-			Expr *e2 = e->eval(txn_, *(collection_.getObjectManager()), &row2,
+			Expr *e2 = e->eval(txn_, *(collection_.getObjectManager()), collection_.getRowAllcateStrategy(), &row2,
 				&fmap_, EVAL_MODE_NORMAL);
 			int ret = e1->compareAsValue(txn_, e2, orderByExprList_[i].nullsLast);
 			QP_SAFE_DELETE(e);
@@ -279,7 +279,7 @@ private:
 	void check(TransactionContext &txn);
 
 	static FullContainerKey* predicateToContainerKey(
-			TransactionContext &txn, DataStore &dataStore, DatabaseId dbId,
+			TransactionContext &txn, DataStoreV4 &dataStore, DatabaseId dbId,
 			const BoolExpr *expr, const MetaContainerInfo &metaInfo,
 			const MetaContainerInfo *coreMetaInfo, PartitionId partitionCount,
 			bool &reduced, PartitionId &reducedPartitionId);

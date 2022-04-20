@@ -24,6 +24,93 @@
 
 #include "data_type.h"
 
+#include "lru_cache.h"
+typedef int64_t EventMonotonicTime;
+struct UserValue;
+
+typedef util::VariableSizeAllocator<util::Mutex> GlobalVariableSizeAllocator;
+
+typedef util::BasicString< char8_t, std::char_traits<char8_t>,
+		util::StdAllocator<char8_t, GlobalVariableSizeAllocator> > UserString; 
+
+typedef CacheNode<UserString, UserValue*,
+		GlobalVariableSizeAllocator> UserCacheEntry; 
+
+typedef LruCacheWithMonitor<UserCacheEntry,
+		UserString, UserValue*,
+		GlobalVariableSizeAllocator> UserCache; 
+
+struct UserValue {
+	UserValue(GlobalVariableSizeAllocator &allocator) :
+		alloc_(allocator),
+		userName_(allocator),
+		digest_(allocator),
+		dbName_(allocator),
+		roleName_(allocator) {}
+	
+	GlobalVariableSizeAllocator &alloc_;
+	UserString userName_; 
+	UserString digest_; 
+	UserString dbName_; 
+	DatabaseId dbId_; 
+	PrivilegeType priv_; 
+	UserString roleName_; 
+	bool isLDAPAuthenticate_;
+	EventMonotonicTime time_; 
+	
+	int checkAndGet(UserValue *userValue, int32_t updateInterval) {
+		if (userValue->time_ - time_ > updateInterval*1000) {
+			return 2;
+		}
+		if (userValue->isLDAPAuthenticate_ != isLDAPAuthenticate_) {
+			return 2;
+		}
+		if (strcmp(userValue->digest_.c_str(), digest_.c_str()) == 0) {
+			userValue->dbId_ = dbId_;
+			userValue->priv_ = priv_;
+			userValue->roleName_ = roleName_.c_str();
+			return 0;
+		} else {
+			return 1;
+		}
+	}
+
+	void clear(UserString &name, bool isDatabase) {
+		if (isDatabase) {
+			if (strcmp(dbName_.c_str(), name.c_str()) == 0) {
+				time_ = 0;
+			}
+		} else {
+			if (strcmp(userName_.c_str(), name.c_str()) == 0) {
+				time_ = 0;
+			}
+		}
+	}
+	
+	bool scan(UserString *name, bool isDatabase, picojson::object &cacheInfo) {
+		if (name == NULL) {
+			cacheInfo["dbName"] = picojson::value(std::string(dbName_.c_str()));
+			cacheInfo["userName"] = picojson::value(std::string(userName_.c_str()));
+			return true;
+		} else {
+			if (isDatabase) {
+				if (strcmp(dbName_.c_str(), name->c_str()) == 0) {
+					cacheInfo["dbName"] = picojson::value(std::string(dbName_.c_str()));
+					cacheInfo["userName"] = picojson::value(std::string(userName_.c_str()));
+					return true;
+				}
+			} else {
+				if (strcmp(userName_.c_str(), name->c_str()) == 0) {
+					cacheInfo["dbName"] = picojson::value(std::string(dbName_.c_str()));
+					cacheInfo["userName"] = picojson::value(std::string(userName_.c_str()));
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+};
+
 typedef uint8_t ClusterVersionId;
 typedef int32_t NodeId;
 typedef int32_t AddressType;
@@ -37,20 +124,10 @@ typedef int64_t PartitionRevisionNo;
 
 
 const ClusterVersionId GS_CLUSTER_MESSAGE_CURRENT_VERSION = 33;
-
 static const int32_t SERVICE_MAX = 5;
 
 static const uint32_t IMMEDIATE_PARTITION_ID = 0;
 static const uint32_t SYSTEM_CONTAINER_PARTITION_ID = 0;
-
-/*!
-	@brief cluster notification mode
-*/
-enum ClusterNotificationMode {
-	NOTIFICATION_MULTICAST,
-	NOTIFICATION_FIXEDLIST,
-	NOTIFICATION_RESOLVER
-};
 
 /*!
 	@brief Status of ChangePartition
@@ -167,7 +244,7 @@ static inline int32_t changeTimeSecToMill(int32_t sec) {
 		const uint32_t lap = watch.elapsedMillis();              \
 		if (lap > IO_MONITOR_DEFAULT_WARNING_THRESHOLD_MILLIS) { \
 			GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_EVENT, \
-				"eventType=" << eventType << ", time=" << lap);  \
+				"eventType=" << eventType << ", elapsedMillis=" << lap);  \
 		}                                                        \
 	}
 
@@ -177,7 +254,7 @@ static inline int32_t changeTimeSecToMill(int32_t sec) {
 		if (lap > IO_MONITOR_DEFAULT_WARNING_THRESHOLD_MILLIS) { \
 			GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_EVENT, \
 				"eventType=" << eventType << ", pId=" << pId     \
-							<< ", time=" << lap);               \
+							<< ", elapsedMillis=" << lap);               \
 		}                                                        \
 	}
 
@@ -187,7 +264,7 @@ static inline int32_t changeTimeSecToMill(int32_t sec) {
 		if (lap > IO_MONITOR_DEFAULT_WARNING_THRESHOLD_MILLIS) {        \
 			GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_EVENT,        \
 				"eventType=" << eventType << ", pId=" << pId            \
-							<< ", pgId=" << pgId << ", time=" << lap); \
+							<< ", pgId=" << pgId << ", elapsedMillis=" << lap); \
 		}                                                               \
 	}
 

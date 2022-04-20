@@ -201,7 +201,7 @@ public:
 		data_.timestamp_ = i;
 	}
 
-	void copy(TransactionContext &txn, ObjectManager &objectManager,
+	void copy(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 		const Value &srcValue);
 
 
@@ -500,7 +500,7 @@ public:
 		@brief Get array length
 	*/
 	uint32_t getArrayLength(
-		TransactionContext &txn, ObjectManager &objectManager) const {
+		TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) const {
 		if ((!isArray()) || (data_.object_.value_ == NULL)) return 0;
 		switch (type_) {
 		case COLUMN_TYPE_STRING_ARRAY: {
@@ -512,7 +512,7 @@ public:
 			const OId *oId = reinterpret_cast<const OId *>(addr);
 			if (*oId != UNDEF_OID) {
 				VariableArrayCursor arrayCursor(
-					txn, objectManager, *oId, OBJECT_READ_ONLY);
+					objectManager, strategy, *oId, OBJECT_READ_ONLY);
 				return arrayCursor.getArrayLength();
 			}
 			else {
@@ -541,7 +541,7 @@ public:
 			break;
 		}
 	}
-	void getArrayElement(TransactionContext &txn, ObjectManager &objectManager,
+	void getArrayElement(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 		uint32_t i, const uint8_t *&data, uint32_t &size) const;
 
 
@@ -549,13 +549,12 @@ public:
 		const;  
 
 
-	void get(TransactionContext &txn, ObjectManager &objectManager,
-		MessageRowStore *messageRowStore,
+	void get(TransactionContext &txn, ObjectManagerV4 &objectManager,
+		AllocateStrategy &strategy, MessageRowStore *messageRowStore,
 		ColumnId columnId);  
 
-	void archive(TransactionContext &txn, ObjectManager &objectManager, ArchiveHandler *handler) const;
 	void dump(
-		TransactionContext &txn, ObjectManager &objectManager, 
+		TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 		util::NormalOStringStream &stream, bool forExport = false) const;
 
 public:
@@ -643,8 +642,8 @@ public:
 */
 class ContainerValue {
 public:
-	ContainerValue(PartitionId pId, ObjectManager &objectManager)
-		: baseObj_(pId, objectManager) {}
+	ContainerValue(ObjectManagerV4 &objectManager, AllocateStrategy &strategy)
+		: baseObj_(objectManager, strategy) {}
 	BaseObject &getBaseObject() {
 		return baseObj_;
 	}
@@ -716,8 +715,7 @@ public:
 		NOTBETWEEN,
 		NONE,
 		IS_NULL,
-		IS_NOT_NULL
-		,
+		IS_NOT_NULL,
 		GEOM_OP
 	};
 
@@ -774,6 +772,5 @@ public:
 		return false;
 	}
 };
-
 
 #endif

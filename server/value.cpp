@@ -24,7 +24,6 @@
 #include "schema.h"
 #include "message_row_store.h"
 
-#include "archive.h"
 #include "gis_point.h"
 
 const uint8_t Value::defalutFixedValue_[8] = {0, 0, 0, 0, 0, 0, 0, 0};
@@ -35,7 +34,7 @@ const uint8_t Value::defalutBlobValue_[2] = {(0x01 | (0x01 << 1)), 0x01};
 const uint8_t Value::defalutGeometryValue_[7] = {0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x00};
 
 void Value::dump(
-	TransactionContext &txn, ObjectManager &objectManager, 
+	TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 	util::NormalOStringStream &ss, bool forExport) const {
 	if (isArray()) {
 		if (!forExport) {
@@ -45,16 +44,16 @@ void Value::dump(
 			ColumnType simpleType =
 				ValueProcessor::getSimpleColumnType(getType());
 			if (simpleType != COLUMN_TYPE_STRING) {
-				ss << getArrayLength(txn, objectManager);
+				ss << getArrayLength(txn, objectManager, strategy);
 				ss << "[";
-				for (uint32_t k = 0; k < getArrayLength(txn, objectManager);
+				for (uint32_t k = 0; k < getArrayLength(txn, objectManager, strategy);
 					 k++) {
 					if (k != 0) {
 						ss << ",";
 					}
 					uint32_t size;
 					const uint8_t *data;
-					getArrayElement(txn, objectManager, k, data, size);
+					getArrayElement(txn, objectManager, strategy, k, data, size);
 					ValueProcessor::dumpSimpleValue(ss, simpleType, data, size, !forExport);
 				}
 				ss << "]";
@@ -72,7 +71,7 @@ void Value::dump(
 				OId headerOId = *reinterpret_cast<const OId *>(blobHeaderData);
 				if (headerOId != UNDEF_OID) {
 					VariableArrayCursor arrayCursor(
-						txn, objectManager, headerOId, OBJECT_READ_ONLY);
+						objectManager, strategy, headerOId, OBJECT_READ_ONLY);
 					uint32_t num = arrayCursor.getArrayLength();
 					if (!forExport) {
 						ss << num << ",";
@@ -106,7 +105,7 @@ void Value::dump(
 	else {
 		switch (getType()) {
 		case COLUMN_TYPE_BLOB: {
-			BlobCursor blobCursor(txn.getPartitionId(), objectManager, data());
+			BlobCursor blobCursor(objectManager, strategy, data());
 			blobCursor.dump(ss, forExport);
 		} break;
 		default:
@@ -116,16 +115,18 @@ void Value::dump(
 	}
 }
 
+
+
 /*!
 	@brief Get element of array
 */
 void Value::getArrayElement(TransactionContext &txn,
-	ObjectManager &objectManager, uint32_t i, const uint8_t *&data,
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, uint32_t i, const uint8_t *&data,
 	uint32_t &size) const {
 	data = NULL;
 	size = 0;
 	if (isArray() && data_.object_.value_ != 0) {
-		uint32_t num = getArrayLength(txn, objectManager);
+		uint32_t num = getArrayLength(txn, objectManager, strategy);
 		if (i < num) {
 			ColumnType simpleType =
 				ValueProcessor::getSimpleColumnType(getType());
@@ -152,7 +153,7 @@ void Value::getArrayElement(TransactionContext &txn,
 						data_.object_.value_);
 				if (data_.object_.onDataStore_) {
 					VariableArrayCursor arrayCursor(
-						txn, objectManager, arrayObject->getHeaderOId(), OBJECT_READ_ONLY);
+						objectManager, strategy, arrayObject->getHeaderOId(), OBJECT_READ_ONLY);
 
 					uint32_t elemCount;
 					while (arrayCursor
@@ -202,7 +203,7 @@ void Value::serialize(util::XArray<uint8_t> &serializedRowList) const {
 /*!
 	@brief Copy value
 */
-void Value::copy(TransactionContext &txn, ObjectManager &objectManager,
+void Value::copy(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 	const Value &srcValue) {
 	PartitionId pId = txn.getPartitionId();
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
@@ -258,8 +259,8 @@ void Value::copy(TransactionContext &txn, ObjectManager &objectManager,
 	case COLUMN_TYPE_BLOB: {
 		type_ = srcValue.getType();
 		if (srcValue.data_.object_.value_ != NULL) {
-			BlobCursor blobCursor(txn.getPartitionId(), objectManager, reinterpret_cast<const uint8_t *>(srcValue.data_.object_.value_));
-			size_t blobSize = blobCursor.getTotalSize();
+			BlobCursor blobCursor(objectManager, strategy, reinterpret_cast<const uint8_t *>(srcValue.data_.object_.value_));
+			uint64_t blobSize = blobCursor.getTotalSize();
 			uint8_t *destAddr = reinterpret_cast<uint8_t *>(alloc.allocate(blobSize));
 			while (blobCursor.next()) {
 				uint32_t srcDataSize = 0;
@@ -274,7 +275,7 @@ void Value::copy(TransactionContext &txn, ObjectManager &objectManager,
 		}
 	} break;
 	case COLUMN_TYPE_STRING_ARRAY: {
-		ArrayObject destObject(txn.getPartitionId(), objectManager);
+		ArrayObject destObject(objectManager, strategy);
 		if (srcValue.data_.object_.value_ != NULL) {
 			const ArrayObject srcObject(reinterpret_cast<uint8_t *>(
 				const_cast<void *>(srcValue.data_.object_.value_)));
@@ -292,7 +293,7 @@ void Value::copy(TransactionContext &txn, ObjectManager &objectManager,
 			for (uint32_t i = 0; i < num; i++) {
 				const char *srcElemVariant;
 				char *destElemVariant;
-				BaseObject baseObject(pId, objectManager);
+				BaseObject baseObject(objectManager, strategy);
 				if (srcValue.onDataStore()) {
 					const OId *srcElemOId = reinterpret_cast<const OId *>(
 						srcObject.getArrayElement(i, FixedSizeOfColumnType[simpleType]));
@@ -302,7 +303,7 @@ void Value::copy(TransactionContext &txn, ObjectManager &objectManager,
 							GS_THROW_USER_ERROR(GS_ERROR_CM_NOT_SUPPORTED,
 								"not support copy type");
 						}
-						baseObject.load(*srcElemOId);
+						baseObject.load(*srcElemOId, false);
 						srcElemVariant = baseObject.getBaseAddr<const char *>();
 					}
 					else {
@@ -367,79 +368,13 @@ void Value::copy(TransactionContext &txn, ObjectManager &objectManager,
 }
 
 
-void Value::get(TransactionContext &txn, ObjectManager &objectManager,
+void Value::get(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 	MessageRowStore *messageRowStore, ColumnId columnId) {
 	if (isNullValue()) {
 		messageRowStore->setNull(columnId);
 	} else {
 		ValueProcessor::getField(
-			txn, objectManager, columnId, this, messageRowStore);
+			txn, objectManager, strategy, columnId, this, messageRowStore);
 	}
 }
 
-
-void Value::archive(TransactionContext &txn, ObjectManager &objectManager, ArchiveHandler *handler) const {
-	if (isArray()) {
-		handler->initializeArray();
-		if (data() != NULL) {
-			ColumnType simpleType =
-				ValueProcessor::getSimpleColumnType(getType());
-			if (simpleType != COLUMN_TYPE_STRING) {
-				for (uint32_t k = 0; k < getArrayLength(txn, objectManager);
-					 k++) {
-					uint32_t size;
-					const uint8_t *data;
-					getArrayElement(txn, objectManager, k, data, size);
-					handler->appendArray(simpleType, data, size);
-				}
-			}
-			else {
-				const uint8_t *blobHeaderData =
-					reinterpret_cast<const uint8_t *>(data_.object_.value_);
-				uint32_t elemSize =
-					ValueProcessor::decodeVarSize(blobHeaderData);
-				blobHeaderData += ValueProcessor::getEncodedVarSize(elemSize);
-				blobHeaderData += sizeof(uint32_t);
-
-				OId headerOId = *reinterpret_cast<const OId *>(blobHeaderData);
-				if (headerOId != UNDEF_OID) {
-					VariableArrayCursor arrayCursor(
-						txn, objectManager, headerOId, OBJECT_READ_ONLY);
-					uint32_t num = arrayCursor.getArrayLength();
-					uint32_t count = 0;
-					uint8_t *elem;
-					uint32_t elemSize;
-					uint32_t elemCount;
-					while (arrayCursor.nextElement()) {
-						elem = arrayCursor.getElement(elemSize, elemCount);
-						StringCursor cursor(elem);
-						handler->appendArray(simpleType, cursor.str(), cursor.stringLength());
-						++count;
-					}
-					UNUSED_VARIABLE(num);
-					assert(num == count);
-				}
-			}
-		}
-		handler->finalizeArray();
-	} else {
-		switch (getType()) {
-		case COLUMN_TYPE_GEOMETRY: {
-			util::StackAllocator::Scope scope(txn.getDefaultAllocator());
-			Geometry *geom = Geometry::deserialize(txn, data(), size());
-			const char *wkt = geom->getString(txn);
-
-			handler->setPrimitiveValue(getType(), wkt, strlen(wkt));
-		} break;
-		case COLUMN_TYPE_BLOB: {
-			BlobCursor blobCursor(txn.getPartitionId(), objectManager, data());
-			util::StackAllocator::Scope scope(txn.getDefaultAllocator());
-			uint8_t *binary = blobCursor.getBinary(txn.getDefaultAllocator());
-			handler->setPrimitiveValue(getType(), binary, blobCursor.getTotalSize());
-		} break;
-		default:
-			handler->setPrimitiveValue(getType(), data(), size());
-			break;
-		}
-	}
-}

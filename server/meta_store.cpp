@@ -22,20 +22,16 @@
 #include "meta_store.h"
 
 #include "time_series.h"
-#include "trigger_service.h"
 #include "lexer.h"
 
 #include "picojson.h"
 #include "sql_processor.h"
-#include "sql_execution_manager.h"
-#include "resource_set.h"
 #include "sql_execution.h"
 #include "sql_service.h"
 #include "sql_job_manager.h"
-#include "sql_resource_manager.h"
-#include "sql_table_schema.h"
-#include "nosql_utils.h"
-#include "sql_job.h"
+#include "nosql_command.h"
+#include "key_data_store.h"
+UTIL_TRACER_DECLARE(SQL_SERVICE);
 
 
 MetaColumnInfo::MetaColumnInfo() :
@@ -209,6 +205,7 @@ const util::NameCoderEntry<MetaType::ContainerStatsMeta>
 	UTIL_NAME_CODER_ENTRY(CONTAINER_STATS_DATABASE_ID),
 	UTIL_NAME_CODER_ENTRY(CONTAINER_STATS_DATABASE_NAME),
 	UTIL_NAME_CODER_ENTRY(CONTAINER_STATS_NAME),
+	UTIL_NAME_CODER_ENTRY(CONTAINER_STATS_GROUPID),
 	UTIL_NAME_CODER_ENTRY(CONTAINER_STATS_NUM_ROWS)
 };
 
@@ -223,7 +220,6 @@ const util::NameCoderEntry<MetaType::ClusterPartitionMeta>
 	UTIL_NAME_CODER_ENTRY(CLUSTER_PARTITION_BLOCK_CATEGORY),
 	UTIL_NAME_CODER_ENTRY(CLUSTER_PARTITION_STORE_USE),
 	UTIL_NAME_CODER_ENTRY(CLUSTER_PARTITION_STORE_OBJECT_USE),
-
 };
 
 const util::NameCoderEntry<MetaType::PartitionMeta>
@@ -289,6 +285,7 @@ const util::NameCoder<MetaType::ContainerStatsMeta, MetaType::END_CONTAINER_STAT
 		MetaType::Coders::CODER_CONTAINER_STATS(LIST_CONTAINER_STATS, 1);
 const util::NameCoder<MetaType::ClusterPartitionMeta, MetaType::END_CLUSTER_PARTITION>
 		MetaType::Coders::CODER_CLUSTER_PARTITION(LIST_CLUSTER_PARTITION, 1);
+
 const util::NameCoder<MetaType::PartitionMeta, MetaType::END_PARTITION>
 		MetaType::Coders::CODER_PARTITION(LIST_PARTITION, 1);
 const util::NameCoder<MetaType::ViewMeta, MetaType::END_VIEW>
@@ -314,6 +311,7 @@ const util::NameCoderEntry<MetaType::StringConstants>
 
 	UTIL_NAME_CODER_ENTRY(STR_DATABASE_NAME),
 	UTIL_NAME_CODER_ENTRY(STR_DATA_AFFINITY),
+	UTIL_NAME_CODER_ENTRY(STR_DATA_GROUPID),
 	UTIL_NAME_CODER_ENTRY(STR_EXPIRATION_TIME),
 	UTIL_NAME_CODER_ENTRY(STR_EXPIRATION_TIME_UNIT),
 	UTIL_NAME_CODER_ENTRY(STR_EXPIRATION_DIVISION_COUNT),
@@ -388,10 +386,8 @@ const util::NameCoderEntry<MetaType::StringConstants>
 
 	UTIL_NAME_CODER_ENTRY(STR_SQL),  
 	UTIL_NAME_CODER_ENTRY(STR_QUERY_ID),
-	UTIL_NAME_CODER_ENTRY(STR_JOB_ID)
+	UTIL_NAME_CODER_ENTRY(STR_JOB_ID),
 
-
-	,
 	UTIL_NAME_CODER_ENTRY(STR_NUM_ROWS),
 	UTIL_NAME_CODER_ENTRY(STR_ROLE),
 	UTIL_NAME_CODER_ENTRY(STR_LSN),
@@ -530,6 +526,7 @@ const MetaType::CoreColumns::Entry<MetaType::ContainerStatsMeta>
 	of(CONTAINER_STATS_DATABASE_ID).asLong(),
 	of(CONTAINER_STATS_DATABASE_NAME).asString().asDbName(),
 	of(CONTAINER_STATS_NAME).asString().asContainerName(),
+	of(CONTAINER_STATS_GROUPID).asLong(true),
 	of(CONTAINER_STATS_NUM_ROWS).asLong(true)
 };
 
@@ -806,6 +803,7 @@ const MetaType::RefColumns::Entry<MetaType::ContainerStatsMeta>
 		MetaType::RefColumns::COLUMNS_CONTAINER_STATS[] = {
 	of(CONTAINER_STATS_DATABASE_NAME, STR_DATABASE_NAME),
 	of(CONTAINER_STATS_NAME, STR_CONTAINER_NAME, STR_TABLE_NAME),
+	of(CONTAINER_STATS_GROUPID, STR_DATA_GROUPID),
 	of(CONTAINER_STATS_NUM_ROWS, STR_NUM_ROWS)
 };
 
@@ -905,16 +903,14 @@ const MetaContainerInfo MetaType::Containers::CONTAINERS_CORE[] = {
 			CoreColumns::COLUMNS_EVENT, Coders::CODER_EVENT, 0)),
 	toNodeDistribution(coreOf(
 			TYPE_SOCKET, "_core_sockets",
-			CoreColumns::COLUMNS_SOCKET, Coders::CODER_SOCKET, 0))
+			CoreColumns::COLUMNS_SOCKET, Coders::CODER_SOCKET, 0)),
 
-	,
 	coreOf(
 			TYPE_CONTAINER_STATS, "_core_containers_stats",
 			CoreColumns::COLUMNS_CONTAINER_STATS, Coders::CODER_CONTAINER_STATS, 0),
 	coreOf(
 			TYPE_CLUSTER_PARTITION, "_core_cluster_partitions",
 			CoreColumns::COLUMNS_CLUSTER_PARTITION, Coders::CODER_CLUSTER_PARTITION, 0)
-
 	,
 	coreOf(
 			TYPE_PARTITION, "_core_table_partitions",
@@ -924,8 +920,8 @@ const MetaContainerInfo MetaType::Containers::CONTAINERS_CORE[] = {
 			CoreColumns::COLUMNS_VIEW, Coders::CODER_VIEW, 0),
 	toNodeDistribution(coreOf(
 			TYPE_SQL, "_core_sqls",
-			CoreColumns::COLUMNS_SQL, Coders::CODER_SQL, 0))
-	,
+			CoreColumns::COLUMNS_SQL, Coders::CODER_SQL, 0)),
+
 	coreOf(
 			TYPE_PARTITION_STATS, "_core_table_partitions_stats",
 			CoreColumns::COLUMNS_PARTITION_STATS, Coders::CODER_PARTITION_STATS, 0),
@@ -955,8 +951,7 @@ const MetaContainerInfo MetaType::Containers::CONTAINERS_REF[] = {
 			"events", "container_events", "table_events",
 			RefColumns::COLUMNS_EVENT, 0),
 	refOf(TYPE_SOCKET,
-			"sockets", NULL, NULL, RefColumns::COLUMNS_SOCKET, 0)
-	,
+			"sockets", NULL, NULL, RefColumns::COLUMNS_SOCKET, 0),
 	refOf(TYPE_CONTAINER_STATS, NULL, "containers_stats", "tables_stats",
 			RefColumns::COLUMNS_CONTAINER_STATS, 0),
 	refOf(TYPE_CLUSTER_PARTITION,
@@ -971,9 +966,7 @@ const MetaContainerInfo MetaType::Containers::CONTAINERS_REF[] = {
 			RefColumns::COLUMNS_VIEW, 0),
 	refOf(TYPE_SQL,
 			"sqls", "container_sqls", "table_sqls",
-			RefColumns::COLUMNS_SQL, 0) 
-
-	,
+			RefColumns::COLUMNS_SQL, 0)	,
 	refOf(TYPE_PARTITION_STATS,
 			NULL, "container_partitions_stats", "table_partitions_stats",
 			RefColumns::COLUMNS_PARTITION_STATS, 0),
@@ -1455,7 +1448,8 @@ template<typename HandlerType>
 void MetaProcessor::scanCore(TransactionContext &txn, Context &cxt) {
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
 
-	DataStore::ContainerCondition condition(alloc);
+	KeyDataStore::ContainerCondition condition(alloc);
+
 	const bool singleRequired = (info_.id_ != MetaType::TYPE_PARTITION);
 	const bool largeRequired = (info_.id_ != MetaType::TYPE_ERASABLE);
 	const bool subRequired = ((info_.id_ == MetaType::TYPE_ERASABLE)
@@ -1465,7 +1459,7 @@ void MetaProcessor::scanCore(TransactionContext &txn, Context &cxt) {
 
 	if (info_.nodeDistribution_) {
 		HandlerType handler(cxt);
-		DataStore *dataStore = cxt.getSource().dataStore_;
+		DataStoreV4 *dataStore = cxt.getSource().dataStore_;
 		BaseContainer *container = ALLOC_NEW(txn.getDefaultAllocator()) Collection(txn, dataStore);
 		handler(
 				txn, UNDEF_CONTAINERID, UNDEF_DBID,
@@ -1478,7 +1472,7 @@ void MetaProcessor::scanCore(TransactionContext &txn, Context &cxt) {
 	isPartitionUnit = (isPartitionUnit || (info_.id_ == MetaType::TYPE_CLUSTER_PARTITION));
 	if (isPartitionUnit) {
 		HandlerType handler(cxt);
-		DataStore *dataStore = cxt.getSource().dataStore_;
+		DataStoreV4 *dataStore = cxt.getSource().dataStore_;
 		BaseContainer *container = ALLOC_NEW(txn.getDefaultAllocator()) Collection(txn, dataStore);
 		handler(
 				txn, UNDEF_CONTAINERID, UNDEF_DBID,
@@ -1503,21 +1497,44 @@ void MetaProcessor::scanCore(TransactionContext &txn, Context &cxt) {
 
 	HandlerType handler(cxt);
 
-	DataStore *dataStore = cxt.getSource().dataStore_;
+	DataStoreV4 *dataStore = cxt.getSource().dataStore_;
 	assert(dataStore != NULL);
 	const DatabaseId dbId = cxt.getSource().dbId_;
 
 	if (containerKey_ == NULL) {
-		if (!dataStore->scanContainerList(
-				txn, txn.getPartitionId(), nextContainerId_,
-				containerLimit_, &dbId, condition, handler)) {
+		util::StackAllocator::Scope subScope(alloc);
+		util::XArray< KeyDataStoreValue* > storeValueList(alloc);
+		bool followingFound = dataStore->getKeyDataStore()->scanContainerList(
+			txn, nextContainerId_,
+			containerLimit_, dbId, condition, storeValueList);
+		util::XArray< KeyDataStoreValue* >::iterator itr;
+		for (itr = storeValueList.begin(); itr != storeValueList.end(); ++itr) {
+			bool isAllowExpiration = true;
+			ContainerAutoPtr containerAutoPtr(txn, dataStore, (*itr)->oId_, ANY_CONTAINER,
+				isAllowExpiration);
+			BaseContainer* baseContainer = containerAutoPtr.getBaseContainer();
+			if (baseContainer == NULL) {
+				GS_THROW_USER_ERROR(GS_ERROR_DS_CONTAINER_UNEXPECTEDLY_REMOVED, "");
+			}
+			handler(
+				txn,
+				(*itr)->containerId_,
+				dbId,
+				(*itr)->attribute_,
+				*baseContainer);
+		}
+		if (!followingFound) {
 			setNextContainerId(UNDEF_CONTAINERID);
 		}
 	}
 	else {
+
+		bool caseSensitive = false;
+		bool allowExpiration = false;
+		KeyDataStoreValue keyStoreValue = dataStore->getKeyDataStore()->get(txn, *containerKey_, caseSensitive);
 		ContainerAutoPtr containerPtr(
-				txn, dataStore, txn.getPartitionId(), *containerKey_,
-				ANY_CONTAINER);
+			txn, dataStore,
+			keyStoreValue.oId_, ANY_CONTAINER, allowExpiration);
 		BaseContainer *container = containerPtr.getBaseContainer();
 		do {
 			if (container == NULL) {
@@ -1734,7 +1751,6 @@ int32_t MetaProcessor::SQLMetaUtils::ColumnTypeTable::get(
 }
 
 
-
 MetaProcessor::StoreCoreHandler::StoreCoreHandler(Context &cxt) :
 		cxt_(cxt) {
 }
@@ -1769,10 +1785,11 @@ void MetaProcessor::StoreCoreHandler::operator()(
 		alloc, KeyConstraint::getNoLimitKeyConstraint(), components);
 
 	const bool caseSensitive = true;
+	KeyDataStoreValue keyStoreValue = container.getDataStore()->getKeyDataStore()->get(txn, subKey, caseSensitive);
+	bool isAllowExpiration = false;
 	ContainerAutoPtr subContainerPtr(
-			txn, container.getDataStore(), txn.getPartitionId(),
-			subKey, ANY_CONTAINER, caseSensitive);
-
+		txn, container.getDataStore(),
+		keyStoreValue.oId_, ANY_CONTAINER, isAllowExpiration);
 	resolvedSubContainer = subContainerPtr.getBaseContainer();
 	if (resolvedSubContainer == NULL) {
 		cxt_.stepContainerListing(id);
@@ -1855,7 +1872,7 @@ bool MetaProcessor::RefHandler::filter(
 template<typename T>
 void decodeLargeRow(
 		const char *key, util::StackAllocator &alloc, TransactionContext &txn,
-		DataStore *dataStore, const char8_t *dbName, BaseContainer *container,
+		DataStoreV4 *dataStore, const char8_t *dbName, BaseContainer *container,
 		T &record, const EventMonotonicTime emNow);
 
 const int8_t MetaProcessor::ContainerHandler::META_EXPIRATION_TYPE_ROW =
@@ -1897,11 +1914,17 @@ void MetaProcessor::ContainerHandler::execute(
 		assert(eventContext != NULL);
 		const int64_t emNow =
 				eventContext->getHandlerStartMonotonicTime();
-
-		decodeLargeRow(
+		try {
+			decodeLargeRow(
 				NoSQLUtils::LARGE_CONTAINER_KEY_PARTITIONING_INFO,
 				alloc, txn, container.getDataStore(), dbName, &container,
 				*partitioningInfo, emNow);
+		}
+		catch (std::exception& e) {
+			ALLOC_DELETE(alloc, partitioningInfo);
+			partitioningInfo = NULL;
+			UTIL_TRACE_EXCEPTION(SQL_SERVICE, e, "");
+		}
 	}
 
 	builder.set(
@@ -1928,25 +1951,7 @@ void MetaProcessor::ContainerHandler::execute(
 			ValueUtils::makeString(alloc, dataAffinity.c_str())));
 
 	const BaseContainer::ExpirationInfo *expirationInfo = NULL;
-	const CompressionSchema *compression = NULL;
 	int32_t expirationDivision = -1;
-	if (type == TIME_SERIES_CONTAINER) {
-		const TimeSeries &timeSeries =
-				static_cast<const TimeSeries&>(schemaContainer);
-
-		expirationInfo = &timeSeries.getExpirationInfo();
-		if (expirationInfo->elapsedTime_ < 0) {
-			expirationInfo = NULL;
-		}
-		else {
-			expirationDivision = expirationInfo->dividedNum_;
-		}
-
-		compression = &timeSeries.getCompressionSchema();
-		if (compression->getCompressionType() == NO_COMPRESSION) {
-			compression = NULL;
-		}
-	}
 
 	if (partitioningInfo != NULL && partitioningInfo->isTableExpiration()) {
 		BaseContainer::ExpirationInfo *partitionExpiration =
@@ -1968,25 +1973,17 @@ void MetaProcessor::ContainerHandler::execute(
 					alloc, timeUnitToName(expirationInfo->timeUnit_)));
 	builder.set(
 			MetaType::CONTAINER_EXPIRATION_DIVISION,
-			expirationDivision < 0 ? ValueUtils::makeNull() :
-					ValueUtils::makeInteger(expirationDivision));
+			ValueUtils::makeNull());
 	builder.set(
 			MetaType::CONTAINER_COMPRESSION_METHOD,
-			compression == NULL ? ValueUtils::makeNull() : ValueUtils::makeString(
-					alloc, compressionToName(compression->getCompressionType())));
+			ValueUtils::makeNull());
 
-	const bool windowSizeSpecified = (compression != NULL &&
-			compression->getDurationInfo().timeDuration_ > 0);
 	builder.set(
 			MetaType::CONTAINER_COMPRESSION_SIZE,
-			!windowSizeSpecified ? ValueUtils::makeNull() :
-					ValueUtils::makeInteger(
-							compression->getDurationInfo().timeDuration_));
+			ValueUtils::makeNull());
 	builder.set(
 			MetaType::CONTAINER_COMPRESSION_UNIT,
-			!windowSizeSpecified ? ValueUtils::makeNull() : ValueUtils::makeString(
-					alloc, timeUnitToName(
-							compression->getDurationInfo().timeUnit_)));
+			ValueUtils::makeNull());
 
 	for (size_t i = 0; i < 2; i++) {
 		PartitioningInfo *p = partitioningInfo;
@@ -2047,7 +2044,8 @@ void MetaProcessor::ContainerHandler::execute(
 				(p == NULL || (p != NULL && !p->checkHashPartitioning(
 						static_cast<int32_t>(i)))) ?
 						ValueUtils::makeNull() :
-						ValueUtils::makeInteger(p->getHashPartitioningCount()));
+						ValueUtils::makeInteger(p->getHashPartitioningCount(
+								static_cast<int32_t>(i))));
 	}
 
 	builder.set(
@@ -2099,19 +2097,6 @@ const char8_t* MetaProcessor::ContainerHandler::timeUnitToName(
 		return "SECOND";
 	case TIME_UNIT_MILLISECOND:
 		return "MILLISECOND";
-	default:
-		assert(false);
-		return "";
-	}
-}
-
-const char8_t* MetaProcessor::ContainerHandler::compressionToName(
-		int8_t type) {
-	switch (type) {
-	case SS_COMPRESSION:
-		return "SS";
-	case HI_COMPRESSION:
-		return "HI";
 	default:
 		assert(false);
 		return "";
@@ -2181,18 +2166,7 @@ void MetaProcessor::ColumnHandler::execute(
 			MetaType::COLUMN_CONTAINER_NAME,
 			ValueUtils::makeString(alloc, name));
 
-	const CompressionSchema *compression = NULL;
-	if (type == TIME_SERIES_CONTAINER) {
-		const TimeSeries &timeSeries =
-				static_cast<const TimeSeries&>(schemaContainer);
-
-		compression = &timeSeries.getCompressionSchema();
-		if (compression->getCompressionType() == NO_COMPRESSION) {
-			compression = NULL;
-		}
-	}
-
-	ObjectManager *objectManager =
+	ObjectManagerV4 *objectManager =
 			container.getDataStore()->getObjectManager();
 
 	const uint32_t columnCount = schemaContainer.getColumnNum();
@@ -2222,7 +2196,7 @@ void MetaProcessor::ColumnHandler::execute(
 				ValueUtils::makeString(alloc, columnTypeName));
 
 		const char8_t *columnName =
-				info.getColumnName(txn, *objectManager);
+				info.getColumnName(txn, *objectManager, const_cast<BaseContainer*>(&schemaContainer)->getMetaAllcateStrategy());
 		builder.set(
 				MetaType::COLUMN_NAME,
 				ValueUtils::makeString(alloc, columnName));
@@ -2246,25 +2220,6 @@ void MetaProcessor::ColumnHandler::execute(
 		Value compressionRate = ValueUtils::makeNull();
 		Value compressionSpan = ValueUtils::makeNull();
 		Value compressionWidth = ValueUtils::makeNull();
-		if (compression != NULL && compression->isHiCompression(i)) {
-			double threshold;
-			double rate;
-			double span;
-			bool thresholdRelative;
-			uint16_t compressionPos;
-			compression->getHiCompressionProperty(
-					i, threshold, rate, span, thresholdRelative,
-					compressionPos);
-			compressionRelative = ValueUtils::makeBool(thresholdRelative);
-
-			if (thresholdRelative) {
-				compressionRate = ValueUtils::makeDouble(rate);
-				compressionSpan = ValueUtils::makeDouble(span);
-			}
-			else {
-				compressionWidth = ValueUtils::makeDouble(threshold);
-			}
-		}
 		builder.set(
 				MetaType::COLUMN_COMPRESSION_RELATIVE,
 				compressionRelative);
@@ -2334,7 +2289,7 @@ void MetaProcessor::IndexHandler::execute(
 			MetaType::INDEX_CONTAINER_NAME,
 			ValueUtils::makeString(alloc, name));
 
-	ObjectManager *objectManager =
+	ObjectManagerV4 *objectManager =
 			container.getDataStore()->getObjectManager();
 
 	for (IndexInfoList::const_iterator it = indexInfoList.begin();
@@ -2366,7 +2321,7 @@ void MetaProcessor::IndexHandler::execute(
 				columnList.begin(); columnIt != columnList.end(); ++columnIt) {
 			const ColumnId columnId = *columnIt;
 			const char8_t *columnName = schemaContainer.getColumnInfo(
-					columnId).getColumnName(txn, *objectManager);
+					columnId).getColumnName(txn, *objectManager, container.getMetaAllcateStrategy());
 
 			const int16_t ordinal =
 					static_cast<int16_t>(columnIt - columnList.begin() + 1);
@@ -2404,7 +2359,6 @@ void MetaProcessor::MetaTriggerHandler::execute(
 
 	typedef util::XArray<const uint8_t*> TriggerArray;
 	TriggerArray triggerList(alloc);
-	schemaContainer.getTriggerList(txn, triggerList);
 
 	if (triggerList.empty()) {
 		return;
@@ -2424,122 +2378,6 @@ void MetaProcessor::MetaTriggerHandler::execute(
 			MetaType::TRIGGER_CONTAINER_NAME,
 			ValueUtils::makeString(alloc, name));
 
-	ObjectManager *objectManager =
-			container.getDataStore()->getObjectManager();
-
-	for (TriggerArray::iterator triggerIt = triggerList.begin();
-			triggerIt != triggerList.end(); ++triggerIt) {
-		TriggerInfo info(alloc);
-		TriggerInfo::decode(*triggerIt, info);
-
-		const int16_t ordinal =
-				static_cast<int16_t>(triggerIt - triggerList.begin() + 1);
-
-		builder.set(
-				MetaType::TRIGGER_ORDINAL,
-				ValueUtils::makeShort(ordinal));
-		builder.set(
-				MetaType::TRIGGER_NAME,
-				ValueUtils::makeString(alloc, info.name_.c_str()));
-
-		bool top = true;
-		uint32_t eventFlags = static_cast<uint32_t>(info.operation_);
-		int32_t eventBit = 0;
-		util::Vector<ColumnId>::iterator columnIt = info.columnIds_.begin();
-		for (;;) {
-			bool found = false;
-			util::StackAllocator::Scope allocScope(alloc);
-
-			Value triggerType = ValueUtils::makeNull();
-			Value uri = ValueUtils::makeNull();
-			Value jmsDestinationType = ValueUtils::makeNull();
-			Value jmsDestinationName = ValueUtils::makeNull();
-			Value user = ValueUtils::makeNull();
-			Value password = ValueUtils::makeNull();
-			if (top) {
-				const bool forJms =
-						(info.type_ == TriggerService::TRIGGER_JMS);
-				if (forJms) {
-					triggerType = ValueUtils::makeString(alloc, "JMS");
-				}
-				else {
-					assert(info.type_ == TriggerService::TRIGGER_REST);
-					triggerType = ValueUtils::makeString(alloc, "REST");
-				}
-
-				uri = ValueUtils::makeString(alloc, info.uri_.c_str());
-
-				if (forJms) {
-					jmsDestinationType = ValueUtils::makeString(
-							alloc, TriggerService::jmsDestinationTypeToStr(
-									info.jmsDestinationType_));
-					jmsDestinationName = ValueUtils::makeString(
-							alloc, info.jmsDestinationName_.c_str());
-					user = ValueUtils::makeString(
-							alloc, info.jmsUser_.c_str());
-					password = ValueUtils::makeString(
-							alloc, info.jmsPassword_.c_str());
-				}
-				top = false;
-				found = true;
-			}
-
-			Value eventType = ValueUtils::makeNull();
-			if (!found && eventBit >= 0) {
-				uint32_t flag = 0;
-				for (; eventFlags != 0; eventBit++) {
-					flag = (1 << static_cast<uint32_t>(eventBit));
-					if ((eventFlags & flag) != 0) {
-						eventFlags &= ~flag;
-						found = true;
-						break;
-					}
-				}
-				if (found) {
-					util::String eventStr(alloc);
-					TriggerHandler::convertOperationTypeToString(
-							static_cast<TriggerService::OperationType>(flag),
-							eventStr);
-					ValueUtils::toUpperString(eventStr);
-					eventType = ValueUtils::makeString(alloc, eventStr.c_str());
-				}
-				else {
-					eventBit = -1;
-				}
-			}
-
-			Value columnName = ValueUtils::makeNull();
-			if (!found && columnIt != info.columnIds_.end()) {
-				const ColumnInfo &columnInfo =
-						schemaContainer.getColumnInfo(*columnIt);
-				const char8_t *columnNameStr =
-						columnInfo.getColumnName(txn, *objectManager);
-				columnName = ValueUtils::makeString(alloc, columnNameStr);
-
-				++columnIt;
-				found = true;
-			}
-
-			if (!found) {
-				break;
-			}
-
-			builder.set(MetaType::TRIGGER_EVENT_TYPE, eventType);
-			builder.set(MetaType::TRIGGER_COLUMN_NAME, columnName);
-			builder.set(MetaType::TRIGGER_TYPE, triggerType);
-			builder.set(MetaType::TRIGGER_URI, uri);
-			builder.set(
-					MetaType::TRIGGER_JMS_DESTINATION_TYPE,
-					jmsDestinationType);
-			builder.set(
-					MetaType::TRIGGER_JMS_DESTINATION_NAME,
-					jmsDestinationName);
-			builder.set(MetaType::TRIGGER_USER, user);
-			builder.set(MetaType::TRIGGER_PASSWORD, password);
-
-			getContext().getRowHandler()(txn, builder.build());
-		}
-	}
 }
 
 
@@ -2702,9 +2540,6 @@ const char8_t* MetaProcessor::ErasableHandler::containerTypeToName(
 const char8_t* MetaProcessor::ErasableHandler::expirationTypeToName(
 		ExpireType type) {
 	switch (type) {
-	case ROW_EXPIRE:
-		return ContainerHandler::expirationTypeToName(
-				ContainerHandler::META_EXPIRATION_TYPE_ROW);
 	case TABLE_EXPIRE:
 		return ContainerHandler::expirationTypeToName(
 				ContainerHandler::META_EXPIRATION_TYPE_PARTITION);
@@ -2975,6 +2810,10 @@ void MetaProcessor::ContainerStatsHandler::execute(
 	builder.set(
 			MetaType::CONTAINER_STATS_NAME,
 			ValueUtils::makeString(alloc, name));
+	OId groupId = container.getBaseGroupId();
+	builder.set(
+			MetaType::CONTAINER_STATS_GROUPID,
+			ValueUtils::makeLong(groupId));
 	builder.set(
 			MetaType::CONTAINER_STATS_NUM_ROWS,
 			attribute == CONTAINER_ATTR_LARGE ?
@@ -3022,7 +2861,7 @@ void MetaProcessor::ClusterPartitionHandler::operator()(
 				role = "BACKUP";
 			}
 			else if (pt->isCatchup(
-						 pId, 0, PT_CURRENT_OB)) {
+						 pId, 0, PartitionTable::PT_CURRENT_OB)) {
 				role = "CATCHUP";
 			}
 			else {
@@ -3044,7 +2883,6 @@ void MetaProcessor::ClusterPartitionHandler::operator()(
 				MetaType::CLUSTER_PARTITION_NODE_PORT,
 				ValueUtils::makeInteger(address.port_));
 
-
 		builder.set(
 				MetaType::CLUSTER_PARTITION_LSN,
 				ValueUtils::makeLong(lsn));
@@ -3056,30 +2894,37 @@ void MetaProcessor::ClusterPartitionHandler::operator()(
 				ValueUtils::makeString(alloc, status.c_str()));
 		}
 
-
-		ObjectManager *objectManager =
+		ObjectManagerV4 *objectManager =
 			container.getDataStore()->getObjectManager();
-		objectManager->updateStoreObjectUseStats(pId);
+		objectManager->updateStoreObjectUseStats();
 
-		ChunkManager::ChunkManagerStats &stats =
-			objectManager->getChunkManagerStats();
-		size_t chunkCategoryNum =
-			objectManager->getChunkCategoryNum();
+		Timestamp timestamp = getContext().getSource().eventContext_->getHandlerStartTime().getUnixTime();
+		container.getDataStore()->scanChunkGroup(txn, timestamp);
 
-		for (size_t chunkCategoryId = 0; chunkCategoryId < chunkCategoryNum;
+		const uint32_t chunkSize = objectManager->getChunkSize();
+
+		const DataStoreStats &dsStats = container.getDataStore()->stats();
+		for (size_t chunkCategoryId = 0; chunkCategoryId < DS_CHUNK_CATEGORY_SIZE;
 				++chunkCategoryId) {
 
+			ChunkGroupStats::Table stats(NULL);
+			dsStats.getChunkStats(chunkCategoryId, stats);
+
 			builder.set(
-				MetaType::CLUSTER_PARTITION_BLOCK_CATEGORY,
-				ValueUtils::makeString(alloc, chunkCategoryList[chunkCategoryId]));
-			int64_t storeUse = stats.getStoreUse(pId, chunkCategoryId);
+					MetaType::CLUSTER_PARTITION_BLOCK_CATEGORY,
+					ValueUtils::makeString(alloc, chunkCategoryList[chunkCategoryId]));
+
+			const int64_t storeUse = static_cast<int64_t>(
+					chunkSize *
+					stats(ChunkGroupStats::GROUP_STAT_USE_BUFFER_COUNT).get());
 			builder.set(
-				MetaType::CLUSTER_PARTITION_STORE_USE,
-				ValueUtils::makeLong(storeUse));
-			int64_t storeStoreUse = stats.getStoreObjectUse(pId, chunkCategoryId);
+					MetaType::CLUSTER_PARTITION_STORE_USE,
+					ValueUtils::makeLong(storeUse));
+
+			const int64_t storeObjectUse = 0;
 			builder.set(
-				MetaType::CLUSTER_PARTITION_STORE_OBJECT_USE,
-				ValueUtils::makeLong(storeStoreUse));
+					MetaType::CLUSTER_PARTITION_STORE_OBJECT_USE,
+					ValueUtils::makeLong(storeObjectUse));
 
 			getContext().getRowHandler()(txn, builder.build());
 		}
@@ -3127,10 +2972,16 @@ void MetaProcessor::PartitionHandler::operator()(
 	const int64_t emNow =
 			eventContext->getHandlerStartMonotonicTime();
 
-	decodeLargeRow(
+	try {
+		decodeLargeRow(
 			NoSQLUtils::LARGE_CONTAINER_KEY_PARTITIONING_INFO,
 			alloc, txn, container.getDataStore(), dbName, &container,
 			partitioningInfo, emNow);
+	}
+	catch (std::exception& e) {
+		getContext().stepContainerListing(id);
+		return;
+	}
 
 	TransactionManager *transactionManager =
 			getContext().getSource().transactionManager_;
@@ -3266,7 +3117,7 @@ void MetaProcessor::PartitionHandler::operator()(
 		}
 		builder.set(
 				MetaType::PARTITION_STATUS,
-				ValueUtils::makeString(alloc, NoSQLUtils::getParitionStatusName(*statusIt)));
+				ValueUtils::makeString(alloc, getParitionStatusName(*statusIt)));
 
 		getContext().getRowHandler()(txn, builder.build());
 	}
@@ -3354,8 +3205,7 @@ void MetaProcessor::SQLHandler::operator()(
 	util::Vector<ClientId> clientIdList(alloc);
 	executionManager->getCurrentClientIdList(clientIdList);
 	for (size_t pos = 0; pos < clientIdList.size(); pos++) {
-		ExecutionLatch latch(clientIdList[pos],
-				executionManager->getResourceManager(), NULL);
+		SQLExecutionManager::Latch latch(clientIdList[pos], executionManager);
 		SQLExecution *execution = latch.get();
 		if (execution) {
 			const SQLExecution::SQLExecutionContext &sqlContext = execution->getContext();
@@ -3395,13 +3245,12 @@ void MetaProcessor::SQLHandler::operator()(
 		}
 	}
 	JobManager *jobManager
-			= getContext().getSource().resourceSet_->getJobManager();
-		
+			= getContext().getSource().sqlExecutionManager_->getJobManager();
 	util::Vector<JobId> jobIdList(alloc);
 	jobManager->getCurrentJobList(jobIdList);
 
 	for (size_t pos = 0; pos < jobIdList.size(); pos++) {
-		JobLatch latch(jobIdList[pos], jobManager->getResourceManager(), NULL);
+		JobManager::Latch latch(jobIdList[pos], "MetaProcessor::SQLHandler::operator()", jobManager);
 		Job *job = latch.get();
 		if (job) {
 			builder.set(
@@ -3548,9 +3397,7 @@ MetaProcessorSource::MetaProcessorSource(
 		eventContext_(NULL),
 		transactionManager_(NULL),
 		transactionService_(NULL),
-		partitionTable_(NULL)
-		,
-		resourceSet_(NULL),
+		partitionTable_(NULL),
 		sqlExecutionManager_(NULL),
 		sqlService_(NULL)
 {
@@ -3558,7 +3405,7 @@ MetaProcessorSource::MetaProcessorSource(
 
 
 MetaContainer::MetaContainer(
-		TransactionContext &txn, DataStore *dataStore, DatabaseId dbId,
+		TransactionContext &txn, DataStoreV4 *dataStore, DatabaseId dbId,
 		MetaContainerId id, NamingType containerNamingType,
 		NamingType columnNamingType) :
 		BaseContainer(txn, dataStore),
@@ -3693,7 +3540,7 @@ void MetaContainer::getCommonContainerOptionInfo(
 
 void MetaContainer::getColumnSchema(
 		TransactionContext &txn, uint32_t columnId,
-		ObjectManager &objectManager, util::XArray<uint8_t> &schema) {
+		ObjectManagerV4 &objectManager, util::XArray<uint8_t> &schema) {
 
 	const char8_t *columnName = const_cast<char *>(
 			getColumnName(txn, columnId, objectManager));
@@ -3714,7 +3561,7 @@ void MetaContainer::getColumnSchema(
 
 const char8_t* MetaContainer::getColumnName(
 		TransactionContext &txn, uint32_t columnId,
-		ObjectManager &objectManager) const {
+		ObjectManagerV4 &objectManager) const {
 	static_cast<void>(txn);
 	static_cast<void>(objectManager);
 	assert(columnId < info_.columnCount_);
@@ -3792,7 +3639,7 @@ void MetaContainer::getColumnInfoList(
 }
 
 void MetaContainer::getColumnInfo(
-		TransactionContext &txn, ObjectManager &objectManager,
+		TransactionContext &txn, ObjectManagerV4 &objectManager,
 		const char8_t *name, uint32_t &columnId, ColumnInfo *&columnInfo,
 		bool isCaseSensitive) const {
 
@@ -3832,7 +3679,7 @@ void MetaContainer::getContainerOptionInfo(
 }
 
 
-MetaStore::MetaStore(DataStore &dataStore) : dataStore_(dataStore) {
+MetaStore::MetaStore(DataStoreV4 &dataStore) : dataStore_(dataStore) {
 }
 
 MetaContainer* MetaStore::getContainer(

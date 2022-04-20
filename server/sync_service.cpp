@@ -1,4 +1,4 @@
-﻿/*
+/*
 	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
 	This program is free software: you can redistribute it and/or modify
@@ -20,12 +20,12 @@
 void SyncService::setClusterHandler() {
 }
 
-void LongTermSyncHandler::operator()(EventContext &ec, Event &ev) {
+void LongTermSyncHandler::operator()(EventContext& ec, Event& ev) {
 
 	UNUSED_VARIABLE(ec);
 	UNUSED_VARIABLE(ev);
 
 	GS_THROW_USER_ERROR(
-			GS_ERROR_CM_NOT_SUPPORTED, "not support cluster operation");
+		GS_ERROR_CM_NOT_SUPPORTED, "not support cluster operation");
 }
 

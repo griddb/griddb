@@ -24,7 +24,7 @@
 #include "util/trace.h"
 #include "data_type.h"
 #include "gs_error.h"
-#include "object_manager.h"
+#include "object_manager_v4.h"
 #include "transaction_context.h"
 #include "value.h"			   
 #include "value_operator.h"			   
@@ -115,7 +115,7 @@ class TreeFuncInfo {
 public:
 	TreeFuncInfo(util::StackAllocator &alloc) : alloc_(alloc), columnSchema_(NULL), orgColumnIds_(NULL), fixedAreaSize_(0) {
 	}
-	void initialize(const util::Vector<ColumnId> &columnIds, ColumnSchema *srcSchema, bool force = false);
+	void initialize(const util::Vector<ColumnId> &columnIds, const ColumnSchema *srcSchema, bool force = false);
 	ColumnSchema *getColumnSchema() {
 		return columnSchema_;
 	}
@@ -143,20 +143,20 @@ private:
 */
 class BaseIndex : public BaseObject {
 public:
-	BaseIndex(TransactionContext &txn, ObjectManager &objectManager,
-		const AllocateStrategy &strategy, BaseContainer *container,
+	BaseIndex(TransactionContext &txn, ObjectManagerV4 &objectManager,
+		AllocateStrategy &strategy, BaseContainer *container,
 		TreeFuncInfo *funcInfo,
 		MapType mapType)
-		: BaseObject(txn.getPartitionId(), objectManager),
+		: BaseObject(objectManager, strategy),
 		  allocateStrategy_(strategy),
 		  container_(container),
 		  funcInfo_(funcInfo),
 		  mapType_(mapType) {}
-	BaseIndex(TransactionContext &txn, ObjectManager &objectManager, OId oId,
-		const AllocateStrategy &strategy, BaseContainer *container,
+	BaseIndex(TransactionContext &txn, ObjectManagerV4 &objectManager, OId oId,
+		AllocateStrategy &strategy, BaseContainer *container,
 		TreeFuncInfo *funcInfo,
 		MapType mapType)
-		: BaseObject(txn.getPartitionId(), objectManager, oId),
+		: BaseObject(objectManager, strategy, oId),
 		  allocateStrategy_(strategy),
 		  container_(container),
 		  funcInfo_(funcInfo),
@@ -181,6 +181,8 @@ public:
 	static const uint64_t NUM_PER_EXEC = 50;
 
 public:
+	virtual ~BaseIndex() {}
+
 	struct SearchContext {
 		enum NullCondition {
 			IS_NULL,		
@@ -203,10 +205,8 @@ public:
 		SearchContext(util::StackAllocator &alloc, ColumnId columnId)
 			: conditionList_(alloc),
 			  keyList_(alloc),
-			  limit_(MAX_RESULT_SIZE)
-			  ,
-			  isResume_(NOT_RESUME)
-			  ,
+			  limit_(MAX_RESULT_SIZE),
+			  isResume_(NOT_RESUME),
 			  nullCond_(NOT_IS_NULL),
 			  isSuspended_(false),
 			  suspendLimit_(MAX_RESULT_SIZE),
@@ -223,10 +223,8 @@ public:
 		SearchContext(util::StackAllocator &alloc, util::Vector<ColumnId> &columnIds)
 			: conditionList_(alloc),
 			  keyList_(alloc),
-			  limit_(MAX_RESULT_SIZE)
-			  ,
-			  isResume_(NOT_RESUME)
-			  ,
+			  limit_(MAX_RESULT_SIZE),
+			  isResume_(NOT_RESUME),
 			  nullCond_(NOT_IS_NULL),
 			  isSuspended_(false),
 			  suspendLimit_(MAX_RESULT_SIZE),
@@ -243,10 +241,8 @@ public:
 		SearchContext(util::StackAllocator &alloc, TermCondition &cond, ResultSize limit)
 			: conditionList_(alloc),
 			  keyList_(alloc),
-			  limit_(limit)
-			  ,
-			  isResume_(NOT_RESUME)
-			  ,
+			  limit_(limit),
+			  isResume_(NOT_RESUME),
 			  nullCond_(NOT_IS_NULL),
 			  isSuspended_(false),
 			  suspendLimit_(MAX_RESULT_SIZE),
@@ -267,10 +263,8 @@ public:
 			TermCondition &endCond, ResultSize limit)
 			: conditionList_(alloc),
 			  keyList_(alloc),
-			  limit_(limit)
-			  ,
-			  isResume_(NOT_RESUME)
-			  ,
+			  limit_(limit),
+			  isResume_(NOT_RESUME),
 			  nullCond_(NOT_IS_NULL),
 			  isSuspended_(false),
 			  suspendLimit_(MAX_RESULT_SIZE),
@@ -312,7 +306,9 @@ public:
 			return nullCond_;
 		}
 		void setNullCond(NullCondition cond) {
-			keyList_.clear();
+			if (cond == IS_NULL) {
+				keyList_.clear();
+			}
 			nullCond_ = cond;
 		}
 		ResultSize getLimit() {
@@ -347,7 +343,7 @@ public:
 		}
 		template <typename K, typename V>
 		void setSuspendPoint(
-			TransactionContext &txn, ObjectManager &, TreeFuncInfo *, const K &suspendKey, const V &suspendValue) {
+			TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy& strategy, TreeFuncInfo *, const K &suspendKey, const V &suspendValue) {
 			UTIL_STATIC_ASSERT((!util::IsSame<K, StringKey>::VALUE));
 			UTIL_STATIC_ASSERT((!util::IsSame<K, FullContainerKeyAddr>::VALUE));
 
@@ -503,7 +499,7 @@ public:
 		util::Vector<TermCondition> *filterConds_;
 	};
 protected:
-	AllocateStrategy allocateStrategy_;
+	AllocateStrategy &allocateStrategy_;
 	BaseContainer *container_;
 	TreeFuncInfo *funcInfo_;
 	MapType mapType_;
@@ -519,12 +515,12 @@ public:
 	CompositeInfoObject() {};
 	void initialize(util::StackAllocator &alloc, TreeFuncInfo &funcInfo);
 
-	void setKey(TransactionContext &txn, ObjectManager &objectManager, 
-		const AllocateStrategy &allocateStrategy, OId neighborOId, 
+	void setKey(TransactionContext &txn, ObjectManagerV4 &objectManager, 
+		AllocateStrategy &allocateStrategy, OId neighborOId, 
 		TreeFuncInfo *funcInfo, CompositeInfoObject &src);
-	void freeKey(TransactionContext &txn, ObjectManager &objectManager);
+	void freeKey(ObjectManagerV4 &objectManager, AllocateStrategy &strategy);
 	bool isNull(uint32_t pos) const;
-	uint8_t *getField(TransactionContext &txn, ObjectManager &objectManager, ColumnInfo &columnInfo, VariableArrayCursor *&varCursor) const;
+	uint8_t *getField(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, ColumnInfo &columnInfo, VariableArrayCursor *&varCursor) const;
 	const uint8_t *getNullsAddr() const;
 	const uint8_t *getVarAddr() const;
 	const uint8_t *getFixedAddr() const;
@@ -534,8 +530,8 @@ public:
 	void setVariableArray(void *value);
 	void setFixedField(TreeFuncInfo &funcInfo, uint32_t pos, const void *value);
 	void setNull(uint32_t pos);
-	void serialize(TransactionContext &txn, ObjectManager &objectManager, TreeFuncInfo &funcInfo, uint8_t *&data, uint32_t &size) const;
-	void dump(TransactionContext &txn, ObjectManager &objectManager, TreeFuncInfo &funcInfo, util::NormalOStringStream &output) const;
+	void serialize(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, TreeFuncInfo &funcInfo, uint8_t *&data, uint32_t &size) const;
+	void dump(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, TreeFuncInfo &funcInfo, util::NormalOStringStream &output) const;
 	void dump(TreeFuncInfo &funcInfo, util::NormalOStringStream &output) const;
 
 	friend std::ostream &operator<<(std::ostream &out, const CompositeInfoObject &foo) {
@@ -558,14 +554,17 @@ private:
 };
 
 
+template <>
+void BaseIndex::SearchContext::setSuspendPoint(TransactionContext &txn,
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, TreeFuncInfo *funcInfo, const StringKey &suspendKey, const OId &suspendValue);
 
 template <>
 void BaseIndex::SearchContext::setSuspendPoint(TransactionContext &txn,
-	ObjectManager &objectManager, TreeFuncInfo *funcInfo, const StringKey &suspendKey, const OId &suspendValue);
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, TreeFuncInfo *funcInfo, const FullContainerKeyAddr &suspendKey, const OId &suspendValue);
 
 template <>
-void BaseIndex::SearchContext::setSuspendPoint(TransactionContext &txn,
-	ObjectManager &objectManager, TreeFuncInfo *funcInfo, const FullContainerKeyAddr &suspendKey, const OId &suspendValue);
+void BaseIndex::SearchContext::setSuspendPoint(TransactionContext& txn,
+	ObjectManagerV4& objectManager, AllocateStrategy& strategy, TreeFuncInfo* funcInfo, const FullContainerKeyAddr& suspendKey, const KeyDataStoreValue& suspendValue);
 
 inline BaseIndex::SearchContext::ConditionStatus BaseIndex::SearchContext::checkCondition(TransactionContext &txn, 
    TermCondition &orgCond, TermCondition &newCond) {
@@ -602,6 +601,7 @@ inline BaseIndex::SearchContext::ConditionStatus BaseIndex::SearchContext::check
 
 inline void BaseIndex::SearchContext::addCondition(TransactionContext &txn, TermCondition &term, bool isKey) {
 	if (isKey) {
+		bool isAllNoContradiction = true;
 		ConditionStatus status = NO_CONTRADICTION;
 		util::Vector<size_t>::iterator itr;
 		for (itr = keyList_.begin(); itr != keyList_.end(); itr++) {
@@ -609,14 +609,17 @@ inline void BaseIndex::SearchContext::addCondition(TransactionContext &txn, Term
 			status = checkCondition(txn, current, term);
 			if (status == REPLACEMENT) {
 				current = term;
+				isAllNoContradiction = false;
 			} else if (status == CONTRADICTION) {
 				conditionList_.push_back(term);
+				isAllNoContradiction = false;
 				break;
 			} else if (status == IGNORANCE) {
+				isAllNoContradiction = false;
 				break;
 			}
 		}
-		if (status == NO_CONTRADICTION) {
+		if (isAllNoContradiction) {
 			keyList_.push_back(static_cast<ColumnId>(conditionList_.size()));
 			conditionList_.push_back(term);
 		}
@@ -624,6 +627,5 @@ inline void BaseIndex::SearchContext::addCondition(TransactionContext &txn, Term
 		conditionList_.push_back(term);
 	}
 }
-
 
 #endif  

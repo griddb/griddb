@@ -34,7 +34,7 @@ public:
 	TqlSpecialId(const char *const name) : name_(name) {}
 	virtual ~TqlSpecialId() {}
 	using TqlFunc::operator();
-	virtual Expr *operator()(ExprList &, TransactionContext &, ObjectManager &);
+	virtual Expr *operator()(ExprList &, TransactionContext &, ObjectManagerV4 &, AllocateStrategy &);
 
 	/*!
 	 * @brief If function has internal valuables, returns a clone object of

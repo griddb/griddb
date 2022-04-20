@@ -21,10 +21,8 @@
 #include "util/trace.h"
 #include "btree_map.h"
 #include "collection.h"
-#include "data_store.h"
+#include "data_store_v4.h"
 #include "data_store_common.h"
-#include "hash_map.h"
-#include "transaction_manager.h"
 #include "blob_processor.h"
 #include "gs_error.h"
 #include "message_schema.h"
@@ -32,11 +30,12 @@
 #include "value_processor.h"
 
 
+
 #include "row.h"
 
 BaseContainer::RowArray::RowArray(TransactionContext &txn, BaseContainer *container) 
 	: rowArrayImplList_(txn.getDefaultAllocator()),
-	rowArrayStorage_(txn.getPartitionId(), *container->getObjectManager()),
+	rowArrayStorage_(*container->getObjectManager(), container->getRowAllcateStrategy()),
 	rowCache_(txn, container), defaultImpl_(NULL) {
 
 	if (container->getContainerType() == COLLECTION_CONTAINER) {
@@ -76,9 +75,6 @@ BaseContainer::RowArray::RowArray(TransactionContext &txn, BaseContainer *contai
 	rowArrayImplList_.push_back(plainImpl);
 	defaultImpl_ = getImpl<BaseContainer, BaseContainer::ROW_ARRAY_GENERAL>();
 }
-
-
-
 
 
 /*!
@@ -228,6 +224,7 @@ uint8_t *BaseContainer::RowArray::getNullsStats() {
 uint32_t BaseContainer::RowArray::getNullbitsSize() const {
 	return getDefaultImpl()->getNullbitsSize();
 }
+
 void BaseContainer::RowArray::setContainerId(ContainerId containerId) {
 	getDefaultImpl()->setContainerId(containerId);
 }
@@ -241,6 +238,7 @@ void BaseContainer::RowArray::setColumnNum(uint16_t columnNum) {
 uint16_t BaseContainer::RowArray::getColumnNum() const {
 	return getDefaultImpl()->getColumnNum();
 }
+
 void BaseContainer::RowArray::setVarColumnNum(uint16_t columnNum) {
 	getDefaultImpl()->setVarColumnNum(columnNum);
 }
@@ -396,10 +394,6 @@ void BaseContainer::RowArray::Row::getFieldImage(TransactionContext &txn,
 	rowArrayCursor_->getDefaultImpl()->getRowCursor().getFieldImage(txn, columnInfo, newColumnId, messageRowStore);
 }
 
-void BaseContainer::RowArray::Row::archive(TransactionContext &txn, ArchiveHandler *handler) {
-	rowArrayCursor_->getDefaultImpl()->getRowCursor().archive(txn, handler);
-}
-
 std::string BaseContainer::RowArray::dump(TransactionContext &txn) {
 	return getDefaultImpl()->dump(txn);
 }
@@ -412,11 +406,14 @@ std::string BaseContainer::RowArray::Row::dump(TransactionContext &txn) {
 	return rowArrayCursor_->getDefaultImpl()->getRowCursor().dump(txn);
 }
 
+
+
+
 BaseContainer::RowCache::RowCache(TransactionContext &txn, BaseContainer *container)
 	: fieldCacheList_(txn.getDefaultAllocator()) {
-	ObjectManager &objectManager = *(container->getObjectManager());
+	ObjectManagerV4 &objectManager = *(container->getObjectManager());
 	new (frontFieldCache_.addr())
-			FieldCache(txn.getPartitionId(), objectManager);
+			FieldCache(objectManager, container->getRowAllcateStrategy());
 
 	const uint32_t varCount = container->getVariableColumnNum();
 
@@ -427,7 +424,7 @@ BaseContainer::RowCache::RowCache(TransactionContext &txn, BaseContainer *contai
 		fieldCacheList_.resize(varCount);
 		for (uint32_t i = varCount; i > 0; i--) {
 			void *addr = &fieldCacheList_[i - 1];
-			new (addr) FieldCache(txn.getPartitionId(), objectManager);
+			new (addr) FieldCache(objectManager, container->getRowAllcateStrategy());
 		}
 	}
 }

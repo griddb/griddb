@@ -24,7 +24,6 @@
 #include "base_container.h"
 
 UTIL_TRACER_DECLARE(COLLECTION);
-class RowArray;
 
 
 
@@ -32,6 +31,7 @@ class RowArray;
 	@brief Collection
 */
 class Collection : public BaseContainer {
+	friend class StoreV5Impl;
 protected:  
 	/*!
 		@brief Collection format
@@ -47,53 +47,47 @@ public:
 
 public:  
 public:  
-	Collection(TransactionContext &txn, DataStore *dataStore, OId oId)
+	Collection(TransactionContext &txn, DataStoreV4 *dataStore, OId oId)
 		: BaseContainer(txn, dataStore, oId) {
 		rowFixedDataSize_ = calcRowFixedDataSize();
 		rowImageSize_ = calcRowImageSize(rowFixedDataSize_);
-		setAllocateStrategy();
-		rowArrayCache_ = ALLOC_NEW(txn.getDefaultAllocator())
-			RowArray(txn, this);
 		util::StackAllocator &alloc = txn.getDefaultAllocator();
 		util::Vector<ColumnId> columnIds(alloc);
-		columnIds.push_back(UNDEF_COLUMNID);
+		columnIds.push_back(getRowIdColumnId());
 		rowIdFuncInfo_ = ALLOC_NEW(alloc) TreeFuncInfo(alloc);
 		rowIdFuncInfo_->initialize(columnIds, NULL);
-		mvccFuncInfo_ = rowIdFuncInfo_;
-	}
-	Collection(TransactionContext &txn, DataStore *dataStore)
-		: BaseContainer(txn, dataStore) {
-	}
-	Collection(TransactionContext &txn, DataStore *dataStore, BaseContainerImage *containerImage, ShareValueList *commonContainerSchema)
-		: BaseContainer(txn, dataStore, containerImage, commonContainerSchema) {
-		rowFixedDataSize_ = calcRowFixedDataSize();
-		rowImageSize_ = calcRowImageSize(rowFixedDataSize_);
-		rowArrayCache_ = ALLOC_NEW(txn.getDefaultAllocator())
-			RowArray(txn, this);
-		util::StackAllocator &alloc = txn.getDefaultAllocator();
-		util::Vector<ColumnId> columnIds(alloc);
-		columnIds.push_back(UNDEF_COLUMNID);
-		rowIdFuncInfo_ = ALLOC_NEW(alloc) TreeFuncInfo(alloc);
-		rowIdFuncInfo_->initialize(columnIds, NULL);
-		mvccFuncInfo_ = rowIdFuncInfo_;
-	}
 
+		columnIds[0] = UNDEF_COLUMNID;
+		mvccFuncInfo_ = ALLOC_NEW(alloc) TreeFuncInfo(alloc);
+		mvccFuncInfo_->initialize(columnIds, NULL);
+	}
+	Collection(TransactionContext &txn, DataStoreV4 *dataStore)
+		: BaseContainer(txn, dataStore) {}
 	~Collection() {}
 	void initialize(TransactionContext &txn);
-	bool finalize(TransactionContext &txn);
+	bool finalize(TransactionContext &txn, bool isRemoveGroup);
 	void set(TransactionContext &txn, const FullContainerKey &containerKey,
 		ContainerId containerId, OId columnSchemaOId,
-		MessageSchema *containerSchema);
+		MessageSchema *containerSchema, DSGroupId groupId);
 
-	void createIndex(TransactionContext &txn, const IndexInfo &indexInfo, 
+	void createIndex(
+		TransactionContext &txn, const IndexInfo &indexInfo,
 		IndexCursor& indexCursor,
-		bool isIndexNameCaseSensitive = false);
+		bool isIndexNameCaseSensitive = false,
+		CreateDropIndexMode mode = INDEX_MODE_NOSQL,
+		bool *skippedByMode = NULL);
 	void continueCreateIndex(TransactionContext& txn, 
 		IndexCursor& indexCursor);
 
-	void dropIndex(TransactionContext &txn, IndexInfo &indexInfo,
-		bool isIndexNameCaseSensitive = false);
+	void dropIndex(
+		TransactionContext &txn, IndexInfo &indexInfo,
+		bool isIndexNameCaseSensitive = false,
+		CreateDropIndexMode mode = INDEX_MODE_NOSQL,
+		bool *skippedByMode = NULL);
 
+	void putRow(TransactionContext &txn, uint32_t rowSize,
+		const uint8_t *rowData, RowId &rowId, bool rowIdSpecified,
+		PutStatus &status, PutRowOption putRowOption);
 
 	void deleteRow(TransactionContext &txn, uint32_t rowKeySize,
 		const uint8_t *rowKey, RowId &rowId, bool &existing);
@@ -108,7 +102,7 @@ public:
 		@brief Updates a Row corresponding to the specified RowId
 	*/
 	void updateRow(TransactionContext &txn, uint32_t rowSize,
-		const uint8_t *rowData, RowId rowId, DataStore::PutStatus &status) {
+		const uint8_t *rowData, RowId rowId, PutStatus &status) {
 		bool isForceLock = false;
 		updateRow(txn, rowSize, rowData, rowId, status, isForceLock);
 	}
@@ -123,17 +117,11 @@ public:
 	void abort(TransactionContext &txn);
 	void commit(TransactionContext &txn);
 
-	void continueChangeSchema(TransactionContext &txn,
-		ContainerCursor &containerCursor);
-
-	bool hasUncommitedTransaction(TransactionContext &txn);
-
 	void searchRowIdIndex(TransactionContext &txn, BtreeMap::SearchContext &sc,
 		util::XArray<OId> &resultList, OutputOrder order);
 	void searchRowIdIndex(TransactionContext &txn, uint64_t start,
 		uint64_t limit, util::XArray<RowId> &rowIdList,
 		util::XArray<OId> &resultList, uint64_t &skipped);
-	bool checkRunTime(TransactionContext &txn);
 	void scanRowIdIndex(
 			TransactionContext& txn, BtreeMap::SearchContext &sc,
 			ContainerRowScanner &scanner);
@@ -147,45 +135,6 @@ public:
 
 	void lockRowList(TransactionContext &txn, util::XArray<RowId> &rowIdList);
 
-	/*!
-		@brief Calculate AllocateStrategy of Map Object
-	*/
-	AllocateStrategy calcMapAllocateStrategy() const {
-		ChunkCategoryId chunkCategoryId;
-		ExpireIntervalCategoryId expireCategoryId = DEFAULT_EXPIRE_CATEGORY_ID;
-		ChunkKey chunkKey = UNDEF_CHUNK_KEY;
-		int64_t duration = getContainerExpirationDutation();
-		if (duration != INT64_MAX) {
-			chunkCategoryId = ALLOCATE_EXPIRE_MAP;
-			calcChunkKey(getContainerExpirationEndTime(), duration,
-				expireCategoryId, chunkKey);
-		}
-		else {
-			chunkCategoryId = ALLOCATE_NO_EXPIRE_MAP;
-		}
-		AffinityGroupId groupId = calcAffnityGroupId(getAffinityBinary());
-		return AllocateStrategy(chunkCategoryId, groupId, chunkKey, expireCategoryId);
-	}
-	/*!
-		@brief Calculate AllocateStrategy of Row Object
-	*/
-	AllocateStrategy calcRowAllocateStrategy() const {
-		ChunkCategoryId chunkCategoryId;
-		ExpireIntervalCategoryId expireCategoryId = DEFAULT_EXPIRE_CATEGORY_ID;
-		ChunkKey chunkKey = UNDEF_CHUNK_KEY;
-		int64_t duration = getContainerExpirationDutation();
-		if (duration != INT64_MAX) {
-			chunkCategoryId = ALLOCATE_EXPIRE_ROW;
-			calcChunkKey(getContainerExpirationEndTime(), duration,
-				expireCategoryId, chunkKey);
-		}
-		else {
-			chunkCategoryId = ALLOCATE_NO_EXPIRE_ROW;
-		}
-		AffinityGroupId groupId = calcAffnityGroupId(getAffinityBinary());
-		return AllocateStrategy(chunkCategoryId, groupId, chunkKey, expireCategoryId);
-	}
-
 	ColumnId getRowIdColumnId() {
 		return UNDEF_COLUMNID;
 	}
@@ -193,40 +142,12 @@ public:
 		return COLUMN_TYPE_LONG;
 	}
 
-	uint32_t getRealColumnNum(TransactionContext &txn) {
-		UNUSED_VARIABLE(txn);
-		return getColumnNum();
-	}
-	ColumnInfo* getRealColumnInfoList(TransactionContext &txn) {
-		UNUSED_VARIABLE(txn);
-		return getColumnInfoList();
-	}
-	uint32_t getRealRowSize(TransactionContext &txn) {
-		UNUSED_VARIABLE(txn);
-		return getRowSize();
-	}
-	uint32_t getRealRowFixedDataSize(TransactionContext &txn) {
-		UNUSED_VARIABLE(txn);
-		return getRowFixedDataSize();
-	}
-
-	util::String getBibInfo(TransactionContext &txn, const char* dbName);
-	void getActiveTxnList(
-		TransactionContext &txn, util::Set<TransactionId> &txnList);
-	void getErasableList(TransactionContext &txn, Timestamp erasableTimeLimit, util::XArray<ArchiveInfo> &list);
-	ExpireType getExpireType() const;
-	bool validate(TransactionContext &txn, std::string &errorMessage);
-	std::string dump(TransactionContext &txn);
-
 protected:  
 protected:  
-	void putRow(TransactionContext &txn, uint32_t rowSize,
-		const uint8_t *rowData, RowId &rowId, bool rowIdSpecified,
-		DataStore::PutStatus &status, PutRowOption putRowOption);
-	void putRow(TransactionContext &txn,
+	void putRowInternal(TransactionContext &txn,
 		InputMessageRowStore *inputMessageRowStore, RowId &rowId,
 		bool rowIdSpecified,
-		DataStore::PutStatus &status, PutRowOption putRowOption);
+		PutStatus &status, PutRowOption putRowOption);
 
 private:  
 	/*!
@@ -258,7 +179,7 @@ private:
 	void deleteRow(
 		TransactionContext &txn, RowId rowId, bool &existing, bool isForceLock);
 	void updateRow(TransactionContext &txn, uint32_t rowSize,
-		const uint8_t *rowData, RowId rowId, DataStore::PutStatus &status,
+		const uint8_t *rowData, RowId rowId, PutStatus &status,
 		bool isForceLock);
 	void appendRowInternal(TransactionContext &txn,
 		MessageRowStore *messageRowStore, RowArray &rowArray, RowId &rowId,
@@ -297,28 +218,6 @@ private:
 		}
 	}
 
-	void insertRowIdMap(TransactionContext &txn, BtreeMap *map,
-		const void *constKey, OId oId);
-	void insertMvccMap(TransactionContext &txn, BtreeMap *map,
-		TransactionId tId, MvccRowImage &mvccImage);
-	void insertValueMap(TransactionContext &txn, ValueMap &valueMap,
-		const void *constKey, OId oId, bool isNull);
-	void updateRowIdMap(TransactionContext &txn, BtreeMap *map,
-		const void *constKey, OId oldOId, OId newOId);
-	void updateMvccMap(TransactionContext &txn, BtreeMap *map,
-		TransactionId tId, MvccRowImage &oldMvccImage,
-		MvccRowImage &newMvccImage);
-	void updateValueMap(TransactionContext &txn, ValueMap &valueMap,
-		const void *constKey, OId oldOId, OId newOId, bool isNull);
-	void removeRowIdMap(TransactionContext &txn, BtreeMap *map,
-		const void *constKey, OId oId);
-	void removeMvccMap(TransactionContext &txn, BtreeMap *map,
-		TransactionId tId, MvccRowImage &mvccImage);
-	void removeValueMap(TransactionContext &txn, ValueMap &valueMap,
-		const void *constKey, OId oId, bool isNull);
-	void updateIndexData(
-		TransactionContext &txn, const IndexData &indexData);
-
 	template<bool Mvcc> static void scanRowArrayCheckedDirect(
 			TransactionContext& txn, RowArray &rowArray,
 			RowId startRowId, RowId endRowId, util::XArray<OId> &oIdList);
@@ -347,6 +246,7 @@ private:
 	void checkContainerOption(MessageSchema *messageSchema,
 		util::XArray<uint32_t> &copyColumnMap, bool &isCompletelySameSchema);
 	util::String getBibContainerOptionInfo(TransactionContext &txn);
+
 	uint32_t calcRowImageSize(uint32_t rowFixedSize) {
 		uint32_t rowImageSize_ =
 			sizeof(TransactionId) + sizeof(RowId) + rowFixedSize;
@@ -360,44 +260,6 @@ private:
 			rowFixedDataSize += sizeof(OId);
 		}
 		return rowFixedDataSize;
-	}
-
-	void setAllocateStrategy() {
-		metaAllocateStrategy_ = calcMetaAllocateStrategy();
-		rowAllocateStrategy_ = calcRowAllocateStrategy();
-		mapAllocateStrategy_ = calcMapAllocateStrategy();
-	}
-	void checkExclusive(TransactionContext &txn);
-
-	bool getIndexData(TransactionContext &txn, const util::Vector<ColumnId> &columnIds,
-		MapType mapType, bool withUncommitted, IndexData &indexData, 
-		bool withPartialMatch = false) const;
-	bool getIndexData(TransactionContext &txn, IndexCursor &indexCursor,
-		IndexData &indexData) const {
-		return indexSchema_->getIndexData( 
-			txn, indexCursor, UNDEF_CONTAINER_POS, indexData);
-	}
-	void createNullIndexData(TransactionContext &txn, IndexData &indexData) {
-		indexSchema_->createNullIndexData(txn, UNDEF_CONTAINER_POS, indexData, 
-			this);
-	}
-	void getIndexList(TransactionContext &txn,  
-		bool withUncommitted, util::XArray<IndexData> &list) const;
-
-
-
-	void finalizeIndex(TransactionContext &txn) {
-		if (!isExpired(txn)) {
-			indexSchema_->dropAll(txn, this, UNDEF_CONTAINER_POS, true);
-		}
-		indexSchema_->finalize(txn);
-	}
-
-	void incrementRowNum() {
-		baseContainerImage_->rowNum_++;
-	}
-	void decrementRowNum() {
-		baseContainerImage_->rowNum_--;
 	}
 
 };

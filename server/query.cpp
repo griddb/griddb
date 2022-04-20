@@ -49,7 +49,7 @@ bool Query::sIsTrace_ = false;
 * @param hook hook for query
 *
 */
-Query::Query(TransactionContext &txn, ObjectManager &objectManager,
+Query::Query(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 	const TQLInfo &tqlInfo, uint64_t limit, QueryHookClass *hook)
 	: tqlInfo_(tqlInfo),
 	  pErrorMsg_(NULL),
@@ -58,6 +58,7 @@ Query::Query(TransactionContext &txn, ObjectManager &objectManager,
 	  pFromCollectionName_(NULL),
 	  txn_(txn),
 	  objectManager_(objectManager),
+	  strategy_(strategy),
 	  nResultSorted_(0),
 	  hook_(hook),
 	  isDistinct_(false),
@@ -208,7 +209,7 @@ void Query::dumpSelectionExpr(
 	if (pSelectionExprList_) {
 		for (size_t i = 0; i < pSelectionExprList_->size(); i++) {
 			Expr *e = (*pSelectionExprList_)[i]->eval(
-				txn_, objectManager_, x, NULL, EVAL_MODE_PRINT);
+				txn_, objectManager_, strategy_, x, NULL, EVAL_MODE_PRINT);
 			os << "\tSELECTION_EXPR[" << i << "]=" << e->getValueAsString(txn)
 			   << std::endl;
 			QP_DELETE(e);
@@ -225,7 +226,7 @@ void Query::evalConditionExpr(ContainerRowWrapper *x) {
 	if (pWhereExpr_ != NULL) {
 		std::cout << "EVAL_RESULT="
 				  << pWhereExpr_->eval(
-						 txn_, objectManager_, x, functionMap_, TRI_TRUE)
+						 txn_, objectManager_, strategy_, x, functionMap_, TRI_TRUE)
 				  << std::endl;
 	}
 }
@@ -240,11 +241,11 @@ void Query::evalConditionExpr(ContainerRowWrapper *x) {
 void Query::dumpConditionExpr(
 	TransactionContext &txn, std::ostream &os, ContainerRowWrapper *x) {
 	if (pWhereExpr_) {
-		pWhereExpr_->dumpTree(txn, objectManager_, os, x, functionMap_);
+		pWhereExpr_->dumpTree(txn, objectManager_, strategy_, os, x, functionMap_);
 		os << std::endl;
 		try {
 			os << "EVAL_RESULT="
-			   << pWhereExpr_->eval(txn, objectManager_, x, functionMap_, TRI_TRUE)
+			   << pWhereExpr_->eval(txn, objectManager_, strategy_, x, functionMap_, TRI_TRUE)
 
 			   << std::endl;
 		}
@@ -266,12 +267,12 @@ void Query::dumpConditionExpr(
 void Query::dumpConditionExprDNF(
 	TransactionContext &txn, std::ostream &os, ContainerRowWrapper *x) {
 	if (pWhereExpr_) {
-		BoolExpr *e = pWhereExpr_->makeDNF(txn, objectManager_);
-		e->dumpTree(txn, objectManager_, os, x, functionMap_);
+		BoolExpr *e = pWhereExpr_->makeDNF(txn, objectManager_, strategy_);
+		e->dumpTree(txn, objectManager_, strategy_, os, x, functionMap_);
 		os << std::endl;
 		try {
 			os << "EVAL_RESULT="
-			   << e->eval(txn, objectManager_, x, functionMap_, TRI_TRUE)
+			   << e->eval(txn, objectManager_, strategy_, x, functionMap_, TRI_TRUE)
 			   << std::endl;
 		}
 		catch (util::Exception &e) {
@@ -294,12 +295,12 @@ void Query::dumpConditionExprOptimized(
 	TransactionContext &txn, std::ostream &os, ContainerRowWrapper *x) {
 	if (pWhereExpr_) {
 		BoolExpr *e = pWhereExpr_->makeOptimizedExpr(
-			txn, objectManager_, x, functionMap_);
-		e->dumpTree(txn, objectManager_, os, x, functionMap_);
+			txn, objectManager_, strategy_, x, functionMap_);
+		e->dumpTree(txn, objectManager_, strategy_, os, x, functionMap_);
 		os << std::endl;
 		try {
 			os << "EVAL_RESULT="
-			   << e->eval(txn, objectManager_, x, functionMap_, TRI_TRUE)
+			   << e->eval(txn, objectManager_, strategy_, x, functionMap_, TRI_TRUE)
 			   << std::endl;
 		}
 		catch (util::Exception &e) {
@@ -323,7 +324,7 @@ void Query::dumpSelectOptions(TransactionContext &txn, std::ostream &os) {
 	if (pGroupByExpr_ != NULL) {
 		for (size_t i = 0; i < pGroupByExpr_->size(); i++) {
 			Expr *e = (*pGroupByExpr_)[i]->eval(
-				txn_, objectManager_, NULL, NULL, EVAL_MODE_PRINT);
+				txn_, objectManager_, strategy_, NULL, NULL, EVAL_MODE_PRINT);
 			std::cout << "\tGROUP BY[" << i << "]: " << e->getValueAsString(txn)
 					  << std::endl;
 			QP_DELETE(e);
@@ -331,14 +332,14 @@ void Query::dumpSelectOptions(TransactionContext &txn, std::ostream &os) {
 	}
 	if (pHavingExpr_ != NULL) {
 		Expr *e = pHavingExpr_->eval(
-			txn_, objectManager_, NULL, NULL, EVAL_MODE_PRINT);
+			txn_, objectManager_, strategy_, NULL, NULL, EVAL_MODE_PRINT);
 		std::cout << "\tHAVING: " << e->getValueAsString(txn) << std::endl;
 		QP_DELETE(e);
 	}
 	if (pOrderByExpr_ != NULL) {
 		for (size_t i = 0; i < pOrderByExpr_->size(); i++) {
 			Expr *e = (*pOrderByExpr_)[i].expr->eval(
-				txn_, objectManager_, NULL, NULL, EVAL_MODE_PRINT);
+				txn_, objectManager_, strategy_, NULL, NULL, EVAL_MODE_PRINT);
 			std::cout << "\tORDER BY[" << i
 					  << "]: " << e->getValueAsString(txn);
 			if ((*pOrderByExpr_)[i].order == DESC) {
@@ -501,10 +502,6 @@ bool Query::getIndexDataInAndList(TransactionContext &txn,
 						mapType = MAP_TYPE_SPATIAL;
 						str = "SPATIAL";
 						break;
-					case 1:
-						mapType = MAP_TYPE_HASH;
-						str = "HASH";
-						break;
 					case 0:
 						mapType = MAP_TYPE_BTREE;
 						str = "BTREE";
@@ -531,8 +528,7 @@ bool Query::getIndexDataInAndList(TransactionContext &txn,
 										&(*dataItr), *static_cast<QueryForCollection*>(this), 
 										sc, restConditions,  MAX_RESULT_SIZE);
 								} else {
-									Timestamp dummy = 0;
-									BoolExpr::toSearchContext(txn, andList, dummy,
+									BoolExpr::toSearchContext(txn, andList,
 										&(*dataItr), *static_cast<QueryForTimeSeries*>(this), 
 										sc, restConditions,  MAX_RESULT_SIZE);
 								}
@@ -633,21 +629,21 @@ void Query::serializeExplainData(TransactionContext &txn, uint64_t &resultNum,
 		util::XArray<uint8_t> buf(txn.getDefaultAllocator());
 		ColumnId columnId = 0;
 		v.set(static_cast<int32_t>(explainData_[i].id));
-		v.get(txn, objectManager_, messageRowStore, columnId++);
+		v.get(txn, objectManager_, strategy_, messageRowStore, columnId++);
 		v.set(static_cast<int32_t>(explainData_[i].depth));
-		v.get(txn, objectManager_, messageRowStore, columnId++);
+		v.get(txn, objectManager_, strategy_, messageRowStore, columnId++);
 		v.set(txn.getDefaultAllocator(),
 			const_cast<char *>(explainData_[i].exp_type->c_str()));
-		v.get(txn, objectManager_, messageRowStore, columnId++);
+		v.get(txn, objectManager_, strategy_, messageRowStore, columnId++);
 		v.set(txn.getDefaultAllocator(),
 			const_cast<char *>(explainData_[i].value_type->c_str()));
-		v.get(txn, objectManager_, messageRowStore, columnId++);
+		v.get(txn, objectManager_, strategy_, messageRowStore, columnId++);
 		v.set(txn.getDefaultAllocator(),
 			const_cast<char *>(explainData_[i].value_string->c_str()));
-		v.get(txn, objectManager_, messageRowStore, columnId++);
+		v.get(txn, objectManager_, strategy_, messageRowStore, columnId++);
 		v.set(txn.getDefaultAllocator(),
 			const_cast<char *>(explainData_[i].statement->c_str()));
-		v.get(txn, objectManager_, messageRowStore, columnId++);
+		v.get(txn, objectManager_, strategy_, messageRowStore, columnId++);
 		messageRowStore->next();
 
 		callDestructor(explainData_[i].exp_type);
@@ -666,7 +662,7 @@ void Query::contractCondition() {
 	if (pWhereExpr_) {
 		BoolExpr *pWhereExprOld = pWhereExpr_;
 		pWhereExpr_ = pWhereExpr_->makeOptimizedExpr(
-			txn_, objectManager_, NULL, functionMap_);
+			txn_, objectManager_, strategy_, NULL, functionMap_);
 		QP_DELETE(pWhereExprOld);
 	}
 }
@@ -686,7 +682,7 @@ void Query::finishQuery(
 		serializedVarDataList.clear();
 		ColumnInfo *explainColumnInfoList = makeExplainColumnInfo(txn);
 		OutputMessageRowStore outputMessageRowStore(
-			container.getDataStore()->getValueLimitConfig(),
+			container.getDataStore()->getConfig(),
 			explainColumnInfoList, EXPLAIN_COLUMN_NUM, serializedRowList,
 			serializedVarDataList, false);
 		ResultSize resultNum;
@@ -750,7 +746,7 @@ void Query::doQueryPartial(
 		return;
 	}
 
-	container.getObjectManager()->setSwapOutCounter(txn.getPartitionId(), queryOption.getSwapOutNum());
+	container.getObjectManager()->setSwapOutCounter(queryOption.getSwapOutNum());
 
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
 
@@ -788,7 +784,7 @@ void Query::doQueryPartial(
 	StackAllocAutoPtr<ContainerRowWrapper> stackAutoPtr(alloc, row);
 
 	OutputMessageRowStore outputMessageRowStore(
-		container.getDataStore()->getValueLimitConfig(),
+		container.getDataStore()->getConfig(),
 		container.getColumnInfoList(), container.getColumnNum(),
 		*resultSet.getRowDataFixedPartBuffer(), 
 		*resultSet.getRowDataVarPartBuffer(), isWithRowId);
@@ -831,7 +827,7 @@ void Query::doQueryPartial(
 				for (uint32_t q = 0; q < andList.size(); q++) {
 					util::StackAllocator::Scope scope(alloc);
 					TrivalentLogicType evalResult = andList[q]->eval(
-						txn, objectManager_, row, getFunctionMap(), TRI_TRUE);
+						txn, objectManager_, strategy_, row, getFunctionMap(), TRI_TRUE);
 					if (evalResult != TRI_TRUE) {
 						conditionFlag = false;
 						break;
@@ -891,7 +887,7 @@ void Query::doQueryPartial(
 			queryOption.setMaxRowId(maxRowId);
 		}
 		queryOption.setFilteredNum(queryOption.getFilteredNum() + resultNum);
-		queryOption.setSwapOutNum(container.getObjectManager()->getSwapOutCounter(txn.getPartitionId()));
+		queryOption.setSwapOutNum(container.getObjectManager()->getSwapOutCounter());
 	}
 	resultSet.setResultNum(resultNum);
 }

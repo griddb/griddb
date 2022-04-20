@@ -151,7 +151,7 @@ public:
 	 *
 	 * @return Duplicated geometry object
 	 */
-	virtual Geometry *dup(TransactionContext &txn, ObjectManager &objectManager,
+	virtual Geometry *dup(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 		srid_t id) = 0;  
 
 	/*!
@@ -162,7 +162,7 @@ public:
 	 * @return Duplicated geometry object
 	 */
 	virtual Geometry *dup(TransactionContext &txn,
-		ObjectManager &objectManager) = 0;  
+		ObjectManagerV4 &objectManager, AllocateStrategy &strategy) = 0;  
 
 	/*!
 	 * @brief Get WKT of the geometry
@@ -214,7 +214,7 @@ public:
 	 * @return
 	 */
 	virtual Geometry *assign(TransactionContext &txn,
-		ObjectManager &objectManager, ContainerRowWrapper *column_values,
+		ObjectManagerV4 &objectManager, AllocateStrategy &strategy, ContainerRowWrapper *column_values,
 		FunctionMap *fmap, EvalMode mode) = 0;
 	/*!
 	 * @brief Get Sub-WKT expression of the geometry (w/o Type)

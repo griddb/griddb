@@ -30,4 +30,5 @@ $(srcdir)/util/type.cpp \
 $(srcdir)/util/type.h
 
 libutil_a_CPPFLAGS = \
--I$(top_srcdir)/utility
+-I$(top_srcdir)/utility \
+-I$(top_srcdir)/3rd_party/fletcher32_simd

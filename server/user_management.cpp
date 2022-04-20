@@ -19,11 +19,13 @@
 	@brief Implementation of TransactionService for user/database management
 */
 #include "transaction_service.h"
+
 #include "gs_error.h"
+
 #include "log_manager.h"
 #include "transaction_context.h"
 #include "transaction_manager.h"
-#include "cluster_manager.h"
+#include "key_data_store.h"
 
 #include "util/container.h"
 
@@ -31,7 +33,7 @@
 #define TEST_PRINT1(s, d)
 
 #include "base_container.h"
-#include "data_store.h"
+#include "data_store_v4.h"
 #include "message_row_store.h"  
 #include "query_processor.h"
 #include "result_set.h"
@@ -50,6 +52,74 @@
 	UTIL_TRACE_DEBUG(TRANSACTION_SERVICE,          \
 		"handler called. (nd=" << ev.getSenderND() \
 							   << ", pId=" << ev.getPartitionId() << ")")
+
+template<>
+template<>
+void StatementMessage::CustomOptionCoder<
+	StatementMessage::CompositeIndexInfos*, 0>::encode(
+		EventByteOutStream& out, const ValueType& value) const;
+template<>
+template<>
+void StatementMessage::CustomOptionCoder<
+	StatementMessage::CompositeIndexInfos*, 0>::encode(
+		OutStream& out, const ValueType& value) const;
+
+template<>
+template<typename S>
+inline void StatementMessage::CustomOptionCoder<
+	StatementMessage::CompositeIndexInfos*, 0>::encode(
+		S& out, const ValueType& value) const {
+	assert(value != NULL);
+	const size_t size = value->indexInfoList_.size();
+	out << static_cast<uint64_t>(size);
+	for (size_t pos = 0; pos < size; pos++) {
+		StatementHandler::encodeIndexInfo(out, value->indexInfoList_[pos]);
+	}
+}
+
+template<>
+template<typename S>
+inline StatementMessage::CompositeIndexInfos*
+StatementMessage::CustomOptionCoder<
+	StatementMessage::CompositeIndexInfos*, 0>::decode(
+		S& in, util::StackAllocator& alloc) const {
+	CompositeIndexInfos* value = ALLOC_NEW(alloc) CompositeIndexInfos(alloc);
+	uint64_t size;
+	in >> size;
+	value->indexInfoList_.resize(static_cast<size_t>(size), IndexInfo(alloc));
+	for (size_t pos = 0; pos < size; pos++) {
+		StatementHandler::decodeIndexInfo(in, value->indexInfoList_[pos]);
+	}
+	return value;
+}
+
+
+template<>
+template<>
+inline void StatementMessage::CustomOptionCoder<
+	StatementMessage::CompositeIndexInfos*, 0>::encode(
+		EventByteOutStream& out, const ValueType& value) const {
+	assert(value != NULL);
+	const size_t size = value->indexInfoList_.size();
+	out << static_cast<uint64_t>(size);
+	for (size_t pos = 0; pos < size; pos++) {
+		StatementHandler::encodeIndexInfo(out, value->indexInfoList_[pos]);
+	}
+}
+template<>
+template<>
+inline void StatementMessage::CustomOptionCoder<
+	StatementMessage::CompositeIndexInfos*, 0>::encode(
+		OutStream& out, const ValueType& value) const {
+	assert(value != NULL);
+	const size_t size = value->indexInfoList_.size();
+	out << static_cast<uint64_t>(size);
+	for (size_t pos = 0; pos < size; pos++) {
+		StatementHandler::encodeIndexInfo(out, value->indexInfoList_[pos]);
+	}
+}
+
+
 
 
 const ColumnId COLUMN_ID_USERS_USERNAME = 0;
@@ -81,16 +151,20 @@ static const DbUserHandler::DUColumnInfo DB_COLUMN_LIST[] = {
 static const char *const PROPERTY_USER_NORMAL = "0";
 static const char *const PROPERTY_USER_ADMIN  = "1";
 
+template void StatementMessage::OptionSet::encode<EventByteOutStream>(EventByteOutStream& out) const;
+template void StatementMessage::OptionSet::encode<OutStream>(OutStream& out) const;
 
+
+template<typename S>
 void DbUserHandler::decodeUserInfo(
-		util::ByteStream<util::ArrayInStream> &in, UserInfo &userInfo) {
+		S &in, UserInfo &userInfo) {
 
 	try {
-		decodeStringData<util::String>(in, userInfo.userName_);
+		decodeStringData<S, util::String>(in, userInfo.userName_);
 		in >> userInfo.property_;
-		decodeBooleanData(in, userInfo.withDigest_);
+		decodeBooleanData<S>(in, userInfo.withDigest_);
 		if (userInfo.withDigest_) {
-			decodeStringData<util::String>(in, userInfo.digest_);
+			decodeStringData<S, util::String>(in, userInfo.digest_);
 		}
 		else {
 			userInfo.digest_ = "";
@@ -100,18 +174,19 @@ void DbUserHandler::decodeUserInfo(
 		TXN_RETHROW_DECODE_ERROR(e, "");
 	}
 }
-void DbUserHandler::decodeDatabaseInfo(util::ByteStream<util::ArrayInStream> &in,
+template<typename S>
+void DbUserHandler::decodeDatabaseInfo(S &in,
 		DatabaseInfo &dbInfo, util::StackAllocator &alloc) {
 	try {
-		decodeStringData<util::String>(in, dbInfo.dbName_);
+		decodeStringData<S, util::String>(in, dbInfo.dbName_);
 		in >> dbInfo.property_;
 		int32_t num;
 		in >> num;
 		for (int32_t i = 0; i < num; i++) {
 			PrivilegeInfo *prInfo = ALLOC_NEW(alloc) PrivilegeInfo(alloc);
 
-			decodeStringData<util::String>(in, prInfo->userName_);
-			decodeStringData<util::String>(in, prInfo->privilege_);
+			decodeStringData<S, util::String>(in, prInfo->userName_);
+			decodeStringData<S, util::String>(in, prInfo->privilege_);
 
 			dbInfo.privilegeInfoList_.push_back(prInfo);
 		}
@@ -177,14 +252,14 @@ void DbUserHandler::makeSchema(util::XArray<uint8_t> &containerSchema, const DUC
 	TEST_PRINT("makeSchema() E\n");
 }
 
-void DbUserHandler::makeRow(
+void DbUserHandler::makeRow(PartitionId pId,
 		util::StackAllocator &alloc, const ColumnInfo *columnInfoList,
 		uint32_t columnNum, DUColumnValue *valueList, RowData &rowData) {
 	TEST_PRINT("makeRow() S\n");
 
 	util::XArray<uint8_t> list1(alloc);
 	util::XArray<uint8_t> list2(alloc);
-	OutputMessageRowStore messageRowStore(dataStore_->getValueLimitConfig(),
+	OutputMessageRowStore messageRowStore(getDataStore(pId)->getConfig(),
 		columnInfoList, columnNum, list1, list2, false);
 
 	messageRowStore.beginRow();
@@ -276,55 +351,27 @@ void DbUserHandler::putContainer(util::StackAllocator &alloc,
 	TransactionContext &txn = transactionManager_->put(
 			alloc, 0 /*pId*/,
 			TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
-	const DataStore::Latch latch(
-			txn, txn.getPartitionId(), dataStore_, clusterService_);
-
-	DataStore::PutStatus putStatus;
 	const FullContainerKey containerKey(
 		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM), GS_SYSTEM_DB_ID,
 		name, static_cast<uint32_t>(strlen(name)));
-	ContainerAutoPtr containerAutoPtr(txn, dataStore_,
-		txn.getPartitionId(), containerKey, COLLECTION_CONTAINER,
-		static_cast<uint32_t>(containerInfo.size()),
-		containerInfo.data(), true /*modifiable*/, 
-		MessageSchema::DEFAULT_VERSION, putStatus);
-	BaseContainer *container = containerAutoPtr.getBaseContainer();
+	bool modifiable = true /*modifiable*/;
+	bool isCaseSensitive = false;
 
-	response.schemaVersionId_ = container->getVersionId();
-	response.containerId_ = container->getContainerId();
-	const void *createdContainerNameBinary;
-	size_t createdContainerNameBinarySize;
-	containerKey.toBinary(
-		createdContainerNameBinary, createdContainerNameBinarySize);
+	KeyDataStore* keyStore = getKeyDataStore(txn.getPartitionId());
+	KeyDataStoreValue keyStoreValue = keyStore->get(txn, containerKey, isCaseSensitive);
 
-	response.binaryData2_.assign(
-		static_cast<const uint8_t*>(createdContainerNameBinary),
-		static_cast<const uint8_t*>(createdContainerNameBinary) + createdContainerNameBinarySize);
+	DataStoreBase* ds = getDataStore(txn.getPartitionId(), keyStoreValue.storeType_);
+	const DataStoreBase::Scope dsScope(&txn, ds, clusterService_);
 
-	const bool optionIncluded = true;
-	bool internalOptionIncluded = true;
-	container->getContainerInfo(
-		txn, response.binaryData_, optionIncluded, internalOptionIncluded);
+	DSInputMes input(alloc, DS_PUT_CONTAINER, &containerKey, COLLECTION_CONTAINER, &containerInfo,
+		modifiable, MessageSchema::DEFAULT_VERSION, isCaseSensitive);
+	StackAllocAutoPtr<DSPutContainerOutputMes> ret(alloc, static_cast<DSPutContainerOutputMes*>(ds->exec(&txn, &keyStoreValue, &input)));
 
-	if (putStatus != DataStore::NOT_EXECUTED) {
-		const util::String emptyExtensionName(alloc);
-		util::XArray<uint8_t> *log =
-			ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
-		const LogSequentialNumber lsn = logManager_->putPutContainerLog(
-				*log,
-				txn.getPartitionId(), txn.getClientId(), UNDEF_TXNID,
-				response.containerId_, request.fixed_.cxtSrc_.stmtId_,
-				static_cast<uint32_t>(response.binaryData2_.size()),
-				response.binaryData2_.data(),
-				response.binaryData_,
-				container->getContainerType(),
-				static_cast<uint32_t>(emptyExtensionName.size()),
-				emptyExtensionName.c_str(),
-				txn.getTransationTimeoutInterval(),
-				request.fixed_.cxtSrc_.getMode_, false, true, MAX_ROWID,
-				(container->getExpireType() == TABLE_EXPIRE));
-		partitionTable_->setLSN(txn.getPartitionId(), lsn);
-		logRecordList.push_back(log);
+	if (ret.get()->status_ != PutStatus::NOT_EXECUTED) {
+		util::XArray<uint8_t>* logBinary = appendDataStoreLog(alloc, txn,
+			request.fixed_.cxtSrc_, request.fixed_.cxtSrc_.stmtId_,
+			keyStoreValue.storeType_, ret.get()->dsLog_);
+		logRecordList.push_back(logBinary);
 	}
 
 	transactionManager_->update(txn, request.fixed_.cxtSrc_.stmtId_);
@@ -339,22 +386,22 @@ bool DbUserHandler::checkContainer(
 	TransactionContext &txn = transactionManager_->put(
 			alloc, request.fixed_.pId_,
 			TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
-	const DataStore::Latch latch(
-			txn, txn.getPartitionId(), dataStore_, clusterService_);
-
 	const FullContainerKey containerKey(
 		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
 		containerName, static_cast<uint32_t>(strlen(containerName)));
-	ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
-		containerKey, COLLECTION_CONTAINER);
-	BaseContainer *container = containerAutoPtr.getBaseContainer();
-	if (container == 0) {
+	bool isCaseSensitive = false;
+
+	KeyDataStore* keyStore = getKeyDataStore(txn.getPartitionId());
+	KeyDataStoreValue keyStoreValue = keyStore->get(txn, containerKey, isCaseSensitive);
+
+	if (keyStoreValue.containerId_ == UNDEF_CONTAINERID) {
 		TEST_PRINT1("%s not found.\n", containerName);
 		return true;
 	}
 	else {
 		return false;
 	}
+
 }
 
 void DbUserHandler::putRow(
@@ -371,60 +418,45 @@ void DbUserHandler::putRow(
 	TransactionContext &txn = transactionManager_->put(
 			alloc, request.fixed_.pId_,
 			TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
-	const DataStore::Latch latch(
-			txn, txn.getPartitionId(), dataStore_, clusterService_);
 
 	const FullContainerKey containerKey(
 		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
 		containerName, static_cast<uint32_t>(strlen(containerName)));
-	ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
-		containerKey, COLLECTION_CONTAINER);
-	BaseContainer *container = containerAutoPtr.getBaseContainer();
-	if (container == 0) {
+	bool isCaseSensitive = false;
+
+	KeyDataStoreValue keyStoreValue = getKeyDataStore(txn.getPartitionId())->get(txn,
+		containerKey, isCaseSensitive);
+	if (keyStoreValue.containerId_ == UNDEF_CONTAINERID) {
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}
 
+	DataStoreBase* ds = getDataStore(txn.getPartitionId(), keyStoreValue.storeType_);
+	const DataStoreBase::Scope dsScope(&txn, ds, clusterService_);
+
 	RowData rowData(alloc);
-	makeRow(alloc, container->getColumnInfoList(),
-			container->getColumnNum(), cvList, rowData);
-
-	util::XArray<RowId> rowIds(alloc);
-	rowIds.assign(numRow, UNDEF_ROWID);
-	DataStore::PutStatus putStatus;
-	container->putRow(txn, static_cast<uint32_t>(rowData.size()),
-		rowData.data(), rowIds[0], putStatus,
-		PUT_INSERT_OR_UPDATE);  
-	const bool executed = (putStatus != DataStore::NOT_EXECUTED);
-
 	{
-		const bool withBegin = (request.fixed_.cxtSrc_.txnMode_ ==
-				TransactionManager::NO_AUTO_COMMIT_BEGIN);
-		const bool isAutoCommit = (request.fixed_.cxtSrc_.txnMode_ ==
-				TransactionManager::AUTO_COMMIT);
-		assert(!(withBegin && isAutoCommit));
-		assert(numRow == rowIds.size());
-		assert((executed && rowIds[0] != UNDEF_ROWID) ||
-			   (!executed && rowIds[0] == UNDEF_ROWID));
-		util::XArray<uint8_t> *log =
-			ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
-		const LogSequentialNumber lsn = logManager_->putPutRowLog(
-				*log,
-				txn.getPartitionId(), TXN_EMPTY_CLIENTID, txn.getId(),
-				container->getContainerId(), request.fixed_.cxtSrc_.stmtId_,
-				(executed ? rowIds.size() : 0), rowIds, (executed ? numRow : 0),
-				rowData, txn.getTransationTimeoutInterval(),
-				request.fixed_.cxtSrc_.getMode_, withBegin, isAutoCommit);
-		partitionTable_->setLSN(txn.getPartitionId(), lsn);
-		logRecordList.push_back(log);
+		DSInputMes input(alloc, DS_GET_CONTAINR_OBJECT, ANY_CONTAINER);
+		DSContainerOutputMes* ret = static_cast<DSContainerOutputMes*>(ds->exec(&txn, &keyStoreValue, &input));
+		BaseContainer* container = ret->container_;
+		makeRow(txn.getPartitionId(), alloc, container->getColumnInfoList(),
+			container->getColumnNum(), cvList, rowData);
 	}
+
+	DSInputMes input(alloc, DS_PUT_ROW, &(rowData), PUT_INSERT_OR_UPDATE,
+		MAX_SCHEMAVERSIONID);
+	DSOutputMes* ret = static_cast<DSOutputMes*>(ds->exec(&txn, &keyStoreValue, &input));
+	util::XArray<uint8_t>* logBinary = appendDataStoreLog(alloc, txn,
+		request.fixed_.cxtSrc_, request.fixed_.cxtSrc_.stmtId_,
+		keyStoreValue.storeType_, ret->dsLog_);
+	logRecordList.push_back(logBinary);
 
 	transactionManager_->update(txn, request.fixed_.cxtSrc_.stmtId_);
 }
 
 void DbUserHandler::fetchRole(TransactionContext &txn, util::StackAllocator &alloc, 
-	BaseContainer *container, ResultSet *rs, RoleType &role) {
+	BaseContainer *container, ResultSet *rs, PrivilegeType &role) {
 		OutputMessageRowStore outputMessageRowStore(
-			dataStore_->getValueLimitConfig(), container->getColumnInfoList(),
+			getDataStore(txn.getPartitionId())->getConfig(), container->getColumnInfoList(),
 			container->getColumnNum(), *(rs->getRowDataFixedPartBuffer()),
 			*(rs->getRowDataVarPartBuffer()), false /*isRowIdIncluded*/);
 		ResultSize resultNum;
@@ -439,7 +471,7 @@ void DbUserHandler::fetchRole(TransactionContext &txn, util::StackAllocator &all
 		outputMessageRowStore.getAllVariablePart(data2, size2);
 
 		InputMessageRowStore inputMessageRowStore(
-			dataStore_->getValueLimitConfig(), container->getColumnInfoList(),
+			getDataStore(txn.getPartitionId())->getConfig(), container->getColumnInfoList(),
 			container->getColumnNum(),
 			reinterpret_cast<void *>(const_cast<uint8_t *>(data1)), size1,
 			reinterpret_cast<void *>(const_cast<uint8_t *>(data2)), size2, 1,
@@ -463,43 +495,24 @@ void DbUserHandler::fetchRole(TransactionContext &txn, util::StackAllocator &all
 		}
 }
 
-void DbUserHandler::removeRowWithRowKey(TransactionContext &txn, util::StackAllocator &alloc, 
-	const TransactionManager::ContextSource &cxtSrc, 
-	BaseContainer *container, const RowKeyData &rowKey,
-	util::XArray<const util::XArray<uint8_t> *> &logRecordList) {
-	util::XArray<RowId> rowIds(alloc);
-	const uint64_t numRow = 1;
-	rowIds.assign(numRow, UNDEF_ROWID);
-	bool existFlag;
-	container->deleteRow(txn, static_cast<uint32_t>(rowKey.size()),
-		rowKey.data(), rowIds[0], existFlag);
-	const bool executed = existFlag;
+void DbUserHandler::removeRowWithRowKey(TransactionContext& txn, util::StackAllocator& alloc,
+	const TransactionManager::ContextSource& cxtSrc,
+	KeyDataStoreValue& keyStoreValue, const RowKeyData& rowKey,
+	util::XArray<const util::XArray<uint8_t>*>& logRecordList) {
+	DataStoreBase* ds = getDataStore(txn.getPartitionId(), keyStoreValue.storeType_);
+	const DataStoreBase::Scope dsScope(&txn, ds, clusterService_);
+	DSInputMes input(alloc, DS_REMOVE_ROW, const_cast<RowKeyData*>(&(rowKey)),
+		MAX_SCHEMAVERSIONID);
+	DSOutputMes* ret = static_cast<DSOutputMes*>(ds->exec(&txn, &keyStoreValue, &input));
 
-	{
-		const bool withBegin = (cxtSrc.txnMode_ ==
-				TransactionManager::NO_AUTO_COMMIT_BEGIN);
-		const bool isAutoCommit = (cxtSrc.txnMode_ ==
-				TransactionManager::AUTO_COMMIT);
-		assert(!(withBegin && isAutoCommit));
-		assert(numRow == rowIds.size());
-		assert((executed && rowIds[0] != UNDEF_ROWID) ||
-			   (!executed && rowIds[0] == UNDEF_ROWID));
-		util::XArray<uint8_t> *log =
-				ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
-		const LogSequentialNumber lsn = logManager_->putRemoveRowLog(
-				*log, txn.getPartitionId(),
-				TXN_EMPTY_CLIENTID, txn.getId(), container->getContainerId(),
-				cxtSrc.stmtId_, (executed ? rowIds.size() : 0), rowIds,
-				txn.getTransationTimeoutInterval(), cxtSrc.getMode_,
-				withBegin, isAutoCommit);
-		partitionTable_->setLSN(txn.getPartitionId(), lsn);
-		logRecordList.push_back(log);
-	}
+	util::XArray<uint8_t>* logBinary = appendDataStoreLog(alloc, txn,
+		cxtSrc, cxtSrc.stmtId_, keyStoreValue.storeType_, ret->dsLog_);
+	logRecordList.push_back(logBinary);
 
 	transactionManager_->update(txn, cxtSrc.stmtId_);
 }
 
-void DbUserHandler::runWithRowKey(
+bool DbUserHandler::runWithRowKey(
 		EventContext &ec, const TransactionManager::ContextSource &cxtSrc, 
 		const char8_t *containerName, const RowKeyData &rowKey,
 		DUGetInOut *option) {
@@ -511,34 +524,38 @@ void DbUserHandler::runWithRowKey(
 	TransactionContext &txn = transactionManager_->put(
 			alloc, 0 /*pId*/,
 			TXN_EMPTY_CLIENTID, cxtSrc, now, emNow);
-	const DataStore::Latch latch(
-			txn, txn.getPartitionId(), dataStore_, clusterService_);
 
 	const FullContainerKey containerKey(
 		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
 		containerName, static_cast<uint32_t>(strlen(containerName)));
-	ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
-		containerKey, COLLECTION_CONTAINER);
-	BaseContainer *container = containerAutoPtr.getBaseContainer();
-	if (container == 0) {
+	bool isCaseSensitive = false;
+
+	KeyDataStoreValue keyStoreValue = getKeyDataStore(txn.getPartitionId())->get(txn,
+		containerKey, isCaseSensitive);
+	if (keyStoreValue.containerId_ == UNDEF_CONTAINERID) {
 		switch (option->type) {
 		case DUGetInOut::DBID:
+		case DUGetInOut::AUTH:
 			assert(option->s);
-			assert(strcmp(containerName, GS_DATABASES) == 0);
 			TEST_PRINT1("%s not found.\n", containerName);
-			GS_THROW_USER_ERROR(GS_ERROR_TXN_AUTH_FAILED,
-				"database name invalid (" << option->s << ")");
+			return false;
 		case DUGetInOut::RESULT_NUM:
-			GS_THROW_USER_ERROR(GS_ERROR_TXN_USER_OR_DATABASE_NOT_EXIST, "");
+		case DUGetInOut::USER:
+			return false;
 		default:
 			GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 		}
 	}
 
 	if (option->type != DUGetInOut::REMOVE) {
-		ResultSet *rs = dataStore_->createResultSet(
+		DataStoreBase* ds = getDataStore(txn.getPartitionId(), keyStoreValue.storeType_);
+		const DataStoreBase::Scope dsScope(&txn, ds, clusterService_);
+		DSInputMes input(alloc, DS_GET_CONTAINR_OBJECT, ANY_CONTAINER);
+		DSContainerOutputMes* ret = static_cast<DSContainerOutputMes*>(ds->exec(&txn, &keyStoreValue, &input));
+		BaseContainer* container = ret->container_;
+		ResultSet *rs = getDataStore(txn.getPartitionId())->getResultSetManager()->create(
 			txn, container->getContainerId(), container->getVersionId(), emNow, NULL);
-		const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
+		const ResultSetGuard rsGuard(txn, *getDataStore(txn.getPartitionId()), *rs);
 		QueryProcessor::get(txn, *container, static_cast<uint32_t>(rowKey.size()),
 			rowKey.data(), *rs);
 		rs->setResultType(RESULT_ROWSET);
@@ -551,9 +568,7 @@ void DbUserHandler::runWithRowKey(
 		}
 		case DUGetInOut::DBID: {
 			if (rs->getResultNum() != 1) {
-				TEST_PRINT("count!=1(dbName)\n");
-				GS_THROW_USER_ERROR(GS_ERROR_TXN_AUTH_FAILED,
-					"database name invalid (" << option->s << ")");
+				return false;
 			}
 			if (option->userType != Message::USER_NORMAL) {
 				util::XArray<RowId> rowIdList(alloc);
@@ -566,21 +581,35 @@ void DbUserHandler::runWithRowKey(
 			break;
 		}
 		case DUGetInOut::ROLE: {
-			fetchRole(txn, alloc, container, rs, option->role);
+			fetchRole(txn, alloc, container, rs, option->priv);
 			break;
+		}
+		case DUGetInOut::AUTH: {
+			if (rs->getResultNum() != 1) {
+				return false;
+			}
+			return checkDigest(txn, alloc, container, rs, option->s);
+		}
+		case DUGetInOut::USER: {
+			if (rs->getResultNum() != 1) {
+				return false;
+			}
+			option->count = rs->getResultNum();
+			return (checkDigest(txn, alloc, container, rs, "") == false);
 		}
 		}
 	} else {
-		removeRowWithRowKey(txn, alloc, cxtSrc, container, rowKey, *(option->logRecordList));
+		removeRowWithRowKey(txn, alloc, cxtSrc, keyStoreValue, rowKey, *(option->logRecordList));
 	}
 	TEST_PRINT("runWithRowKey() E\n");
+	return true;
 }
 
-void DbUserHandler::checkDigest(TransactionContext &txn, util::StackAllocator &alloc, 
+bool DbUserHandler::checkDigest(TransactionContext &txn, util::StackAllocator &alloc, 
 	BaseContainer *container, ResultSet *rs, const char8_t *digest) {
 
 	OutputMessageRowStore outputMessageRowStore(
-		dataStore_->getValueLimitConfig(), container->getColumnInfoList(),
+		getDataStore(txn.getPartitionId())->getConfig(), container->getColumnInfoList(),
 		container->getColumnNum(), *(rs->getRowDataFixedPartBuffer()),
 		*(rs->getRowDataVarPartBuffer()), false /*isRowIdIncluded*/);
 	ResultSize resultNum;
@@ -595,7 +624,7 @@ void DbUserHandler::checkDigest(TransactionContext &txn, util::StackAllocator &a
 	outputMessageRowStore.getAllVariablePart(data2, size2);
 
 	InputMessageRowStore inputMessageRowStore(
-		dataStore_->getValueLimitConfig(), container->getColumnInfoList(),
+		getDataStore(txn.getPartitionId())->getConfig(), container->getColumnInfoList(),
 		container->getColumnNum(),
 		reinterpret_cast<void *>(const_cast<uint8_t *>(data1)), size1,
 		reinterpret_cast<void *>(const_cast<uint8_t *>(data2)), size2, 1,
@@ -613,9 +642,9 @@ void DbUserHandler::checkDigest(TransactionContext &txn, util::StackAllocator &a
 	targetDigest.append("\0");
 
 	if (strcmp(digest, targetDigest.c_str()) != 0) {
-		TEST_PRINT("digest unmatch\n");
-		GS_THROW_USER_ERROR(GS_ERROR_TXN_USER_NAME_ALREADY_EXISTS, "");
+		return false;
 	}
+	return true;
 }
 
 void DbUserHandler::makeDatabaseInfoList(
@@ -625,7 +654,7 @@ void DbUserHandler::makeDatabaseInfoList(
 	TEST_PRINT("makeDatabaseInfoList() S\n");
 
 	OutputMessageRowStore outputMessageRowStore(
-		dataStore_->getValueLimitConfig(), container.getColumnInfoList(),
+		getDataStore(txn.getPartitionId())->getConfig(), container.getColumnInfoList(),
 		container.getColumnNum(), *(rs.getRowDataFixedPartBuffer()),
 		*(rs.getRowDataVarPartBuffer()), false /*isRowIdIncluded*/);
 	ResultSize resultNum;
@@ -639,7 +668,7 @@ void DbUserHandler::makeDatabaseInfoList(
 	uint32_t size2;
 	outputMessageRowStore.getAllVariablePart(data2, size2);
 
-	InputMessageRowStore inputMessageRowStore(dataStore_->getValueLimitConfig(),
+	InputMessageRowStore inputMessageRowStore(getDataStore(txn.getPartitionId())->getConfig(),
 		container.getColumnInfoList(), container.getColumnNum(),
 		reinterpret_cast<void *>(const_cast<uint8_t *>(data1)), size1,
 		reinterpret_cast<void *>(const_cast<uint8_t *>(data2)), size2,
@@ -739,7 +768,7 @@ void DbUserHandler::makeUserInfoList(
 		BaseContainer &container, ResultSet &rs,
 		util::XArray<UserInfo*> &userInfoList) {
 		OutputMessageRowStore outputMessageRowStore(
-			dataStore_->getValueLimitConfig(), container.getColumnInfoList(),
+			getDataStore(txn.getPartitionId())->getConfig(), container.getColumnInfoList(),
 			container.getColumnNum(), *(rs.getRowDataFixedPartBuffer()),
 			*(rs.getRowDataVarPartBuffer()), false /*isRowIdIncluded*/);
 		ResultSize resultNum;
@@ -754,7 +783,7 @@ void DbUserHandler::makeUserInfoList(
 		outputMessageRowStore.getAllVariablePart(data2, size2);
 
 		InputMessageRowStore inputMessageRowStore(
-			dataStore_->getValueLimitConfig(), container.getColumnInfoList(),
+			getDataStore(txn.getPartitionId())->getConfig(), container.getColumnInfoList(),
 			container.getColumnNum(),
 			reinterpret_cast<void *>(const_cast<uint8_t *>(data1)), size1,
 			reinterpret_cast<void *>(const_cast<uint8_t *>(data2)), size2,
@@ -782,48 +811,39 @@ void DbUserHandler::makeUserInfoList(
 			outUserInfo->property_ =
 				(*reinterpret_cast<int8_t *>(const_cast<uint8_t *>(field)));
 
-			outUserInfo->withDigest_ = true;
+			if (strcmp(outUserInfo->digest_.c_str(), "") != 0) {
+				outUserInfo->withDigest_ = true;
+			} else {
+				outUserInfo->withDigest_ = false;
+				outUserInfo->isGroupMapping_ = transactionService_->getManager()->isRoleMappingByGroup();
+				outUserInfo->roleName_.swap(outUserInfo->userName_);
+			}
 
 			userInfoList.push_back(outUserInfo);
 		}
 
 }
 
-void DbUserHandler::removeRowWithRS(TransactionContext &txn, util::StackAllocator &alloc, 
-	const TransactionManager::ContextSource &cxtSrc,
-	BaseContainer &container, ResultSet &rs,
-	util::XArray<const util::XArray<uint8_t> *> &logRecordList) {
+void DbUserHandler::removeRowWithRS(TransactionContext& txn, util::StackAllocator& alloc,
+	const TransactionManager::ContextSource& cxtSrc,
+	KeyDataStoreValue& keyStoreValue,
+	BaseContainer& container, ResultSet& rs,
+	util::XArray<const util::XArray<uint8_t>*>& logRecordList) {
 
 	util::XArray<RowId> rowIdList(alloc);
 	container.getRowIdList(txn, *(rs.getOIdList()), rowIdList);
 
 	util::XArray<RowId> rowIds(alloc);
 	for (size_t i = 0; i < rowIdList.size(); i++) {
-		bool existFlag;
-		container.redoDeleteRow(txn, rowIdList[i], existFlag);
-		const bool executed = existFlag;
+		DataStoreBase* ds = getDataStore(txn.getPartitionId(), keyStoreValue.storeType_);
+		DSInputMes input(alloc, DS_REMOVE_ROW_BY_ID, rowIdList[i],
+			MAX_SCHEMAVERSIONID);
+		DSOutputMes* ret = static_cast<DSOutputMes*>(ds->exec(&txn, &keyStoreValue, &input));
 
-		rowIds.push_back(rowIdList[i]);
-
-		{
-			const bool withBegin = (cxtSrc.txnMode_ ==
-					TransactionManager::NO_AUTO_COMMIT_BEGIN);
-			const bool isAutoCommit = (cxtSrc.txnMode_ ==
-					TransactionManager::AUTO_COMMIT);
-			assert(!(withBegin && isAutoCommit));
-			assert(1 == rowIds.size());
-			assert(rowIds[0] != UNDEF_ROWID);
-			util::XArray<uint8_t> *log =
-				ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
-			const LogSequentialNumber lsn = logManager_->putRemoveRowLog(
-					*log, txn.getPartitionId(), txn.getClientId(), txn.getId(),
-					container.getContainerId(), cxtSrc.stmtId_,
-					(executed ? rowIds.size() : 0), rowIds,
-					txn.getTransationTimeoutInterval(),
-					cxtSrc.getMode_, withBegin, isAutoCommit);
-			partitionTable_->setLSN(txn.getPartitionId(), lsn);
-			logRecordList.push_back(log);
-		}
+		util::XArray<const util::XArray<uint8_t>*> logRecordList(alloc);
+		util::XArray<uint8_t>* logBinary = appendDataStoreLog(alloc, txn,
+			cxtSrc, cxtSrc.stmtId_, keyStoreValue.storeType_, ret->dsLog_);
+		logRecordList.push_back(logBinary);
 
 		transactionManager_->update(txn, cxtSrc.stmtId_);
 
@@ -842,16 +862,14 @@ void DbUserHandler::runWithTQL(
 	TransactionContext &txn = transactionManager_->put(
 			alloc, 0 /*pId*/,
 			TXN_EMPTY_CLIENTID, cxtSrc, now, emNow);
-	const DataStore::Latch latch(
-			txn, txn.getPartitionId(), dataStore_, clusterService_);
-
 	const FullContainerKey containerKey(
 		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
 		containerName, static_cast<uint32_t>(strlen(containerName)));
-	ContainerAutoPtr containerAutoPtr(txn, dataStore_, txn.getPartitionId(),
-		containerKey, COLLECTION_CONTAINER);
-	BaseContainer *container = containerAutoPtr.getBaseContainer();
-	if (container == 0) {
+	bool isCaseSensitive = false;
+
+	KeyDataStoreValue keyStoreValue = getKeyDataStore(txn.getPartitionId())->get(txn,
+		containerKey, isCaseSensitive);
+	if (keyStoreValue.containerId_ == UNDEF_CONTAINERID) {
 		switch (option->phase) {
 		case DUQueryInOut::AUTH:
 			assert(option->type == DUQueryInOut::AGG);
@@ -869,9 +887,15 @@ void DbUserHandler::runWithTQL(
 		}
 	}
 
-	ResultSet *rs = dataStore_->createResultSet(
+	DataStoreBase* ds = getDataStore(txn.getPartitionId(), keyStoreValue.storeType_);
+	const DataStoreBase::Scope dsScope(&txn, ds, clusterService_);
+	DSInputMes input(alloc, DS_GET_CONTAINR_OBJECT, ANY_CONTAINER);
+	DSContainerOutputMes* ret = static_cast<DSContainerOutputMes*>(ds->exec(&txn, &keyStoreValue, &input));
+	BaseContainer* container = ret->container_;
+
+	ResultSet *rs = getDataStore(txn.getPartitionId())->getResultSetManager()->create(
 		txn, container->getContainerId(), container->getVersionId(), emNow, NULL);
-	const ResultSetGuard rsGuard(txn, *dataStore_, *rs);
+	const ResultSetGuard rsGuard(txn, *getDataStore(txn.getPartitionId()), *rs);
 
 	QueryProcessor::executeTQL(
 		txn, *container, MAX_RESULT_SIZE, TQLInfo(GS_SYSTEM, NULL, tql), *rs);
@@ -894,7 +918,9 @@ void DbUserHandler::runWithTQL(
 		int64_t count = rs->getResultNum();
 		if (count > 0) {
 			option->flag = true;
-			checkDigest(txn, alloc, container, rs, option->s);
+			if (checkDigest(txn, alloc, container, rs, option->s) == false) {
+				GS_THROW_USER_ERROR(GS_ERROR_TXN_USER_NAME_ALREADY_EXISTS, "");
+			}
 		} else {
 			option->flag = false;
 		}
@@ -917,7 +943,8 @@ void DbUserHandler::runWithTQL(
 		break;
 	}
 	case DUQueryInOut::REMOVE: {
-		removeRowWithRS(txn, alloc, cxtSrc, *container, *rs, *(option->logRecordList));
+		removeRowWithRS(txn, alloc, cxtSrc, keyStoreValue,
+			*container, *rs, *(option->logRecordList));
 		break;
 	}
 	}
@@ -1118,7 +1145,7 @@ int64_t DbUserHandler::getCount(
 
 void DbUserHandler::checkUser(
 		EventContext &ec, const Request &request, const char8_t *userName,
-		bool &existFlag) {
+		bool &existFlag, bool isRole) {
 	existFlag = false;
 
 	util::StackAllocator &alloc = ec.getAllocator();
@@ -1127,7 +1154,12 @@ void DbUserHandler::checkUser(
 	makeRowKey(userName, rowKey);
 		
 	DUGetInOut option;
-	runWithRowKey(ec, request.fixed_.cxtSrc_, GS_USERS, rowKey, &option);
+	if (isRole) {
+		option.type = DUGetInOut::USER;
+	}
+	if (runWithRowKey(ec, request.fixed_.cxtSrc_, GS_USERS, rowKey, &option) == false) {
+		GS_THROW_USER_ERROR(GS_ERROR_TXN_USER_OR_DATABASE_NOT_EXIST, "");
+	}
 	existFlag = (option.count > 0);
 }
 
@@ -1275,21 +1307,19 @@ void PutUserHandler::operator()(EventContext &ec, Event &ev) {
 	util::StackAllocator &alloc = ec.getAllocator();
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
-	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
 
+	ConnectionOption& connOption =
+		ev.getSenderND().getUserData<ConnectionOption>();
+	InMessage inMes(alloc, getRequestSource(ev), connOption);
+	Request& request = inMes.request_;
 	try {
-		ConnectionOption &connOption =
-				ev.getSenderND().getUserData<ConnectionOption>();
-
 		EventByteInStream in(ev.getInStream());
-		decodeRequestCommonPart(in, request, connOption);
+		inMes.decode(in);
 
-		UserInfo userInfo(alloc);
-		bool modifiable;
+		UserInfo& userInfo = inMes.userInfo_;
+		bool modifiable = inMes.modifiable_;
 
-		decodeUserInfo(in, userInfo);
-		decodeBooleanData(in, modifiable);
 		TEST_PRINT("[RequestMesg]\n");
 		TEST_PRINT1("\t%s\n", userInfo.dump().c_str());
 		TEST_PRINT1("\tmodifiable = %d\n", modifiable);
@@ -1309,11 +1339,21 @@ void PutUserHandler::operator()(EventContext &ec, Event &ev) {
 		if (connOption.userType_ == Message::USER_NORMAL) {
 			checkModifiable(modifiable, true);
 			checkConnectedUserName(connOption, userInfo.userName_.c_str());
+			if (connOption.isLDAPAuthentication_) {
+				GS_THROW_USER_ERROR(GS_ERROR_TXN_OPERATION_NOT_ALLOWED,
+					"LDAP user can't execute the statement");
+			}
 		}
 		checkUserName(userInfo.userName_.c_str(), true);
-		checkDigest(userInfo.digest_.c_str(),
-			dataStore_->getValueLimitConfig().getLimitSmallSize());
+		if (strlen(userInfo.digest_.c_str()) == 0) {
+			checkModifiable(modifiable, false);
+		} else {
+			checkDigest(userInfo.digest_.c_str(),
+				getDataStore(request.fixed_.pId_)->getConfig().getLimitSmallSize());
+		}
 
+		util::LockGuard<util::Mutex> guard(
+			partitionList_->partition(request.fixed_.pId_).mutex());
 
 		util::XArray<const util::XArray<uint8_t> *> logRecordList(alloc);
 
@@ -1324,8 +1364,12 @@ void PutUserHandler::operator()(EventContext &ec, Event &ev) {
 			}
 			bool existFlag;
 			if (modifiable == false) {  
-				checkUserDetails(ec, request, userInfo.userName_.c_str(),
-					userInfo.digest_.c_str(), true, existFlag);  
+				if (strlen(userInfo.digest_.c_str()) == 0) {
+					checkUser(ec, request, userInfo.userName_.c_str(), existFlag);
+				} else {
+					checkUserDetails(ec, request, userInfo.userName_.c_str(),
+						userInfo.digest_.c_str(), true, existFlag);  
+				}
 				if (existFlag == false) {
 					if (getCount(ec, request, GS_USERS) >=
 						static_cast<int64_t>(USER_NUM_MAX)) {
@@ -1336,7 +1380,7 @@ void PutUserHandler::operator()(EventContext &ec, Event &ev) {
 				}
 			}
 			else {  
-				checkUser(ec, request, userInfo.userName_.c_str(), existFlag);
+				checkUser(ec, request, userInfo.userName_.c_str(), existFlag, true);
 				if (existFlag == false) {
 					if (connOption.userType_ == Message::USER_NORMAL) {
 						GS_THROW_USER_ERROR(
@@ -1362,7 +1406,7 @@ void PutUserHandler::operator()(EventContext &ec, Event &ev) {
 					request, ec, alloc, NodeDescriptor::EMPTY_ND, txn,
 					ev.getType(), txn.getLastStatementId(),
 					TransactionManager::REPLICATION_ASYNC, NULL, 0,
-					logRecordList.data(), logRecordList.size(), response);
+					logRecordList.data(), logRecordList.size(), NULL);
 
 			throw;
 		}
@@ -1373,15 +1417,17 @@ void PutUserHandler::operator()(EventContext &ec, Event &ev) {
 				alloc, request.fixed_.pId_,
 				TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
 
+		OutMessage outMes(request.fixed_.cxtSrc_.stmtId_, TXN_STATEMENT_SUCCESS,
+			getReplyOption(alloc, request, response.compositeIndexInfos_, false));
 		const bool ackWait = executeReplication(
 				request, ec, alloc,
 				ev.getSenderND(), txn, ev.getType(), request.fixed_.cxtSrc_.stmtId_,
 				transactionManager_->getReplicationMode(), NULL, 0,
-				logRecordList.data(), logRecordList.size(), response);
+				logRecordList.data(), logRecordList.size(), &outMes);
 
 		replySuccess(ec, alloc, ev.getSenderND(), ev.getType(),
-			TXN_STATEMENT_SUCCESS, request, response, ackWait);
-		
+			request, outMes, ackWait);
+
 		TEST_PRINT("<<<PutUserHandler>>> END\n");
 	}
 	catch (std::exception &e) {
@@ -1431,18 +1477,17 @@ void DropUserHandler::operator()(EventContext &ec, Event &ev) {
 	util::StackAllocator &alloc = ec.getAllocator();
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
-	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
 
+	ConnectionOption& connOption =
+		ev.getSenderND().getUserData<ConnectionOption>();
+	InMessage inMes(alloc, getRequestSource(ev), connOption);
+	Request& request = inMes.request_;
 	try {
-		ConnectionOption &connOption =
-				ev.getSenderND().getUserData<ConnectionOption>();
-
 		EventByteInStream in(ev.getInStream());
-		decodeRequestCommonPart(in, request, connOption);
+		inMes.decode(in);
 
-		util::String userName(alloc);
-		decodeStringData<util::String>(in, userName);
+		util::String& userName = inMes.userName_;
 		TEST_PRINT("[RequestMesg]\n");
 		TEST_PRINT1("\tuserName=%s\n", userName.c_str());
 
@@ -1461,6 +1506,9 @@ void DropUserHandler::operator()(EventContext &ec, Event &ev) {
 		checkPartitionIdForUsers(request.fixed_.pId_);
 		checkUserName(userName.c_str(), false);
 
+
+		util::LockGuard<util::Mutex> guard(
+			partitionList_->partition(request.fixed_.pId_).mutex());
 
 		util::XArray<const util::XArray<uint8_t> *> logRecordList(alloc);
 
@@ -1488,7 +1536,7 @@ void DropUserHandler::operator()(EventContext &ec, Event &ev) {
 					request, ec, alloc, NodeDescriptor::EMPTY_ND, txn,
 					ev.getType(), txn.getLastStatementId(),
 					TransactionManager::REPLICATION_ASYNC, NULL, 0,
-					logRecordList.data(), logRecordList.size(), response);
+					logRecordList.data(), logRecordList.size(), NULL);
 
 			throw;
 		}
@@ -1499,15 +1547,16 @@ void DropUserHandler::operator()(EventContext &ec, Event &ev) {
 				alloc, request.fixed_.pId_,
 				TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
 
+		OutMessage outMes(request.fixed_.cxtSrc_.stmtId_, TXN_STATEMENT_SUCCESS,
+			getReplyOption(alloc, request, response.compositeIndexInfos_, false));
 		const bool ackWait = executeReplication(
 				request, ec, alloc,
 				ev.getSenderND(), txn, ev.getType(), request.fixed_.cxtSrc_.stmtId_,
 				transactionManager_->getReplicationMode(), NULL, 0,
-				logRecordList.data(), logRecordList.size(), response);
+				logRecordList.data(), logRecordList.size(), &outMes);
 
-		replySuccess(
-				ec, alloc, ev.getSenderND(), ev.getType(),
-				TXN_STATEMENT_SUCCESS, request, response, ackWait);
+		replySuccess(ec, alloc, ev.getSenderND(), ev.getType(),
+			request, outMes, ackWait);
 		
 		TEST_PRINT("<<<DropUserHandler>>> END\n");
 	}
@@ -1515,6 +1564,7 @@ void DropUserHandler::operator()(EventContext &ec, Event &ev) {
 		handleError(ec, alloc, ev, request, e);
 	}
 }
+
 void GetUsersHandler::checkNormalUser(UserType userType, const char8_t *userName) {
 	if ((userType == Message::USER_NORMAL) &&
 			(strcmp(userName, "") == 0)) {
@@ -1533,7 +1583,32 @@ void GetUsersHandler::makeUserInfoListForAdmin(util::StackAllocator &alloc,
 	userInfoList.push_back(outUserInfo);
 	TEST_PRINT("makeUserInfoListForAdmin() E\n");
 }
-		
+
+void GetUsersHandler::makeUserInfoListForLDAPUser(util::StackAllocator &alloc,
+	ConnectionOption &connOption, util::XArray<UserInfo*> &userInfoList) {
+	TEST_PRINT("makeUserInfoListForLDAPUser() S\n");
+	UserInfo *outUserInfo = ALLOC_NEW(alloc) UserInfo(alloc);
+	outUserInfo->userName_.append(connOption.userName_.c_str());
+	outUserInfo->property_ = 0;
+	outUserInfo->withDigest_ = false;
+	outUserInfo->isGroupMapping_ = transactionService_->getManager()->isRoleMappingByGroup();
+	outUserInfo->roleName_.append(connOption.roleName_.c_str());
+	userInfoList.push_back(outUserInfo);
+	TEST_PRINT("makeUserInfoListForLDAPUser() E\n");
+}
+
+
+void GetUsersHandler::checkUserInfoList(int32_t featureVersion, util::XArray<UserInfo *> &userInfoList) {
+	if (featureVersion < StatementMessage::FEATURE_V4_5) {
+		for (size_t i = 0; i < userInfoList.size(); i++) {
+			if (strcmp(userInfoList[i]->userName_.c_str(), "") == 0) {
+				GS_THROW_USER_ERROR(GS_ERROR_DS_CON_ACCESS_INVALID,
+					"Can not create user infomation list");
+			}
+		}
+	}
+}
+
 void GetUsersHandler::operator()(EventContext &ec, Event &ev) {
 	TXN_TRACE_HANDLER_CALLED(ev);
 	TEST_PRINT("<<<GetUsersHandler>>> START\n");
@@ -1541,26 +1616,20 @@ void GetUsersHandler::operator()(EventContext &ec, Event &ev) {
 	util::StackAllocator &alloc = ec.getAllocator();
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
-	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
 
+	ConnectionOption& connOption =
+		ev.getSenderND().getUserData<ConnectionOption>();
+	InMessage inMes(alloc, getRequestSource(ev), connOption);
+	Request& request = inMes.request_;
 	try {
-		ConnectionOption &connOption =
-				ev.getSenderND().getUserData<ConnectionOption>();
-
 		EventByteInStream in(ev.getInStream());
-		decodeRequestCommonPart(in, request, connOption);
+		inMes.decode(in);
 
-		bool withFilter;
-		UserInfo userInfo(alloc);
-		util::String userName(alloc);
-		int8_t property = Message::USER_NORMAL;  
+		util::String userName = inMes.userName_;
+		bool withFilter = inMes.withFilter_;
+		int8_t property = inMes.property_;  
 
-		decodeBooleanData(in, withFilter);
-		if (withFilter) {
-			decodeStringData<util::String>(in, userName);
-			in >> property;
-		}
 		TEST_PRINT("[RequestMesg]\n");
 		TEST_PRINT1("\twithFilter=%d\n", withFilter);
 		TEST_PRINT1("\tuserName=%s\n", userName.c_str());
@@ -1583,13 +1652,29 @@ void GetUsersHandler::operator()(EventContext &ec, Event &ev) {
 		}
 		checkNormalUser(connOption.userType_, userName.c_str());
 
+		TransactionManager* txnMgr = transactionService_->getManager();
+		
+
+		util::LockGuard<util::Mutex> guard(
+			partitionList_->partition(request.fixed_.pId_).mutex());
+
 		if (withFilter && (connOption.userType_ != Message::USER_NORMAL)) {
 			makeUserInfoListForAdmin(alloc, userName.c_str(), response.userInfoList_);
 		}
-		else {
-			getUserInfoList(ec, request, connOption.userName_.c_str(),
-				connOption.userType_, response.userInfoList_);
+		else if (withFilter && connOption.isLDAPAuthentication_) {
+			makeUserInfoListForLDAPUser(alloc, connOption, response.userInfoList_);
 		}
+		else {
+			if (connOption.isLDAPAuthentication_ && txnMgr->isRoleMappingByGroup()) {
+				getUserInfoList(ec, request, connOption.roleName_.c_str(),
+					connOption.userType_, response.userInfoList_);
+			} else {
+				getUserInfoList(ec, request, connOption.userName_.c_str(),
+					connOption.userType_, response.userInfoList_);
+			}
+		}
+
+		checkUserInfoList(request.optional_.get<Options::ACCEPTABLE_FEATURE_VERSION>(), response.userInfoList_);
 
 		if (connOption.userType_ == Message::USER_NORMAL) {
 			if (response.userInfoList_.size() == 0) {
@@ -1610,8 +1695,11 @@ void GetUsersHandler::operator()(EventContext &ec, Event &ev) {
 			TEST_PRINT1("%s\n", response.userInfoList_[i]->dump().c_str());
 		}
 
+		OutMessage outMes(request.fixed_.cxtSrc_.stmtId_, TXN_STATEMENT_SUCCESS,
+			getReplyOption(alloc, request, response.compositeIndexInfos_, false),
+			&(response.userInfoList_), request);
 		replySuccess(ec, alloc, ev.getSenderND(), ev.getType(),
-			TXN_STATEMENT_SUCCESS, request, response, false);
+			request, outMes, false);
 		
 		TEST_PRINT("<<<GetUsersHandler>>> END\n");
 	}
@@ -1658,21 +1746,19 @@ void PutDatabaseHandler::operator()(EventContext &ec, Event &ev) {
 	util::StackAllocator &alloc = ec.getAllocator();
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
-	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
 
+	ConnectionOption& connOption =
+		ev.getSenderND().getUserData<ConnectionOption>();
+	InMessage inMes(alloc, getRequestSource(ev), connOption);
+	Request& request = inMes.request_;
 	try {
-		ConnectionOption &connOption =
-				ev.getSenderND().getUserData<ConnectionOption>();
-
 		EventByteInStream in(ev.getInStream());
-		decodeRequestCommonPart(in, request, connOption);
+		inMes.decode(in);
 
-		DatabaseInfo dbInfo(alloc);
-		bool modifiable;  
+		DatabaseInfo& dbInfo = inMes.dbInfo_;
+		bool modifiable = inMes.modifiable_;
 
-		decodeDatabaseInfo(in, dbInfo, alloc);
-		decodeBooleanData(in, modifiable);
 		TEST_PRINT("[RequestMesg]\n");
 		TEST_PRINT1("%s\n", dbInfo.dump().c_str());
 		TEST_PRINT1("\tmodifiable=%d\n", modifiable);
@@ -1694,6 +1780,9 @@ void PutDatabaseHandler::operator()(EventContext &ec, Event &ev) {
 		checkDatabaseName(dbInfo.dbName_.c_str());
 		checkPrivilegeSize(dbInfo, 0);
 
+
+		util::LockGuard<util::Mutex> guard(
+			partitionList_->partition(request.fixed_.pId_).mutex());
 
 		util::XArray<const util::XArray<uint8_t> *> logRecordList(alloc);
 
@@ -1729,7 +1818,7 @@ void PutDatabaseHandler::operator()(EventContext &ec, Event &ev) {
 					request, ec, alloc, NodeDescriptor::EMPTY_ND, txn,
 					ev.getType(), txn.getLastStatementId(),
 					TransactionManager::REPLICATION_ASYNC, NULL, 0,
-					logRecordList.data(), logRecordList.size(), response);
+					logRecordList.data(), logRecordList.size(), NULL);
 
 			throw;
 		}
@@ -1739,17 +1828,18 @@ void PutDatabaseHandler::operator()(EventContext &ec, Event &ev) {
 				alloc, request.fixed_.pId_,
 				TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
 
+		OutMessage outMes(request.fixed_.cxtSrc_.stmtId_, TXN_STATEMENT_SUCCESS,
+			getReplyOption(alloc, request, response.compositeIndexInfos_, false));
 		bool ackWait = false;
 		ackWait = executeReplication(
 				request, ec, alloc, ev.getSenderND(), txn,
 				ev.getType(), request.fixed_.cxtSrc_.stmtId_,
 				transactionManager_->getReplicationMode(), NULL, 0,
-				logRecordList.data(), logRecordList.size(), response);
+				logRecordList.data(), logRecordList.size(), &outMes);
 
-		replySuccess(
-				ec, alloc, ev.getSenderND(), ev.getType(),
-				TXN_STATEMENT_SUCCESS, request, response, ackWait);
-		
+		replySuccess(ec, alloc, ev.getSenderND(), ev.getType(),
+			request, outMes, ackWait);
+
 		TEST_PRINT("<<<PutDatabaseHandler>>> END\n");
 	}
 	catch (std::exception &e) {
@@ -1789,18 +1879,18 @@ void DropDatabaseHandler::operator()(EventContext &ec, Event &ev) {
 	util::StackAllocator &alloc = ec.getAllocator();
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
-	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
 
+	ConnectionOption& connOption =
+		ev.getSenderND().getUserData<ConnectionOption>();
+	InMessage inMes(alloc, getRequestSource(ev), connOption);
+	Request& request = inMes.request_;
 	try {
-		ConnectionOption &connOption =
-				ev.getSenderND().getUserData<ConnectionOption>();
-
 		EventByteInStream in(ev.getInStream());
-		decodeRequestCommonPart(in, request, connOption);
+		inMes.decode(in);
 
-		util::String dbName(alloc);
-		decodeStringData<util::String>(in, dbName);
+		util::String& dbName = inMes.dbName_;
+
 		TEST_PRINT("[RequestMesg]\n");
 		TEST_PRINT1("\tdbName=%s\n", dbName.c_str());
 
@@ -1820,6 +1910,9 @@ void DropDatabaseHandler::operator()(EventContext &ec, Event &ev) {
 		checkConnectedDatabaseName(connOption, dbName.c_str());
 		checkDatabaseName(dbName.c_str());
 
+
+		util::LockGuard<util::Mutex> guard(
+			partitionList_->partition(request.fixed_.pId_).mutex());
 
 		util::XArray<const util::XArray<uint8_t> *> logRecordList(alloc);
 
@@ -1841,7 +1934,7 @@ void DropDatabaseHandler::operator()(EventContext &ec, Event &ev) {
 					request, ec, alloc, NodeDescriptor::EMPTY_ND, txn,
 					ev.getType(), txn.getLastStatementId(),
 					TransactionManager::REPLICATION_ASYNC, NULL, 0,
-					logRecordList.data(), logRecordList.size(), response);
+					logRecordList.data(), logRecordList.size(), NULL);
 
 			throw;
 		}
@@ -1852,15 +1945,17 @@ void DropDatabaseHandler::operator()(EventContext &ec, Event &ev) {
 				alloc, request.fixed_.pId_,
 				TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
 
+		OutMessage outMes(request.fixed_.cxtSrc_.stmtId_, TXN_STATEMENT_SUCCESS,
+			getReplyOption(alloc, request, response.compositeIndexInfos_, false));
 		const bool ackWait = executeReplication(
 				request, ec, alloc,
 				ev.getSenderND(), txn, ev.getType(), request.fixed_.cxtSrc_.stmtId_,
 				transactionManager_->getReplicationMode(), NULL, 0,
-				logRecordList.data(), logRecordList.size(), response);
+				logRecordList.data(), logRecordList.size(), &outMes);
 
 		replySuccess(ec, alloc, ev.getSenderND(), ev.getType(),
-			TXN_STATEMENT_SUCCESS, request, response, ackWait);
-		
+			request, outMes, ackWait);
+
 		TEST_PRINT("<<<DropDatabaseHandler>>> END\n");
 	}
 	catch (std::exception &e) {
@@ -1961,28 +2056,20 @@ void GetDatabasesHandler::operator()(EventContext &ec, Event &ev) {
 	util::StackAllocator &alloc = ec.getAllocator();
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
-	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
 
+	ConnectionOption& connOption =
+		ev.getSenderND().getUserData<ConnectionOption>();
+	InMessage inMes(alloc, getRequestSource(ev), connOption);
+	Request& request = inMes.request_;
 	try {
-		ConnectionOption &connOption =
-				ev.getSenderND().getUserData<ConnectionOption>();
-
 		EventByteInStream in(ev.getInStream());
-		decodeRequestCommonPart(in, request, connOption);
+		inMes.decode(in);
 
-		bool withFilter;
-		util::String dbName(alloc);
-		int8_t property = 0;  
+		util::String& dbName = inMes.dbName_;
+		bool withFilter = inMes.withFilter_;
+		int8_t property = inMes.property_;  
 
-		decodeBooleanData(in, withFilter);
-		if (withFilter) {
-			decodeStringData<util::String>(in, dbName);
-			if (dbName.empty()) {
-				dbName = GS_PUBLIC;
-			}
-			in >> property;
-		}
 		TEST_PRINT("[RequestMesg]\n");
 		TEST_PRINT1("\twithFilter=%d\n", withFilter);
 		TEST_PRINT1("\tdbName=%s\n", dbName.c_str());
@@ -2003,6 +2090,12 @@ void GetDatabasesHandler::operator()(EventContext &ec, Event &ev) {
 			checkConnectedDatabaseName(connOption, dbName.c_str());
 		}
 
+		TransactionManager* txnMgr = transactionService_->getManager();
+
+		
+		util::LockGuard<util::Mutex> guard(
+			partitionList_->partition(request.fixed_.pId_).mutex());
+
 		if (strcmp(dbName.c_str(), GS_PUBLIC) == 0) {
 			getUserInfoList(ec, request, connOption.userName_.c_str(),
 				connOption.userType_, response.userInfoList_);
@@ -2015,11 +2108,21 @@ void GetDatabasesHandler::operator()(EventContext &ec, Event &ev) {
 					response.databaseInfoList_);
 			}
 			else {
-				getDatabaseInfoList(ec, request, dbName.c_str(),
-					connOption.userName_.c_str(), response.databaseInfoList_);
+				if (connOption.isLDAPAuthentication_ && txnMgr->isRoleMappingByGroup()) {
+					getDatabaseInfoList(ec, request, dbName.c_str(),
+						connOption.roleName_.c_str(), response.databaseInfoList_);
+				} else {
+					getDatabaseInfoList(ec, request, dbName.c_str(),
+						connOption.userName_.c_str(), response.databaseInfoList_);
+				}
 			}
 		}
-
+		if (request.optional_.get<Options::ACCEPTABLE_FEATURE_VERSION>() < StatementMessage::FEATURE_V4_5) {
+			if (connOption.isLDAPAuthentication_) {
+				GS_THROW_USER_ERROR(GS_ERROR_DS_CON_ACCESS_INVALID,
+					"Can not create database infomation list");
+			}
+		}
 		checkDatabaseInfoList(request.optional_.get<Options::ACCEPTABLE_FEATURE_VERSION>(), response.databaseInfoList_);
 
 		TEST_PRINT("[ResponseMesg]\n");
@@ -2029,9 +2132,12 @@ void GetDatabasesHandler::operator()(EventContext &ec, Event &ev) {
 			TEST_PRINT1("%s\n", response.databaseInfoList_[i]->dump().c_str());
 		}
 
+		OutMessage outMes(request.fixed_.cxtSrc_.stmtId_, TXN_STATEMENT_SUCCESS,
+			getReplyOption(alloc, request, response.compositeIndexInfos_, false),
+			&(response.databaseInfoList_));
 		replySuccess(ec, alloc, ev.getSenderND(), ev.getType(),
-			TXN_STATEMENT_SUCCESS, request, response, false);
-		
+			request, outMes, false);
+
 		TEST_PRINT("<<<GetDatabasesHandler>>> END\n");
 	}
 	catch (std::exception &e) {
@@ -2046,18 +2152,18 @@ void PutPrivilegeHandler::operator()(EventContext &ec, Event &ev) {
 	util::StackAllocator &alloc = ec.getAllocator();
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
-	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
 
+	ConnectionOption& connOption =
+		ev.getSenderND().getUserData<ConnectionOption>();
+	InMessage inMes(alloc, getRequestSource(ev), connOption);
+	Request& request = inMes.request_;
 	try {
-		ConnectionOption &connOption =
-				ev.getSenderND().getUserData<ConnectionOption>();
-
 		EventByteInStream in(ev.getInStream());
-		decodeRequestCommonPart(in, request, connOption);
+		inMes.decode(in);
 
-		DatabaseInfo dbInfo(alloc);
-		decodeDatabaseInfo(in, dbInfo, alloc);
+		DatabaseInfo& dbInfo = inMes.dbInfo_;
+
 		TEST_PRINT("[RequestMesg]\n");
 		TEST_PRINT1("dbInfo=%s\n", dbInfo.dump().c_str());
 
@@ -2076,6 +2182,10 @@ void PutPrivilegeHandler::operator()(EventContext &ec, Event &ev) {
 		checkPartitionIdForUsers(request.fixed_.pId_);
 		checkPrivilegeSize(dbInfo, 1); 
 		
+		
+		util::LockGuard<util::Mutex> guard(
+			partitionList_->partition(request.fixed_.pId_).mutex());
+
 		util::XArray<const util::XArray<uint8_t> *> logRecordList(alloc);
 		bool ackWait = false;
 
@@ -2102,15 +2212,17 @@ void PutPrivilegeHandler::operator()(EventContext &ec, Event &ev) {
 				alloc, request.fixed_.pId_,
 				TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
 
+		OutMessage outMes(request.fixed_.cxtSrc_.stmtId_, TXN_STATEMENT_SUCCESS,
+			getReplyOption(alloc, request, response.compositeIndexInfos_, false));
 		ackWait = executeReplication(
 				request, ec, alloc, ev.getSenderND(), txn,
 				ev.getType(), request.fixed_.cxtSrc_.stmtId_,
 				transactionManager_->getReplicationMode(), NULL, 0,
-				logRecordList.data(), logRecordList.size(), response);
+				logRecordList.data(), logRecordList.size(), &outMes);
 
 		replySuccess(ec, alloc, ev.getSenderND(), ev.getType(),
-			TXN_STATEMENT_SUCCESS, request, response, ackWait);
-		
+			request, outMes, ackWait);
+
 		TEST_PRINT("<<<PutPrivilegeHandler>>> END\n");
 
 	}
@@ -2142,18 +2254,17 @@ void DropPrivilegeHandler::operator()(EventContext &ec, Event &ev) {
 	util::StackAllocator &alloc = ec.getAllocator();
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
-	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
 
+	ConnectionOption& connOption =
+		ev.getSenderND().getUserData<ConnectionOption>();
+	InMessage inMes(alloc, getRequestSource(ev), connOption);
+	Request& request = inMes.request_;
 	try {
-		ConnectionOption &connOption =
-				ev.getSenderND().getUserData<ConnectionOption>();
-
 		EventByteInStream in(ev.getInStream());
-		decodeRequestCommonPart(in, request, connOption);
+		inMes.decode(in);
 
-		DatabaseInfo dbInfo(alloc);
-		decodeDatabaseInfo(in, dbInfo, alloc);
+		DatabaseInfo& dbInfo = inMes.dbInfo_;
 		TEST_PRINT("[RequestMesg]\n");
 		TEST_PRINT1("dbInfo=%s\n", dbInfo.dump().c_str());
 
@@ -2172,6 +2283,10 @@ void DropPrivilegeHandler::operator()(EventContext &ec, Event &ev) {
 		checkPartitionIdForUsers(request.fixed_.pId_);
 		checkPrivilegeSize(dbInfo, 1); 
 		checkDatabaseName(dbInfo.dbName_.c_str());
+
+		
+		util::LockGuard<util::Mutex> guard(
+			partitionList_->partition(request.fixed_.pId_).mutex());
 
 		util::XArray<const util::XArray<uint8_t> *> logRecordList(alloc);
 		bool ackWait = false;
@@ -2199,630 +2314,21 @@ void DropPrivilegeHandler::operator()(EventContext &ec, Event &ev) {
 				alloc, request.fixed_.pId_,
 				TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
 
-		response.existFlag_ = existFlag;
+		OutMessage outMes(request.fixed_.cxtSrc_.stmtId_, TXN_STATEMENT_SUCCESS,
+			getReplyOption(alloc, request, response.compositeIndexInfos_, false));
 		ackWait = executeReplication(
 				request, ec, alloc, ev.getSenderND(), txn,
 				ev.getType(), request.fixed_.cxtSrc_.stmtId_,
 				transactionManager_->getReplicationMode(), NULL, 0,
-				logRecordList.data(), logRecordList.size(), response);
+				logRecordList.data(), logRecordList.size(), &outMes);
 
 		replySuccess(ec, alloc, ev.getSenderND(), ev.getType(),
-			TXN_STATEMENT_SUCCESS, request, response, ackWait);
+			request, outMes, ackWait);
 
 		TEST_PRINT("<<<DropPrivilegeHandler>>> END\n");
 
 	}
 	catch (std::exception &e) {
 		handleError(ec, alloc, ev, request, e);
-	}
-}
-
-
-void LoginHandler::executeAuthenticationInternal(
-		EventContext &ec, util::StackAllocator &alloc,
-		TransactionManager::ContextSource &cxtSrc,
-		const char8_t *userName, const char8_t *digest, const char8_t *dbName,
-		UserType userType, int checkLevel, DatabaseId &dbId, RoleType &role) {
-	TEST_PRINT("executeAuthenticationInternal() S\n");
-
-	if (checkPublicDB(dbName)) {
-		dbId = GS_PUBLIC_DB_ID;
-		role = ALL;
-	}
-	else if (checkSystemDB(dbName)) {
-		dbId = GS_SYSTEM_DB_ID;
-	}
-	else {
-		dbId = UNDEF_DBID;
-	}
-
-	if ((checkLevel & 0x01) && (userType == Message::USER_NORMAL)) {
-		TEST_PRINT("executeAuthenticationInterval() (Ph1) S\n");
-
-		const util::StackAllocator::Scope scope(alloc);
-		
-		util::String query(alloc);
-		query.append("select count(*) where userName='");
-		query.append(userName);
-		query.append("' and digest='");
-		query.append(digest);
-		query.append("'");
-
-		DUQueryInOut option;
-		option.setForAgg(userName);
-		runWithTQL(ec, cxtSrc, GS_USERS, query.c_str(), &option);
-		if (option.count != 1) {
-			TEST_PRINT("count!=1(userName)\n");
-			GS_THROW_USER_ERROR(GS_ERROR_TXN_AUTH_FAILED,
-				"invalid user name or password (user name = " << userName
-															  << ")");
-		}
-		TEST_PRINT("executeAuthenticationInterval() (Ph1) E\n");
-	}
-	if (checkLevel & 0x02) {
-		TEST_PRINT("executeAuthenticationInterval() (Ph2) S\n");
-
-		const util::StackAllocator::Scope scope(alloc);
-		
-		util::String dbUserName(alloc);
-		dbUserName.append(dbName);
-		dbUserName.append(":");
-		if (userType == Message::USER_NORMAL) {
-			dbUserName.append(userName);
-		}
-		else {
-			dbUserName.append(
-				"admin");  
-		}
-
-		RowKeyData rowKey(alloc);
-		makeRowKey(dbUserName.c_str(), rowKey);
-		
-		{
-			DUGetInOut option;
-			option.setForDbId(dbName, userType);
-			runWithRowKey(ec, cxtSrc, GS_DATABASES, rowKey, &option);
-			dbId = option.dbId;
-			TEST_PRINT1("dbId=%d\n", dbId);
-		}
-		{
-			DUGetInOut option;
-			option.setForRole();
-			runWithRowKey(ec, cxtSrc, GS_DATABASES, rowKey, &option);
-			role = option.role;
-			TEST_PRINT1("role=%d\n", role);
-		}
-		TEST_PRINT("executeAuthenticationInterval() (Ph2) E\n");
-	}
-	if ((checkLevel & 0x02) && (userType == Message::USER_NORMAL)) {
-		TEST_PRINT("executeAuthenticationInterval() (Ph3) S\n");
-
-		const util::StackAllocator::Scope scope(alloc);
-
-		util::String dbUserName(alloc);
-		dbUserName.append(dbName);
-		dbUserName.append(":admin");
-
-		RowKeyData rowKey(alloc);
-		makeRowKey(dbUserName.c_str(), rowKey);
-
-		{
-			DUGetInOut option;
-			option.setForDbId(dbName, Message::USER_ADMIN);
-			runWithRowKey(ec, cxtSrc, GS_DATABASES, rowKey, &option);
-			dbId = option.dbId;
-			TEST_PRINT1("dbId=%d\n", dbId);
-		}
-		TEST_PRINT("executeAuthenticationInterval() (Ph3) E\n");
-	}
-	TEST_PRINT("executeAuthenticationInternal() E\n");
-}
-
-void LoginHandler::executeAuthentication(
-		EventContext &ec, Event &ev,
-		const NodeDescriptor &clientND, StatementId authStmtId,
-		const char8_t *userName, const char8_t *digest,
-		const char8_t *dbName, UserType userType) {
-	TEST_PRINT("executeAuthentication() S\n");
-	TEST_PRINT1("ev.pId=%d\n", ev.getPartitionId());
-
-	util::StackAllocator &alloc = ec.getAllocator();
-
-	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
-
-	AuthenticationId authId = 0;
-
-	AuthenticationContext &authContext =
-		transactionManager_->putAuth(ev.getPartitionId(),
-			authStmtId, clientND, emNow
-			, isNewSQL_
-			);
-	authId = authContext.getAuthenticationId();
-	TEST_PRINT1("authId=%d\n", authId);
-
-	Event authEvent(ec, AUTHENTICATION, 0 /*pId*/);
-	EventByteOutStream out = authEvent.getOutStream();
-	encodeAuthenticationAckPart(
-		out, GS_CLUSTER_MESSAGE_CURRENT_VERSION, authId, ev.getPartitionId());
-	TEST_PRINT1("userName=%s\n", userName);
-	TEST_PRINT1("digest=%s\n", digest);
-	TEST_PRINT1("dbName=%s\n", dbName);
-	TEST_PRINT1("userType=%d\n", userType);
-	encodeStringData(out, userName);
-	encodeStringData(out, digest);
-	encodeStringData(out, dbName);
-	char8_t byteData = userType;
-	out << byteData;
-
-	uint8_t isSQL = 0;
-	PartitionId pId = ev.getPartitionId();
-	if (isNewSQL_) {
-		isSQL = 1;
-	}
-	out << isSQL;
-	out << pId;
-
-	StatementMessage::OptionSet optionalRequest(alloc);
-	optionalRequest.set<StatementMessage::Options::ACCEPTABLE_FEATURE_VERSION>(StatementMessage::FEATURE_V4_3);
-	optionalRequest.encode(out);
-
-	NodeAddress nodeAddress = clusterManager_->getPartition0NodeAddr();
-	TEST_PRINT1("NodeAddress(TS) %s\n", nodeAddress.dump().c_str());
-	TEST_PRINT1("address =%s\n", nodeAddress.toString(false).c_str());
-	const NodeDescriptor &nd =
-		transactionService_->getEE()->getServerND(util::SocketAddress(
-			nodeAddress.toString(false).c_str(), nodeAddress.port_));
-
-	transactionService_->getEE()->send(authEvent, nd);
-	TEST_PRINT("executeAuthentication() E\n");
-}
-
-void AuthenticationHandler::operator()(EventContext &ec, Event &ev) {
-	TEST_PRINT("<<<AuthenticationHandler>>> START\n");
-
-	TXN_TRACE_HANDLER_CALLED(ev);
-
-	util::StackAllocator &alloc = ec.getAllocator();
-
-	AuthenticationAck request(ev.getPartitionId());
-
-	TransactionManager::ContextSource cxtSrc;
-
-	try {
-		EventByteInStream in(ev.getInStream());
-
-		util::String userName(alloc);
-		util::String digest(alloc);
-		util::String dbName(alloc);
-		char8_t byteData;
-		UserType userType;
-
-		decodeAuthenticationAck(in, request);
-		TEST_PRINT1("(authId=%d\n)", request.authId_);
-		TEST_PRINT1("(authPId=%d\n)", request.authPId_);
-		decodeStringData<util::String>(in, userName);
-		decodeStringData<util::String>(in, digest);
-		decodeStringData<util::String>(in, dbName);
-		in >> byteData;
-		userType = static_cast<UserType>(byteData);
-
-		char8_t isSQL;
-		in >> isSQL;
-
-		PartitionId pIdForNewSQL;
-		in >> pIdForNewSQL;
-		StatementMessage::OptionSet optionalRequest(alloc);
-		optionalRequest.decode(in);
-
-		TEST_PRINT1("userName=%s\n", userName.c_str());
-		TEST_PRINT1("digest=%s\n", digest.c_str());
-		TEST_PRINT1("dbName=%s\n", dbName.c_str());
-		TEST_PRINT1("userType=%d\n", userType);
-
-		clusterService_->checkVersion(request.clusterVer_);
-
-		const ClusterRole clusterRole = (CROLE_MASTER | CROLE_FOLLOWER);
-		const PartitionRoleType partitionRole = PROLE_ANY;
-		const PartitionStatus partitionStatus = PSTATE_ANY;
-		checkExecutable(
-			request.pId_, clusterRole, partitionRole, partitionStatus, partitionTable_);
-
-		checkPartitionIdForUsers(request.pId_);
-
-		DatabaseId dbId = UNDEF_DBID;
-		RoleType role = READ;
-
-		{
-			TEST_PRINT("LOGIN\n");
-			try {
-				if (checkPublicDB(dbName.c_str())) {
-					executeAuthenticationInternal(ec, alloc, cxtSrc,
-						userName.c_str(), digest.c_str(), dbName.c_str(),
-						userType, 1, dbId, role);  
-				} else {
-					executeAuthenticationInternal(ec, alloc,
-						cxtSrc, userName.c_str(), digest.c_str(),
-						dbName.c_str(), userType, 3, dbId, role);  
-				}
-				const int32_t featureVersion = optionalRequest.get<Options::ACCEPTABLE_FEATURE_VERSION>();
-				if ((featureVersion < StatementMessage::FEATURE_V4_3) && (role == READ)) {
-						GS_THROW_USER_ERROR(GS_ERROR_TXN_AUTH_FAILED,
-							"Unsupported feature requested "
-							"(requestedVersion=" << featureVersion << ")");
-				}
-			}
-			catch (std::exception &) {
-				dbId = UNDEF_DBID;
-			}
-
-			if (isSQL) {
-				NodeId nodeId = ClusterService::resolveSenderND(ev);
-				const NodeDescriptor &ND = sqlService_->getEE()->getServerND(nodeId);
-				request.pId_ = pIdForNewSQL;
-				replyAuthenticationAck(ec, alloc, ND, request, dbId, role, true);
-			}
-			else {
-				replyAuthenticationAck(ec, alloc, ev.getSenderND(), request, dbId, role);
-			}
-		}
-		TEST_PRINT("<<<AuthenticationHandler>>> END\n");
-	}
-	catch (std::exception &e) {
-		UTIL_TRACE_EXCEPTION(TRANSACTION_SERVICE, e,
-			"Failed to accept authentication "
-			"(nd="
-				<< ev.getSenderND() << ", pId=" << ev.getPartitionId()
-				<< ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
-	}
-}
-
-
-/*!
-	@brief Decodes AuthenticationAck
-*/
-void LoginHandler::decodeAuthenticationAck(
-		util::ByteStream<util::ArrayInStream> &in, AuthenticationAck &ack) {
-
-
-	try {
-		in >> ack.clusterVer_;
-		in >> ack.authId_;
-		in >> ack.authPId_;
-	}
-	catch (std::exception &e) {
-		TXN_RETHROW_DECODE_ERROR(e, "");
-	}
-}
-
-/*!
-	@brief Encodes AuthenticationAck
-*/
-void LoginHandler::encodeAuthenticationAckPart(
-		EventByteOutStream &out, ClusterVersionId clusterVer,
-		AuthenticationId authId, PartitionId authPId) {
-
-
-	try {
-		out << clusterVer;
-		out << authId;
-		out << authPId;
-	}
-	catch (std::exception &e) {
-		TXN_RETHROW_ENCODE_ERROR(e, "");
-	}
-}
-
-void AuthenticationAckHandler::replySuccess(
-		EventContext &ec, util::StackAllocator &alloc,
-		StatementExecStatus status, const Request &request,
-		const AuthenticationContext &authContext)  
-{
-#define TXN_TRACE_REPLY_SUCCESS_ERROR(replContext)     \
-	"(nd=" << authContext.getConnectionND()            \
-		   << ", pId=" << authContext.getPartitionId() \
-		   << ", stmtId=" << authContext.getStatementId() << ")"
-
-	TEST_PRINT("replySuccess() START\n");
-	util::StackAllocator::Scope scope(alloc);
-
-	if (authContext.getConnectionND().isEmpty()) {
-		return;
-	}
-
-	TEST_PRINT1("pId=%d\n", authContext.getPartitionId());
-	TEST_PRINT1("stmtId=%d\n", authContext.getStatementId());
-	try {
-		Response response(alloc);
-		response.connectionOption_ = &(authContext.getConnectionND().getUserData<ConnectionOption>());
-
-		Event ev(ec, LOGIN, authContext.getPartitionId());
-		setSuccessReply(alloc, ev, authContext.getStatementId(), status, response,
-			request);  
-
-		if (!authContext.isSQLService()) {
-			ec.getEngine().send(ev, authContext.getConnectionND());
-		}
-		else {
-			sqlService_->getEE()->send(ev, authContext.getConnectionND());
-		}
-
-		TEST_PRINT("replySuccess() END\n");
-		GS_TRACE_INFO(REPLICATION, GS_TRACE_TXN_REPLY_CLIENT,
-			TXN_TRACE_REPLY_SUCCESS_ERROR(replContext));
-	}
-	catch (EncodeDecodeException &e) {
-		GS_RETHROW_USER_ERROR(e, TXN_TRACE_REPLY_SUCCESS_ERROR(replContext));
-	}
-	catch (std::exception &e) {
-		GS_RETHROW_USER_OR_SYSTEM(
-			e, TXN_TRACE_REPLY_SUCCESS_ERROR(replContext));
-	}
-
-#undef TXN_TRACE_REPLY_SUCCESS_ERROR
-}
-
-void AuthenticationHandler::replyAuthenticationAck(
-		EventContext &ec, util::StackAllocator &alloc,
-		const NodeDescriptor &ND, const AuthenticationAck &request,
-		DatabaseId dbId, RoleType role, bool isNewSQL) {
-#define TXN_TRACE_REPLY_ACK_ERROR(request, ND)        \
-	"(owner=" << ND << ", authId=" << request.authId_ \
-			  << ", pId=" << request.pId_ << ")"
-
-	TEST_PRINT("replyAuthenticationAck() START\n");
-	util::StackAllocator::Scope scope(alloc);
-
-	util::String dbName(alloc);  
-	util::String privilege(alloc);
-	try {
-		TEST_PRINT1("request.pId=%d\n", request.pId_);
-		TEST_PRINT1("request.authPId=%d\n", request.authPId_);
-		Event authAckEvent(ec, AUTHENTICATION_ACK, request.authPId_);
-		EventByteOutStream out = authAckEvent.getOutStream();
-		encodeAuthenticationAckPart(out, request.clusterVer_, request.authId_,
-			request.authPId_);  
-		int32_t num = 0;
-		if (dbId == UNDEF_DBID) {
-			out << num;
-		}
-		else {
-			num = 1;
-			out << num;
-			out << dbName;  
-			out << dbId;
-			if (role == ALL) {
-				privilege.append("ALL");
-			} else {
-				privilege.append("READ");
-			}
-			out << privilege;
-		}
-		TEST_PRINT1("num=%d\n", num);
-		TEST_PRINT1("dbId=%d\n", dbId);
-		TEST_PRINT1("role=%d\n", role);
-		TEST_PRINT1("privilege=%s\n", privilege.c_str());
-		
-		if (isNewSQL) {
-			sqlService_->getEE()->send(authAckEvent, ND);
-		}
-		else {
-			ec.getEngine().send(authAckEvent, ND);
-		}
-
-		TEST_PRINT("replyAuthenticationAck() END\n");
-		GS_TRACE_INFO(REPLICATION, GS_TRACE_TXN_SEND_ACK,
-			TXN_TRACE_REPLY_ACK_ERROR(request, ND));
-	}
-	catch (EncodeDecodeException &e) {
-		TXN_RETHROW_ENCODE_ERROR(e, TXN_TRACE_REPLY_ACK_ERROR(request, ND));
-	}
-	catch (std::exception &e) {
-		GS_RETHROW_USER_OR_SYSTEM(e, TXN_TRACE_REPLY_ACK_ERROR(request, ND));
-	}
-
-#undef TXN_TRACE_REPLY_ACK_ERROR
-}
-
-/*!
-	@brief Handles error in authentication
-*/
-void AuthenticationAckHandler::authHandleError(
-		EventContext &ec, AuthenticationAck &ack, std::exception &e) {
-	try {
-		TEST_PRINT("authHandleError() S\n");
-		AuthenticationContext &authContext = transactionManager_->getAuth(
-			ack.pId_, ack.authId_);
-
-		Event ev(ec, LOGIN, ack.pId_);
-
-		try {
-			throw;
-		}
-		catch (DenyException &e) {
-			setErrorReply(ev, authContext.getStatementId(), TXN_STATEMENT_DENY,
-				e,
-				authContext.getConnectionND());  
-		}
-		catch (std::exception &e) {
-			setErrorReply(ev, authContext.getStatementId(), TXN_STATEMENT_ERROR,
-				e,
-				authContext.getConnectionND());  
-		}
-
-		if (!authContext.getConnectionND().isEmpty()) {
-			TEST_PRINT("send\n");
-			if (!authContext.isSQLService()) {
-				ec.getEngine().send(ev, authContext.getConnectionND());
-			}
-			else {
-				sqlService_->getEE()->send(ev, authContext.getConnectionND());
-			}
-		}
-
-		transactionManager_->removeAuth(ack.pId_, ack.authId_);
-		TEST_PRINT("authHandleError() E\n");
-	}
-	catch (ContextNotFoundException &) {
-		TEST_PRINT("authHandleError() ContextNotFoundException\n");
-	}
-	catch (std::exception &) {
-	}
-}
-
-/*!
-	@brief Handler Operator
-*/
-void AuthenticationAckHandler::operator()(EventContext &ec, Event &ev) {
-	TXN_TRACE_HANDLER_CALLED(ev);
-	TEST_PRINT("<<<AuthenticationAckHandler>>> START\n");
-
-	util::StackAllocator &alloc = ec.getAllocator();
-	const util::DateTime now = ec.getHandlerStartTime();
-	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
-
-	AuthenticationAck ack(ev.getPartitionId());
-	Request request(alloc, getRequestSource(ev));
-
-	try {
-		int32_t num;
-		DatabaseId dbId = UNDEF_DBID;
-		char8_t byteData;
-		RoleType role = ALL;
-
-		EventByteInStream in(ev.getInStream());
-
-		util::String dbName(alloc);
-		util::String privilege(alloc);
-		
-		decodeAuthenticationAck(in, ack);
-		TEST_PRINT1("(authId=%d\n)", ack.authId_);
-		TEST_PRINT1("(authPId=%d\n)", ack.authPId_);
-		in >> num;
-		if (num > 0) {
-			decodeStringData<util::String>(in, dbName);
-			in >> dbId;
-			{
-				decodeStringData<util::String>(in, privilege);
-				if (strcmp(privilege.c_str(), "ALL") == 0) {
-					role = ALL;
-				} else {
-					role = READ;
-				}
-			}
-		}
-		else {
-			GS_THROW_USER_ERROR(GS_ERROR_TXN_AUTH_FAILED, "");
-		}
-		TEST_PRINT1("dbId=%d\n", dbId);
-		TEST_PRINT1("role=%d\n", role);
-
-		clusterService_->checkVersion(ack.clusterVer_);
-
-		const ClusterRole clusterRole = (CROLE_MASTER | CROLE_FOLLOWER);
-		const PartitionRoleType partitionRole = PROLE_ANY;
-		const PartitionStatus partitionStatus = PSTATE_ANY;
-		checkExecutable(
-				request.fixed_.pId_, clusterRole, partitionRole, partitionStatus, partitionTable_);
-
-		AuthenticationContext &authContext = transactionManager_->getAuth(
-				ack.pId_, ack.authId_);
-
-		ConnectionOption &connOption =
-				authContext.getConnectionND().getUserData<ConnectionOption>();
-		connOption.setAfterAuth(dbId, emNow, role);
-
-		replySuccess(
-				ec, alloc, TXN_STATEMENT_SUCCESS, request,
-				authContext);  
-		transactionManager_->removeAuth(ack.pId_, ack.authId_);
-
-		TEST_PRINT("<<<AuthenticationAckHandler>>> END\n");
-		TEST_PRINT("[A3/5/7] E\n");
-	}
-	catch (ContextNotFoundException &e) {
-		UTIL_TRACE_EXCEPTION_INFO(TRANSACTION_SERVICE, e,
-			"Authentication timed out (nd="
-				<< ev.getSenderND() << ", pId=" << ev.getPartitionId()
-				<< ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
-	}
-	catch (std::exception &e) {
-		authHandleError(ec, ack, e);
-	}
-}
-
-
-/*!
-	@brief Checks authentication timeout
-*/
-void CheckTimeoutHandler::checkAuthenticationTimeout(EventContext &ec) {
-
-	util::StackAllocator &alloc = ec.getAllocator();
-	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
-	const PartitionGroupId pgId = ec.getWorkerId();
-
-	util::StackAllocator::Scope scope(alloc);
-
-	size_t timeoutResourceCount = 0;
-
-	try {
-		util::XArray<PartitionId> pIds(alloc);
-		util::XArray<ReplicationId> timeoutResourceIds(alloc);
-
-		transactionManager_->getAuthenticationTimeoutContextId(
-			pgId, emNow, pIds, timeoutResourceIds);
-		timeoutResourceCount = timeoutResourceIds.size();
-
-		for (size_t i = 0; i < timeoutResourceIds.size(); i++) {
-			try {
-				AuthenticationContext &authContext =
-					transactionManager_->getAuth(
-						pIds[i], timeoutResourceIds[i]);
-
-				try {
-					TXN_THROW_DENY_ERROR(
-						GS_ERROR_TXN_AUTHENTICATION_TIMEOUT, "");
-				}
-				catch (std::exception &e) {
-					Event ev(ec, LOGIN, authContext.getPartitionId());
-					setErrorReply(ev, authContext.getStatementId(),
-						TXN_STATEMENT_DENY, e,
-						authContext.getConnectionND());  
-
-					if (!authContext.getConnectionND().isEmpty()) {
-						TEST_PRINT("send\n");
-						if (!authContext.isSQLService()) {
-							ec.getEngine().send(
-								ev, authContext.getConnectionND());
-						}
-						else {
-							sqlService_->getEE()->send(
-								ev, authContext.getConnectionND());
-						}
-					}
-				}
-
-				transactionManager_->removeAuth(
-					pIds[i], timeoutResourceIds[i]);
-			}
-			catch (ContextNotFoundException &e) {
-				UTIL_TRACE_EXCEPTION_WARNING(TRANSACTION_SERVICE, e,
-					"(pId=" << pIds[i]
-							<< ", contextId=" << timeoutResourceIds[i]
-							<< ", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
-			}
-		}
-
-		if (timeoutResourceCount > 0) {
-			TEST_PRINT1("TIMEOUT count=%d\n", timeoutResourceCount);
-			GS_TRACE_WARNING(AUTHENTICATION_TIMEOUT,
-				GS_TRACE_TXN_AUTHENTICATION_TIMEOUT,
-				"(pgId=" << pgId << ", timeoutResourceCount="
-						 << timeoutResourceCount << ")");
-		}
-	}
-	catch (std::exception &e) {
-		GS_RETHROW_USER_OR_SYSTEM(e,
-			"(pId=" << pgId << ", timeoutResourceCount=" << timeoutResourceCount
-					<< ")");
 	}
 }

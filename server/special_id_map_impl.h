@@ -27,7 +27,7 @@
 	@brief Return ID name
 */
 Expr *TqlSpecialId::operator()(
-	ExprList &, TransactionContext &txn, ObjectManager &) {
+	ExprList &, TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &) {
 	return Expr::newStringValue(name_, txn);
 }
 

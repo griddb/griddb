@@ -23,13 +23,10 @@
 #include "util/type.h"
 #include "util/container.h"
 #include "TrTree.h"
-#include "collection.h"
-#include "data_store.h"
 #include "data_type.h"
 #include "gis_geometry.h"
 #include "gs_error.h"
 #include "qp_def.h"
-#include "time_series.h"
 #include "value.h"
 #include <iostream>
 
@@ -46,21 +43,21 @@
  * @note returns void?
  */
 int32_t RtreeMap::initialize(TransactionContext &txn, ColumnType columnType,
-	ColumnId columnId, const AllocateStrategy &metaAllocateStrategy,
+	ColumnId columnId, AllocateStrategy &metaAllocateStrategy,
 	bool isUnique) {
 	if (columnType != COLUMN_TYPE_GEOMETRY) {
 		GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_CANNOT_MAKE_INDEX,
 			"Cannot use RtreeMap with non-geometry column");
 	}
 	rtreeMapImage_ = BaseObject::allocate<RtreeMapImage>(sizeof(RtreeMapImage),
-		metaAllocateStrategy, getBaseOId(), OBJECT_TYPE_RTREE_MAP);
+		getBaseOId(), OBJECT_TYPE_RTREE_MAP);
 
 	rtreeMapImage_->columnId_ = columnId;
 	rtreeMapImage_->isUnique_ = isUnique;
 	rtreeMapImage_->size_ = 0;
 	rtreeMapImage_->offset_ = 0;
 
-	rtreeMapImage_->oId_ = TrIndex_new(txn, *getObjectManager());
+	rtreeMapImage_->oId_ = TrIndex_new(txn, *getObjectManager(), allocateStrategy_);
 
 	return 0;
 }
@@ -77,7 +74,7 @@ bool RtreeMap::finalize(TransactionContext &txn) {
 
 	uint64_t removeNum = NUM_PER_EXEC;
 	if (rtreeMapImage_->oId_ != UNDEF_OID) {
-		TrIndex_destroy(txn, *getObjectManager(), rtreeMapImage_->oId_, removeNum);
+		TrIndex_destroy(txn, *getObjectManager(), allocateStrategy_, rtreeMapImage_->oId_, removeNum);
 		if (removeNum > 0) {
 			rtreeMapImage_->oId_ = UNDEF_OID;
 			rtreeMapImage_->size_ = 0;
@@ -131,7 +128,7 @@ int32_t RtreeMap::insert(TransactionContext &txn, const void *key, OId oId) {
 
 	TrRectTag r;
 	r = getGeometry(txn, key)->getBoundingRect();
-	TrIndex_insert(txn, *getObjectManager(), rtreeMapImage_->oId_, &r, oId);
+	TrIndex_insert(txn, *getObjectManager(), allocateStrategy_, rtreeMapImage_->oId_, &r, oId);
 	++rtreeMapImage_
 		  ->size_;  
 
@@ -152,7 +149,7 @@ int32_t RtreeMap::remove(TransactionContext &txn, const void *key, OId oId) {
 
 	TrRectTag r;
 	r = getGeometry(txn, key)->getBoundingRect();
-	if (TrIndex_delete_cmp(txn, *getObjectManager(), rtreeMapImage_->oId_, &r,
+	if (TrIndex_delete_cmp(txn, *getObjectManager(), allocateStrategy_, rtreeMapImage_->oId_, &r,
 			oIdCmpCallback, &oId)) {
 		--rtreeMapImage_->size_;  
 	}
@@ -176,9 +173,9 @@ int32_t RtreeMap::update(
 
 	TrRectTag r;
 	r = getGeometry(txn, key)->getBoundingRect();
-	TrIndex_delete_cmp(txn, *getObjectManager(), rtreeMapImage_->oId_, &r,
+	TrIndex_delete_cmp(txn, *getObjectManager(), allocateStrategy_, rtreeMapImage_->oId_, &r,
 		oIdCmpCallback, &oId);
-	TrIndex_insert(txn, *getObjectManager(), rtreeMapImage_->oId_, &r, newOId);
+	TrIndex_insert(txn, *getObjectManager(), allocateStrategy_, rtreeMapImage_->oId_, &r, newOId);
 
 	return 0;
 }
@@ -201,7 +198,7 @@ int32_t RtreeMap::getAll(
 	arg.size = 0;
 
 	TrIndex_all(
-		txn, *getObjectManager(), rtreeMapImage_->oId_, hitAllCallback, &arg);
+		txn, *getObjectManager(), allocateStrategy_, rtreeMapImage_->oId_, hitAllCallback, &arg);
 
 	return 0;
 }
@@ -226,7 +223,8 @@ int32_t RtreeMap::search(
 	arg.size = UINT64_MAX;  
 	arg.oidList = NULL;
 	arg.oneOId = UNDEF_OID;
-	TrIndex_search(txn, *getObjectManager(), rtreeMapImage_->oId_,
+
+	TrIndex_search(txn, *getObjectManager(), allocateStrategy_, rtreeMapImage_->oId_,
 		checkCallback, &r, hitIntersectCallback, &arg);
 	oId = arg.oneOId;
 	return 0;
@@ -248,6 +246,7 @@ void RtreeMap::search(TransactionContext &txn, RtreeMap::SearchContext &sc,
 		static_cast<SearchContext::GeomeryCondition *>(
 			const_cast<void *>(cond->value_));
 	if (geomCond->valid_) {
+
 		getAll(txn, sc.getLimit(), oidList);
 	}
 	else {
@@ -258,7 +257,7 @@ void RtreeMap::search(TransactionContext &txn, RtreeMap::SearchContext &sc,
 			arg.limit = static_cast<ResultSize>(sc.getLimit());
 			arg.oidList = &oidList;
 			arg.size = 0;
-			TrIndex_search(txn, *getObjectManager(), rtreeMapImage_->oId_,
+			TrIndex_search(txn, *getObjectManager(), allocateStrategy_, rtreeMapImage_->oId_,
 				checkCallback, arg.rect, hitIntersectCallback, &arg);
 			break;
 		}
@@ -268,7 +267,7 @@ void RtreeMap::search(TransactionContext &txn, RtreeMap::SearchContext &sc,
 			arg.limit = static_cast<ResultSize>(sc.getLimit());
 			arg.oidList = &oidList;
 			arg.size = 0;
-			TrIndex_search(txn, *getObjectManager(), rtreeMapImage_->oId_,
+			TrIndex_search(txn, *getObjectManager(), allocateStrategy_, rtreeMapImage_->oId_,
 				checkCallback, arg.rect, hitIncludeCallback, &arg);
 			break;
 		}
@@ -279,7 +278,7 @@ void RtreeMap::search(TransactionContext &txn, RtreeMap::SearchContext &sc,
 			arg.limit = static_cast<ResultSize>(sc.getLimit());
 			arg.oidList = &oidList;
 			arg.size = 0;
-			TrIndex_search(txn, *getObjectManager(), rtreeMapImage_->oId_,
+			TrIndex_search(txn, *getObjectManager(), allocateStrategy_, rtreeMapImage_->oId_,
 				checkCallback, arg.rect1, hitDifferentialCallback, &arg);
 			break;
 		}
@@ -289,7 +288,7 @@ void RtreeMap::search(TransactionContext &txn, RtreeMap::SearchContext &sc,
 			arg.limit = static_cast<ResultSize>(sc.getLimit());
 			arg.oidList = &oidList;
 			arg.size = 0;
-			TrIndex_search_quad(txn, *getObjectManager(), rtreeMapImage_->oId_,
+			TrIndex_search_quad(txn, *getObjectManager(), allocateStrategy_, rtreeMapImage_->oId_,
 				arg.pkey, hitQsfIntersectCallback, &arg);
 			break;
 		}

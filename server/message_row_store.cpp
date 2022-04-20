@@ -19,17 +19,15 @@
     @brief Implementation of MessageRowStore
 */
 
+#include "data_store_v4.h"
 #include "message_row_store.h"
-#include "data_store.h"
 #include "value.h"
 #include "gis_geometry.h"
 #include <algorithm>
 
 
-int g_nullTestCounter = 0;
-
-MessageRowStore::MessageRowStore(const DataStoreValueLimitConfig &dsValueLimitConfig, const ColumnInfo *columnInfoList, uint32_t columnCount) :
-		dsValueLimitConfig_(dsValueLimitConfig),
+MessageRowStore::MessageRowStore(const DataStoreConfig &dsConfig, const ColumnInfo *columnInfoList, uint32_t columnCount) :
+		dsConfig_(dsConfig),
 		columnInfoList_(columnInfoList),
 		columnCount_(columnCount) {
 	if (columnCount <= 0) {
@@ -299,16 +297,15 @@ MessageRowStore::StreamResetter<S>::~StreamResetter() {
 	}
 }
 
-
 InputMessageRowStore::InputMessageRowStore(
-		const DataStoreValueLimitConfig &dsValueLimitConfig, 
+		const DataStoreConfig &dsConfig,
 		const ColumnInfo *columnInfoList, uint32_t columnCount,
-		void *data, uint32_t size, uint64_t rowCount, uint32_t rowFixedDataSize,
+		void *data, uint32_t size, uint64_t rowCount, uint32_t fixedRowSize,
 		bool validateOnConstruct) :
-		MessageRowStore(dsValueLimitConfig, columnInfoList, columnCount),
+		MessageRowStore(dsConfig, columnInfoList, columnCount),
 		rowCount_(rowCount), rowIdIncluded_(false),
 		rowIdSize_(rowIdIncluded_ ? sizeof(RowId) : 0),
-		varDataIn_(getVarDataInput(data, size, rowCount, (rowIdIncluded_ ? sizeof(RowId) : 0) + rowFixedDataSize)),
+		varDataIn_(getVarDataInput(data, size, rowCount, (rowIdIncluded_ ? sizeof(RowId) : 0) + fixedRowSize)),
 		fixedDataIn_(util::ByteStream<util::ArrayInStream>(util::ArrayInStream(
 				data, size - varDataIn_.base().remaining()))),
 		varData_(static_cast<uint8_t*>(data) + fixedDataIn_.base().remaining()),
@@ -339,11 +336,11 @@ InputMessageRowStore::InputMessageRowStore(
 }
 
 InputMessageRowStore::InputMessageRowStore(
-		const DataStoreValueLimitConfig &dsValueLimitConfig, 
+		const DataStoreConfig &dsConfig,
 		const ColumnInfo *columnInfoList, uint32_t columnCount,
 		void *fixedData, uint32_t fixedDataSize, void *varData, uint32_t varDataSize, uint64_t rowCount, bool rowIdIncluded,
 		bool validateOnConstruct) :
-		MessageRowStore(dsValueLimitConfig, columnInfoList, columnCount),
+		MessageRowStore(dsConfig, columnInfoList, columnCount),
 		rowCount_(rowCount), rowIdIncluded_(rowIdIncluded),
 		rowIdSize_(rowIdIncluded_ ? sizeof(RowId) : 0),
 		varDataIn_(util::ByteStream<util::ArrayInStream>(util::ArrayInStream(varData, varDataSize))),
@@ -683,7 +680,7 @@ void InputMessageRowStore::moveVarData(const ColumnInfo &info,
 	@brief Validate current Row
 */
 void InputMessageRowStore::validate() {
-	uint64_t varidateVarSize = 0, totalVarSize = 0;
+	uint64_t totalVarSize = 0;
 
 	if (getVariableColumnNum() == 0) {
 		totalVarSize = 0;
@@ -706,139 +703,162 @@ void InputMessageRowStore::validate() {
 		totalVarSize = varDataIn_.base().position() - currentVarPos;
 		position(currentRowPos);
 	}
-	for (ColumnId id = 0; id < getColumnCount(); id++) {
-
-		const ColumnInfo &columnInfo =  getColumnInfo(id);
-		const void *data; 
-		uint32_t size;
-		uint32_t varidateVarColumnSize = 0;
-		if (columnInfo.isNotNull()){
-			if (RowNullBits::isNullValue(getNullsAddr(), id)) {
-				GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Null value of Column[" << id << "] is not allowed");
-			}
-		}
-		if (columnInfo.isArray()){
-			uint32_t totalSize = getTotalArraySize(id);
-			if (totalSize > dsValueLimitConfig_.getLimitBigSize()) {
-				GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Size of Column[" << id << "] exceeds maximum size : " << totalSize);
-			}
-
-			uint32_t elementNum = getArrayLength(id);
-			uint32_t elementSize = FixedSizeOfColumnType[columnInfo.getSimpleColumnType()];
-			if (elementNum > dsValueLimitConfig_.getLimitArrayNum()){
-				GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Array length of Column[" << id << "] exceeds maximum size : " << elementNum);
-			}
-			switch (columnInfo.getColumnType()) {
-			case COLUMN_TYPE_STRING_ARRAY :
-				{
-					for (uint32_t nth = 0; nth < elementNum; nth++) {
-						getArrayElement(id, nth , data, size);
-						if (size > dsValueLimitConfig_.getLimitSmallSize()) {
-							GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Size of element[" << nth << "] of Column[" << id << "] exceeds maximum size");
-						}
-						varidateVarColumnSize += ValueProcessor::getEncodedVarSize(size) + size;
-					}
-				}
-				break;
-			case COLUMN_TYPE_TIMESTAMP_ARRAY :
-				{
-					for (uint32_t nth = 0; nth < elementNum; nth++) {
-						getArrayElement(id, nth , data, size);
-						Timestamp val = *reinterpret_cast<const Timestamp*>(data);
-						if (TRIM_MILLISECONDS) {
-							val = (val/1000)*1000;
-						}
-						if (!ValueProcessor::validateTimestamp(val)) {
-							GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Timestamp of Column[" << id << "] out of range (val=" << val << ")");
-						}
-					}
-				}
-				varidateVarColumnSize += elementNum * elementSize;
-				break;
-			default:
-				varidateVarColumnSize += elementNum * elementSize;
-				break;
-			}
-			varidateVarColumnSize += ValueProcessor::getEncodedVarSize(elementNum);
-			if (varidateVarColumnSize != totalSize) {
-				GS_THROW_USER_ERROR(GS_ERROR_DS_INPUT_MESSAGE_INVALID, "Size of Column[" << id << "] is invalid : message data may be broken");
-			}
-			varidateVarColumnSize += ValueProcessor::getEncodedVarSize(totalSize);
-		} else {
-			switch (columnInfo.getColumnType()) {
-			case COLUMN_TYPE_STRING :
-				{
-					getField(id, data, size);
-					if (size > dsValueLimitConfig_.getLimitSmallSize()) {
-						GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Size of Column[" << id << "] exceeds maximum size : " << size);
-					}
-					varidateVarColumnSize += ValueProcessor::getEncodedVarSize(size) + size;
-				}
-				break;
-			case COLUMN_TYPE_GEOMETRY :
-				{
-					getField(id, data, size);
-					if (size > dsValueLimitConfig_.getLimitSmallSize()) {
-						GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Size of Column[" << id << "] exceeds maximum size : " << size);
-					}
-					if (!RowNullBits::isNullValue(getNullsAddr(), id)) {
-						int16_t typex = 0;
-						BinaryObject tmpVariant(const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(data)));
-						bool isEmpty = Geometry::deserializeHeader(tmpVariant.data(), tmpVariant.size(), typex);
-						
-						if (typex == Geometry::QUADRATICSURFACE){
-							GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "QUADRATICSURFACE value of Column[" << id << "] is not supported");
-						}
-						if (isEmpty) {
-							GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Empty value of Column[" << id << "] is not supported");
-						}
-					}
-					varidateVarColumnSize += ValueProcessor::getEncodedVarSize(size) + size;
-				}
-				break;
-			case COLUMN_TYPE_TIMESTAMP :
-				{
-					getField(id, data, size);
-					Timestamp val = *reinterpret_cast<const Timestamp*>(data);
-					if (TRIM_MILLISECONDS) {
-						val = (val/1000)*1000;
-					}
-					if (!ValueProcessor::validateTimestamp(val)) {
-						GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Timestamp of Column[" << id << "] out of range (val=" << val << ")");
-					}
-				}
-				break;
-			case COLUMN_TYPE_BLOB:
-				{
-					getField(id, data, size);
-					if (size > dsValueLimitConfig_.getLimitBigSize()) {
-						GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Size of Column[" << id << "] exceeds maximum size : " << size);
-					}
-					varidateVarColumnSize += ValueProcessor::getEncodedVarSize(size) + size;
-				}
-				break;
-			default:
-				break;
-			}
-		}
-		varidateVarSize += varidateVarColumnSize;
-	}
-	if (getVariableColumnNum() != 0) {
-		varidateVarSize += ValueProcessor::getEncodedVarSize(getVariableColumnNum());
-	}
+	uint64_t varidateVarSize = validateColumnSet();
 	if (varidateVarSize != totalVarSize) {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_INPUT_MESSAGE_INVALID, "Size of variable data is invalid : message data may be broken");
 	}
 }
 
+uint64_t InputMessageRowStore::validateColumnSet() {
+	uint64_t varidateVarSize = 0;
+
+	for (ColumnId id = 0; id < getColumnCount(); id++) {
+
+		const ColumnInfo& columnInfo = getColumnInfo(id);
+		if (columnInfo.isNotNull()) {
+			if (RowNullBits::isNullValue(getNullsAddr(), id)) {
+				GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Null value of Column[" << id << "] is not allowed");
+			}
+		}
+		if (columnInfo.isArray()) {
+			varidateVarSize += validateArrayColumn(id, columnInfo);
+		}
+		else {
+			varidateVarSize += validateSimpleColumn(id, columnInfo);
+		}
+	}
+	if (getVariableColumnNum() != 0) {
+		varidateVarSize += ValueProcessor::getEncodedVarSize(getVariableColumnNum());
+	}
+	return varidateVarSize;
+}
+
+uint64_t InputMessageRowStore::validateArrayColumn(ColumnId id, const ColumnInfo& columnInfo) {
+	uint64_t varidateVarSize = 0;
+	const void* data;
+	uint32_t size;
+	uint32_t varidateVarColumnSize = 0;
+	uint32_t totalSize = getTotalArraySize(id);
+	if (totalSize > dsConfig_.getLimitBigSize()) {
+		GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Size of Column[" << id << "] exceeds maximum size : " << totalSize);
+	}
+
+	uint32_t elementNum = getArrayLength(id);
+	uint32_t elementSize = FixedSizeOfColumnType[columnInfo.getSimpleColumnType()];
+	if (elementNum > dsConfig_.getLimitArrayNum()){
+		GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Array length of Column[" << id << "] exceeds maximum size : " << elementNum);
+	}
+	switch (columnInfo.getColumnType()) {
+	case COLUMN_TYPE_STRING_ARRAY:
+	{
+		for (uint32_t nth = 0; nth < elementNum; nth++) {
+			getArrayElement(id, nth, data, size);
+			if (size > dsConfig_.getLimitSmallSize()) {
+				GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Size of element[" << nth << "] of Column[" << id << "] exceeds maximum size");
+			}
+			varidateVarColumnSize += ValueProcessor::getEncodedVarSize(size) + size;
+		}
+	}
+	break;
+	case COLUMN_TYPE_TIMESTAMP_ARRAY:
+	{
+		for (uint32_t nth = 0; nth < elementNum; nth++) {
+			getArrayElement(id, nth, data, size);
+			Timestamp val = *reinterpret_cast<const Timestamp*>(data);
+			if (TRIM_MILLISECONDS) {
+				val = (val/1000)*1000;
+			}
+			if (!ValueProcessor::validateTimestamp(val)) {
+				GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Timestamp of Column[" << id << "] out of range (val=" << val << ")");
+			}
+		}
+	}
+	varidateVarColumnSize += elementNum * elementSize;
+	break;
+	default:
+		varidateVarColumnSize += elementNum * elementSize;
+		break;
+	}
+	varidateVarColumnSize += ValueProcessor::getEncodedVarSize(elementNum);
+	if (varidateVarColumnSize != totalSize) {
+		GS_THROW_USER_ERROR(GS_ERROR_DS_INPUT_MESSAGE_INVALID, "Size of Column[" << id << "] is invalid : message data may be broken");
+	}
+	varidateVarColumnSize += ValueProcessor::getEncodedVarSize(totalSize);
+	varidateVarSize += varidateVarColumnSize;
+	return varidateVarSize;
+}
+
+uint64_t InputMessageRowStore::validateSimpleColumn(ColumnId id, const ColumnInfo& columnInfo) {
+	uint64_t varidateVarSize = 0;
+	const void* data;
+	uint32_t size;
+	uint32_t varidateVarColumnSize = 0;
+	switch (columnInfo.getColumnType()) {
+	case COLUMN_TYPE_STRING :
+	{
+		getField(id, data, size);
+		if (size > dsConfig_.getLimitSmallSize()) {
+			GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Size of Column[" << id << "] exceeds maximum size : " << size);
+		}
+		varidateVarColumnSize += ValueProcessor::getEncodedVarSize(size) + size;
+	}
+	break;
+	case COLUMN_TYPE_GEOMETRY:
+	{
+		getField(id, data, size);
+		if (size > dsConfig_.getLimitSmallSize()) {
+			GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Size of Column[" << id << "] exceeds maximum size : " << size);
+		}
+		if (!RowNullBits::isNullValue(getNullsAddr(), id)) {
+			int16_t typex = 0;
+			BinaryObject tmpVariant(const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(data)));
+			bool isEmpty = Geometry::deserializeHeader(tmpVariant.data(), tmpVariant.size(), typex);
+			
+			if (typex == Geometry::QUADRATICSURFACE){
+				GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "QUADRATICSURFACE value of Column[" << id << "] is not supported");
+			}
+			if (isEmpty) {
+				GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Empty value of Column[" << id << "] is not supported");
+			}
+		}
+		varidateVarColumnSize += ValueProcessor::getEncodedVarSize(size) + size;
+	}
+	break;
+	case COLUMN_TYPE_TIMESTAMP:
+	{
+		getField(id, data, size);
+		Timestamp val = *reinterpret_cast<const Timestamp*>(data);
+		if (TRIM_MILLISECONDS) {
+			val = (val/1000)*1000;
+		}
+		if (!ValueProcessor::validateTimestamp(val)) {
+			GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Timestamp of Column[" << id << "] out of range (val=" << val << ")");
+		}
+	}
+	break;
+	case COLUMN_TYPE_BLOB:
+	{
+		getField(id, data, size);
+		if (size > dsConfig_.getLimitBigSize()) {
+			GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Size of Column[" << id << "] exceeds maximum size : " << size);
+		}
+		varidateVarColumnSize += ValueProcessor::getEncodedVarSize(size) + size;
+	}
+	break;
+	default:
+		break;
+	}
+	varidateVarSize += varidateVarColumnSize;
+	return varidateVarSize;
+}
 
 
 OutputMessageRowStore::OutputMessageRowStore(
-		const DataStoreValueLimitConfig &dsValueLimitConfig, 
+		const DataStoreConfig &dsConfig,
 		const ColumnInfo *columnInfoList, uint32_t columnCount,
 		util::XArray<uint8_t> &fixedData, util::XArray<uint8_t> &variableData,
 		bool rowIdIncluded) :
-		MessageRowStore(dsValueLimitConfig, columnInfoList, columnCount),
+		MessageRowStore(dsConfig, columnInfoList, columnCount),
 		varData_(variableData),
 		fixedData_(fixedData),
 		varDataOut_(util::ByteStream< util::XArrayOutStream<> >(

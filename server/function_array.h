@@ -36,7 +36,7 @@ class FunctorArrayLength : public TqlFunc {
 public:
 	using TqlFunc::operator();
 	Expr *operator()(
-		ExprList &args, TransactionContext &txn, ObjectManager &objectManager) {
+		ExprList &args, TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) {
 		if (args.empty() || args.size() > 1) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
@@ -49,7 +49,7 @@ public:
 				"Argument 1 is not an array");
 		}
 		else {
-			size_t x = args[0]->getArrayLength(txn, objectManager);
+			size_t x = args[0]->getArrayLength(txn, objectManager, strategy);
 			return Expr::newNumericValue(int32_t(x), txn);
 		}
 	}
@@ -65,7 +65,7 @@ class FunctorElement : public TqlFunc {
 public:
 	using TqlFunc::operator();
 	Expr *operator()(
-		ExprList &args, TransactionContext &txn, ObjectManager &objectManager) {
+		ExprList &args, TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) {
 		if (args.empty() || args.size() != 2) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 				"Invalid argument count");
@@ -83,7 +83,7 @@ public:
 		}
 		else {
 			int idx = args[0]->getValueAsInt();
-			Expr *ar = args[1]->getArrayElement(txn, objectManager, idx);
+			Expr *ar = args[1]->getArrayElement(txn, objectManager, strategy, idx);
 			return ar;
 		}
 	}

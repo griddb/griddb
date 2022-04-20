@@ -139,6 +139,29 @@
 #define UTIL_HAS_ATTRIBUTE_NODISCARD 0
 #endif
 
+#ifndef UTIL_HAS_TEMPLATE_PLACEMENT_NEW
+#define UTIL_HAS_TEMPLATE_PLACEMENT_NEW 0
+#endif
+
+#ifndef UTIL_CPU_BUILD_AVX2
+#if defined(__GNUC__) && \
+		(__GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 6))
+#define UTIL_CPU_BUILD_AVX2 1
+#else
+#define UTIL_CPU_BUILD_AVX2 0
+#endif
+#endif
+
+#if UTIL_CPU_BUILD_AVX2
+#define UTIL_CPU_SUPPORTS_AVX2() (__builtin_cpu_supports("avx2") != 0)
+#else
+#define UTIL_CPU_SUPPORTS_AVX2() (false)
+#endif
+
+#ifndef UTIL_EXT_LIBRARY_ENABLED
+#define UTIL_EXT_LIBRARY_ENABLED 0
+#endif
+
 #ifdef _WIN32
 /* #undef UTIL_HAVE_BLKCNT_T */
 /* #undef UTIL_HAVE_BLKSIZE_T */
@@ -423,6 +446,16 @@ typedef std::basic_string< char8_t, std::char_traits<char8_t> > NormalString;
 #define UTIL_NULLPTR NULL
 #endif
 
+
+#if 0
+#if UTIL_HAS_ATTRIBUTE_MAYBE_UNUSED
+#define UNUSED_VARIABLE(v) \
+		do { using utilUnused_##v [[maybe_unused]] = decltype(v); } \
+		while (false)
+#else
+#define UNUSED_VARIABLE(v) static_cast<void>(v)
+#endif
+#endif
 
 #ifdef _MSC_VER
 #define UTIL_FORCEINLINE __forceinline
@@ -791,7 +824,8 @@ public:
 		CODE_MEMORY_LIMIT_EXCEEDED,	
 		CODE_SIZE_LIMIT_EXCEEDED,	
 		CODE_DECODE_FAILED,	
-		CODE_VALUE_OVERFLOW 
+		CODE_VALUE_OVERFLOW, 
+		CODE_LIBRARY_UNMATCH 
 	};
 };
 
@@ -965,6 +999,32 @@ public:
 	throw util::PlatformExceptionBuilder()( \
 			message, UTIL_EXCEPTION_POSITION_ARGS, \
 			util::PlatformExceptionBuilder::type, errorCode);
+
+
+struct UtilExceptionTag;
+
+namespace util {
+struct LibraryTool {
+	typedef int32_t (*ProviderFunc)(
+			const void *const **funcList, size_t *funcCount);
+
+	static bool findError(int32_t code, UtilExceptionTag *ex) throw();
+
+	template<typename E> static E fromLibraryException(
+			int32_t code, ProviderFunc provider,
+			UtilExceptionTag *&src) throw() {
+		E dest;
+		fromLibraryException(code, provider, src, dest);
+		return dest;
+	}
+
+	static void fromLibraryException(
+			int32_t code, ProviderFunc provider, UtilExceptionTag *&src,
+			Exception &dest) throw();
+	static int32_t toLibraryException(
+			const Exception &src, UtilExceptionTag **dest) throw();
+};
+} 
 
 
 namespace util {

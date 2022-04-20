@@ -1,6 +1,6 @@
 ﻿/*
 	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
-
+	
 	This program is free software: you can redistribute it and/or modify
 	it under the terms of the GNU Affero General Public License as
 	published by the Free Software Foundation, either version 3 of the
@@ -24,8 +24,7 @@
 
 #include "json.h"
 #include "picojson.h"
-
-#include "sql_job.h"
+#include "partition.h"
 
 const int32_t SQLProcessorConfig::DEFAULT_WORK_MEMORY_MB = 32;
 const SQLProcessorConfig SQLProcessorConfig::DEFAULT_CONFIG((DefaultTag()));
@@ -585,10 +584,10 @@ void SQLProcessor::planToOutputInfo(
 
 	for (ColumnList::const_iterator it = columnList.begin();
 			it != columnList.end(); ++it) {
-		const TupleColumnType type = it->columnType_;
-		assert(ColumnTypeUtils::isAny(type) ||
-				ColumnTypeUtils::isDeclarable(type) ||
-				ColumnTypeUtils::isNullable(type));
+		const TupleList::TupleColumnType type = it->columnType_;
+		assert(TupleColumnTypeUtils::isAny(type) ||
+				TupleColumnTypeUtils::isDeclarable(type) ||
+				TupleColumnTypeUtils::isNullable(type));
 
 		tupleInfo.push_back(type);
 	}
@@ -812,36 +811,44 @@ void SQLProcessor::Factory::check(
 	ALLOC_VAR_SIZE_DELETE(varAlloc, modProcessor3);
 }
 
-#include "resource_set.h"
-
 SQLContext::SQLContext(
-		const ResourceSet *resourceSet,
 		SQLVariableSizeGlobalAllocator *valloc,
 		Task *task,
 		SQLAllocator *alloc,
 		SQLVarSizeAllocator *varAlloc,
 		LocalTempStore &store,
 		const SQLProcessorConfig *config) :
-				TaskContext(resourceSet),
-				varAlloc_(varAlloc),
-				store_(store),
-				localDest_(NULL),
-				interruptionHandler_(NULL),
-				event_(NULL),
-				execution_(NULL),
-				clientId_(NULL),
-				stmtId_(UNDEF_STATEMENTID),
-				jobStartTime_(-1),
-				finished_(false),
-				fetchComplete_(false),
-				execId_(-1),
-				config_(config),
-				isDmlTimeSeries_(false),
-				jobCheckComplete_(false),
-				partialMonitorRestricted_(false),
-				storeMemoryAgingSwapRate_(-1),
-				timeZone_(util::TimeZone()) {
-
+		TaskContext(),
+		varAlloc_(varAlloc),
+		store_(store),
+		localDest_(NULL),
+		interruptionHandler_(NULL),
+		event_(NULL),
+		partitionList_(NULL),
+		clusterService_(NULL),
+		transactionManager_(NULL),
+		transactionService_(NULL),
+		partitionTable_(NULL),
+		execution_(NULL),
+		executionManager_(NULL),
+		clientId_(NULL),
+		stmtId_(UNDEF_STATEMENTID),
+		jobStartTime_(-1),
+		finished_(false),
+		fetchComplete_(false),
+		execId_(-1),
+		config_(config),
+		tableSchema_(NULL),
+		tableLatch_(NULL),
+		isDmlTimeSeries_(false),
+		jobCheckComplete_(false),
+		partialMonitorRestricted_(false),
+		storeMemoryAgingSwapRate_(-1),
+		timeZone_(util::TimeZone())
+		,
+		setGroup_(false),
+		groupId_(LocalTempStore::UNDEF_GROUP_ID)
+{
 	setAllocator(alloc);
 }
 
@@ -855,7 +862,13 @@ SQLContext::SQLContext(
 		localDest_(NULL),
 		interruptionHandler_(NULL),
 		event_(NULL),
+		partitionList_(NULL),
+		clusterService_(NULL),
+		transactionManager_(NULL),
+		transactionService_(NULL),
+		partitionTable_(NULL),
 		execution_(NULL),
+		executionManager_(NULL),
 		clientId_(NULL),
 		stmtId_(UNDEF_STATEMENTID),
 		jobStartTime_(-1),
@@ -863,11 +876,17 @@ SQLContext::SQLContext(
 		fetchComplete_(false),
 		execId_(-1),
 		config_(config),
+		tableSchema_(NULL),
+		tableLatch_(NULL),
 		isDmlTimeSeries_(false),
 		jobCheckComplete_(false),
 		partialMonitorRestricted_(false),
 		storeMemoryAgingSwapRate_(-1),
-		timeZone_(util::TimeZone()) {
+		timeZone_(util::TimeZone())
+		,
+		setGroup_(false),
+		groupId_(LocalTempStore::UNDEF_GROUP_ID)
+{
 	setAllocator(alloc);
 }
 
@@ -920,33 +939,56 @@ util::StackAllocator& SQLContext::getEventAllocator() const {
 	return eventContext->getAllocator();
 }
 
-DataStore* SQLContext::getDataStore() const {
-	if (resourceSet_ == NULL) return NULL;
-	return resourceSet_->getDataStore();
+DataStoreV4* SQLContext::getDataStore(PartitionId pId) const {
+	DataStoreBase& dsBase =
+		partitionList_->partition(pId).dataStore();
+	return reinterpret_cast<DataStoreV4*>(&dsBase);
 }
 
+void SQLContext::setDataStore(PartitionList *partitionList) {
+	partitionList_ = partitionList;
+}
+
+PartitionList* SQLContext::getPartitionList() const {
+	return partitionList_;
+}
+
+
 ClusterService* SQLContext::getClusterService() const {
-	if (resourceSet_ == NULL) return NULL;
-	return resourceSet_->getClusterService();
+	return clusterService_;
+}
+
+void SQLContext::setClusterService(ClusterService *clusterService) {
+	clusterService_ = clusterService;
 }
 
 TransactionManager* SQLContext::getTransactionManager() const {
-	if (resourceSet_ == NULL) return NULL;
-	return resourceSet_->getTransactionManager();
+	return transactionManager_;
+}
+
+void SQLContext::setTransactionManager(
+		TransactionManager *transactionManager) {
+	transactionManager_ = transactionManager;
 }
 
 TransactionService* SQLContext::getTransactionService() const {
-	if (resourceSet_ == NULL) return NULL;
-	return resourceSet_->getTransactionService();
+	return transactionService_;
+}
+
+void SQLContext::setTransactionService(
+		TransactionService *transactionService) {
+	transactionService_ = transactionService;
 }
 
 PartitionTable* SQLContext::getPartitionTable() const {
-	if (resourceSet_ == NULL) return NULL;
-	return resourceSet_->getPartitionTable();
+	return partitionTable_;
+}
+
+void SQLContext::setPartitionTable(PartitionTable *partitionTable) {
+	partitionTable_ = partitionTable;
 }
 
 SQLExecution* SQLContext::getExecution() const {
-	if (resourceSet_ == NULL) return NULL;
 	return execution_;
 }
 
@@ -955,12 +997,14 @@ void SQLContext::setExecution(SQLExecution *execution) {
 }
 
 SQLExecutionManager* SQLContext::getExecutionManager() const {
-	if (resourceSet_ == NULL) return NULL;
-	return resourceSet_->getSQLExecutionManager();
+	return executionManager_;
+}
+
+void SQLContext::setExecutionManager(SQLExecutionManager *executionManager) {
+	executionManager_ = executionManager;
 }
 
 ClientId* SQLContext::getClientId() const {
-	if (resourceSet_ == NULL) return NULL;
 	return clientId_;
 }
 

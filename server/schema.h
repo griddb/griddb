@@ -23,7 +23,7 @@
 
 #include "data_type.h"
 #include "base_object.h"
-#include "object_manager.h"  
+#include "object_manager_v4.h"  
 #include "transaction_context.h"
 #include "value_processor.h"
 
@@ -31,205 +31,21 @@
 class TransactionContext;
 class BaseIndex;
 class BtreeMap;
-class HashMap;
 class RtreeMap;
 class MessageSchema;
-class MessageTimeSeriesSchema;
 class BaseContainer;
+
 typedef uint64_t ColumnSchemaId;
 typedef uint8_t IndexTypes;
 
 const ColumnSchemaId UNDEF_COLUMN_SCHEMAID =
 	std::numeric_limits<ColumnSchemaId>::max();
 
-const uint64_t UNDEF_CONTAINER_POS = UINT64_MAX;
 const uint16_t UNDEF_INDEX_POS = 0xffff;
-
-typedef int8_t COMPRESSION_TYPE;
-const int8_t NO_COMPRESSION = 0;
-const int8_t SS_COMPRESSION = 1;
-const int8_t HI_COMPRESSION = 2;
-
-enum SSCompressionStatus {
-	SS_IS_READRY = 0,
-	SS_IS_NOT_READRY = 1,
-};
-
-
-/*!
-	@brief link-based array object
-*/
-template <typename H, typename V>
-class LinkArray : public BaseObject {
-public:
-	static const uint64_t DEFALUT_RESERVE_NUM = 1;
-
-public:
-	LinkArray(TransactionContext &txn, ObjectManager &objectManager)
-		: BaseObject(txn.getPartitionId(), objectManager) {}
-	LinkArray(TransactionContext &txn, ObjectManager &objectManager, OId oId)
-		: BaseObject(txn.getPartitionId(), objectManager, oId) {}
-	void initializeOnMemory(TransactionContext &txn, const V *value) {
-		uint64_t reserveNum = 1;
-		void *binary = txn.getDefaultAllocator().allocate(getAllocateSize(reserveNum));
-		setBaseAddr(static_cast<uint8_t *>(binary));
-		setReserveNum(reserveNum);
-		if (value != NULL) {
-			setNum(1);
-			V *headElem = getElemHead();
-			*headElem = *value;
-		} else {
-			setNum(0);
-		}
-	}
-	void initialize(TransactionContext &txn, uint64_t reserveNum,
-		const AllocateStrategy &allocateStrategy) {
-		UNUSED_VARIABLE(txn);
-		BaseObject::allocate<uint8_t>(getAllocateSize(reserveNum),
-			allocateStrategy, getBaseOId(), OBJECT_TYPE_CONTAINER_ID);
-		setReserveNum(reserveNum);
-		setNum(0);
-	}
-
-	/*!
-		@brief Free Objects related to LinkArray
-	*/
-	void finalize(TransactionContext &txn) {
-		setDirty();
-		V *head = getElemHead();
-		if (getReserveNum() >= MAX_LOCAL_ELEMENT_NUM) {
-			OId nextOId = getNextOId(head);
-			while (nextOId != UNDEF_OID) {
-				BaseObject chainObj(
-					txn.getPartitionId(), *getObjectManager(), nextOId);
-
-				nextOId = getNextOId(chainObj.getBaseAddr<V *>());
-				chainObj.finalize();
-			}
-		}
-		BaseObject::finalize();
-	}
-
-	/*!
-		@brief Get array length
-	*/
-	uint64_t getNum() const {
-		return *getNumPtr();
-	}
-	/*!
-		@brief Get the element
-	*/
-	const V *get(TransactionContext &txn, uint64_t pos);
-	/*!
-		@brief Insert the element
-	*/
-	void insert(TransactionContext &txn, uint64_t pos, const V *value,
-		const AllocateStrategy &allocateStrategy);
-	/*!
-		@brief Update the element
-	*/
-	void update(TransactionContext &txn, uint64_t pos, const V *value);
-	/*!
-		@brief Remove the element
-	*/
-	void remove(TransactionContext &txn, uint64_t pos);
-	/*!
-		@brief Get header value
-	*/
-	const H *getHeader() {
-		return reinterpret_cast<H *>(getBaseAddr());
-	}
-	/*!
-		@brief Set header value
-	*/
-	void setHeader(H *header) {
-		setDirty();
-		*reinterpret_cast<H *>(getBaseAddr()) = *header;
-	}
-	void dump(TransactionContext &txn);
-
-private:
-	static const int32_t LIST_EXP_SIZE = 13;  
-	static const int32_t CHAIN_BIT;
-	static const int32_t SUB_ELEM_BIT_MASK;
-	static const uint64_t MAX_LOCAL_ELEMENT_NUM;
-
-private:
-	static uint32_t getAllocateSize(uint64_t reserveNum) {
-		return static_cast<uint32_t>(getHeaderSize() + (sizeof(uint64_t) * 2) +
-									 (sizeof(V) * reserveNum) + sizeof(OId));
-	}
-	/*!
-		@brief Check if reserved size is full to capacity
-	*/
-	bool isFull() const {
-		return (getNum() == getReserveNum());
-	}
-	uint64_t getReserveNum() const {
-		return *getReserveNumPtr();
-	}
-	uint64_t *getNumPtr() const {
-		return reinterpret_cast<uint64_t *>(getBaseAddr() + getHeaderSize());
-	}
-	uint64_t *getReserveNumPtr() const {
-		return reinterpret_cast<uint64_t *>(
-			getBaseAddr() + getHeaderSize() + sizeof(uint64_t));
-	}
-	void increment() {
-		(*getNumPtr())++;
-	}
-	void decrement() {
-		(*getNumPtr())--;
-	}
-
-	void setNum(uint64_t num) {
-		*getNumPtr() = num;
-	}
-	void setReserveNum(uint64_t reserverNum) {
-		*getReserveNumPtr() = reserverNum;
-	}
-
-	uint64_t getElementHeaderOffset() const {
-		return getHeaderSize() + sizeof(uint64_t) * 2;
-	}
-	V *getElemHead() const {
-		return reinterpret_cast<V *>(getBaseAddr() + getElementHeaderOffset());
-	}
-
-	void getChainList(
-		TransactionContext &txn, uint64_t chainNo, BaseObject &chain);
-	void getChainList(
-		TransactionContext &txn, uint64_t chainNo, UpdateBaseObject &chain);
-
-	uint64_t getChainElemNum(uint64_t chainNo) const {
-		if (getNum() == 0 || chainNo >= getChainNum()) {
-			return 0;
-		}
-		uint64_t rest = (getNum() & SUB_ELEM_BIT_MASK);
-		if (getChainNum() == chainNo + 1 && rest != 0) {
-			return rest;
-		}
-		else {
-			return MAX_LOCAL_ELEMENT_NUM;
-		}
-	}
-	uint64_t getChainNum() const;
-	OId getNextOId(V *head) const {
-		return *reinterpret_cast<OId *>(head + MAX_LOCAL_ELEMENT_NUM);
-	}
-	void setNextOId(V *head, OId nextOId) {
-		OId *addr = reinterpret_cast<OId *>(head + MAX_LOCAL_ELEMENT_NUM);
-		*addr = nextOId;
-	}
-
-	static uint64_t getHeaderSize();
-	OId expand(
-		TransactionContext &txn, const AllocateStrategy &allocateStrategy);
-};
 
 typedef uint16_t CONTAINER_META_TYPE;
 const CONTAINER_META_TYPE META_TYPE_COLUMN_SCHEMA = 0;  
-const CONTAINER_META_TYPE META_TYPE_COMPRESSION_SCHEMA = 1;  
+const CONTAINER_META_TYPE META_TYPE_RESERVED = 1;
 const CONTAINER_META_TYPE META_TYPE_DURATION = 2;	
 const CONTAINER_META_TYPE META_TYPE_AFFINITY = 3;	
 const CONTAINER_META_TYPE META_TYPE_TRIGGER = 4;	 
@@ -252,13 +68,13 @@ public:
 	};
 
 public:
-	ShareValueList(TransactionContext &txn, ObjectManager &objectManager)
-		: BaseObject(txn.getPartitionId(), objectManager) {}
+	ShareValueList(ObjectManagerV4 &objectManager, AllocateStrategy& allocateStrategy)
+		: BaseObject(objectManager, allocateStrategy) {}
 	ShareValueList(
-		TransactionContext &txn, ObjectManager &objectManager, OId oId)
-		: BaseObject(txn.getPartitionId(), objectManager, oId) {}
+		ObjectManagerV4 &objectManager, AllocateStrategy& allocateStrategy, OId oId)
+		: BaseObject(objectManager, allocateStrategy, oId) {}
 	void initialize(TransactionContext &txn, uint32_t allocateSize,
-		const AllocateStrategy &allocateStrategy, bool onMemory);
+		AllocateStrategy &allocateStrategy, bool onMemory);
 	void set(int64_t hashVal, util::XArray<ElemData> &list);
 
 	void finalize();
@@ -306,6 +122,12 @@ private:
 	uint8_t *getElemHeader(int32_t pos) const {
 		return getBaseAddr() + getHeaderSize(pos);
 	}
+};
+
+enum CreateDropIndexMode {
+	INDEX_MODE_NOSQL = 0,
+	INDEX_MODE_SQL_DEFAULT = 1,
+	INDEX_MODE_SQL_EXISTS = 2
 };
 
 /*!
@@ -407,6 +229,60 @@ struct IndexInfo {
 	bool isComposite() {
 		return columnIds_.size() > 1;
 	}
+
+	template <typename S>
+	void encode(S& out) {
+		try {
+			const size_t sizePos = out.base().position();
+
+			uint32_t size = 0;
+			out << size;
+
+			out << indexName_;
+
+			out << static_cast<uint32_t>(columnIds_.size());
+			for (size_t i = 0; i < columnIds_.size(); i++) {
+				out << columnIds_[i];
+			}
+
+			out << static_cast<uint8_t>(mapType);
+
+			const size_t lastPos = out.base().position();
+			size = static_cast<uint32_t>(lastPos - sizePos - sizeof(size));
+			out.base().position(sizePos);
+			out << size;
+			out.base().position(lastPos);
+		}
+		catch (std::exception& e) {
+			DS_RETHROW_ENCODE_ERROR(e, "");
+		}
+	}
+	template <typename S>
+	void decode(S& in) {
+		try {
+			uint32_t size;
+			in >> size;
+
+			const size_t startPos = in.base().position();
+
+			in >> indexName_;
+
+			uint32_t columnIdCount;
+			in >> columnIdCount;
+			for (uint32_t i = 0; i < columnIdCount; i++) {
+				uint32_t columnId;
+				in >> columnId;
+				columnIds_.push_back(columnId);
+			}
+
+			int8_t tmp;
+			in >> tmp;
+			mapType = static_cast<MapType>(tmp);
+		}
+		catch (std::exception& e) {
+			DS_RETHROW_DECODE_ERROR(e, "");
+		}
+	}
 };
 
 /*!
@@ -420,7 +296,8 @@ public:
 	static const uint8_t COLUMN_FLAG_VIRTUAL = 0x02;
 	static const uint8_t COLUMN_FLAG_NOT_NULL = 0x04;
 
-	ColumnInfo() {}
+	ColumnInfo() : columnNameOId_(UNDEF_OID), columnId_(0), columnSize_(0),
+		offset_(0), columnType_(COLUMN_TYPE_ANY), flags_(0) {}
 	~ColumnInfo() {}
 
 	ColumnId getColumnId() const {
@@ -428,13 +305,13 @@ public:
 	}
 
 	const char *getColumnName(
-		TransactionContext &txn, ObjectManager &objectManager,
-		bool onMemory = false) const {
+		TransactionContext &txn, ObjectManagerV4 &objectManager,
+		AllocateStrategy& strategy, bool onMemory = false) const {
 		if (onMemory) {
 			return columnNameOnMemory_;
 		}
 		BaseObject nameObject(
-			txn.getPartitionId(), objectManager, columnNameOId_);
+			objectManager, strategy, columnNameOId_);
 		size_t len = strlen(nameObject.getBaseAddr<const char *>()) + 1;
 		char *name = ALLOC_NEW(txn.getDefaultAllocator()) char[len];
 		memcpy(name, nameObject.getBaseAddr<const char *>(), len);
@@ -488,9 +365,9 @@ public:
 	}
 
 	void initialize();
-	void set(TransactionContext &txn, ObjectManager &objectManager,
+	void set(TransactionContext &txn, ObjectManagerV4 &objectManager,
 		uint32_t toColumnId, uint32_t fromColumnId,
-		MessageSchema *messageSchema, const AllocateStrategy &allocateStrategy,
+		MessageSchema *messageSchema, AllocateStrategy &allocateStrategy,
 		bool onMemory);
 
 	void setType(ColumnType type, bool isArray) {
@@ -503,12 +380,13 @@ public:
 		columnSize_ = FixedSizeOfColumnType[columnType_];
 	}
 
-	void finalize(TransactionContext &txn, ObjectManager &objectManager);
+	void finalize(ObjectManagerV4 &objectManager, AllocateStrategy& allocateStrategy);
 
-	void getSchema(TransactionContext &txn, ObjectManager &objectManager,
-		util::XArray<uint8_t> &schema);
+	void getSchema(TransactionContext &txn, ObjectManagerV4 &objectManager, 
+		AllocateStrategy& strategy, util::XArray<uint8_t> &schema);
 
-	std::string dump(TransactionContext &txn, ObjectManager &objectManager);
+	std::string dump(TransactionContext &txn, ObjectManagerV4 &objectManager, 
+		AllocateStrategy& strategy);
 
 	void setColumnId(uint16_t columnId) {
 		columnId_ = columnId;
@@ -540,7 +418,6 @@ public:
 	}
 
 private:
-
 	union {
 		OId columnNameOId_;	
 		char *columnNameOnMemory_;	
@@ -551,333 +428,6 @@ private:
 		offset_;			 
 	ColumnType columnType_;  
 	uint8_t flags_;			 
-};
-
-/*!
-	@brief Information of Duration
-*/
-struct DurationInfo {
-	int64_t timestampDuration_;  
-	int32_t timeDuration_;		 
-	TimeUnit timeUnit_;			 
-	uint8_t padding1_;
-	uint8_t padding2_;
-	uint8_t padding3_;
-	DurationInfo() {
-		timestampDuration_ = INT64_MAX;  
-		timeDuration_ = -1;				 
-		timeUnit_ = TIME_UNIT_DAY;
-		padding1_ = 0;
-		padding2_ = 0;
-		padding3_ = 0;
-	}
-	/*!
-		@brief Calculate hash value
-	*/
-	int64_t getHashVal() const {
-		int64_t hashVal = 0;
-		hashVal += timestampDuration_;
-		hashVal += timeDuration_;
-		hashVal += timeUnit_;
-		return hashVal;
-	}
-};
-
-/*!
-	@brief Compression Infomation for message format
-*/
-class MessageCompressionInfo {
-public:
-	enum CompressionType {
-		NONE = 0,
-		DSDC = 1,  
-	};
-
-	void initialize();
-	void set(CompressionType type, bool threshholdRelative, double threshhold,
-		double rate, double span);
-	void finalize();
-
-	CompressionType getType() const {
-		return type_;
-	}
-	double getThreshhold() const {
-		return threshhold_;
-	}
-	bool getThreshholdRelative() const {
-		return threshholdRelative_;
-	}
-	double getRate() const {
-		return rate_;
-	}
-	double getSpan() const {
-		return span_;
-	}
-
-	MessageCompressionInfo() {}
-	~MessageCompressionInfo() {}
-
-private:
-	MessageCompressionInfo(const MessageCompressionInfo &) {}
-
-	double threshhold_;		   
-	double rate_;			   
-	double span_;			   
-	CompressionType type_;	 
-	bool threshholdRelative_;  
-};
-
-struct DSDCVal {
-	double upperAngle_;  
-	double lowerAngle_;  
-	double upperError_;
-	double lowerError_;
-
-	void initialize(double error) {
-		upperAngle_ = DBL_MAX;
-		lowerAngle_ = -DBL_MAX;
-		upperError_ = error;
-		lowerError_ = error;
-	}
-
-	std::string dump() {
-		util::NormalOStringStream strstrm;
-		strstrm << "DSDCVal" << std::endl;
-		strstrm << "upperAngle_=" << upperAngle_ << ", "
-				<< "lowerAngle_=" << lowerAngle_ << ", "
-				<< "upperError_=" << upperError_ << ", "
-				<< "lowerError_=" << lowerError_ << ", " << std::endl;
-		return strstrm.str();
-	}
-};
-
-class HiCompressionData {
-public:
-	void initialize(ColumnId columnId, double threshhold, double rate,
-		double span, bool threshholdRelative) {
-		columnId_ = static_cast<uint16_t>(columnId);
-		threshhold_ = threshhold;
-		rate_ = rate;
-		span_ = span;
-		threshholdRelative_ = threshholdRelative;
-		padding1_ = 0;
-		padding2_ = 0;
-	}
-	void finalize() {}
-
-	ColumnId getColumnId() {
-		return columnId_;
-	}
-	void getProperty(double &threshhold, double &rate, double &span,
-		bool &threshholdRelative) const {
-		threshhold = threshhold_;
-		rate = rate_;
-		span = span_;
-		threshholdRelative = threshholdRelative_;
-	}
-
-private:
-	double threshhold_;		   
-	double rate_;			   
-	double span_;			   
-	uint16_t columnId_;		   
-	bool threshholdRelative_;  
-	uint8_t padding1_;
-	uint32_t padding2_;
-};
-
-class CompressionSchema {
-public:
-	void initialize(
-		COMPRESSION_TYPE compressionType, DurationInfo &compressionWindowInfo) {
-		compressionWindowInfo_ = compressionWindowInfo;
-		hiCompressionColumnNum_ = 0;
-		compressionType_ = compressionType;
-		padding1_ = 0;
-		padding2_ = 0;
-	}
-	void finalize() {}
-
-	const DurationInfo &getDurationInfo() const {
-		return compressionWindowInfo_;
-	}
-
-	COMPRESSION_TYPE getCompressionType() const {
-		return compressionType_;
-	}
-	void setCompressionType(COMPRESSION_TYPE type) {
-		compressionType_ = type;
-	}
-
-	void addHiCompression(uint16_t pos, ColumnId columnId, double threshhold,
-		double rate, double span, bool threshholdRelative);
-	bool isHiCompression(ColumnId columnId) const;
-	void getHiCompressionColumnList(util::Vector<ColumnId> &list) const;
-	void getHiCompressionProperty(ColumnId columnId, double &threshhold,
-		double &rate, double &span, bool &threshholdRelative,
-		uint16_t &compressionPos) const;
-
-	uint16_t getHiCompressionNum() const {
-		return hiCompressionColumnNum_;
-	}
-	HiCompressionData *getHiCompressionDataList() const {
-		return reinterpret_cast<HiCompressionData *>(
-			reinterpret_cast<uint8_t *>(const_cast<CompressionSchema *>(this)) +
-			HI_COMPRESSION_DATA_OFFSET);
-	}
-	bool schemaCheck(
-		TransactionContext &txn, MessageTimeSeriesSchema *messageSchema);
-	static int64_t calcHash(MessageTimeSeriesSchema *messageSchema);
-
-	/*!
-		@brief Calculate the size needed
-	*/
-	static uint32_t getAllocateSize(uint32_t hiCompressionColumnNum) {
-		return HI_COMPRESSION_DATA_OFFSET +
-			   (sizeof(HiCompressionData) * hiCompressionColumnNum);
-	}
-
-private:
-	static const uint32_t HI_COMPRESSION_DATA_OFFSET =
-		sizeof(DurationInfo) + sizeof(uint16_t) + sizeof(bool) + sizeof(int8_t);
-	DurationInfo compressionWindowInfo_;  
-	uint16_t hiCompressionColumnNum_;
-	COMPRESSION_TYPE compressionType_;
-	uint8_t padding1_;
-	uint32_t padding2_;
-};
-
-class DSDCValList : public BaseObject {
-public:
-	DSDCValList(TransactionContext &txn, ObjectManager &objectManager)
-		: BaseObject(txn.getPartitionId(), objectManager) {}
-	DSDCValList(TransactionContext &txn, ObjectManager &objectManager, OId oId)
-		: BaseObject(txn.getPartitionId(), objectManager, oId) {}
-	void initialize(TransactionContext &txn,
-		const CompressionSchema &compressionSchema,
-		uint16_t hiCompressionColumnNum,
-		const AllocateStrategy &allocateStrategy) {
-		UNUSED_VARIABLE(txn);
-		BaseObject::allocate<DSDCVal>(sizeof(DSDCVal) * hiCompressionColumnNum,
-			allocateStrategy, getBaseOId(), OBJECT_TYPE_COMPRESSIONINFO);
-
-		reset(compressionSchema, hiCompressionColumnNum);
-	}
-	void finalize() {
-		BaseObject::finalize();
-	}
-	void reset(const CompressionSchema &compressionSchema,
-		uint16_t hiCompressionColumnNum) {
-		setDirty();
-		DSDCVal *dsdcValList = reinterpret_cast<DSDCVal *>(getBaseAddr());
-		const HiCompressionData *hiCompressionDataList =
-			compressionSchema.getHiCompressionDataList();
-		for (uint16_t i = 0; i < hiCompressionColumnNum; i++) {
-			double threshhold, rate, span;
-			bool threshholdRelative;
-			hiCompressionDataList[i].getProperty(
-				threshhold, rate, span, threshholdRelative);
-			dsdcValList[i].initialize(threshhold);
-		}
-	}
-	const DSDCVal *get(uint64_t pos) const {
-		DSDCVal *dsdcValList = getBaseAddr<DSDCVal *>();
-		return &dsdcValList[pos];
-	}
-	void update(uint64_t pos, const DSDCVal *dsdcVal) {
-		setDirty();
-		DSDCVal *dsdcValList = getBaseAddr<DSDCVal *>();
-		dsdcValList[pos] = *dsdcVal;
-	}
-};
-
-/*!
-	@brief Information of trigger
-*/
-class TriggerInfo {
-public:
-	static const int32_t TRIGGER_VERSION = 1;
-
-	TriggerInfo(util::StackAllocator &alloc);
-	TriggerInfo(const TriggerInfo &info);
-
-	static void encode(
-		const TriggerInfo &info, util::XArray<uint8_t> &binaryTrigger);
-	static void decode(const uint8_t *binaryTrigger, TriggerInfo &info);
-	static void getSizeAndVersion(
-		const uint8_t *binaryTrigger, uint32_t &size, int32_t &version);
-	static bool compare(
-		const uint8_t *binaryTrigger1, const uint8_t *binaryTrigger2);
-
-	util::StackAllocator &alloc_;
-
-	int32_t version_;
-
-	int8_t type_;
-	util::String name_;
-	util::String uri_;
-	int32_t operation_;
-	util::Vector<ColumnId> columnIds_;
-
-	int32_t jmsProviderType_;
-	util::String jmsProviderTypeName_;
-
-	int32_t jmsDestinationType_;
-	util::String jmsDestinationTypeName_;
-
-	util::String jmsDestinationName_;
-
-	util::String jmsUser_;
-	util::String jmsPassword_;
-};
-
-/*!
-	@brief List of trigger
-*/
-class TriggerList {
-public:
-	static const uint32_t MAX_TRIGGER_LIST_NUM = 30;
-
-	void initialize(uint32_t num);
-
-	void set(TransactionContext &txn, ObjectManager &objectManager,
-		util::XArray<const uint8_t *> &triggerList,
-		const AllocateStrategy &allocateStrategy);
-
-	void createImage(TransactionContext &txn, ObjectManager &objectManager,
-		const TriggerInfo &info, util::XArray<const uint8_t *> &binary,
-		size_t limit);
-
-	bool updateImage(TransactionContext &txn, ObjectManager &objectManager,
-		const util::XArray<const util::String *> &oldColumnNameList,
-		const util::XArray<const util::String *> &newColumnNameList,
-		util::XArray<const uint8_t *> &binary);
-
-	bool removeImage(TransactionContext &txn, ObjectManager &objectManager,
-		const char *name, util::XArray<const uint8_t *> &binary);
-
-	void getList(TransactionContext &txn, ObjectManager &objectManager,
-		util::XArray<const uint8_t *> &triggerList);
-
-	void finalize(TransactionContext &txn, ObjectManager &objectManager);
-
-	/*!
-		@brief Calculate the size needed
-	*/
-	static uint32_t getAllocateSize(uint32_t num) {
-		return sizeof(uint32_t) + (sizeof(OId) * num);
-	}
-
-private:
-	uint32_t num_;
-
-private:
-	OId *getOIdList() {
-		uint8_t *addr =
-			reinterpret_cast<uint8_t *>(const_cast<TriggerList *>(this)) +
-			sizeof(uint32_t);
-		return reinterpret_cast<OId *>(addr);
-	}
 };
 
 /*!
@@ -947,13 +497,13 @@ class ColumnSchema
 {
 public:
 	void initialize(uint32_t columnNum);
-	void set(TransactionContext &txn, ObjectManager &objectManager,
+	void set(TransactionContext &txn, ObjectManagerV4 &objectManager,
 		MessageSchema *collectionSchema, 
-		const AllocateStrategy &allocateStrategy, bool onMemory);
+		AllocateStrategy &allocateStrategy, bool onMemory);
 	void set(util::StackAllocator &alloc,
-		ColumnSchema *srcSchema,
+		const ColumnSchema *srcSchema,
 		const util::Vector<ColumnId> &columnIds);
-	void finalize(TransactionContext &txn, ObjectManager &objectManager);
+	void finalize(ObjectManagerV4 &objectManager, AllocateStrategy& allocateStrategy);
 
 	uint32_t getColumnNum() const {
 		return columnNum_;
@@ -979,8 +529,8 @@ public:
 		return getColumnInfoList()[columnId];
 	}
 
-	void getColumnInfo(TransactionContext &txn, ObjectManager &objectManager,
-		const char *name, uint32_t &columnId, ColumnInfo *&columnInfo,
+	void getColumnInfo(TransactionContext &txn, ObjectManagerV4 &objectManager,
+		AllocateStrategy& strategy, const char *name, uint32_t &columnId, ColumnInfo *&columnInfo,
 		bool isCaseSensitive) const;
 
 	uint32_t getVariableColumnNum() const {
@@ -995,8 +545,8 @@ public:
 	}
 
 	static int64_t calcSchemaHashKey(MessageSchema *messageSchema);
-	bool schemaCheck(TransactionContext &txn, ObjectManager &objectManager,
-		MessageSchema *messageSchema);
+	bool schemaCheck(TransactionContext &txn, ObjectManagerV4 &objectManager,
+		AllocateStrategy& strategy, MessageSchema *messageSchema);
 	/*!
 		@brief Calculate the size needed
 	*/
@@ -1047,7 +597,7 @@ public:
 		int64_t status = static_cast<int64_t>(orgStatus);
 		return status;
 	}
-	std::string dump(TransactionContext &txn, ObjectManager &objectManager);
+	std::string dump(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy& strategy);
 
 private:
 	uint8_t *getRowKeyPtr() const {
@@ -1128,17 +678,18 @@ public:
 	static const uint32_t INITIALIZE_RESERVE_NUM = 1;
 
 public:
-	IndexSchema(TransactionContext &txn, ObjectManager &objectManager,
-		const AllocateStrategy &strategy)
-		: BaseObject(txn.getPartitionId(), objectManager),
+	IndexSchema(TransactionContext &txn, ObjectManagerV4 &objectManager,
+		AllocateStrategy &strategy)
+		: BaseObject(objectManager, strategy),
 		  allocateStrategy_(strategy) {}
-	IndexSchema(TransactionContext &txn, ObjectManager &objectManager, OId oId,
-		const AllocateStrategy &strategy)
-		: BaseObject(txn.getPartitionId(), objectManager, oId),
+	IndexSchema(TransactionContext &txn, ObjectManagerV4 &objectManager, OId oId,
+		AllocateStrategy &strategy)
+		: BaseObject(objectManager, strategy, oId),
 		  allocateStrategy_(strategy) {}
 
 	void initialize(TransactionContext &txn, uint16_t reserveNum, 
 		uint16_t indexNum, uint32_t columnNum, bool onMemory);
+
 
 	bool createIndexInfo(
 		TransactionContext &txn, const IndexInfo &indexInfo);
@@ -1147,27 +698,25 @@ public:
 	IndexData createIndexData(TransactionContext &txn, 
 		const util::Vector<ColumnId> &columnIds,
 		MapType mapType, const util::Vector<ColumnType> &columnTypes, 
-		BaseContainer *container, uint64_t containerPos, bool isUnique);
-	void createDummyIndexData(TransactionContext &txn, IndexInfo &indexInfo,
-		uint64_t containerPos);
+		BaseContainer *container, bool isUnique);
 	void dropIndexData(TransactionContext &txn, util::Vector<ColumnId> &columnIds,
-		MapType mapType, BaseContainer *container, uint64_t containerPos,
+		MapType mapType, BaseContainer *container,
 		bool isMapFinalize);
 
 	void dropAll(TransactionContext &txn, BaseContainer *container,
-		uint64_t containerPos, bool isMapFinalize);
+		bool isMapFinalize);
 	void finalize(TransactionContext &txn);
 
 	uint16_t getIndexNum() const {
 		return *getNumPtr();
 	}
-	void getIndexList(TransactionContext &txn, uint64_t containerPos,
+	void getIndexList(TransactionContext &txn,
 		bool withUncommitted, util::XArray<IndexData> &list) const;
 	bool getIndexData(TransactionContext &txn, const util::Vector<ColumnId> &columnIds,
-		MapType mapType, uint64_t containerPos, bool withUncommitted, 
+		MapType mapType, bool withUncommitted, 
 		bool withPartialMatch, IndexData &indexData) const;
 	bool getIndexData(TransactionContext &txn, const IndexCursor &indexCursor,
-		uint64_t containerPos, IndexData &indexData) const;
+		IndexData &indexData) const;
 	void getIndexInfoList(TransactionContext &txn, BaseContainer *container,
 		const IndexInfo &indexInfo, bool withUncommitted, 
 		util::Vector<IndexInfo> &matchList, 
@@ -1177,7 +726,7 @@ public:
 	void getIndexDataList(TransactionContext &txn, util::Vector<ColumnId> &columnIds,
 		MapType mapType, bool withUncommitted, 
 		util::Vector<IndexData> &indexDataList, bool withPartialMatch = false);
-	void createNullIndexData(TransactionContext &txn, uint64_t containerPos,
+	void createNullIndexData(TransactionContext &txn,
 		IndexData &indexData, BaseContainer *container);
 
 	bool hasIndex(
@@ -1192,7 +741,7 @@ public:
 		TransactionContext &txn, const IndexData &indexData, bool forNull,
 		BaseContainer *container) const;
 	void updateIndexData(
-		TransactionContext &txn, const IndexData &indexData, uint64_t containerPos);
+		TransactionContext &txn, const IndexData &indexData);
 	void commit(TransactionContext &txn, IndexCursor &indexCursor);
 	uint8_t *getNullsStats() const {
 		return getBaseAddr() + NULL_STAT_OFFSET;
@@ -1301,23 +850,23 @@ private:
 	}
 
 	void getIndexData(TransactionContext &txn, uint16_t nth,
-		uint64_t containerPos, IndexData &indexData) const {
+		IndexData &indexData) const {
 		uint8_t *indexDataPos = getElemHead() + (getIndexDataSize() * nth);
-		indexData.oIds_ = getMapOIds(txn, indexDataPos, containerPos);
+		indexData.oIds_ = getMapOIds(txn, indexDataPos);
 		indexData.mapType_ = getMapType(indexDataPos);
 		indexData.optionOId_ = getOptionOId(indexDataPos);
 		indexData.columnIds_->clear();
 		if (isComposite(indexDataPos)) {
-			BaseObject option(txn.getPartitionId(), *getObjectManager(),
-				getOptionOId(indexDataPos));
+			BaseObject option(*getObjectManager(),
+				*const_cast<AllocateStrategy*>(&allocateStrategy_), getOptionOId(indexDataPos));
 			getCompositeColumnIds(option.getBaseAddr(), *(indexData.columnIds_));
 		} else {
 			indexData.columnIds_->push_back(getColumnId(indexDataPos));
 		}
 		indexData.status_ = getStatus(indexDataPos);
 		if (indexData.status_!= DDL_READY) {
-			BaseObject option(txn.getPartitionId(), *getObjectManager(),
-				getOptionOId(indexDataPos));
+			BaseObject option(*getObjectManager(),
+				*const_cast<AllocateStrategy*>(&allocateStrategy_), getOptionOId(indexDataPos));
 			indexData.cursor_ = getRowId(option.getBaseAddr());
 		} else {
 			indexData.cursor_ = MAX_ROWID;
@@ -1325,19 +874,19 @@ private:
 	}
 
 	void setIndexData(TransactionContext &txn, uint16_t nth,
-		uint64_t containerPos, IndexData &indexData,
+		IndexData &indexData,
 		const util::String *name = NULL) {
 		uint8_t *indexDataPos =	getElemHead() + (getIndexDataSize() * nth);
-		setMapOIds(txn, indexDataPos, containerPos, indexData.oIds_);
+		setMapOIds(txn, indexDataPos, indexData.oIds_);
 		setMapType(indexDataPos, indexData.mapType_, indexData.isComposite());
 		setColumnId(indexDataPos, indexData.columnIds_->at(0));
 		setStatus(indexDataPos, indexData.status_);
 		if (name != NULL) {
 			OId optionOId;
-			BaseObject option(txn.getPartitionId(), *getObjectManager());
+			BaseObject option(*getObjectManager(), allocateStrategy_);
 			uint32_t allocateSize = IndexSchema::getOptionSize(*name, *(indexData.columnIds_));
 			uint8_t *optionAddr = option.allocate<uint8_t>(allocateSize,
-				allocateStrategy_, optionOId, OBJECT_TYPE_COLUMNINFO);
+				optionOId, OBJECT_TYPE_COLUMNINFO);
 			memset(optionAddr, 0, allocateSize);
 			setOptionHeader(optionAddr, 0);
 			setRowId(optionAddr, indexData.cursor_);
@@ -1345,14 +894,15 @@ private:
 			setCompositeColumnIds(optionAddr, *(indexData.columnIds_));
 			setOptionOId(indexDataPos, optionOId);
 		}
+
 	}
 
 	void getIndexInfo(TransactionContext &txn, uint16_t nth, 
 		IndexInfo &indexInfo) {
 		uint8_t *indexDataPos = getElemHead() + (getIndexDataSize() * nth);
 		indexInfo.mapType = getMapType(indexDataPos);
-		BaseObject option(txn.getPartitionId(), *getObjectManager(),
-			getOptionOId(indexDataPos));
+		BaseObject option(*getObjectManager(),
+			allocateStrategy_, getOptionOId(indexDataPos));
 		if (isComposite(indexDataPos)) {
 			getCompositeColumnIds(option.getBaseAddr(), indexInfo.columnIds_);
 		} else {
@@ -1370,7 +920,7 @@ private:
 		indexData.status_ = DDL_UNDER_CONSTRUCTION;
 		indexData.cursor_ = INITIAL_ROWID;
 		indexData.oIds_ = UNDEF_MAP_OIDS;
-		setIndexData(txn, nth, UNDEF_CONTAINER_POS, indexData, &indexInfo.indexName_);
+		setIndexData(txn, nth, indexData, &indexInfo.indexName_);
 	}
 
 	ColumnId getColumnId(uint8_t *cursor) const {
@@ -1389,103 +939,31 @@ private:
 		return static_cast<DDLStatus>(type);
 	}
 
-	void setLinkArrayOId(uint8_t *cursor, OId oId) {
-		MapOIds *mapOIds = reinterpret_cast<MapOIds *>(cursor);
-		mapOIds->mainOId_ = oId;
-	}
-
-	OId getLinkArrayOId(uint8_t *cursor) const {
-		MapOIds *mapOIds = reinterpret_cast<MapOIds *>(cursor);
-		return mapOIds->mainOId_;
-	}
-
 	MapOIds getMapOIds(
-		TransactionContext &txn, uint8_t *cursor, uint64_t containerPos) const {
-		if (containerPos == UNDEF_CONTAINER_POS) {
-			return *reinterpret_cast<MapOIds *>(cursor);
-		}
-		else {
-			OId baseOId = getLinkArrayOId(cursor);
-			if (baseOId == UNDEF_OID) {
-				return UNDEF_MAP_OIDS;
-			}
-			else {
-				LinkArray<void, MapOIds> linkArray(
-					txn, *getObjectManager(), baseOId);
-				return *linkArray.get(txn, containerPos);
-			}
-		}
+		TransactionContext &txn, uint8_t *cursor) const {
+		return *reinterpret_cast<MapOIds *>(cursor);
 	}
 
 
-	void setMapOIds(TransactionContext &txn, uint8_t *cursor, uint64_t containerPos,
+	void setMapOIds(TransactionContext &txn, uint8_t *cursor,
 		const MapOIds oIds) {
-		if (containerPos == UNDEF_CONTAINER_POS) {
-			*reinterpret_cast<MapOIds *>(cursor) = oIds;
-		}
-		else {
-			OId baseOId = getLinkArrayOId(cursor);
-			if (baseOId == UNDEF_OID) {
-				LinkArray<void, MapOIds> linkArray(txn, *getObjectManager());
-				linkArray.initialize(txn,
-					LinkArray<void, MapOIds>::DEFALUT_RESERVE_NUM,
-					allocateStrategy_);
-				setLinkArrayOId(cursor, linkArray.getBaseOId());
-				linkArray.insert(txn, containerPos, &oIds, allocateStrategy_);
-			}
-			else {
-				LinkArray<void, MapOIds> linkArray(
-					txn, *getObjectManager(), baseOId);
-				linkArray.insert(txn, containerPos, &oIds, allocateStrategy_);
-				if (baseOId != linkArray.getBaseOId()) {
-					setLinkArrayOId(cursor, linkArray.getBaseOId());
-				}
-			}
-		}
+		*reinterpret_cast<MapOIds *>(cursor) = oIds;
 	}
 
 	void updateMapOIds(TransactionContext &txn, uint8_t *cursor,
-		uint64_t containerPos, const MapOIds &oIds) {
-		if (containerPos == UNDEF_CONTAINER_POS) {
-			*reinterpret_cast<MapOIds *>(cursor) = oIds;
-		}
-		else {
-			OId baseOId = getLinkArrayOId(cursor);
-			if (baseOId == UNDEF_OID) {
-				GS_THROW_SYSTEM_ERROR(
-					GS_ERROR_DS_UNEXPECTED_ERROR, "update index not found");
-			}
-			else {
-				LinkArray<void, MapOIds> linkArray(
-					txn, *getObjectManager(), baseOId);
-				linkArray.update(txn, containerPos, &oIds);
-			}
-		}
+		const MapOIds &oIds) {
+		*reinterpret_cast<MapOIds *>(cursor) = oIds;
 	}
 
 	void removeMapOIds(
-		TransactionContext &txn, uint8_t *cursor, uint64_t containerPos) {
-		if (containerPos == UNDEF_CONTAINER_POS) {
-			*reinterpret_cast<MapOIds *>(cursor) = UNDEF_MAP_OIDS;
-		}
-		else {
-			OId baseOId = getLinkArrayOId(cursor);
-			if (baseOId != UNDEF_OID) {
-				LinkArray<void, MapOIds> linkArray(
-					txn, *getObjectManager(), baseOId);
-				linkArray.remove(txn, containerPos);
-				if (linkArray.getNum() == 0) {
-					linkArray.finalize(txn);
-					setLinkArrayOId(cursor, UNDEF_OID);
-				}
-			}
-		}
+		TransactionContext &txn, uint8_t *cursor) {
+		*reinterpret_cast<MapOIds *>(cursor) = UNDEF_MAP_OIDS;
 	}
 	bool compareColumnIds(TransactionContext &txn, uint8_t *cursor, 
 		const util::Vector<ColumnId> &columnIds, OId optionOId, bool withPartialMatch) const {
 		bool ret = (getColumnId(cursor) == columnIds[0]);
 		if (ret && (isComposite(cursor) || columnIds.size() > 1)) {
-			BaseObject option(txn.getPartitionId(), *getObjectManager(), optionOId);
+			BaseObject option(*getObjectManager(), *const_cast<AllocateStrategy*>(&allocateStrategy_), optionOId);
 			util::Vector<ColumnId> targetColumnIds(txn.getDefaultAllocator());
 			getCompositeColumnIds(option.getBaseAddr(), targetColumnIds);
 			if (!withPartialMatch) {
@@ -1600,141 +1078,7 @@ private:
 	static const uint8_t MAP_TYPE_MASK = static_cast<const uint8_t>(~COMPOSITE_FLAG_MASK); 
 
 private:
-	AllocateStrategy allocateStrategy_;
+	AllocateStrategy &allocateStrategy_;
 };
 
-class BibInfoUtil {
-public:
-	static TimeUnit getTimeUnit(const char *str);
-	static const char *getTimeUnitStr(TimeUnit unit);
-	static COMPRESSION_TYPE getCompressionType(const char *str);
-	static const char *getCompressionTypeStr(COMPRESSION_TYPE type);
-	static ColumnType getColumnType(const char *str);
-	static const char *getColumnTypeStr(const ColumnType type);
-	static ContainerType getContainerType(const char *str);
-	static const char *getContainerTypeStr(ContainerType type);
-public:
-	static const char *CONTAINER_TYPE_COLLECTION_STR;
-	static const char *CONTAINER_TYPE_TIMESERIES_STR;
-
-	static const char *COLUMN_TYPE_BOOL_STR;
-	static const char *COLUMN_TYPE_BYTE_STR;
-	static const char *COLUMN_TYPE_SHORT_STR;
-	static const char *COLUMN_TYPE_INT_STR;
-	static const char *COLUMN_TYPE_LONG_STR;
-	static const char *COLUMN_TYPE_FLOAT_STR;
-	static const char *COLUMN_TYPE_DOUBLE_STR;
-	static const char *COLUMN_TYPE_TIMESTAMP_STR;
-	static const char *COLUMN_TYPE_STRING_STR;
-	static const char *COLUMN_TYPE_GEOMETRY_STR;
-	static const char *COLUMN_TYPE_BLOB_STR;
-	static const char *COLUMN_TYPE_STRING_ARRAY_STR;
-	static const char *COLUMN_TYPE_BOOL_ARRAY_STR;
-	static const char *COLUMN_TYPE_BYTE_ARRAY_STR;
-	static const char *COLUMN_TYPE_SHORT_ARRAY_STR;
-	static const char *COLUMN_TYPE_INT_ARRAY_STR;
-	static const char *COLUMN_TYPE_LONG_ARRAY_STR;
-	static const char *COLUMN_TYPE_FLOAT_ARRAY_STR;
-	static const char *COLUMN_TYPE_DOUBLE_ARRAY_STR;
-	static const char *COLUMN_TYPE_TIMESTAMP_ARRAY_STR;
-
-
-	static const char *TIME_UNIT_DAY_STR;
-	static const char *TIME_UNIT_HOUR_STR;
-	static const char *TIME_UNIT_MINUTE_STR;
-	static const char *TIME_UNIT_SECOND_STR;
-	static const char *TIME_UNIT_MILLISECOND_STR;
-
-	static const char *NO_COMPRESSION_STR;
-	static const char *SS_COMPRESSION_STR;
-	static const char *HI_COMPRESSION_STR;
-};
-
-namespace picojson {
-class value;
-}
-struct BibInfo {
-	BibInfo() {};
-	virtual ~BibInfo() {};
-	void load(std::string &jsonString);
-	struct Option {
-		Option();
-		void load(const picojson::value &json);
-
-		static const int64_t DEFAULT_FLUSH_THRESHOLD;
-		static const int64_t LIMIT_FLUSH_THRESHOLD;
-		static const int64_t DEFAULT_BLOCK_SIZE;
-		static const int64_t LIMIT_BLOCK_SIZE;
-
-		std::string containerFileType_;
-		std::string storeMemoryLimit_;
-		std::string logDirectory_;
-		int64_t flushThreshold_;
-		int64_t blockSize_;
-		int64_t preReadNum_;
-	};
-	struct Container {
-		Container();
-		void load(const picojson::value &json);
-
-		std::string containerFileBase_;
-
-		DatabaseId databaseId_;
-		ContainerId containerId_;
-		OId rowIndexOId_;
-		OId mvccIndexOId_;
-		int64_t initSchemaStatus_;
-		SchemaVersionId schemaVersion_;
-		std::string database_;
-		std::string container_;
-		std::string dataAffinity_;
-		PartitionId partitionNo_;
-		std::string containerType_;
-		bool rowKeyAssigned_;
-		struct Column {
-			Column();
-			void load(const picojson::value &json);
-
-			std::string columnName_;
-			std::string type_;
-			bool notNull_;
-		};
-		struct TimeSeriesProperties {
-			TimeSeriesProperties();
-			void load(const picojson::value &json);
-
-			bool isExist_;
-			int32_t rowExpirationElapsedTime_;
-			std::string rowExpirationTimeUnit_;
-			int32_t expirationDivisionCount_;
-			std::string compressionMethod_;
-			int32_t compressionWindowSize_;
-			std::string compressionWindowSizeUnit_;
-		};
-		struct CompressionInfo {
-			CompressionInfo();
-			void load(const picojson::value &json);
-
-			std::string columnName_;
-			std::string compressionType_;
-			double rate_;
-			double span_;
-			double width_;
-		};
-		std::vector< Column > columnSet_;
-		TimeSeriesProperties timeSeriesProperties_;
-		std::vector< CompressionInfo > compressionInfoSet_;
-		std::vector< std::string > rowKeySet_;
-	};
-	Option option_;
-	std::vector< Container > containers_;
-
-	template<typename T> static bool setKey(
-		const picojson::value &json, const char *key, T &output, bool isOption);
-	template<typename T> static bool setIntegerKey(
-		const picojson::value &json, const char *key, T &output, bool isOption);
-	template<typename T> static bool setStringIntegerKey(
-		const picojson::value &json, const char *key, T &output, bool isOption);
-private:
-};
 #endif

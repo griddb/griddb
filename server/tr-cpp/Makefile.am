@@ -9,5 +9,5 @@ libtrcpp_a_SOURCES = \
 	TrNode.cpp TrNodeSearch.cpp TrNodeInsert.cpp TrNodeDelete.cpp \
 	TrNodeSplit.cpp TrPv3.cpp
 
-libtrcpp_a_CPPFLAGS= -Wall -std=c++0x -I$(TOP_DIR)/server -I$(TOP_DIR)/utility/ -I$(TOP_DIR)/lib/MessagePack/include/ 
+libtrcpp_a_CPPFLAGS= -std=c++0x -I$(TOP_DIR)/server -I$(TOP_DIR)/utility/ -I$(TOP_DIR)/3rd_party/MessagePack/include/ -I$(TOP_DIR)/3rd_party/fletcher32_simd -finput-charset=cp932
 include_HEADERS = TrTree.h TrPv3.h

@@ -39,7 +39,7 @@
 class FunctorRound : public TqlFunc {
 public:
 	using TqlFunc::operator();
-	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManager &) {
+	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &) {
 		if (args.empty() || args.size() != 1) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT,
 				"Invalid argument count");
@@ -65,7 +65,7 @@ public:
 class FunctorCeil : public TqlFunc {
 public:
 	using TqlFunc::operator();
-	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManager &) {
+	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &) {
 		if (args.empty() || args.size() != 1) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT,
 				"Invalid argument count");
@@ -91,7 +91,7 @@ public:
 class FunctorFloor : public TqlFunc {
 public:
 	using TqlFunc::operator();
-	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManager &) {
+	Expr *operator()(ExprList &args, TransactionContext &txn, ObjectManagerV4 &, AllocateStrategy &) {
 		if (args.empty() || args.size() != 1) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT,
 				"Invalid argument count");

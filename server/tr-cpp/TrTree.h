@@ -29,7 +29,7 @@ typedef struct _TrRectTag {
 	double xmax, ymax, zmax;
 } TrRectTag, *TrRect;
 
-#include "object_manager.h"
+#include "object_manager_v4.h"
 #include "transaction_context.h"
 
 typedef int32_t (*TrCheckCallback)(TransactionContext &txn, TrRect, void *);
@@ -37,32 +37,32 @@ typedef int32_t (*TrHitCallback)(TransactionContext &txn, TrRect, OId, void *);
 typedef int32_t (*TrDataCmpCallback)(
 	TransactionContext &txn, TrRect, OId, void *);
 
-extern OId TrIndex_new(TransactionContext &txn, ObjectManager &objectManager);
+extern OId TrIndex_new(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy& strategy);
 extern void TrIndex_destroy(
-	TransactionContext &txn, ObjectManager &objectManager, OId idxOId, uint64_t &removeNum);
+	TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId idxOId, uint64_t &removeNum);
 extern int32_t TrIndex_size(
-	TransactionContext &txn, ObjectManager &objectManager, OId idxOId);
+	TransactionContext &txn, ObjectManagerV4 &objectManager, OId idxOId);
 extern int32_t TrIndex_insert(TransactionContext &txn,
-	ObjectManager &objectManager, OId idxOId, TrRect r, OId dataOId);
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId idxOId, TrRect r, OId dataOId);
 extern int32_t TrIndex_delete(TransactionContext &txn,
-	ObjectManager &objectManager, OId idxOId, TrRect r, void *data);
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId idxOId, TrRect r, void *data);
 extern int32_t TrIndex_delete_cmp(TransactionContext &txn,
-	ObjectManager &objectManager, OId idxOId, TrRect r, TrDataCmpCallback dccb,
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId idxOId, TrRect r, TrDataCmpCallback dccb,
 	void *dccbarg);
 
 extern void TrIndex_search(TransactionContext &txn,
-	ObjectManager &objectManager, OId idxOId, TrCheckCallback ccb, void *ccbarg,
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId idxOId, TrCheckCallback ccb, void *ccbarg,
 	TrHitCallback hcb, void *hcbarg);
 
-extern void TrIndex_all(TransactionContext &txn, ObjectManager &objectManager,
-	OId idxOId, TrHitCallback cb, void *cbarg);
+extern void TrIndex_all(TransactionContext &txn, ObjectManagerV4 &objectManager,
+	AllocateStrategy &strategy, OId idxOId, TrHitCallback cb, void *cbarg);
 extern void TrIndex_search_rect(TransactionContext &txn,
-	ObjectManager &objectManager, OId idxOId, TrRect r, TrHitCallback cb,
+	ObjectManagerV4 &objectManager, OId idxOId, TrRect r, TrHitCallback cb,
 	void *cbarg);
 extern void TrIndex_search_quad(TransactionContext &txn,
-	ObjectManager &objectManager, OId idxOId, TrPv3Key *qkey, TrHitCallback cb,
+	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId idxOId, TrPv3Key *qkey, TrHitCallback cb,
 	void *cbarg);
 
 extern void TrIndex_dump(
-	TransactionContext &txn, ObjectManager &objectManager, OId idxOId);
+	TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId idxOId);
 #endif

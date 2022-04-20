@@ -1,403 +1,322 @@
 ﻿/*
-    Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
+	Copyright (c) 2017 TOSHIBA Digital Solutions Corporation
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU Affero General Public License as
-    published by the Free Software Foundation, either version 3 of the
-    License, or (at your option) any later version.
+	This program is free software: you can redistribute it and/or modify
+	it under the terms of the GNU Affero General Public License as
+	published by the Free Software Foundation, either version 3 of the
+	License, or (at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU Affero General Public License for more details.
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU Affero General Public License for more details.
 
-    You should have received a copy of the GNU Affero General Public License
-    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+	You should have received a copy of the GNU Affero General Public License
+	along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 /*!
 	@file
-    @brief Definition of LogManager
+	@brief Definition of LogManager
 */
 #ifndef LOG_MANAGER_H_
 #define LOG_MANAGER_H_
 
-#include "data_store_common.h"
-#include "transaction_context.h"
+#include "data_type.h"
+#include "utility_v5.h"
 #include "config_table.h"
-#include "bit_array.h"
-#include "util/file.h"
-#include "util/container.h"
+#include "partition_file.h"
+#include <vector>
+#include <string>
+#include <iostream>
+#include <iomanip>
 
-class PartitionTable;
 
-class LogCursor;
-struct LogRecord;
-struct ChunkTableInfo;
+UTIL_TRACER_DECLARE(LOG_MANAGER);
 
 /*!
-    @brief Writes and reads logs.
+	@brief ログの種類
+*/
+enum LogType {
+	CPLog,  
+	CPULog, 
+	OBJLog, 
+
+
+	TXNLog, 
+	PutChunkStartLog, 
+	PutChunkDataLog,  
+	PutChunkEndLog,   
+	NOPLog, 
+	EOFLog, 
+	CheckpointEndLog  
+};
+
+enum LogFlushMode{
+	LOG_WRITE_WAL_BUFFER,
+	LOG_FLUSH_FILE,
+};
+
+struct LogManagerStats  {
+	enum Param {
+
+		LOG_STAT_FLUSH_COUNT,
+		LOG_STAT_FLUSH_TIME,
+
+		LOG_STAT_FLUSH_COUNT_ON_CP,
+		LOG_STAT_FLUSH_TIME_ON_CP,
+
+		LOG_STAT_DUPLICATE_LOG_MODE,
+
+		LOG_STAT_END
+	};
+
+	typedef TimeStatTable<Param, LOG_STAT_END> TimeTable;
+	typedef TimeTable::BaseTable Table;
+	typedef Table::Mapper Mapper;
+
+	explicit LogManagerStats(const Mapper *mapper);
+
+	static void setUpMapper(Mapper &mapper);
+	void merge(const Table &src);
+
+	Table table_;
+	TimeTable timeTable_;
+};
+
+/*!
+	@brief ログクラス
+*/
+class Log {
+private:
+	static const int64_t serialVersionUID = 1L;
+
+	LogType type_;
+	uint16_t checksum_;
+	uint16_t integrityCheckVal_;
+	int16_t version_;
+	LogSequentialNumber lsn_;
+	int64_t chunkId_;
+	int64_t groupId_;
+	int64_t offset_;
+	int8_t vacancy_;
+
+	int64_t dataSize_;
+	const void* data_;
+
+public:
+	Log(LogType cplog)
+	: type_(cplog), checksum_(0), integrityCheckVal_(0),
+	  version_(0), lsn_(UINT64_MAX),
+	  chunkId_(-1), groupId_(-1), offset_(-1), vacancy_(-1),
+	  dataSize_(0), data_(NULL)
+	{ }
+
+	LogType getType() const {
+		return type_;
+	}
+
+	Log& setCheckSum();
+	uint16_t getCheckSum() const;
+
+	bool checkSum() const;
+
+	Log& setIntegrityCheckVal(uint16_t checkVal);
+	uint16_t getIntegrityCheckVal() const;
+
+	Log& setLsn(LogSequentialNumber lsn);
+	LogSequentialNumber getLsn() const;
+
+	template <typename S>
+	void encode(S& out);
+
+	template <typename S>
+	void decode(S& in, util::StackAllocator& alloc);
+
+	Log& setChunkId(int64_t chunkid);
+
+	int64_t getChunkId() const;
+
+	Log& setGroupId(int64_t groupid);
+
+	int64_t getGroupId() const;
+
+	Log& setOffset(int64_t offset);
+	int64_t getOffset() const;
+
+	Log& setVacancy(int8_t vacancy);
+	int8_t getVacancy() const;
+
+	Log& setVersion(int16_t ver);
+	int16_t getVersion() const;
+
+	Log& setDataSize(int64_t dataLen);
+	Log& setData(const void* data);
+
+	const void* getData() const;
+	int64_t getDataSize() const;
+
+	std::string toString() const;
+};
+
+struct DuplicateLogMode {
+	static const LocalStatTypes::MergeMode STATUS_MERGE_MODE =
+			LocalStatTypes::MERGE_MAX;
+
+	enum Status {
+		DUPLICATE_LOG_DISABLE,
+		DUPLICATE_LOG_ENABLE,
+		DUPLICATE_LOG_ERROR,
+	};
+
+	DuplicateLogMode() :
+			status_(DUPLICATE_LOG_DISABLE),
+			stopOnDuplicateErrorFlag_(false) {
+	}
+
+	static void applyDuplicateStatus(
+			Status srcStatus, LogManagerStats &stats, bool force);
+	static void applyDuplicateStatus(Status src, Status &dest, bool force);
+
+	std::string duplicateLogPath_;
+	Status status_;
+	bool stopOnDuplicateErrorFlag_;
+};
+
+
+template <class L>
+class LogManager;
+class SimpleFile;
+/*!
+	@brief ログイテレータ
+*/
+template <class L>
+class LogIterator {
+private:
+	static const size_t DEFAULT_LOG_READ_BUFFER_SIZE = 4 * 1024;
+
+	LogManager<L>* logManager_;
+	util::StackAllocator* alloc_;
+
+	std::vector<std::string> fileNames_;
+	int32_t nextFile_;
+	BufferedReader* logFile_;
+	int64_t logversion_;
+	int64_t offset_;
+	int64_t lastLsn_;
+	int64_t checkLsn_;
+	bool isXLog_;
+	std::vector<uint8_t> buffer_;
+
+public:
+	LogIterator(LogManager<L>* logmanager, int64_t logVersion)
+		: logManager_(logmanager), alloc_(&logmanager->getAllocator()),
+		  nextFile_(0), logFile_(NULL), logversion_(logVersion),
+		  offset_(0), lastLsn_(0), checkLsn_(-1), isXLog_(false) {
+	};
+
+	LogIterator(LogManager<L>* logmanager, int64_t logVersion, uint64_t offset)
+		: logManager_(logmanager), alloc_(&logmanager->getAllocator()),
+		  nextFile_(0), logFile_(NULL), logversion_(logVersion),
+		  offset_(offset), lastLsn_(0), checkLsn_(-1), isXLog_(false) {
+	};
+
+	void add(const std::string& filename);
+
+	bool checkExists(LogSequentialNumber offset);
+
+	std::unique_ptr<Log> next(bool forRecovery);
+	void fin();
+
+	void removeLogFiles();
+
+	void markXLog() {
+		isXLog_ = true;
+	}
+
+	std::string toString() const;
+};
+
+
+/*!
+	@brief WALバッファ
+*/
+class WALBuffer : public Interchangeable {
+private:
+	PartitionId pId_;
+	int32_t bufferSize_;
+	SimpleFile* logFile_;
+	SimpleFile* duplicateFile_;
+	bool stopOnDuplicateError_;
+	DuplicateLogMode::Status duplicateStatus_;
+	std::unique_ptr<uint8_t[]> buffer_;
+	int32_t position_;
+	util::Atomic<bool> needFlush_;
+	LogManagerStats &stats_;
+
+public:
+	WALBuffer(PartitionId pId, LogManagerStats &stats);
+	~WALBuffer();
+
+	WALBuffer& init(SimpleFile* logfile);
+
+	uint64_t append(const uint8_t* data, size_t dataLength);
+
+	bool flush(LogFlushMode x, bool byCP);
+
+	static void flush(
+			SimpleFile &logfile, bool byCP, LogManagerStats &stats);
+
+	void fin();
+
+	void setDuplicateFile(SimpleFile* file);
+
+	void setStopOnDuplicateError(bool stopOnDuplicateError);
+	bool getStopOnDuplicateError();
+
+	void initDuplicateStatus();
+	DuplicateLogMode::Status getDuplicateStatus();
+
+	SimpleFile* initDuplicateLogFile(const char* path);
+
+	double getActivity() const;
+
+	bool resize(int32_t capacity);
+
+	PartitionId getPId() { return pId_; }
+
+private:
+	void handleDuplicateError(std::exception &e);
+	void setDuplicateStatus(
+			DuplicateLogMode::Status status, bool force = false);
+};
+
+
+struct LogManagerConst {
+	static const char* CPLOG_FILE_SUFFIX;
+	static const char* XLOG_FILE_SUFFIX;
+	static const char* INCREMENTAL_FILE_SUFFIX;
+};
+
+template <class L>
+/*!
+	@brief ログマネージャ
 */
 class LogManager {
 public:
+	static const size_t LOG_DATA_LIMIT_SIZE = INT32_MAX - 100;
 
-	struct Config;
+	LogManager(
+			ConfigTable& configTable, std::unique_ptr<L>&& locker,
+			util::StackAllocator& alloc, WALBuffer& xWALbuffer,
+			WALBuffer& cpWALBuffer, int32_t checkpointrange,
+			const char* cpLogPath, const char* xLogPath, PartitionId pId,
+			LogManagerStats &stats);
+	~LogManager();
 
-	static const int32_t LOGMGR_VARINT_MAX_LEN = 9;
-
-	static const char *const LOG_FILE_BASE_NAME;
-	static const char *const LOG_FILE_SEPARATOR;
-	static const char *const LOG_FILE_EXTENSION;
-
-	/*!
-		@brief Log types of operations
-	*/
-	enum LogType { 
-		LOG_TYPE_UNDEF = 0,
-
-		LOG_TYPE_CHECKPOINT_START,		/*!< start of checkpoint */
-
-		LOG_TYPE_COMMIT,				/*!< commit transaction */
-		LOG_TYPE_ABORT,					/*!< abort transaction */
-
-		LOG_TYPE_CREATE_PARTITION,		/*!< obsolete log type, not supported for version 2.0 or lator */
-		LOG_TYPE_DROP_PARTITION,		/*!< drop partition */
-		LOG_TYPE_PUT_CONTAINER,			/*!< put Container */
-		LOG_TYPE_DROP_CONTAINER,		/*!< drop Container */
-		LOG_TYPE_CREATE_INDEX,			/*!< create index */
-		LOG_TYPE_DROP_INDEX,			/*!< drop index */
-		LOG_TYPE_CREATE_TRIGGER,		/*!< set trigger */
-		LOG_TYPE_DROP_TRIGGER,			/*!< remove trigger */
-
-		LOG_TYPE_PUT_ROW,				/*!< put Row(s) */
-		LOG_TYPE_REMOVE_ROW,			/*!< remove Row(s) */
-		LOG_TYPE_LOCK_ROW,				/*!< lock Row(s) */
-
-		LOG_TYPE_CHECKPOINT_END,		/*!< end of checkpoint */
-		LOG_TYPE_SHUTDOWN,				/*!< shutdown node */
-		LOG_TYPE_CHUNK_META_DATA,		/*!< chunk metadata */
-
-		LOG_TYPE_UPDATE_ROW,			/*!< udpate Row(s) */
-
-		LOG_TYPE_PUT_CHUNK_START,		/*!< start of chunk data */
-		LOG_TYPE_PUT_CHUNK_DATA,		/*!< chunk data */
-		LOG_TYPE_PUT_CHUNK_END,			/*!< end of chunk data */
-
-		LOG_TYPE_CONTINUE_CREATE_INDEX, /*!< continue to alter Container */
-		LOG_TYPE_CONTINUE_ALTER_CONTAINER, /*!< continue to alter Container */
-
-		LOG_TYPE_PARTITION_EXPIRATION_PUT_CONTAINER,	/*!< put Container with partition expiration*/
-
-		LOG_TYPE_WITH_BEGIN = 0x80,		/*!< flags for transaction start */
-		LOG_TYPE_IS_AUTO_COMMIT = 0x40,	/*!< flags for autocommit transaction */
-		LOG_TYPE_CLEAR_FLAGS = 0x3f,	/*!< empty flag */
-
-		LOG_TYPE_NOOP = 0x3e
-	};
-
-	enum ArchiveLogMode {
-		ARCHIVE_LOG_DISABLE = 0,
-		ARCHIVE_LOG_ENABLE,
-		ARCHIVE_LOG_RUNNING,
-		ARCHIVE_LOG_ERROR = -1
-	};
-
-	enum DuplicateLogMode {
-		DUPLICATE_LOG_DISABLE = 0,
-		DUPLICATE_LOG_ENABLE,
-		DUPLICATE_LOG_ERROR = -1
-	};
-
-	/*!
-		@brief Persistency mode of logs
-	*/
 	enum PersistencyMode {
 		PERSISTENCY_NORMAL = 1,
 		PERSISTENCY_KEEP_ALL_LOG = 2
 	};
-
-	uint64_t getFileFlushCount() const;
-	uint64_t getFileFlushTime() const;
-
-	explicit LogManager(const Config &config);	
-
-	~LogManager();
-
-	void open(
-			bool checkOnly, bool forceRecoveryFromExistingFiles = false,
-			bool isIncremental = false,
-			PartitionGroupId cpLongSyncPgId = UNDEF_PARTITIONGROUPID);  
-
-	void openPartial(PartitionGroupId pgId, CheckpointId cpId, const char8_t *suffix);
-
-	void create(PartitionGroupId pgId, CheckpointId cpId, const char8_t *suffix);
-
-	void close();
-
-	CheckpointId getFirstCheckpointId(PartitionGroupId pgId) const;
-
-	CheckpointId getLastCheckpointId(PartitionGroupId pgId) const;
-
-	CheckpointId getLastCompletedCheckpointId(PartitionGroupId pgId) const;
-
-	bool findLog(LogCursor &cursor, PartitionId pId, LogSequentialNumber lsn);
-
-	void updateAvailableStartLsn(
-			PartitionTable *pt, PartitionGroupId pgId,
-			util::XArray<uint8_t> &binaryLogRecords, CheckpointId cpId);
-
-	bool findCheckpointStartLog(
-			LogCursor &cursor, PartitionGroupId pgId, CheckpointId cpId);
-
-	bool findCheckpointEndLog(
-			LogCursor &cursor, PartitionGroupId pgId, CheckpointId cpId);
-
-	LogSequentialNumber getLSN(PartitionId pId) const;
-
-	void setLSN(PartitionId pId, LogSequentialNumber lsn);
-
-	void setAvailableStartLSN(PartitionId  pId, CheckpointId cpId);
-
-
-
-
-
-
-	void putReplicationLog(
-			PartitionId pId, LogSequentialNumber lsn,
-			uint32_t len, uint8_t *logRecord);
-
-	LogSequentialNumber putCheckpointStartLog(
-			util::XArray<uint8_t> &binaryLogBuf,
-			PartitionId pId,
-			TransactionId maxTxnId,	LogSequentialNumber cpLsn,
-			const util::XArray<ClientId> &clientIds,
-			const util::XArray<TransactionId> &activeTxnIds,
-			const util::XArray<ContainerId> &refContainerIds,
-			const util::XArray<StatementId> &lastExecStmtIds,
-			const util::XArray<int32_t> &txnTimeoutIntervalSec);
-
-	LogSequentialNumber putCommitTransactionLog(
-			util::XArray<uint8_t> &binaryLogBuf, 
-			PartitionId pId, const ClientId &clientId,
-			TransactionId txnId, ContainerId containerId,
-			StatementId stmtId);
-
-	LogSequentialNumber putAbortTransactionLog(
-			util::XArray<uint8_t> &binaryLogBuf, 
-			PartitionId pId, const ClientId &clientId,
-			TransactionId txnId, ContainerId containerId,
-			StatementId stmtId);
-
-	LogSequentialNumber putDropPartitionLog(
-			util::XArray<uint8_t> &binaryLogBuf,
-			PartitionId pId) ;
-
-
-	LogSequentialNumber putPutContainerLog(
-			util::XArray<uint8_t> &binaryLogBuf,
-			PartitionId pId, const ClientId &clientId, TransactionId txnId,
-			ContainerId containerId, StatementId stmtId,
-			uint32_t containerNameLen, const uint8_t *containerName,
-			const util::XArray<uint8_t> &containerInfo,
-			int32_t containerType,
-			uint32_t extensionNameLen, const char *extensionName,
-			int32_t txnTimeoutInterval,
-			int32_t txnContextCreateMode, bool withBegin,
-			bool isAutoCommit, RowId cursorRowId, bool isPartitionExpiration);
-
-	LogSequentialNumber putDropContainerLog(
-			util::XArray<uint8_t> &binaryLogBuf,
-			PartitionId pId, ContainerId containerId,
-			uint32_t containerNameLen, const uint8_t *containerName);
-
-	LogSequentialNumber putCreateIndexLog(
-			util::XArray<uint8_t> &binaryLogBuf,
-			PartitionId pId, const ClientId &clientId, TransactionId txnId,
-			ContainerId containerId, StatementId stmtId,
-			const util::Vector<ColumnId> &columnIds,
-			int32_t mapType, uint32_t indexNameLen, const char *indexName,
-			uint32_t extensionNameLen, const char *extensionName,
-			const util::XArray<uint32_t> &paramDataLen,
-			const util::XArray<const uint8_t*> &paramData,
-			int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
-			bool withBegin, bool isAutoCommit, RowId cursorRowId);
-
-	LogSequentialNumber putContinueCreateIndexLog(
-			util::XArray<uint8_t> &binaryLogBuf,
-			PartitionId pId, const ClientId &clientId, TransactionId txnId,
-			ContainerId containerId, StatementId stmtId,
-			int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
-			bool withBegin, bool isAutoCommit, RowId cursor);
-
-	LogSequentialNumber putContinueAlterContainerLog(
-			util::XArray<uint8_t> &binaryLogBuf,
-			PartitionId pId, const ClientId &clientId, TransactionId txnId,
-			ContainerId containerId, StatementId stmtId,
-			int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
-			bool withBegin, bool isAutoCommit, RowId cursorRowId);
-
-	LogSequentialNumber putDropIndexLog(
-			util::XArray<uint8_t> &binaryLogBuf,
-			PartitionId pId, ContainerId containerId,
-			const util::Vector<ColumnId> &columnIds, int32_t mapType,
-			uint32_t indexNameLen, const char *indexName,
-			uint32_t extensionNameLen, const char *extensionName,
-			const util::XArray<uint32_t> &paramDataLen,
-			const util::XArray<const uint8_t*> &paramData);
-
-	LogSequentialNumber putCreateTriggerLog(
-			util::XArray<uint8_t> &binaryLogBuf,
-			PartitionId pId, ContainerId containerId,
-			uint32_t nameLen, const char *name,
-			const util::XArray<uint8_t> &triggerInfo);
-
-	LogSequentialNumber putDropTriggerLog(
-			util::XArray<uint8_t> &binaryLogBuf,
-			PartitionId pId, ContainerId containerId,
-			uint32_t nameLen, const char *name);
-
-	LogSequentialNumber putPutRowLog(
-			util::XArray<uint8_t> &binaryLogBuf,
-			PartitionId pId, const ClientId &clientId,
-			TransactionId txnId, ContainerId containerId,
-			StatementId stmtId,
-			uint64_t numRowId, const util::XArray<RowId> &rowIds,
-			uint64_t numRow, const util::XArray<uint8_t> &rowData,
-			int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
-			bool withBegin, bool isAutoCommit);
-
-	LogSequentialNumber putUpdateRowLog(
-			util::XArray<uint8_t> &binaryLogBuf,
-			PartitionId pId, const ClientId &clientId,
-			TransactionId txnId, ContainerId containerId,
-			StatementId stmtId,
-			uint64_t numRowId, const util::XArray<RowId> &rowIds,
-			uint64_t numRow, const util::XArray<uint8_t> &rowData,
-			int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
-			bool withBegin, bool isAutoCommit);
-
-	LogSequentialNumber putRemoveRowLog(
-			util::XArray<uint8_t> &binaryLogBuf,
-			PartitionId pId, const ClientId &clientId,
-			TransactionId txnId, ContainerId containerId,
-			StatementId stmtId,
-			uint64_t numRowId, const util::XArray<RowId> &rowIds,
-			int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
-			bool withBegin, bool isAutoCommit);
-
-	LogSequentialNumber putLockRowLog(
-			util::XArray<uint8_t> &binaryLogBuf,
-			PartitionId pId, const ClientId &clientId,
-			TransactionId txnId, ContainerId containerId,
-			StatementId stmtId,
-			uint64_t numRowId, const util::XArray<RowId> &rowIds,
-			int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
-			bool withBegin, bool isAutoCommit);
-
-	LogSequentialNumber putCheckpointEndLog(
-			util::XArray<uint8_t> &binaryLogBuf,
-			PartitionId pId);
-
-	LogSequentialNumber putChunkMetaDataLog(
-			util::XArray<uint8_t> &binaryLogBuf,
-			PartitionId pId, ChunkCategoryId categoryId,
-			ChunkId startChunkId, int32_t chunkNum,
-			int32_t validChunkNum, uint32_t expandedSize,
-			const util::XArray<uint8_t> *chunkMetaDataList,
-			bool sentinel);
-
-
-	void prepareCheckpoint(PartitionGroupId pgId, CheckpointId cpId);
-
-	void postCheckpoint(PartitionGroupId pgId);
-
-	LogSequentialNumber putChunkStartLog(
-			util::XArray<uint8_t> &binaryLogBuf,
-			PartitionId pId, uint64_t putChunkId,
-			uint64_t chunkNum);
-
-	LogSequentialNumber putChunkDataLog(
-			util::XArray<uint8_t> &binaryLogBuf,
-			PartitionId pId, uint64_t putChunkId,
-			uint32_t chunkSize,
-			const uint8_t* chunkImage);
-
-
-	LogSequentialNumber putChunkEndLog(
-			util::XArray<uint8_t> &binaryLogBuf,
-			PartitionId pId, uint64_t putChunkId);
-
-	void writeBuffer(PartitionGroupId pgId);
-
-	void flushFile(PartitionGroupId pgId, bool executeChildren = true);
-
-	void addSyncLogManager(LogManager *logMgr, PartitionId filterPId);
-	void removeSyncLogManager(LogManager *logMgr, PartitionId filterPId);
-
-	static uint16_t getBaseVersion();
-	static uint16_t getLatestVersion();
-
-	static bool isAcceptableVersion(uint16_t version);
-	void setLogVersion(PartitionId pId, uint16_t version);
-
-	uint16_t getLogVersion(PartitionId pId);
-	uint64_t copyLogFile(PartitionGroupId pgId, const char8_t *dirPath);
-
-	static uint32_t parseLogHeader(const uint8_t *&addr, LogRecord &record);
-	static uint32_t parseLogBody(const uint8_t *&addr, LogRecord &record);
-
-	PartitionGroupId calcPartitionGroupId(PartitionId pId) const;
-
-	PartitionId calcGroupTopPartitionId(PartitionGroupId pgId) const;
-
-	uint64_t getLogSize(PartitionGroupId pgId);
-
-	static bool isLsnAssignable(uint8_t logType);
-
-	void setAutoCleanupLogFlag(bool flag);
-	bool getAutoCleanupLogFlag();
-
-	void setArchiveLogMode(ArchiveLogMode mode) {
-		archiveLogMode_ = mode;
-	};
-	ArchiveLogMode getArchiveLogMode() {
-		return archiveLogMode_;
-	};
-
-	static void setDuplicateLogMode(int32_t mode) {
-		duplicateLogMode_ = mode;
-	};
-	static int32_t getDuplicateLogMode() {
-		return duplicateLogMode_;
-	};
-
-	void setDuplicateLogPath(PartitionGroupId pgId, const char8_t *duplicatePath);
-	void getDuplicateLogPath(PartitionGroupId pgId, std::string& duplicatePath);
-
-	void setStopOnDuplicateErrorFlag(bool flag);
-
-	void cleanupLogFiles(PartitionGroupId pgId, CheckpointId baseCpId);
-
-	CheckpointId getLastArchivedCpId(PartitionGroupId pgId);
-
-	bool isLongtermSyncLogAvailable() const;
-
-	void setLongtermSyncLogError(const std::string &message);
-
-	std::string getLongtermSyncLogErrorMessage() const;
-
-	static uint16_t selectNewerVersion(uint16_t arg1, uint16_t arg2);
-	static bool checkFileName(
-			const std::string &name,
-			PartitionGroupId &pgId, CheckpointId &cpId);
-
-
-	uint16_t getFileVersion(PartitionGroupId pgId, CheckpointId cpId);
-
-	static const char* logTypeToString(LogType type);
-
-	Config& getConfig() { return config_; }
-
 	/*!
 		@brief Configuration of LogManaegr
 	*/
@@ -438,836 +357,1301 @@ public:
 		bool lsnBaseFileRetention_;
 	};
 
-private:
-	friend class LogCursor;
-	friend class LogManagerFunctionTest;
-
-	class ConflictionDetector;
-	class ConflictionDetectorScope;
-
-	struct ReferenceCounter;
-	struct LogFileInfo;
-	struct LogBlocksInfo;
-
-	class LogFileLatch;
-	class LogBlocksLatch;
-	class LogFileIndex;
-
-	struct PartitionInfo;
-	class PartitionGroupManager;
-
-	typedef uint64_t FileOffset;
-	typedef std::pair<CheckpointId, uint64_t> BlockPosition;
-	typedef util::FixedSizeAllocator<> BlockPool;
-
-	static const uint8_t LOG_RECORD_PADDING_ELEMENT = 0xfc;
-
-	static const char *const LOG_INDEX_FILE_BASE_NAME;
-	static const char *const LOG_INDEX_FILE_SEPARATOR;
-	static const char *const LOG_INDEX_FILE_EXTENSION;
-
-	static const char *const LOG_DUMP_FILE_BASE_NAME;
-	static const char *const LOG_DUMP_FILE_EXTENSION;
-
-	LogManager(const LogManager&);
-	LogManager& operator=(const LogManager&);
-
-	template<typename Alloc>
-	LogSequentialNumber serializeLogCommonPart(
-			util::XArray<uint8_t, Alloc> &logBuf,
-			uint8_t type, PartitionId pId, SessionId sessionId,
-			TransactionId txnId, ContainerId containerId);
-	template<typename Alloc>
-	void putBlockTailNoopLog(
-			util::XArray<uint8_t, Alloc> &logBuf, PartitionId pId);
-	void putLog(
-			PartitionId pId, LogSequentialNumber lsn,
-			uint8_t *serializedLogRecord, size_t logRecordLen,
-			bool needUpdateLength = true);
-	void flushByCommit(PartitionId pId);
-
-	LogSequentialNumber putPutOrUpdateRowLog(
-			LogType logType,
-			util::XArray<uint8_t> &binaryLogBuf,
-			PartitionId pId, const ClientId &clientId, TransactionId txnId,
-			ContainerId containerId, StatementId stmtId,
-			uint64_t numRowId, const util::XArray<RowId> &rowIds,
-			uint64_t numRow, const util::XArray<uint8_t> &rowData,
-			int32_t txnTimeoutInterval, int32_t txnContextCreateMode,
-			bool withBegin, bool isAutoCommit);
-
-	static const char* maskDirectoryPath(const char *dirPath);
-
-	static uint64_t getBlockIndex(const Config &config, uint64_t fileOffset);
-	static uint32_t getBlockOffset(const Config &config, uint64_t fileOffset);
-	static uint64_t getFileOffset(
-			const Config &config, uint64_t blockIndex, uint32_t blockOffset = 0);
-	static uint32_t getBlockRemaining(
-			const Config &config, uint64_t fileOffset);
-
-	static int32_t getLogVersionScore(uint16_t version);
-	static class ConfigSetUpHandler : public ConfigTable::SetUpHandler {
-		virtual void operator()(ConfigTable &config);
-	} configSetUpHandler_;
-
-	Config config_;
-
-	std::vector<PartitionInfo> partitionInfoList_;
-	std::vector<PartitionGroupManager*> pgManagerList_;
-
-	ArchiveLogMode archiveLogMode_; 
-	static int32_t duplicateLogMode_; 
-	bool stopOnDuplicateErrorFlag_; 
-	std::vector<LogManager*> childLogManagerList_; 
-	PartitionId filterPId_; 
-};
-
-
-
-struct LogManager::ReferenceCounter {
-public:
-	ReferenceCounter();
-
-	size_t getCount() const;
-
-private:
-	friend class PartitionGroupManager;
-	friend class LogFileLatch;
-	friend class LogBlocksLatch;
-
-	size_t increment();
-	size_t decrement();
-
-	size_t count_;
-};
-
-/*!
-	@brief Information of a Log file
-*/
-struct LogManager::LogFileInfo {
-public:
-	LogFileInfo();
-
-	void open(
-			const Config &config,
-			PartitionGroupId pgId, CheckpointId cpId, bool expectExisting,
-			bool checkOnly, const char8_t *suffix);
-	void close();
-	bool isClosed() const;
+	Config& getConfig() { return config_; }
 
-	static std::string createLogFilePath(
-			const char8_t *dirPath, PartitionGroupId pgId, CheckpointId cpId,
-			const char8_t *suffix = NULL);
+	std::tuple<LogIterator<L>, LogIterator<L> > init(bool byCP);
 
-	ReferenceCounter& getReferenceCounter();
-	CheckpointId getCheckpointId() const;
-	uint64_t getFileSize() const;
-	void setAvailableFileSize(uint64_t size);
-	bool isAvailableFileSizeUpdated() const;
-	uint64_t getTotalBlockCount(bool ignoreIncompleteTail) const;
-
-	uint32_t readBlock(void *buffer, uint64_t startIndex, uint32_t count);
-	void writeBlock(const void *buffer, uint64_t startIndex, uint32_t count);
-
-	void flush();
-	static void clearCache(
-			util::NamedFile &file, const Config &config,
-			uint64_t flushCount, bool forceClearCache);
-	static uint64_t flush(
-			util::NamedFile &file, const Config &config, bool failOnClose,
-			uint64_t flushCount, bool forceClearCache);
-	util::NamedFile* getFileDirect() { return file_; }
-
-	void setDuplicateLogFile(util::NamedFile* file) { file2_ = file; }
-
-	void setDuplicateLogPath(const char8_t* duplicatePath);
-
-	void setStopOnDuplicateErrorFlag(bool flag) { stopOnDuplicateErrorFlag_ = flag; }
-
-	void createDuplicateLog(PartitionGroupId pgId, const char8_t *duplicatePath);
-
-private:
-	void lock();
-
-	ReferenceCounter referenceCounter_;
-	CheckpointId cpId_;
-	util::NamedFile *file_;
-	util::NamedFile *file2_; 
-	uint64_t fileSize_;
-	uint64_t availableFileSize_;
-	const Config *config_;
-	std::string duplicateLogPath_; 
-	bool stopOnDuplicateErrorFlag_; 
-	int32_t duplicateLogMode_; 
-};
-
-/*!
-	@brief Information of a LogBlock for logging
-*/
-struct LogManager::LogBlocksInfo {
-public:
-
-	static const uint32_t LOGBLOCK_HEADER_SIZE = sizeof(uint32_t) * 16;
-
-	static const uint16_t LOGBLOCK_BASE_VERSION;
-	static const uint16_t LOGBLOCK_LATEST_VERSION;
-	LogBlocksInfo();
-
-	void initialize(const Config &config, BlockPool &blocksPool,
-			uint64_t startIndex, bool multiple);
-	void clear(BlockPool &blocksPool);
-	bool isEmpty() const;
-
-	ReferenceCounter& getReferenceCounter();
-
-	uint32_t getBlockCount() const;
-	uint64_t getStartIndex() const;
-	uint64_t getFileEndOffset() const;
-	bool prepareNextBodyOffset(uint64_t &totalOffset) const;
-
-	uint32_t getBodyPart(
-			uint8_t *buffer, uint64_t index, uint32_t offset, uint32_t size) const;
-	uint32_t putBodyPart(
-			const uint8_t *buffer, uint64_t index, uint32_t offset, uint32_t size);
-
-	void fillBodyRemaining(uint64_t index, uint32_t offset, uint8_t value);
-
-	uint32_t copyAllFromFile(LogFileInfo &fileInfo);
-	void copyToFile(LogFileInfo &fileInfo, uint64_t index);
-
-	void initializeBlockHeader(uint64_t index, uint16_t logVersion);
-
-	uint64_t getLastCheckpointId(uint64_t index) const;
-	void setLastCheckpointId(uint64_t index, uint64_t cpId);
-
-	uint64_t getCheckpointFileInfoOffset(uint64_t index) const;
-	void setCheckpointFileInfoOffset(uint64_t index, uint64_t offset);
-
-	uint32_t getFirstRecordOffest(uint64_t index) const;
-	void setFirstRecordOffest(uint64_t index, uint32_t offset);
-
-	bool isNormalShutdownCompleted(uint64_t index) const;
-	void setNormalShutdownCompleted(uint64_t index, bool completed);
-
-	uint16_t getVersion() const;
-
-	static bool isAcceptableVersion(uint16_t version);
-
-	static bool isValidRecordOffset(const Config &config, uint64_t offset);
-
-	const uint8_t* data() const;
-
-private:
-	static const uint32_t LOGBLOCK_CHECKSUM_OFFSET = 0;		
-	static const uint32_t LOGBLOCK_VERSION_OFFSET =
-			LOGBLOCK_CHECKSUM_OFFSET + sizeof(uint32_t);		
-	static const uint32_t LOGBLOCK_MAGIC_OFFSET =
-			LOGBLOCK_VERSION_OFFSET + sizeof(uint16_t);		
-	static const uint32_t LOGBLOCK_LAST_CHECKPOINT_ID_OFFSET =
-			LOGBLOCK_MAGIC_OFFSET + sizeof(uint16_t);		
-	static const uint32_t LOGBLOCK_CHECKPOINT_FILE_INFO_POS_OFFSET =
-			LOGBLOCK_LAST_CHECKPOINT_ID_OFFSET + sizeof(uint64_t);		
-	static const uint32_t LOGBLOCK_FIRSTRECORD_OFFSET =
-			LOGBLOCK_CHECKPOINT_FILE_INFO_POS_OFFSET + sizeof(uint64_t);		
-	static const uint32_t LOGBLOCK_DUMMY_OFFSET =
-			LOGBLOCK_FIRSTRECORD_OFFSET + sizeof(uint32_t);		
-	static const uint32_t LOGBLOCK_LSN_INFO_OFFSET =
-			LOGBLOCK_DUMMY_OFFSET + sizeof(uint32_t);		
-
-	static const uint64_t LOGBLOCK_NORMAL_SHUTDOWN_FLAG =
-			static_cast<uint64_t>(1) << 63;
-
-	static const uint16_t LOGBLOCK_ACCEPTABLE_VERSIONS[];
-	static const uint16_t LOGBLOCK_MAGIC_NUMBER = 0xAD69;
-
-	void validate(uint64_t index) const;
-
-	void updateChecksum(uint64_t index);
-	uint32_t getChecksum(uint64_t index) const;
-
-	template<typename T>
-	T getHeaderFileld(uint64_t index, uint32_t offset) const;
-	template<typename T>
-	void setHeaderFileld(uint64_t index, uint32_t offset, T value);
-
-	uint32_t getBlockHeadOffset(uint64_t index) const;
-
-	ReferenceCounter referenceCounter_;
-	uint8_t *blocks_;
-	uint64_t startIndex_;
-	uint32_t blockCount_;
-	const Config *config_;
-};
-
-/*!
-    @brief Manages latch of file of logs.
-*/
-class LogManager::LogFileLatch {
-public:
-	LogFileLatch();
-	~LogFileLatch();
-
-	void set(PartitionGroupManager &manager,
-			CheckpointId cpId, bool expectExisting,
-			const char8_t *suffix = NULL);
-	void clear();
-
-	PartitionGroupManager* getManager();
-	LogFileInfo* get();
-	LogFileInfo* get() const;
-
-	void duplicate(LogFileLatch &dest);
-
-private:
-	LogFileLatch(const LogFileLatch&);
-	LogFileLatch& operator=(const LogFileLatch&);
-
-	PartitionGroupManager *manager_;
-	LogFileInfo *fileInfo_;
-};
-
-/*!
-    @brief Manages latch of block of logs.
-*/
-class LogManager::LogBlocksLatch {
-public:
-	LogBlocksLatch();
-	~LogBlocksLatch();
-
-	void setForScan(LogFileLatch &fileLatch, uint64_t startIndex);
-	void setForAppend(LogFileLatch &fileLatch);
-
-	void clear();
-
-	PartitionGroupManager* getManager();
-	LogFileInfo* getFileInfo();
-	LogFileInfo* getFileInfo() const;
-	LogBlocksInfo* get();
-	LogBlocksInfo* get() const;
-
-	void duplicate(LogBlocksLatch &dest);
-
-private:
-	LogBlocksLatch(const LogBlocksLatch&);
-	LogBlocksLatch& operator=(const LogBlocksLatch&);
-
-	void set(LogFileLatch &fileLatch, uint64_t startIndex, bool multiple);
-
-	LogFileLatch fileLatch_;
-	LogBlocksInfo *blocksInfo_;
-};
-
-/*!
-    @brief Manages index of logs.
-*/
-class LogManager::LogFileIndex {
-public:
-	LogFileIndex();
-	~LogFileIndex();
-
-	void initialize(const Config &config,
-			PartitionGroupId pgId, CheckpointId cpId, uint64_t logBlockCount,
-			const std::vector<PartitionInfo> &partitionInfoList);
-	void clear();
-	bool isEmpty();
-
-	bool tryFind(PartitionId pId, LogSequentialNumber startLsn,
-			uint64_t &blockIndex, int32_t &direction, bool &empty);
-	void trySetLastEntry(uint64_t blockIndex,
-			PartitionId activePId, LogSequentialNumber activeLsn);
-
-	void prepare(PartitionGroupManager &manager);
-	void rebuild(PartitionGroupManager &manager);
-
-	bool find(PartitionId pId, LogSequentialNumber startLsn,
-			uint64_t &blockIndex, int32_t &direction, bool &empty);
-	void setLastEntry(uint64_t blockIndex,
-			PartitionId activePId, LogSequentialNumber activeLsn);
-
-private:
-	LogFileIndex(const LogFileIndex&);
-	LogFileIndex& operator=(const LogFileIndex&);
-
-	enum HeaderFiledId {
-		HEADER_FIELD_VERSION,
-		HEADER_FIELD_MAGIC,
-		HEADER_FIELD_PARTITION_GROUP_ID,
-		HEADER_FIELD_CHECKPOINT_ID,
-		HEADER_FIELD_PARTITION_COUNT,
-		HEADER_FIELD_MAX
-	};
-
-	static const uint64_t VERSION_NUMBER = 0x1;
-	static const uint64_t MAGIC_NUMBER = UINT64_C(0xE3B0D89A9F5DE617);
-
-	uint64_t getValue(uint64_t valueId);
-	void setValue(uint64_t valueId, uint64_t value);
-
-	void prepareBuffer(uint64_t valueId);
-	void updateFile();
-
-	void invalidate();
-
-	static uint64_t getFileOffset(uint64_t valueId);
-	uint32_t getBufferValueCount() const;
-	uint32_t getPartitionCount() const;
-	std::string getFileName() const;
-
-	const Config *config_;
-	PartitionGroupId pgId_;
-	CheckpointId cpId_;
-	const std::vector<PartitionInfo> *partitionInfoList_;
-
-	util::NamedFile file_;
-	uint64_t *buffer_;
-	uint64_t bufferValueId_;
-	uint64_t valueCount_;
-	bool dirty_;
-	bool invalid_;
-};
-
-/*!
-	@brief Recovery information of a Partition
-*/
-struct LogManager::PartitionInfo {
-
-	PartitionInfo() : lsn_(0), availableStartLsn_(0)
-	{
+	void init(int64_t logversion, bool withFlush, bool byCP);
+
+	inline int64_t getLogVersion() { return logversion_; };
+
+	void startCheckpoint0(bool withFlush, bool byCP);
+
+	void startCheckpoint(bool withFlush, bool byCP);
+
+	LogSequentialNumber appendXLog(
+			LogType type, void* data, size_t dataLen, util::XArray<uint8_t>* logBinary);
+
+	void copyXLog(
+		LogType type, LogSequentialNumber lsn, const void* data, size_t len);
+
+	void appendCpLog(Log& log);
+
+	void flushCpLog(LogFlushMode x, bool byCP);
+
+	void flushXLog(LogFlushMode x, bool byCP);
+
+	void flushXLogByCommit(bool byCP);
+
+	void removeLogFiles(int64_t baseLogVer, int64_t checkpointRange);
+
+	LogSequentialNumber getStartLSN();
+
+	int64_t getStartLogVersion();
+
+	void closeFiles(bool withFlush, bool byCP);
+
+	void removeAllLogFiles(bool byCP);
+
+	void addPendingFiles(SimpleFile *file);
+	void closePendingFiles(bool force, bool byCP);
+
+	void fin(bool byCP);
+
+	inline L* locker() {
+		return locker_.get();
 	}
 
-	LogSequentialNumber lsn_;
+	inline util::StackAllocator& getAllocator() {
+		return alloc_;
+	}
 
-	LogSequentialNumber availableStartLsn_;
-	std::map<CheckpointId, LogSequentialNumber> startLsnMap_;
+	LogIterator<L> createLogIterator(int64_t logversion);
 
+	LogIterator<L> createXLogIterator(LogSequentialNumber lsn);
 
-};
+	LogIterator<L> createCPLogIterator(LogSequentialNumber lsn);
 
-/*!
-    @brief Manages logs for the Partition group.
-*/
-class LogManager::PartitionGroupManager {
-public:
-	PartitionGroupManager();
-	~PartitionGroupManager();
+	LogIterator<L> createChunkDataLogIterator();
 
-	void open(
-			PartitionGroupId pgId, const Config &config,
-			CheckpointId initialCpId, CheckpointId lastCpId,
-			std::vector<PartitionInfo> &partitionInfoList,
-			bool emptyFileAppendable, bool checkOnly,
-			const char8_t *suffix = NULL, bool isSyncTempLogFile = false);
-	void close();
-	bool isClosed() const;
-
-	CheckpointId getFirstCheckpointId() const;
-	CheckpointId getLastCheckpointId() const;
-	CheckpointId getCompletedCheckpointId() const;
-
-	bool findLog(
-			LogBlocksLatch &blocksLatch, uint64_t &offset,
-			PartitionId pId, LogSequentialNumber lsn);
-	bool findLogByIndex(
-			LogBlocksLatch &blocksLatch, uint64_t &offset,
-			PartitionId pId, LogSequentialNumber lsn,
-			const BlockPosition &start, const BlockPosition &end,
-			int32_t &direction);
-	bool findLogByScan(
-			LogBlocksLatch &blocksLatch, uint64_t &offset,
-			PartitionId pId, LogSequentialNumber lsn,
-			const BlockPosition &start, const BlockPosition &end,
-			int32_t &direction);
-	bool findCheckpointStartLog(
-			LogBlocksLatch &blocksLatch, uint64_t &offset, CheckpointId cpId);
-	bool findCheckpointEndLog(
-			LogBlocksLatch &blocksLatch, uint64_t &offset, CheckpointId cpId);
-
-	bool getLogHeader(
-			LogBlocksLatch &blocksLatch, uint64_t &offset, LogRecord &logRecord,
-			util::XArray<uint8_t> *data, bool sameFileOnly,
-			const BlockPosition *endPosition = NULL);
-	bool getLogBody(
-			LogBlocksLatch &blocksLatch, uint64_t &offset,
-			util::XArray<uint8_t> &data, uint32_t bodyLen);
-	bool skipLogBody(
-			LogBlocksLatch &blocksLatch, uint64_t &offset, uint32_t bodyLen);
-	void putLog(const uint8_t *data, uint32_t size);
-
-	void writeBuffer();
-	void flushFile(bool forceClearCache = false);
-
-	uint64_t copyLogFile(
-			PartitionGroupId pgId, const char8_t *dirPath, bool duplicateLogMode);
-
-	void prepareCheckpoint();
-
-	void cleanupLogFiles(CheckpointId baseCpId = UNDEF_CHECKPOINT_ID);
-
-	void setAutoCleanupLogFlag(bool flag);
-	bool getAutoCleanupLogFlag();
-
-	void setDuplicateLogPath(const char8_t *duplicateLogPath);
-
-	void getDuplicateLogPath(std::string& duplicatePath);
-
-	void setStopOnDuplicateErrorFlag(bool flag);
-	bool getLongtermSyncLogErrorFlag() const;
-
+	void copyCpLog(const char* path, uint8_t* buffer, size_t bufferSize);
+	void copyXLog(const char* path, uint8_t* buffer, size_t bufferSize);
+	bool isLongtermSyncLogAvailable() const;
 	void setLongtermSyncLogError(const std::string &message);
-
+	bool getLongtermSyncLogErrorFlag() const;
 	const std::string& getLongtermSyncLogErrorMessage() const;
 
-	uint64_t getAvailableEndOffset(
-			LogFileLatch &fileLatch, LogBlocksLatch &blocksLatch);
-	uint64_t getAvailableEndBlock(
-			LogFileLatch &fileLatch, LogBlocksLatch &blocksLatch);
-
-	LogBlocksInfo* latchBlocks(
-			LogFileLatch &fileLatch, uint64_t startIndex, bool multiple);
-	void unlatchBlocks(LogFileLatch &fileLatch, LogBlocksInfo *&blocksInfo);
-
-	LogFileInfo* latchFile(
-			CheckpointId cpId, bool expectExisting, const char8_t *suffix);
-	void unlatchFile(LogFileInfo *&fileInfo);
-
-
-	void setLogVersion(uint16_t version);
-	uint16_t getLogVersion();
-
-	uint64_t getFileFlushCount() {
-		return flushCount_;
+	void setKeepXLogVersion(int64_t logVersion) {
+		keepXLogVersion_ = logVersion;
 	}
-	uint64_t getFileFlushTime() {
-		return flushTime_;
-	}
+	int64_t getXKeepLogVersion() { return keepXLogVersion_; }
+
+	LogSequentialNumber getLSN();
+	void setLSN(LogSequentialNumber lsn);
+	LogSequentialNumber incrementLSN();
+	void setSuffix(const char* suffix);
+
+	void setChild(std::unique_ptr<LogManager> child);
+
+	DuplicateLogMode& getDuplicateLogMode();
+	void setDuplicateLogMode(const DuplicateLogMode& mode);
+	void setDuplicateFile(SimpleFile* file);
+	void setStopOnDuplicateError(bool stopOnDuplicateError);
+	bool getStopOnDuplicateError();
 
 private:
-	typedef std::map<CheckpointId, LogFileInfo*> FileInfoMap;
-	typedef std::map<BlockPosition, LogBlocksInfo*> BlocksInfoMap;
+	void setDuplicateStatus(
+			DuplicateLogMode::Status status, bool force = false);
 
-	PartitionGroupManager(const PartitionGroupManager&);
-	PartitionGroupManager& operator=(const PartitionGroupManager&);
+	Config config_;
+	std::unique_ptr<L> locker_;
+	util::StackAllocator& alloc_;
+	WALBuffer& xWALBuffer_;
+	WALBuffer& cpWALBuffer_;
+	int32_t checkpointrange_;
+	PartitionId pId_;
+	std::string cpLogPath_;
+	std::string xLogPath_;
+	int64_t logversion_;
+	SimpleFile* cpFile_;
+	SimpleFile* xFile_;
+	SimpleFile* duplicateFile_;
+	const char* suffix_;
+	uint64_t xLogFileOffset_; 
+	util::Atomic<uint64_t> xLogCount_;
 
-	void getAllBlockRange(BlockPosition &start, BlockPosition &end) const;
-	BlockPosition splitBlockRange(
-			const BlockPosition &start, const BlockPosition &end,
-			LogFileLatch &fileLatch, LogBlocksLatch &blocksLatch);
-	BlockPosition getMinBlockScanEnd(
-			const BlockPosition &start, const BlockPosition &end);
-	static bool isRangeEmpty(
-			const BlockPosition &start, const BlockPosition &end);
+	bool longtermLogAvailable_;
+	std::string longtermSyncLogErrorMessage_;
+	bool longtermSyncLogErrorFlag_;
+	int64_t keepXLogVersion_;
 
-	void updateTailBlock(
-			PartitionId activePId, LogSequentialNumber activeLsn);
-
-	bool prepareBlockForScan(
-			LogBlocksLatch &blocksLatch, uint64_t &offset,
-			bool sameFileOnly, const BlockPosition *endPosition = NULL);
-	uint16_t getLogVersion(LogManager::LogType type);
-	void prepareBlockForAppend(
-			PartitionId activePId, LogSequentialNumber activeLsn, 
-			uint16_t logVersion);
-
-	void scanExistingFiles(
-			LogFileLatch &fileLatch, LogBlocksLatch &blocksLatch,
-			CheckpointId initialCpId, CheckpointId endCpId,
-			LogFileIndex &fileIndex, const char8_t *suffix);
-
-	PartitionGroupId pgId_;
-
-	FileInfoMap fileInfoMap_;
-	BlocksInfoMap blocksInfoMap_;
-
-	CheckpointId firstCheckpointId_;
-	CheckpointId lastCheckpointId_;
-	CheckpointId completedCheckpointId_;
-
-	LogFileIndex tailFileIndex_;
-	LogBlocksLatch tailBlocksLatch_;
-
-	uint64_t tailOffset_;
-	uint64_t checkpointFileInfoOffset_;
-	bool dirty_;
-	util::Atomic<bool> flushRequired_;
-	bool normalShutdownCompleted_;
-	bool tailReadOnly_;
-	bool checkOnly_;
-
-	bool execAutoCleanup_;
-
-	bool stopOnDuplicateErrorFlag_;
-	std::string longtermSyncLogErrorMessage_; 
-
-	bool longtermSyncLogErrorFlag_; 
-	uint16_t logVersion_;
-	util::Atomic<uint64_t> flushCount_; 
-	util::Atomic<uint64_t> flushTime_;
-	const Config *config_;
-	UTIL_UNIQUE_PTR<BlockPool> blocksPool_;
-	std::vector<PartitionInfo> *partitionInfoList_;
-
-	util::Atomic<util::NamedFile*> lastLogFile_;
-	std::string duplicateLogPath_;
+	typedef std::map<int64_t, LogSequentialNumber> ExistLsnMap;
+	ExistLsnMap existLsnMap_; 
+	LogManager<L>* child_;
+	DuplicateLogMode duplicateLogMode_;
+	std::vector<SimpleFile*> pendingFiles_;
+	LogManagerStats &stats_;
 };
 
+
+
 /*!
-	@brief Information of LogRecord for recovery
+	@brief ログファイルの追加
 */
-struct LogRecord {
-public:
-	typedef LogManager::LogType LogType;
+template<class L>
+void LogIterator<L>::add(const std::string& filename) {
+	fileNames_.push_back(filename);
+}
 
-	static const uint32_t LOG_HEADER_SIZE = sizeof(uint8_t)
-			+ sizeof(LogSequentialNumber) + sizeof(uint32_t)
-			+ sizeof(PartitionId);
+/*!
+	@brief 存在チェック
+*/
+template<class L>
+bool LogIterator<L>::checkExists(LogSequentialNumber lsn) {
+	int64_t offset = 0;
 
-	LogSequentialNumber lsn_;
-	uint32_t type_;
-	PartitionId partitionId_;
-	TransactionId txnId_;
-	ContainerId containerId_;
-
-	uint32_t bodyLen_;
-
-	ClientId clientId_;					
-
-	StatementId stmtId_;				
-	uint32_t txnContextCreationMode_;	
-	uint32_t txnTimeout_;				
-	uint64_t numRowId_;					
-	uint64_t numRow_;					
-	uint32_t dataLen_;					
-	const uint8_t *rowIds_;				
-	const uint8_t *rowData_;			
-
-	uint32_t containerType_;			
-	uint32_t containerNameLen_;			
-	uint32_t containerInfoLen_;			
-	const uint8_t *containerName_;		
-	const uint8_t *containerInfo_;		
-
-	uint32_t columnIdCount_;
-	uint32_t mapType_;
-	uint32_t indexNameLen_;
-	const char *indexName_;
-	const ColumnId *columnIds_;
-
-	LogSequentialNumber cpLsn_;
-	uint32_t txnContextNum_;
-	uint32_t containerNum_;
-	const uint8_t *clientIds_;
-	const uint8_t *activeTxnIds_;
-	const uint8_t *refContainerIds_;
-	const uint8_t *lastExecStmtIds_;
-	const uint8_t *txnTimeouts_;
-
-	ChunkId startChunkId_;
-	int32_t chunkNum_;
-	uint8_t chunkCategoryId_;
-	uint8_t emptyInfo_;
-	uint32_t expandedLen_;   
-
-	uint32_t extensionNameLen_;
-	const char *extensionName_;
-	uint32_t paramCount_;
-	const uint32_t *paramDataLen_;
-	const uint8_t *paramData_;
-
-	bool withBegin_;					
-	bool isAutoCommit_;					
-
-	uint16_t fileVersion_;
-
-	LogRecord() {
-		reset();
+	util::LockGuard<Locker>(*logManager_->locker());
+	if (lsn < logManager_->getStartLSN()) {
+		return false;
 	}
-	void reset();
+	else if (lsn > logManager_->getLSN()) {
+		return false;
+	}
+	assert(logFile_ == NULL);
+	std::unique_ptr<Log> log;
+	bool found = false;
+	try {
+		while (true) {
+			util::StackAllocator::Scope scope(logManager_->getAllocator());
+			log = next(false);
+			if (log == nullptr) {
+				break;
+			}
+			if (log->getLsn() == lsn) {
+				found = true;
+				break;
+			}
+			offset = offset_;
+		}
+		offset_ = offset; 
 
-	void dump(std::ostream &os);
-	std::string getDumpString();
-
-	static const char *const GS_LOG_TYPE_NAME_CHECKPOINT_START;
-	static const char *const GS_LOG_TYPE_NAME_CREATE_SESSION;
-	static const char *const GS_LOG_TYPE_NAME_CLOSE_SESSION;
-	static const char *const GS_LOG_TYPE_NAME_BEGIN;
-	static const char *const GS_LOG_TYPE_NAME_COMMIT;
-	static const char *const GS_LOG_TYPE_NAME_ABORT;
-
-	static const char *const GS_LOG_TYPE_NAME_CREATE_PARTITION;
-	static const char *const GS_LOG_TYPE_NAME_DROP_PARTITION;
-	static const char *const GS_LOG_TYPE_NAME_CREATE_CONTAINER;
-	static const char *const GS_LOG_TYPE_NAME_DROP_CONTAINER;
-	static const char *const GS_LOG_TYPE_NAME_CREATE_INDEX;
-	static const char *const GS_LOG_TYPE_NAME_DROP_INDEX;
-	static const char *const GS_LOG_TYPE_NAME_MIGRATE_SCHEMA;
-	static const char *const GS_LOG_TYPE_NAME_CREATE_EVENT_NOTIFICATION;
-	static const char *const GS_LOG_TYPE_NAME_DELETE_EVENT_NOTIFICATION;
-
-	static const char *const GS_LOG_TYPE_NAME_CREATE_COLLECTION_ROW;
-	static const char *const GS_LOG_TYPE_NAME_UPDATE_COLLECTION_ROW;
-	static const char *const GS_LOG_TYPE_NAME_DELETE_COLLECTION_ROW;
-	static const char *const GS_LOG_TYPE_NAME_PUT_COLLECTION_MULTIPLE_ROWS;
-	static const char *const GS_LOG_TYPE_NAME_LOCK_COLLECTION_ROW;
-
-	static const char *const GS_LOG_TYPE_NAME_CREATE_TIME_SERIES_ROW;
-	static const char *const GS_LOG_TYPE_NAME_UPDATE_TIME_SERIES_ROW;
-	static const char *const GS_LOG_TYPE_NAME_DELETE_TIME_SERIES_ROW;
-	static const char *const GS_LOG_TYPE_NAME_PUT_TIME_SERIES_MULTIPLE_ROWS;
-	static const char *const GS_LOG_TYPE_NAME_LOCK_TIME_SERIES_ROW;
-
-	static const char *const GS_LOG_TYPE_NAME_CHECKPOINT_FILE_INFO;
-	static const char *const GS_LOG_TYPE_NAME_CHUNK_TABLE_INFO;
-	static const char *const GS_LOG_TYPE_NAME_CPFILE_LSN_INFO;
-
-	static const char *const GS_LOG_TYPE_NAME_UNDEF;
-};
+		return found;
+	}
+	catch (std::exception &e) {
+		throw e;
+	}
+}
 
 /*!
-    @brief Iterates records for reading logs sequential.
+	@brief 次のログ取得
 */
- class LogCursor {
-public:
-	friend class LogManager;
-
-	LogCursor();
-
-	~LogCursor();
-
-	bool isEmpty() const;
-
-	void clear();
-
-	bool nextLog(
-			LogRecord &logRecord,
-			util::XArray<uint8_t> &binaryLogRecord,
-			PartitionId pId = UNDEF_PARTITIONID,
-			uint8_t targetLogType = LogManager::LOG_TYPE_UNDEF);
-
-	template<typename Stream>
-	void exportPosition(Stream &stream);
-
-	template<typename Stream>
-	void importPosition(Stream &stream, LogManager &logManager);
-
-	/*!
-		@brief Recovery progress information
-	*/
-	struct Progress {
-
-		Progress();
-
-		PartitionGroupId pgId_;
-
-		CheckpointId cpId_;
-
-		uint64_t fileSize_;
-
-		uint64_t offset_;
-
-	};
-
-	Progress getProgress() const;
-
-private:
-	LogCursor(const LogCursor&);
-	LogCursor& operator=(const LogCursor&);
-
-	void exportPosition(
-			CheckpointId &cpId, uint64_t &offset,
-			PartitionId &pId, LogSequentialNumber &lsn);
-	void importPosition(
-			LogManager &logManager, CheckpointId cpId, uint64_t offset,
-			PartitionId pId, LogSequentialNumber lsn);
-
-	PartitionGroupId pgId_;
-	LogManager::LogBlocksLatch blocksLatch_;
-	uint64_t offset_;
-};
-
-
-
-#define LOG_MANAGER_CONFLICTION_DETECTOR_SCOPE_CUSTOM( \
-	detector, entering)
-
-#define LOG_MANAGER_CONFLICTION_DETECTOR_SCOPE(pgId, entering)
-
-
-inline LogSequentialNumber LogManager::getLSN(PartitionId pId) const {
-	return partitionInfoList_[pId].lsn_;
+template <class L>
+std::unique_ptr<Log> LogIterator<L>::next(bool forRecovery) {
+	util::LockGuard<Locker>(*logManager_->locker());
+	try {
+		while (true) {
+			if (logFile_ == NULL) {
+				if (nextFile_ < static_cast<int32_t>(fileNames_.size())) {
+					logFile_ = new BufferedReader(
+						fileNames_.at(nextFile_), DEFAULT_LOG_READ_BUFFER_SIZE);
+					logFile_->open();
+					logversion_ = nextFile_;
+					nextFile_++;
+					offset_ = 0;
+					if (logFile_->getSize() == 0) {
+						logFile_->close();
+						delete logFile_;
+						logFile_ = NULL;
+						continue;
+					}
+				} else {
+					return NULL;
+				}
+			}
+			try {
+				uint64_t fileSize = logFile_->getSize();
+				if (offset_ + sizeof(int64_t) > fileSize) {
+					if (isXLog_) {
+						logManager_->flushXLog(LOG_WRITE_WAL_BUFFER, false);
+						logManager_->flushXLog(LOG_FLUSH_FILE, false);
+						fileSize = logFile_->getSize();
+						if (offset_ + sizeof(int64_t) > fileSize) {
+							logFile_->close();
+							delete logFile_;
+							logFile_ = NULL;
+							continue;
+						}
+					} else {
+						logFile_->close();
+						delete logFile_;
+						logFile_ = NULL;
+						continue;
+					}
+				}
+				int64_t len = logFile_->readLong(offset_);
+				if (len <= 0) {
+					logFile_->close();
+					delete logFile_;
+					logFile_ = NULL;
+					continue;
+				}
+				if (buffer_.size() < static_cast<size_t>(len)) {
+					const uint8_t dummy = 0;
+					buffer_.assign(len, dummy);
+				}
+				if ( static_cast<uint64_t>(offset_ + len) > fileSize) {
+					GS_TRACE_INFO(
+						LOG_MANAGER, GS_TRACE_LM_INCOMPLETE_LOG_RECORD,
+						"Log record is incomplete: recordLength=" << len <<
+						",fileName=" << logFile_->getFileName() <<
+						",offset=" << offset_ << ",fileSize=" << fileSize <<
+						",lastLsn=" << lastLsn_);
+					logFile_->close();
+					delete logFile_;
+					logFile_ = NULL;
+					continue;
+				}
+				int64_t readSize;
+				logFile_->read(len, buffer_.data(), offset_, readSize);
+				std::unique_ptr<Log> log(UTIL_NEW Log(LogType::NOPLog));
+				util::ArrayByteInStream in = util::ArrayByteInStream(
+						util::ArrayInStream(buffer_.data(), len));
+				log->decode<util::ArrayByteInStream>(in, *alloc_);
+				lastLsn_ = log->getLsn();
+				if (log->getType() == LogType::TXNLog
+						&& forRecovery
+						&& nextFile_ < static_cast<int32_t>(fileNames_.size())) {
+					GS_TRACE_INFO(
+						LOG_MANAGER, GS_TRACE_LM_SCAN_LOG_INFO,
+						"TXNLog is skipped. nextFile_=" << nextFile_ <<
+						",fileNames_.size()=" << fileNames_.size() <<
+						",fileName=" << logFile_->getFileName());
+					continue;
+				}
+				if (log->getType() == LogType::EOFLog) {
+					GS_TRACE_INFO(
+						LOG_MANAGER, GS_TRACE_LM_SCAN_LOG_INFO,
+						"EOFLog: fileName=" << logFile_->getFileName());
+					logFile_->close();
+					delete logFile_;
+					logFile_ = NULL;
+					continue;
+				}
+				if (log->getType() == LogType::CheckpointEndLog
+						&& forRecovery
+						&& nextFile_ >= static_cast<int32_t>(fileNames_.size())) {
+					GS_TRACE_INFO(
+						LOG_MANAGER, GS_TRACE_LM_SCAN_LOG_INFO,
+						"CheckpointEndLog(redo CPLog last): fileName=" <<
+						logFile_->getFileName() <<
+						",offset=" << offset_);
+					logFile_->close();
+					delete logFile_;
+					logFile_ = NULL;
+				}
+				return log;
+			}
+			catch (std::exception &e) {
+				logFile_->close();
+				delete logFile_;
+				logFile_ = NULL;
+				throw e;
+			}
+		}
+	}
+	catch (std::exception &e) {
+		throw e;
+	}
 }
 
-inline void LogManager::setLSN(PartitionId pId, LogSequentialNumber lsn) {
-	LOG_MANAGER_CONFLICTION_DETECTOR_SCOPE(
-			config_.pgConfig_.getPartitionGroupId(pId), true);
-
-
-
-	partitionInfoList_[pId].lsn_ = lsn;
+/*!
+	@brief 終了
+*/
+template<class L>
+void LogIterator<L>::fin() {
+	if (logFile_ != NULL) {
+		logFile_->close();
+		delete logFile_;
+		logFile_ = NULL;
+	}
 }
 
-inline void LogManager::setAvailableStartLSN(PartitionId pId, CheckpointId cpId) {
-	LOG_MANAGER_CONFLICTION_DETECTOR_SCOPE(
-			config_.pgConfig_.getPartitionGroupId(pId), true);
-	partitionInfoList_[pId].startLsnMap_[cpId] = getLSN(pId);
+template<class L>
+std::string LogIterator<L>::toString() const {
+	util::NormalOStringStream oss;
+	for (const auto& name : fileNames_) {
+		oss << name.c_str() << ",";
+	}
+	return oss.str();
 }
 
-inline PartitionGroupId LogManager::calcPartitionGroupId(
-		PartitionId pId) const {
-	return config_.pgConfig_.getPartitionGroupId(pId);
+
+/*!
+	@brief コンストラクタ
+*/
+template<class L>
+LogManager<L>::LogManager(
+		ConfigTable& configTable,
+		std::unique_ptr<L>&& locker, util::StackAllocator& alloc,
+		WALBuffer& xWALBuffer, WALBuffer& cpWALBuffer,
+		int32_t checkpointrange, const char* cpLogPath, const char* xLogPath,
+		PartitionId pId, LogManagerStats &stats) :
+		config_(configTable), locker_(std::move(locker)), alloc_(alloc),
+		xWALBuffer_(xWALBuffer), cpWALBuffer_(cpWALBuffer),
+		checkpointrange_(checkpointrange), pId_(pId),
+		cpLogPath_(cpLogPath), xLogPath_(xLogPath),
+		logversion_(-1), cpFile_(nullptr), xFile_(nullptr), duplicateFile_(nullptr),
+		suffix_(nullptr), xLogFileOffset_(0), xLogCount_(0),
+		longtermLogAvailable_(false), longtermSyncLogErrorFlag_(false),
+		keepXLogVersion_(-1), child_(NULL),
+		stats_(stats)
+{
+	xWALBuffer_.use();
+	cpWALBuffer_.use();
 }
 
-inline PartitionId LogManager::calcGroupTopPartitionId(
-		PartitionGroupId pgId) const {
-	return config_.pgConfig_.getGroupBeginPartitionId(pgId);
+template<class L>
+LogManager<L>::~LogManager() {
+	const bool byCP = false;
+	closePendingFiles(true, byCP);
 }
 
-inline void LogManager::setLogVersion(PartitionId pId, uint16_t version) {
-	PartitionGroupManager &pgManager =
-			*pgManagerList_[calcPartitionGroupId(pId)];
-	pgManager.setLogVersion(version);
+/*!
+	@brief LSN取得
+*/
+template <class L> uint64_t LogManager<L>::getLSN() {
+	return xLogCount_;
 }
 
-inline uint16_t LogManager::getLogVersion(PartitionId pId) {
-	PartitionGroupManager &pgManager =
-			*pgManagerList_[calcPartitionGroupId(pId)];
-	return pgManager.getLogVersion();
+template <class L> void LogManager<L>::setLSN(uint64_t lsn) {
+	xLogCount_ = lsn;
 }
 
-inline uint16_t LogManager::selectNewerVersion(uint16_t arg1, uint16_t arg2) {
-	int32_t score1 = getLogVersionScore(arg1);
-	int32_t score2 = getLogVersionScore(arg2);
-	assert(score1 != 0 && score2 != 0);
-	return score1 > score2 ? arg1 : arg2;
+template <class L> LogSequentialNumber LogManager<L>::incrementLSN() {
+	++xLogCount_;
+	return xLogCount_;
 }
 
-template<typename Stream>
-void LogCursor::exportPosition(Stream &stream) {
-	CheckpointId cpId;
-	uint64_t offset;
-	PartitionId pId;
-	LogSequentialNumber lsn;
-
-	exportPosition(cpId, offset, pId, lsn);
-
-	stream << cpId;
-	stream << offset;
-	stream << pId;
-	stream << lsn;
+template <class L> void LogManager<L>::setSuffix(const char* suffix) {
+	suffix_ = suffix;
 }
 
-template<typename Stream>
-void LogCursor::importPosition(Stream &stream, LogManager &logManager) {
-	CheckpointId cpId;
-	uint64_t offset;
-	PartitionId pId;
-	LogSequentialNumber lsn;
+/*!
+	@brief ディスクからログ開始ポイントを決定
+*/
+template <class L>
+std::tuple<LogIterator<L>, LogIterator<L> > LogManager<L>::init(bool byCP) {
+	int32_t latestcplogver = -1;
+	int32_t latestxlogver = -1;
 
-	stream >> cpId;
-	stream >> offset;
-	stream >> pId;
-	stream >> lsn;
+	closeFiles(true, byCP);
 
-	importPosition(logManager, cpId, offset, pId, lsn);
+	std::vector<int32_t> cplogs;
+	UtilFile::getFileNumbers(
+			cpLogPath_.c_str(), LogManagerConst::CPLOG_FILE_SUFFIX,
+			LogManagerConst::INCREMENTAL_FILE_SUFFIX, cplogs);
+	std::vector<int32_t> x;
+	for (int32_t cplogver : cplogs) {
+		LogIterator<L> cpit = createLogIterator(cplogver);
+
+		std::unique_ptr<Log> log;
+		while ((log = cpit.next(true)) != NULL) { 
+			if (log->getType() == LogType::CheckpointEndLog) {
+				x.push_back(cplogver);
+				break;
+			}
+		}
+		cpit.fin();
+	}
+	cplogs = x;
+	std::vector<int32_t> xlogs;
+	UtilFile::getFileNumbers(
+			xLogPath_.c_str(), LogManagerConst::XLOG_FILE_SUFFIX, NULL, xlogs);
+
+	if (cplogs.size() > 0) {
+		latestcplogver = *std::max_element(cplogs.begin(), cplogs.end());
+	}
+	if (xlogs.size() > 0) {
+		latestxlogver = *std::max_element(xlogs.begin(), xlogs.end());
+		if (latestcplogver > latestxlogver) {
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR,
+					"log version " << latestcplogver << " vs " << latestxlogver);
+		}
+	}
+	LogIterator<L> cpit(this, latestcplogver);
+	int32_t mincplogver = INT32_MAX;
+	for (int32_t ver = std::max(0, latestcplogver - checkpointrange_ + 1);
+			ver <= latestcplogver; ver++) {
+		auto result = std::find(cplogs.begin(), cplogs.end(), ver);
+		if (result != cplogs.end()) {
+			mincplogver = std::min(mincplogver, ver);
+		} else {
+			mincplogver = ver + 1;
+		}
+	}
+	for (int32_t ver = mincplogver; ver <= latestcplogver; ver++) {
+		util::NormalOStringStream oss;
+		oss << cpLogPath_ << "/" << pId_ << "_" << ver <<
+				LogManagerConst::CPLOG_FILE_SUFFIX;
+		cpit.add(oss.str());
+	}
+	LogIterator<L> xit(this, latestcplogver);
+	for (int32_t ver = latestcplogver; ver <= latestxlogver; ver++) {
+		auto result = std::find(xlogs.begin(), xlogs.end(), ver);
+		if (result != xlogs.end()) {
+			util::NormalOStringStream oss;
+			oss << xLogPath_ << "/" << pId_ << "_" << ver <<
+					LogManagerConst::XLOG_FILE_SUFFIX;
+			xit.add(oss.str());
+		}
+	}
+	logversion_ = latestcplogver;
+	return std::forward_as_tuple(cpit, xit);
 }
 
-#endif
+/*!
+	@brief ディスク無し、サイクル性あり
+*/
+template <class L>
+void LogManager<L>::init(int64_t logversion, bool withFlush, bool byCP) {
+	closeFiles(withFlush, byCP);
+
+	logversion_ = logversion;
+
+	util::NormalOStringStream oss1;
+	if (!suffix_) {
+		oss1 << cpLogPath_ << "/" << pId_ << "_" << logversion_ <<
+				LogManagerConst::CPLOG_FILE_SUFFIX;
+	}
+	else {
+		oss1 << cpLogPath_ << "/" << pId_ << "_" << logversion_ << suffix_ <<
+				LogManagerConst::CPLOG_FILE_SUFFIX;
+	}
+	cpFile_ = UTIL_NEW SimpleFile(oss1.str());
+	cpFile_->open();
+
+	util::NormalOStringStream oss2;
+	oss2 << xLogPath_ << "/" << pId_ << "_" << logversion_ <<
+			LogManagerConst::XLOG_FILE_SUFFIX;
+	xFile_ = UTIL_NEW SimpleFile(oss2.str());
+	xFile_->open();
+	xLogFileOffset_ = 0;
+
+	xWALBuffer_.init(xFile_);
+
+	if (duplicateLogMode_.status_ == DuplicateLogMode::DUPLICATE_LOG_ENABLE) {
+		if (xWALBuffer_.getDuplicateStatus() !=
+				DuplicateLogMode::DUPLICATE_LOG_ERROR) {
+			util::NormalOStringStream oss3;
+			oss3 << duplicateLogMode_.duplicateLogPath_.c_str() << "/" << pId_ <<
+					"_" << logversion_ << LogManagerConst::XLOG_FILE_SUFFIX;
+
+			xWALBuffer_.setStopOnDuplicateError(
+					duplicateLogMode_.stopOnDuplicateErrorFlag_);
+			duplicateFile_ = xWALBuffer_.initDuplicateLogFile(oss3.str().c_str());
+			if (!duplicateFile_) {
+				setDuplicateStatus(DuplicateLogMode::DUPLICATE_LOG_ERROR);
+			}
+		}
+		else {
+			setDuplicateStatus(DuplicateLogMode::DUPLICATE_LOG_ERROR);
+		}
+	}
+	else {
+		xWALBuffer_.setDuplicateFile(NULL);
+	}
+	cpWALBuffer_.init(cpFile_);
+	existLsnMap_[logversion] = getLSN() + 1; 
+
+	appendXLog(LogType::NOPLog, NULL, 0, NULL); 
+}
+
+/*!
+	@brief リカバリ後のチェックポイント
+*/
+template <class L>
+void LogManager<L>::startCheckpoint0(bool withFlush, bool byCP) {
+	std::vector<int32_t> _cplogs;
+	UtilFile::getFileNumbers(
+			cpLogPath_.c_str(), LogManagerConst::CPLOG_FILE_SUFFIX,
+			LogManagerConst::INCREMENTAL_FILE_SUFFIX, _cplogs);
+	if (_cplogs.size() < 0) {
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "startCheckpoint");
+	}
+	if (_cplogs.size() > 0) {
+		init(
+				*std::max_element(_cplogs.begin(), _cplogs.end()) + 1,
+				withFlush, byCP);
+	}
+	else {
+		init(0, withFlush, byCP);
+	} 
+}
+
+/*!
+	@brief 通常のチェックポイント
+*/
+template <class L>
+void LogManager<L>::startCheckpoint(bool withFlush, bool byCP) {
+	init(logversion_ + 1, withFlush, byCP);
+}
+
+/*!
+	@brief Xログ追加
+
+	@note XログはWALバッファを経由してXログファイルに書き込む
+	@note V5.0では暫定的に扱えるログ内バイナリデータ超の上限は(2GB-100)とする
+*/
+template <class L>
+LogSequentialNumber LogManager<L>::appendXLog(
+		LogType type, void* data, size_t len, util::XArray<uint8_t>* logBinary) {
+	try {
+		util::StackAllocator::Scope scope(alloc_);
+		util::XArray<uint8_t> binary(alloc_);
+		typedef util::ByteStream< util::XArrayOutStream<> > OutStream;
+		util::XArrayOutStream<> arrayOut(binary);
+		OutStream out(arrayOut);
+
+		uint8_t* addr = static_cast<uint8_t*>(data);
+		Log log(type);
+		int64_t dataLen = 0;
+		if (len > 0 && data) {
+			if (len > LOG_DATA_LIMIT_SIZE) {
+				GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
+						"Too large data size (size=" << len << ")");
+			}
+			log.setData(addr);
+			dataLen = static_cast<int64_t>(len);
+		}
+		log.setDataSize(dataLen);
+
+		LogSequentialNumber lsn = 0;
+		{
+			util::LockGuard<Locker>(*locker());
+			lsn = getLSN();
+			if (type == LogType::OBJLog) {
+				++lsn;
+			}
+			log.setLsn(lsn);
+			log.setCheckSum();
+			log.encode(out);
+			xLogFileOffset_ += xWALBuffer_.append(binary.data(), binary.size());
+			if (type == LogType::OBJLog) {
+				setLSN(lsn);
+			}
+		}
+		if (child_) {
+			child_->copyXLog(type, lsn, data, len);
+		}
+		if (logBinary) {
+			logBinary->assign(binary.data(), binary.data() + binary.size());
+		}
+		return lsn;
+	}
+	catch (std::exception &e) {
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Write XLog failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+}
+
+/*!
+	@brief レプリケーション用Xログ追加
+
+		XログはWALバッファを経由してXログファイルに書き込む
+*/
+template <class L>
+void LogManager<L>::copyXLog(
+		LogType type, LogSequentialNumber lsn, const void* data, size_t len) {
+	static_cast<void>(type);
+	if (!data) {
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "data must be NOT NULL");
+	}
+	try {
+		util::LockGuard<Locker>(*locker());
+		xLogFileOffset_ += xWALBuffer_.append(static_cast<const uint8_t*>(data), len);
+		setLSN(lsn);
+	}
+	catch (std::exception& e) { 
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Copy XLog failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+}
+
+/*!
+	@brief CPログ追加
+*/
+template <class L>
+void LogManager<L>::appendCpLog(Log& log) {
+	try {
+		util::StackAllocator::Scope scope(alloc_);
+		util::LockGuard<Locker>(*locker());
+
+		util::XArray<uint8_t> binary(alloc_);
+		typedef util::ByteStream< util::XArrayOutStream<> > OutStream;
+		util::XArrayOutStream<> arrayOut(binary);
+		OutStream out(arrayOut);
+
+		LogSequentialNumber lsn = getLSN();
+		log.setLsn(lsn);
+		log.setCheckSum();
+		log.encode(out);
+
+		cpWALBuffer_.append(binary.data(), binary.size());
+
+	}
+	catch (std::exception &e) {
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Write CPLog failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+}
+
+/*!
+	@brief CPログフラッシュ
+*/
+template <class L>
+void LogManager<L>::flushCpLog(LogFlushMode x, bool byCP) {
+	if (!cpFile_) {
+		return;
+	}
+	try {
+		util::LockGuard<Locker>(locker());
+		cpWALBuffer_.flush(x, byCP);
+	}
+	catch (std::exception& e) {
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Flush CPLog failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+}
+
+/*!
+	@brief Xログバッファ出力＆ファイルフラッシュ
+*/
+template <class L>
+void LogManager<L>::flushXLog(LogFlushMode x, bool byCP) {
+	if (!xFile_) {
+		return;
+	}
+	try {
+		util::LockGuard<Locker>(locker());
+		xWALBuffer_.flush(x, byCP);
+	}
+	catch (std::exception& e) {
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Flush XLog failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+}
+
+/*!
+	@brief コミット時Xログバッファ出力＆ファイルフラッシュ
+	@note configでlogWriteMode=0指定時
+*/
+template <class L>
+void LogManager<L>::flushXLogByCommit(bool byCP) {
+	if (!xFile_ || !config_.alwaysFlushOnTxnEnd_) {
+		return;
+	}
+	try {
+		util::LockGuard<Locker>(locker());
+		xWALBuffer_.flush(LOG_WRITE_WAL_BUFFER, byCP);
+		xWALBuffer_.flush(LOG_FLUSH_FILE, byCP);
+	}
+	catch (std::exception& e) {
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Flush XLog failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+}
+
+/*!
+	@brief 保持している最小のLSNを返す
+
+	@note 主にクラスタで使用する。このLSNはCP実行時点(TXNLog)のLSNと一致する
+	@note OBJLogはこのLSN+1以降になる(存在するとは限らない)
+*/
+template <class L>
+LogSequentialNumber LogManager<L>::getStartLSN() {
+	assert(!existLsnMap_.empty());
+	const auto& itr = existLsnMap_.begin();
+	return itr->second - 1;
+}
+
+/*!
+	@brief 保持している最小のlogversionを返す
+*/
+template <class L>
+int64_t LogManager<L>::getStartLogVersion() {
+	assert(!existLsnMap_.empty());
+	const auto& itr = existLsnMap_.begin();
+	return itr->first;
+}
+
+/*!
+	@brief 指定ログバージョン以前のファイル削除
+
+	@note XログはV4同様にカレント以外にパラメータretainedFileCountの数残す
+	@note CPログは最低checkpointRange数の世代は残す
+*/
+template <class L>
+void LogManager<L>::removeLogFiles(int64_t baseLogVer, int64_t checkpointRange) {
+	if (config_.persistencyMode_ == PERSISTENCY_KEEP_ALL_LOG) {
+		return;
+	}
+	const int64_t retainedFileCount =
+			static_cast<int64_t>(config_.retainedFileCount_);
+	const int64_t targetCpLogVer =
+			(checkpointRange > retainedFileCount + 1)
+					? (baseLogVer - checkpointRange)
+					  : (baseLogVer - retainedFileCount - 1);
+	std::vector<int32_t> logs;
+	{
+		util::NormalOStringStream oss1;
+		oss1 << LogManagerConst::INCREMENTAL_FILE_SUFFIX <<
+				LogManagerConst::CPLOG_FILE_SUFFIX;
+		UtilFile::getFileNumbers(
+				cpLogPath_.c_str(), oss1.str().c_str(), NULL, logs);
+		for (int32_t ver : logs) {
+			util::NormalOStringStream oss;
+			oss << cpLogPath_ << "/" << pId_ << "_" << ver << oss1.str();
+			UtilFile::removeFile(oss.str().c_str());
+		}
+	}
+	logs.clear();
+	UtilFile::getFileNumbers(
+			cpLogPath_.c_str(), LogManagerConst::CPLOG_FILE_SUFFIX, NULL, logs);
+	for (int32_t cpver : logs) {
+		if (cpver <= targetCpLogVer) {
+			util::NormalOStringStream oss;
+			oss << cpLogPath_ << "/" << pId_ << "_" << cpver <<
+					LogManagerConst::CPLOG_FILE_SUFFIX;
+			UtilFile::removeFile(oss.str().c_str());
+		}
+	}
+	logs.clear();
+	int64_t targetXLogVer = baseLogVer - retainedFileCount - 1;
+	if (keepXLogVersion_ != -1 && targetXLogVer >= keepXLogVersion_) {
+		targetXLogVer = keepXLogVersion_ - 1;
+	}
+	UtilFile::getFileNumbers(
+			xLogPath_.c_str(), LogManagerConst::XLOG_FILE_SUFFIX, NULL, logs);
+	for (int32_t xver : logs) {
+		if (xver <= targetXLogVer) {
+			util::NormalOStringStream oss;
+			oss << xLogPath_ << "/" << pId_ << "_" << xver <<
+					LogManagerConst::XLOG_FILE_SUFFIX;
+			UtilFile::removeFile(oss.str().c_str());
+			existLsnMap_.erase(xver);
+		}
+	}
+}
+
+
+/*!
+	@brief すべてのファイル削除(dropPartition用)
+*/
+template <class L>
+void LogManager<L>::removeAllLogFiles(bool byCP) {
+	closeFiles(true, byCP);
+
+	std::vector<int32_t> cplogs;
+	UtilFile::getFileNumbers(
+			cpLogPath_.c_str(), LogManagerConst::CPLOG_FILE_SUFFIX,
+			LogManagerConst::INCREMENTAL_FILE_SUFFIX, cplogs);
+
+	for (int32_t ver : cplogs) {
+		util::NormalOStringStream oss;
+		oss << cpLogPath_ << "/" << pId_ << "_" << ver <<
+				LogManagerConst::CPLOG_FILE_SUFFIX;
+		UtilFile::removeFile(oss.str().c_str());
+	}
+
+	std::vector<int32_t> xlogs;
+	UtilFile::getFileNumbers(
+			xLogPath_.c_str(), LogManagerConst::XLOG_FILE_SUFFIX, NULL, xlogs);
+
+	for (int32_t ver : xlogs) {
+		util::NormalOStringStream oss;
+		oss << xLogPath_ << "/" << pId_ << "_" << ver <<
+				LogManagerConst::XLOG_FILE_SUFFIX;
+		UtilFile::removeFile(oss.str().c_str());
+	}
+}
+
+/*!
+	@brief ログファイルクローズ
+*/
+template <class L>
+void LogManager<L>::closeFiles(bool withFlush, bool byCP) {
+	if (cpFile_ != NULL) {
+		try {
+			cpWALBuffer_.flush(LOG_WRITE_WAL_BUFFER, byCP);
+			if (withFlush) {
+				cpWALBuffer_.flush(LOG_FLUSH_FILE, byCP);
+				cpFile_->clearFileCache();
+				cpFile_->close();
+				delete cpFile_;
+			}
+			else {
+				addPendingFiles(cpFile_);
+			}
+			cpFile_ = NULL;
+		}
+		catch (std::exception& e) {
+			GS_RETHROW_SYSTEM_ERROR(
+					e, "Close CPLog failed. reason=(" <<
+					GS_EXCEPTION_MESSAGE(e) << ")");
+		}
+	}
+	if (xFile_ != NULL) {
+		try {
+			appendXLog(LogType::EOFLog, NULL, 0, NULL);
+
+			xWALBuffer_.flush(LOG_WRITE_WAL_BUFFER, byCP);
+			if (withFlush) {
+				xWALBuffer_.flush(LOG_FLUSH_FILE, byCP);
+				xFile_->clearFileCache();
+				xFile_->close();
+				if (duplicateFile_) {
+					duplicateFile_->clearFileCache();
+					duplicateFile_->close();
+					delete duplicateFile_;
+				}
+				delete xFile_;
+			}
+			else {
+				addPendingFiles(xFile_);
+				if (duplicateFile_) {
+					addPendingFiles(duplicateFile_);
+				}
+				
+			}
+			xFile_ = NULL;
+			duplicateFile_ = NULL;
+		}
+		catch (std::exception& e) {
+			GS_RETHROW_SYSTEM_ERROR(
+					e, "Close XLog failed. reason=(" <<
+					GS_EXCEPTION_MESSAGE(e) << ")");
+		}
+	}
+}
+
+template <class L>
+void LogManager<L>::addPendingFiles(SimpleFile *file) {
+	std::unique_ptr<SimpleFile> ptr(file);
+	pendingFiles_.push_back(ptr.get());
+	ptr.release();
+}
+
+template <class L>
+void LogManager<L>::closePendingFiles(bool force, bool byCP) {
+	while (!pendingFiles_.empty()) {
+		std::unique_ptr<SimpleFile> file(pendingFiles_.back());
+		pendingFiles_.pop_back();
+
+		if (!force) {
+			WALBuffer::flush(*file, byCP, stats_);
+			file->clearFileCache();
+			file->close();
+		}
+	}
+}
+
+/*!
+	@brief 終了処理
+
+		エリア削除など
+*/
+template <class L>
+void LogManager<L>::fin(bool byCP) {
+	closeFiles(true, byCP);
+	xWALBuffer_.unuse();
+	cpWALBuffer_.unuse();
+}
+
+/*!
+	@brief 過去CPログ参照
+*/
+template <class L>
+LogIterator<L> LogManager<L>::createLogIterator(int64_t logversion) {
+	LogIterator<L> cpit(this, logversion);
+	util::NormalOStringStream oss;
+	oss << cpLogPath_ << "/" << pId_ << "_" << logversion <<
+			LogManagerConst::CPLOG_FILE_SUFFIX;
+	cpit.add(oss.str());
+	return cpit;
+}
+
+/*!
+	@brief 過去CPログ参照(LSN指定)
+*/
+template <class L>
+LogIterator<L> LogManager<L>::createCPLogIterator(LogSequentialNumber lsn) {
+	ExistLsnMap::reverse_iterator itr = existLsnMap_.rbegin();
+	int64_t logversion = itr->first; 
+	for (; itr != existLsnMap_.rend(); ++itr) {
+		if (itr->second <= lsn) {
+			logversion = itr->first;
+			break;
+		}
+	}
+	LogIterator<L> cpLogIt(this, logversion);
+	util::NormalOStringStream oss;
+	oss << cpLogPath_ << "/" << pId_ << "_" << logversion <<
+			LogManagerConst::CPLOG_FILE_SUFFIX;
+	cpLogIt.add(oss.str());
+
+	return cpLogIt;
+}
+/*!
+	@brief 過去Xログ参照
+*/
+template <class L>
+LogIterator<L> LogManager<L>::createXLogIterator(LogSequentialNumber lsn) {
+	ExistLsnMap::reverse_iterator itr = existLsnMap_.rbegin();
+	int64_t logversion = itr->first; 
+	for (; itr != existLsnMap_.rend(); ++itr) {
+		if (itr->second <= lsn) {
+			logversion = itr->first;
+			break;
+		}
+	}
+	LogIterator<L> xLogIt(this, logversion);
+	util::NormalOStringStream oss;
+	oss << xLogPath_ << "/" << pId_ << "_" << logversion <<
+			LogManagerConst::XLOG_FILE_SUFFIX;
+	xLogIt.add(oss.str());
+	xLogIt.markXLog();
+	flushXLog(LOG_WRITE_WAL_BUFFER, false);
+	flushXLog(LOG_FLUSH_FILE, false);
+	return xLogIt;
+}
+
+template <class L>
+LogIterator<L> LogManager<L>::createChunkDataLogIterator() {
+	std::vector<int32_t> chunkLogs;
+	util::NormalOStringStream oss1;
+	oss1 << LogManagerConst::INCREMENTAL_FILE_SUFFIX <<
+			LogManagerConst::CPLOG_FILE_SUFFIX;
+	UtilFile::getFileNumbers(
+			cpLogPath_.c_str(), oss1.str().c_str(), NULL, chunkLogs);
+
+	LogIterator<L> chunkIt(this, 0);
+	for (const auto& ver : chunkLogs) {
+		util::NormalOStringStream oss2;
+		oss2 << cpLogPath_ << "/" << pId_ << "_" << ver <<
+				LogManagerConst::INCREMENTAL_FILE_SUFFIX <<
+				LogManagerConst::CPLOG_FILE_SUFFIX;
+		chunkIt.add(oss2.str());
+	}
+	return chunkIt;
+}
+
+template <class L>
+void LogManager<L>::copyCpLog(
+		const char* dirPath, uint8_t* buffer, size_t bufferSize) {
+	if (!cpFile_) {
+		return;
+	}
+	try {
+		flushCpLog(LOG_WRITE_WAL_BUFFER, false);
+		flushCpLog(LOG_FLUSH_FILE, false);
+		util::NormalOStringStream oss;
+		oss << dirPath << "/" << pId_ << "_" << logversion_ <<
+				LogManagerConst::CPLOG_FILE_SUFFIX;
+		cpFile_->copyAll(oss.str().c_str(), buffer, bufferSize);
+	}
+	catch (std::exception& e) {
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Copy CPLog failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+}
+
+template <class L>
+void LogManager<L>::copyXLog(
+		const char* path, uint8_t* buffer, size_t bufferSize) {
+	if (!xFile_) {
+		return;
+	}
+	try {
+		flushXLog(LOG_WRITE_WAL_BUFFER, false);
+		flushXLog(LOG_FLUSH_FILE, false);
+		util::NormalOStringStream oss;
+		oss << path << "/" << pId_ << "_" << logversion_ <<
+				LogManagerConst::XLOG_FILE_SUFFIX;
+		xFile_->copyAll(oss.str().c_str(), buffer, bufferSize);
+	}
+	catch (std::exception& e) {
+		GS_RETHROW_SYSTEM_ERROR(
+				e, "Copy XLog failed. reason=(" <<
+				GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+}
+
+template <class L>
+bool LogManager<L>::isLongtermSyncLogAvailable() const {
+	return !longtermSyncLogErrorFlag_;
+}
+
+template <class L>
+void LogManager<L>::setLongtermSyncLogError(const std::string &message) {
+	longtermSyncLogErrorFlag_ = true;
+	longtermSyncLogErrorMessage_ = message;
+}
+
+template <class L>
+bool LogManager<L>::getLongtermSyncLogErrorFlag() const {
+	return longtermSyncLogErrorFlag_;
+}
+
+template <class L>
+const std::string& LogManager<L>::getLongtermSyncLogErrorMessage() const {
+	return longtermSyncLogErrorMessage_;
+}
+
+template <class L>
+void LogManager<L>::setChild(std::unique_ptr<LogManager> child) {
+	child_.reset(child);
+}
+
+template <class L>
+void LogManager<L>::setDuplicateLogMode(const DuplicateLogMode& mode) {
+	xWALBuffer_.initDuplicateStatus();
+
+	const bool force = true;
+	setDuplicateStatus(mode.status_, force);
+
+	DuplicateLogMode actualMode = mode;
+	actualMode.status_ = duplicateLogMode_.status_;
+
+	duplicateLogMode_ = actualMode;
+}
+
+template <class L>
+DuplicateLogMode& LogManager<L>::getDuplicateLogMode(){
+	return duplicateLogMode_;
+}
+
+template <class L>
+void LogManager<L>::setDuplicateFile(SimpleFile* file) {
+	xWALBuffer_.setDuplicateFile(file);
+}
+
+template <class L>
+void LogManager<L>::setStopOnDuplicateError(bool stopOnDuplicateError) {
+	xWALBuffer_.setStopOnDuplicateError(stopOnDuplicateError);
+}
+
+template <class L>
+bool LogManager<L>::getStopOnDuplicateError() {
+	return xWALBuffer_.getStopOnDuplicateError();
+}
+
+template <class L>
+void LogManager<L>::setDuplicateStatus(
+		DuplicateLogMode::Status status, bool force) {
+	DuplicateLogMode::applyDuplicateStatus(
+			status, duplicateLogMode_.status_, force);
+	DuplicateLogMode::applyDuplicateStatus(status, stats_, force);
+}
+
+inline Log& Log::setCheckSum() {
+	checksum_ = static_cast<uint16_t>(
+			static_cast<uint32_t>(type_) + static_cast<uint64_t>(chunkId_) +
+			static_cast<uint64_t>(groupId_) + static_cast<uint64_t>(lsn_));
+	if (dataSize_ > 0) {
+		assert(data_);
+		checksum_ = static_cast<uint16_t>(
+				checksum_ + util::CRC16::calculate(data_, dataSize_));
+	}
+	return *this;
+}
+inline uint16_t Log::getCheckSum() const {
+	uint16_t checksum = static_cast<uint16_t>(
+			static_cast<uint32_t>(type_) + static_cast<uint64_t>(chunkId_) +
+			static_cast<uint64_t>(groupId_) + static_cast<uint64_t>(lsn_));
+	if (dataSize_ > 0) {
+		assert(data_);
+		checksum = static_cast<uint16_t>(
+				checksum + util::CRC16::calculate(data_, dataSize_));
+	}
+	return checksum;
+}
+inline bool Log::checkSum() const {
+	if (getCheckSum() == checksum_) {
+		return true;
+	} else {
+		return false;
+	}
+}
+
+inline Log& Log::setLsn(uint64_t lsn) {
+	lsn_ = lsn;
+	return *this;
+}
+
+inline LogSequentialNumber Log::getLsn() const {
+	return lsn_;
+}
+
+/*!
+	@brief ログエンコード (ストリームへ出力)
+*/
+template <typename S>
+void Log::encode(S& out) {
+	out << static_cast<int8_t>(type_);
+	out << checksum_;
+	out << integrityCheckVal_;
+	out << version_;
+	out << lsn_;
+	out << chunkId_;
+	out << groupId_;
+	out << offset_;
+	out << vacancy_;
+	out << dataSize_;
+	if (dataSize_ > 0) {
+		out.writeAll(data_, dataSize_);
+	}
+}
+
+/*!
+	@brief ログデコード (ストリームから入力)
+*/
+template <typename S>
+void Log::decode(S& in, util::StackAllocator& alloc) {
+	int8_t i8val;
+	in >> i8val;
+	type_ = static_cast<LogType>(i8val);
+	in >> checksum_;
+	in >> integrityCheckVal_;
+	in >> version_;
+	in >> lsn_;
+	in >> chunkId_;
+	in >> groupId_;
+	in >> offset_;
+	in >> vacancy_;
+	in >> dataSize_;
+	if (dataSize_ > 0) {
+		uint8_t* bytes = static_cast<uint8_t*>(alloc.allocate(dataSize_));
+		in.readAll(bytes, dataSize_);
+		data_ = bytes;
+	}
+	else {
+		data_ = NULL;
+	}
+}
+
+/*!
+	@brief 連続性確認
+*/
+inline Log& Log::setIntegrityCheckVal(uint16_t checkVal) {
+	integrityCheckVal_ = checkVal;
+	return *this;
+}
+inline uint16_t Log::getIntegrityCheckVal() const {
+	return integrityCheckVal_;
+}
+inline Log& Log::setChunkId(int64_t chunkid) {
+	chunkId_ = chunkid;
+	return *this;
+}
+
+inline int64_t Log::getChunkId() const {
+	return chunkId_;
+}
+
+inline Log& Log::setGroupId(int64_t groupid) {
+	groupId_ = groupid;
+	return *this;
+}
+
+inline int64_t Log::getGroupId() const{
+	return groupId_;
+}
+
+inline Log& Log::setOffset(int64_t offset) {
+	offset_ = offset;
+	return *this;
+}
+
+inline int64_t Log::getOffset() const {
+	return offset_;
+}
+
+inline Log& Log::setVacancy(int8_t vacancy) {
+	vacancy_ = vacancy;
+	return *this;
+}
+
+inline int8_t Log::getVacancy() const {
+	return vacancy_;
+}
+
+inline Log& Log::setDataSize(int64_t dataSize) {
+	dataSize_ = dataSize;
+	return *this;
+}
+inline Log& Log::setData(const void* data) {
+	data_ = data;
+	return *this;
+}
+
+inline int64_t Log::getDataSize() const {
+	return dataSize_;
+}
+inline const void* Log::getData() const {
+	return data_;
+}
+
+/*!
+	@brief ログマネージャ用config
+*/
+template <class L>
+LogManager<L>::Config::Config(ConfigTable &configTable) :
+		configTable_(&configTable),
+		pgConfig_(configTable),
+		persistencyMode_(configTable.get<int32_t>(
+				CONFIG_TABLE_DS_PERSISTENCY_MODE)),
+		logWriteMode_(configTable.get<int32_t>(
+				CONFIG_TABLE_DS_LOG_WRITE_MODE)),
+		alwaysFlushOnTxnEnd_(false),
+		logDirectory_(configTable.get<const char8_t*>(
+				CONFIG_TABLE_DS_DB_PATH)),
+		blockSizeBits_(18),
+		blockBufferCountBits_(3),
+		lockRetryCount_(10),
+		lockRetryIntervalMillis_(500),
+		indexEnabled_(false),
+		indexBufferSizeBits_(17),
+		primaryCheckpointAssumed_(false),
+		emptyFileAppendable_(false),
+		ioWarningThresholdMillis_(configTable.getUInt32(
+				CONFIG_TABLE_DS_IO_WARNING_THRESHOLD_TIME)),
+		retainedFileCount_(configTable.getUInt32(
+				CONFIG_TABLE_DS_RETAINED_FILE_COUNT)),
+		logFileClearCacheInterval_(configTable.getUInt32(
+				CONFIG_TABLE_DS_LOG_FILE_CLEAR_CACHE_INTERVAL)),
+		lsnBaseFileRetention_(false) {
+	if (logWriteMode_ == 0 || logWriteMode_ == -1) {
+		alwaysFlushOnTxnEnd_ = true;
+	}
+}
+
+template <class L>
+void LogManager<L>::Config::setUpConfigHandler() {
+}
+
+template <class L>
+void LogManager<L>::Config::operator()(
+		ConfigTable::ParamId id, const ParamValue &value) {
+	switch (id) {
+	case CONFIG_TABLE_DS_RETAINED_FILE_COUNT:
+		retainedFileCount_ = value.get<int32_t>();
+		break;
+	case CONFIG_TABLE_DS_LOG_FILE_CLEAR_CACHE_INTERVAL:
+		logFileClearCacheInterval_ = value.get<int32_t>();
+		break;
+	}
+}
+
+template <class L>
+uint32_t LogManager<L>::Config::getBlockSize() const {
+	return (1 << blockSizeBits_);
+}
+
+template <class L>
+uint32_t LogManager<L>::Config::getBlockBufferCount() const {
+	return (1 << blockBufferCountBits_);
+}
+
+template <class L>
+uint32_t LogManager<L>::Config::getIndexBufferSize() const {
+	return (1 << indexBufferSizeBits_);
+}
+
+#endif 

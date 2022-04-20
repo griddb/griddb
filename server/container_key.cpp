@@ -133,30 +133,44 @@ bool FullContainerKeyComponents::equals(const FullContainerKeyComponents &anothe
 		return false;
 	}
 
-	if (affinityNumber_ == another.affinityNumber_) {
-		if (affinityStringSize_ != another.affinityStringSize_) {
-			return false;
-		}
-		else if (strncmp(affinityString_, another.affinityString_, affinityStringSize_) != 0) {
-			return false;
-		}
+	if (!equalAffinity(another)) {
+		return false;
+	}
+
+	if (!equalSystemPart(another)) {
+		return false;
+	}
+
+	return true;
+}
+
+bool FullContainerKeyComponents::equalAffinity(const FullContainerKeyComponents& another) const {
+	if (affinityNumber_ == another.affinityNumber_ &&
+		affinityStringSize_ != another.affinityStringSize_) {
+		return false;
+	}
+	else if (affinityNumber_ == another.affinityNumber_ &&
+		strncmp(affinityString_, another.affinityString_, affinityStringSize_) != 0) {
+		return false;
 	}
 	else {
 		return false;
 	}
+	return true;
+}
 
-	if (systemPartId_ == another.systemPartId_) {
-		if (systemPartSize_ != another.systemPartSize_) {
-			return false;
-		}
-		else if (strncmp(systemPart_, another.systemPart_, systemPartSize_) != 0) {
-			return false;
-		}
+bool FullContainerKeyComponents::equalSystemPart(const FullContainerKeyComponents& another) const {
+	if (systemPartId_ == another.systemPartId_ &&
+		systemPartSize_ != another.systemPartSize_) {
+		return false;
+	}
+	else if (systemPartId_ == another.systemPartId_ &&
+		strncmp(systemPart_, another.systemPart_, systemPartSize_) != 0) {
+		return false;
 	}
 	else {
 		return false;
 	}
-
 	return true;
 }
 

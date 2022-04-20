@@ -149,10 +149,21 @@ public:
 	void reset();
 
 private:
+	typedef std::pair<util::StackAllocator*, BlobCursor> BlobCursorStorage;
+
+	enum {
+		CURSOR_STORAGE_CAPCACITY = 776
+	};
+
 	BaseObject* getBaseObject(size_t index);
 
 	util::StackAllocator*& getBlobCursorAllocator();
 	BlobCursor* getBlobCursor();
+
+	BlobCursorStorage& getCursorStorage();
+
+	template<size_t Required, size_t Capacity>
+	static void checkStorageCapacity();
 
 	const BaseObject *fieldObject_;
 	const uint64_t *it_;
@@ -161,7 +172,7 @@ private:
 
 	union {
 		int64_t asInt64_;
-		size_t asBytes_[76];
+		uint8_t asBytes_[CURSOR_STORAGE_CAPCACITY];
 	} cursorStorage_;
 };
 

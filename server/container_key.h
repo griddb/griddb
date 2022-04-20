@@ -79,6 +79,9 @@ struct FullContainerKeyComponents {
 	bool equals(const FullContainerKeyComponents &another) const;
 
 	void dump(const char8_t *msg) const;
+private:
+	bool equalAffinity(const FullContainerKeyComponents& another) const;
+	bool equalSystemPart(const FullContainerKeyComponents& another) const;
 };
 
 class FullContainerKey {

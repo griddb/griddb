@@ -37,13 +37,13 @@ class BaseContainer;
  */
 class RtreeMap : public BaseIndex {
 public:
-	RtreeMap(TransactionContext &txn, ObjectManager &objectManager,
-		const AllocateStrategy &strategy, BaseContainer *container,
+	RtreeMap(TransactionContext &txn, ObjectManagerV4 &objectManager,
+		AllocateStrategy &strategy, BaseContainer *container,
 		TreeFuncInfo *funcInfo)
 		: BaseIndex(txn, objectManager, strategy, container, funcInfo, MAP_TYPE_SPATIAL),
 		  rtreeMapImage_(NULL) {}
-	RtreeMap(TransactionContext &txn, ObjectManager &objectManager, OId oId,
-		const AllocateStrategy &strategy, BaseContainer *container,
+	RtreeMap(TransactionContext &txn, ObjectManagerV4 &objectManager, OId oId,
+		AllocateStrategy &strategy, BaseContainer *container,
 		TreeFuncInfo *funcInfo)
 		: BaseIndex(txn, objectManager, oId, strategy, container, funcInfo, MAP_TYPE_SPATIAL) {
 		rtreeMapImage_ = reinterpret_cast<RtreeMapImage *>(getBaseAddr());
@@ -171,7 +171,7 @@ public:
 	};
 
 	int32_t initialize(TransactionContext &txn, ColumnType ColumnType,
-		ColumnId columnId, const AllocateStrategy &metaAllocateStrategy,
+		ColumnId columnId, AllocateStrategy &metaAllocateStrategy,
 		bool isUnique = false);
 	bool finalize(TransactionContext &txn);
 	int32_t clear(TransactionContext &txn);

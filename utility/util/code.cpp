@@ -60,6 +60,12 @@
 #endif
 #endif 
 
+#if UTIL_BUILD_FLETCHER32_SIMD
+#define fletcher32_avx2 inline fletcher32_avx2
+#include "fletcher32_simd/avx2.cpp"
+#undef fletcher32_avx2
+#endif
+
 namespace util {
 
 
@@ -467,6 +473,44 @@ const uint16_t* CRC16::getTable() {
 	static Table table;
 	return table.get();
 }
+
+namespace detail {
+
+
+#if UTIL_BUILD_FLETCHER32_SIMD
+uint32_t fletcher32Avx2(const void *buf, size_t len) {
+	assert(len % 2 == 0);
+	len /= 2; 
+	const uint16_t *data = static_cast<const uint16_t *>(buf);
+	uint32_t sum1 = 0xffff, sum2 = 0xffff;
+
+	return fletcher32_avx2(const_cast<uint16_t *>(data), len, sum1, sum2);
+}
+#endif 
+
+uint32_t fletcher32Reference(const void *buf, size_t len) {
+	assert(len % 2 == 0);
+	len /= 2; 
+	const uint16_t *data = static_cast<const uint16_t *>(buf);
+	uint32_t sum1 = 0xffff, sum2 = 0xffff;
+
+
+	while (len) {
+		size_t tlen = len > 360 ? 360 : len;
+		len -= tlen;
+		do {
+			sum1 += *data++;
+			sum2 += sum1;
+		} while (--tlen);
+		sum1 = (sum1 & 0xffff) + (sum1 >> 16);
+		sum2 = (sum2 & 0xffff) + (sum2 >> 16);
+	}
+	/* Second reduction step to reduce sums to 16 bits */
+	sum1 = (sum1 & 0xffff) + (sum1 >> 16);
+	sum2 = (sum2 & 0xffff) + (sum2 >> 16);
+	return sum2 << 16 | sum1;
+}
+} 
 
 
 
@@ -1187,6 +1231,14 @@ const char8_t* NameCoderImpl::removePrefix(
 	}
 
 	const char8_t *ret = name;
+	for (;;) {
+		const char8_t *found = strchr(ret, ':');
+		if (found == NULL) {
+			break;
+		}
+		ret = found + 1;
+	}
+
 	for (size_t i = prefixWordCount; i > 0; i--) {
 		const char8_t *found = strchr(ret, '_');
 		if (found == NULL) {

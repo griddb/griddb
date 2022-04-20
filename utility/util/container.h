@@ -53,7 +53,12 @@
 namespace util {
 
 namespace detail {
+struct ObjectPoolFreeLink {
+	ObjectPoolFreeLink *next_;
+};
+
 struct ObjectPoolUtils;
+template<typename Mutex, typename D> class ObjectPoolDirectAllocator;
 template<typename T, typename Mutex> class ObjectPoolAllocator;
 }
 
@@ -114,12 +119,10 @@ public:
 #endif
 
 private:
-	struct FreeLink {
-		FreeLink *next_;
-	};
+	friend struct ObjectPoolUtils;
 
-	static const size_t ELEMENT_OFFSET =
-			detail::AlignedSizeOf<FreeLink>::VALUE;
+	typedef detail::ObjectPoolFreeLink FreeLink;
+	typedef detail::ObjectPoolUtils Utils;
 
 	ObjectPool(const ObjectPool&);
 	ObjectPool& operator=(const ObjectPool&);
@@ -133,15 +136,6 @@ private:
 			size_t baseCount, const util::LockGuard<Mutex>&);
 
 	Mutex& getLock();
-
-	inline static void* elementOf(FreeLink *entry) {
-		return reinterpret_cast<uint8_t*>(entry) + ELEMENT_OFFSET;
-	}
-
-	inline static FreeLink* linkOf(void *entry) {
-		return reinterpret_cast<FreeLink*>(
-				static_cast<uint8_t*>(entry) - ELEMENT_OFFSET);
-	}
 
 	size_t freeElementLimit_;
 
@@ -172,30 +166,116 @@ struct ObjectPool<T, Mutex>::StdAllocatorResolver {
 
 namespace detail {
 struct ObjectPoolUtils {
+	static const size_t ELEMENT_OFFSET =
+			AlignedSizeOf<ObjectPoolFreeLink>::VALUE;
+
+	template<typename T> struct TypedElementDestructor;
+	struct ElementDestructor;
+
+	template<typename T> struct ElementDestructorOf {
+#if UTIL_HAS_TEMPLATE_PLACEMENT_NEW
+		typedef TypedElementDestructor<T> Type;
+#else
+		typedef ElementDestructor Type;
+#endif
+	};
+
 	template<typename T, typename Mutex>
 	static ObjectPool<T, Mutex>& checkType(ObjectPool<T, Mutex> &pool) {
 		return pool;
 	}
 
 	template<typename T, typename Mutex>
-	static void* allocateDirect(ObjectPool<T, Mutex> &pool) {
-		return pool.allocateDirect();
+	static ObjectPoolDirectAllocator<
+			Mutex, typename ElementDestructorOf<T>::Type> toDirectAllocator(
+			ObjectPool<T, Mutex> &pool) {
+		typedef typename ElementDestructorOf<T>::Type Destructor;
+		return ObjectPoolDirectAllocator<Mutex, Destructor>(
+				pool.freeLink_, pool.freeElementCount_, pool.base_,
+				Destructor::template create<T>());
 	}
 
-	template<typename T, typename Mutex>
-	static void deallocateDirect(
-			ObjectPool<T, Mutex> &pool, void *rawElement) throw() {
-		try {
-			pool.deallocateDirect(rawElement);
-		}
-		catch (...) {
-		}
-	}
-
-	template<typename T, typename Mutex>
+	template<typename T>
 	static size_t getBaseElementSize() {
-		return ObjectPool<T, Mutex>::ELEMENT_OFFSET + sizeof(T);
+		return ELEMENT_OFFSET + sizeof(T);
 	}
+
+	static size_t getElementSize(size_t baseSize) {
+		return baseSize - ELEMENT_OFFSET;
+	}
+
+	static void* elementOf(ObjectPoolFreeLink *entry) {
+		return reinterpret_cast<uint8_t*>(entry) + ELEMENT_OFFSET;
+	}
+
+	static ObjectPoolFreeLink* linkOf(void *entry) {
+		return reinterpret_cast<ObjectPoolFreeLink*>(
+				static_cast<uint8_t*>(entry) - ELEMENT_OFFSET);
+	}
+
+};
+
+template<typename T>
+struct ObjectPoolUtils::TypedElementDestructor {
+public:
+	template<typename> static TypedElementDestructor create() {
+		return TypedElementDestructor();
+	}
+
+	void operator()(void *rawElement) const {
+		static_cast<T*>(rawElement)->~T();
+	}
+};
+
+struct ObjectPoolUtils::ElementDestructor {
+public:
+	template<typename T> static ElementDestructor create() {
+		return ElementDestructor(&destruct<T>);
+	}
+
+	void operator()(void *rawElement) const {
+		func_(rawElement);
+	}
+
+private:
+	typedef void (*Func)(void*);
+
+	explicit ElementDestructor(Func func) : func_(func) {
+	}
+
+	template<typename T> static void destruct(void *rawElement) {
+		static_cast<T*>(rawElement)->~T();
+	}
+
+	Func func_;
+};
+}	
+
+namespace detail {
+template<typename Mutex, typename D>
+class ObjectPoolDirectAllocator {
+public:
+	typedef ObjectPoolFreeLink FreeLink;
+	typedef FixedSizeAllocator<Mutex> BaseAllocator;
+
+	ObjectPoolDirectAllocator(
+			FreeLink *&freeLink, size_t &freeElementCount, BaseAllocator &base,
+			const D &elementDestructor);
+
+	void* allocateDirect(size_t elementSize) const;
+	void deallocateDirect(void *rawElement) const throw();
+
+private:
+	typedef detail::ObjectPoolUtils Utils;
+
+	Mutex& getLock() const {
+		return base_.getLock();
+	}
+
+	FreeLink *&freeLink_;
+	size_t &freeElementCount_;
+	BaseAllocator &base_;
+	D elementDestructor_;
 };
 }	
 
@@ -209,12 +289,12 @@ public:
 		BaseType &pool = base();
 		if (size != sizeof(T) ||
 				pool.base().getElementSize() !=
-						ObjectPoolUtils::getBaseElementSize<T, Mutex>()) {
+						ObjectPoolUtils::getBaseElementSize<T>()) {
 			UTIL_THROW_UTIL_ERROR(CODE_ILLEGAL_ARGUMENT, "");
 		}
 
 		uint8_t *baseAddr = static_cast<uint8_t*>(pool.base().allocate());
-		return baseAddr + ObjectPoolUtils::getBaseElementSize<T, Mutex>() -
+		return baseAddr + ObjectPoolUtils::getBaseElementSize<T>() -
 				sizeof(T);
 	}
 
@@ -225,7 +305,7 @@ public:
 
 		BaseType &pool = base();
 		uint8_t *baseAddr = static_cast<uint8_t*>(ptr) + sizeof(T) -
-				ObjectPoolUtils::getBaseElementSize<T, Mutex>();
+				ObjectPoolUtils::getBaseElementSize<T>();
 
 		pool.base().deallocate(baseAddr);
 	}
@@ -250,23 +330,53 @@ private:
 }	
 
 #define UTIL_OBJECT_POOL_NEW(pool) \
-		new (util::detail::ObjectPoolUtils::checkType(pool))
+		new (util::detail::ObjectPoolUtils::toDirectAllocator(pool))
 
 #define UTIL_OBJECT_POOL_DELETE(pool, element) \
 		util::detail::ObjectPoolUtils::checkType(pool).deallocate(element)
 
-template<typename T, typename Mutex>
-void* operator new(size_t size, util::ObjectPool<T, Mutex> &pool) {
-	assert(size == sizeof(T));
-	(void) size;
-
-	return util::detail::ObjectPoolUtils::allocateDirect(pool);
+#if UTIL_HAS_TEMPLATE_PLACEMENT_NEW
+template<typename Mutex, typename D>
+void* operator new(
+		size_t size, const util::detail::ObjectPoolDirectAllocator<
+				Mutex, D> &alloc) {
+	return alloc.allocateDirect(size);
+}
+template<typename Mutex, typename D>
+void operator delete(
+		void *p, const util::detail::ObjectPoolDirectAllocator<
+				Mutex, D> &alloc) throw() {
+	alloc.deallocateDirect(p);
+}
+#else
+inline void operator delete(
+		void *p, const util::detail::ObjectPoolDirectAllocator<
+				util::NoopMutex,
+				util::detail::ObjectPoolUtils::ElementDestructor> &alloc) throw() {
+	alloc.deallocateDirect(p);
 }
 
-template<typename T, typename Mutex>
-void operator delete(void *p, util::ObjectPool<T, Mutex> &pool) throw() {
-	return util::detail::ObjectPoolUtils::deallocateDirect(pool, p);
+inline void* operator new(
+		size_t size, const util::detail::ObjectPoolDirectAllocator<
+				util::NoopMutex,
+				util::detail::ObjectPoolUtils::ElementDestructor> &alloc) {
+	return alloc.allocateDirect(size);
 }
+
+inline void* operator new(
+		size_t size, const util::detail::ObjectPoolDirectAllocator<
+				util::Mutex,
+				util::detail::ObjectPoolUtils::ElementDestructor> &alloc) {
+	return alloc.allocateDirect(size);
+}
+
+inline void operator delete(
+		void *p, const util::detail::ObjectPoolDirectAllocator<
+				util::Mutex,
+				util::detail::ObjectPoolUtils::ElementDestructor> &alloc) throw() {
+	alloc.deallocateDirect(p);
+}
+#endif 
 
 namespace util {
 
@@ -1818,7 +1928,7 @@ ObjectPool<T, Mutex>::ObjectPool(const AllocatorInfo &info) :
 		freeElementLimit_(std::numeric_limits<size_t>::max()),
 		freeLink_(NULL),
 		freeElementCount_(0),
-		base_(info, ELEMENT_OFFSET + sizeof(T)),
+		base_(info, Utils::ELEMENT_OFFSET + sizeof(T)),
 		stats_(info) {
 
 	util::AllocatorManager::addAllocator(stats_.info_, *this);
@@ -1846,7 +1956,7 @@ T* ObjectPool<T, Mutex>::allocate() {
 		FreeLink *entry = static_cast<FreeLink*>(base_.allocate());
 
 		entry->next_ = NULL;
-		return new (elementOf(entry)) T();
+		return new (Utils::elementOf(entry)) T();
 	}
 
 	return element;
@@ -1858,7 +1968,7 @@ void ObjectPool<T, Mutex>::deallocate(T *element) {
 		return;
 	}
 
-	FreeLink *entry = linkOf(element);
+	FreeLink *entry = Utils::linkOf(element);
 
 	do {
 		const size_t baseCount = base_.getFreeElementCount();
@@ -1897,7 +2007,7 @@ T* ObjectPool<T, Mutex>::poll() {
 	assert(freeElementCount_ > 0);
 	--freeElementCount_;
 
-	return static_cast<T*>(elementOf(cur));
+	return static_cast<T*>(Utils::elementOf(cur));
 }
 
 template<typename T, typename Mutex>
@@ -1984,50 +2094,6 @@ void ObjectPool<T, Mutex>::setLimit(
 }
 
 template<typename T, typename Mutex>
-void* ObjectPool<T, Mutex>::allocateDirect() {
-	FreeLink *cur;
-	do {
-		LockGuard<Mutex> guard(getLock());
-
-		cur = freeLink_;
-		if (cur == NULL) {
-			break;
-		}
-
-		freeLink_ = cur->next_;
-
-		assert(freeElementCount_ > 0);
-		--freeElementCount_;
-	}
-	while (false);
-
-	if (cur == NULL) {
-		FreeLink *entry = static_cast<FreeLink*>(base_.allocate());
-
-		entry->next_ = NULL;
-		return elementOf(entry);
-	}
-
-	cur->next_ = NULL;
-
-	void *rawElement = elementOf(cur);
-	static_cast<T*>(rawElement)->~T();
-
-	return rawElement;
-}
-
-template<typename T, typename Mutex>
-void ObjectPool<T, Mutex>::deallocateDirect(void *rawElement) {
-	if (rawElement == NULL) {
-		return;
-	}
-
-	FreeLink *entry = linkOf(rawElement);
-	assert(entry->next_ == NULL);
-	base_.deallocate(entry);
-}
-
-template<typename T, typename Mutex>
 void ObjectPool<T, Mutex>::clear(size_t preservedCount) {
 	const size_t baseCount = base_.getFreeElementCount();
 	size_t rest = 0;
@@ -2056,7 +2122,7 @@ void ObjectPool<T, Mutex>::clear(size_t preservedCount) {
 			freeElementCount_--;
 		}
 
-		static_cast<T*>(elementOf(cur))->~T();
+		static_cast<T*>(Utils::elementOf(cur))->~T();
 		base_.deallocate(cur);
 	}
 	while (--rest > 0);
@@ -2072,6 +2138,72 @@ template<typename T, typename Mutex>
 Mutex& ObjectPool<T, Mutex>::getLock() {
 	return base_.getLock();
 }
+
+
+namespace detail {
+template<typename Mutex, typename D>
+ObjectPoolDirectAllocator<Mutex, D>::ObjectPoolDirectAllocator(
+		FreeLink *&freeLink, size_t &freeElementCount, BaseAllocator &base,
+		const D &elementDestructor) :
+		freeLink_(freeLink),
+		freeElementCount_(freeElementCount),
+		base_(base),
+		elementDestructor_(elementDestructor) {
+}
+
+template<typename Mutex, typename D>
+void* ObjectPoolDirectAllocator<Mutex, D>::allocateDirect(
+		size_t elementSize) const {
+	assert(elementSize == Utils::getElementSize(base_.getElementSize()));
+	static_cast<void>(elementSize);
+
+	FreeLink *cur;
+	do {
+		LockGuard<Mutex> guard(getLock());
+
+		cur = freeLink_;
+		if (cur == NULL) {
+			break;
+		}
+
+		freeLink_ = cur->next_;
+
+		assert(freeElementCount_ > 0);
+		--freeElementCount_;
+	}
+	while (false);
+
+	if (cur == NULL) {
+		FreeLink *entry = static_cast<FreeLink*>(base_.allocate());
+
+		entry->next_ = NULL;
+		return Utils::elementOf(entry);
+	}
+
+	cur->next_ = NULL;
+
+	void *rawElement = Utils::elementOf(cur);
+	elementDestructor_(rawElement);
+
+	return rawElement;
+}
+
+template<typename Mutex, typename D>
+void ObjectPoolDirectAllocator<Mutex, D>::deallocateDirect(
+		void *rawElement) const throw() {
+	if (rawElement == NULL) {
+		return;
+	}
+
+	FreeLink *entry = Utils::linkOf(rawElement);
+	assert(entry->next_ == NULL);
+	try {
+		base_.deallocate(entry);
+	}
+	catch (...) {
+	}
+}
+}	
 
 
 template<typename V, typename T>

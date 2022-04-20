@@ -19,35 +19,35 @@
 	@brief TR: R-Tree implementation
 */
 
-#include "data_store.h"
+#include "data_store_v4.h"
 #include "internal.h"
 #include "transaction_context.h"
 #include <stdlib.h>
 
+
 /* create a node */
-OId TrNode_new(TransactionContext &txn, ObjectManager &objectManager) {
+OId TrNode_new(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) {
 	OId oId;
-	BaseObject allocBaseObj(txn.getPartitionId(), objectManager);
+	BaseObject allocBaseObj(objectManager, strategy);
 	TrNode n = allocBaseObj.allocate<TrNodeTag>(sizeof(TrNodeTag),
-		AllocateStrategy(ALLOCATE_NO_EXPIRE_MAP), oId, OBJECT_TYPE_RTREE_MAP);
+		oId, OBJECT_TYPE_RTREE_MAP);
 	TrNode_init(n);
 	return oId;
 }
 
 /* delete node recursively */
 void TrNode_destroy(
-	TransactionContext &txn, ObjectManager &objectManager, OId nodeOId,
+	TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId nodeOId,
 	uint64_t &removeNum) {
-
 	UNDEF_OID_CHECK(nodeOId);
-	UpdateBaseObject baseObj(txn.getPartitionId(), objectManager, nodeOId);
+	UpdateBaseObject baseObj(objectManager, strategy, nodeOId);
 	const TrNode n = baseObj.getBaseAddr<const TrNode>();
 
 	int32_t i;
 	if (!TrNode_leaf_p(n)) {
 		for (i = 0; i < TR_CHILD_COUNT_MAX; i++) {
 			if (n->children[i].nodeOId != UNDEF_OID) {
-				TrNode_destroy(txn, objectManager, 
+				TrNode_destroy(txn, objectManager, strategy,
 					n->children[i].nodeOId, removeNum);
 				if (removeNum == 0) {
 					break;
@@ -75,9 +75,9 @@ void TrNode_init(TrNode n) {
 
 /* return a rect that surrounds the rects in children of a node */
 TrRectTag TrNode_surround(
-	TransactionContext &txn, ObjectManager &objectManager, OId nOId) {
+	TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, OId nOId) {
 	UNDEF_OID_CHECK(nOId);
-	BaseObject baseObj(txn.getPartitionId(), objectManager, nOId);
+	BaseObject baseObj(objectManager, strategy, nOId);
 	const TrNode n = baseObj.getBaseAddr<const TrNode>();
 	int32_t i;
 	TrRectTag r = TrRect_null();
@@ -90,11 +90,11 @@ TrRectTag TrNode_surround(
 }
 
 /* add a child to a node */
-int32_t TrNode_add_child(TransactionContext &txn, ObjectManager &objectManager,
+int32_t TrNode_add_child(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 	OId nodeOId, TrChild c, OId *nnOId) {
 	UNDEF_OID_CHECK(nodeOId);
 	NULL_PTR_CHECK(c);
-	UpdateBaseObject baseObj(txn.getPartitionId(), objectManager, nodeOId);
+	UpdateBaseObject baseObj(objectManager, strategy, nodeOId);
 	TrNode n = baseObj.getBaseAddr<TrNode>();
 
 	if (n->count < TR_CHILD_COUNT_MAX) {
@@ -112,7 +112,7 @@ int32_t TrNode_add_child(TransactionContext &txn, ObjectManager &objectManager,
 	else {
 		/* split; new node is assigned to *nn */
 		NULL_PTR_CHECK(nnOId);
-		TrNode_split(txn, objectManager, nodeOId, c, nnOId);
+		TrNode_split(txn, objectManager, strategy, nodeOId, c, nnOId);
 		return 1;
 	}
 }
@@ -125,12 +125,12 @@ void TrNode_delete_child(TrNode n, int32_t i) {
 }
 
 /* dump a node */
-void TrNode_print(TransactionContext &txn, ObjectManager &objectManager,
+void TrNode_print(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 	OId nodeOId, int32_t indent) {
 	int32_t i;
 	TrChild c;
 	UNDEF_OID_CHECK(nodeOId);
-	BaseObject baseObj(txn.getPartitionId(), objectManager, nodeOId);
+	BaseObject baseObj(objectManager, strategy, nodeOId);
 	const TrNode n = baseObj.getBaseAddr<const TrNode>();
 	TrUtil_print_indent(indent);
 	printf("node ");
@@ -144,6 +144,6 @@ void TrNode_print(TransactionContext &txn, ObjectManager &objectManager,
 		printf("child %d\n", i);
 		c = &n->children[i];
 		TrRect_print(&(c->rect), indent + 1);
-		TrNode_print(txn, objectManager, c->nodeOId, indent + 1);
+		TrNode_print(txn, objectManager, strategy, c->nodeOId, indent + 1);
 	}
 }

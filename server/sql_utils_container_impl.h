@@ -30,7 +30,7 @@
 #include "meta_store.h"
 
 #include "sql_expression_core.h"
-
+#include "sql_operator_utils.h" 
 
 class BoolExpr;
 class Expr;
@@ -46,7 +46,6 @@ struct SQLContainerImpl {
 	typedef ::ColumnType ContainerColumnType;
 
 	typedef BtreeMap::SearchContext BtreeSearchContext;
-	typedef HashMap::SearchContext HashSearchContext;
 
 	typedef BaseContainer::RowArray RowArray;
 	typedef BaseContainer::RowArrayType RowArrayType;
@@ -67,14 +66,16 @@ struct SQLContainerImpl {
 
 	typedef SQLOps::ContainerLocation ContainerLocation;
 
+	typedef SQLOps::OpStore OpStore;
 	typedef SQLOps::OpContext OpContext;
 	typedef SQLOps::Projection Projection;
 
+	typedef SQLOps::ExtOpContext ExtOpContext;
+
 	typedef SQLContainerUtils::ScanMergeMode MergeMode;
-	typedef SQLContainerUtils::ScanCursor::LatchTarget LatchTarget;
 
 	class CursorImpl;
-	class LocalCursor;
+	class CursorAccessorImpl;
 
 	struct Constants;
 
@@ -99,8 +100,6 @@ struct SQLContainerImpl {
 
 	class CursorRef;
 
-	template<RowArrayType RAType>
-	struct ScannerHandler;
 	class ScannerHandlerBase;
 	class ScannerHandlerFactory;
 
@@ -124,88 +123,46 @@ struct SQLContainerImpl {
 
 class SQLContainerImpl::CursorImpl : public SQLContainerUtils::ScanCursor {
 public:
-	explicit CursorImpl(const Source &source);
-	virtual ~CursorImpl();
+	struct Data;
+	class HolderImpl;
 
-	virtual void unlatch() throw();
-	virtual void close() throw();
-	void destroy(bool withResultSet) throw();
+	typedef CursorAccessorImpl Accessor;
+
+	CursorImpl(Accessor &accessor, Data &data);
+	virtual ~CursorImpl();
 
 	virtual bool scanFull(OpContext &cxt, const Projection &proj);
 	virtual bool scanRange(OpContext &cxt, const Projection &proj);
 	virtual bool scanIndex(
-			OpContext &cxt, const Projection &proj,
-			const SQLExprs::IndexConditionList &condList);
+			OpContext &cxt, const SQLExprs::IndexConditionList &condList);
 	virtual bool scanMeta(
 			OpContext &cxt, const Projection &proj, const Expression *pred);
 
 	virtual void finishIndexScan(OpContext &cxt);
 
-	virtual void getIndexSpec(
-			OpContext &cxt, SQLExprs::IndexSelector &selector);
-	virtual bool isIndexLost();
-
-	virtual void setIndexSelection(const SQLExprs::IndexSelector &selector);
-	virtual const SQLExprs::IndexSelector& getIndexSelection();
-
-	virtual void setRowIdFiltering();
-	virtual bool isRowIdFiltering();
-
 	virtual uint32_t getOutputIndex();
 	virtual void setOutputIndex(uint32_t index);
-	virtual void setMergeMode(MergeMode::Type mode);
 
-	void startScope(OpContext &cxt);
-	void finishScope() throw();
-	CursorScope& resolveScope();
+	virtual SQLContainerUtils::ScanCursorAccessor& getAccessor();
+
+	void addScannerUpdator(const UpdatorEntry &updator);
+
+	void addContextRef(OpContext **ref);
+	void addContextRef(SQLExprs::ExprContext **ref);
+
+private:
+	typedef util::AllocVector<UpdatorEntry> UpdatorList;
+
+	typedef util::AllocVector<OpContext**> ContextRefList;
+	typedef util::AllocVector<SQLExprs::ExprContext**> ExprContextRefList;
 
 	ContainerId getNextContainerId() const;
 	void setNextContainerId(ContainerId containerId);
-
-	BaseContainer& resolveContainer();
-	BaseContainer* getContainer();
-
-	TransactionContext& resolveTransactionContext();
-	ResultSet& resolveResultSet();
-
-	template<BaseContainer::RowArrayType RAType>
-	void setRow(
-			typename BaseContainer::RowArrayImpl<
-					BaseContainer, RAType> &rowArrayImpl);
-
-	bool isValueNull(const ContainerColumn &column);
-
-	template<RowArrayType RAType, typename Ret, TupleColumnType T>
-	Ret getValueDirect(
-			SQLValues::ValueContext &cxt, const ContainerColumn &column);
-
-	template<RowArrayType RAType>
-	void writeValue(
-			SQLValues::ValueContext &cxt, TupleListWriter &writer,
-			const TupleList::Column &destColumn,
-			const ContainerColumn &srcColumn, bool forId);
-
-	template<TupleColumnType T>
-	static void writeValueAs(
-			TupleListWriter &writer, const TupleList::Column &column,
-			const typename SQLValues::TypeUtils::Traits<T>::ValueType &value);
 
 	ContainerRowScanner* tryCreateScanner(
 			OpContext &cxt, const Projection &proj,
 			const BaseContainer &container, RowIdFilter *rowIdFilter);
 	void updateScanner(OpContext &cxt, bool finished);
-	void addScannerUpdator(const UpdatorEntry &updator);
-
-	void clearResultSetPreserving(ResultSet &resultSet, bool force);
-	void activateResultSetPreserving(ResultSet &resultSet);
-
-	static void checkInputInfo(OpContext &cxt, const BaseContainer &container);
-
-	static TupleColumnType resolveColumnType(
-			const ColumnInfo &columnInfo, bool used, bool withStats);
-	static ContainerColumn resolveColumn(
-			BaseContainer &container, bool forId, uint32_t pos);
-	bool isColumnNonNullable(uint32_t pos);
 
 	void preparePartialSearch(
 			OpContext &cxt, BtreeSearchContext &sc,
@@ -213,12 +170,12 @@ public:
 	bool finishPartialSearch(
 			OpContext &cxt, BtreeSearchContext &sc, bool forIndex);
 
-	bool checkUpdates(OpContext &cxt, ResultSet &resultSet);
-	TupleUpdateRowIdHandler* prepareUpdateRowIdHandler(
-			OpContext &cxt, ResultSet &resultSet);
+	bool checkUpdates(
+			TransactionContext &txn, BaseContainer &container,
+			ResultSet &resultSet);
 
 	static void setUpSearchContext(
-			OpContext &cxt, TransactionContext &txn,
+			TransactionContext &txn,
 			const SQLExprs::IndexConditionList &targetCondList,
 			BtreeSearchContext &sc, const BaseContainer &container);
 
@@ -243,8 +200,149 @@ public:
 			TransactionContext &txn, Container &container,
 			const SearchResult &result, ContainerRowScanner &scanner);
 
+	static FullContainerKey* predicateToContainerKey(
+			SQLValues::ValueContext &cxt, TransactionContext &txn,
+			DataStoreV4 &dataStore, const Expression *pred,
+			const ContainerLocation &location, util::String &dbNameStr);
+
+	static const MetaContainerInfo& resolveMetaContainerInfo(ContainerId id);
+
+	void updateAllContextRef(OpContext &cxt);
+	void clearAllContextRef();
+
+	RowIdFilter* checkRowIdFilter(
+			OpContext &cxt, TransactionContext& txn, BaseContainer &container,
+			bool readOnly);
+	void finishRowIdFilter(RowIdFilter *rowIdFilter);
+
+	OIdTable* findOIdTable();
+	OIdTable& resolveOIdTable(OpContext &cxt, MergeMode::Type mode);
+
+	RowIdFilter* findRowIdFilter();
+	RowIdFilter& resolveRowIdFilter(OpContext &cxt, RowId maxRowId);
+
+	Accessor &accessor_;
+	Data &data_;
+};
+
+struct SQLContainerImpl::CursorImpl::Data {
+	Data(SQLValues::VarAllocator &varAlloc, Accessor &accessor);
+
+	uint32_t outIndex_;
+	ContainerId nextContainerId_;
+
+	int64_t totalSearchCount_;
+	uint64_t lastPartialExecSize_;
+
+	ContainerRowScanner *scanner_;
+	util::LocalUniquePtr<UpdatorList> updatorList_;
+
+	util::AllocUniquePtr<OIdTable> oIdTable_;
+	util::AllocUniquePtr<RowIdFilter> rowIdFilter_;
+
+	ContextRefList cxtRefList_;
+	ExprContextRefList exprCxtRefList_;
+};
+
+class SQLContainerImpl::CursorImpl::HolderImpl :
+		public SQLContainerUtils::ScanCursor::Holder {
+public:
+	HolderImpl(
+			SQLValues::VarAllocator &varAlloc, Accessor &accessor,
+			const OpStore::ResourceRef &accessorRef);
+	virtual ~HolderImpl();
+
+	virtual util::AllocUniquePtr<ScanCursor>::ReturnType attach();
+
+private:
+	Accessor& resolveAccessor();
+
+	SQLValues::VarAllocator &varAlloc_;
+	OpStore::ResourceRef accessorRef_;
+	void *accessorPtr_;
+	Data data_;
+};
+
+class SQLContainerImpl::CursorAccessorImpl :
+		public SQLContainerUtils::ScanCursorAccessor {
+public:
+	explicit CursorAccessorImpl(const Source &source);
+	virtual ~CursorAccessorImpl();
+
+	virtual util::AllocUniquePtr<
+			SQLContainerUtils::ScanCursor::Holder>::ReturnType createCursor(
+			const OpStore::ResourceRef &accessorRef);
+
+	virtual void unlatch() throw();
+	virtual void close() throw();
+	void destroy(bool withResultSet) throw();
+
+	virtual void getIndexSpec(
+			ExtOpContext &cxt, const TupleColumnList &inColumnList,
+			SQLExprs::IndexSelector &selector);
+	virtual bool isIndexLost();
+
+	virtual void setIndexSelection(const SQLExprs::IndexSelector &selector);
+	virtual const SQLExprs::IndexSelector& getIndexSelection();
+
+	virtual void setRowIdFiltering();
+	virtual bool isRowIdFiltering();
+
+	virtual void setMergeMode(MergeMode::Type mode);
+
+	const ContainerLocation& getLocation();
+	MergeMode::Type getMergeMode();
+	int64_t getIndexLimit();
+	int64_t getMemoryLimit();
+	const std::pair<uint64_t, uint64_t>& getPartialExecSizeRange();
+
+	void startScope(ExtOpContext &cxt, const TupleColumnList &inColumnList);
+	void finishScope() throw();
+	CursorScope& resolveScope();
+
+	BaseContainer& resolveContainer();
+	BaseContainer* getContainer();
+
+	TransactionContext& resolveTransactionContext();
+	ResultSet& resolveResultSet();
+
+	RowArray* getRowArray();
+
+	bool isValueNull(const ContainerColumn &column);
+
+	template<RowArrayType RAType, typename Ret, TupleColumnType T>
+	Ret getValueDirect(
+			SQLValues::ValueContext &cxt, const ContainerColumn &column);
+
+	template<TupleColumnType T>
+	static void writeValueAs(
+			TupleListWriter &writer, const TupleList::Column &column,
+			const typename SQLValues::TypeUtils::Traits<T>::ValueType &value);
+
+	void clearResultSetPreserving(ResultSet &resultSet, bool force);
+	void activateResultSetPreserving(ResultSet &resultSet);
+
+	static void checkInputInfo(
+			const TupleColumnList &list, const BaseContainer &container);
+
+	static TupleColumnType resolveColumnType(
+			const ColumnInfo &columnInfo, bool used, bool withStats);
+	static ContainerColumn resolveColumn(
+			BaseContainer &container, bool forId, uint32_t pos);
+	bool isColumnNonNullable(uint32_t pos);
+	bool updateNullsStats(
+			util::StackAllocator &alloc, const BaseContainer &container);
+
+	TupleUpdateRowIdHandler* prepareUpdateRowIdHandler(
+			TransactionContext &txn, BaseContainer &container,
+			ResultSet &resultSet);
+
+	void acceptIndexLost();
+
 	void initializeScanRange(
 			TransactionContext &txn, BaseContainer &container);
+	RowId getMaxRowId(
+			TransactionContext& txn, BaseContainer &container);
 
 	static void assignIndexInfo(
 			TransactionContext &txn, BaseContainer &container,
@@ -253,24 +351,20 @@ public:
 			TransactionContext &txn, BaseContainer &container,
 			util::Vector<IndexInfo> &indexInfoList);
 
-	static TransactionContext& prepareTransactionContext(OpContext &cxt);
+	void restoreRowIdFilter(RowIdFilter &rowIdFilter);
+	void finishRowIdFilter(RowIdFilter *rowIdFilter);
 
-	static FullContainerKey* predicateToContainerKey(
-			SQLValues::ValueContext &cxt, TransactionContext &txn,
-			DataStore &dataStore, const Expression *pred,
-			const ContainerLocation &location, util::String &dbNameStr);
+	static TransactionContext& prepareTransactionContext(ExtOpContext &cxt);
 
-	static const MetaContainerInfo& resolveMetaContainerInfo(ContainerId id);
-
-	static DataStore* getDataStore(OpContext &cxt);
-	static EventContext* getEventContext(OpContext &cxt);
-	static TransactionManager* getTransactionManager(OpContext &cxt);
-	static TransactionService* getTransactionService(OpContext &cxt);
-	static PartitionTable* getPartitionTable(OpContext &cxt);
-	static ClusterService* getClusterService(OpContext &cxt);
-	static SQLExecutionManager* getExecutionManager(OpContext &cxt);
-	static SQLService* getSQLService(OpContext &cxt);
-	static const ResourceSet* getResourceSet(OpContext &cxt);
+	static DataStoreV4* getDataStore(ExtOpContext &cxt);
+	static EventContext* getEventContext(ExtOpContext &cxt);
+	static TransactionManager* getTransactionManager(ExtOpContext &cxt);
+	static TransactionService* getTransactionService(ExtOpContext &cxt);
+	static PartitionTable* getPartitionTable(ExtOpContext &cxt);
+	static ClusterService* getClusterService(ExtOpContext &cxt);
+	static SQLExecutionManager* getExecutionManager(ExtOpContext &cxt);
+	static SQLService* getSQLService(ExtOpContext &cxt);
+	static const ResourceSet* getResourceSet(ExtOpContext &cxt);
 
 private:
 	friend class CursorScope;
@@ -280,15 +374,12 @@ private:
 	typedef BaseContainer::RowArrayImpl<
 			BaseContainer, BaseContainer::ROW_ARRAY_PLAIN> PlainRowArray;
 
-	typedef util::AllocVector<UpdatorEntry> UpdatorList;
+	typedef util::AllocXArray<uint8_t> NullsStats;
 
 	template<
 			TupleColumnType T,
 			bool VarSize = SQLValues::TypeUtils::Traits<T>::SIZE_VAR>
 	struct DirectValueAccessor;
-
-	CursorImpl(const CursorImpl&);
-	CursorImpl& operator=(const CursorImpl&);
 
 	template<RowArrayType RAType, typename T>
 	const T& getFixedValue(const ContainerColumn &column);
@@ -303,41 +394,27 @@ private:
 
 	void destroyRowArray();
 
-	RowArray* getRowArray();
-
 	template<RowArrayType RAType>
 	typename BaseContainer::RowArrayImpl<
 			BaseContainer, RAType>* getRowArrayImpl(bool loaded);
 
-	template<RowArrayType RAType>
-	void setUpScannerHandler(
-			OpContext &cxt, const Projection &proj,
-			ContainerRowScanner::HandlerSet &handlerSet);
-
 	void destroyUpdateRowIdHandler() throw();
 
-	RowId getMaxRowId(
-			TransactionContext& txn, BaseContainer &container);
 	static RowId resolveMaxRowId(
 			TransactionContext& txn, BaseContainer &container);
 
 	static bool isColumnSchemaNullable(const ColumnInfo &info);
 
-	bool updateNullsStats(const BaseContainer &container);
 	static void getNullsStats(
-			const BaseContainer &container, util::XArray<uint8_t> &nullsStats);
+			util::StackAllocator &alloc, const BaseContainer &container,
+			NullsStats &nullsStats);
 
-	static void initializeBits(util::XArray<uint8_t> &bits, size_t bitCount);
-	static void setBit(util::XArray<uint8_t> &bits, size_t index, bool value);
-	static bool getBit(const util::XArray<uint8_t> &bits, size_t index);
+	static void initializeBits(NullsStats &bits, size_t bitCount);
+	static void setBit(NullsStats &bits, size_t index, bool value);
+	static bool getBit(const NullsStats &bits, size_t index);
 
-	RowIdFilter* checkRowIdFilter(
-			OpContext &cxt, TransactionContext& txn, BaseContainer &container,
-			LocalCursor &cursor, bool readOnly);
-	void finishRowIdFilter(OpContext &cxt, RowIdFilter *rowIdFilter);
-
+	SQLValues::VarAllocator &varAlloc_;
 	ContainerLocation location_;
-	uint32_t outIndex_;
 	OpContext::Source cxtSrc_;
 	MergeMode::Type mergeMode_;
 
@@ -353,11 +430,10 @@ private:
 	ResultSetHolder resultSetHolder_;
 
 	PartitionId lastPartitionId_;
-	DataStore *lastDataStore_;
+	DataStoreV4 *lastDataStore_;
 	BaseContainer *container_;
 	ContainerType containerType_;
 	SchemaVersionId schemaVersionId_;
-	ContainerId nextContainerId_;
 	RowId maxRowId_;
 
 	util::LocalUniquePtr<RowArray> rowArray_;
@@ -367,51 +443,24 @@ private:
 	util::LocalUniquePtr<BaseObject> frontFieldCache_;
 
 	util::AllocUniquePtr<CursorScope> scope_;
-	SQLValues::LatchHolder &latchHolder_;
-	LatchTarget latchTarget_;
 	util::AllocUniquePtr<TupleUpdateRowIdHandler> updateRowIdHandler_;
 
-	ContainerRowScanner *scanner_;
-	util::XArray<uint8_t> initialNullsStats_;
-	util::XArray<uint8_t> lastNullsStats_;
+	NullsStats initialNullsStats_;
+	NullsStats lastNullsStats_;
 	int64_t indexLimit_;
 	int64_t memLimit_;
-	int64_t totalSearchCount_;
-
 	std::pair<uint64_t, uint64_t> partialExecSizeRange_;
-	uint64_t lastPartialExecSize_;
 
 	const SQLExprs::IndexSelector *indexSelection_;
-	util::LocalUniquePtr<UpdatorList> updatorList_;
 	util::LocalUniquePtr<uint32_t> rowIdFilterId_;
 };
 
 template<TupleColumnType T, bool VarSize>
-struct SQLContainerImpl::CursorImpl::DirectValueAccessor {
+struct SQLContainerImpl::CursorAccessorImpl::DirectValueAccessor {
 	template<RowArrayType RAType, typename Ret>
 	Ret access(
-			SQLValues::ValueContext &cxt, CursorImpl &cursor,
+			SQLValues::ValueContext &cxt, CursorAccessorImpl &base,
 			const ContainerColumn &column) const;
-};
-
-class SQLContainerImpl::LocalCursor {
-public:
-	LocalCursor();
-
-	static LocalCursor& resolve(OpContext &cxt);
-
-	OIdTable* findOIdTable();
-	OIdTable& resolveOIdTable(OpContext &cxt, MergeMode::Type mode);
-
-	RowIdFilter* findRowIdFilter();
-	RowIdFilter& resolveRowIdFilter(OpContext &cxt, RowId maxRowId);
-
-private:
-	LocalCursor(const LocalCursor&);
-	LocalCursor& operator=(const LocalCursor&);
-
-	util::AllocUniquePtr<OIdTable> oIdTable_;
-	util::AllocUniquePtr<RowIdFilter> rowIdFilter_;
 };
 
 struct SQLContainerImpl::Constants {
@@ -428,7 +477,7 @@ struct SQLContainerImpl::ColumnCode {
 			ExprFactoryContext &cxt, const Expression *expr,
 			const size_t *argIndex);
 
-	CursorImpl *cursor_;
+	CursorAccessorImpl *accessor_;
 	ContainerColumn column_;
 };
 
@@ -895,7 +944,7 @@ private:
 	BaseCode baseCode_;
 
 	RowIdFilter *rowIdFilter_;
-	CursorImpl *cursor_;
+	CursorAccessorImpl *accessor_;
 	ContainerColumn column_;
 };
 
@@ -959,11 +1008,15 @@ private:
 	typedef SQLExprs::ExprContext ExprContext;
 
 public:
-	explicit CursorRef(util::StackAllocator &alloc);
+	CursorRef();
 
 	CursorImpl& resolveCursor();
+	CursorAccessorImpl& resolveAccessor();
+
 	RowIdFilter* findRowIdFilter();
-	void setCursor(CursorImpl *cursor, RowIdFilter *rowIdFilter);
+	void setCursor(
+			CursorImpl *cursor, CursorAccessorImpl *accessor,
+			RowIdFilter *rowIdFilter);
 
 	void addContextRef(OpContext **ref);
 	void addContextRef(ExprContext **ref);
@@ -971,33 +1024,9 @@ public:
 	void updateAll(OpContext &cxt);
 
 private:
-	typedef util::Vector<OpContext**> ContextRefList;
-	typedef util::Vector<ExprContext**> ExprContextRefList;
-
 	CursorImpl *cursor_;
+	CursorAccessorImpl *accessor_;
 	RowIdFilter *rowIdFilter_;
-
-	ContextRefList cxtRefList_;
-	ExprContextRefList exprCxtRefList_;
-};
-
-template<BaseContainer::RowArrayType RAType>
-struct SQLContainerImpl::ScannerHandler {
-	static const RowArrayType ROW_ARRAY_TYPE = RAType;
-
-	ScannerHandler(OpContext &cxt, CursorImpl &cursor, const Projection &proj);
-
-	template<BaseContainer::RowArrayType InRAType>
-	void operator()(
-			TransactionContext &txn,
-			typename BaseContainer::RowArrayImpl<
-					BaseContainer, InRAType> &rowArrayImpl);
-
-	bool update(TransactionContext &txn);
-
-	OpContext &cxt_;
-	CursorImpl &cursor_;
-	const Projection &proj_;
 };
 
 class SQLContainerImpl::ScannerHandlerBase {
@@ -1188,7 +1217,7 @@ public:
 	static ScannerHandlerFactory& getInstanceForRegistrar();
 
 	ContainerRowScanner& create(
-			OpContext &cxt, CursorImpl &cursor, RowArray &rowArray,
+			OpContext &cxt, CursorImpl &cursor, CursorAccessorImpl &accessor,
 			const Projection &proj, RowIdFilter *rowIdFilter) const;
 
 	ContainerRowScanner::HandlerSet& create(
@@ -1288,7 +1317,9 @@ private:
 
 class SQLContainerImpl::CursorScope {
 public:
-	CursorScope(OpContext &cxt, CursorImpl &cursor);
+	CursorScope(
+			ExtOpContext &cxt, const TupleColumnList &inColumnList,
+			CursorAccessorImpl &accessor);
 	~CursorScope();
 
 	TransactionContext& getTransactionContext();
@@ -1298,30 +1329,36 @@ public:
 	uint64_t getElapsedNanos();
 
 private:
-	void initialize(OpContext &cxt);
+	typedef DataStoreBase::Scope DataStoreScope;
+
+	void initialize(ExtOpContext &cxt);
 	void clear(bool force);
 	void clearResultSet(bool force);
 
-	static const DataStore::Latch* getStoreLatch(
-			TransactionContext &txn, OpContext &cxt,
-			util::LocalUniquePtr<DataStore::Latch> &latch);
+	static util::Mutex* getPartitionLock(
+			TransactionContext &txn, ExtOpContext &cxt);
+	static const DataStoreScope* getStoreScope(
+			TransactionContext &txn, ExtOpContext &cxt,
+			util::LocalUniquePtr<DataStoreScope> &scope);
 	static BaseContainer* getContainer(
-			TransactionContext &txn, OpContext &cxt,
-			const DataStore::Latch *latch, const ContainerLocation &location,
+			TransactionContext &txn, ExtOpContext &cxt,
+			const DataStoreScope *latch, const ContainerLocation &location,
 			bool expired, ContainerType type);
 	static BaseContainer* checkContainer(
-			OpContext &cxt, BaseContainer *container,
-			const ContainerLocation &location, SchemaVersionId schemaVersionId);
+			const TupleColumnList &inColumnList, BaseContainer *container,
+			const ContainerLocation &location,
+			SchemaVersionId schemaVersionId);
 	static ResultSet* prepareResultSet(
-			OpContext &cxt, TransactionContext &txn, BaseContainer *container,
+			ExtOpContext &cxt, TransactionContext &txn, BaseContainer *container,
 			util::LocalUniquePtr<ResultSetGuard> &rsGuard,
-			const CursorImpl &cursor);
+			const CursorAccessorImpl &accessor);
 	static ResultSetId findResultSetId(ResultSet *resultSet);
 
-	CursorImpl &cursor_;
+	CursorAccessorImpl &accessor_;
 	TransactionContext &txn_;
 	TransactionService *txnSvc_;
-	util::LocalUniquePtr<DataStore::Latch> latch_;
+	util::DynamicLockGuard<util::Mutex> partitionGuard_;
+	util::LocalUniquePtr<DataStoreScope> scope_;
 	StackAllocAutoPtr<BaseContainer> containerAutoPtr_;
 	util::LocalUniquePtr<ResultSetGuard> rsGuard_;
 	ResultSet *resultSet_;
@@ -1351,6 +1388,8 @@ private:
 	typedef ResultSet::UpdateOperation UpdateOperation;
 
 public:
+	struct Shared;
+
 	TupleUpdateRowIdHandler(const OpContext::Source &cxtSrc, RowId maxRowId);
 	~TupleUpdateRowIdHandler();
 
@@ -1377,21 +1416,6 @@ private:
 
 	typedef TupleList::Column IdStoreColumnList[ID_STORE_COLUMN_COUNT];
 
-	struct Shared {
-		Shared(const OpContext::Source &cxtSrc, RowId maxRowId);
-
-		util::Mutex mutex_;
-		size_t refCount_;
-		util::LocalUniquePtr<OpContext> cxt_;
-
-		IdStoreColumnList columnList_;
-		uint32_t extraStoreIndex_;
-		uint32_t rowIdStoreIndex_;
-
-		RowId maxRowId_;
-		bool updated_;
-	};
-
 	explicit TupleUpdateRowIdHandler(Shared &shared);
 
 	static uint32_t createRowIdStore(
@@ -1405,6 +1429,21 @@ private:
 	static util::ObjectPool<Shared, util::Mutex> sharedPool_;
 
 	Shared *shared_;
+};
+
+struct SQLContainerImpl::TupleUpdateRowIdHandler::Shared {
+	Shared(const OpContext::Source &cxtSrc, RowId maxRowId);
+
+	util::Mutex mutex_;
+	size_t refCount_;
+	util::LocalUniquePtr<OpContext> cxt_;
+
+	IdStoreColumnList columnList_;
+	uint32_t extraStoreIndex_;
+	uint32_t rowIdStoreIndex_;
+
+	RowId maxRowId_;
+	bool updated_;
 };
 
 class SQLContainerImpl::OIdTable {
@@ -1604,7 +1643,7 @@ struct SQLContainerImpl::OIdTable::Source {
 	Source();
 
 	static Source ofContext(OpContext &cxt, MergeMode::Type mode);
-	static bool detectLarge(DataStore *dataStore);
+	static bool detectLarge(DataStoreV4 *dataStore);
 
 	SQLOps::OpAllocatorManager *allocManager_;
 	util::StackAllocator::BaseAllocator *baseAlloc_;

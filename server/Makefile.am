@@ -54,19 +54,7 @@ clean-local:
 distclean-local:
 	rm -fv Makefile.in
 
-$(aprinclude)/apr.h:
-	rm -rf $(libdir)/apr/org
-	rm -rf $(libdir)/apr/install
-	tar xfz $(libdir)/apr/apr-1.4.8.tar.gz -C $(libdir)/apr
-	mv $(libdir)/apr/apr-1.4.8 $(libdir)/apr/org
-	$(libdir)/apr/build.sh
 
-$(activemqinclude)/ActiveMQCPP.h:
-	rm -rf $(libdir)/activemq-cpp-library/org
-	rm -rf $(libdir)/activemq-cpp-library/install
-	tar xfz $(libdir)/activemq-cpp-library/activemq-cpp-library-3.7.1-src.tar.gz -C $(libdir)/activemq-cpp-library
-	mv $(libdir)/activemq-cpp-library/activemq-cpp-library-3.7.1 $(libdir)/activemq-cpp-library/org
-	$(libdir)/activemq-cpp-library/build.sh
 
 if BUILD_SH_DEBUG
 buildshopt=--debug
@@ -193,25 +181,7 @@ $(trdir)/libtrcpp.a:
 	./configure
 	make
 
-if LINK_ACTIVEMQ
-aprinclude=$(libdir)/apr/install/include/apr-1
-aprldadd=$(libdir)/apr/install/lib/libapr-1.a -lssl -lcrypto
-activemqinclude=$(libdir)/activemq-cpp-library/install/include/activemq-cpp-3.7.1
-activemqldadd=$(libdir)/activemq-cpp-library/install/lib/libactivemq-cpp.a
-aprheaders = $(aprinclude)/apr.h
-activemqheaders = $(activemqinclude)/ActiveMQCPP.h
-else !LINK_ACTIVEMQ
-aprinclude=
-aprldadd=
-activemqinclude=
-activemqldadd=
-aprheaders =
-activemqheaders =
-endif !LINK_ACTIVEMQ
-
 BUILT_SOURCES = \
-$(aprheaders) \
-$(activemqheaders) \
 $(sqliteworkdir)/sqlite3.h
 
 QP_SOURCES= \
@@ -264,7 +234,6 @@ $(srcdir)/base_index.cpp \
 $(srcdir)/base_container.cpp \
 $(srcdir)/blob_processor.cpp \
 $(srcdir)/btree_map.cpp \
-$(srcdir)/checkpoint_file.cpp \
 $(srcdir)/checkpoint_service.cpp \
 $(srcdir)/chunk_manager.cpp \
 $(srcdir)/cluster_event_type.cpp \
@@ -275,19 +244,15 @@ $(srcdir)/collection.cpp \
 $(srcdir)/config_table.cpp \
 $(srcdir)/container_archive.cpp \
 $(srcdir)/container_key.cpp \
-$(srcdir)/data_store.cpp \
 $(srcdir)/event_engine.cpp \
 $(srcdir)/geometry_processor.cpp \
 $(srcdir)/gs_error.cpp \
-$(srcdir)/hash_map.cpp \
 $(srcdir)/http.cpp \
 $(srcdir)/json.cpp \
 $(srcdir)/log_manager.cpp \
 $(srcdir)/message_row_store.cpp \
 $(srcdir)/message_schema.cpp \
 $(srcdir)/meta_store.cpp \
-$(srcdir)/object_allocator.cpp \
-$(srcdir)/object_manager.cpp \
 $(srcdir)/partition_table.cpp \
 $(srcdir)/query_api_processor.cpp \
 $(srcdir)/query_collection.cpp \
@@ -300,7 +265,6 @@ $(srcdir)/schema.cpp \
 $(srcdir)/service_address.cpp \
 $(srcdir)/string_array_processor.cpp \
 $(srcdir)/string_processor.cpp \
-$(srcdir)/sub_time_series.cpp \
 $(srcdir)/sync_manager.cpp \
 $(srcdir)/sync_service_base.cpp \
 $(srcdir)/sync_service.cpp \
@@ -312,7 +276,6 @@ $(srcdir)/transaction_manager_authentication.cpp \
 $(srcdir)/transaction_service_base.cpp \
 $(srcdir)/transaction_service.cpp \
 $(srcdir)/user_management.cpp \
-$(srcdir)/trigger_service.cpp \
 $(srcdir)/uuid_utils.cpp \
 $(srcdir)/value.cpp \
 $(srcdir)/value_operator.cpp \
@@ -339,31 +302,6 @@ $(srcdir)/sql_temp_store.cpp \
 $(srcdir)/sql_tuple.cpp \
 $(srcdir)/sql_tuple_var.cpp \
 $(srcdir)/sql_type.cpp \
-$(srcdir)/nosql_container.cpp \
-$(srcdir)/nosql_db.cpp \
-$(srcdir)/nosql_request.cpp \
-$(srcdir)/nosql_store.cpp \
-$(srcdir)/nosql_store_command.cpp \
-$(srcdir)/nosql_utils.cpp \
-$(srcdir)/sql_allocator_manager.cpp \
-$(srcdir)/sql_cluster_stat.cpp \
-$(srcdir)/sql_execution_direct_insert.cpp \
-$(srcdir)/sql_execution_manager.cpp \
-$(srcdir)/sql_handler_client.cpp \
-$(srcdir)/sql_handler_get_container.cpp \
-$(srcdir)/sql_handler_job.cpp \
-$(srcdir)/sql_handler_nosql_response.cpp \
-$(srcdir)/sql_handler_recover_container.cpp \
-$(srcdir)/sql_handler_request.cpp \
-$(srcdir)/sql_handler_table_schema.cpp \
-$(srcdir)/sql_handler_update_container.cpp \
-$(srcdir)/sql_job.cpp \
-$(srcdir)/sql_job_common.cpp \
-$(srcdir)/sql_profiler.cpp \
-$(srcdir)/sql_service_handler.cpp \
-$(srcdir)/sql_table_schema.cpp \
-$(srcdir)/sql_task_context.cpp \
-$(srcdir)/sql_query_processor.cpp \
 $(srcdir)/sql_expression.cpp \
 $(srcdir)/sql_expression_aggr.cpp \
 $(srcdir)/sql_expression_core.cpp \
@@ -380,7 +318,24 @@ $(srcdir)/sql_operator_utils.cpp \
 $(srcdir)/sql_utils_algorithm.cpp \
 $(srcdir)/sql_utils_container.cpp \
 $(srcdir)/sql_utils_vdbe.cpp \
-$(srcdir)/sql_value.cpp
+$(srcdir)/sql_value.cpp \
+$(srcdir)/affinity_manager.cpp \
+$(srcdir)/chunk_buffer.cpp \
+$(srcdir)/chunk.cpp \
+$(srcdir)/container_message_v4.cpp \
+$(srcdir)/data_store_v4.cpp \
+$(srcdir)/interchangeable.cpp \
+$(srcdir)/key_data_store.cpp \
+$(srcdir)/login.cpp \
+$(srcdir)/nosql_client_session.cpp \
+$(srcdir)/nosql_command.cpp \
+$(srcdir)/object_manager_v4.cpp \
+$(srcdir)/partition.cpp \
+$(srcdir)/partition_file.cpp \
+$(srcdir)/socket_wrapper.cpp \
+$(srcdir)/sql_command_manager.cpp \
+$(srcdir)/utility_v5.cpp
+
 
 BASE_CPPFLAGS = \
 -DGD_ENABLE_UNICAST_NOTIFICATION
@@ -431,8 +386,6 @@ NEWSQL_LDADD = \
 $(QP_LDADD) \
 $(utildir)/libutil.a \
 $(libdir)/MessagePack/libmsgpack.a \
-$(activemqldadd) \
-$(aprldadd) \
 -lpthread -lrt -ldl -lstdc++ -lz \
 $(sqliteworkdir)/libsqlite3.a
 
@@ -442,11 +395,10 @@ NEWSQL_INCLUDES = \
 -I$(libdir)/MessagePack/include \
 -I$(libdir)/picojson/include \
 -I$(libdir)/ebb \
+-I$(libdir)/fletcher32_simd \
 -I$(libdir)/sha2 \
 -I$(libdir)/uuid \
 -I$(srcdir)/tr-cpp \
--I$(aprinclude) \
--I$(activemqinclude) \
 -I$(sqliteworkdir) \
 -I$(sqlitedir)/src \
 -I$(newsqlincdir)

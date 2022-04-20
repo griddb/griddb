@@ -50,8 +50,8 @@ public:
 	 *
 	 */
 	LinearRing(srid_t id, const QP_XArray<Point *> &parray,
-		TransactionContext &txn, ObjectManager &objectManager)
-		: LineString(id, parray, txn, objectManager) {
+		TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy)
+		: LineString(id, parray, txn, objectManager, strategy) {
 		if ((isSimple_ && isClosed_) == false) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_GIS_CANNOT_MAKE_OBJECT,
 				"WKT argument is not a linearring");
@@ -68,8 +68,8 @@ public:
 	 *
 	 */
 	LinearRing(srid_t id, const LineString *l, TransactionContext &txn,
-		ObjectManager &objectManager)
-		: LineString(id, l->getPoints(), txn, objectManager) {
+		ObjectManagerV4 &objectManager, AllocateStrategy &strategy)
+		: LineString(id, l->getPoints(), txn, objectManager, strategy) {
 		isClosed_ = (p_[p_.size() - 1] == p_[0]);
 		if ((isSimple_ && isClosed_) == false) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_GIS_CANNOT_MAKE_OBJECT,
@@ -87,12 +87,12 @@ public:
 	 * @return Duplicated object
 	 */
 	LinearRing *dup(
-		TransactionContext &txn, ObjectManager &objectManager, srid_t id) {
+		TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy, srid_t id) {
 		if (isEmpty()) {
 			return QP_NEW LinearRing(txn);
 		}
 		else {
-			LinearRing *r = QP_NEW LinearRing(id, p_, txn, objectManager);
+			LinearRing *r = QP_NEW LinearRing(id, p_, txn, objectManager, strategy);
 			r->isAssigned_ = isAssigned_;
 			r->isEmpty_ = isEmpty_;
 			return r;
@@ -106,8 +106,8 @@ public:
 	 *
 	 * @return Duplicated object
 	 */
-	LinearRing *dup(TransactionContext &txn, ObjectManager &objectManager) {
-		return dup(txn, objectManager, srId_);
+	LinearRing *dup(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy) {
+		return dup(txn, objectManager, strategy, srId_);
 	}
 
 	/*!

@@ -3716,3 +3716,10 @@ void SQLValues::LatchHolder::close() throw() {
 		target->close();
 	}
 }
+
+
+SQLValues::BaseLatchTarget::~BaseLatchTarget() {
+}
+
+SQLValues::BaseLatchTarget::BaseLatchTarget() {
+}

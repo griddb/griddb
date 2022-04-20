@@ -49,6 +49,7 @@ struct SQLScanOps {
 	typedef SQLOps::ProjectionFactoryContext ProjectionFactoryContext;
 
 	typedef SQLContainerUtils::ScanCursor ScanCursor;
+	typedef SQLContainerUtils::ScanCursorAccessor ScanCursorAccessor;
 
 	class Registrar;
 
@@ -89,7 +90,10 @@ private:
 
 class SQLScanOps::BaseScanContainerOperator : public SQLOps::Operator {
 protected:
-	ScanCursor& getScanCursor(OpContext &cxt, bool forCompiling = false) const;
+	ScanCursorAccessor& getScanCursorAccessor(OpContext &cxt) const;
+	util::AllocUniquePtr<ScanCursor>::ReturnType getScanCursor(
+			OpContext &cxt) const;
+
 	static void unbindScanCursor(OpContext *cxt, ScanCursor &cursor);
 	static uint32_t getScanOutpuIndex(OpContext &cxt);
 };

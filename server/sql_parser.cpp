@@ -14,13 +14,13 @@
 	You should have received a copy of the GNU Affero General Public License
 	along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
+/*!
+ * @file sql_parser.h
+ * @brief SQLパーサ関連クラスの実装
+ */
 
 #ifndef SQL_PARSER_ENABLE_WINDOW_FUNCTION
 #define SQL_PARSER_ENABLE_WINDOW_FUNCTION 1
-#endif
-
-#ifndef SQL_PARSER_ENABLE_DISTINCT_WITHIN_AGGREGATE_FUNCTION
-#define SQL_PARSER_ENABLE_DISTINCT_WITHIN_AGGREGATE_FUNCTION 1
 #endif
 
 #include "sql_parser.h"
@@ -29,9 +29,11 @@
 #include "sql_processor.h" 
 
 #include "sql_execution.h"
-#include "sql_execution_manager.h"
 #include "sql_compiler.h" 
 #include "sql_utils.h"
+
+
+
 
 const int64_t SyntaxTree::SQL_TOKEN_COUNT_LIMIT = 100000;
 const int64_t SyntaxTree::SQL_EXPR_TREE_DEPTH_LIMIT = 3000;
@@ -347,6 +349,7 @@ bool SyntaxTree::Select::isDDL() {
 	case CMD_DROP_INDEX:
 	case CMD_ALTER_TABLE_DROP_PARTITION:  
 	case CMD_ALTER_TABLE_ADD_COLUMN:  
+	case CMD_ALTER_TABLE_RENAME_COLUMN:  
 	case CMD_CREATE_USER:
 	case CMD_DROP_USER:
 	case CMD_SET_PASSWORD:
@@ -379,6 +382,7 @@ int32_t SyntaxTree::Select::calcCommandType() {
 	case CMD_DROP_INDEX:
 	case CMD_ALTER_TABLE_DROP_PARTITION:  
 	case CMD_ALTER_TABLE_ADD_COLUMN:  
+	case CMD_ALTER_TABLE_RENAME_COLUMN:  
 	case CMD_CREATE_USER:
 	case CMD_DROP_USER:
 	case CMD_SET_PASSWORD:
@@ -1215,6 +1219,49 @@ SyntaxTree::CreateTableOption* SyntaxTree::makeCreateTableOption(
 	return dest;
 }
 
+SyntaxTree::TableColumn* SyntaxTree::makeCreateTableColumn(
+	SQLAllocator &alloc, SQLToken *name,
+	SyntaxTree::ColumnInfo *colInfo) {
+	TableColumn *column = ALLOC_NEW(alloc) TableColumn;
+	do {
+		util::String *colName = NULL;
+		bool isQuoted = false;
+		tokenToString(alloc, *name, true, colName, isQuoted);
+		if (!colName) {
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR,
+								"Table name must not be empty");
+		}
+		column->qName_ = ALLOC_NEW(alloc) QualifiedName(alloc);
+		column->qName_->name_ = colName;
+		column->qName_->nameCaseSensitive_ = isQuoted;
+
+		column->type_ = TupleList::TYPE_NULL;
+
+		if (colInfo) {
+			column->option_ = colInfo->option_;
+			column->virtualColumnOption_ = colInfo->virtualColumnOption_;
+			if ((column->option_ & COLUMN_OPT_VIRTUAL) != 0) {
+				GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR,
+						"Virtual column is not supported");
+			}
+			if ((column->option_ & COLUMN_OPT_PRIMARY_KEY) != 0) {
+				column->option_ |= COLUMN_OPT_NOT_NULL;
+			}
+		}
+		else {
+			column->option_ = 0;
+			column->virtualColumnOption_ = NULL;
+		}
+
+		return column;
+	}
+	while (false);
+
+	ALLOC_DELETE(alloc, column);
+
+	return NULL;
+}
+
 SyntaxTree::CreateTableOption* SyntaxTree::makeAlterTableAddColumnOption(
 		SQLAllocator &alloc, SyntaxTree::TableColumnList *columnList) {
 
@@ -1406,7 +1453,25 @@ TupleList::TupleColumnType SyntaxTree::toColumnType(const char8_t *name) {
 }
 
 
+/*
+   カラムタイプ文字列をスキャンして以下のルールにより型を決定する
+   - 下の表の部分文字列にマッチした場合に対応する型とする
+   - 複数回マッチする場合は、上の物が優先される(例えば、BLOBINTならTYPE_INTEGER)
 
+   Substring     | TupleList::ColumnType
+   --------------------------------
+   'INT'         | TYPE_INTEGER
+   'CHAR'        | TYPE_STRING
+   'CLOB'        | TYPE_STRING
+   'TEXT'        | TYPE_STRING
+   'BLOB'        | TYPE_BLOB
+   'REAL'        | TYPE_DOUBLE
+   'DOUB'        | TYPE_DOUBLE
+   'FLOA'        | TYPE_FLOAT
+**
+** If none of the substrings in the above table are found,
+** GS_AFF_NUMERIC is returned.
+*/
 TupleList::TupleColumnType SyntaxTree::determineType(const char *zIn) {
 	uint32_t h = 0;
 	TupleList::TupleColumnType aff = TupleList::TYPE_NULL;
@@ -1479,6 +1544,13 @@ void SyntaxTree::countLineAndColumnFromToken(
 	}
 }
 
+/*!
+	@brief SQLTokenからutil::String*へ変換
+	@param [in] alloc
+	@param [in] token
+	@param [in] dequote dequote処理を行う場合true
+	@return 結果が0文字TokenならNULLを返す。それ以外ならTokenからutil::String*を生成して返す
+*/
 void SyntaxTree::tokenToString(
 		SQLAllocator &alloc, const SQLToken &token, bool dequote,
 		util::String* &out, bool &isQuoted) {
@@ -1500,6 +1572,12 @@ void SyntaxTree::tokenToString(
 	out = str;
 }
 
+/*!
+	@brief SQLTokenからutil::String*へ変換(簡易版: 引用符付かどうかの情報が不要な場合)
+	@param [in] alloc
+	@param [in] token
+	@return 結果が0文字TokenならNULLを返す。それ以外ならTokenからutil::String*を生成して返す
+*/
 util::String* SyntaxTree::tokenToString(
 		SQLAllocator &alloc, const SQLToken &token, bool dequote) {
 
@@ -1510,6 +1588,14 @@ util::String* SyntaxTree::tokenToString(
 }
 
 
+/*
+	SQLスタイルのクォートされた文字列からクォート文字を除去する
+	変換が必要な場合は、新たなutil::Stringを作ってそれを返す。
+	文字列がクォート文字から始まらない場合、何もしない
+
+	戻り値: クォート除去処理が行われなかった場合-1, それ以外は
+	クォート除去後の(終端文字を含まない)文字列長
+*/
 int32_t SyntaxTree::gsDequote(SQLAllocator &alloc, util::String &str) {
 	char quote;
 	int32_t i, j;
@@ -1637,7 +1723,7 @@ void GenSyntaxTree::parseAll(
 		SQLExpandViewContext *expandViewCxt, SQLExecution *execution,
 		util::String& sqlCommandList, uint32_t viewDepth,
 		int64_t viewNsId, int64_t maxViewNsId, bool expandView) {
-	SQLConnectionEnvironment  *control = expandViewCxt->control_;
+	SQLConnectionControl *control = expandViewCxt->control_;
 	assert(control);
 	SQLParsedInfo &parsedInfo = *expandViewCxt->parsedInfo_;
 	std::string value;
@@ -1928,6 +2014,11 @@ void SQLParserContext::setPragma(
 				pragmaType_ = SQLPragma::PRAGMA_EXPERIMENTAL_SCAN_MULTI_INDEX;
 				asBool = true;
 			}
+			else if (SQLProcessor::ValueUtils::strICmp(
+					"internal.resultset.timeout",
+					keyStr->c_str()) == 0) {
+				pragmaType_ = SQLPragma::PRAGMA_RESULTSET_TIMEOUT_INTERVAL;
+			}
 			else {
 				GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR,
 						"Unknown pragma key: " << keyStr->c_str());
@@ -2063,7 +2154,7 @@ void SQLParserContext::checkViewCircularReference(SyntaxTree::Expr* expr) {
 	}
 	if (srcName->tableCaseSensitive_) {
 		const util::String &normalizeTableName =
-				SQLUtils::normalizeName(alloc, tableName->c_str());
+				normalizeName(alloc, tableName->c_str());
 		outResult = viewSet.insert(normalizeTableName);
 	}
 	else {
