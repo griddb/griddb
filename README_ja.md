@@ -56,6 +56,54 @@ GridDBが提供する機能は『[GridDB 機能リファレンス](https://githu
     $ gs_stopcluster -u admin/your_password
     $ gs_stopnode -u admin/your_password
 
+## [クイックスタート (GridDBサービスとCLIの利用)](docs/UsingServiceAndCLI.md)
+
+## クイックスタート (RPM/DEBファイルの利用)
+
+  CentOS 7.9、Ubuntu 18.04、openSUSE Leap 15.1の環境での動作を確認しています。
+
+  ※事前にPython3をインストールしてください。例) yum install python3
+
+  - このパッケージをインストールすると、OS内にgsadmユーザが作成されます。運用コマンドはgsadmユーザで操作してください。  
+  - gsadmユーザでログインすると環境変数 GS_HOMEとGS_LOGが自動的に設定されます。また、運用コマンドの場所が環境変数 PATHに設定されます。
+  - Javaクライアントのライブラリ(gridstore.jar)は/usr/share/java上に、サンプルは/usr/griddb-XXX/docs/sample/program上に配置されます。
+  - 過去版がインストールされている場合は、アンインストール後、/var/lib/gridstore上のconf/,data/を削除してください。
+
+### インストール
+    (CentOS)
+    $ sudo rpm -ivh griddb-X.X.X-linux.x86_64.rpm
+
+    (Ubuntu)
+    $ sudo dpkg -i griddb_X.X.X_amd64.deb
+
+    (openSUSE)
+    $ sudo rpm -ivh griddb-X.X.X-opensuse.x86_64.rpm
+
+    ※ X.X.Xはバージョンを意味します。
+
+### サーバの起動
+    [gsadm]$ cp /usr/griddb-X.X.X/conf_multicast/* conf/.
+    ※ デフォルトはローカル接続限定の設定になっていますので、コンフィグを変更してください。
+
+    [gsadm]$ gs_passwd admin
+      #input your_password
+    [gsadm]$ vi conf/gs_cluster.json
+      #    "clusterName":"your_clustername" #<-- input your_clustername
+    [gsadm]$ gs_startnode
+    [gsadm]$ gs_joincluster -c your_clustername -u admin/your_password
+
+### サンプルプログラムの実行
+    $ export CLASSPATH=${CLASSPATH}:/usr/share/java/gridstore.jar:.
+    $ mkdir gsSample
+    $ cp /usr/griddb-X.X.X/docs/sample/program/Sample1.java gsSample/.
+    $ javac gsSample/Sample1.java
+    $ java gsSample/Sample1 239.0.0.1 31999 your_clustername admin your_password
+      --> Person:  name=name02 status=false count=2 lob=[65, 66, 67, 68, 69, 70, 71, 72, 73, 74]
+
+### サーバの停止
+    [gsadm]$ gs_stopcluster -u admin/your_password
+    [gsadm]$ gs_stopnode -u admin/your_password
+
 [インストール時のトラブルシューティング](docs/TroubleShootingTips_ja.md)もご参照ください。
 
 ## ドキュメント
@@ -95,6 +143,9 @@ GridDBが提供する機能は『[GridDB 機能リファレンス](https://githu
   (NoSQL & SQL Interface)
   * [GridDB WebAPI](https://github.com/griddb/webapi)
   * [GridDB CLI](https://github.com/griddb/cli)
+  
+  (その他)
+  * [GridDB Export/Import](https://github.com/griddb/expimp)
 
   他のOSSと接続するためのコネクタもあります。
   * [GridDB connector for Apache Hadoop MapReduce](https://github.com/griddb/griddb_hadoop_mapreduce/blob/master/README_ja.md)
