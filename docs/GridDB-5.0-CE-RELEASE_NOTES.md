@@ -26,6 +26,14 @@ Main changes in GridDB CE V5.0 are as follows
 
     ALTER TABLE *table name* RENAME COLUMN *column name before renaming* TO *column name after renaming*;
 
+5. GridDB Service
+
+    - When the OS starts (stops), we can start (stop) GridDB Server. Please refer to [GridDB_Service.md](GridDB_Service.md) for details.
+
+6. [Export/Import tool](https://github.com/griddb/expimp)
+
+    - A tool to export/import data from and to a GridDB cluster.
+
 ---
 
 ## Specification Changes
@@ -50,7 +58,7 @@ The following parameters are added to the node definition file (gs_node.json).
 
 ### Notations
 
-- Current version is not compatible with the previous GridDB versions.
+- Current version is not compatible with the previous GridDB versions. To use V4 data, please retrieve data using the export tool and store them in V5 database using the import tool.
 - Hash index, Row expiry release, Timeseries compression and Trigger function have been discontinued in V5.
 Please use Tree index, Partition expiry release, and Block data compression instead of Hash index, Row expiry release, and Timeseries compression.
 
