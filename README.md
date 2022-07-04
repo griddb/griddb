@@ -11,7 +11,8 @@
   This repository includes server and Java client. And [jdbc repository](https://github.com/griddb/jdbc) includes JDBC Driver.
 
 ## Quick start (Using source code)
-  We have confirmed the operation on CentOS 7.9 (gcc 4.8.5), Ubuntu 18.04 (gcc 4.8.5) and openSUSE Leap 15.1 (gcc 4.8.5).
+  We have confirmed the operation with Linux(x64).
+  - CentOS 7.9 (gcc 4.8.5), Ubuntu 18.04 (gcc 4.8.5) and openSUSE Leap 15.1 (gcc 4.8.5)
 
 Note:
 - Please install Python3 in advance.
@@ -58,7 +59,8 @@ Note:
 
 ## Quick start (Using RPM or DEB)
 
-  We have confirmed the operation on CentOS 7.9, Ubuntu 18.04 and openSUSE Leap 15.1.
+  We have confirmed the operation with Linux(x64).
+  - CentOS 7.9, Ubuntu 18.04/20.04 and openSUSE Leap 15.1
 
 Note:
 - Please install Python3 in advance.
