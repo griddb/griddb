@@ -6,7 +6,7 @@ docker pull opensuse/leap:${OPENSUSE_VERSION}
 docker run --name ${DOCKER_CONTAINER_NAME_OPENSUSE} -ti -d -v `pwd`:/griddb --env GS_LOG=/griddb/log --env GS_HOME=/griddb opensuse/leap:${OPENSUSE_VERSION}
 
 # Install gcc-4.8 and g++-4.8
-docker exec ${DOCKER_CONTAINER_NAME_OPENSUSE} /bin/bash -xec "zypper addrepo https://download.opensuse.org/repositories/devel:gcc/openSUSE_Leap_15.2/devel:gcc.repo \
+docker exec ${DOCKER_CONTAINER_NAME_OPENSUSE} /bin/bash -xec "zypper addrepo https://download.opensuse.org/repositories/devel:gcc/openSUSE_Leap_15.3/devel:gcc.repo \
 && zypper --non-interactive --no-gpg-checks --quiet ref \
 && zypper --non-interactive --no-gpg-checks --quiet install --auto-agree-with-licenses gcc48 \
 && zypper --non-interactive --no-gpg-checks --quiet install --auto-agree-with-licenses gcc48-c++"
