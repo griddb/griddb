@@ -234,6 +234,8 @@ const util::NameCoderEntry<MetaType::PartitionMeta>
 	UTIL_NAME_CODER_ENTRY(PARTITION_NODE_AFFINITY),
 	UTIL_NAME_CODER_ENTRY(PARTITION_CLUSTER_PARTITION_INDEX),
 	UTIL_NAME_CODER_ENTRY(PARTITION_NODE_ADDRESS),
+	UTIL_NAME_CODER_ENTRY(PARTITION_EXPIRED_START_TIME),
+	UTIL_NAME_CODER_ENTRY(PARTITION_EXPIRED_ERASABLE_TIME),
 	UTIL_NAME_CODER_ENTRY(PARTITION_STATUS)
 };
 
@@ -301,14 +303,12 @@ const util::NameCoderEntry<MetaType::StringConstants>
 	UTIL_NAME_CODER_ENTRY(STR_CONTAINER_OPTIONAL_TYPE),
 	UTIL_NAME_CODER_ENTRY(STR_TABLE_NAME),
 	UTIL_NAME_CODER_ENTRY(STR_TABLE_OPTIONAL_TYPE),
-
 	UTIL_NAME_CODER_ENTRY(STR_KEY_SEQ),
 	UTIL_NAME_CODER_ENTRY(STR_COLUMN_NAME),
 	UTIL_NAME_CODER_ENTRY(STR_NULLABLE),
 	UTIL_NAME_CODER_ENTRY(STR_ORDINAL_POSITION),
 	UTIL_NAME_CODER_ENTRY(STR_TYPE_NAME),
 	UTIL_NAME_CODER_ENTRY(STR_INDEX_NAME),
-
 	UTIL_NAME_CODER_ENTRY(STR_DATABASE_NAME),
 	UTIL_NAME_CODER_ENTRY(STR_DATA_AFFINITY),
 	UTIL_NAME_CODER_ENTRY(STR_DATA_GROUPID),
@@ -340,8 +340,7 @@ const util::NameCoderEntry<MetaType::StringConstants>
 	UTIL_NAME_CODER_ENTRY(STR_JMS_DESTINATION_TYPE),
 	UTIL_NAME_CODER_ENTRY(STR_JMS_DESTINATION_NAME),
 	UTIL_NAME_CODER_ENTRY(STR_USER),
-	UTIL_NAME_CODER_ENTRY(STR_PASSWORD)
-	,
+	UTIL_NAME_CODER_ENTRY(STR_PASSWORD),
 	UTIL_NAME_CODER_ENTRY(STR_ATTRIBUTE),
 	UTIL_NAME_CODER_ENTRY(STR_DATABASE_ID),
 	UTIL_NAME_CODER_ENTRY(STR_CONTAINER_ID),
@@ -352,8 +351,7 @@ const util::NameCoderEntry<MetaType::StringConstants>
 	UTIL_NAME_CODER_ENTRY(STR_UPPER_BOUNDARY_TIME),
 	UTIL_NAME_CODER_ENTRY(STR_ERASABLE_TIME),
 	UTIL_NAME_CODER_ENTRY(STR_ROW_INDEX_OID),
-	UTIL_NAME_CODER_ENTRY(STR_MVCC_INDEX_OID)
-	,
+	UTIL_NAME_CODER_ENTRY(STR_MVCC_INDEX_OID),
 	UTIL_NAME_CODER_ENTRY(STR_NODE_ADDRESS),
 	UTIL_NAME_CODER_ENTRY(STR_NODE_PORT),
 	UTIL_NAME_CODER_ENTRY(STR_START_TIME),
@@ -365,9 +363,7 @@ const util::NameCoderEntry<MetaType::StringConstants>
 	UTIL_NAME_CODER_ENTRY(STR_REMOTE_PORT),
 	UTIL_NAME_CODER_ENTRY(STR_CREATION_TIME),
 	UTIL_NAME_CODER_ENTRY(STR_DISPATCHING_EVENT_COUNT),
-	UTIL_NAME_CODER_ENTRY(STR_SENDING_EVENT_COUNT)
-
-	,
+	UTIL_NAME_CODER_ENTRY(STR_SENDING_EVENT_COUNT),
 	UTIL_NAME_CODER_ENTRY(STR_PARTITION_TYPE),
 	UTIL_NAME_CODER_ENTRY(STR_PARTITION_COLUMN),
 	UTIL_NAME_CODER_ENTRY(STR_PARTITION_INTERVAL_VALUE),
@@ -379,15 +375,14 @@ const util::NameCoderEntry<MetaType::StringConstants>
 	UTIL_NAME_CODER_ENTRY(STR_SUBPARTITION_INTERVAL_UNIT),
 	UTIL_NAME_CODER_ENTRY(STR_SUBPARTITION_DIVISION_COUNT),
 	UTIL_NAME_CODER_ENTRY(STR_CLUSTER_NODE_ADDRESS),
-	UTIL_NAME_CODER_ENTRY(STR_PARTITION_STATUS)
-	,
+	UTIL_NAME_CODER_ENTRY(STR_PARTITION_EXPIRED_CHECK_TIME),
+	UTIL_NAME_CODER_ENTRY(STR_PARTITION_EXPIRED_ERASABLE_TIME),
+	UTIL_NAME_CODER_ENTRY(STR_PARTITION_STATUS),
 	UTIL_NAME_CODER_ENTRY(STR_VIEW_NAME),  
 	UTIL_NAME_CODER_ENTRY(STR_VIEW_DEFINITION),
-
 	UTIL_NAME_CODER_ENTRY(STR_SQL),  
 	UTIL_NAME_CODER_ENTRY(STR_QUERY_ID),
 	UTIL_NAME_CODER_ENTRY(STR_JOB_ID),
-
 	UTIL_NAME_CODER_ENTRY(STR_NUM_ROWS),
 	UTIL_NAME_CODER_ENTRY(STR_ROLE),
 	UTIL_NAME_CODER_ENTRY(STR_LSN),
@@ -555,6 +550,8 @@ const MetaType::CoreColumns::Entry<MetaType::PartitionMeta>
 	of(PARTITION_NODE_AFFINITY).asLong(),
 	of(PARTITION_CLUSTER_PARTITION_INDEX).asInteger(),
 	of(PARTITION_NODE_ADDRESS).asString(),
+	of(PARTITION_EXPIRED_START_TIME).asString(true),
+	of(PARTITION_EXPIRED_ERASABLE_TIME).asString(true),
 	of(PARTITION_STATUS).asString()
 };
 
@@ -834,6 +831,8 @@ const MetaType::RefColumns::Entry<MetaType::PartitionMeta>
 
 	,
 	of(PARTITION_NODE_ADDRESS, STR_CLUSTER_NODE_ADDRESS),
+	of(PARTITION_EXPIRED_START_TIME, STR_PARTITION_EXPIRED_CHECK_TIME),
+	of(PARTITION_EXPIRED_ERASABLE_TIME, STR_PARTITION_EXPIRED_ERASABLE_TIME),
 	of(PARTITION_STATUS, STR_PARTITION_STATUS)
 };
 
@@ -1500,8 +1499,9 @@ void MetaProcessor::scanCore(TransactionContext &txn, Context &cxt) {
 	DataStoreV4 *dataStore = cxt.getSource().dataStore_;
 	assert(dataStore != NULL);
 	const DatabaseId dbId = cxt.getSource().dbId_;
+	const bool subCondition = (info_.id_ == MetaType::TYPE_PARTITION_STATS);
 
-	if (containerKey_ == NULL) {
+	if (containerKey_ == NULL || subCondition) {
 		util::StackAllocator::Scope subScope(alloc);
 		util::XArray< KeyDataStoreValue* > storeValueList(alloc);
 		bool followingFound = dataStore->getKeyDataStore()->scanContainerList(
@@ -1571,12 +1571,14 @@ Value MetaProcessor::ValueUtils::makeNull() {
 }
 
 Value MetaProcessor::ValueUtils::makeString(
-		util::StackAllocator &alloc, const char8_t *src) {
+		util::StackAllocator &alloc, const char8_t *src, uint32_t limit) {
 	char8_t *addr = const_cast<char8_t*>(src);
-	const uint32_t size = static_cast<uint32_t>(strlen(src));
-
+	size_t size = strlen(src);
+	if (size > limit) {
+		size = limit;
+	}
 	Value dest;
-	dest.set(alloc, addr, size);
+	dest.set(alloc, addr, static_cast<uint32_t>(size));
 	return dest;
 }
 
@@ -1824,6 +1826,10 @@ MetaProcessor::Context& MetaProcessor::StoreCoreHandler::getContext() const {
 	return cxt_;
 }
 
+Value MetaProcessor::StoreCoreHandler::makeString(util::StackAllocator& alloc, const char8_t* src) const {
+	return ValueUtils::makeString(alloc, src, cxt_.getSource().dataStore_->getConfig().getLimitSmallSize());
+}
+
 void MetaProcessor::StoreCoreHandler::getNames(
 		TransactionContext &txn, BaseContainer &container,
 		const char8_t *&dbName, const char8_t *&containerName) const {
@@ -1932,23 +1938,23 @@ void MetaProcessor::ContainerHandler::execute(
 			ValueUtils::makeLong(dbId));
 	builder.set(
 			MetaType::CONTAINER_DATABASE_NAME,
-			ValueUtils::makeString(alloc, dbName));
+			makeString(alloc, dbName));
 	builder.set(
 			MetaType::CONTAINER_ATTRIBUTE,
 			ValueUtils::makeInteger(attribute));
 	builder.set(
 			MetaType::CONTAINER_TYPE_NAME,
-			ValueUtils::makeString(alloc, containerTypeToName(type)));
+			makeString(alloc, containerTypeToName(type)));
 	builder.set(
 			MetaType::CONTAINER_NAME,
-			ValueUtils::makeString(alloc, name));
+			makeString(alloc, name));
 
 	util::String dataAffinity(alloc);
 	container.getAffinityStr(dataAffinity);
 	builder.set(
 			MetaType::CONTAINER_DATA_AFFINITY,
 			(dataAffinity.length() == 0 ? ValueUtils::makeNull() :
-			ValueUtils::makeString(alloc, dataAffinity.c_str())));
+			makeString(alloc, dataAffinity.c_str())));
 
 	const BaseContainer::ExpirationInfo *expirationInfo = NULL;
 	int32_t expirationDivision = -1;
@@ -1969,7 +1975,7 @@ void MetaProcessor::ContainerHandler::execute(
 					ValueUtils::makeInteger(expirationInfo->elapsedTime_));
 	builder.set(
 			MetaType::CONTAINER_EXPIRATION_UNIT,
-			expirationInfo == NULL ? ValueUtils::makeNull() : ValueUtils::makeString(
+			expirationInfo == NULL ? ValueUtils::makeNull() : makeString(
 					alloc, timeUnitToName(expirationInfo->timeUnit_)));
 	builder.set(
 			MetaType::CONTAINER_EXPIRATION_DIVISION,
@@ -2012,13 +2018,13 @@ void MetaProcessor::ContainerHandler::execute(
 				(i == 0 ?
 						MetaType::CONTAINER_PARTITION_TYPE1 :
 						MetaType::CONTAINER_PARTITION_TYPE2),
-				p == NULL ? ValueUtils::makeNull() : ValueUtils::makeString(
+				p == NULL ? ValueUtils::makeNull() : makeString(
 						alloc, partitionTypeToName(partitionType)));
 		builder.set(
 				(i == 0 ?
 						MetaType::CONTAINER_PARTITION_COLUMN1 :
 						MetaType::CONTAINER_PARTITION_COLUMN2),
-				p == NULL ? ValueUtils::makeNull() : ValueUtils::makeString(
+				p == NULL ? ValueUtils::makeNull() : makeString(
 						alloc, (i ==0 ?
 								p->partitionColumnName_ :
 								p->subPartitioningColumnName_).c_str()));
@@ -2028,13 +2034,13 @@ void MetaProcessor::ContainerHandler::execute(
 						MetaType::CONTAINER_PARTITION_INTERVAL2),
 								(p == NULL || (p != NULL && !p->checkInterval(
 										static_cast<int32_t>(i)))) ?
-								ValueUtils::makeNull() : ValueUtils::makeString(
+								ValueUtils::makeNull() : makeString(
 										alloc, p->getIntervalValue().c_str()));
 		builder.set(
 				(i == 0 ?
 						MetaType::CONTAINER_PARTITION_UNIT1 :
 						MetaType::CONTAINER_PARTITION_UNIT2),
-				noTimestamp ? ValueUtils::makeNull() : ValueUtils::makeString(
+				noTimestamp ? ValueUtils::makeNull() : makeString(
 						alloc, timeUnitToName(p->intervalUnit_)));
 
 		builder.set(
@@ -2064,7 +2070,7 @@ void MetaProcessor::ContainerHandler::execute(
 		builder.set(
 				MetaType::CONTAINER_EXPIRATION_TYPE,
 				expirationType < 0 ?
-				ValueUtils::makeNull() : ValueUtils::makeString(
+				ValueUtils::makeNull() : makeString(
 						alloc, expirationTypeToName(expirationType)));
 	}
 
@@ -2158,13 +2164,13 @@ void MetaProcessor::ColumnHandler::execute(
 			ValueUtils::makeLong(dbId));
 	builder.set(
 			MetaType::COLUMN_DATABASE_NAME,
-			ValueUtils::makeString(alloc, dbName));
+			makeString(alloc, dbName));
 	builder.set(
 			MetaType::COLUMN_CONTAINER_ATTRIBUTE,
 			ValueUtils::makeInteger(attribute));
 	builder.set(
 			MetaType::COLUMN_CONTAINER_NAME,
-			ValueUtils::makeString(alloc, name));
+			makeString(alloc, name));
 
 	ObjectManagerV4 *objectManager =
 			container.getDataStore()->getObjectManager();
@@ -2193,13 +2199,13 @@ void MetaProcessor::ColumnHandler::execute(
 
 		builder.set(
 				MetaType::COLUMN_TYPE_NAME,
-				ValueUtils::makeString(alloc, columnTypeName));
+				makeString(alloc, columnTypeName));
 
 		const char8_t *columnName =
-				info.getColumnName(txn, *objectManager, const_cast<BaseContainer*>(&schemaContainer)->getMetaAllcateStrategy());
+				info.getColumnName(txn, *objectManager, const_cast<BaseContainer*>(&schemaContainer)->getMetaAllocateStrategy());
 		builder.set(
 				MetaType::COLUMN_NAME,
-				ValueUtils::makeString(alloc, columnName));
+				makeString(alloc, columnName));
 
 		builder.set(
 				MetaType::COLUMN_KEY,
@@ -2284,10 +2290,10 @@ void MetaProcessor::IndexHandler::execute(
 			ValueUtils::makeLong(dbId));
 	builder.set(
 			MetaType::INDEX_DATABASE_NAME,
-			ValueUtils::makeString(alloc, dbName));
+			makeString(alloc, dbName));
 	builder.set(
 			MetaType::INDEX_CONTAINER_NAME,
-			ValueUtils::makeString(alloc, name));
+			makeString(alloc, name));
 
 	ObjectManagerV4 *objectManager =
 			container.getDataStore()->getObjectManager();
@@ -2299,7 +2305,7 @@ void MetaProcessor::IndexHandler::execute(
 		const util::String &indexName = info.indexName_;
 		const Value indexNameValue = indexName.empty() ?
 				ValueUtils::makeNull() :
-				ValueUtils::makeString(alloc, indexName.c_str());
+				makeString(alloc, indexName.c_str());
 
 		const int16_t indexType = static_cast<int16_t>(info.mapType);
 
@@ -2312,7 +2318,7 @@ void MetaProcessor::IndexHandler::execute(
 
 		builder.set(
 				MetaType::INDEX_TYPE_NAME,
-				ValueUtils::makeString(alloc, getMapTypeStr(info.mapType)));
+				makeString(alloc, getMapTypeStr(info.mapType)));
 
 		const util::Vector<uint32_t> &columnList = info.columnIds_;
 		assert(!columnList.empty());
@@ -2321,7 +2327,7 @@ void MetaProcessor::IndexHandler::execute(
 				columnList.begin(); columnIt != columnList.end(); ++columnIt) {
 			const ColumnId columnId = *columnIt;
 			const char8_t *columnName = schemaContainer.getColumnInfo(
-					columnId).getColumnName(txn, *objectManager, container.getMetaAllcateStrategy());
+					columnId).getColumnName(txn, *objectManager, container.getMetaAllocateStrategy());
 
 			const int16_t ordinal =
 					static_cast<int16_t>(columnIt - columnList.begin() + 1);
@@ -2331,7 +2337,7 @@ void MetaProcessor::IndexHandler::execute(
 					ValueUtils::makeShort(ordinal));
 			builder.set(
 					MetaType::INDEX_COLUMN_NAME,
-					ValueUtils::makeString(alloc, columnName));
+					makeString(alloc, columnName));
 
 			getContext().getRowHandler()(txn, builder.build());
 		}
@@ -2373,10 +2379,10 @@ void MetaProcessor::MetaTriggerHandler::execute(
 			ValueUtils::makeLong(dbId));
 	builder.set(
 			MetaType::TRIGGER_DATABASE_NAME,
-			ValueUtils::makeString(alloc, dbName));
+			makeString(alloc, dbName));
 	builder.set(
 			MetaType::TRIGGER_CONTAINER_NAME,
-			ValueUtils::makeString(alloc, name));
+			makeString(alloc, name));
 
 }
 
@@ -2414,8 +2420,8 @@ void MetaProcessor::ErasableHandler::execute(
 	const PartitionId pId = txn.getPartitionId();
 
 	BaseContainer *archiveContainer = const_cast<BaseContainer *>(&schemaContainer);
-	const FullContainerKey &cotainerKey = archiveContainer->getContainerKey(txn);
-	FullContainerKeyComponents component = cotainerKey.getComponents(alloc);
+	const FullContainerKey &containerKey = archiveContainer->getContainerKey(txn);
+	FullContainerKeyComponents component = containerKey.getComponents(alloc);
 	const ContainerId largeContainerId = component.largeContainerId_;
 	uint32_t schemaVersionId = schemaContainer.getVersionId();
 	int64_t initSchemaStatus = schemaContainer.getInitSchemaStatus();
@@ -2431,22 +2437,22 @@ void MetaProcessor::ErasableHandler::execute(
 	oss << dbId;
 	builder.set(
 			MetaType::ERASABLE_DATABASE_ID,
-			ValueUtils::makeString(alloc, oss.str().c_str()));
+			makeString(alloc, oss.str().c_str()));
 	builder.set(
 			MetaType::ERASABLE_DATABASE_NAME,
-			ValueUtils::makeString(alloc, dbName));
+			makeString(alloc, dbName));
 	builder.set(
 			MetaType::ERASABLE_TYPE_NAME,
-			ValueUtils::makeString(alloc, containerTypeToName(type)));
+			makeString(alloc, containerTypeToName(type)));
 	oss.str("");
 	oss << containerId;
 	builder.set(
 			MetaType::ERASABLE_CONTAINER_ID,
-			ValueUtils::makeString(alloc, oss.str().c_str()));
+			makeString(alloc, oss.str().c_str()));
 	if (attribute != CONTAINER_ATTR_SUB) {
 		builder.set(
 				MetaType::ERASABLE_CONTAINER_NAME,
-				ValueUtils::makeString(alloc, name));
+				makeString(alloc, name));
 		builder.set(
 				MetaType::ERASABLE_PARTITION_NAME,
 				ValueUtils::makeNull());
@@ -2455,25 +2461,29 @@ void MetaProcessor::ErasableHandler::execute(
 			FullContainerKeyComponents baseComponent = component;
 			baseComponent.largeContainerId_ = UNDEF_LARGE_CONTAINERID;
 			baseComponent.affinityNumber_ = UNDEF_NODE_AFFINITY_NUMBER;
-			FullContainerKey baseCotainerKey(alloc,
+			FullContainerKey baseContainerKey(alloc,
 				KeyConstraint::getNoLimitKeyConstraint(), baseComponent);
 
 			util::String tableName(alloc);
-			baseCotainerKey.toString(alloc, tableName);
+			baseContainerKey.toString(alloc, tableName);
 			builder.set(
 					MetaType::ERASABLE_CONTAINER_NAME,
-					ValueUtils::makeString(alloc, tableName.c_str()));
+					makeString(alloc, tableName.c_str()));
 		}
 		{
 			const int64_t affinity = static_cast<int64_t>(component.affinityNumber_);
+			ContainerId largeContainerId = component.largeContainerId_;
 			util::String partitionName(alloc);
-			partitionName.append("#");
+			if (largeContainerId != UNDEF_LARGE_CONTAINERID) {
+				partitionName.append(
+					SQLProcessor::ValueUtils::toString(alloc, static_cast<int64_t>(largeContainerId)).c_str());
+				partitionName.append("@");
+			}
 			partitionName.append(
 				SQLProcessor::ValueUtils::toString(alloc, affinity));
-
 			builder.set(
 					MetaType::ERASABLE_PARTITION_NAME,
-					ValueUtils::makeString(alloc, partitionName.c_str()));
+					makeString(alloc, partitionName.c_str()));
 		}
 	}
 	builder.set(
@@ -2488,7 +2498,7 @@ void MetaProcessor::ErasableHandler::execute(
 		oss << largeContainerId;
 		builder.set(
 				MetaType::ERASABLE_LARGE_CONTAINER_ID,
-				ValueUtils::makeString(alloc, oss.str().c_str()));
+				makeString(alloc, oss.str().c_str()));
 	}
 	builder.set(
 			MetaType::ERASABLE_SCHEMA_VERSION_ID,
@@ -2497,10 +2507,10 @@ void MetaProcessor::ErasableHandler::execute(
 	oss << initSchemaStatus;
 	builder.set(
 			MetaType::ERASABLE_INIT_SCHEMA_STATUS,
-			ValueUtils::makeString(alloc, oss.str().c_str()));
+			makeString(alloc, oss.str().c_str()));
 	builder.set(
 			MetaType::ERASABLE_EXPIRATION_TYPE,
-			ValueUtils::makeString(alloc, expirationTypeToName(expireType)));
+			makeString(alloc, expirationTypeToName(expireType)));
 	util::XArray< BaseContainer::ArchiveInfo > erasableList(alloc);
 	container.getErasableList(txn, erasableTimeLimit_, erasableList);
 	util::XArray< BaseContainer::ArchiveInfo >::iterator itr;
@@ -2521,12 +2531,12 @@ void MetaProcessor::ErasableHandler::execute(
 		oss << itr->rowIdMapOId_;
 		builder.set(
 				MetaType::ERASABLE_ROW_INDEX_OID,
-				ValueUtils::makeString(alloc, oss.str().c_str()));
+				makeString(alloc, oss.str().c_str()));
 		oss.str("");
 		oss << itr->mvccMapOId_;
 		builder.set(
 				MetaType::ERASABLE_MVCC_INDEX_OID,
-				ValueUtils::makeString(alloc, oss.str().c_str()));
+				makeString(alloc, oss.str().c_str()));
 
 		getContext().getRowHandler()(txn, builder.build());
 	}
@@ -2572,7 +2582,7 @@ void MetaProcessor::EventHandler::operator()(
 		if (eventInfo.eventType_ != UNDEF_EVENT_TYPE) {
 			builder.set(
 					MetaType::EVENT_NODE_ADDRESS,
-					ValueUtils::makeString(alloc, address.dump(false).c_str()));
+					makeString(alloc, address.dump(false).c_str()));
 			builder.set(
 					MetaType::EVENT_NODE_PORT,
 					ValueUtils::makeInteger(address.port_));
@@ -2606,11 +2616,11 @@ void MetaProcessor::EventHandler::operator()(
 
 			builder.set(
 					MetaType::EVENT_SERVICE_TYPE,
-					ValueUtils::makeString(alloc, serviceName));
+					makeString(alloc, serviceName));
 
 			builder.set(
 					MetaType::EVENT_EVENT_TYPE,
-					ValueUtils::makeString(alloc, getEventTypeName(eventType)));
+					makeString(alloc, getEventTypeName(eventType)));
 
 			builder.set(
 					MetaType::EVENT_WORKER_INDEX,
@@ -2689,7 +2699,7 @@ void MetaProcessor::SocketHandler::operator()(
 
 			builder.set(
 					MetaType::SOCKET_SERVICE_TYPE,
-					ValueUtils::makeString(alloc, eeName.c_str()));
+					makeString(alloc, eeName.c_str()));
 
 			const bool ndEmpty = info.nd_.isEmpty();
 			const NodeDescriptor::Type ndType = info.multicast_ ?
@@ -2707,7 +2717,7 @@ void MetaProcessor::SocketHandler::operator()(
 
 			builder.set(
 					MetaType::SOCKET_TYPE, ndTypeSpecified ?
-							ValueUtils::makeString(alloc, ndTypeStr.c_str()) :
+							makeString(alloc, ndTypeStr.c_str()) :
 							ValueUtils::makeNull());
 
 			buildSocketAddress(
@@ -2724,7 +2734,7 @@ void MetaProcessor::SocketHandler::operator()(
 					MetaType::SOCKET_APPLICATION_NAME,
 					applicationName.empty() ?
 							ValueUtils::makeNull() :
-							ValueUtils::makeString(alloc, applicationName.c_str()));
+							makeString(alloc, applicationName.c_str()));
 
 			builder.set(
 					MetaType::SOCKET_CREATION_TIME,
@@ -2771,7 +2781,7 @@ void MetaProcessor::SocketHandler::buildSocketAddress(
 
 		builder.set(
 				addressType,
-				ValueUtils::makeString(alloc, addressStr.c_str()));
+				makeString(alloc, addressStr.c_str()));
 		builder.set(
 				portType,
 				ValueUtils::makeInteger(static_cast<int32_t>(port)));
@@ -2806,10 +2816,10 @@ void MetaProcessor::ContainerStatsHandler::execute(
 			ValueUtils::makeLong(dbId));
 	builder.set(
 			MetaType::CONTAINER_STATS_DATABASE_NAME,
-			ValueUtils::makeString(alloc, dbName));
+			makeString(alloc, dbName));
 	builder.set(
 			MetaType::CONTAINER_STATS_NAME,
-			ValueUtils::makeString(alloc, name));
+			makeString(alloc, name));
 	OId groupId = container.getBaseGroupId();
 	builder.set(
 			MetaType::CONTAINER_STATS_GROUPID,
@@ -2869,7 +2879,7 @@ void MetaProcessor::ClusterPartitionHandler::operator()(
 			}
 			builder.set(
 					MetaType::CLUSTER_PARTITION_ROLE,
-					ValueUtils::makeString(alloc, role.c_str()));
+					makeString(alloc, role.c_str()));
 		}
 
 		PartitionRole role;
@@ -2877,7 +2887,7 @@ void MetaProcessor::ClusterPartitionHandler::operator()(
 		NodeAddress &address = pt->getNodeAddress(role.getOwner(), SYSTEM_SERVICE);
 		builder.set(
 			MetaType::CLUSTER_PARTITION_NODE_ADDRESS,
-			ValueUtils::makeString(alloc, address.dump(false).c_str()));
+			makeString(alloc, address.dump(false).c_str()));
 
 		builder.set(
 				MetaType::CLUSTER_PARTITION_NODE_PORT,
@@ -2891,7 +2901,7 @@ void MetaProcessor::ClusterPartitionHandler::operator()(
 				pt->dumpPartitionStatusForRest(pt->getPartitionStatus(pId));
 			builder.set(
 				MetaType::CLUSTER_PARTITION_STATUS,
-				ValueUtils::makeString(alloc, status.c_str()));
+				makeString(alloc, status.c_str()));
 		}
 
 		ObjectManagerV4 *objectManager =
@@ -2912,7 +2922,7 @@ void MetaProcessor::ClusterPartitionHandler::operator()(
 
 			builder.set(
 					MetaType::CLUSTER_PARTITION_BLOCK_CATEGORY,
-					ValueUtils::makeString(alloc, chunkCategoryList[chunkCategoryId]));
+					makeString(alloc, chunkCategoryList[chunkCategoryId]));
 
 			const int64_t storeUse = static_cast<int64_t>(
 					chunkSize *
@@ -2958,10 +2968,10 @@ void MetaProcessor::PartitionHandler::operator()(
 			ValueUtils::makeLong(dbId));
 	builder.set(
 			MetaType::PARTITION_DATABASE_NAME,
-			ValueUtils::makeString(alloc, dbName));
+			makeString(alloc, dbName));
 	builder.set(
 			MetaType::PARTITION_CONTAINER_NAME,
-			ValueUtils::makeString(alloc, name));
+			makeString(alloc, name));
 
 	typedef TablePartitioningInfo<util::StackAllocator> PartitioningInfo;
 	PartitioningInfo partitioningInfo(alloc);
@@ -3015,8 +3025,13 @@ void MetaProcessor::PartitionHandler::operator()(
 
 	const int64_t fixedAffinity = txn.getPartitionId();
 	int64_t ordinal = 0;
+	size_t affinityPos = 0;
 
-	for (; numIt != numEnd && statusIt != statusEnd; ++numIt, ++statusIt) {
+	Timestamp currentErasableTimestamp;
+	int64_t currentTime = eventContext->getHandlerStartTime().getUnixTime();
+	currentErasableTimestamp = txn.getStatementStartTime().getUnixTime();
+
+	for (; numIt != numEnd && statusIt != statusEnd; ++numIt, ++statusIt, ++affinityPos) {
 		const int64_t affinity = static_cast<int64_t>(*numIt);
 		if (affinity == fixedAffinity) {
 			if (valueIt != valueEnd) {
@@ -3040,12 +3055,17 @@ void MetaProcessor::PartitionHandler::operator()(
 
 		{
 			util::String partitionName(alloc);
-			partitionName.append("#");
+			ContainerId largeContainerId = partitioningInfo.largeContainerId_;
+			if (largeContainerId != UNDEF_LARGE_CONTAINERID) {
+				partitionName.append(
+					SQLProcessor::ValueUtils::toString(alloc, static_cast<int64_t>(largeContainerId)).c_str());
+				partitionName.append("@");
+			}
 			partitionName.append(
-					SQLProcessor::ValueUtils::toString(alloc, affinity));
+				SQLProcessor::ValueUtils::toString(alloc, affinity).c_str());
 			builder.set(
-					MetaType::PARTITION_NAME,
-					ValueUtils::makeString(alloc, partitionName.c_str()));
+				MetaType::PARTITION_NAME,
+				makeString(alloc, partitionName.c_str()));
 		}
 
 		Value boundary = ValueUtils::makeNull();
@@ -3078,7 +3098,7 @@ void MetaProcessor::PartitionHandler::operator()(
 				boundaryStr = SQLProcessor::ValueUtils::toString(
 						alloc, TupleValue(tmpValue));
 			}
-			boundary = ValueUtils::makeString(alloc, boundaryStr.c_str());
+			boundary = makeString(alloc, boundaryStr.c_str());
 
 			++valueIt;
 		}
@@ -3099,6 +3119,30 @@ void MetaProcessor::PartitionHandler::operator()(
 				MetaType::PARTITION_CLUSTER_PARTITION_INDEX,
 				ValueUtils::makeInteger(clusterPartition));
 
+		if (partitioningInfo.isTableExpiration()) {
+			int64_t erasableTime = 0;
+			int64_t startTime = 0;
+			partitioningInfo.getIntervalInfo(currentTime, affinityPos, erasableTime, startTime);
+			builder.set(
+				MetaType::PARTITION_EXPIRED_START_TIME,
+				makeString(alloc,
+					SQLProcessor::ValueUtils::toString(alloc, TupleValue(&currentErasableTimestamp, TupleList::TYPE_TIMESTAMP)).c_str()));
+
+			builder.set(
+				MetaType::PARTITION_EXPIRED_ERASABLE_TIME,
+				makeString(alloc,
+					SQLProcessor::ValueUtils::toString(alloc, TupleValue(&erasableTime, TupleList::TYPE_TIMESTAMP)).c_str()));
+		}
+		else {
+			builder.set(
+				MetaType::PARTITION_EXPIRED_START_TIME,
+				ValueUtils::makeNull());
+
+			builder.set(
+				MetaType::PARTITION_EXPIRED_ERASABLE_TIME,
+				ValueUtils::makeNull());
+		}
+
 		PartitionTable *pt = getContext().getSource().partitionTable_;
 		assert(pt != NULL);
 
@@ -3106,18 +3150,18 @@ void MetaProcessor::PartitionHandler::operator()(
 		if (owner != UNDEF_NODEID) {
 			builder.set(
 					MetaType::PARTITION_NODE_ADDRESS,
-					ValueUtils::makeString(alloc, pt->dumpNodeAddress(
+					makeString(alloc, pt->dumpNodeAddress(
 							owner, SQL_SERVICE).c_str()));
 		}
 		else {
 			const char *nodeStr = "UNDEF";
 			builder.set(
 					MetaType::PARTITION_NODE_ADDRESS,
-					ValueUtils::makeString(alloc, nodeStr));
+					makeString(alloc, nodeStr));
 		}
 		builder.set(
 				MetaType::PARTITION_STATUS,
-				ValueUtils::makeString(alloc, getParitionStatusName(*statusIt)));
+				makeString(alloc, getPartitionStatusName(*statusIt)));
 
 		getContext().getRowHandler()(txn, builder.build());
 	}
@@ -3168,14 +3212,14 @@ void MetaProcessor::ViewHandler::operator()(
 			ValueUtils::makeLong(dbId));
 	builder.set(
 			MetaType::VIEW_DATABASE_NAME,
-			ValueUtils::makeString(alloc, dbName));
+			makeString(alloc, dbName));
 	builder.set(
 			MetaType::VIEW_NAME,
-			ValueUtils::makeString(alloc, name));
+			makeString(alloc, name));
 
 	builder.set(
 			MetaType::VIEW_DEFINITION,
-			ValueUtils::makeString(alloc, viewInfo.sqlString_.c_str()));
+			makeString(alloc, viewInfo.sqlString_.c_str()));
 
 	getContext().getRowHandler()(txn, builder.build());
 
@@ -3212,11 +3256,11 @@ void MetaProcessor::SQLHandler::operator()(
 
 			builder.set(
 					MetaType::SQL_DATABASE_NAME,
-					ValueUtils::makeString(alloc, sqlContext.getDBName()));
+					makeString(alloc, sqlContext.getDBName()));
 
 			builder.set(
 				MetaType::SQL_NODE_ADDRESS,
-				ValueUtils::makeString(alloc, address.dump(false).c_str()));
+				makeString(alloc, address.dump(false).c_str()));
 
 			builder.set(
 					MetaType::SQL_NODE_PORT,
@@ -3229,14 +3273,14 @@ void MetaProcessor::SQLHandler::operator()(
 
 			builder.set(
 					MetaType::SQL_APPLICATION_NAME,
-					ValueUtils::makeString(alloc, sqlContext.getApplicationName()));
+					makeString(alloc, sqlContext.getApplicationName()));
 
 			builder.set(
 					MetaType::SQL_SQL,
-					ValueUtils::makeString(alloc, sqlContext.getQuery()));
+					makeString(alloc, sqlContext.getQuery()));
 			builder.set(
 					MetaType::SQL_QUERY_ID,
-					ValueUtils::makeString(alloc, sqlContext.getId().dump(alloc).c_str()));
+					makeString(alloc, sqlContext.getId().dump(alloc).c_str()));
 
 			builder.set(
 					MetaType::SQL_JOB_ID,
@@ -3259,7 +3303,7 @@ void MetaProcessor::SQLHandler::operator()(
 
 			builder.set(
 				MetaType::SQL_NODE_ADDRESS,
-				ValueUtils::makeString(alloc, address.dump(false).c_str()));
+				makeString(alloc, address.dump(false).c_str()));
 
 			builder.set(
 					MetaType::SQL_NODE_PORT,
@@ -3280,10 +3324,10 @@ void MetaProcessor::SQLHandler::operator()(
 
 			builder.set(
 					MetaType::SQL_QUERY_ID,
-					ValueUtils::makeString(alloc, jobIdList[pos].dump(alloc, true).c_str()));
+					makeString(alloc, jobIdList[pos].dump(alloc, true).c_str()));
 			builder.set(
 					MetaType::SQL_JOB_ID,
-					ValueUtils::makeString(alloc, jobIdList[pos].dump(alloc, false).c_str()));
+					makeString(alloc, jobIdList[pos].dump(alloc, false).c_str()));
 
 			getContext().getRowHandler()(txn, builder.build());
 		}
@@ -3307,7 +3351,6 @@ void MetaProcessor::PartitionStatsHandler::operator()(
 			getContext().getValueListSource());
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
 
-
 	builder.set(
 			MetaType::PARTITION_STATS_DATABASE_ID,
 			ValueUtils::makeLong(dbId));
@@ -3315,29 +3358,33 @@ void MetaProcessor::PartitionStatsHandler::operator()(
 	const char8_t *dbName = cxt_.getSource().dbName_;
 	builder.set(
 			MetaType::PARTITION_STATS_DATABASE_NAME,
-			ValueUtils::makeString(alloc, dbName));
+			makeString(alloc, dbName));
 
 	FullContainerKey containerKey = container.getContainerKey(txn);
 	FullContainerKeyComponents component = containerKey.getComponents(alloc);
-
+	ContainerId largeContainerId = component.largeContainerId_;
 	{
 		util::String containerName(alloc);
 		containerName.append(component.baseName_, component.baseNameSize_);
 		builder.set(
 				MetaType::PARTITION_STATS_CONTAINER_NAME,
-				ValueUtils::makeString(alloc, containerName.c_str()));
+				makeString(alloc, containerName.c_str()));
 	}
 
 	{
 		const int64_t affinity = static_cast<int64_t>(component.affinityNumber_);
 		util::String partitionName(alloc);
-		partitionName.append("#");
+		if (largeContainerId != UNDEF_LARGE_CONTAINERID) {
+			partitionName.append(
+				SQLProcessor::ValueUtils::toString(alloc, static_cast<int64_t>(largeContainerId)).c_str());
+			partitionName.append("@");
+		}
 		partitionName.append(
 			SQLProcessor::ValueUtils::toString(alloc, affinity));
 
 		builder.set(
 				MetaType::PARTITION_STATS_NAME,
-				ValueUtils::makeString(alloc, partitionName.c_str()));
+				makeString(alloc, partitionName.c_str()));
 	}
 
 	builder.set(

@@ -42,6 +42,10 @@ class Partition;
 template <class L> class LogManager;
 class PartitionList;
 
+#define TRACE_SYNC_EXCEPTION(e, eventType, pId, level, str)                 \
+	UTIL_TRACE_EXCEPTION_##level(SYNC_SERVICE, e,                           \
+		str << ", eventType=" << getEventTypeName(eventType) \
+				<< ", pId=" << pId << ", reason=" << ", reason=" << GS_EXCEPTION_MESSAGE(e))
 
 /*!
 	@brief Represents the information for SyncManager
@@ -208,7 +212,7 @@ public:
 		request_.syncMode_ = mode;
 	}
 
-	void setPartitionRevision(PartitionRevision &ptRev) {
+	void setPartitionRevision(PartitionRevision& ptRev) {
 		request_.ptRev_ = ptRev;
 	}
 
@@ -249,7 +253,7 @@ public:
 		~Request() {};
 
 		void encode(
-			EventByteOutStream& out, bool isOwner = true) const;
+			EventByteOutStream& out, bool isOwner = true);
 
 		void decode(EventByteInStream& in);
 
@@ -344,11 +348,10 @@ public:
 		@brief Encodes/Decodes the message for sync response
 	*/
 	struct Response {
-		Response(int32_t mode) : syncMode_(mode),
-			targetLsn_(UNDEF_LSN) {}
+		Response(int32_t mode) : syncMode_(mode), targetLsn_(UNDEF_LSN) {}
 		~Response() {};
 
-		void encode(EventByteOutStream& out) const;
+		void encode(EventByteOutStream& out);
 
 		void decode(EventByteInStream& in);
 
@@ -391,8 +394,8 @@ public:
 		return ptRev_;
 	}
 
-	PartitionRevisionNo& getRevisionNo() {
-		return ptRev_.sequentialNumber_;
+	PartitionRevisionNo getRevisionNo() {
+		return ptRev_.getRevisionNo();
 	}
 
 	SyncMode getMode() {
@@ -715,7 +718,6 @@ public:
 private:
 	void checkVersion(ClusterVersionId decodedVersion);
 	uint16_t getLogVersion(PartitionId pId);
-
 	void setClusterHandler();
 
 	EventEngine ee_;
@@ -728,13 +730,7 @@ private:
 	RecvSyncMessageHandler recvSyncMessageHandler_;
 	ServiceThreadErrorHandler serviceThreadErrorHandler_;
 	UnknownSyncEventHandler unknownSyncEventHandler_;
-
-
-	bool initailized_;
+	bool initialized_;
 };
-
-
-
-
 
 #endif

@@ -25,7 +25,6 @@
 
 #include "util/type.h"
 #include "util/numeric.h"
-#include "util/code.h"
 #include "gs_error.h"
 
 

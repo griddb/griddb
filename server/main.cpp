@@ -58,9 +58,9 @@
 
 const char8_t *const GS_PRODUCT_NAME = "GridDB";
 const int32_t GS_MAJOR_VERSION = 5;
-const int32_t GS_MINOR_VERSION = 0;
+const int32_t GS_MINOR_VERSION = 1;
 const int32_t GS_REVISION = 0;
-const int32_t GS_BUILD_NO = 39331;
+const int32_t GS_BUILD_NO = 39692;
 
 const char8_t *const GS_EDITION_NAME = "Community Edition";
 const char8_t *const GS_EDITION_NAME_SHORT = "CE";
@@ -68,7 +68,7 @@ const char8_t *const GS_EDITION_NAME_SHORT = "CE";
 const char8_t *const SYS_CLUSTER_FILE_NAME = "gs_cluster.json";
 const char8_t *const SYS_NODE_FILE_NAME = "gs_node.json";
 const char8_t *const SYS_DEVELOPER_FILE_NAME = "gs_developer.json";
-const char8_t *const GS_CLUSTER_PARAMATER_DIFF_FILE_NAME = "gs_diff.json";
+const char8_t *const GS_CLUSTER_PARAMETER_DIFF_FILE_NAME = "gs_diff.json";
 
 const char8_t *const GS_TRACE_SECRET_HEX_KEY = "7B790AB2C82F01B3"; 
 
@@ -451,7 +451,7 @@ int main(int argc, char **argv) {
 
 		u8string diffFile;
 		util::FileSystem::createPath(
-			configDir, GS_CLUSTER_PARAMATER_DIFF_FILE_NAME, diffFile);
+			configDir, GS_CLUSTER_PARAMETER_DIFF_FILE_NAME, diffFile);
 		SystemService sysSvc(config, eeConfig, source, "SYSTEM_SERVICE",
 			diffFile.c_str(), errorHandler);
 
@@ -842,6 +842,8 @@ void MainConfigSetUpHandler::operator()(ConfigTable &config) {
 	MAIN_TRACE_DECLARE(config, AUTH_OPERATION, ERROR);
 	MAIN_TRACE_DECLARE(config, PARTITION, INFO);
 	MAIN_TRACE_DECLARE(config, PARTITION_DETAIL, ERROR);
+	MAIN_TRACE_DECLARE(config, DATA_EXPIRATION_DETAIL, INFO);
+	MAIN_TRACE_DECLARE(config, CONNECTION_DETAIL, WARNING);
 
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TRACE_OUTPUT_TYPE, INT32)
 		.setExtendedType(ConfigTable::EXTENDED_TYPE_ENUM)
@@ -987,7 +989,7 @@ void StackMemoryLimitOverErrorHandler::operator()(util::Exception &e) {
 	GS_RETHROW_USER_OR_SYSTEM(e, "");
 }
 
-void NoSQLCommonUtils::getDatabasaeVersion(int32_t &major, int32_t &minor) {
+void NoSQLCommonUtils::getDatabaseVersion(int32_t &major, int32_t &minor) {
 	major = GS_MAJOR_VERSION;
 	minor = GS_MINOR_VERSION;
 }

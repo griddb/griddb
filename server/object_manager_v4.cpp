@@ -167,6 +167,7 @@ void ObjectManagerV4::initializeV5StartChunkIdList(
 	if (chunkIdList.size() > 0) {
 		assert(chunkIdList.size() == maxV4GroupId + 1);
 		v5StartChunkIdList_.assign(chunkIdList.begin(), chunkIdList.end());
+		maxV4GroupId_ = maxV4GroupId;
 	}
 }
 

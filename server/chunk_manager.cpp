@@ -676,8 +676,9 @@ ChunkManager::ChunkManager(
 	chunkBuffer_.use();
 	affinityManager_.use();
 
-	int16_t blockExtentSize = static_cast<int16_t>(configTable.get<int32_t>(
+	uint32_t blockExtentExpSize = util::nextPowerBitsOf2(configTable.get<int32_t>(
 		CONFIG_TABLE_DS_STORE_BLOCK_EXTENT_SIZE));
+	int16_t blockExtentSize = static_cast<int16_t>(INT16_C(1) << blockExtentExpSize);
 
 	chunkTable_ = UTIL_NEW MeshedChunkTable(blockExtentSize);
 	freespaceLocker_ = UTIL_NEW NoLocker();
@@ -1002,10 +1003,13 @@ void ChunkManager::_extentChecker() {
 void ChunkManager::updateStoreObjectUseStats() {
 }
 
+uint64_t ChunkManager::getCurrentLimit() {
+	return chunkBuffer_.getCurrentLimit();
+}
+
 void ChunkManager::adjustStoreMemory(uint64_t newLimit) {
-	if (newLimit > 0) {
-		chunkBuffer_.resize(newLimit);
-	}
+	chunkBuffer_.resize(newLimit);
+
 	updateStoreMemoryAgingParams();
 	chunkBuffer_.rebalance();
 }
@@ -1172,7 +1176,7 @@ ChunkManager::Config::Config(
 	  chunkSize_(chunkSize),
 	  atomicAffinitySize_(affinitySize),
 	  isWarmStart_(false),
-	  maxOnceSwapNum_(0)
+	  maxOnceSwapNum_(ChunkManager::MAX_ONCE_SWAP_SIZE_BYTE_ / chunkSize)
 	  , bufferHashTableSizeRate_(bufferHashTableSizeRate)  
 	  , cpFileSplitCount_(cpFileSplitCount)   
 	  , cpFileSplitStripeSize_(cpFileSplitStripeSize)   

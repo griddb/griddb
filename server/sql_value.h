@@ -637,11 +637,11 @@ public:
 					util::IsSame<A1, void>::VALUE ? 0 :
 					util::IsSame<A2, void>::VALUE ? 1 :
 					util::IsSame<A3, void>::VALUE ? 2 : 3),
-			OPTIONS_SPECITIED = (!util::IsSame<Options, void>::VALUE)
+			OPTIONS_SPECIFIED = (!util::IsSame<Options, void>::VALUE)
 		};
 
 		typedef typename util::Conditional<
-				OPTIONS_SPECITIED,
+				OPTIONS_SPECIFIED,
 				Options, OpTraitsOptions<> >::Type OptionsType;
 		typedef typename OptionsType::VariantTraitsType VariantTraitsType;
 		enum {
@@ -1726,7 +1726,7 @@ public:
 	void setNullKeyIgnorable(bool ignorable);
 	void setOrderedDigestRestricted(bool restricted);
 	void setReaderColumnsDeep(bool deep);
-	void setHeadNullAccesible(bool accesible);
+	void setHeadNullAccessible(bool accessible);
 	static bool isDeepReaderColumnSupported(TupleColumnType type);
 
 	void addReaderColumnList(const ColumnTypeList &typeList);
@@ -1892,7 +1892,7 @@ private:
 	bool keyNullIgnorable_;
 	bool orderedDigestRestricted_;
 	bool readerColumnsDeep_;
-	bool headNullAccesible_;
+	bool headNullAccessible_;
 
 	bool columnsCompleted_;
 
@@ -2402,7 +2402,7 @@ public:
 
 	bool isSameVariant(
 			const ValueComparator &another, bool nullIgnorable,
-			bool anotherNullIgnorable) const;
+			bool anotherNullIgnorable, bool orderArranged) const;
 
 private:
 	typedef ThreeWay DefaultPredType;
@@ -2561,7 +2561,7 @@ private:
 	struct OpTraitsAt {
 		enum {
 			ORG_REVERSED = !Ascending,
-			SUB_REVESED = (Rev ? !ORG_REVERSED : ORG_REVERSED)
+			SUB_REVERSED = (Rev ? !ORG_REVERSED : ORG_REVERSED)
 		};
 
 		typedef typename util::Conditional<
@@ -2573,7 +2573,7 @@ private:
 				util::IsSame<A1, A2>::VALUE, void, A2>::Type AccessorType2;
 
 		typedef VariantTraits<
-				PredType, SUB_REVESED,
+				PredType, SUB_REVERSED,
 				AccessorType1, AccessorType2> SubTraitsType;
 		typedef typename Base::VariantTraitsType::
 				template ValueComparatorRebind<
@@ -2974,7 +2974,7 @@ public:
 			bool orderedDigestRestricted = false);
 
 	ValueComparator initialComparatorAt(
-			CompColumnList::const_iterator it) const;
+			CompColumnList::const_iterator it, bool ordering) const;
 
 	ValueComparator comparatorAt(CompColumnList::const_iterator it) const;
 
@@ -3202,7 +3202,7 @@ private:
 	template<typename Op, typename Traits, int32_t DigestOnly, bool FixedDigest>
 	typename Traits::template Func<Op>::Type getSubWith() const {
 		const MainSwitcherType switcher = MainSwitcherType(
-				base_.initialComparatorAt(base_.columnList_.begin()),
+				base_.initialComparatorAt(base_.columnList_.begin(), Ordering),
 				base_.nullIgnorable_).withProfile(profile_);
 		return switcher.getWith<
 				Op, typename OpTraitsAt<Traits, DigestOnly, FixedDigest>::Type>();
@@ -3513,7 +3513,7 @@ public:
 		SwitcherType getTypeSwitcher() const {
 			return SwitcherType(
 					base_.base_.initialComparatorAt(
-							base_.base_.columnList_.begin()),
+							base_.base_.columnList_.begin(), false),
 					base_.base_.nullIgnorable_).withProfile(base_.profile_);
 		}
 
@@ -3952,12 +3952,12 @@ struct SQLValues::ValueUtils {
 			R &value, const Asc&);
 
 	template<typename T, typename Asc>
-	static typename T::ValueType toValueByOrdredDigest(int64_t digest);
-	template<typename Asc> static TupleValue toValueByOrdredDigest(
+	static typename T::ValueType toValueByOrderdDigest(int64_t digest);
+	template<typename Asc> static TupleValue toValueByOrderdDigest(
 			int64_t digest, const Asc&, const Types::Any&);
-	template<typename Asc> static int64_t toValueByOrdredDigest(
+	template<typename Asc> static int64_t toValueByOrderdDigest(
 			int64_t digest, const Asc&, const Types::Integral&);
-	template<typename Asc> static double toValueByOrdredDigest(
+	template<typename Asc> static double toValueByOrderdDigest(
 			int64_t digest, const Asc&, const Types::Floating&);
 
 	static int64_t rotateDigest(int64_t digest, const util::TrueType&);
@@ -5353,7 +5353,7 @@ inline typename T::ValueType SQLValues::SummaryTuple::getHeadValueDetailAs(
 			available, T, SQLValues::Types::Any>::Type FixedTypeTag;
 	typedef util::TrueType Ascending;
 	assert(available);
-	return ValueUtils::toValueByOrdredDigest<FixedTypeTag, Ascending>(
+	return ValueUtils::toValueByOrderdDigest<FixedTypeTag, Ascending>(
 			ValueUtils::digestByRotation(head_.digest_, Rot()));
 }
 
@@ -6279,13 +6279,15 @@ SQLValues::TupleComparator::WithAccessor<
 	const bool nullIgnorable = base.nullIgnorable_;
 
 	typename CompColumnList::const_iterator it = columnList.begin();
-	const ValueComparator front = base.initialComparatorAt(it);
+	const ValueComparator front = base.initialComparatorAt(it, Ordering);
 	do {
 		typename BaseType::SubFuncType subFunc = NULL;
 		const bool subNullIgnorable = (nullIgnorable && !it->isOrdering());
 		if (it != columnList.begin()) {
-			const ValueComparator sub = base.initialComparatorAt(it);
-			if (!sub.isSameVariant(front, subNullIgnorable, nullIgnorable)) {
+			const ValueComparator sub = base.initialComparatorAt(it, Ordering);
+			const bool orderArranged = true;
+			if (!sub.isSameVariant(
+					front, subNullIgnorable, nullIgnorable, orderArranged)) {
 				subFunc = SubSwitcherType(sub, subNullIgnorable).withProfile(
 						profile).template getWith<
 								const ValueComparator,
@@ -6417,14 +6419,16 @@ SQLValues::TupleRangeComparator::WithAccessor<Promo, A1, A2>::WithAccessor(
 	const bool nullIgnorable = base.nullIgnorable_;
 
 	typename CompColumnList::const_iterator it = columnList.begin();
-	const ValueComparator front = compBase.initialComparatorAt(it);
+	const ValueComparator front = compBase.initialComparatorAt(it, false);
 	do {
 		typename BaseType::SubFuncType subFunc = NULL;
 		const bool subNullIgnorable = (nullIgnorable && !it->isOrdering());
 		if (it != columnList.begin()) {
 			const ValueComparator sub =
-					compBase.initialComparatorAt(it);
-			if (!sub.isSameVariant(front, subNullIgnorable, nullIgnorable)) {
+					compBase.initialComparatorAt(it, false);
+			const bool orderArranged = true;
+			if (!sub.isSameVariant(
+					front, subNullIgnorable, nullIgnorable, orderArranged)) {
 				subFunc = SubSwitcherType(sub, subNullIgnorable).withProfile(
 						profile).template getWith<
 								const ValueComparator,
@@ -6807,38 +6811,6 @@ SQLValues::ValueUtils::compareFloating(
 	return pred(compareFloating(v1, v2, sensitive), 0);
 }
 
-inline uint64_t bufToUInt64(const uint8_t *buf) {
-	const uint64_t shift =
-			std::numeric_limits<uint64_t>::digits / sizeof(uint64_t);
-	return
-			(static_cast<uint64_t>(buf[0]) << (shift * 7)) |
-			(static_cast<uint64_t>(buf[1]) << (shift * 6)) |
-			(static_cast<uint64_t>(buf[2]) << (shift * 5)) |
-			(static_cast<uint64_t>(buf[3]) << (shift * 4)) |
-			(static_cast<uint64_t>(buf[4]) << (shift * 3)) |
-			(static_cast<uint64_t>(buf[5]) << (shift * 2)) |
-			(static_cast<uint64_t>(buf[6]) << (shift * 1)) |
-			(static_cast<uint64_t>(buf[7]) << (shift * 0));
-}
-
-inline uint64_t bufToUInt32(const uint8_t *buf) {
-	const uint32_t shift =
-			std::numeric_limits<uint32_t>::digits / sizeof(uint32_t);
-	return
-			(static_cast<uint64_t>(buf[0]) << (shift * 3)) |
-			(static_cast<uint64_t>(buf[1]) << (shift * 2)) |
-			(static_cast<uint64_t>(buf[2]) << (shift * 1)) |
-			(static_cast<uint64_t>(buf[3]) << (shift * 0));
-}
-
-inline uint64_t bufToUInt16(const uint8_t *buf) {
-	const uint16_t shift =
-			std::numeric_limits<uint16_t>::digits / sizeof(uint16_t);
-	return
-			(static_cast<uint64_t>(buf[0]) << (shift * 1)) |
-			(static_cast<uint64_t>(buf[1]) << (shift * 0));
-}
-
 template<typename Pred>
 inline typename util::BinaryFunctionResultOf<Pred>::Type
 SQLValues::ValueUtils::compareString(
@@ -7038,29 +7010,29 @@ inline int64_t SQLValues::ValueUtils::digestOrderedSequence(
 }
 
 template<typename T, typename Asc>
-typename T::ValueType SQLValues::ValueUtils::toValueByOrdredDigest(
+typename T::ValueType SQLValues::ValueUtils::toValueByOrderdDigest(
 		int64_t digest) {
 	typedef typename TypeUtils::template Traits<
 			T::COLUMN_TYPE>::BasicComparableTag ComparableTag;
 	return getValueByComparable<T>(
-			toValueByOrdredDigest(digest, Asc(), ComparableTag()));
+			toValueByOrderdDigest(digest, Asc(), ComparableTag()));
 }
 
 template<typename Asc>
-inline TupleValue SQLValues::ValueUtils::toValueByOrdredDigest(
+inline TupleValue SQLValues::ValueUtils::toValueByOrderdDigest(
 		int64_t digest, const Asc&, const Types::Any&) {
 	static_cast<void>(digest);
 	return TupleValue();
 }
 
 template<typename Asc>
-inline int64_t SQLValues::ValueUtils::toValueByOrdredDigest(
+inline int64_t SQLValues::ValueUtils::toValueByOrderdDigest(
 		int64_t digest, const Asc&, const Types::Integral&) {
 	return digestOrderedIntegral(digest, Asc());
 }
 
 template<typename Asc>
-inline double SQLValues::ValueUtils::toValueByOrdredDigest(
+inline double SQLValues::ValueUtils::toValueByOrderdDigest(
 		int64_t digest, const Asc&, const Types::Floating&) {
 	union {
 		double asDouble_;
@@ -7091,9 +7063,9 @@ inline int64_t SQLValues::ValueUtils::rotateDigest(
 			src >= ValueOrderedDigester::Constants::ROT_THRESHOLD) {
 		return src;
 	}
-	const uint64_t pime = ValueOrderedDigester::Constants::ROT_PRIME;
+	const uint64_t prime = ValueOrderedDigester::Constants::ROT_PRIME;
 	const uint64_t base = ValueOrderedDigester::Constants::ROT_BASE;
-	return static_cast<int64_t>((src % pime) * base + src / pime);
+	return static_cast<int64_t>((src % prime) * base + src / prime);
 }
 
 inline int64_t SQLValues::ValueUtils::rotateDigest(
@@ -7110,9 +7082,9 @@ inline int64_t SQLValues::ValueUtils::digestByRotation(
 		masked = src;
 	}
 	else {
-		const uint64_t pime = ValueOrderedDigester::Constants::ROT_PRIME;
+		const uint64_t prime = ValueOrderedDigester::Constants::ROT_PRIME;
 		const uint64_t base = ValueOrderedDigester::Constants::ROT_BASE;
-		masked = (src % base) * pime + src / base;
+		masked = (src % base) * prime + src / base;
 	}
 	if ((masked & 0x1) != 0) {
 		return static_cast<int64_t>(~(masked >> 1U));

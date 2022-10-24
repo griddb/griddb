@@ -279,7 +279,7 @@ struct CreateIndexInfo : public DDLBaseInfo {
 		DDLBaseInfo(globalVarAlloc), globalVarAlloc_(globalVarAlloc), dbName_(globalVarAlloc),
 		indexName_(globalVarAlloc), tableName_(globalVarAlloc),
 		columnName_(globalVarAlloc), createIndexOpt_(NULL)
-		, versionId_(-1), containerId_(-1), indexColumnId_(-1),
+		, versionId_(-1), containerId_(-1), indexColumnId_(UNDEF_COLUMNID),
 		dbNameCaseSensitive_(false), tableNameCaseSensitive_(false),
 		indexNameCaseSensitive_(false), columnNameCaseSensitive_(false), isSameName_(false)
 	{}

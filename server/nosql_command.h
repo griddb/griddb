@@ -85,7 +85,7 @@ struct TableProperty {
 	UTIL_OBJECT_CODER_MEMBERS(list_);
 };
 
-static const char* getParitionStatusRowName(LargeContainerStatusType type) {
+static const char* getPartitionStatusRowName(LargeContainerStatusType type) {
 	switch (type) {
 	case PARTITION_STATUS_CREATE_START: return "CREATE SUB START";
 	case PARTITION_STATUS_CREATE_END: return "CREATE SUB END";
@@ -531,10 +531,13 @@ struct TablePartitioningInfo {
 	bool dropEntry(bool isOptionSetValue, int64_t& baseValue,
 		PartitionTable* pt, NodeAffinityNumber affinity);
 
-	void checkExpireableInterval(int64_t currentTime,
+	void checkExpirableInterval(int64_t currentTime,
 		int64_t currentErasableTimestamp, int64_t duration,
 		util::Vector<NodeAffinityNumber>& expiredAffinityNumbers,
 		util::Vector<size_t>& expiredAffinityPos);
+
+	void getIntervalInfo(int64_t currentTime, size_t pos,
+		int64_t& erasableTime, int64_t& startTime);
 
 	void getSubIdList(util::StackAllocator& alloc,
 		util::Vector<int64_t>& availableList,
@@ -554,7 +557,7 @@ struct TablePartitioningInfo {
 
 	size_t newEntry(NodeAffinityNumber affinity,
 		LargeContainerStatusType status,
-		int32_t partitioingNum, int64_t baseValue);
+		int32_t partitioningNum, int64_t baseValue);
 
 	TablePartitioningVersionId incrementTablePartitioningVersionId() {
 		partitioningVersionId_++;
@@ -569,7 +572,7 @@ struct TablePartitioningInfo {
 		return assignNumberList_[pos];
 	}
 
-	LargeContainerStatusType getPartitonStatus(size_t pos) {
+	LargeContainerStatusType getPartitionStatus(size_t pos) {
 		return assignStatusList_[pos];
 	}
 
@@ -929,7 +932,7 @@ struct TablePartitioningIndexInfo {
 
 
 struct IndexInfoEntry {
-	IndexInfoEntry() : columnId_(-1), indexType_(MAP_TYPE_DEFAULT) {}
+	IndexInfoEntry() : columnId_(UNDEF_COLUMNID), indexType_(MAP_TYPE_DEFAULT) {}
 	ColumnId columnId_;
 	MapType indexType_;
 	UTIL_OBJECT_CODER_MEMBERS(columnId_, indexType_);
@@ -1105,7 +1108,7 @@ struct TableSchemaInfo {
 		int32_t pos, NoSQLContainer& container,
 		NodeAffinityNumber = UNDEF_NODE_AFFINITY_NUMBER);
 
-	void setPrimaryKeyIndex(int32_t primaryKeyCokumnId);
+	void setPrimaryKeyIndex(int32_t primaryKeyColumnId);
 
 	TableContainerInfo* getTableContainerInfo(
 		uint32_t partitionNum,
@@ -1206,7 +1209,7 @@ struct NoSQLStoreOption {
 		const NameWithCaseSensitivity* tableName = NULL);
 
 	void setAsyncOption(DDLBaseInfo* baseInfo,
-		StatementMessage::CaseSensitivity caseSesitive);
+		StatementMessage::CaseSensitivity caseSensitive);
 	bool isSystemDb_;
 	ContainerType containerType_;
 	bool ifNotExistsOrIfExists_;
@@ -1544,7 +1547,7 @@ public:
 		return stmtId_;
 	}
 
-	void setCurrentSesionId(SessionId sessionId) {
+	void setCurrentSesisonId(SessionId sessionId) {
 		currentSessionId_ = sessionId;
 	}
 
@@ -1631,11 +1634,7 @@ public:
 
 	void sendMessage(EventEngine& ee, Event& request);
 
-	EventContext* getEvetnContext() {
-		return ec_;
-	}
-
-	void setRequestOption(StatementMessage::Request& requset);
+	void setRequestOption(StatementMessage::Request& request);
 	util::Vector<IndexInfo>& getCompositeIndex();
 	SchemaVersionId getVersionId() {
 		return versionId_;
@@ -1883,7 +1882,7 @@ struct NoSQLUtils {
 	}
 
 	static void getAffinityValue(util::StackAllocator& alloc,
-		CreateTableOption& createOpton, util::String& value);
+		CreateTableOption& createOption, util::String& value);
 
 	static void getAffinityValue(util::StackAllocator& alloc,
 		util::XArray<uint8_t>& containerSchema,
@@ -2004,7 +2003,7 @@ void getLargeContainerInfoBinary(util::StackAllocator& alloc,
 
 NoSQLContainer* createNoSQLContainer(EventContext& ec,
 	const NameWithCaseSensitivity tableName, ContainerId largeContainerId,
-	NodeAffinityNumber affnitiyNumber, SQLExecution* execution);
+	NodeAffinityNumber affinityNumber, SQLExecution* execution);
 
 void resolveTargetContainer(EventContext& ec,
 	const TupleValue* value1, const TupleValue* value2,
@@ -2025,15 +2024,15 @@ MapType getAvailableIndex(const DataStoreConfig& dsConfig, const char* indexName
 	ColumnType targetColumnType,
 	ContainerType targetContainerType, bool primaryCheck);
 
-static const char* getParitionStatusName(LargeContainerStatusType type) {
+static const char* getPartitionStatusName(LargeContainerStatusType type) {
 	switch (type) {
 	case PARTITION_STATUS_CREATE_START: return "CREATING PARTITION";
 	case PARTITION_STATUS_CREATE_END: return "NORMAL";
-	case PARTITION_STATUS_DROP_START: return "DROPPING PARTITION";
+	case PARTITION_STATUS_DROP_START: return "DROPPED";
 	case PARTITION_STATUS_DROP_END: return "REMOVED";
 	case INDEX_STATUS_CREATE_START: return "CREATING INDEX";
 	case INDEX_STATUS_CREATE_END: return "NORMAL";
-	case INDEX_STATUS_DROP_START: return "DROPPING INDEX";
+	case INDEX_STATUS_DROP_START: return "DROPPED INDEX";
 	case INDEX_STATUS_DROP_END: return "NORMAL";
 	default: return "NONE";
 	}

@@ -77,7 +77,7 @@ bool ResultProcessor::applyInfo(
 		if (inputInfo.size() != 1) {
 			GS_THROW_USER_ERROR(
 				GS_ERROR_SQL_PROC_INTERNAL_INVALID_INPUT,
-				"Result processur input size must be 1, but current=" << inputInfo.size());
+				"Result processor input size must be 1, but current=" << inputInfo.size());
 		}
 
 		size_t inputSize = inputInfo.size();
@@ -273,7 +273,7 @@ void SQLDetailProfs::complete(int32_t executionTime) {
 
 std::string SQLDetailProfs::dump() {
 	util::NormalOStringStream ss;
-	ss << "startTime=" << getTimeStr(startTime_)
+	ss << "startTime=" << CommonUtility::getTimeStr(startTime_)
 		<< ", dbName=" << dbName_.c_str()
 		<< ", applicationName=" << applicationName_.c_str()
 		<< ", query=" << query_.c_str();

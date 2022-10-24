@@ -52,20 +52,12 @@ using util::ValueFormatter;
 #include <signal.h>  
 #endif
 
-#define GS_TRACE_CLUSTER_INFO(s) \
-	GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_CLUSTER_STATUS, s); \
-
-#define GS_TRACE_CLUSTER_DUMP(s) \
-	GS_TRACE_DEBUG(CLUSTER_OPERATION, GS_TRACE_CS_CLUSTER_STATUS, s);
-
-
 
 
 typedef ObjectManagerV4 OCManager;
 
 UTIL_TRACER_DECLARE(SYSTEM_SERVICE);
 UTIL_TRACER_DECLARE(SYSTEM_SERVICE_DETAIL);
-UTIL_TRACER_DECLARE(CLUSTER_OPERATION);
 UTIL_TRACER_DECLARE(DISTRIBUTED_FRAMEWORK);
 
 UTIL_TRACER_DECLARE(CLUSTER_DETAIL);
@@ -128,7 +120,7 @@ SystemService::SystemService(
 		webapiServerThread_(eeConfig.plainIOMode_.serverAcceptable_, false),
 		secureWebapiServerThread_(eeConfig.secureIOMode_.serverAcceptable_, true),
 		sysConfig_(config),
-		initailized_(false),
+		initialized_(false),
 		config_(config),
 		baseStats_(NULL),
 		socketFactory_(source.socketFactory_),
@@ -144,14 +136,14 @@ SystemService::SystemService(
 
 		ee_.setThreadErrorHandler(serviceThreadErrorHandler_);
 
-		const char8_t *catrgories[] = {"HASH_MAP", "BASE_CONTAINER",
+		const char8_t *categories[] = {"HASH_MAP", "BASE_CONTAINER",
 			"CHECKPOINT_SERVICE_DETAIL", "SYSTEM_SERVICE_DETAIL", "REPLICATION",
 			"SESSION_DETAIL", "TRANSACTION_DETAIL", "TIMEOUT_DETAIL",
 			"RECOVERY_MANAGER_DETAIL", "CHUNK_MANAGER_DETAIL",
 			"CHUNK_MANAGER_IO_DETAIL", NULL};
 
-		for (size_t i = 0; catrgories[i] != NULL; i++) {
-			unchangableTraceCategories_.insert(catrgories[i]);
+		for (size_t i = 0; categories[i] != NULL; i++) {
+			unchangeableTraceCategories_.insert(categories[i]);
 		}
 	}
 	catch (std::exception &e) {
@@ -169,7 +161,7 @@ SystemService::~SystemService() {
 */
 void SystemService::start() {
 	try {
-		if (!initailized_) {
+		if (!initialized_) {
 			GS_THROW_USER_ERROR(GS_ERROR_SC_SERVICE_NOT_INITIALIZED, "");
 		}
 		ee_.start();
@@ -257,7 +249,7 @@ void SystemService::initialize(ManagerSet &mgrSet) {
 	}
 
 
-	initailized_ = true;
+	initialized_ = true;
 }
 
 /*!
@@ -609,7 +601,7 @@ bool SystemService::backupNode(const Event::Source &eventSource,
 		}
 	}
 	catch (UserException &e) {
-		UTIL_TRACE_EXCEPTION_ERROR(SYSTEM_SERVICE, e,
+		UTIL_TRACE_EXCEPTION(SYSTEM_SERVICE, e,
 			"Backup node failed (name=" << backupName << ", detail="
 										<< GS_EXCEPTION_MESSAGE(e) << ")");
 
@@ -923,10 +915,9 @@ void SystemService::getPartitions(
 			std::string tmp =
 				pt_->dumpPartitionStatusForRest(pt_->getPartitionStatus(pId));
 			partition["status"] = picojson::value(tmp);
-			partition["pId"] = picojson::value(makeString(oss, pId));
+			partition["pId"] = picojson::value(CommonUtility::makeString(oss, pId));
 			partition["maxLsn"] =
 				picojson::value(static_cast<double>(pt_->getMaxLsn(pId)));
-
 			if (lsnDump) {
 				partition["lsn"] =
 					picojson::value(static_cast<double>(pt_->getLSN(pId)));
@@ -937,7 +928,7 @@ void SystemService::getPartitions(
 			}
 			if (isCheckPartitionGroup) {
 				partition["pgId"] =
-					picojson::value(makeString(oss, partitionGroupNo));
+					picojson::value(CommonUtility::makeString(oss, partitionGroupNo));
 			}
 			partitionList.push_back(picojson::value(partition));
 		}
@@ -964,7 +955,7 @@ void SystemService::getGoalPartitions(
 		for (uint32_t pId = 0; pId < goalList.size(); pId++) {
 			picojson::object partition;
 			util::NormalOStringStream oss;
-			partition["pId"] = picojson::value(makeString(oss, pId));
+			partition["pId"] = picojson::value(CommonUtility::makeString(oss, pId));
 
 			PartitionRole &currentRole = goalList[pId];
 			NodeId ownerNodeId = currentRole.getOwner();
@@ -1087,8 +1078,8 @@ void SystemService::getPGStoreMemoryLimitStats(picojson::value &result) {
 	typedef std::pair<const char8_t*, ChunkBufferStats::Param> NamedParam;
 	const NamedParam pgParamList[] = {
 		NamedParam("pgStoreUse", ChunkBufferStats::BUF_STAT_USE_STORE_SIZE),
-		NamedParam("pgLimit", ChunkBufferStats::BUF_STAT_USE_BUFFER_SIZE),
-		NamedParam("pgMemory", ChunkBufferStats::BUF_STAT_BUFFER_LIMIT_SIZE),
+		NamedParam("pgLimit", ChunkBufferStats::BUF_STAT_BUFFER_LIMIT_SIZE),
+		NamedParam("pgMemory", ChunkBufferStats::BUF_STAT_USE_BUFFER_SIZE),
 		NamedParam("pgSwapRead", ChunkBufferStats::BUF_STAT_SWAP_READ_COUNT),
 		NamedParam(
 				"pgNormalSwapRead",
@@ -1401,8 +1392,8 @@ bool SystemService::setEventLogLevel(
 		const std::string &category, const std::string &level, bool force) {
 	try {
 		if (!force &&
-			unchangableTraceCategories_.find(category) !=
-				unchangableTraceCategories_.end()) {
+			unchangeableTraceCategories_.find(category) !=
+				unchangeableTraceCategories_.end()) {
 			GS_TRACE_WARNING(SYSTEM_SERVICE, GS_TRACE_SC_BAD_REQUEST,
 				"Unknown event log category (value=" << category << ")");
 			return false;
@@ -1445,8 +1436,8 @@ void SystemService::getEventLogLevel(picojson::value &result) {
 		util::TraceManager::getInstance().getAllTracers(tracerList);
 		picojson::object levelMap;
 		for (size_t pos = 0; pos < tracerList.size(); ++pos) {
-			if (unchangableTraceCategories_.find(tracerList[pos]->getName()) ==
-				unchangableTraceCategories_.end()) {
+			if (unchangeableTraceCategories_.find(tracerList[pos]->getName()) ==
+				unchangeableTraceCategories_.end()) {
 				levelMap[tracerList[pos]->getName()] = picojson::value(
 					std::string(util::TraceManager::outputLevelToString(
 						tracerList[pos]->getMinOutputLevel())));
@@ -2758,10 +2749,10 @@ void SystemService::ListenerSocketHandler::dispatch(
 				return;
 			}
 
-			std::string serachStr, searchStr2, ignoreStr;
+			std::string searchStr, searchStr2, ignoreStr;
 			if (request.parameterMap_.find("searchStr") !=
 				request.parameterMap_.end()) {
-				serachStr = request.parameterMap_["searchStr"];
+				searchStr = request.parameterMap_["searchStr"];
 			}
 			if (request.parameterMap_.find("searchStr2") !=
 				request.parameterMap_.end()) {
@@ -2777,7 +2768,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 				length = atoi(request.parameterMap_["length"].c_str());
 			}
 			picojson::value result;
-			sysSvc_->getLogs(result, serachStr, searchStr2, ignoreStr, length);
+			sysSvc_->getLogs(result, searchStr, searchStr2, ignoreStr, length);
 
 			if (request.parameterMap_.find("callback") !=
 				request.parameterMap_.end()) {
@@ -3537,7 +3528,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 
 			JobManager *jobManager = clsSvc_->getSQLService()->getExecutionManager()->getJobManager();
 			StatJobProfiler profs(alloc_);
-			profs.currentTime_ = getTimeStr(util::DateTime::now(false).getUnixTime()).c_str();
+			profs.currentTime_ = CommonUtility::getTimeStr(util::DateTime::now(false).getUnixTime()).c_str();
 			jobManager->getProfiler(alloc_, profs, mode, currentJobId);
 			picojson::value jsonOutValue;
 			JsonUtils::OutStream out(jsonOutValue);
@@ -4569,7 +4560,7 @@ void SystemService::WebAPIResponse::update() {
 }
 
 SystemService::SystemConfig::SystemConfig(ConfigTable &configTable)
-	: sysStatsInterval_(changeTimeSecToMill(OUTPUT_STATS_INTERVAL_SEC)),
+	: sysStatsInterval_(CommonUtility::changeTimeSecondToMilliSecond(OUTPUT_STATS_INTERVAL_SEC)),
 	  traceMode_(static_cast<TraceMode>(
 		  configTable.get<int32_t>(CONFIG_TABLE_SYS_TRACE_MODE))) {
 	setUpConfigHandler(configTable);
@@ -4673,6 +4664,8 @@ void SystemService::StatSetUpHandler::operator()(StatTable &stat) {
 	parentId = STAT_TABLE_PERF_MEM;
 	STAT_ADD_SUB(STAT_TABLE_PERF_MEM_ALL_TOTAL);
 	STAT_ADD_SUB(STAT_TABLE_PERF_MEM_ALL_CACHED);
+	STAT_ADD_SUB(STAT_TABLE_PERF_MEM_ALL_LOCAL_CACHED);
+	STAT_ADD_SUB(STAT_TABLE_PERF_MEM_ALL_ELEMENT_COUNT);
 	STAT_ADD_SUB(STAT_TABLE_PERF_MEM_PROCESS_MEMORY_GAP);
 	stat.resolveGroup(parentId, STAT_TABLE_PERF_MEM_DS, "store");
 	stat.resolveGroup(parentId, STAT_TABLE_PERF_MEM_WORK, "work");
@@ -4919,7 +4912,9 @@ bool SystemService::StatUpdator::operator()(StatTable &stat) {
 		std::vector<util::AllocatorStats> statsList;
 		statsList.resize(idList.size());
 
-		allocMgr.getGroupStats(&idList[0], idList.size(), &statsList[0]);
+		util::AllocatorStats directStats;
+		allocMgr.getGroupStats(
+				&idList[0], idList.size(), &statsList[0], &directStats);
 		for (IdList::iterator it = idList.begin(); it != idList.end(); ++it) {
 			const size_t index = static_cast<size_t>(
 					std::find(allocIdList, allocIdList + listSize, *it) -
@@ -4938,9 +4933,15 @@ bool SystemService::StatUpdator::operator()(StatTable &stat) {
 					allocStats.values_[util::AllocatorStats::STAT_CACHE_SIZE]);
 
 			if (paramId == STAT_TABLE_PERF_MEM_ALL_TOTAL) {
-				stat.set(STAT_TABLE_PERF_MEM_PROCESS_MEMORY_GAP,
-						static_cast<int64_t>(processMemory) - allocStats
-								.values_[util::AllocatorStats::STAT_TOTAL_SIZE]);
+				stat.set(STAT_TABLE_PERF_MEM_PROCESS_MEMORY_GAP, std::max<int64_t>(
+						static_cast<int64_t>(processMemory) -
+						util::AllocatorManager::estimateHeapUsage(
+								allocStats, directStats), 0));
+				stat.set(STAT_TABLE_PERF_MEM_ALL_LOCAL_CACHED, std::max<int64_t>(
+						allocStats.values_[util::AllocatorStats::STAT_CACHE_SIZE] -
+						directStats.values_[util::AllocatorStats::STAT_CACHE_SIZE], 0));
+				stat.set(STAT_TABLE_PERF_MEM_ALL_ELEMENT_COUNT,
+						directStats.values_[util::AllocatorStats::STAT_CACHE_MISS_COUNT]);
 			}
 		}
 	} while (false);

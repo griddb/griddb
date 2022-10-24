@@ -198,8 +198,8 @@ struct DataStoreConfig : public ConfigTable::ParamHandler {
 		isRowArraySizeControlMode_ = state;
 	}
 
-	void setCheckErasableExpiredInterval(int32_t val, int32_t coucurrency) {
-		concurrencyNum_ = coucurrency;
+	void setCheckErasableExpiredInterval(int32_t val, int32_t concurrency) {
+		concurrencyNum_ = concurrency;
 		setCheckErasableExpiredInterval(val);
 	}
 
@@ -210,6 +210,19 @@ struct DataStoreConfig : public ConfigTable::ParamHandler {
 		else {
 			checkErasableExpiredInterval_ = val;
 		}
+	}
+
+	void setExpiredCheckCount(int32_t val) {
+		if (val == 0) {
+			checkExpiredContainerCount_ = 1;
+		}
+		else {
+			checkExpiredContainerCount_ = val;
+		}
+	}
+
+	int32_t getExpiredCheckCount() {
+		return checkExpiredContainerCount_;
 	}
 
 	int32_t getCheckErasableExpiredInterval() const {
@@ -264,6 +277,7 @@ private:
 	int32_t checkErasableExpiredInterval_;
 	int32_t concurrencyNum_;
 	double storeMemoryAgingSwapRate_;
+	int32_t checkExpiredContainerCount_;
 
 	uint32_t limitSmallSize_;
 	uint32_t limitBigSize_;
@@ -285,7 +299,7 @@ public:
 	*/
 	enum SchemaState {
 		SAME_SCHEMA,
-		PROPERY_DIFFERENCE,
+		PROPERLY_DIFFERENCE,
 		COLUMNS_DIFFERENCE,
 		ONLY_TABLE_PARTITIONING_VERSION_DIFFERENCE,
 		COLUMNS_ADD,
@@ -457,7 +471,7 @@ public:
 
 	void finalizeContainer(TransactionContext &txn, BaseContainer *container);
 	void finalizeMap(TransactionContext &txn, 
-		const AllocateStrategy &allcateStrategy, BaseIndex *index, Timestamp ExpirationTime);
+		const AllocateStrategy &allocateStrategy, BaseIndex *index, Timestamp ExpirationTime);
 	static BaseIndex *getIndex(TransactionContext &txn, 
 		ObjectManagerV4 &objectManager, MapType mapType, OId mapOId, 
 		AllocateStrategy &strategy, BaseContainer *container,
@@ -526,7 +540,7 @@ private:
 
 	std::map<GroupKey, int64_t> groupKeyMap_;
 
-	int32_t calcAffnityGroupId(const uint8_t* affinityBinary) {
+	int32_t calcAffinityGroupId(const uint8_t* affinityBinary) {
 		uint64_t hash = 0;
 		const uint8_t* key = affinityBinary;
 		uint32_t keylen = AFFINITY_STRING_MAX_LENGTH;
@@ -537,11 +551,11 @@ private:
 		return groupId;
 	}
 
-	int32_t calcAffnityGroupId(const util::String &affinityStr) {
+	int32_t calcAffinityGroupId(const util::String &affinityStr) {
 		uint8_t affinityBinary[AFFINITY_STRING_MAX_LENGTH];
 		memset(affinityBinary, 0, AFFINITY_STRING_MAX_LENGTH);
 		memcpy(affinityBinary, affinityStr.c_str(), affinityStr.length());
-		int32_t affinityId = calcAffnityGroupId(affinityBinary);
+		int32_t affinityId = calcAffinityGroupId(affinityBinary);
 		return affinityId;
 	}
 

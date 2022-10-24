@@ -149,7 +149,7 @@ public:
 	static const size_t PASSWORD_SIZE_MAX = 64;  
 	static const size_t DATABASE_NAME_SIZE_MAX = 64;  
 
-	static const size_t USER_NUM_MAX = 128;		 
+	static const size_t USER_NUM_MAX = 1000;  
 	static const size_t DATABASE_NUM_MAX = 128;  
 
 	enum QueryResponseType {
@@ -203,6 +203,28 @@ public:
 	typedef util::XArray<uint8_t> RowKeyData;  
 	typedef util::XArray<uint8_t> RowData;	 
 	typedef util::Map<int8_t, util::XArray<uint8_t> *> PartialQueryOption;	 
+
+	static const uint8_t CONNECTION_ROUTE_MIN = 0;
+	static const uint8_t CONNECTION_ROUTE_LOCAL = 0;
+	static const uint8_t CONNECTION_ROUTE_PUBLIC = 1;
+	static const uint8_t CONNECTION_ROUTE_MAX = 2;
+	
+	/*!
+		@brief Judge public connection route
+	*/
+	/** **
+		@brief 外部接続指定があるかどうか
+		@param [in] request 入力情報
+		@param [in] check メッセージ不正時にエラーを返すかどうか（上位で指定）
+	** **/
+	static bool usePublicConection(Request& request, bool check = true) {
+		int8_t connectionRoute = request.optional_.get<Options::CONNECTION_ROUTE>();
+		if (check && (connectionRoute < CONNECTION_ROUTE_MIN || connectionRoute >= CONNECTION_ROUTE_MAX)) {
+			TXN_THROW_DECODE_ERROR(GS_ERROR_TXN_DECODE_FAILED,
+				"Invalid connection route=" << static_cast<int32_t>(connectionRoute));
+		}
+		return (connectionRoute == CONNECTION_ROUTE_PUBLIC);
+	}
 
 	/*!
 		@brief Represents fetch setting
@@ -797,6 +819,7 @@ public:
 				retryCount_(0)
 			  ,clientId_()
 			  ,keepaliveTime_(0)
+		, connectionRoute_(StatementHandler::CONNECTION_ROUTE_LOCAL)
 		{
 		}
 
@@ -819,6 +842,7 @@ public:
 			timeZone_ = util::TimeZone();
 			keepaliveTime_ = 0;
 			currentSessionId_ = 0;
+			connectionRoute_ = StatementHandler::CONNECTION_ROUTE_LOCAL;
 			initializeCoreInfo();
 		}
 
@@ -860,6 +884,16 @@ public:
 						util::StdAllocator<char8_t, void> > *name);
 		void getApplicationName(std::ostream &os);
 
+		bool isPublicConnection() {
+			return (connectionRoute_ == StatementHandler::CONNECTION_ROUTE_PUBLIC);
+		}
+		int8_t getConnectionRoute() {
+			return connectionRoute_;
+		}
+		void setPublicConnection() {
+			connectionRoute_ = StatementHandler::CONNECTION_ROUTE_PUBLIC;
+		}
+
 		ProtocolVersion clientVersion_;
 		int32_t txnTimeoutInterval_;
 		bool isAuthenticated_;
@@ -889,6 +923,7 @@ public:
 		ClientId clientId_;
 		EventMonotonicTime keepaliveTime_;
 		SessionId currentSessionId_;
+		int8_t connectionRoute_;//
 	private:
 		util::Mutex mutex_;
 		std::string applicationName_;
@@ -1045,7 +1080,7 @@ public:
 	template<typename S>
 	static void decodePartialQueryOption(
 		S &in, util::StackAllocator &alloc,
-		bool &isPartial, PartialQueryOption &partitalQueryOption);
+		bool &isPartial, PartialQueryOption &partialQueryOption);
 
 	template<typename S>
 	static void decodeGeometryRelatedQuery(
@@ -1054,10 +1089,10 @@ public:
 	static void decodeGeometryWithExclusionQuery(
 		S &in, GeometryQuery &query);
 	template<typename S>
-	static void decodeTimeRelatedConditon(S &in,
+	static void decodeTimeRelatedCondition(S &in,
 		TimeRelatedCondition &condition);
 	template<typename S>
-	static void decodeInterpolateConditon(S &in,
+	static void decodeInterpolateCondition(S &in,
 		InterpolateCondition &condition);
 	template<typename S>
 	static void decodeAggregateQuery(
@@ -1569,7 +1604,8 @@ public:
 	template <typename S>
 	static void encodeClusterInfo(
 			S &out, EventEngine &ee,
-			PartitionTable &partitionTable, ContainerHashMode hashMode, ServiceType serviceType);
+			PartitionTable &partitionTable, ContainerHashMode hashMode, ServiceType serviceType, bool usePublic);
+
 private:
 	struct InMessage : public SimpleInputMessage {
 		InMessage(util::StackAllocator& alloc, const FixedRequest::Source& src, ConnectionOption& connOption)
@@ -2292,7 +2328,7 @@ private:
 	typedef SimpleOutputMessage OutMessage;
 };
 /*!
-	@brief Handles CLOSE_TRANSACTIN_CONTEXT statement
+	@brief Handles CLOSE_TRANSACTION_CONTEXT statement
 */
 class CloseTransactionContextHandler : public StatementHandler {
 public:
@@ -2303,7 +2339,7 @@ private:
 };
 
 /*!
-	@brief Handles COMMIT_TRANSACTIN statement
+	@brief Handles COMMIT_TRANSACTION statement
 */
 class CommitAbortTransactionHandler : public StatementHandler {
 public:
@@ -2685,7 +2721,7 @@ private:
 		template<typename S>
 		void decode(S& in) {
 			SimpleInputMessage::decode(in);
-			decodeTimeRelatedConditon<S>(in, condition_);
+			decodeTimeRelatedCondition<S>(in, condition_);
 		}
 
 		TimeRelatedCondition condition_;
@@ -2718,7 +2754,7 @@ private:
 		template<typename S>
 		void decode(S& in) {
 			SimpleInputMessage::decode(in);
-			decodeInterpolateConditon<S>(in, condition_);
+			decodeInterpolateCondition<S>(in, condition_);
 		}
 
 		InterpolateCondition condition_;
@@ -2790,7 +2826,7 @@ private:
 	typedef TQLOutputMessage OutMessage;
 };
 /*!
-	@brief Handles QUERY_TIME_SAMPING statement
+	@brief Handles QUERY_TIME_SAMPLING statement
 */
 class QueryTimeSamplingHandler : public StatementHandler {
 public:
@@ -4986,6 +5022,23 @@ public:
 	bool onBackgroundTask(PartitionGroupId pgId);
 	void setBackgroundTask(PartitionGroupId pgId, bool onBackgroundTask);
 
+	int64_t getTotalInternalConnectionCount() {
+		return totalInternalConnectionCount_;
+	}
+
+	int64_t getTotalExternalConnectionCount() {
+		return totalExternalConnectionCount_;
+	}
+
+	void setTotalInternalConnectionCount() {
+		totalInternalConnectionCount_++;
+	}
+
+	void setTotalExternalConnectionCount() {
+		totalExternalConnectionCount_++;
+	}
+
+
 	util::StackAllocator* getTxnLogAlloc(PartitionGroupId pgId);
 
 	TransactionManager *getManager() {
@@ -5044,6 +5097,9 @@ private:
 	std::vector<uint64_t> backgroundOperationCount_;
 	std::vector<uint64_t> noExpireOperationCount_;
 	std::vector<uint64_t> abortDDLCount_;
+
+	int64_t totalInternalConnectionCount_;
+	int64_t totalExternalConnectionCount_;
 
 	std::vector<bool> onBackgroundTask_; 
 	std::vector<util::StackAllocator *> txnLogAlloc_; 
@@ -5148,7 +5204,6 @@ private:
 
 	RemoveRowSetByIdHandler removeRowSetByIdHandler_;
 	UpdateRowSetByIdHandler updateRowSetByIdHandler_;
-
 
 public:
 

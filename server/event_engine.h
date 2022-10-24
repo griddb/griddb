@@ -48,6 +48,8 @@ public:
 	class EventContext;
 	class EventHandler;
 	class EventCoder;
+	class LocalBuffer;
+	class LocalEvent;
 	class ThreadErrorHandler;
 	class Stats;
 	struct SocketInfo;
@@ -156,6 +158,8 @@ private:
 	class SocketPool;
 	class Dispatcher;
 	class Limitter;
+	class LocalLimitter;
+	class DefaultLimitter;
 	struct Manipulator;
 
 	class ClockGenerator;
@@ -190,7 +194,10 @@ private:
 			UserDataConstructor &constructor, UserDataDestructor &destructor,
 			size_t dataSize);
 
+	VariableSizeAllocator::TraitsType getAllocatorTraits();
+
 	FixedSizeAllocator *fixedAllocator_;
+	util::VariableSizeAllocatorPool varAllocPool_;
 
 	const std::string name_;
 	UTIL_UNIQUE_PTR<const Config> config_;
@@ -200,7 +207,7 @@ private:
 	UTIL_UNIQUE_PTR<NDPool> ndPool_;
 	UTIL_UNIQUE_PTR<SocketPool> socketPool_;
 	UTIL_UNIQUE_PTR<Dispatcher> dispatcher_;
-	UTIL_UNIQUE_PTR<Limitter> limitter_;
+	UTIL_UNIQUE_PTR<DefaultLimitter> limitter_;
 	util::SocketAddress selfAddress_;
 
 	UTIL_UNIQUE_PTR<ClockGenerator> clockGenerator_;
@@ -272,6 +279,11 @@ std::ostream& operator<<(std::ostream &stream, const NodeDescriptor &nd);
 */
 struct EventEngine::Config {
 public:
+	enum {
+		VAR_ALLOC_BASE_COUNT =
+				VariableSizeAllocator::TraitsType::FIXED_ALLOCATOR_COUNT
+	};
+
 	struct IOMode {
 		explicit IOMode(bool serverAcceptable = false, bool clusterAcceptable = false) :
 			serverAcceptable_(serverAcceptable), clusterAcceptable_(clusterAcceptable) {
@@ -293,6 +305,11 @@ public:
 		bool clusterAcceptable_;
 	};
 
+	struct ElementValue {
+		ElementValue() : value_(-1) {}
+		int64_t value_;
+	};
+
 	Config();
 
 	Config& setClientNDEnabled(bool enabled);
@@ -303,13 +320,15 @@ public:
 	Config& setConcurrency(uint32_t concurrency);
 	Config& setPartitionCount(uint32_t partitionCount);
 	Config& setAllAllocatorGroup(util::AllocatorGroupId id);
+	Config& setVarAllocFreeSizeLimit(size_t index, int64_t value);
+	void applyFreeSizeLimits(VariableSizeAllocator &varAlloc) const;
 
 	bool clientNDEnabled_;
 	bool serverNDAutoNumbering_;
 
 	util::SocketAddress listenAddress_;
 	util::SocketAddress multicastAddress_;
-	Config& setMulticastIntefaceAddress(const char8_t *address, uint16_t port);
+	Config& setMulticastInterfaceAddress(const char8_t *address, uint16_t port);
 	util::SocketAddress multicastInterfaceAddress_;
 
 	util::SocketAddress serverAddress_;
@@ -339,6 +358,8 @@ public:
 	uint32_t partitionCount_;
 
 	int64_t eventBufferSizeLimit_;
+	int64_t eventBatchSizeLimit_;
+	int64_t ioBatchSizeLimit_;
 
 	uint32_t clockIntervalMillis_;
 	uint32_t clockCorrectionMillis_;
@@ -346,6 +367,8 @@ public:
 
 	util::AllocatorGroupId allocatorGroupId_;
 	util::AllocatorGroupId workAllocatorGroupId_;
+
+	ElementValue varAllocFreeSizeLimits_[VAR_ALLOC_BASE_COUNT];
 };
 
 /*!
@@ -369,7 +392,7 @@ struct EventEngine::Source {
 	std::pair<SocketFactory*, SocketFactory*> secureSocketFactories_;
 
 private:
-	struct Dafaults {
+	struct Defaults {
 		static SocketFactory defaultSocketFactory_;
 	};
 };
@@ -544,6 +567,7 @@ public:
 	bool isMessageSpecified() const;
 	const Buffer& getMessageBuffer() const;
 	Buffer& getMessageBuffer();
+	void setMessageBuffer(const Buffer &buffer);
 	void transferMessageBuffer(const Buffer &src);
 
 	size_t getExtraMessageCount() const;
@@ -698,6 +722,7 @@ struct EventEngine::EventContext::Source {
 */
 class EventEngine::EventHandler {
 public:
+	virtual ~EventHandler();
 	virtual void operator()(EventContext &ec, Event &ev) = 0;
 };
 
@@ -706,8 +731,10 @@ public:
 */
 class EventEngine::EventCoder {
 public:
+	virtual ~EventCoder();
+
 	virtual size_t decode(
-			EventEngine &ee, Buffer &buffer, Event &ev,
+			EventEngine &ee, LocalBuffer &buffer, Event &ev,
 			const NodeDescriptor &nd,
 			const util::SocketAddress &socketAddress,
 			EventRequestOption &option) = 0;
@@ -719,11 +746,88 @@ public:
 			bool followingEventEncoding) = 0;
 };
 
+class EventEngine::LocalBuffer {
+public:
+	LocalBuffer();
+
+	bool isAttached() const;
+	void attach(Buffer &base);
+	void reset();
+	void eraseAll();
+
+	size_t getWritableSize() const;
+	void* getWritableAddress();
+	bool isWriting() const;
+
+	void startWriting(size_t minSize);
+	void finishWriting(size_t size);
+
+	size_t getPendingSize() const;
+	EventByteInStream getPendingInStream() const;
+	void assignPending(const Buffer &buffer);
+
+	const Buffer& share() const;
+	void assignReadable(size_t offset, size_t size);
+	void eraseReadable();
+	void expandReadable();
+
+	size_t getCapacity() const;
+	void adjustCapacity(size_t minSize);
+
+private:
+	LocalBuffer(const LocalBuffer&);
+	LocalBuffer& operator=(const LocalBuffer&);
+
+	void growCapacity(size_t extraSize);
+
+	size_t getReadableTailPosition() const;
+	size_t getPendingHeadPosition() const;
+	size_t getPendingTailPosition() const;
+
+	const uint8_t* getData() const;
+	uint8_t* getData();
+
+	void errorNoAttach();
+	void errorWritingStart();
+	void errorWritingFinish(size_t size);
+	void errorReadableRange(size_t offset, size_t size);
+
+	Buffer base_;
+	Buffer::XArray *storage_;
+	size_t pendingOffset_;
+	size_t pendingSize_;
+	bool writing_;
+};
+
+class EventEngine::LocalEvent {
+public:
+	LocalEvent();
+
+	void reset();
+	Event& prepareLocal(const Event::Source &souce);
+	Event& getLocal();
+
+	void swap(LocalEvent &ev);
+	void transferTo(const Event::Source &souce, LocalEvent &ev) const;
+
+	bool isEmpty() const;
+	EventType getType() const;
+
+private:
+	LocalEvent(const LocalEvent&);
+	LocalEvent& operator=(const LocalEvent&);
+
+	Event& errorEmptyAccess();
+
+	Event base_;
+};
+
 /*!
 	@brief Handles thread error
 */
 class EventEngine::ThreadErrorHandler {
 public:
+	virtual ~ThreadErrorHandler();
 	virtual void operator()(EventContext &ec, std::exception &e) = 0;
 };
 
@@ -1237,24 +1341,91 @@ private:
 
 class EventEngine::Limitter {
 public:
-	explicit Limitter(EventEngine &ee);
+	struct Info;
+	typedef std::vector<Info> InfoList;
+	typedef uint32_t LimitId;
 
-	int64_t getEventBufferLimit() const;
+	virtual ~Limitter();
 
-	void reportIOBufferDiff(int64_t diff);
-	void reportEventBufferDiff(int64_t diff);
+	const Info& getInfo(LimitId id) const;
+	void reportDiff(LimitId id, int64_t diff);
+
+protected:
+	explicit Limitter(const InfoList &infoList);
+
+	virtual void handleChange(bool exceeded) = 0;
 
 private:
-	void apply(util::Atomic<int64_t> &value, int64_t diff, int64_t limit);
+	struct Entry;
+	typedef std::vector<Entry> EntryList;
 
-	static int64_t maskLimitValue(int64_t value);
+	static EntryList makeEntryList(const InfoList &infoList);
+
+	bool checkLimit() const;
+	size_t getEntryIndex(LimitId id) const;
+
+	util::Mutex mutex_;
+	EntryList entryList_;
+};
+
+struct EventEngine::Limitter::Info {
+	Info();
+
+	int64_t limit_;
+	uint32_t localCount_;
+};
+
+struct EventEngine::Limitter::Entry {
+	Entry();
+
+	Info info_;
+	int64_t value_;
+};
+
+class EventEngine::LocalLimitter {
+public:
+	typedef Limitter::LimitId LimitId;
+
+	LocalLimitter();
+
+	void initialize(Limitter &limitter, LimitId id);
+
+	void reportDiff(int64_t diff);
+	int64_t getValue() const;
+
+private:
+	LocalLimitter(const LocalLimitter&);
+	LocalLimitter& operator=(const LocalLimitter&);
+
+	static int64_t resolveLocalLimit(const Limitter::Info &info);
+
+	Limitter *limitter_;
+	LimitId id_;
+	int64_t value_;
+	int64_t localLimit_;
+};
+
+class EventEngine::DefaultLimitter : public Limitter {
+public:
+	enum DefaultId {
+		LIMIT_ID_EVENT_BUFFER,
+		LIMIT_ID_SEND_BUFFER,
+
+		LIMIT_ID_MAX
+	};
+
+	explicit DefaultLimitter(EventEngine &ee);
+	virtual ~DefaultLimitter();
+
+	void setUpLocal(DefaultId id, LocalLimitter &localLimitter);
+
+protected:
+	virtual void handleChange(bool exceeded);
+
+private:
+	static InfoList makeInfoList(const Config &config);
 
 	EventEngine &ee_;
-	const int64_t ioBufferLimit_;
-	const int64_t eventBufferLimit_;
-
-	util::Atomic<int64_t> ioBufferSize_;
-	util::Atomic<int64_t> eventBufferSize_;
 };
 
 struct EventEngine::Manipulator {
@@ -1265,6 +1436,7 @@ struct EventEngine::Manipulator {
 	static util::SocketAddress resolveListenAddress(const Config &config);
 	static bool isListenerEnabled(const Config &config);
 	static uint32_t getIOConcurrency(const Config &config, bool withSecondary);
+	static size_t resolveBatchSizeLimit(const Config &config, bool forIO);
 	static Stats& getStats(const EventContext &ec);
 	static void setScanner(EventContext &ec, Event *ev);
 
@@ -1391,6 +1563,7 @@ public:
 	void modifySocket(EventSocket *socket, util::IOPollEvent pollEvent);
 	void suspendSocket(EventSocket *socket, util::IOPollEvent pollEvent);
 
+	size_t getBatchSizeLimit() const;
 	const Stats& getStats() const;
 	void mergeExtraStats(Stats &stats);
 
@@ -1464,6 +1637,8 @@ private:
 
 	util::IOPollEPoll poll_;
 
+	bool sendSizeLimited_;
+	size_t batchSizeLimit_;
 	Stats stats_;
 	util::Atomic<int64_t> sendBufferSize_;
 	util::Atomic<int64_t> errorCount_[
@@ -1611,7 +1786,9 @@ private:
 
 	PendingPartitionCheckList pendingPartitionCheckList_;
 
+	LocalLimitter bufferSizeLimitter_;
 	int64_t bufferSizeSoftLimit_;
+	size_t batchSizeLimit_;
 	Stats stats_;
 };
 
@@ -1668,12 +1845,7 @@ public:
 	void exportControlInfo(LockGuard &ndGuard, EventByteOutStream &out);
 
 private:
-	struct ReceiveState {
-		ReceiveState();
-
-		EventRequestOption option_;
-		size_t pendingOffset_;
-	};
+	class SizeUpdator;
 
 	typedef IOWorker::BufferQueue BufferQueue;
 
@@ -1681,7 +1853,6 @@ private:
 	typedef IOWorker::IOEventQueue IOEventQueue;
 
 	static const size_t MULTICAST_MAX_PACKET_SIZE;
-	static const size_t INITIAL_RECEIVE_BUFFER_SIZE;
 
 	EventSocket(const EventSocket&);
 	EventSocket& operator=(const EventSocket&);
@@ -1691,13 +1862,13 @@ private:
 
 	bool acceptInitialEvent(const Event &ev);
 	void initializeND(LockGuard &ndGuard, const NodeDescriptor &nd);
-	void dispatchEvent(Event &ev, const EventRequestOption &option);
+	void dispatchEvent(LocalEvent &ev, const EventRequestOption &option);
 	void dispatchEventsOnSent(IOEventSubQueue *&queue);
 
 	bool connect(const util::SocketAddress *address, bool polling);
 	void setConnected(bool pending);
-	bool receiveLocal(Event &ev, ReceiveState &state);
-	void finishLocalReceive(ReceiveState &state);
+	bool receiveLocal(LocalEvent &ev, EventRequestOption &option);
+	void finishLocalReceive();
 	void sendLocal(IOEventSubQueue *&queue);
 	void suspendLocal(bool enabled, util::IOPollEvent extraPollEvent);
 	void requestShutdown();
@@ -1738,19 +1909,16 @@ private:
 	bool extraGuardRequired_;
 	AbstractSocket::SocketAction lastPendingAction_;
 
-	Event receiveEvent_;
-	Buffer *receiveBuffer_;
+	LocalBuffer receiveBuffer_;
 	BufferQueue *receiveBufferQueue_;
 	BufferQueue *sendBufferQueue_;
 	IOEventQueue *eventQueueOnSent_;
 
-	size_t nextReceiveSize_;
-	size_t pendingReceiveSize_;
 	size_t firstEventQueueSize_;
 	int64_t connectStartTime_;
 	int64_t lastConnectTime_;
 	util::Atomic<bool> shutdownRequested_;
-	Event pendingEvent_;
+	LocalEvent pendingEvent_;
 	EventRequestOption pendingOption_;
 
 	NodeDescriptor nd_;
@@ -1758,6 +1926,18 @@ private:
 
 	util::SocketAddress localAddress_;
 	SocketStats stats_;
+};
+
+class EventEngine::EventSocket::SizeUpdator {
+public:
+	explicit SizeUpdator(EventSocket &socket);
+	~SizeUpdator();
+
+private:
+	SizeUpdator(const SizeUpdator&);
+	SizeUpdator& operator=(const SizeUpdator&);
+
+	EventSocket &socket_;
 };
 
 /*!
@@ -1820,7 +2000,7 @@ public:
 	virtual ~DefaultEventCoder();
 
 	virtual size_t decode(
-			EventEngine &ee, Buffer &buffer, Event &ev,
+			EventEngine &ee, LocalBuffer &buffer, Event &ev,
 			const NodeDescriptor &nd,
 			const util::SocketAddress &socketAddress,
 			EventRequestOption &option);
@@ -1861,6 +2041,9 @@ private:
 	static size_t getCommonPartSize(
 			const util::SocketAddress &socketAddress, bool pIdSpecified);
 	static size_t getAddressSize(const util::SocketAddress &socketAddress);
+
+	static void decodeCheckCode(EventByteInStream &in);
+	static BodySize decodeNonCommonBodySize(EventByteInStream &in);
 
 	static HeaderType decodeND(
 			EventEngine &ee, EventByteInStream &in, NodeDescriptor *nd,
@@ -1971,6 +2154,9 @@ inline void EventEngine::resetConnection(const NodeDescriptor &nd) {
 	for (size_t i = 0; i < 2; i++) {
 		const bool onSecondary = (i > 0);
 		NodeDescriptor::Body *body = Manipulator::findNDBody(nd, onSecondary);
+		if (body == NULL) {
+			continue;
+		}
 		LockGuard guard(body->getLock());
 
 		body->setSocket(guard, NULL, NodeDescriptor::Body::ND_SOCKET_RECEIVER);
@@ -2208,7 +2394,7 @@ EventEngine::Source::resolveFixedSizeAllocator() const {
 }
 
 inline SocketFactory& EventEngine::Source::getDefaultSocketFactory() {
-	return Dafaults::defaultSocketFactory_;
+	return Defaults::defaultSocketFactory_;
 }
 
 
@@ -2584,6 +2770,10 @@ inline EventEngine::Buffer& EventEngine::Event::getMessageBuffer() {
 	}
 
 	return messageBuffer_;
+}
+
+inline void EventEngine::Event::setMessageBuffer(const Buffer &buffer) {
+	messageBuffer_ = buffer;
 }
 
 inline void EventEngine::Event::transferMessageBuffer(const Buffer &src) {
@@ -3175,6 +3365,175 @@ inline void EventEngine::NDPool::releaseTimeMap(TimeMap *&map) {
 		UTIL_OBJECT_POOL_DELETE(timeMapPool_, map);
 		map = NULL;
 	}
+}
+
+
+inline EventEngine::LocalBuffer::LocalBuffer() :
+		storage_(NULL),
+		pendingOffset_(0),
+		pendingSize_(0),
+		writing_(false) {
+}
+
+inline bool EventEngine::LocalBuffer::isAttached() const {
+	return (storage_ != NULL);
+}
+
+inline void EventEngine::LocalBuffer::attach(Buffer &base) {
+	base_ = base;
+	base = Buffer();
+
+	storage_ = &base_.getWritableXArray();
+	eraseAll();
+}
+
+inline void EventEngine::LocalBuffer::reset() {
+	storage_ = NULL;
+	base_ = Buffer();
+	eraseAll();
+}
+
+inline void EventEngine::LocalBuffer::eraseAll() {
+	pendingOffset_ = 0;
+	pendingSize_ = 0;
+	writing_ = false;
+
+	base_.setOffset(0);
+	if (storage_ != NULL) {
+		storage_->clear();
+	}
+}
+
+inline size_t EventEngine::LocalBuffer::getWritableSize() const {
+	if (!writing_) {
+		return 0;
+	}
+	return storage_->capacity() - getPendingTailPosition();
+}
+
+inline void* EventEngine::LocalBuffer::getWritableAddress() {
+	if (!writing_) {
+		return NULL;
+	}
+	return getData() + getPendingTailPosition();
+}
+
+inline bool EventEngine::LocalBuffer::isWriting() const {
+	return writing_;
+}
+
+inline void EventEngine::LocalBuffer::startWriting(size_t minSize) {
+	if (writing_ || !isAttached()) {
+		return errorWritingStart();
+	}
+
+	const size_t positiveMinSize =
+			static_cast<size_t>(std::max<uint64_t>(minSize, 1));
+	const size_t writableSize =
+			storage_->capacity() - getPendingTailPosition();
+	if (positiveMinSize > writableSize) {
+		growCapacity(positiveMinSize - writableSize);
+	}
+
+	writing_ = true;
+}
+
+inline void EventEngine::LocalBuffer::finishWriting(size_t size) {
+	if (!writing_ || size > getWritableSize()) {
+		return errorWritingFinish(size);
+	}
+
+	writing_ = false;
+	pendingSize_ += size;
+}
+
+inline size_t EventEngine::LocalBuffer::getPendingSize() const {
+	return pendingSize_;
+}
+
+inline EventByteInStream EventEngine::LocalBuffer::getPendingInStream() const {
+	if (!isAttached() || pendingSize_ <= 0) {
+		return EventByteInStream(util::ArrayInStream(NULL, 0));
+	}
+	return EventByteInStream(util::ArrayInStream(
+			getData() + getPendingHeadPosition(), pendingSize_));
+}
+
+inline const EventEngine::Buffer& EventEngine::LocalBuffer::share() const {
+	return base_;
+}
+
+inline size_t EventEngine::LocalBuffer::getCapacity() const {
+	if (!isAttached()) {
+		return 0;
+	}
+	return storage_->capacity();
+}
+
+inline size_t EventEngine::LocalBuffer::getReadableTailPosition() const {
+	assert(storage_ != NULL);
+	return storage_->size();
+}
+
+inline size_t EventEngine::LocalBuffer::getPendingHeadPosition() const {
+	assert(storage_ != NULL);
+	return getReadableTailPosition() + pendingOffset_;
+}
+
+inline size_t EventEngine::LocalBuffer::getPendingTailPosition() const {
+	assert(storage_ != NULL);
+	return getPendingHeadPosition() + pendingSize_;
+}
+
+inline const uint8_t* EventEngine::LocalBuffer::getData() const {
+	assert(storage_ != NULL);
+	return storage_->data();
+}
+
+inline uint8_t* EventEngine::LocalBuffer::getData() {
+	assert(storage_ != NULL);
+	return storage_->data();
+}
+
+
+inline EventEngine::LocalEvent::LocalEvent() {
+}
+
+inline void EventEngine::LocalEvent::reset() {
+	base_ = Event();
+}
+
+inline Event& EventEngine::LocalEvent::prepareLocal(
+		const Event::Source &souce) {
+	if (isEmpty()) {
+		base_ = Event(souce, 0, 0);
+	}
+	return base_;
+}
+
+inline Event& EventEngine::LocalEvent::getLocal() {
+	if (isEmpty()) {
+		return errorEmptyAccess();
+	}
+	return base_;
+}
+
+inline void EventEngine::LocalEvent::swap(LocalEvent &ev) {
+	std::swap(base_, ev.base_);
+}
+
+inline void EventEngine::LocalEvent::transferTo(
+		const Event::Source &souce, LocalEvent &ev) const {
+	assert(souce.allocator_ != NULL);
+	ev.base_ = Event(*souce.allocator_, base_);
+}
+
+inline bool EventEngine::LocalEvent::isEmpty() const {
+	return base_.isEmpty();
+}
+
+inline EventType EventEngine::LocalEvent::getType() const {
+	return base_.getType();
 }
 
 

@@ -28,11 +28,11 @@
 #include "expirable_map.h"
 #include "transaction_context.h"
 #include "cluster_event_type.h"
+#include "utility_v5.h" 
 
 #include "sql_common.h"
 #include "container_key.h"
 #include "schema.h"
-
 
 class BaseContainer;
 
@@ -188,6 +188,7 @@ class ReplicationContext {
 	friend class TransactionManager;
 
 public:
+	typedef util::VariableSizeAllocator<> VariableSizeAllocator;
 	typedef util::XArray<uint8_t, util::StdAllocator<uint8_t, void> > BinaryData;
 	typedef util::XArray<uint8_t, util::StdAllocator<uint8_t, VariableSizeAllocator> > BinaryData2;
 

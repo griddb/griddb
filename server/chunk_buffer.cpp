@@ -282,10 +282,11 @@ BasicChunkBuffer<L>::BasicChunkBuffer(
 		ChunkBufferStats &stats) :
 		locker_(locker), partitionList_(nullptr),
 		pgId_(pgId), beginPId_(beginPId), endPId_(endPId),
-		pool_(nullptr), chunkSize_(chunkSize),
+		pool_(nullptr), chunkSize_(chunkSize), storeMemoryLimitBlockCount_(0),
 		compressorParam_(compressorParam), bufferTable_(NULL),
 		storeMemoryAgingSwapRate_(0.02), storeMemoryAgingSwapCount_(0),
 		agingSwapCounter_(0), chunkCategoryNum_(chunkCategoryNum),
+		maxOnceSwapNum_(MAX_ONCE_SWAP_SIZE_BYTE_ / chunkSize),
 		stats_(stats) {
 
 	bufferTable_ = UTIL_NEW LRUTable(numpages);
@@ -389,23 +390,37 @@ uint64_t BasicChunkBuffer<L>::getTotalPinCount() {
 }
 
 template<class L>
-bool BasicChunkBuffer<L>::resize(int32_t capacity) {
+int32_t BasicChunkBuffer<L>::getCurrentLimit() {
+	return bufferTable_->getCurrentNumElems();
+}
+
+template<class L>
+bool BasicChunkBuffer<L>::resize(int32_t newCapacity) {
+	uint64_t currentLimit = bufferTable_->getCurrentNumElems();
+	uint64_t swapNum = 0;
+	if (newCapacity < (currentLimit + 1)) {
+		swapNum = ((currentLimit + 1) - newCapacity);
+	}
+	if (maxOnceSwapNum_ < swapNum) {
+		swapNum = maxOnceSwapNum_;
+	}
 	ChunkAccessor accessor(*this);
-	if (bufferTable_->getCurrentNumElems() - capacity > 0) {
-		int32_t reduce = bufferTable_->getCurrentNumElems() - capacity;
+	if (swapNum > 0 && bufferTable_->getCurrentNumElems() - newCapacity > 0) {
+		int32_t reduce = swapNum;
 		for (int32_t i = 0; i < reduce; i++) {
 			if (!bufferTable_->gotoL2FromL1(pool_)) {
 				break;
 			}
+			swapNum--;
 		}
-		if (bufferTable_->getCurrentNumElems() == 0) {
+		if (bufferTable_->getCurrentNumElems() == 0 || swapNum == 0) {
 			return true;
 		}
 		LRUTable::Cursor bufferTableCursor = bufferTable_->createCursor();
 		LRUFrame *fr;
 		int32_t pos;
 		while (fr = bufferTableCursor.next(pos)) {
-			if ((bufferTable_->getCurrentNumElems() - capacity) <= 0) {
+			if (bufferTable_->getCurrentNumElems() == 0 || swapNum == 0) {
 				break;
 			}
 			if (fr->pincount_ == 0) {
@@ -440,6 +455,7 @@ bool BasicChunkBuffer<L>::resize(int32_t capacity) {
 				}
 				bufferMap_.remove(pId, offset);
 				bufferTable_->gotoL2FromL0(pool_, pos);
+				swapNum--;
 
 				stats_.table_(ChunkBufferStats::BUF_STAT_USE_BUFFER_COUNT)
 						.decrement();
@@ -451,9 +467,9 @@ bool BasicChunkBuffer<L>::resize(int32_t capacity) {
 			}
 		}
 	}
-	else if (bufferTable_->getCurrentNumElems() - capacity < 0) {
-		int32_t increase;
-		increase = capacity - bufferTable_->getCurrentNumElems();
+	else if (bufferTable_->getCurrentNumElems() - newCapacity < 0) {
+		int32_t increase =
+				newCapacity - bufferTable_->getCurrentNumElems();
 		for (int32_t i = 0; i < increase; i++) {
 			if (!bufferTable_->gotoL1FromL2()) {
 				break;
@@ -521,6 +537,7 @@ void BasicChunkBuffer<L>::updateStoreMemoryAgingParams(
 	storeMemoryAgingSwapCount_ = (rate < 1.0) ?
 			static_cast<uint64_t>(avgNum * rate) : DISABLE_COLD;
 }
+
 
 
 template<class L>
@@ -598,7 +615,32 @@ void BasicChunkBuffer<L>::ChunkAccessor::pinChunkMissHit(
 		pos = bcBuffer_.bufferTable_->getFree();
 		if (pos >= 0) {
 			fr = bcBuffer_.bufferTable_->get(pos);
-
+			if (fr->value_ == NULL
+					&& bcBuffer_.pool_->getFreeElementCount() == 0
+					&& bcBuffer_.pool_->getTotalElementCount() >=
+							bcBuffer_.getStoreMemoryLimitBlockCount()) {
+				int32_t pos2;
+				if (swapOut(1, pos2) == 1) {
+					++bcBuffer_.agingSwapCounter_;
+					int32_t oldPos = pos;
+					pos = bcBuffer_.bufferTable_->getFree();
+					assert(pos == pos2);
+					fr = bcBuffer_.bufferTable_->get(pos);
+					bcBuffer_.bufferTable_->pushFree(oldPos); 
+					GS_TRACE_DEBUG(CHUNK_MANAGER, GS_TRACE_CHM_INTERNAL_INFO,
+						"pinChunkMissHit,force_swapOut,swap_ok," << pId <<
+						",freeElemCount," << bcBuffer_.pool_->getFreeElementCount() <<
+						",totalElemCount," << bcBuffer_.pool_->getTotalElementCount() <<
+						",limitElemCount," << bcBuffer_.getStoreMemoryLimitBlockCount());
+				}
+				else {
+					GS_TRACE_DEBUG(CHUNK_MANAGER, GS_TRACE_CHM_INTERNAL_INFO,
+						"pinChunkMissHit,force_swapOut,swap_fail," << pId <<
+						",freeElemCount," << bcBuffer_.pool_->getFreeElementCount() <<
+						",totalElemCount," << bcBuffer_.pool_->getTotalElementCount() <<
+						",limitElemCount," << bcBuffer_.getStoreMemoryLimitBlockCount());
+				}
+			}
 			ChunkBufferStats &stats = bcBuffer_.stats_;
 			stats.table_(alloc ?
 					ChunkBufferStats::BUF_STAT_ALLOCATE_COUNT :

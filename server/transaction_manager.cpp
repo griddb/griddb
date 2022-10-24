@@ -444,7 +444,7 @@ TransactionManager::TransactionManager(ConfigTable &config, bool isSQL)
 			isLDAPAuthentication_ = false;
 		} else {
 			GS_THROW_USER_ERROR(
-				GS_ERROR_CS_CONFIG_ERROR, "security/authentication in gs_cluster.json invallid");
+				GS_ERROR_CS_CONFIG_ERROR, "security/authentication in gs_cluster.json invalid");
 		}
 
 		const char8_t* s2 = config.get<const char8_t *>(CONFIG_TABLE_SEC_LDAP_ROLE_MANAGEMENT);
@@ -454,7 +454,7 @@ TransactionManager::TransactionManager(ConfigTable &config, bool isSQL)
 		} else if (strcmp(s2, "USER") == 0) {
 			isRoleMappingByGroup_ = false;
 		} else {
-			GS_THROW_USER_ERROR(GS_ERROR_CS_CONFIG_ERROR, "security/ldapRoleManagement in gs_cluser.json invallid");
+			GS_THROW_USER_ERROR(GS_ERROR_CS_CONFIG_ERROR, "security/ldapRoleManagement in gs_cluster.json invalid");
 		}
 
 		const char8_t* s3 = config.get<const char8_t *>(CONFIG_TABLE_SEC_LDAP_URL);
@@ -873,7 +873,7 @@ void TransactionManager::getKeepaliveTimeoutContextId(util::StackAllocator &allo
 
 			if (checkPartitionFlagList[relativePId] &&
 				txn->isActive() && !txn->getSenderND().isEmpty() &&
-				txn->getTransationTimeoutInterval() == TXN_NO_TRANSACTION_TIMEOUT_INTERVAL) {
+				txn->getTransactionTimeoutInterval() == TXN_NO_TRANSACTION_TIMEOUT_INTERVAL) {
 
 				StatementHandler::ConnectionOption &connOption =
 				txn->getSenderND().getUserData<StatementHandler::ConnectionOption>();
@@ -921,7 +921,7 @@ void TransactionManager::getNoExpireTransactionContextId(util::StackAllocator &a
 				txnContextMap_[pgId]->get(activeTxn->clientId_);
 
 			if (txn->getPartitionId() == pId && txn->isActive()
-				&& txn->getTransationTimeoutInterval() == TXN_NO_TRANSACTION_TIMEOUT_INTERVAL) {
+				&& txn->getTransactionTimeoutInterval() == TXN_NO_TRANSACTION_TIMEOUT_INTERVAL) {
 				clientIds.push_back(activeTxn->clientId_);
 				partition_[txn->getPartitionId()]->reqTimeoutCount_++;
 				GS_TRACE_INFO(
@@ -1051,7 +1051,7 @@ uint64_t TransactionManager::getReplicationContextCount(PartitionGroupId pgId) {
 	return replContextMap_[pgId]->size();
 }
 /*!
-	@brief Gets the number of times the context expiraion occurrs in a specified
+	@brief Gets the number of times the context expiration occurs in a specified
    partition
 */
 uint64_t TransactionManager::getRequestTimeoutCount(PartitionId pId) const {
@@ -1060,7 +1060,7 @@ uint64_t TransactionManager::getRequestTimeoutCount(PartitionId pId) const {
 			   : partition_[pId]->getRequestTimeoutCount();
 }
 /*!
-	@brief Gets the number of times the transaction timeout occurrs in a
+	@brief Gets the number of times the transaction timeout occurs in a
    specified partition
 */
 uint64_t TransactionManager::getTransactionTimeoutCount(PartitionId pId) const {
@@ -1069,7 +1069,7 @@ uint64_t TransactionManager::getTransactionTimeoutCount(PartitionId pId) const {
 			   : partition_[pId]->getTransactionTimeoutCount();
 }
 /*!
-	@brief Gets the number of times the replication timeout occurrs in a
+	@brief Gets the number of times the replication timeout occurs in a
    specified partition
 */
 uint64_t TransactionManager::getReplicationTimeoutCount(PartitionId pId) const {
@@ -1085,7 +1085,7 @@ uint64_t TransactionManager::getNoExpireTransactionCount(PartitionGroupId pgId) 
 		 activeTxn = cursor.next()) {
 		const TransactionContext *txn =
 			txnContextMap_[pgId]->get(activeTxn->clientId_);
-		if (txn != NULL && txn->getTransationTimeoutInterval() == TXN_NO_TRANSACTION_TIMEOUT_INTERVAL) {
+		if (txn != NULL && txn->getTransactionTimeoutInterval() == TXN_NO_TRANSACTION_TIMEOUT_INTERVAL) {
 			noExpiretxnCount++;
 		}
 	}
@@ -1943,6 +1943,9 @@ void TransactionManager::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.setDefault(5);
 
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TXN_LOCAL_SERVICE_ADDRESS, STRING)
+		.setDefault("");
+
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TXN_PUBLIC_SERVICE_ADDRESS, STRING)
 		.setDefault("");
 
 	CONFIG_TABLE_ADD_PARAM(config,

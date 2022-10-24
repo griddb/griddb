@@ -617,7 +617,7 @@ private:
 	bool checkArgIsTable(
 			const Expr &hintExpr, size_t pos) const;
 
-	bool checkLeadingTreeArgmentsType(const Expr &expr) const;
+	bool checkLeadingTreeArgumentsType(const Expr &expr) const;
 
 	util::StackAllocator &alloc_;
 	HintExprMap hintExprMap_;
@@ -726,6 +726,8 @@ public:
 	bool isMetaDataQuery();
 
 	void setExplainType(SyntaxTree::ExplainType explainType);
+
+	void setQueryStartTime(int64_t currentTime);
 
 	void setPlanSizeLimitRatio(size_t ratio);
 	void setIndexScanEnabled(bool enabled);
@@ -871,11 +873,12 @@ private:
 	void setTargetTableInfo(const char *tableName, bool isCaseSensitive,
 			const SQLTableInfo &tableInfo, SQLPreparedPlan::Node &node);
 
-	size_t validateWindowFunctionOccurence(
+	size_t validateWindowFunctionOccurrence(
 			const Select &select,
 			size_t &genuineWindowExprCount, size_t &pseudoWindowExprCount);
 	bool findWindowExpr(const ExprList &exprList, bool resolved, const Expr* &foundExpr);
 	bool findWindowExpr(const Expr &expr, bool resolved, const Expr* &foundExpr);
+	bool isRankingWindowExpr(const Expr &expr);
 
 	uint32_t calcFunctionCategory(const Expr &expr, bool resolved);
 
@@ -887,7 +890,6 @@ private:
 			size_t &aggrCount);
 
 	void checkNestedAggrWindowExpr(const ExprList &exprList, bool resolved);
-
 	void genFrom(const Select &select, const Expr* &whereExpr, Plan &plan);
 
 	void genWhere(GenRAContext &cxt, Plan &plan);
@@ -955,7 +957,6 @@ private:
 	void trimExprList(size_t len, PlanExprList &list);
 	void hideSelectListName(GenRAContext &cxt, SQLPreparedPlan::Node &inputNode, Plan &plan);
 	void restoreSelectListName(GenRAContext &cxt, PlanExprList &restoreList, Plan &plan);
-
 	void genOrderBy(GenRAContext &cxt, ExprRef &innerTopExprRef, Plan &plan);
 	void genLimitOffset(
 			const Expr *limitExpr, const Expr *offsetExpr, Plan &plan);
@@ -1110,7 +1111,6 @@ private:
 	void betweenToAndTree(const Plan &plan, Expr &expr, Mode mode);
 
 	void splitAggrWindowExprList(GenRAContext &cxt, const ExprList &inExprList, const Plan &plan);
-
 	Expr genReplacedAggrExpr(const Plan &plan, const Expr *inExpr);
 
 	bool splitSubqueryCond(
@@ -1798,6 +1798,7 @@ private:
 	const char* inputSql_;
 	uint32_t subqueryLevel_; 
 	SyntaxTree::ExplainType explainType_;
+	util::DateTime queryStartTime_;
 
 	size_t planSizeLimitRatio_;
 	uint64_t generatedScanCount_;
@@ -2751,10 +2752,8 @@ public:
 	static bool isConstEvaluable(Type exprType);
 	static bool isInternalFunction(Type exprType);
 	static bool isExperimentalFunction(Type exprType);
-
 	static bool isWindowExprType(
 			Type type, bool &windowOnly, bool &pseudoWindow);
-
 
 	static ColumnType getResultType(
 			Type exprType, size_t index, AggregationPhase phase,

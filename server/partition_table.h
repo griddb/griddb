@@ -22,7 +22,6 @@
 #ifndef PARTITION_TABLE_H_
 #define PARTITION_TABLE_H_
 
-
 #include "util/type.h"
 #include "util/container.h"
 #include "util/net.h"
@@ -30,20 +29,23 @@
 #include "data_type.h"
 #include "config_table.h"
 class ClusterManager;
-
+#include <unordered_set>
 #include "msgpack_utils.h"
 class ConfigTable;
-
+class PartitionTable;
+class EventEngine;
 
 typedef int32_t NodeId;
+typedef std::string RackZoneIdString;
+typedef int32_t RackZoneId;
+const int32_t UNDEF_SSL_PORT = -1;
+const int32_t UNDEF_RACKZONEID = -1;
 
 const int32_t UNDEF_NODEID = -1;
 const int64_t UNDEF_TTL = 0;
 const int64_t NOT_UNDEF_TTL = 1;
 const NodeId SELF_NODEID = 0;
 
-class SubPartitionTable;
-class SubPartition;
 struct AddressInfo;
 typedef std::vector<AddressInfo> AddressInfoList;
 
@@ -74,10 +76,8 @@ struct NodeAddress {
 
 	bool operator==(const NodeAddress& nodeAddress) const {
 		return (
-			memcmp(
-				&address_, &(nodeAddress.address_),
-				sizeof(address_)) == 0 &&
-			port_ == nodeAddress.port_);
+			memcmp(&address_, &(nodeAddress.address_),
+				sizeof(address_)) == 0 && port_ == nodeAddress.port_);
 	}
 
 	bool operator < (const NodeAddress& nodeAddress) const {
@@ -87,9 +87,7 @@ struct NodeAddress {
 		else if (port_ > nodeAddress.port_) {
 			return false;
 		}
-		return (memcmp(
-			&address_, &(nodeAddress.address_),
-			sizeof(address_)) < 0);
+		return (memcmp(&address_, &(nodeAddress.address_), sizeof(address_)) < 0);
 	}
 
 	NodeAddress& operator=(const NodeAddress& nodeAddress) {
@@ -128,11 +126,8 @@ struct NodeAddress {
 struct AddressInfo {
 
 	AddressInfo() : isActive_(false) {}
-	AddressInfo(NodeAddress& clusterAddress,
-		NodeAddress& txnAddress,
-		NodeAddress& syncAddress,
-		NodeAddress& systemAddress,
-		NodeAddress& sqlAddress) :
+	AddressInfo(NodeAddress& clusterAddress, NodeAddress& txnAddress,
+		NodeAddress& syncAddress, NodeAddress& systemAddress, NodeAddress& sqlAddress) :
 		clusterAddress_(clusterAddress),
 		transactionAddress_(txnAddress),
 		syncAddress_(syncAddress),
@@ -141,38 +136,20 @@ struct AddressInfo {
 		isActive_(false) {}
 
 	NodeAddress& getNodeAddress(ServiceType type);
-	void setNodeAddress(
-		ServiceType type, NodeAddress& address);
+	void setNodeAddress(ServiceType type, NodeAddress& address);
 
 	bool operator<(const AddressInfo& right) const {
-		if (clusterAddress_.address_
-			< right.clusterAddress_.address_) {
+		if (clusterAddress_.address_ < right.clusterAddress_.address_) {
 			return true;
 		}
-		if (clusterAddress_.address_
-			> right.clusterAddress_.address_) {
+		if (clusterAddress_.address_ > right.clusterAddress_.address_) {
 			return false;
 		}
-		return (clusterAddress_.port_
-			< right.clusterAddress_.port_);
-	}
-
-	std::string dump() {
-		util::NormalOStringStream ss;
-		ss << "NodeAddress:{"
-			<< "cluster={" << clusterAddress_.dump() << "}, "
-			<< "sync={" << syncAddress_.dump() << "}, "
-			<< "transaction={" << transactionAddress_.dump() << "}, "
-			<< "system={" << systemAddress_.dump() << "}, "
-			<< "sql={" << sqlAddress_.dump() << "},"
-			<< "isActive={" << isActive_ << "}"
-			<< "}";
-		return ss.str();
+		return (clusterAddress_.port_ < right.clusterAddress_.port_);
 	}
 
 	bool isValid() {
-		return (transactionAddress_.isValid()
-			&& sqlAddress_.isValid());
+		return (transactionAddress_.isValid() && sqlAddress_.isValid());
 	}
 
 	NodeAddress clusterAddress_;
@@ -190,154 +167,85 @@ struct AddressInfo {
 
 struct PublicAddressInfoMessage {
 public:
+
 	PublicAddressInfoMessage() {}
 	PublicAddressInfoMessage(AddressInfoList& addressInfoList) :
 		addressInfoList_(addressInfoList) {
 	}
+
 	bool check() {
-		return true;
+		return (addressInfoList_.size() > 0);
 	}
+
 	AddressInfoList& getPublicNodeAddressList() {
 		return addressInfoList_;
 	}
 	MSGPACK_DEFINE(addressInfoList_);
+
 private:
 	AddressInfoList addressInfoList_;
 };
 
-static const int32_t PT_BACKUP_GAP_FACTOR = 2;
-static const int32_t PT_OWNER_LOAD_LIMIT = 2;
-static const int32_t PT_DATA_LOAD_LIMIT = 2;
-/*!
-	@brief Result of Partition statistics check
-*/
-enum CheckedPartitionSummaryStatus {
-	PT_NORMAL,
-	PT_NOT_BALANCE,
-	PT_REPLICA_LOSS,
-	PT_OWNER_LOSS,
-	PT_ABNORMAL,
-	PT_INITIAL
+/** **
+	@brief ラックゾーン通信情報
+	@note サブマスタが相手をフォローする際に、自分が保持している情報を送信
+** **/
+class RackZoneInfoList {
+
+	/** **
+		@brief ラックゾーン情報
+		@note ノードアドレスとラックゾーンID文字列のペア
+	** **/
+	class RackZoneInfo {
+		friend class RackZoneInfoList;
+		friend class PartitionTable;
+
+	public:
+		RackZoneInfo() {}
+		RackZoneInfo(NodeAddress& address, std::string& rackZoneId) :
+			address_(address), rackZoneId_(rackZoneId) {}
+
+		bool check() {
+			return true;
+		}
+		MSGPACK_DEFINE(address_, rackZoneId_);
+
+	private:
+		
+		NodeAddress address_;
+		std::string rackZoneId_;
+	};
+
+public:
+	RackZoneInfoList() {}
+
+	void add(NodeAddress& address, std::string& rackZoneId) {
+		rackZoneInfoList_.emplace_back(RackZoneInfo(address, rackZoneId));
+	}
+
+	bool check() {
+		return (rackZoneInfoList_.size() > 0);
+	}
+
+	std::vector<RackZoneInfo>& get() {
+		return rackZoneInfoList_;
+	}
+
+	MSGPACK_DEFINE(rackZoneInfoList_);
+
+private:
+	std::vector<RackZoneInfo> rackZoneInfoList_;
 };
 
-static const int32_t PT_ERROR_NORMAL = 0;
-static const int32_t PT_OTHER_NORMAL = 0;
-static const int32_t PT_ERROR_LONG_SYNC_FAIL = -2;
-static const int32_t PT_ERROR_SHORT_SYNC_FAIL = -1;
-
-struct LoadSummary {
-	LoadSummary(util::StackAllocator& alloc, int32_t nodeLimit)
-		: ownerLoadList_(alloc),
-		dataLoadList_(alloc),
-		liveNodeList_(alloc),
-		ownerLimit_(PT_OWNER_LOAD_LIMIT),
-		dataLimit_(PT_DATA_LOAD_LIMIT),
-		status_(PT_INITIAL),
-		nodeNum_(0),
-		ownerLoadCount_(0),
-		dataLoadCount_(0) {
-		ownerLoadList_.assign(static_cast<size_t>(nodeLimit), 0);
-		dataLoadList_.assign(static_cast<size_t>(nodeLimit), 0);
-		liveNodeList_.assign(static_cast<size_t>(nodeLimit), 0);
-	}
-
-	void init(int32_t nodeNum) {
-		std::fill(
-			ownerLoadList_.begin(), ownerLoadList_.begin() + nodeNum, 0);
-		std::fill(
-			dataLoadList_.begin(), dataLoadList_.begin() + nodeNum, 0);
-		minOwnerLoad_ = UINT32_MAX;
-		maxOwnerLoad_ = 0;
-		minDataLoad_ = UINT32_MAX;
-		maxDataLoad_ = 0;
-		nodeNum_ = nodeNum;
-		ownerLoadCount_ = 0;
-		dataLoadCount_ = 0;
-	}
-
-	void add(NodeId nodeId, bool isOwner = true) {
-		if (isOwner) {
-			ownerLoadList_[nodeId]++;
-		}
-		else {
-			dataLoadList_[nodeId]++;
-		}
-	}
-
-	void setAlive(NodeId nodeId, uint8_t isAlive) {
-		liveNodeList_[nodeId] = isAlive;
-	}
-
-	void update() {
-		for (NodeId nodeId = 0; nodeId < nodeNum_; nodeId++) {
-			if (liveNodeList_[nodeId]) {
-				uint32_t currentOwnerLoad = ownerLoadList_[nodeId];
-				uint32_t currentDataLoad = dataLoadList_[nodeId];
-				if (currentOwnerLoad < minOwnerLoad_)
-					minOwnerLoad_ = ownerLoadList_[nodeId];
-				if (currentOwnerLoad > maxOwnerLoad_)
-					maxOwnerLoad_ = ownerLoadList_[nodeId];
-				if (currentDataLoad < minDataLoad_)
-					minDataLoad_ = dataLoadList_[nodeId];
-				if (currentDataLoad > maxDataLoad_)
-					maxDataLoad_ = dataLoadList_[nodeId];
-				ownerLoadCount_ += currentOwnerLoad;
-				dataLoadCount_ += currentDataLoad;
-			}
-		}
-	}
-
-	bool isBalance(bool isOwner, int32_t checkCount) {
-		if (isOwner) {
-			return (checkCount <= ownerLoadCount_ &&
-				maxOwnerLoad_ - minOwnerLoad_ <= ownerLimit_);
-		}
-		else {
-			return (checkCount <= dataLoadCount_ &&
-				maxDataLoad_ - minDataLoad_ <= dataLimit_);
-		}
-	}
-
-	std::string dump() {
-		util::NormalOStringStream ss;
-		int32_t i = 0;
-		ss << "{ownerLoad:[";
-		for (i = 0; i < nodeNum_; i++) {
-			ss << ownerLoadList_[i];
-			if (i != nodeNum_ - 1) {
-				ss << ",";
-			}
-		}
-		ss << "], dataLoad:[";
-		for (i = 0; i < nodeNum_; i++) {
-			ss << dataLoadList_[i];
-			if (i != nodeNum_ - 1) {
-				ss << ",";
-			}
-		}
-		ss << "], ownerLoadCount:" << ownerLoadCount_
-			<< ", dataLoadCount:" << dataLoadCount_ << "}";
-		return ss.str();
-	}
-
-	uint32_t minOwnerLoad_;
-	uint32_t maxOwnerLoad_;
-	uint32_t minDataLoad_;
-	uint32_t maxDataLoad_;
-	util::XArray<uint32_t> ownerLoadList_;
-	util::XArray<uint32_t> dataLoadList_;
-	util::XArray<uint8_t> liveNodeList_;
-	uint32_t ownerLimit_;
-	uint32_t dataLimit_;
-	CheckedPartitionSummaryStatus status_;
-	int32_t nodeNum_;
-	int32_t ownerLoadCount_;
-	int32_t dataLoadCount_;
-};
-
-struct DropNodeSet {
-
+/** **
+	@brief パーティションドロップ情報
+	@note ノードごとにドロップ可能パーティションをまとめたもの
+** **/
+class DropNodeSet {
+public:
+	friend class DropPartitionNodeInfo;
 	DropNodeSet() : address_(0), port_(0), pos_(0), nodeId_(0) {}
+
 	void setAddress(NodeAddress& address) {
 		address_ = address.address_;
 		port_ = address.port_;
@@ -372,7 +280,12 @@ struct DropNodeSet {
 	std::vector<PartitionRevisionNo> revisionList_;
 };
 
+/** **
+	@brief パーティションドロップ通信情報
+	@note マスタが定期的にチェックして発行
+** **/
 class  DropPartitionNodeInfo {
+
 public:
 
 	DropPartitionNodeInfo(util::StackAllocator& alloc) :
@@ -380,12 +293,10 @@ public:
 
 	void set(PartitionId pId, NodeAddress& address,
 		PartitionRevisionNo revision, NodeId nodeId) {
-		util::Map<NodeAddress, DropNodeSet>::iterator
-			it = tmpDropNodeMap_.find(address);
+		util::Map<NodeAddress, DropNodeSet>::iterator it = tmpDropNodeMap_.find(address);
 		if (it != tmpDropNodeMap_.end()) {
 			(*it).second.append(pId, revision);
-			if (static_cast<size_t>((*it).second.pos_)
-				>= dropNodeMap_.size()) return;
+			if (static_cast<size_t>((*it).second.pos_) >= dropNodeMap_.size()) return;
 			dropNodeMap_[(*it).second.pos_].append(pId, revision);
 		}
 		else {
@@ -394,14 +305,13 @@ public:
 			target.append(pId, revision);
 			target.pos_ = static_cast<int32_t>(dropNodeMap_.size());
 			target.nodeId_ = nodeId;
-			dropNodeMap_.push_back(target);
-			tmpDropNodeMap_.insert(std::make_pair(address, target));
+			dropNodeMap_.emplace_back(target);
+			tmpDropNodeMap_.emplace(address, target);
 		}
 	}
 
 	void init() {
-		for (size_t pos = 0;
-			pos < dropNodeMap_.size(); pos++) {
+		for (size_t pos = 0; pos < dropNodeMap_.size(); pos++) {
 			dropNodeMap_[pos].init();
 		}
 	}
@@ -418,21 +328,23 @@ public:
 	}
 
 	bool check() {
-		return true;
+		return (dropNodeMap_.size() > 0);
 	}
 	std::string dump();
 
 	MSGPACK_DEFINE(dropNodeMap_);
 
 private:
+
 	util::StackAllocator& alloc_;
 	util::Map<NodeAddress, DropNodeSet> tmpDropNodeMap_;
 	std::vector<DropNodeSet> dropNodeMap_;
 };
 
-/*!
-	@brief Represents the table of partitions
-*/
+/** **
+	@brief パーティションテーブル
+	@note パーティション操作およびノード情報を含むクラスタ情報の一部を管理
+** **/
 class PartitionTable {
 
 	struct NodeInfo;
@@ -441,6 +353,21 @@ class PartitionTable {
 	friend struct ScenarioCondition;
 
 public:
+	class SubPartition;
+
+	enum CheckedPartitionSummaryStatus {
+		PT_NORMAL,
+		PT_NOT_BALANCE,
+		PT_REPLICA_LOSS,
+		PT_OWNER_LOSS,
+		PT_ABNORMAL,
+		PT_INITIAL
+	};
+	static const int32_t PT_ERROR_NORMAL = 0;
+	static const int32_t PT_OTHER_NORMAL = 0;
+	static const int32_t PT_ERROR_LONG_SYNC_FAIL = -2;
+	static const int32_t PT_ERROR_SHORT_SYNC_FAIL = -1;
+
 	static const int32_t MAX_NODE_NUM = 1000;
 
 	static const int32_t PARTITION_RULE_UNDEF = -1;
@@ -448,6 +375,19 @@ public:
 	static const int32_t PARTITION_RULE_ADD = 2;
 	static const int32_t PARTITION_RULE_REMOVE = 3;
 	static const int32_t PARTITION_RULE_SWAP = 4;
+
+	static const int32_t RACKZONE_ID_STRING_MAX = 64;
+
+	template<class X, class Y>
+	static void arrayShuffle(X& ary, util::Random& random) {
+		int32_t size = static_cast<int32_t>(ary.size());
+		for (int32_t i = 0;i < size; i++) {
+			int32_t j = random.nextInt32(size);
+			Y t = ary[i];
+			ary[i] = ary[j];
+			ary[j] = t;
+		}
+	}
 
 	/*!
 		@brief Target queue type of change
@@ -497,39 +437,35 @@ public:
 	/*!
 		@brief Represents the revision of each address
 	*/
-	struct PartitionRevision {
+	/** **
+		@brief パーティションリビジョン
+		@note ハートビートごとに内部カウンタをインクリメント
+	** **/
+	class PartitionRevision {
+
+	public:
+		friend class PartitionRevisionMesage;
+
 		static const PartitionRevisionNo INITIAL_CLUSTER_REVISION = 1;
 
-		PartitionRevision()
-			: addr_(0), port_(0),
-			sequentialNumber_(INITIAL_CLUSTER_REVISION) {}
-		PartitionRevision(
-			AddressType addr, uint16_t port,
-			int32_t sequentialNumber)
-			: addr_(addr), port_(port),
-			sequentialNumber_(sequentialNumber) {
-			addr_ = addr;
-			port_ = port;
-			sequentialNumber_ = sequentialNumber;
-		}
+		PartitionRevision() : addr_(0), port_(0), sequentialNumber_(INITIAL_CLUSTER_REVISION) {}
+		PartitionRevision(AddressType addr, uint16_t port, int32_t sequentialNumber) :
+			addr_(addr), port_(port), sequentialNumber_(sequentialNumber) {}
 
 		void set(AddressType addr, uint16_t port) {
 			addr_ = addr;
 			port_ = port;
 		}
+
 		~PartitionRevision() {}
 
-		bool operator==(
-			const PartitionRevision& rev) const {
-			return (memcmp(&addr_,
-				&(rev.addr_), sizeof(addr_)) == 0 &&
-				port_ == rev.port_ &&
-				sequentialNumber_ == rev.sequentialNumber_);
+		bool operator==(const PartitionRevision& rev) const {
+			return (memcmp(&addr_, &(rev.addr_), sizeof(addr_)) == 0 &&
+				port_ == rev.port_ && sequentialNumber_ == rev.sequentialNumber_);
 		}
 
 		bool operator!=(const PartitionRevision& rev) const {
-			int32_t addrDiff = memcmp(
-				&addr_, &(rev.addr_), sizeof(addr_));
+			int32_t addrDiff = memcmp(&addr_, &(rev.addr_), sizeof(addr_));
 			int32_t portDiff = port_ - rev.port_;
 			if (addrDiff == 0 && portDiff == 0) {
 				return sequentialNumber_ != rev.sequentialNumber_;
@@ -543,14 +479,20 @@ public:
 			return sequentialNumber_ > rev.sequentialNumber_;
 		}
 
-		void updateRevision(
-			PartitionRevisionNo sequentialNumber) {
+		PartitionRevisionNo getRevisionNo() {
+			return sequentialNumber_;
+		}
+
+		void increment() {
+			sequentialNumber_++;
+		}
+
+		void updateRevision(PartitionRevisionNo sequentialNumber) {
 			sequentialNumber_ = sequentialNumber;
 		}
 
 		bool isInitialRevision() const {
-			return (sequentialNumber_
-				== INITIAL_CLUSTER_REVISION);
+			return (sequentialNumber_ == INITIAL_CLUSTER_REVISION);
 		}
 
 		std::string toString(bool isDetail = false) const {
@@ -566,14 +508,16 @@ public:
 
 		MSGPACK_DEFINE(addr_, port_, sequentialNumber_);
 
+	private:
 		AddressType addr_;
 		uint16_t port_;
 		PartitionRevisionNo sequentialNumber_;
 	};
 
-	/*!
-		@brief Represents role of each partition
-	*/
+	/** **
+		@brief パーティションロール
+		@note ロールおよび対応するアドレスを管理するが、アドレスはノード間通信の際にのみセットする
+	** **/
 	class PartitionRole {
 	public:
 
@@ -581,14 +525,9 @@ public:
 			init(UNDEF_PARTITIONID);
 		}
 
-		PartitionRole(
-			PartitionId pId, PartitionRevision revision, TableType type) :
-			pId_(pId),
-			revision_(revision),
-			type_(type),
-			ownerNodeId_(UNDEF_NODEID),
-			isSelfBackup_(false),
-			isSelfCatchup_(false) {}
+		PartitionRole(PartitionId pId, PartitionRevision revision, TableType type) :
+			pId_(pId), revision_(revision), type_(type), ownerNodeId_(UNDEF_NODEID),
+			isSelfBackup_(false), isSelfCatchup_(false) {}
 
 		void init(PartitionId pId, TableType type = PT_CURRENT_OB) {
 			pId_ = pId;
@@ -607,23 +546,23 @@ public:
 		}
 
 		PartitionRevisionNo getRevisionNo() {
-			return revision_.sequentialNumber_;
+			return revision_.getRevisionNo();
+		}
+
+		void swapRole(NodeId backupNodeId) {
+			if (backupNodeId == ownerNodeId_) return;
+			backups_.erase(std::remove(backups_.begin(), backups_.end(), backupNodeId));
+			backups_.push_back(ownerNodeId_);
+			ownerNodeId_ = backupNodeId;
+			checkBackup();
 		}
 
 		void getBackups(util::XArray<NodeId>& backups) {
-			size_t size = backups_.size() * sizeof(NodeId);
-			if (size == 0) return;
-			backups.resize(size / sizeof(NodeId));
-			memcpy(backups.data(),
-				reinterpret_cast<uint8_t*>(&backups_[0]), size);
+			getRoles(true, backups);
 		}
 
 		void getCatchups(util::XArray<NodeId>& catchups) {
-			size_t size = catchups_.size() * sizeof(NodeId);
-			if (size == 0) return;
-			catchups.resize(size / sizeof(NodeId));
-			memcpy(catchups.data(),
-				reinterpret_cast<uint8_t*>(&catchups_[0]), size);
+			getRoles(false, catchups);
 		}
 
 		void clearBackup() {
@@ -650,14 +589,14 @@ public:
 			return static_cast<int32_t>(backups_.size());
 		}
 
+		int32_t getRoledSize() {
+			return ((ownerNodeId_ == UNDEF_NODEID) ? 0 : 1) + static_cast<int32_t>(backups_.size());
+		}
+
 		void clear() {
 			ownerNodeId_ = UNDEF_NODEID;
-			backups_.clear();
-			catchups_.clear();
-			backupAddressList_.clear();
-			catchupAddressList_.clear();
-			isSelfBackup_ = false;
-			isSelfCatchup_ = false;
+			clearBackup();
+			clearCatchup();
 		}
 
 		bool isOwnerOrBackup(NodeId nodeId = 0) {
@@ -668,8 +607,7 @@ public:
 			return ownerNodeId_;
 		}
 
-		void set(
-			NodeId owner, NodeIdList& backups, NodeIdList& catchups) {
+		void set(NodeId owner, NodeIdList& backups, NodeIdList& catchups) {
 			ownerNodeId_ = owner;
 			backups_ = backups;
 			catchups_ = catchups;
@@ -694,33 +632,19 @@ public:
 		}
 
 		bool isBackup(NodeId targetNodeId = 0) {
-			if (backups_.size() == 0) return false;
-			if (targetNodeId == 0) {
-				return isSelfBackup_;
-			}
-			NodeIdList::iterator it;
-			it = std::find(backups_.begin(), backups_.end(), targetNodeId);
-			if (it != backups_.end()) {
-				return true;
-			}
-			else {
-				return false;
-			}
+			return isRole(true, targetNodeId);
 		}
 
 		bool isCatchup(NodeId targetNodeId = 0) {
-			if (catchups_.size() == 0) return false;
-			if (targetNodeId == 0) {
-				return isSelfCatchup_;
-			}
-			NodeIdList::iterator it;
-			it = std::find(catchups_.begin(), catchups_.end(), targetNodeId);
-			if (it != catchups_.end()) {
-				return true;
-			}
-			else {
-				return false;
-			}
+			return isRole(false, targetNodeId);
+		}
+
+		void checkBackup() {
+			checkRole(true);
+		}
+
+		void checkCatchup() {
+			checkRole(false);
 		}
 
 		void promoteCatchup() {
@@ -755,31 +679,24 @@ public:
 
 		void encodeAddress(PartitionTable* pt, PartitionRole& role);
 
-		void get(
-			NodeAddress& nodeAddress,
-			std::vector<NodeAddress>& backupAddress) {
+		void get(NodeAddress& nodeAddress, std::vector<NodeAddress>& backupAddress) {
 			nodeAddress = ownerAddress_;
 			backupAddress = backupAddressList_;
 		}
 
-		void get(
-			NodeAddress& nodeAddress,
-			std::vector<NodeAddress>& backupAddress,
+		void get(NodeAddress& nodeAddress, std::vector<NodeAddress>& backupAddress,
 			std::vector<NodeAddress>& catchupAddress) {
 			nodeAddress = ownerAddress_;
 			backupAddress = backupAddressList_;
 			catchupAddress = catchupAddressList_;
 		}
 
-		void getShortTermSyncTargetNodeId(
-			util::Set<NodeId>& targetNodeSet) {
-			if (ownerNodeId_ != UNDEF_NODEID
-				&& ownerNodeId_ > 0) {
+		void getShortTermSyncTargetNodeId(util::Set<NodeId>& targetNodeSet) {
+			if (ownerNodeId_ != UNDEF_NODEID && ownerNodeId_ > 0) {
 				targetNodeSet.insert(ownerNodeId_);
 			}
 			for (size_t pos = 0; pos < backups_.size(); pos++) {
-				if (backups_[pos] != UNDEF_NODEID
-					&& backups_[pos] > 0) {
+				if (backups_[pos] != UNDEF_NODEID && backups_[pos] > 0) {
 					targetNodeSet.insert(backups_[pos]);
 				}
 			}
@@ -818,44 +735,57 @@ public:
 
 		std::string dump();
 		std::string dumpIds();
-		std::string dump(PartitionTable* pt,
-			ServiceType type = CLUSTER_SERVICE);
+		std::string dump(PartitionTable* pt, ServiceType type = CLUSTER_SERVICE);
 
-		MSGPACK_DEFINE(
-			pId_, ownerAddress_,
+		MSGPACK_DEFINE(pId_, ownerAddress_,
 			backupAddressList_, catchupAddressList_, revision_);
 
-		void checkBackup() {
-			if (backups_.size() > 0) {
-				std::sort(backups_.begin(), backups_.end());
-				if (backups_[0] == 0) {
-					isSelfBackup_ = true;
-				}
-				else {
-					isSelfBackup_ = false;
-				}
-			}
-			else {
-				isSelfBackup_ = false;
-			}
-		}
-
-		void checkCatchup() {
-			if (catchups_.size() > 0) {
-				std::sort(catchups_.begin(), catchups_.end());
-				if (catchups_[0] == 0) {
-					isSelfCatchup_ = true;
-				}
-				else {
-					isSelfCatchup_ = false;
-				}
-			}
-			else {
-				isSelfCatchup_ = false;
-			}
-		}
 	private:
 
+		void getRoles(bool isBackup, util::XArray<NodeId>& backups) {
+			NodeIdList& roles = isBackup ? backups_ : catchups_;
+			size_t size = roles.size();
+			if (size == 0) return;
+			backups.resize(size);
+			memcpy(backups.data(), reinterpret_cast<uint8_t*>(&roles[0]), size * sizeof(NodeId));
+		}
+
+		bool isRole(bool isBackup, NodeId targetNodeId = 0) {
+			NodeIdList& roles = isBackup ? backups_ : catchups_;
+			bool& isSelf = isBackup ? isSelfBackup_ : isSelfCatchup_;
+
+			if (roles.size() == 0) return false;
+			if (targetNodeId == 0) {
+				return isSelf;
+			}
+			NodeIdList::iterator it;
+			it = std::find(roles.begin(), roles.end(), targetNodeId);
+			if (it != roles.end()) {
+				return true;
+			}
+			else {
+				return false;
+			}
+		}
+
+		void checkRole(bool isBackup) {
+			NodeIdList& roles = isBackup ? backups_ : catchups_;
+			bool& isSelf = isBackup ? isSelfBackup_ : isSelfCatchup_;
+			if (roles.size() > 0) {
+				std::sort(roles.begin(), roles.end());
+				if (roles[0] == 0) {
+					isSelf = true;
+				}
+				else {
+					isSelf = false;
+				}
+			}
+			else {
+				isSelf = false;
+			}
+		}
+
+		void clearAddressList(PartitionTable* pt, PartitionRole& role, bool isBackup);
 		PartitionId pId_;
 		PartitionRevision revision_;
 		NodeAddress ownerAddress_;
@@ -869,16 +799,185 @@ public:
 		bool isSelfCatchup_;
 	};
 
-	/*!
-		@brief Encodes context of Partition
-	*/
+	/** **
+		@brief サブパーティション
+		@note パーティション単位でロールを切り出したもの
+	** **/
+	class SubPartition {
+	public:
+		SubPartition() : pId_(UNDEF_PARTITIONID), currentOwnerId_(UNDEF_NODEID) {}
+		SubPartition(PartitionId pId, PartitionRole& role, NodeAddress& currentOwner) :
+			pId_(pId), role_(role), currentOwner_(currentOwner), currentOwnerId_(UNDEF_NODEID) {};
+
+		MSGPACK_DEFINE(pId_, role_, currentOwner_);
+
+		std::string dump(PartitionTable* pt = NULL) {
+			util::NormalOStringStream ss;
+			ss << "Partition:{" << "pId=" << pId_;
+			if (pt == NULL) {
+				ss << ", role:" << role_.dump();
+			}
+			else {
+				ss << ", role:" << role_.dump(pt);
+			}
+			ss << ", current owner:" << currentOwner_.toString() << "}";
+			return ss.str();
+		}
+
+		PartitionId pId_;
+		PartitionRole role_;
+		NodeAddress currentOwner_;
+		NodeId currentOwnerId_;
+	};
+
+	/** **
+		@brief サブパーティションテーブル
+		@note ノード間通信、パーティション部分情報切り出しのため
+	** **/
+	class SubPartitionTable {
+	public:
+		SubPartitionTable() : partitionNum_(1) {}
+
+		int32_t size() {
+			return static_cast<int32_t>(subPartitionList_.size());
+		}
+
+		SubPartition& getSubPartition(int32_t pos) {
+			return subPartitionList_[pos];
+		}
+
+		void init(PartitionTable* pt, EventEngine* ee);
+
+		void prepareMap(util::Map<PartitionId, PartitionRole*>& roleMap) {
+			for (size_t pos = 0; pos < subPartitionList_.size(); pos++) {
+				roleMap[subPartitionList_[pos].pId_] = &subPartitionList_[pos].role_;
+			}
+		}
+
+		void set(PartitionTable* pt, PartitionId pId, PartitionRole& role, NodeAddress& ownerAddress) {
+			SubPartition subPartition(pId, role, ownerAddress);
+			PartitionRole& tmpRole = subPartition.role_;
+			tmpRole.encodeAddress(pt, role);
+			subPartitionList_.push_back(subPartition);
+		}
+
+		void set(PartitionTable* pt, PartitionId pId, PartitionRole& role,
+			NodeId ownerNodeId = UNDEF_NODEID);
+
+		void setNodeAddress(AddressInfo& addressInfo) {
+			nodeAddressList_.push_back(addressInfo);
+		}
+
+		AddressInfoList& getNodeAddressList() {
+			return nodeAddressList_;
+		}
+
+		void setPublicNodeAddressList(AddressInfoList& publicNodeAddressList) {
+			publicNodeAddressList_ = publicNodeAddressList;
+		}
+
+		AddressInfoList& getPublicNodeAddressList() {
+			return publicNodeAddressList_;
+		}
+
+		void set(PartitionTable* pt) {
+			for (PartitionId pId = 0; pId < pt->getPartitionNum(); pId++) {
+				PartitionRole tmpRole;
+				pt->getPartitionRole(pId, tmpRole);
+				set(pt, pId, tmpRole);
+			}
+		}
+
+		bool check() {
+			return true;
+		}
+
+		PartitionRevision& getRevision() {
+			return revision_;
+		}
+
+		void clear() {
+			subPartitionList_.clear();
+		}
+
+		void setRevision(PartitionRevision& revision) {
+			revision_ = revision;
+		}
+
+		MSGPACK_DEFINE(subPartitionList_, nodeAddressList_, revision_);
+
+		std::string dump(bool isTrace = true) {
+			util::NormalOStringStream ss;
+			ss << "NextPartitionTable:{";
+			ss << "revision=" << revision_.getRevisionNo();
+			ss << ", [";
+			if (!isTrace) {
+				ss << std::endl;
+			}
+			for (size_t pos = 0; pos < subPartitionList_.size(); pos++) {
+				ss << subPartitionList_[pos].dump();
+				if (!isTrace) {
+					ss << std::endl;
+				}
+				if (pos != subPartitionList_.size() - 1) {
+					ss << ",";
+				}
+			}
+			ss << "]}";
+			return ss.str();
+		}
+	private:
+		std::vector<SubPartition> subPartitionList_;
+		AddressInfoList nodeAddressList_;
+		PartitionRevision revision_;
+		uint32_t partitionNum_;
+		AddressInfoList publicNodeAddressList_;
+	};
+
+	struct NodesStat {
+		NodesStat(util::StackAllocator& alloc) : ownerCountList_(alloc), dataCountList_(alloc),
+			ownerRackZoneCountList_(alloc), dataRackZoneCountList_(alloc),
+			nodeRackZoneCountList_(alloc), rackZoneIdList_(alloc) {}
+
+		static const int32_t AVERAGE = 0;
+		static const int32_t VARIANCE = 1;
+		static const int32_t STANDARD_DEVIATION  = 2;
+		static const int32_t TYPE_MAX = 3;
+
+		static const int32_t OWNER_COUNT = 0;
+		static const int32_t DATA_COUNT = 1;
+		static const int32_t OWNER_RACKZONE_COUNT = 2;
+		static const int32_t DATA_RACKZONE_COUNT = 3;
+		static const int32_t RACKZONE_NODE_COUNT = 4;
+		static const int32_t RACKZONE_ID_LIST = 5;
+		static const int32_t TARGET_MAX = 6;
+
+		void dumpHeader(util::NormalOStringStream &oss, int32_t type, int32_t target);
+
+		void dumpTypeName(util::NormalOStringStream& oss, int32_t type);
+		void dumpTargetName(util::NormalOStringStream& oss, int32_t target);
+		util::Vector<int32_t>& getTargetList(int32_t target);
+		double calc(int32_t statType, int32_t target);
+		void filter(util::Vector<int32_t> &tmpList, int32_t type);
+		bool check(util::StackAllocator& alloc, double ratio);
+		std::string dump();
+
+		util::Vector<int32_t> ownerCountList_;
+		util::Vector<int32_t> dataCountList_;
+		util::Vector<int32_t> ownerRackZoneCountList_;
+		util::Vector<int32_t> dataRackZoneCountList_;
+		util::Vector<int32_t> nodeRackZoneCountList_;
+		util::Vector<RackZoneId> rackZoneIdList_;
+	};
+
+	/** **
+		@brief パーティションコンテキスト
+		@note パーティション操作に必要な情報群
+	** **/
 	struct PartitionContext {
 
-		PartitionContext(
-			util::StackAllocator& eventStackAlloc,
-			PartitionTable* pt,
-			bool& needUpdatePartition,
-			SubPartitionTable& subPartitionTable,
+		PartitionContext(util::StackAllocator& eventStackAlloc, PartitionTable* pt,
+			bool& needUpdatePartition, SubPartitionTable& subPartitionTable,
 			DropPartitionNodeInfo& dropNodeInfo) :
 			eventStackAlloc_(&eventStackAlloc),
 			needUpdatePartition_(needUpdatePartition),
@@ -931,32 +1030,27 @@ public:
 		int32_t backupNum_;
 	};
 
-
-	PartitionTable(const ConfigTable& configTable);
-
-	~PartitionTable();
-
-	struct GoalPartition {
-
-		GoalPartition() : partitionNum_(1) {
-		}
+	/** **
+		@brief ゴールパーティション管理クラス
+		@note ロール集合の管理。排他必要
+	** **/
+	class GoalPartition {
+	public:
+		GoalPartition() : partitionNum_(1) {}
 
 		void init(PartitionTable* pt) {
 			util::LockGuard<util::Mutex> guard(lock_);
 			partitionNum_ = pt->getPartitionNum();
-			for (PartitionId pId = 0;
-				pId < pt->getPartitionNum(); pId++) {
-				PartitionRole role(
-					pId, pt->getPartitionRevision(), PT_CURRENT_OB);
+			for (PartitionId pId = 0; pId < pt->getPartitionNum(); pId++) {
+				PartitionRole role(pId, pt->getPartitionRevision(), PT_CURRENT_OB);
 				role.encodeAddress(pt, role);
 				role.checkBackup();
 				role.checkCatchup();
-				goalPartitions_.push_back(role);
+				goalPartitions_.emplace_back(role);
 			}
 		}
 
-		void set(PartitionTable* pt,
-			util::Vector<PartitionRole>& goalList) {
+		void set(PartitionTable* pt, util::Vector<PartitionRole>& goalList) {
 
 			if (goalList.size() != partitionNum_) {
 				GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
@@ -965,25 +1059,23 @@ public:
 			goalPartitions_.clear();
 			for (size_t pos = 0; pos < goalList.size(); pos++) {
 				if (goalList[pos].getPartitionId() != pos) {
-					GS_THROW_USER_ERROR(
-						GS_ERROR_PT_INTERNAL, "");
+					GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 				}
 				goalList[pos].encodeAddress(pt, goalList[pos]);
 				goalList[pos].checkBackup();
 				goalList[pos].checkCatchup();
-				goalPartitions_.push_back(goalList[pos]);
+				goalPartitions_.emplace_back(goalList[pos]);
 			}
 		}
 
 		void setPartitionRole(PartitionRole& role) {
 			util::LockGuard<util::Mutex> guard(lock_);
-			goalPartitions_.push_back(role);
+			goalPartitions_.emplace_back(role);
 		}
 
 		PartitionRole& getPartitionRole(PartitionId pId) {
 			if (pId >= partitionNum_) {
-				GS_THROW_USER_ERROR(
-					GS_ERROR_PT_INTERNAL, "");
+				GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 			}
 			util::LockGuard<util::Mutex> guard(lock_);
 			return goalPartitions_[pId];
@@ -1007,24 +1099,27 @@ public:
 
 		void copy(util::Vector<PartitionRole>& roleList) {
 			util::LockGuard<util::Mutex> guard(lock_);
-			for (size_t pos = 0;
-				pos < goalPartitions_.size(); pos++) {
-				roleList.push_back(goalPartitions_[pos]);
+			for (size_t pos = 0; pos < goalPartitions_.size(); pos++) {
+				roleList.emplace_back(goalPartitions_[pos]);
 			}
 		}
 
-		std::string dump();
+	private:
 		std::vector<PartitionRole> goalPartitions_;
 		uint32_t partitionNum_;
 		util::Mutex lock_;
 	};
 
+
+	PartitionTable(const ConfigTable& configTable);
+
+	~PartitionTable();
+
 	void copyGoal(util::Vector<PartitionRole>& roleList) {
 		goal_.copy(roleList);
 	}
 
-	void setGoal(
-		PartitionTable* pt, util::Vector<PartitionRole>& goalList) {
+	void setGoal(PartitionTable* pt, util::Vector<PartitionRole>& goalList) {
 		goal_.set(pt, goalList);
 	}
 
@@ -1032,41 +1127,23 @@ public:
 		goal_.update(role);
 	}
 
-	NodeId getOwner(
-		PartitionId pId, TableType type = PT_CURRENT_OB);
+	NodeId getOwner(PartitionId pId, TableType type = PT_CURRENT_OB);
 
-	bool isOwner(
-		PartitionId pId, NodeId targetNodeDescriptor = 0,
-		TableType type = PT_CURRENT_OB);
+	bool isOwner(PartitionId pId, NodeId targetNodeDescriptor = 0, TableType type = PT_CURRENT_OB);
 
-	bool isOwnerOrBackup(
-		PartitionId pId, NodeId targetNodeDescriptor = 0,
-		TableType type = PT_CURRENT_OB);
+	bool isOwnerOrBackup(PartitionId pId, NodeId targetNodeDescriptor = 0, TableType type = PT_CURRENT_OB);
 
-	void getBackup(
-		PartitionId pId, util::XArray<NodeId>& backups,
-		TableType type = PT_CURRENT_OB);
+	void getBackup(PartitionId pId, util::XArray<NodeId>& backups, TableType type = PT_CURRENT_OB);
 
-	void getCatchup(
-		PartitionId pId, util::XArray<NodeId>& catchups,
-		TableType type = PT_CURRENT_OB);
+	void getCatchup(PartitionId pId, util::XArray<NodeId>& catchups, TableType type = PT_CURRENT_OB);
 
 	NodeId getCatchup(PartitionId pId);
 
-	bool isBackup(
-		PartitionId pId, NodeId targetNodeId = 0,
-		TableType type = PT_CURRENT_OB);
+	bool isBackup(PartitionId pId, NodeId targetNodeId = 0, TableType type = PT_CURRENT_OB);
 
-	bool isCatchup(
-		PartitionId pId, NodeId targetNodeId = 0,
-		TableType type = PT_CURRENT_OB);
+	bool isCatchup(PartitionId pId, NodeId targetNodeId = 0, TableType type = PT_CURRENT_OB);
 
-	bool hasCatchupRole(
-		PartitionId pId, TableType type = PT_CURRENT_OB);
-
-	size_t getBackupSize(
-		util::StackAllocator& alloc, PartitionId pId,
-		TableType type = PT_CURRENT_OB) {
+	size_t getBackupSize(util::StackAllocator& alloc, PartitionId pId, TableType type = PT_CURRENT_OB) {
 		util::XArray<NodeId> backups(alloc);
 		getBackup(pId, backups, type);
 		return backups.size();
@@ -1088,39 +1165,50 @@ public:
 		getNodeInfo(nodeId).sslPort_ = sslPort;
 	}
 
-	void getPublicNodeAddress(
-		AddressInfoList& addressInfoList) {
-		for (NodeId nodeId = 0;
-			nodeId < getNodeNum(); nodeId++) {
-			addressInfoList.push_back(
-				nodes_[nodeId].publicAddressInfo_);
+	void getPublicNodeAddress(AddressInfoList& addressInfoList) {
+		util::LockGuard<util::Mutex> lock(nodeInfoLock_);
+		for (NodeId nodeId = 0; nodeId < getNodeNum(); nodeId++) {
+			addressInfoList.emplace_back(nodes_[nodeId].publicAddressInfo_);
 		}
+	}
+
+	void getRackZoneInfoList(RackZoneInfoList& rackZoneInfoList);
+
+	void setRackZoneInfoList(util::StackAllocator& alloc, RackZoneInfoList& rackZoneInfoList);
+
+	void setRackZoneId(const char* rackZoneIdName, NodeId nodeId = 0);
+
+	void getRackZoneIdList(util::Vector<int32_t>& rackZoneIdList);
+
+	template<typename T>
+	void getRackZoneIdName(T& rackZoneIdName, NodeId nodeId);
+
+	bool isEnableRackZoneAwareness() {
+		return enableRackZoneAwareness_;
+	}
+
+	bool isOrgEnableRackZoneAwareness() {
+		return orgEnableRackZoneAwareness_;
 	}
 
 	void resetDownNode(NodeId targetNodeId);
 
-	bool checkConfigurationChange(
-		util::StackAllocator& alloc,
+	bool checkConfigurationChange(util::StackAllocator& alloc,
 		PartitionContext& context, bool checkFlag);
 
-	LogSequentialNumber getLSN(
-		PartitionId pId, NodeId targetNodeId = 0) {
+	LogSequentialNumber getLSN(PartitionId pId, NodeId targetNodeId = 0) {
 		if (pId >= config_.partitionNum_) {
 			GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 		}
-		util::LockGuard<util::ReadLock>
-			currentLock(partitionLockList_[pId]);
+		util::LockGuard<util::ReadLock> currentLock(partitionLockList_[pId]);
 		return currentPartitions_[pId].getLsn(targetNodeId);
 	}
 
-	LogSequentialNumber getStartLSN(
-		PartitionId pId, NodeId targetNodeId = 0) {
+	LogSequentialNumber getStartLSN(PartitionId pId, NodeId targetNodeId = 0) {
 		if (pId >= config_.partitionNum_) {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_PT_INTERNAL, "");
+			GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 		}
-		util::LockGuard<util::ReadLock>
-			currentLock(partitionLockList_[pId]);
+		util::LockGuard<util::ReadLock> currentLock(partitionLockList_[pId]);
 		return currentPartitions_[pId].getStartLsn(targetNodeId);
 	}
 
@@ -1128,55 +1216,43 @@ public:
 
 	LogSequentialNumber getMaxLsn(PartitionId pId) {
 		if (pId >= config_.partitionNum_) {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_PT_INTERNAL, "");
+			GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 		}
 		return maxLsnList_[pId];
 	}
 
-	void setMaxLsn(
-		PartitionId pId, LogSequentialNumber lsn) {
+	void setMaxLsn(PartitionId pId, LogSequentialNumber lsn) {
 		if (pId >= config_.partitionNum_) {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_PT_INTERNAL, "");
+			GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 		}
 		if (lsn > maxLsnList_[pId]) {
 			maxLsnList_[pId] = lsn;
 		}
 	}
 
-	void setRepairedMaxLsn(
-		PartitionId pId, LogSequentialNumber lsn) {
+	void setRepairedMaxLsn(PartitionId pId, LogSequentialNumber lsn) {
 		if (pId >= config_.partitionNum_) {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_PT_INTERNAL, "");
+			GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 		}
 		maxLsnList_[pId] = lsn;
 	}
 
-	bool setNodeInfo(
-		NodeId nodeId, ServiceType type, NodeAddress& address);
+	bool setNodeInfo(NodeId nodeId, ServiceType type, NodeAddress& address);
 
 	void setMaxLsnList(LsnList& maxLsnList) {
 		maxLsnList = maxLsnList_;
 	}
 
-	void changeClusterStatus(
-		ClusterStatus status,
-		NodeId masterNodeId,
-		int64_t currentTime,
-		int64_t nextHeartbeatTimeout);
+	void changeClusterStatus(ClusterStatus status, NodeId masterNodeId,
+		int64_t currentTime, int64_t nextHeartbeatTimeout);
 
 	PartitionRevisionNo getCurrentRevisionNo() {
 		return currentRevisionNo_;
 	}
 
-	void setGoalPartition(GoalPartition& goal);
 	void planNext(PartitionContext& context);
-	bool checkPeriodicDrop(
-		util::StackAllocator& alloc, DropPartitionNodeInfo& dropInfo);
+	bool checkPeriodicDrop(util::StackAllocator& alloc, DropPartitionNodeInfo& dropInfo);
 	void planGoal(PartitionContext& context);
-	bool check();
 
 	std::string dumpPartitionRule(int32_t ruleNo) {
 		switch (ruleNo) {
@@ -1192,154 +1268,96 @@ public:
 		return currentRuleNo_;
 	}
 
-	std::string dumpCurrentRule() {
-		return dumpPartitionRule(currentRuleNo_);
-	}
-
 	int64_t getRuleLimitTime() {
 		return nextApplyRuleLimitTime_;
 	}
 
 	bool isAvailable(PartitionId pId) {
 		if (pId >= config_.partitionNum_) {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_PT_INTERNAL, "");
+			GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 		}
 		return partitions_[pId].partitionInfo_.available_;
 	}
 
-	void setLSN(
-		PartitionId pId,
-		LogSequentialNumber lsn,
-		NodeId targetNodeId = 0) {
-
+	void setLSN(PartitionId pId, LogSequentialNumber lsn, NodeId targetNodeId = 0) {
 		if (pId >= config_.partitionNum_) {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_PT_INTERNAL, "");
+			GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 		}
-		util::LockGuard<util::WriteLock>
-			currentLock(partitionLockList_[pId]);
+		util::LockGuard<util::WriteLock> currentLock(partitionLockList_[pId]);
 		currentPartitions_[pId].setLsn(targetNodeId, lsn);
 	}
 
-	void setStartLSN(
-		PartitionId pId,
-		LogSequentialNumber lsn,
-		NodeId targetNodeId = 0) {
-
+	void setStartLSN(PartitionId pId, LogSequentialNumber lsn, NodeId targetNodeId = 0) {
 		if (pId >= config_.partitionNum_) {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_PT_INTERNAL, "");
+			GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 		}
-		util::LockGuard<util::WriteLock>
-			currentLock(partitionLockList_[pId]);
+		util::LockGuard<util::WriteLock> currentLock(partitionLockList_[pId]);
 		currentPartitions_[pId].setStartLsn(targetNodeId, lsn);
 	}
 
-	void setLsnWithCheck(
-		PartitionId pId,
-		LogSequentialNumber lsn,
-		NodeId targetNodeId = 0) {
-
+	void setLsnWithCheck(PartitionId pId, LogSequentialNumber lsn, NodeId targetNodeId = 0) {
 		if (pId >= config_.partitionNum_) {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_PT_INTERNAL, "");
+			GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 		}
-		util::LockGuard<util::WriteLock>
-			currentLock(partitionLockList_[pId]);
+		util::LockGuard<util::WriteLock> currentLock(partitionLockList_[pId]);
 		currentPartitions_[pId].setLsn(targetNodeId, lsn, true);
 	}
 
-	PartitionStatus getPartitionStatus(
-		PartitionId pId, NodeId targetNode = 0) {
-
+	PartitionStatus getPartitionStatus(PartitionId pId, NodeId targetNode = 0) {
 		if (pId >= config_.partitionNum_) {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_PT_INTERNAL, "");
+			GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 		}
-		util::LockGuard<util::ReadLock>
-			currentLock(partitionLockList_[pId]);
+		util::LockGuard<util::ReadLock> currentLock(partitionLockList_[pId]);
 		return currentPartitions_[pId].getPartitionStatus(targetNode);
 	}
 
-	PartitionRoleStatus getPartitionRoleStatus(
-		PartitionId pId, NodeId targetNode = 0) {
-
+	PartitionRoleStatus getPartitionRoleStatus(PartitionId pId, NodeId targetNode = 0) {
 		if (pId >= config_.partitionNum_) {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_PT_INTERNAL, "");
+			GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 		}
-		util::LockGuard<util::ReadLock>
-			currentLock(partitionLockList_[pId]);
+		util::LockGuard<util::ReadLock> currentLock(partitionLockList_[pId]);
 		return currentPartitions_[pId].getPartitionRoleStatus(targetNode);
 	}
 
-	void setPartitionStatus(
-		PartitionId pId, PartitionStatus status, NodeId targetNode = 0) {
-
+	void setPartitionStatus(PartitionId pId, PartitionStatus status, NodeId targetNode = 0) {
 		if (pId >= config_.partitionNum_) {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_PT_INTERNAL, "");
+			GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 		}
-		util::LockGuard<util::WriteLock>
-			currentLock(partitionLockList_[pId]);
+		util::LockGuard<util::WriteLock> currentLock(partitionLockList_[pId]);
 		return currentPartitions_[pId].setPartitionStatus(targetNode, status);
-	};
+	}
 
-	void setPartitionRoleStatus(
-		PartitionId pId,
-		PartitionRoleStatus status,
-		NodeId targetNode = 0) {
-
+	void setPartitionRoleStatus(PartitionId pId, PartitionRoleStatus status, NodeId targetNode = 0) {
 		if (pId >= config_.partitionNum_) {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_PT_INTERNAL, "");
+			GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 		}
-		util::LockGuard<util::WriteLock>
-			currentLock(partitionLockList_[pId]);
+		util::LockGuard<util::WriteLock> currentLock(partitionLockList_[pId]);
 		currentPartitions_[pId].setPartitionRoleStatus(targetNode, status);
 	};
 
-	void setPartitionRevision(
-		PartitionId pId,
-		PartitionRevisionNo partitionRevisuion,
-		NodeId targetNode = 0) {
-
+	void setPartitionRevision(PartitionId pId, PartitionRevisionNo partitionRevision, NodeId targetNode = 0) {
 		if (pId >= config_.partitionNum_) {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_PT_INTERNAL, "");
+			GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 		}
-		util::LockGuard<util::WriteLock>
-			currentLock(partitionLockList_[pId]);
-		currentPartitions_[pId].setPartitionRevision(
-			targetNode, partitionRevisuion);
+		util::LockGuard<util::WriteLock> currentLock(partitionLockList_[pId]);
+		currentPartitions_[pId].setPartitionRevision(targetNode, partitionRevision);
 	};
 
-	PartitionRevisionNo getPartitionRevision(
-		PartitionId pId, NodeId targetNode) {
-
+	PartitionRevisionNo getPartitionRevision(PartitionId pId, NodeId targetNode) {
 		if (pId >= config_.partitionNum_) {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_PT_INTERNAL, "");
+			GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 		}
-		util::LockGuard<util::ReadLock>
-			currentLock(partitionLockList_[pId]);
+		util::LockGuard<util::ReadLock> currentLock(partitionLockList_[pId]);
 		return currentPartitions_[pId].getPartitionRevision(targetNode);
 	}
 
-	void getPartitionRole(
-		PartitionId pId,
-		PartitionRole& role,
-		TableType type = PT_CURRENT_OB) {
-
+	void getPartitionRole(PartitionId pId, PartitionRole& role, TableType type = PT_CURRENT_OB) {
 		if (pId >= config_.partitionNum_) {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_PT_INTERNAL, "");
+			GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 		}
 		switch (type) {
 		case PT_CURRENT_OB: {
-			util::LockGuard<util::ReadLock>
-				currentLock(partitionLockList_[pId]);
+			util::LockGuard<util::ReadLock> currentLock(partitionLockList_[pId]);
 			role = partitions_[pId].roles_[type];
 			break;
 		}
@@ -1349,27 +1367,18 @@ public:
 		}
 	}
 
-	void setPartitionRole(
-		PartitionId pId,
-		PartitionRole& role,
-		TableType type = PT_CURRENT_OB) {
-
+	void setPartitionRole(PartitionId pId, PartitionRole& role, TableType type = PT_CURRENT_OB) {
 		if (pId >= config_.partitionNum_) {
 			GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 		}
 		switch (type) {
 		case PT_CURRENT_OB: {
-			util::LockGuard<util::WriteLock>
-				currentLock(partitionLockList_[pId]);
-
+			util::LockGuard<util::WriteLock> currentLock(partitionLockList_[pId]);
 			partitions_[pId].roles_[type] = role;
 			partitions_[pId].roles_[type].set(type);
-			PartitionRoleStatus nextStatus =
-				partitions_[pId].roles_[type].getPartitionRoleStatus();
-			currentPartitions_[pId].setPartitionRoleStatus(
-				SELF_NODEID, nextStatus);
-			currentPartitions_[pId].setPartitionRevision(
-				SELF_NODEID, role.getRevisionNo());
+			PartitionRoleStatus nextStatus = partitions_[pId].roles_[type].getPartitionRoleStatus();
+			currentPartitions_[pId].setPartitionRoleStatus(SELF_NODEID, nextStatus);
+			currentPartitions_[pId].setPartitionRevision(SELF_NODEID, role.getRevisionNo());
 			break;
 		}
 		case PT_CURRENT_GOAL: {
@@ -1379,31 +1388,21 @@ public:
 		}
 	}
 
-	void setErrorStatus(
-		PartitionId pId,
-		int32_t status,
-		NodeId targetNode = 0) {
-
-		util::LockGuard<util::WriteLock>
-			currentLock(partitionLockList_[pId]);
+	void setErrorStatus(PartitionId pId, int32_t status,NodeId targetNode = 0) {
+		util::LockGuard<util::WriteLock> currentLock(partitionLockList_[pId]);
 		currentPartitions_[pId].setErrorStatus(targetNode, status);
 	};
 
-	int32_t  getErrorStatus(
-		PartitionId pId, NodeId targetNode) {
-
-		util::LockGuard<util::ReadLock>
-			currentLock(partitionLockList_[pId]);
+	int32_t  getErrorStatus(PartitionId pId, NodeId targetNode) {
+		util::LockGuard<util::ReadLock> currentLock(partitionLockList_[pId]);
 		return currentPartitions_[pId].getErrorStatus(targetNode);
 	}
 
-	void handleErrorStatus(
-		PartitionId pId, NodeId targetNode, int32_t status);
+	void handleErrorStatus(PartitionId pId, NodeId targetNode, int32_t status);
 
 	bool check(PartitionContext& context);
 
-	void setBlockQueue(PartitionId pId,
-		ChangeTableType tableType = PT_CHANGE_NEXT_TABLE,
+	void setBlockQueue(PartitionId pId, ChangeTableType tableType = PT_CHANGE_NEXT_TABLE,
 		NodeId targetNode = UNDEF_NODEID);
 
 	void resetBlockQueue() {
@@ -1413,34 +1412,26 @@ public:
 	};
 
 	CheckedPartitionSummaryStatus checkPartitionSummaryStatus(
-		util::StackAllocator& alloc, bool isBalanceCheck = false);
+		util::StackAllocator& alloc, bool isBalanceCheck, bool firstSkip);
 
 	CheckedPartitionSummaryStatus getPartitionSummaryStatus() {
 		return loadInfo_.status_;
 	}
 
-	void setPartitionSummaryStatus(
-		CheckedPartitionSummaryStatus status) {
+	void setPartitionSummaryStatus(CheckedPartitionSummaryStatus status) {
 		loadInfo_.status_ = status;
 	}
 
-	bool checkNextOwner(PartitionId pId, NodeId checkedNode,
-		LogSequentialNumber checkedLsn,
-		LogSequentialNumber checkedMaxLsn,
-		NodeId currentOwner = UNDEF_NODEID);
+	bool checkNextOwner(PartitionId pId, NodeId checkedNode, LogSequentialNumber checkedLsn,
+		LogSequentialNumber checkedMaxLsn, NodeId currentOwner = UNDEF_NODEID);
 
-	bool checkNextBackup(PartitionId pId, NodeId checkedNode,
-		LogSequentialNumber checkedLsn,
-		LogSequentialNumber currentOwnerStartLsn,
-		LogSequentialNumber currentOwnerLsn);
+	bool checkNextBackup(PartitionId pId, NodeId checkedNode, LogSequentialNumber checkedLsn,
+		LogSequentialNumber currentOwnerStartLsn, LogSequentialNumber currentOwnerLsn);
 
 	template <class T>
-	bool getLiveNodeIdList(
-		T& liveNodeIdList, int64_t checkTime = UNDEF_TTL,
-		bool isCheck = false) {
+	bool getLiveNodeIdList(T& liveNodeIdList, int64_t checkTime = UNDEF_TTL, bool isCheck = false) {
 		bool isDownNode = false;
-		for (NodeId nodeId = 0;
-			nodeId < nodeNum_; nodeId++) {
+		for (NodeId nodeId = 0; nodeId < nodeNum_; nodeId++) {
 			int64_t tmpTime = nodes_[nodeId].heartbeatTimeout_;
 			if (nodes_[nodeId].isAlive(checkTime, isCheck)) {
 				liveNodeIdList.push_back(nodeId);
@@ -1455,13 +1446,11 @@ public:
 		return isDownNode;
 	}
 
-	bool checkLiveNode(
-		NodeId nodeId, int64_t limitTime = UNDEF_TTL) {
+	bool checkLiveNode(NodeId nodeId, int64_t limitTime = UNDEF_TTL) {
 		return nodes_[nodeId].isAlive(limitTime);
 	}
 
-	void setHeartbeatTimeout(NodeId nodeId,
-		int64_t heartbeatTimeout = UNDEF_TTL) {
+	void setHeartbeatTimeout(NodeId nodeId, int64_t heartbeatTimeout = UNDEF_TTL) {
 		nodes_[nodeId].heartbeatTimeout_ = heartbeatTimeout;
 	}
 
@@ -1478,19 +1467,15 @@ public:
 	}
 
 	void clear(PartitionId pId, TableType type) {
-
-		util::LockGuard<util::WriteLock>
-			currentLock(partitionLockList_[pId]);
+		util::LockGuard<util::WriteLock> currentLock(partitionLockList_[pId]);
 		partitions_[pId].clear(type);
 	}
 
 	void clearCurrentStatus();
 	void clearRole(PartitionId pId);
-	void set(SubPartition& subPartition);
 	bool checkClearRole(PartitionId pId);
 
-	void getNodeAddressInfo(
-		AddressInfoList& addressInfoList,
+	void getNodeAddressInfo(AddressInfoList& addressInfoList,
 		AddressInfoList& publicAddressInfoList);
 
 	void clearCatchupRole(PartitionId pId);
@@ -1508,36 +1493,48 @@ public:
 	}
 
 	PartitionGroupId getPartitionGroupId(PartitionId pId) {
-
 		if (pId >= config_.partitionNum_) {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_PT_INTERNAL, "");
+			GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL, "");
 		}
 		return partitions_[pId].partitionInfo_.pgId_;
 	}
 
-	void updatePartitionRevision(
-		PartitionRevisionNo partitionSequentialNumber);
+	void updatePartitionRevision(PartitionRevisionNo partitionSequentialNumber);
 
-	NodeAddress& getNodeAddress(
-		NodeId nodeId, ServiceType type = CLUSTER_SERVICE) {
+	NodeAddress& getNodeAddress(NodeId nodeId, ServiceType type = CLUSTER_SERVICE) {
 		return getNodeInfo(nodeId).getNodeAddress(type);
 	}
 
-	NodeAddress& getPublicNodeAddress(
-		NodeId nodeId, ServiceType type) {
-
+	NodeAddress& getPublicNodeAddress(NodeId nodeId, ServiceType type) {
 		if (!getNodeInfo(nodeId).publicAddressInfo_.isValid()) {
 			return getNodeAddress(nodeId, type);
 		}
 		else {
-			return getNodeInfo(nodeId)
-				.publicAddressInfo_.getNodeAddress(type);
+			return getNodeInfo(nodeId).publicAddressInfo_.getNodeAddress(type);
 		}
 	}
 
-	bool checkSetService(
-		NodeId nodeId, ServiceType type = CLUSTER_SERVICE) {
+	/*!
+		@brief Get node address
+	*/
+	/** **
+		@brief 指定サービスのIPアドレスを取得
+		@param [in] nodeId ノードID
+		@param [in] type サービス種別
+		@param [in] usePublicAddress 外部IPアドレス取得要求
+		@note クライアント指定によるが、単一ネットワーク構成でusePublic=trueの場合、結果的に内部IPアドレスを返す
+	** **/
+	NodeAddress& getNodeAddress(NodeId nodeId, ServiceType type, bool usePublicAddress) {
+
+		if (!usePublicAddress) {
+			return getNodeAddress(nodeId, type);
+		}
+		else {
+			return getPublicNodeAddress(nodeId, type);
+		}
+	}
+
+	bool checkSetService(NodeId nodeId, ServiceType type = CLUSTER_SERVICE) {
 		return getNodeInfo(nodeId).check(type);
 	}
 
@@ -1545,24 +1542,22 @@ public:
 		return revision_;
 	}
 
-	void setPublicAddressInfo(
-		NodeId nodeId, AddressInfo& publicAddressInfo);
+	void setPublicAddressInfo(NodeId nodeId, AddressInfo& publicAddressInfo);
 
 	PartitionRevision& incPartitionRevision() {
 		util::LockGuard<util::Mutex> lock(revisionLock_);
-		if (revision_.sequentialNumber_ == INT64_MAX) {
-			GS_THROW_SYSTEM_ERROR(
-				GS_ERROR_CS_MAX_PARTITION_REVISION,
+		if (revision_.getRevisionNo() == INT64_MAX) {
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_CS_MAX_PARTITION_REVISION,
 				"Cluster partition sequence number is limit");
 		}
 		else {
-			revision_.sequentialNumber_++;
+			revision_.increment();
 		}
 		return revision_;
 	}
 
 	PartitionRevisionNo getPartitionRevisionNo() {
-		return revision_.sequentialNumber_;
+		return revision_.getRevisionNo();
 	}
 
 	NodeId getMaster() {
@@ -1589,40 +1584,12 @@ public:
 		return config_;
 	}
 
-	void getDownNodes(
-		util::Set<NodeId>& downNodes, bool isClear = true) {
-		util::LockGuard<util::Mutex> lock(nodeInfoLock_);
-		for (std::set<NodeId>::iterator it = downNodeList_.begin();
-			it != downNodeList_.end(); it++) {
-			downNodes.insert((*it));
-		}
-		if (isClear) {
-			downNodeList_.clear();
-		}
-	}
 
 	PartitionId getCatchupPId() {
 		return prevCatchupPId_;
 	}
 
-	void getAddNodes(util::Set<NodeId>& nodeIds) {
-
-		util::LockGuard<util::Mutex> lock(nodeInfoLock_);
-		NodeId nodeId = getNodeNum();
-		if (nodeId > prevMaxNodeId_) {
-			for (int32_t pos = prevMaxNodeId_;
-				pos < nodeId; pos++) {
-				if (nodes_[pos].nodeBaseInfo_[CLUSTER_SERVICE + 1].check()) {
-					nodeIds.insert(pos);
-				}
-			}
-			prevMaxNodeId_ = nodeId;
-		}
-	}
-
-	std::string dumpNodeAddress(
-
-		NodeId nodeId, ServiceType type = CLUSTER_SERVICE) {
+	std::string dumpNodeAddress(NodeId nodeId, ServiceType type = CLUSTER_SERVICE) {
 		if (nodeId >= nodeNum_ || nodeId < 0) {
 			return std::string("");
 		}
@@ -1630,9 +1597,7 @@ public:
 	}
 
 	template <class T>
-	std::string dumpNodeAddressList(
-		T& nodeList, ServiceType type = CLUSTER_SERVICE) {
-
+	std::string dumpNodeAddressList(T& nodeList, ServiceType type = CLUSTER_SERVICE) {
 		util::NormalOStringStream ss;
 		int32_t listSize = static_cast<int32_t>(nodeList.size());
 		ss << "[";
@@ -1646,44 +1611,13 @@ public:
 		return ss.str().c_str();
 	}
 
-	std::string dumpNodeAddressInfoList(
-		AddressInfoList& nodeList) {
-
-		util::NormalOStringStream ss;
-		int32_t listSize = static_cast<int32_t>(nodeList.size());
-		ss << "[";
-		for (int32_t pos = 0; pos < listSize; pos++) {
-			ss << nodeList[pos].dump();
-			if (pos != listSize - 1) {
-				ss << ",";
-			}
-		}
-		ss << "]";
-		return ss.str().c_str();
-	}
-
 	std::string dumpNodes();
-	std::string dumpPartitions(
-		util::StackAllocator& alloc, TableType type,
-		bool isSummary = false);
-	std::string dumpPartitionsList(
-		util::StackAllocator& alloc, TableType type);
-	std::string dumpPartitionsNew(
-		util::StackAllocator& alloc, TableType type,
+	std::string dumpPartitions(util::StackAllocator& alloc, TableType type, bool isSummary = false);
+	std::string dumpPartitionsList(util::StackAllocator& alloc, TableType type);
+	std::string dumpPartitionsNew(util::StackAllocator& alloc, TableType type,
 		SubPartitionTable* subTable = NULL);
 
-	void genPartitionColumnStr(
-		util::NormalOStringStream& ss,
-		std::string& roleName,
-		PartitionId pId,
-		NodeId nodeId,
-		int32_t partitoinDigit,
-		int32_t nodeIdDigit,
-		TableType type);
-
-	std::string dumpPartitionStatusForRest(
-		PartitionStatus status) {
-
+	std::string dumpPartitionStatusForRest(PartitionStatus status) {
 		switch (status) {
 		case PT_STOP:
 			return "STOP";
@@ -1699,9 +1633,7 @@ public:
 		return std::string();
 	}
 
-	std::string dumpPartitionStatusEx(
-		PartitionStatus status) {
-
+	std::string dumpPartitionStatusEx(PartitionStatus status) {
 		switch (status) {
 		case PT_STOP:
 			return "STP";
@@ -1718,11 +1650,10 @@ public:
 	}
 
 	std::string dumpCurrentClusterStatus() {
-
-		if (masterNodeId_ == 0) {
+		if (masterNodeId_ == SELF_NODEID) {
 			return "MASTER";
 		}
-		else if (masterNodeId_ == -1) {
+		else if (masterNodeId_ == UNDEF_NODEID) {
 			return "SUB_MASTER";
 		}
 		else {
@@ -1730,48 +1661,101 @@ public:
 		}
 	}
 
-	std::string dumpDatas(
-		bool isDetail = false, bool lsnOnly = false);
+	static inline const std::string dumpPartitionStatus(
+		PartitionStatus status) {
 
-	void getServiceAddress(
-		NodeId nodeId, picojson::value& result,
+		switch (status) {
+		case PartitionTable::PT_STOP:
+			return "STOP";
+		case PartitionTable::PT_OFF:
+			return "OFF";
+		case PartitionTable::PT_SYNC:
+			return "SYNC";
+		case PartitionTable::PT_ON:
+			return "ON";
+		default:
+			return "";
+		}
+	};
+
+	static inline const std::string dumpPartitionRoleStatus(
+		PartitionTable::PartitionRoleStatus status) {
+
+		switch (status) {
+		case PartitionTable::PT_OWNER:
+			return "OWNER";
+		case PartitionTable::PT_BACKUP:
+			return "BACKUP";
+		case PartitionTable::PT_CATCHUP:
+			return "CATCHUP";
+		case PartitionTable::PT_NONE:
+			return "NONE";
+		default:
+			return "";
+		}
+	}
+
+	static inline const std::string dumpPartitionRoleStatusEx(
+		PartitionTable::PartitionRoleStatus status) {
+
+		switch (status) {
+		case PartitionTable::PT_OWNER:
+			return "O";
+		case PartitionTable::PT_BACKUP:
+			return "B";
+		case PartitionTable::PT_CATCHUP:
+			return "C";
+		case PartitionTable::PT_NONE:
+			return "N";
+		default:
+			return "";
+		}
+	}
+
+	std::string dumpDatas(bool isDetail = false, bool lsnOnly = false);
+
+	void set(SubPartition& subPartition);
+
+	void getServiceAddress(NodeId nodeId, picojson::value& result,
 		ServiceType addressType, bool forSsl = false);
 
-	util::Mutex newsqlLock_;
-	std::vector<PartitionRole> newsqlPartitionList_;
-	void updateNewSQLPartiton(
-		std::vector<PartitionRole>& newsqlPartitionList);
-	void updateNewSQLPartiton(
-		SubPartitionTable& newsqlPartition);
+	void updateNewSQLPartition(std::vector<PartitionRole>& newsqlPartitionList);
+	void updateNewSQLPartition(SubPartitionTable& newsqlPartition);
 	NodeId getNewSQLOwner(PartitionId pId);
-	PartitionRevisionNo getNewSQLPartitionRevision(
-		PartitionId pId);
-	std::string dumpNewSQLPartition();
+	PartitionRevisionNo getNewSQLPartitionRevision(PartitionId pId);
 
 	template <typename T1, typename T2>
-	void getActiveNodeList(T1& activeNodeList,
-		T2& downNodeSet, int64_t currentTime);
+	void getActiveNodeList(T1& activeNodeList, T2& downNodeSet, int64_t currentTime);
+
+	void setGoalPartition() {
+		isGoalPartition_ = true;
+	}
+
+	void stat(util::StackAllocator& alloc, TableType type, NodesStat& stat);
 
 private:
+
+
 	struct PartitionInfo {
-		PartitionInfo() :
-			pgId_(0),
-			partitionRevision_(
-				PartitionRevision::INITIAL_CLUSTER_REVISION),
-			available_(true)
-		{}
+
+		PartitionInfo() : pgId_(0), partitionRevision_(PartitionRevision::INITIAL_CLUSTER_REVISION),
+			available_(true) {}
+
 		void clear() {
-			partitionRevision_
-				= PartitionRevision::INITIAL_CLUSTER_REVISION;
+			partitionRevision_ = PartitionRevision::INITIAL_CLUSTER_REVISION;
 		}
+
 		PartitionGroupId pgId_;
 		PartitionRevisionNo partitionRevision_;
 		bool available_;
 	};
 
 	struct NodeInfo {
+
 		struct NodeBaseInfo {
+
 			NodeBaseInfo() : isSet_(false) {}
+
 			bool set(NodeAddress& address) {
 				if (!isSet_ && address.isValid()) {
 					address_ = address;
@@ -1784,37 +1768,33 @@ private:
 			bool check() {
 				return isSet_;
 			}
+
 			NodeAddress address_;
 			bool isSet_;
 		};
 
-		NodeInfo()
-			: nodeBaseInfo_(NULL),
+		NodeInfo() : nodeBaseInfo_(NULL),
 			heartbeatTimeout_(UNDEF_TTL),
 			isAcked_(false),
-			globalStackAlloc_(NULL)
-			,
-			sslPort_(-1)
-		{}
+			globalStackAlloc_(NULL),
+			sslPort_(UNDEF_SSL_PORT),
+			rackZoneIdName_(""),
+			rackZoneId_(UNDEF_RACKZONEID) {}
 
 		~NodeInfo() {
 			if (nodeBaseInfo_) {
-				for (int32_t pos = 0;
-					pos < SERVICE_MAX; pos++) {
-					ALLOC_DELETE(
-						*globalStackAlloc_, &nodeBaseInfo_[pos]);
+				for (int32_t pos = 0; pos < SERVICE_MAX; pos++) {
+					ALLOC_DELETE(*globalStackAlloc_, &nodeBaseInfo_[pos]);
 				}
 			}
 		}
 
 		void init(util::StackAllocator& alloc) {
 			globalStackAlloc_ = &alloc;
-			nodeBaseInfo_ = ALLOC_NEW(alloc)
-				NodeBaseInfo[SERVICE_MAX];
+			nodeBaseInfo_ = ALLOC_NEW(alloc) NodeBaseInfo[SERVICE_MAX];
 		}
 
-		NodeAddress& getNodeAddress(
-			ServiceType type = CLUSTER_SERVICE) {
+		NodeAddress& getNodeAddress(ServiceType type = CLUSTER_SERVICE) {
 			return nodeBaseInfo_[type].address_;
 		}
 
@@ -1822,8 +1802,7 @@ private:
 			return nodeBaseInfo_[type].check();
 		}
 
-		bool isAlive(
-			int64_t limitTime = UNDEF_TTL, bool isCheck = true) {
+		bool isAlive(int64_t limitTime = UNDEF_TTL, bool isCheck = true) {
 			if (heartbeatTimeout_ > limitTime) {
 				return true;
 			}
@@ -1850,37 +1829,34 @@ private:
 			ss << "]";
 			return ss.str().c_str();
 		}
+
 		NodeBaseInfo* nodeBaseInfo_;
 		int64_t heartbeatTimeout_;
 		bool isAcked_;
 		util::StackAllocator* globalStackAlloc_;
 		AddressInfo publicAddressInfo_;
 		int32_t sslPort_;
+		std::string rackZoneIdName_;
+		RackZoneId rackZoneId_;
 	};
 
 	class BlockQueue {
 	public:
-		BlockQueue(
-			int32_t partitionNum,
-			int32_t queueSizeLimit = INT32_MAX)
-			: queueList_(NULL),
-			partitionNum_(partitionNum),
-			queueSize_(queueSizeLimit) {}
+		BlockQueue(int32_t partitionNum, int32_t queueSizeLimit = INT32_MAX)
+			: queueList_(NULL), partitionNum_(partitionNum),
+			queueSize_(queueSizeLimit), globalStackAlloc_(NULL) {}
 
 		~BlockQueue() {
 			if (queueList_) {
-				for (uint32_t pos = 0;
-					pos < partitionNum_; pos++) {
-					ALLOC_DELETE(*globalStackAlloc_,
-						&queueList_[pos]);
+				for (uint32_t pos = 0; pos < partitionNum_; pos++) {
+					ALLOC_DELETE(*globalStackAlloc_, &queueList_[pos]);
 				}
 			}
 		};
 
 		void init(util::StackAllocator& alloc) {
 			globalStackAlloc_ = &alloc;
-			queueList_ = ALLOC_NEW(*globalStackAlloc_)
-				std::set<NodeId>[partitionNum_];
+			queueList_ = ALLOC_NEW(*globalStackAlloc_) std::set<NodeId>[partitionNum_];
 		}
 
 		bool find(PartitionId pId, NodeId nodeId);
@@ -1911,8 +1887,7 @@ private:
 			roleStatus_(PT_NONE),
 			partitionRevision_(1),
 			chunkCount_(0),
-			errorStatus_(PT_OTHER_NORMAL),
-			sslPort_(-1) {}
+			errorStatus_(PT_OTHER_NORMAL) {}
 
 		LogSequentialNumber lsn_;
 		LogSequentialNumber startLsn_;
@@ -1921,21 +1896,16 @@ private:
 		PartitionRevisionNo partitionRevision_;
 		int64_t chunkCount_;
 		int32_t errorStatus_;
-		int32_t sslPort_;
 
 		void clear() {
 			startLsn_ = 0;
 			status_ = PT_OFF;
 			roleStatus_ = PT_NONE;
-			partitionRevision_
-				= PartitionRevision::INITIAL_CLUSTER_REVISION;
+			partitionRevision_ = PartitionRevision::INITIAL_CLUSTER_REVISION;
 			chunkCount_ = 0;
-			sslPort_ = -1;
 			errorStatus_ = PT_OTHER_NORMAL;
 		}
 	};
-
-private:
 
 	class CurrentPartitions {
 	public:
@@ -1947,8 +1917,7 @@ private:
 
 		void resize(int32_t nodeNum, bool withCheck) {
 			if (withCheck) {
-				if (currentPartitionInfos_.size()
-			> static_cast<size_t>(nodeNum)) {
+				if (currentPartitionInfos_.size() > static_cast<size_t>(nodeNum)) {
 					return;
 				}
 			}
@@ -1960,11 +1929,7 @@ private:
 			return currentPartitionInfos_[nodeId].lsn_;
 		}
 
-		void setLsn(
-			NodeId nodeId,
-			LogSequentialNumber lsn,
-			bool updateCheck = false) {
-
+		void setLsn(NodeId nodeId, LogSequentialNumber lsn, bool updateCheck = false) {
 			checkSize(nodeId);
 			currentPartitionInfos_[nodeId].lsn_ = lsn;
 		}
@@ -1974,26 +1939,22 @@ private:
 			return currentPartitionInfos_[nodeId].startLsn_;
 		}
 
-		void setStartLsn(
-			NodeId nodeId, LogSequentialNumber startLsn) {
-
+		void setStartLsn(NodeId nodeId, LogSequentialNumber startLsn) {
 			checkSize(nodeId);
-			if (currentPartitionInfos_[nodeId].startLsn_ < startLsn)
+			if (currentPartitionInfos_[nodeId].startLsn_ < startLsn) {
 				currentPartitionInfos_[nodeId].startLsn_ = startLsn;
+			}
 		}
 
-		void setErrorStatus(
-			NodeId nodeId, int32_t status) {
+		void setErrorStatus(NodeId nodeId, int32_t status) {
 			checkSize(nodeId);
 			currentPartitionInfos_[nodeId].errorStatus_ = status;
 		}
 
 		int32_t getErrorStatus(NodeId nodeId) {
 			checkSize(nodeId);
-			int32_t ret
-				= currentPartitionInfos_[nodeId].errorStatus_;
-			currentPartitionInfos_[nodeId].errorStatus_
-				= PT_ERROR_NORMAL;
+			int32_t ret = currentPartitionInfos_[nodeId].errorStatus_;
+			currentPartitionInfos_[nodeId].errorStatus_ = PT_ERROR_NORMAL;
 			return ret;
 		}
 
@@ -2002,8 +1963,7 @@ private:
 			return currentPartitionInfos_[nodeId].status_;
 		}
 
-		void setPartitionStatus(
-			NodeId nodeId, PartitionStatus status) {
+		void setPartitionStatus(NodeId nodeId, PartitionStatus status) {
 			checkSize(nodeId);
 			currentPartitionInfos_[nodeId].status_ = status;
 		}
@@ -2045,7 +2005,7 @@ private:
 
 			if (static_cast<size_t>(nodeId) >= currentPartitionInfos_.size()) {
 				GS_THROW_USER_ERROR(GS_ERROR_PT_INTERNAL,
-					"Specifed nodeId is invalid, nodeId=" << nodeId
+					"Specified nodeId is invalid, nodeId=" << nodeId
 					<< ", max node size=" << currentPartitionInfos_.size());
 			}
 		}
@@ -2094,16 +2054,8 @@ private:
 	};
 
 	struct ReplicaInfo {
-		ReplicaInfo(PartitionId pId, uint32_t count)
-			: pId_(pId), count_(count) {}
+		ReplicaInfo(PartitionId pId, uint32_t count) : pId_(pId), count_(count) {}
 		PartitionId pId_;
-		uint32_t count_;
-	};
-
-	struct DataNodeInfo {
-		DataNodeInfo(NodeId nodeId, uint32_t count, uint32_t)
-			: nodeId_(nodeId), count_(count) {}
-		NodeId nodeId_;
 		uint32_t count_;
 	};
 
@@ -2189,20 +2141,255 @@ private:
 		int32_t maxNodeNum_;
 	};
 
-	static bool cmpReplica(
-		const ReplicaInfo& a, const ReplicaInfo& b) {
-		return (a.count_ < b.count_);
+	/** **
+		@brief ゴール対象ノード情報
+		@note パーティション割り付けを行うノード情報。優先リスト数に応じた優先度を保持
+	** **/
+	struct GoalNodeInfo {
+
+		GoalNodeInfo(NodeId nodePos, int32_t priority) : nodePos_(nodePos), priority_(priority) {}
+		bool operator<(const GoalNodeInfo& another) const {
+			return (priority_ > another.priority_);
+		}
+
+		NodeId nodePos_;
+		int32_t priority_;
 	};
 
-	bool isBalance(
-		uint32_t minLoad, uint32_t maxLoad, bool isOwnerCheck) {
-		if (isOwnerCheck) {
-			return (maxLoad - minLoad <= config_.ownerLoadLimit_);
+	/** **
+		@brief ゴールプランナー
+		@note LSNリストとクラスタ情報からゴールパーティション決定のためのヒューリスティック実行
+	** **/
+	class GoalPlanner {
+	public:
+		static const int32_t PRIORIY_1ST = 0;
+		static const int32_t PRIORIY_2ND = 1;
+		static const int32_t PRIORIY_NONE = 2;
+
+		static const int32_t MODE_RACKZONE = 0;
+		static const int32_t MODE_NORMAL = 1;
+		static const int32_t MODE_MAX = 2;
+
+		GoalPlanner(PartitionTable* pt, util::StackAllocator& alloc,
+			util::XArray<NodeId>& nodeIdList, util::Vector<PartitionRole>& roleList);
+
+		bool assginePriorityPartition(NodeId targetNodePos, int32_t priorityNo, int32_t& priority);
+
+		int32_t getReplicaNum() {
+			return backupNum_ + 1;
 		}
-		else {
-			return (maxLoad - minLoad <= config_.dataLoadLimit_);
+
+		int32_t calcPriority(NodeId targetNodePos) {
+			return (priorityPartitionLists_[targetNodePos].size()
+				+ priorityPartitionBackupLists_[targetNodePos].size());
+		}
+
+		void setOrigianlRackZoneAwareness(bool flag) {
+			orgRackZoneAwareness_ = flag;
+		}
+
+		int32_t setRackZoneMode(int32_t mode);
+
+		void validate(util::StackAllocator& alloc);
+
+	private:
+
+		void setupMaxLsn();
+		void setupPriorityPartition();
+		bool assignPartition(PartitionId pId, int32_t nodePos, bool backupOnly, int prioriyNo);
+
+		util::StackAllocator& alloc_;
+		PartitionTable* pt_;
+		util::XArray<NodeId>& nodeIdList_;
+		util::Vector<PartitionRole>& roleList_;
+		PartitionId partitionNum_;
+		int32_t nodeNum_;
+		int32_t backupNum_;
+		util::Vector<util::Vector<PartitionId>> priorityPartitionLists_;
+		util::Vector<util::Vector<PartitionId>> priorityPartitionBackupLists_;
+		util::Vector<PartitionId> priorityCountList_;
+		util::Vector<LogSequentialNumber> maxLsnList_;
+		util::Vector<RackZoneId> rackZoneIdList_;
+		bool currentRackZoneAwareness_;
+		bool orgRackZoneAwareness_;
+	};
+
+	/** **
+		@brief ゴール情報修正プランナー
+		@note オーナの偏りを解消する
+	** **/
+	class ModifyPlanner {
+	public:
+		
+		ModifyPlanner(util::StackAllocator& alloc, uint32_t nodeNum, uint32_t partitionNum,
+			util::XArray<NodeId>& nodeIdList, util::Vector<PartitionRole>& roleList);
+
+		util::Vector<PartitionId>& getResolvePartitionIdList() {
+			return pIdList_;
+		}
+
+		void update();
+
+		bool check(int32_t limit) {
+			if (maxOwnerCount_ - minOwnerCount_ <= limit) {
+				return true;
+			}
+			return false;
+		}
+
+		NodeId getSwappableNodeId(util::StackAllocator& alloc, PartitionRole& role);
+
+	private:
+		void init() {
+			maxOwnerCount_ = -1;
+			minOwnerCount_ = INT32_MAX;
+			maxOwnerNodeId_ = UNDEF_NODEID;
+			minOwnerNodeId_ = UNDEF_NODEID;
+		}
+
+		util::Vector<int32_t> ownerCountList_;
+		util::Vector<PartitionId> pIdList_;
+		util::XArray<NodeId>& nodeIdList_;
+		util::Random random_;
+		int32_t maxOwnerCount_;
+		int32_t minOwnerCount_;
+		NodeId maxOwnerNodeId_;
+		NodeId minOwnerNodeId_;
+	};
+
+
+	struct LoadSummary {
+		LoadSummary(util::StackAllocator& alloc, int32_t nodeLimit) :
+			ownerLoadList_(alloc),
+			dataLoadList_(alloc),
+			liveNodeList_(alloc),
+			ownerLimit_(PT_OWNER_LOAD_LIMIT),
+			dataLimit_(PT_DATA_LOAD_LIMIT),
+			status_(PT_INITIAL),
+			nodeNum_(0),
+			maxDataLoad_(0),
+			minDataLoad_(0),
+			maxOwnerLoad_(0),
+			minOwnerLoad_(0),
+			ownerLoadCount_(0),
+			dataLoadCount_(0) {
+			ownerLoadList_.assign(static_cast<size_t>(nodeLimit), 0);
+			dataLoadList_.assign(static_cast<size_t>(nodeLimit), 0);
+			liveNodeList_.assign(static_cast<size_t>(nodeLimit), 0);
+		}
+
+		void init(int32_t nodeNum) {
+			std::fill(ownerLoadList_.begin(), ownerLoadList_.begin() + nodeNum, 0);
+			std::fill(dataLoadList_.begin(), dataLoadList_.begin() + nodeNum, 0);
+			minOwnerLoad_ = UINT32_MAX;
+			maxOwnerLoad_ = 0;
+			minDataLoad_ = UINT32_MAX;
+			maxDataLoad_ = 0;
+			nodeNum_ = nodeNum;
+			ownerLoadCount_ = 0;
+			dataLoadCount_ = 0;
+		}
+
+		void add(NodeId nodeId, bool isOwner = true) {
+			if (isOwner) {
+				ownerLoadList_[nodeId]++;
+			}
+			else {
+				dataLoadList_[nodeId]++;
+			}
+		}
+
+		void setAlive(NodeId nodeId, uint8_t isAlive) {
+			liveNodeList_[nodeId] = isAlive;
+		}
+
+		void update() {
+			for (NodeId nodeId = 0; nodeId < nodeNum_; nodeId++) {
+				if (liveNodeList_[nodeId]) {
+					uint32_t currentOwnerLoad = ownerLoadList_[nodeId];
+					uint32_t currentDataLoad = dataLoadList_[nodeId];
+					if (currentOwnerLoad < minOwnerLoad_)
+						minOwnerLoad_ = ownerLoadList_[nodeId];
+					if (currentOwnerLoad > maxOwnerLoad_)
+						maxOwnerLoad_ = ownerLoadList_[nodeId];
+					if (currentDataLoad < minDataLoad_)
+						minDataLoad_ = dataLoadList_[nodeId];
+					if (currentDataLoad > maxDataLoad_)
+						maxDataLoad_ = dataLoadList_[nodeId];
+					ownerLoadCount_ += currentOwnerLoad;
+					dataLoadCount_ += currentDataLoad;
+				}
+			}
+		}
+
+		bool isBalance(bool isOwner, int32_t checkCount) {
+			if (isOwner) {
+				return (checkCount <= ownerLoadCount_ &&
+					maxOwnerLoad_ - minOwnerLoad_ <= ownerLimit_);
+			}
+			else {
+				return (checkCount <= dataLoadCount_ &&
+					maxDataLoad_ - minDataLoad_ <= dataLimit_);
+			}
+		}
+
+		uint32_t minOwnerLoad_;
+		uint32_t maxOwnerLoad_;
+		uint32_t minDataLoad_;
+		uint32_t maxDataLoad_;
+		util::Vector<uint32_t> ownerLoadList_;
+		util::Vector<uint32_t> dataLoadList_;
+		util::Vector<uint8_t> liveNodeList_;
+		uint32_t ownerLimit_;
+		uint32_t dataLimit_;
+		CheckedPartitionSummaryStatus status_;
+		int32_t nodeNum_;
+		int32_t ownerLoadCount_;
+		int32_t dataLoadCount_;
+	};
+
+
+	static const int32_t PT_BACKUP_GAP_FACTOR = 2;
+	static const int32_t PT_OWNER_LOAD_LIMIT = 2;
+	static const int32_t PT_DATA_LOAD_LIMIT = 2;
+
+	void genPartitionColumnStr(util::NormalOStringStream& ss, std::string& roleName,
+		PartitionId pId, NodeId nodeId, int32_t partitionDigit, int32_t nodeIdDigit, TableType type);
+
+	void getAddNodes(util::Set<NodeId>& nodeIds) {
+		util::LockGuard<util::Mutex> lock(nodeInfoLock_);
+		NodeId nodeId = getNodeNum();
+		if (nodeId > prevMaxNodeId_) {
+			for (int32_t pos = prevMaxNodeId_; pos < nodeId; pos++) {
+				if (nodes_[pos].nodeBaseInfo_[CLUSTER_SERVICE + 1].check()) {
+					nodeIds.insert(pos);
+				}
+			}
+			prevMaxNodeId_ = nodeId;
 		}
 	}
+
+	void getDownNodes(util::Set<NodeId>& downNodes, bool isClear = true) {
+		util::LockGuard<util::Mutex> lock(nodeInfoLock_);
+		for (const auto& nodeId : downNodeList_) {
+			downNodes.insert(nodeId);
+		}
+		if (isClear) {
+			downNodeList_.clear();
+		}
+	}
+
+	/** **
+		@brief ラックゾーンID取得
+		@note 指定ノードのラックゾーンID取得
+	** **/
+	RackZoneId getRackZoneId(NodeId nodeId = 0);
+
+	/** **
+		@brief ラックゾーンID取得
+		@note 指定ノードIDのラックゾーンID取得
+	** **/
+	bool isUseRackZoneAwareness(util::StackAllocator& alloc);
 
 	bool checkLimitOwnerBackupLsnGap(
 		LogSequentialNumber ownerLSN,
@@ -2219,10 +2406,8 @@ private:
 	}
 
 	NodeInfo& getNodeInfo(NodeId nodeId) {
-		if (nodeId >= config_.maxNodeNum_
-			|| nodeId == UNDEF_NODEID) {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_CS_SERVICE_CLUSTER_INTERNAL_FAILED, "");
+		if (nodeId >= config_.maxNodeNum_ || nodeId == UNDEF_NODEID) {
+			GS_THROW_USER_ERROR(GS_ERROR_CS_SERVICE_CLUSTER_INTERNAL_FAILED, "");
 		}
 		return nodes_[nodeId];
 	}
@@ -2231,8 +2416,7 @@ private:
 		partitions_[pId].partitionInfo_.available_ = available;
 	}
 
-	bool checkTargetPartition(
-		PartitionId pId, int32_t backupNum, bool& catchupWait);
+	bool checkTargetPartition(PartitionId pId, int32_t backupNum, bool& catchupWait);
 
 	void clearPartitionRole(PartitionId pId);
 
@@ -2241,64 +2425,20 @@ private:
 	bool applyRemoveRule(PartitionContext& context);
 	bool applySwapRule(PartitionContext& context);
 
+	void getReplicaLossPIdList(util::StackAllocator& alloc, util::Vector<ReplicaInfo>& resolvePIdList);
+	void getCurrentCatchupPIdList(util::Vector<PartitionId>& catchupPIdList);
 	void checkRepairPartition(PartitionContext& context);
 
-	struct ScoreNode {
-		ScoreNode(
-			double score, NodeId nodeId, int32_t count, int32_t ownerCount) :
-			score_(score), nodeId_(nodeId),
-			count_(count), ownerCount_(ownerCount) {}
-		double score_;
-		NodeId nodeId_;
-		int32_t count_;
-		int32_t ownerCount_;
+	static bool cmpReplica(const ReplicaInfo& a, const ReplicaInfo& b) {
+		return (a.count_ < b.count_);
 	};
 
-	struct ScoreInfo {
-		ScoreInfo(double score, PartitionId pId) :
-			score_(score), pId_(pId), assigned_(false),
-			nodeId_(0), randVal_(0) {}
-		double score_;
-		PartitionId pId_;
-		bool assigned_;
-		NodeId nodeId_;
-		int32_t randVal_;
-	};
-
-	static bool cmpScoreNode(
-		const ScoreInfo& a, const ScoreInfo& b) {
-		return (a.score_ > b.score_);
-	};
-
-	static bool cmpScore(
-		const ScoreNode& a, const ScoreNode& b) {
-		if (a.score_ > b.score_) {
-			return true;
-		}
-		else if (a.score_ < b.score_) {
-			return false;
-		}
-		else {
-			if (a.count_ < b.count_) {
-				return true;
-			}
-			else if (a.count_ > b.count_) {
-				return false;
-			}
-			else {
-				return (a.ownerCount_ < b.ownerCount_);
-			}
-		}
-	};
-
-	void assignGoalTable(
-		util::StackAllocator& alloc,
-		util::XArray<NodeId>& nodeIdList,
+	void assignGoalTable(util::StackAllocator& alloc, util::XArray<NodeId>& nodeIdList,
 		util::Vector<PartitionRole>& roleList);
-	void modifyGoalTable(
-		util::StackAllocator& alloc,
-		util::XArray<NodeId>& nodeIdList,
+
+	void modifyGoalTable(util::StackAllocator& alloc, util::XArray<NodeId>& nodeIdList,
 		util::Vector<PartitionRole>& roleList);
+
 
 	util::FixedSizeAllocator<util::Mutex> fixedSizeAlloc_;
 	util::StackAllocator globalStackAlloc_;
@@ -2333,6 +2473,12 @@ private:
 
 	NodeInfo* nodes_;
 
+	util::Mutex newsqlLock_;
+	std::vector<PartitionRole> newsqlPartitionList_;
+	std::unordered_map <std::string, int32_t> rackZoneMap_;
+	bool enableRackZoneAwareness_;
+	bool orgEnableRackZoneAwareness_;
+
 	LoadSummary loadInfo_;
 
 	int32_t partitionDigit_;
@@ -2352,203 +2498,9 @@ typedef PartitionTable::PartitionContext PartitionContext;
 typedef PartitionTable::PartitionRoleStatus PartitionRoleStatus;
 typedef PartitionTable::TableType TableType;
 
-/*!
-	@brief Represents data cut out from Partition for communicatition between
-   nodes
-*/
-class SubPartition {
-public:
-	SubPartition() {}
-	SubPartition(PartitionId pId,
-		PartitionRole& role, NodeAddress& currentOwner)
-		: pId_(pId), role_(role),
-		currentOwner_(currentOwner),
-		currentOwnerId_(UNDEF_NODEID) {};
-
-	MSGPACK_DEFINE(pId_, role_, currentOwner_);
-
-	std::string dump(PartitionTable* pt = NULL) {
-		util::NormalOStringStream ss;
-		ss << "Partition:{"
-			<< "pId=" << pId_;
-		if (pt == NULL) {
-			ss << ", role:" << role_.dump();
-		}
-		else {
-			ss << ", role:" << role_.dump(pt);
-		}
-		ss << ", current owner:"
-			<< currentOwner_.toString() << "}";
-		return ss.str();
-	}
-
-	PartitionId pId_;
-	PartitionRole role_;
-	NodeAddress currentOwner_;
-	NodeId currentOwnerId_;
-};
-
-std::ostream& operator<<(std::ostream& stream, SubPartition& subPartition);
+std::ostream& operator<<(std::ostream& stream, PartitionTable::SubPartition& subPartition);
 std::ostream& operator<<(std::ostream& stream, PartitionRole& PartitionRole);
 std::ostream& operator<<(std::ostream& stream, NodeAddress& nodeAddres);
 std::ostream& operator<<(std::ostream& stream, PartitionRevision& revision);
 
-/*!
-	@brief SubPartition Table
-*/
-class EventEngine;
-class SubPartitionTable {
-public:
-	SubPartitionTable() : partitionNum_(1) {}
-
-	int32_t size() {
-		return static_cast<int32_t>(subPartitionList_.size());
-	}
-	SubPartition& getSubPartition(int32_t pos) {
-		return subPartitionList_[pos];
-	}
-
-	void init(PartitionTable* pt, EventEngine* ee);
-
-	void prepareMap(
-		util::Map<PartitionId, PartitionRole*>& roleMap) {
-		for (size_t pos = 0; pos < subPartitionList_.size(); pos++) {
-			roleMap[subPartitionList_[pos].pId_]
-				= &subPartitionList_[pos].role_;
-		}
-	}
-
-	void set(PartitionTable* pt, PartitionId pId,
-		PartitionRole& role,
-		NodeAddress& ownerAddress) {
-		SubPartition subPartition(pId, role, ownerAddress);
-		PartitionRole& tmpRole = subPartition.role_;
-		tmpRole.encodeAddress(pt, role);
-		subPartitionList_.push_back(subPartition);
-	}
-
-	void set(PartitionTable* pt, PartitionId pId, PartitionRole& role,
-		NodeId ownerNodeId = UNDEF_NODEID);
-
-	void setNodeAddress(AddressInfo& addressInfo) {
-		nodeAddressList_.push_back(addressInfo);
-	}
-
-	AddressInfoList& getNodeAddressList() {
-		return nodeAddressList_;
-	}
-
-	void setPublicNodeAddressList(
-		AddressInfoList& publicNodeAddressList) {
-		publicNodeAddressList_ = publicNodeAddressList;
-	}
-	AddressInfoList& getPublicNodeAddressList() {
-		return publicNodeAddressList_;
-	}
-
-	void set(PartitionTable* pt) {
-		for (PartitionId pId = 0;
-			pId < pt->getPartitionNum(); pId++) {
-			PartitionRole tmpRole;
-			pt->getPartitionRole(pId, tmpRole);
-			set(pt, pId, tmpRole);
-		}
-	}
-	bool check() {
-		return true;
-	}
-
-	PartitionRevision& getRevision() {
-		return revision_;
-	}
-
-	void clear() {
-		subPartitionList_.clear();
-	}
-
-	void setRevision(PartitionRevision& revison) {
-		revision_ = revison;
-	}
-
-	MSGPACK_DEFINE(
-		subPartitionList_, nodeAddressList_, revision_);
-
-	std::string dump(bool isTrace = true) {
-		util::NormalOStringStream ss;
-		ss << "NextPartitionTable:{";
-		ss << "revision=" << revision_.sequentialNumber_;
-		ss << ", [";
-		if (!isTrace) {
-			ss << std::endl;
-		}
-		for (size_t pos = 0; pos < subPartitionList_.size(); pos++) {
-			ss << subPartitionList_[pos].dump();
-			if (!isTrace) {
-				ss << std::endl;
-			}
-			if (pos != subPartitionList_.size() - 1) {
-				ss << ",";
-			}
-		}
-		ss << "]}";
-		return ss.str();
-	}
-
-	std::vector<SubPartition> subPartitionList_;
-	AddressInfoList nodeAddressList_;
-	PartitionRevision revision_;
-	uint32_t partitionNum_;
-	AddressInfoList publicNodeAddressList_;
-};
-
-static inline const std::string dumpPartitionStatus(
-	PartitionStatus status) {
-
-	switch (status) {
-	case PartitionTable::PT_STOP:
-		return "STOP";
-	case PartitionTable::PT_OFF:
-		return "OFF";
-	case PartitionTable::PT_SYNC:
-		return "SYNC";
-	case PartitionTable::PT_ON:
-		return "ON";
-	default:
-		return "";
-	}
-};
-
-static inline const std::string dumpPartitionRoleStatus(
-	PartitionTable::PartitionRoleStatus status) {
-
-	switch (status) {
-	case PartitionTable::PT_OWNER:
-		return "OWNER";
-	case PartitionTable::PT_BACKUP:
-		return "BACKUP";
-	case PartitionTable::PT_CATCHUP:
-		return "CATCHUP";
-	case PartitionTable::PT_NONE:
-		return "NONE";
-	default:
-		return "";
-	}
-}
-
-static inline const std::string dumpPartitionRoleStatusEx(
-	PartitionTable::PartitionRoleStatus status) {
-
-	switch (status) {
-	case PartitionTable::PT_OWNER:
-		return "O";
-	case PartitionTable::PT_BACKUP:
-		return "B";
-	case PartitionTable::PT_CATCHUP:
-		return "C";
-	case PartitionTable::PT_NONE:
-		return "N";
-	default:
-		return "";
-	}
-}
 #endif

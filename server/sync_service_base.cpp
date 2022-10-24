@@ -19,15 +19,7 @@
 	@brief Implementation of SyncService
 */
 #include "sync_service.h"
-#include "chunk_manager.h"
-#include "cluster_common.h"
-#include "data_store_v4.h"
-#include "event_engine.h"
-#include "log_manager.h"
-#include "recovery_manager.h"
-#include "sync_manager.h"
 #include "transaction_service.h"
-#include "cluster_manager.h"
 
 #ifndef _WIN32
 #include <signal.h>  
@@ -35,22 +27,35 @@
 
 UTIL_TRACER_DECLARE(CLUSTER_SERVICE);
 UTIL_TRACER_DECLARE(SYNC_SERVICE);
-UTIL_TRACER_DECLARE(CLUSTER_OPERATION);
 UTIL_TRACER_DECLARE(IO_MONITOR);
 UTIL_TRACER_DECLARE(SYNC_DETAIL);
 UTIL_TRACER_DECLARE(CLUSTER_DUMP);
-
-#define GS_TRACE_CLUSTER_INFO(s) \
-	GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_CLUSTER_STATUS, s); 
-
-#define GS_TRACE_CLUSTER_DUMP(s) \
-	GS_TRACE_DEBUG(CLUSTER_OPERATION, GS_TRACE_CS_CLUSTER_STATUS, s); 
-
 
 #define RM_THROW_LOG_REDO_ERROR(errorCode, message) \
 	GS_THROW_CUSTOM_ERROR(LogRedoException, , errorCode, message)
 #define RM_RETHROW_LOG_REDO_ERROR(cause, message) \
 	GS_RETHROW_CUSTOM_ERROR(LogRedoException, GS_ERROR_DEFAULT, cause, message)
+
+class PartitionRevisionMesage {
+
+public:
+	PartitionRevisionMesage(PartitionRevision& revision) : revision_(revision) {}
+
+	void encode(EventByteOutStream& out) {
+		out << revision_.addr_;
+		out << revision_.port_;
+		out << revision_.sequentialNumber_;
+	}
+
+	void decode(EventByteInStream& in) {
+		in >> revision_.addr_;
+		in >> revision_.port_;
+		in >> revision_.sequentialNumber_;
+	}
+
+private:
+	PartitionRevision& revision_;
+};
 
 SyncService::SyncService(
 	const ConfigTable& config,
@@ -64,14 +69,13 @@ SyncService::SyncService(
 	syncMgr_(&syncMgr),
 	versionId_(versionId),
 	serviceThreadErrorHandler_(serviceThreadErrorHandler),
-	initailized_(false)
+	initialized_(false)
 {
 	try {
 		syncMgr_ = &syncMgr;
 		ee_.setHandler(
 			SYC_SHORTTERM_SYNC_LOG, recvSyncMessageHandler_);
 		setClusterHandler();
-
 		ee_.setUnknownEventHandler(
 			unknownSyncEventHandler_);
 		ee_.setThreadErrorHandler(
@@ -90,7 +94,7 @@ void SyncService::initialize(ManagerSet& mgrSet) {
 	syncMgr_->initialize(&mgrSet);
 	recvSyncMessageHandler_.initialize(mgrSet);
 	serviceThreadErrorHandler_.initialize(mgrSet);
-	initailized_ = true;
+	initialized_ = true;
 }
 
 SyncService::~SyncService() {
@@ -122,7 +126,7 @@ EventEngine::Config SyncService::createEEConfig(
 void SyncService::start() {
 
 	try {
-		if (!initailized_) {
+		if (!initialized_) {
 			GS_THROW_USER_ERROR(
 				GS_ERROR_CS_SERVICE_NOT_INITIALIZED, "");
 		}
@@ -150,18 +154,12 @@ void SyncService::waitForShutdown() {
 }
 
 template <class T>
-void SyncService::decode(
-	util::StackAllocator& alloc,
-	EventEngine::Event& ev,
-	T& t,
-	EventByteInStream& in) {
+void SyncService::decode(util::StackAllocator& alloc, EventEngine::Event& ev, T& t, EventByteInStream& in) {
 
 	try {
 		util::XArray<char8_t> buffer(alloc);
-		const char8_t* eventBuffer
-			= reinterpret_cast<const char8_t*>(
-				ev.getMessageBuffer().getXArray().data() +
-				ev.getMessageBuffer().getOffset());
+		const char8_t* eventBuffer = reinterpret_cast<const char8_t*>(
+			ev.getMessageBuffer().getXArray().data() + ev.getMessageBuffer().getOffset());
 
 		uint8_t decodedVersionId;
 		in >> decodedVersionId;
@@ -191,9 +189,9 @@ void SyncService::checkVersion(uint8_t versionId) {
 }
 
 uint16_t SyncService::getLogVersion(PartitionId pId) {
-
 	return partitionList_->partition(pId).logManager().getLogVersion();
 }
+
 
 template <class T>
 void SyncService::encode(
@@ -284,8 +282,6 @@ void SyncHandler::sendEvent(
 	NodeId targetNodeId,
 	Event& ev,
 	int32_t delayTime) {
-
-
 	if (targetNodeId == SELF_NODEID) {
 		if (delayTime == UNDEF_DELAY_TIME) {
 			delayTime = EE_PRIORITY_HIGH;
@@ -362,7 +358,6 @@ void ShortTermSyncHandler::operator()(
 			}
 
 			GS_OUTPUT_SYNC(context, "[" << getEventTypeName(eventType) << ":START]", "");
-
 			executeSyncRequest(
 				ec, pId, context,
 				syncRequestInfo, syncResponseInfo);
@@ -376,7 +371,6 @@ void ShortTermSyncHandler::operator()(
 			syncMgr_->checkExecutable(
 				TXN_SHORTTERM_SYNC_START, pId,
 				syncRequestInfo.getPartitionRole());
-
 			executeSyncStart(
 				ec, ev, pId, context,
 				syncRequestInfo, syncResponseInfo, senderNodeId);
@@ -391,8 +385,6 @@ void ShortTermSyncHandler::operator()(
 			syncMgr_->checkExecutable(
 				TXN_SHORTTERM_SYNC_START_ACK, pId,
 				syncResponseInfo.getPartitionRole());
-
-
 			executeSyncStartAck(
 				ec, ev, pId, context,
 				syncRequestInfo, syncResponseInfo, senderNodeId);
@@ -407,8 +399,6 @@ void ShortTermSyncHandler::operator()(
 			syncMgr_->checkExecutable(
 				TXN_SHORTTERM_SYNC_LOG,
 				pId, syncRequestInfo.getPartitionRole());
-
-
 			executeSyncLog(
 				ec, ev, pId, context,
 				syncRequestInfo, syncResponseInfo);
@@ -423,7 +413,6 @@ void ShortTermSyncHandler::operator()(
 			syncMgr_->checkExecutable(
 				TXN_SHORTTERM_SYNC_LOG_ACK, pId,
 				syncResponseInfo.getPartitionRole());
-
 			executeSyncLogAck(
 				ec, ev, pId, context,
 				syncRequestInfo, syncResponseInfo, senderNodeId);
@@ -460,8 +449,7 @@ void ShortTermSyncHandler::operator()(
 				GS_ERROR_SYNC_EVENT_TYPE_INVALID, "");
 		}
 		}
-		WATCHER_END_SYNC(
-			getEventTypeName(eventType), pId);
+		WATCHER_END_DETAIL(eventType, pId, ec.getWorkerId());
 		if (context) {
 			GS_OUTPUT_SYNC(context, "[" << getEventTypeName(eventType) << ":END]", "");
 		}
@@ -471,10 +459,10 @@ void ShortTermSyncHandler::operator()(
 			GS_OUTPUT_SYNC(context, "[" << getEventTypeName(eventType) << ":ERROR]", "");
 
 			UTIL_TRACE_EXCEPTION(
-				SYNC_DETAIL, e, "Short term sync faild, pId=" << pId
+				SYNC_DETAIL, e, "Short term sync failed, pId=" << pId
 				<< ", lsn=" << pt_->getLSN(pId)
 				<< ", revision="
-				<< context->getPartitionRevision().sequentialNumber_
+				<< context->getPartitionRevision().getRevisionNo()
 				<< ", event=" << getEventTypeName(eventType)
 				<< ", reason=" << GS_EXCEPTION_MESSAGE(e));
 
@@ -525,7 +513,7 @@ void ShortTermSyncHandler::operator()(
 
 
 /*!
-	@brief Gets log information satifies a presetting condition
+	@brief Gets log information satisfies a presetting condition
 */
 bool SyncRequestInfo::getLogs(
 	PartitionId pId,
@@ -581,26 +569,8 @@ bool SyncRequestInfo::getLogs(
 			util::StackAllocator::Scope scope(logMgr->getAllocator());
 			log = logIt.next(false);
 			if (log == NULL) break;
-			if (log->getLsn() <= request_.endLsn_ &&
-				binaryLogRecords_.size() <= condition_.logSize_) {
-				int64_t dataSize = log->getDataSize();
-				size_t startPos = binaryLogRecords_.size();
-				util::XArray<uint8_t> binary(logMgr->getAllocator());
-				typedef util::ByteStream< util::XArrayOutStream<> > OutStream;
-				util::XArrayOutStream<> arrayOut(binary);
-				OutStream out(arrayOut);
-				log->encode(out);
-
-				binaryLogRecords_.resize(
-					binaryLogRecords_.size() + sizeof(uint64_t)
-					+ binary.size());
-				uint64_t logAllSize = binary.size();
-				uint8_t* sizeAddr = binaryLogRecords_.data() + startPos;
-				uint8_t* addr = sizeAddr + sizeof(uint64_t);
-				memcpy(sizeAddr, &logAllSize, sizeof(uint64_t));
-				memcpy(addr, binary.data(), binary.size());
-
-				callLogCount++;
+			if (log->getLsn() <= request_.endLsn_ && binaryLogRecords_.size() <= condition_.logSize_) {
+				log->encode(logMgr->getAllocator(), binaryLogRecords_);
 				lastLsn = log->getLsn();
 			}
 		}
@@ -686,28 +656,8 @@ bool SyncRequestInfo::getChunks(
 					GS_ERROR_SYNC_CHUNK_GET_FAILED,
 					"Long term sync get checkpoint start log failed, pId=" << pId);
 			}
-			GS_OUTPUT_SYNC2("CPLog, pId=" << pId << ",lsn=" << log->getLsn());
-
-			size_t startPos = binaryLogRecords_.size();
-			int64_t dataSize = log->getDataSize();
-
-			util::XArray<uint8_t> binary(logManager.getAllocator());
-			typedef util::ByteStream< util::XArrayOutStream<> > OutStream;
-			util::XArrayOutStream<> arrayOut(binary);
-			OutStream out(arrayOut);
-			log->encode(out);
-
-			binaryLogRecords_.resize(
-				binaryLogRecords_.size() + sizeof(uint64_t)
-				+ binary.size());
-
-			uint64_t logAllSize = binary.size();
-			uint8_t* sizeAddr = binaryLogRecords_.data() + startPos;
-			uint8_t* addr = sizeAddr + sizeof(uint64_t);
-			memcpy(sizeAddr, &logAllSize, sizeof(uint64_t));
-			memcpy(addr, binary.data(), binary.size());
-			request_.binaryLogSize_ =
-				static_cast<uint32_t>(binaryLogRecords_.size());
+			log->encode(logManager.getAllocator(), binaryLogRecords_);
+			request_.binaryLogSize_ = static_cast<uint32_t>(binaryLogRecords_.size());
 		}
 		return lastChunkGet;
 	}
@@ -889,7 +839,7 @@ void DropPartitionHandler::operator()(
 		TRACE_SYNC_EXCEPTION(
 			e, eventType, pId, WARNING,
 			"Drop partition pending, "
-			"checkpoint-sync lock confict exception is occurred, retry after "
+			"checkpoint-sync lock conflict exception is occurred, retry after "
 			<< syncMgr_->getExtraConfig()
 			.getLockConflictPendingInterval() / 1000 << " sec");
 
@@ -968,8 +918,7 @@ void RecvSyncMessageHandler::operator()(
 			ec, *txnEE_, txnEventType,
 			pId, syncRequestInfo, 0);
 
-		WATCHER_END_SYNC(
-			getEventTypeName(syncEventType), pId);
+		WATCHER_END_DETAIL(syncEventType, pId, ec.getWorkerId());
 	}
 	catch (UserException& e) {
 		TRACE_SYNC_EXCEPTION(
@@ -1083,12 +1032,9 @@ void UnknownSyncEventHandler::operator()(
 	}
 }
 
-void SyncRequestInfo::decode(
-	EventByteInStream& in,
-	const char8_t* bodyBuffer) {
+void SyncRequestInfo::decode(EventByteInStream& in, const char8_t* bodyBuffer) {
 
-	SyncVariableSizeAllocator& varSizeAlloc =
-		syncMgr_->getVariableSizeAllocator();
+	SyncVariableSizeAllocator& varSizeAlloc = syncMgr_->getVariableSizeAllocator();
 
 	switch (eventType_) {
 	case TXN_SHORTTERM_SYNC_REQUEST:
@@ -1116,26 +1062,19 @@ void SyncRequestInfo::decode(
 
 		request_.decode(in);
 		partitionRole_.set(request_.ptRev_);
-		util::LockGuard<util::ReadLock>
-			guard(syncMgr_->getAllocLock());
-		SyncContext* context
-			= syncMgr_->getSyncContext(
-				pId_, backupSyncId_, false);
-
+		util::LockGuard<util::ReadLock> guard(syncMgr_->getAllocLock());
+		SyncContext* context = syncMgr_->getSyncContext(pId_, backupSyncId_, false);
 		if (context == NULL) {
 			return;
 		}
 		if (request_.binaryLogSize_ > 0) {
 			const size_t currentPosition = in.base().position();
-			const uint8_t* logBuffer
-				= reinterpret_cast<const uint8_t*>(
+			const uint8_t* logBuffer = reinterpret_cast<const uint8_t*>(
 					bodyBuffer + currentPosition);
 			if (logBuffer == NULL) {
-				GS_THROW_USER_ERROR(
-					GS_ERROR_SYNC_SERVICE_DECODE_MESSAGE_FAILED, "");
+				GS_THROW_USER_ERROR(GS_ERROR_SYNC_SERVICE_DECODE_MESSAGE_FAILED, "");
 			}
-			context->copyLogBuffer(
-				varSizeAlloc, logBuffer,
+			context->copyLogBuffer(varSizeAlloc, logBuffer,
 				request_.binaryLogSize_, syncMgr_->getSyncOptStat());
 		}
 		break;
@@ -1144,52 +1083,34 @@ void SyncRequestInfo::decode(
 
 		request_.decode(in);
 		partitionRole_.set(request_.ptRev_);
-		util::LockGuard<util::ReadLock>
-			guard(syncMgr_->getAllocLock());
-		SyncContext* context
-			= syncMgr_->getSyncContext(
-				pId_, backupSyncId_, false);
+		util::LockGuard<util::ReadLock> guard(syncMgr_->getAllocLock());
+		SyncContext* context = syncMgr_->getSyncContext(pId_, backupSyncId_, false);
 		if (context == NULL) {
 			return;
 		}
-		if (request_.numChunk_ == 0
-			|| request_.chunkSize_ == 0) {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_SYNC_SERVICE_DECODE_MESSAGE_FAILED, "");
+		if (request_.numChunk_ == 0 || request_.chunkSize_ == 0) {
+			GS_THROW_USER_ERROR(GS_ERROR_SYNC_SERVICE_DECODE_MESSAGE_FAILED, "");
 		}
 		size_t currentPosition = in.base().position();
-		const uint8_t* chunkBuffer =
-			reinterpret_cast<const uint8_t*>(
+		const uint8_t* chunkBuffer = reinterpret_cast<const uint8_t*>(
 				bodyBuffer + currentPosition);
 		if (chunkBuffer == NULL) {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_SYNC_SERVICE_DECODE_MESSAGE_FAILED, "");
+			GS_THROW_USER_ERROR(GS_ERROR_SYNC_SERVICE_DECODE_MESSAGE_FAILED, "");
 		}
-		context->copyChunkBuffer(
-			varSizeAlloc, chunkBuffer, request_.chunkSize_,
+		context->copyChunkBuffer(varSizeAlloc, chunkBuffer, request_.chunkSize_,
 			request_.numChunk_, syncMgr_->getSyncOptStat());
 		if (request_.binaryLogSize_ > 0) {
-			size_t nextPosition
-				= currentPosition
-				+ request_.chunkSize_ * request_.numChunk_;
-
-			const uint8_t* logBuffer
-				= reinterpret_cast<const uint8_t*>(
-					bodyBuffer + nextPosition);
+			size_t nextPosition = currentPosition + request_.chunkSize_ * request_.numChunk_;
+			const uint8_t* logBuffer = reinterpret_cast<const uint8_t*>(bodyBuffer + nextPosition);
 			if (logBuffer == NULL) {
-				GS_THROW_USER_ERROR(
-					GS_ERROR_SYNC_SYNCMESSAGE_FAILED, "");
+				GS_THROW_USER_ERROR(GS_ERROR_SYNC_SYNCMESSAGE_FAILED, "");
 			}
-			context->copyLogBuffer(
-				varSizeAlloc, logBuffer,
-				request_.binaryLogSize_,
-				syncMgr_->getSyncOptStat());
+			context->copyLogBuffer(varSizeAlloc, logBuffer, request_.binaryLogSize_, syncMgr_->getSyncOptStat());
 		}
 		break;
 	}
 	default: {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_SYNC_EVENT_TYPE_INVALID, "");
+		GS_THROW_USER_ERROR(GS_ERROR_SYNC_EVENT_TYPE_INVALID, "");
 	}
 	}
 
@@ -1203,25 +1124,17 @@ void SyncRequestInfo::decode(
 		std::vector<NodeAddress> backupsAddress, catchupAddress;
 		NodeId owner;
 		NodeIdList backups, catchups;
-		partitionRole_.get(
-			ownerAddress, backupsAddress, catchupAddress);
-		owner = ClusterService::changeNodeId(
-			ownerAddress, ee_);
+		partitionRole_.get(ownerAddress, backupsAddress, catchupAddress);
+		owner = ClusterService::changeNodeId(ownerAddress, ee_);
 
-		for (size_t pos = 0;
-			pos < backupsAddress.size(); pos++) {
-			NodeId nodeId
-				= ClusterService::changeNodeId(
-					backupsAddress[pos], ee_);
+		for (size_t pos = 0;pos < backupsAddress.size(); pos++) {
+			NodeId nodeId = ClusterService::changeNodeId(backupsAddress[pos], ee_);
 			if (nodeId != UNDEF_NODEID) {
 				backups.push_back(nodeId);
 			}
 		}
-		for (size_t pos = 0;
-			pos < catchupAddress.size(); pos++) {
-			NodeId nodeId
-				= ClusterService::changeNodeId(
-					catchupAddress[pos], ee_);
+		for (size_t pos = 0;pos < catchupAddress.size(); pos++) {
+			NodeId nodeId = ClusterService::changeNodeId(catchupAddress[pos], ee_);
 			if (nodeId != UNDEF_NODEID) {
 				catchups.push_back(nodeId);
 			}
@@ -1233,8 +1146,7 @@ void SyncRequestInfo::decode(
 	}
 }
 
-void SyncResponseInfo::decode(
-	EventByteInStream& in, const char8_t*) {
+void SyncResponseInfo::decode(EventByteInStream& in, const char8_t*) {
 
 	switch (eventType_) {
 	case TXN_SHORTTERM_SYNC_START_ACK:
@@ -1248,14 +1160,12 @@ void SyncResponseInfo::decode(
 		break;
 	}
 	default: {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_SYNC_EVENT_TYPE_INVALID, "");
+		GS_THROW_USER_ERROR(GS_ERROR_SYNC_EVENT_TYPE_INVALID, "");
 	}
 	}
 }
 
-void SyncManagerInfo::encode(
-	EventByteOutStream& out) {
+void SyncManagerInfo::encode(EventByteOutStream& out) {
 
 	try {
 		msgpack::sbuffer buffer;
@@ -1263,14 +1173,11 @@ void SyncManagerInfo::encode(
 			msgpack::pack(buffer, partitionRole_);
 		}
 		catch (std::exception& e) {
-			GS_RETHROW_USER_ERROR(
-				e, GS_EXCEPTION_MERGE_MESSAGE(
-					e, "Failed to encode message"));
+			GS_RETHROW_USER_ERROR(e, GS_EXCEPTION_MERGE_MESSAGE(e, "Failed to encode message"));
 		}
 		uint32_t packedSize = static_cast<uint32_t>(buffer.size());
 		if (packedSize == 0) {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_CS_ENCODE_DECODE_VALIDATION_CHECK, "");
+			GS_THROW_USER_ERROR(GS_ERROR_CS_ENCODE_DECODE_VALIDATION_CHECK, "");
 		}
 		out << packedSize;
 		out.writeAll(buffer.data(), packedSize);
@@ -1280,30 +1187,24 @@ void SyncManagerInfo::encode(
 	}
 }
 
-void SyncManagerInfo::decode(
-	EventByteInStream& in, const char8_t* bodyBuffer) {
+void SyncManagerInfo::decode(EventByteInStream& in, const char8_t* bodyBuffer) {
 
 	uint32_t bodySize;
 	in >> bodySize;
-	const char8_t* dataBuffer
-		= bodyBuffer + in.base().position();
+	const char8_t* dataBuffer = bodyBuffer + in.base().position();
 	uint32_t lastSize = in.base().position() + bodySize;
 	msgpack::unpacked msg;
-	msgpack::unpack(
-		&msg, dataBuffer, static_cast<size_t>(bodySize));
+	msgpack::unpack(&msg, dataBuffer, static_cast<size_t>(bodySize));
 	msgpack::object obj = msg.get();
 	obj.convert(&partitionRole_);
 	in.base().position(lastSize);
 }
 
-void SyncCheckEndInfo::decode(
-	EventByteInStream& in, const char8_t*) {
+void SyncCheckEndInfo::decode(EventByteInStream& in, const char8_t*) {
 
-	in >> ptRev_.addr_;
-	in >> ptRev_.port_;
-	in >> ptRev_.sequentialNumber_;
-	in >> syncId_.contextId_;
-	in >> syncId_.contextVersion_;
+	PartitionRevisionMesage revision(ptRev_);
+	revision.decode(in);
+	syncId_.decode(in);
 	int32_t tmpSyncMode;
 	in >> tmpSyncMode;
 	syncMode_ = static_cast<SyncMode>(tmpSyncMode);
@@ -1312,17 +1213,12 @@ void SyncCheckEndInfo::decode(
 void SyncCheckEndInfo::encode(EventByteOutStream& out) {
 
 	if (context_ == NULL || !syncId_.isValid()) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_SYNC_SERVICE_ENCODE_MESSAGE_FAILED,
-			"pId=" << pId_);
+		GS_THROW_USER_ERROR(GS_ERROR_SYNC_SERVICE_ENCODE_MESSAGE_FAILED, "pId=" << pId_);
 	}
 
-	PartitionRevision& ptRev = context_->getPartitionRevision();
-	out << ptRev.addr_;
-	out << ptRev.port_;
-	out << ptRev.sequentialNumber_;
-	out << syncId_.contextId_;
-	out << syncId_.contextVersion_;
+	PartitionRevisionMesage revision(context_->getPartitionRevision());
+	revision.encode(out);
+	syncId_.encode(out);
 	out << static_cast<int32_t>(syncMode_);
 }
 
@@ -1389,16 +1285,13 @@ void SyncResponseInfo::encode(EventByteOutStream& out) {
 	@brief Encodes synchronization request
 */
 void SyncRequestInfo::Request::encode(
-	EventByteOutStream& out, bool isOwner) const {
+	EventByteOutStream& out, bool isOwner) {
 
 	out << syncMode_;
-	out << ptRev_.addr_;
-	out << ptRev_.port_;
-	out << ptRev_.sequentialNumber_;
-	out << requestInfo_->syncId_.contextId_;
-	out << requestInfo_->syncId_.contextVersion_;
-	out << requestInfo_->backupSyncId_.contextId_;
-	out << requestInfo_->backupSyncId_.contextVersion_;
+	PartitionRevisionMesage revision(ptRev_);
+	revision.encode(out);
+	requestInfo_->syncId_.encode(out);
+	requestInfo_->backupSyncId_.encode(out);
 	out << ownerLsn_;
 	out << startLsn_;
 	out << endLsn_;
@@ -1408,15 +1301,13 @@ void SyncRequestInfo::Request::encode(
 
 	if (isOwner) {
 		if (numChunk_ > 0) {
-			util::XArray<uint8_t*>& chunks
-				= requestInfo_->chunks_;
+			util::XArray<uint8_t*>& chunks = requestInfo_->chunks_;
 			for (size_t pos = 0; pos < numChunk_; pos++) {
 				out.writeAll(chunks[pos], chunkSize_);
 			}
 		}
 		if (binaryLogSize_ > 0) {
-			util::XArray<uint8_t>& logRecord
-				= requestInfo_->binaryLogRecords_;
+			util::XArray<uint8_t>& logRecord = requestInfo_->binaryLogRecords_;
 			out.writeAll(logRecord.data(), logRecord.size());
 		}
 	}
@@ -1425,17 +1316,13 @@ void SyncRequestInfo::Request::encode(
 /*!
 	@brief Decodes synchronization request
 */
-void SyncRequestInfo::Request::decode(
-	EventByteInStream& in) {
+void SyncRequestInfo::Request::decode(EventByteInStream& in) {
 
 	in >> syncMode_;
-	in >> ptRev_.addr_;
-	in >> ptRev_.port_;
-	in >> ptRev_.sequentialNumber_;
-	in >> requestInfo_->syncId_.contextId_;
-	in >> requestInfo_->syncId_.contextVersion_;
-	in >> requestInfo_->backupSyncId_.contextId_;
-	in >> requestInfo_->backupSyncId_.contextVersion_;
+	PartitionRevisionMesage revision(ptRev_);
+	revision.decode(in);
+	requestInfo_->syncId_.decode(in);
+	requestInfo_->backupSyncId_.decode(in);
 	in >> ownerLsn_;
 	in >> startLsn_;
 	in >> endLsn_;
@@ -1447,34 +1334,26 @@ void SyncRequestInfo::Request::decode(
 /*!
 	@brief Encodes synchronization response
 */
-void SyncResponseInfo::Response::encode(
-	EventByteOutStream& out) const {
+void SyncResponseInfo::Response::encode(EventByteOutStream& out) {
 
 	out << syncMode_;
-	out << ptRev_.addr_;
-	out << ptRev_.port_;
-	out << ptRev_.sequentialNumber_;
-	out << responseInfo_->syncId_.contextId_;
-	out << responseInfo_->syncId_.contextVersion_;
-	out << responseInfo_->backupSyncId_.contextId_;
-	out << responseInfo_->backupSyncId_.contextVersion_;
+	PartitionRevisionMesage revision(ptRev_);
+	revision.encode(out);
+	responseInfo_->syncId_.encode(out);
+	responseInfo_->backupSyncId_.encode(out);
 	out << targetLsn_;
 }
 
 /*!
 	@brief Decodes synchronization response
 */
-void SyncResponseInfo::Response::decode(
-	EventByteInStream& in) {
+void SyncResponseInfo::Response::decode(EventByteInStream& in) {
 
 	in >> syncMode_;
-	in >> ptRev_.addr_;
-	in >> ptRev_.port_;
-	in >> ptRev_.sequentialNumber_;
-	in >> responseInfo_->syncId_.contextId_;
-	in >> responseInfo_->syncId_.contextVersion_;
-	in >> responseInfo_->backupSyncId_.contextId_;
-	in >> responseInfo_->backupSyncId_.contextVersion_;
+	PartitionRevisionMesage revision(ptRev_);
+	revision.decode(in);
+	responseInfo_->syncId_.decode(in);
+	responseInfo_->backupSyncId_.decode(in);
 	in >> targetLsn_;
 }
 
@@ -1531,7 +1410,7 @@ void ShortTermSyncHandler::decodeLongSyncRequestInfo(
 		if (longSyncContext) {
 		}
 		else {
-			GS_TRACE_SYNC_NORAML(
+			GS_TRACE_SYNC_NORMAL(
 				"Long sync context is not found");
 		}
 	}
@@ -1955,5 +1834,3 @@ void ShortTermSyncHandler::executeSyncEndAck(
 		}
 	}
 }
-
-

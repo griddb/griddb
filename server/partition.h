@@ -16,7 +16,7 @@
 */
 /*!
 	@file
-	@brief Definition of Partiiton
+	@brief Definition of Partition
 */
 #ifndef PARTITION_H_
 #define PARTITION_H_
@@ -245,7 +245,7 @@ public:
 
 	virtual ~Partition();
 
-	void initialize(ManagerSet &resouceSet);
+	void initialize(ManagerSet &resourceSet);
 
 	void fin();
 
@@ -253,7 +253,8 @@ public:
 
 	void reinit(PartitionList& ptList);
 
-	void recover(InterchangeableStoreMemory* ism);
+	void recover(
+			InterchangeableStoreMemory* ism, LogSequentialNumber targetLsn = 0);
 
 	void restore(const uint8_t* logListBinary, uint32_t size);
 
@@ -286,7 +287,7 @@ public:
 	void endCheckpoint0(CheckpointPhase phase);
 
 	void endCheckpoint(EndCheckpointMode x);
-	LogIterator<NoLocker> endCheckpointPrepareRelaseBlock();
+	LogIterator<NoLocker> endCheckpointPrepareReleaseBlock();
 	void endCheckpointReleaseBlock(const Log* log);
 	void removeLogFiles();
 	int64_t postCheckpoint(
@@ -355,6 +356,7 @@ public:
 	static const int32_t INITIAL_X_WAL_BUFFER_SIZE = 256 * 1024;
 	static const int32_t INITIAL_CP_WAL_BUFFER_SIZE = 4 * 1024;
 	static const int32_t INITIAL_AFFINITY_MANAGER_SIZE = 1024;
+	static const std::string CLUSTER_SNAPSHOT_INFO_FILE_NAME;
 
 	PartitionList(::ConfigTable& config, TransactionManager* txnMgr,
 				  util::FixedSizeAllocator<util::Mutex>& resultsetPool);
@@ -364,7 +366,7 @@ public:
 	Partition& partition(size_t pId);
 	InterchangeableStoreMemory& interchangeableStoreMemory();
 
-	void initialize(ManagerSet &resouceSet);
+	void initialize(ManagerSet & resourceSet);
 
 	PartitionGroupConfig& getPgConfig() { return pgConfig_; }
 
@@ -434,6 +436,8 @@ public:
 		util::Atomic<uint64_t> atomicCpFileFlushInterval_;
 		util::Atomic<bool> atomicCpFileAutoClearCache_;
 	};
+
+	Config& config() { return config_; }
 
 private:
 	util::VariableSizeAllocator<> varAlloc_;

@@ -510,7 +510,7 @@ private:
 			Chunk *chunk, const ChunkBufferFrameRef &frameRef);
 };
 
-class ChunkManagerStats;
+struct ChunkManagerStats;
 
 /*!
 	@brief フリースペース管理
@@ -711,7 +711,7 @@ public:
 	static inline uint64_t calcMaxChunkId(uint32_t blockSize) {
 		const uint32_t chunkExpSize = util::nextPowerBitsOf2(blockSize);
 		const bool isLargeChunkMode = ChunkManager::isLargeChunkMode(chunkExpSize);
-		return INT32_MAX - 1;
+		return isLargeChunkMode ? ((static_cast<int32_t>(1) << 26) - 2): INT32_MAX - 1;
 	}
 
 	ChunkManager(
@@ -743,6 +743,8 @@ public:
 	ChunkId getHeadChunkId(DSGroupId groupId);
 
 	void adjustStoreMemory(uint64_t newLimit);
+
+	uint64_t getCurrentLimit();
 
 	void validatePinCount();
 
@@ -817,6 +819,10 @@ public:
 	void updateStoreMemoryAgingParams();
 
 	void updateStoreObjectUseStats();
+
+	int64_t getMaxChunkId() {
+		return MAX_CHUNK_ID;
+	}
 
 	ChunkManagerStats& stats() {
 		return chunkManagerStats_;

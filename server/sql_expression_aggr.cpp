@@ -101,13 +101,13 @@ inline void SQLAggrExprs::Functions::CountColumn::Advance::operator()(
 
 
 SQLAggrExprs::Functions::GroupConcat::Advance::Advance() :
-		forSeparatror_(false) {
+		forSeparator_(false) {
 }
 
 template<typename C>
 void SQLAggrExprs::Functions::GroupConcat::Advance::operator()(
 		C &cxt, const Aggr &aggr, const TupleValue &v) {
-	if (forSeparatror_) {
+	if (forSeparator_) {
 		if (!SQLValues::ValueUtils::isNull(v)) {
 			aggr.set<2>()(
 					cxt, SQLValues::ValueUtils::promoteValue<
@@ -140,7 +140,7 @@ void SQLAggrExprs::Functions::GroupConcat::Advance::operator()(
 		aggr.add<1>()(cxt, lobReader);
 	}
 
-	forSeparatror_ = true;
+	forSeparator_ = true;
 	if (!aggr.isNull<2>()(cxt)) {
 		cxt.finishFunction();
 	}
@@ -230,7 +230,8 @@ inline void SQLAggrExprs::Functions::LagLead::Advance::operator()(
 		C &cxt, const Aggr &aggr, const TupleValue &v) {
 	if (positioning_) {
 		positioning_ = false;
-		if (!SQLValues::ValueUtils::isNull(v) && v.get<int64_t>() >= 0) {
+		if (!SQLValues::ValueUtils::isNull(v))
+		{
 			cxt.finishFunction();
 		}
 		else {

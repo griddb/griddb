@@ -334,7 +334,7 @@ bool NoSQLContainer::executeCommand(Event& request,
 			currentTime = sqlSvc->getEE()->getMonotonicTime();
 			if (counter % 5 == 0) {
 				GS_TRACE_WARNING(SQL_SERVICE, GS_TRACE_SQL_FAILOVER_WORKING,
-					"Failover working, totalDuraton=" << (currentTime - startTime_)
+					"Failover working, totalDuration=" << (currentTime - startTime_)
 					<< ", limitDuration=" << (limitTime - startTime_)
 					<< ", pId=" << txnPId_ << ", nodeId=" << nodeId_
 					<< ", revision=" << partitionRevNo_);
@@ -348,7 +348,7 @@ bool NoSQLContainer::executeCommand(Event& request,
 					catch (std::exception& e) {
 						GS_RETHROW_USER_ERROR_CODED(GS_ERROR_JOB_CANCELLED, e,
 							GS_EXCEPTION_MERGE_MESSAGE(e, "Cancel SQL, clientId="
-								<< context_->clientId_ << ", location=executeCommand, reason=Failover timeout, totalDuraton="
+								<< context_->clientId_ << ", location=executeCommand, reason=Failover timeout, totalDuration="
 								<< (currentTime - startTime_)
 								<< ", limitDuration=" << (limitTime - startTime_)
 								<< ", pId=" << txnPId_ << ", nodeId=" << nodeId_
@@ -359,7 +359,7 @@ bool NoSQLContainer::executeCommand(Event& request,
 				else {
 					GS_THROW_USER_ERROR(GS_ERROR_SQL_PARTITION_NOT_AVAILABLE,
 						"Cancel SQL, clientId=" << context_->clientId_
-						<< ", location=executeCommand, reason=Failover timeout, totalDuraton="
+						<< ", location=executeCommand, reason=Failover timeout, totalDuration="
 						<< (currentTime - startTime_)
 						<< ", limitDuration=" << (limitTime - startTime_)
 						<< ", pId=" << txnPId_ << ", nodeId=" << nodeId_
@@ -549,17 +549,17 @@ bool TableExpirationSchemaInfo::updateSchema(util::StackAllocator& alloc,
 			if (affinityStrLen == 0) {
 				return false;
 			}
-			util::XArray<uint8_t> affinitiValue(alloc);
-			affinitiValue.resize(static_cast<size_t>(affinityStrLen));
-			in >> std::make_pair(affinitiValue.data(), affinityStrLen);
+			util::XArray<uint8_t> affinityValue(alloc);
+			affinityValue.resize(static_cast<size_t>(affinityStrLen));
+			in >> std::make_pair(affinityValue.data(), affinityStrLen);
 			StatementHandler::decodeBinaryData<util::ArrayByteInStream>(in, remaining, true);
 
-			util::String  affinityValue(alloc);
-			NoSQLUtils::getAffinitySubValue(alloc, subContainerAffinity_, affinityValue);
+			util::String  affinityValueStr(alloc);
+			NoSQLUtils::getAffinitySubValue(alloc, subContainerAffinity_, affinityValueStr);
 
-			affinityStrLen = affinityValue.size();
+			affinityStrLen = affinityValueStr.size();
 			out << affinityStrLen;
-			out << std::make_pair(affinityValue.c_str(), affinityStrLen);
+			out << std::make_pair(affinityValueStr.c_str(), affinityStrLen);
 
 			out << std::make_pair(remaining.data(), remaining.size());
 			return true;
@@ -1164,10 +1164,10 @@ void NoSQLContainer::createIndex(const char* indexName, MapType mapType,
 }
 
 bool NoSQLContainer::createLargeIndex(const char* indexName,
-	util::Vector<util::String> &columnNameList,
+	util::Vector<util::String>& columnNameList,
 	MapType mapType,
-	util::Vector<ColumnId> &columnIdList,
-	NoSQLStoreOption & option) {
+	util::Vector<ColumnId>& columnIdList,
+	NoSQLStoreOption& option) {
 	try {
 		EventType eventType = CREATE_LARGE_INDEX;
 		ClientSession::Builder sessionBuilder(this, eventType);
@@ -1217,7 +1217,7 @@ bool NoSQLContainer::createLargeIndex(const char* indexName,
 
 bool NoSQLContainer::createLargeIndex(const char* indexName,
 	const char* columnName, MapType mapType, uint32_t columnId,
-	NoSQLStoreOption & option) {
+	NoSQLStoreOption& option) {
 	try {
 		EventType eventType = CREATE_LARGE_INDEX;
 		ClientSession::Builder sessionBuilder(this, eventType);
@@ -1263,7 +1263,7 @@ bool NoSQLContainer::createLargeIndex(const char* indexName,
 /*!
 	@brief	索引を削除する
 */
-void NoSQLContainer::dropIndex(const char* indexName, NoSQLStoreOption & option) {
+void NoSQLContainer::dropIndex(const char* indexName, NoSQLStoreOption& option) {
 	try {
 		EventType eventType = DELETE_INDEX;
 		ClientSession::Builder sessionBuilder(this, eventType);
@@ -1292,14 +1292,14 @@ void NoSQLContainer::dropIndex(const char* indexName, NoSQLStoreOption & option)
 /*!
 	@brief	コミットを実行する
 */
-void NoSQLContainer::commit(NoSQLStoreOption & option) {
+void NoSQLContainer::commit(NoSQLStoreOption& option) {
 	commitOrRollbackInternal(COMMIT_TRANSACTION, option);
 }
 
 /*!
 	@brief	アボートを実行する
 */
-void NoSQLContainer::abort(NoSQLStoreOption & option) {
+void NoSQLContainer::abort(NoSQLStoreOption& option) {
 	commitOrRollbackInternal(ABORT_TRANSACTION, option);
 }
 
@@ -1307,7 +1307,7 @@ void NoSQLContainer::abort(NoSQLStoreOption & option) {
 	@brief	コミット若しくはアボートを実行する
 */
 void NoSQLContainer::commitOrRollbackInternal(EventType eventType,
-	NoSQLStoreOption & option) {
+	NoSQLStoreOption& option) {
 	try {
 		if (enableCommitOrAbort()) {
 			ClientSession::Builder sessionBuilder(this, eventType);
@@ -1329,7 +1329,7 @@ void NoSQLContainer::commitOrRollbackInternal(EventType eventType,
 	}
 }
 
-void NoSQLContainer::createTransactionContext(NoSQLStoreOption & option) {
+void NoSQLContainer::createTransactionContext(NoSQLStoreOption& option) {
 	EventType eventType = CREATE_TRANSACTION_CONTEXT;
 	try {
 		ClientSession::Builder sessionBuilder(this, eventType);
@@ -1352,7 +1352,7 @@ void NoSQLContainer::createTransactionContext(NoSQLStoreOption & option) {
 	@brief ステートメントをクローズする
 	@return NoSQLStatementId 実行対象のステートメントID
 */
-void NoSQLContainer::closeContainer(NoSQLStoreOption & option) {
+void NoSQLContainer::closeContainer(NoSQLStoreOption& option) {
 	try {
 		EventType eventType = CLOSE_SESSION;
 		ClientSession::Builder sessionBuilder(this, eventType);
@@ -1372,8 +1372,8 @@ void NoSQLContainer::closeContainer(NoSQLStoreOption & option) {
 /*!
 	@brief	指定カラム名に対するカラムIDを取得する
 */
-int32_t NoSQLContainer::getColumnId(util::StackAllocator & alloc,
-	const NameWithCaseSensitivity & columnName) {
+int32_t NoSQLContainer::getColumnId(util::StackAllocator& alloc,
+	const NameWithCaseSensitivity& columnName) {
 	int32_t indexColId = -1;
 	int32_t realIndexColId = 0;
 
@@ -1387,12 +1387,12 @@ int32_t NoSQLContainer::getColumnId(util::StackAllocator & alloc,
 		}
 	}
 	else {
-		const util::String& normalizeSpecfiedColumnName =
+		const util::String& normalizeSpecifiedColumnName =
 			normalizeName(alloc, columnName.name_);
 		for (int32_t col = 0; col < static_cast<int32_t>(columnInfoList_.size()); col++) {
 			const util::String& normalizeColumnName =
 				normalizeName(alloc, columnInfoList_[col]->name_.c_str());
-			if (!normalizeColumnName.compare(normalizeSpecfiedColumnName)) {
+			if (!normalizeColumnName.compare(normalizeSpecifiedColumnName)) {
 				indexColId = realIndexColId;
 				break;
 			}
@@ -1402,9 +1402,9 @@ int32_t NoSQLContainer::getColumnId(util::StackAllocator & alloc,
 	return indexColId;
 }
 
-bool NoSQLContainer::getIndexEntry(util::StackAllocator & alloc,
-	const NameWithCaseSensitivity & indexName, ColumnId columnId, MapType indexType,
-	util::Vector<IndexInfoEntry> &entryList) {
+bool NoSQLContainer::getIndexEntry(util::StackAllocator& alloc,
+	const NameWithCaseSensitivity& indexName, ColumnId columnId, MapType indexType,
+	util::Vector<IndexInfoEntry>& entryList) {
 	bool existsSameColumn = false;
 
 	if (indexName.isCaseSensitive_) {
@@ -1445,7 +1445,7 @@ bool NoSQLContainer::getIndexEntry(util::StackAllocator & alloc,
 /*!
 	@brief	固定長部分をエンコードする
 */
-void NoSQLContainer::encodeFixedPart(EventByteOutStream & out, EventType type) {
+void NoSQLContainer::encodeFixedPart(EventByteOutStream& out, EventType type) {
 
 	StatementMessage::FixedRequest::Source source(getPartitionId(), type);
 	StatementMessage::FixedRequest request(source);
@@ -1524,8 +1524,8 @@ void NoSQLContainer::encodeFixedPart(EventByteOutStream & out, EventType type) {
 /*!
 	@brief	オプション部をエンコードする
 */
-void NoSQLContainer::encodeOptionPart(EventByteOutStream & out, EventType type,
-	NoSQLStoreOption & option) {
+void NoSQLContainer::encodeOptionPart(EventByteOutStream& out, EventType type,
+	NoSQLStoreOption& option) {
 	try {
 		util::StackAllocator::Scope scope(eventStackAlloc_);
 		StatementMessage::OptionSet optionalRequest(eventStackAlloc_);
@@ -1709,7 +1709,7 @@ void NoSQLContainer::encodeOptionPart(EventByteOutStream & out, EventType type,
 	@brief	オプション種別の追加
 */
 void NoSQLContainer::OptionalRequest::putType(
-	EventByteOutStream & reqOut, StatementHandler::OptionType type) {
+	EventByteOutStream& reqOut, StatementHandler::OptionType type) {
 	reqOut << static_cast<int16_t>(type);
 }
 
@@ -1729,7 +1729,7 @@ void NoSQLContainer::OptionalRequest::set(
 }
 
 void TableSchemaInfo::setContainerInfo(
-	int32_t pos, TableContainerInfo & containerInfo, NodeAffinityNumber affinity) {
+	int32_t pos, TableContainerInfo& containerInfo, NodeAffinityNumber affinity) {
 	containerInfo.affinity_ = affinity;
 	containerInfo.pos_ = pos;
 	containerInfoList_.push_back(containerInfo);
@@ -1741,7 +1741,7 @@ void TableSchemaInfo::setContainerInfo(
 	@note 実データから
 */
 TableContainerInfo* TableSchemaInfo::setContainerInfo(
-	int32_t pos, NoSQLContainer & container, NodeAffinityNumber affinity) {
+	int32_t pos, NoSQLContainer& container, NodeAffinityNumber affinity) {
 	ColumnIdList* columnIdList = NULL;
 	try {
 		TableContainerInfo containerInfo(container.getGlobalAllocator());
@@ -1804,7 +1804,7 @@ TableContainerInfo* TableSchemaInfo::setContainerInfo(
 	@brief	カラム情報をセットする
 	@note 実データから
 */
-void TableSchemaInfo::setColumnInfo(NoSQLContainer & container) {
+void TableSchemaInfo::setColumnInfo(NoSQLContainer& container) {
 	uint16_t fixDataOffset = 0;
 	uint16_t varDataPos = 0;
 	if (nosqlColumnInfoList_ == NULL) {
@@ -1846,7 +1846,7 @@ void TableSchemaInfo::setColumnInfo(NoSQLContainer & container) {
 	columnSize_ = static_cast<uint32_t>(container.getColumnSize());
 }
 
-void TableSchemaInfo::setOptionList(util::XArray<uint8_t> &optionList) {
+void TableSchemaInfo::setOptionList(util::XArray<uint8_t>& optionList) {
 	assert(columnInfoList_.size() == optionList.size());
 	if (columnInfoList_.size() != optionList.size()) {
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_COLUMN, "");
@@ -1871,8 +1871,8 @@ TableSchemaInfo::~TableSchemaInfo() {
 }
 
 void NoSQLSyncContext::put(EventType eventType, int64_t syncId, StatementExecStatus status,
-	EventByteInStream & in, util::Exception & exception,
-	StatementMessage::Request & request) {
+	EventByteInStream& in, util::Exception& exception,
+	StatementMessage::Request& request) {
 	nosqlRequest_.put(syncId, status, in, &exception, request);
 }
 
@@ -1884,9 +1884,9 @@ bool NoSQLSyncContext::isRunning() {
 	return nosqlRequest_.isRunning();
 }
 
-void NoSQLSyncContext::get(Event & request, util::StackAllocator & alloc,
-	NoSQLContainer * container, int32_t waitInterval,
-	int32_t timeoutInterval, util::XArray<uint8_t> &response) {
+void NoSQLSyncContext::get(Event& request, util::StackAllocator& alloc,
+	NoSQLContainer* container, int32_t waitInterval,
+	int32_t timeoutInterval, util::XArray<uint8_t>& response) {
 	nosqlRequest_.get(request, alloc, container, waitInterval, timeoutInterval, response);
 }
 void NoSQLSyncContext::wait(int32_t waitInterval) {
@@ -1928,21 +1928,21 @@ void NoSQLContainer::updateCondition() {
 }
 
 template void NoSQLUtils::makeNormalContainerSchema(
-	util::StackAllocator & alloc, const char* containerName,
-	CreateTableOption & createOption,
-	util::XArray<uint8_t> &containerSchema,
-	util::XArray<uint8_t> &optionList,
-	TablePartitioningInfo<util::StackAllocator> &partitioningInfo);
+	util::StackAllocator& alloc, const char* containerName,
+	CreateTableOption& createOption,
+	util::XArray<uint8_t>& containerSchema,
+	util::XArray<uint8_t>& optionList,
+	TablePartitioningInfo<util::StackAllocator>& partitioningInfo);
 
 template void NoSQLUtils::makeNormalContainerSchema(
-	util::StackAllocator & alloc, const char* containerName,
-	CreateTableOption & createOption,
-	util::XArray<uint8_t> &containerSchema,
-	util::XArray<uint8_t> &optionList,
-	TablePartitioningInfo<SQLVariableSizeGlobalAllocator> &partitioningInfo);
+	util::StackAllocator& alloc, const char* containerName,
+	CreateTableOption& createOption,
+	util::XArray<uint8_t>& containerSchema,
+	util::XArray<uint8_t>& optionList,
+	TablePartitioningInfo<SQLVariableSizeGlobalAllocator>& partitioningInfo);
 
-void NoSQLUtils::getAffinityValue(util::StackAllocator & alloc,
-	CreateTableOption & createOption, util::String & affinityValue) {
+void NoSQLUtils::getAffinityValue(util::StackAllocator& alloc,
+	CreateTableOption& createOption, util::String& affinityValue) {
 	if (createOption.propertyMap_) {
 		SyntaxTree::DDLWithParameterMap& paramMap = *createOption.propertyMap_;
 		SyntaxTree::DDLWithParameterMap::iterator it;
@@ -1956,9 +1956,9 @@ void NoSQLUtils::getAffinityValue(util::StackAllocator & alloc,
 }
 
 
-void NoSQLUtils::getAffinityValue(util::StackAllocator & alloc,
-	util::XArray<uint8_t> &containerSchema,
-	util::String & affityStr) {
+void NoSQLUtils::getAffinityValue(util::StackAllocator& alloc,
+	util::XArray<uint8_t>& containerSchema,
+	util::String& affinityStr) {
 
 	util::ArrayByteInStream in = util::ArrayByteInStream(
 		util::ArrayInStream(containerSchema.data(), containerSchema.size()));
@@ -1981,16 +1981,16 @@ void NoSQLUtils::getAffinityValue(util::StackAllocator & alloc,
 	for (int16_t pos = 0; pos < rowKeyNum; pos++) {
 		in >> keyColumnId;
 	}
-	StatementHandler::decodeStringData<util::ByteStream<util::ArrayInStream>, util::String>(in, affityStr);
+	StatementHandler::decodeStringData<util::ByteStream<util::ArrayInStream>, util::String>(in, affinityStr);
 }
 
 template<typename Alloc>
 void NoSQLUtils::makeNormalContainerSchema(
-	util::StackAllocator & alloc, const char* containerName,
-	CreateTableOption & createOption,
-	util::XArray<uint8_t> &containerSchema,
-	util::XArray<uint8_t> &optionList,
-	TablePartitioningInfo<Alloc> &partitioningInfo) {
+	util::StackAllocator& alloc, const char* containerName,
+	CreateTableOption& createOption,
+	util::XArray<uint8_t>& containerSchema,
+	util::XArray<uint8_t>& optionList,
+	TablePartitioningInfo<Alloc>& partitioningInfo) {
 	try {
 		int32_t keyColumnId = UNDEF_COLUMNID;
 		int32_t columnNum = createOption.columnNum_;
@@ -2001,7 +2001,6 @@ void NoSQLUtils::makeNormalContainerSchema(
 			(*createOption.columnInfoList_)[primaryKeyList[j]]->option_
 				|= SyntaxTree::COLUMN_OPT_NOT_NULL;
 		}
-
 		containerSchema.push_back(
 			reinterpret_cast<uint8_t*>(&columnNum), sizeof(int32_t));
 		for (int32_t i = 0; i < columnNum; i++) {
@@ -2057,7 +2056,7 @@ void NoSQLUtils::makeNormalContainerSchema(
 			if (it != paramMap.end()) {
 				TupleValue& value = (*it).second;
 				if (value.getType() != TupleList::TYPE_LONG) {
-					GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, "Invalid fomart type");
+					GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, "Invalid format type");
 				}
 				int64_t tmpValue = value.get<int64_t>();
 				if (tmpValue <= 0) {
@@ -2076,7 +2075,7 @@ void NoSQLUtils::makeNormalContainerSchema(
 				withTimeSeriesOption = true;
 				TupleValue& value = (*it).second;
 				if (value.getType() != TupleList::TYPE_STRING) {
-					GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, "Invalid fomart type");
+					GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, "Invalid format type");
 				}
 				const char* valueStr = static_cast<const char*>(value.varData());
 				assert(valueStr != NULL);
@@ -2111,7 +2110,7 @@ void NoSQLUtils::makeNormalContainerSchema(
 				useDevisionCount = true;
 				TupleValue& value = (*it).second;
 				if (value.getType() != TupleList::TYPE_LONG) {
-					GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, "Invalid fomart type");
+					GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, "Invalid format type");
 				}
 				int64_t tmpValue = value.get<int64_t>();
 				if (tmpValue <= 0) {
@@ -2129,7 +2128,7 @@ void NoSQLUtils::makeNormalContainerSchema(
 			if (it != paramMap.end()) {
 				TupleValue& value = (*it).second;
 				if (value.getType() != TupleList::TYPE_STRING) {
-					GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, "Invalid fomart type");
+					GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, "Invalid format type");
 				}
 				withTimeSeriesOption = true;
 				const char* valueStr = static_cast<const char*>(value.varData());
@@ -2162,7 +2161,7 @@ void NoSQLUtils::makeNormalContainerSchema(
 
 		if (!createOption.isTimeSeries() && partitioningInfo.tableStatus_ == EXPIRATION_TYPE_ROW) {
 			GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_PARAMETER,
-				"Row expriration definition must be timeseries container");
+				"Row expiration definition must be timeseries container");
 		}
 
 		int8_t existTimeSeriesOptionTmp = 0;
@@ -2196,9 +2195,9 @@ void NoSQLUtils::makeNormalContainerSchema(
 	}
 }
 
-void NoSQLUtils::checkSchemaValidation(util::StackAllocator & alloc,
-	const DataStoreConfig & config, const char* containerName,
-	util::XArray<uint8_t> &binarySchema, ContainerType containerType) {
+void NoSQLUtils::checkSchemaValidation(util::StackAllocator& alloc,
+	const DataStoreConfig& config, const char* containerName,
+	util::XArray<uint8_t>& binarySchema, ContainerType containerType) {
 
 	util::ArrayByteInStream normalIn = util::ArrayByteInStream(
 		util::ArrayInStream(binarySchema.data(), binarySchema.size()));
@@ -2213,10 +2212,10 @@ void NoSQLUtils::checkSchemaValidation(util::StackAllocator & alloc,
 }
 
 void NoSQLUtils::makeContainerColumns(
-	util::StackAllocator & alloc, util::XArray<uint8_t> &containerSchema,
-	util::Vector<util::String> &columnNameList,
-	util::Vector<ColumnType> &columnTypeList,
-	util::Vector<uint8_t> &columnOptionList) {
+	util::StackAllocator& alloc, util::XArray<uint8_t>& containerSchema,
+	util::Vector<util::String>& columnNameList,
+	util::Vector<ColumnType>& columnTypeList,
+	util::Vector<uint8_t>& columnOptionList) {
 	util::ArrayByteInStream in = util::ArrayByteInStream(
 		util::ArrayInStream(containerSchema.data(), containerSchema.size()));
 	int32_t columnNum;
@@ -2241,8 +2240,8 @@ void NoSQLUtils::makeContainerColumns(
 }
 
 void NoSQLUtils::makeLargeContainerSchema(
-	util::StackAllocator & alloc, util::XArray<uint8_t> &binarySchema,
-	bool isView, util::String & affinityStr) {
+	util::StackAllocator& alloc, util::XArray<uint8_t>& binarySchema,
+	bool isView, util::String& affinityStr) {
 
 	int32_t columnNum = 2;
 	binarySchema.push_back(
@@ -2306,7 +2305,7 @@ void NoSQLUtils::makeLargeContainerSchema(
 }
 
 void NoSQLUtils::makeLargeContainerColumn(
-	util::XArray<ColumnInfo> &columnInfoList) {
+	util::XArray<ColumnInfo>& columnInfoList) {
 	uint32_t nullByteSize = ValueProcessor::calcNullsByteSize(1);
 	uint16_t fixDataOffset = static_cast<uint16_t>(nullByteSize);
 	uint16_t varDataPos = 0;
@@ -2328,9 +2327,9 @@ void NoSQLUtils::makeLargeContainerColumn(
 	@note utility関数
 	@note 新規計算方法に対応
 */
-PartitionId NoSQLUtils::resolvePartitionId(util::StackAllocator & alloc,
+PartitionId NoSQLUtils::resolvePartitionId(util::StackAllocator& alloc,
 	PartitionId partitionCount,
-	const FullContainerKey & containerKey,
+	const FullContainerKey& containerKey,
 	ContainerHashMode hashMode) {
 	return KeyDataStore::resolvePartitionId(
 		alloc, containerKey, partitionCount, hashMode);
@@ -2347,8 +2346,8 @@ uint32_t NoSQLUtils::resolveSubContainerId(
 /*!
 	@brief	コンテナを取得する
 */
-void NoSQLContainer::getContainerCount(uint64_t & containerCount,
-	NoSQLStoreOption & option) {
+void NoSQLContainer::getContainerCount(uint64_t& containerCount,
+	NoSQLStoreOption& option) {
 	try {
 		EventType eventType = GET_PARTITION_CONTAINER_NAMES;
 		containerCount = 0;
@@ -2388,7 +2387,7 @@ void NoSQLContainer::getContainerCount(uint64_t & containerCount,
 	}
 }
 
-int32_t NoSQLUtils::checkPrimaryKey(CreateTableOption & createTableOption) {
+int32_t NoSQLUtils::checkPrimaryKey(CreateTableOption& createTableOption) {
 	int32_t primaryKeyColumnId = -1;
 	for (int32_t i = 0; i < static_cast<int32_t>(createTableOption.columnInfoList_->size()); i++) {
 		if ((*createTableOption.columnInfoList_)[i]->isPrimaryKey()) {
@@ -2454,8 +2453,8 @@ int32_t NoSQLUtils::checkPrimaryKey(CreateTableOption & createTableOption) {
 	return primaryKeyColumnId;
 }
 
-void NoSQLUtils::checkPrimaryKey(util::StackAllocator & alloc,
-	CreateTableOption & createTableOption, util::Vector<ColumnId> &columnIds) {
+void NoSQLUtils::checkPrimaryKey(util::StackAllocator& alloc,
+	CreateTableOption& createTableOption, util::Vector<ColumnId>& columnIds) {
 	ColumnId checkId = 0;
 	util::Map<util::String, int32_t> columnMap(alloc);
 	util::Map<util::String, int32_t>::iterator it;
@@ -2510,10 +2509,9 @@ void NoSQLUtils::checkPrimaryKey(util::StackAllocator & alloc,
 	}
 }
 
-
-void NoSQLUtils::decodePartitioningTableIndexInfo(util::StackAllocator & alloc,
-	InputMessageRowStore & rowStore,
-	util::Vector<IndexInfo> &indexInfoList) {
+void NoSQLUtils::decodePartitioningTableIndexInfo(util::StackAllocator& alloc,
+	InputMessageRowStore& rowStore,
+	util::Vector<IndexInfo>& indexInfoList) {
 	while (rowStore.next()) {
 		const void* keyData = NULL;
 		uint32_t keySize = 0;
@@ -2551,8 +2549,8 @@ void TableSchemaInfo::setPrimaryKeyIndex(int32_t primaryKeyColumnId) {
 }
 
 TablePartitioningIndexInfoEntry* TablePartitioningIndexInfo::find(
-	const NameWithCaseSensitivity & indexName,
-	util::Vector<ColumnId> &columnIdList, MapType indexType) {
+	const NameWithCaseSensitivity& indexName,
+	util::Vector<ColumnId>& columnIdList, MapType indexType) {
 	TablePartitioningIndexInfoEntry* retEntry = NULL;
 	if (indexName.isCaseSensitive_) {
 		for (size_t pos = 0; pos < indexEntryList_.size(); pos++) {
@@ -2586,7 +2584,7 @@ TablePartitioningIndexInfoEntry* TablePartitioningIndexInfo::find(
 }
 
 TablePartitioningIndexInfoEntry* TablePartitioningIndexInfo::check(
-	util::Vector<ColumnId> &columnIdList, MapType indexType) {
+	util::Vector<ColumnId>& columnIdList, MapType indexType) {
 	for (size_t pos = 0; pos < indexEntryList_.size(); pos++) {
 		if (isSame(pos, columnIdList, indexType)) {
 			return indexEntryList_[pos];
@@ -2596,7 +2594,7 @@ TablePartitioningIndexInfoEntry* TablePartitioningIndexInfo::check(
 }
 
 TablePartitioningIndexInfoEntry* TablePartitioningIndexInfo::find(
-	const NameWithCaseSensitivity & indexName) {
+	const NameWithCaseSensitivity& indexName) {
 	TablePartitioningIndexInfoEntry* retEntry = NULL;
 	if (indexName.isCaseSensitive_) {
 		for (size_t pos = 0; pos < indexEntryList_.size(); pos++) {
@@ -2627,8 +2625,8 @@ TablePartitioningIndexInfoEntry* TablePartitioningIndexInfo::find(
 }
 
 TablePartitioningIndexInfoEntry* TablePartitioningIndexInfo::add(
-	const NameWithCaseSensitivity & indexName,
-	util::Vector<ColumnId> &columnIdList, MapType indexType) {
+	const NameWithCaseSensitivity& indexName,
+	util::Vector<ColumnId>& columnIdList, MapType indexType) {
 	util::String indexNameStr(indexName.name_, eventStackAlloc_);
 	TablePartitioningIndexInfoEntry* entry
 		= ALLOC_NEW(eventStackAlloc_) TablePartitioningIndexInfoEntry(
@@ -2648,9 +2646,9 @@ void TablePartitioningIndexInfo::remove(int32_t pos) {
 	indexEntryList_.erase(indexEntryList_.begin() + pos);
 }
 
-int32_t NoSQLUtils::getColumnId(util::StackAllocator & alloc,
+int32_t NoSQLUtils::getColumnId(util::StackAllocator& alloc,
 	util::Vector<util::String> columnNameList,
-	const NameWithCaseSensitivity & columnName) {
+	const NameWithCaseSensitivity& columnName) {
 	int32_t indexColId = -1;
 	int32_t realIndexColId = 0;
 	if (columnName.isCaseSensitive_) {
@@ -2664,14 +2662,14 @@ int32_t NoSQLUtils::getColumnId(util::StackAllocator & alloc,
 		}
 	}
 	else {
-		const util::String& normalizeSpecfiedColumnName =
+		const util::String& normalizeSpecifiedColumnName =
 			normalizeName(alloc, columnName.name_);
 		for (int32_t col = 0; col < static_cast<int32_t>(
 			columnNameList.size()); col++) {
 			util::String normalizeColumnName =
 				normalizeName(alloc, columnNameList[col].c_str());
 			if (!normalizeColumnName.compare(
-				normalizeSpecfiedColumnName)) {
+				normalizeSpecifiedColumnName)) {
 				indexColId = realIndexColId;
 				break;
 			}
@@ -2683,7 +2681,7 @@ int32_t NoSQLUtils::getColumnId(util::StackAllocator & alloc,
 
 void NoSQLContainer::updateContainerProperty(
 	TablePartitioningVersionId versionId,
-	NoSQLStoreOption & option) {
+	NoSQLStoreOption& option) {
 	try {
 		EventType eventType = UPDATE_CONTAINER_STATUS;
 		ClientSession::Builder sessionBuilder(this, eventType);
@@ -2714,8 +2712,8 @@ void NoSQLContainer::updateContainerProperty(
 
 void NoSQLContainer::updateLargeContainerStatus(
 	LargeContainerStatusType partitionStatus,
-	NodeAffinityNumber affinity, NoSQLStoreOption & option,
-	LargeExecStatus & execStatus, IndexInfo * indexInfo) {
+	NodeAffinityNumber affinity, NoSQLStoreOption& option,
+	LargeExecStatus& execStatus, IndexInfo* indexInfo) {
 	try {
 		EventType eventType = UPDATE_CONTAINER_STATUS;
 		ClientSession::Builder sessionBuilder(this, eventType);
@@ -2766,11 +2764,11 @@ void NoSQLContainer::updateLargeContainerStatus(
 
 TableContainerInfo* TableSchemaInfo::getTableContainerInfo(
 	uint32_t partitionNum,
-	const TupleValue * value1,
-	const TupleValue * value2,
-	NodeAffinityNumber & affinity,
-	int64_t & baseValue,
-	NodeAffinityNumber & baseAffinity) {
+	const TupleValue* value1,
+	const TupleValue* value2,
+	NodeAffinityNumber& affinity,
+	int64_t& baseValue,
+	NodeAffinityNumber& baseAffinity) {
 
 	affinity = partitionInfo_.getAffinityNumber(
 		partitionNum, value1, value2, -1, baseValue, baseAffinity);
@@ -2837,7 +2835,7 @@ TableContainerInfo* TableSchemaInfo::getTableContainerInfo(
 }
 
 
-void TargetContainerInfo::set(TableContainerInfo * containerInfo,
+void TargetContainerInfo::set(TableContainerInfo* containerInfo,
 	NodeAffinityNumber affinity) {
 	containerId_ = containerInfo->containerId_;
 	pId_ = containerInfo->pId_;
@@ -2848,15 +2846,15 @@ void TargetContainerInfo::set(TableContainerInfo * containerInfo,
 
 
 void resolveTargetContainer(
-	EventContext & ec,
-	const TupleValue * value1,
-	const TupleValue * value2,
-	DBConnection * conn,
-	TableSchemaInfo * origTableSchema,
-	SQLExecution * execution,
-	NameWithCaseSensitivity & dbName,
-	NameWithCaseSensitivity & tableName,
-	TargetContainerInfo & targetInfo,
+	EventContext& ec,
+	const TupleValue* value1,
+	const TupleValue* value2,
+	DBConnection* conn,
+	TableSchemaInfo* origTableSchema,
+	SQLExecution* execution,
+	NameWithCaseSensitivity& dbName,
+	NameWithCaseSensitivity& tableName,
+	TargetContainerInfo& targetInfo,
 	bool& needRefresh) {
 
 	util::StackAllocator& eventStackAlloc = ec.getAllocator();
@@ -2926,7 +2924,9 @@ void resolveTargetContainer(
 				== PARTITION_STATUS_DROP_START) {
 				GS_THROW_USER_ERROR(
 					GS_ERROR_SQL_TABLE_PARTITION_ALREADY_REMOVED,
-					"Target partition is already removed");
+					"Target partition is already removed, name="
+					<< tableName.name_ << "@" << partitioningInfo.largeContainerId_
+					<< "@" << affinity);
 			}
 			cmdOption.isSync_ = true;
 			cmdOption.ifNotExistsOrIfExists_ = true;
@@ -2939,9 +2939,9 @@ void resolveTargetContainer(
 			if (targetInfo.affinity_ == UNDEF_NODE_AFFINITY_NUMBER) {
 				TableLatch latch(
 					ec, conn, execution, dbName, tableName, false, true);
-				TableSchemaInfo* curentSchema = latch.get();
-				if (curentSchema) {
-					containerInfo = curentSchema->getTableContainerInfo(
+				TableSchemaInfo* currentSchema = latch.get();
+				if (currentSchema) {
+					containerInfo = currentSchema->getTableContainerInfo(
 						partitionNum, value1, value2,
 						affinity, baseValue, baseAffinity);
 					assert(containerInfo != NULL);
@@ -2976,6 +2976,14 @@ void resolveTargetContainer(
 				if (currentContainer == NULL) {
 					GS_RETHROW_USER_OR_SYSTEM(e, "");
 				}
+				size_t targetAffinityPos = partitioningInfo.findEntry(targetInfo.affinity_);
+				if (targetAffinityPos == SIZE_MAX) {
+					return;
+				}
+				else if (partitioningInfo.assignStatusList_[targetAffinityPos]
+					== PARTITION_STATUS_DROP_START) {
+					return;
+				}
 				TablePartitioningIndexInfo tablePartitioningIndexInfo(eventStackAlloc);
 				store->getLargeRecord<TablePartitioningIndexInfo>(
 					eventStackAlloc, NoSQLUtils::LARGE_CONTAINER_KEY_INDEX,
@@ -3007,18 +3015,18 @@ void resolveTargetContainer(
 }
 
 template<typename Alloc>
-bool execPartitioningOperation(EventContext & ec,
-	DBConnection * conn,
+bool execPartitioningOperation(EventContext& ec,
+	DBConnection* conn,
 	LargeContainerStatusType targetOperation,
-	LargeExecStatus & execStatus,
-	NoSQLContainer & targetContainer,
+	LargeExecStatus& execStatus,
+	NoSQLContainer& targetContainer,
 	NodeAffinityNumber baseAffinity,
 	NodeAffinityNumber targetAffinity,
-	NoSQLStoreOption & cmdOption,
-	TablePartitioningInfo<Alloc> &partitioningInfo,
-	const NameWithCaseSensitivity & tableName,
-	SQLExecution * execution,
-	TargetContainerInfo & targetContainerInfo) {
+	NoSQLStoreOption& cmdOption,
+	TablePartitioningInfo<Alloc>& partitioningInfo,
+	const NameWithCaseSensitivity& tableName,
+	SQLExecution* execution,
+	TargetContainerInfo& targetContainerInfo) {
 	util::StackAllocator& eventStackAlloc = ec.getAllocator();
 	NoSQLContainer* currentContainer = NULL;
 	IndexInfo* indexInfo = &execStatus.indexInfo_;
@@ -3068,7 +3076,9 @@ bool execPartitioningOperation(EventContext & ec,
 					== PARTITION_STATUS_DROP_START) {
 					GS_THROW_USER_ERROR(
 						GS_ERROR_SQL_TABLE_PARTITION_ALREADY_REMOVED,
-						"Target partition is already removed");
+						"Target partition is already removed, name="
+						<< tableName.name_ << "@" << partitioningInfo.largeContainerId_
+						<< "@" << affinityList[pos]);
 				}
 				currentContainer = createNoSQLContainer(ec,
 					tableName, partitioningInfo.largeContainerId_,
@@ -3143,6 +3153,14 @@ bool execPartitioningOperation(EventContext & ec,
 						(*it), execution);
 					currentContainer->getContainerInfo(cmdOption);
 					if (!currentContainer->isExists()) {
+						size_t targetAffinityPos = partitioningInfo.findEntry((*it));
+						if (targetAffinityPos == SIZE_MAX) {
+							continue;
+						}
+						else if (partitioningInfo.assignStatusList_[targetAffinityPos]
+							== PARTITION_STATUS_DROP_START) {
+							continue;
+						}
 						TablePartitioningIndexInfo tablePartitioningIndexInfo(eventStackAlloc);
 						store->getLargeRecord<TablePartitioningIndexInfo>(
 							eventStackAlloc, NoSQLUtils::LARGE_CONTAINER_KEY_INDEX,
@@ -3183,26 +3201,26 @@ bool execPartitioningOperation(EventContext & ec,
 	return true;
 }
 
-void dumpRecoverContainer(util::StackAllocator & alloc,
-	const char* tableName, NoSQLContainer * container) {
+void dumpRecoverContainer(util::StackAllocator& alloc,
+	const char* tableName, NoSQLContainer* container) {
 	if (container != NULL) {
 		util::String subNameStr(alloc);
 		container->getContainerKey()->toString(alloc, subNameStr);
 		GS_TRACE_WARNING(SQL_SERVICE, GS_TRACE_SQL_RECOVER_CONTAINER,
-			"Recover table '" << tableName << "', partition '" << subNameStr);
+			"Recover table '" << tableName << "', partition '" << subNameStr << "'");
 	}
 }
 
-NoSQLContainer* createNoSQLContainer(EventContext & ec,
+NoSQLContainer* createNoSQLContainer(EventContext& ec,
 	const NameWithCaseSensitivity tableName,
 	ContainerId largeContainerId,
-	NodeAffinityNumber affnitiyNumber,
-	SQLExecution * execution) {
+	NodeAffinityNumber affinityNumber,
+	SQLExecution* execution) {
 
 	util::StackAllocator& eventStackAlloc = ec.getAllocator();
 	FullContainerKeyComponents components;
 	components.dbId_ = execution->getContext().getDBId();
-	components.affinityNumber_ = affnitiyNumber;
+	components.affinityNumber_ = affinityNumber;
 	components.baseName_ = tableName.name_;
 	components.baseNameSize_ = strlen(tableName.name_);
 	components.largeContainerId_ = largeContainerId;
@@ -3221,8 +3239,8 @@ NoSQLContainer* createNoSQLContainer(EventContext & ec,
 
 template <typename Alloc>
 void TablePartitioningInfo<Alloc>::findNeighbor(
-	util::StackAllocator & alloc, int64_t value,
-	util::Set<NodeAffinityNumber> &neighborAssignList) {
+	util::StackAllocator& alloc, int64_t value,
+	util::Set<NodeAffinityNumber>& neighborAssignList) {
 	util::Map<int64_t, NodeAffinityNumber> tmpMap(alloc);
 	int32_t divideCount = 1;
 	size_t pos;
@@ -3312,21 +3330,21 @@ MapType getAvailableIndex(const DataStoreConfig& dsConfig, const char* indexName
 			GS_THROW_USER_ERROR(
 				GS_ERROR_CM_NOT_SUPPORTED, "not support this index type");
 		}
-		bool isSuport;
+		bool isSupport;
 		switch (targetContainerType) {
 		case COLLECTION_CONTAINER:
-			isSuport = Collection::indexMapTable[targetColumnType]
+			isSupport = Collection::indexMapTable[targetColumnType]
 				[realMapType];
 			break;
 		case TIME_SERIES_CONTAINER:
-			isSuport = TimeSeries::indexMapTable[targetColumnType]
+			isSupport = TimeSeries::indexMapTable[targetColumnType]
 				[realMapType];
 			break;
 		default:
 			GS_THROW_USER_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
 			break;
 		}
-		if (isSuport) {
+		if (isSupport) {
 			return realMapType;
 		}
 		else {
@@ -3351,8 +3369,8 @@ void NoSQLContainer::createNoSQLClientId() {
 	nosqlClientId_.sessionId_ = 1;
 }
 
-NoSQLRequest::NoSQLRequest(SQLVariableSizeGlobalAllocator & varAlloc,
-	SQLService * sqlSvc, TransactionService * txnSvc, ClientId * clientId) :
+NoSQLRequest::NoSQLRequest(SQLVariableSizeGlobalAllocator& varAlloc,
+	SQLService* sqlSvc, TransactionService* txnSvc, ClientId* clientId) :
 	varAlloc_(varAlloc), requestId_(0),
 	syncBinaryData_(NULL), syncBinarySize_(0),
 	sqlSvc_(sqlSvc), txnSvc_(txnSvc), container_(NULL), clientId_(clientId) {
@@ -3378,7 +3396,7 @@ void NoSQLRequest::wait(int32_t waitInterval) {
 }
 
 void NoSQLContainer::encodeRequestId(
-	util::StackAllocator & alloc, Event & request,
+	util::StackAllocator& alloc, Event& request,
 	NoSQLRequestId requestId) {
 	util::StackAllocator::Scope scope(alloc);
 	StatementHandler::updateRequestOption<
@@ -3386,10 +3404,10 @@ void NoSQLContainer::encodeRequestId(
 			alloc, request, requestId);
 }
 
-void NoSQLRequest::get(Event & request,
-	util::StackAllocator & alloc, NoSQLContainer * container,
+void NoSQLRequest::get(Event& request,
+	util::StackAllocator& alloc, NoSQLContainer* container,
 	int32_t waitInterval, int32_t timeoutInterval,
-	util::XArray<uint8_t> &response) {
+	util::XArray<uint8_t>& response) {
 	util::LockGuard<util::Condition> guard(condition_);
 	container_ = container;
 	try {
@@ -3414,7 +3432,7 @@ void NoSQLRequest::get(Event & request,
 			int32_t currentTime = watch.elapsedMillis();
 			if (currentTime >= timeoutInterval) {
 				GS_THROW_USER_ERROR(GS_ERROR_SQL_CANCELLED,
-					"Elapsed time expired limt interval=" << timeoutInterval);
+					"Elapsed time expired limit interval=" << timeoutInterval);
 			}
 			sqlSvc_->checkActiveStatus();
 			container->checkCondition(watch.elapsedMillis(), timeoutInterval);
@@ -3507,7 +3525,7 @@ void NoSQLRequest::cancel() {
 }
 
 void NoSQLRequest::put(NoSQLRequestId requestId, StatementExecStatus status,
-	EventByteInStream & in, util::Exception * exception, StatementMessage::Request & request) {
+	EventByteInStream& in, util::Exception* exception, StatementMessage::Request& request) {
 
 	util::LockGuard<util::Condition> guard(condition_);
 	if (requestId_ != requestId) {
@@ -3538,7 +3556,7 @@ void NoSQLRequest::put(NoSQLRequestId requestId, StatementExecStatus status,
 	condition_.signal();
 }
 
-void NoSQLRequest::getResponse(util::XArray<uint8_t> &buffer) {
+void NoSQLRequest::getResponse(util::XArray<uint8_t>& buffer) {
 	if (syncBinarySize_ > 0) {
 		buffer.resize(syncBinarySize_);
 		util::ArrayByteInStream in =
@@ -3577,7 +3595,7 @@ const char8_t* timeUnitToName(TimeUnit unit) {
 template<typename Alloc>
 std::string TablePartitioningInfo<Alloc>::dumpExpirationInfo(
 	const char* containerName,
-	TableExpirationSchemaInfo & info) {
+	TableExpirationSchemaInfo& info) {
 	util::NormalOStringStream oss;
 	oss << "CONTAINER_NAME=" << containerName << std::endl;
 	oss << getContainerTypeName(containerType_) << std::endl;
@@ -3592,8 +3610,8 @@ std::string TablePartitioningInfo<Alloc>::dumpExpirationInfo(
 			oss << "EXPIRATION_ROW" << std::endl;
 			oss << "ELAPSED_TIME=" << info.elapsedTime_ << std::endl;
 			oss << "TIME_UNIT=" << timeUnitToName(info.timeUnit_) << std::endl;
-			oss << "START_VALUE=" << getTimeStr(info.startValue_) << std::endl;
-			oss << "LIMIT_VALUE=" << getTimeStr(info.limitValue_) << std::endl;
+			oss << "START_VALUE=" << CommonUtility::getTimeStr(info.startValue_) << std::endl;
+			oss << "LIMIT_VALUE=" << CommonUtility::getTimeStr(info.limitValue_) << std::endl;
 		}
 	}
 	oss << std::endl;
@@ -3601,7 +3619,7 @@ std::string TablePartitioningInfo<Alloc>::dumpExpirationInfo(
 }
 
 void NoSQLContainer::getContainerBinary(
-	NoSQLStoreOption & option, util::XArray<uint8_t> &response) {
+	NoSQLStoreOption& option, util::XArray<uint8_t>& response) {
 	try {
 		EventType eventType = GET_CONTAINER;
 		ClientSession::Builder sessionBuilder(this, eventType);
@@ -3620,7 +3638,7 @@ void NoSQLContainer::getContainerBinary(
 }
 
 void RenameColumnSchemaInfo::encode(
-	EventByteOutStream & out) {
+	EventByteOutStream& out) {
 
 	if (isRenameColumn_) {
 		out << static_cast<int32_t>(
@@ -3640,7 +3658,7 @@ void RenameColumnSchemaInfo::encode(
 	}
 }
 
-void TableExpirationSchemaInfo::encode(EventByteOutStream & out) {
+void TableExpirationSchemaInfo::encode(EventByteOutStream& out) {
 
 	if (isTableExpiration_) {
 		if (startValue_ != -1 && limitValue_ != -1
@@ -3678,7 +3696,7 @@ void TableSchemaInfo::checkWritableContainer() {
 	}
 }
 
-void checkConnectedDbName(util::StackAllocator & alloc,
+void checkConnectedDbName(util::StackAllocator& alloc,
 	const char* connectedDbName,
 	const char* currentDbName, bool isCaseSensitive) {
 	if (currentDbName == NULL
@@ -3724,7 +3742,7 @@ void TableSchemaInfo::checkSubContainer(size_t nth) {
 }
 
 void TableSchemaInfo::setupSQLTableInfo(
-	util::StackAllocator & alloc, SQLTableInfo & tableInfo,
+	util::StackAllocator& alloc, SQLTableInfo& tableInfo,
 	const char* tableName, DatabaseId dbId, bool withVersion,
 	int32_t clusterPartitionCount, bool isFirst, bool withoutCache
 	, int64_t startTime
@@ -3875,9 +3893,9 @@ void TableSchemaInfo::setupSQLTableInfo(
 }
 
 NoSQLStoreOption::NoSQLStoreOption(
-	SQLExecution * execution,
-	const NameWithCaseSensitivity * dbName,
-	const NameWithCaseSensitivity * tableName) {
+	SQLExecution* execution,
+	const NameWithCaseSensitivity* dbName,
+	const NameWithCaseSensitivity* tableName) {
 
 	clear();
 	if (execution) {
@@ -3898,7 +3916,7 @@ NoSQLStoreOption::NoSQLStoreOption(
 	}
 }
 
-void TableSchemaInfo::copyPartitionInfo(TableSchemaInfo & info) {
+void TableSchemaInfo::copyPartitionInfo(TableSchemaInfo& info) {
 	partitionInfo_.partitionType_ = info.partitionInfo_.partitionType_;
 	partitionInfo_.partitioningNum_ = info.partitionInfo_.partitioningNum_;
 	partitionInfo_.partitionColumnName_ = info.partitionInfo_.partitionColumnName_;
@@ -3944,7 +3962,7 @@ void TableSchemaInfo::copyPartitionInfo(TableSchemaInfo & info) {
 	partitionInfo_.currentIntervalValue_ = info.partitionInfo_.currentIntervalValue_;
 }
 
-void TableSchemaInfo::copy(TableSchemaInfo & info) {
+void TableSchemaInfo::copy(TableSchemaInfo& info) {
 	columnInfoList_ = info.columnInfoList_;
 	containerInfoList_ = info.containerInfoList_;
 	founded_ = info.founded_;
@@ -3954,6 +3972,7 @@ void TableSchemaInfo::copy(TableSchemaInfo & info) {
 	columnSize_ = info.columnSize_;
 	nosqlColumnInfoList_ = static_cast<ColumnInfo*>(
 		globalVarAlloc_.allocate(sizeof(ColumnInfo) * columnSize_));
+	memset(nosqlColumnInfoList_, sizeof(ColumnInfo) * columnSize_, 0);
 	memcpy((char*)nosqlColumnInfoList_, (char*)info.nosqlColumnInfoList_,
 		sizeof(ColumnInfo) * columnSize_);
 	indexInfoList_ = info.indexInfoList_;
@@ -3966,7 +3985,7 @@ void TableSchemaInfo::copy(TableSchemaInfo & info) {
 }
 
 template<typename Alloc>
-TablePartitioningInfo<Alloc>::TablePartitioningInfo(Alloc & alloc) :
+TablePartitioningInfo<Alloc>::TablePartitioningInfo(Alloc& alloc) :
 	alloc_(alloc),
 	partitionType_(0),
 	partitioningNum_(0),
@@ -3977,48 +3996,42 @@ TablePartitioningInfo<Alloc>::TablePartitioningInfo(Alloc & alloc) :
 	subPartitioningColumnId_(UNDEF_COLUMNID),
 	intervalValue_(0),
 	intervalUnit_(UINT8_MAX),
-
 	largeContainerId_(UNDEF_CONTAINERID),
 	largeAffinityNumber_(UNDEF_NODE_AFFINITY_NUMBER),
-
 	subContainerNameList_(alloc), 
 	condensedPartitionIdList_(alloc),
-
 	assignNumberList_(alloc),
 	assignStatusList_(alloc),
 	assignValueList_(alloc),
 	assignNumberMapList_(
 		typename PartitionAssignNumberMapList::key_compare(), alloc),
-
 	assignCountMax_(TABLE_PARTITIONING_MAX_ASSIGN_NUM),
 	tableStatus_(0),
 	dividePolicy_(0),
 	distributedfPolicy_(0),
 	partitioningVersionId_(0),
-	primaryColumnId_(-1),
+	primaryColumnId_(UNDEF_COLUMNID),
 	containerType_(COLLECTION_CONTAINER),
 	currentStatus_(PARTITION_STATUS_NONE),
 	currentAffinityNumber_(UNDEF_NODE_AFFINITY_NUMBER),
 	currentIndexName_(alloc),
 	currentIndexType_(MAP_TYPE_DEFAULT),
-	currentIndexColumnId_(-1),
+	currentIndexColumnId_(UNDEF_COLUMNID),
 	anyNameMatches_(0), anyTypeMatches_(0),
 	currentIndexCaseSensitive_(false),
 	subPartitionColumnType_(0),
 	activeContainerCount_(0),
 	subIdListCached_(false),
 	availableList_(alloc), availableCountList_(alloc),
-	disAvailableList_(alloc), disAvailableCountList_(alloc)
-	, currentIntervalValue_(-1)
-	, opt_(NULL)
-	, property_(NULL)
+	disAvailableList_(alloc), disAvailableCountList_(alloc),
+	currentIntervalValue_(-1), opt_(NULL), property_(NULL)
 {
 	if (partitionType_ != SyntaxTree::TABLE_PARTITION_TYPE_HASH) {
 		for (size_t i = 0; i < assignNumberList_.size(); i++) {
 			assignNumberMapList_.insert(std::make_pair(assignNumberList_[i], i));
 			}
 		}
-	}
+}
 
 template<typename Alloc>
 void TablePartitioningInfo<Alloc>::init() {
@@ -4032,8 +4045,8 @@ void TablePartitioningInfo<Alloc>::init() {
 template<typename Alloc>
 void TablePartitioningInfo<Alloc>::checkIntervalList(
 	int64_t interval, int64_t currentValue,
-	util::Vector<int64_t> &intervalList,
-	util::Vector<int64_t> &intervalCountList, int64_t & prevInterval) {
+	util::Vector<int64_t>& intervalList,
+	util::Vector<int64_t>& intervalCountList, int64_t& prevInterval) {
 	int64_t offset;
 	if (currentValue < 0) {
 		offset = -CURRENT_INTERVAL_UNIT;
@@ -4068,8 +4081,8 @@ void TablePartitioningInfo<Alloc>::checkIntervalList(
 
 template<typename Alloc>
 bool TablePartitioningInfo<Alloc>::createNewEntry(bool isOptionSetValue,
-	int64_t & baseValue, PartitionTable * pt,
-	TransactionContext & txn, BaseContainer * container,
+	int64_t& baseValue, PartitionTable* pt,
+	TransactionContext& txn, BaseContainer* container,
 	NodeAffinityNumber affinity) {
 	bool updatePartitioningInfo = false;
 	if (SyntaxTree::isRangePartitioningType(partitionType_)) {
@@ -4092,7 +4105,7 @@ bool TablePartitioningInfo<Alloc>::createNewEntry(bool isOptionSetValue,
 
 template<typename Alloc>
 bool TablePartitioningInfo<Alloc>::dropEntry(bool isOptionSetValue,
-	int64_t & baseValue, PartitionTable * pt, NodeAffinityNumber affinity) {
+	int64_t& baseValue, PartitionTable* pt, NodeAffinityNumber affinity) {
 	bool updatePartitioningInfo = false;
 	if (SyntaxTree::isRangePartitioningType(partitionType_)) {
 		if (!isOptionSetValue) {
@@ -4123,11 +4136,11 @@ bool TablePartitioningInfo<Alloc>::dropEntry(bool isOptionSetValue,
 }
 
 template<typename Alloc>
-void TablePartitioningInfo<Alloc>::checkExpireableInterval(
+void TablePartitioningInfo<Alloc>::checkExpirableInterval(
 	int64_t currentTime, int64_t currentErasableTimestamp,
 	int64_t duration,
-	util::Vector<NodeAffinityNumber> &expiredAffinityNumbers,
-	util::Vector<size_t> &expiredAffinityPos) {
+	util::Vector<NodeAffinityNumber>& expiredAffinityNumbers,
+	util::Vector<size_t>& expiredAffinityPos) {
 	if (isTableExpiration()) {
 		if (assignValueList_.size() < 2) return;
 		for (size_t pos = 1; pos < assignValueList_.size(); pos++) {
@@ -4153,12 +4166,39 @@ void TablePartitioningInfo<Alloc>::checkExpireableInterval(
 	}
 }
 
+template void TablePartitioningInfo<util::StackAllocator>::getIntervalInfo(
+	int64_t currentTime, size_t pos, int64_t& erasableTime, int64_t& startTime);
+
+template<typename Alloc>
+void TablePartitioningInfo<Alloc>::getIntervalInfo(int64_t currentTime, size_t pos,
+	int64_t& erasableTime, int64_t& startTime) {
+	startTime = 0;
+	erasableTime = 0;
+	int64_t endTime;
+	if (isTableExpiration()) {
+		if (assignValueList_.size() < 2 || assignValueList_.size() <= pos) return;
+		if (assignStatusList_[pos] != PARTITION_STATUS_CREATE_END) return;
+		if (assignValueList_[pos] - 1 > INT64_MAX - intervalValue_) {
+			endTime = INT64_MAX;
+		}
+		else {
+			endTime = assignValueList_[pos] + intervalValue_ - 1;
+		}
+		int64_t duration = MessageSchema::getTimestampDuration(
+			timeSeriesProperty_.elapsedTime_, timeSeriesProperty_.timeUnit_);
+		startTime = (
+			(currentTime - duration) / intervalValue_
+			* intervalValue_ - intervalValue_);
+		erasableTime = BaseContainer::calcErasableTime(endTime, duration);
+	}
+}
+
 template<typename Alloc>
 void TablePartitioningInfo<Alloc>::getSubIdList(
-	util::StackAllocator & alloc, util::Vector<int64_t> &availableList,
-	util::Vector<int64_t> &availableCountList,
-	util::Vector<int64_t> &disAvailableList,
-	util::Vector<int64_t> &disAvailableCountList,
+	util::StackAllocator& alloc, util::Vector<int64_t>& availableList,
+	util::Vector<int64_t>& availableCountList,
+	util::Vector<int64_t>& disAvailableList,
+	util::Vector<int64_t>& disAvailableCountList,
 	int64_t currentTime) {
 	if (assignNumberList_.size() == 1) {
 		return;
@@ -4272,7 +4312,7 @@ void TablePartitioningInfo<Alloc>::getSubIdList(
 
 template<typename Alloc>
 void TablePartitioningInfo<Alloc>::setSubContainerPartitionIdList(
-	util::Vector<NodeAffinityNumber> &assignNumberList) {
+	util::Vector<NodeAffinityNumber>& assignNumberList) {
 	if (assignCountMax_ < assignNumberList.size()) {
 		GS_THROW_USER_ERROR(
 			GS_ERROR_SQL_TABLE_PARTITION_INTERNAL,
@@ -4311,7 +4351,7 @@ size_t TablePartitioningInfo<Alloc>::findEntry(NodeAffinityNumber affinity) {
 template<typename Alloc>
 size_t TablePartitioningInfo<Alloc>::newEntry(
 	NodeAffinityNumber affinity, LargeContainerStatusType status,
-	int32_t partitioingNum, int64_t baseValue) {
+	int32_t partitioningNum, int64_t baseValue) {
 
 	if (assignNumberList_.size() >
 		TABLE_PARTITIONING_MAX_ASSIGN_ENTRY_NUM) {
@@ -4319,7 +4359,7 @@ size_t TablePartitioningInfo<Alloc>::newEntry(
 			GS_ERROR_SQL_TABLE_PARTITION_MAX_ASSIGN_COUNT, "");
 	}
 	size_t pos, retPos = 0;
-	for (pos = 0; pos < static_cast<size_t>(partitioingNum); pos++) {
+	for (pos = 0; pos < static_cast<size_t>(partitioningNum); pos++) {
 		assignNumberList_.push_back(affinity + pos);
 		assignStatusList_.push_back(status);
 		retPos = assignNumberList_.size() - 1;
@@ -4341,7 +4381,7 @@ size_t TablePartitioningInfo<Alloc>::newEntry(
 			tmpValue = ((baseValue + 1) / intervalValue_ - 1) * intervalValue_;
 		}
 	}
-	for (pos = 0; pos < partitioingNum; pos++) {
+	for (pos = 0; pos < partitioningNum; pos++) {
 		assignValueList_.push_back(tmpValue);
 	}
 	return retPos;
@@ -4350,11 +4390,11 @@ size_t TablePartitioningInfo<Alloc>::newEntry(
 template<typename Alloc>
 NodeAffinityNumber TablePartitioningInfo<Alloc>::getAffinityNumber(
 	uint32_t partitionNum,
-	const TupleValue * value1,
-	const TupleValue * value2,
+	const TupleValue* value1,
+	const TupleValue* value2,
 	int32_t position,
-	int64_t & baseValue,
-	NodeAffinityNumber & baseAffinity) {
+	int64_t& baseValue,
+	NodeAffinityNumber& baseAffinity) {
 	NodeAffinityNumber affinity = UNDEF_NODE_AFFINITY_NUMBER;
 	int64_t tmpValue;
 	uint64_t shiftValue = 0;
@@ -4494,7 +4534,7 @@ int64_t TablePartitioningInfo<Alloc>::calcValueFromAffinity(
 
 template<typename Alloc>
 void TablePartitioningInfo<Alloc>::checkTableExpirationSchema(
-	TableExpirationSchemaInfo & info,
+	TableExpirationSchemaInfo& info,
 	NodeAffinityNumber affinity, uint32_t partitionNum) {
 
 	if (isTableExpiration() && assignNumberList_[0] != affinity) {
@@ -4509,7 +4549,7 @@ void TablePartitioningInfo<Alloc>::checkTableExpirationSchema(
 
 template<typename Alloc>
 void TablePartitioningInfo<Alloc>::checkTableExpirationSchema(
-	TableExpirationSchemaInfo & info, size_t pos) {
+	TableExpirationSchemaInfo& info, size_t pos) {
 
 	if (isTableExpiration() && pos != 0 && pos < assignValueList_.size()) {
 		info.isTableExpiration_ = true;
@@ -4519,13 +4559,13 @@ void TablePartitioningInfo<Alloc>::checkTableExpirationSchema(
 		assert(info.startValue_ != -1);
 		info.limitValue_ = intervalValue_;
 		}
-	}
+}
 
 template<typename Alloc>
 bool TablePartitioningInfo<Alloc>::checkSchema(
-	TablePartitioningInfo & target,
-	util::XArray<uint8_t> &targetSchema,
-	util::XArray<uint8_t> &currentSchema) {
+	TablePartitioningInfo& target,
+	util::XArray<uint8_t>& targetSchema,
+	util::XArray<uint8_t>& currentSchema) {
 	if (partitionType_ == target.partitionType_
 		&& partitioningNum_ == target.partitioningNum_
 		&& partitioningColumnId_ == target.partitioningColumnId_
@@ -4547,7 +4587,7 @@ bool TablePartitioningInfo<Alloc>::checkSchema(
 	}
 }
 
-void NoSQLContainer::setRequestOption(StatementMessage::Request & request) {
+void NoSQLContainer::setRequestOption(StatementMessage::Request& request) {
 	StatementHandler::CompositeIndexInfos* compositeIndexInfos =
 		request.optional_.get<StatementMessage::Options::COMPOSITE_INDEX>();
 	if (compositeIndexInfos) {
@@ -4564,7 +4604,7 @@ util::Vector<IndexInfo>& NoSQLContainer::getCompositeIndex() {
 }
 
 void TablePartitioningIndexInfo::getIndexInfoList(
-	util::StackAllocator & alloc, util::Vector<IndexInfo> &indexInfoList) {
+	util::StackAllocator& alloc, util::Vector<IndexInfo>& indexInfoList) {
 	for (size_t pos = 0; pos < indexEntryList_.size(); pos++) {
 		IndexInfo indexInfo(alloc, indexEntryList_[pos]->indexName_,
 			indexEntryList_[pos]->columnIds_, indexEntryList_[pos]->indexType_);
@@ -4573,7 +4613,7 @@ void TablePartitioningIndexInfo::getIndexInfoList(
 }
 
 bool TablePartitioningIndexInfo::isSame(size_t pos,
-	util::Vector<ColumnId> &columnIdList, MapType indexType) {
+	util::Vector<ColumnId>& columnIdList, MapType indexType) {
 	if (columnIdList.size() != indexEntryList_[pos]->columnIds_.size()) {
 		return false;
 	}
@@ -4584,10 +4624,10 @@ bool TablePartitioningIndexInfo::isSame(size_t pos,
 		}
 	}
 	return (indexEntryList_[pos]->indexType_ == indexType);
-	}
+}
 
 std::string TablePartitioningIndexInfo::dumpStatus(
-	util::StackAllocator & alloc) {
+	util::StackAllocator& alloc) {
 	util::NormalOStringStream oss;
 	picojson::value jsonOutValue;
 	JsonUtils::OutStream out(jsonOutValue);
@@ -4597,10 +4637,10 @@ std::string TablePartitioningIndexInfo::dumpStatus(
 }
 
 template<typename T>
-void NoSQLUtils::makeLargeContainerRow(util::StackAllocator & alloc,
+void NoSQLUtils::makeLargeContainerRow(util::StackAllocator& alloc,
 	const char* key,
-	OutputMessageRowStore & outputMrs,
-	T & targetValue) {
+	OutputMessageRowStore& outputMrs,
+	T& targetValue) {
 	util::XArray<uint8_t> encodeValue(alloc);
 	util::XArrayByteOutStream outStream =
 		util::XArrayByteOutStream(util::XArrayOutStream<>(encodeValue));
@@ -4612,10 +4652,10 @@ void NoSQLUtils::makeLargeContainerRow(util::StackAllocator & alloc,
 	outputMrs.next();
 }
 
-void NoSQLUtils::makeLargeContainerRowBinary(util::StackAllocator & alloc,
+void NoSQLUtils::makeLargeContainerRowBinary(util::StackAllocator& alloc,
 	const char* key,
-	OutputMessageRowStore & outputMrs,
-	util::XArray<uint8_t> &targetValue) {
+	OutputMessageRowStore& outputMrs,
+	util::XArray<uint8_t>& targetValue) {
 	outputMrs.beginRow();
 	outputMrs.setFieldForRawData(0, key, static_cast<uint32_t>(strlen(key)));
 	outputMrs.setFieldForRawData(1,
@@ -4624,9 +4664,9 @@ void NoSQLUtils::makeLargeContainerRowBinary(util::StackAllocator & alloc,
 }
 
 void NoSQLUtils::makeLargeContainerIndexRow(
-	util::StackAllocator & alloc,
-	const char* key, OutputMessageRowStore & outputMrs,
-	util::Vector<IndexInfo> &indexInfoList) {
+	util::StackAllocator& alloc,
+	const char* key, OutputMessageRowStore& outputMrs,
+	util::Vector<IndexInfo>& indexInfoList) {
 	util::XArray<uint8_t> encodeValue(alloc);
 	util::XArrayByteOutStream outStream =
 		util::XArrayByteOutStream(util::XArrayOutStream<>(encodeValue));
@@ -4663,8 +4703,8 @@ bool NoSQLUtils::checkAcceptableTupleType(TupleList::TupleColumnType type) {
 }
 
 template<typename T>
-void decodeRow(InputMessageRowStore & rowStore, T & record,
-	VersionInfo & versionInfo, const char* rowKey) {
+void decodeRow(InputMessageRowStore& rowStore, T& record,
+	VersionInfo& versionInfo, const char* rowKey) {
 
 	bool decodeVersion = false;
 	bool decodeInfo = false;
@@ -4712,21 +4752,21 @@ void decodeRow(InputMessageRowStore & rowStore, T & record,
 }
 
 template
-void decodeRow(InputMessageRowStore & rowStore, TablePartitioningInfo<util::StackAllocator> &record,
-	VersionInfo & versionInfo, const char* rowKey);
+void decodeRow(InputMessageRowStore& rowStore, TablePartitioningInfo<util::StackAllocator>& record,
+	VersionInfo& versionInfo, const char* rowKey);
 
 template
-void decodeRow(InputMessageRowStore & rowStore, TablePartitioningIndexInfo & record,
-	VersionInfo & versionInfo, const char* rowKey);
+void decodeRow(InputMessageRowStore& rowStore, TablePartitioningIndexInfo& record,
+	VersionInfo& versionInfo, const char* rowKey);
 
 template
-void decodeRow(InputMessageRowStore & rowStore, TableProperty & record,
-	VersionInfo & versionInfo, const char* rowKey);
+void decodeRow(InputMessageRowStore& rowStore, TableProperty& record,
+	VersionInfo& versionInfo, const char* rowKey);
 
 
 template<typename T>
-void decodeBinaryRow(InputMessageRowStore & rowStore, T & record,
-	VersionInfo & versionInfo, const char* rowKey) {
+void decodeBinaryRow(InputMessageRowStore& rowStore, T& record,
+	VersionInfo& versionInfo, const char* rowKey) {
 
 	bool decodeVersion = false;
 	bool decodeInfo = false;
@@ -4783,10 +4823,10 @@ void decodeBinaryRow(InputMessageRowStore & rowStore, T & record,
 }
 
 template<typename T>
-void getTablePartitioningInfo(util::StackAllocator & alloc,
-	const DataStoreConfig &dsConfig, NoSQLContainer & container,
-	util::XArray<ColumnInfo> &columnInfoList,
-	T & partitioningInfo, NoSQLStoreOption & option) {
+void getTablePartitioningInfo(util::StackAllocator& alloc,
+	const DataStoreConfig& dsConfig, NoSQLContainer& container,
+	util::XArray<ColumnInfo>& columnInfoList,
+	T& partitioningInfo, NoSQLStoreOption& option) {
 
 	int64_t rowCount;
 	bool hasRowKey = false;
@@ -4819,9 +4859,9 @@ void getTablePartitioningInfo(util::StackAllocator & alloc,
 }
 
 template<typename T>
-void getLargeContainerInfo(util::StackAllocator & alloc, const char* key,
-	const DataStoreConfig& dsConfig, NoSQLContainer & container,
-	util::XArray<ColumnInfo> &columnInfoList, T & partitioningInfo) {
+void getLargeContainerInfo(util::StackAllocator& alloc, const char* key,
+	const DataStoreConfig& dsConfig, NoSQLContainer& container,
+	util::XArray<ColumnInfo>& columnInfoList, T& partitioningInfo) {
 	NoSQLStoreOption option;
 	int64_t rowCount;
 	bool hasRowKey = false;
@@ -4851,9 +4891,9 @@ void getLargeContainerInfo(util::StackAllocator & alloc, const char* key,
 }
 
 template<typename T>
-void getLargeContainerInfoBinary(util::StackAllocator & alloc, const char* key,
-	const DataStoreConfig& dsConfig, NoSQLContainer & container,
-	util::XArray<ColumnInfo> &columnInfoList, T & partitioningInfo) {
+void getLargeContainerInfoBinary(util::StackAllocator& alloc, const char* key,
+	const DataStoreConfig& dsConfig, NoSQLContainer& container,
+	util::XArray<ColumnInfo>& columnInfoList, T& partitioningInfo) {
 	NoSQLStoreOption option;
 	int64_t rowCount;
 	bool hasRowKey = false;
@@ -4885,8 +4925,8 @@ void getLargeContainerInfoBinary(util::StackAllocator & alloc, const char* key,
 
 template <typename Alloc>
 void TablePartitioningInfo<Alloc>::checkMaxAssigned(
-	TransactionContext & txn,
-	const FullContainerKey & containerKey,
+	TransactionContext& txn,
+	const FullContainerKey& containerKey,
 	int32_t partitioningNum) {
 
 	if (activeContainerCount_ + partitioningNum >
@@ -4904,14 +4944,14 @@ void TablePartitioningInfo<Alloc>::checkMaxAssigned(
 }
 
 template<typename Alloc>
-NoSQLContainer* recoveryContainer(util::StackAllocator & alloc,
-	EventContext & ec,
-	NoSQLStore * store,
-	TablePartitioningInfo<Alloc>  &partitioningInfo,
-	NoSQLContainer & targetContainer,
-	SQLExecution * execution,
+NoSQLContainer* recoveryContainer(util::StackAllocator& alloc,
+	EventContext& ec,
+	NoSQLStore* store,
+	TablePartitioningInfo<Alloc>& partitioningInfo,
+	NoSQLContainer& targetContainer,
+	SQLExecution* execution,
 	int32_t subContainerId,
-	const NameWithCaseSensitivity & tableName,
+	const NameWithCaseSensitivity& tableName,
 	int32_t partitionNum,
 	NodeAffinityNumber affinity) {
 
@@ -4971,101 +5011,101 @@ NoSQLContainer* recoveryContainer(util::StackAllocator & alloc,
 	}
 }
 
-template NoSQLContainer* recoveryContainer(util::StackAllocator & alloc,
-	EventContext & ec,
-	NoSQLStore * store,
-	TablePartitioningInfo<SQLVariableSizeGlobalAllocator>  &partitioningInfo,
-	NoSQLContainer & targetContainer,
-	SQLExecution * execution,
+template NoSQLContainer* recoveryContainer(util::StackAllocator& alloc,
+	EventContext& ec,
+	NoSQLStore* store,
+	TablePartitioningInfo<SQLVariableSizeGlobalAllocator>& partitioningInfo,
+	NoSQLContainer& targetContainer,
+	SQLExecution* execution,
 	int32_t subContainerId,
-	const NameWithCaseSensitivity & tableName,
+	const NameWithCaseSensitivity& tableName,
 	int32_t partitionNum,
 	NodeAffinityNumber affinity);
 
-template void getLargeContainerInfo(util::StackAllocator & alloc,
-	const char* key, const DataStoreConfig& dsConfig, NoSQLContainer & container,
-	util::XArray<ColumnInfo> &columnInfoList,
-	TablePartitioningInfo<class util::StackAllocator> &partitioningInfo);
+template void getLargeContainerInfo(util::StackAllocator& alloc,
+	const char* key, const DataStoreConfig& dsConfig, NoSQLContainer& container,
+	util::XArray<ColumnInfo>& columnInfoList,
+	TablePartitioningInfo<class util::StackAllocator>& partitioningInfo);
 
-template void getLargeContainerInfo(util::StackAllocator & alloc,
-	const char* key, const DataStoreConfig& dsConfig, NoSQLContainer & container,
-	util::XArray<ColumnInfo> &columnInfoList,
-	TableProperty & tableProperty);
+template void getLargeContainerInfo(util::StackAllocator& alloc,
+	const char* key, const DataStoreConfig& dsConfig, NoSQLContainer& container,
+	util::XArray<ColumnInfo>& columnInfoList,
+	TableProperty& tableProperty);
 
-
-template void decodeRow(
-	InputMessageRowStore & rowStore, ViewInfo & record,
-	VersionInfo & versionInfo, const char* rowKey);
 
 template void decodeRow(
-	InputMessageRowStore & rowStore,
-	TablePartitioningInfo<SQLVariableSizeGlobalAllocator> &record,
-	VersionInfo & versionInfo, const char* rowKey);
+	InputMessageRowStore& rowStore, ViewInfo& record,
+	VersionInfo& versionInfo, const char* rowKey);
+
+template void decodeRow(
+	InputMessageRowStore& rowStore,
+	TablePartitioningInfo<SQLVariableSizeGlobalAllocator>& record,
+	VersionInfo& versionInfo, const char* rowKey);
 
 template void decodeBinaryRow(
-	InputMessageRowStore & rowStore,
-	util::XArray<uint8_t> &record,
-	VersionInfo & versionInfo, const char* rowKey);
+	InputMessageRowStore& rowStore,
+	util::XArray<uint8_t>& record,
+	VersionInfo& versionInfo, const char* rowKey);
 
-template void getTablePartitioningInfo(util::StackAllocator & alloc,
-	const DataStoreConfig& dsConfig, NoSQLContainer & container,
-	util::XArray<ColumnInfo> &columnInfoList,
-	TablePartitioningInfo<util::StackAllocator> &partitioningInfo,
-	NoSQLStoreOption & option);
-
-template void NoSQLUtils::makeLargeContainerRow(
-	util::StackAllocator & alloc,
-	const char* key, OutputMessageRowStore & outputMrs,
-	ViewInfo & targetValue);
+template void getTablePartitioningInfo(util::StackAllocator& alloc,
+	const DataStoreConfig& dsConfig, NoSQLContainer& container,
+	util::XArray<ColumnInfo>& columnInfoList,
+	TablePartitioningInfo<util::StackAllocator>& partitioningInfo,
+	NoSQLStoreOption& option);
 
 template void NoSQLUtils::makeLargeContainerRow(
-	util::StackAllocator & alloc,
-	const char* key, OutputMessageRowStore & outputMrs,
-	VersionInfo & targetValue);
+	util::StackAllocator& alloc,
+	const char* key, OutputMessageRowStore& outputMrs,
+	ViewInfo& targetValue);
 
 template void NoSQLUtils::makeLargeContainerRow(
-	util::StackAllocator & alloc,
-	const char* key, OutputMessageRowStore & outputMrs,
-	TablePartitioningInfo<class util::StackAllocator> &targetValue);
+	util::StackAllocator& alloc,
+	const char* key, OutputMessageRowStore& outputMrs,
+	VersionInfo& targetValue);
 
 template void NoSQLUtils::makeLargeContainerRow(
-	util::StackAllocator & alloc,
-	const char* key, OutputMessageRowStore & outputMrs,
-	TablePartitioningIndexInfo & targetValue);
+	util::StackAllocator& alloc,
+	const char* key, OutputMessageRowStore& outputMrs,
+	TablePartitioningInfo<class util::StackAllocator>& targetValue);
 
 template void NoSQLUtils::makeLargeContainerRow(
-	util::StackAllocator & alloc,
-	const char* key, OutputMessageRowStore & outputMrs,
-	TableProperty & targetValue);
+	util::StackAllocator& alloc,
+	const char* key, OutputMessageRowStore& outputMrs,
+	TablePartitioningIndexInfo& targetValue);
+
+template void NoSQLUtils::makeLargeContainerRow(
+	util::StackAllocator& alloc,
+	const char* key, OutputMessageRowStore& outputMrs,
+	TableProperty& targetValue);
 
 template void TablePartitioningInfo<util::StackAllocator>::init();
 
 template void TablePartitioningInfo<
 	util::StackAllocator>::checkIntervalList(
 		int64_t interval, int64_t currentValue,
-		util::Vector<int64_t> &intervalList,
-		util::Vector<int64_t> &intervalCountList, int64_t & prevInterval);
+		util::Vector<int64_t>& intervalList,
+		util::Vector<int64_t>& intervalCountList, int64_t& prevInterval);
 
 template void TablePartitioningInfo<
-	util::StackAllocator>::checkExpireableInterval(
+	util::StackAllocator>::checkExpirableInterval(
 		int64_t currentTime, int64_t currentErasableTimestamp,
 		int64_t duration,
-		util::Vector<NodeAffinityNumber> &expiredAffinityNumbers,
-		util::Vector<size_t> &expiredAffinityPos);
+		util::Vector<NodeAffinityNumber>& expiredAffinityNumbers,
+		util::Vector<size_t>& expiredAffinityPos);
 
 template void TablePartitioningInfo<util::StackAllocator>::getSubIdList(
-	util::StackAllocator & alloc, util::Vector<int64_t> &availableList,
-	util::Vector<int64_t> &availableCountList,
-	util::Vector<int64_t> &disAvailableList,
-	util::Vector<int64_t> &disAvailableCountList, int64_t currentTime);
+	util::StackAllocator& alloc, util::Vector<int64_t>& availableList,
+	util::Vector<int64_t>& availableCountList,
+	util::Vector<int64_t>& disAvailableList,
+	util::Vector<int64_t>& disAvailableCountList, int64_t currentTime);
 
 template void TablePartitioningInfo<
 	util::StackAllocator>::setSubContainerPartitionIdList(
-		util::Vector<NodeAffinityNumber> &assignNumberList);
+		util::Vector<NodeAffinityNumber>& assignNumberList);
 
 template size_t TablePartitioningInfo<util::StackAllocator>::newEntry(
 	NodeAffinityNumber affinity, LargeContainerStatusType status,
-	int32_t partitioingNum, int64_t baseValue);
+	int32_t partitioningNum, int64_t baseValue);
 
 template size_t TablePartitioningInfo<
 	SQLVariableSizeGlobalAllocator>::findEntry(
@@ -5075,27 +5115,27 @@ template size_t TablePartitioningInfo<util::StackAllocator>::findEntry(
 	NodeAffinityNumber affinity);
 
 template bool TablePartitioningInfo<util::StackAllocator>::checkSchema(
-	TablePartitioningInfo & target,
-	util::XArray<uint8_t> &targetSchema,
-	util::XArray<uint8_t> &currentSchema);
+	TablePartitioningInfo& target,
+	util::XArray<uint8_t>& targetSchema,
+	util::XArray<uint8_t>& currentSchema);
 
 template void TablePartitioningInfo<
 	SQLVariableSizeGlobalAllocator>::checkTableExpirationSchema(
-		TableExpirationSchemaInfo & info, NodeAffinityNumber affinity,
+		TableExpirationSchemaInfo& info, NodeAffinityNumber affinity,
 		uint32_t partitionNum);
 
 template void TablePartitioningInfo<
 	SQLVariableSizeGlobalAllocator>::checkTableExpirationSchema(
-		TableExpirationSchemaInfo & info, size_t pos);
+		TableExpirationSchemaInfo& info, size_t pos);
 
 template void TablePartitioningInfo<
 	util::StackAllocator>::checkTableExpirationSchema(
-		TableExpirationSchemaInfo & info,
+		TableExpirationSchemaInfo& info,
 		NodeAffinityNumber affinity, uint32_t partitionNum);
 
 template void TablePartitioningInfo<
 	util::StackAllocator>::checkTableExpirationSchema(
-		TableExpirationSchemaInfo & info, size_t pos);
+		TableExpirationSchemaInfo& info, size_t pos);
 
 template int64_t TablePartitioningInfo<
 	util::StackAllocator>::calcValueFromAffinity(
@@ -5107,35 +5147,35 @@ template TablePartitioningInfo<
 	SQLVariableSizeGlobalAllocator>::TablePartitioningInfo(
 		SQLVariableSizeGlobalAllocator&);
 
-template bool execPartitioningOperation(EventContext & ec,
-	DBConnection * conn,
+template bool execPartitioningOperation(EventContext& ec,
+	DBConnection* conn,
 	LargeContainerStatusType targetOperation,
-	LargeExecStatus & execStatus,
-	NoSQLContainer & targetContainer,
+	LargeExecStatus& execStatus,
+	NoSQLContainer& targetContainer,
 	NodeAffinityNumber baseAffinity, NodeAffinityNumber targetAffinity,
-	NoSQLStoreOption & cmdOption,
-	TablePartitioningInfo<util::StackAllocator> &partitioningInfo,
-	const NameWithCaseSensitivity & tableName,
-	SQLExecution * execution,
-	TargetContainerInfo & targetContainerInfo);
+	NoSQLStoreOption& cmdOption,
+	TablePartitioningInfo<util::StackAllocator>& partitioningInfo,
+	const NameWithCaseSensitivity& tableName,
+	SQLExecution* execution,
+	TargetContainerInfo& targetContainerInfo);
 
 template NodeAffinityNumber TablePartitioningInfo<
 	util::StackAllocator>::getAffinityNumber(
-		uint32_t partitionNum, const TupleValue * value1,
-		const TupleValue * value2, int32_t position,
-		int64_t & baseValue, NodeAffinityNumber & baseAffinity);
+		uint32_t partitionNum, const TupleValue* value1,
+		const TupleValue* value2, int32_t position,
+		int64_t& baseValue, NodeAffinityNumber& baseAffinity);
 
 template void TablePartitioningInfo<
 	util::StackAllocator>::checkMaxAssigned(
-		TransactionContext & txn,
-		const FullContainerKey & containerKey,
+		TransactionContext& txn,
+		const FullContainerKey& containerKey,
 		int32_t partitioningNum);
 
-NoSQLContainer* recoverySubContainer(util::StackAllocator & alloc,
-	EventContext & ec,
-	NoSQLStore * store,
-	SQLExecution * execution,
-	const NameWithCaseSensitivity & tableName,
+NoSQLContainer* recoverySubContainer(util::StackAllocator& alloc,
+	EventContext& ec,
+	NoSQLStore* store,
+	SQLExecution* execution,
+	const NameWithCaseSensitivity& tableName,
 	int32_t partitionNum,
 	NodeAffinityNumber affinity) {
 
@@ -5163,6 +5203,14 @@ NoSQLContainer* recoverySubContainer(util::StackAllocator & alloc,
 			NoSQLUtils::LARGE_CONTAINER_KEY_PARTITIONING_INFO,
 			targetContainer, columnInfoList, partitioningInfo, option);
 		partitioningInfo.init();
+		size_t targetAffinityPos = partitioningInfo.findEntry(affinity);
+		if (targetAffinityPos == SIZE_MAX) {
+			return false;
+		}
+		else if (partitioningInfo.assignStatusList_[targetAffinityPos]
+			== PARTITION_STATUS_DROP_START) {
+			return false;
+		}
 
 		util::XArray<uint8_t> containerSchema(alloc);
 		util::XArray<ColumnInfo> largeColumnInfoList(alloc);

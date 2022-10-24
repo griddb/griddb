@@ -28,6 +28,7 @@ EventMonotonicTime userCacheUpdateInterval = 60;
 #include "sql_service.h"
 
 UTIL_TRACER_DECLARE(AUTH_OPERATION);
+UTIL_TRACER_DECLARE(CONNECTION_DETAIL);
 
 #define TXN_THROW_DENY_ERROR(errorCode, message) \
 	GS_THROW_CUSTOM_ERROR(DenyException, errorCode, message)
@@ -720,7 +721,24 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 		TEST_PRINT1("authType=%d\n", authType);
 		
 		UTIL_TRACE_DEBUG(AUTH_OPERATION, "userName=" << userName.c_str() << " dbName=" << dbName);
-			
+
+		bool usePublic = usePublicConection(request, false);
+		const char* serviceType = isNewSQL_ ? "SQL" : "Transaction";
+
+		if (usePublic) {
+			connOption.setPublicConnection();
+			isNewSQL_ ? sqlService_->setTotalExternalConnectionCount() : transactionService_->setTotalExternalConnectionCount();
+			GS_TRACE_INFO(CONNECTION_DETAIL, GS_TRACE_TXN_CONNECTION_STATUS, "operation=connect,"
+				<< "serviceType=" << serviceType << ",userName=" << userName.c_str()
+				<< ",source=" << ev.getSenderND() << ",connection=PUBLIC");
+		}
+		else {
+			isNewSQL_ ? sqlService_->setTotalInternalConnectionCount() : transactionService_->setTotalInternalConnectionCount();
+			GS_TRACE_DEBUG(CONNECTION_DETAIL, GS_TRACE_TXN_CONNECTION_STATUS, "operation=connect,"
+				<< "serviceType=" << serviceType << ",userName=" << userName.c_str()
+				<< ",source=" << ev.getSenderND());
+		}
+
 		const ClusterRole clusterRole = (CROLE_MASTER | CROLE_FOLLOWER);
 		const PartitionRoleType partitionRole = PROLE_ANY;
 		const PartitionStatus partitionStatus = PSTATE_ANY;

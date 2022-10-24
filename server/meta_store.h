@@ -99,7 +99,7 @@ private:
 
 struct MetaProcessor::ValueUtils {
 	static Value makeNull();
-	static Value makeString(util::StackAllocator &alloc, const char8_t *src);
+	static Value makeString(util::StackAllocator &alloc, const char8_t *src,const uint32_t limit);
 	static Value makeBool(bool src);
 	static Value makeShort(int16_t src);
 	static Value makeInteger(int32_t src);
@@ -249,6 +249,8 @@ protected:
 	void getNames(
 			TransactionContext &txn, BaseContainer &container,
 			const char8_t *&dbName, const char8_t *&containerName) const;
+
+	Value makeString(util::StackAllocator &alloc, const char8_t *src) const;
 
 	Context &cxt_;
 };

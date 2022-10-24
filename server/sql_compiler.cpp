@@ -42,6 +42,7 @@ UTIL_TRACER_DECLARE(SQL_HINT);
 	while (false)
 
 
+
 SQLTableInfo::SQLTableInfo(util::StackAllocator &alloc) :
 		dbName_(alloc),
 		tableName_(alloc),
@@ -1195,6 +1196,10 @@ void SQLCompiler::setExplainType(SyntaxTree::ExplainType explainType) {
 	explainType_ = explainType;
 }
 
+void SQLCompiler::setQueryStartTime(int64_t time) {
+	queryStartTime_ = util::DateTime(time);
+}
+
 void SQLCompiler::setPlanSizeLimitRatio(size_t ratio) {
 	planSizeLimitRatio_ = ratio;
 }
@@ -1561,7 +1566,7 @@ void SQLCompiler::genUnionAllShallow(
 			}
 		}
 		else if (hintValueList.size() != 0) {
-			plan.hintInfo_->reportWarning("Invalid value for Hint(MaxDegreeOfTaskInpout)");
+			plan.hintInfo_->reportWarning("Invalid value for Hint(MaxDegreeOfTaskInput)");
 			upperLimit = 0;
 		}
 	}
@@ -1666,7 +1671,7 @@ void SQLCompiler::genSelect(
 	productedNodeId = UNDEF_PLAN_NODEID;
 	cxt.productedNodeId_ = UNDEF_PLAN_NODEID;
 
-	validateWindowFunctionOccurence(
+	validateWindowFunctionOccurrence(
 			select, cxt.genuineWindowExprCount_, cxt.pseudoWindowExprCount_);
 	if (select.from_) {
 		genFrom(select, cxt.whereExpr_, plan);
@@ -2053,7 +2058,7 @@ void SQLCompiler::genDelete(const Select &select, Plan &plan) {
 	}
 	size_t genuineWindowExprCount = 0;
 	size_t pseudoWindowExprCount = 0;
-	size_t windowExprCount = validateWindowFunctionOccurence(
+	size_t windowExprCount = validateWindowFunctionOccurrence(
 			select, genuineWindowExprCount, pseudoWindowExprCount);
 	if (windowExprCount > 0) {
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_PARAMETER,
@@ -2137,7 +2142,7 @@ void SQLCompiler::validateScanOptionForVirtual(const PlanExprList &scanOptionLis
 	if (!isVirtual && scanOptionList.size() > 0) {
 		SQL_COMPILER_THROW_ERROR(
 			GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, NULL,
-			"Scan option is allowd for virtual table");
+			"Scan option is allowed for virtual table");
 	}
 	for (; itr != scanOptionList.end(); ++itr) {
 		if (itr->op_ != SQLType::EXPR_CONSTANT
@@ -2199,7 +2204,7 @@ void SQLCompiler::validateCreateIndexOptionForVirtual(
 		else {
 			SQL_COMPILER_THROW_ERROR(
 					GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, NULL,
-					"VNN Index option must be contant value or placeholder");
+					"VNN Index option must be constant value or placeholder");
 		}
 	}
 }
@@ -2817,7 +2822,7 @@ void SQLCompiler::genGroupBy(GenRAContext &cxt, ExprRef &havingExprRef, Plan &pl
 			if (columnPos > static_cast<int64_t>(cxt.selectList_.size())
 				|| columnPos <= 0) {
 				SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, &(*itr),
-						"Invalid column refernce (" << columnPos << ")");
+						"Invalid column reference (" << columnPos << ")");
 			}
 			ColumnId colId = static_cast<ColumnId>(columnPos - 1);
 			if (findAggrExpr(cxt.selectList_[colId], true)) {
@@ -2904,7 +2909,7 @@ void SQLCompiler::genOrderBy(GenRAContext &cxt, ExprRef &innerTopExprRef, Plan &
 				|| columnPos > static_cast<int64_t>(cxt.select_.selectList_->size())
 				|| columnPos <= 0) {
 				SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, &(*itr),
-					"Invalid column refernce (" << columnPos << ")");
+					"Invalid column reference (" << columnPos << ")");
 			}
 			ColumnId colId = static_cast<ColumnId>(columnPos - 1);
 			if (inSubQuery) {
@@ -3258,14 +3263,27 @@ void SQLCompiler::genWindowOverClauseOption(
 			assert(node->id_ == plan.back().id_);
 		}
 		if (windowExpr->windowOpt_->orderByList_) {
-			if (findSubqueryExpr(*windowExpr->windowOpt_->orderByList_)) {
+			const ExprList &inExprList = *windowExpr->windowOpt_->orderByList_;
+			if (findSubqueryExpr(inExprList)) {
 				GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR,
 						"Subqueries in the over clause are not supported");
 			}
 			windowOrderByList1 = genExprList(
-					*windowExpr->windowOpt_->orderByList_,
-					plan, MODE_NORMAL_SELECT, &inputId);
+					inExprList, plan, MODE_NORMAL_SELECT, &inputId);
 			assert(node->id_ == plan.back().id_);
+
+			PlanExprList::iterator itr = windowOrderByList1.begin();
+			ExprList::const_iterator inItr = inExprList.begin();
+			for (; inItr != inExprList.end(); ++inItr, ++itr) {
+				if (itr == windowOrderByList1.end() ||
+						(*inItr)->op_ == SQLType::EXPR_ALL_COLUMN) {
+					SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_INTERNAL, NULL, "");
+				}
+				if ((*inItr)->op_ == SQLType::EXPR_COLUMN) {
+					continue;
+				}
+				itr->sortAscending_ = (*inItr)->sortAscending_;
+			}
 		}
 		restoreSelectListName(cxt, saveOutputList, plan);
 		inputNode.outputList_ = saveOutputList;
@@ -3361,8 +3379,10 @@ void SQLCompiler::genWindowSortPlan(
 		for (size_t addIndex = 0;
 				addIndex < overCxt.addColumnExprList_.size(); addIndex++) {
 			ColumnId colId = static_cast<ColumnId>(overCxt.baseOutputListSize_ + addIndex);
-			const Expr& col = genColumnExpr(plan, 0, colId);
-			tmpPredList[overCxt.replaceColumnIndexList_[addIndex]] = col;
+			Expr col = genColumnExpr(plan, 0, colId);
+			Expr &destCol = tmpPredList[overCxt.replaceColumnIndexList_[addIndex]];
+			col.sortAscending_ = destCol.sortAscending_;
+			destCol = col;
 		}
 		appendUniqueExpr(tmpPredList, sortNode.predList_);
 	}
@@ -3412,12 +3432,25 @@ void SQLCompiler::genWindowMainPlan(
 		tmpPredList.end(),
 		overCxt.windowPartitionByList_.begin(),
 		overCxt.windowPartitionByList_.end());
+	const size_t orderByStartPos = tmpPredList.size();
+	const bool ranking = isRankingWindowExpr(*overCxt.windowExpr_);
+	if (ranking) {
+		tmpPredList.insert(
+			tmpPredList.end(),
+			overCxt.windowOrderByList_.begin(),
+			overCxt.windowOrderByList_.end());
+	}
 	for (size_t addIndex = 0;
-			addIndex < overCxt.replaceColumnIndexList_.size()
-		 	&& addIndex < overCxt.orderByStartPos_; addIndex++) {
+			addIndex < overCxt.replaceColumnIndexList_.size(); addIndex++) {
+		if (!ranking && addIndex >= overCxt.orderByStartPos_) {
+			break;
+		}
 		ColumnId colId = static_cast<ColumnId>(overCxt.baseOutputListSize_ + addIndex);
-		const Expr& col = genColumnExpr(plan, 0, colId);
+		const Expr &col = genColumnExpr(plan, 0, colId);
 		tmpPredList[overCxt.replaceColumnIndexList_[addIndex]] = col;
+	}
+	for (size_t i = 0; i < tmpPredList.size(); i++) {
+		tmpPredList[i].sortAscending_ = (i < orderByStartPos);
 	}
 	appendUniqueExpr(tmpPredList, windowNode.predList_);
 	assert(cxt.selectTopColumnId_ != UNDEF_COLUMNID);
@@ -3554,7 +3587,7 @@ void SQLCompiler::preparePseudoWindowOption(
 				if (columnPos > static_cast<int64_t>(cxt.selectList_.size())
 					|| columnPos <= 0) {
 					SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, &(*itr),
-							"Invalid column refernce (" << columnPos << ")");
+							"Invalid column reference (" << columnPos << ")");
 				}
 				ColumnId colId = static_cast<ColumnId>(columnPos - 1);
 				if (findAggrExpr(*cxt.aggrExprList_[colId], false)) {
@@ -3680,7 +3713,7 @@ void SQLCompiler::genSubquerySelect(
 	cxt.inSubQuery_ = true;
 	cxt.type_ = type;
 
-	validateWindowFunctionOccurence(
+	validateWindowFunctionOccurrence(
 			select, cxt.genuineWindowExprCount_, cxt.pseudoWindowExprCount_);
 
 	if (!select.selectList_
@@ -4704,6 +4737,10 @@ void SQLCompiler::Meta::appendMetaTableInfoId(
 		return;
 	}
 
+	if (metaInfo.id_ == MetaType::TYPE_PARTITION_STATS) {
+		return;
+	}
+
 	{
 		const TableInfo::SubInfoList &subInfoList = tableInfo.partitioning_->subInfoList_;
 
@@ -5166,12 +5203,14 @@ void SQLCompiler::genJoinCondition(const Plan &plan,
 		++itr;
 	}
 	if (checkUsing && (usingExprList.size() > 0)) {
-		Expr &frontExpr = usingExprList.front();
-		const char* c_str = static_cast<const char*>(frontExpr.value_.varData());
-		util::String name(c_str, frontExpr.value_.varSize(), alloc_);
+		const char8_t *name = "";
+		const Expr &frontExpr = usingExprList.front();
+		if (frontExpr.qName_ != NULL && frontExpr.qName_->name_ != NULL) {
+			name = frontExpr.qName_->name_->c_str();
+		}
 		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, NULL,
-			"Column \"" << name.c_str()
-			<< "\" specified in USING clause does not exist in left or right table");
+				"Column \"" << name <<
+				"\" specified in USING clause does not exist in left or right table");
 	}
 	if (tempOnExpr.op_ != SQLType::Id()) {
 		onExpr = tempOnExpr;
@@ -5523,13 +5562,13 @@ void SQLCompiler::trimExprList(size_t len, PlanExprList &list) {
 	assert(len == list.size());
 }
 
-size_t SQLCompiler::validateWindowFunctionOccurence(
+size_t SQLCompiler::validateWindowFunctionOccurrence(
 		const Select &select,
 		size_t &genuineWindowExprCount, size_t &pseudoWindowExprCount) {
 	genuineWindowExprCount = 0;
 	pseudoWindowExprCount = 0;
 
-	size_t occurenceCount = 0;
+	size_t occurrenceCount = 0;
 	bool resolved = false;
 	bool found = false;
 	const Expr* foundExpr = NULL;
@@ -5643,9 +5682,9 @@ size_t SQLCompiler::validateWindowFunctionOccurence(
 				}
 			}
 		}
-		occurenceCount = totalWindowCount;
+		occurrenceCount = totalWindowCount;
 	}
-	return occurenceCount;
+	return occurrenceCount;
 }
 
 bool SQLCompiler::findWindowExpr(const ExprList &exprList, bool resolved, const Expr* &foundExpr) {
@@ -5686,6 +5725,23 @@ bool SQLCompiler::findWindowExpr(const Expr &expr, bool resolved, const Expr* &f
 	}
 	foundExpr = NULL;
 	return false;
+}
+
+bool SQLCompiler::isRankingWindowExpr(const Expr &expr) {
+	bool ranking = false;
+
+	Type opType = expr.op_;
+	if (opType == SQLType::EXPR_FUNCTION) {
+		opType = resolveFunction(expr);
+	}
+
+	bool windowOnly;
+	bool pseudoWindow;
+	if (ProcessorUtils::isWindowExprType(opType, windowOnly, pseudoWindow)) {
+		ranking = !(windowOnly || pseudoWindow);
+	}
+
+	return ranking;
 }
 
 uint32_t SQLCompiler::calcFunctionCategory(const Expr &expr, bool resolved) {
@@ -6030,7 +6086,16 @@ SQLCompiler::Expr SQLCompiler::genScalarExpr(
 		outExpr.op_ = exprType;
 
 		if (exprType == SQLType::FUNC_NOW) {
-			currentTimeRequired_ = true;
+			if (queryStartTime_.getUnixTime() !=
+					util::DateTime::INITIAL_UNIX_TIME) {
+				const int64_t unixTime = queryStartTime_.getUnixTime();
+				outExpr.value_ =
+						TupleValue(&unixTime, TupleList::TYPE_TIMESTAMP);
+				outExpr.op_ = SQLType::EXPR_CONSTANT;
+			}
+			else {
+				currentTimeRequired_ = true;
+			}
 		}
 	}
 	else if (SQLType::START_AGG < exprType && exprType < SQLType::END_AGG) {
@@ -6098,8 +6163,15 @@ SQLCompiler::Expr SQLCompiler::genScalarExpr(
 			}
 
 			assert(inExpr.placeHolderCount_ > 0);
-			outExpr.columnId_ =
+			const ColumnId pos =
 					static_cast<ColumnId>(inExpr.placeHolderCount_ - 1);
+			if (pos < plan.parameterList_.size()) {
+				outExpr.value_ = plan.parameterList_[pos];
+				outExpr.op_ = SQLType::EXPR_CONSTANT;
+			}
+			else {
+				outExpr.columnId_ = pos;
+			}
 		}
 		else if (outExpr.next_ != NULL &&
 				(exprType == SQLType::EXPR_AND ||
@@ -14348,12 +14420,12 @@ void SQLCompiler::setUpSimpleSubqueryGroup(
 	else if (matching && !withValue) {
 		assert(!preGrouped);
 
-		ColumnId beseInColumnId;
+		ColumnId baseInColumnId;
 		if (inNodeId == preFoldId) {
-			beseInColumnId = (*foldExpr.next_)[2]->columnId_;
+			baseInColumnId = (*foldExpr.next_)[2]->columnId_;
 		}
 		else {
-			beseInColumnId = static_cast<ColumnId>(
+			baseInColumnId = static_cast<ColumnId>(
 					node.outputList_.size()) + reducedNECount;
 		}
 
@@ -14373,7 +14445,7 @@ void SQLCompiler::setUpSimpleSubqueryGroup(
 			ExprList *aggrArgs = ALLOC_NEW(alloc_) ExprList(alloc_);
 			if (argExpr == NULL) {
 				const ColumnId inColumnId =
-						beseInColumnId + (neReducing ? outIndex : 0);
+						baseInColumnId + (neReducing ? outIndex : 0);
 
 				Expr *colExpr = ALLOC_NEW(alloc_) Expr(genColumnExprBase(
 						&plan, &node, 0, inColumnId, NULL));
@@ -18320,7 +18392,7 @@ void SQLCompiler::Meta::genDriverClusterInfo(
 	{
 		int32_t major;
 		int32_t minor;
-		NoSQLCommonUtils::getDatabasaeVersion(major, minor);
+		NoSQLCommonUtils::getDatabaseVersion(major, minor);
 		node.outputList_.push_back(genConstColumn(
 				plan, TupleValue(major), STR_DATABASE_MAJOR_VERSION));
 		node.outputList_.push_back(genConstColumn(
@@ -21706,7 +21778,7 @@ bool SQLHintInfo::checkHintArguments(SQLHint::Id hintId, const Expr &hintExpr) c
 				return false;
 			}
 			if (hintExpr.next_->size() == 1) {
-				if (!checkLeadingTreeArgmentsType(*hintExpr.next_->at(0))) {
+				if (!checkLeadingTreeArgumentsType(*hintExpr.next_->at(0))) {
 					return false;
 				}
 			}
@@ -22807,7 +22879,7 @@ bool SQLHintInfo::checkArgIsTable(
 	return true;
 }
 
-bool SQLHintInfo::checkLeadingTreeArgmentsType(const Expr &expr) const {
+bool SQLHintInfo::checkLeadingTreeArgumentsType(const Expr &expr) const {
 	util::String token(alloc_);
 	if (expr.op_ == SQLType::EXPR_LIST) {
 		assert(expr.next_);
@@ -22823,7 +22895,7 @@ bool SQLHintInfo::checkLeadingTreeArgmentsType(const Expr &expr) const {
 		}
 		for (size_t pos = 0; pos < expr.next_->size(); ++pos) {
 			if (expr.next_->at(pos)->op_ == SQLType::EXPR_LIST) {
-				if (!checkLeadingTreeArgmentsType(*expr.next_->at(pos))) {
+				if (!checkLeadingTreeArgumentsType(*expr.next_->at(pos))) {
 					return false;
 				}
 			}

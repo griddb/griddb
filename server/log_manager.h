@@ -132,6 +132,8 @@ public:
 	template <typename S>
 	void decode(S& in, util::StackAllocator& alloc);
 
+	void encode(util::StackAllocator& alloc, util::XArray<uint8_t>& logRecoreds);
+
 	Log& setChunkId(int64_t chunkid);
 
 	int64_t getChunkId() const;
@@ -318,7 +320,7 @@ public:
 		PERSISTENCY_KEEP_ALL_LOG = 2
 	};
 	/*!
-		@brief Configuration of LogManaegr
+		@brief Configuration of LogManager
 	*/
 	struct Config : public ConfigTable::ParamHandler {
 		Config(ConfigTable &configTable);
@@ -924,7 +926,8 @@ LogSequentialNumber LogManager<L>::appendXLog(
 			child_->copyXLog(type, lsn, data, len);
 		}
 		if (logBinary) {
-			logBinary->assign(binary.data(), binary.data() + binary.size());
+			logBinary->clear();
+			logBinary->push_back(binary.data(), binary.size());
 		}
 		return lsn;
 	}

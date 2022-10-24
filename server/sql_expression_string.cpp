@@ -328,7 +328,7 @@ SQLStringExprs::Functions::Replace::operator()(
 
 	for (;;) {
 		const size_t rest = reader1.getNext();
-		int64_t pos = SQLValues::ValueUtils::findPart(
+		const int64_t pos = SQLValues::ValueUtils::findPart(
 				reader1, reader2,
 				static_cast<int64_t>(reader1.getPrev()));
 		size_t size = rest - reader1.getNext();
@@ -337,7 +337,8 @@ SQLStringExprs::Functions::Replace::operator()(
 		}
 		reader1.back(size);
 
-		if (pos > 0) {
+		if (pos > 0 && keySize > 0)
+		{
 			const size_t stepSize = size - keySize;
 			SQLValues::ValueUtils::subPart(
 					writer, reader1, static_cast<int64_t>(stepSize));

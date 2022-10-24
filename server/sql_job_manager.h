@@ -514,8 +514,8 @@ public:
 				completed_ = completed;
 			}
 
-			bool isImmediated() {
-				return immediated_;
+			bool isImmediate() {
+				return immediate_;
 			}
 
 			JobId& getJobId() {
@@ -629,7 +629,7 @@ public:
 			util::StackAllocator::Scope* scope_;
 			bool completed_;
 			bool resultComplete_;
-			bool immediated_;
+			bool immediate_;
 			int64_t counter_;
 			TaskExecutionStatus status_;
 			TupleListArray tempTupleList_;
@@ -700,7 +700,7 @@ public:
 
 		typedef uint8_t StatementExecStatus;  
 
-		void recieveNoSQLResponse(EventContext& ec,
+		void receiveNoSQLResponse(EventContext& ec,
 			util::Exception& dest, StatementExecStatus status, int32_t pos);
 
 		void getProfiler(util::StackAllocator& alloc, StatJobProfilerInfo& prof, int32_t mode);
@@ -712,7 +712,7 @@ public:
 
 		void checkMemoryLimit();
 
-		void recieveTaskBlock(EventContext& ec, TaskId taskId, InputId inputId,
+		void receiveTaskBlock(EventContext& ec, TaskId taskId, InputId inputId,
 			TupleList::Block* block, int64_t blockNo, ControlType controlType,
 			bool isEmpty, bool isLocal);
 
@@ -743,7 +743,7 @@ public:
 			return jobManager_;
 		}
 
-		void fowardRequest(EventContext& ec, ControlType controlType,
+		void forwardRequest(EventContext& ec, ControlType controlType,
 			Task* task, int outputId, bool isEmpty,
 			bool isComplete, TupleList::Block* resource);
 
@@ -839,9 +839,13 @@ public:
 		}
 		bool checkTaskInterrupt(TaskId taskId);
 		void recvSendComplete(TaskId taskId);
+		util::StackAllocator* getLocalStackAllocator() {
+			return &jobStackAlloc_;
+		}
 
 	private:
 
+		util::StackAllocator* getStackAllocator();
 		void executeJobStart(EventContext* ec, int64_t waitTime);
 		void executeTask(EventContext* ec, Event* ev, JobManager::ControlType controlType,
 			TaskId taskId, TaskId inputId, bool isEmpty, bool isComplete,
@@ -851,7 +855,6 @@ public:
 		void decodeOptional(EventByteInStream& in);
 
 		static bool isDQLProcessor(SQLType::Id type);
-		util::StackAllocator* getStackAllocator();
 		SQLVarSizeAllocator* getLocalVarAllocator();
 		void releaseStackAllocator(util::StackAllocator* alloc);
 		void releaseLocalVarAllocator(SQLVarSizeAllocator* varAlloc);

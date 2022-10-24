@@ -19,6 +19,8 @@
  * @brief SQLパーサ関連クラスの実装
  */
 
+
+
 #ifndef SQL_PARSER_ENABLE_WINDOW_FUNCTION
 #define SQL_PARSER_ENABLE_WINDOW_FUNCTION 1
 #endif
@@ -31,7 +33,6 @@
 #include "sql_execution.h"
 #include "sql_compiler.h" 
 #include "sql_utils.h"
-
 
 
 
@@ -392,6 +393,7 @@ int32_t SyntaxTree::Select::calcCommandType() {
 	case CMD_BEGIN:
 	case CMD_COMMIT:
 	case CMD_ROLLBACK:
+	case CMD_CREATE_ROLE:
 		return COMMAND_NONE;
 	default:
 		assert(false);

@@ -56,20 +56,6 @@ private:
 static const uint32_t CP_HANDLER_PARTITION_ID = 0;
 static const uint32_t CP_SERIALIZED_PARTITION_ID = 0;
 
-static const int32_t secondLimit = INT32_MAX / 1000;
-
-/*!
-	@brief Converts time unit from second to millisecond.
-*/
-static inline int32_t changeTimeSecondToMilliSecond(int32_t second) {
-	if (second > secondLimit) {
-		return INT32_MAX;
-	}
-	else {
-		return second * 1000;
-	}
-}
-
 struct CheckpointTypes  {
 	enum PeriodicFlag {
 		PERIODIC_INACTIVE,
@@ -323,7 +309,7 @@ public:
 	struct BackupStatus {
 		BackupStatus()
 			: name_(""),
-			  cumlativeCount_(0),
+			  cumulativeCount_(0),
 			  differentialCount_(0),
 			  incrementalLevel_(-1),
 			  archiveLogMode_(false),
@@ -332,7 +318,7 @@ public:
 
 		void reset() {
 			name_.clear();
-			cumlativeCount_ = 0;
+			cumulativeCount_ = 0;
 			differentialCount_ = 0;
 			incrementalLevel_ = 0;
 			archiveLogMode_ = false;
@@ -341,7 +327,7 @@ public:
 		}
 
 		u8string name_;
-		uint64_t cumlativeCount_;
+		uint64_t cumulativeCount_;
 		uint64_t differentialCount_;
 		int32_t incrementalLevel_;
 		bool archiveLogMode_;
@@ -547,7 +533,7 @@ private:
 
 	bool checkCPrunnable(int32_t mode); 
 
-	bool prepareBackupDirecoty(CheckpointMainMessage &message);
+	bool prepareBackupDirectory(CheckpointMainMessage &message);
 
 	void traceCheckpointStart(CheckpointMainMessage &message);
 	void traceCheckpointEnd(CheckpointMainMessage &message);
@@ -633,7 +619,7 @@ private:
 	SystemService *systemService_;
 	PartitionList* partitionList_;
 	PartitionTable *partitionTable_;
-	bool initailized_;
+	bool initialized_;
 	bool isErrorOccured_;
 
 	SyncService *syncService_;
