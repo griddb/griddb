@@ -88,20 +88,20 @@ void Collection::set(TransactionContext & txn, const FullContainerKey& container
 	setTablePartitioningVersionId(containerSchema->getTablePartitioningVersionId());
 	setContainerExpirationStartTime(containerSchema->getContainerExpirationStartTime());
 
-	FullContainerKeyCursor keyCursor(*getObjectManager(), getMetaAllcateStrategy());
+	FullContainerKeyCursor keyCursor(*getObjectManager(), getMetaAllocateStrategy());
 	keyCursor.initialize(txn, containerKey);
 	baseContainerImage_->containerNameOId_ = keyCursor.getBaseOId();
 
 	baseContainerImage_->columnSchemaOId_ = columnSchemaOId;
 	commonContainerSchema_ =
 		ALLOC_NEW(txn.getDefaultAllocator()) ShareValueList(
-			*getObjectManager(), getMetaAllcateStrategy(), baseContainerImage_->columnSchemaOId_);
+			*getObjectManager(), getMetaAllocateStrategy(), baseContainerImage_->columnSchemaOId_);
 
 	columnSchema_ =
 		commonContainerSchema_->get<ColumnSchema>(META_TYPE_COLUMN_SCHEMA);
 
 	indexSchema_ = ALLOC_NEW(txn.getDefaultAllocator())
-		IndexSchema(txn, *getObjectManager(), getMetaAllcateStrategy());
+		IndexSchema(txn, *getObjectManager(), getMetaAllocateStrategy());
 	bool onMemory = false;
 	indexSchema_->initialize(txn, IndexSchema::INITIALIZE_RESERVE_NUM, 0, getColumnNum(), onMemory);
 	baseContainerImage_->indexSchemaOId_ = indexSchema_->getBaseOId();
@@ -130,12 +130,12 @@ void Collection::set(TransactionContext & txn, const FullContainerKey& container
 	mvccFuncInfo_ = ALLOC_NEW(alloc) TreeFuncInfo(alloc);
 	mvccFuncInfo_->initialize(columnIds, NULL);
 
-	BtreeMap map(txn, *getObjectManager(), getMapAllcateStrategy(), this, rowIdFuncInfo_);
+	BtreeMap map(txn, *getObjectManager(), getMapAllocateStrategy(), this, rowIdFuncInfo_);
 	map.initialize(
 		txn, COLUMN_TYPE_TIMESTAMP, true, BtreeMap::TYPE_UNIQUE_RANGE_KEY);
 	baseContainerImage_->rowIdMapOId_ = map.getBaseOId();
 
-	BtreeMap mvccMap(txn, *getObjectManager(), getMapAllcateStrategy(), this, mvccFuncInfo_);
+	BtreeMap mvccMap(txn, *getObjectManager(), getMapAllocateStrategy(), this, mvccFuncInfo_);
 	mvccMap.initialize<TransactionId, MvccRowImage>(
 		txn, COLUMN_TYPE_OID, false, BtreeMap::TYPE_SINGLE_KEY);
 	baseContainerImage_->mvccMapOId_ = mvccMap.getBaseOId();
@@ -193,7 +193,7 @@ bool Collection::finalize(TransactionContext& txn, bool isRemoveGroup) {
 					return false;
 				}
 
-				getDataStore()->finalizeMap(txn, getMapAllcateStrategy(), rowIdMap.get(), getContainerExpirationTime());
+				getDataStore()->finalizeMap(txn, getMapAllocateStrategy(), rowIdMap.get(), getContainerExpirationTime());
 			}
 
 			if (baseContainerImage_->mvccMapOId_ != UNDEF_OID && !isExpired(txn)) {
@@ -235,7 +235,7 @@ bool Collection::finalize(TransactionContext& txn, bool isRemoveGroup) {
 						break;
 					}
 				}
-				getDataStore()->finalizeMap(txn, getMapAllcateStrategy(), mvccMap.get(), getContainerExpirationTime());
+				getDataStore()->finalizeMap(txn, getMapAllocateStrategy(), mvccMap.get(), getContainerExpirationTime());
 			}
 		}
 
@@ -772,10 +772,10 @@ void Collection::updateRow(TransactionContext& txn, uint32_t rowSize,
 			for (util::Vector<ColumnId>::iterator itr = keyColumnIdList.begin();
 				itr != keyColumnIdList.end(); itr++) {
 				BaseObject baseFieldObject(
-					*getObjectManager(), getRowAllcateStrategy());
+					*getObjectManager(), getRowAllocateStrategy());
 				row.getField(txn, getColumnInfo(*itr),
 					baseFieldObject);
-				if (ValueProcessor::compare(txn, *getObjectManager(), getRowAllcateStrategy(),
+				if (ValueProcessor::compare(txn, *getObjectManager(), getRowAllocateStrategy(),
 						*itr, &inputMessageRowStore,
 						baseFieldObject.getCursor<uint8_t>()) != 0) {
 					GS_THROW_USER_ERROR(GS_ERROR_DS_COL_ROWKEY_INVALID,
@@ -1092,7 +1092,7 @@ void Collection::searchRowIdIndex(TransactionContext& txn,
 
 	sc.setLimit(limitBackup);
 
-	ContainerValue containerValue(*getObjectManager(), getRowAllcateStrategy());
+	ContainerValue containerValue(*getObjectManager(), getRowAllocateStrategy());
 	util::XArray<OId> oIdList(txn.getDefaultAllocator());
 	util::XArray<OId>::iterator itr;
 
@@ -2093,7 +2093,7 @@ bool Collection::searchRowKeyWithRowIdMap(TransactionContext& txn,
 	util::Vector<TermCondition> condList(txn.getDefaultAllocator());
 	sc.getConditionList(condList, BaseIndex::SearchContext::COND_ALL);
 	util::Vector<TermCondition>::iterator condItr;
-	ContainerValue containerValue(*getObjectManager(), getRowAllcateStrategy());
+	ContainerValue containerValue(*getObjectManager(), getRowAllocateStrategy());
 
 	BtreeMap::BtreeCursor btreeCursor;
 
@@ -2155,7 +2155,7 @@ bool Collection::searchRowKeyWithMvccMap(TransactionContext& txn,
 	util::Vector<TermCondition> condList(txn.getDefaultAllocator());
 	sc.getConditionList(condList, BaseIndex::SearchContext::COND_ALL);
 	util::Vector<TermCondition>::iterator condItr;
-	ContainerValue containerValue(*getObjectManager(), getRowAllcateStrategy());
+	ContainerValue containerValue(*getObjectManager(), getRowAllocateStrategy());
 
 	RowArray rowArray(txn, this);
 	util::XArray<std::pair<TransactionId, MvccRowImage> > idList(

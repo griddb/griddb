@@ -67,7 +67,7 @@ KeyDataStore::~KeyDataStore() {
 
 
 /** **
-	@breif DataStoreがサポートしている機能かを判定
+	@brief DataStoreがサポートしている機能かを判定
 	@param [IN] type Support機能タイプ
 	@return
 	@note 現時点では未使用
@@ -122,11 +122,11 @@ void KeyDataStore::postProcess(TransactionContext* txn) {
 ** **/
 OId KeyDataStore::put(TransactionContext& txn, StoreType storeType, DSObjectSize allocateSize) {
 	try {
-		DataStorePartitionHeaderObject partitionHeadearObject(*getObjectManager(), allocateStrategy_);
+		DataStorePartitionHeaderObject partitionHeaderObject(*getObjectManager(), allocateStrategy_);
 		if (!isActive()) {
 			initializeHeader(txn);
 		}
-		partitionHeadearObject.load(headerOId_, true);
+		partitionHeaderObject.load(headerOId_, true);
 
 		OId oId = UNDEF_OID;
 		BaseObject storeObject(*getObjectManager(), allocateStrategy_);
@@ -134,7 +134,7 @@ OId KeyDataStore::put(TransactionContext& txn, StoreType storeType, DSObjectSize
 		memset(data, 0, allocateSize);
 
 		BtreeMap storeMap(txn, *getObjectManager(),
-			partitionHeadearObject.getStoreMapOId(), allocateStrategy_, NULL);
+			partitionHeaderObject.getStoreMapOId(), allocateStrategy_, NULL);
 		util::XArray<OId> list(txn.getDefaultAllocator());
 		TermCondition cond(COLUMN_TYPE_INT, COLUMN_TYPE_INT,
 			DSExpression::EQ, UNDEF_COLUMNID, &storeType, sizeof(storeType));
@@ -150,7 +150,7 @@ OId KeyDataStore::put(TransactionContext& txn, StoreType storeType, DSObjectSize
 				storeMap.update<StoreType, OId>(txn, storeType, list[0], oId, isCaseSensitive);
 		}
 		if ((status & BtreeMap::ROOT_UPDATE) != 0) {
-			partitionHeadearObject.setStoreMapOId(storeMap.getBaseOId());
+			partitionHeaderObject.setStoreMapOId(storeMap.getBaseOId());
 		}
 		return oId;
 	}
@@ -170,9 +170,9 @@ OId KeyDataStore::get(TransactionContext& txn, StoreType storeType) {
 	if (!isActive()) {
 		return UNDEF_OID;
 	}
-	DataStorePartitionHeaderObject partitionHeadearObject(*getObjectManager(), allocateStrategy_, headerOId_);
+	DataStorePartitionHeaderObject partitionHeaderObject(*getObjectManager(), allocateStrategy_, headerOId_);
 	BtreeMap storeMap(txn, *getObjectManager(),
-		partitionHeadearObject.getStoreMapOId(), allocateStrategy_, NULL);
+		partitionHeaderObject.getStoreMapOId(), allocateStrategy_, NULL);
 	util::XArray<OId> list(txn.getDefaultAllocator());
 	TermCondition cond(COLUMN_TYPE_INT, COLUMN_TYPE_INT,
 		DSExpression::EQ, UNDEF_COLUMNID, &storeType, sizeof(storeType));
@@ -221,10 +221,10 @@ KeyDataStoreValue KeyDataStore::get(TransactionContext& txn,
 		if (!isActive()) {
 			return ret;
 		}
-		DataStorePartitionHeaderObject partitionHeadearObject(
+		DataStorePartitionHeaderObject partitionHeaderObject(
 			*getObjectManager(), allocateStrategy_, headerOId_);
 		BtreeMap keyMap(txn, *getObjectManager(),
-			partitionHeadearObject.getKeyMapOId(), allocateStrategy_, NULL);
+			partitionHeaderObject.getKeyMapOId(), allocateStrategy_, NULL);
 
 		FullContainerKeyCursor keyCursor(const_cast<FullContainerKey*>(&containerKey));
 		keyMap.search<FullContainerKeyCursor, KeyDataStoreValue, KeyDataStoreValue>(
@@ -249,16 +249,16 @@ PutStatus KeyDataStore::put(TransactionContext& txn,
 	util::StackAllocator& alloc = txn.getDefaultAllocator();
 	PutStatus putStatus = PutStatus::CREATE;
 	try {
-		DataStorePartitionHeaderObject partitionHeadearObject(*getObjectManager(), allocateStrategy_);
+		DataStorePartitionHeaderObject partitionHeaderObject(*getObjectManager(), allocateStrategy_);
 		if (!isActive()) {
 			GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR,
 				"must call 'put(TransactionContext&, StoreType, Size_t)', at first");
 		}
 		else {
-			partitionHeadearObject.load(headerOId_, false);
+			partitionHeaderObject.load(headerOId_, false);
 		}
 		BtreeMap keyMap(txn, *getObjectManager(),
-			partitionHeadearObject.getKeyMapOId(), allocateStrategy_, NULL);
+			partitionHeaderObject.getKeyMapOId(), allocateStrategy_, NULL);
 
 		bool isCaseSensitive = false;
 		KeyDataStoreValue value;
@@ -270,7 +270,7 @@ PutStatus KeyDataStore::put(TransactionContext& txn,
 			int32_t status = keyMap.remove<FullContainerKeyCursor, KeyDataStoreValue>(
 				txn, keyCursor, value, isCaseSensitive);
 			if ((status & BtreeMap::ROOT_UPDATE) != 0) {
-				partitionHeadearObject.setKeyMapOId(keyMap.getBaseOId());
+				partitionHeaderObject.setKeyMapOId(keyMap.getBaseOId());
 			}
 
 			containerIdTable_.remove(newValue.containerId_);
@@ -280,7 +280,7 @@ PutStatus KeyDataStore::put(TransactionContext& txn,
 			int32_t status = keyMap.insert<FullContainerKeyCursor, KeyDataStoreValue>(
 				txn, keyCursor, newValue, isCaseSensitive);
 			if ((status & BtreeMap::ROOT_UPDATE) != 0) {
-				partitionHeadearObject.setKeyMapOId(keyMap.getBaseOId());
+				partitionHeaderObject.setKeyMapOId(keyMap.getBaseOId());
 			}
 		}
 
@@ -306,15 +306,15 @@ bool KeyDataStore::remove(TransactionContext& txn, OId keyOId) {
 	util::StackAllocator& alloc = txn.getDefaultAllocator();
 	PutStatus status = PutStatus::CREATE;
 	try {
-		DataStorePartitionHeaderObject partitionHeadearObject(*getObjectManager(), allocateStrategy_);
+		DataStorePartitionHeaderObject partitionHeaderObject(*getObjectManager(), allocateStrategy_);
 		if (!isActive()) {
 			return false;
 		}
 		else {
-			partitionHeadearObject.load(headerOId_, false);
+			partitionHeaderObject.load(headerOId_, false);
 		}
 		BtreeMap keyMap(txn, *getObjectManager(),
-			partitionHeadearObject.getKeyMapOId(), allocateStrategy_, NULL);
+			partitionHeaderObject.getKeyMapOId(), allocateStrategy_, NULL);
 
 		bool isCaseSensitive = false;
 		KeyDataStoreValue value;
@@ -326,7 +326,7 @@ bool KeyDataStore::remove(TransactionContext& txn, OId keyOId) {
 			int32_t status = keyMap.remove<FullContainerKeyCursor, KeyDataStoreValue>(
 				txn, keyCursor, value, isCaseSensitive);
 			if ((status & BtreeMap::ROOT_UPDATE) != 0) {
-				partitionHeadearObject.setKeyMapOId(keyMap.getBaseOId());
+				partitionHeaderObject.setKeyMapOId(keyMap.getBaseOId());
 			}
 			containerIdTable_.remove(value.containerId_);
 		}
@@ -416,11 +416,11 @@ void KeyDataStore::handleSearchError(std::exception&, ErrorCode) {
 ** **/
 void KeyDataStore::initializeHeader(TransactionContext& txn) {
 	assert(!objectManager_->isActive(allocateStrategy_.getGroupId()));
-	DataStorePartitionHeaderObject partitionHeadearObject(
+	DataStorePartitionHeaderObject partitionHeaderObject(
 		*getObjectManager(), allocateStrategy_);
-	partitionHeadearObject.initialize(txn, allocateStrategy_);
+	partitionHeaderObject.initialize(txn, allocateStrategy_);
 	headerOId_ = getHeadOId(allocateStrategy_.getGroupId());
-	if (partitionHeadearObject.getBaseOId() != headerOId_) {
+	if (partitionHeaderObject.getBaseOId() != headerOId_) {
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_DS_CHUNK_OFFSET_INVALID, "must be first object");
 	}
 }
@@ -430,14 +430,14 @@ void KeyDataStore::initializeHeader(TransactionContext& txn) {
 	@return 新規割当コンテナID
 ** **/
 ContainerId KeyDataStore::allocateContainerId() {
-	DataStorePartitionHeaderObject partitionHeadearObject(*getObjectManager(), allocateStrategy_);
+	DataStorePartitionHeaderObject partitionHeaderObject(*getObjectManager(), allocateStrategy_);
 	if (!isActive()) {
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}
 	else {
-		partitionHeadearObject.load(headerOId_, false);
+		partitionHeaderObject.load(headerOId_, false);
 	}
-	ContainerId containerId = partitionHeadearObject.allocateContainerId();
+	ContainerId containerId = partitionHeaderObject.allocateContainerId();
 	return containerId;
 }
 
@@ -447,14 +447,14 @@ ContainerId KeyDataStore::allocateContainerId() {
 	@return 新規に割り当てた先頭のチャンクグループID
 ** **/
 DSGroupId KeyDataStore::allocateGroupId(int32_t num) {
-	DataStorePartitionHeaderObject partitionHeadearObject(*getObjectManager(), allocateStrategy_);
+	DataStorePartitionHeaderObject partitionHeaderObject(*getObjectManager(), allocateStrategy_);
 	if (!isActive()) {
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 	}
 	else {
-		partitionHeadearObject.load(headerOId_, false);
+		partitionHeaderObject.load(headerOId_, false);
 	}
-	DSGroupId groupId = partitionHeadearObject.allocateGroupId(num);
+	DSGroupId groupId = partitionHeaderObject.allocateGroupId(num);
 	return groupId;
 }
 
@@ -581,10 +581,10 @@ void KeyDataStore::restoreContainerIdTable(
 		return;
 	}
 
-	DataStorePartitionHeaderObject partitionHeadearObject(
+	DataStorePartitionHeaderObject partitionHeaderObject(
 		*getObjectManager(), allocateStrategy_, headerOId_);
 	BtreeMap keyMap(txn, *getObjectManager(),
-		partitionHeadearObject.getKeyMapOId(), allocateStrategy_, NULL);
+		partitionHeaderObject.getKeyMapOId(), allocateStrategy_, NULL);
 
 	size_t containerListSize = 0;
 	BtreeMap::BtreeCursor btreeCursor;
@@ -812,7 +812,7 @@ FullContainerKey* KeyDataStore::getKey(TransactionContext& txn, OId oId) {
 	@return コンテナキーのオブジェクトのID
 ** **/
 OId KeyDataStore::allocateKey(TransactionContext& txn, const FullContainerKey &key) {
-	DataStorePartitionHeaderObject partitionHeadearObject(*getObjectManager(), allocateStrategy_);
+	DataStorePartitionHeaderObject partitionHeaderObject(*getObjectManager(), allocateStrategy_);
 	if (!isActive()) {
 		initializeHeader(txn);
 	}
@@ -936,7 +936,7 @@ void KeyDataStore::ContainerIdTable::remove(ContainerId containerId) {
 	@param [in] start 取得開始件数
 	@param [in] limit 取得上限件数
 	@param [out] list 条件を満たすコンテナIdとコンテナの情報のリスト
-	@attension limitの指定値はMAX_INT64までOK。ただし、実際に返す個数が
+	@attention limitの指定値はMAX_INT64までOK。ただし、実際に返す個数が
 			   MAX_INT32を越える場合はエラーを返す。(EventEngineの制約)
 ** **/
 void KeyDataStore::ContainerIdTable::getList(
@@ -985,7 +985,7 @@ void KeyDataStore::ContainerIdTable::getList(
 	@param [in] dbId DatabaseId
 	@param [in] condition ContainerCondition
 	@param [out] list 条件を満たすコンテナIdとコンテナの情報のリスト
-	@attension limitの指定値はMAX_INT64までOK。ただし、実際に返す個数が
+	@attention limitの指定値はMAX_INT64までOK。ただし、実際に返す個数が
 			   MAX_INT32を越える場合はエラーを返す。(EventEngineの制約)
 ** **/
 bool KeyDataStore::ContainerIdTable::getListOrdered(

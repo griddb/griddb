@@ -1323,7 +1323,7 @@ inline void SQLOpUtils::ExpressionListWriter::ByDigestTuple<
 				digestWritable, TypeTag, SQLValues::Types::Any>::Type FixedTypeTag;
 		ValueUtils::writeValue<FixedTypeTag>(
 				outTuple, base_.digestColumn_,
-				ValueUtils::toValueByOrdredDigest<FixedTypeTag, AscendingType>(
+				ValueUtils::toValueByOrderdDigest<FixedTypeTag, AscendingType>(
 						ValueUtils::digestByRotation(reader.getDigest(), RotatingType())));
 	}
 	else {

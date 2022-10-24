@@ -243,7 +243,7 @@ void TransactionManager::removeAuth(PartitionId pId, AuthenticationId authId) {
 }
 
 /*!
-	@brief Gets authentication contextID (partitionID and auhtenticationID) list on authentication timeout
+	@brief Gets authentication contextID (partitionID and authenticationID) list on authentication timeout
 */
 void TransactionManager::getAuthenticationTimeoutContextId(
 	PartitionGroupId pgId, EventMonotonicTime emNow,

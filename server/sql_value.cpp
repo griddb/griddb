@@ -890,7 +890,7 @@ SQLValues::SummaryTupleSet::SummaryTupleSet(
 		keyNullIgnorable_(false),
 		orderedDigestRestricted_(false),
 		readerColumnsDeep_(false),
-		headNullAccesible_(false),
+		headNullAccessible_(false),
 		columnsCompleted_(false),
 		bodySize_(0),
 		initialBodyImage_(NULL),
@@ -955,9 +955,9 @@ void SQLValues::SummaryTupleSet::setReaderColumnsDeep(bool deep) {
 	readerColumnsDeep_ = deep;
 }
 
-void SQLValues::SummaryTupleSet::setHeadNullAccesible(bool accesible) {
+void SQLValues::SummaryTupleSet::setHeadNullAccessible(bool accessible) {
 	assert(!columnsCompleted_);
-	headNullAccesible_ = accesible;
+	headNullAccessible_ = accessible;
 }
 
 bool SQLValues::SummaryTupleSet::isDeepReaderColumnSupported(
@@ -1258,7 +1258,7 @@ void SQLValues::SummaryTupleSet::completeColumns() {
 			readerColumnList_.push_back(column);
 			const bool onBody = (it->offset_ >= 0);
 			const bool forLob = TypeUtils::isLob(it->type_);
-			const bool headNullable = (headNullAccesible_ &&
+			const bool headNullable = (headNullAccessible_ &&
 					!onBody && !forLob && it->nullsOffset_ >= 0);
 			if (onBody || forLob || headNullable) {
 				FieldReaderFunc func = resolveFieldReaderFunc(
@@ -2111,9 +2111,10 @@ bool SQLValues::ValueComparator::isEmpty() const {
 
 bool SQLValues::ValueComparator::isSameVariant(
 		const ValueComparator &another, bool nullIgnorable,
-		bool anotherNullIgnorable) const {
+		bool anotherNullIgnorable, bool orderArranged) const {
 	return (!sensitive_ == !another.sensitive_ &&
-			!ascending_ == !another.ascending_ &&
+			(orderArranged ?
+					ascending_ : (!ascending_ == !another.ascending_)) &&
 			accessor1_.isSameVariant(
 					another.accessor1_, nullIgnorable, anotherNullIgnorable) &&
 			accessor2_.isSameVariant(
@@ -2318,10 +2319,15 @@ SQLValues::TupleComparator::TupleComparator(
 }
 
 SQLValues::ValueComparator SQLValues::TupleComparator::initialComparatorAt(
-		CompColumnList::const_iterator it) const {
+		CompColumnList::const_iterator it, bool ordering) const {
+	bool ascending = it->isAscending();
+	if (ordering && !columnList_.front().isAscending() &&
+			it != columnList_.begin()) {
+		ascending = !ascending;
+	}
 	return ValueComparator(
 			ValueAccessor(it, columnList_), ValueAccessor(it, columnList_),
-			NULL, sensitive_, it->isAscending());
+			NULL, sensitive_, ascending);
 }
 
 bool SQLValues::TupleComparator::isEmpty(size_t startIndex) const {
@@ -2331,7 +2337,7 @@ bool SQLValues::TupleComparator::isEmpty(size_t startIndex) const {
 
 	for (CompColumnList::const_iterator it = columnList_.begin() + startIndex;
 			it != columnList_.end(); ++it) {
-		if (!initialComparatorAt(it).isEmpty()) {
+		if (!initialComparatorAt(it, false).isEmpty()) {
 			return false;
 		}
 	}

@@ -56,7 +56,7 @@ void QueryProcessor::executeTQL(TransactionContext &txn,
 		}
 
 		if (strcmp(query, ANALYZE_QUERY) == 0) {
-			Query analyzeQuery(txn, *(container.getObjectManager()), container.getRowAllcateStrategy(), tqlInfo);
+			Query analyzeQuery(txn, *(container.getObjectManager()), container.getRowAllocateStrategy(), tqlInfo);
 			analyzeQuery.enableExplain(true);
 			assignDistributedTarget(txn, container, analyzeQuery, resultSet);
 			if (container.isInvalid()) {
@@ -175,7 +175,7 @@ void QueryProcessor::searchGeometryRelated(TransactionContext &txn,
 			collection.searchRowIdIndex(txn, sc, tmpOIdList, ORDER_UNDEFINED);
 			util::XArray<OId>::iterator itr;
 			BaseContainer::RowArray rowArray(txn, &collection);
-			ContainerValue value(objectManager, collection.getRowAllcateStrategy());
+			ContainerValue value(objectManager, collection.getRowAllocateStrategy());
 			for (itr = tmpOIdList.begin(); itr != tmpOIdList.end(); itr++) {
 				rowArray.load(txn, *itr, &collection, OBJECT_READ_ONLY);
 				BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);
@@ -201,7 +201,7 @@ void QueryProcessor::searchGeometryRelated(TransactionContext &txn,
 			}
 		}
 		else {
-			RtreeMap::SearchContext::GeomeryCondition geomCond;
+			RtreeMap::SearchContext::GeometryCondition geomCond;
 			geomCond.valid_ = true;
 			if (geom->getType() == Geometry::QUADRATICSURFACE) {
 				if (geometryOp == GEOMETRY_INTERSECT ||
@@ -229,7 +229,7 @@ void QueryProcessor::searchGeometryRelated(TransactionContext &txn,
 			TermCondition cond(columnInfo->getColumnType(), 
 				columnInfo->getColumnType(), DSExpression::GEOM_OP, 
 				columnInfo->getColumnId(),
-				&geomCond, sizeof(RtreeMap::SearchContext::GeomeryCondition));
+				&geomCond, sizeof(RtreeMap::SearchContext::GeometryCondition));
 			RtreeMap::SearchContext sc (txn.getDefaultAllocator(), columnInfo->getColumnId());
 			sc.addCondition(txn, cond, true);
 			sc.setLimit(limit);
@@ -277,7 +277,7 @@ void QueryProcessor::searchGeometry(TransactionContext &txn,
 			collection.searchRowIdIndex(txn, sc, tmpOIdList, ORDER_UNDEFINED);
 			util::XArray<OId>::iterator itr;
 			BaseContainer::RowArray rowArray(txn, &collection);
-			ContainerValue value(objectManager, collection.getRowAllcateStrategy());
+			ContainerValue value(objectManager, collection.getRowAllocateStrategy());
 			for (itr = tmpOIdList.begin(); itr != tmpOIdList.end(); itr++) {
 				rowArray.load(txn, *itr, &collection, OBJECT_READ_ONLY);
 				BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);
@@ -293,7 +293,7 @@ void QueryProcessor::searchGeometry(TransactionContext &txn,
 			}
 		}
 		else {
-			RtreeMap::SearchContext::GeomeryCondition geomCond;
+			RtreeMap::SearchContext::GeometryCondition geomCond;
 			geomCond.valid_ = true;
 			geomCond.rect_[0] = geom1->getBoundingRect();
 			geomCond.rect_[1] = geom2->getBoundingRect();
@@ -302,7 +302,7 @@ void QueryProcessor::searchGeometry(TransactionContext &txn,
 			TermCondition cond(columnInfo->getColumnType(), 
 				columnInfo->getColumnType(), DSExpression::GEOM_OP, 
 				columnInfo->getColumnId(),
-				&geomCond, sizeof(RtreeMap::SearchContext::GeomeryCondition));
+				&geomCond, sizeof(RtreeMap::SearchContext::GeometryCondition));
 			RtreeMap::SearchContext sc (txn.getDefaultAllocator(), columnInfo->getColumnId());
 			sc.addCondition(txn, cond, true);
 			sc.setLimit(limit);

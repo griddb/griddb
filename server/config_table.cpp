@@ -1096,7 +1096,7 @@ void ParamTable::toFile(const char8_t *filePath, ParamId id, ExportMode mode) {
 			if (trial >= maxOpenTrial) {
 				GS_RETHROW_USER_OR_SYSTEM(e,
 						"Too many temporary files may exist or other open"
-						" error occred (tmpFileName=" << tmpFileName.c_str() <<
+						" error occured (tmpFileName=" << tmpFileName.c_str() <<
 						", trial=" << trial <<
 						", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
 			}
@@ -1694,7 +1694,7 @@ void ConfigTable::resolveGroup(ParamId groupId, ParamId id, const char8_t *name)
 }
 
 /*!
-	@brief Adds config parameter and returns constrait object
+	@brief Adds config parameter and returns constraint object
 */
 ConfigTable::Constraint& ConfigTable::addParam(
 		ParamId groupId, ParamId id, const char8_t *name) {
@@ -3292,7 +3292,7 @@ PartitionGroupId PartitionGroupConfig::getPartitionGroupId(PartitionId pId) cons
 	}
 }
 
-uint32_t PartitionGroupConfig::getGroupPartitonCount(PartitionGroupId pgId) const
+uint32_t PartitionGroupConfig::getGroupPartitionCount(PartitionGroupId pgId) const
 {
 	if (pgId < mod_) {
 		return base_ + 1;
@@ -3340,7 +3340,7 @@ void ConfigTableUtils::resolveGroup(
 }
 
 /*!
-	@brief Adds parameter id and symbol to ConfigTable, and returns constrait object
+	@brief Adds parameter id and symbol to ConfigTable, and returns constraint object
 */
 ConfigTable::Constraint& ConfigTableUtils::addParam(
 		ConfigTable &configTable, ConfigTable::ParamId id, const char8_t *symbol) {
@@ -3452,7 +3452,7 @@ BasicLocalStatMapper::Source BasicLocalStatMapper::getSource() {
 void BasicLocalStatMapper::addSub(const BasicLocalStatMapper &sub) {
 	checkParamCount(sub.paramCount_);
 
-	preapareDefaultGroup();
+	prepareDefaultGroup();
 	const size_t groupOffset = groupList_.size();
 
 	const GroupList &subGroupList = sub.groupList_;
@@ -3485,7 +3485,7 @@ void BasicLocalStatMapper::addSub(const BasicLocalStatMapper &sub) {
 }
 
 void BasicLocalStatMapper::addFilter(DisplayOption option) {
-	Group &group = preapareDefaultGroup();
+	Group &group = prepareDefaultGroup();
 	Group::DisplayOptionList &list = group.displayOptions_;
 
 	assert(std::find(list.begin(), list.end(), option) == list.end());
@@ -3493,7 +3493,7 @@ void BasicLocalStatMapper::addFilter(DisplayOption option) {
 }
 
 BasicLocalStatMapper::Options BasicLocalStatMapper::defaultOptions() {
-	Group &group = preapareDefaultGroup();
+	Group &group = prepareDefaultGroup();
 	return Options(alloc_, group.defaultEntry_);
 }
 
@@ -3678,14 +3678,14 @@ BasicLocalStatMapper::Entry& BasicLocalStatMapper::newEntry(ParamId id) {
 				"Entry already exists (id=" << id <<")");
 	}
 
-	Group &group = preapareDefaultGroup();
+	Group &group = prepareDefaultGroup();
 	entry = ALLOC_NEW(alloc_) Entry();
 	group.idSet_.insert(id);
 
 	return *entry;
 }
 
-BasicLocalStatMapper::Group& BasicLocalStatMapper::preapareDefaultGroup() {
+BasicLocalStatMapper::Group& BasicLocalStatMapper::prepareDefaultGroup() {
 	if (groupList_.empty()) {
 		size_t groupIndex;
 		addGroup(groupIndex);

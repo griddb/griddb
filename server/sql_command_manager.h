@@ -89,8 +89,8 @@ static const char* getCommandString(DDLCommandType type) {
 
 
 struct PartitionRangeList {
-	struct PartitonRange {
-		PartitonRange(PartitionId startPId, PartitionId endPId, int32_t range) :
+	struct PartitionRange {
+		PartitionRange(PartitionId startPId, PartitionId endPId, int32_t range) :
 			startPId_(startPId), endPId_(endPId), range_(range) {}
 		PartitionId startPId_;
 		PartitionId endPId_;
@@ -98,7 +98,7 @@ struct PartitionRangeList {
 	};
 
 	PartitionId set(PartitionId startPId, int32_t rangeVal) {
-		PartitonRange range(startPId, startPId + rangeVal - 1, rangeVal);
+		PartitionRange range(startPId, startPId + rangeVal - 1, rangeVal);
 		ranges_.push_back(range);
 		return (startPId + rangeVal);
 	}
@@ -124,11 +124,11 @@ struct PartitionRangeList {
 			startPId = set(startPId, range);
 		}
 	}
-	util::Vector<PartitonRange> ranges_;
+	util::Vector<PartitionRange> ranges_;
 	util::StackAllocator& alloc_;
 	uint32_t base_;
 	uint32_t mod_;
-	int32_t curentPos_;
+	int32_t currentPos_;
 };
 
 template<class T> void randomShuffle(
@@ -153,7 +153,7 @@ public:
 	typedef CacheNode<SQLString, TableSchemaInfo*,
 		SQLVariableSizeGlobalAllocator> SQLTableCacheEntry;
 
-	typedef LruCacheCocurrency<SQLTableCacheEntry,
+	typedef LruCacheConcurrency<SQLTableCacheEntry,
 		SQLString, TableSchemaInfo*,
 		SQLVariableSizeGlobalAllocator> SQLTableCache;
 
@@ -869,7 +869,7 @@ void NoSQLStore::getLargeRecord(util::StackAllocator& alloc,
 
 	if (rowCount == 0) {
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_TABLE_PARTITION_PARTITIONING_TABLE_NOT_FOUND,
-			"Tareget table is not found or change to schema, table name=" << container.getName());
+			"Target table is not found or change to schema, table name=" << container.getName());
 	}
 	InputMessageRowStore rowStore(*dsConfig_,
 		columnInfoList.data(), static_cast<uint32_t>(columnInfoList.size()),

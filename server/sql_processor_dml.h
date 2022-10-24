@@ -176,7 +176,7 @@ private:
 		@note RAから
 	*/
 	bool isImmediate() {
-		return immediated_;
+		return immediate_;
 	}
 
 	/*!
@@ -205,7 +205,7 @@ private:
 	TupleList::TupleColumnType* columnTypeList_;
 	TupleList::Info** tupleInfoList_;
 	int32_t inputTupleColumnCount_;
-	bool immediated_;
+	bool immediate_;
 	DmlType dmlType_;
 	uint32_t completedNum_;
 	InputId currentPos_;
@@ -478,7 +478,7 @@ protected:
 	util::XArray<uint8_t>* varData_;
 	OutputMessageRowStore* rowStore_;
 	util::XArray<RowId>* rowIdList_;
-	int64_t threashold_;
+	int64_t threshold_;
 	int64_t limitSize_;
 
 	NoSQLStoreOption* option_;
@@ -581,7 +581,7 @@ public:
 		const ColumnInfo* columnInfoList,
 		uint32_t columnCount, NoSQLContainer* container, int32_t pos, NodeAffinityNumber affinity) :
 		Operation(bulkManager, alloc, columnInfoList, columnCount, container, pos, affinity) {
-		threashold_ = BULK_DELETE_THRESHOLD_COUNT;
+		threshold_ = BULK_DELETE_THRESHOLD_COUNT;
 		initialize();
 	}
 
@@ -601,7 +601,7 @@ public:
 		@brief 実行可能条件を満たすか
 	*/
 	bool full() {
-		return (threashold_ <= static_cast<int64_t>(rowIdList_->size()));
+		return (threshold_ <= static_cast<int64_t>(rowIdList_->size()));
 	}
 
 	virtual void initialize();

@@ -95,7 +95,7 @@ public:
 				new (&(varray_[i])) ContainerValue(
 					*(collection
 						.getObjectManager()),
-					collection_.getRowAllcateStrategy());  
+					collection_.getRowAllocateStrategy());  
 				varrayCounter_++;
 			}
 			memset(pBitmap, 0,
@@ -128,7 +128,7 @@ public:
 				new (&(varray_[i])) ContainerValue(
 					*(collection_
 						.getObjectManager()),
-					collection_.getRowAllcateStrategy());  
+					collection_.getRowAllocateStrategy());  
 				varrayCounter_++;
 			}
 			memset(pBitmap, 0,
@@ -200,7 +200,7 @@ private:
 };
 
 /*!
-*	@brief Compare methord for Collection Row
+*	@brief Compare method for Collection Row
 */
 class CollectionOrderByComparator {
 public:
@@ -229,9 +229,9 @@ public:
 		CollectionRowWrapper row2(txn_, collection_, y, pBitmap2_);
 		for (size_t i = 0; i < orderByExprList_.size(); i++) {
 			Expr *e = orderByExprList_[i].expr;
-			Expr *e1 = e->eval(txn_, *(collection_.getObjectManager()), collection_.getRowAllcateStrategy(), &row1,
+			Expr *e1 = e->eval(txn_, *(collection_.getObjectManager()), collection_.getRowAllocateStrategy(), &row1,
 				&fmap_, EVAL_MODE_NORMAL);
-			Expr *e2 = e->eval(txn_, *(collection_.getObjectManager()), collection_.getRowAllcateStrategy(), &row2,
+			Expr *e2 = e->eval(txn_, *(collection_.getObjectManager()), collection_.getRowAllocateStrategy(), &row2,
 				&fmap_, EVAL_MODE_NORMAL);
 			int ret = e1->compareAsValue(txn_, e2, orderByExprList_[i].nullsLast);
 			QP_SAFE_DELETE(e);

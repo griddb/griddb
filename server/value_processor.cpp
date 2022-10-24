@@ -488,7 +488,7 @@ void VariableArrayCursor::checkVarDataSize(TransactionContext &txn,
 			(currentObjectSize + elemSize +
 				ValueProcessor::getEncodedVarSize(elemSize) +
 				NEXT_OBJECT_LINK_INFO_SIZE) >
-			static_cast<uint32_t>(objectManager.getRecommendtLimitObjectSize());
+			static_cast<uint32_t>(objectManager.getRecommendedLimitObjectSize());
 			checkCount++) {
 			uint32_t dividedObjectSize = currentObjectSize;
 			uint32_t dividedElemNth = elemNth - 1;
@@ -798,7 +798,7 @@ const char8_t* ValueProcessor::getTypeNameChars(ColumnType type) {
 	case COLUMN_TYPE_TIMESTAMP_ARRAY:
 		return "TIMESTAMP_ARRAY";
 	default:
-		return "UNKNON_TYPE";
+		return "UNKNOWN_TYPE";
 	}
 }
 

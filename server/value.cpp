@@ -26,12 +26,12 @@
 
 #include "gis_point.h"
 
-const uint8_t Value::defalutFixedValue_[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-const uint8_t Value::defalutStringValue_[1] = {0x01};
-const uint8_t Value::defalutFixedArrayValue_[2] = {(0x01 | (0x01 << 1)), 0x01};
-const uint8_t Value::defalutStringArrayValue_[13] = {(0x01 | (0x0c << 1)), 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
-const uint8_t Value::defalutBlobValue_[2] = {(0x01 | (0x01 << 1)), 0x01};
-const uint8_t Value::defalutGeometryValue_[7] = {0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x00};
+const uint8_t Value::defaultFixedValue_[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+const uint8_t Value::defaultStringValue_[1] = {0x01};
+const uint8_t Value::defaultFixedArrayValue_[2] = {(0x01 | (0x01 << 1)), 0x01};
+const uint8_t Value::defaultStringArrayValue_[13] = {(0x01 | (0x0c << 1)), 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+const uint8_t Value::defaultBlobValue_[2] = {(0x01 | (0x01 << 1)), 0x01};
+const uint8_t Value::defaultGeometryValue_[7] = {0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x00};
 
 void Value::dump(
 	TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,

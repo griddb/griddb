@@ -16,7 +16,7 @@
 */
 /*!
 	@file
-	@brief Definition of local tempolary store
+	@brief Definition of local temporary store
 */
 
 #ifndef LOCAL_TEMP_STORE_H_
@@ -195,7 +195,6 @@ public:
 		util::Atomic<uint64_t> blockUsedSize_;
 		util::Atomic<uint64_t> latchBlockCount_;
 		util::Atomic<uint64_t> maxLatchBlockCount_;
-
 		GroupStats() :
 			appendBlockCount_(0),
 			readBlockCount_(0), swapInCount_(0), swapOutCount_(0),

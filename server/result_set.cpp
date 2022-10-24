@@ -637,7 +637,7 @@ ResultSet* ResultSetManager::create(TransactionContext& txn,
 	ContainerId containerId, SchemaVersionId schemaVersionId, int64_t emNow,
 	ResultSetOption* queryOption, bool noExpire) {
 	ResultSetId rsId = ++resultSetId_;
-	int32_t rsTimeout = txn.getTransationTimeoutInterval();
+	int32_t rsTimeout = txn.getTransactionTimeoutInterval();
 	const int64_t timeout = emNow + static_cast<int64_t>(rsTimeout) * 1000;
 	ResultSet& rs = (noExpire ?
 		resultSetMap_->createNoExpire(rsId) :
@@ -712,7 +712,7 @@ void ResultSetManager::close(ResultSetId rsId) {
 }
 
 /*!
-	@brief If ResultSet is no need, then clse , othewise clear temporary memory
+	@brief If ResultSet is no need, then clse , otherwise clear temporary memory
 */
 void ResultSetManager::closeOrClear(ResultSetId rsId) {
 	if (rsId == UNDEF_RESULTSETID) {

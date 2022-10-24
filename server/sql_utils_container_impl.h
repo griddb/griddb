@@ -346,7 +346,7 @@ public:
 
 	static void assignIndexInfo(
 			TransactionContext &txn, BaseContainer &container,
-			IndexSelector &indexSelector, const TupleColumnList &coumnList);
+			IndexSelector &indexSelector, const TupleColumnList &columnList);
 	static void getIndexInfoList(
 			TransactionContext &txn, BaseContainer &container,
 			util::Vector<IndexInfo> &indexInfoList);

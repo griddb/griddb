@@ -51,7 +51,7 @@ void BaseContainer::getErasableList(TransactionContext &txn, Timestamp erasableT
 		info.end_ = getContainerExpirationEndTime();
 		info.expired_ = getContainerExpirationTime();
 		info.erasable_ = DataStoreV4::DataAffinityUtils::convertChunkKey2Timestamp(
-			calcChunkKey(getContainerExpirationEndTime(), getContainerExpirationDutation()));
+			calcChunkKey(getContainerExpirationEndTime(), getContainerExpirationDuration()));
 		if (erasableTimeLowerLimit >= info.erasable_ || info.erasable_ > erasableTimeUpperLimit) {
 			return;
 		}
@@ -265,7 +265,7 @@ bool BaseContainer::validateImpl(TransactionContext &txn,
 				case MVCC_CONTAINER:
 					if (!isAlterContainer()) {
 						strstrm << (isValid ? ", " : "")
-								<< "\"invalidMvccConainerNotLocked\"";
+								<< "\"invalidMvccContainerNotLocked\"";
 						isValid = false;
 					}
 					break;

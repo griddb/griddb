@@ -263,7 +263,7 @@ public:
 	}
 
 	/*!
-	 * @brief Generate expression from string with quote-escapeing
+	 * @brief Generate expression from string with quote-escaping
 	 *
 	 * @param s Quoted string
 	 * @param txn The transaction context

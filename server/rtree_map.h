@@ -134,8 +134,8 @@ public:
 	 *
 	 */
 	struct SearchContext : BaseIndex::SearchContext {
-		struct GeomeryCondition {
-			GeomeryCondition() : relation_(GEOMETRY_INTERSECT),
+		struct GeometryCondition {
+			GeometryCondition() : relation_(GEOMETRY_INTERSECT),
 				valid_(false) {
 				memset(&pkey_, 0, sizeof(TrPv3Key));
 			}

@@ -138,7 +138,7 @@ void DDLProcessor::cleanupNoSQL() {
 						execution->getContext().getSyncContext(), execution);
 					NoSQLStoreOption option;
 					option.isSync_ = false;
-					targetContainer.setCurrentSesionId(execution->getContext().getCurrentSessionId());
+					targetContainer.setCurrentSesisonId(execution->getContext().getCurrentSessionId());
 					targetContainer.setMode(TransactionManager::NO_AUTO_COMMIT_BEGIN, TransactionManager::GET);
 					targetContainer.setBeginTransaction();
 					targetContainer.setForceAbort();
@@ -166,7 +166,7 @@ void DDLProcessor::cleanupNoSQL() {
 								0, ackContainerInfoList_[pos].pId_, execution->getContext().getSyncContext(), execution);
 							NoSQLStoreOption option;
 							option.isSync_ = false;
-							targetContainer.setCurrentSesionId(ackContainerInfoList_[pos].sessionId_);
+							targetContainer.setCurrentSesisonId(ackContainerInfoList_[pos].sessionId_);
 							targetContainer.setMode(TransactionManager::NO_AUTO_COMMIT_BEGIN, TransactionManager::GET);
 							targetContainer.setBeginTransaction();
 							targetContainer.setForceAbort();
@@ -458,7 +458,7 @@ bool DDLProcessor::applyInfo(
 				createViewInfo_->tableNameCaseSensitive_ = node.qName_->tableCaseSensitive_;
 				if (node.createTableOpt_ == NULL) {
 					GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_PARAMETER,
-						"View parametor is invalid");
+						"View parameter is invalid");
 				}
 				createViewInfo_->createTableOpt_ = node.createTableOpt_;
 				createViewInfo_->execId_ = cxt.getExecId();
@@ -884,7 +884,7 @@ void DDLProcessor::checkPartitionStatus() {
 			|| ackContainerInfoList_[pos].masterNodeId_ != pt->getMaster()) {
 			GS_THROW_CUSTOM_ERROR(DenyException,
 				GS_ERROR_TXN_PARTITION_ROLE_UNMATCH,
-				"Check partition status, unmatch partition revison (expected revision=" << ackContainerInfoList_[pos].ptRev_
+				"Check partition status, unmatch partition revision (expected revision=" << ackContainerInfoList_[pos].ptRev_
 				<< ", actual revision=" << pt->getNewSQLPartitionRevision(pId)
 				<< ", expected master=" << pt->dumpNodeAddress(ackContainerInfoList_[pos].masterNodeId_)
 				<< ", actual master=" << pt->dumpNodeAddress(pt->getMaster()) << ")");

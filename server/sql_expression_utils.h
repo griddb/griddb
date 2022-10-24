@@ -204,15 +204,15 @@ public:
 			util::Vector<const Expression*> &exprList);
 	static Expression& toNonDistinctExpr(
 			ExprFactoryContext &cxt, const Expression &src, uint32_t input,
-			uint32_t *refCoulmnPos);
+			uint32_t *refColumnPos);
 	static void addDistinctRefColumnExprs(
 			ExprFactoryContext &cxt, const Expression &src, bool forAdvance,
-			bool refEmpty, uint32_t input, uint32_t *refCoulmnPos,
+			bool refEmpty, uint32_t input, uint32_t *refColumnPos,
 			Expression::ModIterator &destIt);
 	static void replaceDistinctExprsToRef(
 			ExprFactoryContext &cxt, Expression &expr, bool forAdvance,
 			int32_t emptySide, const util::Set<uint32_t> *keySet,
-			uint32_t *restDistinctCount, uint32_t *refCoulmnPos);
+			uint32_t *restDistinctCount, uint32_t *refColumnPos);
 
 	static bool findVarGenerativeExpr(const Expression &expr);
 
@@ -338,7 +338,7 @@ private:
 	static void swapExprArgs(Expression &expr);
 	static bool isSameExpr(
 			const ExprFactory &factory, const Expression &expr1,
-			const Expression &expr2, bool excludesDymanic);
+			const Expression &expr2, bool excludesDynamic);
 	static bool isSameExprCode(
 			const ExprCode &code1, const ExprCode &code2);
 	template<typename T> static bool checkNumericBounds(
@@ -382,7 +382,7 @@ private:
 	bool matchMultiStageGroupKey(
 			const Expression &expr, bool *acceptable) const;
 
-	void prepareDistinctAggreagation() const;
+	void prepareDistinctAggregation() const;
 
 	void replaceChildToAggrFirst(
 			ExprFactoryContext &cxt, Expression::ModIterator &it) const;

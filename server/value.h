@@ -68,12 +68,12 @@ private:
 		Object object_;  
 	};
 	Member data_;
-	static const uint8_t defalutFixedValue_[8];
-	static const uint8_t defalutStringValue_[1];
-	static const uint8_t defalutFixedArrayValue_[2];
-	static const uint8_t defalutStringArrayValue_[13];
-	static const uint8_t defalutBlobValue_[2];
-	static const uint8_t defalutGeometryValue_[7];
+	static const uint8_t defaultFixedValue_[8];
+	static const uint8_t defaultStringValue_[1];
+	static const uint8_t defaultFixedArrayValue_[2];
+	static const uint8_t defaultStringArrayValue_[13];
+	static const uint8_t defaultBlobValue_[2];
+	static const uint8_t defaultGeometryValue_[7];
 
 public:
 	Value() : type_(COLUMN_TYPE_STRING) {
@@ -208,7 +208,7 @@ public:
 	/*!
 		@brief Get value pointer
 		@note string and geometry type return head of string and head of
-	   geometry-bainary
+	   geometry-binary
 	*/
 	UTIL_FORCEINLINE const uint8_t *data() const {
 		switch (type_) {
@@ -267,7 +267,7 @@ public:
 	}
 	/*!
 		@brief Get value size
-		@note string and geometry type return string-length and geometry-bainary
+		@note string and geometry type return string-length and geometry-binary
 	   length
 	*/
 	UTIL_FORCEINLINE uint32_t size() const {
@@ -603,21 +603,21 @@ public:
 
 	static const void *getDefaultFixedValue(ColumnType type) {
 		UNUSED_VARIABLE(type);
-		return defalutFixedValue_;
+		return defaultFixedValue_;
 	}
 	static const void *getDefaultVariableValue(ColumnType type) {
 		switch (type) {
 		case COLUMN_TYPE_STRING:
-			return defalutStringValue_;
+			return defaultStringValue_;
 			break;
 		case COLUMN_TYPE_GEOMETRY:
-			return defalutGeometryValue_;
+			return defaultGeometryValue_;
 			break;
 		case COLUMN_TYPE_BLOB:
-			return defalutBlobValue_;
+			return defaultBlobValue_;
 			break;
 		case COLUMN_TYPE_STRING_ARRAY:
-			return defalutStringArrayValue_;
+			return defaultStringArrayValue_;
 			break;
 		case COLUMN_TYPE_BOOL_ARRAY:
 		case COLUMN_TYPE_BYTE_ARRAY:
@@ -627,7 +627,7 @@ public:
 		case COLUMN_TYPE_FLOAT_ARRAY:
 		case COLUMN_TYPE_DOUBLE_ARRAY:
 		case COLUMN_TYPE_TIMESTAMP_ARRAY:
-			return defalutFixedArrayValue_;
+			return defaultFixedArrayValue_;
 			break;
 		default:
 			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");

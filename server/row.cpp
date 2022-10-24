@@ -35,7 +35,7 @@
 
 BaseContainer::RowArray::RowArray(TransactionContext &txn, BaseContainer *container) 
 	: rowArrayImplList_(txn.getDefaultAllocator()),
-	rowArrayStorage_(*container->getObjectManager(), container->getRowAllcateStrategy()),
+	rowArrayStorage_(*container->getObjectManager(), container->getRowAllocateStrategy()),
 	rowCache_(txn, container), defaultImpl_(NULL) {
 
 	if (container->getContainerType() == COLLECTION_CONTAINER) {
@@ -413,7 +413,7 @@ BaseContainer::RowCache::RowCache(TransactionContext &txn, BaseContainer *contai
 	: fieldCacheList_(txn.getDefaultAllocator()) {
 	ObjectManagerV4 &objectManager = *(container->getObjectManager());
 	new (frontFieldCache_.addr())
-			FieldCache(objectManager, container->getRowAllcateStrategy());
+			FieldCache(objectManager, container->getRowAllocateStrategy());
 
 	const uint32_t varCount = container->getVariableColumnNum();
 
@@ -424,7 +424,7 @@ BaseContainer::RowCache::RowCache(TransactionContext &txn, BaseContainer *contai
 		fieldCacheList_.resize(varCount);
 		for (uint32_t i = varCount; i > 0; i--) {
 			void *addr = &fieldCacheList_[i - 1];
-			new (addr) FieldCache(objectManager, container->getRowAllcateStrategy());
+			new (addr) FieldCache(objectManager, container->getRowAllocateStrategy());
 		}
 	}
 }

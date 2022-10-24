@@ -85,7 +85,7 @@ public:
 	uint32_t getHalfOfMaxObjectSize() const {
 		return halfOfMaxObjectSize_;
 	}
-	uint32_t getRecommendtLimitObjectSize() const {
+	uint32_t getRecommendedLimitObjectSize() const {
 		return recommendLimitObjectSize_;
 	}
 

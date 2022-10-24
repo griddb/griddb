@@ -693,7 +693,7 @@ public:
 
 	/*!
 	 * @brief Check the value type is acceptable. Timestamp is added with
-	 * default implemantation.
+	 * default Implementation.
 	 *
 	 * @param type Value type
 	 *

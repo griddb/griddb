@@ -703,14 +703,14 @@ void InputMessageRowStore::validate() {
 		totalVarSize = varDataIn_.base().position() - currentVarPos;
 		position(currentRowPos);
 	}
-	uint64_t varidateVarSize = validateColumnSet();
-	if (varidateVarSize != totalVarSize) {
+	uint64_t validateVarSize = validateColumnSet();
+	if (validateVarSize != totalVarSize) {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_INPUT_MESSAGE_INVALID, "Size of variable data is invalid : message data may be broken");
 	}
 }
 
 uint64_t InputMessageRowStore::validateColumnSet() {
-	uint64_t varidateVarSize = 0;
+	uint64_t validateVarSize = 0;
 
 	for (ColumnId id = 0; id < getColumnCount(); id++) {
 
@@ -721,23 +721,23 @@ uint64_t InputMessageRowStore::validateColumnSet() {
 			}
 		}
 		if (columnInfo.isArray()) {
-			varidateVarSize += validateArrayColumn(id, columnInfo);
+			validateVarSize += validateArrayColumn(id, columnInfo);
 		}
 		else {
-			varidateVarSize += validateSimpleColumn(id, columnInfo);
+			validateVarSize += validateSimpleColumn(id, columnInfo);
 		}
 	}
 	if (getVariableColumnNum() != 0) {
-		varidateVarSize += ValueProcessor::getEncodedVarSize(getVariableColumnNum());
+		validateVarSize += ValueProcessor::getEncodedVarSize(getVariableColumnNum());
 	}
-	return varidateVarSize;
+	return validateVarSize;
 }
 
 uint64_t InputMessageRowStore::validateArrayColumn(ColumnId id, const ColumnInfo& columnInfo) {
-	uint64_t varidateVarSize = 0;
+	uint64_t validateVarSize = 0;
 	const void* data;
 	uint32_t size;
-	uint32_t varidateVarColumnSize = 0;
+	uint32_t validateVarColumnSize = 0;
 	uint32_t totalSize = getTotalArraySize(id);
 	if (totalSize > dsConfig_.getLimitBigSize()) {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Size of Column[" << id << "] exceeds maximum size : " << totalSize);
@@ -756,7 +756,7 @@ uint64_t InputMessageRowStore::validateArrayColumn(ColumnId id, const ColumnInfo
 			if (size > dsConfig_.getLimitSmallSize()) {
 				GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Size of element[" << nth << "] of Column[" << id << "] exceeds maximum size");
 			}
-			varidateVarColumnSize += ValueProcessor::getEncodedVarSize(size) + size;
+			validateVarColumnSize += ValueProcessor::getEncodedVarSize(size) + size;
 		}
 	}
 	break;
@@ -773,26 +773,26 @@ uint64_t InputMessageRowStore::validateArrayColumn(ColumnId id, const ColumnInfo
 			}
 		}
 	}
-	varidateVarColumnSize += elementNum * elementSize;
+	validateVarColumnSize += elementNum * elementSize;
 	break;
 	default:
-		varidateVarColumnSize += elementNum * elementSize;
+		validateVarColumnSize += elementNum * elementSize;
 		break;
 	}
-	varidateVarColumnSize += ValueProcessor::getEncodedVarSize(elementNum);
-	if (varidateVarColumnSize != totalSize) {
+	validateVarColumnSize += ValueProcessor::getEncodedVarSize(elementNum);
+	if (validateVarColumnSize != totalSize) {
 		GS_THROW_USER_ERROR(GS_ERROR_DS_INPUT_MESSAGE_INVALID, "Size of Column[" << id << "] is invalid : message data may be broken");
 	}
-	varidateVarColumnSize += ValueProcessor::getEncodedVarSize(totalSize);
-	varidateVarSize += varidateVarColumnSize;
-	return varidateVarSize;
+	validateVarColumnSize += ValueProcessor::getEncodedVarSize(totalSize);
+	validateVarSize += validateVarColumnSize;
+	return validateVarSize;
 }
 
 uint64_t InputMessageRowStore::validateSimpleColumn(ColumnId id, const ColumnInfo& columnInfo) {
-	uint64_t varidateVarSize = 0;
+	uint64_t validateVarSize = 0;
 	const void* data;
 	uint32_t size;
-	uint32_t varidateVarColumnSize = 0;
+	uint32_t validateVarColumnSize = 0;
 	switch (columnInfo.getColumnType()) {
 	case COLUMN_TYPE_STRING :
 	{
@@ -800,7 +800,7 @@ uint64_t InputMessageRowStore::validateSimpleColumn(ColumnId id, const ColumnInf
 		if (size > dsConfig_.getLimitSmallSize()) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Size of Column[" << id << "] exceeds maximum size : " << size);
 		}
-		varidateVarColumnSize += ValueProcessor::getEncodedVarSize(size) + size;
+		validateVarColumnSize += ValueProcessor::getEncodedVarSize(size) + size;
 	}
 	break;
 	case COLUMN_TYPE_GEOMETRY:
@@ -821,7 +821,7 @@ uint64_t InputMessageRowStore::validateSimpleColumn(ColumnId id, const ColumnInf
 				GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Empty value of Column[" << id << "] is not supported");
 			}
 		}
-		varidateVarColumnSize += ValueProcessor::getEncodedVarSize(size) + size;
+		validateVarColumnSize += ValueProcessor::getEncodedVarSize(size) + size;
 	}
 	break;
 	case COLUMN_TYPE_TIMESTAMP:
@@ -842,14 +842,14 @@ uint64_t InputMessageRowStore::validateSimpleColumn(ColumnId id, const ColumnInf
 		if (size > dsConfig_.getLimitBigSize()) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Size of Column[" << id << "] exceeds maximum size : " << size);
 		}
-		varidateVarColumnSize += ValueProcessor::getEncodedVarSize(size) + size;
+		validateVarColumnSize += ValueProcessor::getEncodedVarSize(size) + size;
 	}
 	break;
 	default:
 		break;
 	}
-	varidateVarSize += varidateVarColumnSize;
-	return varidateVarSize;
+	validateVarSize += validateVarColumnSize;
+	return validateVarSize;
 }
 
 

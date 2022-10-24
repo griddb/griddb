@@ -31,7 +31,7 @@
 #define testcase(...)
 
 /*!
- * Cherset type map.
+ * Charset type map.
  *
  * Bit 0 (0x01): SPACE
  * Bit 1 (0x02): ALPHA

@@ -551,7 +551,7 @@ public:
 	}
 
 	/*!
-		@brief Validatet Timestamp value
+		@brief Validate Timestamp value
 	*/
 	static bool validateTimestamp(Timestamp val) {
 		if ((val < 0) || (val > SUPPORT_MAX_TIMESTAMP)) {
@@ -814,7 +814,7 @@ public:
 	}
 	/*!
 		@brief Get value pointer
-		@note return head of blob-bainary
+		@note return head of blob-binary
 	*/
 	const uint8_t *data() const {
 		uint32_t sizeLen = ValueProcessor::getEncodedVarSize(getBaseAddr());
@@ -1027,24 +1027,24 @@ public:
 	LogDevide(ObjectManagerV4 &objectManager) 
 		: objectManager_(objectManager), constElemNum_(0), dividedElemNum_(0),
 		sizeList_{ 0, 0, 0 },
-		blobSubBlockUnitSize_(objectManager.getRecommendtLimitObjectSize()) {
+		blobSubBlockUnitSize_(objectManager.getRecommendedLimitObjectSize()) {
 	}
 	void initialize(uint64_t inputSize);
 	uint32_t getElemNum() {
 		return static_cast<uint32_t>(constElemNum_ + dividedElemNum_);
 	}
-	uint32_t getAllocateSize(int32_t curentElemNum) {
-		if (curentElemNum < static_cast<int32_t>(constElemNum_)) {
+	uint32_t getAllocateSize(int32_t currentElemNum) {
+		if (currentElemNum < static_cast<int32_t>(constElemNum_)) {
 			return blobSubBlockUnitSize_;
 		} else {
-			return sizeList_[curentElemNum - constElemNum_];
+			return sizeList_[currentElemNum - constElemNum_];
 		}
 	}
 
 
 private:
-	static const double EFFICENCY_THRESHOLD;
-	static const uint32_t	DIVIED_SIZE_LIMIT = ((1 << 7) - ObjectManagerV4::OBJECT_HEADER_SIZE); 
+	static const double EFFICIENCY_THRESHOLD;
+	static const uint32_t	DIVIDED_SIZE_LIMIT = ((1 << 7) - ObjectManagerV4::OBJECT_HEADER_SIZE); 
 
 	ObjectManagerV4 &objectManager_;
 	uint32_t constElemNum_;
@@ -1134,8 +1134,8 @@ private:
 				reinterpret_cast<const uint8_t *>(data));
 		}
 		bool next() {
-			uint32_t lengh = getArrayLength();
-			if (lengh != 0  && curPos_ + 1 < static_cast<int32_t>(lengh)) {
+			uint32_t length = getArrayLength();
+			if (length != 0  && curPos_ + 1 < static_cast<int32_t>(length)) {
 				curPos_++;
 				return true;
 			} else {
@@ -1191,7 +1191,7 @@ private:
 	const uint8_t *topArrayAddr_;
 	BaseObject curObj_;
 	BlobArrayObject *arrayCursor_;
-	BlobArrayObject stackCusor_[MAX_DEPTH];
+	BlobArrayObject stackCursor_[MAX_DEPTH];
 	int32_t currentElem_;
 	int32_t maxElem_;
 	uint32_t currentDepth_;

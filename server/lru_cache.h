@@ -298,7 +298,7 @@ struct CacheNode : public CacheNodeBase<Key, Value, Allocator> {
 			removed_(false) {}
 
 	/*!
-		@brief relase value with global allocator
+		@brief release value with global allocator
 	*/
 	void deallocateValue(Allocator &alloc) {
 		UNUSED_VARIABLE(alloc);
@@ -323,7 +323,7 @@ struct CacheNode : public CacheNodeBase<Key, Value, Allocator> {
 	}
 
 	/*!
-		@brief if need to deatch latched node, use this flag and release when unlatched
+		@brief if need to detatch latched node, use this flag and release when unlatched
 	*/
 	void setRemoved() {
 		removed_ = true;
@@ -349,10 +349,10 @@ struct CacheNode : public CacheNodeBase<Key, Value, Allocator> {
 };
 
 /*!
-	@brief LruCacheCocurrency (use global allocator, thread safe, available remove entry, resize)
+	@brief LruCacheConcurrency (use global allocator, thread safe, available remove entry, resize)
 */
 template <class Node, class Key, class Value, class Allocator>
-class LruCacheCocurrency :
+class LruCacheConcurrency :
 		public LruCacheBase<Node, Key, Value, Allocator> {
 public:
 
@@ -364,7 +364,7 @@ public:
 	/*!
 		@brief Constructor
 	*/
-	LruCacheCocurrency(int32_t capacity, Allocator &alloc) :
+	LruCacheConcurrency(int32_t capacity, Allocator &alloc) :
 			LruCacheBase<Node,Key,Value,Allocator>(capacity, alloc),
 			pendingCount_(0),
 			allocateCount_(0) {}
@@ -372,7 +372,7 @@ public:
 	/*!
 		@brief Destructor
 	*/
-	~LruCacheCocurrency() {
+	~LruCacheConcurrency() {
 		Node *current = this->head_;
 		while (current) {
 			Node* temp = static_cast<Node *>(current->next_);
@@ -488,7 +488,7 @@ public:
 	}
 
 	/*!
-		@brief release key-value entry, shoud be used RAII(get/release)
+		@brief release key-value entry, should be used RAII(get/release)
 	*/
 	void release(Node*& node) {
 		util::LockGuard<util::Mutex> guard(lock_);
@@ -573,14 +573,14 @@ private:
 
 template <class Node, class Key, class Value, class Allocator>
 class LruCacheWithMonitor :
-		public LruCacheCocurrency<Node, Key, Value, Allocator> {
+		public LruCacheConcurrency<Node, Key, Value, Allocator> {
 public:
 	typedef std::pair<Key, Value> MapEntry;
 	typedef std::map<Key, Node*, std::less<Key>,
 			util::StdAllocator<MapEntry, Allocator> > TableMap;
 
 	LruCacheWithMonitor(int32_t capacity, Allocator &alloc, int32_t updateInterval) :
-			LruCacheCocurrency<Node,Key,Value,Allocator>(capacity, alloc),
+			LruCacheConcurrency<Node,Key,Value,Allocator>(capacity, alloc),
 			updateInterval_(updateInterval) {}
 
 	Node* put(Key &key, Value &value, bool withGet = false) {
@@ -632,7 +632,7 @@ public:
 			int ret = node->value_->checkAndGet(value, updateInterval_);
 			if (ret != 0) {
 				if (node->isRemoved()) {
-					if (LruCacheCocurrency<Node,Key,Value,Allocator>::releaseNode(node)) {
+					if (LruCacheConcurrency<Node,Key,Value,Allocator>::releaseNode(node)) {
 						node = NULL;
 					}
 				}
@@ -648,7 +648,7 @@ public:
 	}
 
 	void release(Node*& node) {
-		LruCacheCocurrency<Node,Key,Value,Allocator>::release(node);
+		LruCacheConcurrency<Node,Key,Value,Allocator>::release(node);
 	}
 
 	void release(Key &key) {
@@ -659,7 +659,7 @@ public:
 			TEST_PRINT("LruCacheWithMonitor;;release() decrement\n");
 			node->refCount_--;
 			if (node->isRemoved()) {
-				if (LruCacheCocurrency<Node,Key,Value,Allocator>::releaseNode(node)) {
+				if (LruCacheConcurrency<Node,Key,Value,Allocator>::releaseNode(node)) {
 					node = NULL;
 				}
 			}

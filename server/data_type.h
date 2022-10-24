@@ -43,25 +43,25 @@ typedef uint64_t OId; /*!< Object ID */
 typedef uint32_t PartitionId;	  /*!< Partition ID */
 typedef uint32_t PartitionGroupId; /*!< Partition group ID */
 
-typedef int32_t ChunkId; /*!< Chunk ID (unique witihin a partition) */
+typedef int32_t ChunkId; /*!< Chunk ID (unique within a partition) */
 
-typedef uint64_t ContainerId; /*!< Container ID (unique witihin a partition) */
+typedef uint64_t ContainerId; /*!< Container ID (unique within a partition) */
 
-typedef int64_t RowId; /*!< Row ID (unique witihin a container) */
+typedef int64_t RowId; /*!< Row ID (unique within a container) */
 
 typedef uint32_t ColumnId; /*!< Column ID */
 
 typedef uint32_t SchemaVersionId; /*!< ContainerSchema version ID (unique
-									 witihin a container) */
+									 within a container) */
 
-typedef uint64_t LogSequentialNumber; /*!< Log sequential Number (unique witihin
+typedef uint64_t LogSequentialNumber; /*!< Log sequential Number (unique within
 										 a partition) */
 
 const LogSequentialNumber UNDEF_LSN = UINT64_MAX;
 const LogSequentialNumber MAX_LSN = UNDEF_LSN - 1;
 
 typedef uint64_t
-	TransactionId;			/*!< Transaction ID (unique witihin a partition) */
+	TransactionId;			/*!< Transaction ID (unique within a partition) */
 
 typedef uint64_t SessionId; /*!< Session ID (decide by client) */
 
@@ -72,11 +72,11 @@ typedef int64_t Timestamp; /*!< Timestamp */
 typedef uint32_t UserId; /*!< User ID */
 
 typedef uint64_t
-	CheckpointId; /*!< Checkpoint ID (unique witihin a partition group) */
+	CheckpointId; /*!< Checkpoint ID (unique within a partition group) */
 
 typedef uint64_t ResultSize;  
 
-typedef uint64_t BackgroundId; /*! Background Id (unique witihin a partition) */
+typedef uint64_t BackgroundId; /*! Background Id (unique within a partition) */
 
 typedef uint32_t DSObjectSize;
 typedef int32_t DSObjectOffset;
@@ -178,7 +178,9 @@ typedef uint16_t UpdateIntervalCategoryId;
 
 typedef RowId DatabaseId;  
 
+
 #define MAX_COMPOSITE_COLUMN_NUM 16
+
 
 typedef int64_t DSGroupId;
 const DSGroupId UNDEF_DS_GROUPID = INT64_MIN;

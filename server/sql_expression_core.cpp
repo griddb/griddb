@@ -19,7 +19,6 @@
 #include "query_function.h"
 
 
-
 const SQLExprs::ExprRegistrar
 SQLCoreExprs::CustomRegistrar::REGISTRAR_INSTANCE((CustomRegistrar()));
 
@@ -982,17 +981,17 @@ int64_t SQLCoreExprs::Functions::Shift<Left>::operator()(
 
 	union {
 		int64_t asSigned_;
-		int64_t asUnigned_;
+		int64_t asUnsigned_;
 	} value, bits;
 	value.asSigned_ = value1;
 
 	if (left) {
-		bits.asUnigned_ = value.asUnigned_ << shift;
+		bits.asUnsigned_ = value.asUnsigned_ << shift;
 	}
 	else {
-		bits.asUnigned_ = value.asUnigned_ >> shift;
+		bits.asUnsigned_ = value.asUnsigned_ >> shift;
 		if (value1 < 0) {
-			bits.asUnigned_ |= ~static_cast<uint64_t>(0) << (64 - shift);
+			bits.asUnsigned_ |= ~static_cast<uint64_t>(0) << (64 - shift);
 		}
 	}
 

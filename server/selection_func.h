@@ -122,7 +122,7 @@ public:
  * TIME_PREV_ONLY)
  *
  */
-template <bool isJustInclude, bool isAccending>
+template <bool isJustInclude, bool isAscending>
 class SelectionTimeFind : public TqlSelection {
 public:
 	using TqlSelection::operator();

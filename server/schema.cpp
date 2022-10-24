@@ -497,15 +497,15 @@ IndexData IndexSchema::createIndexData(TransactionContext &txn, const util::Vect
 				fixedColumnsSize, hasVariable) + sizeof(OId);
 		}
 		BtreeMap map(txn, *getObjectManager(),
-			container->getMapAllcateStrategy(), container, funcInfo);
+			container->getMapAllocateStrategy(), container, funcInfo);
 		map.initialize(txn, columntype, isUnique, BtreeMap::TYPE_SINGLE_KEY, elemSize);
 		oId = map.getBaseOId();
 	} break;
 	case MAP_TYPE_SPATIAL: {
 		RtreeMap map(txn, *getObjectManager(),
-			container->getMapAllcateStrategy(), container, funcInfo);
+			container->getMapAllocateStrategy(), container, funcInfo);
 		map.initialize(txn, columnTypes[0], columnIds[0],
-			container->getMapAllcateStrategy(), isUnique);
+			container->getMapAllocateStrategy(), isUnique);
 		oId = map.getBaseOId();
 	} break;
 	default:
@@ -538,14 +538,14 @@ void IndexSchema::dropIndexData(TransactionContext &txn, util::Vector<ColumnId> 
 				getIndex(txn, indexData, false, container));
 			if (mainMap.get() != NULL) {
 				container->getDataStore()->finalizeMap
-					(txn, container->getMapAllcateStrategy(), mainMap.get(), 
+					(txn, container->getMapAllocateStrategy(), mainMap.get(), 
 						container->getContainerExpirationTime());
 			}
 			StackAllocAutoPtr<BaseIndex> nullMap(txn.getDefaultAllocator(),
 				getIndex(txn, indexData, true, container));
 			if (nullMap.get() != NULL) {
 				container->getDataStore()->finalizeMap
-					(txn, container->getMapAllcateStrategy(), nullMap.get(), 
+					(txn, container->getMapAllocateStrategy(), nullMap.get(), 
 						container->getContainerExpirationTime());
 			}
 		}
@@ -750,7 +750,7 @@ void IndexSchema::createNullIndexData(TransactionContext &txn,
 	bool isUnique = false;
 	ColumnType nullType = COLUMN_TYPE_NULL;
 	BtreeMap map(txn, *getObjectManager(),
-		container->getMapAllcateStrategy(), container);
+		container->getMapAllocateStrategy(), container);
 	map.initialize(txn, nullType, isUnique, BtreeMap::TYPE_SINGLE_KEY);
 	indexData.oIds_.nullOId_ = map.getBaseOId();
 
@@ -892,7 +892,7 @@ void IndexSchema::finalize(TransactionContext &txn) {
 */
 BaseIndex *IndexSchema::getIndex(TransactionContext &txn, const IndexData &indexData,
 	bool forNull, BaseContainer *container) const {
-	AllocateStrategy& strategy = container->getMapAllcateStrategy();
+	AllocateStrategy& strategy = container->getMapAllocateStrategy();
 
 	OId mapOId;
 	MapType mapType;
