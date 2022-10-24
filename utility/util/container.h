@@ -1787,8 +1787,8 @@ public:
 
 private:
 	template<typename Ev>
-	struct Enrty {
-		Enrty() : referenceCount_(0) {};
+	struct Entry {
+		Entry() : referenceCount_(0) {};
 
 		Ev value_;
 		size_t referenceCount_;
@@ -1797,7 +1797,7 @@ private:
 	WeakMap(const WeakMap&);
 	WeakMap& operator=(const WeakMap&);
 
-	typedef Enrty<V> EntryType;
+	typedef Entry<V> EntryType;
 	typedef std::map<K, EntryType*> BaseType;
 
 	BaseType base_;
@@ -2629,7 +2629,7 @@ void XArray<T, Alloc>::reserveInternal(size_t requestedCapacity) {
 
 	const uint32_t MIN_CAPACITY_BIT = 4;	
 	const size_t usedSize = this->size();
-	const size_t newCapacity = (1U << std::max<uint32_t>(
+	size_t newCapacity = (1U << std::max<uint32_t>(
 		MIN_CAPACITY_BIT,
 		static_cast<uint32_t>(sizeof(uint32_t) * CHAR_BIT) -
 		nlz(static_cast<uint32_t>(requestedCapacity - 1)) ));
@@ -2638,6 +2638,21 @@ void XArray<T, Alloc>::reserveInternal(size_t requestedCapacity) {
 				"Too large array capacity requested (size=" <<
 				requestedCapacity << ")");
 	}
+
+#if UTIL_MEMORY_POOL_AGGRESSIVE
+	typedef detail::DirectAllocationUtils Utils;
+	if (newCapacity >= (1U << (Utils::LARGE_ELEMENT_BITS - 1)) / sizeof(T)) {
+		const size_t margin =
+				(Utils::ELEMENT_MARGIN_SIZE + sizeof(T) - 1) / sizeof(T);
+		if (margin <= newCapacity - requestedCapacity) {
+			newCapacity -= margin;
+		}
+		else if (newCapacity < (1U << (sizeof(uint32_t) * CHAR_BIT - 1)) &&
+				newCapacity > margin) {
+			newCapacity += newCapacity - margin;
+		}
+	}
+#endif
 
 	T *newData;
 	try {
@@ -3345,7 +3360,7 @@ WeakMap<K, V>::WeakMap() {
 
 template<typename K, typename V>
 WeakMap<K, V>::~WeakMap() {
-	for (typename std::map<K, Enrty<V>*>::iterator it = base_.begin();
+	for (typename std::map<K, Entry<V>*>::iterator it = base_.begin();
 			it != base_.end(); ++it) {
 		delete it->second;
 	}

@@ -293,6 +293,47 @@ struct FileLib {
 #endif 
 };
 
+class Mutex;
+namespace detail {
+struct DirectMemoryUtils {
+	static void* mallocDirect(size_t size) UTIL_NOEXCEPT;
+	static void freeDirect(void *ptr) UTIL_NOEXCEPT;
+};
+
+class DirectMutex {
+public:
+	DirectMutex() throw();
+	~DirectMutex();
+
+	void lock() throw();
+	void unlock() throw();
+
+private:
+	struct Binder;
+
+	struct LocalData {
+#ifdef UTIL_HAVE_POSIX_MUTEX
+		pthread_mutex_t mutex_;
+#else
+		CRITICAL_SECTION cs_;
+#endif
+	};
+
+	void* data() throw();
+
+	LocalData data_;
+};
+
+class DirectMutex::Binder {
+public:
+	Binder(DirectMutex &src, Mutex &target) throw();
+	~Binder();
+
+private:
+	Mutex &target_;
+};
+} 
+
 } 
 
 #endif

@@ -52,9 +52,11 @@
 
 #include "util/type.h"
 #include "util/allocator.h"
+#include "util/code.h"
 #include "util/os.h"
 #include <stdexcept>
 #include <cassert>
+#include <climits>
 
 #ifdef UTIL_STACK_TRACE_ENABLED
 #include "util/thread.h"
@@ -80,6 +82,14 @@
 
 #endif	
 
+#ifndef UTIL_MEMORY_MANAGE_LARGE
+#define UTIL_MEMORY_MANAGE_LARGE 1
+#endif
+
+#ifndef UTIL_MEMORY_SIZE_HISTOGRAM_ENABLED
+#define UTIL_MEMORY_SIZE_HISTOGRAM_ENABLED 0
+#endif
+
 namespace util {
 
 int stricmp(const char *x, const char *y) {
@@ -95,6 +105,696 @@ int stricmp(const char *x, const char *y) {
 #error 0
 #endif 
 }
+
+namespace detail {
+
+
+void* DirectMemoryUtils::mallocDirect(size_t size) UTIL_NOEXCEPT {
+#if UTIL_FAILURE_SIMULATION_ENABLED
+	if (util::AllocationFailureSimulator::checkOperationDirect(
+			util::AllocationFailureSimulator::TARGET_NEW, size)) {
+		return NULL;
+	}
+#endif
+
+	void *ptr = malloc(size);
+#if UTIL_MEMORY_ALLOCATE_INITIALIZE
+	if (ptr != NULL) {
+		memset(ptr, 0, size);
+	}
+#endif
+	return ptr;
+}
+
+void DirectMemoryUtils::freeDirect(void *ptr) UTIL_NOEXCEPT {
+	free(ptr);
+}
+
+
+class MemoryManager {
+public:
+	enum StatType {
+		STAT_TOTAL_SIZE,
+		STAT_CACHE_SIZE,
+		STAT_MONITORING_SIZE,
+		STAT_TOTAL_COUNT,
+		STAT_CACHE_COUNT,
+		STAT_DEALLOC_COUNT,
+
+		END_STAT
+	};
+
+	typedef int64_t (UnitStats)[END_STAT];
+
+	class Initializer;
+
+	static MemoryManager* findInstance() UTIL_NOEXCEPT;
+
+	static void* allocate(
+			MemoryManager *manager, size_t size,
+			bool monitoring) UTIL_NOEXCEPT;
+	static void deallocate(
+			MemoryManager *manager, void *ptr, bool monitoring) UTIL_NOEXCEPT;
+
+	static FreeLink* allocateBulk(
+			MemoryManager *manager, size_t size, bool monitoring, bool aligned,
+			size_t &count) UTIL_NOEXCEPT;
+	static void deallocateBulk(
+			MemoryManager *manager, FreeLink *link, size_t size,
+			bool monitoring, bool aligned) UTIL_NOEXCEPT;
+
+	static void* allocateDirect(
+			MemoryManager *manager, size_t size, bool monitoring,
+			bool aligned) UTIL_NOEXCEPT;
+	static void deallocateDirect(
+			MemoryManager *manager, void *ptr, size_t size, bool monitoring,
+			bool aligned) UTIL_NOEXCEPT;
+
+	static size_t adjustAllocationSize(
+			size_t size, bool withHead, size_t *index) UTIL_NOEXCEPT;
+
+	static size_t getUnitCount() UTIL_NOEXCEPT;
+	static bool getUnitProfile(
+			MemoryManager *manager, size_t index, int64_t &totalSize,
+			int64_t &cacheSize, int64_t &monitoringSize, int64_t &totalCount,
+			int64_t &cacheCount, int64_t &deallocCount) UTIL_NOEXCEPT;
+	static bool getUnitProfile(
+			MemoryManager *manager, size_t index,
+			UnitStats &stats) UTIL_NOEXCEPT;
+
+	static void dumpStats(
+			MemoryManager *manager, std::ostream &os);
+	static void dumpSizeHistogram(
+			MemoryManager *manager, std::ostream &os);
+
+private:
+	friend class MemoryManagerInitializer;
+
+	enum {
+		NORMAL_HEAD_SIZE = AlignedSizeOf<size_t>::VALUE,
+
+#if UTIL_MEMORY_MANAGE_LARGE
+		ENTRY_COUNT = 31
+#else
+		ENTRY_COUNT = 21
+#endif
+	};
+
+	typedef UnitStats (StatsList)[ENTRY_COUNT + 1];
+
+	struct Shared;
+
+	typedef std::pair<uint32_t, FreeLink*> SubLink;
+
+	struct Entry {
+		Entry() UTIL_NOEXCEPT;
+
+		DirectMutex mutex_;
+		FreeLink *freeLink_;
+		SubLink *subList_;
+		size_t subCount_;
+	};
+
+	typedef std::pair<uint64_t, uint64_t> HistogramEntry;
+	struct SizeHistogram {
+		enum {
+			HISTOGRAM_CAPACITY = 1000
+		};
+		typedef HistogramEntry (HistogramEntryList)[HISTOGRAM_CAPACITY];
+
+		SizeHistogram() UTIL_NOEXCEPT;
+		void add(size_t size, size_t count) UTIL_NOEXCEPT;
+		void dump(std::ostream &os) UTIL_NOEXCEPT;
+
+		HistogramEntryList histogramEntries_;
+		size_t histogramSize_;
+	};
+
+	explicit MemoryManager(StatsList &statsListRef) UTIL_NOEXCEPT;
+	~MemoryManager();
+
+	void unmanageAll() UTIL_NOEXCEPT;
+
+	static void* allocateInternal(
+			DynamicLockGuard<DirectMutex>&, size_t allocSize, Entry *entry,
+			UnitStats &stats, bool monitoring) UTIL_NOEXCEPT;
+	static void deallocateInternal(
+			MemoryManager *manager, DynamicLockGuard<DirectMutex>&,
+			void *ptr, size_t allocSize, Entry *entry, UnitStats &stats,
+			bool monitoring) UTIL_NOEXCEPT;
+
+	static size_t adjustAllocationSizeInternal(
+			size_t size, bool aligned, size_t *index) UTIL_NOEXCEPT;
+	static bool tryAddHeadSize(size_t srcSize, size_t &destSize) UTIL_NOEXCEPT;
+
+	static Entry* findEntry(
+			MemoryManager *manager, size_t index,
+			DirectMutex *&mutex) UTIL_NOEXCEPT;
+	static void updateStats(
+			MemoryManager *manager, size_t size, size_t index,
+			bool allocated) UTIL_NOEXCEPT;
+
+	void adviceDeallocatedRange(void *ptr, size_t allocSize) UTIL_NOEXCEPT;
+	static size_t resolvePageSize() UTIL_NOEXCEPT;
+
+	static UnitStats& getUnitStats(
+			MemoryManager *manager, size_t index) UTIL_NOEXCEPT;
+
+	static void addSizeHistogram(
+			MemoryManager *manager, size_t size, size_t count) UTIL_NOEXCEPT;
+
+	Entry entryList_[ENTRY_COUNT];
+	StatsList &statsListRef_;
+	DirectMutex totalMutex_;
+	size_t pageSize_;
+
+#if UTIL_MEMORY_SIZE_HISTOGRAM_ENABLED
+	SizeHistogram sizeHistogram_;
+#endif
+};
+
+struct MemoryManager::Shared {
+	static size_t initializerCounter_;
+	static MemoryManager *instance_;
+	static uint8_t storage_[sizeof(MemoryManager)];
+	static StatsList statsList_;
+};
+
+MemoryManager* MemoryManager::findInstance() UTIL_NOEXCEPT {
+	return Shared::instance_;
+}
+
+void* MemoryManager::allocate(
+		MemoryManager *manager, size_t size, bool monitoring) UTIL_NOEXCEPT {
+	size_t totalSize;
+	if (!tryAddHeadSize(size, totalSize)) {
+		return NULL;
+	}
+
+	const bool aligned = true;
+	void *headPtr = allocateDirect(manager, totalSize, monitoring, aligned);
+	if (headPtr == NULL) {
+		return NULL;
+	}
+
+	UTIL_STATIC_ASSERT(sizeof(size_t) <= NORMAL_HEAD_SIZE);
+	const size_t offset = NORMAL_HEAD_SIZE;
+
+	*static_cast<size_t*>(headPtr) = totalSize;
+	return static_cast<uint8_t*>(headPtr) + offset;
+}
+
+void MemoryManager::deallocate(
+		MemoryManager *manager, void *ptr, bool monitoring) UTIL_NOEXCEPT {
+	if (ptr == NULL) {
+		return;
+	}
+
+	UTIL_STATIC_ASSERT(sizeof(size_t) <= NORMAL_HEAD_SIZE);
+	const size_t offset = NORMAL_HEAD_SIZE;
+
+	void *headPtr = static_cast<uint8_t*>(ptr) - offset;
+	const size_t totalSize = *static_cast<size_t*>(headPtr);
+
+	const bool aligned = true;
+	deallocateDirect(manager, headPtr, totalSize, monitoring, aligned);
+}
+
+FreeLink* MemoryManager::allocateBulk(
+		MemoryManager *manager, size_t size, bool monitoring, bool aligned,
+		size_t &count) UTIL_NOEXCEPT {
+	addSizeHistogram(manager, size, count);
+
+	size_t index;
+	const size_t allocSize =
+			adjustAllocationSizeInternal(size, aligned, &index);
+	UnitStats &stats = getUnitStats(manager, index);
+
+	DirectMutex *mutex;
+	Entry *entry = findEntry(manager, index, mutex);
+	DynamicLockGuard<DirectMutex> guard(mutex);
+
+	size_t allocCount = 0;
+	FreeLink *link = NULL;
+	for (size_t i = count; i > 0; i--) {
+		FreeLink *sub = static_cast<FreeLink*>(allocateInternal(
+				guard, allocSize, entry, stats, monitoring));
+		if (sub == NULL) {
+			break;
+		}
+		sub->next_ = link;
+		link = sub;
+		allocCount++;
+	}
+
+	count = allocCount;
+	return link;
+}
+
+void MemoryManager::deallocateBulk(
+		MemoryManager *manager, FreeLink *link, size_t size,
+		bool monitoring, bool aligned) UTIL_NOEXCEPT {
+	size_t index;
+	const size_t allocSize =
+			adjustAllocationSizeInternal(size, aligned, &index);
+	UnitStats &stats = getUnitStats(manager, index);
+
+	DirectMutex *mutex;
+	Entry *entry = findEntry(manager, index, mutex);
+	DynamicLockGuard<DirectMutex> guard(mutex);
+
+	for (FreeLink *sub = link; sub != NULL;) {
+		FreeLink *next = sub->next_;
+		deallocateInternal(
+				manager, guard, sub, allocSize, entry, stats, monitoring);
+		sub = next;
+	}
+}
+
+void* MemoryManager::allocateDirect(
+		MemoryManager *manager, size_t size, bool monitoring,
+		bool aligned) UTIL_NOEXCEPT {
+	addSizeHistogram(manager, size, 1);
+
+	size_t index;
+	const size_t allocSize =
+			adjustAllocationSizeInternal(size, aligned, &index);
+	UnitStats &stats = getUnitStats(manager, index);
+
+	DirectMutex *mutex;
+	Entry *entry = findEntry(manager, index, mutex);
+	DynamicLockGuard<DirectMutex> guard(mutex);
+
+	return allocateInternal(guard, allocSize, entry, stats, monitoring);
+}
+
+void MemoryManager::deallocateDirect(
+		MemoryManager *manager, void *ptr, size_t size, bool monitoring,
+		bool aligned) UTIL_NOEXCEPT {
+	assert(ptr != NULL);
+	size_t index;
+	const size_t allocSize =
+			adjustAllocationSizeInternal(size, aligned, &index);
+	UnitStats &stats = getUnitStats(manager, index);
+
+	DirectMutex *mutex;
+	Entry *entry = findEntry(manager, index, mutex);
+	DynamicLockGuard<DirectMutex> guard(mutex);
+
+	deallocateInternal(
+			manager, guard, ptr, allocSize, entry, stats, monitoring);
+}
+
+size_t MemoryManager::adjustAllocationSize(
+		size_t size, bool withHead, size_t *index) UTIL_NOEXCEPT {
+	size_t totalSize = size;
+	if (withHead && !tryAddHeadSize(size, totalSize)) {
+		if (index != NULL) {
+			*index = ENTRY_COUNT;
+		}
+		return size;
+	}
+
+	const bool aligned = true;
+	const size_t alignedSize =
+			adjustAllocationSizeInternal(totalSize, aligned, index);
+
+	assert(alignedSize >= NORMAL_HEAD_SIZE);
+	return alignedSize - NORMAL_HEAD_SIZE;
+}
+
+size_t MemoryManager::getUnitCount() UTIL_NOEXCEPT {
+	return ENTRY_COUNT;
+}
+
+bool MemoryManager::getUnitProfile(
+		MemoryManager *manager, size_t index, int64_t &totalSize,
+		int64_t &cacheSize, int64_t &monitoringSize, int64_t &totalCount,
+		int64_t &cacheCount, int64_t &deallocCount) UTIL_NOEXCEPT {
+	int64_t *values[END_STAT] = {
+			&totalSize, &cacheSize, &monitoringSize, &totalCount, &cacheCount,
+			&deallocCount
+	};
+
+	UnitStats stats;
+	const bool found = getUnitProfile(manager, index, stats);
+
+	for (size_t i = 0; i < END_STAT; i++) {
+		*(values[i]) = stats[i];
+	}
+
+	return found;
+}
+
+bool MemoryManager::getUnitProfile(
+		MemoryManager *manager, size_t index, UnitStats &stats) UTIL_NOEXCEPT {
+	if (index > ENTRY_COUNT) {
+		for (size_t i = 0; i < END_STAT; i++) {
+			stats[i] = 0;
+		}
+		return false;
+	}
+
+	bool found = false;
+	const UnitStats &srcStats = getUnitStats(manager, index);
+	for (size_t i = 0; i < END_STAT; i++) {
+		if (srcStats[i] != 0) {
+			found = true;
+		}
+		stats[i] = srcStats[i];
+	}
+	return found;
+}
+
+void MemoryManager::dumpStats(
+		MemoryManager *manager, std::ostream &os) {
+	const size_t count = getUnitCount();
+
+	int64_t totalSize = 0;
+	int64_t totalCount = 0;
+	for (size_t i = 0; i < count; i++) {
+		UnitStats stats;
+		getUnitProfile(manager, i, stats);
+		totalSize += stats[STAT_TOTAL_SIZE];
+		totalCount += stats[STAT_TOTAL_COUNT];
+	}
+
+	os << totalSize << " [";
+	for (size_t i = 0; i < count; i++) {
+		UnitStats stats;
+		getUnitProfile(manager, i, stats);
+		int64_t size = stats[STAT_TOTAL_SIZE];
+		if (size == 0) {
+			continue;
+		}
+		os << " " << i << ":" << size;
+	}
+	os << " ] " << totalCount << std::endl;;
+}
+
+void MemoryManager::dumpSizeHistogram(
+		MemoryManager *manager, std::ostream &os) {
+#if UTIL_MEMORY_SIZE_HISTOGRAM_ENABLED
+	if (manager == NULL) {
+		return;
+	}
+	LockGuard<DirectMutex> guard(manager->totalMutex_);
+	manager->sizeHistogram_.dump(os);
+#else
+	static_cast<void>(manager);
+	static_cast<void>(os);
+#endif
+}
+
+MemoryManager::MemoryManager(StatsList &statsListRef) UTIL_NOEXCEPT :
+		statsListRef_(statsListRef),
+		pageSize_(resolvePageSize()) {
+}
+
+MemoryManager::~MemoryManager() {
+	unmanageAll();
+}
+
+void MemoryManager::unmanageAll() UTIL_NOEXCEPT {
+	for (uint32_t i = 0; i < ENTRY_COUNT; i++) {
+		Entry &entry = entryList_[i];
+
+		for (FreeLink *&link = entry.freeLink_; link != NULL;) {
+			FreeLink *next = link->next_;
+
+			const size_t allocSize = (static_cast<size_t>(1) << i);
+			DirectMemoryUtils::freeDirect(link);
+
+			UnitStats &stats = getUnitStats(this, i);
+			stats[STAT_TOTAL_SIZE] -= static_cast<int64_t>(allocSize);
+			stats[STAT_TOTAL_COUNT]--;
+			stats[STAT_CACHE_SIZE] -= static_cast<int64_t>(allocSize);
+			stats[STAT_CACHE_COUNT]--;
+			stats[STAT_DEALLOC_COUNT]++;
+
+			link = next;
+		}
+	}
+}
+
+void* MemoryManager::allocateInternal(
+		DynamicLockGuard<DirectMutex>&, size_t allocSize, Entry *entry,
+		UnitStats &stats, bool monitoring) UTIL_NOEXCEPT {
+	void *ptr = NULL;
+	do {
+		if (entry == NULL) {
+			break;
+		}
+
+		FreeLink *&link = entry->freeLink_;
+		if (link == NULL) {
+			break;
+		}
+
+		stats[STAT_CACHE_SIZE] -= static_cast<int64_t>(allocSize);
+		stats[STAT_CACHE_COUNT]--;
+
+		ptr = link;
+		link = link->next_;
+	}
+	while (false);
+
+	if (ptr == NULL) {
+		ptr = DirectMemoryUtils::mallocDirect(allocSize);
+		if (ptr == NULL) {
+			return NULL;
+		}
+		stats[STAT_TOTAL_SIZE] += static_cast<int64_t>(allocSize);
+		stats[STAT_TOTAL_COUNT]++;
+	}
+
+	if (monitoring) {
+		stats[STAT_MONITORING_SIZE] += static_cast<int64_t>(allocSize);
+	}
+
+	return ptr;
+}
+
+void MemoryManager::deallocateInternal(
+		MemoryManager *manager, DynamicLockGuard<DirectMutex>&,
+		void *ptr, size_t allocSize, Entry *entry, UnitStats &stats,
+		bool monitoring) UTIL_NOEXCEPT {
+	stats[STAT_DEALLOC_COUNT]++;
+	if (monitoring) {
+		stats[STAT_MONITORING_SIZE] -= static_cast<int64_t>(allocSize);
+	}
+
+	if (entry == NULL) {
+		DirectMemoryUtils::freeDirect(ptr);
+		stats[STAT_TOTAL_SIZE] -= static_cast<int64_t>(allocSize);
+		stats[STAT_TOTAL_COUNT]--;
+		return;
+	}
+
+	FreeLink *&link = entry->freeLink_;
+	FreeLink *next = link;
+
+	link = static_cast<FreeLink*>(ptr);
+	link->next_ = next;
+
+	if (next != NULL && manager != NULL && allocSize > manager->pageSize_) {
+		manager->adviceDeallocatedRange(next, allocSize);
+	}
+
+	stats[STAT_CACHE_SIZE] += static_cast<int64_t>(allocSize);
+	stats[STAT_CACHE_COUNT]++;
+}
+
+size_t MemoryManager::adjustAllocationSizeInternal(
+		size_t size, bool aligned, size_t *index) UTIL_NOEXCEPT {
+	size_t indexBase;
+	size_t &indexRef = (index == NULL ? indexBase : *index);
+	indexRef = ENTRY_COUNT;
+
+	if (size > (static_cast<size_t>(1) << (ENTRY_COUNT - 1))) {
+		return size;
+	}
+
+	const uint32_t baseSize =
+			static_cast<uint32_t>(std::max<uint64_t>(size, sizeof(FreeLink)));
+	const uint32_t bits = static_cast<uint32_t>(sizeof(uint32_t) * CHAR_BIT) -
+			util::nlz(static_cast<uint32_t>(baseSize - 1));
+	assert((static_cast<size_t>(1) << (bits - 1)) < baseSize &&
+			baseSize <= (static_cast<size_t>(1) << bits));
+
+	indexRef = bits;
+	return (aligned ? (static_cast<size_t>(1) << bits) : size);
+}
+
+inline bool MemoryManager::tryAddHeadSize(
+		size_t srcSize, size_t &destSize) UTIL_NOEXCEPT {
+	if (srcSize > std::numeric_limits<size_t>::max() - NORMAL_HEAD_SIZE) {
+		destSize = srcSize;
+		return false;
+	}
+	destSize = srcSize + NORMAL_HEAD_SIZE;
+	return true;
+}
+
+MemoryManager::Entry* MemoryManager::findEntry(
+		MemoryManager *manager, size_t index,
+		DirectMutex *&mutex) UTIL_NOEXCEPT {
+	mutex = (manager == NULL ? NULL : &manager->totalMutex_);
+
+	if (manager == NULL || index >= ENTRY_COUNT) {
+		return NULL;
+	}
+
+	Entry &entry = manager->entryList_[index];
+	mutex = &entry.mutex_;
+	return &entry;
+}
+
+void MemoryManager::adviceDeallocatedRange(
+		void *ptr, size_t allocSize) UTIL_NOEXCEPT {
+#ifdef _WIN32
+	static_cast<void>(ptr);
+	static_cast<void>(allocSize);
+#else
+	const uintptr_t alignedBegin = (reinterpret_cast<uintptr_t>(ptr) +
+			sizeof(FreeLink*) + pageSize_ - 1) / pageSize_ * pageSize_;
+
+	const uintptr_t ptrEnd = reinterpret_cast<uintptr_t>(ptr) + allocSize;
+	const uintptr_t alignedEndBase =
+			(ptrEnd + pageSize_ - 1) / pageSize_ * pageSize_;
+	const uintptr_t alignedEnd =
+			alignedEndBase - (ptrEnd < alignedEndBase ? pageSize_ : 0);
+
+	if (alignedBegin < alignedEnd) {
+		madvise(
+				reinterpret_cast<void*>(alignedBegin),
+				static_cast<size_t>(alignedEnd - alignedBegin),
+				MADV_DONTNEED);
+	}
+#endif
+}
+
+size_t MemoryManager::resolvePageSize() UTIL_NOEXCEPT {
+#ifndef _WIN32
+	const long size = sysconf(_SC_PAGESIZE);
+	if (size > 0) {
+		return static_cast<size_t>(size);
+	}
+#endif
+	return std::numeric_limits<size_t>::max();
+}
+
+MemoryManager::UnitStats& MemoryManager::getUnitStats(
+		MemoryManager *manager, size_t index) UTIL_NOEXCEPT {
+	assert(index <= ENTRY_COUNT);
+
+	UnitStats &statValue = (manager == NULL ?
+			Shared::statsList_ : manager->statsListRef_)[index];
+
+	return statValue;
+}
+
+inline void MemoryManager::addSizeHistogram(
+		MemoryManager *manager, size_t size, size_t count) UTIL_NOEXCEPT {
+#if UTIL_MEMORY_SIZE_HISTOGRAM_ENABLED
+	if (manager == NULL) {
+		return;
+	}
+	LockGuard<DirectMutex> guard(manager->totalMutex_);
+	manager->sizeHistogram_.add(size, count);
+#else
+	static_cast<void>(manager);
+	static_cast<void>(size);
+	static_cast<void>(count);
+#endif
+}
+
+size_t MemoryManager::Shared::initializerCounter_ = 0;
+MemoryManager *MemoryManager::Shared::instance_ = NULL;
+uint8_t MemoryManager::Shared::storage_[sizeof(MemoryManager)];
+MemoryManager::StatsList MemoryManager::Shared::statsList_ = { { 0 } };
+
+MemoryManager::Entry::Entry() UTIL_NOEXCEPT :
+		freeLink_(NULL),
+		subList_(NULL),
+		subCount_(0) {
+}
+
+MemoryManager::SizeHistogram::SizeHistogram() UTIL_NOEXCEPT :
+		histogramSize_(0) {
+}
+
+void MemoryManager::SizeHistogram::add(
+		size_t size, size_t count) UTIL_NOEXCEPT {
+	const HistogramEntry value(size, 0);
+	HistogramEntry *begin = histogramEntries_;
+	HistogramEntry *end = begin + histogramSize_;
+	HistogramEntry *it = std::lower_bound(begin, end, value);
+	if (it == end || it->first != value.first) {
+		if (histogramSize_ >= HISTOGRAM_CAPACITY) {
+			return;
+		}
+		histogramSize_++;
+
+		for (HistogramEntry *sub = end; sub != it; --sub) {
+			*sub = *(sub - 1);
+		}
+		*it = value;
+	}
+	it->second += count;
+}
+
+void MemoryManager::SizeHistogram::dump(std::ostream &os) UTIL_NOEXCEPT {
+	HistogramEntry *begin = histogramEntries_;
+	HistogramEntry *end = begin + histogramSize_;
+	uint64_t base = 0;
+	bool lineStarted = false;
+	for (HistogramEntry *it = begin;; ++it) {
+		const bool done = (it == end);
+		bool baseUpdated = false;
+		const uint64_t size = (done ? 0 : it->first);
+		while (size >= (static_cast<uint64_t>(1) << (base + 1))) {
+			if (base > sizeof(uint64_t) * CHAR_BIT) {
+				break;
+			}
+			base++;
+			baseUpdated = true;
+		}
+		if (lineStarted && (done || baseUpdated)) {
+			os << " ]" << std::endl;
+		}
+		if (done) {
+			break;
+		}
+		if (!lineStarted || baseUpdated) {
+			os << "2^" << base << ": [";
+			lineStarted = true;
+		}
+		os << " +" << (size - (static_cast<size_t>(1) << base));
+		os << ":" << it->second;
+	}
+}
+
+
+MemoryManagerInitializer::MemoryManagerInitializer() UTIL_NOEXCEPT {
+	typedef MemoryManager::Shared Shared;
+	if (++Shared::initializerCounter_ == 1) {
+		assert(Shared::instance_ == NULL);
+		Shared::instance_ =
+				new (Shared::storage_) MemoryManager(Shared::statsList_);
+	}
+}
+
+MemoryManagerInitializer::~MemoryManagerInitializer() {
+	typedef MemoryManager::Shared Shared;
+	if (--Shared::initializerCounter_ == 0) {
+		assert(Shared::instance_ != NULL);
+		Shared::instance_->~MemoryManager();
+		Shared::instance_ = NULL;
+	}
+}
+
+} 
 
 
 bool Exception::whatEnabled_ = false;
@@ -545,14 +1245,14 @@ void* Exception::allocate(size_t size) throw() {
 		return ptr;
 	}
 	else {
-		return ::malloc(size);
+		return UTIL_MALLOC(size);
 	}
 }
 
 void Exception::deallocate(void *ptr) throw() {
 	uint8_t *bytePtr = static_cast<uint8_t*>(ptr);
 	if (bytePtr < buffer_ || buffer_ + sizeof(buffer_) <= bytePtr) {
-		::free(bytePtr);
+		UTIL_FREE(bytePtr);
 	}
 }
 
@@ -979,7 +1679,7 @@ LocalString::LocalString(char8_t *localBuf, size_t capacity) throw() :
 }
 
 LocalString::~LocalString() {
-	::free(dynamicBuf_);
+	UTIL_FREE(dynamicBuf_);
 }
 
 bool LocalString::tryAppend(const char8_t *value) throw() {
@@ -998,13 +1698,13 @@ bool LocalString::tryAppend(const char8_t *begin, const char8_t *end) throw() {
 			return false;
 		}
 
-		char8_t *newBuf = static_cast<char8_t*>(::malloc(newCapacity));
+		char8_t *newBuf = static_cast<char8_t*>(UTIL_MALLOC(newCapacity));
 		if (newBuf == NULL) {
 			return false;
 		}
 
 		memcpy(newBuf, buf, size_);
-		::free(dynamicBuf_);
+		UTIL_FREE(dynamicBuf_);
 
 		capacity_ = newCapacity;
 		localBuf_ = NULL;
@@ -1093,10 +1793,10 @@ void StackTraceUtils::getStackTrace(StackTraceHandler &handler) {
 		}
 	}
 	catch (...) {
-		::free(symbols);
+		detail::DirectMemoryUtils::freeDirect(symbols);
 		throw;
 	}
-	::free(symbols);
+	detail::DirectMemoryUtils::freeDirect(symbols);
 #endif
 }
 
@@ -1273,11 +1973,11 @@ void StackTraceUtils::Impl::getSymbolName(
 			handler(demangled, -1);
 		}
 		catch (...) {
-			::free(demangled);
+			detail::DirectMemoryUtils::freeDirect(demangled);
 			throw;
 		}
 
-		::free(demangled);
+		detail::DirectMemoryUtils::freeDirect(demangled);
 		return;
 	}
 	while (false);
@@ -1381,18 +2081,91 @@ void DebugUtils::interrupt() {
 namespace util {
 namespace detail {
 
-void* DirectAllocationUtils::allocate(size_t size) {
-#ifdef UTIL_MEMORY_ALLOCATE_INITIALIZE
-	void *ptr = malloc(size);
-	memset(ptr, 0, size);
-	return ptr;
+void* DirectAllocationUtils::allocate(
+		size_t size, bool monitoring) UTIL_NOEXCEPT {
+#if UTIL_MEMORY_POOL_AGGRESSIVE
+	return MemoryManager::allocate(MemoryManager::findInstance(), size, monitoring);
 #else
-	return malloc(size);
+	static_cast<void>(monitoring);
+	return DirectMemoryUtils::mallocDirect(size);
 #endif
 }
 
-void DirectAllocationUtils::deallocate(void *ptr) {
-	return free(ptr);
+void DirectAllocationUtils::deallocate(
+		void *ptr, bool monitoring) UTIL_NOEXCEPT {
+#if UTIL_MEMORY_POOL_AGGRESSIVE
+	MemoryManager::deallocate(MemoryManager::findInstance(), ptr, monitoring);
+#else
+	static_cast<void>(monitoring);
+	DirectMemoryUtils::freeDirect(ptr);
+#endif
+}
+
+#if UTIL_MEMORY_POOL_AGGRESSIVE
+FreeLink* DirectAllocationUtils::allocateBulk(
+		size_t size, bool monitoring, bool aligned,
+		size_t &count) UTIL_NOEXCEPT {
+	return MemoryManager::allocateBulk(
+			MemoryManager::findInstance(), size, monitoring, aligned, count);
+}
+
+void DirectAllocationUtils::deallocateBulk(
+		FreeLink *link, size_t size, bool monitoring,
+		bool aligned) UTIL_NOEXCEPT {
+	return MemoryManager::deallocateBulk(
+			MemoryManager::findInstance(), link, size, monitoring, aligned);
+}
+#endif 
+
+void* DirectAllocationUtils::allocateDirect(
+		size_t size, bool monitoring, bool aligned) UTIL_NOEXCEPT {
+#if UTIL_MEMORY_POOL_AGGRESSIVE
+	return MemoryManager::allocateDirect(
+			MemoryManager::findInstance(), size, monitoring, aligned);
+#else
+	static_cast<void>(monitoring);
+	static_cast<void>(aligned);
+	return DirectMemoryUtils::mallocDirect(size);
+#endif
+}
+
+void DirectAllocationUtils::deallocateDirect(
+		void *ptr, size_t size, bool monitoring, bool aligned) UTIL_NOEXCEPT {
+#if UTIL_MEMORY_POOL_AGGRESSIVE
+	MemoryManager::deallocateDirect(
+			MemoryManager::findInstance(), ptr, size, monitoring, aligned);
+#else
+	static_cast<void>(size);
+	static_cast<void>(monitoring);
+	static_cast<void>(aligned);
+	DirectMemoryUtils::freeDirect(ptr);
+#endif
+}
+
+size_t DirectAllocationUtils::adjustAllocationSize(
+		size_t size, bool withHead, size_t *index) UTIL_NOEXCEPT {
+	return MemoryManager::adjustAllocationSize(size, withHead, index);
+}
+
+size_t DirectAllocationUtils::getUnitCount() UTIL_NOEXCEPT {
+	return MemoryManager::getUnitCount();
+}
+
+bool DirectAllocationUtils::getUnitProfile(
+		size_t index, int64_t &totalSize, int64_t &cacheSize,
+		int64_t &monitoringSize, int64_t &totalCount, int64_t &cacheCount,
+		int64_t &deallocCount) UTIL_NOEXCEPT {
+	return MemoryManager::getUnitProfile(
+			MemoryManager::findInstance(), index, totalSize, cacheSize,
+			monitoringSize, totalCount, cacheCount, deallocCount);
+}
+
+void DirectAllocationUtils::dumpStats(std::ostream &os) {
+	MemoryManager::dumpStats(MemoryManager::findInstance(), os);
+}
+
+void DirectAllocationUtils::dumpSizeHistogram(std::ostream &os) {
+	MemoryManager::dumpSizeHistogram(MemoryManager::findInstance(), os);
 }
 
 } 
@@ -1427,41 +2200,50 @@ void AllocationFailureSimulator::set(
 }
 
 void AllocationFailureSimulator::checkOperation(int32_t targetType, size_t size) {
-	(void) size;
+	if (!checkOperationDirect(targetType, size)) {
+		return;
+	}
+
+	switch (targetType) {
+	case TARGET_NEW:
+		UTIL_THROW_UTIL_ERROR(CODE_NO_MEMORY,
+				"Allocation failed");
+	case TARGET_STACK_ALLOCATION:
+		try {
+			UTIL_THROW_UTIL_ERROR(CODE_NO_MEMORY,
+					"Allocation failed");
+		}
+		catch (util::Exception &e) {
+			StackAllocator::handleAllocationError(e);
+		}
+	}
+}
+
+bool AllocationFailureSimulator::checkOperationDirect(
+		int32_t targetType, size_t size) UTIL_NOEXCEPT {
+	static_cast<void>(size);
 
 	if (enabled_ && targetType == targetType_) {
 		const uint64_t count = lastOperationCount_;
 		lastOperationCount_++;
 
 		if (startCount_ <= count && count < endCount_) {
-			switch (targetType) {
-			case TARGET_NEW:
-				UTIL_THROW_UTIL_ERROR(CODE_NO_MEMORY,
-						"Allocation failed");
-			case TARGET_STACK_ALLOCATION:
-				try {
-					UTIL_THROW_UTIL_ERROR(CODE_NO_MEMORY,
-							"Allocation failed");
-				}
-				catch (util::Exception &e) {
-					StackAllocator::handleAllocationError(e);
-				}
-			}
+			return true;
 		}
 	}
+
+	return false;
 }
 
 } 
 #else	
 
-#ifdef UTIL_PLACEMENT_NEW_ENABLED
-void* operator new(size_t size) {
-
-#if UTIL_FAILURE_SIMULATION_ENABLED
-	util::AllocationFailureSimulator::checkOperation(
-			util::AllocationFailureSimulator::TARGET_NEW, size);
+#if UTIL_MEMORY_POOL_PLACEMENT_NEW && !UTIL_MEMORY_POOL_AGGRESSIVE
+#error 0
 #endif
 
+#ifdef UTIL_PLACEMENT_NEW_ENABLED
+void* operator new(size_t size) UTIL_PLACEMENT_NEW_SPECIFIER {
 	void *p = UTIL_MALLOC(size);
 
 	if (p == NULL) {
@@ -1471,11 +2253,11 @@ void* operator new(size_t size) {
 	return p;
 }
 
-void* operator new[](size_t size) {
+void* operator new[](size_t size) UTIL_PLACEMENT_NEW_SPECIFIER {
 	return operator new(size);
 }
 
-void operator delete(void *p) {
+void operator delete(void *p) UTIL_NOEXCEPT {
 #ifdef UTIL_DUMP_OPERATOR_DELETE
 	if (p != NULL) {
 		char8_t buf[512];
@@ -1492,7 +2274,7 @@ void operator delete(void *p) {
 	UTIL_FREE(p);
 }
 
-void operator delete[](void *p) {
+void operator delete[](void *p) UTIL_NOEXCEPT {
 	operator delete(p);
 }
 #endif	

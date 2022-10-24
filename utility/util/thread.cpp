@@ -356,11 +356,10 @@ UTIL_FLAG_TYPE UTIL_MUTEX_ERRORCHECK = 0;
 
 struct Mutex::Data {
 #ifdef UTIL_HAVE_POSIX_MUTEX
-	Data(const pthread_mutexattr_t *attr);
-#else
-	Data();
+	explicit Data(const pthread_mutexattr_t *attr);
 #endif
 
+	Data() throw();
 	~Data();
 
 #ifdef UTIL_HAVE_POSIX_MUTEX
@@ -382,11 +381,17 @@ Mutex::Data::Data(const pthread_mutexattr_t *attr) {
 		UTIL_THROW_PLATFORM_ERROR(NULL);
 	}
 }
-#else
-Mutex::Data::Data() {
-	InitializeCriticalSection(&cs_);
-}
 #endif
+
+Mutex::Data::Data() throw() {
+#ifdef UTIL_HAVE_POSIX_MUTEX
+	if (0 != pthread_mutex_init(&mutex_, NULL)) {
+		assert(false);
+	}
+#else
+	InitializeCriticalSection(&cs_);
+#endif
+}
 
 Mutex::Data::~Data() {
 #ifdef UTIL_HAVE_POSIX_MUTEX
@@ -448,6 +453,10 @@ bool Mutex::tryLock(void) {
 bool Mutex::tryLock(uint32_t msec) {
 	(void) msec;
 	UTIL_THROW_NOIMPL_UTIL();
+}
+
+Mutex::Mutex(const FalseType&) :
+		data_(UTIL_NULLPTR) {
 }
 
 MutexAttribute::MutexAttribute() : data_(new Data()) {
@@ -1426,5 +1435,44 @@ ConflictionDetectorScope::~ConflictionDetectorScope() try {
 }
 catch (...) {
 }
+
+
+namespace detail {
+
+DirectMutex::DirectMutex() throw() {
+	new (data()) Mutex::Data();
+}
+
+DirectMutex::~DirectMutex() {
+	static_cast<Mutex::Data*>(data())->~Data();
+}
+
+void DirectMutex::lock() throw() {
+	Mutex mutex((FalseType()));
+	Binder binder(*this, mutex);
+	mutex.lock();
+}
+
+void DirectMutex::unlock() throw() {
+	Mutex mutex((FalseType()));
+	Binder binder(*this, mutex);
+	mutex.unlock();
+}
+
+void* DirectMutex::data() throw() {
+	UTIL_STATIC_ASSERT(sizeof(LocalData) == sizeof(Mutex::Data));
+	return &data_;
+}
+
+DirectMutex::Binder::Binder(DirectMutex &src, Mutex &target) throw() :
+		target_(target) {
+	target_.data_.reset(static_cast<Mutex::Data*>(src.data()));
+}
+
+DirectMutex::Binder::~Binder() {
+	target_.data_.release();
+}
+
+} 
 
 } 
