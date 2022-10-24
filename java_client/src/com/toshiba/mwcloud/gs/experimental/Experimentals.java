@@ -39,7 +39,7 @@ public class Experimentals {
 
 		public void putUser(
 				String name, UserInfo info,
-				boolean modifiable) throws GSException;
+				boolean modifiable, boolean isRole) throws GSException;
 
 		public void dropUser(String name) throws GSException;
 

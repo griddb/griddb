@@ -835,7 +835,7 @@ public class ContainerInfo {
 	 * 高くなります。</p>
 	 *
 	 * <p>コンテナの定義において使用できるデータアフィニティ文字列の文字種や
-	 * 長さには制限があります。具体的には、GridDBテクニカルリファレンスを参照
+	 * 長さには制限があります。具体的には、GridDB機能リファレンスを参照
 	 * してください。ただし、文字列を設定した時点で必ずしもすべての制限を
 	 * 検査するとは限りません。特に記載のない限り、データアフィニティ文字列が
 	 * 使用される操作では、ASCIIの大文字・小文字表記の違いが区別されます。</p>
@@ -863,7 +863,7 @@ public class ContainerInfo {
 	 * which includes Rows with similar elapsed time periods.</p>
 	 *
 	 * <p>There are the limitations, allowed characters and maximum
-	 * length, for the data affinity string. See GridDB Technical
+	 * length, for the data affinity string. See GridDB Features
 	 * Reference for the details. All the limitations may not be
 	 * checked when setting the string. The data affinity string
 	 * is case-sensitive unless otherwise noted.</p>

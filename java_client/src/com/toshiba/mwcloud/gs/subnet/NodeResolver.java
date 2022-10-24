@@ -22,6 +22,8 @@ import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.MulticastSocket;
+import java.net.NetworkInterface;
+import java.net.SocketException;
 import java.net.URL;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
@@ -33,6 +35,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+
+import javax.net.ssl.SSLSocketFactory;
 
 import com.toshiba.mwcloud.gs.GSException;
 import com.toshiba.mwcloud.gs.common.BasicBuffer;
@@ -46,6 +50,7 @@ import com.toshiba.mwcloud.gs.common.PropertyUtils;
 import com.toshiba.mwcloud.gs.common.PropertyUtils.WrappedProperties;
 import com.toshiba.mwcloud.gs.common.ServiceAddressResolver;
 import com.toshiba.mwcloud.gs.common.Statement;
+import com.toshiba.mwcloud.gs.subnet.NodeConnection.SocketType;
 
 public class NodeResolver implements Closeable {
 
@@ -62,9 +67,13 @@ public class NodeResolver implements Closeable {
 	private static final String DEFAULT_NOTIFICATION_ADDRESS_V6 = "ff12::1";
 
 	private static final String DEFAULT_SERVICE_TYPE = "transaction";
+	private static final String DEFAULT_PUBLIC_SERVICE_TYPE = "transactionPublic";
 
-	private static final AddressConfig DEFAULT_ADDRESS_CONFIG =
-			new AddressConfig();
+	private static AddressConfig DEFAULT_ADDRESS_CONFIG =
+			new AddressConfig(DEFAULT_SERVICE_TYPE);
+
+	private static AddressConfig DEFAULT_PUBLIC_ADDRESS_CONFIG =
+			new AddressConfig(DEFAULT_PUBLIC_SERVICE_TYPE);
 
 	public static final ProtocolConfig DEFAULT_PROTOCOL_CONFIG =
 			new DefaultProtocolConfig();
@@ -77,6 +86,8 @@ public class NodeResolver implements Closeable {
 	private final boolean ipv6Enabled;
 
 	private final InetSocketAddress notificationAddress;
+
+	private final NetworkInterface notificationInterface;
 
 	private InetSocketAddress masterAddress;
 
@@ -129,17 +140,25 @@ public class NodeResolver implements Closeable {
 			NodeConnection.Config connectionConfig,
 			ServiceAddressResolver.Config sarConfig,
 			List<InetSocketAddress> memberList,
-			AddressConfig addressConfig) throws GSException {
+			AddressConfig addressConfig,
+			InetAddress notificationInterfaceAddress,
+			boolean isPublicConnection) throws GSException {
+
+		this.DEFAULT_ADDRESS_CONFIG = new AddressConfig(
+			isPublicConnection ? DEFAULT_PUBLIC_SERVICE_TYPE : DEFAULT_SERVICE_TYPE);
 		this.pool = pool;
 		this.ipv6Enabled = (sarConfig == null ?
 				(address.getAddress() instanceof Inet6Address) :
 					sarConfig.isIPv6Expected());
 		this.notificationAddress = (passive ? address : null);
+		this.notificationInterface =
+				findNotificationInterface(notificationInterfaceAddress);
 		this.masterAddress = (passive ? null : address);
-		this.connectionConfig.set(connectionConfig);
+		this.connectionConfig.set(connectionConfig, true);
 		this.preferableConnectionPoolSize = pool.getMaxSize();
 		this.serviceAddressResolver = makeServiceAddressResolver(
-				sarConfig, memberList, addressConfig);
+				makeServiceAddressResolverConfig(sarConfig, connectionConfig),
+				memberList, addressConfig);
 		this.protocolConfig = DEFAULT_PROTOCOL_CONFIG;
 		if (addressConfig != null) {
 			alwaysMaster = addressConfig.alwaysMaster;
@@ -178,9 +197,25 @@ public class NodeResolver implements Closeable {
 		return resolver;
 	}
 
+	private static ServiceAddressResolver.Config
+	makeServiceAddressResolverConfig(
+			ServiceAddressResolver.Config src,
+			NodeConnection.Config connectionConfig) {
+		if (src == null) {
+			return null;
+		}
+
+		final ServiceAddressResolver.Config dest =
+				new ServiceAddressResolver.Config(src);
+		dest.setSecureSocketFactory(
+				(SSLSocketFactory) connectionConfig.getSocketFactories().get(
+						SocketType.SECURE));
+		return dest;
+	}
+
 	public synchronized void setConnectionConfig(
 			NodeConnection.Config connectionConfig) {
-		this.connectionConfig.set(connectionConfig);
+		this.connectionConfig.set(connectionConfig, false);
 	}
 
 	public synchronized void setNotificationReceiveTimeoutMillis(long timeout) {
@@ -356,7 +391,7 @@ public class NodeResolver implements Closeable {
 
 		NodeConnection.fillRequestHead(ipv6Enabled, req);
 		try {
-			NodeConnection.tryPutEmptyOptionalRequest(req);
+			clusterInfo.loginInfo.putConnectionOption(req);
 			masterConnection.executeStatementDirect(
 					protocolConfig.getNormalStatementType(
 							Statement.GET_PARTITION_ADDRESS),
@@ -652,7 +687,7 @@ public class NodeResolver implements Closeable {
 			}
 
 			NodeConnection.fillRequestHead(ipv6Enabled, req);
-			NodeConnection.tryPutEmptyOptionalRequest(req);
+			clusterInfo.loginInfo.putConnectionOption(req);
 
 			if (masterResolvable) {
 				req.putBoolean(true);
@@ -738,6 +773,9 @@ public class NodeResolver implements Closeable {
 			socket.setSoTimeout(PropertyUtils.timeoutPropertyToIntMillis(
 					notificationReceiveTimeoutMillis));
 			socket.setReuseAddress(true);
+			if (notificationInterface != null) {
+				socket.setNetworkInterface(notificationInterface);
+			}
 			socket.joinGroup(notificationAddress.getAddress());
 
 			
@@ -1026,6 +1064,33 @@ public class NodeResolver implements Closeable {
 				Math.max(preferableConnectionPoolSize, addressCache.size()));
 	}
 
+	private static NetworkInterface findNotificationInterface(
+			InetAddress address) throws GSException {
+		if (address == null) {
+			return null;
+		}
+
+		final NetworkInterface networkInterface;
+		try {
+			networkInterface = NetworkInterface.getByInetAddress(address);
+		}
+		catch (SocketException e) {
+			throw new GSException(
+					GSErrorCode.ILLEGAL_PARAMETER,
+					"Failed to resolve network interface (" +
+					"address=" + address +
+					", reason=" + e.getMessage() + ")", e);
+		}
+
+		if (networkInterface == null) {
+			throw new GSException(
+					GSErrorCode.ILLEGAL_PARAMETER,
+					"Network interface not found (address=" + address + ")");
+		}
+
+		return networkInterface;
+	}
+
 	public synchronized void close() throws GSException {
 		releaseMasterCache(false);
 	}
@@ -1167,17 +1232,21 @@ public class NodeResolver implements Closeable {
 		public String notificationAddressV6 = DEFAULT_NOTIFICATION_ADDRESS_V6;
 		public String serviceType = DEFAULT_SERVICE_TYPE;
 		public boolean alwaysMaster = false;
+		AddressConfig(String serviceType) {
+			this.serviceType = serviceType;
+		}
 	}
 
 	public static InetSocketAddress getAddressProperties(
 			WrappedProperties props, boolean[] passive,
 			ServiceAddressResolver.Config sarConfig,
 			List<InetSocketAddress> memberList,
-			AddressConfig addressConfig) throws GSException {
+			AddressConfig addressConfig,
+			InetAddress[] notificationInterfaceAddress) throws GSException {
 		if (addressConfig == null) {
 			return getAddressProperties(
 					props, passive, sarConfig, memberList,
-					DEFAULT_ADDRESS_CONFIG);
+					DEFAULT_ADDRESS_CONFIG, notificationInterfaceAddress);
 		}
 
 		final String host = props.getProperty("host", false);
@@ -1201,7 +1270,7 @@ public class NodeResolver implements Closeable {
 
 		final InetAddress address = getNotificationProperties(
 				props, host, ipv6Enabled, sarConfig, memberList,
-				addressConfig);
+				addressConfig, notificationInterfaceAddress);
 
 		final String portKey = (passive[0] ? "notificationPort" : "port");
 		Integer port = props.getIntProperty(portKey, false);
@@ -1234,7 +1303,8 @@ public class NodeResolver implements Closeable {
 			WrappedProperties props, String host, Boolean ipv6Expected,
 			ServiceAddressResolver.Config sarConfig,
 			List<InetSocketAddress> memberList,
-			AddressConfig addressConfig) throws GSException {
+			AddressConfig addressConfig,
+			InetAddress[] notificationInterfaceAddress) throws GSException {
 
 		PropertyUtils.checkExclusiveProperties(
 				props.getBase(),
@@ -1242,9 +1312,16 @@ public class NodeResolver implements Closeable {
 				"notificationMember",
 				"notificationAddress");
 		PropertyUtils.checkExclusiveProperties(
+				props.getBase(),
+				"notificationProvider",
+				"notificationMember",
+				"notificationInterfaceAddress");
+		PropertyUtils.checkExclusiveProperties(
 				props.getBase(), "notificationProvider", "host");
 		PropertyUtils.checkExclusiveProperties(
 				props.getBase(), "notificationMember", "host");
+		PropertyUtils.checkExclusiveProperties(
+				props.getBase(), "notificationInterfaceAddress", "host");
 
 		final String notificationProvider =
 				props.getProperty("notificationProvider", false);
@@ -1252,6 +1329,8 @@ public class NodeResolver implements Closeable {
 				props.getProperty("notificationMember", false);
 		final String notificationAddress =
 				props.getProperty("notificationAddress", false);
+		final String notificationInterfaceAddressStr =
+				props.getProperty("notificationInterfaceAddress", false);
 
 		if (notificationProvider != null) {
 			sarConfig.setProviderURL(notificationProvider);
@@ -1269,6 +1348,12 @@ public class NodeResolver implements Closeable {
 		}
 
 		if (host == null) {
+			if (notificationInterfaceAddressStr != null) {
+				notificationInterfaceAddress[0] = getNotificationAddress(
+						notificationInterfaceAddressStr, null, addressConfig,
+						"notificationInterfaceAddress");
+			}
+
 			return getNotificationAddress(
 					notificationAddress, ipv6Expected, addressConfig,
 					"notificationAddress");

@@ -30,19 +30,27 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.Formatter;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.SimpleTimeZone;
 import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.UUID;
 
+import javax.net.SocketFactory;
+import javax.net.ssl.SSLSocketFactory;
+
 import com.toshiba.mwcloud.gs.GSException;
 import com.toshiba.mwcloud.gs.common.BasicBuffer;
+import com.toshiba.mwcloud.gs.common.BasicBuffer.BufferUtils;
 import com.toshiba.mwcloud.gs.common.ContainerKeyConverter;
 import com.toshiba.mwcloud.gs.common.GSConnectionException;
 import com.toshiba.mwcloud.gs.common.GSErrorCode;
@@ -94,19 +102,27 @@ public class NodeConnection implements Closeable {
 
 	private final long heartbeatTimeoutMillis;
 
-	private final Socket socket;
+	private Socket socket;
 
-	private final InputStream input;
+	private InputStream input;
 
-	private final OutputStream output;
+	private OutputStream output;
 
 	private final Integer alternativeVersion;
 
 	private final boolean ipv6Enabled;
 
+	private Set<SocketType> acceptableSocketTypes;
+
+	private Map<SocketType, SocketFactory> socketFactories;
+
 	private AuthMode authMode = Challenge.getDefaultMode();
 
 	private int remoteProtocolVersion;
+
+	private AuthType authType = AuthType.INTERNAL;
+
+	private ConnectionRoute connectionRoute = ConnectionRoute.DEFAULT;
 
 	private boolean responseUnacceptable;
 
@@ -123,7 +139,8 @@ public class NodeConnection implements Closeable {
 		heartbeatTimeoutMillis = config.heartbeatTimeoutMillis;
 
 		try {
-			socket = new Socket();
+			socket = createSocket(
+					config.socketFactories, SocketType.PLAIN, null);
 			if (tcpNoDelayEnabled) {
 				socket.setTcpNoDelay(true);
 			}
@@ -145,6 +162,8 @@ public class NodeConnection implements Closeable {
 
 		alternativeVersion = config.alternativeVersion;
 		ipv6Enabled = (address.getAddress() instanceof Inet6Address);
+		acceptableSocketTypes = config.acceptableSocketTypes;
+		socketFactories = config.socketFactories;
 	}
 
 	public static void setDetailErrorMessageEnabled(
@@ -813,6 +832,7 @@ public class NodeConnection implements Closeable {
 		req.base().position(getRequestHeadLength(ipv6Enabled, true));
 		req.putInt(alternativeVersion == null ?
 				protocolVersion : alternativeVersion);
+		putControlInfo(req);
 	}
 
 	private void acceptConnectResponse(BasicBuffer resp) throws GSException {
@@ -828,6 +848,91 @@ public class NodeConnection implements Closeable {
 						version + ")");
 			}
 			remoteProtocolVersion = version;
+		}
+
+		if (resp.base().remaining() > 0) {
+			authType = resp.getByteEnum(AuthType.class);
+		}
+
+		acceptControlInfo(resp);
+	}
+
+	private void putControlInfo(BasicBuffer req) {
+		final int headPos = req.base().position();
+		req.putInt(0);
+
+		final int bodyPos = req.base().position();
+		req.putBoolean(acceptableSocketTypes.contains(SocketType.PLAIN));
+		req.putBoolean(acceptableSocketTypes.contains(SocketType.SECURE));
+
+		final int endPos = req.base().position();
+		req.base().position(headPos);
+		final int bodySize = endPos - bodyPos;
+		req.putInt(bodySize);
+		req.base().position(endPos);
+	}
+
+	private void acceptControlInfo(BasicBuffer resp) throws GSException {
+		final Set<SocketType> respTypes = EnumSet.noneOf(SocketType.class);
+		do {
+			if (resp.base().remaining() <= 0) {
+				respTypes.add(SocketType.PLAIN);
+				break;
+			}
+
+			final int bodySize = BufferUtils.getIntSize(resp.base());
+			final int limit = BufferUtils.limitForward(resp.base(), bodySize);
+
+			if (resp.getBoolean()) {
+				respTypes.add(SocketType.PLAIN);
+			}
+			if (resp.getBoolean()) {
+				respTypes.add(SocketType.SECURE);
+			}
+
+			BufferUtils.restoreLimit(resp.base(), limit);
+		}
+		while (false);
+
+		final Set<SocketType> nextTypes =
+				EnumSet.copyOf(acceptableSocketTypes);
+		nextTypes.retainAll(respTypes);
+		if (nextTypes.isEmpty()) {
+			throw new GSException(
+					GSErrorCode.ILLEGAL_CONFIG,
+					"Requested security options not supported (" +
+					"requested={plain:" + acceptableSocketTypes.contains(
+							SocketType.PLAIN) +
+					", secure:" + acceptableSocketTypes.contains(
+							SocketType.SECURE) + "}, " +
+					"supported={plain:" + respTypes.contains(SocketType.PLAIN) +
+					", secure:" + respTypes.contains(SocketType.SECURE) +
+					"})");
+		}
+		else if (!socketFactories.isEmpty()) {
+			changeTransportMethod(nextTypes);
+		}
+	}
+
+	private void changeTransportMethod(Set<SocketType> nextTypes)
+			throws GSException {
+		final Map<SocketType, SocketFactory> socketFactories =
+				this.socketFactories;
+		this.socketFactories = Collections.emptyMap();
+
+		if (!nextTypes.contains(SocketType.SECURE)) {
+			acceptableSocketTypes = EnumSet.of(SocketType.PLAIN);
+			return;
+		}
+		acceptableSocketTypes = EnumSet.of(SocketType.SECURE);
+
+		socket = createSocket(socketFactories, SocketType.SECURE, socket);
+		try {
+			input = socket.getInputStream();
+			output = socket.getOutputStream();
+		}
+		catch (IOException e) {
+			throw new GSConnectionException(e);
 		}
 	}
 
@@ -889,6 +994,8 @@ public class NodeConnection implements Closeable {
 			Challenge lastChallenge) throws GSException {
 		req.base().position(getRequestHeadLength(ipv6Enabled, false));
 
+		final AuthType authType =
+				resolveAuthType(loginInfo.authType, loginInfo.user);
 		if (isOptionalRequestEnabled()) {
 			final OptionalRequest request = new OptionalRequest();
 
@@ -919,12 +1026,24 @@ public class NodeConnection implements Closeable {
 						OptionalRequestType.TIME_ZONE_OFFSET,
 						(long) loginInfo.timeZoneOffset.getRawOffset());
 			}
+			if (authType != AuthType.INTERNAL) {
+				request.put(
+						OptionalRequestType.AUTHENTICATION_TYPE,
+						(byte) authType.ordinal());
+			}
+
+			if (loginInfo.isPublicConnection()) {
+				request.put(
+						OptionalRequestType.CONNECTION_ROUTE,
+						(byte) loginInfo.getConnectionRoute().ordinal());
+			}
+			
 			request.format(req);
 		}
 
 		req.putString(loginInfo.user);
 		req.putString(Challenge.build(
-				authMode, lastChallenge, loginInfo.passwordDigest));
+				authMode, lastChallenge, loginInfo.passwordDigest, authType));
 		req.putInt(PropertyUtils.
 				timeoutPropertyToIntSeconds(statementTimeoutMillis));
 		req.putBoolean(loginInfo.ownerMode);
@@ -941,6 +1060,38 @@ public class NodeConnection implements Closeable {
 				Challenge.getResponse(resp, resultMode, lastChallenge);
 		authMode = resultMode[0];
 		return respChallenge;
+	}
+
+	private AuthType resolveAuthType(AuthType specifiedType, String user)
+			throws GSException {
+		final boolean nonInternalSpecified =
+				(specifiedType != null && specifiedType != AuthType.INTERNAL);
+		final AuthType type = authType;
+
+		if (type == AuthType.INTERNAL || specifiedType == AuthType.INTERNAL) {
+			if (nonInternalSpecified) {
+				throw new GSException(
+						GSErrorCode.ILLEGAL_CONFIG,
+						"Unavailable authentication type for target node (" +
+						"authentication=" + specifiedType.toPropertyString() +
+						", user=" + user +
+						", address=" + getRemoteSocketAddress() + ")");
+			}
+			return AuthType.INTERNAL;
+		}
+
+		if (UserTypeUtils.checkAdmin(user)) {
+			if (nonInternalSpecified) {
+				throw new GSException(
+						GSErrorCode.ILLEGAL_PROPERTY_ENTRY,
+						"Illegal authentication type for admin user (" +
+						"authentication=" + specifiedType.toPropertyString() +
+						", user=" + user + ")");
+			}
+			return AuthType.INTERNAL;
+		}
+
+		return type;
 	}
 
 	public void reuse(
@@ -1059,6 +1210,29 @@ public class NodeConnection implements Closeable {
 		}
 	}
 
+	private static Socket createSocket(
+			Map<SocketType, SocketFactory> factoryMap, SocketType type,
+			Socket base)
+			throws GSException {
+		final SocketFactory factory = factoryMap.get(type);
+		if (factory == null) {
+			throw new GSException(GSErrorCode.INTERNAL_ERROR, "");
+		}
+
+		try {
+			if (base != null) {
+				final InetSocketAddress address =
+						(InetSocketAddress) base.getRemoteSocketAddress();
+				return ((SSLSocketFactory) factory).createSocket(
+						base, address.getHostName(), address.getPort(), true);
+			}
+			return factory.createSocket();
+		}
+		catch (IOException e) {
+			throw new GSException(e);
+		}
+	}
+
 	static class Heartbeat {
 		int orgStatementTypeNumber;
 		long orgStatementId;
@@ -1109,12 +1283,23 @@ public class NodeConnection implements Closeable {
 
 		private Integer alternativeVersion;
 
-		public void set(Config config) {
+		private Set<SocketType> acceptableSocketTypes =
+				Collections.emptySet();
+
+		private Map<SocketType, SocketFactory> socketFactories =
+				Collections.emptyMap();
+
+		public void set(Config config, boolean withSocketConfig) {
 			this.connectTimeoutMillis = config.connectTimeoutMillis;
 			this.statementTimeoutMillis = config.statementTimeoutMillis;
 			this.heartbeatTimeoutMillis = config.heartbeatTimeoutMillis;
 			this.statementTimeoutEnabled = config.statementTimeoutEnabled;
 			this.alternativeVersion = config.alternativeVersion;
+
+			if (withSocketConfig) {
+				this.acceptableSocketTypes = config.acceptableSocketTypes;
+				this.socketFactories = config.socketFactories;
+			}
 		}
 
 		public boolean set(WrappedProperties props) throws GSException {
@@ -1167,9 +1352,29 @@ public class NodeConnection implements Closeable {
 			this.alternativeVersion = alternativeVersion;
 		}
 
+		public void setSocketConfig(
+				Set<SocketType> acceptableSocketTypes,
+				Map<SocketType, SocketFactory> socketFactories) {
+			this.acceptableSocketTypes = acceptableSocketTypes;
+			this.socketFactories = socketFactories;
+		}
+
+		public Map<SocketType, SocketFactory> getSocketFactories() {
+			return socketFactories;
+		}
+
+	}
+
+	enum SocketType {
+		PLAIN,
+		SECURE
 	}
 
 	public static class LoginInfo {
+
+		private static Map<String, AuthType> AUTH_TYPE_MAP = makeAuthTypeMap();
+
+		private static Map<String, ConnectionRoute> CONNECTION_ROUTE_MAP = makeConnectionRouteMap();
 
 		private String user;
 
@@ -1191,23 +1396,31 @@ public class NodeConnection implements Closeable {
 
 		private SimpleTimeZone timeZoneOffset;
 
+		private AuthType authType;
+
+		private ConnectionRoute connectionRoute;
+
 		public LoginInfo(
 				String user, String password, boolean ownerMode,
 				String database, String clusterName,
 				long transactionTimeoutMillis,
 				String applicationName, double storeMemoryAgingSwapRate,
-				SimpleTimeZone timeZoneOffset) {
-			this.user = user;
-			this.passwordDigest = Challenge.makeDigest(user, password);
-			this.database = database;
-			this.ownerMode = ownerMode;
-			this.clusterName = clusterName;
-			this.transactionTimeoutSecs =
+				SimpleTimeZone timeZoneOffset, AuthType authType, ConnectionRoute connectionRoute) {
+			final ClientId clientId = null;
+			set(
+					user,
+					Challenge.makeDigest(user, password),
+					database,
+					ownerMode,
+					clusterName,
 					PropertyUtils.timeoutPropertyToIntSeconds(
-							transactionTimeoutMillis);
-			this.applicationName = applicationName;
-			this.storeMemoryAgingSwapRate = storeMemoryAgingSwapRate;
-			this.timeZoneOffset = timeZoneOffset;
+							transactionTimeoutMillis),
+					clientId,
+					applicationName,
+					storeMemoryAgingSwapRate,
+					timeZoneOffset,
+					authType,
+					connectionRoute);
 		}
 
 		public LoginInfo(LoginInfo loginInfo) {
@@ -1215,16 +1428,39 @@ public class NodeConnection implements Closeable {
 		}
 
 		public void set(LoginInfo loginInfo) {
-			this.user = loginInfo.user;
-			this.passwordDigest = loginInfo.passwordDigest;
-			this.database = loginInfo.database;
-			this.ownerMode = loginInfo.ownerMode;
-			this.clusterName = loginInfo.clusterName;
-			this.transactionTimeoutSecs = loginInfo.transactionTimeoutSecs;
-			this.clientId = loginInfo.clientId;
-			this.applicationName = loginInfo.applicationName;
-			this.storeMemoryAgingSwapRate = loginInfo.storeMemoryAgingSwapRate;
-			this.timeZoneOffset = loginInfo.timeZoneOffset;
+			set(
+					loginInfo.user,
+					loginInfo.passwordDigest,
+					loginInfo.database,
+					loginInfo.ownerMode,
+					loginInfo.clusterName,
+					loginInfo.transactionTimeoutSecs,
+					loginInfo.clientId,
+					loginInfo.applicationName,
+					loginInfo.storeMemoryAgingSwapRate,
+					loginInfo.timeZoneOffset,
+					loginInfo.authType,
+					loginInfo.connectionRoute);
+		}
+
+		private void set(
+				String user, PasswordDigest passwordDigest,
+				String database, boolean ownerMode, String clusterName,
+				int transactionTimeoutSecs, ClientId clientId,
+				String applicationName, double storeMemoryAgingSwapRate,
+				SimpleTimeZone timeZoneOffset, AuthType authType, ConnectionRoute connectionRoute) {
+			this.user = user;
+			this.passwordDigest = passwordDigest;
+			this.database = database;
+			this.ownerMode = ownerMode;
+			this.clusterName = clusterName;
+			this.transactionTimeoutSecs = transactionTimeoutSecs;
+			this.clientId = clientId;
+			this.applicationName = applicationName;
+			this.storeMemoryAgingSwapRate = storeMemoryAgingSwapRate;
+			this.timeZoneOffset = timeZoneOffset;
+			this.authType = authType;
+			this.connectionRoute = connectionRoute;
 		}
 
 		public void setUser(String user) {
@@ -1279,8 +1515,105 @@ public class NodeConnection implements Closeable {
 			return timeZoneOffset;
 		}
 
+		public AuthType getAuthType() {
+			return authType;
+		}
+
+		public static AuthType parseAuthType(String typeStr)
+				throws GSException {
+			final AuthType type = AUTH_TYPE_MAP.get(typeStr);
+			if (type == null) {
+				throw new GSException(
+						GSErrorCode.ILLEGAL_PROPERTY_ENTRY,
+						"Unknown authenthcation type (value=" +
+								typeStr + ")");
+			}
+			return type;
+		}
+
+		private static final Map<String, AuthType> makeAuthTypeMap() {
+			final Map<String, AuthType> map = new HashMap<String, AuthType>();
+			for (AuthType type : AuthType.values()) {
+				map.put(type.toPropertyString(), type);
+			}
+			return map;
+		}
+
+		public ConnectionRoute getConnectionRoute() {
+			return connectionRoute;
+		}
+		
+		public boolean isPublicConnection() {
+			return (connectionRoute == ConnectionRoute.PUBLIC);
+		}
+
+		public static ConnectionRoute parseConnectionRoute(String routeStr)
+				throws GSException {
+			final ConnectionRoute route = CONNECTION_ROUTE_MAP.get(routeStr);
+			if (route == null) {
+				throw new GSException(
+						GSErrorCode.ILLEGAL_PROPERTY_ENTRY,
+						"Unknown connection route (value=" +
+								routeStr + ")");
+			}
+			return route;
+		}
+
+		private static final Map<String, ConnectionRoute> makeConnectionRouteMap() {
+			final Map<String, ConnectionRoute> map = new HashMap<String, ConnectionRoute>();
+			for (ConnectionRoute route : ConnectionRoute.values()) {
+				if (!route.toPropertyString().isEmpty()) {
+					map.put(route.toPropertyString(), route);
+				}
+			}
+			return map;
+		}
+		
+		public void putConnectionOption(BasicBuffer req) {
+			if (connectionRoute == ConnectionRoute.PUBLIC) {
+				final OptionalRequest optionalRequest = new OptionalRequest();
+				optionalRequest.put(OptionalRequestType.CONNECTION_ROUTE,
+						(byte) connectionRoute.ordinal());
+				optionalRequest.format(req);
+			}
+			else {
+				NodeConnection.tryPutEmptyOptionalRequest(req);
+			}
+		}
 	}
 
+	public enum AuthType {
+		INTERNAL("INTERNAL"),
+		EXTERNAL_LDAP("LDAP");
+
+		private final String propertyString;
+
+		private AuthType(String propertyString) {
+			this.propertyString = propertyString;
+		}
+
+		public String toPropertyString() {
+			return propertyString;
+		}
+
+	}
+
+	public enum ConnectionRoute {
+		DEFAULT(""),
+		PUBLIC("PUBLIC");
+
+		private final String propertyString;
+
+		private ConnectionRoute(String propertyString) {
+			this.propertyString = propertyString;
+		}
+
+		public String toPropertyString() {
+			return propertyString;
+		}
+
+	}	
+	
 	public enum AuthMode {
 		NONE,
 		BASIC,
@@ -1340,7 +1673,8 @@ public class NodeConnection implements Closeable {
 			return new PasswordDigest(
 					sha256Hash(password),
 					sha256Hash(user + ":" + password),
-					md5Hash(user + ":" + DEFAULT_REALM + ":" + password));
+					md5Hash(user + ":" + DEFAULT_REALM + ":" + password),
+					password);
 		}
 
 		public static void putRequest(
@@ -1404,7 +1738,12 @@ public class NodeConnection implements Closeable {
 		}
 
 		public static String build(
-				AuthMode mode, Challenge challenge, PasswordDigest digest) {
+				AuthMode mode, Challenge challenge, PasswordDigest digest,
+				AuthType type) {
+			if (type == AuthType.EXTERNAL_LDAP) {
+				return digest.password;
+			}
+
 			if (!isChallenging(challenge)) {
 				if (mode == AuthMode.CHALLENGE) {
 					return "";
@@ -1512,6 +1851,19 @@ public class NodeConnection implements Closeable {
 
 	}
 
+	public static class UserTypeUtils {
+
+		private static final String ADMIN_USER = "admin";
+		private static final String SYSTEM_USER = "system";
+		private static final String SPECIAL_USER_SYMBOL = "#";
+
+		public static boolean checkAdmin(String userName) {
+			return userName.equals(ADMIN_USER) ||
+					userName.equals(SYSTEM_USER) ||
+					userName.contains(SPECIAL_USER_SYMBOL);
+		}
+	}
+
 	public static class PasswordDigest {
 
 		private final String basicSecret;
@@ -1520,11 +1872,15 @@ public class NodeConnection implements Closeable {
 
 		private final String challengeBase;
 
+		private transient final String password;
+
 		public PasswordDigest(
-				String basicSecret, String cryptSecret, String challengeBase) {
+				String basicSecret, String cryptSecret, String challengeBase,
+				String password) {
 			this.basicSecret = basicSecret;
 			this.cryptBase = cryptSecret;
 			this.challengeBase = challengeBase;
+			this.password = password;
 		}
 
 		public String getBasicSecret() {
@@ -1617,7 +1973,9 @@ public class NodeConnection implements Closeable {
 		QUERY_CONTAINER_KEY(11008, byte[].class),
 		APPLICATION_NAME(11009, String.class),
 		STORE_MEMORY_AGING_SWAP_RATE(11010, Double.class),
-		TIME_ZONE_OFFSET(11011, Long.class);
+		TIME_ZONE_OFFSET(11011, Long.class),
+		AUTHENTICATION_TYPE(11012, Byte.class),
+		CONNECTION_ROUTE(11013, Byte.class);
 
 		private final int id;
 

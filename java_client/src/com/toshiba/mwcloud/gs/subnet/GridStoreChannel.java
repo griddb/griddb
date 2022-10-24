@@ -16,6 +16,7 @@
 package com.toshiba.mwcloud.gs.subnet;
 
 import java.io.Closeable;
+import java.io.IOException;
 import java.lang.ref.Reference;
 import java.lang.ref.ReferenceQueue;
 import java.lang.ref.WeakReference;
@@ -26,6 +27,7 @@ import java.net.SocketAddress;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.Formatter;
 import java.util.HashMap;
@@ -34,12 +36,16 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.Set;
 import java.util.SimpleTimeZone;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.CRC32;
+
+import javax.net.SocketFactory;
+import javax.net.ssl.SSLSocketFactory;
 
 import com.toshiba.mwcloud.gs.ContainerType;
 import com.toshiba.mwcloud.gs.GSException;
@@ -49,6 +55,7 @@ import com.toshiba.mwcloud.gs.common.ContainerKeyConverter;
 import com.toshiba.mwcloud.gs.common.ContainerKeyConverter.ContainerKey;
 import com.toshiba.mwcloud.gs.common.ContainerProperties.ContainerVisibility;
 import com.toshiba.mwcloud.gs.common.ContainerProperties.MetaNamingType;
+import com.toshiba.mwcloud.gs.common.Extensibles;
 import com.toshiba.mwcloud.gs.common.GSConnectionException;
 import com.toshiba.mwcloud.gs.common.GSErrorCode;
 import com.toshiba.mwcloud.gs.common.GSStatementException;
@@ -67,6 +74,7 @@ import com.toshiba.mwcloud.gs.subnet.NodeConnection.MessageDigestFactory;
 import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequest;
 import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequestSource;
 import com.toshiba.mwcloud.gs.subnet.NodeConnection.OptionalRequestType;
+import com.toshiba.mwcloud.gs.subnet.NodeConnection.SocketType;
 import com.toshiba.mwcloud.gs.subnet.NodeResolver.ClusterInfo;
 import com.toshiba.mwcloud.gs.subnet.NodeResolver.ContainerHashMode;
 
@@ -110,6 +118,8 @@ public class GridStoreChannel implements Closeable {
 
 	private final Config config = new Config();
 
+	private final NodeConnection.Config connectionConfig;
+
 	private int statementRetryMode;
 
 	private final NodeConnectionPool pool;
@@ -137,8 +147,11 @@ public class GridStoreChannel implements Closeable {
 
 		private int maxConnectionPoolSize = -1;
 
+		private Extensibles.TransportProvider transProvider =
+				new PlainTransportProvider();
+
 		public synchronized void set(Config config) {
-			connectionConfig.set(config.connectionConfig);
+			connectionConfig.set(config.connectionConfig, false);
 			failoverTimeoutMillis = config.failoverTimeoutMillis;
 			failoverRetryIntervalMillis = config.failoverRetryIntervalMillis;
 			notificationReceiveTimeoutMillis =
@@ -195,10 +208,18 @@ public class GridStoreChannel implements Closeable {
 			return updated;
 		}
 
-		public synchronized NodeConnection.Config getConnectionConfig() {
+		public synchronized NodeConnection.Config createConnectionConfig(
+				Properties transProps) throws GSException {
 			final NodeConnection.Config connectionConfig =
 					new NodeConnection.Config();
-			connectionConfig.set(this.connectionConfig);
+			connectionConfig.set(this.connectionConfig, false);
+			try {
+				applySocketConfig(connectionConfig, transProvider, transProps);
+			}
+			catch (IOException e) {
+				throw new GSException(e);
+			}
+
 			return connectionConfig;
 		}
 
@@ -216,6 +237,41 @@ public class GridStoreChannel implements Closeable {
 
 		public synchronized int getMaxConnectionPoolSize() {
 			return maxConnectionPoolSize;
+		}
+
+		public synchronized
+		Extensibles.TransportProvider getTransportProvider() {
+			return transProvider;
+		}
+
+		public synchronized void setTransportProvider(
+				Extensibles.TransportProvider provider) {
+			this.transProvider = provider;
+		}
+
+		private static void applySocketConfig(
+				NodeConnection.Config connectionConfig,
+				Extensibles.TransportProvider transProvider,
+				Properties transProps) throws IOException {
+			final Set<SocketType> socketTypes =
+					EnumSet.noneOf(SocketType.class);
+			if (transProvider.isPlainSocketAllowed(transProps)) {
+				socketTypes.add(SocketType.PLAIN);
+			}
+
+			final Map<SocketType, SocketFactory> socketFactories =
+					new EnumMap<SocketType, SocketFactory>(SocketType.class);
+			socketFactories.put(SocketType.PLAIN, SocketFactory.getDefault());
+			{
+				final SocketFactory secureFactory =
+						transProvider.createSecureSocketFactory(transProps);
+				if (secureFactory != null) {
+					socketTypes.add(SocketType.SECURE);
+					socketFactories.put(SocketType.SECURE, secureFactory);
+				}
+			}
+
+			connectionConfig.setSocketConfig(socketTypes, socketFactories);
 		}
 
 	}
@@ -308,16 +364,20 @@ public class GridStoreChannel implements Closeable {
 
 		private final DataAffinityPattern dataAffinityPattern;
 
-		public Source(WrappedProperties props) throws GSException {
+		public Source(WrappedProperties props, Config baseConfig)
+				throws GSException {
 			final boolean[] passive = new boolean[1];
 			ServiceAddressResolver.Config sarConfig =
 					new ServiceAddressResolver.Config();
 			List<InetSocketAddress> memberList =
 					new ArrayList<InetSocketAddress>();
+			final InetAddress[] notificationInterfaceAddress =
+					new InetAddress[1];
 
 			final InetSocketAddress address =
 					NodeResolver.getAddressProperties(
-							props, passive, sarConfig, memberList, null);
+							props, passive, sarConfig, memberList, null,
+							notificationInterfaceAddress);
 			if (address != null) {
 				sarConfig = null;
 				memberList = null;
@@ -338,8 +398,11 @@ public class GridStoreChannel implements Closeable {
 				RowMapper.checkSymbol(database, "database name");
 			}
 
+			final Properties transProps = resolveTransportProperties(
+					props, baseConfig.getTransportProvider());
 			this.key = new Key(
-					passive[0], address, clusterName, sarConfig, memberList);
+					passive[0], address, notificationInterfaceAddress[0],
+					clusterName, sarConfig, memberList, transProps);
 			this.partitionCount = props.getIntProperty("partitionCount", true);
 
 			final String consistency = props.getProperty("consistency", false);
@@ -364,7 +427,9 @@ public class GridStoreChannel implements Closeable {
 					localConfig.transactionTimeoutMillis,
 					resolveApplicationName(props),
 					resolveStoreMemoryAgingSwapRate(props),
-					resolveTimeZoneOffset(props));
+					resolveTimeZoneOffset(props),
+					resolveAuthType(props),
+					resolveConnectionRoute(props));
 			this.keyConverter = ContainerKeyConverter.getInstance(
 					NodeConnection.getProtocolVersion(), false, false);
 			this.dataAffinityPattern = new DataAffinityPattern(
@@ -409,6 +474,41 @@ public class GridStoreChannel implements Closeable {
 			return null;
 		}
 
+		private static NodeConnection.AuthType resolveAuthType(
+				WrappedProperties props) throws GSException {
+			final String typeStr = props.getProperty(
+					"authentication", null, false);
+			if (typeStr != null) {
+				return NodeConnection.LoginInfo.parseAuthType(typeStr);
+			}
+			return null;
+		}
+
+		private static NodeConnection.ConnectionRoute resolveConnectionRoute(
+				WrappedProperties props) throws GSException {
+			final String routeStr = props.getProperty(
+					"connectionRoute", null, false);
+			if (routeStr != null) {
+				return NodeConnection.LoginInfo.parseConnectionRoute(routeStr);
+			}
+			return null;
+		}
+
+		private static Properties resolveTransportProperties(
+				WrappedProperties props,
+				Extensibles.TransportProvider transProvider)
+				throws GSException {
+			final Properties transProps = new Properties();
+			try {
+				transProvider.filterProperties(props.getBase(), transProps);
+			}
+			catch (IOException e) {
+				throw new GSException(e);
+			}
+			props.addVisitedNames(transProps.stringPropertyNames(), false);
+			return transProps;
+		}
+
 		public NodeConnection.LoginInfo getLoginInfo() {
 			return loginInfo;
 		}
@@ -451,18 +551,24 @@ public class GridStoreChannel implements Closeable {
 
 		private final InetSocketAddress address;
 
+		private final InetAddress notificationInterfaceAddress;
+
 		private final String clusterName;
 
 		private final ServiceAddressResolver.Config sarConfig;
 
 		private final List<InetSocketAddress> memberList;
 
+		private final Properties transProps;
+
 		public Key(
-				boolean passive, InetSocketAddress address, String clusterName,
+				boolean passive, InetSocketAddress address,
+				InetAddress notificationInterfaceAddress, String clusterName,
 				ServiceAddressResolver.Config sarConfig,
-				List<InetSocketAddress> memberList) {
+				List<InetSocketAddress> memberList, Properties transProps) {
 			this.passive = passive;
 			this.address = address;
+			this.notificationInterfaceAddress = notificationInterfaceAddress;
 			this.clusterName = clusterName;
 			this.sarConfig = (sarConfig == null ?
 					null : new ServiceAddressResolver.Config(sarConfig));
@@ -472,6 +578,7 @@ public class GridStoreChannel implements Closeable {
 			if (sarConfig != null) {
 				Collections.sort(this.memberList, new SocketAddressComparator());
 			}
+			this.transProps = transProps;
 		}
 
 		public boolean isIPV6Enabled() {
@@ -489,6 +596,10 @@ public class GridStoreChannel implements Closeable {
 			return address;
 		}
 
+		public InetAddress getNotificationInterfaceAddress() {
+			return notificationInterfaceAddress;
+		}
+
 		@Override
 		public int hashCode() {
 			final int prime = 31;
@@ -499,9 +610,15 @@ public class GridStoreChannel implements Closeable {
 					((clusterName == null) ? 0 : clusterName.hashCode());
 			result = prime * result +
 					((memberList == null) ? 0 : memberList.hashCode());
+			result = prime *
+					result +
+					((notificationInterfaceAddress == null) ? 0
+							: notificationInterfaceAddress.hashCode());
 			result = prime * result + (passive ? 1231 : 1237);
 			result = prime * result +
 					((sarConfig == null) ? 0 : sarConfig.hashCode());
+			result = prime * result +
+					((transProps == null) ? 0 : transProps.hashCode());
 			return result;
 		}
 
@@ -532,6 +649,13 @@ public class GridStoreChannel implements Closeable {
 			}
 			else if (!memberList.equals(other.memberList))
 				return false;
+			if (notificationInterfaceAddress == null) {
+				if (other.notificationInterfaceAddress != null)
+					return false;
+			}
+			else if (!notificationInterfaceAddress
+					.equals(other.notificationInterfaceAddress))
+				return false;
 			if (passive != other.passive)
 				return false;
 			if (sarConfig == null) {
@@ -539,6 +663,12 @@ public class GridStoreChannel implements Closeable {
 					return false;
 			}
 			else if (!sarConfig.equals(other.sarConfig))
+				return false;
+			if (transProps == null) {
+				if (other.transProps != null)
+					return false;
+			}
+			else if (!transProps.equals(other.transProps))
 				return false;
 			return true;
 		}
@@ -1327,21 +1457,51 @@ public class GridStoreChannel implements Closeable {
 		}
 	}
 
+	private static class PlainTransportProvider
+	implements Extensibles.TransportProvider {
+
+		@Override
+		public void filterProperties(Properties src, Properties transProps)
+				throws GSException {
+			for (String key : Extensibles.AsStoreFactory
+					.getReservedTransportPropertyKeys()) {
+				if (src.containsKey(key)) {
+					throw new GSException(
+							GSErrorCode.ILLEGAL_PROPERTY_ENTRY,
+							"Unacceptable property specified because of " +
+							"lack of extra library (key=" + key + ")");
+				}
+			}
+		}
+
+		@Override
+		public boolean isPlainSocketAllowed(Properties props)
+				throws GSException {
+			return true;
+		}
+
+		@Override
+		public SSLSocketFactory createSecureSocketFactory(Properties props)
+				throws GSException {
+			return null;
+		}
+
+	}
+
 	public GridStoreChannel(Config config, Source source)
 			throws GSException {
+		this.connectionConfig =
+				config.createConnectionConfig(source.key.transProps);
 		this.pool = new NodeConnectionPool();
 		this.key = source.key;
 		this.nodeResolver = new NodeResolver(
-				pool, key.passive, key.address,
-				config.getConnectionConfig(),
-				key.sarConfig, key.memberList, null);
+				pool, key.passive, key.address, connectionConfig,
+				key.sarConfig, key.memberList, null,
+				key.notificationInterfaceAddress,
+				source.loginInfo.isPublicConnection());
 		this.requestHeadLength =
 				NodeConnection.getRequestHeadLength(key.isIPV6Enabled());
 		apply(config);
-	}
-
-	public NodeConnection.Config getConnectionConfig() {
-		return config.getConnectionConfig();
 	}
 
 	public NodeConnectionPool getConnectionPool() {
@@ -1350,7 +1510,7 @@ public class GridStoreChannel implements Closeable {
 
 	public void apply(Config config) {
 		this.config.set(config);
-		nodeResolver.setConnectionConfig(this.config.connectionConfig);
+		nodeResolver.setConnectionConfig(connectionConfig);
 		nodeResolver.setNotificationReceiveTimeoutMillis(
 				config.getNotificationReceiveTimeoutMillis());
 		nodeResolver.setPreferableConnectionPoolSize(
@@ -1988,9 +2148,8 @@ public class GridStoreChannel implements Closeable {
 
 		final long[] databaseId = new long[1];
 		final NodeConnection newConnection = pool.resolve(
-				address, req, resp,
-				config.getConnectionConfig(), context.loginInfo, databaseId,
-				preferConnectionPool);
+				address, req, resp, connectionConfig, context.loginInfo,
+				databaseId, preferConnectionPool);
 		nodeResolver.acceptDatabaseId(
 				context.clusterInfo, databaseId[0],
 				(InetSocketAddress) newConnection.getRemoteSocketAddress());
@@ -2480,7 +2639,7 @@ public class GridStoreChannel implements Closeable {
 				args.add(formatNanosAsMillis(totalTime -statementIOTotalTime));
 			}
 
-			LOGGER.debug(key, args.toArray());
+			STATEMENT_LOGGER.debug(key, args.toArray());
 		}
 
 		void startStatementIO() {

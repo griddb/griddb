@@ -15,9 +15,13 @@
 */
 package com.toshiba.mwcloud.gs.common;
 
+import java.io.IOException;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Properties;
 import java.util.Set;
+
+import javax.net.ssl.SSLSocketFactory;
 
 import com.toshiba.mwcloud.gs.Container;
 import com.toshiba.mwcloud.gs.ContainerType;
@@ -78,6 +82,19 @@ public class Extensibles {
 				Properties extProperties) throws GSException;
 
 		public abstract GridStoreFactory getBaseFactory();
+
+		public void setTransportProvider(TransportProvider provider) {
+			throw new Error();
+		}
+
+		public static java.util.Collection<String>
+		getReservedTransportPropertyKeys() {
+			return Arrays.asList("sslMode");
+		}
+
+		public ExceptionFactory getExceptionFactory() {
+			return new ExceptionFactoryImpl(0);
+		}
 
 	}
 
@@ -224,6 +241,19 @@ public class Extensibles {
 
 	}
 
+	public interface TransportProvider {
+
+		public void filterProperties(
+				Properties src, Properties transProps) throws IOException;
+
+		public boolean isPlainSocketAllowed(
+				Properties props) throws IOException;
+
+		public SSLSocketFactory createSecureSocketFactory(
+				Properties props) throws IOException;
+
+	}
+
 	public interface MultiTargetConsumer<K, V> {
 
 		public void consume(
@@ -261,6 +291,35 @@ public class Extensibles {
 	}
 
 	public interface ConfigProvidable {
+	}
+
+	public interface ExceptionFactory {
+
+		public IOException create(String message, Throwable cause);
+
+		public ExceptionFactory asIllegalPropertyEntry();
+
+	}
+
+	private static class ExceptionFactoryImpl implements ExceptionFactory {
+
+		private final int errorCode;
+
+		private ExceptionFactoryImpl(int errorCode) {
+			this.errorCode = errorCode;
+		}
+
+		@Override
+		public IOException create(String message, Throwable cause) {
+			return new GSException(errorCode, message, cause);
+		}
+
+		@Override
+		public ExceptionFactory asIllegalPropertyEntry() {
+			return new ExceptionFactoryImpl(
+					GSErrorCode.ILLEGAL_PROPERTY_ENTRY);
+		}
+
 	}
 
 	public static AsStore get(GridStore store) {

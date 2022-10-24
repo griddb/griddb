@@ -163,7 +163,7 @@ public class TimeSeriesProperties implements Cloneable {
 	 * </ul>
 	 *
 	 * <p>1つの時系列に対してパラメータ設定できるカラムの上限数については、
-	 * GridDBテクニカルリファレンスを参照してください。上限を超えるオプションは作成できますが、
+	 * GridDB機能リファレンスを参照してください。上限を超えるオプションは作成できますが、
 	 * 上限を超えたオプションを指定して時系列を作成することはできません。</p>
 	 *
 	 * @param column カラム名
@@ -195,7 +195,7 @@ public class TimeSeriesProperties implements Cloneable {
 	 * <li>{@link GSType#DOUBLE}</li>
 	 * </ul>
 	 *
-	 * <p>See the GridDB Technical Reference for the upper limit
+	 * <p>See the GridDB Features Reference for the upper limit
 	 * of the number of columns on which the parameters can be
 	 * specified. The number of options that is over the limit
 	 * can be created, but the TimeSeries cannot be created for
@@ -868,7 +868,7 @@ public class TimeSeriesProperties implements Cloneable {
 	 * 解放するための条件を制御できます。期限に到達したロウデータが
 	 * 分割数に相当する期間だけ集まった時点で解放しようとします。</p>
 	 *
-	 * <p>分割数の上限については、GridDBテクニカルリファレンスを参照してください。
+	 * <p>分割数の上限については、GridDB機能リファレンスを参照してください。
 	 * 上限を超えたオプションを指定して時系列を作成することはできません。</p>
 	 *
 	 * <p>ロウの有効期限の基準となる経過期間の設定がない場合、この分割数の
@@ -891,7 +891,7 @@ public class TimeSeriesProperties implements Cloneable {
 	 * Expired row data shall be released at the point they are collected only
 	 * when the period equivalent to the division number is reached.</p>
 	 *
-	 * <p>See the GridDB Technical Reference for the upper limit
+	 * <p>See the GridDB Features Reference for the upper limit
 	 * of the division number. It will be failed if the division
 	 * number exceeds the size limit.</p>
 	 *

@@ -20,12 +20,12 @@ import java.util.Set;
 
 import com.toshiba.mwcloud.gs.GridStoreFactory;
 import com.toshiba.mwcloud.gs.common.GridStoreFactoryProvider;
+import com.toshiba.mwcloud.gs.common.Extensibles;
 import com.toshiba.mwcloud.gs.common.ServiceProviderUtils;
-import com.toshiba.mwcloud.gs.subnet.SubnetGridStoreFactory;
 
 public class ConfigurableFactoryProvider extends GridStoreFactoryProvider
 implements GridStoreFactoryProvider.ChainProvidable,
-SubnetGridStoreFactory.ConfigProvidable {
+Extensibles.ConfigProvidable {
 
 	@Override
 	public GridStoreFactory getFactory() {
@@ -38,7 +38,7 @@ SubnetGridStoreFactory.ConfigProvidable {
 	public GridStoreFactory getFactory(
 			Set<Class<?>> chainProviderClasses,
 			Set<Class<?>> visitedProviderClasses) {
-		return new SubnetGridStoreFactory.ConfigurableFactory(
+		return Extensibles.AsStoreFactory.newConfigurableInstance(
 				ServiceProviderUtils.mergeChainClasses(
 						chainProviderClasses, ConfigurableFactoryProvider.class),
 				visitedProviderClasses);

@@ -129,7 +129,7 @@ public interface Query<R> extends Closeable {
 	 *
 	 * <p>一度に大量のロウを取得しようとした場合、GridDBノードが管理する
 	 * 通信バッファのサイズの上限に到達し、失敗することがあります。
-	 * 上限サイズについては、GridDBテクニカルリファレンスを参照してください。</p>
+	 * 上限サイズについては、GridDB機能リファレンスを参照してください。</p>
 	 *
 	 * @throws GSException 対応するコレクションの自動コミットモード有効であるにも
 	 * かかわらず、{@code forUpdate}に{@code true}が指定された場合
@@ -161,7 +161,7 @@ public interface Query<R> extends Closeable {
 	 * of this query will be closed.</p>
 	 *
 	 * <p>It will be failed if too much Rows are obtained, because of the data buffer
-	 * size upper limit of GridDB node. See "System limiting values" in the GridDB Technical Reference about
+	 * size upper limit of GridDB node. See "System limiting values" in the GridDB Features Reference about
 	 * the buffer size upper limit.</p>
 	 *
 	 * @throws GSException if {@code true} is specified as {@code forUpdate} although the autocommit
