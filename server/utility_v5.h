@@ -99,7 +99,7 @@ public:
 	virtual int16_t size() const = 0;
 	virtual int8_t getId() const = 0;
 
-	virtual bool reducable() const { return false; }
+	virtual bool reducible() const { return false; }
 	virtual int64_t get(int16_t pos) const = 0;
 	virtual bool trySet(int16_t pos, int64_t value) = 0;
 };
@@ -185,7 +185,7 @@ public:
 
 	int64_t min() const;
 
-	bool reducable() const;
+	bool reducible() const;
 
 	inline int64_t get(int16_t pos) const {
 		assert(pos < size_);
@@ -220,7 +220,7 @@ inline void MimicLongArray::set(int16_t pos, int64_t value) {
 }
 
 inline void MimicLongArray::resize() {
-	if (mimicArray_->getId() == (int8_t)8 && mimicArray_->reducable()) {
+	if (mimicArray_->getId() == (int8_t)8 && mimicArray_->reducible()) {
 		MimicLongArray2* array2 = UTIL_NEW MimicLongArray2(*reinterpret_cast<MimicLongArray8*>(mimicArray_));
 		delete mimicArray_;
 		mimicArray_ = array2;
@@ -285,7 +285,7 @@ inline int64_t MimicLongArray8::min() const {
 	return *std::min_element(array_, array_ + size_);
 }
 
-inline bool MimicLongArray8::reducable() const {
+inline bool MimicLongArray8::reducible() const {
 	int64_t max = *std::max_element(array_, array_ + size_);
 	if (max - min() < INT16_MAX) {
 		return true;
@@ -411,8 +411,8 @@ private:
 		}
 	}
 
-	void init(bool intialvalue) {
-		initialvalue_ = intialvalue;
+	void init(bool initialvalue) {
+		initialvalue_ = initialvalue;
 	}
 
 	int64_t size() {

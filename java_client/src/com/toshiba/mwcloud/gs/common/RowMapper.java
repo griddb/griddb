@@ -3757,6 +3757,100 @@ public class RowMapper {
 			}
 		}
 
+		private void setValueAs(
+				int column, Object fieldValue, boolean arrayUsed,
+				GSType elementType) throws GSException {
+			try {
+				if (arrayUsed) {
+					switch (elementType) {
+					case STRING:
+						setStringArray(column, (String[]) fieldValue);
+						break;
+					case BOOL:
+						setBoolArray(column, (boolean[]) fieldValue);
+						break;
+					case BYTE:
+						setByteArray(column, (byte[]) fieldValue);
+						break;
+					case SHORT:
+						setShortArray(column, (short[]) fieldValue);
+						break;
+					case INTEGER:
+						setIntegerArray(column, (int[]) fieldValue);
+						break;
+					case LONG:
+						setLongArray(column, (long[]) fieldValue);
+						break;
+					case FLOAT:
+						setFloatArray(column, (float[]) fieldValue);
+						break;
+					case DOUBLE:
+						setDoubleArray(column, (double[]) fieldValue);
+						break;
+					case TIMESTAMP:
+						setTimestampArray(column, (Date[]) fieldValue);
+						break;
+					default:
+						throw new Error();
+					}
+				}
+				else if (elementType != null) {
+					switch (elementType) {
+					case STRING:
+						setAnyValueDirect(column, (String) fieldValue);
+						break;
+					case BOOL:
+						setAnyValueDirect(column, (Boolean) fieldValue);
+						break;
+					case BYTE:
+						setAnyValueDirect(column, (Byte) fieldValue);
+						break;
+					case SHORT:
+						setAnyValueDirect(column, (Short) fieldValue);
+						break;
+					case INTEGER:
+						setAnyValueDirect(column, (Integer) fieldValue);
+						break;
+					case LONG:
+						setAnyValueDirect(column, (Long) fieldValue);
+						break;
+					case FLOAT:
+						setAnyValueDirect(column, (Float) fieldValue);
+						break;
+					case DOUBLE:
+						setAnyValueDirect(column, (Double) fieldValue);
+						break;
+					case TIMESTAMP:
+						setAnyValueDirect(column, (Date) fieldValue);
+						break;
+					case GEOMETRY:
+						setAnyValueDirect(column, (Geometry) fieldValue);
+						break;
+					case BLOB:
+						setAnyValueDirect(
+								column, shareBlob((Blob) fieldValue));
+						break;
+					default:
+						throw new Error();
+					}
+				}
+				else {
+					final Class<?> objectType = fieldValue.getClass();
+					final GSType resolvedElemType =
+							resolveElementType(objectType, true, true);
+					if (objectType.isArray() || resolvedElemType == GSType.BLOB) {
+						setValueAs(column, fieldValue, arrayUsed, resolvedElemType);
+					}
+					else {
+						setAnyValueDirect(column, fieldValue);
+					}
+				}
+			}
+			catch (ClassCastException e) {
+				throw errorTypeUnmatch(column, null, fieldValue, e);
+			}
+		}
+
 		private void setAnyValueDirect(int column, Object fieldValue) {
 			fieldArray[column] = fieldValue;
 		}
@@ -3922,103 +4016,7 @@ public class RowMapper {
 			}
 
 			final Entry entry = getEntry(column);
-			try {
-				if (entry.arrayUsed) {
-					switch (entry.elementType) {
-					case STRING:
-						setStringArray(column, (String[]) fieldValue);
-						break;
-					case BOOL:
-						setBoolArray(column, (boolean[]) fieldValue);
-						break;
-					case BYTE:
-						setByteArray(column, (byte[]) fieldValue);
-						break;
-					case SHORT:
-						setShortArray(column, (short[]) fieldValue);
-						break;
-					case INTEGER:
-						setIntegerArray(column, (int[]) fieldValue);
-						break;
-					case LONG:
-						setLongArray(column, (long[]) fieldValue);
-						break;
-					case FLOAT:
-						setFloatArray(column, (float[]) fieldValue);
-						break;
-					case DOUBLE:
-						setDoubleArray(column, (double[]) fieldValue);
-						break;
-					case TIMESTAMP:
-						setTimestampArray(column, (Date[]) fieldValue);
-						break;
-					default:
-						throw new Error();
-					}
-				}
-				else if (entry.elementType != null) {
-					switch (entry.elementType) {
-					case STRING:
-						setAnyValueDirect(column, (String) fieldValue);
-						break;
-					case BOOL:
-						setAnyValueDirect(column, (Boolean) fieldValue);
-						break;
-					case BYTE:
-						setAnyValueDirect(column, (Byte) fieldValue);
-						break;
-					case SHORT:
-						setAnyValueDirect(column, (Short) fieldValue);
-						break;
-					case INTEGER:
-						setAnyValueDirect(column, (Integer) fieldValue);
-						break;
-					case LONG:
-						setAnyValueDirect(column, (Long) fieldValue);
-						break;
-					case FLOAT:
-						setAnyValueDirect(column, (Float) fieldValue);
-						break;
-					case DOUBLE:
-						setAnyValueDirect(column, (Double) fieldValue);
-						break;
-					case TIMESTAMP:
-						setAnyValueDirect(column, (Date) fieldValue);
-						break;
-					case GEOMETRY:
-						setAnyValueDirect(column, (Geometry) fieldValue);
-						break;
-					case BLOB:
-						setAnyValueDirect(
-								column, shareBlob((Blob) fieldValue));
-						break;
-					default:
-						throw new Error();
-					}
-				}
-				else {
-					final Class<?> objectType = fieldValue.getClass();
-					final GSType elemType =
-							resolveElementType(objectType, true, true);
-					if (objectType.isArray() || elemType == GSType.BLOB) {
-						try {
-							entry.elementType = elemType;
-							entry.arrayUsed = objectType.isArray();
-							setValue(column, fieldValue);
-						}
-						finally {
-							entry.elementType = null;
-							entry.arrayUsed = false;
-						}
-					}
-					else {
-						setAnyValueDirect(column, fieldValue);
-					}
-				}
-			}
-			catch (ClassCastException e) {
-				throw errorTypeUnmatch(column, null, fieldValue, e);
-			}
+			setValueAs(column, fieldValue, entry.arrayUsed, entry.elementType);
 		}
 
 		@Override

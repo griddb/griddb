@@ -16,7 +16,7 @@
 */
 /*!
 	@file
-	@brief Definition of Partiiton
+	@brief Definition of Partition
 */
 #ifndef PARTITION_FILE_H_
 #define PARTITION_FILE_H_
@@ -121,6 +121,7 @@ public:
 */
 class VirtualFileNIO final : public VirtualFileBase {
 private:
+	uint32_t timeThresholdMillis_;
 	std::unique_ptr<Locker> locker_;
 	std::string path_;
 	int32_t stripeSize_;
@@ -189,6 +190,7 @@ private:
 */
 class SimpleFile {
  private:
+	uint32_t timeThresholdMillis_;
 	std::string path_;
 	util::NamedFile* file_;
 	util::Atomic<uint64_t> tailOffset_;

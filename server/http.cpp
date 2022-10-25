@@ -1990,7 +1990,7 @@ bool HttpRequest::Parser::parse(bool eof) {
 		if (encoding != NULL) {
 			GS_COMMON_THROW_USER_ERROR(
 					GS_ERROR_HTTP_INVALID_MESSAGE,
-					"Unssuported content encoding ("
+					"Unsupported content encoding ("
 					"value=" << encoding->value_ << ")");
 		}
 	}

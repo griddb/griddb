@@ -560,7 +560,7 @@ TupleList::TupleList(LocalTempStore &store, const ResourceId &resourceId, const 
 		util::LockGuard<util::Mutex> guard(body->getLock());
 		if (!body->detached()) {
 			GS_THROW_USER_ERROR(GS_ERROR_LTS_TUPLELIST_OPERATION_NOT_SUPPORTED,
-					"Specified resourceId is not datached: ResourceId=" << resourceId);
+					"Specified resourceId is not detached: ResourceId=" << resourceId);
 		}
 		body_ = body;
 		body_->setDetached(false);
@@ -1049,7 +1049,7 @@ TupleList::BlockReader::BlockReader(
 	}
 	if (tupleList_->getActiveTopBlockNth() != image.activeTopBlockNth_) { 
 		GS_THROW_USER_ERROR(GS_ERROR_LTS_TUPLELIST_BLOCKREADER_CREATE_FAILED,
-			"Attach failed. TupleList status has chaged. "
+			"Attach failed. TupleList status has changed. "
 			"(activeTopBlockNth: detached=" << image.activeTopBlockNth_ <<
 			", current=" << tupleList.getActiveTopBlockNth() << ")");
 	} 
@@ -1357,19 +1357,19 @@ TupleList::Reader::Reader(TupleList &tupleList, const TupleList::Reader::Image &
 
 	if (image.resourceId_ != tupleList_->getResourceId()) { 
 		GS_THROW_USER_ERROR(GS_ERROR_LTS_TUPLELIST_READER_CREATE_FAILED,
-			"Attach failed. TupleList status has chaged. "
+			"Attach failed. TupleList status has changed. "
 			"(ResourceId: detached=" << image.resourceId_ <<
 			", current=" << tupleList_->getResourceId() << ")");
 	}
 	if (image.blockCount_ > tupleList_->getBlockCount()) {
 		GS_THROW_USER_ERROR(GS_ERROR_LTS_TUPLELIST_READER_CREATE_FAILED,
-			"Attach failed. TupleList status has chaged. "
+			"Attach failed. TupleList status has changed. "
 			"(blockCount: detached=" << image.blockCount_ <<
 			", current=" << tupleList_->getBlockCount() << ")");
 	}
 	if (tupleList.getActiveTopBlockNth() != image.activeTopBlockNth_) {
 		GS_THROW_USER_ERROR(GS_ERROR_LTS_TUPLELIST_READER_CREATE_FAILED,
-			"Attach failed. TupleList status has chaged. "
+			"Attach failed. TupleList status has changed. "
 			"(activeTopBlockNth: detached=" << image.activeTopBlockNth_ <<
 			", current=" << tupleList.getActiveTopBlockNth() << ")");
 	} 
@@ -2082,13 +2082,13 @@ TupleList::Writer::Writer(TupleList &tupleList, const TupleList::Writer::Image &
 	initialize(tupleList);
 	if (image.resourceId_ != tupleList_->getResourceId()) {  
 		GS_THROW_USER_ERROR(GS_ERROR_LTS_TUPLELIST_WRITER_CREATE_FAILED,
-			"Attach failed. TupleList status has chaged. "
+			"Attach failed. TupleList status has changed. "
 			"(ResourceId: detached=" << image.resourceId_ <<
 			", current=" << tupleList_->getResourceId() << ")");
 	}
 	if (image.blockCount_ != tupleList_->getAllocatedBlockCount()) {
 		GS_THROW_USER_ERROR(GS_ERROR_LTS_TUPLELIST_WRITER_CREATE_FAILED,
-			"Attach failed. TupleList status has chaged. "
+			"Attach failed. TupleList status has changed. "
 			"(blockCount: detached=" << image.blockCount_ <<
 			", current=" << tupleList_->getAllocatedBlockCount() << ")");
 	}  
@@ -2105,13 +2105,13 @@ TupleList::Writer::Writer(TupleList &tupleList, const TupleList::Writer::Image &
 
 		if (image.tupleCount_ != TupleBlockHeader::getTupleCount(block_.data())) {  
 			GS_THROW_USER_ERROR(GS_ERROR_LTS_TUPLELIST_WRITER_CREATE_FAILED,
-				"Attach failed. TupleList status has chaged. "
+				"Attach failed. TupleList status has changed. "
 				"(tupleCount: detached=" << image.tupleCount_ <<
 				", current=" << TupleBlockHeader::getTupleCount(block_.data()) << ")");
 		}
 		if (image.contiguousBlockCount_ != static_cast<uint32_t>(contiguousBlockNum)) {
 			GS_THROW_USER_ERROR(GS_ERROR_LTS_TUPLELIST_WRITER_CREATE_FAILED,
-				"Attach failed. TupleList status has chaged. "
+				"Attach failed. TupleList status has changed. "
 				"(contiguousBlockCount: detached=" <<
 				image.contiguousBlockCount_ <<
 				", current=" << contiguousBlockNum << ")");

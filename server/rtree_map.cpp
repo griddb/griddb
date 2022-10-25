@@ -242,8 +242,8 @@ void RtreeMap::search(TransactionContext &txn, RtreeMap::SearchContext &sc,
 	UNUSED_VARIABLE(outputOrder);
 
 	TermCondition *cond = sc.getKeyCondition();
-	SearchContext::GeomeryCondition *geomCond = 
-		static_cast<SearchContext::GeomeryCondition *>(
+	SearchContext::GeometryCondition *geomCond = 
+		static_cast<SearchContext::GeometryCondition *>(
 			const_cast<void *>(cond->value_));
 	if (geomCond->valid_) {
 
@@ -410,7 +410,7 @@ int32_t RtreeMap::hitIncludeCallback(
  *
  * @param r Key-rect on leaf
  * @param hitOId Data on leaf
- * @param arg_ Pointer to HitDifferntialCallbackArg
+ * @param arg_ Pointer to HitDifferentialCallbackArg
  *
  * @return 1 if search continues, 0 if search finishes
  */
@@ -484,8 +484,8 @@ bool geomOperation(TransactionContext& txn, uint8_t const* p,
 				   uint32_t size1, uint8_t const* q, uint32_t size2) {
 	UNUSED_VARIABLE(size2);
 	Geometry *geom = Geometry::deserialize(txn, p, size1);
-	const RtreeMap::SearchContext::GeomeryCondition *geomCond = 
-		reinterpret_cast<const RtreeMap::SearchContext::GeomeryCondition *>(q);
+	const RtreeMap::SearchContext::GeometryCondition *geomCond = 
+		reinterpret_cast<const RtreeMap::SearchContext::GeometryCondition *>(q);
 	assert(geom != NULL);
 
 	bool isMatch = true;

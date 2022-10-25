@@ -330,7 +330,7 @@ CheckpointService::CheckpointService(
 		systemService_(NULL),
 		partitionList_(NULL),
 		partitionTable_(NULL),
-		initailized_(false),
+		initialized_(false),
 		syncService_(NULL),
 		fixedSizeAlloc_(NULL),
 		varAlloc_(util::AllocatorInfo(
@@ -429,7 +429,7 @@ void CheckpointService::initialize(ManagerSet &resourceSet) {
 		flushLogPeriodicallyHandler_.initialize(resourceSet);
 		syncService_ = resourceSet.syncSvc_;
 		serviceThreadErrorHandler_.initialize(resourceSet);
-		initailized_ = true;
+		initialized_ = true;
 		isErrorOccured_ = false;
 	}
 	catch (std::exception &e) {
@@ -443,7 +443,7 @@ void CheckpointService::initialize(ManagerSet &resourceSet) {
 */
 void CheckpointService::start(const Event::Source &eventSource) {
 	try {
-		if (!initailized_) {
+		if (!initialized_) {
 			GS_THROW_USER_ERROR(GS_ERROR_CP_SERVICE_NOT_INITIALIZED, "");
 		}
 		ee_.start();
@@ -455,13 +455,13 @@ void CheckpointService::start(const Event::Source &eventSource) {
 		EventByteOutStream out = requestEvent.getOutStream();
 		message.encode(out);
 
-		ee_.addTimer(requestEvent, changeTimeSecondToMilliSecond(cpInterval_));
+		ee_.addTimer(requestEvent, CommonUtility::changeTimeSecondToMilliSecond(cpInterval_));
 
 		if (logWriteMode_ > 0 && logWriteMode_ < INT32_MAX) {
 			Event flushLogEvent(
 					eventSource, CP_TIMER_LOG_FLUSH, CP_SERIALIZED_PARTITION_ID);
 			ee_.addPeriodicTimer(
-					flushLogEvent, changeTimeSecondToMilliSecond(logWriteMode_));
+					flushLogEvent, CommonUtility::changeTimeSecondToMilliSecond(logWriteMode_));
 		}
 
 	}
@@ -513,7 +513,7 @@ void CheckpointServiceMainHandler::operator()(EventContext &ec, Event &ev) {
 
 		if (message.mode() == CP_NORMAL) {
 			ec.getEngine().addTimer(
-					ev, changeTimeSecondToMilliSecond(
+					ev, CommonUtility::changeTimeSecondToMilliSecond(
 					checkpointService_->getCheckpointInterval()));
 
 			if (checkpointService_->getPeriodicCheckpointFlag()) {
@@ -540,14 +540,14 @@ void CheckpointServiceMainHandler::operator()(EventContext &ec, Event &ev) {
 		}
 	}
 	catch (SystemException &e) {
-		UTIL_TRACE_EXCEPTION_ERROR(CHECKPOINT_SERVICE, e, "SystemException");
+		UTIL_TRACE_EXCEPTION(CHECKPOINT_SERVICE, e, "SystemException");
 		checkpointService_->errorOccured_ = true;
 		throw;
 	}
 	catch (std::exception &e) {
 		checkpointService_->errorOccured_ = true;
 		clusterService_->setError(ec, &e);
-		UTIL_TRACE_EXCEPTION_ERROR(CHECKPOINT_SERVICE, e, "std::exception");
+		UTIL_TRACE_EXCEPTION(CHECKPOINT_SERVICE, e, "std::exception");
 		GS_RETHROW_SYSTEM_ERROR(e, "");
 	}
 }
@@ -588,7 +588,7 @@ void CheckpointService::runCheckpoint(
 
 	errorOccured_ = false;
 	backupEndPending_ = false;
-	bool backupCommandWorking = prepareBackupDirecoty(message);
+	bool backupCommandWorking = prepareBackupDirectory(message);
 
 	CheckpointDataCleaner cpDataCleaner(
 			*this, ec, backupCommandWorking, message.backupPath());
@@ -781,11 +781,13 @@ void CheckpointService::partitionCheckpoint(
 			(partition.chunkManager().getStatus() == 1));
 	const bool needCheckpoint = stateEntry.resolveNeedCheckpoint(
 			partition.needCheckpoint());
-	const bool isNormalCheckpoint = (mode == CP_NORMAL || mode == CP_REQUESTED);
+	const bool isNormalCheckpoint =
+			(mode == CP_NORMAL || mode == CP_REQUESTED  || mode == CP_SHUTDOWN);
 
 	if (mode == CP_AFTER_RECOVERY) {
 
 		partition.fullCheckpoint(phase);
+
 		if (phase == CP_PHASE_FINISH) {
 			lsnInfo_.setLsn(pId, partition.logManager().getLSN());
 			partitionTable_->setStartLSN(pId, partition.logManager().getStartLSN());
@@ -865,7 +867,9 @@ void CheckpointService::partitionCheckpoint(
 				}
 				checkSystemError();
 				int32_t queueSize = getTransactionEEQueueSize(pgId);
-				util::Thread::sleep(0); 
+				if (mode != CP_AFTER_RECOVERY && mode != CP_SHUTDOWN) {
+					util::Thread::sleep(0); 
+				}
 				if (mode != CP_AFTER_RECOVERY && mode != CP_SHUTDOWN &&
 					(queueSize > CP_CHUNK_COPY_WITH_SLEEP_LIMIT_QUEUE_SIZE)) {
 					util::Thread::sleep(chunkCopyIntervalMillis_);
@@ -885,11 +889,11 @@ void CheckpointService::partitionCheckpoint(
 		if (phase == CP_PHASE_FINISH) {
 			partition.endCheckpoint(CP_END_FLUSH_CPLOG);
 		}
-		if (phase == CP_PHASE_FINISH) {
-			LogIterator<NoLocker> cpit = partition.endCheckpointPrepareRelaseBlock();
+		if (phase == CP_PHASE_FINISH && mode != CP_SHUTDOWN) {
+			LogIterator<NoLocker> cpit = partition.endCheckpointPrepareReleaseBlock();
 			std::unique_ptr<Log> log;
 			while (true) {
-	       			util::Thread::sleep(0); 
+				util::Thread::sleep(0); 
 				util::LockGuard<util::Mutex> guard(partition.mutex());
 				util::StackAllocator::Scope scope(partition.logManager().getAllocator());
 				log = cpit.next(false);
@@ -987,7 +991,7 @@ void CheckpointService::partitionCheckpoint(
 	}
 }
 
-bool CheckpointService::prepareBackupDirecoty(CheckpointMainMessage &message) {
+bool CheckpointService::prepareBackupDirectory(CheckpointMainMessage &message) {
 	if (message.mode() == CP_BACKUP ||
 			message.mode() == CP_BACKUP_START ||
 			message.mode() == CP_BACKUP_END ||
@@ -1424,18 +1428,18 @@ bool CheckpointService::checkBackupParams(BackupContext &cxt) {
 			}
 			else {
 				assert(cxt.option_.incrementalBackupLevel_ == 1);
-				uint64_t nextCumlativeCount =
-						lastQueuedBackupStatus_.cumlativeCount_;
+				uint64_t nextCumulativeCount =
+						lastQueuedBackupStatus_.cumulativeCount_;
 				uint64_t nextDifferentialCount =
 						lastQueuedBackupStatus_.differentialCount_;
 				if (cxt.option_.isCumulativeBackup_) {
-					++nextCumlativeCount;
+					++nextCumulativeCount;
 					nextDifferentialCount = 0;
 				}
 				else {
 					++nextDifferentialCount;
 				}
-				if (nextCumlativeCount > INCREMENTAL_BACKUP_COUNT_LIMIT ||
+				if (nextCumulativeCount > INCREMENTAL_BACKUP_COUNT_LIMIT ||
 						nextDifferentialCount > INCREMENTAL_BACKUP_COUNT_LIMIT) {
 					cxt.errorNo_ = WEBAPI_CP_INCREMENTAL_BACKUP_COUNT_EXCEEDS_LIMIT;
 					cxt.errorInfo_["errorStatus"] =
@@ -1447,14 +1451,14 @@ bool CheckpointService::checkBackupParams(BackupContext &cxt) {
 							"Incremental backup count exceeds limit. (name=" <<
 							cxt.backupName_ << ", path=" << cxt.backupPath_ <<
 							", mode=" << checkpointModeToString(cxt.mode_) <<
-							", nextCumulativeCount=" << nextCumlativeCount <<
+							", nextCumulativeCount=" << nextCumulativeCount <<
 							", nextDifferentialCount=" <<
 							nextDifferentialCount << ")");
 					return false;
 				}
 				util::NormalOStringStream oss;
 				oss << "_lv1_" << std::setfill('0') << std::setw(3)
-					<< nextCumlativeCount << "_" << std::setw(3)
+					<< nextCumulativeCount << "_" << std::setw(3)
 					<< nextDifferentialCount;
 				cxt.backupPath_.append(oss.str());
 			}
@@ -1483,7 +1487,7 @@ bool CheckpointService::checkBackupParams(BackupContext &cxt) {
 			else {
 				util::NormalOStringStream oss;
 				oss << "_lv1_" << std::setfill('0') << std::setw(3)
-					<< lastQueuedBackupStatus_.cumlativeCount_ << "_"
+					<< lastQueuedBackupStatus_.cumulativeCount_ << "_"
 					<< std::setw(3)
 					<< lastQueuedBackupStatus_.differentialCount_;
 				checkPath.append(oss.str());
@@ -1628,7 +1632,7 @@ bool CheckpointService::prepareExecuteBackup(BackupContext &cxt) {
 				if (cxt.option_.incrementalBackupLevel_ == 0) {
 					cxt.mode_ = CP_INCREMENTAL_BACKUP_LEVEL_0;
 					lastQueuedBackupStatus_.incrementalLevel_ = 0;
-					lastQueuedBackupStatus_.cumlativeCount_ = 0;
+					lastQueuedBackupStatus_.cumulativeCount_ = 0;
 					lastQueuedBackupStatus_.differentialCount_ = 0;
 				}
 				else {
@@ -1636,7 +1640,7 @@ bool CheckpointService::prepareExecuteBackup(BackupContext &cxt) {
 					lastQueuedBackupStatus_.incrementalLevel_ = 1;
 					if (cxt.option_.isCumulativeBackup_) {
 						cxt.mode_ = CP_INCREMENTAL_BACKUP_LEVEL_1_CUMULATIVE;
-						++lastQueuedBackupStatus_.cumlativeCount_;
+						++lastQueuedBackupStatus_.cumulativeCount_;
 						lastQueuedBackupStatus_.differentialCount_ = 0;
 					}
 					else {
@@ -1649,7 +1653,7 @@ bool CheckpointService::prepareExecuteBackup(BackupContext &cxt) {
 				lastQueuedBackupStatus_.archiveLogMode_ = cxt.option_.logArchive_;
 				lastQueuedBackupStatus_.duplicateLogMode_ = cxt.option_.logDuplicate_;
 				lastQueuedBackupStatus_.incrementalLevel_ = -1;
-				lastQueuedBackupStatus_.cumlativeCount_ = 0;
+				lastQueuedBackupStatus_.cumulativeCount_ = 0;
 				lastQueuedBackupStatus_.differentialCount_ = 0;
 			}
 			break;
@@ -1964,7 +1968,7 @@ void CheckpointService::PIdLsnInfo::setLsn(
 	},
 	"lsnInfo":[111111,222222,0,33,0,444.....,99999], 
 }
-※LSNは、オーナでもバックアップでもないPartitonは0とする
+※LSNは、オーナでもバックアップでもないPartitionは0とする
 */
 void CheckpointService::PIdLsnInfo::writeFile(const char8_t *backupPath) {
 	util::LockGuard<util::Mutex> guard(mutex_);

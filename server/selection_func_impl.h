@@ -98,7 +98,7 @@ int SelectionTimeFind<isJustInclude, isAscending>::operator()(
 	}
 
 	ObjectManagerV4 &objectManager = *(timeSeries.getObjectManager());
-	AllocateStrategy &strategy = timeSeries.getRowAllcateStrategy();
+	AllocateStrategy &strategy = timeSeries.getRowAllocateStrategy();
 	Expr *tsExpr =
 		args[1]->eval(txn, objectManager, strategy, NULL, NULL, EVAL_MODE_NORMAL);
 	Timestamp baseTs = tsExpr->getTimeStamp();
@@ -243,7 +243,7 @@ uint64_t SelectionTimeFind<isJustInclude, isAscending>::apiPassThrough(
 
 	Value v;
 	ObjectManagerV4 &objectManager = *(timeSeries.getObjectManager());
-	AllocateStrategy &strategy = timeSeries.getRowAllcateStrategy();
+	AllocateStrategy &strategy = timeSeries.getRowAllocateStrategy();
 	Expr *tsExpr =
 		args[1]->eval(txn, objectManager, strategy, NULL, NULL, EVAL_MODE_NORMAL);
 	if (tsExpr->isNullValue()) {
@@ -334,7 +334,7 @@ int SelectionTimeInterpolated::operator()(TransactionContext &txn,
 	FunctionMap &, ExprList &args, OutputMessageRowStore *messageRowStore,
 	ResultType &resultType) {
 	ObjectManagerV4 &objectManager = *(timeSeries.getObjectManager());
-	AllocateStrategy &strategy = timeSeries.getRowAllcateStrategy();
+	AllocateStrategy &strategy = timeSeries.getRowAllocateStrategy();
 	if (args.size() != 2) {
 		GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_COUNT,
 			"Invalid argument count for selection");
@@ -430,8 +430,8 @@ int SelectionTimeInterpolated::operator()(TransactionContext &txn,
 		GS_THROW_USER_ERROR(GS_ERROR_TQ_TIM_SAMPLE_FAILED,
 			"Specified time is later than all timestamp in resultset.");
 	}
-	ContainerValue v1(objectManager, timeSeries.getRowAllcateStrategy());
-	ContainerValue v2(objectManager, timeSeries.getRowAllcateStrategy());
+	ContainerValue v1(objectManager, timeSeries.getRowAllocateStrategy());
+	ContainerValue v2(objectManager, timeSeries.getRowAllocateStrategy());
 	ColumnInfo &interpolateColumnInfo =
 		timeSeries.getColumnInfo(columnId);  
 	rowArray.load(txn, resultRowIdList[pos - 1], &timeSeries,
@@ -497,7 +497,7 @@ uint64_t SelectionTimeInterpolated::apiPassThrough(TransactionContext &txn,
 	}
 
 	Expr *tsExpr = args[1]->eval(
-		txn, *(timeSeries.getObjectManager()), timeSeries.getRowAllcateStrategy(), NULL, NULL, EVAL_MODE_NORMAL);
+		txn, *(timeSeries.getObjectManager()), timeSeries.getRowAllocateStrategy(), NULL, NULL, EVAL_MODE_NORMAL);
 	if (tsExpr->isNullValue()) {
 		return 0;
 	}
@@ -546,7 +546,7 @@ int SelectionTimeSampling::operator()(TransactionContext &txn,
 					  (*orderByExpr)[0].order == ASC);
 
 	ObjectManagerV4 &objectManager = *(timeSeries.getObjectManager());
-	AllocateStrategy &strategy = timeSeries.getRowAllcateStrategy();
+	AllocateStrategy &strategy = timeSeries.getRowAllocateStrategy();
 	bool isNullValue = parseArgument(txn, objectManager, strategy, args, columnId, columnType, fType,
 		targetTs, endTs, duration);
 	if (isNullValue) {
@@ -620,7 +620,7 @@ int SelectionTimeSampling::operator()(TransactionContext &txn,
 			tmpRow.key = targetTs;
 			if (columnId != UNDEF_COLUMNID) {
 				Value *v = QP_NEW Value();
-				ContainerValue currentContainerValue(objectManager, timeSeries.getRowAllcateStrategy());
+				ContainerValue currentContainerValue(objectManager, timeSeries.getRowAllocateStrategy());
 				rowArray.load(txn, resultRowIdList[i], &timeSeries,
 					OBJECT_READ_ONLY);  
 				BaseContainer::RowArray::Row row(
@@ -645,8 +645,8 @@ int SelectionTimeSampling::operator()(TransactionContext &txn,
 			tmpRow.key = targetTs;
 			if (columnId != UNDEF_COLUMNID) {
 				Value *v = QP_NEW Value();
-				ContainerValue v1(objectManager, timeSeries.getRowAllcateStrategy());
-				ContainerValue v2(objectManager, timeSeries.getRowAllcateStrategy());
+				ContainerValue v1(objectManager, timeSeries.getRowAllocateStrategy());
+				ContainerValue v2(objectManager, timeSeries.getRowAllocateStrategy());
 				rowArray.load(txn, resultRowIdList[i - 1], &timeSeries,
 					OBJECT_READ_ONLY);  
 				BaseContainer::RowArray::Row row1(
@@ -817,7 +817,7 @@ uint64_t SelectionTimeSampling::apiPassThrough(TransactionContext &txn,
 	int64_t duration_msec;
 
 	ObjectManagerV4 &objectManager = *(timeSeries.getObjectManager());
-	AllocateStrategy &strategy = timeSeries.getRowAllcateStrategy();
+	AllocateStrategy &strategy = timeSeries.getRowAllocateStrategy();
 	bool isNullValue = parseArgument(txn, objectManager, strategy, args, columnId, columnType, fType,
 		startTs, endTs, duration);
 	if (isNullValue) {
@@ -979,7 +979,7 @@ int SelectionTimeWindowAgg::operator()(TransactionContext &txn,
 			"TimeWindowAgg is not support with order by clause");
 	}
 	ObjectManagerV4 &objectManager = *(timeSeries.getObjectManager());
-	AllocateStrategy &strategy = timeSeries.getRowAllcateStrategy();
+	AllocateStrategy &strategy = timeSeries.getRowAllocateStrategy();
 	bool isNullValue = parseArgument(txn, objectManager, strategy, args, columnId, columnType, fType,
 		startTime, endTime, duration, aggType);
 	if (isNullValue) {
@@ -1103,7 +1103,7 @@ uint64_t SelectionTimeWindowAgg::apiPassThrough(TransactionContext &txn,
 	AggregationType aggType;
 
 	ObjectManagerV4 &objectManager = *(timeSeries.getObjectManager());
-	AllocateStrategy &strategy = timeSeries.getRowAllcateStrategy();
+	AllocateStrategy &strategy = timeSeries.getRowAllocateStrategy();
 	bool isNullValue = parseArgument(txn, objectManager, strategy, args, columnId, columnType, fType,
 		startTime, endTime, duration, aggType);
 	if (isNullValue) {
@@ -1202,12 +1202,12 @@ int SelectionMaxMinRows<aggregateType>::execute(TransactionContext &txn,
 	util::XArray<PointRowId> maxMinPosList(
 		txn.getDefaultAllocator());  
 	ObjectManagerV4 &objectManager = *(container->getObjectManager());
-	AllocateStrategy& strategy = container->getRowAllcateStrategy();
+	AllocateStrategy& strategy = container->getRowAllocateStrategy();
 	BaseContainer::RowArray rowArray(txn, container);
 	for (size_t i = 0; i < resultRowIdList.size(); i++) {
 		rowArray.load(txn, resultRowIdList[i], container, OBJECT_READ_ONLY);  
 		BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
-		ContainerValue currentContainerValue(objectManager, container->getRowAllcateStrategy());
+		ContainerValue currentContainerValue(objectManager, container->getRowAllocateStrategy());
 		row.getField(txn, columnInfo, currentContainerValue);
 		if (currentContainerValue.getValue().isNullValue()) {
 		}

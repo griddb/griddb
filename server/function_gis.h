@@ -543,7 +543,7 @@ public:
 				"Argument is not a geometry");
 		}
 		else {
-			/* DO NOTHIHG */
+			/* DO NOTHING */
 		}
 		Geometry *g1 = args[0]->getGeometry();
 		Geometry *g2 = args[1]->getGeometry();
@@ -584,7 +584,7 @@ public:
 				"Argument is not a geometry, or geometry is not created");
 		}
 		else {
-			/* DO NOTHIHG */
+			/* DO NOTHING */
 		}
 
 		TrRect r1 = NULL;
@@ -632,7 +632,7 @@ public:
 				"Argument is not a geometry");
 		}
 		else {
-			/* DO NOTHIHG */
+			/* DO NOTHING */
 		}
 
 		Geometry *g1 = args[0]->getGeometry();
@@ -647,7 +647,7 @@ public:
 				"Argument 1 must be a 3D box");
 		}
 		else {
-			/* DO NOTHIHG */
+			/* DO NOTHING */
 		}
 
 		TrRectTag r = g2->getBoundingRect();
@@ -706,7 +706,7 @@ public:
 			return;
 		}
 		else {
-			/* DO NOTHIHG */
+			/* DO NOTHING */
 			indexColumnId = args[1]->getColumnId();
 		}
 

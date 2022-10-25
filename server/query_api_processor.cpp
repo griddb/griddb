@@ -153,13 +153,13 @@ void QueryProcessor::search(TransactionContext &txn, BaseContainer &container,
 			GS_THROW_USER_ERROR(GS_ERROR_QP_ROW_KEY_INVALID, "range for composite row key is not support");
 		}
 
-		util::XArray<KeyData> startKeyFileds(alloc);
-		util::XArray<KeyData> endKeyFileds(alloc);
+		util::XArray<KeyData> startKeyFields(alloc);
+		util::XArray<KeyData> endKeyFields(alloc);
 		if (startKey != NULL) {
-			container.getRowKeyFields(txn, startKey->size(), startKey->data(), startKeyFileds);
+			container.getRowKeyFields(txn, startKey->size(), startKey->data(), startKeyFields);
 		}
 		if (endKey != NULL) {
-			container.getRowKeyFields(txn, endKey->size(), endKey->data(), endKeyFileds);
+			container.getRowKeyFields(txn, endKey->size(), endKey->data(), endKeyFields);
 		}
 		util::Vector<ColumnId> rowIdColumnIdList(alloc);
 		rowIdColumnIdList.push_back(container.getRowIdColumnId());
@@ -188,16 +188,16 @@ void QueryProcessor::search(TransactionContext &txn, BaseContainer &container,
 		} else {
 		}
 		BtreeMap::SearchContext sc(txn.getDefaultAllocator(), *indexColumnIdList);
-		for (ColumnId i = 0; i < static_cast<uint32_t>(startKeyFileds.size()); i++) {
+		for (ColumnId i = 0; i < static_cast<uint32_t>(startKeyFields.size()); i++) {
 			ColumnInfo &columnInfo = container.getColumnInfo(i);
 			TermCondition cond(columnInfo.getColumnType(), columnInfo.getColumnType(), 
-				DSExpression::GE, i, startKeyFileds[i].data_, startKeyFileds[i].size_);
+				DSExpression::GE, i, startKeyFields[i].data_, startKeyFields[i].size_);
 			sc.addCondition(txn, cond, isKeyCondition);
 		}
-		for (ColumnId i = 0; i < static_cast<uint32_t>(endKeyFileds.size()); i++) {
+		for (ColumnId i = 0; i < static_cast<uint32_t>(endKeyFields.size()); i++) {
 			ColumnInfo &columnInfo = container.getColumnInfo(i);
 			TermCondition cond(columnInfo.getColumnType(), columnInfo.getColumnType(), 
-				DSExpression::LE, i, endKeyFileds[i].data_, endKeyFileds[i].size_);
+				DSExpression::LE, i, endKeyFields[i].data_, endKeyFields[i].size_);
 			sc.addCondition(txn, cond, isKeyCondition);
 		}
 		OutputOrder order = (keyColumnIdList.size() > 1) ? ORDER_UNDEFINED : ORDER_ASCENDING;

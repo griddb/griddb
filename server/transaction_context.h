@@ -182,7 +182,7 @@ public:
 
 	int64_t getTransactionExpireTime() const;
 
-	int32_t getTransationTimeoutInterval() const;
+	int32_t getTransactionTimeoutInterval() const;
 
 	int64_t getExpireTime() const;
 
@@ -409,7 +409,7 @@ inline int64_t TransactionContext::getTransactionExpireTime() const {
 /*!
 	@brief Gets current transaction timeout interval
 */
-inline int32_t TransactionContext::getTransationTimeoutInterval() const {
+inline int32_t TransactionContext::getTransactionTimeoutInterval() const {
 	return txnTimeoutInterval_;
 }
 

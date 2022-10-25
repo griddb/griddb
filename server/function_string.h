@@ -84,7 +84,7 @@ public:
 /*!
  * @brief CONCAT(str1, str2, ...)
  *
- * @return concatinated string
+ * @return concatenated string
  */
 class FunctorConcat : public TqlFunc {
 public:

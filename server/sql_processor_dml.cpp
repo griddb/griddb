@@ -50,7 +50,7 @@ DMLProcessor::DMLProcessor(Context& cxt, const TypeInfo& typeInfo) :
 	columnTypeList_(NULL),
 	tupleInfoList_(NULL),
 	inputTupleColumnCount_(0),
-	immediated_(false),
+	immediate_(false),
 	dmlType_(DML_NONE),
 	completedNum_(0),
 	currentPos_(0),
@@ -1128,7 +1128,7 @@ DMLProcessor::BulkManager::Insert::Insert(
 	uint32_t columnCount, NoSQLContainer* container,
 	int32_t pos, bool isInsertReplace, NodeAffinityNumber affinity) :
 	Operation(bulkManager, alloc, columnInfoList, columnCount, container, pos, affinity) {
-	threashold_ = BULK_INSERT_THRESHOLD_COUNT;
+	threshold_ = BULK_INSERT_THRESHOLD_COUNT;
 	if (isInsertReplace) {
 		option_->putRowOption_ = PUT_INSERT_OR_UPDATE;
 	}
@@ -1144,7 +1144,7 @@ DMLProcessor::BulkManager::Update::Update(
 	const ColumnInfo* columnInfoList,
 	uint32_t columnCount, NoSQLContainer* container, int32_t pos, NodeAffinityNumber affinity) :
 	Operation(bulkManager, alloc, columnInfoList, columnCount, container, pos, affinity) {
-	threashold_ = BULK_UPDATE_THRESHOLD_COUNT;
+	threshold_ = BULK_UPDATE_THRESHOLD_COUNT;
 	option_->putRowOption_ = PUT_UPDATE_ONLY;
 	initialize();
 }

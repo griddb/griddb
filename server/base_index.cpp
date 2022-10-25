@@ -163,8 +163,8 @@ std::string BaseIndex::SearchContext::dump() {
 }
 
 
-BaseIndex::Setting::Setting(ColumnType keyType, bool isCaseSenstive, TreeFuncInfo *funcInfo)
-	: keyType_(keyType), isCaseSenstive_(isCaseSenstive), 
+BaseIndex::Setting::Setting(ColumnType keyType, bool isCaseSensitive, TreeFuncInfo *funcInfo)
+	: keyType_(keyType), isCaseSensitive_(isCaseSensitive), 
 	isStartIncluded_(true), isEndIncluded_(true), compareNum_(0), 
 	greaterCompareNum_(0), lessCompareNum_(0), funcInfo_(funcInfo),
 	startCondition_(NULL), endCondition_(NULL), filterConds_(NULL) {
@@ -401,7 +401,7 @@ void BaseIndex::Setting::initialize(util::StackAllocator &alloc, SearchContext &
 
 CompositeInfoObject *TreeFuncInfo::createCompositeInfo(util::StackAllocator &alloc,
 	util::XArray<KeyData> &valueList) {
-	CompositeInfoObject *compositeInfo = allocateCompoiteInfo(alloc);
+	CompositeInfoObject *compositeInfo = allocateCompositeInfo(alloc);
 	ColumnSchema *columnSchema = getColumnSchema();
 	assert(valueList.size() <= columnSchema->getColumnNum());
 
@@ -490,7 +490,7 @@ void TreeFuncInfo::initialize(const util::Vector<ColumnId> &columnIds, const Col
 	}
 }
 
-CompositeInfoObject *TreeFuncInfo::allocateCompoiteInfo(util::StackAllocator &alloc) {
+CompositeInfoObject *TreeFuncInfo::allocateCompositeInfo(util::StackAllocator &alloc) {
 	ColumnSchema *columnSchema = getColumnSchema();
 	uint32_t fixedColumnsSize = columnSchema->getRowFixedColumnSize();
 	bool hasVariable = columnSchema->getVariableColumnNum() > 0;
@@ -503,7 +503,7 @@ CompositeInfoObject *TreeFuncInfo::allocateCompoiteInfo(util::StackAllocator &al
 
 CompositeInfoObject *TreeFuncInfo::createCompositeInfo(util::StackAllocator &alloc, void *data, uint32_t size) {
 	UNUSED_VARIABLE(size);
-	CompositeInfoObject *compositeInfo = allocateCompoiteInfo(alloc);
+	CompositeInfoObject *compositeInfo = allocateCompositeInfo(alloc);
 
 	memcpy(compositeInfo, data, getFixedAreaSize());
 	if (compositeInfo->hasVariable()) {
@@ -803,7 +803,7 @@ void CompositeInfoObject::dump(TreeFuncInfo &funcInfo, util::NormalOStringStream
 		}
 		ColumnInfo &columnInfo = columnSchema->getColumnInfo(pos);
 		if (columnInfo.isVariable() && getType() == KEY_ON_INDEX) {
-			output << "(Thie function can not access DB file, call another function)";
+			output << "(This function can not access DB file, call another function)";
 			continue;
 		}
 
@@ -823,7 +823,7 @@ std::string BaseIndex::Setting::dump()
 {
 	util::NormalOStringStream strstrm;
 	strstrm << "\"BaseIndex_Setting\" : {";
-	strstrm << ", {\"isCaseSenstive_\" : " << (int)isCaseSenstive_ << "}";
+	strstrm << ", {\"isCaseSensitive_\" : " << (int)isCaseSensitive_ << "}";
 	strstrm << ", {\"compareNum_\" : " << compareNum_ << "}";
 	strstrm << ", {\"greaterCompareNum_\" : " << greaterCompareNum_ << "}";
 	strstrm << ", {\"lessCompareNum_\" : " << lessCompareNum_ << "}";

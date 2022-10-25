@@ -23,7 +23,7 @@
 #endif
 
 UTIL_TRACER_DECLARE(CHUNK_MANAGER);  
-
+UTIL_TRACER_DECLARE(IO_MONITOR);
 
 
 FileStatTable::FileStatTable(const util::StdAllocator<void, void> &alloc) :
@@ -167,6 +167,7 @@ VirtualFileNIO::VirtualFileNIO(
 		std::unique_ptr<Locker>&& locker, const char* path, PartitionId pId,
 		int32_t stripeSize, int32_t numfiles, int32_t chunkSize,
 		FileStatTable *stats) :
+		timeThresholdMillis_(IO_MONITOR_DEFAULT_WARNING_THRESHOLD_MILLIS),
 		locker_(std::move(locker)),
 		path_(path),
 		pId_(pId),
@@ -256,6 +257,12 @@ void VirtualFileNIO::read(
 	}
 	const uint32_t lap = ioWatch.stop();
 
+	if (lap > timeThresholdMillis_) {
+		GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_IO,
+				"[LONG I/O] read time," << lap <<
+				",fileName," << files_[index]->getName() <<
+				",offset," << filePos);
+	}
 }
 
 void VirtualFileNIO::write(
@@ -280,7 +287,12 @@ void VirtualFileNIO::write(
 		++retryCount;
 	}
 	const uint32_t lap = ioWatch.stop();
-
+	if (lap > timeThresholdMillis_) {
+		GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_IO,
+				"[LONG I/O] write time," << lap <<
+				",fileName," << files_[index]->getName() <<
+				",offset," << filePos);
+	}
 }
 
 void VirtualFileNIO::punchHole(
@@ -290,11 +302,26 @@ void VirtualFileNIO::punchHole(
 	files_[index]->preAllocate(
 			FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE, offset, size);
 #endif
-	ioWatch.stop();
+	const uint32_t lap = ioWatch.stop();
+	if (lap > timeThresholdMillis_) {
+		GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_IO,
+				"[LONG I/O] punching hole time," << lap <<
+				",fileName," << files_[index]->getName() <<
+				",offset," << offset << ",size," << size);
+	}
 }
 
 void VirtualFileNIO::flush(int32_t index) {
+	util::Stopwatch ioWatch;
+	ioWatch.start();
 	files_[index]->sync();
+
+	const uint32_t lap = ioWatch.stop();
+	if (lap > timeThresholdMillis_) {
+		GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_IO,
+				"[LONG I/O] sync time," << lap <<
+				",fileName," << files_[index]->getName());
+	}
 }
 
 /*!
@@ -425,7 +452,8 @@ void VirtualFileNIO::clearMonitoring() {
 	@brief コンストラクタ
 */
 SimpleFile::SimpleFile(const std::string& path)
-: path_(path), file_(NULL), tailOffset_(0), flushedOffset_(0) {
+: timeThresholdMillis_(IO_MONITOR_DEFAULT_WARNING_THRESHOLD_MILLIS),
+  path_(path), file_(NULL), tailOffset_(0), flushedOffset_(0) {
 	;
 }
 
@@ -499,7 +527,8 @@ int64_t SimpleFile::readLong(int64_t& offset) {
 	try {
  		int32_t retryCount = 0;
 		ssize_t readRemain = sizeof(n);
-		const uint64_t startClock = util::Stopwatch::currentClock();
+		util::Stopwatch ioWatch;
+		ioWatch.start();
 		while (readRemain > 0) {
 			ssize_t readSize = file_->read(&n, sizeof(n), offset);
 			if (readSize == sizeof(n)) {
@@ -523,12 +552,16 @@ int64_t SimpleFile::readLong(int64_t& offset) {
 			assert(readSize < readRemain);
 			++retryCount;
 		}
-		const uint32_t lap = util::Stopwatch::clockToMillis(
-				util::Stopwatch::currentClock() - startClock);
+		const uint32_t lap = ioWatch.stop();
+		if (lap > timeThresholdMillis_) {
+			GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_IO,
+					"[LONG I/O] read time," << lap <<
+					",fileName," << file_->getName() << ",offset," << offset);
+		}
 	}
 	catch(util::PlatformException &e) {
 		GS_RETHROW_USER_OR_SYSTEM(e,
-				"Read error occred (fileName=" << path_.c_str() <<
+				"Read error occured (fileName=" << path_.c_str() <<
 				", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 	return n;
@@ -538,10 +571,20 @@ int64_t SimpleFile::readLong(int64_t& offset) {
 	@brief int32値書き込み
 */
 void SimpleFile::writeLong(int64_t len) {
+	util::Stopwatch ioWatch;
+	ioWatch.start();
+
 	ssize_t writeBytes = file_->write(&len, sizeof(len), tailOffset_);
 	assert(writeBytes == sizeof(len));
 
 	tailOffset_ += sizeof(len);
+	const uint32_t lap = ioWatch.stop();
+	if (lap > timeThresholdMillis_) {
+		GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_IO,
+				"[LONG I/O] write time," << lap <<
+				",fileName," << file_->getName() <<
+				",len," << len);
+	}
 }
 
 /*!
@@ -552,7 +595,8 @@ int32_t SimpleFile::read(int64_t len, void* buff, int64_t& filePos) {
 		int32_t retryCount = 0;
 		ssize_t readRemain = static_cast<ssize_t>(len);
 		uint8_t* readAddr = static_cast<uint8_t*>(buff);
-		const uint64_t startClock = util::Stopwatch::currentClock();
+		util::Stopwatch ioWatch;
+		ioWatch.start();
 		while (readRemain > 0) {
 			ssize_t readSize = file_->read(readAddr, readRemain, filePos);
 			if (readSize == readRemain) {
@@ -574,13 +618,18 @@ int32_t SimpleFile::read(int64_t len, void* buff, int64_t& filePos) {
 			filePos += static_cast<int64_t>(readSize);
 			++retryCount;
 		}
-		const uint32_t lap = util::Stopwatch::clockToMillis(
-			util::Stopwatch::currentClock() - startClock);
+		const uint32_t lap = ioWatch.stop();
+		if (lap > timeThresholdMillis_) {
+			GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_IO,
+					"[LONG I/O] read time," << lap <<
+					",fileName," << file_->getName() <<
+					",offset," << filePos << ",len," << len);
+		}
 		return static_cast<int32_t>(lap);
 	}
 	catch(util::PlatformException &e) {
 		GS_RETHROW_USER_OR_SYSTEM(e,
-				"Read error occred (fileName=" << path_.c_str() <<
+				"Read error occured (fileName=" << file_->getName() <<
 				", reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
 	}
 }
@@ -591,11 +640,20 @@ int32_t SimpleFile::read(int64_t len, void* buff, int64_t& filePos) {
 void SimpleFile::write(int64_t len, const void* buff) {
 	ssize_t remain = static_cast<ssize_t>(len);
 	const char* addr = static_cast<const char*>(buff);
+	util::Stopwatch ioWatch;
+	ioWatch.start();
 	while(remain > 0) {
 		ssize_t writeBytes = file_->write(addr, remain, tailOffset_);
 		tailOffset_ += writeBytes;
 		addr += writeBytes;
 		remain -= writeBytes;
+	}
+	const uint32_t lap = ioWatch.stop();
+	if (lap > timeThresholdMillis_) {
+		GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_IO,
+				"[LONG I/O] write time," << lap <<
+				",fileName," << file_->getName() <<
+				",len," << len);
 	}
 }
 
@@ -605,8 +663,17 @@ void SimpleFile::write(int64_t len, const void* buff) {
 void SimpleFile::flush() {
 	uint64_t currentTail = tailOffset_;
 	if (flushedOffset_ != currentTail) {
+		util::Stopwatch ioWatch;
+		ioWatch.start();
 		file_->sync();
+
 		flushedOffset_ = currentTail;
+		const uint32_t lap = ioWatch.stop();
+		if (lap > timeThresholdMillis_) {
+			GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_IO,
+					"[LONG I/O] sync time," << lap <<
+					",fileName," << file_->getName());
+		}
 	}
 }
 

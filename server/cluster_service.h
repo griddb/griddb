@@ -49,6 +49,8 @@ class SQLExecutionManager;
 class JobManager;
 class PartitionList;
 class DataStoreConfig;
+struct ClusterOptionalInfo;
+
 
 class ServiceConfig {
 public:
@@ -57,8 +59,8 @@ public:
 	static const char8_t* TYPE_NAME_SYNC;
 	static const char8_t* TYPE_NAME_SYSTEM;
 	static const char8_t* TYPE_NAME_SQL;
-	static const char8_t* TYPE_NAME_TRANSACTION_LOCAL;
-	static const char8_t* TYPE_NAME_SQL_LOCAL;
+	static const char8_t* TYPE_NAME_TRANSACTION_PUBLIC;
+	static const char8_t* TYPE_NAME_SQL_PUBLIC;
 
 	static const char8_t* const SERVICE_TYPE_NAMES[];
 	static const char8_t* const SERVICE_TYPE_NAMES_WITH_PUBLIC[];
@@ -71,38 +73,32 @@ public:
 const char8_t* dumpServiceType(ServiceType serviceType);
 
 struct ClusterAdditionalServiceConfig {
-	ClusterAdditionalServiceConfig(
-		const ConfigTable& config, PartitionTable* pt = NULL);
+
+	ClusterAdditionalServiceConfig(const ConfigTable& config, PartitionTable* pt = NULL);
+	
 	bool hasPublicAddress() {
 		return hasPublic_;
 	}
-	const char* getAddress(
-		ServiceType serviceType, int32_t type = 0);
 
 	const char* getServiceAddress(ServiceType serviceType);
 	uint16_t getPort(ServiceType serviceTy);
 
 	bool isSetServiceAddress() {
-		return (
-			txnAddressSize_ > 0
-			&& sqlAddressSize_ > 0
-			);
+		return (txnAddressSize_ > 0 && sqlAddressSize_ > 0);
 	}
 
-	bool isSetLocalAddress() {
-		return (
-			txnInternalAddressSize_ > 0
-			&& sqlInternalAddressSize_ > 0
-			);
+	bool isSetPublicAddress() {
+		return (txnInternalAddressSize_ > 0 && sqlInternalAddressSize_ > 0);
 	}
+
 	const char* txnServiceAddress_;
-	const char* txnLocalServiceAddress_;
+	const char* txnPublicServiceAddress_;
 	size_t txnAddressSize_;
 	size_t txnInternalAddressSize_;
 	uint16_t txnPort_;
 
 	const char* sqlServiceAddress_;
-	const char* sqlLocalServiceAddress_;
+	const char* sqlPublicServiceAddress_;
 	size_t sqlAddressSize_;
 	size_t sqlInternalAddressSize_;
 	uint16_t sqlPort_;
@@ -410,7 +406,7 @@ private:
 
 	void decode(util::StackAllocator& alloc, Event& ev,
 		ClusterManager::HeartbeatInfo& heartbeatInfo,
-		PublicAddressInfoMessage& publicAddressInfo);
+		ClusterOptionalInfo& option);
 };
 
 class SQLTimerNotifyClientHandler : public ClusterHandler {
@@ -449,14 +445,14 @@ public:
 
 private:
 	void checkAndRequestDropPartition(EventContext& ec,
-		ClusterManager::UpdatePartitionInfo& updatePartitionInfo);
+		DropPartitionNodeInfo& dropPartitionNodeInfo);
 	void updateNodeInfo(EventContext& ec,
 		ClusterManager::UpdatePartitionInfo& updatePartitionInfo);
-	bool resolveAddress(SubPartition& subPartition);
+	bool resolveAddress(PartitionTable::SubPartition& subPartition);
 	void requestSync(EventContext& ec,
 		PartitionId pId, PartitionRole& role, bool isShorttermSync);
 	void decode(EventContext& ec, Event& ev,
-		ClusterManager::UpdatePartitionInfo& updateParttiionInfo);
+		ClusterManager::UpdatePartitionInfo& updatePartitionInfo);
 };
 
 class NewSQLPartitionRefreshHandler : public ClusterHandler {
@@ -562,7 +558,7 @@ private:
 
 	void sendUpdatePartitionInfo(EventContext& ec,
 		ClusterManager::UpdatePartitionInfo& updatePartitionInfo,
-		NodeIdList& activeNodeList);
+		NodeIdList& activeNodeList, ClusterOptionalInfo& option);
 };
 
 /*!
@@ -671,7 +667,7 @@ public:
 	void setError(
 		const Event::Source& eventSource, std::exception* e);
 
-	void shutdownAllService(bool isInSytemService = false);
+	void shutdownAllService(bool isInSystemService = false);
 
 	bool isSystemServiceError() {
 		return isSystemServiceError_;
@@ -696,6 +692,10 @@ public:
 
 	template <class T>
 	void decode(Event& ev, T& t, EventByteInStream& in);
+
+
+	void encodeOptionalPart(EventByteOutStream& out, ClusterOptionalInfo& optionalInfo);
+	void decodeOptionalPart(Event& ev, EventByteInStream& in, ClusterOptionalInfo& optionalInfo);
 
 	template <class T>
 	void request(
@@ -795,7 +795,7 @@ private:
 	ClusterStats clusterStats_;
 	SQLService* sqlSvc_;
 	PartitionTable* pt_;
-	bool initailized_;
+	bool initialized_;
 	bool isSystemServiceError_;
 
 	/*!
@@ -863,7 +863,7 @@ private:
 		AddressInfoList& getPublicFixedAddressInfo();
 
 		/*!
-			@brief Gets the number of fixed adderss info.
+			@brief Gets the number of fixed address info.
 		*/
 		int32_t getFixedNodeNum() {
 			return fixedNodeNum_;
@@ -911,6 +911,73 @@ private:
 	};
 
 	NotificationManager notificationManager_;
+};
+
+/** **
+	@brief クラスタオプション情報
+	@note クラスタ情報通信のためのオプション情報のエンコードデコード
+** **/
+struct ClusterOptionalInfo {
+	static const int32_t PUBLIC_ADDRESS_INFO = 0;
+	static const int32_t SSL_PORT = 1;
+	static const int32_t RACKZONE_ID = 2;
+	static const int32_t DROP_PARTITION_INFO = 3;
+	static const int32_t PUBLIC_ADDRESS_INFO_SET = 4;
+	static const int32_t PARAM_MAX = 5;
+
+	static const int8_t INACTIVE = 0;
+	static const int8_t ACTIVE = 1;
+
+	ClusterOptionalInfo(util::StackAllocator& alloc, PartitionTable* pt) :
+		alloc_(alloc), pt_(pt), setList_(PARAM_MAX, INACTIVE, alloc),
+		dropPartitionNodeInfo_(alloc), ssl_port_(UNDEF_SSL_PORT) {
+	}
+
+	bool isActive(int32_t type) {
+		if (type >= static_cast<int32_t>(setList_.size())) {
+			return false;
+		}
+		return (setList_[type] == ACTIVE);
+	}
+
+	void encode(EventByteOutStream& out, ClusterService* clsSvc);
+	void decode(Event &ev, EventByteInStream& in, ClusterService* clsSvc);
+
+	void setPublicAddressInfo();
+
+	PublicAddressInfoMessage& getPublicAddressInfo() {
+		return publicAddressInfo_;
+	}
+
+	DropPartitionNodeInfo& getDropPartitionInfo() {
+		return dropPartitionNodeInfo_;
+	}
+
+	RackZoneInfoList& getRackZoneInfo() {
+		return rackZoneInfoList_;
+	}
+
+	void setRackZoneInfo();
+
+	void setRackZoneId(NodeAddress& address, std::string& rackZoneId) {
+		rackZoneInfoList_.add(address, rackZoneId);
+	}
+
+	void setSSLPort(int32_t sslPort) {
+		ssl_port_ = sslPort;
+	}
+
+	int32_t getSSLPort() {
+		return ssl_port_;
+	}
+
+	util::StackAllocator& alloc_;
+	util::Vector<uint8_t> setList_;
+	PartitionTable* pt_;
+	PublicAddressInfoMessage publicAddressInfo_;
+	RackZoneInfoList rackZoneInfoList_;
+	DropPartitionNodeInfo dropPartitionNodeInfo_;
+	int32_t ssl_port_;
 };
 
 #endif

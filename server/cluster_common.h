@@ -31,24 +31,24 @@ struct UserValue;
 typedef util::VariableSizeAllocator<util::Mutex> GlobalVariableSizeAllocator;
 
 typedef util::BasicString< char8_t, std::char_traits<char8_t>,
-		util::StdAllocator<char8_t, GlobalVariableSizeAllocator> > UserString; 
+	util::StdAllocator<char8_t, GlobalVariableSizeAllocator> > UserString; 
 
 typedef CacheNode<UserString, UserValue*,
-		GlobalVariableSizeAllocator> UserCacheEntry; 
+	GlobalVariableSizeAllocator> UserCacheEntry; 
 
 typedef LruCacheWithMonitor<UserCacheEntry,
-		UserString, UserValue*,
-		GlobalVariableSizeAllocator> UserCache; 
+	UserString, UserValue*,
+	GlobalVariableSizeAllocator> UserCache; 
 
 struct UserValue {
-	UserValue(GlobalVariableSizeAllocator &allocator) :
+	UserValue(GlobalVariableSizeAllocator& allocator) :
 		alloc_(allocator),
 		userName_(allocator),
 		digest_(allocator),
 		dbName_(allocator),
 		roleName_(allocator) {}
-	
-	GlobalVariableSizeAllocator &alloc_;
+
+	GlobalVariableSizeAllocator& alloc_;
 	UserString userName_; 
 	UserString digest_; 
 	UserString dbName_; 
@@ -57,9 +57,9 @@ struct UserValue {
 	UserString roleName_; 
 	bool isLDAPAuthenticate_;
 	EventMonotonicTime time_; 
-	
-	int checkAndGet(UserValue *userValue, int32_t updateInterval) {
-		if (userValue->time_ - time_ > updateInterval*1000) {
+
+	int checkAndGet(UserValue* userValue, int32_t updateInterval) {
+		if (userValue->time_ - time_ > updateInterval * 1000) {
 			return 2;
 		}
 		if (userValue->isLDAPAuthenticate_ != isLDAPAuthenticate_) {
@@ -70,36 +70,40 @@ struct UserValue {
 			userValue->priv_ = priv_;
 			userValue->roleName_ = roleName_.c_str();
 			return 0;
-		} else {
+		}
+		else {
 			return 1;
 		}
 	}
 
-	void clear(UserString &name, bool isDatabase) {
+	void clear(UserString& name, bool isDatabase) {
 		if (isDatabase) {
 			if (strcmp(dbName_.c_str(), name.c_str()) == 0) {
 				time_ = 0;
 			}
-		} else {
+		}
+		else {
 			if (strcmp(userName_.c_str(), name.c_str()) == 0) {
 				time_ = 0;
 			}
 		}
 	}
-	
-	bool scan(UserString *name, bool isDatabase, picojson::object &cacheInfo) {
+
+	bool scan(UserString* name, bool isDatabase, picojson::object& cacheInfo) {
 		if (name == NULL) {
 			cacheInfo["dbName"] = picojson::value(std::string(dbName_.c_str()));
 			cacheInfo["userName"] = picojson::value(std::string(userName_.c_str()));
 			return true;
-		} else {
+		}
+		else {
 			if (isDatabase) {
 				if (strcmp(dbName_.c_str(), name->c_str()) == 0) {
 					cacheInfo["dbName"] = picojson::value(std::string(dbName_.c_str()));
 					cacheInfo["userName"] = picojson::value(std::string(userName_.c_str()));
 					return true;
 				}
-			} else {
+			}
+			else {
 				if (strcmp(userName_.c_str(), name->c_str()) == 0) {
 					cacheInfo["dbName"] = picojson::value(std::string(dbName_.c_str()));
 					cacheInfo["userName"] = picojson::value(std::string(userName_.c_str()));
@@ -129,30 +133,8 @@ static const int32_t SERVICE_MAX = 5;
 static const uint32_t IMMEDIATE_PARTITION_ID = 0;
 static const uint32_t SYSTEM_CONTAINER_PARTITION_ID = 0;
 
-/*!
-	@brief Status of ChangePartition
-*/
-enum ChangePartitionType {
-	PT_CHANGE_NORMAL,
-	PT_CHANGE_SYNC_START,
-	PT_CHANGE_SYNC_END
-};
-/*!
-	@brief Synchronization mode
-*/
-enum SyncMode {
-	MODE_SHORTTERM_SYNC,
-	MODE_LONGTERM_SYNC,
-	MODE_CHANGE_PARTITION,
-	MODE_SYNC_TIMEOUT
-};
-/*!
-	@brief Synchronization type
-*/
-enum SyncType {
-	LOG_SYNC,	
-	CHUNK_SYNC,  
-};
+static const int32_t EE_PRIORITY_HIGH = static_cast<int32_t>(-2147483647);
+
 /*!
 	@brief Service type
 */
@@ -164,97 +146,90 @@ enum ServiceType {
 	SQL_SERVICE = 4
 };
 
-static void clearStringStream(util::NormalOStringStream &oss) {
-	static std::string emptyStr;
-	oss.clear();
-	oss.str(emptyStr);
-}
+class CommonUtility {
+public:
 
-template <typename T>
-static const std::string makeString(
-	util::NormalOStringStream &s, const T &value) {
-	clearStringStream(s);
-	s << value;
-	return s.str();
-}
-
-static const int32_t EE_PRIORITY_HIGH = static_cast<int32_t>(-2147483647);
-
-static inline std::string getTimeStr(int64_t timeval, bool trim = false) {
-	util::NormalOStringStream oss;
-	oss.clear();
-	util::DateTime dtime(timeval);
-	dtime.format(oss, trim);
-	return oss.str();
-}
-
-static const int32_t secLimit = INT32_MAX / 1000;
-static inline int32_t changeTimeSecToMill(int32_t sec) {
-	if (sec > secLimit) {
-		return INT32_MAX;
-	}
-	else {
-		return sec * 1000;
-	}
-}
-
-#define TRACE_CLUSTER_EXCEPTION_FORCE(errorCode, message)       \
-	try {                                                       \
-		GS_THROW_USER_ERROR(errorCode, message);                \
-	}                                                           \
-	catch (std::exception & e) {                                \
-		UTIL_TRACE_EXCEPTION_WARNING(CLUSTER_OPERATION, e, ""); \
+	static void clearStringStream(util::NormalOStringStream& oss) {
+		static std::string emptyStr;
+		oss.clear();
+		oss.str(emptyStr);
 	}
 
-#define TRACE_CLUSTER_EXCEPTION_FORCE_ERROR(errorCode, message)       \
-	try {                                                       \
-		GS_THROW_USER_ERROR(errorCode, message);                \
-	}                                                           \
-	catch (std::exception & e) {                                \
-		UTIL_TRACE_EXCEPTION_ERROR(CLUSTER_OPERATION, e, ""); \
+	template <typename T>
+	static const std::string makeString(util::NormalOStringStream& s, const T& value) {
+		clearStringStream(s);
+		s << value;
+		return s.str();
 	}
+
+	static inline std::string getTimeStr(int64_t timeval, bool trim = false) {
+		util::NormalOStringStream oss;
+		oss.clear();
+		util::DateTime dtime(timeval);
+		dtime.format(oss, trim);
+		return oss.str();
+	}
+
+	static const int32_t secLimit = INT32_MAX / 1000;
+	static inline int32_t changeTimeSecondToMilliSecond(int32_t sec) {
+		if (sec > secLimit) {
+			return INT32_MAX;
+		}
+		else {
+			return sec * 1000;
+		}
+	}
+
+	template <class T>
+	static void dumpValueList(util::NormalOStringStream& oss, T& list) {
+		oss << "(";
+		for (size_t pos = 0; pos < list.size(); pos++) {
+			oss << list[pos];
+			if (pos != list.size() - 1) oss << ",";
+		}
+		oss << ")";
+	}
+
+	template <class T>
+	static double average(T& list) {
+		size_t size = list.size();
+		if (size == 0) return -1;
+		return std::accumulate(std::begin(list), std::end(list), 0.0) / size;
+	}
+
+	template <class T>
+	static double variance(T& list) {
+		size_t size = list.size();
+		if (size == 0) return -1;
+		const double ave = average(list);
+		return std::accumulate(std::begin(list), std::end(list), 0.0, [ave](double sum, const int32_t& e) {
+			const double temp = e - ave;
+			return sum + temp * temp;
+		}) / size;
+	}
+
+	template <class T>
+	static double standardDeviation(T& list) {
+		size_t size = list.size();
+		if (size == 0) return -1;
+		return std::sqrt(variance(list));
+	}
+};
 
 #define TRACE_CLUSTER_NORMAL_OPERATION(level, str) \
 	GS_TRACE_##level(CLUSTER_OPERATION, GS_TRACE_CS_NORMAL_OPERATION, str);
 
-#define TRACE_SYNC_NORMAL(level, str) \
-	GS_TRACE_##level(SYNC_SERVICE, GS_TRACE_SYNC_NORMAL, str);
-
 #define UTIL_TRACE_EXCEPTION_ERROR(tracer, cause, message) \
 	UTIL_TRACER_PUT(tracer, LEVEL_ERROR, message, &(cause))
 
-#define TRACE_CLUSTER_EXCEPTION(e, eventType, level, str) \
-	UTIL_TRACE_EXCEPTION_##level(CLUSTER_SERVICE, e,      \
-		str << ", eventType=" << getEventTypeName(eventType) << ", reason=" << GS_EXCEPTION_MESSAGE(e));
-
-#define TRACE_SYNC_EXCEPTION(e, eventType, pId, level, str)                 \
-	UTIL_TRACE_EXCEPTION_##level(SYNC_SERVICE, e,                           \
-		str << ", eventType=" << getEventTypeName(eventType) \
-				<< ", pId=" << pId << ", reason=" << ", reason=" << GS_EXCEPTION_MESSAGE(e))
-
-#define TRACE_CLUSTER_EE_SEND(eventType, nd, level, str)             \
-	GS_TRACE_##level(CLUSTER_SERVICE, GS_TRACE_CS_EVENT_SEND,        \
-		str << ", eventType=" << getEventTypeName(eventType) \
-			<< ", nd=" << nd);
-
 #define WATCHER_START util::Stopwatch watch(util::Stopwatch::STATUS_STARTED);
 
-#define WATCHER_END_NORMAL(eventType)                                 \
+#define WATCHER_END_NORMAL(eventType, pgId)                                 \
 	{                                                            \
 		const uint32_t lap = watch.elapsedMillis();              \
 		if (lap > IO_MONITOR_DEFAULT_WARNING_THRESHOLD_MILLIS) { \
 			GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_EVENT, \
-				"eventType=" << eventType << ", elapsedMillis=" << lap);  \
-		}                                                        \
-	}
-
-#define WATCHER_END_SYNC(eventType, pId)                            \
-	{                                                            \
-		const uint32_t lap = watch.elapsedMillis();              \
-		if (lap > IO_MONITOR_DEFAULT_WARNING_THRESHOLD_MILLIS) { \
-			GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_EVENT, \
-				"eventType=" << eventType << ", pId=" << pId     \
-							<< ", elapsedMillis=" << lap);               \
+				"eventType=" << getEventTypeName(eventType) << ", pgId=" << pgId << ", elapsedMillis=" << lap);  \
 		}                                                        \
 	}
 
@@ -263,118 +238,13 @@ static inline int32_t changeTimeSecToMill(int32_t sec) {
 		const uint32_t lap = watch.elapsedMillis();                     \
 		if (lap > IO_MONITOR_DEFAULT_WARNING_THRESHOLD_MILLIS) {        \
 			GS_TRACE_WARNING(IO_MONITOR, GS_TRACE_CM_LONG_EVENT,        \
-				"eventType=" << eventType << ", pId=" << pId            \
+				"eventType=" << getEventTypeName(eventType) << ", pId=" << pId            \
 							<< ", pgId=" << pgId << ", elapsedMillis=" << lap); \
 		}                                                               \
 	}
 
-static inline const std::string dumpChangePartitionType(
-	ChangePartitionType type) {
-	switch (type) {
-	case PT_CHANGE_NORMAL:
-		return "NORMAL";
-	case PT_CHANGE_SYNC_START:
-		return "SYNC_START";
-	case PT_CHANGE_SYNC_END:
-		return "SYNC_END";
-	default:
-		return "";
-	}
-}
-
-template <class T>
-static inline void mergeList(std::ostream &ss, T &list) {
-	ss << "[";
-	for (size_t pos = 0; pos < list.size(); pos++) {
-		ss << list[pos].dump();
-		if (pos != list.size() - 1) {
-			ss << ",";
-		}
-	}
-	ss << "]";
-}
-
-template <class T>
-static inline std::string dumpList(T &list) {
-	util::NormalOStringStream ss;
-	ss << "[";
-	for (size_t pos = 0; pos < list.size(); pos++) {
-		ss << list[pos].dump();
-		if (pos != list.size() - 1) {
-			ss << ",";
-		}
-	}
-	ss << "]";
-	return ss.str();
-}
-
-template <class T>
-static inline std::string dumpArray(T &list) {
-	util::NormalOStringStream ss;
-	ss << "[";
-	for (size_t pos = 0; pos < list.size(); pos++) {
-		ss << list[pos];
-		if (pos != list.size() - 1) {
-			ss << ",";
-		}
-	}
-	ss << "]";
-	return ss.str();
-}
-
-static inline std::ostream &operator<<(
-	std::ostream &ss, util::XArray<PartitionId> &list) {
-	ss << "[";
-	for (size_t pos = 0; pos < list.size(); pos++) {
-		ss << list[pos];
-		if (pos != list.size() - 1) {
-			ss << ",";
-		}
-	}
-	ss << "]";
-	return ss;
-}
-
-static inline std::ostream &operator<<(
-	std::ostream &ss, std::vector<PartitionId> &list) {
-	ss << "[";
-	for (size_t pos = 0; pos < list.size(); pos++) {
-		ss << list[pos];
-		if (pos != list.size() - 1) {
-			ss << ",";
-		}
-	}
-	ss << "]";
-	return ss;
-}
-
-static inline std::ostream &operator<<(
-	std::ostream &ss, NodeIdList &list) {
-	ss << "[";
-	for (size_t pos = 0; pos < list.size(); pos++) {
-		ss << list[pos];
-		if (pos != list.size() - 1) {
-			ss << ",";
-		}
-	}
-	ss << "]";
-	return ss;
-}
-
-static inline std::ostream &operator<<(
-	std::ostream &ss, std::set<NodeId> &list) {
-	size_t size = list.size();
-	size_t pos = 0;
-	ss << "[";
-	for (std::set<NodeId>::iterator it = list.begin(); it != list.end(); it++) {
-		ss << *it;
-		if (pos != size - 1) {
-			ss << ",";
-		}
-		pos++;
-	}
-	ss << "]";
-	return ss;
-}
+UTIL_TRACER_DECLARE(CLUSTER_OPERATION);
+#define GS_TRACE_CLUSTER_INFO(s) \
+	GS_TRACE_INFO(CLUSTER_OPERATION, GS_TRACE_CS_CLUSTER_STATUS, s); \
 
 #endif

@@ -18,7 +18,6 @@
 #include "sql_operator_utils.h"
 
 
-
 SQLOps::OpCodeBuilder::OpCodeBuilder(const Source &source) :
 		factoryCxt_(source.alloc_),
 		rewriter_(source.alloc_) {
@@ -1386,10 +1385,10 @@ SQLOps::Projection& SQLOps::OpCodeBuilder::createDistinctGroupProjection(
 	const SQLExprs::Expression *expr = distinctList[index];
 	if (idGrouping) {
 		assert(aggrPhase != SQLType::AGG_PHASE_ADVANCE_PIPE);
-		uint32_t refCoulmnPos = 1;
+		uint32_t refColumnPos = 1;
 		SQLExprs::Expression &nonDistinctExpr =
 				SQLExprs::ExprRewriter::toNonDistinctExpr(
-						factoryCxt, *expr, input, &refCoulmnPos);
+						factoryCxt, *expr, input, &refColumnPos);
 		projIt.append(nonDistinctExpr);
 	}
 	else {
@@ -2643,6 +2642,7 @@ const util::NameCoderEntry<SQLOpTypes::Type>
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_SORT_NWAY),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_WINDOW),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_WINDOW_PARTITION),
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_WINDOW_RANK_PARTITION),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_WINDOW_MERGE),
 
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_JOIN),

@@ -168,7 +168,7 @@ extends SubnetContainer<K, R> implements Collection<K, R> {
 
 		public MetaCollection(
 				SubnetGridStore store, GridStoreChannel channel,
-				Context context, 
+				Context context,
 				Container.BindType<K, R, ? extends Container<?, ?>> bindType,
 				RowMapper mapper,
 				int schemaVerId, int partitionId,

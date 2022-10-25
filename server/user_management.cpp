@@ -435,7 +435,7 @@ void DbUserHandler::putRow(
 
 	RowData rowData(alloc);
 	{
-		DSInputMes input(alloc, DS_GET_CONTAINR_OBJECT, ANY_CONTAINER);
+		DSInputMes input(alloc, DS_GET_CONTAINER_OBJECT, ANY_CONTAINER);
 		DSContainerOutputMes* ret = static_cast<DSContainerOutputMes*>(ds->exec(&txn, &keyStoreValue, &input));
 		BaseContainer* container = ret->container_;
 		makeRow(txn.getPartitionId(), alloc, container->getColumnInfoList(),
@@ -550,7 +550,7 @@ bool DbUserHandler::runWithRowKey(
 	if (option->type != DUGetInOut::REMOVE) {
 		DataStoreBase* ds = getDataStore(txn.getPartitionId(), keyStoreValue.storeType_);
 		const DataStoreBase::Scope dsScope(&txn, ds, clusterService_);
-		DSInputMes input(alloc, DS_GET_CONTAINR_OBJECT, ANY_CONTAINER);
+		DSInputMes input(alloc, DS_GET_CONTAINER_OBJECT, ANY_CONTAINER);
 		DSContainerOutputMes* ret = static_cast<DSContainerOutputMes*>(ds->exec(&txn, &keyStoreValue, &input));
 		BaseContainer* container = ret->container_;
 		ResultSet *rs = getDataStore(txn.getPartitionId())->getResultSetManager()->create(
@@ -840,7 +840,6 @@ void DbUserHandler::removeRowWithRS(TransactionContext& txn, util::StackAllocato
 			MAX_SCHEMAVERSIONID);
 		DSOutputMes* ret = static_cast<DSOutputMes*>(ds->exec(&txn, &keyStoreValue, &input));
 
-		util::XArray<const util::XArray<uint8_t>*> logRecordList(alloc);
 		util::XArray<uint8_t>* logBinary = appendDataStoreLog(alloc, txn,
 			cxtSrc, cxtSrc.stmtId_, keyStoreValue.storeType_, ret->dsLog_);
 		logRecordList.push_back(logBinary);
@@ -889,7 +888,7 @@ void DbUserHandler::runWithTQL(
 
 	DataStoreBase* ds = getDataStore(txn.getPartitionId(), keyStoreValue.storeType_);
 	const DataStoreBase::Scope dsScope(&txn, ds, clusterService_);
-	DSInputMes input(alloc, DS_GET_CONTAINR_OBJECT, ANY_CONTAINER);
+	DSInputMes input(alloc, DS_GET_CONTAINER_OBJECT, ANY_CONTAINER);
 	DSContainerOutputMes* ret = static_cast<DSContainerOutputMes*>(ds->exec(&txn, &keyStoreValue, &input));
 	BaseContainer* container = ret->container_;
 
@@ -1603,7 +1602,7 @@ void GetUsersHandler::checkUserInfoList(int32_t featureVersion, util::XArray<Use
 		for (size_t i = 0; i < userInfoList.size(); i++) {
 			if (strcmp(userInfoList[i]->userName_.c_str(), "") == 0) {
 				GS_THROW_USER_ERROR(GS_ERROR_DS_CON_ACCESS_INVALID,
-					"Can not create user infomation list");
+					"Can not create user information list");
 			}
 		}
 	}
@@ -2036,13 +2035,13 @@ void GetDatabasesHandler::checkDatabaseInfoList(int32_t featureVersion, util::XA
 		for (size_t i = 0; i < dbInfoList.size(); i++) {
 			if (dbInfoList[i]->privilegeInfoList_.size() > 1) {
 				GS_THROW_USER_ERROR(GS_ERROR_DS_CON_ACCESS_INVALID,
-					"Can not create database infomation list");
+					"Can not create database information list");
 			}
 			
 			for (size_t j = 0; j < dbInfoList[i]->privilegeInfoList_.size(); j++) {
 				if (strcmp(dbInfoList[i]->privilegeInfoList_[j]->privilege_.c_str(), "READ") == 0) {
 					GS_THROW_USER_ERROR(GS_ERROR_DS_CON_ACCESS_INVALID,
-						"Can not create database infomation list");
+						"Can not create database information list");
 				}
 			}
 		}
@@ -2120,7 +2119,7 @@ void GetDatabasesHandler::operator()(EventContext &ec, Event &ev) {
 		if (request.optional_.get<Options::ACCEPTABLE_FEATURE_VERSION>() < StatementMessage::FEATURE_V4_5) {
 			if (connOption.isLDAPAuthentication_) {
 				GS_THROW_USER_ERROR(GS_ERROR_DS_CON_ACCESS_INVALID,
-					"Can not create database infomation list");
+					"Can not create database information list");
 			}
 		}
 		checkDatabaseInfoList(request.optional_.get<Options::ACCEPTABLE_FEATURE_VERSION>(), response.databaseInfoList_);

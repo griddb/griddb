@@ -29,11 +29,6 @@
 
 
 
-
-
-
-
-
 class LocalTempStore;
 class ResourceGroup;
 class TupleList {
@@ -322,7 +317,7 @@ public:
 private:
 	const void* varData(size_t &headerSize, size_t &dataSize) const;
 
-	static const size_t DEFALULT_INITIAL_CAPACITY = 1 * 1024 * 1024; 
+	static const size_t DEFAULT_INITIAL_CAPACITY = 1 * 1024 * 1024; 
 
 	union {
 		int64_t longValue_;    
@@ -884,7 +879,7 @@ public:
 
 	bool isExists();
 
-	void isExists(bool &isExists, bool &isAvaliable);
+	void isExists(bool &isExists, bool &isAvailable);
 
 	void getBlockCount(uint64_t &blockCount, uint64_t &blockNth);
 

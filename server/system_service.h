@@ -511,9 +511,9 @@ private:
 
 	SystemConfig sysConfig_;
 
-	bool initailized_;
+	bool initialized_;
 
-	std::set<std::string> unchangableTraceCategories_;
+	std::set<std::string> unchangeableTraceCategories_;
 
 	ConfigTable &config_;
 	StatTable *baseStats_;

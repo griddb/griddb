@@ -152,7 +152,7 @@ private:
 	typedef std::pair<util::StackAllocator*, BlobCursor> BlobCursorStorage;
 
 	enum {
-		CURSOR_STORAGE_CAPCACITY = 776
+		CURSOR_STORAGE_CAPACITY = 776
 	};
 
 	BaseObject* getBaseObject(size_t index);
@@ -172,7 +172,7 @@ private:
 
 	union {
 		int64_t asInt64_;
-		uint8_t asBytes_[CURSOR_STORAGE_CAPCACITY];
+		uint8_t asBytes_[CURSOR_STORAGE_CAPACITY];
 	} cursorStorage_;
 };
 

@@ -170,9 +170,12 @@ private:
 	PartitionId endPId_;
 
 protected:
+	static const uint32_t MAX_ONCE_SWAP_SIZE_BYTE_ = 64 * 1024 * 1024;  
+
 	std::vector<VirtualFileBase*> dataFileList_;
 	Chunk::ChunkMemoryPool* pool_;
 	int32_t chunkSize_;
+	uint64_t storeMemoryLimitBlockCount_;
 	CompressorParam compressorParam_;
 
 	LRUTable* bufferTable_;
@@ -182,6 +185,7 @@ protected:
 	int64_t storeMemoryAgingSwapCount_;
 	int64_t agingSwapCounter_;
 	size_t chunkCategoryNum_;
+	const uint32_t maxOnceSwapNum_;
 
 	ChunkBufferStats &stats_;
 
@@ -214,6 +218,8 @@ public:
 
 	bool resize(int32_t capacity);
 
+	int32_t getCurrentLimit();
+
 	void getFileStatus(PartitionId pId, uint64_t &size, uint64_t& allocatedSize) const;
 
 	void setMemoryPool(Chunk::ChunkMemoryPool* pool);
@@ -232,6 +238,9 @@ public:
 	double getStoreMemoryAgingSwapRate();
 	void updateStoreMemoryAgingParams(int64_t totalLimitNum, int32_t partitionGroupNum);
 	void rebalance();
+
+	void setStoreMemoryLimitBlockCount(uint64_t limit);
+	uint64_t getStoreMemoryLimitBlockCount();
 
 	std::string toString() const;
 
@@ -383,6 +392,8 @@ public:
 
 	bool resize(int32_t capacity);
 
+	int32_t getCurrentLimit();
+
 	void validatePinCount();
 
 	uint64_t getTotalPinCount();
@@ -403,6 +414,7 @@ public:
 	};
 
 	void setMemoryPool(Chunk::ChunkMemoryPool* pool);
+	Chunk::ChunkMemoryPool* getMemoryPool() { return pool_; }
 	void setVirtualFile(PartitionId pId, VirtualFileBase &file);
 	void setPartitionList(PartitionList* ptList);
 
@@ -416,6 +428,8 @@ public:
 	void updateStoreMemoryAgingParams(
 			int64_t totalLimitNum, int32_t partitionGroupNum);
 	void rebalance();
+
+	void setStoreMemoryLimitBlockCount(uint64_t limit);
 
 	static uint64_t calcHashTableSize(
 			PartitionGroupId partitionGroupNum,
@@ -505,6 +519,7 @@ public:
 	bool touch(int32_t pos, bool toTail = true); 
 
 	int32_t getFree();
+	void pushFree(int32_t pos); 
 	int32_t getStock();
 
 	void gotoL1FromL0(int32_t pos);
@@ -738,6 +753,10 @@ inline bool ChunkBuffer::resize(int32_t capacity) {
 	return basicChunkBuffer_->resize(capacity);
 }
 
+inline int32_t ChunkBuffer::getCurrentLimit() {
+	return basicChunkBuffer_->getCurrentLimit();
+}
+
 inline void ChunkBuffer::validatePinCount() {
 	basicChunkBuffer_->validatePinCount();
 }
@@ -769,6 +788,10 @@ inline void ChunkBuffer::rebalance() {
 	return basicChunkBuffer_->rebalance();
 }
 
+inline void ChunkBuffer::setStoreMemoryLimitBlockCount(uint64_t count) {
+	basicChunkBuffer_->setStoreMemoryLimitBlockCount(count);
+}
+
 inline Chunk* ChunkBuffer::getPinnedChunk(
 		const ChunkBufferFrameRef &frameRef) {
 	LRUFrame *frame = frameRef.get();
@@ -793,6 +816,16 @@ inline double BasicChunkBuffer<L>::getActivity() const {
 template<class L>
 inline void BasicChunkBuffer<L>::rebalance() {
 	bufferTable_->rebalance();
+}
+
+template<class L>
+inline void BasicChunkBuffer<L>::setStoreMemoryLimitBlockCount(uint64_t count) {
+	storeMemoryLimitBlockCount_ = count;
+}
+
+template<class L>
+inline uint64_t BasicChunkBuffer<L>::getStoreMemoryLimitBlockCount() {
+	return storeMemoryLimitBlockCount_;
 }
 
 template<class L>
@@ -950,9 +983,9 @@ inline void LRUTable::pushTail(int32_t pos) {
 
 inline bool LRUTable::pushMiddle(int32_t pos) {
 	bool toHot = false;
-	int32_t tartgetHotNumElems = static_cast<int32_t>(
+	int32_t targetHotNumElems = static_cast<int32_t>(
 			static_cast<double>(currentNumElems_) * hotRate_ + 0.5);
-	if (hotNumElems_ < tartgetHotNumElems) {
+	if (hotNumElems_ < targetHotNumElems) {
 		pushHotHead(pos);
 		toHot = true;;
 	} else {
@@ -1195,6 +1228,12 @@ inline int32_t LRUTable::getFree() {
 		return pos;
 	}
 	return -1;
+}
+
+inline void LRUTable::pushFree(int32_t pos) {
+	init(pos);
+	table_[pos].next_ = free_;
+	free_ = pos;
 }
 
 inline int32_t LRUTable::getStock() {

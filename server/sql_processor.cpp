@@ -66,6 +66,9 @@ bool SQLProcessorConfig::merge(
 		const SQLProcessorConfig *base, bool withDefaults) {
 	bool merged = false;
 
+	if (withDefaults) {
+		Manager::getInstance().mergeTo(*this);
+	}
 
 	if (base != NULL) {
 		merged |= merge(*base);

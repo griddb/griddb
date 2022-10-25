@@ -813,7 +813,7 @@ void SQLContainerImpl::CursorImpl::acceptIndexInfo(
 			profilerEntry->setColumnName(
 					*it, columnInfo.getColumnName(
 							txn, *objectManager,
-							container.getMetaAllcateStrategy()));
+							container.getMetaAllocateStrategy()));
 		}
 		profilerEntry->addIndexColumn(*it);
 	}
@@ -934,7 +934,7 @@ SQLContainerImpl::CursorImpl::predicateToContainerKey(
 		try {
 			KeyDataStoreValue keyStoreValue =
 					dataStore.getKeyDataStore()->get(alloc, containerId);
-			DSInputMes input(alloc, DS_GET_CONTAINR_OBJECT, ANY_CONTAINER);
+			DSInputMes input(alloc, DS_GET_CONTAINER_OBJECT, ANY_CONTAINER);
 			StackAllocAutoPtr<DSContainerOutputMes> ret(
 					alloc, static_cast<DSContainerOutputMes*>(
 							dataStore.exec(&txn, &keyStoreValue, &input)));
@@ -2692,7 +2692,7 @@ void SQLContainerImpl::CursorScope::initialize(ExtOpContext &cxt) {
 	ObjectManagerV4 *objectManager = dataStore->getObjectManager();
 	accessor_.frontFieldCache_ = UTIL_MAKE_LOCAL_UNIQUE(
 			accessor_.frontFieldCache_, BaseObject,
-			*objectManager, container->getRowAllcateStrategy());
+			*objectManager, container->getRowAllocateStrategy());
 	}
 	catch (std::exception& e) {
 		container->handleSearchError(txn_, e, GS_ERROR_DS_CON_STATUS_INVALID);
@@ -2797,7 +2797,7 @@ BaseContainer* SQLContainerImpl::CursorScope::getContainer(
 		KeyDataStoreValue keyStoreValue =
 				dataStore->getKeyDataStore()->get(alloc, location.id_);
 
-		DSInputMes input(alloc, DS_GET_CONTAINR_OBJECT, requiredType);
+		DSInputMes input(alloc, DS_GET_CONTAINER_OBJECT, requiredType);
 		DSContainerOutputMes *ret = static_cast<DSContainerOutputMes*>(
 				dataStore->exec(&txn, &keyStoreValue, &input));
 		return ret->container_;

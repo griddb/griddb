@@ -59,12 +59,24 @@
 #define UTIL_FAILURE_SIMULATION_ENABLED 0
 #endif
 
+#ifndef UTIL_MEMORY_POOL_AGGRESSIVE
+#define UTIL_MEMORY_POOL_AGGRESSIVE 0
+#endif
+
+#ifndef UTIL_MEMORY_POOL_PLACEMENT_NEW
+#define UTIL_MEMORY_POOL_PLACEMENT_NEW 0
+#endif
+
+#ifndef UTIL_MEMORY_ALLOCATE_INITIALIZE
+#define UTIL_MEMORY_ALLOCATE_INITIALIZE 0
+#endif
 
 
 #define UTIL_STACK_TRACE_ENABLED
 
 #if UTIL_FAILURE_SIMULATION_ENABLED || \
-	defined(UTIL_MEMORY_ALLOCATE_INITIALIZE) || \
+	UTIL_MEMORY_POOL_PLACEMENT_NEW || \
+	UTIL_MEMORY_ALLOCATE_INITIALIZE || \
 	defined(UTIL_DUMP_OPERATOR_DELETE)
 #define UTIL_PLACEMENT_NEW_ENABLED
 #endif
@@ -434,13 +446,13 @@ typedef std::basic_string< char8_t, std::char_traits<char8_t> > NormalString;
 } 
 
 
-#if UTIL_CXX11_SUPPORTED
+#if UTIL_CXX11_SUPPORTED_EXACT
 #define UTIL_NOEXCEPT noexcept
 #else
 #define UTIL_NOEXCEPT throw()
 #endif
 
-#if UTIL_CXX11_SUPPORTED
+#if UTIL_CXX11_SUPPORTED_EXACT
 #define UTIL_NULLPTR nullptr
 #else
 #define UTIL_NULLPTR NULL
@@ -511,6 +523,23 @@ typedef size_t blkcnt_t;
 typedef size_t fsblkcnt_t;
 #endif 
 
+} 
+
+namespace util {
+namespace detail {
+
+
+class MemoryManagerInitializer {
+public:
+	MemoryManagerInitializer() throw();
+	~MemoryManagerInitializer();
+};
+
+#if UTIL_MEMORY_POOL_AGGRESSIVE
+static MemoryManagerInitializer g_memoryManagerInitializer;
+#endif
+
+} 
 } 
 
 const int32_t ERROR_UNDEF = 0;
@@ -1248,15 +1277,55 @@ private:
 
 namespace util {
 namespace detail {
+struct FreeLink {
+	FreeLink *next_;
+};
 struct DirectAllocationUtils {
-	static void* allocate(size_t size);
-	static void deallocate(void *ptr);
+	enum {
+		LARGE_ELEMENT_BITS = 20,
+		ELEMENT_MARGIN_SIZE = sizeof(uint64_t) * 4
+	};
+
+	static void* allocate(size_t size, bool monitoring) UTIL_NOEXCEPT;
+	static void deallocate(void *ptr, bool monitoring) UTIL_NOEXCEPT;
+
+#if UTIL_MEMORY_POOL_AGGRESSIVE
+	static FreeLink* allocateBulk(
+			size_t size, bool monitoring, bool aligned,
+			size_t &count) UTIL_NOEXCEPT;
+	static void deallocateBulk(
+			FreeLink *link, size_t size, bool monitoring,
+			bool aligned) UTIL_NOEXCEPT;
+#endif
+
+	static void* allocateDirect(
+			size_t size, bool monitoring, bool aligned) UTIL_NOEXCEPT;
+	static void deallocateDirect(
+			void *ptr, size_t size, bool monitoring,
+			bool aligned) UTIL_NOEXCEPT;
+
+	static size_t adjustAllocationSize(
+			size_t size, bool withHead, size_t *index) UTIL_NOEXCEPT;
+
+	static size_t getUnitCount() UTIL_NOEXCEPT;
+	static bool getUnitProfile(
+			size_t index, int64_t &totalSize, int64_t &cacheSize,
+			int64_t &monitoringSize, int64_t &totalCount, int64_t &cacheCount,
+			int64_t &deallocCount) UTIL_NOEXCEPT;
+
+	static void dumpStats(std::ostream &os);
+	static void dumpSizeHistogram(std::ostream &os);
 };
 } 
 } 
 
-#define UTIL_MALLOC(size) util::detail::DirectAllocationUtils::allocate(size)
-#define UTIL_FREE(ptr) util::detail::DirectAllocationUtils::deallocate(ptr)
+#define UTIL_MALLOC(size) util::detail::DirectAllocationUtils::allocate(size, false)
+#define UTIL_FREE(ptr) util::detail::DirectAllocationUtils::deallocate(ptr, false)
+
+#define UTIL_MALLOC_MONITORING(size) \
+	util::detail::DirectAllocationUtils::allocate(size, true)
+#define UTIL_FREE_MONITORING(ptr) \
+	util::detail::DirectAllocationUtils::deallocate(ptr, true)
 
 
 
@@ -1280,6 +1349,7 @@ public:
 	static void set(int32_t targetType, uint64_t startCount, uint64_t endCount);
 
 	static void checkOperation(int32_t targetType, size_t size);
+	static bool checkOperationDirect(int32_t targetType, size_t size) UTIL_NOEXCEPT;
 
 	static uint64_t getLastOperationCount() { return lastOperationCount_; }
 
@@ -1302,11 +1372,16 @@ void operator delete[](void *p);
 #else
 
 #ifdef UTIL_PLACEMENT_NEW_ENABLED
-void* operator new(size_t size);
-void* operator new[](size_t size);
-void operator delete(void *p);
-void operator delete[](void *p);
+#if UTIL_CXX11_SUPPORTED
+#define UTIL_PLACEMENT_NEW_SPECIFIER
+#else
+#define UTIL_PLACEMENT_NEW_SPECIFIER throw(std::bad_alloc)
 #endif
+void* operator new(size_t size) UTIL_PLACEMENT_NEW_SPECIFIER;
+void* operator new[](size_t size) UTIL_PLACEMENT_NEW_SPECIFIER;
+void operator delete(void *p) UTIL_NOEXCEPT;
+void operator delete[](void *p) UTIL_NOEXCEPT;
+#endif 
 
 #endif	
 

@@ -29,7 +29,6 @@
 #include "partition_table.h"
 #include "cluster_manager.h"
 
-UTIL_TRACER_DECLARE(CLUSTER_OPERATION);
 UTIL_TRACER_DECLARE(SYNC_SERVICE);
 UTIL_TRACER_DECLARE(SYNC_DETAIL);
 UTIL_TRACER_DECLARE(CLUSTER_DUMP);
@@ -560,9 +559,6 @@ void SyncManager::recoveryPartition(PartitionId pId) {
 	partition.fullCheckpoint(CP_PHASE_PRE_WRITE);
 	partition.fullCheckpoint(CP_PHASE_PRE_SYNC);
 	partition.fullCheckpoint(CP_PHASE_FINISH);
-
-
-
 }
 
 
@@ -601,7 +597,7 @@ void SyncManager::setShorttermSyncLog(
 
 			GS_RETHROW_LOG_REDO_ERROR(
 				e, context, "Short term log redo failed",
-				", recieved [" << syncRequestInfo.getStartLsn()
+				", received [" << syncRequestInfo.getStartLsn()
 				<< ", " << syncRequestInfo.getEndLsn() << "]"
 				<< ", applied [" << startLsn << ", " << endLsn << "]");
 		}
@@ -1082,7 +1078,7 @@ void SyncManager::setLongtermSyncChunkAck(
 
 			GS_TRACE_SYNC(
 				context, "Long term log sync failed, log is not found or invalid",
-				", recieved [" << syncRequestInfo.getStartLsn()
+				", received [" << syncRequestInfo.getStartLsn()
 				<< ", " << syncRequestInfo.getEndLsn() << "]"
 				<< ", logStartLsn=" << pt_->getStartLSN(pId));
 		}
@@ -1216,7 +1212,7 @@ void SyncManager::setLongtermSyncLog(
 			LogSequentialNumber endLsn = pt_->getLSN(pId);
 			GS_RETHROW_LOG_REDO_ERROR(
 				e, context, "Long term log redo failed",
-				", recieved [" << syncRequestInfo.getStartLsn()
+				", received [" << syncRequestInfo.getStartLsn()
 				<< ", " << syncRequestInfo.getEndLsn() << "]"
 				<< ", applied [" << startLsn << ", " << endLsn << "]");
 		}
@@ -1890,9 +1886,9 @@ std::string SyncContext::dump(uint8_t detailMode) {
 		<< ", maxLsn=" << pt_->getMaxLsn(pId_)
 		<< ", logStartLsn=" << pt_->getStartLSN(pId_)
 		<< ", SSN=" << syncSequentialNumber_
-		<< ", revision=" << ptRev_.sequentialNumber_
+		<< ", revision=" << ptRev_.getRevisionNo()
 		<< ", mode=" << getSyncModeStr()
-		<< ", role=" << dumpPartitionRoleStatus(roleStatus_);
+		<< ", role=" << PartitionTable::dumpPartitionRoleStatus(roleStatus_);
 
 	if (detailMode == 4) {
 		if (roleStatus_ == PartitionTable::PT_OWNER) {
@@ -2113,11 +2109,11 @@ void SyncManager::Config::operator()(
 		break;
 	case CONFIG_TABLE_SYNC_LOCKCONFLICT_INTERVAL:
 		syncMgr_->getExtraConfig().setLockWaitInterval(
-			changeTimeSecToMill(value.get<int32_t>()));
+			CommonUtility::changeTimeSecondToMilliSecond(value.get<int32_t>()));
 		break;
 	case CONFIG_TABLE_SYNC_APPROXIMATE_WAIT_INTERVAL:
 		syncMgr_->getExtraConfig().setApproximateWaitInterval(
-			changeTimeSecToMill(value.get<int32_t>()));
+			CommonUtility::changeTimeSecondToMilliSecond(value.get<int32_t>()));
 		break;
 	case CONFIG_TABLE_SYNC_LONGTERM_LIMIT_QUEUE_SIZE:
 		syncMgr_->getExtraConfig().setLimitLongtermQueueSize(
@@ -2147,10 +2143,9 @@ void SyncManager::Config::operator()(
 
 void SyncManager::resetCurrentSyncId(SyncContext* context) {
 
-	if (context->getPartitionRevision().sequentialNumber_
-		>= currentSyncEntry_.ptRev_.sequentialNumber_) {
+	if (context->getPartitionRevision().getRevisionNo()
+		>= currentSyncEntry_.ptRev_.getRevisionNo()) {
 		currentSyncEntry_.reset();
-		currentSyncStatus_.clear();
 	}
 }
 
@@ -2169,15 +2164,15 @@ void SyncManager::checkCurrentContext(
 				syncId.contextId_, syncId.contextVersion_);
 
 		if (targetContext != NULL && !targetContext->isCatchupSync()) {
-			if (revision.sequentialNumber_
-				< targetContext->getPartitionRevision().sequentialNumber_) {
+			if (revision.getRevisionNo()
+				< targetContext->getPartitionRevision().getRevisionNo()) {
 
 				GS_THROW_SYNC_ERROR(
 					GS_ERROR_SYM_INVALID_PARTITION_REVISION,
 					targetContext,
 					"Target longterm sync is old", "latest revision="
-					<< targetContext->getPartitionRevision().sequentialNumber_
-					<< ", current revision=" << revision.sequentialNumber_);
+					<< targetContext->getPartitionRevision().getRevisionNo()
+					<< ", current revision=" << revision.getRevisionNo());
 			}
 			targetContext->setCatchupSync(false);
 			Event syncCheckEndEvent(
@@ -2239,10 +2234,10 @@ bool SyncManager::controlSyncLoad(
 			return false;
 		}
 	}
-	int64_t exeutableCount = 0;
+	int64_t executableCount = 0;
 	int64_t afterCount = 0;
 	waitTime = txnSvc_->getWaitTime(
-		ec, &ev, 0, 0, exeutableCount, afterCount, SYNC_EXEC);
+		ec, &ev, 0, 0, executableCount, afterCount, SYNC_EXEC);
 	return true;
 }
 
@@ -2269,7 +2264,7 @@ bool SyncContext::checkLongTermSync(
 		else {
 			pt_->clearCatchupRole(pId_);
 			pt_->setErrorStatus(
-				pId_, PT_ERROR_LONG_SYNC_FAIL);
+				pId_, PartitionTable::PT_ERROR_LONG_SYNC_FAIL);
 			return false;
 		}
 	}

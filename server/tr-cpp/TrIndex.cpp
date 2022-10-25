@@ -118,7 +118,7 @@ void TrIndex_dump(
 	TrNode_all_dump(txn, objectManager, strategy, idx->rootNodeOId);
 }
 
-/* serach an entry by using user-defined collision detection */
+/* search an entry by using user-defined collision detection */
 void TrIndex_search(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 	OId idxOId, TrCheckCallback ccb, void *ccbarg, TrHitCallback hcb,
 	void *hcbarg) {

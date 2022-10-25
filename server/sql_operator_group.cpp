@@ -18,7 +18,6 @@
 #include "sql_operator_group.h"
 
 
-
 const SQLOps::OpProjectionRegistrar
 SQLGroupOps::Registrar::REGISTRAR_INSTANCE((Registrar()));
 
@@ -943,7 +942,7 @@ uint64_t SQLGroupOps::Union::estimateHashMapSize(
 	tupleSet.addReaderColumnList(columnList);
 	tupleSet.addKeyList(keyList, (input == 0), false);
 	tupleSet.setReaderColumnsDeep(true);
-	tupleSet.setHeadNullAccesible(true);
+	tupleSet.setHeadNullAccessible(true);
 	tupleSet.completeColumns();
 
 	const size_t hashHeadSize = sizeof(uint64_t) * 2;
@@ -1543,7 +1542,7 @@ void SQLGroupOps::UnionHashContext::initializeTupleSet(
 	}
 
 	tupleSet->setReaderColumnsDeep(true);
-	tupleSet->setHeadNullAccesible(true);
+	tupleSet->setHeadNullAccessible(true);
 	tupleSet->setOrderedDigestRestricted(!digestOrdering);
 
 	tupleSet->completeColumns();

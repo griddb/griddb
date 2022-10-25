@@ -79,6 +79,8 @@ DataStoreConfig::DataStoreConfig(ConfigTable& configTable) :
 	setCheckErasableExpiredInterval(
 		configTable.get<int32_t>(CONFIG_TABLE_DS_PARTITION_BATCH_FREE_CHECK_INTERVAL),
 		configTable.get<int32_t>(CONFIG_TABLE_DS_CONCURRENCY));
+	setExpiredCheckCount(configTable.get<int32_t>(
+		CONFIG_TABLE_DS_PARTITION_BATCH_FREE_CHECK_CONTAINER_COUNT));
 	setStoreMemoryAgingSwapRate(configTable.get<double>(CONFIG_TABLE_DS_STORE_MEMORY_AGING_SWAP_RATE));
 
 	int32_t chunkExpSize = util::nextPowerBitsOf2(
@@ -102,6 +104,7 @@ void DataStoreConfig::setUpConfigHandler(ConfigTable& configTable) {
 	configTable.setParamHandler(CONFIG_TABLE_DS_ROW_ARRAY_RATE_EXPONENT, *this);
 	configTable.setParamHandler(CONFIG_TABLE_DS_ROW_ARRAY_SIZE_CONTROL_MODE, *this);
 	configTable.setParamHandler(CONFIG_TABLE_DS_PARTITION_BATCH_FREE_CHECK_INTERVAL, *this);
+	configTable.setParamHandler(CONFIG_TABLE_DS_PARTITION_BATCH_FREE_CHECK_CONTAINER_COUNT, *this);
 	configTable.setParamHandler(CONFIG_TABLE_DS_STORE_MEMORY_AGING_SWAP_RATE, *this);
 }
 
@@ -141,6 +144,9 @@ void DataStoreConfig::operator()(
 		break;
 	case CONFIG_TABLE_DS_PARTITION_BATCH_FREE_CHECK_INTERVAL:
 		setCheckErasableExpiredInterval(value.get<int32_t>());
+		break;
+	case CONFIG_TABLE_DS_PARTITION_BATCH_FREE_CHECK_CONTAINER_COUNT:
+		setExpiredCheckCount(value.get<int32_t>());
 		break;
 	case CONFIG_TABLE_DS_STORE_MEMORY_AGING_SWAP_RATE:
 		setStoreMemoryAgingSwapRate(value.get<double>());
@@ -491,10 +497,10 @@ void DataStoreV4::removeColumnSchema(
 		int32_t status =
 			schemaMap.get()->remove(txn, schemaHashKey, schemaOId, isCaseSensitive);
 		if ((status & BtreeMap::ROOT_UPDATE) != 0) {
-			DataStorePartitionHeaderObject partitionHeadearObject(
+			DataStorePartitionHeaderObject partitionHeaderObject(
 				*getObjectManager(),
 				allocateStrategy_, headerOId_);
-			partitionHeadearObject.setSchemaMapOId(
+			partitionHeaderObject.setSchemaMapOId(
 				schemaMap.get()->getBaseOId());
 		}
 		finalizeSchema(
@@ -529,7 +535,7 @@ void DataStoreV4::finalizeContainer(TransactionContext &txn, BaseContainer *cont
 				<< ", containerId = " << container->getContainerId());
 	} else {
 		BackgroundData bgData;
-		bgData.setDropContainerData(container->getMetaAllcateStrategy().getGroupId(), 
+		bgData.setDropContainerData(container->getMetaAllocateStrategy().getGroupId(), 
 			container->getBaseOId(), container->getContainerExpirationTime());
 		insertBGTask(txn, bgData);
 
@@ -540,7 +546,7 @@ void DataStoreV4::finalizeContainer(TransactionContext &txn, BaseContainer *cont
 	}
 }
 
-void DataStoreV4::finalizeMap(TransactionContext &txn, const AllocateStrategy &allcateStrategy, 
+void DataStoreV4::finalizeMap(TransactionContext &txn, const AllocateStrategy &allocateStrategy, 
 	BaseIndex *index, Timestamp expirationTime) {
 	if (index == NULL) {
 		return;
@@ -554,7 +560,7 @@ void DataStoreV4::finalizeMap(TransactionContext &txn, const AllocateStrategy &a
 				<< ", oId = " << index->getBaseOId());
 	} else {
 		BackgroundData bgData;
-		bgData.setDropIndexData(index->getMapType(), allcateStrategy.getGroupId(), index->getBaseOId(), expirationTime);
+		bgData.setDropIndexData(index->getMapType(), allocateStrategy.getGroupId(), index->getBaseOId(), expirationTime);
 		insertBGTask(txn, bgData);
 
 		GS_TRACE_INFO(
@@ -794,9 +800,9 @@ void DataStoreV4::initializeHeader(TransactionContext& txn) {
 	DSObjectSize requestSize = sizeof(DataStorePartitionHeader);
 	headerOId_ = keyStore_->put(txn, getStoreType(), requestSize);
 
-	DataStorePartitionHeaderObject partitionHeadearObject(
+	DataStorePartitionHeaderObject partitionHeaderObject(
 		*getObjectManager(), allocateStrategy_);
-	partitionHeadearObject.initialize(txn, allocateStrategy_, headerOId_);
+	partitionHeaderObject.initialize(txn, allocateStrategy_, headerOId_);
 }
 
 
@@ -894,26 +900,26 @@ PutStatus DataStoreV4::changeContainer(TransactionContext& txn,
 			DATA_STORE, GS_TRACE_DS_DS_UPDATE_CONTAINER, "Change shema");
 		status = PutStatus::UPDATE;
 		break;
-	case DataStoreV4::PROPERY_DIFFERENCE:
+	case DataStoreV4::PROPERLY_DIFFERENCE:
 		changeContainerProperty(
 			txn, container, messageSchema);
 		GS_TRACE_INFO(
 			DATA_STORE, GS_TRACE_DS_DS_UPDATE_CONTAINER, "Change property");
-		status = PutStatus::CHANGE_PROPERY;
+		status = PutStatus::CHANGE_PROPERLY;
 		break;
 	case DataStoreV4::ONLY_TABLE_PARTITIONING_VERSION_DIFFERENCE:
 		changeTablePartitioningVersion(
 			txn, container, messageSchema);
 		GS_TRACE_INFO(
 			DATA_STORE, GS_TRACE_DS_DS_UPDATE_CONTAINER, "Change table partitioning version");
-		status = PutStatus::CHANGE_PROPERY;
+		status = PutStatus::CHANGE_PROPERLY;
 		break;
 	case DataStoreV4::COLUMNS_ADD:
 		addContainerSchema(
 			txn, container, messageSchema);
 		GS_TRACE_INFO(
 			DATA_STORE, GS_TRACE_DS_DS_UPDATE_CONTAINER, "Column add");
-		status = PutStatus::CHANGE_PROPERY;
+		status = PutStatus::CHANGE_PROPERLY;
 		break;
 	default:
 		assert(schemaState == DataStoreV4::SAME_SCHEMA);
@@ -1004,15 +1010,15 @@ void DataStoreV4::addContainerSchema(TransactionContext &txn,
 	ContainerType containerType = container->getContainerType();
 	OId schemaOId = insertColumnSchema(txn, messageSchema);
 
-	OId oldSchmaOId = container->getColumnSchemaId();
+	OId oldSchemaOId = container->getColumnSchemaId();
 	container->changeProperty(txn, schemaOId);
 	container->setTablePartitioningVersionId(messageSchema->getTablePartitioningVersionId());
 
 	OId containerOId = container->getBaseOId();
 	ALLOC_DELETE(txn.getDefaultAllocator(), container);
-	if (oldSchmaOId != UNDEF_OID) {
+	if (oldSchemaOId != UNDEF_OID) {
 		removeColumnSchema(
-			txn, oldSchmaOId);
+			txn, oldSchemaOId);
 	}
 
 	container = getBaseContainer(txn, containerOId, containerType);
@@ -1067,10 +1073,10 @@ OId DataStoreV4::insertColumnSchema(TransactionContext &txn,
 		int32_t status =
 			schemaMap.get()->insert(txn, schemaHashKey, schemaOId, isCaseSensitive);
 		if ((status & BtreeMap::ROOT_UPDATE) != 0) {
-			DataStorePartitionHeaderObject partitionHeadearObject(
+			DataStorePartitionHeaderObject partitionHeaderObject(
 				*getObjectManager(),
 				allocateStrategy_, headerOId_);
-			partitionHeadearObject.setSchemaMapOId(
+			partitionHeaderObject.setSchemaMapOId(
 				schemaMap.get()->getBaseOId());
 		}
 	}
@@ -1088,11 +1094,11 @@ OId DataStoreV4::insertColumnSchema(TransactionContext &txn,
 BtreeMap *DataStoreV4::getSchemaMap(TransactionContext &txn) {
 	BtreeMap *schemaMap = NULL;
 
-	DataStorePartitionHeaderObject partitionHeadearObject(
+	DataStorePartitionHeaderObject partitionHeaderObject(
 		*getObjectManager(), allocateStrategy_, headerOId_);
 	schemaMap =
 		ALLOC_NEW(txn.getDefaultAllocator()) BtreeMap(txn, *getObjectManager(),
-			partitionHeadearObject.getSchemaMapOId(), allocateStrategy_);
+			partitionHeaderObject.getSchemaMapOId(), allocateStrategy_);
 	return schemaMap;
 }
 
@@ -1157,20 +1163,20 @@ BaseContainer *DataStoreV4::getBaseContainer(TransactionContext &txn,
 BtreeMap *DataStoreV4::getBackgroundMap(TransactionContext &txn) {
 	BtreeMap *schemaMap = NULL;
 
-	DataStorePartitionHeaderObject partitionHeadearObject(
+	DataStorePartitionHeaderObject partitionHeaderObject(
 		*getObjectManager(), allocateStrategy_, headerOId_);
 	schemaMap =
 		ALLOC_NEW(txn.getDefaultAllocator()) BtreeMap(txn, *getObjectManager(),
-			partitionHeadearObject.getBackgroundMapOId(), allocateStrategy_);
+			partitionHeaderObject.getBackgroundMapOId(), allocateStrategy_);
 	return schemaMap;
 }
 BackgroundId DataStoreV4::insertBGTask(TransactionContext &txn, 
 	BackgroundData &bgData) {
 
-	DataStorePartitionHeaderObject partitionHeadearObject(
+	DataStorePartitionHeaderObject partitionHeaderObject(
 		*getObjectManager(), allocateStrategy_, headerOId_);
 
-	BackgroundId bgId = partitionHeadearObject.allocateBackgroundId();
+	BackgroundId bgId = partitionHeaderObject.allocateBackgroundId();
 
 	{
 		StackAllocAutoPtr<BtreeMap> bgMap(
@@ -1180,7 +1186,7 @@ BackgroundId DataStoreV4::insertBGTask(TransactionContext &txn,
 		int32_t status =
 			bgMap.get()->insert<BackgroundId, BackgroundData>(txn, bgId, bgData, isCaseSensitive);
 		if ((status & BtreeMap::ROOT_UPDATE) != 0) {
-			partitionHeadearObject.setBackgroundMapOId(
+			partitionHeaderObject.setBackgroundMapOId(
 				bgMap.get()->getBaseOId());
 		}
 	}
@@ -1198,9 +1204,9 @@ void DataStoreV4::removeBGTask(TransactionContext &txn, BackgroundId bgId,
 	int32_t status =
 		bgMap.get()->remove<BackgroundId, BackgroundData>(txn, bgId, bgData, isCaseSensitive);
 	if ((status & BtreeMap::ROOT_UPDATE) != 0) {
-		DataStorePartitionHeaderObject partitionHeadearObject(
+		DataStorePartitionHeaderObject partitionHeaderObject(
 			*getObjectManager(), allocateStrategy_, headerOId_);
-		partitionHeadearObject.setBackgroundMapOId(
+		partitionHeaderObject.setBackgroundMapOId(
 			bgMap.get()->getBaseOId());
 	}
 	activeBackgroundCount_--;
@@ -1215,9 +1221,9 @@ void DataStoreV4::updateBGTask(TransactionContext &txn, BackgroundId bgId,
 	int32_t status =
 		bgMap.get()->update<BackgroundId, BackgroundData>(txn, bgId, beforBgData, afterBgData, isCaseSensitive);
 	if ((status & BtreeMap::ROOT_UPDATE) != 0) {
-		DataStorePartitionHeaderObject partitionHeadearObject(
+		DataStorePartitionHeaderObject partitionHeaderObject(
 			*getObjectManager(), allocateStrategy_, headerOId_);
-		partitionHeadearObject.setBackgroundMapOId(
+		partitionHeaderObject.setBackgroundMapOId(
 			bgMap.get()->getBaseOId());
 	}
 }
@@ -1248,15 +1254,15 @@ void DataStoreV4::restoreLastExpiredTime(TransactionContext &txn, ClusterService
 	const DataStoreV4::Latch latch(
 		txn, this, clusterService);
 
-	DataStorePartitionHeaderObject partitionHeadearObject(
+	DataStorePartitionHeaderObject partitionHeaderObject(
 		*getObjectManager(), allocateStrategy_, headerOId_);
 
 	dsStats_.setTimestamp(
 			DataStoreStats::DS_STAT_EXPIRED_TIME,
-			partitionHeadearObject.getLatestCheckTime());
+			partitionHeaderObject.getLatestCheckTime());
 	dsStats_.setTimestamp(
 			DataStoreStats::DS_STAT_BATCH_FREE_TIME,
-			partitionHeadearObject.getLatestBatchFreeTime());
+			partitionHeaderObject.getLatestBatchFreeTime());
 }
 
 /*!
@@ -1337,7 +1343,7 @@ void DataStoreV4::restoreGroupId(
 			DatabaseId dbId = containerKey.getComponents(alloc, false).dbId_;
 
 			container->getAffinityStr(affinityStr);
-			int32_t affinityId = calcAffnityGroupId(affinityStr);
+			int32_t affinityId = calcAffinityGroupId(affinityStr);
 
 			ChunkKey chunkKey = container->getChunkKey();
 			DSGroupId groupId = container->getBaseGroupId();
@@ -1368,11 +1374,11 @@ void DataStoreV4::restoreV4ChunkIdMap(
 	const DataStoreV4::Latch latch(
 		txn, this, clusterService);
 
-	DataStorePartitionHeaderObject partitionHeadearObject(
+	DataStorePartitionHeaderObject partitionHeaderObject(
 		*getObjectManager(), allocateStrategy_, headerOId_);
 
 	BtreeMap v4chunkIdMap(
-		txn, *getObjectManager(), partitionHeadearObject.getV4chunkIdMapOId(), allocateStrategy_, NULL);
+		txn, *getObjectManager(), partitionHeaderObject.getV4chunkIdMapOId(), allocateStrategy_, NULL);
 
 	BtreeMap::BtreeCursor btreeCursor;
 	while (1) {
@@ -1624,9 +1630,9 @@ void DataStoreV4::setLastExpiredTime(Timestamp time, bool force) {
 		return;
 	}
 
-	DataStorePartitionHeaderObject partitionHeadearObject(
+	DataStorePartitionHeaderObject partitionHeaderObject(
 		*objectManager_, allocateStrategy_, headerOId_);
-	partitionHeadearObject.setLatestCheckTime(time, force);
+	partitionHeaderObject.setLatestCheckTime(time, force);
 
 	if (setLatestTimeToStats(
 			time, force, DataStoreStats::DS_STAT_BATCH_FREE_TIME)) {
@@ -1640,9 +1646,9 @@ void DataStoreV4::setLatestBatchFreeTime(Timestamp time, bool force) {
 	if (!isActive()) {
 		return;
 	}
-	DataStorePartitionHeaderObject partitionHeadearObject(
+	DataStorePartitionHeaderObject partitionHeaderObject(
 		*objectManager_, allocateStrategy_, headerOId_);
-	partitionHeadearObject.setLatestBatchFreeTime(time, force);
+	partitionHeaderObject.setLatestBatchFreeTime(time, force);
 
 	if (setLatestTimeToStats(
 			time, force, DataStoreStats::DS_STAT_BATCH_FREE_TIME)) {
@@ -2001,6 +2007,9 @@ void DataStoreV4::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.setMin(60)
 		.setDefault(60*60*6)
 		.setMax(INT32_MAX);
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_PARTITION_BATCH_FREE_CHECK_CONTAINER_COUNT, INT32)
+		.setDefault(5000)
+		.setMax(INT32_MAX);
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DS_STORE_MEMORY_REDISTRIBUTE_SHIFTABLE_MEMORY_RATE, INT32)
 		.setMin(0)
 		.setMax(100)
@@ -2220,7 +2229,7 @@ Serializable* DataStoreV4::exec(TransactionContext* txn, KeyDataStoreValue* stor
 		case DS_DROP_CONTAINER: {
 			return execEvent(txn, storeValue, input->value_.dropContainer_);
 		} break;
-		case DS_GET_CONTAINR: {
+		case DS_GET_CONTAINER: {
 			return execEvent(txn, storeValue, input->value_.getContainer_);
 		} break;
 		case DS_CREATE_INDEX: {
@@ -2286,7 +2295,7 @@ Serializable* DataStoreV4::exec(TransactionContext* txn, KeyDataStoreValue* stor
 		case DS_QUERY_CLOSE_RESULT_SET: {
 			return execEvent(txn, storeValue, input->value_.queryCloseResultSet_);
 		} break;
-		case DS_GET_CONTAINR_OBJECT: {
+		case DS_GET_CONTAINER_OBJECT: {
 			return execEvent(txn, storeValue, input->value_.getContainerObject_);
 		} break;
 		case DS_SCAN_CHUNK_GROUP: {
@@ -3412,7 +3421,7 @@ bool DataStoreV4::support(Support type) {
 	case Support::TRIGGER:
 		isSupport = false;
 		break;
-	defalut:
+	default:
 		assert(false);
 		break;
 	}
@@ -3457,7 +3466,7 @@ void DataStoreV4::checkContainerSchemaVersion(
 DSGroupId DataStoreV4::getGroupId(DatabaseId dbId, const util::String& affinityStr, ChunkKey chunkKey) {
 	const int32_t groupNum = 2;
 
-	int32_t affinityId = calcAffnityGroupId(affinityStr);
+	int32_t affinityId = calcAffinityGroupId(affinityStr);
 	if (strcmp(affinityStr.c_str(), UNIQUE_GROUP_ID_KEY) == 0) {
 		DSGroupId groupId = keyStore_->allocateGroupId(groupNum);
 		groupKeyMap_.insert(std::make_pair(GroupKey(dbId, groupId, affinityId, chunkKey), 1));
@@ -3479,7 +3488,7 @@ DSGroupId DataStoreV4::getGroupId(DatabaseId dbId, const util::String& affinityS
 }
 
 bool DataStoreV4::removeGroupId(DatabaseId dbId, const util::String& affinityStr, ChunkKey chunkKey, DSGroupId groupId) {
-	int32_t affinityId = calcAffnityGroupId(affinityStr);
+	int32_t affinityId = calcAffinityGroupId(affinityStr);
 
 	bool isGroupEmpty = false;
 	GroupKey groupKey(dbId, groupId, affinityId, chunkKey);

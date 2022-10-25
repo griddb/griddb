@@ -204,7 +204,6 @@ struct SQLCoreExprs::Specs {
 
 	template<int C> struct Spec<SQLType::FUNC_COALESCE, C> {
 		typedef Base::Type<TupleTypes::TYPE_NULL, Base::InList<
-				typename Base::PromotableAnyIn,
 				typename Base::PromotableAnyIn>,
 				ExprSpec::FLAG_INHERIT1 | ExprSpec::FLAG_REPEAT1> Type;
 	};
@@ -452,9 +451,9 @@ struct SQLCoreExprs::VariantTypes {
 	private:
 		enum {
 			FLOATING_NUM = COUNT_INTEGRAL + COUNT_FLOATING - 1,
-			FLAOTING_PROMO = (I >= COUNT_BASIC_TYPE),
-			SRC_BASIC_NUM = (I - (FLAOTING_PROMO ? COUNT_BASIC_TYPE : 0)),
-			DEST_BASIC_NUM = (FLAOTING_PROMO ? FLOATING_NUM : SRC_BASIC_NUM)
+			FLOATING_PROMO = (I >= COUNT_BASIC_TYPE),
+			SRC_BASIC_NUM = (I - (FLOATING_PROMO ? COUNT_BASIC_TYPE : 0)),
+			DEST_BASIC_NUM = (FLOATING_PROMO ? FLOATING_NUM : SRC_BASIC_NUM)
 		};
 
 		typedef ColumnTypeByBasic<SRC_BASIC_NUM> SrcBaseType;

@@ -31,11 +31,22 @@
 #include "partition_table.h"
 #include "util/net.h"
 
-
 class EventEngine;
 
 typedef std::set<AddressInfo> NodeAddressSet;
 typedef NodeAddressSet::iterator NodeAddressSetItr;
+
+#define TRACE_CLUSTER_EXCEPTION(e, eventType, level, str) \
+	UTIL_TRACE_EXCEPTION_##level(CLUSTER_SERVICE, e,      \
+		str << ", eventType=" << getEventTypeName(eventType) << ", reason=" << GS_EXCEPTION_MESSAGE(e));
+
+#define TRACE_CLUSTER_EXCEPTION_FORCE(errorCode, message)       \
+	try {                                                       \
+		GS_THROW_USER_ERROR(errorCode, message);                \
+	}                                                           \
+	catch (std::exception & e) {                                \
+		UTIL_TRACE_EXCEPTION_WARNING(CLUSTER_OPERATION, e, ""); \
+	}
 
 /*!
 	@brief cluster notification mode
@@ -44,6 +55,16 @@ enum ClusterNotificationMode {
 	NOTIFICATION_MULTICAST,
 	NOTIFICATION_FIXEDLIST,
 	NOTIFICATION_RESOLVER
+};
+
+
+/*!
+	@brief Status of ChangePartition
+*/
+enum ChangePartitionType {
+	PT_CHANGE_NORMAL,
+	PT_CHANGE_SYNC_START,
+	PT_CHANGE_SYNC_END
 };
 
 class ClusterService;
@@ -550,7 +571,6 @@ public:
 		PartitionRevisionNo getPartitionRevisionNo() {
 			return partitionSequentialNumber_;
 		}
-
 
 		void setPartition0NodeAddr(NodeAddress& nodeAddr) {
 			partition0NodeAddr_ = nodeAddr;
@@ -1161,10 +1181,11 @@ public:
 		UpdatePartitionInfo(util::StackAllocator& alloc,
 			NodeId nodeId,
 			PartitionTable* pt,
+			DropPartitionNodeInfo &dropPartitionNodeInfo,
 			bool isAddNewNode = false,
 			bool needUpdatePartition = false)
 			: ClusterManagerInfo(alloc, nodeId),
-			dropPartitionNodeInfo_(alloc),
+			dropPartitionNodeInfo_(dropPartitionNodeInfo),
 			shorttermSyncPosList_(alloc),
 			changePartitionPosList_(alloc),
 			longtermSyncPosList_(alloc),
@@ -1199,7 +1220,7 @@ public:
 			return needUpdatePartition_;
 		}
 
-		SubPartitionTable& getSubPartitionTable() {
+		PartitionTable::SubPartitionTable& getSubPartitionTable() {
 			return subPartitionTable_;
 		}
 
@@ -1213,7 +1234,7 @@ public:
 		DropPartitionNodeInfo& getDropPartitionNodeInfo() {
 			return dropPartitionNodeInfo_;
 		}
-		DropPartitionNodeInfo dropPartitionNodeInfo_;
+		DropPartitionNodeInfo &dropPartitionNodeInfo_;
 		bool isAddNewNode() {
 			return isAddNewNode_;
 		}
@@ -1229,7 +1250,7 @@ public:
 			return longtermSyncPosList_;
 		}
 
-		util::Vector<PartitionId>& getChangePartitonPIdList() {
+		util::Vector<PartitionId>& getChangePartitionPIdList() {
 			return changePartitionPosList_;
 		}
 
@@ -1238,7 +1259,7 @@ public:
 
 	private:
 
-		SubPartitionTable subPartitionTable_;
+		PartitionTable::SubPartitionTable subPartitionTable_;
 		AddressInfoList nodeList_;
 		LsnList maxLsnList_;
 		util::Vector<PartitionId> shorttermSyncPosList_;
@@ -1422,11 +1443,11 @@ private:
 		clusterInfo_.isInitialCluster_ = isInitialCluster;
 	}
 
-	int32_t getIntialClusterNum() {
+	int32_t getInitialClusterNum() {
 		return clusterInfo_.initialClusterConstructNum_;
 	}
 
-	void setIntialClusterNum(int32_t initalClusterNum) {
+	void setInitialClusterNum(int32_t initalClusterNum) {
 		clusterInfo_.initialClusterConstructNum_
 			= initalClusterNum;
 	}
@@ -1459,7 +1480,7 @@ private:
 
 	void setPartition0NodeAddr(NodeAddress& nodeAddr) {
 		util::LockGuard<util::Mutex> lock(clusterLock_);
-		clusterInfo_.partition0NodeAddr_ = nodeAddr;
+ 		clusterInfo_.partition0NodeAddr_ = nodeAddr;
 	}
 
 	bool isNewNode() {
@@ -1516,7 +1537,7 @@ private:
 		}
 	}
 
-	void detectMutliMaster();
+	void detectMultiMaster();
 
 	void setSecondMaster(
 		NodeAddress& secondMasterNode);
@@ -1536,23 +1557,23 @@ private:
 		static const int32_t DEFAULT_CLEAR_BLOCK_INTERVAL = 60;
 
 		ClusterConfig(const ConfigTable& config) {
-			heartbeatInterval_ = changeTimeSecToMill(
+			heartbeatInterval_ = CommonUtility::changeTimeSecondToMilliSecond(
 				config.get<int32_t>(
 					CONFIG_TABLE_CS_HEARTBEAT_INTERVAL));
 
-			notifyClusterInterval_ = changeTimeSecToMill(
+			notifyClusterInterval_ = CommonUtility::changeTimeSecondToMilliSecond(
 				config.get<int32_t>(
 					CONFIG_TABLE_CS_NOTIFICATION_INTERVAL));
 
-			notifyClientInterval_ = changeTimeSecToMill(
+			notifyClientInterval_ = CommonUtility::changeTimeSecondToMilliSecond(
 				config.get<int32_t>(
 					CONFIG_TABLE_TXN_NOTIFICATION_INTERVAL));
 
-			checkLoadBalanceInterval_ = changeTimeSecToMill(
+			checkLoadBalanceInterval_ = CommonUtility::changeTimeSecondToMilliSecond(
 				config.get<int32_t>(
 					CONFIG_TABLE_CS_LOADBALANCE_CHECK_INTERVAL));
 
-			shortTermTimeoutInterval_ = changeTimeSecToMill(
+			shortTermTimeoutInterval_ = CommonUtility::changeTimeSecondToMilliSecond(
 				config.get<int32_t>(
 					CONFIG_TABLE_SYNC_TIMEOUT_INTERVAL));
 
@@ -1560,7 +1581,7 @@ private:
 
 			ruleLimitInterval_
 				= shortTermTimeoutInterval_ + heartbeatInterval_ * 2;
-			checkDropInterval_ = changeTimeSecToMill(
+			checkDropInterval_ = CommonUtility::changeTimeSecondToMilliSecond(
 				config.get<int32_t>(
 					CONFIG_TABLE_CS_DROP_CHECK_INTERVAL));
 
@@ -1588,8 +1609,8 @@ private:
 			return checkDropInterval_;
 		}
 
-		int32_t setCheckDropInterval(int32_t interval) {
-			return checkDropInterval_ = interval;
+		void setCheckDropInterval(int32_t interval) {
+			checkDropInterval_ = interval;
 		}
 
 		const std::string getSetClusterName() const {
@@ -1662,9 +1683,9 @@ private:
 
 		ExtraConfig() {
 			clusterReconstructWaitTime_ =
-				changeTimeSecToMill(CS_RECONSTRUCT_WAIT_TIME);
+				CommonUtility::changeTimeSecondToMilliSecond(CS_RECONSTRUCT_WAIT_TIME);
 			maxClusterNameSize_ = CLUSTER_NAME_STRING_MAX;
-			nextHeartbeatMargin_ = changeTimeSecToMill(
+			nextHeartbeatMargin_ = CommonUtility::changeTimeSecondToMilliSecond(
 				NEXT_HEARTBEAT_MARGIN);
 		}
 
@@ -1842,8 +1863,8 @@ private:
 		*/
 		struct ClusterErrorStatus {
 
-			ClusterErrorStatus() : detectMutliMaster_(false) {};
-			bool detectMutliMaster_;
+			ClusterErrorStatus() : detectMultiMaster_(false) {};
+			bool detectMultiMaster_;
 		};
 
 		volatile bool isSystemError_;

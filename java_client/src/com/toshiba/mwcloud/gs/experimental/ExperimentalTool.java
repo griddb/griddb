@@ -167,7 +167,7 @@ public class ExperimentalTool {
 	public static void putUser(
 			GridStore store, String name, UserInfo info, boolean modifiable)
 			throws GSException {
-		Experimentals.get(store).putUser(name, info, modifiable);
+		Experimentals.get(store).putUser(name, info, modifiable, false);
 	}
 
 	public static void dropUser(GridStore store, String name)
@@ -175,13 +175,15 @@ public class ExperimentalTool {
 		Experimentals.get(store).dropUser(name);
 	}
 
-	public static void dropRole(GridStore store, String name)
-			throws GSException {
-	}
-
 	public static void putRole(
 			GridStore store, String name)
 			throws GSException {
+		Experimentals.get(store).putUser(name, null, false, true);
+	}
+
+	public static void dropRole(GridStore store, String name)
+			throws GSException {
+		Experimentals.get(store).dropUser(name);
 	}
 
 	public static Map<String, UserInfo> getUsers(GridStore store)

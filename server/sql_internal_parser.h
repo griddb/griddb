@@ -3206,7 +3206,7 @@ SQLPARSER_SAFE_DELETE((yypminor->yy323));
 		util::String* fieldStr = SyntaxTree::tokenToString(
 				parser->getSQLAllocator(), yymsp[0].minor.yy0, false);
 		SQL_PARSER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, yymsp[0].minor.yy0,
-				"Unknwon field: " << fieldStr->c_str());
+				"Unknown field: " << fieldStr->c_str());
 		break;
 	}
 	yygotominor.yy286 = SyntaxTree::Expr::makeExpr(parser->getSQLAllocator(), SQLType::EXPR_CONSTANT);

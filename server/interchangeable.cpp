@@ -159,6 +159,11 @@ void InterchangeableStoreMemory::updateBufferSize(int64_t newStoreMemLimit) {
 		load.limitNum_ = bufferSize / partitionGroupNum_;
 		load.lastBaseLimit_ = bufferSize / partitionGroupNum_;
 	}
+	for (auto& itr : chunkBuffers_) {
+		if (itr) {
+			itr->setStoreMemoryLimitBlockCount(chunkBufferLimit);
+		}
+	}
 }
 
 void InterchangeableStoreMemory::updateShiftableMemRate(int32_t shiftableMemRate) {

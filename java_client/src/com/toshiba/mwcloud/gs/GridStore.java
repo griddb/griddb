@@ -32,7 +32,7 @@ import java.util.Map;
  * できません。コンテナ名は、ベースコンテナ名単独、もしくは、ベースコンテナ名の
  * 後ろにノードアフィニティ名をアットマーク「@」で連結した形式で表記します。
  * その他、コンテナの定義において使用できるコンテナ名の文字種や長さには制限が
- * あります。具体的には、GridDBテクニカルリファレンスを参照してください。
+ * あります。具体的には、GridDB機能リファレンスを参照してください。
  * 特に記載のない限り、コンテナ名を指定する操作では、ASCIIの大文字・小文字
  * 表記の違いは区別されません。</p>
  *
@@ -78,7 +78,7 @@ import java.util.Map;
  * different only in uppercase and lowercase ASCII characters cannot
  * be defined in a database. A container name is represented by only
  * a base container name or by connecting the base name and a node
- * affinity name with '@'. See the GridDB Technical Reference for the
+ * affinity name with '@'. See the GridDB Features Reference for the
  * details. In the operations specifying a container name, uppercase
  * and lowercase ASCII characters are identified as the same unless
  * otherwise noted.</p>
@@ -1763,7 +1763,7 @@ public interface GridStore extends Closeable {
 	 *
 	 * <p>一度に大量のロウを取得しようとした場合、GridDBノードが管理する
 	 * 通信バッファのサイズの上限に到達し、失敗することがあります。
-	 * 上限サイズについては、GridDBテクニカルリファレンスを参照してください。</p>
+	 * 上限サイズについては、GridDB機能リファレンスを参照してください。</p>
 	 *
 	 * <p>送出する{@link GSException}は、{@code container}パラメータを含む
 	 * ことがあります。エラーに関するパラメータの詳細は、{@link GridStore}の定義を
@@ -1837,7 +1837,7 @@ public interface GridStore extends Closeable {
 	 * <p>If the system tries to acquire a large number of Rows all at once,
 	 * the upper limit of the communication buffer size managed by the GridDB
 	 * node may be reached, possibly resulting in a failure.
-	 * Refer to "System limiting values" in the GridDB Technical Reference for the upper limit size.</p>
+	 * Refer to "System limiting values" in the GridDB Features Reference for the upper limit size.</p>
 	 *
 	 * <p>The thrown {@link GSException} may contain {@code container}
 	 * parameter. For the details of the parameters
@@ -2065,7 +2065,7 @@ public interface GridStore extends Closeable {
 	 *
 	 * <p>一度に大量のロウを取得しようとした場合、GridDBノードが管理する
 	 * 通信バッファのサイズの上限に到達し、失敗することがあります。
-	 * 上限サイズについては、GridDBテクニカルリファレンスを参照してください。</p>
+	 * 上限サイズについては、GridDB機能リファレンスを参照してください。</p>
 	 *
 	 * <p>送出する{@link GSException}は、{@code container}パラメータを含む
 	 * ことがあります。エラーに関するパラメータの詳細は、{@link GridStore}の定義を
@@ -2146,7 +2146,7 @@ public interface GridStore extends Closeable {
 	 * <p>If the system tries to acquire a large number of Rows all at once,
 	 * the upper limit of the communication buffer size managed by the GridDB
 	 * node may be reached, possibly resulting in a failure.
-	 * Refer to "System limiting values" in the GridDB Technical Reference for the upper limit size.</p>
+	 * Refer to "System limiting values" in the GridDB Features Reference for the upper limit size.</p>
 	 *
 	 * <p>The thrown {@link GSException} may contain {@code container}
 	 * parameter. For the details of the parameters

@@ -960,9 +960,9 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 					bindType.castContainer(container);
 		}
 
-		final ContainerType containerType =
-				RowMapper.BindingTool.findContainerType(bindType);
 		final ContainerInfo info = findContainerInfo(props);
+		final ContainerType containerType = resolveContainerType(
+				RowMapper.BindingTool.findContainerType(bindType), info);
 
 		final ContainerKeyConverter keyConverter =
 				getContainerKeyConverter(internalMode, true);
@@ -3831,7 +3831,6 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 
 		List<UserInfo> list = new LinkedList<UserInfo>();
 		for (int i = 0; i < userInfoCount; i++) {
-
 			String userName = resp.getString();		
 			Byte property = resp.base().get();		
 			Boolean passwordExist = resp.getBoolean();	
@@ -3844,8 +3843,8 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 			list.add(new UserInfo(userName, hashPassword, (Boolean)(property != 0), false, ""));
 		}
 		for (int i = 0; i < userInfoCount; i++) {
-			Boolean isGroupMapping = resp.getBoolean();
-			String roleName = resp.getString();
+			Boolean isGroupMapping = resp.getBoolean();	
+			String roleName = resp.getString();		
 			
 			if (list.get(i).getName().length() > 0) {
 				map.put(list.get(i).getName(), new UserInfo(list.get(i).getName(), list.get(i).getHashPassword(), list.get(i).isSuperUser(), isGroupMapping, roleName));
@@ -3856,52 +3855,59 @@ Experimentals.AsStore, Experimentals.StoreProvider {
 		return map;
 	}
 
-	public void putUser(String name, UserInfo userInfo, boolean modifiable)
+	public void putUser(String name, UserInfo userInfo, boolean modifiable, boolean isRole)
 			throws GSException {
-
-		GSErrorCode.checkNullParameter(userInfo, "userInfo", null);
-
-		
-		name = resolveName(name, userInfo.getName(), "user name");
-
 		final BasicBuffer req = context.getRequestBuffer();
 		final BasicBuffer resp = context.getResponseBuffer();
 
 		channel.setupRequestBuffer(req);
 
-		NodeConnection.tryPutEmptyOptionalRequest(req);
+		OptionalRequest opt = new OptionalRequest();
+		if (isRole) { 
+			opt.putFeatureVersion(FeatureVersion.V4_5);
+		}
+		opt.format(req);
 
 		final int partitionId = SYSTEM_USER_PARTITION_ID;
 
-		final String password = userInfo.getPassword();
-		final String hashPassword = userInfo.getHashPassword();
+		if (isRole) { 
+			setUserInfoRequest(req, name, (byte) 0, null);
+		} else {
+		
+			GSErrorCode.checkNullParameter(userInfo, "userInfo", null);
 
-		if (password != null && hashPassword == null) {
-			RowMapper.checkString(password, "password");
+			
+			name = resolveName(name, userInfo.getName(), "user name");
 
-			final int bytesLength =
-					password.getBytes(BasicBuffer.DEFAULT_CHARSET).length;
-			if (bytesLength > MAX_PASSWORD_BYTES_LENGTH) {
-				throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
-						"The length of password string bytes exceeded (max=" +
-						MAX_PASSWORD_BYTES_LENGTH + ")");
+			final String password = userInfo.getPassword();
+			final String hashPassword = userInfo.getHashPassword();
+
+			if (password != null && hashPassword == null) {
+				RowMapper.checkString(password, "password");
+
+				final int bytesLength =
+						password.getBytes(BasicBuffer.DEFAULT_CHARSET).length;
+				if (bytesLength > MAX_PASSWORD_BYTES_LENGTH) {
+					throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
+							"The length of password string bytes exceeded (max=" +
+							MAX_PASSWORD_BYTES_LENGTH + ")");
+				}
+
+				setUserInfoRequest(
+						req, name, (byte) 0, NodeConnection.getDigest(password));
 			}
-
-			setUserInfoRequest(
-					req, name, (byte) 0, NodeConnection.getDigest(password));
+			else if (password == null && hashPassword != null) {
+				setUserInfoRequest(req, name, (byte) 0, hashPassword);
+			}
+			else if (password == null) {
+				throw new GSException(GSErrorCode.EMPTY_PARAMETER,
+						"Password and hash password not specified");
+			}
+			else {
+				throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
+						"Both password and hash password specified");
+			}
 		}
-		else if (password == null && hashPassword != null) {
-			setUserInfoRequest(req, name, (byte) 0, hashPassword);
-		}
-		else if (password == null) {
-			throw new GSException(GSErrorCode.EMPTY_PARAMETER,
-					"Password and hash password not specified");
-		}
-		else {
-			throw new GSException(GSErrorCode.ILLEGAL_PARAMETER,
-					"Both password and hash password specified");
-		}
-
 		req.putBoolean(modifiable);
 
 		executeStatement(Statement.PUT_USER, partitionId, req, resp, null);

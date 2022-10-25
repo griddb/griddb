@@ -813,8 +813,8 @@ private:
 	void setNum(uint16_t num) {
 		*getNumPtr() = num;
 	}
-	void setReserveNum(uint16_t reserverNum) {
-		*getReserveNumPtr() = reserverNum;
+	void setReserveNum(uint16_t reserveNum) {
+		*getReserveNumPtr() = reserveNum;
 	}
 
 	uint8_t *getElemHead() const {

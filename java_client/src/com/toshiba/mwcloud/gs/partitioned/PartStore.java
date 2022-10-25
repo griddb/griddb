@@ -504,9 +504,14 @@ Extensibles.AsStore, Experimentals.StoreProvider {
 						throws GSException {
 					final int attribute = PartContainer.Attributes.SUB;
 					final boolean internalMode = true;
-					setSource(base.getContainer(
-							key, bindType, attribute, internalMode));
-					return getSource().getSchemaProperties();
+					final Extensibles.AsContainer<K, R> container =
+							base.getContainer(
+									key, bindType, attribute, internalMode);
+					setSource(container);
+					if (container == null) {
+						return null;
+					}
+					return container.getSchemaProperties();
 				}
 			};
 
@@ -1064,10 +1069,10 @@ Extensibles.AsStore, Experimentals.StoreProvider {
 		return getLargeInfo(normalizedKey, emptyAllowed, keyConverter, null);
 	}
 
-	private <S> LargeInfo getLargeInfo(
+	private LargeInfo getLargeInfo(
 			ContainerKey normalizedKey, boolean emptyAllowed,
 			ContainerKeyConverter keyConverter,
-			SchemaPropertiesResolver<S> resolver) throws GSException {
+			SchemaPropertiesResolver<?> resolver) throws GSException {
 		LargeInfo largeInfo = largeInfoCache.find(
 				normalizedKey, largeInfoCache.currentNanosForExpiration());
 		if (largeInfo == null || !largeInfo.isStable(emptyAllowed)) {

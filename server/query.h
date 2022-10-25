@@ -461,9 +461,9 @@ protected:
 		util::XArray<T> &resultRowIdList, util::XArray<T> &andRowIdArray) {
 		size_t currentResultSize = resultRowIdList.size();
 		size_t newResultSize = andRowIdArray.size();
-		const size_t sortThrethold = 100;
+		const size_t sortThreshold = 100;
 
-		if (currentResultSize + newResultSize > sortThrethold) {
+		if (currentResultSize + newResultSize > sortThreshold) {
 			util::XArray<T> tmp(txn.getDefaultAllocator());
 
 			switch (nResultSorted_) {
@@ -577,7 +577,7 @@ struct Query::BoolExprAccessor : public BoolExpr {
 
 /*!
  * @brief Callback member function by template.
- * Use like "cast_to_callback<Query, bool, &Query::ComparaterFunc>"
+ * Use like "cast_to_callback<Query, bool, &Query::ComparatorFunc>"
  *
  * @return
  */

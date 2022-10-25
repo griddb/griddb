@@ -19,6 +19,9 @@
 
 #include "transaction_manager.h"
 #include "cluster_event_type.h"
+#include "data_store_common.h"
+#include "container_key.h"
+#include "schema.h"
 
 struct DataStoreLogV4 : public Serializable {
 	struct EmptyDataLog : public Serializable {
@@ -564,13 +567,13 @@ struct TxnLog : public Serializable {
 		StatementId stmtId, StoreType storeType, DataStoreLogV4* dsLog)
 		: Serializable((&txn.getDefaultAllocator())), clientId_(txn.getClientId()),
 		txnId_(txn.getId()), containerId_(txn.getContainerId()),
-		stmtId_(stmtId), txnTimeoutInterval_(txn.getTransationTimeoutInterval()),
+		stmtId_(stmtId), txnTimeoutInterval_(txn.getTransactionTimeoutInterval()),
 		getMode_(cxtSrc.getMode_), txnMode_(cxtSrc.txnMode_), storeType_(storeType), dsLog_(dsLog) {}
 	TxnLog(TransactionContext& txn, const ClientId &clientId, const TransactionManager::ContextSource& cxtSrc,
 		StatementId stmtId, StoreType storeType, DataStoreLogV4* dsLog)
 		: Serializable(&(txn.getDefaultAllocator())), clientId_(clientId),
 		txnId_(txn.getId()), containerId_(txn.getContainerId()),
-		stmtId_(stmtId), txnTimeoutInterval_(txn.getTransationTimeoutInterval()),
+		stmtId_(stmtId), txnTimeoutInterval_(txn.getTransactionTimeoutInterval()),
 		getMode_(cxtSrc.getMode_), txnMode_(cxtSrc.txnMode_), storeType_(storeType), dsLog_(dsLog) {}
 	void encode(EventByteOutStream& out) {
 		encode<EventByteOutStream>(out);

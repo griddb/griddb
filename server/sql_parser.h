@@ -275,7 +275,7 @@ public:
 	}
 
 	template<typename T>
-	static bool isInlcludeHashPartitioningType(T typeVal) {
+	static bool isIncludeHashPartitioningType(T typeVal) {
 		TablePartitionType type = static_cast<TablePartitionType>(typeVal);
 		return (type == TABLE_PARTITION_TYPE_HASH
 				|| type ==TABLE_PARTITION_TYPE_RANGE_HASH);

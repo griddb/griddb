@@ -312,7 +312,7 @@ public:
 
 	virtual void operator()(T&) = 0;
 
-	static void setUpAll(T &patamTable);
+	static void setUpAll(T &paramTable);
 
 private:
 	static std::vector<BasicSetUpHandler*>& handlerList();
@@ -345,7 +345,7 @@ public:
 private:
 	friend class ParamTable;
 	PathFormatter(
-			ParamId id, const EntryMap &enrtyMap, const SubPath *subPath);
+			ParamId id, const EntryMap &entryMap, const SubPath *subPath);
 
 	ParamId id_;
 	const EntryMap &entryMap_;
@@ -804,7 +804,7 @@ private:
 	Entry& resolveEntry(ParamId id);
 	Entry& newEntry(ParamId id);
 
-	Group& preapareDefaultGroup();
+	Group& prepareDefaultGroup();
 	Group& addGroup(size_t &groupIndex);
 
 	EntryPair getEntries(ParamId id) const;
@@ -984,7 +984,7 @@ public:
 
 	PartitionGroupId getPartitionGroupId(PartitionId pId) const;
 
-	uint32_t getGroupPartitonCount(PartitionGroupId pgId) const;
+	uint32_t getGroupPartitionCount(PartitionGroupId pgId) const;
 
 private:
 	static void checkParams(uint32_t partitionNum, uint32_t concurrency);
@@ -1092,11 +1092,11 @@ inline ParamTable::BasicSetUpHandler<T>::~BasicSetUpHandler() {
 }
 
 template<typename T>
-inline void ParamTable::BasicSetUpHandler<T>::setUpAll(T &patamTable) {
+inline void ParamTable::BasicSetUpHandler<T>::setUpAll(T &paramTable) {
 	static const std::vector<BasicSetUpHandler*> list = handlerList();
 	for (typename std::vector<BasicSetUpHandler*>::const_iterator it = list.begin();
 			it != list.end(); ++it) {
-		(**it)(patamTable);
+		(**it)(paramTable);
 	}
 }
 
@@ -1300,7 +1300,7 @@ inline StatStopwatch& TimeStatTable<T, C>::operator()(T id) {
 }
 
 /*!
-	@brief Paramter ID of config table
+	@brief Parameter ID of config table
 */
 enum ConfigTableParamId {
 	CONFIG_TABLE_ROOT,
@@ -1383,6 +1383,9 @@ enum ConfigTableParamId {
 
 	CONFIG_TABLE_CS_ABNORMAL_AUTO_SHUTDOWN,
 
+	CONFIG_TABLE_CS_RACK_ZONE_AWARENESS,
+	CONFIG_TABLE_CS_RACK_ZONE_ID,
+
 	CONFIG_TABLE_SEC_AUTHENTICATION,
 	CONFIG_TABLE_SEC_LDAP_ROLE_MANAGEMENT,
 	CONFIG_TABLE_SEC_LDAP_URL,
@@ -1427,6 +1430,7 @@ enum ConfigTableParamId {
 	CONFIG_TABLE_DS_ROW_ARRAY_RATE_EXPONENT,
 	CONFIG_TABLE_DS_ROW_ARRAY_SIZE_CONTROL_MODE,
 	CONFIG_TABLE_DS_PARTITION_BATCH_FREE_CHECK_INTERVAL,
+	CONFIG_TABLE_DS_PARTITION_BATCH_FREE_CHECK_CONTAINER_COUNT,
 	CONFIG_TABLE_DS_STORE_MEMORY_AGING_SWAP_RATE,
 	CONFIG_TABLE_DS_STORE_MEMORY_COLD_RATE,
 	CONFIG_TABLE_DS_STORE_MEMORY_REDISTRIBUTE_SHIFTABLE_MEMORY_RATE,
@@ -1550,6 +1554,9 @@ enum ConfigTableParamId {
 	CONFIG_TABLE_TRACE_AUTH_OPERATION,
 	CONFIG_TABLE_TRACE_PARTITION,
 	CONFIG_TABLE_TRACE_PARTITION_DETAIL,
+	CONFIG_TABLE_TRACE_DATA_EXPIRATION_DETAIL,
+
+	CONFIG_TABLE_TRACE_CONNECTION_DETAIL,
 	CONFIG_TABLE_TRACE_TRACER_ID_END,
 
 	CONFIG_TABLE_DEV_AUTO_JOIN_CLUSTER,
@@ -1565,6 +1572,7 @@ enum ConfigTableParamId {
 	
 	CONFIG_TABLE_SEC_USER_CACHE_SIZE,
 	CONFIG_TABLE_SEC_USER_CACHE_UPDATE_INTERVAL,
+	CONFIG_TABLE_TXN_PUBLIC_SERVICE_ADDRESS,
 	
 	CONFIG_TABLE_PARAM_END
 };
@@ -1620,7 +1628,7 @@ private:
 	while (false)
 
 /*!
-	@brief Paramter ID of statistics table
+	@brief Parameter ID of statistics table
 */
 enum StatTableParamId {
 	STAT_TABLE_ROOT = 0,
@@ -1670,6 +1678,7 @@ enum StatTableParamId {
 	STAT_TABLE_CS_CLUSTER_REVISION_NO,
 
 	STAT_TABLE_CS_AUTO_GOAL,
+	STAT_TABLE_CS_RACKZONE_ID,
 
 	STAT_TABLE_PERF_OWNER_COUNT,
 	STAT_TABLE_PERF_BACKUP_COUNT,
@@ -1734,6 +1743,9 @@ enum StatTableParamId {
 	STAT_TABLE_PERF_TXN_EE_SYNC,
 	STAT_TABLE_PERF_TXN_EE_TRANSACTION,
 	STAT_TABLE_PERF_TXN_EE_SQL,
+
+	STAT_TABLE_PERF_TXN_TOTAL_INTERNAL_CONNECTION_COUNT,
+	STAT_TABLE_PERF_TXN_TOTAL_EXTERNAL_CONNECTION_COUNT,
 
 	STAT_TABLE_PERF_DS_STORE_MEMORY_LIMIT,
 	STAT_TABLE_PERF_DS_STORE_MEMORY,	
@@ -1800,6 +1812,8 @@ enum StatTableParamId {
 
 	STAT_TABLE_PERF_MEM_ALL_TOTAL,	
 	STAT_TABLE_PERF_MEM_ALL_CACHED,	
+	STAT_TABLE_PERF_MEM_ALL_LOCAL_CACHED,
+	STAT_TABLE_PERF_MEM_ALL_ELEMENT_COUNT,
 	STAT_TABLE_PERF_MEM_PROCESS_MEMORY_GAP,	
 	STAT_TABLE_PERF_MEM_DS_STORE_TOTAL,
 	STAT_TABLE_PERF_MEM_DS_STORE_CACHED,

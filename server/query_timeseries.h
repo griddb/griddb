@@ -107,7 +107,7 @@ public:
 				new (&(varray_[i])) ContainerValue(
 					*(timeSeries
 							.getObjectManager()),
-					timeSeries.getRowAllcateStrategy());  
+					timeSeries.getRowAllocateStrategy());  
 				varrayCounter_++;
 			}
 			memset(pBitmap, 0,
@@ -140,7 +140,7 @@ public:
 				new (&(varray_[i])) ContainerValue(
 					*(timeSeries_
 						.getObjectManager()),
-					timeSeries.getRowAllcateStrategy());  
+					timeSeries.getRowAllocateStrategy());  
 				varrayCounter_++;
 			}
 			memset(pBitmap, 0,
@@ -218,7 +218,7 @@ private:
 };
 
 /*!
-*	@brief Compare methord for TimeSeries Row
+*	@brief Compare method for TimeSeries Row
 */
 class TimeSeriesOrderByComparator {
 public:
@@ -255,9 +255,9 @@ public:
 		TimeSeriesRowWrapper row2(txn_, timeSeries_, y, pBitmap2_);
 		for (size_t i = 0; i < orderByExprList_.size(); i++) {
 			Expr *e = orderByExprList_[i].expr;
-			Expr *e1 = e->eval(txn_, *(timeSeries_.getObjectManager()), timeSeries_.getRowAllcateStrategy(), &row1,
+			Expr *e1 = e->eval(txn_, *(timeSeries_.getObjectManager()), timeSeries_.getRowAllocateStrategy(), &row1,
 				&fmap_, EVAL_MODE_NORMAL);
-			Expr *e2 = e->eval(txn_, *(timeSeries_.getObjectManager()), timeSeries_.getRowAllcateStrategy(), &row2,
+			Expr *e2 = e->eval(txn_, *(timeSeries_.getObjectManager()), timeSeries_.getRowAllocateStrategy(), &row2,
 				&fmap_, EVAL_MODE_NORMAL);
 			int ret = e1->compareAsValue(txn_, e2, orderByExprList_[i].nullsLast);
 			QP_SAFE_DELETE(e);
@@ -292,9 +292,9 @@ public:
 
 		for (size_t i = 0; i < orderByExprList_.size(); i++) {
 			Expr *e = orderByExprList_[i].expr;
-			Expr *e1 = e->eval(txn_, *(timeSeries_.getObjectManager()), timeSeries_.getRowAllcateStrategy(), &row1,
+			Expr *e1 = e->eval(txn_, *(timeSeries_.getObjectManager()), timeSeries_.getRowAllocateStrategy(), &row1,
 				&fmap_, EVAL_MODE_NORMAL);
-			Expr *e2 = e->eval(txn_, *(timeSeries_.getObjectManager()), timeSeries_.getRowAllcateStrategy(), &row2,
+			Expr *e2 = e->eval(txn_, *(timeSeries_.getObjectManager()), timeSeries_.getRowAllocateStrategy(), &row2,
 				&fmap_, EVAL_MODE_NORMAL);
 			int ret = e1->compareAsValue(txn_, e2, orderByExprList_[i].nullsLast);
 			QP_SAFE_DELETE(e);

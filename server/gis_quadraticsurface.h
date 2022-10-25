@@ -222,7 +222,7 @@ public:
 	 */
 	const TrRectTag &getBoundingRect() const {
 		GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_GIS_CANNOT_GET_VALUE,
-			"Cannot get bounding rect from infinite quadractic-surface.");
+			"Cannot get bounding rect from infinite quadratic-surface.");
 	}
 
 	/*!

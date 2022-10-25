@@ -39,6 +39,9 @@ UTIL_TRACER_DECLARE(SIZE_MONITOR);
 UTIL_TRACER_DECLARE(IO_MONITOR);
 UTIL_TRACER_DECLARE(RECOVERY_MANAGER);
 
+const std::string PartitionList::CLUSTER_SNAPSHOT_INFO_FILE_NAME(
+		"gs_cluster_snapshot_info.json");
+
 struct PartitionListStats::SubEntrySet {
 	explicit SubEntrySet(const util::StdAllocator<void, void> &alloc);
 	~SubEntrySet();
@@ -363,8 +366,10 @@ LogSequentialNumber Partition::getLSN() {
 
 /*!
 	@brief 通常リカバリ
+	@note recoveryTargetLSNが0以外の時、XLogのredo中にrecoveryTargetLSNと一致するLSNを持つログレコードが存在しなかった場合にはシステムエラー例外が送出される
 */
-void Partition::recover(InterchangeableStoreMemory* ism) {
+void Partition::recover(
+		InterchangeableStoreMemory* ism, LogSequentialNumber recoveryTargetLsn) {
 	try {
 		const uint64_t currentTime = util::Stopwatch::currentClock();
 		uint64_t adjustTime = currentTime;
@@ -410,12 +415,27 @@ void Partition::recover(InterchangeableStoreMemory* ism) {
 			chunkManager_->reinit();
 		}
 		chunkManager_->setLogVersion(defaultLogManager_->getLogVersion());
+		if (recoveryTargetLsn > 0
+				&& recoveryTargetLsn < defaultLogManager_->getLSN()) {
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_RM_RECOVERY_FAILED,
+					"[CLUSTER_SNAPSHOT_RESTORE] Redo failed: targetLSN is too small. " <<
+					"Check " << PartitionList::CLUSTER_SNAPSHOT_INFO_FILE_NAME.c_str() <<
+					": (pId=" << pId_ << ", targetLSN=" << recoveryTargetLsn <<
+					", redoStartLSN=" << defaultLogManager_->getLSN() << ")");
+		}
 		activate();
 		{
 			LogIterator<NoLocker>& it = std::get<1>(its);
 			std::unique_ptr<Log> log;
 			LogSequentialNumber lsn = UNDEF_LSN;
 			while (true) {
+				if (recoveryTargetLsn > 0
+						&& recoveryTargetLsn == defaultLogManager_->getLSN()) {
+					GS_TRACE_INFO(RECOVERY_MANAGER, GS_TRACE_RM_RECOVERY_INFO,
+							"[CLUSTER_SNAPSHOT_RESTORE] Redo finished. (pId=" << pId_ <<
+							",lsn=" << recoveryTargetLsn << ")");
+					break;
+				}
 				util::StackAllocator::Scope scope(defaultLogManager_->getAllocator());
 				log = it.next(true);
 				if (log == NULL) break;
@@ -438,11 +458,21 @@ void Partition::recover(InterchangeableStoreMemory* ism) {
 			}
 			it.fin();
 		}
-
-		GS_TRACE_INFO(RECOVERY_MANAGER, GS_TRACE_RM_RECOVERY_INFO,
-			"Redo finished (pId=" << pId_ << ", lsn=" << managerSet_->pt_->getLSN(pId_) << ", elapsedMillis="
-			<< (util::Stopwatch::currentClock() - currentTime)/1000 << ")");
-
+		if (recoveryTargetLsn > 0
+				&& recoveryTargetLsn != defaultLogManager_->getLSN()) {
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_RM_RECOVERY_FAILED,
+					"[CLUSTER_SNAPSHOT_RESTORE] Redo failed: targetLSN is too large. " <<
+					"Check " << PartitionList::CLUSTER_SNAPSHOT_INFO_FILE_NAME.c_str() <<
+					": (pId=" << pId_ << ", targetLSN=" << recoveryTargetLsn <<
+					", redoFinishedLSN=" << defaultLogManager_->getLSN() << ")");
+		}
+		if (managerSet_ && managerSet_->pt_) {
+			GS_TRACE_INFO(RECOVERY_MANAGER, GS_TRACE_RM_RECOVERY_INFO,
+					"Redo finished (pId=" << pId_ <<
+					", lsn=" << managerSet_->pt_->getLSN(pId_) <<
+					", elapsedMillis=" <<
+					(util::Stopwatch::currentClock() - currentTime)/1000 << ")");
+		}
 		setStatus(Status::RestoredPartition);
 	} catch (std::exception &e) {
 		GS_RETHROW_SYSTEM_ERROR(e, GS_EXCEPTION_MERGE_MESSAGE(e, "Recovery failed. partitionId=" << pId_));
@@ -891,7 +921,7 @@ void Partition::endCheckpoint(EndCheckpointMode x) {
 	@brief チェックポイント終了: 不要になった前世代のブロックイメージ解放準備
 	@note 通常のチェックポイント
 */
-LogIterator<NoLocker> Partition::endCheckpointPrepareRelaseBlock() {
+LogIterator<NoLocker> Partition::endCheckpointPrepareReleaseBlock() {
 	try {
 		int64_t logVersion = defaultLogManager_->getLogVersion();
 		return defaultLogManager_->createLogIterator(logVersion - 1);
@@ -1554,6 +1584,7 @@ PartitionList::PartitionList(
 					stats_->getPartitionGroupEntry(pgId).chunkBufStats_);
 			chunkBuffer->setMemoryPool(chunkMemoryPool_);
 			chunkBuffer->setPartitionList(this);
+			chunkBuffer->setStoreMemoryLimitBlockCount(chunkBufferLimit);
 			chunkBufferList_.push_back(chunkBuffer);
 			ism_->regist(pgId, chunkBuffer, initialBufferSize);
 		}

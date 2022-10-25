@@ -46,7 +46,7 @@
 QueryForTimeSeries::QueryForTimeSeries(TransactionContext &txn,
 	TimeSeries &timeSeries, const TQLInfo &tqlInfo, uint64_t limit,
 	QueryHookClass *hook)
-	: Query(txn, *(timeSeries.getObjectManager()), timeSeries.getRowAllcateStrategy(), tqlInfo, limit, hook),
+	: Query(txn, *(timeSeries.getObjectManager()), timeSeries.getRowAllocateStrategy(), tqlInfo, limit, hook),
 
 	timeSeries_(&timeSeries), scPass_(txn.getDefaultAllocator(), ColumnInfo::ROW_KEY_COLUMN_ID) {
 	if (hook_) {
@@ -439,7 +439,7 @@ void QueryForTimeSeries::doQueryWithCondition(
 									isFirstColumn = false;
 								}
 								ColumnInfo &columnInfo = timeSeries.getColumnInfo(condList[i].columnId_);
-								os << columnInfo.getColumnName(txn, objectManager_, timeSeries.getMetaAllcateStrategy());
+								os << columnInfo.getColumnName(txn, objectManager_, timeSeries.getMetaAllocateStrategy());
 							}
 						}
 						addExplain(
@@ -452,7 +452,7 @@ void QueryForTimeSeries::doQueryWithCondition(
 								os << " ";
 							}
 							ColumnInfo &columnInfo = timeSeries.getColumnInfo((*(indexData.columnIds_))[i]);
-							os << columnInfo.getColumnName(txn, objectManager_, timeSeries.getMetaAllcateStrategy());
+							os << columnInfo.getColumnName(txn, objectManager_, timeSeries.getMetaAllocateStrategy());
 						}
 
 						addExplain(2, "SEARCH_MAP", "STRING", os.str().c_str(), "");

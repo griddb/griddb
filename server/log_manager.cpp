@@ -91,6 +91,23 @@ std::string Log::toString() const {
 }
 
 
+void Log::encode(util::StackAllocator& alloc, util::XArray<uint8_t>& logRecoreds) {
+	int64_t dataSize = getDataSize();
+	size_t startPos = logRecoreds.size();
+	util::XArray<uint8_t> binary(alloc);
+	typedef util::ByteStream< util::XArrayOutStream<> > OutStream;
+	util::XArrayOutStream<> arrayOut(binary);
+	OutStream out(arrayOut);
+	encode(out);
+	logRecoreds.resize(logRecoreds.size() + sizeof(uint64_t) + binary.size());
+	uint64_t logAllSize = binary.size();
+	uint8_t* sizeAddr = logRecoreds.data() + startPos;
+	uint8_t* addr = sizeAddr + sizeof(uint64_t);
+	memcpy(sizeAddr, &logAllSize, sizeof(uint64_t));
+	memcpy(addr, binary.data(), binary.size());
+}
+
+
 void DuplicateLogMode::applyDuplicateStatus(
 		Status srcStatus, LogManagerStats &stats, bool force) {
 	LocalStatValue &destValue =

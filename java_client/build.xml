@@ -3,14 +3,23 @@
 <project default="all" basedir=".">
 
 	<property name="baseName" value="java_client" />
-	<property name="binDir" value="obj" />
+
+	<property name="baseBinDir" value="obj" />
+	<property name="binDir" value="${baseBinDir}/main" />
+	<property name="contribBinDir" value="${baseBinDir}/contrib" />
+	<property name="stubBinDir" value="${baseBinDir}/stub" />
+	<property name="confBinDir" value="${baseBinDir}/conf" />
+	<property name="callLoggingBinDir" value="${baseBinDir}/call_logging" />
+
 	<property name="srcDir" value="src" />
 	<property name="contribSrcDir" value="src_contrib" />
 	<property name="stubSrcDir" value="src_stub" />
 	<property name="confSrcDir" value="src_conf" />
+	<property name="callLoggingSrcDir" value="src_call_logging" />
 	<property name="jarDir" value="../bin" />
 	<property name="jarFile" value="gridstore.jar" />
 	<property name="confJarFile" value="gridstore-conf.jar" />
+	<property name="callLoggingJarFile" value="gridstore-call-logging.jar" />
 	<property name="jarFileCompatible" value="gs.jar" />
 	<property name="srcEncoding" value="UTF-8" />
 	<property name="includeDebugInfo" value="yes" />
@@ -76,11 +85,24 @@
 	</target>
 
 	<target name="confCompile" depends="compile">
-		<mkdir dir="${binDir}"/>
+		<mkdir dir="${confBinDir}"/>
 
-		<javac srcdir="${confSrcDir}" destdir="${binDir}"
+		<javac srcdir="${confSrcDir}" destdir="${confBinDir}"
 			encoding="${srcEncoding}" debug="yes" includeantruntime="no"
 			source="1.6" target="1.6" classpath="${binDir}">
+		</javac>
+	</target>
+
+	<target name="callLoggingCompile" depends="compile">
+		<mkdir dir="${callLoggingBinDir}"/>
+
+		<javac srcdir="${callLoggingSrcDir}" destdir="${callLoggingBinDir}"
+			encoding="${srcEncoding}" debug="yes" includeantruntime="no"
+			source="1.6" target="1.6">
+			<classpath>
+				<pathelement location="${binDir}"/>
+				<path refid="buildClasspath"/>
+			</classpath>
 		</javac>
 	</target>
 
@@ -104,18 +126,22 @@
 		<mkdir dir="${jarDir}"/>
 
 		<jar destfile="${jarDir}/${confJarFile}">
-			<zipfileset dir="${binDir}" includes="com/toshiba/mwcloud/gs/config/*.class" />
+			<zipfileset dir="${confBinDir}" />
 			<zipfileset dir="${confSrcDir}" includes="META-INF/**/*" />
 		</jar>
 	</target>
 
-	<target name="jarPartial" depends="compile">
-		<jar destfile="${jarDir}/${jarFile}">
-			<zipfileset dir="${binDir}" includes="com/toshiba/mwcloud/gs/*.class" />
+	<target name="callLoggingJar" depends="callLoggingCompile">
+		<mkdir dir="${jarDir}"/>
+
+		<jar destfile="${jarDir}/${callLoggingJarFile}">
+			<zipfileset dir="${callLoggingBinDir}" />
+			<zipfileset dir="${callLoggingSrcDir}" includes="META-INF/**/*" />
+			<zipfileset dir="${callLoggingSrcDir}" includes="**/*.properties" />
 		</jar>
 	</target>
 
-	<target name="all" depends="jar,confJar">
+	<target name="all" depends="jar,callLoggingJar,confJar">
 	</target>
 
 </project>

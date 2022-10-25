@@ -20,7 +20,6 @@
 #include "query_function.h"
 
 
-
 SQLExprs::ExprRewriter::ExprRewriter(util::StackAllocator &alloc) :
 		alloc_(alloc),
 		localEntry_(alloc),
@@ -1128,8 +1127,8 @@ void SQLExprs::ExprRewriter::getDistinctExprList(
 
 SQLExprs::Expression& SQLExprs::ExprRewriter::toNonDistinctExpr(
 		ExprFactoryContext &cxt, const Expression &src, uint32_t input,
-		uint32_t *refCoulmnPos) {
-	assert(refCoulmnPos != NULL);
+		uint32_t *refColumnPos) {
+	assert(refColumnPos != NULL);
 
 	ExprType destExprType;
 	const TypeResolverResult &retInfo = resolveNonDistinctExprColumnTypes(
@@ -1145,13 +1144,13 @@ SQLExprs::Expression& SQLExprs::ExprRewriter::toNonDistinctExpr(
 	for (Expression::ModIterator it(dest); it.exists(); it.next()) {
 		const Expression &subSrc = it.get();
 
-		Expression &subDest = createColumnExpr(cxt, input, *refCoulmnPos);
+		Expression &subDest = createColumnExpr(cxt, input, *refColumnPos);
 		subDest.getPlanningCode().setColumnType(
 				subSrc.getCode().getColumnType());
 		it.remove();
 		it.insert(subDest);
 
-		(*refCoulmnPos)++;
+		(*refColumnPos)++;
 	}
 
 	return dest;
@@ -1159,21 +1158,21 @@ SQLExprs::Expression& SQLExprs::ExprRewriter::toNonDistinctExpr(
 
 void SQLExprs::ExprRewriter::addDistinctRefColumnExprs(
 		ExprFactoryContext &cxt, const Expression &src, bool forAdvance,
-		bool refEmpty, uint32_t input, uint32_t *refCoulmnPos,
+		bool refEmpty, uint32_t input, uint32_t *refColumnPos,
 		Expression::ModIterator &destIt) {
 	if (forAdvance) {
 		for (Expression::Iterator it(src); it.exists(); it.next()) {
 			addDistinctRefColumnExprs(
-					cxt, it.get(), false, refEmpty, input, refCoulmnPos,
+					cxt, it.get(), false, refEmpty, input, refColumnPos,
 					destIt);
 		}
 	}
 	else {
 		const ExprCode &srcCode = src.getCode();
-		const uint32_t pos = (refCoulmnPos == NULL ?
-				srcCode.getColumnPos() : *refCoulmnPos);
+		const uint32_t pos = (refColumnPos == NULL ?
+				srcCode.getColumnPos() : *refColumnPos);
 
-		assert(refCoulmnPos != NULL ||
+		assert(refColumnPos != NULL ||
 				srcCode.getType() == SQLType::EXPR_COLUMN);
 
 		const TupleColumnType type = srcCode.getColumnType();
@@ -1187,8 +1186,8 @@ void SQLExprs::ExprRewriter::addDistinctRefColumnExprs(
 		}
 		destIt.append(*refExpr);
 
-		if (refCoulmnPos != NULL) {
-			(*refCoulmnPos)++;
+		if (refColumnPos != NULL) {
+			(*refColumnPos)++;
 		}
 	}
 }
@@ -1196,17 +1195,17 @@ void SQLExprs::ExprRewriter::addDistinctRefColumnExprs(
 void SQLExprs::ExprRewriter::replaceDistinctExprsToRef(
 		ExprFactoryContext &cxt, Expression &expr, bool forAdvance,
 		int32_t emptySide, const util::Set<uint32_t> *keySet,
-		uint32_t *restDistinctCount, uint32_t *refCoulmnPos) {
+		uint32_t *restDistinctCount, uint32_t *refColumnPos) {
 
-	if (restDistinctCount == NULL || refCoulmnPos == NULL) {
+	if (restDistinctCount == NULL || refColumnPos == NULL) {
 		util::Vector<const Expression*> exprList(cxt.getAllocator());
 		getDistinctExprList(cxt.getFactory(), expr, exprList);
 		uint32_t restDistinctCountBase = static_cast<uint32_t>(exprList.size());
 
-		uint32_t refCoulmnPosBase = cxt.getInputColumnCount(0);
+		uint32_t refColumnPosBase = cxt.getInputColumnCount(0);
 		replaceDistinctExprsToRef(
 				cxt, expr, forAdvance, emptySide, keySet,
-				&restDistinctCountBase, &refCoulmnPosBase);
+				&restDistinctCountBase, &refColumnPosBase);
 
 		assert(restDistinctCountBase == 0);
 		return;
@@ -1226,13 +1225,13 @@ void SQLExprs::ExprRewriter::replaceDistinctExprsToRef(
 					(emptySide == 0 ? merged : !merged) : false);
 
 			const uint32_t input = (merged ? 0 : 1);
-			const uint32_t refCoulmnPosBase = (merged ? *refCoulmnPos : 1);
-			uint32_t refCoulmnPosSub = refCoulmnPosBase;
+			const uint32_t refColumnPosBase = (merged ? *refColumnPos : 1);
+			uint32_t refColumnPosSub = refColumnPosBase;
 			addDistinctRefColumnExprs(
 					cxt, subExpr, forAdvance, refEmpty, input,
-					&refCoulmnPosSub, it);
+					&refColumnPosSub, it);
 
-			(*refCoulmnPos) += (refCoulmnPosSub - refCoulmnPosBase);
+			(*refColumnPos) += (refColumnPosSub - refColumnPosBase);
 			(*restDistinctCount)--;
 		}
 		else if (subType == SQLType::EXPR_AGG_FOLLOWING) {
@@ -1248,7 +1247,7 @@ void SQLExprs::ExprRewriter::replaceDistinctExprsToRef(
 		else {
 			replaceDistinctExprsToRef(
 					cxt, subExpr, forAdvance, emptySide, keySet,
-					restDistinctCount, refCoulmnPos);
+					restDistinctCount, refColumnPos);
 			it.next();
 		}
 	}
@@ -2341,22 +2340,32 @@ void SQLExprs::ExprRewriter::swapExprArgs(Expression &expr) {
 
 bool SQLExprs::ExprRewriter::isSameExpr(
 		const ExprFactory &factory, const Expression &expr1,
-		const Expression &expr2, bool excludesDymanic) {
+		const Expression &expr2, bool excludesDynamic) {
 	if (!isSameExprCode(expr1.getCode(), expr2.getCode())) {
 		return false;
 	}
 
-	if (excludesDymanic) {
-		const ExprSpec &spec = factory.getSpec(expr1.getCode().getType());
+	do {
+		if (!excludesDynamic) {
+			break;
+		}
+
+		const ExprType type = expr1.getCode().getType();
+		if (type == SQLType::EXPR_COLUMN) {
+			break;
+		}
+
+		const ExprSpec &spec = factory.getSpec(type);
 		if ((spec.flags_ & ExprSpec::FLAG_DYNAMIC) != 0) {
 			return false;
 		}
 	}
+	while (false);
 
 	Expression::Iterator it1(expr1);
 	Expression::Iterator it2(expr2);
 	while (it1.exists() && it2.exists()) {
-		if (!isSameExpr(factory, it1.get(), it2.get(), excludesDymanic)) {
+		if (!isSameExpr(factory, it1.get(), it2.get(), excludesDynamic)) {
 			return false;
 		}
 		it1.next();
@@ -2431,7 +2440,7 @@ void SQLExprs::ExprRewriter::setUpAggregation(
 			findDistinctAggregation(cxt.getFactory(), expr)));
 
 	prepareMultiStageGrouping(cxt);
-	prepareDistinctAggreagation();
+	prepareDistinctAggregation();
 
 	{
 		cxt.clearAggregationColumns();
@@ -2963,7 +2972,7 @@ bool SQLExprs::ExprRewriter::matchMultiStageGroupKey(
 	return matched;
 }
 
-void SQLExprs::ExprRewriter::prepareDistinctAggreagation() const {
+void SQLExprs::ExprRewriter::prepareDistinctAggregation() const {
 	entry_->distinctAggrMainList_.clear();
 	entry_->distinctAggrSubList_.clear();
 	entry_->distinctAggrsExpr_ = NULL;
@@ -3536,7 +3545,10 @@ SQLExprs::TypeResolver::complete(bool checking) {
 
 			if ((spec_.flags_ & (
 					ExprSpec::FLAG_WINDOW_ONLY |
-					ExprSpec::FLAG_PSEUDO_WINDOW)) == 0) {
+					ExprSpec::FLAG_PSEUDO_WINDOW)) == 0 ||
+					((spec_.flags_ & ExprSpec::FLAG_WINDOW_ONLY) != 0 &&
+							isAdvanceAggregation()))
+			{
 				alterType = TypeUtils::toNullable(alterType);
 			}
 		}
@@ -5435,7 +5447,7 @@ bool SQLExprs::IndexSelector::selectClosestIndex(
 			continue;
 		}
 
-		bool reduceable =
+		bool reducible =
 				reduceIndexMatch(condIt, condIt + 1, 0, matchList, 0);
 
 		for (IndexMatchList::iterator it = matchList.begin();
@@ -5443,8 +5455,8 @@ bool SQLExprs::IndexSelector::selectClosestIndex(
 			it->condOrdinal_ = static_cast<size_t>(condIt - condBegin);
 		}
 
-		for (size_t columnOrdinal = 1; reduceable; columnOrdinal++) {
-			reduceable = reduceIndexMatch(
+		for (size_t columnOrdinal = 1; reducible; columnOrdinal++) {
+			reducible = reduceIndexMatch(
 					condBegin, condEnd, acceptedCondCount, matchList,
 					columnOrdinal);
 		}

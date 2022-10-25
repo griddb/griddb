@@ -23,7 +23,6 @@
 #include "sql_operator_utils.h"
 #include "sql_utils_algorithm.h"
 
-
 struct SQLSortOps {
 	typedef SQLOps::TupleListReader TupleListReader;
 	typedef SQLOps::TupleListWriter TupleListWriter;
@@ -87,6 +86,7 @@ struct SQLSortOps {
 
 	class Window;
 	class WindowPartition;
+	class WindowRankPartition;
 	class WindowMerge;
 };
 
@@ -179,7 +179,7 @@ private:
 			size_t ordinal,
 			const SQLValues::CompColumnList &keyColumnList) const;
 
-	void finshMerging(SortContext &cxt, bool primary) const;
+	void finishMerging(SortContext &cxt, bool primary) const;
 
 	uint32_t prepareStageElement(
 			SortContext &cxt, SortStageElement &elem, bool primary) const;
@@ -636,7 +636,7 @@ struct SQLSortOps::SorterEntry {
 			OpContext &cxt, size_t capacity, bool hashAvailable,
 			int64_t hashSizeBase, TupleListReader &reader);
 
-	SummaryTupleSet& getSummaryTupleSet(bool pimary);
+	SummaryTupleSet& getSummaryTupleSet(bool primary);
 	TupleSorter& resolveSorter(
 			const std::pair<TupleLess, TupleLess> &predPair);
 
@@ -644,8 +644,8 @@ struct SQLSortOps::SorterEntry {
 	size_t getHashConflictionLimit() const;
 
 	void initializeHashTable();
-	SorterElementType* getBuffer(bool forHash, bool pimary);
-	BufferRef& getBufferRef(bool forHash, bool pimary);
+	SorterElementType* getBuffer(bool forHash, bool primary);
+	BufferRef& getBufferRef(bool forHash, bool primary);
 
 	static size_t toBufferBytes(size_t capacity);
 	static size_t toHashSize(
@@ -680,10 +680,10 @@ struct SQLSortOps::SortContext {
 	OpContext& getBase();
 	util::StackAllocator& getAllocator();
 
-	SQLOps::SummaryColumnList& getSummaryColumnList(bool pimary);
-	SQLValues::CompColumnList& getKeyColumnList(bool pimary);
-	bool& getFinalStageStarted(bool pimary);
-	util::LocalUniquePtr<TupleDigester>& getDigester(bool pimary);
+	SQLOps::SummaryColumnList& getSummaryColumnList(bool primary);
+	SQLValues::CompColumnList& getKeyColumnList(bool primary);
+	bool& getFinalStageStarted(bool primary);
+	util::LocalUniquePtr<TupleDigester>& getDigester(bool primary);
 
 	OpContext *baseCxt_;
 
@@ -753,22 +753,38 @@ private:
 			Projection &src, ExprRefList &windowExprList);
 	static Projection& createUnmatchWindowPipeProjection(
 			OpCodeBuilder &builder, const Projection &src);
+
+	static void setUpUnmatchWindowExpr(
+			SQLExprs::ExprFactoryContext &factoryCxt,
+			SQLExprs::Expression &expr);
+	static SQLExprs::Expression& createUnmatchPositioningExpr(
+			SQLExprs::ExprFactoryContext &factoryCxt,
+			const SQLExprs::Expression *baseExpr);
+
 	static void duplicateExprList(
 			OpCodeBuilder &builder, const ExprRefList &src, ExprRefList &dest);
+
+	static bool isRanking(
+			OpCodeBuilder &builder, const Projection &pipeProj);
 };
 
 class SQLSortOps::WindowPartition : public SQLOps::Operator {
 public:
+	typedef SQLValues::TupleComparator::WithAccessor<
+			std::equal_to<SQLValues::ValueComparator::PredArgType>,
+			false, false, false, false,
+			SQLValues::ValueAccessor::ByReader> TupleEq;
+
 	virtual void execute(OpContext &cxt) const;
 
 	static bool toAbsolutePosition(
 			int64_t curPos, int64_t relativePos, bool following, int64_t &pos);
 
+	static TupleEq* createKeyComparator(
+			OpContext &cxt, const SQLValues::CompColumnList *keyList,
+			util::LocalUniquePtr<TupleEq> &ptr);
+
 private:
-	typedef SQLValues::TupleComparator::WithAccessor<
-			std::equal_to<SQLValues::ValueComparator::PredArgType>,
-			false, false, false, false,
-			SQLValues::ValueAccessor::ByReader> TupleEq;
 	typedef SQLOps::TupleColumn TupleColumn;
 
 	struct PartitionContext {
@@ -827,12 +843,55 @@ private:
 	static uint32_t getPositioningOutput(bool projecting);
 };
 
+class SQLSortOps::WindowRankPartition : public SQLOps::Operator {
+public:
+	virtual void compile(OpContext &cxt) const;
+	virtual void execute(OpContext &cxt) const;
+
+private:
+	typedef WindowPartition::TupleEq TupleEq;
+
+	struct PartitionContext {
+		explicit PartitionContext(util::StackAllocator &alloc);
+
+		TupleEq *partEq_;
+		TupleEq *rankEq_;
+		util::LocalUniquePtr<TupleEq> partEqBase_;
+		util::LocalUniquePtr<TupleEq> rankEqBase_;
+		SQLValues::CompColumnList partKeyList_;
+		SQLValues::CompColumnList rankKeyList_;
+
+		bool keyReaderStarted_;
+		bool pipeDone_;
+		int64_t rankGap_;
+	};
+
+	void getProjections(
+			const Projection *&pipeProj, const Projection *&subFinishProj) const;
+	PartitionContext& preparePartitionContext(OpContext &cxt) const;
+
+	void resolveKeyList(
+			SQLValues::CompColumnList &partKeyList,
+			SQLValues::CompColumnList &rankKeyList) const;
+
+	static TupleListReader* prepareKeyReader(
+			OpContext &cxt, PartitionContext &partCxt);
+	static TupleListReader& preparePipeReader(OpContext &cxt);
+	static TupleListReader& prepareSubFinishReader(OpContext &cxt);
+};
+
 class SQLSortOps::WindowMerge : public SQLOps::Operator {
 public:
 	enum {
 		IN_MAIN = 0,
 		IN_COUNTING = 1,
-		IN_POSITIONING = 2
+		IN_POSITIONING = 2,
+	};
+
+	enum {
+		COLUMN_POSITIONING_ORG = 0,
+		COLUMN_POSITIONING_VALUE = 1,
+		COLUMN_POSITIONING_REF = 2
 	};
 
 	virtual void execute(OpContext &cxt) const;

@@ -122,7 +122,7 @@ public:
 	util::Vector<ColumnId> *getOrgColumnIds() {
 		return orgColumnIds_;
 	}
-	CompositeInfoObject *allocateCompoiteInfo(util::StackAllocator &alloc);
+	CompositeInfoObject *allocateCompositeInfo(util::StackAllocator &alloc);
 	CompositeInfoObject *createCompositeInfo(util::StackAllocator &alloc,
 	   util::XArray<KeyData> &valueList);
 	CompositeInfoObject *createCompositeInfo(util::StackAllocator &alloc, void *data, uint32_t size);
@@ -451,7 +451,7 @@ public:
 	}
 
 	struct Setting {
-		Setting(ColumnType keyType, bool isCaseSenstive, TreeFuncInfo *funcInfo);
+		Setting(ColumnType keyType, bool isCaseSensitive, TreeFuncInfo *funcInfo);
 
 		void initialize(util::StackAllocator &alloc, SearchContext &sc,
 			OutputOrder outputOrder);
@@ -463,7 +463,7 @@ public:
 		}
 
 		bool isCaseSensitive() const {
-			return isCaseSenstive_;
+			return isCaseSensitive_;
 		}
 		void setCompareNum(uint32_t compareNum) {
 			compareNum_ = compareNum;
@@ -487,7 +487,7 @@ public:
 		std::string dump();
 
 		ColumnType keyType_;
-		bool isCaseSenstive_;
+		bool isCaseSensitive_;
 		bool isStartIncluded_;
 		bool isEndIncluded_;
 		uint32_t compareNum_;

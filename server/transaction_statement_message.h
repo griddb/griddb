@@ -170,6 +170,7 @@ struct StatementMessage {
 		static const OptionType STORE_MEMORY_AGING_SWAP_RATE = 11010; 
 		static const OptionType TIME_ZONE_OFFSET = 11011;
 		static const OptionType AUTHENTICATION_TYPE = 11012; 
+		static const OptionType CONNECTION_ROUTE = 11013; 
 
 		static const OptionType CREATE_DROP_INDEX_MODE = 12001;
 		static const OptionType RETRY_MODE = 12002;
@@ -358,6 +359,9 @@ struct StatementMessage {
 			public CustomOptionCoder<util::TimeZone, C> {
 	};
 	template<int C> struct OptionCoder<Options::AUTHENTICATION_TYPE, C> :
+		public PrimitiveOptionCoder<int8_t, 0, C> {
+	};
+	template<int C> struct OptionCoder<Options::CONNECTION_ROUTE, C> :
 		public PrimitiveOptionCoder<int8_t, 0, C> {
 	};
 
@@ -1255,6 +1259,9 @@ inline bool StatementMessage::OptionTypeSwitcher<
 		break;
 	case Options::AUTHENTICATION_TYPE:
 		action.template opType<Options::AUTHENTICATION_TYPE>();
+		break;
+	case Options::CONNECTION_ROUTE:
+		action.template opType<Options::CONNECTION_ROUTE>();
 		break;
 	default:
 		return false;

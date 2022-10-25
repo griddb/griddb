@@ -118,7 +118,7 @@ varAlloc_(&varAllocator)
 				if (!util::FileSystem::isDirectory(swapFilesTopDir_.c_str())) {
 					GS_THROW_SYSTEM_ERROR(GS_ERROR_LTS_INVALID_PARAMETER,
 							"SwapFilesTopDir (" << swapFilesTopDir_.c_str() <<
-							") is not direcotry");
+							") is not directory");
 				}
 				util::Directory dir(swapFilesTopDir_.c_str());
 				if (dir.isParentOrSelfChecked()) {

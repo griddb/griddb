@@ -360,7 +360,7 @@ struct SQLAggrExprs::Functions::GroupConcat {
 		template<typename C>
 		void operator()(C &cxt, const Aggr &aggr, const TupleValue &v);
 
-		bool forSeparatror_;
+		bool forSeparator_;
 	};
 	struct Merge {
 		typedef DefaultPolicy::AsPartiallyFinishable::

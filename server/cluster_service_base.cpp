@@ -50,7 +50,6 @@ UTIL_TRACER_DECLARE(CLUSTER_DUMP);
 
 UTIL_TRACER_DECLARE(CLUSTER_SERVICE);
 UTIL_TRACER_DECLARE(SYNC_SERVICE);
-UTIL_TRACER_DECLARE(CLUSTER_OPERATION);
 
 #define TEST_PRINT(s)
 #define TEST_PRINT1(s, d)
@@ -75,9 +74,9 @@ TYPE_NAME_SYSTEM = "system";
 const char8_t* ServiceConfig::
 TYPE_NAME_SQL = "sql";
 const char8_t* ServiceConfig::
-TYPE_NAME_TRANSACTION_LOCAL = "transactionLocal";
+TYPE_NAME_TRANSACTION_PUBLIC = "transactionPublic";
 const char8_t* ServiceConfig::
-TYPE_NAME_SQL_LOCAL = "sqlLocal";
+TYPE_NAME_SQL_PUBLIC = "sqlPublic";
 
 const char8_t* const ServiceConfig::
 SERVICE_TYPE_NAMES[] = {
@@ -91,13 +90,13 @@ SERVICE_TYPE_NAMES_WITH_PUBLIC[] = {
 		TYPE_NAME_CLUSTER, TYPE_NAME_TRANSACTION,
 		TYPE_NAME_SYNC, TYPE_NAME_SYSTEM,
 		TYPE_NAME_SQL,
-		TYPE_NAME_TRANSACTION_LOCAL,
-		TYPE_NAME_SQL_LOCAL
+		TYPE_NAME_TRANSACTION_PUBLIC,
+		TYPE_NAME_SQL_PUBLIC
 };
 
 ServiceType ServiceConfig::SERVICE_TYPE_LIST[] = {
 		CLUSTER_SERVICE, TRANSACTION_SERVICE,
-		SYNC_SERVICE, SYSTEM_SERVICE, SQL_SERVICE};
+		SYNC_SERVICE, SYSTEM_SERVICE, SQL_SERVICE };
 
 int32_t ServiceConfig::SERVICE_TYPE_LIST_MAP[] = {
 		0, 1, 2, 3, 4
@@ -113,10 +112,9 @@ SERVICE_TYPE_LIST_WITH_PUBLIC[] = {
 		SQL_SERVICE
 };
 
-
 int32_t ServiceConfig::
 SERVICE_TYPE_LIST_MAP_WITH_PUBLIC[] = {
-		0, 5, 2, 3, 6, 1, 4
+		0, 1, 2, 3, 4, 5, 6
 };
 
 const char8_t* dumpServiceType(ServiceType serviceType) {
@@ -160,7 +158,7 @@ ClusterService::ClusterService(
 		config.get<int32_t>(CONFIG_TABLE_DS_PARTITION_NUM)),
 	sqlSvc_(NULL),
 	pt_(clsMgr.getPartitionTable()),
-	initailized_(false),
+	initialized_(false),
 	isSystemServiceError_(false),
 	notificationManager_(clsMgr_, alloc) {
 
@@ -203,7 +201,7 @@ ClusterService::ClusterService(
 		Event requestNotifyClientEvent(
 			source, SQL_TIMER_NOTIFY_CLIENT, CS_HANDLER_PARTITION_ID);
 		ee_.addPeriodicTimer(
-			requestNotifyClientEvent, changeTimeSecToMill(config.get<int32_t>(
+			requestNotifyClientEvent, CommonUtility::changeTimeSecondToMilliSecond(config.get<int32_t>(
 				CONFIG_TABLE_SQL_NOTIFICATION_INTERVAL)));
 		ee_.setHandler(CS_TIMER_REQUEST_SQL_CHECK_TIMEOUT,
 			timerRequestSQLCheckTimeoutHandler_);
@@ -279,7 +277,7 @@ EventEngine::Config ClusterService::createEEConfig(
 			config.getUInt16(CONFIG_TABLE_CS_NOTIFICATION_PORT));
 		if (strlen(config.get<const char8_t*>(
 			CONFIG_TABLE_CS_NOTIFICATION_INTERFACE_ADDRESS)) != 0) {
-			eeConfig.setMulticastIntefaceAddress(
+			eeConfig.setMulticastInterfaceAddress(
 				config.get<const char8_t*>(
 					CONFIG_TABLE_CS_NOTIFICATION_INTERFACE_ADDRESS),
 				config.getUInt16(CONFIG_TABLE_CS_SERVICE_PORT));
@@ -441,9 +439,23 @@ void ClusterService::initialize(ManagerSet& mgrSet) {
 					"Duplicate member is included in this list");
 			}
 		}
+		std::string rackZoneId = config->get<const char8_t*>(CONFIG_TABLE_CS_RACK_ZONE_ID);
+		if (pt_->isEnableRackZoneAwareness()) {
+			if (rackZoneId.empty()) {
+				GS_THROW_USER_ERROR(GS_ERROR_CS_CONFIG_ERROR, "RackZone ID is not speified");
+			}
+			NoEmptyKey::validate(KeyConstraint::getUserKeyConstraint(PartitionTable::RACKZONE_ID_STRING_MAX),
+				rackZoneId.c_str(), static_cast<uint32_t>(rackZoneId.size()), "rackZoneId");
+			pt_->setRackZoneId(rackZoneId.c_str(), 0);
+		}
+		else {
+			if (!rackZoneId.empty()) {
+				GS_THROW_USER_ERROR(GS_ERROR_CS_CONFIG_ERROR, "RackZoneAwaerness is not specified");
+			}
+		}
 		pt_->getPartitionRevision().set(
 			clusterAddress.address_, clusterAddress.port_);
-		initailized_ = true;
+		initialized_ = true;
 	}
 	catch (std::exception& e) {
 		GS_RETHROW_SYSTEM_ERROR(e, "");
@@ -455,7 +467,7 @@ void ClusterService::initialize(ManagerSet& mgrSet) {
 */
 void ClusterService::start(const Event::Source& eventSource) {
 	try {
-		if (!initailized_) {
+		if (!initialized_) {
 			GS_THROW_USER_ERROR(
 				GS_ERROR_CS_SERVICE_NOT_INITIALIZED, "");
 		}
@@ -565,6 +577,120 @@ template void ClusterService::encode(
 
 template void ClusterService::encode(
 	ClusterManager::NotifyClusterResInfo& t, EventByteOutStream& out);
+
+void ClusterService::encodeOptionalPart(EventByteOutStream& out, ClusterOptionalInfo& optionalInfo) {
+	optionalInfo.encode(out, this);
+}
+
+void ClusterService::decodeOptionalPart(Event& ev, EventByteInStream& in, ClusterOptionalInfo& optionalInfo) {
+	optionalInfo.decode(ev, in, this);
+}
+
+void ClusterOptionalInfo::setPublicAddressInfo() {
+	if (pt_->hasPublicAddress()) {
+		pt_->getPublicNodeAddress(
+			publicAddressInfo_.getPublicNodeAddressList());
+	}
+}
+
+/** **
+	@brief ラックゾーン情報のセット
+** **/
+void ClusterOptionalInfo::setRackZoneInfo() {
+	pt_->getRackZoneInfoList(rackZoneInfoList_);
+}
+
+/** **
+	@brief エンコード
+	@note クラスタ情報本体に付随されるオプション情報のエンコード
+	@param [in] out 出力ストリーム
+	@param [in] clsSvc クラスタサービス
+** **/
+void ClusterOptionalInfo::encode(EventByteOutStream& out, ClusterService* clsSvc) {
+	uint32_t bodySize;
+	for (int32_t type = 0; type < PARAM_MAX; type++) {
+		switch (type) {
+		case PUBLIC_ADDRESS_INFO:
+			if (publicAddressInfo_.check()) setList_[type] = ACTIVE;
+			break;
+		case SSL_PORT:
+			if (ssl_port_ != UNDEF_SSL_PORT) setList_[type] = ACTIVE;
+			break;
+		case RACKZONE_ID:
+			if (rackZoneInfoList_.check()) setList_[type] = ACTIVE;
+			break;
+		case DROP_PARTITION_INFO:
+			if (dropPartitionNodeInfo_.check()) setList_[type] = ACTIVE;
+			break;
+		default:
+			break;
+		}
+		for (int32_t type = 0; type < setList_.size(); type++) {
+			if (setList_[type] == ACTIVE) {
+				out << type;
+				const size_t bodyTopPos = out.base().position();
+				bodySize = 0;
+				out << bodySize;
+				switch (type) {
+				case PUBLIC_ADDRESS_INFO:
+					clsSvc->encode(publicAddressInfo_, out);
+					break;
+				case SSL_PORT:
+					out << ssl_port_;
+					break;
+				case RACKZONE_ID:
+					clsSvc->encode(rackZoneInfoList_, out);
+					break;
+				case DROP_PARTITION_INFO:
+					clsSvc->encode(dropPartitionNodeInfo_, out);
+					break;
+				default:
+					break;
+				}
+				const size_t bodyEndPos = out.base().position();
+				bodySize = static_cast<uint32_t>(bodyEndPos - bodyTopPos);
+				out.base().position(bodyTopPos);
+				out << bodySize;
+				out.base().position(bodyEndPos);
+			}
+		}
+	}
+}
+
+/** **
+	@brief デコード
+	@note クラスタ情報本体に付随されるオプション情報のデコード
+	@param [in] out 入力ストリーム
+	@param [in] clsSvc クラスタサービス
+** **/
+void ClusterOptionalInfo::decode(Event& ev, EventByteInStream& in, ClusterService* clsSvc) {
+	while (in.base().remaining()) {
+		int32_t type;
+		uint32_t bodySize;
+		in >> type;
+		in >> bodySize;
+		const size_t bodyTopPos = in.base().position();
+		setList_[type] = ACTIVE;
+		switch (type) {
+		case PUBLIC_ADDRESS_INFO:
+			clsSvc->decode(ev, publicAddressInfo_, in);
+			break;
+		case SSL_PORT:
+			in >> ssl_port_;
+			break;
+		case RACKZONE_ID:
+			clsSvc->decode(ev, rackZoneInfoList_, in);
+			break;
+		case DROP_PARTITION_INFO:
+			clsSvc->decode(ev, dropPartitionNodeInfo_, in);
+			break;
+		default:
+			setList_[type] = INACTIVE;
+			in.base().position(bodyTopPos + bodySize);
+			break;
+		}
+	}
+}
 
 /*!
 	@brief Checks the version of message for cluster service
@@ -689,6 +815,8 @@ template void ClusterService::decode(Event& ev, ClusterManager::NotifyClusterRes
 template void ClusterService::decode(Event& ev, ClusterManager::NotifyClusterInfo& t, EventByteInStream& in);
 template void ClusterService::decode(Event& ev, DropPartitionInfo& t);
 template void ClusterService::decode(Event& ev, LongtermSyncInfo& t);
+template void ClusterService::decode(Event& ev, RackZoneInfoList::RackZoneInfo& t, EventByteInStream& in);
+template void ClusterService::decode(Event& ev, PublicAddressInfoMessage& t, EventByteInStream& in);
 
 /*!
 	@brief Handles system error
@@ -699,7 +827,7 @@ void ClusterService::setError(
 
 	try {
 		if (e != NULL) {
-			UTIL_TRACE_EXCEPTION_ERROR(CLUSTER_OPERATION, *e,
+			UTIL_TRACE_EXCEPTION(CLUSTER_OPERATION, *e,
 				GS_EXCEPTION_MERGE_MESSAGE(
 					*e, "[ERROR] SetError requested"));
 		}
@@ -1029,13 +1157,12 @@ void TimerCheckClusterHandler::sendHeartbeat(
 			ec, CS_HEARTBEAT, CS_HANDLER_PARTITION_ID);
 		EventByteOutStream out = heartbeatEvent.getOutStream();
 		clsSvc_->encode(heartbeatInfo, out);
-		if (pt_->hasPublicAddress()
-			&& heartbeatInfo.getNodeAddressList().size() > 0) {
-			PublicAddressInfoMessage publicAddressInfo;
-			pt_->getPublicNodeAddress(
-				publicAddressInfo.getPublicNodeAddressList());
-			clsSvc_->encode(publicAddressInfo, out);
+		ClusterOptionalInfo option(ec.getAllocator(), pt_);
+		if (heartbeatInfo.getNodeAddressList().size() > 0) {
+			option.setPublicAddressInfo();
 		}
+		clsSvc_->encodeOptionalPart(out, option);
+
 		for (NodeId nodeId = 1; nodeId < activeNodeListSize;nodeId++) {
 			pt_->setAckHeartbeat(activeNodeList[nodeId], false);
 			const NodeDescriptor& nd
@@ -1050,34 +1177,16 @@ void TimerCheckClusterHandler::sendHeartbeat(
 void TimerCheckClusterHandler::sendUpdatePartitionInfo(
 	EventContext& ec,
 	ClusterManager::UpdatePartitionInfo& updatePartitionInfo,
-	NodeIdList& activeNodeList) {
+	NodeIdList& activeNodeList, ClusterOptionalInfo& option) {
 
 	if (updatePartitionInfo.isNeedUpdatePartition()) {
 		Event updatePartitionEvent(
 			ec, CS_UPDATE_PARTITION, CS_HANDLER_PARTITION_ID);
 		EventByteOutStream out = updatePartitionEvent.getOutStream();
 		clsSvc_->encode(updatePartitionInfo, out);
-
-		if (updatePartitionInfo.dropPartitionNodeInfo_.getSize() > 0
-			|| pt_->hasPublicAddress()) {
-			clsSvc_->encode(
-				updatePartitionInfo.dropPartitionNodeInfo_, out);
-		}
-		if (pt_->hasPublicAddress()) {
-			PublicAddressInfoMessage publicAddressInfo;
-			pt_->getPublicNodeAddress(
-				publicAddressInfo.getPublicNodeAddressList());
-			clsSvc_->encode(publicAddressInfo, out);
-		}
-
-		Event sendMasterInfoEvent(
-			ec, CS_SEND_MASTER_INFO, CS_HANDLER_PARTITION_ID);
-		ClusterManager::SendMasterInfo sendMasterInfo(
-			ec.getAllocator(), 0);
-
-		sendMasterInfo.setSSLPort(pt_->getSSLPortNo(SELF_NODEID));
-		EventByteOutStream out2 = sendMasterInfoEvent.getOutStream();
-		clsSvc_->encode(sendMasterInfo, out2);
+		option.setPublicAddressInfo();
+		option.setSSLPort(pt_->getSSLPortNo(SELF_NODEID));
+		clsSvc_->encodeOptionalPart(out, option);
 
 		for (NodeIdList::iterator it = activeNodeList.begin();
 			it != activeNodeList.end(); it++) {
@@ -1089,7 +1198,6 @@ void TimerCheckClusterHandler::sendUpdatePartitionInfo(
 				const NodeDescriptor& nd = clsEE_->getServerND(nodeId);
 				if (!nd.isEmpty()) {
 					clsEE_->send(updatePartitionEvent, nd);
-					clsEE_->send(sendMasterInfoEvent, nd);
 				}
 			}
 		}
@@ -1125,8 +1233,10 @@ void TimerCheckClusterHandler::doAfterUpdatePartitionInfo(
 		bool clusterChange = clsMgr_->isUpdatePartition();
 		ClusterStatusTransition nextTransition
 			= heartbeatCheckInfo.getNextTransition();
+		ClusterOptionalInfo option(alloc, pt_);
+
 		ClusterManager::UpdatePartitionInfo updatePartitionInfo(
-			alloc, 0, pt_, heartbeatCheckInfo.isAddNewNode(),
+			alloc, 0, pt_, option.dropPartitionNodeInfo_, heartbeatCheckInfo.isAddNewNode(),
 			(nextTransition != KEEP) || clusterChange);
 		if (clusterChange) {
 			updatePartitionInfo.setAddOrDownNode();
@@ -1136,7 +1246,7 @@ void TimerCheckClusterHandler::doAfterUpdatePartitionInfo(
 		}
 		clsMgr_->getUpdatePartitionInfo(updatePartitionInfo);
 		sendUpdatePartitionInfo(ec, updatePartitionInfo,
-			heartbeatCheckInfo.getActiveNodeList());
+			heartbeatCheckInfo.getActiveNodeList(), option);
 	}
 }
 
@@ -1157,8 +1267,6 @@ void TimerCheckClusterHandler::operator()(
 		}
 		util::StackAllocator& alloc = ec.getAllocator();
 		util::StackAllocator::Scope scope(alloc);
-
-
 		ClusterManager::HeartbeatCheckInfo heartbeatCheckInfo(alloc);
 		clsMgr_->getHeartbeatCheckInfo(heartbeatCheckInfo);
 		doAfterHeartbeatCheckInfo(ec, heartbeatCheckInfo);
@@ -1230,12 +1338,9 @@ void TimerNotifyClientHandler::operator()(
 }
 
 void UpdatePartitionHandler::checkAndRequestDropPartition(
-	EventContext& ec,
-	ClusterManager::UpdatePartitionInfo& updatePartitionInfo) {
+	EventContext& ec, DropPartitionNodeInfo& dropPartitionNodeInfo) {
 
 	util::StackAllocator& alloc = ec.getAllocator();
-	DropPartitionNodeInfo& dropPartitionNodeInfo
-		= updatePartitionInfo.dropPartitionNodeInfo_;
 	dropPartitionNodeInfo.init();
 
 	for (size_t pos = 0;
@@ -1259,7 +1364,7 @@ void UpdatePartitionHandler::updateNodeInfo(
 	ClusterManager::UpdatePartitionInfo& updatePartitionInfo) {
 
 	bool needCancel = false;
-	SubPartitionTable& subPartitionTable
+	PartitionTable::SubPartitionTable& subPartitionTable
 		= updatePartitionInfo.getSubPartitionTable();
 	clsSvc_->updateNodeList(
 		subPartitionTable.getNodeAddressList(),
@@ -1331,24 +1436,23 @@ void ClusterHandler::resolveAddress(PartitionRole& role) {
 		nextBackups.push_back(nextBackupId);
 	}
 
-	for (int32_t cachupPos = 0;
-		cachupPos < static_cast<int32_t>(catchupAddressList.size());
-		cachupPos++) {
+	for (int32_t catchupPos = 0;
+		catchupPos < static_cast<int32_t>(catchupAddressList.size());
+		catchupPos++) {
 		NodeId nextCatchupId = ClusterService::changeNodeId(
-			catchupAddressList[cachupPos], clsEE_);
+			catchupAddressList[catchupPos], clsEE_);
 		if (nextCatchupId == UNDEF_NODEID) {
 			GS_THROW_USER_ERROR(
 				GS_ERROR_PT_INVALID_NODE_ADDRESS,
 				"Specify invalid node address"
-				<< catchupAddressList[cachupPos].dump());
+				<< catchupAddressList[catchupPos].dump());
 		}
 		nextCatchups.push_back(nextCatchupId);
 	}
 	role.set(nextOwnerId, nextBackups, nextCatchups);
 }
 
-bool UpdatePartitionHandler::resolveAddress(
-	SubPartition& subPartition) {
+bool UpdatePartitionHandler::resolveAddress(PartitionTable::SubPartition& subPartition) {
 
 	ClusterHandler::resolveAddress(subPartition.role_);
 	NodeId currentOwner = ClusterService::changeNodeId(
@@ -1357,11 +1461,8 @@ bool UpdatePartitionHandler::resolveAddress(
 	return (currentOwner == 0);
 }
 
-void UpdatePartitionHandler::requestSync(
-	EventContext& ec,
-	PartitionId pId,
-	PartitionRole& role,
-	bool isShorttermSync) {
+void UpdatePartitionHandler::requestSync(EventContext& ec, PartitionId pId,
+	PartitionRole& role, bool isShorttermSync) {
 
 	EventType eventType = TXN_SHORTTERM_SYNC_REQUEST;
 	SyncMode syncMode = MODE_SHORTTERM_SYNC;
@@ -1370,9 +1471,7 @@ void UpdatePartitionHandler::requestSync(
 		syncMode = MODE_LONGTERM_SYNC;
 	}
 	util::StackAllocator& alloc = ec.getAllocator();
-	SyncRequestInfo syncRequestInfo(alloc,
-		eventType, syncMgr_, pId, clsEE_,
-		syncMode);
+	SyncRequestInfo syncRequestInfo(alloc, eventType, syncMgr_, pId, clsEE_, syncMode);
 	syncRequestInfo.setPartitionRole(role);
 	Event requestEvent(ec, eventType, pId);
 	EventByteOutStream out = requestEvent.getOutStream();
@@ -1380,26 +1479,24 @@ void UpdatePartitionHandler::requestSync(
 	txnEE_->addTimer(requestEvent, EE_PRIORITY_HIGH);
 }
 
-
-void UpdatePartitionHandler::decode(
-	EventContext& ec, Event& ev,
+void UpdatePartitionHandler::decode(EventContext& ec, Event& ev,
 	ClusterManager::UpdatePartitionInfo& updatePartitionInfo) {
 
 	util::StackAllocator& alloc = ec.getAllocator();
 	EventByteInStream in = ev.getInStream();
-	clsSvc_->decode(ev, updatePartitionInfo, in);
-	if (in.base().remaining()) {
-		clsSvc_->decode(
-			ev, updatePartitionInfo.dropPartitionNodeInfo_, in);
-		checkAndRequestDropPartition(ec, updatePartitionInfo);
 
-		if (in.base().remaining()) {
-			PublicAddressInfoMessage publicAddressInfo;
-			clsSvc_->decode(ev, publicAddressInfo, in);
-			updatePartitionInfo.getSubPartitionTable()
-				.setPublicNodeAddressList(
-					publicAddressInfo.getPublicNodeAddressList());
-		}
+	ClusterOptionalInfo option(alloc, pt_);
+	clsSvc_->decode(ev, updatePartitionInfo, in);
+	clsSvc_->decodeOptionalPart(ev, in, option);
+	if (option.isActive(ClusterOptionalInfo::PUBLIC_ADDRESS_INFO)) {
+		updatePartitionInfo.getSubPartitionTable().setPublicNodeAddressList(
+			option.getPublicAddressInfo().getPublicNodeAddressList());
+	}
+	if (option.isActive(ClusterOptionalInfo::DROP_PARTITION_INFO)) {
+		checkAndRequestDropPartition(ec, option.getDropPartitionInfo());
+	}
+	if (option.isActive(ClusterOptionalInfo::SSL_PORT)) {
+		pt_->setSSLPortNo(ClusterService::resolveSenderND(ev), option.getSSLPort());
 	}
 }
 
@@ -1417,15 +1514,16 @@ void UpdatePartitionHandler::operator()(
 		util::StackAllocator& alloc = ec.getAllocator();
 		util::StackAllocator::Scope scope(alloc);
 		NodeId senderNodeId = ClusterService::resolveSenderND(ev);
+		ClusterOptionalInfo optionInfo(alloc, pt_);
 		ClusterManager::UpdatePartitionInfo
-			updatePartitionInfo(alloc, senderNodeId, pt_);
+			updatePartitionInfo(alloc, senderNodeId, pt_, optionInfo.dropPartitionNodeInfo_);
 
 		decode(ec, ev, updatePartitionInfo);
 
 		bool traceFlag
 			= (updatePartitionInfo.dropPartitionNodeInfo_.getSize() > 0);
 		updateNodeInfo(ec, updatePartitionInfo);
-		SubPartitionTable& subPartitionTable
+		PartitionTable::SubPartitionTable& subPartitionTable
 			= updatePartitionInfo.getSubPartitionTable();
 		clsMgr_->setUpdatePartitionInfo(updatePartitionInfo);
 		util::Vector<PartitionId>& shorttermSyncPIdList
@@ -1433,7 +1531,7 @@ void UpdatePartitionHandler::operator()(
 		util::Vector<PartitionId>& longtermSyncPIdList
 			= updatePartitionInfo.getLongtermSyncPIdList();
 		util::Vector<PartitionId>& changePartitionPIdList
-			= updatePartitionInfo.getChangePartitonPIdList();
+			= updatePartitionInfo.getChangePartitionPIdList();
 		for (PartitionId pos = 0;
 			pos < shorttermSyncPIdList.size(); pos++) {
 			PartitionRole& role
@@ -1469,8 +1567,8 @@ void UpdatePartitionHandler::operator()(
 
 		if (traceFlag) {
 			TRACE_CLUSTER_NORMAL_OPERATION(INFO,
-				"Recieve next partition, revision="
-				<< subPartitionTable.getRevision().sequentialNumber_);
+				"Receive next partition, revision="
+				<< subPartitionTable.getRevision().getRevisionNo());
 		}
 	}
 	catch (UserException& e) {
@@ -1785,9 +1883,9 @@ EventEngine* ClusterService::getEE(ServiceType type) {
 /*!
 	@brief Shutdown all services
 */
-void ClusterService::shutdownAllService(bool isInSytemService) {
+void ClusterService::shutdownAllService(bool isInSystemService) {
 	try {
-		if (isInSytemService) {
+		if (isInSystemService) {
 			isSystemServiceError_ = true;
 		}
 		sysSvc_->shutdown();
@@ -1882,9 +1980,7 @@ void ClusterService::NotificationManager::initialize(
 				}
 			}
 			resolverList_.reserve(resolverList_.size() + 1);
-			ServiceAddressResolver* resolver =
-				UTIL_NEW ServiceAddressResolver(
-					localVarAlloc_, resolverConfig);
+			ServiceAddressResolver* resolver = UTIL_NEW ServiceAddressResolver(localVarAlloc_, resolverConfig);
 			resolverList_.push_back(resolver);
 
 			ClusterAdditionalServiceConfig addConfig(config);
@@ -1904,16 +2000,13 @@ void ClusterService::NotificationManager::initialize(
 					AddressInfo publicInfo;
 					memset(&info, 0, sizeof(AddressInfo));
 
-					CLUSTER_SET_RESOLVER_ADDRESS(
-						resolver, info, index, cluster);
+					CLUSTER_SET_RESOLVER_ADDRESS(resolver, info, index, cluster);
 
 					if (usePublicAddress) {
-						util::SocketAddress localTxnAddress
-							= resolver->getAddress(index, resolver->getType(
-								ServiceConfig::TYPE_NAME_TRANSACTION_LOCAL));
-						util::SocketAddress txnAddress
-							= resolver->getAddress(index, resolver->getType(
-								ServiceConfig::TYPE_NAME_TRANSACTION));
+						util::SocketAddress localTxnAddress = resolver->getAddress(index, resolver->getType(
+							ServiceConfig::TYPE_NAME_TRANSACTION));
+						util::SocketAddress txnAddress = resolver->getAddress(index, resolver->getType(
+							ServiceConfig::TYPE_NAME_TRANSACTION_PUBLIC));
 
 						if (localTxnAddress.getPort() != txnAddress.getPort()) {
 							GS_THROW_USER_ERROR(GS_ERROR_CS_CONFIG_ERROR,
@@ -1924,12 +2017,11 @@ void ClusterService::NotificationManager::initialize(
 						info.transactionAddress_.set(localTxnAddress);
 						publicInfo.transactionAddress_.set(txnAddress);
 
-						util::SocketAddress localSqlAddress
-							= resolver->getAddress(index, resolver->getType(
-								ServiceConfig::TYPE_NAME_SQL_LOCAL));
-						util::SocketAddress sqlAddress
-							= resolver->getAddress(index, resolver->getType(
-								ServiceConfig::TYPE_NAME_SQL));
+						util::SocketAddress localSqlAddress = resolver->getAddress(index, resolver->getType(
+							ServiceConfig::TYPE_NAME_SQL));
+						util::SocketAddress sqlAddress = resolver->getAddress(index, resolver->getType(
+							ServiceConfig::TYPE_NAME_SQL_PUBLIC));
+
 						if (localSqlAddress.getPort() != sqlAddress.getPort()) {
 							GS_THROW_USER_ERROR(
 								GS_ERROR_CS_CONFIG_ERROR,
@@ -1941,20 +2033,12 @@ void ClusterService::NotificationManager::initialize(
 						publicInfo.sqlAddress_.set(sqlAddress);
 					}
 					else {
-						if (addConfig.isSetLocalAddress()) {
-							GS_THROW_USER_ERROR(
-								GS_ERROR_CS_CONFIG_ERROR,
-								"LocalServiceAddres is , but not defined node configuration");
-						}
-						CLUSTER_SET_RESOLVER_ADDRESS(
-							resolver, info, index, transaction);
-						CLUSTER_SET_RESOLVER_ADDRESS(
-							resolver, info, index, sql);
+						CLUSTER_SET_RESOLVER_ADDRESS(resolver, info, index, transaction);
+						CLUSTER_SET_RESOLVER_ADDRESS(resolver, info, index, sql);
 					}
-					CLUSTER_SET_RESOLVER_ADDRESS(
-						resolver, info, index, sync);
-					CLUSTER_SET_RESOLVER_ADDRESS(
-						resolver, info, index, system);
+
+					CLUSTER_SET_RESOLVER_ADDRESS(resolver, info, index, sync);
+					CLUSTER_SET_RESOLVER_ADDRESS(resolver, info, index, system);
 
 					fixedAddressInfoSet_.insert(info);
 					if (usePublicAddress) {
@@ -1965,7 +2049,7 @@ void ClusterService::NotificationManager::initialize(
 			else {
 				const int32_t updateInterval = config.get<int32_t>(
 					CONFIG_TABLE_CS_NOTIFICATION_PROVIDER_UPDATE_INTERVAL);
-				resolverUpdateInterval_ = changeTimeSecToMill(
+				resolverUpdateInterval_ = CommonUtility::changeTimeSecondToMilliSecond(
 					updateInterval > 0 ? updateInterval : notificationInterval);
 				if (resolverUpdateInterval_ < resolverCheckLongInterval_) {
 					resolverCheckLongInterval_ = DEFAULT_CHECK_INTERVAL;
@@ -2157,10 +2241,10 @@ void NewSQLPartitionRefreshHandler::operator()(
 		const NodeDescriptor& nd = ev.getSenderND();
 		switch (eventType) {
 		case CS_NEWSQL_PARTITION_REFRESH: {
-			SubPartitionTable subTable;
+			PartitionTable::SubPartitionTable subTable;
 			subTable.set(pt_);
 			if (nd.isEmpty()) {
-				pt_->updateNewSQLPartiton(subTable);
+				pt_->updateNewSQLPartition(subTable);
 			}
 			else {
 				Event requestEvent(
@@ -2172,10 +2256,10 @@ void NewSQLPartitionRefreshHandler::operator()(
 			break;
 		}
 		case CS_NEWSQL_PARTITION_REFRESH_ACK: {
-			SubPartitionTable subTable;
+			PartitionTable::SubPartitionTable subTable;
 			clsSvc_->decode(ev, subTable);
 			subTable.init(pt_, clsSvc_->getEE());
-			pt_->updateNewSQLPartiton(subTable);
+			pt_->updateNewSQLPartition(subTable);
 		}
 		}
 	}
@@ -2198,18 +2282,18 @@ void ClusterService::requestRefreshPartition(
 		else {
 			refreshPartitionInfo.set(pt_);
 		}
-		Event requetEvent(
+		Event requestEvent(
 			ec, CS_NEWSQL_PARTITION_REFRESH, CS_HANDLER_PARTITION_ID);
-		encode(requetEvent, refreshPartitionInfo);
+		encode(requestEvent, refreshPartitionInfo);
 		NodeId master = pt_->getMaster();
 		if (master != UNDEF_NODEID) {
 			const NodeDescriptor& nd = ee_.getServerND(master);
 			if (!nd.isEmpty()) {
 				if (master == 0) {
-					ee_.add(requetEvent);
+					ee_.add(requestEvent);
 				}
 				else {
-					ee_.send(requetEvent, nd);
+					ee_.send(requestEvent, nd);
 				}
 			}
 		}
@@ -2219,7 +2303,7 @@ void ClusterService::requestRefreshPartition(
 	}
 }
 
-void SubPartitionTable::init(
+void PartitionTable::SubPartitionTable::init(
 	PartitionTable* pt, EventEngine* ee) {
 
 	for (size_t pos = 0; pos < subPartitionList_.size(); pos++) {
@@ -2504,123 +2588,69 @@ void SystemCommandHandler::doCompleteCheckpointForRecovery(
 		}
 	}
 }
-
 ClusterAdditionalServiceConfig::ClusterAdditionalServiceConfig(
-	const ConfigTable& config,
-	PartitionTable* pt) : hasPublic_(false) {
+	const ConfigTable& config, PartitionTable* pt) : hasPublic_(false) {
 
-	txnServiceAddress_ = config.get<const char8_t*>(
-		CONFIG_TABLE_TXN_SERVICE_ADDRESS);
-	txnLocalServiceAddress_ = config.get<const char8_t*>(
-		CONFIG_TABLE_TXN_LOCAL_SERVICE_ADDRESS);
+	txnServiceAddress_ = config.get<const char8_t*>(CONFIG_TABLE_TXN_SERVICE_ADDRESS);
+	txnPublicServiceAddress_ = config.get<const char8_t*>(CONFIG_TABLE_TXN_PUBLIC_SERVICE_ADDRESS);
 	txnAddressSize_ = strlen(txnServiceAddress_);
-	txnInternalAddressSize_ = strlen(txnLocalServiceAddress_);
-	txnPort_ = config.getUInt16(
-		CONFIG_TABLE_TXN_SERVICE_PORT);
-	sqlServiceAddress_ = config.get<const char8_t*>(
-		CONFIG_TABLE_SQL_SERVICE_ADDRESS);
-	sqlLocalServiceAddress_ = config.get<const char8_t*>(
-		CONFIG_TABLE_SQL_LOCAL_SERVICE_ADDRESS);
+	txnInternalAddressSize_ = strlen(txnPublicServiceAddress_);
+	txnPort_ = config.getUInt16(CONFIG_TABLE_TXN_SERVICE_PORT);
+
+	sqlServiceAddress_ = config.get<const char8_t*>(CONFIG_TABLE_SQL_SERVICE_ADDRESS);
+	sqlPublicServiceAddress_ = config.get<const char8_t*>(CONFIG_TABLE_SQL_PUBLIC_SERVICE_ADDRESS);
 	sqlAddressSize_ = strlen(sqlServiceAddress_);
-	sqlInternalAddressSize_ = strlen(sqlLocalServiceAddress_);
+	sqlInternalAddressSize_ = strlen(sqlPublicServiceAddress_);
 	sqlPort_ = config.getUInt16(CONFIG_TABLE_SQL_SERVICE_PORT);
 
 	serviceTypeList_ = ServiceConfig::SERVICE_TYPE_LIST_MAP;
-	serviceTypeSize_
-		= sizeof(ServiceConfig::SERVICE_TYPE_LIST_MAP) / sizeof(int32_t);
+	serviceTypeSize_ = sizeof(ServiceConfig::SERVICE_TYPE_LIST_MAP) / sizeof(int32_t);
 	serviceTypeNameList_ = ServiceConfig::SERVICE_TYPE_NAMES;
 
-	if (txnAddressSize_ == 0 && txnInternalAddressSize_ > 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_CS_CONFIG_ERROR, "");
+	if ((txnInternalAddressSize_ > 0 && sqlInternalAddressSize_ == 0)
+		|| (sqlInternalAddressSize_ > 0 && txnInternalAddressSize_ == 0)) {
+		GS_THROW_USER_ERROR(GS_ERROR_CS_CONFIG_ERROR, "Public service address is conflict");
 	}
-	else {
-		if (txnInternalAddressSize_ > 0) {
-			hasPublic_ = true;
-			serviceTypeList_
-				= ServiceConfig::SERVICE_TYPE_LIST_MAP_WITH_PUBLIC;
-			serviceTypeSize_
-				= sizeof(ServiceConfig::SERVICE_TYPE_LIST_MAP_WITH_PUBLIC)
-				/ sizeof(int32_t);
-			serviceTypeNameList_
-				= ServiceConfig::SERVICE_TYPE_NAMES_WITH_PUBLIC;
 
-			if (pt != NULL) {
-				pt->setPublicAddress();
-				AddressInfo publicAddressInfo;
-				NodeAddress txnAddress(txnServiceAddress_, txnPort_);
-				publicAddressInfo.setNodeAddress(
-					TRANSACTION_SERVICE, txnAddress);
-				NodeAddress sqlAddress(sqlServiceAddress_, sqlPort_);
-				publicAddressInfo.setNodeAddress(
-					SQL_SERVICE, sqlAddress);
-				pt->setPublicAddressInfo(
-					SELF_NODEID, publicAddressInfo);
-			}
+	if (txnInternalAddressSize_ > 0 && sqlInternalAddressSize_ > 0) {
+		hasPublic_ = true;
+
+		serviceTypeList_ = ServiceConfig::SERVICE_TYPE_LIST_MAP_WITH_PUBLIC;
+		serviceTypeSize_ = sizeof(ServiceConfig::SERVICE_TYPE_LIST_MAP_WITH_PUBLIC) / sizeof(int32_t);
+		serviceTypeNameList_ = ServiceConfig::SERVICE_TYPE_NAMES_WITH_PUBLIC;
+
+		if (pt != NULL) {
+
+			pt->setPublicAddress();
+
+			AddressInfo publicAddressInfo;
+			NodeAddress txnAddress(txnPublicServiceAddress_, txnPort_);
+			publicAddressInfo.setNodeAddress(TRANSACTION_SERVICE, txnAddress);
+			NodeAddress sqlAddress(sqlPublicServiceAddress_, sqlPort_);
+
+			publicAddressInfo.setNodeAddress(SQL_SERVICE, sqlAddress);
+			pt->setPublicAddressInfo(SELF_NODEID, publicAddressInfo);
 		}
 	}
-	if (sqlAddressSize_ == 0 && sqlInternalAddressSize_ > 0) {
-		GS_THROW_USER_ERROR(
-			GS_ERROR_CS_CONFIG_ERROR, "");
-	}
-	if ((txnInternalAddressSize_ > 0
-		&& sqlInternalAddressSize_ == 0)
-		|| (sqlInternalAddressSize_ > 0
-			&& txnInternalAddressSize_ == 0)) {
-		GS_THROW_USER_ERROR(GS_ERROR_CS_CONFIG_ERROR, "");
-	}
-};
+}
 
-const char* ClusterAdditionalServiceConfig::getServiceAddress(
-	ServiceType serviceType) {
+const char* ClusterAdditionalServiceConfig::getServiceAddress(ServiceType serviceType) {
 
-	const char* localAddress = NULL;
-	const char* publicAddress = NULL;
 	const char* targetAddress = NULL;
 	switch (serviceType) {
 	case TRANSACTION_SERVICE:
 		targetAddress = txnServiceAddress_;
-		localAddress = txnLocalServiceAddress_;
-		publicAddress = txnServiceAddress_;
 		break;
 	case SQL_SERVICE:
 		targetAddress = sqlServiceAddress_;
-		localAddress = sqlLocalServiceAddress_;
-		publicAddress = sqlServiceAddress_;
 		break;
 	default:
-		GS_THROW_USER_ERROR(
-			GS_ERROR_CS_SERVICE_CLUSTER_INTERNAL_FAILED, "");
-	}
-	if (strlen(publicAddress) > 0) {
-		if (strlen(localAddress) > 0) {
-			targetAddress = localAddress;
-		}
-	}
-	else {
-		if (strlen(localAddress) > 0) {
-			GS_THROW_USER_ERROR(GS_ERROR_CS_CONFIG_ERROR, "");
-		}
+		GS_THROW_USER_ERROR(GS_ERROR_CS_SERVICE_CLUSTER_INTERNAL_FAILED, "");
 	}
 	return targetAddress;
 }
 
-const char* ClusterAdditionalServiceConfig::getAddress(
-	ServiceType serviceType, int32_t type) {
-
-	switch (serviceType) {
-	case TRANSACTION_SERVICE:
-		return txnServiceAddress_;
-	case SQL_SERVICE:
-		return sqlServiceAddress_;
-	default:
-		GS_THROW_USER_ERROR(
-			GS_ERROR_CS_SERVICE_CLUSTER_INTERNAL_FAILED, "");
-	}
-}
-
-uint16_t ClusterAdditionalServiceConfig::getPort(
-	ServiceType serviceType) {
+uint16_t ClusterAdditionalServiceConfig::getPort(ServiceType serviceType) {
 
 	switch (serviceType) {
 	case TRANSACTION_SERVICE:
@@ -2628,7 +2658,6 @@ uint16_t ClusterAdditionalServiceConfig::getPort(
 	case SQL_SERVICE:
 		return sqlPort_;
 	default:
-		GS_THROW_USER_ERROR(
-			GS_ERROR_CS_SERVICE_CLUSTER_INTERNAL_FAILED, "");
+		GS_THROW_USER_ERROR(GS_ERROR_CS_SERVICE_CLUSTER_INTERNAL_FAILED, "");
 	}
 }

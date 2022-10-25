@@ -24,7 +24,7 @@
 #include "object_manager_v4.h"
 #include "transaction_context.h"
 
-/* serach an entry by using user-defined collision detection */
+/* search an entry by using user-defined collision detection */
 void TrNode_search(TransactionContext &txn, ObjectManagerV4 &objectManager,
 	AllocateStrategy &strategy, OId nodeOId, TrCheckCallback ccb, void *ccbarg, TrHitCallback hcb,
 	void *hcbarg)

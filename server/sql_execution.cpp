@@ -219,7 +219,9 @@ void SQLExecutionManager::release(SQLExecution* execution) {
 	try {
 		util::LockGuard<util::Mutex> guard(lock_);
 		if (execution->unlatch()) {
+			util::StackAllocator* alloc = execution->getStackAllocator();
 			ALLOC_VAR_SIZE_DELETE(globalVarAlloc_, execution);
+			releaseStackAllocator(alloc);
 		}
 	}
 	catch (std::exception& e) {
@@ -372,8 +374,8 @@ SQLExecution::SQLExecution(JobManager* jobManager,
 	preparedInfo_(globalVarAlloc_),
 	clientInfo_(executionStackAlloc_, globalVarAlloc_,
 		clientNd, clientId, connOption),
-	analyedQueryInfo_(globalVarAlloc_, executionStackAlloc_),
-	context_(lock_, clientInfo_, analyedQueryInfo_,
+	analyzedQueryInfo_(globalVarAlloc_, executionStackAlloc_),
+	context_(lock_, clientInfo_, analyzedQueryInfo_,
 		executionStatus_, response_, clientId_, currentJobId_)
 {
 	executionStatus_.set(request);
@@ -402,7 +404,6 @@ SQLExecution::~SQLExecution()  try {
 	}
 	ALLOC_VAR_SIZE_DELETE(globalVarAlloc_, syncContext_);
 	ALLOC_VAR_SIZE_DELETE(globalVarAlloc_, scope_);
-	executionManager_->releaseStackAllocator(&executionStackAlloc_);
 	updateConnection();
 	cleanupSerializedData();
 
@@ -675,7 +676,7 @@ void SQLExecution::execute(EventContext& ec,
 		currentVersionId = currentJobId.versionId_;
 	}
 	int64_t delayTime = 0;
-	bool isPreaparedRetry = false;
+	bool isPreparedRetry = false;
 	if (context_.isRetryStatement()) {
 		JobId jobId(clientId_, context_.getExecId());
 		currentVersionId = 1;
@@ -715,7 +716,7 @@ void SQLExecution::execute(EventContext& ec,
 					"Transaction is not supported");
 			}
 
-			if (isPreaparedRetry) {
+			if (isPreparedRetry) {
 				request.preparedParamList_.clear();
 				restoreBindInfo(request);
 			}
@@ -732,6 +733,7 @@ void SQLExecution::execute(EventContext& ec,
 				tableSet, viewSet, liveNodeIdList, useCache,
 				(currentVersionId == 0));
 
+			int64_t startTime = util::DateTime::now(false).getUnixTime();
 			if (request.requestType_ == REQUEST_TYPE_PREPARE || prepareBinded) {
 				TRACE_SQL_START(clientId_, jobManager_->getHostName(), "PARSE");
 				tableInfoList = ALLOC_NEW(alloc) SQLTableInfoList(alloc);
@@ -742,7 +744,7 @@ void SQLExecution::execute(EventContext& ec,
 					SQLReplyContext replyCxt;
 					replyCxt.set(&ec, NULL, UNDEF_JOB_VERSIONID, NULL);
 					replyClient(replyCxt);
-					if (analyedQueryInfo_.isPragmaStatement()) {
+					if (analyzedQueryInfo_.isPragmaStatement()) {
 						executionManager_->remove(ec, clientId_, false, 51, NULL);
 					}
 					return;
@@ -760,7 +762,7 @@ void SQLExecution::execute(EventContext& ec,
 				if (request.requestType_ == REQUEST_TYPE_PREPARE) {
 					TRACE_SQL_START(clientId_, jobManager_->getHostName(), "COMPILE");
 					compile(alloc, connectionControl,
-						parameterTypeList, tableInfoList, request.preparedParamList_, varCxt);
+						parameterTypeList, tableInfoList, request.preparedParamList_, varCxt, startTime);
 					TRACE_SQL_END(clientId_, jobManager_->getHostName(), "COMPILE");
 					SQLReplyContext replyCxt;
 					replyCxt.set(&ec, &parameterTypeList, UNDEF_JOB_VERSIONID, NULL);
@@ -786,12 +788,12 @@ void SQLExecution::execute(EventContext& ec,
 
 			TRACE_SQL_START(clientId_, jobManager_->getHostName(), "COMPILE");
 			compile(alloc, connectionControl,
-				parameterTypeList, tableInfoList, request.preparedParamList_, varCxt);
+				parameterTypeList, tableInfoList, request.preparedParamList_, varCxt, startTime);
 
-			setPreparedOption(request, isPreaparedRetry);
+			setPreparedOption(request, isPreparedRetry);
 			TRACE_SQL_END(clientId_, jobManager_->getHostName(), "COMPILE");
 
-			if (analyedQueryInfo_.isExplain()) {
+			if (analyzedQueryInfo_.isExplain()) {
 				SQLReplyContext replyCxt;
 				replyCxt.setExplain(&ec);
 				replyClient(replyCxt);
@@ -801,6 +803,7 @@ void SQLExecution::execute(EventContext& ec,
 			TRACE_SQL_START(clientId_, jobManager_->getHostName(), "ASSIGN");
 			const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 			JobInfo jobInfo(alloc);
+			jobInfo.startTime_ = startTime;
 			generateJobInfo(alloc, tableInfoList, executionStatus_.preparedPlan_,
 				&jobInfo, 0, ec.getEngine().getMonotonicTime(),
 				connectionControl, liveNodeIdList, maxNodeNum);
@@ -817,7 +820,7 @@ void SQLExecution::execute(EventContext& ec,
 		}
 		catch (std::exception& e1) {
 			if (context_.isPreparedStatement()) {
-				isPreaparedRetry = true;
+				isPreparedRetry = true;
 			}
 			if (!checkJobVersionId(currentVersionId, false, responseJobId)) {
 				return;
@@ -830,7 +833,7 @@ void SQLExecution::execute(EventContext& ec,
 		e = NULL;
 	}
 	GS_THROW_USER_ERROR(GS_ERROR_SQL_EXECUTION_RETRY_QUERY_LIMIT,
-		"Sql stetement execution is reached retry max count="
+		"Sql statement execution is reached retry max count="
 		<< static_cast<int32_t>(MAX_JOB_VERSIONID));
 }
 
@@ -847,7 +850,7 @@ void SQLExecution::generateJobInfo(util::StackAllocator& alloc,
 			jobInfo->containerType_ = TIME_SERIES_CONTAINER;
 		}
 		jobInfo->isSQL_ = !isNotSelect();
-		jobInfo->isExplainAnalyze_ = analyedQueryInfo_.isExplainAnalyze();
+		jobInfo->isExplainAnalyze_ = analyzedQueryInfo_.isExplainAnalyze();
 		size_t pos = 0;
 		PartitionTable* pt = executionManager_->getPartitionTable();
 		util::Vector<NodeId> rootAssignTaskList(pPlan->nodeList_.size(), 0, alloc);
@@ -1074,8 +1077,7 @@ void SQLExecution::generateJobInfo(util::StackAllocator& alloc,
 		executionStatus_.setMaxRows(config_.maxRows_);
 		jobInfo->storeMemoryAgingSwapRate_ = context_.getStoreMemoryAgingSwapRate();
 		jobInfo->timezone_ = context_.getTimezone();
-		int64_t startTime = util::DateTime::now(false).getUnixTime();
-		jobInfo->setup(config_.queryTimeout_, emNow, startTime,
+		jobInfo->setup(config_.queryTimeout_, emNow, jobInfo->startTime_,
 			isCurrentTimeRequired(), true);
 	}
 	catch (std::exception& e) {
@@ -1103,7 +1105,7 @@ void SQLExecution::fetch(EventContext& ec, Event& ev,
 		}
 		CommandId requestCommandNo = request.sqlCount_;
 		if (requestCommandNo > 1) {
-			GS_THROW_USER_ERROR(GS_ERROR_SQL_CLIENT_REQUST_PROTOCOL_ERROR,
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_CLIENT_REQUEST_PROTOCOL_ERROR,
 				"Invalid statement command number, expected="
 				<< requestCommandNo << ", current = 1");
 		}
@@ -1259,7 +1261,7 @@ void SQLExecution::close(EventContext& ec, RequestInfo& request) {
 		executeCancel(ec);
 	}
 	catch (std::exception& e) {
-		GS_RETHROW_USER_OR_SYSTEM(e, "Close SQL exectuion failed, reason = "
+		GS_RETHROW_USER_OR_SYSTEM(e, "Close SQL execution failed, reason = "
 			<< GS_EXCEPTION_MESSAGE(e));
 	}
 }
@@ -1674,7 +1676,10 @@ void SQLExecution::ErrorFormatter::format(std::ostream& os) const {
 		os << " (appName=\'" << appName << "\')";
 	}
 	os << " (clientId=\'" << execution_.getContext().getId() << "\')";
-	os << " (clientNd=\'" << execution_.getContext().getClientNd() << "\')";
+	os << " (source=" << execution_.getContext().getClientNd() << ")";
+	if (execution_.getContext().getConnectionOption().isPublicConnection()) {
+		os << " (connection=PUBLIC)";
+	}
 }
 
 std::ostream& operator<<(
@@ -1706,7 +1711,7 @@ void SQLExecutionManager::resizeTableCache(
 
 void SQLExecution::checkClientResponse() {
 	SQLParsedInfo& parsedInfo = getParsedInfo();
-	if (analyedQueryInfo_.isExplain() || analyedQueryInfo_.isExplainAnalyze()) {
+	if (analyzedQueryInfo_.isExplain() || analyzedQueryInfo_.isExplainAnalyze()) {
 		return;
 	}
 	if (!isNotSelect()) {
@@ -1921,7 +1926,7 @@ bool SQLExecution::executeFastInsert(EventContext& ec,
 	TableSchemaInfo* tableSchema = NULL;
 	const char8_t* currentDBName = NULL;
 
-	const DataStoreConfig* dsConfig = executionManager_->getManagerSet()->dsConfig_ ;
+	const DataStoreConfig* dsConfig = executionManager_->getManagerSet()->dsConfig_;
 	try {
 		getContext().setStartTime(util::DateTime::now(false).getUnixTime());
 		ExecutionProfilerWatcher watcher(this, true);
@@ -2256,6 +2261,9 @@ void SQLExecutionManager::StatSetUpHandler::operator()(StatTable& stat) {
 	STAT_ADD(STAT_TABLE_PERF_SQL_STORE_SWAP_WRITE);
 	STAT_ADD(STAT_TABLE_PERF_SQL_STORE_SWAP_WRITE_SIZE);
 	STAT_ADD(STAT_TABLE_PERF_SQL_STORE_SWAP_WRITE_TIME);
+
+	STAT_ADD(STAT_TABLE_PERF_SQL_TOTAL_INTERNAL_CONNECTION_COUNT);
+	STAT_ADD(STAT_TABLE_PERF_SQL_TOTAL_EXTERNAL_CONNECTION_COUNT);
 }
 
 void SQLExecutionManager::updateStat(StatTable& stat) {
@@ -2288,7 +2296,8 @@ void SQLExecutionManager::updateStat(StatTable& stat) {
 	stat.set(STAT_TABLE_PERF_SQL_SQL_COUNT,
 		getCurrentClientIdListSize());
 	EventEngine::Stats eeStats;
-	jobManager_->getSQLService()->getEE()->getStats(eeStats);
+	SQLService* sqlService = jobManager_->getSQLService();
+	sqlService->getEE()->getStats(eeStats);
 	const int64_t activeQueueSize = eeStats.get(
 		EventEngine::Stats::EVENT_ACTIVE_QUEUE_SIZE_CURRENT);
 	stat.set(STAT_TABLE_PERF_SQL_QUEUE_MAX,
@@ -2301,21 +2310,25 @@ void SQLExecutionManager::updateStat(StatTable& stat) {
 		tableCacheSkipCount_);
 	stat.set(STAT_TABLE_PERF_SQL_TABLE_CACHE_LOAD_TIME,
 		tableCacheLoadTime_);
+	stat.set(STAT_TABLE_PERF_SQL_TOTAL_INTERNAL_CONNECTION_COUNT,
+		sqlService->getTotalInternalConnectionCount());
+	stat.set(STAT_TABLE_PERF_SQL_TOTAL_EXTERNAL_CONNECTION_COUNT,
+		sqlService->getTotalExternalConnectionCount());
 }
 
 void SQLExecutionManager::setRequestedConnectionEnv(
 	const RequestInfo& request,
 	StatementHandler::ConnectionOption& connOption) {
 	typedef StatementMessage::PragmaList PragmaList;
-	const PragmaList* pragmeList =
+	const PragmaList* pragmaList =
 		request.option_.get<StatementMessage::Options::PRAGMA_LIST>();
 
-	if (pragmeList == NULL) {
+	if (pragmaList == NULL) {
 		return;
 	}
 
-	for (PragmaList::List::const_iterator it = pragmeList->list_.begin();
-		it != pragmeList->list_.end(); ++it) {
+	for (PragmaList::List::const_iterator it = pragmaList->list_.begin();
+		it != pragmaList->list_.end(); ++it) {
 		const SQLPragma::PragmaType paramId =
 			SQLPragma::getPragmaType(it->first.c_str());
 		if (paramId != SQLPragma::PRAGMA_NONE) {
@@ -2392,7 +2405,7 @@ void SQLExecutionManager::getProfiler(
 
 		if (execution) {
 			SQLProfilerInfo prof(alloc);
-			prof.startTime_ = getTimeStr(execution->getContext().getStartTime()).c_str();
+			prof.startTime_ = CommonUtility::getTimeStr(execution->getContext().getStartTime()).c_str();
 			prof.sql_ = execution->getContext().getQuery();
 			util::NormalOStringStream strstrm;
 
@@ -2406,7 +2419,7 @@ void SQLExecutionManager::getProfiler(
 			JobId jobId;
 			execution->getContext().getCurrentJobId(jobId);
 			prof.jobId_ = jobId.dump(alloc).c_str();
-			prof.endTime_ = getTimeStr(execution->getContext().getEndTime()).c_str();
+			prof.endTime_ = CommonUtility::getTimeStr(execution->getContext().getEndTime()).c_str();
 			prof.dbName_ = execution->getContext().getDBName();
 			prof.applicationName_ = execution->getContext().getApplicationName();
 			if (!execution->getContext().isPreparedStatement()) {
@@ -2517,7 +2530,7 @@ SQLTableInfo* SQLExecution::decodeTableInfo(
 	int32_t distributedMethod;
 	in >> distributedMethod;
 
-	if (SyntaxTree::isInlcludeHashPartitioningType(partitioningType)) {
+	if (SyntaxTree::isIncludeHashPartitioningType(partitioningType)) {
 		int32_t partitioningCount;
 		in >> partitioningCount;
 		if (partitioningCount <= 0) {
@@ -2744,7 +2757,8 @@ bool SQLExecution::checkJobVersionId(uint8_t versionId, bool isFetch, JobId* job
 void SQLExecution::compile(util::StackAllocator& alloc,
 	SQLConnectionControl& connectionControl,
 	ValueTypeList& parameterTypeList, SQLTableInfoList* tableInfoList,
-	util::Vector<BindParam*>& bindParamInfos, TupleValue::VarContext& varCxt) {
+	util::Vector<BindParam*>& bindParamInfos, TupleValue::VarContext& varCxt, int64_t startTime) {
+
 	SQLPreparedPlan* plan;
 	SQLParsedInfo& parsedInfo = getParsedInfo();
 	SQLCompiler::CompileOption option;
@@ -2753,6 +2767,7 @@ void SQLExecution::compile(util::StackAllocator& alloc,
 	compiler.setMetaDataQueryFlag(executionStatus_.requestType_ == REQUEST_TYPE_PRAGMA);
 	compiler.setExplainType(parsedInfo.explainType_);
 	compiler.setInputSql(parsedInfo.inputSql_);
+	compiler.setQueryStartTime(startTime);
 	if (parsedInfo.placeHolderCount_ > 0) {
 		compiler.setParameterTypeList(&parameterTypeList);
 	}
@@ -2770,7 +2785,7 @@ void SQLExecution::compile(util::StackAllocator& alloc,
 	if (bindParamInfos.size() > 0) {
 		compiler.bindParameterTypes(*plan);
 	}
-	if (analyedQueryInfo_.isExplainAnalyze()) {
+	if (analyzedQueryInfo_.isExplainAnalyze()) {
 		util::XArray<uint8_t> binary(alloc);
 		util::XArrayOutStream<> arrayOut(binary);
 		util::ByteStream< util::XArrayOutStream<> > out(arrayOut);
@@ -2876,7 +2891,7 @@ bool SQLExecution::parse(
 		return doAfterParse(request);
 	}
 	catch (std::exception& e) {
-		if (!analyedQueryInfo_.isPragmaStatement() && parsedInfo.getCommandNum() == 0) {
+		if (!analyzedQueryInfo_.isPragmaStatement() && parsedInfo.getCommandNum() == 0) {
 			GS_RETHROW_USER_OR_SYSTEM(e, "");
 		}
 		doAfterParse(request);
@@ -2890,7 +2905,7 @@ bool SQLExecution::doAfterParse(RequestInfo& request) {
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_UNSUPPORTED,
 			"Multiple SQL statement is not supported");
 	}
-	if (analyedQueryInfo_.isPragmaStatement()) {
+	if (analyzedQueryInfo_.isPragmaStatement()) {
 		if (request.requestType_ == REQUEST_TYPE_UPDATE) {
 			setNotSelect(true);
 		}
@@ -3664,19 +3679,19 @@ const char* SQLExecution::SQLExecutionContext::getApplicationName() const {
 	return clientInfo_.applicationName_.c_str();
 }
 const char* SQLExecution::SQLExecutionContext::getQuery() const {
-	return analyedQueryInfo_.query_.c_str();
+	return analyzedQueryInfo_.query_.c_str();
 }
 void SQLExecution::SQLExecutionContext::getQuery(
 	util::String& str, size_t size) {
-	const char* ptr = analyedQueryInfo_.query_.c_str();
+	const char* ptr = analyzedQueryInfo_.query_.c_str();
 	if (ptr) {
-		str.append(analyedQueryInfo_.query_.c_str(), size);
+		str.append(analyzedQueryInfo_.query_.c_str(), size);
 	}
 }
 
 void SQLExecution::SQLExecutionContext::setQuery(util::String& query) const {
 	if (query.size() > 0) {
-		analyedQueryInfo_.query_ = query.c_str();
+		analyzedQueryInfo_.query_ = query.c_str();
 	}
 }
 
@@ -3729,7 +3744,7 @@ bool SQLExecution::SQLExecutionContext::isRetryStatement() const {
 }
 
 bool SQLExecution::SQLExecutionContext::isPreparedStatement() const {
-	return analyedQueryInfo_.prepared_;
+	return analyzedQueryInfo_.prepared_;
 }
 
 const NodeDescriptor& SQLExecution::SQLExecutionContext::getClientNd() const {

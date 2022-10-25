@@ -86,19 +86,19 @@ void TimeSeries::set(TransactionContext & txn, const FullContainerKey & containe
 	setTablePartitioningVersionId(containerSchema->getTablePartitioningVersionId());
 	setContainerExpirationStartTime(containerSchema->getContainerExpirationStartTime());
 
-	FullContainerKeyCursor keyCursor(*getObjectManager(), getMetaAllcateStrategy());
+	FullContainerKeyCursor keyCursor(*getObjectManager(), getMetaAllocateStrategy());
 	keyCursor.initialize(txn, containerKey);
 	baseContainerImage_->containerNameOId_ = keyCursor.getBaseOId();
 
 	baseContainerImage_->columnSchemaOId_ = columnSchemaOId;
 	commonContainerSchema_ =
 		ALLOC_NEW(txn.getDefaultAllocator()) ShareValueList(
-			*getObjectManager(), getMetaAllcateStrategy(), baseContainerImage_->columnSchemaOId_);
+			*getObjectManager(), getMetaAllocateStrategy(), baseContainerImage_->columnSchemaOId_);
 	columnSchema_ =
 		commonContainerSchema_->get<ColumnSchema>(META_TYPE_COLUMN_SCHEMA);
 
 	indexSchema_ = ALLOC_NEW(txn.getDefaultAllocator())
-		IndexSchema(txn, *getObjectManager(), getMetaAllcateStrategy());
+		IndexSchema(txn, *getObjectManager(), getMetaAllocateStrategy());
 	bool onMemory = false;
 	indexSchema_->initialize(txn, IndexSchema::INITIALIZE_RESERVE_NUM, 0, getColumnNum(), onMemory);
 	baseContainerImage_->indexSchemaOId_ = indexSchema_->getBaseOId();
@@ -127,12 +127,12 @@ void TimeSeries::set(TransactionContext & txn, const FullContainerKey & containe
 	mvccFuncInfo_ = ALLOC_NEW(alloc) TreeFuncInfo(alloc);
 	mvccFuncInfo_->initialize(columnIds, NULL);
 
-	BtreeMap map(txn, *getObjectManager(), getMapAllcateStrategy(), this, rowIdFuncInfo_);
+	BtreeMap map(txn, *getObjectManager(), getMapAllocateStrategy(), this, rowIdFuncInfo_);
 	map.initialize(
 		txn, COLUMN_TYPE_TIMESTAMP, true, BtreeMap::TYPE_UNIQUE_RANGE_KEY);
 	baseContainerImage_->rowIdMapOId_ = map.getBaseOId();
 
-	BtreeMap mvccMap(txn, *getObjectManager(), getMapAllcateStrategy(), this, mvccFuncInfo_);
+	BtreeMap mvccMap(txn, *getObjectManager(), getMapAllocateStrategy(), this, mvccFuncInfo_);
 	mvccMap.initialize<TransactionId, MvccRowImage>(
 		txn, COLUMN_TYPE_OID, false, BtreeMap::TYPE_SINGLE_KEY);
 	baseContainerImage_->mvccMapOId_ = mvccMap.getBaseOId();
@@ -184,7 +184,7 @@ bool TimeSeries::finalize(TransactionContext& txn, bool isRemoveGroup) {
 					return false;
 				}
 
-				getDataStore()->finalizeMap(txn, getMapAllcateStrategy(), rowIdMap.get(), getContainerExpirationTime());
+				getDataStore()->finalizeMap(txn, getMapAllocateStrategy(), rowIdMap.get(), getContainerExpirationTime());
 			}
 
 			if (baseContainerImage_->mvccMapOId_ != UNDEF_OID && !isExpired(txn)) {
@@ -226,7 +226,7 @@ bool TimeSeries::finalize(TransactionContext& txn, bool isRemoveGroup) {
 						break;
 					}
 				}
-				getDataStore()->finalizeMap(txn, getMapAllcateStrategy(), mvccMap.get(), getContainerExpirationTime());
+				getDataStore()->finalizeMap(txn, getMapAllocateStrategy(), mvccMap.get(), getContainerExpirationTime());
 			}
 
 		}
@@ -1005,7 +1005,7 @@ void TimeSeries::searchRowIdIndex(TransactionContext &txn,
 
 	sc.setLimit(limitBackup);
 
-	ContainerValue containerValue(*getObjectManager(), getRowAllcateStrategy());
+	ContainerValue containerValue(*getObjectManager(), getRowAllocateStrategy());
 	util::XArray<OId> oIdList(txn.getDefaultAllocator());
 	util::XArray<OId>::iterator itr;
 
@@ -3047,7 +3047,7 @@ void TimeSeries::aggregateByTimeWindow(TransactionContext &txn,
 		}
 	}
 	
-	ContainerValue containerValue(*getObjectManager(), getRowAllcateStrategy());
+	ContainerValue containerValue(*getObjectManager(), getRowAllocateStrategy());
 	AggregationCursor aggCursor;
 	const AggregatorForLoop *aggLoop = &aggLoopTable[type];
 	ColumnInfo &aggColumnInfo = getColumnInfo(columnId);
@@ -3343,9 +3343,9 @@ void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 			}
 		}
 	}
-	ContainerValue containerValue(*getObjectManager(), getRowAllcateStrategy());
-	ContainerValue prevContainerValue(*getObjectManager(), getRowAllcateStrategy());
-	ContainerValue nextContainerValue(*getObjectManager(), getRowAllcateStrategy());
+	ContainerValue containerValue(*getObjectManager(), getRowAllocateStrategy());
+	ContainerValue prevContainerValue(*getObjectManager(), getRowAllocateStrategy());
+	ContainerValue nextContainerValue(*getObjectManager(), getRowAllocateStrategy());
 	Value subValue;
 	Value mulValue;
 	Value addValue;
@@ -3367,24 +3367,24 @@ void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 	bool isWithRowId = false;  
 
 	while (normalItr != normalOIdList.end() || mvccItr != mvccOIdList.end()) {
-		bool isNoramlExecute = false;
+		bool isNormalExecute = false;
 		if (mvccItr == mvccOIdList.end() ||
 			(normalItr != normalOIdList.end() &&
 				normalBeginTime < mvccBeginTime)) {
 			rowArrayPtr = normalRowArrayPtr;
-			isNoramlExecute = true;
+			isNormalExecute = true;
 		}
 		else {
 			rowArrayPtr = mvccRowArrayPtr;
-			isNoramlExecute = false;
+			isNormalExecute = false;
 		}
 
-		if ((isNoramlExecute &&
+		if ((isNormalExecute &&
 				(isExclusive() || txn.getId() == rowArrayPtr->getTxnId() ||
 					rowArrayPtr->isFirstUpdate() ||
 					!txn.getManager().isActiveTransaction(
 						pId, rowArrayPtr->getTxnId()))) ||
-			(!isNoramlExecute && txn.getId() != rowArrayPtr->getTxnId())) {
+			(!isNormalExecute && txn.getId() != rowArrayPtr->getTxnId())) {
 			for (rowArrayPtr->begin(); !rowArrayPtr->end();
 				 rowArrayPtr->next()) {
 				RowArray::Row row(rowArrayPtr->getRow(), rowArrayPtr);
@@ -3555,7 +3555,7 @@ void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 				prevOId = rowArrayPtr->getOId();
 			}
 		}
-		if (isNoramlExecute) {
+		if (isNormalExecute) {
 			normalItr++;
 		}
 		else {
@@ -3710,28 +3710,28 @@ void TimeSeries::sampleWithoutInterp(TransactionContext &txn,
 		}
 	}
 
-	ContainerValue containerValue(*getObjectManager(), getRowAllcateStrategy());
+	ContainerValue containerValue(*getObjectManager(), getRowAllocateStrategy());
 	Value value;
 	bool isWithRowId = false;  
 	while (normalItr != normalOIdList.end() || mvccItr != mvccOIdList.end()) {
-		bool isNoramlExecute = false;
+		bool isNormalExecute = false;
 		if (mvccItr == mvccOIdList.end() ||
 			(normalItr != normalOIdList.end() &&
 				normalBeginTime < mvccBeginTime)) {
 			rowArrayPtr = normalRowArrayPtr;
-			isNoramlExecute = true;
+			isNormalExecute = true;
 		}
 		else {
 			rowArrayPtr = mvccRowArrayPtr;
-			isNoramlExecute = false;
+			isNormalExecute = false;
 		}
 
-		if ((isNoramlExecute &&
+		if ((isNormalExecute &&
 				(isExclusive() || txn.getId() == rowArrayPtr->getTxnId() ||
 					rowArrayPtr->isFirstUpdate() ||
 					!txn.getManager().isActiveTransaction(
 						pId, rowArrayPtr->getTxnId()))) ||
-			(!isNoramlExecute && txn.getId() != rowArrayPtr->getTxnId())) {
+			(!isNormalExecute && txn.getId() != rowArrayPtr->getTxnId())) {
 			for (rowArrayPtr->begin(); !rowArrayPtr->end();
 				 rowArrayPtr->next()) {
 				RowArray::Row row(rowArrayPtr->getRow(), rowArrayPtr);
@@ -3779,7 +3779,7 @@ void TimeSeries::sampleWithoutInterp(TransactionContext &txn,
 							 columnId++) {
 							ColumnInfo &columnInfo = getColumnInfo(columnId);
 							value.init(columnInfo.getColumnType());
-							value.get(txn, *getObjectManager(), getRowAllcateStrategy(),
+							value.get(txn, *getObjectManager(), getRowAllocateStrategy(),
 								messageRowStore, columnId);
 						}
 						messageRowStore->next();
@@ -3813,7 +3813,7 @@ void TimeSeries::sampleWithoutInterp(TransactionContext &txn,
 				}
 			}
 		}
-		if (isNoramlExecute) {
+		if (isNormalExecute) {
 			normalItr++;
 		}
 		else {
@@ -3852,7 +3852,7 @@ LABEL_FINISH:
 			for (uint32_t columnId = 1; columnId < getColumnNum(); columnId++) {
 				ColumnInfo &columnInfo = getColumnInfo(columnId);
 				value.init(columnInfo.getColumnType());
-				value.get(txn, *getObjectManager(), getRowAllcateStrategy(),
+				value.get(txn, *getObjectManager(), getRowAllocateStrategy(),
 					messageRowStore, columnId);
 			}
 			messageRowStore->next();
@@ -3903,10 +3903,10 @@ void TimeSeries::aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 	sc.getConditionList(condList, BaseIndex::SearchContext::COND_OTHER);
 	searchRowArrayList(txn, sc, normalOIdList, mvccOIdList);
 
-	ContainerValue containerValue(*getObjectManager(), getRowAllcateStrategy());
+	ContainerValue containerValue(*getObjectManager(), getRowAllocateStrategy());
 	switch (type) {
 	case AGG_TIME_AVG: {
-		ContainerValue containerValueTs(*getObjectManager(), getRowAllcateStrategy());
+		ContainerValue containerValueTs(*getObjectManager(), getRowAllocateStrategy());
 		Timestamp beforeTs = UNDEF_TIMESTAMP;
 		Timestamp beforeIntTs = UNDEF_TIMESTAMP;
 		double beforeVal = 0;
@@ -3946,24 +3946,24 @@ void TimeSeries::aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 		mvccItr = mvccOIdList.begin();
 		while (
 			normalItr != normalOIdList.end() || mvccItr != mvccOIdList.end()) {
-			bool isNoramlExecute = false;
+			bool isNormalExecute = false;
 			if (mvccItr == mvccOIdList.end() ||
 				(normalItr != normalOIdList.end() &&
 					normalBeginTime < mvccBeginTime)) {
 				rowArrayPtr = normalRowArrayPtr;
-				isNoramlExecute = true;
+				isNormalExecute = true;
 			}
 			else {
 				rowArrayPtr = mvccRowArrayPtr;
-				isNoramlExecute = false;
+				isNormalExecute = false;
 			}
 
-			if ((isNoramlExecute &&
+			if ((isNormalExecute &&
 					(isExclusive() || txn.getId() == rowArrayPtr->getTxnId() ||
 						rowArrayPtr->isFirstUpdate() ||
 						!txn.getManager().isActiveTransaction(
 							pId, rowArrayPtr->getTxnId()))) ||
-				(!isNoramlExecute && txn.getId() != rowArrayPtr->getTxnId())) {
+				(!isNormalExecute && txn.getId() != rowArrayPtr->getTxnId())) {
 				for (rowArrayPtr->begin(); !rowArrayPtr->end();
 					 rowArrayPtr->next()) {
 					RowArray::Row row(rowArrayPtr->getRow(), rowArrayPtr);
@@ -4017,7 +4017,7 @@ void TimeSeries::aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 				}
 			}
 
-			if (isNoramlExecute) {
+			if (isNormalExecute) {
 				normalItr++;
 			}
 			else {

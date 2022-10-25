@@ -78,7 +78,6 @@ extern std::string dumpUUID(uint8_t* uuid);
 
 
 
-
 #define TXN_THROW_DENY_ERROR(errorCode, message) \
 	GS_THROW_CUSTOM_ERROR(DenyException, errorCode, message)
 
@@ -99,6 +98,7 @@ extern std::string dumpUUID(uint8_t* uuid);
 UTIL_TRACER_DECLARE(IO_MONITOR);
 UTIL_TRACER_DECLARE(TRANSACTION_DETAIL);
 UTIL_TRACER_DECLARE(DISTRIBUTED_FRAMEWORK);
+UTIL_TRACER_DECLARE(DATA_EXPIRATION_DETAIL);
 
 template<>
 template<typename S>
@@ -1448,7 +1448,7 @@ void StatementHandler::decodeGeometryWithExclusionQuery(
 	@brief Decodes TimeRelatedCondition
 */
 template<typename S>
-void StatementHandler::decodeTimeRelatedConditon(
+void StatementHandler::decodeTimeRelatedCondition(
 	S & in,
 	TimeRelatedCondition & condition) {
 	try {
@@ -1464,7 +1464,7 @@ void StatementHandler::decodeTimeRelatedConditon(
 	@brief Decodes InterpolateCondition
 */
 template<typename S>
-void StatementHandler::decodeInterpolateConditon(
+void StatementHandler::decodeInterpolateCondition(
 	S & in,
 	InterpolateCondition & condition) {
 	try {
@@ -1780,7 +1780,7 @@ void StatementHandler::encodeContainerKey(
 }
 
 /*!
-	@brief Encodes exception infomation
+	@brief Encodes exception information
 */
 template <typename ByteOutStream>
 void StatementHandler::encodeException(
@@ -2012,7 +2012,7 @@ void StatementHandler::replySuccess(
 #define TXN_TRACE_REPLY_SUCCESS_ERROR(replContext)             \
 	"(nd=" << replContext.getConnectionND()                    \
 		   << ", pId=" << replContext.getPartitionId()         \
-		   << ", eventType=" << replContext.getStatementType() \
+		   << ", eventType=" << getEventTypeName(replContext.getStatementType()) \
 		   << ", stmtId=" << replContext.getStatementId()      \
 		   << ", clientId=" << replContext.getClientId()       \
 		   << ", containerId=" << replContext.getContainerId() << ")"
@@ -2858,8 +2858,8 @@ void StatementHandler::ErrorMessage::formatParameters(std::ostream & os) const {
 			elements_.options_, &nd, NULL, &os);
 	}
 
-	os << ", nd=" << nd;
-	os << ", eventType=" << elements_.stmtType_;
+	os << ", source=" << nd;
+	os << ", eventType=" << getEventTypeName(elements_.stmtType_) << "(" << elements_.stmtType_ << ")";
 	os << ", partition=" << elements_.pId_;
 
 	if (elements_.stmtId_ != UNDEF_STATEMENTID) {
@@ -2872,6 +2872,11 @@ void StatementHandler::ErrorMessage::formatParameters(std::ostream & os) const {
 
 	if (elements_.containerId_ != UNDEF_CONTAINERID) {
 		os << ", containerId=" << elements_.containerId_;
+	}
+	if (!nd.isEmpty()) {
+		if (nd.getUserData<ConnectionOption>().isPublicConnection()) {
+			os << ", connection=PUBLIC";
+		}
 	}
 }
 
@@ -3073,6 +3078,8 @@ void GetPartitionAddressHandler::operator()(EventContext & ec, Event & ev) {
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
 
+		bool usePublic = usePublicConection(request);
+
 		bool& masterResolving = inMes.masterResolving_;
 
 		const ClusterRole clusterRole =
@@ -3095,8 +3102,8 @@ void GetPartitionAddressHandler::operator()(EventContext & ec, Event & ev) {
 		const NodeId ownerNodeId = (masterResolving ?
 			UNDEF_NODEID : partitionTable_->getOwner(request.fixed_.pId_));
 		if (ownerNodeId != UNDEF_NODEID) {
-			NodeAddress& address = partitionTable_->getPublicNodeAddress(
-				ownerNodeId, TRANSACTION_SERVICE);
+			NodeAddress& address = partitionTable_->getNodeAddress(
+				ownerNodeId, TRANSACTION_SERVICE, usePublic);
 			out << static_cast<uint8_t>(1);
 			out << std::pair<const uint8_t*, size_t>(
 				reinterpret_cast<const uint8_t*>(&address.address_),
@@ -3116,8 +3123,8 @@ void GetPartitionAddressHandler::operator()(EventContext & ec, Event & ev) {
 		out << numBackup;
 		for (uint8_t i = 0; i < numBackup; i++) {
 
-			NodeAddress& address = partitionTable_->getPublicNodeAddress(
-				backupNodeIds[i], TRANSACTION_SERVICE);
+			NodeAddress& address = partitionTable_->getNodeAddress(
+				backupNodeIds[i], TRANSACTION_SERVICE, usePublic);
 			out << std::pair<const uint8_t*, size_t>(
 				reinterpret_cast<const uint8_t*>(&address.address_),
 				sizeof(AddressType));
@@ -3127,7 +3134,7 @@ void GetPartitionAddressHandler::operator()(EventContext & ec, Event & ev) {
 		if (masterResolving) {
 			encodeClusterInfo(
 				out, ec.getEngine(), *partitionTable_,
-				CONTAINER_HASH_MODE_CRC32, TRANSACTION_SERVICE);
+				CONTAINER_HASH_MODE_CRC32, TRANSACTION_SERVICE, usePublic);
 		}
 
 		OutMessage outMes(request.fixed_.cxtSrc_.stmtId_, TXN_STATEMENT_SUCCESS,
@@ -3144,7 +3151,7 @@ void GetPartitionAddressHandler::operator()(EventContext & ec, Event & ev) {
 template <typename S>
 void GetPartitionAddressHandler::encodeClusterInfo(
 	S & out, EventEngine & ee,
-	PartitionTable & partitionTable, ContainerHashMode hashMode, ServiceType serviceType) {
+	PartitionTable & partitionTable, ContainerHashMode hashMode, ServiceType serviceType, bool usePublic) {
 	const NodeId masterNodeId = partitionTable.getMaster();
 	if (masterNodeId == UNDEF_NODEID) {
 		TXN_THROW_DENY_ERROR(GS_ERROR_TXN_CLUSTER_ROLE_UNMATCH,
@@ -3160,8 +3167,8 @@ void GetPartitionAddressHandler::encodeClusterInfo(
 
 	out << hashMode;
 
-	NodeAddress& address = partitionTable.getPublicNodeAddress(
-		masterNodeId, serviceType);
+	NodeAddress& address = partitionTable.getNodeAddress(masterNodeId, serviceType, usePublic);
+
 	out << std::pair<const uint8_t*, size_t>(
 		reinterpret_cast<const uint8_t*>(&address.address_),
 		sizeof(AddressType));
@@ -3384,7 +3391,7 @@ void GetContainerPropertiesHandler::operator()(EventContext & ec, Event & ev)
 			assert(keyStoreValue.containerId_ != UNDEF_CONTAINERID);
 			DataStoreBase* ds = getDataStore(txn.getPartitionId(), keyStoreValue.storeType_);
 			const DataStoreBase::Scope dsScope(&txn, ds, clusterService_);
-			DSInputMes input(alloc, DS_GET_CONTAINR_OBJECT, ANY_CONTAINER, true);
+			DSInputMes input(alloc, DS_GET_CONTAINER_OBJECT, ANY_CONTAINER, true);
 			StackAllocAutoPtr<DSContainerOutputMes> ret(alloc, NULL);
 			{
 				ret.set(static_cast<DSContainerOutputMes*>(
@@ -3894,7 +3901,7 @@ void GetContainerPropertiesHandler::encodePartitioningMetaData(
 		int32_t distributedMethod = 0;
 		out << distributedMethod;
 
-		if (SyntaxTree::isInlcludeHashPartitioningType(partitioningInfo.partitionType_)) {
+		if (SyntaxTree::isIncludeHashPartitioningType(partitioningInfo.partitionType_)) {
 			out << static_cast<int32_t>(partitioningInfo.partitioningNum_);
 		}
 		if (SyntaxTree::isRangePartitioningType(partitioningInfo.partitionType_)) {
@@ -4197,7 +4204,7 @@ void PutContainerHandler::operator()(EventContext & ec, Event & ev) {
 
 		int32_t replicationMode = transactionManager_->getReplicationMode();
 		ReplicationContext::TaskStatus taskStatus = ReplicationContext::TASK_FINISHED;
-		if (putStatus == PutStatus::CREATE || putStatus == PutStatus::CHANGE_PROPERY ||
+		if (putStatus == PutStatus::CREATE || putStatus == PutStatus::CHANGE_PROPERLY ||
 			isAlterExecuted) {
 			DSInputMes input(alloc, DS_COMMIT);
 			StackAllocAutoPtr<DSOutputMes> retCommit(alloc, NULL);
@@ -4392,6 +4399,15 @@ void DropContainerHandler::operator()(EventContext & ec, Event & ev) {
 		{
 			ret.set(static_cast<DSOutputMes*>(ds->exec(&txn, &keyStoreValue, &input)));
 		}
+
+		if (isNewSQL(request) && isSkipReply(request)) {
+			util::String keyStr(alloc);
+			containerKey.toString(alloc, keyStr);
+			FullContainerKeyComponents keyComponents = containerKey.getComponents(alloc);
+			GS_TRACE_WARNING(DATA_EXPIRATION_DETAIL, GS_TRACE_DS_EXPIRED_CONTAINER_INFO,
+				"Drop expired container, dbId=" << keyComponents.dbId_ << ", pId=" << request.fixed_.pId_
+				<< ", name=" << keyStr.c_str() << ", from=" << ev.getSenderND());
+		}
 		util::XArray<const util::XArray<uint8_t>*> logRecordList(alloc);
 		util::XArray<uint8_t>* logBinary = appendDataStoreLog(alloc, txn,
 			request.fixed_.cxtSrc_, request.fixed_.cxtSrc_.stmtId_,
@@ -4485,7 +4501,7 @@ void GetContainerHandler::operator()(EventContext & ec, Event & ev) {
 
 		DataStoreBase* ds = getDataStore(txn.getPartitionId(), keyStoreValue.storeType_);
 		const DataStoreBase::Scope dsScope(&txn, ds, clusterService_);
-		DSInputMes input(alloc, DS_GET_CONTAINR, &containerKey, containerType);
+		DSInputMes input(alloc, DS_GET_CONTAINER, &containerKey, containerType);
 
 		StackAllocAutoPtr<DSOutputMes> ret(alloc, NULL);
 		{
@@ -4700,7 +4716,7 @@ void StatementHandler::continueEvent(
 #define TXN_TRACE_REPLY_SUCCESS_ERROR(replContext)             \
 	"(nd=" << replContext.getConnectionND()                    \
 		   << ", pId=" << replContext.getPartitionId()         \
-		   << ", eventType=" << replContext.getStatementType() \
+		   << ", eventType=" << getEventTypeName(replContext.getStatementType()) \
 		   << ", stmtId=" << replContext.getStatementId()      \
 		   << ", clientId=" << replContext.getClientId()       \
 		   << ", containerId=" << replContext.getContainerId() << ")"
@@ -5295,7 +5311,7 @@ void PutRowSetHandler::operator()(EventContext& ec, Event& ev) {
 		DataStoreBase* ds = getDataStore(txn.getPartitionId(), keyStoreValue.storeType_);
 		const DataStoreBase::Scope dsScope(&txn, ds, clusterService_);
 
-		DSInputMes input(alloc, DS_GET_CONTAINR_OBJECT, ANY_CONTAINER);
+		DSInputMes input(alloc, DS_GET_CONTAINER_OBJECT, ANY_CONTAINER);
 		StackAllocAutoPtr<DSContainerOutputMes> ret(alloc, NULL);
 		{
 			ret.set(static_cast<DSContainerOutputMes*>(ds->exec(&txn, &keyStoreValue, &input)));
@@ -5324,7 +5340,7 @@ void PutRowSetHandler::operator()(EventContext& ec, Event& ev) {
 				catch (StatementAlreadyExecutedException& e) {
 					UTIL_TRACE_EXCEPTION_INFO(TRANSACTION_SERVICE, e,
 						"Row already put (pId=" << ev.getPartitionId() <<
-						", eventType=" << ev.getType() <<
+						", eventType=" << getEventTypeName(ev.getType()) <<
 						", stmtId=" << rowStmtId <<
 						", clientId=" << request.fixed_.clientId_ <<
 						", containerId=" <<
@@ -5695,7 +5711,7 @@ void RemoveRowSetByIdHandler::operator()(EventContext& ec, Event& ev) {
 				catch (StatementAlreadyExecutedException& e) {
 					UTIL_TRACE_EXCEPTION_INFO(TRANSACTION_SERVICE, e,
 						"Row already put (pId=" << ev.getPartitionId() <<
-						", eventType=" << ev.getType() <<
+						", eventType=" << getEventTypeName(ev.getType()) <<
 						", stmtId=" << rowStmtId <<
 						", clientId=" << request.fixed_.clientId_ <<
 						", containerId=" <<
@@ -5796,7 +5812,7 @@ void UpdateRowSetByIdHandler::operator()(EventContext& ec, Event& ev) {
 		DataStoreBase* ds = getDataStore(txn.getPartitionId(), keyStoreValue.storeType_);
 		const DataStoreBase::Scope dsScope(&txn, ds, clusterService_);
 
-		DSInputMes input(alloc, DS_GET_CONTAINR_OBJECT, ANY_CONTAINER);
+		DSInputMes input(alloc, DS_GET_CONTAINER_OBJECT, ANY_CONTAINER);
 		StackAllocAutoPtr<DSContainerOutputMes> ret(alloc, NULL);
 		{
 			ret.set(static_cast<DSContainerOutputMes*>(ds->exec(&txn, &keyStoreValue, &input)));
@@ -5827,7 +5843,7 @@ void UpdateRowSetByIdHandler::operator()(EventContext& ec, Event& ev) {
 				catch (StatementAlreadyExecutedException& e) {
 					UTIL_TRACE_EXCEPTION_INFO(TRANSACTION_SERVICE, e,
 						"Row already put (pId=" << ev.getPartitionId() <<
-						", eventType=" << ev.getType() <<
+						", eventType=" << getEventTypeName(ev.getType()) <<
 						", stmtId=" << rowStmtId <<
 						", clientId=" << request.fixed_.clientId_ <<
 						", containerId=" <<
@@ -7742,7 +7758,7 @@ void MultiPutHandler::execute(
 		DataStoreBase* ds = getDataStore(txn.getPartitionId(), keyStoreValue.storeType_);
 		const DataStoreBase::Scope dsScope(&txn, ds, clusterService_);
 
-		DSInputMes input(alloc, DS_GET_CONTAINR_OBJECT, ANY_CONTAINER);
+		DSInputMes input(alloc, DS_GET_CONTAINER_OBJECT, ANY_CONTAINER);
 		StackAllocAutoPtr<DSContainerOutputMes> ret(alloc, NULL);
 		{
 			ret.set(static_cast<DSContainerOutputMes*>(
@@ -7784,7 +7800,7 @@ void MultiPutHandler::execute(
 					UTIL_TRACE_EXCEPTION_INFO(TRANSACTION_SERVICE, e,
 						"Row already put. (pId=" <<
 						request.fixed_.pId_ <<
-						", eventType=" << PUT_MULTIPLE_CONTAINER_ROWS <<
+						", eventType=" << getEventTypeName(PUT_MULTIPLE_CONTAINER_ROWS) <<
 						", stmtId=" << rowStmtId << ", clientId=" << clientId <<
 						", containerId=" <<
 						((src.containerId_ == UNDEF_CONTAINERID) ?
@@ -7867,7 +7883,7 @@ void MultiPutHandler::checkSchema(
 		}
 
 		const char8_t* name1Ptr =
-			info.getColumnName(txn, *(container.getObjectManager()), container.getMetaAllcateStrategy());
+			info.getColumnName(txn, *(container.getObjectManager()), container.getMetaAllocateStrategy());
 		const char8_t* name2Ptr = schema.getColumnName(i).c_str();
 
 		name1.resize(strlen(name1Ptr));
@@ -8141,7 +8157,7 @@ uint32_t MultiGetHandler::execute(
 		checkContainerExistence(keyStoreValue);
 		DataStoreBase* ds = getDataStore(txn.getPartitionId(), keyStoreValue.storeType_);
 		const DataStoreBase::Scope dsScope(&txn, ds, clusterService_);
-		DSInputMes input(alloc, DS_GET_CONTAINR_OBJECT, ANY_CONTAINER);
+		DSInputMes input(alloc, DS_GET_CONTAINER_OBJECT, ANY_CONTAINER);
 		StackAllocAutoPtr<DSContainerOutputMes> ret(alloc, NULL);
 		ret.set(static_cast<DSContainerOutputMes*>(
 			ds->exec(&txn, &keyStoreValue, &input)));
@@ -8330,7 +8346,7 @@ void MultiGetHandler::buildSchemaMap(
 		checkContainerExistence(keyStoreValue);
 		DataStoreBase* ds = getDataStore(txn.getPartitionId(), keyStoreValue.storeType_);
 		const DataStoreBase::Scope dsScope(&txn, ds, clusterService_);
-		DSInputMes input(alloc, DS_GET_CONTAINR_OBJECT, ANY_CONTAINER);
+		DSInputMes input(alloc, DS_GET_CONTAINER_OBJECT, ANY_CONTAINER);
 		StackAllocAutoPtr<DSContainerOutputMes> ret(alloc, NULL);
 		{
 			ret.set(static_cast<DSContainerOutputMes*>(
@@ -8405,7 +8421,7 @@ void MultiGetHandler::buildSchemaMap(
 		checkContainerExistence(keyStoreValue);
 		DataStoreBase* ds = getDataStore(txn.getPartitionId(), keyStoreValue.storeType_);
 		const DataStoreBase::Scope dsScope(&txn, ds, clusterService_);
-		DSInputMes input(alloc, DS_GET_CONTAINR_OBJECT, ANY_CONTAINER);
+		DSInputMes input(alloc, DS_GET_CONTAINER_OBJECT, ANY_CONTAINER);
 		StackAllocAutoPtr<DSContainerOutputMes> ret(alloc, NULL);
 		{
 			ret.set(static_cast<DSContainerOutputMes*>(ds->exec(&txn, &keyStoreValue, &input)));
@@ -8513,17 +8529,17 @@ void MultiGetHandler::decodeMultiSearchEntry(
 	util::XArray<SearchEntry>& searchList) {
 	try {
 		util::StackAllocator& alloc = *searchList.get_allocator().base();
-		util::XArray<const RowKeyPredicate*> predicareList(alloc);
+		util::XArray<const RowKeyPredicate*> predicateList(alloc);
 
 		{
 			int32_t headCount;
 			in >> headCount;
-			predicareList.reserve(static_cast<size_t>(headCount));
+			predicateList.reserve(static_cast<size_t>(headCount));
 
 			for (int32_t i = 0; i < headCount; i++) {
 				const RowKeyPredicate* predicate = ALLOC_NEW(alloc)
 					RowKeyPredicate(decodePredicate(in, alloc));
-				predicareList.push_back(predicate);
+				predicateList.push_back(predicate);
 			}
 		}
 
@@ -8540,14 +8556,14 @@ void MultiGetHandler::decodeMultiSearchEntry(
 					ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
 				decodeVarSizeBinaryData(in, *containerName);
 
-				int32_t predicareIndex;
-				in >> predicareIndex;
+				int32_t predicateIndex;
+				in >> predicateIndex;
 
-				if (predicareIndex < 0 ||
-					static_cast<size_t>(predicareIndex) >=
-					predicareList.size()) {
+				if (predicateIndex < 0 ||
+					static_cast<size_t>(predicateIndex) >=
+					predicateList.size()) {
 					TXN_THROW_DECODE_ERROR(GS_ERROR_TXN_DECODE_FAILED,
-						"(predicareIndex=" << predicareIndex << ")");
+						"(predicateIndex=" << predicateIndex << ")");
 				}
 
 				util::LockGuard<util::Mutex> guard(
@@ -8574,7 +8590,7 @@ void MultiGetHandler::decodeMultiSearchEntry(
 				}
 				DataStoreBase* ds = getDataStore(txn.getPartitionId(), keyStoreValue.storeType_);
 				const DataStoreBase::Scope dsScope(&txn, ds, clusterService_);
-				DSInputMes input(alloc, DS_GET_CONTAINR_OBJECT, ANY_CONTAINER);
+				DSInputMes input(alloc, DS_GET_CONTAINER_OBJECT, ANY_CONTAINER);
 				StackAllocAutoPtr<DSContainerOutputMes> ret(alloc, NULL);
 				{
 					ret.set(static_cast<DSContainerOutputMes*>(
@@ -8612,7 +8628,7 @@ void MultiGetHandler::decodeMultiSearchEntry(
 				}
 
 				SearchEntry entry(containerId, containerKey,
-					predicareList[static_cast<size_t>(predicareIndex)]);
+					predicateList[static_cast<size_t>(predicateIndex)]);
 
 				searchList.push_back(entry);
 			}
@@ -8878,7 +8894,7 @@ void MultiQueryHandler::execute(
 		checkContainerExistence(keyStoreValue);
 		DataStoreV4* ds = dynamic_cast<DataStoreV4*>(getDataStore(txn.getPartitionId(), keyStoreValue.storeType_));
 		const DataStoreBase::Scope dsScope(&txn, ds, clusterService_);
-		DSInputMes input(alloc, DS_GET_CONTAINR_OBJECT, ANY_CONTAINER);
+		DSInputMes input(alloc, DS_GET_CONTAINER_OBJECT, ANY_CONTAINER);
 		StackAllocAutoPtr<DSContainerOutputMes> ret(alloc, NULL);
 
 		ret.set(static_cast<DSContainerOutputMes*>(
@@ -9585,7 +9601,7 @@ void CheckTimeoutHandler::checkRequestTimeout(
 					const TransactionManager::ContextSource src(
 						TXN_COLLECT_TIMEOUT_RESOURCE, txn.getLastStatementId(),
 						txn.getContainerId(),
-						txn.getTransationTimeoutInterval(),
+						txn.getTransactionTimeoutInterval(),
 						TransactionManager::AUTO,
 						TransactionManager::AUTO_COMMIT,
 						false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE,
@@ -9695,7 +9711,7 @@ void CheckTimeoutHandler::checkKeepaliveTimeout(
 					const TransactionManager::ContextSource src(
 						TXN_COLLECT_TIMEOUT_RESOURCE, txn.getLastStatementId(),
 						txn.getContainerId(),
-						txn.getTransationTimeoutInterval(),
+						txn.getTransactionTimeoutInterval(),
 						TransactionManager::AUTO,
 						TransactionManager::AUTO_COMMIT,
 						false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE,
@@ -9796,7 +9812,7 @@ void CheckTimeoutHandler::checkNoExpireTransaction(util::StackAllocator& alloc, 
 				const TransactionManager::ContextSource src(
 					TXN_COLLECT_TIMEOUT_RESOURCE, txn.getLastStatementId(),
 					txn.getContainerId(),
-					txn.getTransationTimeoutInterval(),
+					txn.getTransactionTimeoutInterval(),
 					TransactionManager::AUTO,
 					TransactionManager::AUTO_COMMIT,
 					false, TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE,
@@ -10086,7 +10102,7 @@ void DataStorePeriodicallyHandler::operator()(EventContext& ec, Event& ev) {
 			{
 				int32_t checkInterval = dsConfig_->getCheckErasableExpiredInterval();
 				int32_t interruptionInterval = 1000;
-				int32_t limitCount = PERIODICAL_TABLE_SCAN_MAX_COUNT;
+				int32_t limitCount = dsConfig_->getExpiredCheckCount();
 				ExpiredContainerContext& context = getContext(pgId);
 				context.prepare(checkInterval, limitCount, interruptionInterval);
 				while (checkAndDrop(ec, context));
@@ -10158,6 +10174,9 @@ void DataStorePeriodicallyHandler::operator()(EventContext& ec, Event& ev) {
 						uint64_t scanNum = ret.get()->num_;
 						count += scanNum;
 					}
+					else {
+						count = periodMaxScanCount; 
+					}
 					pIdCursor_[pgId]++;
 					if (pIdCursor_[pgId] ==
 						pgConfig.getGroupEndPartitionId(pgId)) {
@@ -10169,7 +10188,7 @@ void DataStorePeriodicallyHandler::operator()(EventContext& ec, Event& ev) {
 					}
 				}  
 			}
-			WATCHER_END_NORMAL(getEventTypeName(CHUNK_EXPIRE_PERIODICALLY));
+			WATCHER_END_NORMAL(CHUNK_EXPIRE_PERIODICALLY, pgId);
 		}
 	}
 	catch (UserException& e) {
@@ -10223,7 +10242,8 @@ void AdjustStoreMemoryPeriodicallyHandler::operator()(
 				partitionList_->partition(groupBeginPId).chunkManager();
 			uint64_t newLimit = partitionList_->interchangeableStoreMemory().
 				getChunkBufferLimit(pgId);
-			{
+			uint64_t currentLimit = chunkManager.getCurrentLimit();
+			if (newLimit != currentLimit) {
 				util::LockGuard<util::Mutex> guard(
 					partitionList_->partition(groupBeginPId).mutex());
 				chunkManager.adjustStoreMemory(newLimit);  
@@ -10232,7 +10252,7 @@ void AdjustStoreMemoryPeriodicallyHandler::operator()(
 			if (pIdCursor_[pgId] == groupEndPId) {
 				pIdCursor_[pgId] = groupBeginPId;
 			}
-			WATCHER_END_NORMAL(getEventTypeName(ADJUST_STORE_MEMORY_PERIODICALLY));
+			WATCHER_END_NORMAL(ADJUST_STORE_MEMORY_PERIODICALLY, pgId);
 		}
 	}
 	catch (UserException& e) {
@@ -10319,7 +10339,7 @@ void BackgroundHandler::operator()(EventContext& ec, Event& ev) {
 				transactionService_->setBackgroundTask(pgId, false);
 				PartitionId currentPId = request.fixed_.pId_;
 				const PartitionGroupConfig& pgConfig = transactionManager_->getPartitionGroupConfig();
-				for (uint32_t i = 0; i < pgConfig.getGroupPartitonCount(pgId); i++) {
+				for (uint32_t i = 0; i < pgConfig.getGroupPartitionCount(pgId); i++) {
 					util::LockGuard<util::Mutex> guard(
 						partitionList_->partition(currentPId).mutex());
 
@@ -10603,12 +10623,12 @@ void UpdateDataStoreStatusHandler::operator()(EventContext& ec, Event& ev) {
 		if (force) {
 			GS_TRACE_WARNING(DATA_STORE,
 				GS_TRACE_DS_DS_CHANGE_STATUS,
-				"Force Update Latest Expration Check Time :" << inputTime);
+				"Force Update Latest Expiration Check Time :" << inputTime);
 		}
 		else {
 			GS_TRACE_INFO(DATA_STORE,
 				GS_TRACE_DS_DS_CHANGE_STATUS,
-				"Update Latest Expration Check Time :" << inputTime);
+				"Update Latest Expiration Check Time :" << inputTime);
 		}
 
 		const PartitionGroupId pgId = ec.getWorkerId();
@@ -10718,7 +10738,7 @@ void UnknownStatementHandler::operator()(EventContext& ec, Event& ev) {
 		UTIL_TRACE_EXCEPTION(TRANSACTION_SERVICE, e,
 			GS_EXCEPTION_MESSAGE(e) << " (nd=" << ev.getSenderND()
 			<< ", pId=" << ev.getPartitionId()
-			<< ", eventType=" << ev.getType() << ")");
+			<< ", eventType=" << getEventTypeName(ev.getType()) << ")");
 		clusterService_->setError(ec, &e);
 	}
 }
@@ -10749,6 +10769,8 @@ TransactionService::TransactionService(
 	backgroundOperationCount_(pgConfig_.getPartitionCount(), 0),
 	noExpireOperationCount_(pgConfig_.getPartitionCount(), 0),
 	abortDDLCount_(pgConfig_.getPartitionCount(), 0),
+	totalInternalConnectionCount_(0),
+	totalExternalConnectionCount_(0),
 	onBackgroundTask_(pgConfig_.getPartitionGroupCount(), false),
 	txnLogAlloc_(pgConfig_.getPartitionGroupCount(), NULL),
 
@@ -10775,7 +10797,7 @@ TransactionService::TransactionService(
 				config.getUInt16(CONFIG_TABLE_TXN_NOTIFICATION_PORT));
 			if (strlen(config.get<const char8_t*>(
 				CONFIG_TABLE_TXN_NOTIFICATION_INTERFACE_ADDRESS)) != 0) {
-				eeConfig_.setMulticastIntefaceAddress(
+				eeConfig_.setMulticastInterfaceAddress(
 					config.get<const char8_t*>(
 						CONFIG_TABLE_TXN_NOTIFICATION_INTERFACE_ADDRESS),
 					config.getUInt16(CONFIG_TABLE_TXN_SERVICE_PORT));
@@ -11267,7 +11289,6 @@ void TransactionService::initialize(const ManagerSet& mgrSet) {
 		ee_->setHandler(SQL_GET_CONTAINER, sqlGetContainerHandler_);
 		sqlGetContainerHandler_.initialize(mgrSet);
 
-
 		const PartitionGroupConfig& pgConfig =
 			mgrSet.txnMgr_->getPartitionGroupConfig();
 
@@ -11545,6 +11566,9 @@ void TransactionService::StatSetUpHandler::operator()(StatTable& stat) {
 	STAT_ADD_SUB(STAT_TABLE_PERF_TXN_TOTAL_ROW_READ);
 	STAT_ADD_SUB(STAT_TABLE_PERF_TXN_TOTAL_ROW_WRITE);
 	STAT_ADD_SUB(STAT_TABLE_PERF_TXN_NUM_NO_EXPIRE_TXN);
+	STAT_ADD_SUB(STAT_TABLE_PERF_TXN_TOTAL_INTERNAL_CONNECTION_COUNT);
+	STAT_ADD_SUB(STAT_TABLE_PERF_TXN_TOTAL_EXTERNAL_CONNECTION_COUNT);
+
 
 	stat.resolveGroup(parentId, STAT_TABLE_PERF_TXN_DETAIL, "txnDetail");
 	parentId = STAT_TABLE_PERF_TXN_DETAIL;
@@ -11614,6 +11638,10 @@ bool TransactionService::StatUpdator::operator()(StatTable& stat) {
 		stat.set(STAT_TABLE_PERF_TXN_TOTAL_ABORT_DDL, svc.getTotalAbortDDLCount());
 		stat.set(STAT_TABLE_PERF_TXN_TOTAL_REP_TIMEOUT, numReplicationTimeout);
 	}
+
+	stat.set(STAT_TABLE_PERF_TXN_TOTAL_INTERNAL_CONNECTION_COUNT, svc.getTotalInternalConnectionCount());
+
+	stat.set(STAT_TABLE_PERF_TXN_TOTAL_EXTERNAL_CONNECTION_COUNT, svc.getTotalExternalConnectionCount());
 
 	return true;
 }
@@ -11700,7 +11728,7 @@ std::string EventMonitor::dump() {
 		strstrm << "pos=" << pos
 			<< ", event=" << getEventTypeName(eventInfoList_[pos].eventType_)
 			<< ", pId=" << eventInfoList_[pos].pId_
-			<< ", startTime=" << getTimeStr(eventInfoList_[pos].startTime_)
+			<< ", startTime=" << CommonUtility::getTimeStr(eventInfoList_[pos].startTime_)
 			<< std::endl;
 	}
 	return strstrm.str().c_str();

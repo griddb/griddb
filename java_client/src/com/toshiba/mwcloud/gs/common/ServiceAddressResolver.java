@@ -39,6 +39,11 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
+import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.SSLSocketFactory;
+
 import com.toshiba.mwcloud.gs.GSException;
 
 public class ServiceAddressResolver {
@@ -132,8 +137,29 @@ public class ServiceAddressResolver {
 			if (!(urlConnection instanceof HttpURLConnection)) {
 				throw new GSException(
 						GSErrorCode.ILLEGAL_PROPERTY_ENTRY,
-						"Provider URL is only supported for HTTP (protocol=" +
+						"Provider URL is only supported for HTTP(S) (protocol=" +
 								config.providerURL.getProtocol() + ")");
+			}
+
+			if (urlConnection instanceof HttpsURLConnection) {
+				final SSLSocketFactory factory =
+						config.getSecureSocketFactory();
+				if (factory == null) {
+					throw new GSException(
+							GSErrorCode.ILLEGAL_PROPERTY_ENTRY,
+							"HTTPS Provider not available because of " +
+							"lack of extra library (url=" +
+							config.providerURL + ")");
+				}
+				((HttpsURLConnection) urlConnection).setSSLSocketFactory(
+						factory);
+				((HttpsURLConnection) urlConnection).setHostnameVerifier(
+						new HostnameVerifier() {
+					@Override
+					public boolean verify(String hostname, SSLSession session) {
+						return true;
+					}
+				});
 			}
 
 			connection = (HttpURLConnection) urlConnection;
@@ -454,6 +480,8 @@ public class ServiceAddressResolver {
 
 		private int timeoutMillis = DEFAULT_TIMEOUT_MILLIS;
 
+		private transient SSLSocketFactory secureSocketFactory;
+
 		public Config() {
 		}
 
@@ -461,6 +489,7 @@ public class ServiceAddressResolver {
 			this.providerURL = config.providerURL;
 			this.ipv6Expected = config.ipv6Expected;
 			this.timeoutMillis = config.timeoutMillis;
+			this.secureSocketFactory = config.secureSocketFactory;
 		}
 
 		public URL getProviderURL() {
@@ -488,10 +517,11 @@ public class ServiceAddressResolver {
 			}
 
 			final String protocol = this.providerURL.getProtocol();
-			if (!protocol.toLowerCase(Locale.US).equals("http")) {
+			if (!protocol.toLowerCase(Locale.US).equals("http") &&
+					!protocol.toLowerCase(Locale.US).equals("https")) {
 				throw new GSException(
 						GSErrorCode.SA_INVALID_CONFIG,
-						"Only HTTP is supported for provider URL " +
+						"Only HTTP(S) is supported for provider URL " +
 						"(url=" + providerURL +")");
 			}
 
@@ -521,6 +551,14 @@ public class ServiceAddressResolver {
 				return;
 			}
 			this.timeoutMillis = timeoutMillis;
+		}
+
+		public SSLSocketFactory getSecureSocketFactory() {
+			return secureSocketFactory;
+		}
+
+		public void setSecureSocketFactory(SSLSocketFactory factory) {
+			this.secureSocketFactory = factory;
 		}
 
 		@Override

@@ -68,7 +68,7 @@ private:
 QueryForCollection::QueryForCollection(TransactionContext &txn,
 	Collection &collection, const TQLInfo &tqlInfo, 
 	uint64_t limit, QueryHookClass *hook)
-	: Query(txn, *(collection.getObjectManager()), collection.getRowAllcateStrategy(), tqlInfo, limit, hook),
+	: Query(txn, *(collection.getObjectManager()), collection.getRowAllocateStrategy(), tqlInfo, limit, hook),
 	  collection_(&collection) {
 	if (hook_) {
 		hook_->qpBuildBeginHook(*this);	
@@ -381,7 +381,7 @@ void QueryForCollection::doQueryWithCondition(
 										isFirstColumn = false;
 									}
 									ColumnInfo &columnInfo = collection.getColumnInfo(condList[i].columnId_);
-									os << columnInfo.getColumnName(txn, objectManager_, collection.getMetaAllcateStrategy());
+									os << columnInfo.getColumnName(txn, objectManager_, collection.getMetaAllocateStrategy());
 								}
 							}
 							addExplain(
@@ -394,7 +394,7 @@ void QueryForCollection::doQueryWithCondition(
 									os << " ";
 								}
 								ColumnInfo &columnInfo = collection.getColumnInfo((*(indexData.columnIds_))[0]);
-								os << columnInfo.getColumnName(txn, objectManager_, collection.getMetaAllcateStrategy());
+								os << columnInfo.getColumnName(txn, objectManager_, collection.getMetaAllocateStrategy());
 							}
 
 							addExplain(2, "SEARCH_MAP", "STRING", os.str().c_str(), "");
@@ -414,7 +414,7 @@ void QueryForCollection::doQueryWithCondition(
 						addExplain(
 							1, "SEARCH_EXECUTE", "MAP_TYPE", "SPATIAL", "");
 						const char *columnName =
-							indexColumnInfo->getColumnName(txn, objectManager_, collection.getMetaAllcateStrategy());
+							indexColumnInfo->getColumnName(txn, objectManager_, collection.getMetaAllocateStrategy());
 						addExplain(2, "SEARCH_MAP", "STRING", columnName, "");
 					}
 					operatorOutOIdArray.clear();
@@ -743,7 +743,7 @@ QueryForCollection *QueryForCollection::dup(
 QueryForMetaContainer::QueryForMetaContainer(
 		TransactionContext &txn, MetaContainer &container,
 		const TQLInfo &tqlInfo, uint64_t limit, QueryHookClass *hook) :
-		Query(txn, *(container.getObjectManager()), container.getRowAllcateStrategy(), tqlInfo, limit, hook),
+		Query(txn, *(container.getObjectManager()), container.getRowAllocateStrategy(), tqlInfo, limit, hook),
 		container_(container) {
 
 	if (hook_) {
@@ -861,7 +861,7 @@ void QueryForMetaContainer::doQuery(
 
 	const MetaContainerInfo &info = container_.getMetaContainerInfo();
 	MessageRowHandler handler(
-			out, pWhereExpr_, *container_.getObjectManager(), container_.getRowAllcateStrategy(),
+			out, pWhereExpr_, *container_.getObjectManager(), container_.getRowAllocateStrategy(),
 			getFunctionMap());
 	MetaProcessor proc(txn, info.id_, info.forCore_);
 

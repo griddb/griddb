@@ -439,6 +439,22 @@ public:
 		return clsSvc_;
 	}
 
+	int64_t getTotalInternalConnectionCount() {
+		return totalInternalConnectionCount_;
+	}
+
+	int64_t getTotalExternalConnectionCount() {
+		return totalExternalConnectionCount_;
+	}
+
+	void setTotalInternalConnectionCount() {
+		totalInternalConnectionCount_++;
+	}
+
+	void setTotalExternalConnectionCount() {
+		totalExternalConnectionCount_++;
+	}
+
 	void requestCancel(EventContext& ec);
 	void sendCancel(EventContext& ec, NodeId nodeId);
 
@@ -557,6 +573,9 @@ private:
 	int32_t sendPendingTaskLimit_;
 	int32_t sendPendingJobLimit_;
 	int32_t sendPendingTaskConcurrency_;
+
+	int64_t totalInternalConnectionCount_;
+	int64_t totalExternalConnectionCount_;
 
 	int64_t jobMemoryLimit_;
 	int32_t checkCounter_;

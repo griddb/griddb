@@ -22,10 +22,11 @@ import com.toshiba.mwcloud.gs.GSException;
 import com.toshiba.mwcloud.gs.GridStore;
 import com.toshiba.mwcloud.gs.GridStoreFactory;
 import com.toshiba.mwcloud.gs.common.Extensibles;
+import com.toshiba.mwcloud.gs.common.Extensibles.TransportProvider;
 
 public class PartFactory extends GridStoreFactory {
 
-	private static final String REQUIRED_EXT_VERSION = "7";
+	private static final String REQUIRED_EXT_VERSION = "8";
 
 	private final Extensibles.AsStoreFactory base;
 
@@ -89,6 +90,12 @@ public class PartFactory extends GridStoreFactory {
 		public GridStoreFactory getBaseFactory() {
 			return base;
 		}
+
+		@Override
+		public void setTransportProvider(TransportProvider provider) {
+			base.base.setTransportProvider(provider);
+		}
+
 	}
 
 }

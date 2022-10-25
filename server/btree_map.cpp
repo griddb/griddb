@@ -468,8 +468,8 @@ int32_t BtreeMap::insert(
 
 template<>
 void BtreeMap::InsertFunc::execute<StringObject, StringKey, OId, OId>() {
-	StringCursor stringCusor(reinterpret_cast<uint8_t *>(key_));
-	StringObject convertKey(reinterpret_cast<uint8_t *>(&stringCusor));
+	StringCursor stringCursor(reinterpret_cast<uint8_t *>(key_));
+	StringObject convertKey(reinterpret_cast<uint8_t *>(&stringCursor));
 	bool isCaseSensitive = true;
 	ret_ = tree_->insertInternal<StringObject, StringKey, OId>(txn_, convertKey, oId_, isCaseSensitive);
 }
@@ -490,8 +490,8 @@ int32_t BtreeMap::remove(
 
 template<>
 void BtreeMap::RemoveFunc::execute<StringObject, StringKey, OId, OId>() {
-	StringCursor stringCusor(reinterpret_cast<uint8_t *>(key_));
-	StringObject convertKey(reinterpret_cast<uint8_t *>(&stringCusor));
+	StringCursor stringCursor(reinterpret_cast<uint8_t *>(key_));
+	StringObject convertKey(reinterpret_cast<uint8_t *>(&stringCursor));
 	bool isCaseSensitive = true;
 	ret_ = tree_->removeInternal<StringObject, StringKey, OId>(txn_, convertKey, oId_, isCaseSensitive);
 }
@@ -512,8 +512,8 @@ int32_t BtreeMap::update(
 
 template<>
 void BtreeMap::UpdateFunc::execute<StringObject, StringKey, OId, OId>() {
-	StringCursor stringCusor(reinterpret_cast<uint8_t *>(key_));
-	StringObject convertKey(reinterpret_cast<uint8_t *>(&stringCusor));
+	StringCursor stringCursor(reinterpret_cast<uint8_t *>(key_));
+	StringObject convertKey(reinterpret_cast<uint8_t *>(&stringCursor));
 	bool isCaseSensitive = true;
 	ret_ = tree_->updateInternal<StringObject, StringKey, OId>(txn_, convertKey, oId_, newOId_, isCaseSensitive);
 }
@@ -542,8 +542,8 @@ int32_t BtreeMap::search(
 
 template<>
 void BtreeMap::UniqueSearchFunc::execute<StringObject, StringKey, OId, OId>() {
-	StringCursor stringCusor(reinterpret_cast<uint8_t *>(key_));
-	StringObject convertKey(reinterpret_cast<uint8_t *>(&stringCusor));
+	StringCursor stringCursor(reinterpret_cast<uint8_t *>(key_));
+	StringObject convertKey(reinterpret_cast<uint8_t *>(&stringCursor));
 	ret_ = tree_->find<StringObject, StringKey, OId, KEY_COMPONENT>(txn_, convertKey, oId_, setting_);
 }
 
@@ -573,18 +573,18 @@ void BtreeMap::SearchFunc::execute<StringObject, StringKey, OId, OId>() {
 	const void *orgStartKey = NULL;
 	const void *orgEndKey = NULL;
 	if (startCond != NULL) {
-		StringCursor *startStringCusor = ALLOC_NEW(alloc) 
+		StringCursor *startStringCursor = ALLOC_NEW(alloc) 
 			StringCursor(alloc, static_cast<const uint8_t *>(startCond->value_), startCond->valueSize_);
 		StringObject *startConvertKey = ALLOC_NEW(alloc) 
-			StringObject(reinterpret_cast<uint8_t *>(startStringCusor));
+			StringObject(reinterpret_cast<uint8_t *>(startStringCursor));
 		orgStartKey = startCond->value_;
 		startCond->value_ = startConvertKey;
 	}
 	if (endCond != NULL) {
-		StringCursor *endStringCusor = ALLOC_NEW(alloc) 
+		StringCursor *endStringCursor = ALLOC_NEW(alloc) 
 			StringCursor(alloc, static_cast<const uint8_t *>(endCond->value_), endCond->valueSize_);
 		StringObject *endConvertKey = ALLOC_NEW(alloc)
-			StringObject(reinterpret_cast<uint8_t *>(endStringCusor));
+			StringObject(reinterpret_cast<uint8_t *>(endStringCursor));
 		orgEndKey = endCond->value_;
 		endCond->value_ = endConvertKey;
 	}

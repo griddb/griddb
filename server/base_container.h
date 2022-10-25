@@ -327,15 +327,15 @@ public:
 	void putRow(TransactionContext &txn, uint32_t rowSize,
 		const uint8_t *rowData, RowId &rowId, PutStatus &status,
 		PutRowOption putRowOption) {
-		bool rowIdSecified = false;
-		putRow(txn, rowSize, rowData, rowId, rowIdSecified, status,
+		bool rowIdSpecified = false;
+		putRow(txn, rowSize, rowData, rowId, rowIdSpecified, status,
 			putRowOption);
 	}
 	void redoPutRow(TransactionContext &txn, uint32_t rowSize,
 		const uint8_t *rowData, RowId &rowId, PutStatus &status,
 		PutRowOption putRowOption) {
-		bool rowIdSecified = true;
-		putRow(txn, rowSize, rowData, rowId, rowIdSecified, status,
+		bool rowIdSpecified = true;
+		putRow(txn, rowSize, rowData, rowId, rowIdSpecified, status,
 			putRowOption);
 	}
 	virtual void deleteRow(TransactionContext &txn, uint32_t rowSize,
@@ -591,7 +591,7 @@ public:
 		return calcChunkKey(baseTime, duration);
 	}
 	ChunkKey getChunkKey() {
-		return calcChunkKey(getContainerExpirationEndTime(), getContainerExpirationDutation());
+		return calcChunkKey(getContainerExpirationEndTime(), getContainerExpirationDuration());
 	}
 
 	uint16_t getRowKeyColumnNum() const {
@@ -601,18 +601,18 @@ public:
 	void getRowKeyFields(TransactionContext &txn, uint32_t rowKeySize, const uint8_t *rowKey, util::XArray<KeyData> &fields);
 	ColumnInfo *getRowKeyColumnInfoList(TransactionContext &txn);
 
-	AllocateStrategy& getMapAllcateStrategy() {
+	AllocateStrategy& getMapAllocateStrategy() {
 		return mapAllocateStrategy_;
 	}
-	AllocateStrategy& getRowAllcateStrategy() {
+	AllocateStrategy& getRowAllocateStrategy() {
 		return rowAllocateStrategy_;
 	}
-	AllocateStrategy& getMetaAllcateStrategy() {
+	AllocateStrategy& getMetaAllocateStrategy() {
 		return metaAllocateStrategy_;
 	}
 
 	Timestamp getContainerExpirationTime() const {
-		int64_t duration = getContainerExpirationDutation();
+		int64_t duration = getContainerExpirationDuration();
 		if (duration != INT64_MAX) {
 			Timestamp endTime = getContainerExpirationEndTime();
 			Timestamp expirationTime = getContainerExpirationEndTime() + duration;
@@ -824,20 +824,20 @@ protected:
 		{
 		resetMetaAllocateStrategy(getObjectManager(), metaAllocateStrategy_);
 
-		BaseObject::reset(*(getObjectManager()), getMetaAllcateStrategy());
+		BaseObject::reset(*(getObjectManager()), getMetaAllocateStrategy());
 		BaseObject::load(oId, false);
 
-		containerKeyCursor_.reset(*(getObjectManager()), getMetaAllcateStrategy());
+		containerKeyCursor_.reset(*(getObjectManager()), getMetaAllocateStrategy());
 
 		baseContainerImage_ = getBaseAddr<BaseContainerImage *>();
 		commonContainerSchema_ =
 			ALLOC_NEW(txn.getDefaultAllocator()) ShareValueList(
-				*getObjectManager(), getMetaAllcateStrategy(), baseContainerImage_->columnSchemaOId_);
+				*getObjectManager(), getMetaAllocateStrategy(), baseContainerImage_->columnSchemaOId_);
 		columnSchema_ =
 			commonContainerSchema_->get<ColumnSchema>(META_TYPE_COLUMN_SCHEMA);
 		indexSchema_ = ALLOC_NEW(txn.getDefaultAllocator())
 			IndexSchema(txn, *getObjectManager(),
-				baseContainerImage_->indexSchemaOId_, getMetaAllcateStrategy());
+				baseContainerImage_->indexSchemaOId_, getMetaAllocateStrategy());
 		
 		resetRowAllocateStrategy(getObjectManager(), rowAllocateStrategy_);
 		resetMapAllocateStrategy(getObjectManager(), mapAllocateStrategy_);
@@ -860,8 +860,8 @@ protected:
 	{
 		resetMetaAllocateStrategy(getObjectManager(), metaAllocateStrategy_);
 
-		BaseObject::reset(*(getObjectManager()), getMetaAllcateStrategy());
-		containerKeyCursor_.reset(*(getObjectManager()), getMetaAllcateStrategy());
+		BaseObject::reset(*(getObjectManager()), getMetaAllocateStrategy());
+		containerKeyCursor_.reset(*(getObjectManager()), getMetaAllocateStrategy());
 	}
 
 	void resetMetaAllocateStrategy(ObjectManagerV4* objMgr, AllocateStrategy &strategy) const {
@@ -1135,7 +1135,7 @@ protected:
 	ContainerExpirationInfo* getContainerExpirationInfo() const {
 		return commonContainerSchema_->get<ContainerExpirationInfo>(META_TYPE_CONTAINER_DURATION);
 	}
-	int64_t getContainerExpirationDutation() const {
+	int64_t getContainerExpirationDuration() const {
 		ContainerExpirationInfo *info =  commonContainerSchema_->get<ContainerExpirationInfo>(META_TYPE_CONTAINER_DURATION);
 		if (info != NULL) {
 			return info->info_.duration_;
@@ -1242,7 +1242,7 @@ public:
 		}
 		util::StackAllocator& alloc = txn.getDefaultAllocator();
 		KeyDataStoreValue keyStoreValue(UNDEF_CONTAINERID, oId, dataStore->getStoreType(), CONTAINER_ATTR_ANY);
-		DSInputMes input(alloc, DS_GET_CONTAINR_OBJECT, containerType, allowExpiration);
+		DSInputMes input(alloc, DS_GET_CONTAINER_OBJECT, containerType, allowExpiration);
 		StackAllocAutoPtr<DSContainerOutputMes> ret(alloc, 
 			static_cast<DSContainerOutputMes*>(dataStore->exec(&txn, &keyStoreValue, &input)));
 		stackAutoPtr_.set(ret.get()->releaseContainerPtr());
@@ -1260,7 +1260,7 @@ public:
 		util::StackAllocator& alloc = txn.getDefaultAllocator();
 		KeyDataStoreValue keyStoreValue(UNDEF_CONTAINERID, containerCursor.getContainerOId(),
 			dataStore->getStoreType(), CONTAINER_ATTR_ANY);
-		DSInputMes input(alloc, DS_GET_CONTAINR_OBJECT, ANY_CONTAINER, allowExpiration);
+		DSInputMes input(alloc, DS_GET_CONTAINER_OBJECT, ANY_CONTAINER, allowExpiration);
 		StackAllocAutoPtr<DSContainerOutputMes> ret(alloc,
 			static_cast<DSContainerOutputMes*>(dataStore->exec(&txn, &keyStoreValue, &input)));
 		stackAutoPtr_.set(ret.get()->releaseContainerPtr());
@@ -1847,7 +1847,7 @@ public:
 	struct HandlerEntry {
 	public:
 		HandlerEntry();
-		bool isAvalilable() const;
+		bool isAvailable() const;
 
 	private:
 		friend class ContainerRowScanner;

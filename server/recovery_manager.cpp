@@ -43,7 +43,6 @@ UTIL_TRACER_DECLARE(RECOVERY_MANAGER_DETAIL);
 	GS_RETHROW_CUSTOM_ERROR(LogRedoException, GS_ERROR_DEFAULT, cause, message)
 
 
-
 const std::string RecoveryManager::BACKUP_INFO_FILE_NAME("gs_backup_info.json");
 const std::string RecoveryManager::BACKUP_INFO_DIGEST_FILE_NAME(
 	"gs_backup_info_digest.json");
@@ -106,6 +105,17 @@ RecoveryManager::RecoveryManager(
 		configTable.get<const char8_t *>(CONFIG_TABLE_DS_DB_PATH));
 	backupInfo_.setGSVersion(
 		configTable.get<const char8_t *>(CONFIG_TABLE_DEV_SIMPLE_VERSION));
+
+	clusterSnapshotRestoreInfo_.setConfigValue(
+		configTable.getUInt32(CONFIG_TABLE_DS_PARTITION_NUM),
+		configTable.get<const char8_t *>(CONFIG_TABLE_DS_DB_PATH));
+
+	try {
+		clusterSnapshotRestoreInfo_.readInfoFile();
+	}
+	catch (std::exception &e) {
+		GS_RETHROW_SYSTEM_ERROR(e, "");
+	}
 }
 
 /*!
@@ -408,7 +418,9 @@ void RecoveryManager::recovery(util::StackAllocator &alloc, bool existBackup,
 		for (uint32_t pId = 0; pId < partitionNum; ++pId) {
 			Partition &partition = partitionList_->partition(pId);
 			InterchangeableStoreMemory& ism = partitionList_->interchangeableStoreMemory();
-			partition.recover(&ism);
+			LogSequentialNumber restoreTargetLsn = 0;
+			restoreTargetLsn = clusterSnapshotRestoreInfo_.getTargetLsn(pId);
+			partition.recover(&ism, restoreTargetLsn);
 			ism.calculate();
 			ism.resize();
 			if (releaseUnusedFileBlocks_) {
@@ -421,6 +433,7 @@ void RecoveryManager::recovery(util::StackAllocator &alloc, bool existBackup,
 			"Partition recovery finished (elapsedMillis="
 			<< (util::Stopwatch::currentClock() - currentTime) / 1000 << ")");
 
+		clusterSnapshotRestoreInfo_.removeInfoFile();
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_SYSTEM_ERROR(
@@ -537,27 +550,27 @@ void RecoveryManager::BackupInfo::writeBackupInfoFile() {
 			jsonBackupInfo["backupStartTime"] = picojson::value(oss.str());
 		}
 		if (backupEndTime_ > 0) {
-			clearStringStream(oss);
+			CommonUtility::clearStringStream(oss);
 			util::DateTime(backupEndTime_).format(oss, true);
 			jsonBackupInfo["backupEndTime"] = picojson::value(oss.str());
 		}
 		if (cpFileCopyStartTime_ > 0) {
-			clearStringStream(oss);
+			CommonUtility::clearStringStream(oss);
 			util::DateTime(cpFileCopyStartTime_).format(oss, true);
 			jsonBackupInfo["cpFileCopyStartTime"] = picojson::value(oss.str());
 		}
 		if (cpFileCopyEndTime_ > 0) {
-			clearStringStream(oss);
+			CommonUtility::clearStringStream(oss);
 			util::DateTime(cpFileCopyEndTime_).format(oss, true);
 			jsonBackupInfo["cpFileCopyEndTime"] = picojson::value(oss.str());
 		}
 		if (logFileCopyStartTime_ > 0) {
-			clearStringStream(oss);
+			CommonUtility::clearStringStream(oss);
 			util::DateTime(logFileCopyStartTime_).format(oss, true);
 			jsonBackupInfo["logFileCopyStartTime"] = picojson::value(oss.str());
 		}
 		if (logFileCopyEndTime_ > 0) {
-			clearStringStream(oss);
+			CommonUtility::clearStringStream(oss);
 			util::DateTime(logFileCopyEndTime_).format(oss, true);
 			jsonBackupInfo["logFileCopyEndTime"] = picojson::value(oss.str());
 		}
@@ -1094,3 +1107,125 @@ bool RecoveryManager::BackupInfo::getCheckCpFileSizeFlag() {
 void RecoveryManager::BackupInfo::setCheckCpFileSizeFlag(bool flag) {
 	checkCpFileSizeFlag_ = flag;
 }
+
+/*!
+	@brief コンストラクタ
+*/
+RecoveryManager::ClusterSnapshotRestoreInfo::ClusterSnapshotRestoreInfo() : partitionNum_(0) {
+}
+
+/*!
+	@brief デストラクタ
+*/
+RecoveryManager::ClusterSnapshotRestoreInfo::~ClusterSnapshotRestoreInfo() {
+}
+
+/*!
+	@brief DB設定パラメータの設定
+*/
+void RecoveryManager::ClusterSnapshotRestoreInfo::setConfigValue(
+		uint32_t partitionNum, const std::string &dataFilePath) {
+	partitionNum_ = partitionNum;
+	dataFilePath_ = dataFilePath;
+}
+
+/*!
+	@brief クラスタスナップショット復元情報ファイル読み込み
+	@note 存在しない場合は何もしない
+	@note JSONとして不正、必要なキーがない、値の型が不正、などの場合はシステムエラー例外送出
+*/
+void RecoveryManager::ClusterSnapshotRestoreInfo::readInfoFile() {
+	assert(partitionNum_ > 0);
+	std::string fileName;
+	try {
+		targetLsnList_.clear();
+		util::FileSystem::createPath(
+				dataFilePath_.c_str(),
+				PartitionList::CLUSTER_SNAPSHOT_INFO_FILE_NAME.c_str(),
+				fileName);
+		std::ifstream ifs(fileName.c_str());
+		if (!ifs) {
+			return;
+		}
+		GS_TRACE_INFO(RECOVERY_MANAGER, GS_TRACE_RM_RECOVERY_INFO,
+				"[CLUSTER_SNAPSHOT_RESTORE] file " << fileName.c_str() << " found.");
+		std::string jsonString;
+		std::getline(ifs, jsonString);
+
+		picojson::value value;
+		std::string error;
+		picojson::parse(value, jsonString.begin(), jsonString.end(), &error);
+		if (!error.empty()) {
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_RM_READ_CLUSTER_SNAPSHOT_INFO_FILE_FAILED,
+					"[CLUSTER_SNAPSHOT_RESTORE] file " << fileName.c_str() <<
+					"is corrupted: " << error.c_str());
+		}
+
+		picojson::array lsnArray =
+			value.get("clusterSnapshotInfo").get<picojson::array>();
+
+		targetLsnList_.assign(partitionNum_, 0);
+		for (picojson::array::iterator itr = lsnArray.begin();
+				itr != lsnArray.end(); ++itr) {
+			size_t pId = static_cast<size_t>((*itr).get("pId").get<double>());
+			LogSequentialNumber lsn =
+					static_cast<LogSequentialNumber>((*itr).get("lsn").get<double>());
+			if (pId >= partitionNum_) {
+				GS_THROW_SYSTEM_ERROR(GS_ERROR_RM_READ_CLUSTER_SNAPSHOT_INFO_FILE_FAILED,
+						"[CLUSTER_SNAPSHOT_RESTORE] file " << fileName.c_str() <<
+						": pId(" << pId << ") is out of range.");
+			}
+			if (targetLsnList_[pId] != 0) {
+				GS_THROW_SYSTEM_ERROR(GS_ERROR_RM_READ_CLUSTER_SNAPSHOT_INFO_FILE_FAILED,
+						"[CLUSTER_SNAPSHOT_RESTORE] file " << fileName.c_str() <<
+						": duplicate pId(" << pId << ") is found.");
+			}
+			targetLsnList_[pId] = lsn;
+		}
+	}
+	catch (std::exception &e) {
+		GS_RETHROW_SYSTEM_ERROR(e,
+			"Read " << fileName.c_str()
+					<< " failed. (reason=" << GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+}
+
+/*!
+	@brief クラスタスナップショット復元情報ファイル削除
+	@note 全パーティションの復元が正常に完了した場合呼び出される
+	@note 対象ファイルが存在しない場合は何もしない
+*/
+void RecoveryManager::ClusterSnapshotRestoreInfo::removeInfoFile() {
+	assert(partitionNum_ > 0);
+	std::string fileName;
+	util::FileSystem::createPath(
+			dataFilePath_.c_str(),
+			PartitionList::CLUSTER_SNAPSHOT_INFO_FILE_NAME.c_str(),
+			fileName);
+	if (util::FileSystem::exists(fileName.c_str())) {
+		try {
+			util::FileSystem::remove(fileName.c_str(), false);
+		}
+		catch (std::exception &e) {
+			GS_RETHROW_SYSTEM_ERROR(e,
+					"Remove " << fileName.c_str() << " failed. (reason="
+					<< GS_EXCEPTION_MESSAGE(e) << ")");
+		}
+	}
+}
+
+/*!
+	@brief パーティションごとの復元LSNを取得する
+	@note クラスタスナップショット復元情報ファイルにエントリーが存在しなかった場合、0を返す
+*/
+LogSequentialNumber RecoveryManager::ClusterSnapshotRestoreInfo::getTargetLsn(PartitionId pId) {
+	assert(pId < partitionNum_);
+	if (pId < partitionNum_ && targetLsnList_.size() > 0) {
+		assert(targetLsnList_.size() == partitionNum_);
+		return targetLsnList_[pId];
+	}
+	else {
+		return 0;
+	}
+}
+

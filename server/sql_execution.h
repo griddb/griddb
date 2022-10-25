@@ -730,14 +730,14 @@ public:
 	public:
 		SQLExecutionContext(util::Mutex& lock,
 			ClientInfo& clientInfo,
-			QueryAnalyzedInfo& analyedQueryInfo,
+			QueryAnalyzedInfo& analyzedQueryInfo,
 			ExecutionStatus& executionStatus,
 			ResponseInfo& response,
 			ClientId& clientId,
 			JobId& currentJobId) :
 			lock_(lock),
 			clientInfo_(clientInfo),
-			analyedQueryInfo_(analyedQueryInfo),
+			analyzedQueryInfo_(analyzedQueryInfo),
 			executionStatus_(executionStatus),
 			response_(response),
 			clientId_(clientId),
@@ -779,7 +779,7 @@ public:
 
 		util::Mutex& lock_;
 		ClientInfo& clientInfo_;
-		QueryAnalyzedInfo& analyedQueryInfo_;
+		QueryAnalyzedInfo& analyzedQueryInfo_;
 		ExecutionStatus& executionStatus_;
 		ResponseInfo& response_;
 		ClientId& clientId_;
@@ -792,6 +792,7 @@ public:
 		return context_;
 	}
 	DataStoreV4* getDataStore(PartitionId pId);
+	util::StackAllocator* getStackAllocator() { return &executionStackAlloc_; };
 
 	struct SQLReplyContext {
 		SQLReplyContext() : ec_(NULL), job_(NULL), typeList_(NULL),
@@ -883,55 +884,55 @@ private:
 	static SQLReplyType checkReplyType(int32_t errorCode, bool& clearCache);
 
 	bool isDDL() {
-		return analyedQueryInfo_.isDDL_;
+		return analyzedQueryInfo_.isDDL_;
 	}
 
 	void setDDL() {
-		analyedQueryInfo_.isDDL_ = true;
+		analyzedQueryInfo_.isDDL_ = true;
 	}
 
 	void setNotSelect(bool value) {
-		analyedQueryInfo_.notSelect_ = value;
+		analyzedQueryInfo_.notSelect_ = value;
 	}
 
 	bool isNotSelect() {
-		return analyedQueryInfo_.notSelect_;
+		return analyzedQueryInfo_.notSelect_;
 	}
 
 	void setPrepared() {
-		analyedQueryInfo_.prepared_ = true;
+		analyzedQueryInfo_.prepared_ = true;
 	}
 
 	void setFastInserted() {
-		analyedQueryInfo_.fastInserted_ = true;
+		analyzedQueryInfo_.fastInserted_ = true;
 	}
 
 	bool isFastInserted() {
-		return analyedQueryInfo_.fastInserted_;
+		return analyzedQueryInfo_.fastInserted_;
 	}
 
 	bool isTimeSeriesIncluded() {
-		return analyedQueryInfo_.isTimeSeriesIncluded_;
+		return analyzedQueryInfo_.isTimeSeriesIncluded_;
 	}
 
 	void setTimeSeriesIncluded(bool flag) {
-		analyedQueryInfo_.isTimeSeriesIncluded_ = flag;
+		analyzedQueryInfo_.isTimeSeriesIncluded_ = flag;
 	}
 
 	SQLParsedInfo& getParsedInfo() {
-		return analyedQueryInfo_.parsedInfo_;
+		return analyzedQueryInfo_.parsedInfo_;
 	}
 
 	util::Vector<SyntaxTree::ExprList*>& getMergeSelectList() {
-		return analyedQueryInfo_.mergeSelectList_;
+		return analyzedQueryInfo_.mergeSelectList_;
 	}
 
 	bool isAnalyzed() {
-		return analyedQueryInfo_.fastInserted_;
+		return analyzedQueryInfo_.fastInserted_;
 	}
 
 	void setAnalyzed() {
-		analyedQueryInfo_.fastInserted_ = true;
+		analyzedQueryInfo_.fastInserted_ = true;
 	}
 
 	void resetCurrentJobInfo() {
@@ -999,10 +1000,10 @@ private:
 	void encodeSuccessExplainAnalyze(util::StackAllocator& alloc,
 		EventByteOutStream& out, Job* job);
 
-	void compile(util::StackAllocator& alloc, SQLConnectionControl& contol,
+	void compile(util::StackAllocator& alloc, SQLConnectionControl& control,
 		ValueTypeList& parameterTypeList, SQLTableInfoList* tableInfoList,
 		util::Vector<BindParam*>& bindParamInfos,
-		TupleValue::VarContext& varCxt);
+		TupleValue::VarContext& varCxt, int64_t startTime);
 
 	bool replySuccessExplainAnalyze(
 		EventContext& ec, Job* job, uint8_t versionId, JobId* responseJobId);
@@ -1163,7 +1164,7 @@ private:
 	JobId currentJobId_;
 	PreparedInfo preparedInfo_;
 	ClientInfo clientInfo_;
-	QueryAnalyzedInfo analyedQueryInfo_;
+	QueryAnalyzedInfo analyzedQueryInfo_;
 	ExecutionStatus executionStatus_;
 	struct Config {
 		Config(RequestInfo& request) {

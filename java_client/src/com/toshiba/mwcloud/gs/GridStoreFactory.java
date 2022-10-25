@@ -35,7 +35,7 @@ import com.toshiba.mwcloud.gs.common.LoggingUtils.BaseGridStoreLogger;
  *
  * <p>このクラスの公開メソッドは、すべてスレッド安全です。</p>
  *
- * <p>また、クライアントロギングとクライアント設定ファイルの機能を使用できます。</p>
+ * <p>追加の環境設定を行うことで、次の機能を使用できるようになります。</p>
  *
  * <p><b>クライアントロギング</b></p>
  * <p>クラスパスにロギングライブラリを含めることで、ログ出力を有効にした場合にログを出力できます。</p>
@@ -68,6 +68,11 @@ import com.toshiba.mwcloud.gs.common.LoggingUtils.BaseGridStoreLogger;
  * 設定ファイルの内容は適用されません。</p>
  * </dd>
  * </dl>
+ *
+ * <p><b>SSL接続</b></p>
+ * <p>アドバンスド機能用ライブラリ「gridstore-advanced.jar」をクラスパスに
+ * 含めることで、クラスタもしくはアドレスプロバイダへのTCP接続においてSSL接続を
+ * 選択できるようになります。</p>
  *
  * </div><div lang="en">
  * Manages a {@link GridStore} instance.
@@ -167,58 +172,96 @@ public abstract class GridStoreFactory implements Closeable {
 	 * <table>
 	 * <thead><tr><th>名称</th><th>説明</th></tr></thead>
 	 * <tbody>
-	 * <tr><td>host</td><td>接続先ホスト名。IPアドレス(IPV4のみ)も可。
-	 * マスタを手動指定する場合は必須。マスタを自動検出する場合は設定しない</td></tr>
-	 * <tr><td>port</td><td>接続先ポート番号。{@code 0}から
-	 * {@code 65535}までの数値の文字列表現。マスタを手動指定する場合は必須。
-	 * マスタを自動検出する場合は設定しない</td></tr>
-	 * <tr><td>notificationAddress</td><td>マスタ自動検出に用いられる通知情報を
-	 * 受信するためのIPアドレス(IPV4のみ)。省略時はデフォルトのアドレスを使用。
-	 * notificationMemberおよびnotificationProviderと同時に指定することはできない</td></tr>
-	 * <tr><td>notificationPort</td><td>マスタ自動検出に用いられる通知情報を
-	 * 受信するためのポート番号。{@code 0}から{@code 65535}までの数値の
-	 * 文字列表現。省略時はデフォルトのポートを使用</td></tr>
-	 * <tr><td>clusterName</td><td>クラスタ名。接続先のクラスタに設定されている
-	 * クラスタ名と一致するかどうかを確認するために使用される。省略時もしくは空文字列を
+	 * <tr>
+	 * <td>host</td>
+	 * <td>接続先ホスト名。IPアドレス(IPv4のみ)も可。
+	 * マスタを手動指定する場合は必須。マスタを自動検出する場合は設定しない。
+	 * {@code notificationMember}および{@code notificationProvider}プロパティと
+	 * 同時に指定することはできない</td>
+	 * </tr>
+	 * <tr>
+	 * <td>port</td>
+	 * <td>接続先ポート番号。{@code 0}から{@code 65535}までの数値の文字列表現。
+	 * マスタを手動指定する場合は必須。マスタを自動検出する場合は設定しない</td>
+	 * </tr>
+	 * <tr>
+	 * <td>notificationAddress</td>
+	 * <td>マスタ自動検出に用いられる通知情報を受信するためのIPアドレス
+	 * (IPv4のみ)。省略時はデフォルトのアドレスを使用。
+	 * {@code notificationMember}および{@code notificationProvider}プロパティと
+	 * 同時に指定することはできない</td>
+	 * </tr>
+	 * <tr>
+	 * <td>notificationPort</td>
+	 * <td>マスタ自動検出に用いられる通知情報を受信するためのポート番号。
+	 * {@code 0}から{@code 65535}までの数値の文字列表現。
+	 * 省略時はデフォルトのポートを使用</td>
+	 * </tr>
+	 * <tr>
+	 * <td>clusterName</td>
+	 * <td>クラスタ名。接続先のクラスタに設定されているクラスタ名と一致するか
+	 * どうかを確認するために使用される。省略時もしくは空文字列を
 	 * 指定した場合、クラスタ名の確認は行われない</td></tr>
-	 * <tr><td>database</td><td>接続先のデータベース名。省略時は全てのユーザが
-	 * アクセス可能な「public」データベースに自動接続される。接続ユーザは接続
-	 * データベースに属するコンテナを操作できる。</td></tr>
-	 * <tr><td>user</td><td>ユーザ名</td></tr>
-	 * <tr><td>password</td><td>ユーザ認証用のパスワード</td></tr>
-	 * <tr><td>consistency</td><td>次のいずれかの一貫性レベル。
+	 * <tr>
+	 * <td>database</td>
+	 * <td>接続先のデータベース名。省略時は全てのユーザがアクセス可能な「public」
+	 * データベースに自動接続される。接続ユーザは接続データベースに属する
+	 * コンテナを操作できる。</td>
+	 * </tr>
+	 * <tr>
+	 * <td>user</td>
+	 * <td>ユーザ名</td>
+	 * </tr>
+	 * <tr>
+	 * <td>password</td>
+	 * <td>ユーザ認証用のパスワード</td>
+	 * </tr>
+	 * <tr>
+	 * <td>consistency</td>
+	 * <td>一貫性レベル。次のいずれかの文字列を指定できる。
 	 * <dl>
-	 * <dt>{@code "IMMEDIATE"}</dt><dd>他のクライアントからの更新結果は、
-	 * 該当トランザクションの完了後即座に反映される</dd>
-	 * <dt>{@code "EVENTUAL"}</dt><dd>他のクライアントからの更新結果は、
-	 * 該当トランザクションが完了した後でも反映されない場合がある。
-	 * {@link Container}に対する更新操作は実行できない</dd>
+	 * <dt>{@code "IMMEDIATE"}</dt>
+	 * <dd>他のクライアントからの更新結果は、該当トランザクションの完了後即座に
+	 * 反映される</dd>
+	 * <dt>{@code "EVENTUAL"}</dt>
+	 * <dd>他のクライアントからの更新結果は、該当トランザクションが完了した
+	 * 後でも反映されない場合がある。{@link Container}に対する更新操作は
+	 * 実行できない</dd>
 	 * </dl>
-	 * デフォルトでは{@code "IMMEDIATE"}が適用されます
-	 * </td></tr>
-	 * <tr><td>transactionTimeout</td><td>トランザクションタイムアウト時間の最低値。
+	 * 省略時は{@code "IMMEDIATE"}が指定されたものとみなされる
+	 * </td>
+	 * </tr>
+	 * <tr>
+	 * <td>transactionTimeout</td>
+	 * <td>トランザクションタイムアウト時間の最低値。
 	 * 関係する{@link Container}における各トランザクションの開始時点から適用。
 	 * {@code 0}以上{@link Integer#MAX_VALUE}までの値の文字列表現であり、
 	 * 単位は秒。ただし、タイムアウト時間として有効に機能する範囲に上限があり、
 	 * 上限を超える指定は上限値が指定されたものとみなされる。
 	 * {@code 0}の場合、後続のトランザクション処理がタイムアウトエラーに
 	 * なるかどうかは常に不定となる。省略時は接続先GridDB上のデフォルト値を使用
-	 * </td></tr>
-	 * <tr><td>failoverTimeout</td><td>フェイルオーバ処理にて新たな接続先が
-	 * 見つかるまで待機する時間の最低値。{@code 0}以上
-	 * {@link Integer#MAX_VALUE}までの数値の文字列表現であり、単位は秒。
-	 * {@code 0}の場合、フェイルオーバ処理を行わない。省略時はこのファクトリの
-	 * 設定値を使用</td></tr>
-	 * <tr><td>containerCacheSize</td><td>
-	 * コンテナキャッシュに格納するコンテナ情報の最大個数。
+	 * </td>
+	 * </tr>
+	 * <tr>
+	 * <td>failoverTimeout</td>
+	 * <td>フェイルオーバ処理にて新たな接続先が見つかるまで待機する時間の最低値。
+	 * {@code 0}以上{@link Integer#MAX_VALUE}までの数値の文字列表現であり、
+	 * 単位は秒。{@code 0}の場合、フェイルオーバ処理を行わない。省略時は
+	 * このファクトリの設定値を使用</td>
+	 * </tr>
+	 * <tr>
+	 * <td>containerCacheSize</td>
+	 * <td>コンテナキャッシュに格納するコンテナ情報の最大個数。
 	 * {@code 0}以上{@link Integer#MAX_VALUE}までの数値の文字列表現。
 	 * 値が{@code 0}の場合、コンテナキャッシュを使用しないことを意味する。
 	 * {@link Container}を取得する際にキャッシュにヒットした場合は、
 	 * GridDBへのコンテナ情報の問い合わせを行わない。
-	 * 省略時は既存の設定値を使用。バージョン1.5よりサポート</td></tr>
-	 * <tr><td>dataAffinityPattern</td><td>
-	 * データアフィニティ機能のアフィニティ文字列を次のようにコンテナパターン
-	 * とペアで任意個数指定する。
+	 * 省略時は既存の設定値を使用。バージョン1.5よりサポート</td>
+	 * </tr>
+	 * <tr>
+	 * <td>dataAffinityPattern</td>
+	 * <td>データアフィニティ機能のアフィニティ文字列について、次のように
+	 * コンテナ名のパターンとペアで任意個数指定する。
 	 * <pre>(コンテナ名パターン1)=(アフィニティ文字列1),(コンテナ名パターン2)=(アフィニティ文字列2),...</pre>
 	 * {@link ContainerInfo#setDataAffinity(String)}が未指定の
 	 * {@link Container}を追加する際に、コンテナ名が指定したいずれかの
@@ -231,27 +274,39 @@ public abstract class GridStoreFactory implements Closeable {
 	 * 用いるには、「\」を用いてエスケープする。ただしコンテナ名やアフィニティ
 	 * 文字列の規則に反する記号は使用できない。
 	 * バージョン2.7よりサポート
-	 * </td></tr>
-	 * <tr><td>notificationMember</td><td>
-	 * 固定リスト方式を使用して構成されたクラスタに接続する場合に、クラスタノードのアドレス・ポートのリストを
-	 * 次のように指定する。
+	 * </td>
+	 * </tr>
+	 * <tr>
+	 * <td>notificationMember</td>
+	 * <td>固定リスト方式を使用して構成されたクラスタに接続する場合に、
+	 * クラスタノードのアドレス・ポートのリストを次のように指定する。
 	 * <pre>(アドレス1):(ポート1),(アドレス2):(ポート2),...</pre>
-	 * notificationAddressおよびnotificationProviderと同時に指定することはできない。
+	 * {@code notificationAddress}および{@code notificationProvider}プロパティと
+	 * 同時に指定することはできない。
 	 * バージョン2.9よりサポート
-	 * </td></tr>
-	 * <tr><td>notificationProvider</td><td>
-	 * プロバイダ方式を使用して構成されたクラスタに接続する場合に、アドレスプロバイダのURLを指定する。
-	 * notificationAddressおよびnotificationMemberと同時に指定することはできない。
+	 * </td>
+	 * </tr>
+	 * <tr>
+	 * <td>notificationProvider</td>
+	 * <td>プロバイダ方式を使用して構成されたクラスタに接続する場合に、アドレス
+	 * プロバイダのURLを指定する。{@code notificationAddress}および
+	 * {@code notificationMember}プロパティと同時に指定することはできない。
 	 * バージョン2.9よりサポート
-	 * </td></tr>
-	 * <tr><td>applicationName</td><td>アプリケーションの名前。
+	 * </td>
+	 * </tr>
+	 * <tr>
+	 * <td>applicationName</td>
+	 * <td>アプリケーションの名前。
 	 * アプリケーションの識別を補助するための情報として、接続先のクラスタ上での
 	 * 各種管理情報の出力の際に含められる場合がある。ただし、アプリケーションの
 	 * 同一性を どのように定義するかについては関与しない。省略時は
 	 * アプリケーション名の指定がなかったものとみなされる。空文字列は指定
 	 * できない。
-	 * バージョン4.2よりサポート</td></tr>
-	 * <tr><td>timeZone</td><td>タイムゾーン情報。
+	 * バージョン4.2よりサポート</td>
+	 * </tr>
+	 * <tr>
+	 * <td>timeZone</td>
+	 * <td>タイムゾーン情報。
 	 * TQLでのTIMESTAMP値演算などに使用される。
 	 * 「{@code ±hh:mm}」または「{@code ±hhmm}」形式によるオフセット値
 	 * ({@code ±}は{@code +}または{@code -}、{@code hh}は時、
@@ -259,14 +314,60 @@ public abstract class GridStoreFactory implements Closeable {
 	 * 「{@code auto}」(実行環境に応じ自動設定)のいずれかを指定する。
 	 * {@code auto}が使用できるのは夏時間を持たないタイムゾーンに
 	 * 限定される。
-	 * バージョン4.3よりサポート</td></tr>
+	 * バージョン4.3よりサポート</td>
+	 * </tr>
+	 * <tr>
+	 * <td>authentication</td>
+	 * <td>認証種別。次のいずれかの文字列を指定できる。
+	 * <dl>
+	 * <dt>{@code "INTERNAL"}</dt>
+	 * <dd>クラスタ上で管理されているアカウント情報に基づいた、内部認証</dd>
+	 * <dt>{@code "LDAP"}</dt>
+	 * <dd>クラスタ外にあるLDAPサーバで管理されているアカウント情報に基づいた、
+	 * 外部認証。LDAP接続設定のないクラスタに接続する場合、もしくは、
+	 * 管理ユーザを使用する場合は指定できない</dd>
+	 * </dl>
+	 * 省略時は自動的に認証種別が選択される。原則として指定は不要。
+	 * 非管理ユーザについて内部認証と外部認証を併用するクラスタへの接続の際に、
+	 * 内部認証を用いる場合などに指定する。
+	 * バージョン4.5よりサポート</td>
+	 * </tr>
+	 * <tr>
+	 * <td>sslMode</td>
+	 * <td>クラスタへの接続においてSSLの使用有無の判断に用いられるモード。
+	 * 次のいずれかの文字列を指定できる。
+	 * <dl>
+	 * <dt>{@code "DISABLED"}</dt>
+	 * <dd>SSLを常に使用しない</dd>
+	 * <dt>{@code "PREFERRED"}</dt>
+	 * <dd>可能な限りSSLを使用する。SSL接続・非SSL接続共に使用できる場合は
+	 * SSL接続を使用する</dd>
+	 * <dt>{@code "VERIFY"}</dt>
+	 * <dd>SSLを常に使用する。サーバ検証あり</dd>
+	 * </dl>
+	 * SSL接続を選択できる環境設定(詳細: {@link GridStoreFactory})の場合のみ
+	 * 指定できる。それ以外の場合はプロパティの値によらず指定できない。
+	 * SSL接続を選択できる場合、省略時は{@code "PREFERRED"}が指定されたものと
+	 * みなされる。バージョン4.5よりサポート。VERIFYはバージョン4.6よりサポート</td>
+	 * </tr>
+	 * <tr>
+	 * <td>connectionRoute</td>
+	 * <td>クラスタ接続時における通信経路。
+	 * 次の文字列を指定できる。
+	 * <dl>
+	 * <dt>{@code "PUBLIC"}</dt>
+	 * <dd>クラスタの外部通信経路が設定されている場合に、外部通信経路を経由した接続を行う</dd>
+	 * </dl>
+	 * 省略時は通常のクラスタ通信経路を用いた接続が行われる。外部接続が必要な場合のみ指定する。
+	 * バージョン5.1.1よりサポート</td>
+	 * </tr>
 	 * </tbody>
 	 * </table>
 	 *
 	 * <p>クラスタ名、データベース名、ユーザ名、パスワードについては、
 	 * ASCIIの大文字・小文字表記の違いがいずれも区別されます。その他、
 	 * これらの定義に使用できる文字種や長さの上限などの制限については、
-	 * GridDBテクニカルリファレンスを参照してください。ただし、制限に反する
+	 * GridDB機能リファレンスを参照してください。ただし、制限に反する
 	 * 文字列をプロパティ値として指定した場合、各ノードへの接続のタイミングまで
 	 * エラーが検知されないことや、認証情報の不一致など別のエラーになる
 	 * ことがあります。</p>
@@ -303,16 +404,16 @@ public abstract class GridStoreFactory implements Closeable {
 	 * <table>
 	 * <thead><tr><th>Property</th><th>Description</th></tr></thead>
 	 * <tbody>
-	 * <tr><td>host</td><td>A destination host name. An IP address (IPV4 only) is
+	 * <tr><td>host</td><td>A destination host name. An IP address (IPv4 only) is
 	 * also available. Mandatory for manually setting a master. For autodetection
 	 * of a master, omit the setting.</td></tr>
 	 * <tr><td>port</td><td>A destination port number. A string representing of
 	 * a number from {@code 0} to {@code 65535}. Mandatory for manually setting a master.
 	 * For autodetection of a master, omit the setting.</td></tr>
-	 * <tr><td>notificationAddress</td><td>An IP address (IPV4 only) for receiving
+	 * <tr><td>notificationAddress</td><td>An IP address (IPv4 only) for receiving
 	 * a notification used for autodetection of a master. A default address is
 	 * used if omitted.
-	 * This property cannot be specified with neither notificationMember nor
+	 * This property cannot be specified with neither {@code notificationMember} nor
 	 * notificationProvider properties at the same time.
 	 * </td></tr>
 	 * <tr><td>notificationPort</td><td>A port number for receiving a notification
@@ -380,15 +481,15 @@ public abstract class GridStoreFactory implements Closeable {
 	 * cluster which is configured with FIXED_LIST mode, and specified as
 	 * follows.
 	 * <pre>(Address1):(Port1),(Address2):(Port2),...</pre>
-	 * This property cannot be specified with neither notificationAddress nor
+	 * This property cannot be specified with neither {@code notificationAddress} nor
 	 * notificationProvider properties at the same time.
 	 * This property is supported on version 2.9 or later.
 	 * </td></tr>
 	 * <tr><td>notificationProvider</td><td>
 	 * A URL of address provider. It is used to connect to cluster which is
 	 * configured with PROVIDER mode.
-	 * This property cannot be specified with neither notificationAddress nor
-	 * notificationMember properties at the same time.
+	 * This property cannot be specified with neither {@code notificationAddress} nor
+	 * {@code notificationMember} properties at the same time.
 	 * This property is supported on version 2.9 or later.
 	 *
 	 * </td></tr>
@@ -411,7 +512,7 @@ public abstract class GridStoreFactory implements Closeable {
 	 * </table>
 	 *
 	 * <p>Cluster names, database names, user names and passwords
-	 * are case-sensitive. See the GridDB Technical Reference for
+	 * are case-sensitive. See the GridDB Features Reference for
 	 * the details of the limitations, such as allowed characters
 	 * and maximum length. When a name violating the limitations has
 	 * been specified as a property value, the error detection may

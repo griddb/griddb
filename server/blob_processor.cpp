@@ -25,7 +25,7 @@
 #include "schema.h"
 #include "value_operator.h"
 
-const double LogDevide::EFFICENCY_THRESHOLD = 1 / (1 / static_cast<double>(1 << MAX_DIVIDED_NUM));
+const double LogDevide::EFFICIENCY_THRESHOLD = 1 / (1 / static_cast<double>(1 << MAX_DIVIDED_NUM));
 
 void LogDevide::initialize(uint64_t inputSize) {
 	uint32_t restSize;
@@ -36,7 +36,7 @@ void LogDevide::initialize(uint64_t inputSize) {
 		restSize = static_cast<uint32_t>(inputSize);
 	}
 	if (restSize > 0) {
-		if (restSize <= DIVIED_SIZE_LIMIT) {
+		if (restSize <= DIVIDED_SIZE_LIMIT) {
 			sizeList_[dividedElemNum_++] = restSize;
 		} else {
 			initializeDevide(restSize);
@@ -87,7 +87,7 @@ BlobCursor::BlobCursor(ObjectManagerV4 &objectManager, AllocateStrategy &allocat
 					   currentElem_(-1), maxElem_(0), currentDepth_(0),
 					   maxDepth_(0),  logDevide_(objectManager), neighborOId_(UNDEF_OID) {
 	for (uint32_t i = 0; i < MAX_DEPTH; i++) {
-		stackCusor_[i].reset(objectManager, allocateStrategy_);
+		stackCursor_[i].reset(objectManager, allocateStrategy_);
 	}
 	uint32_t headerLen = ValueProcessor::getEncodedVarSize(baseAddr_);  
 	uint64_t size = ValueProcessor::decodeVarSize64(baseAddr_ + headerLen);  
@@ -111,7 +111,7 @@ BlobCursor::BlobCursor(ObjectManagerV4 &objectManager,
 					   currentElem_(-1), maxElem_(0), currentDepth_(0),
 					   maxDepth_(0), logDevide_(objectManager), neighborOId_(neighborOId) {
 	for (uint32_t i = 0; i < MAX_DEPTH; i++) {
-		stackCusor_[i].reset(objectManager, allocateStrategy_);
+		stackCursor_[i].reset(objectManager, allocateStrategy_);
 	}
 }
 
@@ -139,7 +139,7 @@ uint32_t BlobCursor::getPrefixDataSize(ObjectManagerV4 &objectManager, uint64_t 
 
 uint32_t BlobCursor::getMaxArrayNum(ObjectManagerV4 &objectManager) {
 	uint32_t headerSize = sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint64_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint64_t);
-	uint32_t allocateSize = objectManager.getRecommendtLimitObjectSize() - headerSize;
+	uint32_t allocateSize = objectManager.getRecommendedLimitObjectSize() - headerSize;
 	return allocateSize / sizeof(BlobArrayElement);
 }
 
@@ -227,7 +227,7 @@ bool BlobCursor::next(CURSOR_MODE mode) {
 	if (!hasNext()) {
 		if (mode == REMOVE) {
 			for (uint32_t i = 0; i < currentDepth_ + 1; i++) {
-				stackCusor_[i].finalize();
+				stackCursor_[i].finalize();
 			}
 			arrayCursor_ = NULL;
 		}
@@ -236,8 +236,8 @@ bool BlobCursor::next(CURSOR_MODE mode) {
 	currentElem_++;
 	if (arrayCursor_ == NULL) {
 		if (isDivided()) {
-			stackCusor_[currentDepth_].setBaseAddr(const_cast<uint8_t *>(topArrayAddr_));
-			arrayCursor_ = &(stackCusor_[currentDepth_]);
+			stackCursor_[currentDepth_].setBaseAddr(const_cast<uint8_t *>(topArrayAddr_));
+			arrayCursor_ = &(stackCursor_[currentDepth_]);
 			if (mode == CREATE) {
 				uint32_t arrayNum = calcArrayNum(currentElem_, currentDepth_);
 				arrayCursor_->setArrayLength(arrayNum);
@@ -261,7 +261,7 @@ void BlobCursor::nextBlock(CURSOR_MODE mode) {
 	bool isExist = (currentDepth_ > 0);
 	while (currentDepth_ > 0) {
 		currentDepth_--;
-		arrayCursor_ = &(stackCusor_[currentDepth_]);
+		arrayCursor_ = &(stackCursor_[currentDepth_]);
 		if (arrayCursor_->next()) {
 			isExist = true;
 			break;
@@ -283,25 +283,25 @@ void BlobCursor::down(CURSOR_MODE mode) {
 			uint32_t arrayNum = calcArrayNum(currentElem_, currentDepth_);
 			OId newOId;
 			if (neighborOId_ == UNDEF_OID) {
-				stackCusor_[currentDepth_].allocate<BlobArrayObject>(
+				stackCursor_[currentDepth_].allocate<BlobArrayObject>(
 					BlobArrayObject::getObjectSize(arrayNum),
 					newOId, OBJECT_TYPE_VARIANT);
 			}
 			else {
-				stackCusor_[currentDepth_].allocateNeighbor<BlobArrayObject>(
+				stackCursor_[currentDepth_].allocateNeighbor<BlobArrayObject>(
 					BlobArrayObject::getObjectSize(arrayNum),
 					newOId, neighborOId_,
 					OBJECT_TYPE_VARIANT);
 			}
 			neighborOId_ = newOId;
-			stackCusor_[currentDepth_].setArrayLength(arrayNum);
+			stackCursor_[currentDepth_].setArrayLength(arrayNum);
 			BlobArrayElement newElement(0, newOId);
 			arrayCursor_->setCurrentElement(&newElement);
-			arrayCursor_ = &(stackCusor_[currentDepth_]);
+			arrayCursor_ = &(stackCursor_[currentDepth_]);
 		} else {
 			const BlobArrayElement *element = arrayCursor_->getCurrentElement();
 			OId oId = element->oId_;
-			arrayCursor_ = &(stackCusor_[currentDepth_]);
+			arrayCursor_ = &(stackCursor_[currentDepth_]);
 			if (arrayCursor_->getBaseOId() != UNDEF_OID) {
 				arrayCursor_->loadNeighbor(oId, OBJECT_READ_ONLY);
 			} else {
@@ -321,7 +321,7 @@ void BlobCursor::reset() {
 	currentDepth_ = 0;
 	arrayCursor_ = NULL;
 	for (uint32_t i = 0; i < MAX_DEPTH; i++) {
-		stackCusor_[i].resetArrayCursor();
+		stackCursor_[i].resetArrayCursor();
 	}
 }
 
@@ -371,9 +371,9 @@ void BlobCursor::addBinary(const uint8_t *addr, uint32_t size) {
 		BlobArrayElement newElement(size, oId);
 		arrayCursor_->setCurrentElement(&newElement);
 		for (uint32_t i = 0; i < currentDepth_; i++) {
-			const BlobArrayElement *element = stackCusor_[i].getCurrentElement();
+			const BlobArrayElement *element = stackCursor_[i].getCurrentElement();
 			BlobArrayElement updateElement = BlobArrayElement(element->size_ + size, element->oId_);
-			stackCusor_[i].setCurrentElement(&updateElement);
+			stackCursor_[i].setCurrentElement(&updateElement);
 		}
 	}
 	memcpy(curObj_.getBaseAddr(), addr, size);

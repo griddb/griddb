@@ -902,7 +902,7 @@ void BoolExpr::getIndexBitmapAndInfo(TransactionContext &txn,
 }
 
 /*!
- * @brief Create new expression to optimized expresion.
+ * @brief Create new expression to optimized expression.
  *
  * @param txn The transaction context
  * @param txn Object manager

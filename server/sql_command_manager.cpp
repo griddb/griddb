@@ -468,8 +468,8 @@ void NoSQLStore::createUser(
 	DDLCommandType commandType = DDL_CREATE_USER;
 	try {
 		const NameWithCaseSensitivity gsUsers(GS_USERS);
-		ExecuteCondition contidion(&gsUsers, NULL, NULL, NULL);
-		checkExecutable(alloc, commandType, execution, false, contidion);
+		ExecuteCondition condition(&gsUsers, NULL, NULL, NULL);
+		checkExecutable(alloc, commandType, execution, false, condition);
 		NoSQLContainer container(ec, gsUsers,
 			execution->getContext().getSyncContext(), execution);
 		NoSQLStoreOption option(execution);
@@ -813,7 +813,7 @@ public:
 			generateIntervalHashAssignment(condenseIdList, assignIdList);
 			break;
 		default:
-			GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_UNSUPPORTED_PARTITINION_INFO,
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_UNSUPPORTED_PARTITIONING_INFO,
 				"Unsupported table partitioning type");
 			break;
 		}
@@ -1011,8 +1011,8 @@ void NoSQLStore::createTable(
 		bool isAdjust = adjustConnectedDb(tmpDbName);
 		NameWithCaseSensitivity connectedDbName(
 			tmpDbName, dbName.isCaseSensitive_);
-		ExecuteCondition contidion(NULL, &connectedDbName, &tableName, NULL);
-		checkExecutable(alloc, commandType, execution, false, contidion);
+		ExecuteCondition condition(NULL, &connectedDbName, &tableName, NULL);
+		checkExecutable(alloc, commandType, execution, false, condition);
 		ContainerType containerType = (createTableOption.isTimeSeries())
 			? TIME_SERIES_CONTAINER : COLLECTION_CONTAINER;
 		bool isPartitioning = createTableOption.isPartitioning();
@@ -1024,6 +1024,7 @@ void NoSQLStore::createTable(
 		TablePartitioningIndexInfo tablePartitioningIndexInfo(alloc);
 
 		TableProperty tableProperty(alloc);
+		const DataStoreConfig* dsConfig = execution->getExecutionManager()->getManagerSet()->dsConfig_;
 
 		util::XArray<uint8_t> containerSchema(alloc);
 		util::XArray<uint8_t> optionList(alloc);
@@ -1067,6 +1068,31 @@ void NoSQLStore::createTable(
 				idempotenceCheck = true;
 			}
 			else {
+				if ((targetContainer.getContainerAttribute() == CONTAINER_ATTR_LARGE)) {
+					getTablePartitioningInfo(alloc, *dsConfig, targetContainer, columnInfoList, partitioningInfo, option);
+					assert(partitioningInfo.assignNumberList_.size() > 0);
+					NodeAffinityNumber fixedSubContainerId = 0;
+					NoSQLContainer* fixedSubContainer =  createNoSQLContainer(ec,
+						tableName, partitioningInfo.largeContainerId_,
+						partitioningInfo.assignNumberList_[fixedSubContainerId], execution);
+					getContainer(*fixedSubContainer, false, option);
+					if (fixedSubContainer->isExists()) {
+						return;
+					}
+					util::XArray<uint8_t> subContainerSchema(alloc);
+					getLargeBinaryRecord(
+						alloc, NoSQLUtils::LARGE_CONTAINER_KEY_SUB_CONTAINER_SCHEMA,
+						targetContainer, columnInfoList, subContainerSchema, option);
+					TablePartitioningIndexInfo tablePartitioningIndexInfo(alloc);
+					getLargeRecord<TablePartitioningIndexInfo>(
+						alloc, NoSQLUtils::LARGE_CONTAINER_KEY_INDEX,
+						targetContainer, columnInfoList, tablePartitioningIndexInfo, option);
+					TableExpirationSchemaInfo info;
+					createSubContainer(info, alloc, this, targetContainer, fixedSubContainer, subContainerSchema,
+						partitioningInfo, tablePartitioningIndexInfo, tableName, partitionNum,
+						partitioningInfo.assignNumberList_[fixedSubContainerId]);
+					dumpRecoverContainer(alloc, tableName.name_, fixedSubContainer);
+				}
 				return;
 			}
 		}
@@ -1184,7 +1210,7 @@ void NoSQLStore::createTable(
 				}
 			}
 
-			if (SyntaxTree::isInlcludeHashPartitioningType(partitioningType)) {
+			if (SyntaxTree::isIncludeHashPartitioningType(partitioningType)) {
 				if (createTableOption.partitionInfoNum_ < 1
 					|| createTableOption.partitionInfoNum_ >
 					TABLE_PARTITIONING_MAX_HASH_PARTITIONING_NUM) {
@@ -1276,7 +1302,7 @@ void NoSQLStore::createTable(
 		if (partitioningInfo.isRowExpiration()) {
 			if (!createTableOption.isTimeSeries()) {
 				GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_PARAMETER,
-					"Row expriration definition must be timeseries container");
+					"Row expiration definition must be timeseries container");
 			}
 		}
 		else if (partitioningInfo.isTableExpiration()) {
@@ -1284,7 +1310,7 @@ void NoSQLStore::createTable(
 			}
 			else {
 				GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_PARAMETER,
-					"Table expriration definition must be interval or interval-hash partitioning");
+					"Table expiration definition must be interval or interval-hash partitioning");
 			}
 			if (partitionColumnId == -1) {
 				GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_PARAMETER,
@@ -1294,10 +1320,9 @@ void NoSQLStore::createTable(
 				= (*createTableOption.columnInfoList_)[partitionColumnId]->type_;
 			if (partitioningColumnType != TupleList::TYPE_TIMESTAMP) {
 				GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_PARAMETER,
-					"Expriration definition column must be timestamp type");
+					"Expiration definition column must be timestamp type");
 			}
 		}
-		const DataStoreConfig* dsConfig = execution->getExecutionManager()->getManagerSet()->dsConfig_;
 		NoSQLUtils::checkSchemaValidation(alloc, *dsConfig,
 			tableName.name_, containerSchema, containerType);
 
@@ -1558,8 +1583,8 @@ void NoSQLStore::createView(
 		const char8_t* tmpDbName = dbName.name_;
 		bool isAdjust = adjustConnectedDb(tmpDbName);
 		NameWithCaseSensitivity connectedDbName(tmpDbName, dbName.isCaseSensitive_);
-		ExecuteCondition contidion(NULL, &connectedDbName, &tableName, NULL);
-		checkExecutable(alloc, commandType, execution, false, contidion);
+		ExecuteCondition condition(NULL, &connectedDbName, &tableName, NULL);
+		checkExecutable(alloc, commandType, execution, false, condition);
 		util::XArray<uint8_t> containerSchema(alloc);
 		util::XArray<uint8_t> metaContainerSchema(alloc);
 		util::String affinityStr(alloc);
@@ -1663,7 +1688,7 @@ void NoSQLStore::dropView(
 		const char8_t* tmpDbName = dbName.name_;
 		bool isAdjust = adjustConnectedDb(tmpDbName);
 		NameWithCaseSensitivity connectedDbName(tmpDbName, dbName.isCaseSensitive_);
-		ExecuteCondition contidion(NULL, &connectedDbName, &tableName, NULL);
+		ExecuteCondition condition(NULL, &connectedDbName, &tableName, NULL);
 
 		NoSQLContainer targetContainer(ec, tableName, execution->getContext().getSyncContext(), execution);
 		getContainer(targetContainer, false, option);
@@ -1726,7 +1751,7 @@ void NoSQLStore::dropTable(
 		const char8_t* tmpDbName = dbName.name_;
 		bool isAdjust = adjustConnectedDb(tmpDbName);
 		NameWithCaseSensitivity connectedDbName(tmpDbName, dbName.isCaseSensitive_);
-		ExecuteCondition contidion(NULL, &connectedDbName, &tableName, NULL);
+		ExecuteCondition condition(NULL, &connectedDbName, &tableName, NULL);
 
 		NoSQLContainer targetContainer(ec, tableName, execution->getContext().getSyncContext(), execution);
 		getContainer(targetContainer, false, option);
@@ -1864,9 +1889,9 @@ void NoSQLStore::createIndex(
 		bool isAdjust = adjustConnectedDb(tmpDbName);
 		NameWithCaseSensitivity connectedDbName(
 			tmpDbName, dbName.isCaseSensitive_);
-		ExecuteCondition contidion(
+		ExecuteCondition condition(
 			NULL, &connectedDbName, &tableName, &indexName);
-		checkExecutable(alloc, commandType, execution, false, contidion);
+		checkExecutable(alloc, commandType, execution, false, condition);
 		uint32_t partitionNum = dbConnection_->getPartitionTable()->getPartitionNum();
 
 		NoSQLContainer targetContainer(ec,
@@ -2177,8 +2202,8 @@ void NoSQLStore::dropIndex(
 		const char8_t* tmpDbName = dbName.name_;
 		bool isAdjust = adjustConnectedDb(tmpDbName);
 		NameWithCaseSensitivity connectedDbName(tmpDbName, dbName.isCaseSensitive_);
-		ExecuteCondition contidion(NULL, &connectedDbName, &tableName, &indexName);
-		checkExecutable(alloc, commandType, execution, false, contidion);
+		ExecuteCondition condition(NULL, &connectedDbName, &tableName, &indexName);
+		checkExecutable(alloc, commandType, execution, false, condition);
 		uint32_t partitionNum = dbConnection_->getPartitionTable()->getPartitionNum();
 
 		NoSQLContainer targetContainer(ec,
@@ -2358,11 +2383,11 @@ void NoSQLStore::checkDatabase(
 	NameWithCaseSensitivity connectedDbName(
 		tmpDbName, dbName.isCaseSensitive_);
 
-	ExecuteCondition contidion(
+	ExecuteCondition condition(
 		NULL, &connectedDbName, &tableName, NULL);
 
 	checkExecutable(
-		alloc, commandType, execution, false, contidion);
+		alloc, commandType, execution, false, condition);
 }
 
 TableLatch::TableLatch(
@@ -2589,7 +2614,7 @@ bool NoSQLStore::getTable(
 				subContainerId++) {
 
 				LargeContainerStatusType status
-					= currentPartitioningInfo.getPartitonStatus(subContainerId);
+					= currentPartitioningInfo.getPartitionStatus(subContainerId);
 				if (status != PARTITION_STATUS_CREATE_END) {
 					continue;
 				}
@@ -3062,8 +3087,8 @@ void NoSQLStore::dropTablePartition(
 		const char8_t* tmpDbName = dbName.name_;
 		bool isAdjust = adjustConnectedDb(tmpDbName);
 		NameWithCaseSensitivity connectedDbName(tmpDbName, dbName.isCaseSensitive_);
-		ExecuteCondition contidion(NULL, &connectedDbName, &tableName, NULL);
-		checkExecutable(alloc, commandType, execution, false, contidion);
+		ExecuteCondition condition(NULL, &connectedDbName, &tableName, NULL);
+		checkExecutable(alloc, commandType, execution, false, condition);
 
 		if (dropPartitionTableInfo->cmdOptionList_ != NULL
 			&& dropPartitionTableInfo->cmdOptionList_->size() == 1) {
@@ -3116,22 +3141,22 @@ void NoSQLStore::dropTablePartition(
 			*dsConfig, targetContainer, largeColumnInfoList, partitioningInfo);
 		partitioningInfo.init();
 
-		TupleList::TupleColumnType patitioningColumnType = partitioningInfo.partitionColumnType_;
+		TupleList::TupleColumnType partitioningColumnType = partitioningInfo.partitionColumnType_;
 
 		if (expr.value_.getType() == TupleList::TYPE_STRING
-			&& patitioningColumnType != TupleList::TYPE_TIMESTAMP) {
+			&& partitioningColumnType != TupleList::TYPE_TIMESTAMP) {
 			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_VALUE_SYNTAX_ERROR,
 				"Invalid data format, specified partitioning column type must be timestamp");
 		}
 
 		if (expr.value_.getType() != TupleList::TYPE_STRING
-			&& patitioningColumnType == TupleList::TYPE_TIMESTAMP) {
+			&& partitioningColumnType == TupleList::TYPE_TIMESTAMP) {
 			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_VALUE_SYNTAX_ERROR,
 				"Invalid data format, specified partitioning column type must be numeric");
 		}
 
 		TupleValue* tupleValue = NULL;
-		switch (patitioningColumnType) {
+		switch (partitioningColumnType) {
 		case TupleList::TYPE_BYTE:
 		{
 			if (static_cast<int64_t>(targetValue) > INT8_MAX || static_cast<int64_t>(targetValue) < INT8_MIN) {
@@ -3335,8 +3360,8 @@ void NoSQLStore::addColumn(
 		const char8_t* tmpDbName = dbName.name_;
 		bool isAdjust = adjustConnectedDb(tmpDbName);
 		NameWithCaseSensitivity connectedDbName(tmpDbName, dbName.isCaseSensitive_);
-		ExecuteCondition contidion(NULL, &connectedDbName, &tableName, NULL);
-		checkExecutable(alloc, commandType, execution, false, contidion);
+		ExecuteCondition condition(NULL, &connectedDbName, &tableName, NULL);
+		checkExecutable(alloc, commandType, execution, false, condition);
 		if (addColumnInfo->createTableOpt_->columnInfoList_ == NULL) {
 			GS_THROW_USER_ERROR(GS_ERROR_SQL_TABLE_PARTITION_SCHEMA_UNMATCH, "");
 		}
@@ -3638,8 +3663,8 @@ void NoSQLStore::checkPre(DDLSource& ddlSource) {
 	const char8_t* tmpDbName = dbName.name_;
 	bool isAdjust = adjustConnectedDb(tmpDbName);
 	NameWithCaseSensitivity connectedDbName(tmpDbName, dbName.isCaseSensitive_);
-	ExecuteCondition contidion(NULL, &connectedDbName, &tableName, NULL);
-	checkExecutable(alloc, commandType, execution, false, contidion);
+	ExecuteCondition condition(NULL, &connectedDbName, &tableName, NULL);
+	checkExecutable(alloc, commandType, execution, false, condition);
 
 	if (commandType == DDL_RENAME_COLUMN) {
 		RenameColumnInfo* renameColumnInfo = static_cast<RenameColumnInfo*>(baseInfo);

@@ -231,6 +231,9 @@ private:
 };
 
 class MutexAttribute;
+namespace detail {
+class DirectMutex;
+}
 
 extern UTIL_FLAG_TYPE UTIL_MUTEX_DEFAULT; 
 extern UTIL_FLAG_TYPE UTIL_MUTEX_FAST; 
@@ -257,8 +260,12 @@ public:
 	void unlock(void);
 
 private:
+	friend class detail::DirectMutex;
+
 	Mutex(const Mutex&);
 	Mutex& operator=(const Mutex&);
+
+	Mutex(const FalseType&);
 
 	struct Data;
 	UTIL_UNIQUE_PTR<Data> data_;

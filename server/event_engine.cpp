@@ -28,9 +28,13 @@ UTIL_TRACER_DECLARE(IO_MONITOR);
 
 
 
+
+
+
 EventEngine::EventEngine(
 		const Config &config, const Source &source, const char8_t *name) :
 		fixedAllocator_(&source.resolveFixedSizeAllocator()),
+		varAllocPool_(util::AllocatorInfo(config.allocatorGroupId_, "eeVarPool")),
 		name_(name),
 		ioWorkerList_(NULL),
 		eventWorkerList_(NULL),
@@ -45,10 +49,11 @@ EventEngine::EventEngine(
 				config.partitionCount_, config.concurrency_));
 		stats_.reset(UTIL_NEW Stats());
 
+		varAllocPool_.setFreeElementLimitScale(config_->concurrency_ * 2);
 		ndPool_.reset(UTIL_NEW NDPool(*this));
 		socketPool_.reset(UTIL_NEW SocketPool(*this, source));
 		dispatcher_.reset(UTIL_NEW Dispatcher(*this));
-		limitter_.reset(UTIL_NEW Limitter(*this));
+		limitter_.reset(UTIL_NEW DefaultLimitter(*this));
 
 		const NodeDescriptor selfND = ndPool_->getSelfServerND();
 		if (!selfND.isEmpty()) {
@@ -301,6 +306,11 @@ EventMonotonicTime EventEngine::getMonotonicTime() {
 	return clockGenerator_->getMonotonicTime();
 }
 
+EventEngine::VariableSizeAllocator::TraitsType
+EventEngine::getAllocatorTraits() {
+	return VariableSizeAllocator::TraitsType(&varAllocPool_);
+}
+
 
 const NodeDescriptor NodeDescriptor::EMPTY_ND;
 
@@ -379,6 +389,8 @@ EventEngine::Config::Config() :
 		concurrency_(1),
 		partitionCount_(1),
 		eventBufferSizeLimit_(-1),
+		eventBatchSizeLimit_(-1),
+		ioBatchSizeLimit_(-1),
 		clockIntervalMillis_(100),
 		clockCorrectionMillis_(1000),
 		clockCorrectionMaxTrial_(50),
@@ -410,7 +422,7 @@ EventEngine::Config& EventEngine::Config::setMulticastAddress(
 	return *this;
 }
 
-EventEngine::Config& EventEngine::Config::setMulticastIntefaceAddress(
+EventEngine::Config& EventEngine::Config::setMulticastInterfaceAddress(
 		const char8_t *address, uint16_t port) {
 	multicastInterfaceAddress_.assign(address, port);
 	return *this;
@@ -505,8 +517,33 @@ EventEngine::Config& EventEngine::Config::setAllAllocatorGroup(
 	return *this;
 }
 
+EventEngine::Config& EventEngine::Config::setVarAllocFreeSizeLimit(
+		size_t index, int64_t value) {
+	if (index >= VAR_ALLOC_BASE_COUNT) {
+		GS_THROW_USER_ERROR(GS_ERROR_EE_PARAMETER_INVALID, "");
+	}
+	varAllocFreeSizeLimits_[index].value_ = value;
+	return *this;
+}
 
-SocketFactory EventEngine::Source::Dafaults::defaultSocketFactory_;
+void EventEngine::Config::applyFreeSizeLimits(
+		VariableSizeAllocator &varAlloc) const {
+	for (size_t i = 0; i < VAR_ALLOC_BASE_COUNT; i++) {
+		const int64_t baseValue = varAllocFreeSizeLimits_[i].value_;
+		if (baseValue < 0) {
+			continue;
+		}
+
+		const size_t value = static_cast<size_t>(std::min<uint64_t>(
+				static_cast<uint64_t>(baseValue),
+				std::numeric_limits<size_t>::max()));
+		varAlloc.setBaseLimit(
+				i, util::AllocatorStats::STAT_CACHE_LIMIT, value);
+	}
+}
+
+
+SocketFactory EventEngine::Source::Defaults::defaultSocketFactory_;
 
 
 EventEngine::BufferManager::~BufferManager() {
@@ -673,7 +710,9 @@ bool NodeDescriptor::Body::findSocketType(
 EventEngine::NDPool::NDPool(EventEngine &ee) :
 		ee_(ee),
 		config_(*ee_.config_),
-		varAllocator_(util::AllocatorInfo(config_.allocatorGroupId_, "ndVar")),
+		varAllocator_(
+				util::AllocatorInfo(config_.allocatorGroupId_, "ndVar"),
+				ee.getAllocatorTraits()),
 		userDataConstructor_(NULL),
 		userDataDestructor_(NULL),
 		timeMapPool_(util::AllocatorInfo(config_.allocatorGroupId_, "ndTimeMap")),
@@ -1070,8 +1109,9 @@ EventEngine::SocketPool::SocketPool(EventEngine &ee, const Source &eeSource) :
 		base_(util::AllocatorInfo(ee.config_->allocatorGroupId_, "eeSocket")),
 		primaryWorkerSeed_(0),
 		secondaryWorkerSeed_(0),
-		varAlloc_(util::AllocatorInfo(
-				ee.config_->allocatorGroupId_, "eeSocketVar")),
+		varAlloc_(
+				util::AllocatorInfo(ee.config_->allocatorGroupId_, "eeSocketVar"),
+				ee.getAllocatorTraits()),
 		socketSet_(SocketSet::key_compare(), varAlloc_),
 		factory_(eeSource.socketFactory_),
 		secureFactories_(eeSource.secureSocketFactories_) {
@@ -1751,45 +1791,171 @@ EventEngine::Dispatcher::HandlerEntry::HandlerEntry() :
 }
 
 
-EventEngine::Limitter::Limitter(EventEngine &ee) :
-		ee_(ee),
-		ioBufferLimit_(maskLimitValue(ee_.config_->sendBufferSizeLimit_)),
-		eventBufferLimit_(maskLimitValue(ee_.config_->eventBufferSizeLimit_)) {
+EventEngine::Limitter::~Limitter() {
 }
 
-int64_t EventEngine::Limitter::getEventBufferLimit() const {
-	return eventBufferLimit_;
+const EventEngine::Limitter::Info& EventEngine::Limitter::getInfo(
+		LimitId id) const {
+	return entryList_[getEntryIndex(id)].info_;
 }
 
-void EventEngine::Limitter::reportIOBufferDiff(int64_t diff) {
-	apply(ioBufferSize_, diff, ioBufferLimit_);
-}
+void EventEngine::Limitter::reportDiff(LimitId id, int64_t diff) {
+	util::LockGuard<util::Mutex> guard(mutex_);
 
-void EventEngine::Limitter::reportEventBufferDiff(int64_t diff) {
-	apply(eventBufferSize_, diff, eventBufferLimit_);
-}
+	const bool prevExceeded = checkLimit();
+	{
+		Entry &entry = entryList_[getEntryIndex(id)];
+		entry.value_ += diff;
+	}
+	const bool curExceeded = checkLimit();
 
-void EventEngine::Limitter::apply(
-		util::Atomic<int64_t> &value, int64_t diff, int64_t limit) {
-
-	const int64_t cur = (value += diff);
-	const int64_t prev = cur - diff;
-
-	const bool prevExceeded = (prev > limit);
-	const bool curExceeded = (cur > limit);
-
-	if (prevExceeded ^ curExceeded) {
-		const uint32_t ioConcurrency =
-				Manipulator::getIOConcurrency(*ee_.config_, true);
-
-		for (uint32_t i = 0; i < ioConcurrency; i++) {
-			ee_.ioWorkerList_[i].suspend(curExceeded);
-		}
+	if (!prevExceeded != !curExceeded) {
+		handleChange(curExceeded);
 	}
 }
 
-int64_t EventEngine::Limitter::maskLimitValue(int64_t value) {
-	return (value < 0 ? std::numeric_limits<int64_t>::max() : value);
+EventEngine::Limitter::Limitter(const InfoList &infoList) :
+		entryList_(makeEntryList(infoList)) {
+}
+
+EventEngine::Limitter::EntryList EventEngine::Limitter::makeEntryList(
+		const InfoList &infoList) {
+	EntryList entryList;
+	for (InfoList::const_iterator it = infoList.begin();
+			it != infoList.end(); ++it) {
+		Entry entry;
+		entry.info_ = *it;
+		entryList.push_back(entry);
+	}
+	return entryList;
+}
+
+bool EventEngine::Limitter::checkLimit() const {
+	bool exceeded = false;
+	for (EntryList::const_iterator it = entryList_.begin();
+			it != entryList_.end(); ++it) {
+		const int64_t &limit = it->info_.limit_;
+		if (limit >= 0 && it->value_ > limit) {
+			exceeded = true;
+			break;
+		}
+	}
+	return exceeded;
+}
+
+inline size_t EventEngine::Limitter::getEntryIndex(LimitId id) const {
+	assert(id < entryList_.size());
+	return id;
+}
+
+
+EventEngine::Limitter::Info::Info() :
+		limit_(-1),
+		localCount_(1) {
+}
+
+
+EventEngine::Limitter::Entry::Entry() :
+		value_(0) {
+}
+
+
+EventEngine::LocalLimitter::LocalLimitter() :
+		limitter_(NULL),
+		id_(std::numeric_limits<LimitId>::max()),
+		value_(0) {
+}
+
+void EventEngine::LocalLimitter::initialize(Limitter &limitter, LimitId id) {
+	const int64_t localLimit = resolveLocalLimit(limitter.getInfo(id));
+
+	limitter_ = &limitter;
+	id_ = id;
+	value_ = 0;
+	localLimit_ = localLimit;
+}
+
+inline void EventEngine::LocalLimitter::reportDiff(int64_t diff) {
+	assert(limitter_ != NULL);
+
+	const int64_t prevValue = value_;
+	const bool prevExceeded = (prevValue > localLimit_);
+
+	value_ += diff;
+	const bool curExceeded = (value_ > localLimit_);
+
+	int64_t totalDiff;
+	if (curExceeded) {
+		if (prevExceeded) {
+			totalDiff = diff;
+		}
+		else {
+			totalDiff = value_;
+		}
+	}
+	else {
+		if (prevExceeded) {
+			totalDiff = -prevValue;
+		}
+		else {
+			return;
+		}
+	}
+	limitter_->reportDiff(id_, totalDiff);
+}
+
+int64_t EventEngine::LocalLimitter::getValue() const {
+	return value_;
+}
+
+int64_t EventEngine::LocalLimitter::resolveLocalLimit(
+		const Limitter::Info &info) {
+	if (info.limit_ < 0) {
+		return std::numeric_limits<int64_t>::max();
+	}
+
+	assert(info.localCount_ > 0);
+	return info.limit_ / static_cast<int64_t>(info.localCount_);
+}
+
+
+EventEngine::DefaultLimitter::DefaultLimitter(EventEngine &ee) :
+		Limitter(makeInfoList(*ee.config_)),
+		ee_(ee) {
+}
+
+EventEngine::DefaultLimitter::~DefaultLimitter() {
+}
+
+void EventEngine::DefaultLimitter::setUpLocal(
+		DefaultId id, LocalLimitter &localLimitter) {
+	localLimitter.initialize(*this, id);
+}
+
+void EventEngine::DefaultLimitter::handleChange(bool exceeded) {
+	const uint32_t ioConcurrency =
+			Manipulator::getIOConcurrency(*ee_.config_, true);
+
+	for (uint32_t i = 0; i < ioConcurrency; i++) {
+		ee_.ioWorkerList_[i].suspend(exceeded);
+	}
+}
+
+EventEngine::Limitter::InfoList EventEngine::DefaultLimitter::makeInfoList(
+		const Config &config) {
+	InfoList list;
+	list.resize(LIMIT_ID_MAX);
+	{
+		Info &info = list[LIMIT_ID_EVENT_BUFFER];
+		info.limit_ = config.eventBufferSizeLimit_;
+		info.localCount_ = config.concurrency_;
+	}
+	{
+		Info &info = list[LIMIT_ID_SEND_BUFFER];
+		info.limit_ = config.sendBufferSizeLimit_;
+		info.localCount_ = Manipulator::getIOConcurrency(config, true);
+	}
+	return list;
 }
 
 
@@ -1853,6 +2019,20 @@ uint32_t EventEngine::Manipulator::getIOConcurrency(
 	}
 
 	return base;
+}
+
+size_t EventEngine::Manipulator::resolveBatchSizeLimit(
+		const Config &config, bool forIO) {
+	const int64_t base =
+			(forIO ? config.ioBatchSizeLimit_ : config.eventBatchSizeLimit_);
+	if (base >= 0) {
+		return static_cast<size_t>(std::min<uint64_t>(
+				static_cast<uint64_t>(base),
+				std::numeric_limits<size_t>::max()));
+	}
+
+	typedef VariableSizeAllocator::TraitsType Traits;
+	return Traits::getFixedSize(Traits::FIXED_ALLOCATOR_COUNT - 1);
 }
 
 EventEngine::Stats& EventEngine::Manipulator::getStats(
@@ -1989,7 +2169,8 @@ void EventEngine::ClockGenerator::run() {
 	const bool trimMilliseconds = false;
 
 	EventEngine::VariableSizeAllocator varAllocator(
-			util::AllocatorInfo(ee_.config_->allocatorGroupId_, "eeClockVar"));
+			util::AllocatorInfo(ee_.config_->allocatorGroupId_, "eeClockVar"),
+			ee_.getAllocatorTraits());
 	util::StackAllocator allocator(
 			util::AllocatorInfo(ee_.config_->allocatorGroupId_, "eeClockStack"),
 			ee_.fixedAllocator_);
@@ -2176,7 +2357,8 @@ void EventEngine::Listener::run() {
 	const uint32_t pollTimeout = 10 * 1000;
 
 	EventEngine::VariableSizeAllocator varAllocator(
-			util::AllocatorInfo(ee_.config_->allocatorGroupId_, "eeListenerVar"));
+			util::AllocatorInfo(ee_.config_->allocatorGroupId_, "eeListenerVar"),
+			ee_.getAllocatorTraits());
 	util::StackAllocator allocator(
 			util::AllocatorInfo(ee_.config_->allocatorGroupId_, "eeListenerStack"),
 			ee_.fixedAllocator_);
@@ -2306,7 +2488,9 @@ EventEngine::IOWorker::IOWorker() :
 		secondary_(false),
 		runnable_(true),
 		suspended_(false),
-		suspendedLocal_(false) {
+		suspendedLocal_(false),
+		sendSizeLimited_(false),
+		batchSizeLimit_(std::numeric_limits<uint64_t>::max()) {
 	poll_.setInterruptible();
 	stats_.set(Stats::WORKER_STOPPED_THREAD_COUNT, 1);
 }
@@ -2328,9 +2512,14 @@ void EventEngine::IOWorker::initialize(
 	}
 
 	sharedVarAllocator_.reset(UTIL_NEW VariableSizeAllocator(
-			util::AllocatorInfo(ee.config_->allocatorGroupId_, "ioSharedVar")));
+			util::AllocatorInfo(ee.config_->allocatorGroupId_, "ioSharedVar"),
+			ee.getAllocatorTraits()));
 	localVarAllocator_.reset(UTIL_NEW VariableSizeAllocator(
-			util::AllocatorInfo(ee.config_->allocatorGroupId_, "ioLocalVar")));
+			util::AllocatorInfo(ee.config_->allocatorGroupId_, "ioLocalVar"),
+			ee.getAllocatorTraits()));
+
+	ee.config_->applyFreeSizeLimits(*sharedVarAllocator_);
+	ee.config_->applyFreeSizeLimits(*localVarAllocator_);
 
 	allocator_.reset(UTIL_NEW util::StackAllocator(
 			util::AllocatorInfo(ee.config_->workAllocatorGroupId_, "ioStack"),
@@ -2359,6 +2548,11 @@ void EventEngine::IOWorker::initialize(
 	ee_ = &ee;
 	id_ = id;
 	secondary_ = secondary;
+
+	const bool forIO = true;
+	sendSizeLimited_ = (ee.limitter_->getInfo(
+			DefaultLimitter::LIMIT_ID_SEND_BUFFER).limit_ >= 0);
+	batchSizeLimit_ = Manipulator::resolveBatchSizeLimit(*ee.config_, forIO);
 }
 
 void EventEngine::IOWorker::run() {
@@ -2414,14 +2608,15 @@ void EventEngine::IOWorker::run() {
 				try {
 					applyPolling(socket, entry.second);
 					reconnectingMap.erase(socket);
-					suspendedMap.erase(socket);
 
 					switch (entry.first) {
 					case SOCKET_OPERATION_RECONNECT:
+						suspendedMap.erase(socket);
 						socket->addLocal();
 						reconnectingMap[socket] = true;
 						break;
 					case SOCKET_OPERATION_ADD:
+						suspendedMap.erase(socket);
 						if (!socket->addLocal()) {
 							reconnectingMap[socket] = true;
 						}
@@ -2907,7 +3102,8 @@ void EventEngine::IOWorker::modifySocket(
 
 	SocketOperationEntry &entry = (*operationMap_)[socket];
 	if (entry.first == SOCKET_OPERATION_REMOVE ||
-			entry.first == SOCKET_OPERATION_MOVE) {
+			entry.first == SOCKET_OPERATION_MOVE ||
+			entry.first == SOCKET_OPERATION_SUSPEND) {
 		stats_.increment(Stats::IO_REQUEST_CANCEL_COUNT);
 		return;
 	}
@@ -2947,6 +3143,10 @@ void EventEngine::IOWorker::suspendSocket(
 	stats_.increment(Stats::IO_REQUEST_SUSPEND_COUNT);
 }
 
+size_t EventEngine::IOWorker::getBatchSizeLimit() const {
+	return batchSizeLimit_;
+}
+
 const EventEngine::Stats& EventEngine::IOWorker::getStats() const {
 	return stats_;
 }
@@ -2976,7 +3176,10 @@ void EventEngine::IOWorker::updateSendBufferSize(
 	stats_.set(Stats::IO_SEND_BUFFER_SIZE_CURRENT, size);
 	stats_.updateMax(Stats::IO_SEND_BUFFER_SIZE_MAX, size);
 
-	ee_->limitter_->reportIOBufferDiff(diff);
+	if (sendSizeLimited_) {
+		ee_->limitter_->reportDiff(
+				DefaultLimitter::LIMIT_ID_SEND_BUFFER, diff);
+	}
 }
 
 void EventEngine::IOWorker::incrementErrorCount(Stats::Type type) {
@@ -3085,7 +3288,7 @@ void EventEngine::IOWorker::discardSocket(EventSocket *&socket, bool polled) {
 
 EventEngine::EventWorker::EventWorker() :
 		ee_(NULL), id_(0), started_(false), runnable_(true),
-		bufferSizeSoftLimit_(std::numeric_limits<int64_t>::max()) {
+		batchSizeLimit_(std::numeric_limits<uint64_t>::max()) {
 }
 
 EventEngine::EventWorker::~EventWorker() {
@@ -3110,9 +3313,14 @@ void EventEngine::EventWorker::initialize(EventEngine &ee, uint32_t id) {
 	id_ = id;
 
 	sharedVarAllocator_.reset(UTIL_NEW VariableSizeAllocator(
-			util::AllocatorInfo(ee.config_->allocatorGroupId_, "workerSharedVar")));
+			util::AllocatorInfo(ee.config_->allocatorGroupId_, "workerSharedVar"),
+			ee.getAllocatorTraits()));
 	localVarAllocator_.reset(UTIL_NEW VariableSizeAllocator(
-			util::AllocatorInfo(ee.config_->allocatorGroupId_, "workerLocalVar")));
+			util::AllocatorInfo(ee.config_->allocatorGroupId_, "workerLocalVar"),
+			ee.getAllocatorTraits()));
+
+	ee.config_->applyFreeSizeLimits(*sharedVarAllocator_);
+	ee.config_->applyFreeSizeLimits(*localVarAllocator_);
 
 	allocator_.reset(UTIL_NEW util::StackAllocator(
 			util::AllocatorInfo(ee.config_->workAllocatorGroupId_, "workerStack"),
@@ -3126,11 +3334,13 @@ void EventEngine::EventWorker::initialize(EventEngine &ee, uint32_t id) {
 	watcherList_.reset(UTIL_NEW WatcherList(*sharedVarAllocator_));
 
 	pendingPartitionCheckList_.resize(
-			ee.pgConfig_->getGroupPartitonCount(id));
+			ee.pgConfig_->getGroupPartitionCount(id));
 
 	assert(ee.config_->concurrency_ > 0);
-	bufferSizeSoftLimit_ = ee.limitter_->getEventBufferLimit() /
-			ee.config_->concurrency_;
+	ee.limitter_->setUpLocal(
+			DefaultLimitter::LIMIT_ID_EVENT_BUFFER, bufferSizeLimitter_);
+	const bool forIO = false;
+	batchSizeLimit_ = Manipulator::resolveBatchSizeLimit(*ee.config_, forIO);
 }
 
 void EventEngine::EventWorker::run() {
@@ -3304,13 +3514,13 @@ void EventEngine::EventWorker::add(
 
 		if (watcher == progressWatcher_.get()) {
 			GS_THROW_USER_ERROR(GS_ERROR_EE_PARAMETER_INVALID,
-					"Wathing itself");
+					"Watching itself");
 		}
 
 		if (std::find(watcherList_->begin(), watcherList_->end(), watcher) !=
 				watcherList_->end()) {
 			GS_THROW_USER_ERROR(GS_ERROR_EE_OPERATION_NOT_ALLOWED,
-					"Already wathing");
+					"Already watching");
 		}
 
 		watcherList_->push_back(watcher);
@@ -3550,13 +3760,14 @@ bool EventEngine::EventWorker::popActiveEvents(
 	const int64_t now = ee_->clockGenerator_->getMonotonicTime();
 
 	bool found = false;
+	uint64_t bufTotal = 0;
 	size_t size = activeQueue_->size();
 	eventList.reserve(size);
 	for (; size > 0; size--) {
 		ActiveEntry &entry = activeQueue_->front();
 
 		nextTimeDiff = entry.time_ - now;
-		if (nextTimeDiff > 0) {
+		if (nextTimeDiff > 0 || bufTotal > batchSizeLimit_) {
 			break;
 		}
 
@@ -3564,6 +3775,7 @@ bool EventEngine::EventWorker::popActiveEvents(
 				Event(*localVarAllocator_, *entry.ev_));
 		found = true;
 
+		bufTotal += entry.ev_->getMessageBuffer().getCapacity();
 		updateBufferSize<false>(*entry.ev_);
 		ALLOC_VAR_SIZE_DELETE(*sharedVarAllocator_, entry.ev_);
 
@@ -3705,25 +3917,12 @@ template<bool Adding>
 inline void EventEngine::EventWorker::updateBufferSize(const Event &ev) {
 	const int64_t diff = static_cast<int64_t>(
 			ev.getMessageBuffer().getCapacity()) * (Adding ? 1 : -1);
-	const int64_t size =
-			stats_.get(Stats::EVENT_ACTIVE_BUFFER_SIZE_CURRENT) + diff;
+	bufferSizeLimitter_.reportDiff(diff);
+
+	const int64_t size = bufferSizeLimitter_.getValue();
 
 	stats_.set(Stats::EVENT_ACTIVE_BUFFER_SIZE_CURRENT, size);
 	stats_.updateMax(Stats::EVENT_ACTIVE_BUFFER_SIZE_MAX, size);
-
-	if (size > bufferSizeSoftLimit_) {
-		if (size - diff > bufferSizeSoftLimit_) {
-			ee_->limitter_->reportEventBufferDiff(diff);
-		}
-		else {
-			ee_->limitter_->reportEventBufferDiff(size);
-		}
-	}
-	else {
-		if (size - diff > bufferSizeSoftLimit_) {
-			ee_->limitter_->reportEventBufferDiff(-(size - diff));
-		}
-	}
 }
 
 template<typename EventContainer>
@@ -3793,7 +3992,6 @@ bool EventEngine::EventWorker::ActiveEntryLess::operator()(
 
 
 const size_t EventEngine::EventSocket::MULTICAST_MAX_PACKET_SIZE = 64 * 1024;
-const size_t EventEngine::EventSocket::INITIAL_RECEIVE_BUFFER_SIZE = 2 * 1024;
 
 EventEngine::EventSocket::EventSocket(
 		EventEngine &ee, IOWorker &parentWorker) :
@@ -3815,12 +4013,9 @@ EventEngine::EventSocket::EventSocket(
 		methodChanging_(false),
 		extraGuardRequired_(false),
 		lastPendingAction_(AbstractSocket::ACTION_NONE),
-		receiveBuffer_(NULL),
 		receiveBufferQueue_(NULL),
 		sendBufferQueue_(NULL),
 		eventQueueOnSent_(NULL),
-		nextReceiveSize_(0),
-		pendingReceiveSize_(0),
 		firstEventQueueSize_(0),
 		connectStartTime_(-1),
 		lastConnectTime_(-1),
@@ -3831,8 +4026,7 @@ EventEngine::EventSocket::EventSocket(
 
 EventEngine::EventSocket::~EventSocket() try {
 	assert(base_.isClosed());
-	assert(receiveEvent_.isEmpty());
-	assert(receiveBuffer_ == NULL);
+	assert(!receiveBuffer_.isAttached());
 }
 catch (...) {
 }
@@ -3846,18 +4040,20 @@ void EventEngine::EventSocket::handlePollEvent(
 		if (filteredEv & util::IOPollEvent::TYPE_READ) {
 			const bool lastActionPending =
 					(lastPendingAction_ != AbstractSocket::ACTION_NONE);
-			ReceiveState state;
+			LocalEvent ev;
+			EventRequestOption option;
 			for (;;) {
-				if (receiveLocal(receiveEvent_, state)) {
-					dispatchEvent(receiveEvent_, state.option_);
+				if (receiveLocal(ev, option)) {
+					dispatchEvent(ev, option);
 
-					if (pendingReceiveSize_ > 0 && !lastActionPending) {
+					if (receiveBuffer_.getPendingSize() > 0 &&
+							!lastActionPending) {
 						continue;
 					}
 				}
 				break;
 			}
-			finishLocalReceive(state);
+			finishLocalReceive();
 		}
 		else if (filteredEv & util::IOPollEvent::TYPE_WRITE) {
 			IOEventSubQueue *queue = NULL;
@@ -4206,13 +4402,13 @@ void EventEngine::EventSocket::resumeLocal() {
 	assert(!base_.isClosed());
 
 	try {
-		suspendLocal(false, util::IOPollEvent::TYPE_READ);
+		suspendLocal(false, util::IOPollEvent::TYPE_READ_WRITE);
 
 		if (!pendingEvent_.isEmpty()) {
-			Event ev = pendingEvent_;
-			EventRequestOption option = pendingOption_;
+			LocalEvent ev;
+			ev.swap(pendingEvent_);
 
-			pendingEvent_ = Event();
+			EventRequestOption option = pendingOption_;
 			pendingOption_ = EventRequestOption();
 
 			dispatchEvent(ev, option);
@@ -4222,10 +4418,6 @@ void EventEngine::EventSocket::resumeLocal() {
 		parentWorker_.incrementErrorCount(Stats::IO_ERROR_OTHER_COUNT);
 		UTIL_TRACE_EXCEPTION_WARNING(EVENT_ENGINE, e,
 				GS_EXCEPTION_MERGE_MESSAGE(e, "Failed to resume"));
-	}
-
-	if (sendBufferQueue_ != NULL && !sendBufferQueue_->empty()) {
-		parentWorker_.modifySocket(this, util::IOPollEvent::TYPE_READ_WRITE);
 	}
 }
 
@@ -4257,23 +4449,12 @@ bool EventEngine::EventSocket::addLocal() {
 				GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
 			}
 
-			receiveEvent_ = Event(eventSource_, 0, 0);
-			receiveBuffer_ = &receiveEvent_.getMessageBuffer();
+			SizeUpdator updator(*this);
 
-			Buffer &buffer = receiveBufferQueue_->front();
-
-			const size_t orgSize = buffer.getXArray().size();
-			const size_t fullSize = orgSize + pendingReceiveSize_;
-			if (fullSize > buffer.getCapacity()) {
-				assert(false);
-				GS_THROW_USER_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
-			}
-
-			buffer.getWritableXArray().resize(fullSize);
-			receiveBuffer_->getWritableXArray().reserve(buffer.getCapacity());
-			buffer.transferTo(*receiveBuffer_);
-
-			receiveBuffer_->getWritableXArray().resize(orgSize);
+			LocalEvent ev;
+			receiveBuffer_.attach(
+					ev.prepareLocal(eventSource_).getMessageBuffer());
+			receiveBuffer_.assignPending(receiveBufferQueue_->front());
 
 			parentWorker_.releaseBufferQueue(receiveBufferQueue_);
 		}
@@ -4340,8 +4521,8 @@ bool EventEngine::EventSocket::addLocal() {
 		return true;
 	}
 
-	if (pendingReceiveSize_ > 0) {
-		handlePollEvent(NULL, util::IOPollEvent::TYPE_READ);
+	if (receiveBuffer_.getPendingSize() > 0) {
+		parentWorker_.modifySocket(this, util::IOPollEvent::TYPE_READ_WRITE);
 	}
 
 	return true;
@@ -4392,27 +4573,18 @@ void EventEngine::EventSocket::moveLocal() {
 		socket->extraGuardRequired_ = extraGuardRequired_;
 		socket->lastPendingAction_ = lastPendingAction_;
 
-		if (receiveBuffer_ != NULL) {
-			const size_t orgSize = receiveBuffer_->getXArray().size();
-			const size_t fullSize = orgSize + pendingReceiveSize_;
-			assert(fullSize <= receiveBuffer_->getCapacity());
+		if (receiveBuffer_.isAttached()) {
+			receiveBuffer_.expandReadable();
 
-			receiveBuffer_->getWritableXArray().resize(fullSize);
-			{
-				Buffer &buffer = socket->parentWorker_.pushBufferQueue(
-						socket->receiveBufferQueue_,
-						receiveBuffer_->getCapacity());
-				receiveBuffer_->transferTo(buffer);
-				buffer.getWritableXArray().resize(orgSize);
-			}
-			receiveBuffer_->getWritableXArray().resize(orgSize);
+			Buffer &buffer = socket->parentWorker_.pushBufferQueue(
+					socket->receiveBufferQueue_,
+					receiveBuffer_.getCapacity());
+			receiveBuffer_.share().transferTo(buffer);
 		}
 		transferSendBuffer(*socket);
 		transferIOEventQueue(*socket);
 		requestShutdown();
 
-		socket->nextReceiveSize_ = nextReceiveSize_;
-		socket->pendingReceiveSize_ = pendingReceiveSize_;
 		socket->firstEventQueueSize_ = firstEventQueueSize_;
 		socket->connectStartTime_ = connectStartTime_;
 		socket->lastConnectTime_ = lastConnectTime_;
@@ -4474,8 +4646,8 @@ void EventEngine::EventSocket::closeLocal(
 	}
 
 	if (workerAlive) {
-		if (receiveBuffer_ != NULL) {
-			parentWorker_.updateReceiveBufferSize(*receiveBuffer_, false);
+		if (receiveBuffer_.isAttached()) {
+			parentWorker_.updateReceiveBufferSize(receiveBuffer_.share(), false);
 		}
 
 		if (receiveBufferQueue_ != NULL) {
@@ -4496,9 +4668,8 @@ void EventEngine::EventSocket::closeLocal(
 		}
 	}
 
-	pendingEvent_ = Event();
-	receiveEvent_ = Event();
-	receiveBuffer_ = NULL;
+	pendingEvent_.reset();
+	receiveBuffer_.reset();
 
 	base_.close();
 }
@@ -4745,12 +4916,6 @@ bool EventEngine::EventSocket::acceptInitialEvent(const Event &ev) {
 	}
 
 	if (moving) {
-		if (type >= 0) {
-			Buffer::XArray &storage = receiveBuffer_->getWritableXArray();
-			pendingReceiveSize_ += storage.size();
-			storage.resize(0);
-		}
-
 		parentWorker_.moveSocket(this);
 		return false;
 	}
@@ -4772,7 +4937,7 @@ void EventEngine::EventSocket::initializeND(
 }
 
 void EventEngine::EventSocket::dispatchEvent(
-		Event &ev, const EventRequestOption &option) {
+		LocalEvent &ev, const EventRequestOption &option) {
 
 	if (!Dispatcher::isSpecialEventType(ev.getType())) {
 		stats_.dispatchingEventCount_++;
@@ -4781,12 +4946,12 @@ void EventEngine::EventSocket::dispatchEvent(
 	EventContext &ec = parentWorker_.getLocalEventContext();
 	const bool suspended = parentWorker_.isSuspendedLocal();
 
-	switch (ee_.dispatcher_->dispatch(ec, ev, suspended, option)) {
+	switch (ee_.dispatcher_->dispatch(ec, ev.getLocal(), suspended, option)) {
 	case Dispatcher::DISPATCH_RESULT_DONE:
 		break;
 	case Dispatcher::DISPATCH_RESULT_CANCELED:
 		if (!multicast_) {
-			pendingEvent_ = ev;
+			ev.transferTo(eventSource_, pendingEvent_);
 			pendingOption_ = option;
 
 			suspendLocal(true, util::IOPollEvent::TYPE_READ);
@@ -4925,7 +5090,8 @@ void EventEngine::EventSocket::setConnected(bool pending) {
 	}
 }
 
-bool EventEngine::EventSocket::receiveLocal(Event &ev, ReceiveState &state) {
+bool EventEngine::EventSocket::receiveLocal(
+		LocalEvent &ev, EventRequestOption &option) {
 	bool unexpectedShutdown = false;
 	try {
 		if (!pendingEvent_.isEmpty()) {
@@ -4951,56 +5117,36 @@ bool EventEngine::EventSocket::receiveLocal(Event &ev, ReceiveState &state) {
 		const bool lastActionPending =
 				(lastPendingAction_ != AbstractSocket::ACTION_NONE);
 
-		if (receiveBuffer_ == NULL) {
+		SizeUpdator updator(*this);
+
+		if (!receiveBuffer_.isAttached()) {
 			setConnected(true);
 
-			ev = Event(eventSource_, 0, 0);
-			receiveBuffer_ = &ev.getMessageBuffer();
-			receiveBuffer_->getWritableXArray().reserve(
-					INITIAL_RECEIVE_BUFFER_SIZE);
-			receiveBuffer_->clear();
+			receiveBuffer_.attach(
+					ev.prepareLocal(eventSource_).getMessageBuffer());
 		}
-
-		struct SizeUpdator {
-			SizeUpdator(EventSocket &socket) : socket_(socket) {
-				socket_.parentWorker_.updateReceiveBufferSize(
-						*socket_.receiveBuffer_, false);
-			}
-
-			~SizeUpdator() try {
-				socket_.parentWorker_.updateReceiveBufferSize(
-						*socket_.receiveBuffer_, true);
-			}
-			catch (...) {
-			}
-
-			EventSocket &socket_;
-		} updator(*this);
 
 		if (multicast_) {
-			nextReceiveSize_ = MULTICAST_MAX_PACKET_SIZE;
-			receiveBuffer_->clear();
 			nd_ = NodeDescriptor();
+			receiveBuffer_.eraseAll();
+			receiveBuffer_.startWriting(MULTICAST_MAX_PACKET_SIZE);
 		}
-		else {
-			receiveBuffer_->setOffset(0);
+		else if (!receiveBuffer_.isWriting() &&
+				receiveBuffer_.getPendingSize() <= 0) {
+			receiveBuffer_.startWriting(0);
 		}
 
-		Buffer::XArray &storage = receiveBuffer_->getWritableXArray();
-		size_t pendingOffset;
-		size_t bufferSize;
-		if (pendingReceiveSize_ == 0) {
+		if (receiveBuffer_.isWriting()) {
 			lastPendingAction_ = AbstractSocket::ACTION_NONE;
-
-			assert(state.pendingOffset_ == 0);
-			const size_t orgSize = (nextReceiveSize_ == 0 ? 0 : storage.size());
-			storage.reserve(orgSize + nextReceiveSize_);
-			nextReceiveSize_ = storage.capacity() - orgSize;
-
-			const int64_t receivedSize =
-					base_.receive(storage.data() + orgSize, nextReceiveSize_);
-			if (receivedSize < 0) {
-				storage.resize(orgSize);
+			const int64_t receivedSize = base_.receive(
+					receiveBuffer_.getWritableAddress(),
+					receiveBuffer_.getWritableSize());
+			if (receivedSize <= 0) {
+				if (receivedSize == 0) {
+					unexpectedShutdown = true;
+					GS_THROW_USER_ERROR(GS_ERROR_EE_IO_READ_FAILED,
+							"Unexpected shutdown occurred");
+				}
 				if (extraGuardRequired_) {
 					setNextPollEvent(NULL, lastActionPending, true);
 					if (base_.getNextAction() != AbstractSocket::ACTION_NONE) {
@@ -5009,59 +5155,26 @@ bool EventEngine::EventSocket::receiveLocal(Event &ev, ReceiveState &state) {
 				}
 				return false;
 			}
-			else if (receivedSize > 0) {
-				bufferSize = orgSize + static_cast<size_t>(receivedSize);
-			}
-			else {
-				unexpectedShutdown = true;
-				GS_THROW_USER_ERROR(GS_ERROR_EE_IO_READ_FAILED,
-						"Unexpected shutdown occurred");
-			}
-			pendingOffset = 0;
-			storage.resize(bufferSize);
-		}
-		else {
-			assert(state.pendingOffset_ + pendingReceiveSize_ <=
-					storage.capacity() - storage.size());
-
-			pendingOffset = storage.size() + state.pendingOffset_;
-			bufferSize = pendingOffset + pendingReceiveSize_;
-
-			storage.resize(bufferSize);
-			receiveBuffer_->setOffset(pendingOffset);
+			receiveBuffer_.finishWriting(static_cast<size_t>(receivedSize));
 		}
 
-		nextReceiveSize_ = eventCoder_.decode(
-				ee_, *receiveBuffer_, ev, nd_, address_, state.option_);
+		const size_t nextReceiveSize = eventCoder_.decode(
+				ee_, receiveBuffer_, ev.prepareLocal(eventSource_), nd_,
+				address_, option);
 
 		if (extraGuardRequired_) {
 			setNextPollEvent(NULL, lastActionPending, true);
 		}
 
-		if (nextReceiveSize_ == 0) {
-			assert(storage.size() + pendingOffset <= bufferSize);
-
-			pendingReceiveSize_ = bufferSize - (storage.size() + pendingOffset);
-			state.pendingOffset_ = (pendingReceiveSize_ > 0 ? pendingOffset : 0);
-
-			if (!firstEventReceived_ && !acceptInitialEvent(ev)) {
+		if (nextReceiveSize == 0) {
+			if (!firstEventReceived_ && !acceptInitialEvent(ev.getLocal())) {
 				return false;
 			}
 			return true;
 		}
-		else {
-			if (pendingOffset > 0) {
-				const size_t nextSize = bufferSize - pendingOffset;
-				uint8_t *data = storage.data();
-				memmove(data, data + pendingOffset, nextSize);
 
-				receiveBuffer_->setOffset(0);
-				storage.resize(nextSize);
-			}
-
-			state.pendingOffset_ = 0;
-			pendingReceiveSize_ = 0;
-		}
+		receiveBuffer_.eraseReadable();
+		receiveBuffer_.startWriting(nextReceiveSize);
 	}
 	catch (std::exception &e) {
 		do {
@@ -5114,14 +5227,14 @@ bool EventEngine::EventSocket::receiveLocal(Event &ev, ReceiveState &state) {
 	return false;
 }
 
-void EventEngine::EventSocket::finishLocalReceive(ReceiveState &state) {
-	assert(receiveBuffer_ == NULL || shutdownRequested_ ||
-			receiveBuffer_->getWritableXArray().size() +
-					pendingReceiveSize_ + state.pendingOffset_ <=
-					receiveBuffer_->getWritableXArray().capacity());
-
-	pendingReceiveSize_ += state.pendingOffset_;
-	state.pendingOffset_ = 0;
+void EventEngine::EventSocket::finishLocalReceive() {
+	if (!receiveBuffer_.isWriting() && receiveBuffer_.getPendingSize() <= 0) {
+		const size_t limit = parentWorker_.getBatchSizeLimit();
+		if (receiveBuffer_.getCapacity() > limit) {
+			SizeUpdator updator(*this);
+			receiveBuffer_.adjustCapacity(limit);
+		}
+	}
 }
 
 void EventEngine::EventSocket::sendLocal(IOEventSubQueue *&queue) {
@@ -5357,7 +5470,8 @@ util::IOPollEvent EventEngine::EventSocket::filterPollEvent(util::IOPollEvent ev
 	case AbstractSocket::ACTION_WRITE:
 		return util::IOPollEvent::TYPE_WRITE;
 	default:
-		if (base_.isPending() || pendingReceiveSize_ > 0) {
+		if (base_.isPending() || (receiveBuffer_.getPendingSize() > 0 &&
+				!receiveBuffer_.isWriting())) {
 			return util::IOPollEvent::TYPE_READ;
 		}
 		return ev;
@@ -5401,7 +5515,7 @@ void EventEngine::EventSocket::changeTransportMethod(LockGuard &ndGuard) {
 	(void) ndGuard;
 	assert(methodChanging_);
 
-	if (nextReceiveSize_ > 0 || pendingReceiveSize_ > 0) {
+	if (receiveBuffer_.isWriting() || receiveBuffer_.getPendingSize() > 0) {
 		GS_THROW_USER_ERROR(
 				GS_ERROR_EE_MESSAGE_INVALID,
 				"Unexpected message after negotiation");
@@ -5591,8 +5705,20 @@ size_t EventEngine::EventSocket::getSendBufferThreshold() {
 }
 
 
-EventEngine::EventSocket::ReceiveState::ReceiveState() :
-		pendingOffset_(0) {
+inline EventEngine::EventSocket::SizeUpdator::SizeUpdator(
+		EventSocket &socket) :
+		socket_(socket) {
+	socket_.parentWorker_.updateReceiveBufferSize(
+			socket_.receiveBuffer_.share(), false);
+}
+
+inline EventEngine::EventSocket::SizeUpdator::~SizeUpdator() {
+	try {
+		socket_.parentWorker_.updateReceiveBufferSize(
+				socket_.receiveBuffer_.share(), true);
+	}
+	catch (...) {
+	}
 }
 
 
@@ -5774,12 +5900,12 @@ EventEngine::DefaultEventCoder::~DefaultEventCoder() {
 }
 
 size_t EventEngine::DefaultEventCoder::decode(
-		EventEngine &ee, Buffer &buffer, Event &ev,
+		EventEngine &ee, LocalBuffer &buffer, Event &ev,
 		const NodeDescriptor &nd,
 		const util::SocketAddress &socketAddress,
 		EventRequestOption &option) {
 
-	EventByteInStream in = buffer.getInStream();
+	EventByteInStream in = buffer.getPendingInStream();
 	const size_t bufferSize = in.base().remaining();
 
 	const size_t commonPartSize = getCommonPartSize(socketAddress, true);
@@ -5787,16 +5913,11 @@ size_t EventEngine::DefaultEventCoder::decode(
 		return commonPartSize - bufferSize;
 	}
 
+	decodeCheckCode(in);
+
 	NodeDescriptor senderND;
 	HeaderType headerType;
 	if (nd.isEmpty()) {
-		CheckCode checkCode;
-		in >> checkCode;
-		if (checkCode != CODER_CHECK_CODE_VALUE) {
-			GS_THROW_USER_ERROR(GS_ERROR_EE_MESSAGE_INVALID,
-					"Invalid check code");
-		}
-
 		util::SocketAddress ndAddress;
 		headerType = decodeND(ee, in, &senderND, ndAddress, socketAddress);
 	}
@@ -5809,50 +5930,23 @@ size_t EventEngine::DefaultEventCoder::decode(
 		senderND = nd;
 	}
 
-	BodySize bodySize;
-	in >> bodySize;
-
-	const size_t requiredSize =
-			commonPartSize - CODER_BODY_COMMON_PART_SIZE + bodySize;
+	const BodySize subBodySize = decodeNonCommonBodySize(in);
+	const size_t requiredSize = commonPartSize + subBodySize;
 	if (bufferSize < requiredSize) {
 		return requiredSize - bufferSize;
 	}
-
-	do {
-		const size_t bufferOffset = buffer.getOffset();
-		if (bufferOffset > 0) {
-			Buffer::XArray &baseBuffer = buffer.getWritableXArray();
-			assert(bufferOffset + requiredSize <= baseBuffer.size());
-
-			uint8_t *data = baseBuffer.data();
-			memmove(data, data + bufferOffset, requiredSize);
-			baseBuffer.resize(requiredSize);
-
-			const size_t orgPos = in.base().position();
-			in = EventByteInStream(util::ArrayInStream(data, requiredSize));
-			in.base().position(orgPos);
-			break;
-		}
-
-		const size_t remaining = bufferSize - requiredSize;
-		if (remaining > 0) {
-			buffer.getWritableXArray().resize(requiredSize);
-
-			const size_t orgPos = in.base().position();
-			in = buffer.getInStream();
-			in.base().position(orgPos);
-			break;
-		}
-	}
-	while (false);
-
-	buffer.setOffset(commonPartSize);
 
 	EventType eventType;
 	in >> eventType;
 
 	PartitionId partitionId;
 	in >> partitionId;
+
+	buffer.assignReadable(commonPartSize, subBodySize);
+	const Buffer &eventBuffer = buffer.share();
+
+	ev.setMessageBuffer(eventBuffer);
+	in = eventBuffer.getInStream();
 
 	ev.resetAttributes(eventType, partitionId, senderND);
 
@@ -5960,6 +6054,29 @@ size_t EventEngine::DefaultEventCoder::getAddressSize(
 		GS_THROW_USER_ERROR(GS_ERROR_EE_MESSAGE_INVALID,
 				"Empty or unknown address family");
 	}
+}
+
+void EventEngine::DefaultEventCoder::decodeCheckCode(EventByteInStream &in) {
+	CheckCode checkCode;
+	in >> checkCode;
+	if (checkCode != CODER_CHECK_CODE_VALUE) {
+		GS_THROW_USER_ERROR(GS_ERROR_EE_MESSAGE_INVALID,
+				"Invalid check code");
+	}
+}
+
+EventEngine::DefaultEventCoder::BodySize
+EventEngine::DefaultEventCoder::decodeNonCommonBodySize(
+		EventByteInStream &in) {
+	const size_t commonSize = CODER_BODY_COMMON_PART_SIZE;
+	BodySize bodySize;
+	in >> bodySize;
+	if (bodySize < commonSize ||
+			bodySize > std::numeric_limits<BodySize>::max() - commonSize) {
+		GS_THROW_USER_ERROR(GS_ERROR_EE_MESSAGE_INVALID,
+				"Invalid body size (size=" << bodySize << ")");
+	}
+	return static_cast<BodySize>(bodySize - commonSize);
 }
 
 EventEngine::DefaultEventCoder::HeaderType
@@ -6234,6 +6351,163 @@ inline void EventEngine::DefaultEventCoder::putValueUnchecked(
 		uint8_t *&out, const T &value) {
 	memcpy(out, &value, sizeof(value));
 	out += sizeof(value);
+}
+
+
+EventEngine::EventHandler::~EventHandler() {
+}
+
+
+EventEngine::EventCoder::~EventCoder() {
+}
+
+
+void EventEngine::LocalBuffer::assignPending(const Buffer &buffer) {
+	Buffer src = buffer;
+	src.setOffset(0);
+
+	EventByteInStream in = src.getInStream();
+	const size_t size = in.base().remaining();
+
+	eraseAll();
+	startWriting(size);
+	in.readAll(getData(), size);
+	finishWriting(size);
+}
+
+void EventEngine::LocalBuffer::assignReadable(size_t offset, size_t size) {
+	if (!isAttached()) {
+		return errorNoAttach();
+	}
+
+	if (offset > pendingSize_ || size > pendingSize_ - offset) {
+		return errorReadableRange(offset, size);
+	}
+
+	const size_t srcPos = getPendingHeadPosition();
+	const size_t srcSize = offset + size;
+
+	if (srcPos > 0) {
+		uint8_t *data = getData();
+		memmove(data, data + srcPos, srcSize);
+	}
+
+	storage_->resize(srcSize);
+	base_.setOffset(offset);
+	pendingSize_ -= srcSize;
+	pendingOffset_ = (pendingSize_ > 0 ? srcPos : 0);
+}
+
+void EventEngine::LocalBuffer::eraseReadable() {
+	if (!isAttached()) {
+		return errorNoAttach();
+	}
+
+	const size_t srcPos = getPendingHeadPosition();
+
+	if (srcPos > 0 && pendingSize_ > 0) {
+		uint8_t *data = getData();
+		memmove(data, data + srcPos, pendingSize_);
+	}
+
+	storage_->clear();
+	base_.setOffset(0);
+	pendingOffset_ = 0;
+}
+
+void EventEngine::LocalBuffer::expandReadable() {
+	if (!isAttached()) {
+		return errorNoAttach();
+	}
+
+	const size_t destPos = getReadableTailPosition();
+
+	if (pendingOffset_ > 0 && pendingSize_ > 0) {
+		uint8_t *data = getData() + destPos;
+		memmove(data, data + pendingOffset_, pendingSize_);
+	}
+
+	storage_->resize(destPos + pendingSize_);
+	pendingOffset_ = 0;
+	pendingSize_ = 0;
+}
+
+void EventEngine::LocalBuffer::adjustCapacity(size_t minSize) {
+	if (!isAttached() || writing_ || storage_->capacity() <= minSize) {
+		return;
+	}
+
+	const size_t pendingTail = getPendingTailPosition();
+	if (pendingTail > minSize) {
+		return;
+	}
+
+	Buffer::XArray sub(storage_->get_allocator());
+	if (pendingTail > 0) {
+		sub.reserve(pendingTail);
+		sub.resize(storage_->size());
+		memcpy(sub.data(), getData(), pendingTail);
+	}
+	storage_->swap(sub);
+}
+
+void EventEngine::LocalBuffer::growCapacity(size_t extraSize) {
+	assert(storage_ != NULL);
+
+	const size_t prevCapacity = storage_->capacity();
+	const size_t nextCapacity = prevCapacity +
+			static_cast<size_t>(std::min<uint64_t>(
+					extraSize,
+					std::numeric_limits<size_t>::max() - prevCapacity));
+
+	const size_t readableTail = getReadableTailPosition();
+	const size_t pendingTail = getPendingTailPosition();
+
+	storage_->resize(pendingTail);
+	storage_->reserve(nextCapacity);
+	storage_->resize(readableTail);
+}
+
+void EventEngine::LocalBuffer::errorNoAttach() {
+	GS_THROW_USER_ERROR(
+			GS_ERROR_EE_OPERATION_NOT_ALLOWED, "Local buffer not attached");
+}
+
+void EventEngine::LocalBuffer::errorWritingStart() {
+	GS_THROW_USER_ERROR(
+			GS_ERROR_EE_OPERATION_NOT_ALLOWED,
+			"Local buffer not attached or already writing");
+}
+
+void EventEngine::LocalBuffer::errorWritingFinish(size_t size) {
+	if (!writing_) {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_EE_OPERATION_NOT_ALLOWED, "Local buffer not writing");
+	}
+
+	GS_THROW_USER_ERROR(
+			GS_ERROR_EE_PARAMETER_INVALID,
+			"Invalid wrote size ("
+			"size=" << size << ", max=" << getWritableSize() << ")");
+}
+
+void EventEngine::LocalBuffer::errorReadableRange(size_t offset, size_t size) {
+	GS_THROW_USER_ERROR(
+			GS_ERROR_EE_PARAMETER_INVALID,
+			"Invalid readable range ("
+			"offset=" << offset <<
+			", size=" << size <<
+			", max=" << pendingSize_ << ")");
+}
+
+
+Event& EventEngine::LocalEvent::errorEmptyAccess() {
+	GS_THROW_USER_ERROR(
+			GS_ERROR_EE_OPERATION_NOT_ALLOWED, "Empty local event access");
+}
+
+
+EventEngine::ThreadErrorHandler::~ThreadErrorHandler() {
 }
 
 

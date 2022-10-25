@@ -20,7 +20,6 @@
 
 #include "util/container.h"
 
-
 struct SQLAlgorithmUtils {
 	struct SortConfig;
 
@@ -297,7 +296,7 @@ private:
 	bool sortGroupAt(const Action &action);
 
 	template<typename Action>
-	bool preapareBaseSorter(bool primary, const Action &action);
+	bool prepareBaseSorter(bool primary, const Action &action);
 	bool acceptResult(bool sorted);
 
 	void flip(bool primary);
@@ -1838,7 +1837,7 @@ template<typename T, typename Pred, typename Alloc>
 bool SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::sort() {
 	for (size_t i = 0; i < 2; i++) {
 		const bool primary = (i == 0);
-		if (!preapareBaseSorter(primary, util::FalseType())) {
+		if (!prepareBaseSorter(primary, util::FalseType())) {
 			continue;
 		}
 
@@ -1858,7 +1857,7 @@ template<typename U>
 bool SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::sortOptional(const U&) {
 	for (size_t i = 0; i < 2; i++) {
 		const bool primary = (i == 0);
-		if (!preapareBaseSorter(primary, util::FalseType())) {
+		if (!prepareBaseSorter(primary, util::FalseType())) {
 			continue;
 		}
 
@@ -1892,7 +1891,7 @@ bool SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::sortGroup(
 		const bool primary = (i == 0);
 		action(primary);
 
-		if (!preapareBaseSorter(primary, action)) {
+		if (!prepareBaseSorter(primary, action)) {
 			continue;
 		}
 
@@ -1992,7 +1991,7 @@ bool SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::sortGroupAt(
 
 template<typename T, typename Pred, typename Alloc>
 template<typename Action>
-bool SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::preapareBaseSorter(
+bool SQLAlgorithmUtils::Sorter<T, Pred, Alloc>::prepareBaseSorter(
 		bool primary, const Action &action) {
 	do {
 		BaseSorter nextBase(NULL, NULL);

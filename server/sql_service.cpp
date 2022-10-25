@@ -20,13 +20,10 @@
 */
 
 #include "sql_service.h"
-#include "sql_execution.h"
-#include "base_container.h"
-#include "key_data_store.h"
-
-#include "message_schema.h"
 #include "sql_command_manager.h"
 #include "sql_utils.h"
+#include "query_processor.h"
+#include "data_store_v4.h"
 
 template<typename T>
 void decodeLargeRow(
@@ -39,6 +36,7 @@ void decodeLargeRow(
 #endif
 UTIL_TRACER_DECLARE(SQL_SERVICE);
 UTIL_TRACER_DECLARE(DISTRIBUTED_FRAMEWORK);
+UTIL_TRACER_DECLARE(DATA_EXPIRATION_DETAIL);
 
 SQLService::ConfigSetUpHandler
 SQLService::configSetUpHandler_;
@@ -174,7 +172,7 @@ void SQLGetContainerHandler::operator()(
 		DataStoreBase* ds = getDataStore(txn.getPartitionId(), keyStoreValue.storeType_);
 		const DataStoreBase::Scope dsScope(&txn, ds, clusterService_);
 
-		DSInputMes input(alloc, DS_GET_CONTAINR_OBJECT, ANY_CONTAINER, true);
+		DSInputMes input(alloc, DS_GET_CONTAINER_OBJECT, ANY_CONTAINER, true);
 		StackAllocAutoPtr<DSContainerOutputMes> ret(alloc, static_cast<DSContainerOutputMes*>(ds->exec(&txn, &keyStoreValue, &input)));
 		BaseContainer* container = ret.get()->container_;
 
@@ -252,7 +250,7 @@ void SQLGetContainerHandler::operator()(
 				ColumnInfo& noSqlColumn = container->getColumnInfo(i);
 
 				current.name_ = noSqlColumn.getColumnName(
-					txn, *container->getObjectManager(), container->getMetaAllcateStrategy());
+					txn, *container->getObjectManager(), container->getMetaAllocateStrategy());
 				current.type_ = noSqlColumn.getColumnType();
 
 				TupleList::TupleColumnType currentType
@@ -366,7 +364,7 @@ SQLService::SQLService(
 	localAlloc_(NULL),
 	pgConfig_(KeyDataStore::MAX_PARTITION_NUM,
 		config.get<int32_t>(CONFIG_TABLE_SQL_CONCURRENCY)),
-	notifyClientInterval_(changeTimeSecToMill(config.get<int32_t>(
+	notifyClientInterval_(CommonUtility::changeTimeSecondToMilliSecond(config.get<int32_t>(
 		CONFIG_TABLE_SQL_NOTIFICATION_INTERVAL))), executionManager_(NULL),
 	txnSvc_(NULL), clsSvc_(NULL), txnMgr_(config, true),
 	connectHandler_(SQL_CLIENT_VERSION,
@@ -390,7 +388,9 @@ SQLService::SQLService(
 	sendPendingJobLimit_(config.get<int32_t>(
 		CONFIG_TABLE_SQL_SEND_PENDING_JOB_LIMIT)),
 	sendPendingTaskConcurrency_(config.get<int32_t>(
-		CONFIG_TABLE_SQL_SEND_PENDING_TASK_CONCURRENCY))
+		CONFIG_TABLE_SQL_SEND_PENDING_TASK_CONCURRENCY)),
+	totalInternalConnectionCount_(0),
+	totalExternalConnectionCount_(0)
 {
 	try {
 
@@ -506,7 +506,7 @@ EventEngine::Config SQLService::createEEConfig(
 			config.getUInt16(CONFIG_TABLE_SQL_NOTIFICATION_PORT));
 		if (strlen(config.get<const char8_t*>(
 			CONFIG_TABLE_SQL_NOTIFICATION_INTERFACE_ADDRESS)) != 0) {
-			eeConfig.setMulticastIntefaceAddress(
+			eeConfig.setMulticastInterfaceAddress(
 				config.get<const char8_t*>(
 					CONFIG_TABLE_SQL_NOTIFICATION_INTERFACE_ADDRESS),
 				config.getUInt16(CONFIG_TABLE_SQL_SERVICE_PORT));
@@ -683,7 +683,7 @@ void SQLTimerNotifyClientHandler::operator ()(EventContext& ec, Event& ev) {
 		}
 		else {
 			GS_THROW_USER_ERROR(GS_ERROR_SQL_INVALID_SENDER_ND,
-				"Mutilcast send failed");
+				"Multicast send failed");
 		}
 	}
 	catch (EncodeDecodeException& e) {
@@ -759,6 +759,7 @@ void SQLGetConnectionAddressHandler::operator ()(EventContext& ec, Event& ev) {
 		if (in.base().remaining() > 0) {
 			decodeBooleanData(in, masterResolving);
 		}
+		bool usePublic = usePublicConection(request);
 
 		const ClusterRole clusterRole =
 			CROLE_MASTER | (masterResolving ? CROLE_FOLLOWER : 0);
@@ -791,8 +792,8 @@ void SQLGetConnectionAddressHandler::operator ()(EventContext& ec, Event& ev) {
 			out << static_cast<uint8_t>(0);
 		}
 		else {
-			NodeAddress& address = partitionTable_->getPublicNodeAddress(
-				liveNodeList[targetNodePos], SQL_SERVICE);
+			NodeAddress& address = partitionTable_->getNodeAddress(
+				liveNodeList[targetNodePos], SQL_SERVICE, usePublic);
 			out << static_cast<uint8_t>(1);
 			out << std::pair<const uint8_t*, size_t>(
 				reinterpret_cast<const uint8_t*>(&address.address_),
@@ -806,7 +807,7 @@ void SQLGetConnectionAddressHandler::operator ()(EventContext& ec, Event& ev) {
 		if (masterResolving) {
 			GetPartitionAddressHandler::encodeClusterInfo(
 				out, ec.getEngine(), *partitionTable_,
-				CONTAINER_HASH_MODE_CRC32, SQL_SERVICE);
+				CONTAINER_HASH_MODE_CRC32, SQL_SERVICE, usePublic);
 		}
 
 		replySuccess(ec, alloc, ev.getSenderND(), ev.getType(), TXN_STATEMENT_SUCCESS,
@@ -1422,7 +1423,7 @@ void NoSQLSyncReceiveHandler::operator ()(EventContext& ec, Event& ev) {
 			JobManager::Latch latch(jobId, "NoSQLSyncReceiveHandler::operator", jobManager_);
 			Job* job = latch.get();
 			if (job) {
-				job->recieveNoSQLResponse(
+				job->receiveNoSQLResponse(
 					ec, dest, status, request.optional_.get<Options::SUB_CONTAINER_ID>());
 			}
 			else {
@@ -1437,7 +1438,7 @@ void NoSQLSyncReceiveHandler::operator ()(EventContext& ec, Event& ev) {
 					status = TXN_STATEMENT_ERROR;
 					try {
 						GS_THROW_USER_ERROR(GS_ERROR_SQL_CANCELLED,
-							"Cancel SQL, clientId=" << targetClientId << ", location=NoSQL Recieve");
+							"Cancel SQL, clientId=" << targetClientId << ", location=NoSQL Receive");
 					}
 					catch (std::exception& e) {
 						dest = GS_EXCEPTION_CONVERT(e, "");
@@ -1583,6 +1584,9 @@ void SQLService::ConfigSetUpHandler::operator()(ConfigTable& config) {
 		setDefault(10);
 
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SQL_LOCAL_SERVICE_ADDRESS, STRING)
+		.setDefault("");
+
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SQL_PUBLIC_SERVICE_ADDRESS, STRING)
 		.setDefault("");
 
 	CONFIG_TABLE_ADD_PARAM(config,
@@ -1744,10 +1748,6 @@ bool SQLService::StatUpdator::operator()(StatTable& stat) {
 
 SQLService::StatUpdator::StatUpdator() : service_(NULL) {}
 
-#include "log_manager.h"
-#include "result_set.h"
-#include "query_processor.h"
-#include "data_store_v4.h"
 template<typename T>
 void putLargeRows(
 	const char* key,
@@ -2095,7 +2095,6 @@ void PutLargeContainerHandler::operator()(
 			isNewSql);
 
 		{
-
 			if (containerName.compare(GS_USERS) == 0 ||
 				containerName.compare(GS_DATABASES) == 0) {
 
@@ -2149,7 +2148,7 @@ void PutLargeContainerHandler::operator()(
 		ReplicationContext::TaskStatus taskStatus
 			= ReplicationContext::TASK_FINISHED;
 
-		if (putStatus == PutStatus::CREATE || putStatus == PutStatus::CHANGE_PROPERY ||
+		if (putStatus == PutStatus::CREATE || putStatus == PutStatus::CHANGE_PROPERLY ||
 			isAlterExecuted) {
 			DSInputMes input(alloc, DS_COMMIT);
 			StackAllocAutoPtr<DSOutputMes> retCommit(alloc, static_cast<DSOutputMes*>(ds->exec(&txn, &outputStoreValue, &input)));
@@ -2372,12 +2371,12 @@ void UpdateContainerStatusHandler::decode(EventByteInStream& in,
 					if (isNewSQL(request)) {
 						GS_THROW_USER_ERROR(GS_ERROR_SQL_TABLE_PARTITION_INVALID_MESSAGE,
 							"Invalid message from sql server, affinity="
-							<< affinity << ", status=" << getParitionStatusRowName(status));
+							<< affinity << ", status=" << getPartitionStatusRowName(status));
 					}
 					else {
 						GS_THROW_USER_ERROR(GS_ERROR_SQL_TABLE_PARTITION_INVALID_MESSAGE,
 							"Invalid message from java client, affinity=" << affinity
-							<< ", status=" << getParitionStatusRowName(status));
+							<< ", status=" << getPartitionStatusRowName(status));
 					}
 				}
 			}
@@ -2410,7 +2409,7 @@ bool checkExpiredContainer(
 		partitioningInfo.timeSeriesProperty_.elapsedTime_,
 		partitioningInfo.timeSeriesProperty_.timeUnit_);
 
-	partitioningInfo.checkExpireableInterval(
+	partitioningInfo.checkExpirableInterval(
 		currentTime,
 		currentErasableTimestamp,
 		duration,
@@ -2500,6 +2499,12 @@ bool checkExpiredContainer(
 			else {
 				ee.send(sendRequest, nd);
 			}
+
+			util::String subContainerNameStr(alloc);
+			subContainerKey->toString(alloc, subContainerNameStr);
+			GS_TRACE_WARNING(DATA_EXPIRATION_DETAIL, GS_TRACE_DS_EXPIRED_CONTAINER_INFO,
+				"Detect expired container, dbId=" << dbId << ", pId=" << targetPId << ", name="
+				<< subContainerNameStr.c_str() << ", to=" << nd);
 
 			for (size_t pos = 0; pos < affinityPosList.size(); pos++) {
 
@@ -2673,7 +2678,7 @@ void UpdateContainerStatusHandler::operator()(
 				<< containerNameStr << "' is already removed");
 		}
 
-		DSInputMes input(alloc, DS_GET_CONTAINR_OBJECT, ANY_CONTAINER);
+		DSInputMes input(alloc, DS_GET_CONTAINER_OBJECT, ANY_CONTAINER);
 		StackAllocAutoPtr<DSContainerOutputMes> ret(alloc, static_cast<DSContainerOutputMes*>(ds->exec(&txn, &keyStoreValue, &input)));
 		BaseContainer* container = ret.get()->container_;
 
@@ -3104,7 +3109,7 @@ void CreateLargeIndexHandler::operator()(
 		DataStoreV4* ds = static_cast<DataStoreV4*>(getDataStore(txn.getPartitionId(), keyStoreValue.storeType_));
 		const DataStoreBase::Scope dsScope(&txn, ds, clusterService_);
 
-		DSInputMes input(alloc, DS_GET_CONTAINR_OBJECT, ANY_CONTAINER);
+		DSInputMes input(alloc, DS_GET_CONTAINER_OBJECT, ANY_CONTAINER);
 		StackAllocAutoPtr<DSContainerOutputMes> ret(alloc, static_cast<DSContainerOutputMes*>(ds->exec(&txn, &keyStoreValue, &input)));
 		BaseContainer* container = ret.get()->container_;
 		checkContainerSchemaVersion(

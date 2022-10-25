@@ -128,6 +128,26 @@ public:
 	}
 
 	/*!
+		@brief クラスタスナップショット復元情報ファイル
+		@note リードオンリー
+	*/
+	class ClusterSnapshotRestoreInfo {
+	public:
+		ClusterSnapshotRestoreInfo();
+		~ClusterSnapshotRestoreInfo();
+
+		void setConfigValue(uint32_t partitionNum, const std::string &dataFilePath);
+		void readInfoFile();
+		void removeInfoFile();
+		LogSequentialNumber getTargetLsn(PartitionId pId); 
+
+	private:
+		uint32_t partitionNum_;
+		std::string dataFilePath_;
+		std::vector<LogSequentialNumber> targetLsnList_;
+	};
+	
+	/*!
 		@brief バックアップ情報ファイル
 		@note 出力時はチェックポイントサービススレッドでのみアクセスを想定(排他無し)
 	*/
@@ -255,6 +275,8 @@ private:
 	int32_t recoveryDownCount_;		 
 
 	BackupInfo backupInfo_;
+
+	ClusterSnapshotRestoreInfo clusterSnapshotRestoreInfo_;
 
 	static util::Atomic<uint32_t> progressPercent_;  
 

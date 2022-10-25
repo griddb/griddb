@@ -816,7 +816,7 @@ Expr::Expr(double v, TransactionContext &txn) {
  * @param s String value
  * @param txn The transaction context
  * @param isLabel The string is a expression label
- * @param needUnescape add escape charactor
+ * @param needUnescape add escape character
 */
 Expr::Expr(
 	const char *s, TransactionContext &txn, bool isLabel, bool needUnescape) {
@@ -852,7 +852,7 @@ Expr::Expr(
  * @param len String length
  * @param txn The transaction context
  * @param isLabel The string is a expression label
- * @param needUnescape add escape charactor
+ * @param needUnescape add escape character
  */
 Expr::Expr(const char *s, size_t len, TransactionContext &txn, bool isLabel,
 	bool needUnescape) {
@@ -1118,7 +1118,7 @@ Expr::~Expr() {
 }
 
 /*!
- * @brief Create new expression to evaluated expresion.
+ * @brief Create new expression to evaluated expression.
  *
  * @param txn The transaction context
  * @param txn Object manager
@@ -2255,8 +2255,8 @@ TermCondition *Expr::toCondition(TransactionContext &txn, MapType mapType,
 				if (r1 == NULL) {
 					return NULL;
 				} else {
-					RtreeMap::SearchContext::GeomeryCondition *geomCond = 
-						QP_NEW RtreeMap::SearchContext::GeomeryCondition();
+					RtreeMap::SearchContext::GeometryCondition *geomCond = 
+						QP_NEW RtreeMap::SearchContext::GeometryCondition();
 					geomCond->relation_ = static_cast<uint32_t>(op_g);
 					if (geomCond->relation_ == GEOMETRY_QSF_INTERSECT) {
 						geomCond->pkey_ = *reinterpret_cast<const TrPv3Key *>(r1);
@@ -2271,7 +2271,7 @@ TermCondition *Expr::toCondition(TransactionContext &txn, MapType mapType,
 
 					c = TermCondition(COLUMN_TYPE_BOOL, COLUMN_TYPE_BOOL, 
 						DSExpression::GEOM_OP, indexColumnId, geomCond,
-						sizeof(RtreeMap::SearchContext::GeomeryCondition));
+						sizeof(RtreeMap::SearchContext::GeometryCondition));
 				}
 			}
 			break;
@@ -2293,7 +2293,7 @@ void Expr::getIndexBitmapAndInfo(TransactionContext &txn,
 #define TOBITMAP(x) (1 << (x))
 
 	ObjectManagerV4 &objectManager = *(container.getObjectManager());
-	AllocateStrategy &strategy = container.getRowAllcateStrategy();
+	AllocateStrategy &strategy = container.getRowAllocateStrategy();
 	if (type_ == EXPR) {
 		assert(arglist_ != NULL);
 		for (uint32_t i = 0; i < arglist_->size(); i++) {
@@ -2455,7 +2455,7 @@ void Expr::getIndexBitmapAndInfo(TransactionContext &txn,
 	if (columnInfo != NULL && mapBitmap == 0) {
 		if (queryObj.doExplain()) {
 			const char *columnName =
-				columnInfo->getColumnName(txn, objectManager, container.getMetaAllcateStrategy());
+				columnInfo->getColumnName(txn, objectManager, container.getMetaAllocateStrategy());
 			if (columnInfo->isKey()) {
 				queryObj.addExplain(
 					1, "INDEX_FOUND", "INDEX_TYPE", "ROWKEY", columnName);
@@ -2599,12 +2599,12 @@ Expr *Expr::newColumnNode(const char *upperName, TransactionContext &txn,
 		else if (collection != NULL) {
 			ObjectManagerV4 &objectManager = *(collection->getObjectManager());
 			collection->getColumnInfo(
-				txn, objectManager, collection->getMetaAllcateStrategy(), tmpCName, columnId, cInfo, isQuoted);
+				txn, objectManager, collection->getMetaAllocateStrategy(), tmpCName, columnId, cInfo, isQuoted);
 		}
 		else if (timeSeries != NULL) {
 			ObjectManagerV4 &objectManager = *(timeSeries->getObjectManager());
 			timeSeries->getColumnInfo(
-				txn, objectManager, timeSeries->getMetaAllcateStrategy(), tmpCName, columnId, cInfo, isQuoted);
+				txn, objectManager, timeSeries->getMetaAllocateStrategy(), tmpCName, columnId, cInfo, isQuoted);
 		}
 		else {
 			/* DO NOTHING */
@@ -2781,7 +2781,7 @@ bool Expr::aggregate(TransactionContext &txn, Collection &collection,
 			rowArray.load(txn, resultRowIdList[i], &collection,
 				OBJECT_READ_ONLY);  
 			BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  
-			ContainerValue v(objectManager, collection.getRowAllcateStrategy());
+			ContainerValue v(objectManager, collection.getRowAllocateStrategy());
 			row.getField(txn, *aggColumnInfo, v);
 			if (!v.getValue().isNullValue()) {
 				agg->putValue(txn, v.getValue());
@@ -2834,8 +2834,8 @@ bool Expr::aggregate(TransactionContext &txn, TimeSeries &timeSeries,
 		ColumnInfo &keyColumnInfo = timeSeries.getColumnInfo(0);  
 		ColumnInfo &aggColumnInfo = timeSeries.getColumnInfo(aggColumnId);  
 		for (uint32_t i = 0; i < resultRowIdList.size(); i++) {
-			ContainerValue k(objectManager, timeSeries.getRowAllcateStrategy());
-			ContainerValue v(objectManager, timeSeries.getRowAllcateStrategy());
+			ContainerValue k(objectManager, timeSeries.getRowAllocateStrategy());
+			ContainerValue v(objectManager, timeSeries.getRowAllocateStrategy());
 			rowArray.load(txn, resultRowIdList[i], &timeSeries,
 				OBJECT_READ_ONLY);  
 			BaseContainer::RowArray::Row row(rowArray.getRow(), &rowArray);  

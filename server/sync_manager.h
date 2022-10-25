@@ -55,14 +55,14 @@ static const int32_t DEFAULT_DETECT_SYNC_ERROR_COUNT = 3;
 #define GS_THROW_SYNC_ERROR(errorCode, context, s1, s2) \
 	GS_THROW_USER_ERROR(errorCode, s1 << ", (pId=" << context->getPartitionId() \
 	<< ", SSN=" << context->getSequentialNumber() \
-	<< ", revision=" << context->getPartitionRevision().sequentialNumber_ \
+	<< ", revision=" << context->getPartitionRevision().getRevisionNo() \
 	<< ", lsn=" << pt_->getLSN(context->getPartitionId()) << ")" << s2);
 
 
 #define GS_RETHROW_SYNC_ERROR(e, context, s1, s2) \
 	GS_RETHROW_USER_OR_SYSTEM(e, s1 << ", (pId=" << context->getPartitionId() \
 	<< ", SSN=" << context->getSequentialNumber() \
-	<< ", revision=" << context->getPartitionRevision().sequentialNumber_ \
+	<< ", revision=" << context->getPartitionRevision().getRevisionNo() \
 	<< ", lsn=" << pt_->getLSN(context->getPartitionId()) << ")" \
 	<< s2 << ", reason=" << GS_EXCEPTION_MESSAGE(e));
 
@@ -70,7 +70,7 @@ static const int32_t DEFAULT_DETECT_SYNC_ERROR_COUNT = 3;
 #define GS_RETHROW_LOG_REDO_ERROR(e, context, s1, s2) \
 	RM_RETHROW_LOG_REDO_ERROR(e, s1 << ", (pId=" << context->getPartitionId() \
 	<< ", SSN=" << context->getSequentialNumber()  << ", revision=" \
-	<< context->getPartitionRevision().sequentialNumber_ \
+	<< context->getPartitionRevision().getRevisionNo() \
 	<< ", lsn=" << pt_->getLSN(context->getPartitionId()) << ")" \
 	<< s2 << ", reason=" << GS_EXCEPTION_MESSAGE(e));
 
@@ -78,7 +78,7 @@ static const int32_t DEFAULT_DETECT_SYNC_ERROR_COUNT = 3;
 	GS_TRACE_WARNING(SYNC_DETAIL, GS_TRACE_SYNC_OPERATION, s1 \
 	<< " (pId=" << context->getPartitionId() \
 	<< ", SSN=" << context->getSequentialNumber() \
-	<< ", revision=" << context->getPartitionRevision().sequentialNumber_ \
+	<< ", revision=" << context->getPartitionRevision().getRevisionNo() \
 	<< ", lsn=" << pt_->getLSN(context->getPartitionId()) \
 	<< ", logStartLsn=" << pt_->getStartLSN(context->getPartitionId()) \
 	<< ", elapsedMillis=" << context->getElapsedTime() \
@@ -88,7 +88,7 @@ static const int32_t DEFAULT_DETECT_SYNC_ERROR_COUNT = 3;
 	GS_TRACE_INFO(SYNC_DETAIL, GS_TRACE_SYNC_OPERATION, s1 \
 	<< ", (pId=" << context->getPartitionId() \
 	<< ", SSN=" << context->getSequentialNumber()  << ", revision=" \
-	<< context->getPartitionRevision().sequentialNumber_ \
+	<< context->getPartitionRevision().getRevisionNo() \
 	<< ", lsn=" << pt_->getLSN(context->getPartitionId()) << ")" << s2);
 
 #define GS_OUTPUT_SYNC(context, s1, s2) \
@@ -97,9 +97,29 @@ static const int32_t DEFAULT_DETECT_SYNC_ERROR_COUNT = 3;
 
 #define GS_OUTPUT_SYNC2(s)
 
-#define GS_TRACE_SYNC_NORAML(s1) \
+#define GS_TRACE_SYNC_NORMAL(s1) \
 	GS_TRACE_WARNING(SYNC_DETAIL, GS_TRACE_SYNC_OPERATION, s1);
 
+#define TRACE_SYNC_NORMAL(level, str) \
+	GS_TRACE_##level(SYNC_SERVICE, GS_TRACE_SYNC_NORMAL, str);
+
+/*!
+	@brief Synchronization type
+*/
+enum SyncType {
+	LOG_SYNC,	
+	CHUNK_SYNC,  
+};
+
+/*!
+	@brief Synchronization mode
+*/
+enum SyncMode {
+	MODE_SHORTTERM_SYNC,
+	MODE_LONGTERM_SYNC,
+	MODE_CHANGE_PARTITION,
+	MODE_SYNC_TIMEOUT
+};
 
 class SyncPartitionLock {
 public:
@@ -142,6 +162,16 @@ struct SyncId {
 	}
 	bool isValid() {
 		return (contextId_ != UNDEF_CONTEXT_ID);
+	}
+
+	void encode(EventByteOutStream& out) {
+		out << contextId_;
+		out << contextVersion_;
+	}
+
+	void decode(EventByteInStream& in) {
+		in >> contextId_;
+		in >> contextVersion_;
 	}
 
 	std::string dump() {
@@ -675,26 +705,6 @@ private:
 	int64_t prevProcessedLogNum_;
 };
 
-struct SyncStatus {
-	SyncStatus() {
-		clear();
-	}
-	void clear() {
-		pId_ = UNDEF_PARTITIONID;
-		ssn_ = -1;
-		chunkNum_ = 0;
-		startLsn_ = 0;
-		endLsn_ = 0;
-		errorCount_ = 0;
-	}
-	PartitionId pId_;
-	int64_t ssn_;
-	int64_t chunkNum_;
-	LogSequentialNumber startLsn_;
-	LogSequentialNumber endLsn_;
-	int32_t errorCount_;
-};
-
 /*!
 	@brief SyncManager
 */
@@ -1054,7 +1064,7 @@ private:
 	public:
 
 		SyncConfig(const ConfigTable& config)
-			: syncTimeoutInterval_(changeTimeSecToMill(
+			: syncTimeoutInterval_(CommonUtility::changeTimeSecondToMilliSecond(
 				config.get<int32_t>(
 					CONFIG_TABLE_SYNC_TIMEOUT_INTERVAL))),
 			maxMessageSize_(static_cast<int32_t>(config.get<int32_t>(
@@ -1128,12 +1138,12 @@ private:
 	public:
 		ExtraConfig(const ConfigTable& config)
 			:
-			lockConflictPendingInterval_(changeTimeSecToMill(
+			lockConflictPendingInterval_(CommonUtility::changeTimeSecondToMilliSecond(
 				config.get<int32_t>(
 					CONFIG_TABLE_SYNC_LOCKCONFLICT_INTERVAL))),
 			longtermNearestLsnGap_(config.get<int32_t>(
 				CONFIG_TABLE_SYNC_APPROXIMATE_GAP_LSN)),
-			longtermNearestInterval_(changeTimeSecToMill(
+			longtermNearestInterval_(CommonUtility::changeTimeSecondToMilliSecond(
 				config.get<int32_t>(
 					CONFIG_TABLE_SYNC_APPROXIMATE_WAIT_INTERVAL))),
 			longtermLimitQueueSize_(
@@ -1275,7 +1285,6 @@ private:
 	ClusterService* clsSvc_;
 	ClusterManager* clsMgr_;
 	RecoveryManager* recoveryMgr_;
-	SyncStatus currentSyncStatus_;
 };
 
 class LongtermSyncInfo {

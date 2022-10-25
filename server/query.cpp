@@ -571,7 +571,7 @@ void Query::setDefaultFunctionMap() {
  * @brief Enable explain query plan
  *
  * @param doExecute true when EXPLAIN STAT is queried.
- *                    execute query and statictics is outputed.
+ *                    execute query and statistics is outputed.
  *                  false when EXPLAIN only.
  */
 void Query::enableExplain(bool doExecute) {
