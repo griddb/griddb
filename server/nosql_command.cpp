@@ -3972,7 +3972,6 @@ void TableSchemaInfo::copy(TableSchemaInfo& info) {
 	columnSize_ = info.columnSize_;
 	nosqlColumnInfoList_ = static_cast<ColumnInfo*>(
 		globalVarAlloc_.allocate(sizeof(ColumnInfo) * columnSize_));
-	memset(nosqlColumnInfoList_, sizeof(ColumnInfo) * columnSize_, 0);
 	memcpy((char*)nosqlColumnInfoList_, (char*)info.nosqlColumnInfoList_,
 		sizeof(ColumnInfo) * columnSize_);
 	indexInfoList_ = info.indexInfoList_;
