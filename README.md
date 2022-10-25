@@ -126,6 +126,7 @@ If necessary, please refer to [Installation Troubleshooting](docs/TroubleShootin
   - [V4.5 Release Notes](docs/GridDB-4.5-CE-RELEASE_NOTES.md)
   - [V4.6 Release Notes](docs/GridDB-4.6-CE-RELEASE_NOTES.md)
   - [V5.0 Release Notes](docs/GridDB-5.0-CE-RELEASE_NOTES.md)
+  - [V5.1 Release Notes](docs/GridDB-5.1-CE-RELEASE_NOTES.md)
 
 ## Client and Connector
   There are other clients and API for GridDB.
@@ -139,7 +140,8 @@ If necessary, please refer to [Installation Troubleshooting](docs/TroubleShootin
   * [GridDB Node API (node-addon-api based)](https://github.com/griddb/node-api)
   * [GridDB PHP Client](https://github.com/griddb/php_client)
   * [GridDB Perl Client](https://github.com/griddb/perl_client)
-  
+  * [GridDB Rust Client](https://github.com/griddb/rust_client)
+    
   (SQL Interface)
   * [GridDB JDBC Driver](https://github.com/griddb/jdbc)
   
@@ -161,7 +163,6 @@ If necessary, please refer to [Installation Troubleshooting](docs/TroubleShootin
   * [GridDB Plugin for Fluentd](https://github.com/griddb/fluent-plugin-griddb)
   * [GridDB Plugin for Tableau](https://github.com/griddb/tableau-plugin-griddb)
   * [GridDB connector for Apache Kafka](https://github.com/griddb/griddb-kafka-connect)
-  * [GridDB Sample Application for Apache Kafka](https://github.com/griddb/griddb_kafka_sample_app)
 
 ## [Packages](docs/Packages.md)
 
