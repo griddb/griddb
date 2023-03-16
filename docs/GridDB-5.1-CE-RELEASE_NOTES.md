@@ -6,7 +6,7 @@ Main changes in GridDB CE V5.1 are as follows:
 
 - Configuration for communication path between client and server
 
-    - Multiple communication paths can now be configured from the GridDB client and server. The new setting makes it possible for GridDB clients to configure access to GridDB cluster, allowing communication via the private and public networks in parallel. (This feature is currently supported by the Java client, JDBC driver.)
+    - Multiple communication paths can now be configured from the GridDB client and server. The new setting makes it possible for GridDB clients to configure access to GridDB cluster, allowing communication via the private and public networks in parallel. (This feature is currently supported by the Java/C client, JDBC driver.)
 
 Note: Until now, the server setting has limited the client to a single communication route, either the internal or external communication route, and the client could not individually select which communication route to use.
 
