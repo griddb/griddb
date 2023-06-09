@@ -23,9 +23,59 @@
 #include "query_function_time.h"
 
 
+void FunctionUtils::checkTimeField(
+		int64_t fieldType, bool precise, bool days) {
+	switch (fieldType) {
+	case util::DateTime::FIELD_YEAR:
+	case util::DateTime::FIELD_MONTH:
+	case util::DateTime::FIELD_DAY_OF_MONTH:
+	case util::DateTime::FIELD_HOUR:
+	case util::DateTime::FIELD_MINUTE:
+	case util::DateTime::FIELD_SECOND:
+	case util::DateTime::FIELD_MILLISECOND:
+	case util::DateTime::FIELD_MICROSECOND:
+	case util::DateTime::FIELD_NANOSECOND:
+	case util::DateTime::FIELD_DAY_OF_WEEK:
+	case util::DateTime::FIELD_DAY_OF_YEAR:
+		break;
+	default:
+		GS_THROW_USER_ERROR(
+				GS_ERROR_QF_INVALID_ARGUMENT,"Unknown timestamp field");
+		break;
+	}
+
+	if (!precise) {
+		switch (fieldType) {
+		case util::DateTime::FIELD_MICROSECOND:
+		case util::DateTime::FIELD_NANOSECOND:
+			GS_THROW_USER_ERROR(
+					GS_ERROR_QF_INVALID_ARGUMENT,
+					"Specified function cannot accept timestamp field of "
+					"milli or nano second");
+		default:
+			break;
+		}
+	}
+
+	if (!days) {
+		switch (fieldType) {
+		case util::DateTime::FIELD_DAY_OF_WEEK:
+		case util::DateTime::FIELD_DAY_OF_YEAR:
+			GS_THROW_USER_ERROR(
+					GS_ERROR_QF_INVALID_ARGUMENT,
+					"Specified function cannot accept timestamp field of "
+					"day of week or year");
+		default:
+			break;
+		}
+	}
+}
+
+
 bool FunctionUtils::BasicValueUtils::isSpaceChar(util::CodePoint c) const {
 	return c == 0x20 || (0x09 <= c && c <= 0x0d);
 }
+
 
 void FunctionUtils::NumberArithmetic::ErrorHandler::errorZeroDivision() const {
 	try {
@@ -58,6 +108,7 @@ void FunctionUtils::NumberArithmetic::ErrorHandler::errorValueOverflow() const {
 		GS_RETHROW_USER_OR_SYSTEM(e, "");
 	}
 }
+
 
 void FunctionUtils::TimeErrorHandler::errorTimeParse(std::exception &e) const {
 	GS_RETHROW_USER_ERROR_CODED(
@@ -104,6 +155,56 @@ bool FunctionUtils::NumberArithmetic::middleOfOrderedValues(
 		return true;
 	}
 	return false;
+}
+
+int64_t FunctionUtils::NumberArithmetic::interpolateLinear(
+		int64_t x1, int64_t y1, int64_t x2, int64_t y2, int64_t x) {
+	const int64_t dx = x2 - x1;
+	const int64_t dy = y2 - y1;
+
+	const int64_t w = x - x1;
+	const int64_t h = (dx != 0 ? (w * dy / dx) : 0);
+
+	return y1 + h;
+}
+
+int64_t FunctionUtils::NumberArithmetic::interpolateLinear(
+		double x1, int64_t y1, double x2, int64_t y2, double x) {
+	const double dx = x2 - x1;
+	const double dy = static_cast<double>(y2 - y1);
+
+	const double w = x - x1;
+	const int64_t h = static_cast<int64_t>(w * dy / dx);
+
+	return y1 + h;
+}
+
+double FunctionUtils::NumberArithmetic::interpolateLinear(
+		double x1, double y1, double x2, double y2, double x) {
+	const double dx = x2 - x1;
+	const double dy = y2 - y1;
+
+	const double w = x - x1;
+	const double h = w * dy / dx;
+
+	return y1 + h;
+}
+
+int32_t FunctionUtils::NumberArithmetic::compareDoubleLongPrecise(
+		double value1, int64_t value2) {
+	if (value1 < static_cast<double>(value2)) {
+		return -1;
+	}
+	else if (value1 > static_cast<double>(value2) || util::isNaN(value1)) {
+		return 1;
+	}
+	else if (static_cast<int64_t>(value1) < value2) {
+		return -1;
+	}
+	else if (static_cast<int64_t>(value1) > value2) {
+		return 1;
+	}
+	return 0;
 }
 
 

@@ -427,7 +427,8 @@ void SyncManager::checkShorttermGetSyncLog(
 			context->start(logWatch);
 			int64_t ssn = getTargetSSN(pId, context);
 			try {
-				LogManager<NoLocker>& logManager = partitionList_->partition(pId).logManager();
+				LogManager<MutexLocker>& logManager =
+						partitionList_->partition(pId).logManager();
 				syncRequestInfo.getLogs(pId, ssn,
 					&logManager, cpSvc_, context->isUseLongSyncLog());
 				context->endLog(logWatch);
@@ -494,7 +495,8 @@ void SyncManager::setShorttermGetSyncLog(
 		context->start(logWatch);
 		int64_t ssn = getTargetSSN(pId, context);
 		try {
-			LogManager<NoLocker>& logManager = partitionList_->partition(pId).logManager();
+			LogManager<MutexLocker>& logManager =
+					partitionList_->partition(pId).logManager();
 			syncRequestInfo.getLogs(pId, ssn,
 				&logManager, cpSvc_, context->isUseLongSyncLog());
 
@@ -657,7 +659,7 @@ void SyncManager::setShorttermGetSyncNextLog(
 	int64_t ssn = getTargetSSN(pId, context);
 
 	try {
-		LogManager<NoLocker>& logManager = partitionList_->partition(pId).logManager();
+		LogManager<MutexLocker>& logManager = partitionList_->partition(pId).logManager();
 		syncRequestInfo.getLogs(pId, ssn,
 			&logManager, cpSvc_, context->isUseLongSyncLog());
 
@@ -774,7 +776,7 @@ bool SyncManager::checkLongGetSyncLog(
 	context->setSyncTargetLsnWithSyncId(
 		targetNodeId, catchupLsn,
 		syncResponseInfo.getBackupSyncId());
-	LogManager<NoLocker>& logManager = partitionList_->partition(pId).logManager();
+	LogManager<MutexLocker>& logManager = partitionList_->partition(pId).logManager();
 	syncRequestInfo.clearSearchCondition();
 	syncRequestInfo.set(
 		SYC_LONGTERM_SYNC_LOG, context,
@@ -1049,7 +1051,7 @@ void SyncManager::setLongtermSyncChunkAck(
 				catchupLsn + 1, ownerLsn);
 		util::Stopwatch logWatch;
 		context->start(logWatch);
-		LogManager<NoLocker>& logManager = partitionList_->partition(pId).logManager();
+		LogManager<MutexLocker>& logManager = partitionList_->partition(pId).logManager();
 
 		try {
 			syncRequestInfo.getLogs(
@@ -1239,7 +1241,7 @@ void SyncManager::setLongtermSyncLogAck(
 	LogSequentialNumber startLsn
 		= pt_->getLSN(pId);
 	try {
-		LogManager<NoLocker>& logManager = partitionList_->partition(pId).logManager();
+		LogManager<MutexLocker>& logManager = partitionList_->partition(pId).logManager();
 
 		syncRequestInfo.getLogs(
 			pId, context->getSequentialNumber(),

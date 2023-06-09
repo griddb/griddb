@@ -130,8 +130,9 @@ public:
 		noEval_ = false;
 	}
 
-	bool getCondition(TransactionContext &txn, MapType type,
-		Query &queryObj, TermCondition *&cond);
+	bool getCondition(
+			TransactionContext &txn, MapType type, Query &queryObj,
+			TermCondition *&cond, bool &semiFiltering);
 
 	void getIndexBitmapAndInfo(TransactionContext &txn,
 		BaseContainer &baseContainer, Query &queryObj, uint32_t &mapBitmap,

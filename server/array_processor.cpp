@@ -82,24 +82,23 @@ void ArrayProcessor::getField(TransactionContext &, ObjectManagerV4 &, AllocateS
 	if (objectValue->data() != NULL) {
 		const ArrayObject arrayObject(
 			const_cast<uint8_t *>(objectValue->data()));
-		ColumnType simpleType = messageRowStore->getColumnInfoList()[columnId]
-									.getSimpleColumnType();
-		uint32_t num = arrayObject.getArrayLength();
-		uint32_t totalSize = ValueProcessor::getEncodedVarSize(num) +
-							 FixedSizeOfColumnType[simpleType] * num;
-		messageRowStore->setVarDataHeaderField(
-			columnId, totalSize);		   
-		messageRowStore->setVarSize(num);  
+		const ColumnType elemType =
+				messageRowStore->getColumnInfoList()[columnId]
+				.getArrayElementType();
+		const uint32_t elemSize = FixedSizeOfColumnType[elemType];
+
+		const uint32_t num = arrayObject.getArrayLength();
+		const uint32_t totalSize =
+				ValueProcessor::getEncodedVarSize(num) + elemSize * num;
+		messageRowStore->setVarDataHeaderField(columnId, totalSize);
+		messageRowStore->setVarSize(num); 
 		for (uint32_t i = 0; i < num; i++) {
-			const uint8_t *elemData =
-				arrayObject.getArrayElement(i, FixedSizeOfColumnType[simpleType]);
-			messageRowStore->addArrayElement(
-				elemData, FixedSizeOfColumnType[simpleType]);
+			const uint8_t *elemData = arrayObject.getArrayElement(i, elemSize);
+			messageRowStore->addArrayElement(elemData, elemSize);
 		}
 	}
-	else {
-		messageRowStore->setVarDataHeaderField(
-			columnId, 1);  
-		messageRowStore->setVarSize(0);  
+	else { 
+		messageRowStore->setVarDataHeaderField(columnId, 1);
+		messageRowStore->setVarSize(0); 
 	}
 }

@@ -30,6 +30,8 @@ EventMonotonicTime userCacheUpdateInterval = 60;
 UTIL_TRACER_DECLARE(AUTH_OPERATION);
 UTIL_TRACER_DECLARE(CONNECTION_DETAIL);
 
+AUDIT_TRACER_DECLARE(AUDIT_CONNECT);
+
 #define TXN_THROW_DENY_ERROR(errorCode, message) \
 	GS_THROW_CUSTOM_ERROR(DenyException, errorCode, message)
 
@@ -690,6 +692,8 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 		const util::TimeZone timeZone =
 				request.optional_.get<Options::TIME_ZONE_OFFSET>();
 		const int8_t authType = request.optional_.get<Options::AUTHENTICATION_TYPE>();
+		const int32_t acceptableFeatureVersion =
+				request.optional_.get<Options::ACCEPTABLE_FEATURE_VERSION>();
 
 		util::String userName(alloc);
 		util::String digest(alloc);
@@ -758,12 +762,16 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 		}
 		TEST_PRINT1("isLDAPAuthentication=%d\n", isLDAPAuthentication);
 
-		connOption.setFirstStep(request.fixed_.clientId_, storeMemoryAgingSwapRate, timeZone, 
-			isLDAPAuthentication);
+		connOption.setFirstStep(
+				request.fixed_.clientId_, storeMemoryAgingSwapRate, timeZone,
+				isLDAPAuthentication, acceptableFeatureVersion);
 		connOption.setSecondStep(userName.c_str(), digest.c_str(), dbName, applicationName,
 					isImmediateConsistency, txnTimeoutInterval, requestType);
 
 		LoginContext login(ec, ev, request, response, systemMode);
+
+		util::LockGuard<util::Mutex> guard(
+			partitionList_->partition(request.fixed_.pId_).mutex());
 
 		if (checkAdmin(userName)) {
 			authAdmin(alloc, login);
@@ -788,6 +796,7 @@ void LoginHandler::operator()(EventContext &ec, Event &ev) {
 		}
 
 		}
+
 		TEST_PRINT("<<<LoginHandler>>> END\n");
 	}
 	catch (DenyException &e) {
@@ -1057,6 +1066,8 @@ void AuthenticationHandler::operator()(EventContext &ec, Event &ev) {
 		PrivilegeType priv = READ;
 		const char *pRoleName = NULL;
 
+		util::LockGuard<util::Mutex> guard(
+			partitionList_->partition(request.pId_).mutex());
 		{
 			TEST_PRINT("LOGIN\n");
 			try {
@@ -1440,6 +1451,7 @@ void DisconnectHandler::operator()(EventContext &ec, Event &ev) {
 
 		ConnectionOption &connOption =
 				ev.getSenderND().getUserData<ConnectionOption>();
+
 		releaseUserCache(connOption);
 		sqlService_->getExecutionManager()->clearConnection(ev, isNewSQL_);
 

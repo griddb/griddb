@@ -1145,6 +1145,152 @@ std::string LRUTable::toString() {
 	return oss.str();
 }
 
+int32_t LRUTable::shiftHotToCold(int32_t count) {
+	if (hotNumElems_ == 0) {
+		return 0;
+	}
+	int32_t oldHotHead = head1_;
+	int32_t oldHotTail = tail1_;
+	int32_t oldColdTail = tail2_;
+	int32_t oldHotNumElems = hotNumElems_;
+	int32_t oldColdNumElems = coldNumElems_;
+
+	if (hotNumElems_ <= count) {
+		if (tail2_ >= 0) {
+			table_[tail2_].next_ = head1_;
+		}
+		else {
+			head2_ = head1_;
+		}
+		table_[head1_].prev_ = tail2_;
+		int32_t pos = head1_;
+
+		head1_ = -1;
+		tail1_ = -1;
+		while(pos >= 0) {
+			table_[pos].inHot_ = false;
+			tail2_ = pos;
+			--hotNumElems_;
+			assert(hotNumElems_ >= 0);
+			++coldNumElems_;
+			pos = table_[pos].next_;
+		}
+		assert(hotNumElems_ == 0);
+		assert(coldNumElems_ == oldColdNumElems + oldHotNumElems);
+		assert(validateLink());
+
+		return hotNumElems_;
+	}
+	else {
+		int32_t remain = count;
+
+		if (tail2_ >= 0) { 
+			table_[tail2_].next_ = head1_; 
+		}
+		else {
+			head2_ = head1_;
+		}
+		table_[head1_].prev_ = tail2_;
+		int32_t pos = head1_;
+
+		while(remain > 0 && pos >= 0) {
+			table_[pos].inHot_ = false;
+			tail2_ = pos;
+			--hotNumElems_;
+			assert(hotNumElems_ >= 0);
+			++coldNumElems_;
+			--remain;
+			pos = table_[pos].next_;
+		}
+		head1_ = pos;
+		if (tail2_ >= 0) { table_[tail2_].next_ = -1; }
+		if (head1_ >= 0) { table_[head1_].prev_ = -1; }
+		assert(hotNumElems_ == oldHotNumElems - count);
+		assert(coldNumElems_ == oldColdNumElems + count);
+		assert(validateLink());
+
+		return count;
+	}
+}
+
+int32_t LRUTable::shiftColdToHot(int32_t count) {
+	if (coldNumElems_ == 0) {
+		return 0;
+	}
+	int32_t oldHotHead = head1_;
+	int32_t oldHotTail = tail1_;
+	int32_t oldColdTail = tail2_;
+	int32_t oldHotNumElems = hotNumElems_;
+	int32_t oldColdNumElems = coldNumElems_;
+
+	if (coldNumElems_ <= count) {
+		table_[tail2_].next_ = head1_;
+		if (head1_ >= 0) {
+			table_[head1_].prev_ = tail2_;
+		}
+		else {
+			tail1_ = tail2_;
+		}
+		int32_t pos = tail2_;
+
+		head2_ = -1;
+		tail2_ = -1;
+		while(pos >= 0) {
+			table_[pos].inHot_ = true;
+			head1_ = pos;
+			++hotNumElems_;
+			--coldNumElems_;
+			assert(coldNumElems_ >= 0);
+			pos = table_[pos].prev_;
+		}
+		assert(coldNumElems_ == 0);
+		assert(hotNumElems_ == oldHotNumElems + oldColdNumElems);
+		assert(validateLink());
+
+		return coldNumElems_;
+	}
+	else {
+		table_[tail2_].next_ = head1_;
+		if (head1_ >= 0) { 
+			table_[head1_].prev_ = tail2_; 
+		}
+		else {
+			tail1_ = tail2_;
+		}
+		int32_t pos = tail2_;
+		int32_t remain = count;
+
+		while(remain > 0 && pos >= 0) {
+			table_[pos].inHot_ = true;
+			head1_ = pos;
+			++hotNumElems_;
+			--coldNumElems_;
+			--remain;
+			assert(coldNumElems_ >= 0);
+			pos = table_[pos].prev_;
+		}
+		tail2_ = pos;
+		if (tail2_ >= 0) { table_[tail2_].next_ = -1; }
+		if (head1_ >= 0) { table_[head1_].prev_ = -1; }
+		assert(coldNumElems_ == oldColdNumElems - count);
+		assert(hotNumElems_ == oldHotNumElems + count);
+		assert(validateLink());
+
+		return count;
+	}
+}
+
+bool LRUTable::validateLink() {
+	if (hotNumElems_ > 0) {
+		assert(tail1_ != -1);
+		assert(head1_ != -1);
+	}
+	if (coldNumElems_ > 0) {
+		assert(tail2_ != -1);
+		assert(head2_ != -1);
+	}
+	return true;
+}
 
 std::string LRUTable::toString(BasicChunkBuffer<NoLocker> &bcBuffer) {
 	util::NormalOStringStream oss;

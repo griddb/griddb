@@ -286,12 +286,12 @@ void SelectionTimeInterpolated::getInterpolatedValue(TransactionContext &txn,
 	double rate = static_cast<double>(t - t1) / static_cast<double>(t2 - t1);
 	tmp1.set(rate);
 
-	CalculatorTable::subTable_[v2.getType()][v1.getType()](txn, v2.data(), 0, v1.data(), 0,
-		vdiff);  
-	CalculatorTable::mulTable_[tmp1.getType()][vdiff.getType()](
-		txn, tmp1.data(), 0, vdiff.data(), 0, tmp2);
-	CalculatorTable::addTable_[tmp2.getType()][v1.getType()](
-		txn, tmp2.data(), 0, v1.data(), 0, v);
+	CalculatorTable::Sub()(v2.getType(), v1.getType())(
+			txn, v2.data(), 0, v1.data(), 0, vdiff);  
+	CalculatorTable::Mul()(tmp1.getType(), vdiff.getType())(
+			txn, tmp1.data(), 0, vdiff.data(), 0, tmp2);
+	CalculatorTable::Add()(tmp2.getType(), v1.getType())(
+			txn, tmp2.data(), 0, v1.data(), 0, v);
 	int64_t i = v.getLong();
 	double d = v.getDouble();
 	switch (v1.getType()) {
@@ -375,7 +375,7 @@ int SelectionTimeInterpolated::operator()(TransactionContext &txn,
 	}
 
 	resultType = RESULT_ROWSET;
-	if (!(type >= COLUMN_TYPE_BYTE && type <= COLUMN_TYPE_DOUBLE)) {
+	if (!ValueProcessor::isNumerical(type)) {
 		GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 			"Cannot interpolate non-numeric column");
 	}
@@ -491,7 +491,7 @@ uint64_t SelectionTimeInterpolated::apiPassThrough(TransactionContext &txn,
 		type = columnInfo->getColumnType();
 	}
 	resultType = RESULT_ROWSET;
-	if (!(type >= COLUMN_TYPE_BYTE && type <= COLUMN_TYPE_DOUBLE)) {
+	if (!ValueProcessor::isNumerical(type)) {
 		GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 			"Cannot interpolate non-numeric column");
 	}
@@ -1160,7 +1160,7 @@ int SelectionMaxMinRows<aggregateType>::execute(TransactionContext &txn,
 	ColumnInfo &columnInfo = container->getColumnInfo(columnId);
 	ColumnType columnType = columnInfo.getColumnType();
 	if (!ValueProcessor::isNumerical(columnType) &&
-		columnType != COLUMN_TYPE_TIMESTAMP) {
+			!ValueProcessor::isTimestampFamily(columnType)) {
 		GS_THROW_USER_ERROR(GS_ERROR_TQ_COLUMN_CANNOT_AGGREGATE,
 			"Invalid column for aggregation");
 	}
@@ -1195,8 +1195,6 @@ int SelectionMaxMinRows<aggregateType>::execute(TransactionContext &txn,
 		limit += offset;
 	}
 
-	assert(ComparatorTable::comparatorTable_[columnType][columnType] != NULL);
-
 	bool isFirst = true;
 	Value maxMinVal;
 	util::XArray<PointRowId> maxMinPosList(
@@ -1218,8 +1216,8 @@ int SelectionMaxMinRows<aggregateType>::execute(TransactionContext &txn,
 			maxMinPosList.push_back(resultRowIdList[i]);
 		}
 		else {
-			int32_t ret =
-				ComparatorTable::comparatorTable_[columnType][columnType](txn, maxMinVal.data(),
+			int32_t ret = ComparatorTable::getComparator(columnType, columnType)(
+					txn, maxMinVal.data(),
 					maxMinVal.size(), currentContainerValue.getValue().data(),
 					currentContainerValue.getValue().size());
 			if (ret == 0) {

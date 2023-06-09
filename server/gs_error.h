@@ -24,7 +24,13 @@
 #include "util/type.h"
 #include "util/container.h"
 #include "util/trace.h"
-
+#define AUDIT_TRACE_ERROR(tracer, cause, userName, privilege, dbName, appName, sourceAddr, \
+						 destAddr, target, statementType, statementInfo, statementId, message) 
+#define AUDIT_TRACE_ERROR_CODED(tracer, code, userName, privilege, dbName, appName, sourceAddr, \
+						 destAddr, target, statementType, statementInfo, statementId, message)
+#define AUDIT_TRACER_DECLARE(name)
+#define AUDIT_TRACE_INFO(tracer, code, userName, privilege, dbName, appName, sourceAddr, \
+						 destAddr, target, statementType, statementInfo, statementId, message)
 
 #define UNUSED_VARIABLE(b) (void)(b)
 
@@ -101,6 +107,22 @@ private:
 	util::NormalXArray<uint8_t> secretKey_;
 	bool secret_;
 	bool traceLocationVisible_;
+};
+
+/*!
+	@brief Formatter for writing message to audit log file
+*/
+class GSAuditTraceFormatter : public GSTraceFormatter {
+public:
+	explicit GSAuditTraceFormatter(const char8_t *secretHexKey);
+	virtual ~GSAuditTraceFormatter();
+
+protected:
+	/*!
+		@brief Format for writing message to audit log file
+	*/
+	virtual void formatFiltered(
+		std::ostream &stream, const util::TraceRecord &record);
 };
 
 /*!
@@ -1233,6 +1255,7 @@ enum ErrorCode {
 	GS_ERROR_RM_INVALID_FILE_FOUND,
 	GS_ERROR_RM_INCOMPLETE_CP_FILE,
 	GS_ERROR_RM_READ_CLUSTER_SNAPSHOT_INFO_FILE_FAILED,
+	GS_ERROR_RM_REDO_LOG_VERSION_NOT_ACCEPTABLE,
 
 	GS_ERROR_TRIG_SERVICE_START_FAILED = 170000,  
 	GS_ERROR_TRIG_TYPE_INVALID,					  
@@ -1374,6 +1397,7 @@ enum TraceCode {
 	GS_TRACE_TXN_KEEPALIVE_TIMEOUT, 
 	GS_TRACE_TXN_AUTH_STATUS, 
 	GS_TRACE_TXN_CONNECTION_STATUS,
+	GS_TRACE_TXN_AUDIT_CALLED,
 
 	GS_TRACE_SYNC_HANDLER = 20900,
 	GS_TRACE_SYNC_HANDLER_DETAIL,

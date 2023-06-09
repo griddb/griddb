@@ -32,11 +32,70 @@
 #include "picojson.h"
 #include <fstream>
 
+
+#include "event_engine.h"
+#include "transaction_service.h"
+
+
 #define TEST_PRINT(s)
 #define TEST_PRINT1(s, d)
 
 
 
+AUDIT_TRACER_DECLARE(AUDIT_NOSQL_READ);
+AUDIT_TRACER_DECLARE(AUDIT_NOSQL_WRITE);
+
+std::string DataStoreV4::getClientAddress(const Event *ev) {
+	util::NormalOStringStream oss;
+	std::string work;
+	if (ev->getSenderND().isEmpty()){
+		return "";
+	}
+	oss << ev->getSenderND();
+	work = oss.str();
+	return work.substr(work.find("address=")+8,work.length()-work.find("address=")-9);
+}
+
+#define AUDIT_TRACE_CHECK   0
+
+#define AUDIT_TRACE_INFO_EXECUTE(category,type,containername)  { \
+}
+#define AUDIT_TRACE_ERROR_EXECUTE()  { \
+}
+
+
+class TransactionContextScope {
+public:
+
+	TransactionContextScope(TransactionContext& txn) :
+		txn_(txn), containerNameStr_(txn.getDefaultAllocator()) {
+		txn_.setContainerNameStr(&containerNameStr_);
+	}
+
+	~TransactionContextScope() {
+		txn_.setContainerNameStr(NULL);
+	}
+	
+	static const char* getContainerName(TransactionContext& txn, const FullContainerKey& containerKey) {
+		if (txn.getContainerNameStr()) {
+			containerKey.toString(txn.getDefaultAllocator(), *txn.getContainerNameStr());
+			return txn.getContainerNameStr()->c_str();
+		}
+		return "";
+	}
+
+	static const char* getContainerName(TransactionContext& txn, BaseContainer* container) {
+		return getContainerName(txn, container->getContainerKey(txn));
+	}
+
+	const char* getContainerName() {
+		return txn_.getContainerName();
+	}
+
+private:
+	TransactionContext& txn_;
+	util::String containerNameStr_;
+};
 const uint32_t DataStoreConfig::LIMIT_SMALL_SIZE_LIST[12] = {
 	15 * 1024, 31 * 1024, 63 * 1024, 127 * 1024, 128 * 1024, 128 * 1024,
 	128 * 1024, 128 * 1024, 128 * 1024, 128 * 1024, 128 * 1024, 128 * 1024 };
@@ -303,7 +362,7 @@ DataStoreV4::DataStoreV4(
 		util::StackAllocator* stAlloc,
 		util::FixedSizeAllocator<util::Mutex>* resultSetPool,
 		ConfigTable* configTable, TransactionManager* txnMgr,
-		ChunkManager* chunkmanager, LogManager<NoLocker>* logmanager,
+		ChunkManager* chunkmanager, LogManager<MutexLocker>* logmanager,
 		KeyDataStore* keyStore, const StatsSet &stats) :
 		DataStoreBase(stAlloc, resultSetPool, configTable, txnMgr, chunkmanager, logmanager, keyStore),
 		config_(NULL),
@@ -478,6 +537,7 @@ ContainerId DataStoreV4::dropContainer(TransactionContext &txn,
 	}
 	catch (std::exception &e) {
 		handleUpdateError(e, GS_ERROR_DS_DS_DROP_COLLECTION_FAILED);
+		GS_RETHROW_SYSTEM_ERROR(e, "");
 	}
 }
 
@@ -899,6 +959,13 @@ PutStatus DataStoreV4::changeContainer(TransactionContext& txn,
 		GS_TRACE_INFO(
 			DATA_STORE, GS_TRACE_DS_DS_UPDATE_CONTAINER, "Change shema");
 		status = PutStatus::UPDATE;
+		break;
+	case DataStoreV4::COLUMNS_RENAME:
+		changeContainerProperty(
+			txn, container, messageSchema);
+		GS_TRACE_INFO(
+			DATA_STORE, GS_TRACE_DS_DS_UPDATE_CONTAINER, "Column rename");
+		status = PutStatus::CHANGE_PROPERLY;
 		break;
 	case DataStoreV4::PROPERLY_DIFFERENCE:
 		changeContainerProperty(
@@ -2211,6 +2278,7 @@ void DataStoreV4::finalize() {}
 
 Serializable* DataStoreV4::exec(TransactionContext* txn, KeyDataStoreValue* storeValue, Serializable* message) {
 	DSInputMes* input = static_cast<DSInputMes*>(message);
+	TransactionContextScope scope(*txn);
 	try {
 		util::StackAllocator& alloc = txn->getDefaultAllocator();
 		switch (input->type_) {
@@ -2318,6 +2386,12 @@ Serializable* DataStoreV4::exec(TransactionContext* txn, KeyDataStoreValue* stor
 		return NULL;
 	}
 	catch (std::exception& e) {
+		Event* ev=txn->getEvent();
+		if ( AUDIT_TRACE_CHECK ) {
+			if ( AuditCategoryType(input) != 0 ) {
+				AUDIT_TRACE_ERROR_EXECUTE();
+			}
+		}
 		handleSearchError(e, GS_ERROR_DS_DS_STATEMENT_FAILED);
 		return NULL;
 	}
@@ -2328,6 +2402,11 @@ Serializable* DataStoreV4::execEvent(TransactionContext* txn, KeyDataStoreValue*
 	StackAllocAutoPtr<BaseContainer> containerAutoPtr(alloc, getBaseContainer(*txn, storeValue->oId_, ANY_CONTAINER,
 		opMes->allowExpiration_));
 	BaseContainer* container = containerAutoPtr.get();
+	Event* ev=txn->getEvent();
+	if ( AUDIT_TRACE_CHECK ) {
+		AUDIT_TRACE_INFO_EXECUTE(2,"COMMIT",
+			(TransactionContextScope::getContainerName(*txn, container)));
+	}
 	checkContainerExistence(container);
 
 	txnMgr_->commit(*txn, *container);
@@ -2345,6 +2424,12 @@ Serializable* DataStoreV4::execEvent(TransactionContext* txn, KeyDataStoreValue*
 	StackAllocAutoPtr<BaseContainer> containerAutoPtr(alloc, getBaseContainer(*txn, storeValue->oId_, ANY_CONTAINER,
 		opMes->allowExpiration_));
 	BaseContainer* container = containerAutoPtr.get();
+	Event* ev=txn->getEvent();
+	if ( AUDIT_TRACE_CHECK ) {
+		AUDIT_TRACE_INFO_EXECUTE(2,"ABORT",
+			(TransactionContextScope::getContainerName(*txn, container)));
+	}
+
 	checkContainerExistence(container);
 
 	txnMgr_->abort(*txn, *container);
@@ -2367,7 +2452,11 @@ Serializable* DataStoreV4::execEvent(TransactionContext* txn, KeyDataStoreValue*
 			opMes->containerInfo_->size(), opMes->containerInfo_->data(),
 			opMes->modifiable_, opMes->featureVersion_,
 			status, opMes->isCaseSensitive_, *storeValue);
-
+	Event* ev=txn->getEvent();
+	if ( AUDIT_TRACE_CHECK ) {
+		AUDIT_TRACE_INFO_EXECUTE(2,"PUT_CONTAINER",
+			(TransactionContextScope::getContainerName(*txn, orgContainer)));
+	}
 	StackAllocAutoPtr<BaseContainer> containerAutoPtr(alloc, orgContainer);
 	ContainerId containerId = orgContainer->getContainerId();
 
@@ -2440,6 +2529,11 @@ Serializable* DataStoreV4::execEvent(TransactionContext* txn, KeyDataStoreValue*
 
 Serializable* DataStoreV4::execEvent(TransactionContext* txn, KeyDataStoreValue* storeValue, DSInputMes::DropContainer* opMes) {
 	util::StackAllocator& alloc = txn->getDefaultAllocator();
+	Event* ev=txn->getEvent();
+	if ( AUDIT_TRACE_CHECK ) {
+		AUDIT_TRACE_INFO_EXECUTE(2,"DROP_CONTAINER",
+			(TransactionContextScope::getContainerName(*txn, *opMes->key_)));
+	}
 	ContainerId containerId = dropContainer(*txn, opMes->containerType_,
 		opMes->isCaseSensitive_, *storeValue);
 
@@ -2461,6 +2555,11 @@ Serializable* DataStoreV4::execEvent(TransactionContext* txn, KeyDataStoreValue*
 	bool isExist = false;
 	bool allowExpiration = false;
 	SchemaMessage* schemaMes = NULL;
+	Event* ev=txn->getEvent();
+	if ( AUDIT_TRACE_CHECK ) {
+		AUDIT_TRACE_INFO_EXECUTE(1,"GET_CONTAINER",
+			(TransactionContextScope::getContainerName(*txn, *opMes->key_)));
+	}
 	if (storeValue->oId_ != UNDEF_OID) {
 		isExist = true;
 		StackAllocAutoPtr<BaseContainer> containerAutoPtr(alloc, getBaseContainer(*txn, storeValue->oId_, opMes->containerType_, allowExpiration));
@@ -2477,6 +2576,11 @@ Serializable* DataStoreV4::execEvent(TransactionContext* txn, KeyDataStoreValue*
 	bool allowExpiration = true;
 	StackAllocAutoPtr<BaseContainer> containerAutoPtr(alloc, getBaseContainer(*txn, storeValue->oId_, ANY_CONTAINER, allowExpiration));
 	BaseContainer* container = containerAutoPtr.get();
+	Event* ev=txn->getEvent();
+	if ( AUDIT_TRACE_CHECK ) {
+		AUDIT_TRACE_INFO_EXECUTE(2,"CREATE_INDEX",
+			TransactionContextScope::getContainerName(*txn, container));
+	}
 	checkContainerSchemaVersion(container, opMes->verId_);
 
 	bool isImmediate = false;
@@ -2501,6 +2605,11 @@ Serializable* DataStoreV4::execEvent(TransactionContext* txn, KeyDataStoreValue*
 	bool allowExpiration = true;
 	StackAllocAutoPtr<BaseContainer> containerAutoPtr(alloc, getBaseContainer(*txn, storeValue->oId_, ANY_CONTAINER, allowExpiration));
 	BaseContainer* container = containerAutoPtr.get();
+	Event* ev=txn->getEvent();
+	if ( AUDIT_TRACE_CHECK ) {
+		AUDIT_TRACE_INFO_EXECUTE(2,"DROP_INDEX",
+			TransactionContextScope::getContainerName(*txn, container));
+	}
 	checkContainerSchemaVersion(container, opMes->verId_);
 
 	bool skippedByMode = false;
@@ -2584,6 +2693,11 @@ Serializable* DataStoreV4::execEvent(TransactionContext* txn, KeyDataStoreValue*
 	const uint64_t numRow = 1;
 	StackAllocAutoPtr<BaseContainer> containerAutoPtr(alloc, getBaseContainer(*txn, storeValue->oId_, ANY_CONTAINER));
 	BaseContainer* container = containerAutoPtr.get();
+	Event* ev=txn->getEvent();
+	if ( AUDIT_TRACE_CHECK ) {
+		AUDIT_TRACE_INFO_EXECUTE(2,"PUT_ROW",
+			TransactionContextScope::getContainerName(*txn, container));
+	}
 
 	checkContainerSchemaVersion(container, opMes->verId_);
 	RowId rowId = UNDEF_ROWID;
@@ -2605,6 +2719,11 @@ Serializable* DataStoreV4::execEvent(TransactionContext* txn, KeyDataStoreValue*
 	const uint64_t numRow = 1;
 	StackAllocAutoPtr<BaseContainer> containerAutoPtr(alloc, getBaseContainer(*txn, storeValue->oId_, TIME_SERIES_CONTAINER));
 	BaseContainer* container = containerAutoPtr.get();
+	Event* ev=txn->getEvent();
+	if ( AUDIT_TRACE_CHECK ) {
+		AUDIT_TRACE_INFO_EXECUTE(2,"APPEND_ROW",
+			TransactionContextScope::getContainerName(*txn, container));
+	}
 
 	checkContainerSchemaVersion(container, opMes->verId_);
 	RowId rowId = UNDEF_ROWID;
@@ -2626,6 +2745,11 @@ Serializable* DataStoreV4::execEvent(TransactionContext* txn, KeyDataStoreValue*
 	const uint64_t numRow = 1;
 	StackAllocAutoPtr<BaseContainer> containerAutoPtr(alloc, getBaseContainer(*txn, storeValue->oId_, ANY_CONTAINER));
 	BaseContainer* container = containerAutoPtr.get();
+	Event* ev=txn->getEvent();
+	if ( AUDIT_TRACE_CHECK ) {
+		AUDIT_TRACE_INFO_EXECUTE(2,"UPDATE_ROW_BY_ID",
+			TransactionContextScope::getContainerName(*txn, container));
+	}
 
 	checkContainerSchemaVersion(container, opMes->verId_);
 	PutStatus status;
@@ -2646,6 +2770,11 @@ Serializable* DataStoreV4::execEvent(TransactionContext* txn, KeyDataStoreValue*
 	const uint64_t numRow = 1;
 	StackAllocAutoPtr<BaseContainer> containerAutoPtr(alloc, getBaseContainer(*txn, storeValue->oId_, ANY_CONTAINER));
 	BaseContainer* container = containerAutoPtr.get();
+	Event* ev=txn->getEvent();
+	if ( AUDIT_TRACE_CHECK ) {
+		AUDIT_TRACE_INFO_EXECUTE(2,"REMOVE_ROW",
+			TransactionContextScope::getContainerName(*txn, container));
+	}
 
 	checkContainerSchemaVersion(container, opMes->verId_);
 	bool exist;
@@ -2665,6 +2794,11 @@ Serializable* DataStoreV4::execEvent(TransactionContext* txn, KeyDataStoreValue*
 	const uint64_t numRow = 1;
 	StackAllocAutoPtr<BaseContainer> containerAutoPtr(alloc, getBaseContainer(*txn, storeValue->oId_, ANY_CONTAINER));
 	BaseContainer* container = containerAutoPtr.get();
+	Event* ev=txn->getEvent();
+	if ( AUDIT_TRACE_CHECK ) {
+		AUDIT_TRACE_INFO_EXECUTE(2,"REMOVE_ROW_BY_ID",
+			TransactionContextScope::getContainerName(*txn, container));
+	}
 
 	checkContainerSchemaVersion(container, opMes->verId_);
 	bool exist;
@@ -2682,6 +2816,11 @@ Serializable* DataStoreV4::execEvent(TransactionContext* txn, KeyDataStoreValue*
 	util::StackAllocator& alloc = txn->getDefaultAllocator();
 	StackAllocAutoPtr<BaseContainer> containerAutoPtr(alloc, getBaseContainer(*txn, storeValue->oId_, ANY_CONTAINER));
 	BaseContainer* container = containerAutoPtr.get();
+	Event* ev=txn->getEvent();
+	if ( AUDIT_TRACE_CHECK ) {
+		AUDIT_TRACE_INFO_EXECUTE(1,"GET_ROW",
+			TransactionContextScope::getContainerName(*txn, container));
+	}
 
 	checkContainerSchemaVersion(container, opMes->verId_);
 	ResultSet* rs = getResultSetManager()->create(
@@ -2716,6 +2855,11 @@ Serializable* DataStoreV4::execEvent(TransactionContext* txn, KeyDataStoreValue*
 	util::StackAllocator& alloc = txn->getDefaultAllocator();
 	StackAllocAutoPtr<BaseContainer> containerAutoPtr(alloc, getBaseContainer(*txn, storeValue->oId_, ANY_CONTAINER));
 	BaseContainer* container = containerAutoPtr.get();
+	Event* ev=txn->getEvent();
+	if ( AUDIT_TRACE_CHECK ) {
+		AUDIT_TRACE_INFO_EXECUTE(1,"GET_ROW_SET",
+			TransactionContextScope::getContainerName(*txn, container));
+	}
 
 	checkContainerSchemaVersion(container, opMes->verId_);
 	ResultSet* rs = getResultSetManager()->create(
@@ -2740,6 +2884,11 @@ Serializable* DataStoreV4::execEvent(TransactionContext* txn, KeyDataStoreValue*
 	util::StackAllocator& alloc = txn->getDefaultAllocator();
 	StackAllocAutoPtr<BaseContainer> containerAutoPtr(alloc, getBaseContainer(*txn, storeValue->oId_, ANY_CONTAINER));
 	BaseContainer* container = containerAutoPtr.get();
+	Event* ev=txn->getEvent();
+	if ( AUDIT_TRACE_CHECK ) {
+		AUDIT_TRACE_INFO_EXECUTE(1,"QUERY_TQL",
+			TransactionContextScope::getContainerName(*txn, container));
+	}
 
 	checkContainerSchemaVersion(container, opMes->verId_);
 	ResultSet* rs = getResultSetManager()->create(
@@ -2779,6 +2928,11 @@ Serializable* DataStoreV4::execEvent(TransactionContext* txn, KeyDataStoreValue*
 	util::StackAllocator& alloc = txn->getDefaultAllocator();
 	StackAllocAutoPtr<BaseContainer> containerAutoPtr(alloc, getBaseContainer(*txn, storeValue->oId_, COLLECTION_CONTAINER));
 	BaseContainer* container = containerAutoPtr.get();
+	Event* ev=txn->getEvent();
+	if ( AUDIT_TRACE_CHECK ) {
+		AUDIT_TRACE_INFO_EXECUTE(1,"QUERY_GEOMETRY_WITH_EXCLUSION",
+			TransactionContextScope::getContainerName(*txn, container));
+	}
 
 	checkContainerSchemaVersion(container, opMes->verId_);
 	ResultSet* rs = getResultSetManager()->create(
@@ -2818,6 +2972,11 @@ Serializable* DataStoreV4::execEvent(TransactionContext* txn, KeyDataStoreValue*
 	util::StackAllocator& alloc = txn->getDefaultAllocator();
 	StackAllocAutoPtr<BaseContainer> containerAutoPtr(alloc, getBaseContainer(*txn, storeValue->oId_, COLLECTION_CONTAINER));
 	BaseContainer* container = containerAutoPtr.get();
+	Event* ev=txn->getEvent();
+	if ( AUDIT_TRACE_CHECK ) {
+		AUDIT_TRACE_INFO_EXECUTE(1,"QUERY_GEOMETRY_RELATED",
+			TransactionContextScope::getContainerName(*txn, container));
+	}
 
 	checkContainerSchemaVersion(container, opMes->verId_);
 	ResultSet* rs = getResultSetManager()->create(
@@ -2855,6 +3014,11 @@ Serializable* DataStoreV4::execEvent(TransactionContext* txn, KeyDataStoreValue*
 	util::StackAllocator& alloc = txn->getDefaultAllocator();
 	StackAllocAutoPtr<BaseContainer> containerAutoPtr(alloc, getBaseContainer(*txn, storeValue->oId_, TIME_SERIES_CONTAINER));
 	BaseContainer* container = containerAutoPtr.get();
+	Event* ev=txn->getEvent();
+	if ( AUDIT_TRACE_CHECK ) {
+		AUDIT_TRACE_INFO_EXECUTE(1,"GET_TIME_RELATED",
+			TransactionContextScope::getContainerName(*txn, container));
+	}
 
 	checkContainerSchemaVersion(container, opMes->verId_);
 	ResultSet* rs = getResultSetManager()->create(
@@ -2879,6 +3043,11 @@ Serializable* DataStoreV4::execEvent(TransactionContext* txn, KeyDataStoreValue*
 	util::StackAllocator& alloc = txn->getDefaultAllocator();
 	StackAllocAutoPtr<BaseContainer> containerAutoPtr(alloc, getBaseContainer(*txn, storeValue->oId_, TIME_SERIES_CONTAINER));
 	BaseContainer* container = containerAutoPtr.get();
+	Event* ev=txn->getEvent();
+	if ( AUDIT_TRACE_CHECK ) {
+		AUDIT_TRACE_INFO_EXECUTE(1,"GET_INTERPOLATE",
+			TransactionContextScope::getContainerName(*txn, container));
+	}
 
 	checkContainerSchemaVersion(container, opMes->verId_);
 	ResultSet* rs = getResultSetManager()->create(
@@ -2904,6 +3073,11 @@ Serializable* DataStoreV4::execEvent(TransactionContext* txn, KeyDataStoreValue*
 	util::StackAllocator& alloc = txn->getDefaultAllocator();
 	StackAllocAutoPtr<BaseContainer> containerAutoPtr(alloc, getBaseContainer(*txn, storeValue->oId_, TIME_SERIES_CONTAINER));
 	BaseContainer* container = containerAutoPtr.get();
+	Event* ev=txn->getEvent();
+	if ( AUDIT_TRACE_CHECK ) {
+		AUDIT_TRACE_INFO_EXECUTE(1,"QUERY_AGGREGATE",
+			TransactionContextScope::getContainerName(*txn, container));
+	}
 
 	checkContainerSchemaVersion(container, opMes->verId_);
 	ResultSet* rs = getResultSetManager()->create(
@@ -2929,6 +3103,11 @@ Serializable* DataStoreV4::execEvent(TransactionContext* txn, KeyDataStoreValue*
 	util::StackAllocator& alloc = txn->getDefaultAllocator();
 	StackAllocAutoPtr<BaseContainer> containerAutoPtr(alloc, getBaseContainer(*txn, storeValue->oId_, TIME_SERIES_CONTAINER));
 	BaseContainer* container = containerAutoPtr.get();
+	Event* ev=txn->getEvent();
+	if ( AUDIT_TRACE_CHECK ) {
+		AUDIT_TRACE_INFO_EXECUTE(1,"QUERY_TIME_RANGE",
+			TransactionContextScope::getContainerName(*txn, container));
+	}
 
 	checkContainerSchemaVersion(container, opMes->verId_);
 	ResultSet* rs = getResultSetManager()->create(
@@ -2963,6 +3142,11 @@ Serializable* DataStoreV4::execEvent(TransactionContext* txn, KeyDataStoreValue*
 	util::StackAllocator& alloc = txn->getDefaultAllocator();
 	StackAllocAutoPtr<BaseContainer> containerAutoPtr(alloc, getBaseContainer(*txn, storeValue->oId_, TIME_SERIES_CONTAINER));
 	BaseContainer* container = containerAutoPtr.get();
+	Event* ev=txn->getEvent();
+	if ( AUDIT_TRACE_CHECK ) {
+		AUDIT_TRACE_INFO_EXECUTE(1,"QUERY_SAMPLE",
+			TransactionContextScope::getContainerName(*txn, container));
+	}
 
 	checkContainerSchemaVersion(container, opMes->verId_);
 	ResultSet* rs = getResultSetManager()->create(
@@ -3034,6 +3218,11 @@ Serializable* DataStoreV4::execEvent(TransactionContext* txn, KeyDataStoreValue*
 	BaseContainer* container = NULL;
 	if (storeValue->oId_ != UNDEF_OID) {
 		container = getBaseContainer(*txn, storeValue->oId_, opMes->containerType_, opMes->allowExpiration_);
+	}
+	Event* ev=txn->getEvent();
+	if ( AUDIT_TRACE_CHECK ) {
+		AUDIT_TRACE_INFO_EXECUTE(1,"GET_CONTAINER_OBJECT",
+			TransactionContextScope::getContainerName(*txn, container));
 	}
 	DSContainerOutputMes* out = ALLOC_NEW(alloc) DSContainerOutputMes(alloc, container);
 	return out;
@@ -3506,3 +3695,133 @@ bool DataStoreV4::removeGroupId(DatabaseId dbId, const util::String& affinityStr
 }
 
 
+const char* DataStoreV4::AuditEventType(DSInputMes *input)
+{
+	switch (input->type_) {
+	case DS_COMMIT:
+		return "COMMIT";
+	case DS_ABORT:
+		return "ABORT";
+	case DS_PUT_CONTAINER:
+		return "PUT_CONTAINER";
+	case DS_UPDATE_TABLE_PARTITIONING_ID:
+		return "";
+	case DS_DROP_CONTAINER:
+		return "DROP_CONTAINER";
+	case DS_GET_CONTAINER:
+		return "GET_CONTAINER";
+	case DS_CREATE_INDEX:
+		return "CREATE_INDEX";
+	case DS_DROP_INDEX:
+		return "DROP_INDEX";
+	case DS_CONTINUE_CREATE_INDEX:
+	case DS_CONTINUE_ALTER_CONTAINER:
+		return "";
+	case DS_PUT_ROW:
+		return "PUT_ROW";
+	case DS_APPEND_ROW:
+		return "APPEND_ROW";
+	case DS_UPDATE_ROW_BY_ID:
+		return "UPDATE_ROW_BY_ID";
+	case DS_REMOVE_ROW:
+		return "REMOVE_ROW";
+	case DS_REMOVE_ROW_BY_ID:
+		return "REMOVE_ROW_BY_ID";
+	case DS_GET_ROW:
+		return "GET_ROW";
+	case DS_GET_ROW_SET:
+		return "GET_ROW_SET";
+	case DS_QUERY_TQL:
+		return "QUERY_TQL";
+	case DS_QUERY_GEOMETRY_WITH_EXCLUSION:
+		return "QUERY_GEOMETRY_WITH_EXCLUSION";
+	case DS_QUERY_GEOMETRY_RELATED:
+		return "QUERY_GEOMETRY_RELATED";
+	case DS_GET_TIME_RELATED:
+		return "GET_TIME_RELATED";
+	case DS_GET_INTERPOLATE:
+		return "GET_INTERPOLATE";
+	case DS_QUERY_AGGREGATE:
+		return "QUERY_AGGREGATE";
+	case DS_QUERY_TIME_RANGE:
+		return "QUERY_TIME_RANGE";
+	case DS_QUERY_SAMPLE:
+		return "QUERY_SAMPLE";
+	case DS_QUERY_FETCH_RESULT_SET:
+	case DS_QUERY_CLOSE_RESULT_SET:
+		return "";
+	case DS_GET_CONTAINER_OBJECT:
+		return "GET_CONTAINER_OBJECT";
+	case DS_SCAN_CHUNK_GROUP:
+	case DS_SEARCH_BACKGROUND_TASK:
+	case DS_EXECUTE_BACKGROUND_TASK:
+	case DS_CHECK_TIMEOUT_RESULT_SET:
+		return "";
+	}
+	return "";
+}
+const int32_t DataStoreV4::AuditCategoryType(DSInputMes *input)
+{
+	switch (input->type_) {
+	case DS_COMMIT:
+		return 2;
+	case DS_ABORT:
+		return 2;
+	case DS_PUT_CONTAINER:
+		return 2;
+	case DS_UPDATE_TABLE_PARTITIONING_ID:
+		return 0;
+	case DS_DROP_CONTAINER:
+		return 2;
+	case DS_GET_CONTAINER:
+		return 1;
+	case DS_CREATE_INDEX:
+		return 2;
+	case DS_DROP_INDEX:
+		return 2;
+	case DS_CONTINUE_CREATE_INDEX:
+	case DS_CONTINUE_ALTER_CONTAINER:
+		return 0;
+	case DS_PUT_ROW:
+		return 2;
+	case DS_APPEND_ROW:
+		return 2;
+	case DS_UPDATE_ROW_BY_ID:
+		return 2;
+	case DS_REMOVE_ROW:
+		return 2;
+	case DS_REMOVE_ROW_BY_ID:
+		return 2;
+	case DS_GET_ROW:
+		return 1;
+	case DS_GET_ROW_SET:
+		return 1;
+	case DS_QUERY_TQL:
+		return 1;
+	case DS_QUERY_GEOMETRY_WITH_EXCLUSION:
+		return 1;
+	case DS_QUERY_GEOMETRY_RELATED:
+		return 1;
+	case DS_GET_TIME_RELATED:
+		return 1;
+	case DS_GET_INTERPOLATE:
+		return 1;
+	case DS_QUERY_AGGREGATE:
+		return 1;
+	case DS_QUERY_TIME_RANGE:
+		return 1;
+	case DS_QUERY_SAMPLE:
+		return 1;
+	case DS_QUERY_FETCH_RESULT_SET:
+	case DS_QUERY_CLOSE_RESULT_SET:
+		return 0;
+	case DS_GET_CONTAINER_OBJECT:
+		return 1;
+	case DS_SCAN_CHUNK_GROUP:
+	case DS_SEARCH_BACKGROUND_TASK:
+	case DS_EXECUTE_BACKGROUND_TASK:
+	case DS_CHECK_TIMEOUT_RESULT_SET:
+		return 0;
+	}
+	return 0;
+}

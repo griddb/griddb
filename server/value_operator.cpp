@@ -19,7 +19,105 @@
 	@brief Implementation of ValueOperator
 */
 #include "value_operator.h"
-const Comparator ComparatorTable::comparatorTable_[][11] = {
+
+struct ComparatorTable::Timestamps {
+	template<typename Op, typename T1, typename T2>
+	static bool op(
+			TransactionContext &txn, const uint8_t *p,
+			uint32_t size1, const uint8_t *q, uint32_t size2) {
+		return Op()(comp<T1, T2>(txn, p, size1, q, size2));
+	}
+
+	template<typename T1, typename T2>
+	static int32_t comp(
+			TransactionContext &txn, const uint8_t *p,
+			uint32_t size1, const uint8_t *q, uint32_t size2) {
+		typedef typename T1::template With<T2>::Type CompType;
+		static_cast<void>(txn);
+		static_cast<void>(size1);
+		static_cast<void>(size2);
+		return ValueProcessor::compareTimestamp(
+				T1()(p, CompType()), T2()(q, CompType()));
+	}
+};
+
+struct ComparatorTable::Milli {
+	template<typename T> struct With {
+		typedef
+				typename util::Conditional<util::IsSame<Nano, T>::VALUE, Nano,
+				typename util::Conditional<util::IsSame<Micro, T>::VALUE, Micro,
+						Milli>::Type>::Type Type;
+	};
+	Timestamp operator()(const void *p, const Milli&) const {
+		return *static_cast<const Timestamp*>(p);
+	}
+	MicroTimestamp operator()(const void *p, const Micro&) const {
+		return ValueProcessor::getMicroTimestamp((*this)(p, Milli()));
+	}
+	NanoTimestamp operator()(const void *p, const Nano&) const {
+		return ValueProcessor::getNanoTimestamp((*this)(p, Milli()));
+	}
+};
+
+struct ComparatorTable::Micro {
+	template<typename T> struct With {
+		typedef typename util::Conditional<
+				util::IsSame<Nano, T>::VALUE, Nano, Micro>::Type Type;
+	};
+	MicroTimestamp operator()(const void *p, const Micro&) const {
+		return *static_cast<const MicroTimestamp*>(p);
+	}
+	NanoTimestamp operator()(const void *p, const Nano&) const {
+		return ValueProcessor::getNanoTimestamp((*this)(p, Micro()));
+	}
+};
+
+struct ComparatorTable::Nano {
+	template<typename> struct With {
+		typedef Nano Type;
+	};
+	NanoTimestamp operator()(const void *p, const Nano&) const {
+		return *static_cast<const NanoTimestamp*>(p);
+	}
+};
+
+struct ComparatorTable::NeOp {
+	bool operator()(int32_t comp) const {
+		return comp != 0;
+	}
+};
+
+struct ComparatorTable::EqOp {
+	bool operator()(int32_t comp) const {
+		return comp == 0;
+	}
+};
+
+struct ComparatorTable::LtOp {
+	bool operator()(int32_t comp) const {
+		return comp < 0;
+	}
+};
+
+struct ComparatorTable::LeOp {
+	bool operator()(int32_t comp) const {
+		return comp <= 0;
+	}
+};
+
+struct ComparatorTable::GtOp {
+	bool operator()(int32_t comp) const {
+		return comp > 0;
+	}
+};
+
+struct ComparatorTable::GeOp {
+	bool operator()(int32_t comp) const {
+		return comp >= 0;
+	}
+};
+
+const ValueComparatorTable ComparatorTable::comparatorTable_ = {
 	{&compareStringString, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 		NULL}
 	,
@@ -50,15 +148,26 @@ const Comparator ComparatorTable::comparatorTable_[][11] = {
 		&compareDoubleLong, &compareDoubleFloat, &compareDoubleDouble, NULL,
 		NULL, NULL}
 	,
-	{NULL, NULL, NULL, NULL,
-		NULL, NULL, NULL,
-		NULL, &compareTimestampTimestamp, NULL, NULL}
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+		&compareTimestampTimestamp, NULL, NULL,
+		&Timestamps::comp<Milli, Micro>,
+		&Timestamps::comp<Milli, Nano>}
 	,
 	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
 	,
-	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}};
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
+	,
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+		&Timestamps::comp<Micro, Milli>, NULL, NULL,
+		&Timestamps::comp<Micro, Micro>,
+		&Timestamps::comp<Micro, Nano>}
+	,
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+		&Timestamps::comp<Nano, Milli>, NULL, NULL,
+		&Timestamps::comp<Nano, Micro>,
+		&Timestamps::comp<Nano, Nano>}};
 
-const Operator ComparatorTable::eqTable_[][11] = {
+const ValueOperatorTable ComparatorTable::eqTable_ = {
 	{&eqStringString, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 		NULL}
 	,
@@ -82,14 +191,25 @@ const Operator ComparatorTable::eqTable_[][11] = {
 	{NULL, NULL, &eqDoubleByte, &eqDoubleShort, &eqDoubleInt, &eqDoubleLong,
 		&eqDoubleFloat, &eqDoubleDouble, NULL, NULL, NULL}
 	,
-	{NULL, NULL, NULL, NULL, NULL,
-		NULL, NULL, NULL,
-		&eqTimestampTimestamp, NULL, NULL}
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+		&eqTimestampTimestamp, NULL, NULL,
+		&Timestamps::op<EqOp, Milli, Micro>,
+		&Timestamps::op<EqOp, Milli, Nano>}
 	,
 	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
 	,
-	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}};
-const Operator ComparatorTable::neTable_[][11] = {
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
+	,
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+		&Timestamps::op<EqOp, Micro, Milli>, NULL, NULL,
+		&Timestamps::op<EqOp, Micro, Micro>,
+		&Timestamps::op<EqOp, Micro, Nano>}
+	,
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+		&Timestamps::op<EqOp, Nano, Milli>, NULL, NULL,
+		&Timestamps::op<EqOp, Nano, Micro>,
+		&Timestamps::op<EqOp, Nano, Nano>}};
+const ValueOperatorTable ComparatorTable::neTable_ = {
 	{&neStringString, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 		NULL}
 	,
@@ -113,14 +233,25 @@ const Operator ComparatorTable::neTable_[][11] = {
 	{NULL, NULL, &neDoubleByte, &neDoubleShort, &neDoubleInt, &neDoubleLong,
 		&neDoubleFloat, &neDoubleDouble, NULL, NULL, NULL}
 	,
-	{NULL, NULL, NULL, NULL, NULL,
-		NULL, NULL, NULL,
-		&neTimestampTimestamp, NULL, NULL}
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+		&neTimestampTimestamp, NULL, NULL,
+		&Timestamps::op<NeOp, Milli, Micro>,
+		&Timestamps::op<NeOp, Milli, Nano>}
 	,
 	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
 	,
-	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}};
-const Operator ComparatorTable::ltTable_[][11] = {
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
+	,
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+		&Timestamps::op<NeOp, Micro, Milli>, NULL, NULL,
+		&Timestamps::op<NeOp, Micro, Micro>,
+		&Timestamps::op<NeOp, Micro, Nano>}
+	,
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+		&Timestamps::op<NeOp, Nano, Milli>, NULL, NULL,
+		&Timestamps::op<NeOp, Nano, Micro>,
+		&Timestamps::op<NeOp, Nano, Nano>}};
+const ValueOperatorTable ComparatorTable::ltTable_ = {
 	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
 	,
 	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
@@ -143,14 +274,25 @@ const Operator ComparatorTable::ltTable_[][11] = {
 	{NULL, NULL, &ltDoubleByte, &ltDoubleShort, &ltDoubleInt, &ltDoubleLong,
 		&ltDoubleFloat, &ltDoubleDouble, NULL, NULL, NULL}
 	,
-	{NULL, NULL, NULL, NULL, NULL,
-		NULL, NULL, NULL,
-		&ltTimestampTimestamp, NULL, NULL}
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+		&ltTimestampTimestamp, NULL, NULL,
+		&Timestamps::op<LtOp, Milli, Micro>,
+		&Timestamps::op<LtOp, Milli, Nano>}
 	,
 	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
 	,
-	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}};
-const Operator ComparatorTable::gtTable_[][11] = {
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
+	,
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+		&Timestamps::op<LtOp, Micro, Milli>, NULL, NULL,
+		&Timestamps::op<LtOp, Micro, Micro>,
+		&Timestamps::op<LtOp, Micro, Nano>}
+	,
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+		&Timestamps::op<LtOp, Nano, Milli>, NULL, NULL,
+		&Timestamps::op<LtOp, Nano, Micro>,
+		&Timestamps::op<LtOp, Nano, Nano>}};
+const ValueOperatorTable ComparatorTable::gtTable_ = {
 	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
 	,
 	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
@@ -173,14 +315,25 @@ const Operator ComparatorTable::gtTable_[][11] = {
 	{NULL, NULL, &gtDoubleByte, &gtDoubleShort, &gtDoubleInt, &gtDoubleLong,
 		&gtDoubleFloat, &gtDoubleDouble, NULL, NULL, NULL}
 	,
-	{NULL, NULL, NULL, NULL, NULL,
-		NULL, NULL, NULL,
-		&gtTimestampTimestamp, NULL, NULL}
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+		&gtTimestampTimestamp, NULL, NULL,
+		&Timestamps::op<GtOp, Milli, Micro>,
+		&Timestamps::op<GtOp, Milli, Nano>}
 	,
 	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
 	,
-	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}};
-const Operator ComparatorTable::leTable_[][11] = {
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
+	,
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+		&Timestamps::op<GtOp, Micro, Milli>, NULL, NULL,
+		&Timestamps::op<GtOp, Micro, Micro>,
+		&Timestamps::op<GtOp, Micro, Nano>}
+	,
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+		&Timestamps::op<GtOp, Nano, Milli>, NULL, NULL,
+		&Timestamps::op<GtOp, Nano, Micro>,
+		&Timestamps::op<GtOp, Nano, Nano>}};
+const ValueOperatorTable ComparatorTable::leTable_ = {
 	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
 	,
 	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
@@ -203,14 +356,25 @@ const Operator ComparatorTable::leTable_[][11] = {
 	{NULL, NULL, &leDoubleByte, &leDoubleShort, &leDoubleInt, &leDoubleLong,
 		&leDoubleFloat, &leDoubleDouble, NULL, NULL, NULL}
 	,
-	{NULL, NULL, NULL, NULL, NULL,
-		NULL, NULL, NULL,
-		&leTimestampTimestamp, NULL, NULL}
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+		&leTimestampTimestamp, NULL, NULL,
+		&Timestamps::op<LeOp, Milli, Micro>,
+		&Timestamps::op<LeOp, Milli, Nano>}
 	,
 	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
 	,
-	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}};
-const Operator ComparatorTable::geTable_[][11] = {
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
+	,
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+		&Timestamps::op<LeOp, Micro, Milli>, NULL, NULL,
+		&Timestamps::op<LeOp, Micro, Micro>,
+		&Timestamps::op<LeOp, Micro, Nano>}
+	,
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+		&Timestamps::op<LeOp, Nano, Milli>, NULL, NULL,
+		&Timestamps::op<LeOp, Nano, Micro>,
+		&Timestamps::op<LeOp, Nano, Nano>}};
+const ValueOperatorTable ComparatorTable::geTable_ = {
 	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
 	,
 	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
@@ -233,13 +397,24 @@ const Operator ComparatorTable::geTable_[][11] = {
 	{NULL, NULL, &geDoubleByte, &geDoubleShort, &geDoubleInt, &geDoubleLong,
 		&geDoubleFloat, &geDoubleDouble, NULL, NULL, NULL}
 	,
-	{NULL, NULL, NULL, NULL, NULL,
-		NULL, NULL, NULL,
-		&geTimestampTimestamp, NULL, NULL}
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+		&geTimestampTimestamp, NULL, NULL,
+		&Timestamps::op<GeOp, Milli, Micro>,
+		&Timestamps::op<GeOp, Milli, Nano>}
 	,
 	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
 	,
-	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}};
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL}
+	,
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+		&Timestamps::op<GeOp, Micro, Milli>, NULL, NULL,
+		&Timestamps::op<GeOp, Micro, Micro>,
+		&Timestamps::op<GeOp, Micro, Nano>}
+	,
+	{NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+		&Timestamps::op<GeOp, Nano, Milli>, NULL, NULL,
+		&Timestamps::op<GeOp, Nano, Micro>,
+		&Timestamps::op<GeOp, Nano, Nano>}};
 
 const Operator ComparatorTable::isNull_ = &isNullAnyType;
 const Operator ComparatorTable::isNotNull_ = &isNotNullAnyType;
@@ -250,45 +425,47 @@ bool geomOperation(TransactionContext& txn, uint8_t const* p,
 const Operator ComparatorTable::geomOp_ = &geomOperation;
 
 Operator ComparatorTable::getOperator(
-	DSExpression::Operation opType, ColumnType type1, ColumnType type2) {
-	Operator op = NULL;
-	switch (opType) {
-	case DSExpression::NE:
-		op = ComparatorTable::neTable_[type1][type2];
-		break;
-	case DSExpression::EQ:
-		op = ComparatorTable::eqTable_[type1][type2];
-		break;
-	case DSExpression::LT:
-		op = ComparatorTable::ltTable_[type1][type2];
-		break;
-	case DSExpression::LE:
-		op = ComparatorTable::leTable_[type1][type2];
-		break;
-	case DSExpression::GT:
-		op = ComparatorTable::gtTable_[type1][type2];
-		break;
-	case DSExpression::GE:
-		op = ComparatorTable::geTable_[type1][type2];
-		break;
-	case DSExpression::IS:
-		op = ComparatorTable::isNull_;
-		break;
-	case DSExpression::ISNOT:
-		op = ComparatorTable::isNotNull_;
-		break;
-	case DSExpression::GEOM_OP:
-		op = ComparatorTable::geomOp_;
-		break;
-	default:
-		op = NULL;
-		break;
-	}
+		DSExpression::Operation opType, ColumnType type1, ColumnType type2) {
+	Operator op = findOperator(opType, type1, type2);
+	assert(op != NULL);
 	return op;
 }
 
+Operator ComparatorTable::findOperator(
+		DSExpression::Operation opType, ColumnType type1, ColumnType type2) {
+	const ValueOperatorTable *table;
+	switch (opType) {
+	case DSExpression::NE:
+		table = &neTable_;
+		break;
+	case DSExpression::EQ:
+		table = &eqTable_;
+		break;
+	case DSExpression::LT:
+		table = &ltTable_;
+		break;
+	case DSExpression::LE:
+		table = &leTable_;
+		break;
+	case DSExpression::GT:
+		table = &gtTable_;
+		break;
+	case DSExpression::GE:
+		table = &geTable_;
+		break;
+	case DSExpression::IS:
+		return isNull_;
+	case DSExpression::ISNOT:
+		return isNotNull_;
+	case DSExpression::GEOM_OP:
+		return geomOp_;
+	default:
+		return NULL;
+	}
+	return findOperator(*table, type1, type2);
+}
 
-const Calculator2 CalculatorTable::addTable_[][11] = {
+const ValueCalculatorTable CalculatorTable::addTable_ = {
 	{
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 	},
@@ -329,9 +506,11 @@ const Calculator2 CalculatorTable::addTable_[][11] = {
 	{
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 	},
+	{ NULL },
+	{ NULL }
 };
 
-const Calculator2 CalculatorTable::subTable_[][11] = {
+const ValueCalculatorTable CalculatorTable::subTable_ = {
 	{
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 	},
@@ -372,9 +551,11 @@ const Calculator2 CalculatorTable::subTable_[][11] = {
 	{
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 	},
+	{ NULL },
+	{ NULL }
 };
 
-const Calculator2 CalculatorTable::mulTable_[][11] = {
+const ValueCalculatorTable CalculatorTable::mulTable_ = {
 	{
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 	},
@@ -415,9 +596,11 @@ const Calculator2 CalculatorTable::mulTable_[][11] = {
 	{
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 	},
+	{ NULL },
+	{ NULL }
 };
 
-const Calculator2 CalculatorTable::divTable_[][11] = {
+const ValueCalculatorTable CalculatorTable::divTable_ = {
 	{
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 	},
@@ -458,9 +641,11 @@ const Calculator2 CalculatorTable::divTable_[][11] = {
 	{
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 	},
+	{ NULL },
+	{ NULL }
 };
 
-const Calculator2 CalculatorTable::modTable_[][11] = {
+const ValueCalculatorTable CalculatorTable::modTable_ = {
 	{
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 	},
@@ -498,4 +683,6 @@ const Calculator2 CalculatorTable::modTable_[][11] = {
 	{
 		NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 	},
+	{ NULL },
+	{ NULL }
 };

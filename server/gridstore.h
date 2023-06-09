@@ -20,7 +20,7 @@
 
 #ifndef GS_CLIENT_VERSION_MAJOR
 
-#define GS_CLIENT_VERSION_MAJOR 4
+#define GS_CLIENT_VERSION_MAJOR 5
 #endif
 
 #ifndef GS_CLIENT_VERSION_MINOR
@@ -187,6 +187,14 @@ extern "C" {
 #define GS_COMPATIBILITY_SUPPORT_4_3 0
 #endif
 
+#if !defined(GS_COMPATIBILITY_SUPPORT_5_3) && \
+	(GS_CLIENT_VERSION_MAJOR > 5 || \
+	(GS_CLIENT_VERSION_MAJOR == 5 && GS_CLIENT_VERSION_MINOR >= 3))
+#define GS_COMPATIBILITY_SUPPORT_5_3 1
+#else
+#define GS_COMPATIBILITY_SUPPORT_5_3 0
+#endif
+
 #endif 
 
 
@@ -271,6 +279,24 @@ typedef int32_t GSResult;
 
 
 #define GS_SUCCEEDED(result) ((result) == GS_RESULT_OK)
+
+#if GS_COMPATIBILITY_SUPPORT_5_3
+
+typedef struct GSPreciseTimestampTag {
+
+	
+	GSTimestamp base;
+
+	
+	uint32_t nanos;
+
+} GSPreciseTimestamp;
+
+
+#define GS_PRECISE_TIMESTAMP_INITIALIZER \
+		{ 0, 0 }
+
+#endif 
 
 
 typedef struct GSBlobTag {
@@ -568,7 +594,13 @@ enum GSTypeTag {
 
 #if GS_COMPATIBILITY_SUPPORT_3_5
 	
-	GS_TYPE_NULL = -1
+	GS_TYPE_NULL = -1,
+
+#if GS_COMPATIBILITY_SUPPORT_5_3
+	
+	GS_TYPE_PRECISE_TIMESTAMP = -2
+#endif 
+
 #endif
 };
 
@@ -595,7 +627,18 @@ enum GSTypeOptionTag {
 	GS_TYPE_OPTION_DEFAULT_VALUE_NULL = 1 << 3,
 
 	
-	GS_TYPE_OPTION_DEFAULT_VALUE_NOT_NULL = 1 << 4
+	GS_TYPE_OPTION_DEFAULT_VALUE_NOT_NULL = 1 << 4,
+
+#if GS_COMPATIBILITY_SUPPORT_5_3
+	
+	GS_TYPE_OPTION_TIME_MILLI = 1 << 5,
+
+	
+	GS_TYPE_OPTION_TIME_MICRO = 1 << 6,
+
+	
+	GS_TYPE_OPTION_TIME_NANO = 1 << 7,
+#endif 
 
 #endif 
 
@@ -828,9 +871,7 @@ typedef struct GSTriggerInfoTag {
 
 
 #define GS_TRIGGER_INFO_INITIALIZER \
-	{ NULL, GS_TRIGGER_REST, NULL, \
-	0, NULL, \
-	NULL, NULL, NULL, NULL }
+	{ NULL, GS_TRIGGER_REST, NULL, 0, NULL, 0, NULL, NULL, NULL }
 
 #endif 
 
@@ -1098,6 +1139,11 @@ typedef union GSValueTag {
 	
 	GSTimestamp asTimestamp;
 
+#if GS_COMPATIBILITY_SUPPORT_5_3
+	
+	GSPreciseTimestamp asPreciseTimestamp;
+#endif 
+
 	
 	const GSChar *asGeometry;
 
@@ -1224,8 +1270,29 @@ typedef struct GSTimeZoneTag {
 
 #endif 
 
+#if GS_COMPATIBILITY_SUPPORT_5_3
 
-#define GS_TIME_STRING_SIZE_MAX 32
+typedef struct GSTimestampFormatOptionTag {
+	
+	const GSTimeZone *timeZone;
+} GSTimestampFormatOption;
+
+
+#define GS_TIMESAMP_FORMAT_OPTION_INITIALIZER \
+	{ NULL }
+
+#endif 
+
+#if GS_INTERNAL_DEFINITION_VISIBLE
+#if GS_COMPATIBILITY_SUPPORT_5_3
+#define GS_INTERNAL_TIME_STRING_SIZE_MAX 37
+#else
+#define GS_INTERNAL_TIME_STRING_SIZE_MAX 32
+#endif 
+#endif 
+
+
+#define GS_TIME_STRING_SIZE_MAX GS_INTERNAL_TIME_STRING_SIZE_MAX
 
 #if GS_COMPATIBILITY_SUPPORT_4_3
 
@@ -2033,6 +2100,13 @@ GS_DLL_PUBLIC GSResult GS_API_CALL gsGetRowByTimestamp(
 		GSContainer *container, GSTimestamp key, void *rowObj,
 		GSBool forUpdate, GSBool *exists);
 
+#if GS_COMPATIBILITY_SUPPORT_5_3
+
+GS_DLL_PUBLIC GSResult GS_API_CALL gsGetRowByPreciseTimestamp(
+		GSContainer *container, const GSPreciseTimestamp *key, void *rowObj,
+		GSBool forUpdate, GSBool *exists);
+#endif 
+
 
 GS_DLL_PUBLIC GSResult GS_API_CALL gsGetRowByString(
 		GSContainer *container, const GSChar *key, void *rowObj,
@@ -2052,6 +2126,13 @@ GS_DLL_PUBLIC GSResult GS_API_CALL gsPutRowByLong(
 GS_DLL_PUBLIC GSResult GS_API_CALL gsPutRowByTimestamp(
 		GSContainer *container, GSTimestamp key, const void *rowObj,
 		GSBool *exists);
+
+#if GS_COMPATIBILITY_SUPPORT_5_3
+
+GS_DLL_PUBLIC GSResult GS_API_CALL gsPutRowByPreciseTimestamp(
+		GSContainer *container, const GSPreciseTimestamp *key,
+		const void *rowObj, GSBool *exists);
+#endif 
 
 
 GS_DLL_PUBLIC GSResult GS_API_CALL gsPutRowByString(
@@ -2085,6 +2166,12 @@ GS_DLL_PUBLIC GSResult GS_API_CALL gsDeleteRowByLong(
 
 GS_DLL_PUBLIC GSResult GS_API_CALL gsDeleteRowByTimestamp(
 		GSContainer *container, GSTimestamp key, GSBool *exists);
+
+#if GS_COMPATIBILITY_SUPPORT_5_3
+
+GS_DLL_PUBLIC GSResult GS_API_CALL gsDeleteRowByPreciseTimestamp(
+		GSContainer *container, const GSPreciseTimestamp *key, GSBool *exists);
+#endif 
 
 
 GS_DLL_PUBLIC GSResult GS_API_CALL gsDeleteRowByString(
@@ -2341,6 +2428,16 @@ GS_DLL_PUBLIC GSResult GS_API_CALL gsSetRowFieldByTimestamp(
 GS_DLL_PUBLIC GSResult GS_API_CALL gsGetRowFieldAsTimestamp(
 		GSRow *row, int32_t column, GSTimestamp *fieldValue);
 
+#if GS_COMPATIBILITY_SUPPORT_5_3
+
+GS_DLL_PUBLIC GSResult GS_API_CALL gsSetRowFieldByPreciseTimestamp(
+		GSRow *row, int32_t column, const GSPreciseTimestamp *fieldValue);
+
+
+GS_DLL_PUBLIC GSResult GS_API_CALL gsGetRowFieldAsPreciseTimestamp(
+		GSRow *row, int32_t column, GSPreciseTimestamp *fieldValue);
+#endif 
+
 
 GS_DLL_PUBLIC GSResult GS_API_CALL gsSetRowFieldByGeometry(
 		GSRow *row, int32_t column, const GSChar *fieldValue);
@@ -2511,6 +2608,12 @@ GS_DLL_PUBLIC GSResult GS_API_CALL gsGetNextQueryAnalysis(
 
 GS_DLL_PUBLIC GSRowSetType GS_API_CALL gsGetRowSetType(GSRowSet *rowSet);
 
+#if GS_COMPATIBILITY_SUPPORT_5_3
+
+GS_DLL_PUBLIC GSResult GS_API_CALL gsGetRowSetSchema(
+		GSRowSet *rowSet, GSContainerInfo *schemaInfo, GSBool *exists);
+#endif 
+
 
 GS_DLL_PUBLIC int32_t GS_API_CALL gsGetRowSetSize(GSRowSet *rowSet);
 
@@ -2550,6 +2653,13 @@ GS_DLL_PUBLIC GSResult GS_API_CALL gsGetAggregationValueAsDouble(
 GS_DLL_PUBLIC GSResult GS_API_CALL gsGetAggregationValueAsTimestamp(
 		GSAggregationResult *aggregationResult, GSTimestamp *value,
 		GSBool *assigned);
+
+#if GS_COMPATIBILITY_SUPPORT_5_3
+
+GS_DLL_PUBLIC GSResult GS_API_CALL gsGetAggregationValueAsPreciseTimestamp(
+		GSAggregationResult *aggregationResult, GSPreciseTimestamp *value,
+		GSBool *assigned);
+#endif 
 
 #endif 
 
@@ -2603,6 +2713,12 @@ GS_DLL_PUBLIC GSResult GS_API_CALL gsGetPredicateStartKeyAsLong(
 GS_DLL_PUBLIC GSResult GS_API_CALL gsGetPredicateStartKeyAsTimestamp(
 		GSRowKeyPredicate *predicate, const GSTimestamp **startKey);
 
+#if GS_COMPATIBILITY_SUPPORT_5_3
+
+GS_DLL_PUBLIC GSResult GS_API_CALL gsGetPredicateStartKeyAsPreciseTimestamp(
+		GSRowKeyPredicate *predicate, const GSPreciseTimestamp **startKey);
+#endif 
+
 #if GS_COMPATIBILITY_SUPPORT_4_3
 
 
@@ -2630,6 +2746,13 @@ GS_DLL_PUBLIC GSResult GS_API_CALL gsGetPredicateFinishKeyAsLong(
 
 GS_DLL_PUBLIC GSResult GS_API_CALL gsGetPredicateFinishKeyAsTimestamp(
 		GSRowKeyPredicate *predicate, const GSTimestamp **finishKey);
+
+#if GS_COMPATIBILITY_SUPPORT_5_3
+
+GS_DLL_PUBLIC GSResult GS_API_CALL gsGetPredicateFinishKeyAsPreciseTimestamp(
+		GSRowKeyPredicate *predicate, const GSPreciseTimestamp **finishKey);
+#endif 
+
 
 #if GS_COMPATIBILITY_SUPPORT_4_3
 
@@ -2662,6 +2785,13 @@ GS_DLL_PUBLIC GSResult GS_API_CALL gsGetPredicateDistinctKeysAsTimestamp(
 		GSRowKeyPredicate *predicate,
 		const GSTimestamp **keyList, size_t *size);
 
+#if GS_COMPATIBILITY_SUPPORT_5_3
+
+GS_DLL_PUBLIC GSResult GS_API_CALL gsGetPredicateDistinctKeysAsPreciseTimestamp(
+		GSRowKeyPredicate *predicate,
+		const GSPreciseTimestamp **keyList, size_t *size);
+#endif 
+
 #if GS_COMPATIBILITY_SUPPORT_4_3
 
 
@@ -2689,6 +2819,12 @@ GS_DLL_PUBLIC GSResult GS_API_CALL gsSetPredicateStartKeyByLong(
 
 GS_DLL_PUBLIC GSResult GS_API_CALL gsSetPredicateStartKeyByTimestamp(
 		GSRowKeyPredicate *predicate, const GSTimestamp *startKey);
+
+#if GS_COMPATIBILITY_SUPPORT_5_3
+
+GS_DLL_PUBLIC GSResult GS_API_CALL gsSetPredicateStartKeyByPreciseTimestamp(
+		GSRowKeyPredicate *predicate, const GSPreciseTimestamp *startKey);
+#endif 
 
 #if GS_COMPATIBILITY_SUPPORT_4_3
 
@@ -2718,6 +2854,12 @@ GS_DLL_PUBLIC GSResult GS_API_CALL gsSetPredicateFinishKeyByLong(
 GS_DLL_PUBLIC GSResult GS_API_CALL gsSetPredicateFinishKeyByTimestamp(
 		GSRowKeyPredicate *predicate, const GSTimestamp *finishKey);
 
+#if GS_COMPATIBILITY_SUPPORT_5_3
+
+GS_DLL_PUBLIC GSResult GS_API_CALL gsSetPredicateFinishKeyByPreciseTimestamp(
+		GSRowKeyPredicate *predicate, const GSPreciseTimestamp *finishKey);
+#endif 
+
 #if GS_COMPATIBILITY_SUPPORT_4_3
 
 
@@ -2745,6 +2887,12 @@ GS_DLL_PUBLIC GSResult GS_API_CALL gsAddPredicateKeyByLong(
 
 GS_DLL_PUBLIC GSResult GS_API_CALL gsAddPredicateKeyByTimestamp(
 		GSRowKeyPredicate *predicate, GSTimestamp key);
+
+#if GS_COMPATIBILITY_SUPPORT_5_3
+
+GS_DLL_PUBLIC GSResult GS_API_CALL gsAddPredicateKeyByPreciseTimestamp(
+		GSRowKeyPredicate *predicate, const GSPreciseTimestamp *key);
+#endif 
 
 #endif 
 
@@ -2877,11 +3025,25 @@ GS_DLL_PUBLIC size_t GS_API_CALL gsFormatZonedTime(
 		GSTimestamp timestamp, GSChar *strBuf, size_t bufSize,
 		const GSTimeZone *zone);
 
+#if GS_COMPATIBILITY_SUPPORT_5_3
+
+GS_DLL_PUBLIC size_t GS_API_CALL gsFormatPreciseTime(
+		const GSPreciseTimestamp *timestamp, GSChar *strBuf, size_t bufSize,
+		const GSTimestampFormatOption *option);
+#endif 
+
 #endif 
 
 
 GS_DLL_PUBLIC GSBool GS_API_CALL gsParseTime(
 		const GSChar *str, GSTimestamp *timestamp);
+
+#if GS_COMPATIBILITY_SUPPORT_5_3
+
+GS_DLL_PUBLIC GSBool GS_API_CALL gsParsePreciseTime(
+		const GSChar *str, GSPreciseTimestamp *timestamp,
+		const GSTimestampFormatOption *option);
+#endif 
 
 #if GS_COMPATIBILITY_SUPPORT_4_3
 

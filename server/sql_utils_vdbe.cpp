@@ -23,6 +23,14 @@
 #include "sql_rewrite.h"
 #include "newsql_interface.h"
 
+namespace {
+struct ConstantsChecker {
+	ConstantsChecker() {
+		UTIL_STATIC_ASSERT(GS_TYPE_STRING_NULL == GS_TYPE_TIMESTAMP_ARRAY + 1);
+	}
+};
+}
+
 extern "C" {
 #include "sqliteInt.h"
 #include "vdbeInt.h"
@@ -568,8 +576,8 @@ TupleValue SQLVdbeUtils::VdbeUtils::sqlPrintf(
 		}
 		else if (argType == TupleTypes::TYPE_STRING ||
 				argType == TupleTypes::TYPE_BLOB ||
-				argType == TupleTypes::TYPE_TIMESTAMP ||
-				argType == TupleTypes::TYPE_BOOL) {
+				argType == TupleTypes::TYPE_BOOL ||
+				TypeUtils::isTimestampFamily(argType)) {
 			const TupleValue &strArg = ValueUtils::toString(cxt, arg);
 			const size_t strSize = strArg.varSize();
 			if (strSize >

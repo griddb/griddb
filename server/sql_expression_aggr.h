@@ -146,6 +146,19 @@ struct SQLAggrExprs::Specs {
 				SQLType::AGG_MIN> Type;
 	};
 
+	template<int C> struct Spec<SQLType::AGG_PERCENTILE_CONT, C> {
+		typedef Base::Type<TupleTypes::TYPE_NULL, Base::InList<
+				Base::In<TupleTypes::TYPE_NUMERIC>,
+				Base::In<TupleTypes::TYPE_DOUBLE, ExprSpec::FLAG_EXACT> >,
+				ExprSpec::FLAG_INHERIT1 |
+				ExprSpec::FLAG_PSEUDO_WINDOW |
+				ExprSpec::FLAG_WINDOW_COLUMN |
+				ExprSpec::FLAG_AGGR_ORDERING |
+				ExprSpec::FLAG_WINDOW_VALUE_COUNTING, Base::InList<
+				Base::In<TupleTypes::TYPE_NUMERIC>,
+				Base::In<TupleTypes::TYPE_LONG> > > Type;
+	};
+
 	template<int C> struct Spec<SQLType::AGG_ROW_NUMBER, C> {
 		typedef Base::Type<TupleTypes::TYPE_LONG, Base::InList<>,
 				ExprSpec::FLAG_NON_NULLABLE |
@@ -281,6 +294,7 @@ struct SQLAggrExprs::Functions {
 	struct Max;
 	struct Median;
 	struct Min;
+	struct PercentileCont;
 	struct RowNumber;
 	struct StddevBase;
 	struct Stddev0;
@@ -442,6 +456,36 @@ struct SQLAggrExprs::Functions::Min {
 	};
 	typedef Advance Merge;
 	typedef void Finish;
+};
+
+struct SQLAggrExprs::Functions::PercentileCont {
+	typedef FunctionUtils::AggregationValues<
+			std::pair<int64_t, bool>, int64_t> LongAggr;
+	typedef FunctionUtils::AggregationValues<
+			std::pair<double, bool>, int64_t> DoubleAggr;
+
+	enum PercentileAction {
+		ACTION_NONE,
+		ACTION_SET,
+		ACTION_MERGE
+	};
+
+	struct Advance {
+		template<typename C, typename Aggr, typename V>
+		void operator()(C &cxt, const Aggr &aggr, const V &v, double rate);
+
+		template<typename C, typename Aggr>
+		static PercentileAction nextAction(
+				C &cxt, const Aggr &aggr, double rate, int64_t &mergePos);
+	};
+
+	typedef void Merge;
+	typedef void Finish;
+
+	struct Checker {
+		template<typename C, typename Aggr, typename V>
+		void operator()(C &cxt, const Aggr&, const V&, double rate);
+	};
 };
 
 struct SQLAggrExprs::Functions::RowNumber {

@@ -171,8 +171,10 @@ void SQLScanOps::Scan::compile(OpContext &cxt) const {
 		ColumnTypeList inputTypeList(alloc);
 		TupleList::Info inputInfo = getInputInfo(cxt, inputTypeList);
 
+		SQLValues::ValueContext valueCxt(
+				SQLValues::ValueContext::ofAllocator(alloc));
 		selector = ALLOC_NEW(alloc) SQLExprs::IndexSelector(
-				alloc, alloc, SQLType::EXPR_COLUMN, inputInfo);
+				valueCxt, SQLType::EXPR_COLUMN, inputInfo);
 		if (location.multiIndexActivated_) {
 			selector->setMultiAndConditionEnabled(true);
 		}
@@ -228,7 +230,10 @@ void SQLScanOps::Scan::compile(OpContext &cxt) const {
 			rewriter.setIdOfInput(0, true);
 		}
 		else {
-			builder.addColumnUsage(getCode(), withId);
+			OpCode code = getCode();
+			code.setJoinPredicate(NULL);
+
+			builder.addColumnUsage(code, withId);
 		}
 	}
 
@@ -406,6 +411,9 @@ void SQLScanOps::Scan::compile(OpContext &cxt) const {
 		OpNode &node = plan.createNode(opType);
 		node.setCode(code);
 		node.addInput(*inNode);
+		if (baseCode.getInputCount() > 1) {
+			node.addInput(plan.getParentInput(1));
+		}
 
 		OpCodeBuilder::setUpOutputNodes(
 				plan, NULL, node, distinctProj,
@@ -610,6 +618,7 @@ void SQLScanOps::ScanContainerIndex::execute(OpContext &cxt) const {
 	const SQLExprs::IndexSelector &selector =
 			cursor->getAccessor().getIndexSelection();
 	SQLExprs::IndexConditionList condList(cxt.getAllocator());
+	SQLValues::ValueSetHolder valuesHolder(cxt.getValueContext());
 
 	for (;;) {
 		condList.assign(
@@ -619,7 +628,9 @@ void SQLScanOps::ScanContainerIndex::execute(OpContext &cxt) const {
 			if (!inReader->exists()) {
 				break;
 			}
-			bindIndexCondition(*inReader, *inColumnList, selector, condList);
+			bindIndexCondition(
+					*inReader, *inColumnList, selector, condList,
+					valuesHolder);
 		}
 
 		for (;;) {
@@ -647,7 +658,8 @@ void SQLScanOps::ScanContainerIndex::execute(OpContext &cxt) const {
 void SQLScanOps::ScanContainerIndex::bindIndexCondition(
 		TupleListReader &reader, const TupleColumnList &columnList,
 		const SQLExprs::IndexSelector &selector,
-		SQLExprs::IndexConditionList &condList) {
+		SQLExprs::IndexConditionList &condList,
+		SQLValues::ValueSetHolder &valuesHolder) {
 	const uint32_t emptyColumn = SQLExprs::IndexCondition::EMPTY_IN_COLUMN;
 
 	for (SQLExprs::IndexConditionList::iterator it = condList.begin();
@@ -666,7 +678,7 @@ void SQLScanOps::ScanContainerIndex::bindIndexCondition(
 					reader, columnList[pair.second]);
 		}
 
-		selector.bindCondition(*it, value1, value2);
+		selector.bindCondition(*it, value1, value2, valuesHolder);
 	}
 }
 

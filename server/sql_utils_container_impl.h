@@ -80,7 +80,7 @@ struct SQLContainerImpl {
 	struct Constants;
 
 	struct ColumnCode;
-	template<RowArrayType RAType, typename T, typename S, bool Nullable>
+	template<RowArrayType RAType, typename T, bool Nullable>
 	class ColumnEvaluator;
 
 	class ColumnExpression;
@@ -481,14 +481,15 @@ struct SQLContainerImpl::ColumnCode {
 	ContainerColumn column_;
 };
 
-template<RowArrayType RAType, typename T, typename S, bool Nullable>
+template<RowArrayType RAType, typename T, bool Nullable>
 class SQLContainerImpl::ColumnEvaluator {
+public:
+	typedef T ValueTypeTag;
+
 private:
 	typedef SQLValues::ValueUtils ValueUtils;
 	typedef SQLExprs::ExprContext ExprContext;
-
-	typedef typename T::ValueType ValueType;
-	typedef typename S::ValueType SourceType;
+	typedef typename ValueTypeTag::ValueType ValueType;
 
 public:
 	typedef ColumnEvaluator EvaluatorType;
@@ -558,7 +559,6 @@ public:
 	template<size_t V, bool = (V <= OFFSET_CONTAINER)>
 	struct VariantTraitsBase {
 		typedef SQLValues::Types::Any ValueTypeTag;
-		typedef ValueTypeTag ResultTypeTag;
 
 		typedef SQLCoreExprs::ConstEvaluator<ValueTypeTag> Evaluator;
 		typedef typename Evaluator::CodeType Code;
@@ -581,11 +581,9 @@ public:
 
 		typedef typename VariantTypes::ColumnTypeByFull<
 				SUB_TYPE>::ValueTypeTag ValueTypeTag;
-		typedef ValueTypeTag ResultTypeTag;
 
 		typedef ColumnEvaluator<
-				SUB_RA_TYPE, ResultTypeTag, ValueTypeTag,
-				SUB_NULLABLE> Evaluator;
+				SUB_RA_TYPE, ValueTypeTag, SUB_NULLABLE> Evaluator;
 		typedef typename Evaluator::CodeType Code;
 		typedef util::FalseType Checking;
 	};
@@ -648,11 +646,9 @@ public:
 						SUB_SOURCE>::RA_TYPE;
 
 		typedef SQLValues::Types::Long ValueTypeTag;
-		typedef ValueTypeTag ResultTypeTag;
 
 		typedef ColumnEvaluator<
-				SUB_RA_TYPE, ResultTypeTag, ValueTypeTag,
-				SUB_NULLABLE> Evaluator;
+				SUB_RA_TYPE, ValueTypeTag, SUB_NULLABLE> Evaluator;
 	};
 };
 
@@ -708,15 +704,17 @@ public:
 		typedef typename VariantTypes::ColumnTypeByBasicAndPromo<
 				SUB_TYPE>::CompTypeTag CompTypeTag;
 
-		typedef ColumnEvaluator<
-				SUB_RA_TYPE, CompTypeTag, SourceType, SUB_NULLABLE> Arg1;
+		typedef ColumnEvaluator<SUB_RA_TYPE, SourceType, SUB_NULLABLE> Arg1;
 		typedef SQLCoreExprs::ConstEvaluator<CompTypeTag> Arg2;
+
+		typedef typename Arg1::ValueTypeTag ValueTypeTag1;
+		typedef typename Arg2::ValueTypeTag ValueTypeTag2;
 
 		typedef typename Arg1::CodeType Code1;
 		typedef typename Arg2::CodeType Code2;
 
-		typedef typename SQLValues::ValueBasicComparator::TypeAt<
-				CompTypeTag> TypedComparator;
+		typedef typename SQLValues::ValueComparator::BasicTypeAt<
+				ValueTypeTag1, ValueTypeTag2> TypedComparator;
 
 		typedef util::FalseType Checking;
 	};

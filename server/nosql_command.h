@@ -715,7 +715,7 @@ struct TablePartitioningInfo {
 	std::string getIntervalValue() {
 		util::NormalOStringStream oss;
 		if (SyntaxTree::isRangePartitioningType(partitionType_)) {
-			if (partitionColumnType_ == TupleList::TYPE_TIMESTAMP) {
+			if (TupleColumnTypeUtils::isTimestampFamily(partitionColumnType_)) {
 				int64_t orgValue = intervalValue_ / 24 / 3600 / 1000;
 				oss << orgValue;
 			}
@@ -1247,7 +1247,7 @@ struct NoSQLStoreOption {
 		featureVersion_ = -1;
 		acceptableFeatureVersion_ = -1;
 		applicationName_ = NULL;
-		storeMemoryAgingSwapRate_ = -1;
+		storeMemoryAgingSwapRate_ = TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE;
 		timezone_ = util::TimeZone();
 	}
 };
@@ -1946,36 +1946,11 @@ struct NoSQLUtils {
 
 	/*!
 		@brief カラム種別が可変長かどうか
-		@note 共通関数でもよい
+		@note 内部でNoSQL系共通関数を呼び出し
 	*/
-	static bool isVariableType(ColumnType type) {
-		switch (type) {
-		case COLUMN_TYPE_STRING:
-		case COLUMN_TYPE_GEOMETRY:
-		case COLUMN_TYPE_BLOB:
-			return true;
-		default:
-			return false;
-		}
-	};
+	static bool isVariableType(ColumnType type);
 
-	static uint32_t getFixedSize(ColumnType type) {
-		switch (type) {
-		case COLUMN_TYPE_BOOL: return sizeof(bool);
-		case COLUMN_TYPE_BYTE: return sizeof(int8_t);
-		case COLUMN_TYPE_SHORT: return sizeof(int16_t);
-		case COLUMN_TYPE_INT: return sizeof(int32_t);
-		case COLUMN_TYPE_LONG: return sizeof(int64_t);
-		case COLUMN_TYPE_FLOAT: return sizeof(float);
-		case COLUMN_TYPE_DOUBLE: return sizeof(double);
-		case COLUMN_TYPE_TIMESTAMP: return sizeof(int64_t);
-		case COLUMN_TYPE_GEOMETRY: return sizeof(double);
-		case COLUMN_TYPE_NULL: return sizeof(int64_t);
-			break;
-		default:
-			return -1;
-		}
-	};
+	static uint32_t getFixedSize(ColumnType type);
 };
 
 template<typename T>

@@ -1524,22 +1524,113 @@ static inline bool isNotNullAnyType(TransactionContext&, uint8_t const* p,
 
 class ComparatorTable {
 public:
-	static const Comparator comparatorTable_[][11];
+	struct Ne {
+		Operator operator()(ColumnType type1, ColumnType type2) const {
+			return getOperator(neTable_, type1, type2);
+		}
+	};
+	struct Eq {
+		Operator operator()(ColumnType type1, ColumnType type2) const {
+			return getOperator(eqTable_, type1, type2);
+		}
+	};
+	struct Lt {
+		Operator operator()(ColumnType type1, ColumnType type2) const {
+			return getOperator(ltTable_, type1, type2);
+		}
+	};
+	struct Le {
+		Operator operator()(ColumnType type1, ColumnType type2) const {
+			return getOperator(leTable_, type1, type2);
+		}
+	};
+	struct Gt {
+		Operator operator()(ColumnType type1, ColumnType type2) const {
+			return getOperator(gtTable_, type1, type2);
+		}
+	};
+	struct Ge {
+		Operator operator()(ColumnType type1, ColumnType type2) const {
+			return getOperator(geTable_, type1, type2);
+		}
+	};
 
-	static const Operator eqTable_[][11];
-	static const Operator neTable_[][11];
-	static const Operator ltTable_[][11];
-	static const Operator gtTable_[][11];
-	static const Operator leTable_[][11];
-	static const Operator geTable_[][11];
+	static Comparator getComparator(ColumnType type1, ColumnType type2);
+	static Comparator findComparator(ColumnType type1, ColumnType type2);
+
+	static Operator getOperator(
+			DSExpression::Operation op, ColumnType type1, ColumnType type2);
+	static Operator getOperator(
+			const ValueOperatorTable &table,
+			ColumnType type1, ColumnType type2);
+
+	static Operator findOperator(
+			DSExpression::Operation op, ColumnType type1, ColumnType type2);
+	static Operator findOperator(
+			const ValueOperatorTable &table,
+			ColumnType type1, ColumnType type2);
+
+	static size_t toOperatorIndex(ColumnType type);
+
+	static const ValueComparatorTable comparatorTable_;
+
+	static const ValueOperatorTable eqTable_;
+	static const ValueOperatorTable neTable_;
+	static const ValueOperatorTable ltTable_;
+	static const ValueOperatorTable gtTable_;
+	static const ValueOperatorTable leTable_;
+	static const ValueOperatorTable geTable_;
 
 	static const Operator isNull_;
 	static const Operator isNotNull_;
 	static const Operator geomOp_;
 
-	static Operator getOperator(DSExpression::Operation op, 
-		ColumnType type1, ColumnType type2);
+private:
+	struct Timestamps;
+
+	struct Milli;
+	struct Micro;
+	struct Nano;
+
+	struct NeOp;
+	struct EqOp;
+	struct LtOp;
+	struct LeOp;
+	struct GtOp;
+	struct GeOp;
 };
+
+inline Comparator ComparatorTable::getComparator(
+		ColumnType type1, ColumnType type2) {
+	Comparator op = findComparator(type1, type2);
+	assert(op != NULL);
+	return op;
+}
+
+inline Comparator ComparatorTable::findComparator(
+		ColumnType type1, ColumnType type2) {
+	return comparatorTable_[toOperatorIndex(type1)][toOperatorIndex(type2)];
+}
+
+inline Operator ComparatorTable::getOperator(
+		const ValueOperatorTable &table,
+		ColumnType type1, ColumnType type2) {
+	Operator op = findOperator(table, type1, type2);
+	assert(op != NULL);
+	return op;
+}
+
+inline Operator ComparatorTable::findOperator(
+		const ValueOperatorTable &table,
+		ColumnType type1, ColumnType type2) {
+	return table[toOperatorIndex(type1)][toOperatorIndex(type2)];
+}
+
+inline size_t ComparatorTable::toOperatorIndex(ColumnType type) {
+	assert(!ValueProcessor::isArray(type));
+	return static_cast<size_t>(
+			ValueProcessor::getPrimitiveColumnTypeOrdinal(type, false));
+}
 
 static inline void addByteByte(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
@@ -1724,12 +1815,66 @@ static inline void addDoubleDouble(TransactionContext&, uint8_t const* p,
 
 class CalculatorTable {
 public:
-	static const Calculator2 addTable_[][11];
-	static const Calculator2 subTable_[][11];
-	static const Calculator2 mulTable_[][11];
-	static const Calculator2 divTable_[][11];
-	static const Calculator2 modTable_[][11];
+	struct Add {
+		Calculator operator()(ColumnType type1, ColumnType type2) const {
+			return getCalculator(addTable_, type1, type2);
+		}
+	};
+	struct Sub {
+		Calculator operator()(ColumnType type1, ColumnType type2) const {
+			return getCalculator(subTable_, type1, type2);
+		}
+	};
+	struct Mul {
+		Calculator operator()(ColumnType type1, ColumnType type2) const {
+			return getCalculator(mulTable_, type1, type2);
+		}
+	};
+	struct Div {
+		Calculator operator()(ColumnType type1, ColumnType type2) const {
+			return getCalculator(divTable_, type1, type2);
+		}
+	};
+	struct Mod {
+		Calculator operator()(ColumnType type1, ColumnType type2) const {
+			return getCalculator(modTable_, type1, type2);
+		}
+	};
+
+	static Calculator getCalculator(
+			const ValueCalculatorTable &table,
+			ColumnType type1, ColumnType type2);
+	static Calculator findCalculator(
+			const ValueCalculatorTable &table,
+			ColumnType type1, ColumnType type2);
+
+	static size_t toCalculatorIndex(ColumnType type);
+
+	static const ValueCalculatorTable addTable_;
+	static const ValueCalculatorTable subTable_;
+	static const ValueCalculatorTable mulTable_;
+	static const ValueCalculatorTable divTable_;
+	static const ValueCalculatorTable modTable_;
 };
+
+inline Calculator CalculatorTable::getCalculator(
+		const ValueCalculatorTable &table,
+		ColumnType type1, ColumnType type2) {
+	Calculator calc = findCalculator(table, type1, type2);
+	assert(calc != NULL);
+	return calc;
+}
+
+inline Calculator CalculatorTable::findCalculator(
+		const ValueCalculatorTable &table,
+		ColumnType type1, ColumnType type2) {
+	return table[toCalculatorIndex(type1)][toCalculatorIndex(type2)];
+}
+
+inline size_t CalculatorTable::toCalculatorIndex(ColumnType type) {
+	return ComparatorTable::toOperatorIndex(type);
+}
+
 static inline void subByteByte(TransactionContext&, uint8_t const* p, uint32_t,
 	uint8_t const* q, uint32_t, Value& value) {
 	value.set((*(reinterpret_cast<const int8_t*>(p))) -

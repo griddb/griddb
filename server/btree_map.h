@@ -59,6 +59,28 @@ struct StringKey {
 	}
 };
 
+template<typename T>
+struct BaseTimestampKey {
+	friend std::ostream& operator<<(
+			std::ostream &output, const BaseTimestampKey &key) {
+		ValueProcessor::dumpRawTimestamp(output, key.base_);
+		return output;
+	}
+	bool operator==(const BaseTimestampKey &key) const {
+		return ValueProcessor::compareTimestamp(base_, key.base_) == 0;
+	}
+	bool operator<(const BaseTimestampKey &key) const {
+		return ValueProcessor::compareTimestamp(base_, key.base_) < 0;
+	}
+
+	T base_;
+};
+
+struct MicroTimestampKey : public BaseTimestampKey<MicroTimestamp> {
+};
+struct NanoTimestampKey : public BaseTimestampKey<NanoTimestamp> {
+};
+
 struct FullContainerKeyObject {
 	FullContainerKeyObject(const FullContainerKeyCursor *ptr) : ptr_(reinterpret_cast<const uint8_t *>(ptr)) {}
 	FullContainerKeyObject() : ptr_(NULL) {}

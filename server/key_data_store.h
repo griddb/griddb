@@ -115,7 +115,7 @@ public:
 			util::StackAllocator* stAlloc,
 			util::FixedSizeAllocator<util::Mutex>* resultSetPool,
 			ConfigTable* configTable, TransactionManager* txnMgr,
-			ChunkManager* chunkmanager, LogManager<NoLocker>* logmanager,
+			ChunkManager* chunkmanager, LogManager<MutexLocker>* logmanager,
 			KeyDataStore* keyStore, const StatsSet &stats);
 
 	~KeyDataStore();

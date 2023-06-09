@@ -56,6 +56,8 @@ static bool checkAcceptableTupleType(TupleList::TupleColumnType type) {
 		case TupleList::TYPE_NUMERIC :
 		case TupleList::TYPE_DOUBLE :
 		case TupleList::TYPE_TIMESTAMP :
+		case TupleList::TYPE_MICRO_TIMESTAMP :
+		case TupleList::TYPE_NANO_TIMESTAMP :
 		case TupleList::TYPE_NULL :
 		case TupleList::TYPE_STRING :
 		case TupleList::TYPE_BLOB :
@@ -77,6 +79,8 @@ static ColumnType convertTupleTypeToNoSQLType(TupleList::TupleColumnType type) {
 	case TupleList::TYPE_NUMERIC: return COLUMN_TYPE_DOUBLE;
 	case TupleList::TYPE_DOUBLE: return COLUMN_TYPE_DOUBLE;
 	case TupleList::TYPE_TIMESTAMP: return COLUMN_TYPE_TIMESTAMP;
+	case TupleList::TYPE_MICRO_TIMESTAMP: return COLUMN_TYPE_MICRO_TIMESTAMP;
+	case TupleList::TYPE_NANO_TIMESTAMP: return COLUMN_TYPE_NANO_TIMESTAMP;
 	case TupleList::TYPE_NULL: return COLUMN_TYPE_NULL;
 	case TupleList::TYPE_STRING: return COLUMN_TYPE_STRING;
 	case TupleList::TYPE_GEOMETRY: return COLUMN_TYPE_GEOMETRY;
@@ -98,6 +102,8 @@ static bool checkNoSQLTypeToTupleType(ColumnType type) {
 		case COLUMN_TYPE_FLOAT :
 		case COLUMN_TYPE_DOUBLE :
 		case COLUMN_TYPE_TIMESTAMP :
+		case COLUMN_TYPE_MICRO_TIMESTAMP :
+		case COLUMN_TYPE_NANO_TIMESTAMP :
 		case COLUMN_TYPE_NULL :
 		case COLUMN_TYPE_STRING :
 		case COLUMN_TYPE_BLOB :
@@ -130,6 +136,8 @@ static TupleList::TupleColumnType
 	case COLUMN_TYPE_FLOAT : return TupleList::TYPE_FLOAT;
 	case COLUMN_TYPE_DOUBLE : return TupleList::TYPE_DOUBLE;
 	case COLUMN_TYPE_TIMESTAMP : return TupleList::TYPE_TIMESTAMP;
+	case COLUMN_TYPE_MICRO_TIMESTAMP : return TupleList::TYPE_MICRO_TIMESTAMP;
+	case COLUMN_TYPE_NANO_TIMESTAMP : return TupleList::TYPE_NANO_TIMESTAMP;
 	case COLUMN_TYPE_NULL : return TupleList::TYPE_NULL;
 	case COLUMN_TYPE_STRING : return TupleList::TYPE_STRING;
 	case COLUMN_TYPE_BLOB : return  TupleList::TYPE_BLOB;

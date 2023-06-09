@@ -632,8 +632,9 @@ SQLOpUtils::ProjectionRefPair SQLSortOps::SortNway::prepareSortProjection(
 		SortContext &cxt, bool primary) const {
 	prepareProjectionOutput(cxt, primary);
 
-	*cxt.getBase().getSummaryColumnListRef(0) =
-			cxt.getSummaryColumnList(primary);
+	SummaryTupleSet::applyColumnList(
+			cxt.getSummaryColumnList(primary),
+			*cxt.getBase().getSummaryColumnListRef(0));
 
 	const ProjectionRefPair &projectionPair = findProjection(false, true);
 	updateProjections(cxt, projectionPair);
@@ -1157,7 +1158,9 @@ SQLSortOps::SortNway::SorterBuilder::SorterBuilder(
 		groupFunc_((hashTable_ != NULL && pipeProj != NULL ?
 				digester1_.getTypeSwitcher().get<const Grouping>() : NULL)) {
 	if (hashTable_ != NULL && pipeProj != NULL) {
-		*cxt_.getSummaryColumnListRef(0) = cxt.getSummaryColumnList(true);
+		SummaryTupleSet::applyColumnList(
+				cxt.getSummaryColumnList(true),
+				*cxt_.getSummaryColumnListRef(0));
 		cxt_.getExprContext().setAggregationTupleRef(&tupleSet1_, outTupleRef_);
 	}
 	for (SQLValues::CompColumnList::const_iterator it = keyColumnList.begin();
@@ -1607,7 +1610,8 @@ void SQLSortOps::SortNway::GroupSortAction::operator()(bool primary) const {
 	SummaryTupleSet *tupleSet =
 			(primary ? tupleSetPair_.first : tupleSetPair_.second);
 
-	*cxt_.getSummaryColumnListRef(0) = *columnList;
+	SummaryTupleSet::applyColumnList(
+			*columnList, *cxt_.getSummaryColumnListRef(0));
 	cxt_.getExprContext().setAggregationTupleRef(tupleSet, outTupleRef_);
 }
 

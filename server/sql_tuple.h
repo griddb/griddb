@@ -29,6 +29,10 @@
 
 
 
+
+
+
+
 class LocalTempStore;
 class ResourceGroup;
 class TupleList {
@@ -52,6 +56,7 @@ public:
 
 
 	enum TupleColumnTypeBits {
+		TYPE_BITS_NORMAL_SIZE = 3,
 		TYPE_BITS_SUB_TYPE = 8,
 		TYPE_BITS_VAR = 12,
 		TYPE_BITS_ARRAY = 13,
@@ -66,7 +71,10 @@ public:
 		TYPE_MASK_ARRAY = 1 << TYPE_BITS_ARRAY,
 		TYPE_MASK_VAR = 1 << TYPE_BITS_VAR,
 		TYPE_MASK_ARRAY_VAR = TYPE_MASK_ARRAY | TYPE_MASK_VAR,
-		TYPE_MASK_NULLABLE = 1 << TYPE_BITS_NULLABLE
+		TYPE_MASK_NULLABLE = 1 << TYPE_BITS_NULLABLE,
+		TYPE_MASK_TIMESTAMP_BASE = (3 << TYPE_BITS_SUB_TYPE),
+		TYPE_MASK_TIMESTAMP_EXT =
+				TYPE_MASK_TIMESTAMP_BASE | (4 << TYPE_BITS_SUB_TYPE)
 	};
 
 	enum TupleColumnTypeTag {
@@ -77,7 +85,9 @@ public:
 		TYPE_LONG = (1 << TYPE_BITS_SUB_TYPE) | 8,
 		TYPE_FLOAT = (2 << TYPE_BITS_SUB_TYPE) | 4,
 		TYPE_DOUBLE = (2 << TYPE_BITS_SUB_TYPE) | 8,
-		TYPE_TIMESTAMP = (3 << TYPE_BITS_SUB_TYPE) | 8,
+		TYPE_TIMESTAMP = TYPE_MASK_TIMESTAMP_BASE | 8,
+		TYPE_MICRO_TIMESTAMP = TYPE_MASK_TIMESTAMP_EXT | 8,
+		TYPE_NANO_TIMESTAMP = TYPE_MASK_TIMESTAMP_EXT | 9,
 		TYPE_BOOL = (4 << TYPE_BITS_SUB_TYPE) | 1,
 		TYPE_NUMERIC = (5 << TYPE_BITS_SUB_TYPE) | 0,
 		TYPE_ANY = TYPE_MASK_VAR | (0 << TYPE_BITS_SUB_TYPE) | 10,
@@ -265,6 +275,7 @@ public:
 	struct StoreMultiVarBlockIdList;
 	struct StackAllocLobHeader;
 	struct StackAllocMultiVarData;
+	struct TimestampTag {};
 	class VarContext;
 	class SingleVarBuilder;
 	class StackAllocSingleVarBuilder;
@@ -273,6 +284,7 @@ public:
 	class StackAllocLobBuilder;
 	class VarArrayReader;
 	class LobReader;
+	class NanoTimestampBuilder;
 	template<typename Base> class Coder;
 
 	friend class TupleList::Reader;
@@ -283,6 +295,8 @@ public:
 	template<typename T> explicit TupleValue(const T &value);
 
 	TupleValue(const void *rawData, TupleList::TupleColumnType type);
+
+	TupleValue(const int64_t &ts, const TimestampTag&);
 
 	TupleList::TupleColumnType getType() const;
 
@@ -838,6 +852,44 @@ public:
 	bool next(const void *&data, size_t &size);
 };
 
+class TupleValue::NanoTimestampBuilder {
+public:
+	explicit NanoTimestampBuilder(VarContext &cxt);
+
+	void append(const void *data, size_t size);
+	void setValue(const NanoTimestamp &ts);
+
+	const NanoTimestamp* build();
+
+private:
+	VarContext &cxt_;
+	uint8_t data_[sizeof(NanoTimestamp)];
+	size_t pos_;
+};
+
+
+class TupleNanoTimestamp {
+public:
+	TupleNanoTimestamp();
+	explicit TupleNanoTimestamp(const NanoTimestamp *ts);
+	explicit TupleNanoTimestamp(const TupleValue &value);
+
+	operator TupleValue() const;
+	operator NanoTimestamp() const;
+
+	const NanoTimestamp& get() const;
+	const void* data() const;
+
+private:
+	struct Constants {
+		static const NanoTimestamp EMPTY_VALUE;
+	};
+
+	static NanoTimestamp makeEmptyValue();
+
+	const NanoTimestamp *ts_;
+};
+
 
 class TupleString {
 public:
@@ -1107,6 +1159,8 @@ public:
 	void setBy(const Column &column, const int64_t &value);
 	void setBy(const Column &column, const float &value);
 	void setBy(const Column &column, const double &value);
+	void setBy(const Column &column, const MicroTimestamp &value);
+	void setBy(const Column &column, const NanoTimestamp &value);
 
 	void setIsNull(uint16_t colNumber, bool nullValue = true);
 
@@ -1290,8 +1344,11 @@ struct TupleColumnTypeUtils {
 	static bool isNullable(TupleList::TupleColumnType type);
 
 	static bool isNull(TupleList::TupleColumnType type);
-	static bool isFixed(TupleList::TupleColumnType type);
+	static bool isSomeFixed(TupleList::TupleColumnType type);
+	static bool isNormalFixed(TupleList::TupleColumnType type);
+	static bool isLargeFixed(TupleList::TupleColumnType type);
 	static bool isSingleVar(TupleList::TupleColumnType type);
+	static bool isSingleVarOrLarge(TupleList::TupleColumnType type);
 	static bool isArray(TupleList::TupleColumnType type);
 	static bool isFixedArray(TupleList::TupleColumnType type);
 	static bool isLob(TupleList::TupleColumnType type);
@@ -1299,6 +1356,7 @@ struct TupleColumnTypeUtils {
 	static bool isNumeric(TupleList::TupleColumnType type);
 	static bool isIntegral(TupleList::TupleColumnType type);
 	static bool isFloating(TupleList::TupleColumnType type);
+	static bool isTimestampFamily(TupleList::TupleColumnType type);
 
 	static bool isAbstract(TupleList::TupleColumnType type);
 	static bool isDeclarable(TupleList::TupleColumnType type);
@@ -1416,13 +1474,13 @@ TupleValue TupleList::ReadableTuple::get(const Column &column) const{
 		}
 		type &= static_cast<TupleColumnType>(~TYPE_MASK_NULLABLE);
 	}
-	if (TupleColumnTypeUtils::isFixed(type)) {
+	if (TupleColumnTypeUtils::isSomeFixed(type)) {
 		return TupleValue(addr, type);
 	}
 	else if (TupleColumnTypeUtils::isAny(type)) {
 		memcpy(&type, addr, sizeof(type));
 		addr += sizeof(type);
-		if (TupleColumnTypeUtils::isFixed(type)) {
+		if (TupleColumnTypeUtils::isSomeFixed(type)) {
 			return TupleValue(addr, type);
 		}
 	}
@@ -1474,7 +1532,7 @@ inline TupleString TupleList::ReadableTuple::getAs(const Column &column) const {
 	const uint8_t* blockTopAddr = reader_->getBlockTopAddr(pos_);
 	const uint8_t* addr = blockTopAddr + reader_->calcBlockOffset(pos_) + column.offset_;
 #endif
-	assert(!TupleColumnTypeUtils::isFixed(column.type_));
+	assert(!TupleColumnTypeUtils::isSomeFixed(column.type_));
 	assert(!TupleColumnTypeUtils::isAny(column.type_));
 	assert(TupleColumnTypeUtils::isSingleVar(column.type_));
 	uint64_t varOffset;
@@ -1574,6 +1632,46 @@ inline double TupleList::ReadableTuple::getAs(const Column &column) const {
 	const uint8_t* addr = blockTopAddr + reader_->calcBlockOffset(pos_) + column.offset_;
 #endif
 	return *reinterpret_cast<const double*>(addr);
+}
+
+template<>
+inline MicroTimestamp TupleList::ReadableTuple::getAs(const Column &column) const {
+#ifndef NDEBUG
+	if (!reader_) {
+		GS_THROW_USER_ERROR(GS_ERROR_LTS_TUPLELIST_IS_NOT_EXIST,
+			"Reader is not exist(or already closed).");
+	}
+	assert(!checkIsNull(column.pos_));
+	assert(TupleList::TYPE_MICRO_TIMESTAMP ==
+			(column.type_ & ~TupleList::TYPE_MASK_NULLABLE));
+#endif
+#if defined(NDEBUG)
+	const uint8_t* addr = addr_ + column.offset_;
+#else
+	const uint8_t* blockTopAddr = reader_->getBlockTopAddr(pos_);
+	const uint8_t* addr = blockTopAddr + reader_->calcBlockOffset(pos_) + column.offset_;
+#endif
+	return *reinterpret_cast<const MicroTimestamp*>(addr);
+}
+
+template<>
+inline TupleNanoTimestamp TupleList::ReadableTuple::getAs(const Column &column) const {
+#ifndef NDEBUG
+	if (!reader_) {
+		GS_THROW_USER_ERROR(GS_ERROR_LTS_TUPLELIST_IS_NOT_EXIST,
+			"Reader is not exist(or already closed).");
+	}
+	assert(!checkIsNull(column.pos_));
+	assert(TupleList::TYPE_NANO_TIMESTAMP ==
+			(column.type_ & ~TupleList::TYPE_MASK_NULLABLE));
+#endif
+#if defined(NDEBUG)
+	const uint8_t* addr = addr_ + column.offset_;
+#else
+	const uint8_t* blockTopAddr = reader_->getBlockTopAddr(pos_);
+	const uint8_t* addr = blockTopAddr + reader_->calcBlockOffset(pos_) + column.offset_;
+#endif
+	return TupleNanoTimestamp(reinterpret_cast<const NanoTimestamp*>(addr));
 }
 
 inline bool TupleList::ReadableTuple::checkIsNull(uint16_t colNumber) const {
@@ -1684,13 +1782,13 @@ template<> inline TupleValue TupleList::Reader::getAs(const Column &column) {
 		}
 		type &= static_cast<TupleColumnType>(~TYPE_MASK_NULLABLE);
 	}
-	if (TupleColumnTypeUtils::isFixed(type)) {
+	if (TupleColumnTypeUtils::isSomeFixed(type)) {
 		return TupleValue(addr, type);
 	}
 	else if (TupleColumnTypeUtils::isAny(type)) {
 		memcpy(&type, addr, sizeof(type));
 		addr += sizeof(type);
-		if (TupleColumnTypeUtils::isFixed(type)) {
+		if (TupleColumnTypeUtils::isSomeFixed(type)) {
 			return TupleValue(addr, type);
 		}
 	}
@@ -1726,7 +1824,7 @@ template<> inline TupleString TupleList::Reader::getAs(const Column &column) {
 #endif
 	assert(!checkIsNull(column.pos_));
 	const uint8_t* addr = fixedAddr_ + column.offset_;
-	assert(!TupleColumnTypeUtils::isFixed(column.type_));
+	assert(!TupleColumnTypeUtils::isSomeFixed(column.type_));
 	assert(!TupleColumnTypeUtils::isAny(column.type_));
 	assert(TupleColumnTypeUtils::isSingleVar(column.type_));
 	uint64_t varOffset;
@@ -1814,6 +1912,41 @@ template<> inline double TupleList::Reader::getAs(const Column &column) {
 	const uint8_t* addr = fixedAddr_ + column.offset_;
 	return *reinterpret_cast<const double*>(addr);
 }
+
+template<> inline MicroTimestamp TupleList::Reader::getAs(const Column &column) {
+#ifndef NDEBUG
+	if (!tupleList_) {
+		GS_THROW_USER_ERROR(GS_ERROR_LTS_TUPLELIST_IS_NOT_EXIST,
+			"TupleList is not exist(or already closed).");
+	}
+	if (!existsDirect()) {
+		GS_THROW_USER_ERROR(GS_ERROR_LTS_READER_NOT_SUPPORTED,
+			"Tuple is not exist.");
+	}
+#endif
+	assert(!checkIsNull(column.pos_));
+	assert((TupleList::TYPE_MICRO_TIMESTAMP ==
+					(column.type_ & ~TupleList::TYPE_MASK_NULLABLE)));
+	const uint8_t* addr = fixedAddr_ + column.offset_;
+	return *reinterpret_cast<const MicroTimestamp*>(addr);
+}
+
+template<> inline TupleNanoTimestamp TupleList::Reader::getAs(const Column &column) {
+#ifndef NDEBUG
+	if (!tupleList_) {
+		GS_THROW_USER_ERROR(GS_ERROR_LTS_TUPLELIST_IS_NOT_EXIST,
+			"TupleList is not exist(or already closed).");
+	}
+	if (!existsDirect()) {
+		GS_THROW_USER_ERROR(GS_ERROR_LTS_READER_NOT_SUPPORTED,
+			"Tuple is not exist.");
+	}
+#endif
+	assert(!checkIsNull(column.pos_));
+	const uint8_t* addr = fixedAddr_ + column.offset_;
+	return TupleNanoTimestamp(reinterpret_cast<const NanoTimestamp*>(addr));
+}
+
 inline bool TupleList::Reader::exists() {
 	if (fixedAddr_ >= fixedEndAddr_) {
 		return existsDetail();
@@ -1920,14 +2053,19 @@ inline void TupleList::WritableTuple::set(const Column &column, const TupleValue
 		setIsNull(column.pos_, TupleColumnTypeUtils::isNull(value.getType()));
 	}
 
-	if (TupleColumnTypeUtils::isFixed(value.getType())) {
+	if (TupleColumnTypeUtils::isSomeFixed(value.getType())) {
 		void* addr = fixedAddr + column.offset_;
 		if (TupleColumnTypeUtils::isAny(column.type_)) {
 			const TupleColumnType &type = value.getType();
 			TupleValueUtils::memWrite(addr, &type, sizeof(type));
 		}
-		memcpy(addr, value.fixedData(),
-			   TupleColumnTypeUtils::getFixedSize(value.getType()));
+		const void *srcAddr = value.fixedData();
+		if (TupleColumnTypeUtils::isLargeFixed(value.getType())) {
+			srcAddr = value.getRawData();
+		}
+		memcpy(
+				addr, srcAddr,
+				TupleColumnTypeUtils::getFixedSize(value.getType()));
 	}
 	else {
 		if (TupleList::TYPE_STRING == value.getType()) {
@@ -1985,7 +2123,7 @@ inline void TupleList::WritableTuple::setBy(const Column &column, const int64_t 
 		setIsNull(column.pos_, false);
 	}
 #if defined(NDEBUG)
-	*((int64_t*)((uint8_t*)addr_ + column.offset_)) = value;
+	*reinterpret_cast<int64_t*>(addr_ + column.offset_) = value;
 #else
 #ifdef NDEBUG
 	uint8_t* fixedAddr = addr_;
@@ -2023,6 +2161,51 @@ inline void TupleList::WritableTuple::setBy(const Column &column, const float &v
 
 inline void TupleList::WritableTuple::setBy(const Column &column, const double &value) {
 	assert(TupleList::TYPE_DOUBLE ==
+			(column.type_ & ~TupleList::TYPE_MASK_NULLABLE));
+	if (TupleColumnTypeUtils::isNullable(column.type_)) {
+		assert(writer_->isNullable_);
+		setIsNull(column.pos_, false);
+	}
+#ifdef NDEBUG
+	uint8_t* fixedAddr = addr_;
+#else
+	uint8_t* fixedAddr = writer_->getFixedAddr(pos_);
+#endif
+	assert(fixedAddr);
+	{
+		void* addr = fixedAddr + column.offset_;
+		memcpy(addr, &value, sizeof(value));
+	}
+	assert(!writer_->block_.isSwapped());
+}
+
+inline void TupleList::WritableTuple::setBy(
+		const Column &column, const MicroTimestamp &value) {
+	assert(TupleList::TYPE_MICRO_TIMESTAMP ==
+			(column.type_ & ~TupleList::TYPE_MASK_NULLABLE));
+	if (TupleColumnTypeUtils::isNullable(column.type_)) {
+		assert(writer_->isNullable_);
+		setIsNull(column.pos_, false);
+	}
+#if defined(NDEBUG)
+	*reinterpret_cast<MicroTimestamp*>(addr_ + column.offset_) = value;
+#else
+#ifdef NDEBUG
+	uint8_t* fixedAddr = addr_;
+#else
+	uint8_t* fixedAddr = writer_->getFixedAddr(pos_);
+#endif
+	assert(fixedAddr);
+	{
+		void* addr = fixedAddr + column.offset_;
+		memcpy(addr, &value, sizeof(value));
+	}
+	assert(!writer_->block_.isSwapped());
+#endif
+}
+
+inline void TupleList::WritableTuple::setBy(const Column &column, const NanoTimestamp &value) {
+	assert(TupleList::TYPE_NANO_TIMESTAMP ==
 			(column.type_ & ~TupleList::TYPE_MASK_NULLABLE));
 	if (TupleColumnTypeUtils::isNullable(column.type_)) {
 		assert(writer_->isNullable_);
@@ -2092,14 +2275,37 @@ inline bool TupleColumnTypeUtils::isNull(TupleList::TupleColumnType type) {
 	return TupleList::TYPE_NULL == type;
 }
 
-inline bool TupleColumnTypeUtils::isFixed(TupleList::TupleColumnType type) {
+inline bool TupleColumnTypeUtils::isSomeFixed(TupleList::TupleColumnType type) {
 	return 0 == (TupleList::TYPE_MASK_VAR & type);
+}
+
+inline bool TupleColumnTypeUtils::isNormalFixed(TupleList::TupleColumnType type) {
+	if (!isSomeFixed(type)) {
+		return false;
+	}
+	const size_t rawFixedSize = type & TupleList::TYPE_MASK_FIXED_SIZE;
+	const size_t normalFixedSize = 1 << TupleList::TYPE_BITS_NORMAL_SIZE;
+	return rawFixedSize <= normalFixedSize;
+}
+
+inline bool TupleColumnTypeUtils::isLargeFixed(TupleList::TupleColumnType type) {
+	if (!isSomeFixed(type)) {
+		return false;
+	}
+	const size_t rawFixedSize = type & TupleList::TYPE_MASK_FIXED_SIZE;
+	const size_t normalFixedSize = 1 << TupleList::TYPE_BITS_NORMAL_SIZE;
+	return rawFixedSize > normalFixedSize;
 }
 
 inline bool TupleColumnTypeUtils::isSingleVar(TupleList::TupleColumnType type) {
 	return (0 != (TupleList::TYPE_MASK_VAR & type))
 		&& (0 == (TupleList::TYPE_MASK_ARRAY & type))
 		&& (type != TupleList::TYPE_BLOB);
+}
+
+inline bool TupleColumnTypeUtils::isSingleVarOrLarge(
+		TupleList::TupleColumnType type) {
+	return isSingleVar(type) || isLargeFixed(type);
 }
 
 inline bool TupleColumnTypeUtils::isArray(TupleList::TupleColumnType type) {
@@ -2130,6 +2336,16 @@ inline bool TupleColumnTypeUtils::isIntegral(TupleList::TupleColumnType type) {
 inline bool TupleColumnTypeUtils::isFloating(TupleList::TupleColumnType type) {
 	return (0 == (TupleList::TYPE_MASK_VAR & type))
 		&& (2 == ((type & TupleList::TYPE_MASK_SUB) >> TupleList::TYPE_BITS_SUB_TYPE));
+}
+
+inline bool TupleColumnTypeUtils::isTimestampFamily(
+		TupleList::TupleColumnType type) {
+	const TupleList::TupleColumnType extMask =
+			(~(TupleList::TYPE_MASK_TIMESTAMP_BASE ^
+					TupleList::TYPE_MASK_TIMESTAMP_EXT)) &
+			(~(TupleList::TYPE_MASK_FIXED_SIZE |
+			TupleList::TYPE_MASK_NULLABLE));
+	return (0 == ((TupleList::TYPE_TIMESTAMP ^ type) & extMask));
 }
 
 inline bool TupleColumnTypeUtils::isAbstract(TupleList::TupleColumnType type) {
@@ -2185,6 +2401,12 @@ inline TupleValue::TupleValue(const void *rawData, TupleList::TupleColumnType ty
 		case TupleList::TYPE_TIMESTAMP:
 			memcpy(data_.fixedData_, rawData, sizeof(int64_t));
 			break;
+		case TupleList::TYPE_MICRO_TIMESTAMP:
+			memcpy(data_.fixedData_, rawData, sizeof(int64_t));
+			break;
+		case TupleList::TYPE_NANO_TIMESTAMP:
+			data_.varData_ = rawData;
+			break;
 		case TupleList::TYPE_BOOL:
 			memcpy(data_.fixedData_, rawData, sizeof(int8_t));
 			break;
@@ -2195,13 +2417,15 @@ inline TupleValue::TupleValue(const void *rawData, TupleList::TupleColumnType ty
 				memcpy(&destType, rawData, sizeof(destType));
 				type_ = destType;
 				addr += sizeof(destType);
-				if (TupleColumnTypeUtils::isFixed(getType())) {
+				if (TupleColumnTypeUtils::isNormalFixed(getType())) {
 					memcpy(data_.fixedData_, addr, TupleColumnTypeUtils::getFixedSize(getType()));
 				}
 				else if (TupleList::TYPE_STRING == getType()) {
 					data_.varData_ = addr;
 				}
 				else {
+					assert(TupleColumnTypeUtils::isLob(getType()) ||
+							TupleColumnTypeUtils::isLargeFixed(getType()));
 					data_.varData_ = addr;
 				}
 			}
@@ -2262,6 +2486,21 @@ template<> inline TupleValue::TupleValue(const TupleString &s)
 	data_.varData_ = s.data();
 }
 
+template<> inline TupleValue::TupleValue(const MicroTimestamp &ts) :
+		data_(), type_(TupleList::TYPE_MICRO_TIMESTAMP) {
+	data_.longValue_ = ts.value_;
+}
+
+template<> inline TupleValue::TupleValue(const TupleNanoTimestamp &ts) :
+		data_(), type_(TupleList::TYPE_NANO_TIMESTAMP) {
+	data_.varData_ = &ts.get();
+}
+
+inline TupleValue::TupleValue(const int64_t &ts, const TimestampTag&) :
+		data_(), type_(TupleList::TYPE_TIMESTAMP) {
+	data_.longValue_ = ts;
+}
+
 
 template<> inline float TupleValue::get() const {
 	assert(TupleList::TYPE_FLOAT == type_);
@@ -2281,6 +2520,19 @@ template<> inline int64_t TupleValue::get() const {
 	return data_.longValue_;
 }
 
+template<> inline MicroTimestamp TupleValue::get() const {
+	assert(TupleList::TYPE_MICRO_TIMESTAMP == type_);
+	MicroTimestamp ts;
+	ts.value_ = data_.longValue_;
+	return ts;
+}
+
+template<> inline TupleNanoTimestamp TupleValue::get() const {
+	assert(TupleList::TYPE_NANO_TIMESTAMP == type_);
+	return TupleNanoTimestamp(
+			static_cast<const NanoTimestamp*>(data_.rawData_));
+}
+
 template<> inline const void* TupleValue::get() const {
 	return data_.varData_;
 }
@@ -2295,12 +2547,12 @@ inline TupleList::TupleColumnType TupleValue::getType() const {
 }
 
 inline const void* TupleValue::fixedData() const {
-	assert(TupleColumnTypeUtils::isFixed(getType()));
+	assert(TupleColumnTypeUtils::isNormalFixed(getType()));
 	return data_.fixedData_;
 }
 
 inline size_t TupleValue::varSize() const {
-	assert(!TupleColumnTypeUtils::isFixed(getType()));
+	assert(!TupleColumnTypeUtils::isSomeFixed(getType()));
 	if (data_.varData_) {
 		uint32_t len;
 		TupleValueUtils::decodeInt32(data_.varData_, len);
@@ -2339,7 +2591,7 @@ inline const void* TupleValue::varData() const {
 }
 
 inline const void* TupleValue::getRawData() const {
-	return data_.varData_;
+	return data_.rawData_;
 }
 
 inline void* TupleValue::getRawData() {
@@ -2480,6 +2732,15 @@ void TupleValue::Coder<Base>::encodeTupleValue(
 	case TupleList::TYPE_TIMESTAMP:
 		stream.writeNumeric(value.get<int64_t>(), attr, DEFAULT_PRECISION);
 		break;
+	case TupleList::TYPE_MICRO_TIMESTAMP:
+		stream.writeNumeric(
+				value.get<MicroTimestamp>().value_, attr, DEFAULT_PRECISION);
+		break;
+	case TupleList::TYPE_NANO_TIMESTAMP:
+		stream.writeBinary(
+				value.get<TupleNanoTimestamp>().data(),
+				sizeof(NanoTimestamp), attr);
+		break;
 	case TupleList::TYPE_BOOL:
 		stream.writeBool(!!getNumericValue<int8_t>(value), attr);
 		break;
@@ -2561,7 +2822,24 @@ void TupleValue::Coder<Base>::decodeTupleValue(
 		{
 			const int64_t tsValue = stream.template readNumeric<int64_t>(
 					attr, DEFAULT_PRECISION);
-			value = TupleValue(&tsValue, TupleList::TYPE_TIMESTAMP);
+			value = TupleValue(tsValue, TimestampTag());
+		}
+		break;
+	case TupleList::TYPE_MICRO_TIMESTAMP:
+		{
+			MicroTimestamp tsValue;
+			tsValue.value_ = stream.template readNumeric<int64_t>(
+					attr, DEFAULT_PRECISION);
+			value = TupleValue(tsValue);
+		}
+		break;
+	case TupleList::TYPE_NANO_TIMESTAMP:
+		{
+			NanoTimestampBuilder tsBuilder(getContext());
+			util::ObjectCoder::StringBuilder<
+					NanoTimestampBuilder, uint8_t> builder(tsBuilder);
+			stream.readBinary(builder, attr);
+			value = TupleNanoTimestamp(tsBuilder.build());
 		}
 		break;
 	case TupleList::TYPE_BOOL:
@@ -2777,6 +3055,36 @@ inline void TupleValueUtils::getPartData(const void* rawAddr, const void* &data,
 	data = addr;
 }
 
+
+inline TupleNanoTimestamp::TupleNanoTimestamp() :
+		ts_(&Constants::EMPTY_VALUE) {
+}
+
+inline TupleNanoTimestamp::TupleNanoTimestamp(const NanoTimestamp *ts) :
+		ts_(ts) {
+	assert(ts != NULL);
+}
+
+inline TupleNanoTimestamp::TupleNanoTimestamp(const TupleValue &value) :
+		ts_(static_cast<const NanoTimestamp*>(value.getRawData())) {
+}
+
+inline TupleNanoTimestamp::operator TupleValue() const {
+	return TupleValue(*this);
+}
+
+inline TupleNanoTimestamp::operator NanoTimestamp() const {
+	return get();
+}
+
+inline const NanoTimestamp& TupleNanoTimestamp::get() const {
+	assert(ts_ != NULL);
+	return *ts_;
+}
+
+inline const void* TupleNanoTimestamp::data() const {
+	return ts_;
+}
 
 inline TupleString::TupleString() :
 		data_(emptyData()) {

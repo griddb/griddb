@@ -76,7 +76,7 @@ protected:
 	util::FixedSizeAllocator<util::Mutex>* resultSetPool_;
 	TransactionManager* txnMgr_;
 	ChunkManager* chunkManager_;
-	LogManager<NoLocker>* logManager_;
+	LogManager<MutexLocker>* logManager_;
 
 public:
 	enum class Support {
@@ -106,7 +106,7 @@ public:
 	DataStoreBase(util::StackAllocator* stAlloc,
 		util::FixedSizeAllocator<util::Mutex>* resultSetPool,
 		ConfigTable* configTable, TransactionManager* txnMgr, ChunkManager* chunkManager,
-		LogManager<NoLocker>* logManager, KeyDataStore* keyStore) {
+		LogManager<MutexLocker>* logManager, KeyDataStore* keyStore) {
 		stAlloc_ = stAlloc;
 		resultSetPool_ = resultSetPool;
 		txnMgr_ = txnMgr;
@@ -164,7 +164,7 @@ private:
 	static const size_t STORE_MEM_POOL_SIZE_BITS = 12; 
 	static const uint64_t ADJUST_MEMORY_TIME_INTERVAL_ = 30 * 1000 * 1000;  
 public:
-	static const int32_t PARTIAL_CHECKPOINT_INTERVAL = 10;
+	static const int32_t PARTIAL_CHECKPOINT_INTERVAL = 2;
 	static const int32_t VARINT_MAX_LEN = 9;
 
 	static bool dumpMode_; 
@@ -206,7 +206,7 @@ private:
 	DataStoreBase* dataStore_;
 	DataStoreBase* keyStore_;
 
-	LogManager<NoLocker>* defaultLogManager_;
+	LogManager<MutexLocker>* defaultLogManager_;
 	FixedMemoryPool logMemoryPool_;
 	util::StackAllocator logStackAlloc_;
 	WALBuffer* cpWALBuffer_;
@@ -268,7 +268,7 @@ public:
 
 	void finalizeRecovery(bool commit);
 
-	bool needCheckpoint();
+	bool needCheckpoint(bool updateLastLsn);
 
 	void fullCheckpoint(CheckpointPhase phase);
 
@@ -287,7 +287,7 @@ public:
 	void endCheckpoint0(CheckpointPhase phase);
 
 	void endCheckpoint(EndCheckpointMode x);
-	LogIterator<NoLocker> endCheckpointPrepareReleaseBlock();
+	LogIterator<MutexLocker> endCheckpointPrepareRelaseBlock();
 	void endCheckpointReleaseBlock(const Log* log);
 	void removeLogFiles();
 	int64_t postCheckpoint(
@@ -316,7 +316,7 @@ public:
 
 	DataStoreBase& keyStore();
 
-	LogManager<NoLocker>& logManager();
+	LogManager<MutexLocker>& logManager();
 	ChunkManager& chunkManager();
 
 	ConfigTable& config() { return configTable_; }
@@ -567,7 +567,7 @@ inline DataStoreBase& Partition::keyStore() {
 /*!
 	@brief ログマネージャ取得
 */
-inline LogManager<NoLocker>& Partition::logManager() {
+inline LogManager<MutexLocker>& Partition::logManager() {
 	return *defaultLogManager_;
 }
 /*!

@@ -28,12 +28,24 @@ bool SQLValues::TypeUtils::isNull(TupleColumnType type) {
 	return BaseUtils::isNull(type);
 }
 
-bool SQLValues::TypeUtils::isFixed(TupleColumnType type) {
-	return BaseUtils::isFixed(type);
+bool SQLValues::TypeUtils::isSomeFixed(TupleColumnType type) {
+	return BaseUtils::isSomeFixed(type);
+}
+
+bool SQLValues::TypeUtils::isNormalFixed(TupleColumnType type) {
+	return BaseUtils::isNormalFixed(type);
+}
+
+bool SQLValues::TypeUtils::isLargeFixed(TupleColumnType type) {
+	return BaseUtils::isLargeFixed(type);
 }
 
 bool SQLValues::TypeUtils::isSingleVar(TupleColumnType type) {
 	return BaseUtils::isSingleVar(toNonNullable(type));
+}
+
+bool SQLValues::TypeUtils::isSingleVarOrLarge(TupleColumnType type) {
+	return BaseUtils::isSingleVarOrLarge(toNonNullable(type));
 }
 
 bool SQLValues::TypeUtils::isArray(TupleColumnType type) {
@@ -50,6 +62,10 @@ bool SQLValues::TypeUtils::isIntegral(TupleColumnType type) {
 
 bool SQLValues::TypeUtils::isFloating(TupleColumnType type) {
 	return BaseUtils::isFloating(type);
+}
+
+bool SQLValues::TypeUtils::isTimestampFamily(TupleColumnType type) {
+	return BaseUtils::isTimestampFamily(type);
 }
 
 bool SQLValues::TypeUtils::isDeclarable(TupleColumnType type) {
@@ -139,6 +155,17 @@ TupleColumnType SQLValues::TypeUtils::findPromotionType(
 
 	const TypeCategory category1 = getStaticTypeCategory(base1);
 	const TypeCategory category2 = getStaticTypeCategory(base2);
+
+	if (category1 == category2 &&
+			category1 == TYPE_CATEGORY_TIMESTAMP) {
+		if (getTimePrecisionLevel(base1) >=
+				getTimePrecisionLevel(base2)) {
+			return setNullable(base1, eitherNullable);
+		}
+		else {
+			return setNullable(base2, eitherNullable);
+		}
+	}
 
 	const int32_t maskedCategory1 =
 			category1 & ~TYPE_CATEGORY_NUMERIC_MASK;
@@ -234,12 +261,18 @@ TupleColumnType SQLValues::TypeUtils::findConversionType(
 				(srcCategory == TYPE_CATEGORY_BOOL &&
 						desiredCategory == TYPE_CATEGORY_LONG) ||
 				(srcCategory == TYPE_CATEGORY_LONG &&
-						desiredCategory == TYPE_CATEGORY_BOOL)) {
+						desiredCategory == TYPE_CATEGORY_BOOL) ||
+				(srcCategory == TYPE_CATEGORY_TIMESTAMP &&
+						desiredCategory == TYPE_CATEGORY_TIMESTAMP)) {
 			return setNullable(desiredBase, srcNullable);
 		}
 	}
 
-	if ((srcCategory & TYPE_CATEGORY_NUMERIC_FLAG) != 0 &&
+	if (srcCategory == TYPE_CATEGORY_TIMESTAMP &&
+			desiredCategory == TYPE_CATEGORY_TIMESTAMP) {
+		return setNullable(desiredBase, srcNullable);
+	}
+	else if ((srcCategory & TYPE_CATEGORY_NUMERIC_FLAG) != 0 &&
 			(desiredCategory & TYPE_CATEGORY_NUMERIC_FLAG) != 0) {
 		if (desiredCategory == TYPE_CATEGORY_NUMERIC_FLAG) {
 			if (srcCategory == TYPE_CATEGORY_LONG) {
@@ -287,7 +320,7 @@ SQLValues::TypeUtils::getStaticTypeCategory(TupleColumnType type) {
 	else if (type == TupleTypes::TYPE_BOOL) {
 		return TYPE_CATEGORY_BOOL;
 	}
-	else if (type == TupleTypes::TYPE_TIMESTAMP) {
+	else if (TypeUtils::isTimestampFamily(type)) {
 		return TYPE_CATEGORY_TIMESTAMP;
 	}
 	else if (type == TupleTypes::TYPE_NUMERIC) {
@@ -302,6 +335,31 @@ bool SQLValues::TypeUtils::isNumerical(TupleColumnType type) {
 	return isIntegral(type) || isFloating(type);
 }
 
+util::DateTime::FieldType SQLValues::TypeUtils::getTimePrecision(
+		TupleColumnType type) {
+	switch (type) {
+	case TupleTypes::TYPE_MICRO_TIMESTAMP:
+		return util::DateTime::FIELD_MICROSECOND;
+	case TupleTypes::TYPE_NANO_TIMESTAMP:
+		return util::DateTime::FIELD_NANOSECOND;
+	default:
+		assert(type == TupleTypes::TYPE_TIMESTAMP);
+		return util::DateTime::FIELD_MILLISECOND;
+	}
+}
+
+int32_t SQLValues::TypeUtils::getTimePrecisionLevel(TupleColumnType type) {
+	switch (type) {
+	case TupleTypes::TYPE_MICRO_TIMESTAMP:
+		return 6;
+	case TupleTypes::TYPE_NANO_TIMESTAMP:
+		return 9;
+	default:
+		assert(type == TupleTypes::TYPE_TIMESTAMP);
+		return 3;
+	}
+}
+
 void SQLValues::TypeUtils::setUpTupleInfo(
 		TupleList::Info &info, const TupleColumnType *list, size_t count) {
 	info.columnTypeList_ = list;
@@ -309,7 +367,18 @@ void SQLValues::TypeUtils::setUpTupleInfo(
 }
 
 const char8_t* SQLValues::TypeUtils::toString(
-		TupleColumnType type, bool nullOnUnknown) {
+		TupleColumnType type, bool nullOnUnknown, bool internal) {
+	if (!internal) {
+		switch (type) {
+		case TupleTypes::TYPE_MICRO_TIMESTAMP:
+			return "TIMESTAMP(6)";
+		case TupleTypes::TYPE_NANO_TIMESTAMP:
+			return "TIMESTAMP(9)";
+		default:
+			break;
+		}
+	}
+
 	const char8_t *str = TupleList::TupleColumnTypeCoder()(type);
 	if (str == NULL && !nullOnUnknown) {
 		return "";
@@ -442,8 +511,15 @@ SQLValues::ValueContext::Source SQLValues::ValueContext::ofAllocator(
 }
 
 SQLValues::ValueContext::Source SQLValues::ValueContext::ofVarContext(
-		VarContext &varCxt, util::StackAllocator *alloc) {
+		VarContext &varCxt, util::StackAllocator *alloc,
+		bool noVarAllocAllowed) {
 	if (varCxt.getVarAllocator() == NULL) {
+		if (noVarAllocAllowed) {
+			util::StackAllocator *foundAlloc = findAllocator(varCxt, alloc);
+			if (foundAlloc != NULL) {
+				return ofAllocator(*foundAlloc);
+			}
+		}
 		assert(false);
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
 	}
@@ -467,6 +543,13 @@ SQLValues::VarAllocator& SQLValues::ValueContext::getVarAllocator() {
 	return *varAlloc;
 }
 
+util::StdAllocator<void, void> SQLValues::ValueContext::getStdAllocator() {
+	if (varCxt_->getVarAllocator() != NULL) {
+		return util::StdAllocator<void, void>(getVarAllocator());
+	}
+	return util::StdAllocator<void, void>(getAllocator());
+}
+
 size_t SQLValues::ValueContext::getVarContextDepth() {
 	VarContext &varCxt = getVarContext();
 	size_t depth = 0;
@@ -487,7 +570,8 @@ int64_t SQLValues::ValueContext::getCurrentTimeMillis() {
 
 	const int64_t time = extCxt_->getCurrentTimeMillis();
 	try {
-		return SQLValues::ValueUtils::checkTimestamp(time);
+		return SQLValues::ValueUtils::checkTimestamp(
+				DateTimeElements(time)).toTimestamp(Types::TimestampTag());
 	}
 	catch (UserException &e) {
 		GS_RETHROW_USER_ERROR_CODED(
@@ -518,6 +602,14 @@ void SQLValues::ValueContext::setTimeZone(const util::TimeZone *zone) {
 	}
 }
 
+util::StackAllocator* SQLValues::ValueContext::findAllocator(
+		VarContext &varCxt, util::StackAllocator *alloc) {
+	if (alloc != NULL) {
+		return alloc;
+	}
+	return varCxt.getStackAllocator();
+}
+
 size_t SQLValues::ValueContext::resolveMaxStringLength() {
 	size_t len;
 	do {
@@ -545,6 +637,92 @@ SQLValues::ValueContext::Source::Source(
 }
 
 
+SQLValues::ProfileElement::ProfileElement() :
+		candidate_(0),
+		target_(0) {
+}
+
+void SQLValues::ProfileElement::merge(const ProfileElement &src) {
+	candidate_ += src.candidate_;
+	target_ += src.target_;
+}
+
+
+SQLValues::ValueHolder::ValueHolder(SQLValues::ValueContext &valueCxt) :
+		varCxt_(valueCxt.getVarContext()) {
+}
+
+SQLValues::ValueHolder::~ValueHolder() {
+	reset();
+}
+
+void SQLValues::ValueHolder::assign(TupleValue &value) {
+	reset();
+	value_ = value;
+	value = TupleValue();
+}
+
+TupleValue SQLValues::ValueHolder::release() {
+	TupleValue ret = value_;
+	value_ = TupleValue();
+	return ret;
+}
+
+void SQLValues::ValueHolder::reset() {
+	if (isDeallocatableContext(varCxt_)) {
+		ValueContext cxt(ValueContext::ofVarContext(varCxt_));
+		ValueUtils::destroyValue(cxt, value_);
+	}
+	value_ = TupleValue();
+}
+
+bool SQLValues::ValueHolder::isDeallocatableContext(VarContext &varCxt) {
+	return (varCxt.getVarAllocator() != NULL);
+}
+
+bool SQLValues::ValueHolder::isDeallocatableValueType(TupleColumnType type) {
+	assert(!TypeUtils::isAny(type) && !TypeUtils::isNullable(type));
+	return !TypeUtils::isNull(type) && !TypeUtils::isNormalFixed(type);
+}
+
+
+SQLValues::ValueSetHolder::ValueSetHolder(SQLValues::ValueContext &valueCxt) :
+		varCxt_(valueCxt.getVarContext()),
+		values_(valueCxt.getStdAllocator()) {
+}
+
+SQLValues::ValueSetHolder::~ValueSetHolder() {
+	reset();
+}
+
+void SQLValues::ValueSetHolder::add(TupleValue &value) {
+	if (!ValueHolder::isDeallocatableContext(varCxt_) ||
+			!ValueHolder::isDeallocatableValueType(value.getType())) {
+		return;
+	}
+	ValueContext cxt(ValueContext::ofVarContext(varCxt_));
+	ValueHolder holder(cxt);
+	values_.push_back(TupleValue());
+	values_.back() = holder.release();
+}
+
+void SQLValues::ValueSetHolder::reset() {
+	if (!ValueHolder::isDeallocatableContext(varCxt_)) {
+		return;
+	}
+	ValueContext cxt(ValueContext::ofVarContext(varCxt_));
+	ValueHolder holder(cxt);
+	while (!values_.empty()) {
+		holder.assign(values_.back());
+		values_.pop_back();
+	}
+}
+
+SQLValues::VarContext& SQLValues::ValueSetHolder::getVarContext() {
+	return varCxt_;
+}
+
+
 SQLValues::SummaryColumn::SummaryColumn(const Source &src) :
 		tupleColumn_(src.tupleColumn_),
 		offset_(src.offset_),
@@ -563,17 +741,6 @@ SQLValues::SummaryColumn::Source::Source() :
 		pos_(-1),
 		ordering_(-1),
 		tupleColumnPos_(-1) {
-}
-
-
-SQLValues::ProfileElement::ProfileElement() :
-		candidate_(0),
-		target_(0) {
-}
-
-void SQLValues::ProfileElement::merge(const ProfileElement &src) {
-	candidate_ += src.candidate_;
-	target_ += src.target_;
 }
 
 
@@ -750,7 +917,7 @@ void SQLValues::ArrayTuple::assign(
 		TupleValue value = tuple.get(inColumnList[i]);
 		if (value.getType() != compType &&
 				!TypeUtils::isNull(value.getType())) {
-			value = ValuePromoter(compType)(value);
+			value = ValuePromoter(compType)(&cxt, value);
 		}
 		set(i, cxt, value);
 	}
@@ -803,7 +970,8 @@ uint8_t* SQLValues::ArrayTuple::prepareVarData(
 		ValueEntry &entry, uint32_t size) {
 	assert(size > 0);
 	assert(entry.type_ == TupleTypes::TYPE_NULL ||
-			TypeUtils::isSingleVar(static_cast<TupleColumnType>(entry.type_)));
+			TypeUtils::isSingleVarOrLarge(
+					static_cast<TupleColumnType>(entry.type_)));
 
 	VarData *&varData = entry.data_.var_;
 	if (varData == NULL) {
@@ -841,7 +1009,7 @@ SQLValues::ArrayTuple::EmptyAssigner::EmptyAssigner(
 	for (ColumnTypeList::const_iterator it = typeList.begin();
 			it != typeList.end(); ++it) {
 		if (!TypeUtils::isNullable(*it) && !TypeUtils::isAny(*it) &&
-				!TypeUtils::isFixed(*it)) {
+				!TypeUtils::isNormalFixed(*it)) {
 			return;
 		}
 	}
@@ -869,6 +1037,63 @@ void SQLValues::SummaryTuple::initializeBodyDetail(
 	}
 }
 
+void SQLValues::SummaryTuple::swapValue(
+		SummaryTupleSet &tupleSet, SummaryTuple &tuple1, uint32_t pos1,
+		SummaryTuple &tuple2, uint32_t pos2, uint32_t count) {
+	const ColumnList &totalColumnList = tupleSet.getTotalColumnList();
+
+	assert(pos1 + count <= totalColumnList.size());
+	assert(pos2 + count <= totalColumnList.size());
+
+	ColumnList::const_iterator colIt1  = totalColumnList.begin() + pos1;
+	ColumnList::const_iterator colIt2  = totalColumnList.begin() + pos2;
+
+	uint64_t localData[2];
+	void *localAddr = &localData;
+	for (uint32_t i = 0; i < count; i++) {
+		const SummaryColumn &column1 = totalColumnList[pos1 + i];
+		const SummaryColumn &column2 = totalColumnList[pos2 + i];
+
+		if (TypeUtils::isAny(column1.getTupleColumn().getType())) {
+			continue;
+		}
+
+		void *field1 = tuple1.getField(column1.getOffset());
+		void *field2 = tuple2.getField(column2.getOffset());
+
+		const size_t size1 = tupleSet.getFixedFieldSize(pos1 + i);
+		const size_t size2 = tupleSet.getFixedFieldSize(pos2 + i);
+		if (size1 != size2 || size1 > sizeof(localData) ||
+				column1.getTupleColumn().getType() !=
+				column2.getTupleColumn().getType()) {
+			assert(false);
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+		}
+
+		const bool null1 = tuple1.isNull(column1);
+		const bool null2 = tuple2.isNull(column2);
+
+		if (null1) {
+			if (null2) {
+				continue;
+			}
+			tuple1.setNullDetail(column1, false);
+			tuple2.setNullDetail(column2, true);
+			memcpy(field1, field2, size1);
+		}
+		else if (null2) {
+			tuple1.setNullDetail(column1, true);
+			tuple2.setNullDetail(column2, false);
+			memcpy(field2, field1, size1);
+		}
+		else {
+			memcpy(localAddr, field1, size1);
+			memcpy(field1, field2, size1);
+			memcpy(field2, localAddr, size1);
+		}
+	}
+}
+
 
 SQLValues::SummaryTupleSet::SummaryTupleSet(
 		ValueContext &cxt, SummaryTupleSet *parent) :
@@ -886,6 +1111,7 @@ SQLValues::SummaryTupleSet::SummaryTupleSet(
 		subFieldReaderList_(alloc_),
 		getterFuncList_(alloc_),
 		setterFuncList_(alloc_),
+		promotedSetterFuncList_(alloc_),
 		readableTupleRequired_(false),
 		keyNullIgnorable_(false),
 		orderedDigestRestricted_(false),
@@ -962,7 +1188,7 @@ void SQLValues::SummaryTupleSet::setHeadNullAccessible(bool accessible) {
 
 bool SQLValues::SummaryTupleSet::isDeepReaderColumnSupported(
 		TupleColumnType type) {
-	return (TypeUtils::isAny(type) || TypeUtils::isFixed(type) ||
+	return (TypeUtils::isAny(type) || TypeUtils::isSomeFixed(type) ||
 			TypeUtils::isSingleVar(type));
 }
 
@@ -1045,7 +1271,7 @@ void SQLValues::SummaryTupleSet::completeColumns() {
 
 		const TupleColumnType type = it->type_;
 		uint32_t fieldSize = 0;
-		if (TypeUtils::isFixed(type)) {
+		if (TypeUtils::isSomeFixed(type)) {
 			fieldSize = static_cast<uint32_t>(TypeUtils::getFixedSize(type));
 		}
 		else if (!TypeUtils::isAny(type)) {
@@ -1129,12 +1355,14 @@ void SQLValues::SummaryTupleSet::completeColumns() {
 
 		const TupleColumnType type = readerColumnTypeList[pos];
 		if (onHead && (ordering >= 0 || (keySourceList_.size() <= 1 &&
-				(TypeUtils::isFixed(type) || TypeUtils::isAny(type)))) &&
+				(TypeUtils::isNormalFixed(type) || TypeUtils::isAny(type)))) &&
 				!orderedDigestRestricted_) {
 			headKeyPos = pos;
 
-			fixedBodySize -= bodySizeList[pos];
-			bodySizeList[pos] = 0;
+			if (!TypeUtils::isLargeFixed(type)) {
+				fixedBodySize -= bodySizeList[pos];
+				bodySizeList[pos] = 0;
+			}
 		}
 
 		if (keyNullIgnorable_ && (onHead || ordering < 0)) {
@@ -1191,7 +1419,7 @@ void SQLValues::SummaryTupleSet::completeColumns() {
 				it != columnSourceList_.end(); ++it) {
 			if (firstModPos >= it->pos_) {
 				const TupleColumnType type = it->type_;
-				if (!TypeUtils::isFixed(type) && !TypeUtils::isAny(type) &&
+				if (!TypeUtils::isSomeFixed(type) && !TypeUtils::isAny(type) &&
 						bodySizeList[it->pos_] > 0) {
 					const void *data = NULL;
 					if (!nullableList[it->pos_]) {
@@ -1254,6 +1482,7 @@ void SQLValues::SummaryTupleSet::completeColumns() {
 		FieldGetterFunc getter =
 				typeSwitcher.get<const SummaryTuple::FieldGetter>();
 		FieldSetterFunc setter = NULL;
+		FieldPromotedSetterFunc promotedSetter = NULL;
 		if (it->tupleColumnPos_ >= 0) {
 			readerColumnList_.push_back(column);
 			const bool onBody = (it->offset_ >= 0);
@@ -1292,12 +1521,15 @@ void SQLValues::SummaryTupleSet::completeColumns() {
 		}
 		else {
 			modifiableColumnList_.push_back(column);
-			setter = typeSwitcher.get<const SummaryTuple::FieldSetter>();
+			setter = typeSwitcher.get< const SummaryTuple::FieldSetter<false> >();
+			promotedSetter =
+					typeSwitcher.get< const SummaryTuple::FieldSetter<true> >();
 		}
 		totalColumnList_.push_back(column);
 
 		getterFuncList_.push_back(getter);
 		setterFuncList_.push_back(setter);
+		promotedSetterFuncList_.push_back(promotedSetter);
 
 		if (static_cast<int32_t>(pos) == headKeyPos) {
 			readerHeadColumn_ = column;
@@ -1351,6 +1583,12 @@ SQLValues::SummaryTupleSet::getModifiableColumnList() const {
 	return modifiableColumnList_;
 }
 
+void SQLValues::SummaryTupleSet::applyColumnList(
+		const ColumnList &src, ColumnList &dest) {
+	assert(dest.empty() || dest.size() == src.size());
+	dest.assign(src.begin(), src.end());
+}
+
 size_t SQLValues::SummaryTupleSet::estimateTupleSize() const {
 	assert(columnsCompleted_);
 	const size_t headSize = static_cast<size_t>(
@@ -1364,6 +1602,24 @@ bool SQLValues::SummaryTupleSet::isReadableTupleAvailable() const {
 }
 
 int32_t SQLValues::SummaryTupleSet::getDefaultReadableTupleOffset() {
+	return 0;
+}
+
+size_t SQLValues::SummaryTupleSet::getFixedFieldSize(uint32_t index) {
+	assert(columnsCompleted_);
+	assert(index < totalColumnList_.size());
+
+	const SummaryColumn &column = totalColumnList_[index];
+	assert(column.getOffset() >= 0);
+
+	const TupleColumnType type = column.getTupleColumn().getType();
+	if (TypeUtils::isSomeFixed(type)) {
+		return TypeUtils::getFixedSize(type);
+	}
+	else if (!TypeUtils::isAny(type)) {
+		return sizeof(void*);
+	}
+
 	return 0;
 }
 
@@ -1589,7 +1845,8 @@ SQLValues::SummaryTupleSet::resolveFieldReaderFunc(
 	if (headNullable) {
 		return resolveFieldReaderFuncBy<true, true>(destType, srcType);
 	}
-	else if (shallow || TypeUtils::isAny(destType) || TypeUtils::isFixed(destType)) {
+	else if (shallow || TypeUtils::isAny(destType) ||
+			TypeUtils::isSomeFixed(destType)) {
 		return resolveFieldReaderFuncBy<true, false>(destType, srcType);
 	}
 	else if (TypeUtils::isSingleVar(destType)) {
@@ -2089,8 +2346,8 @@ bool SQLValues::ValueAccessor::isSameVariant(
 
 
 SQLValues::ValueComparator SQLValues::ValueComparator::ofValues(
-		const TupleValue &v1, const TupleValue &v2,
-		bool sensitive, bool ascending) {
+		const TupleValue &v1, const TupleValue &v2, bool sensitive,
+		bool ascending) {
 	return ValueComparator(
 			ValueAccessor::ofValue(v1), ValueAccessor::ofValue(v2),
 			NULL, sensitive, ascending);
@@ -2147,21 +2404,21 @@ SQLValues::ValueComparator::Arranged::Arranged(const ValueComparator &base) :
 bool SQLValues::ValueEq::operator()(
 		const TupleValue &v1, const TupleValue &v2) const {
 	const bool sensitive = false;
-	return ValueComparator::ofValues(v1, v2, sensitive, true)(v1, v2) == 0;
+	return ValueComparator::compareValues(v1, v2, sensitive, true) == 0;
 }
 
 
 bool SQLValues::ValueLess::operator()(
 		const TupleValue &v1, const TupleValue &v2) const {
 	const bool sensitive = true;
-	return ValueComparator::ofValues(v1, v2, sensitive, true)(v1, v2) < 0;
+	return ValueComparator::compareValues(v1, v2, sensitive, true) < 0;
 }
 
 
 bool SQLValues::ValueGreater::operator()(
 		const TupleValue &v1, const TupleValue &v2) const {
 	const bool sensitive = true;
-	return ValueComparator::ofValues(v1, v2, sensitive, true)(v1, v2) > 0;
+	return ValueComparator::compareValues(v1, v2, sensitive, true) > 0;
 }
 
 
@@ -2252,7 +2509,20 @@ TupleValue SQLValues::ValueConverter::operator()(
 	case TupleTypes::TYPE_DOUBLE:
 		return ValueUtils::toAnyByNumeric(ValueUtils::toFloating<double>(src));
 	case TupleTypes::TYPE_TIMESTAMP:
-		return ValueUtils::toAnyByTimestamp(ValueUtils::toTimestamp(cxt, src));
+		return ValueUtils::toAnyByValue<TupleTypes::TYPE_TIMESTAMP>(
+				ValueUtils::toTimestamp(
+						cxt, src, util::DateTime::FIELD_MILLISECOND).toTimestamp(
+								Types::TimestampTag()));
+	case TupleTypes::TYPE_MICRO_TIMESTAMP:
+		return ValueUtils::toAnyByValue<TupleTypes::TYPE_MICRO_TIMESTAMP>(
+				ValueUtils::toTimestamp(
+						cxt, src, util::DateTime::FIELD_MICROSECOND).toTimestamp(
+								Types::MicroTimestampTag()));
+	case TupleTypes::TYPE_NANO_TIMESTAMP:
+		return ValueUtils::toAnyByWritable<TupleTypes::TYPE_NANO_TIMESTAMP>(
+				cxt, ValueUtils::toTimestamp(
+						cxt, src, util::DateTime::FIELD_NANOSECOND).toTimestamp(
+								Types::NanoTimestampTag()));
 	case TupleTypes::TYPE_BOOL:
 		return ValueUtils::toAnyByBool(ValueUtils::toBool(src));
 	case TupleTypes::TYPE_STRING:
@@ -2270,7 +2540,8 @@ SQLValues::ValuePromoter::ValuePromoter(TupleColumnType type) :
 		type_(type) {
 }
 
-TupleValue SQLValues::ValuePromoter::operator()(const TupleValue &src) const {
+TupleValue SQLValues::ValuePromoter::operator()(
+		ValueContext *cxt, const TupleValue &src) const {
 	if (src.getType() == type_) {
 		return src;
 	}
@@ -2284,6 +2555,21 @@ TupleValue SQLValues::ValuePromoter::operator()(const TupleValue &src) const {
 		return ValueUtils::toAnyByNumeric(ValueUtils::toIntegral<int64_t>(src));
 	case TupleTypes::TYPE_DOUBLE:
 		return ValueUtils::toAnyByNumeric(ValueUtils::toFloating<double>(src));
+	case TupleTypes::TYPE_TIMESTAMP:
+		return ValueUtils::toAnyByValue<TupleTypes::TYPE_TIMESTAMP>(
+				ValueUtils::promoteValue<TupleTypes::TYPE_TIMESTAMP>(src));
+	case TupleTypes::TYPE_MICRO_TIMESTAMP:
+		return ValueUtils::toAnyByValue<TupleTypes::TYPE_MICRO_TIMESTAMP>(
+				ValueUtils::promoteValue<
+						TupleTypes::TYPE_MICRO_TIMESTAMP>(src));
+	case TupleTypes::TYPE_NANO_TIMESTAMP:
+		if (cxt == NULL) {
+			assert(false);
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+		}
+		return ValueUtils::toAnyByWritable<TupleTypes::TYPE_NANO_TIMESTAMP>(
+				*cxt, ValueUtils::promoteValue<
+						TupleTypes::TYPE_NANO_TIMESTAMP>(src));
 	default:
 		assert(false);
 		return TupleValue();
@@ -2371,7 +2657,7 @@ bool SQLValues::TupleComparator::isDigestOnly(bool promotable) const {
 		const TupleColumnType type = column.getType();
 		assert(!TypeUtils::isNull(type));
 
-		if ((TypeUtils::isFixed(type) &&
+		if ((TypeUtils::isNormalFixed(type) &&
 				(nullIgnorable_ || !TypeUtils::isNullable(type))) ||
 				TypeUtils::isAny(type)) {
 
@@ -2407,7 +2693,7 @@ bool SQLValues::TupleComparator::isDigestOrdered() const {
 		const TupleColumnType type = column.getType();
 		assert(!TypeUtils::isNull(type));
 
-		if ((TypeUtils::isFixed(type) || TypeUtils::isAny(type)) &&
+		if ((TypeUtils::isNormalFixed(type) || TypeUtils::isAny(type)) &&
 				columnList_.size() <= 1) {
 			return true;
 		}
@@ -2485,47 +2771,6 @@ SQLValues::ValueDigester SQLValues::TupleDigester::initialDigesterAt(
 		CompColumnList::const_iterator it) const {
 	return ValueDigester(
 			ValueAccessor(it, columnList_), NULL, ordering_, rotating_, 0);
-}
-
-
-SQLValues::TupleConverter::TupleConverter(
-		const CompColumnList &srcColumnList,
-		const CompColumnList &destColumnList) :
-		srcColumnList_(srcColumnList),
-		destColumnList_(destColumnList) {
-}
-
-void SQLValues::TupleConverter::operator()(
-		ValueContext &cxt,
-		const ReadableTuple &src, WritableTuple &dest) const {
-	CompColumnList::const_iterator srcIt = srcColumnList_.begin();
-	CompColumnList::const_iterator destIt = destColumnList_.begin();
-	for (; srcIt != srcColumnList_.end(); ++srcIt, ++destIt) {
-		const TupleColumn &srcColumn = srcIt->getTupleColumn1();
-		const TupleColumn &destColumn = destIt->getTupleColumn1();
-		const ValueConverter conv(srcIt->getType());
-		dest.set(destColumn, conv(cxt, src.get(srcColumn)));
-	}
-}
-
-
-SQLValues::TuplePromoter::TuplePromoter(
-		const CompColumnList &srcColumnList,
-		const CompColumnList &destColumnList) :
-		srcColumnList_(srcColumnList),
-		destColumnList_(destColumnList) {
-}
-
-void SQLValues::TuplePromoter::operator()(
-		const ReadableTuple &src, WritableTuple &dest) const {
-	CompColumnList::const_iterator srcIt = srcColumnList_.begin();
-	CompColumnList::const_iterator destIt = destColumnList_.begin();
-	for (; srcIt != srcColumnList_.end(); ++srcIt, ++destIt) {
-		const TupleColumn &srcColumn = srcIt->getTupleColumn1();
-		const TupleColumn &destColumn = destIt->getTupleColumn1();
-		const ValuePromoter promo(srcIt->getType());
-		dest.set(destColumn, promo(src.get(srcColumn)));
-	}
 }
 
 
@@ -2756,6 +3001,124 @@ int32_t SQLValues::ValueUtils::compareString(
 			rest, sizeDiff, PredType());
 }
 
+bool SQLValues::ValueUtils::isUpperBoundaryAsLong(
+		const TupleValue &value, int64_t unit) {
+	const int32_t direction = getBoundaryDirectionAsLong(value, unit);
+	if (direction == 0) {
+		return isSmallestBoundaryUnitAsLong(value, unit);
+	}
+	return (direction < 0);
+}
+
+bool SQLValues::ValueUtils::isLowerBoundaryAsLong(
+		const TupleValue &value, int64_t unit) {
+	const int32_t direction = getBoundaryDirectionAsLong(value, unit);
+	return (direction == 0);
+}
+
+TupleColumnType SQLValues::ValueUtils::getBoundaryCategoryAsLong(
+		TupleColumnType type) {
+	const TypeUtils::TypeCategory typeCategory =
+			TypeUtils::getStaticTypeCategory(type);
+
+	if (type == TupleTypes::TYPE_TIMESTAMP ||
+			typeCategory == TypeUtils::TYPE_CATEGORY_LONG) {
+		return TupleTypes::TYPE_LONG;
+	}
+	else if (typeCategory == TypeUtils::TYPE_CATEGORY_TIMESTAMP) {
+		return TupleTypes::TYPE_NANO_TIMESTAMP;
+	}
+	else {
+		return TupleTypes::TYPE_NULL;
+	}
+}
+
+bool SQLValues::ValueUtils::isSmallestBoundaryUnitAsLong(
+		const TupleValue &value, int64_t unit) {
+	if (unit > 1) {
+		return false;
+	}
+
+	return (getBoundaryCategoryAsLong(value.getType()) ==
+			TupleTypes::TYPE_LONG);
+}
+
+int32_t SQLValues::ValueUtils::getBoundaryDirectionAsLong(
+		const TupleValue &value, int64_t unit) {
+	if (unit <= 0) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	const TupleColumnType type = value.getType();
+	const TupleColumnType boundaryCategory =
+			getBoundaryCategoryAsLong(type);
+
+	if (boundaryCategory == TupleTypes::TYPE_LONG) {
+		const int64_t baseValue = toLong(value);
+		if (baseValue >= 0) {
+			const int64_t mod = baseValue % unit;
+			if (mod == 0) {
+				return 0;
+			}
+			else if (mod == unit - 1) {
+				return -1;
+			}
+			return 1;
+		}
+		else {
+			const int64_t absValue =
+					(baseValue == std::numeric_limits<int64_t>::min() ?
+							-(baseValue + unit) :
+							-baseValue);
+			const int64_t mod = absValue % unit;
+			if (mod == 0) {
+				return 0;
+			}
+			else if (mod == 1) {
+				return -1;
+			}
+			return 1;
+		}
+	}
+	else if (boundaryCategory == TupleTypes::TYPE_NANO_TIMESTAMP) {
+		const int32_t base = getBoundaryDirectionAsLong(
+				TupleValue(toLong(value)), unit);
+		if (base > 0) {
+			return base;
+		}
+
+		uint32_t subUnit;
+		uint32_t subValue;
+		switch (type) {
+		case TupleTypes::TYPE_MICRO_TIMESTAMP:
+			subUnit = 1000;
+			subValue = DateTimeElements(
+					value.get<MicroTimestamp>()).getNanoSeconds() / 1000;
+			break;
+		case TupleTypes::TYPE_NANO_TIMESTAMP:
+			subUnit = 1000 * 1000;
+			subValue = DateTimeElements(
+					value.get<TupleNanoTimestamp>()).getNanoSeconds();
+			break;
+		default:
+			assert(false);
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+		}
+
+		if (base < 0 || (unit == 1 && subValue != 0)) {
+			return (subValue == subUnit - 1 ? -1 : 1);
+		}
+		else {
+			return (subValue == 0 ? 0 : 1);
+		}
+	}
+	else {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+}
+
 
 uint32_t SQLValues::ValueUtils::fnv1aHashInit() {
 	const uint32_t fnvOffsetBasis =
@@ -2780,6 +3143,18 @@ uint32_t SQLValues::ValueUtils::fnv1aHashFloating(
 	}
 
 	return fnv1aHashBytes(base, &value, sizeof(value));
+}
+
+uint32_t SQLValues::ValueUtils::fnv1aHashPreciseTimestamp(
+		uint32_t base, const DateTimeElements &value) {
+	uint32_t hash = fnv1aHashIntegral(base, value.getUnixTimeMillis());
+
+	const uint32_t nanos = value.getNanoSeconds();
+	if (nanos != 0) {
+		hash = fnv1aHashBytes(hash, &nanos, sizeof(nanos));
+	}
+
+	return hash;
 }
 
 uint32_t SQLValues::ValueUtils::fnv1aHashBytes(
@@ -2814,18 +3189,25 @@ double SQLValues::ValueUtils::toDouble(const TupleValue &src) {
 	return src.get<double>();
 }
 
-int64_t SQLValues::ValueUtils::toTimestamp(
-		ValueContext &cxt, const TupleValue &src) {
-	if (src.getType() == TupleTypes::TYPE_STRING) {
+SQLValues::DateTimeElements SQLValues::ValueUtils::toTimestamp(
+		ValueContext &cxt, const TupleValue &src,
+		util::DateTime::FieldType precision) {
+	const TupleColumnType type = src.getType();
+
+	if (type == TupleTypes::TYPE_STRING) {
 		util::StackAllocator &alloc = cxt.getAllocator();
 		util::StackAllocator::Scope scope(alloc);
 
 		const TupleString::BufferInfo &strBuf = TupleString(src).getBuffer();
 		const bool zoneSpecified = false;
-		return parseTimestamp(strBuf, cxt.getTimeZone(), zoneSpecified, alloc);
+		return parseTimestamp(
+				strBuf, cxt.getTimeZone(), zoneSpecified, precision, alloc);
 	}
 
-	return checkTimestamp(toLong(src));
+	return checkTimestamp(TypeUtils::isTimestampFamily(type) ?
+			DateTimeElements(
+					promoteValue<TupleTypes::TYPE_NANO_TIMESTAMP>(src)) :
+			DateTimeElements(toLong(src)));
 }
 
 bool SQLValues::ValueUtils::toBool(const TupleValue &src) {
@@ -2969,11 +3351,23 @@ TupleString::BufferInfo SQLValues::ValueUtils::toNumericStringByBlob(
 }
 
 bool SQLValues::ValueUtils::findLong(const TupleValue &src, int64_t &dest) {
-	const int32_t type = src.getType();
+	const TupleColumnType type = src.getType();
 
-	if ((type & TupleTypes::TYPE_MASK_ARRAY_VAR) ||
-			(type & TupleTypes::TYPE_MASK_SUB) ==
-					(TupleTypes::TYPE_DOUBLE & TupleTypes::TYPE_MASK_SUB)) {
+	if ((type & TupleTypes::TYPE_MASK_ARRAY_VAR)) {
+		dest = int64_t();
+		return false;
+	}
+
+	switch (type & TupleTypes::TYPE_MASK_SUB) {
+	case TupleTypes::TYPE_LONG & TupleTypes::TYPE_MASK_SUB:
+		break;
+	case TupleTypes::TYPE_BOOL & TupleTypes::TYPE_MASK_SUB:
+		break;
+	default:
+		if (TypeUtils::isTimestampFamily(type)) {
+			dest = promoteValue<TupleTypes::TYPE_TIMESTAMP>(src);
+			return true;
+		}
 		dest = int64_t();
 		return false;
 	}
@@ -3024,8 +3418,12 @@ void SQLValues::ValueUtils::formatValue(
 		builder.appendAll(*toStringReader(value));
 		return;
 	}
-	else if (type == TupleTypes::TYPE_TIMESTAMP) {
-		formatTimestamp(builder, value.get<int64_t>(), cxt.getTimeZone());
+	else if (TypeUtils::isTimestampFamily(type)) {
+		formatTimestamp(
+				builder, DateTimeElements(
+						promoteValue<TupleTypes::TYPE_NANO_TIMESTAMP>(value)),
+						cxt.getTimeZone(),
+				TypeUtils::getTimePrecision(type));
 		return;
 	}
 	else if (type == TupleTypes::TYPE_BOOL) {
@@ -3067,13 +3465,19 @@ void SQLValues::ValueUtils::formatDouble(
 }
 
 void SQLValues::ValueUtils::formatTimestamp(
-		StringBuilder &builder, const util::DateTime &value,
-		const util::TimeZone &zone) {
+		StringBuilder &builder, const DateTimeElements &value,
+		const util::TimeZone &zone, util::DateTime::FieldType precision) {
+	const util::PreciseDateTime &tsValue =
+			value.toDateTime(Types::NanoTimestampTag());
+
 	util::DateTime::ZonedOption option;
 	applyDateTimeOption(option);
 	option.zone_ = zone;
 
-	value.writeTo(builder, option, TimeErrorHandler());
+	util::DateTime::Formatter formatter = tsValue.getFormatter(option);
+	formatter.setDefaultPrecision(precision);
+
+	formatter.writeTo(builder, TimeErrorHandler());
 }
 
 void SQLValues::ValueUtils::formatBool(StringBuilder &builder, bool value) {
@@ -3114,9 +3518,10 @@ bool SQLValues::ValueUtils::parseDouble(
 	return true;
 }
 
-int64_t SQLValues::ValueUtils::parseTimestamp(
+SQLValues::DateTimeElements SQLValues::ValueUtils::parseTimestamp(
 		const TupleString::BufferInfo &src, const util::TimeZone &zone,
-		bool zoneSpecified, util::StdAllocator<void, void> alloc) {
+		bool zoneSpecified, util::DateTime::FieldType precision,
+		util::StdAllocator<void, void> alloc) {
 	typedef util::BasicString<
 			char8_t, std::char_traits<char8_t>,
 			util::StdAllocator<char8_t, void> > String;
@@ -3124,14 +3529,15 @@ int64_t SQLValues::ValueUtils::parseTimestamp(
 	String str(src.first, src.second, alloc);
 
 	bool zoned = true;
-	const size_t size = str.size();
-	if (size <= 11 && str.find('-') != util::String::npos) {
-		str.append("T00:00:00");
-		zoned = false;
-	}
-	else if ((size == 12 || size == 8) && str.find(':') != util::String::npos) {
-		str.insert(0, "1970-01-01T");
-		zoned = false;
+	if (str.find('T') == util::String::npos) {
+		if (str.find(':') == util::String::npos) {
+			str.append("T00:00:00");
+			zoned = false;
+		}
+		else {
+			str.insert(0, "1970-01-01T");
+			zoned = false;
+		}
 	}
 
 	size_t zoneStrLen = 0;
@@ -3166,15 +3572,15 @@ int64_t SQLValues::ValueUtils::parseTimestamp(
 	util::DateTime::ZonedOption option;
 	applyDateTimeOption(option);
 
-	int64_t time;
+	util::PreciseDateTime dateTime;
 	util::TimeZone zoneByStr;
 	try {
 		const bool throwOnError = true;
 
 		{
-			util::DateTime dateTime;
-			dateTime.parse(str.c_str(), str.size(), throwOnError, option);
-			time = dateTime.getUnixTime();
+			util::DateTime::Parser parser = dateTime.getParser(option);
+			parser.setDefaultPrecision(precision);
+			parser(str.c_str(), str.size(), throwOnError);
 		}
 
 		if (zoneStrLen > 0) {
@@ -3200,7 +3606,7 @@ int64_t SQLValues::ValueUtils::parseTimestamp(
 				str << ", specifiedZone=" << zone << ")");
 	}
 
-	return time;
+	return DateTimeElements(dateTime);
 }
 
 bool SQLValues::ValueUtils::parseBool(
@@ -3232,10 +3638,6 @@ void SQLValues::ValueUtils::parseBlob(
 }
 
 
-TupleValue SQLValues::ValueUtils::toAnyByTimestamp(int64_t src) {
-	return TupleValue(&src, TupleTypes::TYPE_TIMESTAMP);
-}
-
 TupleValue SQLValues::ValueUtils::createEmptyValue(
 		ValueContext &cxt, TupleColumnType type) {
 	if (TypeUtils::isAny(type) || TypeUtils::isNullable(type)) {
@@ -3243,7 +3645,7 @@ TupleValue SQLValues::ValueUtils::createEmptyValue(
 	}
 
 	const TupleColumnType baseType = TypeUtils::toNonNullable(type);
-	if (TypeUtils::isFixed(baseType)) {
+	if (TypeUtils::isSomeFixed(baseType)) {
 		const int64_t emptyLong = 0;
 		return ValueConverter(baseType)(cxt, TupleValue(emptyLong));
 	}
@@ -3296,13 +3698,14 @@ TupleColumnType SQLValues::ValueUtils::toColumnType(const TupleValue &value) {
 }
 
 
-int64_t SQLValues::ValueUtils::checkTimestamp(int64_t tsValue) {
+SQLValues::DateTimeElements SQLValues::ValueUtils::checkTimestamp(
+		const DateTimeElements &tsValue) {
 	util::DateTime::Option option;
 	applyDateTimeOption(option);
 
 	util::DateTime dateTime;
 	try {
-		dateTime.setUnixTime(tsValue, option);
+		dateTime.setUnixTime(tsValue.getUnixTimeMillis(), option);
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_USER_ERROR_CODED(
@@ -3311,7 +3714,15 @@ int64_t SQLValues::ValueUtils::checkTimestamp(int64_t tsValue) {
 						e, "Unacceptable timestamp value specified"));
 	}
 
-	return dateTime.getUnixTime();
+	const uint32_t nanos = tsValue.getNanoSeconds();
+	if (nanos >= 1000 * 1000) {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_SQL_PROC_VALUE_OVERFLOW,
+				"Unacceptable nano seconds of timestamp specified");
+	}
+
+	return DateTimeElements(
+			util::PreciseDateTime::ofNanoSeconds(dateTime, nanos));
 }
 
 void SQLValues::ValueUtils::applyDateTimeOption(
@@ -3335,6 +3746,8 @@ util::DateTime::FieldType SQLValues::ValueUtils::toTimestampField(
 	case util::DateTime::FIELD_MINUTE:
 	case util::DateTime::FIELD_SECOND:
 	case util::DateTime::FIELD_MILLISECOND:
+	case util::DateTime::FIELD_MICROSECOND:
+	case util::DateTime::FIELD_NANOSECOND:
 	case util::DateTime::FIELD_DAY_OF_WEEK:
 	case util::DateTime::FIELD_DAY_OF_YEAR:
 		break;
@@ -3365,8 +3778,12 @@ size_t SQLValues::ValueUtils::toLobCapacity(uint64_t size) {
 TupleValue SQLValues::ValueUtils::duplicateValue(
 		ValueContext &cxt, const TupleValue &src) {
 	const TupleColumnType type = src.getType();
-	if (TypeUtils::isFixed(type)) {
+	if (TypeUtils::isNormalFixed(type)) {
 		return src;
+	}
+	else if (type == TupleTypes::TYPE_NANO_TIMESTAMP) {
+		return createNanoTimestampValue(
+				cxt, getValue<TupleNanoTimestamp>(src));
 	}
 	else if (type == TupleTypes::TYPE_STRING) {
 		const TupleString::BufferInfo &info = TupleString(src).getBuffer();
@@ -3427,7 +3844,7 @@ void SQLValues::ValueUtils::moveValueToRoot(
 	assert(currentDepth == cxt.getVarContextDepth());
 	assert(currentDepth > targetDepth);
 
-	if (!TypeUtils::isFixed(value.getType())) {
+	if (!TypeUtils::isNormalFixed(value.getType())) {
 		if (currentDepth <= 0) {
 			errorVarContextDepth();
 		}
@@ -3449,7 +3866,7 @@ size_t SQLValues::ValueUtils::estimateTupleSize(
 		size += TypeUtils::getFixedSize(type);
 		nullable |= TypeUtils::isNullable(type);
 
-		if (!TypeUtils::isAny(type) && !TypeUtils::isFixed(type)) {
+		if (!TypeUtils::isAny(type) && !TypeUtils::isSomeFixed(type)) {
 			size += 1;
 		}
 	}

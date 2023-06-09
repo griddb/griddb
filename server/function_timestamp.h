@@ -210,7 +210,7 @@ public:
 		else if (args[0]->isNullValue()) {
 			return Expr::newNullValue(txn);
 		}
-		if (!args[0]->isTimestamp()) {
+		if (!args[0]->isTimestampFamily()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 				"Argument 1 is not a timestamp value");
 		}
@@ -240,7 +240,7 @@ public:
 		else if (args[1]->isNullValue() || args[2]->isNullValue()) {
 			return Expr::newNullValue(txn);
 		}
-		else if (!args[1]->isTimestamp()) {
+		else if (!args[1]->isTimestampFamily()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 				"Argument 2 is not a timestamp value");
 		}
@@ -252,8 +252,8 @@ public:
 			/* DO NOTHING */
 		}
 
-		util::DateTime t1 =
-			static_cast<util::DateTime>(args[1]->getTimeStamp());
+		util::PreciseDateTime t1 =
+				ValueProcessor::toDateTime(args[1]->getNanoTimestamp());
 		time_t t2 = args[2]->getValueAsInt();
 		util::String s(args[0]->getValueAsString(txn),
 			QP_ALLOCATOR);  
@@ -290,7 +290,8 @@ public:
 				"This time kind is invalid or not supported.");
 		}
 
-		return Expr::newTimestampValue(t1, txn);
+		const ColumnType valueType = args[1]->resolveValueType();
+		return Expr::newTimestampValue(t1, txn, valueType);
 	}
 
 	Expr *operator()(ExprList &args, ContainerRowWrapper *column_values,
@@ -346,11 +347,11 @@ public:
 		else if (args[0]->isNullValue() || args[1]->isNullValue() || args[2]->isNullValue()) {
 			return Expr::newNullValue(txn);
 		}
-		else if (!args[1]->isTimestamp()) {
+		else if (!args[1]->isTimestampFamily()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 				"Argument 2 is not a timestamp value");
 		}
-		else if (!args[2]->isTimestamp()) {
+		else if (!args[2]->isTimestampFamily()) {
 			GS_THROW_USER_ERROR(GS_ERROR_TQ_CONSTRAINT_INVALID_ARGUMENT_TYPE,
 				"Argument 3 is not a timestamp value");
 		}
@@ -358,13 +359,14 @@ public:
 			/* DO NOTHING */
 		}
 
-		Timestamp t1 = args[1]->getTimeStamp();
-		Timestamp t2 = args[2]->getTimeStamp();
+		util::PreciseDateTime dt1 =
+				ValueProcessor::toDateTime(args[1]->getNanoTimestamp());
+		util::PreciseDateTime dt2 =
+				ValueProcessor::toDateTime(args[2]->getNanoTimestamp());
 		util::String s(args[0]->getValueAsString(txn), QP_ALLOCATOR);
 		std::transform(
 			s.begin(), s.end(), s.begin(), (int (*)(int))std::toupper);
-		int64_t result;
-		util::DateTime dt1(t1), dt2(t2);
+
 		util::DateTime::FieldType field_type;
 
 		if (s.compare("YEAR") == 0) {
@@ -393,7 +395,7 @@ public:
 				"This time kind is invalid or not supported.");
 		}
 		util::DateTime::ZonedOption zonedOption = util::DateTime::ZonedOption::create(false, txn.getTimeZone());
-		result = dt1.getDifference(dt2, field_type, zonedOption);
+		const int64_t result = dt1.getDifference(dt2, field_type, zonedOption);
 
 		return Expr::newNumericValue(result, txn);
 	}

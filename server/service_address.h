@@ -28,6 +28,8 @@ namespace picojson {
 class value;
 } 
 
+class HttpRequest;
+
 class ServiceAddressResolver {
 public:
 	struct Config {
@@ -37,6 +39,10 @@ public:
 		int addressFamily_;
 		SocketFactory *plainSocketFactory_;
 		SocketFactory *secureSocketFactory_;
+
+		uint32_t hostCheckMillis_;
+
+		bool hostCheckImmediately_;
 	};
 
 	typedef util::StdAllocator<void, void> Allocator;
@@ -53,6 +59,8 @@ public:
 	void initializeType(const ServiceAddressResolver &another);
 
 	void initializeType(uint32_t type, const char8_t *name);
+
+	void setExecutor(util::ExecutorService &executor);
 
 	uint32_t getTypeCount() const;
 
@@ -86,11 +94,10 @@ public:
 	util::IOPollHandler* getIOPollHandler();
 	util::IOPollEvent getIOPollEvent();
 
-	util::SocketAddress makeSocketAddress(const char8_t *host, int64_t port);
-
 private:
 	struct Entry;
 	struct EntryLess;
+	struct HostTable;
 	struct ProviderContext;
 
 	typedef util::BasicString< char8_t, std::char_traits<char8_t>,
@@ -108,6 +115,8 @@ private:
 
 	typedef std::vector<Entry, util::StdAllocator<Entry, void> > EntryList;
 
+	typedef util::SocketAddress::AssignByHostCommand AssignByHostCommand;
+
 	friend std::ostream& operator<<(
 			std::ostream &s, const ProviderContext &cxt);
 
@@ -118,6 +127,18 @@ private:
 
 	ServiceAddressResolver(const ServiceAddressResolver&);
 	ServiceAddressResolver& operator=(const ServiceAddressResolver&);
+
+	util::SocketAddress makeSocketAddress(
+			const u8string &host, int64_t port, HostTable &hostTable,
+			bool hostCheckOnly);
+
+	static util::SocketAddress makeRequestAddress(
+			const HttpRequest &request, HostTable &hostTable,
+			bool hostCheckOnly);
+
+	void importDetailFrom(
+			const picojson::value &value, HostTable &hostTable,
+			bool hostCheckOnly, bool strict);
 
 	void initializeRaw();
 

@@ -80,27 +80,50 @@ public:
 		return static_cast<uint32_t>(keyColumnIds_.size());
 	}
 
-	ColumnType getColumnType(ColumnId columnId) const {
+	ColumnType getColumnFullType(ColumnId columnId) const {
 		return columnTypeList_[columnId];
 	}
 
-	ColumnType getColumnFullType(ColumnId columnId) const;
+	static uint8_t makeColumnFlags(
+			bool forArray, bool forVirtual, bool notNull) {
+		uint8_t flags = 0;
+		if (forArray) {
+			setArray(flags);
+		}
+		if (forVirtual) {
+			setVirtual(flags);
+		}
+		if (notNull) {
+			setNotNull(flags);
+		}
+		return flags;
+	}
 
 	bool getIsArray(ColumnId columnId) const {
-		return (flagsList_[columnId] & COLUMN_FLAG_ARRAY) != 0;
+		return getIsArrayByFlags(flagsList_[columnId]);
 	}
+
+	static bool getIsArrayByFlags(uint8_t flags) {
+		return (flags & COLUMN_FLAG_ARRAY) != 0;
+	}
+
+	static void setArray(uint8_t &flags) {
+		flags |= COLUMN_FLAG_ARRAY;
+	}
+
+	bool getIsVirtual(ColumnId columnId) const {
+		return (flagsList_[columnId] & COLUMN_FLAG_VIRTUAL) != 0;
+	}
+	static void setVirtual(uint8_t &flags) {
+		flags |= COLUMN_FLAG_VIRTUAL;
+	}
+
 	bool getIsNotNull(ColumnId columnId) const {
 		return (flagsList_[columnId] & COLUMN_FLAG_NOT_NULL) != 0;
 	}
-	static void setArray(uint8_t &flag) {
-		flag |= COLUMN_FLAG_ARRAY;
-	}
 
-	static void setNotNull(uint8_t &flag) {
-		flag |= COLUMN_FLAG_NOT_NULL;
-	}
-	bool getIsVirtual(ColumnId columnId) const {
-		return (flagsList_[columnId] & COLUMN_FLAG_VIRTUAL) != 0;
+	static void setNotNull(uint8_t &flags) {
+		flags |= COLUMN_FLAG_NOT_NULL;
 	}
 
 	const util::String &getColumnName(ColumnId columnId) const {
@@ -215,6 +238,8 @@ protected:
 	static const uint8_t COLUMN_FLAG_ARRAY = 0x01;
 	static const uint8_t COLUMN_FLAG_VIRTUAL = 0x02;
 	static const uint8_t COLUMN_FLAG_NOT_NULL = 0x04;
+
+	const uint32_t MAX_FIXED_COLUMN_TOTAL_SIZE = 59 * 1024;
 
 	uint32_t columnNum_;
 	util::Vector<ColumnId> keyColumnIds_;

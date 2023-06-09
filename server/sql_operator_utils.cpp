@@ -232,7 +232,8 @@ SQLOps::Projection& SQLOps::OpCodeBuilder::createProjectionByUsage(
 }
 
 SQLOps::Projection& SQLOps::OpCodeBuilder::rewriteProjection(
-		const Projection &src, Projection **distinctProj) {
+		const Projection &src, Projection **distinctProj,
+		bool chainOmitted) {
 	if (distinctProj != NULL) {
 		*distinctProj = NULL;
 	}
@@ -319,6 +320,7 @@ SQLOps::Projection& SQLOps::OpCodeBuilder::rewriteProjection(
 					SQLExprs::ExprCode::ATTR_WINDOWING) == 0) {
 				SQLOps::Projection &outProj = *dest;
 
+				assert(!chainOmitted);
 				dest = &createProjection(SQLOpTypes::PROJ_AGGR_OUTPUT);
 				dest->addChain(outProj);
 			}
@@ -358,8 +360,10 @@ SQLOps::Projection& SQLOps::OpCodeBuilder::rewriteProjection(
 		const bool arranging = factoryCxt.isSummaryColumnsArranging();
 		factoryCxt.setSummaryColumnsArranging(false);
 
-		for (Projection::ChainIterator it(src); it.exists(); it.next()) {
-			dest->addChain(rewriteProjection(it.get()));
+		if (!chainOmitted) {
+			for (Projection::ChainIterator it(src); it.exists(); it.next()) {
+				dest->addChain(rewriteProjection(it.get()));
+			}
 		}
 
 		factoryCxt.setSummaryColumnsArranging(arranging);
@@ -1004,12 +1008,15 @@ void SQLOps::OpCodeBuilder::applySummaryAggregationColumns(
 
 		if (aggrProj != NULL && factoryCxt.getInputCount() == 1) {
 			assert(aggrTupleSet->isColumnsCompleted());
-			*summaryColumns = aggrTupleSet->getTotalColumnList();
+			SummaryTupleSet::applyColumnList(
+					aggrTupleSet->getTotalColumnList(), *summaryColumns);
 		}
 		else {
-			*summaryColumns = rewriter_.createSummaryColumnList(
-					factoryCxt, i, false, (i == 0), keyList,
-					orderingRestricted);
+			SummaryTupleSet::applyColumnList(
+					rewriter_.createSummaryColumnList(
+							factoryCxt, i, false, (i == 0), keyList,
+							orderingRestricted),
+					*summaryColumns);
 		}
 		assert(lastCount == 0 || summaryColumns->size() == lastCount);
 		static_cast<void>(lastCount);
@@ -1188,6 +1195,23 @@ const SQLOps::Projection* SQLOps::OpCodeBuilder::findAggregationProjection(
 	for (Projection::ChainIterator it(src); it.exists(); it.next()) {
 		const SQLOps::Projection *foundProj =
 				findAggregationProjection(it.get(), forPipe);
+		if (foundProj != NULL) {
+			return foundProj;
+		}
+	}
+
+	return NULL;
+}
+
+SQLOps::Projection* SQLOps::OpCodeBuilder::findAggregationModifiableProjection(
+		Projection &src, const bool *forPipe) {
+	if (&src == findAggregationProjection(src, forPipe)) {
+		return &src;
+	}
+
+	for (Projection::ChainModIterator it(src); it.exists(); it.next()) {
+		SQLOps::Projection *foundProj =
+				findAggregationModifiableProjection(it.get(), forPipe);
 		if (foundProj != NULL) {
 			return foundProj;
 		}
@@ -1860,7 +1884,7 @@ void SQLOps::OpAllocatorManager::Buffer::fill(void *addr, size_t size) {
 bool SQLOps::OpAllocatorManager::Buffer::checkFilled(
 		const void *addr, size_t size) {
 	const uint8_t *it = static_cast<const uint8_t*>(addr);
-	return (std::count(it, it + size, 0) == size);
+	return (static_cast<size_t>(std::count(it, it + size, 0)) == size);
 }
 
 
@@ -2660,6 +2684,8 @@ const util::NameCoderEntry<SQLOpTypes::Type>
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_GROUP_DISTINCT),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_GROUP_DISTINCT_MERGE),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_GROUP_BUCKET_HASH),
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_GROUP_RANGE),
+	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_GROUP_RANGE_MERGE),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_UNION),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_UNION_ALL),
 	UTIL_NAME_CODER_ENTRY(SQLOpTypes::OP_UNION_SORTED),
@@ -3220,13 +3246,14 @@ void SQLOpUtils::ExpressionListWriter::setKeyColumnList(
 		if (!comp.isDigestOnly(false)) {
 			if (forSummary) {
 				if (SQLValues::TypeUtils::isLob(type) ||
+						SQLValues::TypeUtils::isLargeFixed(type) ||
 						!keyColumn.isOrdering()) {
 					break;
 				}
 			}
 			else {
 				if ((SQLValues::TypeUtils::isNullable(type) && !nullIgnorable) ||
-						!SQLValues::TypeUtils::isFixed(type) ||
+						!SQLValues::TypeUtils::isNormalFixed(type) ||
 						!keyColumn.isOrdering()) {
 					break;
 				}

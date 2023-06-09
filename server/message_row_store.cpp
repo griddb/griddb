@@ -272,14 +272,11 @@ const ColumnInfo& MessageRowStore::getColumnInfo(ColumnId columnId) const {
 
 bool MessageRowStore::isVariableColumn(ColumnId columnId) const {
 	const ColumnInfo &info = getColumnInfo(columnId);
-	return (info.getColumnType() == COLUMN_TYPE_STRING ||
-			info.getColumnType() == COLUMN_TYPE_GEOMETRY ||
-			info.getColumnType() == COLUMN_TYPE_BLOB ||
-			info.isArray());
+	return ValueProcessor::isVariable(info.getColumnType());
 }
 
 uint32_t MessageRowStore::getColumnElementFixedSize(const ColumnInfo &info) {
-	return FixedSizeOfColumnType[info.getSimpleColumnType()];
+	return FixedSizeOfColumnType[info.getArrayElementType()];
 }
 
 template<typename S>
@@ -744,7 +741,7 @@ uint64_t InputMessageRowStore::validateArrayColumn(ColumnId id, const ColumnInfo
 	}
 
 	uint32_t elementNum = getArrayLength(id);
-	uint32_t elementSize = FixedSizeOfColumnType[columnInfo.getSimpleColumnType()];
+	uint32_t elementSize = FixedSizeOfColumnType[columnInfo.getArrayElementType()];
 	if (elementNum > dsConfig_.getLimitArrayNum()){
 		GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Array length of Column[" << id << "] exceeds maximum size : " << elementNum);
 	}
@@ -832,7 +829,10 @@ uint64_t InputMessageRowStore::validateSimpleColumn(ColumnId id, const ColumnInf
 			val = (val/1000)*1000;
 		}
 		if (!ValueProcessor::validateTimestamp(val)) {
-			GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Timestamp of Column[" << id << "] out of range (val=" << val << ")");
+			GS_THROW_USER_ERROR(
+					GS_ERROR_DS_TIM_ROW_DATA_INVALID,
+					"Timestamp of Column[" << id << "] out of range (val=" <<
+					ValueProcessor::getRawTimestampFormatter(val) << ")");
 		}
 	}
 	break;
@@ -843,6 +843,30 @@ uint64_t InputMessageRowStore::validateSimpleColumn(ColumnId id, const ColumnInf
 			GS_THROW_USER_ERROR(GS_ERROR_DS_TIM_ROW_DATA_INVALID, "Size of Column[" << id << "] exceeds maximum size : " << size);
 		}
 		validateVarColumnSize += ValueProcessor::getEncodedVarSize(size) + size;
+	}
+	break;
+	case COLUMN_TYPE_MICRO_TIMESTAMP:
+	{
+		getField(id, data, size);
+		MicroTimestamp val = *reinterpret_cast<const MicroTimestamp*>(data);
+		if (!ValueProcessor::validateTimestamp(val)) {
+			GS_THROW_USER_ERROR(
+					GS_ERROR_DS_TIM_ROW_DATA_INVALID,
+					"Timestamp(6) of Column[" << id << "] out of range (val=" <<
+					ValueProcessor::getRawTimestampFormatter(val) << ")");
+		}
+	}
+	break;
+	case COLUMN_TYPE_NANO_TIMESTAMP:
+	{
+		getField(id, data, size);
+		NanoTimestamp val = *reinterpret_cast<const NanoTimestamp*>(data);
+		if (!ValueProcessor::validateTimestamp(val)) {
+			GS_THROW_USER_ERROR(
+					GS_ERROR_DS_TIM_ROW_DATA_INVALID,
+					"Timestamp(9) of Column[" << id << "] out of range (val=" <<
+					ValueProcessor::getRawTimestampFormatter(val) << ")");
+		}
 	}
 	break;
 	default:
@@ -1278,6 +1302,18 @@ void OutputMessageRowStore::setInitField(ColumnId columnId) {
 				setField<COLUMN_TYPE_TIMESTAMP>(columnId, val);
 			}
 			break;
+		case COLUMN_TYPE_MICRO_TIMESTAMP:
+			{
+				MicroTimestamp val = ValueProcessor::getMicroTimestamp(0);
+				setField<COLUMN_TYPE_MICRO_TIMESTAMP>(columnId, val);
+			}
+			break;
+		case COLUMN_TYPE_NANO_TIMESTAMP:
+			{
+				NanoTimestamp val = ValueProcessor::getNanoTimestamp(0);
+				setField<COLUMN_TYPE_NANO_TIMESTAMP>(columnId, val);
+			}
+			break;
 		default:
 			GS_THROW_USER_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
 		}
@@ -1291,6 +1327,8 @@ MessageRowKeyCoder::MessageRowKeyCoder(ColumnType keyType) :
 	case COLUMN_TYPE_INT:
 	case COLUMN_TYPE_LONG:
 	case COLUMN_TYPE_TIMESTAMP:
+	case COLUMN_TYPE_MICRO_TIMESTAMP:
+	case COLUMN_TYPE_NANO_TIMESTAMP:
 		break;
 	default:
 		GS_THROW_USER_ERROR(GS_ERROR_DS_COL_ROWKEY_INVALID, "");

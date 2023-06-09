@@ -41,9 +41,9 @@ void Value::dump(
 			ss << "[Array]length=";
 		}
 		if (data() != NULL) {
-			ColumnType simpleType =
-				ValueProcessor::getSimpleColumnType(getType());
-			if (simpleType != COLUMN_TYPE_STRING) {
+			ColumnType elemType =
+					ValueProcessor::getArrayElementType(getType());
+			if (elemType != COLUMN_TYPE_STRING) {
 				ss << getArrayLength(txn, objectManager, strategy);
 				ss << "[";
 				for (uint32_t k = 0; k < getArrayLength(txn, objectManager, strategy);
@@ -54,7 +54,7 @@ void Value::dump(
 					uint32_t size;
 					const uint8_t *data;
 					getArrayElement(txn, objectManager, strategy, k, data, size);
-					ValueProcessor::dumpSimpleValue(ss, simpleType, data, size, !forExport);
+					ValueProcessor::dumpSimpleValue(ss, elemType, data, size, !forExport);
 				}
 				ss << "]";
 			}
@@ -87,7 +87,7 @@ void Value::dump(
 							ss << ",";
 						}
 						elem = arrayCursor.getElement(elemSize, elemCount);
-						ValueProcessor::dumpSimpleValue(ss, simpleType, elem, elemSize, !forExport);
+						ValueProcessor::dumpSimpleValue(ss, elemType, elem, elemSize, !forExport);
 						++count;
 					}
 					ss << "]";
@@ -128,9 +128,9 @@ void Value::getArrayElement(TransactionContext &txn,
 	if (isArray() && data_.object_.value_ != 0) {
 		uint32_t num = getArrayLength(txn, objectManager, strategy);
 		if (i < num) {
-			ColumnType simpleType =
-				ValueProcessor::getSimpleColumnType(getType());
-			switch (simpleType) {
+			ColumnType elemType =
+					ValueProcessor::getArrayElementType(getType());
+			switch (elemType) {
 			case COLUMN_TYPE_BOOL:
 			case COLUMN_TYPE_BYTE:
 			case COLUMN_TYPE_SHORT:
@@ -143,9 +143,9 @@ void Value::getArrayElement(TransactionContext &txn,
 				const ArrayObject arrayObject(reinterpret_cast<uint8_t *>(
 					const_cast<void *>(data_.object_.value_)));
 				const uint8_t *elementObject =
-					arrayObject.getArrayElement(i, FixedSizeOfColumnType[simpleType]);
+					arrayObject.getArrayElement(i, FixedSizeOfColumnType[elemType]);
 				data = elementObject;
-				size = FixedSizeOfColumnType[simpleType];
+				size = FixedSizeOfColumnType[elemType];
 			} break;
 			case COLUMN_TYPE_STRING: {
 				const MatrixCursor *arrayObject =
@@ -192,10 +192,13 @@ void Value::getArrayElement(TransactionContext &txn,
 	@brief Serialize value (only numlic or Timestamp)
 */
 void Value::serialize(util::XArray<uint8_t> &serializedRowList) const {
-	if (!isArray() && (isNumerical() || type_ == COLUMN_TYPE_TIMESTAMP)) {
-		int8_t tmp = type_;
+	if (!isArray() &&
+			(isNumerical() || ValueProcessor::isTimestampFamily(type_))) {
+		const int8_t typeOrdinal =
+				ValueProcessor::getPrimitiveColumnTypeOrdinal(type_, false);
 		serializedRowList.push_back(
-			reinterpret_cast<uint8_t *>(&tmp), sizeof(int8_t));
+				reinterpret_cast<const uint8_t*>(&typeOrdinal),
+				sizeof(typeOrdinal));
 		serializedRowList.push_back(data(), FixedSizeOfColumnType[type_]);
 	}
 }
@@ -279,24 +282,24 @@ void Value::copy(TransactionContext &txn, ObjectManagerV4 &objectManager, Alloca
 		if (srcValue.data_.object_.value_ != NULL) {
 			const ArrayObject srcObject(reinterpret_cast<uint8_t *>(
 				const_cast<void *>(srcValue.data_.object_.value_)));
-			ColumnType simpleType =
-				ValueProcessor::getSimpleColumnType(srcValue.getType());
+			ColumnType elemType =
+					ValueProcessor::getArrayElementType(srcValue.getType());
 			uint32_t objectSize = ArrayObject::getObjectSize(
-				srcObject.getArrayLength(), FixedSizeOfColumnType[COLUMN_TYPE_OID]);
+					srcObject.getArrayLength(), FixedSizeOfColumnType[COLUMN_TYPE_OID]);
 
 			uint32_t num = srcObject.getArrayLength();
 
 			destObject.setBaseAddr(
 				reinterpret_cast<uint8_t *>(alloc.allocate(objectSize)));
 
-			destObject.setArrayLength(num, FixedSizeOfColumnType[simpleType]);
+			destObject.setArrayLength(num, FixedSizeOfColumnType[elemType]);
 			for (uint32_t i = 0; i < num; i++) {
 				const char *srcElemVariant;
 				char *destElemVariant;
 				BaseObject baseObject(objectManager, strategy);
 				if (srcValue.onDataStore()) {
 					const OId *srcElemOId = reinterpret_cast<const OId *>(
-						srcObject.getArrayElement(i, FixedSizeOfColumnType[simpleType]));
+						srcObject.getArrayElement(i, FixedSizeOfColumnType[elemType]));
 
 					if (*srcElemOId != UNDEF_OID) {
 						if (pId == UNDEF_PARTITIONID) {
@@ -312,7 +315,7 @@ void Value::copy(TransactionContext &txn, ObjectManagerV4 &objectManager, Alloca
 				}
 				else {
 					srcElemVariant = reinterpret_cast<const char *>(
-						srcObject.getArrayElement(i, FixedSizeOfColumnType[simpleType]));
+						srcObject.getArrayElement(i, FixedSizeOfColumnType[elemType]));
 				}
 				if (srcElemVariant != NULL) {
 					uint32_t srcElemVariantLen =
@@ -326,7 +329,7 @@ void Value::copy(TransactionContext &txn, ObjectManagerV4 &objectManager, Alloca
 					destElemVariant = NULL;
 				}
 
-				destObject.setArrayElement(i, FixedSizeOfColumnType[simpleType],
+				destObject.setArrayElement(i, FixedSizeOfColumnType[elemType],
 					reinterpret_cast<const uint8_t *>(destElemVariant));
 			}
 		}
@@ -359,6 +362,12 @@ void Value::copy(TransactionContext &txn, ObjectManagerV4 &objectManager, Alloca
 		type_ = srcValue.getType();
 		data_.object_.set(destObject, false);
 	} break;
+	case COLUMN_TYPE_MICRO_TIMESTAMP:
+		setMicroTimestamp(srcValue.data_.microTimestamp_);
+		break;
+	case COLUMN_TYPE_NANO_TIMESTAMP:
+		setNanoTimestamp(srcValue.data_.nanoTimestamp_);
+		break;
 	case COLUMN_TYPE_NULL:
 		*this = srcValue;
 		break;

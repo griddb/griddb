@@ -24,6 +24,7 @@
 
 #include "json.h"
 #include "picojson.h"
+
 #include "partition.h"
 
 const int32_t SQLProcessorConfig::DEFAULT_WORK_MEMORY_MB = 32;
@@ -66,9 +67,6 @@ bool SQLProcessorConfig::merge(
 		const SQLProcessorConfig *base, bool withDefaults) {
 	bool merged = false;
 
-	if (withDefaults) {
-		Manager::getInstance().mergeTo(*this);
-	}
 
 	if (base != NULL) {
 		merged |= merge(*base);
@@ -846,8 +844,9 @@ SQLContext::SQLContext(
 		isDmlTimeSeries_(false),
 		jobCheckComplete_(false),
 		partialMonitorRestricted_(false),
-		storeMemoryAgingSwapRate_(-1),
-		timeZone_(util::TimeZone())
+		storeMemoryAgingSwapRate_(TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE),
+		timeZone_(util::TimeZone()),
+		isAdministrator_(false)
 		,
 		setGroup_(false),
 		groupId_(LocalTempStore::UNDEF_GROUP_ID)
@@ -875,17 +874,19 @@ SQLContext::SQLContext(
 		clientId_(NULL),
 		stmtId_(UNDEF_STATEMENTID),
 		jobStartTime_(-1),
+		tableSchema_(NULL),
+		tableLatch_(NULL),
 		finished_(false),
 		fetchComplete_(false),
 		execId_(-1),
+		versionId_(0),
 		config_(config),
-		tableSchema_(NULL),
-		tableLatch_(NULL),
 		isDmlTimeSeries_(false),
 		jobCheckComplete_(false),
 		partialMonitorRestricted_(false),
-		storeMemoryAgingSwapRate_(-1),
-		timeZone_(util::TimeZone())
+		storeMemoryAgingSwapRate_(TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE),
+		timeZone_(util::TimeZone()),
+		isAdministrator_(false)
 		,
 		setGroup_(false),
 		groupId_(LocalTempStore::UNDEF_GROUP_ID)
@@ -943,8 +944,7 @@ util::StackAllocator& SQLContext::getEventAllocator() const {
 }
 
 DataStoreV4* SQLContext::getDataStore(PartitionId pId) const {
-	DataStoreBase& dsBase =
-		partitionList_->partition(pId).dataStore();
+	DataStoreBase& dsBase = partitionList_->partition(pId).dataStore();
 	return reinterpret_cast<DataStoreV4*>(&dsBase);
 }
 
@@ -1041,6 +1041,10 @@ bool SQLContext::isPartialMonitorRestricted() const {
 
 void SQLContext::setPartialMonitorRestricted(bool restricted) {
 	partialMonitorRestricted_ = restricted;
+}
+
+bool SQLContext::isAdministrator()  {
+	return isAdministrator_;
 }
 
 double SQLContext::getStoreMemoryAgingSwapRate() const {

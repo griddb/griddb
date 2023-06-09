@@ -189,7 +189,7 @@ bool DMLProcessor::applyInfo(Context& cxt, const Option& option,
 			ColumnInfo& columnInfo = nosqlColumnList_[colId];
 			columnInfo.initialize();
 			columnInfo.setColumnId(colId);
-			columnInfo.setType(nosqlColumnTypeList[colId], false);
+			columnInfo.setType(nosqlColumnTypeList[colId]);
 			uint8_t option = (*node.nosqlColumnOptionList_)[colId];
 			if (ColumnInfo::isNotNull(option)) {
 				columnInfo.setNotNull();

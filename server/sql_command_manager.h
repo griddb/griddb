@@ -179,6 +179,15 @@ public:
 		ContainerType containerType_; 
 		int32_t columnNum_; 
 		ContainerAttribute containerAttribute_; 
+		bool renamed_;
+		
+		void setRenamed() {
+			renamed_ = true;
+		}
+		
+		bool isRenamed() {
+			return renamed_;
+		}
 
 		DDLSource(util::StackAllocator& alloc, EventContext& ec, SQLExecution* execution,
 			const NameWithCaseSensitivity& dbName, const NameWithCaseSensitivity& tableName,
@@ -188,7 +197,7 @@ public:
 			baseInfo_(baseInfo), commandType_(commandType), targetContainer_(NULL),
 			partitioningInfo_(alloc), tablePartitioningIndexInfo_(alloc),
 			orgContainerSchema_(alloc), newContainerSchema_(alloc),
-			isPartitioning_(false), containerType_(CONTAINER_ATTR_SINGLE), columnNum_(0) {
+			isPartitioning_(false), containerType_(CONTAINER_ATTR_SINGLE), columnNum_(0), renamed_(false) {
 			if (dbName_.isCaseSensitive_) {
 				option_.caseSensitivity_.setDatabaseNameCaseSensitive();
 			}

@@ -52,23 +52,30 @@ struct TermCondition {
 	const void *value_;   
 	uint32_t valueSize_;  
 
-	TermCondition()
-		: operator_(NULL),
-		  opType_(DSExpression::NONE),
-		  valueType_(COLUMN_TYPE_WITH_BEGIN),
-		  columnId_(UNDEF_COLUMNID),
-		  value_(NULL),
-		  valueSize_(0) {}
+	TermCondition() :
+			operator_(NULL),
+			opType_(DSExpression::NONE),
+			valueType_(COLUMN_TYPE_WITH_BEGIN),
+			columnId_(UNDEF_COLUMNID),
+			value_(NULL),
+			valueSize_(0) {
+	}
 	TermCondition(
-		ColumnType columnType, ColumnType valueType, 
-		DSExpression::Operation opType, uint32_t columnId,
-		const void *value, uint32_t valueSize)
-		: opType_(opType),
-		  valueType_(valueType),
-		  columnId_(columnId),
-		  value_(value),
-		  valueSize_(valueSize) {
-		operator_ = ComparatorTable::getOperator(opType, columnType, valueType);
+			ColumnType columnType, ColumnType valueType,
+			DSExpression::Operation opType, uint32_t columnId,
+			const void *value, uint32_t valueSize) :
+			opType_(opType),
+			valueType_(valueType),
+			columnId_(columnId),
+			value_(value),
+			valueSize_(valueSize) {
+		if (columnType == COLUMN_TYPE_COMPOSITE &&
+				valueType == COLUMN_TYPE_COMPOSITE) {
+			operator_ = NULL;
+		}
+		else {
+			operator_ = ComparatorTable::getOperator(opType, columnType, valueType);
+		}
 	}
 	bool isIncluded() const {
 		return DSExpression::isIncluded(opType_);

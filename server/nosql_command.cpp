@@ -529,12 +529,12 @@ bool TableExpirationSchemaInfo::updateSchema(util::StackAllocator& alloc,
 				columnName.resize(static_cast<size_t>(columnNameLen));
 				in >> std::make_pair(columnName.data(), columnNameLen);
 				out << std::make_pair(columnName.data(), columnNameLen);
-				int8_t tmp;
-				in >> tmp;
-				out << tmp;
-				uint8_t opt;
-				in >> opt;
-				out << opt;
+				int8_t typeOrdinal;
+				in >> typeOrdinal;
+				out << typeOrdinal;
+				uint8_t flags;
+				in >> flags;
+				out << flags;
 			}
 			int16_t rowKeyNum = 0;
 			in >> rowKeyNum;
@@ -607,7 +607,7 @@ void NoSQLContainer::putContainer(TableExpirationSchemaInfo& info,
 		}
 		int32_t columnNum = 0;
 		int16_t keyColumnId = 0;
-		uint8_t isArrayVal;
+
 		if (syncBinarySize != 0) {
 			founded_ = true;
 			util::ArrayByteInStream in =
@@ -619,8 +619,17 @@ void NoSQLContainer::putContainer(TableExpirationSchemaInfo& info,
 				NoSQLColumn* column = ALLOC_NEW(eventStackAlloc_)
 					NoSQLColumn(eventStackAlloc_);
 				in >> column->name_;
-				in >> column->type_;
-				in >> isArrayVal;
+
+				int8_t typeOrdinal;
+				uint8_t flags;
+				in >> typeOrdinal;
+				in >> flags;
+				const bool forArray = MessageSchema::getIsArrayByFlags(flags);
+				if (!ValueProcessor::findColumnTypeByPrimitiveOrdinal(
+						typeOrdinal, forArray, false, column->type_)) {
+					GS_THROW_USER_ERROR(GS_ERROR_TXN_DECODE_FAILED, "");
+				}
+
 				columnInfoList_.push_back(column);
 			}
 			int16_t rowKeyNum;
@@ -697,7 +706,6 @@ void NoSQLContainer::putLargeContainer(
 		}
 		int32_t columnNum = 0;
 		int16_t keyColumnId = 0;
-		uint8_t isArrayVal;
 		if (syncBinarySize != 0) {
 			util::ArrayByteInStream in =
 				util::ArrayByteInStream(
@@ -708,8 +716,17 @@ void NoSQLContainer::putLargeContainer(
 				NoSQLColumn* column = ALLOC_NEW(eventStackAlloc_)
 					NoSQLColumn(eventStackAlloc_);
 				in >> column->name_;
-				in >> column->type_;
-				in >> isArrayVal;
+
+				int8_t typeOrdinal;
+				uint8_t flags;
+				in >> typeOrdinal;
+				in >> flags;
+				const bool forArray = MessageSchema::getIsArrayByFlags(flags);
+				if (!ValueProcessor::findColumnTypeByPrimitiveOrdinal(
+						typeOrdinal, forArray, false, column->type_)) {
+					GS_THROW_USER_ERROR(GS_ERROR_TXN_DECODE_FAILED, "");
+				}
+
 				columnInfoList_.push_back(column);
 			}
 			int16_t rowKeyNum;
@@ -1689,7 +1706,7 @@ void NoSQLContainer::encodeOptionPart(EventByteOutStream& out, EventType type,
 				StatementMessage::Options::APPLICATION_NAME>
 				(option.applicationName_);
 		}
-		if (option.storeMemoryAgingSwapRate_ != -1) {
+		if (option.storeMemoryAgingSwapRate_ != TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE) {
 			optionalRequest.set<
 				StatementMessage::Options::STORE_MEMORY_AGING_SWAP_RATE>
 				(option.storeMemoryAgingSwapRate_);
@@ -1833,7 +1850,7 @@ void TableSchemaInfo::setColumnInfo(NoSQLContainer& container) {
 		columnInfoList_.push_back(info);
 		ColumnInfo& columnInfo = nosqlColumnInfoList_[pos];
 		columnInfo.setColumnId(static_cast<uint16_t>(pos));
-		columnInfo.setType(info.type_, false);
+		columnInfo.setType(info.type_);
 		if (NoSQLUtils::isVariableType(info.type_)) {
 			columnInfo.setOffset(varDataPos);
 			varDataPos++;
@@ -1970,10 +1987,10 @@ void NoSQLUtils::getAffinityValue(util::StackAllocator& alloc,
 		util::XArray<uint8_t> columnName(alloc);
 		columnName.resize(static_cast<size_t>(columnNameLen));
 		in >> std::make_pair(columnName.data(), columnNameLen);
-		int8_t tmp;
-		in >> tmp;
-		uint8_t opt;
-		in >> opt;
+		int8_t typeOrdinal;
+		in >> typeOrdinal;
+		uint8_t flags;
+		in >> flags;
 	}
 	int16_t rowKeyNum = 0;
 	in >> rowKeyNum;
@@ -2011,17 +2028,20 @@ void NoSQLUtils::makeNormalContainerSchema(
 				reinterpret_cast<uint8_t*>(&columnNameLen), sizeof(int32_t));
 			containerSchema.push_back(
 				reinterpret_cast<uint8_t*>(columnName), columnNameLen);
-			int8_t tmp = static_cast<int8_t>(
-				convertTupleTypeToNoSQLType(
-					(*createOption.columnInfoList_)[i]->type_));
+
+			const ColumnType columnType = convertTupleTypeToNoSQLType(
+					(*createOption.columnInfoList_)[i]->type_);
+			const int8_t typeOrdinal =
+					ValueProcessor::getPrimitiveColumnTypeOrdinal(
+							columnType, false);
 			containerSchema.push_back(
-				reinterpret_cast<uint8_t*>(&tmp), sizeof(int8_t));
-			uint8_t opt = 0;
-			if ((*createOption.columnInfoList_)[i]->hasNotNullConstraint()) {
-				ColumnInfo::setNotNull(opt);
-			}
-			containerSchema.push_back(
-				reinterpret_cast<uint8_t*>(&opt), sizeof(uint8_t));
+					reinterpret_cast<const uint8_t*>(&typeOrdinal),
+					sizeof(typeOrdinal));
+
+			const uint8_t flags = MessageSchema::makeColumnFlags(
+					ValueProcessor::isArray(columnType), false,
+					(*createOption.columnInfoList_)[i]->hasNotNullConstraint());
+			containerSchema.push_back(&flags, sizeof(flags));
 			optionList.push_back((*createOption.columnInfoList_)[i]->option_);
 		}
 		containerSchema.push_back(
@@ -2221,16 +2241,23 @@ void NoSQLUtils::makeContainerColumns(
 	int32_t columnNum;
 	int16_t keyColumnId;
 	in >> columnNum;
-	int8_t tmp;
-	uint8_t opt;
+	int8_t typeOrdinal;
+	uint8_t flags;
 	for (int32_t i = 0; i < columnNum; i++) {
 		util::String columnName(alloc);
 		in >> columnName;
 		columnNameList.push_back(columnName);
-		in >> tmp;
-		columnTypeList.push_back(static_cast<ColumnType>(tmp));
-		in >> opt;
-		columnOptionList.push_back(static_cast<uint8_t>(opt));
+		in >> typeOrdinal;
+		in >> flags;
+		columnOptionList.push_back(flags);
+
+		const bool forArray = MessageSchema::getIsArrayByFlags(flags);
+		ColumnType columnType;
+		if (!ValueProcessor::findColumnTypeByPrimitiveOrdinal(
+				typeOrdinal, forArray, false, columnType)) {
+			GS_THROW_USER_ERROR(GS_ERROR_TXN_DECODE_FAILED, "");
+		}
+		columnTypeList.push_back(columnType);
 	}
 	int16_t rowKeyNum;
 	in >> rowKeyNum;
@@ -2253,13 +2280,17 @@ void NoSQLUtils::makeLargeContainerSchema(
 			reinterpret_cast<uint8_t*>(&columnNameLen), sizeof(int32_t));
 		binarySchema.push_back(
 			reinterpret_cast<uint8_t*>(const_cast<char*>(columnName)), columnNameLen);
-		int8_t columnType = COLUMN_TYPE_STRING;
+		const ColumnType columnType = COLUMN_TYPE_STRING;
+		const int8_t typeOrdinal =
+				ValueProcessor::getPrimitiveColumnTypeOrdinal(
+						columnType, false);
 		binarySchema.push_back(
-			reinterpret_cast<uint8_t*>(&columnType), sizeof(int8_t));
-		uint8_t opt = 0;
-		ColumnInfo::setNotNull(opt);
-		binarySchema.push_back(
-			reinterpret_cast<uint8_t*>(&opt), sizeof(uint8_t));
+				reinterpret_cast<const uint8_t*>(&typeOrdinal),
+				sizeof(typeOrdinal));
+		const bool notNull = true;
+		const uint8_t flags = MessageSchema::makeColumnFlags(
+				ValueProcessor::isArray(columnType), false, notNull);
+		binarySchema.push_back(&flags, sizeof(flags));
 	}
 	const char* columnName = "value";
 	int32_t columnNameLen = static_cast<int32_t>(strlen(columnName));
@@ -2267,12 +2298,15 @@ void NoSQLUtils::makeLargeContainerSchema(
 		reinterpret_cast<uint8_t*>(&columnNameLen), sizeof(int32_t));
 	binarySchema.push_back(
 		reinterpret_cast<uint8_t*>(const_cast<char*>(columnName)), columnNameLen);
-	int8_t columnType = COLUMN_TYPE_BLOB;
+	const ColumnType columnType = COLUMN_TYPE_BLOB;
+	const int8_t typeOrdinal =
+			ValueProcessor::getPrimitiveColumnTypeOrdinal(columnType, false);
 	binarySchema.push_back(
-		reinterpret_cast<uint8_t*>(&columnType), sizeof(int8_t));
-	bool isArrayVal = false;
-	binarySchema.push_back(
-		reinterpret_cast<uint8_t*>(&isArrayVal), sizeof(bool));
+			reinterpret_cast<const uint8_t*>(&typeOrdinal),
+			sizeof(typeOrdinal));
+	const uint8_t flags = MessageSchema::makeColumnFlags(
+			ValueProcessor::isArray(columnType), false, false);
+	binarySchema.push_back(&flags, sizeof(flags));
 	int16_t rowKeyNum = 1;
 	binarySchema.push_back(
 		reinterpret_cast<uint8_t*>(&rowKeyNum), sizeof(int16_t));
@@ -2311,12 +2345,12 @@ void NoSQLUtils::makeLargeContainerColumn(
 	uint16_t varDataPos = 0;
 	fixDataOffset += static_cast<int16_t>(sizeof(OId));
 	ColumnInfo columnInfo;
-	columnInfo.setType(COLUMN_TYPE_STRING, false);
+	columnInfo.setType(COLUMN_TYPE_STRING);
 	columnInfo.setColumnId(0);
 	columnInfo.setOffset(varDataPos++); 
 	columnInfoList.push_back(columnInfo);
 
-	columnInfo.setType(COLUMN_TYPE_BLOB, false);
+	columnInfo.setType(COLUMN_TYPE_BLOB);
 	columnInfo.setColumnId(1);
 	columnInfo.setOffset(varDataPos); 
 	columnInfoList.push_back(columnInfo);
@@ -3320,37 +3354,18 @@ MapType getAvailableIndex(const DataStoreConfig& dsConfig, const char* indexName
 				indexName, strlen(indexName),
 				"indexName");
 		}
-		if (ValueProcessor::isArray(targetColumnType)) {
-			isArray = 1;
+
+		MapType realMapType;
+		if (!IndexSchema::findDefaultIndexType(targetColumnType, realMapType)) {
 			GS_THROW_USER_ERROR(
-				GS_ERROR_CM_NOT_SUPPORTED, "not support this index type");
+					GS_ERROR_CM_NOT_SUPPORTED,
+					"Index is not supported for target column");
 		}
-		MapType realMapType = defaultIndexType[targetColumnType];
-		if (realMapType < 0 || realMapType >= MAP_TYPE_NUM) {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_CM_NOT_SUPPORTED, "not support this index type");
-		}
-		bool isSupport;
-		switch (targetContainerType) {
-		case COLLECTION_CONTAINER:
-			isSupport = Collection::indexMapTable[targetColumnType]
-				[realMapType];
-			break;
-		case TIME_SERIES_CONTAINER:
-			isSupport = TimeSeries::indexMapTable[targetColumnType]
-				[realMapType];
-			break;
-		default:
-			GS_THROW_USER_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
-			break;
-		}
-		if (isSupport) {
-			return realMapType;
-		}
-		else {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_CM_NOT_SUPPORTED, "not support this index type");
-		}
+
+		BaseContainer::validateIndexInfo(
+				targetContainerType, targetColumnType, realMapType);
+
+		return realMapType;
 	}
 	catch (std::exception& e) {
 		if (primaryCheck) {
@@ -4415,27 +4430,33 @@ NodeAffinityNumber TablePartitioningInfo<Alloc>::getAffinityNumber(
 			int8_t byteValue;
 			memcpy(&byteValue, value1->fixedData(), size);
 			tmpValue = byteValue;
+			break;
 		}
-								 break;
 		case TupleList::TYPE_SHORT: {
 			int16_t shortValue;
 			memcpy(&shortValue, value1->fixedData(), size);
 			tmpValue = shortValue;
+			break;
 		}
-								  break;
 		case TupleList::TYPE_INTEGER: {
 			int32_t intValue;
 			memcpy(&intValue, value1->fixedData(), size);
 			tmpValue = intValue;
+			break;
 		}
-									break;
 		case TupleList::TYPE_TIMESTAMP:
 		case TupleList::TYPE_LONG: {
 			int64_t longValue;
 			memcpy(&longValue, value1->fixedData(), size);
 			tmpValue = longValue;
+			break;
 		}
-								 break;
+		case TupleList::TYPE_MICRO_TIMESTAMP:
+			tmpValue = ValueProcessor::getTimestamp(value1->get<MicroTimestamp>());
+			break;
+		case TupleList::TYPE_NANO_TIMESTAMP:
+			tmpValue = ValueProcessor::getTimestamp(value1->get<TupleNanoTimestamp>());
+			break;
 		default:
 			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INVALID_CONSTRAINT_NULL,
 				"NULL value is not allowed, partitioning column='"
@@ -4691,6 +4712,8 @@ bool NoSQLUtils::checkAcceptableTupleType(TupleList::TupleColumnType type) {
 	case TupleList::TYPE_NUMERIC:
 	case TupleList::TYPE_DOUBLE:
 	case TupleList::TYPE_TIMESTAMP:
+	case TupleList::TYPE_MICRO_TIMESTAMP:
+	case TupleList::TYPE_NANO_TIMESTAMP:
 	case TupleList::TYPE_NULL:
 	case TupleList::TYPE_STRING:
 	case TupleList::TYPE_BLOB:
@@ -4699,6 +4722,14 @@ bool NoSQLUtils::checkAcceptableTupleType(TupleList::TupleColumnType type) {
 	default:
 		return false;
 	}
+}
+
+bool NoSQLUtils::isVariableType(ColumnType type) {
+	return ValueProcessor::isVariable(type);
+};
+
+uint32_t NoSQLUtils::getFixedSize(ColumnType type) {
+	return FixedSizeOfColumnType[type];
 }
 
 template<typename T>
@@ -5204,11 +5235,11 @@ NoSQLContainer* recoverySubContainer(util::StackAllocator& alloc,
 		partitioningInfo.init();
 		size_t targetAffinityPos = partitioningInfo.findEntry(affinity);
 		if (targetAffinityPos == SIZE_MAX) {
-			return false;
+			return NULL;
 		}
 		else if (partitioningInfo.assignStatusList_[targetAffinityPos]
 			== PARTITION_STATUS_DROP_START) {
-			return false;
+			return NULL;
 		}
 
 		util::XArray<uint8_t> containerSchema(alloc);

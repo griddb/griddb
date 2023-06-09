@@ -630,6 +630,9 @@ const SQLPreparedPlan::Node::CommandOptionFlag
 const SQLPreparedPlan::Node::CommandOptionFlag
 		SQLPreparedPlan::Node::Config::CMD_OPT_WINDOW_SORTED = 1 << 7;
 
+const SQLPreparedPlan::Node::CommandOptionFlag
+		SQLPreparedPlan::Node::Config::CMD_OPT_GROUP_RANGE = 1 << 8;
+
 SQLPreparedPlan::Node::Node(util::StackAllocator &alloc) :
 		id_(0),
 		type_(Type()),
@@ -1213,6 +1216,7 @@ void SQLCompiler::setMultiIndexScanEnabled(bool enabled) {
 }
 
 void SQLCompiler::compile(const Select &in, Plan &plan, SQLConnectionControl *control) {
+
 	{
 		std::string value;
 
@@ -1300,6 +1304,7 @@ void SQLCompiler::compile(const Select &in, Plan &plan, SQLConnectionControl *co
 				"Unsupported command: commandType=" << static_cast<uint32_t>(in.cmdType_));
 		break;
 	}
+
 	genResult(plan);
 
 
@@ -1348,6 +1353,7 @@ void SQLCompiler::compile(const Select &in, Plan &plan, SQLConnectionControl *co
 		profiler_->setTableInfoList(getTableInfoList());
 		ProfilerManager::getInstance().addProfiler(*profiler_);
 	}
+
 }
 
 bool SQLCompiler::isRecompileOnBindRequired() const {
@@ -2438,6 +2444,7 @@ void SQLCompiler::genWhere(GenRAContext &cxt, Plan &plan) {
 			const Expr& whereExpr = genExpr(*scalarExpr, plan, MODE_WHERE);
 			assert(node.id_ == plan.back().id_);
 			node.predList_.push_back(whereExpr);
+			cxt.scalarWhereNodeRef_ = toRef(plan, &node);
 		}
 		assert(subExpr != NULL);
 		inputId = plan.back().id_;
@@ -2462,6 +2469,7 @@ void SQLCompiler::genWhere(GenRAContext &cxt, Plan &plan) {
 		const Expr& whereExpr = genExpr(*selectWhereExpr, plan, MODE_WHERE);
 		assert(node.id_ == plan.back().id_);
 		node.predList_.push_back(whereExpr);
+		cxt.scalarWhereNodeRef_ = toRef(plan, &node);
 	}
 	cxt.whereExpr_ = NULL;
 }
@@ -2675,6 +2683,10 @@ bool SQLCompiler::genSplittedSelectProjection(
 
 
 void SQLCompiler::genGroupBy(GenRAContext &cxt, ExprRef &havingExprRef, Plan &plan) {
+	if (genRangeGroup(cxt, havingExprRef, plan)) {
+		return;
+	}
+
 	const Select &select = cxt.select_;
 	bool inSubQuery = cxt.inSubQuery_;
 	const Expr* selectHaving = select.having_;
@@ -2872,6 +2884,559 @@ void SQLCompiler::genHaving(GenRAContext &cxt, const ExprRef &havingExprRef, Pla
 	Expr havingExpr(alloc_);
 	havingExpr = havingExprRef.generate();
 	node.predList_.push_back(havingExpr);
+}
+
+bool SQLCompiler::genRangeGroup(
+		GenRAContext &cxt, ExprRef &havingExprRef, Plan &plan) {
+	const Select &select = cxt.select_;
+
+	if (!isRangeGroupPredicate(select.groupByList_)) {
+		return false;
+	}
+
+	if (cxt.inSubQuery_) {
+		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, NULL,
+				"GROUP BY RANGE clause in the subquery is not supported");
+	}
+
+	ExprList inSelectList(alloc_);
+	inSelectList.reserve(select.selectList_->size() + 1);
+	inSelectList.assign(select.selectList_->begin(), select.selectList_->end());
+	if (select.having_) {
+		inSelectList.push_back(select.having_);
+	}
+
+
+	if (findSubqueryExpr(inSelectList)) {
+		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, NULL,
+				"Subqueries in the SELECT " <<
+				(select.having_ == NULL ? "" : "or HAVING ") <<
+				"clause with GROUP BY RANGE clause "
+				"are not supported");
+	}
+
+	if (findDistinctAggregation(&inSelectList)) {
+		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, NULL,
+				"Distinct aggregation functions with GROUP BY RANGE clause "
+				"are not supported");
+	}
+
+	const Expr *windowExpr = NULL;
+
+	if (findWindowExpr(inSelectList, false, windowExpr) &&
+			calcFunctionCategory(*windowExpr, false) !=
+					FUNCTION_PSEUDO_WINDOW) {
+		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, NULL,
+				"Window functions with GROUP BY RANGE clause "
+				"are not supported");
+	}
+
+	genSplittedSelectProjection(cxt, inSelectList, plan);
+
+	ExprRef keyExprRef;
+	{
+		const PlanNodeId inputId = plan.back().id_;
+		const PlanNodeId *productedNodeId = &inputId;
+		PlanNode &node = plan.append(SQLType::EXEC_SORT);
+		node.inputList_.push_back(inputId);
+
+		ExprList inPredList(alloc_);
+		inPredList.push_back(select.groupByList_->front()->next_->front());
+		assert(inPredList.front()->op_ == SQLType::EXPR_COLUMN);
+
+		PlanExprList baseList = genExprList(
+				inPredList, plan, MODE_GROUPBY, productedNodeId);
+
+		keyExprRef = toRef(
+				plan,
+				plan.nodeList_[inputId].outputList_[baseList.front().columnId_],
+				&plan.nodeList_[inputId]);
+		plan.nodeList_.pop_back();
+	}
+
+	const bool withPseudoWindow = (cxt.pseudoWindowExprCount_ > 0);
+	if (withPseudoWindow) {
+		genPseudoWindowFunc(cxt, plan);
+
+		PlanNodeId inputId = plan.back().id_;
+		SQLPreparedPlan::Node &node = plan.append(SQLType::EXEC_SELECT);
+		node.inputList_.push_back(inputId);
+		node.outputList_ = inputListToOutput(plan);
+	}
+	else {
+		const PlanNodeId inputId = plan.back().id_;
+		const PlanNodeId *productedNodeId = &inputId;
+		PlanNode &node = plan.append(SQLType::EXEC_SORT);
+		node.inputList_.push_back(inputId);
+		node.outputList_ = inputListToOutput(plan);
+
+		ExprList inPredList(alloc_);
+		inPredList.push_back(select.groupByList_->front()->next_->front());
+		assert(inPredList.front()->op_ == SQLType::EXPR_COLUMN);
+
+		node.predList_ = genExprList(
+				inPredList, plan, MODE_GROUPBY, productedNodeId);
+	}
+
+	{
+		const PlanNodeId inputId = plan.back().id_;
+		const PlanNodeId *productedNodeId = &inputId;
+		PlanNode &node = plan.append(SQLType::EXEC_GROUP);
+		node.cmdOptionFlag_ |= PlanNode::Config::CMD_OPT_GROUP_RANGE;
+		node.inputList_.push_back(inputId);
+		node.outputList_ = inputListToOutput(plan); 
+
+		ExprList inTotalAggrList(alloc_);
+		inTotalAggrList.insert(
+				inTotalAggrList.end(),
+				cxt.aggrExprList_.begin(), cxt.aggrExprList_.end());
+		inTotalAggrList.insert(
+				inTotalAggrList.end(),
+				cxt.windowExprList_.begin(), cxt.windowExprList_.end());
+
+		PlanExprList totalAggrList = genColumnExprList(
+				inTotalAggrList, plan, MODE_GROUP_SELECT, productedNodeId);
+		assert(&node == &plan.back());
+		assert(
+				totalAggrList.size() ==
+				cxt.aggrExprList_.size() + cxt.windowExprList_.size());
+
+		PlanExprList::const_iterator aggrBegin = totalAggrList.begin();
+		PlanExprList::const_iterator aggrEnd = aggrBegin + cxt.aggrExprList_.size();
+		{
+			PlanExprList::const_iterator inIt = aggrBegin;
+			PlanExprList::iterator outIt = cxt.selectList_.begin();
+			for (; inIt != aggrEnd; ++inIt, ++outIt) {
+				if (findAggrExpr(*inIt, true)) {
+					*outIt = *inIt;
+				}
+			}
+		}
+		{
+			PlanExprList::const_iterator inIt = aggrBegin;
+			PlanExprList::iterator outIt =
+					node.outputList_.begin() + cxt.selectTopColumnId_;
+			for (; inIt != aggrEnd; ++inIt, ++outIt) {
+				if (findAggrExpr(*inIt, true)) {
+					*outIt = *inIt;
+				}
+			}
+		}
+		if (select.having_) {
+			cxt.selectList_.pop_back();
+			if (cxt.selectExprRefList_.size() > 1) {
+				cxt.selectExprRefList_.pop_back();
+			}
+		}
+
+		PlanNodeRef &whereNode = cxt.scalarWhereNodeRef_;
+		const PlanExprList *wherePred =
+				(whereNode.get() == NULL ? NULL : &whereNode->predList_);
+		if (wherePred == NULL || wherePred->empty()) {
+			SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, NULL,
+					"WHERE clause must be specified for GROUP BY RANGE clause");
+		}
+
+		const Expr keyExprInCond = *keyExprRef;
+		keyExprRef.update();
+
+		const Expr *optionExpr = select.groupByList_->front();
+		node.predList_.push_back(resolveRangeGroupPredicate(
+				plan, wherePred->front(), *keyExprRef, keyExprInCond,
+				*optionExpr));
+		whereNode = PlanNodeRef();
+
+		adjustRangeGroupOutput(plan, node, *keyExprRef);
+
+		cxt.selectTopColumnId_ = 0;
+		cxt.productedNodeId_ = node.id_;
+	}
+
+	if (select.having_) {
+		assert(cxt.otherTopPos_ > 0);
+		const size_t havingColId = cxt.otherTopPos_ - 1;
+		assert(plan.back().outputList_.size() > havingColId);
+		havingExprRef = toRef(plan, plan.back().outputList_[havingColId]);
+	}
+
+	return true;
+}
+
+bool SQLCompiler::genRangeGroupIdNode(
+		Plan &plan, const Select &select, int32_t &rangeGroupIdPos) {
+	rangeGroupIdPos = -1;
+
+	if (!isRangeGroupPredicate(select.groupByList_)) {
+		return false;
+	}
+	const Expr *optionExpr = select.groupByList_->front();
+
+	{
+		Plan::Node &node = plan.back();
+		node.outputList_.push_back(makeRangeGroupIdExpr(plan, *optionExpr));
+		rangeGroupIdPos = static_cast<int32_t>(node.outputList_.size() - 1);
+	}
+	const PlanNodeId inputId = plan.back().id_;
+
+	{
+		Plan::Node &node = plan.append(SQLType::EXEC_SELECT);
+		node.inputList_.push_back(inputId);
+		node.outputList_ = inputListToOutput(plan);
+	}
+
+	return true;
+}
+
+bool SQLCompiler::isRangeGroupPredicate(const ExprList *groupByList) {
+	if (groupByList == NULL || groupByList->size() != 1) {
+		return false;
+	}
+
+	const Expr *optionExpr = groupByList->front();
+	if (optionExpr->op_ != SQLType::EXPR_RANGE_GROUP) {
+		return false;
+	}
+
+	return true;
+}
+
+void SQLCompiler::adjustRangeGroupOutput(
+		Plan &plan, PlanNode &node, const Expr &keyExpr) {
+	PlanExprList &outExprList = node.outputList_;
+	assert(keyExpr.op_ == SQLType::EXPR_COLUMN);
+
+	for (PlanExprList::iterator it = outExprList.begin();
+			it != outExprList.end(); ++it) {
+		adjustRangeGroupOutput(*it, keyExpr);
+	}
+
+	refreshColumnTypes(plan, node, outExprList, true, false);
+	for (PlanExprList::iterator it = outExprList.begin();
+			it != outExprList.end(); ++it) {
+	}
+}
+
+void SQLCompiler::adjustRangeGroupOutput(
+		Expr &outExpr, const Expr &keyExpr) {
+	const Type type = outExpr.op_;
+	do {
+		Type destType;
+		if (SQLType::START_AGG < type && type < SQLType::END_AGG) {
+			destType = SQLType::EXPR_RANGE_FILL;
+		}
+		else if (type == SQLType::EXPR_COLUMN) {
+			destType = (outExpr.columnId_ == keyExpr.columnId_ ?
+					SQLType::EXPR_RANGE_KEY : SQLType::EXPR_RANGE_FILL);
+		}
+		else {
+			break;
+		}
+
+		Expr *subExpr = ALLOC_NEW(alloc_) Expr(outExpr);
+		outExpr = Expr(alloc_);
+		outExpr.op_ = destType;
+		outExpr.left_ = subExpr;
+		outExpr.autoGenerated_ = true;
+		setUpExprAttributes(
+				outExpr, subExpr, subExpr->columnType_, MODE_GROUP_SELECT,
+				SQLType::AGG_PHASE_ALL_PIPE);
+		outExpr.autoGenerated_ = subExpr->autoGenerated_;
+
+		outExpr.qName_ = subExpr->qName_;
+		outExpr.aliasName_ = subExpr->aliasName_;
+
+		return;
+	}
+	while (false);
+
+	for (ExprArgsIterator<false> it(outExpr); it.exists(); it.next()) {
+		adjustRangeGroupOutput(it.get(), keyExpr);
+	}
+}
+
+SQLCompiler::Expr SQLCompiler::resolveRangeGroupPredicate(
+		const Plan &plan, const Expr &whereCond, const Expr &keyExpr,
+		const Expr &keyExprInCond, const Expr &optionExpr) {
+	{
+		const ColumnType keyType = keyExpr.columnType_;
+		if (!ColumnTypeUtils::isNull(keyType) &&
+				!ProcessorUtils::isRangeGroupSupportedType(keyType)) {
+			SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, NULL,
+					"Unsuppoted column type for GROUP BY RANGE key (type=" <<
+					TupleList::TupleColumnTypeCoder()(keyType) << ")");
+		}
+	}
+
+	TupleValue lower;
+	const bool lowerFound =
+			findRangeGroupBoundary(whereCond, keyExprInCond, lower, true);
+
+	TupleValue upper;
+	const bool upperFound =
+			findRangeGroupBoundary(whereCond, keyExprInCond, upper, false);
+
+	if (!lowerFound || !upperFound) {
+		if (!lowerFound && !upperFound) {
+			SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, NULL,
+					"Boundary conditions in the WHERE clause "
+					"must be specified for GROUP BY RANGE clause");
+		}
+		else {
+			SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, NULL,
+					(lowerFound ? "Upper" : "Lower") << " "
+					"boundary condition in the WHERE clause "
+					"not specified for GROUP BY RANGE clause");
+		}
+	}
+
+	assert(optionExpr.op_ == SQLType::EXPR_RANGE_GROUP);
+	const Type fillType = (*optionExpr.next_)[1]->op_;
+	const int64_t baseInterval = (*optionExpr.next_)[2]->value_.get<int64_t>();
+	const int64_t unit = (*optionExpr.next_)[3]->value_.get<int64_t>();
+	const int64_t baseOffset = (*optionExpr.next_)[4]->value_.get<int64_t>();
+	const TupleValue &timeZone =
+			resolveRangeGroupTimeZone((*optionExpr.next_)[5]->value_);
+
+	int64_t interval = resolveRangeGroupIntervalOrOffset(baseInterval, unit, true);
+	int64_t offset = resolveRangeGroupIntervalOrOffset(baseOffset, unit, false);
+	adjustRangeGroupInterval(interval, offset, timeZone);
+	if (!ProcessorUtils::adjustRangeGroupBoundary(
+			lower, upper, interval, offset)) {
+		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, NULL,
+				"Boundary value for GROUP BY RANGE clause must not be "
+				"less than offset");
+	}
+
+	const int64_t limit = getMaxGeneratedRows(plan);
+	return makeRangeGroupPredicate(keyExpr, fillType, interval, lower, upper, limit);
+}
+
+SQLCompiler::Expr SQLCompiler::makeRangeGroupIdExpr(
+		Plan &plan, const Expr &optionExpr) {
+	assert(optionExpr.op_ == SQLType::EXPR_RANGE_GROUP);
+	Expr *inKeyExpr = (*optionExpr.next_)[0];
+	const int64_t baseInterval = (*optionExpr.next_)[2]->value_.get<int64_t>();
+	const int64_t unit = (*optionExpr.next_)[3]->value_.get<int64_t>();
+	const int64_t baseOffset = (*optionExpr.next_)[4]->value_.get<int64_t>();
+	const TupleValue &timeZone =
+			resolveRangeGroupTimeZone((*optionExpr.next_)[5]->value_);
+
+	int64_t interval = resolveRangeGroupIntervalOrOffset(baseInterval, unit, true);
+	int64_t offset = resolveRangeGroupIntervalOrOffset(baseOffset, unit, false);
+	adjustRangeGroupInterval(interval, offset, timeZone);
+
+	ExprList inPredList(alloc_);
+	inPredList.push_back(inKeyExpr);
+	assert(inPredList.front()->op_ == SQLType::EXPR_COLUMN);
+	Expr* outKeyExpr = ALLOC_NEW(alloc_) Expr(genExprList(
+			inPredList, plan, MODE_NORMAL_SELECT, NULL).front());
+
+	Expr outExpr(alloc_);
+	outExpr.op_ = SQLType::EXPR_RANGE_GROUP_ID;
+	outExpr.next_ = ALLOC_NEW(alloc_) ExprList(alloc_);
+	outExpr.next_->push_back(outKeyExpr);
+	outExpr.next_->push_back(makeRangeGroupConst(TupleValue(interval)));
+	outExpr.next_->push_back(makeRangeGroupConst(TupleValue(offset)));
+
+	return outExpr;
+}
+
+SQLCompiler::Expr SQLCompiler::makeRangeGroupPredicate(
+		const Expr &keyExpr, Type fillType, int64_t interval,
+		TupleValue lower, TupleValue upper, int64_t limit) {
+	Expr expr(alloc_);
+	expr.op_ = SQLType::EXPR_RANGE_GROUP;
+	expr.next_ = ALLOC_NEW(alloc_) ExprList(alloc_);
+	expr.next_->push_back(ALLOC_NEW(alloc_) Expr(keyExpr));
+	expr.next_->push_back(Expr::makeExpr(alloc_, fillType));
+	expr.next_->push_back(makeRangeGroupConst(TupleValue(interval)));
+	expr.next_->push_back(makeRangeGroupConst(lower));
+	expr.next_->push_back(makeRangeGroupConst(upper));
+	expr.next_->push_back(makeRangeGroupConst(TupleValue(limit)));
+	return expr;
+}
+
+int64_t SQLCompiler::resolveRangeGroupIntervalOrOffset(
+		int64_t baseInterval, int64_t unit, bool forInterval) {
+	util::DateTime dt(0);
+	try {
+		dt.addField(baseInterval, static_cast<util::DateTime::FieldType>(unit));
+	}
+	catch (util::UtilityException &e) {
+		const char8_t *target = (forInterval ? "interval" : "offset");
+		GS_RETHROW_USER_ERROR_CODED(
+				GS_ERROR_SQL_COMPILE_LIMIT_EXCEEDED,
+				e, "Too large range group " << target <<" (reason=" <<
+				e.getField(util::Exception::FIELD_MESSAGE) << ")");
+	}
+	return dt.getUnixTime();
+}
+
+void SQLCompiler::adjustRangeGroupInterval(
+		int64_t &interval, int64_t &offset, const TupleValue &timeZone) {
+	int64_t outInterval = std::max<int64_t>(interval, 1);
+	int64_t outOffset = std::max<int64_t>(offset, 0) % outInterval;
+
+	if (!ColumnTypeUtils::isNull(timeZone.getType())) {
+		const int64_t zoneOffset = timeZone.get<int64_t>();
+		int64_t diff;
+		if (zoneOffset >= 0) {
+			diff = zoneOffset % outInterval;
+		}
+		else {
+			diff = outInterval - ((-zoneOffset) % outInterval);
+		}
+
+		if (outOffset >= outInterval - diff) {
+			outOffset += diff - outInterval;
+		}
+		else {
+			outOffset += diff;
+		}
+	}
+
+	interval = outInterval;
+	offset = outOffset;
+}
+
+bool SQLCompiler::findRangeGroupBoundary(
+		const Expr &expr, const Expr &keyExpr, TupleValue &value,
+		bool forLower) {
+	bool bounding = true;
+	bool less = false;
+	bool inclusive = false;
+	switch (expr.op_) {
+	case SQLType::OP_LT:
+		less = true;
+		break;
+	case SQLType::OP_GT:
+		break;
+	case SQLType::OP_LE:
+		inclusive = true;
+		less = true;
+		break;
+	case SQLType::OP_GE:
+		inclusive = true;
+		break;
+	case SQLType::EXPR_AND:
+		bounding = false;
+		break;
+	default:
+		return false;
+	}
+
+	if (bounding) {
+		const Expr *lhs = expr.left_;
+		const Expr *rhs = expr.right_;
+		if (lhs->op_ != SQLType::EXPR_COLUMN) {
+			std::swap(lhs, rhs);
+			less = !less;
+			if (lhs->op_ != SQLType::EXPR_COLUMN) {
+				return false;
+			}
+		}
+		if (!(!forLower == less)) {
+			return false;
+		}
+		if (lhs->columnId_ != keyExpr.columnId_) {
+			return false;
+		}
+		if (rhs->op_ != SQLType::EXPR_CONSTANT) {
+			if (!isConstantOnExecution(*rhs)) {
+				return false;
+			}
+			return true;
+		}
+		const ColumnType keyType = keyExpr.columnType_;
+		const ColumnType valueType = rhs->value_.getType();
+		if (!ProcessorUtils::isRangeGroupSupportedType(keyType) ||
+				!ProcessorUtils::isRangeGroupSupportedType(valueType)) {
+			return false;
+		}
+		value = ProcessorUtils::getRangeGroupBoundary(
+				alloc_, keyType, rhs->value_, forLower, inclusive);
+		return true;
+	}
+
+	bool found = false;
+	TupleValue lastValue;
+	for (ExprArgsIterator<> it(expr); it.exists(); it.next()) {
+		TupleValue subValue;
+		if (!findRangeGroupBoundary(it.get(), keyExpr, subValue, forLower)) {
+			continue;
+		}
+
+		found = true;
+		if (ColumnTypeUtils::isNull(subValue.getType())) {
+			lastValue = TupleValue();
+			break;
+		}
+
+		if (ColumnTypeUtils::isNull(lastValue.getType())) {
+			lastValue = subValue;
+			continue;
+		}
+
+		const int64_t base1 = subValue.get<int64_t>();
+		const int64_t base2 = lastValue.get<int64_t>();
+		lastValue = TupleValue(forLower ?
+				std::max(base1, base2) :
+				std::min(base1, base2));
+	}
+
+	value = lastValue;
+	return found;
+}
+
+TupleValue SQLCompiler::resolveRangeGroupTimeZone(const TupleValue &specified) {
+	if (!ColumnTypeUtils::isNull(specified.getType())) {
+		return specified;
+	}
+
+	const util::TimeZone &zone = getCompileOption().getTimeZone();
+	if (!zone.isEmpty()) {
+		const int64_t offsetMillis = zone.getOffsetMillis();
+		return TupleValue(offsetMillis);
+	}
+
+	return TupleValue();
+}
+
+SQLCompiler::Expr* SQLCompiler::makeRangeGroupConst(const TupleValue &value) {
+	Expr *expr = ALLOC_NEW(alloc_) Expr(alloc_);
+	expr->op_ = SQLType::EXPR_CONSTANT;
+	expr->value_ = value;
+	expr->autoGenerated_ = true;
+	setUpExprAttributes(
+			*expr, NULL, TupleList::TYPE_NULL, MODE_GROUP_SELECT,
+			SQLType::AGG_PHASE_ALL_PIPE);
+	return expr;
+}
+
+bool SQLCompiler::findDistinctAggregation(const ExprList *exprList) {
+	if (exprList == NULL) {
+		return false;
+	}
+
+	for (ExprList::const_iterator it = exprList->begin();
+			it != exprList->end(); ++it) {
+		if (findDistinctAggregation(*it)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool SQLCompiler::findDistinctAggregation(const Expr *expr) {
+	if (expr == NULL) {
+		return false;
+	}
+
+	assert(!(SQLType::START_AGG < expr->op_ && expr->op_ < SQLType::END_AGG));
+	return (expr->aggrOpts_ & SyntaxTree::AGGR_OPT_DISTINCT) != 0 ||
+			findDistinctAggregation(expr->left_) ||
+			findDistinctAggregation(expr->right_) ||
+			findDistinctAggregation(expr->next_);
 }
 
 void SQLCompiler::genOrderBy(GenRAContext &cxt, ExprRef &innerTopExprRef, Plan &plan) {
@@ -3556,6 +4121,12 @@ void SQLCompiler::preparePseudoWindowOption(
 	node->inputList_.push_back(inputId);
 	node->outputList_ = inputListToOutput(plan);
 
+	int32_t rangeGroupIdPos;
+	if (genRangeGroupIdNode(plan, select, rangeGroupIdPos)) {
+		node = &plan.back();
+		inputId = node->inputList_.front();
+	}
+
 	PlanNodeId firstSelectNodeId = node->id_;
 
 	PlanExprList windowPartitionByList1(alloc_);
@@ -3571,8 +4142,14 @@ void SQLCompiler::preparePseudoWindowOption(
 		PlanExprList groupByList0(alloc_);
 		if (select.groupByList_) {
 			size_t orgSize = node->outputList_.size();
-			groupByList0 = genExprList(
-					*select.groupByList_, plan, mode, &inputId);
+			if (rangeGroupIdPos >= 0) {
+				groupByList0.push_back(genColumnExpr(
+						plan, 0, static_cast<ColumnId>(rangeGroupIdPos)));
+			}
+			else {
+				groupByList0 = genExprList(
+						*select.groupByList_, plan, mode, &inputId);
+			}
 			node = &plan.back();
 			node->outputList_ = inputListToOutput(plan, *node, &inId);
 			trimExprList(orgSize, node->outputList_);
@@ -4483,8 +5060,9 @@ void SQLCompiler::Meta::genDriverColumns(
 	projNode.outputList_.push_back(genConstColumn(
 			plan, TupleValue(static_cast<int32_t>(2000000000)),
 					STR_BUFFER_LENGTH));
-	projNode.outputList_.push_back(genConstColumn(
-			plan, TupleValue(static_cast<int32_t>(10)), STR_DECIMAL_DIGITS));
+	projNode.outputList_.push_back(genRefColumn<MetaType>(
+			plan, scanOutputList, MetaType::COLUMN_DECIMAL_DIGITS,
+					STR_DECIMAL_DIGITS));
 	projNode.outputList_.push_back(genConstColumn(
 			plan, TupleValue(static_cast<int32_t>(10)), STR_NUM_PREC_RADIX));
 	{
@@ -4525,8 +5103,8 @@ void SQLCompiler::Meta::genDriverColumns(
 	projNode.outputList_.push_back(genConstColumn(
 			plan, TupleValue(static_cast<int32_t>(0)),
 					STR_SQL_DATETIME_SUB));
-	projNode.outputList_.push_back(genConstColumn(
-			plan, TupleValue(static_cast<int32_t>(2000000000)),
+	projNode.outputList_.push_back(genRefColumn<MetaType>(
+			plan, scanOutputList, MetaType::COLUMN_CHAR_OCTET_LENGTH,
 					STR_CHAR_OCTET_LENGTH));
 	projNode.outputList_.push_back(genRefColumn<MetaType>(
 			plan, scanOutputList, MetaType::COLUMN_ORDINAL,
@@ -4773,7 +5351,7 @@ void SQLCompiler::Meta::genDriverTypeInfo(
 		TupleList::TYPE_LONG,
 		TupleList::TYPE_FLOAT,
 		TupleList::TYPE_DOUBLE,
-		TupleList::TYPE_TIMESTAMP,
+		TupleList::TYPE_NANO_TIMESTAMP, 
 		TupleList::TYPE_BOOL,
 		TupleList::TYPE_ANY,
 		TupleList::TYPE_STRING,
@@ -4784,7 +5362,9 @@ void SQLCompiler::Meta::genDriverTypeInfo(
 		SQLPreparedPlan::Node &projNode = plan.append(SQLType::EXEC_SELECT);
 		planNodeIdList.push_back(projNode.id_);
 
-		const char8_t *typeStr = TupleList::TupleColumnTypeCoder()(*it);
+		const bool precisionIgnorable = true;
+		const char8_t *typeStr = ValueProcessor::getTypeNameChars(
+				convertTupleTypeToNoSQLType(*it), precisionIgnorable);
 		if (*it == TupleList::TYPE_ANY) {
 			typeStr = str(STR_UNKNOWN);
 		}
@@ -4795,8 +5375,13 @@ void SQLCompiler::Meta::genDriverTypeInfo(
 		const int32_t dataType = ProcessorUtils::toSQLColumnType(*it);
 		projNode.outputList_.push_back(genConstColumn(
 				plan, TupleValue(dataType), STR_DATA_TYPE));
+		int32_t typePrecision = ValueProcessor::getValuePrecision(
+				convertTupleTypeToNoSQLType(*it));
+		if (typePrecision < 0) {
+			typePrecision = 0;
+		}
 		projNode.outputList_.push_back(genConstColumn(
-				plan, TupleValue(static_cast<int32_t>(0)), STR_PRECISION));
+				plan, TupleValue(typePrecision), STR_PRECISION));
 		projNode.outputList_.push_back(genEmptyColumn(
 				plan, TupleList::TYPE_STRING, STR_LITERAL_PREFIX));
 		projNode.outputList_.push_back(genEmptyColumn(
@@ -5789,6 +6374,15 @@ uint32_t SQLCompiler::calcFunctionCategory(const Expr &expr, bool resolved) {
 	return FUNCTION_SCALAR;
 }
 
+bool SQLCompiler::isRangeGroupNode(const PlanNode &node) {
+	if ((node.cmdOptionFlag_ &
+			PlanNode::Config::CMD_OPT_GROUP_RANGE) != 0) {
+		assert(node.type_ == SQLType::EXEC_GROUP);
+		return true;
+	}
+	return false;
+}
+
 bool SQLCompiler::isWindowNode(const PlanNode &node) {
 	if ((node.cmdOptionFlag_ &
 			PlanNode::Config::CMD_OPT_WINDOW_SORTED) != 0) {
@@ -6028,8 +6622,6 @@ SQLCompiler::Expr SQLCompiler::genScalarExpr(
 
 	if (inExpr.op_ == SQLType::EXPR_FUNCTION) {
 		exprType = resolveFunction(inExpr);
-		resolveTimestampField(
-				plan, mode, exprType, inExpr.next_, timestampField);
 
 		if (exprType == SQLType::AGG_COUNT_ALL) {
 			exprNext = NULL;
@@ -6068,11 +6660,6 @@ SQLCompiler::Expr SQLCompiler::genScalarExpr(
 		ExprList *outNext = ALLOC_NEW(alloc_) ExprList(alloc_);
 
 		ExprList::const_iterator it = exprNext->begin();
-		if (timestampField != NULL) {
-			++it;
-			outNext->push_back(timestampField);
-		}
-
 		for (; it != exprNext->end(); ++it) {
 			outNext->push_back(ALLOC_NEW(alloc_) Expr(genScalarExpr(
 					**it, plan, mode, subAggregated, productedNodeId,
@@ -6080,6 +6667,10 @@ SQLCompiler::Expr SQLCompiler::genScalarExpr(
 		}
 
 		outExpr.next_ = outNext;
+	}
+
+	if (inExpr.op_ == SQLType::EXPR_FUNCTION) {
+		arrangeFunctionArgs(exprType, outExpr);
 	}
 
 	if (SQLType::START_FUNC < exprType && exprType < SQLType::END_FUNC) {
@@ -6172,6 +6763,15 @@ SQLCompiler::Expr SQLCompiler::genScalarExpr(
 			else {
 				outExpr.columnId_ = pos;
 			}
+		}
+		else if (exprType == SQLType::EXPR_AGG_ORDERING) {
+			assert(outExpr.next_ != NULL);
+			if (outExpr.next_->size() != 1) {
+				SQL_COMPILER_THROW_ERROR(
+						GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, &inExpr,
+						"Only one sort key can be used for WITHIN GROUP clause");
+			}
+			return *outExpr.next_->front();
 		}
 		else if (outExpr.next_ != NULL &&
 				(exprType == SQLType::EXPR_AND ||
@@ -8856,6 +9456,10 @@ bool SQLCompiler::pushDownAggregate(Plan &plan) {
 				continue;
 			}
 
+			if (isRangeGroupNode(node)) {
+				continue;
+			}
+
 			unionNodeId = node.inputList_.front();
 			unionNode = &plan.nodeList_[unionNodeId];
 			if (unionNode->type_ != SQLType::EXEC_UNION ||
@@ -10870,6 +11474,17 @@ uint64_t SQLCompiler::getMaxExpansionCount(const Plan &plan) {
 			plan.hintInfo_, SQLHint::MAX_DEGREE_OF_EXPANSION,
 			DEFAULT_MAX_EXPANSION_COUNT, count);
 	return count;
+}
+
+int64_t SQLCompiler::getMaxGeneratedRows(const Plan &plan) {
+	uint64_t count;
+	const bool found = getSingleHintValue(
+			plan.hintInfo_, SQLHint::MAX_GENERATED_ROWS,
+			0, count);
+	if (!found) {
+		return -1;
+	}
+	return static_cast<int64_t>(count);
 }
 
 bool SQLCompiler::getSingleHintValue(
@@ -13882,10 +14497,16 @@ bool SQLCompiler::rewriteSubquery(
 
 	PlanNodeId outsideId;
 	PlanNodeId foldNodeId;
+	ColumnId outsideColumnId;
 	{
 		PlanNode &node = plan.nodeList_[subqueryJoinId];
 		outsideId = node.inputList_[0];
 		foldNodeId = node.inputList_[1];
+		outsideColumnId = (node.predList_.size() > 1 &&
+				node.predList_[1].op_ == SQLType::OP_EQ &&
+				node.predList_[1].left_->op_ == SQLType::EXPR_COLUMN &&
+				node.predList_[1].left_->inputId_ == 0 ?
+						node.predList_[1].left_->columnId_ : UNDEF_COLUMNID);
 	}
 
 	if (rewroteJoinIdSet.find(foldNodeId) != rewroteJoinIdSet.end()) {
@@ -13982,11 +14603,66 @@ bool SQLCompiler::rewriteSubquery(
 				continue;
 			}
 			else {
+				ColumnId resolvedInsideColumnId = insideColumnId;
+				do {
+					if (!(resolvedInsideColumnId == UNDEF_COLUMNID &&
+							node.type_ == SQLType::EXEC_JOIN &&
+							node.inputList_[0] == outsideId)) {
+						break;
+					}
+
+					for (PlanExprList::iterator it = node.outputList_.begin();
+							it != node.outputList_.end(); ++it) {
+						if (it->op_ == SQLType::EXPR_COLUMN &&
+								it->inputId_ == 0 &&
+								it->columnId_ == outsideColumnId) {
+							resolvedInsideColumnId =
+									static_cast<ColumnId>(it - node.outputList_.begin());
+							break;
+						}
+					}
+
+					if (resolvedInsideColumnId == UNDEF_COLUMNID) {
+						break;
+					}
+
+					PlanNodeId prevNodeId = nodeId;
+					ColumnId prevInsideColumnId = resolvedInsideColumnId;
+					for (NodePath::reverse_iterator pathIt = nodePath.rbegin();
+							pathIt != nodePath.rend(); ++pathIt) {
+						const PlanNodeId curNodeId = pathIt->first;
+						ColumnId &curInsideColumnId = pathIt->second.second;
+						if (curNodeId == foldNodeId ||
+								curInsideColumnId != UNDEF_COLUMNID) {
+							break;
+						}
+						PlanNode &curNode = plan.nodeList_[curNodeId];
+
+						for (PlanExprList::iterator it = curNode.outputList_.begin();
+								it != curNode.outputList_.end(); ++it) {
+							if (it->op_ == SQLType::EXPR_COLUMN &&
+									curNode.inputList_[it->inputId_] == prevNodeId &&
+									it->columnId_ == prevInsideColumnId) {
+								curInsideColumnId = static_cast<ColumnId>(
+										it - curNode.outputList_.begin());
+								break;
+							}
+						}
+
+						if (curInsideColumnId == UNDEF_COLUMNID) {
+							break;
+						}
+						prevNodeId = curNodeId;
+						prevInsideColumnId = curInsideColumnId;
+					}
+				}
+				while (false);
+
 				visitedList[nodeId] = true;
 
 				bool typeRefreshRequired;
 				disableSubqueryOutsideColumns(
-						plan, node, outsideId, insideColumnId,
+						plan, node, outsideId, resolvedInsideColumnId,
 						typeRefreshRequired, fullDisabledList,
 						pendingLimitOffsetIdList);
 
@@ -15571,7 +16247,8 @@ void SQLCompiler::disableSubqueryOutsideColumns(
 			typeRefreshRequired = true;
 		}
 
-		if (node.subLimit_ >= 0 || node.subOffset_ > 0) {
+		if (insideColumnId != UNDEF_COLUMNID &&
+				(node.subLimit_ >= 0 || node.subOffset_ > 0)) {
 			assert(!(node.limit_ >= 0 || node.offset_ > 0));
 
 			if (node.subOffset_ > 0) {
@@ -17270,12 +17947,14 @@ size_t SQLCompiler::resolveColumn(
 	bool tableFound = false;
 	const Expr *foundExpr = NULL;
 
+	const bool forNormalGroupSelect =
+			(mode == MODE_GROUP_SELECT && !isRangeGroupNode(node));
 	bool deepError = false;
 	Expr deepOut(alloc_);
 	const PendingColumn *deepPendingColumn = NULL;
 	if (shallow &&
 			(mode == MODE_GROUPBY ||
-			mode == MODE_GROUP_SELECT ||
+			forNormalGroupSelect ||
 			mode == MODE_ORDERBY)) {
 		if (productedNodeId != NULL) {
 			deepCount = resolveColumnDeep(
@@ -17291,7 +17970,7 @@ size_t SQLCompiler::resolveColumn(
 	const PlanNode::IdList &inputList = node.inputList_;
 
 	PlanNode::IdList::const_iterator inIt = inputList.begin();
-	if (shallow && mode == MODE_GROUP_SELECT) {
+	if (shallow && forNormalGroupSelect) {
 		inIt = inputList.end();
 	}
 
@@ -17818,6 +18497,26 @@ SQLCompiler::Type SQLCompiler::resolveFunction(const Expr &expr) {
 						"The OVER clause cannot be used with the function '" << name << "'");
 			}
 		}
+
+		const bool orderingAggr =
+				ProcessorUtils::isExplicitOrderingAggregation(type);
+		const bool withOrderingArg =
+				(expr.next_ != NULL && !expr.next_->empty() &&
+				expr.next_->front()->op_ == SQLType::EXPR_AGG_ORDERING);
+		if (!orderingAggr != !withOrderingArg) {
+			if (orderingAggr) {
+				SQL_COMPILER_THROW_ERROR(
+						GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, &expr,
+						"The function '" << name <<
+						"' must have an WITHIN GROUP clause");
+			}
+			else {
+				SQL_COMPILER_THROW_ERROR(
+						GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, &expr,
+						"The WITHIN GROUP clause cannot be used "
+						"with the function '" << name << "'");
+			}
+		}
 		return type;
 	}
 
@@ -17870,61 +18569,73 @@ bool SQLCompiler::filterFunction(Type &type, size_t argCount) {
 	}
 }
 
-void SQLCompiler::resolveTimestampField(
-		const Plan &plan, Mode mode, Type type, const ExprList *inExprList,
-		Expr *&outExpr) {
-	outExpr = NULL;
-
-	switch (type) {
-	case SQLType::FUNC_EXTRACT:
-	case SQLType::FUNC_TIMESTAMP_ADD:
-	case SQLType::FUNC_TIMESTAMP_DIFF:
-	case SQLType::FUNC_TIMESTAMP_TRUNC:
-	case SQLType::FUNC_TIMESTAMPADD:
-	case SQLType::FUNC_TIMESTAMPDIFF:
-		break;
-	default:
+void SQLCompiler::arrangeFunctionArgs(Type type, Expr &expr) {
+	ExprList *exprList = expr.next_;
+	if (exprList == NULL) {
 		return;
 	}
-	const bool fillField = (type == SQLType::FUNC_EXTRACT);
 
-	if (inExprList == NULL || inExprList->empty() || inExprList->front() == NULL) {
-		assert(false);
-		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_INTERNAL, NULL, "");
+	bool checkRequired = false;
+	for (size_t lastIndex = 0;;) {
+		size_t index;
+		ColumnType argType;
+		if (!ProcessorUtils::findConstantArgType(
+				type, lastIndex, index, argType)) {
+			break;
+		}
+
+		Expr *argExpr = (*exprList)[index];
+		const bool forConst = (argExpr->op_ == SQLType::EXPR_CONSTANT);
+		if (!forConst && argExpr->op_ != SQLType::EXPR_PLACEHOLDER) {
+			SQL_COMPILER_THROW_ERROR(
+					GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, NULL,
+					"The argument in the specified function must be constant "
+					"(function=" << SQLType::Coder()(type, "") << ")");
+		}
+		checkRequired |= forConst;
+
+		do {
+			TupleValue &argValue = argExpr->value_;
+			if (!forConst || argValue.getType() == argType) {
+				break;
+			}
+
+			const bool implicit = true;
+			argValue = ProcessorUtils::convertType(
+					getVarContext(), argValue, argType, implicit);
+			if (argValue.getType() == argType) {
+				argExpr->columnType_ = argValue.getType();
+				break;
+			}
+
+			if (!ColumnTypeUtils::isNull(argValue.getType())) {
+				SQL_COMPILER_THROW_ERROR(
+						GS_ERROR_SQL_COMPILE_INTERNAL, NULL, "");
+			}
+
+			SQL_COMPILER_THROW_ERROR(
+					GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, NULL,
+					"The argument in the specified function must not be null "
+					"(function=" << SQLType::Coder()(type, "") << ")");
+		}
+		while (false);
+
+		lastIndex = index + 1;
 	}
 
-	const Expr &inExpr = *inExprList->front();
-	if (inExpr.op_ != SQLType::EXPR_CONSTANT) {
-		assert(false);
-		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_INTERNAL, NULL, "");
+	if (checkRequired) {
+		try {
+			Expr subExpr = expr;
+			subExpr.op_ = type;
+			ProcessorUtils::checkExprArgs(
+					getVarContext(), subExpr, getCompileOption());
+		}
+		catch (std::exception &e) {
+			SQL_COMPILER_RETHROW_ERROR(
+					e, NULL, GS_EXCEPTION_MESSAGE(e) <<
+					" (function=" << SQLType::Coder()(type, "") << ")");
+		}
 	}
-
-	util::DateTime::FieldType field =
-			static_cast<util::DateTime::FieldType>(inExpr.value_.get<int64_t>());
-	assert(field == util::DateTime::FIELD_YEAR ||
-			field == util::DateTime::FIELD_MONTH ||
-			field == util::DateTime::FIELD_DAY_OF_MONTH ||
-			field == util::DateTime::FIELD_HOUR ||
-			field == util::DateTime::FIELD_MINUTE ||
-			field == util::DateTime::FIELD_SECOND ||
-			field == util::DateTime::FIELD_MILLISECOND ||
-			field == util::DateTime::FIELD_DAY_OF_WEEK ||
-			field == util::DateTime::FIELD_DAY_OF_YEAR);
-
-	if (!fillField &&
-			(field == util::DateTime::FIELD_DAY_OF_WEEK ||
-			field == util::DateTime::FIELD_DAY_OF_YEAR)) {
-		SQL_COMPILER_THROW_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR, NULL,
-				"Specified function cannot accept timestamp field of "
-				"day of week or year (function=" <<
-				SQLType::Coder()(type, "") << ")");
-	}
-
-	outExpr = ALLOC_NEW(alloc_) Expr(genConstExpr(
-			plan, TupleValue(static_cast<int64_t>(field)), mode));
-	outExpr->qName_ = ALLOC_NEW(alloc_) QualifiedName(alloc_);
-	outExpr->qName_->name_ = SyntaxTree::tokenToString(
-			alloc_, inExpr.startToken_, true);
 }
 
 uint32_t SQLCompiler::genSourceId() {
@@ -18037,7 +18748,8 @@ bool SQLCompiler::isConstantEvaluable(const Expr &expr) {
 
 bool SQLCompiler::isConstantOnExecution(const Expr &expr) {
 	if (expr.op_ == SQLType::EXPR_CONSTANT ||
-			expr.op_ == SQLType::EXPR_PLACEHOLDER) {
+			expr.op_ == SQLType::EXPR_PLACEHOLDER ||
+			expr.op_ == SQLType::FUNC_NOW) {
 		return true;
 	}
 
@@ -21527,6 +22239,7 @@ SQLHint::Coder::NameTable::NameTable() : entryEnd_(entryList_) {
 	SQL_HINT_CODER_NAME_TABLE_ADD(START_ID);
 	SQL_HINT_CODER_NAME_TABLE_ADD(MAX_DEGREE_OF_PARALLELISM);
 	SQL_HINT_CODER_NAME_TABLE_ADD(MAX_DEGREE_OF_EXPANSION);
+	SQL_HINT_CODER_NAME_TABLE_ADD(MAX_GENERATED_ROWS);
 	SQL_HINT_CODER_NAME_TABLE_ADD(DISTRIBUTED_POLICY);
 	SQL_HINT_CODER_NAME_TABLE_ADD(INDEX_SCAN);
 	SQL_HINT_CODER_NAME_TABLE_ADD(NO_INDEX_SCAN);
@@ -21723,6 +22436,7 @@ bool SQLHintInfo::checkHintArguments(SQLHint::Id hintId, const Expr &hintExpr) c
 	switch(hintId) {
 	case SQLHint::MAX_DEGREE_OF_PARALLELISM:
 	case SQLHint::MAX_DEGREE_OF_TASK_INPUT:
+	case SQLHint::MAX_GENERATED_ROWS:
 		{
 			if (!checkArgCount(hintExpr, 1, false) ||
 				!checkArgSQLOpType(hintExpr, SQLType::EXPR_CONSTANT) ||
@@ -21842,6 +22556,7 @@ void SQLHintInfo::makeHintMap(
 						case SQLHint::MAX_DEGREE_OF_PARALLELISM:
 						case SQLHint::MAX_DEGREE_OF_TASK_INPUT:
 						case SQLHint::MAX_DEGREE_OF_EXPANSION:
+						case SQLHint::MAX_GENERATED_ROWS:
 						case SQLHint::DISTRIBUTED_POLICY:
 						case SQLHint::TASK_ASSIGNMENT:
 							{

@@ -742,6 +742,10 @@ SQLExprs::Expression& SQLExprs::ExprRewriter::duplicate(
 	Expression &dest = (destTop == NULL ?
 			cxt.getFactory().create(cxt, src.getCode()) : *destTop);
 
+	if (cxt.isArgChecking()) {
+		cxt.setArgChecking(false);
+	}
+
 	if (destTop != NULL && destTop->isPlannable()) {
 		destTop->getPlanningCode().setAttributes(
 				(destTop->getCode().getAttributes() |
@@ -1259,9 +1263,11 @@ bool SQLExprs::ExprRewriter::findVarGenerativeExpr(const Expression &expr) {
 	const TupleColumnType type = code.getColumnType();
 	if (!SQLValues::TypeUtils::isNull(type) &&
 			!SQLValues::TypeUtils::isAny(type) &&
-			!SQLValues::TypeUtils::isFixed(type) &&
+			!SQLValues::TypeUtils::isNormalFixed(type) &&
 			!ExprTypeUtils::isVarNonGenerative(
-					code.getType(), SQLValues::TypeUtils::isLob(type))) {
+					code.getType(),
+					SQLValues::TypeUtils::isLob(type),
+					SQLValues::TypeUtils::isLargeFixed(type))) {
 		return true;
 	}
 
@@ -1849,7 +1855,8 @@ void SQLExprs::ExprRewriter::setUpCodesAt(
 		uint32_t topAttributes, bool insideAggrFunc) const {
 
 	ExprCode &code = expr.getPlanningCode();
-	code.setAttributes(resolveAttributesAt(expr, projDepth, topAttributes));
+	code.setAttributes(
+			resolveAttributesAt(expr, projDepth, topAttributes, insideAggrFunc));
 	code.setColumnType(resolveColumnTypeAt(
 			cxt, expr, projDepth, topAttributes, insideAggrFunc));
 
@@ -1858,7 +1865,7 @@ void SQLExprs::ExprRewriter::setUpCodesAt(
 
 uint32_t SQLExprs::ExprRewriter::resolveAttributesAt(
 		const Expression &expr, const size_t *projDepth,
-		uint32_t topAttributes) {
+		uint32_t topAttributes, bool insideAggrFunc) {
 	const ExprCode &code = expr.getCode();
 
 	bool aggregated = false;
@@ -1877,6 +1884,13 @@ uint32_t SQLExprs::ExprRewriter::resolveAttributesAt(
 				break;
 			}
 		}
+	}
+
+	if (!aggregated && !insideAggrFunc &&
+			(expr.getCode().getType() == SQLType::EXPR_RANGE_KEY_CURRENT ||
+			expr.getCode().getType() == SQLType::EXPR_RANGE_KEY ||
+			expr.getCode().getType() == SQLType::EXPR_RANGE_FILL)) {
+		aggregated = true;
 	}
 
 	uint32_t attributes = (code.getAttributes() | ExprCode::ATTR_ASSIGNED);
@@ -2069,6 +2083,14 @@ void SQLExprs::ExprRewriter::optimizeCompExpr(
 				left->getCode().getColumnType());
 		const TupleColumnType type2 = SQLValues::TypeUtils::toNonNullable(
 				right->getCode().getColumnType());
+
+		if (SQLValues::TypeUtils::isTimestampFamily(type1)) {
+			swapRequired = (
+					SQLValues::TypeUtils::getTimePrecisionLevel(type1) <
+					SQLValues::TypeUtils::getTimePrecisionLevel(type2));
+			break;
+		}
+
 		if (!SQLValues::TypeUtils::isNumerical(type1) ||
 				!SQLValues::TypeUtils::isNumerical(type2)) {
 			break;
@@ -2097,7 +2119,9 @@ void SQLExprs::ExprRewriter::optimizeCompExpr(
 				ExprTypeUtils::swapCompOp(expr.getCode().getType()));
 	}
 
-	TupleColumnType numericAdjustingType = TupleTypes::TYPE_NULL;
+	TupleColumnType desiredType = TupleTypes::TYPE_NULL;
+	TupleColumnType adjustingType = TupleTypes::TYPE_NULL;
+	bool adjustOnLossy = false;
 	do {
 		const ExprType exprType1 = left->getCode().getType();
 		const ExprType exprType2 = right->getCode().getType();
@@ -2108,53 +2132,81 @@ void SQLExprs::ExprRewriter::optimizeCompExpr(
 		}
 
 		const TupleValue &srcValue = right->getCode().getValue();
+		if (SQLValues::ValueUtils::isNull(srcValue)) {
+			break;
+		}
 
 		const TupleColumnType type1 = SQLValues::TypeUtils::toNonNullable(
 				left->getCode().getColumnType());
 		const TupleColumnType type2 = SQLValues::TypeUtils::toNonNullable(
 				srcValue.getType());
-		if (type1 == type2 ||
-				!SQLValues::TypeUtils::isNumerical(type1) ||
-				!SQLValues::TypeUtils::isNumerical(type2)) {
+
+		if (SQLValues::TypeUtils::isTimestampFamily(type1)) {
+			if (type1 == type2) {
+				break;
+			}
+			desiredType = type1;
+			adjustingType = TupleTypes::TYPE_NANO_TIMESTAMP;
+			adjustOnLossy = true;
 			break;
 		}
 
-		const bool floating1 = SQLValues::TypeUtils::isFloating(type1);
-		const bool floating2 = SQLValues::TypeUtils::isFloating(type2);
-		if (!floating1 && floating2) {
-			break;
-		}
+		if (SQLValues::TypeUtils::isNumerical(type1) &&
+				SQLValues::TypeUtils::isNumerical(type2)) {
+			const bool floating1 = SQLValues::TypeUtils::isFloating(type1);
+			const bool floating2 = SQLValues::TypeUtils::isFloating(type2);
 
-		switch (SQLValues::TypeUtils::getStaticTypeCategory(type1)) {
-		case SQLValues::TypeUtils::TYPE_CATEGORY_LONG:
-			numericAdjustingType = TupleTypes::TYPE_LONG;
-			break;
-		case SQLValues::TypeUtils::TYPE_CATEGORY_DOUBLE:
-			numericAdjustingType = TupleTypes::TYPE_DOUBLE;
-			break;
-		default:
-			assert(false);
+			TupleColumnType baseType;
+			if (!floating1 && floating2) {
+				baseType = TupleTypes::TYPE_DOUBLE;
+			}
+			else {
+				baseType = SQLValues::TypeUtils::toComparisonType(type1);
+			}
+
+			if (baseType != type2) {
+				adjustingType = baseType;
+			}
+
 			break;
 		}
 	}
 	while (false);
 
-	if (!SQLValues::TypeUtils::isNull(numericAdjustingType)) {
+	if (!SQLValues::TypeUtils::isNull(adjustingType)) {
 		util::StackAllocator &alloc = cxt.getAllocator();
 		SQLValues::ValueContext valueCxt(
 				SQLValues::ValueContext::ofAllocator(alloc));
 
 		const TupleValue &srcValue = right->getCode().getValue();
 
-		const TupleValue &destValue = SQLValues::ValueConverter(
-				numericAdjustingType)(valueCxt, srcValue);
+		TupleValue destValue;
+		TupleColumnType valueType;
+		if (adjustOnLossy) {
+			destValue = SQLValues::ValueConverter(desiredType)(
+					valueCxt, srcValue);
+
+			const bool sensitive = false;
+			const bool lossy = (SQLValues::ValueComparator::compareValues(
+					destValue, srcValue, sensitive, true) != 0);
+			if (lossy) {
+				destValue = SQLValues::ValueConverter(
+						adjustingType)(valueCxt, srcValue);
+			}
+			valueType = (lossy ? adjustingType : desiredType);
+		}
+		else {
+			destValue = SQLValues::ValueConverter(
+					adjustingType)(valueCxt, srcValue);
+			valueType = adjustingType;
+		}
 
 		Expression::ModIterator it(expr);
 		it.next();
 
 		ExprCode &destCode = it.get().getPlanningCode();
 		destCode.setValue(valueCxt, destValue);
-		destCode.setColumnType(numericAdjustingType);
+		destCode.setColumnType(valueType);
 	}
 }
 
@@ -3359,6 +3411,63 @@ TupleValue SQLExprs::SyntaxExprRewriter::evalConstExpr(
 	return ExprRewriter::evalConstExpr(cxt, evaluableExpr);
 }
 
+void SQLExprs::SyntaxExprRewriter::checkExprArgs(
+		ExprContext &cxt, const ExprFactory &factory,
+		const SyntaxExpr &expr) {
+	util::StackAllocator &alloc = cxt.getAllocator();
+	util::StackAllocator::Scope allocScope(alloc);
+
+	SyntaxExprRewriter syntaxRewriter(cxt.getValueContext(), NULL);
+	Expression *planningExpr = syntaxRewriter.toExpr(&expr);
+	assert(planningExpr != NULL);
+
+	const ExprSpec &spec = factory.getSpec(planningExpr->getCode().getType());
+
+	ExprFactoryContext factoryCxt(alloc);
+	factoryCxt.setFactory(&factory);
+
+	size_t argIndex = 0;
+	for (Expression::ModIterator it(*planningExpr); it.exists(); it.next()) {
+		const ExprCode &code = it.get().getCode();
+		const TupleColumnType valueType = code.getValue().getType();
+
+		const ExprSpec::In *argIn = (argIndex < ExprSpec::IN_LIST_SIZE ?
+				&spec.inList_[argIndex] : NULL);
+
+		const bool numericPromo = (argIn != NULL &&
+				ExprSpecBase::InPromotionVariants::isNumericPromotion(*argIn));
+		const TupleColumnType nullType = TupleTypes::TYPE_NULL;
+		const TupleColumnType longType = TupleTypes::TYPE_LONG;
+
+		const TupleColumnType argType = (argIn == NULL ?
+				nullType : (numericPromo ? longType : argIn->typeList_[0]));
+
+		if (SQLValues::TypeUtils::isNull(argType)) {
+			while (it.exists()) {
+				it.remove();
+			}
+			break;
+		}
+		if (code.getType() != SQLType::EXPR_CONSTANT || valueType != argType) {
+			it.remove();
+			it.insert(ExprRewriter::createEmptyConstExpr(factoryCxt, argType));
+		}
+		argIndex++;
+	}
+
+	factoryCxt.setPlanning(false);
+	factoryCxt.setArgChecking(true);
+	factoryCxt.setAggregationPhase(true, SQLType::AGG_PHASE_ALL_PIPE);
+
+	ExprRewriter rewriter(alloc);
+	const Expression &evaluableExpr =
+			rewriter.rewrite(factoryCxt, *planningExpr, NULL);
+
+	SQLValues::VarContext::Scope varScope(
+			cxt.getValueContext().getVarContext());
+	evaluableExpr.eval(cxt);
+}
+
 SQLExprs::Expression* SQLExprs::SyntaxExprRewriter::toColumnListElement(
 		Expression *src, bool columnSingle) {
 	if (src == NULL) {
@@ -3368,6 +3477,16 @@ SQLExprs::Expression* SQLExprs::SyntaxExprRewriter::toColumnListElement(
 	ExprCode &code = src->getPlanningCode();
 	do {
 		const ExprType exprType = code.getType();
+		if (exprType == SQLType::EXPR_RANGE_GROUP) {
+			if (src->child().getCode().getType() != SQLType::EXPR_COLUMN) {
+				break;
+			}
+			Expression::ModIterator it(*src);
+			Expression &dest =  it.get();
+			it.remove();
+			return toColumnListElement(&dest, columnSingle);
+		}
+
 		if (columnSingle) {
 			if (exprType != SQLType::EXPR_COLUMN) {
 				break;
@@ -3669,6 +3788,13 @@ bool SQLExprs::TypeResolver::convertPromotedType() {
 			}
 		}
 		if (found) {
+			continue;
+		}
+
+		if (ExprSpecBase::InPromotionVariants::isTimestampPromotion(*in) &&
+				!TypeUtils::isNull(TypeUtils::findConversionType(
+						promotedType_,
+						TypeUtils::toNullable(in->typeList_[0]), true, true))) {
 			continue;
 		}
 
@@ -4041,22 +4167,24 @@ bool SQLExprs::IndexCondition::isBinded() const {
 
 
 SQLExprs::IndexSelector::IndexSelector(
-		const util::StdAllocator<void, void> &stdAlloc,
-		util::StackAllocator &alloc, ExprType columnExprType,
+		SQLValues::ValueContext &valueCxt, ExprType columnExprType,
 		const TupleList::Info &info) :
-		stdAlloc_(stdAlloc),
+		stdAlloc_(valueCxt.getStdAllocator()),
+		varCxt_(valueCxt.getVarContext()),
+		localValuesHolder_(valueCxt),
 		columnExprType_(columnExprType),
-		indexList_(info.columnCount_, IndexFlagsEntry(), alloc),
+		indexList_(
+				info.columnCount_, IndexFlagsEntry(), valueCxt.getAllocator()),
 		allColumnsList_(stdAlloc_),
 		tupleInfo_(
 				info.columnTypeList_,
 				info.columnTypeList_ + info.columnCount_,
-				alloc),
-		condList_(alloc),
-		indexMatchList_(alloc),
-		condOrdinalList_(alloc),
-		specList_(stdAlloc),
-		columnSpecIdList_(stdAlloc),
+				valueCxt.getAllocator()),
+		condList_(valueCxt.getAllocator()),
+		indexMatchList_(valueCxt.getAllocator()),
+		condOrdinalList_(valueCxt.getAllocator()),
+		specList_(stdAlloc_),
+		columnSpecIdList_(stdAlloc_),
 		indexAvailable_(true),
 		placeholderAffected_(false),
 		multiAndConditionEnabled_(false),
@@ -4293,7 +4421,10 @@ void SQLExprs::IndexSelector::getIndexColumnList(
 
 bool SQLExprs::IndexSelector::bindCondition(
 		Condition &cond,
-		const TupleValue &value1, const TupleValue &value2) const {
+		const TupleValue &value1, const TupleValue &value2,
+		SQLValues::ValueSetHolder &valuesHolder) const {
+	valuesHolder.reset();
+
 	if (cond.isEmpty() || cond.opType_ == SQLType::EXPR_CONSTANT) {
 		return false;
 	}
@@ -4332,7 +4463,8 @@ bool SQLExprs::IndexSelector::bindCondition(
 		}
 
 		const TupleValue &value = (i == 0 ? value1 : value2);
-		if (!applyValue(subCond, &value, Condition::EMPTY_IN_COLUMN)) {
+		if (!applyValue(
+				subCond, &value, Condition::EMPTY_IN_COLUMN, valuesHolder)) {
 			cond = Condition();
 			return false;
 		}
@@ -4446,7 +4578,8 @@ void SQLExprs::IndexSelector::selectSub(
 		selectSub(expr.child(), !negative, inAndCond);
 	}
 	else {
-		condList_.push_back(makeValueCondition(expr, negative));
+		condList_.push_back(
+				makeValueCondition(expr, negative, localValuesHolder_));
 
 		if (!inAndCond) {
 			Range range;
@@ -5118,7 +5251,8 @@ size_t SQLExprs::IndexSelector::getOrConditionCount(
 
 SQLExprs::IndexSelector::Condition
 SQLExprs::IndexSelector::makeValueCondition(
-		const Expression &expr, bool negative) {
+		const Expression &expr, bool negative,
+		SQLValues::ValueSetHolder &valuesHolder) {
 	ExprType opType = expr.getCode().getType();
 
 	const ExprType negativeOpType = ExprTypeUtils::negateCompOp(opType);
@@ -5156,7 +5290,7 @@ SQLExprs::IndexSelector::makeValueCondition(
 	}
 	cond.opType_ = opType;
 
-	if (!applyValue(cond, value, inColumn)) {
+	if (!applyValue(cond, value, inColumn, valuesHolder)) {
 		return Condition();
 	}
 
@@ -5172,7 +5306,8 @@ SQLExprs::IndexSelector::makeValueCondition(
 }
 
 bool SQLExprs::IndexSelector::applyValue(
-		Condition &cond, const TupleValue *value, uint32_t inColumn) const {
+		Condition &cond, const TupleValue *value, uint32_t inColumn,
+		SQLValues::ValueSetHolder &valuesHolder) const {
 	if (value == NULL) {
 		assert(inColumn != Condition::EMPTY_IN_COLUMN);
 		cond.inColumnPair_.first = inColumn;
@@ -5220,6 +5355,11 @@ bool SQLExprs::IndexSelector::applyValue(
 			break;
 		case TupleTypes::TYPE_BOOL:
 			applyBoolBounds(cond);
+			break;
+		default:
+			if (SQLValues::TypeUtils::isTimestampFamily(columnType)) {
+				applyTimestampBounds(cond, columnType, valuesHolder);
+			}
 			break;
 		}
 
@@ -5428,6 +5568,37 @@ void SQLExprs::IndexSelector::applyFloatingBounds(Condition &cond) {
 	}
 
 	cond.valuePair_.first = TupleValue(value);
+}
+
+void SQLExprs::IndexSelector::applyTimestampBounds(
+		Condition &cond, TupleColumnType columnType,
+		SQLValues::ValueSetHolder &valuesHolder) {
+	TupleValue &condValueRef = cond.valuePair_.first;
+	if (condValueRef.getType() == columnType) {
+		return;
+	}
+
+	SQLValues::ValueContext cxt(SQLValues::ValueContext::ofVarContext(
+			valuesHolder.getVarContext(), NULL, true));
+	TupleValue adjustedValue =
+			SQLValues::ValuePromoter(columnType)(&cxt, condValueRef);
+
+	if (compareValue(adjustedValue, condValueRef) != 0) {
+		ExprType &opType = cond.opType_;
+		switch (opType) {
+		case SQLType::OP_LT:
+			opType = SQLType::OP_LE;
+			break;
+		case SQLType::OP_GT:
+			opType = SQLType::OP_GE;
+			break;
+		default:
+			break;
+		}
+	}
+
+	condValueRef = adjustedValue;
+	valuesHolder.add(adjustedValue);
 }
 
 bool SQLExprs::IndexSelector::selectClosestIndex(
@@ -5797,8 +5968,8 @@ SQLExprs::IndexSelector::getPairElement(size_t ordinal, Pair &src) {
 int32_t SQLExprs::IndexSelector::compareValue(
 		const TupleValue &value1, const TupleValue &value2) {
 	const bool sensitive = true;
-	return SQLValues::ValueComparator::ofValues(
-			value1, value2, sensitive, true)(value1, value2);
+	return SQLValues::ValueComparator::compareValues(
+			value1, value2, sensitive, true);
 }
 
 
@@ -5999,22 +6170,28 @@ SQLExprs::ExprType SQLExprs::ExprTypeUtils::getCompColumnOp(
 	}
 }
 
-bool SQLExprs::ExprTypeUtils::isVarNonGenerative(ExprType type, bool forLob) {
+bool SQLExprs::ExprTypeUtils::isVarNonGenerative(
+		ExprType type, bool forLob, bool forLargeFixed) {
 	switch (type) {
-	case SQLType::EXPR_CASE:
 	case SQLType::EXPR_CONSTANT:
+		return true;
+	case SQLType::EXPR_COLUMN:
+		if (forLob) {
+			break;
+		}
+		return true;
+	case SQLType::EXPR_CASE:
 	case SQLType::FUNC_COALESCE:
 	case SQLType::FUNC_IFNULL:
 	case SQLType::FUNC_MAX:
 	case SQLType::FUNC_MIN:
 	case SQLType::FUNC_NULLIF:
+		if (forLargeFixed) {
+			break;
+		}
 		return true;
 	default:
 		break;
-	}
-
-	if (type == SQLType::EXPR_COLUMN) {
-		return !forLob;
 	}
 
 	return false;
@@ -6146,8 +6323,7 @@ bool SQLExprs::DataPartitionUtils::reducePartitionedTarget(
 		indexType |= (1 << SQLType::INDEX_TREE_EQ);
 	}
 
-	IndexSelector selector(
-			alloc, alloc, SQLType::EXPR_COLUMN, tupleInfo);
+	IndexSelector selector(valueCxt, SQLType::EXPR_COLUMN, tupleInfo);
 	if (forContainer) {
 		selector.addIndex(
 				static_cast<uint32_t>(partitioning->partitioningColumnId_),
@@ -6218,15 +6394,15 @@ bool SQLExprs::DataPartitionUtils::reducePartitionedTarget(
 					if (i == 0 && !it->inclusivePair_.first &&
 							rawInterval !=
 									std::numeric_limits<int64_t>::max() &&
-							SQLValues::ValueUtils::toLong(condValue) %
-							unit == (rawInterval >= 0 ? unit : 0) - 1) {
+							SQLValues::ValueUtils::isUpperBoundaryAsLong(
+									condValue, unit)) {
 						rawInterval++;
 					}
 					else if (i != 0 && !it->inclusivePair_.second &&
 							rawInterval !=
 									std::numeric_limits<int64_t>::min() &&
-							SQLValues::ValueUtils::toLong(condValue) %
-									unit == 0) {
+							SQLValues::ValueUtils::isLowerBoundaryAsLong(
+									condValue, unit)) {
 						rawInterval--;
 					}
 				}
@@ -6680,7 +6856,119 @@ void SQLExprs::DataPartitionUtils::makeAffinityRevList(
 }
 
 
-const SQLExprs::ExprFactory &SQLExprs::DefaultExprFactory::factory_ =
+bool SQLExprs::RangeGroupUtils::isRangeGroupSupportedType(
+		TupleColumnType type) {
+	return SQLValues::TypeUtils::isTimestampFamily(type);
+}
+
+TupleValue SQLExprs::RangeGroupUtils::getRangeGroupBoundary(
+		util::StackAllocator &alloc, TupleColumnType keyType, TupleValue base,
+		bool forLower, bool inclusive) {
+	if (SQLValues::ValueUtils::isNull(base)) {
+		return TupleValue();
+	}
+
+	const TupleColumnType promoType = SQLValues::TypeUtils::toNonNullable(
+			SQLValues::TypeUtils::findPromotionType(
+					keyType, base.getType(), true));
+	if (SQLValues::TypeUtils::isNull(promoType)) {
+		return TupleValue();
+	}
+
+	util::StackAllocator::Scope allocScope(alloc);
+	SQLValues::ValueContext valueCxt(
+			SQLValues::ValueContext::ofAllocator(alloc));
+	const TupleValue promoBase =
+			SQLValues::ValueConverter(promoType)(valueCxt, base);
+
+	const int64_t longBase = SQLValues::ValueUtils::toLong(promoBase);
+
+	int32_t gap;
+	if (!inclusive) {
+		if (forLower) {
+			gap = (SQLValues::ValueUtils::isUpperBoundaryAsLong(promoBase, 1) ?
+					1 : 0);
+			if (gap > 0 && longBase >= std::numeric_limits<int64_t>::max()) {
+				return TupleValue();
+			}
+		}
+		else {
+			gap = (SQLValues::ValueUtils::isLowerBoundaryAsLong(promoBase, 1) ?
+					-1 : 0);
+			if (gap < 0 && longBase <= std::numeric_limits<int64_t>::min()) {
+				return TupleValue();
+			}
+		}
+	}
+	else {
+		gap = 0;
+	}
+
+	return TupleValue(longBase + gap);
+}
+
+bool SQLExprs::RangeGroupUtils::adjustRangeGroupBoundary(
+		TupleValue &lower, TupleValue &upper, int64_t interval,
+		int64_t offset) {
+	assert(0 <= offset);
+	assert(offset < interval);
+
+	bool normal = true;
+	do {
+		if (SQLValues::TypeUtils::isNull(lower.getType()) ||
+				SQLValues::TypeUtils::isNull(upper.getType())) {
+			break;
+		}
+
+		const int64_t lowerBase = lower.get<int64_t>();
+		const int64_t upperBase = upper.get<int64_t>();
+
+		if (lowerBase > upperBase) {
+			break;
+		}
+
+		for (size_t i = 0; i < 2; i++) {
+			const int64_t base = (i == 0 ? lowerBase : upperBase);
+
+			int64_t gap = 0;
+			if (base < offset) {
+				gap = interval * (base < interval ? 1 : -1);
+				normal = false;
+			}
+
+			const int64_t value = (base - offset + gap) / interval * interval + offset;
+			(i == 0 ? lower : upper) = TupleValue(value);
+		}
+		return normal;
+	}
+	while (false);
+
+	const int64_t emptyLower = 1;
+	const int64_t emptyUpper = 0;
+	lower = TupleValue(emptyLower);
+	upper = TupleValue(emptyUpper);
+	return normal;
+}
+
+bool SQLExprs::RangeGroupUtils::getRangeGroupId(
+		TupleValue key, int64_t interval, int64_t offset, int64_t &id) {
+	assert(0 <= offset);
+	assert(offset < interval);
+
+	if (SQLValues::ValueUtils::isNull(key)) {
+		id = 0;
+		return false;
+	}
+
+	const int64_t base = SQLValues::ValueUtils::toLong(key);
+	const int64_t gap = offset - (base >= offset ? 0 : interval);
+
+	id = (base - gap) / interval * interval + gap;
+	return true;
+}
+
+
+const SQLExprs::ExprFactory& SQLExprs::DefaultExprFactory::factory_ =
 		getFactoryForRegistrar();
 
 const SQLExprs::ExprFactory& SQLExprs::DefaultExprFactory::getFactory() {
@@ -6806,30 +7094,37 @@ void SQLExprs::ExprRegistrar::addDirect(
 
 SQLExprs::ExprRegistrar::FactoryFunc
 SQLExprs::ExprRegistrar::resolveFactoryFunc(
-		ExprFactoryContext &cxt, const FuncTableByCounts &table,
+		ExprFactoryContext &cxt, const BasicFuncTable &table,
 		const ExprSpec &spec) {
+	if (cxt.isArgChecking()) {
+		return table.checker_;
+	}
 	const size_t countVariant = getArgCountVariant(cxt, spec);
 	const size_t typeVariant = getColumnTypeVariant(cxt, spec);
-	return table.list_[countVariant].list_[typeVariant];
+	return table.base_.list_[countVariant].list_[typeVariant];
 }
 
 SQLExprs::ExprRegistrar::FactoryFunc
 SQLExprs::ExprRegistrar::resolveFactoryFunc(
-		ExprFactoryContext &cxt, const FuncTableByAggr &table,
+		ExprFactoryContext &cxt, const AggrFuncTable &table,
 		const ExprSpec &spec) {
+	if (cxt.isArgChecking()) {
+		return table.checker_;
+	}
+	const FuncTableByAggr &baseTable = table.base_;
 	const FuncTableByTypes *subTable;
 	switch (cxt.getAggregationPhase(false)) {
 	case SQLType::AGG_PHASE_ADVANCE_PIPE:
-		subTable = &table.advance_;
+		subTable = &baseTable.advance_;
 		break;
 	case SQLType::AGG_PHASE_ADVANCE_FINISH:
-		subTable = &table.finish_;
+		subTable = &baseTable.finish_;
 		break;
 	case SQLType::AGG_PHASE_MERGE_PIPE:
-		subTable = &table.merge_;
+		subTable = &baseTable.merge_;
 		break;
 	case SQLType::AGG_PHASE_MERGE_FINISH:
-		subTable = &table.finish_;
+		subTable = &baseTable.finish_;
 		break;
 	default:
 		assert(false);
@@ -6881,6 +7176,7 @@ size_t SQLExprs::ExprRegistrar::getColumnTypeVariant(
 
 	uint32_t aggrIndex = baseExpr.getCode().getAggregationIndex();
 	const Expression *subExpr = NULL;
+	int32_t lastIndex = -1;
 	for (uint32_t i = 0;; i++) {
 		const ExprSpec::In *in;
 		if (byAggr) {
@@ -6908,20 +7204,27 @@ size_t SQLExprs::ExprRegistrar::getColumnTypeVariant(
 		}
 		type = SQLValues::TypeUtils::toNonNullable(type);
 
+		bool definitive;
+		if (ExprSpecBase::InPromotionVariants::matchVariantIndex(
+				*in, type, lastIndex, definitive)) {
+			if (definitive) {
+				return static_cast<size_t>(lastIndex);
+			}
+			continue;
+		}
+
 		for (size_t j = 0; j < ExprSpec::IN_TYPE_COUNT; j++) {
 			const TupleColumnType inType = in->typeList_[j];
 			if (SQLValues::TypeUtils::isNull(inType)) {
 				break;
 			}
-			else if (inType == TupleTypes::TYPE_NUMERIC) {
-				if (SQLValues::TypeUtils::isFloating(type)) {
-					return 1;
-				}
-			}
 			else if (j > 0 && inType == type) {
 				return j;
 			}
 		}
+	}
+	if (lastIndex >= 0) {
+		return lastIndex;
 	}
 	return 0;
 }
@@ -6961,6 +7264,74 @@ SQLExprs::ExprRegistrar::FuncTableByAggr::FuncTableByAggr(
 		advance_(advance),
 		merge_(merge),
 		finish_(finish) {
+}
+
+SQLExprs::ExprRegistrar::BasicFuncTable::BasicFuncTable(
+		const FuncTableByCounts base, FactoryFunc checker) :
+		base_(base),
+		checker_(checker) {
+}
+
+SQLExprs::ExprRegistrar::AggrFuncTable::AggrFuncTable(
+		const FuncTableByAggr base, FactoryFunc checker) :
+		base_(base),
+		checker_(checker) {
+}
+
+
+bool SQLExprs::ExprSpecBase::InPromotionVariants::matchVariantIndex(
+		const ExprSpec::In &in, TupleColumnType type,
+		int32_t &lastIndex, bool &definitive) {
+	assert(!SQLValues::TypeUtils::isNullable(type));
+
+	if (isNumericPromotion(in)) {
+		if (SQLValues::TypeUtils::isFloating(type)) {
+			lastIndex = 1;
+			definitive = true;
+		}
+		else {
+			lastIndex = 0;
+			definitive = false;
+		}
+		return true;
+	}
+	else if (isTimestampPromotion(in)) {
+		int32_t baseIndex;
+		switch (type) {
+		case TupleTypes::TYPE_TIMESTAMP:
+			baseIndex = 0;
+			break;
+		case TupleTypes::TYPE_MICRO_TIMESTAMP:
+			baseIndex = 1;
+			break;
+		case TupleTypes::TYPE_NANO_TIMESTAMP:
+			baseIndex = 2;
+			break;
+		default:
+			definitive = false;
+			return false;
+		}
+		lastIndex = std::max(lastIndex, baseIndex);
+		definitive = (lastIndex >= 2);
+		return true;
+	}
+	else {
+		definitive = false;
+		return false;
+	}
+}
+
+bool SQLExprs::ExprSpecBase::InPromotionVariants::isNumericPromotion(
+		const ExprSpec::In &in) {
+	const TupleColumnType inType = in.typeList_[0];
+	return (inType == TupleTypes::TYPE_NUMERIC);
+}
+
+bool SQLExprs::ExprSpecBase::InPromotionVariants::isTimestampPromotion(
+		const ExprSpec::In &in) {
+	const TupleColumnType inType = in.typeList_[0];
+	return (inType == PromotableTimestampIn::TypeAt<0>::COLUMN_TYPE &&
+			(in.flags_ & ExprSpec::FLAG_PROMOTABLE) != 0);
 }
 
 
@@ -7046,6 +7417,10 @@ SQLExprs::AggregationExpressionBase::AggregationExpressionBase() :
 
 void SQLExprs::AggregationExpressionBase::initializeCustom(
 		ExprFactoryContext &cxt, const ExprCode &code) {
+	if (cxt.isArgChecking()) {
+		return;
+	}
+
 	const ExprSpec &spec = cxt.getFactory().getSpec(code.getType());
 
 	uint32_t count = 0;

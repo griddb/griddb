@@ -58,9 +58,9 @@
 
 const char8_t *const GS_PRODUCT_NAME = "GridDB";
 const int32_t GS_MAJOR_VERSION = 5;
-const int32_t GS_MINOR_VERSION = 1;
+const int32_t GS_MINOR_VERSION = 3;
 const int32_t GS_REVISION = 0;
-const int32_t GS_BUILD_NO = 39692;
+const int32_t GS_BUILD_NO = 39942;
 
 const char8_t *const GS_EDITION_NAME = "Community Edition";
 const char8_t *const GS_EDITION_NAME_SHORT = "CE";
@@ -87,6 +87,7 @@ static class MainConfigSetUpHandler : public ConfigTable::SetUpHandler {
 } g_mainConfigSetUpHandler;
 
 static void setUpTrace(const ConfigTable *param, bool checkOnly, bool longArchive = false);
+static void setUpAuditTrace(const ConfigTable *param);
 static void setUpAllocator();
 
 
@@ -117,6 +118,7 @@ void signal_handler(int sig, siginfo_t *siginfo, void *param);
 
 UTIL_TRACER_DECLARE(MAIN);
 UTIL_TRACER_DECLARE(SYSTEM_SERVICE);
+AUDIT_TRACER_DECLARE(AUDIT_SYSTEM);
 
 /*!
 	@brief Handles trace request for main function
@@ -304,6 +306,10 @@ int main(int argc, char **argv) {
 		MainTraceHandler traceHandler(config);
 		setUpTrace(&config, checkOnly, longArchive);
 		config.setTraceEnabled(true);
+        setUpAuditTrace(&config);
+
+		AUDIT_TRACE_INFO(AUDIT_SYSTEM, GS_TRACE_SC_WEB_API_CALLED, 
+				"", "", "", "", "", "", "SYSTEM", "GS_START_NODE", "", "", "");
 
 #ifdef MAIN_CAPTURE_SIGNAL
 		const int syncSignals[] = {
@@ -395,6 +401,11 @@ int main(int argc, char **argv) {
 		ServiceThreadErrorHandler errorHandler;
 
 
+		util::SingleThreadExecutor exeSvc(
+				util::AllocatorInfo(
+						ALLOCATOR_GROUP_MAIN, "globalExecutorService"),
+				varSizeAlloc);
+
 		PartitionTable pt(config);
 		ClusterVersionId clsVersionId = GS_CLUSTER_MESSAGE_CURRENT_VERSION;
 		ClusterManager clsMgr(config, &pt, clsVersionId);
@@ -433,6 +444,8 @@ int main(int argc, char **argv) {
 		EventEngine::Config eeConfig;
 		EventEngine::Source source(eeVarSizeAlloc, fixedSizeAlloc);
 
+#ifndef _WIN32
+#endif
 		int32_t cacheSize = config.get<int32_t>(CONFIG_TABLE_SEC_USER_CACHE_SIZE);
 		int32_t cacheUpdateInterval = config.get<int32_t>(CONFIG_TABLE_SEC_USER_CACHE_UPDATE_INTERVAL);
 		UserCache userCache(cacheSize, varSizeAlloc, cacheUpdateInterval);
@@ -487,8 +500,8 @@ int main(int argc, char **argv) {
 
 		ManagerSet mgrSet(&clsSvc, &syncSvc, &txnSvc, &cpSvc, &sysSvc,
 			&pt, &partitionList, &clsMgr, &syncMgr, &txnMgr,
-			&recoveryMgr, &fixedSizeAlloc, &varSizeAlloc, &config,
-			&stats
+			&recoveryMgr, &fixedSizeAlloc, &varSizeAlloc, &exeSvc,
+			&config, &stats
 			, &newSqlSvc, &executionManager, &jobManager
 			, pUserCache 
 			, &dsConfig
@@ -844,6 +857,15 @@ void MainConfigSetUpHandler::operator()(ConfigTable &config) {
 	MAIN_TRACE_DECLARE(config, PARTITION_DETAIL, ERROR);
 	MAIN_TRACE_DECLARE(config, DATA_EXPIRATION_DETAIL, INFO);
 	MAIN_TRACE_DECLARE(config, CONNECTION_DETAIL, WARNING);
+	MAIN_TRACE_DECLARE(config, AUDIT_SYSTEM, CRITICAL);
+	MAIN_TRACE_DECLARE(config, AUDIT_STAT, CRITICAL);
+	MAIN_TRACE_DECLARE(config, AUDIT_SQL_READ, CRITICAL);
+	MAIN_TRACE_DECLARE(config, AUDIT_SQL_WRITE, CRITICAL);
+	MAIN_TRACE_DECLARE(config, AUDIT_NOSQL_READ, CRITICAL);
+	MAIN_TRACE_DECLARE(config, AUDIT_NOSQL_WRITE, CRITICAL);
+	MAIN_TRACE_DECLARE(config, AUDIT_CONNECT, INFO);
+	MAIN_TRACE_DECLARE(config, AUDIT_DDL, CRITICAL);
+	MAIN_TRACE_DECLARE(config, AUDIT_DCL, CRITICAL);
 
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TRACE_OUTPUT_TYPE, INT32)
 		.setExtendedType(ConfigTable::EXTENDED_TYPE_ENUM)
@@ -858,6 +880,23 @@ void MainConfigSetUpHandler::operator()(ConfigTable &config) {
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TRACE_FILE_COUNT, INT32)
 		.setMin(1)
 		.setDefault(30);
+
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TRACE_AUDIT_LOGS, BOOL)
+		.setExtendedType(ConfigTable::EXTENDED_TYPE_LAX_BOOL)
+		.setDefault(false);
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TRACE_AUDIT_LOGS_PATH, STRING)
+		.setDefault("audit");
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TRACE_AUDIT_FILE_LIMIT, INT32)
+		.setUnit(ConfigTable::VALUE_UNIT_SIZE_MB)
+		.setMin(1)
+		.setDefault(10);
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TRACE_AUDIT_MESSAGE_LIMIT, INT32)
+		.setMin(0)
+		.setDefault(1024);
+	
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TRACE_AUDIT_FILE_COUNT, INT32)
+		.setMin(0)
+		.setDefault(0);
 
 	CONFIG_TABLE_RESOLVE_GROUP(config, CONFIG_TABLE_DEV, "developer");
 	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_DEV_AUTO_JOIN_CLUSTER, BOOL)
@@ -958,6 +997,10 @@ void setUpTrace(const ConfigTable *config, bool checkOnly, bool longArchive) {
 		manager.setOutputType(static_cast<util::TraceOption::OutputType>(
 			config->get<int32_t>(CONFIG_TABLE_TRACE_OUTPUT_TYPE)));
 	}
+}
+
+void setUpAuditTrace(const ConfigTable *config) {
+
 }
 
 void setUpAllocator() {

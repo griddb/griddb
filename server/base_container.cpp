@@ -183,6 +183,15 @@ void BaseContainer::getContainerInfo(TransactionContext &txn,
 	}
 }
 
+SchemaFeatureLevel BaseContainer::getSchemaFeatureLevel() const {
+	return resolveSchemaFeatureLevel(*this);
+}
+
+SchemaFeatureLevel BaseContainer::resolveColumnSchemaFeatureLevel(
+		const ColumnInfo &info) {
+	return ValueProcessor::getSchemaFeatureLevel(info.getColumnType());
+}
+
 IndexCursor BaseContainer::getIndexCursor(TransactionContext& txn) {
 	util::XArray<MvccRowImage> mvccList(txn.getDefaultAllocator());
 	try {
@@ -674,16 +683,96 @@ void BaseContainer::getRowKeyFields(TransactionContext &txn, uint32_t rowKeySize
 			}
 		}
 		else if (columnInfo.getColumnType() == COLUMN_TYPE_TIMESTAMP) {
-			if (!ValueProcessor::validateTimestamp(
-					*reinterpret_cast<const Timestamp *>(rowKey))) {
+			const Timestamp &ts = *reinterpret_cast<const Timestamp*>(rowKey);
+			if (!ValueProcessor::validateTimestamp(ts)) {
 				GS_THROW_USER_ERROR(GS_ERROR_QP_TIMESTAMP_RANGE_INVALID,
-					"Timestamp of rowKey out of range (rowKey=" << rowKey
-																<< ")");
+						"Timestamp of rowKey out of range (rowKey=" <<
+						ValueProcessor::getRawTimestampFormatter(ts) << ")");
+			}
+		}
+		else if (columnInfo.getColumnType() == COLUMN_TYPE_MICRO_TIMESTAMP) {
+			const MicroTimestamp &ts =
+					*reinterpret_cast<const MicroTimestamp*>(rowKey);
+			if (!ValueProcessor::validateTimestamp(ts)) {
+				GS_THROW_USER_ERROR(GS_ERROR_QP_TIMESTAMP_RANGE_INVALID,
+						"Timestamp(6) of rowKey out of range (rowKey=" <<
+						ValueProcessor::getRawTimestampFormatter(ts) << ")");
+			}
+		}
+		else if (columnInfo.getColumnType() == COLUMN_TYPE_NANO_TIMESTAMP) {
+			const NanoTimestamp &ts =
+					*reinterpret_cast<const NanoTimestamp*>(rowKey);
+			if (!ValueProcessor::validateTimestamp(ts)) {
+				GS_THROW_USER_ERROR(GS_ERROR_QP_TIMESTAMP_RANGE_INVALID,
+						"Timestamp(9) of rowKey out of range (rowKey=" <<
+						ValueProcessor::getRawTimestampFormatter(ts) << ")");
 			}
 		}
 		KeyData keyData(rowKey, rowKeySize);
 		fields.push_back(keyData);
 	}
+}
+
+void BaseContainer::validateIndexInfo(const IndexInfo &info) const {
+	const MapType mapType = info.mapType;
+	if (info.columnIds_.size() > 1 && mapType != MAP_TYPE_BTREE) {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_CM_NOT_SUPPORTED,
+				"Unsupported index type ("
+				"columnCount=" << info.columnIds_.size() <<
+				", mapType=" << static_cast<int32_t>(mapType) << ")");
+	}
+
+	const ContainerType type = getContainerType();
+	bool isSupport = true;
+	for (size_t i = 0; i < info.columnIds_.size(); i++) {
+		const ColumnId columnId = info.columnIds_[i];
+		const ColumnType columnType = getColumnInfo(columnId).getColumnType();
+		validateIndexInfo(type, columnType, mapType);
+	}
+}
+
+void BaseContainer::validateIndexInfo(
+		ContainerType type, ColumnType columnType, MapType mapType) {
+	const IndexMapTable *table;
+	switch (type) {
+	case COLLECTION_CONTAINER:
+		table = &Collection::getIndexMapTable();
+		break;
+	case TIME_SERIES_CONTAINER:
+		table = &TimeSeries::getIndexMapTable();
+		break;
+	default:
+		GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
+	}
+
+	do {
+		if (ValueProcessor::isArray(columnType)) {
+			break;
+		}
+
+		int8_t columnTypeOrdinal;
+		if (!ValueProcessor::findPrimitiveColumnTypeOrdinal(
+				columnType, false, columnTypeOrdinal)) {
+			break;
+		}
+
+		if (!(0 <= mapType && mapType < MAP_TYPE_NUM)) {
+			break;
+		}
+
+		if (!(*table)[columnTypeOrdinal][mapType]) {
+			break;
+		}
+		return;
+	}
+	while (false);
+
+	GS_THROW_USER_ERROR(
+			GS_ERROR_CM_NOT_SUPPORTED,
+			"Unsupported index type ("
+			"columnType=" << static_cast<int32_t>(columnType) <<
+			", mapType=" << static_cast<int32_t>(mapType) << ")");
 }
 
 /*!
@@ -842,7 +931,13 @@ void BaseContainer::makeCopyColumnMap(TransactionContext &txn,
 	uint32_t matchCount = 0;
 	uint32_t posMatchCount = 0;
 	uint32_t columnNum = messageSchema->getColumnCount();
-
+	bool renameOperation = messageSchema->isRenameColumn();
+	if (renameOperation) {
+		if (columnNum != getColumnNum()) {
+			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_CHANGE_INVALID,
+				"The number of columns does not match");
+		}
+	}
 	util::Vector<ColumnId> keyColumnIdList(txn.getDefaultAllocator());
 	getKeyColumnIdList(keyColumnIdList);
 	const util::Vector<ColumnId> &schemaKeyColumnIdList =  messageSchema->getRowKeyColumnIdList();
@@ -865,8 +960,10 @@ void BaseContainer::makeCopyColumnMap(TransactionContext &txn,
 				columnNameSize, newColumnName.c_str(),
 				static_cast<uint32_t>(newColumnName.length()),
 				isCaseSensitive)) {  
-			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_CHANGE_INVALID,
-				"RowKey column name is different");
+			if (!renameOperation) {
+				GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_CHANGE_INVALID,
+					"RowKey column name is different");
+			}
 		}
 	}
 
@@ -880,8 +977,7 @@ void BaseContainer::makeCopyColumnMap(TransactionContext &txn,
 
 	for (uint32_t i = 0; i < columnNum; i++) {
 		const util::String &newColumnName = messageSchema->getColumnName(i);
-		ColumnType columnType = messageSchema->getColumnType(i);
-		bool isArray = messageSchema->getIsArray(i);
+		const ColumnType columnType = messageSchema->getColumnFullType(i);
 		bool isNotNull = messageSchema->getIsNotNull(i);
 
 		bool isMatch = false;
@@ -893,6 +989,12 @@ void BaseContainer::makeCopyColumnMap(TransactionContext &txn,
 			bool isNotNull = messageSchema->getIsNotNull(i);
 			if (columnInfoList[j].isNotNull() && !isNotNull) {
 				isNullableChange = true;
+				if (renameOperation) {
+					GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_CHANGE_INVALID,
+						newColumnName.c_str()
+						<< " is different nullable property: new is not nullable"
+						<< ", current is nullable");
+				}
 			} else if (columnInfoList[j].isNotNull() != isNotNull) {
 				GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_CHANGE_INVALID,
 					newColumnName.c_str()
@@ -901,8 +1003,9 @@ void BaseContainer::makeCopyColumnMap(TransactionContext &txn,
 			}
 
 			bool isSame = false;
-			if (columnInfoList[j].getSimpleColumnType() == columnType &&
-				columnInfoList[j].isArray() == isArray) {
+			const ColumnType currentColumnType =
+					columnInfoList[j].getColumnType();
+			if (currentColumnType == columnType) {
 				isSame = true;
 			}
 			if (isSame) {  
@@ -912,16 +1015,22 @@ void BaseContainer::makeCopyColumnMap(TransactionContext &txn,
 				if (i == j) {
 					posMatchCount++;
 				}
+				else {
+					if (renameOperation) {
+						GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_CHANGE_INVALID,
+							"Column order does not match");
+					}
+				}
 			}
 			else {
-				GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_CHANGE_INVALID,
-					newColumnName.c_str()
-						<< " is different type. (type, array): new = ("
-						<< (int32_t)columnType << "," << isArray
-						<< "), current = ("
-						<< (int32_t)columnInfoList[j].getSimpleColumnType()
-						<< "," << (int32_t)columnInfoList[j].isArray()
-						<< ")");
+				GS_THROW_USER_ERROR(
+						GS_ERROR_DS_DS_SCHEMA_CHANGE_INVALID,
+						"Column type is different (column=" << newColumnName <<
+						", requested=" <<
+						ValueProcessor::getTypeNameChars(columnType) <<
+						", current=" <<
+						ValueProcessor::getTypeNameChars(currentColumnType) <<
+						")");
 			}
 		}
 		if (isMatch == false) {  
@@ -1015,7 +1124,12 @@ void BaseContainer::makeCopyColumnMap(TransactionContext &txn,
 		}
 		messageSchema->setFirstSchema(columnNum, varColumnNum, rowFixedColumnSize);
 	} else {
-		schemaState = DataStoreV4::COLUMNS_DIFFERENCE;
+		if (renameOperation) {
+			schemaState = DataStoreV4::COLUMNS_RENAME;
+		}
+		else {
+			schemaState = DataStoreV4::COLUMNS_DIFFERENCE;
+		}
 	}
 }
 
@@ -1068,7 +1182,7 @@ void BaseContainer::validateForRename(TransactionContext &txn,
 
 	for (uint32_t i = 0; i < columnNum; i++) {
 		const util::String &newColumnName = messageSchema->getColumnName(i);
-		ColumnType columnType = messageSchema->getColumnType(i);
+		const ColumnType columnType = messageSchema->getColumnFullType(i);
 		bool isArray = messageSchema->getIsArray(i);
 		bool isNotNull = messageSchema->getIsNotNull(i);
 
@@ -1093,10 +1207,9 @@ void BaseContainer::validateForRename(TransactionContext &txn,
 						<< ", current is nullable");
 			}
 
-			if (columnInfoList[j].getSimpleColumnType() != columnType ||
-				columnInfoList[j].isArray() != isArray) {
+			if (columnInfoList[j].getColumnType() != columnType) {
 				GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_CHANGE_INVALID, 
-					"Column type or array type does not match");
+					"Column type does not match");
 			}
 		}
 	}
@@ -1142,48 +1255,6 @@ void BaseContainer::setCreateRowId(TransactionContext &txn, RowId rowId) {
 	else {
 		MvccRowImage postMvccImage(rowId, rowId);
 		insertMvccMap(txn, mvccMap.get(), tId, postMvccImage);
-	}
-}
-
-bool BaseContainer::isSupportIndex(const IndexInfo &indexInfo) const {
-	MapType inputMapType = indexInfo.mapType;
-	if (inputMapType < 0 || inputMapType >= MAP_TYPE_NUM) {
-		return false;
-	}
-	if (indexInfo.columnIds_.size() > 1 && inputMapType != MAP_TYPE_BTREE) {
-		return false;
-	}
-	bool isSupport = true;
-	for (size_t i = 0; i < indexInfo.columnIds_.size(); i++) {
-		ColumnId inputColumnId = indexInfo.columnIds_[i];
-
-		ColumnInfo &columnInfo = getColumnInfo(inputColumnId);
-		if (columnInfo.isArray()) {
-			return false;
-		}
-		switch (getContainerType()) {
-		case COLLECTION_CONTAINER:
-			isSupport = Collection::indexMapTable[columnInfo.getColumnType()]
-												[inputMapType];
-			break;
-		case TIME_SERIES_CONTAINER:
-			isSupport = TimeSeries::indexMapTable[columnInfo.getColumnType()]
-												[inputMapType];
-			break;
-		default:
-			GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_CONTAINER_TYPE_UNKNOWN, "");
-			break;
-		}
-		if (!isSupport) {
-			break;
-		}
-	}
-
-	if (isSupport) {
-		return true;
-	}
-	else {
-		return false;
 	}
 }
 
@@ -1387,7 +1458,7 @@ void BaseContainer::changeSchemaRecord(TransactionContext &txn,
 		RowId lastRowId = INITIAL_ROWID;
 		ResultSize limit = (ContainerCursor::getNum() / getNormalRowArrayNum() <= 2) ?
 			2 : (ContainerCursor::getNum() / getNormalRowArrayNum());
-		TermCondition cond(getRowIdColumnType(), getRowIdColumnId(),
+		TermCondition cond(getRowIdColumnType(), getRowIdColumnType(),
 			DSExpression::GT, getRowIdColumnId(), &cursor,
 			sizeof(cursor));
 		BtreeMap::SearchContext sc(txn.getDefaultAllocator(), cond, limit);
@@ -1923,30 +1994,30 @@ void BaseContainer::mergeRowList(TransactionContext &txn,
 			sortKeyList1.push_back(sortKey);
 		}
 
-		const Operator *sortOp;
+		Operator sortOp;
 		const Operator stringOp[] = {&ltStringString, &gtStringString,
 			&ltStringString};  
 		const Operator boolOp[] = {&ltBoolBool, &gtBoolBool,
 			&ltBoolBool};  
 		bool isNullLast = outputOrder == ORDER_ASCENDING;
 		if (targetType == COLUMN_TYPE_STRING) {
-			sortOp = &stringOp[outputOrder];
+			sortOp = stringOp[outputOrder];
 		}
 		else if (targetType == COLUMN_TYPE_BOOL) {
-			sortOp = &boolOp[outputOrder];
+			sortOp = boolOp[outputOrder];
 		}
 		else {
 			if (outputOrder == ORDER_ASCENDING) {
-				sortOp = &ComparatorTable::ltTable_[targetType][targetType];
+				sortOp = ComparatorTable::Lt()(targetType, targetType);
 			}
 			else {
-				sortOp = &ComparatorTable::gtTable_[targetType][targetType];
+				sortOp = ComparatorTable::Gt()(targetType, targetType);
 			}
 		}
 		if (!isList1Sorted) {
-			std::sort(sortKeyList1.begin(), sortKeyList1.end(),
-				SortPred(txn, sortOp, targetType, isNullLast));
-
+			std::sort(
+					sortKeyList1.begin(), sortKeyList1.end(),
+					SortPred(txn, sortOp, targetType, isNullLast));
 		}
 
 		for (itr = inputList2.begin(); itr != inputList2.end(); itr++) {
@@ -1968,8 +2039,9 @@ void BaseContainer::mergeRowList(TransactionContext &txn,
 			sortKeyList2.push_back(sortKey);
 		}
 		if (!isList2Sorted) {
-			std::sort(sortKeyList2.begin(), sortKeyList2.end(),
-				SortPred(txn, sortOp, targetType, isNullLast));
+			std::sort(
+					sortKeyList2.begin(), sortKeyList2.end(),
+					SortPred(txn, sortOp, targetType, isNullLast));
 		}
 
 		util::XArray<SortKey>::iterator itr1, itr2;

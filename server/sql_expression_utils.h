@@ -318,7 +318,7 @@ private:
 
 	static uint32_t resolveAttributesAt(
 			const Expression &expr, const size_t *projDepth,
-			uint32_t topAttributes);
+			uint32_t topAttributes, bool insideAggrFunc);
 	TupleColumnType resolveColumnTypeAt(
 			ExprFactoryContext &cxt, const Expression &expr,
 			const size_t *projDepth, uint32_t topAttributes,
@@ -431,6 +431,9 @@ public:
 	SyntaxExprList toSyntaxExprList(const Expression &src) const;
 
 	static TupleValue evalConstExpr(
+			ExprContext &cxt, const ExprFactory &factory,
+			const SyntaxExpr &expr);
+	static void checkExprArgs(
 			ExprContext &cxt, const ExprFactory &factory,
 			const SyntaxExpr &expr);
 
@@ -569,8 +572,7 @@ public:
 	typedef Condition::IndexSpecId IndexSpecId;
 
 	IndexSelector(
-			const util::StdAllocator<void, void> &stdAlloc,
-			util::StackAllocator &alloc, ExprType columnExprType,
+			SQLValues::ValueContext &valueCxt, ExprType columnExprType,
 			const TupleList::Info &info);
 	~IndexSelector();
 
@@ -605,7 +607,8 @@ public:
 
 	bool bindCondition(
 			Condition &cond,
-			const TupleValue &value1, const TupleValue &value2) const;
+			const TupleValue &value1, const TupleValue &value2,
+			SQLValues::ValueSetHolder &valuesHolder) const;
 
 	bool isPlaceholderAffected() const;
 
@@ -698,9 +701,12 @@ private:
 
 	size_t getOrConditionCount(size_t beginOffset, size_t endOffset) const;
 
-	Condition makeValueCondition(const Expression &expr, bool negative);
+	Condition makeValueCondition(
+			const Expression &expr, bool negative,
+			SQLValues::ValueSetHolder &valuesHolder);
 	bool applyValue(
-			Condition &cond, const TupleValue *value, uint32_t inColumn) const;
+			Condition &cond, const TupleValue *value, uint32_t inColumn,
+			SQLValues::ValueSetHolder &valuesHolder) const;
 
 	static void applyBoolBounds(Condition &cond);
 
@@ -711,6 +717,10 @@ private:
 
 	template<TupleColumnType T>
 	static void applyFloatingBounds(Condition &cond);
+
+	static void applyTimestampBounds(
+			Condition &cond, TupleColumnType columnType,
+			SQLValues::ValueSetHolder &valuesHolder);
 
 	bool selectClosestIndex(
 			ConditionList::const_iterator condBegin,
@@ -750,6 +760,8 @@ private:
 			const TupleValue &value1, const TupleValue &value2);
 
 	util::StdAllocator<void, void> stdAlloc_;
+	VarContext &varCxt_;
+	SQLValues::ValueSetHolder localValuesHolder_;
 
 	ExprType columnExprType_;
 	util::Vector<IndexFlagsEntry> indexList_;
@@ -820,7 +832,8 @@ struct SQLExprs::ExprTypeUtils {
 			ExprType type, uint32_t pos1, uint32_t pos2, bool last);
 	static ExprType getCompColumnOp(const SQLValues::CompColumn &column);
 
-	static bool isVarNonGenerative(ExprType type, bool forLob);
+	static bool isVarNonGenerative(
+			ExprType type, bool forLob, bool forLargeFixed);
 };
 
 struct SQLExprs::PlanPartitioningInfo {
@@ -909,6 +922,19 @@ struct SQLExprs::DataPartitionUtils {
 			uint32_t partitioningCount, uint32_t clusterPartitionCount,
 			const util::Vector<int64_t> &affinityList,
 			util::Vector<uint32_t> &affinityRevList);
+};
+
+struct SQLExprs::RangeGroupUtils {
+	static bool isRangeGroupSupportedType(
+			TupleColumnType type);
+	static TupleValue getRangeGroupBoundary(
+			util::StackAllocator &alloc, TupleColumnType keyType, TupleValue base,
+			bool forLower, bool inclusive);
+	static bool adjustRangeGroupBoundary(
+			TupleValue &lower, TupleValue &upper, int64_t interval,
+			int64_t offset);
+	static bool getRangeGroupId(
+			TupleValue key, int64_t interval, int64_t offset, int64_t &id);
 };
 
 #endif

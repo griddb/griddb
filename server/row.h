@@ -1695,7 +1695,7 @@ BaseContainer::RowArray::Column BaseContainer::RowArrayImpl<Container, rowArrayT
 		ColumnInfo info;
 		info.initialize();
 		info.setColumnId(std::numeric_limits<uint16_t>::max());
-		info.setType(COLUMN_TYPE_LONG, false);
+		info.setType(COLUMN_TYPE_LONG);
 		info.setOffset(static_cast<uint16_t>(BaseContainer::RowArray::getColRowIdOffset()));
 		column.setColumnInfo(info);
 		column.setFixedOffset(info.getColumnOffset());

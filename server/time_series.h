@@ -43,9 +43,6 @@ protected:
 	};
 
 public:  
-	static const bool indexMapTable[][MAP_TYPE_NUM];
-
-public:  
 public:  
 	TimeSeries(TransactionContext &txn, DataStoreV4 *dataStore, OId oId)
 		: BaseContainer(txn, dataStore, oId) {
@@ -189,6 +186,8 @@ public:
 		return COLUMN_TYPE_TIMESTAMP;
 	}
 
+	static const IndexMapTable& getIndexMapTable();
+
 protected:  
 protected:  
 	void putRowInternal(TransactionContext &txn,
@@ -199,9 +198,9 @@ protected:
 private:  
 	struct OpForSample {
 		bool isInterpolated_;
-		Calculator2 add_;
-		Calculator2 sub_;
-		Calculator2 mul_;
+		Calculator add_;
+		Calculator sub_;
+		Calculator mul_;
 	};
 	/*!
 		@brief Status of RowArray, when row is deleted
@@ -212,7 +211,6 @@ private:
 		DELETE_ROW_ARRAY,  
 	};
 
-private:  
 private:  
 
 	void deleteRow(
@@ -300,6 +298,10 @@ private:
 	void searchRowArrayList(TransactionContext &txn,
 		BtreeMap::SearchContext &sc, util::XArray<OId> &normalOIdList,
 		util::XArray<OId> &mvccOIdList);
+
+private:  
+
+	static const bool INDEX_MAP_TABLE[][MAP_TYPE_NUM];
 };
 
 /*!
@@ -308,8 +310,8 @@ private:
 struct AggregationCursor {
 
 	Operator operator_;		   
-	Calculator2 calculator1_;  
-	Calculator2 calculator2_;  
+	Calculator calculator1_;  
+	Calculator calculator2_;  
 	int32_t count_;			   
 	Value value1_;
 	Value value2_;
@@ -327,26 +329,26 @@ struct AggregationCursor {
 		type_ = type;
 		switch (aggType) {
 		case AGG_MIN:
-			operator_ = ComparatorTable::ltTable_[type][type];
+			operator_ = ComparatorTable::Lt()(type, type);
 			break;
 		case AGG_MAX:
-			operator_ = ComparatorTable::gtTable_[type][type];
+			operator_ = ComparatorTable::Gt()(type, type);
 			break;
 		case AGG_SUM:
-			calculator1_ = CalculatorTable::addTable_[type][type];
+			calculator1_ = CalculatorTable::Add()(type, type);
 			break;
 		case AGG_AVG:
-			calculator1_ = CalculatorTable::addTable_[type][type];
+			calculator1_ = CalculatorTable::Add()(type, type);
 			break;
 		case AGG_COUNT:
 			break;
 		case AGG_VARIANCE:
-			calculator1_ = CalculatorTable::addTable_[type][type];
-			calculator2_ = CalculatorTable::mulTable_[type][type];
+			calculator1_ = CalculatorTable::Add()(type, type);
+			calculator2_ = CalculatorTable::Mul()(type, type);
 			break;
 		case AGG_STDDEV:
-			calculator1_ = CalculatorTable::addTable_[type][type];
-			calculator2_ = CalculatorTable::mulTable_[type][type];
+			calculator1_ = CalculatorTable::Add()(type, type);
+			calculator2_ = CalculatorTable::Mul()(type, type);
 			break;
 		case AGG_TIME_AVG:
 		default:

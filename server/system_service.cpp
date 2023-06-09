@@ -53,6 +53,26 @@ using util::ValueFormatter;
 #endif
 
 
+#define AUDIT_TRACE_USER_TYPE() 
+
+#define AUDIT_TRACE_INFO_INTERNAL_COMMAND(tracer) { \
+}
+
+#define AUDIT_TRACE_INFO_COMMAND() { \
+}
+
+#define AUDIT_TRACE_ERROR_CODE_INTERNAL_COMMAND(tracer) { \
+}
+
+#define AUDIT_TRACE_ERROR_CODED_COMMAND() { \
+}
+
+#define AUDIT_TRACE_ERROR_INTERNAL_COMMAND(tracer) { \
+}
+
+#define AUDIT_TRACE_ERROR_COMMAND() { \
+}
+
 
 typedef ObjectManagerV4 OCManager;
 
@@ -62,6 +82,9 @@ UTIL_TRACER_DECLARE(DISTRIBUTED_FRAMEWORK);
 
 UTIL_TRACER_DECLARE(CLUSTER_DETAIL);
 
+
+AUDIT_TRACER_DECLARE(AUDIT_SYSTEM);
+AUDIT_TRACER_DECLARE(AUDIT_STAT);
 
 
 
@@ -2228,6 +2251,13 @@ SystemService::ListenerSocketHandler::ListenerSocketHandler(
 		socketFactory_(resolveSocketFactory(sysSvc_, secure)),
 		secure_(secure) {
 	alloc_.setFreeSizeLimit(alloc_.base().getElementSize());
+	uriToStatement_ = {
+		{"stat", "GS_STAT"}, {"shutdown", "GS_STOP_NODE"}, {"join", "GS_JOIN_CLUSTER"}, {"leave", "GS_LEAVE_CLUSTER"},
+		{"stop", "GS_STOP_CLUSTER"}, {"host", "GS_CONFIG"},	{"increase", "GS_INCREASE_CLUSTER"}, {"failover", "GS_FAILOVER_CLUSTER"},
+		{"partition", "GS_PARTITION"}, {"loadBalance", "GS_LOAD_BALANCE"}, {"checkpoint", "GS_CHECK_POINT"}, {"periodicCheckpoint", "GS_CHECK_POINT"},
+		{"log", "GS_LOGS"}, {"trace", "GS_LOG_CONF"}, {"backup", "GS_BACKUP"}, {"config", "GS_PARAM_CONF"},	
+		{"clearUserCache", "GS_AUTH_CACHE"}, {"userCache", "GS_AUTH_CACHE"}
+	};
 }
 
 /*!
@@ -2259,10 +2289,18 @@ void SystemService::ListenerSocketHandler::handlePollEvent(
 
 		try {
 			util::StackAllocator::Scope scope(alloc_);
+			AUDIT_TRACE_INFO_COMMAND();
+
 			dispatch(request, response);
+
+			if (response.statusCode_ >= 400) {
+				AUDIT_TRACE_ERROR_CODED_COMMAND();
+			};
+
 		}
 		catch (std::exception &e) {
 			UTIL_TRACE_EXCEPTION(SYSTEM_SERVICE, e, "");
+			AUDIT_TRACE_ERROR_COMMAND();
 
 			response.setInternalServerError();
 			response.hasJson_ = false;
@@ -2280,6 +2318,79 @@ void SystemService::ListenerSocketHandler::handlePollEvent(
 
 util::Socket &SystemService::ListenerSocketHandler::getFile() {
 	return listenerSocket_;
+}
+
+std::string SystemService::ListenerSocketHandler::getURI(WebAPIRequest &request) {
+	util::NormalOStringStream oss;
+	std::vector<std::string> parameters;
+	for (size_t pos = 0; pos < request.pathElements_.size(); pos++) {
+		oss << "/" << request.pathElements_[pos];
+	}
+
+	for (auto it = request.parameterMap_.begin(); it != request.parameterMap_.end(); it++) {
+        parameters.push_back(it->first + "=" + it->second);
+    }
+	std::string separate = " ";
+	for (const auto &parameter: parameters) {
+        oss << separate << parameter;
+		separate = ",";
+    }
+	return oss.str();
+}
+
+std::string SystemService::ListenerSocketHandler::getSenderName(AbstractSocket *socket) {
+	util::NormalOStringStream oss;
+	util::SocketAddress sa;
+	u8string host;
+	uint16_t port;
+	socket->getPeerName(sa);
+	sa.getIP(&host, &port);
+	oss << host << ":" << port;
+	return  oss.str();
+}
+
+std::string SystemService::ListenerSocketHandler::getNodeName(AbstractSocket *socket) {
+	util::NormalOStringStream oss;
+	util::SocketAddress sa;
+	u8string host;
+	uint16_t port;
+	socket->getSocketName(sa);
+	sa.getIP(&host, &port);
+	oss << host << ":" << port;
+	return  oss.str();
+}
+
+std::string SystemService::ListenerSocketHandler::getErrorInfo(WebAPIResponse &response) {
+	util::NormalOStringStream oss;
+	oss.clear();
+	if (response.hasJson_) {
+		oss << response.body_.c_str();
+	}
+	else {
+		switch (response.statusCode_) {
+			case 400:
+				oss << "Bad request.";
+				break;
+			case 405:
+				oss << "Method error.";
+				break;
+			case 500:
+				oss << "Internal service error.";
+				break;
+		}
+	}
+	return oss.str();
+}
+
+std::string SystemService::ListenerSocketHandler::getStatementName(std::string uriOperator) {
+	std::string statementName;
+	statementName.clear();
+
+	auto iter = uriToStatement_.find(uriOperator); 
+	if (iter != end(uriToStatement_)) {
+		statementName = iter->second;
+	}
+	return statementName;
 }
 
 /*!
@@ -4519,6 +4630,12 @@ void SystemService::WebAPIResponse::setMethodError() {
 }
 
 void SystemService::WebAPIResponse::setAuthError() {
+	picojson::object errorInfo;
+	int32_t errorNo = WEBAPI_CS_OTHER_REASON;
+	std::string reason = "Authentication error.";
+	errorInfo["errorStatus"] = picojson::value(static_cast<double>(errorNo));
+	errorInfo["reason"] = picojson::value(reason);
+	setJson(picojson::value(errorInfo));
 	statusCode_ = 401;
 }
 

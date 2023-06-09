@@ -21,7 +21,6 @@
 
 #include "message_schema.h"
 #include "value_processor.h"
-#include <iostream>
 
 #include "picojson.h"
 
@@ -53,17 +52,6 @@ MessageSchema::MessageSchema(util::StackAllocator &alloc,
 }
 
 
-
-ColumnType MessageSchema::getColumnFullType(ColumnId columnId) const {
-	if (getIsArray(columnId)) {
-		return static_cast<ColumnType>(
-			getColumnType(columnId) + COLUMN_TYPE_STRING_ARRAY);
-	}
-	else {
-		return getColumnType(columnId);
-	}
-}
-
 void MessageSchema::validateColumnSchema(util::ArrayByteInStream &in) {
 	in >> columnNum_;
 	validateColumnSize();
@@ -86,7 +74,6 @@ void MessageSchema::validateColumnSize() {
 
 void MessageSchema::validateColumn(util::ArrayByteInStream& in) {
 	uint32_t fixedColumnTotalSize = 0;
-	const uint32_t MAX_FIXED_COLUMN_TOTAL_SIXE = 59 * 1024;
 	bool hasVariableColumn = false;
 	util::Map<util::String, ColumnId, CompareStringI>::iterator itr;
 	for (uint32_t i = 0; i < columnNum_; i++) {
@@ -113,28 +100,29 @@ void MessageSchema::validateColumn(util::ArrayByteInStream& in) {
 		}
 		columnNameMap_.insert(std::make_pair(caseColumnName, i));
 
-		int8_t columnTypeTmp;
-		in >> columnTypeTmp;
-		columnTypeList_.push_back(static_cast<ColumnType>(columnTypeTmp));
+		int8_t typeOrdinal;
+		in >> typeOrdinal;
 
 		uint8_t flagsTmp;
 		in >> flagsTmp;
 		flagsList_.push_back(flagsTmp);
-		const bool isArray = getIsArray(i);
+		const bool forArray = getIsArray(i);
 
-		if (!ValueProcessor::isValidArrayAndType(
-			isArray, columnTypeList_[i])) {
+		ColumnType columnType;
+		if (!ValueProcessor::findColumnTypeByPrimitiveOrdinal(
+				typeOrdinal, forArray, false, columnType)) {
 			GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
-				"unsupported Column type = " << (int32_t)columnTypeList_[i]
-				<< ", array = "
-				<< (int32_t)isArray);
+					"Unsupported Column type ("
+					"ordinal=" << static_cast<int32_t>(typeOrdinal) <<
+					", forArray=" << forArray << ")");
 		}
+		columnTypeList_.push_back(columnType);
 
-		if (!isArray && ValueProcessor::isSimple(columnTypeTmp)) {
-			fixedColumnTotalSize += FixedSizeOfColumnType[columnTypeTmp];
-			if (fixedColumnTotalSize > MAX_FIXED_COLUMN_TOTAL_SIXE) {
+		if (!forArray && ValueProcessor::isSimple(columnType)) {
+			fixedColumnTotalSize += FixedSizeOfColumnType[columnType];
+			if (fixedColumnTotalSize > MAX_FIXED_COLUMN_TOTAL_SIZE) {
 				GS_THROW_USER_ERROR(GS_ERROR_DS_DS_SCHEMA_INVALID,
-					"Total size of Fixed Columns is over, limit =  " << MAX_FIXED_COLUMN_TOTAL_SIXE);
+					"Total size of Fixed Columns is over, limit =  " << MAX_FIXED_COLUMN_TOTAL_SIZE);
 			}
 		}
 		else if (!hasVariableColumn) {
@@ -316,7 +304,7 @@ void MessageTimeSeriesSchema::validateRowKeySchema() {
 		GS_THROW_USER_ERROR(
 			GS_ERROR_DS_DS_SCHEMA_INVALID, "must define rowkey");
 	}
-	if (getColumnType(columnId) !=
+	if (getColumnFullType(columnId) !=
 		COLUMN_TYPE_TIMESTAMP) {  
 		GS_THROW_USER_ERROR(
 			GS_ERROR_DS_DS_SCHEMA_INVALID, "Type of rowkey not supported");

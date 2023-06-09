@@ -70,6 +70,9 @@ struct SQLGroupOps {
 	class GroupDistinctMerge;
 	class GroupBucketHash;
 
+	class GroupRange;
+	class GroupRangeMerge;
+
 	class Union;
 	class UnionAll;
 
@@ -171,6 +174,267 @@ private:
 	};
 
 	BucketContext& prepareContext(OpContext &cxt) const;
+};
+
+class SQLGroupOps::GroupRange : public SQLOps::Operator {
+public:
+	virtual void compile(OpContext &cxt) const;
+
+	static const SQLExprs::Expression& resolveRangeOptionPredicate(
+			const OpCode &code);
+
+	static bool isFillingWithPrevious(SQLExprs::ExprType fillType);
+	static SQLExprs::ExprType getFillType(const SQLExprs::Expression &pred);
+
+private:
+	static Projection& createTotalProjection(
+			OpCodeBuilder &builder, OpCode &srcCode);
+	static SQLOpUtils::ProjectionPair createAggregatableProjections(
+			OpCodeBuilder &builder, OpCode &srcCode,
+			uint32_t &baseAggrColumnCount, SQLExprs::ExprType fillType);
+	static Projection& createBaseFinishProjection(
+			OpCodeBuilder &builder, const Projection &srcProj);
+
+	static Projection& createFillProjection(
+			OpCodeBuilder &builder, const Projection &srcProj,
+			const SQLExprs::Expression &pred, uint32_t baseAggrColumnCount);
+	static Projection& createGroupProjection(
+			OpCodeBuilder &builder, const Projection &srcProj);
+
+	static void arrangeBaseProjection(
+			SQLExprs::ExprFactoryContext &cxt, Projection &proj,
+			SQLExprs::ExprType fillType);
+	static void arrangeFillProjection(
+			SQLExprs::ExprFactoryContext &cxt, Projection &expr,
+			const SQLExprs::Expression &pred, uint32_t baseAggrColumnCount,
+			bool noPrev, bool noNext);
+	static void arrangeGroupProjection(
+			SQLExprs::ExprFactoryContext &cxt, Projection &expr);
+
+	static void arrangeBaseExpression(
+			SQLExprs::ExprFactoryContext &cxt, SQLExprs::Expression &expr,
+			SQLExprs::ExprType fillType);
+	static void arrangeFillExpression(
+			SQLExprs::ExprFactoryContext &cxt, SQLExprs::Expression &expr,
+			const SQLExprs::Expression &pred, uint32_t baseAggrColumnCount,
+			bool noPrev, bool noNext);
+	static void arrangePrevFillTarget(
+			SQLExprs::ExprFactoryContext &cxt, SQLExprs::Expression &expr,
+			uint32_t baseAggrColumnCount);
+	static void arrangeGroupExpression(
+			SQLExprs::ExprFactoryContext &cxt, SQLExprs::Expression &expr);
+
+	static SQLExprs::Expression& createFillExpression(
+			SQLExprs::ExprFactoryContext &cxt,
+			const SQLExprs::Expression &srcExpr,
+			const SQLExprs::Expression &pred, uint32_t baseAggrColumnCount,
+			bool noPrev, bool noNext);
+
+	static SQLExprs::Expression& createFillTargetExpression(
+			SQLExprs::ExprFactoryContext &cxt,
+			const SQLExprs::Expression &srcExpr, uint32_t baseAggrColumnCount,
+			bool forPrev);
+	static SQLExprs::Expression& createFillNullExpression(
+			SQLExprs::ExprFactoryContext &cxt,
+			const SQLExprs::Expression &srcExpr);
+	static SQLExprs::Expression& createRangeKeyExpression(
+			SQLExprs::ExprFactoryContext &cxt,
+			const SQLExprs::Expression &srcExpr, bool forPrev, bool forNext);
+
+	static const SQLExprs::Expression& getBaseKeyExpression(
+			const SQLExprs::Expression &pred);
+};
+
+class SQLGroupOps::GroupRangeMerge : public SQLOps::Operator {
+public:
+	struct Constants;
+	struct ValueReader;
+
+	virtual void execute(OpContext &cxt) const;
+
+private:
+	typedef SQLValues::TupleComparator::WithAccessor<
+			std::equal_to<SQLValues::ValueComparator::PredArgType>,
+			false, false, false, false,
+			SQLValues::ValueAccessor::ByReader> TupleEq;
+
+	typedef int64_t (*ValueReaderFunc)(const ValueReader &reader);
+	typedef SQLValues::SummaryTupleSet::ColumnList AggrColumnList;
+
+	struct MergeContext;
+	struct Directions;
+
+	static void clearAggregationValues(
+			OpContext &cxt, MergeContext &mergeCxt,
+			const Directions &directions);
+	static bool finishPendingGroups(
+			OpContext &cxt, MergeContext &mergeCxt,
+			const Directions &directions);
+
+	static bool checkGroupRow(
+			OpContext &cxt, MergeContext &mergeCxt, TupleListReader &pipeReader,
+			TupleListReader &keyReader, Directions &directions);
+	static bool checkGroup(
+			OpContext &cxt, MergeContext &mergeCxt,
+			const Directions &directions);
+	static bool nextGroup(
+			MergeContext &mergeCxt, const Directions &directions);
+
+	static bool setGroupPending(MergeContext &mergeCxt);
+	static void beginPendingGroup(MergeContext &mergeCxt);
+	static void endPendingGroup(MergeContext &mergeCxt);
+
+	MergeContext& prepareMergeContext(OpContext &cxt) const;
+
+	static TupleListReader& preparePipeReader(OpContext &cxt);
+	static TupleListReader& prepareKeyReader(
+			OpContext &cxt, MergeContext &mergeCxt);
+
+	static const Projection& getFillFinishProjection(
+			MergeContext &mergeCxt, bool noNext);
+	static const Projection& getFinishProjection(MergeContext &mergeCxt);
+
+	static void swapAggregationValues(
+			OpContext &cxt, MergeContext &mergeCxt, bool withCurrent);
+	static SQLValues::SummaryTuple& prepareLocalAggragationTuple(
+			OpContext &cxt, MergeContext &mergeCxt,
+			SQLValues::SummaryTupleSet *&tupleSet, SummaryTuple *&aggrTuple);
+
+	static int64_t getNextRangeKeyByValue(
+			MergeContext &mergeCxt, int64_t groupEnd, int64_t value);
+	static int64_t getRangeKey(
+			MergeContext &mergeCxt, TupleListReader &reader);
+	static int64_t getRangeKey(const TupleValue &value);
+};
+
+struct SQLGroupOps::GroupRangeMerge::Constants {
+	static const int64_t ROW_GENERATION_LIMIT = 100 * 1000;
+};
+
+struct SQLGroupOps::GroupRangeMerge::ValueReader {
+	typedef int64_t RetType;
+
+	template<typename T>
+	struct TypeAt {
+		explicit TypeAt(const ValueReader &base) : base_(base) {}
+
+		RetType operator()() const;
+
+		const ValueReader &base_;
+	};
+
+	explicit ValueReader(
+			TupleListReader &reader, const TupleColumn &column) :
+			reader_(reader),
+			column_(column) {
+	}
+
+	template<typename T>
+	RetType read(const T&, const SQLValues::Types::Integral&) const;
+	template<typename T>
+	RetType read(const T&, const SQLValues::Types::PreciseTimestamp&) const;
+	template<typename T, typename C>
+	RetType read(const T&, const C&) const;
+
+	TupleListReader &reader_;
+	const TupleColumn &column_;
+};
+
+struct SQLGroupOps::GroupRangeMerge::MergeContext {
+	MergeContext(
+			util::StackAllocator &alloc, SQLValues::VarContext &varCxt,
+			const OpCode &code);
+
+	bool isTotalEmptyPossible() const;
+	bool isFilling() const;
+	bool isFillPending() const;
+
+	bool isFirstRowReady() const;
+	bool isForNormalGroup() const;
+	bool isBeforePartitionTail() const;
+
+	int64_t getGroupBegin() const;
+	int64_t getGroupEnd() const;
+
+	int64_t getTailGroupKey() const;
+
+	static SQLValues::CompColumnList resolvePartitionKeyList(
+			util::StackAllocator &alloc, const OpCode &code);
+	static TupleEq* createKeyComparator(
+			util::StackAllocator &alloc, SQLValues::VarContext &varCxt,
+			const SQLValues::CompColumnList &keyList,
+			util::LocalUniquePtr<TupleEq> &ptr);
+	static TupleColumn resoveRangeColumn(const OpCode &code);
+	static const Projection* findProjection(
+			const OpCode &code, bool filling, bool noPrev, bool noNext);
+	static SQLExprs::WindowState resolveRangeOptions(
+			const OpCode &code, int64_t &partBegin, int64_t &partEnd,
+			int64_t &interval, int64_t &limit, bool &fillingWithPrev);
+
+	static const Projection* getSubProjection(
+			const Projection *base, SQLOpTypes::ProjectionType baseTypeFilter,
+			size_t index, bool selfOnUnmatch, bool always);
+
+	static ValueReaderFunc getValueReaderFunction(
+			const TupleColumn &rangeColumn);
+
+	SQLValues::CompColumnList partKeyList_;
+	util::LocalUniquePtr<TupleEq> partEqBase_;
+	TupleEq *partEq_;
+	TupleColumn rangeColumn_;
+
+	const Projection *aggrPipeProj_;
+	const Projection *currentFinishProj_;
+
+	const Projection *emptyFillProj_;
+	const Projection *nextFillProj_;
+	const Projection *prevFillProj_;
+	const Projection *bothFillProj_;
+
+	int64_t partBegin_;
+	int64_t partEnd_;
+	int64_t interval_;
+	int64_t limit_;
+	bool fillingWithPrev_;
+
+	SQLExprs::WindowState windowState_;
+	int64_t pendingKey_;
+	int64_t restGenerationLimit_;
+	bool firstRowReady_;
+	bool groupFoundLast_;
+	bool fillPending_;
+	bool fillProjecting_;
+	bool prevValuesPreserved_;
+
+	SQLValues::SummaryTupleSet *aggrTupleSet_;
+	SummaryTuple *aggrTuple_;
+	SummaryTuple localAggrTuple_;
+	ValueReaderFunc valueReaderFunc_;
+};
+
+struct SQLGroupOps::GroupRangeMerge::Directions {
+	Directions();
+
+	static Directions of(
+			int64_t nextRangeKey, int32_t partition, int32_t group,
+			bool onNormalGroup, bool nextRowForNextGroup);
+
+	int64_t getNextRangeKey() const;
+
+	bool isBeforeTotalTailRow() const;
+	bool isBeforePartitionTailRow() const;
+	bool isBeforeGroupTailRow() const;
+
+	bool isGroupPreceding() const;
+
+	bool isOnNormalGroup() const;
+	bool isNextRowForNextGroup() const;
+
+	int64_t nextRangeKey_;
+	int32_t partition_;
+	int32_t group_;
+	bool onNormalGroup_;
+	bool nextRowForNextGroup_;
 };
 
 class SQLGroupOps::Union : public SQLOps::Operator {

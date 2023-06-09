@@ -189,7 +189,7 @@ void SyncService::checkVersion(uint8_t versionId) {
 }
 
 uint16_t SyncService::getLogVersion(PartitionId pId) {
-	return partitionList_->partition(pId).logManager().getLogVersion();
+	return partitionList_->partition(pId).logManager().getLogFormatVersion();
 }
 
 
@@ -274,6 +274,24 @@ void SyncService::notifySyncCheckpointEnd(
 	clsSvc_->request(
 		ec, TXN_LONGTERM_SYNC_RECOVERY_ACK,
 		pId, txnSvc_->getEE(), *syncInfo);
+}
+
+void SyncService::notifySyncCheckpointError(
+	EventContext& ec,
+	PartitionId pId,
+	LongtermSyncInfo* syncInfo) {
+	
+	SyncId syncId(syncInfo->getId(), syncInfo->getVersion());
+	SyncContext* context = syncMgr_->getSyncContext(pId, syncId);
+	if (context) {
+		SyncCheckEndInfo syncCheckEndInfo(
+			ec.getAllocator(), TXN_SYNC_TIMEOUT,
+			syncMgr_, pId, MODE_LONGTERM_SYNC, context);
+		Event syncCheckEndEvent(ec, TXN_SYNC_TIMEOUT, pId);
+		EventByteOutStream out = syncCheckEndEvent.getOutStream();
+		encode(syncCheckEndEvent, syncCheckEndInfo, out);
+		txnSvc_->getEE()->add(syncCheckEndEvent);
+	}
 }
 
 void SyncHandler::sendEvent(
@@ -518,7 +536,7 @@ void ShortTermSyncHandler::operator()(
 bool SyncRequestInfo::getLogs(
 	PartitionId pId,
 	int64_t sId,
-	LogManager<NoLocker>* logMgr,
+	LogManager<MutexLocker>* logMgr,
 	CheckpointService* cpSvc,
 	bool useLongSyncLog,
 	bool isCheck) {
@@ -535,7 +553,7 @@ bool SyncRequestInfo::getLogs(
 	std::unique_ptr<Log> log;
 	try {
 		LogSequentialNumber current = request_.startLsn_;
-		LogIterator<NoLocker> logIt = logMgr->createXLogIterator(current);
+		LogIterator<MutexLocker> logIt = logMgr->createXLogIterator(current);
 
 		if (request_.syncMode_ == MODE_LONGTERM_SYNC
 			|| useLongSyncLog) {
@@ -639,9 +657,9 @@ bool SyncRequestInfo::getChunks(
 
 		if (lastChunkGet) {
 			
-			LogManager<NoLocker>& logManager = partition->logManager();
+			LogManager<MutexLocker>& logManager = partition->logManager();
 			std::unique_ptr<Log> log;
-			LogIterator<NoLocker> logIt(&logManager, 0);
+			LogIterator<MutexLocker> logIt(&logManager, 0);
 			util::StackAllocator::Scope scope(logManager.getAllocator());
 			GS_OUTPUT_SYNC2("Get Long cp start log pId=" << pId <<  ", ssn = " << sId);
 

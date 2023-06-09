@@ -28,7 +28,7 @@
 #include "message_schema.h"
 #include "value_processor.h"
 
-const bool Collection::indexMapTable[][MAP_TYPE_NUM] = {
+const bool Collection::INDEX_MAP_TABLE[][MAP_TYPE_NUM] = {
 	{true, false, false},  
 	{true, false, false},  
 	{true, false, false},  
@@ -39,7 +39,9 @@ const bool Collection::indexMapTable[][MAP_TYPE_NUM] = {
 	{true, false, false},  
 	{true, false, false},  
 	{false, false, true},  
-	{false, false, false}  
+	{false, false, false},  
+	{true, false, false},  
+	{true, false, false}  
 };
 
 
@@ -322,7 +324,8 @@ void Collection::createIndex(
 
 			ColumnInfo& columnInfo = getColumnInfo(inputColumnId);
 			if (realIndexInfo.mapType == MAP_TYPE_DEFAULT) {
-				realIndexInfo.mapType = defaultIndexType[columnInfo.getColumnType()];
+				IndexSchema::findDefaultIndexType(
+						columnInfo.getColumnType(), realIndexInfo.mapType);
 			}
 		}
 		MapType inputMapType = realIndexInfo.mapType;
@@ -332,10 +335,7 @@ void Collection::createIndex(
 							   << ", first columnNumber = " << realIndexInfo.columnIds_[0]
 							   << ", type = " << getMapTypeStr(inputMapType));
 
-		if (!isSupportIndex(realIndexInfo)) {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_CM_NOT_SUPPORTED, "not support this index type");
-		}
+		validateIndexInfo(realIndexInfo);
 
 		util::Vector<IndexInfo> matchList(txn.getDefaultAllocator());
 		util::Vector<IndexInfo> mismatchList(txn.getDefaultAllocator());
@@ -1237,12 +1237,12 @@ void Collection::searchRowIdIndex(TransactionContext& txn,
 			}
 
 			bool isNullLast = outputOrder == ORDER_ASCENDING;
-			const Operator* sortOp;
+			Operator sortOp;
 			if (outputOrder == ORDER_ASCENDING) {
-				sortOp = &ComparatorTable::ltTable_[targetType][targetType];
+				sortOp = ComparatorTable::Lt()(targetType, targetType);
 			}
 			else {
-				sortOp = &ComparatorTable::gtTable_[targetType][targetType];
+				sortOp = ComparatorTable::Gt()(targetType, targetType);
 			}
 			std::sort(mvccSortKeyList.begin(), mvccSortKeyList.end(),
 				SortPred(txn, sortOp, targetType, isNullLast));
@@ -1666,6 +1666,10 @@ void Collection::lockRowList(
 	catch (std::exception& e) {
 		handleSearchError(txn, e, GS_ERROR_DS_CON_GET_LOCK_ID_INVALID);
 	}
+}
+
+const BaseContainer::IndexMapTable& Collection::getIndexMapTable() {
+	return INDEX_MAP_TABLE;
 }
 
 

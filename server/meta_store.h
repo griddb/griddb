@@ -503,6 +503,8 @@ public:
 	void getIndexInfoList(
 			TransactionContext &txn, util::Vector<IndexInfo> &indexInfoList);
 
+	virtual SchemaFeatureLevel getSchemaFeatureLevel() const;
+
 	uint32_t getColumnNum() const;
 	void getKeyColumnIdList(util::Vector<ColumnId> &keyColumnIdList);
 	void getCommonContainerOptionInfo(
@@ -514,8 +516,7 @@ public:
 	const char8_t* getColumnName(
 			TransactionContext &txn, uint32_t columnId,
 			ObjectManagerV4 &objectManager) const;
-	ColumnType getSimpleColumnType(uint32_t columnId) const;
-	bool isArrayColumn(uint32_t columnId) const;
+	ColumnType getColumnType(uint32_t columnId) const;
 	bool isVirtualColumn(uint32_t columnId) const;
 	bool isNotNullColumn(uint32_t columnId) const;
 

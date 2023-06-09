@@ -27,7 +27,27 @@
 const char* LogManagerConst::CPLOG_FILE_SUFFIX = ".cplog";
 const char* LogManagerConst::XLOG_FILE_SUFFIX = ".xlog";
 const char* LogManagerConst::INCREMENTAL_FILE_SUFFIX = "_incremental";
+const uint32_t Log::COMMON_HEADER_SIZE = Log::getCommonHeaderSize();
 
+const uint16_t LogManagerConst::LOGFORMAT_OLD_VERSION = 0x0;
+const uint16_t LogManagerConst::LOGFORMAT_BASE_VERSION = 0x1;
+const uint16_t LogManagerConst::LOGFORMAT_LATEST_VERSION = 0x1; 
+
+const uint16_t
+LogManagerConst::LOGFORMAT_ACCEPTABLE_VERSIONS[] = {
+		LOGFORMAT_OLD_VERSION,      
+		LOGFORMAT_BASE_VERSION,
+		UINT16_MAX /* sentinel */
+};
+
+uint32_t LogManagerConst::getLogFormatVersionScore(uint16_t version) {
+	switch(version) {
+	case LOGFORMAT_BASE_VERSION:
+		return 1;
+	default:
+		return 0;
+	}
+}
 
 LogManagerStats::LogManagerStats(const Mapper *mapper) :
 		table_(mapper),
@@ -78,14 +98,14 @@ std::string Log::toString() const {
 	case CPLog:
 	case CPULog:
 	case PutChunkDataLog:
-		oss << "<" << (int32_t)type_ << ",C" << chunkId_ << ",G" << groupId_ <<
+		oss << "<" << (int32_t)type_ << ",L" << lsn_ << ",C" << chunkId_ << ",G" << groupId_ <<
 		  ",O" << offset_ << ",V" << (int32_t)vacancy_ << ",S" << dataSize_ << ">";
 		return oss.str();
 	case OBJLog:
-		oss << "<" << (int32_t)type_ << ",S" << dataSize_ << ">";
+		oss << "<" << (int32_t)type_ << ",L" << lsn_ << ",S" << dataSize_ << ">";
 		return oss.str();
 	default:
-		oss << "<" << (int32_t)type_ << ",S" << dataSize_ << ">";
+		oss << "<" << (int32_t)type_ << ",L" << lsn_ << ",S" << dataSize_ << ">";
 		return oss.str();
 	}
 }
@@ -301,6 +321,13 @@ uint64_t WALBuffer::append(const uint8_t* data, size_t dataLength) {
 	}
 	needFlush_ = true;
 	return sizeof(uint64_t) + dataLength;
+}
+
+/*!
+	@brief フラッシュの必要性をチェック
+*/
+bool WALBuffer::checkNeedFlush() {
+	return ( needFlush_ || (position_ > 0) );
 }
 
 /*!

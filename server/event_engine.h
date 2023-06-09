@@ -1749,6 +1749,7 @@ private:
 			const EventMonotonicTime *queuedTime);
 
 	template<bool Adding> void updateBufferSize(const Event &ev);
+	static size_t getEventBufferSize(const Event &ev);
 
 	template<typename EventContainer>
 	static void addEvent(

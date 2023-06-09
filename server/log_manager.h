@@ -48,7 +48,8 @@ enum LogType {
 	PutChunkEndLog,   
 	NOPLog, 
 	EOFLog, 
-	CheckpointEndLog  
+	CheckpointEndLog,  
+	CheckpointStartLog 
 };
 
 enum LogFlushMode{
@@ -87,13 +88,15 @@ struct LogManagerStats  {
 	@brief ログクラス
 */
 class Log {
+public:
+	static const uint32_t COMMON_HEADER_SIZE;
 private:
 	static const int64_t serialVersionUID = 1L;
 
 	LogType type_;
 	uint16_t checksum_;
 	uint16_t integrityCheckVal_;
-	int16_t version_;
+	uint16_t formatVersion_;
 	LogSequentialNumber lsn_;
 	int64_t chunkId_;
 	int64_t groupId_;
@@ -104,12 +107,14 @@ private:
 	const void* data_;
 
 public:
-	Log(LogType cplog)
+	Log(LogType cplog, uint16_t logFormatVersion)
 	: type_(cplog), checksum_(0), integrityCheckVal_(0),
-	  version_(0), lsn_(UINT64_MAX),
+	  formatVersion_(logFormatVersion), lsn_(UINT64_MAX),
 	  chunkId_(-1), groupId_(-1), offset_(-1), vacancy_(-1),
 	  dataSize_(0), data_(NULL)
 	{ }
+
+	static uint32_t getCommonHeaderSize();
 
 	LogType getType() const {
 		return type_;
@@ -148,8 +153,8 @@ public:
 	Log& setVacancy(int8_t vacancy);
 	int8_t getVacancy() const;
 
-	Log& setVersion(int16_t ver);
-	int16_t getVersion() const;
+	Log& setFormatVersion(uint16_t ver);
+	uint16_t getFormatVersion() const;
 
 	Log& setDataSize(int64_t dataLen);
 	Log& setData(const void* data);
@@ -268,6 +273,8 @@ public:
 	static void flush(
 			SimpleFile &logfile, bool byCP, LogManagerStats &stats);
 
+	bool checkNeedFlush();
+
 	void fin();
 
 	void setDuplicateFile(SimpleFile* file);
@@ -297,6 +304,18 @@ struct LogManagerConst {
 	static const char* CPLOG_FILE_SUFFIX;
 	static const char* XLOG_FILE_SUFFIX;
 	static const char* INCREMENTAL_FILE_SUFFIX;
+
+	static const uint16_t LOGFORMAT_OLD_VERSION;
+	static const uint16_t LOGFORMAT_BASE_VERSION;
+	static const uint16_t LOGFORMAT_LATEST_VERSION;
+	static const uint16_t LOGFORMAT_ACCEPTABLE_VERSIONS[];
+
+	static uint16_t getBaseFormatVersion();
+	static uint16_t getLatestFormatVersion();
+
+	static bool isAcceptableFormatVersion(uint16_t version);
+	static uint32_t getLogFormatVersionScore(uint16_t version);
+	static uint16_t selectNewerVersion(uint16_t arg1, uint16_t arg2);
 };
 
 template <class L>
@@ -385,6 +404,8 @@ public:
 
 	void flushXLogByCommit(bool byCP);
 
+	bool checkNeedFlushXLog();
+
 	void removeLogFiles(int64_t baseLogVer, int64_t checkpointRange);
 
 	LogSequentialNumber getStartLSN();
@@ -440,6 +461,8 @@ public:
 	void setDuplicateFile(SimpleFile* file);
 	void setStopOnDuplicateError(bool stopOnDuplicateError);
 	bool getStopOnDuplicateError();
+	void setLogFormatVersion(uint16_t version);
+	uint16_t getLogFormatVersion();
 
 private:
 	void setDuplicateStatus(
@@ -473,6 +496,7 @@ private:
 	DuplicateLogMode duplicateLogMode_;
 	std::vector<SimpleFile*> pendingFiles_;
 	LogManagerStats &stats_;
+	uint16_t logFormatVersion_; 
 };
 
 
@@ -595,7 +619,7 @@ std::unique_ptr<Log> LogIterator<L>::next(bool forRecovery) {
 				}
 				int64_t readSize;
 				logFile_->read(len, buffer_.data(), offset_, readSize);
-				std::unique_ptr<Log> log(UTIL_NEW Log(LogType::NOPLog));
+				std::unique_ptr<Log> log(UTIL_NEW Log(LogType::NOPLog, LogManagerConst::LOGFORMAT_BASE_VERSION));
 				util::ArrayByteInStream in = util::ArrayByteInStream(
 						util::ArrayInStream(buffer_.data(), len));
 				log->decode<util::ArrayByteInStream>(in, *alloc_);
@@ -686,7 +710,8 @@ LogManager<L>::LogManager(
 		suffix_(nullptr), xLogFileOffset_(0), xLogCount_(0),
 		longtermLogAvailable_(false), longtermSyncLogErrorFlag_(false),
 		keepXLogVersion_(-1), child_(NULL),
-		stats_(stats)
+		stats_(stats),
+		logFormatVersion_(LogManagerConst::LOGFORMAT_BASE_VERSION)
 {
 	xWALBuffer_.use();
 	cpWALBuffer_.use();
@@ -845,7 +870,7 @@ void LogManager<L>::init(int64_t logversion, bool withFlush, bool byCP) {
 	cpWALBuffer_.init(cpFile_);
 	existLsnMap_[logversion] = getLSN() + 1; 
 
-	appendXLog(LogType::NOPLog, NULL, 0, NULL); 
+	appendXLog(LogType::CheckpointStartLog, NULL, 0, NULL); 
 }
 
 /*!
@@ -887,21 +912,23 @@ void LogManager<L>::startCheckpoint(bool withFlush, bool byCP) {
 template <class L>
 LogSequentialNumber LogManager<L>::appendXLog(
 		LogType type, void* data, size_t len, util::XArray<uint8_t>* logBinary) {
+	util::LockGuard<Locker>(*locker());
 	try {
+		if (len > LOG_DATA_LIMIT_SIZE) {
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
+					"Too large data size (size=" << len << ")");
+		}
 		util::StackAllocator::Scope scope(alloc_);
 		util::XArray<uint8_t> binary(alloc_);
+		binary.reserve(Log::COMMON_HEADER_SIZE + len); 
 		typedef util::ByteStream< util::XArrayOutStream<> > OutStream;
 		util::XArrayOutStream<> arrayOut(binary);
 		OutStream out(arrayOut);
 
 		uint8_t* addr = static_cast<uint8_t*>(data);
-		Log log(type);
+		Log log(type, getLogFormatVersion());
 		int64_t dataLen = 0;
 		if (len > 0 && data) {
-			if (len > LOG_DATA_LIMIT_SIZE) {
-				GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
-						"Too large data size (size=" << len << ")");
-			}
 			log.setData(addr);
 			dataLen = static_cast<int64_t>(len);
 		}
@@ -909,7 +936,6 @@ LogSequentialNumber LogManager<L>::appendXLog(
 
 		LogSequentialNumber lsn = 0;
 		{
-			util::LockGuard<Locker>(*locker());
 			lsn = getLSN();
 			if (type == LogType::OBJLog) {
 				++lsn;
@@ -921,9 +947,6 @@ LogSequentialNumber LogManager<L>::appendXLog(
 			if (type == LogType::OBJLog) {
 				setLSN(lsn);
 			}
-		}
-		if (child_) {
-			child_->copyXLog(type, lsn, data, len);
 		}
 		if (logBinary) {
 			logBinary->clear();
@@ -950,8 +973,8 @@ void LogManager<L>::copyXLog(
 	if (!data) {
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "data must be NOT NULL");
 	}
+	util::LockGuard<Locker>(*locker());
 	try {
-		util::LockGuard<Locker>(*locker());
 		xLogFileOffset_ += xWALBuffer_.append(static_cast<const uint8_t*>(data), len);
 		setLSN(lsn);
 	}
@@ -967,9 +990,9 @@ void LogManager<L>::copyXLog(
 */
 template <class L>
 void LogManager<L>::appendCpLog(Log& log) {
+	util::LockGuard<Locker>(*locker());
 	try {
 		util::StackAllocator::Scope scope(alloc_);
-		util::LockGuard<Locker>(*locker());
 
 		util::XArray<uint8_t> binary(alloc_);
 		typedef util::ByteStream< util::XArrayOutStream<> > OutStream;
@@ -996,11 +1019,11 @@ void LogManager<L>::appendCpLog(Log& log) {
 */
 template <class L>
 void LogManager<L>::flushCpLog(LogFlushMode x, bool byCP) {
+	util::LockGuard<Locker>(locker());
 	if (!cpFile_) {
 		return;
 	}
 	try {
-		util::LockGuard<Locker>(locker());
 		cpWALBuffer_.flush(x, byCP);
 	}
 	catch (std::exception& e) {
@@ -1010,16 +1033,25 @@ void LogManager<L>::flushCpLog(LogFlushMode x, bool byCP) {
 	}
 }
 
+template <class L>
+bool LogManager<L>::checkNeedFlushXLog() {
+	util::LockGuard<Locker>(locker());
+	if (!xFile_) {
+		return false;
+	}
+	return xWALBuffer_.checkNeedFlush();
+}
+
 /*!
 	@brief Xログバッファ出力＆ファイルフラッシュ
 */
 template <class L>
 void LogManager<L>::flushXLog(LogFlushMode x, bool byCP) {
+	util::LockGuard<Locker>(locker());
 	if (!xFile_) {
 		return;
 	}
 	try {
-		util::LockGuard<Locker>(locker());
 		xWALBuffer_.flush(x, byCP);
 	}
 	catch (std::exception& e) {
@@ -1035,11 +1067,14 @@ void LogManager<L>::flushXLog(LogFlushMode x, bool byCP) {
 */
 template <class L>
 void LogManager<L>::flushXLogByCommit(bool byCP) {
-	if (!xFile_ || !config_.alwaysFlushOnTxnEnd_) {
+	if (!config_.alwaysFlushOnTxnEnd_) {
+		return;
+	}
+	util::LockGuard<Locker>(locker());
+	if (!xFile_) {
 		return;
 	}
 	try {
-		util::LockGuard<Locker>(locker());
 		xWALBuffer_.flush(LOG_WRITE_WAL_BUFFER, byCP);
 		xWALBuffer_.flush(LOG_FLUSH_FILE, byCP);
 	}
@@ -1443,6 +1478,54 @@ void LogManager<L>::setDuplicateStatus(
 	DuplicateLogMode::applyDuplicateStatus(status, stats_, force);
 }
 
+/*!
+    @brief Returns of version of the Log foramt.
+*/
+inline uint16_t LogManagerConst::getBaseFormatVersion() {
+	return LogManagerConst::LOGFORMAT_BASE_VERSION;
+};
+inline uint16_t LogManagerConst::getLatestFormatVersion() {
+	return LogManagerConst::LOGFORMAT_LATEST_VERSION;
+};
+
+/*!
+    @brief Checks the version of the Log format
+*/
+inline bool LogManagerConst::isAcceptableFormatVersion(uint16_t version) {
+	bool acceptable = false;
+
+	for (const uint16_t *acceptableVersions =
+		 		LogManagerConst::LOGFORMAT_ACCEPTABLE_VERSIONS;
+		 *acceptableVersions != UINT16_MAX && !acceptable; acceptableVersions++) {
+		if (version == *acceptableVersions) {
+			acceptable = true;
+		}
+	}
+
+	return acceptable;
+}
+
+template <class L>
+inline void LogManager<L>::setLogFormatVersion(uint16_t version) {
+	logFormatVersion_ = version;
+}
+
+template <class L>
+inline uint16_t LogManager<L>::getLogFormatVersion() {
+	return logFormatVersion_;
+}
+
+inline uint16_t LogManagerConst::selectNewerVersion(uint16_t arg1, uint16_t arg2) {
+	uint32_t score1 = getLogFormatVersionScore(arg1);
+	uint32_t score2 = getLogFormatVersionScore(arg2);
+	assert(score1 != 0 && score2 != 0);
+	return score1 > score2 ? arg1 : arg2;
+}
+
+inline uint32_t Log::getCommonHeaderSize() {
+	return sizeof(int8_t) * 2 + sizeof(int16_t) * 3 + sizeof(int64_t) * 5;
+};
+
 inline Log& Log::setCheckSum() {
 	checksum_ = static_cast<uint16_t>(
 			static_cast<uint32_t>(type_) + static_cast<uint64_t>(chunkId_) +
@@ -1490,7 +1573,7 @@ void Log::encode(S& out) {
 	out << static_cast<int8_t>(type_);
 	out << checksum_;
 	out << integrityCheckVal_;
-	out << version_;
+	out << formatVersion_;
 	out << lsn_;
 	out << chunkId_;
 	out << groupId_;
@@ -1512,7 +1595,7 @@ void Log::decode(S& in, util::StackAllocator& alloc) {
 	type_ = static_cast<LogType>(i8val);
 	in >> checksum_;
 	in >> integrityCheckVal_;
-	in >> version_;
+	in >> formatVersion_;
 	in >> lsn_;
 	in >> chunkId_;
 	in >> groupId_;
@@ -1538,6 +1621,14 @@ inline Log& Log::setIntegrityCheckVal(uint16_t checkVal) {
 }
 inline uint16_t Log::getIntegrityCheckVal() const {
 	return integrityCheckVal_;
+}
+
+inline Log& Log::setFormatVersion(uint16_t formatVersion) {
+	formatVersion_ = formatVersion;
+	return *this;
+}
+inline uint16_t Log::getFormatVersion() const {
+	return formatVersion_;
 }
 inline Log& Log::setChunkId(int64_t chunkid) {
 	chunkId_ = chunkid;

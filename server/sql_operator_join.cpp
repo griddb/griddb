@@ -273,7 +273,6 @@ int32_t SQLJoinOps::Join::detectDrivingInputDetail(
 
 	bool eitherEmpty = false;
 	bool eitherSmall = false;
-	bool eitherLarge = false;
 	bool bothLarge = true;
 
 	int32_t smallSide = -1;
@@ -292,9 +291,6 @@ int32_t SQLJoinOps::Join::detectDrivingInputDetail(
 				smallSide = static_cast<int32_t>(i);
 			}
 			bothLarge = false;
-		}
-		else {
-			eitherLarge = true;
 		}
 	}
 
@@ -1344,6 +1340,10 @@ SQLJoinOps::JoinHash::prepareHashContext(
 		SQLValues::CompColumnList bothKeyList(cxt.getAllocator());
 		bothKeyList = keyList;
 		tupleSet->applyKeyList(bothKeyList, &innerSideFirst);
+
+		SummaryTupleSet::applyColumnList(
+				tupleSet->getTotalColumnList(),
+				*cxt.getSummaryColumnListRef(ordinals.inner()));
 
 		const size_t capacity = resolveHashCapacity(cxt, ordinals);
 		cxt.getResource(0) = ALLOC_UNIQUE(

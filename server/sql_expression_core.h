@@ -41,14 +41,14 @@ struct SQLCoreExprs {
 	struct SummaryColumnCode;
 	struct ConstCode;
 
-	template<typename T, typename S, size_t I, bool Nullable>
+	template<typename T, size_t I, bool Nullable>
 	class ArgExprEvaluator;
 	class GeneralColumnEvaluator;
-	template<typename T, typename S, bool Nullable, bool Multi>
+	template<typename T, bool Nullable, bool Multi>
 	class ReaderColumnEvaluator;
-	template<typename T, typename S, bool Nullable>
+	template<typename T, bool Nullable>
 	class ReadableTupleColumnEvaluator;
-	template<typename T, typename S, bool Nullable>
+	template<typename T, bool Nullable>
 	class SummaryColumnEvaluator;
 	template<typename T>
 	class ConstEvaluator;
@@ -66,6 +66,8 @@ struct SQLCoreExprs {
 	class InExpression;
 	class CastExpression;
 	class NoopExpression;
+	class RangeKeyExpression;
+	class LinearExpression;
 
 	struct Functions;
 };
@@ -199,6 +201,82 @@ struct SQLCoreExprs::Specs {
 		typedef Base::Type<TupleTypes::TYPE_NULL, Base::InList<
 				Base::In<TupleTypes::TYPE_ANY>,
 				Base::In<TupleTypes::TYPE_ANY> > > Type;
+	};
+
+	template<int C> struct Spec<SQLType::EXPR_RANGE_GROUP, C> {
+		typedef Base::Type< TupleTypes::TYPE_LONG, Base::InList<
+				Base::In<TupleTypes::TYPE_ANY>,
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_LONG> >,
+				ExprSpec::FLAG_DYNAMIC> Type;
+	};
+
+	template<int C> struct Spec<SQLType::EXPR_RANGE_GROUP_ID, C> {
+		typedef Base::Type< TupleTypes::TYPE_LONG, Base::InList<
+				Base::In<TupleTypes::TYPE_ANY>,
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_LONG> >,
+				ExprSpec::FLAG_DYNAMIC> Type;
+	};
+
+	template<int C> struct Spec<SQLType::EXPR_RANGE_KEY, C> {
+		typedef Base::Type<TupleTypes::TYPE_NULL, Base::InList<
+				Base::In<TupleTypes::TYPE_ANY> >,
+				ExprSpec::FLAG_INHERIT1 |
+				ExprSpec::FLAG_NON_NULLABLE |
+				ExprSpec::FLAG_DYNAMIC> Type;
+	};
+
+	template<int C> struct Spec<SQLType::EXPR_RANGE_KEY_CURRENT, C> {
+		typedef Base::Type<TupleTypes::TYPE_NULL, Base::InList<>,
+				ExprSpec::FLAG_DYNAMIC> Type;
+	};
+
+	template<int C> struct Spec<SQLType::EXPR_RANGE_AGG, C> {
+		typedef Base::Type<TupleTypes::TYPE_NULL, Base::InList<
+				Base::PromotableAnyIn,
+				Base::PromotableAnyIn>,
+				ExprSpec::FLAG_INHERIT1 |
+				ExprSpec::FLAG_NULLABLE |
+				ExprSpec::FLAG_DYNAMIC> Type;
+	};
+
+	template<int C> struct Spec<SQLType::EXPR_RANGE_FILL, C> {
+		typedef Base::Type<TupleTypes::TYPE_NULL, Base::InList<
+				Base::In<TupleTypes::TYPE_ANY> >,
+				ExprSpec::FLAG_INHERIT1 |
+				ExprSpec::FLAG_NULLABLE |
+				ExprSpec::FLAG_DYNAMIC> Type;
+	};
+
+	template<int C> struct Spec<SQLType::EXPR_RANGE_FILL_NONE, C> {
+		typedef Base::Type< TupleTypes::TYPE_LONG, Base::InList<>,
+				ExprSpec::FLAG_DYNAMIC> Type;
+	};
+
+	template<int C> struct Spec<SQLType::EXPR_RANGE_FILL_NULL, C> {
+		typedef typename Spec<SQLType::EXPR_RANGE_FILL_NONE, C>::Type Type;
+	};
+
+	template<int C> struct Spec<SQLType::EXPR_RANGE_FILL_PREV, C> {
+		typedef typename Spec<SQLType::EXPR_RANGE_FILL_NONE, C>::Type Type;
+	};
+
+	template<int C> struct Spec<SQLType::EXPR_RANGE_FILL_LINEAR, C> {
+		typedef typename Spec<SQLType::EXPR_RANGE_FILL_NONE, C>::Type Type;
+	};
+
+	template<int C> struct Spec<SQLType::EXPR_LINEAR, C> {
+		typedef Base::Type< TupleTypes::TYPE_NULL, Base::InList<
+				Base::In<TupleTypes::TYPE_ANY>,
+				Base::PromotableAnyIn,
+				Base::In<TupleTypes::TYPE_ANY>,
+				Base::PromotableAnyIn,
+				Base::In<TupleTypes::TYPE_ANY> >,
+				ExprSpec::FLAG_INHERIT2> Type;
 	};
 
 
@@ -380,21 +458,46 @@ struct SQLCoreExprs::VariantTypes {
 	};
 
 	enum {
-		COUNT_COMP_TYPE = 4, 
+		COUNT_COMP_TYPE = 6, 
 		COUNT_NULLABLE = 2, 
 		COUNT_INTEGRAL = 4,
 		COUNT_FLOATING = 2,
+		COUNT_TIMESTAMP_FULL = 3, 
+		COUNT_TIMESTAMP_BASIC = COUNT_TIMESTAMP_FULL - 1, 
+		COUNT_OTHER_TYPE = 3, 
+
 		COUNT_NUMERIC = COUNT_INTEGRAL + COUNT_FLOATING,
-		COUNT_BASIC_NO_NUMERIC = 3, 
-		COUNT_FULL_NO_NUMERIC = COUNT_BASIC_NO_NUMERIC + 1, 
+		COUNT_FULL_NO_NUMERIC =
+				(COUNT_OTHER_TYPE + COUNT_TIMESTAMP_FULL),
+		COUNT_BASIC_NO_NUMERIC =
+				(COUNT_OTHER_TYPE + COUNT_TIMESTAMP_BASIC),
 		COUNT_CONTAINER_SOURCE = 2, 
+
+		COUNT_NUMERIC_PROMO = COUNT_INTEGRAL,
+		COUNT_TIMESTAMP_PROMO = COUNT_TIMESTAMP_FULL - 1, 
+		COUNT_PROMO = COUNT_NUMERIC_PROMO + COUNT_TIMESTAMP_PROMO,
 
 		COUNT_BASIC_TYPE = COUNT_NUMERIC + COUNT_BASIC_NO_NUMERIC,
 		COUNT_FULL_TYPE = COUNT_NUMERIC + COUNT_FULL_NO_NUMERIC,
-		COUNT_BASIC_AND_PROMO_TYPE = COUNT_BASIC_TYPE + COUNT_INTEGRAL,
+		COUNT_BASIC_AND_PROMO_TYPE = COUNT_BASIC_TYPE + COUNT_PROMO,
 
 		COUNT_NUMERIC_COMBI = CombiOf<COUNT_NUMERIC>::VALUE,
-		COUNT_BASIC_COMBI = COUNT_NUMERIC_COMBI + COUNT_BASIC_NO_NUMERIC
+		COUNT_NO_BASIC_TIMESTAMP_COMBI = 1, 
+		COUNT_BASIC_TIMESTAMP_COMBI =
+				CombiOf<COUNT_TIMESTAMP_FULL>::VALUE -
+				COUNT_NO_BASIC_TIMESTAMP_COMBI,
+		COUNT_SOME_BASIC_COMBI =
+				(COUNT_NUMERIC_COMBI + COUNT_BASIC_TIMESTAMP_COMBI),
+		COUNT_NO_COMBI = COUNT_OTHER_TYPE,
+		COUNT_BASIC_COMBI = (COUNT_SOME_BASIC_COMBI + COUNT_NO_COMBI),
+
+		INDEX_NUMERIC_BEGIN = 0,
+		INDEX_OTHER_BEGIN = COUNT_NUMERIC,
+		INDEX_TIMESTAMP_BEGIN = INDEX_OTHER_BEGIN + COUNT_OTHER_TYPE,
+
+		INDEX_NUMERIC_PROMO = COUNT_NUMERIC - 1,
+		INDEX_BASIC_TIMESTAMP_PROMO =
+				INDEX_TIMESTAMP_BEGIN + COUNT_TIMESTAMP_BASIC - 1
 	};
 
 	template<size_t I>
@@ -405,8 +508,10 @@ struct SQLCoreExprs::VariantTypes {
 				typename util::Conditional<I == 1, Types::Double,
 				typename util::Conditional<I == 2, Types::String,
 				typename util::Conditional<I == 3, Types::Blob,
+				typename util::Conditional<I == 4, Types::MicroTimestampTag,
+				typename util::Conditional<I == 5, Types::NanoTimestampTag,
 						void
-				>::Type>::Type>::Type>::Type ValueTypeTag;
+				>::Type>::Type>::Type>::Type>::Type>::Type ValueTypeTag;
 		typedef ValueTypeTag CompTypeTag;
 	};
 
@@ -423,10 +528,12 @@ struct SQLCoreExprs::VariantTypes {
 				typename util::Conditional<I == 6, Types::Bool,
 				typename util::Conditional<I == 7, Types::String,
 				typename util::Conditional<I == 8, Types::Blob,
+				typename util::Conditional<I == 9, Types::MicroTimestampTag,
+				typename util::Conditional<I == 10, Types::NanoTimestampTag,
 						void
 				>::Type>::Type>::Type>::Type>::Type
-				>::Type>::Type>::Type>::Type
-						ValueTypeTag;
+				>::Type>::Type>::Type>::Type>::Type
+				>::Type ValueTypeTag;
 		typedef typename util::Conditional<I == 6,
 				Types::Bool,
 				typename ColumnTypeByComp<(
@@ -437,31 +544,99 @@ struct SQLCoreExprs::VariantTypes {
 	template<size_t I>
 	struct ColumnTypeByFull {
 		typedef SQLValues::Types Types;
-		typedef typename util::Conditional<(I <= 8),
-				typename ColumnTypeByBasic<I>::ValueTypeTag,
-				Types::Timestamp>::Type ValueTypeTag;
+		typedef typename util::Conditional<(I == 11),
+				Types::TimestampTag,
+				typename ColumnTypeByBasic<I>::ValueTypeTag
+				>::Type ValueTypeTag;
 
-		typedef typename util::Conditional<(I <= 8),
-				typename ColumnTypeByBasic<I>::CompTypeTag,
-				Types::Long>::Type CompTypeTag;
+		typedef typename util::Conditional<(I == 11),
+				Types::TimestampTag,
+				typename ColumnTypeByBasic<I>::CompTypeTag
+				>::Type CompTypeTag;
+	};
+
+	template<size_t I>
+	struct TimestampFullIndexOf {
+		enum {
+			VALUE = (INDEX_TIMESTAMP_BEGIN +
+					(I > 0 ? I - 1 : COUNT_TIMESTAMP_BASIC + 0))
+		};
 	};
 
 	template<size_t I>
 	struct ColumnTypeByBasicAndPromo {
 	private:
 		enum {
-			FLOATING_NUM = COUNT_INTEGRAL + COUNT_FLOATING - 1,
-			FLOATING_PROMO = (I >= COUNT_BASIC_TYPE),
-			SRC_BASIC_NUM = (I - (FLOATING_PROMO ? COUNT_BASIC_TYPE : 0)),
-			DEST_BASIC_NUM = (FLOATING_PROMO ? FLOATING_NUM : SRC_BASIC_NUM)
+			BASIC_PROMO = (I >= COUNT_BASIC_TYPE),
+			PROMO_OFFSET = (I - (BASIC_PROMO ? COUNT_BASIC_TYPE : 0)),
+
+			TIMESTAMP_PROMO = (PROMO_OFFSET >= COUNT_NUMERIC_PROMO),
+			TIMESTAMP_PROMO_INDEX = (TimestampFullIndexOf<
+					PROMO_OFFSET - (TIMESTAMP_PROMO ?
+							COUNT_NUMERIC_PROMO : 0)>::VALUE),
+
+			NUMERIC_PROMO = (BASIC_PROMO && !TIMESTAMP_PROMO),
+			NUMERIC_PROMO_INDEX = INDEX_NUMERIC_BEGIN +
+					(NUMERIC_PROMO ? PROMO_OFFSET : 0),
+			NUMERIC_NON_PROMO = (!BASIC_PROMO && I < COUNT_NUMERIC),
+
+			SRC_BASIC_NUM = (BASIC_PROMO ? (TIMESTAMP_PROMO ?
+					static_cast<size_t>(TIMESTAMP_PROMO_INDEX) :
+					static_cast<size_t>(NUMERIC_PROMO_INDEX)) : I),
+			DEST_BASIC_NUM = (BASIC_PROMO ? (TIMESTAMP_PROMO ?
+					INDEX_BASIC_TIMESTAMP_PROMO : INDEX_NUMERIC_PROMO) + 0 :
+					SRC_BASIC_NUM),
+
+			COMP_TYPE_ADJUSTING = (
+					SRC_BASIC_NUM != DEST_BASIC_NUM ||
+					NUMERIC_NON_PROMO)
 		};
 
-		typedef ColumnTypeByBasic<SRC_BASIC_NUM> SrcBaseType;
-		typedef ColumnTypeByBasic<DEST_BASIC_NUM> DestBaseType;
+		typedef ColumnTypeByFull<SRC_BASIC_NUM> SrcBaseType;
+		typedef ColumnTypeByFull<DEST_BASIC_NUM> DestBaseType;
 
 	public:
 		typedef typename SrcBaseType::ValueTypeTag ValueTypeTag;
-		typedef typename DestBaseType::CompTypeTag CompTypeTag;
+		typedef typename util::Conditional<
+				COMP_TYPE_ADJUSTING,
+				typename DestBaseType::CompTypeTag,
+				ValueTypeTag>::Type CompTypeTag;
+	};
+
+	template<size_t I, size_t S>
+	struct ColumnTypeByBasicCombi {
+	private:
+		enum {
+			NUMERIC_COMBI = (I < COUNT_NUMERIC_COMBI),
+			NUMERIC_COMBI_INDEX = (NUMERIC_COMBI ? I : 0),
+
+			TIMESTAMP_COMBI = (!NUMERIC_COMBI &&
+					(I < COUNT_NUMERIC_COMBI + COUNT_BASIC_TIMESTAMP_COMBI)),
+			TIMESTAMP_COMBI_INDEX = COUNT_NO_BASIC_TIMESTAMP_COMBI +
+					(I - (TIMESTAMP_COMBI ? COUNT_NUMERIC_COMBI : 0)),
+
+			NO_COMBI = (!NUMERIC_COMBI && !TIMESTAMP_COMBI),
+			TYPE_INDEX_NO_COMBI = INDEX_OTHER_BEGIN +
+					(I - (NO_COMBI ? COUNT_SOME_BASIC_COMBI : 0)),
+
+			COMBI_COUNT = (NO_COMBI ? 1 : (TIMESTAMP_COMBI ?
+					COUNT_TIMESTAMP_FULL : COUNT_NUMERIC)),
+			COMBI_INDEX = (NO_COMBI ? 0 : (TIMESTAMP_COMBI ?
+					TIMESTAMP_COMBI_INDEX : NUMERIC_COMBI_INDEX))
+		};
+
+		typedef CombiIndexOf<COMBI_COUNT, COMBI_INDEX> BaseType;
+
+		enum {
+			BASE_OFFSET = (S == 0 ? BaseType::VALUE1 : BaseType::VALUE2),
+			TYPE_INDEX = (NO_COMBI ? TYPE_INDEX_NO_COMBI :
+					(TIMESTAMP_COMBI ?
+							TimestampFullIndexOf<BASE_OFFSET>::VALUE :
+							(INDEX_NUMERIC_BEGIN + BASE_OFFSET)))
+		};
+
+	public:
+		typedef typename ColumnTypeByFull<TYPE_INDEX>::ValueTypeTag TypeTag;
 	};
 };
 
@@ -473,7 +648,13 @@ struct SQLCoreExprs::VariantUtils {
 	static size_t toFullTypeNumber(TupleColumnType src);
 	static size_t toBasicAndPromoTypeNumber(
 			TupleColumnType src, TupleColumnType promo);
+	static bool findBasicCombiTypeNumber(
+			TupleColumnType type1, TupleColumnType type2, size_t &num);
 
+	static size_t toTimestampPromoSubIndex(TupleColumnType src);
+	static size_t toTimestampCombiSubIndex(TupleColumnType src);
+
+	static bool findCombiNumber(size_t n1, size_t n2, size_t &num);
 	static size_t getCombiCount(size_t n);
 
 	static const Expression& getBaseExpression(
@@ -584,12 +765,15 @@ struct SQLCoreExprs::ConstCode {
 	TupleValue value_;
 };
 
-template<typename T, typename S, size_t I, bool Nullable>
+template<typename T, size_t I, bool Nullable>
 class SQLCoreExprs::ArgExprEvaluator {
+public:
+	typedef T ValueTypeTag;
+
+private:
 	typedef SQLValues::ValueUtils ValueUtils;
 	typedef SQLExprs::Expression Expression;
-	typedef typename T::ValueType ValueType;
-	typedef typename S::ValueType SourceType;
+	typedef typename ValueTypeTag::ValueType ValueType;
 
 public:
 	typedef const Expression &EvaluatorType;
@@ -607,16 +791,17 @@ public:
 	}
 
 	static ValueType get(const ResultType &value) {
-		return ValueUtils::getPromoted<T, S>(
-				ValueUtils::getValue<SourceType>(value));
+		return ValueUtils::getValue<ValueType>(value);
 	}
 };
 
 class SQLCoreExprs::GeneralColumnEvaluator {
+private:
 	typedef SQLValues::ValueUtils ValueUtils;
 	typedef TupleValue ValueType;
 
 public:
+	typedef SQLValues::Types::Any ValueTypeTag;
 	typedef GeneralColumnEvaluator EvaluatorType;
 	typedef GeneralColumnCode CodeType;
 	typedef TupleValue ResultType;
@@ -642,11 +827,14 @@ private:
 	const CodeType &code_;
 };
 
-template<typename T, typename S, bool Nullable, bool Multi>
+template<typename T, bool Nullable, bool Multi>
 class SQLCoreExprs::ReaderColumnEvaluator {
+public:
+	typedef T ValueTypeTag;
+
+private:
 	typedef SQLValues::ValueUtils ValueUtils;
-	typedef typename T::ValueType ValueType;
-	typedef typename S::ValueType SourceType;
+	typedef typename ValueTypeTag::ValueType ValueType;
 
 public:
 	typedef ReaderColumnEvaluator EvaluatorType;
@@ -675,8 +863,7 @@ public:
 		}
 
 		return ResultType(
-				ValueUtils::getPromoted<T, S>(
-						ValueUtils::readCurrentValue<S>(*reader, code_.column_)),
+				ValueUtils::readCurrentValue<T>(*reader, code_.column_),
 				false);
 	}
 
@@ -687,11 +874,15 @@ private:
 	const CodeType &code_;
 };
 
-template<typename T, typename S, bool Nullable>
+template<typename T, bool Nullable>
 class SQLCoreExprs::ReadableTupleColumnEvaluator {
+public:
+	typedef T ValueTypeTag;
+
+private:
 	typedef SQLValues::ValueUtils ValueUtils;
-	typedef typename T::ValueType ValueType;
-	typedef typename S::ValueType SourceType;
+	typedef typename ValueTypeTag::ValueType ValueType;
+	typedef SQLExprs::ReadableTuple ReadableTuple;
 
 public:
 	typedef ReadableTupleColumnEvaluator EvaluatorType;
@@ -710,15 +901,13 @@ public:
 		return value.first;
 	}
 
-	typedef SQLExprs::ReadableTuple ReadableTuple;
 	ResultType eval(ExprContext &cxt) const {
-		const SQLExprs::ReadableTuple *tuple = code_.tuple_;
+		const ReadableTuple *tuple = code_.tuple_;
 		if (Nullable && ValueUtils::readNull(*tuple, code_.column_)) {
 			return ResultType(ValueType(), true);
 		}
 		return ResultType(
-				ValueUtils::getPromoted<T, S>(
-						ValueUtils::readValue<S>(*tuple, code_.column_)),
+				ValueUtils::readValue<T>(*tuple, code_.column_),
 				false);
 	}
 
@@ -729,11 +918,14 @@ private:
 	const CodeType &code_;
 };
 
-template<typename T, typename S, bool Nullable>
+template<typename T, bool Nullable>
 class SQLCoreExprs::SummaryColumnEvaluator {
+public:
+	typedef T ValueTypeTag;
+
+private:
 	typedef SQLValues::ValueUtils ValueUtils;
-	typedef typename T::ValueType ValueType;
-	typedef typename S::ValueType SourceType;
+	typedef typename ValueTypeTag::ValueType ValueType;
 
 public:
 	typedef SummaryColumnEvaluator EvaluatorType;
@@ -758,10 +950,7 @@ public:
 		if (Nullable && tuple->isNull(*code_.column_)) {
 			return ResultType(ValueType(), true);
 		}
-		return ResultType(
-				ValueUtils::getPromoted<T, S>(
-						tuple->getValueAs<S>(*code_.column_)),
-				false);
+		return ResultType(tuple->getValueAs<T>(*code_.column_), false);
 	}
 
 private:
@@ -773,8 +962,13 @@ private:
 
 template<typename T>
 class SQLCoreExprs::ConstEvaluator {
+public:
+	typedef T ValueTypeTag;
+
+private:
 	typedef SQLValues::ValueUtils ValueUtils;
 	typedef typename T::ValueType ValueType;
+
 public:
 	typedef ConstEvaluator EvaluatorType;
 	typedef ConstCode CodeType;
@@ -879,7 +1073,6 @@ public:
 	template<size_t V, bool = (V <= 0)>
 	struct VariantTraitsBase {
 		typedef SQLValues::Types::Any ValueTypeTag;
-		typedef ValueTypeTag ResultTypeTag;
 
 		typedef GeneralColumnEvaluator Evaluator;
 		typedef typename Evaluator::CodeType Code;
@@ -897,21 +1090,20 @@ public:
 
 		typedef typename VariantTypes::ColumnTypeByFull<
 				SUB_TYPE>::ValueTypeTag ValueTypeTag;
-		typedef ValueTypeTag ResultTypeTag;
 
 		typedef
 				typename util::Conditional<
 						(SUB_SOURCE == 0),
 						ReaderColumnEvaluator<
-								ResultTypeTag, ValueTypeTag, SUB_NULLABLE, false>,
+								ValueTypeTag, SUB_NULLABLE, false>,
 				typename util::Conditional<
 						(SUB_SOURCE == 1),
 						ReaderColumnEvaluator<
-								ResultTypeTag, ValueTypeTag, SUB_NULLABLE, true>,
+								ValueTypeTag, SUB_NULLABLE, true>,
 				typename util::Conditional<
 						(SUB_SOURCE == 2),
 						SummaryColumnEvaluator<
-								ResultTypeTag, ValueTypeTag, SUB_NULLABLE>,
+								ValueTypeTag, SUB_NULLABLE>,
 				void>::Type>::Type>::Type Evaluator;
 
 		typedef typename Evaluator::CodeType Code;
@@ -929,6 +1121,21 @@ public:
 		static size_t resolveVariant(ExprFactoryContext &cxt, const ExprCode &code);
 	};
 
+	struct ColumnValueChecker {
+		TupleValue operator()(
+				const SQLExprs::Expression &expr, ExprContext &cxt,
+				const TupleValue &src, const util::TrueType&) const {
+			return expr.asColumnValue(&cxt.getValueContext(), src);
+		}
+
+		TupleValue operator()(
+				const SQLExprs::Expression&, ExprContext&,
+				const TupleValue&, const util::FalseType&) const {
+			assert(false);
+			return TupleValue();
+		}
+	};
+
 	template<typename Code, typename Checking>
 	class VariantBase : public SQLExprs::Expression {
 	public:
@@ -937,21 +1144,24 @@ public:
 
 	protected:
 		TupleValue toResult(
-				const TupleValue &value = TupleValue(),
+				ExprContext &cxt, const TupleValue &value = TupleValue(),
 				const SQLValues::Types::Any& = SQLValues::Types::Any()) const {
 			if (Checking::VALUE) {
-				return asColumnValue(value);
+				return ColumnValueChecker()(*this, cxt, value, Checking());
 			}
 			return value;
 		}
 
-		template<typename T, typename R>
-		TupleValue toResult(const std::pair<T, bool> &value, const R&) const {
+		template<typename T>
+		TupleValue toResult(
+				ExprContext &cxt,
+				const std::pair<typename T::ValueType, bool> &value,
+				const T&) const {
 			const TupleValue &anyValue =
 					SQLValues::ValueUtils::toAnyByValue<
-							R::COLUMN_TYPE>(value.first);
+							T::COLUMN_TYPE>(value.first);
 			if (Checking::VALUE) {
-				return asColumnValue(anyValue);
+				return ColumnValueChecker()(*this, cxt, anyValue, Checking());
 			}
 			return anyValue;
 		}
@@ -972,9 +1182,9 @@ public:
 	private:
 		typedef typename Base::template VariantTraitsBase<V> BaseType;
 
+		typedef typename BaseType::ValueTypeTag ValueTypeTag;
 		typedef typename BaseType::Evaluator Evaluator;
-		typedef typename Evaluator::ResultType ValueType;
-		typedef typename BaseType::ResultTypeTag ResultType;
+		typedef typename Evaluator::ResultType ResultType;
 	};
 
 	template<size_t V>
@@ -1024,6 +1234,7 @@ public:
 
 	template<size_t V>
 	struct ArgTypeOf<V, 0> {
+	private:
 		enum {
 			SUB_OFFSET = V - OFFSET_EXPR,
 			SUB_ANY_TYPE = (SUB_OFFSET < 1),
@@ -1031,52 +1242,28 @@ public:
 			SUB_TYPE_OFFSET = (SUB_ANY_TYPE ? 0 : SUB_OFFSET - 1),
 			SUB_NULLABLE = (SUB_TYPE_OFFSET >= COUNT_BASIC_COMBI ||
 					SUB_ANY_TYPE),
-			SUB_COMBI = (SUB_TYPE_OFFSET % COUNT_BASIC_COMBI),
-
-			SUB_NUMERIC =
-					(!SUB_ANY_TYPE && SUB_COMBI < COUNT_NUMERIC_COMBI),
-			SUB_NUMERIC_COMBI = (SUB_NUMERIC ? SUB_COMBI : 0),
-			SUB_NO_NUMERIC_TYPE = (SUB_ANY_TYPE ? 0 : COUNT_NUMERIC +
-					(SUB_NUMERIC ? 0 : SUB_COMBI - COUNT_NUMERIC_COMBI)),
-
-			SUB_TYPE1 = (SUB_NUMERIC ?
-					static_cast<size_t>(VariantTypes::CombiIndexOf<
-							COUNT_NUMERIC, SUB_NUMERIC_COMBI>::VALUE1) :
-					SUB_NO_NUMERIC_TYPE),
-			SUB_TYPE2 = (SUB_NUMERIC ?
-					static_cast<size_t>(VariantTypes::CombiIndexOf<
-							COUNT_NUMERIC, SUB_NUMERIC_COMBI>::VALUE2) :
-					SUB_NO_NUMERIC_TYPE),
-			SUB_COMP_TYPE =
-					(SUB_TYPE1 >= SUB_TYPE2 ? SUB_TYPE1 : SUB_TYPE2)
+			SUB_COMBI = (SUB_TYPE_OFFSET % COUNT_BASIC_COMBI)
 		};
 
 		typedef typename util::Conditional<
 				SUB_ANY_TYPE,
 				SQLValues::Types::Any,
-				typename VariantTypes::ColumnTypeByBasic<
-						SUB_TYPE1>::ValueTypeTag>::Type SourceType1;
+				typename VariantTypes::ColumnTypeByBasicCombi<
+						SUB_COMBI, 0>::TypeTag>::Type SourceType1;
 		typedef typename util::Conditional<
 				SUB_ANY_TYPE,
 				SQLValues::Types::Any,
-				typename VariantTypes::ColumnTypeByBasic<
-						SUB_TYPE2>::ValueTypeTag>::Type SourceType2;
+				typename VariantTypes::ColumnTypeByBasicCombi<
+						SUB_COMBI, 1>::TypeTag>::Type SourceType2;
 
-		typedef typename util::Conditional<
-				SUB_ANY_TYPE,
-				SQLValues::Types::Any,
-				typename VariantTypes::ColumnTypeByBasic<
-						SUB_COMP_TYPE>::CompTypeTag>::Type CompTypeTag;
-
-		typedef ArgExprEvaluator<
-				CompTypeTag, SourceType1, 0, SUB_NULLABLE> Arg1;
-		typedef ArgExprEvaluator<
-				CompTypeTag, SourceType2, 1, SUB_NULLABLE> Arg2;
-
+	public:
+		typedef ArgExprEvaluator<SourceType1, 0, SUB_NULLABLE> Arg1;
+		typedef ArgExprEvaluator<SourceType2, 1, SUB_NULLABLE> Arg2;
 	};
 
 	template<size_t V>
 	struct ArgTypeOf<V, 1> {
+	private:
 		enum {
 			SUB_OFFSET = V - OFFSET_CONST,
 			SUB_NULLABLE = (SUB_OFFSET >= COUNT_BASIC_AND_PROMO_TYPE),
@@ -1088,47 +1275,28 @@ public:
 		typedef typename VariantTypes::ColumnTypeByBasicAndPromo<
 				SUB_TYPE>::CompTypeTag CompTypeTag;
 
-		typedef ReaderColumnEvaluator<
-				CompTypeTag, SourceType, SUB_NULLABLE, false> Arg1;
+	public:
+		typedef ReaderColumnEvaluator<SourceType, SUB_NULLABLE, false> Arg1;
 		typedef ConstEvaluator<CompTypeTag> Arg2;
 	};
 
 	template<size_t V>
 	struct ArgTypeOf<V, 2> {
+	private:
 		enum {
 			SUB_OFFSET = V - OFFSET_COLUMN,
 			SUB_NULLABLE = (SUB_OFFSET >= COUNT_BASIC_COMBI),
-			SUB_COMBI = (SUB_OFFSET % COUNT_BASIC_COMBI),
-
-			SUB_NUMERIC = (SUB_COMBI < COUNT_NUMERIC_COMBI),
-			SUB_NUMERIC_COMBI = (SUB_NUMERIC ? SUB_COMBI : 0),
-			SUB_NO_NUMERIC_TYPE = COUNT_NUMERIC +
-					(SUB_NUMERIC ? 0 : SUB_COMBI - COUNT_NUMERIC_COMBI),
-
-			SUB_TYPE1 = (SUB_NUMERIC ?
-					static_cast<size_t>(VariantTypes::CombiIndexOf<
-							COUNT_NUMERIC, SUB_NUMERIC_COMBI>::VALUE1) :
-					SUB_NO_NUMERIC_TYPE),
-			SUB_TYPE2 = (SUB_NUMERIC ?
-					static_cast<size_t>(VariantTypes::CombiIndexOf<
-							COUNT_NUMERIC, SUB_NUMERIC_COMBI>::VALUE2) :
-					SUB_NO_NUMERIC_TYPE),
-			SUB_COMP_TYPE =
-					(SUB_TYPE1 >= SUB_TYPE2 ? SUB_TYPE1 : SUB_TYPE2)
+			SUB_COMBI = (SUB_OFFSET % COUNT_BASIC_COMBI)
 		};
 
-		typedef typename VariantTypes::ColumnTypeByBasic<
-				SUB_TYPE1>::ValueTypeTag SourceType1;
-		typedef typename VariantTypes::ColumnTypeByBasic<
-				SUB_TYPE2>::ValueTypeTag SourceType2;
+		typedef typename VariantTypes::ColumnTypeByBasicCombi<
+				SUB_COMBI, 0>::TypeTag SourceType1;
+		typedef typename VariantTypes::ColumnTypeByBasicCombi<
+				SUB_COMBI, 1>::TypeTag SourceType2;
 
-		typedef typename VariantTypes::ColumnTypeByBasic<
-				SUB_COMP_TYPE>::CompTypeTag CompTypeTag;
-
-		typedef ReaderColumnEvaluator<
-				CompTypeTag, SourceType1, SUB_NULLABLE, false> Arg1;
-		typedef ReaderColumnEvaluator<
-				CompTypeTag, SourceType2, SUB_NULLABLE, false> Arg2;
+	public:
+		typedef ReaderColumnEvaluator<SourceType1, SUB_NULLABLE, false> Arg1;
+		typedef ReaderColumnEvaluator<SourceType2, SUB_NULLABLE, false> Arg2;
 	};
 
 public:
@@ -1138,7 +1306,9 @@ public:
 
 		typedef typename ArgTypes::Arg1 Arg1;
 		typedef typename ArgTypes::Arg2 Arg2;
-		typedef typename ArgTypes::CompTypeTag CompTypeTag;
+
+		typedef typename Arg1::ValueTypeTag ValueTypeTag1;
+		typedef typename Arg2::ValueTypeTag ValueTypeTag2;
 
 		typedef typename Arg1::CodeType Code1;
 		typedef typename Arg2::CodeType Code2;
@@ -1148,8 +1318,8 @@ public:
 		typedef typename util::Conditional<
 				Checking::VALUE,
 				SQLValues::ValueComparator,
-				SQLValues::ValueBasicComparator::TypeAt<
-						CompTypeTag> >::Type TypedComparator;
+				SQLValues::ValueComparator::BasicTypeAt<
+						ValueTypeTag1, ValueTypeTag2> >::Type TypedComparator;
 	};
 
 	struct VariantTraits {
@@ -1172,7 +1342,7 @@ public:
 	protected:
 		TupleValue toResult() const {
 			if (Checking::VALUE) {
-				return asColumnValue(TupleValue());
+				return asColumnValueSpecific(TupleValue());
 			}
 			return TupleValue();
 		}
@@ -1205,7 +1375,17 @@ public:
 
 		template<typename T>
 		T generate(const SQLExprs::Expression&, const util::FalseType&) const {
-			return T(SQLValues::ValueBasicComparator(COMP_SENSITIVE));
+			return T(COMP_SENSITIVE);
+		}
+	};
+
+	template<typename Func>
+	struct ComparatorPredicate {
+		typedef bool result_type;
+		typedef int32_t first_argument_type;
+		typedef int32_t second_argument_type;
+		template<typename T> bool operator()(const T &v1, const T &v2) const {
+			return Func()(v1, v2);
 		}
 	};
 
@@ -1236,6 +1416,7 @@ public:
 		typedef typename Arg2::ResultType ResultType2;
 
 		typedef typename TraitsBase::TypedComparator TypedComparator;
+		typedef ComparatorPredicate<Func> PredType;
 
 		typename Arg1::EvaluatorType getArg1() const {
 			return Arg1::evaluator(BaseExpr::getArg1());
@@ -1319,6 +1500,9 @@ public:
 				int64_t, TupleValue, MapHasher, EqPred> Map;
 		typedef Map::iterator MapIterator;
 
+		static const bool COMP_SENSITIVE =
+				ComparisonExpressionBase::ComparatorGenerator::COMP_SENSITIVE;
+
 		util::LocalUniquePtr<Map> map_;
 
 		SQLValues::ValueAccessor accessor_;
@@ -1353,13 +1537,15 @@ public:
 
 		typedef typename SrcTypeTag::ValueType SrcType;
 		typedef typename CompTypeTag::ValueType CompType;
+		typedef typename CompTypeTag::LocalValueType LocalCompType;
 
-		typedef typename SQLValues::ValueBasicComparator::template TypeAt<
-				CompTypeTag> Comparator;
+		typedef typename SQLValues::ValueComparator::template BasicTypeAt<
+				CompTypeTag, CompTypeTag> Comparator;
 
+		typedef typename SQLValues::ValueAccessor::ByLocalValue<
+				CompTypeTag> AccessorType;
 		typedef typename SQLValues::ValueDigester::VariantTraits<
-				false, false,
-				SQLValues::ValueAccessor::ByValue> DigesterVariantTraits;
+				false, false, AccessorType> DigesterVariantTraits;
 		typedef typename SQLValues::TypeSwitcher::template TypeTraits<
 				CompTypeTag, void, util::FalseType,
 				DigesterVariantTraits> DigesterTraits;
@@ -1379,8 +1565,37 @@ public:
 	virtual TupleValue eval(ExprContext &cxt) const;
 };
 
+class SQLCoreExprs::RangeKeyExpression : public SQLExprs::Expression {
+public:
+	RangeKeyExpression(ExprFactoryContext &cxt, const ExprCode &code);
+	virtual TupleValue eval(ExprContext &cxt) const;
+
+private:
+	bool forPrev_;
+	bool forNext_;
+};
+
+class SQLCoreExprs::LinearExpression : public SQLExprs::Expression {
+public:
+	LinearExpression(ExprFactoryContext &cxt, const ExprCode &code);
+	virtual TupleValue eval(ExprContext &cxt) const;
+
+private:
+	static SQLValues::TypeUtils::TypeCategory resolveEvaluationCategory(
+			TupleColumnType type);
+
+	SQLValues::TypeUtils::TypeCategory category_;
+};
+
 struct SQLCoreExprs::Functions {
 	typedef SQLExprs::ExprUtils::FunctorPolicy::DefaultPolicy DefaultPolicy;
+
+	struct RangeGroupId {
+		template<typename C>
+		std::pair<int64_t, bool> operator()(
+				C &cxt, const TupleValue &value, int64_t interval,
+				int64_t offset);
+	};
 
 	struct Coalesce {
 		typedef DefaultPolicy::AsPartiallyFinishable::AsResultPromotable::
@@ -1579,14 +1794,14 @@ void SQLCoreExprs::ColumnExpression::VariantBase<
 template<size_t V, typename Base>
 TupleValue SQLCoreExprs::ColumnExpression::VariantBaseAt<V, Base>::eval(
 		ExprContext &cxt) const {
-	const ValueType &value =
+	const ResultType &value =
 			Evaluator::evaluator(this->getVariantCode()).eval(cxt);
 
 	if (!Evaluator::check(value)) {
-		return this->toResult();
+		return this->toResult(cxt);
 	}
 
-	return this->toResult(value, ResultType());
+	return this->toResult(cxt, value, ValueTypeTag());
 }
 
 
@@ -1623,7 +1838,7 @@ TupleValue SQLCoreExprs::ComparisonExpressionBase::VariantBaseAt<
 		return toResult();
 	}
 
-	return toResult(getComparator()(Arg1::get(v1), Arg2::get(v2), Func()));
+	return toResult(getComparator()(Arg1::get(v1), Arg2::get(v2), PredType()));
 }
 
 template<typename Func, size_t V, typename Base>
@@ -1639,7 +1854,7 @@ inline bool SQLCoreExprs::ComparisonExpressionBase::VariantBaseAt<
 		return false;
 	}
 
-	return getComparator()(Arg1::get(v1), Arg2::get(v2), Func());
+	return getComparator()(Arg1::get(v1), Arg2::get(v2), PredType());
 }
 
 

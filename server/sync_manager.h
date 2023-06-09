@@ -36,6 +36,7 @@ class ClusterService;
 class RecoveryManager;
 class PartitionList;
 class NoLocker;
+class MutexLocker;
 template <class L> class LogManager;
 
 

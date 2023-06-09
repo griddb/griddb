@@ -618,6 +618,7 @@ public:
 		const NodeDescriptor clientNd_;
 		double storeMemoryAgingSwapRate_;
 		util::TimeZone timezone_;
+		int32_t acceptableFeatureVersion_;
 		StatementHandler::ConnectionOption& connOption_;
 	};
 
@@ -643,6 +644,8 @@ public:
 		bool isExplainStatement() {
 			return (isExplain() || isExplainAnalyze());
 		}
+		const std::string getTableNameList();
+
 		SQLParsedInfo parsedInfo_;
 		util::Vector<SyntaxTree::ExprList*> mergeSelectList_;
 		bool prepared_;
@@ -742,7 +745,9 @@ public:
 			response_(response),
 			clientId_(clientId),
 			syncContext_(NULL),
-			currentJobId_(currentJobId) {}
+			currentJobId_(currentJobId),
+			pendingExceptionExecId_(UNDEF_STATEMENTID)
+			{}
 
 		const char* getDBName() const;
 		const char* getApplicationName() const;
@@ -764,8 +769,11 @@ public:
 		const char* getNormalizedDBName();
 		bool isRetryStatement() const;
 		bool isPreparedStatement() const;
+		
+		const std::string getTableNameList() const;
 
 		const NodeDescriptor& getClientNd() const;
+		const std::string getClientAddress() const;
 		ExecutionId getExecId();
 		StatementHandler::ConnectionOption& getConnectionOption();
 		NoSQLSyncContext& getSyncContext();
@@ -774,6 +782,9 @@ public:
 		void setCurrentJobId(JobId& jobId);
 		void getCurrentJobId(JobId& jobId, bool isLocal = true);
 		uint8_t getCurrentJobVersionId();
+		void setPendingException(std::exception& e);
+		void resetPendingException();
+		bool checkPendingException(bool flag);
 
 	private:
 
@@ -785,6 +796,8 @@ public:
 		ClientId& clientId_;
 		NoSQLSyncContext* syncContext_;
 		JobId& currentJobId_;
+		ExecId pendingExceptionExecId_;
+		util::Exception pendingException_;
 	};
 
 	SQLExecutionContext context_;
@@ -972,7 +985,7 @@ private:
 	NoSQLStore* getNoSQLStore();
 
 	bool handleError(EventContext& ec, std::exception& e,
-		int32_t currentVersionId, int64_t& delayTime);
+		int32_t currentVersionId, int64_t& delayTime, RequestInfo &request);
 	int32_t preparedExecute(int32_t versionId,
 		bool isException, RequestInfo& request);
 
@@ -1086,6 +1099,8 @@ private:
 		SyntaxTree::Expr* targetExpr,
 		TupleList::TupleColumnType tupleType,
 		util::Vector<BindParam*>& bindParamInfos);
+
+	void checkColumnTypeFeatureVersion(ColumnType columnType);
 
 	util::Mutex lock_;
 	int64_t latchCount_;

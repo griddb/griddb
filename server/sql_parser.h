@@ -94,6 +94,7 @@ public:
 	struct TableColumn;
 	struct PartitioningOption;
 	struct ColumnInfo;
+	struct TypeInfo;
 	struct WindowOption;
 
 	typedef TupleList::TupleColumnType ColumnType;
@@ -157,40 +158,67 @@ public:
 		int32_t ifNotExist, CreateIndexOption *usingOption);
 
 	static TableColumn* makeCreateTableColumn(
-		SQLAllocator &alloc, SQLToken *name, SQLToken *type,
+		SQLAllocator &alloc, SQLToken *name, TupleList::TupleColumnType type,
 		SyntaxTree::ColumnInfo *colInfo);
 	static TableColumn* makeCreateTableColumn(
 		SQLAllocator &alloc, SQLToken *name,
 		SyntaxTree::ColumnInfo *colInfo);
 
-	static TupleList::TupleColumnType toColumnType(const char8_t *name);
+	static ExprList* makeRangeGroupOption(
+			SQLAllocator &alloc, SyntaxTree::Expr *baseKey,
+			SyntaxTree::Expr *fillExpr, int64_t interval, int64_t intervalUnit,
+			int64_t offset, int64_t timeZone, bool withTimeZone);
+
+	static bool resolveRangeGroupOffset(
+			const SQLToken &token, int64_t &offset);
+	static bool resolveRangeGroupTimeZone(
+			SQLAllocator &alloc, const SQLToken &token, int64_t &timeZone);
+
+	static TupleList::TupleColumnType toColumnType(
+			SQLAllocator &alloc, const SQLToken &type, const int64_t *num1,
+			const int64_t *num2);
+	static TupleList::TupleColumnType toColumnType(
+			const char8_t *name, const int64_t *num1,const int64_t *num2);
 	static TupleList::TupleColumnType determineType(const char *zIn);
+
+	static bool checkPartitioningIntervalTimeField(
+			util::DateTime::FieldType type);
+	static bool checkGroupIntervalTimeField(util::DateTime::FieldType type);
+
 	static int32_t gsDequote(SQLAllocator &alloc, util::String &str);
 	static void tokenToString(SQLAllocator &alloc, const SQLToken &token,
 			bool dequote, util::String* &out, bool &isQuoted);
 	static util::String* tokenToString(
 			SQLAllocator &alloc, const SQLToken &token, bool dequote);
 
+	static bool toSignedValue(
+			const SQLToken &token, bool minus, int64_t &value);
+
 	static void countLineAndColumnFromToken(
-		const char* srcSqlStr, const SQLToken &token, size_t &line, size_t &column);
+			const char* srcSqlStr, const SQLToken &token, size_t &line, size_t &column);
 
 	static void countLineAndColumn(
-		const char* srcSqlStr, const Expr* expr, size_t &line, size_t &column);
+			const char* srcSqlStr, const Expr* expr, size_t &line, size_t &column);
 
+	static Expr* makeConst(SQLAllocator& alloc, const TupleValue &value);
+
+	static TupleValue makeNanoTimestampValue(
+			SQLAllocator& alloc, const NanoTimestamp &ts);
 	static TupleValue makeStringValue(
-		SQLAllocator& alloc, const char* str, size_t strLen);
+			SQLAllocator& alloc, const char* str, size_t strLen);
 
 	static TupleValue makeBlobValue(
-		TupleValue::VarContext& cxt, const void* src, size_t byteLen);
+			TupleValue::VarContext& cxt, const void* src, size_t byteLen);
 
 	static void calcPositionInfo(const char *top, const char *cursor,
-		int32_t &line, int32_t &charPos);
+			int32_t &line, int32_t &charPos);
 
 	enum SQLCommandType {
 		COMMAND_SELECT,
 		COMMAND_DML,
 		COMMAND_DDL,
-		COMMAND_NONE
+		COMMAND_NONE,
+		COMMAND_DCL
 	};
 
 	enum CommandType {
@@ -338,6 +366,9 @@ public:
 		bool isDDL();
 		int32_t calcCommandType();
 		CommandType getCommandType();
+
+		const char* dumpCommandType();
+		int32_t dumpCategoryType();
 
 		SQLAllocator& alloc_;
 		CommandType cmdType_; 

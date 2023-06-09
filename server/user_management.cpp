@@ -212,22 +212,27 @@ void DbUserHandler::makeSchema(util::XArray<uint8_t> &containerSchema, const DUC
 		containerSchema.push_back(
 			reinterpret_cast<uint8_t *>(columnName), columnNameLen);
 
-		int8_t tmp = static_cast<int8_t>(
-			ValueProcessor::getSimpleColumnType(columnInfoList[i].type));
+		const ColumnType columnType = columnInfoList[i].type;
+		const int8_t typeOrdinal =
+				ValueProcessor::getPrimitiveColumnTypeOrdinal(
+						columnType, false);
 		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(&tmp), sizeof(int8_t));
+				reinterpret_cast<const uint8_t *>(&typeOrdinal),
+				sizeof(typeOrdinal));
 
-		uint8_t flag = 0;
-		flag |= ColumnInfo::COLUMN_FLAG_NOT_NULL;
-		containerSchema.push_back(&flag, sizeof(uint8_t));
+		const bool notNull = true;
+		const uint8_t flags = MessageSchema::makeColumnFlags(
+				ValueProcessor::isArray(columnType), false, notNull);
+		containerSchema.push_back(&flags, sizeof(flags));
 	}
 	{
 		int16_t rowKeyNum = 1;
 		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(&rowKeyNum), sizeof(int16_t));
+				reinterpret_cast<uint8_t *>(&rowKeyNum), sizeof(int16_t));
 		int16_t keyColumnId = static_cast<int16_t>(ColumnInfo::ROW_KEY_COLUMN_ID);
 		containerSchema.push_back(
-			reinterpret_cast<uint8_t *>(&keyColumnId), sizeof(int16_t));
+				reinterpret_cast<const uint8_t *>(&keyColumnId),
+				sizeof(int16_t));
 	}
 
 	{
@@ -351,6 +356,8 @@ void DbUserHandler::putContainer(util::StackAllocator &alloc,
 	TransactionContext &txn = transactionManager_->put(
 			alloc, 0 /*pId*/,
 			TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
+	txn.setAuditInfo(NULL, NULL, NULL);
+
 	const FullContainerKey containerKey(
 		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM), GS_SYSTEM_DB_ID,
 		name, static_cast<uint32_t>(strlen(name)));
@@ -386,6 +393,8 @@ bool DbUserHandler::checkContainer(
 	TransactionContext &txn = transactionManager_->put(
 			alloc, request.fixed_.pId_,
 			TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
+	txn.setAuditInfo(NULL, NULL, NULL);
+
 	const FullContainerKey containerKey(
 		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
 		containerName, static_cast<uint32_t>(strlen(containerName)));
@@ -418,6 +427,7 @@ void DbUserHandler::putRow(
 	TransactionContext &txn = transactionManager_->put(
 			alloc, request.fixed_.pId_,
 			TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
+	txn.setAuditInfo(NULL, NULL, NULL);
 
 	const FullContainerKey containerKey(
 		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
@@ -524,6 +534,7 @@ bool DbUserHandler::runWithRowKey(
 	TransactionContext &txn = transactionManager_->put(
 			alloc, 0 /*pId*/,
 			TXN_EMPTY_CLIENTID, cxtSrc, now, emNow);
+	txn.setAuditInfo(NULL, NULL, NULL);
 
 	const FullContainerKey containerKey(
 		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
@@ -535,12 +546,12 @@ bool DbUserHandler::runWithRowKey(
 	if (keyStoreValue.containerId_ == UNDEF_CONTAINERID) {
 		switch (option->type) {
 		case DUGetInOut::DBID:
-		case DUGetInOut::AUTH:
+		case DUGetInOut::AUTH://[LDAP]
 			assert(option->s);
 			TEST_PRINT1("%s not found.\n", containerName);
 			return false;
 		case DUGetInOut::RESULT_NUM:
-		case DUGetInOut::USER:
+		case DUGetInOut::USER://[LDAP]
 			return false;
 		default:
 			GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "");
@@ -861,6 +872,8 @@ void DbUserHandler::runWithTQL(
 	TransactionContext &txn = transactionManager_->put(
 			alloc, 0 /*pId*/,
 			TXN_EMPTY_CLIENTID, cxtSrc, now, emNow);
+	txn.setAuditInfo(NULL, NULL, NULL);
+
 	const FullContainerKey containerKey(
 		alloc, getKeyConstraint(CONTAINER_ATTR_SINGLE_SYSTEM, false), GS_SYSTEM_DB_ID,
 		containerName, static_cast<uint32_t>(strlen(containerName)));
@@ -1399,6 +1412,7 @@ void PutUserHandler::operator()(EventContext &ec, Event &ev) {
 			TransactionContext &txn = transactionManager_->put(
 					alloc, request.fixed_.pId_,
 					TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
+			txn.setAuditInfo(NULL, NULL, NULL);
 
 			Response response(alloc);
 			executeReplication(
@@ -1415,6 +1429,7 @@ void PutUserHandler::operator()(EventContext &ec, Event &ev) {
 		TransactionContext &txn = transactionManager_->put(
 				alloc, request.fixed_.pId_,
 				TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
+		txn.setAuditInfo(NULL, NULL, NULL);
 
 		OutMessage outMes(request.fixed_.cxtSrc_.stmtId_, TXN_STATEMENT_SUCCESS,
 			getReplyOption(alloc, request, response.compositeIndexInfos_, false));
@@ -1529,6 +1544,7 @@ void DropUserHandler::operator()(EventContext &ec, Event &ev) {
 			TransactionContext &txn = transactionManager_->put(
 					alloc, request.fixed_.pId_,
 					TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
+			txn.setAuditInfo(NULL, NULL, NULL);
 
 			Response response(alloc);
 			executeReplication(
@@ -1545,6 +1561,7 @@ void DropUserHandler::operator()(EventContext &ec, Event &ev) {
 		TransactionContext &txn = transactionManager_->put(
 				alloc, request.fixed_.pId_,
 				TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
+		txn.setAuditInfo(NULL, NULL, NULL);
 
 		OutMessage outMes(request.fixed_.cxtSrc_.stmtId_, TXN_STATEMENT_SUCCESS,
 			getReplyOption(alloc, request, response.compositeIndexInfos_, false));
@@ -1811,6 +1828,7 @@ void PutDatabaseHandler::operator()(EventContext &ec, Event &ev) {
 			TransactionContext &txn = transactionManager_->put(
 					alloc, request.fixed_.pId_,
 					TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
+			txn.setAuditInfo(NULL, NULL, NULL);
 
 			Response response(alloc);
 			executeReplication(
@@ -1826,6 +1844,7 @@ void PutDatabaseHandler::operator()(EventContext &ec, Event &ev) {
 		TransactionContext &txn = transactionManager_->put(
 				alloc, request.fixed_.pId_,
 				TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
+		txn.setAuditInfo(NULL, NULL, NULL);
 
 		OutMessage outMes(request.fixed_.cxtSrc_.stmtId_, TXN_STATEMENT_SUCCESS,
 			getReplyOption(alloc, request, response.compositeIndexInfos_, false));
@@ -1927,6 +1946,7 @@ void DropDatabaseHandler::operator()(EventContext &ec, Event &ev) {
 			TransactionContext &txn = transactionManager_->put(
 					alloc, request.fixed_.pId_,
 					TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
+			txn.setAuditInfo(NULL, NULL, NULL);
 
 			Response response(alloc);
 			executeReplication(
@@ -1943,6 +1963,7 @@ void DropDatabaseHandler::operator()(EventContext &ec, Event &ev) {
 		TransactionContext &txn = transactionManager_->put(
 				alloc, request.fixed_.pId_,
 				TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
+		txn.setAuditInfo(NULL, NULL, NULL);
 
 		OutMessage outMes(request.fixed_.cxtSrc_.stmtId_, TXN_STATEMENT_SUCCESS,
 			getReplyOption(alloc, request, response.compositeIndexInfos_, false));
@@ -2210,6 +2231,7 @@ void PutPrivilegeHandler::operator()(EventContext &ec, Event &ev) {
 		TransactionContext &txn = transactionManager_->put(
 				alloc, request.fixed_.pId_,
 				TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
+		txn.setAuditInfo(NULL, NULL, NULL);
 
 		OutMessage outMes(request.fixed_.cxtSrc_.stmtId_, TXN_STATEMENT_SUCCESS,
 			getReplyOption(alloc, request, response.compositeIndexInfos_, false));
@@ -2312,6 +2334,7 @@ void DropPrivilegeHandler::operator()(EventContext &ec, Event &ev) {
 		TransactionContext &txn = transactionManager_->put(
 				alloc, request.fixed_.pId_,
 				TXN_EMPTY_CLIENTID, request.fixed_.cxtSrc_, now, emNow);
+		txn.setAuditInfo(NULL, NULL, NULL);
 
 		OutMessage outMes(request.fixed_.cxtSrc_.stmtId_, TXN_STATEMENT_SUCCESS,
 			getReplyOption(alloc, request, response.compositeIndexInfos_, false));

@@ -133,7 +133,8 @@ private:
 	static void bindIndexCondition(
 			TupleListReader &reader, const TupleColumnList &columnList,
 			const SQLExprs::IndexSelector &selector,
-			SQLExprs::IndexConditionList &condList);
+			SQLExprs::IndexConditionList &condList,
+			SQLValues::ValueSetHolder &valuesHolder);
 };
 
 class SQLScanOps::ScanContainerMeta :

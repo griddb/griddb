@@ -65,6 +65,8 @@ private:
 		float float_;
 		double double_;
 		Timestamp timestamp_;
+		MicroTimestamp microTimestamp_;
+		NanoTimestamp nanoTimestamp_;
 		Object object_;  
 	};
 	Member data_;
@@ -99,6 +101,14 @@ public:
 	}
 	explicit Value(double d) : type_(COLUMN_TYPE_DOUBLE) {
 		data_.double_ = d;
+	}
+	explicit Value(const MicroTimestamp &ts) :
+			type_(COLUMN_TYPE_MICRO_TIMESTAMP) {
+		data_.microTimestamp_ = ts;
+	}
+	explicit Value(const NanoTimestamp &ts) :
+			type_(COLUMN_TYPE_NANO_TIMESTAMP) {
+		data_.nanoTimestamp_ = ts;
 	}
 	/*!
 		@brief Set string value
@@ -200,9 +210,28 @@ public:
 		type_ = COLUMN_TYPE_TIMESTAMP;
 		data_.timestamp_ = i;
 	}
+	inline void setMicroTimestamp(const MicroTimestamp &i) {
+		type_ = COLUMN_TYPE_MICRO_TIMESTAMP;
+		data_.microTimestamp_ = i;
+	}
+	inline void setNanoTimestamp(const NanoTimestamp &i) {
+		type_ = COLUMN_TYPE_NANO_TIMESTAMP;
+		data_.nanoTimestamp_ = i;
+	}
 
 	void copy(TransactionContext &txn, ObjectManagerV4 &objectManager, AllocateStrategy &strategy,
 		const Value &srcValue);
+
+	void copyFixedValue(const Value &srcValue) {
+		const ColumnType srcType = srcValue.type_;
+		type_ = srcType;
+
+		assert(ValueProcessor::isSimple(srcType));
+		const size_t fixedSize = FixedSizeOfColumnType[srcType];
+
+		assert(srcValue.size() == fixedSize);
+		memcpy(&data_, &srcValue.data_, fixedSize);
+	}
 
 
 	/*!
@@ -220,6 +249,8 @@ public:
 		case COLUMN_TYPE_FLOAT:
 		case COLUMN_TYPE_DOUBLE:
 		case COLUMN_TYPE_TIMESTAMP:
+		case COLUMN_TYPE_MICRO_TIMESTAMP:
+		case COLUMN_TYPE_NANO_TIMESTAMP:
 		case COLUMN_TYPE_OID:
 			return reinterpret_cast<const uint8_t *>(&data_);
 			break;
@@ -281,6 +312,8 @@ public:
 		case COLUMN_TYPE_FLOAT:
 		case COLUMN_TYPE_DOUBLE:
 		case COLUMN_TYPE_TIMESTAMP:
+		case COLUMN_TYPE_MICRO_TIMESTAMP:
+		case COLUMN_TYPE_NANO_TIMESTAMP:
 		case COLUMN_TYPE_OID:
 			size = FixedSizeOfColumnType[type_];
 			break;
@@ -314,9 +347,12 @@ public:
 		case COLUMN_TYPE_TIMESTAMP_ARRAY: {
 			if (data_.object_.value_ != NULL) {
 				const ArrayObject arrayObject(reinterpret_cast<uint8_t *>(
-					const_cast<void *>(data_.object_.value_)));
-				size = arrayObject.getObjectSize(arrayObject.getArrayLength(),
-					FixedSizeOfColumnType[ValueProcessor::getSimpleColumnType(type_)]);
+						const_cast<void *>(data_.object_.value_)));
+				const ColumnType elemType =
+						ValueProcessor::getArrayElementType(type_);
+				size = arrayObject.getObjectSize(
+						arrayObject.getArrayLength(),
+						FixedSizeOfColumnType[elemType]);
 			}
 		} break;
 		case COLUMN_TYPE_NULL:
@@ -343,6 +379,8 @@ public:
 		case COLUMN_TYPE_FLOAT:
 		case COLUMN_TYPE_DOUBLE:
 		case COLUMN_TYPE_TIMESTAMP:
+		case COLUMN_TYPE_MICRO_TIMESTAMP:
+		case COLUMN_TYPE_NANO_TIMESTAMP:
 		case COLUMN_TYPE_OID:
 			return reinterpret_cast<const uint8_t *>(&data_);
 			break;
@@ -389,6 +427,8 @@ public:
 		case COLUMN_TYPE_FLOAT:
 		case COLUMN_TYPE_DOUBLE:
 		case COLUMN_TYPE_TIMESTAMP:
+		case COLUMN_TYPE_MICRO_TIMESTAMP:
+		case COLUMN_TYPE_NANO_TIMESTAMP:
 		case COLUMN_TYPE_OID:
 			memset(&data_, 0, FixedSizeOfColumnType[type_]);
 			break;
@@ -494,6 +534,15 @@ public:
 	Timestamp getTimestamp() const {
 		return ValueProcessor::getTimestamp(type_, data());
 	}
+
+	MicroTimestamp getMicroTimestamp() const {
+		return ValueProcessor::getMicroTimestamp(type_, data());
+	}
+
+	NanoTimestamp getNanoTimestamp() const {
+		return ValueProcessor::getNanoTimestamp(type_, data());
+	}
+
 
 
 	/*!
@@ -676,13 +725,18 @@ typedef bool (*Operator)(TransactionContext &txn, uint8_t const *p,
 	uint32_t size1, uint8_t const *q, uint32_t size2);
 typedef int32_t (*Comparator)(TransactionContext &txn, uint8_t const *p,
 	uint32_t size1, uint8_t const *q, uint32_t size2);
-typedef bool (*Operator)(TransactionContext &txn, uint8_t const *p,
-	uint32_t size1, uint8_t const *q, uint32_t size2);
 
-typedef void (*Calculator1)(
-	TransactionContext &txn, uint8_t const *p, uint32_t size1, Value &value);
-typedef void (*Calculator2)(TransactionContext &txn, uint8_t const *p,
-	uint32_t size1, uint8_t const *q, uint32_t size2, Value &value);
+typedef void (*Calculator)(
+		TransactionContext &txn, uint8_t const *p,
+		uint32_t size1, uint8_t const *q, uint32_t size2, Value &value);
+
+typedef Operator ValueOperatorList[COLUMN_TYPE_PRIMITIVE_COUNT];
+typedef Comparator ValueComparatorList[COLUMN_TYPE_PRIMITIVE_COUNT];
+typedef Calculator ValueCalculatorList[COLUMN_TYPE_PRIMITIVE_COUNT];
+
+typedef ValueOperatorList ValueOperatorTable[COLUMN_TYPE_PRIMITIVE_COUNT];
+typedef ValueComparatorList ValueComparatorTable[COLUMN_TYPE_PRIMITIVE_COUNT];
+typedef ValueCalculatorList ValueCalculatorTable[COLUMN_TYPE_PRIMITIVE_COUNT];
 
 /*!
 *	@brief Represents the type of Operation

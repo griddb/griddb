@@ -76,6 +76,7 @@ struct SQLExprs {
 	struct PlanPartitioningInfo;
 	struct PlanNarrowingKey;
 	struct DataPartitionUtils;
+	struct RangeGroupUtils;
 
 
 	class DefaultExprFactory;
@@ -225,7 +226,9 @@ public:
 
 	const ExprCode& getCode() const;
 
-	TupleValue asColumnValue(const TupleValue &value) const;
+	TupleValue asColumnValueSpecific(const TupleValue &value) const;
+	TupleValue asColumnValue(
+			SQLValues::ValueContext *cxt, const TupleValue &value) const;
 
 
 	bool isPlannable() const;
@@ -401,6 +404,10 @@ private:
 
 struct SQLExprs::FunctionValueUtils {
 	bool isSpaceChar(util::CodePoint c) const;
+
+	bool getRangeGroupId(
+			TupleValue key, int64_t interval, int64_t offset,
+			int64_t &id) const;
 };
 
 struct SQLExprs::WindowState {
@@ -408,6 +415,10 @@ struct SQLExprs::WindowState {
 
 	int64_t partitionTupleCount_;
 	int64_t partitionValueCount_;
+
+	int64_t rangeKey_;
+	int64_t rangePrevKey_;
+	int64_t rangeNextKey_;
 };
 
 class SQLExprs::NormalFunctionContext {
@@ -432,6 +443,20 @@ public:
 	util::TimeZone getTimeZone();
 	void applyDateTimeOption(util::DateTime::ZonedOption &option) const;
 	void applyDateTimeOption(util::DateTime::Option &option) const;
+
+	int64_t toTimestamp(const util::DateTime &dateTime, const int64_t&) const;
+	MicroTimestamp toTimestamp(
+			const util::PreciseDateTime &dateTime, const MicroTimestamp&) const;
+	NanoTimestamp toTimestamp(
+			const util::PreciseDateTime &dateTime, const NanoTimestamp&) const;
+
+	util::DateTime toDateTime(const int64_t &tsValue) const;
+	util::PreciseDateTime toDateTime(const MicroTimestamp &tsValue) const;
+	util::PreciseDateTime toDateTime(const NanoTimestamp &tsValue) const;
+
+	util::DateTime::FieldType getTimePrecision(const int64_t&) const;
+	util::DateTime::FieldType getTimePrecision(const MicroTimestamp&) const;
+	util::DateTime::FieldType getTimePrecision(const NanoTimestamp&) const;
 
 	void finishFunction();
 	util::FalseType isFunctionFinished();
@@ -505,6 +530,8 @@ public:
 	TupleValue getAggregationValue(const SummaryColumn &column);
 	void setAggregationValue(
 			const SummaryColumn &column, const TupleValue &value);
+	void setAggregationValuePromoted(
+			const SummaryColumn &column, const TupleValue &value);
 
 	template<typename T>
 	typename T::ValueType getAggregationValueAs(
@@ -563,6 +590,7 @@ private:
 struct SQLExprs::ExprSpec {
 	enum Constants {
 		IN_TYPE_COUNT = 2,
+		IN_EXPANDED_TYPE_COUNT = 3,
 		IN_LIST_SIZE = 7,
 		AGGR_LIST_SIZE = 3,
 		IN_MAX_OPTS_COUNT = 3
@@ -602,12 +630,13 @@ struct SQLExprs::ExprSpec {
 
 		FLAG_ARGS_LISTING = 1 << 20,
 		FLAG_AGGR_FINISH_DEFAULT = 1 << 21,
+		FLAG_AGGR_ORDERING = 1 << 22,
 
-		FLAG_WINDOW_POS_BEFORE = 1 << 22,
-		FLAG_WINDOW_POS_AFTER = 1 << 23,
-		FLAG_WINDOW_VALUE_COUNTING = 1 << 24,
+		FLAG_WINDOW_POS_BEFORE = 1 << 23,
+		FLAG_WINDOW_POS_AFTER = 1 << 24,
+		FLAG_WINDOW_VALUE_COUNTING = 1 << 25,
 
-		FLAG_COMP_SENSITIVE = 1 << 25
+		FLAG_COMP_SENSITIVE = 1 << 26
 	};
 
 	ExprSpec();
@@ -703,6 +732,9 @@ public:
 	bool isPlanning();
 	void setPlanning(bool planning);
 
+	bool isArgChecking();
+	void setArgChecking(bool checking);
+
 	AggregationPhase getAggregationPhase(bool forSrc);
 	void setAggregationPhase(bool forSrc, AggregationPhase aggrPhase);
 
@@ -743,6 +775,7 @@ private:
 		ScopedEntry();
 
 		bool planning_;
+		bool argChecking_;
 		bool summaryColumnsArranging_;
 
 		AggregationPhase srcAggrPhase_;
@@ -951,6 +984,12 @@ inline void SQLExprs::ExprContext::setAggregationValue(
 	return aggrTuple_->setValue(*aggrTupleSet_, column, value);
 }
 
+inline void SQLExprs::ExprContext::setAggregationValuePromoted(
+		const SummaryColumn &column, const TupleValue &value) {
+	assert(aggrTuple_ != NULL);
+	return aggrTuple_->setValuePromoted(*aggrTupleSet_, column, value);
+}
+
 template<typename T>
 inline typename T::ValueType SQLExprs::ExprContext::getAggregationValueAs(
 		const SummaryColumn &column) {
@@ -1013,6 +1052,60 @@ inline SQLExprs::ExprContext& SQLExprs::NormalFunctionContext::getBase() {
 
 inline void SQLExprs::NormalFunctionContext::setBase(ExprContext *base) {
 	base_ = base;
+}
+
+inline int64_t SQLExprs::NormalFunctionContext::toTimestamp(
+		const util::DateTime &dateTime, const int64_t&) const {
+	return SQLValues::DateTimeElements(dateTime).toTimestamp(
+			SQLValues::Types::TimestampTag());
+}
+
+inline MicroTimestamp SQLExprs::NormalFunctionContext::toTimestamp(
+		const util::PreciseDateTime &dateTime, const MicroTimestamp&) const {
+	return SQLValues::DateTimeElements(dateTime).toTimestamp(
+			SQLValues::Types::MicroTimestampTag());
+}
+
+inline NanoTimestamp SQLExprs::NormalFunctionContext::toTimestamp(
+		const util::PreciseDateTime &dateTime, const NanoTimestamp&) const {
+	return SQLValues::DateTimeElements(dateTime).toTimestamp(
+			SQLValues::Types::NanoTimestampTag());
+}
+
+inline util::DateTime SQLExprs::NormalFunctionContext::toDateTime(
+		const int64_t &tsValue) const {
+	return SQLValues::DateTimeElements(tsValue).toDateTime(
+			SQLValues::Types::TimestampTag());
+}
+
+inline util::PreciseDateTime SQLExprs::NormalFunctionContext::toDateTime(
+		const MicroTimestamp &tsValue) const {
+	return SQLValues::DateTimeElements(tsValue).toDateTime(
+			SQLValues::Types::MicroTimestampTag());
+}
+
+inline util::PreciseDateTime SQLExprs::NormalFunctionContext::toDateTime(
+		const NanoTimestamp &tsValue) const {
+	return SQLValues::DateTimeElements(tsValue).toDateTime(
+			SQLValues::Types::NanoTimestampTag());
+}
+
+inline util::DateTime::FieldType
+SQLExprs::NormalFunctionContext::getTimePrecision(
+		const int64_t&) const {
+	return util::DateTime::FIELD_MILLISECOND;
+}
+
+inline util::DateTime::FieldType
+SQLExprs::NormalFunctionContext::getTimePrecision(
+		const MicroTimestamp&) const {
+	return util::DateTime::FIELD_MICROSECOND;
+}
+
+inline util::DateTime::FieldType
+SQLExprs::NormalFunctionContext::getTimePrecision(
+		const NanoTimestamp&) const {
+	return util::DateTime::FIELD_NANOSECOND;
 }
 
 #endif

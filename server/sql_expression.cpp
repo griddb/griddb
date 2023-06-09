@@ -170,7 +170,13 @@ const SQLExprs::ExprCode& SQLExprs::Expression::getCode() const {
 	return *code_;
 }
 
-TupleValue SQLExprs::Expression::asColumnValue(const TupleValue &value) const {
+TupleValue SQLExprs::Expression::asColumnValueSpecific(
+		const TupleValue &value) const {
+	return asColumnValue(NULL, value);
+}
+
+TupleValue SQLExprs::Expression::asColumnValue(
+		SQLValues::ValueContext *cxt, const TupleValue &value) const {
 	const TupleColumnType type = getCode().getColumnType();
 	assert(!SQLValues::TypeUtils::isNull(type));
 
@@ -183,7 +189,7 @@ TupleValue SQLExprs::Expression::asColumnValue(const TupleValue &value) const {
 	}
 
 	return SQLValues::ValuePromoter(
-			SQLValues::TypeUtils::toNonNullable(type))(value);
+			SQLValues::TypeUtils::toNonNullable(type))(cxt, value);
 }
 
 bool SQLExprs::Expression::isPlannable() const {
@@ -552,10 +558,18 @@ bool SQLExprs::FunctionValueUtils::isSpaceChar(util::CodePoint c) const {
 	return SQLVdbeUtils::VdbeUtils::isSpaceChar(c);
 }
 
+bool SQLExprs::FunctionValueUtils::getRangeGroupId(
+		TupleValue key, int64_t interval, int64_t offset, int64_t &id) const {
+	return RangeGroupUtils::getRangeGroupId(key, interval, offset, id);
+}
+
 
 SQLExprs::WindowState::WindowState() :
 		partitionTupleCount_(-1),
-		partitionValueCount_(-1) {
+		partitionValueCount_(-1),
+		rangeKey_(-1),
+		rangePrevKey_(-1),
+		rangeNextKey_(-1) {
 }
 
 
@@ -1144,6 +1158,14 @@ void SQLExprs::ExprFactoryContext::setPlanning(bool planning) {
 	scopedEntry_->planning_ = planning;
 }
 
+bool SQLExprs::ExprFactoryContext::isArgChecking() {
+	return scopedEntry_->argChecking_;
+}
+
+void SQLExprs::ExprFactoryContext::setArgChecking(bool checking) {
+	scopedEntry_->argChecking_ = checking;
+}
+
 SQLType::AggregationPhase SQLExprs::ExprFactoryContext::getAggregationPhase(
 		bool forSrc) {
 	return (forSrc ? scopedEntry_->srcAggrPhase_ : scopedEntry_->destAggrPhase_);
@@ -1234,6 +1256,7 @@ TupleColumnType SQLExprs::ExprFactoryContext::unifyInputType(
 
 SQLExprs::ExprFactoryContext::ScopedEntry::ScopedEntry() :
 		planning_(true),
+		argChecking_(false),
 		summaryColumnsArranging_(true),
 		srcAggrPhase_(SQLType::END_AGG_PHASE),
 		destAggrPhase_(SQLType::END_AGG_PHASE),

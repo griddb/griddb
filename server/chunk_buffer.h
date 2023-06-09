@@ -491,7 +491,7 @@ struct LRUFrame {
 class LRUTable {
 private:
 	int32_t maxNumElems_;
-	std::deque<LRUFrame> table_;
+	std::vector<LRUFrame> table_;	
 	int32_t head1_; 
 	int32_t tail1_; 
 	int32_t head2_; 
@@ -556,6 +556,9 @@ public:
 
 	Cursor createCursor();
 
+	int32_t shiftHotToCold(int32_t count);	
+	int32_t shiftColdToHot(int32_t count);	
+
 private:
 	void init(int32_t pos);
 
@@ -564,9 +567,6 @@ private:
 	int32_t popTail();
 
 	void pushHead(int32_t pos);
-
-	bool shiftHotToCold();
-	bool shiftColdToHot();
 
 	void pushHotHead(int32_t pos);
 	int32_t popHotHead();
@@ -579,6 +579,8 @@ private:
 	int32_t popColdTail();
 
 	void removeChain(int32_t pos);
+
+	bool validateLink();
 };
 
 class LRUTable::Cursor {
@@ -679,7 +681,7 @@ class ChunkCopyContext {
 public:
 	uint64_t ssn_;
 	VirtualFileBase* datafile_;
-	LogManager<NoLocker>* logManager_;
+	LogManager<MutexLocker>* logManager_;
 	Chunk* chunk_;
 	uint8_t* tmpBuffer_;
 	uint64_t offset_;
@@ -996,7 +998,7 @@ inline bool LRUTable::pushMiddle(int32_t pos) {
 }
 
 inline void LRUTable::removeChain(int32_t pos) {
-	assert(pos >= 0);
+	if (pos < 0) return;
 	if (pos == head2_) {
 		popColdHead();
 	} else if (pos == tail1_) {
@@ -1184,39 +1186,13 @@ inline int32_t LRUTable::popColdTail() {
 	}
 }
 
-inline bool LRUTable::shiftHotToCold() {
-	if (hotNumElems_ <= 1) {
-		return false;
-	}
-	int32_t pos = popHotHead();
-	if (pos != -1){
-		pushColdTail(pos);
-		return true;
-	} else {
-		return false;
-	}
-}
-inline bool LRUTable::shiftColdToHot() {
-	int32_t pos = popColdTail();
-	if (pos != -1){
-		pushHotHead(pos);
-		return true;
-	} else {
-		return false;
-	}
-}
 inline void LRUTable::rebalance() {
 	int32_t hotCount = static_cast<int32_t>(
 			static_cast<double>(currentNumElems_) * hotRate_ + 0.5);
-	bool moved = true;
 	if (hotCount < hotNumElems_) {
-		while (moved && hotCount < hotNumElems_) {
-			moved = shiftHotToCold();
-		}
+		int32_t moved = shiftHotToCold(hotNumElems_ - hotCount);
 	} else if (hotCount > hotNumElems_) {
-		while (moved && hotCount > hotNumElems_) {
-			moved = shiftColdToHot();
-		}
+		int32_t moved = shiftColdToHot(hotCount - hotNumElems_);
 	}
 }
 

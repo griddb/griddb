@@ -354,20 +354,18 @@ class HttpRequest {
 public:
 	class Parser;
 	class Formatter;
+	struct Field;
 
 	typedef HttpMessage::Allocator Allocator;
 	typedef HttpMessage::String String;
 
-	typedef std::vector<
-			String, util::StdAllocator<String, void> > PathElements;
-	typedef std::map<
-			String, String, std::map<String, String>::key_compare,
-			util::StdAllocator<
-					std::pair<const String, String>, void> > ParameterMap;
+	typedef util::AllocVector<String> PathElements;
+	typedef util::AllocVector<Field> FieldList;
 
 	typedef int32_t Method;
 
 	static const uint16_t DEFAULT_HTTP_PORT;
+	static const uint16_t DEFAULT_HTTPS_PORT;
 
 	static const Method METHOD_GET;
 	static const Method METHOD_POST;
@@ -382,7 +380,7 @@ public:
 	HttpMessage& build();
 
 	PathElements& getPathElements();
-	ParameterMap& getParameterMap();
+	FieldList& getQueryFields();
 	String& getFragment();
 
 	bool isDirectory() const;
@@ -392,7 +390,7 @@ public:
 	void setMethod(Method method);
 
 	void acceptURL(const char8_t *url);
-	void acceptPath(const char8_t *path);
+	void acceptURLPathAndFollowing(const char8_t *path);
 
 	const char8_t* getScheme() const;
 	const char8_t* getHost() const;
@@ -403,20 +401,22 @@ public:
 	Formatter formatter() const;
 
 private:
+	static uint16_t getDefaultPort(const char8_t *scheme);
+	static void checkURLAuthority(const char8_t *authority, size_t length);
 	void encodeQueryString(std::ostream &os);
 	static void encodeURL(std::ostream &os, const char8_t *str);
 
 	HttpMessage message_;
 
 	PathElements pathElements_;
-	ParameterMap parameterMap_;
+	FieldList queryFields_;
 	String fragment_;
 	bool directory_;
 
 	String scheme_;
 	Method method_;
 	String host_;
-	uint16_t port_;
+	int32_t port_;
 };
 
 class HttpRequest::Formatter {
@@ -433,6 +433,14 @@ private:
 
 std::ostream& operator<<(
 		std::ostream &s, const HttpRequest::Formatter &formatter);
+
+struct HttpRequest::Field {
+	Field(const String &name, const String &value, bool separatedOnEmpty);
+
+	String name_;
+	String value_;
+	bool separatedOnEmpty_;
+};
 
 class HttpResponse {
 public:
