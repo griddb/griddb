@@ -19,6 +19,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.sql.Blob;
 import java.sql.SQLException;
+import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.BitSet;
@@ -1254,12 +1255,10 @@ Extensibles.AsStore, Experimentals.StoreProvider {
 					typeSet.addAll(columnInfo.getIndexTypes());
 				}
 
-				columnInfoList.set(column, new ColumnInfo(
-						columnInfo.getName(),
-						columnInfo.getType(),
-						columnInfo.getNullable(),
-						columnInfo.getDefaultValueNull(),
-						typeSet));
+				final ColumnInfo.Builder builder =
+						new ColumnInfo.Builder(columnInfo);
+				builder.setIndexTypes(typeSet);
+				columnInfoList.set(column, builder.toInfo());
 			}
 
 			destIndexInfo.setColumnNameList(columnNameList);
@@ -1367,7 +1366,12 @@ Extensibles.AsStore, Experimentals.StoreProvider {
 		private static final SubOperation[] SUB_OPERATION_VALUES =
 				SubOperation.values();
 
-		private static final GSType[] COLUMN_TYPE_VALUES = GSType.values();
+		private static final Set<GSType> INTERVAL_COLUMN_TYPES = EnumSet.of(
+				GSType.BYTE,
+				GSType.SHORT,
+				GSType.INTEGER,
+				GSType.LONG,
+				GSType.TIMESTAMP);
 
 		private static final long MAX_NODE_AFFINITY_NUM =
 				(1L << (Long.SIZE - 2)) - 1;
@@ -1385,7 +1389,7 @@ Extensibles.AsStore, Experimentals.StoreProvider {
 
 		int partitioningCount;
 
-		GSType intervalType;
+		ColumnInfo intervalType;
 
 		long intervalValue;
 
@@ -1471,7 +1475,7 @@ Extensibles.AsStore, Experimentals.StoreProvider {
 			this.cachedNanos = cachedNanos;
 		}
 
-		void put(BasicBuffer out) {
+		void put(BasicBuffer out) throws GSException {
 			out.putInt(locationMode);
 			out.putInt(partitioningType.ordinal());
 			out.putInt(partitioningMode.ordinal());
@@ -1855,7 +1859,7 @@ Extensibles.AsStore, Experimentals.StoreProvider {
 				throws ContainerPartitioningException {
 			final long longValue;
 			try {
-				if (intervalType == GSType.TIMESTAMP) {
+				if (intervalType.getType() == GSType.TIMESTAMP) {
 					longValue = ((Date) value).getTime();
 				}
 				else {
@@ -1866,14 +1870,16 @@ Extensibles.AsStore, Experimentals.StoreProvider {
 				throw new ContainerPartitioningException(
 						GSErrorCode.ILLEGAL_SCHEMA,
 						"Null is not allowed for interval partitioning key (" +
-						"partitioningKeyType=" + intervalType + ")", e);
+						"partitioningKeyType=" + intervalType.getType() +
+						")", e);
 			}
 			catch (ClassCastException e) {
 				throw new ContainerPartitioningException(
 						GSErrorCode.ILLEGAL_SCHEMA,
 						"Unmatched type for interval partitioning key (" +
 						"valueClass=" + value.getClass().getName() +
-						", partitioningKeyType=" + intervalType + ")", e);
+						", partitioningKeyType=" + intervalType.getType() +
+						")", e);
 			}
 
 			final long rawInterval;
@@ -2208,29 +2214,9 @@ Extensibles.AsStore, Experimentals.StoreProvider {
 				return;
 			}
 
-			final GSType type = getIntervalColumnType(in);
-			final long value;
-			switch (type) {
-			case BYTE:
-				value = in.base().get();
-				break;
-			case SHORT:
-				value = in.base().getShort();
-				break;
-			case INTEGER:
-				value = in.base().getInt();
-				break;
-			case LONG:
-				value = in.base().getLong();
-				break;
-			case TIMESTAMP:
-				value = in.base().getLong();
-				break;
-			default:
-				throw new GSException(
-						GSErrorCode.MESSAGE_CORRUPTED,
-						"Protocol error by illegal interval column type");
-			}
+			final ColumnInfo type = getIntervalColumnType(in);
+			final long value = getIntervalValueAsLong(
+					type, RowMapper.TypeUtils.getSingleField(in, type));
 
 			info.intervalType = type;
 			info.intervalValue = value;
@@ -2239,7 +2225,7 @@ Extensibles.AsStore, Experimentals.StoreProvider {
 
 		private static void putIntervalInfo(
 				BasicBuffer out, PartitioningType partitioningType,
-				LargeInfo info) {
+				LargeInfo info) throws GSException {
 			switch (partitioningType) {
 			case INTERVAL:
 			case INTERVAL_HASH:
@@ -2248,44 +2234,67 @@ Extensibles.AsStore, Experimentals.StoreProvider {
 				return;
 			}
 
-			out.put((byte) info.intervalType.ordinal());
-			switch (info.intervalType) {
-			case BYTE:
-				out.put((byte) info.intervalValue);
-				break;
-			case SHORT:
-				out.putShort((short) info.intervalValue);
-				break;
-			case INTEGER:
-				out.putInt((int) info.intervalValue);
-				break;
-			case LONG:
-				out.putLong(info.intervalValue);
-				break;
-			case TIMESTAMP:
-				out.putLong(info.intervalValue);
-				break;
-			default:
-				throw new IllegalStateException();
-			}
+			RowMapper.TypeUtils.putFullColumnType(out, info.intervalType);
+
+			final ColumnInfo type = info.intervalType;
+			final long value = info.intervalValue;
+			RowMapper.TypeUtils.putSingleField(
+					out, type, getIntervalValueAsObject(type, value));
+
 			out.put((byte) info.intervalUnit);
 		}
 
-		private static GSType getIntervalColumnType(BasicBuffer in)
+		private static ColumnInfo getIntervalColumnType(BasicBuffer in)
 				throws GSException {
-			final int typeValue = in.base().get();
-			if (typeValue < 0 || typeValue >= COLUMN_TYPE_VALUES.length) {
+			final ColumnInfo type = RowMapper.TypeUtils.getFullColumnType(in);
+			if (!INTERVAL_COLUMN_TYPES.contains(type.getType())) {
 				throw new GSException(
 						GSErrorCode.MESSAGE_CORRUPTED,
 						"Protocol error by illegal column type");
 			}
-			return COLUMN_TYPE_VALUES[typeValue];
+			return type;
+		}
+
+		private static long getIntervalValueAsLong(
+				ColumnInfo type, Object src) {
+			try {
+				if (type.getType() == GSType.TIMESTAMP) {
+					return ((Date) src).getTime();
+				}
+				else {
+					return ((Number) src).longValue();
+				}
+			}
+			catch (ClassCastException e) {
+				throw new IllegalArgumentException(e);
+			}
+		}
+
+		private static Object getIntervalValueAsObject(
+				ColumnInfo type, long src) {
+			switch (type.getType()) {
+			case BYTE:
+				return (byte) src;
+			case SHORT:
+				return (short) src;
+			case INTEGER:
+				return (int) src;
+			case LONG:
+				return src;
+			case TIMESTAMP:
+				if (type.getTimePrecision() != TimeUnit.MILLISECOND) {
+					return new Timestamp(src);
+				}
+				return new Date(src);
+			default:
+				throw new IllegalStateException();
+			}
 		}
 
 		private static int getIntervalUnitType(
-				BasicBuffer in, GSType intervalType) throws GSException {
+				BasicBuffer in, ColumnInfo intervalType) throws GSException {
 			final int typeValue = in.base().get();
-			if (intervalType == GSType.TIMESTAMP) {
+			if (intervalType.getType() == GSType.TIMESTAMP) {
 				if (typeValue == TimeUnit.DAY.ordinal()) {
 					return typeValue;
 				}
@@ -2666,7 +2675,8 @@ Extensibles.AsStore, Experimentals.StoreProvider {
 			final TimeUnit timeUnit = in.getByteEnum(TimeUnit.class);
 			final long timeMillis = expirationTimeToMillis(time, timeUnit);
 
-			if (time > 0 && (info.intervalType != GSType.TIMESTAMP ||
+			if (time > 0 && (info.intervalType == null ||
+					info.intervalType.getType() != GSType.TIMESTAMP ||
 					!(info.partitioningType == PartitioningType.INTERVAL ||
 					info.partitioningType == PartitioningType.INTERVAL_HASH))) {
 				throw new GSException(
@@ -3241,7 +3251,10 @@ Extensibles.AsStore, Experimentals.StoreProvider {
 				return hashNumber(base, (Number) value);
 			}
 			if (value instanceof Date) {
-				return hashNumber(base, ((Date) value).getTime());
+				if (value instanceof Timestamp) {
+					return hashPreciseTimestamp(base, (Timestamp) value);
+				}
+				return hashLong(base, ((Date) value).getTime());
 			}
 			else if (value instanceof String) {
 				return hashString(base, (String) value);
@@ -3269,8 +3282,12 @@ Extensibles.AsStore, Experimentals.StoreProvider {
 				return hashDouble(base, value.doubleValue());
 			}
 			else {
-				return hashDouble(base, (double) value.longValue());
+				return hashLong(base, value.longValue());
 			}
+		}
+
+		private static int hashLong(int base, long value) {
+			return hashDouble(base, (double) value);
 		}
 
 		private static int hashDouble(int base, double value) {
@@ -3288,6 +3305,21 @@ Extensibles.AsStore, Experimentals.StoreProvider {
 			hash = FNV1a.update(hash, (byte) (bits >> 40));
 			hash = FNV1a.update(hash, (byte) (bits >> 48));
 			hash = FNV1a.update(hash, (byte) (bits >> 56));
+			return hash;
+		}
+
+		private static int hashPreciseTimestamp(int base, Timestamp value) {
+			int hash = base;
+			hash = hashLong(hash, value.getTime());
+
+			int nanos = value.getNanos();
+			if (nanos != 0) {
+				hash = FNV1a.update(hash, (byte) nanos);
+				hash = FNV1a.update(hash, (byte) (nanos >> 8));
+				hash = FNV1a.update(hash, (byte) (nanos >> 16));
+				hash = FNV1a.update(hash, (byte) (nanos >> 24));
+			}
+
 			return hash;
 		}
 

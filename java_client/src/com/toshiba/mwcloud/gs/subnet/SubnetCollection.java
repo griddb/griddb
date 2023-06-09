@@ -23,6 +23,7 @@ import java.util.Set;
 
 import com.toshiba.mwcloud.gs.Collection;
 import com.toshiba.mwcloud.gs.Container;
+import com.toshiba.mwcloud.gs.ContainerInfo;
 import com.toshiba.mwcloud.gs.GSException;
 import com.toshiba.mwcloud.gs.Geometry;
 import com.toshiba.mwcloud.gs.GeometryOperator;
@@ -581,6 +582,17 @@ extends SubnetContainer<K, R> implements Collection<K, R> {
 				this.size = size;
 			}
 			return size;
+		}
+
+		@Override
+		public ContainerInfo getSchema() throws GSException {
+			for (RowSet<?> sub : subList) {
+				final ContainerInfo schema = sub.getSchema();
+				if (schema != null) {
+					return schema;
+				}
+			}
+			return null;
 		}
 
 		@Override

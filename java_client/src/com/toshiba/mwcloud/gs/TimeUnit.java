@@ -24,18 +24,80 @@ package com.toshiba.mwcloud.gs;
  */
 public enum TimeUnit {
 
+	/**
+	 * <div lang="ja">
+	 * 年単位であることを示します。
+	 * </div><div lang="en">
+	 * </div>
+	 */
 	YEAR,
 
+	/**
+	 * <div lang="ja">
+	 * 月単位であることを示します。
+	 * </div><div lang="en">
+	 * </div>
+	 */
 	MONTH,
 
+	/**
+	 * <div lang="ja">
+	 * 日単位であることを示します。
+	 * </div><div lang="en">
+	 * </div>
+	 */
 	DAY,
 
+	/**
+	 * <div lang="ja">
+	 * 時間単位であることを示します。
+	 * </div><div lang="en">
+	 * </div>
+	 */
 	HOUR,
 
+	/**
+	 * <div lang="ja">
+	 * 分単位であることを示します。
+	 * </div><div lang="en">
+	 * </div>
+	 */
 	MINUTE,
 
+	/**
+	 * <div lang="ja">
+	 * 秒単位であることを示します。
+	 * </div><div lang="en">
+	 * </div>
+	 */
 	SECOND,
 
-	MILLISECOND
+	/**
+	 * <div lang="ja">
+	 * ミリ秒単位であることを示します。
+	 * </div><div lang="en">
+	 * </div>
+	 */
+	MILLISECOND,
+
+	/**
+	 * <div lang="ja">
+	 * マイクロ秒単位であることを示します。
+	 * @since 5.3
+	 * </div><div lang="en">
+	 * @since 5.3
+	 * </div>
+	 */
+	MICROSECOND,
+
+	/**
+	 * <div lang="ja">
+	 * ナノ秒単位であることを示します。
+	 * @since 5.3
+	 * </div><div lang="en">
+	 * @since 5.3
+	 * </div>
+	 */
+	NANOSECOND
 
 }

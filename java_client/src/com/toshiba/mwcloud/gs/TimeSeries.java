@@ -25,6 +25,8 @@ import java.util.Set;
  * <p>一般的に、範囲取得や集計演算といった処理は、{@link Collection}よりも
  * 効率的な実装が選択されます。</p>
  *
+ * <p>ロウキーは、通常精度のTIMESTAMP型カラム1つのみから構成されます。</p>
+ *
  * <p>ロウ操作については、{@link Collection}と異なり一部制限が
  * 設けられています。
  * {@link TimeSeriesProperties}に基づき圧縮オプションが

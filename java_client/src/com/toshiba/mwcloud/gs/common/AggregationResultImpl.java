@@ -15,6 +15,7 @@
 */
 package com.toshiba.mwcloud.gs.common;
 
+import java.sql.Timestamp;
 import java.util.Date;
 
 import com.toshiba.mwcloud.gs.AggregationResult;
@@ -55,8 +56,24 @@ public class AggregationResultImpl implements AggregationResult {
 
 	@Override
 	public Date getTimestamp() {
-		if (value instanceof Date) {
+		if (value instanceof Timestamp) {
+			return new Date(((Date) value).getTime());
+		}
+		else if (value instanceof Date) {
 			return (Date) value;
+		}
+		else {
+			return null;
+		}
+	}
+
+	@Override
+	public Timestamp getPreciseTimestamp() {
+		if (value instanceof Timestamp) {
+			return (Timestamp) value;
+		}
+		else if (value instanceof Date) {
+			return new Timestamp(((Date) value).getTime());
 		}
 		else {
 			return null;

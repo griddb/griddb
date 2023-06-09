@@ -16,6 +16,7 @@
 package com.toshiba.mwcloud.gs;
 
 import java.sql.Blob;
+import java.sql.Timestamp;
 import java.util.Date;
 
 /**
@@ -462,10 +463,13 @@ public interface Row {
 
 	/**
 	 * <div lang="ja">
-	 * 指定のTIMESTAMP型フィールドに値を設定します。
+	 * 指定の通常精度のTIMESTAMP型フィールドに値を設定します。
 	 *
 	 * <p>指定したオブジェクトの内容を呼び出し後に変更した場合に、
 	 * このオブジェクトの内容が変化するかどうかは未定義です。</p>
+	 *
+	 * <p>現バージョンでは、高精度のTIMESTAMP型フィールドに値を設定する
+	 * ことはできません。</p>
 	 *
 	 * @param column 対象フィールドのカラム番号。{@code 0}以上かつカラム数未満の値
 	 * @param fieldValue 対象フィールドの値
@@ -473,7 +477,7 @@ public interface Row {
 	 * @throws GSException 範囲外のカラム番号が指定された場合
 	 * @throws GSException NOT NULL制約の設定されたカラムに対して、フィールド値
 	 * として{@code null}が指定された場合
-	 * @throws GSException 指定のカラム番号の型と一致しない場合
+	 * @throws GSException 指定のカラム番号の型・精度種別と一致しない場合
 	 * </div><div lang="en">
 	 * Sets the TIMESTAMP value to the specified field.
 	 *
@@ -492,19 +496,22 @@ public interface Row {
 
 	/**
 	 * <div lang="ja">
-	 * 指定のTIMESTAMP型フィールドの値を取得します。
+	 * 指定の通常精度のTIMESTAMP型フィールドの値を取得します。
 	 *
 	 * <p>返却されたオブジェクトの内容を呼び出し後に変更した場合に、
 	 * このオブジェクトの内容が変化するかどうかは未定義です。
 	 * また、このオブジェクトに対する操作により、返却されたオブジェクトの内容が
 	 * 変化することはありません。</p>
 	 *
+	 * <p>現バージョンでは、高精度のTIMESTAMP型フィールドから値を取得する
+	 * ことはできません。</p>
+	 *
 	 * @param column 対象フィールドのカラム番号。{@code 0}以上かつカラム数未満の値
 	 *
 	 * @return 対象フィールドの値。NULLが設定されている場合は{@code null}
 	 *
 	 * @throws GSException 範囲外のカラム番号が指定された場合
-	 * @throws GSException 指定のカラム番号の型と一致しない場合
+	 * @throws GSException 指定のカラム番号の型・精度種別と一致しない場合
 	 * </div><div lang="en">
 	 * Returns the TIMESTAMP value of the specified field.
 	 *
@@ -522,6 +529,56 @@ public interface Row {
 	 * </div>
 	 */
 	public Date getTimestamp(int column) throws GSException;
+
+	/**
+	 * <div lang="ja">
+	 * 指定の高精度のTIMESTAMP型フィールドに値を設定します。
+	 *
+	 * <p>指定したオブジェクトの内容を呼び出し後に変更した場合に、
+	 * このオブジェクトの内容が変化するかどうかは未定義です。</p>
+	 *
+	 * <p>現バージョンでは、通常精度のTIMESTAMP型フィールドに値を設定する
+	 * ことはできません。</p>
+	 *
+	 * @param column 対象フィールドのカラム番号。{@code 0}以上かつカラム数未満の値
+	 * @param fieldValue 対象フィールドの値
+	 *
+	 * @throws GSException 範囲外のカラム番号が指定された場合
+	 * @throws GSException NOT NULL制約の設定されたカラムに対して、フィールド値
+	 * として{@code null}が指定された場合
+	 * @throws GSException 指定のカラム番号の型・精度種別と一致しない場合
+	 * @since 5.3
+	 * </div><div lang="en">
+	 * @since 5.3
+	 * </div>
+	 */
+	public void setPreciseTimestamp(
+			int column, Timestamp fieldValue) throws GSException;
+
+	/**
+	 * <div lang="ja">
+	 * 指定の高精度のTIMESTAMP型フィールドの値を取得します。
+	 *
+	 * <p>返却されたオブジェクトの内容を呼び出し後に変更した場合に、
+	 * このオブジェクトの内容が変化するかどうかは未定義です。
+	 * また、このオブジェクトに対する操作により、返却されたオブジェクトの内容が
+	 * 変化することはありません。</p>
+	 *
+	 * <p>現バージョンでは、通常精度のTIMESTAMP型フィールドから値を取得する
+	 * ことはできません。</p>
+	 *
+	 * @param column 対象フィールドのカラム番号。{@code 0}以上かつカラム数未満の値
+	 *
+	 * @return 対象フィールドの値。NULLが設定されている場合は{@code null}
+	 *
+	 * @throws GSException 範囲外のカラム番号が指定された場合
+	 * @throws GSException 指定のカラム番号の型・精度種別と一致しない場合
+	 * @since 5.3
+	 * </div><div lang="en">
+	 * @since 5.3
+	 * </div>
+	 */
+	public Timestamp getPreciseTimestamp(int column) throws GSException;
 
 	/**
 	 * <div lang="ja">

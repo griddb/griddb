@@ -57,6 +57,10 @@ public class BasicBuffer {
 		return base;
 	}
 
+	public BasicBuffer asReadOnlyBuffer() {
+		return new BasicBuffer(base.asReadOnlyBuffer());
+	}
+
 	public void prepare(int size) {
 		if ( size <= base.remaining() ) {
 			return;

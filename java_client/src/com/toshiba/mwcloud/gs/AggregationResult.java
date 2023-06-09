@@ -15,6 +15,7 @@
 */
 package com.toshiba.mwcloud.gs;
 
+import java.sql.Timestamp;
 import java.util.Date;
 
 /**
@@ -99,12 +100,15 @@ public interface AggregationResult {
 
 	/**
 	 * <div lang="ja">
-	 * 時刻型の集計値をTIMESTAMP型({@link Date})で取得します。
+	 * 時刻型の集計値を通常精度のTIMESTAMP型({@link Date})で取得します。
 	 *
 	 * <p>TIMESTAMP型以外の値を保持している場合、{@code null}を
 	 * 返します。</p>
 	 *
-	 * @return TIMESTAMP型({@link Date})の集計値。結果がTIMESTAMP型
+	 * <p>高精度のTIMESTAMP値を保持している場合、通常精度の値に変換したものを
+	 * 返します。</p>
+	 *
+	 * @return 通常精度のTIMESTAMP型({@link Date})の集計値。結果がTIMESTAMP型
 	 * 以外の場合は{@code null}
 	 * </div><div lang="en">
 	 * Obtains the result of aggregating time-type values in TIMESTAMP type ({@link Date}).
@@ -116,5 +120,24 @@ public interface AggregationResult {
 	 * </div>
 	 */
 	public Date getTimestamp();
+
+	/**
+	 * <div lang="ja">
+	 * 時刻型の集計値を高精度のTIMESTAMP型({@link Timestamp})で取得します。
+	 *
+	 * <p>TIMESTAMP型以外の値を保持している場合、{@code null}を
+	 * 返します。</p>
+	 *
+	 * <p>通常精度のTIMESTAMP値を保持している場合、高精度の値に変換したものを
+	 * 返します。</p>
+	 *
+	 * @return 高精度のTIMESTAMP型({@link Timestamp})の集計値。結果がTIMESTAMP型
+	 * 以外の場合は{@code null}
+	 * @since 5.3
+	 * </div><div lang="en">
+	 * @since 5.3
+	 * </div>
+	 */
+	public Timestamp getPreciseTimestamp();
 
 }

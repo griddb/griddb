@@ -26,6 +26,7 @@ import java.util.Set;
 
 import com.toshiba.mwcloud.gs.Collection;
 import com.toshiba.mwcloud.gs.Container;
+import com.toshiba.mwcloud.gs.ContainerInfo;
 import com.toshiba.mwcloud.gs.GSException;
 import com.toshiba.mwcloud.gs.Row;
 import com.toshiba.mwcloud.gs.RowSet;
@@ -63,6 +64,8 @@ implements RowSet<R>, Extensibles.AsRowSet<R>, Experimentals.AsRowSet<R> {
 	private final long totalRowCount;
 
 	private long remainingRowCount;
+
+	private final ContainerInfo nextRowSchema;
 
 	private Map<Integer, byte[]> extResultMap;
 
@@ -112,6 +115,7 @@ implements RowSet<R>, Extensibles.AsRowSet<R>, Experimentals.AsRowSet<R> {
 			remainingRowCount = totalRowCount - resultCursor.getRowCount();
 		}
 
+		this.nextRowSchema = mapper.peekNextRowSchema(resultCursor);
 		this.extResultMap = extResultMap;
 		this.queryFormatter = queryFormatter;
 		this.queryParameters = queryParameters;
@@ -402,6 +406,14 @@ implements RowSet<R>, Extensibles.AsRowSet<R>, Experimentals.AsRowSet<R> {
 		catch (GSException e) {
 			throw new IllegalStateException(e);
 		}
+	}
+
+	@Override
+	public ContainerInfo getSchema() throws GSException {
+		if (nextRowSchema != null) {
+			return new ContainerInfo(nextRowSchema);
+		}
+		return mapper.getContainerInfo();
 	}
 
 	@Override
