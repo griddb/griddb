@@ -1825,6 +1825,255 @@ private:
 };
 
 
+namespace detail {
+
+struct ConcurrentQueueUtils {
+	typedef void (*ErrorHandler)(std::exception&);
+	static void errorQueueClosed(ErrorHandler customHandler);
+};
+
+template< typename T, typename Alloc = StdAllocator<void, void> >
+class BlockingQueue {
+public:
+	typedef ConcurrentQueueUtils::ErrorHandler ErrorHandler;
+
+	explicit BlockingQueue(const Alloc &alloc);
+	~BlockingQueue();
+
+	void push(AllocUniquePtr<T> &ptr);
+	bool poll(AllocUniquePtr<T> &ptr);
+
+	void wait();
+
+	bool isClosed();
+	void close();
+
+	void setErrorHandler(ErrorHandler handler);
+
+private:
+	struct Entry {
+		Entry(T *value, const AllocDefaultDelete<T> &deteter);
+
+		T *value_;
+		AllocDefaultDelete<T> deteter_;
+	};
+
+	typedef typename Alloc::template rebind<Entry>::other EntryAllocator;
+
+	BlockingQueue(const BlockingQueue&);
+	BlockingQueue& operator=(const BlockingQueue&);
+
+	Condition cond_;
+	Deque<Entry, EntryAllocator> base_;
+	ErrorHandler errorHandler_;
+	bool closed_;
+};
+
+class FuturePool {
+public:
+	FuturePool(
+			const AllocatorInfo &info, const StdAllocator<void, void> &alloc);
+
+	StdAllocator<void, void>& getAllocator() throw();
+	ObjectPool<Condition, Mutex>& getConditionPool() throw();
+
+private:
+	FuturePool(const FuturePool&);
+	FuturePool& operator=(const FuturePool&);
+
+	StdAllocator<void, void> alloc_;
+	ObjectPool<Condition, Mutex> condPool_;
+};
+
+template<typename T>
+class FutureBase {
+public:
+	explicit FutureBase(FuturePool &pool);
+	~FutureBase();
+
+	FutureBase(const FutureBase &another);
+	FutureBase& operator=(const FutureBase&);
+
+	T* poll();
+	void waitFor(uint32_t timeoutMillis);
+	void setValue(const T &value);
+	void setException(std::exception &e);
+
+	bool isCancelled();
+	void cancel() throw();
+
+private:
+	struct Data;
+
+	void reset() throw();
+	Data& resolveData();
+
+	static void cancelInternal(
+			Data &data, const LockGuard<Condition> &gurad) throw();
+	static bool isResultAcceptable(
+			Data &data, const LockGuard<Condition>&) throw();
+
+	Data *data_;
+	bool forConsumer_;
+};
+
+template<typename T>
+struct FutureBase<T>::Data {
+	explicit Data(FuturePool &pool);
+	~Data();
+
+	Atomic<uint64_t> refCount_;
+	Atomic<uint64_t> consumerCount_;
+
+	FuturePool &pool_;
+	Condition *cond_;
+
+	LocalUniquePtr<T> value_;
+	LocalUniquePtr< std::pair<Exception, bool> > exception_;
+	bool cancelled_;
+	bool retrieved_;
+};
+
+struct FutureBaseUtils {
+	typedef std::pair<Exception, bool> ExceptionInfo;
+	static void errorNotAssigned();
+	static void errorRetrieved();
+	static void errorCancelled();
+	static void errorServiceShutdown(std::exception &e);
+
+	static void raiseExceptionResult(const ExceptionInfo &ex);
+	static void assignExceptionResult(
+			std::exception &e, LocalUniquePtr<ExceptionInfo> &dest) throw();
+};
+
+class TaskBase {
+public:
+	virtual ~TaskBase();
+	virtual void operator()() = 0;
+
+protected:
+	TaskBase();
+
+private:
+	TaskBase(const TaskBase&);
+	TaskBase& operator=(const TaskBase&);
+};
+
+template<typename C>
+class BasicTask : public TaskBase {
+public:
+	typedef typename C::ResultType ResultType;
+	typedef FutureBase<ResultType> FutureType;
+
+	BasicTask(FuturePool &pool, const C &command);
+	virtual ~BasicTask();
+
+	virtual void operator()();
+	FutureBase<ResultType> getFuture();
+
+private:
+	FutureBase<ResultType> future_;
+	C command_;
+};
+
+} 
+
+template<typename T>
+class Future {
+public:
+	explicit Future(const detail::FutureBase<T> &base);
+
+	T* poll();
+	void waitFor(uint32_t timeoutMillis);
+
+private:
+	detail::FutureBase<T> base_;
+};
+
+class ExecutorService {
+public:
+	template<typename C>
+	struct FutureOf {
+		typedef Future<typename detail::BasicTask<C>::ResultType> Type;
+	};
+
+	virtual ~ExecutorService();
+
+	template<typename C>
+	typename FutureOf<C>::Type submit(const C &command);
+
+	virtual void start() = 0;
+	virtual void shutdown() = 0;
+	virtual void waitForShutdown() = 0;
+
+protected:
+	ExecutorService();
+
+	virtual void submitTask(AllocUniquePtr<detail::TaskBase> &task) = 0;
+	virtual detail::FuturePool& getFuturePool() = 0;
+};
+
+class SingleThreadExecutor : public ExecutorService {
+public:
+	SingleThreadExecutor(
+			const AllocatorInfo &info, const StdAllocator<void, void> &alloc);
+	virtual ~SingleThreadExecutor();
+
+	virtual void start();
+	virtual void shutdown();
+	virtual void waitForShutdown();
+
+protected:
+	virtual void submitTask(AllocUniquePtr<detail::TaskBase> &task);
+	virtual detail::FuturePool& getFuturePool();
+
+private:
+	typedef detail::BlockingQueue<detail::TaskBase> TaskQueue;
+
+	static SingleThreadExecutor *defaultInstance_;
+
+	class Runner : public ThreadRunner {
+	public:
+		explicit Runner(TaskQueue &queueRef);
+		virtual ~Runner();
+		virtual void run();
+
+	private:
+		TaskQueue &queueRef_;
+	};
+
+	detail::FuturePool futurePool_;
+	TaskQueue queue_;
+	Runner runner_;
+	Thread thread_;
+};
+
+template< typename C, typename Alloc = StdAllocator<void, void> >
+class BatchCommand {
+public:
+	typedef typename detail::BasicTask<C>::ResultType SubResultType;
+	typedef typename Alloc::template rebind<SubResultType>::other ResultAllocator;
+	typedef typename Alloc::template rebind<C>::other CommnandAllocator;
+	typedef Vector<SubResultType, ResultAllocator> ResultType;
+	typedef Vector<C, CommnandAllocator> CommnandList;
+	typedef typename CommnandList::const_iterator CommandIterator;
+
+	explicit BatchCommand(const Alloc &alloc);
+
+	void add(const C &command);
+	template<typename It> void addAll(It begin, It end);
+	void clear();
+
+	CommandIterator begin() const;
+	CommandIterator end() const;
+
+	ResultType operator()();
+
+private:
+	CommnandList commandList_;
+};
+
+
 class InsertionResetter {
 public:
 	template<typename C>
@@ -3438,6 +3687,401 @@ void WeakMapReference<K, V>::unmanage() {
 	value_ = NULL;
 }
 
+
+namespace detail {
+
+
+template<typename T, typename Alloc>
+BlockingQueue<T, Alloc>::BlockingQueue(const Alloc &alloc) :
+		base_(alloc),
+		errorHandler_(NULL),
+		closed_(false) {
+}
+
+template<typename T, typename Alloc>
+BlockingQueue<T, Alloc>::~BlockingQueue() {
+	close();
+}
+
+template<typename T, typename Alloc>
+void BlockingQueue<T, Alloc>::push(AllocUniquePtr<T> &ptr) {
+	LockGuard<Condition> guard(cond_);
+	if (closed_) {
+		ConcurrentQueueUtils::errorQueueClosed(errorHandler_);
+		return;
+	}
+
+	cond_.signal();
+	base_.push_back(Entry(ptr.get(), ptr.get_deleter()));
+	ptr.release();
+}
+
+template<typename T, typename Alloc>
+bool BlockingQueue<T, Alloc>::poll(AllocUniquePtr<T> &ptr) {
+	LockGuard<Condition> guard(cond_);
+	if (base_.empty()) {
+		return false;
+	}
+
+	const Entry &entry = base_.front();
+	base_.pop_front();
+	ptr = AllocUniquePtr<T>::of(entry.value_, entry.deteter_);
+	return true;
+}
+
+template<typename T, typename Alloc>
+void BlockingQueue<T, Alloc>::wait() {
+	LockGuard<Condition> guard(cond_);
+	while (base_.empty() && !closed_) {
+		cond_.wait();
+	}
+}
+
+template<typename T, typename Alloc>
+bool BlockingQueue<T, Alloc>::isClosed() {
+	LockGuard<Condition> guard(cond_);
+	return closed_;
+}
+
+template<typename T, typename Alloc>
+void BlockingQueue<T, Alloc>::close() {
+	LockGuard<Condition> guard(cond_);
+	cond_.signal();
+
+	closed_ = true;
+	while (!base_.empty()) {
+		const Entry &entry = base_.front();
+
+		AllocUniquePtr<T> ptr(entry.value_, entry.deteter_);
+		ptr.reset();
+
+		base_.pop_front();
+	}
+}
+
+template<typename T, typename Alloc>
+void BlockingQueue<T, Alloc>::setErrorHandler(ErrorHandler handler) {
+	errorHandler_ = handler;
+}
+
+
+template<typename T, typename Alloc>
+BlockingQueue<T, Alloc>::Entry::Entry(
+		T *value, const AllocDefaultDelete<T> &deteter) :
+		value_(value),
+		deteter_(deteter) {
+}
+
+
+template<typename T>
+FutureBase<T>::FutureBase(FuturePool &pool) :
+		data_(ALLOC_NEW(pool.getAllocator()) Data(pool)),
+		forConsumer_(false) {
+}
+
+template<typename T>
+FutureBase<T>::~FutureBase() {
+	reset();
+}
+
+template<typename T>
+FutureBase<T>::FutureBase(const FutureBase &another) :
+		data_(NULL),
+		forConsumer_(false) {
+	*this = another;
+}
+
+template<typename T>
+FutureBase<T>& FutureBase<T>::operator=(const FutureBase &another) {
+	if (this == &another) {
+		return *this;
+	}
+	reset();
+
+	if (another.data_ != NULL) {
+		data_ = another.data_;
+		forConsumer_ = true;
+		++data_->refCount_;
+		++data_->consumerCount_;
+	}
+	return *this;
+}
+
+template<typename T>
+T* FutureBase<T>::poll() {
+	Data &data = resolveData();
+
+	LockGuard<Condition> guard(*data.cond_);
+	if (data.retrieved_) {
+		FutureBaseUtils::errorRetrieved();
+	}
+	else if (data.cancelled_) {
+		FutureBaseUtils::errorCancelled();
+	}
+	else if (data.exception_.get() != NULL) {
+		data.retrieved_ = true;
+		FutureBaseUtils::raiseExceptionResult(*data.exception_);
+	}
+	else if (data.value_.get() != NULL) {
+		data.retrieved_ = true;
+		return data.value_.get();
+	}
+	return NULL;
+}
+
+template<typename T>
+void FutureBase<T>::waitFor(uint32_t timeoutMillis) {
+	Data &data = resolveData();
+
+	Stopwatch watch;
+	watch.start();
+
+	LockGuard<Condition> guard(*data.cond_);
+	while (isResultAcceptable(data, guard)) {
+		const uint32_t elapsedMillis = watch.elapsedMillis();
+		if (elapsedMillis >= timeoutMillis) {
+			break;
+		}
+		data.cond_->wait(timeoutMillis - elapsedMillis);
+	}
+}
+
+template<typename T>
+void FutureBase<T>::setValue(const T &value) {
+	Data &data = resolveData();
+
+	LockGuard<Condition> guard(*data.cond_);
+	if (!isResultAcceptable(data, guard)) {
+		return;
+	}
+
+	data.cond_->signal();
+	try {
+		data.value_ = UTIL_MAKE_LOCAL_UNIQUE(data.value_, T, value);
+	}
+	catch (...) {
+		std::exception e;
+		FutureBaseUtils::assignExceptionResult(e, data.exception_);
+	}
+}
+
+template<typename T>
+void FutureBase<T>::setException(std::exception &e) {
+	Data &data = resolveData();
+
+	LockGuard<Condition> guard(*data.cond_);
+	if (!isResultAcceptable(data, guard)) {
+		return;
+	}
+
+	data.cond_->signal();
+	FutureBaseUtils::assignExceptionResult(e, data.exception_);
+}
+
+template<typename T>
+bool FutureBase<T>::isCancelled() {
+	Data &data = resolveData();
+
+	LockGuard<Condition> guard(*data.cond_);
+	return data.cancelled_;
+}
+
+template<typename T>
+void FutureBase<T>::cancel() throw() {
+	if (data_ == NULL) {
+		return;
+	}
+
+	LockGuard<Condition> guard(*data_->cond_);
+	cancelInternal(*data_, guard);
+}
+
+template<typename T>
+void FutureBase<T>::reset() throw() {
+	if (data_ == NULL) {
+		return;
+	}
+
+	Data *const data = data_;
+	const bool forConsumer = forConsumer_;
+
+	data_ = NULL;
+	forConsumer_ = false;
+
+	assert(data->refCount_ > 0);
+	const bool noRef = (--data->refCount_ == 0);
+
+	if (forConsumer) {
+		assert(data->consumerCount_ > 0);
+		if (--data->consumerCount_ == 0) {
+			LockGuard<Condition> guard(*data->cond_);
+			cancelInternal(*data, guard);
+		}
+	}
+
+	if (noRef) {
+		ALLOC_DELETE(data->pool_.getAllocator(), data);
+	}
+}
+
+template<typename T>
+typename FutureBase<T>::Data& FutureBase<T>::resolveData() {
+	if (data_ == NULL) {
+		FutureBaseUtils::errorNotAssigned();
+	}
+
+	return *data_;
+}
+
+template<typename T>
+void FutureBase<T>::cancelInternal(
+		Data &data, const LockGuard<Condition> &gurad) throw() {
+	if (!isResultAcceptable(data, gurad)) {
+		return;
+	}
+	data.cond_->signal();
+	data.cancelled_ = true;
+}
+
+template<typename T>
+bool FutureBase<T>::isResultAcceptable(
+		Data &data, const LockGuard<Condition>&) throw() {
+	return (!data.cancelled_ &&
+			data.exception_.get() == NULL &&
+			data.value_.get() == NULL);
+}
+
+
+template<typename T>
+FutureBase<T>::Data::Data(FuturePool &pool) :
+		refCount_(1),
+		consumerCount_(0),
+		pool_(pool),
+		cond_(pool.getConditionPool().allocate()),
+		cancelled_(false),
+		retrieved_(false) {
+}
+
+template<typename T>
+FutureBase<T>::Data::~Data() {
+	assert(refCount_ == 0);
+	pool_.getConditionPool().deallocate(cond_);
+}
+
+
+template<typename C>
+BasicTask<C>::BasicTask(FuturePool &pool, const C &command) :
+		future_(pool),
+		command_(command) {
+}
+
+template<typename C>
+BasicTask<C>::~BasicTask() {
+	future_.cancel();
+}
+
+template<typename C>
+void BasicTask<C>::operator()() {
+	try {
+		if (future_.isCancelled()) {
+			return;
+		}
+		future_.setValue(command_());
+	}
+	catch (...) {
+		std::exception e;
+		future_.setException(e);
+	}
+}
+
+template<typename C>
+typename BasicTask<C>::FutureType BasicTask<C>::getFuture() {
+	return future_;
+}
+
+} 
+
+
+template<typename T>
+Future<T>::Future(const detail::FutureBase<T> &base) :
+		base_(base) {
+}
+
+template<typename T>
+T* Future<T>::poll() {
+	return base_.poll();
+}
+
+template<typename T>
+void Future<T>::waitFor(uint32_t timeoutMillis) {
+	return base_.waitFor(timeoutMillis);
+}
+
+
+template<typename C>
+typename ExecutorService::template FutureOf<C>::Type
+ExecutorService::submit(const C &command) {
+	typedef detail::BasicTask<C> TaskType;
+
+	detail::FuturePool &pool = getFuturePool();
+	StdAllocator<void, void> &alloc = pool.getAllocator();
+
+	AllocUniquePtr<TaskType> task(
+			ALLOC_UNIQUE(alloc, TaskType, pool, command));
+	typename FutureOf<C>::Type future(task->getFuture());
+
+	AllocUniquePtr<detail::TaskBase> taskBase(task.release(), alloc);
+	submitTask(taskBase);
+
+	return future;
+}
+
+
+template<typename C, typename Alloc>
+BatchCommand<C, Alloc>::BatchCommand(const Alloc &alloc) :
+		commandList_(alloc) {
+}
+
+template<typename C, typename Alloc>
+void BatchCommand<C, Alloc>::add(const C &command) {
+	commandList_.push_back(command);
+}
+
+template<typename C, typename Alloc>
+template<typename It>
+void BatchCommand<C, Alloc>::addAll(It begin, It end) {
+	commandList_.insert(commandList_.end(), begin, end);
+}
+
+template<typename C, typename Alloc>
+void BatchCommand<C, Alloc>::clear() {
+	commandList_.clear();
+}
+
+template<typename C, typename Alloc>
+typename BatchCommand<C, Alloc>::CommandIterator
+BatchCommand<C, Alloc>::begin() const {
+	return commandList_.begin();
+}
+
+template<typename C, typename Alloc>
+typename BatchCommand<C, Alloc>::CommandIterator
+BatchCommand<C, Alloc>::end() const {
+	return commandList_.end();
+}
+
+template<typename C, typename Alloc>
+typename BatchCommand<C, Alloc>::ResultType
+BatchCommand<C, Alloc>::operator()() {
+	ResultType result(commandList_.get_allocator());
+
+	for (CommandIterator it = commandList_.begin();
+			it != commandList_.end(); ++it) {
+		result.push_back((*it)());
+	}
+
+	return result;
+}
 
 
 

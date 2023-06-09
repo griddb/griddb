@@ -205,18 +205,17 @@ public:
 
 	static bool stringToOutputLevel(const std::string &str, int32_t &outputLevel);
 
+protected:
+	TraceManager();
+	virtual ~TraceManager();
+
 private:
 	typedef std::map<u8string, Tracer*> TracerMap;
-
-	TraceManager();
-	~TraceManager();
 
 	TraceManager(const TraceManager&);
 	TraceManager& operator=(const TraceManager&);
 
 	TraceWriter* getDefaultWriter(TraceOption::OutputType type);
-
-	static detail::ProxyTraceHandler& getProxyTraceHandler();
 
 	Mutex mutex_;
 
@@ -232,7 +231,7 @@ private:
 	uint64_t maxRotationFileSize_;
 	uint32_t maxRotationFileCount_;
 	TraceOption::RotationMode rotationMode_;
-	detail::ProxyTraceHandler &proxyTraceHandler_;
+	UTIL_UNIQUE_PTR<detail::ProxyTraceHandler> proxyTraceHandler_;
 };
 
 namespace detail {
@@ -343,6 +342,21 @@ private:
 	inline util::Tracer& UTIL_TRACER_INSTANCE_GETTER(name) () { \
 		static util::Tracer *tracer( \
 				&util::TraceManager::getInstance().resolveTracer(#name)); \
+		if (tracer == NULL) \
+			return *util::detail::TraceUtil::awaitTracerInitialization(&tracer); \
+		return *tracer; \
+	}
+
+/*!
+    @brief Macro of declaration of a tracer with specifying traceManager name.
+*/
+#define UTIL_TRACER_DECLARE_CUSTOM(traceManager, name) \
+	inline util::Tracer& UTIL_TRACER_INSTANCE_GETTER(name) () { \
+		static util::Tracer *tracer( \
+				&((#traceManager == "AuditTraceManager") ? \
+					util::traceManager::getAuditInstance() : \
+					util::traceManager::getInstance() \
+				).resolveTracer(#name)); \
 		if (tracer == NULL) \
 			return *util::detail::TraceUtil::awaitTracerInitialization(&tracer); \
 		return *tracer; \

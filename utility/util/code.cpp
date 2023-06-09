@@ -69,6 +69,10 @@
 namespace util {
 
 
+u8string TinyLexicalIntConverter::toString(uint32_t value) {
+	return TinyLexicalIntConverter().toString<u8string>(value);
+}
+
 TinyLexicalIntConverter::TinyLexicalIntConverter() :
 		minWidth_(1),
 		maxWidth_(0) {
@@ -118,13 +122,26 @@ bool TinyLexicalIntConverter::format(
 
 bool TinyLexicalIntConverter::parse(
 		const char8_t *&it, const char8_t *end, uint32_t &value) const {
+	const char8_t *outIt;
+	const bool ret = parseDetail(it, end, &outIt, value);
+	it = outIt;
+	return ret;
+}
+
+bool TinyLexicalIntConverter::parseDetail(
+		const char8_t *begin, const char8_t *end, const char8_t **outIt,
+		uint32_t &value) const {
+	if (outIt != NULL) {
+		*outIt = begin;
+	}
 	value = 0;
+
+	const char8_t *it = begin;
 
 	if (it > end) {
 		assert(false);
 		return false;
 	}
-	const char8_t *const begin = it;
 
 	size_t limitSize = static_cast<size_t>(end - it);
 	if (maxWidth_ > 0 && maxWidth_ < limitSize) {
@@ -181,6 +198,9 @@ bool TinyLexicalIntConverter::parse(
 		return false;
 	}
 
+	if (outIt != NULL) {
+		*outIt = it;
+	}
 	value = static_cast<uint32_t>(ret);
 	return true;
 }

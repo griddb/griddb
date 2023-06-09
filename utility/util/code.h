@@ -109,10 +109,20 @@ public:
 
 
 struct TinyLexicalIntConverter {
+public:
 	TinyLexicalIntConverter();
+
+	static u8string toString(uint32_t value);
+
+	template<typename S> S toString(
+			uint32_t value, const typename S::allocator_type &alloc =
+					typename S::allocator_type()) const;
 
 	bool format(char8_t *&it, char8_t *end, uint32_t value) const;
 	bool parse(const char8_t *&it, const char8_t *end, uint32_t &value) const;
+	bool parseDetail(
+			const char8_t *begin, const char8_t *end, const char8_t **outIt,
+			uint32_t &value) const;
 
 	size_t minWidth_;
 	size_t maxWidth_;
@@ -2880,6 +2890,17 @@ template<> struct ValueFormatterTraits<double> {
 	typedef FloatingNumberFormatter<double> Formatter; };
 
 }	
+
+
+template<typename S>
+S TinyLexicalIntConverter::toString(
+		uint32_t value, const typename S::allocator_type &alloc) const {
+	char8_t buf[std::numeric_limits<uint32_t>::digits10 + 1];
+	char8_t *const begin = buf;
+	char8_t *it = begin;
+	TinyLexicalIntConverter().format(it, begin + sizeof(buf), value);
+	return S(begin, it, alloc);
+}
 
 
 template<typename T>

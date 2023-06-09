@@ -942,7 +942,11 @@ void Exception::append(const Exception &another, size_t startDepth) throw() {
 		clear();
 	}
 
-	size_t subEntryCount = baseEntryCount + (another.maxDepth_ - startDepth);
+	const size_t anotherDepth = another.maxDepth_;
+	const size_t anotherStartDepth =
+			static_cast<size_t>(std::min<uint64_t>(anotherDepth, startDepth));
+
+	size_t subEntryCount = baseEntryCount + (anotherDepth - anotherStartDepth);
 	if (subEntryCount > 0) {
 		subEntries_ =
 				static_cast<Entry*>(allocate(sizeof(Entry) * subEntryCount));
@@ -960,7 +964,7 @@ void Exception::append(const Exception &another, size_t startDepth) throw() {
 			src = base.getEntryAt(i);
 		}
 		else {
-			src = another.getEntryAt(startDepth + (i - baseEntryCount));
+			src = another.getEntryAt(anotherStartDepth + (i - baseEntryCount));
 		}
 
 		setEntry(dest, *src);
