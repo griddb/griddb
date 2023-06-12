@@ -13,7 +13,7 @@ env:
 jobs:
   release_package:
     name: Create and release ${{ matrix.file_type }} file for ${{ matrix.os }}
-    runs-on: ubuntu-18.04
+    runs-on: ubuntu-latest
 
     strategy:
       matrix:
@@ -32,13 +32,6 @@ jobs:
             docker_image: centos
             container_name: centos_container
             upload_path:  installer/RPMS/x86_64/griddb-*-linux.x86_64.rpm
-          - os: Opensuse
-            file_type: rpm
-            package_path: ./griddb/installer/RPMS/x86_64/griddb-*-opensuse.x86_64.rpm
-            docker_file: .github/workflows/dockerFile/Dockerfile-opensuse
-            docker_image: opensuse
-            container_name: opensuse_container
-            upload_path:  installer/RPMS/x86_64/griddb-*-opensuse.x86_64.rpm
 
     steps:
       - uses: actions/checkout@v1
