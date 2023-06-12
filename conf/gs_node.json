@@ -12,7 +12,7 @@
 		"affinityGroupSize":4
 	},
 	"checkpoint":{
-		"checkpointInterval":"60s"
+		"checkpointInterval":"300s"
 	},
 	"cluster":{
 		"servicePort":10010
