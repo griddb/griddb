@@ -127,6 +127,7 @@ struct ManagerSet {
 		RecoveryManager* recoveryMgr,
 		GlobalFixedSizeAllocator* fixedSizeAlloc,
 		GlobalVariableSizeAllocator* varSizeAlloc,
+		util::ExecutorService *execSvc,
 		ConfigTable* config,
 		StatTable* stats
 		,
@@ -152,6 +153,7 @@ struct ManagerSet {
 		recoveryMgr_(recoveryMgr),
 		fixedSizeAlloc_(fixedSizeAlloc),
 		varSizeAlloc_(varSizeAlloc),
+		execSvc_(execSvc),
 		config_(config),
 		stats_(stats),
 		userCache_(userCache),
@@ -173,8 +175,10 @@ struct ManagerSet {
 		recoveryMgr_(NULL),
 		fixedSizeAlloc_(NULL),
 		varSizeAlloc_(NULL),
+		execSvc_(NULL),
 		config_(NULL),
 		stats_(NULL),
+		userCache_(NULL),
 		dsConfig_(NULL) {}
 
 
@@ -194,6 +198,7 @@ struct ManagerSet {
 	RecoveryManager* recoveryMgr_;
 	GlobalFixedSizeAllocator* fixedSizeAlloc_;
 	GlobalVariableSizeAllocator* varSizeAlloc_;
+	util::ExecutorService *execSvc_;
 
 	ConfigTable* config_;
 	StatTable* stats_;
@@ -792,6 +797,7 @@ private:
 	SyncService* syncSvc_;
 	SystemService* sysSvc_;
 	CheckpointService* cpSvc_;
+	util::ExecutorService *execSvc_;
 	ClusterStats clusterStats_;
 	SQLService* sqlSvc_;
 	PartitionTable* pt_;
@@ -828,6 +834,8 @@ private:
 		void initialize(
 			const ConfigTable& config, const EventEngine::Config& eeConfig,
 			const EventEngine::Source& eeSource);
+
+		void setExecutor(util::ExecutorService &executor);
 
 		/*!
 			@brief Sets resolver updating interval

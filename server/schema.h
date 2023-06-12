@@ -325,8 +325,8 @@ public:
 	/*!
 		@brief Get element Column type from Array Column type
 	*/
-	ColumnType getSimpleColumnType() const {
-		return ValueProcessor::getSimpleColumnType(getColumnType());
+	ColumnType getArrayElementType() const {
+		return ValueProcessor::getArrayElementType(getColumnType());
 	}
 
 	uint32_t getColumnSize() const {
@@ -350,18 +350,14 @@ public:
 	}
 
 	bool isVariable() const {
-		return (getColumnType() == COLUMN_TYPE_STRING ||
-				getColumnType() == COLUMN_TYPE_GEOMETRY ||
-				getColumnType() == COLUMN_TYPE_BLOB ||
-				ValueProcessor::isArray(getColumnType()));
+		return ValueProcessor::isVariable(getColumnType());
 	}
 
 	/*!
 		@brief Check if column type is special(Blob or StringArray)
 	*/
 	bool isSpecialVariable() const {
-		return (getColumnType() == COLUMN_TYPE_BLOB ||
-				getColumnType() == COLUMN_TYPE_STRING_ARRAY);
+		return ValueProcessor::isNestStructure(getColumnType());
 	}
 
 	void initialize();
@@ -370,14 +366,9 @@ public:
 		MessageSchema *messageSchema, AllocateStrategy &allocateStrategy,
 		bool onMemory);
 
-	void setType(ColumnType type, bool isArray) {
-		if (isArray) {
-			columnType_ = static_cast<ColumnType>(type + COLUMN_TYPE_OID + 1);
-		}
-		else {
-			columnType_ = type;
-		}
-		columnSize_ = FixedSizeOfColumnType[columnType_];
+	void setType(ColumnType type) {
+		columnType_ = type;
+		columnSize_ = FixedSizeOfColumnType[type];
 	}
 
 	void finalize(ObjectManagerV4 &objectManager, AllocateStrategy& allocateStrategy);
@@ -764,6 +755,9 @@ public:
 		RowNullBits::setNull(getNullsStats(), columnId);
 	}
 	bool expandNullStats(TransactionContext &txn, uint32_t oldColumnNum, uint32_t newColumnNum);
+
+	static bool findDefaultIndexType(ColumnType columnType, MapType &type);
+
 private:
 /*!
 	@brief Calculate the size needed

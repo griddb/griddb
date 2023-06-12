@@ -61,6 +61,7 @@ import com.toshiba.mwcloud.gs.common.LoggingUtils.BaseGridStoreLogger;
 import com.toshiba.mwcloud.gs.common.PropertyUtils;
 import com.toshiba.mwcloud.gs.common.PropertyUtils.WrappedProperties;
 import com.toshiba.mwcloud.gs.common.Statement;
+import com.toshiba.mwcloud.gs.common.RowMapper.SchemaFeatureLevel;
 import com.toshiba.mwcloud.gs.common.Statement.GeneralStatement;
 import com.toshiba.mwcloud.gs.common.StatementResult;
 
@@ -119,6 +120,8 @@ public class NodeConnection implements Closeable {
 	private AuthMode authMode = Challenge.getDefaultMode();
 
 	private int remoteProtocolVersion;
+
+	private FeatureVersion remoteFeatureVersion;
 
 	private AuthType authType = AuthType.INTERNAL;
 
@@ -987,6 +990,11 @@ public class NodeConnection implements Closeable {
 		if (databaseId != null) {
 			databaseId[0] = respDatabaseId;
 		}
+
+		if (resp.base().remaining() > 0) {
+			remoteFeatureVersion =
+					FeatureVersion.remoteValueOf(resp.base().getInt());
+		}
 	}
 
 	private Challenge loginInternal(
@@ -1037,7 +1045,10 @@ public class NodeConnection implements Closeable {
 						OptionalRequestType.CONNECTION_ROUTE,
 						(byte) loginInfo.getConnectionRoute().ordinal());
 			}
-			
+			request.put(
+					OptionalRequestType.ACCEPTABLE_FEATURE_VERSION,
+					FeatureVersion.latest().ordinal());
+
 			request.format(req);
 		}
 
@@ -1115,6 +1126,10 @@ public class NodeConnection implements Closeable {
 
 	public long getHeartbeatReceiveCount() {
 		return heartbeatReceiveCount;
+	}
+
+	public FeatureVersion getRemoteFeatureVersion() {
+		return remoteFeatureVersion;
 	}
 
 	public static String getDigest(String password) {
@@ -1894,7 +1909,37 @@ public class NodeConnection implements Closeable {
 		V4_1,
 		V4_2,
 		V4_3,
-		V4_5
+		V4_5,
+		V5_3
+
+		;
+
+		public static FeatureVersion remoteValueOf(int ordinal)
+				throws GSException {
+			if (ordinal < 0) {
+				throw new GSConnectionException(
+						GSErrorCode.MESSAGE_CORRUPTED, "");
+			}
+
+			final FeatureVersion latest = latest();
+			if (ordinal >= latest.ordinal()) {
+				return latest();
+			}
+			return values()[ordinal];
+		}
+
+		public static FeatureVersion latest() {
+			final FeatureVersion[] values = values();
+			return values[values.length - 1];
+		}
+
+		public FeatureVersion merge(FeatureVersion another) {
+			if (another != null && another.ordinal() > ordinal()) {
+				return another;
+			}
+			return this;
+		}
+
 	}
 
 	public static class MessageDigestFactory {

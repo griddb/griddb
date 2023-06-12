@@ -88,8 +88,9 @@ struct StatementMessage {
 		FEATURE_V4_2 = 2,
 		FEATURE_V4_3 = 3,
 		FEATURE_V4_5 = 4,
+		FEATURE_V5_3 = 5,
 
-		FEATURE_SUPPORTED_MAX = FEATURE_V4_5 
+		FEATURE_SUPPORTED_MAX = FEATURE_V5_3
 	};
 
 	struct FixedTypes {

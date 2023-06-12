@@ -44,12 +44,15 @@
     OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
+#ifdef _WIN32
 #ifndef FD_SETSIZE
 #define FD_SETSIZE 64
+#endif
 #endif
 
 #include "util/net.h"
 #include "util/thread.h"
+#include "util/code.h"
 #include "util/os.h"
 #include <sstream>
 #include <map>
@@ -415,7 +418,7 @@ bool Socket::accept(Socket *socket, SocketAddress *addr) const {
 
 bool Socket::connect(const SocketAddress &addr) {
 #if UTIL_FAILURE_SIMULATION_ENABLED
-	SocketFailureSimulator::checkOperation(*this, 0);
+	SocketFailureSimulator::checkOperation(this, 0);
 #endif
 
 	struct sockaddr_storage ss;
@@ -441,7 +444,7 @@ bool Socket::connect(const SocketAddress &addr) {
 
 ssize_t Socket::receive(void *buf, size_t len, int flags) {
 #if UTIL_FAILURE_SIMULATION_ENABLED
-	SocketFailureSimulator::checkOperation(*this, 0);
+	SocketFailureSimulator::checkOperation(this, 0);
 #endif
 
 	const ssize_t result = recv(toSocket(fd_),
@@ -460,7 +463,7 @@ ssize_t Socket::receive(void *buf, size_t len, int flags) {
 ssize_t Socket::receiveFrom(void *buf, size_t len,
 		SocketAddress *addr, int flags) {
 #if UTIL_FAILURE_SIMULATION_ENABLED
-	SocketFailureSimulator::checkOperation(*this, 0);
+	SocketFailureSimulator::checkOperation(this, 0);
 #endif
 
 	sockaddr_storage ss;
@@ -487,7 +490,7 @@ ssize_t Socket::receiveFrom(void *buf, size_t len,
 
 ssize_t Socket::send(const void *buf, size_t len, int flags) {
 #if UTIL_FAILURE_SIMULATION_ENABLED
-	SocketFailureSimulator::checkOperation(*this, 0);
+	SocketFailureSimulator::checkOperation(this, 0);
 #endif
 
 	const ssize_t result = ::send(toSocket(fd_),
@@ -506,7 +509,7 @@ ssize_t Socket::send(const void *buf, size_t len, int flags) {
 ssize_t Socket::sendTo(const void *buf, size_t len,
 		const SocketAddress &addr, int flags) {
 #if UTIL_FAILURE_SIMULATION_ENABLED
-	SocketFailureSimulator::checkOperation(*this, 0);
+	SocketFailureSimulator::checkOperation(this, 0);
 #endif
 
 	struct sockaddr_storage ss;
@@ -916,11 +919,12 @@ volatile SocketFailureSimulator::FilterHandler
 volatile int32_t SocketFailureSimulator::targetType_ = 0;
 volatile uint64_t SocketFailureSimulator::startCount_ = 0;
 volatile uint64_t SocketFailureSimulator::endCount_ = 0;
+volatile int32_t SocketFailureSimulator::operationType_ = 0;
 volatile uint64_t SocketFailureSimulator::lastOperationCount_ = 0;
 
 void SocketFailureSimulator::set(
 		int32_t targetType, uint64_t startCount, uint64_t endCount,
-		FilterHandler handler) {
+		int32_t operationType, FilterHandler handler) {
 	if (startCount < endCount) {
 		if (handler == NULL) {
 			UTIL_THROW_UTIL_ERROR_CODED(CODE_ILLEGAL_OPERATION);
@@ -930,6 +934,7 @@ void SocketFailureSimulator::set(
 		targetType_ = targetType;
 		startCount_ = startCount;
 		endCount_ = endCount;
+		operationType_ = operationType;
 		lastOperationCount_ = 0;
 		enabled_ = true;
 	}
@@ -939,26 +944,69 @@ void SocketFailureSimulator::set(
 		targetType_ = 0;
 		startCount_ = 0;
 		endCount_ = 0;
+		operationType_ = 0;
 	}
 }
 
 void SocketFailureSimulator::checkOperation(
-		const Socket &socket, int operationType) {
+		const Socket *socket, int operationType) {
 	FilterHandler handler = handler_;
-	if (enabled_ && handler != NULL &&
-			(*handler)(socket, targetType_, operationType)) {
-		const uint64_t count = lastOperationCount_;
-		lastOperationCount_++;
 
-		if (startCount_ <= count && count < endCount_) {
-#ifdef _WIN32
-			SetLastError(static_cast<DWORD>(-1));
-#else
-			errno = -1;
-#endif
-			UTIL_THROW_PLATFORM_ERROR(NULL);
-		}
+	if (!enabled_ || operationType != operationType_ || (handler != NULL &&
+			!(*handler)(socket, targetType_, operationType))) {
+		return;
 	}
+
+	const uint64_t count = lastOperationCount_;
+	const uint64_t startCount = startCount_;
+	const uint64_t endCount = endCount_;
+
+	bool sleeping = false;
+	bool throwing = true;
+	switch (operationType) {
+	case 0:
+		break;
+	case 1:
+		sleeping = true;
+		break;
+	case 2:
+		sleeping = true;
+		throwing = false;
+		break;
+	default:
+		assert(false);
+		break;
+	}
+
+	const uint64_t nextCount = (sleeping ? endCount : count + 1);
+	lastOperationCount_ = nextCount;
+
+	if (!(startCount <= count && count < endCount)) {
+		return;
+	}
+
+	if (sleeping) {
+		const uint32_t millis = static_cast<uint32_t>(std::min<uint64_t>(
+				endCount - count, std::numeric_limits<uint32_t>::max()));
+		util::Thread::sleep(millis);
+	}
+
+	if (throwing) {
+#ifdef _WIN32
+		SetLastError(static_cast<DWORD>(-1));
+#else
+		errno = -1;
+#endif
+		UTIL_THROW_PLATFORM_ERROR(NULL);
+	}
+}
+
+bool SocketFailureSimulator::filterDefault(
+		const Socket *socket, int32_t targetType, int32_t operationType) {
+	static_cast<void>(socket);
+	static_cast<void>(targetType);
+	static_cast<void>(operationType);
+	return true;
 }
 
 #endif	
@@ -1091,9 +1139,8 @@ void SocketAddress::getAll(std::vector<SocketAddress> &addrList,
 void SocketAddress::getAll(std::vector<SocketAddress> &addrList,
 		const char8_t *host, uint16_t port,
 		int family, int sockType) {
-	NormalOStringStream os;
-	os << port;
-	getAll(addrList, host, os.str().c_str(), family, sockType);
+	const u8string &portStr = TinyLexicalIntConverter::toString(port);
+	getAll(addrList, host, portStr.c_str(), family, sockType);
 }
 
 bool SocketAddress::isAny() const {
@@ -1138,9 +1185,8 @@ void SocketAddress::assign(
 
 void SocketAddress::assign(
 		const char8_t *host, uint16_t port, int family, int sockType) {
-	NormalOStringStream os;
-	os << port;
-	assign(host, os.str().c_str(), family, sockType);
+	const u8string &portStr = TinyLexicalIntConverter::toString(port);
+	assign(host, portStr.c_str(), family, sockType);
 }
 
 void SocketAddress::assign(const Inet &addr, uint16_t port) {
@@ -1347,6 +1393,11 @@ int32_t SocketAddress::compare(const SocketAddress &another) const {
 addrinfo* SocketAddress::getAddressInfo(
 		const char8_t *host, const char8_t *service,
 		int family, int sockType) {
+#if UTIL_FAILURE_SIMULATION_ENABLED
+	SocketFailureSimulator::checkOperation(NULL, 1);
+	SocketFailureSimulator::checkOperation(NULL, 2);
+#endif
+
 	SocketLibrary::checkAvailability();
 
 	addrinfo hints, *result;
@@ -1449,6 +1500,56 @@ std::ostream& operator<<(std::ostream &s, const SocketAddress::Inet6 &addr) {
 }
 
 
+SocketAddress::AssignByHostCommand::AssignByHostCommand(
+		const u8string &host, const u8string &service, int family,
+		int sockType) :
+		host_(host),
+		service_(service),
+		family_(family),
+		sockType_(sockType) {
+}
+
+SocketAddress::AssignByHostCommand::AssignByHostCommand(
+		const u8string &host, uint16_t port, int family, int sockType) :
+		host_(host),
+		service_(TinyLexicalIntConverter::toString(port)),
+		family_(family),
+		sockType_(sockType) {
+}
+
+SocketAddress::AssignByHostCommand::ResultType
+SocketAddress::AssignByHostCommand::operator()() const {
+	return SocketAddress(host_.c_str(), service_.c_str(), family_, sockType_);
+}
+
+bool SocketAddress::AssignByHostCommand::operator<(
+		const AssignByHostCommand &another) const {
+	return compare(another) < 0;
+}
+
+int32_t SocketAddress::AssignByHostCommand::compare(
+		const AssignByHostCommand &another) const {
+	int32_t c;
+	if ((c = compareValue(host_, another.host_)) != 0 ||
+			(c = compareValue(service_, another.service_)) != 0 ||
+			(c = compareValue(family_, another.family_)) != 0 ||
+			(c = compareValue(sockType_, another.sockType_)) != 0) {
+		return c;
+	}
+	return 0;
+}
+
+template<typename T>
+int32_t SocketAddress::AssignByHostCommand::compareValue(
+		const T &v1, const T &v2) {
+	if (v1 != v2) {
+		return (v1 < v2 ? -1 : 1);
+	}
+	return 0;
+}
+
+
+namespace detail {
 struct IOPollSelect::Data {
 	FDMap fds_;
 	fd_set rset_;
@@ -1504,11 +1605,19 @@ void IOPollSelect::add(IOPollHandler *handler, IOPollEvent event) {
 	assert(fd != File::INITIAL_FD);
 	assert(data_->fds_.find(fd) == data_->fds_.end());
 
+#ifdef _WIN32
 	if (data_->fds_.size() >= FD_SETSIZE) {
 		UTIL_THROW_UTIL_ERROR(CODE_SIZE_LIMIT_EXCEEDED,
-				"Too many sockets are opened (limitPerIOSelector=" <<
+				"Too many sockets are polled (limitPerIOSelector=" <<
 				FD_SETSIZE << ")");
 	}
+#else
+	if (fd >= FD_SETSIZE) {
+		UTIL_THROW_UTIL_ERROR(CODE_SIZE_LIMIT_EXCEEDED,
+				"Too many file descriptors are opened for select() polling "
+				"(fd=" << fd << ")");
+	}
+#endif
 
 	if (event & IOPollEvent::TYPE_READ)
 		FD_SET(Socket::toSocket(fd), &data_->rset_);
@@ -1628,6 +1737,7 @@ const char* IOPollSelect::getType(void) const {
 	static const char type[] = "select";
 	return type;
 }
+} 
 
 #ifdef UTIL_HAVE_EPOLL_CTL
 

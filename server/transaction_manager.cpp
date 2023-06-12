@@ -1417,6 +1417,10 @@ TransactionContext &TransactionManager::Partition::put(
 			GS_THROW_USER_ERROR(GS_ERROR_TM_TRANSACTION_MODE_INVALID, "");
 		}
 
+		txn->ev_ = NULL;
+		txn->ec_ = NULL;
+		txn->objectNameStr_ = NULL;
+
 		return *txn;
 	}
 	catch (StatementAlreadyExecutedException &e) {
@@ -1450,6 +1454,9 @@ TransactionContext &TransactionManager::Partition::get(
 		TransactionContext *txn = txnContextMap_->get(clientId);
 		if (txn != NULL) {
 			txn->alloc_ = &alloc;
+			txn->ev_ = NULL;
+			txn->ec_ = NULL;
+			txn->objectNameStr_ = NULL;
 			return *txn;
 		}
 		else {

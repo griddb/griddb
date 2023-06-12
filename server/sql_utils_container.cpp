@@ -1391,7 +1391,7 @@ SQLContainerImpl::CursorAccessorImpl::resolveColumn(
 					RowArray::getRowIdColumn<TimeSeries>(container);
 
 			ColumnInfo modInfo = column.getColumnInfo();
-			modInfo.setType(COLUMN_TYPE_TIMESTAMP, false);
+			modInfo.setType(COLUMN_TYPE_TIMESTAMP);
 			column.setColumnInfo(modInfo);
 
 			return column;
@@ -1859,6 +1859,17 @@ inline Ret SQLContainerImpl::CursorAccessorImpl::DirectValueAccessor<
 template<>
 template<BaseContainer::RowArrayType RAType, typename Ret>
 inline Ret SQLContainerImpl::CursorAccessorImpl::DirectValueAccessor<
+		TupleTypes::TYPE_NANO_TIMESTAMP, false>::access(
+		SQLValues::ValueContext &cxt, CursorAccessorImpl &base,
+		const ContainerColumn &column) const {
+	static_cast<void>(cxt);
+	return TupleNanoTimestamp(
+			&base.getFixedValue<RAType, NanoTimestamp>(column));
+}
+
+template<>
+template<BaseContainer::RowArrayType RAType, typename Ret>
+inline Ret SQLContainerImpl::CursorAccessorImpl::DirectValueAccessor<
 		TupleTypes::TYPE_STRING, true>::access(
 		SQLValues::ValueContext &cxt, CursorAccessorImpl &base,
 		const ContainerColumn &column) const {
@@ -1913,18 +1924,18 @@ void SQLContainerImpl::ColumnCode::initialize(
 }
 
 
-template<RowArrayType RAType, typename T, typename S, bool Nullable>
+template<RowArrayType RAType, typename T, bool Nullable>
 inline typename
-SQLContainerImpl::ColumnEvaluator<RAType, T, S, Nullable>::ResultType
-SQLContainerImpl::ColumnEvaluator<RAType, T, S, Nullable>::eval(
+SQLContainerImpl::ColumnEvaluator<RAType, T, Nullable>::ResultType
+SQLContainerImpl::ColumnEvaluator<RAType, T, Nullable>::eval(
 		ExprContext &cxt) const {
 	if (Nullable && code_.accessor_->isValueNull(code_.column_)) {
 		return ResultType(ValueType(), true);
 	}
 	return ResultType(
-			static_cast<ValueType>(code_.accessor_->getValueDirect<
-					RAType, SourceType, S::COLUMN_TYPE>(
-							cxt.getValueContext(), code_.column_)),
+			code_.accessor_->getValueDirect<
+					RAType, ValueType, T::COLUMN_TYPE>(
+							cxt.getValueContext(), code_.column_),
 			false);
 }
 
@@ -4365,6 +4376,13 @@ void SQLContainerImpl::ContainerValueUtils::toContainerValue(
 	case TupleTypes::TYPE_TIMESTAMP:
 		dest.setTimestamp(ValueUtils::getValue<int64_t>(src));
 		break;
+	case TupleTypes::TYPE_MICRO_TIMESTAMP:
+		dest.setMicroTimestamp(ValueUtils::getValue<MicroTimestamp>(src));
+		break;
+	case TupleTypes::TYPE_NANO_TIMESTAMP:
+		dest.setNanoTimestamp(
+				ValueUtils::getValue<TupleNanoTimestamp>(src).get());
+		break;
 	case TupleTypes::TYPE_STRING:
 		{
 			const TupleString::BufferInfo &str = TupleString(src).getBuffer();
@@ -4433,6 +4451,12 @@ bool SQLContainerImpl::ContainerValueUtils::toTupleValue(
 	case COLUMN_TYPE_TIMESTAMP:
 		dest = ValueUtils::toAnyByTimestamp(src.getTimestamp());
 		break;
+	case COLUMN_TYPE_MICRO_TIMESTAMP:
+		dest = TupleValue(src.getMicroTimestamp());
+		break;
+	case COLUMN_TYPE_NANO_TIMESTAMP:
+		dest = SyntaxTree::makeNanoTimestampValue(alloc, src.getNanoTimestamp());
+		break;
 	case COLUMN_TYPE_BLOB: {
 		TupleValue::VarContext varCxt;
 		varCxt.setStackAllocator(&alloc);
@@ -4464,7 +4488,7 @@ TupleColumnType SQLContainerImpl::ContainerValueUtils::toRawTupleColumnType(
 		ContainerColumnType src) {
 	TupleColumnType dest;
 
-	switch (ValueProcessor::getSimpleColumnType(src)) {
+	switch (ValueProcessor::getArrayElementType(src)) {
 	case COLUMN_TYPE_STRING:
 		dest = TupleTypes::TYPE_STRING;
 		break;
@@ -4491,6 +4515,12 @@ TupleColumnType SQLContainerImpl::ContainerValueUtils::toRawTupleColumnType(
 		break;
 	case COLUMN_TYPE_TIMESTAMP:
 		dest = TupleTypes::TYPE_TIMESTAMP;
+		break;
+	case COLUMN_TYPE_MICRO_TIMESTAMP:
+		dest = TupleTypes::TYPE_MICRO_TIMESTAMP;
+		break;
+	case COLUMN_TYPE_NANO_TIMESTAMP:
+		dest = TupleTypes::TYPE_NANO_TIMESTAMP;
 		break;
 	case COLUMN_TYPE_GEOMETRY:
 		dest = TupleTypes::TYPE_GEOMETRY;
@@ -4543,6 +4573,12 @@ bool SQLContainerImpl::ContainerValueUtils::toContainerColumnType(
 		break;
 	case TupleTypes::TYPE_TIMESTAMP:
 		dest = COLUMN_TYPE_TIMESTAMP;
+		break;
+	case TupleTypes::TYPE_MICRO_TIMESTAMP:
+		dest = COLUMN_TYPE_MICRO_TIMESTAMP;
+		break;
+	case TupleTypes::TYPE_NANO_TIMESTAMP:
+		dest = COLUMN_TYPE_NANO_TIMESTAMP;
 		break;
 	case TupleTypes::TYPE_GEOMETRY:
 		dest = COLUMN_TYPE_GEOMETRY;

@@ -408,12 +408,13 @@ public:
 	UTIL_OBJECT_CODER_PARTIAL_OBJECT;
 
 	UTIL_OBJECT_CODER_MEMBERS(
-			columnList_, groupColumns_, nestLevel_);
+			columnList_, groupColumns_, nestLevel_, pred_);
 
 private:
 	Expression *columnList_;
 	ColumnPosList groupColumns_;
 	uint32_t nestLevel_;
+	Expression *pred_;
 };
 
 class DQLProcs::JoinOption {

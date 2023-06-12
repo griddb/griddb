@@ -254,7 +254,7 @@ Job* JobManager::create(JobId& jobId, JobInfo* jobInfo) {
 	}
 }
 
-void JobManager::remove(JobId& jobId, int32_t point) {
+void JobManager::remove(JobId& jobId) {
 	try {
 		util::LockGuard<util::Mutex> guard(mutex_);
 		JobMapItr it = jobMap_.find(jobId);
@@ -325,7 +325,7 @@ void JobManager::beginJob(EventContext& ec, JobId& jobId,
 	}
 }
 
-void JobManager::cancel(EventContext& ec, JobId& jobId, bool clientCancel, int32_t point) {
+void JobManager::cancel(EventContext& ec, JobId& jobId, bool clientCancel) {
 	try {
 		Latch latch(jobId, "JobManager::cancel", this);
 		Job* job = latch.get();
@@ -334,7 +334,7 @@ void JobManager::cancel(EventContext& ec, JobId& jobId, bool clientCancel, int32
 				GS_TRACE_SQL_EXECUTION_INFO, "CANCEL:jobId=" << jobId);
 			return;
 		}
-		job->cancel(ec, clientCancel, point);
+		job->cancel(ec, clientCancel);
 	}
 	catch (std::exception& e) {
 		GS_RETHROW_USER_OR_SYSTEM(e, "");
@@ -484,7 +484,7 @@ void JobManager::checkAlive(EventContext& ec,
 				UTIL_TRACE_EXCEPTION(SQL_SERVICE, e2, "");
 			}
 			if (!job->isCoordinator()) {
-				remove(jobId, 2);
+				remove(jobId);
 			}
 		}
 	}
@@ -532,6 +532,7 @@ Job::Job(JobId& jobId, JobInfo* jobInfo, JobManager* jobManager,
 	deployCompleted_(false),
 	coordinatorNodeId_(jobInfo->coordinatorNodeId_),
 	cancelled_(false),
+	clientCancelled_(false),
 	status_(FW_JOB_INIT),
 	jobAllocateMemory_(0),
 	executionCount_(0),
@@ -823,46 +824,18 @@ void Job::encodeProcessor(EventContext& ec,
 	}
 }
 
-#define THROW_CANCEL(sourceErrorCode, sourceErrorMessage, location, address) \
-try { \
-		GS_THROW_USER_ERROR(sourceErrorCode, sourceErrorMessage); \
-} \
-catch (std::exception &e) { \
-	GS_RETHROW_USER_ERROR_CODED( \
-			GS_ERROR_JOB_CANCELLED, e, \
-			GS_EXCEPTION_MERGE_MESSAGE(e, "Cancel job") \
-			<< ", location=" << location <<", jobId=" << jobId_ <<", srcAddress="<<address);  \
-}
-
-#define THROW_CANCEL_BY_EXCEPTION(sourceException, location, address) \
-GS_RETHROW_USER_ERROR_CODED( \
-		GS_ERROR_JOB_CANCELLED, sourceException, \
-		GS_EXCEPTION_MERGE_MESSAGE(sourceException, "Cancel job") \
-		<< ", location=" << location << ", jobId=" << jobId_ << ", srcAddress=" << address);  
 
 void Job::checkCancel(const char* str, bool partitionCheck, bool nodeCheck) {
 
-	const char* address = jobManager_->getHostName().c_str();
-
-	if (cancelled_) {
-		int64_t memoryLimit = jobManager_->sqlSvc_->getJobMemoryLimit();
-		if (memoryLimit > 0 && jobAllocateMemory_ >= memoryLimit) {
-			THROW_CANCEL(GS_ERROR_JOB_REQUEST_CANCEL,
-				"Memory allocation limit, size=" << jobAllocateMemory_ << ", limit=" << memoryLimit, str, address);
-		}
-		else {
-			THROW_CANCEL(GS_ERROR_JOB_REQUEST_CANCEL, "Called cancel", str, address);
-		}
-	}
-
 	SQLService* sqlService = jobManager_->getSQLService();
+
 	if (expiredTime_ != INT64_MAX) {
 		int64_t current = sqlService->getEE()->getMonotonicTime();
 		if (current >= expiredTime_) {
-			THROW_CANCEL(GS_ERROR_JOB_TIMEOUT,
-				"Expired query timeout=" << queryTimeout_
-				<< "ms, startTime=" << CommonUtility::getTimeStr(startTime_)
-				<< ",current=" << current << ",limit=" << expiredTime_, str, address);
+			GS_THROW_USER_ERROR(GS_ERROR_JOB_CANCELLED,
+				"Canceling job due to query timeout "
+					"(jobId=" << jobId_ << ", query timeout=" << queryTimeout_ << " (ms), "
+					"query start time=" << CommonUtility::getTimeStr(startTime_) << ")");
 		}
 	}
 
@@ -870,15 +843,19 @@ void Job::checkCancel(const char* str, bool partitionCheck, bool nodeCheck) {
 		jobManager_->getSQLService()->checkActiveStatus();
 	}
 	catch (std::exception& e) {
-		THROW_CANCEL_BY_EXCEPTION(e, str, address);
+		GS_RETHROW_USER_ERROR_CODED(GS_ERROR_JOB_CANCELLED, e,
+			GS_EXCEPTION_MERGE_MESSAGE(e, 
+				"Canceling job due to invalid cluster status "
+					"(jobId=" << jobId_ << ")"));
 	}
 
 	if (nodeCheck) {
 		PartitionTable* pt = jobManager_->getPartitionTable();
 		for (size_t pos = 0; pos < nodeList_.size(); pos++) {
 			if (pt->getHeartbeatTimeout(nodeList_[pos]) == UNDEF_TTL) {
-				THROW_CANCEL(GS_ERROR_JOB_NODE_FAILURE,
-					"Node failure occured, node=" << pt->dumpNodeAddress(nodeList_[pos]), str, address);
+				GS_THROW_USER_ERROR(GS_ERROR_JOB_CANCELLED,
+					"Canceling job due to node failures, "
+					"(jobId=" << jobId_ << ", failured node=" << pt->dumpNodeAddress(nodeList_[pos]) << ")");
 			}
 		}
 	}
@@ -888,18 +865,47 @@ void Job::checkCancel(const char* str, bool partitionCheck, bool nodeCheck) {
 			checkAsyncPartitionStatus();
 		}
 		catch (std::exception& e) {
-			THROW_CANCEL_BY_EXCEPTION(e, str, address);
+			GS_RETHROW_USER_ERROR_CODED(GS_ERROR_JOB_CANCELLED, e, \
+				GS_EXCEPTION_MERGE_MESSAGE(e, "Canceling job due to invalid partition status ("
+				"jobId=" << jobId_ << ")"));
 		}
+	}
+	
+	if (cancelled_) {
+		if (clientCancelled_) {
+			SQLExecutionManager::Latch latch(jobId_.clientId_,
+				jobManager_->getExecutionManager());
+			SQLExecution* execution = latch.get();
+			if (execution) {
+				execution->getContext().getClientNd();
+				GS_THROW_USER_ERROR(GS_ERROR_JOB_CANCELLED,
+					"Canceling job due to client cancel request or query timeout ("
+					"jobId=" << jobId_ <<
+					 "client address=" << execution->getContext().getClientNd() << 
+					 ", db=" << execution->getContext().getDBName() <<
+					 ", app=" << execution->getContext().getApplicationName() <<
+					 ", source=" << execution->getContext().getClientNd() << ")");
+			}
+		}
+		int64_t memoryLimit = jobManager_->sqlSvc_->getJobMemoryLimit();
+		if (memoryLimit > 0 && jobAllocateMemory_ >= memoryLimit) {
+			GS_THROW_USER_ERROR(GS_ERROR_JOB_CANCELLED,
+				"Canceling job due to memory allocation limit ("
+				"jobId=" << jobId_ << ", allocation size=" << jobAllocateMemory_ <<
+				", limit size = " << memoryLimit << ")");
+		}
+		GS_THROW_USER_ERROR(GS_ERROR_JOB_CANCELLED,
+			"Canceling job due to internal process (jobId=" << jobId_ << ")");
 	}
 }
 
-void JobManager::Job::cancel(EventContext& ec, bool clientCancel, int32_t point) {
-	setCancel();
+void JobManager::Job::cancel(EventContext& ec, bool clientCancel) {
+	setCancel(clientCancel);
 	if (isCoordinator()) {
 		for (size_t pos = 0; pos < nodeList_.size(); pos++) {
 			NodeId targetNodeId = nodeList_[pos];
 			if (pos == 0 && !clientCancel) {
-				jobManager_->remove(jobId_, point);
+				jobManager_->remove(jobId_);
 			}
 			else {
 				sendJobEvent(ec, targetNodeId, FW_CONTROL_CANCEL, NULL, NULL,
@@ -920,7 +926,7 @@ void JobManager::Job::cancel(EventContext& ec, bool clientCancel, int32_t point)
 		}
 		catch (std::exception& e) {
 			handleError(ec, &e);
-			jobManager_->remove(jobId_, 4);
+			jobManager_->remove(jobId_);
 		}
 	}
 }
@@ -960,7 +966,7 @@ void JobManager::Job::fetch(EventContext& ec, SQLExecution* execution) {
 	if (execution->fetch(ec, fetchContext,
 		execution->getContext().getExecId(), jobId_.versionId_)) {
 
-		jobManager_->remove(jobId_, 5);
+		jobManager_->remove(jobId_);
 		if (!execution->getContext().isPreparedStatement()) {
 			jobManager_->removeExecution(&ec, jobId_, execution, true);
 		}
@@ -1201,7 +1207,6 @@ void Job::getProfiler(util::StackAllocator& alloc,
 				taskProf.inputId_ = task->inputNo_;
 				taskProf.sendPendingCount_ = task->sendRequestCount_;
 				taskProf.counter_ = task->profilerInfo_->profiler_.executionCount_;
-				taskProf.counter_ = task->profilerInfo_->profiler_.worker_;
 				taskProf.dispatchCount_ = task->dispatchCount_;
 				taskProf.dispatchTime_ = task->dispatchTime_;
 				taskProf.status_ = getTaskExecStatusName(task->status_);
@@ -1389,7 +1394,7 @@ void Job::deploy(EventContext& ec, util::StackAllocator& alloc,
 				JobManager::FW_CONTROL_EXECUTE_SUCCESS,
 				NULL, NULL, 0, 0, connectedPId_,
 				SQL_SERVICE, false, false, static_cast<TupleList::Block*>(NULL));
-			jobManager_->remove(jobId_, 6);
+			jobManager_->remove(jobId_);
 		}
 	}
 	deployCompleted_ = true;
@@ -1654,7 +1659,7 @@ void Job::doComplete(EventContext& ec, Task* task, TaskId inputId,
 				JobManager::FW_CONTROL_EXECUTE_SUCCESS,
 				NULL, NULL, 0, 0, connectedPId_,
 				SQL_SERVICE, false, false, static_cast<TupleList::Block*>(NULL));
-			jobManager_->remove(jobId_, 7);
+			jobManager_->remove(jobId_);
 		}
 		status_ = Job::FW_JOB_COMPLETE;
 	}
@@ -1941,7 +1946,7 @@ void JobManager::Job::sendJobEvent(EventContext& ec, NodeId nodeId,
 					SQLJobHandler::encodeRequestInfo(out, jobId, controlType);
 					jobManager_->sendEvent(
 						cancelRequest, SQL_SERVICE, coordinatorNodeId_, 0, NULL, false);
-					jobManager_->remove(jobId, 8);
+					jobManager_->remove(jobId);
 					return;
 				}
 			}
@@ -2041,7 +2046,7 @@ void JobManager::Job::cancel(const Event::Source& source, CancelOption& option) 
 		}
 	}
 	if (!isCoordinator() || option.forced_) {
-		jobManager_->remove(jobId, 0);
+		jobManager_->remove(jobId);
 	}
 }
 
@@ -2107,15 +2112,17 @@ void Job::Task::setupContextTask() {
 
 void Job::Task::setupProfiler(TaskInfo* taskInfo) {
 	profilerInfo_ = job_->appendProfiler();
+	int32_t workerId;
+	if (type_ == static_cast<uint8_t>(SQL_SERVICE)) {
+		workerId = jobManager_->getSQLService()->getPartitionGroupId(loadBalance_);
+	}
+	else {
+		workerId = jobManager_->getTransactionService()->getPartitionGroupId(loadBalance_)
+			+ jobManager_->getSQLService()->getConcurrency();
+	}
+	profilerInfo_->taskId_ = taskId_;
+	profilerInfo_->profiler_.worker_ = workerId;
 	if (job_->isExplainAnalyze() || jobManager_->getSQLService()->isEnableProfiler()) {
-		int32_t workerId;
-		if (type_ == static_cast<uint8_t>(SQL_SERVICE)) {
-			workerId = jobManager_->getSQLService()->getPartitionGroupId(loadBalance_);
-		}
-		else {
-			workerId = jobManager_->getTransactionService()->getPartitionGroupId(loadBalance_)
-				+ jobManager_->getSQLService()->getConcurrency();
-		}
 		profilerInfo_->init(jobStackAlloc_, taskId_,
 			taskInfo->inputList_.size(), workerId, true);
 	}
@@ -2331,7 +2338,7 @@ void ControlJobHandler::operator()(EventContext& ec, Event& ev) {
 		break;
 		case JobManager::FW_CONTROL_CANCEL:
 			job->setCancel();
-			jobManager_->cancel(ec, jobId, true, 101);
+			jobManager_->cancel(ec, jobId, true);
 			break;
 		case JobManager::FW_CONTROL_CHECK_CONTAINER:
 			job->ackResult(ec);
@@ -3020,12 +3027,15 @@ void JobManager::executeStatementError(EventContext& ec,
 	if (execution) {
 		RequestInfo request(alloc, false);
 		execution->execute(ec, request, true, e, jobId.versionId_, &jobId);
-		cancel(ec, jobId, false, 71);
-		remove(jobId, 9);
-		removeExecution(&ec, jobId, execution, true);
+		bool pendingException = execution->getContext().checkPendingException(false);
+		cancel(ec, jobId, false);
+		remove(jobId);
+		if (!pendingException) {
+			removeExecution(&ec, jobId, execution, true);
+		}
 	}
 	else {
-		remove(jobId, 10);
+		remove(jobId);
 	}
 }
 
@@ -3041,8 +3051,8 @@ void JobManager::executeStatementSuccess(EventContext& ec, Job* job,
 			replyCxt.setExplainAnalyze(&ec, job, jobId.versionId_, &jobId);
 			execution->replyClient(replyCxt);
 		}
-		cancel(ec, jobId, false, 72);
-		remove(jobId, 11);
+		cancel(ec, jobId, false);
+		remove(jobId);
 		removeExecution(&ec, jobId, execution, true);
 	}
 }

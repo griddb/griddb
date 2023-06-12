@@ -681,7 +681,7 @@ public:
 
 		void fetch(EventContext& ec, SQLExecution* execution);
 
-		void cancel(EventContext& ec, bool clientCancel, int32_t point);
+		void cancel(EventContext& ec, bool clientCancel);
 
 		void cancel(const Event::Source& sourcel, CancelOption& option);
 
@@ -731,8 +731,9 @@ public:
 
 		bool getFetchContext(SQLFetchContext& cxt);
 
-		void setCancel() {
+		void setCancel(bool clientCancelled = false) {
 			cancelled_ = true;
+			clientCancelled_ = clientCancelled;
 		}
 
 		PartitionId getPartitionId() {
@@ -880,6 +881,7 @@ public:
 		bool isSQL_;
 		NodeId coordinatorNodeId_;
 		util::Atomic<bool> cancelled_;
+		util::Atomic<bool> clientCancelled_;
 		ExecutionStatus status_;
 		int64_t queryTimeout_;
 		int64_t expiredTime_;
@@ -1098,7 +1100,7 @@ public:
 	void beginJob(EventContext& ec, JobId& jobId, JobInfo* jobInfo, int64_t waitInterval);
 	void removeExecution(
 		EventContext* ec, JobId& jobId, SQLExecution* execution, bool withCheck);
-	void cancel(EventContext& ec, JobId& jobId, bool clientCancel, int32_t point);
+	void cancel(EventContext& ec, JobId& jobId, bool clientCancel);
 	void cancel(const Event::Source& eventSource, JobId& jobId, CancelOption& option);
 	void cancelAll(const Event::Source& eventSource,
 		util::StackAllocator& alloc, util::Vector<JobId>& jobIdList, CancelOption& option);
@@ -1160,7 +1162,7 @@ public:
 		return executionManager_;
 	}
 
-	void remove(JobId& jobId, int32_t point);
+	void remove(JobId& jobId);
 
 	std::string& getHostName() {
 		return hostName_;

@@ -34,6 +34,8 @@ convertTupleTypeToNoSQLTypeWithNullable(TupleList::TupleColumnType type) {
 	case TupleList::TYPE_NUMERIC: returnType = COLUMN_TYPE_DOUBLE;break;
 	case TupleList::TYPE_DOUBLE: returnType = COLUMN_TYPE_DOUBLE;break;
 	case TupleList::TYPE_TIMESTAMP: returnType = COLUMN_TYPE_TIMESTAMP;break;
+	case TupleList::TYPE_MICRO_TIMESTAMP: returnType = COLUMN_TYPE_MICRO_TIMESTAMP;break;
+	case TupleList::TYPE_NANO_TIMESTAMP: returnType = COLUMN_TYPE_NANO_TIMESTAMP;break;
 	case TupleList::TYPE_NULL: returnType = COLUMN_TYPE_NULL;break;
 	case TupleList::TYPE_STRING: returnType = COLUMN_TYPE_STRING;break;
 	case TupleList::TYPE_GEOMETRY: returnType = COLUMN_TYPE_GEOMETRY;break;
@@ -113,6 +115,14 @@ void SQLResultSet::setColumnTypeList(
 	setup();
 }
 
+void SQLResultSet::writeType(
+		util::ByteStream< util::XArrayOutStream<> > &out, ColumnType type) {
+	const bool withAny = true;
+	const int8_t typeOrdinal =
+			ValueProcessor::getPrimitiveColumnTypeOrdinal(type, withAny);
+	out << typeOrdinal;
+}
+
 void SQLResultSet::exportSchema(util::StackAllocator& alloc,
 	EventByteOutStream& out) {
 	try {
@@ -131,21 +141,21 @@ void SQLResultSet::exportSchema(util::StackAllocator& alloc,
 		for (columnNo = 0; columnNo < columnCount_; columnNo++) {
 			const util::String emptyColumnName("", alloc);
 			StatementHandler::encodeStringData<EventByteOutStream>(out, emptyColumnName);
-			uint8_t type = columnTypeList_[columnNo];
+			ColumnType type = columnTypeList_[columnNo];
 			const bool nullable = (type != COLUMN_TYPE_ANY &&
 				((type & NULLABLE_MASK) != 0));
 			if (nullable) {
 				type &= ~NULLABLE_MASK;
 			}
-			out << type;
-			const bool isArrayVal = false;
-			uint8_t flags = 0;
-			if (isArrayVal) {
-				flags |= ColumnInfo::COLUMN_FLAG_KEY;
-			}
-			if (!nullable) {
-				flags |= ColumnInfo::COLUMN_FLAG_NOT_NULL;
-			}
+			const bool withAny = true;
+			const int8_t typeOrdinal =
+					ValueProcessor::getPrimitiveColumnTypeOrdinal(
+							type, withAny);
+			out << typeOrdinal;
+			const bool forArray = false;
+			const bool noNull = !nullable;
+			const uint8_t flags =
+					MessageSchema::makeColumnFlags(forArray, false, noNull);
 			out << flags;
 		}
 		const int16_t keyCount = (keyColumnId >= 0 ? 0 : 1);

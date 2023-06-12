@@ -28,15 +28,6 @@
 #include "value_operator.h"
 #include <limits>
 
-typedef Operator OperatorTable[11][11];
-
-typedef void (*Calculator)(TransactionContext &txn, uint8_t const *p,
-	uint32_t size1, uint8_t const *q, uint32_t size2, Value &value);
-extern const Operator gtTable[][11];
-extern const Operator ltTable[][11];
-extern const Calculator addTable[][11];
-extern const Calculator divTable[][11];
-
 /*!
  * @brief TQL Aggregate function base class
  *
@@ -92,7 +83,7 @@ public:
 	 * @return test result
 	 */
 	virtual bool isAcceptable(ColumnType type) {
-		return (type >= COLUMN_TYPE_BYTE && type <= COLUMN_TYPE_DOUBLE);
+		return ValueProcessor::isNumerical(type);
 	}
 
 	virtual QpPassMode getPassMode() {
@@ -248,8 +239,7 @@ public:
 				"Invalid type for aggregation");
 		}
 		ColumnType type = input.getType();
-		assert(CalculatorTable::addTable_[type][value.getType()] != NULL);
-		CalculatorTable::addTable_[type][value.getType()](
+		CalculatorTable::Add()(type, value.getType())(
 			txn, input.data(), 0, value.data(), 0, value);
 		b = true;
 	}
@@ -264,7 +254,7 @@ public:
 	 */
 	virtual bool getResult(TransactionContext &txn, Value &result) {
 		result.set(0);
-		CalculatorTable::addTable_[result.getType()][value.getType()](
+		CalculatorTable::Add()(result.getType(), value.getType())(
 			txn, result.data(), 0, value.data(), 0, result);
 		return b;  
 	}
@@ -616,8 +606,9 @@ public:
 	 * @param inputType Value type to input
 	 */
 	virtual void reset(ColumnType inputType) {
-		resultFlag = false;
-		type = inputType;
+		resultFlag_ = false;
+		timestampFamily_ = ValueProcessor::isTimestampFamily(inputType);
+		type_ = inputType;
 	}
 
 	using TqlAggregation::putValue;
@@ -628,16 +619,16 @@ public:
 	 * @param input Value to aggregate
 	 */
 	virtual void putValue(TransactionContext &txn, const Value &input) {
-		if (type == COLUMN_TYPE_TIMESTAMP) {
-			if (resultFlag) {
-				if ((*opTable)[type][type](txn, input.data(), 0,
-						reinterpret_cast<uint8_t *>(&tsValue), 0) == true) {
-					tsValue = input.getTimestamp();
+		if (timestampFamily_) {
+			if (resultFlag_) {
+				if (ComparatorTable::getOperator(*opTable_, type_, type_)(
+						txn, input.data(), 0, value_.data(), 0) == true) {
+					value_.copyFixedValue(input);
 				}
 			}
 			else {
-				tsValue = input.getTimestamp();
-				resultFlag = true;
+				value_.copyFixedValue(input);
+				resultFlag_ = true;
 			}
 		}
 		else {
@@ -646,21 +637,19 @@ public:
 					"Invalid type for aggregation");
 			}
 
-			if (resultFlag) {
-				assert(opTable[type][value.getType()] != NULL);
-				if ((*opTable)[type][value.getType()](
-						txn, input.data(), 0, value.data(), 0) == true) {
-					value.set(0);
-					CalculatorTable::addTable_[type][value.getType()](
-						txn, input.data(), 0, value.data(), 0, value);
+			if (resultFlag_) {
+				if (ComparatorTable::getOperator(*opTable_, type_, value_.getType())(
+						txn, input.data(), 0, value_.data(), 0) == true) {
+					value_.set(0);
+					CalculatorTable::Add()(type_, value_.getType())(
+							txn, input.data(), 0, value_.data(), 0, value_);
 				}
 			}
 			else {
-				value.set(0);
-				assert(opTable[type][value.getType()] != NULL);
-				CalculatorTable::addTable_[input.getType()][value.getType()](
-					txn, input.data(), 0, value.data(), 0, value);
-				resultFlag = true;
+				value_.set(0);
+				CalculatorTable::Add()(input.getType(), value_.getType())(
+						txn, input.data(), 0, value_.data(), 0, value_);
+				resultFlag_ = true;
 			}
 		}
 	}
@@ -674,19 +663,17 @@ public:
 	 * @return The result value is valid
 	 */
 	virtual bool getResult(TransactionContext &txn, Value &result) {
-		if (!resultFlag) {
+		if (!resultFlag_) {
 			return false;
 		}
 
-		switch (type) {
-		case COLUMN_TYPE_TIMESTAMP:
-			result.setTimestamp(tsValue);
-			break;
-		default: {
+		if (timestampFamily_) {
+			result.copyFixedValue(value_);
+		}
+		else {
 			Value zero(0);
-			CalculatorTable::addTable_[value.getType()][COLUMN_TYPE_INT](
-				txn, value.data(), 0, zero.data(), 0, result);
-		} break;
+			CalculatorTable::Add()(value_.getType(), COLUMN_TYPE_INT)(
+					txn, value_.data(), 0, zero.data(), 0, result);
 		}
 		return true;
 	}
@@ -700,18 +687,18 @@ public:
 	 * @return test result
 	 */
 	virtual bool isAcceptable(ColumnType type) {
-		return (type >= COLUMN_TYPE_BYTE && type <= COLUMN_TYPE_DOUBLE) ||
-			   type == COLUMN_TYPE_TIMESTAMP;
+		return ValueProcessor::isNumerical(type) ||
+				ValueProcessor::isTimestampFamily(type);
 	}
 
 	virtual ~AggregationMaxMinBase() {}
 
 protected:
-	Value value;
-	Timestamp tsValue;
-	bool resultFlag;
-	ColumnType type;
-	const OperatorTable *opTable;
+	Value value_;
+	bool resultFlag_;
+	bool timestampFamily_;
+	ColumnType type_;
+	const ValueOperatorTable *opTable_;
 };
 
 /*!
@@ -724,8 +711,9 @@ public:
 	 * @brief constructor setups opTable
 	 */
 	AggregationMax() {
-		opTable = reinterpret_cast<const OperatorTable *>(&ComparatorTable::gtTable_);
+		opTable_ = &ComparatorTable::gtTable_;
 	}
+
 	virtual AggregationType apiAggregationType() {
 		return AGG_MAX;
 	}
@@ -759,8 +747,9 @@ public:
 	 * @brief constructor setups opTable
 	 */
 	AggregationMin() {
-		opTable = reinterpret_cast<const OperatorTable *>(&ComparatorTable::ltTable_);
+		opTable_ = &ComparatorTable::ltTable_;
 	}
+
 	virtual AggregationType apiAggregationType() {
 		return AGG_MIN;
 	}

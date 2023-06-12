@@ -268,6 +268,8 @@ public:
 	template<typename Container, RowArrayType rowArrayType>
 	class RowArrayImpl;
 
+	typedef bool IndexMapTable[COLUMN_TYPE_PRIMITIVE_COUNT][MAP_TYPE_NUM];
+
 public:  
 public:  
 	virtual ~BaseContainer() {
@@ -321,6 +323,10 @@ public:
 	bool checkRowKeySchema(util::XArray<ColumnType> &columnTypeList);
 	void getContainerInfo(TransactionContext &txn,
 		util::XArray<uint8_t> &containerSchema, bool optionIncluded = true, bool internalOptionIncluded = true, bool isRenameColumn = false);
+
+	virtual SchemaFeatureLevel getSchemaFeatureLevel() const;
+	static SchemaFeatureLevel resolveColumnSchemaFeatureLevel(
+			const ColumnInfo &info);
 
 	void getErasableList(TransactionContext &txn, Timestamp erasableTimeLimit, util::XArray<ArchiveInfo> &list);
 
@@ -626,6 +632,10 @@ public:
 		return MAX_TIMESTAMP;
 	}
 
+	void validateIndexInfo(const IndexInfo &info) const;
+	static void validateIndexInfo(
+			ContainerType type, ColumnType columnType, MapType mapType);
+
 protected:  
 	/*!
 		@brief Mode of operation of put
@@ -681,6 +691,8 @@ protected:
 			case COLUMN_TYPE_FLOAT:
 			case COLUMN_TYPE_DOUBLE:
 			case COLUMN_TYPE_TIMESTAMP:
+			case COLUMN_TYPE_MICRO_TIMESTAMP:
+			case COLUMN_TYPE_NANO_TIMESTAMP:
 			case COLUMN_TYPE_OID: {
 				data_ = reinterpret_cast<uint8_t *>(
 					txn.getDefaultAllocator().allocate(
@@ -711,35 +723,42 @@ protected:
 		@brief Compare method for sort
 	*/
 	struct SortPred {
-		const Operator *op_;
+		Operator op_;
 		TransactionContext *txn_;
 		const ColumnType columnType_;
 		const bool isNullLast_;
-		SortPred(TransactionContext &txn, const Operator *op,
-			const ColumnType columnType, bool isNullLast)
-			: op_(op), txn_(&txn), columnType_(columnType),
-			isNullLast_(isNullLast) {}
+
+		SortPred(
+				TransactionContext &txn, Operator op,
+				const ColumnType columnType, bool isNullLast) :
+				op_(op), txn_(&txn), columnType_(columnType),
+				isNullLast_(isNullLast) {
+		}
+
 		bool operator()(const SortKey &v1, const SortKey &v2) const {
 			if (v1.data() == NULL) {
 				if (v2.data() == NULL) {
 					return false;
-				} else {
+				}
+				else {
 					return !isNullLast_;
 				}
 			}
 			else if (v2.data() == NULL) {
 				return isNullLast_;
-			} else {
+			}
+			else {
 				Value value1_;
 				Value value2_;
 				value1_.set(v1.data(), columnType_);
 				value2_.set(v2.data(), columnType_);
-				return (*op_)(*txn_, value1_.data(), value1_.size(), value2_.data(),
-					value2_.size());
+				return op_(
+						*txn_,
+						value1_.data(), value1_.size(),
+						value2_.data(), value2_.size());
 			}
 		}
 	};
-
 
 	enum ToRowMode {
 		TO_MVCC,
@@ -933,7 +952,6 @@ protected:
 
 	void setCreateRowId(TransactionContext &txn, RowId rowId);
 
-	bool isSupportIndex(const IndexInfo &indexInfo) const;
 	IndexCursor createCursor(TransactionContext &txn, const MvccRowImage &mvccImage);
 
 	virtual void putRow(TransactionContext &txn, uint32_t rowSize,
@@ -1173,6 +1191,9 @@ protected:
 	const uint8_t *getAffinityBinary() const {
 		return commonContainerSchema_->get<uint8_t>(META_TYPE_AFFINITY);
 	}
+
+	template<typename C>
+	static SchemaFeatureLevel resolveSchemaFeatureLevel(const C &container);
 
 protected:  
 	void setContainerInvalid() {
@@ -1912,6 +1933,21 @@ private:
 	RowArray &rowArray_;
 	VirtualValueList *virtualValueList_;
 };
+
+template<typename C>
+SchemaFeatureLevel BaseContainer::resolveSchemaFeatureLevel(
+		const C &container) {
+	const uint32_t columnNum = container.getColumnNum();
+
+	SchemaFeatureLevel level = 1;
+	for (uint32_t i = 0; i < columnNum; i++) {
+		level = std::max(
+				level,
+				resolveColumnSchemaFeatureLevel(container.getColumnInfo(i)));
+	}
+
+	return level;
+}
 
 inline bool ContainerRowScanner::scanRowUnchecked(
 		TransactionContext &txn, BaseContainer &container,

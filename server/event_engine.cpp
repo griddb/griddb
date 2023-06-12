@@ -3775,7 +3775,7 @@ bool EventEngine::EventWorker::popActiveEvents(
 				Event(*localVarAllocator_, *entry.ev_));
 		found = true;
 
-		bufTotal += entry.ev_->getMessageBuffer().getCapacity();
+		bufTotal += getEventBufferSize(*entry.ev_);
 		updateBufferSize<false>(*entry.ev_);
 		ALLOC_VAR_SIZE_DELETE(*sharedVarAllocator_, entry.ev_);
 
@@ -3915,14 +3915,18 @@ inline void EventEngine::EventWorker::addDirect(
 
 template<bool Adding>
 inline void EventEngine::EventWorker::updateBufferSize(const Event &ev) {
-	const int64_t diff = static_cast<int64_t>(
-			ev.getMessageBuffer().getCapacity()) * (Adding ? 1 : -1);
+	const int64_t diff =
+			static_cast<int64_t>(getEventBufferSize(ev)) * (Adding ? 1 : -1);
 	bufferSizeLimitter_.reportDiff(diff);
 
 	const int64_t size = bufferSizeLimitter_.getValue();
 
 	stats_.set(Stats::EVENT_ACTIVE_BUFFER_SIZE_CURRENT, size);
 	stats_.updateMax(Stats::EVENT_ACTIVE_BUFFER_SIZE_MAX, size);
+}
+
+inline size_t EventEngine::EventWorker::getEventBufferSize(const Event &ev) {
+	return ev.getMessageBuffer().getCapacity();
 }
 
 template<typename EventContainer>

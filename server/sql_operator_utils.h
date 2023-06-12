@@ -159,7 +159,8 @@ public:
 	Projection& createProjectionByUsage(bool unified);
 
 	Projection& rewriteProjection(
-			const Projection &src, Projection **distinctProj = NULL);
+			const Projection &src, Projection **distinctProj = NULL,
+			bool chainOmitted = false);
 
 	Projection& createFilteredProjection(Projection &src, OpCode &code);
 	Projection& createFilteredProjection(
@@ -242,6 +243,8 @@ public:
 
 	static const Projection* findAggregationProjection(
 			const Projection &src, const bool *forPipe = NULL);
+	static Projection* findAggregationModifiableProjection(
+			Projection &src, const bool *forPipe = NULL);
 
 	bool findDistinctAggregation(const Projection &src);
 	static bool findDistinctAggregation(
@@ -1312,8 +1315,8 @@ inline void SQLOpUtils::ExpressionListWriter::ByDigestTuple<
 	base_.writer_->next();
 	WritableTuple outTuple = base_.writer_->get();
 
-	const bool digestWritable =
-			!SQLValues::TypeUtils::Traits<TypeTag::COLUMN_TYPE>::FOR_SEQUENTIAL;
+	const bool digestWritable = !SQLValues::TypeUtils::Traits<
+			TypeTag::COLUMN_TYPE>::SIZE_VAR_OR_LARGE_EXPLICIT;
 	if (digestWritable) {
 		assert(base_.isDigestColumnAssigned());
 		assert(T::COLUMN_TYPE ==
@@ -1354,7 +1357,8 @@ inline void SQLOpUtils::ExpressionListWriter::ByDigestTuple<
 	WritableTuple outTuple = base_.writer_->get();
 
 	const bool digestWritable =
-			!SQLValues::TypeUtils::Traits<TypeTag::COLUMN_TYPE>::FOR_MULTI_VAR;
+			!SQLValues::TypeUtils::Traits<TypeTag::COLUMN_TYPE>::FOR_MULTI_VAR &&
+			!SQLValues::TypeUtils::Traits<TypeTag::COLUMN_TYPE>::FOR_LARGE_FIXED;
 	if (digestWritable) {
 		assert(base_.isDigestColumnAssigned());
 		assert(T::COLUMN_TYPE ==

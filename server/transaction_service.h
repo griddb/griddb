@@ -23,6 +23,13 @@
 
 #include "util/trace.h"
 #include "data_type.h"
+#define AUDIT_TRACE_ERROR(tracer, cause, userName, privilege, dbName, appName, sourceAddr, \
+						 destAddr, target, statementType, statementInfo, statementId, message)
+#define AUDIT_TRACE_ERROR_CODED(tracer, code, userName, privilege, dbName, appName, sourceAddr, \
+						 destAddr, target, statementType, statementInfo, statementId, message)
+#define AUDIT_TRACER_DECLARE(name)
+#define AUDIT_TRACE_INFO(tracer, code, userName, privilege, dbName, appName, sourceAddr, \
+						 destAddr, target, statementType, statementInfo, statementId, message)
 
 #include "cluster_event_type.h"
 #include "event_engine.h"
@@ -714,6 +721,9 @@ public:
 			Event &ev, StatementId stmtId,
 			StatementExecStatus status, const std::exception &exception,
 			const NodeDescriptor &nd);
+	static std::string getAuditContainerName(util::StackAllocator &alloc, FullContainerKey* getcontainerKey);
+	static std::string getClientAddress(const Event & ev);
+	static std::string getClientAddress(const NodeDescriptor& nd);
 
 	static OptionSet* getReplyOption(util::StackAllocator& alloc,
 		const Request& request, CompositeIndexInfos* infos, bool isContinue);
@@ -733,6 +743,10 @@ public:
 
 	static EventType resolveReplyEventType(
 			EventType stmtType, const OptionSet &optionSet);
+
+	const char* AuditEventType(const Event &ev);
+
+	const int32_t AuditCategoryType(const Event &ev);
 
 	typedef uint32_t
 		ClusterRole;  
@@ -819,7 +833,9 @@ public:
 				retryCount_(0)
 			  ,clientId_()
 			  ,keepaliveTime_(0)
-		, connectionRoute_(StatementHandler::CONNECTION_ROUTE_LOCAL)
+			,
+			connectionRoute_(StatementHandler::CONNECTION_ROUTE_LOCAL),
+			acceptableFeatureVersion_(0)
 		{
 		}
 
@@ -843,6 +859,7 @@ public:
 			keepaliveTime_ = 0;
 			currentSessionId_ = 0;
 			connectionRoute_ = StatementHandler::CONNECTION_ROUTE_LOCAL;
+			acceptableFeatureVersion_ = 0;
 			initializeCoreInfo();
 		}
 
@@ -856,7 +873,10 @@ public:
 
 		void initializeCoreInfo();
 
-		void setFirstStep(ClientId &clientId, double storeMemoryAgingSwapRate, const util::TimeZone &timeZone, bool isLDAPAuthentication);
+		void setFirstStep(
+				ClientId &clientId, double storeMemoryAgingSwapRate,
+				const util::TimeZone &timeZone, bool isLDAPAuthentication, 
+				int32_t acceptableFeatureVersion);
 		void setSecondStep(const char8_t *userName, const char8_t *digest, const char8_t *dbName, const char8_t *applicationName,
 			bool isImmediateConsistency, int32_t txnTimeoutInterval, RequestType requestType);
 		void setBeforeAuth(UserType userType, bool isAdminAndPublicDB);
@@ -866,6 +886,7 @@ public:
 		void checkForUpdate(bool forUpdate);
 		void checkSelect(SQLParsedInfo &parsedInfo);
 
+		std::string getAuditApplicationName();
 		template<typename Alloc>
 		bool getApplicationName(
 				util::BasicString<
@@ -923,7 +944,8 @@ public:
 		ClientId clientId_;
 		EventMonotonicTime keepaliveTime_;
 		SessionId currentSessionId_;
-		int8_t connectionRoute_;//
+		int8_t connectionRoute_;
+		int32_t acceptableFeatureVersion_;
 	private:
 		util::Mutex mutex_;
 		std::string applicationName_;
@@ -1018,6 +1040,10 @@ public:
 	void checkContainerExistence(KeyDataStoreValue &keyStoreValue);
 	void checkContainerSchemaVersion(
 			BaseContainer *container, SchemaVersionId schemaVersionId);
+	static void checkSchemaFeatureVersion(
+			const BaseContainer &container, int32_t acceptableFeatureVersion);
+	static void checkSchemaFeatureVersion(
+			int32_t schemaFetureLevel, int32_t acceptableFeatureVersion);
 
 	void checkFetchOption(FetchOption fetchOption);
 	void checkSizeLimit(ResultSize limit);
@@ -1335,7 +1361,7 @@ protected:
 	DataStoreBase* getDataStore(PartitionId pId, StoreType type);
 	DataStoreBase* getDataStore(PartitionId pId, KeyDataStoreValue *keyStoreVal);
 	KeyDataStore* getKeyDataStore(PartitionId pId);
-	LogManager<NoLocker>* getLogManager(PartitionId pId);
+	LogManager<MutexLocker>* getLogManager(PartitionId pId);
 
 	KeyConstraint keyConstraint_[2][2][2];
 };
@@ -3293,7 +3319,7 @@ private:
 	void buildSchemaMap(
 			PartitionId pId,
 			const util::XArray<SearchEntry> &searchList, SchemaMap &schemaMap,
-			EventByteOutStream &out);
+			EventByteOutStream &out, int32_t acceptableFeatureVersion);
 
 	void checkContainerRowKey(
 			BaseContainer *container, const RowKeyPredicate &predicate);

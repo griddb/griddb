@@ -32,10 +32,11 @@
 #include <iomanip>  
 
 const Timestamp ValueProcessor::SUPPORT_MAX_TIMESTAMP =
-	(util::DateTime::max(TRIM_MILLISECONDS) >
-		static_cast<int64_t>(std::numeric_limits<int32_t>::max()) * 1000)
-		? util::DateTime(9999, 12, 31, 23, 59, 59, 999, false).getUnixTime()
-		: util::DateTime::max(TRIM_MILLISECONDS).getUnixTime();
+		makeMaxTimestamp(TRIM_MILLISECONDS);
+const MicroTimestamp ValueProcessor::SUPPORT_MAX_MICRO_TIMESTAMP =
+		makeMaxMicroTimestamp(TRIM_MILLISECONDS);
+const NanoTimestamp ValueProcessor::SUPPORT_MAX_NANO_TIMESTAMP =
+		makeMaxNanoTimestamp(TRIM_MILLISECONDS);
 
 /*!
 	@brief Compare message field value with object field value
@@ -59,10 +60,13 @@ int32_t ValueProcessor::compare(TransactionContext &txn,
 	case COLUMN_TYPE_LONG:
 	case COLUMN_TYPE_FLOAT:
 	case COLUMN_TYPE_DOUBLE:
-	case COLUMN_TYPE_TIMESTAMP: {
+	case COLUMN_TYPE_TIMESTAMP:
+	case COLUMN_TYPE_MICRO_TIMESTAMP:
+	case COLUMN_TYPE_NANO_TIMESTAMP: {
 		uint32_t objectRowFieldSize = 0;
-		result = ComparatorTable::comparatorTable_[type][type](txn, inputField, inputFieldSize,
-			objectRowField, objectRowFieldSize);
+		result = ComparatorTable::getComparator(type, type)(
+				txn, inputField, inputFieldSize,
+				objectRowField, objectRowFieldSize);
 	} break;
 	case COLUMN_TYPE_STRING:
 		result = StringProcessor::compare(
@@ -112,12 +116,15 @@ int32_t ValueProcessor::compare(TransactionContext &txn,
 	case COLUMN_TYPE_LONG:
 	case COLUMN_TYPE_FLOAT:
 	case COLUMN_TYPE_DOUBLE:
-	case COLUMN_TYPE_TIMESTAMP: {
+	case COLUMN_TYPE_TIMESTAMP:
+	case COLUMN_TYPE_MICRO_TIMESTAMP:
+	case COLUMN_TYPE_NANO_TIMESTAMP: {
 		uint32_t srcObjectRowFieldSize = 0;
 		uint32_t targetObjectRowFieldSize = 0;
-		result = ComparatorTable::comparatorTable_[type][type](txn, srcObjectRowField,
-			srcObjectRowFieldSize, targetObjectRowField,
-			targetObjectRowFieldSize);
+		result = ComparatorTable::getComparator(type, type)(
+				txn, srcObjectRowField,
+				srcObjectRowFieldSize, targetObjectRowField,
+				targetObjectRowFieldSize);
 	} break;
 	case COLUMN_TYPE_STRING:
 		result = StringProcessor::compare(
@@ -176,6 +183,8 @@ void ValueProcessor::getField(TransactionContext &txn,
 	case COLUMN_TYPE_FLOAT:
 	case COLUMN_TYPE_DOUBLE:
 	case COLUMN_TYPE_TIMESTAMP:
+	case COLUMN_TYPE_MICRO_TIMESTAMP:
+	case COLUMN_TYPE_NANO_TIMESTAMP:
 		messageRowStore->setField(
 			columnId, objectValue->data(), FixedSizeOfColumnType[type]);
 		break;
@@ -751,11 +760,77 @@ uint32_t StringCursor::getObjectSize() {
 	return length_ + ValueProcessor::getEncodedVarSize(length_);  
 }
 
+ValueProcessor::RawTimestampFormatter<Timestamp>
+ValueProcessor::getRawTimestampFormatter(const Timestamp &ts) {
+	return ValueProcessor::RawTimestampFormatter<Timestamp>(ts);
+}
+
+ValueProcessor::RawTimestampFormatter<MicroTimestamp>
+ValueProcessor::getRawTimestampFormatter(const MicroTimestamp &ts) {
+	return ValueProcessor::RawTimestampFormatter<MicroTimestamp>(ts);
+}
+
+ValueProcessor::RawTimestampFormatter<NanoTimestamp>
+ValueProcessor::getRawTimestampFormatter(const NanoTimestamp &ts) {
+	return ValueProcessor::RawTimestampFormatter<NanoTimestamp>(ts);
+}
+
+void ValueProcessor::dumpRawTimestamp(std::ostream &os, const Timestamp &ts) {
+	os << ts;
+}
+
+void ValueProcessor::dumpRawTimestamp(
+		std::ostream &os, const MicroTimestamp &ts) {
+	os << ts.value_;
+}
+
+void ValueProcessor::dumpRawTimestamp(
+		std::ostream &os, const NanoTimestamp &ts) {
+	os << "[";
+	os << ts.getHigh();
+	os << ",";
+	os << static_cast<uint32_t>(ts.getLow());
+	os << "]";
+}
+
+Timestamp ValueProcessor::makeMaxTimestamp(bool fractionTrimming) {
+	if (util::DateTime::max(fractionTrimming) >
+			static_cast<int64_t>(std::numeric_limits<int32_t>::max()) * 1000) {
+		return util::DateTime(9999, 12, 31, 23, 59, 59, 999, false).getUnixTime();
+	}
+	else {
+		return util::DateTime::max(fractionTrimming).getUnixTime();
+	}
+}
+
+MicroTimestamp ValueProcessor::makeMaxMicroTimestamp(bool fractionTrimming) {
+	return getMicroTimestamp(makeMaxNanoTimestamp(fractionTrimming));
+}
+
+NanoTimestamp ValueProcessor::makeMaxNanoTimestamp(bool fractionTrimming) {
+	return getNanoTimestamp(util::PreciseDateTime::ofNanoSeconds(
+			util::DateTime(makeMaxTimestamp(fractionTrimming)),
+			(fractionTrimming ? 0 : 1000 * 1000 - 1)));
+}
+
+Timestamp ValueProcessor::errorTimestampType() {
+	GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
+}
+
+MicroTimestamp ValueProcessor::errorMicroTimestampType() {
+	GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
+}
+
+NanoTimestamp ValueProcessor::errorNanoTimestampType() {
+	GS_THROW_SYSTEM_ERROR(GS_ERROR_DS_TYPE_INVALID, "");
+}
+
 std::string ValueProcessor::getTypeName(ColumnType type) {
 	return getTypeNameChars(type);
 }
 
-const char8_t* ValueProcessor::getTypeNameChars(ColumnType type) {
+const char8_t* ValueProcessor::getTypeNameChars(
+		ColumnType type, bool precisionIgnorable) {
 	switch (type) {
 	case COLUMN_TYPE_BOOL:
 		return "BOOL";
@@ -797,6 +872,16 @@ const char8_t* ValueProcessor::getTypeNameChars(ColumnType type) {
 		return "DOUBLE_ARRAY";
 	case COLUMN_TYPE_TIMESTAMP_ARRAY:
 		return "TIMESTAMP_ARRAY";
+	case COLUMN_TYPE_MICRO_TIMESTAMP:
+		if (precisionIgnorable) {
+			return "TIMESTAMP";
+		}
+		return "TIMESTAMP(6)";
+	case COLUMN_TYPE_NANO_TIMESTAMP:
+		if (precisionIgnorable) {
+			return "TIMESTAMP";
+		}
+		return "TIMESTAMP(9)";
 	default:
 		return "UNKNOWN_TYPE";
 	}
@@ -870,6 +955,17 @@ void ValueProcessor::dumpSimpleValue(util::NormalOStringStream &stream, ColumnTy
 		case COLUMN_TYPE_NULL:
 			stream << "NULL";
 			break;
+		case COLUMN_TYPE_MICRO_TIMESTAMP:
+			stream << toDateTime(
+					*static_cast<const MicroTimestamp*>(data)).getFormatter(
+					util::DateTime::ZonedOption()).withDefaultPrecision(
+					util::DateTime::FIELD_MICROSECOND);
+			break;
+		case COLUMN_TYPE_NANO_TIMESTAMP:
+			stream << toDateTime(
+					*static_cast<const NanoTimestamp*>(data)).getFormatter(
+					util::DateTime::ZonedOption());
+			break;
 		default:
 			stream << "(not implement)";
 			break;
@@ -877,3 +973,28 @@ void ValueProcessor::dumpSimpleValue(util::NormalOStringStream &stream, ColumnTy
 		}
 	}
 }
+
+int32_t ValueProcessor::getValuePrecision(ColumnType type) {
+	switch (type) {
+	case COLUMN_TYPE_TIMESTAMP:
+		return 3;
+	case COLUMN_TYPE_MICRO_TIMESTAMP:
+		return 6;
+	case COLUMN_TYPE_NANO_TIMESTAMP:
+		return 9;
+	default:
+		return -1;
+	}
+}
+
+int32_t ValueProcessor::getValueStringLength(ColumnType type) {
+	switch (type) {
+	case COLUMN_TYPE_TIMESTAMP:
+	case COLUMN_TYPE_MICRO_TIMESTAMP:
+	case COLUMN_TYPE_NANO_TIMESTAMP:
+		return 27 + getValuePrecision(type);
+	default:
+		return -1;
+	}
+}
+

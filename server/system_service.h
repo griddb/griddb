@@ -44,6 +44,7 @@ class SyncService;
 class RecoveryManager;
 class DataStoreV4;
 class NoLocker;
+class MutexLocker;
 template <class L> class LogManager;
 class PartitionList;
 class SQLService;
@@ -350,6 +351,11 @@ private:
 				AbstractSocket &socket, util::NormalXArray<char8_t> &buffer);
 		static SocketFactory& resolveSocketFactory(
 				SystemService *sysSvc, bool secure);
+		static std::string getURI(WebAPIRequest &request);		
+		static std::string getSenderName(AbstractSocket *socket);		
+		static std::string getNodeName(AbstractSocket *socket);
+		std::string getStatementName(std::string uriOperator);
+		static std::string getErrorInfo(WebAPIResponse &response);
 
 		util::Socket listenerSocket_;
 
@@ -367,6 +373,7 @@ private:
 		util::StackAllocator alloc_;
 		SocketFactory &socketFactory_;
 		const bool secure_;
+		std::unordered_map<std::string, std::string> uriToStatement_;
 	};
 
 	/*!

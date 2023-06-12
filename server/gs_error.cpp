@@ -332,6 +332,49 @@ u8string GSTraceFormatter::obfuscate(const u8string &src) {
 	return dest;
 }
 
+GSAuditTraceFormatter::GSAuditTraceFormatter(const char8_t *secretHexKey) :
+		GSTraceFormatter(secretHexKey) {
+}
+
+GSAuditTraceFormatter::~GSAuditTraceFormatter() {}
+
+void GSAuditTraceFormatter::formatFiltered(
+	std::ostream &stream, const util::TraceRecord &record) {
+	const bool codeAndSymbolCombined = true;
+
+	stream << record.dateTime_ << " ";
+
+	if (record.hostName_ != NULL) {
+		stream << record.hostName_ << " ";
+	}
+
+	stream << util::Thread::getSelfId() << " ";
+
+	formatLevel(stream, record);
+
+	if (!codeAndSymbolCombined) {
+		formatMainErrorCode(stream, record, false, " ");
+	}
+
+	if (record.tracerName_ != NULL) {
+		stream << " " << record.tracerName_;
+	}
+
+	if (codeAndSymbolCombined) {
+		if (formatMainErrorCode(stream, record, false, " [")) {
+			formatMainErrorCode(stream, record, true, ":");
+			stream << "]";
+		}
+	}
+	else {
+		formatMainErrorCode(stream, record, true, " ");
+	}
+
+	if (record.message_ != NULL && *record.message_ != '\0') {
+		stream << (codeAndSymbolCombined ? " " : " : ") << record.message_;
+	}
+}
+
 InterruptionChecker::InterruptionChecker() :
 		flags_(0),
 		handler_(NULL) {

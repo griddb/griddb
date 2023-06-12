@@ -151,6 +151,8 @@ void SQLGetContainerHandler::operator()(
 				request.fixed_.cxtSrc_,
 				now,
 				emNow);
+		txn.setAuditInfo(&ev, &ec, NULL);
+
 		const FullContainerKey containerKey(
 			alloc,
 			getKeyConstraint(CONTAINER_ATTR_ANY, false),
@@ -942,7 +944,7 @@ void SQLRequestHandler::operator ()(EventContext& ec, Event& ev) {
 			}
 			JobId jobId;
 			execution->getContext().getCurrentJobId(jobId);
-			jobManager_->cancel(ec, jobId, false, 102);
+			jobManager_->cancel(ec, jobId, false);
 			execution->close(ec, request);
 			executionManager_->remove(ec, request.clientId_, false, 59, NULL);
 		}
@@ -1117,9 +1119,16 @@ void SQLRequestHandler::decodeBindColumnInfo(
 		int32_t size;
 		char8_t* data;
 
-		ColumnType type;
-		fixedPartIn >> type;
+		int8_t typeOrdinal;
+		fixedPartIn >> typeOrdinal;
 
+		const bool forArray = false;
+		const bool withAny = true;
+		ColumnType type;
+		if (!ValueProcessor::findColumnTypeByPrimitiveOrdinal(
+				typeOrdinal, forArray, withAny, type)) {
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_VALUETYPE_UNSUPPORTED, "");
+		}
 		BindParam* param = ALLOC_NEW(request.eventStackAlloc_) BindParam(request.eventStackAlloc_, type);
 
 		switch (type) {
@@ -1157,6 +1166,21 @@ void SQLRequestHandler::decodeBindColumnInfo(
 			fixedPartIn >> numValue;
 			param->value_ = TupleValue(reinterpret_cast<const char*>(
 				&numValue), TupleList::TYPE_TIMESTAMP);
+			break;
+		}
+		case COLUMN_TYPE_MICRO_TIMESTAMP: {
+			fixedPartIn >> numValue;
+			param->value_ = TupleValue(reinterpret_cast<const char*>(
+				&numValue), TupleList::TYPE_MICRO_TIMESTAMP);
+			break;
+		}
+		case COLUMN_TYPE_NANO_TIMESTAMP: {
+			int64_t padding;
+			fixedPartIn >> padding;
+			NanoTimestamp tsValue;
+			varPartIn.readAll(&tsValue, sizeof(tsValue));
+			param->value_ = SyntaxTree::makeNanoTimestampValue(
+					request.eventStackAlloc_, tsValue);
 			break;
 		}
 		case COLUMN_TYPE_NULL: {
@@ -1350,7 +1374,7 @@ void SQLCancelHandler::operator ()(EventContext& ec, Event& ev) {
 				GS_TRACE_WARNING(SQL_SERVICE, GS_TRACE_SQL_CANCEL,
 					"Call cancel by client, jobId=" << jobId);
 			}
-			jobManager_->cancel(ec, jobId, true, 103);
+			jobManager_->cancel(ec, jobId, true);
 			execution->cancel(ec, execId);
 		}
 		else {
@@ -2056,6 +2080,7 @@ void PutLargeContainerHandler::operator()(
 			request.fixed_.cxtSrc_,
 			now,
 			emNow);
+		txn.setAuditInfo(&ev, &ec, NULL);
 
 		if (txn.getPartitionId() != request.fixed_.pId_) {
 
@@ -2095,6 +2120,7 @@ void PutLargeContainerHandler::operator()(
 			isNewSql);
 
 		{
+
 			if (containerName.compare(GS_USERS) == 0 ||
 				containerName.compare(GS_DATABASES) == 0) {
 
@@ -2165,6 +2191,7 @@ void PutLargeContainerHandler::operator()(
 			txn = transactionManager_->put(
 				alloc, request.fixed_.pId_,
 				request.fixed_.clientId_, request.fixed_.cxtSrc_, now, emNow);
+			txn.setAuditInfo(&ev, &ec, NULL);
 
 			bool noClient = false;
 			util::XArray<ColumnInfo> columnInfoList(alloc);
@@ -2304,6 +2331,7 @@ void PutLargeContainerHandler::operator()(
 			txn = transactionManager_->put(
 				alloc, request.fixed_.pId_,
 				request.fixed_.clientId_, request.fixed_.cxtSrc_, now, emNow);
+			txn.setAuditInfo(&ev, &ec, NULL);
 		}
 		else {
 			replicationMode = TransactionManager::REPLICATION_SEMISYNC;
@@ -2599,6 +2627,7 @@ void UpdateContainerStatusHandler::operator()(
 			request.fixed_.cxtSrc_,
 			now,
 			emNow);
+		txn.setAuditInfo(&ev, &ec, NULL);
 
 		bool noClient = true;
 
@@ -2608,7 +2637,7 @@ void UpdateContainerStatusHandler::operator()(
 			containerNameBinary.data(),
 			containerNameBinary.size());
 
-		LogManager<NoLocker>* logManager_ = getLogManager(txn.getPartitionId());
+		LogManager<MutexLocker>* logManager_ = getLogManager(txn.getPartitionId());
 
 		bool caseSensitive = getCaseSensitivity(request).isContainerNameCaseSensitive();
 		KeyDataStore* keyStore = getKeyDataStore(txn.getPartitionId());
@@ -2622,6 +2651,7 @@ void UpdateContainerStatusHandler::operator()(
 			bool ackWait = false;
 
 			DSInputMes input(alloc, DS_UPDATE_TABLE_PARTITIONING_ID, &containerKey, targetVersionId);
+			txn.setAuditInfo(&ev, &ec, NULL);
 			StackAllocAutoPtr<DSPutContainerOutputMes> ret(alloc, static_cast<DSPutContainerOutputMes*>(ds->exec(&txn, &keyStoreValue, &input)));
 			PutStatus putStatus = ret.get()->status_;
 
@@ -2692,6 +2722,7 @@ void UpdateContainerStatusHandler::operator()(
 				request.fixed_.cxtSrc_,
 				now,
 				emNow);
+			txn.setAuditInfo(&ev, &ec, NULL);
 
 			decodeLargeRow(
 				NoSQLUtils::LARGE_CONTAINER_KEY_PARTITIONING_INFO,
@@ -3098,11 +3129,12 @@ void CreateLargeIndexHandler::operator()(
 			request.fixed_.cxtSrc_,
 			now,
 			emNow);
+		txn.setAuditInfo(&ev, &ec, NULL);
 
 		uint8_t existIndex = 0;
 		bool noClient = false;
 
-		LogManager<NoLocker>* logManager_ = getLogManager(txn.getPartitionId());
+		LogManager<MutexLocker>* logManager_ = getLogManager(txn.getPartitionId());
 
 		KeyDataStore* keyStore = getKeyDataStore(txn.getPartitionId());
 		KeyDataStoreValue keyStoreValue = keyStore->get(alloc, txn.getContainerId());
@@ -3711,6 +3743,18 @@ void BindParam::dump(util::StackAllocator& alloc) {
 	case TupleList::TYPE_TIMESTAMP:
 	{
 		os << value_.get<int64_t>();
+		break;
+	}
+	case TupleList::TYPE_MICRO_TIMESTAMP:
+	{
+		os << value_.get<MicroTimestamp>().value_;
+		break;
+	}
+	case TupleList::TYPE_NANO_TIMESTAMP:
+	{
+		NanoTimestamp tsValue = value_.get<TupleNanoTimestamp>();
+		os << static_cast<uint32_t>(tsValue.getHigh()) << " " <<
+				static_cast<uint32_t>(tsValue.getLow());
 		break;
 	}
 	case TupleList::TYPE_BLOB:

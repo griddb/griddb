@@ -45,6 +45,17 @@ void SQLCoreExprs::CustomRegistrar::operator()() const {
 	add<SQLType::EXPR_LIST, SQLExprs::PlanningExpression>();
 	addNonEvaluable<SQLType::EXPR_AGG_FOLLOWING>();
 	addNoArgs<SQLType::EXPR_HINT_NO_INDEX, NoopExpression>();
+
+	add<SQLType::EXPR_RANGE_GROUP, SQLExprs::PlanningExpression>();
+	add<SQLType::EXPR_RANGE_KEY, SQLExprs::PlanningExpression>();
+	add<SQLType::EXPR_RANGE_KEY_CURRENT, RangeKeyExpression>();
+	add<SQLType::EXPR_RANGE_AGG, SQLExprs::PlanningExpression>();
+	add<SQLType::EXPR_RANGE_FILL, SQLExprs::PlanningExpression>();
+	add<SQLType::EXPR_RANGE_FILL_NONE, SQLExprs::PlanningExpression>();
+	add<SQLType::EXPR_RANGE_FILL_NULL, SQLExprs::PlanningExpression>();
+	add<SQLType::EXPR_RANGE_FILL_PREV, SQLExprs::PlanningExpression>();
+	add<SQLType::EXPR_RANGE_FILL_LINEAR, SQLExprs::PlanningExpression>();
+	add<SQLType::EXPR_LINEAR, LinearExpression>();
 }
 
 
@@ -52,6 +63,8 @@ const SQLExprs::ExprRegistrar
 SQLCoreExprs::BasicRegistrar::REGISTRAR_INSTANCE((BasicRegistrar()));
 
 void SQLCoreExprs::BasicRegistrar::operator()() const {
+	add<SQLType::EXPR_RANGE_GROUP_ID, Functions::RangeGroupId>();
+
 	add<SQLType::FUNC_COALESCE, Functions::Coalesce>();
 	add<SQLType::FUNC_IFNULL, Functions::Coalesce>();
 	add<SQLType::FUNC_MAX, Functions::Max>();
@@ -126,6 +139,10 @@ size_t SQLCoreExprs::VariantUtils::toBasicTypeNumber(TupleColumnType src) {
 		return 7;
 	case TupleTypes::TYPE_BLOB:
 		return 8;
+	case TupleTypes::TYPE_MICRO_TIMESTAMP:
+		return 9;
+	case TupleTypes::TYPE_NANO_TIMESTAMP:
+		return 10;
 	default:
 		assert(false);
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
@@ -153,11 +170,102 @@ size_t SQLCoreExprs::VariantUtils::toBasicAndPromoTypeNumber(
 		if (TypeUtils::isAny(src)) {
 			return toBasicTypeNumber(promo);
 		}
+		else if (TypeUtils::isTimestampFamily(src)) {
+			assert(src != TupleTypes::TYPE_NANO_TIMESTAMP);
+			assert(TypeUtils::isTimestampFamily(promo));
+			return (VariantTypes::COUNT_BASIC_TYPE +
+					VariantTypes::COUNT_NUMERIC_PROMO) +
+					toTimestampPromoSubIndex(src);
+		}
 		assert(TypeUtils::isIntegral(src) && TypeUtils::isFloating(promo));
 		return VariantTypes::COUNT_BASIC_TYPE + toBasicTypeNumber(src);
 	}
 
 	return toBasicTypeNumber(src);
+}
+
+bool SQLCoreExprs::VariantUtils::findBasicCombiTypeNumber(
+		TupleColumnType type1, TupleColumnType type2, size_t &num) {
+	typedef SQLValues::TypeUtils TypeUtils;
+	num = std::numeric_limits<size_t>::max();
+
+	const size_t sub1 = toBasicTypeNumber(type1);
+	const size_t sub2 = toBasicTypeNumber(type2);
+
+	if (TypeUtils::isTimestampFamily(type1)) {
+		if (!TypeUtils::isTimestampFamily(type2)) {
+			return false;
+		}
+
+		const size_t tsSub1 = toTimestampCombiSubIndex(type1);
+		const size_t tsSub2 = toTimestampCombiSubIndex(type2);
+		size_t baseNum;
+		if (!findCombiNumber(tsSub1, tsSub2, baseNum)) {
+			return false;
+		}
+
+		if (baseNum < VariantTypes::COUNT_NO_BASIC_TIMESTAMP_COMBI) {
+			assert(tsSub1 == 0 && tsSub2 == 0 && baseNum == 0);
+			return findCombiNumber(sub1, sub2, num);
+		}
+
+		num = VariantTypes::COUNT_NUMERIC_COMBI + baseNum -
+				VariantTypes::COUNT_NO_BASIC_TIMESTAMP_COMBI;
+		return true;
+	}
+
+	if (TypeUtils::isNumerical(type1)) {
+		if (!TypeUtils::isNumerical(type2)) {
+			return false;
+		}
+		return findCombiNumber(sub1, sub2, num);
+	}
+
+	if (TypeUtils::toNonNullable(type1) != TypeUtils::toNonNullable(type2)) {
+		return false;
+	}
+
+	assert(sub1 >= VariantTypes::INDEX_OTHER_BEGIN);
+	num = VariantTypes::COUNT_SOME_BASIC_COMBI +
+			(sub1 - VariantTypes::INDEX_OTHER_BEGIN);
+	return true;
+}
+
+size_t SQLCoreExprs::VariantUtils::toTimestampPromoSubIndex(
+		TupleColumnType src) {
+	typedef SQLValues::TypeUtils TypeUtils;
+	UTIL_UNUSED_TYPE_ALIAS(TypeUtils);
+
+	assert(TypeUtils::toNonNullable(src) != TupleTypes::TYPE_NANO_TIMESTAMP);
+	return toTimestampCombiSubIndex(src);
+}
+
+size_t SQLCoreExprs::VariantUtils::toTimestampCombiSubIndex(
+		TupleColumnType src) {
+	typedef SQLValues::TypeUtils TypeUtils;
+
+	assert(TypeUtils::isTimestampFamily(src));
+
+	if (TypeUtils::toNonNullable(src) == TupleTypes::TYPE_TIMESTAMP) {
+		return 0;
+	}
+
+	const size_t index = toBasicTypeNumber(src) -
+			(VariantTypes::COUNT_NUMERIC + VariantTypes::COUNT_OTHER_TYPE) + 1;
+	assert(index < VariantTypes::COUNT_TIMESTAMP_FULL);
+	return index;
+}
+
+bool SQLCoreExprs::VariantUtils::findCombiNumber(
+		size_t n1, size_t n2, size_t &num) {
+	num = std::numeric_limits<size_t>::max();
+
+	if (n1 < n2) {
+		return false;
+	}
+
+	num = getCombiCount(n1) + n2;
+	return true;
 }
 
 size_t SQLCoreExprs::VariantUtils::getCombiCount(size_t n) {
@@ -474,19 +582,10 @@ size_t SQLCoreExprs::ComparisonExpressionBase::VariantTraits::resolveVariant(
 		return fullGeneral;
 	}
 
-	const TupleColumnType longType = TupleTypes::TYPE_LONG;
-	const TupleColumnType doubleType = TupleTypes::TYPE_DOUBLE;
-	const TupleColumnType compType =
-			TypeUtils::isIntegral(promoType) ? longType :
-			TypeUtils::isFloating(promoType) ? doubleType :
-			promoType;
+	const TupleColumnType compType = TypeUtils::toNonNullable(promoType);
 
 	const size_t basicPromoNum = (any1 ? 0 :
 			VariantUtils::toBasicAndPromoTypeNumber(columnType1, compType));
-	const size_t basicNum1 =
-			(any1 ? 0 : VariantUtils::toBasicTypeNumber(columnType1));
-	const size_t basicNum2 =
-			(any2 ? 0 : VariantUtils::toBasicTypeNumber(columnType2));
 
 	const bool promoted1 = !any1;
 	const bool promoted2 =
@@ -542,18 +641,11 @@ size_t SQLCoreExprs::ComparisonExpressionBase::VariantTraits::resolveVariant(
 		const size_t offset =
 				baseOffset + COUNT_BASIC_COMBI * (someNullable ? 1 : 0);
 
-		if (basicNum1 < COUNT_NUMERIC) {
-			if (basicNum1 >= basicNum2) {
-				columnsProfile.target_++;
-				return offset + VariantUtils::getCombiCount(basicNum1) + basicNum2;
-			}
-		}
-		else {
-			if (basicNum1 == basicNum2) {
-				columnsProfile.target_++;
-				return offset + COUNT_NUMERIC_COMBI +
-						(basicNum1 - COUNT_NUMERIC);
-			}
+		size_t num;
+		if (VariantUtils::findBasicCombiTypeNumber(
+				columnType1, columnType2, num)) {
+			columnsProfile.target_++;
+			return offset + num;
 		}
 	}
 
@@ -610,13 +702,13 @@ TupleValue SQLCoreExprs::CaseExpression::eval(ExprContext &cxt) const {
 	do {
 		const Expression *thenExpr = expr->findNext();
 		if (thenExpr == NULL) {
-			return asColumnValue(expr->eval(cxt));
+			return asColumnValue(&cxt.getValueContext(), expr->eval(cxt));
 		}
 
 		const TupleValue &condValue = expr->eval(cxt);
 		if (!SQLValues::ValueUtils::isNull(condValue) &&
 				SQLValues::ValueUtils::toBool(condValue)) {
-			return asColumnValue(thenExpr->eval(cxt));
+			return asColumnValue(&cxt.getValueContext(), thenExpr->eval(cxt));
 		}
 
 		expr = thenExpr->findNext();
@@ -692,6 +784,8 @@ void SQLCoreExprs::InExpression::VariantBase::initializeCustom(
 			const SQLValues::ValueDigester,
 			DigesterSwitcher::DefaultTraitsType>();
 
+	SQLValues::ValueContext valueCxt(
+			SQLValues::ValueContext::ofAllocator(cxt.getAllocator()));
 	bool nullFound = false;
 	map_ = UTIL_MAKE_LOCAL_UNIQUE(
 			map_, Map, 0, MapHasher(), EqPred(), cxt.getAllocator());
@@ -704,7 +798,7 @@ void SQLCoreExprs::InExpression::VariantBase::initializeCustom(
 		}
 
 		const TupleValue &value =
-				SQLValues::ValuePromoter(compType)(baseValue);
+				SQLValues::ValuePromoter(compType)(&valueCxt, baseValue);
 		const int64_t digest = digesterFunc(digester_, value);
 
 		const std::pair<MapIterator, MapIterator> &range =
@@ -741,20 +835,18 @@ TupleValue SQLCoreExprs::InExpression::VariantAt<V>::eval(
 		return TupleValue();
 	}
 
-	const CompType &key = static_cast<CompType>(
-			SQLValues::ValueUtils::getValue<SrcType>(uncheckedKey));
-	const int64_t digest = Digester(digester_)(
-			SQLValues::ValueUtils::toAnyByValue<
-					CompTypeTag::COLUMN_TYPE>(key));
+	const LocalCompType &key = SQLValues::ValueUtils::getPromoted<
+			CompTypeTag, SrcTypeTag>(
+					SQLValues::ValueUtils::getValue<SrcType>(uncheckedKey));
+	const int64_t digest = Digester(digester_)(key);
 
 	const std::pair<MapIterator, MapIterator> &range =
 			map_->equal_range(digest);
 	for (MapIterator it = range.first; it != range.second; ++it) {
-		const CompType &cond =
+		const LocalCompType &cond =
 				SQLValues::ValueUtils::getValue<CompType>(it->second);
 
-		const SQLValues::ValueBasicComparator comp(false);
-		if (Comparator(comp)(key, cond, EqPred())) {
+		if (Comparator(COMP_SENSITIVE)(key, cond, EqPred())) {
 			return SQLValues::ValueUtils::toAnyByBool(true);
 		}
 	}
@@ -777,6 +869,110 @@ TupleValue SQLCoreExprs::CastExpression::eval(ExprContext &cxt) const {
 
 TupleValue SQLCoreExprs::NoopExpression::eval(ExprContext &cxt) const {
 	return child().eval(cxt);
+}
+
+
+SQLCoreExprs::RangeKeyExpression::RangeKeyExpression(
+		ExprFactoryContext &cxt, const ExprCode &code) :
+		forPrev_(code.getColumnPos() == 1),
+		forNext_(code.getColumnPos() == 2) {
+	static_cast<void>(cxt);
+}
+
+TupleValue SQLCoreExprs::RangeKeyExpression::eval(ExprContext &cxt) const {
+	const SQLExprs::WindowState *state = cxt.getWindowState();
+	const int64_t &key =
+			(forPrev_ ? state->rangePrevKey_ :
+			(forNext_ ? state->rangeNextKey_ : state->rangeKey_));
+	return SQLValues::ValueConverter(getCode().getColumnType())(
+			cxt, SQLValues::ValueUtils::toAnyByNumeric(key));
+}
+
+
+SQLCoreExprs::LinearExpression::LinearExpression(
+		ExprFactoryContext &cxt, const ExprCode &code) :
+		category_(resolveEvaluationCategory(code.getColumnType())) {
+	static_cast<void>(cxt);
+}
+
+TupleValue SQLCoreExprs::LinearExpression::eval(ExprContext &cxt) const {
+	const size_t argCount = 5;
+	TupleValue argList[argCount];
+	TupleValue *argIt = argList;
+	TupleValue *const argEnd = argIt + argCount;
+	for (Iterator it(*this);; it.next()) {
+		assert(it.exists());
+		*argIt = it.get().eval(cxt);
+		if (SQLValues::ValueUtils::isNull(*argIt)) {
+			return asColumnValue(&cxt.getValueContext(), TupleValue());
+		}
+		if (++argIt == argEnd) {
+			break;
+		}
+	}
+
+	TupleValue ret;
+	switch (category_) {
+	case SQLValues::TypeUtils::TYPE_CATEGORY_LONG:
+		ret = TupleValue(FunctionUtils::NumberArithmetic::interpolateLinear(
+				SQLValues::ValueUtils::toLong(argList[0]),
+				SQLValues::ValueUtils::toLong(argList[1]),
+				SQLValues::ValueUtils::toLong(argList[2]),
+				SQLValues::ValueUtils::toLong(argList[3]),
+				SQLValues::ValueUtils::toLong(argList[4])));
+		break;
+	case SQLValues::TypeUtils::TYPE_CATEGORY_DOUBLE:
+		ret = TupleValue(FunctionUtils::NumberArithmetic::interpolateLinear(
+				SQLValues::ValueUtils::toDouble(argList[0]),
+				SQLValues::ValueUtils::toDouble(argList[1]),
+				SQLValues::ValueUtils::toDouble(argList[2]),
+				SQLValues::ValueUtils::toDouble(argList[3]),
+				SQLValues::ValueUtils::toDouble(argList[4])));
+		break;
+	default:
+		return asColumnValue(&cxt.getValueContext(), argList[1]);
+	}
+	return SQLValues::ValueConverter(getCode().getColumnType())(cxt, ret);
+}
+
+SQLValues::TypeUtils::TypeCategory
+SQLCoreExprs::LinearExpression::resolveEvaluationCategory(
+		TupleColumnType type) {
+	const TupleColumnType baseType = SQLValues::TypeUtils::toNonNullable(type);
+	const SQLValues::TypeUtils::TypeCategory baseCategory =
+			(SQLValues::TypeUtils::isAny(baseType) ?
+					SQLValues::TypeUtils::TYPE_CATEGORY_NULL :
+					SQLValues::TypeUtils::getStaticTypeCategory(baseType));
+
+	switch (baseCategory) {
+	case SQLValues::TypeUtils::TYPE_CATEGORY_BOOL:
+		return SQLValues::TypeUtils::TYPE_CATEGORY_LONG;
+	case SQLValues::TypeUtils::TYPE_CATEGORY_LONG:
+		return baseCategory;
+	case SQLValues::TypeUtils::TYPE_CATEGORY_DOUBLE:
+		return baseCategory;
+	default:
+		assert(!(SQLValues::TypeUtils::isNumerical(baseType) ||
+				SQLValues::TypeUtils::isSomeFixed(baseType)) ||
+				SQLValues::TypeUtils::isTimestampFamily(baseType));
+		return SQLValues::TypeUtils::TYPE_CATEGORY_NULL;
+	}
+}
+
+
+template<typename C>
+inline std::pair<int64_t, bool>
+SQLCoreExprs::Functions::RangeGroupId::operator()(
+		C &cxt, const TupleValue &value, int64_t interval, int64_t offset) {
+	static_cast<void>(cxt);
+	assert(interval > 0);
+
+	int64_t id;
+	if (!cxt.getValueUtils().getRangeGroupId(value, interval, offset, id)) {
+		return std::pair<int64_t, bool>();
+	}
+
+	return std::make_pair(id, true);
 }
 
 
@@ -874,8 +1070,10 @@ inline typename C::WriterType& SQLCoreExprs::Functions::TypeOf::operator()(
 	typename C::WriterType &writer = cxt.getResultWriter();
 
 	const bool nullOnUnknown = true;
+	const bool forDisplay = true;
 	const char8_t *typeStr =
-			SQLValues::TypeUtils::toString(value.getType(), nullOnUnknown);
+			SQLValues::TypeUtils::toString(
+					value.getType(), nullOnUnknown, forDisplay);
 
 	if (typeStr == NULL) {
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");

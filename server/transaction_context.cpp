@@ -73,7 +73,12 @@ TransactionContext::TransactionContext()
 	  contextExpireTime_(0),
 	  txnTimeoutInterval_(TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL),
 	  storeMemoryAgingSwapRate_(TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE),
-	  timeZone_(util::TimeZone()) {}
+	  timeZone_(util::TimeZone()),
+	  containerNameStr_(NULL),
+	  ev_(NULL),
+	  ec_(NULL),
+	  objectNameStr_(NULL)
+	  {}
 
 TransactionContext::TransactionContext(const TransactionContext &txn)
 	: manager_(txn.manager_),
@@ -94,7 +99,12 @@ TransactionContext::TransactionContext(const TransactionContext &txn)
 	  contextExpireTime_(txn.contextExpireTime_),
 	  txnTimeoutInterval_(txn.txnTimeoutInterval_),
 	  storeMemoryAgingSwapRate_(txn.storeMemoryAgingSwapRate_),
-	  timeZone_(txn.timeZone_) {}
+	  timeZone_(txn.timeZone_),
+	  containerNameStr_(NULL),
+	  ev_(NULL),
+	  ec_(NULL),
+	  objectNameStr_(NULL)
+	  {}
 
 TransactionContext::~TransactionContext() {}
 
@@ -117,5 +127,12 @@ TransactionContext::TransactionContext(util::StackAllocator &alloc)
 	  contextExpireTime_(0),
 	  txnTimeoutInterval_(TXN_DEFAULT_TRANSACTION_TIMEOUT_INTERVAL),
 	  storeMemoryAgingSwapRate_(TXN_UNSET_STORE_MEMORY_AGING_SWAP_RATE),
-	  timeZone_(util::TimeZone()) {}
+	  timeZone_(util::TimeZone()),
+	  containerNameStr_(NULL),
+	  ev_(NULL),
+	  ec_(NULL),
+	  objectNameStr_(NULL)
+	  {}
+
+
 

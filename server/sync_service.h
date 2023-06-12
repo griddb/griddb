@@ -38,6 +38,7 @@ class TransactionManager;
 class StatementHandler;
 class SyncResponseInfo;
 class NoLocker;
+class MutexLocker;
 class Partition;
 template <class L> class LogManager;
 class PartitionList;
@@ -218,7 +219,7 @@ public:
 
 
 	bool getLogs(
-		PartitionId pId, int64_t sId, LogManager<NoLocker>* logMgr,
+		PartitionId pId, int64_t sId, LogManager<MutexLocker>* logMgr,
 		CheckpointService* cpSvc,
 		bool useLongSyncLog, bool isCheck = false);
 
@@ -711,6 +712,8 @@ public:
 	void notifySyncCheckpointEnd(
 		EventContext& ec, PartitionId pId, LongtermSyncInfo* syncInfo, bool errorOccured);
 
+	void notifySyncCheckpointError(EventContext& ec, PartitionId pId, LongtermSyncInfo* syncInfo);
+	
 	SyncManager* getManager() {
 		return syncMgr_;
 	}

@@ -469,7 +469,7 @@ bool FileTraceWriter::prepareFile(
 			list.insert(info);
 		}
 
-		while (!list.empty() && list.size() >= maxFileCount_) {
+		while (!list.empty() && list.size() >= maxFileCount_ && maxFileCount_ > 0) {
 			const Info &info = *(list.end() - 1);
 			NormalOStringStream oss;
 			oss.fill('0');
@@ -766,7 +766,7 @@ void TraceManager::setOutputType(TraceOption::OutputType outputType) {
 		filesWriter_ = UTIL_NEW detail::FileTraceWriter(
 				rotationFileName_.c_str(), rotationFilesDirectory_.c_str(),
 				maxRotationFileSize_, maxRotationFileCount_, rotationMode_,
-				proxyTraceHandler_, false);
+				*proxyTraceHandler_, false);
 	}
 
 	TraceWriter *newWriter = getDefaultWriter(outputType);
@@ -858,7 +858,7 @@ void TraceManager::setRotationMode(
 }
 
 void TraceManager::setTraceHandler(TraceHandler *traceHandler) {
-	proxyTraceHandler_.setProxy(traceHandler);
+	proxyTraceHandler_->setProxy(traceHandler);
 }
 
 void TraceManager::getHistory(std::vector<u8string> &history) {
@@ -891,7 +891,7 @@ TraceManager::TraceManager() :
 		maxRotationFileSize_(1024 * 1024),
 		maxRotationFileCount_(10),
 		rotationMode_(TraceOption::ROTATION_SEQUENTIAL),
-		proxyTraceHandler_(getProxyTraceHandler()) {
+		proxyTraceHandler_(UTIL_NEW detail::ProxyTraceHandler()) {
 }
 
 TraceManager::~TraceManager() try {
@@ -953,11 +953,6 @@ bool TraceManager::stringToOutputLevel(const std::string &level, int32_t &output
 		return false;
 	}
 	return true;
-}
-
-detail::ProxyTraceHandler& TraceManager::getProxyTraceHandler() {
-	static detail::ProxyTraceHandler proxyTraceHandler;
-	return proxyTraceHandler;
 }
 
 namespace detail {

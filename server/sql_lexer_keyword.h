@@ -11,22 +11,23 @@
 ** is substantially reduced.  This is important for embedded applications
 ** on platforms with limited memory.
 */
-/* Hash score: 203 */
+/* Hash score: 272 */
 #ifndef SQL_LEXER_KEYWORD_H
 #define SQL_LEXER_KEYWORD_H
 static inline int keywordCode(const char *z, int n) {
-	/* zText[] encodes 858 bytes of keywords in 565 bytes */
+	/* zText[] encodes 914 bytes of keywords in 606 bytes */
 	/*   DESCAPELSELECTABLEFTHENDATABASEXPLAINTERVALUESUBPARTITIONS         */
 	/*   PASSWORDEREGEXPLANALYZEXCEPTIMESERIESWITHOUTERAISEXCLUSIVE         */
 	/*   XISTSBEGINDEXTRACTIMESTAMPADDAY_OF_WEEKEYBETWEENATURALLIKEVERY     */
 	/*   CASEFALSEGROUPDATEJOINNERELEASEMONTHASHAVINGLOBYPRAGMATCHOUR       */
-	/*   EVOKEROLEVIRTUALTERANGEWHENOTNULLIMITIMESTAMPDIFFORCEWHERENAME     */
-	/*   XOREPLACEABORTIMESTAMP_ADDAY_OF_YEARIGHTIMESTAMP_DIFFROM           */
-	/*   ILLISECONDELETEAFTEROLLBACKANDISTINCTIMESTAMP_TRUNCAST             */
-	/*   RANSACTIONASCOLLATECOLUMNCOMMITRUECONFLICTCREATECROSSDROP          */
-	/*   RIMARYFULLGRANTIDENTIFIEDINSERTINSTEADINTERSECTINTOFFSETISNULL     */
-	/*   MINUTEOVEROWUNIONUSERUSINGVIEWQUERY                                */
-	static const char zText[564] = {
+	/*   EVOKEPREVIOUSEROLEVIRTUALTERANGEWHENANOSECONDAY_OF_YEARENAME       */
+	/*   WHEREPLACEWITHINSERTIMESTAMPDIFFILLIMITIMESTAMP_ADDELETEXOR        */
+	/*   IGHTIMESTAMP_DIFFORCEABORTIMESTAMP_TRUNCASTRANSACTIONONEAFTER      */
+	/*   OLLBACKANDISTINCTRUEASCOLLATECOLUMNOTNULLINEAROWCOMMITCONFLICT     */
+	/*   CREATECROSSDROPRIMARYFROMICROSECONDFULLGRANTIDENTIFIEDINSTEAD      */
+	/*   INTERSECTINTOFFSETISNULLMILLISECONDMINUTEOVERUNIONUSINGVIEW        */
+	/*   QUERY                                                              */
+	static const char zText[605] = {
 		'D','E','S','C','A','P','E','L','S','E','L','E','C','T','A','B','L','E',
 		'F','T','H','E','N','D','A','T','A','B','A','S','E','X','P','L','A','I',
 		'N','T','E','R','V','A','L','U','E','S','U','B','P','A','R','T','I','T',
@@ -40,75 +41,80 @@ static inline int keywordCode(const char *z, int n) {
 		'S','E','F','A','L','S','E','G','R','O','U','P','D','A','T','E','J','O',
 		'I','N','N','E','R','E','L','E','A','S','E','M','O','N','T','H','A','S',
 		'H','A','V','I','N','G','L','O','B','Y','P','R','A','G','M','A','T','C',
-		'H','O','U','R','E','V','O','K','E','R','O','L','E','V','I','R','T','U',
-		'A','L','T','E','R','A','N','G','E','W','H','E','N','O','T','N','U','L',
-		'L','I','M','I','T','I','M','E','S','T','A','M','P','D','I','F','F','O',
-		'R','C','E','W','H','E','R','E','N','A','M','E','X','O','R','E','P','L',
-		'A','C','E','A','B','O','R','T','I','M','E','S','T','A','M','P','_','A',
-		'D','D','A','Y','_','O','F','_','Y','E','A','R','I','G','H','T','I','M',
-		'E','S','T','A','M','P','_','D','I','F','F','R','O','M','I','L','L','I',
-		'S','E','C','O','N','D','E','L','E','T','E','A','F','T','E','R','O','L',
-		'L','B','A','C','K','A','N','D','I','S','T','I','N','C','T','I','M','E',
-		'S','T','A','M','P','_','T','R','U','N','C','A','S','T','R','A','N','S',
-		'A','C','T','I','O','N','A','S','C','O','L','L','A','T','E','C','O','L',
-		'U','M','N','C','O','M','M','I','T','R','U','E','C','O','N','F','L','I',
-		'C','T','C','R','E','A','T','E','C','R','O','S','S','D','R','O','P','R',
-		'I','M','A','R','Y','F','U','L','L','G','R','A','N','T','I','D','E','N',
-		'T','I','F','I','E','D','I','N','S','E','R','T','I','N','S','T','E','A',
+		'H','O','U','R','E','V','O','K','E','P','R','E','V','I','O','U','S','E',
+		'R','O','L','E','V','I','R','T','U','A','L','T','E','R','A','N','G','E',
+		'W','H','E','N','A','N','O','S','E','C','O','N','D','A','Y','_','O','F',
+		'_','Y','E','A','R','E','N','A','M','E','W','H','E','R','E','P','L','A',
+		'C','E','W','I','T','H','I','N','S','E','R','T','I','M','E','S','T','A',
+		'M','P','D','I','F','F','I','L','L','I','M','I','T','I','M','E','S','T',
+		'A','M','P','_','A','D','D','E','L','E','T','E','X','O','R','I','G','H',
+		'T','I','M','E','S','T','A','M','P','_','D','I','F','F','O','R','C','E',
+		'A','B','O','R','T','I','M','E','S','T','A','M','P','_','T','R','U','N',
+		'C','A','S','T','R','A','N','S','A','C','T','I','O','N','O','N','E','A',
+		'F','T','E','R','O','L','L','B','A','C','K','A','N','D','I','S','T','I',
+		'N','C','T','R','U','E','A','S','C','O','L','L','A','T','E','C','O','L',
+		'U','M','N','O','T','N','U','L','L','I','N','E','A','R','O','W','C','O',
+		'M','M','I','T','C','O','N','F','L','I','C','T','C','R','E','A','T','E',
+		'C','R','O','S','S','D','R','O','P','R','I','M','A','R','Y','F','R','O',
+		'M','I','C','R','O','S','E','C','O','N','D','F','U','L','L','G','R','A',
+		'N','T','I','D','E','N','T','I','F','I','E','D','I','N','S','T','E','A',
 		'D','I','N','T','E','R','S','E','C','T','I','N','T','O','F','F','S','E',
-		'T','I','S','N','U','L','L','M','I','N','U','T','E','O','V','E','R','O',
-		'W','U','N','I','O','N','U','S','E','R','U','S','I','N','G','V','I','E',
-		'W','Q','U','E','R','Y',
+		'T','I','S','N','U','L','L','M','I','L','L','I','S','E','C','O','N','D',
+		'M','I','N','U','T','E','O','V','E','R','U','N','I','O','N','U','S','I',
+		'N','G','V','I','E','W','Q','U','E','R','Y',
 	};
 	static const unsigned char aHash[127] = {
-		 111,  88,  92, 110,  26,   0,   0, 124,  28,   0,  57,  14,   0,
-		  81,   0,  23, 112,   0,  97,  64, 118,  85,   0,   4,   0,  13,
-		   0,   0, 123,  52, 120,  22, 116,   0,   0,   0,   0,  99, 104,
-		   0,  44,   0,   0, 127,  93, 107,   0, 122,   0,   0,   0,  70,
-		   0,   0,  74,  82,   9,   0, 126,   0,   8,   0,   2,  54,   3,
-		 100,   0,   0,  41, 106, 109,   0,  33,   0,  46,   0,  32,   0,
-		  79,  25,  35, 105,   0,   0,   0,  96,   0, 101,  91, 108,  10,
-		  37,  86,   0,  76,   0,  19,  75,  73,  63,  60, 125,  56, 119,
-		  66,  21,  68,   0,   0, 114, 115, 121,  69,  36, 113,  58,   0,
-		  17,   0,  95,  49,  80,   0,  43, 102,   0,  47,
+		  76, 127,  95, 117,  26,   0,   0,  61,  28,   0,  57,  14,   0,
+		  70,   0,  23, 118,  75,  92,  66, 126,  86,   0,   4,   0,  13,
+		   0,   0, 131,  52, 129,  67, 122,   0,   0,   0,   0, 100, 109,
+		   0,  44,   0,   0, 134,  96, 112,   0, 106,   0,   0,   0,  87,
+		   0,   0,  83,  71,   9,   0, 133,   0,   8,   0,   2,  54,   3,
+		 101,   0,   0,  41, 111, 116,   0,  33,   0,  46,   0,  32,   0,
+		  88,  25,  35, 110,   0,   0,   0,  91,   0, 107,  94, 115,  10,
+		  37, 113,   0,  89,   0,  19, 105,  72,  65,  62, 132,  56, 128,
+		 103,  21,  79,   0,   0, 120, 121, 130,  77,  36, 119,  58,   0,
+		  17,   0,  90,  49, 104,   0,  43, 102,   0,  47,
   };
-	static const unsigned char aNext[127] = {
+	static const unsigned char aNext[134] = {
 		   0,   1,   0,   0,   0,   0,   0,   0,   0,   0,   6,   0,   0,
 		   0,   0,   0,   0,   0,   0,   0,  11,   7,   0,   0,   0,  16,
 		   0,  12,  20,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
 		   0,   0,   0,   5,   0,  31,  34,   0,   0,   0,  27,   0,   0,
-		  15,   0,   0,   0,  51,   0,  55,   0,  42,   0,  30,   0,  40,
-		   0,   0,   0,  29,  45,   0,   0,  59,   0,  50,   0,   0,   0,
-		  71,  67,   0,   0,   0,   0,   0,   0,  53,   0,  48,   0,  62,
-		   0,  78,  38,  72,   0,  83,   0,   0,   0,   0,  65,   0,   0,
-		   0,  94,  24, 103,  39,   0,   0,   0,  77,  84,   0,   0,  89,
-		  87, 117,   0,   0,  98,  61,   0,  18,  90,   0,
+		  15,   0,   0,   0,  51,   0,  55,   0,   0,   0,  42,   0,  30,
+		   0,  22,   0,   0,   0,   0,  59,   0,  50,   0,   0,  29,   0,
+		   0,   0,   0,   0,   0,  60,   0,   0,  45,  68,   0,  73,   0,
+		  84,  53,  64,   0,  81,  38,  40,   0,   0,   0,  98,   0,  69,
+		  74,  99,   0,  78,   0,   0,  97,  24,   0,  93, 108,  39,   0,
+		   0,  80,  85,   0,   0,  48, 114, 123, 124,   0, 125,   0,   0,
+		  63,  18,  82,   0,
   };
-	static const unsigned char aLen[127] = {
+	static const unsigned char aLen[134] = {
 		   4,   6,   4,   6,   5,   4,   4,   3,   8,   7,   8,   6,  13,
 		  12,  10,   9,   2,   8,   2,   5,   2,   6,   4,   7,   6,  10,
 		   4,   7,   5,   5,   9,   6,   5,   5,   7,  12,  11,   3,   7,
 		   7,   3,   4,   5,   4,   5,   5,   6,   4,   5,   7,   5,   4,
-		   6,   4,   2,   6,   5,   4,   6,   4,   7,   5,   5,   4,   7,
-		   3,   4,   5,  13,   5,   3,   5,   6,   3,   7,   5,  13,   3,
-		  11,   3,   2,   4,   5,  14,   2,   4,  11,   2,   6,   6,   5,
-		   8,   3,   8,  15,   4,  11,   3,   7,   6,   6,   4,   8,   6,
-		   5,   4,   7,   4,   5,  10,   6,   7,   9,   2,   4,   2,   6,
-		   3,   6,   6,   4,   3,   5,   4,   5,   4,   5,
+		   6,   4,   2,   6,   5,   4,   6,   8,   4,   4,   7,   5,   5,
+		   4,  10,  11,   3,   2,   4,   6,   5,   7,   6,   6,  13,   4,
+		   5,  13,   3,   6,   3,   5,  14,   2,   5,   3,   5,  15,   4,
+		  11,   4,   5,   8,   3,   8,   4,   3,   7,   6,   7,   3,   4,
+		   6,   3,   6,   8,   6,   5,   4,   7,   4,  11,   4,   5,  10,
+		   7,   9,   2,   4,   2,   6,   3,   6,  11,   2,   6,   6,   4,
+		   5,   5,   4,   5,
   };
-	static const unsigned short int aOffset[127] = {
+	static const unsigned short int aOffset[134] = {
 		   0,   1,   6,   8,  13,  16,  19,  21,  23,  30,  35,  40,  45,
 		  45,  48,  48,  55,  58,  59,  63,  63,  67,  72,  74,  80,  85,
 		  95,  95,  99, 103, 107, 115, 121, 124, 127, 133, 144, 154, 157,
 		 163, 168, 170, 173, 178, 182, 187, 190, 196, 198, 202, 209, 213,
-		 216, 221, 224, 226, 230, 234, 237, 243, 247, 252, 256, 261, 264,
-		 264, 267, 270, 274, 286, 286, 291, 294, 300, 302, 309, 313, 323,
-		 325, 325, 329, 332, 335, 339, 350, 352, 355, 359, 360, 365, 371,
-		 375, 383, 385, 392, 406, 409, 420, 422, 429, 435, 440, 444, 452,
-		 458, 463, 466, 473, 477, 482, 492, 498, 505, 505, 514, 516, 517,
-		 520, 523, 529, 535, 538, 541, 546, 550, 555, 559,
+		 216, 221, 224, 226, 230, 234, 237, 243, 249, 252, 256, 261, 265,
+		 270, 273, 282, 282, 286, 289, 292, 298, 301, 308, 312, 317, 329,
+		 332, 336, 346, 348, 354, 356, 360, 371, 373, 373, 378, 382, 396,
+		 399, 409, 413, 417, 425, 427, 434, 438, 440, 447, 452, 452, 455,
+		 458, 463, 466, 472, 480, 486, 491, 494, 501, 504, 515, 519, 524,
+		 534, 541, 541, 550, 552, 553, 556, 559, 565, 569, 570, 576, 582,
+		 586, 591, 596, 600,
   };
-	static const unsigned char aCode[127] = {
+	static const unsigned char aCode[134] = {
 		TK_DESC,       TK_ESCAPE,     TK_ELSE,       TK_SELECT,     TK_TABLE,      
 		TK_LEFT,       TK_THEN,       TK_END,        TK_DATABASE,   TK_EXPLAIN,    
 		TK_INTERVAL,   TK_VALUES,     TK_SUBPARTITIONS,  TK_SUBPARTITION, TK_PARTITIONS, 
@@ -120,21 +126,22 @@ static inline int keywordCode(const char *z, int n) {
 		TK_ALL,        TK_LIKE_KW,    TK_EVERY,      TK_CASE,       TK_FALSE,      
 		TK_GROUP,      TK_UPDATE,     TK_JOIN,       TK_INNER,      TK_RELEASE,    
 		TK_MONTH,      TK_HASH,       TK_HAVING,     TK_LIKE_KW,    TK_BY,         
-		TK_PRAGMA,     TK_MATCH,      TK_HOUR,       TK_REVOKE,     TK_ROLE,       
-		TK_VIRTUAL,    TK_ALTER,      TK_RANGE,      TK_WHEN,       TK_NOTNULL,    
-		TK_NOT,        TK_NULL,       TK_LIMIT,      TK_TIMESTAMPDIFF,  TK_FORCE,      
-		TK_FOR,        TK_WHERE,      TK_RENAME,     TK_XOR,        TK_REPLACE,    
-		TK_ABORT,      TK_TIMESTAMPADD, TK_ADD,        TK_DAY_OF_YEAR,TK_DAY,        
-		TK_OF,         TK_YEAR,       TK_RIGHT,      TK_TIMESTAMPDIFF,  TK_IF,         
-		TK_FROM,       TK_MILLISECOND,TK_IS,         TK_SECOND,     TK_DELETE,     
-		TK_AFTER,      TK_ROLLBACK,   TK_AND,        TK_DISTINCT,   TK_TIMESTAMP_TRUNC,    
-		TK_CAST,       TK_TRANSACTION,TK_ASC,        TK_COLLATE,    TK_COLUMNKW,   
-		TK_COMMIT,     TK_TRUE,       TK_CONFLICT,   TK_CREATE,     TK_CROSS,      
-		TK_DROP,       TK_PRIMARY,    TK_FULL,       TK_GRANT,      TK_IDENTIFIED, 
-		TK_INSERT,     TK_INSTEAD,    TK_INTERSECT,  TK_IN,         TK_INTO,       
-		TK_TO,         TK_OFFSET,     TK_SET,        TK_ISNULL,     TK_MINUTE,     
-		TK_OVER,       TK_ROW,        TK_UNION,      TK_USER,       TK_USING,      
-		TK_VIEW,       TK_QUERY,      
+		TK_PRAGMA,     TK_MATCH,      TK_HOUR,       TK_REVOKE,     TK_PREVIOUS,   
+		TK_USER,       TK_ROLE,       TK_VIRTUAL,    TK_ALTER,      TK_RANGE,      
+		TK_WHEN,       TK_NANOSECOND, TK_DAY_OF_YEAR,TK_DAY,        TK_OF,         
+		TK_YEAR,       TK_RENAME,     TK_WHERE,      TK_REPLACE,    TK_WITHIN,     
+		TK_INSERT,     TK_TIMESTAMPDIFF,  TK_FILL,       TK_LIMIT,      TK_TIMESTAMPADD, 
+		TK_ADD,        TK_DELETE,     TK_XOR,        TK_RIGHT,      TK_TIMESTAMPDIFF,  
+		TK_IF,         TK_FORCE,      TK_FOR,        TK_ABORT,      TK_TIMESTAMP_TRUNC,    
+		TK_CAST,       TK_TRANSACTION,TK_NONE,       TK_AFTER,      TK_ROLLBACK,   
+		TK_AND,        TK_DISTINCT,   TK_TRUE,       TK_ASC,        TK_COLLATE,    
+		TK_COLUMNKW,   TK_NOTNULL,    TK_NOT,        TK_NULL,       TK_LINEAR,     
+		TK_ROW,        TK_COMMIT,     TK_CONFLICT,   TK_CREATE,     TK_CROSS,      
+		TK_DROP,       TK_PRIMARY,    TK_FROM,       TK_MICROSECOND,TK_FULL,       
+		TK_GRANT,      TK_IDENTIFIED, TK_INSTEAD,    TK_INTERSECT,  TK_IN,         
+		TK_INTO,       TK_TO,         TK_OFFSET,     TK_SET,        TK_ISNULL,     
+		TK_MILLISECOND,TK_IS,         TK_SECOND,     TK_MINUTE,     TK_OVER,       
+		TK_UNION,      TK_USING,      TK_VIEW,       TK_QUERY,      
   };
 	int h, i;
 	if (n < 2) return TK_ID;
@@ -148,5 +155,5 @@ static inline int keywordCode(const char *z, int n) {
 	}
 	return TK_ID;
 }
-#define GS_N_KEYWORD 127
+#define GS_N_KEYWORD 134
 #endif

@@ -43,9 +43,6 @@ protected:
 	};
 
 public:  
-	static const bool indexMapTable[][MAP_TYPE_NUM];
-
-public:  
 public:  
 	Collection(TransactionContext &txn, DataStoreV4 *dataStore, OId oId)
 		: BaseContainer(txn, dataStore, oId) {
@@ -142,6 +139,8 @@ public:
 		return COLUMN_TYPE_LONG;
 	}
 
+	static const IndexMapTable& getIndexMapTable();
+
 protected:  
 protected:  
 	void putRowInternal(TransactionContext &txn,
@@ -162,7 +161,6 @@ private:
 		ABORT_UNDEF_STATUS
 	};
 
-private:  
 private:  
 	bool isUnique(TransactionContext &txn, 
 		util::Vector<ColumnId> &keyColumnIdList, 
@@ -262,6 +260,9 @@ private:
 		return rowFixedDataSize;
 	}
 
+private:  
+
+	static const bool INDEX_MAP_TABLE[][MAP_TYPE_NUM];
 };
 
 #endif

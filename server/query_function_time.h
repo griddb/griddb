@@ -24,17 +24,18 @@
 
 #include "query_function.h"
 
+
 struct TimeFunctions {
 
 	struct Strftime {
 	public:
-		template<typename C, typename R>
+		template<typename C, typename T, typename R>
 		typename C::WriterType& operator()(
-				C &cxt, R &format, int64_t tsValue, R &zone);
+				C &cxt, R &format, const T &tsValue, R &zone);
 
-		template<typename C, typename R>
+		template<typename C, typename T, typename R>
 		typename C::WriterType& operator()(
-				C &cxt, R &format, int64_t tsValue,
+				C &cxt, R &format, const T &tsValue,
 				const util::TimeZone &zone = util::TimeZone());
 
 	private:
@@ -46,26 +47,26 @@ struct TimeFunctions {
 
 
 struct TimeFunctions::Strftime::FormatContext {
-	template<typename C>
-	FormatContext(
-			C &funcCxt, const util::DateTime &time,
-			const util::TimeZone &zone);
+	template<typename C, typename T>
+	FormatContext(C &funcCxt, const T &tsValue, const util::TimeZone &zone);
 
 	int64_t getFieldValue(util::DateTime::FieldType fieldType);
 
-	util::DateTime time_;
-	util::DateTime::ZonedOption option_;
+	util::DateTime::Formatter getDateTimeFormatter();
 
-	int32_t lastWidth_;
-	util::DateTime::FieldData fieldData_;
+	util::PreciseDateTime time_;
+	util::DateTime::ZonedOption option_;
+	util::DateTime::FieldType defaultPrecision_;
+
+	util::PreciseDateTime::FieldData fieldData_;
 	bool fieldResolved_;
 };
 
 struct TimeFunctions::Strftime::Formatter {
 public:
-	static const Formatter& getInstance(util::CodePoint key);
+	static const Formatter& getInstance(util::CodePoint key, int32_t width);
 
-	void acceptWidth(const FormatContext &formatCxt) const;
+	bool matchWidth(int32_t width) const;
 
 	template<typename W>
 	void format(FormatContext &formatCxt, W &writer) const;
@@ -81,6 +82,9 @@ private:
 	static const Formatter *const FORMATTER_LIST;
 
 	Formatter(char8_t key, Type type);
+
+	static Formatter createFractionalSecond(
+			util::DateTime::FieldType fieldType, int32_t width);
 
 	static Formatter create(char8_t key, Type type);
 	static Formatter create(
@@ -101,21 +105,22 @@ private:
 };
 
 
-template<typename C, typename R>
+template<typename C, typename T, typename R>
 inline typename C::WriterType& TimeFunctions::Strftime::operator()(
-		C &cxt, R &format, int64_t tsValue, R &zone) {
+		C &cxt, R &format, const T &tsValue, R &zone) {
 	return (*this)(
 			cxt, format, tsValue, FunctionUtils::resolveTimeZone(zone));
 }
 
-template<typename C, typename R>
+template<typename C, typename T, typename R>
 inline typename C::WriterType& TimeFunctions::Strftime::operator()(
-		C &cxt, R &format, int64_t tsValue,
+		C &cxt, R &format, const T &tsValue,
 		const util::TimeZone &zone) {
 	typename C::WriterType &writer = cxt.getResultWriter();
-	FormatContext formatCxt(cxt, util::DateTime(tsValue), zone);
+	FormatContext formatCxt(cxt, tsValue, zone);
 
 	bool escaping = false;
+	int32_t lastWidth = -1;
 	for (util::CodePoint c; format.nextCode(&c);) {
 		if (!escaping) {
 			if (c == '%') {
@@ -126,25 +131,25 @@ inline typename C::WriterType& TimeFunctions::Strftime::operator()(
 			}
 			continue;
 		}
-		else if (formatCxt.lastWidth_ < 0 && '0' <= c && c <= '9') {
-			formatCxt.lastWidth_ = static_cast<int32_t>(c - '0');
+		else if (lastWidth < 0 && '0' <= c && c <= '9') {
+			lastWidth = static_cast<int32_t>(c - '0');
 			continue;
 		}
 		escaping = false;
 
-		Formatter::getInstance(c).format(formatCxt, writer);
-		formatCxt.lastWidth_ = -1;
+		Formatter::getInstance(c, lastWidth).format(formatCxt, writer);
+		lastWidth = -1;
 	}
 
 	return writer;
 }
 
 
-template<typename C>
+template<typename C, typename T>
 TimeFunctions::Strftime::FormatContext::FormatContext(
-		C &funcCxt, const util::DateTime &time, const util::TimeZone &zone) :
-		time_(time),
-		lastWidth_(-1),
+		C &funcCxt, const T &tsValue, const util::TimeZone &zone) :
+		time_(FunctionUtils::toPreciseDateTime(funcCxt.toDateTime(tsValue))),
+		defaultPrecision_(funcCxt.getTimePrecision(tsValue)),
 		fieldResolved_(false) {
 	funcCxt.applyDateTimeOption(option_);
 	option_.zone_ = FunctionUtils::resolveTimeZone(funcCxt, zone);
@@ -171,36 +176,53 @@ inline int64_t TimeFunctions::Strftime::FormatContext::getFieldValue(
 	}
 }
 
+inline util::DateTime::Formatter
+TimeFunctions::Strftime::FormatContext::getDateTimeFormatter() {
+	return time_.getFormatter(option_).withDefaultPrecision(defaultPrecision_);
+}
+
 
 inline const TimeFunctions::Strftime::Formatter&
-TimeFunctions::Strftime::Formatter::getInstance(util::CodePoint key) {
+TimeFunctions::Strftime::Formatter::getInstance(
+		util::CodePoint key, int32_t width) {
+	bool keyMatched = false;
 	for (const Formatter *it = FORMATTER_LIST; it->key_ != char8_t(); ++it) {
-		if (static_cast<util::CodePoint>(it->key_) == key) {
+		if (static_cast<util::CodePoint>(it->key_) != key) {
+			continue;
+		}
+
+		keyMatched = true;
+		if (it->matchWidth(width)) {
 			return *it;
 		}
 	}
-	GS_THROW_USER_ERROR(GS_ERROR_QF_VALUE_OUT_OF_RANGE,
-			"Illegal timestamp format");
-}
 
-inline void TimeFunctions::Strftime::Formatter::acceptWidth(
-		const FormatContext &formatCxt) const {
-	const int32_t width = formatCxt.lastWidth_;
-	if (width < 0 && maxWidth_ < 0) {
-		return;
-	}
-
-	if (width < minWidth_ || maxWidth_ < width) {
+	if (keyMatched) {
 		GS_THROW_USER_ERROR(GS_ERROR_QF_VALUE_OUT_OF_RANGE,
 				"Illegal timestamp format because of unacceptable or "
 				"empty width option");
 	}
+
+	GS_THROW_USER_ERROR(GS_ERROR_QF_VALUE_OUT_OF_RANGE,
+			"Illegal timestamp format");
+}
+
+inline bool TimeFunctions::Strftime::Formatter::matchWidth(
+		int32_t width) const {
+	if (width < 0 && maxWidth_ < 0) {
+		return true;
+	}
+
+	if (minWidth_ <= width && width <= maxWidth_) {
+		return true;
+	}
+
+	return false;
 }
 
 template<typename W>
 inline void TimeFunctions::Strftime::Formatter::format(
 		FormatContext &formatCxt, W &writer) const {
-	acceptWidth(formatCxt);
 	switch (type_) {
 	case TYPE_DATE_TIME_FIELD:
 		{
@@ -215,8 +237,8 @@ inline void TimeFunctions::Strftime::Formatter::format(
 		}
 		break;
 	case TYPE_TIME_VALUE:
-		formatCxt.time_.writeTo(
-				writer, formatCxt.option_, FunctionUtils::TimeErrorHandler());
+		formatCxt.getDateTimeFormatter().writeTo(
+				writer, FunctionUtils::TimeErrorHandler());
 		break;
 	case TYPE_TIME_ZONE:
 		{
@@ -244,6 +266,14 @@ inline TimeFunctions::Strftime::Formatter::Formatter(char8_t key, Type type) :
 		minWidth_(-1),
 		maxWidth_(-1),
 		fraction_(NULL) {
+}
+
+inline TimeFunctions::Strftime::Formatter
+TimeFunctions::Strftime::Formatter::createFractionalSecond(
+		util::DateTime::FieldType fieldType, int32_t width) {
+	Formatter formatter = create('f', fieldType, width);
+	formatter.setWidthRange(width, width);
+	return formatter;
 }
 
 inline TimeFunctions::Strftime::Formatter
@@ -276,9 +306,12 @@ TimeFunctions::Strftime::Formatter::setFraction(const Formatter *fraction) {
 inline const TimeFunctions::Strftime::Formatter*
 TimeFunctions::Strftime::Formatter::createFormatterList() {
 
-	const Formatter fractionalSecond =
-			create('f', util::DateTime::FIELD_MILLISECOND, 3)
-			.setWidthRange(3, 3);
+	const Formatter milliSecond =
+			createFractionalSecond(util::DateTime::FIELD_MILLISECOND, 3);
+	const Formatter microSecond =
+			createFractionalSecond(util::DateTime::FIELD_MICROSECOND, 6);
+	const Formatter nanoSecond =
+			createFractionalSecond(util::DateTime::FIELD_NANOSECOND, 9);
 
 	const Formatter sentinel = create(char8_t(), TYPE_KEY);
 
@@ -289,7 +322,9 @@ TimeFunctions::Strftime::Formatter::createFormatterList() {
 		create('H', util::DateTime::FIELD_HOUR, 2),
 		create('M', util::DateTime::FIELD_MINUTE, 2),
 		create('S', util::DateTime::FIELD_SECOND, 2),
-		fractionalSecond,
+		milliSecond,
+		microSecond,
+		nanoSecond,
 		create('w', util::DateTime::FIELD_DAY_OF_WEEK, 1),
 		create('W', util::DateTime::FIELD_WEEK_OF_YEAR_MONDAY, 2),
 		create('j', util::DateTime::FIELD_DAY_OF_YEAR, 3),

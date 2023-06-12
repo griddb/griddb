@@ -308,10 +308,10 @@ std::vector<RawChunkInfo> MeshedChunkTable::dump() {
 	return chunkinfos;
 }
 
-void MeshedChunkTable::_extentChecker() {
+void MeshedChunkTable::extentChecker() {
 	for (auto& itr : groupMap_) {
 		Group& group = *groupMap_[itr.first];
-		group._extentChecker();
+		group.extentChecker();
 	}
 }
 
@@ -432,12 +432,13 @@ std::string MeshedChunkTable::Group::toString() {
 	oss << "]";
 	return oss.str();
 }
-void MeshedChunkTable::Group::_extentChecker() {
+void MeshedChunkTable::Group::extentChecker() {
 	int32_t index;
 	for (index = 0; index < mct_.extents_.size(); index++) {
 		ChunkExtent& extent = *mct_.extents_[index];
 		std::cout << index <<  " ***** " << extent.toString() <<
-		  " " << extent.getNumUsed() << " " << extent.getExtentSize() << std::endl;
+				" " << extent.getNumUsed() << " " << extent.getExtentSize() <<
+				std::endl;
 	}
 	index = free_->peek();
 	std::cout << index << " " << mct_.freeTable_->toString() << std::endl;
@@ -644,7 +645,7 @@ void ChunkManagerStats::setUpCPMapper(Mapper &mapper) {
 
 ChunkManager::ChunkManager(
 		ConfigTable& configTable,
-		LogManager<NoLocker> &logmanager, ChunkBuffer &chunkBuffer,
+		LogManager<MutexLocker> &logmanager, ChunkBuffer &chunkBuffer,
 		AffinityManager &affinitymanager, int32_t chunkSize, PartitionId pId,
 		ChunkManagerStats &stats) :
 		configTable_(configTable),
@@ -743,7 +744,7 @@ void ChunkManager::freeSpace(const Log* log) {
 void ChunkManager::appendUndo(
 		int64_t chunkId, DSGroupId groupId, int64_t offset, int8_t vacancy) {
 	flushBuffer(offset);
-	Log log(LogType::CPULog);
+	Log log(LogType::CPULog, defaultLogManager_.getLogFormatVersion());
 	log.setChunkId(chunkId)
 			.setGroupId(groupId)
 			.setOffset(offset)
@@ -768,30 +769,6 @@ void ChunkManager::dumpBuffer(int64_t offset) {
 	chunkBuffer_.dumpChunk(pId_, offset);
 }
 
-void ChunkManager::allocateChunk(
-		DSGroupId groupId, ChunkId chunkId, ChunkAccessor &ca) {
-	try {
-		MeshedChunkTable::Group &group = *chunkTable_->putGroup(groupId);
-		RawChunkInfo chunkinfo;
-		group.tryAllocate(chunkId, chunkinfo);
-		int64_t offset = freespace_->allocate();
-		assert(offset >= 0);
-		++blockCount_;
-		stats().table_(ChunkManagerStats::CHUNK_STAT_USE_CHUNK_COUNT)
-				.increment();
-		if (chunkinfo.getLogVersion() < logversion_) {
-			appendUndo(chunkId, groupId, -1, (int8_t)-1);
-		}
-		group.set(chunkId, offset, logversion_, true);
-		ChunkBufferFrameRef frameRef;
-		chunkBuffer_.pinChunk(pId_, offset, true, true, groupId, frameRef);
-		ca.set(chunkTable_, &chunkBuffer_, pId_, groupId, chunkId, frameRef);
-	}
-	catch(std::exception &e) {
-		GS_RETHROW_SYSTEM_ERROR(
-			e, GS_EXCEPTION_MERGE_MESSAGE(e, "tryAllocateChunk, groupId," << groupId << ",chunkId," << chunkId));
-	}
-}
 
 void ChunkManager::allocateChunk(MeshedChunkTable::Group &group, ChunkAccessor &ca) {
 	const DSGroupId groupId = group.getId();
@@ -937,7 +914,7 @@ int64_t ChunkManager::copyChunk(
 		ChunkId chunkId = chunk.getChunkId();
 		uint8_t vacancy = chunk.getMaxFreeExpSize();
 
-		Log log(LogType::PutChunkDataLog);
+		Log log(LogType::PutChunkDataLog, cxt->logManager_->getLogFormatVersion());
 		log.setChunkId(chunkId)
 			.setGroupId(groupId)
 			.setOffset(offset)
@@ -996,8 +973,8 @@ std::string ChunkManager::getSignature() {
 	return oss.str();
 }
 
-void ChunkManager::_extentChecker() {  
-	chunkTable_->_extentChecker();
+void ChunkManager::extentChecker() {
+	chunkTable_->extentChecker();
 }
 
 void ChunkManager::updateStoreObjectUseStats() {

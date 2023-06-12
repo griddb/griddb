@@ -69,10 +69,10 @@ public class NodeResolver implements Closeable {
 	private static final String DEFAULT_SERVICE_TYPE = "transaction";
 	private static final String DEFAULT_PUBLIC_SERVICE_TYPE = "transactionPublic";
 
-	private static AddressConfig DEFAULT_ADDRESS_CONFIG =
+	private static final AddressConfig DEFAULT_ADDRESS_CONFIG =
 			new AddressConfig(DEFAULT_SERVICE_TYPE);
 
-	private static AddressConfig DEFAULT_PUBLIC_ADDRESS_CONFIG =
+	private static final AddressConfig DEFAULT_PUBLIC_ADDRESS_CONFIG =
 			new AddressConfig(DEFAULT_PUBLIC_SERVICE_TYPE);
 
 	public static final ProtocolConfig DEFAULT_PROTOCOL_CONFIG =
@@ -144,8 +144,6 @@ public class NodeResolver implements Closeable {
 			InetAddress notificationInterfaceAddress,
 			boolean isPublicConnection) throws GSException {
 
-		this.DEFAULT_ADDRESS_CONFIG = new AddressConfig(
-			isPublicConnection ? DEFAULT_PUBLIC_SERVICE_TYPE : DEFAULT_SERVICE_TYPE);
 		this.pool = pool;
 		this.ipv6Enabled = (sarConfig == null ?
 				(address.getAddress() instanceof Inet6Address) :
@@ -158,7 +156,7 @@ public class NodeResolver implements Closeable {
 		this.preferableConnectionPoolSize = pool.getMaxSize();
 		this.serviceAddressResolver = makeServiceAddressResolver(
 				makeServiceAddressResolverConfig(sarConfig, connectionConfig),
-				memberList, addressConfig);
+				memberList, addressConfig, isPublicConnection);
 		this.protocolConfig = DEFAULT_PROTOCOL_CONFIG;
 		if (addressConfig != null) {
 			alwaysMaster = addressConfig.alwaysMaster;
@@ -169,19 +167,22 @@ public class NodeResolver implements Closeable {
 	private static ServiceAddressResolver makeServiceAddressResolver(
 			ServiceAddressResolver.Config sarConfig,
 			List<InetSocketAddress> memberList,
-			AddressConfig addressConfig) throws GSException {
+			AddressConfig addressConfig, boolean isPublicConnection) throws GSException {
 		if (sarConfig == null) {
 			return null;
 		}
 
 		if (addressConfig == null) {
 			return makeServiceAddressResolver(
-					sarConfig, memberList, DEFAULT_ADDRESS_CONFIG);
+					sarConfig, memberList,
+					isPublicConnection ? DEFAULT_PUBLIC_ADDRESS_CONFIG : DEFAULT_ADDRESS_CONFIG,
+					isPublicConnection);
 		}
 
 		final ServiceAddressResolver resolver =
 				new ServiceAddressResolver(sarConfig);
-		resolver.initializeType(0, addressConfig.serviceType);
+		String serviceType = isPublicConnection ? DEFAULT_PUBLIC_SERVICE_TYPE : DEFAULT_SERVICE_TYPE;
+		resolver.initializeType(0, serviceType);
 
 		if (sarConfig.getProviderURL() == null && memberList.isEmpty()) {
 			throw new IllegalArgumentException();

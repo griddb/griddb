@@ -270,8 +270,52 @@ void ClassInstanceChecker<T>::Scope::clear() {
 }
 #endif 
 
+struct ServiceAddressResolver::HostTable {
+public:
+	HostTable(const Allocator &localAlloc, const Config &config);
+
+	void setExecutor(util::ExecutorService &executor);
+
+	bool isEmpty();
+	void clear();
+
+	void add(const AssignByHostCommand &cmd);
+
+	bool resolveAddresses();
+	bool resolveAddressesAsync();
+	bool resolveAddressesImmediately();
+
+	util::SocketAddress takeAddress(const AssignByHostCommand &cmd);
+
+private:
+	typedef util::BatchCommand<AssignByHostCommand> TotalCommand;
+	typedef TotalCommand::ResultType TotalResult;
+	typedef util::AllocMap<AssignByHostCommand, util::SocketAddress> Map;
+	typedef bool (HostTable::*ResolveAddressesFunc)();
+
+	bool prepareCommand();
+	bool checkCommmandResult(uint32_t timeoutMillis);
+
+	static void handleCommnadError(
+			std::exception&, const char8_t *mainMessage);
+
+	static std::allocator<char> globalAllocBase_;
+
+	Allocator localAlloc_;
+
+	util::ExecutorService *executor_;
+
+	TotalCommand workingCommand_;
+	util::LocalUniquePtr< util::Future<TotalResult> > future_;
+
+	Map map_;
+
+	uint32_t timeoutMillis_;
+	ResolveAddressesFunc resolveAddressesFunc_;
+};
+
 struct ServiceAddressResolver::ProviderContext : public util::IOPollHandler {
-	ProviderContext(ServiceAddressResolver &base);
+	explicit ProviderContext(ServiceAddressResolver &base);
 	virtual ~ProviderContext();
 
 	virtual void handlePollEvent(util::IOPollBase *io, util::IOPollEvent event);
@@ -290,10 +334,12 @@ struct ServiceAddressResolver::ProviderContext : public util::IOPollHandler {
 	ServiceAddressResolver &base_;
 	HttpRequest request_;
 	HttpResponse response_;
+	HostTable hostTable_;
 	util::SocketAddress address_;
 	AbstractSocket socket_;
 	util::IOPollEvent ioPollEvent_;
 	bool connected_;
+	picojson::value responseValue_;
 };
 
 std::ostream& operator<<(
@@ -459,6 +505,15 @@ void ServiceAddressResolver::initializeType(
 	typeList_[type].swap(nameStr);
 }
 
+void ServiceAddressResolver::setExecutor(util::ExecutorService &executor) {
+#if SERVICE_ADDRESS_CHECK_INSTANCE
+	ProviderContext::ContextChecker::Scope cxtCheckerScope(
+			ProviderContext::contextCheckers_, providerCxt_);
+#endif
+
+	providerCxt_->hostTable_.setExecutor(executor);
+}
+
 uint32_t ServiceAddressResolver::getTypeCount() const {
 	return static_cast<uint32_t>(typeMap_.size());
 }
@@ -493,37 +548,36 @@ bool ServiceAddressResolver::update() try {
 
 	HttpRequest &request = providerCxt_->request_;
 	HttpResponse &response = providerCxt_->response_;
+	HostTable &hostTable = providerCxt_->hostTable_;
 	util::SocketAddress &address = providerCxt_->address_;
 	AbstractSocket &socket = providerCxt_->socket_;
 	util::IOPollEvent &ioPollEvent = providerCxt_->ioPollEvent_;
 	bool &connected = providerCxt_->connected_;
+	picojson::value &responseValue = providerCxt_->responseValue_;
 
 	request.clear();
 	response.clear();
+	hostTable.clear();
 	address.clear();
 	socket.close();
 	ioPollEvent = util::IOPollEvent();
 	connected = false;
+	responseValue = picojson::value();
 
 	request.getMessage().addHeader(
 			HttpMessage::HEADER_ACCEPT, HttpMessage::CONTENT_TYPE_JSON, true);
 	request.acceptURL(providerURL_.c_str());
 	request.build();
 
-	address.assign(request.getHost(), request.getPort());
-
-	createSocket(socket);
-	socket.open(address.getFamily(), util::Socket::TYPE_STREAM);
-	socket.setBlockingMode(false);
-	connected = socket.connect(address);
+	makeRequestAddress(request, hostTable, true);
 
 #if SERVICE_ADDRESS_CHECK_INSTANCE
 	checkerScope.clear();
 	cxtCheckerScope.clear();
 #endif
 
-	assert(!socket.isClosed());
-	return (connected && checkUpdated());
+	assert(!hostTable.isEmpty() && responseValue.is<picojson::null>());
+	return checkUpdated();
 }
 catch (...) {
 #if SERVICE_ADDRESS_CHECK_INSTANCE
@@ -531,7 +585,7 @@ catch (...) {
 			ProviderContext::contextCheckers_, providerCxt_);
 #endif
 
-	providerCxt_->socket_.close();
+	providerCxt_->hostTable_.clear();
 	throw;
 }
 
@@ -555,11 +609,14 @@ bool ServiceAddressResolver::checkUpdated(size_t *readSize) try {
 
 	HttpRequest &request = providerCxt_->request_;
 	HttpResponse &response = providerCxt_->response_;
+	HostTable &hostTable = providerCxt_->hostTable_;
+	util::SocketAddress &address = providerCxt_->address_;
 	AbstractSocket &socket = providerCxt_->socket_;
 	util::IOPollEvent &ioPollEvent = providerCxt_->ioPollEvent_;
-	const bool &connected = providerCxt_->connected_;
+	bool &connected = providerCxt_->connected_;
+	picojson::value &responseValue = providerCxt_->responseValue_;
 
-	if (socket.isClosed()) {
+	if (hostTable.isEmpty()) {
 #if SERVICE_ADDRESS_CHECK_INSTANCE
 		checkerScope.clear();
 		cxtCheckerScope.clear();
@@ -567,13 +624,27 @@ bool ServiceAddressResolver::checkUpdated(size_t *readSize) try {
 		return update();
 	}
 
+	if (!hostTable.resolveAddresses()) {
+		return false;
+	}
+
+	if (address.isEmpty()) {
+		address = makeRequestAddress(request, hostTable, false);
+
+		createSocket(socket);
+		socket.open(address.getFamily(), util::Socket::TYPE_STREAM);
+		socket.setBlockingMode(false);
+		connected = socket.connect(address);
+	}
+
 	ioPollEvent = util::IOPollEvent::TYPE_READ_WRITE;
 	if (!connected) {
-		util::IOPollSelect select;
-		select.add(&socket, util::IOPollEvent::TYPE_READ_WRITE);
-		if (!select.dispatch(0)) {
+		util::IOPollEPoll poll;
+		poll.add(&socket, util::IOPollEvent::TYPE_READ_WRITE);
+		if (!poll.dispatch(0)) {
 			return false;
 		}
+		connected = true;
 	}
 
 	if (!request.getMessage().isWrote() &&
@@ -584,26 +655,27 @@ bool ServiceAddressResolver::checkUpdated(size_t *readSize) try {
 
 	ioPollEvent = util::IOPollEvent::TYPE_READ;
 
-	const bool eof = response.getMessage().readFrom(socket, readSize);
-	ioPollEvent = resolvePollEvent(socket, ioPollEvent);
-	if (!response.parse(eof)) {
-		return false;
-	}
+	if (responseValue.is<picojson::null>()) {
+		const bool eof = response.getMessage().readFrom(socket, readSize);
+		ioPollEvent = resolvePollEvent(socket, ioPollEvent);
+		if (!response.parse(eof)) {
+			return false;
+		}
 
-	socket.close();
+		socket.close();
+
+		response.checkSuccess();
+		responseValue = response.getMessage().toJsonValue();
+
+		importDetailFrom(responseValue, hostTable, true, true);
+		if (!hostTable.resolveAddresses()) {
+			return false;
+		}
+	}
 	ioPollEvent = util::IOPollEvent();
 
-	response.checkSuccess();
-
-#if SERVICE_ADDRESS_CHECK_INSTANCE
-	checkerScope.clear();
-#endif
-
-	importFrom(response.getMessage().toJsonValue());
-
-#if SERVICE_ADDRESS_CHECK_INSTANCE
-	checkerScope.set(ProviderContext::resolverCheckers_, this);
-#endif
+	importDetailFrom(responseValue, hostTable, false, true);
+	responseValue = picojson::value();
 
 	updated_ = std::make_pair(true, true);
 
@@ -615,7 +687,7 @@ catch (...) {
 			ProviderContext::contextCheckers_, providerCxt_);
 #endif
 
-	providerCxt_->socket_.close();
+	providerCxt_->hostTable_.clear();
 
 	std::exception e;
 	GS_COMMON_RETHROW_USER_ERROR(
@@ -684,11 +756,6 @@ void ServiceAddressResolver::setAddress(
 			if (it == storedIt) {
 				return;
 			}
-			GS_COMMON_THROW_USER_ERROR(
-					GS_ERROR_SA_ADDRESS_CONFLICTED,
-					"Address conflicted (index=" << index <<
-					", type=" << getTypeName(type) <<
-					", address=" << addr << ")");
 		}
 
 		const int family = config_.addressFamily_;
@@ -737,71 +804,16 @@ void ServiceAddressResolver::importFrom(
 #if SERVICE_ADDRESS_CHECK_INSTANCE
 	ProviderContext::ResolverChecker::Scope checkerScope(
 			ProviderContext::resolverCheckers_, this);
+	ProviderContext::ContextChecker::Scope cxtCheckerScope(
+			ProviderContext::contextCheckers_, providerCxt_);
 #endif
 
-	completeInit();
+	HostTable &hostTable = providerCxt_->hostTable_;
+	importDetailFrom(value, hostTable, true, strict);
 
-	Config config = config_;
-	config.providerURL_ = NULL;
+	hostTable.resolveAddressesImmediately();
 
-	ServiceAddressResolver another(alloc_, config);
-	another.initializeType(*this);
-
-	const u8string addrName = JSON_KEY_ADDRESS;
-	const u8string portName = JSON_KEY_PORT;
-
-	const picojson::array &list = JsonUtils::as<picojson::array>(value);
-
-	for (picojson::array::const_iterator entryIt = list.begin();
-			entryIt != list.end(); ++entryIt) {
-		const size_t index = entryIt - list.begin();
-		JsonUtils::Path entryPath = JsonUtils::Path().indexed(index);
-
-		for (TypeList::const_iterator typeIt = typeList_.begin();
-				typeIt != typeList_.end(); ++typeIt) {
-
-			JsonUtils::Path typePath = entryPath.child();
-			const uint32_t type =
-					static_cast<uint32_t>(typeIt - typeList_.begin());
-			const char8_t *typeName = typeIt->c_str();
-
-			const picojson::value *addrObj = (strict ?
-					&JsonUtils::as<picojson::value>(
-							*entryIt, typeName, &typePath) :
-					JsonUtils::find<picojson::value>(
-							*entryIt, typeName, &typePath));
-			if (addrObj == NULL) {
-				continue;
-			}
-
-			JsonUtils::Path addrPath = typePath.child();
-			const u8string &host = JsonUtils::as<u8string>(
-					*addrObj, addrName, &addrPath);
-			const int64_t port = JsonUtils::asInt<int64_t>(
-					*addrObj, portName, &addrPath);
-
-			const util::SocketAddress &addr =
-					makeSocketAddress(host.c_str(), port);
-
-			another.setAddress(index, type, addr);
-		}
-	}
-
-	if (strict) {
-		another.normalize();
-		another.validate();
-	}
-
-	changed_ = !isSameEntries(another);
-
-#if SERVICE_ADDRESS_CHECK_INSTANCE
-	ProviderContext::ResolverChecker::Scope anotherCheckerScope(
-			ProviderContext::resolverCheckers_, &another);
-#endif
-
-	std::swap(addressSet_, another.addressSet_);
-	std::swap(entryList_, another.entryList_);
-	std::swap(normalized_, another.normalized_);
+	importDetailFrom(value, hostTable, false, strict);
 }
 
 bool ServiceAddressResolver::exportTo(picojson::value &value) const try {
@@ -910,7 +922,8 @@ util::IOPollEvent ServiceAddressResolver::getIOPollEvent() {
 }
 
 util::SocketAddress ServiceAddressResolver::makeSocketAddress(
-		const char8_t *host, int64_t port) {
+		const u8string &host, int64_t port, HostTable &hostTable,
+		bool hostCheckOnly) {
 	if (port < 0 || port >
 			static_cast<int64_t>(std::numeric_limits<uint16_t>::max())) {
 		GS_COMMON_THROW_USER_ERROR(
@@ -918,8 +931,110 @@ util::SocketAddress ServiceAddressResolver::makeSocketAddress(
 				"Port out of range (host=" << host << ", port=" << port << ")");
 	}
 
+	const AssignByHostCommand cmd(host, 0, config_.addressFamily_);
+	if (hostCheckOnly) {
+		hostTable.add(cmd);
+		return util::SocketAddress();
+	}
+
 	const uint16_t validPort = static_cast<uint16_t>(port);
-	return util::SocketAddress(host, validPort, config_.addressFamily_);
+
+	util::SocketAddress address = hostTable.takeAddress(cmd);
+	address.setPort(validPort);
+	return address;
+}
+
+util::SocketAddress ServiceAddressResolver::makeRequestAddress(
+		const HttpRequest &request, HostTable &hostTable, bool hostCheckOnly) {
+	AssignByHostCommand cmd(request.getHost(), request.getPort());
+
+	if (hostCheckOnly) {
+		hostTable.add(cmd);
+		return util::SocketAddress();
+	}
+
+	return hostTable.takeAddress(cmd);
+}
+
+void ServiceAddressResolver::importDetailFrom(
+		const picojson::value &value, HostTable &hostTable,
+		bool hostCheckOnly, bool strict) {
+	completeInit();
+
+	Config config = config_;
+	config.providerURL_ = NULL;
+
+	ServiceAddressResolver another(alloc_, config);
+	another.initializeType(*this);
+
+	const u8string addrName = JSON_KEY_ADDRESS;
+	const u8string portName = JSON_KEY_PORT;
+
+	const picojson::array &list = JsonUtils::as<picojson::array>(value);
+
+	for (picojson::array::const_iterator entryIt = list.begin();
+			entryIt != list.end(); ++entryIt) {
+		const size_t index = entryIt - list.begin();
+		JsonUtils::Path entryPath = JsonUtils::Path().indexed(index);
+
+		for (TypeList::const_iterator typeIt = typeList_.begin();
+				typeIt != typeList_.end(); ++typeIt) {
+
+			JsonUtils::Path typePath = entryPath.child();
+			const uint32_t type =
+					static_cast<uint32_t>(typeIt - typeList_.begin());
+			const char8_t *typeName = typeIt->c_str();
+
+			const picojson::value *addrObj = (strict ?
+					&JsonUtils::as<picojson::value>(
+							*entryIt, typeName, &typePath) :
+					JsonUtils::find<picojson::value>(
+							*entryIt, typeName, &typePath));
+			if (addrObj == NULL) {
+				continue;
+			}
+
+			JsonUtils::Path addrPath = typePath.child();
+			const u8string &host = JsonUtils::as<u8string>(
+					*addrObj, addrName, &addrPath);
+			const int64_t port = JsonUtils::asInt<int64_t>(
+					*addrObj, portName, &addrPath);
+
+			const util::SocketAddress &addr = makeSocketAddress(
+					host, port, hostTable, hostCheckOnly);
+			if (hostCheckOnly) {
+				continue;
+			}
+
+			another.setAddress(index, type, addr);
+		}
+	}
+
+	if (hostCheckOnly) {
+		return;
+	}
+
+	if (strict) {
+		another.normalize();
+		another.validate();
+	}
+
+	changed_ = !isSameEntries(another);
+
+#if SERVICE_ADDRESS_CHECK_INSTANCE
+	ProviderContext::ResolverChecker::Scope anotherCheckerScope(
+			ProviderContext::resolverCheckers_, &another);
+#endif
+
+	std::swap(addressSet_, another.addressSet_);
+	std::swap(entryList_, another.entryList_);
+	std::swap(normalized_, another.normalized_);
+}
+
+void ServiceAddressResolver::initializeRaw() {
+#if SERVICE_ADDRESS_CHECK_INSTANCE
+	memset(this, 0, sizeof(*this));
+#endif
 }
 
 void ServiceAddressResolver::completeInit() {
@@ -933,12 +1048,6 @@ void ServiceAddressResolver::completeInit() {
 	}
 
 	initialized_ = true;
-}
-
-void ServiceAddressResolver::initializeRaw() {
-#if SERVICE_ADDRESS_CHECK_INSTANCE
-	memset(this, 0, sizeof(*this));
-#endif
 }
 
 void ServiceAddressResolver::checkEntry(size_t index) const {
@@ -1017,12 +1126,16 @@ util::IOPollEvent ServiceAddressResolver::resolvePollEvent(
 	}
 }
 
+
 ServiceAddressResolver::Config::Config() :
 		providerURL_(NULL),
 		addressFamily_(util::SocketAddress::FAMILY_INET),
 		plainSocketFactory_(&DEFAULT_SOCKET_FACTORY),
-		secureSocketFactory_(NULL) {
+		secureSocketFactory_(NULL),
+		hostCheckMillis_(50),
+		hostCheckImmediately_(false) {
 }
+
 
 ServiceAddressResolver::Entry::Entry(const Allocator &alloc, size_t typeCount) :
 		list_(alloc) {
@@ -1049,16 +1162,184 @@ int32_t ServiceAddressResolver::Entry::compare(const Entry &another) const {
 	return 0;
 }
 
+
 bool ServiceAddressResolver::EntryLess::operator()(
 		const Entry &entry1, const Entry &entry2) const {
 	return entry1.compare(entry2) < 0;
 }
+
+
+std::allocator<char> ServiceAddressResolver::HostTable::globalAllocBase_;
+
+ServiceAddressResolver::HostTable::HostTable(
+		const Allocator &localAlloc, const Config &config) :
+		localAlloc_(localAlloc),
+		executor_(NULL),
+		workingCommand_(localAlloc_),
+		map_(localAlloc_),
+		timeoutMillis_(config.hostCheckMillis_),
+		resolveAddressesFunc_(config.hostCheckImmediately_ ?
+				&HostTable::resolveAddressesImmediately :
+				&HostTable::resolveAddressesAsync) {
+}
+
+void ServiceAddressResolver::HostTable::setExecutor(
+		util::ExecutorService &executor) {
+	executor_ = &executor;
+}
+
+bool ServiceAddressResolver::HostTable::isEmpty() {
+	return map_.empty();
+}
+
+void ServiceAddressResolver::HostTable::clear() {
+	workingCommand_.clear();
+	future_.reset();
+	map_.clear();
+}
+
+void ServiceAddressResolver::HostTable::add(const AssignByHostCommand &cmd) {
+	if (future_.get() != NULL) {
+		assert(false);
+		GS_COMMON_THROW_USER_ERROR(
+				GS_ERROR_SA_INTERNAL_ILLEGAL_OPERATION, "");
+	}
+	map_.insert(std::make_pair(cmd, util::SocketAddress()));
+}
+
+bool ServiceAddressResolver::HostTable::resolveAddresses() {
+	return (this->*resolveAddressesFunc_)();
+}
+
+bool ServiceAddressResolver::HostTable::resolveAddressesAsync() {
+	if (future_.get() == NULL) {
+		if (!prepareCommand()) {
+			return true;
+		}
+	}
+
+	return checkCommmandResult(timeoutMillis_);
+}
+
+bool ServiceAddressResolver::HostTable::resolveAddressesImmediately() {
+	for (Map::iterator it = map_.begin(); it != map_.end(); ++it) {
+		if (!it->second.isEmpty()) {
+			continue;
+		}
+		it->second = it->first();
+	}
+	return true;
+}
+
+util::SocketAddress ServiceAddressResolver::HostTable::takeAddress(
+		const AssignByHostCommand &cmd) {
+	Map::iterator it = map_.find(cmd);
+	if (it == map_.end() || it->second.isEmpty()) {
+		assert(false);
+		GS_COMMON_THROW_USER_ERROR(
+				GS_ERROR_SA_INTERNAL_ILLEGAL_OPERATION, "");
+	}
+	return it->second;
+}
+
+bool ServiceAddressResolver::HostTable::prepareCommand() {
+	if (executor_ == NULL) {
+		assert(false);
+		GS_COMMON_THROW_USER_ERROR(
+				GS_ERROR_SA_INTERNAL_ILLEGAL_OPERATION, "");
+	}
+
+	assert(future_.get() == NULL);
+
+	workingCommand_.clear();
+	for (Map::iterator it = map_.begin(); it != map_.end(); ++it) {
+		if (!it->second.isEmpty()) {
+			continue;
+		}
+		workingCommand_.add(it->first);
+	}
+
+	if (workingCommand_.begin() == workingCommand_.end()) {
+		return false;
+	}
+
+	Allocator globalAlloc(&globalAllocBase_);
+	TotalCommand command(globalAlloc);
+	command.addAll(workingCommand_.begin(), workingCommand_.end());
+
+	typedef util::Future<TotalResult> FutureType;
+	try {
+		future_ = UTIL_MAKE_LOCAL_UNIQUE(
+				future_, FutureType, executor_->submit(command));
+	}
+	catch (...) {
+		std::exception e;
+		handleCommnadError(e, "Failed to request on host address");
+	}
+	return true;
+}
+
+bool ServiceAddressResolver::HostTable::checkCommmandResult(
+		uint32_t timeoutMillis) {
+	assert(future_.get() != NULL);
+
+	future_->waitFor(timeoutMillis);
+
+	TotalResult *result;
+	try {
+		result = future_->poll();
+	}
+	catch (...) {
+		std::exception e;
+		handleCommnadError(e, "Failed to resolve host address");
+	}
+
+	if (result == NULL) {
+		return false;
+	}
+
+	TotalResult::const_iterator it = result->begin();
+	TotalCommand::CommandIterator cmdIt = workingCommand_.begin();
+	while (it != result->end() && cmdIt != workingCommand_.end()) {
+		map_[*cmdIt] = *it;
+		++it;
+		++cmdIt;
+	}
+
+	workingCommand_.clear();
+	future_.reset();
+	return true;
+}
+
+void ServiceAddressResolver::HostTable::handleCommnadError(
+		std::exception&, const char8_t *mainMessage) {
+	try {
+		throw;
+	}
+	catch (util::UtilityException &e) {
+		if (e.getErrorCode() == util::UtilityException::CODE_INVALID_STATUS) {
+			GS_COMMON_THROW_USER_ERROR(
+					GS_ERROR_SA_ADDRESS_NOT_ASSIGNED,
+					mainMessage << " (reason=" <<
+					e.getField(util::Exception::FIELD_MESSAGE) << ")");
+		}
+	}
+	catch (...) {
+	}
+
+	std::exception e;
+	GS_COMMON_RETHROW_USER_ERROR(
+			e, mainMessage << " (reason=" <<
+			GS_COMMON_EXCEPTION_MESSAGE(e) << ")");
+}
+
 
 ServiceAddressResolver::ProviderContext::ProviderContext(
 		ServiceAddressResolver &base) :
 		base_(base),
 		request_(base.alloc_),
 		response_(base.alloc_),
+		hostTable_(base.alloc_, base.config_),
 		ioPollEvent_(util::IOPollEvent()),
 		connected_(false) {
 }

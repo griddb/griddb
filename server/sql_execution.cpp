@@ -29,6 +29,7 @@ UTIL_TRACER_DECLARE(DISTRIBUTED_FRAMEWORK);
 UTIL_TRACER_DECLARE(SQL_DETAIL);
 UTIL_TRACER_DECLARE(DISTRIBUTED_FRAMEWORK_DETAIL);
 UTIL_TRACER_DECLARE(SQL_INTERNAL);
+AUDIT_TRACER_DECLARE(AUDIT_CONNECT);
 
 
 const size_t SQLExecutionManager::DEFAULT_ALLOCATOR_BLOCK_SIZE = 20;
@@ -56,6 +57,23 @@ SQLExecutionManager::configSetUpHandler_;
 			" SQL 0 END IN 0 " << \
 			processorName \
 			<< " PIPE");
+
+AUDIT_TRACER_DECLARE(AUDIT_SQL_READ);
+AUDIT_TRACER_DECLARE(AUDIT_SQL_WRITE);
+AUDIT_TRACER_DECLARE(AUDIT_DDL);
+AUDIT_TRACER_DECLARE(AUDIT_DCL);
+
+#define AUDIT_TRACE_INFO_INTERNAL_EXECUTE(tracer, statementType) { \
+}
+
+#define AUDIT_TRACE_INFO_EXECUTE() { \
+}
+
+#define AUDIT_TRACE_ERROR_INTERNAL_HANDLEERROR(tracer, statementType) { \
+}
+
+#define AUDIT_TRACE_ERROR_HANDLEERROR() { \
+}
 
 SQLConfigParam::SQLConfigParam(ConfigTable& config) {
 	multiIndexScan_ = config.get<bool>(CONFIG_TABLE_SQL_MULTI_INDEX_SCAN);
@@ -147,7 +165,7 @@ void SQLExecutionManager::remove(EventContext& ec,
 		}
 		if (isRemove) {
 			if (jobId == NULL || (jobId != NULL && cancelJobId == *jobId)) {
-				jobManager_->cancel(ec, cancelJobId, false, point);
+				jobManager_->cancel(ec, cancelJobId, false);
 			}
 		}
 		{
@@ -418,6 +436,7 @@ void SQLExecution::setRequest(RequestInfo& request) {
 	executionStatus_.connectedPgId_ = request.pgId_;
 	executionStatus_.requestType_ = request.requestType_;
 	context_.setQuery(request.sqlString_);
+	context_.resetPendingException();
 	response_.set(request, resultSet_);
 	executionStatus_.responsed_ = false;
 
@@ -741,6 +760,7 @@ void SQLExecution::execute(EventContext& ec,
 
 				cxt.tableInfoList_ = tableInfoList;
 				if (parsedInfo.getCommandNum() == 0 && !parse(cxt, request, 0, 0, 0)) {
+					AUDIT_TRACE_INFO_EXECUTE();
 					SQLReplyContext replyCxt;
 					replyCxt.set(&ec, NULL, UNDEF_JOB_VERSIONID, NULL);
 					replyClient(replyCxt);
@@ -750,6 +770,7 @@ void SQLExecution::execute(EventContext& ec,
 					return;
 				}
 				TRACE_SQL_END(clientId_, jobManager_->getHostName(), "PARSE");
+				AUDIT_TRACE_INFO_EXECUTE();
 
 				getContext().getConnectionOption().checkSelect(parsedInfo);
 
@@ -825,7 +846,7 @@ void SQLExecution::execute(EventContext& ec,
 			if (!checkJobVersionId(currentVersionId, false, responseJobId)) {
 				return;
 			}
-			if (handleError(ec, e1, currentVersionId, delayTime)) {
+			if (handleError(ec, e1, currentVersionId, delayTime, request)) {
 				return;
 			}
 		}
@@ -1098,6 +1119,7 @@ void SQLExecution::fetch(EventContext& ec, Event& ev,
 	try {
 		setRequest(request);
 		checkCancel();
+
 		if (executionStatus_.execId_ != request.stmtId_) {
 			GS_THROW_USER_ERROR(GS_ERROR_SQL_INVALID_QUERY_EXECUTION_ID,
 				"Invalid statement execution number, expected="
@@ -1114,10 +1136,12 @@ void SQLExecution::fetch(EventContext& ec, Event& ev,
 		JobManager::Latch latch(jobId, "SQLExecution::fetch", jobManager_);
 		Job* job = latch.get();
 		if (job) {
+			getContext().checkPendingException(true);
 			job->fetch(ec, this);
 		}
 		else {
 			try {
+				getContext().checkPendingException(true);
 				GS_THROW_USER_ERROR(GS_ERROR_JOB_CANCELLED,
 					"Cancel job, jobId=" << jobId << ", (fetch)");
 			}
@@ -1215,6 +1239,17 @@ void SQLExecution::setAnyTypeData(util::StackAllocator& alloc, const TupleValue&
 	case TupleList::TYPE_TIMESTAMP: {
 		resultSet_->setFixedValue<int64_t>(
 			COLUMN_TYPE_TIMESTAMP, value.fixedData());
+		break;
+	}
+	case TupleList::TYPE_MICRO_TIMESTAMP: {
+		resultSet_->setFixedValue<MicroTimestamp>(
+			COLUMN_TYPE_MICRO_TIMESTAMP, value.fixedData());
+		break;
+	}
+	case TupleList::TYPE_NANO_TIMESTAMP: {
+		resultSet_->setLargeFixedFieldValueWithPadding(
+			COLUMN_TYPE_NANO_TIMESTAMP,
+			value.get<TupleNanoTimestamp>().get());
 		break;
 	}
 	case TupleList::TYPE_BOOL: {
@@ -1383,11 +1418,17 @@ void SQLExecution::encodeSuccess(util::StackAllocator& alloc,
 						const util::String emptyColumnName("", alloc);
 						StatementHandler::encodeStringData<EventByteOutStream>(
 							out, emptyColumnName);
-						uint8_t type = convertTupleTypeToNoSQLType(
-							(*typeList)[placeHolderPos]);
-						out << type;
-						const bool isArrayVal = false;
-						StatementHandler::encodeBooleanData<EventByteOutStream>(out, isArrayVal);
+						const bool withAny = true;
+						const ColumnType columnType = convertTupleTypeToNoSQLType(
+								(*typeList)[placeHolderPos]);
+						checkColumnTypeFeatureVersion(columnType);
+						const int8_t typeOrdinal =
+								ValueProcessor::getPrimitiveColumnTypeOrdinal(
+										columnType, withAny);
+						out << typeOrdinal;
+						const uint8_t flags = MessageSchema::makeColumnFlags(
+								ValueProcessor::isArray(columnType), false, false);
+						out << flags;
 					}
 					const int16_t keyCount = 0;
 					StatementHandler::encodeIntData<EventByteOutStream>(out, keyCount);
@@ -1429,7 +1470,7 @@ void SQLExecution::encodeSuccessExplain(util::StackAllocator& alloc,
 	typeList.push_back(TupleList::TYPE_STRING);
 	util::Vector<util::String> columnNameList(alloc);
 	resultSet.getColumnNameList(alloc, columnNameList);
-	columnNameList.push_back("");
+	columnNameList.push_back(util::String(alloc));
 	resultSet.setColumnNameList(columnNameList);
 	resultSet.setColumnTypeList(typeList);
 	resultSet.init(alloc);
@@ -1481,7 +1522,7 @@ void SQLExecution::encodeSuccessExplainAnalyze(
 	typeList.push_back(TupleList::TYPE_STRING);
 	util::Vector<util::String> columnNameList(eventStackAlloc);
 	resultSet.getColumnNameList(eventStackAlloc, columnNameList);
-	columnNameList.push_back("");
+	columnNameList.push_back(util::String(eventStackAlloc));
 	resultSet.setColumnNameList(columnNameList);
 	resultSet.setColumnTypeList(typeList);
 	resultSet.init(eventStackAlloc);
@@ -1579,6 +1620,7 @@ bool SQLExecution::replyError(EventContext& ec,
 		GS_TRACE_INFO(DISTRIBUTED_FRAMEWORK, GS_TRACE_SQL_INTERNAL_DEBUG,
 			"Call reply success, but not executed because of already responded,"
 			"clientId=" << clientId_);
+		context_.setPendingException(e);
 		return false;
 	}
 	UTIL_TRACE_EXCEPTION(SQL_SERVICE, e, "");
@@ -1742,6 +1784,12 @@ TupleValue SQLExecution::getTupleValue(TupleValue::VarContext& varCxt,
 		return SQLCompiler::ProcessorUtils::convertType(
 			varCxt, bindParamInfos[targetExpr->placeHolderPos_]->value_, type, implicit);
 	}
+}
+
+void SQLExecution::checkColumnTypeFeatureVersion(ColumnType columnType) {
+	StatementHandler::checkSchemaFeatureVersion(
+			ValueProcessor::getSchemaFeatureLevel(columnType),
+			context_.clientInfo_.acceptableFeatureVersion_);
 }
 
 struct BulkEntry {
@@ -2540,9 +2588,15 @@ SQLTableInfo* SQLExecution::decodeTableInfo(
 			static_cast<uint32_t>(partitioningCount);
 	}
 
-	int8_t partitionColumnType;
+	ColumnType partitionColumnType;
 	if (SyntaxTree::isRangePartitioningType(partitioningType)) {
-		in >> partitionColumnType;
+		int8_t typeOrdinal;
+		in >> typeOrdinal;
+		if (!ValueProcessor::findColumnTypeByPrimitiveOrdinal(
+				typeOrdinal, false, false, partitionColumnType)) {
+			GS_THROW_USER_ERROR(GS_ERROR_TXN_DECODE_FAILED, "");
+		}
+
 		int64_t intervalValue;
 		switch (partitionColumnType) {
 		case COLUMN_TYPE_BYTE: {
@@ -2575,6 +2629,18 @@ SQLTableInfo* SQLExecution::decodeTableInfo(
 			intervalValue = value;
 			break;
 		}
+		case COLUMN_TYPE_MICRO_TIMESTAMP: {
+			MicroTimestamp value;
+			in.readAll(&value, sizeof(value));
+			intervalValue = ValueProcessor::getTimestamp(value);
+			break;
+		}
+		case COLUMN_TYPE_NANO_TIMESTAMP: {
+			NanoTimestamp value;
+			in.readAll(&value, sizeof(value));
+			intervalValue = ValueProcessor::getTimestamp(value);
+			break;
+		}
 		default:
 			GS_THROW_USER_ERROR(GS_ERROR_TXN_DECODE_FAILED, "");
 		}
@@ -2587,7 +2653,7 @@ SQLTableInfo* SQLExecution::decodeTableInfo(
 		in >> unitValue;
 	}
 	else {
-		partitionColumnType = -1;
+		partitionColumnType = COLUMN_TYPE_ANY;
 	}
 
 	int64_t partitioningVersionId;
@@ -2812,14 +2878,14 @@ void SQLExecution::cleanupPrevJob(EventContext& ec) {
 	if (context_.isPreparedStatement()) {
 		JobId currentJobId;
 		context_.getCurrentJobId(currentJobId);
-		jobManager_->remove(currentJobId, 1);
+		jobManager_->remove(currentJobId);
 	}
 }
 
 void SQLExecution::cancelPrevJob(EventContext& ec) {
 	JobId currentJobId;
 	context_.getCurrentJobId(currentJobId);
-	jobManager_->cancel(ec, currentJobId, false, 100);
+	jobManager_->cancel(ec, currentJobId, false);
 }
 
 bool SQLExecution::fastInsert(EventContext& ec,
@@ -3273,11 +3339,17 @@ bool SQLExecution::fetchSelect(EventContext& ec, TupleList::Reader* reader,
 			case TupleList::TYPE_NUMERIC:
 			case TupleList::TYPE_DOUBLE:
 			case TupleList::TYPE_TIMESTAMP:
+			case TupleList::TYPE_MICRO_TIMESTAMP:
 			case TupleList::TYPE_BOOL: {
 				resultSet_->setFixedFieldValue(value.fixedData(),
 					ColumnTypeUtils::getFixedSize(value.getType()));
 			}
 									 break;
+			case TupleList::TYPE_NANO_TIMESTAMP:
+				resultSet_->setFixedFieldValue(
+						value.get<TupleNanoTimestamp>().data(),
+						ColumnTypeUtils::getFixedSize(value.getType()));
+				break;
 			case TupleList::TYPE_STRING: {
 				resultSet_->setVarFieldValue(
 					value.varData(), value.varSize());
@@ -3335,11 +3407,10 @@ void SQLExecution::setNullValue(const TupleValue& value,
 		setAnyTypeData(alloc, value);
 	}
 	else {
-		if (ColumnTypeUtils::isFixed(column.type_)) {
-			const uint64_t padding = 0;
+		if (ColumnTypeUtils::isSomeFixed(column.type_)) {
 			const size_t paddingSize =
-				ColumnTypeUtils::getFixedSize(column.type_);
-			resultSet_->setFixedFieldValue(&padding, paddingSize);
+					ColumnTypeUtils::getFixedSize(column.type_);
+			resultSet_->setFixedFieldPadding(paddingSize);
 		}
 		else {
 			resultSet_->setVarFieldValue(NULL, 0);
@@ -3367,7 +3438,8 @@ void SQLExecution::checkConcurrency(EventContext& ec, std::exception* e) {
 }
 
 bool SQLExecution::handleError(EventContext& ec,
-	std::exception& e, int32_t currentVersionId, int64_t& delayTime) {
+	std::exception& e, int32_t currentVersionId, int64_t& delayTime,
+	RequestInfo &request) {
 	const util::Exception checkException = GS_EXCEPTION_CONVERT(e, "");
 	int32_t errorCode = checkException.getErrorCode();
 	bool cacheClear = false;
@@ -3377,6 +3449,8 @@ bool SQLExecution::handleError(EventContext& ec,
 		replyType = SQL_REPLY_ERROR;
 	}
 	try {
+		SQLParsedInfo& parsedInfo = getParsedInfo();
+		AUDIT_TRACE_ERROR_HANDLEERROR();
 		GS_RETHROW_USER_OR_SYSTEM(e, ErrorFormatter(*this, e));
 	}
 	catch (std::exception& e2) {
@@ -3476,7 +3550,8 @@ SQLExecution::ClientInfo::ClientInfo(util::StackAllocator& alloc,
 	: userName_(globalVarAlloc), dbName_(globalVarAlloc), dbId_(0),
 	normalizedDbName_(globalVarAlloc),
 	applicationName_(globalVarAlloc), isAdministrator_(false),
-	clientNd_(clientNd), clientId_(clientId), connOption_(connOption) {
+	clientNd_(clientNd), clientId_(clientId), connOption_(connOption),
+	acceptableFeatureVersion_(0) {
 	init(alloc);
 }
 
@@ -3488,6 +3563,7 @@ void SQLExecution::ClientInfo::init(util::StackAllocator& alloc) {
 	normalizedDbName_ = normalizeName(alloc, dbName_.c_str()).c_str();
 	storeMemoryAgingSwapRate_ = connOption_.storeMemoryAgingSwapRate_;
 	timezone_ = connOption_.timeZone_;
+	acceptableFeatureVersion_ = connOption_.acceptableFeatureVersion_;
 	connOption_.setHandlingClientId(clientId_);
 }
 
@@ -3751,6 +3827,14 @@ const NodeDescriptor& SQLExecution::SQLExecutionContext::getClientNd() const {
 	return clientInfo_.clientNd_;
 }
 
+const std::string SQLExecution::SQLExecutionContext::getClientAddress() const {
+	util::NormalOStringStream oss;
+	std::string work;
+	oss << clientInfo_.clientNd_;
+	work = oss.str();
+	return work.substr(work.find("address=")+8,work.length()-work.find("address=")-9);
+}
+
 ExecutionId SQLExecution::SQLExecutionContext::getExecId() {
 	return executionStatus_.execId_;
 }
@@ -3789,6 +3873,35 @@ void SQLExecution::SQLExecutionContext::getCurrentJobId(JobId& jobId, bool isLoc
 void SQLExecution::SQLExecutionContext::setCurrentJobId(JobId& jobId) {
 	util::LockGuard<util::Mutex> guard(lock_);
 	currentJobId_ = jobId;
+	pendingExceptionExecId_ = UNDEF_STATEMENTID;
+}
+
+void SQLExecution::SQLExecutionContext::setPendingException(std::exception& e) {
+	util::LockGuard<util::Mutex> guard(lock_);
+	pendingExceptionExecId_ = currentJobId_.execId_;
+	pendingException_ = GS_EXCEPTION_CONVERT(e, "");
+}
+
+void SQLExecution::SQLExecutionContext::resetPendingException() {
+	util::LockGuard<util::Mutex> guard(lock_);
+	pendingExceptionExecId_ = UNDEF_STATEMENTID;
+}
+
+bool SQLExecution::SQLExecutionContext::checkPendingException(bool flag) {
+	util::LockGuard<util::Mutex> guard(lock_);
+	if (pendingExceptionExecId_ != UNDEF_STATEMENTID) {
+		if (flag) {
+			try {
+				pendingExceptionExecId_ = UNDEF_STATEMENTID;
+				throw pendingException_;
+			}
+			catch (std::exception& e) {
+				GS_RETHROW_USER_ERROR(e, "");
+			}
+		}
+		return true;
+	}
+	return false;
 }
 
 uint8_t SQLExecution::SQLExecutionContext::getCurrentJobVersionId() {
@@ -3807,4 +3920,61 @@ void SQLExecutionManager::refreshSchemaCache() {
 	}
 	catch (std::exception& e) {
 	}
+}
+
+const std::string SQLExecution::QueryAnalyzedInfo::getTableNameList()  {
+	util::NormalOStringStream oss;
+	if (parsedInfo_.tableList_.size() > 0) {
+		oss << "'tableName'=[";
+
+		for (util::Vector<SyntaxTree::Expr*>::iterator it = parsedInfo_.tableList_.begin();
+			it != parsedInfo_.tableList_.end(); it++) {
+			std::string dbName;
+			if ((*it)->qName_ && (*it)->qName_->db_) {
+				dbName = (*it)->qName_->db_->c_str();
+			}
+			const SyntaxTree::QualifiedName* srcName = (*it)->qName_;
+			if (srcName == NULL) {
+				continue;
+			}
+			const util::String* tableName = srcName->table_;
+			if (srcName->table_ == NULL) {
+				continue;
+			}
+			oss << "'";
+			if (!dbName.empty()) {
+				oss << dbName;
+				oss << ":";
+			}
+			oss << srcName->table_->c_str();
+			oss << "'";
+			if (it != parsedInfo_.tableList_.end() - 1) {
+				oss << ",";
+			}
+		}
+		oss << "] ";
+	}
+	else if (isDDL_) {
+		if (parsedInfo_.syntaxTreeList_.size() > 0) {
+			SyntaxTree::QualifiedName* targetName_ = parsedInfo_.syntaxTreeList_[0]->targetName_;
+			if (targetName_ && targetName_->table_) {
+				std::string dbName;
+				if (targetName_->db_) {
+					dbName = targetName_->db_->c_str();
+				}
+				oss << "'tableName'=['";
+				if (!dbName.empty()) {
+					oss << dbName;
+					oss << ":";
+				}
+				oss << targetName_->table_->c_str();
+				oss << "'] ";
+			}
+		}
+	}
+	return oss.str().c_str();
+}
+
+const std::string SQLExecution::SQLExecutionContext::getTableNameList() const {
+	return analyzedQueryInfo_.getTableNameList();
 }

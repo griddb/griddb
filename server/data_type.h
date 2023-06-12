@@ -36,7 +36,7 @@ enum PrivilegeType {
 	READ
 };
 
-
+#define MAX_COMPOSITE_COLUMN_NUM 16
 
 typedef uint64_t OId; /*!< Object ID */
 
@@ -68,6 +68,45 @@ typedef uint64_t SessionId; /*!< Session ID (decide by client) */
 typedef uint64_t StatementId; /*!< Statement ID (decide by client) */
 
 typedef int64_t Timestamp; /*!< Timestamp */
+
+struct MicroTimestamp {
+	int64_t value_;
+};
+
+struct NanoTimestamp {
+	typedef uint8_t Low;
+
+	struct High {
+		uint8_t value_[8];
+	};
+
+	union LocalHigh {
+		High high_;
+		int64_t longValue_;
+	};
+
+	static const int64_t HIGH_MICRO_UNIT = 4;
+
+	void assign(int64_t high, uint8_t low) {
+		LocalHigh local;
+		local.longValue_ = high;
+		high_ = local.high_;
+		low_ = low;
+	}
+
+	int64_t getHigh() const {
+		LocalHigh local;
+		local.high_ = high_;
+		return local.longValue_;
+	}
+
+	uint8_t getLow() const {
+		return low_;
+	}
+
+	High high_;
+	Low low_;
+};
 
 typedef uint32_t UserId; /*!< User ID */
 
@@ -178,8 +217,6 @@ typedef uint16_t UpdateIntervalCategoryId;
 
 typedef RowId DatabaseId;  
 
-
-#define MAX_COMPOSITE_COLUMN_NUM 16
 
 
 typedef int64_t DSGroupId;

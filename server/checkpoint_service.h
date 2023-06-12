@@ -291,6 +291,7 @@ public:
 	static const SyncSequentialNumber UNDEF_SYNC_SEQ_NUMBER; 
 	static const SyncSequentialNumber MAX_SYNC_SEQ_NUMBER; 
 
+	static const uint32_t RELEASE_BLOCK_THRESHOLD_MILLIS = 1000; 
 	/*!
 		@brief CP途中失敗時の後始末
 	*/
@@ -401,10 +402,10 @@ public:
 
 	bool getLongSyncLog(
 			SyncSequentialNumber ssn,
-			LogSequentialNumber startLsn, LogIterator<NoLocker> &itr);
+			LogSequentialNumber startLsn, LogIterator<MutexLocker> &itr);
 
 	bool getLongSyncCheckpointStartLog(
-			SyncSequentialNumber ssn, LogIterator<NoLocker> &itr);
+			SyncSequentialNumber ssn, LogIterator<MutexLocker> &itr);
 
 	bool isEntry(SyncSequentialNumber ssn);
 
@@ -420,6 +421,8 @@ public:
 
 	bool updateCpLongtermSyncInfo(
 		SyncSequentialNumber id, const CpLongtermSyncInfo &cpLongtermSyncInfo);
+
+	void removeCpLongtermSyncInfoAll();
 
 	SyncSequentialNumber getCurrentSyncSequentialNumber(PartitionId pId);
 
@@ -465,6 +468,9 @@ public:
 	void setPeriodicCheckpointFlag(bool flag);
 	bool getPeriodicCheckpointFlag();
 
+	uint16_t getNewestLogFormatVersion();
+	void setNewestLogFormatVersion(uint16_t version);
+
 	int32_t getChunkCopyInterval() {
 		return chunkCopyIntervalMillis_;
 	}
@@ -490,6 +496,7 @@ public:
 	void checkFailureBeforeWriteGroupLog(int32_t mode);
 	void checkFailureAfterWriteGroupLog(int32_t mode);
 	void checkFailureWhileWriteChunkMetaLog(int32_t mode);
+	void checkFailureLongtermSyncCheckpoint(int32_t mode, int32_t point);
 
 private:
 	static const int32_t CP_CHUNK_COPY_WITH_SLEEP_LIMIT_QUEUE_SIZE = 40;
@@ -533,6 +540,8 @@ private:
 
 	bool checkCPrunnable(int32_t mode); 
 
+	void cleanSyncTempDir();
+
 	bool prepareBackupDirectory(CheckpointMainMessage &message);
 
 	void traceCheckpointStart(CheckpointMainMessage &message);
@@ -540,6 +549,8 @@ private:
 
 	void prepareAllCheckpoint(CheckpointMainMessage &message);
 	void completeAllCheckpoint(CheckpointMainMessage &message, bool& backupCommandWorking);
+
+	bool needCollectOffset(int32_t mode);
 
 	void stopLongtermSync(
 			PartitionId pId, EventContext &ec, CheckpointMainMessage &message);
@@ -680,6 +691,7 @@ private:
 	BackupStatus lastQueuedBackupStatus_;
 	BackupStatus lastCompletedBackupStatus_;
 	util::Atomic<bool> enablePeriodicCheckpoint_;
+	util::Atomic<int32_t> newestLogFormatVersion_;
 
 };
 
@@ -700,6 +712,14 @@ private:
 	const std::string backupPath_;
 	uint32_t workerId_;
 };
+
+inline uint16_t CheckpointService::getNewestLogFormatVersion() {
+	return static_cast<uint16_t>(newestLogFormatVersion_);
+}
+
+inline void CheckpointService::setNewestLogFormatVersion(uint16_t version) {
+	newestLogFormatVersion_ = static_cast<int32_t>(version);
+}
 
 
 #endif  

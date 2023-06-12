@@ -27,6 +27,9 @@ void SQLGroupOps::Registrar::operator()() const {
 	add<SQLOpTypes::OP_GROUP_DISTINCT_MERGE, GroupDistinctMerge>();
 	add<SQLOpTypes::OP_GROUP_BUCKET_HASH, GroupBucketHash>();
 
+	add<SQLOpTypes::OP_GROUP_RANGE, GroupRange>();
+	add<SQLOpTypes::OP_GROUP_RANGE_MERGE, GroupRangeMerge>();
+
 	add<SQLOpTypes::OP_UNION, Union>();
 	add<SQLOpTypes::OP_UNION_ALL, UnionAll>();
 
@@ -563,6 +566,1234 @@ SQLGroupOps::GroupBucketHash::BucketContext::createBaseDigester(
 			(keyList.empty() ? false : keyList.front().isOrdering());
 	return SQLValues::TupleDigester(
 			keyList, &varCxt, &orderingAvailable, false, false, false);
+}
+
+
+void SQLGroupOps::GroupRange::compile(OpContext &cxt) const {
+	OpPlan &plan = cxt.getPlan();
+
+	OpNode &node = plan.createNode(SQLOpTypes::OP_GROUP_RANGE_MERGE);
+
+	OpCode srcCode = getCode();
+	OpCode code;
+
+	OpCodeBuilder builder(OpCodeBuilder::ofContext(cxt));
+
+	code.setPipeProjection(&createTotalProjection(builder, srcCode));
+	code.setKeyColumnList(&srcCode.getKeyColumnList());
+	code.setFilterPredicate(srcCode.getFilterPredicate());
+
+	node.addInput(plan.getParentInput(0));
+	node.setCode(code);
+	plan.linkToAllParentOutput(node);
+}
+
+const SQLExprs::Expression&
+SQLGroupOps::GroupRange::resolveRangeOptionPredicate(const OpCode &code) {
+	const SQLExprs::Expression *pred = code.getFilterPredicate();
+	if (pred == NULL ||
+			pred->getCode().getType() != SQLType::EXPR_RANGE_GROUP) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	return *pred;
+}
+
+bool SQLGroupOps::GroupRange::isFillingWithPrevious(SQLExprs::ExprType fillType) {
+	return (
+			fillType != SQLType::EXPR_RANGE_FILL_NONE &&
+			fillType != SQLType::EXPR_RANGE_FILL_NULL);
+}
+
+SQLExprs::ExprType SQLGroupOps::GroupRange::getFillType(
+		const SQLExprs::Expression &pred) {
+	SQLExprs::Expression::Iterator it(pred);
+	it.next();
+	return it.get().getCode().getType();
+}
+
+SQLOps::Projection& SQLGroupOps::GroupRange::createTotalProjection(
+		OpCodeBuilder &builder, OpCode &srcCode) {
+	SQLExprs::ExprFactoryContext &factoryCxt = builder.getExprFactoryContext();
+
+	const SQLExprs::Expression &pred = resolveRangeOptionPredicate(srcCode);
+	const SQLExprs::ExprType fillType = getFillType(pred);
+
+	const Projection *baseProj = srcCode.getPipeProjection();
+	if (baseProj == NULL) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	Projection &proj = builder.rewriteProjection(*baseProj);
+	arrangeBaseProjection(factoryCxt, proj, fillType);
+	srcCode.setPipeProjection(&proj);
+
+	uint32_t baseAggrColumnCount;
+	const SQLOpUtils::ProjectionPair projections =
+			createAggregatableProjections(
+					builder, srcCode, baseAggrColumnCount, fillType);
+	Projection &baseFinishProj =
+			createBaseFinishProjection(builder, *projections.second);
+
+	if (fillType == SQLType::EXPR_RANGE_FILL_NONE) {
+		Projection &finishSubProj = baseFinishProj;
+		Projection &finishTopProj = builder.createMultiStageProjection(
+				*projections.second, finishSubProj);
+		return builder.createPipeFinishProjection(
+				*projections.first, finishTopProj);
+	}
+
+	Projection &pipeTopProj =
+			createGroupProjection(builder, *projections.first);
+	Projection &finishSubProj = builder.createMultiStageProjection(
+			createGroupProjection(builder, baseFinishProj),
+			createFillProjection(
+					builder, baseFinishProj, pred, baseAggrColumnCount));
+	Projection &finishTopProj = builder.createMultiStageProjection(
+			*projections.second, finishSubProj);
+	return builder.createPipeFinishProjection(pipeTopProj, finishTopProj);
+}
+
+SQLOpUtils::ProjectionPair
+SQLGroupOps::GroupRange::createAggregatableProjections(
+		OpCodeBuilder &builder, OpCode &srcCode, uint32_t &baseAggrColumnCount,
+		SQLExprs::ExprType fillType) {
+	baseAggrColumnCount = 0;
+	const SQLOpUtils::ProjectionPair baseProjections =
+			builder.arrangeProjections(srcCode, false, true, NULL);
+	if (baseProjections.first == NULL || baseProjections.second == NULL) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	SQLOpUtils::ProjectionPair dest = baseProjections;
+
+	const SQLValues::ColumnTypeList *baseTypeList = NULL;
+	Projection *aggrProjList[2];
+	for (size_t i = 0; i < 2; i++) {
+		Projection *baseProj = (i == 0 ? dest.first : dest.second);
+		Projection *aggrProj =
+				SQLOps::OpCodeBuilder::findAggregationModifiableProjection(
+						*baseProj);
+		if (aggrProj == NULL) {
+			aggrProj = SQLOps::OpCodeBuilder::findOutputProjection(
+					*baseProj, NULL);
+		}
+		aggrProjList[i] = aggrProj;
+
+		const SQLValues::ColumnTypeList *typeList = (aggrProj == NULL ?
+				NULL : aggrProj->getProjectionCode().getColumnTypeList());
+		if (typeList == NULL ||
+				(baseTypeList != NULL && *typeList != *baseTypeList)) {
+			assert(false);
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+		}
+		baseTypeList = typeList;
+	}
+
+	if (!isFillingWithPrevious(fillType)) {
+		return dest;
+	}
+
+	baseAggrColumnCount = static_cast<uint32_t>(baseTypeList->size());
+
+	util::StackAllocator &alloc =
+			builder.getExprFactoryContext().getAllocator();
+	SQLValues::ColumnTypeList *typeList =
+			ALLOC_NEW(alloc) SQLValues::ColumnTypeList(alloc);
+
+	typeList->insert(typeList->end(), baseTypeList->begin(), baseTypeList->end());
+	typeList->insert(typeList->end(), baseTypeList->begin(), baseTypeList->end());
+
+	for (size_t i = 0; i < 2; i++) {
+		aggrProjList[i]->getProjectionCode().setColumnTypeList(typeList);
+	}
+
+	return dest;
+}
+
+SQLOps::Projection& SQLGroupOps::GroupRange::createBaseFinishProjection(
+		OpCodeBuilder &builder, const Projection &srcProj) {
+	const SQLOps::ProjectionCode &srcCode = srcProj.getProjectionCode();
+
+	if (srcCode.getType() == SQLOpTypes::PROJ_AGGR_OUTPUT) {
+		assert(srcProj.getChainCount() > 0);
+		Projection &dest = createBaseFinishProjection(builder, srcProj.chainAt(0));
+		dest.getProjectionCode().setColumnTypeList(srcCode.getColumnTypeList());
+		return dest;
+	}
+
+	SQLOps::Projection &dest = builder.rewriteProjection(srcProj, NULL, true);
+
+	const size_t count = srcProj.getChainCount();
+	for (size_t i = 0; i < count; i++) {
+		dest.addChain(createBaseFinishProjection(builder, srcProj.chainAt(i)));
+	}
+
+	return dest;
+}
+
+SQLOps::Projection& SQLGroupOps::GroupRange::createFillProjection(
+		OpCodeBuilder &builder, const Projection &srcProj,
+		const SQLExprs::Expression &pred, uint32_t baseAggrColumnCount) {
+	SQLExprs::ExprFactoryContext &factoryCxt = builder.getExprFactoryContext();
+
+	Projection &emptyFillProj = builder.rewriteProjection(srcProj);
+	Projection &nextFillProj = builder.rewriteProjection(srcProj);
+	Projection &prevFillProj = builder.rewriteProjection(srcProj);
+	Projection &bothFillProj = builder.rewriteProjection(srcProj);
+
+	arrangeFillProjection(
+			factoryCxt, emptyFillProj, pred, baseAggrColumnCount, true, true);
+	arrangeFillProjection(
+			factoryCxt, nextFillProj, pred, baseAggrColumnCount, true, false);
+	arrangeFillProjection(
+			factoryCxt, prevFillProj, pred, baseAggrColumnCount, false, true);
+	arrangeFillProjection(
+			factoryCxt, bothFillProj, pred, baseAggrColumnCount, false, false);
+
+	return builder.createMultiStageProjection(
+			builder.createMultiStageProjection(emptyFillProj, nextFillProj),
+			builder.createMultiStageProjection(prevFillProj, bothFillProj));
+}
+
+SQLOps::Projection& SQLGroupOps::GroupRange::createGroupProjection(
+		OpCodeBuilder &builder, const Projection &srcProj) {
+	SQLExprs::ExprFactoryContext &factoryCxt = builder.getExprFactoryContext();
+
+	Projection &destProj = builder.rewriteProjection(srcProj);
+	arrangeGroupProjection(factoryCxt, destProj);
+	return destProj;
+}
+
+void SQLGroupOps::GroupRange::arrangeBaseProjection(
+		SQLExprs::ExprFactoryContext &cxt, Projection &proj,
+		SQLExprs::ExprType fillType) {
+	arrangeBaseExpression(cxt, proj, fillType);
+
+	const size_t count = proj.getChainCount();
+	for (size_t i = 0; i < count; i++) {
+		arrangeBaseProjection(cxt, proj.chainAt(i), fillType);
+	}
+}
+
+void SQLGroupOps::GroupRange::arrangeFillProjection(
+		SQLExprs::ExprFactoryContext &cxt, Projection &proj,
+		const SQLExprs::Expression &pred, uint32_t baseAggrColumnCount,
+		bool noPrev, bool noNext) {
+	arrangeFillExpression(cxt, proj, pred, baseAggrColumnCount, noPrev, noNext);
+
+	const size_t count = proj.getChainCount();
+	for (size_t i = 0; i < count; i++) {
+		arrangeFillProjection(
+				cxt, proj.chainAt(i), pred, baseAggrColumnCount, noPrev, noNext);
+	}
+}
+
+void SQLGroupOps::GroupRange::arrangeGroupProjection(
+		SQLExprs::ExprFactoryContext &cxt, Projection &proj) {
+	arrangeGroupExpression(cxt, proj);
+
+	const size_t count = proj.getChainCount();
+	for (size_t i = 0; i < count; i++) {
+		arrangeGroupProjection(cxt, proj.chainAt(i));
+	}
+}
+
+void SQLGroupOps::GroupRange::arrangeBaseExpression(
+		SQLExprs::ExprFactoryContext &cxt, SQLExprs::Expression &expr,
+		SQLExprs::ExprType fillType) {
+	SQLExprs::Expression::ModIterator it(expr);
+	for (; it.exists(); it.next()) {
+		const SQLExprs::ExprType subType = it.get().getCode().getType();
+
+		if (subType == SQLType::EXPR_RANGE_KEY) {
+			SQLExprs::Expression &keyExpr =
+					createRangeKeyExpression(cxt, it.get(), false, false);
+
+			it.remove();
+			it.insert(keyExpr);
+		}
+		else if ((subType == SQLType::EXPR_RANGE_FILL ||
+				subType == SQLType::EXPR_RANGE_AGG) &&
+				fillType == SQLType::EXPR_RANGE_FILL_NONE) {
+			SQLExprs::Expression::ModIterator subIt(it.get());
+			SQLExprs::Expression &fillTarget = subIt.get();
+
+			it.remove();
+			it.insert(fillTarget);
+		}
+		else {
+			arrangeBaseExpression(cxt, it.get(), fillType);
+		}
+	}
+}
+
+void SQLGroupOps::GroupRange::arrangeFillExpression(
+		SQLExprs::ExprFactoryContext &cxt, SQLExprs::Expression &expr,
+		const SQLExprs::Expression &pred, uint32_t baseAggrColumnCount,
+		bool noPrev, bool noNext) {
+	SQLExprs::Expression::ModIterator it(expr);
+	for (; it.exists(); it.next()) {
+		const SQLExprs::ExprType subType = it.get().getCode().getType();
+
+		if (subType == SQLType::EXPR_RANGE_FILL) {
+			SQLExprs::Expression &fillExpr = createFillExpression(
+					cxt, it.get(), pred, baseAggrColumnCount, noPrev, noNext);
+			it.remove();
+			it.insert(fillExpr);
+		}
+		else if (subType == SQLType::EXPR_COLUMN) {
+			SQLExprs::Expression &nullExpr =
+					createFillNullExpression(cxt, it.get());
+			it.remove();
+			it.insert(nullExpr);
+		}
+		else if (subType == SQLType::EXPR_RANGE_AGG) {
+			SQLExprs::Expression::ModIterator subIt(it.get());
+			it.remove();
+
+			assert(subIt.exists());
+			subIt.next();
+
+			assert(subIt.exists());
+			it.insert(subIt.get());
+
+			arrangeFillExpression(
+					cxt, it.get(), pred, baseAggrColumnCount, noPrev, noNext);
+		}
+		else {
+			arrangeFillExpression(
+					cxt, it.get(), pred, baseAggrColumnCount, noPrev, noNext);
+		}
+	}
+}
+
+void SQLGroupOps::GroupRange::arrangePrevFillTarget(
+		SQLExprs::ExprFactoryContext &cxt, SQLExprs::Expression &expr,
+		uint32_t baseAggrColumnCount) {
+	SQLExprs::ExprCode &code = expr.getPlanningCode();
+
+	if (SQLExprs::ExprTypeUtils::isAggregation(code.getType())) {
+		const uint32_t baseAggrIndex = code.getAggregationIndex();
+
+		if (baseAggrIndex >= baseAggrColumnCount) {
+			assert(false);
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+		}
+
+		code.setAggregationIndex(baseAggrColumnCount + baseAggrIndex);
+	}
+
+	SQLExprs::Expression::ModIterator it(expr);
+	for (; it.exists(); it.next()) {
+		arrangePrevFillTarget(cxt, it.get(), baseAggrColumnCount);
+	}
+}
+
+void SQLGroupOps::GroupRange::arrangeGroupExpression(
+		SQLExprs::ExprFactoryContext &cxt, SQLExprs::Expression &expr) {
+	SQLExprs::Expression::ModIterator it(expr);
+	for (; it.exists(); it.next()) {
+		const SQLExprs::ExprType subType = it.get().getCode().getType();
+		if (subType == SQLType::EXPR_RANGE_AGG ||
+				subType == SQLType::EXPR_RANGE_FILL) {
+			SQLExprs::Expression::ModIterator subIt(it.get());
+			it.remove();
+
+			assert(subIt.exists());
+			it.insert(subIt.get());
+
+			arrangeGroupExpression(cxt, it.get());
+		}
+		else {
+			arrangeGroupExpression(cxt, it.get());
+		}
+	}
+}
+
+SQLExprs::Expression& SQLGroupOps::GroupRange::createFillExpression(
+		SQLExprs::ExprFactoryContext &cxt,
+		const SQLExprs::Expression &srcExpr,
+		const SQLExprs::Expression &pred, uint32_t baseAggrColumnCount,
+		bool noPrev, bool noNext) {
+	const SQLExprs::ExprCode &srcCode = srcExpr.getCode();
+	assert(srcCode.getType() == SQLType::EXPR_RANGE_FILL);
+
+	const SQLExprs::Expression &targetExpr = srcExpr.child();
+	const SQLExprs::ExprType fillType = getFillType(pred);
+	if (fillType == SQLType::EXPR_RANGE_FILL_NULL) {
+		return createFillNullExpression(cxt, srcExpr);
+	}
+	else if (fillType == SQLType::EXPR_RANGE_FILL_PREV) {
+		if (noPrev) {
+			return createFillNullExpression(cxt, srcExpr);
+		}
+		return createFillTargetExpression(
+				cxt, targetExpr, baseAggrColumnCount, true);
+	}
+	else if (fillType == SQLType::EXPR_RANGE_FILL_LINEAR) {
+		if (noPrev || noNext) {
+			return createFillNullExpression(cxt, srcExpr);
+		}
+
+		const SQLExprs::Expression &keyExpr = getBaseKeyExpression(pred);
+
+		SQLExprs::ExprFactoryContext::Scope scope(cxt);
+		cxt.setPlanning(true);
+
+		SQLExprs::ExprCode code;
+		code.setType(SQLType::EXPR_LINEAR);
+		code.setColumnType(srcCode.getColumnType());
+		code.setAttributes(srcCode.getAttributes());
+
+		SQLExprs::Expression &linearExpr = cxt.getFactory().create(cxt, code);
+
+		SQLExprs::Expression::ModIterator it(linearExpr);
+		it.append(createRangeKeyExpression(cxt, keyExpr, true, false));
+		it.append(createFillTargetExpression(
+				cxt, targetExpr, baseAggrColumnCount, true));
+		it.append(createRangeKeyExpression(cxt, keyExpr, false, true));
+		it.append(createFillTargetExpression(
+				cxt, targetExpr, baseAggrColumnCount, false));
+		it.append(createRangeKeyExpression(cxt, keyExpr, false, false));
+		return linearExpr;
+	}
+	else {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+}
+
+SQLExprs::Expression& SQLGroupOps::GroupRange::createFillTargetExpression(
+		SQLExprs::ExprFactoryContext &cxt,
+		const SQLExprs::Expression &srcExpr, uint32_t baseAggrColumnCount,
+		bool forPrev) {
+	SQLExprs::ExprRewriter rewriter(cxt.getAllocator());
+
+	SQLExprs::Expression &expr = rewriter.rewrite(cxt, srcExpr, NULL);
+	if (forPrev) {
+		arrangePrevFillTarget(cxt, expr, baseAggrColumnCount);
+	}
+
+	return expr;
+}
+
+SQLExprs::Expression& SQLGroupOps::GroupRange::createFillNullExpression(
+		SQLExprs::ExprFactoryContext &cxt,
+		const SQLExprs::Expression &srcExpr) {
+	const TupleValue nullValue;
+	const SQLExprs::ExprCode &srcCode = srcExpr.getCode();
+
+	if (SQLValues::TypeUtils::isNull(
+			SQLValues::TypeUtils::findConversionType(
+					SQLValues::ValueUtils::toColumnType(nullValue),
+					srcCode.getColumnType(), false, true))) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	SQLExprs::Expression &expr = SQLExprs::ExprRewriter::createConstExpr(
+			cxt, nullValue, srcCode.getColumnType());
+
+	SQLExprs::ExprCode &code = expr.getPlanningCode();
+	code.setAttributes(srcCode.getAttributes());
+
+	return expr;
+}
+
+SQLExprs::Expression& SQLGroupOps::GroupRange::createRangeKeyExpression(
+		SQLExprs::ExprFactoryContext &cxt,
+		const SQLExprs::Expression &srcExpr, bool forPrev, bool forNext) {
+	const SQLExprs::ExprCode &srcCode = srcExpr.getCode();
+	const uint32_t columnPos = (forPrev ? 1 : (forNext ? 2 : 0));
+
+	SQLExprs::Expression &expr =
+			cxt.getFactory().create(cxt, SQLType::EXPR_RANGE_KEY_CURRENT);
+
+	SQLExprs::ExprCode &code = expr.getPlanningCode();
+	code.setColumnPos(columnPos);
+	code.setColumnType(srcCode.getColumnType());
+	code.setAttributes(srcCode.getAttributes());
+
+	return expr;
+}
+
+const SQLExprs::Expression& SQLGroupOps::GroupRange::getBaseKeyExpression(
+		const SQLExprs::Expression &pred) {
+	SQLExprs::Expression::Iterator it(pred);
+	return it.get();
+}
+
+
+void SQLGroupOps::GroupRangeMerge::execute(OpContext &cxt) const {
+	MergeContext &mergeCxt = prepareMergeContext(cxt);
+	cxt.getExprContext().setWindowState(&mergeCxt.windowState_);
+
+	TupleListReader &pipeReader = preparePipeReader(cxt);
+	TupleListReader &keyReader = prepareKeyReader(cxt, mergeCxt);
+	const Projection &aggrPipeProj = *mergeCxt.aggrPipeProj_;
+
+	for (;;) { 
+		Directions directions;
+		for (;;) {
+			if (cxt.checkSuspended()) { 
+				return;
+			}
+
+			if (!checkGroupRow(
+					cxt, mergeCxt, pipeReader, keyReader, directions)) {
+				break;
+			}
+
+			if (directions.isOnNormalGroup()) {
+				aggrPipeProj.project(cxt);
+			}
+
+			if (!directions.isBeforeGroupTailRow()) {
+				break;
+			}
+
+			assert(keyReader.exists());
+			pipeReader.next();
+			keyReader.next();
+		}
+
+		if (!checkGroup(cxt, mergeCxt, directions)) {
+			break;
+		}
+
+		if (mergeCxt.isForNormalGroup()) {
+			if (mergeCxt.isFilling()) {
+				if (!finishPendingGroups(cxt, mergeCxt, directions)) {
+					return;
+				}
+				if (!directions.isOnNormalGroup()) {
+					if (!setGroupPending(mergeCxt)) {
+						const bool noNext = true;
+						mergeCxt.windowState_.rangeNextKey_ =
+								mergeCxt.windowState_.rangeKey_;
+						mergeCxt.windowState_.rangePrevKey_ =
+								mergeCxt.windowState_.rangeKey_;
+						getFillFinishProjection(mergeCxt, noNext).project(cxt);
+						mergeCxt.windowState_.rangeNextKey_ = -1;
+						mergeCxt.windowState_.rangePrevKey_ = -1;
+					}
+				}
+				else {
+					getFinishProjection(mergeCxt).project(cxt);
+				}
+			}
+			else {
+				getFinishProjection(mergeCxt).project(cxt);
+			}
+		}
+
+		if (!nextGroup(mergeCxt, directions)) {
+			break;
+		}
+		clearAggregationValues(cxt, mergeCxt, directions);
+
+		if (directions.isNextRowForNextGroup()) {
+			assert(pipeReader.exists());
+			pipeReader.next();
+			if (keyReader.exists()) {
+				keyReader.next();
+			}
+		}
+	}
+}
+
+void SQLGroupOps::GroupRangeMerge::clearAggregationValues(
+		OpContext &cxt, MergeContext &mergeCxt,
+		const Directions &directions) {
+	if (mergeCxt.fillingWithPrev_) {
+		if (directions.isOnNormalGroup()) {
+			swapAggregationValues(cxt, mergeCxt, true);
+			mergeCxt.prevValuesPreserved_ = true;
+		}
+		else {
+			swapAggregationValues(cxt, mergeCxt, false);
+		}
+	}
+
+	cxt.getExprContext().initializeAggregationValues();
+
+	if (mergeCxt.fillingWithPrev_) {
+		swapAggregationValues(cxt, mergeCxt, false);
+	}
+}
+
+bool SQLGroupOps::GroupRangeMerge::finishPendingGroups(
+		OpContext &cxt, MergeContext &mergeCxt, const Directions &directions) {
+	if (!mergeCxt.isFillPending()) {
+		return true;
+	}
+
+	if (!directions.isOnNormalGroup() &&
+			mergeCxt.windowState_.rangeKey_ < mergeCxt.partEnd_) {
+		return true;
+	}
+
+	const bool noNext = !directions.isOnNormalGroup();
+	bool projected = false;
+	do {
+		if (projected && cxt.checkSuspended()) { 
+			return false;
+		}
+
+		beginPendingGroup(mergeCxt);
+		getFillFinishProjection(mergeCxt, noNext).project(cxt);
+		endPendingGroup(mergeCxt);
+
+		projected = true;
+	}
+	while (mergeCxt.isFillPending());
+
+	mergeCxt.prevValuesPreserved_ = false;
+	return true;
+}
+
+bool SQLGroupOps::GroupRangeMerge::checkGroupRow(
+		OpContext &cxt, MergeContext &mergeCxt, TupleListReader &pipeReader,
+		TupleListReader &keyReader, Directions &directions) {
+
+	const int64_t groupEnd = mergeCxt.getGroupEnd();
+	if (!mergeCxt.isFirstRowReady()) {
+		const int64_t nextRangeKey = groupEnd;
+		directions = Directions::of(nextRangeKey, 1, -1, false, false);
+		return false;
+	}
+
+	int32_t partitionDirection;
+	int64_t nextKey;
+	if (keyReader.exists()) {
+		if (mergeCxt.partEq_ == NULL || (*mergeCxt.partEq_)(
+				SQLValues::TupleListReaderSource(pipeReader),
+				SQLValues::TupleListReaderSource(keyReader))) {
+			partitionDirection = -1;
+		}
+		else {
+			partitionDirection = 0;
+		}
+		nextKey = getRangeKey(mergeCxt, keyReader);
+	}
+	else {
+		partitionDirection = 1;
+		nextKey = -1;
+	}
+
+	const int64_t curKey = (pipeReader.exists() ?
+			getRangeKey(mergeCxt, pipeReader) : groupEnd);
+	const bool afterNormal = !mergeCxt.isForNormalGroup();
+
+	int32_t groupDirection;
+	bool rowAcceptable;
+	bool onNormalGroup;
+	if (curKey < groupEnd || afterNormal) {
+		groupDirection = (partitionDirection < 0 &&
+				(nextKey < groupEnd || afterNormal) ? 0 : 1);
+		if (curKey >= mergeCxt.getGroupBegin()) {
+			rowAcceptable = true;
+			onNormalGroup = !afterNormal;
+		}
+		else {
+			rowAcceptable = (groupDirection == 0);
+			onNormalGroup = false;
+		}
+	}
+	else {
+		groupDirection = -1;
+		rowAcceptable = false;
+		onNormalGroup = false;
+	}
+
+	int64_t nextRangeKey = -1;
+	bool nextRowForNextGroup = false;
+	if (!rowAcceptable || groupDirection > 0) {
+		if (mergeCxt.isFilling()) {
+			if (partitionDirection < 0) {
+				nextRangeKey = groupEnd;
+				nextRowForNextGroup = (nextKey >= groupEnd);
+			}
+			else if (mergeCxt.isBeforePartitionTail()) {
+				nextRangeKey = groupEnd;
+				nextRowForNextGroup = false;
+			}
+			else {
+				nextRangeKey = mergeCxt.partBegin_;
+				nextRowForNextGroup = (partitionDirection <= 0);
+			}
+		}
+		else {
+			if (partitionDirection < 0) {
+				nextRangeKey =
+						getNextRangeKeyByValue(mergeCxt, groupEnd, nextKey);
+			}
+			else {
+				nextRangeKey = mergeCxt.partBegin_;
+			}
+			nextRowForNextGroup = (partitionDirection <= 0);
+		}
+	}
+
+	if (!onNormalGroup && (partitionDirection > 0 || curKey >= groupEnd)) {
+		nextRowForNextGroup = false;
+	}
+
+	directions = Directions::of(
+			nextRangeKey, partitionDirection, groupDirection, onNormalGroup,
+			nextRowForNextGroup);
+
+	if (rowAcceptable && !checkGroup(cxt, mergeCxt, directions)) {
+		return false;
+	}
+	return rowAcceptable;
+}
+
+bool SQLGroupOps::GroupRangeMerge::checkGroup(
+		OpContext &cxt, MergeContext &mergeCxt,
+		const Directions &directions) {
+	if (!directions.isBeforeTotalTailRow() &&
+			!(cxt.isAllInputCompleted() &&
+			(directions.isOnNormalGroup() ||
+					mergeCxt.isTotalEmptyPossible() || mergeCxt.isFilling()))) {
+		return false;
+	}
+	return true;
+}
+
+bool SQLGroupOps::GroupRangeMerge::nextGroup(
+		MergeContext &mergeCxt, const Directions &directions) {
+	mergeCxt.groupFoundLast_ = (mergeCxt.isBeforePartitionTail() ?
+			(directions.isOnNormalGroup() ? true : mergeCxt.groupFoundLast_) :
+			false);
+
+	if (!directions.isBeforeTotalTailRow() &&
+			(!mergeCxt.isFilling() || !mergeCxt.isBeforePartitionTail())) {
+		return false;
+	}
+
+	mergeCxt.windowState_.rangeKey_ = directions.getNextRangeKey();
+	return true;
+}
+
+bool SQLGroupOps::GroupRangeMerge::setGroupPending(
+		MergeContext &mergeCxt) {
+	assert(!mergeCxt.fillProjecting_);
+
+	if (!mergeCxt.fillingWithPrev_ || !mergeCxt.isBeforePartitionTail()) {
+		return false;
+	}
+
+	if (!mergeCxt.fillPending_) {
+		mergeCxt.fillPending_ = true;
+		mergeCxt.pendingKey_ = mergeCxt.windowState_.rangeKey_;
+		mergeCxt.windowState_.rangePrevKey_ =
+				mergeCxt.pendingKey_ - mergeCxt.interval_;
+	}
+
+	return true;
+}
+
+void SQLGroupOps::GroupRangeMerge::beginPendingGroup(
+		MergeContext &mergeCxt) {
+	assert(mergeCxt.fillingWithPrev_);
+	assert(mergeCxt.fillPending_);
+
+	assert(!mergeCxt.fillProjecting_);
+	mergeCxt.fillProjecting_ = true;
+
+	mergeCxt.windowState_.rangeNextKey_ = mergeCxt.windowState_.rangeKey_;
+	std::swap(mergeCxt.pendingKey_, mergeCxt.windowState_.rangeKey_);
+}
+
+void SQLGroupOps::GroupRangeMerge::endPendingGroup(
+		MergeContext &mergeCxt) {
+	assert(mergeCxt.fillingWithPrev_);
+	assert(mergeCxt.fillPending_);
+
+	assert(mergeCxt.fillProjecting_);
+	mergeCxt.fillProjecting_ = false;
+
+	std::swap(mergeCxt.pendingKey_, mergeCxt.windowState_.rangeKey_);
+	mergeCxt.windowState_.rangeNextKey_ = -1;
+
+	if (mergeCxt.pendingKey_ >=
+			mergeCxt.windowState_.rangeKey_ - mergeCxt.interval_) {
+		mergeCxt.windowState_.rangePrevKey_ = -1;
+		mergeCxt.pendingKey_ = -1;
+		mergeCxt.fillPending_ = false;
+	}
+	else {
+		mergeCxt.pendingKey_ += mergeCxt.interval_;
+	}
+}
+
+SQLGroupOps::GroupRangeMerge::MergeContext&
+SQLGroupOps::GroupRangeMerge::prepareMergeContext(OpContext &cxt) const {
+	if (!cxt.getResource(0).isEmpty()) {
+		return cxt.getResource(0).resolveAs<MergeContext>();
+	}
+
+	cxt.getResource(0) = ALLOC_UNIQUE(
+			cxt.getAllocator(), MergeContext,
+			cxt.getAllocator(), cxt.getVarContext(), getCode());
+	MergeContext &mergeCxt = cxt.getResource(0).resolveAs<MergeContext>();
+
+	return mergeCxt;
+}
+
+SQLOps::TupleListReader& SQLGroupOps::GroupRangeMerge::preparePipeReader(
+		OpContext &cxt) {
+	SQLOps::TupleListReader &reader = cxt.getReader(0);
+	reader.exists();
+	return reader;
+}
+
+SQLOps::TupleListReader& SQLGroupOps::GroupRangeMerge::prepareKeyReader(
+		OpContext &cxt, MergeContext &mergeCxt) {
+	SQLOps::TupleListReader &reader = cxt.getReader(0, 1);
+
+	if (!mergeCxt.firstRowReady_ && reader.exists()) {
+		if (!mergeCxt.isFilling()) {
+			const int64_t baseKey = getRangeKey(mergeCxt, reader);
+			mergeCxt.windowState_.rangeKey_ = getNextRangeKeyByValue(
+					mergeCxt, mergeCxt.partBegin_, baseKey);
+		}
+		mergeCxt.firstRowReady_ = true;
+		reader.next();
+	}
+
+	return reader;
+}
+
+const SQLOps::Projection& SQLGroupOps::GroupRangeMerge::getFillFinishProjection(
+		MergeContext &mergeCxt, bool noNext) {
+	if (mergeCxt.restGenerationLimit_ <= 0) {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_SQL_PROC_LIMIT_EXCEEDED,
+				"Too many groups filled (limit=" << mergeCxt.limit_ << ")");
+	}
+	mergeCxt.restGenerationLimit_--;
+
+	const bool noPrev = !mergeCxt.groupFoundLast_;
+	if (noPrev) {
+		if (noNext) {
+			return *mergeCxt.emptyFillProj_;
+		}
+		else {
+			return *mergeCxt.nextFillProj_;
+		}
+	}
+	else {
+		if (noNext) {
+			return *mergeCxt.prevFillProj_;
+		}
+		else {
+			return *mergeCxt.bothFillProj_;
+		}
+	}
+}
+
+const SQLOps::Projection& SQLGroupOps::GroupRangeMerge::getFinishProjection(
+		MergeContext &mergeCxt) {
+	if (!mergeCxt.isFirstRowReady()) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+
+	return *mergeCxt.currentFinishProj_;
+}
+
+void SQLGroupOps::GroupRangeMerge::swapAggregationValues(
+		OpContext &cxt, MergeContext &mergeCxt, bool withCurrent) {
+	SQLValues::SummaryTupleSet *tupleSet;
+	SummaryTuple *aggr;
+	SummaryTuple &local =
+			prepareLocalAggragationTuple(cxt, mergeCxt, tupleSet, aggr);
+
+	const AggrColumnList &columnList = tupleSet->getModifiableColumnList();
+	const uint32_t size = static_cast<uint32_t>(columnList.size()) / 2;
+
+	const uint32_t basePos = columnList.front().getSummaryPosition();
+	const uint32_t aggrPos = basePos + (withCurrent ? 0 : size);
+	const uint32_t localPos = basePos + size;
+
+	SummaryTuple::swapValue(*tupleSet, *aggr, aggrPos, local, localPos, size);
+}
+
+SQLValues::SummaryTuple&
+SQLGroupOps::GroupRangeMerge::prepareLocalAggragationTuple(
+		OpContext &cxt, MergeContext &mergeCxt,
+		SQLValues::SummaryTupleSet *&tupleSet, SummaryTuple *&aggrTuple) {
+
+	if (mergeCxt.aggrTupleSet_ == NULL) {
+		tupleSet = cxt.getDefaultAggregationTupleSet();
+		mergeCxt.aggrTupleSet_ = tupleSet;
+
+		if (tupleSet == NULL) {
+			assert(false);
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+		}
+
+		if (tupleSet->getModifiableColumnList().size() % 2 != 0) {
+			assert(false);
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+		}
+
+		mergeCxt.localAggrTuple_ = SummaryTuple::create(*tupleSet);
+		mergeCxt.localAggrTuple_.initializeValues(*tupleSet);
+
+		mergeCxt.aggrTuple_ = cxt.getDefaultAggregationTupleRef();
+		assert(mergeCxt.aggrTuple_ != NULL);
+	}
+
+	tupleSet = mergeCxt.aggrTupleSet_;
+	aggrTuple = mergeCxt.aggrTuple_;
+	return mergeCxt.localAggrTuple_;
+}
+
+int64_t SQLGroupOps::GroupRangeMerge::getNextRangeKeyByValue(
+		MergeContext &mergeCxt, int64_t groupEnd, int64_t value) {
+	assert(groupEnd <= mergeCxt.partEnd_);
+	return std::min(mergeCxt.partEnd_, groupEnd +
+			(std::max(value, groupEnd) - groupEnd) /
+			mergeCxt.interval_ * mergeCxt.interval_);
+}
+
+int64_t SQLGroupOps::GroupRangeMerge::getRangeKey(
+		MergeContext &mergeCxt, TupleListReader &reader) {
+	if (SQLValues::ValueUtils::readCurrentNull(reader, mergeCxt.rangeColumn_)) {
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL_INVALID_INPUT, "");
+	}
+
+	ValueReader valuerReader(reader, mergeCxt.rangeColumn_);
+	return mergeCxt.valueReaderFunc_(valuerReader);
+}
+
+int64_t SQLGroupOps::GroupRangeMerge::getRangeKey(const TupleValue &value) {
+	if (SQLValues::ValueUtils::isNull(value)) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+	return SQLValues::ValueUtils::toLong(value);
+}
+
+
+template<typename T>
+SQLGroupOps::GroupRangeMerge::ValueReader::RetType
+SQLGroupOps::GroupRangeMerge::ValueReader::TypeAt<T>::operator()() const {
+	typedef typename SQLValues::Types::template Of<
+			T::COLUMN_TYPE>::Type SrcType;
+	typedef typename SQLValues::TypeUtils::Traits<
+			T::COLUMN_TYPE>::BasicComparableTag BasicComparableTag;
+	return base_.read(SrcType(), BasicComparableTag());
+}
+
+template<typename T>
+SQLGroupOps::GroupRangeMerge::ValueReader::RetType
+SQLGroupOps::GroupRangeMerge::ValueReader::read(
+		const T&, const SQLValues::Types::Integral&) const {
+	typedef SQLValues::Types::Long DestType;
+	return SQLValues::ValueUtils::getPromoted<DestType, T>(
+			SQLValues::ValueUtils::readCurrentValue<T>(reader_, column_));
+}
+
+template<typename T>
+SQLGroupOps::GroupRangeMerge::ValueReader::RetType
+SQLGroupOps::GroupRangeMerge::ValueReader::read(
+		const T&, const SQLValues::Types::PreciseTimestamp&) const {
+	typedef SQLValues::Types::TimestampTag DestType;
+	return SQLValues::ValueUtils::getPromoted<DestType, T>(
+			SQLValues::ValueUtils::readCurrentValue<T>(reader_, column_));
+}
+
+template<typename T, typename C>
+SQLGroupOps::GroupRangeMerge::ValueReader::RetType
+SQLGroupOps::GroupRangeMerge::ValueReader::read(const T&, const C&) const {
+	assert(false);
+	return 0;
+}
+
+
+SQLGroupOps::GroupRangeMerge::MergeContext::MergeContext(
+		util::StackAllocator &alloc, SQLValues::VarContext &varCxt,
+		const OpCode &code) :
+		partKeyList_(resolvePartitionKeyList(alloc, code)),
+		partEq_(createKeyComparator(alloc, varCxt, partKeyList_, partEqBase_)),
+		rangeColumn_(resoveRangeColumn(code)),
+		aggrPipeProj_(findProjection(code, false, false, true)),
+		currentFinishProj_(findProjection(code, false, false, false)),
+		emptyFillProj_(findProjection(code, true, true, true)),
+		nextFillProj_(findProjection(code, true, true, false)),
+		prevFillProj_(findProjection(code, true, false, true)),
+		bothFillProj_(findProjection(code, true, false, false)),
+		partBegin_(-1),
+		partEnd_(-1),
+		interval_(-1),
+		windowState_(resolveRangeOptions(
+				code, partBegin_, partEnd_, interval_, limit_,
+				fillingWithPrev_)),
+		pendingKey_(-1),
+		restGenerationLimit_(limit_),
+		firstRowReady_(false),
+		groupFoundLast_(false),
+		fillPending_(false),
+		fillProjecting_(false),
+		prevValuesPreserved_(false),
+		aggrTupleSet_(NULL),
+		aggrTuple_(NULL),
+		valueReaderFunc_(getValueReaderFunction(rangeColumn_)) {
+}
+
+inline bool
+SQLGroupOps::GroupRangeMerge::MergeContext::isTotalEmptyPossible() const {
+	return (isFilling() && !isFirstRowReady() && partEq_ != NULL);
+}
+
+inline bool SQLGroupOps::GroupRangeMerge::MergeContext::isFilling() const {
+	return (emptyFillProj_ != NULL);
+}
+
+inline bool SQLGroupOps::GroupRangeMerge::MergeContext::isFillPending() const {
+	return fillPending_;
+}
+
+inline bool
+SQLGroupOps::GroupRangeMerge::MergeContext::isFirstRowReady() const {
+	return firstRowReady_;
+}
+
+inline bool
+SQLGroupOps::GroupRangeMerge::MergeContext::isForNormalGroup() const {
+	return windowState_.rangeKey_ <= partEnd_;
+}
+
+inline bool
+SQLGroupOps::GroupRangeMerge::MergeContext::isBeforePartitionTail() const {
+	return windowState_.rangeKey_ < getTailGroupKey();
+}
+
+inline int64_t
+SQLGroupOps::GroupRangeMerge::MergeContext::getGroupBegin() const {
+	return windowState_.rangeKey_;
+}
+
+inline int64_t
+SQLGroupOps::GroupRangeMerge::MergeContext::getGroupEnd() const {
+	const int64_t groupBegin = getGroupBegin();
+	return groupBegin + interval_;
+}
+
+inline int64_t
+SQLGroupOps::GroupRangeMerge::MergeContext::getTailGroupKey() const {
+	return partEnd_;
+}
+
+SQLValues::CompColumnList
+SQLGroupOps::GroupRangeMerge::MergeContext::resolvePartitionKeyList(
+		util::StackAllocator &alloc, const OpCode &code) {
+	SQLValues::CompColumnList destList(alloc);
+
+	const SQLValues::CompColumnList &srcList = code.getKeyColumnList();
+	if (srcList.size() > 1) {
+		destList.assign(srcList.begin(), srcList.end() - 1);
+	}
+
+	return destList;
+}
+
+SQLGroupOps::GroupRangeMerge::TupleEq*
+SQLGroupOps::GroupRangeMerge::MergeContext::createKeyComparator(
+		util::StackAllocator &alloc, SQLValues::VarContext &varCxt,
+		const SQLValues::CompColumnList &keyList,
+		util::LocalUniquePtr<TupleEq> &ptr) {
+	if (!keyList.empty()) {
+		ptr = UTIL_MAKE_LOCAL_UNIQUE(
+				ptr, TupleEq, alloc,
+				SQLValues::TupleComparator(keyList, &varCxt, false));
+	}
+	return ptr.get();
+}
+
+SQLValues::TupleColumn
+SQLGroupOps::GroupRangeMerge::MergeContext::resoveRangeColumn(
+		const OpCode &code) {
+	const SQLValues::CompColumnList &baseKeyList = code.getKeyColumnList();
+	if (baseKeyList.empty()) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+	return baseKeyList.back().getTupleColumn1();
+}
+
+const SQLOps::Projection*
+SQLGroupOps::GroupRangeMerge::MergeContext::findProjection(
+		const OpCode &code, bool filling, bool noPrev, bool noNext) {
+	const Projection *topProj = code.getPipeProjection();
+	if (!filling && noNext) {
+		assert(!noPrev);
+		const Projection *pipeTopProj = getSubProjection(
+				topProj, SQLOpTypes::PROJ_PIPE_FINISH, 0, false, true);
+		return pipeTopProj;
+	}
+
+	const Projection *finishTopProj = getSubProjection(
+			topProj, SQLOpTypes::PROJ_PIPE_FINISH, 1, false, true);
+	const Projection *finishSubProj = getSubProjection(
+			finishTopProj, SQLOpTypes::PROJ_MULTI_STAGE, 1, false, true);
+
+	if (filling) {
+		const Projection *fillTopProj = getSubProjection(
+				finishSubProj, SQLOpTypes::PROJ_MULTI_STAGE, 1, true, false);
+		if (fillTopProj == finishSubProj) {
+			return NULL;
+		}
+
+		const Projection *subProj = getSubProjection(
+				fillTopProj, SQLOpTypes::PROJ_MULTI_STAGE,
+				(noPrev ? 0 : 1), false, true);
+		return getSubProjection(
+				subProj, SQLOpTypes::PROJ_MULTI_STAGE,
+				(noNext ? 0 : 1), false, true);
+	}
+	else {
+		assert(!noPrev);
+		return getSubProjection(
+				finishSubProj, SQLOpTypes::PROJ_MULTI_STAGE, 0, true, false);
+	}
+}
+
+SQLExprs::WindowState
+SQLGroupOps::GroupRangeMerge::MergeContext::resolveRangeOptions(
+		const OpCode &code, int64_t &partBegin, int64_t &partEnd,
+		int64_t &interval, int64_t &limit, bool &fillingWithPrev) {
+	const SQLExprs::Expression &pred =
+			GroupRange::resolveRangeOptionPredicate(code);
+	{
+		SQLExprs::Expression::Iterator it(pred);
+		it.next();
+
+		it.next();
+		interval = getRangeKey(it.get().getCode().getValue());
+
+		it.next();
+		partBegin = getRangeKey(it.get().getCode().getValue());
+
+		it.next();
+		partEnd = getRangeKey(it.get().getCode().getValue());
+
+		it.next();
+		limit = getRangeKey(it.get().getCode().getValue());
+		if (limit < 0) {
+			limit = Constants::ROW_GENERATION_LIMIT;
+		}
+	}
+	fillingWithPrev =
+			GroupRange::isFillingWithPrevious(GroupRange::getFillType(pred));
+
+	SQLExprs::WindowState windowState;
+	windowState.rangeKey_ = partBegin;
+	windowState.partitionValueCount_ = 1; 
+	return windowState;
+}
+
+const SQLOps::Projection*
+SQLGroupOps::GroupRangeMerge::MergeContext::getSubProjection(
+		const Projection *base, SQLOpTypes::ProjectionType baseTypeFilter,
+		size_t index, bool selfOnUnmatch, bool always) {
+	do {
+		if (base == NULL) {
+			break;
+		}
+
+		if (base->getProjectionCode().getType() != baseTypeFilter) {
+			if (selfOnUnmatch) {
+				return base;
+			}
+			break;
+		}
+
+		if (index >= base->getChainCount()) {
+			break;
+		}
+
+		return &base->chainAt(index);
+	}
+	while (false);
+
+	if (always) {
+		assert(false);
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	}
+	return NULL;
+}
+
+SQLGroupOps::GroupRangeMerge::ValueReaderFunc
+SQLGroupOps::GroupRangeMerge::MergeContext::getValueReaderFunction(
+		const TupleColumn &rangeColumn) {
+	SQLValues::TypeSwitcher typeSwitcher(
+			SQLValues::TypeUtils::toNonNullable(rangeColumn.getType()));
+	return typeSwitcher.get<const ValueReader>();
+}
+
+
+inline SQLGroupOps::GroupRangeMerge::Directions::Directions() :
+		nextRangeKey_(0),
+		partition_(0),
+		group_(0),
+		onNormalGroup_(false),
+		nextRowForNextGroup_(false) {
+}
+
+inline SQLGroupOps::GroupRangeMerge::Directions
+SQLGroupOps::GroupRangeMerge::Directions::of(
+		int64_t nextRangeKey, int32_t partition, int32_t group,
+		bool onNormalGroup, bool nextRowForNextGroup) {
+	Directions directions;
+	directions.nextRangeKey_ = nextRangeKey;
+	directions.partition_ = partition;
+	directions.group_ = group;
+	directions.onNormalGroup_ = onNormalGroup;
+	directions.nextRowForNextGroup_ = nextRowForNextGroup;
+	return directions;
+}
+
+inline int64_t
+SQLGroupOps::GroupRangeMerge::Directions::getNextRangeKey() const {
+	return nextRangeKey_;
+}
+
+inline bool
+SQLGroupOps::GroupRangeMerge::Directions::isBeforeTotalTailRow() const {
+	return partition_ <= 0;
+}
+
+inline bool
+SQLGroupOps::GroupRangeMerge::Directions::isBeforePartitionTailRow() const {
+	return partition_ < 0;
+}
+
+inline bool
+SQLGroupOps::GroupRangeMerge::Directions::isBeforeGroupTailRow() const {
+	return group_ <= 0;
+}
+
+inline bool
+SQLGroupOps::GroupRangeMerge::Directions::isGroupPreceding() const {
+	return group_ < 0;
+}
+
+inline bool SQLGroupOps::GroupRangeMerge::Directions::isOnNormalGroup() const {
+	return onNormalGroup_;
+}
+
+inline bool
+SQLGroupOps::GroupRangeMerge::Directions::isNextRowForNextGroup() const {
+	return onNormalGroup_;
 }
 
 
@@ -1547,7 +2778,9 @@ void SQLGroupOps::UnionHashContext::initializeTupleSet(
 
 	tupleSet->completeColumns();
 
-	*cxt.getSummaryColumnListRef(input) = tupleSet->getReaderColumnList();
+	SummaryTupleSet::applyColumnList(
+			tupleSet->getReaderColumnList(),
+			*cxt.getSummaryColumnListRef(input));
 }
 
 void SQLGroupOps::UnionHashContext::setUpInputEntryList(

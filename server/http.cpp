@@ -1609,6 +1609,7 @@ HttpAuth::ParamList HttpAuth::newParamList(const Allocator &alloc) {
 }
 
 const uint16_t HttpRequest::DEFAULT_HTTP_PORT = 80;
+const uint16_t HttpRequest::DEFAULT_HTTPS_PORT = 443;
 
 const HttpRequest::Method HttpRequest::METHOD_GET = EBB_GET;
 const HttpRequest::Method HttpRequest::METHOD_POST = EBB_POST;
@@ -1616,13 +1617,13 @@ const HttpRequest::Method HttpRequest::METHOD_POST = EBB_POST;
 HttpRequest::HttpRequest(const Allocator &alloc) :
 		message_(alloc),
 		pathElements_(alloc),
-		parameterMap_(ParameterMap::key_compare(), alloc),
+		queryFields_(alloc),
 		fragment_(alloc),
 		directory_(false),
 		scheme_(alloc),
 		method_(METHOD_GET),
 		host_(alloc),
-		port_(DEFAULT_HTTP_PORT) {
+		port_(-1) {
 }
 
 HttpMessage& HttpRequest::getMessage() {
@@ -1636,13 +1637,13 @@ const HttpMessage& HttpRequest::getMessage() const {
 void HttpRequest::clear() {
 	message_.clear();
 	pathElements_.clear();
-	parameterMap_.clear();
+	queryFields_.clear();
 	fragment_.clear();
 	directory_ = false;
 	scheme_.clear();
 	method_ = METHOD_GET;
 	host_.clear();
-	port_ = DEFAULT_HTTP_PORT;
+	port_ = -1;
 }
 
 HttpMessage* HttpRequest::parse(bool eof) {
@@ -1660,7 +1661,7 @@ HttpMessage& HttpRequest::build() {
 		if (!host_.empty()) {
 			util::NormalOStringStream oss;
 			oss << host_;
-			if (port_ != DEFAULT_HTTP_PORT) {
+			if (port_ >= 0) {
 				oss << ":";
 				oss << port_;
 			}
@@ -1683,7 +1684,7 @@ HttpMessage& HttpRequest::build() {
 		oss << "/";
 	}
 
-	if (!parameterMap_.empty()) {
+	if (!queryFields_.empty()) {
 		oss << "?";
 		encodeQueryString(oss);
 	}
@@ -1708,8 +1709,8 @@ HttpRequest::PathElements& HttpRequest::getPathElements() {
 	return pathElements_;
 }
 
-HttpRequest::ParameterMap& HttpRequest::getParameterMap() {
-	return parameterMap_;
+HttpRequest::FieldList& HttpRequest::getQueryFields() {
+	return queryFields_;
 }
 
 HttpRequest::String& HttpRequest::getFragment() {
@@ -1735,8 +1736,8 @@ void HttpRequest::setMethod(Method method) {
 void HttpRequest::acceptURL(const char8_t *url) {
 	scheme_.clear();
 	host_.clear();
-	port_ = 80;
-	acceptPath("");
+	port_ = -1;
+	acceptURLPathAndFollowing("");
 
 	const char8_t *end = url + strlen(url);
 	const char8_t *it = url;
@@ -1763,6 +1764,7 @@ void HttpRequest::acceptURL(const char8_t *url) {
 		if (path == NULL) {
 			path = end;
 		}
+		checkURLAuthority(host, path - host);
 
 		const char8_t *portStr = NULL;
 		for (it = path; it != host;) {
@@ -1778,19 +1780,19 @@ void HttpRequest::acceptURL(const char8_t *url) {
 			it = path;
 		}
 		else {
-			port_ = util::LexicalConverter<uint16_t>()(
-					u8string(portStr, path));
+			port_ = static_cast<int32_t>(util::LexicalConverter<uint16_t>()(
+					u8string(portStr, path)));
 		}
 
 		host_.assign(host, it);
 	}
 	while (false);
-	acceptPath(path);
+	acceptURLPathAndFollowing(path);
 }
 
-void HttpRequest::acceptPath(const char8_t *path) {
+void HttpRequest::acceptURLPathAndFollowing(const char8_t *path) {
 	pathElements_.clear();
-	parameterMap_.clear();
+	queryFields_.clear();
 	fragment_.clear();
 
 	const char8_t *end = path + strlen(path);
@@ -1808,12 +1810,15 @@ void HttpRequest::acceptPath(const char8_t *path) {
 		fragment++;
 	}
 
-	const char8_t *query = strchr(path, '?');
+	const char8_t *query = static_cast<const char8_t*>(
+			memchr(path, '?', static_cast<size_t>(queryEnd - path)));
+	const char8_t *pathEnd = end;
 	if (query != NULL) {
+		pathEnd = query;
 		query++;
 	}
 
-	Parser::acceptPath(&request, path, end - path);
+	Parser::acceptPath(&request, path, pathEnd - path);
 
 	if (query != NULL) {
 		Parser::acceptQueryString(&request, query, queryEnd - query);
@@ -1833,7 +1838,10 @@ const char8_t* HttpRequest::getHost() const {
 }
 
 uint16_t HttpRequest::getPort() const {
-	return port_;
+	if (port_ < 0) {
+		return getDefaultPort(getScheme());
+	}
+	return static_cast<uint16_t>(port_);
 }
 
 const char8_t* HttpRequest::methodToString(Method method, bool failOnUnknown) {
@@ -1855,15 +1863,35 @@ HttpRequest::Formatter HttpRequest::formatter() const {
 	return Formatter(*this);
 }
 
+uint16_t HttpRequest::getDefaultPort(const char8_t *scheme) {
+	if (HttpMessage::FieldParser::compareToken(scheme, "https") == 0) {
+		return DEFAULT_HTTPS_PORT;
+	}
+
+	return DEFAULT_HTTP_PORT;
+}
+
+void HttpRequest::checkURLAuthority(const char8_t *authority, size_t length) {
+	const char8_t *authorityEnd = authority + length;
+	if (std::find(authority, authorityEnd, '@') != authorityEnd) {
+		GS_COMMON_THROW_USER_ERROR(
+				GS_ERROR_HTTP_INVALID_MESSAGE,
+				"User info of URL is not supported");
+	}
+}
+
 void HttpRequest::encodeQueryString(std::ostream &os) {
-	for (ParameterMap::const_iterator it = parameterMap_.begin();
-			it != parameterMap_.end(); ++it) {
-		if (it != parameterMap_.begin()) {
+	for (FieldList::const_iterator it = queryFields_.begin();
+			it != queryFields_.end(); ++it) {
+		if (it != queryFields_.begin()) {
 			os << "&";
 		}
-		encodeURL(os, it->first.c_str());
+		encodeURL(os, it->name_.c_str());
+		if (it->value_.empty() && !it->separatedOnEmpty_) {
+			continue;
+		}
 		os << "=";
-		encodeURL(os, it->second.c_str());
+		encodeURL(os, it->value_.c_str());
 	}
 }
 
@@ -1888,6 +1916,13 @@ std::ostream& operator<<(
 		std::ostream &s, const HttpRequest::Formatter &formatter) {
 	formatter.format(s);
 	return s;
+}
+
+HttpRequest::Field::Field(
+		const String &name, const String &value, bool separatedOnEmpty) :
+		name_(name),
+		value_(value),
+		separatedOnEmpty_(separatedOnEmpty) {
 }
 
 HttpRequest::Parser::Parser(HttpRequest &base) :
@@ -1916,7 +1951,7 @@ bool HttpRequest::Parser::parse(bool eof) {
 	}
 
 	base_.pathElements_.clear();
-	base_.parameterMap_.clear();
+	base_.queryFields_.clear();
 	base_.fragment_.clear();
 	fieldName_.clear();
 	fieldValue_.clear();
@@ -1990,7 +2025,7 @@ bool HttpRequest::Parser::parse(bool eof) {
 		if (encoding != NULL) {
 			GS_COMMON_THROW_USER_ERROR(
 					GS_ERROR_HTTP_INVALID_MESSAGE,
-					"Unsupported content encoding ("
+					"Unssuported content encoding ("
 					"value=" << encoding->value_ << ")");
 		}
 	}
@@ -2119,7 +2154,7 @@ void HttpRequest::Parser::acceptPath(
 void HttpRequest::Parser::acceptQueryString(
 		ebb_request *request, const char8_t *at, size_t length) {
 	HttpRequest &base = getBase(request);
-	const Allocator &alloc = base.parameterMap_.get_allocator();
+	const Allocator &alloc = base.queryFields_.get_allocator();
 
 	const char8_t *end = at + length;
 	for (const char8_t *entry = at; entry != end;) {
@@ -2129,19 +2164,23 @@ void HttpRequest::Parser::acceptQueryString(
 			continue;
 		}
 		const char8_t *const nameEnd = std::find(entry, entryEnd, '=');
+		const bool separated = (nameEnd != entryEnd);
+
+		const char8_t *const valueBegin = (separated ? nameEnd + 1 : entryEnd);
+		const bool separatedOnEmpty = (separated && valueBegin == entryEnd);
 
 		util::NormalIStringStream nameIn(u8string(entry, nameEnd));
-		util::NormalIStringStream valueIn(u8string(
-				(nameEnd == entryEnd ? entryEnd : nameEnd + 1), entryEnd));
+		util::NormalIStringStream valueIn(u8string(valueBegin, entryEnd));
 
 		util::NormalOStringStream nameOut;
 		util::NormalOStringStream valueOut;
 		util::URLConverter::decode(nameOut, nameIn);
 		util::URLConverter::decode(valueOut, valueIn);
 
-		base.parameterMap_.insert(std::make_pair(
+		base.queryFields_.push_back(Field(
 				String(nameOut.str().c_str(), alloc),
-				String(valueOut.str().c_str(), alloc)));
+				String(valueOut.str().c_str(), alloc),
+				separatedOnEmpty));
 		entry = entryEnd;
 	}
 }

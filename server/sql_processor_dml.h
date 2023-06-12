@@ -147,8 +147,15 @@ public:
 		case TupleList::TYPE_NUMERIC:
 		case TupleList::TYPE_DOUBLE:
 		case TupleList::TYPE_TIMESTAMP:
-			rowStore.setField(columnId, value.fixedData(),
-				static_cast<uint32_t>(TupleColumnTypeUtils::getFixedSize(type)));
+		case TupleList::TYPE_MICRO_TIMESTAMP:
+			rowStore.setField(
+					columnId, value.fixedData(),
+					static_cast<uint32_t>(TupleColumnTypeUtils::getFixedSize(type)));
+			break;
+		case TupleList::TYPE_NANO_TIMESTAMP:
+			rowStore.setField(
+					columnId, value.get<TupleNanoTimestamp>().data(),
+					static_cast<uint32_t>(TupleColumnTypeUtils::getFixedSize(type)));
 			break;
 		case TupleList::TYPE_NULL:
 			rowStore.setNull(columnId);

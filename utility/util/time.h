@@ -70,6 +70,23 @@ private:
 	@brief Manages date and time
 */
 class DateTime {
+private:
+	enum {
+		DIGITS_YEAR_MIN = 4,
+		DIGITS_YEAR_MAX = 5,
+		DIGITS_FRACTION_UNIT = 3,
+		DIGITS_OTHER = 2,
+		DIGITS_SEPARATORS = 6,
+		DIGITS_ZONE = (TimeZone::MAX_FORMAT_SIZE - 1),
+
+		DIGITS_MAX = (
+				DIGITS_YEAR_MAX +
+				DIGITS_OTHER * 5 +
+				DIGITS_FRACTION_UNIT * 3 +
+				DIGITS_SEPARATORS +
+				DIGITS_ZONE)
+	};
+
 public:
 
 	enum FieldType {
@@ -80,6 +97,8 @@ public:
 		FIELD_MINUTE,
 		FIELD_SECOND,
 		FIELD_MILLISECOND,
+		FIELD_MICROSECOND,
+		FIELD_NANOSECOND,
 
 		END_PRIMITIVE_FIELD,
 
@@ -95,7 +114,10 @@ public:
 	struct Option;
 	struct ZonedOption;
 
-	static const size_t MAX_FORMAT_SIZE = 32;
+	class Formatter;
+	class Parser;
+
+	static const size_t MAX_FORMAT_SIZE = (DIGITS_MAX + 1);
 
 	static const int64_t INITIAL_UNIX_TIME;
 
@@ -103,7 +125,7 @@ public:
 
 	DateTime(const DateTime &another);
 
-	DateTime(const char8_t *str, bool trimMilliseconds);
+	DateTime(const char8_t *str, bool fractionTrimming);
 
 	DateTime(int64_t unixTimeMillis);
 
@@ -161,26 +183,30 @@ public:
 
 	void format(std::ostream &s, const ZonedOption &option) const;
 	void format(
-			std::ostream &s, bool trimMilliseconds,
+			std::ostream &s, bool fractionTrimming,
 			bool asLocalTimeZone = true) const;
 
 	size_t format(char8_t *buf, size_t size, const ZonedOption &option) const;
+
+	Formatter getFormatter(const ZonedOption &option) const;
 
 	bool parse(
 			const char8_t *buf, size_t size, bool throwOnError,
 			const ZonedOption &option);
 	static bool parse(
-			const char8_t *str, DateTime &dateTime, bool trimMilliseconds);
+			const char8_t *str, DateTime &dateTime, bool fractionTrimming);
+
+	Parser getParser(const ZonedOption &option);
 
 	template<typename W, typename H>
 	void writeTo(
 			W &writer, const ZonedOption &option, const H& errorHandler) const;
 
 	static DateTime now(const Option &option);
-	static DateTime now(bool trimMilliseconds);
+	static DateTime now(bool fractionTrimming);
 
 	static DateTime max(const Option &option);
-	static DateTime max(bool trimMilliseconds);
+	static DateTime max(bool fractionTrimming);
 
 	bool operator==(const DateTime &another) const;
 	bool operator!=(const DateTime &another) const;
@@ -208,7 +234,7 @@ private:
 			int64_t unixTimeMillis, const Option &option);
 	static int64_t resolveMaxUnixTime(const Option &option);
 
-	static int64_t getMaxUnixTime(bool trimMilliseconds);
+	static int64_t getMaxUnixTime(bool fractionTrimming);
 
 	int64_t unixTimeMillis_;
 };
@@ -232,24 +258,157 @@ struct DateTime::FieldData {
 };
 
 struct DateTime::Option {
+	static const FieldType PRECISION_NONE = END_PRIMITIVE_FIELD;
+	static const FieldType PRECISION_DEFAULT = FIELD_MILLISECOND;
+
 	Option();
 
-	static Option create(bool trimMilliseconds);
+	static Option create(bool fractionTrimming);
 
-	bool trimMilliseconds_;
+	Option withDefaultPrecision(FieldType defaultType) const;
+	static FieldType makePrecision(bool fractionTrimming);
+	static FieldType resolvePrecision(FieldType base, FieldType defaultType);
+
+	uint32_t getFractionalDigits() const;
+	static uint32_t getFractionalDigits(FieldType precision);
+
+	bool isFractionTrimming() const;
+
+	FieldType precision_;
 	int64_t maxTimeMillis_;
 };
 
 struct DateTime::ZonedOption {
 	ZonedOption();
 
-	static ZonedOption create(bool trimMilliseconds, const TimeZone &zone);
+	static ZonedOption create(bool fractionTrimming, const TimeZone &zone);
 
 	Option baseOption_;
 
 	bool asLocalTimeZone_;
 	TimeZone zone_;
 	const FieldData *maxFields_;
+};
+
+class DateTime::Formatter {
+public:
+	Formatter(const DateTime &dateTime, const ZonedOption &option);
+
+	void operator()(std::ostream &s) const;
+	size_t operator()(char8_t *buf, size_t size) const;
+
+	template<typename W, typename H>
+	void writeTo(W &writer, const H &errorHandler) const;
+
+	Formatter withDefaultPrecision(FieldType defaultPrecision) const;
+
+	void setDefaultPrecision(FieldType defaultPrecision);
+	void setNanoSeconds(uint32_t nanoSeconds);
+
+private:
+	size_t format(char8_t *buf, size_t size) const;
+
+	static void formatMain(
+			char8_t *&it, char8_t *end, const FieldData &fieldData);
+	static void formatFraction(
+			char8_t *&it, char8_t *end, const FieldData &fieldData,
+			uint32_t nanoSeconds, const Option &option);
+
+	DateTime dateTime_;
+	ZonedOption option_;
+	FieldType defaultPrecision_;
+	uint32_t nanoSeconds_;
+};
+
+class DateTime::Parser {
+public:
+	Parser(DateTime &dateTime, const ZonedOption &option);
+
+	bool operator()(const char8_t *buf, size_t size, bool throwOnError) const;
+
+	void setDefaultPrecision(FieldType defaultPrecision);
+	void setNanoSecondsRef(uint32_t *nanoSecondsRef);
+
+private:
+	bool parse(const char8_t *buf, size_t size, bool throwOnError) const;
+
+	static bool parseMain(
+			const char8_t *&it, const char8_t *end, FieldData &fieldData);
+	static bool parseFraction(
+			const char8_t *&it, const char8_t *end, FieldData &fieldData,
+			uint32_t &nanoSeconds, const Option &option);
+
+	static bool errorParse(bool throwOnError);
+
+	DateTime &dateTime_;
+	ZonedOption option_;
+	FieldType defaultPrecision_;
+	uint32_t *nanoSecondsRef_;
+};
+
+class PreciseDateTime {
+public:
+	struct FieldData;
+
+	typedef DateTime::FieldType FieldType;
+	typedef DateTime::Option Option;
+	typedef DateTime::ZonedOption ZonedOption;
+	typedef DateTime::Formatter Formatter;
+	typedef DateTime::Parser Parser;
+
+	PreciseDateTime();
+
+	static PreciseDateTime ofNanoSeconds(
+			const DateTime &base, uint32_t nanoSeconds);
+
+	static PreciseDateTime of(const DateTime &src);
+	static PreciseDateTime of(const PreciseDateTime &src);
+
+	const DateTime& getBase() const;
+	DateTime& getBase();
+
+	uint32_t getNanoSeconds() const;
+
+	void getFields(FieldData &fieldData, const ZonedOption &option) const;
+	int64_t getField(FieldType type, const ZonedOption &option) const;
+
+	void setFields(
+			const FieldData &fieldData, const ZonedOption &option,
+			bool strict = true);
+
+	void addField(
+			int64_t amount, FieldType fieldType, const ZonedOption &option);
+
+	int64_t getDifference(
+			const PreciseDateTime &base, FieldType fieldType,
+			const ZonedOption &option) const;
+
+	Formatter getFormatter(const ZonedOption &option) const;
+	Parser getParser(const ZonedOption &option);
+
+	static PreciseDateTime max(const Option &option);
+
+private:
+	static int32_t compareBase(
+			const PreciseDateTime &t1, const PreciseDateTime &t2);
+	static int32_t compareNanos(
+			const PreciseDateTime &t1, const PreciseDateTime &t2);
+
+	DateTime base_;
+	uint32_t nanoSeconds_;
+};
+
+struct PreciseDateTime::FieldData {
+	void initialize();
+
+	template<FieldType T> int32_t getValue() const;
+	template<FieldType T> void setValue(int32_t value);
+
+	int32_t getValue(FieldType type) const;
+	void setValue(FieldType type, int32_t value);
+
+	DateTime::FieldData baseFields_;
+	uint32_t nanoSecond_;
 };
 
 /*!
@@ -355,19 +514,19 @@ inline void DateTime::setUnixTime(int64_t unixTimeMillis) {
 	unixTimeMillis_ = unixTimeMillis;
 }
 
+inline DateTime::Formatter DateTime::getFormatter(
+		const ZonedOption &option) const {
+	return Formatter(*this, option);
+}
+
+inline DateTime::Parser DateTime::getParser(const ZonedOption &option) {
+	return Parser(*this, option);
+}
+
 template<typename W, typename H>
 void DateTime::writeTo(
 		W &writer, const ZonedOption &option, const H& errorHandler) const {
-	char8_t buf[MAX_FORMAT_SIZE];
-	size_t size;
-	try {
-		size = format(buf, sizeof(buf), option);
-	}
-	catch (std::exception &e) {
-		errorHandler.errorTimeFormat(e);
-		return;
-	}
-	writer.append(buf, size);
+	getFormatter(option).writeTo(writer, errorHandler);
 }
 
 inline bool DateTime::operator==(const DateTime &another) const {
@@ -397,6 +556,79 @@ inline bool DateTime::operator<=(const DateTime &another) const {
 inline std::ostream& operator<<(std::ostream &s, const DateTime &dateTime) {
 	dateTime.format(s, false);
 	return s;
+}
+
+
+inline DateTime::Formatter::Formatter(
+		const DateTime &dateTime, const ZonedOption &option) :
+		dateTime_(dateTime),
+		option_(option),
+		defaultPrecision_(Option::PRECISION_NONE),
+		nanoSeconds_(0) {
+}
+
+inline size_t DateTime::Formatter::operator()(
+		char8_t *buf, size_t size) const {
+	return format(buf, size);
+}
+
+template<typename W, typename H>
+void DateTime::Formatter::writeTo(W &writer, const H &errorHandler) const {
+	char8_t buf[MAX_FORMAT_SIZE];
+	size_t size;
+	try {
+		size = format(buf, sizeof(buf));
+	}
+	catch (std::exception &e) {
+		errorHandler.errorTimeFormat(e);
+		return;
+	}
+	writer.append(buf, size);
+}
+
+inline DateTime::Formatter DateTime::Formatter::withDefaultPrecision(
+		FieldType defaultPrecision) const {
+	Formatter formatter = *this;
+	formatter.setDefaultPrecision(defaultPrecision);
+	return formatter;
+}
+
+inline void DateTime::Formatter::setDefaultPrecision(
+		FieldType defaultPrecision) {
+	defaultPrecision_ = defaultPrecision;
+}
+
+inline void DateTime::Formatter::setNanoSeconds(uint32_t nanoSeconds) {
+	nanoSeconds_ = nanoSeconds;
+}
+
+inline std::ostream& operator<<(
+		std::ostream &s, const DateTime::Formatter &formatter) {
+	formatter(s);
+	return s;
+}
+
+
+inline DateTime::Parser::Parser(
+		DateTime &dateTime, const ZonedOption &option) :
+		dateTime_(dateTime),
+		option_(option),
+		defaultPrecision_(Option::PRECISION_NONE),
+		nanoSecondsRef_(NULL) {
+}
+
+inline bool DateTime::Parser::operator()(
+		const char8_t *buf, size_t size, bool throwOnError) const {
+	return parse(buf, size, throwOnError);
+}
+
+inline void DateTime::Parser::setDefaultPrecision(
+		FieldType defaultPrecision) {
+	defaultPrecision_ = defaultPrecision;
+}
+
+inline void DateTime::Parser::setNanoSecondsRef(uint32_t *nanoSecondsRef) {
+	nanoSecondsRef_ = nanoSecondsRef;
 }
 
 
@@ -485,6 +717,128 @@ template<>
 inline void DateTime::FieldData::setValue<DateTime::FIELD_MILLISECOND>(
 		int32_t value) {
 	milliSecond_ = value;
+}
+
+
+inline PreciseDateTime::PreciseDateTime() :
+		nanoSeconds_(0) {
+}
+
+inline PreciseDateTime PreciseDateTime::ofNanoSeconds(
+		const DateTime &base, uint32_t nanoSeconds) {
+	PreciseDateTime dateTime;
+	dateTime.base_ = base;
+	dateTime.nanoSeconds_ = nanoSeconds;
+	return dateTime;
+}
+
+inline PreciseDateTime PreciseDateTime::of(const DateTime &src) {
+	PreciseDateTime dateTime;
+	dateTime.base_ = src;
+	return dateTime;
+}
+
+inline PreciseDateTime PreciseDateTime::of(const PreciseDateTime &src) {
+	return src;
+}
+
+inline const DateTime& PreciseDateTime::getBase() const {
+	return base_;
+}
+
+inline DateTime& PreciseDateTime::getBase() {
+	return base_;
+}
+
+inline uint32_t PreciseDateTime::getNanoSeconds() const {
+	return nanoSeconds_;
+}
+
+inline DateTime::Formatter PreciseDateTime::getFormatter(
+		const ZonedOption &option) const {
+	Formatter formatter(base_, option);
+	formatter.setDefaultPrecision(DateTime::FIELD_NANOSECOND);
+	formatter.setNanoSeconds(nanoSeconds_);
+	return formatter;
+}
+
+inline DateTime::Parser PreciseDateTime::getParser(const ZonedOption &option) {
+	Parser parser(base_, option);
+	parser.setDefaultPrecision(DateTime::FIELD_NANOSECOND);
+	parser.setNanoSecondsRef(&nanoSeconds_);
+	return parser;
+}
+
+inline PreciseDateTime PreciseDateTime::max(const Option &option) {
+	const uint32_t maxNanoSeconds =
+			(option.isFractionTrimming() ? 0 : 1000 * 1000 -1);
+	return ofNanoSeconds(DateTime::max(option), maxNanoSeconds);
+}
+
+inline std::ostream& operator<<(
+		std::ostream &s, const PreciseDateTime &dateTime) {
+	dateTime.getFormatter(DateTime::ZonedOption())(s);
+	return s;
+}
+
+
+template<DateTime::FieldType T>
+int32_t PreciseDateTime::FieldData::getValue() const {
+	UTIL_STATIC_ASSERT(
+			T != DateTime::FIELD_MILLISECOND &&
+			T != DateTime::FIELD_MICROSECOND &&
+			T != DateTime::FIELD_NANOSECOND);
+	return baseFields_.getValue<T>();
+}
+
+template<>
+inline int32_t PreciseDateTime::FieldData::getValue<
+		DateTime::FIELD_MILLISECOND>() const {
+	return baseFields_.getValue<DateTime::FIELD_MILLISECOND>();
+}
+
+template<>
+inline int32_t PreciseDateTime::FieldData::getValue<
+		DateTime::FIELD_MICROSECOND>() const {
+	return (baseFields_.milliSecond_ * 1000) +
+			static_cast<int32_t>(nanoSecond_ / 1000);
+}
+
+template<>
+inline int32_t PreciseDateTime::FieldData::getValue<
+		DateTime::FIELD_NANOSECOND>() const {
+	return (baseFields_.milliSecond_ * (1000 * 1000)) +
+			static_cast<int32_t>(nanoSecond_);
+}
+
+template<DateTime::FieldType T>
+void PreciseDateTime::FieldData::setValue(int32_t value) {
+	UTIL_STATIC_ASSERT(
+			T != DateTime::FIELD_MILLISECOND &&
+			T != DateTime::FIELD_MICROSECOND &&
+			T != DateTime::FIELD_NANOSECOND);
+	baseFields_.setValue<T>(value);
+}
+
+template<>
+inline void PreciseDateTime::FieldData::setValue<DateTime::FIELD_MILLISECOND>(
+		int32_t value) {
+	baseFields_.setValue<DateTime::FIELD_MILLISECOND>(value);
+	nanoSecond_ = 0;
+}
+
+template<>
+inline void PreciseDateTime::FieldData::setValue<DateTime::FIELD_MICROSECOND>(
+		int32_t value) {
+	baseFields_.milliSecond_ = value / 1000;
+	nanoSecond_ = (static_cast<uint32_t>(value) % 1000) * 1000;
+}
+
+template<>
+inline void PreciseDateTime::FieldData::setValue<DateTime::FIELD_NANOSECOND>(
+		int32_t value) {
+	baseFields_.milliSecond_ = value / (1000 * 1000);
+	nanoSecond_ = static_cast<uint32_t>(value) % (1000 * 1000);
 }
 
 #if UTIL_FAILURE_SIMULATION_ENABLED

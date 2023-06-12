@@ -1230,7 +1230,7 @@ void NoSQLStore::createTable(
 				assert(intervalValue != 0);
 				TupleList::TupleColumnType columnType
 					= (*createTableOption.columnInfoList_)[partitionColumnId]->type_;
-				if (columnType == TupleList::TYPE_TIMESTAMP) {
+				if (TupleColumnTypeUtils::isTimestampFamily(columnType)) {
 					if (createTableOption.optIntervalUnit_ !=
 						util::DateTime::FIELD_DAY_OF_MONTH) {
 						GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_PARAMETER,
@@ -1318,7 +1318,7 @@ void NoSQLStore::createTable(
 			}
 			TupleList::TupleColumnType partitioningColumnType
 				= (*createTableOption.columnInfoList_)[partitionColumnId]->type_;
-			if (partitioningColumnType != TupleList::TYPE_TIMESTAMP) {
+			if (!TupleColumnTypeUtils::isTimestampFamily(partitioningColumnType)) {
 				GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_PARAMETER,
 					"Expiration definition column must be timestamp type");
 			}
@@ -3142,15 +3142,15 @@ void NoSQLStore::dropTablePartition(
 		partitioningInfo.init();
 
 		TupleList::TupleColumnType partitioningColumnType = partitioningInfo.partitionColumnType_;
+		const bool timestampFamily =
+				TupleColumnTypeUtils::isTimestampFamily(partitioningColumnType);
 
-		if (expr.value_.getType() == TupleList::TYPE_STRING
-			&& partitioningColumnType != TupleList::TYPE_TIMESTAMP) {
+		if (expr.value_.getType() == TupleList::TYPE_STRING && !timestampFamily) {
 			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_VALUE_SYNTAX_ERROR,
 				"Invalid data format, specified partitioning column type must be timestamp");
 		}
 
-		if (expr.value_.getType() != TupleList::TYPE_STRING
-			&& partitioningColumnType == TupleList::TYPE_TIMESTAMP) {
+		if (expr.value_.getType() != TupleList::TYPE_STRING && timestampFamily) {
 			GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_VALUE_SYNTAX_ERROR,
 				"Invalid data format, specified partitioning column type must be numeric");
 		}
@@ -3194,6 +3194,15 @@ void NoSQLStore::dropTablePartition(
 			tupleValue = ALLOC_NEW(alloc) TupleValue(&value, TupleList::TYPE_LONG);
 		}
 		break;
+		case TupleList::TYPE_MICRO_TIMESTAMP:
+			tupleValue = ALLOC_NEW(alloc) TupleValue(
+					ValueProcessor::getMicroTimestamp(targetValue));
+			break;
+		case TupleList::TYPE_NANO_TIMESTAMP:
+			tupleValue = ALLOC_NEW(alloc) TupleValue(TupleNanoTimestamp(
+					ALLOC_NEW(alloc) NanoTimestamp(
+							ValueProcessor::getNanoTimestamp(targetValue))));
+			break;
 		}
 
 		if (SyntaxTree::isRangePartitioningType(partitioningInfo.partitionType_)) {
@@ -3502,13 +3511,13 @@ void NoSQLStore::addColumn(
 			columnName.resize(static_cast<size_t>(columnNameLen));
 			in >> std::make_pair(columnName.data(), columnNameLen);
 			out << std::make_pair(columnName.data(), columnNameLen);
-			int8_t tmp;
-			in >> tmp;
-			out << tmp;
-			uint8_t opt;
-			in >> opt;
-			out << opt;
-			optionList.push_back(opt);
+			int8_t typeOrdinal;
+			in >> typeOrdinal;
+			out << typeOrdinal;
+			uint8_t flags;
+			in >> flags;
+			out << flags;
+			optionList.push_back(flags);
 		}
 		for (int32_t i = 0; i < (*createTableOption.columnInfoList_).size(); i++) {
 			char* columnName = const_cast<char*>(
@@ -3516,16 +3525,17 @@ void NoSQLStore::addColumn(
 			int32_t columnNameLen = static_cast<int32_t>(strlen(columnName));
 			out << columnNameLen;
 			out << std::make_pair(columnName, columnNameLen);
-			int8_t tmp = static_cast<int8_t>(
-				convertTupleTypeToNoSQLType(
-					(*createTableOption.columnInfoList_)[i]->type_));
-			out << tmp;
-			uint8_t opt = 0;
-			if ((*createTableOption.columnInfoList_)[i]->hasNotNullConstraint()) {
-				ColumnInfo::setNotNull(opt);
-			}
-			out << opt;
-			optionList.push_back(opt);
+			const ColumnType columnType = convertTupleTypeToNoSQLType(
+					(*createTableOption.columnInfoList_)[i]->type_);
+			const int8_t typeOrdinal =
+					ValueProcessor::getPrimitiveColumnTypeOrdinal(
+							columnType, false);
+			out << typeOrdinal;
+			const uint8_t flags = MessageSchema::makeColumnFlags(
+					ValueProcessor::isArray(columnType), false,
+					(*createTableOption.columnInfoList_)[i]->hasNotNullConstraint());
+			out << flags;
+			optionList.push_back(flags);
 		}
 		int16_t rowKeyNum = 0;
 		in >> rowKeyNum;
@@ -3798,12 +3808,12 @@ void NoSQLStore::makeSchema(DDLSource& ddlSource, RenameColumnContext* rcCxt) {
 		else {
 			out << std::make_pair(columnName.data(), columnNameLen);
 		}
-		int8_t tmp;
-		in >> tmp;
-		out << tmp;
-		uint8_t opt;
-		in >> opt;
-		out << opt;
+		int8_t typeOrdinal;
+		in >> typeOrdinal;
+		out << typeOrdinal;
+		uint8_t flags;
+		in >> flags;
+		out << flags;
 	}
 
 	int16_t rowKeyNum = 0;
@@ -3916,7 +3926,12 @@ void NoSQLStore::execNoSQL(DDLSource& ddlSource, NoSQLContainer& targetContainer
 			uint64_t numRow = 1;
 			NoSQLStoreOption option(execution);
 			option.putRowOption_ = PUT_INSERT_OR_UPDATE;
-			targetContainer.putRow(fixedPart, varPart, UNDEF_ROWID, option);
+			if (ddlSource.isRenamed()) {
+				NoSQLUtils::makeLargeContainerRow(alloc, NoSQLUtils::LARGE_CONTAINER_KEY_PARTITIONING_INFO,
+					outputMrs, partitioningInfo);
+				numRow++;
+			}
+			targetContainer.putRowSet(fixedPart, varPart, numRow, option);
 		}
 	}
 	else {
@@ -3963,6 +3978,7 @@ void NoSQLStore::RenameColumnContext::checkColumnName(DDLSource& ddlSource) {
 	util::XArray<uint8_t>& orgContainerSchema = ddlSource.orgContainerSchema_;
 	bool isPartitioning = ddlSource.isPartitioning_;
 	util::StackAllocator& alloc = ddlSource.alloc_;
+	TablePartitioningInfo<util::StackAllocator>& partitioningInfo = ddlSource.partitioningInfo_;
 
 	{
 		util::ArrayByteInStream in = util::ArrayByteInStream(
@@ -3988,7 +4004,6 @@ void NoSQLStore::RenameColumnContext::checkColumnName(DDLSource& ddlSource) {
 			startPos = in.base().position();
 			in >> columnNum;
 			containerAttribute = CONTAINER_ATTR_SUB;
-
 		}
 		ddlSource.columnNum_ = columnNum;
 
@@ -4025,15 +4040,26 @@ void NoSQLStore::RenameColumnContext::checkColumnName(DDLSource& ddlSource) {
 			else if (strcmp(caseColumnName.c_str(), newCaseColumnName.c_str()) == 0) {
 				newColumnNameId_ = i;
 			}
-			int8_t tmp;
-			in >> tmp;
-			uint8_t opt;
-			in >> opt;
+			int8_t typeOrdinal;
+			in >> typeOrdinal;
+			uint8_t flags;
+			in >> flags;
 		}
 
 		if (((oldColumnNameId_ != -1) && (newColumnNameId_ != -1)) ||
 			((oldColumnNameId_ == -1) && (newColumnNameId_ == -1))) {
 			GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_COLUMN, "Invalid column name");
+		}
+		
+		if (isPartitioning) {
+			if (partitioningInfo.partitioningColumnId_ == oldColumnNameId_) {
+				partitioningInfo.partitionColumnName_ = newColumnName_;
+				ddlSource.setRenamed();
+			}
+			else if (partitioningInfo.subPartitioningColumnId_ == oldColumnNameId_) {
+				partitioningInfo.subPartitioningColumnName_ = newColumnName_;
+				ddlSource.setRenamed();
+			}
 		}
 	}
 

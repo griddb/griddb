@@ -23,6 +23,7 @@ import java.util.ListIterator;
 import java.util.Set;
 import java.util.TreeSet;
 
+import com.toshiba.mwcloud.gs.ContainerInfo;
 import com.toshiba.mwcloud.gs.GSException;
 import com.toshiba.mwcloud.gs.Query;
 import com.toshiba.mwcloud.gs.QueryAnalysisEntry;
@@ -98,11 +99,12 @@ implements RowSet<R>, Extensibles.AsRowSet<R>, Experimentals.AsRowSet<R> {
 			try {
 				try {
 					prepareSubList(subQueryList.size());
+					prepareFilterAndRowType();
 				}
 				catch (Throwable t) {
 					throw closeByProblem(t);
 				}
-				rowCount = calculateRowCount(subList);
+				rowCount = calculateRowSetSize(subList, filter);
 			}
 			catch (GSException e) {
 				throw new IllegalStateException(e);
@@ -110,6 +112,26 @@ implements RowSet<R>, Extensibles.AsRowSet<R>, Experimentals.AsRowSet<R> {
 		}
 
 		return rowCount;
+	}
+
+	@Override
+	public ContainerInfo getSchema() throws GSException {
+		final int count = subQueryList.size();
+		for (int i = 0; i < count; i++) {
+			try {
+				prepareSubList(i + 1);
+			}
+			catch (Throwable t) {
+				throw closeByProblem(t);
+			}
+
+			final ContainerInfo schema = subList.get(i).getSchema();
+			if (schema != null) {
+				return schema;
+			}
+		}
+
+		return null;
 	}
 
 	@Override
@@ -419,19 +441,21 @@ implements RowSet<R>, Extensibles.AsRowSet<R>, Experimentals.AsRowSet<R> {
 		return sub;
 	}
 
-	private static int calculateRowCount(
-			List<? extends RowSet<?>> subList) throws GSException {
-		long value = 0;
+	private static int calculateRowSetSize(
+			List<? extends RowSet<?>> subList, Filter filter)
+			throws GSException {
+		long baseValue = 0;
 		for (RowSet<?> sub : subList) {
 			if (sub == null) {
 				continue;
 			}
-			value += sub.size();
-			if (value > Integer.MAX_VALUE) {
-				throw new GSException(
-						GSErrorCode.UNSUPPORTED_OPERATION,
-						"Row count exceeds max value of Integer");
-			}
+			baseValue += sub.size();
+		}
+		final long value = filter.rowSetSize(baseValue);
+		if (value > Integer.MAX_VALUE) {
+			throw new GSException(
+					GSErrorCode.UNSUPPORTED_OPERATION,
+					"Row count exceeds max value of Integer");
 		}
 		return (int) value;
 	}
@@ -497,6 +521,10 @@ implements RowSet<R>, Extensibles.AsRowSet<R>, Experimentals.AsRowSet<R> {
 			}
 		}
 
+		long rowSetSize(long baseSize) {
+			return baseSize;
+		}
+
 	}
 
 	static abstract class ChainFilter extends Filter {
@@ -528,9 +556,18 @@ implements RowSet<R>, Extensibles.AsRowSet<R>, Experimentals.AsRowSet<R> {
 			base.step(rowSet, count);
 		}
 
+		@Override
+		long rowSetSize(long baseSize) {
+			return base.rowSetSize(baseSize);
+		}
+
 	}
 
 	static class LimitFilter extends ChainFilter {
+
+		private final long initialLimit;
+
+		private final long initialOffset;
 
 		private long restLimit;
 
@@ -538,6 +575,8 @@ implements RowSet<R>, Extensibles.AsRowSet<R>, Experimentals.AsRowSet<R> {
 
 		private LimitFilter(Filter base, long limit, long offset) {
 			super(base);
+			initialLimit = limit;
+			initialOffset = offset;
 			restLimit = limit;
 			restOffset = offset;
 		}
@@ -565,6 +604,15 @@ implements RowSet<R>, Extensibles.AsRowSet<R>, Experimentals.AsRowSet<R> {
 			}
 
 			return rowObj;
+		}
+
+		@Override
+		long rowSetSize(long baseSize) {
+			final long chainSize = super.rowSetSize(baseSize);
+			if (chainSize <= initialOffset) {
+				return 0;
+			}
+			return Math.min(chainSize - initialOffset, initialLimit);
 		}
 
 	}

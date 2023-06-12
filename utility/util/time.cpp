@@ -303,9 +303,9 @@ const int64_t DateTime::INITIAL_UNIX_TIME = static_cast<int64_t>(0);
 
 const int32_t DateTime::EPOCH_DAY_OF_WEEK = 5; 
 
-DateTime::DateTime(const char8_t *str, bool trimMilliseconds) :
+DateTime::DateTime(const char8_t *str, bool fractionTrimming) :
 		unixTimeMillis_(INITIAL_UNIX_TIME) {
-	if (!parse(str, *this, trimMilliseconds)) {
+	if (!parse(str, *this, fractionTrimming)) {
 		UTIL_THROW_UTIL_ERROR(CODE_INVALID_PARAMETER,
 				"Parse failed (" << str << ")");
 	}
@@ -382,7 +382,7 @@ void DateTime::getFields(
 		fieldData.monthDay_ = 31;
 	}
 
-	if (option.baseOption_.trimMilliseconds_) {
+	if (option.baseOption_.isFractionTrimming()) {
 		fieldData.milliSecond_ = 0;
 	}
 }
@@ -499,8 +499,8 @@ void DateTime::setFields(
 	}
 
 	const bool asLocalTimeZone = false;
-	const int32_t modMilliSecond =
-			option.baseOption_.trimMilliseconds_ ? 0 : fieldData.milliSecond_;
+	const int32_t modMilliSecond = (option.baseOption_.isFractionTrimming() ?
+			0 : fieldData.milliSecond_);
 
 #ifdef _WIN32
 	const bool dstIgnored = true;
@@ -746,7 +746,7 @@ int64_t DateTime::getDifference(
 	case FIELD_SECOND:
 		return diffMillis / 1000;
 	case FIELD_MILLISECOND:
-		if (option.baseOption_.trimMilliseconds_) {
+		if (option.baseOption_.isFractionTrimming()) {
 			return 0;
 		}
 		else {
@@ -840,189 +840,36 @@ int64_t DateTime::getDifference(
 }
 
 void DateTime::format(std::ostream &s, const ZonedOption &option) const {
-	try {
-		char8_t buf[MAX_FORMAT_SIZE];
-		const size_t size = format(buf, sizeof(buf), option);
-		s.write(buf, static_cast<std::streamsize>(size));
-	}
-	catch (...) {
-		s.setstate(std::ios::failbit);
-		if (s.exceptions() & std::ios::failbit) {
-			throw;
-		}
-		return;
-	}
+	getFormatter(option)(s);
 }
 
 size_t DateTime::format(
 		char8_t *buf, size_t size, const ZonedOption &option) const {
-	TimeZone zone = option.zone_;
-	if (zone.isEmpty()) {
-		if (option.asLocalTimeZone_) {
-			zone = TimeZone::getLocalTimeZone(unixTimeMillis_);
-		}
-		else {
-			zone = TimeZone::getUTCTimeZone();
-		}
-	}
-
-	char8_t *it = buf;
-	char8_t *end = it + size;
-
-	FieldData fieldData;
-	getFields(fieldData, option);
-
-	TinyLexicalIntConverter converter;
-
-	converter.minWidth_ = 4;
-	converter.format(it, end, static_cast<uint32_t>(fieldData.year_));
-	CharBufferUtils::write(it, end, "-");
-
-	converter.minWidth_ = 2;
-	converter.format(it, end, static_cast<uint32_t>(fieldData.month_));
-	CharBufferUtils::write(it, end, "-");
-
-	converter.format(it, end, static_cast<uint32_t>(fieldData.monthDay_));
-	CharBufferUtils::write(it, end, "T");
-
-	converter.format(it, end, static_cast<uint32_t>(fieldData.hour_));
-	CharBufferUtils::write(it, end, ":");
-
-	converter.format(it, end, static_cast<uint32_t>(fieldData.minute_));
-	CharBufferUtils::write(it, end, ":");
-
-	converter.format(it, end, static_cast<uint32_t>(fieldData.second_));
-
-	if (!option.baseOption_.trimMilliseconds_) {
-		CharBufferUtils::write(it, end, ".");
-
-		converter.minWidth_ = 3;
-		converter.format(it, end, static_cast<uint32_t>(fieldData.milliSecond_));
-	}
-
-	const size_t zoneSize = zone.format(it, static_cast<size_t>(end - it));
-	it += zoneSize;
-
-	return static_cast<size_t>(it - buf);
+	return getFormatter(option)(buf, size);
 }
 
 void DateTime::format(
-		std::ostream &s, bool trimMilliseconds, bool asLocalTimeZone) const {
+		std::ostream &s, bool fractionTrimming, bool asLocalTimeZone) const {
 	ZonedOption option;
-	option.baseOption_.trimMilliseconds_ = trimMilliseconds;
+	option.baseOption_ = Option::create(fractionTrimming);
 	option.asLocalTimeZone_ = asLocalTimeZone;
 
-	format(s, option);
+	getFormatter(option)(s);
 }
 
 bool DateTime::parse(
 		const char8_t *buf, size_t size, bool throwOnError,
 		const ZonedOption &option) {
-	const char8_t *it = buf;
-	const char8_t *end = it + size;
-
-	do {
-		if (it == end) {
-			break;
-		}
-
-		FieldData fieldData;
-
-		uint32_t value;
-		TinyLexicalIntConverter converter;
-		converter.minWidth_ = 4;
-
-		if (!converter.parse(it, end, value) ||
-				value > static_cast<uint32_t>(
-						std::numeric_limits<int32_t>::max()) ||
-				it == end || *it != '-') {
-			break;
-		}
-		++it;
-		fieldData.year_ = static_cast<int32_t>(value);
-
-		converter.minWidth_ = 2;
-		converter.maxWidth_ = 2;
-
-		if (!converter.parse(it, end, value) || it == end || *it != '-') {
-			break;
-		}
-		++it;
-		fieldData.month_ = static_cast<int32_t>(value);
-
-		if (!converter.parse(it, end, value) || it == end || *it != 'T') {
-			break;
-		}
-		++it;
-		fieldData.monthDay_ = static_cast<int32_t>(value);
-
-		if (!converter.parse(it, end, value) || it == end || *it != ':') {
-			break;
-		}
-		++it;
-		fieldData.hour_ = static_cast<int32_t>(value);
-
-		if (!converter.parse(it, end, value) || it == end || *it != ':') {
-			break;
-		}
-		++it;
-		fieldData.minute_ = static_cast<int32_t>(value);
-
-		if (!converter.parse(it, end, value)) {
-			break;
-		}
-		fieldData.second_ = static_cast<int32_t>(value);
-
-		if (!option.baseOption_.trimMilliseconds_ && it != end && *it == '.') {
-			++it;
-
-			converter.minWidth_ = 3;
-			converter.maxWidth_ = 3;
-
-			if (!converter.parse(it, end, value)) {
-				break;
-			}
-			fieldData.milliSecond_ = static_cast<int32_t>(value);
-		}
-		else {
-			fieldData.milliSecond_ = 0;
-		}
-
-		ZonedOption modOption = option;
-		modOption.asLocalTimeZone_ = false;
-
-		if (!modOption.zone_.parse(
-				it, static_cast<size_t>(end - it), throwOnError)) {
-			break;
-		}
-
-		try {
-			setFields(fieldData, modOption);
-		}
-		catch (...) {
-			if (!throwOnError) {
-				break;
-			}
-			throw;
-		}
-
-		return true;
-	}
-	while (false);
-
-	if (throwOnError) {
-		UTIL_THROW_UTIL_ERROR(CODE_INVALID_PARAMETER, "Failed to parse");
-	}
-	return false;
+	return getParser(option)(buf, size, throwOnError);
 }
 
 bool DateTime::parse(
-		const char8_t *str, DateTime &dateTime, bool trimMilliseconds) {
+		const char8_t *str, DateTime &dateTime, bool fractionTrimming) {
 	ZonedOption option;
-	option.baseOption_.trimMilliseconds_ = trimMilliseconds;
+	option.baseOption_ = Option::create(fractionTrimming);
 
 	const bool throwOnError = false;
-	return dateTime.parse(str, strlen(str), throwOnError, option);
+	return dateTime.getParser(option)(str, strlen(str), throwOnError);
 }
 
 DateTime DateTime::now(const Option &option) {
@@ -1037,20 +884,19 @@ DateTime DateTime::now(const Option &option) {
 	}
 	int64_t unixTime = FileLib::getUnixTime(time);
 #endif
-	if (option.trimMilliseconds_) {
+	if (option.isFractionTrimming()) {
 		unixTime = unixTime / 1000 * 1000;
 	}
 	return DateTime(UTIL_FAILURE_SIMULATION_TIME_FILTER(unixTime));
 }
 
-DateTime DateTime::now(bool trimMilliseconds) {
-	Option option;
-	option.trimMilliseconds_ = trimMilliseconds;
+DateTime DateTime::now(bool fractionTrimming) {
+	const Option &option = Option::create(fractionTrimming);
 	return now(option);
 }
 
 DateTime DateTime::max(const Option &option) {
-	if (option.trimMilliseconds_) {
+	if (option.isFractionTrimming()) {
 		static const DateTime maxTime(getMaxUnixTime(true));
 		return maxTime;
 	}
@@ -1060,9 +906,8 @@ DateTime DateTime::max(const Option &option) {
 	}
 }
 
-DateTime DateTime::max(bool trimMilliseconds) {
-	Option option;
-	option.trimMilliseconds_ = trimMilliseconds;
+DateTime DateTime::max(bool fractionTrimming) {
+	const Option &option = Option::create(fractionTrimming);
 	return max(option);
 }
 
@@ -1180,12 +1025,12 @@ void DateTime::checkUnixTimeBounds(
 
 int64_t DateTime::resolveMaxUnixTime(const Option &option) {
 	if (option.maxTimeMillis_ <= 0) {
-		return getMaxUnixTime(option.trimMilliseconds_);
+		return getMaxUnixTime(option.isFractionTrimming());
 	}
 	return option.maxTimeMillis_;
 }
 
-int64_t DateTime::getMaxUnixTime(bool trimMilliseconds) {
+int64_t DateTime::getMaxUnixTime(bool fractionTrimming) {
 	int64_t maxUnixTime;
 #if defined(_WIN32)
 	try {
@@ -1207,7 +1052,7 @@ int64_t DateTime::getMaxUnixTime(bool trimMilliseconds) {
 #endif
 	assert(maxUnixTime / 1000 >= std::numeric_limits<int32_t>::max());
 
-	return (trimMilliseconds ? maxUnixTime / 1000 * 1000 : maxUnixTime);
+	return (fractionTrimming ? maxUnixTime / 1000 * 1000 : maxUnixTime);
 }
 
 
@@ -1274,14 +1119,61 @@ void DateTime::FieldData::setValue(FieldType type, int32_t value) {
 
 
 DateTime::Option::Option() :
-		trimMilliseconds_(false),
+		precision_(PRECISION_NONE),
 		maxTimeMillis_(0) {
 }
 
-DateTime::Option DateTime::Option::create(bool trimMilliseconds) {
+DateTime::Option DateTime::Option::withDefaultPrecision(
+		FieldType defaultType) const {
+	Option dest = *this;
+	dest.precision_ = resolvePrecision(precision_, defaultType);
+	return dest;
+}
+
+DateTime::Option DateTime::Option::create(bool fractionTrimming) {
 	Option option;
-	option.trimMilliseconds_ = trimMilliseconds;
+	option.precision_ = makePrecision(fractionTrimming);
 	return option;
+}
+
+DateTime::FieldType DateTime::Option::makePrecision(bool fractionTrimming) {
+	if (fractionTrimming) {
+		return DateTime::FIELD_SECOND;
+	}
+	else {
+		return PRECISION_NONE;
+	}
+}
+
+DateTime::FieldType DateTime::Option::resolvePrecision(
+		FieldType base, FieldType defaultType) {
+	if (base == PRECISION_NONE) {
+		return defaultType;
+	}
+	return base;
+}
+
+uint32_t DateTime::Option::getFractionalDigits() const {
+	return getFractionalDigits(
+			resolvePrecision(precision_, PRECISION_DEFAULT));
+}
+
+uint32_t DateTime::Option::getFractionalDigits(FieldType precision) {
+	switch (precision) {
+	case FIELD_MILLISECOND:
+		return 3;
+	case FIELD_MICROSECOND:
+		return 6;
+	case FIELD_NANOSECOND:
+		return 9;
+	default:
+		assert(precision == FIELD_SECOND);
+		return 0;
+	}
+}
+
+bool DateTime::Option::isFractionTrimming() const {
+	return (precision_ == FIELD_SECOND);
 }
 
 
@@ -1291,11 +1183,370 @@ DateTime::ZonedOption::ZonedOption() :
 }
 
 DateTime::ZonedOption DateTime::ZonedOption::create(
-		bool trimMilliseconds, const TimeZone &zone) {
+		bool fractionTrimming, const TimeZone &zone) {
 	ZonedOption option;
-	option.baseOption_.trimMilliseconds_ = trimMilliseconds;
+	option.baseOption_ = Option::create(fractionTrimming);
 	option.zone_ = zone;
 	return option;
+}
+
+
+void DateTime::Formatter::operator()(std::ostream &s) const {
+	try {
+		char8_t buf[MAX_FORMAT_SIZE];
+		const size_t size = format(buf, sizeof(buf));
+		s.write(buf, static_cast<std::streamsize>(size));
+	}
+	catch (...) {
+		s.setstate(std::ios::failbit);
+		if (s.exceptions() & std::ios::failbit) {
+			throw;
+		}
+	}
+}
+
+size_t DateTime::Formatter::format(char8_t *buf, size_t size) const {
+	TimeZone zone = option_.zone_;
+	if (zone.isEmpty()) {
+		if (option_.asLocalTimeZone_) {
+			zone = TimeZone::getLocalTimeZone(dateTime_.getUnixTime());
+		}
+		else {
+			zone = TimeZone::getUTCTimeZone();
+		}
+	}
+
+	char8_t *it = buf;
+	char8_t *end = it + size;
+
+	FieldData fieldData;
+	dateTime_.getFields(fieldData, option_);
+
+	formatMain(it, end, fieldData);
+	formatFraction(
+			it, end, fieldData, nanoSeconds_,
+			option_.baseOption_.withDefaultPrecision(defaultPrecision_));
+
+	const size_t zoneSize = zone.format(it, static_cast<size_t>(end - it));
+	it += zoneSize;
+
+	return static_cast<size_t>(it - buf);
+}
+
+void DateTime::Formatter::formatMain(
+		char8_t *&it, char8_t *end, const FieldData &fieldData) {
+	TinyLexicalIntConverter converter;
+
+	converter.minWidth_ = 4;
+	converter.format(it, end, static_cast<uint32_t>(fieldData.year_));
+	CharBufferUtils::write(it, end, "-");
+
+	converter.minWidth_ = 2;
+	converter.format(it, end, static_cast<uint32_t>(fieldData.month_));
+	CharBufferUtils::write(it, end, "-");
+
+	converter.format(it, end, static_cast<uint32_t>(fieldData.monthDay_));
+	CharBufferUtils::write(it, end, "T");
+
+	converter.format(it, end, static_cast<uint32_t>(fieldData.hour_));
+	CharBufferUtils::write(it, end, ":");
+
+	converter.format(it, end, static_cast<uint32_t>(fieldData.minute_));
+	CharBufferUtils::write(it, end, ":");
+
+	converter.format(it, end, static_cast<uint32_t>(fieldData.second_));
+}
+
+void DateTime::Formatter::formatFraction(
+		char8_t *&it, char8_t *end, const FieldData &fieldData,
+		uint32_t nanoSeconds, const Option &option) {
+	if (option.isFractionTrimming()) {
+		return;
+	}
+	TinyLexicalIntConverter converter;
+
+	CharBufferUtils::write(it, end, ".");
+	converter.minWidth_ = 3;
+
+	converter.format(it, end, static_cast<uint32_t>(fieldData.milliSecond_));
+
+	const uint32_t digits = option.getFractionalDigits();
+	if (digits < Option::getFractionalDigits(FIELD_MICROSECOND)) {
+		return;
+	}
+	converter.format(it, end, (nanoSeconds / 1000) % 1000);
+
+	if (digits < Option::getFractionalDigits(FIELD_NANOSECOND)) {
+		return;
+	}
+	converter.format(it, end, nanoSeconds % 1000);
+}
+
+
+bool DateTime::Parser::parse(
+		const char8_t *buf, size_t size, bool throwOnError) const {
+	const char8_t *it = buf;
+	const char8_t *end = it + size;
+
+	if (it == end) {
+		return errorParse(throwOnError);
+	}
+
+	FieldData fieldData;
+	if (!parseMain(it, end, fieldData)) {
+		return errorParse(throwOnError);
+	}
+
+	uint32_t nanoSeconds;
+	if (!parseFraction(
+			it, end, fieldData, nanoSeconds,
+			option_.baseOption_.withDefaultPrecision(defaultPrecision_))) {
+		return errorParse(throwOnError);
+	}
+
+	ZonedOption modOption = option_;
+	modOption.asLocalTimeZone_ = false;
+
+	if (!modOption.zone_.parse(
+			it, static_cast<size_t>(end - it), throwOnError)) {
+		return errorParse(throwOnError);
+	}
+
+	try {
+		dateTime_.setFields(fieldData, modOption);
+	}
+	catch (...) {
+		if (!throwOnError) {
+			return errorParse(throwOnError);
+		}
+		throw;
+	}
+
+	if (nanoSecondsRef_ != NULL) {
+		*nanoSecondsRef_ = nanoSeconds;
+	}
+
+	return true;
+}
+
+bool DateTime::Parser::parseMain(
+		const char8_t *&it, const char8_t *end, FieldData &fieldData) {
+	uint32_t value;
+	TinyLexicalIntConverter converter;
+	converter.minWidth_ = 4;
+
+	if (!converter.parse(it, end, value) ||
+			value > static_cast<uint32_t>(
+					std::numeric_limits<int32_t>::max()) ||
+			it == end || *it != '-') {
+		return false;
+	}
+	++it;
+	fieldData.year_ = static_cast<int32_t>(value);
+
+	converter.minWidth_ = 2;
+	converter.maxWidth_ = 2;
+
+	if (!converter.parse(it, end, value) || it == end || *it != '-') {
+		return false;
+	}
+	++it;
+	fieldData.month_ = static_cast<int32_t>(value);
+
+	if (!converter.parse(it, end, value) || it == end || *it != 'T') {
+		return false;
+	}
+	++it;
+	fieldData.monthDay_ = static_cast<int32_t>(value);
+
+	if (!converter.parse(it, end, value) || it == end || *it != ':') {
+		return false;
+	}
+	++it;
+	fieldData.hour_ = static_cast<int32_t>(value);
+
+	if (!converter.parse(it, end, value) || it == end || *it != ':') {
+		return false;
+	}
+	++it;
+	fieldData.minute_ = static_cast<int32_t>(value);
+
+	if (!converter.parse(it, end, value)) {
+		return false;
+	}
+	fieldData.second_ = static_cast<int32_t>(value);
+
+	return true;
+}
+
+bool DateTime::Parser::parseFraction(
+		const char8_t *&it, const char8_t *end, FieldData &fieldData,
+		uint32_t &nanoSeconds, const Option &option) {
+	fieldData.milliSecond_ = 0;
+	nanoSeconds = 0;
+
+	if (option.isFractionTrimming() || it == end || *it != '.') {
+		return true;
+	}
+	++it;
+
+	uint32_t value;
+	TinyLexicalIntConverter converter;
+	converter.minWidth_ = 3;
+	converter.maxWidth_ = 3;
+
+	if (!converter.parse(it, end, value)) {
+		return true;
+	}
+	fieldData.milliSecond_ = static_cast<int32_t>(value);
+
+	const uint32_t digits = option.getFractionalDigits();
+	if (digits < Option::getFractionalDigits(FIELD_MICROSECOND)) {
+		return true;
+	}
+	if (!converter.parse(it, end, value)) {
+		return true;
+	}
+	nanoSeconds = static_cast<uint32_t>(value) * 1000;
+
+	if (digits < Option::getFractionalDigits(FIELD_NANOSECOND)) {
+		return true;
+	}
+	if (converter.parse(it, end, value)) {
+		nanoSeconds += static_cast<uint32_t>(value);
+	}
+	return true;
+}
+
+bool DateTime::Parser::errorParse(bool throwOnError) {
+	if (throwOnError) {
+		UTIL_THROW_UTIL_ERROR(CODE_INVALID_PARAMETER, "Failed to parse");
+	}
+	return false;
+}
+
+
+void PreciseDateTime::getFields(
+		FieldData &fieldData, const ZonedOption &option) const {
+	base_.getFields(fieldData.baseFields_, option);
+	fieldData.nanoSecond_ = nanoSeconds_;
+}
+
+int64_t PreciseDateTime::getField(
+		FieldType type, const ZonedOption &option) const {
+	switch (type) {
+	case DateTime::FIELD_MICROSECOND:
+	case DateTime::FIELD_NANOSECOND:
+		break;
+	default:
+		return base_.getField(type, option);
+	}
+
+	FieldData fieldData;
+	getFields(fieldData, option);
+	return fieldData.getValue(type);
+}
+
+void PreciseDateTime::setFields(
+		const FieldData &fieldData, const ZonedOption &option, bool strict) {
+	base_.setFields(fieldData.baseFields_, option, strict);
+	nanoSeconds_ = fieldData.nanoSecond_;
+}
+
+void PreciseDateTime::addField(
+		int64_t amount, FieldType fieldType, const ZonedOption &option) {
+	switch (fieldType) {
+	case DateTime::FIELD_MICROSECOND:
+	case DateTime::FIELD_NANOSECOND:
+		UTIL_THROW_UTIL_ERROR(CODE_ILLEGAL_ARGUMENT,
+				"Unsupported DateTime field type (type=" <<
+				static_cast<int32_t>(fieldType) << ")");
+	default:
+		break;
+	}
+	base_.addField(amount, fieldType, option);
+}
+
+int64_t PreciseDateTime::getDifference(
+		const PreciseDateTime &base, FieldType fieldType,
+		const ZonedOption &option) const {
+	switch (fieldType) {
+	case DateTime::FIELD_MICROSECOND:
+	case DateTime::FIELD_NANOSECOND:
+		UTIL_THROW_UTIL_ERROR(CODE_ILLEGAL_ARGUMENT,
+				"Unsupported DateTime field type (type=" <<
+				static_cast<int32_t>(fieldType) << ")");
+	default:
+		break;
+	}
+
+	int64_t carry = 0;
+	if (fieldType != DateTime::FIELD_YEAR &&
+			fieldType != DateTime::FIELD_MONTH) {
+		const int32_t baseComp = compareBase(*this, base);
+		if (baseComp != 0) {
+			const int32_t nanosComp = compareNanos(*this, base);
+			if (baseComp > 0) {
+				carry = (nanosComp < 0 ? -1 : 0);
+			}
+			else {
+				carry = (nanosComp > 0 ? 1 : 0);
+			}
+		}
+	}
+
+	const DateTime adjustedTime(base_.getUnixTime() + carry);
+	return adjustedTime.getDifference(base.base_, fieldType, option);
+}
+
+int32_t PreciseDateTime::compareBase(
+		const PreciseDateTime &t1, const PreciseDateTime &t2) {
+	const int64_t v1 = t1.base_.getUnixTime();
+	const int64_t v2 = t2.base_.getUnixTime();
+	return (v1 == v2 ? 0 : (v1 < v2 ? -1 : 1));
+}
+
+int32_t PreciseDateTime::compareNanos(
+		const PreciseDateTime &t1, const PreciseDateTime &t2) {
+	const uint32_t v1 = t1.getNanoSeconds();
+	const uint32_t v2 = t2.getNanoSeconds();
+	return (v1 == v2 ? 0 : (v1 < v2 ? -1 : 1));
+}
+
+
+void PreciseDateTime::FieldData::initialize() {
+	baseFields_.initialize();
+	setValue<DateTime::FIELD_MILLISECOND>(0);
+}
+
+int32_t PreciseDateTime::FieldData::getValue(FieldType type) const {
+	switch (type) {
+	case DateTime::FIELD_MILLISECOND:
+		return getValue<DateTime::FIELD_MILLISECOND>();
+	case DateTime::FIELD_MICROSECOND:
+		return getValue<DateTime::FIELD_MICROSECOND>();
+	case DateTime::FIELD_NANOSECOND:
+		return getValue<DateTime::FIELD_NANOSECOND>();
+	default:
+		return baseFields_.getValue(type);
+	}
+}
+
+void PreciseDateTime::FieldData::setValue(FieldType type, int32_t value) {
+	switch (type) {
+	case DateTime::FIELD_MILLISECOND:
+		setValue<DateTime::FIELD_MILLISECOND>(value);
+		break;
+	case DateTime::FIELD_MICROSECOND:
+		setValue<DateTime::FIELD_MICROSECOND>(value);
+		break;
+	case DateTime::FIELD_NANOSECOND:
+		setValue<DateTime::FIELD_NANOSECOND>(value);
+		break;
+	default:
+		baseFields_.setValue(type, value);
+		break;
+	}
 }
 
 

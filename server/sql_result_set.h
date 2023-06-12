@@ -148,18 +148,34 @@ public:
 	void setNull(size_t index, bool nullValue);
 
 	void setFixedNull() {
-		(*cursor_.fixedPartOut_) << COLUMN_TYPE_NULL;
+		writeType(*cursor_.fixedPartOut_, COLUMN_TYPE_NULL);
 		(*cursor_.fixedPartOut_) << static_cast<int64_t>(0);
 	}
 
+	void setFixedFieldPadding(size_t size) {
+		uint64_t padding = 0;
+		for (size_t pos = 0; pos < size; pos += sizeof(padding)) {
+			(*cursor_.fixedPartOut_).writeAll(&padding, size - pos);
+		}
+	}
+
 	template <typename T> void setFixedValueWithPadding(ColumnType type, const void* value) {
-		(*cursor_.fixedPartOut_) << type;
+		writeType(*cursor_.fixedPartOut_, type);
 		(*cursor_.fixedPartOut_).writeAll(value, sizeof(T));
 		(*cursor_.fixedPartOut_).writeAll(paddingBuffer_, sizeof(int64_t) - sizeof(T));
 	}
 
+	template <typename T> void setLargeFixedFieldValueWithPadding(
+			ColumnType type, const T &value) {
+		writeType(*cursor_.fixedPartOut_, type);
+		(*cursor_.fixedPartOut_) << cursor_.baseVarOffset_;
+		const size_t startPos = cursor_.varPartOut_->base().position();
+		cursor_.varPartOut_->writeAll(&value, sizeof(value));
+		cursor_.baseVarOffset_ += (cursor_.varPartOut_->base().position() - startPos);
+	}
+
 	template <typename T> void setFixedValue(ColumnType type, const void* value) {
-		(*cursor_.fixedPartOut_) << type;
+		writeType(*cursor_.fixedPartOut_, type);
 		(*cursor_.fixedPartOut_).writeAll(value, sizeof(T));
 	}
 
@@ -169,12 +185,12 @@ public:
 		if (size > 0) {
 			cursor_.varPartOut_->writeAll(value, size);
 		}
-		(*cursor_.fixedPartOut_) << type;
+		writeType(*cursor_.fixedPartOut_, type);
 		(*cursor_.fixedPartOut_) << cursor_.baseVarOffset_;
 		cursor_.baseVarOffset_ += (cursor_.varPartOut_->base().position() - startPos);
 	}
 	template <typename T> void setNull(ColumnType type) {
-		(*cursor_.fixedPartOut_) << COLUMN_TYPE_NULL;
+		writeType(*cursor_.fixedPartOut_, COLUMN_TYPE_NULL);
 	}
 
 	void setVarFieldValue(const void* value, size_t size) {
@@ -226,6 +242,8 @@ public:
 	void setColumnTypeList(util::Vector<TupleList::TupleColumnType>& typeList);
 
 private:
+	static void writeType(
+			util::ByteStream< util::XArrayOutStream<> > &out, ColumnType type);
 
 	SQLVariableSizeGlobalAllocator& globalVarAlloc_;
 

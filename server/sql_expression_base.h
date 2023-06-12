@@ -72,7 +72,7 @@ protected:
 
 	struct FuncTableByTypes {
 		enum {
-			LIST_SIZE = ExprSpec::IN_TYPE_COUNT
+			LIST_SIZE = ExprSpec::IN_EXPANDED_TYPE_COUNT
 		};
 		FuncTableByTypes();
 		explicit FuncTableByTypes(const FactoryFunc (&list)[LIST_SIZE]);
@@ -97,6 +97,18 @@ protected:
 		FuncTableByTypes finish_;
 	};
 
+	struct BasicFuncTable {
+		BasicFuncTable(const FuncTableByCounts base, FactoryFunc checker);
+		const FuncTableByCounts base_;
+		FactoryFunc checker_;
+	};
+
+	struct AggrFuncTable {
+		AggrFuncTable(const FuncTableByAggr base, FactoryFunc checker);
+		const FuncTableByAggr base_;
+		FactoryFunc checker_;
+	};
+
 	void addDirect(
 			ExprType type, const ExprSpec &spec, FactoryFunc func) const;
 
@@ -104,10 +116,10 @@ protected:
 	void addDirectVariants(const ExprSpec *spec) const;
 
 	static FactoryFunc resolveFactoryFunc(
-			ExprFactoryContext &cxt, const FuncTableByCounts &table,
+			ExprFactoryContext &cxt, const BasicFuncTable &table,
 			const ExprSpec &spec);
 	static FactoryFunc resolveFactoryFunc(
-			ExprFactoryContext &cxt, const FuncTableByAggr &table,
+			ExprFactoryContext &cxt, const AggrFuncTable &table,
 			const ExprSpec &spec);
 
 	static size_t getArgCountVariant(
@@ -208,6 +220,43 @@ private:
 };
 
 struct SQLExprs::ExprSpecBase {
+	template<size_t N>
+	struct NumericPromotion {
+		static const TupleColumnType COLUMN_TYPE =
+				(N == 0 ? TupleTypes::TYPE_LONG : TupleTypes::TYPE_DOUBLE);
+	};
+
+	template<size_t N>
+	struct TimestampPromotion {
+		static const TupleColumnType COLUMN_TYPE = (
+				N == 0 ? TupleTypes::TYPE_TIMESTAMP :
+				N == 1 ? TupleTypes::TYPE_MICRO_TIMESTAMP :
+						TupleTypes::TYPE_NANO_TIMESTAMP);
+	};
+
+	template<TupleColumnType T, uint32_t Flags, size_t N>
+	struct InPromotion {
+		enum {
+			NUMERIC_PROMO = (T == TupleTypes::TYPE_NUMERIC),
+			TIMESTAMP_PROMO = (T == TupleTypes::TYPE_TIMESTAMP &&
+					(Flags & ExprSpec::FLAG_PROMOTABLE) != 0),
+			PROMO_ENABLED = (NUMERIC_PROMO || TIMESTAMP_PROMO)
+		};
+		static const TupleColumnType COLUMN_TYPE = (
+				NUMERIC_PROMO ? NumericPromotion<N>::COLUMN_TYPE :
+				TIMESTAMP_PROMO ? TimestampPromotion<N>::COLUMN_TYPE :
+						static_cast<TupleColumnType>(TupleTypes::TYPE_NULL));
+	};
+
+	struct InPromotionVariants {
+		static bool matchVariantIndex(
+				const ExprSpec::In &in, TupleColumnType type,
+				int32_t &lastIndex, bool &definitive);
+
+		static bool isNumericPromotion(const ExprSpec::In &in);
+		static bool isTimestampPromotion(const ExprSpec::In &in);
+	};
+
 	template<
 			TupleColumnType T1 = TupleTypes::TYPE_NULL,
 			uint32_t Flags = 0,
@@ -215,6 +264,15 @@ struct SQLExprs::ExprSpecBase {
 	struct In {
 		template<size_t N> 
 		struct TypeAt {
+		private:
+			typedef InPromotion<T1, Flags, N> PromotionType;
+			enum {
+				PROMO_ENABLED = PromotionType::PROMO_ENABLED
+			};
+			static const TupleColumnType PROMO_COLUMN_TYPE =
+					PromotionType::COLUMN_TYPE;
+
+		public:
 			static const TupleColumnType COLUMN_TYPE =
 					(N == 0 ? T1 :
 					(N == 1 ? T2 :
@@ -224,10 +282,8 @@ struct SQLExprs::ExprSpecBase {
 			};
 
 			static const TupleColumnType EXPANDED_COLUMN_TYPE =
-					(T1 == TupleTypes::TYPE_NUMERIC ?
-							static_cast<TupleColumnType>(N == 0 ?
-									TupleTypes::TYPE_LONG :
-									TupleTypes::TYPE_DOUBLE) :
+					(PROMO_ENABLED ?
+							PROMO_COLUMN_TYPE :
 							((N != 0 && TYPE_EMPTY) ? T1 : COLUMN_TYPE));
 			enum {
 				EXPANDED_TYPE_EMPTY =
@@ -242,7 +298,8 @@ struct SQLExprs::ExprSpecBase {
 		static const uint32_t IN_FLAGS = Flags;
 		enum {
 			VALUE_EMPTY = (TypeAt<0>::TYPE_EMPTY),
-			MULTI_COLUMN_TYPE = (!TypeAt<1>::EXPANDED_TYPE_EMPTY),
+			MULTI_COLUMN_TYPE1 = (!TypeAt<1>::EXPANDED_TYPE_EMPTY),
+			MULTI_COLUMN_TYPE2 = (!TypeAt<2>::EXPANDED_TYPE_EMPTY),
 			TYPE_ANY = (TypeAt<0>::COLUMN_TYPE == TupleTypes::TYPE_ANY),
 			TYPE_NULLABLE_ANY =
 					(TYPE_ANY &&
@@ -250,7 +307,8 @@ struct SQLExprs::ExprSpecBase {
 			TYPE_NULLABLE =
 					(!TYPE_NULLABLE_ANY && (Flags & ExprSpec::FLAG_EXACT) == 0),
 			ANY_PROMOTABLE =
-					(TYPE_ANY && (Flags & ExprSpec::FLAG_PROMOTABLE) != 0)
+					(TYPE_ANY && (Flags & ExprSpec::FLAG_PROMOTABLE) != 0),
+			ARG_CHECK = ((Flags & ExprSpec::FLAG_EXACT) != 0)
 		};
 		static ExprSpec::In create() {
 			ExprSpec::In in;
@@ -345,10 +403,17 @@ struct SQLExprs::ExprSpecBase {
 				};
 			};
 		};
-		struct MultiMatch {
+		struct MultiMatch1 {
 			template<typename I> struct Type {
 				enum {
-					VALUE = I::MULTI_COLUMN_TYPE
+					VALUE = I::MULTI_COLUMN_TYPE1
+				};
+			};
+		};
+		struct MultiMatch2 {
+			template<typename I> struct Type {
+				enum {
+					VALUE = I::MULTI_COLUMN_TYPE2
 				};
 			};
 		};
@@ -366,13 +431,22 @@ struct SQLExprs::ExprSpecBase {
 				};
 			};
 		};
+		struct ArgCheckMatch {
+			template<typename I> struct Type {
+				enum {
+					VALUE = I::ARG_CHECK
+				};
+			};
+		};
 		typedef typename ModOf<NullableInvMod>::Type NullableInv;
 		enum {
 			MIN_COUNT = IndexOf<EmptyOrOptionalMatch>::VALUE,
 			MAX_COUNT = IndexOf<EmptyMatch>::VALUE,
-			MULTI_COLUMN_TYPE = MatchWith<MultiMatch>::VALUE,
+			MULTI_COLUMN_TYPE1 = MatchWith<MultiMatch1>::VALUE,
+			MULTI_COLUMN_TYPE2 = MatchWith<MultiMatch2>::VALUE,
 			IN_NULLABLE_ANY = MatchWith<NullableAnyTypeMatch>::VALUE,
 			IN_ANY_PROMOTABLE = MatchWith<AnyPromotableMatch>::VALUE,
+			IN_ARG_CHECKING = MatchWith<ArgCheckMatch>::VALUE
 		};
 	};
 
@@ -389,7 +463,8 @@ struct SQLExprs::ExprSpecBase {
 		static const ExprType DISTINCT_TYPE = Distinct;
 
 		enum {
-			MULTI_COLUMN_TYPE = InListType::MULTI_COLUMN_TYPE,
+			MULTI_COLUMN_TYPE1 = InListType::MULTI_COLUMN_TYPE1,
+			MULTI_COLUMN_TYPE2 = InListType::MULTI_COLUMN_TYPE2,
 			IN_REPEAT_UNIT = (
 					((TYPE_FLAGS & ExprSpec::FLAG_REPEAT1) != 0) ? 1 :
 					((TYPE_FLAGS & ExprSpec::FLAG_REPEAT2) != 0) ? 2 : 0),
@@ -405,6 +480,7 @@ struct SQLExprs::ExprSpecBase {
 					ExprSpec::FLAG_INHERIT_NULLABLE1)) != 0),
 			IN_NULLABLE_ANY = InListType::IN_NULLABLE_ANY,
 			IN_ANY_PROMOTABLE = InListType::IN_ANY_PROMOTABLE,
+			IN_ARG_CHECKING = InListType::IN_ARG_CHECKING,
 			RESULT_NON_NULLABLE = ((TYPE_FLAGS &
 					ExprSpec::FLAG_NON_NULLABLE) != 0),
 			RESULT_NULLABLE =
@@ -429,6 +505,9 @@ struct SQLExprs::ExprSpecBase {
 	typedef In<
 			TupleTypes::TYPE_NUMERIC,
 			ExprSpec::FLAG_PROMOTABLE> PromotableNumIn;
+	typedef In<
+			TupleTypes::TYPE_TIMESTAMP,
+			ExprSpec::FLAG_PROMOTABLE> PromotableTimestampIn;
 	typedef In<
 			TupleTypes::TYPE_STRING, ExprSpec::FLAG_PROMOTABLE,
 			TupleTypes::TYPE_BLOB> PromotableStringOrBlobIn;
@@ -746,25 +825,29 @@ public:
 		return getAggregationValue<T>(aggrColumns_[N], ForAny());
 	}
 
-	template<size_t N, typename T> void setAggrValue(const T &value) {
+	template<size_t N, typename T, typename Promo>
+	void setAggrValue(const T &value, const Promo&) {
 		typedef typename TypeTagOf<T>::ForAny ForAny;
-		setAggregationValue(aggrColumns_[N], value, ForAny());
+		setAggregationValue(aggrColumns_[N], value, ForAny(), Promo());
 	}
 
-	template<size_t N, typename T> void setAggrValue(T &value) {
+	template<size_t N, typename T, typename Promo>
+	void setAggrValue(T &value, const Promo&) {
 		typedef typename TypeTagOf<T>::ForAny ForAny;
 		typedef typename util::BoolType<util::IsSame<
 				T, typename AggregationManipulator<T>::RetType>::VALUE
 				>::Result SameRetType;
 		setAggregationValue(
-				aggrColumns_[N], build(value, SameRetType()), ForAny());
+				aggrColumns_[N], build(value, SameRetType()), ForAny(),
+				Promo());
 	}
 
 	template<size_t N, typename T, typename Checked> void addAggrValue(
 			const T &value) {
 		typedef typename AggregationManipulator<T>::RetType RetType;
 		setAggrValue<N, RetType>(AggregationManipulator<T>::add(
-				this, getAggrValue<N, RetType>(), value, Checked()));
+				this, getAggrValue<N, RetType>(), value, Checked()),
+				util::FalseType());
 	}
 
 	template<size_t N, typename T, typename Checked> void addAggrValue(
@@ -781,17 +864,6 @@ public:
 
 	template<size_t N> bool checkNullAggrValue() {
 		return isAggregationNull(aggrColumns_[N]);
-	}
-
-	template<size_t N> TupleValue promoteAggrValue(const TupleValue &src) {
-		if (!SQLValues::ValueUtils::isNull(src)) {
-			const TupleColumnType type = SQLValues::TypeUtils::toNonNullable(
-					aggrColumns_[N].getTupleColumn().getType());
-			if (type != src.getType()) {
-				return SQLValues::ValuePromoter(type)(src);
-			}
-		}
-		return src;
 	}
 
 	int64_t getWindowValueCount() {
@@ -828,15 +900,22 @@ private:
 
 	void setAggregationValue(
 			const SummaryColumn &column, const TupleValue &value,
-			const util::TrueType&) {
+			const util::TrueType&, const util::FalseType&) {
 		NormalFunctionContext::getBase().setAggregationValue(
+				column, value);
+	}
+
+	void setAggregationValue(
+			const SummaryColumn &column, const TupleValue &value,
+			const util::TrueType&, const util::TrueType&) {
+		NormalFunctionContext::getBase().setAggregationValuePromoted(
 				column, value);
 	}
 
 	template<typename T>
 	void setAggregationValue(
 			const SummaryColumn &column, const T &value,
-			const util::FalseType&) {
+			const util::FalseType&, const util::FalseType&) {
 		NormalFunctionContext::getBase().template setAggregationValueBy<
 				typename TypeTagOf<T>::Type>(column, value);
 	}
@@ -877,7 +956,7 @@ private:
 	static const TupleColumnType FILTERED_TYPE = TYPE_INVALID ?
 			static_cast<TupleColumnType>(TupleTypes::TYPE_ANY) : T;
 
-	typedef typename Traits::ValueType ValueType;
+	typedef typename Traits::LocalValueType ValueType;
 	typedef typename Traits::ReadableType ReadableType;
 	typedef typename Traits::ReadableRefType ReadableRefType;
 	typedef typename Traits::ReadablePtrType ReadablePtrType;
@@ -1102,7 +1181,7 @@ struct SQLExprs::ExprUtils::BaseResultValue<T, util::TrueType> {
 	template<typename U>
 	static TupleValue of(ValueContext &cxt, const Expr *expr, U &src) {
 		return expr->asColumnValue(
-				BaseResultValue<T, util::FalseType>::of(cxt, expr, src));
+				&cxt, BaseResultValue<T, util::FalseType>::of(cxt, expr, src));
 	}
 };
 
@@ -1358,7 +1437,7 @@ struct SQLExprs::ExprUtils::FunctorTraits {
 	};
 
 	typedef typename SQLValues::TypeUtils::Traits<
-			RESULT_TYPE>::ValueType NormalRetType;
+			RESULT_TYPE>::LocalValueType NormalRetType;
 	typedef typename SQLValues::TypeUtils::Traits<
 			RESULT_TYPE>::WritableType WritableRetType;
 
@@ -1849,36 +1928,57 @@ private:
 	}
 
 	template<ExprType T, typename F>
-	static const FuncTableByCounts& resolveTable() {
-		static const FuncTableByCounts table(createTable<T, F>());
+	static const BasicFuncTable& resolveTable() {
+		static const BasicFuncTable table(createTable<T, F>());
 		return table;
 	};
 
 	template<ExprType T, typename F>
-	static FuncTableByCounts createTable() {
+	static BasicFuncTable createTable() {
 		const FuncTableByTypes list[] = {
 			createSubTable<T, F, 0>(),
 			createSubTable<T, F, 1>(),
 			createSubTable<T, F, 2>()
 		};
-		return FuncTableByCounts(list);
+		const FactoryFunc checker = createCheckerFunc<T, F>();
+		return BasicFuncTable(FuncTableByCounts(list), checker);
 	};
 
 	template<ExprType T, typename F, size_t Opt>
 	static FuncTableByTypes createSubTable() {
 		const FactoryFunc list[] = {
 			createFactoryFunc<T, F, Opt, 0>(),
-			createFactoryFunc<T, F, Opt, 1>()
+			createFactoryFunc<T, F, Opt, 1>(),
+			createFactoryFunc<T, F, Opt, 2>()
 		};
 		return FuncTableByTypes(list);
+	}
+
+	template<ExprType T, typename F>
+	static FactoryFunc createCheckerFunc() {
+		typedef typename S::template Spec<T>::Type SpecType;
+		typedef typename util::BoolType<
+				SpecType::IN_ARG_CHECKING>::Result ArgChecking;
+		return createCheckerFuncDetail<T, F>(ArgChecking());
+	}
+
+	template<ExprType T, typename F>
+	static FactoryFunc createCheckerFuncDetail(const util::TrueType&) {
+		return createFactoryFunc<T, typename F::Checker, 0, 0>();
+	}
+
+	template<ExprType, typename>
+	static FactoryFunc createCheckerFuncDetail(const util::FalseType&) {
+		return FactoryFunc();
 	}
 
 	template<ExprType T, typename F, size_t Opt, size_t M>
 	static FactoryFunc createFactoryFunc() {
 		typedef typename S::template Spec<T>::Type SpecType;
 
-		const size_t multiColumnTypeOrdinal =
-				(SpecType::MULTI_COLUMN_TYPE ? M : 0);
+		const size_t multiColumnTypeOrdinal = ((
+				(M == 2 && SpecType::MULTI_COLUMN_TYPE2) ||
+				(M == 1 && SpecType::MULTI_COLUMN_TYPE1)) ? M : 0);
 		typedef typename util::Conditional<
 				(multiColumnTypeOrdinal > 0),
 				ExprUtils::VariantTraits<multiColumnTypeOrdinal>,
@@ -1932,17 +2032,18 @@ private:
 	}
 
 	template<ExprType T, typename F>
-	static const FuncTableByAggr& resolveTable() {
-		static const FuncTableByAggr table(createTable<T, F>());
+	static const AggrFuncTable& resolveTable() {
+		static const AggrFuncTable table(createTable<T, F>());
 		return table;
 	};
 
 	template<ExprType T, typename F>
-	static FuncTableByAggr createTable() {
-		return FuncTableByAggr(
+	static AggrFuncTable createTable() {
+		const FactoryFunc checker = createCheckerFunc<T, F>();
+		return AggrFuncTable(FuncTableByAggr(
 				createSubTable<T, typename F::Advance, 0>(),
 				createSubTable<T, typename F::Merge, 1>(),
-				createSubTable<T, typename F::Finish, 2>());
+				createSubTable<T, typename F::Finish, 2>()), checker);
 	};
 
 	template<ExprType T, typename G, size_t Phase>
@@ -1956,17 +2057,39 @@ private:
 
 		const FactoryFunc list[] = {
 			createFactoryFunc<T, G, Phase, 0>(Available()),
-			createFactoryFunc<T, G, Phase, 1>(Available())
+			createFactoryFunc<T, G, Phase, 1>(Available()),
+			createFactoryFunc<T, G, Phase, 2>(Available())
 		};
 		return FuncTableByTypes(list);
+	}
+
+	template<ExprType T, typename F>
+	static FactoryFunc createCheckerFunc() {
+		typedef typename S::template Spec<T>::Type SpecType;
+		typedef typename util::BoolType<
+				(!util::IsSame<F, void>::VALUE) &&
+				SpecType::IN_ARG_CHECKING>::Result ArgChecking;
+		return createCheckerFuncDetail<T, F>(ArgChecking());
+	}
+
+	template<ExprType T, typename F>
+	static FactoryFunc createCheckerFuncDetail(const util::TrueType&) {
+		typedef typename F::Checker CheckerType;
+		return createFactoryFunc<T, CheckerType, 0, 0>(util::TrueType());
+	}
+
+	template<ExprType, typename>
+	static FactoryFunc createCheckerFuncDetail(const util::FalseType&) {
+		return FactoryFunc();
 	}
 
 	template<ExprType T, typename F, size_t Phase, size_t M>
 	static FactoryFunc createFactoryFunc(const util::TrueType&) {
 		typedef typename S::template Spec<T>::Type SpecType;
 
-		const size_t multiColumnTypeOrdinal =
-				(SpecType::MULTI_COLUMN_TYPE ? M : 0);
+		const size_t multiColumnTypeOrdinal = ((
+				(M == 2 && SpecType::MULTI_COLUMN_TYPE2) ||
+				(M == 1 && SpecType::MULTI_COLUMN_TYPE1)) ? M : 0);
 		const AggregationPhase aggrPhase =
 				Phase == 1 ? SQLType::AGG_PHASE_MERGE_PIPE :
 				Phase == 2 ? SQLType::AGG_PHASE_MERGE_FINISH :

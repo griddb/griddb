@@ -16,9 +16,7 @@
 package com.toshiba.mwcloud.gs;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
-import java.util.Date;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -63,22 +61,20 @@ public class RowKeyPredicate<K> {
 	private static final RowMapper.Config KEY_MAPPER_CONFIG =
 			new RowMapper.Config(true, true, true, true);
 
-	private static final Map<GSType, RowMapper> SINGLE_MAPPER_MAP =
+	private static final Map<
+			GSType, Map<Integer, RowMapper>> SINGLE_MAPPERS_BY_TYPE =
 			makeSingleMapperMap();
 
-	private static final Map<GSType, Class<?>> SINGLE_CLASS_MAP =
-			makeSingleClassMap();
+	private static final Map<
+			Class<?>, Map<Integer, RowMapper>> SINGLE_MAPPERS_BY_CLASS =
+			makeSingleMapperMap(SINGLE_MAPPERS_BY_TYPE);
 
 	private static final Map<Class<?>, GSType> SINGLE_TYPE_MAP =
-			makeSingleTypeMap(SINGLE_CLASS_MAP);
+			makeSingleTypeMap(SINGLE_MAPPERS_BY_CLASS);
 
 	private static boolean stringRangeRestricted = false;
 
-	private final Class<K> bindingClass;
-
-	private final Class<?> keyClass;
-
-	private final RowMapper mapper;
+	private final RowMapper.ValueDuplicator<K> duplicator;
 
 	private final boolean rangeAcceptable;
 
@@ -88,14 +84,12 @@ public class RowKeyPredicate<K> {
 
 	private Set<K> distinctKeys;
 
-	private RowKeyPredicate(
-			Class<K> bindingClass, Class<?> keyClass, RowMapper mapper)
+	private RowKeyPredicate(RowMapper.ValueDuplicator<K> duplicator)
 			throws GSException {
-		checkMapper(mapper);
-		this.bindingClass = bindingClass;
-		this.keyClass = keyClass;
-		this.mapper = mapper;
-		this.rangeAcceptable = isRangeKeyAcceptable(keyClass, mapper);
+		checkMapper(duplicator.getMapper());
+		this.duplicator = duplicator;
+		this.rangeAcceptable = isRangeKeyAcceptable(
+				duplicator.getValueClass(), duplicator.getMapper());
 	}
 
 	/**
@@ -105,9 +99,11 @@ public class RowKeyPredicate<K> {
 	 * <p>合致条件の評価対象とするコンテナは、ロウキーを持ち、かつ、
 	 * ロウキーの型が指定の{@link GSType}と同一の型でなければなりません。</p>
 	 *
+	 * <p>また、カラムの精度を合わせる必要があります。</p>
+	 *
 	 * <p>{@link #create(Class)}とは異なり、アプリケーションのコンパイル時点で
 	 * ロウキーの型が確定しない場合の使用に適します。ただし、
-	 * 条件内容を設定する際のロウキーの型チェックの基準は同一です。</p>
+	 * 条件内容を設定する際のロウキーの型・精度チェックの基準は同一です。</p>
 	 *
 	 * <p>設定可能なロウキーの型は、{@link Container}のいずれかの
 	 * サブインタフェースにて許容されている型のみです。</p>
@@ -143,26 +139,53 @@ public class RowKeyPredicate<K> {
 	 * @see Container
 	 * </div>
 	 */
+	public static RowKeyPredicate<Object> create(GSType keyType)
+			throws GSException {
+		return create(keyType, null);
+	}
+
+	/**
+	 * <div lang="ja">
+	 * 指定の{@link GSType}ならびに日時精度をロウキーの型とする合致条件を
+	 * 作成します。
+	 *
+	 * <p>合致条件の評価対象とするコンテナは、ロウキーを持ち、かつ、
+	 * ロウキーの型が指定の{@link GSType}と同一の型でなければなりません。</p>
+	 *
+	 * <p>また、カラムの精度を合わせる必要があります。</p>
+	 *
+	 * <p>{@link #create(Class)}とは異なり、アプリケーションのコンパイル時点で
+	 * ロウキーの型が確定しない場合の使用に適します。ただし、
+	 * 条件内容を設定する際のロウキーの型・精度チェックの基準は同一です。</p>
+	 *
+	 * <p>設定可能なロウキーの型は、{@link Container}のいずれかの
+	 * サブインタフェースにて許容されている型のみです。</p>
+	 *
+	 * @param keyType 合致条件の評価対象とするロウキーの型
+	 * @param timePrecision 合致条件の評価対象とするロウキーの日時精度
+	 *
+	 * @return 新規に作成された{@link RowKeyPredicate}
+	 *
+	 * @throws GSException 指定された型がロウキーとして常にサポート外となる場合
+	 * @throws NullPointerException {@code keyType}引数に{@code null}が指定された場合
+	 *
+	 * @see Container
+	 * @since 5.3
+	 * </div><div lang="en">
+	 * @since 5.3
+	 * </div>
+	 */
 	public static RowKeyPredicate<Object> create(
-			GSType keyType) throws GSException {
-		final Class<?> keyClass = SINGLE_CLASS_MAP.get(keyType);
-		if (keyClass == null) {
+			GSType keyType, TimeUnit timePrecision) throws GSException {
+		final RowMapper mapper = findSingleMapper(keyType, timePrecision);
+		if (mapper == null) {
 			GSErrorCode.checkNullParameter(keyType, "keyType", null);
 			throw new GSException(GSErrorCode.UNSUPPORTED_KEY_TYPE,
 					"Unsupported key type (type=" + keyType + ")");
 		}
-		try {
-			final RowMapper mapper = getSingleMapper(keyType);
-			if (keyType == GSType.TIMESTAMP) {
-				return new TimestampPredicate<Object>(
-						Object.class, keyClass, mapper);
-			}
-			return new DefaultPredicate<Object>(
-					Object.class, keyClass, mapper);
-		}
-		catch (GSException e) {
-			throw new Error(e);
-		}
+
+		return new RowKeyPredicate<Object>(
+				RowMapper.ValueDuplicator.createSingle(Object.class, mapper));
 	}
 
 	/**
@@ -174,7 +197,9 @@ public class RowKeyPredicate<K> {
 	 * 持ち、かつ、そのロウキーの型は指定の{@link GSType}と同一の型でなければ
 	 * なりません。</p>
 	 *
-	 * <p>設定可能なロウキーの型は、{@link Container}のいずれかの
+	 * <p>また、カラムの精度を合わせる必要があります。</p>
+	 *
+	 * <p>設定可能なロウキーの型・精度は、{@link Container}のいずれかの
 	 * サブインタフェースにて許容されている型のみです。
 	 * {@link Class}と{@link GSType}との対応関係については、
 	 * {@link Container}の定義を参照してください。</p>
@@ -217,24 +242,55 @@ public class RowKeyPredicate<K> {
 	 * @see Container
 	 * </div>
 	 */
+	public static <K> RowKeyPredicate<K> create(Class<K> keyType)
+			throws GSException {
+		return create(keyType, null);
+	}
+
+	/**
+	 * <div lang="ja">
+	 * 指定の{@link Class}ならびに日時精度と対応する{@link GSType}を
+	 * ロウキーの型とする合致条件を作成します。
+	 *
+	 * <p>合致条件の評価対象とするコンテナは、単一カラムからなるロウキーを
+	 * 持ち、かつ、そのロウキーの型は指定の{@link GSType}と同一の型でなければ
+	 * なりません。</p>
+	 *
+	 * <p>また、カラムの精度を合わせる必要があります。</p>
+	 *
+	 * <p>設定可能なロウキーの型は、{@link Container}のいずれかの
+	 * サブインタフェースにて許容されている型のみです。
+	 * {@link Class}と{@link GSType}との対応関係については、
+	 * {@link Container}の定義を参照してください。</p>
+	 *
+	 * <p>複合ロウキーなどロウキーを構成するカラムの個数によらずに合致条件を
+	 * 作成するには、{@link #create(ContainerInfo)}を使用します。</p>
+	 *
+	 * @param keyType 合致条件の判定対象とするロウキーの型に対応する、{@link Class}
+	 * @param timePrecision 合致条件の評価対象とするロウキーの日時精度
+	 *
+	 * @return 新規に作成された{@link RowKeyPredicate}
+	 *
+	 * @throws GSException 指定された型がロウキーとして常にサポート外となる場合
+	 * @throws NullPointerException {@code keyType}引数に{@code null}が指定された場合
+	 *
+	 * @see Container
+	 * @since 5.3
+	 * </div><div lang="en">
+	 * @since 5.3
+	 * </div>
+	 */
 	public static <K> RowKeyPredicate<K> create(
-			Class<K> keyType) throws GSException {
-		final GSType gsKeyType = SINGLE_TYPE_MAP.get(keyType);
-		if (gsKeyType == null) {
+			Class<K> keyType, TimeUnit timePrecision) throws GSException {
+		final RowMapper mapper = findSingleMapper(keyType, timePrecision);
+		if (mapper == null) {
 			GSErrorCode.checkNullParameter(keyType, "keyType", null);
 			throw new GSException(GSErrorCode.UNSUPPORTED_KEY_TYPE,
 					"Unsupported key type (type=" + keyType + ")");
 		}
-		try {
-			final RowMapper mapper = getSingleMapper(gsKeyType);
-			if (gsKeyType == GSType.TIMESTAMP) {
-				return new TimestampPredicate<K>(keyType, keyType, mapper);
-			}
-			return new DefaultPredicate<K>(keyType, keyType, mapper);
-		}
-		catch (GSException e) {
-			throw new Error(e);
-		}
+
+		return new RowKeyPredicate<K>(
+				RowMapper.ValueDuplicator.createSingle(keyType, mapper));
 	}
 
 	/**
@@ -283,7 +339,8 @@ public class RowKeyPredicate<K> {
 		GSErrorCode.checkNullParameter(info, "info", null);
 		final RowMapper mapper =
 				RowMapper.getInstance(info.getType(), info, KEY_MAPPER_CONFIG);
-		return new GeneralPredicate(mapper);
+		return new RowKeyPredicate<Row.Key>(
+				RowMapper.ValueDuplicator.createForKey(mapper));
 	}
 
 	/**
@@ -449,12 +506,12 @@ public class RowKeyPredicate<K> {
 	 * </div>
 	 */
 	public GSType getKeyType() {
-		if (mapper.getKeyCategory() != RowMapper.KeyCategory.SINGLE) {
+		if (getRowMapper().getKeyCategory() != RowMapper.KeyCategory.SINGLE) {
 			throw new IllegalStateException(
 					"This method cannot be used for composite row key");
 		}
 
-		final GSType keyType = SINGLE_TYPE_MAP.get(keyClass);
+		final GSType keyType = SINGLE_TYPE_MAP.get(getKeyClass());
 		if (keyType == null) {
 			throw new Error();
 		}
@@ -488,7 +545,7 @@ public class RowKeyPredicate<K> {
 	 */
 	public ContainerInfo getKeySchema() {
 		try {
-			return mapper.resolveKeyContainerInfo();
+			return getRowMapper().resolveKeyContainerInfo();
 		}
 		catch (GSException e) {
 			throw new Error(e);
@@ -559,7 +616,7 @@ public class RowKeyPredicate<K> {
 		}
 
 		final java.util.Collection<K> baseKeys;
-		if (isImmutableKey()) {
+		if (duplicator.isImmutable()) {
 			baseKeys = distinctKeys;
 		}
 		else {
@@ -572,27 +629,23 @@ public class RowKeyPredicate<K> {
 		return Collections.unmodifiableCollection(baseKeys);
 	}
 
-	Class<K> getBindingClass() {
-		return bindingClass;
+	private Class<K> getBindingClass() {
+		return duplicator.getBindingClass();
 	}
 
-	RowMapper getRowMapper() {
-		return mapper;
+	private Class<?> getKeyClass() {
+		return duplicator.getValueClass();
 	}
 
-	K duplicateKey(K src, boolean identical) {
+	private RowMapper getRowMapper() {
+		return duplicator.getMapper();
+	}
+
+	private K duplicateKey(K src, boolean identical) {
 		if (src == null) {
 			return null;
 		}
-		return duplicateKeyNoNull(src, identical);
-	}
-
-	K duplicateKeyNoNull(K src, boolean identical) {
-		return src;
-	}
-
-	boolean isImmutableKey() {
-		return true;
+		return duplicator.duplicate(src, identical);
 	}
 
 	private void checkRangeKey(Object obj) throws GSException {
@@ -611,6 +664,7 @@ public class RowKeyPredicate<K> {
 			return null;
 		}
 
+		final Class<K> bindingClass = getBindingClass();
 		if (bindingClass == Object.class) {
 			if (obj instanceof Row.Key) {
 				final Row.Key generalKey = (Row.Key) obj;
@@ -630,6 +684,7 @@ public class RowKeyPredicate<K> {
 
 	private void checkKeyType(Object obj, Object generalObj)
 			throws GSException {
+		final Class<?> keyClass = getKeyClass();
 		try {
 			keyClass.cast(obj);
 		}
@@ -651,7 +706,7 @@ public class RowKeyPredicate<K> {
 			}
 
 			try {
-				objMapper.checkKeySchemaMatched(mapper);
+				objMapper.checkKeySchemaMatched(getRowMapper());
 			}
 			catch (GSException e) {
 				throw new GSException(
@@ -660,58 +715,97 @@ public class RowKeyPredicate<K> {
 		}
 	}
 
-	private static RowMapper getSingleMapper(GSType keyType) {
-		final RowMapper mapper = SINGLE_MAPPER_MAP.get(keyType);
-		if (mapper == null) {
-			throw new Error();
+	private static RowMapper findSingleMapper(
+			GSType keyType, TimeUnit timePrecision) throws GSException {
+		final Map<Integer, RowMapper> subMap =
+				SINGLE_MAPPERS_BY_TYPE.get(keyType);
+		if (subMap == null) {
+			return null;
 		}
-		return mapper;
+
+		final int precisionLevel = RowMapper.TypeUtils.resolvePrecisionLevel(
+				keyType, timePrecision);
+		return subMap.get(precisionLevel);
 	}
 
-	private static Map<GSType, RowMapper> makeSingleMapperMap() {
-		final Map<GSType, RowMapper> map =
-				new EnumMap<GSType, RowMapper>(GSType.class);
-		for (GSType type : new GSType[] {
-				GSType.STRING,
-				GSType.INTEGER,
-				GSType.LONG,
-				GSType.TIMESTAMP
-		}) {
-			final boolean rowKeyAssigned = true;
-			final ContainerInfo info = new ContainerInfo(
-					null, null,
-					Arrays.asList(new ColumnInfo(null, type)),
-					rowKeyAssigned);
-
-			final RowMapper mapper;
-			try {
-				mapper = RowMapper.getInstance(null, info, KEY_MAPPER_CONFIG);
-			}
-			catch (GSException e) {
-				throw new Error(e);
-			}
-
-			map.put(type, mapper);
+	private static RowMapper findSingleMapper(
+			Class<?> keyClass, TimeUnit timePrecision) throws GSException {
+		final Map<Integer, RowMapper> subMap =
+				SINGLE_MAPPERS_BY_CLASS.get(keyClass);
+		if (subMap == null) {
+			return null;
 		}
 
+		final int precisionLevel = RowMapper.TypeUtils.resolvePrecisionLevel(
+				keyClass, timePrecision);
+		return subMap.get(precisionLevel);
+	}
+
+	private static Map<GSType, Map<Integer, RowMapper>> makeSingleMapperMap() {
+		final Map<GSType, Map<Integer, RowMapper>> map =
+				new EnumMap<GSType, Map<Integer, RowMapper>>(GSType.class);
+		for (GSType type : RowMapper.TypeUtils.getKeyTypeSet()) {
+			final Map<Integer, RowMapper> subMap =
+					new HashMap<Integer, RowMapper>();
+			for (int precisionLevel : RowMapper.TypeUtils.getPrecisionLevelSet(type)) {
+				final ColumnInfo.Builder builder = new ColumnInfo.Builder();
+				builder.setType(type);
+				builder.setTimePrecision(
+						RowMapper.TypeUtils.resolveTimePrecision(
+								type, precisionLevel));
+
+				final boolean rowKeyAssigned = true;
+				final ContainerInfo info = new ContainerInfo(
+						null, null,
+						Collections.singletonList(builder.toInfo()),
+						rowKeyAssigned);
+
+				final RowMapper mapper;
+				try {
+					mapper = RowMapper.getInstance(
+							null, info, KEY_MAPPER_CONFIG);
+				}
+				catch (GSException e) {
+					throw new Error(e);
+				}
+				subMap.put(precisionLevel, mapper);
+			}
+			map.put(type, subMap);
+		}
 		return map;
 	}
 
-	private static Map<GSType, Class<?>> makeSingleClassMap() {
-		final Map<GSType, Class<?>> map =
-				new EnumMap<GSType, Class<?>>(GSType.class);
-		map.put(GSType.STRING, String.class);
-		map.put(GSType.INTEGER, Integer.class);
-		map.put(GSType.LONG, Long.class);
-		map.put(GSType.TIMESTAMP, Date.class);
+	private static Map<Class<?>, Map<Integer, RowMapper>> makeSingleMapperMap(
+			Map<GSType, Map<Integer, RowMapper>> src) {
+		final Map<Class<?>, Map<Integer, RowMapper>> map =
+				new HashMap<Class<?>, Map<Integer, RowMapper>>();
+		for (GSType type : src.keySet()) {
+			final Map<Integer, RowMapper> srcSubMap = src.get(type);
+			for (int precisionLevel : srcSubMap.keySet()) {
+				final RowMapper mapper = srcSubMap.get(precisionLevel);
+				final Class<?> keyClass =
+						RowMapper.ValueDuplicator.createSingle(
+								Object.class, mapper).getValueClass();
+				Map<Integer, RowMapper> subMap = map.get(keyClass);
+				if (subMap == null) {
+					subMap = new HashMap<Integer, RowMapper>();
+					map.put(keyClass, subMap);
+				}
+				subMap.put(precisionLevel, mapper);
+			}
+		}
 		return map;
 	}
 
 	private static Map<Class<?>, GSType> makeSingleTypeMap(
-			Map<GSType, Class<?>> src) {
+			Map<Class<?>, Map<Integer, RowMapper>> src) {
 		final Map<Class<?>, GSType> map = new HashMap<Class<?>, GSType>();
-		for (Map.Entry<GSType, Class<?>> entry : src.entrySet()) {
-			map.put(entry.getValue(), entry.getKey());
+		for (Class<?> keyClass : src.keySet()) {
+			final Map<Integer, RowMapper> srcSubMap = src.get(keyClass);
+			final RowMapper mapper = srcSubMap.values().iterator().next();
+			final GSType type =
+					mapper.getContainerInfo().getColumnInfo(0).getType();
+			map.put(keyClass, type);
 		}
 		return map;
 	}
@@ -744,70 +838,6 @@ public class RowKeyPredicate<K> {
 		}
 
 		return true;
-	}
-
-	private static class DefaultPredicate<K>
-	extends RowKeyPredicate<K> implements RowMapper.Provider {
-
-		DefaultPredicate(
-				Class<K> bindingClass, Class<?> keyClass, RowMapper mapper)
-				throws GSException {
-			super(bindingClass, keyClass, mapper);
-		}
-
-		@Override
-		public RowMapper getRowMapper() {
-			return super.getRowMapper();
-		}
-
-	}
-
-	private static class GeneralPredicate extends DefaultPredicate<Row.Key> {
-
-		GeneralPredicate(RowMapper mapper) throws GSException {
-			super(Row.Key.class, Row.Key.class, mapper);
-		}
-
-		@Override
-		Row.Key duplicateKeyNoNull(Row.Key src, boolean identical) {
-			try {
-				if (identical) {
-					return RowMapper.createIdenticalRowKey(src);
-				}
-				else {
-					return src.createKey();
-				}
-			}
-			catch (GSException e) {
-				throw new IllegalStateException(e);
-			}
-		}
-
-		@Override
-		boolean isImmutableKey() {
-			return false;
-		}
-
-	}
-
-	private static class TimestampPredicate<K> extends DefaultPredicate<K> {
-
-		TimestampPredicate(
-				Class<K> bindingClass, Class<?> keyClass, RowMapper mapper)
-				throws GSException {
-			super(bindingClass, keyClass, mapper);
-		}
-
-		@Override
-		K duplicateKeyNoNull(K src, boolean identical) {
-			return getBindingClass().cast(new Date(((Date) src).getTime()));
-		}
-
-		@Override
-		boolean isImmutableKey() {
-			return false;
-		}
-
 	}
 
 }

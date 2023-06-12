@@ -154,6 +154,7 @@ ClusterService::ClusterService(
 	syncSvc_(NULL),
 	sysSvc_(NULL),
 	cpSvc_(NULL),
+	execSvc_(NULL),
 	clusterStats_(
 		config.get<int32_t>(CONFIG_TABLE_DS_PARTITION_NUM)),
 	sqlSvc_(NULL),
@@ -289,8 +290,8 @@ EventEngine::Config ClusterService::createEEConfig(
 }
 
 ClusterService::~ClusterService() {
-	ee_.shutdown();
-	ee_.waitForShutdown();
+	shutdown();
+	waitForShutdown();
 }
 
 void ClusterService::initialize(ManagerSet& mgrSet) {
@@ -300,6 +301,7 @@ void ClusterService::initialize(ManagerSet& mgrSet) {
 		cpSvc_ = mgrSet.cpSvc_;
 		sysSvc_ = mgrSet.sysSvc_;
 		sqlSvc_ = mgrSet.sqlSvc_;
+		execSvc_ = mgrSet.execSvc_;
 		clsMgr_->initialize(this, &ee_);
 
 		pt_ = mgrSet.pt_;
@@ -359,6 +361,8 @@ void ClusterService::initialize(ManagerSet& mgrSet) {
 			SYSTEM_SERVICE, systemAddress);
 		pt_->setNodeInfo(SELF_NODEID,
 			SQL_SERVICE, sqlAddress);
+
+		notificationManager_.setExecutor(*execSvc_);
 
 		if (notificationManager_.getMode() == NOTIFICATION_FIXEDLIST) {
 			NodeAddressSet& addressInfo
@@ -472,6 +476,7 @@ void ClusterService::start(const Event::Source& eventSource) {
 				GS_ERROR_CS_SERVICE_NOT_INITIALIZED, "");
 		}
 		ee_.start();
+		execSvc_->start();
 
 		const ClusterNotificationMode mode
 			= notificationManager_.getMode();
@@ -493,6 +498,7 @@ void ClusterService::start(const Event::Source& eventSource) {
 */
 void ClusterService::shutdown() {
 	ee_.shutdown();
+	execSvc_->shutdown();
 }
 
 /*!
@@ -500,6 +506,7 @@ void ClusterService::shutdown() {
 */
 void ClusterService::waitForShutdown() {
 	ee_.waitForShutdown();
+	execSvc_->waitForShutdown();
 }
 
 /*!
@@ -670,22 +677,24 @@ void ClusterOptionalInfo::decode(Event& ev, EventByteInStream& in, ClusterServic
 		in >> type;
 		in >> bodySize;
 		const size_t bodyTopPos = in.base().position();
-		setList_[type] = ACTIVE;
 		switch (type) {
 		case PUBLIC_ADDRESS_INFO:
 			clsSvc->decode(ev, publicAddressInfo_, in);
+			setList_[type] = ACTIVE;
 			break;
 		case SSL_PORT:
 			in >> ssl_port_;
+			setList_[type] = ACTIVE;
 			break;
 		case RACKZONE_ID:
 			clsSvc->decode(ev, rackZoneInfoList_, in);
+			setList_[type] = ACTIVE;
 			break;
 		case DROP_PARTITION_INFO:
 			clsSvc->decode(ev, dropPartitionNodeInfo_, in);
+			setList_[type] = ACTIVE;
 			break;
 		default:
-			setList_[type] = INACTIVE;
 			in.base().position(bodyTopPos + bodySize);
 			break;
 		}
@@ -2063,6 +2072,14 @@ void ClusterService::NotificationManager::initialize(
 			"Failed to initialize cluster notification "
 			"(reason = "
 			<< GS_EXCEPTION_MESSAGE(e) << ")");
+	}
+}
+
+void ClusterService::NotificationManager::setExecutor(
+		util::ExecutorService &executor) {
+	const size_t count = resolverList_.size();
+	for (size_t i = 0; i < count; i++) {
+		resolverList_[i]->setExecutor(executor);
 	}
 }
 

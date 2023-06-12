@@ -980,7 +980,7 @@ bool TupleList::Info::isNullable() const {
 
 bool TupleList::Info::hasVarType() const {
 	for (size_t column = 0; column < columnCount_; ++column) {
-		if (!TupleColumnTypeUtils::isFixed(columnTypeList_[column])) {
+		if (!TupleColumnTypeUtils::isSomeFixed(columnTypeList_[column])) {
 			return true;
 		}
 	}
@@ -1006,6 +1006,16 @@ size_t TupleList::Info::getNullBitOffset() const {
 	}
 	return offset;
 }
+
+
+NanoTimestamp TupleNanoTimestamp::makeEmptyValue() {
+	NanoTimestamp ts;
+	ts.assign(0, 0);
+	return ts;
+}
+
+
+const NanoTimestamp TupleNanoTimestamp::Constants::EMPTY_VALUE = makeEmptyValue();
 
 
 TupleList::BlockReader::BlockReader()
@@ -2735,6 +2745,10 @@ const char8_t* TupleList::TupleColumnTypeCoder::operator()(TupleColumnType type)
 		return off + (a ? "NULLABLE_DOUBLE_ARRAY" : "NULLABLE_DOUBLE");
 	case TYPE_TIMESTAMP:
 		return off + (a ? "NULLABLE_TIMESTAMP_ARRAY" : "NULLABLE_TIMESTAMP");
+	case TYPE_MICRO_TIMESTAMP:
+		return off + (a ? "NULLABLE_TIMESTAMP_ARRAY(6)" : "NULLABLE_TIMESTAMP(6)");
+	case TYPE_NANO_TIMESTAMP:
+		return off + (a ? "NULLABLE_TIMESTAMP_ARRAY(9)" : "NULLABLE_TIMESTAMP(9)");
 	case TYPE_BOOL:
 		return off + (a ? "NULLABLE_BOOL_ARRAY" : "NULLABLE_BOOL");
 	case TYPE_STRING:
@@ -2779,6 +2793,8 @@ bool TupleList::TupleColumnTypeCoder::operator()(
 		Entry("FLOAT", TYPE_FLOAT),
 		Entry("DOUBLE", TYPE_DOUBLE),
 		Entry("TIMESTAMP", TYPE_TIMESTAMP),
+		Entry("TIMESTAMP(6)", TYPE_MICRO_TIMESTAMP),
+		Entry("TIMESTAMP(9)", TYPE_NANO_TIMESTAMP),
 		Entry("BOOL", TYPE_BOOL),
 		Entry("STRING", TYPE_STRING),
 		Entry("GEOMETRY", TYPE_GEOMETRY),
@@ -2893,7 +2909,7 @@ void TupleValue::VarContext::clear() {
 void TupleValue::VarContext::destroyValue(TupleValue &value) {
 	TupleValueVarUtils::VarData *varData;
 	assert(!TupleColumnTypeUtils::isAny(value.getType()));
-	if (TupleColumnTypeUtils::isSingleVar(value.getType())) {
+	if (TupleColumnTypeUtils::isSingleVarOrLarge(value.getType())) {
 		uint8_t *body = static_cast<uint8_t*>(value.getRawData()) - 1;
 		if (*body != TupleValueTempStoreVarUtils::LTS_VAR_DATA_SINGLE_VAR) {
 			assert(false);
@@ -2941,6 +2957,24 @@ void TupleValue::VarContext::moveValueToParent(
 		assert(1 + encodeSize == headerSize);
 		memcpy(addr + encodeSize, value.varData(), size);
 		value.data_.varData_ = addr;
+	}
+	else if (TupleColumnTypeUtils::isLargeFixed(value.getType())) {
+		const uint8_t dataType = TupleValueTempStoreVarUtils::LTS_VAR_DATA_SINGLE_VAR;
+
+		const size_t size = TupleColumnTypeUtils::getFixedSize(value.getType());
+		const TupleValueVarUtils::VarDataType type =
+				TupleValueVarUtils::VAR_DATA_TEMP_STORE;
+
+		const size_t headerSize = sizeof(dataType);
+		varData = allocate(type, headerSize + size);
+		assert(varData->getBodySize(getBaseVarContext()) >= headerSize + size);
+
+		void *addr = varData->getBody();
+		*static_cast<uint8_t*>(addr) = dataType;
+		addr = static_cast<uint8_t*>(addr) + headerSize;
+
+		memcpy(addr, value.getRawData(), size);
+		value.data_.rawData_ = addr;
 	}
 	else if (TupleColumnTypeUtils::isLob(value.getType())) {
 		for (;;) {
@@ -3918,6 +3952,51 @@ TupleValue TupleValue::StackAllocLobBuilder::fromDataStore(
 
 TupleValue TupleValue::StackAllocLobBuilder::build() {
 	return TupleValue(topVarData_, TupleList::TYPE_BLOB);
+}
+
+TupleValue::NanoTimestampBuilder::NanoTimestampBuilder(VarContext &cxt) :
+		cxt_(cxt),
+		pos_(0) {
+}
+
+void TupleValue::NanoTimestampBuilder::append(const void *data, size_t size) {
+	if (size > sizeof(NanoTimestamp) ||
+			pos_ + size > sizeof(NanoTimestamp)) {
+		GS_THROW_USER_ERROR(GS_ERROR_LTS_TYPE_NOT_MATCH,
+				"Internal error by unexpected value size");
+	}
+	memcpy(data_ + pos_, data, size);
+	pos_ += size;
+}
+
+void TupleValue::NanoTimestampBuilder::setValue(const NanoTimestamp &ts) {
+	memcpy(data_, &ts, sizeof(ts));
+	pos_ = sizeof(ts);
+}
+
+const NanoTimestamp* TupleValue::NanoTimestampBuilder::build() {
+	const uint32_t valueSize = sizeof(NanoTimestamp);
+	if (pos_ != valueSize) {
+		GS_THROW_USER_ERROR(GS_ERROR_LTS_TYPE_NOT_MATCH,
+				"Internal error by state");
+	}
+
+	const uint8_t dataType = TupleValueTempStoreVarUtils::LTS_VAR_DATA_SINGLE_VAR;
+
+	const uint32_t headerSize = sizeof(dataType);
+	const uint32_t totalSize = headerSize + valueSize;
+
+	const TupleValueVarUtils::VarDataType type =
+			TupleValueVarUtils::VAR_DATA_TEMP_STORE;
+	TupleValueVarUtils::VarData *varData = cxt_.allocate(type, totalSize);
+	assert(varData->getBodySize(cxt_.getBaseVarContext()) >= totalSize);
+
+	void *addr = varData->getBody();
+	*static_cast<uint8_t*>(addr) = dataType;
+	addr = static_cast<uint8_t*>(addr) + headerSize;
+
+	memcpy(addr, data_, valueSize);
+	return static_cast<const NanoTimestamp*>(addr);
 }
 
 

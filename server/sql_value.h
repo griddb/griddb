@@ -26,6 +26,7 @@ typedef TupleList::TupleColumnType TupleColumnType;
 
 struct TupleTypes {
 	enum {
+		TYPE_BITS_NORMAL_SIZE = TupleList::TYPE_BITS_NORMAL_SIZE,
 		TYPE_BITS_SUB_TYPE = TupleList::TYPE_BITS_SUB_TYPE,
 		TYPE_BITS_VAR = TupleList::TYPE_BITS_VAR,
 		TYPE_BITS_ARRAY = TupleList::TYPE_BITS_ARRAY,
@@ -46,6 +47,8 @@ struct TupleTypes {
 		TYPE_FLOAT = TupleList::TYPE_FLOAT,
 		TYPE_DOUBLE = TupleList::TYPE_DOUBLE,
 		TYPE_TIMESTAMP = TupleList::TYPE_TIMESTAMP,
+		TYPE_MICRO_TIMESTAMP = TupleList::TYPE_MICRO_TIMESTAMP,
+		TYPE_NANO_TIMESTAMP = TupleList::TYPE_NANO_TIMESTAMP,
 		TYPE_BOOL = TupleList::TYPE_BOOL,
 		TYPE_STRING = TupleList::TYPE_STRING,
 		TYPE_GEOMETRY = TupleList::TYPE_GEOMETRY,
@@ -53,7 +56,9 @@ struct TupleTypes {
 
 		TYPE_NULL = TupleList::TYPE_NULL,
 		TYPE_ANY = TupleList::TYPE_ANY,
-		TYPE_NUMERIC = TupleList::TYPE_NUMERIC
+		TYPE_NUMERIC = TupleList::TYPE_NUMERIC,
+
+		TYPE_BIT_SIZE_SUB_TYPE = (TYPE_BITS_VAR - TYPE_BITS_SUB_TYPE)
 	};
 };
 
@@ -83,6 +88,9 @@ struct SQLValues {
 
 	struct ProfileElement;
 	struct ValueProfile;
+
+	class ValueHolder;
+	class ValueSetHolder;
 
 	class SummaryColumn;
 	class CompColumn;
@@ -115,8 +123,8 @@ struct SQLValues {
 	class TupleComparator;
 	class TupleRangeComparator;
 	class TupleDigester;
-	class TupleConverter;
-	class TuplePromoter;
+
+	class DateTimeElements;
 
 	typedef util::SequenceReader<
 			char8_t, const char8_t*, util::UTF8Utils> StringReader;
@@ -145,10 +153,11 @@ struct SQLValues {
 
 struct SQLValues::Types {
 private:
-	template<TupleColumnType T, typename V>
+	template<TupleColumnType T, typename V, typename L = V>
 	struct Base {
 		enum { COLUMN_TYPE = T };
 		typedef V ValueType;
+		typedef L LocalValueType;
 	};
 
 public:
@@ -158,7 +167,12 @@ public:
 	struct Long : public Base<TupleTypes::TYPE_LONG, int64_t> {};
 	struct Float : public Base<TupleTypes::TYPE_FLOAT, float> {};
 	struct Double : public Base<TupleTypes::TYPE_DOUBLE, double> {};
-	struct Timestamp : public Base<TupleTypes::TYPE_TIMESTAMP, int64_t> {};
+	struct TimestampTag : public Base<TupleTypes::TYPE_TIMESTAMP, int64_t> {};
+	struct MicroTimestampTag : public Base<
+			TupleTypes::TYPE_MICRO_TIMESTAMP, MicroTimestamp> {};
+	struct NanoTimestampTag : public Base<
+			TupleTypes::TYPE_NANO_TIMESTAMP, TupleNanoTimestamp,
+			NanoTimestamp> {};
 	struct Bool : public Base<TupleTypes::TYPE_BOOL, bool> {};
 	struct String : public Base<TupleTypes::TYPE_STRING, TupleString> {};
 	struct Blob : public Base<TupleTypes::TYPE_BLOB, TupleValue> {};
@@ -167,10 +181,13 @@ public:
 	struct Integral {};
 	struct Floating {};
 	struct Numeric {};
+	struct PreciseTimestamp {};
 
+	struct NormalFixed {};
 	struct SingleVar {};
 	struct MultiVar {};
 	struct Sequential {};
+	struct VarOrLarge {};
 
 	template<TupleColumnType T>
 	struct Of {
@@ -181,7 +198,12 @@ public:
 				typename util::Conditional<T == Long::COLUMN_TYPE, Long,
 				typename util::Conditional<T == Float::COLUMN_TYPE, Float,
 				typename util::Conditional<T == Double::COLUMN_TYPE, Double,
-				typename util::Conditional<T == Timestamp::COLUMN_TYPE, Timestamp,
+				typename util::Conditional<T == TimestampTag::COLUMN_TYPE,
+						TimestampTag,
+				typename util::Conditional<T == MicroTimestampTag::COLUMN_TYPE,
+						MicroTimestampTag,
+				typename util::Conditional<T == NanoTimestampTag::COLUMN_TYPE,
+						NanoTimestampTag,
 				typename util::Conditional<T == Bool::COLUMN_TYPE, Bool,
 				typename util::Conditional<T == String::COLUMN_TYPE, String,
 				typename util::Conditional<T == Blob::COLUMN_TYPE, Blob,
@@ -189,7 +211,7 @@ public:
 						void
 				>::Type>::Type>::Type>::Type>::Type
 				>::Type>::Type>::Type>::Type>::Type
-				>::Type Type;
+				>::Type>::Type>::Type Type;
 	};
 };
 
@@ -218,13 +240,17 @@ public:
 	static bool isAny(TupleColumnType type);
 	static bool isNull(TupleColumnType type);
 
-	static bool isFixed(TupleColumnType type);
+	static bool isSomeFixed(TupleColumnType type);
+	static bool isNormalFixed(TupleColumnType type);
+	static bool isLargeFixed(TupleColumnType type);
 	static bool isSingleVar(TupleColumnType type);
+	static bool isSingleVarOrLarge(TupleColumnType type);
 	static bool isArray(TupleColumnType type);
 	static bool isLob(TupleColumnType type);
 
 	static bool isIntegral(TupleColumnType type);
 	static bool isFloating(TupleColumnType type);
+	static bool isTimestampFamily(TupleColumnType type);
 
 	static bool isDeclarable(TupleColumnType type);
 	static bool isSupported(TupleColumnType type);
@@ -257,12 +283,15 @@ public:
 
 	static TypeCategory getStaticTypeCategory(TupleColumnType type);
 	static bool isNumerical(TupleColumnType type);
+	static util::DateTime::FieldType getTimePrecision(TupleColumnType type);
+	static int32_t getTimePrecisionLevel(TupleColumnType type);
 
 	static void setUpTupleInfo(
 			TupleList::Info &info, const TupleColumnType *list, size_t count);
 
 	static const char8_t* toString(
-			TupleColumnType type, bool nullOnUnknown = false);
+			TupleColumnType type, bool nullOnUnknown = false,
+			bool internal = false);
 
 private:
 	typedef TupleColumnTypeUtils BaseUtils;
@@ -273,7 +302,9 @@ struct SQLValues::TypeUtils::Traits {
 private:
 	struct EmptyTag {
 		typedef util::FalseType ValueType;
+		typedef util::FalseType LocalValueType;
 	};
+
 	template<typename Tag>
 	struct ValueTypeOf {
 		typedef typename util::Conditional<
@@ -281,9 +312,35 @@ private:
 				EmptyTag, Tag>::Type::ValueType Type;
 	};
 
+	template<typename Tag>
+	struct LocalValueTypeOf {
+		typedef typename util::Conditional<
+				util::IsSame<Tag, void>::VALUE,
+				EmptyTag, Tag>::Type::LocalValueType Type;
+	};
+
 public:
 	typedef typename Types::template Of<T>::Type TypeTag;
 	typedef typename ValueTypeOf<TypeTag>::Type ValueType;
+	typedef typename LocalValueTypeOf<TypeTag>::Type LocalValueType;
+
+	static const bool FOR_ANY = (T == TupleTypes::TYPE_ANY);
+
+	static const bool SIZE_VAR = ((T & TupleTypes::TYPE_MASK_VAR) != 0);
+	static const bool SIZE_VAR_EXPLICIT = (SIZE_VAR && !FOR_ANY);
+
+	static const uint32_t FIXED_SIZE = (T & TupleTypes::TYPE_MASK_FIXED_SIZE);
+	static const uint32_t SUB_TYPE =
+			((T & TupleTypes::TYPE_MASK_SUB) >> TupleTypes::TYPE_BITS_SUB_TYPE);
+
+	static const bool FOR_LARGE_FIXED = (
+			!FOR_ANY && !SIZE_VAR &&
+			FIXED_SIZE > (1 << TupleTypes::TYPE_BITS_NORMAL_SIZE));
+	static const bool FOR_NORMAL_FIXED =
+			(!FOR_ANY && !SIZE_VAR && !FOR_LARGE_FIXED);
+
+	static const bool SIZE_VAR_OR_LARGE_EXPLICIT =
+			(SIZE_VAR_EXPLICIT || FOR_LARGE_FIXED);
 
 
 	typedef
@@ -302,7 +359,7 @@ public:
 
 	typedef typename util::Conditional<
 			T == TupleTypes::TYPE_STRING, TupleString::BufferInfo,
-			ValueType>::Type ReadableSourceType;
+			LocalValueType>::Type ReadableSourceType;
 
 	typedef
 			typename util::Conditional<
@@ -337,25 +394,32 @@ public:
 			(FOR_INTEGRAL_EXPLICIT || FOR_FLOATING);
 	static const bool FOR_NUMERIC = (FOR_INTEGRAL || FOR_FLOATING);
 
+	static const bool FOR_PRECISE_TIMESTAMP = (
+			T == TupleTypes::TYPE_MICRO_TIMESTAMP ||
+			T == TupleTypes::TYPE_NANO_TIMESTAMP);
+	static const bool FOR_TIMESTAMP_FAMILY = (
+			T == TupleTypes::TYPE_TIMESTAMP || FOR_PRECISE_TIMESTAMP);
+
 	static const bool FOR_SINGLE_VAR = (T == TupleTypes::TYPE_STRING);
 	static const bool FOR_MULTI_VAR = (T == TupleTypes::TYPE_BLOB);
 	static const bool FOR_SEQUENTIAL = (FOR_SINGLE_VAR || FOR_MULTI_VAR);
 
-	static const bool FOR_ANY = (T == TupleTypes::TYPE_ANY);
-
 	static const bool TUPLE_SPECIALIZED = (
 			T == TupleTypes::TYPE_INTEGER ||
 			T == TupleTypes::TYPE_LONG ||
-			T == TupleTypes::TYPE_TIMESTAMP ||
 			T == TupleTypes::TYPE_STRING ||
-			FOR_FLOATING);
+			FOR_FLOATING ||
+			FOR_TIMESTAMP_FAMILY);
 
 	static const bool READABLE_TUPLE_SPECIALIZED = TUPLE_SPECIALIZED;
 
 	static const bool WRITABLE_TUPLE_SPECIALIZED = TUPLE_SPECIALIZED;
 
+	static const uint32_t TIMESTAMP_PRECISION_SCORE =
+			(FOR_TIMESTAMP_FAMILY ?
+					((FIXED_SIZE << TupleTypes::TYPE_BIT_SIZE_SUB_TYPE) |
+							SUB_TYPE) : 0);
 
-	static const bool SIZE_VAR = ((T & TupleTypes::TYPE_MASK_VAR) != 0);
 
 	static const bool READER_AVAILABLE =
 			!util::IsSame<ReaderType, void>::VALUE;
@@ -363,43 +427,61 @@ public:
 			!util::IsSame<WriterType, void>::VALUE;
 
 	typedef typename util::Conditional<
-			READER_AVAILABLE, ReaderType, ValueType>::Type ReadableType;
+			READER_AVAILABLE, ReaderType, LocalValueType>::Type ReadableType;
 	typedef typename util::Conditional<
-			WRITER_AVAILABLE, WriterType, ValueType>::Type WritableType;
+			WRITER_AVAILABLE, WriterType, LocalValueType>::Type WritableType;
 
 	typedef typename util::Conditional<
 			READER_AVAILABLE,
-			ReadableType&, const ValueType&>::Type ReadableRefType;
+			ReadableType&, const LocalValueType&>::Type ReadableRefType;
 	typedef typename util::Conditional<
 			WRITER_AVAILABLE,
-			WritableType&, const ValueType&>::Type WritableRefType;
+			WritableType&, const LocalValueType&>::Type WritableRefType;
 
 	typedef typename util::Conditional<
 			READER_AVAILABLE,
-			ReadableType*, const ValueType*>::Type ReadablePtrType;
+			ReadableType*, const LocalValueType*>::Type ReadablePtrType;
+
+	typedef
+			typename util::Conditional<FOR_NORMAL_FIXED, Types::NormalFixed,
+			typename util::Conditional<SIZE_VAR_OR_LARGE_EXPLICIT,
+					Types::VarOrLarge,
+			typename util::Conditional<FOR_ANY, TypeTag,
+					void>::Type>::Type>::Type NormalStorageTag;
+
+	typedef
+			typename util::Conditional<(FOR_SINGLE_VAR || FOR_LARGE_FIXED),
+					TypeTag,
+			typename util::Conditional<FOR_SEQUENTIAL, Types::Sequential,
+					NormalStorageTag>::Type>::Type FineNormalStorageTag;
 
 	typedef
 			typename util::Conditional<FOR_INTEGRAL, Types::Integral,
 			typename util::Conditional<FOR_FLOATING, Types::Floating,
+			typename util::Conditional<FOR_PRECISE_TIMESTAMP,
+					Types::PreciseTimestamp,
 			typename util::Conditional<FOR_SEQUENTIAL, Types::Sequential,
 			typename util::Conditional<FOR_ANY, TypeTag,
-			void>::Type>::Type>::Type>::Type BasicComparableTag;
+			void>::Type>::Type>::Type>::Type>::Type BasicComparableTag;
 
-	typedef typename util::Conditional<T == TupleTypes::TYPE_STRING,
-			Types::String, BasicComparableTag>::Type FineComparableTag;
+	typedef typename util::Conditional<FOR_SINGLE_VAR,
+			TypeTag, BasicComparableTag>::Type FineComparableTag;
+	typedef typename util::Conditional<FOR_PRECISE_TIMESTAMP,
+			TypeTag, FineComparableTag>::Type ResultFineComparableTag;
 
 	typedef
+			typename util::Conditional<
+					(FOR_TIMESTAMP_FAMILY || FOR_SEQUENTIAL || FOR_ANY), TypeTag,
 			typename util::Conditional<FOR_INTEGRAL, Types::Long,
 			typename util::Conditional<FOR_FLOATING, Types::Double,
-			typename util::Conditional<FOR_SEQUENTIAL, TypeTag,
-			typename util::Conditional<FOR_ANY, TypeTag,
-			void>::Type>::Type>::Type>::Type ComparableValueTag;
+			void>::Type>::Type>::Type ComparableValueTag;
 	typedef typename ValueTypeOf<ComparableValueTag>::Type ComparableValueType;
 
 	typedef
-			typename util::Conditional<(T == TupleTypes::TYPE_BOOL),
-					Types::Byte::ValueType,
-			typename util::Conditional<FOR_NUMERIC, ValueType,
+			typename util::Conditional<
+					(T == TupleTypes::TYPE_BOOL), Types::Byte::ValueType,
+			typename util::Conditional<
+					(FOR_NORMAL_FIXED || FOR_LARGE_FIXED), LocalValueType,
 			typename util::Conditional<FOR_SEQUENTIAL, void*,
 			void>::Type>::Type>::Type StorableValueType;
 };
@@ -417,9 +499,14 @@ struct SQLValues::TypeUtils::PairTraits {
 			(Traits1::FOR_INTEGRAL_EXPLICIT && Traits2::FOR_INTEGRAL_EXPLICIT);
 	static const bool BOTH_NUMERIC_EXPLICIT =
 			(Traits1::FOR_NUMERIC_EXPLICIT && Traits2::FOR_NUMERIC_EXPLICIT);
+	static const bool BOTH_TIMESTAMP_FAMILY =
+			(Traits1::FOR_TIMESTAMP_FAMILY && Traits2::FOR_TIMESTAMP_FAMILY);
 
 	static const bool FOR_PROMOTION =
-			(FOR_SAME || SOME_ANY || BOTH_NUMERIC_EXPLICIT);
+			(FOR_SAME ||
+			SOME_ANY ||
+			BOTH_NUMERIC_EXPLICIT ||
+			BOTH_TIMESTAMP_FAMILY);
 
 	static const bool IMPLICIT_INTEGRAL_CONVERTABLE =
 			(!FOR_SAME && Traits1::FOR_INTEGRAL_EXPLICIT &&
@@ -427,18 +514,24 @@ struct SQLValues::TypeUtils::PairTraits {
 	static const bool IMPLICIT_FLOATING_CONVERTABLE =
 			(!FOR_SAME && Traits1::FOR_FLOATING &&
 			T2 == TupleTypes::TYPE_DOUBLE);
+	static const bool IMPLICIT_TIMESTAMP_CONVERTABLE =
+			(!FOR_SAME && BOTH_TIMESTAMP_FAMILY);
 	static const bool IMPLICIT_ANY_CONVERTABLE =
 			(Traits1::FOR_ANY || !Traits2::FOR_ANY);
 
 	static const bool IMPLICIT_CONVERTABLE =
 			(IMPLICIT_INTEGRAL_CONVERTABLE ||
 			IMPLICIT_FLOATING_CONVERTABLE ||
+			IMPLICIT_TIMESTAMP_CONVERTABLE ||
 			IMPLICIT_ANY_CONVERTABLE);
 	static const bool IMPLICIT_CONVERTABLE_OR_SAME =
 			(IMPLICIT_CONVERTABLE || FOR_SAME);
 
 	typedef typename Traits<
-			(FOR_PROMOTION ? (Traits1::FOR_FLOATING ? T1 : T2) :
+			(FOR_PROMOTION ? ((BOTH_TIMESTAMP_FAMILY ?
+					(Traits1::TIMESTAMP_PRECISION_SCORE >=
+					Traits2::TIMESTAMP_PRECISION_SCORE) :
+					Traits1::FOR_FLOATING) ? T1 : T2) :
 			static_cast<TupleColumnType>(TupleTypes::TYPE_NULL))
 			>::ComparableValueTag ComparableValueTag;
 };
@@ -711,11 +804,13 @@ private:
 			typedef typename TypeUtils::template Traits<
 					T1::COLUMN_TYPE> FirstTraitsType;
 			enum {
-				SIZE_VAR = FirstTraitsType::SIZE_VAR,
-				SINGLE_VAR = FirstTraitsType::FOR_SINGLE_VAR,
+				FOR_ANY = FirstTraitsType::FOR_ANY,
+				SIZE_VAR_OR_LARGE =
+						(FOR_ANY || FirstTraitsType::SIZE_VAR_OR_LARGE_EXPLICIT),
+				NO_SINGLE_VAR = (FOR_ANY || !FirstTraitsType::FOR_SINGLE_VAR),
 				FIRST_ALLOWED = (Specific &&
-						!(Target == TYPE_TARGET_FIXED && SIZE_VAR) &&
-						!(Target == TYPE_TARGET_SINGLE_VAR && !SINGLE_VAR))
+						!(Target == TYPE_TARGET_FIXED && SIZE_VAR_OR_LARGE) &&
+						!(Target == TYPE_TARGET_SINGLE_VAR && NO_SINGLE_VAR))
 			};
 			typedef typename util::Conditional<
 					FIRST_ALLOWED, T1, Types::Any>::Type Type;
@@ -1057,10 +1152,12 @@ public:
 
 	static Source ofAllocator(util::StackAllocator &alloc);
 	static Source ofVarContext(
-			VarContext &varCxt, util::StackAllocator *alloc = NULL);
+			VarContext &varCxt, util::StackAllocator *alloc = NULL,
+			bool noVarAllocAllowed = false);
 
 	util::StackAllocator& getAllocator();
 	VarAllocator& getVarAllocator();
+	util::StdAllocator<void, void> getStdAllocator();
 
 	VarContext& getVarContext();
 	size_t getVarContextDepth();
@@ -1077,6 +1174,8 @@ private:
 		static const size_t DEFAULT_MAX_STRING_LENGTH;
 	};
 
+	static util::StackAllocator* findAllocator(
+			VarContext &varCxt, util::StackAllocator *alloc);
 	size_t resolveMaxStringLength();
 
 	util::StackAllocator *alloc_;
@@ -1134,6 +1233,58 @@ public:
 	}
 };
 
+struct SQLValues::ProfileElement {
+	ProfileElement();
+
+	void merge(const ProfileElement &src);
+
+	int64_t candidate_;
+	int64_t target_;
+};
+
+struct SQLValues::ValueProfile {
+	ProfileElement noNull_;
+	ProfileElement noSwitch_;
+};
+
+class SQLValues::ValueHolder {
+public:
+	explicit ValueHolder(SQLValues::ValueContext &valueCxt);
+	~ValueHolder();
+
+	void assign(TupleValue &value);
+	TupleValue release();
+	void reset();
+
+	static bool isDeallocatableContext(VarContext &varCxt);
+	static bool isDeallocatableValueType(TupleColumnType type);
+
+private:
+	ValueHolder(const ValueHolder&);
+	ValueHolder& operator=(const ValueHolder&);
+
+	VarContext &varCxt_;
+	TupleValue value_;
+};
+
+class SQLValues::ValueSetHolder {
+public:
+	explicit ValueSetHolder(SQLValues::ValueContext &valueCxt);
+	~ValueSetHolder();
+
+	void add(TupleValue &value);
+	void reset();
+
+	VarContext& getVarContext();
+
+private:
+	ValueSetHolder(const ValueSetHolder&);
+	ValueSetHolder& operator=(const ValueSetHolder&);
+
+	VarContext &varCxt_;
+	util::AllocVector<TupleValue> values_;
+};
+
 class SQLValues::SummaryColumn {
 public:
 	typedef uint32_t NullsUnitType;
@@ -1179,20 +1330,6 @@ private:
 
 	int32_t pos_;
 	int32_t ordering_;
-};
-
-struct SQLValues::ProfileElement {
-	ProfileElement();
-
-	void merge(const ProfileElement &src);
-
-	int64_t candidate_;
-	int64_t target_;
-};
-
-struct SQLValues::ValueProfile {
-	ProfileElement noNull_;
-	ProfileElement noSwitch_;
 };
 
 class SQLValues::CompColumn {
@@ -1301,21 +1438,20 @@ public:
 
 	template<typename T>
 	void setBy(
-			size_t index, ValueContext &cxt, const typename T::ValueType &value);
-
-	void increment(size_t index) {
-		ValueEntry &entry = getEntry(index);
-		++entry.value_.integral_;
-	}
+			size_t index, ValueContext &cxt,
+			const typename T::LocalValueType &value);
 
 private:
 	typedef util::Vector<uint8_t> VarData;
+
+	union ValueBody {
+		int64_t integral_;
+		double floating_;
+		const void *var_;
+	};
+
 	struct ValueEntry {
-		union {
-			int64_t integral_;
-			double floating_;
-			const void *var_;
-		} value_;
+		ValueBody value_;
 		int32_t type_;
 		union {
 			void *ptr_;
@@ -1323,6 +1459,7 @@ private:
 			VarContext *varCxt_;
 		} data_;
 	};
+
 	typedef util::Vector<ValueEntry> ValueList;
 
 	ArrayTuple(const ArrayTuple&);
@@ -1331,36 +1468,32 @@ private:
 	void resize(size_t size);
 
 	template<typename T>
-	int64_t getAs(const ValueEntry &entry, const Types::Integral&) const;
+	typename T::ValueType getAs(
+			const ValueEntry &entry, const Types::NormalFixed&) const;
 	template<typename T>
-	double getAs(const ValueEntry &entry, const Types::Floating&) const;
-	template<typename T>
-	TupleString getAs(const ValueEntry &entry, const Types::String&) const;
-	template<typename T>
-	TupleValue getAs(const ValueEntry &entry, const Types::Sequential&) const;
-	template<typename T>
+	typename T::ValueType getAs(
+			const ValueEntry &entry, const Types::VarOrLarge&) const;
+	template<typename>
 	TupleValue getAs(const ValueEntry&, const Types::Any&) const;
 
-	template<typename T>
+	template<typename C>
 	void setBy(
-			ValueEntry &entry, ValueContext&, int64_t value,
-			const Types::Integral&);
-	template<typename T>
+			ValueEntry &entry, ValueContext&,
+			const typename C::LocalValueType &value, const C&,
+			const Types::NormalFixed&);
 	void setBy(
-			ValueEntry &entry, ValueContext&, double value,
-			const Types::Floating&);
-	template<typename T>
+			ValueEntry &entry, ValueContext&, const NanoTimestamp &value,
+			const Types::NanoTimestampTag&, const Types::NanoTimestampTag&);
 	void setBy(
 			ValueEntry &entry, ValueContext&, const TupleString &value,
-			const Types::String&);
-	template<typename T>
+			const Types::String&, const Types::String&);
+	template<typename C>
 	void setBy(
 			ValueEntry &entry, ValueContext &cxt, const TupleValue &value,
-			const Types::Sequential&);
-	template<typename T>
+			const C&, const Types::Sequential&);
 	void setBy(
 			ValueEntry &entry, ValueContext&, const TupleValue&,
-			const Types::Any&);
+			const Types::Any&, const Types::Any&);
 
 	void clear(ValueEntry &entry);
 
@@ -1460,7 +1593,7 @@ public:
 
 	class FieldReader;
 	class FieldGetter;
-	class FieldSetter;
+	template<bool Promo> class FieldSetter;
 
 	class Wrapper;
 
@@ -1509,11 +1642,15 @@ public:
 	void setValue(
 			SummaryTupleSet &tupleSet,
 			const SummaryColumn &column, const TupleValue &value);
+	void setValuePromoted(
+			SummaryTupleSet &tupleSet,
+			const SummaryColumn &column, const TupleValue &value);
 
 	template<typename T>
 	void setValueBy(
 			SummaryTupleSet &tupleSet,
-			const SummaryColumn &column, const typename T::ValueType &value);
+			const SummaryColumn &column,
+			const typename T::LocalValueType &value);
 
 	template<typename T>
 	void incrementValueBy(const SummaryColumn &column);
@@ -1522,6 +1659,10 @@ public:
 	void appendValueBy(
 			SummaryTupleSet &tupleSet, const SummaryColumn &column,
 			typename TypeTraits<T>::ReadableRefType value);
+
+	static void swapValue(
+			SummaryTupleSet &tupleSet, SummaryTuple &tuple1, uint32_t pos1,
+			SummaryTuple &tuple2, uint32_t pos2, uint32_t count);
 
 private:
 	typedef SummaryColumn::NullsUnitType NullsUnitType;
@@ -1545,6 +1686,10 @@ private:
 	typename T::ValueType getHeadValueDetailAs(
 			const SummaryColumn &column, const T&, const Rot&) const;
 	template<typename Rot>
+	TupleNanoTimestamp getHeadValueDetailAs(
+			const SummaryColumn &column, const Types::NanoTimestampTag&,
+			const Rot&) const;
+	template<typename Rot>
 	TupleString getHeadValueDetailAs(
 			const SummaryColumn &column, const Types::String&,
 			const Rot&) const;
@@ -1552,6 +1697,8 @@ private:
 	template<typename T>
 	typename T::ValueType getBodyValueDetailAs(
 			const SummaryColumn &column, const T&) const;
+	TupleNanoTimestamp getBodyValueDetailAs(
+			const SummaryColumn &column, const Types::NanoTimestampTag&) const;
 	TupleString getBodyValueDetailAs(
 			const SummaryColumn &column, const Types::String&) const;
 	TupleValue getBodyValueDetailAs(
@@ -1562,7 +1709,7 @@ private:
 	template<typename T, typename Shallow, typename Initializing>
 	void setValueDetailBy(
 			SummaryTupleSet &tupleSet, const SummaryColumn &column,
-			const typename T::ValueType &value, const T&, const Shallow&,
+			const typename T::LocalValueType &value, const T&, const Shallow&,
 			const Initializing&);
 	template<typename Shallow, typename Initializing>
 	void setValueDetailBy(
@@ -1664,6 +1811,7 @@ private:
 	const SummaryColumn &column_;
 };
 
+template<bool Promo>
 class SQLValues::SummaryTuple::FieldSetter {
 public:
 	typedef void RetType;
@@ -1688,6 +1836,9 @@ public:
 	}
 
 private:
+	template<typename T> void set(const util::TrueType&) const;
+	template<typename T> void set(const util::FalseType&) const;
+
 	SummaryTuple &tuple_;
 	SummaryTupleSet &tupleSet_;
 	const SummaryColumn &column_;
@@ -1712,7 +1863,9 @@ public:
 
 	typedef void (*FieldReaderFunc)(const SummaryTuple::FieldReader&);
 	typedef TupleValue (*FieldGetterFunc)(const SummaryTuple::FieldGetter&);
-	typedef void (*FieldSetterFunc)(const SummaryTuple::FieldSetter&);
+	typedef void (*FieldSetterFunc)(const SummaryTuple::FieldSetter<false>&);
+	typedef void (*FieldPromotedSetterFunc)(
+			const SummaryTuple::FieldSetter<true>&);
 
 	typedef std::pair<SummaryColumn, FieldReaderFunc> FieldReaderEntry;
 	typedef util::Vector<FieldReaderEntry> FieldReaderList;
@@ -1743,15 +1896,18 @@ public:
 	const ColumnList& getTotalColumnList() const;
 	const ColumnList& getReaderColumnList() const;
 	const ColumnList& getModifiableColumnList() const;
+	static void applyColumnList(const ColumnList &src, ColumnList &dest);
 
 	size_t estimateTupleSize() const;
 	bool isReadableTupleAvailable() const;
 	static int32_t getDefaultReadableTupleOffset();
+	size_t getFixedFieldSize(uint32_t index);
 
 	const FieldReaderList& getFieldReaderList() const;
 	const FieldReaderList& getSubFieldReaderList(uint32_t index) const;
 	FieldGetterFunc getFieldGetterFunc(uint32_t pos) const;
 	FieldSetterFunc getFieldSetterFunc(uint32_t pos) const;
+	FieldPromotedSetterFunc getFieldPromotedSetterFunc(uint32_t pos) const;
 
 	const SummaryColumn& getReaderHeadColumn() const;
 
@@ -1784,6 +1940,7 @@ private:
 	typedef util::Vector<FieldReaderList> AllFieldReaderList;
 	typedef util::Vector<FieldGetterFunc> FieldGetterFuncList;
 	typedef util::Vector<FieldSetterFunc> FieldSetterFuncList;
+	typedef util::Vector<FieldPromotedSetterFunc> FieldPromotedSetterFuncList;
 
 	typedef util::AllocVector<void*> Pool;
 
@@ -1885,6 +2042,7 @@ private:
 	AllFieldReaderList subFieldReaderList_;
 	FieldGetterFuncList getterFuncList_;
 	FieldSetterFuncList setterFuncList_;
+	FieldPromotedSetterFuncList promotedSetterFuncList_;
 
 	SummaryColumn readerHeadColumn_;
 
@@ -1989,6 +2147,7 @@ public:
 	struct VarScopeTraits;
 
 	class ByValue;
+	template<typename V> class ByLocalValue;
 	class ByReader;
 	class ByReadableTuple;
 	class ByArrayTuple;
@@ -2020,6 +2179,8 @@ private:
 	private:
 		const ValueAccessor &base_;
 	};
+
+	class NoopNullChecker;
 
 	TupleColumnType type_;
 	CompColumnList::const_iterator columnIt_;
@@ -2057,9 +2218,13 @@ struct SQLValues::ValueAccessor::TraitsBase {
 
 	template<typename T>
 	struct BodyOnly {
+		enum {
+			FOR_MULTI_VAR_OR_LARGE_FIXED =
+					(TypeUtils::Traits<T::COLUMN_TYPE>::FOR_MULTI_VAR ||
+					TypeUtils::Traits<T::COLUMN_TYPE>::FOR_LARGE_FIXED)
+		};
 		typedef typename util::BoolType<
-				(HEAD_SEPARATED && TypeUtils::Traits<
-						T::COLUMN_TYPE>::FOR_MULTI_VAR)>::Result Type;
+				(HEAD_SEPARATED && FOR_MULTI_VAR_OR_LARGE_FIXED)>::Result Type;
 	};
 
 	template<typename T>
@@ -2112,6 +2277,36 @@ public:
 		explicit NullChecker(const ValueAccessor &base) : AccessorRef(base) {}
 		template<typename P>
 		bool operator()(const SourceType &src, const P&);
+	};
+};
+
+template<typename V>
+class SQLValues::ValueAccessor::ByLocalValue {
+public:
+	typedef TraitsBase<ByLocalValue> TraitsType;
+	typedef typename V::LocalValueType SourceType;
+	typedef SourceType SubSourceType;
+
+	template<typename> class TypeAt : private AccessorRef {
+	public:
+		explicit TypeAt(const ValueAccessor &base) : AccessorRef(base) {}
+		template<typename P>
+		const SourceType& operator()(const SourceType &src, const P&) {
+			return src;
+		}
+	};
+
+	class NullChecker : private AccessorRef {
+	public:
+		explicit NullChecker(const ValueAccessor &base) : AccessorRef(base) {}
+		template<typename P>
+		bool operator()(const SourceType &src, const P&) {
+			typedef typename util::Conditional<
+					TypeUtils::Traits<V::COLUMN_TYPE>::FOR_ANY,
+					ByValue::NullChecker, NoopNullChecker>::Type BaseType;
+			BaseType base((get()));
+			return base(src, P());
+		}
 	};
 };
 
@@ -2258,6 +2453,19 @@ public:
 	};
 };
 
+class SQLValues::ValueAccessor::NoopNullChecker : private AccessorRef {
+public:
+	explicit NoopNullChecker(const ValueAccessor &base) :
+			AccessorRef(base) {
+	}
+
+	template<typename S, typename P>
+	bool operator()(const S&, const P&);
+
+	template<typename P>
+	bool operator()(const TupleValue &src, const P&);
+};
+
 class SQLValues::ValueBasicComparator {
 public:
 	typedef int32_t RetType;
@@ -2268,8 +2476,8 @@ public:
 
 		template<typename Pred>
 		bool operator()(
-				const typename T::ValueType &v1,
-				const typename T::ValueType &v2,
+				const typename T::LocalValueType &v1,
+				const typename T::LocalValueType &v2,
 				const Pred &pred) const;
 
 	private:
@@ -2315,8 +2523,20 @@ bool SQLValues::ValueBasicComparator::TypeAt<
 template<>
 template<typename Pred>
 bool SQLValues::ValueBasicComparator::TypeAt<
-		SQLValues::Types::Timestamp>::operator()(
+		SQLValues::Types::TimestampTag>::operator()(
 		const int64_t &v1, const int64_t &v2, const Pred &pred) const;
+template<>
+template<typename Pred>
+bool SQLValues::ValueBasicComparator::TypeAt<
+		SQLValues::Types::MicroTimestampTag>::operator()(
+		const MicroTimestamp &v1, const MicroTimestamp &v2,
+		const Pred &pred) const;
+template<>
+template<typename Pred>
+bool SQLValues::ValueBasicComparator::TypeAt<
+		SQLValues::Types::NanoTimestampTag>::operator()(
+		const NanoTimestamp &v1, const NanoTimestamp &v2,
+		const Pred &pred) const;
 template<>
 template<typename Pred>
 bool SQLValues::ValueBasicComparator::TypeAt<
@@ -2370,6 +2590,9 @@ public:
 	template<typename T>
 	class TypeAt;
 
+	template<typename T1, typename T2>
+	class BasicTypeAt;
+
 	struct ThreeWay {
 		typedef DefaultResultType result_type;
 		typedef PredArgType first_argument_type;
@@ -2386,8 +2609,11 @@ public:
 			VarContext *varCxt, bool sensitive, bool ascending);
 
 	static ValueComparator ofValues(
-			const TupleValue &v1, const TupleValue &v2,
-			bool sensitive, bool ascending);
+			const TupleValue &v1, const TupleValue &v2, bool sensitive,
+			bool ascending);
+	static DefaultResultType compareValues(
+			const TupleValue &v1, const TupleValue &v2, bool sensitive,
+			bool ascending);
 
 	DefaultResultType operator()(
 			const TupleValue &v1, const TupleValue &v2) const;
@@ -2411,6 +2637,12 @@ private:
 			void, false, true, false,
 			ValueAccessor::ByValue>::Type DefaultSwitcherByValues;
 
+	template<typename A, typename T, typename Comp>
+	struct PromotedOp;
+
+	template<typename A, typename T, typename Comp>
+	struct OpTypeOf;
+
 	TypeSwitcher getColumnTypeSwitcher(
 			bool promotable, bool nullIgnorable, ValueProfile *profile) const;
 
@@ -2422,6 +2654,11 @@ private:
 	static typename util::BinaryFunctionResultOf<Pred>::Type compare(
 			double v1, double v2, bool sensitive,
 			const Pred &pred, const Types::Floating&);
+
+	template<typename Pred, typename T>
+	static typename util::BinaryFunctionResultOf<Pred>::Type compare(
+			const T &v1, const T &v2, bool, const Pred &pred,
+			const Types::PreciseTimestamp&);
 
 	template<typename Pred>
 	static typename util::BinaryFunctionResultOf<Pred>::Type compare(
@@ -2612,6 +2849,28 @@ private:
 	const ValueComparator &base_;
 };
 
+template<typename T1, typename T2>
+class SQLValues::ValueComparator::BasicTypeAt {
+public:
+	explicit BasicTypeAt(bool sensitive) : sensitive_(sensitive) {
+	}
+
+	template<typename Pred>
+	typename util::BinaryFunctionResultOf<Pred>::Type operator()(
+			const typename T1::LocalValueType &v1,
+			const typename T2::LocalValueType &v2,
+			const Pred&) const;
+
+private:
+	typedef typename TypeUtils::PairTraits<
+			T1::COLUMN_TYPE, T2::COLUMN_TYPE> PairTraits;
+	typedef typename PairTraits::ComparableValueTag CompTypeTag;
+	typedef typename TypeUtils::template Traits<
+			CompTypeTag::COLUMN_TYPE> TypeTraits;
+
+	bool sensitive_;
+};
+
 class SQLValues::ValueComparator::Arranged {
 public:
 	explicit Arranged(const ValueComparator &base);
@@ -2625,6 +2884,39 @@ private:
 	typedef DefaultSwitcherByValues SwitcherType;
 	ValueComparator base_;
 	SwitcherType::DefaultFuncType func_;
+};
+
+template<typename A, typename T, typename Comp>
+struct SQLValues::ValueComparator::PromotedOp {
+public:
+	explicit PromotedOp(const ValueAccessor &accessor);
+
+	template<typename Source, typename Pos>
+	typename Comp::LocalValueType operator()(
+			const Source &src, const Pos&) const;
+
+private:
+	typedef typename A::template TypeAt<T> BaseOpType;
+
+	const ValueAccessor &accessor_;
+};
+
+template<typename A, typename T, typename Comp>
+struct SQLValues::ValueComparator::OpTypeOf {
+private:
+	typedef PromotedOp<A, T, Comp> PromotedOpType;
+	typedef typename A::template TypeAt<T> BaseOpType;
+	typedef typename TypeUtils::Traits<T::COLUMN_TYPE> TraitsType;
+
+	enum {
+		PROMOTION_REQUIRED =
+				(!util::IsSame<T, Comp>::VALUE &&
+				TraitsType::FOR_TIMESTAMP_FAMILY)
+	};
+
+public:
+	typedef typename util::Conditional<
+			PROMOTION_REQUIRED, PromotedOpType, BaseOpType>::Type Type;
 };
 
 class SQLValues::ValueEq {
@@ -2681,6 +2973,9 @@ private:
 			uint32_t seed, const double &value, const Types::Floating&);
 	template<typename T>
 	static int64_t digest(
+			uint32_t seed, const T &value, const Types::PreciseTimestamp&);
+	template<typename T>
+	static int64_t digest(
 			uint32_t seed, const T &value, const Types::Sequential&);
 	static int64_t digest(
 			uint32_t seed, const TupleValue &value, const Types::Any&);
@@ -2723,6 +3018,8 @@ private:
 
 	static int64_t digest(const int64_t &value, const Types::Integral&);
 	static int64_t digest(const double &value, const Types::Floating&);
+	template<typename T>
+	static int64_t digest(const T &value, const Types::PreciseTimestamp&);
 	template<typename T>
 	static int64_t digest(const T &value, const Types::Sequential&);
 	static int64_t digest(const TupleValue &value, const Types::Any&);
@@ -2898,7 +3195,7 @@ private:
 class SQLValues::ValuePromoter {
 public:
 	explicit ValuePromoter(TupleColumnType type);
-	TupleValue operator()(const TupleValue &src) const;
+	TupleValue operator()(ValueContext *cxt, const TupleValue &src) const;
 
 private:
 	TupleColumnType type_;
@@ -3735,31 +4032,33 @@ private:
 	const BaseType &base_;
 };
 
-class SQLValues::TupleConverter {
+class SQLValues::DateTimeElements {
 public:
-	TupleConverter(
-			const CompColumnList &srcColumnList,
-			const CompColumnList &destColumnList);
-	void operator()(
-			ValueContext &cxt, const ReadableTuple &src,
-			WritableTuple &dest) const;
+	explicit DateTimeElements(const int64_t &value);
+	explicit DateTimeElements(const MicroTimestamp &value);
+	explicit DateTimeElements(const NanoTimestamp &value);
+
+	explicit DateTimeElements(const util::DateTime &value);
+	explicit DateTimeElements(const util::PreciseDateTime &value);
+
+	int64_t toTimestamp(const Types::TimestampTag&) const;
+	MicroTimestamp toTimestamp(const Types::MicroTimestampTag&) const;
+	NanoTimestamp toTimestamp(const Types::NanoTimestampTag&) const;
+
+	util::DateTime toDateTime(const Types::TimestampTag&) const;
+	util::PreciseDateTime toDateTime(const Types::MicroTimestampTag&) const;
+	util::PreciseDateTime toDateTime(const Types::NanoTimestampTag&) const;
+
+	int64_t getUnixTimeMillis() const;
+	uint32_t getNanoSeconds() const;
 
 private:
-	const CompColumnList &srcColumnList_;
-	const CompColumnList &destColumnList_;
-};
-
-class SQLValues::TuplePromoter {
-public:
-	TuplePromoter(
-			const CompColumnList &srcColumnList,
-			const CompColumnList &destColumnList);
-	void operator()(
-			const ReadableTuple &src, WritableTuple &dest) const;
-
-private:
-	const CompColumnList &srcColumnList_;
-	const CompColumnList &destColumnList_;
+	struct Constants {
+		static const int64_t HIGH_MICRO_UNIT = NanoTimestamp::HIGH_MICRO_UNIT;
+		static const int64_t HIGH_MICRO_REV_UNIT = 1000 / HIGH_MICRO_UNIT;
+	};
+	int64_t unixTimeMillis_;
+	uint32_t nanoSeconds_;
 };
 
 class SQLValues::StringBuilder {
@@ -3904,6 +4203,10 @@ struct SQLValues::ValueUtils {
 
 	static int32_t compareIntegral(int64_t v1, int64_t v2);
 	static int32_t compareFloating(double v1, double v2, bool sensitive);
+	static int32_t comparePreciseTimestamp(
+			const MicroTimestamp &v1, const MicroTimestamp &v2);
+	static int32_t comparePreciseTimestamp(
+			const NanoTimestamp &v1, const NanoTimestamp &v2);
 	static int32_t compareString(const TupleString &v1, const TupleString &v2);
 	template<typename R> static int32_t compareSequence(R &v1, R &v2);
 
@@ -3913,6 +4216,16 @@ struct SQLValues::ValueUtils {
 	template<typename Pred>
 	static typename util::BinaryFunctionResultOf<Pred>::Type compareFloating(
 			double v1, double v2, bool sensitive, const Pred &pred);
+	template<typename Pred>
+	static typename util::BinaryFunctionResultOf<
+			Pred>::Type comparePreciseTimestamp(
+			const MicroTimestamp &v1, const MicroTimestamp &v2,
+			const Pred &pred);
+	template<typename Pred>
+	static typename util::BinaryFunctionResultOf<
+			Pred>::Type comparePreciseTimestamp(
+			const NanoTimestamp &v1, const NanoTimestamp &v2,
+			const Pred &pred);
 	template<typename Pred>
 	static typename util::BinaryFunctionResultOf<Pred>::Type compareString(
 			const TupleString &v1, const TupleString &v2, const Pred &pred);
@@ -3933,10 +4246,26 @@ struct SQLValues::ValueUtils {
 
 	static int32_t compareNull(bool nullValue1, bool nullValue2);
 
+	static bool isUpperBoundaryAsLong(const TupleValue &value, int64_t unit);
+	static bool isLowerBoundaryAsLong(const TupleValue &value, int64_t unit);
+
+	static TupleColumnType getBoundaryCategoryAsLong(TupleColumnType type);
+
+	static bool isSmallestBoundaryUnitAsLong(
+			const TupleValue &value, int64_t unit);
+	static int32_t getBoundaryDirectionAsLong(
+			const TupleValue &value, int64_t unit);
+
 
 	static uint32_t fnv1aHashInit();
 	static uint32_t fnv1aHashIntegral(uint32_t base, int64_t value);
 	static uint32_t fnv1aHashFloating(uint32_t base, double value);
+	static uint32_t fnv1aHashPreciseTimestamp(
+			uint32_t base, const MicroTimestamp &value);
+	static uint32_t fnv1aHashPreciseTimestamp(
+			uint32_t base, const NanoTimestamp &value);
+	static uint32_t fnv1aHashPreciseTimestamp(
+			uint32_t base, const DateTimeElements &value);
 	template<typename R> static uint32_t fnv1aHashSequence(
 			uint32_t base, R &value);
 	static uint32_t fnv1aHashBytes(
@@ -3948,6 +4277,10 @@ struct SQLValues::ValueUtils {
 	static int64_t digestOrderedIntegral(int64_t value, const util::FalseType&);
 	template<typename Asc> static int64_t digestOrderedFloating(
 			double value, const Asc&);
+	template<typename Asc> static int64_t digestOrderedPreciseTimestamp(
+			const MicroTimestamp &value, const Asc&);
+	template<typename Asc> static int64_t digestOrderedPreciseTimestamp(
+			const NanoTimestamp &value, const Asc&);
 	template<typename Asc, typename R> static int64_t digestOrderedSequence(
 			R &value, const Asc&);
 
@@ -3959,6 +4292,8 @@ struct SQLValues::ValueUtils {
 			int64_t digest, const Asc&, const Types::Integral&);
 	template<typename Asc> static double toValueByOrderdDigest(
 			int64_t digest, const Asc&, const Types::Floating&);
+	template<typename Asc> static MicroTimestamp toValueByOrderdDigest(
+			int64_t digest, const Asc&, const Types::MicroTimestampTag&);
 
 	static int64_t rotateDigest(int64_t digest, const util::TrueType&);
 	static int64_t rotateDigest(int64_t digest, const util::FalseType&);
@@ -3968,14 +4303,18 @@ struct SQLValues::ValueUtils {
 
 
 	template<TupleColumnType T>
-	static typename TypeUtils::Traits<T>::ValueType promoteValue(
+	static typename TypeUtils::Traits<T>::LocalValueType promoteValue(
 			const TupleValue &src);
 
 	static int64_t toLong(const TupleValue &src);
 	static double toDouble(const TupleValue &src);
 	template<typename T> static T toIntegral(const TupleValue &src);
 	template<typename T> static T toFloating(const TupleValue &src);
-	static int64_t toTimestamp(ValueContext &cxt, const TupleValue &src);
+
+	static DateTimeElements toTimestamp(
+			ValueContext &cxt, const TupleValue &src,
+			util::DateTime::FieldType precision);
+
 	static bool toBool(const TupleValue &src);
 	static TupleValue toString(ValueContext &cxt, const TupleValue &src);
 	static TupleValue toBlob(ValueContext &cxt, const TupleValue &src);
@@ -4003,8 +4342,8 @@ struct SQLValues::ValueUtils {
 	static void formatLong(StringBuilder &builder, int64_t value);
 	static void formatDouble(StringBuilder &builder, double value);
 	static void formatTimestamp(
-			StringBuilder &builder, const util::DateTime &value,
-			const util::TimeZone &zone);
+			StringBuilder &builder, const DateTimeElements &value,
+			const util::TimeZone &zone, util::DateTime::FieldType precision);
 	static void formatBool(StringBuilder &builder, bool value);
 	static void formatBlob(StringBuilder &builder, const TupleValue &value);
 
@@ -4013,9 +4352,10 @@ struct SQLValues::ValueUtils {
 			const TupleString::BufferInfo &src, int64_t &dest, bool strict);
 	static bool parseDouble(
 			const TupleString::BufferInfo &src, double &dest, bool strict);
-	static int64_t parseTimestamp(
+	static DateTimeElements parseTimestamp(
 			const TupleString::BufferInfo &src, const util::TimeZone &zone,
-			bool zoneSpecified, util::StdAllocator<void, void> alloc);
+			bool zoneSpecified, util::DateTime::FieldType precision,
+			util::StdAllocator<void, void> alloc);
 	static bool parseBool(
 			const TupleString::BufferInfo &src, bool &dest, bool strict);
 	static void parseBlob(
@@ -4033,6 +4373,11 @@ struct SQLValues::ValueUtils {
 	static TupleValue toAnyByTimestamp(int64_t src);
 	static TupleValue toAnyByBool(bool src);
 
+	static TupleValue createNanoTimestampValue(
+			util::StackAllocator &alloc, const NanoTimestamp &ts);
+	static TupleValue createNanoTimestampValue(
+			ValueContext &cxt, const NanoTimestamp &ts);
+
 	static TupleValue createEmptyValue(
 			ValueContext &cxt, TupleColumnType type);
 
@@ -4044,8 +4389,14 @@ struct SQLValues::ValueUtils {
 			const typename TypeUtils::Traits<
 					T::COLUMN_TYPE>::ComparableValueType &src);
 
-	template<typename T, typename S> static typename T::ValueType getPromoted(
-			const typename S::ValueType &src);
+	template<typename T>
+	static typename T::ValueType getValueByAddress(const void *src);
+	template<typename T>
+	static const void* getAddressByValue(const typename T::ValueType &src);
+
+	template<typename T, typename S>
+	static typename T::LocalValueType getPromoted(
+			const typename S::LocalValueType &src);
 
 	template<TupleColumnType T>
 	static typename TypeUtils::Traits<T>::ReadableSourceType toReadableSource(
@@ -4085,7 +4436,8 @@ struct SQLValues::ValueUtils {
 	static TupleColumnType toColumnType(const TupleValue &value);
 
 
-	static int64_t checkTimestamp(int64_t tsValue);
+	static DateTimeElements checkTimestamp(
+			const DateTimeElements& tsValue);
 
 	static void applyDateTimeOption(util::DateTime::ZonedOption &option);
 	static void applyDateTimeOption(util::DateTime::Option &option);
@@ -4244,7 +4596,7 @@ struct SQLValues::ValueUtils {
 
 	template<typename T> static void writeValue(
 			WritableTuple &tuple, const TupleColumn &column,
-			const typename T::ValueType &value);
+			const typename T::LocalValueType &value);
 	static void writeAny(
 			WritableTuple &tuple, const TupleColumn &column,
 			const TupleValue &value);
@@ -4273,10 +4625,22 @@ int64_t SQLValues::ValueUtils::promoteValue<TupleTypes::TYPE_LONG>(
 template<>
 double SQLValues::ValueUtils::promoteValue<TupleTypes::TYPE_DOUBLE>(
 		const TupleValue &src);
+template<>
+int64_t SQLValues::ValueUtils::promoteValue<TupleTypes::TYPE_TIMESTAMP>(
+		const TupleValue &src);
+template<>
+MicroTimestamp SQLValues::ValueUtils::promoteValue<
+		TupleTypes::TYPE_MICRO_TIMESTAMP>(const TupleValue &src);
+template<>
+NanoTimestamp SQLValues::ValueUtils::promoteValue<
+		TupleTypes::TYPE_NANO_TIMESTAMP>(const TupleValue &src);
 
 template<> TupleValue SQLValues::ValueUtils::toAnyByValue<
 		TupleTypes::TYPE_TIMESTAMP>(const int64_t &src);
 
+template<> TupleValue SQLValues::ValueUtils::toAnyByWritable<
+		TupleTypes::TYPE_NANO_TIMESTAMP>(
+		ValueContext &cxt, const NanoTimestamp &src);
 template<> TupleValue SQLValues::ValueUtils::toAnyByWritable<
 		TupleTypes::TYPE_STRING>(ValueContext &cxt, StringBuilder &src);
 template<> TupleValue SQLValues::ValueUtils::toAnyByWritable<
@@ -4298,10 +4662,42 @@ template<>
 TupleString SQLValues::ValueUtils::getValue(const TupleValue &src);
 
 template<>
+int64_t SQLValues::ValueUtils::getPromoted<
+		SQLValues::Types::TimestampTag, SQLValues::Types::MicroTimestampTag>(
+		const MicroTimestamp &src);
+template<>
+int64_t SQLValues::ValueUtils::getPromoted<
+		SQLValues::Types::TimestampTag, SQLValues::Types::NanoTimestampTag>(
+		const NanoTimestamp &src);
+template<>
+MicroTimestamp SQLValues::ValueUtils::getPromoted<
+		SQLValues::Types::MicroTimestampTag, SQLValues::Types::TimestampTag>(
+		const int64_t &src);
+template<>
+MicroTimestamp SQLValues::ValueUtils::getPromoted<
+		SQLValues::Types::MicroTimestampTag, SQLValues::Types::NanoTimestampTag>(
+		const NanoTimestamp &src);
+template<>
+NanoTimestamp SQLValues::ValueUtils::getPromoted<
+		SQLValues::Types::NanoTimestampTag, SQLValues::Types::TimestampTag>(
+		const int64_t &src);
+template<>
+NanoTimestamp SQLValues::ValueUtils::getPromoted<
+		SQLValues::Types::NanoTimestampTag, SQLValues::Types::MicroTimestampTag>(
+		const MicroTimestamp &src);
+
+template<>
 bool SQLValues::ValueUtils::getValueByComparable<
 		SQLValues::Types::Bool>(
 		const TypeUtils::Traits<
 				Types::Bool::COLUMN_TYPE>::ComparableValueType &src);
+
+template<>
+TupleNanoTimestamp SQLValues::ValueUtils::getValueByAddress<
+		SQLValues::Types::NanoTimestampTag>(const void *src);
+template<>
+TupleString SQLValues::ValueUtils::getValueByAddress<
+		SQLValues::Types::String>(const void *src);
 
 template<>
 TupleString::BufferInfo SQLValues::ValueUtils::toReadableSource<
@@ -4392,7 +4788,7 @@ struct SQLValues::ValueUtils::TupleWrapper {
 
 		void setBy(
 				const TupleColumn &column,
-				const typename T::ValueType &value) const {
+				const typename T::LocalValueType &value) const {
 			writeAny(tuple_, column, toAnyByValue<T::COLUMN_TYPE>(value));
 		}
 
@@ -4724,7 +5120,13 @@ typename SubOp::RetType SQLValues::TypeSwitcher::operate(
 				Types::Double>::Type>(op);
 	case TupleTypes::TYPE_TIMESTAMP:
 		return operate<SubOp, typename Filter::template First<
-				Types::Timestamp>::Type>(op);
+				Types::TimestampTag>::Type>(op);
+	case TupleTypes::TYPE_MICRO_TIMESTAMP:
+		return operate<SubOp, typename Filter::template First<
+				Types::MicroTimestampTag>::Type>(op);
+	case TupleTypes::TYPE_NANO_TIMESTAMP:
+		return operate<SubOp, typename Filter::template First<
+				Types::NanoTimestampTag>::Type>(op);
 	case TupleTypes::TYPE_BOOL:
 		return operate<SubOp, typename Filter::template First<
 				Types::Bool>::Type>(op);
@@ -4764,6 +5166,15 @@ typename SubOp::RetType SQLValues::TypeSwitcher::operate(
 	case TupleTypes::TYPE_DOUBLE:
 		return operate<SubOp, T1, typename Filter::template Second<
 				T1, Types::Double>::Type>(op);
+	case TupleTypes::TYPE_TIMESTAMP:
+		return operate<SubOp, T1, typename Filter::template Second<
+				T1, Types::TimestampTag>::Type>(op);
+	case TupleTypes::TYPE_MICRO_TIMESTAMP:
+		return operate<SubOp, T1, typename Filter::template Second<
+				T1, Types::MicroTimestampTag>::Type>(op);
+	case TupleTypes::TYPE_NANO_TIMESTAMP:
+		return operate<SubOp, T1, typename Filter::template Second<
+				T1, Types::NanoTimestampTag>::Type>(op);
 	default:
 		assert(getMaskedType1() == getMaskedType2() ||
 				(SubOp::TraitsType::TYPE_COUNT ==1 &&
@@ -4930,14 +5341,15 @@ inline typename T::ValueType SQLValues::ArrayTuple::getAs(size_t index) const {
 			(util::IsSame<T, typename Types::Any>::VALUE &&
 			entry.type_ == TupleTypes::TYPE_NULL));
 
-	typedef typename TypeUtils::template Traits<
-			T::COLUMN_TYPE>::FineComparableTag TypeTag;
-	return ValueUtils::getValueByComparable<T>(getAs<T>(entry, TypeTag()));
+	typedef typename TypeUtils::template Traits<T::COLUMN_TYPE> TraitsType;
+	typedef typename TraitsType::NormalStorageTag TypeTag;
+
+	return getAs<T>(entry, TypeTag());
 }
 
 template<typename T>
 inline void SQLValues::ArrayTuple::setBy(
-		size_t index, ValueContext &cxt, const typename T::ValueType &value) {
+		size_t index, ValueContext &cxt, const typename T::LocalValueType &value) {
 	ValueEntry &entry = getEntry(index);
 	const TupleColumnType type = (util::IsSame<T, typename Types::Any>::VALUE ?
 			static_cast<TupleColumnType>(TupleTypes::TYPE_NULL) :
@@ -4946,60 +5358,76 @@ inline void SQLValues::ArrayTuple::setBy(
 	assert(entry.type_ == TupleTypes::TYPE_NULL ||
 			type == TupleTypes::TYPE_NULL || entry.type_ == type);
 
-	typedef typename TypeUtils::template Traits<
-			T::COLUMN_TYPE>::FineComparableTag TypeTag;
-	setBy<T>(entry, cxt, value, TypeTag());
+	typedef typename TypeUtils::template Traits<T::COLUMN_TYPE> TraitsType;
+	typedef typename TraitsType::ComparableValueTag ComparableTag;
+	typedef typename TraitsType::FineNormalStorageTag TypeTag;
+
+	setBy(entry, cxt, value, ComparableTag(), TypeTag());
 	entry.type_ = type;
 }
 
 template<typename T>
-inline int64_t SQLValues::ArrayTuple::getAs(
-		const ValueEntry &entry, const Types::Integral&) const {
-	return entry.value_.integral_;
+inline typename T::ValueType SQLValues::ArrayTuple::getAs(
+		const ValueEntry &entry, const Types::NormalFixed&) const {
+	const ValueBody &valueBody = entry.value_;
+
+	UTIL_STATIC_ASSERT((
+			sizeof(typename T::LocalValueType) <= sizeof(valueBody)));
+	const void *addr = &valueBody;
+
+	typedef typename TypeUtils::template Traits<
+			T::COLUMN_TYPE>::ComparableValueType Comparable;
+	return ValueUtils::getValueByComparable<T>(
+			*static_cast<const Comparable*>(addr));
 }
 
 template<typename T>
-inline double SQLValues::ArrayTuple::getAs(
-		const ValueEntry &entry, const Types::Floating&) const {
-	return entry.value_.floating_;
+inline typename T::ValueType SQLValues::ArrayTuple::getAs(
+		const ValueEntry &entry, const Types::VarOrLarge&) const {
+	return ValueUtils::getValueByAddress<T>(entry.value_.var_);
 }
 
-template<typename T>
-inline TupleString SQLValues::ArrayTuple::getAs(
-		const ValueEntry &entry, const Types::String&) const {
-	return TupleString(entry.value_.var_);
-}
-
-template<typename T>
-TupleValue SQLValues::ArrayTuple::getAs(
-		const ValueEntry &entry, const Types::Sequential&) const {
-	return TupleValue(entry.value_.var_, T::COLUMN_TYPE);
-}
-
-template<typename T>
+template<typename>
 inline TupleValue SQLValues::ArrayTuple::getAs(
 		const ValueEntry&, const Types::Any&) const {
 	return TupleValue();
 }
 
-template<typename T>
+template<typename C>
 inline void SQLValues::ArrayTuple::setBy(
-		ValueEntry &entry, ValueContext&, int64_t value,
-		const Types::Integral&) {
-	entry.value_.integral_ = value;
+		ValueEntry &entry, ValueContext&,
+		const typename C::LocalValueType &value, const C&,
+		const Types::NormalFixed&) {
+	typedef typename C::LocalValueType ValueType;
+
+	ValueBody &valueBody = entry.value_;
+
+	UTIL_STATIC_ASSERT((sizeof(ValueType) <= sizeof(valueBody)));
+	void *addr = &valueBody;
+
+	*static_cast<ValueType*>(addr) = static_cast<ValueType>(value);
 }
 
-template<typename T>
 inline void SQLValues::ArrayTuple::setBy(
-		ValueEntry &entry, ValueContext&, double value,
-		const Types::Floating&) {
-	entry.value_.floating_ = value;
+		ValueEntry &entry, ValueContext&, const NanoTimestamp &value,
+		const Types::NanoTimestampTag&, const Types::NanoTimestampTag&) {
+	const uint32_t size = sizeof(value);
+
+	uint8_t *dest;
+	if (entry.data_.var_ == NULL || size > entry.data_.var_->size()) {
+		dest = prepareVarData(entry, size);
+	}
+	else {
+		dest = &((*entry.data_.var_)[0]);
+	}
+
+	memcpy(dest, &value, size);
+	entry.value_.var_ = dest;
 }
 
-template<typename T>
 inline void SQLValues::ArrayTuple::setBy(
 		ValueEntry &entry, ValueContext&, const TupleString &value,
-		const Types::String&) {
+		const Types::String&, const Types::String&) {
 	const void *src = value.data();
 
 	const uint32_t bodySize = TupleValueUtils::decodeVarSize(src);
@@ -5018,13 +5446,12 @@ inline void SQLValues::ArrayTuple::setBy(
 	entry.value_.var_ = dest;
 }
 
-template<typename T>
-void SQLValues::ArrayTuple::setBy(
+template<typename C>
+inline void SQLValues::ArrayTuple::setBy(
 		ValueEntry &entry, ValueContext &cxt, const TupleValue &value,
-		const Types::Sequential&) {
+		const C&, const Types::Sequential&) {
 	clear(entry);
 
-	assert(T::COLUMN_TYPE == value.getType());
 	TupleValue dest = ValueUtils::duplicateValue(cxt, value);
 	ValueUtils::moveValueToRoot(cxt, dest, cxt.getVarContextDepth(), 0);
 
@@ -5032,10 +5459,9 @@ void SQLValues::ArrayTuple::setBy(
 	entry.data_.varCxt_ = &cxt.getVarContext();
 }
 
-template<typename T>
-void SQLValues::ArrayTuple::setBy(
+inline void SQLValues::ArrayTuple::setBy(
 		ValueEntry &entry, ValueContext&, const TupleValue&,
-		const Types::Any&) {
+		const Types::Any&, const Types::Any&) {
 	clear(entry);
 }
 
@@ -5236,6 +5662,8 @@ inline typename T::ValueType SQLValues::SummaryTuple::getValueAs(
 	const bool onHead =
 			(static_cast<TupleColumnType>(T::COLUMN_TYPE) !=
 					TupleTypes::TYPE_BLOB &&
+			static_cast<TupleColumnType>(T::COLUMN_TYPE) !=
+					TupleTypes::TYPE_NANO_TIMESTAMP &&
 			!column.isOnBody());
 	return (onHead ?
 			(column.isRotating() ?
@@ -5271,13 +5699,20 @@ inline void SQLValues::SummaryTuple::setValue(
 		SummaryTupleSet &tupleSet,
 		const SummaryColumn &column, const TupleValue &value) {
 	tupleSet.getFieldSetterFunc(column.getSummaryPosition())(
-			FieldSetter(*this, tupleSet, column, value));
+			FieldSetter<false>(*this, tupleSet, column, value));
+}
+
+inline void SQLValues::SummaryTuple::setValuePromoted(
+		SummaryTupleSet &tupleSet,
+		const SummaryColumn &column, const TupleValue &value) {
+	tupleSet.getFieldPromotedSetterFunc(column.getSummaryPosition())(
+			FieldSetter<true>(*this, tupleSet, column, value));
 }
 
 template<typename T>
 inline void SQLValues::SummaryTuple::setValueBy(
 		SummaryTupleSet &tupleSet,
-		const SummaryColumn &column, const typename T::ValueType &value) {
+		const SummaryColumn &column, const typename T::LocalValueType &value) {
 	assert(tupleSet.getFieldSetterFunc(column.getSummaryPosition()) != NULL);
 
 	setValueDetailBy(
@@ -5347,14 +5782,22 @@ template<typename T, typename Rot>
 inline typename T::ValueType SQLValues::SummaryTuple::getHeadValueDetailAs(
 		const SummaryColumn &column, const T&, const Rot&) const {
 	static_cast<void>(column);
-	const bool available = (!TypeUtils::Traits<T::COLUMN_TYPE>::SIZE_VAR ||
-			TypeUtils::Traits<T::COLUMN_TYPE>::FOR_ANY);
+	const bool available =
+			!TypeUtils::Traits<T::COLUMN_TYPE>::SIZE_VAR_OR_LARGE_EXPLICIT;
 	typedef typename util::Conditional<
 			available, T, SQLValues::Types::Any>::Type FixedTypeTag;
 	typedef util::TrueType Ascending;
 	assert(available);
 	return ValueUtils::toValueByOrderdDigest<FixedTypeTag, Ascending>(
 			ValueUtils::digestByRotation(head_.digest_, Rot()));
+}
+
+template<typename Rot>
+inline TupleNanoTimestamp SQLValues::SummaryTuple::getHeadValueDetailAs(
+		const SummaryColumn &column, const Types::NanoTimestampTag&,
+		const Rot&) const {
+	assert(false);
+	return getBodyValueDetailAs(column, Types::NanoTimestampTag());
 }
 
 template<typename Rot>
@@ -5371,6 +5814,12 @@ inline typename T::ValueType SQLValues::SummaryTuple::getBodyValueDetailAs(
 	typedef typename TypeUtils::Traits<T::COLUMN_TYPE>::StorableValueType Storable;
 	return ValueUtils::getValueByComparable<T>(
 			*static_cast<const Storable*>(getField(column.getOffset())));
+}
+
+inline TupleNanoTimestamp SQLValues::SummaryTuple::getBodyValueDetailAs(
+		const SummaryColumn &column, const Types::NanoTimestampTag&) const {
+	return ValueUtils::getValueByAddress<Types::NanoTimestampTag>(
+			getField(column.getOffset()));
 }
 
 inline TupleString SQLValues::SummaryTuple::getBodyValueDetailAs(
@@ -5405,7 +5854,7 @@ inline TupleValue SQLValues::SummaryTuple::getBodyValueDetailAs(
 template<typename T, typename Shallow, typename Initializing>
 inline void SQLValues::SummaryTuple::setValueDetailBy(
 		SummaryTupleSet &tupleSet, const SummaryColumn &column,
-		const typename T::ValueType &value, const T&, const Shallow&,
+		const typename T::LocalValueType &value, const T&, const Shallow&,
 		const Initializing&) {
 	static_cast<void>(tupleSet);
 	typedef typename TypeUtils::Traits<T::COLUMN_TYPE>::StorableValueType Storable;
@@ -5521,6 +5970,7 @@ inline SQLValues::SummaryTuple::Head SQLValues::SummaryTuple::readHead(
 	return head;
 }
 
+
 inline SQLValues::SummaryTuple::Head SQLValues::SummaryTuple::digestToHead(
 		int64_t digest) {
 	Head head;
@@ -5553,15 +6003,38 @@ SQLValues::SummaryTuple::FieldGetter::TypeAt<T>::operator()() const {
 }
 
 
+template<bool Promo>
 template<typename T>
-inline void SQLValues::SummaryTuple::FieldSetter::TypeAt<T>::operator()() const {
-	if (ValueUtils::isNull(base_.value_)) {
-		base_.tuple_.setNull(base_.column_);
+inline void SQLValues::SummaryTuple::FieldSetter<Promo>::set(
+		const util::TrueType&) const {
+	if (ValueUtils::isNull(value_)) {
+		tuple_.setNull(column_);
 		return;
 	}
-	base_.tuple_.template setValueBy<T>(
-			base_.tupleSet_, base_.column_,
-			ValueUtils::getValue<typename T::ValueType>(base_.value_));
+	tuple_.template setValueBy<T>(
+			tupleSet_, column_,
+			ValueUtils::promoteValue<T::COLUMN_TYPE>(value_));
+}
+
+template<bool Promo>
+template<typename T>
+inline void SQLValues::SummaryTuple::FieldSetter<Promo>::set(
+		const util::FalseType&) const {
+	if (ValueUtils::isNull(value_)) {
+		tuple_.setNull(column_);
+		return;
+	}
+	tuple_.template setValueBy<T>(
+			tupleSet_, column_,
+			ValueUtils::getValue<typename T::ValueType>(value_));
+}
+
+template<bool Promo>
+template<typename T>
+inline void SQLValues::SummaryTuple::FieldSetter<
+		Promo>::TypeAt<T>::operator()() const {
+	typedef typename util::BoolType<Promo>::Result PromoType;
+	base_.set<T>(PromoType());
 }
 
 
@@ -5583,6 +6056,11 @@ SQLValues::SummaryTupleSet::getFieldGetterFunc(uint32_t pos) const {
 inline SQLValues::SummaryTupleSet::FieldSetterFunc
 SQLValues::SummaryTupleSet::getFieldSetterFunc(uint32_t pos) const {
 	return setterFuncList_[pos];
+}
+
+inline SQLValues::SummaryTupleSet::FieldPromotedSetterFunc
+SQLValues::SummaryTupleSet::getFieldPromotedSetterFunc(uint32_t pos) const {
+	return promotedSetterFuncList_[pos];
 }
 
 inline const SQLValues::SummaryColumn&
@@ -5789,6 +6267,22 @@ SQLValues::ValueAccessor::BySummaryTupleBody::TypeAt<T>::operator()(
 }
 
 
+template<typename S, typename P>
+inline bool SQLValues::ValueAccessor::NoopNullChecker::operator()(
+		const S&, const P&) {
+	UTIL_STATIC_ASSERT((!util::IsSame<S, TupleValue>::VALUE));
+	return false;
+}
+
+template<typename P>
+inline bool SQLValues::ValueAccessor::NoopNullChecker::operator()(
+		const TupleValue &src, const P&) {
+	assert(!ValueUtils::isNull(src));
+	static_cast<void>(src);
+	return false;
+}
+
+
 template<>
 template<typename Pred>
 inline bool SQLValues::ValueBasicComparator::TypeAt<
@@ -5840,9 +6334,27 @@ inline bool SQLValues::ValueBasicComparator::TypeAt<
 template<>
 template<typename Pred>
 inline bool SQLValues::ValueBasicComparator::TypeAt<
-		SQLValues::Types::Timestamp>::operator()(
+		SQLValues::Types::TimestampTag>::operator()(
 		const int64_t &v1, const int64_t &v2, const Pred &pred) const {
 	return pred(v1, v2);
+}
+
+template<>
+template<typename Pred>
+inline bool SQLValues::ValueBasicComparator::TypeAt<
+		SQLValues::Types::MicroTimestampTag>::operator()(
+		const MicroTimestamp &v1, const MicroTimestamp &v2,
+		const Pred &pred) const {
+	return pred(v1.value_, v2.value_);
+}
+
+template<>
+template<typename Pred>
+inline bool SQLValues::ValueBasicComparator::TypeAt<
+		SQLValues::Types::NanoTimestampTag>::operator()(
+		const NanoTimestamp &v1, const NanoTimestamp &v2,
+		const Pred &pred) const {
+	return pred(ValueUtils::comparePreciseTimestamp(v1, v2), 0);
 }
 
 template<>
@@ -5893,6 +6405,13 @@ inline SQLValues::ValueComparator::ValueComparator(
 		ascending_(ascending) {
 }
 
+inline SQLValues::ValueComparator::DefaultResultType
+SQLValues::ValueComparator::compareValues(
+		const TupleValue &v1, const TupleValue &v2, bool sensitive,
+		bool ascending) {
+	return ofValues(v1, v2, sensitive, ascending)(v1, v2);
+}
+
 template<typename Pred>
 inline typename util::BinaryFunctionResultOf<Pred>::Type
 SQLValues::ValueComparator::compare(
@@ -5907,6 +6426,14 @@ SQLValues::ValueComparator::compare(
 		double v1, double v2, bool sensitive,
 		const Pred &pred, const Types::Floating&) {
 	return ValueUtils::compareFloating(v1, v2, sensitive, pred);
+}
+
+template<typename Pred, typename T>
+inline typename util::BinaryFunctionResultOf<Pred>::Type
+SQLValues::ValueComparator::compare(
+		const T &v1, const T &v2, bool, const Pred &pred,
+		const Types::PreciseTimestamp&) {
+	return ValueUtils::comparePreciseTimestamp(v1, v2, pred);
 }
 
 template<typename Pred>
@@ -5962,18 +6489,37 @@ SQLValues::ValueComparator::TypeAt<T>::operator()(
 		}
 	}
 
-	typedef typename TypeUtils::template Traits<
-			T::ComparableValueTag::COLUMN_TYPE> TypeTraits;
-	typedef typename T::ComparableValueTag::ValueType ValueType;
+	typedef typename T::ComparableValueTag CompTypeTag;
 
-	typedef typename AccessorType1::template TypeAt<typename T::Type1> Op1;
-	typedef typename AccessorType2::template TypeAt<typename T::Type2> Op2;
+	typedef typename TypeUtils::template Traits<
+			CompTypeTag::COLUMN_TYPE> TypeTraits;
+	typedef typename CompTypeTag::LocalValueType ValueType;
+
+	typedef typename OpTypeOf<
+			AccessorType1, typename T::Type1, CompTypeTag>::Type Op1;
+	typedef typename OpTypeOf<
+			AccessorType2, typename T::Type2, CompTypeTag>::Type Op2;
 
 	VarScopeType varScope(base_.varCxt_);
 	return compare(
 			static_cast<ValueType>(Op1(base_.accessor1_)(src1, Pos1())),
 			static_cast<ValueType>(Op2(base_.accessor2_)(src2, Pos2())),
 			base_.sensitive_, PredType(),
+			typename TypeTraits::FineComparableTag());
+}
+
+
+template<typename T1, typename T2>
+template<typename Pred>
+inline typename util::BinaryFunctionResultOf<Pred>::Type
+SQLValues::ValueComparator::BasicTypeAt<T1, T2>::operator()(
+		const typename T1::LocalValueType &v1,
+		const typename T2::LocalValueType &v2,
+		const Pred&) const {
+	return compare(
+			ValueUtils::getPromoted<CompTypeTag, T1>(v1),
+			ValueUtils::getPromoted<CompTypeTag, T2>(v2),
+			sensitive_, Pred(),
 			typename TypeTraits::FineComparableTag());
 }
 
@@ -6009,6 +6555,21 @@ SQLValues::ValueComparator::Switcher<
 	return base_.getColumnTypeSwitcher(
 			Promo, nullIgnorable_, profile_).getWith<
 					Op, typename OpTraitsAt<Traits, Ascending>::Type>();
+}
+
+
+template<typename A, typename T, typename Comp>
+SQLValues::ValueComparator::PromotedOp<A, T, Comp>::PromotedOp(
+		const ValueAccessor &accessor) :
+		accessor_(accessor) {
+}
+
+template<typename A, typename T, typename Comp>
+template<typename Source, typename Pos>
+typename Comp::LocalValueType
+SQLValues::ValueComparator::PromotedOp<A, T, Comp>::operator()(
+		const Source &src, const Pos&) const {
+	return ValueUtils::getPromoted<Comp, T>(BaseOpType(accessor_)(src, Pos()));
 }
 
 
@@ -6053,6 +6614,12 @@ inline int64_t SQLValues::ValueFnv1aHasher::digest(
 inline int64_t SQLValues::ValueFnv1aHasher::digest(
 		uint32_t seed, const double &value, const Types::Floating&) {
 	return ValueUtils::fnv1aHashFloating(seed, value);
+}
+
+template<typename T>
+inline int64_t SQLValues::ValueFnv1aHasher::digest(
+		uint32_t seed, const T &value, const Types::PreciseTimestamp&) {
+	return ValueUtils::fnv1aHashPreciseTimestamp(seed, value);
 }
 
 template<typename T>
@@ -6106,6 +6673,12 @@ inline int64_t SQLValues::ValueOrderedDigester::digest(
 inline int64_t SQLValues::ValueOrderedDigester::digest(
 		const double &value, const Types::Floating&) {
 	return ValueUtils::digestOrderedFloating(value, Ascending());
+}
+
+template<typename T>
+inline int64_t SQLValues::ValueOrderedDigester::digest(
+		const T &value, const Types::PreciseTimestamp&) {
+	return ValueUtils::digestOrderedPreciseTimestamp(value, Ascending());
 }
 
 template<typename T>
@@ -6580,6 +7153,92 @@ inline int64_t SQLValues::TupleDigester::BaseTypeAt<T>::operator()(
 }
 
 
+inline SQLValues::DateTimeElements::DateTimeElements(const int64_t &value) :
+		unixTimeMillis_(value),
+		nanoSeconds_(0) {
+}
+
+inline SQLValues::DateTimeElements::DateTimeElements(
+		const MicroTimestamp &value) :
+		unixTimeMillis_(value.value_ / 1000),
+		nanoSeconds_(static_cast<uint32_t>(value.value_ % 1000) * 1000) {
+}
+
+inline SQLValues::DateTimeElements::DateTimeElements(
+		const NanoTimestamp &value) :
+		unixTimeMillis_(
+				value.getHigh() / (1000 * Constants::HIGH_MICRO_UNIT)),
+		nanoSeconds_(
+				static_cast<uint32_t>(
+						value.getHigh() % (1000 * Constants::HIGH_MICRO_UNIT) *
+						Constants::HIGH_MICRO_REV_UNIT) +
+						value.getLow()) {
+}
+
+inline SQLValues::DateTimeElements::DateTimeElements(
+		const util::DateTime &value) :
+		unixTimeMillis_(value.getUnixTime()),
+		nanoSeconds_(0) {
+}
+
+inline SQLValues::DateTimeElements::DateTimeElements(
+		const util::PreciseDateTime &value) :
+		unixTimeMillis_(value.getBase().getUnixTime()),
+		nanoSeconds_(value.getNanoSeconds()) {
+}
+
+inline int64_t SQLValues::DateTimeElements::toTimestamp(
+		const Types::TimestampTag&) const {
+	return unixTimeMillis_;
+}
+
+inline MicroTimestamp SQLValues::DateTimeElements::toTimestamp(
+		const Types::MicroTimestampTag&) const {
+	MicroTimestamp value;
+	value.value_ = unixTimeMillis_ * 1000 + nanoSeconds_ / 1000;
+	return value;
+}
+
+inline NanoTimestamp SQLValues::DateTimeElements::toTimestamp(
+		const Types::NanoTimestampTag&) const {
+	const int64_t unit = Constants::HIGH_MICRO_UNIT;
+	const int64_t revUnit = Constants::HIGH_MICRO_REV_UNIT;
+	const int64_t base = unixTimeMillis_;
+	const int64_t nanos = nanoSeconds_;
+	NanoTimestamp value;
+	value.assign(
+			base * (1000 * unit) + nanos / revUnit,
+			static_cast<uint8_t>(nanos % revUnit));
+	return value;
+}
+
+inline util::DateTime SQLValues::DateTimeElements::toDateTime(
+		const Types::TimestampTag&) const {
+	return util::DateTime(unixTimeMillis_);
+}
+
+inline util::PreciseDateTime SQLValues::DateTimeElements::toDateTime(
+		const Types::MicroTimestampTag&) const {
+	return util::PreciseDateTime::ofNanoSeconds(
+			util::DateTime(unixTimeMillis_),
+			nanoSeconds_ / 1000 * 1000);
+}
+
+inline util::PreciseDateTime SQLValues::DateTimeElements::toDateTime(
+		const Types::NanoTimestampTag&) const {
+	return util::PreciseDateTime::ofNanoSeconds(
+			util::DateTime(unixTimeMillis_), nanoSeconds_);
+}
+
+inline int64_t SQLValues::DateTimeElements::getUnixTimeMillis() const {
+	return unixTimeMillis_;
+}
+
+inline uint32_t SQLValues::DateTimeElements::getNanoSeconds() const {
+	return nanoSeconds_;
+}
+
+
 inline SQLValues::StringBuilder::StringBuilder(ValueContext &cxt, size_t capacity) :
 		data_(NULL),
 		dynamicBuffer_(resolveAllocator(cxt)),
@@ -6775,6 +7434,21 @@ inline int32_t SQLValues::ValueUtils::compareIntegral(int64_t v1, int64_t v2) {
 	return compareRawValue(v1, v2);
 }
 
+inline int32_t SQLValues::ValueUtils::comparePreciseTimestamp(
+		const MicroTimestamp &v1, const MicroTimestamp &v2) {
+	return compareRawValue(v1.value_, v2.value_);
+}
+
+inline int32_t SQLValues::ValueUtils::comparePreciseTimestamp(
+		const NanoTimestamp &v1, const NanoTimestamp &v2) {
+	const int32_t comp = compareRawValue(v1.getHigh(), v2.getHigh());
+	if (comp != 0) {
+		return comp;
+	}
+
+	return compareRawValue(v1.getLow(), v2.getLow());
+}
+
 template<typename R>
 int32_t SQLValues::ValueUtils::compareSequence(R &v1, R &v2) {
 	for (;;) {
@@ -6809,6 +7483,22 @@ inline typename util::BinaryFunctionResultOf<Pred>::Type
 SQLValues::ValueUtils::compareFloating(
 		double v1, double v2, bool sensitive, const Pred &pred) {
 	return pred(compareFloating(v1, v2, sensitive), 0);
+}
+
+template<typename Pred>
+inline typename util::BinaryFunctionResultOf<Pred>::Type
+SQLValues::ValueUtils::comparePreciseTimestamp(
+		const MicroTimestamp &v1, const MicroTimestamp &v2,
+		const Pred &pred) {
+	return pred(v1.value_, v2.value_);
+}
+
+template<typename Pred>
+inline typename util::BinaryFunctionResultOf<Pred>::Type
+SQLValues::ValueUtils::comparePreciseTimestamp(
+		const NanoTimestamp &v1, const NanoTimestamp &v2,
+		const Pred &pred) {
+	return pred(comparePreciseTimestamp(v1, v2), 0);
 }
 
 template<typename Pred>
@@ -6914,6 +7604,16 @@ inline int32_t SQLValues::ValueUtils::compareNull(
 }
 
 
+inline uint32_t SQLValues::ValueUtils::fnv1aHashPreciseTimestamp(
+		uint32_t base, const MicroTimestamp &value) {
+	return fnv1aHashPreciseTimestamp(base, DateTimeElements(value));
+}
+
+inline uint32_t SQLValues::ValueUtils::fnv1aHashPreciseTimestamp(
+		uint32_t base, const NanoTimestamp &value) {
+	return fnv1aHashPreciseTimestamp(base, DateTimeElements(value));
+}
+
 template<typename R>
 uint32_t SQLValues::ValueUtils::fnv1aHashSequence(uint32_t base, R &value) {
 	uint32_t hash = base;
@@ -6969,6 +7669,19 @@ inline int64_t SQLValues::ValueUtils::digestOrderedFloating(
 	return digestOrderedIntegral(data.asSigned_, Asc());
 }
 
+template<typename Asc>
+inline int64_t SQLValues::ValueUtils::digestOrderedPreciseTimestamp(
+		const MicroTimestamp &value, const Asc&) {
+	return digestOrderedIntegral(value.value_, Asc());
+}
+
+template<typename Asc>
+inline int64_t SQLValues::ValueUtils::digestOrderedPreciseTimestamp(
+		const NanoTimestamp &value, const Asc&) {
+	return digestOrderedIntegral(
+			DateTimeElements(value).getUnixTimeMillis(), Asc());
+}
+
 template<typename Asc, typename R>
 inline int64_t SQLValues::ValueUtils::digestOrderedSequence(
 		R &value, const Asc&) {
@@ -7013,7 +7726,7 @@ template<typename T, typename Asc>
 typename T::ValueType SQLValues::ValueUtils::toValueByOrderdDigest(
 		int64_t digest) {
 	typedef typename TypeUtils::template Traits<
-			T::COLUMN_TYPE>::BasicComparableTag ComparableTag;
+			T::COLUMN_TYPE>::ResultFineComparableTag ComparableTag;
 	return getValueByComparable<T>(
 			toValueByOrderdDigest(digest, Asc(), ComparableTag()));
 }
@@ -7048,6 +7761,14 @@ inline double SQLValues::ValueUtils::toValueByOrderdDigest(
 	}
 
 	return data.asDouble_;
+}
+
+template<typename Asc>
+inline MicroTimestamp SQLValues::ValueUtils::toValueByOrderdDigest(
+		int64_t digest, const Asc&, const Types::MicroTimestampTag&) {
+	MicroTimestamp ts;
+	ts.value_ = digestOrderedIntegral(digest, Asc());
+	return ts;
 }
 
 inline int64_t SQLValues::ValueUtils::rotateDigest(
@@ -7101,7 +7822,7 @@ inline int64_t SQLValues::ValueUtils::digestByRotation(
 
 
 template<TupleColumnType T>
-inline typename SQLValues::TypeUtils::Traits<T>::ValueType
+inline typename SQLValues::TypeUtils::Traits<T>::LocalValueType
 SQLValues::ValueUtils::promoteValue(const TupleValue &src) {
 	typedef typename TypeUtils::Traits<T>::ValueType Type;
 	return getValue<Type>(src);
@@ -7117,6 +7838,57 @@ template<>
 inline double SQLValues::ValueUtils::promoteValue<TupleTypes::TYPE_DOUBLE>(
 		const TupleValue &src) {
 	return toDouble(src);
+}
+
+template<>
+inline int64_t SQLValues::ValueUtils::promoteValue<TupleTypes::TYPE_TIMESTAMP>(
+		const TupleValue &src) {
+	typedef Types::TimestampTag DestTypeTag;
+	const TupleColumnType type = src.getType();
+	if (type != TupleTypes::TYPE_TIMESTAMP) {
+		if (type == TupleTypes::TYPE_MICRO_TIMESTAMP) {
+			return getPromoted<DestTypeTag, Types::MicroTimestampTag>(
+					getValue<MicroTimestamp>(src));
+		}
+		assert(type == TupleTypes::TYPE_NANO_TIMESTAMP);
+		return getPromoted<DestTypeTag, Types::NanoTimestampTag>(
+				getValue<TupleNanoTimestamp>(src));
+	}
+	return getValue<int64_t>(src);
+}
+
+template<>
+inline MicroTimestamp SQLValues::ValueUtils::promoteValue<
+		TupleTypes::TYPE_MICRO_TIMESTAMP>(const TupleValue &src) {
+	typedef Types::MicroTimestampTag DestTypeTag;
+	const TupleColumnType type = src.getType();
+	if (type != TupleTypes::TYPE_MICRO_TIMESTAMP) {
+		if (type == TupleTypes::TYPE_TIMESTAMP) {
+			return getPromoted<DestTypeTag, Types::TimestampTag>(
+					getValue<int64_t>(src));
+		}
+		assert(type == TupleTypes::TYPE_NANO_TIMESTAMP);
+		return getPromoted<DestTypeTag, Types::NanoTimestampTag>(
+				getValue<TupleNanoTimestamp>(src));
+	}
+	return getValue<MicroTimestamp>(src);
+}
+
+template<>
+inline NanoTimestamp SQLValues::ValueUtils::promoteValue<
+		TupleTypes::TYPE_NANO_TIMESTAMP>(const TupleValue &src) {
+	typedef Types::NanoTimestampTag DestTypeTag;
+	const TupleColumnType type = src.getType();
+	if (type != TupleTypes::TYPE_NANO_TIMESTAMP) {
+		if (type == TupleTypes::TYPE_MICRO_TIMESTAMP) {
+			return getPromoted<DestTypeTag, Types::MicroTimestampTag>(
+					getValue<MicroTimestamp>(src));
+		}
+		assert(type == TupleTypes::TYPE_TIMESTAMP);
+		return getPromoted<DestTypeTag, Types::TimestampTag>(
+				getValue<int64_t>(src));
+	}
+	return getValue<TupleNanoTimestamp>(src);
 }
 
 template<typename T>
@@ -7232,6 +8004,12 @@ inline TupleValue SQLValues::ValueUtils::toAnyByWritable(
 }
 
 template<> inline TupleValue SQLValues::ValueUtils::toAnyByWritable<
+		TupleTypes::TYPE_NANO_TIMESTAMP>(
+		ValueContext &cxt, const NanoTimestamp &src) {
+	return createNanoTimestampValue(cxt, src);
+}
+
+template<> inline TupleValue SQLValues::ValueUtils::toAnyByWritable<
 		TupleTypes::TYPE_STRING>(ValueContext &cxt, StringBuilder &src) {
 	return src.build(cxt);
 }
@@ -7248,8 +8026,24 @@ TupleValue SQLValues::ValueUtils::toAnyByNumeric(T src) {
 	return TupleValue(src);
 }
 
+inline TupleValue SQLValues::ValueUtils::toAnyByTimestamp(int64_t src) {
+	return TupleValue(src, TupleValue::TimestampTag());
+}
+
 inline TupleValue SQLValues::ValueUtils::toAnyByBool(bool src) {
 	return TupleValue(src);
+}
+
+inline TupleValue SQLValues::ValueUtils::createNanoTimestampValue(
+		util::StackAllocator &alloc, const NanoTimestamp &ts) {
+	return TupleValue(ALLOC_NEW(alloc) NanoTimestamp(ts));
+}
+
+inline TupleValue SQLValues::ValueUtils::createNanoTimestampValue(
+		ValueContext &cxt, const NanoTimestamp &ts) {
+	TupleValue::NanoTimestampBuilder builder(cxt.getVarContext());
+	builder.setValue(ts);
+	return TupleNanoTimestamp(builder.build());
 }
 
 
@@ -7309,22 +8103,83 @@ inline typename T::ValueType SQLValues::ValueUtils::getValueByComparable(
 	return static_cast<typename T::ValueType>(src);
 }
 
-template<typename T, typename S>
-inline typename T::ValueType SQLValues::ValueUtils::getPromoted(
-		const typename S::ValueType &src) {
-	UTIL_STATIC_ASSERT(
-			(TypeUtils::PairTraits<
-					S::COLUMN_TYPE, T::COLUMN_TYPE
-					>::IMPLICIT_CONVERTABLE_OR_SAME));
-	return static_cast<typename T::ValueType>(src);
-}
-
 template<>
 inline bool SQLValues::ValueUtils::getValueByComparable<
 		SQLValues::Types::Bool>(
 		const TypeUtils::Traits<
 				Types::Bool::COLUMN_TYPE>::ComparableValueType &src) {
 	return !!src;
+}
+
+template<typename T>
+inline typename T::ValueType SQLValues::ValueUtils::getValueByAddress(
+		const void *src) {
+	UTIL_STATIC_ASSERT((TypeUtils::Traits<T::COLUMN_TYPE>::FOR_MULTI_VAR));
+	return getValue<typename T::ValueType>(TupleValue(src, T::COLUMN_TYPE));
+}
+
+template<>
+inline TupleNanoTimestamp SQLValues::ValueUtils::getValueByAddress<
+		SQLValues::Types::NanoTimestampTag>(const void *src) {
+	return TupleNanoTimestamp(static_cast<const NanoTimestamp*>(src));
+}
+
+template<>
+inline TupleString SQLValues::ValueUtils::getValueByAddress<
+		SQLValues::Types::String>(const void *src) {
+	return TupleString(src);
+}
+
+template<typename T, typename S>
+inline typename T::LocalValueType SQLValues::ValueUtils::getPromoted(
+		const typename S::LocalValueType &src) {
+	UTIL_STATIC_ASSERT(
+			(TypeUtils::PairTraits<
+					S::COLUMN_TYPE, T::COLUMN_TYPE
+					>::IMPLICIT_CONVERTABLE_OR_SAME));
+	return static_cast<typename T::LocalValueType>(src);
+}
+
+template<>
+inline int64_t SQLValues::ValueUtils::getPromoted<
+		SQLValues::Types::TimestampTag, SQLValues::Types::MicroTimestampTag>(
+		const MicroTimestamp &src) {
+	return DateTimeElements(src).toTimestamp(Types::TimestampTag());
+}
+
+template<>
+inline int64_t SQLValues::ValueUtils::getPromoted<
+		SQLValues::Types::TimestampTag, SQLValues::Types::NanoTimestampTag>(
+		const NanoTimestamp &src) {
+	return DateTimeElements(src).toTimestamp(Types::TimestampTag());
+}
+
+template<>
+inline MicroTimestamp SQLValues::ValueUtils::getPromoted<
+		SQLValues::Types::MicroTimestampTag, SQLValues::Types::TimestampTag>(
+		const int64_t &src) {
+	return DateTimeElements(src).toTimestamp(Types::MicroTimestampTag());
+}
+
+template<>
+inline MicroTimestamp SQLValues::ValueUtils::getPromoted<
+		SQLValues::Types::MicroTimestampTag, SQLValues::Types::NanoTimestampTag>(
+		const NanoTimestamp &src) {
+	return DateTimeElements(src).toTimestamp(Types::MicroTimestampTag());
+}
+
+template<>
+inline NanoTimestamp SQLValues::ValueUtils::getPromoted<
+		SQLValues::Types::NanoTimestampTag, SQLValues::Types::TimestampTag>(
+		const int64_t &src) {
+	return DateTimeElements(src).toTimestamp(Types::NanoTimestampTag());
+}
+
+template<>
+inline NanoTimestamp SQLValues::ValueUtils::getPromoted<
+		SQLValues::Types::NanoTimestampTag, SQLValues::Types::MicroTimestampTag>(
+		const MicroTimestamp &src) {
+	return DateTimeElements(src).toTimestamp(Types::NanoTimestampTag());
 }
 
 template<TupleColumnType T>
@@ -8284,7 +9139,7 @@ inline bool SQLValues::ValueUtils::readNull(
 template<typename T>
 inline void SQLValues::ValueUtils::writeValue(
 		WritableTuple &tuple, const TupleColumn &column,
-		const typename T::ValueType &value) {
+		const typename T::LocalValueType &value) {
 	typedef TupleWrapper::WrapperOf<T, false> Wrapper;
 	return Wrapper()(tuple).setBy(column, value);
 }

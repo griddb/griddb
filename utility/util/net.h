@@ -332,14 +332,18 @@ private:
 class SocketFailureSimulator {
 public:
 	typedef bool (*FilterHandler)(
-			const Socket &socket, int32_t targetType, int operationType);
+			const Socket *socket, int32_t targetType, int32_t operationType);
 
-	static void set(int32_t targetType, uint64_t startCount, uint64_t endCount,
-			FilterHandler handler);
+	static void set(
+			int32_t targetType, uint64_t startCount, uint64_t endCount,
+			int32_t operationType, FilterHandler handler);
 
-	static void checkOperation(const Socket &socket, int operationType);
+	static void checkOperation(const Socket *socket, int32_t operationType);
 
 	static uint64_t getLastOperationCount() { return lastOperationCount_; }
+
+	static bool filterDefault(
+			const Socket *socket, int32_t targetType, int32_t operationType);
 
 private:
 	SocketFailureSimulator();
@@ -350,6 +354,7 @@ private:
 	static volatile int32_t targetType_;
 	static volatile uint64_t startCount_;
 	static volatile uint64_t endCount_;
+	static volatile int32_t operationType_;
 	static volatile uint64_t lastOperationCount_;
 };
 #endif	
@@ -359,6 +364,11 @@ private:
 */
 class SocketAddress {
 public:
+
+
+	class AssignByHostCommand;
+
+
 	static const int FAMILY_INET;
 	static const int FAMILY_INET6;
 
@@ -487,10 +497,36 @@ private:
 	} addr_;
 };
 
+class SocketAddress::AssignByHostCommand {
+public:
+	typedef SocketAddress ResultType;
+
+	AssignByHostCommand(
+			const u8string &host, const u8string &service, int family = 0,
+			int sockType = 0);
+	AssignByHostCommand(
+			const u8string &host, uint16_t port, int family = 0,
+			int sockType = 0);
+
+	ResultType operator()() const;
+
+	bool operator<(const AssignByHostCommand &another) const;
+
+private:
+	int32_t compare(const AssignByHostCommand &another) const;
+	template<typename T> static int32_t compareValue(const T &v1, const T &v2);
+
+	u8string host_;
+	u8string service_;
+	int family_;
+	int sockType_;
+};
+
 std::ostream& operator<<(std::ostream &s, const SocketAddress &addr);
 std::ostream& operator<<(std::ostream &s, const SocketAddress::Inet &addr);
 std::ostream& operator<<(std::ostream &s, const SocketAddress::Inet6 &addr);
 
+namespace detail {
 /*!
 	@brief Waits network I/O using select system calls.
 */
@@ -515,6 +551,7 @@ private:
 	struct Data;
 	UTIL_UNIQUE_PTR<Data> data_;
 };
+} 
 
 #ifdef UTIL_HAVE_EPOLL_CTL
 /*!
@@ -538,7 +575,10 @@ private:
 	UTIL_UNIQUE_PTR<Data> data_;
 };
 #else
-typedef IOPollSelect IOPollEPoll;
+#ifndef _WIN32
+#error
+#endif
+typedef detail::IOPollSelect IOPollEPoll;
 #endif 
 
 #ifdef UTIL_HAVE_POLL
@@ -612,7 +652,10 @@ private:
 	IOPollPollCont cont_;
 };
 #else
-typedef IOPollSelect IOPollPoll;
+#ifndef _WIN32
+#error
+#endif
+typedef detail::IOPollSelect IOPollPoll;
 #endif 
 
 typedef IOPollEPoll IOPoll;

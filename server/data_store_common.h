@@ -156,12 +156,39 @@ const ColumnType COLUMN_TYPE_LONG_ARRAY = 17;
 const ColumnType COLUMN_TYPE_FLOAT_ARRAY = 18;
 const ColumnType COLUMN_TYPE_DOUBLE_ARRAY = 19;
 const ColumnType COLUMN_TYPE_TIMESTAMP_ARRAY = 20;
+const ColumnType COLUMN_TYPE_MICRO_TIMESTAMP = 21;
+const ColumnType COLUMN_TYPE_NANO_TIMESTAMP = 22;
 
 const ColumnType COLUMN_TYPE_ROWID = COLUMN_TYPE_LONG;
 const ColumnType COLUMN_TYPE_COMPOSITE = 0xfe;
 const ColumnType COLUMN_TYPE_WITH_BEGIN = 0xff;
 const ColumnType COLUMN_TYPE_NULL = 0xff;  
 const ColumnType COLUMN_TYPE_ANY = 0xff;
+
+const ColumnType COLUMN_TYPE_ARRAY_BEGIN = COLUMN_TYPE_STRING_ARRAY;
+const ColumnType COLUMN_TYPE_ARRAY_TAIL = COLUMN_TYPE_TIMESTAMP_ARRAY;
+
+const ColumnType COLUMN_TYPE_PRIMITIVE_BEGIN1 = COLUMN_TYPE_STRING;
+const ColumnType COLUMN_TYPE_PRIMITIVE_TAIL1 = COLUMN_TYPE_BLOB;
+const ColumnType COLUMN_TYPE_PRIMITIVE_BEGIN2 = COLUMN_TYPE_MICRO_TIMESTAMP;
+const ColumnType COLUMN_TYPE_PRIMITIVE_TAIL2 = COLUMN_TYPE_NANO_TIMESTAMP;
+
+const ColumnType COLUMN_TYPE_SIMPLE_BEGIN1 = COLUMN_TYPE_BOOL;
+const ColumnType COLUMN_TYPE_SIMPLE_TAIL1 = COLUMN_TYPE_TIMESTAMP;
+const ColumnType COLUMN_TYPE_SIMPLE_BEGIN2 = COLUMN_TYPE_MICRO_TIMESTAMP;
+const ColumnType COLUMN_TYPE_SIMPLE_TAIL2 = COLUMN_TYPE_NANO_TIMESTAMP;
+
+const ColumnType COLUMN_TYPE_NUMERIC_BEGIN = COLUMN_TYPE_BYTE;
+const ColumnType COLUMN_TYPE_NUMERIC_TAIL = COLUMN_TYPE_DOUBLE;
+const ColumnType COLUMN_TYPE_INTEGRAL_BEGIN = COLUMN_TYPE_BYTE;
+const ColumnType COLUMN_TYPE_INTEGRAL_TAIL = COLUMN_TYPE_LONG;
+const ColumnType COLUMN_TYPE_FLOATING_BEGIN = COLUMN_TYPE_FLOAT;
+const ColumnType COLUMN_TYPE_FLOATING_TAIL = COLUMN_TYPE_DOUBLE;
+
+const ColumnType COLUMN_TYPE_PRIMITIVE_COUNT = (
+		(COLUMN_TYPE_PRIMITIVE_TAIL1 - COLUMN_TYPE_PRIMITIVE_BEGIN1 + 1) +
+		(COLUMN_TYPE_PRIMITIVE_TAIL2 - COLUMN_TYPE_PRIMITIVE_BEGIN2 + 1));
+const ColumnType COLUMN_TYPE_TOTAL_TAIL = COLUMN_TYPE_PRIMITIVE_TAIL2;
 
 const uint16_t FixedSizeOfColumnType[] = {
 	0,					
@@ -185,7 +212,11 @@ const uint16_t FixedSizeOfColumnType[] = {
 	0,					
 	0,					
 	0,					
+	sizeof(MicroTimestamp), 
+	sizeof(NanoTimestamp), 
 };
+
+typedef int32_t SchemaFeatureLevel;
 
 typedef uint8_t ContainerType;
 static const ContainerType COLLECTION_CONTAINER = 0;
@@ -256,7 +287,7 @@ static const MapType MAP_TYPE_DEFAULT = -1;
 static const MapType MAP_TYPE_VECTOR = -2;
 static const MapType MAP_TYPE_ANY = -3;
 
-const MapType defaultIndexType[] = {
+const MapType DEFAULT_INDEX_TYPE[] = {
 	MAP_TYPE_BTREE,		
 	MAP_TYPE_BTREE,		
 	MAP_TYPE_BTREE,		
@@ -268,16 +299,8 @@ const MapType defaultIndexType[] = {
 	MAP_TYPE_BTREE,		
 	MAP_TYPE_SPATIAL,	
 	MAP_TYPE_DEFAULT,	
-	MAP_TYPE_DEFAULT,	
-	MAP_TYPE_DEFAULT,	
-	MAP_TYPE_DEFAULT,	
-	MAP_TYPE_DEFAULT,	
-	MAP_TYPE_DEFAULT,	
-	MAP_TYPE_DEFAULT,	
-	MAP_TYPE_DEFAULT,	
-	MAP_TYPE_DEFAULT,	
-	MAP_TYPE_DEFAULT,	
-	MAP_TYPE_DEFAULT,	
+	MAP_TYPE_BTREE, 
+	MAP_TYPE_BTREE, 
 };
 
 inline const char8_t* getMapTypeStr(MapType type) {
@@ -882,6 +905,23 @@ public:
 	 * xxxxxx10 8byte(OID)
 	 * xxxxxxx1 1byte(to 127)
 	*/
+
+	static const char8_t* dumpContainerAttribute(ContainerAttribute attr) {
+		switch (attr) {
+		case CONTAINER_ATTR_SINGLE:
+			return "SINGLE";
+		case CONTAINER_ATTR_SINGLE_SYSTEM:
+			return "SINGLE_SYSTEM";
+		case CONTAINER_ATTR_LARGE:
+			return "LARGE";
+		case CONTAINER_ATTR_SUB:
+			return "SUB";
+		case CONTAINER_ATTR_VIEW:
+			return "VIEW";
+		default:
+			return "ANY";
+		}
+	}
 
 	/*!
 		@brief Checks if variable size is 1 byte

@@ -123,7 +123,9 @@ const util::NameCoderEntry<MetaType::ColumnMeta>
 	UTIL_NAME_CODER_ENTRY(COLUMN_COMPRESSION_RELATIVE),
 	UTIL_NAME_CODER_ENTRY(COLUMN_COMPRESSION_RATE),
 	UTIL_NAME_CODER_ENTRY(COLUMN_COMPRESSION_SPAN),
-	UTIL_NAME_CODER_ENTRY(COLUMN_COMPRESSION_WIDTH)
+	UTIL_NAME_CODER_ENTRY(COLUMN_COMPRESSION_WIDTH),
+	UTIL_NAME_CODER_ENTRY(COLUMN_DECIMAL_DIGITS),
+	UTIL_NAME_CODER_ENTRY(COLUMN_CHAR_OCTET_LENGTH)
 };
 const util::NameCoderEntry<MetaType::IndexMeta>
 		MetaType::Coders::LIST_INDEX[] = {
@@ -332,6 +334,8 @@ const util::NameCoderEntry<MetaType::StringConstants>
 	UTIL_NAME_CODER_ENTRY(STR_COMPRESSION_RATE),
 	UTIL_NAME_CODER_ENTRY(STR_COMPRESSION_SPAN),
 	UTIL_NAME_CODER_ENTRY(STR_COMPRESSION_WIDTH),
+	UTIL_NAME_CODER_ENTRY(STR_DECIMAL_DIGITS),
+	UTIL_NAME_CODER_ENTRY(STR_CHAR_OCTET_LENGTH),
 	UTIL_NAME_CODER_ENTRY(STR_INDEX_TYPE),
 	UTIL_NAME_CODER_ENTRY(STR_TRIGGER_NAME),
 	UTIL_NAME_CODER_ENTRY(STR_EVENT_TYPE),
@@ -439,7 +443,9 @@ const MetaType::CoreColumns::Entry<MetaType::ColumnMeta>
 	of(COLUMN_COMPRESSION_RELATIVE).asBool(true),
 	of(COLUMN_COMPRESSION_RATE).asDouble(true),
 	of(COLUMN_COMPRESSION_SPAN).asDouble(true),
-	of(COLUMN_COMPRESSION_WIDTH).asDouble(true)
+	of(COLUMN_COMPRESSION_WIDTH).asDouble(true),
+	of(COLUMN_DECIMAL_DIGITS).asInteger(true),
+	of(COLUMN_CHAR_OCTET_LENGTH).asInteger()
 };
 const MetaType::CoreColumns::Entry<MetaType::IndexMeta>
 		MetaType::CoreColumns::COLUMNS_INDEX[] = {
@@ -714,7 +720,9 @@ const MetaType::RefColumns::Entry<MetaType::ColumnMeta>
 	of(COLUMN_COMPRESSION_RELATIVE, STR_COMPRESSION_RELATIVE),
 	of(COLUMN_COMPRESSION_RATE, STR_COMPRESSION_RATE),
 	of(COLUMN_COMPRESSION_SPAN, STR_COMPRESSION_SPAN),
-	of(COLUMN_COMPRESSION_WIDTH, STR_COMPRESSION_WIDTH)
+	of(COLUMN_COMPRESSION_WIDTH, STR_COMPRESSION_WIDTH),
+	of(COLUMN_DECIMAL_DIGITS, STR_DECIMAL_DIGITS),
+	of(COLUMN_CHAR_OCTET_LENGTH, STR_CHAR_OCTET_LENGTH)
 };
 const MetaType::RefColumns::Entry<MetaType::ColumnMeta>
 		MetaType::RefColumns::COLUMNS_KEY[] = {
@@ -1722,7 +1730,9 @@ MetaProcessor::SQLMetaUtils::COLUMN_TYPE_TABLE_ENTRIES[] = {
 	ColumnTypeTable::Entry(COLUMN_TYPE_TIMESTAMP, TYPE_TIMESTAMP),
 	ColumnTypeTable::Entry(COLUMN_TYPE_BOOL, TYPE_BIT),
 	ColumnTypeTable::Entry(COLUMN_TYPE_STRING, TYPE_VARCHAR),
-	ColumnTypeTable::Entry(COLUMN_TYPE_BLOB, TYPE_BLOB)
+	ColumnTypeTable::Entry(COLUMN_TYPE_BLOB, TYPE_BLOB),
+	ColumnTypeTable::Entry(COLUMN_TYPE_MICRO_TIMESTAMP, TYPE_TIMESTAMP),
+	ColumnTypeTable::Entry(COLUMN_TYPE_NANO_TIMESTAMP, TYPE_TIMESTAMP)
 };
 
 const MetaProcessor::SQLMetaUtils::ColumnTypeTable
@@ -2012,7 +2022,7 @@ void MetaProcessor::ContainerHandler::execute(
 		const bool noInterval = (p == NULL ||
 				partitionType != SyntaxTree::TABLE_PARTITION_TYPE_RANGE);
 		const bool noTimestamp = (noInterval ||
-				p->partitionColumnType_ != TupleList::TYPE_TIMESTAMP);
+				!TupleColumnTypeUtils::isTimestampFamily(p->partitionColumnType_));
 
 		builder.set(
 				(i == 0 ?
@@ -2194,8 +2204,9 @@ void MetaProcessor::ColumnHandler::execute(
 				MetaType::COLUMN_SQL_TYPE,
 				ValueUtils::makeInteger(sqlColumnType));
 
-		const char8_t *columnTypeName =
-				ValueProcessor::getTypeNameChars(columnType);
+		const bool precisionIgnorableOnName = true;
+		const char8_t *columnTypeName = ValueProcessor::getTypeNameChars(
+				columnType, precisionIgnorableOnName);
 
 		builder.set(
 				MetaType::COLUMN_TYPE_NAME,
@@ -2238,6 +2249,24 @@ void MetaProcessor::ColumnHandler::execute(
 		builder.set(
 				MetaType::COLUMN_COMPRESSION_WIDTH,
 				compressionWidth);
+
+		Value decimalDigits = ValueUtils::makeNull();
+		{
+			const int32_t value = ValueProcessor::getValuePrecision(columnType);
+			if (value >= 0) {
+				decimalDigits = ValueUtils::makeInteger(value);
+			}
+		}
+		builder.set(MetaType::COLUMN_DECIMAL_DIGITS, decimalDigits);
+
+		Value charOctetLength = ValueUtils::makeInteger(2000000000);
+		{
+			const int32_t value = ValueProcessor::getValueStringLength(columnType);
+			if (value >= 0) {
+				charOctetLength = ValueUtils::makeInteger(value);
+			}
+		}
+		builder.set(MetaType::COLUMN_CHAR_OCTET_LENGTH, charOctetLength);
 
 		getContext().getRowHandler()(txn, builder.build());
 	}
@@ -3005,7 +3034,7 @@ void MetaProcessor::PartitionHandler::operator()(
 	const uint8_t partitionType = partitioningInfo.partitionType_;
 	const bool forInterval = SyntaxTree::isRangePartitioningType(partitionType);
 	const bool forTimestamp = (forInterval &&
-			partitioningInfo.partitionColumnType_ == TupleList::TYPE_TIMESTAMP);
+			TupleColumnTypeUtils::isTimestampFamily(partitioningInfo.partitionColumnType_));
 
 	typedef PartitioningInfo::PartitionAssignNumberList NumList;
 	typedef PartitioningInfo::PartitionAssignStatusList StatusList;
@@ -3565,6 +3594,10 @@ void MetaContainer::getIndexInfoList(
 	static_cast<void>(indexInfoList);
 }
 
+SchemaFeatureLevel MetaContainer::getSchemaFeatureLevel() const {
+	return resolveSchemaFeatureLevel(*this);
+}
+
 uint32_t MetaContainer::getColumnNum() const {
 	return static_cast<uint32_t>(info_.columnCount_);
 }
@@ -3597,13 +3630,18 @@ void MetaContainer::getColumnSchema(
 	schema.push_back(
 			reinterpret_cast<const uint8_t*>(columnName), columnNameLen);
 
-	int8_t tmp = static_cast<int8_t>(getSimpleColumnType(columnId));
-	schema.push_back(reinterpret_cast<uint8_t*>(&tmp), sizeof(int8_t));
+	const ColumnType type = getColumnType(columnId);
+	const int8_t typeOrdinal =
+			ValueProcessor::getPrimitiveColumnTypeOrdinal(type, false);
+	schema.push_back(
+			reinterpret_cast<const uint8_t*>(&typeOrdinal),
+			sizeof(typeOrdinal));
 
-	uint8_t flag = (isArrayColumn(columnId) ? 1 : 0);
-	flag |= (isVirtualColumn(columnId) ? ColumnInfo::COLUMN_FLAG_VIRTUAL : 0);
-	flag |= (isNotNullColumn(columnId) ? ColumnInfo::COLUMN_FLAG_NOT_NULL : 0);
-	schema.push_back(reinterpret_cast<uint8_t*>(&flag), sizeof(uint8_t));
+	const uint8_t flags = MessageSchema::makeColumnFlags(
+			ValueProcessor::isArray(type),
+			isVirtualColumn(columnId),
+			isNotNullColumn(columnId));
+	schema.push_back(&flags, sizeof(flags));
 }
 
 const char8_t* MetaContainer::getColumnName(
@@ -3616,14 +3654,9 @@ const char8_t* MetaContainer::getColumnName(
 			info_.columnList_[columnId], columnNamingType_, false);
 }
 
-ColumnType MetaContainer::getSimpleColumnType(uint32_t columnId) const {
+ColumnType MetaContainer::getColumnType(uint32_t columnId) const {
 	assert(columnId < info_.columnCount_);
 	return info_.columnList_[columnId].type_;
-}
-
-bool MetaContainer::isArrayColumn(uint32_t columnId) const {
-	static_cast<void>(columnId);
-	return false;
 }
 
 bool MetaContainer::isVirtualColumn(uint32_t columnId) const {
@@ -3662,7 +3695,7 @@ void MetaContainer::getColumnInfoList(
 	for (uint32_t i = 0; i < columnCount; i++) {
 		ColumnInfo info;
 		info.initialize();
-		info.setType(getSimpleColumnType(i), false);
+		info.setType(getColumnType(i));
 		if (info.isVariable()) {
 			info.setOffset(variableColumnIndex);
 			variableColumnIndex++;

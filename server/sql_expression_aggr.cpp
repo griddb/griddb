@@ -31,6 +31,7 @@ void SQLAggrExprs::Registrar::operator()() const {
 	add<SQLType::AGG_MAX, Functions::Max>();
 	add<SQLType::AGG_MEDIAN, Functions::Median>();
 	add<SQLType::AGG_MIN, Functions::Min>();
+	add<SQLType::AGG_PERCENTILE_CONT, Functions::PercentileCont>();
 	add<SQLType::AGG_ROW_NUMBER, Functions::RowNumber>();
 	add<SQLType::AGG_STDDEV0, Functions::Stddev0>();
 	add<SQLType::AGG_STDDEV_POP, Functions::StddevPop>();
@@ -240,7 +241,7 @@ inline void SQLAggrExprs::Functions::LagLead::Advance::operator()(
 	}
 	else {
 		positioning_ = true;
-		aggr.set<0>()(cxt, cxt.template promoteAggrValue<0>(v));
+		aggr.setPromoted<0>()(cxt, v);
 	}
 }
 
@@ -332,6 +333,83 @@ inline void SQLAggrExprs::Functions::Min::Advance::operator()(
 	if (aggr.isNull<0>()(cxt) ||
 			cxt.getComparator()(v, aggr.get<0>()(cxt)) < 0) {
 		aggr.set<0>()(cxt, v);
+	}
+}
+
+
+template<typename C, typename Aggr, typename V>
+inline void SQLAggrExprs::Functions::PercentileCont::Advance::operator()(
+		C &cxt, const Aggr &aggr, const V &v, double rate) {
+	int64_t mergePos;
+	switch (nextAction(cxt, aggr, rate, mergePos)) {
+	case ACTION_SET:
+		aggr.template set<0>()(cxt, v);
+		break;
+	case ACTION_MERGE:
+		{
+			const int64_t total = cxt.getWindowValueCount();
+			const double x1 = static_cast<double>(mergePos);
+			const double x2 = static_cast<double>(mergePos + 1);
+			const double x = static_cast<double>(total) * rate;
+
+			aggr.template set<0>()(
+					cxt, FunctionUtils::NumberArithmetic::interpolateLinear(
+							x1, aggr.template get<0>()(cxt), x2, v, x));
+		}
+		break;
+	default:
+		break;
+	}
+}
+
+template<typename C, typename Aggr>
+inline SQLAggrExprs::Functions::PercentileCont::PercentileAction
+SQLAggrExprs::Functions::PercentileCont::Advance::nextAction(
+		C &cxt, const Aggr &aggr, double rate, int64_t &mergePos) {
+	mergePos = 0;
+
+	int64_t count = aggr.template get<1>()(cxt);
+	PercentileAction action = ACTION_NONE;
+	do {
+		if (count < 0) {
+			if (count < -1) {
+				action = ACTION_MERGE;
+				mergePos = -(count + 1);
+				count = -1;
+			}
+			break;
+		}
+
+		const int64_t total = cxt.getWindowValueCount();
+		const double boundary = static_cast<double>(total - 1) * rate;
+		count++;
+
+		if (FunctionUtils::NumberArithmetic::compareDoubleLongPrecise(
+				boundary, count) >= 0) {
+			break;
+		}
+
+		action = ACTION_SET;
+		if (FunctionUtils::NumberArithmetic::compareDoubleLongPrecise(
+				boundary, count - 1) <= 0) {
+			count = -1;
+			break;
+		}
+		count = (-count - 1);
+	}
+	while (false);
+
+	aggr.template set<1>()(cxt, count);
+	return action;
+}
+
+template<typename C, typename Aggr, typename V>
+void SQLAggrExprs::Functions::PercentileCont::Checker::operator()(
+		C&, const Aggr&, const V&, double rate) {
+	if (!(0 <= rate && rate <= 1)) {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_SQL_PROC_INVALID_EXPRESSION_INPUT,
+				"The parameter of PERCENTILE_CONT out of range");
 	}
 }
 

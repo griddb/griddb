@@ -475,7 +475,7 @@ int32_t ChunkBuddy::tryAllocateObject(uint8_t* record, uint8_t requestExpSize, O
 
 void ChunkBuddy::overwriteObject(int32_t offset, const uint8_t* record, uint8_t expSize) {
 	uint8_t* addr = data_ + offset;
-	int8_t allocatedExpSize = getObjectSize(offset, V4ObjectHeader::OBJECT_HEADER_SIZE); 
+	int8_t allocatedExpSize = getObjectSize(offset, V4ObjectHeader::OBJECT_HEADER_SIZE);
 	if(allocatedExpSize != expSize) {
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "Invalid record size");
 	} else {

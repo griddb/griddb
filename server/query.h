@@ -442,7 +442,7 @@ protected:
 			sizeof(OId);  
 		for (uint32_t i = 0; i < EXPLAIN_COLUMN_NUM; i++) {
 			explainColumnInfoList[i].initialize();
-			explainColumnInfoList[i].setType(explainColumnTypeList[i], false);
+			explainColumnInfoList[i].setType(explainColumnTypeList[i]);
 			if (explainColumnInfoList[i].isVariable()) {  
 				explainColumnInfoList[i].setOffset(variableColumnIndex);
 				++variableColumnIndex;

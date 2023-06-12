@@ -1010,7 +1010,8 @@ void DQLProcs::CommonOption::toCode(
 DQLProcs::GroupOption::GroupOption(util::StackAllocator &alloc) :
 		columnList_(NULL),
 		groupColumns_(alloc),
-		nestLevel_(0) {
+		nestLevel_(0),
+		pred_(NULL) {
 }
 
 void DQLProcs::GroupOption::fromPlanNode(OptionInput &in) {
@@ -1023,6 +1024,11 @@ void DQLProcs::GroupOption::fromPlanNode(OptionInput &in) {
 	for (Expression::Iterator it(list); it.exists(); it.next()) {
 		groupColumns_.push_back(it.get().getCode().getColumnPos());
 	}
+
+	if (!node.predList_.empty() && (node.cmdOptionFlag_ &
+			ProcPlan::Node::Config::CMD_OPT_GROUP_RANGE) != 0) {
+		pred_ = rewriter.toExpr(&node.predList_.back());
+	}
 }
 
 void DQLProcs::GroupOption::toPlanNode(OptionOutput &out) const {
@@ -1032,7 +1038,13 @@ void DQLProcs::GroupOption::toPlanNode(OptionOutput &out) const {
 
 void DQLProcs::GroupOption::toCode(
 		SQLOps::OpCodeBuilder &builder, SQLOps::OpCode &code) const {
-	code.setType(SQLOpTypes::OP_GROUP);
+	if (pred_ != NULL &&
+			pred_->getCode().getType() == SQLType::EXPR_RANGE_GROUP) {
+		code.setType(SQLOpTypes::OP_GROUP_RANGE);
+	}
+	else {
+		code.setType(SQLOpTypes::OP_GROUP);
+	}
 
 	bool forWindow = false;
 	code.setPipeProjection(&builder.toGroupingProjectionByExpr(
@@ -1047,6 +1059,7 @@ void DQLProcs::GroupOption::toCode(
 		list.push_back(column);
 	}
 	code.setKeyColumnList(&list);
+	code.setFilterPredicate(pred_);
 }
 
 
@@ -1722,6 +1735,24 @@ void SQLCompiler::ProcessorUtils::getTablePartitionAffinityRevList(
 			partitioning, affinityRevList);
 }
 
+bool SQLCompiler::ProcessorUtils::isRangeGroupSupportedType(ColumnType type) {
+	return SQLExprs::RangeGroupUtils::isRangeGroupSupportedType(type);
+}
+
+TupleValue SQLCompiler::ProcessorUtils::getRangeGroupBoundary(
+		util::StackAllocator &alloc, ColumnType keyType, TupleValue base,
+		bool forLower, bool inclusive) {
+	return SQLExprs::RangeGroupUtils::getRangeGroupBoundary(
+			alloc, keyType, base, forLower, inclusive);
+}
+
+bool SQLCompiler::ProcessorUtils::adjustRangeGroupBoundary(
+		TupleValue &lower, TupleValue &upper, int64_t interval,
+		int64_t offset) {
+	return SQLExprs::RangeGroupUtils::adjustRangeGroupBoundary(
+			lower, upper, interval, offset);
+}
+
 TupleValue SQLCompiler::ProcessorUtils::evalConstExpr(
 		TupleValue::VarContext &varCxt, const Expr &expr,
 		const CompileOption &option) {
@@ -1729,6 +1760,16 @@ TupleValue SQLCompiler::ProcessorUtils::evalConstExpr(
 	DQLProcs::CompilerUtils::applyCompileOption(cxt, option);
 
 	return SQLExprs::SyntaxExprRewriter::evalConstExpr(
+			cxt, SQLExprs::ExprFactory::getDefaultFactory(), expr);
+}
+
+void SQLCompiler::ProcessorUtils::checkExprArgs(
+		TupleValue::VarContext &varCxt, const Expr &expr,
+		const CompileOption &option) {
+	SQLExprs::ExprContext cxt(SQLValues::ValueContext::ofVarContext(varCxt));
+	DQLProcs::CompilerUtils::applyCompileOption(cxt, option);
+
+	SQLExprs::SyntaxExprRewriter::checkExprArgs(
 			cxt, SQLExprs::ExprFactory::getDefaultFactory(), expr);
 }
 
@@ -1785,6 +1826,18 @@ bool SQLCompiler::ProcessorUtils::isWindowExprType(
 	return windowType;
 }
 
+bool SQLCompiler::ProcessorUtils::isExplicitOrderingAggregation(Type exprType) {
+	typedef SQLExprs::ExprSpec ExprSpec;
+	const ExprSpec &spec =
+			SQLExprs::ExprFactory::getDefaultFactory().getSpec(exprType);
+
+	assert(
+			SQLExprs::ExprTypeUtils::isAggregation(exprType) ||
+			SQLExprs::ExprTypeUtils::isFunction(exprType));
+
+	return ((spec.flags_ & ExprSpec::FLAG_AGGR_ORDERING) != 0);
+}
+
 SQLCompiler::ColumnType SQLCompiler::ProcessorUtils::getResultType(
 		Type exprType, size_t index, AggregationPhase phase,
 		const util::Vector<ColumnType> &argTypeList, bool grouping) {
@@ -1827,6 +1880,33 @@ bool SQLCompiler::ProcessorUtils::updateArgType(
 
 	assert(false);
 	GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+}
+
+bool SQLCompiler::ProcessorUtils::findConstantArgType(
+		Type exprType, size_t startIndex, size_t &index, ColumnType &argType) {
+	index = std::numeric_limits<size_t>::max();
+	argType = TupleTypes::TYPE_NULL;
+
+	typedef SQLExprs::ExprSpec ExprSpec;
+	const ExprSpec &spec =
+			SQLExprs::ExprFactory::getDefaultFactory().getSpec(exprType);
+
+	for (size_t i = startIndex; i < ExprSpec::IN_LIST_SIZE; i++) {
+		const ExprSpec::In &in = spec.inList_[i];
+		const ColumnType inType = in.typeList_[0];
+
+		if (SQLValues::TypeUtils::isNull(inType)) {
+			break;
+		}
+
+		if ((in.flags_ & ExprSpec::FLAG_EXACT) != 0) {
+			index = i;
+			argType = inType;
+			return true;
+		}
+	}
+
+	return false;
 }
 
 TupleValue SQLCompiler::ProcessorUtils::convertType(

@@ -22,7 +22,6 @@
 #include "data_store_common.h"
 #include "schema.h"
 
-
 template<>
 struct BtreeMap::MapKeyTraits<CompositeInfoObject8> {
 	typedef CompositeInfoObject TYPE;
@@ -366,6 +365,12 @@ void BtreeMap::switchToBasicType(ColumnType type, Action &action) {
 		break;
 	case COLUMN_TYPE_TIMESTAMP:
 		action.template execute<Timestamp, Timestamp, OId, OId>();
+		break;
+	case COLUMN_TYPE_MICRO_TIMESTAMP:
+		action.template execute<MicroTimestampKey, MicroTimestampKey, OId, OId>();
+		break;
+	case COLUMN_TYPE_NANO_TIMESTAMP:
+		action.template execute<NanoTimestampKey, NanoTimestampKey, OId, OId>();
 		break;
 	case COLUMN_TYPE_OID:
 		action.template execute<OId, OId, OId, OId>();

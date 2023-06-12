@@ -47,7 +47,7 @@ struct SQLTimeExprs::Specs {
 	template<int C> struct Spec<SQLType::FUNC_EXTRACT, C> {
 		typedef Base::Type<TupleTypes::TYPE_LONG, Base::InList<
 				Base::In<TupleTypes::TYPE_LONG, ExprSpec::FLAG_EXACT>,
-				Base::In<TupleTypes::TYPE_TIMESTAMP>,
+				Base::PromotableTimestampIn,
 				Base::In<TupleTypes::TYPE_STRING, ExprSpec::FLAG_OPTIONAL>
 				> > Type;
 	};
@@ -81,7 +81,7 @@ struct SQLTimeExprs::Specs {
 	template<int C> struct Spec<SQLType::FUNC_STRFTIME, C> {
 		typedef Base::Type<TupleTypes::TYPE_STRING, Base::InList<
 				Base::In<TupleTypes::TYPE_STRING>,
-				Base::In<TupleTypes::TYPE_TIMESTAMP>,
+				Base::PromotableTimestampIn,
 				Base::In<TupleTypes::TYPE_STRING, ExprSpec::FLAG_OPTIONAL>
 				> > Type;
 	};
@@ -103,28 +103,46 @@ struct SQLTimeExprs::Specs {
 				> > Type;
 	};
 
-	template<int C> struct Spec<SQLType::FUNC_TIMESTAMP_TRUNC, C> {
-		typedef Base::Type<TupleTypes::TYPE_TIMESTAMP, Base::InList<
-				Base::In<TupleTypes::TYPE_LONG, ExprSpec::FLAG_EXACT>,
-				Base::In<TupleTypes::TYPE_TIMESTAMP>,
+	template<int C> struct Spec<SQLType::FUNC_TIMESTAMP_MS, C> {
+		typedef typename Spec<SQLType::FUNC_TIMESTAMP, C>::Type Type;
+	};
+
+	template<int C> struct Spec<SQLType::FUNC_TIMESTAMP_US, C> {
+		typedef Base::Type<TupleTypes::TYPE_MICRO_TIMESTAMP, Base::InList<
+				Base::In<TupleTypes::TYPE_STRING>,
 				Base::In<TupleTypes::TYPE_STRING, ExprSpec::FLAG_OPTIONAL>
 				> > Type;
 	};
 
-	template<int C> struct Spec<SQLType::FUNC_TIMESTAMP_ADD, C> {
-		typedef Base::Type<TupleTypes::TYPE_TIMESTAMP, Base::InList<
-				Base::In<TupleTypes::TYPE_LONG, ExprSpec::FLAG_EXACT>,
-				Base::In<TupleTypes::TYPE_TIMESTAMP>,
-				Base::In<TupleTypes::TYPE_LONG>,
+	template<int C> struct Spec<SQLType::FUNC_TIMESTAMP_NS, C> {
+		typedef Base::Type<TupleTypes::TYPE_NANO_TIMESTAMP, Base::InList<
+				Base::In<TupleTypes::TYPE_STRING>,
 				Base::In<TupleTypes::TYPE_STRING, ExprSpec::FLAG_OPTIONAL>
 				> > Type;
+	};
+
+	template<int C> struct Spec<SQLType::FUNC_TIMESTAMP_TRUNC, C> {
+		typedef Base::Type<TupleTypes::TYPE_NULL, Base::InList<
+				Base::In<TupleTypes::TYPE_LONG, ExprSpec::FLAG_EXACT>,
+				Base::PromotableTimestampIn,
+				Base::In<TupleTypes::TYPE_STRING, ExprSpec::FLAG_OPTIONAL> >,
+				ExprSpec::FLAG_INHERIT2> Type;
+	};
+
+	template<int C> struct Spec<SQLType::FUNC_TIMESTAMP_ADD, C> {
+		typedef Base::Type<TupleTypes::TYPE_NULL, Base::InList<
+				Base::In<TupleTypes::TYPE_LONG, ExprSpec::FLAG_EXACT>,
+				Base::PromotableTimestampIn,
+				Base::In<TupleTypes::TYPE_LONG>,
+				Base::In<TupleTypes::TYPE_STRING, ExprSpec::FLAG_OPTIONAL> >,
+				ExprSpec::FLAG_INHERIT2> Type;
 	};
 
 	template<int C> struct Spec<SQLType::FUNC_TIMESTAMP_DIFF, C> {
 		typedef Base::Type<TupleTypes::TYPE_LONG, Base::InList<
 				Base::In<TupleTypes::TYPE_LONG, ExprSpec::FLAG_EXACT>,
-				Base::In<TupleTypes::TYPE_TIMESTAMP>,
-				Base::In<TupleTypes::TYPE_TIMESTAMP>,
+				Base::PromotableTimestampIn,
+				Base::PromotableTimestampIn,
 				Base::In<TupleTypes::TYPE_STRING, ExprSpec::FLAG_OPTIONAL>
 				> > Type;
 	};
@@ -142,13 +160,18 @@ struct SQLTimeExprs::Functions {
 	typedef SQLExprs::ExprUtils::FunctorPolicy::DefaultPolicy DefaultPolicy;
 
 	struct Extract {
-		template<typename C, typename R>
-		int64_t operator()(
-				C &cxt, int64_t fieldTypeValue, int64_t tsValue, R &zone);
+		struct Checker {
+			template<typename C, typename T>
+			int64_t operator()(C&, int64_t fieldTypeValue, const T&);
+		};
 
-		template<typename C>
+		template<typename C, typename T, typename R>
 		int64_t operator()(
-				C &cxt, int64_t fieldTypeValue, int64_t tsValue,
+				C &cxt, int64_t fieldTypeValue, const T &tsValue, R &zone);
+
+		template<typename C, typename T>
+		int64_t operator()(
+				C &cxt, int64_t fieldTypeValue, const T &tsValue,
 				const util::TimeZone &zone = util::TimeZone());
 	};
 
@@ -202,57 +225,80 @@ struct SQLTimeExprs::Functions {
 		int64_t operator()(C &cxt, int64_t millis);
 	};
 
+	template<typename T>
 	struct TimestampFunc {
 		typedef DefaultPolicy::AsAllocatable Policy;
 
 		template<typename C, typename R>
-		int64_t operator()(C &cxt, R &value, R &zone);
+		typename T::LocalValueType operator()(C &cxt, R &value, R &zone);
 
 		template<typename C, typename R>
-		int64_t operator()(
+		typename T::LocalValueType operator()(
 				C &cxt, R &value,
 				const util::TimeZone &zone = util::TimeZone());
 	};
 
-	struct TimestampTrunc {
-		template<typename C, typename R>
-		int64_t operator()(
-				C &cxt, int64_t fieldTypeValue, int64_t tsValue, R &zone);
+	typedef TimestampFunc<SQLValues::Types::TimestampTag> TimestampMsFunc;
+	typedef TimestampFunc<SQLValues::Types::MicroTimestampTag> TimestampUsFunc;
+	typedef TimestampFunc<SQLValues::Types::NanoTimestampTag> TimestampNsFunc;
 
-		template<typename C>
-		int64_t operator()(
-				C &cxt, int64_t fieldTypeValue, int64_t tsValue,
+	struct TimestampTrunc {
+		struct Checker {
+			template<typename C, typename T>
+			T operator()(C&, int64_t fieldTypeValue, const T &tsValue);
+		};
+
+		template<typename C, typename T, typename R>
+		T operator()(
+				C &cxt, int64_t fieldTypeValue, const T &tsValue, R &zone);
+
+		template<typename C, typename T>
+		T operator()(
+				C &cxt, int64_t fieldTypeValue, const T &tsValue,
 				const util::TimeZone &zone = util::TimeZone());
 	};
 
 	struct TimestampAdd {
-		template<typename C, typename R>
-		int64_t operator()(
-				C &cxt, int64_t fieldTypeValue, int64_t tsValue, int64_t amount,
-				R &zone);
+		struct Checker {
+			template<typename C, typename T>
+			T operator()(C&, int64_t fieldTypeValue, const T &tsValue, int64_t);
+		};
 
-		template<typename C>
-		int64_t operator()(
-				C &cxt, int64_t fieldTypeValue, int64_t tsValue, int64_t amount,
-				const util::TimeZone &zone = util::TimeZone());
+		template<typename C, typename T, typename R>
+		T operator()(
+				C &cxt, int64_t fieldTypeValue, const T &tsValue,
+				int64_t amount, R &zone);
+
+		template<typename C, typename T>
+		T operator()(
+				C &cxt, int64_t fieldTypeValue, const T &tsValue,
+				int64_t amount, const util::TimeZone &zone = util::TimeZone());
 	};
 
 	struct TimestampDiff {
-		template<typename C, typename R>
-		int64_t operator()(
-				C &cxt, int64_t fieldTypeValue, int64_t tsValue1, int64_t tsValue2,
-				R &zone);
+		struct Checker {
+			template<typename C, typename T>
+			int64_t operator()(C&, int64_t fieldTypeValue, const T&, const T&);
+		};
 
-		template<typename C>
+		template<typename C, typename T, typename R>
 		int64_t operator()(
-				C &cxt, int64_t fieldTypeValue, int64_t tsValue1, int64_t tsValue2,
-				const util::TimeZone &zone = util::TimeZone());
+				C &cxt, int64_t fieldTypeValue, const T &tsValue1,
+				const T &tsValue2, R &zone);
+
+		template<typename C, typename T>
+		int64_t operator()(
+				C &cxt, int64_t fieldTypeValue, const T &tsValue1,
+				const T &tsValue2, const util::TimeZone &zone = util::TimeZone());
 	};
 };
 
 struct SQLTimeExprs::TimeFunctionUtils {
 	static util::DateTime trunc(
 			const util::DateTime &value, util::DateTime::FieldType field,
+			const util::DateTime::ZonedOption &option);
+	static util::PreciseDateTime trunc(
+			const util::PreciseDateTime &value, util::DateTime::FieldType field,
 			const util::DateTime::ZonedOption &option);
 };
 

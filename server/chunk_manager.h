@@ -285,7 +285,7 @@ public:
 
 	std::vector<RawChunkInfo> dump();
 
-	void _extentChecker();
+	void extentChecker();
 
 	Group* createGroup();
 
@@ -363,7 +363,7 @@ private:
 
 	void addExtentFree(int32_t index);
 
-	void _extentChecker();
+	void extentChecker();
 
 	DSGroupId groupId_;
 	DLTable::Chain* chain_;
@@ -715,7 +715,7 @@ public:
 	}
 
 	ChunkManager(
-			ConfigTable& configTable, LogManager<NoLocker> &logmanager,
+			ConfigTable& configTable, LogManager<MutexLocker> &logmanager,
 			ChunkBuffer &chunkBuffer, AffinityManager &affinitymanager,
 			int32_t chunkSize, PartitionId pId,
 			ChunkManagerStats &stats);
@@ -782,8 +782,6 @@ public:
 
 	void fin();
 
-	void allocateChunk(DSGroupId groupId, ChunkId v5ChunkId, ChunkAccessor &ca);
-
 	int64_t copyChunk(ChunkCopyContext* cxt, int64_t offset, bool keepSrcOffset);
 
 	void restoreChunk(uint8_t* buff, size_t buffSize, int64_t offset);
@@ -838,11 +836,11 @@ private:
 	uint64_t getCheckpointChunkNum() const;
 	uint64_t getBatchFreeCount() const;
 
-	void _extentChecker();
+	void extentChecker();
 
 private:
 	const ConfigTable& configTable_;
-	LogManager<NoLocker> &defaultLogManager_;
+	LogManager<MutexLocker> &defaultLogManager_;
 	ChunkBuffer &chunkBuffer_;
 	AffinityManager &affinityManager_;
 	int32_t chunkSize_;

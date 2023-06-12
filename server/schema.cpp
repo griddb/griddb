@@ -54,8 +54,7 @@ void ColumnInfo::set(TransactionContext &txn, ObjectManagerV4 &objectManager,
 		memcpy(stringPtr, columnName.c_str(), size + 1);
 	}
 
-	setType(messageSchema->getColumnType(fromColumnId),
-		messageSchema->getIsArray(fromColumnId));
+	setType(messageSchema->getColumnFullType(fromColumnId));
 
 	flags_ = 0;
 
@@ -90,21 +89,24 @@ void ColumnInfo::finalize(
 /*!
 	@brief translate into Message format
 */
-void ColumnInfo::getSchema(TransactionContext &txn,
-	ObjectManagerV4 &objectManager, AllocateStrategy &strategy, util::XArray<uint8_t> &schema) {
+void ColumnInfo::getSchema(
+		TransactionContext &txn, ObjectManagerV4 &objectManager,
+		AllocateStrategy &strategy, util::XArray<uint8_t> &schema) {
 	char *columnName = const_cast<char *>(getColumnName(txn, objectManager, strategy));
 	int32_t columnNameLen = static_cast<int32_t>(strlen(columnName));
 	schema.push_back(
 		reinterpret_cast<uint8_t *>(&columnNameLen), sizeof(int32_t));
 	schema.push_back(reinterpret_cast<uint8_t *>(columnName), columnNameLen);
 
-	int8_t tmp = static_cast<int8_t>(getSimpleColumnType());
-	schema.push_back(reinterpret_cast<uint8_t *>(&tmp), sizeof(int8_t));
+	const int8_t typeOrdinal = ValueProcessor::getPrimitiveColumnTypeOrdinal(
+			getColumnType(), false);
+	schema.push_back(
+			reinterpret_cast<const uint8_t *>(&typeOrdinal),
+			sizeof(typeOrdinal));
 
-	uint8_t flag = (isArray() ? 1 : 0);
-	flag |= (isVirtual() ? COLUMN_FLAG_VIRTUAL : 0);
-	flag |= (isNotNull() ? COLUMN_FLAG_NOT_NULL : 0);
-	schema.push_back(reinterpret_cast<uint8_t *>(&flag), sizeof(uint8_t));
+	const uint8_t flags = MessageSchema::makeColumnFlags(
+			isArray(), isVirtual(), isNotNull());
+	schema.push_back(&flags, sizeof(flags));
 }
 
 std::string ColumnInfo::dump(
@@ -297,7 +299,7 @@ int64_t ColumnSchema::calcSchemaHashKey(MessageSchema *messageSchema) {
 	hashVal = hashVal << 32;
 	for (uint32_t i = 0; i < messageSchema->getColumnCount(); i++) {
 		int32_t columnHashVal = 0;
-		columnHashVal += messageSchema->getColumnType(i);
+		columnHashVal += messageSchema->getColumnFullType(i);
 		const util::String &columnName = messageSchema->getColumnName(i);
 		for (uint32_t j = 0; j < columnName.size(); j++) {
 			columnHashVal += static_cast<int32_t>(columnName[j]);
@@ -357,8 +359,7 @@ bool ColumnSchema::schemaCheck(TransactionContext &txn,
 	if (isSameSchema) {
 		for (uint32_t i = 0; i < columnNum; i++) {
 			const util::String &newColumnName = messageSchema->getColumnName(i);
-			ColumnType columnType = messageSchema->getColumnType(i);
-			bool isArray = messageSchema->getIsArray(i);
+			ColumnType columnType = messageSchema->getColumnFullType(i);
 			bool isNotNull = messageSchema->getIsNotNull(i);
 
 			ColumnInfo &columnInfo = getColumnInfo(columnMap[i]);
@@ -374,9 +375,8 @@ bool ColumnSchema::schemaCheck(TransactionContext &txn,
 					static_cast<uint32_t>(
 						newColumnName.length()))) {  
 
-				if (columnInfo.getSimpleColumnType() != columnType ||
-					columnInfo.isArray() != isArray ||
-					columnInfo.isNotNull() != isNotNull) {
+				if (columnInfo.getColumnType() != columnType ||
+						columnInfo.isNotNull() != isNotNull) {
 					isSameSchema = false;
 				}
 			}
@@ -784,9 +784,11 @@ void IndexSchema::getIndexInfoList(TransactionContext &txn,
 		bool isMapTypeMatch;
 		if (indexInfo.mapType == MAP_TYPE_DEFAULT) {
 			ColumnInfo& columnInfo = container->getColumnInfo(currentIndexInfo.columnIds_[0]);
-			isMapTypeMatch = defaultIndexType[columnInfo.getColumnType()] == currentIndexInfo.mapType;
+			MapType defaultType;
+			findDefaultIndexType(columnInfo.getColumnType(), defaultType);
+			isMapTypeMatch = (defaultType == currentIndexInfo.mapType);
 		} else {
-			isMapTypeMatch = indexInfo.mapType == currentIndexInfo.mapType;
+			isMapTypeMatch = (indexInfo.mapType == currentIndexInfo.mapType);
 		}
 
 		if (indexInfo.anyNameMatches_ == 0 && indexInfo.indexName_.length() != 0) {
@@ -961,6 +963,23 @@ bool IndexSchema::expandNullStats(TransactionContext &txn, uint32_t oldColumnNum
 	setNullbitsSize(newNullBitsSize);
 
 	return true;
+}
+
+bool IndexSchema::findDefaultIndexType(ColumnType columnType, MapType &type) {
+	UTIL_STATIC_ASSERT(
+			sizeof(DEFAULT_INDEX_TYPE) / sizeof(*DEFAULT_INDEX_TYPE) ==
+			COLUMN_TYPE_PRIMITIVE_COUNT);
+
+	int8_t columnTypeOrdinal;
+	if (ValueProcessor::isArray(columnType) ||
+			!ValueProcessor::findPrimitiveColumnTypeOrdinal(
+					columnType, false, columnTypeOrdinal)) {
+		type = MAP_TYPE_DEFAULT;
+		return false;
+	}
+
+	type = DEFAULT_INDEX_TYPE[columnTypeOrdinal];
+	return (type != MAP_TYPE_DEFAULT);
 }
 
 /*!

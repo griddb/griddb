@@ -473,6 +473,16 @@ struct MessageRowStore::ColumnTypeTraits<COLUMN_TYPE_TIMESTAMP> {
 	typedef Timestamp PrimitiveType;
 };
 
+template<>
+struct MessageRowStore::ColumnTypeTraits<COLUMN_TYPE_MICRO_TIMESTAMP> {
+	typedef MicroTimestamp PrimitiveType;
+};
+
+template<>
+struct MessageRowStore::ColumnTypeTraits<COLUMN_TYPE_NANO_TIMESTAMP> {
+	typedef NanoTimestamp PrimitiveType;
+};
+
 template<ColumnType C>
 typename MessageRowStore::ColumnTypeTraits<C>::PrimitiveType MessageRowStore::getField(
 		ColumnId columnId) {

@@ -181,6 +181,35 @@ public interface RowSet<R> extends Closeable {
 
 	/**
 	 * <div lang="ja">
+	 * このロウ集合に対応するスキーマを取得します。
+	 *
+	 * <p>ロウキーの有無を含むカラムレイアウトにする情報のみが設定された
+	 * {@link ContainerInfo}が求まります。
+	 * コンテナ名、コンテナ種別、索引設定、時系列構成オプションなどその他の
+	 * コンテナ情報は含まれません。</p>
+	 *
+	 * <p>このロウ集合が{@link AggregationResult}インスタンスのロウを扱う
+	 * ものとして構成されており、かつ、1件もロウを含まない場合、現バージョンでは
+	 * {@code null}を返します。</p>
+	 *
+	 * @return スキーマに関するコンテナ情報のみを持つ{@link ContainerInfo}
+	 *
+	 * @throws GSException 現バージョンでは送出されない
+	 * @since 5.3
+	 * </div><div lang="en">
+	 * Returns the schema corresponding to the specified Row set.
+	 *
+	 * @return {@link ContainerInfo} having only container information
+	 * related to the schema. If the Row set has no Row and the type of
+	 * the Row is {@link AggregationResult}, returns {@code null}.
+	 *
+	 * @since 5.3
+	 * </div>
+	 */
+	public ContainerInfo getSchema() throws GSException;
+
+	/**
+	 * <div lang="ja">
 	 * 関連するリソースを適宜解放します。
 	 *
 	 * @throws GSException 現バージョンでは送出されない

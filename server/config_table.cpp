@@ -4174,7 +4174,6 @@ void BasicLocalStatMapper::ValueProducer::applyDateTimeValue(
 	util::DateTime dateTime(static_cast<int64_t>(src.get()));
 
 	util::DateTime::ZonedOption option;
-	option.baseOption_.trimMilliseconds_ = false;
 	option.asLocalTimeZone_ = true;
 
 	char8_t buf[util::DateTime::MAX_FORMAT_SIZE + 1] = { 0 };

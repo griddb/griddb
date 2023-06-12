@@ -701,16 +701,20 @@ void BoolExpr::toAndList(util::XArray<BoolExpr *> &andList) {
  *
  * @return true : success, false : fail to get
  */
-bool BoolExpr::getCondition(TransactionContext &txn, MapType type,
-	Query &queryObj, TermCondition *&cond) {
+bool BoolExpr::getCondition(
+		TransactionContext &txn, MapType type, Query &queryObj,
+		TermCondition *&cond, bool &semiFiltering) {
+	cond = NULL;
+	semiFiltering = false;
+
 	Expr *unary;
 	if (this->opeType_ == UNARY) {
 		unary = this->unary_;
-		cond = unary->toCondition(txn, type, queryObj, false);
+		cond = unary->toCondition(txn, type, queryObj, false, semiFiltering);
 	}
 	else if (this->opeType_ == NOT) {
 		unary = this->operands_[0]->unary_;
-		cond = unary->toCondition(txn, type, queryObj, true);
+		cond = unary->toCondition(txn, type, queryObj, true, semiFiltering);
 	}
 	else {
 		GS_THROW_USER_ERROR(GS_ERROR_TQ_CRITICAL_LOGIC_ERROR,
@@ -729,26 +733,35 @@ void BoolExpr::toSearchContext(TransactionContext &txn,
 	QueryForCollection &queryObj, BtreeMap::SearchContext *&sc,
 	uint32_t &restEval, ResultSize limit) {
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
+
 	if (indexData != NULL) {
 		sc = ALLOC_NEW(alloc) BtreeMap::SearchContext (alloc, *(indexData->columnIds_));
-	} else {
+	}
+	else {
 		util::Vector<ColumnId> columnIds(alloc);
 		columnIds.push_back(queryObj.collection_->getRowIdColumnId());
 		sc = ALLOC_NEW(alloc) BtreeMap::SearchContext (alloc, columnIds);
 	}
 	sc->reserveCondition(andList.size());
 	restEval = 0;
-	util::Vector<ColumnId>::const_iterator columnIdItr;
+
 	const util::Vector<ColumnId> &columnIds = sc->getColumnIds();
 	for (size_t i = 0; i < andList.size(); i++) {
-		TermCondition *c = NULL;
-		andList[i]->getCondition(txn, MAP_TYPE_BTREE, queryObj, c);
-		if (c == NULL) {
-			restEval++;
-		} else {
+		TermCondition *c;
+		bool semiFiltering;
+		const bool conditionDealed = andList[i]->getCondition(
+				txn, MAP_TYPE_BTREE, queryObj, c, semiFiltering);
+
+		if (conditionDealed && !semiFiltering) {
 			andList[i]->enableEvaluationFilter();
-			columnIdItr = std::find(columnIds.begin(), 
-				columnIds.end(), c->columnId_);
+		}
+		else {
+			restEval++;
+		}
+
+		if (conditionDealed) {
+			util::Vector<ColumnId>::const_iterator columnIdItr = std::find(
+					columnIds.begin(), columnIds.end(), c->columnId_);
 			bool isKey = false;
 			if (columnIdItr != columnIds.end()) {
 				if (sc->getKeyColumnNum() == 1) {
@@ -779,7 +792,8 @@ void BoolExpr::toSearchContext(TransactionContext &txn,
 
 	if (indexData != NULL) {
 		sc = ALLOC_NEW(alloc) RtreeMap::SearchContext (alloc, *(indexData->columnIds_));
-	} else {
+	}
+	else {
 		util::Vector<ColumnId> columnIds(alloc);
 		columnIds.push_back(queryObj.collection_->getRowIdColumnId());
 		sc = ALLOC_NEW(alloc) RtreeMap::SearchContext (alloc, columnIds);
@@ -787,17 +801,23 @@ void BoolExpr::toSearchContext(TransactionContext &txn,
 	sc->reserveCondition(andList.size());
 	restEval = 0;
 
-	int32_t conditionDealed;
 	const util::Vector<ColumnId> &columnIds = sc->getColumnIds();
 	for (size_t i = 0; i < andList.size(); i++) {
-		TermCondition *c = NULL;
-		conditionDealed = andList[i]->getCondition(txn, MAP_TYPE_SPATIAL,
-			queryObj, c);
-		if (conditionDealed) {
+		TermCondition *c;
+		bool semiFiltering;
+		const bool conditionDealed = andList[i]->getCondition(
+				txn, MAP_TYPE_SPATIAL, queryObj, c, semiFiltering);
+
+		if (conditionDealed && !semiFiltering) {
 			andList[i]->enableEvaluationFilter();
-			util::Vector<ColumnId>::const_iterator columnIdItr = 
-				std::find(columnIds.begin(), 
-				columnIds.end(), c->columnId_);
+		}
+		else {
+			restEval++;
+		}
+
+		if (conditionDealed) {
+			util::Vector<ColumnId>::const_iterator columnIdItr = std::find(
+					columnIds.begin(), columnIds.end(), c->columnId_);
 			bool isKey = false;
 			if (columnIdItr != columnIds.end()) {
 				if (sc->getNullCond() != BaseIndex::SearchContext::IS_NULL) {
@@ -808,9 +828,6 @@ void BoolExpr::toSearchContext(TransactionContext &txn,
 				}
 			}
 			sc->addCondition(txn, *c, isKey);
-		}
-		else {
-			restEval++;
 		}
 	}
 	sc->setLimit((0 == restEval) ? limit : MAX_RESULT_SIZE);
@@ -825,9 +842,11 @@ void BoolExpr::toSearchContext(TransactionContext &txn,
 	IndexData *indexData, QueryForTimeSeries &queryObj,
 	BtreeMap::SearchContext *&sc, uint32_t &restEval, ResultSize limit) {
 	util::StackAllocator &alloc = txn.getDefaultAllocator();
+
 	if (indexData != NULL) {
 		sc = ALLOC_NEW(alloc) BtreeMap::SearchContext (alloc, *(indexData->columnIds_));
-	} else {
+	}
+	else {
 		util::Vector<ColumnId> columnIds(alloc);
 		columnIds.push_back(queryObj.timeSeries_->getRowIdColumnId());
 		sc = ALLOC_NEW(alloc) BtreeMap::SearchContext (alloc, columnIds);
@@ -835,17 +854,23 @@ void BoolExpr::toSearchContext(TransactionContext &txn,
 	sc->reserveCondition(andList.size() + 1);  
 	restEval = 0;
 
-	util::Vector<ColumnId>::const_iterator columnIdItr;
 	const util::Vector<ColumnId> &columnIds = sc->getColumnIds();
 	for (size_t i = 0; i < andList.size(); i++) {
-		TermCondition *c = NULL;
-		andList[i]->getCondition(txn, MAP_TYPE_BTREE, queryObj, c);
-		if (c == NULL) {
-			restEval++;
-		} else {
+		TermCondition *c;
+		bool semiFiltering;
+		const bool conditionDealed = andList[i]->getCondition(
+				txn, MAP_TYPE_BTREE, queryObj, c, semiFiltering);
+
+		if (conditionDealed && !semiFiltering) {
 			andList[i]->enableEvaluationFilter();
-			columnIdItr = std::find(columnIds.begin(), 
-				columnIds.end(), c->columnId_);
+		}
+		else {
+			restEval++;
+		}
+
+		if (conditionDealed) {
+			util::Vector<ColumnId>::const_iterator columnIdItr = std::find(
+					columnIds.begin(), columnIds.end(), c->columnId_);
 			bool isKey = false;
 			if (columnIdItr != columnIds.end()) {
 				if (sc->getKeyColumnNum() == 1) {

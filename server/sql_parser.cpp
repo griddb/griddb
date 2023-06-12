@@ -36,6 +36,7 @@
 
 
 
+
 const int64_t SyntaxTree::SQL_TOKEN_COUNT_LIMIT = 100000;
 const int64_t SyntaxTree::SQL_EXPR_TREE_DEPTH_LIMIT = 3000;
 const int64_t SyntaxTree::SQL_VIEW_NESTING_LEVEL_LIMIT = 10;
@@ -408,6 +409,101 @@ SyntaxTree::CommandType SyntaxTree::Select::getCommandType() {
 }
 
 
+const char* SyntaxTree::Select::dumpCommandType() {
+	switch (cmdType_) {
+	case CMD_NONE:
+		return "NONE";
+	case CMD_SELECT:
+		return "SELECT";
+	case CMD_INSERT:
+		return "INSERT";
+	case CMD_UPDATE:
+		return "UPDATE";
+	case CMD_DELETE:
+		return "DELETE";
+	case CMD_CREATE_DATABASE:
+		return "CREATE_DATABASE";
+	case CMD_DROP_DATABASE:
+		return "DROP_DATABASE";
+	case CMD_CREATE_TABLE:
+		return "CREATE_TABLE";
+	case CMD_DROP_TABLE:
+		return "DROP_TABLE";
+	case CMD_CREATE_VIEW: 
+		return "CREATE_VIEW";
+	case CMD_DROP_VIEW: 
+		return "DROP_VIEW";
+	case CMD_CREATE_INDEX:
+		return "CREATE_INDEX";
+	case CMD_DROP_INDEX:
+		return "DROP_INDEX";
+	case CMD_ALTER_TABLE_DROP_PARTITION:  
+	case CMD_ALTER_TABLE_ADD_COLUMN:  
+	case CMD_ALTER_TABLE_RENAME_COLUMN:  
+		return "ALTER_TABLE";
+	case CMD_CREATE_USER:
+		return "CREATE_USER";
+	case CMD_DROP_USER:
+		return "DROP_USER";
+	case CMD_SET_PASSWORD:
+		return "SET_PASSWORD";
+	case CMD_GRANT:
+		return "GRANT";
+	case CMD_REVOKE:
+		return "REVOKE";
+	case CMD_BEGIN:
+	case CMD_COMMIT:
+	case CMD_ROLLBACK:
+		return "NONE";
+	case CMD_CREATE_ROLE:
+		return "CREATE_ROLE";
+	default:
+		return "NONE";
+	}
+	return "NONE";
+}
+
+
+int32_t SyntaxTree::Select::dumpCategoryType() {
+	switch (cmdType_) {
+	case CMD_NONE:
+		return COMMAND_NONE;
+	case CMD_SELECT:
+		return COMMAND_SELECT;
+	case CMD_INSERT:
+	case CMD_UPDATE:
+	case CMD_DELETE:
+		return COMMAND_DML;
+	case CMD_CREATE_DATABASE:
+	case CMD_DROP_DATABASE:
+	case CMD_CREATE_TABLE:
+	case CMD_DROP_TABLE:
+	case CMD_CREATE_VIEW: 
+	case CMD_DROP_VIEW: 
+	case CMD_CREATE_INDEX:
+	case CMD_DROP_INDEX:
+	case CMD_ALTER_TABLE_DROP_PARTITION:  
+	case CMD_ALTER_TABLE_ADD_COLUMN:  
+	case CMD_ALTER_TABLE_RENAME_COLUMN:  
+	case CMD_CREATE_USER:
+	case CMD_DROP_USER:
+	case CMD_CREATE_ROLE:
+		return COMMAND_DDL;
+	case CMD_SET_PASSWORD:
+	case CMD_GRANT:
+	case CMD_REVOKE:
+		return COMMAND_DCL;
+	case CMD_BEGIN:
+	case CMD_COMMIT:
+	case CMD_ROLLBACK:
+		return COMMAND_NONE;
+	default:
+		return COMMAND_NONE;
+	}
+	return COMMAND_NONE;
+}
+
+
 void SyntaxTree::Select::dump(std::ostream &os) {
 	os << "{\"Select\":{\"cmdType\":" << cmdType_; 
 	if (selectList_) {
@@ -766,8 +862,20 @@ SyntaxTree::Expr* SyntaxTree::Expr::makeTable(SQLAllocator &alloc,
 	return table;
 }
 
+SyntaxTree::Expr* SyntaxTree::makeConst(
+		SQLAllocator& alloc, const TupleValue &value) {
+	Expr *expr = Expr::makeExpr(alloc, SQLType::EXPR_CONSTANT);
+	expr->value_ = value;
+	return expr;
+}
+
+TupleValue SyntaxTree::makeNanoTimestampValue(
+		SQLAllocator& alloc, const NanoTimestamp &ts) {
+	return TupleNanoTimestamp(ALLOC_NEW(alloc) NanoTimestamp(ts));
+}
+
 TupleValue SyntaxTree::makeStringValue(
-	SQLAllocator& alloc, const char* str, size_t strLen) {
+		SQLAllocator& alloc, const char* str, size_t strLen) {
 	TupleValue::StackAllocSingleVarBuilder singleVarBuilder(
 		alloc, TupleList::TYPE_STRING, strLen);
 	singleVarBuilder.append(str, strLen);
@@ -775,7 +883,7 @@ TupleValue SyntaxTree::makeStringValue(
 }
 
 TupleValue SyntaxTree::makeBlobValue(
-	TupleValue::VarContext& cxt, const void* src, size_t byteLen) {
+		TupleValue::VarContext& cxt, const void* src, size_t byteLen) {
 	TupleValue::StackAllocLobBuilder lobBuilder(
 		cxt, TupleList::TYPE_BLOB, byteLen);
 	lobBuilder.append(src, byteLen);
@@ -783,7 +891,7 @@ TupleValue SyntaxTree::makeBlobValue(
 }
 
 void SyntaxTree::calcPositionInfo(
-	const char *top, const char *target, int32_t &line, int32_t &charPos) {
+		const char *top, const char *target, int32_t &line, int32_t &charPos) {
 	line = 0;
 	charPos = -1;
 	if (top > target) {
@@ -884,6 +992,18 @@ void SyntaxTree::Expr::dump(std::ostream &os) {
 		case TupleList::TYPE_TIMESTAMP: {
 			int64_t val = value_.get<int64_t>();
 			os << ", \"value_long\":" << val;
+			break;
+		}
+		case TupleList::TYPE_MICRO_TIMESTAMP: {
+			MicroTimestamp val = value_.get<MicroTimestamp>();
+			os << ", \"value_micro_timestamp\":" << val.value_;
+			break;
+		}
+		case TupleList::TYPE_NANO_TIMESTAMP: {
+			const NanoTimestamp &val = value_.get<TupleNanoTimestamp>();
+			os << ", \"value_micro_timestamp\":" <<
+					static_cast<uint32_t>(val.getHigh()) << " " <<
+					val.getLow();
 			break;
 		}
 		case TupleList::TYPE_FLOAT: {
@@ -1347,7 +1467,7 @@ SyntaxTree::CreateIndexOption* SyntaxTree::makeCreateIndexOption(
 }
 
 SyntaxTree::TableColumn* SyntaxTree::makeCreateTableColumn(
-	SQLAllocator &alloc, SQLToken *name, SQLToken *type,
+	SQLAllocator &alloc, SQLToken *name, TupleList::TupleColumnType type,
 	SyntaxTree::ColumnInfo *colInfo) {
 	TableColumn *column = ALLOC_NEW(alloc) TableColumn;
 	do {
@@ -1361,17 +1481,7 @@ SyntaxTree::TableColumn* SyntaxTree::makeCreateTableColumn(
 		column->qName_ = ALLOC_NEW(alloc) QualifiedName(alloc);
 		column->qName_->name_ = colName;
 		column->qName_->nameCaseSensitive_ = isQuoted;
-
-		util::String *typeStr = NULL;
-		tokenToString(alloc, *type, false, typeStr, isQuoted);
-		if (typeStr) {
-			column->type_ = toColumnType(typeStr->c_str());
-			ALLOC_DELETE(alloc, typeStr);
-		}
-		else {
-			GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR,
-								"Column type name must not be empty");
-		}
+		column->type_ = type;
 		if (colInfo) {
 			column->option_ = colInfo->option_;
 			column->virtualColumnOption_ = colInfo->virtualColumnOption_;
@@ -1396,7 +1506,80 @@ SyntaxTree::TableColumn* SyntaxTree::makeCreateTableColumn(
 	return NULL;
 }
 
-TupleList::TupleColumnType SyntaxTree::toColumnType(const char8_t *name) {
+SyntaxTree::ExprList* SyntaxTree::makeRangeGroupOption(
+		SQLAllocator &alloc, SyntaxTree::Expr *baseKey,
+		SyntaxTree::Expr *fillExpr, int64_t interval, int64_t intervalUnit,
+		int64_t offset, int64_t timeZone, bool withTimeZone) {
+
+	SyntaxTree::Expr *key = Expr::makeExpr(alloc, SQLType::EXPR_RANGE_GROUP);
+	{
+		key->next_ = ALLOC_NEW(alloc) ExprList(alloc);
+		key->next_->push_back(baseKey);
+		key->next_->push_back(fillExpr);
+		key->next_->push_back(makeConst(alloc, TupleValue(interval)));
+		key->next_->push_back(makeConst(alloc, TupleValue(intervalUnit)));
+		key->next_->push_back(makeConst(alloc, TupleValue(offset)));
+		key->next_->push_back(makeConst(
+				alloc, (withTimeZone ? TupleValue(timeZone) : TupleValue())));
+	}
+
+	ExprList *option = ALLOC_NEW(alloc) ExprList(alloc);
+	option->push_back(key);
+
+	return option;
+}
+
+bool SyntaxTree::resolveRangeGroupOffset(
+		const SQLToken &token, int64_t &offset) {
+	if(!SQLProcessor::ValueUtils::toLong(
+			token.value_, token.size_, offset)) {
+		return false;
+	}
+	if (offset < 0) {
+		return false;
+	}
+	return true;
+}
+
+bool SyntaxTree::resolveRangeGroupTimeZone(
+		SQLAllocator &alloc, const SQLToken &token, int64_t &timeZone) {
+	timeZone = 0;
+
+	bool isQuoted = false;
+	util::String *tokenStr = NULL;
+	tokenToString(alloc, token, true, tokenStr, isQuoted);
+
+	util::TimeZone zone;
+	const bool throwOnError = false;
+	if (!zone.parse(tokenStr->c_str(), tokenStr->size(), throwOnError)) {
+		return false;
+	}
+	timeZone = zone.getOffsetMillis();
+	return true;
+}
+
+TupleList::TupleColumnType SyntaxTree::toColumnType(
+		SQLAllocator &alloc, const SQLToken &type, const int64_t *num1,
+		const int64_t *num2) {
+	bool isQuoted = false;
+	util::String *typeStr = NULL;
+	tokenToString(alloc, type, false, typeStr, isQuoted);
+
+	TupleList::TupleColumnType resolvedType;
+	if (typeStr) {
+		resolvedType = toColumnType(typeStr->c_str(), num1, num2);
+		ALLOC_DELETE(alloc, typeStr);
+	}
+	else {
+		GS_THROW_USER_ERROR(
+				GS_ERROR_SQL_COMPILE_SYNTAX_ERROR,
+				"Column type name must not be empty");
+	}
+	return resolvedType;
+}
+
+TupleList::TupleColumnType SyntaxTree::toColumnType(
+		const char8_t *name, const int64_t *num1, const int64_t *num2) {
 	if (util::stricmp(name, "NULL") == 0) {
 		return TupleList::TYPE_NULL;
 	}
@@ -1419,6 +1602,24 @@ TupleList::TupleColumnType SyntaxTree::toColumnType(const char8_t *name) {
 		return TupleList::TYPE_DOUBLE;
 	}
 	else if (util::stricmp(name, "TIMESTAMP") == 0) {
+		if (num2 != NULL) {
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR,
+					"Too many precision arguments for TIMESTAMP column type");
+		}
+		if (num1 != NULL) {
+			switch (*num1) {
+			case 3:
+				break;
+			case 6:
+				return TupleList::TYPE_MICRO_TIMESTAMP;
+			case 9:
+				return TupleList::TYPE_NANO_TIMESTAMP;
+			default:
+				GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_SYNTAX_ERROR,
+						"Unsupported precision number for TIMESTAMP column type ("
+						"number=" << *num1 << ")");
+			}
+		}
 		return TupleList::TYPE_TIMESTAMP;
 	}
 	else if (util::stricmp(name, "BOOL") == 0) {
@@ -1522,6 +1723,29 @@ TupleList::TupleColumnType SyntaxTree::determineType(const char *zIn) {
 	return aff;
 }
 
+bool SyntaxTree::checkPartitioningIntervalTimeField(
+		util::DateTime::FieldType type) {
+	switch(type) {
+	case util::DateTime::FIELD_DAY_OF_MONTH:
+		return true;
+	default:
+		return false;
+	}
+}
+
+bool SyntaxTree::checkGroupIntervalTimeField(util::DateTime::FieldType type) {
+	switch(type) {
+	case util::DateTime::FIELD_DAY_OF_MONTH:
+	case util::DateTime::FIELD_HOUR:
+	case util::DateTime::FIELD_MINUTE:
+	case util::DateTime::FIELD_SECOND:
+	case util::DateTime::FIELD_MILLISECOND:
+		return true;
+	default:
+		return false;
+	}
+}
+
 void SyntaxTree::countLineAndColumn(
 	const char* srcSqlStr, const Expr* expr, size_t &line, size_t &column) {
 	line = 0;
@@ -1572,6 +1796,22 @@ void SyntaxTree::tokenToString(
 		}
 	}
 	out = str;
+}
+
+bool SyntaxTree::toSignedValue(
+		const SQLToken &token, bool minus, int64_t &value) {
+	if (!SQLProcessor::ValueUtils::toLong(token.value_, token.size_, value)) {
+		return false;
+	}
+
+	if (minus) {
+		if (value >= std::numeric_limits<int64_t>::max()) {
+			return false;
+		}
+		value = -value;
+	}
+
+	return true;
 }
 
 /*!

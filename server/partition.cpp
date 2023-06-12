@@ -180,8 +180,8 @@ Partition::Partition(
 			ossCpLog << dataPath << "/" << pId_;
 			util::NormalOStringStream ossXLog;
 			ossXLog << logPath << "/" << pId;
-			std::unique_ptr<NoLocker> locker(UTIL_NEW NoLocker());
-			defaultLogManager_ = UTIL_NEW LogManager<NoLocker>(
+			std::unique_ptr<MutexLocker> locker(UTIL_NEW MutexLocker());
+			defaultLogManager_ = UTIL_NEW LogManager<MutexLocker>(
 					configTable, std::move(locker), logStackAlloc_,
 					*xWALBuffer, *cpWALBuffer_,
 					checkpointRange_, ossCpLog.str().c_str(),
@@ -277,8 +277,9 @@ void Partition::reinit(PartitionList& ptList) {
 			ossCpLog << dataPath << "/" << pId_;
 			util::NormalOStringStream ossXLog;
 			ossXLog << logPath << "/" << pId_;
-			std::unique_ptr<NoLocker> locker(UTIL_NEW NoLocker());
-			defaultLogManager_ = UTIL_NEW LogManager<NoLocker>(
+
+			std::unique_ptr<MutexLocker> locker(UTIL_NEW MutexLocker());
+			defaultLogManager_ = UTIL_NEW LogManager<MutexLocker>(
 					configTable_, std::move(locker), logStackAlloc_,
 					*xWALBuffer, *cpWALBuffer_,
 					checkpointRange_, ossCpLog.str().c_str(),
@@ -375,10 +376,10 @@ void Partition::recover(
 		uint64_t adjustTime = currentTime;
 
 		const bool byCP = false;
-		std::tuple<LogIterator<NoLocker>, LogIterator<NoLocker>> its =
+		std::tuple<LogIterator<MutexLocker>, LogIterator<MutexLocker>> its =
 				defaultLogManager_->init(byCP);
 		{
-			LogIterator<NoLocker> it = defaultLogManager_->createChunkDataLogIterator();
+			LogIterator<MutexLocker> it = defaultLogManager_->createChunkDataLogIterator();
 			std::unique_ptr<Log> log;
 			while (true) {
 				util::StackAllocator::Scope scope(defaultLogManager_->getAllocator());
@@ -394,7 +395,7 @@ void Partition::recover(
 		}
 		int32_t redoCount = 0;
 		{
-			LogIterator<NoLocker>& it = std::get<0>(its);
+			LogIterator<MutexLocker>& it = std::get<0>(its);
 			std::unique_ptr<Log> log;
 			while (true) {
 				util::StackAllocator::Scope scope(defaultLogManager_->getAllocator());
@@ -425,7 +426,7 @@ void Partition::recover(
 		}
 		activate();
 		{
-			LogIterator<NoLocker>& it = std::get<1>(its);
+			LogIterator<MutexLocker>& it = std::get<1>(its);
 			std::unique_ptr<Log> log;
 			LogSequentialNumber lsn = UNDEF_LSN;
 			while (true) {
@@ -568,6 +569,7 @@ uint32_t Partition::undo(util::StackAllocator& alloc) {
 		for (size_t i = 0; i < undoTxnContextIds.size(); i++) {
 			TransactionContext &txn =
 					transactionManager->get(alloc, pId_, undoTxnContextIds[i]);
+			txn.setAuditInfo(NULL, NULL, NULL);
 
 			if (txn.isActive()) {
 				util::StackAllocator::Scope innerScope(alloc);
@@ -687,11 +689,14 @@ void Partition::finalizeRecovery(bool commit) {
 
 /*!
 	@brief チェックポイント実行判定
+	@param [in] updateLastLsn 最終CPLSNを更新する場合true
 */
-bool Partition::needCheckpoint() {
+bool Partition::needCheckpoint(bool updateLastLsn) {
 	uint64_t currentLsn = logManager().getLSN();
 	if (currentLsn != lastCpLsn_) {
-		lastCpLsn_ = currentLsn;
+		if (updateLastLsn) {
+			lastCpLsn_ = currentLsn;
+		}
 		return true;
 	}
 	else {
@@ -768,7 +773,7 @@ void Partition::executeCheckpoint0() {
 		if (chunkInfo.getOffset() >= 0) {
 			chunkManager_->flushBuffer(chunkInfo.getOffset());
 		}
-		Log log(LogType::CPLog);
+		Log log(LogType::CPLog, defaultLogManager_->getLogFormatVersion());
 		log.setChunkId(chunkInfo.getChunkId())
 			.setGroupId(chunkInfo.getGroupId())
 			.setOffset(chunkInfo.getOffset())
@@ -802,7 +807,7 @@ int32_t Partition::executePartialCheckpoint(
 			if (chunkInfo.getOffset() >= 0) {
 				chunkManager_->flushBuffer(chunkInfo.getOffset());
 			}
-			Log log(LogType::CPLog);
+			Log log(LogType::CPLog, defaultLogManager_->getLogFormatVersion());
 			log.setChunkId(chunkInfo.getChunkId())
 				.setGroupId(chunkInfo.getGroupId())
 				.setOffset(chunkInfo.getOffset())
@@ -872,7 +877,7 @@ void Partition::endCheckpoint0(CheckpointPhase phase) {
 		if (phase == CP_PHASE_PRE_SYNC) {
 			flushData();
 
-			Log log(LogType::CheckpointEndLog);
+			Log log(LogType::CheckpointEndLog, defaultLogManager_->getLogFormatVersion());
 			log.setLsn(getLSN());
 			defaultLogManager_->appendCpLog(log);
 		}
@@ -902,7 +907,7 @@ void Partition::endCheckpoint(EndCheckpointMode x) {
 			break;
 		case CP_END_ADD_CPLOG:
 			{
-				Log log(LogType::CheckpointEndLog);
+				Log log(LogType::CheckpointEndLog, defaultLogManager_->getLogFormatVersion());
 				log.setLsn(getLSN());
 				defaultLogManager_->appendCpLog(log);
 			}
@@ -921,7 +926,7 @@ void Partition::endCheckpoint(EndCheckpointMode x) {
 	@brief チェックポイント終了: 不要になった前世代のブロックイメージ解放準備
 	@note 通常のチェックポイント
 */
-LogIterator<NoLocker> Partition::endCheckpointPrepareReleaseBlock() {
+LogIterator<MutexLocker> Partition::endCheckpointPrepareRelaseBlock() {
 	try {
 		int64_t logVersion = defaultLogManager_->getLogVersion();
 		return defaultLogManager_->createLogIterator(logVersion - 1);
@@ -1107,6 +1112,25 @@ bool Partition::redo(RedoMode mode, Log* log) {
 		return true;
 	case LogType::NOPLog:
 		return true;
+	case LogType::CheckpointStartLog:  
+	{
+		uint16_t logFormatVersion = static_cast<uint16_t>(log->getFormatVersion());
+		if (logFormatVersion == 0) {
+			logFormatVersion = LogManagerConst::getBaseFormatVersion();
+		}
+		if (!LogManagerConst::isAcceptableFormatVersion(logFormatVersion)) {
+			GS_THROW_SYSTEM_ERROR(GS_ERROR_RM_REDO_LOG_VERSION_NOT_ACCEPTABLE,
+				"(logFormatVersion=" << static_cast<uint32_t>(logFormatVersion) <<
+				", baseFormatVersion=" <<
+				static_cast<uint32_t>(LogManagerConst::getBaseFormatVersion()) <<
+				")" );
+		}
+		defaultLogManager_->setLogFormatVersion(logFormatVersion);
+		GS_TRACE_DEBUG(
+			PARTITION, GS_TRACE_RM_RECOVERY_INFO,
+			"setLogForamatVersion: pId=" << pId_ << ",version=" << logFormatVersion);
+		return true;
+	}
 	case LogType::EOFLog:
 		return false;
 	case LogType::CheckpointEndLog:
@@ -1135,7 +1159,7 @@ bool Partition::redoLogList(
 		pos += sizeof(uint64_t);
 		size_t logPos = pos;
 
-		Log log(LogType::NOPLog);
+		Log log(LogType::NOPLog, defaultLogManager_->getLogFormatVersion());
 		util::ArrayByteInStream in = util::ArrayByteInStream(
 				util::ArrayInStream(logTop + pos, logSize));
 		log.decode<util::ArrayByteInStream>(in, storeStackAlloc_);
@@ -1217,6 +1241,24 @@ bool Partition::redoLogList(
 			break;
 		case LogType::NOPLog:
 			break;
+		case LogType::CheckpointStartLog:  
+			{
+			uint16_t logFormatVersion =
+					static_cast<uint16_t>(log.getFormatVersion());
+			if (logFormatVersion == 0) {
+				logFormatVersion = LogManagerConst::getBaseFormatVersion();
+			}
+			if (!LogManagerConst::isAcceptableFormatVersion(logFormatVersion)) {
+				GS_THROW_USER_ERROR(GS_ERROR_RM_REDO_LOG_VERSION_NOT_ACCEPTABLE,
+						"(logFormatVersion=" <<
+						static_cast<uint32_t>(logFormatVersion) <<
+						", baseFormatVersion=" <<
+						static_cast<uint32_t>(LogManagerConst::getBaseFormatVersion()) <<
+						")" );
+			}
+			defaultLogManager_->setLogFormatVersion(logFormatVersion);
+			}
+			break;
 		case LogType::CheckpointEndLog:
 			break;
 		case LogType::EOFLog:
@@ -1278,7 +1320,7 @@ void Partition::genTempLogManager() {
 		MeshedChunkTable::StableChunkCursor cursor = chunkManager_->createStableChunkCursor();
 		RawChunkInfo chunkInfo;
 		while (cursor.next(chunkInfo)) {
-			Log log(LogType::CPLog);
+			Log log(LogType::CPLog, defaultLogManager_->getLogFormatVersion());
 			log.setChunkId(chunkInfo.getChunkId())
 				.setGroupId(chunkInfo.getGroupId())
 				.setOffset(chunkInfo.getOffset())
@@ -1286,7 +1328,7 @@ void Partition::genTempLogManager() {
 				.setLsn(getLSN());
 			logManager.appendCpLog(log);
 		}
-		Log log(LogType::CheckpointEndLog);
+		Log log(LogType::CheckpointEndLog, defaultLogManager_->getLogFormatVersion());
 		log.setLsn(defaultLogManager_->getLSN());
 		logManager.appendCpLog(log);
 		logManager.flushCpLog(LOG_WRITE_WAL_BUFFER, byCP);
@@ -1330,15 +1372,16 @@ uint64_t Partition::copyChunks(
 			localCPWALBuffer.reset(UTIL_NEW WALBuffer(pId_, statsSet_.logMgrStats_));
 
 			int64_t logVersion = defaultLogManager_->getLogVersion();
-			cxt.logManager_ = UTIL_NEW LogManager<NoLocker>(
-					configTable_, std::move(noLocker), logStackAlloc_,
+			std::unique_ptr<MutexLocker> mutexLocker(UTIL_NEW MutexLocker());
+			cxt.logManager_ = UTIL_NEW LogManager<MutexLocker>(
+					configTable_, std::move(mutexLocker), logStackAlloc_,
 					*localXWALBuffer, *localCPWALBuffer, 1,
 					dataPath, xLogPath, pId_, statsSet_.logMgrStats_);
 			cxt.logManager_->setSuffix(LogManagerConst::INCREMENTAL_FILE_SUFFIX);
 			const bool byCP = false;
 			cxt.logManager_->init(logVersion, true, byCP);
 
-			Log log(LogType::PutChunkStartLog);
+			Log log(LogType::PutChunkStartLog, defaultLogManager_->getLogFormatVersion());
 			log.setLsn(defaultLogManager_->getLSN());
 
 			cxt.logManager_->appendCpLog(log);
@@ -1355,7 +1398,7 @@ uint64_t Partition::copyChunks(
 			cxt.datafile_ = NULL;
 		}
 		else {
-			Log log(LogType::PutChunkEndLog);
+			Log log(LogType::PutChunkEndLog, defaultLogManager_->getLogFormatVersion());
 			log.setOffset(blockCount)
 				.setLsn(defaultLogManager_->getLSN());
 			cxt.logManager_->appendCpLog(log);
@@ -1479,7 +1522,7 @@ void Partition::writeTxnLog(util::StackAllocator &alloc) {
 					sizeof(TransactionId));
 		}
 		const LogType logType = LogType::TXNLog;
-		Log log(logType);
+		Log log(logType, defaultLogManager_->getLogFormatVersion());
 		log.setLsn(defaultLogManager_->getLSN());
 		log.setDataSize(binaryLogBuf.size());
 		if (binaryLogBuf.size() > 0) {
@@ -1636,9 +1679,9 @@ void PartitionList::ConfigSetUpHandler::operator()(ConfigTable& config) {
 	CONFIG_TABLE_ADD_PARAM(
 			config, CONFIG_TABLE_DS_PERSISTENCY_MODE, INT32).
 			setExtendedType(ConfigTable::EXTENDED_TYPE_ENUM).
-			addEnum(LogManager<NoLocker>::PERSISTENCY_NORMAL, "NORMAL").
-			addEnum(LogManager<NoLocker>::PERSISTENCY_KEEP_ALL_LOG, "KEEP_ALL_LOG").
-			setDefault(LogManager<NoLocker>::PERSISTENCY_NORMAL);
+			addEnum(LogManager<MutexLocker>::PERSISTENCY_NORMAL, "NORMAL").
+			addEnum(LogManager<MutexLocker>::PERSISTENCY_KEEP_ALL_LOG, "KEEP_ALL_LOG").
+			setDefault(LogManager<MutexLocker>::PERSISTENCY_NORMAL);
 	CONFIG_TABLE_ADD_PARAM(
 			config, CONFIG_TABLE_DS_RETAINED_FILE_COUNT, INT32).
 			setMin(2).

@@ -378,9 +378,16 @@ public:
 		return tableLatch_;
 	}
 
+
+
+	void setAdministrator() {
+		isAdministrator_ = true;
+	}
+
 	bool isPartialMonitorRestricted() const;
 	void setPartialMonitorRestricted(bool restricted);
 
+	bool isAdministrator();
 	double getStoreMemoryAgingSwapRate() const;
 	void setStoreMemoryAgingSwapRate(double storeMemoryAgingSwapRate);
 
@@ -425,6 +432,7 @@ private:
 	bool partialMonitorRestricted_;
 	double storeMemoryAgingSwapRate_;
 	util::TimeZone timeZone_;
+	bool isAdministrator_;
 	bool setGroup_;
 	LocalTempStore::GroupId groupId_;
 };

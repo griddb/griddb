@@ -459,14 +459,20 @@ typedef std::basic_string< char8_t, std::char_traits<char8_t> > NormalString;
 #endif
 
 
-#if 0
 #if UTIL_HAS_ATTRIBUTE_MAYBE_UNUSED
-#define UNUSED_VARIABLE(v) \
+#define UTIL_UNUSED_VARIABLE(v) \
 		do { using utilUnused_##v [[maybe_unused]] = decltype(v); } \
 		while (false)
 #else
-#define UNUSED_VARIABLE(v) static_cast<void>(v)
+#define UTIL_UNUSED_VARIABLE(v) static_cast<void>(v)
 #endif
+
+#if UTIL_HAS_ATTRIBUTE_MAYBE_UNUSED
+#define UTIL_UNUSED_TYPE_ALIAS(type) \
+	do { using utilUnused_##type [[maybe_unused]] = type; } while (false)
+#else
+#define UTIL_UNUSED_TYPE_ALIAS(type) \
+	do { static_cast<void>(static_cast<type*>(NULL)); } while (false)
 #endif
 
 #ifdef _MSC_VER

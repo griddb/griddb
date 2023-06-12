@@ -303,6 +303,7 @@ public:
 		COLUMNS_DIFFERENCE,
 		ONLY_TABLE_PARTITIONING_VERSION_DIFFERENCE,
 		COLUMNS_ADD,
+		COLUMNS_RENAME
 	};
 
 	/*!
@@ -427,7 +428,7 @@ public:
 			util::StackAllocator* stAlloc,
 			util::FixedSizeAllocator<util::Mutex> *resultSetPool,
 			ConfigTable* configTable, TransactionManager* txnMgr,
-			ChunkManager* chunkmanager, LogManager<NoLocker>* logmanager,
+			ChunkManager* chunkmanager, LogManager<MutexLocker>* logmanager,
 			KeyDataStore* keyStore, const StatsSet &stats);
 	~DataStoreV4();
 
@@ -491,6 +492,12 @@ public:
 
 
 
+
+	const char* AuditEventType(DSInputMes *input);
+
+	const int32_t AuditCategoryType(DSInputMes *input);
+	
+	static std::string getClientAddress(const Event *ev);
 
 private:  
 	static const bool LOCK_FORCE = true;

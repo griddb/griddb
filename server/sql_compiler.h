@@ -25,7 +25,6 @@ struct BindParm;
 class SQLHintInfo;
 class Query;
 
-
 struct SQLHint {
 	class Coder;
 
@@ -34,6 +33,8 @@ struct SQLHint {
 		MAX_DEGREE_OF_PARALLELISM,
 		MAX_DEGREE_OF_TASK_INPUT,
 		MAX_DEGREE_OF_EXPANSION,
+
+		MAX_GENERATED_ROWS,
 
 		DISTRIBUTED_POLICY,
 
@@ -315,6 +316,7 @@ public:
 		static const CommandOptionFlag CMD_OPT_JOIN_USE_INDEX;
 		static const CommandOptionFlag CMD_OPT_SCAN_MULTI_INDEX;
 		static const CommandOptionFlag CMD_OPT_WINDOW_SORTED;
+		static const CommandOptionFlag CMD_OPT_GROUP_RANGE;
 	};
 
 	explicit Node(util::StackAllocator &alloc);
@@ -882,6 +884,7 @@ private:
 
 	uint32_t calcFunctionCategory(const Expr &expr, bool resolved);
 
+	static bool isRangeGroupNode(const PlanNode &node);
 	static bool isWindowNode(const PlanNode &node);
 
 	void checkNestedAggrWindowExpr(
@@ -895,6 +898,37 @@ private:
 	void genWhere(GenRAContext &cxt, Plan &plan);
 	void genGroupBy(GenRAContext &cxt, ExprRef &havingExprRef, Plan &plan);
 	void genHaving(GenRAContext &cxt, const ExprRef &havingExprRef, Plan &plan);
+
+	bool genRangeGroup(GenRAContext &cxt, ExprRef &havingExprRef, Plan &plan);
+
+	bool genRangeGroupIdNode(
+			Plan &plan, const Select &select, int32_t &rangeGroupIdPos);
+	static bool isRangeGroupPredicate(const ExprList *groupByList);
+
+	void adjustRangeGroupOutput(
+			Plan &plan, PlanNode &node, const Expr &keyExpr);
+	void adjustRangeGroupOutput(Expr &outExpr, const Expr &keyExpr);
+
+	Expr resolveRangeGroupPredicate(
+			const Plan &plan, const Expr &whereCond, const Expr &keyExpr,
+			const Expr &keyExprInCond, const Expr &optionExpr);
+	Expr makeRangeGroupIdExpr(Plan &plan, const Expr &optionExpr);
+	Expr makeRangeGroupPredicate(
+			const Expr &keyExpr, Type fillType, int64_t interval,
+			TupleValue lower, TupleValue upper, int64_t limit);
+
+	int64_t resolveRangeGroupIntervalOrOffset(
+			int64_t baseInterval, int64_t unit, bool forInterval);
+	void adjustRangeGroupInterval(
+			int64_t &interval, int64_t &offset, const TupleValue &timeZone);
+	bool findRangeGroupBoundary(
+			const Expr &expr, const Expr &keyExpr, TupleValue &value,
+			bool forLower);
+	TupleValue resolveRangeGroupTimeZone(const TupleValue &specified);
+	Expr* makeRangeGroupConst(const TupleValue &value);
+
+	bool findDistinctAggregation(const ExprList *exprList);
+	bool findDistinctAggregation(const Expr *expr);
 
 	bool genSplittedSelectProjection(
 			GenRAContext &cxt, const ExprList &inSelectList,
@@ -1333,6 +1367,7 @@ private:
 
 	uint64_t getMaxInputCount(const Plan &plan);
 	uint64_t getMaxExpansionCount(const Plan &plan);
+	int64_t getMaxGeneratedRows(const Plan &plan);
 
 	bool getSingleHintValue(
 			const SQLHintInfo *hintInfo, SQLHint::Id hint, uint64_t defaultValue,
@@ -1750,9 +1785,7 @@ private:
 
 	Type resolveFunction(const Expr &expr);
 	bool filterFunction(Type &type, size_t argCount);
-	void resolveTimestampField(
-			const Plan &plan, Mode mode, Type type, const ExprList *inExprList,
-			Expr *&outExpr);
+	void arrangeFunctionArgs(Type type, Expr &expr);
 
 	uint32_t genSourceId();
 
@@ -2328,6 +2361,7 @@ public:
 	size_t otherTopPos_;
 	size_t otherColumnCount_;
 	bool inSubQuery_;
+	PlanNodeRef scalarWhereNodeRef_;
 
 private:
 	GenRAContext(const GenRAContext&);
@@ -2743,7 +2777,18 @@ public:
 			const TableInfo &tableInfo,
 			util::Vector<uint32_t> &affinityRevList);
 
+	static bool isRangeGroupSupportedType(ColumnType type);
+	static TupleValue getRangeGroupBoundary(
+			util::StackAllocator &alloc, ColumnType keyType, TupleValue base,
+			bool forLower, bool inclusive);
+	static bool adjustRangeGroupBoundary(
+			TupleValue &lower, TupleValue &upper, int64_t interval,
+			int64_t offset);
+
 	static TupleValue evalConstExpr(
+			TupleValue::VarContext &varCxt, const Expr &expr,
+			const CompileOption &option);
+	static void checkExprArgs(
 			TupleValue::VarContext &varCxt, const Expr &expr,
 			const CompileOption &option);
 	static bool checkArgCount(
@@ -2754,6 +2799,7 @@ public:
 	static bool isExperimentalFunction(Type exprType);
 	static bool isWindowExprType(
 			Type type, bool &windowOnly, bool &pseudoWindow);
+	static bool isExplicitOrderingAggregation(Type exprType);
 
 	static ColumnType getResultType(
 			Type exprType, size_t index, AggregationPhase phase,
@@ -2762,6 +2808,9 @@ public:
 	static ColumnType filterColumnType(ColumnType type);
 	static bool updateArgType(
 			Type exprType, util::Vector<ColumnType> &argTypeList);
+	static bool findConstantArgType(
+			Type exprType, size_t startIndex, size_t &index,
+			ColumnType &argType);
 
 	static TupleValue convertType(
 			TupleValue::VarContext &varCxt, const TupleValue &src,

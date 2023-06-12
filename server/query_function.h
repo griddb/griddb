@@ -27,6 +27,9 @@
 #include "util/numeric.h"
 #include "gs_error.h"
 
+struct MicroTimestamp;
+struct NanoTimestamp;
+
 
 struct FunctionUtils {
 
@@ -39,6 +42,9 @@ struct FunctionUtils {
 	struct NumberArithmetic;
 
 	struct TimeErrorHandler;
+
+	template<typename T>
+	struct DateTimeOf;
 
 	struct AggregationValueOperations;
 	template<
@@ -60,6 +66,12 @@ struct FunctionUtils {
 
 	template<typename R>
 	static util::TimeZone resolveTimeZone(R &reader);
+
+	static util::PreciseDateTime toPreciseDateTime(const util::DateTime &src);
+	static util::PreciseDateTime toPreciseDateTime(
+			const util::PreciseDateTime &src);
+
+	static void checkTimeField(int64_t fieldType, bool precise, bool days);
 };
 
 struct FunctionUtils::BasicValueUtils {
@@ -117,6 +129,15 @@ public:
 	static bool middleOfOrderedValues(int64_t value1, int64_t value2, int64_t &result);
 	static bool middleOfOrderedValues(double value1, double value2, double &result);
 
+	static int64_t interpolateLinear(
+			int64_t x1, int64_t y1, int64_t x2, int64_t y2, int64_t x);
+	static int64_t interpolateLinear(
+			double x1, int64_t y1, double x2, int64_t y2, double x);
+	static double interpolateLinear(
+			double x1, double y1, double x2, double y2, double x);
+
+	static int32_t compareDoubleLongPrecise(double value1, int64_t value2);
+
 private:
 	struct ErrorHandler;
 
@@ -132,6 +153,18 @@ struct FunctionUtils::NumberArithmetic::ErrorHandler {
 struct FunctionUtils::TimeErrorHandler {
 	void errorTimeParse(std::exception &e) const;
 	void errorTimeFormat(std::exception &e) const;
+};
+
+template<typename T>
+struct FunctionUtils::DateTimeOf {
+	typedef
+			typename util::Conditional<
+					util::IsSame<T, int64_t>::VALUE, util::DateTime,
+			typename util::Conditional<
+					util::IsSame<T, MicroTimestamp>::VALUE, util::PreciseDateTime,
+			typename util::Conditional<
+					util::IsSame<T, NanoTimestamp>::VALUE, util::PreciseDateTime,
+			void>::Type>::Type>::Type Type;
 };
 
 struct FunctionUtils::AggregationValueOperations {
@@ -160,16 +193,16 @@ struct FunctionUtils::AggregationValueOperations {
 					cxt.template getAggrValue<N, BaseType>(), true);
 		}
 	};
-	template<uint32_t N, typename T> struct Setter {
+	template<uint32_t N, typename T, typename Promo> struct Setter {
 		template<typename C, typename U>
 		void operator()(C &cxt, const U &value) const {
 			typedef typename ValueTraits<T>::BaseType BaseType;
-			return cxt.template setAggrValue<N, BaseType>(value);
+			return cxt.template setAggrValue<N, BaseType>(value, Promo());
 		}
 		template<typename C, typename U>
 		void operator()(C &cxt, U &value) const {
 			typedef typename ValueTraits<U>::BaseType BaseType;
-			return cxt.template setAggrValue<N, BaseType>(value);
+			return cxt.template setAggrValue<N, BaseType>(value, Promo());
 		}
 	};
 	template<uint32_t N, typename T, typename Checked> struct Adder {
@@ -209,7 +242,8 @@ struct FunctionUtils::AggregationValues {
 		typedef AggregationValueOperations Ops;
 
 		typedef typename Ops::Getter<N, Type> Getter;
-		typedef typename Ops::Setter<N, Type> Setter;
+		typedef typename Ops::Setter<N, Type, util::FalseType> Setter;
+		typedef typename Ops::Setter<N, Type, util::TrueType> PromotedSetter;
 		typedef typename Ops::Adder<N, Type, util::TrueType> Adder;
 		typedef typename Ops::Adder<N, Type, util::FalseType> UncheckedAdder;
 		typedef typename Ops::Incrementer<N, Type> Incrementer;
@@ -221,6 +255,9 @@ struct FunctionUtils::AggregationValues {
 	}
 	template<uint32_t N> typename At<N>::Setter set() const {
 		return typename At<N>::Setter();
+	}
+	template<uint32_t N> typename At<N>::PromotedSetter setPromoted() const {
+		return typename At<N>::PromotedSetter();
 	}
 	template<uint32_t N> typename At<N>::Adder add() const {
 		return typename At<N>::Adder();
@@ -260,6 +297,16 @@ util::TimeZone FunctionUtils::resolveTimeZone(
 template<typename R>
 util::TimeZone FunctionUtils::resolveTimeZone(R &reader) {
 	return util::TimeZone::readFrom(reader, TimeErrorHandler());
+}
+
+inline util::PreciseDateTime FunctionUtils::toPreciseDateTime(
+		const util::DateTime &src) {
+	return util::PreciseDateTime::ofNanoSeconds(src, 0);
+}
+
+inline util::PreciseDateTime FunctionUtils::toPreciseDateTime(
+		const util::PreciseDateTime &src) {
+	return src;
 }
 
 

@@ -46,29 +46,16 @@ public class ColumnInfo {
 
 	private final Set<IndexType> indexTypes;
 
-	ColumnInfo(ColumnInfo info) {
-		final boolean sameClass;
-		try {
-			sameClass = (info.getClass() == ColumnInfo.class);
-		}
-		catch (NullPointerException e) {
-			throw GSErrorCode.checkNullParameter(info, "info", e);
-		}
+	private final TimeUnit timePrecision;
 
-		if (sameClass) {
-			this.name = info.name;
-			this.type = info.type;
-			this.nullable = info.nullable;
-			this.defaultValueNull = info.defaultValueNull;
-			this.indexTypes = info.indexTypes;
-		}
-		else {
-			this.name = info.getName();
-			this.type = info.getType();
-			this.nullable = info.getNullable();
-			this.defaultValueNull = info.getDefaultValueNull();
-			this.indexTypes = getImmutableIndexTypes(info.getIndexTypes());
-		}
+	ColumnInfo(Builder builder) {
+		this(
+				builder.name,
+				builder.type,
+				builder.nullable,
+				builder.defaultValueNull,
+				builder.indexTypes,
+				builder.timePrecision);
 	}
 
 	/**
@@ -201,11 +188,19 @@ public class ColumnInfo {
 	public ColumnInfo(
 			String name, GSType type, Boolean nullable,
 			Boolean defaultValueNull, Set<IndexType> indexTypes) {
+		this(name, type, nullable, defaultValueNull, indexTypes, null);
+	}
+
+	private ColumnInfo(
+			String name, GSType type, Boolean nullable,
+			Boolean defaultValueNull, Set<IndexType> indexTypes,
+			TimeUnit timePrecision) {
 		this.name = name;
 		this.type = type;
 		this.nullable = nullable;
 		this.defaultValueNull = defaultValueNull;
 		this.indexTypes = getImmutableIndexTypes(indexTypes);
+		this.timePrecision = timePrecision;
 	}
 
 	/**
@@ -308,6 +303,42 @@ public class ColumnInfo {
 		return indexTypes;
 	}
 
+	/**
+	 * <div lang="ja">
+	 * このカラムの日時型における精度を取得します。
+	 *
+	 * <p>コンテナを定義する際に、現バージョンにて使用できる組み合わせは、以下
+	 * のみです。</p>
+	 * <table>
+	 * <thead><tr><th>カラム型</th><th>日時精度</th></tr></thead>
+	 * <tbody>
+	 * <tr><td>TIMESTAMP型</td><td>
+	 * <ul>
+	 * <li>{@link TimeUnit#MILLISECOND}</li>
+	 * <li>{@link TimeUnit#MICROSECOND}</li>
+	 * <li>{@link TimeUnit#NANOSECOND}</li>
+	 * <li>{@code null} ({@link TimeUnit#MILLISECOND}が指定されたものとして
+	 * 解釈)</li>
+	 * </ul>
+	 * </td></tr>
+	 * <tr><td>TIMESTAMP型以外</td><td>{@code null}</td></tr>
+	 * </tbody>
+	 * </table>
+	 *
+	 * <p>日時精度を指定した{@link ColumnInfo}を構築するには、{@link Builder}を
+	 * 使用します。</p>
+	 *
+	 * @return 日時精度。未設定の場合は{@code null}
+	 *
+	 * @since 5.3
+	 * </div><div lang="en">
+	 * @since 5.3
+	 * </div>
+	 */
+	public TimeUnit getTimePrecision() {
+		return timePrecision;
+	}
+
 	private static Set<IndexType> getImmutableIndexTypes(Set<IndexType> src) {
 		if (src == null) {
 			return null;
@@ -324,13 +355,222 @@ public class ColumnInfo {
 		if (base instanceof Immutable) {
 			return (Immutable) base;
 		}
-		return new Immutable(base);
+		return new Immutable(new Builder(base));
 	}
 
 	private static class Immutable extends ColumnInfo {
 
-		Immutable(ColumnInfo base) {
+		Immutable(Builder base) {
 			super(base);
+		}
+
+	}
+
+	/**
+	 * <div lang="ja">
+	 * {@link ColumnInfo}を構築するためのビルダーです。
+	 *
+	 * <p>{@link ColumnInfo}を通じて参照できるすべての要素について、それぞれ
+	 * 必要に応じて設定し、{@link ColumnInfo}を構築することができます。</p>
+	 *
+	 * @since 5.3
+	 * </div><div lang="en">
+	 * @since 5.3
+	 * </div>
+	 */
+	public static class Builder {
+
+		private ColumnInfo info;
+
+		private String name;
+
+		private GSType type;
+
+		private Boolean nullable;
+
+		private Boolean defaultValueNull;
+
+		private Set<IndexType> indexTypes;
+
+		private TimeUnit timePrecision;
+
+		/**
+		 * <div lang="ja">
+		 * すべての要素が未設定状態のビルダーを構築します。
+		 * </div><div lang="en">
+		 * </div>
+		 */
+		public Builder() {
+		}
+
+		/**
+		 * <div lang="ja">
+		 * 指定の{@link ColumnInfo}のすべての要素を設定したビルダーを構築します。
+		 *
+		 * @param info 設定元のカラム情報
+		 * @throws NullPointerException 引数に{@code null}が指定された場合
+		 * </div><div lang="en">
+		 * </div>
+		 */
+		public Builder(ColumnInfo info) {
+			set(info);
+		}
+
+		/**
+		 * <div lang="ja">
+		 * 指定の{@link ColumnInfo}のすべての要素を設定します。
+		 *
+		 * <p>指定の{@link ColumnInfo}に未設定状態の要素が含まれる場合、
+		 * このビルダーの元の設定内容に関係なく、該当する要素は未設定状態と
+		 * なります。</p>
+		 *
+		 * @param info 設定元のカラム情報
+		 * @throws NullPointerException 引数に{@code null}が指定された場合
+		 * @return このビルダー
+		 * </div><div lang="en">
+		 * </div>
+		 */
+		public Builder set(ColumnInfo info) {
+			GSErrorCode.checkNullParameter(info, "info", null);
+
+			setName(info.getName());
+			setType(info.getType());
+			setNullable(info.getNullable());
+			setDefaultValueNull(info.getDefaultValueNull());
+			setIndexTypes(info.getIndexTypes());
+			setTimePrecision(info.getTimePrecision());
+
+			return this;
+		}
+
+		/**
+		 * <div lang="ja">
+		 * カラム名を設定します。
+		 *
+		 * <p>指定の引数が{@code null}の場合、未設定状態となります。</p>
+		 *
+		 * @param name カラム名
+		 * @return このビルダー
+		 * @see ColumnInfo#getName()
+		 * </div><div lang="en">
+		 * </div>
+		 */
+		public Builder setName(String name) {
+			clearInfo();
+			this.name = name;
+			return this;
+		}
+
+		/**
+		 * <div lang="ja">
+		 * カラム型を設定します。
+		 *
+		 * <p>指定の引数が{@code null}の場合、未設定状態となります。</p>
+		 *
+		 * @param type カラム型
+		 * @return このビルダー
+		 * @see ColumnInfo#getType()
+		 * </div><div lang="en">
+		 * </div>
+		 */
+		public Builder setType(GSType type) {
+			clearInfo();
+			this.type = type;
+			return this;
+		}
+
+		/**
+		 * <div lang="ja">
+		 * カラムにNOT NULL制約が設定されていないかどうかを設定します。
+		 *
+		 * <p>指定の引数が{@code null}の場合、未設定状態となります。</p>
+		 *
+		 * @param nullable カラムにNOT NULL制約が設定されていないかどうか
+		 * @return このビルダー
+		 * @see ColumnInfo#getNullable()
+		 * </div><div lang="en">
+		 * </div>
+		 */
+		public Builder setNullable(Boolean nullable) {
+			clearInfo();
+			this.nullable = nullable;
+			return this;
+		}
+
+		/**
+		 * <div lang="ja">
+		 * カラムの初期値としてNULLを使用するかどうかを設定します。
+		 *
+		 * <p>指定の引数が{@code null}の場合、未設定状態となります。</p>
+		 *
+		 * @param defaultValueNull カラムの初期値としてNULLを使用するか
+		 * @return このビルダー
+		 * @see ColumnInfo#getDefaultValueNull()
+		 * </div><div lang="en">
+		 * </div>
+		 */
+		public Builder setDefaultValueNull(Boolean defaultValueNull) {
+			clearInfo();
+			this.defaultValueNull = defaultValueNull;
+			return this;
+		}
+
+		/**
+		 * <div lang="ja">
+		 * 索引種別の集合を設定します。
+		 *
+		 * <p>指定の引数が{@code null}の場合、未設定状態となります。</p>
+		 *
+		 * @param indexTypes 索引種別の集合
+		 * @return このビルダー
+		 * @see ColumnInfo#getIndexTypes()
+		 * </div><div lang="en">
+		 * </div>
+		 */
+		public Builder setIndexTypes(Set<IndexType> indexTypes) {
+			clearInfo();
+			this.indexTypes = getImmutableIndexTypes(indexTypes);
+			return this;
+		}
+
+		/**
+		 * <div lang="ja">
+		 * 日時精度を設定します。
+		 *
+		 * <p>指定の引数が{@code null}の場合、未設定状態となります。</p>
+		 *
+		 * @param timePrecision 日時精度
+		 * @return このビルダー
+		 * @see ColumnInfo#getTimePrecision()
+		 * </div><div lang="en">
+		 * </div>
+		 */
+		public Builder setTimePrecision(TimeUnit timePrecision) {
+			clearInfo();
+			this.timePrecision = timePrecision;
+			return this;
+		}
+
+		/**
+		 * <div lang="ja">
+		 * このビルダーに設定された内容に基づき、{@link ColumnInfo}を構築します。
+		 *
+		 * <p>構築後にこのビルダーの設定が変更されたとしても、返却されるカラム
+		 * 情報が変化することはありません。</p>
+		 *
+		 * @return カラム情報
+		 * </div><div lang="en">
+		 * </div>
+		 */
+		public ColumnInfo toInfo() {
+			if (info == null) {
+				info = new Immutable(this);
+			}
+			return info;
+		}
+
+		private void clearInfo() {
+			info = null;
 		}
 
 	}

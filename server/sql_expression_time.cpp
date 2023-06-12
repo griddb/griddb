@@ -30,7 +30,10 @@ void SQLTimeExprs::Registrar::operator()() const {
 	add<SQLType::FUNC_STRFTIME, TimeFunctions::Strftime>();
 	add<SQLType::FUNC_TO_EPOCH_MS, Functions::ToEpochMs>();
 	add<SQLType::FUNC_TO_TIMESTAMP_MS, Functions::ToTimestampMs>();
-	add<SQLType::FUNC_TIMESTAMP, Functions::TimestampFunc>();
+	add<SQLType::FUNC_TIMESTAMP, Functions::TimestampMsFunc>();
+	add<SQLType::FUNC_TIMESTAMP_MS, Functions::TimestampMsFunc>();
+	add<SQLType::FUNC_TIMESTAMP_US, Functions::TimestampUsFunc>();
+	add<SQLType::FUNC_TIMESTAMP_NS, Functions::TimestampNsFunc>();
 	add<SQLType::FUNC_TIMESTAMP_ADD, Functions::TimestampAdd>();
 	add<SQLType::FUNC_TIMESTAMP_DIFF, Functions::TimestampDiff>();
 	add<SQLType::FUNC_TIMESTAMP_TRUNC, Functions::TimestampTrunc>();
@@ -39,28 +42,30 @@ void SQLTimeExprs::Registrar::operator()() const {
 }
 
 
-template<typename C, typename R>
+template<typename C, typename T, typename R>
 inline int64_t SQLTimeExprs::Functions::Extract::operator()(
-		C &cxt, int64_t fieldTypeValue, int64_t tsValue, R &zone) {
+		C &cxt, int64_t fieldTypeValue, const T &tsValue, R &zone) {
 	return (*this)(
 			cxt, fieldTypeValue, tsValue,
 			FunctionUtils::resolveTimeZone(zone));
 }
 
-template<typename C>
+template<typename C, typename T>
 inline int64_t SQLTimeExprs::Functions::Extract::operator()(
-		C &cxt, int64_t fieldTypeValue, int64_t tsValue,
+		C &cxt, int64_t fieldTypeValue, const T &tsValue,
 		const util::TimeZone &zone) {
 	util::DateTime::ZonedOption option;
 	cxt.applyDateTimeOption(option);
 	option.zone_ = FunctionUtils::resolveTimeZone(cxt, zone);
 
+	const util::PreciseDateTime ts =
+			util::PreciseDateTime::of(cxt.toDateTime(tsValue));
 	const util::DateTime::FieldType field =
 			SQLValues::ValueUtils::toTimestampField(fieldTypeValue);
 
 	int64_t fieldValue;
 	try {
-		fieldValue = util::DateTime(tsValue).getField(field, option);
+		fieldValue = ts.getField(field, option);
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_USER_ERROR_CODED(
@@ -70,6 +75,13 @@ inline int64_t SQLTimeExprs::Functions::Extract::operator()(
 	}
 
 	return fieldValue;
+}
+
+template<typename C, typename T>
+int64_t SQLTimeExprs::Functions::Extract::Checker::operator()(
+		C&, int64_t fieldTypeValue, const T&) {
+	FunctionUtils::checkTimeField(fieldTypeValue, true, true);
+	return 0;
 }
 
 
@@ -183,38 +195,48 @@ template<typename C>
 inline int64_t SQLTimeExprs::Functions::ToTimestampMs::operator()(
 		C &cxt, int64_t millis) {
 	static_cast<void>(cxt);
-	return SQLValues::ValueUtils::checkTimestamp(millis);
+	return SQLValues::ValueUtils::checkTimestamp(
+			SQLValues::DateTimeElements(millis)).toTimestamp(
+					SQLValues::Types::TimestampTag());
 }
 
 
+template<typename T>
 template<typename C, typename R>
-inline int64_t SQLTimeExprs::Functions::TimestampFunc::operator()(
+inline typename T::LocalValueType
+SQLTimeExprs::Functions::TimestampFunc<T>::operator()(
 		C &cxt, R &value, R &zone) {
 	return (*this)(cxt, value, FunctionUtils::resolveTimeZone(zone));
 }
 
+template<typename T>
 template<typename C, typename R>
-inline int64_t SQLTimeExprs::Functions::TimestampFunc::operator()(
+inline typename T::LocalValueType
+SQLTimeExprs::Functions::TimestampFunc<T>::operator()(
 		C &cxt, R &value, const util::TimeZone &zone) {
+	const util::DateTime::FieldType precision =
+			cxt.getTimePrecision(typename T::LocalValueType());
 	return SQLValues::ValueUtils::parseTimestamp(
 			SQLValues::ValueUtils::partToStringBuffer(value),
 			FunctionUtils::resolveTimeZone(cxt, zone), !zone.isEmpty(),
-			cxt.getAllocator());
+			precision, cxt.getAllocator()).toTimestamp(T());
 }
 
 
-template<typename C, typename R>
-inline int64_t SQLTimeExprs::Functions::TimestampTrunc::operator()(
-		C &cxt, int64_t fieldTypeValue, int64_t tsValue, R &zone) {
+template<typename C, typename T, typename R>
+inline T SQLTimeExprs::Functions::TimestampTrunc::operator()(
+		C &cxt, int64_t fieldTypeValue, const T &tsValue, R &zone) {
 	return (*this)(
 			cxt, fieldTypeValue, tsValue,
 			FunctionUtils::resolveTimeZone(zone));
 }
 
-template<typename C>
-inline int64_t SQLTimeExprs::Functions::TimestampTrunc::operator()(
-		C &cxt, int64_t fieldTypeValue, int64_t tsValue,
+template<typename C, typename T>
+inline T SQLTimeExprs::Functions::TimestampTrunc::operator()(
+		C &cxt, int64_t fieldTypeValue, const T &tsValue,
 		const util::TimeZone &zone) {
+	typedef typename FunctionUtils::template DateTimeOf<T>::Type DateTimeType;
+
 	const util::DateTime::FieldType field =
 			SQLValues::ValueUtils::toTimestampField(fieldTypeValue);
 
@@ -222,24 +244,33 @@ inline int64_t SQLTimeExprs::Functions::TimestampTrunc::operator()(
 	cxt.applyDateTimeOption(option);
 	option.zone_ = FunctionUtils::resolveTimeZone(cxt, zone);
 
-	util::DateTime ts(tsValue);
-	return TimeFunctionUtils::trunc(ts, field, option).getUnixTime();
+	const DateTimeType &ts = cxt.toDateTime(tsValue);
+	return cxt.toTimestamp(TimeFunctionUtils::trunc(ts, field, option), T());
+}
+
+template<typename C, typename T>
+T SQLTimeExprs::Functions::TimestampTrunc::Checker::operator()(
+		C&, int64_t fieldTypeValue, const T &tsValue) {
+	FunctionUtils::checkTimeField(fieldTypeValue, true, false);
+	return tsValue;
 }
 
 
-template<typename C, typename R>
-inline int64_t SQLTimeExprs::Functions::TimestampAdd::operator()(
-		C &cxt, int64_t fieldTypeValue, int64_t tsValue, int64_t amount,
-		R &zone) {
+template<typename C, typename T, typename R>
+inline T SQLTimeExprs::Functions::TimestampAdd::operator()(
+		C &cxt, int64_t fieldTypeValue, const T &tsValue,
+		int64_t amount, R &zone) {
 	return (*this)(
 			cxt, fieldTypeValue, tsValue, amount,
 			FunctionUtils::resolveTimeZone(zone));
 }
 
-template<typename C>
-inline int64_t SQLTimeExprs::Functions::TimestampAdd::operator()(
-		C &cxt, int64_t fieldTypeValue, int64_t tsValue, int64_t amount,
-		const util::TimeZone &zone) {
+template<typename C, typename T>
+inline T SQLTimeExprs::Functions::TimestampAdd::operator()(
+		C &cxt, int64_t fieldTypeValue, const T &tsValue,
+		int64_t amount, const util::TimeZone &zone) {
+	typedef typename FunctionUtils::template DateTimeOf<T>::Type DateTimeType;
+
 	const util::DateTime::FieldType field =
 			SQLValues::ValueUtils::toTimestampField(fieldTypeValue);
 
@@ -247,10 +278,9 @@ inline int64_t SQLTimeExprs::Functions::TimestampAdd::operator()(
 	cxt.applyDateTimeOption(option);
 	option.zone_ = FunctionUtils::resolveTimeZone(cxt, zone);
 
+	DateTimeType ts = cxt.toDateTime(tsValue);
 	try {
-		util::DateTime ts(tsValue);
 		ts.addField(amount, field, option);
-		return ts.getUnixTime();
 	}
 	catch (std::exception &e) {
 		GS_RETHROW_USER_ERROR_CODED(
@@ -258,22 +288,32 @@ inline int64_t SQLTimeExprs::Functions::TimestampAdd::operator()(
 				GS_EXCEPTION_MERGE_MESSAGE(
 						e, "Timestamp range overflow"));
 	}
+	return cxt.toTimestamp(ts, T());
+}
+
+template<typename C, typename T>
+T SQLTimeExprs::Functions::TimestampAdd::Checker::operator()(
+		C&, int64_t fieldTypeValue, const T &tsValue, int64_t) {
+	FunctionUtils::checkTimeField(fieldTypeValue, false, false);
+	return tsValue;
 }
 
 
-template<typename C, typename R>
+template<typename C, typename T, typename R>
 inline int64_t SQLTimeExprs::Functions::TimestampDiff::operator()(
-		C &cxt, int64_t fieldTypeValue, int64_t tsValue1, int64_t tsValue2,
-		R &zone) {
+		C &cxt, int64_t fieldTypeValue, const T &tsValue1,
+		const T &tsValue2, R &zone) {
 	return (*this)(
 			cxt, fieldTypeValue, tsValue1, tsValue2,
 			FunctionUtils::resolveTimeZone(zone));
 }
 
-template<typename C>
+template<typename C, typename T>
 inline int64_t SQLTimeExprs::Functions::TimestampDiff::operator()(
-		C &cxt, int64_t fieldTypeValue, int64_t tsValue1, int64_t tsValue2,
-		const util::TimeZone &zone) {
+		C &cxt, int64_t fieldTypeValue, const T &tsValue1,
+		const T &tsValue2, const util::TimeZone &zone) {
+	typedef typename FunctionUtils::template DateTimeOf<T>::Type DateTimeType;
+
 	const util::DateTime::FieldType field =
 			SQLValues::ValueUtils::toTimestampField(fieldTypeValue);
 
@@ -283,8 +323,8 @@ inline int64_t SQLTimeExprs::Functions::TimestampDiff::operator()(
 
 	int64_t result;
 	try {
-		util::DateTime ts1(tsValue1);
-		util::DateTime ts2(tsValue2);
+		const DateTimeType &ts1 = cxt.toDateTime(tsValue1);
+		const DateTimeType &ts2 = cxt.toDateTime(tsValue2);
 		result = ts1.getDifference(ts2, field, option);
 	}
 	catch (std::exception &e) {
@@ -297,11 +337,27 @@ inline int64_t SQLTimeExprs::Functions::TimestampDiff::operator()(
 	return result;
 }
 
+template<typename C, typename T>
+int64_t SQLTimeExprs::Functions::TimestampDiff::Checker::operator()(
+		C&, int64_t fieldTypeValue, const T&, const T&) {
+	FunctionUtils::checkTimeField(fieldTypeValue, false, false);
+	return 0;
+}
+
+
 util::DateTime SQLTimeExprs::TimeFunctionUtils::trunc(
 		const util::DateTime &value, util::DateTime::FieldType field,
 		const util::DateTime::ZonedOption &option) {
+	const util::PreciseDateTime &preciseValue =
+			util::PreciseDateTime::of(value);
+	return trunc(preciseValue, field, option).getBase();
+}
 
-	util::DateTime::FieldData fieldData;
+util::PreciseDateTime SQLTimeExprs::TimeFunctionUtils::trunc(
+		const util::PreciseDateTime &value, util::DateTime::FieldType field,
+		const util::DateTime::ZonedOption &option) {
+
+	util::PreciseDateTime::FieldData fieldData;
 	try {
 		value.getFields(fieldData, option);
 	}
@@ -310,41 +366,51 @@ util::DateTime SQLTimeExprs::TimeFunctionUtils::trunc(
 	}
 
 	do {
-		if (field == util::DateTime::FIELD_MILLISECOND) {
+		if (field == util::DateTime::FIELD_NANOSECOND) {
 			break;
 		}
-		fieldData.milliSecond_ = 0;
+		if (field == util::DateTime::FIELD_MICROSECOND) {
+			fieldData.setValue<util::DateTime::FIELD_MICROSECOND>(
+					fieldData.getValue<util::DateTime::FIELD_MICROSECOND>());
+			break;
+		}
+		if (field == util::DateTime::FIELD_MILLISECOND) {
+			fieldData.setValue<util::DateTime::FIELD_MILLISECOND>(
+					fieldData.getValue<util::DateTime::FIELD_MILLISECOND>());
+			break;
+		}
+		fieldData.setValue<util::DateTime::FIELD_MILLISECOND>(0);
 
 		if (field == util::DateTime::FIELD_SECOND) {
 			break;
 		}
-		fieldData.second_ = 0;
+		fieldData.setValue<util::DateTime::FIELD_SECOND>(0);
 
 		if (field == util::DateTime::FIELD_MINUTE) {
 			break;
 		}
-		fieldData.minute_ = 0;
+		fieldData.setValue<util::DateTime::FIELD_MINUTE>(0);
 
 		if (field == util::DateTime::FIELD_HOUR) {
 			break;
 		}
-		fieldData.hour_ = 0;
+		fieldData.setValue<util::DateTime::FIELD_HOUR>(0);
 
 		if (field == util::DateTime::FIELD_DAY_OF_MONTH ||
 				field == util::DateTime::FIELD_DAY_OF_WEEK ||
 				field == util::DateTime::FIELD_DAY_OF_YEAR) {
 			break;
 		}
-		fieldData.monthDay_ = 1;
+		fieldData.setValue<util::DateTime::FIELD_DAY_OF_MONTH>(1);
 
 		if (field == util::DateTime::FIELD_MONTH) {
 			break;
 		}
-		fieldData.month_ = 1;
+		fieldData.setValue<util::DateTime::FIELD_MONTH>(1);
 	}
 	while (false);
 
-	util::DateTime ret;
+	util::PreciseDateTime ret;
 	try {
 		ret.setFields(fieldData, option);
 	}

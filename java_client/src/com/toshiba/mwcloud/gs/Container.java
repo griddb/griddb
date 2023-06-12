@@ -75,7 +75,8 @@ import com.toshiba.mwcloud.gs.common.RowMapper;
  * <tr><td>LONG</td><td>{@link Long}または{@code long}</td></tr>
  * <tr><td>FLOAT</td><td>{@link Float}または{@code float}</td></tr>
  * <tr><td>DOUBLE</td><td>{@link Double}または{@code double}</td></tr>
- * <tr><td>TIMESTAMP</td><td>{@link java.util.Date}</td></tr>
+ * <tr><td>TIMESTAMP(通常精度:ミリ秒)</td><td>{@link java.util.Date}</td></tr>
+ * <tr><td>TIMESTAMP(高精度:マイクロ・ナノ秒)</td><td>{@link java.sql.Timestamp}</td></tr>
  * <tr><td>GEOMETRY</td><td>{@link Geometry}</td></tr>
  * <tr><td>BLOB</td><td>{@link Blob}を実装したクラス</td></tr>
  * <tr><td>STRING配列</td><td>{@code String[]}</td></tr>
@@ -140,6 +141,9 @@ import com.toshiba.mwcloud.gs.common.RowMapper;
  * <tr><td>配列型</td><td>要素数0の配列</td></tr>
  * </tbody>
  * </table>
+ *
+ * <p>日時精度は、{@link TimePrecision#value()}もしくは
+ * {@link ColumnInfo#getTimePrecision()}により明示的に指定できます。</p>
  *
  * <p>トランザクション処理では、デフォルトで自動コミットモードが有効になっています。
  * 自動コミットモードでは、変更操作は逐次確定し、明示的に取り消すことができません。

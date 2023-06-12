@@ -27,7 +27,7 @@
 #include "message_schema.h"
 #include "value_processor.h"
 
-const bool TimeSeries::indexMapTable[][MAP_TYPE_NUM] = {
+const bool TimeSeries::INDEX_MAP_TABLE[][MAP_TYPE_NUM] = {
 	{true, false, false},   
 	{true, false, false},   
 	{true, false, false},   
@@ -38,7 +38,9 @@ const bool TimeSeries::indexMapTable[][MAP_TYPE_NUM] = {
 	{true, false, false},   
 	{true, false, false},   
 	{false, false, false},  
-	{false, false, false}   
+	{false, false, false},   
+	{true, false, false},  
+	{true, false, false}  
 };
 
 
@@ -314,7 +316,8 @@ void TimeSeries::createIndex(
 
 			ColumnInfo& columnInfo = getColumnInfo(inputColumnId);
 			if (realIndexInfo.mapType == MAP_TYPE_DEFAULT) {
-				realIndexInfo.mapType = defaultIndexType[columnInfo.getColumnType()];
+				IndexSchema::findDefaultIndexType(
+						columnInfo.getColumnType(), realIndexInfo.mapType);
 			}
 		}
 		MapType inputMapType = realIndexInfo.mapType;
@@ -324,10 +327,8 @@ void TimeSeries::createIndex(
 							   << ", first columnNumber = " << realIndexInfo.columnIds_[0]
 							   << ", type = " << getMapTypeStr(inputMapType));
 
-		if (!isSupportIndex(realIndexInfo)) {
-			GS_THROW_USER_ERROR(
-				GS_ERROR_CM_NOT_SUPPORTED, "not support this index type");
-		}
+		validateIndexInfo(realIndexInfo);
+
 		util::Vector<uint32_t>::iterator itr = 
 			std::find(realIndexInfo.columnIds_.begin(), realIndexInfo.columnIds_.end(),
 			ColumnInfo::ROW_KEY_COLUMN_ID);
@@ -1143,12 +1144,12 @@ void TimeSeries::searchRowIdIndex(TransactionContext &txn,
 			}
 
 			bool isNullLast = outputOrder == ORDER_ASCENDING;
-			const Operator* sortOp;
+			Operator sortOp;
 			if (outputOrder == ORDER_ASCENDING) {
-				sortOp = &ComparatorTable::ltTable_[targetType][targetType];
+				sortOp = ComparatorTable::Lt()(targetType, targetType);
 			}
 			else {
-				sortOp = &ComparatorTable::gtTable_[targetType][targetType];
+				sortOp = ComparatorTable::Gt()(targetType, targetType);
 			}
 			std::sort(mvccSortKeyList.begin(), mvccSortKeyList.end(),
 				SortPred(txn, sortOp, targetType, isNullLast));
@@ -1692,6 +1693,10 @@ void TimeSeries::lockRowList(
 	catch (std::exception& e) {
 		handleSearchError(txn, e, GS_ERROR_DS_CON_GET_LOCK_ID_INVALID);
 	}
+}
+
+const BaseContainer::IndexMapTable& TimeSeries::getIndexMapTable() {
+	return INDEX_MAP_TABLE;
 }
 
 
@@ -2973,8 +2978,8 @@ void TimeSeries::searchRowArrayList(TransactionContext &txn,
 					break;
 				}
 			}
-			const Operator *sortOp =
-				&ComparatorTable::ltTable_[COLUMN_TYPE_TIMESTAMP][COLUMN_TYPE_TIMESTAMP];
+			const Operator sortOp = ComparatorTable::Lt()(
+					COLUMN_TYPE_TIMESTAMP, COLUMN_TYPE_TIMESTAMP);
 			bool isNullLast = true;
 			std::sort(mvccSortKeyList.begin(), mvccSortKeyList.end(),
 				SortPred(txn, sortOp, COLUMN_TYPE_TIMESTAMP, isNullLast));
@@ -3359,9 +3364,9 @@ void TimeSeries::sample(TransactionContext &txn, BtreeMap::SearchContext &sc,
 		uint32_t columnId = sampling.interpolatedColumnIdList_[i];
 		ColumnType type = getColumnInfo(columnId).getColumnType();
 		opList[columnId].isInterpolated_ = true;
-		opList[columnId].sub_ = CalculatorTable::subTable_[type][type];
-		opList[columnId].mul_ = CalculatorTable::mulTable_[type][COLUMN_TYPE_DOUBLE];
-		opList[columnId].add_ = CalculatorTable::addTable_[type][COLUMN_TYPE_DOUBLE];
+		opList[columnId].sub_ = CalculatorTable::Sub()(type, type);
+		opList[columnId].mul_ = CalculatorTable::Mul()(type, COLUMN_TYPE_DOUBLE);
+		opList[columnId].add_ = CalculatorTable::Add()(type, COLUMN_TYPE_DOUBLE);
 	}
 
 	bool isWithRowId = false;  
@@ -3882,7 +3887,7 @@ void TimeSeries::aggregate(TransactionContext &txn, BtreeMap::SearchContext &sc,
 		ColumnType colType = getColumnInfo(columnId).getColumnType();
 		if (type == AGG_MAX || type == AGG_MIN) {
 			if (!ValueProcessor::isNumerical(colType) &&
-				colType != COLUMN_TYPE_TIMESTAMP) {
+					!ValueProcessor::isTimestampFamily(colType)) {
 				GS_THROW_USER_ERROR(
 					GS_ERROR_DS_AGGREGATED_COLUMN_TYPE_INVALID, "");
 			}

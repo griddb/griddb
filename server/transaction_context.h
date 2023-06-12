@@ -197,6 +197,32 @@ public:
 	const util::TimeZone &getTimeZone() const;
 
 
+	void setContainerNameStr(util::String* containerNameStr) {
+		containerNameStr_ = containerNameStr;
+	}
+	
+	util::String* getContainerNameStr() {
+		return containerNameStr_;
+	}
+	
+	const char* getContainerName() const {
+		return (containerNameStr_ ? containerNameStr_->c_str() : "");
+	}
+	void setAuditInfo(Event* ev,EventContext* ec,util::String* objectNameStr) {
+		ev_ = ev;
+		ec_ = ec;
+		objectNameStr_ = objectNameStr;
+	}
+	Event* getEvent() {
+		return(ev_);
+	}
+	EventContext* getEventContext() {
+		return(ec_);
+	}
+	util::String* getobjectNameStr() {
+		return(objectNameStr_);
+	}
+
 private:
 	typedef int32_t State;  
 	static const State ACTIVE = 1;  
@@ -241,6 +267,14 @@ private:
 		double storeMemoryAgingSwapRate, const util::TimeZone &timeZone);
 	void clear();
 
+	util::String* containerNameStr_;
+
+	Event* ev_;
+
+	EventContext* ec_;
+
+	util::String* objectNameStr_;
+	
 public:
 	TransactionContext(util::StackAllocator &alloc);
 
