@@ -22,9 +22,9 @@ Main changes in GridDB CE V5.3 are as follows:
 
 Please refer to the following sample codes creating container, putting row data and getting row data with nanosecond.
 
-- Java Client: NanoTimestamp.java
-- C Client: NanoTimestamp.c
-- JDBC Driver: NanoTimestamp-SQL.md
+- Java Client: [NanoTimestamp.java](https://github.com/griddb/griddb/blob/master/sample/guide/ja/NanoTimestamp.java)
+- C Client: [NanoTimestamp.c](https://github.com/griddb/c_client/blob/master/sample/guide/ja/NanoTimestamp.c)
+- JDBC Driver: [NanoTimestamp-SQL.md](https://github.com/griddb/jdbc/blob/master/sample/NanoTimestamp-SQL.md)
 
 Note: The row-key for Collection container supports 3 type (MILLI/MICRO/NANO-SECOND) TIMESTAMPs.
  But The row-key for Timeseries container supports only MILLISECOND TIMESTAMP.
@@ -63,3 +63,6 @@ SELECT * FROM table1
 WHERE key BETWEEN TIMESTAMP('2023-01-01T00:00:00Z') AND TIMESTAMP('2023-01-01T00:01:00Z')
 GROUP BY RANGE (key) EVERY (10, SECOND) FILL (LINEAR)
 ```
+
+Please refer to the following sample code.
+- JDBC Driver: [GROUP-BY-RANGE-SQL.md](https://github.com/griddb/jdbc/blob/master/sample/GROUP-BY-RANGE-SQL.md)
