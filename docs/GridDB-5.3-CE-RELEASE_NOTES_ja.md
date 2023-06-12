@@ -25,9 +25,9 @@ V5.3では、精度指定付TIMESTMP型を追加し、より高精度の時刻�
 精度指定値付TIMESTAMP型を利用して、コンテナ生成、データ登録、データ参照を行う
 以下のサンプルコードをご参考願います。
 
-- Javaクライアント: NanoTimestamp.java
-- Cクライアント: NanoTimestamp.c
-- JDBCドライバ: NanoTimestamp-SQL.md
+- Javaクライアント: [NanoTimestamp.java](https://github.com/griddb/griddb/blob/master/sample/guide/ja/NanoTimestamp.java)
+- Cクライアント: [NanoTimestamp.c](https://github.com/griddb/c_client/blob/master/sample/guide/ja/NanoTimestamp.c)
+- JDBCドライバ: [NanoTimestamp-SQL.md](https://github.com/griddb/jdbc/blob/master/sample/NanoTimestamp-SQL.md)
 
 ※ コレクションコンテナのロウキーは3種類の精度のTIMESTAMP型に対応していますが、時系列コンテナのロウキーはミリ秒精度のTIMESTAMP型に限定されます。
 
@@ -65,3 +65,6 @@ SELECT * FROM table1
 WHERE key BETWEEN TIMESTAMP('2023-01-01T00:00:00Z') AND TIMESTAMP('2023-01-01T00:01:00Z')
 GROUP BY RANGE (key) EVERY (10, SECOND) FILL (LINEAR)
 ```
+
+以下のサンプルコードをご参考願います。
+- JDBCドライバ: [GROUP-BY-RANGE-SQL.md](https://github.com/griddb/jdbc/blob/master/sample/GROUP-BY-RANGE-SQL.md)
