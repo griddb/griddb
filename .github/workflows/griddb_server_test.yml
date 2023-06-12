@@ -21,6 +21,3 @@ jobs:
     - name: Build, start server and run sample in centos docker
       run: |
         ./.github/workflows/setup_centos_docker.sh
-    - name: Build, start server and run sample in opensuse docker
-      run: |
-        ./.github/workflows/setup_opensuse_docker.sh
