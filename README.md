@@ -9,7 +9,7 @@
   Please refer to [GridDB Features Reference](https://github.com/griddb/docs-en/blob/master/manuals/GridDB_FeaturesReference.md) for functionality.
 
   This repository includes server and Java client. And [jdbc repository](https://github.com/griddb/jdbc) includes JDBC Driver.
-
+i just test 
 ## Quick start (Using source code)
   We have confirmed the operation with Linux(x64).
   - CentOS 7.9 (gcc 4.8.5), Ubuntu 18.04 (gcc 4.8.5)
