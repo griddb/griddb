@@ -1417,7 +1417,10 @@ void SQLGroupOps::GroupRangeMerge::swapAggregationValues(
 
 	const AggrColumnList &columnList = tupleSet->getModifiableColumnList();
 	const uint32_t size = static_cast<uint32_t>(columnList.size()) / 2;
-
+	if (columnList.empty()) {
+		return;
+	}
+	
 	const uint32_t basePos = columnList.front().getSummaryPosition();
 	const uint32_t aggrPos = basePos + (withCurrent ? 0 : size);
 	const uint32_t localPos = basePos + size;
