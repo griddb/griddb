@@ -383,6 +383,8 @@ fi
 /usr/griddb/bin/gridstore
 
 %changelog
+* Mon Jun 12 2023 Toshiba Digital Solutions Corporation
+- 5.3.0
 * Tue Oct 25 2022 Toshiba Digital Solutions Corporation
 - 5.1.0
 * Thu Apr 21 2022 Toshiba Digital Solutions Corporation
