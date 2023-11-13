@@ -1,5 +1,5 @@
 %define griddb_name griddb
-%define griddb_ver 5.3.0
+%define griddb_ver 5.3.1
 %define griddb_instdir /usr/griddb-%{griddb_ver}
 %define griddb_homedir /var/lib/gridstore
 # do not strip
