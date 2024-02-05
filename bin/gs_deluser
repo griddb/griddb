@@ -12,17 +12,17 @@ import fcntl
 import stat
 from optparse import OptionParser
 
-import util
-util.install_sigint_handler()
-(homedir,logdir) = util.get_required_env()
+import util_server
+util_server.install_sigint_handler()
+(homedir,logdir) = util_server.get_required_env()
 
 parser = OptionParser(usage="%prog USERNAME",
-                      description="Delete an administrator.",
-            version="%prog [V2.8.00]")
+                      description="Delete the administrator of GridDB.",
+            version="%prog [V5.0.00]")
 (options, args) = parser.parse_args()
 
 if len(args) < 1:
-    parser.error("A60001: Specify USERNAME.")
+    parser.error("A60001: Specify the USERNAME.")
 username = args[0]
 
 filename = os.path.join(homedir, "conf/password")
@@ -30,7 +30,7 @@ with open(filename, 'r+') as file:
     try:
         fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except(IOError):
-        print("A60101: Failed to lock file '" + filename + "'.")
+        print("A60101: Failed to lock file. "+filename)
         sys.exit(1)
 
     csvReader = csv.reader(file)
@@ -39,7 +39,7 @@ with open(filename, 'r+') as file:
         allPassword[row[0]] = row[1]
 
     if username not in allPassword:
-        print("A60102: USERNAME '" + username + "' does not exist.")
+        print("A60102: The USERNAME '" + username + "' does not exist.")
         sys.exit(1)
 
     del allPassword[username]

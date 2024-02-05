@@ -10,37 +10,39 @@ import copy
 from optparse import OptionParser
 from typing import Optional
 
-import util
-util.install_sigint_handler()
-(homedir,logdir) = util.get_required_env()
+import util_client
+util_client.install_sigint_handler()
+(homedir,logdir) = util_client.get_required_env()
 
 parser = OptionParser(usage="%prog [-c NAME] [-n NUM] [-w [WAIT_TIME]]"
-                      + util.CLIENT_OPTIONS_USAGE,
-                      description="Join the started node to a cluster.",
-            version="[V2.8.00]")
-util.add_client_options(parser)
+                      + util_client.CLIENT_OPTIONS_USAGE,
+                      description="Join the node to the GridDB cluster.",
+            version="%prog [V5.0.00]")
+util_client.add_client_options(parser)
 parser.add_option("-c", "--clusterName", dest="clusterName",
                   default="defaultCluster",
-                  help="cluster name (default is defaultCluster)")
+                  help="Specify the cluster name. The value 'defaultCluster is used by default.")
 parser.add_option("-n", "--nodeNum", dest="minNodeNum",
                   type="int", default=1,
-                  help="the number of nodes constituting a cluster (default is 1)")
+                  help="Specify the number of nodes of the GridDB cluster. The value 1 is used by default.")
 parser.add_option("-w", "--wait", action='callback', callback=\
-                    util.optional_arg(0), dest="wait_time",default=None,
-                  help="wait for completion of joining to a cluster")
+                    util_client.optional_arg(0), dest="wait_time",default=None,
+                  help="Wait for the GridDB cluster to start.")
 (options, args) = parser.parse_args()
+# REST通信時SSL接続を行うか判断 デフォルトのポート番号を設定
+util_client.decide_use_ssl_and_port(options)
 
 if options.username is None:
-    print("A70001: Specify a user name and a password. (-u USER/PASS)")
+    print("A70001: Specify a user name and a password."+" (-u USER/PASS)")
     sys.exit(2)
 if options.wait_time is not None:
     try:
         wait_time = int(options.wait_time)
     except ValueError:
-        print("A70002: Specify the correct number of seconds to wait. (-w "+options.wait_time+")")
+        print("A70002: Specify seconds to wait.(-w "+options.wait_time+")")
         sys.exit(2)
 if options.minNodeNum == 0:
-    print("A70003: Specify the number of nodes more than 0. (-n "+str(options.minNodeNum)+")")
+    print("A70003: Specify the number of nodes more than 0.(-n "+str(options.minNodeNum)+")")
     sys.exit(2)
 
 log = log.logger(__file__, log.DEBUG)
@@ -50,49 +52,49 @@ tmpoptions.password = "***"
 log.info(tmpoptions)
 
 e = 0
-nodestat: Optional[str] = util.get_nodestat(options, log)
+nodestat: Optional[str] = util_client.get_nodestat(options, log)
 if nodestat != "INACTIVE":
     e = 1
     if nodestat is not None:
         if nodestat == "ACTIVE":
-            print("A70101: Node is already joined.")
-            log.error("A70101: Node is already joined.")
+            print("A70101: The GridDB node has already joined to the GridDB cluster.")
+            log.error("A70101: The GridDB node has already joined to the GridDB cluster.")
             e = 3
         else:
-            print("A70102: Confirm node status.")
-            log.error("A70102: Confirm node status. (status="+nodestat+")")
+            print("A70102: Check the status of the node.")
+            log.error("A70102: node status (status="+nodestat+")")
     sys.exit(e)
 
 method = "POST"
 path = "/node/join"
 data = { "clusterName": options.clusterName,
          "minNodeNum": options.minNodeNum }
-(res, code) = util.request_rest(method, path, data, options, log)
+(res, code) = util_client.request_rest(method, path, data, options, log)
 #if code == 400:
 #    res_json = json.loads(res)
 #    err_status = res_json.get("errorStatus")
 #    err_reason = res_json.get("reason")
 #    if err_status == 100:
-#        print u"A70103: Specified cluster name is wrong."
+#        print u"A70103: クラスタ名の指定に誤りがあります。"
 #        print err_reason
 #    sys.exit(1)
 if code != 200:
     sys.exit(1)
 
-clustered = util.is_active_cluster(options, log)
+clustered = util_client.is_active_cluster(options, log)
 if options.wait_time is not None:
     sleep_time = 0
     while not clustered:
-        util.wait_one_sec()
+        util_client.wait_one_sec()
         sleep_time += 1
-        clustered = util.is_active_cluster(options, log)
+        clustered = util_client.is_active_cluster(options, log)
         if clustered is None:
             e = 1
             break
         if sleep_time == wait_time:
             e = 2
             break
-    util.wait_error_case(e,log,"\nJoined node")
+    util_client.wait_error_case(e,log,"\nThe GridDB cluster has been started.")
     log.debug("%s end." % (__file__))
     sys.exit(e)
 

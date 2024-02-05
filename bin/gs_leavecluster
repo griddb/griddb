@@ -8,30 +8,32 @@ import copy
 from optparse import OptionParser
 from typing import Optional
 
-import util
-util.install_sigint_handler()
-(homedir,logdir) = util.get_required_env()
+import util_client
+util_client.install_sigint_handler()
+(homedir,logdir) = util_client.get_required_env()
 
-parser = OptionParser(usage="%prog [-f] [-w [WAIT_TIME]]" + util.CLIENT_OPTIONS_USAGE,
-                      description="Leave a node from a cluster.",
-            version="%prog [V2.8.00]")
-util.add_client_options(parser)
+parser = OptionParser(usage="%prog [-f] [-w [WAIT_TIME]]" + util_client.CLIENT_OPTIONS_USAGE,
+                      description="Leave the node from the GridDB cluster.",
+            version="%prog [V5.0.00]")
+util_client.add_client_options(parser)
 parser.add_option("-f", "--force", dest="force",
                   action="store_true", default=False,
-                  help="Force a node to leave")
+                  help="The GridDB node is forced to leave from the GridDB cluster.")
 parser.add_option("-w", "--wait", action='callback', callback=\
-                    util.optional_arg(0), dest="wait_time",default=None,
-                  help="wait for completion of leaving a node")
+                    util_client.optional_arg(0), dest="wait_time",default=None,
+                  help="Wait for the GridDB node to leave from the cluster.")
 (options, args) = parser.parse_args()
+# REST通信時SSL接続を行うか判断 デフォルトのポート番号を設定
+util_client.decide_use_ssl_and_port(options)
 
 if options.username is None:
-    print("A80001: Specify a user name and a password. (-u USER/PASS)")
+    print("A80001: Specify a user name and a password."+" (-u USER/PASS)")
     sys.exit(2)
 if options.wait_time is not None:
     try:
         wait_time = int(options.wait_time)
     except ValueError:
-        print("A80002: Specify the correct number of seconds to wait. (-w "+options.wait_time+")")
+        print("A80002: Specify seconds to wait.(-w "+options.wait_time+")")
         sys.exit(2)
 
 log = log.logger(__file__, log.DEBUG)
@@ -41,53 +43,53 @@ tmpoptions.password = "***"
 log.info(tmpoptions)
 
 e = 0
-nodestat: Optional[str] = util.get_nodestat(options, log)
+nodestat: Optional[str] = util_client.get_nodestat(options, log)
 if nodestat != "ACTIVE":
     e = 1
     if nodestat is not None:
         if nodestat == "INACTIVE":
-            print("A80101: Node is not joined.")
-            log.error("A80101: Node is not joined. (status="+nodestat+")")
+            print("A80101: The node has not been joined to the GridDB cluster.")
+            log.error("A80101: The node has not been joined to the GridDB cluster. (status="+nodestat+")")
             e = 3
         else:
-            print("A80102: Confirm node status.")
-            log.error("A80102: Node is the wrong status to leave. (status="+nodestat+")")
+            print("A80102: Check the status of the node.")
+            log.error("A80102: Check the status of the node. (status="+nodestat+")")
     else:
-        log.error("A80104: Unable to retreive the node status.")
+        log.error("A80104: Failed to obtain the node status.")
     sys.exit(e)
 
 if not options.force:
-    c = util.is_critical_node(options, log)
+    c = util_client.is_critical_node(options, log)
     if c is not None:
         if c == 1:
-            print("A80103: If you leave this node, data loss may occur.")
-            print("If you want to force a node to leave, specify f-option.")
-            log.error("A80103: If you leave this node, data loss may occur.")
+            print("A80103: If this node is left from the GridDB cluster, data loss may occur.")
+            print("If this node is forced to leave from the GridDB cluster, use '-f' option.")
+            log.error("A80103: If this node is left from the GridDB cluster, data loss may occur.")
             sys.exit(3)
 
 method = "POST"
 path = "/node/leave"
 data = {}
-(res, code) = util.request_rest(method, path, data, options, log)
+(res, code) = util_client.request_rest(method, path, data, options, log)
 
 if options.wait_time is not None:
     sleep_time = 0
     while nodestat != "INACTIVE":
-        util.wait_one_sec()
+        util_client.wait_one_sec()
         sleep_time += 1
-        nodestat = util.get_nodestat(options, log)
+        nodestat: Optional[str] = util_client.get_nodestat(options, log)
         if nodestat is None:
             e = 1
             break
         if sleep_time == wait_time:
             e = 2
             break
-    util.wait_error_case(e,log,"\nLeaved node")
+    util_client.wait_error_case(e,log,"\nThe node has been left from the GridDB cluster.")
     log.info("%s end." % (__file__))
     sys.exit(e)
 
 if code != 200:
-    log.error("A80105: Failed to leave")
+    log.error("A80105: failed to leave")
     sys.exit(1)
 
 log.info("%s end." % (__file__))

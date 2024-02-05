@@ -12,50 +12,52 @@ from optparse import OptionParser
 from optparse import SUPPRESS_HELP
 from typing import Optional
 
-import util
-util.install_sigint_handler()
-(homedir,logdir) = util.get_required_env()
+import util_client
+util_client.install_sigint_handler()
+(homedir,logdir) = util_client.get_required_env()
 
 confdir = os.path.join(homedir, "conf")
 pidfile = os.path.join(confdir, "gridstore.pid")
 
-parser = OptionParser(usage="%prog [-f] [-w [WAIT_TIME]] " + util.CLIENT_OPTIONS_USAGE+"\n       %prog -k [-w [WAIT_TIME]]",
-                      description="Stops a node.",
-            version="%prog [V2.8.00]")
-util.add_client_options(parser)
+parser = OptionParser(usage="%prog [-f] [-w [WAIT_TIME]] " + util_client.CLIENT_OPTIONS_USAGE+"\n       %prog -k [-w [WAIT_TIME]]",
+                      description="Stop the GridDB node.",
+            version="%prog [V5.0.00]")
+util_client.add_client_options(parser)
 parser.add_option("-f", "--force", dest="force",
                   action="store_true", default=False,
-                  help="Force a node to stop")
+                  help="Stop forcibly the GridDB node.")
 parser.add_option("-w", "--wait", action='callback', callback=\
-                    util.optional_arg(0), dest="wait_time",default=None,
-                  help="wait for completion of stopping a node")
+                    util_client.optional_arg(0), dest="wait_time",default=None,
+                  help="Wait for the node to stop.")
 parser.add_option("--rc", dest="rc",
                   action="store_true", default=False,
                   help=SUPPRESS_HELP)
 parser.add_option("-k", "--kill", dest="kill",
                   action="store_true", default=False,
-                  help="Force a process to be killed on the local machine")
+                  help="Forcibly stop the node process on the local machine.")
 (options, args) = parser.parse_args()
+# REST通信時SSL接続を行うか判断 デフォルトのポート番号を設定
+util_client.decide_use_ssl_and_port(options)
 
 if options.username is None and not options.rc and not options.kill:
-    print("B00001: Specify a user name and a password. (-u USER/PASS)")
+    print("B00001: User and password are required."+" (-u USER/PASS)")
     sys.exit(2)
 if options.wait_time is not None:
     try:
         wait_time = int(options.wait_time)
     except ValueError:
-        print("B00002: Specify the correct number of seconds to wait. (-w WAIT_TIME)")
+        print("B00002: Specify seconds to wait. (-w WAIT_TIME)")
         sys.exit(2)
 
 if options.kill:
     if options.force:
-        print("B00112: You can't specify both kill-option and force-option")
+        print("B00112: --kill option and --force option cannot be specified at same time.")
         sys.exit(2)
     if "-s" in sys.argv or "--server" in sys.argv or "-p" in sys.argv or "--port" in sys.argv:
-        print("B00110: You can't specify both kill-option and server-option (or port-option).")
+        print("B00110: --kill option and --server|--port option cannot be specified at same time.")
         sys.exit(2)
     if options.username is not None:
-        print("B00111: You can't specify both kill-option and user-option.")
+        print("B00111: --kill option and --user option cannot be specified at same time.")
         sys.exit(2)
 
 log = log.logger(__file__, log.DEBUG)
@@ -65,20 +67,21 @@ tmpoptions.password = "***"
 log.info(tmpoptions)
 
 if options.rc or options.kill:
-    pid = util.getpid(pidfile)
+    # プロセス停止
+    pid = util_client.getpid(pidfile)
     if pid is None:
-        print("B00101: Failed to get PID.")
-        print("Confirm node is started")
-        log.error("B00101: Getting PID failed. (path="+pidfile+")")
+        print("B00101: Failed to obtain the PID.")
+        print("Check whether a node has been started.")
+        log.error("B00101: Failed to obtain the PID. (path="+pidfile+")")
         sys.exit(1)
 
-    if util.psexists(pid, "gsserver") == 0:
-        print("B00103: Node is not started")
-        log.error("B00103: Node is not started. (pid="+str(pid)+")")
+    if util_client.psexists(pid, "gsserver") == 0:
+        print("B00103: The GridDB node has not been started.")
+        log.error("B00103: The GridDB node has not been started. (pid="+str(pid)+")")
         sys.exit(3)
         
-    print("Killing process")
-    log.info("killing process (pid="+str(pid)+")")
+    print("The GridDB node is stopped.")
+    log.info("The GridDB node is stopped. (pid="+str(pid)+")")
     if options.kill:
         os.kill(int(pid), signal.SIGKILL)
     else:
@@ -86,59 +89,59 @@ if options.rc or options.kill:
     code = 200
     if options.wait_time is not None:
         if wait_time == 0:
-            while util.psexists(pid, "gsserver"):
-                util.wait_one_sec()
-            print("\nKilled process")
+            while util_client.psexists(pid, "gsserver"):
+                util_client.wait_one_sec()
+            print("\nThe GridDB node has been stopped.")
         else:
             i = 0
             while i < wait_time:
-                util.wait_one_sec()
-                m = util.psexists(pid, "gsserver")
+                util_client.wait_one_sec()
+                m = util_client.psexists(pid, "gsserver")
                 if not m:
-                    print("\nKilled process")
-                    break;
+                    print("\nThe GridDB node has been stopped.")
+                    break
                 i += 1
             if m:
-                print("\nB00104: Timeout occurred. Confirm node status.")
-                log.warning("B00104: Timeout")
+                print("\nB00104: Timeout expired. Check the status of the node.")
+                log.warning("B00104: Timeout expired. Check the status of the node.")
                 sys.exit(2)
     log.info("%s end." % (__file__))
     sys.exit(0)
 
 else:
-    # REST
+    # RESTを用いた停止
     if not options.force:
-        nodestat: Optional[str] = util.get_nodestat(options, log)
+        nodestat: Optional[str] = util_client.get_nodestat(options, log)
         if nodestat != "INACTIVE":
             e = 1
             if nodestat is not None:
                 if nodestat == "ACTIVE":
-                    print("B00105: You can't stop node, because node is joined.")
-                    log.error("B00105: Node is joined. (status="+nodestat+")")
+                    print("B00105: The GridDB node cannot be stopped when the node joins to the GridDB cluster.")
+                    log.error("B00105: The GridDB node cannot be stopped when the node joins to the GridDB cluster. (status="+nodestat+")")
                     e = 3
                 elif nodestat == "NORMAL_SHUTDOWN":
-                    print("B00106: Node is stopping.")
-                    log.error("B00106: Node is stopping. (status="+nodestat+")")
+                    print("B00106: The GridDB node is being stopped.")
+                    log.error("B00106: The GridDB node is being stopped. (status="+nodestat+")")
                     e = 3
                 else:
-                    print("B00107: Confirm node status.")
-                    log.error("B00107: Confirm node status (status="+nodestat+")")
+                    print("B00107: Check the status of the node.")
+                    log.error("B00107: Check the status of the node. (status="+nodestat+")")
             else:
-                log.error("B00108: Failed to get the node status.")
+                log.error("B00108: failed to get the node status.")
             sys.exit(e)
 
-        print("Stopping node")
+        print("The GridDB node is stopped.")
     else:
-        print("Force stopping node")
+        print("The GridDB node is forced to stop.")
     
 
     method = "POST"
     path = "/node/shutdown"
     data = { "force": str(options.force).lower() }
-    (res, code) = util.request_rest(method, path, data, options, log)
+    (res, code) = util_client.request_rest(method, path, data, options, log)
 
     if code != 200:
-        log.error("B00109: Failed to stop node.")
+        log.error("B00109: failed to stop node.")
         sys.exit(1)
 
     if options.wait_time is not None:
@@ -150,16 +153,16 @@ else:
         e = 0
         sleep_time = 0
         while res is not None:
-            util.wait_one_sec()
+            util_client.wait_one_sec()
             sleep_time += 1
-            (res, code) = util.request_rest(method, path, data, options, log)
+            (res, code) = util_client.request_rest(method, path, data, options, log)
             if code == 401:
                 e = 1
                 break
             if sleep_time == wait_time:
                 e = 2
                 break
-        util.wait_error_case(e,log,"\nStopped node")
+        util_client.wait_error_case(e,log,"\nThe GridDB node has been stopped.")
         log.info("%s end." % (__file__))
         sys.exit(e)
 
