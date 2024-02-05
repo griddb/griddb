@@ -1,0 +1,110 @@
+#!/usr/bin/python3 -B
+# coding=UTF-8
+
+import sys
+import log
+import os
+import json
+import copy
+from optparse import OptionParser
+from typing import Optional
+
+import util_client
+util_client.install_sigint_handler()
+(homedir,logdir) = util_client.get_required_env()
+
+# PARAM_NAMEに指定可能なパラメータおよびモジュールは固定
+module_dict = {
+    "storeMemoryLimit": "dataStore",
+    "storeMemoryAgingSwapRate": "dataStore",
+    "storeMemoryColdRate": "dataStore",
+    "checkpointDelayInterval": "cluster",
+    "batchScanNum": "dataStore",
+    "estimatedErasableExpiredTime": "dataStore",
+    "traceLimitExecutionTime": "sql",
+    "traceLimitQuerySize": "sql",
+    "checkRuleInterval": "cluster",
+    "checkpointFileFlushSize": "dataStore",
+    "checkpointFileAutoClearCache": "dataStore",
+    "partitioningRowkeyConstraint": "sql",
+    "reauthenticationInterval": "transaction"
+}
+
+# helpに表示するパラメータ
+param_list = ["storeMemoryLimit","traceLimitExecutionTime","traceLimitQuerySize"]
+
+# 値がString型以外のパラメータ
+param_not_str_list = ["batchScanNum","storeMemoryAgingSwapRate","storeMemoryColdRate","traceLimitQuerySize","checkpointFileAutoClearCache","partitioningRowkeyConstraint"]
+
+def get_module_name(param_name) -> str:
+    if (param_name not in module_dict):
+        print("B50005: Specify a 'PARAM_NAME'.")
+        sys.exit(2)
+    return module_dict[param_name]
+
+parser = OptionParser(usage="%prog --show [PARAM_NAME] | --set PARAM_NAME PARAM_VALUE\n                    " + util_client.CLIENT_OPTIONS_USAGE,
+                      description="Change or display the parameter of the GridDB node.", version="%prog [V5.0.00]")
+util_client.add_client_options(parser)
+parser.add_option("--show", 
+        dest="showParam",
+        action="store_true",
+        help='Display the specified parameter.')
+parser.add_option("--set", 
+        dest="setParam",
+        action="store_true",
+        help='Change the specified parameter to the specified value.\
+                    The available values of PARAM_NAME:\
+                    %s' % '			'.join(map(str, param_list)))
+(options, args) = parser.parse_args()
+# REST通信時SSL接続を行うか判断 デフォルトのポート番号を設定
+util_client.decide_use_ssl_and_port(options)
+
+if options.username is None:
+    print("B50001: User and password are required."+" (-u USER/PASS)")
+    sys.exit(2)
+if options.setParam is None and options.showParam is None:
+    print("B50002: Specify a option either --set or --show.")
+    sys.exit(2)
+if len(args) < 2  and options.setParam:
+    print("B50004: Specify a parameter of PARAM_VALUE.")
+    sys.exit(2)
+
+log = log.logger(__file__, log.DEBUG)
+log.info("%s start." % (__file__))
+tmpoptions = copy.deepcopy(options)
+tmpoptions.password = "***"
+log.info("options="+str(tmpoptions)+" args="+str(args))
+
+method = "GET"
+path = "/node/config"
+data = {}
+paramName = ""
+paramValue=""
+module: str =""
+
+# --show
+if len(args) >= 1:
+    paramName = args[0]
+    module = get_module_name(paramName)
+# --set
+if len(args) > 1 and options.setParam:
+    method = "POST_JSON"    # To post single value
+    paramName = args[0]
+    paramValue = args[1]
+    module = get_module_name(paramName)
+    data = paramValue
+    if paramName in param_not_str_list:
+        method = "POST_JSON_NOT_STR"
+        data = str(data)
+
+path += "/" + module + "/" + paramName
+
+(res, code) = util_client.request_rest(method, path, data, options, log)
+if code != 200:
+    log.error("B50101: Failed to set/show GridStore parameter.")
+    sys.exit(1)
+
+if res is not None and options.showParam:
+    print(json.dumps(json.loads(res), sort_keys=True, indent=4))
+
+log.info("%s end." % (__file__))

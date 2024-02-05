@@ -1,0 +1,52 @@
+#!/usr/bin/python3 -B
+# coding=UTF-8
+
+import sys
+import log
+import json
+import os
+from optparse import OptionParser
+
+import util_client
+util_client.install_sigint_handler()
+(homedir,logdir) = util_client.get_required_env()
+
+parser = OptionParser(usage="%prog [-a ADDR_TYPE]" + util_client.CLIENT_OPTIONS_USAGE,
+                      description="Obtain the GridDB cluster configuration.",
+            version="%prog [V5.0.00]")
+util_client.add_client_options(parser)
+parser.add_option("-a", "--address-type", type="string",
+        action="callback", callback=util_client.check_addr_type, dest="addr_type",
+        help="Specify the service type of the address and the port to display.\
+                            ADDR_TYPE\
+                            system\
+                            cluster\
+                            transaction\
+                            sync")
+(options, args) = parser.parse_args()
+# REST通信時SSL接続を行うか判断 デフォルトのポート番号を設定
+util_client.decide_use_ssl_and_port(options)
+
+if options.username is None:
+    print("A50001: Specify a user name and a password."+" (-u USER/PASS)")
+    sys.exit(1)
+
+log = log.logger(__file__, log.DEBUG)
+log.info("%s start." % (__file__))
+
+method = "GET"
+path = "/node/host"
+data = None
+
+if options.addr_type is not None:
+    data = { "addressType" : options.addr_type}
+
+(res, code) = util_client.request_rest(method, path, data, options, log)
+if res is not None:
+    print(json.dumps(json.loads(res), sort_keys=True, indent=4))
+
+if code != 200:
+    sys.exit(1)
+
+log.info("%s end." % (__file__))
+
