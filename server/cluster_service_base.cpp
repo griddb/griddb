@@ -33,7 +33,6 @@
 #include "transaction_service.h"
 
 UTIL_TRACER_DECLARE(CLUSTER_INFO_TRACE);
-UTIL_TRACER_DECLARE(CLUSTER_DUMP);
 
 #include "json.h"
 #include "picojson.h"
@@ -477,7 +476,8 @@ void ClusterService::start(const Event::Source& eventSource) {
 		}
 		ee_.start();
 		execSvc_->start();
-
+		clsMgr_->getClusterInfo().startupTime_
+			= util::DateTime::now(TRIM_MILLISECONDS).getUnixTime();
 		const ClusterNotificationMode mode
 			= notificationManager_.getMode();
 		if (mode == NOTIFICATION_RESOLVER) {
@@ -629,6 +629,9 @@ void ClusterOptionalInfo::encode(EventByteOutStream& out, ClusterService* clsSvc
 		case DROP_PARTITION_INFO:
 			if (dropPartitionNodeInfo_.check()) setList_[type] = ACTIVE;
 			break;
+		case SSL_ADDRESS_LIST:
+			if (sslAddressList_.check()) setList_[type] = ACTIVE;
+			break;
 		default:
 			break;
 		}
@@ -650,6 +653,9 @@ void ClusterOptionalInfo::encode(EventByteOutStream& out, ClusterService* clsSvc
 					break;
 				case DROP_PARTITION_INFO:
 					clsSvc->encode(dropPartitionNodeInfo_, out);
+					break;
+				case SSL_ADDRESS_LIST:
+					clsSvc->encode(sslAddressList_, out);
 					break;
 				default:
 					break;
@@ -692,6 +698,10 @@ void ClusterOptionalInfo::decode(Event& ev, EventByteInStream& in, ClusterServic
 			break;
 		case DROP_PARTITION_INFO:
 			clsSvc->decode(ev, dropPartitionNodeInfo_, in);
+			setList_[type] = ACTIVE;
+			break;
+		case SSL_ADDRESS_LIST:
+			clsSvc->decode(ev, sslAddressList_, in);
 			setList_[type] = ACTIVE;
 			break;
 		default:
@@ -858,7 +868,15 @@ void ClusterService::setError(
 			try {
 				sysSvc_->traceStats();
 			}
-			catch (std::exception& e) {
+			catch (std::exception& e1) {
+			}
+
+			const util::Exception checkException = GS_EXCEPTION_CONVERT(*e, "");
+			int32_t errorCode = checkException.getErrorCode();
+			if (errorCode == GS_ERROR_CM_NO_MEMORY ||
+				errorCode == GS_ERROR_CM_MEMORY_LIMIT_EXCEEDED ||
+				errorCode == GS_ERROR_CM_SIZE_LIMIT_EXCEEDED) {
+				clsMgr_->setAutoShutdown();
 			}
 			sysSvc_->shutdown();
 			shutdown();
@@ -1195,6 +1213,15 @@ void TimerCheckClusterHandler::sendUpdatePartitionInfo(
 		clsSvc_->encode(updatePartitionInfo, out);
 		option.setPublicAddressInfo();
 		option.setSSLPort(pt_->getSSLPortNo(SELF_NODEID));
+		if (pt_->getSSLPortNo(SELF_NODEID) != UNDEF_SSL_PORT) {
+			for (NodeIdList::iterator it = activeNodeList.begin();
+				it != activeNodeList.end(); it++) {
+				NodeId nodeId = (*it);
+				if (nodeId != 0) {
+					option.setSSLAddress(pt_->getNodeAddress(nodeId), pt_->getSSLPortNo(nodeId));
+				}
+			}
+		}
 		clsSvc_->encodeOptionalPart(out, option);
 
 		for (NodeIdList::iterator it = activeNodeList.begin();
@@ -1274,6 +1301,11 @@ void TimerCheckClusterHandler::operator()(
 		catch (UserException&) {
 			return;
 		}
+		const std::string& currentStatus = pt_->dumpCurrentClusterStatus();
+//		EventTracer tracer(currentStatus.c_str(), ev.getType(), ev.getSenderND(),  *clsMgr_);
+
+		util::Stopwatch watch;
+		watch.start();
 		util::StackAllocator& alloc = ec.getAllocator();
 		util::StackAllocator::Scope scope(alloc);
 		ClusterManager::HeartbeatCheckInfo heartbeatCheckInfo(alloc);
@@ -1286,6 +1318,11 @@ void TimerCheckClusterHandler::operator()(
 			clsMgr_->getHeartbeatInfo(heartbeatInfo);
 			doAfterUpdatePartitionInfo(
 				ec, heartbeatInfo, heartbeatCheckInfo);
+		}
+		int32_t lap = watch.elapsedMillis();
+		if (lap >= ClusterService::CLUSTER_EVENT_TRACE_LIMIT_INTERVAL) {
+			GS_TRACE_WARNING(
+				CLUSTER_DUMP, GS_TRACE_CM_LONG_EVENT, "Long cluster event (check cluster), elapsedMillis=" << lap);
 		}
 	}
 	catch (UserException& e) {
@@ -1506,6 +1543,23 @@ void UpdatePartitionHandler::decode(EventContext& ec, Event& ev,
 	}
 	if (option.isActive(ClusterOptionalInfo::SSL_PORT)) {
 		pt_->setSSLPortNo(ClusterService::resolveSenderND(ev), option.getSSLPort());
+	}
+	if (option.isActive(ClusterOptionalInfo::SSL_ADDRESS_LIST)) {
+		std::vector<SSLPair>& sslAddressList = option.getSSLAddressList();
+		for (size_t pos = 0; pos < sslAddressList.size(); pos++) {
+			NodeAddress &address = sslAddressList[pos].address_;
+			int32_t sslPort = sslAddressList[pos].sslPortNo_;
+			util::SocketAddress socketAddress(
+				*(util::SocketAddress::Inet*)&address.address_,
+				address.port_);
+			const NodeDescriptor& nd = clsEE_->resolveServerND(socketAddress);
+			if (!nd.isEmpty()) {
+				NodeId nodeId = nd.getId();
+				if (nodeId != 0) {
+					pt_->setSSLPortNo(nodeId, sslPort);
+				}
+			}
+		}
 	}
 }
 
@@ -1848,14 +1902,14 @@ void UnknownClusterEventHandler::operator()(
 			GS_THROW_USER_ERROR(
 				GS_ERROR_CS_CLUSTER_VERSION_UNMATCHED,
 				"Cluster version is unmatched, event type:"
-				<< getEventTypeName(eventType) << " is before v1.5");
+				<< EventTypeUtility::getEventTypeName(eventType) << " is before v1.5");
 		}
 		else if (eventType >= V_1_5_CLUSTER_START &&
 			eventType <= V_1_5_CLUSTER_END) {
 			GS_THROW_USER_ERROR(
 				GS_ERROR_CS_CLUSTER_VERSION_UNMATCHED,
 				"Cluster version is unmatched, event type:"
-				<< getEventTypeName(eventType) << " is v1.5");
+				<< EventTypeUtility::getEventTypeName(eventType) << " is v1.5");
 		}
 		else {
 			GS_THROW_USER_ERROR(

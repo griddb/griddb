@@ -191,6 +191,7 @@ private:
 	@note サブマスタが相手をフォローする際に、自分が保持している情報を送信
 ** **/
 class RackZoneInfoList {
+public:
 
 	/** **
 		@brief ラックゾーン情報
@@ -216,7 +217,6 @@ class RackZoneInfoList {
 		std::string rackZoneId_;
 	};
 
-public:
 	RackZoneInfoList() {}
 
 	void add(NodeAddress& address, std::string& rackZoneId) {
@@ -339,6 +339,44 @@ private:
 	util::StackAllocator& alloc_;
 	util::Map<NodeAddress, DropNodeSet> tmpDropNodeMap_;
 	std::vector<DropNodeSet> dropNodeMap_;
+};
+
+struct SSLPair {
+public:
+	SSLPair() : sslPortNo_(UNDEF_SSL_PORT) {}
+	SSLPair(NodeAddress& address, int32_t sslPortNo) : address_(address), sslPortNo_(sslPortNo) {}
+	MSGPACK_DEFINE(address_, sslPortNo_);
+	NodeAddress address_;
+	int32_t sslPortNo_;
+};
+
+struct SSLAddressList {
+
+public:
+	SSLAddressList() {}
+
+	bool check() {
+		return (sslAddressList_.size() > 0);
+	}
+	
+	void add(NodeAddress& address, int32_t sslPortNo) {
+		sslAddressList_.push_back(SSLPair(address, sslPortNo));
+	}
+
+	std::vector<SSLPair> &getList() {
+		return sslAddressList_;
+	}
+
+	void dump() {
+		for (size_t pos = 0; pos < sslAddressList_.size(); pos++) {
+			std::cout << sslAddressList_[pos].address_.toString() << "," << sslAddressList_[pos].sslPortNo_ << std::endl;
+		}
+	}
+
+	MSGPACK_DEFINE(sslAddressList_);
+
+private:
+	std::vector<SSLPair> sslAddressList_;
 };
 
 /** **
@@ -1253,6 +1291,7 @@ public:
 	void planNext(PartitionContext& context);
 	bool checkPeriodicDrop(util::StackAllocator& alloc, DropPartitionNodeInfo& dropInfo);
 	void planGoal(PartitionContext& context);
+	void assignOptimalGoal(util::StackAllocator& allo);
 
 	std::string dumpPartitionRule(int32_t ruleNo) {
 		switch (ruleNo) {
@@ -1514,6 +1553,12 @@ public:
 		}
 	}
 
+	void progress(double &goalProgress, double &replicaProgress);
+	void getProgress(double& goalProgress, double& replicaProgress) {
+		goalProgress = goalProgress_;
+		replicaProgress = replicaProgress_;
+	}
+
 	/*!
 		@brief Get node address
 	*/
@@ -1717,7 +1762,7 @@ public:
 	void set(SubPartition& subPartition);
 
 	void getServiceAddress(NodeId nodeId, picojson::value& result,
-		ServiceType addressType, bool forSsl = false);
+		ServiceType addressType, bool forSsl);
 
 	void updateNewSQLPartition(std::vector<PartitionRole>& newsqlPartitionList);
 	void updateNewSQLPartition(SubPartitionTable& newsqlPartition);
@@ -2333,10 +2378,6 @@ private:
 			}
 		}
 
-		uint32_t minOwnerLoad_;
-		uint32_t maxOwnerLoad_;
-		uint32_t minDataLoad_;
-		uint32_t maxDataLoad_;
 		util::Vector<uint32_t> ownerLoadList_;
 		util::Vector<uint32_t> dataLoadList_;
 		util::Vector<uint8_t> liveNodeList_;
@@ -2344,6 +2385,10 @@ private:
 		uint32_t dataLimit_;
 		CheckedPartitionSummaryStatus status_;
 		int32_t nodeNum_;
+		uint32_t maxDataLoad_;
+		uint32_t minDataLoad_;
+		uint32_t maxOwnerLoad_;
+		uint32_t minOwnerLoad_;
 		int32_t ownerLoadCount_;
 		int32_t dataLoadCount_;
 	};
@@ -2480,6 +2525,9 @@ private:
 	bool orgEnableRackZoneAwareness_;
 
 	LoadSummary loadInfo_;
+
+	double goalProgress_;
+	double replicaProgress_;
 
 	int32_t partitionDigit_;
 	int32_t lsnDigit_;

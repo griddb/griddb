@@ -53,6 +53,8 @@ struct DDLWithParameter {
 		EXPIRATION_TYPE,
 		DATA_AFFINITY,
 		DATA_AFFINITY_POLICY,
+		INTERVAL_WORKER_GROUP,
+		INTERVAL_WORKER_GROUP_POSITION,
 		END_ID
 	};
 };
@@ -340,7 +342,8 @@ public:
 
 		UTIL_OBJECT_CODER_ALLOC_CONSTRUCTOR;
 		UTIL_OBJECT_CODER_MEMBERS(
-				nsId_, db_, table_, name_,
+				UTIL_OBJECT_CODER_OPTIONAL(nsId_, 0),
+				db_, table_, name_,
 				UTIL_OBJECT_CODER_OPTIONAL(dbCaseSensitive_, false),
 				UTIL_OBJECT_CODER_OPTIONAL(tableCaseSensitive_, false),
 				UTIL_OBJECT_CODER_OPTIONAL(nameCaseSensitive_, false));
@@ -366,6 +369,7 @@ public:
 		bool isDDL();
 		int32_t calcCommandType();
 		CommandType getCommandType();
+		bool isDropOnlyCommand();
 
 		const char* dumpCommandType();
 		int32_t dumpCategoryType();
@@ -616,10 +620,10 @@ public:
 		bool isVirtual_;
 		bool isTimeSeries_;
 
-		bool isPartitioning() {
+		bool isPartitioning() const {
 			return (partitionType_ != TABLE_PARTITION_TYPE_UNDEF);
 		}
-		bool isTimeSeries() {
+		bool isTimeSeries() const {
 			return isTimeSeries_;
 		}
 
@@ -649,6 +653,26 @@ public:
 				columnNameList_, ifNotExists_,
 				extensionName_, extensionOptionList_);
 	};
+};
+
+class SQLPlanningVersion {
+public:
+	SQLPlanningVersion();
+	SQLPlanningVersion(int32_t major, int32_t minor);
+
+	bool isEmpty() const;
+
+	int32_t getMajor() const;
+	int32_t getMinor() const;
+
+	void parse(const char8_t *str);
+
+	int32_t compareTo(int32_t major, int32_t minor) const;
+	int32_t compareTo(const SQLPlanningVersion &another) const;
+
+private:
+	int32_t major_;
+	int32_t minor_;
 };
 
 namespace lemon_SQLParser{ class SQLParser; };

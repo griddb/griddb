@@ -76,9 +76,9 @@ SQLResultSet::SQLResultSet(SQLVariableSizeGlobalAllocator& globalVarAlloc) :
 	rowCount_(0),
 	rowKeyAssigned_(false),
 	hasVariableType_(false),
+	blockList_(globalVarAlloc_),
 	columnNameList_(globalVarAlloc_),
 	columnTypeList_(globalVarAlloc_),
-	blockList_(globalVarAlloc_),
 	padding_(0), paddingBuffer_((const void*)&padding_) {
 }
 

@@ -410,7 +410,7 @@ void BaseContainer::searchColumnIdIndex(TransactionContext &txn, MapType mapType
 		}
 		bool withUncommitted = false;
 		const util::Vector<ColumnId> &columnIds = sc.getColumnIds();
-		IndexData indexData(txn.getDefaultAllocator());
+		IndexData &indexData = sc.prepareIndexData(txn.getDefaultAllocator());
 		getIndexData(txn, columnIds, mapType, withUncommitted, indexData);
 		ValueMap valueMap(txn, this, indexData);
 		valueMap.search<T>(txn, sc, normalRowList, outputOrder);
@@ -877,6 +877,15 @@ void BaseContainer::handleInvalidError(
 	else {
 		GS_RETHROW_SYSTEM_ERROR(e, "");
 	}
+}
+
+bool BaseContainer::hasTermConditionUpdator(BtreeMap::SearchContext &sc) {
+	return (sc.getTermConditionUpdator() != NULL);
+}
+
+bool BaseContainer::hasTermConditionUpdator(RtreeMap::SearchContext &sc) {
+	static_cast<void>(sc);
+	return false;
 }
 
 TablePartitioningVersionId BaseContainer::getTablePartitioningVersionId() {
@@ -1688,8 +1697,8 @@ void BaseContainer::searchMvccMap(
 
 	setExclusiveStatus(NO_ROW_TRANSACTION);
 
-	StackAllocAutoPtr<BtreeMap> mvccMap(
-		txn.getDefaultAllocator(), getMvccMap(txn));
+	BaseIndexStorage::AutoPtr<BtreeMap> mvccMap;
+	getMvccMap(txn, sc.prepareIndexData(txn.getDefaultAllocator()), mvccMap);
 	if (mvccMap.get()->isEmpty()) {
 		return;
 	}
@@ -1780,8 +1789,8 @@ void BaseContainer::searchMvccMap(
 
 	setExclusiveStatus(NO_ROW_TRANSACTION);
 
-	StackAllocAutoPtr<BtreeMap> mvccMap(
-			txn.getDefaultAllocator(), getMvccMap(txn));
+	BaseIndexStorage::AutoPtr<BtreeMap> mvccMap;
+	getMvccMap(txn, sc.prepareIndexData(txn.getDefaultAllocator()), mvccMap);
 	if (mvccMap.get()->isEmpty()) {
 		return;
 	}

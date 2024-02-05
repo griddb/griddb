@@ -59,6 +59,7 @@ struct MetaContainerInfo {
 		ColumnId containerNameColumn_;
 		ColumnId partitionIndexColumn_;
 		ColumnId containerIdColumn_;
+		ColumnId dbIdColumn_;
 	};
 
 	MetaContainerInfo();
@@ -102,6 +103,8 @@ struct MetaType {
 		TYPE_VIEW,  
 		TYPE_SQL,
 		TYPE_PARTITION_STATS,
+		TYPE_DATABASE_STATS,
+		TYPE_DATABASE,
 		END_TYPE_SQL
 	};
 
@@ -117,6 +120,7 @@ struct MetaType {
 		COMMON_CONTAINER_NAME,
 		COMMON_PARTITION_INDEX,
 		COMMON_CONTAINER_ID,
+		COMMON_DATABASE_ID,
 		END_COMMON
 	};
 
@@ -145,6 +149,8 @@ struct MetaType {
 		CONTAINER_PARTITION_DIVISION2,
 		CONTAINER_CLUSTER_PARTITION,
 		CONTAINER_EXPIRATION_TYPE,
+		CONTAINER_PARTITION_INTERVAL_WORKER_GROUP,
+		CONTAINER_PARTITION_INTERVAL_WORKER_GROUP_POSITION,
 		END_CONTAINER
 	};
 
@@ -220,6 +226,7 @@ struct MetaType {
 	};
 
 	enum EventMeta {
+		EVENT_DATABASE_ID,
 		EVENT_NODE_ADDRESS,
 		EVENT_NODE_PORT,
 		EVENT_START_TIME,
@@ -242,6 +249,7 @@ struct MetaType {
 		SOCKET_CREATION_TIME,
 		SOCKET_DISPATCHING_EVENT_COUNT,
 		SOCKET_SENDING_EVENT_COUNT,
+		SOCKET_DATABASE_NAME,
 		END_SOCKET,
 	};
 
@@ -281,6 +289,7 @@ struct MetaType {
 		PARTITION_EXPIRED_START_TIME,
 		PARTITION_EXPIRED_ERASABLE_TIME,
 		PARTITION_STATUS,
+		PARTITION_WORKER_INDEX,
 		END_PARTITION
 	};
 
@@ -301,6 +310,7 @@ struct MetaType {
 		SQL_SQL,
 		SQL_QUERY_ID,
 		SQL_JOB_ID,
+		SQL_USER_NAME,
 		END_SQL
 	};
 
@@ -313,6 +323,33 @@ struct MetaType {
 		END_PARTITION_STATS
 	};
 
+	enum DatabaseStatsMeta {
+		DATABASE_STATS_DATABASE_ID,
+		DATABASE_STATS_NODE_ADDRESS,
+		DATABASE_STATS_NODE_PORT,
+		DATABASE_STATS_TRANSACTION_CONNECTION_COUNT,
+		DATABASE_STATS_TRANSACTION_REQUEST_COUNT,
+		DATABASE_STATS_SQL_CONNECTION_COUNT,
+		DATABASE_STATS_SQL_REQUEST_COUNT,
+		DATABASE_STATS_STORE_BLOCK_SIZE,
+		DATABASE_STATS_STORE_MEMORY_SIZE,
+		DATABASE_STATS_STORE_SWAP_READ_SIZE,
+		DATABASE_STATS_STORE_SWAP_WRITE_SIZE,
+		DATABASE_STATS_SQL_WORK_MEMORY_SIZE,
+		DATABASE_STATS_SQL_STORE_MEMORY_SIZE,
+		DATABASE_STATS_SQL_STORE_SWAP_READ_SIZE,
+		DATABASE_STATS_SQL_STORE_SWAP_WRITE_SIZE,
+		DATABASE_STATS_SQL_TASK_COUNT,
+		DATABASE_STATS_SQL_PENDING_JOB_COUNT,
+		DATABASE_STATS_SQL_SEND_MESSAGE_SIZE,
+		END_DATABASE_STATS
+	};
+
+	enum DatabaseMeta {
+		DATABASE_DATABASE_ID,
+		DATABASE_DATABASE_NAME,
+		END_DATABASE
+	};
 	enum StringConstants {
 		STR_CONTAINER_NAME,
 		STR_CONTAINER_OPTIONAL_TYPE,
@@ -413,6 +450,25 @@ struct MetaType {
 		STR_BLOCK_CATEGORY,
 		STR_STORE_USE,
 		STR_STORE_OBJECT_USE,
+		STR_PARTITION_INTERVAL_WORKER_GROUP,
+		STR_PARTITION_INTERVAL_WORKER_GROUP_POSITION,
+		STR_USER_NAME,
+		STR_TYPE,
+		STR_TRANSACTION_CONNECTION_COUNT,
+		STR_TRANSACTION_REQUEST_COUNT,
+		STR_SQL_CONNECTION_COUNT,
+		STR_SQL_REQUEST_COUNT,
+		STR_STORE_BLOCK_SIZE,
+		STR_STORE_MEMORY_SIZE,
+		STR_STORE_SWAP_READ_SIZE,
+		STR_STORE_SWAP_WRITE_SIZE,
+		STR_SQL_WORK_MEMORY_SIZE,
+		STR_SQL_STORE_MEMORY_SIZE,
+		STR_SQL_STORE_SWAP_READ_SIZE,
+		STR_SQL_STORE_SWAP_WRITE_SIZE,
+		STR_SQL_TASK_COUNT,
+		STR_SQL_PENDING_JOB_COUNT,
+		STR_SQL_SEND_MESSAGE_SIZE,
 
 		END_STR
 	};
@@ -432,6 +488,8 @@ struct MetaType::Coders {
 	static const util::NameCoderEntry<ViewMeta> LIST_VIEW[];
 	static const util::NameCoderEntry<SQLMeta> LIST_SQL[];
 	static const util::NameCoderEntry<PartitionStatsMeta> LIST_PARTITION_STATS[];
+	static const util::NameCoderEntry<DatabaseStatsMeta> LIST_DATABASE_STATS[];
+	static const util::NameCoderEntry<DatabaseMeta> LIST_DATABASE[];
 
 
 	static const util::NameCoder<ContainerMeta, END_CONTAINER> CODER_CONTAINER;
@@ -447,6 +505,8 @@ struct MetaType::Coders {
 	static const util::NameCoder<ViewMeta, END_VIEW> CODER_VIEW;
 	static const util::NameCoder<SQLMeta, END_SQL> CODER_SQL;
 	static const util::NameCoder<PartitionStatsMeta, END_PARTITION_STATS> CODER_PARTITION_STATS;
+	static const util::NameCoder<DatabaseStatsMeta, END_DATABASE_STATS> CODER_DATABASE_STATS;
+	static const util::NameCoder<DatabaseMeta, END_DATABASE> CODER_DATABASE;
 
 	static const util::NameCoderEntry<StringConstants> LIST_STR[];
 	static const util::NameCoder<StringConstants, END_STR> CODER_STR;
@@ -470,6 +530,7 @@ struct MetaType::CoreColumns {
 		Entry asContainerName() const;
 		Entry asPartitionIndex() const;
 		Entry asContainerId() const;
+		Entry asDbId() const;
 
 		T id_;
 		uint8_t type_;
@@ -490,6 +551,8 @@ struct MetaType::CoreColumns {
 	static const Entry<ViewMeta> COLUMNS_VIEW[]; 
 	static const Entry<SQLMeta> COLUMNS_SQL[]; 
 	static const Entry<PartitionStatsMeta> COLUMNS_PARTITION_STATS[];
+	static const Entry<DatabaseStatsMeta> COLUMNS_DATABASE_STATS[];
+	static const Entry<DatabaseMeta> COLUMNS_DATABASE[];
 
 	template<typename T>
 	static Entry<T> of(T id);
@@ -518,6 +581,8 @@ struct MetaType::RefColumns {
 	static const Entry<ViewMeta> COLUMNS_VIEW[]; 
 	static const Entry<SQLMeta> COLUMNS_SQL[]; 
 	static const Entry<PartitionStatsMeta> COLUMNS_PARTITION_STATS[];
+	static const Entry<DatabaseStatsMeta> COLUMNS_DATABASE_STATS[];
+	static const Entry<DatabaseMeta> COLUMNS_DATABASE[];
 
 	template<typename T>
 	static Entry<T> of(

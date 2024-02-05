@@ -25,6 +25,7 @@
 #include "transaction_service.h"
 
 #include "base_container.h"
+#include "database_manager.h"
 
 #define TM_THROW_TXN_CONTEXT_NOT_FOUND(message) \
 	GS_THROW_CUSTOM_ERROR(                      \
@@ -370,7 +371,7 @@ TransactionManager::TransactionManager(ConfigTable &config, bool isSQL)
 	  loginRepetitionNum_(config.get<int32_t>(CONFIG_TABLE_SEC_LOGIN_REPETITION_NUM)),
 	  txnTimeoutLimit_(
 		  config.get<int32_t>(CONFIG_TABLE_TXN_TRANSACTION_TIMEOUT_LIMIT)),
-	  eventMonitor_(pgConfig_.getPartitionGroupCount()),
+	  eventMonitor_(pgConfig_),
 	  txnContextMapManager_(pgConfig_.getPartitionGroupCount(), NULL),
 	  txnContextMap_(pgConfig_.getPartitionGroupCount(), NULL),
 	  activeTxnMapManager_(pgConfig_.getPartitionGroupCount(), NULL),
@@ -384,7 +385,8 @@ TransactionManager::TransactionManager(ConfigTable &config, bool isSQL)
 	  replContextPartition_(pgConfig_.getPartitionCount(), NULL),
 	  authContextPartition_(pgConfig_.getPartitionCount(), NULL),
 	  ptLock_(pgConfig_.getPartitionCount(), 0),
-	  ptLockMutex_(NULL)
+	  ptLockMutex_(NULL),
+	  databaseManager_(NULL)
 {
 	try {
 		ptLockMutex_ = UTIL_NEW util::Mutex[NUM_LOCK_MUTEX];
@@ -1192,6 +1194,10 @@ void TransactionManager::finalize() {
 	}
 
 	delete[] ptLockMutex_;
+}
+
+void TransactionManager::initialize(const ManagerSet& mgrSet) {
+	databaseManager_ = mgrSet.dbMgr_;
 }
 
 void TransactionManager::createReplContextPartition(PartitionId pId) {
@@ -2002,4 +2008,35 @@ void TransactionManager::ConfigSetUpHandler::operator()(ConfigTable &config) {
 		.setMin(0)
 		.setMax(256)
 		.setDefault(1);
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TXN_USE_MULTITENANT_MODE, BOOL)
+		.setExtendedType(ConfigTable::EXTENDED_TYPE_LAX_BOOL)
+		.setDefault(false);
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TXN_USE_REQUEST_CONSTRAINT, BOOL)
+		.setExtendedType(ConfigTable::EXTENDED_TYPE_LAX_BOOL)
+		.setDefault(false);
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TXN_CHECK_DATABASE_STATS_INTERVAL, INT32)
+		.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
+		.setMin(1)
+		.setDefault(5);
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TXN_LIMIT_DELAY_TIME, INT32)
+		.setUnit(ConfigTable::VALUE_UNIT_DURATION_S)
+		.setMin(1)
+		.setMax(60 * 60)
+		.setDefault(300);
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_TXN_USE_SCAN_STAT, BOOL)
+		.setExtendedType(ConfigTable::EXTENDED_TYPE_LAX_BOOL)
+		.setDefault(false);
+}
+
+EventStart::EventStart(EventContext& ec, Event& ev, EventMonitor& monitor, DatabaseId dbId,  bool clientRequest) :
+	ec_(ec), ev_(ev), monitor_(monitor) {
+	monitor_.set(*this, dbId, clientRequest);
+}
+
+EventStart::~EventStart() {
+	monitor_.reset(*this);
+}
+
+void EventStart::setType(int32_t type) {
+	monitor_.setType(ec_.getWorkerId(), type);
 }

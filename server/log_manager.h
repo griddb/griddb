@@ -22,6 +22,7 @@
 #define LOG_MANAGER_H_
 
 #include "data_type.h"
+#include "gs_error.h"
 #include "utility_v5.h"
 #include "config_table.h"
 #include "partition_file.h"
@@ -243,6 +244,26 @@ public:
 	std::string toString() const;
 };
 
+/*!
+	@brief Scoped Lockの変種。ロックスコープ中での一時的なロック解除・再取得が可能
+ */
+template<typename L>
+class LockGuardVariant {
+public:
+	explicit LockGuardVariant(L &lockObject);
+	~LockGuardVariant();
+	void acquire();
+	void release();
+	bool isLocked(); 
+
+private:
+	LockGuardVariant(const LockGuardVariant&);
+	LockGuardVariant& operator=(const LockGuardVariant&);
+	
+	L &lockObject_;
+	util::Atomic<int32_t> count_;
+};
+
 
 /*!
 	@brief WALバッファ
@@ -268,7 +289,7 @@ public:
 
 	uint64_t append(const uint8_t* data, size_t dataLength);
 
-	bool flush(LogFlushMode x, bool byCP);
+	bool flush(LockGuardVariant<Locker> *guard, LogFlushMode x, bool byCP);
 
 	static void flush(
 			SimpleFile &logfile, bool byCP, LogManagerStats &stats);
@@ -292,6 +313,7 @@ public:
 	bool resize(int32_t capacity);
 
 	PartitionId getPId() { return pId_; }
+
 
 private:
 	void handleDuplicateError(std::exception &e);
@@ -516,12 +538,14 @@ template<class L>
 bool LogIterator<L>::checkExists(LogSequentialNumber lsn) {
 	int64_t offset = 0;
 
-	util::LockGuard<Locker>(*logManager_->locker());
-	if (lsn < logManager_->getStartLSN()) {
-		return false;
-	}
-	else if (lsn > logManager_->getLSN()) {
-		return false;
+	{
+		util::LockGuard<Locker> guard(*logManager_->locker());
+		if (lsn < logManager_->getStartLSN()) {
+			return false;
+		}
+		else if (lsn > logManager_->getLSN()) {
+			return false;
+		}
 	}
 	assert(logFile_ == NULL);
 	std::unique_ptr<Log> log;
@@ -544,7 +568,7 @@ bool LogIterator<L>::checkExists(LogSequentialNumber lsn) {
 		return found;
 	}
 	catch (std::exception &e) {
-		throw e;
+		GS_RETHROW_USER_OR_SYSTEM(e, "");
 	}
 }
 
@@ -553,7 +577,7 @@ bool LogIterator<L>::checkExists(LogSequentialNumber lsn) {
 */
 template <class L>
 std::unique_ptr<Log> LogIterator<L>::next(bool forRecovery) {
-	util::LockGuard<Locker>(*logManager_->locker());
+	LockGuardVariant<Locker> guard(*logManager_->locker());
 	try {
 		while (true) {
 			if (logFile_ == NULL) {
@@ -578,8 +602,10 @@ std::unique_ptr<Log> LogIterator<L>::next(bool forRecovery) {
 				uint64_t fileSize = logFile_->getSize();
 				if (offset_ + sizeof(int64_t) > fileSize) {
 					if (isXLog_) {
+						guard.release();
 						logManager_->flushXLog(LOG_WRITE_WAL_BUFFER, false);
 						logManager_->flushXLog(LOG_FLUSH_FILE, false);
+						guard.acquire();
 						fileSize = logFile_->getSize();
 						if (offset_ + sizeof(int64_t) > fileSize) {
 							logFile_->close();
@@ -603,7 +629,12 @@ std::unique_ptr<Log> LogIterator<L>::next(bool forRecovery) {
 				}
 				if (buffer_.size() < static_cast<size_t>(len)) {
 					const uint8_t dummy = 0;
-					buffer_.assign(len, dummy);
+					try {
+						buffer_.assign(len, dummy);
+					}
+					catch (std::exception &e) {
+						GS_RETHROW_SYSTEM_ERROR(e, "buffer_.assign() failed.");
+					}
 				}
 				if ( static_cast<uint64_t>(offset_ + len) > fileSize) {
 					GS_TRACE_INFO(
@@ -661,12 +692,12 @@ std::unique_ptr<Log> LogIterator<L>::next(bool forRecovery) {
 				logFile_->close();
 				delete logFile_;
 				logFile_ = NULL;
-				throw e;
+				GS_RETHROW_USER_OR_SYSTEM(e, "");
 			}
 		}
 	}
 	catch (std::exception &e) {
-		throw e;
+		GS_RETHROW_USER_OR_SYSTEM(e, "");
 	}
 }
 
@@ -912,7 +943,7 @@ void LogManager<L>::startCheckpoint(bool withFlush, bool byCP) {
 template <class L>
 LogSequentialNumber LogManager<L>::appendXLog(
 		LogType type, void* data, size_t len, util::XArray<uint8_t>* logBinary) {
-	util::LockGuard<Locker>(*locker());
+	util::LockGuard<Locker> guard(*locker());
 	try {
 		if (len > LOG_DATA_LIMIT_SIZE) {
 			GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_LIMITS_EXCEEDED,
@@ -973,7 +1004,7 @@ void LogManager<L>::copyXLog(
 	if (!data) {
 		GS_THROW_SYSTEM_ERROR(GS_ERROR_CM_INTERNAL_ERROR, "data must be NOT NULL");
 	}
-	util::LockGuard<Locker>(*locker());
+	util::LockGuard<Locker> guard(*locker());
 	try {
 		xLogFileOffset_ += xWALBuffer_.append(static_cast<const uint8_t*>(data), len);
 		setLSN(lsn);
@@ -990,7 +1021,7 @@ void LogManager<L>::copyXLog(
 */
 template <class L>
 void LogManager<L>::appendCpLog(Log& log) {
-	util::LockGuard<Locker>(*locker());
+	util::LockGuard<Locker> guard(*locker());
 	try {
 		util::StackAllocator::Scope scope(alloc_);
 
@@ -1019,12 +1050,12 @@ void LogManager<L>::appendCpLog(Log& log) {
 */
 template <class L>
 void LogManager<L>::flushCpLog(LogFlushMode x, bool byCP) {
-	util::LockGuard<Locker>(locker());
+	LockGuardVariant<Locker> guard(*locker());
 	if (!cpFile_) {
 		return;
 	}
 	try {
-		cpWALBuffer_.flush(x, byCP);
+		cpWALBuffer_.flush(&guard, x, byCP);
 	}
 	catch (std::exception& e) {
 		GS_RETHROW_SYSTEM_ERROR(
@@ -1035,7 +1066,7 @@ void LogManager<L>::flushCpLog(LogFlushMode x, bool byCP) {
 
 template <class L>
 bool LogManager<L>::checkNeedFlushXLog() {
-	util::LockGuard<Locker>(locker());
+	util::LockGuard<Locker> guard(*locker());
 	if (!xFile_) {
 		return false;
 	}
@@ -1047,12 +1078,12 @@ bool LogManager<L>::checkNeedFlushXLog() {
 */
 template <class L>
 void LogManager<L>::flushXLog(LogFlushMode x, bool byCP) {
-	util::LockGuard<Locker>(locker());
+	LockGuardVariant<Locker> guard(*locker());
 	if (!xFile_) {
 		return;
 	}
 	try {
-		xWALBuffer_.flush(x, byCP);
+		xWALBuffer_.flush(&guard, x, byCP);
 	}
 	catch (std::exception& e) {
 		GS_RETHROW_SYSTEM_ERROR(
@@ -1070,13 +1101,13 @@ void LogManager<L>::flushXLogByCommit(bool byCP) {
 	if (!config_.alwaysFlushOnTxnEnd_) {
 		return;
 	}
-	util::LockGuard<Locker>(locker());
+	LockGuardVariant<Locker> guard(*locker());
 	if (!xFile_) {
 		return;
 	}
 	try {
-		xWALBuffer_.flush(LOG_WRITE_WAL_BUFFER, byCP);
-		xWALBuffer_.flush(LOG_FLUSH_FILE, byCP);
+		xWALBuffer_.flush(&guard, LOG_WRITE_WAL_BUFFER, byCP);
+		xWALBuffer_.flush(&guard, LOG_FLUSH_FILE, byCP);
 	}
 	catch (std::exception& e) {
 		GS_RETHROW_SYSTEM_ERROR(
@@ -1116,15 +1147,17 @@ int64_t LogManager<L>::getStartLogVersion() {
 */
 template <class L>
 void LogManager<L>::removeLogFiles(int64_t baseLogVer, int64_t checkpointRange) {
+	assert(checkpointRange >= 1);
 	if (config_.persistencyMode_ == PERSISTENCY_KEEP_ALL_LOG) {
 		return;
 	}
 	const int64_t retainedFileCount =
 			static_cast<int64_t>(config_.retainedFileCount_);
-	const int64_t targetCpLogVer =
-			(checkpointRange > retainedFileCount + 1)
-					? (baseLogVer - checkpointRange)
-					  : (baseLogVer - retainedFileCount - 1);
+	int64_t targetCpLogVer = baseLogVer - checkpointRange;
+	if (keepXLogVersion_ != -1 && targetCpLogVer >= keepXLogVersion_) {
+		targetCpLogVer = keepXLogVersion_ - 1;
+	}
+
 	std::vector<int32_t> logs;
 	{
 		util::NormalOStringStream oss1;
@@ -1206,9 +1239,9 @@ template <class L>
 void LogManager<L>::closeFiles(bool withFlush, bool byCP) {
 	if (cpFile_ != NULL) {
 		try {
-			cpWALBuffer_.flush(LOG_WRITE_WAL_BUFFER, byCP);
+			cpWALBuffer_.flush(NULL, LOG_WRITE_WAL_BUFFER, byCP);
 			if (withFlush) {
-				cpWALBuffer_.flush(LOG_FLUSH_FILE, byCP);
+				cpWALBuffer_.flush(NULL, LOG_FLUSH_FILE, byCP);
 				cpFile_->clearFileCache();
 				cpFile_->close();
 				delete cpFile_;
@@ -1228,9 +1261,9 @@ void LogManager<L>::closeFiles(bool withFlush, bool byCP) {
 		try {
 			appendXLog(LogType::EOFLog, NULL, 0, NULL);
 
-			xWALBuffer_.flush(LOG_WRITE_WAL_BUFFER, byCP);
+			xWALBuffer_.flush(NULL, LOG_WRITE_WAL_BUFFER, byCP);
 			if (withFlush) {
-				xWALBuffer_.flush(LOG_FLUSH_FILE, byCP);
+				xWALBuffer_.flush(NULL, LOG_FLUSH_FILE, byCP);
 				xFile_->clearFileCache();
 				xFile_->close();
 				if (duplicateFile_) {
@@ -1748,4 +1781,35 @@ uint32_t LogManager<L>::Config::getIndexBufferSize() const {
 	return (1 << indexBufferSizeBits_);
 }
 
+
+template<typename L>
+inline LockGuardVariant<L>::LockGuardVariant(L &lockObject)
+: lockObject_(lockObject), count_(0) {
+	acquire();
+}
+
+template<typename L>
+inline void LockGuardVariant<L>::acquire() {
+	lockObject_.lock();
+	assert(count_ == 0);
+	count_ = 1;
+}
+
+template<typename L>
+inline void LockGuardVariant<L>::release() {
+	if (count_ > 0) {
+		count_ = 0;
+		lockObject_.unlock();
+	}
+}
+
+template<typename L>
+inline LockGuardVariant<L>::~LockGuardVariant() {
+	release();
+}
+
+template<typename L>
+inline bool LockGuardVariant<L>::isLocked() {
+	return (count_ > 0);
+}
 #endif 

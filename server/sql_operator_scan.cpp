@@ -24,11 +24,15 @@ SQLScanOps::Registrar::REGISTRAR_INSTANCE((Registrar()));
 
 void SQLScanOps::Registrar::operator()() const {
 	add<SQLOpTypes::OP_SCAN, Scan>();
+	add<SQLOpTypes::OP_SCAN_SEMI_FILTERING, ScanSemiFiltering>();
+	add<SQLOpTypes::OP_SCAN_UNIQUE, ScanUnique>();
+	add<SQLOpTypes::OP_SCAN_NO_INDEXED, ScanNoIndex>();
 	add<SQLOpTypes::OP_SCAN_CONTAINER_FULL, ScanContainerFull>();
 	add<SQLOpTypes::OP_SCAN_CONTAINER_RANGE, ScanContainerRange>();
 	add<SQLOpTypes::OP_SCAN_CONTAINER_INDEX, ScanContainerIndex>();
 	add<SQLOpTypes::OP_SCAN_CONTAINER_META, ScanContainerMeta>();
 	add<SQLOpTypes::OP_SELECT, Select>();
+	add<SQLOpTypes::OP_SELECT_NONE, SelectPipe>();
 	add<SQLOpTypes::OP_SELECT_PIPE, SelectPipe>();
 	add<SQLOpTypes::OP_LIMIT, Limit>();
 
@@ -134,336 +138,111 @@ void SQLScanOps::BaseScanContainerOperator::unbindScanCursor(
 
 
 void SQLScanOps::Scan::compile(OpContext &cxt) const {
-	OpPlan &plan = cxt.getPlan();
-	if (tryCompileIndexJoin(cxt, plan)) {
-		return;
-	}
-	else if (tryCompileEmpty(cxt, plan)) {
-		return;
-	}
+	const OpCode &baseCode = getCode();
 
-
-	util::StackAllocator &alloc = cxt.getAllocator();
-
-	const SQLOps::ContainerLocation &location =
-			getCode().getContainerLocation();
-	const bool forMeta = (location.type_ == SQLType::TABLE_META);
-
-	bool indexPlanned = !plan.isEmpty();
-	SQLExprs::IndexSelector *selector = NULL;
-	do {
-		const SQLExprs::Expression *expr = getCode().getJoinPredicate();
-		if (expr == NULL) {
-			expr = getCode().getFilterPredicate();
-		}
-		if (forMeta || expr == NULL || !location.indexActivated_) {
-			break;
-		}
-
-		ScanCursorAccessor &accessor = getScanCursorAccessor(cxt);
-		if (indexPlanned || getCode().getLimit() == 0 || accessor.isIndexLost()) {
-			if (accessor.isIndexLost()) {
-				indexPlanned = false;
-			}
-			break;
-		}
-
-		ColumnTypeList inputTypeList(alloc);
-		TupleList::Info inputInfo = getInputInfo(cxt, inputTypeList);
-
-		SQLValues::ValueContext valueCxt(
-				SQLValues::ValueContext::ofAllocator(alloc));
-		selector = ALLOC_NEW(alloc) SQLExprs::IndexSelector(
-				valueCxt, SQLType::EXPR_COLUMN, inputInfo);
-		if (location.multiIndexActivated_) {
-			selector->setMultiAndConditionEnabled(true);
-		}
-
-		accessor.getIndexSpec(
-				cxt.getExtContext(), cxt.getInputColumnList(0), *selector);
-		selector->select(*expr);
-		if (selector->isSelected()) {
-			break;
-		}
-
-		const SQLExprs::IndexConditionList &condList =
-				selector->getConditionList();
-		if (condList.size() != 1) {
-			break;
-		}
-
-		const SQLExprs::IndexCondition &cond = condList.front();
-		if (cond.isNull() || cond.equals(false)) {
-			break;
-		}
-		selector = NULL;
-	}
-	while (false);
-
-	OpCodeBuilder builder(OpCodeBuilder::ofContext(cxt));
-
-	OpCode baseCode = getCode();
-	Projection *distinctProj = NULL;
-	std::pair<Projection*, Projection*> projections;
-	if (indexPlanned && selector == NULL) {
-		builder.assignInputTypesByProjection(
-				OpCodeBuilder::resolveOutputProjection(baseCode, NULL), NULL);
-		projections.first = &builder.createIdenticalProjection(false, 0);
-		baseCode = OpCode();
-	}
-	else if (!forMeta) {
-		projections = builder.arrangeProjections(
-				baseCode, true, true, &distinctProj);
-		assert(projections.first != NULL);
-	}
-
-	SQLExprs::ExprRewriter &rewriter = builder.getExprRewriter();
-	SQLExprs::ExprFactoryContext &factoryCxt = builder.getExprFactoryContext();
-	rewriter.activateColumnMapping(factoryCxt);
-
-	if (!forMeta) {
-		rewriter.clearColumnUsage();
-
-		const bool withId = true;
-
-		if (indexPlanned || selector != NULL) {
-			rewriter.setIdOfInput(0, true);
-		}
-		else {
-			OpCode code = getCode();
-			code.setJoinPredicate(NULL);
-
-			builder.addColumnUsage(code, withId);
-		}
-	}
-
-	Projection *midInProj = &builder.createProjectionByUsage(false);
-
-	rewriter.setIdProjected(true);
-	rewriter.setInputProjected(true);
-
-	if (selector != NULL) {
-		const bool parentPending = (projections.second != NULL);
-
-		const SQLExprs::IndexConditionList &condList =
-				selector->getConditionList();
-
-		SQLValues::CompColumnList &keyColumnList =
-				builder.createCompColumnList();
-		{
-			SQLValues::CompColumn keyColumn;
-			keyColumn.setColumnPos(rewriter.getMappedIdColumn(0), true);
-			keyColumnList.push_back(keyColumn);
-		}
-
-		Projection *midUnionProj = &builder.createProjectionByUsage(true);
-
-		OpNode &rangeNode = OpCodeBuilder::setUpOutputNodesDetail(
-				plan, NULL, parentPending, NULL,
-				SQLOpTypes::OP_SCAN_CONTAINER_RANGE,
-				distinctProj, baseCode.getAggregationPhase(), NULL);
-		{
-			OpNode &node = rangeNode;
-			OpCode code;
-			code.setPipeProjection(projections.first);
-			code.setFinishProjection(projections.second);
-			node.setCode(code);
-
-			node.addInput(plan.getParentInput(0));
-		}
-
-		OpNode *orNode = NULL;
-		if (SQLExprs::IndexSelector::getOrConditionCount(
-				condList.begin(), condList.end()) > 1) {
-			OpNode &node = plan.createNode(SQLOpTypes::OP_UNION_DISTINCT_MERGE);
-			OpCode code;
-			code.setKeyColumnList(&keyColumnList);
-			code.setPipeProjection(midUnionProj);
-			node.setCode(code);
-
-			orNode = &node;
-			rangeNode.addInput(*orNode);
-		}
-
-		OpNode &topNode = (orNode == NULL ? rangeNode : *orNode);
-
-		bool andNodeFound = false;
-		OpNode *followingNode = NULL;
-		for (SQLExprs::IndexConditionList::const_iterator it = condList.begin();
-				it != condList.end();) {
-			const size_t count =
-					SQLExprs::IndexSelector::nextCompositeConditionDistance(
-							it, condList.end());
-			if (it->andOrdinal_ == 0 && count < it->andCount_) {
-				OpNode &node =
-						plan.createNode(SQLOpTypes::OP_UNION_INTERSECT_MERGE);
-				OpCode code;
-				code.setKeyColumnList(&keyColumnList);
-				code.setPipeProjection(midUnionProj);
-				node.setCode(code);
-
-				topNode.addInput(node);
-				followingNode = &node;
-				andNodeFound = true;
-			}
-			else if (it->andOrdinal_ == 0) {
-				followingNode = &topNode;
-			}
-
-			{
-				OpNode &node = plan.createNode(
-						SQLOpTypes::OP_SCAN_CONTAINER_INDEX);
-
-				SQLExprs::IndexConditionList &condList =
-						builder.createIndexConditionList();
-				condList.assign(it, it + count);
-
-				OpCode code;
-				code.setIndexConditionList(&condList);
-				code.setPipeProjection(midInProj);
-				node.setCode(code);
-
-				node.addInput(plan.getParentInput(0));
-				if (baseCode.getInputCount() > 1) {
-					node.addInput(plan.getParentInput(1));
-				}
-
-				assert(followingNode != NULL);
-				followingNode->addInput(node);
-			}
-			it += count;
-		}
-
-		typedef SQLContainerUtils::ScanMergeMode MergeMode;
-		const MergeMode::Type mergeMode =
-				(andNodeFound && orNode != NULL ? MergeMode::MODE_ROW_ARRAY :
-				!andNodeFound && orNode == NULL ? MergeMode::MODE_MIXED :
-				MergeMode::MODE_MIXED_MERGING);
-
-		ScanCursorAccessor &accessor = getScanCursorAccessor(cxt);
-		accessor.setMergeMode(mergeMode);
-		accessor.setIndexSelection(*selector);
-
-		if (parentPending) {
-			cxt.setPlanPending();
-		}
-		else {
-			accessor.setRowIdFiltering();
-
-			OpCode code = getCode();
-			code.setJoinPredicate(NULL);
-
-			SQLOps::OpConfig &config = builder.createConfig();
-			const SQLOps::OpConfig *srcConfig = getCode().getConfig();
-			if (srcConfig != NULL) {
-				config = *srcConfig;
-			}
-			if (code.getLimit() >= 0) {
-				config.set(SQLOpTypes::CONF_LIMIT_INHERITANCE, 1);
-			}
-			code.setConfig(&config);
-
-			OpNode &node = plan.createNode(SQLOpTypes::OP_SCAN);
-			node.setCode(code);
-
-			node.addInput(plan.getParentInput(0));
-			plan.linkToAllParentOutput(node);
-		}
-		return;
-	}
-
-	const OpNode *inNode;
-	SQLOpTypes::Type opType;
-	if (forMeta) {
-		inNode = &plan.getParentInput(0);
-		opType = SQLOpTypes::OP_SCAN_CONTAINER_META;
-	}
-	else if (!indexPlanned) {
-		inNode = &plan.getParentInput(0);
-		opType = SQLOpTypes::OP_SCAN_CONTAINER_FULL;
+	if (isDrivingInputFound(baseCode)) {
+		generateIndexJoinPlan(cxt, baseCode);
 	}
 	else {
-		inNode = plan.findNextNode(0);
-		assert(inNode != NULL);
-
-		opType = SQLOpTypes::OP_SELECT;
-	}
-
-	if (projections.first == NULL) {
-		projections = builder.arrangeProjections(
-				baseCode, true, true, &distinctProj);
-	}
-
-	{
-		OpCode code = baseCode;
-
-		if (opType != SQLOpTypes::OP_SELECT) {
-			code.setContainerLocation(&location);
+		ScanCursorAccessor &accessor = getScanCursorAccessor(cxt);
+		if (!generateMainScanPlan(cxt, accessor, baseCode)) {
+			cxt.setPlanPending();
 		}
-
-		if (forMeta) {
-			code.setMiddleProjection(midInProj);
-		}
-
-		code.setPipeProjection(projections.first);
-		code.setFinishProjection(projections.second);
-
-		OpNode &node = plan.createNode(opType);
-		node.setCode(code);
-		node.addInput(*inNode);
-		if (baseCode.getInputCount() > 1) {
-			node.addInput(plan.getParentInput(1));
-		}
-
-		OpCodeBuilder::setUpOutputNodes(
-				plan, NULL, node, distinctProj,
-				baseCode.getAggregationPhase());
 	}
 }
 
-bool SQLScanOps::Scan::tryCompileIndexJoin(
-		OpContext &cxt, OpPlan &plan) const {
-	if (!plan.isEmpty()) {
-		return false;
+bool SQLScanOps::Scan::generateMainScanPlan(
+		OpContext &cxt, ScanCursorAccessor &accessor, const OpCode &baseCode) {
+	if (generateCheckedScanPlan(cxt, accessor, baseCode)) {
+		return true;
 	}
 
-	const OpCode &baseCode = getCode();
-	if (baseCode.getInputCount() <= 1) {
-		return false;
-	}
+	OpPlan &plan = cxt.getPlan();
 
-	{
-		const SQLOps::OpConfig *config = baseCode.getConfig();
-		const int64_t semi = SQLOps::OpConfig::resolve(
-				SQLOpTypes::CONF_JOIN_SEMI, config);
-		if (semi > 0) {
-			return false;
-		}
-	}
-
-	const uint32_t scanIn = 0;
-	const uint32_t drivingIn = 1;
+	bool indexPlanned;
+	const SQLExprs::IndexSelector *selector =
+			selectIndex(cxt, accessor, baseCode, plan, indexPlanned);
 
 	OpCodeBuilder builder(OpCodeBuilder::ofContext(cxt));
+	ProjectionSet projSet;
+	setUpMainScanPlanBuilder(
+			builder, selector, indexPlanned, baseCode, projSet);
 
-	SQLOps::OpConfig &scanConfig = builder.createConfig();
-	{
-		SQLOps::OpConfig &config = scanConfig;
-		const SQLOps::OpConfig *srcConfig = baseCode.getConfig();
-		if (srcConfig != NULL) {
-			config = *srcConfig;
-		}
-		config.set(SQLOpTypes::CONF_JOIN_SEMI, 1);
+	if (selector != NULL) {
+		return generateIndexScanNodes(
+				builder, accessor, baseCode, *selector, projSet, plan);
 	}
 
-	const SQLExprs::Expression *semiPred = baseCode.getFilterPredicate();
+	generateNoIndexedScanNodes(indexPlanned, baseCode, projSet, plan);
+	return true;
+}
+
+void SQLScanOps::Scan::generateEmptyPlan(OpContext &cxt) {
+	OpPlan &plan = cxt.getPlan();
+
+	ColumnTypeList outTypeList(cxt.getAllocator());
+	OpCodeBuilder::getColumnTypeListByColumns(
+			cxt.getOutputColumnList(0), outTypeList);
+
+	OpCodeBuilder builder(OpCodeBuilder::ofContext(cxt));
+	builder.setUpNoopNodes(plan, outTypeList);
+}
+
+void SQLScanOps::Scan::generateNoIndexedScanPlan(
+		OpContext &cxt, const OpCode &baseCode) {
+	OpPlan &plan = cxt.getPlan();
+
+	const SQLExprs::IndexSelector *selector = NULL;
+	const bool indexPlanned = false;
+
+	OpCodeBuilder builder(OpCodeBuilder::ofContext(cxt));
+	ProjectionSet projSet;
+	setUpMainScanPlanBuilder(
+			builder, selector, indexPlanned, baseCode, projSet);
+
+	generateNoIndexedScanNodes(indexPlanned, baseCode, projSet, plan);
+}
+
+bool SQLScanOps::Scan::generateCheckedScanPlan(
+		OpContext &cxt, ScanCursorAccessor &accessor, const OpCode &baseCode) {
+	if (!(accessor.isRowDuplicatable() || accessor.isIndexLost())) {
+		return false;
+	}
+
+	OpPlan &plan = cxt.getPlan();
+	OpNode &node = plan.createNode((accessor.isRowDuplicatable() ?
+			SQLOpTypes::OP_SCAN_UNIQUE :
+			SQLOpTypes::OP_SCAN_NO_INDEXED));
+
+	OpCode code = baseCode;
+	code.setJoinPredicate(NULL);
+	node.setCode(code);
+
+	node.addInput(plan.getParentInput(0));
+	plan.linkToAllParentOutput(node);
+	return true;
+}
+
+void SQLScanOps::Scan::generateIndexJoinPlan(
+		OpContext &cxt, const OpCode &baseCode) {
+	OpPlan &plan = cxt.getPlan();
+
+	assert(baseCode.getInputCount() >= 2);
+
+	const uint32_t scanIn = INPUT_JOIN_SCAN;
+	const uint32_t drivingIn = INPUT_JOIN_DRIVING;
+
+	OpCodeBuilder builder(OpCodeBuilder::ofContext(cxt));
+	const SQLOps::OpConfig *scanConfig = baseCode.getConfig();
+
+	const SQLExprs::Expression *baseSemiPred = baseCode.getFilterPredicate();
 
 	SQLValues::CompColumnList *keyColumnList =
 			&builder.createCompColumnList();
 	{
 		SQLOpUtils::CompPosSet posSet(cxt.getAllocator());
 		builder.extractJoinKeyColumns(
-				semiPred, NULL, *keyColumnList, posSet, NULL);
+				baseSemiPred, NULL, *keyColumnList, posSet, NULL);
 		if (keyColumnList->empty()) {
 			keyColumnList = NULL;
 		}
@@ -473,17 +252,24 @@ bool SQLScanOps::Scan::tryCompileIndexJoin(
 	SQLExprs::ExprFactoryContext &factoryCxt = builder.getExprFactoryContext();
 
 	const SQLExprs::Expression *scanFilterPred = NULL;
-	if (semiPred != NULL) {
+	if (baseSemiPred != NULL) {
 		SQLExprs::ExprFactoryContext::Scope scope(factoryCxt);
 		factoryCxt.setAggregationPhase(true, baseCode.getAggregationPhase());
 
 		SQLExprs::Expression &srcExpr =
-				rewriter.rewrite(factoryCxt, *semiPred, NULL);
+				rewriter.rewrite(factoryCxt, *baseSemiPred, NULL);
 		scanFilterPred = &SQLExprs::ExprRewriter::retainSingleInputPredicate(
 				factoryCxt, srcExpr, scanIn, false);
 	}
 
+	SQLExprs::Expression *semiPred;
+	const OpNode *arrangedDrivingNode;
+	generateIndexJoinDrivingNode(
+			builder, baseCode, keyColumnList, baseSemiPred, semiPred,
+			arrangedDrivingNode, plan);
+
 	rewriter.activateColumnMapping(factoryCxt);
+
 	{
 		rewriter.clearColumnUsage();
 
@@ -494,10 +280,10 @@ bool SQLScanOps::Scan::tryCompileIndexJoin(
 		rewriter.setIdOfInput(drivingIn, false);
 	}
 
-	OpNode &scanNode = plan.createNode(SQLOpTypes::OP_SCAN);
+	OpNode &scanNode = plan.createNode(SQLOpTypes::OP_SCAN_SEMI_FILTERING);
 	{
 		OpCode code;
-		code.setConfig(&scanConfig);
+		code.setConfig(scanConfig);
 
 		code.setJoinPredicate(semiPred);
 		code.setFilterPredicate(scanFilterPred);
@@ -511,7 +297,7 @@ bool SQLScanOps::Scan::tryCompileIndexJoin(
 
 		OpNode &node = scanNode;
 		node.addInput(plan.getParentInput(scanIn));
-		node.addInput(plan.getParentInput(drivingIn));
+		node.addInput(*arrangedDrivingNode);
 		node.setCode(code);
 	}
 
@@ -532,31 +318,348 @@ bool SQLScanOps::Scan::tryCompileIndexJoin(
 	}
 
 	plan.linkToAllParentOutput(joinNode);
+}
+
+void SQLScanOps::Scan::generateIndexJoinDrivingNode(
+		OpCodeBuilder &builder, const OpCode &baseCode,
+		const SQLValues::CompColumnList *keyColumnList,
+		const SQLExprs::Expression *baseSemiPred,
+		SQLExprs::Expression *&semiPred, const OpNode *&drivingNode,
+		OpPlan &plan) {
+	const uint32_t scanIn = INPUT_JOIN_SCAN;
+	const uint32_t drivingIn = INPUT_JOIN_DRIVING;
+	const bool keyFront = (drivingIn == 0);
+
+	semiPred = NULL;
+	drivingNode = &plan.getParentInput(drivingIn);
+
+	if (keyColumnList == NULL) {
+		return;
+	}
+
+	SQLExprs::ExprRewriter &rewriter = builder.getExprRewriter();
+	SQLExprs::ExprFactoryContext &factoryCxt = builder.getExprFactoryContext();
+
+	SQLExprs::ExprRewriter::Scope rewriterScope(rewriter);
+	rewriter.activateColumnMapping(factoryCxt);
+
+	rewriter.clearColumnUsage();
+	rewriter.addKeyColumnUsage(drivingIn, *keyColumnList, keyFront);
+	rewriter.addColumnUsage(baseSemiPred, false);
+
+	SQLValues::CompColumnList *mappedInKeys;
+	SQLValues::CompColumnList *mappedOutKeys;
+	Projection *midInProj;
+	Projection *pipeProj;
+	{
+		SQLExprs::ExprRewriter::Scope rewriterSubScope1(rewriter);
+
+		rewriter.setInputUsage(scanIn, false);
+		rewriter.setMappedInput(drivingIn, 0);
+
+		const bool keyInputMapping = true;
+		{
+			SQLExprs::ExprRewriter::Scope rewriterSubScope2(rewriter);
+			rewriter.setInputColumnUsage(drivingIn, true);
+			mappedInKeys = &rewriter.remapCompColumnList(
+					factoryCxt, *keyColumnList, drivingIn, keyFront, false,
+					NULL, keyInputMapping);
+		}
+
+		midInProj = &builder.createKeyFilteredProjection(
+				builder.createProjectionByUsage(false));
+
+		rewriter.setInputProjected(true);
+
+		mappedOutKeys = &rewriter.remapCompColumnList(
+				factoryCxt, *keyColumnList, drivingIn, keyFront, false, NULL,
+				keyInputMapping);
+		Projection &midOutProj = builder.createProjectionByUsage(false);
+		midOutProj.getProjectionCode().setKeyList(mappedOutKeys);
+
+		Projection &outProj = builder.createProjectionByUsage(false);
+		pipeProj = &builder.createMultiStageProjection(outProj, midOutProj);
+	}
+
+	{
+		SQLOps::OpConfig &config = builder.createConfig();
+		config.set(SQLOpTypes::CONF_SORT_ORDERED_UNIQUE, 1);
+
+		OpCode code;
+		code.setConfig(&config);
+		code.setMiddleKeyColumnList(mappedInKeys);
+		code.setKeyColumnList(mappedOutKeys);
+		code.setMiddleProjection(midInProj);
+		code.setPipeProjection(pipeProj);
+
+		OpNode &node = plan.createNode(SQLOpTypes::OP_SORT);
+		node.setCode(code);
+		node.addInput(plan.getParentInput(drivingIn));
+		drivingNode = &node;
+	}
+
+	if (baseSemiPred != NULL) {
+		factoryCxt.setAggregationPhase(true, baseCode.getAggregationPhase());
+
+		rewriter.setInputColumnUsage(scanIn, true);
+		rewriter.setIdProjected(true);
+		semiPred = &rewriter.rewritePredicate(factoryCxt, baseSemiPred);
+	}
+}
+
+bool SQLScanOps::Scan::generateIndexScanNodes(
+		OpCodeBuilder &builder, ScanCursorAccessor &accessor,
+		const OpCode &baseCode, const SQLExprs::IndexSelector &selector,
+		const ProjectionSet &projSet, OpPlan &plan) {
+	const OpCode &arrangedCode = projSet.arrangedCode_;
+	const SQLOpUtils::ProjectionPair &projections = projSet.projections_;
+
+	const bool parentPending = (projections.second != NULL);
+	accessor.setIndexSelection(selector);
+
+	OpNode &rangeNode = OpCodeBuilder::setUpOutputNodesDetail(
+			plan, NULL, parentPending, NULL,
+			SQLOpTypes::OP_SCAN_CONTAINER_RANGE,
+			projSet.distinctProj_, arrangedCode.getAggregationPhase(), NULL);
+	{
+		OpNode &node = rangeNode;
+		OpCode code;
+		code.setPipeProjection(projections.first);
+		code.setFinishProjection(projections.second);
+		node.setCode(code);
+
+		node.addInput(plan.getParentInput(0));
+	}
+
+	{
+		OpNode &node = plan.createNode(
+				SQLOpTypes::OP_SCAN_CONTAINER_INDEX);
+
+		OpCode code;
+		code.setIndexConditionList(&selector.getConditionList());
+		code.setPipeProjection(projSet.midInProj_);
+		node.setCode(code);
+
+		node.addInput(plan.getParentInput(0));
+		if (arrangedCode.getInputCount() > 1) {
+			node.addInput(plan.getParentInput(1));
+		}
+
+		rangeNode.addInput(node);
+	}
+
+	if (parentPending) {
+		return false;
+	}
+
+	accessor.setRowIdFiltering();
+
+	SQLOps::OpConfig &config = builder.createConfig(baseCode.getConfig());
+	if (baseCode.getLimit() >= 0) {
+		config.set(SQLOpTypes::CONF_LIMIT_INHERITANCE, 1);
+	}
+
+	for (size_t i = 0; i < 2; i++) {
+		OpCode code = baseCode;
+		code.setJoinPredicate(NULL);
+
+		OpNode &node = plan.createNode((i == 0 ?
+				SQLOpTypes::OP_SCAN_UNIQUE :
+				SQLOpTypes::OP_SCAN_NO_INDEXED));
+		node.setCode(code);
+		code.setConfig(&config);
+
+		node.addInput(plan.getParentInput(0));
+		plan.linkToAllParentOutput(node);
+	}
 	return true;
 }
 
-bool SQLScanOps::Scan::tryCompileEmpty(OpContext &cxt, OpPlan &plan) const {
-	ScanCursorAccessor &accessor = getScanCursorAccessor(cxt);
-	if (!accessor.isRowIdFiltering()) {
-		return false;
+void SQLScanOps::Scan::generateNoIndexedScanNodes(
+		bool indexPlanned, const OpCode &baseCode,
+		const ProjectionSet &projSet, OpPlan &plan) {
+	const OpCode &arrangedCode = projSet.arrangedCode_;
+	const SQLOpUtils::ProjectionPair &projections = projSet.projections_;
+
+	const SQLOps::ContainerLocation &location =
+			baseCode.getContainerLocation();
+	const bool forMeta = isForMetaScan(location);
+
+	const OpNode *inNode;
+	SQLOpTypes::Type opType;
+	if (indexPlanned) {
+		inNode = plan.findNextNode(0);
+		assert(inNode != NULL);
+		opType = SQLOpTypes::OP_SELECT;
+	}
+	else if (forMeta) {
+		inNode = &plan.getParentInput(0);
+		opType = SQLOpTypes::OP_SCAN_CONTAINER_META;
+	}
+	else {
+		inNode = &plan.getParentInput(0);
+		opType = SQLOpTypes::OP_SCAN_CONTAINER_FULL;
 	}
 
-	if (accessor.isIndexLost()) {
-		return false;
+	{
+		OpCode code = arrangedCode;
+
+		if (opType != SQLOpTypes::OP_SELECT) {
+			code.setContainerLocation(&location);
+		}
+
+		if (forMeta) {
+			code.setMiddleProjection(projSet.midInProj_);
+		}
+
+		code.setPipeProjection(projections.first);
+		code.setFinishProjection(projections.second);
+
+		OpNode &node = plan.createNode(opType);
+		node.setCode(code);
+		node.addInput(*inNode);
+		if (baseCode.getInputCount() > 1) {
+			node.addInput(plan.getParentInput(1));
+		}
+
+		OpCodeBuilder::setUpOutputNodes(
+				plan, NULL, node, projSet.distinctProj_,
+				baseCode.getAggregationPhase());
+	}
+}
+
+void SQLScanOps::Scan::setUpMainScanPlanBuilder(
+		OpCodeBuilder &builder, const SQLExprs::IndexSelector *selector,
+		bool indexPlanned, const OpCode &baseCode, ProjectionSet &projSet) {
+	OpCode &arrangedCode = projSet.arrangedCode_;
+	SQLOpUtils::ProjectionPair &projections = projSet.projections_;
+	Projection *distinctProj = NULL;
+
+	const bool indexScanCompleted = (indexPlanned && selector == NULL);
+
+	const SQLOps::ContainerLocation &location =
+			baseCode.getContainerLocation();
+	const bool forMeta = isForMetaScan(location);
+
+	arrangedCode = baseCode;
+	if (indexScanCompleted) {
+		builder.assignInputTypesByProjection(
+				OpCodeBuilder::resolveOutputProjection(baseCode, NULL), NULL);
+		projections.first = &builder.createIdenticalProjection(false, 0);
+		arrangedCode = OpCode();
+	}
+	else if (!forMeta) {
+		projections = builder.arrangeProjections(
+				arrangedCode, true, true, &distinctProj);
+		assert(projections.first != NULL);
 	}
 
-	ColumnTypeList outTypeList(cxt.getAllocator());
-	OpCodeBuilder::getColumnTypeListByColumns(
-			cxt.getOutputColumnList(0), outTypeList);
+	SQLExprs::ExprRewriter &rewriter = builder.getExprRewriter();
+	SQLExprs::ExprFactoryContext &factoryCxt = builder.getExprFactoryContext();
+	rewriter.activateColumnMapping(factoryCxt);
 
-	OpCodeBuilder builder(OpCodeBuilder::ofContext(cxt));
-	builder.setUpNoopNodes(plan, outTypeList);
+	if (!forMeta) {
+		rewriter.clearColumnUsage();
 
-	return true;
+		const bool withId = true;
+
+		if (indexPlanned || selector != NULL) {
+			rewriter.setIdOfInput(0, true);
+		}
+		else {
+			OpCode code = baseCode;
+			code.setJoinPredicate(NULL);
+
+			builder.addColumnUsage(code, withId);
+		}
+	}
+
+	projSet.midInProj_ = &builder.createProjectionByUsage(false);
+
+	rewriter.setIdProjected(true);
+	rewriter.setInputProjected(true);
+
+	if (projections.first == NULL) {
+		projections = builder.arrangeProjections(
+				arrangedCode, true, true, &distinctProj);
+	}
+
+	projSet.distinctProj_ = distinctProj;
+}
+
+const SQLExprs::IndexSelector* SQLScanOps::Scan::selectIndex(
+		OpContext &cxt, ScanCursorAccessor &accessor, const OpCode &baseCode,
+		const OpPlan &plan, bool &indexPlanned) {
+	indexPlanned = !plan.isEmpty();
+	SQLExprs::IndexSelector *selector = NULL;
+	do {
+		const SQLOps::ContainerLocation &location =
+				baseCode.getContainerLocation();
+		const bool forMeta = isForMetaScan(location);
+
+		const SQLExprs::Expression *expr = baseCode.getJoinPredicate();
+		if (expr == NULL) {
+			expr = baseCode.getFilterPredicate();
+		}
+		if (forMeta || expr == NULL || !location.indexActivated_) {
+			break;
+		}
+
+		if (indexPlanned || baseCode.getLimit() == 0 || accessor.isIndexLost()) {
+			if (accessor.isIndexLost()) {
+				indexPlanned = false;
+			}
+			break;
+		}
+
+		util::StackAllocator &alloc = cxt.getAllocator();
+
+		ColumnTypeList inputTypeList(alloc);
+		TupleList::Info inputInfo = getInputInfo(cxt, inputTypeList);
+
+		SQLValues::ValueContext valueCxt(
+				SQLValues::ValueContext::ofAllocator(alloc));
+		selector = ALLOC_NEW(alloc) SQLExprs::IndexSelector(
+				valueCxt, SQLType::EXPR_COLUMN, inputInfo);
+		if (location.multiIndexActivated_) {
+			selector->setMultiAndConditionEnabled(true);
+		}
+
+		accessor.getIndexSpec(
+				cxt.getExtContext(), cxt.getInputColumnList(0), *selector);
+		selector->setBulkGrouping(true);
+		selector->select(*expr);
+		if (selector->isSelected()) {
+			break;
+		}
+
+		const SQLExprs::IndexConditionList &condList =
+				selector->getConditionList();
+		if (condList.size() != 1) {
+			break;
+		}
+
+		const SQLExprs::IndexCondition &cond = condList.front();
+		if (cond.isNull() || cond.equals(false)) {
+			break;
+		}
+		selector = NULL;
+	}
+	while (false);
+	return selector;
+}
+
+bool SQLScanOps::Scan::isForMetaScan(
+		const SQLOps::ContainerLocation &location) {
+	return (location.type_ == SQLType::TABLE_META);
+}
+
+bool SQLScanOps::Scan::isDrivingInputFound(const OpCode &baseCode) {
+	return (baseCode.getInputCount() >= 2);
 }
 
 TupleList::Info SQLScanOps::Scan::getInputInfo(
-		OpContext &cxt, SQLOps::ColumnTypeList &typeList) const {
+		OpContext &cxt, SQLOps::ColumnTypeList &typeList) {
 	const SQLOps::TupleColumnList &columnList = cxt.getInputColumnList(0);
 	for (SQLOps::TupleColumnList::const_iterator it = columnList.begin();
 			it != columnList.end(); ++it) {
@@ -568,6 +671,235 @@ TupleList::Info SQLScanOps::Scan::getInputInfo(
 	info.columnTypeList_ = &typeList[0];
 	info.columnCount_ = typeList.size();
 	return info;
+}
+
+
+SQLScanOps::Scan::ProjectionSet::ProjectionSet() :
+		distinctProj_(NULL),
+		midInProj_(NULL) {
+}
+
+
+void SQLScanOps::ScanSemiFiltering::compile(OpContext &cxt) const {
+	const OpCode &baseCode = getCode();
+	ScanCursorAccessor &accessor = getScanCursorAccessor(cxt);
+
+	if (!Scan::generateMainScanPlan(cxt, accessor, baseCode)) {
+		cxt.setPlanPending();
+	}
+}
+
+
+void SQLScanOps::ScanUnique::compile(OpContext &cxt) const {
+	ScanCursorAccessor &accessor = getScanCursorAccessor(cxt);
+
+	bool duplicatable;
+	if (!detectRowDuplicatable(accessor, duplicatable)) {
+		cxt.setPlanPending();
+		return;
+	}
+
+	if (!accessor.isRowIdFiltering() && accessor.isIndexLost()) {
+		OpPlan &plan = cxt.getPlan();
+		OpNode &node = plan.createNode(SQLOpTypes::OP_SCAN_NO_INDEXED);
+		node.setCode(getCode());
+		node.addInput(plan.getParentInput(0));
+		plan.linkToAllParentOutput(node);
+		return;
+	}
+
+	if (duplicatable && !accessor.isIndexLost()) {
+		const OpCode &baseCode = getCode();
+		if (!generateUniqueScanPlan(cxt, accessor, baseCode)) {
+			cxt.setPlanPending();
+		}
+	}
+	else {
+		assert(accessor.isRowIdFiltering());
+		Scan::generateEmptyPlan(cxt);
+	}
+}
+
+bool SQLScanOps::ScanUnique::generateUniqueScanPlan(
+		OpContext &cxt, ScanCursorAccessor &accessor,
+		const OpCode &baseCode) {
+	OpPlan &plan = cxt.getPlan();
+
+	assert(accessor.isRowDuplicatable());
+	assert(baseCode.getInputCount() == 1);
+
+	const bool indexLost = accessor.isIndexLost();
+	const bool indexPlanned = (!plan.isEmpty() && !indexLost);
+	const SQLOps::ContainerLocation &location =
+			baseCode.getContainerLocation();
+
+	OpCodeBuilder builder(OpCodeBuilder::ofContext(cxt));
+
+	SQLExprs::ExprRewriter &rewriter = builder.getExprRewriter();
+	SQLExprs::ExprFactoryContext &factoryCxt = builder.getExprFactoryContext();
+
+	rewriter.activateColumnMapping(factoryCxt);
+	rewriter.clearColumnUsage();
+
+	const bool withId = true;
+	builder.addColumnUsage(baseCode, withId);
+	rewriter.setIdOfInput(0, true);
+
+	Projection &midInProj = builder.createFilteredProjection(
+			builder.createProjectionByUsage(false),
+			baseCode.getFilterPredicate());
+
+	rewriter.setIdProjected(true);
+	rewriter.setInputProjected(true);
+
+	Projection &midOutProj = builder.createProjectionByUsage(false);
+
+	OpCode tailBaseCode = baseCode;
+	tailBaseCode.setFilterPredicate(NULL);
+
+	Projection *distinctProj;
+	SQLOpUtils::ProjectionPair projections = builder.arrangeProjections(
+			tailBaseCode, true, true, &distinctProj);
+
+	const bool aggregated = (projections.second != NULL);
+	const bool parentPending = (aggregated && !indexLost && !indexPlanned);
+
+	const OpNode *inNode;
+	if (indexPlanned) {
+		inNode = plan.findNextNode(0);
+	}
+	else {
+		OpCode code;
+		code.setContainerLocation(&location);
+		code.setPipeProjection(&midInProj);
+
+		OpNode &node = plan.createNode((indexLost ?
+				SQLOpTypes::OP_SCAN_CONTAINER_FULL :
+				SQLOpTypes::OP_SCAN_CONTAINER_RANGE));
+		node.setCode(code);
+		node.addInput(plan.getParentInput(0));
+
+		inNode = &node;
+	}
+
+	if (parentPending) {
+		return false;
+	}
+
+	OpNode &groupNode = plan.createNode(SQLOpTypes::OP_UNION);
+	{
+		SQLValues::CompColumnList &keyColumnList =
+				builder.createCompColumnList();
+		{
+			SQLValues::CompColumn keyColumn;
+			keyColumn.setColumnPos(rewriter.getMappedIdColumn(0), true);
+			keyColumn.setOrdering(false);
+			keyColumnList.push_back(keyColumn);
+		}
+
+		OpCode code;
+		if (aggregated) {
+			code.setPipeProjection(&midOutProj);
+		}
+		else {
+			code = tailBaseCode;
+			code.setPipeProjection(projections.first);
+			code.setContainerLocation(NULL);
+		}
+		code.setKeyColumnList(&keyColumnList);
+		code.setUnionType(SQLType::UNION_DISTINCT);
+
+		OpNode &node = groupNode;
+		node.setCode(code);
+		node.addInput(*inNode);
+	}
+
+	OpNode *tailNode = &groupNode;
+	if (aggregated) {
+		OpNode &node = plan.createNode(SQLOpTypes::OP_SELECT);
+
+		Projection &mappedProj =
+				builder.rewriteProjection(*baseCode.getPipeProjection());
+
+		OpCode code = baseCode;
+		code.setContainerLocation(NULL);
+		code.setFilterPredicate(NULL);
+		code.setPipeProjection(&mappedProj);
+
+		node.setCode(code);
+		node.addInput(groupNode);
+
+		tailNode = &node;
+	}
+
+	plan.linkToAllParentOutput(*tailNode);
+	return true;
+}
+
+bool SQLScanOps::ScanUnique::detectRowDuplicatable(
+		ScanCursorAccessor &accessor, bool &duplicatable) {
+	duplicatable = accessor.isRowDuplicatable();
+	bool pending = false;
+	do {
+		if (duplicatable) {
+			break;
+		}
+
+		assert(accessor.isRowIdFiltering());
+
+		if (accessor.isRangeScanFinished() || accessor.isIndexLost()) {
+			break;
+		}
+
+		pending = true;
+	}
+	while (false);
+	return !pending;
+}
+
+
+void SQLScanOps::ScanNoIndex::compile(OpContext &cxt) const {
+	ScanCursorAccessor &accessor = getScanCursorAccessor(cxt);
+
+	bool indexLost;
+	if (!detectIndexLoss(accessor, indexLost)) {
+		cxt.setPlanPending();
+		return;
+	}
+
+	if (indexLost) {
+		const OpCode &baseCode = getCode();
+		if (accessor.isRowDuplicatable()) {
+			ScanUnique::generateUniqueScanPlan(cxt, accessor, baseCode);
+			return;
+		}
+		Scan::generateNoIndexedScanPlan(cxt, baseCode);
+	}
+	else {
+		assert(accessor.isRowIdFiltering());
+		Scan::generateEmptyPlan(cxt);
+	}
+}
+
+bool SQLScanOps::ScanNoIndex::detectIndexLoss(
+		ScanCursorAccessor &accessor, bool &indexLost) {
+	indexLost = accessor.isIndexLost();
+	bool pending = false;
+	do {
+		if (indexLost) {
+			break;
+		}
+
+		assert(accessor.isRowIdFiltering());
+
+		if (accessor.isRangeScanFinished()) {
+			break;
+		}
+
+		pending = true;
+	}
+	while (false);
+	return !pending;
 }
 
 
@@ -604,82 +936,30 @@ void SQLScanOps::ScanContainerRange::execute(OpContext &cxt) const {
 
 
 void SQLScanOps::ScanContainerIndex::execute(OpContext &cxt) const {
-	util::AllocUniquePtr<ScanCursor> cursor(getScanCursor(cxt));
+	if (!cxt.isAllInputCompleted()) {
+		return;
+	}
 
-	TupleListReader *inReader = NULL;
-	const TupleColumnList *inColumnList = NULL;
-
+	util::LocalUniquePtr<uint32_t> indexPtr;
 	if (getCode().getInputCount() > 1) {
 		const uint32_t index = 1;
-		inReader = &cxt.getReader(index);
-		inColumnList = &cxt.getInputColumnList(index);
+		indexPtr = UTIL_MAKE_LOCAL_UNIQUE(indexPtr, uint32_t, index);
 	}
+	const IndexScanInfo info(
+			getCode().getIndexConditionList(), indexPtr.get());
 
-	const SQLExprs::IndexSelector &selector =
-			cursor->getAccessor().getIndexSelection();
-	SQLExprs::IndexConditionList condList(cxt.getAllocator());
-	SQLValues::ValueSetHolder valuesHolder(cxt.getValueContext());
-
+	util::AllocUniquePtr<ScanCursor> cursor(getScanCursor(cxt));
 	for (;;) {
-		condList.assign(
-				getCode().getIndexConditionList().begin(),
-				getCode().getIndexConditionList().end());
-		if (inReader != NULL) {
-			if (!inReader->exists()) {
-				break;
-			}
-			bindIndexCondition(
-					*inReader, *inColumnList, selector, condList,
-					valuesHolder);
-		}
+		const bool done = cursor->scanIndex(cxt, info);
 
-		for (;;) {
-			const bool done = cursor->scanIndex(cxt, condList);
-
-			if (done) {
-				break;
-			}
-			else if (cxt.checkSuspended()) {
-				return;
-			}
-		}
-
-		if (inReader == NULL) {
+		if (done) {
 			break;
 		}
-		inReader->next();
-	}
-	if (cxt.isAllInputCompleted()) {
-		cursor->finishIndexScan(cxt);
+		else if (cxt.checkSuspended()) {
+			return;
+		}
 	}
 	unbindScanCursor(&cxt, *cursor);
-}
-
-void SQLScanOps::ScanContainerIndex::bindIndexCondition(
-		TupleListReader &reader, const TupleColumnList &columnList,
-		const SQLExprs::IndexSelector &selector,
-		SQLExprs::IndexConditionList &condList,
-		SQLValues::ValueSetHolder &valuesHolder) {
-	const uint32_t emptyColumn = SQLExprs::IndexCondition::EMPTY_IN_COLUMN;
-
-	for (SQLExprs::IndexConditionList::iterator it = condList.begin();
-			it != condList.end(); ++it) {
-		const std::pair<uint32_t, uint32_t> &pair = it->inColumnPair_;
-
-		TupleValue value1;
-		if (pair.first != emptyColumn) {
-			value1 = SQLValues::ValueUtils::readCurrentAny(
-					reader, columnList[pair.first]);
-		}
-
-		TupleValue value2;
-		if (pair.second != emptyColumn) {
-			value2 = SQLValues::ValueUtils::readCurrentAny(
-					reader, columnList[pair.second]);
-		}
-
-		selector.bindCondition(*it, value1, value2, valuesHolder);
-	}
 }
 
 

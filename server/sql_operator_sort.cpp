@@ -18,7 +18,6 @@
 #include "sql_operator_sort.h"
 #include "sql_operator_utils.h"
 
-
 const SQLOps::OpRegistrar
 SQLSortOps::Registrar::REGISTRAR_INSTANCE((Registrar()));
 
@@ -296,7 +295,7 @@ bool SQLSortOps::SortNway::sortMerge(SortContext &cxt) const {
 						SQLExprs::ExprCode::INPUT_MULTI_STAGE));
 
 		if (writer.isDigestColumnAssigned() && !queue.isPredicateEmpty()) {
-			if (isUnique() || cxt.workingRestLimit_ >= 0) {
+			if (isUnique() || isOrderedUnique() || cxt.workingRestLimit_ >= 0) {
 				continuable = sortMergeDetail(cxt, queue, writer);
 			}
 			else {
@@ -465,7 +464,8 @@ SQLSortOps::TupleSorter& SQLSortOps::SortNway::prepareSorter(
 
 		assert(getCode().getOffset() <= 0);
 		config.limit_ = getCode().getLimit();
-		config.unique_ = unique;
+		config.orderedUnique_ = isOrderedUnique();
+		config.unique_ = (unique || config.orderedUnique_);
 
 		sorter.setConfig(config);
 	}
@@ -745,6 +745,12 @@ bool SQLSortOps::SortNway::isDuplicateGroupMerging() const {
 
 bool SQLSortOps::SortNway::isUnique() const {
 	return (getCode().getSubLimit() == 1 && getCode().getSubOffset() <= 0);
+}
+
+bool SQLSortOps::SortNway::isOrderedUnique() const {
+	const SQLOps::OpConfig *config = getCode().getConfig();
+	return (config != NULL &&
+			config->get(SQLOpTypes::CONF_SORT_ORDERED_UNIQUE) == 1);
 }
 
 bool SQLSortOps::SortNway::isKeyFiltering() const {
@@ -1073,7 +1079,10 @@ bool SQLSortOps::SortNway::sortMergeDetail(
 			}
 		}
 		else {
-			if (unique) {
+			if (isOrderedUnique()) {
+				return queue.mergeOrderedUnique(action);
+			}
+			else if (unique) {
 				return queue.mergeUnique(action);
 			}
 			else {
@@ -1087,9 +1096,13 @@ bool SQLSortOps::SortNway::sortMergeDetail(
 		SortContext &cxt, TupleHeapQueue &queue,
 		SQLOpUtils::ExpressionListWriter &writer) const {
 	assert(writer.isDigestColumnAssigned() && !queue.isPredicateEmpty());
-	assert(isUnique() || cxt.workingRestLimit_ >= 0);
+	assert(isUnique() || isOrderedUnique() || cxt.workingRestLimit_ >= 0);
 
-	if (isUnique()) {
+	if (isOrderedUnique()) {
+		MergeAction<true, false, false> action(cxt, writer);
+		return queue.mergeOrderedUnique(action);
+	}
+	else if (isUnique()) {
 		MergeAction<true, false, true> action(cxt, writer);
 		return queue.mergeUnique(action);
 	}
@@ -1523,9 +1536,6 @@ void SQLSortOps::SortNway::SorterWriter::writeUniqueBy(const P &projector) {
 				continue;
 			}
 
-			if (!((i == 0) == (it->getDigest() < 0))) {
-				abort();
-			}
 			assert((i == 0) == (it->getDigest() < 0));
 
 			while (sorterIt != sorterEnd && pred_(*sorterIt, *it, DigestOnly())) {

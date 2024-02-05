@@ -18,7 +18,6 @@
 #include "sql_operator_utils.h"
 
 
-
 SQLOps::OpConfig::OpConfig() {
 	std::fill(valueList_, valueList_ + VALUE_COUNT, -1);
 }
@@ -84,7 +83,8 @@ SQLOps::ContainerLocation::ContainerLocation() :
 		id_(0),
 		schemaVersionId_(0),
 		partitioningVersionId_(-1),
-		schemaVersionSpecified_(false),
+		approxSize_(-1),
+		indexFirstColumns_(NULL),
 		expirable_(false),
 		indexActivated_(false),
 		multiIndexActivated_(false) {
@@ -857,7 +857,8 @@ SQLOps::OpCursor::OpCursor(const Source &source) :
 		executing_(false),
 		compiling_(false),
 		suspended_(false),
-		released_(false) {
+		released_(false),
+		flags_(source.flags_) {
 	if (plan_.isEmpty() || state_.problemOccurred_) {
 		assert(false);
 		GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
@@ -924,11 +925,12 @@ bool SQLOps::OpCursor::release() {
 
 	if (isRootOp()) {
 		store_.detach();
+		store_.setLastInterruptionCheckCount(-1);
 
 	}
 
 	released_ = true;
-	return suspended_;
+	return suspended_ || ((flags_ & FLAG_PRETEND_SUSPEND) != 0);
 }
 
 void SQLOps::OpCursor::clearOp() throw() {
@@ -947,7 +949,8 @@ void SQLOps::OpCursor::clearOp() throw() {
 }
 
 void SQLOps::OpCursor::prepareOp() {
-	if (executableOp_.get() != NULL || suspended_) {
+	if (executableOp_.get() != NULL || suspended_ ||
+			((flags_ & FLAG_NO_EXEC) != 0)) {
 		return;
 	}
 
@@ -1431,11 +1434,16 @@ SQLOps::OpCursor::Source::Source(
 		id_(id),
 		store_(store),
 		parentCxt_(parentCxt),
-		extCxt_((parentCxt == NULL ? NULL : parentCxt->findExtContext())) {
+		extCxt_((parentCxt == NULL ? NULL : parentCxt->findExtContext())),
+		flags_(0) {
 }
 
 void SQLOps::OpCursor::Source::setExtContext(ExtOpContext *extCxt) {
 	extCxt_ = extCxt;
+}
+
+void SQLOps::OpCursor::Source::setFlags(uint32_t flags) {
+	flags_ = flags;
 }
 
 
@@ -1459,8 +1467,10 @@ SQLOps::OpStore::OpStore(OpAllocatorManager &allocManager) :
 		varAlloc_(allocManager.getLocalVarAllocator()),
 		allocBase_(NULL),
 		opFactory_(&OpFactory::getDefaultFactory()),
+		lastInterruptionCheckCount_(-1),
 		allocManager_(allocManager),
 		latchKeeperManager_(NULL),
+		simulator_(NULL),
 		lastTempStoreUsage_(0, SQLOpTypes::END_OP) {
 }
 
@@ -1674,6 +1684,14 @@ void SQLOps::OpStore::setConfig(const OpConfig &config) {
 	config_ = config;
 }
 
+int64_t SQLOps::OpStore::getLastInterruptionCheckCount() {
+	return lastInterruptionCheckCount_;
+}
+
+void SQLOps::OpStore::setLastInterruptionCheckCount(int64_t count) {
+	lastInterruptionCheckCount_ = count;
+}
+
 SQLOps::OpAllocatorManager& SQLOps::OpStore::getAllocatorManager() {
 	return allocManager_;
 }
@@ -1687,6 +1705,14 @@ SQLOps::OpLatchKeeperManager& SQLOps::OpStore::getLatchKeeperManager(
 				&OpLatchKeeperManager::getDefault().getSubManager(cxt, alloc);
 	}
 	return *latchKeeperManager_;
+}
+
+SQLOps::OpSimulator* SQLOps::OpStore::getSimulator() {
+	return simulator_;
+}
+
+void SQLOps::OpStore::setSimulator(OpSimulator *simulator) {
+	simulator_ = simulator;
 }
 
 SQLOps::OpProfiler* SQLOps::OpStore::getProfiler() {
@@ -3467,7 +3493,8 @@ SQLOps::OpContext::OpContext(const Source &source) :
 		storeEntry_(store_.getEntry(storeId_)),
 		exprCxt_(storeEntry_.getValueContextSource(source.extCxt_)),
 		extCxt_(source.extCxt_),
-		interruptionCheckRemaining_(getInitialInterruptionCheckCount(store_)),
+		interruptionCheckRemaining_(
+				getInitialInterruptionCheckCount(store_, true)),
 		invalidated_(false),
 		suspended_(false),
 		planPending_(false),
@@ -3475,8 +3502,11 @@ SQLOps::OpContext::OpContext(const Source &source) :
 }
 
 void SQLOps::OpContext::release() {
-	if (exprCxtAvailable_ && !invalidated_) {
-		saveTupleId();
+	if (!invalidated_) {
+		if (exprCxtAvailable_) {
+			saveTupleId();
+		}
+		saveInterruptionCheckCount();
 	}
 }
 
@@ -3553,6 +3583,7 @@ bool SQLOps::OpContext::isCompleted() {
 }
 
 void SQLOps::OpContext::setCompleted() {
+	saveInterruptionCheckCount();
 	storeEntry_.setCompleted();
 	interruptionCheckRemaining_ = 1;
 }
@@ -3578,13 +3609,13 @@ bool SQLOps::OpContext::isSubPlanInvalidated() {
 }
 
 bool SQLOps::OpContext::checkSuspendedAlways(bool suspendable) {
-	interruptionCheckRemaining_ = 1;
 	if (!suspendable) {
 		if (extCxt_ != NULL) {
 			extCxt_->checkCancelRequest();
 		}
 		return false;
 	}
+	interruptionCheckRemaining_ = 1;
 	return checkSuspendedDetail();
 }
 
@@ -3606,7 +3637,7 @@ void SQLOps::OpContext::setNextCountForSuspend(uint64_t count) {
 }
 
 void SQLOps::OpContext::resetNextCountForSuspend() {
-	interruptionCheckRemaining_ = getInitialInterruptionCheckCount(store_);
+	interruptionCheckRemaining_ = getInitialInterruptionCheckCount(store_, false);
 }
 
 SQLOps::OpPlan& SQLOps::OpContext::getPlan() {
@@ -3635,6 +3666,14 @@ void SQLOps::OpContext::adjustLatch(uint64_t size) {
 	return storeEntry_.adjustLatch(size);
 }
 
+SQLOps::OpSimulator* SQLOps::OpContext::getSimulator() {
+	return store_.getSimulator();
+}
+
+bool SQLOps::OpContext::isProfiling() {
+	return (storeEntry_.getProfiler() != NULL);
+}
+
 SQLValues::ValueProfile* SQLOps::OpContext::getValueProfile() {
 	return SQLExprs::ExprProfile::getValueProfile(getExprProfile());
 }
@@ -3652,12 +3691,13 @@ SQLOps::OpContext::getOptimizationProfiler() {
 	return &profilerEntry->getOptimizationEntry();
 }
 
-SQLOps::OpProfilerIndexEntry* SQLOps::OpContext::getIndexProfiler() {
+SQLOps::OpProfilerIndexEntry* SQLOps::OpContext::getIndexProfiler(
+		uint32_t ordinal) {
 	OpProfilerEntry *profilerEntry = storeEntry_.getProfiler();
 	if (profilerEntry == NULL) {
 		return NULL;
 	}
-	return &profilerEntry->getIndexEntry();
+	return &profilerEntry->getIndexEntry(ordinal);
 }
 
 uint32_t SQLOps::OpContext::getInputCount() {
@@ -3859,14 +3899,43 @@ void SQLOps::OpContext::setUpProjectionFactoryContext(
 	storeEntry_.setUpProjectionFactoryContext(cxt, mappedInput);
 }
 
-int64_t SQLOps::OpContext::getInitialInterruptionCheckCount(OpStore &store) {
+int64_t SQLOps::OpContext::getInitialInterruptionCheckCount(
+		OpStore &store, bool withLast) {
+	if (withLast) {
+		const int64_t last = store.getLastInterruptionCheckCount();
+		if (last >= 0) {
+			return last;
+		}
+	}
+
 	const OpConfig &config = store.getConfig();
 	int64_t count = config.get(SQLOpTypes::CONF_INTERRUPTION_PROJECTION_COUNT);
 	if (count < 0) {
 		count = 100000;
 	}
+
+	if (withLast) {
+		OpSimulator *simulator = store.getSimulator();
+		if (simulator != NULL) {
+			int64_t subCount;
+			if (simulator->nextInterruptionAction(subCount)) {
+				count = subCount;
+			}
+		}
+	}
+
 	count = std::max<int64_t>(count, 1);
 	return count;
+}
+
+void SQLOps::OpContext::saveInterruptionCheckCount() {
+	if (isCompleted()) {
+		return;
+	}
+	const int64_t last = store_.getLastInterruptionCheckCount();
+	const int64_t cur = interruptionCheckRemaining_;
+	const int64_t next = (last >= 0 ? std::min(last, cur) : cur);
+	store_.setLastInterruptionCheckCount(next);
 }
 
 bool SQLOps::OpContext::checkSuspendedDetail() {

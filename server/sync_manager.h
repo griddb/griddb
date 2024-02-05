@@ -1278,8 +1278,8 @@ private:
 	Config config_;
 
 	int64_t syncSequentialNumber_;
-	CheckpointService* cpSvc_;
 	PartitionList* partitionList_;
+	CheckpointService* cpSvc_;
 	SyncService* syncSvc_;
 	TransactionService* txnSvc_;
 	TransactionManager* txnMgr_;

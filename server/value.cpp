@@ -387,3 +387,35 @@ void Value::get(TransactionContext &txn, ObjectManagerV4 &objectManager, Allocat
 	}
 }
 
+Value::Pool::Pool(util::StackAllocator &alloc) :
+		alloc_(alloc),
+		entryList_(alloc_),
+		nextPos_(0) {
+}
+
+void Value::Pool::clear() {
+	nextPos_ = 0;
+}
+
+Value& Value::Pool::newValue(Buffer *&buffer) {
+	while (nextPos_ >= entryList_.size()) {
+		entryList_.push_back(Entry());
+	}
+
+	Entry &entry = entryList_[nextPos_];
+	++nextPos_;
+
+	Value *&valueRef = entry.first;
+	if (valueRef == NULL) {
+		valueRef = ALLOC_NEW(alloc_) Value();
+	}
+	*valueRef = Value();
+
+	Buffer *&bufferRef = entry.second;
+	if (bufferRef == NULL) {
+		bufferRef = ALLOC_NEW(alloc_) Buffer(alloc_);
+	}
+
+	buffer = bufferRef;
+	return *valueRef;
+}

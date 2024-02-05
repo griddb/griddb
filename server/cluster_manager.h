@@ -38,7 +38,7 @@ typedef NodeAddressSet::iterator NodeAddressSetItr;
 
 #define TRACE_CLUSTER_EXCEPTION(e, eventType, level, str) \
 	UTIL_TRACE_EXCEPTION_##level(CLUSTER_SERVICE, e,      \
-		str << ", eventType=" << getEventTypeName(eventType) << ", reason=" << GS_EXCEPTION_MESSAGE(e));
+		str << ", eventType=" << EventTypeUtility::getEventTypeName(eventType) << ", reason=" << GS_EXCEPTION_MESSAGE(e));
 
 #define TRACE_CLUSTER_EXCEPTION_FORCE(errorCode, message)       \
 	try {                                                       \
@@ -91,7 +91,6 @@ class ClusterManager {
 public:
 	struct ClusterInfo;
 	static const int32_t EVENT_MONOTONIC_ADJUST_TIME = 1000;
-
 	/*!
 		@brief Node status
 	*/
@@ -256,12 +255,20 @@ public:
 		}
 	}
 
+	void setAutoShutdown() {
+		autoShutdown_ = true;
+	}
+
 	util::Mutex& getClusterLock() {
 		return clusterLock_;
 	}
 
 	bool isSignalBeforeRecovery() {
 		return isSignalBeforeRecovery_;
+	}
+
+	bool isAutoShutdown() {
+		return autoShutdown_;
 	}
 
 	void setNotificationMode(ClusterNotificationMode mode) {
@@ -1902,6 +1909,7 @@ private:
 	NodeStatusInfo statusInfo_;
 	ClusterVersionId versionId_;
 	bool isSignalBeforeRecovery_;
+	bool autoShutdown_;
 
 	int32_t concurrency_;
 	SyncStat syncStat_;
@@ -1915,6 +1923,7 @@ private:
 		partition0NodeAddrOnMaster_;  
 	ClusterService* clsSvc_;
 	Config config_;
+	int64_t expectedCheckTime_;
 };
 
 template <class T>

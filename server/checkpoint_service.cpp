@@ -431,7 +431,7 @@ void CheckpointService::initialize(ManagerSet &resourceSet) {
 		syncService_ = resourceSet.syncSvc_;
 		serviceThreadErrorHandler_.initialize(resourceSet);
 		initialized_ = true;
-		isErrorOccured_ = false;
+		errorOccured_ = false;
 
 		Partition& partition = partitionList_->partition(0);
 		newestLogFormatVersion_ = partition.logManager().getLogFormatVersion();
@@ -1032,7 +1032,7 @@ void CheckpointService::partitionCheckpoint(
 			}
 		}
 		if (phase == CP_PHASE_FINISH) {
-			partition.removeLogFiles();
+			partition.removeLogFiles(partition.calcCheckpointRange(mode));
 			partitionTable_->setStartLSN(pId, partition.logManager().getStartLSN());
 			const uint32_t flag = message.flag();
 			const bool enableDuplicateLog = ((flag & BACKUP_DUPLICATE_LOG_MODE_FLAG) != 0);

@@ -51,6 +51,7 @@ class TimeSeries;
 class CheckpointBuffer;
 class CheckpointFile;
 class TransactionContext;
+class BaseIndexStorage;
 class BtreeMap;
 class MessageSchema;
 class ObjectManagerV4;
@@ -425,19 +426,25 @@ public:
 public:  
 public:  
 	DataStoreV4(
-			util::StackAllocator* stAlloc,
+			util::StackAllocator *stAlloc,
 			util::FixedSizeAllocator<util::Mutex> *resultSetPool,
-			ConfigTable* configTable, TransactionManager* txnMgr,
-			ChunkManager* chunkmanager, LogManager<MutexLocker>* logmanager,
-			KeyDataStore* keyStore, const StatsSet &stats);
+			ConfigTable *configTable, TransactionManager *txnMgr,
+			ChunkManager *chunkManager, LogManager<MutexLocker> *logManager,
+			KeyDataStore *keyStore, ResultSetManager &rsManager,
+			const StatsSet &stats);
 	~DataStoreV4();
+
+	void initialize(ManagerSet& resourceSet);
+	static void createResultSetManager(
+			util::FixedSizeAllocator<util::Mutex> &resultSetPool,
+			ConfigTable &configTable, ChunkBuffer &chunkBuffer,
+			UTIL_UNIQUE_PTR<ResultSetManager> &rsManager) ;
 
 	Serializable* exec(TransactionContext* txn, KeyDataStoreValue* storeValue, Serializable* message);
 
 	bool support(Support type);
 	void preProcess(TransactionContext* txn, ClusterService* clsService);
 	void postProcess(TransactionContext* txn);
-	void initialize(ManagerSet& resourceSet);
 	void finalize();
 	void redo(util::StackAllocator &alloc, RedoMode mode, const util::DateTime &redoStartTime,
 			  Timestamp redoStartEmTime, Serializable* message);
@@ -452,7 +459,7 @@ public:
 		virtual void operator()(
 				TransactionContext &txn,
 				ContainerId id, DatabaseId dbId, ContainerAttribute attribute,
-				BaseContainer &container) const = 0;
+				BaseContainer *container) const = 0;
 	};
 
 	KeyDataStore* getKeyDataStore() {
@@ -468,15 +475,18 @@ public:
 	}
 
 	const DataStoreStats& stats() const { return dsStats_; };
-	ResultSetManager* getResultSetManager() { return rsManager_; }
+	ResultSetManager* getResultSetManager() { return &rsManager_; }
 
 	void finalizeContainer(TransactionContext &txn, BaseContainer *container);
 	void finalizeMap(TransactionContext &txn, 
 		const AllocateStrategy &allocateStrategy, BaseIndex *index, Timestamp ExpirationTime);
-	static BaseIndex *getIndex(TransactionContext &txn, 
-		ObjectManagerV4 &objectManager, MapType mapType, OId mapOId, 
-		AllocateStrategy &strategy, BaseContainer *container,
-		TreeFuncInfo *funcInfo);
+
+	static BaseIndex *getIndex(
+			TransactionContext &txn, ObjectManagerV4 &objectManager,
+			MapType mapType, OId mapOId, AllocateStrategy &strategy,
+			BaseContainer *container, TreeFuncInfo *funcInfo,
+			BaseIndexStorage *&indexStorage);
+	static void releaseIndex(BaseIndexStorage &indexStorage) throw();
 
 	void setLastExpiredTime(Timestamp time, bool force = false);
 
@@ -493,7 +503,7 @@ public:
 
 
 
-	const char* AuditEventType(DSInputMes *input);
+	static const char* AuditEventType(DSInputMes *input);
 
 	const int32_t AuditCategoryType(DSInputMes *input);
 	
@@ -673,17 +683,17 @@ private:
 		ObjectManagerV4::CHUNK_HEADER_BLOCK_SIZE * 2 + 4;
 
 private:					  
-	DataStoreConfig* config_;
+	DataStoreConfig *config_;
 	AllocateStrategy allocateStrategy_;
 	int32_t affinityGroupSize_;  
 	DataStoreStats &dsStats_;
 	ObjectManagerV4 *objectManager_;
-	ClusterService* clusterService_;
-	KeyDataStore* keyStore_;
+	ClusterService *clusterService_;
+	KeyDataStore *keyStore_;
 	Latch *latch_;
 	OId headerOId_;
 	BaseContainer *container_;
-	ResultSetManager* rsManager_;
+	ResultSetManager &rsManager_;
 	uint64_t activeBackgroundCount_;
 	uint32_t blockSize_;
 

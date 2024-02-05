@@ -758,9 +758,9 @@ public:
 
 class ResultSetManager {
 public:
-	ResultSetManager(util::StackAllocator* stAlloc,
-		util::FixedSizeAllocator<util::Mutex>* memoryPool,
-		ObjectManagerV4* objectManager, uint32_t rsCacheSize);
+	ResultSetManager(
+			util::FixedSizeAllocator<util::Mutex> &memoryPool,
+			ChunkBuffer &chunkBuffer, uint32_t rsCacheSize);
 	~ResultSetManager();
 	ResultSet* create(TransactionContext& txn, ContainerId containerId,
 		SchemaVersionId versionId, int64_t emNow,
@@ -784,7 +784,8 @@ private:
 		}
 	};
 
-	ObjectManagerV4* objectManager_;
+	ChunkBuffer &chunkBuffer_;
+
 	ResultSetId resultSetId_;
 	util::FixedSizeAllocator<util::Mutex>* resultSetPool_;
 	util::StackAllocator* resultSetAllocator_;

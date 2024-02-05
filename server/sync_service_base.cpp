@@ -29,7 +29,6 @@ UTIL_TRACER_DECLARE(CLUSTER_SERVICE);
 UTIL_TRACER_DECLARE(SYNC_SERVICE);
 UTIL_TRACER_DECLARE(IO_MONITOR);
 UTIL_TRACER_DECLARE(SYNC_DETAIL);
-UTIL_TRACER_DECLARE(CLUSTER_DUMP);
 
 #define RM_THROW_LOG_REDO_ERROR(errorCode, message) \
 	GS_THROW_CUSTOM_ERROR(LogRedoException, , errorCode, message)
@@ -323,8 +322,7 @@ void SyncHandler::sendEvent(
 /*!
 	@brief Handler Operator
 */
-void ShortTermSyncHandler::operator()(
-	EventContext& ec, Event& ev) {
+void ShortTermSyncHandler::operator()(EventContext& ec, Event& ev) {
 
 	SyncContext* context = NULL;
 	SyncContext* longSyncContext = NULL;
@@ -334,8 +332,9 @@ void ShortTermSyncHandler::operator()(
 	NodeId senderNodeId
 		= ClusterService::resolveSenderND(ev);
 	SyncId longSyncId;
-	EVENT_START(ec, ev, txnMgr_);
 	try {
+		EVENT_START(ec, ev, txnMgr_, UNDEF_DBID, false);
+
 		util::StackAllocator& alloc
 			= ec.getAllocator();
 		util::StackAllocator::Scope scope(alloc);
@@ -375,7 +374,7 @@ void ShortTermSyncHandler::operator()(
 				GS_TRACE_SYNC(context, "[OWNER] Catchup promotion sync start, SYNC_START", "")
 			}
 
-			GS_OUTPUT_SYNC(context, "[" << getEventTypeName(eventType) << ":START]", "");
+			GS_OUTPUT_SYNC(context, "[" << EventTypeUtility::getEventTypeName(eventType) << ":START]", "");
 			executeSyncRequest(
 				ec, pId, context,
 				syncRequestInfo, syncResponseInfo);
@@ -469,19 +468,19 @@ void ShortTermSyncHandler::operator()(
 		}
 		WATCHER_END_DETAIL(eventType, pId, ec.getWorkerId());
 		if (context) {
-			GS_OUTPUT_SYNC(context, "[" << getEventTypeName(eventType) << ":END]", "");
+			GS_OUTPUT_SYNC(context, "[" << EventTypeUtility::getEventTypeName(eventType) << ":END]", "");
 		}
 	}
 	catch (UserException& e) {
 		if (context != NULL) {
-			GS_OUTPUT_SYNC(context, "[" << getEventTypeName(eventType) << ":ERROR]", "");
+			GS_OUTPUT_SYNC(context, "[" << EventTypeUtility::getEventTypeName(eventType) << ":ERROR]", "");
 
 			UTIL_TRACE_EXCEPTION(
 				SYNC_DETAIL, e, "Short term sync failed, pId=" << pId
 				<< ", lsn=" << pt_->getLSN(pId)
 				<< ", revision="
 				<< context->getPartitionRevision().getRevisionNo()
-				<< ", event=" << getEventTypeName(eventType)
+				<< ", event=" << EventTypeUtility::getEventTypeName(eventType)
 				<< ", reason=" << GS_EXCEPTION_MESSAGE(e));
 
 			addCheckEndEvent(
@@ -520,7 +519,7 @@ void ShortTermSyncHandler::operator()(
 	}
 	catch (std::exception& e) {
 		if (context != NULL) {
-			GS_OUTPUT_SYNC(context, "[" << getEventTypeName(eventType) << ":START]", "");
+			GS_OUTPUT_SYNC(context, "[" << EventTypeUtility::getEventTypeName(eventType) << ":START]", "");
 			addCheckEndEvent(
 				ec, pId, ec.getAllocator(),
 				MODE_SHORTTERM_SYNC, context, true);
@@ -687,13 +686,13 @@ bool SyncRequestInfo::getChunks(
 /*!
 	@brief Handler Operator
 */
-void SyncCheckEndHandler::operator()(
-	EventContext& ec, Event& ev) {
+void SyncCheckEndHandler::operator()(EventContext& ec, Event& ev) {
 
 	SyncContext* context = NULL;
 	PartitionId pId = ev.getPartitionId();
-	EVENT_START(ec, ev, txnMgr_);
 	try {
+		EVENT_START(ec, ev, txnMgr_, UNDEF_DBID, false);
+
 		util::StackAllocator& alloc = ec.getAllocator();
 		util::StackAllocator::Scope scope(alloc);
 		EventByteInStream in = ev.getInStream();
@@ -796,13 +795,12 @@ void SyncCheckEndHandler::operator()(
 /*!
 	@brief Handler Operator
 */
-void DropPartitionHandler::operator()(
-	EventContext& ec, Event& ev) {
+void DropPartitionHandler::operator()(EventContext& ec, Event& ev) {
 
 	PartitionId pId = ev.getPartitionId();
 	EventType eventType = ev.getType();
-	EVENT_START(ec, ev, txnMgr_);
 	try {
+		EVENT_START(ec, ev, txnMgr_, UNDEF_DBID, false);
 		clsMgr_->checkNodeStatus();
 		util::StackAllocator& alloc = ec.getAllocator();
 		util::StackAllocator::Scope scope(alloc);
@@ -1046,7 +1044,7 @@ void UnknownSyncEventHandler::operator()(
 		UTIL_TRACE_EXCEPTION_WARNING(
 			SYNC_SERVICE, e,
 			"Unknown sync event, type:"
-			<< getEventTypeName(eventType));
+			<< EventTypeUtility::getEventTypeName(eventType));
 	}
 }
 
@@ -1582,7 +1580,7 @@ void ShortTermSyncHandler::executeSyncStart(
 	context = syncMgr_->createSyncContext(
 		ec, pId, nextRole.getRevision(),
 		MODE_SHORTTERM_SYNC, PartitionTable::PT_BACKUP);
-	GS_OUTPUT_SYNC(context, "[" << getEventTypeName(ev.getType()) << ":START]", "");
+	GS_OUTPUT_SYNC(context, "[" << EventTypeUtility::getEventTypeName(ev.getType()) << ":START]", "");
 
 	syncMgr_->setShortermSyncStart(
 		context, syncRequestInfo, senderNodeId);
@@ -1628,7 +1626,7 @@ void ShortTermSyncHandler::executeSyncStartAck(
 
 	util::StackAllocator& alloc = ec.getAllocator();
 	if (context != NULL) {
-		GS_OUTPUT_SYNC(context, "[" << getEventTypeName(ev.getType()) << ":START]", "");
+		GS_OUTPUT_SYNC(context, "[" << EventTypeUtility::getEventTypeName(ev.getType()) << ":START]", "");
 
 		LogSequentialNumber backupLsn
 			= syncResponseInfo.getTargetLsn();
@@ -1696,7 +1694,7 @@ void ShortTermSyncHandler::executeSyncLog(
 	SyncResponseInfo& syncResponseInfo) {
 
 	if (context != NULL) {
-		GS_OUTPUT_SYNC(context, "[" << getEventTypeName(ev.getType()) << ":START]", "");
+		GS_OUTPUT_SYNC(context, "[" << EventTypeUtility::getEventTypeName(ev.getType()) << ":START]", "");
 		syncMgr_->setShorttermSyncLog(
 			context, syncRequestInfo, ev.getType(),
 			ec.getHandlerStartTime(),
@@ -1743,7 +1741,7 @@ void ShortTermSyncHandler::executeSyncLogAck(
 
 	util::StackAllocator& alloc = ec.getAllocator();
 	if (context != NULL) {
-		GS_OUTPUT_SYNC(context, "[" << getEventTypeName(ev.getType()) << ":START]", "");
+		GS_OUTPUT_SYNC(context, "[" << EventTypeUtility::getEventTypeName(ev.getType()) << ":START]", "");
 		LogSequentialNumber ownerLsn
 			= pt_->getLSN(pId);
 		LogSequentialNumber backupLsn
@@ -1793,7 +1791,7 @@ void ShortTermSyncHandler::executeSyncEnd(
 
 	util::StackAllocator& alloc = ec.getAllocator();
 	if (context != NULL) {
-		GS_OUTPUT_SYNC(context, "[" << getEventTypeName(TXN_SHORTTERM_SYNC_END) << ":START]", "");
+		GS_OUTPUT_SYNC(context, "[" << EventTypeUtility::getEventTypeName(TXN_SHORTTERM_SYNC_END) << ":START]", "");
 
 		syncMgr_->setUndoCompleted(pId);
 		checkOwner(pt_->getLSN(pId), context, false);
@@ -1822,7 +1820,7 @@ void ShortTermSyncHandler::executeSyncEndAck(
 
 	util::StackAllocator& alloc = ec.getAllocator();
 	if (context != NULL) {
-		GS_OUTPUT_SYNC(context, "[" << getEventTypeName(TXN_SHORTTERM_SYNC_END_ACK) << ":START]", "");
+		GS_OUTPUT_SYNC(context, "[" << EventTypeUtility::getEventTypeName(TXN_SHORTTERM_SYNC_END_ACK) << ":START]", "");
 		if (pt_->getLSN(pId) != syncResponseInfo.getTargetLsn()) {
 			GS_THROW_SYNC_ERROR(
 				GS_ERROR_SYM_INVALID_PARTITION_REVISION, context,

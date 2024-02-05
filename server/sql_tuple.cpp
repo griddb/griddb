@@ -619,7 +619,7 @@ TupleList& TupleList::operator=(const TupleList &another) {
 
 LocalTempStore::ResourceId TupleList::detach() {
 	if (body_) {
-		util::LockGuard<util::Mutex>(body_->getLock());
+		util::LockGuard<util::Mutex> guard(body_->getLock());
 		if (body_->detached()) { 
 			GS_THROW_USER_ERROR(GS_ERROR_LTS_TUPLELIST_OPERATION_NOT_SUPPORTED,
 					"Already detached");

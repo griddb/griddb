@@ -20,6 +20,7 @@
 */
 #include "result_set.h"
 #include "base_container.h"
+#include "chunk_buffer.h"
 
 ResultSet::ResultSet()
 	: rsAlloc_(NULL),
@@ -565,18 +566,17 @@ void ResultSet::handleUpdateRowIdError(std::exception &e) {
 
 
 
-ResultSetManager::ResultSetManager(util::StackAllocator* stAlloc,
-	util::FixedSizeAllocator<util::Mutex>* memoryPool,
-	ObjectManagerV4* objectManager, uint32_t rsCacheSize) :
-	objectManager_(objectManager),
-	resultSetPool_(memoryPool),
-	resultSetId_(1),
-	resultSetAllocator_(NULL),
-	resultSetRowIdAllocator_(NULL),
-	resultSetSwapAllocator_(NULL),
-	resultSetMapManager_(NULL),
-	resultSetMap_(NULL)
-{
+ResultSetManager::ResultSetManager(
+		util::FixedSizeAllocator<util::Mutex> &memoryPool,
+		ChunkBuffer &chunkBuffer, uint32_t rsCacheSize) :
+		chunkBuffer_(chunkBuffer),
+		resultSetId_(1),
+		resultSetPool_(&memoryPool),
+		resultSetAllocator_(NULL),
+		resultSetRowIdAllocator_(NULL),
+		resultSetSwapAllocator_(NULL),
+		resultSetMapManager_(NULL),
+		resultSetMap_(NULL) {
 	try {
 		if (rsCacheSize > 0) {
 			resultSetPool_->setLimit(
@@ -693,7 +693,7 @@ ResultSet* ResultSetManager::get(TransactionContext& txn, ResultSetId rsId) {
 	if (rs) {
 		rs->setTxnAllocator(&txn.getDefaultAllocator());
 		ResultSetOption& queryOption = rs->getQueryOption();
-		objectManager_->setSwapOutCounter(queryOption.getSwapOutNum());
+		chunkBuffer_.setSwapOutCounter(queryOption.getSwapOutNum());
 	}
 	return rs;
 }
@@ -722,7 +722,7 @@ void ResultSetManager::closeOrClear(ResultSetId rsId) {
 	if (rs) {
 		rs->releaseTxnAllocator();
 		ResultSetOption& queryOption = rs->getQueryOption();
-		queryOption.setSwapOutNum(objectManager_->getSwapOutCounter());
+		queryOption.setSwapOutNum(chunkBuffer_.getSwapOutCounter());
 	}
 	if (rs && (rs->isRelease())) {
 		closeInternal(*rs);

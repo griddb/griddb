@@ -54,11 +54,11 @@ NoSQLContainer::NoSQLContainer(
 	const NameWithCaseSensitivity& containerName,
 	NoSQLSyncContext& context, SQLExecution* execution) :
 	eventStackAlloc_(ec.getAllocator()),
-	containerName_(containerName.name_, eventStackAlloc_),
 	nodeId_(UNDEF_NODEID),
 	containerId_(UNDEF_CONTAINERID),
 	versionId_(UNDEF_SCHEMAVERSIONID),
 	txnPId_(UNDEF_PARTITIONID),
+	containerName_(containerName.name_, eventStackAlloc_),
 	stmtId_(0),
 	context_(&context),
 	statementType_(UNDEF_EVENT_TYPE),
@@ -84,7 +84,8 @@ NoSQLContainer::NoSQLContainer(
 	containerKey_(NULL),
 	startTime_(0),
 	ec_(&ec),
-	sqlString_(eventStackAlloc_)
+	sqlString_(eventStackAlloc_),
+	approxSize_(-1)
 {
 	containerKey_ = ALLOC_NEW(eventStackAlloc_) FullContainerKey(
 		eventStackAlloc_,
@@ -105,11 +106,11 @@ NoSQLContainer::NoSQLContainer(
 	FullContainerKey* containerKey,
 	NoSQLSyncContext& context, SQLExecution* execution) :
 	eventStackAlloc_(ec.getAllocator()),
-	containerName_(containerName.name_, eventStackAlloc_),
 	nodeId_(UNDEF_NODEID),
 	containerId_(UNDEF_CONTAINERID),
 	versionId_(UNDEF_SCHEMAVERSIONID),
 	txnPId_(UNDEF_PARTITIONID),
+	containerName_(containerName.name_, eventStackAlloc_),
 	stmtId_(0),
 	context_(&context),
 	statementType_(UNDEF_EVENT_TYPE),
@@ -135,7 +136,8 @@ NoSQLContainer::NoSQLContainer(
 	containerKey_(NULL),
 	startTime_(0),
 	ec_(&ec),
-	sqlString_(eventStackAlloc_)
+	sqlString_(eventStackAlloc_),
+	approxSize_(-1)
 {
 	containerKey_ = containerKey;
 	txnPId_ = NoSQLUtils::resolvePartitionId(
@@ -149,11 +151,11 @@ NoSQLContainer::NoSQLContainer(
 	ContainerId containerId, SchemaVersionId versionId,
 	PartitionId pId, NoSQLSyncContext& context, SQLExecution* execution) :
 	eventStackAlloc_(ec.getAllocator()),
-	containerName_(eventStackAlloc_),
 	nodeId_(UNDEF_NODEID),
 	containerId_(containerId),
 	versionId_(versionId),
 	txnPId_(pId),
+	containerName_(eventStackAlloc_),
 	stmtId_(0),
 	context_(&context),
 	statementType_(UNDEF_EVENT_TYPE),
@@ -178,7 +180,8 @@ NoSQLContainer::NoSQLContainer(
 	keyConstraint_(KeyConstraint::getNoLimitKeyConstraint()),
 	containerKey_(NULL),
 	ec_(&ec),
-	sqlString_(eventStackAlloc_)
+	sqlString_(eventStackAlloc_),
+	approxSize_(-1)
 {
 	partitionRevNo_ = context_->pt_->getNewSQLPartitionRevision(txnPId_);
 	nodeId_ = context_->pt_->getNewSQLOwner(txnPId_);
@@ -188,11 +191,11 @@ NoSQLContainer::NoSQLContainer(
 	EventContext& ec,
 	PartitionId pId, NoSQLSyncContext& context, SQLExecution* execution) :
 	eventStackAlloc_(ec.getAllocator()),
-	txnPId_(pId),
-	containerName_(eventStackAlloc_),
 	nodeId_(UNDEF_NODEID),
 	containerId_(UNDEF_CONTAINERID),
 	versionId_(UNDEF_SCHEMAVERSIONID),
+	txnPId_(pId),
+	containerName_(eventStackAlloc_),
 	stmtId_(0),
 	context_(&context),
 	statementType_(UNDEF_EVENT_TYPE),
@@ -218,7 +221,8 @@ NoSQLContainer::NoSQLContainer(
 	containerKey_(NULL),
 	startTime_(0),
 	ec_(&ec),
-	sqlString_(eventStackAlloc_)
+	sqlString_(eventStackAlloc_),
+	approxSize_(-1)
 {
 	nodeId_ = context_->pt_->getNewSQLOwner(txnPId_);
 }
@@ -353,7 +357,7 @@ bool NoSQLContainer::executeCommand(Event& request,
 								<< ", limitDuration=" << (limitTime - startTime_)
 								<< ", pId=" << txnPId_ << ", nodeId=" << nodeId_
 								<< ", revision=" << partitionRevNo_
-								<< ", event=" << getEventTypeName(statementType_) << ")"));
+								<< ", event=" << EventTypeUtility::getEventTypeName(statementType_) << ")"));
 					}
 				}
 				else {
@@ -364,7 +368,7 @@ bool NoSQLContainer::executeCommand(Event& request,
 						<< ", limitDuration=" << (limitTime - startTime_)
 						<< ", pId=" << txnPId_ << ", nodeId=" << nodeId_
 						<< ", revision=" << partitionRevNo_
-						<< ", event=" << getEventTypeName(statementType_) << ")");
+						<< ", event=" << EventTypeUtility::getEventTypeName(statementType_) << ")");
 				}
 			}
 		}
@@ -442,6 +446,7 @@ void NoSQLContainer::getContainerInfo(NoSQLStoreOption& option) {
 					= static_cast<ContainerType>(schemaInfo.containerType_);
 				versionId_ = containerInfo.versionId_;
 				containerId_ = containerInfo.containerId_;
+				approxSize_ = containerInfo.approxSize_;
 				hasRowKey_ = schemaInfo.hasRowKey_;
 				for (size_t columnId = 0;
 					columnId < schemaInfo.columnInfoList_.size(); columnId++) {
@@ -1767,6 +1772,7 @@ TableContainerInfo* TableSchemaInfo::setContainerInfo(
 		containerInfo.pId_ = container.getPartitionId();
 		containerInfo.affinity_ = affinity;
 		containerInfo.pos_ = pos;
+		containerInfo.approxSize_ = container.containerApproxSize();
 		containerInfoList_.push_back(containerInfo);
 
 		if (pos == 0) {
@@ -1934,7 +1940,7 @@ void NoSQLContainer::checkCondition(uint32_t currentTimer, int32_t timeoutInterv
 	}
 	if (checkTimeoutEvent(currentTimer, timeoutInterval)) {
 		GS_THROW_USER_ERROR(GS_ERROR_TXN_PARTITION_ROLE_UNMATCH,
-			"NoSQL command execution timeout, event=" << getEventTypeName(statementType_));
+			"NoSQL command execution timeout, event=" << EventTypeUtility::getEventTypeName(statementType_));
 	}
 }
 
@@ -1946,20 +1952,20 @@ void NoSQLContainer::updateCondition() {
 
 template void NoSQLUtils::makeNormalContainerSchema(
 	util::StackAllocator& alloc, const char* containerName,
-	CreateTableOption& createOption,
+	const CreateTableOption& createOption,
 	util::XArray<uint8_t>& containerSchema,
 	util::XArray<uint8_t>& optionList,
 	TablePartitioningInfo<util::StackAllocator>& partitioningInfo);
 
 template void NoSQLUtils::makeNormalContainerSchema(
 	util::StackAllocator& alloc, const char* containerName,
-	CreateTableOption& createOption,
+	const CreateTableOption& createOption,
 	util::XArray<uint8_t>& containerSchema,
 	util::XArray<uint8_t>& optionList,
 	TablePartitioningInfo<SQLVariableSizeGlobalAllocator>& partitioningInfo);
 
 void NoSQLUtils::getAffinityValue(util::StackAllocator& alloc,
-	CreateTableOption& createOption, util::String& affinityValue) {
+	const CreateTableOption& createOption, util::String& affinityValue) {
 	if (createOption.propertyMap_) {
 		SyntaxTree::DDLWithParameterMap& paramMap = *createOption.propertyMap_;
 		SyntaxTree::DDLWithParameterMap::iterator it;
@@ -1972,39 +1978,10 @@ void NoSQLUtils::getAffinityValue(util::StackAllocator& alloc,
 	}
 }
 
-
-void NoSQLUtils::getAffinityValue(util::StackAllocator& alloc,
-	util::XArray<uint8_t>& containerSchema,
-	util::String& affinityStr) {
-
-	util::ArrayByteInStream in = util::ArrayByteInStream(
-		util::ArrayInStream(containerSchema.data(), containerSchema.size()));
-	int32_t columnNum;
-	in >> columnNum;
-	for (int32_t i = 0; i < columnNum; i++) {
-		int32_t columnNameLen;
-		in >> columnNameLen;
-		util::XArray<uint8_t> columnName(alloc);
-		columnName.resize(static_cast<size_t>(columnNameLen));
-		in >> std::make_pair(columnName.data(), columnNameLen);
-		int8_t typeOrdinal;
-		in >> typeOrdinal;
-		uint8_t flags;
-		in >> flags;
-	}
-	int16_t rowKeyNum = 0;
-	in >> rowKeyNum;
-	int16_t keyColumnId = 0;
-	for (int16_t pos = 0; pos < rowKeyNum; pos++) {
-		in >> keyColumnId;
-	}
-	StatementHandler::decodeStringData<util::ByteStream<util::ArrayInStream>, util::String>(in, affinityStr);
-}
-
 template<typename Alloc>
 void NoSQLUtils::makeNormalContainerSchema(
 	util::StackAllocator& alloc, const char* containerName,
-	CreateTableOption& createOption,
+	const CreateTableOption& createOption,
 	util::XArray<uint8_t>& containerSchema,
 	util::XArray<uint8_t>& optionList,
 	TablePartitioningInfo<Alloc>& partitioningInfo) {
@@ -2274,12 +2251,12 @@ void NoSQLUtils::makeLargeContainerSchema(
 	binarySchema.push_back(
 		reinterpret_cast<uint8_t*>(&columnNum), sizeof(int32_t));
 	{
-		const char* columnName = "key";
-		int32_t columnNameLen = static_cast<int32_t>(strlen(columnName));
+		const char8_t *columnName = "key";
+		const int32_t columnNameLen = static_cast<int32_t>(strlen(columnName));
 		binarySchema.push_back(
-			reinterpret_cast<uint8_t*>(&columnNameLen), sizeof(int32_t));
+			reinterpret_cast<const uint8_t*>(&columnNameLen), sizeof(int32_t));
 		binarySchema.push_back(
-			reinterpret_cast<uint8_t*>(const_cast<char*>(columnName)), columnNameLen);
+			reinterpret_cast<const uint8_t*>(columnName), columnNameLen);
 		const ColumnType columnType = COLUMN_TYPE_STRING;
 		const int8_t typeOrdinal =
 				ValueProcessor::getPrimitiveColumnTypeOrdinal(
@@ -2292,12 +2269,12 @@ void NoSQLUtils::makeLargeContainerSchema(
 				ValueProcessor::isArray(columnType), false, notNull);
 		binarySchema.push_back(&flags, sizeof(flags));
 	}
-	const char* columnName = "value";
-	int32_t columnNameLen = static_cast<int32_t>(strlen(columnName));
+	const char8_t *columnName = "value";
+	const int32_t columnNameLen = static_cast<int32_t>(strlen(columnName));
 	binarySchema.push_back(
-		reinterpret_cast<uint8_t*>(&columnNameLen), sizeof(int32_t));
+		reinterpret_cast<const uint8_t*>(&columnNameLen), sizeof(int32_t));
 	binarySchema.push_back(
-		reinterpret_cast<uint8_t*>(const_cast<char*>(columnName)), columnNameLen);
+		reinterpret_cast<const uint8_t*>(columnName), columnNameLen);
 	const ColumnType columnType = COLUMN_TYPE_BLOB;
 	const int8_t typeOrdinal =
 			ValueProcessor::getPrimitiveColumnTypeOrdinal(columnType, false);
@@ -2421,7 +2398,7 @@ void NoSQLContainer::getContainerCount(uint64_t& containerCount,
 	}
 }
 
-int32_t NoSQLUtils::checkPrimaryKey(CreateTableOption& createTableOption) {
+int32_t NoSQLUtils::checkPrimaryKey(const CreateTableOption& createTableOption) {
 	int32_t primaryKeyColumnId = -1;
 	for (int32_t i = 0; i < static_cast<int32_t>(createTableOption.columnInfoList_->size()); i++) {
 		if ((*createTableOption.columnInfoList_)[i]->isPrimaryKey()) {
@@ -2488,7 +2465,7 @@ int32_t NoSQLUtils::checkPrimaryKey(CreateTableOption& createTableOption) {
 }
 
 void NoSQLUtils::checkPrimaryKey(util::StackAllocator& alloc,
-	CreateTableOption& createTableOption, util::Vector<ColumnId>& columnIds) {
+	const CreateTableOption& createTableOption, util::Vector<ColumnId>& columnIds) {
 	ColumnId checkId = 0;
 	util::Map<util::String, int32_t> columnMap(alloc);
 	util::Map<util::String, int32_t>::iterator it;
@@ -3473,7 +3450,7 @@ void NoSQLRequest::get(Event& request,
 					job->checkCancel("NoSQL Send", false);
 					GS_TRACE_WARNING(
 						SQL_SERVICE, GS_TRACE_SQL_LONG_EVENT_WAITING,
-						"Long event waiting (eventType=" << getEventTypeName(eventType_) <<
+						"Long event waiting (eventType=" << EventTypeUtility::getEventTypeName(eventType_) <<
 						", pId=" << request.getPartitionId() <<
 						", clientId=" << *clientId_ <<
 						", jobId=" << jobId <<
@@ -3483,7 +3460,7 @@ void NoSQLRequest::get(Event& request,
 				else {
 					GS_TRACE_WARNING(
 						SQL_SERVICE, GS_TRACE_SQL_LONG_EVENT_WAITING,
-						"Long event waiting (eventType=" << getEventTypeName(eventType_) <<
+						"Long event waiting (eventType=" << EventTypeUtility::getEventTypeName(eventType_) <<
 						", pId=" << request.getPartitionId() <<
 						", clientId=" << *clientId_ <<
 						", node=" << nd <<
@@ -3495,7 +3472,7 @@ void NoSQLRequest::get(Event& request,
 			if (!isTrace) {
 				GS_TRACE_WARNING(
 					SQL_SERVICE, GS_TRACE_SQL_LONG_EVENT_WAITING,
-					"Long event waiting (eventType=" << getEventTypeName(eventType_) <<
+					"Long event waiting (eventType=" << EventTypeUtility::getEventTypeName(eventType_) <<
 					", pId=" << request.getPartitionId() <<
 					", node=" << nd <<
 					", elapsedMillis=" << watch.elapsedMillis() << ")");
@@ -3766,8 +3743,6 @@ void TableSchemaInfo::setupSQLTableInfo(
 	tableInfo.tableName_ = tableName;
 	tableInfo.idInfo_.dbId_ = dbId;
 	tableInfo.hasRowKey_ = hasRowKey_;
-	tableInfo.indexInfoList_.assign(
-		indexInfoList_.begin(), indexInfoList_.end());
 	tableInfo.sqlString_ = viewSqlString;
 	if (containerAttr_ == CONTAINER_ATTR_VIEW) {
 		tableInfo.isView_ = true;
@@ -3783,6 +3758,33 @@ void TableSchemaInfo::setupSQLTableInfo(
 		tableInfo.nosqlColumnInfoList_.push_back(columnInfo.type_);
 		tableInfo.nosqlColumnOptionList_.push_back(columnInfo.option_);
 	}
+
+	{
+		SQLTableInfo::IndexInfoList *indexInfoList =
+				ALLOC_NEW(alloc) SQLTableInfo::IndexInfoList(alloc);
+		for (TableIndexInfoList::const_iterator it = indexInfoList_.begin();
+				it != indexInfoList_.end(); ++it) {
+			const int32_t indexFlags = *it;
+			if (indexFlags == 0) {
+				continue;
+			}
+			indexInfoList->push_back(SQLTableInfo::SQLIndexInfo(alloc));
+			indexInfoList->back().columns_.push_back(
+					static_cast<ColumnId>(it - indexInfoList_.begin()));
+		}
+		for (CompositeColumnIdList::const_iterator it =
+				compositeColumnIdList_.begin();
+				it != compositeColumnIdList_.end(); ++it) {
+			indexInfoList->push_back(SQLTableInfo::SQLIndexInfo(alloc));
+			const ColumnIdList *columns = *it;
+			indexInfoList->back().columns_.assign(columns->begin(), columns->end());
+		}
+		if (indexInfoList->empty()) {
+			indexInfoList = NULL;
+		}
+		tableInfo.indexInfoList_ = indexInfoList;
+	}
+
 	int32_t partitioningCount
 		= partitionInfo_.getCurrentPartitioningCount();
 	if (partitioningCount > 0) {
@@ -3818,14 +3820,13 @@ void TableSchemaInfo::setupSQLTableInfo(
 		for (int32_t subContainerId = startSubContainerId;
 			subContainerId < containerInfoList_.size();subContainerId++) {
 			const TableContainerInfo& containerInfo = containerInfoList_[subContainerId];
+
 			SQLTableInfo::SubInfo subInfo;
-			subInfo.partitionId_ = containerInfo.pId_,
-				subInfo.containerId_ = containerInfo.containerId_,
-				subInfo.schemaVersionId_ = containerInfo.versionId_;
-			subInfo.indexInfoList_ = ALLOC_NEW(alloc) util::Vector<int32_t>(alloc);
-			subInfo.indexInfoList_->assign(
-				indexInfoList_.begin(),
-				indexInfoList_.end());
+			subInfo.partitionId_ = containerInfo.pId_;
+			subInfo.containerId_ = containerInfo.containerId_;
+			subInfo.schemaVersionId_ = containerInfo.versionId_;
+			subInfo.approxSize_ = containerInfo.approxSize_;
+
 			if (partitionInfo_.partitionType_ ==
 				SyntaxTree::TABLE_PARTITION_TYPE_HASH) {
 				const size_t idListSize = partitionInfo_.condensedPartitionIdList_.size();
@@ -3895,15 +3896,7 @@ void TableSchemaInfo::setupSQLTableInfo(
 		tableInfo.idInfo_.partitionId_ = containerInfo.pId_;
 		tableInfo.idInfo_.containerId_ = containerInfo.containerId_;
 		tableInfo.idInfo_.schemaVersionId_ = containerInfo.versionId_;
-	}
-
-	for (size_t pos = 0; pos < compositeColumnIdList_.size(); pos++) {
-		util::Vector<ColumnId> columnIdList(alloc);
-		for (size_t columnPos = 0;
-			columnPos < compositeColumnIdList_[pos]->size(); columnPos++) {
-			columnIdList.push_back((*compositeColumnIdList_[pos])[columnPos]);
-		}
-		tableInfo.compositeIndexInfoList_.push_back(columnIdList);
+		tableInfo.idInfo_.approxSize_ = containerInfo.approxSize_;
 	}
 }
 
@@ -3943,7 +3936,7 @@ void TableSchemaInfo::copyPartitionInfo(TableSchemaInfo& info) {
 	partitionInfo_.intervalUnit_ = info.partitionInfo_.intervalUnit_;
 	partitionInfo_.intervalValue_ = info.partitionInfo_.intervalValue_;
 	partitionInfo_.largeContainerId_ = info.partitionInfo_.largeContainerId_;
-	partitionInfo_.largeAffinityNumber_ = info.partitionInfo_.largeAffinityNumber_;
+	partitionInfo_.intervalAffinity_ = info.partitionInfo_.intervalAffinity_;
 	partitionInfo_.subContainerNameList_ = info.partitionInfo_.subContainerNameList_;
 	partitionInfo_.condensedPartitionIdList_ = info.partitionInfo_.condensedPartitionIdList_;
 	partitionInfo_.assignNumberList_ = info.partitionInfo_.assignNumberList_;
@@ -4008,10 +4001,10 @@ TablePartitioningInfo<Alloc>::TablePartitioningInfo(Alloc& alloc) :
 	partitionColumnType_(0),
 	subPartitioningColumnName_(alloc),
 	subPartitioningColumnId_(UNDEF_COLUMNID),
-	intervalValue_(0),
 	intervalUnit_(UINT8_MAX),
+	intervalValue_(0),
 	largeContainerId_(UNDEF_CONTAINERID),
-	largeAffinityNumber_(UNDEF_NODE_AFFINITY_NUMBER),
+	intervalAffinity_(UNDEF_NODE_AFFINITY_NUMBER),
 	subContainerNameList_(alloc), 
 	condensedPartitionIdList_(alloc),
 	assignNumberList_(alloc),

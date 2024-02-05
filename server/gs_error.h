@@ -24,6 +24,8 @@
 #include "util/type.h"
 #include "util/container.h"
 #include "util/trace.h"
+
+
 #define AUDIT_TRACE_ERROR(tracer, cause, userName, privilege, dbName, appName, sourceAddr, \
 						 destAddr, target, statementType, statementInfo, statementId, message) 
 #define AUDIT_TRACE_ERROR_CODED(tracer, code, userName, privilege, dbName, appName, sourceAddr, \
@@ -560,7 +562,7 @@ enum ErrorCode {
 	GS_ERROR_TXN_LDAP_ACCESS_FAILED,
 	GS_ERROR_TXN_LDAP_FAILED,
 	GS_ERROR_TXN_LDAP_TIMEOUT,
-
+	GS_ERROR_TXN_DENY_REQUEST,
 	GS_ERROR_SYNC_SERVICE_START_FAILED = 20000,  
 	GS_ERROR_SYNC_SERVICE_ENCODE_FAILED,		 
 	GS_ERROR_SYNC_SERVICE_ENCODE_MESSAGE_FAILED,  

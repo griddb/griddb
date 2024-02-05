@@ -75,7 +75,6 @@ private:
 	static const double CALC_EMA_HALF_LIFE_CONSTANT;
 
 	const ConfigTable& config_;
-	const PartitionGroupConfig& pgConfig_;
 	const uint32_t partitionNum_;
 	const uint32_t partitionGroupNum_;
 	const uint32_t chunkExpSize_;

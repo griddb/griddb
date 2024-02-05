@@ -125,10 +125,10 @@ private:
 	uint32_t timeThresholdMillis_;
 	std::unique_ptr<Locker> locker_;
 	std::string path_;
+	PartitionId pId_;
 	int32_t stripeSize_;
 	int32_t numfiles_;
 	int32_t chunkSize_;
-	PartitionId pId_;
 	FileStatTable *stats_;
 
 	std::vector< std::unique_ptr<util::NamedFile> > files_;

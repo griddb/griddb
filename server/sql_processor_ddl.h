@@ -46,6 +46,7 @@ struct DDLBaseInfo {
 		, currentDbName_(NULL)
 		, largeContainerId_(UNDEF_CONTAINERID)
 	{}
+	SQLVariableSizeGlobalAllocator& globalVarAlloc_;
 	ExecId execId_;
 	uint8_t jobVersionId_;
 	bool isSync_;
@@ -56,11 +57,10 @@ struct DDLBaseInfo {
 	bool existJob_;
 	EventContext* ec_;
 	EventType currentEventType_;
-	ContainerId largeContainerId_;
 
 	const char* currentContainerName_;
 	const char* currentDbName_;
-	SQLVariableSizeGlobalAllocator& globalVarAlloc_;
+	ContainerId largeContainerId_;
 
 	~DDLBaseInfo() {}
 
@@ -167,7 +167,7 @@ struct CreateTableInfo
 	SQLVariableSizeGlobalAllocator& globalVarAlloc_;
 	SQLString dbName_;
 	SQLString tableName_;
-	CreateTableOption* createTableOpt_;
+	const CreateTableOption* createTableOpt_;
 	bool dbNameCaseSensitive_;
 	bool tableNameCaseSensitive_;
 };
@@ -199,7 +199,7 @@ struct CreateViewInfo
 	SQLVariableSizeGlobalAllocator& globalVarAlloc_;
 	SQLString dbName_;
 	SQLString tableName_;
-	CreateTableOption* createTableOpt_;
+	const CreateTableOption* createTableOpt_;
 	bool dbNameCaseSensitive_;
 	bool tableNameCaseSensitive_;
 };
@@ -233,7 +233,7 @@ struct DropTablePartitionInfo : public DDLBaseInfo {
 	SQLString dbName_;
 	SQLString tableName_;
 	SQLString partitionName_;
-	SyntaxTree::ExprList* cmdOptionList_;
+	const SyntaxTree::ExprList* cmdOptionList_;
 	bool dbNameCaseSensitive_;
 	bool tableNameCaseSensitive_;
 	bool ifExists_;
@@ -252,7 +252,7 @@ struct AddColumnInfo : public DDLBaseInfo {
 	SQLVariableSizeGlobalAllocator& globalVarAlloc_;
 	SQLString dbName_;
 	SQLString tableName_;
-	CreateTableOption* createTableOpt_;
+	const CreateTableOption* createTableOpt_;
 	bool dbNameCaseSensitive_;
 	bool tableNameCaseSensitive_;
 };
@@ -269,7 +269,7 @@ struct RenameColumnInfo : public DDLBaseInfo {
 	SQLVariableSizeGlobalAllocator& globalVarAlloc_;
 	SQLString dbName_; 
 	SQLString tableName_; 
-	CreateTableOption* createTableOpt_; 
+	const CreateTableOption* createTableOpt_; 
 	bool dbNameCaseSensitive_; 
 	bool tableNameCaseSensitive_; 
 };
@@ -290,10 +290,14 @@ struct CreateIndexInfo : public DDLBaseInfo {
 	SQLString indexName_;
 	SQLString tableName_;
 	SQLString columnName_;
-	CreateIndexOption* createIndexOpt_;
+	const CreateIndexOption* createIndexOpt_;
 	SchemaVersionId versionId_;
 	ContainerId containerId_;
 	int32_t indexColumnId_;
+	bool dbNameCaseSensitive_;
+	bool tableNameCaseSensitive_;
+	bool indexNameCaseSensitive_;
+	bool columnNameCaseSensitive_;
 	bool isSameName_;
 
 	void bindParamInfos(const char* dbName, const char* indexName, const char* tableName, const char* columnName,
@@ -306,19 +310,16 @@ struct CreateIndexInfo : public DDLBaseInfo {
 		containerId_ = containerId;
 		versionId_ = versionId;
 	}
-	bool dbNameCaseSensitive_;
-	bool tableNameCaseSensitive_;
-	bool indexNameCaseSensitive_;
-	bool columnNameCaseSensitive_;
 };
 
 struct DropIndexInfo : public DDLBaseInfo {
 	DropIndexInfo(SQLVariableSizeGlobalAllocator& globalVarAlloc) :
 		DDLBaseInfo(globalVarAlloc),
 		globalVarAlloc_(globalVarAlloc),
-		dbName_(globalVarAlloc), indexName_(globalVarAlloc), ifExists_(false)
-		, tableName_(globalVarAlloc), indexKey_(globalVarAlloc)
-		, dbNameCaseSensitive_(false),
+		dbName_(globalVarAlloc), indexName_(globalVarAlloc),
+		tableName_(globalVarAlloc), indexKey_(globalVarAlloc),
+		ifExists_(false),
+		dbNameCaseSensitive_(false),
 		tableNameCaseSensitive_(false),
 		indexNameCaseSensitive_(false)
 	{}
@@ -439,19 +440,12 @@ private:
 	DropIndexInfo* dropIndexInfo_;
 	DropTablePartitionInfo* dropPartitionInfo_;
 	AddColumnInfo* addColumnInfo_;
-	RenameColumnInfo* renameColumnInfo_; 
 	CreateViewInfo* createViewInfo_;
 	DropViewInfo* dropViewInfo_;
 
 	int32_t targetAckCount_;
 	int32_t currentAckCount_;
 	int32_t phase_;
-	AckList ackList_;
-	AckContainerInfoList ackContainerInfoList_;
-
-	ContainerId executingContainerId_;
-	SchemaVersionId executingVersionId_;
-	StatementId executingStatementId_;
 
 	SQLExecutionManager* executionManager_;
 	bool isRetry_;
@@ -461,7 +455,15 @@ private:
 	int32_t currentCheckAckCount_;
 	bool existJob_;
 	DDLBaseInfo* baseInfo_;
+	AckList ackList_;
+
+	ContainerId executingContainerId_;
+	SchemaVersionId executingVersionId_;
+	StatementId executingStatementId_;
+
+	AckContainerInfoList ackContainerInfoList_;
 	bool isCleanup_;
+	RenameColumnInfo* renameColumnInfo_; 
 };
 
 inline void DDLBaseInfo::updateAckCount(int32_t ackCount) {

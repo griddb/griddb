@@ -107,13 +107,16 @@ PartitionTable::PartitionTable(const ConfigTable& configTable) :
 	prevCatchupNodeId_(UNDEF_NODEID),
 	partitions_(NULL),
 	nodes_(NULL),
+	enableRackZoneAwareness_(configTable.get<bool>(CONFIG_TABLE_CS_RACK_ZONE_AWARENESS)),
+	orgEnableRackZoneAwareness_(enableRackZoneAwareness_),
 	loadInfo_(globalStackAlloc_, MAX_NODE_NUM),
+	goalProgress_(0),
+	replicaProgress_(0),
 	currentRevisionNo_(1),
 	prevDropRevisionNo_(0),
 	isGoalPartition_(false),
-	hasPublicAddress_(false),
-	enableRackZoneAwareness_(configTable.get<bool>(CONFIG_TABLE_CS_RACK_ZONE_AWARENESS)),
-	orgEnableRackZoneAwareness_(enableRackZoneAwareness_) {
+	hasPublicAddress_(false)
+{
 
 	try {
 		uint32_t partitionNum = config_.partitionNum_;
@@ -1185,8 +1188,6 @@ bool PartitionTable::GoalPlanner::assginePriorityPartition(
 				adjustPartitionList.push_back(pId);
 			}
 		}
-		std::sort(adjustPartitionList.begin(), adjustPartitionList.end(), [&](int a, int b) {
-			return priorityCountList_[a] < priorityCountList_[b]; });
 		targetPartitionList = &adjustPartitionList;
 		erasable = false;
 		break;
@@ -1337,6 +1338,31 @@ void PartitionTable::assignGoalTable(util::StackAllocator& alloc,
 	catch (std::exception& e) {
 		GS_RETHROW_USER_OR_SYSTEM(e, "");
 	}
+}
+
+void PartitionTable::assignOptimalGoal(util::StackAllocator& alloc) {
+
+	util::Vector<PartitionRole> roleList(alloc);
+	util::XArray<NodeId> nodeIdList(alloc);
+	getLiveNodeIdList(nodeIdList);
+
+	uint32_t nodeNum = nodeIdList.size();
+	uint32_t backupNum = getReplicationNum();
+	if (backupNum > nodeNum - 1) {
+		backupNum = nodeNum - 1;
+	}
+	uint32_t nodePos = 0;
+	for (PartitionId pId = 0; pId < getPartitionNum(); pId++) {
+		roleList.emplace_back(PartitionRole(pId, revision_, PT_CURRENT_OB));
+		PartitionRole& role = roleList[pId];
+		role.setOwner(nodeIdList[nodePos++ % nodeNum]);
+		for (uint32_t pos = 0; pos < backupNum; pos++) {
+			role.getBackups().push_back(nodeIdList[(nodePos + pos) % nodeNum]);
+		}
+		role.checkBackup();
+	}
+	setGoal(this, roleList);
+	GS_TRACE_CLUSTER_INFO(dumpPartitionsNew(alloc, PT_CURRENT_GOAL));
 }
 
 /** **
@@ -3171,5 +3197,53 @@ void PartitionTable::stat(util::StackAllocator& alloc, TableType type, NodesStat
 		stat.filter(tmpRackZoneDataList, NodesStat::DATA_RACKZONE_COUNT);
 		stat.filter(tmpNodeRackZoneList, NodesStat::RACKZONE_NODE_COUNT);
 		stat.filter(tmpRackZoneIdList, NodesStat::RACKZONE_ID_LIST);
+	}
+}
+
+#include <algorithm>
+void PartitionTable::progress(double& goalProgress, double& replicaProgress) {
+	try {
+		int32_t goalCount = 0;
+		int32_t currentCount = 0;
+		int32_t currentReplicaCount = 0;
+		NodeIdList activeNodeList;
+		getLiveNodeIdList(activeNodeList);
+		int32_t liveNum = static_cast<int32_t>(activeNodeList.size());
+		int32_t backupNum = getReplicationNum();
+		if (backupNum > liveNum - 1) {
+			backupNum = liveNum - 1;
+		}
+		int32_t allReplicaCount = getPartitionNum() * (backupNum + 1);
+		for (PartitionId pId = 0; pId < getPartitionNum(); pId++) {
+			PartitionRole goal;
+			PartitionRole current;
+			getPartitionRole(pId, goal, PT_CURRENT_GOAL);
+			getPartitionRole(pId, current, PT_CURRENT_OB);
+			currentReplicaCount += current.getRoledSize();
+			if (goal.getOwner() != UNDEF_NODEID) {
+				goalCount += goal.getRoledSize();
+				NodeIdList& currentBackupList = current.getBackups();
+				if (goal.getOwner() == current.getOwner()) {
+					currentCount++;
+				}
+				if (currentBackupList.size() > 0) {
+					std::set<NodeId> currentSet;
+					for (size_t pos = 0; pos < currentBackupList.size(); pos++) {
+						currentSet.insert(currentBackupList[pos]);
+					}
+					NodeIdList& goalBackupList = goal.getBackups();
+					for (size_t pos = 0; pos < goalBackupList.size(); pos++) {
+						if (currentSet.count(goalBackupList[pos])) {
+							currentCount++;
+						}
+					}
+				}
+			}
+		}
+		replicaProgress = (allReplicaCount > 0) ? ((double)currentReplicaCount / (double)allReplicaCount) : 0;
+		goalProgress = (goalCount > 0) ? ((double)currentCount / (double)goalCount) : 0;
+	}
+	catch (std::exception& e) {
+		GS_RETHROW_USER_OR_SYSTEM(e, "");
 	}
 }

@@ -74,7 +74,7 @@ bool DQLProcessor::finish(Context &cxt, InputId inputId) {
 }
 
 bool DQLProcessor::next(Context &cxt) {
-	OpCursor c(getCursorSource(cxt));
+	OpCursor c(getCursorSourceForNext(cxt));
 	for (; c.exists(); c.next()) {
 		c.get().execute(c.getContext());
 	}
@@ -155,6 +155,12 @@ const SQLProcessor::Profiler& DQLProcessor::getProfiler() {
 	SQLOps::OpProfiler *opProfiler = store_->getProfiler();
 	if (opProfiler != NULL) {
 		mainInfo = opProfiler->getAnalysisInfo(NULL);
+	}
+
+	if (simulator_.get() != NULL) {
+		if (mainInfo.op_ != NULL && !mainInfo.op_->empty()) {
+			mainInfo.op_->front().partial_ = simulator_->getPartialProfile();
+		}
 	}
 
 	if (matchProfilerResultType(profiler_, true)) {
@@ -268,9 +274,22 @@ SQLOps::OpStore::Entry* DQLProcessor::findInputEntry(
 }
 
 SQLOps::OpCursor::Source DQLProcessor::getCursorSource(Context &cxt) {
+	return getCursorSourceDetail(cxt, false);
+}
+
+SQLOps::OpCursor::Source DQLProcessor::getCursorSourceForNext(Context &cxt) {
+	return getCursorSourceDetail(cxt, true);
+}
+
+SQLOps::OpCursor::Source DQLProcessor::getCursorSourceDetail(
+		Context &cxt, bool forNext) {
 	OpStore &store = prepareStore(cxt);
 	OpCursor::Source source(getStoreRootId(), store, NULL);
 	source.setExtContext(&getExtOpContext(cxt));
+
+	if (simulator_.get() != NULL) {
+		source.setFlags(simulator_->checkPartialMonitor(forNext));
+	}
 
 	return source;
 }
@@ -309,6 +328,7 @@ SQLOps::OpStore& DQLProcessor::prepareStore(Context &cxt) {
 		if (isProfilerRequested(profiler_)) {
 			store_->activateProfiler();
 		}
+
 
 		storeRootId_ = id;
 	}
@@ -404,7 +424,7 @@ void DQLProcessor::setUpRoot(
 		const DQLProcs::Option &option, const AllocTupleInfoList &inputInfo) {
 	util::StackAllocator &alloc = rootEntry.getStackAllocator();
 	const SQLOps::OpCode &code = createOpCode(alloc, option, inputInfo);
-	const bool inputIgnorable = (code.findContainerLocation() != NULL);
+	const bool inputIgnorable = DQLProcs::Option::isInputIgnorable(code);
 
 	for (AllocTupleInfoList::const_iterator inIt = inputInfo.begin();
 			inIt != inputInfo.end(); ++inIt) {
@@ -461,7 +481,7 @@ void DQLProcessor::setUpRoot(
 void DQLProcessor::setUpInput(
 		const SQLOps::OpCode &code, size_t inputCount,
 		InputId &inputIdOffset) {
-	const bool inputIgnorable = (code.findContainerLocation() != NULL);
+	const bool inputIgnorable = DQLProcs::Option::isInputIgnorable(code);
 	const bool inputEmpty = (inputCount <= 0);
 
 	InputId offset;
@@ -613,12 +633,12 @@ PartitionTable* DQLProcs::ProcResourceSet::getPartitionTable() const {
 	return baseCxt_->getPartitionTable();
 }
 
-DataStoreV4* DQLProcs::ProcResourceSet::getDataStore() const {
-	return baseCxt_->getDataStore();
-}
-
 PartitionList* DQLProcs::ProcResourceSet::getPartitionList() const {
 	return baseCxt_->getPartitionList();
+}
+
+const DataStoreConfig* DQLProcs::ProcResourceSet::getDataStoreConfig() const {
+	return baseCxt_->getDataStoreConfig();
 }
 
 
@@ -684,6 +704,10 @@ double DQLProcs::ExtProcContext::getStoreMemoryAgingSwapRate() {
 	return getBase().getStoreMemoryAgingSwapRate();
 }
 
+bool DQLProcs::ExtProcContext::isAdministrator() {
+	return getBase().isAdministrator();
+}
+
 uint32_t DQLProcs::ExtProcContext::getTotalWorkerId() {
 	EventContext *ec = getEventContext();
 	if (ec->isOnIOWorker()) {
@@ -706,6 +730,219 @@ uint32_t DQLProcs::ExtProcContext::getTotalWorkerId() {
 SQLContext& DQLProcs::ExtProcContext::getBase() {
 	assert(baseCxt_ != NULL);
 	return *baseCxt_;
+}
+
+
+DQLProcs::ProcSimulator::ProcSimulator(Manager &manager) :
+		manager_(manager) {
+}
+
+DQLProcs::ProcSimulator::~ProcSimulator() {
+	if (opSimulator_.get() != NULL) {
+		manager_.clearSimulation();
+	}
+	if (partialInfo_.get() != NULL && !partialInfo_->id_.isEmpty()) {
+		manager_.closePartial(partialInfo_->id_);
+	}
+}
+
+SQLOps::OpSimulator* DQLProcs::ProcSimulator::getOpSimulator() {
+	return opSimulator_.get();
+}
+
+SQLOps::OpSimulator* DQLProcs::ProcSimulator::tryCreate(
+		SQLProcessor::Context &cxt, Manager &manager,
+		util::AllocUniquePtr<ProcSimulator> &simulator,
+		SQLType::Id type, const SQLOps::OpPlan &plan) {
+	simulator.reset();
+
+	if (tryCreateOpSimulator(cxt, manager, simulator, type, plan)) {
+		return simulator->getOpSimulator();
+	}
+
+	tryCreatePartialMonitor(cxt, manager, simulator, type, plan);
+	return NULL;
+}
+
+uint32_t DQLProcs::ProcSimulator::checkPartialMonitor(bool forNext) {
+	uint32_t cursorFlags = 0;
+
+	do {
+		if (partialInfo_.get() == NULL) {
+			break;
+		}
+
+		Manager::PartialId &partialId = partialInfo_->id_;
+		if (partialId.isEmpty()) {
+			break;
+		}
+
+		SQLProcessorConfig::PartialStatus status;
+		const bool passed = manager_.checkPartial(partialId, status);
+		partialInfo_->profile_.globalStatus_ = status;
+
+		const bool noExec = passed;
+		const bool pretendSuspend = (passed || forNext);
+
+		if (noExec) {
+			cursorFlags |= SQLOps::OpCursor::FLAG_NO_EXEC;
+		}
+
+		if (pretendSuspend) {
+			cursorFlags |= SQLOps::OpCursor::FLAG_PRETEND_SUSPEND;
+		}
+	}
+	while (false);
+
+	return cursorFlags;
+}
+
+SQLOpUtils::AnalysisPartialInfo* DQLProcs::ProcSimulator::getPartialProfile() {
+	if (partialInfo_.get() == NULL) {
+		return NULL;
+	}
+	return &partialInfo_->profile_;
+}
+
+SQLProcessorConfig::Manager::SimulationEntry
+DQLProcs::ProcSimulator::toBaseEntry(const OpSimulator::Entry &src) {
+	Manager::SimulationEntry dest;
+	dest.point_ = src.point_;
+	dest.action_ = src.action_;
+	dest.param_ = src.param_;
+	return dest;
+}
+
+SQLOps::OpSimulator::Entry DQLProcs::ProcSimulator::toOpEntry(
+		const Manager::SimulationEntry &src) {
+	OpSimulator::Entry dest;
+	dest.point_ = static_cast<OpSimulator::PointType>(src.point_);
+	dest.action_ = static_cast<OpSimulator::ActionType>(src.action_);
+	dest.param_ = src.param_;
+	return dest;
+}
+
+bool DQLProcs::ProcSimulator::tryCreateOpSimulator(
+		SQLProcessor::Context &cxt, Manager &manager,
+		util::AllocUniquePtr<ProcSimulator> &simulator,
+		SQLType::Id type, const SQLOps::OpPlan &plan) {
+	if (!manager.isSimulating()) {
+		return false;
+	}
+
+	const SQLOps::OpNode *node = plan.findNextNode(0);
+	if (node == NULL) {
+		return false;
+	}
+
+	util::StackAllocator &alloc = cxt.getEventContext()->getAllocator();
+
+	typedef util::Vector<Manager::SimulationEntry> BaseEntryList;
+	BaseEntryList entryList(alloc);
+
+	SQLType::Id curType;
+	int64_t inputCount;
+	const bool simulating =
+			manager.getSimulation(entryList, curType, inputCount);
+	if (!simulating || curType != type) {
+		return false;
+	}
+
+	const int64_t modInCount =
+			static_cast<int64_t>(plan.getParentInputCount()) -
+			(Option::isInputIgnorable(node->getCode()) ? 1 : 0);
+	if (inputCount >= 0 && modInCount != inputCount) {
+		return false;
+	}
+
+	SQLValues::VarAllocator &varAlloc = cxt.getVarAllocator();
+	simulator = ALLOC_UNIQUE(varAlloc, ProcSimulator, manager);
+
+	util::LocalUniquePtr<SQLOps::OpSimulator> &opSimulator =
+			simulator->opSimulator_;
+	opSimulator = UTIL_MAKE_LOCAL_UNIQUE(
+			opSimulator, SQLOps::OpSimulator, varAlloc);
+	for (BaseEntryList::const_iterator it = entryList.begin();
+			it != entryList.end(); ++it) {
+		opSimulator->addEntry(toOpEntry(*it));
+	}
+	return true;
+}
+
+bool DQLProcs::ProcSimulator::tryCreatePartialMonitor(
+		SQLProcessor::Context &cxt, Manager &manager,
+		util::AllocUniquePtr<ProcSimulator> &simulator,
+		SQLType::Id type, const SQLOps::OpPlan &plan) {
+	if (!manager.isPartialMonitoring()) {
+		return false;
+	}
+
+	int32_t index;
+	int64_t submissionCode;
+	if (type == SQLType::EXEC_SCAN) {
+		index = 0;
+		submissionCode = 0;
+	}
+	else if (type == SQLType::EXEC_SELECT) {
+		const SQLOps::OpNode *node = plan.findNextNode(0);
+		if (node == NULL) {
+			return false;
+		}
+
+		const SQLOps::Projection *proj = node->getCode().getPipeProjection();
+		if (proj->getProjectionCode().getType() != SQLOpTypes::PROJ_OUTPUT) {
+			return false;
+		}
+
+		const size_t valueCount = 2;
+		int64_t valueList[valueCount];
+		{
+			SQLExprs::Expression::Iterator it(*proj);
+			for (size_t i = 0; i < valueCount; i++) {
+				if (!it.exists()) {
+					return false;
+				}
+				const SQLExprs::Expression &expr = it.get();
+				if (expr.getCode().getType() != SQLType::EXPR_CONSTANT) {
+					return false;
+				}
+				const TupleValue &value = expr.getCode().getValue();
+				if (value.getType() != TupleList::TYPE_LONG) {
+					return false;
+				}
+				valueList[i] = value.get<int64_t>();
+				it.next();
+			}
+		}
+
+		index = static_cast<int32_t>(valueList[0]) + 1;
+		submissionCode = valueList[1];
+
+		if (index <= 0) {
+			return false;
+		}
+	}
+	else {
+		return false;
+	}
+
+	Manager::PartialId partialId(cxt, index);
+	if (!manager.initPartial(partialId, submissionCode)) {
+		partialId = Manager::PartialId();
+	}
+
+	SQLValues::VarAllocator &varAlloc = cxt.getVarAllocator();
+	simulator = ALLOC_UNIQUE(varAlloc, ProcSimulator, manager);
+
+	util::LocalUniquePtr<PartialInfo> &info = simulator->partialInfo_;
+	info = UTIL_MAKE_LOCAL_UNIQUE(info, PartialInfo);
+	info->id_ = partialId;
+
+	return true;
+}
+
+DQLProcs::ProcSimulator::PartialInfo::PartialInfo() :
+		pretendSuspendLast_(false) {
 }
 
 
@@ -933,6 +1170,10 @@ SQLOps::OpCode DQLProcs::Option::toCode(
 	}
 
 	return code;
+}
+
+bool DQLProcs::Option::isInputIgnorable(const SQLOps::OpCode &code) {
+	return (code.findContainerLocation() != NULL);
 }
 
 
@@ -1168,17 +1409,8 @@ void DQLProcs::LimitOption::toCode(
 
 
 DQLProcs::ScanOption::ScanOption(util::StackAllocator &alloc) :
-		tableType_(SQLType::TABLE_CONTAINER),
-		databaseVersionId_(-1),
-		containerId_(std::numeric_limits<uint64_t>::max()),
-		schemaVersionId_(std::numeric_limits<uint32_t>::max()),
-		partitioningVersionId_(-1),
 		columnList_(NULL),
-		pred_(NULL),
-		containerExpirable_(false),
-		indexActivated_(false),
-		multiIndexActivated_(false),
-		indexList_(NULL) {
+		pred_(NULL) {
 	static_cast<void>(alloc);
 }
 
@@ -1186,30 +1418,12 @@ void DQLProcs::ScanOption::fromPlanNode(OptionInput &in) {
 	const ProcPlan::Node &node = in.resolvePlanNode();
 	SQLExprs::SyntaxExprRewriter rewriter = in.createPlanRewriter();
 
-	tableType_ = node.tableIdInfo_.type_;
-	databaseVersionId_ = node.tableIdInfo_.dbId_;
-	containerId_ = node.tableIdInfo_.containerId_;
-	schemaVersionId_ = node.tableIdInfo_.schemaVersionId_;
-	partitioningVersionId_ = node.tableIdInfo_.partitioningVersionId_;
+	location_ = getLocation(in.getAllocator(), node);
 
 	columnList_ = &rewriter.toProjection(node.outputList_);
 
 	if (node.predList_.size() > 0) {
 		pred_ = rewriter.toExpr(&node.predList_[0]);
-	}
-
-	containerExpirable_ = ((node.cmdOptionFlag_ &
-			ProcPlan::Node::Config::CMD_OPT_SCAN_EXPIRABLE) != 0);
-	indexActivated_ = ((node.cmdOptionFlag_ &
-			ProcPlan::Node::Config::CMD_OPT_SCAN_INDEX) != 0);
-	multiIndexActivated_ = ((node.cmdOptionFlag_ &
-			ProcPlan::Node::Config::CMD_OPT_SCAN_MULTI_INDEX) != 0);
-
-	if (node.indexInfoList_ != NULL && !node.indexInfoList_->empty()) {
-		indexList_ = ALLOC_NEW(in.getAllocator()) util::Vector<int32_t>(
-				node.indexInfoList_->begin(),
-				node.indexInfoList_->end(),
-				in.getAllocator());
 	}
 }
 
@@ -1222,23 +1436,47 @@ void DQLProcs::ScanOption::toCode(
 		SQLOps::OpCodeBuilder &builder, SQLOps::OpCode &code) const {
 	code.setType(SQLOpTypes::OP_SCAN);
 
-	SQLOps::ContainerLocation &location = builder.createContainerLocation();
-
-	location.type_ = tableType_;
-	location.dbVersionId_ = databaseVersionId_;
-	location.id_ = containerId_;
-	location.schemaVersionId_ = schemaVersionId_;
-	location.partitioningVersionId_= partitioningVersionId_;
-	location.schemaVersionSpecified_ = true;
-	location.expirable_ = containerExpirable_;
-	location.indexActivated_ = indexActivated_;
-	location.multiIndexActivated_ = multiIndexActivated_;
-
-	code.setContainerLocation(&location);
-
+	code.setContainerLocation(&builder.createContainerLocation(location_));
 	code.setPipeProjection(&builder.toNormalProjectionByExpr(
 			columnList_, code.getAggregationPhase()));
 	code.setFilterPredicate(pred_);
+}
+
+SQLOps::ContainerLocation DQLProcs::ScanOption::getLocation(
+		util::StackAllocator &alloc, const ProcPlan::Node &node) {
+	SQLOps::ContainerLocation location;
+
+	{
+		const SQLTableInfo::IdInfo &idInfo = node.tableIdInfo_;
+
+		location.type_ = idInfo.type_;
+		location.dbVersionId_ = idInfo.dbId_;
+		location.id_ = idInfo.containerId_;
+		location.schemaVersionId_ = idInfo.schemaVersionId_;
+		location.partitioningVersionId_ = idInfo.partitioningVersionId_;
+		location.approxSize_ = idInfo.approxSize_;
+	}
+
+	if (node.indexInfoList_ != NULL) {
+		const util::Vector<ColumnId> &inColumns =
+				node.indexInfoList_->getFirstColumns();
+
+		location.indexFirstColumns_ = ALLOC_NEW(alloc) util::Vector<uint32_t>(
+				inColumns.begin(), inColumns.end(), alloc);
+	}
+
+	{
+		const ProcPlan::Node::CommandOptionFlag &flags = node.cmdOptionFlag_;
+
+		location.expirable_ = ((flags &
+				ProcPlan::Node::Config::CMD_OPT_SCAN_EXPIRABLE) != 0);
+		location.indexActivated_ = ((flags &
+				ProcPlan::Node::Config::CMD_OPT_SCAN_INDEX) != 0);
+		location.multiIndexActivated_ = ((flags &
+				ProcPlan::Node::Config::CMD_OPT_SCAN_MULTI_INDEX) != 0);
+	}
+
+	return location;
 }
 
 
@@ -1552,16 +1790,21 @@ int64_t SQLProcessor::ValueUtils::intervalToAffinity(
 
 void SQLProcessor::DQLTool::decodeSimulationEntry(
 		const picojson::value &value, SimulationEntry &entry) {
-	static_cast<void>(value);
-	static_cast<void>(entry);
-	GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	JsonUtils::InStream in(value);
+
+	SQLOps::OpSimulator::Entry opEntry;
+	util::ObjectCoder().decode(in, opEntry);
+
+	entry = DQLProcs::ProcSimulator::toBaseEntry(opEntry);
 }
 
 void SQLProcessor::DQLTool::encodeSimulationEntry(
 		const SimulationEntry &entry, picojson::value &value) {
-	static_cast<void>(entry);
-	static_cast<void>(value);
-	GS_THROW_USER_ERROR(GS_ERROR_SQL_PROC_INTERNAL, "");
+	JsonUtils::OutStream out(value);
+
+	SQLOps::OpSimulator::Entry opEntry =
+			DQLProcs::ProcSimulator::toOpEntry(entry);
+	util::ObjectCoder().encode(out, opEntry);
 }
 
 void SQLProcessor::DQLTool::getInterruptionProfile(picojson::value &value) {

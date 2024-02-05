@@ -37,7 +37,7 @@
 #include "log_manager.h"
 #include "picojson.h"
 #include "sync_manager.h"
-#include <strstream> 
+#include "database_manager.h"
 
 using util::ValueFormatter;
 
@@ -51,7 +51,6 @@ using util::ValueFormatter;
 #ifndef _WIN32
 #include <signal.h>  
 #endif
-
 
 #define AUDIT_TRACE_USER_TYPE() 
 
@@ -72,7 +71,6 @@ using util::ValueFormatter;
 
 #define AUDIT_TRACE_ERROR_COMMAND() { \
 }
-
 
 typedef ObjectManagerV4 OCManager;
 
@@ -1006,6 +1004,18 @@ void SystemService::getGoalPartitions(
 	}
 }
 
+void SystemService::getDatabaseContraint(
+	util::StackAllocator& alloc, const ServiceTypeInfo& addressType,
+	DatabaseId dbId, picojson::value& result) {
+	try {
+		GS_TRACE_DEBUG(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
+			"Get Database constraint called");
+		txnSvc_->getManager()->getDatabaseManager().getExecutionConstraintList(dbId, result);
+	}
+	catch (std::exception& e) {
+		UTIL_TRACE_EXCEPTION(SYSTEM_SERVICE, e, "");
+	}
+}
 
 /*!
 	@brief Handles getStats command
@@ -2889,6 +2899,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 				response.setJson(result);
 			}
 		}
+
 		else if (request.pathElements_.size() >= 2 &&
 				 request.pathElements_[1] == "trace") {
 			if (request.pathElements_.size() == 2) {
@@ -3705,6 +3716,18 @@ void SystemService::ListenerSocketHandler::dispatch(
 				}
 			}
 			if (!isError) {
+				if (jobIdList.size() == 1) {
+					GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
+						"Cancel job called (jobId=" << jobIdList[0] << ")");
+				}
+				else {
+					util::NormalOStringStream oss;
+					oss <<  "Cancel job list called(jobIdList=";
+					CommonUtility::dumpValueList(oss, jobIdList);
+					oss << ")";
+					GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
+						oss.str().c_str());
+				}
 				jobManager->cancelAll(eventSource, alloc_, jobIdList, option);
 			}
 		}
@@ -3745,10 +3768,111 @@ void SystemService::ListenerSocketHandler::dispatch(
 				}
 			}
 			if (!isError) {
+				if (clientIdList.size() == 1) {
+					GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
+						"Cancel sql called (jobId=" << clientIdList[0] << ")");
+				}
+				else {
+					util::NormalOStringStream oss;
+					oss << "Cancel sql list called(jobIdList=";
+					CommonUtility::dumpValueList(oss, clientIdList);
+					oss << ")";
+					GS_TRACE_INFO(SYSTEM_SERVICE, GS_TRACE_SC_WEB_API_CALLED,
+						oss.str().c_str());
+				}
 				executionManager->cancelAll(eventSource, alloc_, clientIdList, option);
 			}
 		}
+		else if (request.pathElements_.size() == 3 &&
+			request.pathElements_[1] == "request" &&
+			request.pathElements_[2] == "constraint") {
+			SQLExecutionManager* executionManager = clsSvc_->getSQLService()->getExecutionManager();
+			DatabaseManager &dbManager = txnSvc_->getManager()->getDatabaseManager();
+			DatabaseId dbId = UNDEF_DBID;
+			int32_t mode = DatabaseManager::ExecutionConstraint::MODE_UNDEF;
+			if (request.parameterMap_.find("dbId") !=
+				request.parameterMap_.end()) {
+				if (!response.checkParamValue("dbId", dbId, false)) {
+					return;
+				}
+				if (dbId < 0 || dbId > MAX_DBID) {
+					dbId = UNDEF_DBID;
+				}
+			}
+			if (request.method_ == EBB_GET) {
+				picojson::value result;
+				dbManager.getExecutionConstraintList(dbId, result);
+				std::string jsonString(picojson::value(result).serialize());
+				if (request.parameterMap_.find("callback") !=
+					request.parameterMap_.end()) {
+					response.setJson(request.parameterMap_["callback"], result);
+				}
+				else {
+					response.setJson(result);
+				}
+			}
+			else {
+				if (request.parameterMap_.find("mode") !=
+					request.parameterMap_.end()) {
+					const std::string retStr = request.parameterMap_["mode"];
+					mode = DatabaseManager::ExecutionConstraint::getMode(retStr);
+					if (mode == DatabaseManager::ExecutionConstraint::MODE_UNDEF) {
+						util::NormalOStringStream oss;
+						oss << "Invalid mode name=" << retStr;
+						response.setError(WEBAPI_DB_INVALID_PARAMETER, oss.str().c_str(), 400);
+						return;
+					}
+					if (mode == DatabaseManager::ExecutionConstraint::MODE_DENY) {
+						if (request.parameterMap_.find("denyCommand") !=
+							request.parameterMap_.end()) {
+							const std::string retStr = request.parameterMap_["denyCommand"];
+							mode = DatabaseManager::ExecutionConstraint::getDenyMode(retStr);
+							if (mode == DatabaseManager::ExecutionConstraint::MODE_UNDEF) {
+								util::NormalOStringStream oss;
+								oss << "Invalid command name=" << retStr;
+								response.setError(WEBAPI_DB_INVALID_PARAMETER, oss.str().c_str(), 400);
+								return;
+							}
+						}
+						else {
+							mode = DatabaseManager::ExecutionConstraint::getDefaultDenyMode();
+						}
+					}
+				}
+				int64_t delayStartInterval = 0;
+				int64_t delayExecutionInterval = 0;
+				bool intervalSet1 = false;
+				bool intervalSet2 = false;
+				if (dbId >= 0 && request.parameterMap_.find("requestDelayTime") !=
+					request.parameterMap_.end()) {
+					if (!response.checkParamValue("requestDelayTime", delayStartInterval, true)) {
+						return;
+					}
+					intervalSet1 = true;
+				}
+				if (dbId >= 0 && request.parameterMap_.find("eventDelayTime") !=
+					request.parameterMap_.end()) {
+					if (!response.checkParamValue("eventDelayTime", delayExecutionInterval, true)) {
+						return;
+					}
+					intervalSet2 = true;
+				}
 
+				if (mode != DatabaseManager::ExecutionConstraint::MODE_UNDEF) {
+					if (mode == DatabaseManager::ExecutionConstraint::MODE_DELAY
+						&& !intervalSet1 && !intervalSet2) {
+						util::NormalOStringStream oss;
+						oss << "Invalid paramter, mode is DEALY but delay time is not defined";
+						response.setError(WEBAPI_DB_INVALID_PARAMETER, oss.str().c_str(), 400);
+						return;
+					}
+					else {
+						dbManager.putExecutionConsraint(dbId, mode,
+							static_cast<uint32_t>(delayStartInterval), static_cast<uint32_t>(delayExecutionInterval));
+					}
+				}
+			}
+		}
 
 		else if (request.pathElements_.size() > 3 &&
 				request.pathElements_[1] == "sql" &&
@@ -4155,6 +4279,12 @@ void SystemService::ListenerSocketHandler::dispatch(
 				}
 			}
 			else {
+				const ServiceTypeInfo& addressType =
+					getDefaultAddressType(request.parameterMap_);
+				if (addressType.first < 0) {
+					response.setBadRequestError();
+					return;
+				}
 				bool currentMode = clsMgr_->checkLoadBalance();
 				bool nextMode = true;
 				bool isSetted = false;
@@ -4190,6 +4320,23 @@ void SystemService::ListenerSocketHandler::dispatch(
 					}
 				}
 
+				bool optimized = false;
+				if (request.parameterMap_.find("optimize") !=
+					request.parameterMap_.end()) {
+					const std::string retStr = request.parameterMap_["optimize"];
+					if (retStr == "true") {
+						pt_->assignOptimalGoal(alloc_);
+						return;
+					}
+					else if (retStr == "false") {
+					}
+					else {
+						response.setMethodError();
+						return;
+					}
+					return;
+				}
+
 				if (isSetted) {
 					if (nextMode == true) {
 						clsMgr_->setUpdatePartition();
@@ -4219,7 +4366,7 @@ void SystemService::ListenerSocketHandler::dispatch(
 					}
 				}
 				const picojson::value *paramValue = request.jsonValue_.get();
-				if (!sysSvc_->setGoalPartitions(alloc_, paramValue, result)) {
+				if (!sysSvc_->setGoalPartitions(alloc_, addressType, paramValue, result)) {
 					response.setJson(result);
 					response.setBadRequestError();
 				}
@@ -4237,18 +4384,27 @@ void SystemService::ListenerSocketHandler::dispatch(
 }
 
 bool SystemService::setGoalPartitions(util::StackAllocator &alloc, 
+		const ServiceTypeInfo& addressType,
 		const picojson::value *paramValue, picojson::value &result) {
 	std::string reason;
 	try {
 
+	bool forSSL = addressType.second;
 	util::Map<NodeAddress, NodeId> addressMap(alloc);
 	util::Map<NodeAddress, NodeId>::iterator itMap;
 	util::Vector<NodeId> liveNodeIdList(alloc);
 	pt_->getLiveNodeIdList(liveNodeIdList);
 	for (size_t pos = 0; pos < liveNodeIdList.size(); pos++) {
 		NodeId nodeId = liveNodeIdList[pos];
-		NodeAddress &address = pt_->getNodeAddress(nodeId, SYSTEM_SERVICE);
-		addressMap.insert(std::make_pair(address, nodeId));
+		if (forSSL) {
+			NodeAddress address = pt_->getNodeAddress(nodeId, SYSTEM_SERVICE);
+			address.port_ = pt_->getSSLPortNo(nodeId);
+			addressMap.insert(std::make_pair(address, nodeId));
+		}
+		else {
+			NodeAddress &address = pt_->getNodeAddress(nodeId, SYSTEM_SERVICE);
+			addressMap.insert(std::make_pair(address, nodeId));
+		}
 	}
 	if (paramValue != NULL) {
 		util::Set<PartitionId> pIdSet(alloc);
@@ -4637,6 +4793,31 @@ void SystemService::WebAPIResponse::setAuthError() {
 	errorInfo["reason"] = picojson::value(reason);
 	setJson(picojson::value(errorInfo));
 	statusCode_ = 401;
+}
+
+void SystemService::WebAPIResponse::setError(int32_t errorNo, const char* reason, uint32_t status) {
+	picojson::object errorInfo;
+	errorInfo["errorStatus"] = picojson::value(static_cast<double>(errorNo));
+	errorInfo["reason"] = picojson::value(reason);
+	setJson(picojson::value(errorInfo));
+	statusCode_ = status;
+}
+
+bool SystemService::WebAPIResponse::checkParamValue(const char* paramName, int64_t& value, bool isInteger) {
+	assert(paramName);
+	assert(!request_.parameterMap_[paramName].empty());
+	if (paramName && SQLProcessor::ValueUtils::toLong(request_.parameterMap_[paramName].data(),
+		request_.parameterMap_[paramName].size(), value)) {
+		if (isInteger && (value >= UINT32_MAX || value < 0)) {
+		}
+		else {
+			return true;
+		}
+	}
+	util::NormalOStringStream oss;
+	oss << "Invalid parameter, name=" << paramName << ", value=" << request_.parameterMap_[paramName];
+	setError(WEBAPI_DB_INVALID_PARAMETER, oss.str().c_str(), 400);
+	return false;
 }
 
 void SystemService::WebAPIResponse::setBadRequestError() {

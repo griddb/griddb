@@ -853,8 +853,8 @@ private:
 	PartitionId pId_;  
 	Config config_;
 	ChunkManagerStats &chunkManagerStats_;
-	const int64_t MAX_CHUNK_ID;
 	int64_t blockCount_;
+	const int64_t MAX_CHUNK_ID;
 };
 
 struct ChunkManager::Coders {
@@ -896,6 +896,7 @@ inline MeshedChunkTable::Group* MeshedChunkTable::checkGroup(DSGroupId groupId) 
 inline void MeshedChunkTable::removeGroupFromMap(DSGroupId groupId) {
 	auto itr = groupMap_.find(groupId);
 	if (itr != groupMap_.end()) {
+		delete itr->second;  
 		groupMap_.erase(itr);
 	}
 }

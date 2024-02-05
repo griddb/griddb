@@ -92,7 +92,8 @@ public:
 	SQLValues::CompColumnList& remapCompColumnList(
 			ExprFactoryContext &cxt, const SQLValues::CompColumnList &src,
 			uint32_t input, bool front, bool keyOnly,
-			const util::Set<uint32_t> *keyPosSet) const;
+			const util::Set<uint32_t> *keyPosSet,
+			bool inputMapping = false) const;
 
 	static void createIdenticalProjection(
 			ExprFactoryContext &cxt, bool inputUnified, uint32_t input,
@@ -151,6 +152,9 @@ public:
 	static Expression* compColumnListToKeyFilterPredicate(
 			ExprFactoryContext &cxt, const SQLValues::CompColumnList &src,
 			bool first);
+
+	static Expression& replaceColumnToConstExpr(
+			ExprFactoryContext &cxt, Expression &expr);
 
 	static Expression& retainSingleInputPredicate(
 			ExprFactoryContext &cxt, Expression &expr, uint32_t input,
@@ -544,6 +548,7 @@ struct SQLExprs::IndexCondition {
 	bool isStatic() const;
 
 	bool isAndTop() const;
+	bool isBulkTop() const;
 
 	bool isBinded() const;
 
@@ -559,6 +564,8 @@ struct SQLExprs::IndexCondition {
 	size_t andOrdinal_;
 	size_t compositeAndCount_;
 	size_t compositeAndOrdinal_;
+	size_t bulkOrCount_;
+	size_t bulkOrOrdinal_;
 
 	IndexSpecId specId_;
 	IndexSpec spec_;
@@ -584,6 +591,7 @@ public:
 	void completeIndex();
 
 	void setMultiAndConditionEnabled(bool enabled);
+	void setBulkGrouping(bool enabled);
 
 	bool matchIndexList(const int32_t *indexList, size_t size) const;
 
@@ -624,10 +632,17 @@ public:
 	template<typename It, typename Accessor>
 	static size_t nextCompositeConditionDistance(
 			It beginIt, It endIt, const Accessor &accessor);
+	static size_t nextBulkConditionDistance(
+			ConditionList::const_iterator beginIt,
+			ConditionList::const_iterator endIt);
 
 private:
 	struct IndexFlagsEntry;
 	struct IndexMatch;
+
+	struct BulkPosition;
+	struct BulkRewriter;
+	struct BulkConditionLess;
 
 	typedef util::AllocVector<IndexSpec> SpecList;
 
@@ -684,13 +699,13 @@ private:
 	static void moveTailConditionToFront(
 			ConditionList::iterator beginIt, ConditionList::iterator tailIt);
 
-	static Condition makeNallower(
+	static Condition makeNarrower(
 			const Condition &cond1, const Condition &cond2);
-	static bool tryMakeNallower(
+	static bool tryMakeNarrower(
 			const Condition &cond1, const Condition &cond2,
 			Condition &retCond);
 
-	static Condition makeRangeNallower(
+	static Condition makeRangeNarrower(
 			const Condition &cond1, const Condition &cond2);
 	static Condition toRangeCondition(const Condition &cond);
 
@@ -778,6 +793,7 @@ private:
 	bool indexAvailable_;
 	bool placeholderAffected_;
 	bool multiAndConditionEnabled_;
+	bool bulkGrouping_;
 	bool complexReordering_;
 
 	bool completed_;
@@ -815,6 +831,86 @@ struct SQLExprs::IndexSelector::IndexMatch {
 
 	uint64_t penalty_;
 	bool completed_;
+};
+
+struct SQLExprs::IndexSelector::BulkPosition {
+public:
+	explicit BulkPosition(size_t pos);
+
+	size_t get() const;
+
+	bool operator<(const BulkPosition &another) const;
+
+private:
+	size_t pos_;
+};
+
+struct SQLExprs::IndexSelector::BulkRewriter {
+public:
+	BulkRewriter();
+
+	void rewrite(ConditionList &condList) const;
+
+	static int32_t comparePosition(
+			const BulkPosition &pos1, const BulkPosition &pos2);
+	static int32_t compareBulkCondition(
+			const ConditionList &condList, const BulkPosition &pos1,
+			const BulkPosition &pos2);
+
+private:
+	typedef util::Vector<BulkPosition> PositionList;
+
+	typedef std::pair<BulkPosition, BulkPosition> PositionPair;
+	typedef util::Vector<PositionPair> PositionPairList;
+
+	static void generateInitialPositions(
+			const ConditionList &condList, PositionList &posList);
+	static void arrangeBulkPositions(
+			const ConditionList &condList, PositionList &posList);
+	static void applyBulkPositions(
+			const PositionList &posList, ConditionList &condList);
+
+	static int32_t compareBulkTarget(
+			const ConditionList &condList, const BulkPosition &pos1,
+			const BulkPosition &pos2);
+	static int32_t compareBulkSpec(
+			const ConditionList &condList, const BulkPosition &pos1,
+			const BulkPosition &pos2);
+	static int32_t compareBulkValue(
+			const ConditionList &condList, const BulkPosition &pos1,
+			const BulkPosition &pos2);
+	static int32_t compareUIntValue(uint64_t value1, uint64_t value2);
+
+	static bool isBulkTarget(
+			const ConditionList &condList, const BulkPosition &pos);
+	static size_t getBulkUnitSize(
+			const ConditionList &condList, const BulkPosition &pos);
+
+	static void fillGroupOrdinals(
+			ConditionList &condList, size_t offset);
+	static size_t getGroupPositionCount(
+			const ConditionList &condList, const PositionList &posList,
+			size_t offset);
+	static bool isSameGroup(
+			const ConditionList &condList, const BulkPosition &pos1,
+			const BulkPosition &pos2);
+
+	static const Condition& getCondition(
+			const ConditionList &condList, const BulkPosition &pos);
+	static const Condition& getCondition(
+			const ConditionList &condList, size_t pos);
+
+	template<typename T>
+	static util::StackAllocator& getAllocator(util::Vector<T> &src);
+};
+
+struct SQLExprs::IndexSelector::BulkConditionLess {
+public:
+	explicit BulkConditionLess(const ConditionList &condList);
+	bool operator()(const BulkPosition &pos1, const BulkPosition &pos2) const;
+
+private:
+	const ConditionList &condList_;
 };
 
 struct SQLExprs::ExprTypeUtils {

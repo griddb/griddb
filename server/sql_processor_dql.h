@@ -44,6 +44,8 @@ struct DQLProcs {
 	class ProcResourceSet;
 	class ExtProcContext;
 
+	class ProcSimulator;
+
 	class OptionInput;
 	class OptionOutput;
 
@@ -124,6 +126,9 @@ private:
 	OpStore::Entry* findInputEntry(Context &cxt, InputId inputId);
 
 	OpCursor::Source getCursorSource(Context &cxt);
+	OpCursor::Source getCursorSourceForNext(Context &cxt);
+	OpCursor::Source getCursorSourceDetail(Context &cxt, bool forNext);
+
 	OpStore& prepareStore(Context &cxt);
 	SQLOps::ExtOpContext& getExtOpContext(Context &cxt);
 
@@ -166,7 +171,15 @@ private:
 	OpStoreId storeRootId_;
 	InputId inputIdOffset_;
 	util::AllocUniquePtr<DQLProcs::ExtProcContext> extCxt_;
+
 	Profiler profiler_;
+	util::AllocUniquePtr<DQLProcs::ProcSimulator> simulator_;
+};
+
+struct SQLOpUtils::AnalysisPartialInfo {
+	UTIL_OBJECT_CODER_MEMBERS(globalStatus_);
+
+	SQLProcessorConfig::PartialStatus globalStatus_;
 };
 
 class DQLProcs::ProcRegistrar {
@@ -213,8 +226,8 @@ public:
 	virtual TransactionService* getTransactionService() const;
 	virtual ClusterService* getClusterService() const;
 	virtual PartitionTable* getPartitionTable() const;
-	virtual DataStoreV4* getDataStore() const;
 	virtual PartitionList* getPartitionList() const;
+	virtual const DataStoreConfig* getDataStoreConfig() const;
 
 private:
 	SQLContext *baseCxt_;
@@ -242,6 +255,7 @@ public:
 
 	virtual bool isOnTransactionService();
 	virtual double getStoreMemoryAgingSwapRate();
+	virtual bool isAdministrator();
 
 	virtual uint32_t getTotalWorkerId();
 
@@ -250,6 +264,50 @@ private:
 
 	SQLContext *baseCxt_;
 	ProcResourceSet resourceSet_;
+};
+class DQLProcs::ProcSimulator {
+private:
+	typedef SQLProcessorConfig::Manager Manager;
+	typedef SQLOps::OpSimulator OpSimulator;
+
+public:
+	explicit ProcSimulator(Manager &manager);
+	~ProcSimulator();
+
+	SQLOps::OpSimulator* getOpSimulator();
+
+	uint32_t checkPartialMonitor(bool forNext);
+	SQLOpUtils::AnalysisPartialInfo* getPartialProfile();
+
+	static SQLOps::OpSimulator* tryCreate(
+			SQLProcessor::Context &cxt, Manager &manager,
+			util::AllocUniquePtr<ProcSimulator> &simulator,
+			SQLType::Id type, const SQLOps::OpPlan &plan);
+
+	static Manager::SimulationEntry toBaseEntry(const OpSimulator::Entry &src);
+	static OpSimulator::Entry toOpEntry(const Manager::SimulationEntry &src);
+
+private:
+	struct PartialInfo {
+		PartialInfo();
+
+		Manager::PartialId id_;
+		SQLOpUtils::AnalysisPartialInfo profile_;
+		bool pretendSuspendLast_;
+	};
+
+	static bool tryCreateOpSimulator(
+			SQLProcessor::Context &cxt, Manager &manager,
+			util::AllocUniquePtr<ProcSimulator> &simulator,
+			SQLType::Id type, const SQLOps::OpPlan &plan);
+	static bool tryCreatePartialMonitor(
+			SQLProcessor::Context &cxt, Manager &manager,
+			util::AllocUniquePtr<ProcSimulator> &simulator,
+			SQLType::Id type, const SQLOps::OpPlan &plan);
+
+	util::LocalUniquePtr<SQLOps::OpSimulator> opSimulator_;
+	util::LocalUniquePtr<PartialInfo> partialInfo_;
+	Manager &manager_;
 };
 
 class DQLProcs::OptionInput {
@@ -332,6 +390,8 @@ public:
 	void exportTo(OptionOutput &out);
 
 	SQLOps::OpCode toCode(SQLOps::OpCodeBuilder &builder) const;
+
+	static bool isInputIgnorable(const SQLOps::OpCode &code);
 
 private:
 	typedef BasicSubOption<CommonOption> Common;
@@ -474,34 +534,15 @@ public:
 	UTIL_OBJECT_CODER_ALLOC_CONSTRUCTOR;
 	UTIL_OBJECT_CODER_PARTIAL_OBJECT;
 
-	UTIL_OBJECT_CODER_MEMBERS(
-			UTIL_OBJECT_CODER_ENUM(
-					tableType_, SQLType::TABLE_CONTAINER, SQLType::Coder()),
-			UTIL_OBJECT_CODER_OPTIONAL(databaseVersionId_, 0),
-			UTIL_OBJECT_CODER_OPTIONAL(containerId_, 0U),
-			UTIL_OBJECT_CODER_OPTIONAL(schemaVersionId_, 0U),
-			UTIL_OBJECT_CODER_OPTIONAL(partitioningVersionId_, -1),
-			columnList_,
-			pred_,
-			UTIL_OBJECT_CODER_OPTIONAL(containerExpirable_, false),
-			UTIL_OBJECT_CODER_OPTIONAL(indexActivated_, false),
-			UTIL_OBJECT_CODER_OPTIONAL(multiIndexActivated_, false),
-			indexList_);
+	UTIL_OBJECT_CODER_MEMBERS(location_, columnList_, pred_);
 
 private:
-	SQLType::TableType tableType_;
-	int64_t databaseVersionId_;
+	static SQLOps::ContainerLocation getLocation(
+			util::StackAllocator &alloc, const ProcPlan::Node &node);
 
-	uint64_t containerId_;
-	uint32_t schemaVersionId_;
-	int64_t partitioningVersionId_;
-
+	SQLOps::ContainerLocation location_;
 	Expression *columnList_;
 	Expression *pred_;
-	bool containerExpirable_;
-	bool indexActivated_;
-	bool multiIndexActivated_;
-	util::Vector<int32_t> *indexList_;
 };
 
 class DQLProcs::SelectOption {

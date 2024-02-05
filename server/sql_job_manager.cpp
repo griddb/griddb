@@ -25,6 +25,8 @@
 #include "sql_processor_ddl.h"
 #include "sql_processor_result.h"
 
+#include "database_manager.h"
+#include "chunk_buffer.h"
 
 
 
@@ -160,8 +162,8 @@ JobManager::JobManager(SQLVariableSizeGlobalAllocator& globalVarAlloc,
 	dataStore_(NULL),
 	executionManager_(NULL),
 	currentCnt_(0),
-	txnConcurrency_(config.get<int32_t>(CONFIG_TABLE_DS_CONCURRENCY)),
 	sqlConcurrency_(config.get<int32_t>(CONFIG_TABLE_SQL_CONCURRENCY)),
+	txnConcurrency_(config.get<int32_t>(CONFIG_TABLE_DS_CONCURRENCY)),
 	sqlPgConfig_(KeyDataStore::MAX_PARTITION_NUM, sqlConcurrency_),
 	txnPgConfig_(config.get<int32_t>(CONFIG_TABLE_DS_PARTITION_NUM), txnConcurrency_),
 	sendRequestCount_(0)
@@ -247,26 +249,6 @@ Job* JobManager::create(JobId& jobId, JobInfo* jobInfo) {
 			job->incReference();
 			jobMap_.insert(std::make_pair(jobId, job));
 			return job;
-		}
-	}
-	catch (std::exception& e) {
-		GS_RETHROW_USER_OR_SYSTEM(e, "");
-	}
-}
-
-void JobManager::remove(JobId& jobId) {
-	try {
-		util::LockGuard<util::Mutex> guard(mutex_);
-		JobMapItr it = jobMap_.find(jobId);
-		if (it != jobMap_.end()) {
-			Job* job = (*it).second;
-			if (job->isCoordinator()) {
-				job->setCancel();
-			}
-			if (job->decReference()) {
-				ALLOC_VAR_SIZE_DELETE(globalVarAlloc_, job);
-			}
-			jobMap_.erase(it);
 		}
 	}
 	catch (std::exception& e) {
@@ -373,7 +355,7 @@ void JobManager::checkTimeout(EventContext& ec,
 	}
 }
 
-CancelOption::CancelOption(util::String& startTimeStr) : startTime_(0), forced_(false) {
+CancelOption::CancelOption(util::String& startTimeStr) : startTime_(0), forced_(false),allocateMemory_(0) {
 	if (startTimeStr.size() > 0) {
 		startTime_ = convertToTime(startTimeStr);
 	}
@@ -411,6 +393,9 @@ void JobManager::getProfiler(util::StackAllocator& alloc,
 				else {
 					continue;
 				}
+			}
+			if (!job->isDeployCompleted()) {
+				continue;
 			}
 			StatJobProfilerInfo jobProf(alloc, job->getJobId());
 			jobProf.id_ = jobCount++;
@@ -505,7 +490,11 @@ void JobManager::cancel(
 				return;
 			}
 		}
-
+		if (option.allocateMemory_> 0) {
+			if (job->getVarTotalSize() < option.allocateMemory_) {
+				return;
+			}
+		}
 		job->cancel(source, option);
 	}
 	catch (std::exception& e) {
@@ -515,33 +504,33 @@ void JobManager::cancel(
 
 Job::Job(JobId& jobId, JobInfo* jobInfo, JobManager* jobManager,
 	SQLVariableSizeGlobalAllocator& globalVarAlloc) :
-	jobId_(jobId),
 	jobManager_(jobManager),
 	jobStackAlloc_(*getStackAllocator()),
 	scope_(NULL),
 	globalVarAlloc_(globalVarAlloc),
 	noCondition_(globalVarAlloc_),
 	nodeList_(globalVarAlloc_),
-	taskList_(globalVarAlloc_),
-	taskStatList_(globalVarAlloc_),
-	deployCompletedCount_(0),
-	executeCompletedCount_(0),
-	taskCompletedCount_(0),
+	jobId_(jobId),
 	refCount_(1),
-	selfTaskNum_(0),
-	deployCompleted_(false),
+	coordinator_(jobInfo->coordinator_),
 	coordinatorNodeId_(jobInfo->coordinatorNodeId_),
 	cancelled_(false),
 	clientCancelled_(false),
 	status_(FW_JOB_INIT),
-	jobAllocateMemory_(0),
-	executionCount_(0),
-	coordinator_(jobInfo->coordinator_),
 	queryTimeout_(jobInfo->queryTimeout_),
 	expiredTime_(jobInfo->expiredTime_),
 	startTime_(jobInfo->startTime_),
 	startMonotonicTime_(jobInfo->startMonotonicTime_),
 	isSetJobTime_(jobInfo->isSetJobTime_),
+	selfTaskNum_(0),
+	deployCompleted_(false),
+	taskList_(globalVarAlloc_),
+	taskStatList_(globalVarAlloc_),
+	jobAllocateMemory_(0),
+	executionCount_(0),
+	deployCompletedCount_(0),
+	executeCompletedCount_(0),
+	taskCompletedCount_(0),
 	resultTaskId_(jobInfo->resultTaskId_),
 	connectedPId_(jobInfo->pId_),
 	syncContext_(jobInfo->syncContext_),
@@ -556,15 +545,21 @@ Job::Job(JobId& jobId, JobInfo* jobInfo, JobManager* jobManager,
 	sendRequestCount_(0),
 	limitPendingTime_(0),
 	sendVersion_(0),
-	point_(0),
 	sendJobCount_(0),
 	sendEventCount_(0),
 	deployCompleteTime_(0),
 	execStartTime_(0),
-	str_(NULL),
 	isSQL_(jobInfo->isSQL_),
 	storeMemoryAgingSwapRate_(jobInfo->storeMemoryAgingSwapRate_),
-	timezone_(jobInfo->timezone_)
+	timezone_(jobInfo->timezone_),
+	dbId_(jobInfo->dbId_),
+	dbName_(jobInfo->dbName_ ? jobInfo->dbName_ : "", jobStackAlloc_),
+	appName_(jobInfo->appName_ ? jobInfo->appName_ : "", jobStackAlloc_),
+	userName_(jobInfo->userName_ ? jobInfo->userName_ : "", jobStackAlloc_),
+	sql_(jobInfo->sql_ ? jobInfo->sql_ : "", jobStackAlloc_),
+	isAdministrator_(jobInfo->isAdministrator_),
+	delayTime_(jobInfo->delayTime_),
+	chunkSize_(0)
 {
 
 	setLimitedAssignNoList();
@@ -582,11 +577,13 @@ Job::Job(JobId& jobId, JobInfo* jobInfo, JobManager* jobManager,
 	}
 	scope_ = ALLOC_VAR_SIZE_NEW(globalVarAlloc_)
 		util::StackAllocator::Scope(jobStackAlloc_);
+	chunkSize_ = PartitionList::Config::getChunkSize(*jobManager_->getExecutionManager()->getManagerSet()->config_);
 }
 
 Job::~Job()
 {
-	for (size_t pos = 0;pos < taskList_.size(); pos++) {
+
+	for (size_t pos = 0; pos < taskList_.size(); pos++) {
 		Task* task = taskList_[pos];
 		if (task != NULL) {
 			ALLOC_VAR_SIZE_DELETE(globalVarAlloc_, task);
@@ -626,6 +623,12 @@ Task* Job::createTask(EventContext& ec, TaskId taskId,
 			noCondition_.push_back(
 				ALLOC_VAR_SIZE_NEW(globalVarAlloc_) Dispatch(task->taskId_, task->nodeId_,
 					0, task->getServiceType(), task->loadBalance_));
+		}
+		if (taskInfo->sqlType_ == SQLType::EXEC_RESULT) {
+			ResultProcessor* resultProcessor = static_cast<ResultProcessor*>(task->processor_);
+			if (resultProcessor) {
+				resultProcessor->getProfs().taskNum_ = jobInfo->taskInfoList_.size();
+			}
 		}
 		selfTaskNum_++;
 		return task;
@@ -671,13 +674,13 @@ JobManager::Job::Task::Task(Job* job, TaskInfo* taskInfo) :
 	dispatchTime_(0),
 	dispatchCount_(0),
 	status_(JobManager::TASK_EXEC_IDLE),
-	sendBlockCounter_(0),
 	tempTupleList_(globalVarAlloc_),
 	blockReaderList_(globalVarAlloc_),
 	recvBlockCounterList_(globalVarAlloc_),
-	inputStatusList_(globalVarAlloc_),
 	inputNo_(0),
 	startTime_(0),
+	sendBlockCounter_(0),
+	inputStatusList_(globalVarAlloc_),
 	taskId_(taskInfo->taskId_),
 	nodeId_(taskInfo->nodeId_),
 	cxt_(NULL),
@@ -693,7 +696,11 @@ JobManager::Job::Task::Task(Job* job, TaskInfo* taskInfo) :
 	scope_(NULL),
 	sendEventCount_(0),
 	sendEventSize_(0),
-	sendRequestCount_(0)
+	sendRequestCount_(0),
+	scanBufferHitCount_(0),
+	scanBufferMissHitCount_(0),
+	scanBufferSwapReadSize_(0),
+	scanBufferSwapWriteSize_(0)
 {
 	if (taskInfo->inputList_.size() == 0) {
 		immediate_ = true;
@@ -818,12 +825,8 @@ void Job::encodeProcessor(EventContext& ec,
 		currentOut << static_cast<uint32_t>(bodySize);
 		currentOut.base().position(endPos);
 	}
-	encodeOptional(currentOut, jobInfo);
-	if (!jobInfo->timezone_.isEmpty()) {
-		currentOut << jobInfo->timezone_.getOffsetMillis();
-	}
+	encodeOptional(currentOut);
 }
-
 
 void Job::checkCancel(const char* str, bool partitionCheck, bool nodeCheck) {
 
@@ -918,10 +921,10 @@ void JobManager::Job::cancel(EventContext& ec, bool clientCancel) {
 		try {
 			RAISE_OPERATION(SQLFailureSimulator::TARGET_POINT_3);
 			if (clientCancel) {
-				checkCancel("client", false);
+				checkCancel("client", false, true);
 			}
 			else {
-				checkCancel("internal", false);
+				checkCancel("internal", false, true);
 			}
 		}
 		catch (std::exception& e) {
@@ -1074,8 +1077,7 @@ void JobManager::Job::receiveTaskBlock(EventContext& ec,
 	jobManager_->addEvent(request, serviceType);
 }
 
-bool JobManager::Job::getTaskBlock(
-	TaskId taskId, InputId inputId, Task*& task,
+bool JobManager::Job::getTaskBlock(TaskId taskId, InputId inputId, Task*& task,
 	TupleList::Block& block, bool& isExistBlock) {
 	task = NULL;
 	util::LockGuard<util::Mutex> guard(mutex_);
@@ -1099,9 +1101,17 @@ void Job::checkMemoryLimit() {
 	}
 }
 
-int64_t Job::getVarTotalSize() {
+bool Job::checkTotalMemorySize() {
 
-	if (jobManager_->sqlSvc_->getJobMemoryLimit() == 0) {
+	if (jobManager_->sqlSvc_->getJobMemoryLimit() == 0 || jobManager_->sqlSvc_->getMemoryCheckCount() == 0) {
+		return false;
+	}
+	return true;
+}
+
+int64_t Job::getVarTotalSize(bool force) {
+
+	if (!force && checkTotalMemorySize()) {
 		return 0;
 	}
 
@@ -1109,138 +1119,110 @@ int64_t Job::getVarTotalSize() {
 	for (size_t pos = 0; pos < taskStatList_.size(); pos++) {
 		totalSize += taskStatList_[pos];
 	}
+	totalSize += jobStackAlloc_.getTotalSize();
 	return totalSize;
 }
 
-int64_t Job::getVarTotalSize(TaskId taskId) {
+int64_t Job::getTotalMemorySizeInternal(TaskId taskId) {
 
-	if (jobManager_->sqlSvc_->getJobMemoryLimit() == 0) {
-		return 0;
-	}
-
-	int32_t checkCounter = jobManager_->sqlSvc_->getMemoryCheckCount();
-	if (checkCounter == 0) {
-		return 0;
-	}
-
-	util::LockGuard<util::Mutex> guard(mutex_);
-	if (taskList_[taskId] == NULL) {
-		return 0;
-	}
 	Task* task = taskList_[taskId];
-	if (task->counter_ % checkCounter == 0) {
+	if (task && (task->counter_ % jobManager_->sqlSvc_->getMemoryCheckCount()) != 0) {
+		taskStatList_[taskId] = task->getAllocateMemory();
+		return taskStatList_[taskId];
 	}
 	else {
 		return 0;
 	}
-
-	const size_t count =
-		SQLVarSizeAllocator::TraitsType::FIXED_ALLOCATOR_COUNT;
-	util::AllocatorStats stats;
-	for (size_t i = 0; i < count; i++) {
-		task->processorVarAlloc_->base(i)->getStats(stats);
-	}
-	task->processorVarAlloc_->getStats(stats);
-	taskStatList_[taskId] = stats.values_[util::AllocatorStats::STAT_TOTAL_SIZE];
-	return taskStatList_[taskId];
 }
 
-int64_t Job::getDeployVarTotalSize(TaskId taskId) {
+int64_t Job::getVarTotalSize(TaskId taskId, bool isDeploy) {
 
-	if (jobManager_->sqlSvc_->getJobMemoryLimit() == 0) {
+	if (checkTotalMemorySize()) {
 		return 0;
 	}
-
-	int32_t checkCounter = jobManager_->sqlSvc_->getMemoryCheckCount();
-	if (checkCounter == 0) {
-		return 0;
-	}
-
-	if (taskList_[taskId] == NULL) {
-		return 0;
-	}
-	Task* task = taskList_[taskId];
-	if (task->counter_ % checkCounter == 0) {
+	if (isDeploy) {
+		return getTotalMemorySizeInternal(taskId);
 	}
 	else {
-		return 0;
+		util::LockGuard<util::Mutex> guard(mutex_);
+		return getTotalMemorySizeInternal(taskId);
 	}
-
-	const size_t count =
-		SQLVarSizeAllocator::TraitsType::FIXED_ALLOCATOR_COUNT;
-	util::AllocatorStats stats;
-	for (size_t i = 0; i < count; i++) {
-		task->processorVarAlloc_->base(i)->getStats(stats);
-	}
-	task->processorVarAlloc_->getStats(stats);
-	taskStatList_[taskId] = stats.values_[util::AllocatorStats::STAT_TOTAL_SIZE];
-	return taskStatList_[taskId];
 }
 
-void Job::getProfiler(util::StackAllocator& alloc,
-	StatJobProfilerInfo& jobProf, int32_t mode) {
-	util::LockGuard<util::Mutex> guard(mutex_);
+int64_t Job::Task::getAllocateMemory() {
+	util::AllocatorStats stats;
+	for (size_t i = 0; i < SQLVarSizeAllocator::TraitsType::FIXED_ALLOCATOR_COUNT; i++) {
+		processorVarAlloc_->base(i)->getStats(stats);
+	}
+	processorVarAlloc_->getStats(stats);
+	processorStackAlloc_->getStats(stats);
+	return stats.values_[util::AllocatorStats::STAT_TOTAL_SIZE];
+}
 
+bool Job::Task::getProfiler(util::StackAllocator& alloc, StatJobProfilerInfo& jobProf,
+	StatTaskProfilerInfo& taskProf, int32_t mode) {
 	LocalTempStore& store = jobManager_->getStore();
-	util::Mutex& statsMutex = store.getGroupStatsMapMutex();
+	LocalTempStore::GroupStatsMap& groupStatsMap = store.getGroupStatsMap();
 
-	int64_t taskVarTotalSize = 0;
-	int64_t jobVarTotalSize = 0;
+	int64_t allocateMemory = getAllocateMemory();
+	jobProf.allocateMemory_ += allocateMemory;
+	jobProf.sendEventCount_ += sendEventCount_;
+	jobProf.sendEventSize_ += sendEventSize_;
 
+	if (mode == 1 || (mode != 1 && status_ != TASK_EXEC_IDLE)) {
+		taskProf.id_ = taskId_;
+		taskProf.inputId_ = inputStatusList_.size();
+		taskProf.sendPendingCount_ = sendRequestCount_;
+		taskProf.counter_ = profilerInfo_->profiler_.executionCount_;
+		taskProf.dispatchCount_ = dispatchCount_;
+		taskProf.dispatchTime_ = dispatchTime_;
+		taskProf.status_ = getTaskExecStatusName(status_);
+		taskProf.name_ = getProcessorName(sqlType_);
+		taskProf.startTime_ = CommonUtility::getTimeStr(startTime_).c_str();
+		taskProf.allocateMemory_ = allocateMemory;
+		taskProf.worker_ = profilerInfo_->profiler_.worker_;
+		taskProf.actualTime_ = (profilerInfo_->profiler_.actualTime_ / 1000 / 1000);
+		taskProf.leadTime_ = profilerInfo_->lap();
+
+		getStoreProfiler(taskProf.scanBufferHitCount_,
+			taskProf.scanBufferMissHitCount_,
+			taskProf.scanBufferSwapReadSize_,
+			taskProf.scanBufferSwapWriteSize_);
+
+		util::Mutex& statsMutex = store.getGroupStatsMapMutex();
+		util::LockGuard<util::Mutex> guard(statsMutex);
+		LocalTempStore::GroupStatsMap::iterator it = groupStatsMap.find(group_.getId());
+		if (it != groupStatsMap.end()) {
+			taskProf.inputSwapRead_ = it->second.swapInCount_;
+			taskProf.inputSwapWrite_ = it->second.swapOutCount_;
+			taskProf.inputActiveBlockCount_ = it->second.activeBlockCount_;
+		}
+		if (setGroup_) {
+			LocalTempStore::GroupStatsMap::iterator it = groupStatsMap.find(processorGroupId_);
+			if (it != groupStatsMap.end()) {
+				taskProf.swapRead_ = it->second.swapInCount_;
+				taskProf.swapWrite_ = it->second.swapOutCount_;
+				taskProf.activeBlockCount_ = it->second.activeBlockCount_;
+			}
+		}
+		return true;
+	}
+	return false;
+}
+
+void Job::getProfiler(util::StackAllocator& alloc, StatJobProfilerInfo& jobProf, int32_t mode) {
+	
+	util::LockGuard<util::Mutex> guard(mutex_);
 	for (size_t pos = 0; pos < taskList_.size(); pos++) {
 		Task* task = taskList_[pos];
 		if (taskList_[pos] != NULL) {
-			const size_t count =
-				SQLVarSizeAllocator::TraitsType::FIXED_ALLOCATOR_COUNT;
-			util::AllocatorStats stats;
-			for (size_t i = 0; i < count; i++) {
-				task->processorVarAlloc_->base(i)->getStats(stats);
-			}
-			task->processorVarAlloc_->getStats(stats);
-			taskVarTotalSize = stats.values_[util::AllocatorStats::STAT_TOTAL_SIZE];
-			jobVarTotalSize += taskVarTotalSize;
-			task->processorStackAlloc_->getStats(stats);
-
-			if (mode == 1 || (mode != 1 && task->status_ != TASK_EXEC_IDLE)) {
-				StatTaskProfilerInfo taskProf(alloc);
-				taskProf.id_ = task->taskId_;
-				taskProf.inputId_ = task->inputNo_;
-				taskProf.sendPendingCount_ = task->sendRequestCount_;
-				taskProf.counter_ = task->profilerInfo_->profiler_.executionCount_;
-				taskProf.dispatchCount_ = task->dispatchCount_;
-				taskProf.dispatchTime_ = task->dispatchTime_;
-				taskProf.status_ = getTaskExecStatusName(task->status_);
-				taskProf.name_ = getProcessorName(task->sqlType_);
-				taskProf.startTime_ = CommonUtility::getTimeStr(task->startTime_).c_str();
-				taskProf.sendEventCount_ = task->sendEventCount_;
-				taskProf.sendEventSize_ = task->sendEventSize_;
-				taskProf.allocateMemory_ = taskVarTotalSize;
-				taskProf.worker_ = task->profilerInfo_->profiler_.worker_;
-				taskProf.actualTime_ = (task->profilerInfo_->profiler_.actualTime_ / 1000 / 1000);
-
-				util::LockGuard<util::Mutex> guard(statsMutex);
-				LocalTempStore::GroupStatsMap& groupStatsMap = store.getGroupStatsMap();
-
-				LocalTempStore::GroupStatsMap::iterator it = groupStatsMap.find(task->group_.getId());
-				if (it != groupStatsMap.end()) {
-					taskProf.inputSwapRead_ = it->second.swapInCount_;
-					taskProf.inputSwapWrite_ = it->second.swapOutCount_;
-					taskProf.inputActiveBlockCount_ = it->second.activeBlockCount_;
-				}
-				if (task->setGroup_) {
-					LocalTempStore::GroupStatsMap::iterator it = groupStatsMap.find(task->processorGroupId_);
-					if (it != groupStatsMap.end()) {
-						taskProf.swapRead_ = it->second.swapInCount_;
-						taskProf.swapWrite_ = it->second.swapOutCount_;
-						taskProf.activeBlockCount_ = it->second.activeBlockCount_;
-					}
-				}
-
+			StatTaskProfilerInfo taskProf(alloc);
+			if (task->getProfiler(alloc, jobProf, taskProf, mode)) {
 				jobProf.taskProfs_.push_back(taskProf);
 			}
 		}
 	}
-	jobProf.allocateMemory_ = jobVarTotalSize;
+	jobProf.sendPendingCount_ = sendRequestCount_;
 }
 
 void JobManager::Job::checkAsyncPartitionStatus() {
@@ -1272,7 +1254,6 @@ void Job::removeTask(TaskId taskId) {
 	util::LockGuard<util::Mutex> guard(mutex_);
 
 	Task* task = taskList_[taskId];
-
 	taskStatList_[taskId] = 0;
 
 	ALLOC_VAR_SIZE_DELETE(globalVarAlloc_, taskList_[taskId]);
@@ -1282,123 +1263,132 @@ void Job::removeTask(TaskId taskId) {
 void Job::deploy(EventContext& ec, util::StackAllocator& alloc,
 	JobInfo* jobInfo, NodeId senderNodeId, int64_t waitInterval) {
 
-	status_ = Job::FW_JOB_DEPLOY;
-	util::LockGuard<util::Mutex> guard(mutex_);
-	NodeId targetNodeId;
-	Task* task = NULL;
-	int32_t scanCounter = 0;
-	util::Set<NodeId> nodeSet(alloc);
+	try {
+		status_ = Job::FW_JOB_DEPLOY;
+		watch_.start();
 
-	if (senderNodeId != SELF_NODEID) {
-		taskCompletedCount_++;
-	}
+		util::LockGuard<util::Mutex> guard(mutex_);
+		NodeId targetNodeId;
+		Task* task = NULL;
+		int32_t scanCounter = 0;
+		util::Set<NodeId> nodeSet(alloc);
 
-	for (size_t pos = 0; pos < jobInfo->taskInfoList_.size(); pos++) {
-		TaskInfo* taskInfo = jobInfo->taskInfoList_[pos];
-		if (taskInfo->nodePos_ == UNDEF_NODEID
-			|| taskInfo->nodePos_ >= nodeList_.size()) {
-			GS_THROW_USER_ERROR(GS_ERROR_JOB_RESOLVE_NODE_FAILED,
-				"Resolve node failed, jobId = " << jobId_ << ", taskPos = " << pos);
+		if (senderNodeId != SELF_NODEID) {
+			taskCompletedCount_++;
 		}
-		taskInfo->nodeId_ = nodeList_[taskInfo->nodePos_];
-		if (taskInfo->sqlType_ == SQLType::EXEC_SCAN && taskInfo->inputList_.size() == 0) {
-			nodeSet.insert(taskInfo->nodeId_);
-			if (taskInfo->nodeId_ == 0) {
-				scanCounter++;
-			}
-		}
-	}
 
-	taskStatList_.assign(jobInfo->taskInfoList_.size(), 0);
-	for (size_t pos = 0; pos < jobInfo->taskInfoList_.size(); pos++) {
-		TaskInfo* taskInfo = jobInfo->taskInfoList_[pos];
-		targetNodeId = nodeList_[taskInfo->nodePos_];
-		if ((pos & UNIT_CHECK_COUNT) == 0) {
-			RAISE_OPERATION(SQLFailureSimulator::TARGET_POINT_5);
-			checkCancel("deploy", false);
-		}
-		if (coordinator_ && isExplainAnalyze_) {
-			dispatchNodeIdList_.push_back(targetNodeId);
-			dispatchServiceList_.push_back(taskInfo->type_);
-		}
-		task = NULL;
-		if (targetNodeId == SELF_NODEID
-			|| taskInfo->sqlType_ == SQLType::EXEC_RESULT) {
-			try {
-				task = createTask(ec, static_cast<TaskId>(pos), jobInfo, taskInfo);
-			}
-			catch (std::exception& e) {
-				GS_RETHROW_USER_OR_SYSTEM(e, "");
-			}
-			taskList_.push_back(task);
-			getDeployVarTotalSize(task->taskId_);
-		}
-		else {
-			taskList_.push_back(static_cast<Task*>(NULL));
-			if (coordinator_ && isExplainAnalyze_) {
-				appendProfiler();
-			}
-			if (!coordinator_) {
-				if (isDQLProcessor(jobInfo->taskInfoList_[pos]->sqlType_)) {
-					uint32_t size = 0;
-					(*jobInfo->inStream_) >> size;
-					const size_t startPos = (*jobInfo->inStream_).base().position();
-					(*jobInfo->inStream_).base().position(startPos + size);
-				}
-			}
-		}
-	}
-	checkCounter_.initLocal(scanCounter);
-	if (isCoordinator() && nodeSet.size() >= 1) {
-		checkCounter_.initGlobal(nodeSet.size());
-	}
-	int64_t totalSize = getVarTotalSize();
-
-	if (selfTaskNum_ > 0) {
-		int32_t outputId = 0;
-		size_t taskSize = taskList_.size();
 		for (size_t pos = 0; pos < jobInfo->taskInfoList_.size(); pos++) {
 			TaskInfo* taskInfo = jobInfo->taskInfoList_[pos];
-			for (InputId inputId = 0; inputId <
-				static_cast<InputId>(taskInfo->inputList_.size()); inputId++) {
-				TaskId inputTaskId = taskInfo->inputList_[inputId];
-				if (taskSize <= inputTaskId) {
-					GS_THROW_USER_ERROR(GS_ERROR_SQL_INTERNAL, "");
+			if (taskInfo->nodePos_ == UNDEF_NODEID
+				|| taskInfo->nodePos_ >= nodeList_.size()) {
+				GS_THROW_USER_ERROR(GS_ERROR_JOB_RESOLVE_NODE_FAILED,
+					"Resolve node failed, jobId = " << jobId_ << ", taskPos = " << pos);
+			}
+			taskInfo->nodeId_ = nodeList_[taskInfo->nodePos_];
+			if (taskInfo->sqlType_ == SQLType::EXEC_SCAN && taskInfo->inputList_.size() == 0) {
+				nodeSet.insert(taskInfo->nodeId_);
+				if (taskInfo->nodeId_ == 0) {
+					scanCounter++;
 				}
-				Task* inputTask = taskList_[inputTaskId];
-				if (inputTask == NULL) {
-					continue;
-				}
-				if (inputTask->outputDispatchList_.size() <= outputId) {
-					GS_THROW_USER_ERROR(GS_ERROR_SQL_INTERNAL, "");
-				}
-				inputTask->outputDispatchList_[outputId].push_back(
-					ALLOC_VAR_SIZE_NEW(globalVarAlloc_)
-					Dispatch(taskInfo->taskId_, taskInfo->nodeId_,
-						inputId, (ServiceType)taskInfo->type_, taskInfo->loadBalance_));
 			}
 		}
-	}
-	if (isCoordinator()) {
-		recvDeploySuccess(ec, waitInterval);
-		sendJobInfo(ec, jobInfo, waitInterval);
-	}
-	else {
-		decodeOptional(*jobInfo->inStream_);
-		sendJobEvent(ec, coordinatorNodeId_,
-			JobManager::FW_CONTROL_DEPLOY_SUCCESS,
-			NULL, NULL, -1, 0, 0, SQL_SERVICE,
-			false, false, (TupleList::Block*)NULL, waitInterval);
-		if (selfTaskNum_ == 1) {
-			sendJobEvent(ec, coordinatorNodeId_,
-				JobManager::FW_CONTROL_EXECUTE_SUCCESS,
-				NULL, NULL, 0, 0, connectedPId_,
-				SQL_SERVICE, false, false, static_cast<TupleList::Block*>(NULL));
-			jobManager_->remove(jobId_);
+
+		taskStatList_.assign(jobInfo->taskInfoList_.size(), 0);
+		for (size_t pos = 0; pos < jobInfo->taskInfoList_.size(); pos++) {
+			TaskInfo* taskInfo = jobInfo->taskInfoList_[pos];
+			targetNodeId = nodeList_[taskInfo->nodePos_];
+			if ((pos & UNIT_CHECK_COUNT) == 0) {
+				RAISE_OPERATION(SQLFailureSimulator::TARGET_POINT_5);
+				checkCancel("deploy", false, true);
+			}
+			if (coordinator_ && isExplainAnalyze_) {
+				dispatchNodeIdList_.push_back(targetNodeId);
+				dispatchServiceList_.push_back(taskInfo->type_);
+			}
+			task = NULL;
+			if (targetNodeId == SELF_NODEID
+				|| taskInfo->sqlType_ == SQLType::EXEC_RESULT) {
+				try {
+					task = createTask(ec, static_cast<TaskId>(pos), jobInfo, taskInfo);
+				}
+				catch (std::exception& e) {
+					GS_RETHROW_USER_OR_SYSTEM(e, "");
+				}
+				taskList_.push_back(task);
+				getVarTotalSize(task->taskId_, true);
+				}
+			else {
+				taskList_.push_back(static_cast<Task*>(NULL));
+				if (coordinator_ && isExplainAnalyze_) {
+					appendProfiler();
+				}
+				if (!coordinator_) {
+					if (isDQLProcessor(jobInfo->taskInfoList_[pos]->sqlType_)) {
+						uint32_t size = 0;
+						(*jobInfo->inStream_) >> size;
+						const size_t startPos = (*jobInfo->inStream_).base().position();
+						(*jobInfo->inStream_).base().position(startPos + size);
+					}
+				}
+			}
+			}
+		checkCounter_.initLocal(scanCounter);
+		if (isCoordinator() && nodeSet.size() >= 1) {
+			checkCounter_.initGlobal(nodeSet.size());
 		}
+		int64_t totalSize = getVarTotalSize();
+
+		if (selfTaskNum_ > 0) {
+			int32_t outputId = 0;
+			size_t taskSize = taskList_.size();
+			for (size_t pos = 0; pos < jobInfo->taskInfoList_.size(); pos++) {
+				TaskInfo* taskInfo = jobInfo->taskInfoList_[pos];
+				for (InputId inputId = 0; inputId <
+					static_cast<InputId>(taskInfo->inputList_.size()); inputId++) {
+					TaskId inputTaskId = taskInfo->inputList_[inputId];
+					if (taskSize <= inputTaskId) {
+						GS_THROW_USER_ERROR(GS_ERROR_SQL_INTERNAL, "");
+					}
+					Task* inputTask = taskList_[inputTaskId];
+					if (inputTask == NULL) {
+						continue;
+					}
+					if (inputTask->outputDispatchList_.size() <= outputId) {
+						GS_THROW_USER_ERROR(GS_ERROR_SQL_INTERNAL, "");
+					}
+					inputTask->outputDispatchList_[outputId].push_back(
+						ALLOC_VAR_SIZE_NEW(globalVarAlloc_)
+						Dispatch(taskInfo->taskId_, taskInfo->nodeId_,
+							inputId, (ServiceType)taskInfo->type_, taskInfo->loadBalance_));
+				}
+			}
+		}
+		if (isCoordinator()) {
+			recvDeploySuccess(ec, waitInterval);
+			sendJobInfo(ec, jobInfo, waitInterval);
+		}
+		else {
+			decodeOptional(*jobInfo->inStream_);
+			checkCancel("deploy", false, true);
+			sendJobEvent(ec, coordinatorNodeId_,
+				JobManager::FW_CONTROL_DEPLOY_SUCCESS,
+				NULL, NULL, -1, 0, 0, SQL_SERVICE,
+				false, false, (TupleList::Block*)NULL, waitInterval);
+			if (selfTaskNum_ == 1) {
+				sendJobEvent(ec, coordinatorNodeId_,
+					JobManager::FW_CONTROL_EXECUTE_SUCCESS,
+					NULL, NULL, 0, 0, connectedPId_,
+					SQL_SERVICE, false, false, static_cast<TupleList::Block*>(NULL));
+				jobManager_->remove(jobId_);
+			}
+		}
+		deployCompleted_ = true;
+		deployCompleteTime_ = util::DateTime::now(false).getUnixTime();
 	}
-	deployCompleted_ = true;
-	deployCompleteTime_ = util::DateTime::now(false).getUnixTime();
+	catch (std::exception& e) {
+		UTIL_TRACE_EXCEPTION(SQL_SERVICE, e, "");
+		GS_RETHROW_USER_OR_SYSTEM(e, "");
+	}
 }
 
 void Job::request(EventContext* ec, Event* ev, JobManager::ControlType controlType,
@@ -1408,7 +1398,6 @@ void Job::request(EventContext* ec, Event* ev, JobManager::ControlType controlTy
 	SQLService* sqlSvc = jobManager_->getSQLService();
 	try {
 		RAISE_OPERATION(SQLFailureSimulator::TARGET_POINT_6);
-		checkCancel("request", false);
 		switch (controlType) {
 		case FW_CONTROL_PIPE0: {
 			RAISE_OPERATION(SQLFailureSimulator::TARGET_POINT_11);
@@ -1419,6 +1408,7 @@ void Job::request(EventContext* ec, Event* ev, JobManager::ControlType controlTy
 		case FW_CONTROL_PIPE_FINISH:
 		case FW_CONTROL_FINISH:
 		case FW_CONTROL_NEXT: {
+			checkCancel("request", false);
 			RAISE_OPERATION(SQLFailureSimulator::TARGET_POINT_12);
 			executeTask(ec, ev, controlType, taskId, inputId,
 				isEmpty, isComplete, block, emTime, waitTime);
@@ -1437,6 +1427,7 @@ void Job::request(EventContext* ec, Event* ev, JobManager::ControlType controlTy
 
 void Job::executeJobStart(EventContext* ec, int64_t waitTime) {
 	try {
+		checkCancel("request", false, true);
 		for (size_t pos = 0; pos < noCondition_.size(); pos++) {
 			sendJobEvent(*ec, 0, FW_CONTROL_PIPE,
 				NULL, NULL, noCondition_[pos]->taskId_,
@@ -1454,7 +1445,7 @@ void Job::executeJobStart(EventContext* ec, int64_t waitTime) {
 	}
 }
 
-void ExecuteJobHandler::executeRequest(EventContext& ec, Event& ev,
+void SQLJobHandler::executeRequest(EventContext& ec, Event& ev,
 	EventByteInStream& in, JobId& jobId, JobManager::ControlType controlType) {
 	TaskId taskId = 0;
 	InputId inputId = 0;
@@ -1526,8 +1517,88 @@ void Job::setupTaskInfo(Task* task,
 	task->cxt_->setTimeZone(timezone_);
 }
 
+class ChunkBufferStatsSQLScope {
+public:
+	ChunkBufferStatsSQLScope(Task* task, PartitionGroupId pgId,
+		const PartitionListStats& plStats, bool isUseDatabaseStats, uint32_t chunkSize);
+
+	~ChunkBufferStatsSQLScope();
+
+	void set(ChunkBufferStatsSQL& stats);
+
+	void update(ChunkBufferStatsSQL& stats);
+
+	void setIgnore() {
+		setted_ = false;
+	}
+
+	bool isEnable() {
+		return setted_;
+	}
+
+	Task* getTask() {
+		return task_;
+	}
+
+private:
+	Task* task_;
+	PartitionGroupId pgId_;
+	const PartitionListStats& plStats_;
+	ChunkBufferStats bufStats_;
+	ChunkBufferStatsSQL prevStats_;
+	bool enable_;
+	bool setted_;
+	uint32_t chunkSize_;
+};
+
+ChunkBufferStatsSQLScope::ChunkBufferStatsSQLScope(Task* task, PartitionGroupId pgId,
+	const PartitionListStats& plStats, bool isUseDatabaseStats, uint32_t chunkSize) :
+	task_(task), pgId_(pgId), plStats_(plStats), bufStats_(NULL), enable_(isUseDatabaseStats), setted_(false), chunkSize_(chunkSize) {
+	if (enable_ && task->getServiceType() == TRANSACTION_SERVICE && task->getSQLType() == SQLType::EXEC_SCAN) {
+		setted_ = true;
+		set(prevStats_);
+	}
+}
+
+ChunkBufferStatsSQLScope::~ChunkBufferStatsSQLScope() {
+	if (setted_) {
+		ChunkBufferStatsSQL currentStats;
+		set(currentStats);
+		update(currentStats);
+		task_->setStoreProfiler(chunkSize_,
+			currentStats.table_(ChunkBufferStatsSQL::BUFFER_STATS_SQL_HIT_COUNT).get(),
+			currentStats.table_(ChunkBufferStatsSQL::BUFFER_STATS_SQL_MISS_HIT_COUNT).get(),
+			currentStats.table_(ChunkBufferStatsSQL::BUFFER_STATS_SQL_SWAP_READ_SIZE).get(),
+			currentStats.table_(ChunkBufferStatsSQL::BUFFER_STATS_SQL_SWAP_WRITE_SIZE).get());
+	}
+}
+
+void ChunkBufferStatsSQLScope::set(ChunkBufferStatsSQL& stats) {
+	plStats_.getPGChunkBufferStats(pgId_, bufStats_);
+	stats.table_(ChunkBufferStatsSQL::BUFFER_STATS_SQL_HIT_COUNT).set(
+		bufStats_.table_(ChunkBufferStats::BUF_STAT_HIT_COUNT).get());
+	stats.table_(ChunkBufferStatsSQL::BUFFER_STATS_SQL_MISS_HIT_COUNT).set(
+		bufStats_.table_(ChunkBufferStats::BUF_STAT_MISS_HIT_COUNT).get() +
+		bufStats_.table_(ChunkBufferStats::BUF_STAT_ALLOCATE_COUNT).get());
+	stats.table_(ChunkBufferStatsSQL::BUFFER_STATS_SQL_SWAP_READ_SIZE).set(
+		bufStats_.table_(ChunkBufferStats::BUF_STAT_SWAP_READ_SIZE).get());
+	stats.table_(ChunkBufferStatsSQL::BUFFER_STATS_SQL_SWAP_WRITE_SIZE).set(
+		bufStats_.table_(ChunkBufferStats::BUF_STAT_SWAP_WRITE_SIZE).get());
+}
+
+void ChunkBufferStatsSQLScope::update(ChunkBufferStatsSQL& stats) {
+	stats.table_(ChunkBufferStatsSQL::BUFFER_STATS_SQL_HIT_COUNT).subtract(
+		prevStats_.table_(ChunkBufferStatsSQL::BUFFER_STATS_SQL_HIT_COUNT).get());
+	stats.table_(ChunkBufferStatsSQL::BUFFER_STATS_SQL_MISS_HIT_COUNT).subtract(
+		prevStats_.table_(ChunkBufferStatsSQL::BUFFER_STATS_SQL_MISS_HIT_COUNT).get());
+	stats.table_(ChunkBufferStatsSQL::BUFFER_STATS_SQL_SWAP_READ_SIZE).subtract(
+		prevStats_.table_(ChunkBufferStatsSQL::BUFFER_STATS_SQL_SWAP_READ_SIZE).get());
+	stats.table_(ChunkBufferStatsSQL::BUFFER_STATS_SQL_SWAP_WRITE_SIZE).subtract(
+		prevStats_.table_(ChunkBufferStatsSQL::BUFFER_STATS_SQL_SWAP_WRITE_SIZE).get());
+}
+
 bool Job::pipeOrFinish(Task* task, TaskId inputId,
-	JobManager::ControlType controlType, TupleList::Block* block) {
+	JobManager::ControlType controlType, TupleList::Block* block, ChunkBufferStatsSQLScope* scope) {
 	try {
 		SQLContext& cxt = *task->cxt_;
 		bool remaining;
@@ -1550,6 +1621,9 @@ bool Job::pipeOrFinish(Task* task, TaskId inputId,
 		return remaining;
 	}
 	catch (std::exception& e) {
+		if (scope) {
+			scope->setIgnore();
+		}
 		task->endProcessor();
 		TRACE_TASK_END(task, inputId, controlType);
 		removeTask(task->taskId_);
@@ -1560,7 +1634,7 @@ bool Job::pipeOrFinish(Task* task, TaskId inputId,
 bool Job::executeContinuous(
 	EventContext& ec, Event& ev, Task* task, TaskId inputId,
 	JobManager::ControlType controlType, bool checkRemaining,
-	bool isEmpty, bool isComplete, EventMonotonicTime emTime) {
+	bool isEmpty, bool isComplete, EventMonotonicTime emTime, ChunkBufferStatsSQLScope* scope) {
 	bool remaining = checkRemaining;
 	SQLService* sqlSvc = jobManager_->getSQLService();
 	SQLContext& cxt = *task->cxt_;
@@ -1589,7 +1663,7 @@ bool Job::executeContinuous(
 				sendJobEvent(ec, 0, nextControlType,
 					NULL, NULL, task->taskId_,
 					inputId, task->loadBalance_, task->getServiceType(),
-					nextEmpty, isComplete, static_cast<TupleList::Block*>(NULL));
+					nextEmpty, isComplete, static_cast<TupleList::Block*>(NULL), delayTime_);
 				return false;
 			}
 			pending = true;
@@ -1612,6 +1686,12 @@ bool Job::executeContinuous(
 				}
 			}
 			catch (std::exception& e) {
+				if (scope) {
+					if (scope->isEnable()) {
+						UTIL_TRACE_EXCEPTION(SQL_SERVICE, e, "Exception is occured in executeContinuous (scanStatMode");
+					}
+					scope->setIgnore();
+				}
 				task->endProcessor();
 				TRACE_TASK_END(task, inputId, controlType);
 				removeTask(task->taskId_);
@@ -1646,7 +1726,7 @@ void Job::doComplete(EventContext& ec, Task* task, TaskId inputId,
 					else {
 						sendJobEvent(ec, 0, JobManager::FW_CONTROL_EXECUTE_SUCCESS,
 							NULL, NULL, 0, 0, connectedPId_,
-							SQL_SERVICE, false, false, static_cast<TupleList::Block*>(NULL));
+							SQL_SERVICE, false, false, static_cast<TupleList::Block*>(NULL), delayTime_);
 					}
 				}
 			}
@@ -1688,20 +1768,34 @@ void Job::executeTask(EventContext* ec, Event* ev,
 			return;
 		}
 		assert(task->processor_);
-		bool remaining = pipeOrFinish(
-			task, inputId, controlType, block);
-		if (isComplete) {
-			if (!task->completed_ && task->isDml_) {
-				int32_t loadBalance = task->loadBalance_;
-				sendJobEvent(*ec, 0, FW_CONTROL_FINISH, NULL, NULL, task->taskId_,
-					0, loadBalance, task->getServiceType(),
-					isEmpty, true, static_cast<TupleList::Block*>(NULL));
+		EventMonitor* monitor = (task->getServiceType() == TRANSACTION_SERVICE) ?
+			&getJobManager()->getTransactionService()->getManager()->getEventMonitor() :
+			&sqlSvc->getEventMonitor();
+		EventStart start(*ec, *ev,*monitor, getDbId(), false);
+		start.setType(task->getSQLType());
+
+		PartitionList& partitionList = *jobManager_->getExecutionManager()->getManagerSet()->partitionList_;
+		const PartitionListStats& plStats = partitionList.getStats();
+		PartitionGroupId pgId = ec->getWorkerId();
+		bool isUseScanStats = getJobManager()->getTransactionService()->getManager()->getDatabaseManager().isScanStats();
+		{
+			ChunkBufferStatsSQLScope scope(task, pgId, plStats, isUseScanStats, chunkSize_);
+
+			bool remaining = pipeOrFinish(
+				task, inputId, controlType, block, &scope);
+			if (isComplete) {
+				if (!task->completed_ && task->isDml_) {
+					int32_t loadBalance = task->loadBalance_;
+					sendJobEvent(*ec, 0, FW_CONTROL_FINISH, NULL, NULL, task->taskId_,
+						0, loadBalance, task->getServiceType(),
+						isEmpty, true, static_cast<TupleList::Block*>(NULL), delayTime_);
+					return;
+				}
+			}
+			if (!executeContinuous(*ec, *ev, task, inputId, controlType,
+				remaining, isEmpty, isComplete, emTime, &scope)) {
 				return;
 			}
-		}
-		if (!executeContinuous(*ec, *ev, task, inputId, controlType,
-			remaining, isEmpty, isComplete, emTime)) {
-			return;
 		}
 		if (controlType == FW_CONTROL_NEXT) {
 			if (task->isCompleted()) {
@@ -1718,7 +1812,7 @@ void Job::executeTask(EventContext* ec, Event* ev,
 			checkNextEvent(*ec, controlType, taskId, inputId);
 		}
 
-		int64_t total = getVarTotalSize(taskId);
+		int64_t total = getVarTotalSize(taskId, false);
 		jobAllocateMemory_ = getVarTotalSize();
 		checkMemoryLimit();
 	}
@@ -1736,6 +1830,7 @@ void Job::executeTask(EventContext* ec, Event* ev,
 void Job::sendJobInfo(EventContext& ec,
 	JobInfo* jobInfo, int64_t waitInterval) {
 	util::StackAllocator& alloc = ec.getAllocator();
+	checkCancel("deploy", false, true);
 	if (jobInfo->gsNodeInfoList_.size() > 1) {
 		try {
 			encodeProcessor(ec, alloc, jobInfo);
@@ -1747,7 +1842,12 @@ void Job::sendJobInfo(EventContext& ec,
 				else {
 					NodeId nodeId = resolveNodeId(nodeInfo);
 					util::Random random(jobInfo->startTime_);
-					waitInterval = EE_PRIORITY_HIGH;
+					if (waitInterval == 0 && delayTime_ == 0) {
+						waitInterval = EE_PRIORITY_HIGH;
+					}
+					else {
+						waitInterval += delayTime_;
+					}
 					sendJobEvent(ec, nodeId, FW_CONTROL_DEPLOY, jobInfo, NULL,
 						-1, 0, random.nextInt32(KeyDataStore::MAX_PARTITION_NUM),
 						SQL_SERVICE, false, false, (TupleList::Block*)NULL, waitInterval);
@@ -1757,7 +1857,6 @@ void Job::sendJobInfo(EventContext& ec,
 		}
 		catch (std::exception& e) {
 			UTIL_TRACE_EXCEPTION(SQL_SERVICE, e, "");
-
 		}
 	}
 }
@@ -1765,11 +1864,12 @@ void Job::sendJobInfo(EventContext& ec,
 void Job::recvDeploySuccess(EventContext& ec, int64_t waitInterval) {
 	try {
 		EventMonotonicTime emTime = -1;
+		checkCancel("deploy", false, true);
 		if (checkStart()) {
 			for (size_t pos = 0; pos < nodeList_.size(); pos++) {
 				if (nodeList_[pos] == SELF_NODEID) {
 					request(&ec, NULL, FW_CONTROL_PIPE0, -1, 0,
-						false, false, (TupleList::Block*)NULL, emTime, waitInterval);
+						false, false, (TupleList::Block*)NULL, emTime, delayTime_ + waitInterval);
 				}
 				else {
 					sendJobEvent(ec, nodeList_[pos], FW_CONTROL_PIPE0, NULL, NULL,
@@ -1789,6 +1889,7 @@ void Job::recvExecuteSuccess(
 		if (!isCoordinator()) {
 			return;
 		}
+		checkCancel("execute", false, true);
 		util::StackAllocator& alloc = ec.getAllocator();
 		JobProfilerInfo profs(alloc);
 		if (isExplainAnalyze_) {
@@ -1974,8 +2075,11 @@ void JobManager::Job::sendJobEvent(EventContext& ec, NodeId nodeId,
 			encodeProfiler(out);
 		}
 												   break;
+		case JobManager::FW_CONTROL_PIPE0: {
+			waitInterval = delayTime_;
+		}
+												   break;
 		case JobManager::FW_CONTROL_DEPLOY_SUCCESS:
-		case JobManager::FW_CONTROL_PIPE0:
 		case JobManager::FW_CONTROL_HEARTBEAT:
 		case JobManager::FW_CONTROL_CHECK_CONTAINER:
 		case JobManager::FW_CONTROL_CLOSE: {
@@ -1985,7 +2089,7 @@ void JobManager::Job::sendJobEvent(EventContext& ec, NodeId nodeId,
 			GS_THROW_USER_ERROR(
 				GS_ERROR_JOB_INVALID_CONTROL_TYPE, "");
 		}
-		jobManager_->sendEvent(request, serviceType, nodeId, 0, NULL, isSecondary);
+		jobManager_->sendEvent(request, serviceType, nodeId, waitInterval, NULL, isSecondary);
 	}
 	catch (std::exception& e) {
 		GS_RETHROW_USER_OR_SYSTEM(e, "");
@@ -2010,6 +2114,7 @@ void JobManager::Job::setProfiler(
 	util::LockGuard<util::Mutex> guard(mutex_);
 	for (size_t pos = 0; pos < profs.profilerList_.size(); pos++) {
 		TaskId taskId = profs.profilerList_[pos]->taskId_;
+		if (taskId >= profilerInfos_.profilerList_.size()) continue;
 		if (isRemote && resultTaskId_ == taskId) {
 		}
 		else {
@@ -2092,7 +2197,8 @@ void Job::Task::setupContextBase(
 		cxt->setTransactionService(txnSvc);
 		cxt->setTransactionManager(txnSvc->getManager());
 	}
-	cxt->setDataStore(jobManager->getExecutionManager()->getManagerSet()->partitionList_);
+	cxt->setDataStoreConfig(jobManager->getExecutionManager()->getManagerSet()->dsConfig_);
+	cxt->setPartitionList(jobManager->getExecutionManager()->getManagerSet()->partitionList_);
 	cxt->setExecutionManager(jobManager->getExecutionManager());
 	cxt->setJobManager(jobManager);
 }
@@ -2108,6 +2214,7 @@ void Job::Task::setupContextTask() {
 	if (job_->isSetJobTime_) {
 		cxt_->setJobStartTime(job_->startTime_);
 	}
+	cxt_->setAdministrator(job_->isAdministrator());
 }
 
 void Job::Task::setupProfiler(TaskInfo* taskInfo) {
@@ -2123,8 +2230,8 @@ void Job::Task::setupProfiler(TaskInfo* taskInfo) {
 	profilerInfo_->taskId_ = taskId_;
 	profilerInfo_->profiler_.worker_ = workerId;
 	if (job_->isExplainAnalyze() || jobManager_->getSQLService()->isEnableProfiler()) {
-		profilerInfo_->init(jobStackAlloc_, taskId_,
-			taskInfo->inputList_.size(), workerId, true);
+		profilerInfo_->init(jobStackAlloc_,
+			taskInfo->inputList_.size(), true);
 	}
 }
 
@@ -2180,6 +2287,8 @@ void ExecuteJobHandler::executeDeploy(EventContext& ec, Event& ev,
 			jobId, "ExecuteJobHandler::executeDeploy", jobManager_, JobManager::Latch::LATCH_CREATE, jobInfo);
 		Job* job = latch.get();
 		if (job) {
+			EventMonitor& monitor = sqlSvc_->getEventMonitor();
+			EventStart start(ec, ev, monitor, job->getDbId(), false);
 			job->deploy(ec, alloc, jobInfo, nodeId, 0);
 			recvPartitionId = job->getPartitionId();
 		}
@@ -2270,9 +2379,7 @@ void ExecuteJobHandler::operator()(EventContext& ec, Event& ev) {
 	NodeId nodeId = 0;
 	int32_t sqlVersionId;
 	PartitionId recvPartitionId = ev.getPartitionId();
-	EventStart eventStart(ec, ev,
-		jobManager_->getTransactionService()->getManager()->getEventMonitor(),
-		(getServiceType() == TRANSACTION_SERVICE));
+
 	try {
 		EventByteInStream in(ev.getInStream());
 		decodeRequestInfo(in, jobId, controlType, sqlVersionId);
@@ -2791,14 +2898,99 @@ void SQLJobHandler::encodeErrorInfo(EventByteOutStream& out,
 	StatementHandler::encodeException(out, e, 0);
 }
 
-void Job::decodeOptional(EventByteInStream& in) {
-	if (in.base().remaining() > 0) {
-		in >> storeMemoryAgingSwapRate_;
+void Job::encodeHeader(util::ByteStream<util::XArrayOutStream<> >& out, int32_t type, uint32_t size) {
+	out << type;
+	out << size;
+}
+
+void Job::decodeHeader(EventByteInStream& in, int32_t &type, uint32_t &size) {
+	in >> type;
+	in >> size;
+}
+
+void Job::encodeOptional(util::ByteStream<util::XArrayOutStream<> >& out) {
+	out << storeMemoryAgingSwapRate_;
+	out << timezone_.getOffsetMillis();
+
+	encodeHeader(out, OPTION_DB_ID, sizeof(DatabaseId));
+	out << dbId_;
+
+	if (dbId_ >= DBID_RESERVED_RANGE) {
+		encodeHeader(out, OPTION_DB_NAME, dbName_.size());
+		StatementHandler::encodeStringData<util::ByteStream<util::XArrayOutStream<> >>(out, dbName_.c_str());
 	}
-	if (in.base().remaining() > 0) {
-		int64_t offset;
-		in >> offset;
-		timezone_.setOffsetMillis(offset);
+
+	if (!userName_.empty()) {
+		encodeHeader(out, OPTION_USER_NAME, userName_.size());
+		StatementHandler::encodeStringData<util::ByteStream<util::XArrayOutStream<> >>(out, userName_.c_str());
+	}
+	
+	if (!appName_.empty()) {
+		encodeHeader(out, OPTION_APPLICATION_NAME, appName_.size());
+		StatementHandler::encodeStringData<util::ByteStream<util::XArrayOutStream<> >>(out, appName_.c_str());
+	}
+	if (delayTime_ > 0) {
+		encodeHeader(out, OPTION_DELAY_TIME, sizeof(delayTime_));
+		out << delayTime_;
+	}
+	encodeHeader(out, OPTION_ADMIN, sizeof(bool));
+	StatementHandler::encodeBooleanData<util::ByteStream<util::XArrayOutStream<> >>(out, isAdministrator_);
+}
+
+void Job::decodeOptional(EventByteInStream& in) {
+	in >> storeMemoryAgingSwapRate_;
+	if (in.base().remaining() == 0) {
+		return;
+	}
+	int64_t offset;
+	in >> offset;
+	timezone_.setOffsetMillis(offset);
+
+	while (in.base().remaining()) {
+		int32_t type = OPTION_MAX;
+		uint32_t bodySize = 0;
+		decodeHeader(in, type, bodySize);
+		const size_t bodyTopPos = in.base().position();
+		switch (type) {
+		case OPTION_AGING_SWAP_RATE:
+			in >> storeMemoryAgingSwapRate_;
+			break;
+		case OPTION_TIME_ZONE: {
+			int64_t offset;
+			in >> offset;
+			timezone_.setOffsetMillis(offset);
+		}
+			break;
+		case OPTION_DB_ID:
+			in >> dbId_;
+			break;
+		case OPTION_DB_NAME:
+			StatementHandler::decodeStringData<util::ByteStream<util::ArrayInStream>, util::String>(in, dbName_);
+			break;
+		case OPTION_APPLICATION_NAME:
+			StatementHandler::decodeStringData<util::ByteStream<util::ArrayInStream>, util::String>(in, appName_);
+			break;
+		case OPTION_USER_NAME:
+			StatementHandler::decodeStringData<util::ByteStream<util::ArrayInStream>, util::String>(in, userName_);
+			break;
+		case OPTION_SQL:
+			StatementHandler::decodeStringData<util::ByteStream<util::ArrayInStream>, util::String>(in, sql_);
+			break;
+		case OPTION_ADMIN:
+			StatementHandler::decodeBooleanData(in, isAdministrator_);
+			break;
+		case OPTION_DELAY_TIME:
+			in >> delayTime_;
+			break;
+		default:
+			in.base().position(bodyTopPos + bodySize);
+			break;
+		}
+	}
+	for (TaskId taskId = 0; taskId < taskList_.size(); taskId++) {
+		if (taskList_[taskId] != NULL) {
+			taskList_[taskId]->cxt_->setAdministrator(isAdministrator_);
+		}
 	}
 }
 
@@ -2809,10 +3001,7 @@ bool Job::isImmediateReply(EventContext* ec, ServiceType serviceType) {
 		== ec->getWorkerId());
 }
 
-void TaskProfilerInfo::init(util::StackAllocator& alloc, int32_t taskId,
-	int32_t size, int32_t workerId, bool enableTimer) {
-	taskId_ = taskId;
-	profiler_.worker_ = workerId;
+void TaskProfilerInfo::init(util::StackAllocator& alloc, int32_t size, bool enableTimer) {
 	profiler_.rows_ = ALLOC_NEW(alloc) util::Vector<int64_t>(size, 0, alloc);
 	profiler_.customData_ = ALLOC_NEW(alloc) util::XArray<uint8_t>(alloc);
 	enableTimer_ = enableTimer;
@@ -2822,7 +3011,7 @@ void TaskProfilerInfo::init(util::StackAllocator& alloc, int32_t taskId,
 }
 
 void TaskProfilerInfo::incInputCount(int32_t inputId, int32_t size) {
-	if (enableTimer_) {
+	if (enableTimer_ && profiler_.rows_) {
 		(*profiler_.rows_)[inputId] += size;
 	}
 }
@@ -2845,6 +3034,13 @@ void TaskProfilerInfo::end() {
 		watch_.reset();
 		watch_.start();
 	}
+}
+
+int64_t TaskProfilerInfo::lap() {
+	if (enableTimer_ && !completed_ && profiler_.executionCount_ > 0) {
+		return (watch_.currentClock() - startTime_) / 1000;
+	}
+	return 0;
 }
 
 void TaskProfilerInfo::complete() {
@@ -3013,10 +3209,6 @@ void JobManager::addEvent(Event& ev, ServiceType type) {
 	ee->add(ev);
 }
 
-void Job::encodeOptional(util::ByteStream<util::XArrayOutStream<> >& out,
-	JobInfo* jobInfo) {
-	out << jobInfo->storeMemoryAgingSwapRate_;
-}
 
 void JobManager::executeStatementError(EventContext& ec,
 	std::exception* e, JobId& jobId) {
@@ -3412,4 +3604,81 @@ bool Job::SchemaCheckCounter::checkAndSetPending() {
 
 bool Job::isEnableFetch() {
 	return checkCounter_.isEnableFetch();
+}
+
+std::string Job::getLongQueryForAudit(SQLExecution*execution) {
+
+	int64_t execTime = watch_.elapsedMillis();
+	if (execTime >= jobManager_->getSQLService()->getTraceLimitTime()) {
+		util::NormalOStringStream strstrm;
+		strstrm << "startTime=" << CommonUtility::getTimeStr(startTime_) << " executionTime=" << execTime;
+		return strstrm.str().c_str();
+	}
+	return "";
+}
+
+std::string Job::getLongQueryForEventLog(SQLExecution* execution) {
+	int64_t execTime = watch_.elapsedMillis();
+	if (execTime >= jobManager_->getSQLService()->getTraceLimitTime()) {
+		util::NormalOStringStream strstrm;
+		const SQLExecution::SQLExecutionContext& cxt = execution->getContext();
+		strstrm << "startTime=" << CommonUtility::getTimeStr(startTime_)
+			<< ", executionTime=" << execTime
+			<< ", dbName=" << cxt.getDBName()
+			<< ", applicationName=" << cxt.getApplicationName()
+			<< ", query=";
+
+		return strstrm.str().c_str();
+	}
+	return "";
+}
+
+void JobManager::getDatabaseStats(util::StackAllocator& alloc,
+	DatabaseId dbId, util::Map<DatabaseId, DatabaseStats*>& statsMap, bool isAdministrator) {
+	util::Vector<JobId> jobIdList(alloc);
+	getCurrentJobList(jobIdList);
+
+	for (size_t pos = 0; pos < jobIdList.size(); pos++) {
+		JobManager::Latch latch(jobIdList[pos], "getDatabaseStats", this);
+		Job* job = latch.get();
+		if (job) {
+			DatabaseId currentDbId = job->getDbId();
+			if (isAdministrator || currentDbId == dbId) {
+				auto stats = statsMap.find(currentDbId);
+				DatabaseStats* currentStats = NULL;
+				if (stats == statsMap.end()) {
+					statsMap[currentDbId] = ALLOC_NEW(alloc)  DatabaseStats;
+					currentStats = statsMap[currentDbId];
+				}
+				else {
+					currentStats = stats->second;
+				}
+				StatJobProfilerInfo jobProf(alloc, job->getJobId());
+				job->getProfiler(alloc, jobProf, 1);
+
+				bool pendingJob = false;
+				for (size_t i = 0; i < jobProf.taskProfs_.size(); i++) {
+					currentStats->jobStats_.allocateMemorySize_ += jobProf.taskProfs_[i].allocateMemory_;
+					currentStats->jobStats_.sqlStoreSize_ += jobProf.taskProfs_[i].inputActiveBlockCount_;
+					currentStats->jobStats_.sqlStoreSwapReadSize_ +=
+						(jobProf.taskProfs_[i].inputSwapRead_ + jobProf.taskProfs_[i].swapRead_);
+					currentStats->jobStats_.sqlStoreSwapReadSize_ +=
+						(jobProf.taskProfs_[i].inputSwapWrite_ + jobProf.taskProfs_[i].swapWrite_);
+					if (!pendingJob) {
+						if (jobProf.taskProfs_[i].sendEventCount_ > sqlSvc_->getSendPendingTaskLimit()) {
+							pendingJob = true;
+						}
+						if (jobProf.sendPendingCount_ > sqlSvc_->getSendPendingJobLimit()) {
+							pendingJob = true;
+						}
+					}
+
+				}
+				currentStats->jobStats_.taskCount_++;
+				if (pendingJob) {
+					currentStats->jobStats_.pendingJobCount_++;
+				}
+			}
+		}
+	}
 }

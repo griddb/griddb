@@ -16,6 +16,8 @@
 */
 #include "sql_command_manager.h"
 #include "sql_execution.h"
+#include "sql_job_manager.h"
+#include "database_manager.h"
 
 UTIL_TRACER_DECLARE(SQL_SERVICE);
 UTIL_TRACER_DECLARE(SQL_DETAIL);
@@ -41,6 +43,7 @@ DBConnection::DBConnection(
 		NoSQLStoreMap::key_compare(), globalVarAlloc),
 	pt_(pt),
 	partitionList_(partitionList),
+	dsConfig_(NULL),
 	sqlSvc_(sqlSvc) {
 
 	NoSQLStore* store = NULL;
@@ -702,6 +705,8 @@ void NoSQLStore::dropDatabase(
 		const NameWithCaseSensitivity gsDatabases(GS_DATABASES);
 		NoSQLContainer dropContainer(ec, gsDatabases, execution->getContext().getSyncContext(), execution);
 		dropContainer.dropDatabase(dbName.name_, option);
+		jobManager_->getTransactionService()->getManager()->getDatabaseManager().drop(execution->getContext().getDBId());
+		SQLExecution::updateRemoteCache(ec, jobManager_->getEE(SQL_SERVICE), pt_, execution->getContext().getDBId(), NULL, NULL, 0);
 	}
 	catch (std::exception& e) {
 		GS_RETHROW_USER_OR_SYSTEM(e, getCommandString(commandType)
@@ -724,6 +729,11 @@ void NoSQLStore::dropDatabase(
 class ClusterStatistics {
 
 	static const int32_t DEFAULT_OWNER_NOT_BALANCE_GAP = 5;
+	static const int32_t INTERVAL_ASSIGN_MODE_NORMAL = 0;
+	static const int32_t INTERVAL_ASSIGN_MODE_WORKER = 1;
+	static const int32_t INTERVAL_ASSIGN_MODE_OPTIMIZE = 2;
+	static const int32_t UNDEF_WORKER_GROUP_NO = -1;
+	static const int32_t UNDEF_WORKER_GROUP_POS = -1;
 
 public:
 
@@ -734,8 +744,16 @@ public:
 		ownerNodeIdList_(alloc), divideList_(alloc),
 		activeNodeList_(alloc), activeNodeMap_(alloc),
 		random_(seed),
-		useRandom_(false), ownerNotBalanceGap_(DEFAULT_OWNER_NOT_BALANCE_GAP),
-		largeContainerPId_(-1) {
+		useRandom_(false), 
+		ownerLoss_(false),
+		ownerNotBalanceGap_(DEFAULT_OWNER_NOT_BALANCE_GAP),
+		largeContainerPId_(UNDEF_CONTAINERID),
+		partitionDevideList_(alloc),
+		workerNum_(0), 
+		workerGroupNo_(UNDEF_WORKER_GROUP_NO),
+		workerGroupPos_(UNDEF_WORKER_GROUP_POS),
+		intervalAssignMode_(INTERVAL_ASSIGN_MODE_NORMAL) {
+
 		if (pt == NULL || partitionNum_ == 0) {
 			GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INTERNAL,
 				"Invalid cluster statistics parameter");
@@ -745,8 +763,7 @@ public:
 		pt_->getLiveNodeIdList(activeNodeList_);
 		activeNodeNum_ = activeNodeList_.size();
 		if (nodeNum_ == 0 || activeNodeNum_ == 0) {
-			GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_INVALID_NODE_ASSIGN,
-				"Active node is not found");
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_COMPILE_INVALID_NODE_ASSIGN, "Active node is not found");
 		}
 		assignCountList_.assign(activeNodeNum_, 0);
 		PartitionId partitionNum = pt_->getPartitionNum();
@@ -770,16 +787,19 @@ public:
 			ownerNodeIdList_[pId] = ownerNodeId;
 			if (ownerNodeId == UNDEF_NODEID || ownerNodeId >= nodeNum_) {
 				useRandom_ = true;
+				ownerLoss_ = true;
 				continue;
 			}
 			nodePos = activeNodeMap_[ownerNodeId];
 			if (nodePos == -1) {
 				useRandom_ = true;
+				ownerLoss_ = true;
 				continue;
 			}
 			assert(nodePos != -1);
 			divideList_[nodePos].push_back(pId);
 		}
+
 		int32_t max = INT32_MIN;
 		int32_t min = INT32_MAX;
 		int32_t count = 0;
@@ -794,6 +814,46 @@ public:
 		}
 		if ((max - min) > ownerNotBalanceGap_) {
 			useRandom_ = true;
+		}
+	}
+
+	void setOptionalIntervalAssignment(const PartitionGroupConfig& config, int32_t workerGroupNo, int32_t workerGroupPos, bool setGroupPositionOption) {
+		assert(workerNum_ >= 0);
+		if (ownerLoss_) {
+			return;
+		}
+		workerNum_ = config.getPartitionGroupCount();
+		workerGroupNo_ = workerGroupNo % workerNum_;
+		workerGroupPos_ = workerGroupPos;
+
+		if (partitionNum_ < workerNum_) {
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_PARAMETER,
+				"Worker number(" << workerNum_ << ") must be less than cluster partition number(" << partitionNum_ << ") in case of using interval_worker_group");
+		}
+		intervalAssignMode_ = INTERVAL_ASSIGN_MODE_WORKER;
+
+		for (int32_t i = 0; i < workerNum_; i++) {
+			util::Vector<PartitionId> tmpList(eventStackAlloc_);
+			util::Vector<PartitionId> ownerCountList(nodeNum_, eventStackAlloc_);
+			partitionDevideList_.push_back(tmpList);
+
+			PartitionId startPId = config.getGroupBeginPartitionId(i);
+			PartitionId endPId = config.getGroupEndPartitionId(i);
+			int32_t groupSize = endPId - startPId;
+			int32_t groupBasePId = (workerGroupPos != UNDEF_WORKER_GROUP_POS) ? startPId + workerGroupPos % groupSize : startPId;
+
+			for (PartitionId pId = groupBasePId; pId < endPId; pId++) {
+				partitionDevideList_[i].push_back(pId);
+				ownerCountList[ownerNodeIdList_[pId]]++;
+			}
+			for (PartitionId pId = startPId; pId < groupBasePId; pId++) {
+				partitionDevideList_[i].push_back(pId);
+				ownerCountList[ownerNodeIdList_[pId]]++;
+			}
+
+			if (workerGroupPos == UNDEF_WORKER_GROUP_POS) {
+				randomShuffle(partitionDevideList_[i], partitionDevideList_[i].size(), random_);
+			}
 		}
 	}
 
@@ -905,14 +965,14 @@ private:
 		}
 	};
 
-	void generateIntervalAssignment(util::Vector<PartitionId>& condenseIdList,
+	void generateIntervalBaseAssignment(util::Vector<PartitionId>& condenseIdList,
 		util::Vector<NodeAffinityNumber>& assignIdList) {
 
 		assignIdList.push_back(largeContainerPId_);
 		condenseIdList.assign(partitionNum_, 0);
 		int32_t nodePos;
 		if (useRandom_) {
-			for (PartitionId pId = 0;pId < partitionNum_; pId++) {
+			for (PartitionId pId = 0; pId < partitionNum_; pId++) {
 				condenseIdList[pId] = pId;
 			}
 			randomShuffle(condenseIdList, partitionNum_, random_);
@@ -959,6 +1019,85 @@ private:
 		}
 	};
 
+	void generateIntervalGroupAssignment(util::Vector<PartitionId>& condenseIdList,
+		util::Vector<NodeAffinityNumber>& assignIdList) {
+
+		assignIdList.push_back(largeContainerPId_);
+		condenseIdList.assign(partitionNum_, 0);
+
+		int32_t groupPos = workerGroupNo_;
+		int32_t currentWorkerGroupNo = 0;
+		int32_t nodePos = 0;
+
+		uint32_t minVal = UINT32_MAX;
+		util::Vector<int32_t> candList(eventStackAlloc_);
+
+		for (int32_t pos = 0; pos < partitionNum_; pos++) {
+			bool assigned = false;
+			minVal = UINT32_MAX;
+			candList.clear();
+			if (workerGroupPos_ == UNDEF_WORKER_GROUP_POS) {
+				for (nodePos = 0; nodePos < activeNodeNum_; nodePos++) {
+					if (minVal > assignCountList_[nodePos]) {
+						minVal = assignCountList_[nodePos];
+					}
+				}
+				for (nodePos = 0; nodePos < activeNodeNum_; nodePos++) {
+					if (minVal == assignCountList_[nodePos]) {
+						candList.push_back(nodePos);
+					}
+				}
+				randomShuffle(candList, candList.size(), random_);
+			}
+			for (int32_t i = 0; i < workerNum_; i++) {
+				currentWorkerGroupNo = groupPos++ % workerNum_;
+				if (partitionDevideList_[currentWorkerGroupNo].empty()) continue;
+				if (workerGroupPos_ != UNDEF_WORKER_GROUP_POS) {
+					condenseIdList[pos] = partitionDevideList_[currentWorkerGroupNo].front();
+					partitionDevideList_[currentWorkerGroupNo].erase(partitionDevideList_[currentWorkerGroupNo].begin());
+				}
+				else {
+					for (int32_t j = 0; j < candList.size(); j++) {
+						for (int32_t k = 0; k < partitionDevideList_[currentWorkerGroupNo].size(); k++) {
+							if (ownerNodeIdList_[partitionDevideList_[currentWorkerGroupNo][k]] == candList[j]) {
+								condenseIdList[pos] = partitionDevideList_[currentWorkerGroupNo][k];
+								partitionDevideList_[currentWorkerGroupNo].erase((partitionDevideList_[currentWorkerGroupNo].begin() + k));
+								assigned = true;
+								break;
+							}
+						}
+						if (assigned) break;
+					}
+					if (!assigned) {
+						int32_t targetPos = random_.nextInt32(static_cast<int32_t>(partitionDevideList_[currentWorkerGroupNo].size()));
+						condenseIdList[pos] = partitionDevideList_[currentWorkerGroupNo][targetPos];
+						partitionDevideList_[currentWorkerGroupNo].erase((partitionDevideList_[currentWorkerGroupNo].begin() + targetPos));
+					}
+				}
+				assigned = true;
+				break;
+			}
+			if (!assigned) {
+				GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INTERNAL, "");
+			}
+		}
+	};
+
+	void generateIntervalAssignment(util::Vector<PartitionId>& condenseIdList,
+		util::Vector<NodeAffinityNumber>& assignIdList) {
+		switch (intervalAssignMode_) {
+		case INTERVAL_ASSIGN_MODE_NORMAL:
+			generateIntervalBaseAssignment(condenseIdList, assignIdList);
+			break;
+		case INTERVAL_ASSIGN_MODE_WORKER:
+			generateIntervalGroupAssignment(condenseIdList, assignIdList);
+			break;
+		default:
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INTERNAL, "");
+			break;
+		}
+	}
+
 	void generateIntervalHashAssignment(util::Vector<PartitionId>& condenseIdList,
 		util::Vector<NodeAffinityNumber>& assignIdList) {
 		generateIntervalAssignment(condenseIdList, assignIdList);
@@ -980,8 +1119,14 @@ private:
 	util::Vector<PartitionId> activeNodeMap_;
 	util::Random random_;
 	bool useRandom_;
+	bool ownerLoss_;
 	int32_t ownerNotBalanceGap_;
 	PartitionId largeContainerPId_;
+	util::Vector<util::Vector<PartitionId>> partitionDevideList_;
+	int32_t workerNum_;
+	int32_t workerGroupNo_;
+	int32_t workerGroupPos_;
+	int32_t intervalAssignMode_;
 };
 
 void NoSQLStore::createTable(
@@ -989,7 +1134,7 @@ void NoSQLStore::createTable(
 	SQLExecution* execution,
 	const NameWithCaseSensitivity& dbName,
 	const NameWithCaseSensitivity& tableName,
-	CreateTableOption& createTableOption, DDLBaseInfo* baseInfo) {
+	const CreateTableOption& createTableOption, DDLBaseInfo* baseInfo) {
 	DDLCommandType commandType = DDL_CREATE_TABLE;
 	TableSchemaInfo* schemaInfo = NULL;
 	NoSQLStoreOption option(execution);
@@ -1105,6 +1250,7 @@ void NoSQLStore::createTable(
 		int32_t primaryKeyColumnId = -1;
 		util::Vector<ColumnId> primaryKeyList(alloc);
 		NoSQLUtils::checkPrimaryKey(alloc, createTableOption, primaryKeyList);
+		bool isTimestampFamily = false;
 
 		if (isPartitioning) {
 			const util::String& partitioningColumnName =
@@ -1231,6 +1377,7 @@ void NoSQLStore::createTable(
 				TupleList::TupleColumnType columnType
 					= (*createTableOption.columnInfoList_)[partitionColumnId]->type_;
 				if (TupleColumnTypeUtils::isTimestampFamily(columnType)) {
+					isTimestampFamily = true;
 					if (createTableOption.optIntervalUnit_ !=
 						util::DateTime::FIELD_DAY_OF_MONTH) {
 						GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_PARAMETER,
@@ -1363,6 +1510,69 @@ void NoSQLStore::createTable(
 			partitioningInfo.intervalValue_ = intervalValue;
 			partitioningInfo.intervalUnit_ = intervalUnit;
 
+			bool setIntervalOption = false;
+			bool setIntervalPosition = false;
+			if (createTableOption.propertyMap_) {
+				SyntaxTree::DDLWithParameterMap& paramMap = *createTableOption.propertyMap_;
+				SyntaxTree::DDLWithParameterMap::iterator it;
+				it = paramMap.find(DDLWithParameter::INTERVAL_WORKER_GROUP);
+				if (it != paramMap.end()) {
+					if (partitioningType != SyntaxTree::TABLE_PARTITION_TYPE_RANGE) {
+						GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_PARAMETER,
+							"Interval_worker_group must be specified for interval partitioning table");
+					}
+					if (!isTimestampFamily) {
+						GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_PARAMETER,
+							"Partitioning column type of interval_worker_group must be TIMESTAMP");
+					}
+					TupleValue& value = (*it).second;
+					if (value.getType() != TupleList::TYPE_LONG) {
+						GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_PARAMETER,
+							"Partitioning column type of interval_worker_group must be TIMESTAMP");
+					}
+					int64_t currentValue = value.get<int64_t>();
+					if (currentValue > INT32_MAX - 1) {
+						GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_PARAMETER,
+							"Value of Interval_worker_group(" << currentValue << ") must be less than max value of integer");
+					}
+					if (currentValue < 0) {
+						GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_PARAMETER,
+							"Value of Interval_worker_group(" << currentValue << ") must be positive value");
+					}
+					partitioningInfo.setIntervalWorkerGroup(static_cast<uint32_t>(currentValue));
+					setIntervalOption = true;
+				}
+				it = paramMap.find(DDLWithParameter::INTERVAL_WORKER_GROUP_POSITION);
+				if (it != paramMap.end()) {
+					if (partitioningType != SyntaxTree::TABLE_PARTITION_TYPE_RANGE) {
+						GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_PARAMETER,
+							"Interval_worker_group_position must be specified for interval partitioning table");
+					}
+					if (!setIntervalOption) {
+						GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_PARAMETER, 
+							"'Interval_worker_group_position  must be specified with interval_worker_group");
+					}
+					TupleValue& value = (*it).second;
+					if (value.getType() != TupleList::TYPE_LONG) {
+						GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_PARAMETER,
+							"Partitioning column type of interval_worker_group_position must be TIMESTAMP");
+					}
+					int64_t currentValue = value.get<int64_t>();
+					if (currentValue > INT32_MAX - 1) {
+						GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_PARAMETER,
+							"Value of Interval_worker_group_position(" << currentValue << ") must be less than max value of integer");
+					}
+					int32_t groupPos = static_cast<uint32_t>(currentValue);
+					if (groupPos < -1) {
+						GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_PARAMETER,
+							"Value of Interval_worker_group_position(" << currentValue << ") must be larger than minus 1");
+					}
+					partitioningInfo.setIntervalWorkerGroupPosition(groupPos);
+					setIntervalOption = true;
+					setIntervalPosition = true;
+				}
+			}
+
 			int64_t seed = util::DateTime::now(TRIM_MILLISECONDS).getUnixTime();
 			ClientId& clientId = execution->getContext().getId();
 			const uint32_t crcValue1 = util::CRC32::calculate(
@@ -1372,6 +1582,10 @@ void NoSQLStore::createTable(
 			seed += (crcValue1 + crcValue2 + clientId.sessionId_ + baseInfo->execId_);
 
 			ClusterStatistics clusterStat(alloc, pt_, partitioningInfo.partitioningNum_, seed);
+			if (setIntervalOption) {
+				clusterStat.setOptionalIntervalAssignment(jobManager_->getTransactionService()->getManager()->getPartitionGroupConfig(),
+					partitioningInfo.getIntervalWorkerGroup(), partitioningInfo.getIntervalWorkerGroupPosition(), setIntervalPosition);
+			}
 			util::Vector<PartitionId> condensedPartitionIdList(alloc);
 			util::Vector<NodeAffinityNumber> assignNumberList(alloc);
 			clusterStat.generateStatistics(createTableOption.partitionType_,
@@ -1488,6 +1702,19 @@ void NoSQLStore::createTable(
 			}
 		}
 		else {
+			if (createTableOption.propertyMap_) {
+				SyntaxTree::DDLWithParameterMap& paramMap = *createTableOption.propertyMap_;
+				SyntaxTree::DDLWithParameterMap::iterator it;
+				it = paramMap.find(DDLWithParameter::INTERVAL_WORKER_GROUP);
+				if (it != paramMap.end()) {
+					GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_PARAMETER, "interval_worker_group must be specified for interval partitioning");
+				}
+				it = paramMap.find(DDLWithParameter::INTERVAL_WORKER_GROUP_POSITION);
+				if (it != paramMap.end()) {
+					GS_THROW_USER_ERROR(GS_ERROR_SQL_DDL_INVALID_PARAMETER, "interval_worker_group_position must be specified for interval partitioning");
+				}
+			}
+			
 			currentContainer = ALLOC_NEW(alloc) NoSQLContainer(ec,
 				tableName, execution->getContext().getSyncContext(), execution);
 
@@ -1565,7 +1792,7 @@ void NoSQLStore::createView(
 	SQLExecution* execution,
 	const NameWithCaseSensitivity& dbName,
 	const NameWithCaseSensitivity& tableName,
-	CreateTableOption& createTableOption, DDLBaseInfo* baseInfo) {
+	const CreateTableOption& createTableOption, DDLBaseInfo* baseInfo) {
 	DDLCommandType commandType = DDL_CREATE_VIEW;
 	TableSchemaInfo* schemaInfo = NULL;
 	NoSQLStoreOption option(execution);
@@ -1863,7 +2090,7 @@ void NoSQLStore::createIndex(
 	const NameWithCaseSensitivity& dbName,
 	const NameWithCaseSensitivity& indexName,
 	const NameWithCaseSensitivity& tableName,
-	CreateIndexOption& indexOption,
+	const CreateIndexOption& indexOption,
 	DDLBaseInfo* baseInfo) {
 
 	util::StackAllocator& alloc = ec.getAllocator();
@@ -2544,11 +2771,11 @@ public:
 private:
 	util::Stopwatch watch_;
 	SQLExecutionManager* executionManager_;
-	int32_t timeout_;
 	const char* tableName_;
-	SyntaxTree::TablePartitionType type_;
+	int32_t timeout_;
 	int32_t searchCount_;
 	int32_t skipCount_;
+	SyntaxTree::TablePartitionType type_;
 };
 
 bool NoSQLStore::getTable(
@@ -2826,7 +3053,7 @@ void DBConnection::createTable(EventContext& ec,
 	SQLExecution* execution,
 	const NameWithCaseSensitivity& dbName,
 	const NameWithCaseSensitivity& tableName,
-	CreateTableOption& createTableOption, DDLBaseInfo* baseInfo) {
+	const CreateTableOption& createTableOption, DDLBaseInfo* baseInfo) {
 	NoSQLStore* command = getNoSQLStore(
 		execution->getContext().getDBId(), execution->getContext().getDBName());
 	command->createTable(ec,
@@ -2837,7 +3064,7 @@ void DBConnection::createView(EventContext& ec,
 	SQLExecution* execution,
 	const NameWithCaseSensitivity& dbName,
 	const NameWithCaseSensitivity& tableName,
-	CreateTableOption& createTableOption, DDLBaseInfo* baseInfo) {
+	const CreateTableOption& createTableOption, DDLBaseInfo* baseInfo) {
 	NoSQLStore* command = getNoSQLStore(
 		execution->getContext().getDBId(), execution->getContext().getDBName());
 	command->createView(ec,
@@ -2915,7 +3142,7 @@ void DBConnection::createIndex(EventContext& ec,
 	const NameWithCaseSensitivity& dbName,
 	const NameWithCaseSensitivity& indexName,
 	const NameWithCaseSensitivity& tableName,
-	CreateIndexOption& option, DDLBaseInfo* baseInfo) {
+	const CreateIndexOption& option, DDLBaseInfo* baseInfo) {
 	NoSQLStore* command = getNoSQLStore(
 		execution->getContext().getDBId(), execution->getContext().getDBName());
 	command->createIndex(ec,
@@ -3350,7 +3577,7 @@ void NoSQLStore::addColumn(
 	SQLExecution* execution,
 	const NameWithCaseSensitivity& dbName,
 	const NameWithCaseSensitivity& tableName,
-	CreateTableOption& createTableOption, DDLBaseInfo* baseInfo) {
+	const CreateTableOption& createTableOption, DDLBaseInfo* baseInfo) {
 	DDLCommandType commandType = DDL_ADD_COLUMN;
 	TableSchemaInfo* schemaInfo = NULL;
 	NoSQLStoreOption option(execution);
@@ -3946,7 +4173,7 @@ void NoSQLStore::execNoSQL(DDLSource& ddlSource, NoSQLContainer& targetContainer
 	}
 }
 
-NoSQLStore::RenameColumnContext::RenameColumnContext(CreateTableOption& createTableOption) :
+NoSQLStore::RenameColumnContext::RenameColumnContext(const CreateTableOption& createTableOption) :
 	oldColumnName_(NULL), newColumnName_(NULL),
 	oldColumnNameId_(-1), newColumnNameId_(-1) {
 
@@ -4070,7 +4297,7 @@ void NoSQLStore::renameColumn(
 	SQLExecution* execution,
 	const NameWithCaseSensitivity& dbName,
 	const NameWithCaseSensitivity& tableName,
-	CreateTableOption& createTableOption, DDLBaseInfo* baseInfo) {
+	const CreateTableOption& createTableOption, DDLBaseInfo* baseInfo) {
 
 	DDLCommandType commandType = DDL_RENAME_COLUMN;
 	DDLSource ddlSource(ec.getAllocator(), ec, execution, dbName, tableName,
@@ -4102,7 +4329,7 @@ void NoSQLStore::renameColumn(
 void DBConnection::addColumn(EventContext& ec, SQLExecution* execution,
 	const NameWithCaseSensitivity& dbName,
 	const NameWithCaseSensitivity& tableName,
-	CreateTableOption& createTableOption, DDLBaseInfo* baseInfo) {
+	const CreateTableOption& createTableOption, DDLBaseInfo* baseInfo) {
 	NoSQLStore* command = getNoSQLStore(
 		execution->getContext().getDBId(), execution->getContext().getDBName());
 	command->addColumn(ec,
@@ -4119,7 +4346,7 @@ void DBConnection::addColumn(EventContext& ec, SQLExecution* execution,
 void DBConnection::renameColumn(EventContext& ec, SQLExecution* execution,
 	const NameWithCaseSensitivity& dbName,
 	const NameWithCaseSensitivity& tableName,
-	CreateTableOption& createTableOption, DDLBaseInfo* baseInfo) {
+	const CreateTableOption& createTableOption, DDLBaseInfo* baseInfo) {
 	NoSQLStore* command = getNoSQLStore(
 		execution->getContext().getDBId(), execution->getContext().getDBName());
 	command->renameColumn(ec,

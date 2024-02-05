@@ -1593,11 +1593,12 @@ RowId TimeSeries::getMaxRowId(TransactionContext &txn) {
 	}
 }
 
-void TimeSeries::searchColumnIdIndex(TransactionContext &txn,
-	BtreeMap::SearchContext &sc, BtreeMap::SearchContext &orgSc,
-	util::XArray<OId> &resultList, OutputOrder order, bool neverOrdering)
-{
+void TimeSeries::searchColumnIdIndex(
+		TransactionContext &txn, BtreeMap::SearchContext &sc,
+		util::XArray<OId> &resultList, OutputOrder order,
+		bool neverOrdering) {
 	assert(!(order != ORDER_UNDEFINED && neverOrdering));
+
 	util::XArray<OId> mergeList(txn.getDefaultAllocator());
 	if (order != ORDER_UNDEFINED) {
 		reinterpret_cast<BaseContainer *>(this)
@@ -1623,10 +1624,9 @@ void TimeSeries::searchColumnIdIndex(TransactionContext &txn,
 	}
 }
 
-void TimeSeries::searchColumnIdIndex(TransactionContext &txn,
-	BtreeMap::SearchContext &sc, BtreeMap::SearchContext &orgSc,
-	util::XArray<OId> &normalRowList, util::XArray<OId> &mvccRowList)
-{
+void TimeSeries::searchColumnIdIndex(
+		TransactionContext &txn, BtreeMap::SearchContext &sc,
+		util::XArray<OId> &normalRowList, util::XArray<OId> &mvccRowList) {
 	{
 		ResultSize limitBackup = sc.getLimit();
 		sc.setLimit(MAX_RESULT_SIZE);

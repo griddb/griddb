@@ -471,7 +471,7 @@ void DMLProcessor::BulkManager::setup(
 	PartitioningInfo* partitioningInfo,
 	TupleList::Column* inputColumnList, int32_t inputColumnSize,
 	ColumnInfo* nosqlColumnInfoList, int32_t nosqlColumnSize,
-	InsertColumnMap* insertColumnMap, bool isInsertReplace) {
+	const InsertColumnMap* insertColumnMap, bool isInsertReplace) {
 
 	if (insertColumnMap && insertColumnMap->size() > 0) {
 		insertColumnMap_ = ALLOC_VAR_SIZE_NEW(globalVarAlloc_)
@@ -902,13 +902,13 @@ DMLProcessor::BulkManager::Operation::Operation(
 	columnCount_(columnCount),
 	container_(container),
 	pos_(pos),
-	option_(NULL),
-	currentProcessedNum_(0),
-	totalProcessedNum_(0),
 	fixedData_(NULL),
 	varData_(NULL),
 	rowStore_(NULL),
 	rowIdList_(NULL),
+	option_(NULL),
+	totalProcessedNum_(0),
+	currentProcessedNum_(0),
 	partitioning_(false),
 	dsConfig_(NULL),
 	bulkManager_(bulkManager),

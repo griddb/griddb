@@ -23,6 +23,7 @@
 #include "sql_command_manager.h"
 #include "sql_service.h"
 #include "sql_utils.h"
+#include "database_manager.h"
 
 UTIL_TRACER_DECLARE(SQL_SERVICE);
 UTIL_TRACER_DECLARE(DISTRIBUTED_FRAMEWORK);
@@ -69,17 +70,135 @@ AUDIT_TRACER_DECLARE(AUDIT_DCL);
 #define AUDIT_TRACE_INFO_EXECUTE() { \
 }
 
+#define AUDIT_TRACE_WARNING_EXECUTE(execution, message) { \
+}
+
 #define AUDIT_TRACE_ERROR_INTERNAL_HANDLEERROR(tracer, statementType) { \
 }
 
 #define AUDIT_TRACE_ERROR_HANDLEERROR() { \
 }
 
-SQLConfigParam::SQLConfigParam(ConfigTable& config) {
-	multiIndexScan_ = config.get<bool>(CONFIG_TABLE_SQL_MULTI_INDEX_SCAN);
-	partitioningRowKeyConstraint_
-		= config.get<bool>(CONFIG_TABLE_SQL_PARTITIONING_ROWKEY_CONSTRAINT);
-};
+void BindParamSet::clear() {
+	for (size_t pos1 = 0; pos1 < bindParamList_.size(); pos1++) {
+		for (size_t pos2 = 0; pos2 < bindParamList_[pos1].size(); pos2++) {
+			ALLOC_DELETE(alloc_, bindParamList_[pos1][pos2]);
+			bindParamList_[pos1].clear();
+		}
+	}
+	bindParamList_.clear();
+	currentPos_ = 0;
+	columnSize_ = 0;
+	rowCount_ = 0;
+}
+
+void BindParamSet::copyBindParamSet(const BindParamSet& rhs) {
+	try {
+		reset();
+		prepare(rhs.columnSize_, rhs.rowCount_);
+		for (size_t pos = 0; pos < rhs.rowCount_; pos++) {
+			for (int32_t columnNo = 0; columnNo < rhs.columnSize_; columnNo++) {
+				ColumnType type = rhs.bindParamList_[pos][columnNo]->type_;
+				TupleValue& value = rhs.bindParamList_[pos][columnNo]->value_;
+				BindParam* param = ALLOC_NEW(alloc_) BindParam(alloc_, type);
+				switch (type) {
+				case COLUMN_TYPE_NULL: 
+					param->value_ = TupleValue(&SyntaxTree::NULL_VALUE_RAW_DATA,
+						TupleList::TYPE_ANY);
+					 break;
+				case COLUMN_TYPE_BOOL: 
+				case COLUMN_TYPE_BYTE: 
+				case COLUMN_TYPE_SHORT: 
+				case COLUMN_TYPE_INT: 
+				case COLUMN_TYPE_LONG: 
+				case COLUMN_TYPE_FLOAT: 
+				case COLUMN_TYPE_DOUBLE: 
+				case COLUMN_TYPE_TIMESTAMP: 
+				case COLUMN_TYPE_MICRO_TIMESTAMP: {
+					TupleList::TupleColumnType tupleType = convertNoSQLTypeToTupleType(type);
+					param->value_ = TupleValue(value.fixedData(), tupleType);
+					break;
+				}
+				case COLUMN_TYPE_NANO_TIMESTAMP: {
+					NanoTimestamp tsValue = value.get<TupleNanoTimestamp>();
+					param->value_ = SyntaxTree::makeNanoTimestampValue(alloc_, tsValue);
+					break;
+				}
+				case COLUMN_TYPE_STRING: 
+				case COLUMN_TYPE_GEOMETRY:
+				case COLUMN_TYPE_BLOB: {
+					TupleList::TupleColumnType tupleType = convertNoSQLTypeToTupleType(type);
+					switch (tupleType) {
+					case TupleList::TYPE_STRING: {
+						int32_t size = static_cast<int32_t>(value.varSize());
+						const char8_t* data = reinterpret_cast<const char*>(value.varData());
+						param->value_ = SyntaxTree::makeStringValue(alloc_, data, size);
+						break;
+					}
+					case TupleList::TYPE_GEOMETRY:
+					case TupleList::TYPE_BLOB: {
+						TupleValue::VarContext cxt;
+						cxt.setStackAllocator(&alloc_);
+						TupleValue::StackAllocLobBuilder lobBuilder(
+							cxt, TupleList::TYPE_BLOB, 0);
+						{
+							TupleValue::LobReader reader(value);
+							const void *data;
+							size_t size;
+							while (reader.next(data, size)) {
+								lobBuilder.append(data, size);
+							}
+						}
+						param->value_ = lobBuilder.build();
+						break;
+					}
+					default:
+						GS_THROW_USER_ERROR(GS_ERROR_SQL_VALUETYPE_UNSUPPORTED, "");
+					}
+					break;
+				}
+				case COLUMN_TYPE_STRING_ARRAY:
+				case COLUMN_TYPE_BOOL_ARRAY:
+				case COLUMN_TYPE_BYTE_ARRAY:
+				case COLUMN_TYPE_SHORT_ARRAY:
+				case COLUMN_TYPE_INT_ARRAY:
+				case COLUMN_TYPE_LONG_ARRAY:
+				case COLUMN_TYPE_FLOAT_ARRAY:
+				case COLUMN_TYPE_DOUBLE_ARRAY:
+				case COLUMN_TYPE_TIMESTAMP_ARRAY: 
+					GS_THROW_USER_ERROR(GS_ERROR_SQL_VALUETYPE_UNSUPPORTED,
+						"Unsupported bind type = " << static_cast<int32_t>(type));
+				default:
+					GS_THROW_USER_ERROR(GS_ERROR_SQL_INTERNAL,
+						"Invalid bind type = " << static_cast<int32_t>(type));
+				}
+				bindParamList_[pos].push_back(param);
+			}
+		}
+	}
+	catch (std::exception& e) {
+		GS_RETHROW_USER_OR_SYSTEM(e, "");
+	}
+}
+
+SQLConfigParam::SQLConfigParam(const ConfigTable& config) :
+		multiIndexScan_(config.get<bool>(CONFIG_TABLE_SQL_MULTI_INDEX_SCAN)),
+		partitioningRowKeyConstraint_(config.get<bool>(
+				CONFIG_TABLE_SQL_PARTITIONING_ROWKEY_CONSTRAINT)),
+		costBasedJoin_(config.get<bool>(CONFIG_TABLE_SQL_COST_BASED_JOIN)),
+		planningVersion_(
+				getPlanningVersion(config, CONFIG_TABLE_SQL_PLAN_VERSION)) {
+}
+
+SQLPlanningVersion SQLConfigParam::getPlanningVersion(
+		const ConfigTable& config, SQLConfigTableParamId paramId) {
+	SQLPlanningVersion version;
+	const char8_t *str = config.get<const char8_t*>(paramId);
+	if (strlen(str) != 0) {
+		version.parse(str);
+	}
+	return version;
+}
 
 SQLExecutionManager::SQLExecutionManager(
 	ConfigTable& config, SQLVariableSizeGlobalAllocator& globalVarAlloc) try :
@@ -379,9 +498,10 @@ SQLExecution::SQLExecution(JobManager* jobManager,
 	executionManager_(execManager),
 	dbConnection_(dbConnection),
 	executionStackAlloc_(*wrapStackAllocator()),
-	globalVarAlloc_(globalVarAlloc), scope_(NULL),
+	globalVarAlloc_(globalVarAlloc),
 	localVarAlloc_(*jobManager_->
 		getSQLService()->getLocalAllocator(request.pgId_)),
+	scope_(NULL),
 	group_(jobManager_->getStore()),
 	resultSet_(NULL),
 	executionStatus_(request),
@@ -394,7 +514,11 @@ SQLExecution::SQLExecution(JobManager* jobManager,
 		clientNd, clientId, connOption),
 	analyzedQueryInfo_(globalVarAlloc_, executionStackAlloc_),
 	context_(lock_, clientInfo_, analyzedQueryInfo_,
-		executionStatus_, response_, clientId_, currentJobId_)
+		executionStatus_, response_, clientId_, currentJobId_),
+	isBatch_(false),
+	batchCount_(0),
+	batchCurrentPos_(0),
+	bindParamSet_(executionStackAlloc_)
 {
 	executionStatus_.set(request);
 	scope_ = ALLOC_VAR_SIZE_NEW(globalVarAlloc_)
@@ -659,7 +783,7 @@ void SQLExecution::execute(EventContext& ec,
 	std::exception* e, uint8_t versionId, JobId* responseJobId) {
 
 	util::StackAllocator& alloc = ec.getAllocator();
-	if (e == NULL) {
+	if (e == NULL && !isBatch_) {
 		setRequest(request);
 	}
 
@@ -684,9 +808,32 @@ void SQLExecution::execute(EventContext& ec,
 	checkCancel();
 	if (!isException) {
 		cleanupPrevJob(ec);
-		cleanupSerializedData();
-		copySerializedBindInfo(request.serializedBindInfo_);
+		if (!isBatch_) {
+			cleanupSerializedData();
+			copySerializedBindInfo(request.serializedBindInfo_);
+			if (request.bindParamSet_.getRowCount() > 0) {
+				bindParamSet_.copyBindParamSet(request.bindParamSet_);
+			}
+		}
 	}
+
+	if (!isBatch_ && request.bindParamSet_.getRowCount() > 1) {
+		isBatch_ = true;
+		batchCount_ = request.bindParamSet_.getRowCount();
+		SQLService* sqlSvc = executionManager_->getSQLService();
+		int32_t addBatchMaxCount = sqlSvc->getAddBatchMaxCount();
+		if (addBatchMaxCount != 0 && batchCount_ > addBatchMaxCount) {
+			GS_THROW_USER_ERROR(GS_ERROR_SQL_ADD_BATCH_LIMIT_EXCEEDED, 
+					"addBatch limit exceeded (limit=" << addBatchMaxCount <<
+					", requested=" << batchCount_ << ")");
+		}
+	}
+	else {
+		if (!isBatch_) {
+			isBatch_ = false;
+		}
+	}
+
 	SQLConnectionControl connectionControl(executionManager_, this);
 	JobId currentJobId;
 	int32_t currentVersionId = versionId;
@@ -695,7 +842,12 @@ void SQLExecution::execute(EventContext& ec,
 		currentVersionId = currentJobId.versionId_;
 	}
 	int64_t delayTime = 0;
+	uint32_t delayStartTime = 0;
+	uint32_t delayExecutionTime = 0;
 	bool isPreparedRetry = false;
+	bool checkConst = false;
+	bool isDbConstraint = false;
+
 	if (context_.isRetryStatement()) {
 		JobId jobId(clientId_, context_.getExecId());
 		currentVersionId = 1;
@@ -715,7 +867,7 @@ void SQLExecution::execute(EventContext& ec,
 				GS_RETHROW_USER_OR_SYSTEM(*e, "");
 			}
 
-			ExecutionProfilerWatcher watcher(this, (e == NULL));
+			ExecutionProfilerWatcher watcher(this, (e == NULL), false);
 
 			bool useCache = (!context_.isRetryStatement() && currentVersionId == 0);
 			resultSet_->resetSchema();
@@ -736,8 +888,9 @@ void SQLExecution::execute(EventContext& ec,
 			}
 
 			if (isPreparedRetry) {
-				request.preparedParamList_.clear();
+				request.bindParamSet_.clear();
 				restoreBindInfo(request);
+				bindParamSet_.copyBindParamSet(request.bindParamSet_);
 			}
 
 
@@ -775,7 +928,12 @@ void SQLExecution::execute(EventContext& ec,
 				getContext().getConnectionOption().checkSelect(parsedInfo);
 
 				checkClientResponse();
-				if (fastInsert(ec, request.preparedParamList_, useCache)) {
+
+				isDbConstraint = checkExecutionConstraint(delayStartTime, delayExecutionTime);
+				checkConst = true;
+
+				if (!isBatch() && !isDbConstraint && 
+					fastInsert(ec, bindParamSet_.getParamList(batchCurrentPos_), useCache)) {
 					return;
 				}
 				tableInfoList = generateTableInfo(cxt);
@@ -783,7 +941,7 @@ void SQLExecution::execute(EventContext& ec,
 				if (request.requestType_ == REQUEST_TYPE_PREPARE) {
 					TRACE_SQL_START(clientId_, jobManager_->getHostName(), "COMPILE");
 					compile(alloc, connectionControl,
-						parameterTypeList, tableInfoList, request.preparedParamList_, varCxt, startTime);
+						parameterTypeList, tableInfoList, bindParamSet_.getParamList(batchCurrentPos_), varCxt, startTime);
 					TRACE_SQL_END(clientId_, jobManager_->getHostName(), "COMPILE");
 					SQLReplyContext replyCxt;
 					replyCxt.set(&ec, &parameterTypeList, UNDEF_JOB_VERSIONID, NULL);
@@ -792,8 +950,20 @@ void SQLExecution::execute(EventContext& ec,
 				}
 			}
 
+			getContext().getConnectionOption().checkSelect(getParsedInfo());
 			checkClientResponse();
-			if (fastInsert(ec, request.preparedParamList_, useCache)) {
+
+			DatabaseId dbId = context_.getDBId();
+			DatabaseManager::Option option;
+			if (parsedInfo.syntaxTreeList_.size() > 0) {
+				option.dropOnly_ = parsedInfo.syntaxTreeList_[0]->isDropOnlyCommand();
+			}
+			if (!checkConst) {
+				isDbConstraint = checkExecutionConstraint(delayStartTime, delayExecutionTime);
+			}
+			checkBatchRequest(request);
+			if (!isBatch() && !isDbConstraint && 
+				fastInsert(ec, bindParamSet_.getParamList(batchCurrentPos_), useCache)) {
 				return;
 			}
 
@@ -809,7 +979,9 @@ void SQLExecution::execute(EventContext& ec,
 
 			TRACE_SQL_START(clientId_, jobManager_->getHostName(), "COMPILE");
 			compile(alloc, connectionControl,
-				parameterTypeList, tableInfoList, request.preparedParamList_, varCxt, startTime);
+				parameterTypeList, tableInfoList, 
+				bindParamSet_.getParamList(batchCurrentPos_), 
+				varCxt, startTime);
 
 			setPreparedOption(request, isPreparedRetry);
 			TRACE_SQL_END(clientId_, jobManager_->getHostName(), "COMPILE");
@@ -830,12 +1002,14 @@ void SQLExecution::execute(EventContext& ec,
 				connectionControl, liveNodeIdList, maxNodeNum);
 			TRACE_SQL_END(clientId_, jobManager_->getHostName(), "ASSIGN");
 
+			jobInfo.delayTime_ = delayExecutionTime;
+
 			JobId jobId;
 			generateJobId(jobId, request.stmtId_);
 
 			watcher.lap(ExecutionProfilerWatcher::COMPILE);
 
-			jobManager_->beginJob(ec, jobId, &jobInfo, delayTime);
+			jobManager_->beginJob(ec, jobId, &jobInfo, delayStartTime);
 			getContext().setStartTime(jobInfo.startTime_);
 			return;
 		}
@@ -1098,6 +1272,12 @@ void SQLExecution::generateJobInfo(util::StackAllocator& alloc,
 		executionStatus_.setMaxRows(config_.maxRows_);
 		jobInfo->storeMemoryAgingSwapRate_ = context_.getStoreMemoryAgingSwapRate();
 		jobInfo->timezone_ = context_.getTimezone();
+		jobInfo->dbId_ = context_.getDBId();
+		jobInfo->dbName_ = context_.getDBName();
+		jobInfo->appName_ = context_.getApplicationName();
+		jobInfo->userName_ = context_.getUserName().c_str();
+
+		jobInfo->isAdministrator_ = context_.isAdministrator();
 		jobInfo->setup(config_.queryTimeout_, emNow, jobInfo->startTime_,
 			isCurrentTimeRequired(), true);
 	}
@@ -1176,12 +1356,37 @@ bool SQLExecution::fetch(EventContext& ec, SQLFetchContext& cxt,
 		varCxt.setVarAllocator(&localVarAlloc_);
 		varCxt.setGroup(&group_);
 		cxt.reader_->setVarContext(varCxt);
-		if (isNotSelect()) {
-			return fetchNotSelect(ec, cxt.reader_, cxt.columnList_);
+
+		if (isBatch()) {
+			if (!isNotSelect()) {
+				setBatchCount(0);
+			}
+			else if (cxt.reader_->exists()) {
+				TupleList::Column& column = cxt.columnList_[0];
+				int64_t updateCount = cxt.reader_->get().getAs<int64_t>(column);
+				setBatchCount(updateCount);
+			}
+			else {
+				setBatchCount(0);
+			}
+			if (isBatchComplete()) {
+				return fetchBatch(
+							ec, &batchCountList_);
+			}
+			else {
+				RequestInfo request(alloc, false);
+				execute(ec, request, true, NULL, 0, NULL);
+				return false;
+			}
 		}
 		else {
-			return fetchSelect(ec, cxt.reader_, cxt.columnList_,
-				cxt.columnSize_, cxt.isCompleted_);
+			if (isNotSelect()) {
+				return fetchNotSelect(ec, cxt.reader_, cxt.columnList_);
+			}
+			else {
+				return fetchSelect(ec, cxt.reader_, cxt.columnList_,
+					cxt.columnSize_, cxt.isCompleted_);
+			}
 		}
 	}
 	catch (std::exception& e) {
@@ -1551,21 +1756,11 @@ void SQLExecution::encodeSuccessExplainAnalyze(
 			catch (std::exception& e) {
 			}
 			{
-				util::String tmpStr(eventStackAlloc);
-				tmpStr = jsonPlanOutValue.serialize().c_str();
-				size_t currentSize = tmpStr.size();
-				tmpStr.erase(currentSize - 1, 1);
-				tmpStr += ",\"profile\":";
-				picojson::value jsonProfileOutValue;
-				JsonUtils::OutStream profileOut(jsonProfileOutValue);
-				SQLProcessor::Profiler::makeProfilerCoder(
-					eventStackAlloc, util::ObjectCoder()).encode(profileOut, profile);
-				tmpStr += jsonProfileOutValue.serialize().c_str();
-				tmpStr += "}";
+				SQLProcessor::Profiler::mergeResultToPlan(
+						eventStackAlloc, profile, jsonPlanOutValue);
+				const u8string &tmpStr = jsonPlanOutValue.serialize();
 
-				resultSet.setVarFieldValue(
-					reinterpret_cast<const char*>(tmpStr.data()),
-					static_cast<uint32_t>(tmpStr.size()));
+				resultSet.setVarFieldValue(tmpStr.data(), tmpStr.size());
 			}
 			ALLOC_DELETE(eventStackAlloc, profile.rows_);
 			ALLOC_DELETE(eventStackAlloc, profile.address_);
@@ -1828,15 +2023,15 @@ struct BulkEntry {
 	util::XArray<uint8_t>* varPart_;
 	ColumnInfo* columnInfoList_;
 	uint32_t columnCount_;
+	const DataStoreConfig& dsConfig_;
+	OutputMessageRowStore* rowStore_;
 	ContainerId containerId_;
 	PartitionId pId_;
 	SchemaVersionId versionId_;
 	NodeAffinityNumber affinity_;
-	const DataStoreConfig& dsConfig_;
 	int64_t getSize() {
 		return (fixedPart_->size() + varPart_->size());
 	}
-	OutputMessageRowStore* rowStore_;
 };
 
 class BulkEntryManager {
@@ -1976,8 +2171,11 @@ bool SQLExecution::executeFastInsert(EventContext& ec,
 
 	const DataStoreConfig* dsConfig = executionManager_->getManagerSet()->dsConfig_;
 	try {
-		getContext().setStartTime(util::DateTime::now(false).getUnixTime());
-		ExecutionProfilerWatcher watcher(this, true);
+		int64_t startTime = util::DateTime::now(false).getUnixTime();
+		getContext().setStartTime(startTime);
+		ExecutionProfilerWatcher watcher(this, true, true);
+		JobId jobId;
+		generateJobId(jobId, getContext().executionStatus_.execId_);
 
 		util::Vector<SyntaxTree::ExprList*>& mergeSelectList = getMergeSelectList();
 		assert(mergeSelectList.size() > 0);
@@ -2255,18 +2453,6 @@ bool SQLExecution::executeFastInsert(EventContext& ec,
 			latch = NULL;
 		}
 
-		uint32_t lap = watch.elapsedMillis();
-		if (lap >= sqlSvc->getTraceLimitTime()) {
-			SQLDetailProfs profs(globalVarAlloc_,
-				sqlSvc->getTraceLimitTime(),
-				sqlSvc->getTraceLimitQuerySize());
-			profs.set(
-				context_.getDBName(),
-				context_.getApplicationName(),
-				context_.getQuery());
-			profs.complete(lap);
-		}
-
 		if (releaseCache) {
 			getNoSQLStore()->removeCache(
 				parsedInfo.tableList_[0]->qName_->table_->c_str());
@@ -2295,6 +2481,7 @@ void SQLExecutionManager::StatSetUpHandler::operator()(StatTable& stat) {
 	STAT_ADD(STAT_TABLE_PERF_SQL_TOTAL_WRITE_OPERATION);
 	STAT_ADD(STAT_TABLE_PERF_SQL_SEND_PENDING_COUNT);
 	STAT_ADD(STAT_TABLE_PERF_SQL_SQL_COUNT);
+	STAT_ADD(STAT_TABLE_PERF_SQL_SQL_RETRY_COUNT);
 	STAT_ADD(STAT_TABLE_PERF_SQL_JOB_COUNT);
 	STAT_ADD(STAT_TABLE_PERF_SQL_QUEUE_MAX);
 	STAT_ADD(STAT_TABLE_PERF_SQL_TABLE_CACHE_RATIO);
@@ -2343,6 +2530,7 @@ void SQLExecutionManager::updateStat(StatTable& stat) {
 		jobManager_->getCurrentJobListSize());
 	stat.set(STAT_TABLE_PERF_SQL_SQL_COUNT,
 		getCurrentClientIdListSize());
+	stat.set(STAT_TABLE_PERF_SQL_SQL_RETRY_COUNT, getInternalRetry());
 	EventEngine::Stats eeStats;
 	SQLService* sqlService = jobManager_->getSQLService();
 	sqlService->getEE()->getStats(eeStats);
@@ -2775,9 +2963,14 @@ SQLTableInfo* SQLExecution::decodeTableInfo(
 }
 
 void SQLExecution::applyClusterPartitionCount(
-	SQLTableInfo& tableInfo, uint32_t clusterPartitionCount) {
+		SQLTableInfo& tableInfo, uint32_t clusterPartitionCount) {
 	if (tableInfo.partitioning_ != NULL) {
-		tableInfo.partitioning_->clusterPartitionCount_ = clusterPartitionCount;
+		const SQLTableInfo::PartitioningInfo *src = tableInfo.partitioning_;
+		SQLTableInfo::PartitioningInfo *dest =
+				ALLOC_NEW(src->alloc_) SQLTableInfo::PartitioningInfo(*src);
+
+		dest->clusterPartitionCount_ = clusterPartitionCount;
+		tableInfo.partitioning_ = dest;
 	}
 }
 
@@ -2827,8 +3020,15 @@ void SQLExecution::compile(util::StackAllocator& alloc,
 
 	SQLPreparedPlan* plan;
 	SQLParsedInfo& parsedInfo = getParsedInfo();
+
 	SQLCompiler::CompileOption option;
-	option.setTimeZone(getContext().getTimezone());
+	{
+		const SQLConfigParam &param = executionManager_->getSQLConfig();
+		option.setTimeZone(getContext().getTimezone());
+		option.setPlanningVersion(param.getPlanningVersion());
+		option.setCostBasedJoin(param.isCostBasedJoin());
+	}
+
 	SQLCompiler compiler(varCxt, &option);
 	compiler.setMetaDataQueryFlag(executionStatus_.requestType_ == REQUEST_TYPE_PRAGMA);
 	compiler.setExplainType(parsedInfo.explainType_);
@@ -2991,11 +3191,11 @@ bool SQLExecution::doAfterParse(RequestInfo& request) {
 	}
 	if (context_.isPreparedStatement() && request.requestType_ == REQUEST_TYPE_EXECUTE) {
 		if (response_.parameterCount_
-			!= static_cast<int32_t>(request.preparedParamList_.size())) {
+			!= static_cast<int32_t>(bindParamSet_.getParamList(batchCurrentPos_).size())) {
 			GS_THROW_USER_ERROR(GS_ERROR_SQL_EXECUTION_BIND_FAILED,
 				"Unmatch bind parameter count, expect="
 				<< response_.parameterCount_
-				<< ", actual=" << request.preparedParamList_.size());
+				<< ", actual=" << bindParamSet_.getParamList(batchCurrentPos_).size());
 		}
 	}
 	if (!context_.isPreparedStatement() && parsedInfo.placeHolderCount_ > 0) {
@@ -3270,6 +3470,78 @@ void SQLExecution::restorePlanInfo(SQLPreparedPlan*& plan,
 	preparedInfo_.restorePlan(plan, eventStackAlloc, varCxt);
 }
 
+bool SQLExecution::fetchBatch(EventContext &ec, 
+		std::vector<int64_t> *countList) {
+
+	bool responsed = executionStatus_.responsed_;
+	if (executionStatus_.currentType_
+			!= SQL_EXEC_CLOSE && responsed) {
+		
+		GS_TRACE_INFO(
+				DISTRIBUTED_FRAMEWORK,
+				GS_TRACE_SQL_INTERNAL_DEBUG,
+				"Call reply success, but not executed because of already responded,"
+				"clientId=" << clientId_);
+		return false;
+	}
+
+	Event replyEv(
+			ec, SQL_EXECUTE_QUERY, getConnectedPId());
+	replyEv.setPartitionIdSpecified(false);
+	EventByteOutStream out = replyEv.getOutStream();
+
+	out << response_.stmtId_;
+	out << StatementHandler::TXN_STATEMENT_SUCCESS;
+	StatementHandler::encodeBooleanData(
+			out, response_.transactionStarted_);
+
+	StatementHandler::encodeBooleanData(
+			out, response_.isAutoCommit_);
+	
+	StatementHandler::encodeIntData<EventByteOutStream, uint32_t>(
+			out, static_cast<uint32_t>(
+					batchCountList_.size()));
+
+	for (int32_t i = 0; i < batchCountList_.size(); i++) {
+
+		executionManager_->incOperation(
+				false, ec.getWorkerId(),
+				static_cast<int32_t>(batchCountList_[i]));
+
+		StatementHandler::encodeIntData<EventByteOutStream, uint32_t>(
+				out, static_cast<uint32_t>(
+						batchCountList_[i]));
+
+		StatementHandler::encodeIntData<EventByteOutStream, uint32_t>(
+				out, response_.parameterCount_);
+
+		bool existsResult = false;
+		StatementHandler::encodeBooleanData(
+				out, existsResult);
+	}
+
+	SQLRequestHandler::encodeEnvList(
+			out,
+			ec.getAllocator(),
+			*executionManager_,
+			context_.getClientNd().getUserData<StatementHandler::ConnectionOption>());
+
+	sendClient(ec, replyEv);
+
+	resultSet_->clear();
+	executionStatus_.reset();
+	response_.reset();
+	resetJobVersion();
+
+	isBatch_ = false;
+	batchCountList_.clear();
+	batchCount_ = 0;
+	batchCurrentPos_ = 0;
+	bindParamSet_.clear();
+
+	return true;
+}
+
 bool SQLExecution::fetchNotSelect(EventContext& ec,
 	TupleList::Reader* reader, TupleList::Column* columnList) {
 	if (reader->exists()) {
@@ -3447,6 +3719,7 @@ bool SQLExecution::handleError(EventContext& ec,
 	SQLReplyType replyType = checkReplyType(errorCode, cacheClear);
 	if (checkRetryError(replyType, currentVersionId)) {
 		replyType = SQL_REPLY_ERROR;
+		executionManager_->incInternalRetry();
 	}
 	try {
 		SQLParsedInfo& parsedInfo = getParsedInfo();
@@ -3515,10 +3788,17 @@ void SQLExecution::setupViewContext(SQLExpandViewContext& cxt,
 }
 
 void SQLExecution::generateJobId(JobId& jobId, ExecId execId) {
-	checkExecutableJob(execId);
-	context_.getCurrentJobId(jobId);
-	jobId.clientId_ = clientId_;
-	jobId.execId_ = context_.getExecId();
+	if (isBatch_) {
+		context_.getCurrentJobId(jobId);
+		jobId.clientId_ = clientId_;
+		jobId.execId_ = INT64_MAX - batchCurrentPos_;
+	}
+	else {
+		checkExecutableJob(execId);
+		context_.getCurrentJobId(jobId);
+		jobId.clientId_ = clientId_;
+		jobId.execId_ = context_.getExecId();
+	}
 	context_.setCurrentJobId(jobId);
 }
 
@@ -3640,6 +3920,9 @@ bool SQLExecution::checkSelectList(SyntaxTree::ExprList* selectList,
 	util::Vector<SyntaxTree::ExprList*>& mergeSelectList,
 	int32_t& placeHolderCount) {
 	SyntaxTree::ExprList::iterator it;
+	if (selectList == NULL) {
+		return false;
+	}
 	for (it = selectList->begin(); it != selectList->end(); it++) {
 		if ((*it)->op_ != SQLType::EXPR_CONSTANT) {
 			if ((*it)->op_ != SQLType::EXPR_PLACEHOLDER) {
@@ -3690,9 +3973,11 @@ void SQLExecution::updateRemoteCache(EventContext& ec, EventEngine* ee,
 	Event request(ec, UPDATE_TABLE_CACHE, IMMEDIATE_PARTITION_ID);
 	EventByteOutStream out = request.getOutStream();
 	out << dbId;
-	StatementHandler::encodeStringData<EventByteOutStream>(out, dbName);
-	StatementHandler::encodeStringData<EventByteOutStream>(out, tableName);
-	out << versionId;
+	if (dbName != NULL && tableName != NULL) {
+		StatementHandler::encodeStringData<EventByteOutStream>(out, dbName);
+		StatementHandler::encodeStringData<EventByteOutStream>(out, tableName);
+		out << versionId;
+	}
 	for (int32_t pos = 1; pos < pt->getNodeNum(); pos++) {
 		const NodeDescriptor& nd = ee->getServerND(pos);
 		try {
@@ -3728,6 +4013,7 @@ SQLExecution::SQLReplyType SQLExecution::checkReplyType(
 	case GS_ERROR_SQL_PROC_INVALID_CONSTRAINT_NULL:
 	case GS_ERROR_SQL_PROC_INTERNAL_INDEX_UNMATCH:
 	case GS_ERROR_SQL_DML_EXPIRED_SUB_CONTAINER_VERSION:
+	case GS_ERROR_SQL_DML_CONTAINER_STAT_GAP_TOO_LARGE:
 	case GS_ERROR_SQL_PROC_UNSUPPORTED_TYPE_CONVERSION:
 	case GS_ERROR_SQL_PROC_VALUE_SYNTAX_ERROR:
 	case GS_ERROR_CM_INTERNAL_ERROR:
@@ -3754,9 +4040,19 @@ const char* SQLExecution::SQLExecutionContext::getDBName() const {
 const char* SQLExecution::SQLExecutionContext::getApplicationName() const {
 	return clientInfo_.applicationName_.c_str();
 }
+
+bool SQLExecution::SQLExecutionContext::isSetApplicationName() const {
+	return !clientInfo_.applicationName_.empty();
+}
+
 const char* SQLExecution::SQLExecutionContext::getQuery() const {
 	return analyzedQueryInfo_.query_.c_str();
 }
+
+bool SQLExecution::SQLExecutionContext::isSetQuery() const {
+	return !analyzedQueryInfo_.query_.empty();
+}
+
 void SQLExecution::SQLExecutionContext::getQuery(
 	util::String& str, size_t size) {
 	const char* ptr = analyzedQueryInfo_.query_.c_str();
@@ -3977,4 +4273,116 @@ const std::string SQLExecution::QueryAnalyzedInfo::getTableNameList()  {
 
 const std::string SQLExecution::SQLExecutionContext::getTableNameList() const {
 	return analyzedQueryInfo_.getTableNameList();
+}
+
+void SQLExecutionManager::getDatabaseStats(util::StackAllocator& alloc,
+	DatabaseId dbId, util::Map<DatabaseId, DatabaseStats*>& statsMap, bool isAdministrator) {
+	util::Vector<ClientId> clientIdList(alloc);
+	getCurrentClientIdList(clientIdList);
+	for (size_t pos = 0; pos < clientIdList.size(); pos++) {
+		SQLExecutionManager::Latch latch(clientIdList[pos], this);
+		SQLExecution* execution = latch.get();
+		if (execution) {
+			const SQLExecution::SQLExecutionContext& sqlContext = execution->getContext();
+			DatabaseId currentDbId = sqlContext.getDBId();
+			if (isAdministrator || currentDbId == dbId) {
+				auto stats = statsMap.find(currentDbId);
+				if (stats == statsMap.end()) {
+					statsMap[currentDbId] = ALLOC_NEW(alloc) DatabaseStats;
+				}
+				statsMap[currentDbId]->connectionStats_.sqlRequestCount_++;
+				statsMap[currentDbId]->jobStats_.allocateMemorySize_ += execution->getTotalSize();
+			}
+		}
+	}
+}
+
+void JobManager::remove(JobId& jobId) {
+	try {
+		util::LockGuard<util::Mutex> guard(mutex_);
+		JobMapItr it = jobMap_.find(jobId);
+		if (it != jobMap_.end()) {
+			Job* job = (*it).second;
+			jobMap_.erase(it);
+			if (job->isCoordinator()) {
+				job->setCancel();
+				SQLExecutionManager::Latch latch(jobId.clientId_, executionManager_);
+				SQLExecution* execution = latch.get();
+				if (execution) {
+					job->traceLongQuery(execution);
+				}
+			}
+			if (job->decReference()) {
+				util::StackAllocator* alloc = job->getLocalStackAllocator();
+				ALLOC_VAR_SIZE_DELETE(globalVarAlloc_, job);
+				executionManager_->releaseStackAllocator(alloc);
+			}
+		}
+	}
+	catch (std::exception& e) {
+		GS_RETHROW_USER_OR_SYSTEM(e, "");
+	}
+}
+
+void JobManager::Job::traceLongQuery(SQLExecution* execution) {
+	traceLongQueryCore(execution, startTime_, watch_.elapsedMillis());
+}
+
+void JobManager::Job::traceLongQueryCore(SQLExecution* execution, int64_t startTime, int64_t execTime) {
+	try {
+		SQLService* sqlSvc = execution->getExecutionManager()->getSQLService();
+		int64_t traceLimitTime = sqlSvc->getTraceLimitTime();
+		if (execTime < traceLimitTime) {
+			return;
+		}
+		util::NormalOStringStream ss;
+		ss << "startTime=" << CommonUtility::getTimeStr(startTime) << ", executionTime=" << execTime;
+		int32_t orgLength = static_cast<int32_t>(strlen(execution->getContext().getQuery()));
+		int32_t queryLength = orgLength;
+		int32_t queryLimitSize = sqlSvc->getTraceLimitQuerySize();
+		if (queryLength > queryLimitSize) {
+			queryLength = queryLimitSize;
+			ss << ", query=";
+			ss.write(execution->getContext().getQuery(), queryLength);
+			ss << "(ommited, limit=" << queryLimitSize << ", size=" << orgLength << ")";
+		}
+		else if (queryLength > 0) {
+			ss << ", query=" << execution->getContext().getQuery();
+		}
+		AUDIT_TRACE_WARNING_EXECUTE(execution, ss.str().c_str());
+		ss << ", dbName=" << execution->getContext().getDBName()
+			<< ", appName=" << execution->getContext().getApplicationName();
+		GS_TRACE_WARNING(SQL_DETAIL, GS_TRACE_SQL_LONG_QUERY, ss.str().c_str());
+	}
+	catch (std::exception& e) {
+		UTIL_TRACE_EXCEPTION(SQL_SERVICE, e, "");
+	}
+}
+
+SQLExecution::ExecutionProfilerWatcher::~ExecutionProfilerWatcher() {
+	if (trace_) {
+		JobManager::Job::traceLongQueryCore(execution_, execution_->getContext().getStartTime(), watch_.elapsedMillis());
+	}
+}
+
+bool SQLExecution::checkExecutionConstraint(uint32_t& delayStartTime, uint32_t& delayExecutionTime) {
+	if (!jobManager_->getTransactionService()->getManager()->getDatabaseManager().isEnableRequsetConstraint()) {
+		return false;
+	}
+	DatabaseId dbId = context_.getDBId();
+	DatabaseManager::Option option;
+	SQLParsedInfo& parsedInfo = getParsedInfo();
+	if (parsedInfo.syntaxTreeList_.size() > 0) {
+		option.dropOnly_ = parsedInfo.syntaxTreeList_[0]->isDropOnlyCommand();
+	}
+	return jobManager_->getTransactionService()->getManager()->getDatabaseManager().getExecutionConstraint(
+		dbId, delayStartTime, delayExecutionTime, true, &option);
+}
+
+void SQLExecution::checkBatchRequest(RequestInfo& request) {
+	if (request.option_.get<StatementMessage::Options::FEATURE_VERSION>()
+		== StatementMessage::FEATURE_V5_5 && !isNotSelect()) {
+		GS_THROW_USER_ERROR(GS_ERROR_SQL_INVALID_BATCH_STATEMENT, 
+			"Query with result set can not be used in batch method");
+	}
 }

@@ -24,6 +24,7 @@
 #include "sql_utils.h"
 #include "query_processor.h"
 #include "data_store_v4.h"
+#include "database_manager.h"
 
 template<typename T>
 void decodeLargeRow(
@@ -55,7 +56,9 @@ const int32_t SQLService::SQL_CLIENT_VERSION = SQL_V4_0_1_CLIENT_VERSION;
 const int32_t SQLService::SQL_V4_0_MSG_VERSION = 1;
 const int32_t SQLService::SQL_V4_1_MSG_VERSION = 2;
 const int32_t SQLService::SQL_V4_1_0_MSG_VERSION = 3;
-const int32_t SQLService::SQL_MSG_VERSION = SQL_V4_1_0_MSG_VERSION;
+const int32_t SQLService::SQL_V5_5_MSG_VERSION = 3;
+const int32_t SQLService::SQL_MSG_VERSION = SQL_V5_5_MSG_VERSION;
+const bool SQLService::SQL_MSG_BACKWARD_COMPATIBLE = false;
 
 static const int32_t ACCEPTABLE_NEWSQL_CLIENT_VERSIONS[] = {
 		SQLService::SQL_CLIENT_VERSION,
@@ -89,15 +92,16 @@ void SQLGetContainerHandler::operator()(
 
 	Response response(alloc);
 
-	EVENT_START(ec, ev, transactionManager_);
-
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		EVENT_START(ec, ev, transactionManager_, connOption.dbId_, false);
 
 		int32_t acceptableVersion
 			= request.optional_.get<Options::ACCEPTABLE_FEATURE_VERSION>();
@@ -237,6 +241,10 @@ void SQLGetContainerHandler::operator()(
 			info.containerAttr_ = container->getAttribute();
 			containerInfo.versionId_ = container->getVersionId();
 			containerInfo.containerId_ = container->getContainerId();
+			containerInfo.approxSize_ = static_cast<int64_t>(std::min(
+					container->getRowNum(),
+					static_cast<uint64_t>(
+							std::numeric_limits<int64_t>::max())));
 			info.containerInfoList_.push_back(containerInfo);
 
 			uint32_t columnNum = container->getColumnNum();
@@ -369,9 +377,10 @@ SQLService::SQLService(
 	notifyClientInterval_(CommonUtility::changeTimeSecondToMilliSecond(config.get<int32_t>(
 		CONFIG_TABLE_SQL_NOTIFICATION_INTERVAL))), executionManager_(NULL),
 	txnSvc_(NULL), clsSvc_(NULL), txnMgr_(config, true),
-	connectHandler_(SQL_CLIENT_VERSION,
-		ACCEPTABLE_NEWSQL_CLIENT_VERSIONS), pt_(pt),
+	pt_(pt),
 	clientSequenceNo_(0), nosqlSyncId_(0),
+	connectHandler_(SQL_CLIENT_VERSION,
+		ACCEPTABLE_NEWSQL_CLIENT_VERSIONS),
 	traceLimitTime_(config.get<int32_t>(
 		CONFIG_TABLE_SQL_TRACE_LIMIT_EXECUTION_TIME) * 1000),
 	traceLimitQuerySize_(config.get<int32_t>(
@@ -391,17 +400,22 @@ SQLService::SQLService(
 		CONFIG_TABLE_SQL_SEND_PENDING_JOB_LIMIT)),
 	sendPendingTaskConcurrency_(config.get<int32_t>(
 		CONFIG_TABLE_SQL_SEND_PENDING_TASK_CONCURRENCY)),
+	addBatchMaxCount_(config.get<int32_t>(
+		CONFIG_TABLE_SQL_ADD_BATCH_MAX_COUNT)),
 	totalInternalConnectionCount_(0),
-	totalExternalConnectionCount_(0)
+	totalExternalConnectionCount_(0),
+	eventMonitor_(pgConfig_)
 {
 	try {
 
 		setNoSQLFailoverTimeout(config.get<int32_t>(
-			CONFIG_TABLE_SQL_NOSQL_FAILOVER_TIMEOUT)),
-			setTableSchemaExpiredTime(config.get<int32_t>(
-				CONFIG_TABLE_SQL_TABLE_CACHE_EXPIRED_TIME)),
+			CONFIG_TABLE_SQL_NOSQL_FAILOVER_TIMEOUT));
+		setTableSchemaExpiredTime(config.get<int32_t>(
+			CONFIG_TABLE_SQL_TABLE_CACHE_EXPIRED_TIME));
+		setScanMetaTableByAdmin(config.get<bool>(
+			CONFIG_TABLE_SQL_ENABLE_SCAN_META_TABLE_ADMINISTRATOR_PRIVILEGES));
 
-			ee_.setHandler(CONNECT, connectHandler_);
+		ee_.setHandler(CONNECT, connectHandler_);
 		ee_.setHandlingMode(CONNECT, EventEngine::HANDLING_IMMEDIATE);
 		ee_.setHandler(DISCONNECT, disconnectHandler_);
 		ee_.setHandlingMode(DISCONNECT, EventEngine::HANDLING_IMMEDIATE);
@@ -578,6 +592,8 @@ void SQLService::initialize(const ManagerSet& mgrSet) {
 		executionManager_ = mgrSet.execMgr_;
 		int32_t concurrency = getConcurrency();
 		localAlloc_ = UTIL_NEW SQLVariableSizeLocalAllocator * [concurrency];
+
+		txnMgr_.initialize(mgrSet);
 
 		statusList_.assign(concurrency, 0);
 		for (int32_t i = 0; i < concurrency; i++) {
@@ -1070,22 +1086,33 @@ void SQLRequestHandler::decodeBindInfo(util::ByteStream<util::ArrayInStream>& in
 				int32_t columnDataSize = sizeof(uint8_t)/* type */ + sizeof(uint64_t); 
 
 				InStream fixedPartIn(util::ArrayInStream(fixedPartData, fixedPartDataSize));
-				size_t baseVarOffset;
-				fixedPartIn >> baseVarOffset;
+				uint64_t headerPos;
+				fixedPartIn >> headerPos;
 
-				size_t headerSize = sizeof(uint64_t)
-					+ static_cast<size_t>(nullsBytes) + sizeof(uint64_t);
-				fixedPartIn.base().position(headerSize);
+				size_t varPos = sizeof(uint64_t) + (sizeof(uint64_t) + nullsBytes + columnDataSize * columnCount) * rowCount;
 
-				size_t varPos = headerSize + columnDataSize * columnCount;
-				InStream varPartIn(util::ArrayInStream(reinterpret_cast<const char*>(
-					(fixedPartData)+varPos), fixedPartDataSize));
+				InStream varPartIn(util::ArrayInStream(fixedPartData, fixedPartDataSize));
 
-				ValueProcessor::getVarSize(varPartIn);
+				request.bindParamSet_.prepare(columnCount, rowCount);
+				for (int64_t i = 0; i < rowCount; i++) {
+					uint64_t baseVarOffset;
+					fixedPartIn >> baseVarOffset;
 
-				for (int32_t columnNo = 0; columnNo < columnCount; columnNo++) {
-					decodeBindColumnInfo(in, request, fixedPartIn, varPartIn);
+					fixedPartIn.base().position(
+						fixedPartIn.base().position() + nullsBytes);
+
+					varPartIn.base().position(varPos + baseVarOffset);
+
+					ValueProcessor::getVarSize(varPartIn);
+
+					for (int32_t columnNo = 0; columnNo < columnCount; columnNo++) {
+						decodeBindColumnInfo(in, request, fixedPartIn, varPartIn);
+					}
+					request.bindParamSet_.next();
 				}
+			}
+			else {
+				request.bindParamSet_.prepare(columnCount, rowCount);
 			}
 			size_t endPos = in.base().position();
 			if (request.serialized_) {
@@ -1252,7 +1279,7 @@ void SQLRequestHandler::decodeBindColumnInfo(
 			GS_THROW_USER_ERROR(GS_ERROR_SQL_INTERNAL,
 				"Invalid bind type = " << static_cast<int32_t>(type));
 		}
-		request.preparedParamList_.push_back(param);
+		request.bindParamSet_.append(param);
 	}
 	catch (std::exception& e) {
 		GS_RETHROW_USER_OR_SYSTEM(e, "");
@@ -1349,7 +1376,7 @@ void SQLCancelHandler::operator ()(EventContext& ec, Event& ev) {
 	try {
 
 		bool isClientCancel = true;
-		if (!ev.getSenderND().isEmpty() && ev.getSenderND().getId() >= 0) {
+		if (ev.getSenderND().isEmpty() || (!ev.getSenderND().isEmpty() && ev.getSenderND().getId() >= 0)) {
 			isClientCancel = false;
 		}
 
@@ -1622,10 +1649,26 @@ void SQLService::ConfigSetUpHandler::operator()(ConfigTable& config) {
 		setExtendedType(ConfigTable::EXTENDED_TYPE_LAX_BOOL).
 		setDefault(true);
 
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SQL_PLAN_VERSION, STRING).
+		setDefault("");
+
+	CONFIG_TABLE_ADD_PARAM(config, CONFIG_TABLE_SQL_COST_BASED_JOIN, BOOL).
+		setDefault(true);
+
 	CONFIG_TABLE_ADD_PARAM(
 		config, CONFIG_TABLE_SQL_TABLE_CACHE_LOAD_DUMP_LIMIT_TIME, INT32).
 		setMin(0).
 		setDefault(5000);
+
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_SQL_ENABLE_SCAN_META_TABLE_ADMINISTRATOR_PRIVILEGES, BOOL).
+		setExtendedType(ConfigTable::EXTENDED_TYPE_LAX_BOOL).
+		setDefault(true);
+
+	CONFIG_TABLE_ADD_PARAM(
+		config, CONFIG_TABLE_SQL_ADD_BATCH_MAX_COUNT, INT32)
+		.setMin(0)
+		.setDefault(1000);
 }
 
 /*!
@@ -2022,15 +2065,15 @@ void PutLargeContainerHandler::operator()(
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
-
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		EVENT_START(ec, ev, transactionManager_, connOption.dbId_, false);
 
 		util::XArray<uint8_t>& containerNameBinary = inMes.containerNameBinary_;
 		util::String containerName(alloc); 
@@ -2561,8 +2604,6 @@ void UpdateContainerStatusHandler::operator()(
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
-
 	try {
 		ConnectionOption& connOption =
 			ev.getSenderND().getUserData<ConnectionOption>();
@@ -2594,6 +2635,7 @@ void UpdateContainerStatusHandler::operator()(
 			largeContainerId,
 			targetStatus,
 			indexInfo);
+		EVENT_START(ec, ev, transactionManager_, connOption.dbId_, false);
 
 		const ClusterRole clusterRole
 			= (CROLE_MASTER | CROLE_FOLLOWER);
@@ -2815,6 +2857,13 @@ void UpdateContainerStatusHandler::operator()(
 						partitionTable_->getPartitionNum(),
 						affinityNumber);
 				}
+				if (TupleColumnTypeUtils::isTimestampFamily(partitioningInfo.partitionColumnType_) 
+					&&  !ValueProcessor::validateTimestamp(baseValue)) {
+					GS_THROW_USER_ERROR(GS_ERROR_QP_TIMESTAMP_RANGE_INVALID,
+						"Timestamp of partitioning key is out of range (value=" << baseValue
+						<< ")");
+				}
+
 				size_t entryPos
 					= partitioningInfo.findEntry(affinityNumber);
 
@@ -3068,15 +3117,16 @@ void CreateLargeIndexHandler::operator()(
 		= ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		EVENT_START(ec, ev, transactionManager_, connOption.dbId_, false);
 
 		const uint64_t numRow = 1;
 		RowData rowData(alloc);
@@ -3421,6 +3471,10 @@ void UpdateTableCacheHandler::operator()(EventContext& ec, Event& ev) {
 		util::String tableName(alloc);
 		TablePartitioningVersionId versionId;
 		in >> dbId;
+		if (in.base().remaining() == 0) {
+			transactionManager_->getDatabaseManager().drop(dbId);
+			return;
+		}
 		decodeStringData<util::ByteStream<util::ArrayInStream>, util::String>(in, dbName);
 		decodeStringData<util::ByteStream<util::ArrayInStream>, util::String>(in, tableName);
 		in >> versionId;
@@ -3559,7 +3613,9 @@ void SQLRequestNoSQLClientHandler::operator()(EventContext& ec, Event& ev) {
 }
 
 void SQLService::checkVersion(int32_t versionId) {
-	if (versionId > SQL_MSG_VERSION) {
+	if (!(SQL_MSG_BACKWARD_COMPATIBLE ?
+			versionId <= SQL_MSG_VERSION :
+			versionId == SQL_MSG_VERSION)) {
 		GS_THROW_CUSTOM_ERROR(DenyException,
 			GS_ERROR_SQL_MSG_VERSION_NOT_ACCEPTABLE,
 			"(receiveVersion=" << versionId << ", acceptableVersion=" << SQL_MSG_VERSION);
@@ -3633,6 +3689,12 @@ void SQLService::Config::setUpConfigHandler(SQLService* sqlSvc, ConfigTable& con
 
 	configTable.setParamHandler(
 		CONFIG_TABLE_SQL_TABLE_CACHE_LOAD_DUMP_LIMIT_TIME, *this);
+
+	configTable.setParamHandler(
+		CONFIG_TABLE_SQL_ENABLE_SCAN_META_TABLE_ADMINISTRATOR_PRIVILEGES, *this);
+
+	configTable.setParamHandler(
+		CONFIG_TABLE_SQL_ADD_BATCH_MAX_COUNT, *this);
 }
 
 void SQLService::Config::operator()(
@@ -3678,9 +3740,11 @@ void SQLService::Config::operator()(
 	case CONFIG_TABLE_SQL_TABLE_CACHE_LOAD_DUMP_LIMIT_TIME:
 		sqlSvc_->getExecutionManager()->setTableCacheDumpLimitTime(value.get<int32_t>());
 		break;
+	case CONFIG_TABLE_SQL_ADD_BATCH_MAX_COUNT:
+		sqlSvc_->setAddBatchMaxCount(value.get<int32_t>());
+		break;
 	}
 }
-
 
 void SQLService::checkActiveStatus() {
 	const StatementHandler::ClusterRole clusterRole =

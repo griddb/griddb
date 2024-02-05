@@ -26,6 +26,7 @@
 #include "transaction_context.h"
 #include "transaction_manager.h"
 #include "cluster_manager.h"
+#include "database_manager.h"
 
 #include "util/container.h"
 #include "sql_execution.h"
@@ -33,7 +34,6 @@
 
 #include "key_data_store.h"
 #include "interchangeable.h"
-
 
 template<>
 void StatementMessage::OptionSet::encode<>(EventByteOutStream& out) const;
@@ -58,6 +58,10 @@ void decodeLargeBinaryRow(
 #define TEST_PRINT(s)
 #define TEST_PRINT1(s, d)
 
+#define TRANSACTION_EVENT_START(ec, ev, mgr, conn, clientRequest) \
+	EVENT_START(ec, ev, mgr,conn.dbId_, clientRequest); \
+	if (checkConstraint(ev, conn)) return;
+
 #include "base_container.h"
 #include "data_store_v4.h"
 #include "message_row_store.h"  
@@ -79,20 +83,19 @@ extern std::string dumpUUID(uint8_t* uuid);
 
 
 
-
 #define TXN_THROW_DENY_ERROR(errorCode, message) \
 	GS_THROW_CUSTOM_ERROR(DenyException, errorCode, message)
 
 #define TXN_TRACE_HANDLER_CALLED(ev)               \
 	UTIL_TRACE_DEBUG(TRANSACTION_SERVICE,          \
-		"handler called. (type=" << getEventTypeName(ev.getType()) \
+		"handler called. (type=" <<  EventTypeUtility::getEventTypeName(ev.getType()) \
 							<< "[" << ev.getType() << "]" \
 							<< ", nd=" << ev.getSenderND() \
 							<< ", pId=" << ev.getPartitionId() << ")")
 
 #define TXN_TRACE_HANDLER_CALLED_END(ev)               \
 	UTIL_TRACE_DEBUG(TRANSACTION_SERVICE,          \
-		"handler finished. (type=" << getEventTypeName(ev.getType()) \
+		"handler finished. (type=" << EventTypeUtility::getEventTypeName(ev.getType()) \
 							<< "[" << ev.getType() << "]" \
 							<< ", nd=" << ev.getSenderND() \
 							<< ", pId=" << ev.getPartitionId() << ")")
@@ -808,6 +811,8 @@ void StatementHandler::setReplyOptionForContinue(
 		request.optional_.get<Options::REPLY_PID>());
 	optionSet.set<Options::REPLY_EVENT_TYPE>(
 		request.optional_.get<Options::REPLY_EVENT_TYPE>());
+	optionSet.set<Options::DB_VERSION_ID>(
+		request.optional_.get<Options::DB_VERSION_ID>());
 
 	if (!request.optional_.get<Options::FOR_SYNC>()) {
 		optionSet.set<Options::ACK_EVENT_TYPE>(
@@ -818,6 +823,14 @@ void StatementHandler::setReplyOptionForContinue(
 			request.optional_.get<Options::JOB_EXEC_ID>());
 		optionSet.set<Options::JOB_VERSION>(
 			request.optional_.get<Options::JOB_VERSION>());
+	}
+	else {
+		optionSet.set<Options::ACK_EVENT_TYPE>(request.fixed_.stmtType_);
+		if (request.optional_.get<Options::NOSQL_SYNC_ID>() !=
+			UNDEF_NOSQL_REQUESTID) {
+			optionSet.set<Options::NOSQL_SYNC_ID>(
+				request.optional_.get<Options::NOSQL_SYNC_ID>());
+		}
 	}
 }
 
@@ -833,6 +846,8 @@ void StatementHandler::setReplyOptionForContinue(
 
 	optionSet.set<Options::REPLY_PID>(replContext.getReplyPId());
 	optionSet.set<Options::REPLY_EVENT_TYPE>(replContext.getReplyEventType());
+	optionSet.set<Options::DB_VERSION_ID>(
+		replContext.getConnectionND().isEmpty() ? 0 : replContext.getConnectionND().getUserData<ConnectionOption>().dbId_);
 
 	if (!replContext.getSyncFlag()) {
 		optionSet.set<Options::SUB_CONTAINER_ID>(
@@ -1271,7 +1286,7 @@ void StatementHandler::decodeRequestOptionPart(
 			connOption.requestType_ = Message::REQUEST_NEWSQL;
 			connOption.userType_ = StatementMessage::USER_ADMIN;
 			connOption.isAdminAndPublicDB_ = true;
-			connOption.dbId_ = UNDEF_DBID;
+			connOption.dbId_ = request.optional_.get<Options::DB_VERSION_ID>();
 			connOption.priv_ = ALL;
 		}
 
@@ -2053,7 +2068,7 @@ void StatementHandler::replySuccess(
 #define TXN_TRACE_REPLY_SUCCESS_ERROR(replContext)             \
 	"(nd=" << replContext.getConnectionND()                    \
 		   << ", pId=" << replContext.getPartitionId()         \
-		   << ", eventType=" << getEventTypeName(replContext.getStatementType()) \
+		   << ", eventType=" << EventTypeUtility::getEventTypeName(replContext.getStatementType()) \
 		   << ", stmtId=" << replContext.getStatementId()      \
 		   << ", clientId=" << replContext.getClientId()       \
 		   << ", containerId=" << replContext.getContainerId() << ")"
@@ -2921,6 +2936,12 @@ void StatementHandler::ConnectionOption::getApplicationName(
 	os << applicationName_;
 }
 
+void  StatementHandler::ConnectionOption::getDbApplicationName(util::String& dbName, util::String& applicationName) {
+	util::LockGuard<util::Mutex> guard(mutex_);
+	dbName = dbName_.c_str();
+	applicationName = applicationName_.c_str(); 
+}
+
 void StatementHandler::ErrorMessage::format(std::ostream & os) const {
 	os << GS_EXCEPTION_MESSAGE(elements_.cause_);
 	os << " (" << elements_.description_;
@@ -2955,7 +2976,7 @@ void StatementHandler::ErrorMessage::formatParameters(std::ostream & os) const {
 	}
 
 	os << ", source=" << nd;
-	os << ", eventType=" << getEventTypeName(elements_.stmtType_) << "(" << elements_.stmtType_ << ")";
+	os << ", eventType=" << EventTypeUtility::getEventTypeName(elements_.stmtType_) << "(" << elements_.stmtType_ << ")";
 	os << ", partition=" << elements_.pId_;
 
 	if (elements_.stmtId_ != UNDEF_STATEMENTID) {
@@ -3164,13 +3185,14 @@ void GetPartitionAddressHandler::operator()(EventContext & ec, Event & ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
-
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+		EVENT_START(ec, ev, transactionManager_, UNDEF_DBID, false);
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
 
@@ -3286,15 +3308,16 @@ void GetPartitionContainerNamesHandler::operator()(
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
-
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		bool isNewSql = isNewSQL(request);
 		DatabaseId dbId = connOption.dbId_;
@@ -3384,15 +3407,17 @@ void GetContainerPropertiesHandler::operator()(EventContext & ec, Event & ev)
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		const char8_t* dbName = request.optional_.get<Options::DB_NAME>();
 		const int32_t visibility =
@@ -4194,15 +4219,17 @@ void PutContainerHandler::operator()(EventContext & ec, Event & ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		util::XArray<uint8_t>& containerNameBinary = inMes.containerNameBinary_;
 		util::String containerName(alloc); 
@@ -4453,15 +4480,17 @@ void DropContainerHandler::operator()(EventContext & ec, Event & ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		util::XArray<uint8_t>& containerNameBinary = inMes.containerNameBinary_;;
 		ContainerType& containerType = inMes.containerType_;
@@ -4572,15 +4601,17 @@ void GetContainerHandler::operator()(EventContext & ec, Event & ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		util::XArray<uint8_t>& containerNameBinary = inMes.containerNameBinary_;
 		ContainerType& containerType = inMes.containerType_;
@@ -4654,15 +4685,17 @@ void CreateIndexHandler::operator()(EventContext& ec, Event& ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		if (connOption.requestType_ == Message::REQUEST_NOSQL) {
 			connOption.keepaliveTime_ = ec.getHandlerStartMonotonicTime();
@@ -4826,7 +4859,7 @@ void StatementHandler::continueEvent(
 		encodeUUID(out, request.fixed_.clientId_.uuid_, TXN_CLIENT_UUID_BYTE_SIZE);
 		out << originalStmtId;
 
-		if (continueStmtType == CONTINUE_CREATE_INDEX) {
+		if (continueStmtType == CONTINUE_CREATE_INDEX || continueStmtType == CONTINUE_ALTER_CONTAINER) {
 			OptionSet optionSet(alloc);
 			setReplyOptionForContinue(optionSet, request);
 			optionSet.encode(out);
@@ -4846,7 +4879,7 @@ void StatementHandler::continueEvent(
 #define TXN_TRACE_REPLY_SUCCESS_ERROR(replContext)             \
 	"(nd=" << replContext.getConnectionND()                    \
 		   << ", pId=" << replContext.getPartitionId()         \
-		   << ", eventType=" << getEventTypeName(replContext.getStatementType()) \
+		   << ", eventType=" << EventTypeUtility::getEventTypeName(replContext.getStatementType()) \
 		   << ", stmtId=" << replContext.getStatementId()      \
 		   << ", clientId=" << replContext.getClientId()       \
 		   << ", containerId=" << replContext.getContainerId() << ")"
@@ -4882,7 +4915,7 @@ void StatementHandler::continueEvent(
 		encodeUUID(out, replContext.getClientId().uuid_, TXN_CLIENT_UUID_BYTE_SIZE);
 		out << replContext.getOriginalStatementId();
 
-		if (continueStmtType == CONTINUE_CREATE_INDEX) {
+		if (continueStmtType == CONTINUE_CREATE_INDEX || continueStmtType == CONTINUE_ALTER_CONTAINER) {
 			OptionSet optionSet(alloc);
 			setReplyOptionForContinue(optionSet, replContext);
 			optionSet.encode(out);
@@ -4908,15 +4941,17 @@ void DropIndexHandler::operator()(EventContext& ec, Event& ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		IndexInfo& indexInfo = inMes.indexInfo_;
 
@@ -4985,15 +5020,18 @@ void CreateDropTriggerHandler::operator()(EventContext& ec, Event& ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, false);
+
 		GS_THROW_USER_ERROR(GS_ERROR_CM_NOT_SUPPORTED,
 			"Trigger not support");
 	}
@@ -5012,13 +5050,15 @@ void FlushLogHandler::operator()(EventContext& ec, Event& ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+		EVENT_START(ec, ev, transactionManager_, UNDEF_DBID, false);
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
 		if ( AUDIT_TRACE_CHECK ) {
@@ -5070,15 +5110,17 @@ void CreateTransactionContextHandler::operator()(EventContext& ec, Event& ev)
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		EVENT_START(ec, ev, transactionManager_, connOption.dbId_, (ev.getSenderND().getId() < 0));
 
 		if ( AUDIT_TRACE_CHECK ) {
 			AUDIT_TRACE_INFO_OPERATOR("")
@@ -5124,15 +5166,17 @@ void CloseTransactionContextHandler::operator()(EventContext& ec, Event& ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		EVENT_START(ec, ev, transactionManager_, connOption.dbId_, (ev.getSenderND().getId() < 0));
 
 		if ( AUDIT_TRACE_CHECK ) {
 			AUDIT_TRACE_INFO_OPERATOR("")
@@ -5235,15 +5279,17 @@ void CommitAbortTransactionHandler::operator()(EventContext& ec, Event& ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		EVENT_START(ec, ev, transactionManager_, connOption.dbId_, (ev.getSenderND().getId() < 0));
 
 		const ClusterRole clusterRole = (CROLE_MASTER | CROLE_FOLLOWER);
 		const PartitionRoleType partitionRole = PROLE_OWNER;
@@ -5336,15 +5382,17 @@ void PutRowHandler::operator()(EventContext& ec, Event& ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		const uint64_t numRow = 1;
 		const ClusterRole clusterRole = (CROLE_MASTER | CROLE_FOLLOWER);
@@ -5412,15 +5460,18 @@ void PutRowSetHandler::operator()(EventContext& ec, Event& ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
+
 		RowData& multiRowData = inMes.rowData_;
 		uint64_t numRow = inMes.numRow_;
 
@@ -5487,7 +5538,7 @@ void PutRowSetHandler::operator()(EventContext& ec, Event& ev) {
 				catch (StatementAlreadyExecutedException& e) {
 					UTIL_TRACE_EXCEPTION_INFO(TRANSACTION_SERVICE, e,
 						"Row already put (pId=" << ev.getPartitionId() <<
-						", eventType=" << getEventTypeName(ev.getType()) <<
+						", eventType=" << EventTypeUtility::getEventTypeName(ev.getType()) <<
 						", stmtId=" << rowStmtId <<
 						", clientId=" << request.fixed_.clientId_ <<
 						", containerId=" <<
@@ -5559,15 +5610,17 @@ void RemoveRowHandler::operator()(EventContext& ec, Event& ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		RowKeyData& rowKey = inMes.keyData_;
 		const uint64_t numRow = 1;
@@ -5642,15 +5695,17 @@ void UpdateRowByIdHandler::operator()(EventContext& ec, Event& ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		const uint64_t numRow = 1;
 		util::XArray<RowId> rowIds(alloc);
@@ -5728,15 +5783,17 @@ void RemoveRowByIdHandler::operator()(EventContext& ec, Event& ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		const uint64_t numRow = 1;
 		util::XArray<RowId> rowIds(alloc);
@@ -5807,15 +5864,17 @@ void RemoveRowSetByIdHandler::operator()(EventContext& ec, Event& ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		uint64_t numRow = static_cast<uint64_t>(inMes.rowIds_.size());
 		util::XArray<RowId>& rowIds = inMes.rowIds_;
@@ -5861,7 +5920,7 @@ void RemoveRowSetByIdHandler::operator()(EventContext& ec, Event& ev) {
 				catch (StatementAlreadyExecutedException& e) {
 					UTIL_TRACE_EXCEPTION_INFO(TRANSACTION_SERVICE, e,
 						"Row already put (pId=" << ev.getPartitionId() <<
-						", eventType=" << getEventTypeName(ev.getType()) <<
+						", eventType=" << EventTypeUtility::getEventTypeName(ev.getType()) <<
 						", stmtId=" << rowStmtId <<
 						", clientId=" << request.fixed_.clientId_ <<
 						", containerId=" <<
@@ -5920,15 +5979,17 @@ void UpdateRowSetByIdHandler::operator()(EventContext& ec, Event& ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		uint64_t numRow = static_cast<uint64_t>(inMes.rowIds_.size());
 		util::XArray<RowId>& targetRowIds = inMes.rowIds_;
@@ -5993,7 +6054,7 @@ void UpdateRowSetByIdHandler::operator()(EventContext& ec, Event& ev) {
 				catch (StatementAlreadyExecutedException& e) {
 					UTIL_TRACE_EXCEPTION_INFO(TRANSACTION_SERVICE, e,
 						"Row already put (pId=" << ev.getPartitionId() <<
-						", eventType=" << getEventTypeName(ev.getType()) <<
+						", eventType=" << EventTypeUtility::getEventTypeName(ev.getType()) <<
 						", stmtId=" << rowStmtId <<
 						", clientId=" << request.fixed_.clientId_ <<
 						", containerId=" <<
@@ -6067,15 +6128,17 @@ void GetRowHandler::operator()(EventContext& ec, Event& ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		RowKeyData& rowKey = inMes.keyData_;
 
@@ -6156,15 +6219,17 @@ void GetRowSetHandler::operator()(EventContext& ec, Event& ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		FetchOption& fetchOption = inMes.fetchOption_;
 		bool isPartial = inMes.isPartial_;
@@ -6253,15 +6318,17 @@ void QueryTqlHandler::operator()(EventContext& ec, Event& ev)
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		FetchOption& fetchOption = inMes.fetchOption_;
 		bool isPartial = inMes.isPartial_;
@@ -6436,15 +6503,17 @@ void AppendRowHandler::operator()(EventContext& ec, Event& ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		const uint64_t numRow = 1;
 		RowData& rowData = inMes.rowData_;
@@ -6514,15 +6583,17 @@ void QueryGeometryRelatedHandler::operator()(EventContext& ec, Event& ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		FetchOption& fetchOption = inMes.fetchOption_;
 		bool isPartial = inMes.isPartial_;
@@ -6610,15 +6681,17 @@ void QueryGeometryWithExclusionHandler::operator()(
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		FetchOption& fetchOption = inMes.fetchOption_;
 		bool isPartial = inMes.isPartial_;
@@ -6707,15 +6780,17 @@ void GetRowTimeRelatedHandler::operator()(EventContext& ec, Event& ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		TimeRelatedCondition& condition = inMes.condition_;
 
@@ -6786,15 +6861,17 @@ void GetRowInterpolateHandler::operator()(EventContext& ec, Event& ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		InterpolateCondition& condition = inMes.condition_;
 
@@ -6865,15 +6942,17 @@ void AggregateHandler::operator()(EventContext& ec, Event& ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		AggregateQuery& query = inMes.query_;
 
@@ -6944,15 +7023,17 @@ void QueryTimeRangeHandler::operator()(EventContext& ec, Event& ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		FetchOption& fetchOption = inMes.fetchOption_;
 		bool isPartial = inMes.isPartial_;
@@ -7041,15 +7122,17 @@ void QueryTimeSamplingHandler::operator()(EventContext& ec, Event& ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		FetchOption& fetchOption = inMes.fetchOption_;
 		bool isPartial = inMes.isPartial_;
@@ -7143,15 +7226,17 @@ void FetchResultSetHandler::operator()(EventContext& ec, Event& ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		ResultSetId rsId = inMes.rsId_;
 		ResultSize startPos = inMes.startPos_;
@@ -7215,15 +7300,17 @@ void CloseResultSetHandler::operator()(EventContext& ec, Event& ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		EVENT_START(ec, ev, transactionManager_, connOption.dbId_, (ev.getSenderND().getId() < 0));
 
 		ResultSetId rsId = inMes.rsId_;
 
@@ -7284,15 +7371,17 @@ void MultiCreateTransactionContextHandler::operator()(
 	util::TimeZone timeZone;
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		EVENT_START(ec, ev, transactionManager_, connOption.dbId_, (ev.getSenderND().getId() < 0));
 
 		util::XArray<SessionCreationEntry>& entryList = inMes.entryList_;
 		const bool withId = inMes.withId_;
@@ -7432,15 +7521,17 @@ void MultiCloseTransactionContextHandler::operator()(
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		EVENT_START(ec, ev, transactionManager_, connOption.dbId_, (ev.getSenderND().getId() < 0));
 
 		util::XArray<SessionCloseEntry>& entryList = inMes.entryList_;
 
@@ -7808,7 +7899,6 @@ void MultiPutHandler::operator()(EventContext& ec, Event& ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption& connOption =
@@ -7816,6 +7906,7 @@ void MultiPutHandler::operator()(EventContext& ec, Event& ev) {
 
 		EventByteInStream in(ev.getInStream());
 		decodeRequestCommonPart(in, request, connOption);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		util::XArray<const MessageSchema*> schemaList(alloc);
 		util::XArray<const RowSetRequest*> rowSetList(alloc);
@@ -7994,7 +8085,7 @@ void MultiPutHandler::execute(
 					UTIL_TRACE_EXCEPTION_INFO(TRANSACTION_SERVICE, e,
 						"Row already put. (pId=" <<
 						request.fixed_.pId_ <<
-						", eventType=" << getEventTypeName(PUT_MULTIPLE_CONTAINER_ROWS) <<
+						", eventType=" << EventTypeUtility::getEventTypeName(PUT_MULTIPLE_CONTAINER_ROWS) <<
 						", stmtId=" << rowStmtId << ", clientId=" << clientId <<
 						", containerId=" <<
 						((src.containerId_ == UNDEF_CONTAINERID) ?
@@ -8215,7 +8306,6 @@ void MultiGetHandler::operator()(EventContext& ec, Event& ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption& connOption =
@@ -8233,6 +8323,7 @@ void MultiGetHandler::operator()(EventContext& ec, Event& ev) {
 			connOption.userType_, connOption.requestType_,
 			request.optional_.get<Options::SYSTEM_MODE>(),
 			searchList);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		const bool forUpdate = request.optional_.get<Options::FOR_UPDATE>();
 		const ClusterRole clusterRole = (CROLE_MASTER | CROLE_FOLLOWER);
@@ -8988,7 +9079,6 @@ void MultiQueryHandler::operator()(EventContext& ec, Event& ev) {
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 	try {
 		ConnectionOption& connOption =
@@ -9000,6 +9090,7 @@ void MultiQueryHandler::operator()(EventContext& ec, Event& ev) {
 		QueryRequestList queryList(alloc);
 
 		decodeMultiQuery(in, request, queryList);
+		TRANSACTION_EVENT_START(ec, ev, transactionManager_, connOption, (ev.getSenderND().getId() < 0));
 
 		const ClusterRole clusterRole = (CROLE_MASTER | CROLE_FOLLOWER);
 		const PartitionStatus partitionStatus = PSTATE_ON;
@@ -10519,7 +10610,7 @@ void BackgroundHandler::operator()(EventContext& ec, Event& ev) {
 	util::StackAllocator& alloc = ec.getAllocator();
 	const util::DateTime now = ec.getHandlerStartTime();
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
-	EVENT_START(ec, ev, transactionManager_);
+	EVENT_START(ec, ev, transactionManager_, UNDEF_DBID, false);
 
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
@@ -10672,7 +10763,6 @@ void ContinueCreateDDLHandler::operator()(EventContext& ec, Event& ev) {
 	const EventMonotonicTime emNow = ec.getHandlerStartMonotonicTime();
 
 	Response response(alloc);
-	EVENT_START(ec, ev, transactionManager_);
 
 
 	if (clusterManager_->isSystemError() || clusterManager_->isNormalShutdownCall()) {
@@ -10684,11 +10774,14 @@ void ContinueCreateDDLHandler::operator()(EventContext& ec, Event& ev) {
 
 	ConnectionOption& connOption =
 		ev.getSenderND().getUserData<ConnectionOption>();
+
 	InMessage inMes(alloc, getRequestSource(ev), connOption);
 	Request& request = inMes.request_;
 	try {
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
+		EVENT_START(ec, ev, transactionManager_, connOption.dbId_, (ev.getSenderND().getId() < 0));
 
 		const ClusterRole clusterRole = (CROLE_MASTER | CROLE_FOLLOWER);
 		const PartitionRoleType partitionRole = PROLE_OWNER;
@@ -10842,10 +10935,11 @@ void UpdateDataStoreStatusHandler::operator()(EventContext& ec, Event& ev) {
 	Request request(alloc, getRequestSource(ev));
 	Response response(alloc);
 	BGTask currentTask;
-	EVENT_START(ec, ev, transactionManager_);
 
 	InMessage inMes;
 	try {
+		EVENT_START(ec, ev, transactionManager_, UNDEF_DBID, false);
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
 		Timestamp inputTime = inMes.inputTime_;
@@ -10924,13 +11018,14 @@ void TransactionService::requestUpdateDataStoreStatus(
 */
 void UnsupportedStatementHandler::operator()(EventContext& ec, Event& ev) {
 	util::StackAllocator& alloc = ec.getAllocator();
-	EVENT_START(ec, ev, transactionManager_);
 
 	if (ev.getSenderND().isEmpty()) return;
 
 	Request request(alloc, getRequestSource(ev));
 	InMessage inMes;
 	try {
+		EVENT_START(ec, ev, transactionManager_, UNDEF_DBID, false);
+
 		EventByteInStream in(ev.getInStream());
 		inMes.decode(in);
 
@@ -10947,8 +11042,8 @@ void UnsupportedStatementHandler::operator()(EventContext& ec, Event& ev) {
 	@brief Handler Operator
 */
 void UnknownStatementHandler::operator()(EventContext& ec, Event& ev) {
-	EVENT_START(ec, ev, transactionManager_);
 	try {
+		EVENT_START(ec, ev, transactionManager_, UNDEF_DBID, false);
 		GS_THROW_USER_ERROR(
 			GS_ERROR_TXN_STATEMENT_TYPE_UNKNOWN, "Unknown statement type");
 	}
@@ -10969,7 +11064,7 @@ void UnknownStatementHandler::operator()(EventContext& ec, Event& ev) {
 		UTIL_TRACE_EXCEPTION(TRANSACTION_SERVICE, e,
 			GS_EXCEPTION_MESSAGE(e) << " (nd=" << ev.getSenderND()
 			<< ", pId=" << ev.getPartitionId()
-			<< ", eventType=" << getEventTypeName(ev.getType()) << ")");
+			<< ", eventType=" << EventTypeUtility::getEventTypeName(ev.getType()) << ")");
 		clusterService_->setError(ec, &e);
 	}
 }
@@ -11553,6 +11648,7 @@ void TransactionService::initialize(const ManagerSet& mgrSet) {
 		sendEventHandler_.initialize(mgrSet, TRANSACTION_SERVICE);
 
 		transactionManager_ = mgrSet.txnMgr_;
+		transactionManager_->initialize(mgrSet);
 
 		for (PartitionGroupId pgId = 0;
 			pgId < pgConfig_.getPartitionGroupCount(); pgId++) {
@@ -11572,6 +11668,7 @@ void TransactionService::initialize(const ManagerSet& mgrSet) {
 		checkpointService_ = mgrSet.cpSvc_;
 
 		userCache_ = mgrSet.userCache_;
+		olFactory_ = mgrSet.olFactory_;
 
 		initalized_ = true;
 	}
@@ -11947,23 +12044,37 @@ void EventMonitor::reset(EventStart& eventStart) {
 	eventInfoList_[pgId].init();
 }
 
-void EventMonitor::set(EventStart& eventStart) {
+void EventMonitor::set(EventStart& eventStart, DatabaseId dbId, bool clientRequest) {
 	PartitionGroupId pgId = eventStart.getEventContext().getWorkerId();
 	eventInfoList_[pgId].eventType_ = eventStart.getEvent().getType();
 	eventInfoList_[pgId].pId_ = eventStart.getEvent().getPartitionId();
 	eventInfoList_[pgId].startTime_
 		= eventStart.getEventContext().getHandlerStartTime().getUnixTime();
+	eventInfoList_[pgId].dbId_ = dbId;
+	eventInfoList_[pgId].clientRequest_ = clientRequest;
+
 }
+
+void EventMonitor::setType(PartitionGroupId pgId, int32_t typeDetail) {
+	eventInfoList_[pgId].type_ = typeDetail;
+}
+
 std::string EventMonitor::dump() {
 	util::NormalOStringStream strstrm;
 	for (size_t pos = 0; pos < eventInfoList_.size(); pos++) {
-		strstrm << "pos=" << pos
-			<< ", event=" << getEventTypeName(eventInfoList_[pos].eventType_)
-			<< ", pId=" << eventInfoList_[pos].pId_
-			<< ", startTime=" << CommonUtility::getTimeStr(eventInfoList_[pos].startTime_)
-			<< std::endl;
+		eventInfoList_[pos].dump(strstrm, pos);
 	}
 	return strstrm.str().c_str();
+}
+
+void EventMonitor::EventInfo::dump(util::NormalOStringStream& strstrm, size_t pos) {
+	strstrm << "workerId=" << pos
+		<< ", event=" << EventTypeUtility::getEventTypeName(eventType_)
+		<< ", pId=" << pId_
+		<< ", startTime=" << CommonUtility::getTimeStr(startTime_)
+		<< ", type=" << static_cast<int32_t>(type_)
+		<< ", isClient=" << static_cast<int32_t>(clientRequest_)
+		<< std::endl;
 }
 
 
@@ -12203,6 +12314,21 @@ void StatementHandler::TQLOutputMessage::addExtraMessage(ReplicationContext* rep
 		GS_THROW_USER_ERROR(GS_ERROR_TXN_RESULT_TYPE_INVALID,
 			"(resultType=" << rs_->getResultType() << ")");
 	}
+}
+
+bool StatementHandler::checkConstraint(Event& ev, ConnectionOption& connOption) {
+	uint32_t delayTime1, delayTime2;
+	bool isClientNd = !ev.getSenderND().isEmpty() && ev.getSenderND().getId() < 0;
+	if (isClientNd
+		&& transactionManager_->getDatabaseManager().getExecutionConstraint(connOption.dbId_, delayTime1, delayTime2, false)) {
+		if (delayTime1 > 0 && connOption.retryCount_ == 0) {
+			connOption.retryCount_++;
+			transactionService_->getEE()->addTimer(ev, delayTime1);
+			return true;
+		}
+	} 
+	connOption.retryCount_ = 0;
+	return false;
 }
 
 util::XArray<uint8_t>* StatementHandler::appendDataStoreLog(

@@ -107,17 +107,6 @@ bool ResultProcessor::applyInfo(
 		for (size_t pos = 0; pos < tupleInfo.size(); pos++) {
 			outputInfo.push_back(tupleInfo[pos]);
 		}
-
-		SQLExecutionManager::Latch latch(
-			clientId_, cxt.getExecutionManager());
-		SQLExecution* execution = latch.get();
-		if (execution) {
-			SQLExecution::SQLExecutionContext& sqlContext = execution->getContext();
-			profs_.set(
-				sqlContext.getDBName(),
-				sqlContext.getApplicationName(),
-				sqlContext.getQuery());
-		}
 		return true;
 	}
 	catch (std::exception& e) {
@@ -217,7 +206,12 @@ SQLDetailProfs::SQLDetailProfs(
 	isTrace_(false),
 	execTime_(INT32_MAX),
 	traceLimitInterval_(limitInterval),
-	queryLimitSize_(queryLimitSize) {
+	queryLimitSize_(queryLimitSize),
+	swapReadSize_(0),
+	swapWriteSize_(0),
+	sqlSwapReadSize_(0),
+	sqlSwapWriteSize_(0),
+	taskNum_(0) {
 	watch_.start();
 }
 
@@ -235,6 +229,24 @@ SQLDetailProfs::~SQLDetailProfs() try {
 }
 catch (...) {
 	assert(false);
+}
+
+SQLDetailProfs::SQLDetailProfs(SQLVariableSizeGlobalAllocator& globalVarAlloc, const SQLDetailProfs& another) :
+	globalVarAlloc_(globalVarAlloc),
+	startTime_(another.startTime_),
+	dbName_(another.dbName_.c_str(), globalVarAlloc_),
+	applicationName_(another.applicationName_.c_str(), globalVarAlloc_),
+	query_(another.query_.c_str(), globalVarAlloc_),
+	isOmmited_(false),
+	isTrace_(false),
+	execTime_(another.execTime_),
+	traceLimitInterval_(another.traceLimitInterval_),
+	queryLimitSize_(another.queryLimitSize_),
+	swapReadSize_(another.swapReadSize_),
+	swapWriteSize_(another.swapWriteSize_),
+	sqlSwapReadSize_(another.sqlSwapReadSize_),
+	sqlSwapWriteSize_(another.sqlSwapWriteSize_),
+	taskNum_(another.taskNum_) {
 }
 
 void SQLDetailProfs::set(
@@ -274,6 +286,7 @@ void SQLDetailProfs::complete(int32_t executionTime) {
 std::string SQLDetailProfs::dump() {
 	util::NormalOStringStream ss;
 	ss << "startTime=" << CommonUtility::getTimeStr(startTime_)
+		<< ", executionTime=" << execTime_
 		<< ", dbName=" << dbName_.c_str()
 		<< ", applicationName=" << applicationName_.c_str()
 		<< ", query=" << query_.c_str();
@@ -287,3 +300,17 @@ std::string SQLDetailProfs::dumpQuery() {
 		<< ", query=" << query_.c_str();
 	return ss.str().c_str();
 };
+
+bool SQLDetailProfs::check(int64_t& startTime, uint32_t& elapsedMills) {
+	if (isTrace_) {
+		if (execTime_ == INT32_MAX) {
+			execTime_ = watch_.elapsedMillis();
+		}
+		if (execTime_ >= traceLimitInterval_) {
+			startTime = startTime_;
+			elapsedMills = execTime_;
+			return true;
+		}
+	}
+	return false;
+}

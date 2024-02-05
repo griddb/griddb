@@ -21,11 +21,16 @@
 #include "data_type.h"
 #include "cluster_event_type.h"
 
+std::set<EventType> EventTypeUtility::CATEGORY_EVENT_TYPES = { V_1_1_STATEMENT_START,
+	CONNECT, GET_USERS, PUT_LARGE_CONTAINER, SQL_EXECUTE_QUERY, REPLICATION_LOG , TXN_COLLECT_TIMEOUT_RESOURCE,
+	AUTHENTICATION, CS_HEARTBEAT, TXN_SHORTTERM_SYNC_REQUEST , SYC_SHORTTERM_SYNC_LOG , PARTITION_GROUP_START,
+	SYS_EVENT_SIMULATE_FAILURE, SQL_NOTIFY_CLIENT, RECV_NOTIFY_MASTER, EVENT_TYPE_MAX };
+
 #define CASE_EVENT(eventType) \
 	case eventType:           \
 		return #eventType
 
-const char8_t* getEventTypeName(EventType eventType) {
+const char8_t* EventTypeUtility::getEventTypeName(EventType eventType) {
 	switch (eventType) {
 		CASE_EVENT(CONNECT);
 		CASE_EVENT(DISCONNECT);
@@ -176,3 +181,15 @@ const char8_t* getEventTypeName(EventType eventType) {
 	}
 	return "UNDEF_EVENT_TYPE";
 }
+
+EventType EventTypeUtility::getCategoryEventType(EventType eventType) {
+	if (eventType <= UNDEF_EVENT_TYPE || eventType >= EVENT_TYPE_MAX) {
+		return UNDEF_EVENT_TYPE;
+	}
+	auto itr = CATEGORY_EVENT_TYPES.upper_bound(eventType);
+	if (itr != CATEGORY_EVENT_TYPES.end()) {
+		return *(--itr);
+	}
+	return UNDEF_EVENT_TYPE;
+}
+

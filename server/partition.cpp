@@ -32,6 +32,7 @@
 #include "cluster_service.h" 
 #include "container_message_v4.h"
 #include "transaction_manager.h"
+#include "result_set.h"
 
 UTIL_TRACER_DECLARE(PARTITION);  
 UTIL_TRACER_DECLARE(PARTITION_DETAIL);
@@ -39,6 +40,10 @@ UTIL_TRACER_DECLARE(SIZE_MONITOR);
 UTIL_TRACER_DECLARE(IO_MONITOR);
 UTIL_TRACER_DECLARE(RECOVERY_MANAGER);
 
+
+const int32_t PartitionList::INITIAL_X_WAL_BUFFER_SIZE = 256 * 1024;
+const int32_t PartitionList::INITIAL_CP_WAL_BUFFER_SIZE = 4 * 1024;
+const int32_t PartitionList::INITIAL_AFFINITY_MANAGER_SIZE = 1024;
 const std::string PartitionList::CLUSTER_SNAPSHOT_INFO_FILE_NAME(
 		"gs_cluster_snapshot_info.json");
 
@@ -171,7 +176,6 @@ Partition::Partition(
 		ism.regist(pId, xWALBuffer);
 		cpWALBuffer_ = UTIL_NEW WALBuffer(pId_, statsSet_.logMgrStats_);
 		cpWALBuffer_->resize(PartitionList::INITIAL_CP_WAL_BUFFER_SIZE);
-
 		AffinityManager* affinityManager = UTIL_NEW AffinityManager(pId);
 		ism.regist(pId, affinityManager);
 
@@ -192,6 +196,9 @@ Partition::Partition(
 				configTable, *defaultLogManager_, *chunkBuffer,
 				*affinityManager, chunkSize, pId,
 				statsSet_.chunkMgrStats_);
+
+		DataStoreV4::createResultSetManager(
+				resultSetPool_, configTable, *chunkBuffer, rsManager_);
 
 	} catch (std::exception &e) {  
 		GS_RETHROW_SYSTEM_ERROR(e, GS_EXCEPTION_MERGE_MESSAGE(e, ""));
@@ -268,7 +275,6 @@ void Partition::reinit(PartitionList& ptList) {
 		ism.regist(pId_, xWALBuffer);
 		cpWALBuffer_ = UTIL_NEW WALBuffer(pId_, statsSet_.logMgrStats_);
 		cpWALBuffer_->resize(PartitionList::INITIAL_CP_WAL_BUFFER_SIZE);
-
 		AffinityManager* affinityManager = UTIL_NEW AffinityManager(pId_);
 		ism.regist(pId_, affinityManager);
 
@@ -284,6 +290,19 @@ void Partition::reinit(PartitionList& ptList) {
 					*xWALBuffer, *cpWALBuffer_,
 					checkpointRange_, ossCpLog.str().c_str(),
 					ossXLog.str().c_str(), pId_, statsSet_.logMgrStats_);
+
+			defaultLogManager_->init(0, true, false);
+			defaultLogManager_->setLSN(0);
+
+			Log log(LogType::CheckpointEndLog, defaultLogManager_->getLogFormatVersion());
+			log.setLsn(0);
+			defaultLogManager_->appendCpLog(log);
+			defaultLogManager_->appendXLog(LogType::CheckpointStartLog, NULL, 0, NULL);
+
+			defaultLogManager_->flushCpLog(LOG_WRITE_WAL_BUFFER, false);
+			defaultLogManager_->flushCpLog(LOG_FLUSH_FILE, false);
+			defaultLogManager_->flushXLog(LOG_WRITE_WAL_BUFFER, false);
+			defaultLogManager_->flushXLog(LOG_FLUSH_FILE, false);
 		}
 		PartitionGroupId pgId = pgConfig.getPartitionGroupId(pId_);
 		ChunkBuffer* chunkBuffer = ism.getChunkBuffer(pgId);
@@ -531,7 +550,7 @@ void Partition::activate() {
 		dataStore_ = UTIL_NEW DataStoreV4(
 				&storeStackAlloc_, &resultSetPool_, &configTable_,
 				managerSet_->txnMgr_,
-				chunkManager_, defaultLogManager_, keyStore,
+				chunkManager_, defaultLogManager_, keyStore, *rsManager_,
 				statsSet_.dsStats_);
 		dataStore_->initialize(*managerSet_);
 		dataStore_->activate(txn, managerSet_->clsSvc_);
@@ -951,10 +970,10 @@ void Partition::endCheckpointReleaseBlock(const Log* log) {
 	@brief チェックポイント終了: 不要になったトランザクションログファイル削除
 	@note 通常のチェックポイント
 */
-void Partition::removeLogFiles() {
+void Partition::removeLogFiles(int32_t range) {
 	try {
 		int64_t logVersion = defaultLogManager_->getLogVersion();
-		defaultLogManager_->removeLogFiles(logVersion, checkpointRange_);
+		defaultLogManager_->removeLogFiles(logVersion, range);
 	} catch (std::exception &e) {
 		GS_RETHROW_SYSTEM_ERROR(e, GS_EXCEPTION_MERGE_MESSAGE(e, ""));
 	}
@@ -1660,7 +1679,6 @@ void PartitionList::initialize(ManagerSet &resourceSet) {
 	for (auto& itr : ptList_) {
 		itr->initialize(resourceSet);
 	}
-
 	assert(resourceSet.stats_ != NULL);
 	assert(resourceSet.dsConfig_ != NULL);
 	assert(chunkMemoryPool_ != NULL);

@@ -45,7 +45,7 @@ class PartitionList;
 
 #define TRACE_SYNC_EXCEPTION(e, eventType, pId, level, str)                 \
 	UTIL_TRACE_EXCEPTION_##level(SYNC_SERVICE, e,                           \
-		str << ", eventType=" << getEventTypeName(eventType) \
+		str << ", eventType=" << EventTypeUtility::getEventTypeName(eventType) \
 				<< ", pId=" << pId << ", reason=" << ", reason=" << GS_EXCEPTION_MESSAGE(e))
 
 /*!
