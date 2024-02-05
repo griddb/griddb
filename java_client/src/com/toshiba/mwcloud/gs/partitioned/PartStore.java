@@ -2052,9 +2052,9 @@ Extensibles.AsStore, Experimentals.StoreProvider {
 					getBeginInterval(true) : findNeighbor(
 							true, intervalFromSubId(startSubId),
 							true, true, false));
-			final long finishInterval = (startSubId == null ?
+			final long finishInterval = (finishSubId == null ?
 					getTailInterval(true) : findNeighbor(
-							true, intervalFromSubId(startSubId),
+							true, intervalFromSubId(finishSubId),
 							false, true, false));
 			if (startInterval < 0 || finishInterval < 0) {
 				return Collections.emptySet();
@@ -3742,7 +3742,7 @@ Extensibles.AsStore, Experimentals.StoreProvider {
 
 				final Object start = pred.getStart();
 				final Object finish = pred.getFinish();
-				if (!keyPartitioned || largeInfo.isOrdered() ||
+				if (!keyPartitioned || !largeInfo.isOrdered() ||
 						(start == null && finish == null)) {
 					putFull(pred);
 					return;
