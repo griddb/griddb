@@ -617,6 +617,7 @@ public:
 
 
 	BaseAllocator* base(size_t index);
+	static size_t getElementHeadSize();
 
 	size_t getTotalElementSize();
 	size_t getFreeElementSize();
@@ -3257,6 +3258,11 @@ VariableSizeAllocator<Mutex, Traits>::base(size_t index) {
 #else
 	return baseList_[index];
 #endif
+}
+
+template<typename Mutex, typename Traits>
+size_t VariableSizeAllocator<Mutex, Traits>::getElementHeadSize() {
+	return detail::AlignedSizeOf<size_t>::VALUE;
 }
 
 template<typename Mutex, typename Traits>
