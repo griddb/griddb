@@ -134,4 +134,4 @@ private:
 	SQLDetailProfs profs_;
 	static const Registrar registrar_;
 };
-
+#endif
