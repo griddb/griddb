@@ -14,7 +14,7 @@ GridDBが提供する機能は『[GridDB 機能リファレンス](https://githu
 ## クイックスタート (ソースコードの利用)
 
   以下のLinux(x64)環境での動作を確認しています。
-  - CentOS 7.9(gcc 4.8.5)、Ubuntu 18.04(gcc 4.8.5)
+  - CentOS 7.9(gcc 4.8.5)
 
   ※事前にtclをインストールしてください。例) yum install tcl.x86_64  
   ※事前にPython3をインストールしてください。例) yum install python3
@@ -62,7 +62,7 @@ GridDBが提供する機能は『[GridDB 機能リファレンス](https://githu
 ## クイックスタート (RPM/DEBファイルの利用)
 
   以下のLinux(x64)環境での動作を確認しています。
-  - CentOS 7.9、Ubuntu 18.04/20.4
+  - CentOS 7.9、Ubuntu 22.4
 
   ※事前にPython3をインストールしてください。例) yum install python3
 
@@ -124,6 +124,7 @@ GridDBが提供する機能は『[GridDB 機能リファレンス](https://githu
   * [V5.0 Release Notes](docs/GridDB-5.0-CE-RELEASE_NOTES_ja.md)
   * [V5.1 Release Notes](docs/GridDB-5.1-CE-RELEASE_NOTES_ja.md)
   * [V5.3 Release Notes](docs/GridDB-5.3-CE-RELEASE_NOTES_ja.md)
+  * [V5.5 Release Notes](docs/GridDB-5.5-CE-RELEASE_NOTES_ja.md)
 
 ## クライアントとコネクタ
   Java以外のクライアント、APIもあります。

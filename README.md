@@ -12,7 +12,7 @@
 
 ## Quick start (Using source code)
   We have confirmed the operation with Linux(x64).
-  - CentOS 7.9 (gcc 4.8.5), Ubuntu 18.04 (gcc 4.8.5)
+  - CentOS 7.9 (gcc 4.8.5)
 
 Note:
 - Please install Python3 in advance.
@@ -60,7 +60,7 @@ Note:
 ## Quick start (Using RPM or DEB)
 
   We have confirmed the operation with Linux(x64).
-  - CentOS 7.9, Ubuntu 18.04/20.04
+  - CentOS 7.9, Ubuntu 22.04
 
 Note:
 - Please install Python3 in advance.
@@ -125,6 +125,7 @@ If necessary, please refer to [Installation Troubleshooting](docs/TroubleShootin
   - [V5.0 Release Notes](docs/GridDB-5.0-CE-RELEASE_NOTES.md)
   - [V5.1 Release Notes](docs/GridDB-5.1-CE-RELEASE_NOTES.md)
   - [V5.3 Release Notes](docs/GridDB-5.3-CE-RELEASE_NOTES.md)
+  - [V5.5 Release Notes](docs/GridDB-5.5-CE-RELEASE_NOTES.md)
 
 ## Client and Connector
   There are other clients and API for GridDB.
