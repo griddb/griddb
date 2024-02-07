@@ -42,7 +42,7 @@ Supports the following methods for the PreparedStatement interface. Calling quer
 
 
 Please refer to the following sample codes for creating container and inserting row data.
-- JDBC Driver: [JDBCAddBatch.java](https://github.com/griddb/jdbc/blob/master/sample/ja/jdbc/DBCAddBatch.java)
+- JDBC Driver: [JDBCAddBatch.java](https://github.com/griddb/jdbc/blob/master/sample/ja/jdbc/JDBCAddBatch.java)
 
 ## GridDB Monitoring Template for Zabbix
 
